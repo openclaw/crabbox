@@ -3230,32 +3230,36 @@ function html(
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="dark light">
-  <meta name="theme-color" content="#0b0d0f">
+  <meta name="theme-color" content="#0a0a0a">
   <title>${escapeHTML(title)}</title>
   <script nonce="${pageNonce}">(function(){var s;try{s=localStorage.getItem('crabbox-theme-source')}catch(e){}var m=(s==='light'||s==='dark'||s==='system')?s:'system';var d=window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches;document.documentElement.dataset.themeSource=m;document.documentElement.dataset.theme=m==='system'?(d?'dark':'light'):m})();</script>
+  <link rel="stylesheet" href="/portal/assets/carapace/carapace-core.css">
   <style>
+    /* Portal palette is aliased onto vendored carapace semantic tokens
+       (see /portal/assets/carapace/VENDORED.md); carapace owns the
+       light/dark values via html[data-theme], so no per-theme block here. */
     :root {
-      color-scheme: dark;
-      --bg:#0b0d0f; --fg:#f3f5f7; --muted:#9ca3af; --line:#262b31; --line-soft:#1d2126;
-      --panel:#15181c; --panel-2:#0f1215; --accent:#38bdf8; --accent-fg:#001018; --accent-soft-fg:#bae6fd;
-      --bad:#f87171; --warn:#fbbf24; --ok:#34d399;
-      --inset:#0c0e10; --inset-deep:#080a0c; --hover:#1b1f24; --hover-active:#22272d; --hover-line:#3a4046;
-      --code-fg:#d1fae5; --danger-fg:#fecaca; --icon:#cbd5e1; --subtle:#6b7280; --arrow:#4b5563;
-      --ext-fg:#b6beca; --ext-badge:#8b949e; --ext-icon:#7c8490;
-      --mono: ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-    }
-    :root[data-theme="light"] {
-      color-scheme: light;
-      --bg:#f4f6f8; --fg:#1a1d22; --muted:#5c636e; --line:#d8dce2; --line-soft:#e7eaee;
-      --panel:#ffffff; --panel-2:#f1f3f6; --accent:#0284c7; --accent-fg:#ffffff; --accent-soft-fg:#0369a1;
-      --bad:#dc2626; --warn:#b45309; --ok:#047857;
-      --inset:#f1f3f6; --inset-deep:#e9ecf0; --hover:#eceef2; --hover-active:#e1e4e9; --hover-line:#b9bec7;
-      --code-fg:#0f5132; --danger-fg:#b42318; --icon:#5c636e; --subtle:#9aa1ab; --arrow:#b9bec7;
-      --ext-fg:#6b7280; --ext-badge:#8b929c; --ext-icon:#9aa1ab;
+      --bg: var(--oc-bg-page); --fg: var(--oc-text-primary); --muted: var(--oc-text-muted);
+      --line: var(--oc-border-subtle); --line-soft: color-mix(in srgb, var(--oc-border-subtle) 55%, transparent);
+      --panel: var(--oc-bg-surface); --panel-2: color-mix(in srgb, var(--oc-bg-surface) 55%, var(--oc-bg-page));
+      --accent: var(--oc-accent-primary); --accent-fg: var(--oc-text-on-accent);
+      --accent-soft-fg: color-mix(in srgb, var(--oc-accent-primary) 55%, var(--oc-text-primary));
+      --bad: var(--oc-status-error-fg); --warn: var(--oc-status-warning-fg); --ok: var(--oc-status-success-fg);
+      --inset: var(--oc-bg-recessed); --inset-deep: color-mix(in oklch, var(--oc-bg-recessed) 90%, oklch(0 0 0));
+      --hover: color-mix(in srgb, var(--oc-text-primary) 7%, transparent);
+      --hover-active: color-mix(in srgb, var(--oc-text-primary) 12%, transparent);
+      --hover-line: var(--oc-border-strong);
+      --code-fg: color-mix(in srgb, var(--oc-accent-secondary) 45%, var(--oc-text-primary));
+      --danger-fg: color-mix(in srgb, var(--oc-status-error-fg) 55%, var(--oc-text-primary));
+      --icon: var(--oc-text-secondary); --subtle: var(--oc-text-inactive);
+      --arrow: color-mix(in srgb, var(--oc-text-muted) 45%, transparent);
+      --ext-fg: var(--oc-text-secondary); --ext-badge: var(--oc-text-muted);
+      --ext-icon: color-mix(in srgb, var(--oc-text-muted) 80%, transparent);
+      --mono: var(--oc-font-mono);
     }
     * { box-sizing: border-box; }
     html { min-height:100%; background:var(--bg); }
-    body { margin:0; min-height:100vh; overflow-x:hidden; background:var(--bg); color:var(--fg); font:14px/1.45 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; transition:background-color .18s,color .18s; }
+    body { margin:0; min-height:100vh; overflow-x:hidden; background:var(--bg); color:var(--fg); font:14px/1.45 var(--oc-font-body); transition:background-color .18s,color .18s; }
     main { width:min(1180px, calc(100vw - 32px)); max-width:100%; margin:0 auto; padding:10px 0 22px; }
     .portal-shell { width:min(1240px, calc(100vw - 16px)); max-width:100%; height:100dvh; display:grid; grid-template-rows:auto minmax(0,1fr); gap:8px; padding:6px 0 8px; overflow:hidden; }
     .lease-shell { grid-template-rows:auto auto minmax(0,1fr); }
@@ -3671,7 +3675,7 @@ function html(
           `frame-ancestors ${options.frameAncestors ?? "'none'"}`,
           "img-src 'self' data: blob:",
           `script-src ${scriptSource}`,
-          "style-src 'unsafe-inline'",
+          "style-src 'self' 'unsafe-inline'",
         ].join("; "),
         "content-type": "text/html; charset=utf-8",
       },
