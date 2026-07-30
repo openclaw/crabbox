@@ -182,7 +182,7 @@ export function portalHome(
     : `${active.length + activeRunners.length + activeMacHosts.length} active / ${ended} ended / ${sortedRunners.length} external`;
   return html(
     "Crabbox Portal",
-    `<main class="portal-shell">
+    `<main class="portal-shell${admin ? " admin-home-shell" : ""}">
       ${portalHeader({
         meta: `${escapeHTML(new URL(request.url).host)}${admin ? ` <span class="oc-badge oc-badge-accent">admin</span>` : ""}`,
         actions: `${admin ? `<a class="oc-action oc-action-outline admin-nav-link" href="/portal/admin">${lockIcon}<span>admin</span></a>` : ""}${portalLogoutButton()}`,
@@ -3291,6 +3291,9 @@ function html(
     main { width:min(1180px, calc(100vw - 32px)); max-width:100%; margin:0 auto; padding:10px 0 22px; }
     .portal-shell { width:min(1240px, calc(100vw - 16px)); max-width:100%; height:100dvh; display:grid; grid-template-rows:auto minmax(0,1fr); gap:8px; padding:6px 0 8px; overflow:hidden; }
     .lease-shell { grid-template-rows:auto auto minmax(0,1fr); }
+    /* Admin home inserts the admin summary between header and leases; without
+       the extra auto row the summary lands in the 1fr slot and fills the viewport. */
+    .admin-home-shell { grid-template-rows:auto auto minmax(0,1fr); }
     .run-shell { height:auto; min-height:100dvh; overflow:visible; grid-template-rows:auto; }
     h1,h2,p { margin:0; }
     h1 { font-size:20px; font-weight:700; }
