@@ -185,7 +185,7 @@ export function portalHome(
     `<main class="portal-shell">
       ${portalHeader({
         meta: `${escapeHTML(new URL(request.url).host)}${admin ? ` <span class="pill admin-pill">admin</span>` : ""}`,
-        actions: `${admin ? `<a class="button secondary admin-nav-link" href="/portal/admin">${lockIcon}<span>admin</span></a>` : ""}${portalLogoutButton()}`,
+        actions: `${admin ? `<a class="oc-action oc-action-outline admin-nav-link" href="/portal/admin">${lockIcon}<span>admin</span></a>` : ""}${portalLogoutButton()}`,
       })}
       ${admin ? portalAdminSummary({ owner, org, active: active.length, ended, runners: sortedRunners.length, system, providers: portalProviderSummary(sortedLeases, sortedRunners, macHosts) }) : ""}
       <section class="panel table-panel">
@@ -253,8 +253,8 @@ export function portalAdmin(
       ${portalHeader({
         meta: `${escapeHTML(new URL(request.url).host)} <span class="pill admin-pill">admin</span>`,
         actions: `
-          <a class="button secondary" href="/portal">leases</a>
-          <a class="button secondary admin-nav-link" href="/portal/admin">${lockIcon}<span>admin</span></a>
+          <a class="oc-action oc-action-outline" href="/portal">leases</a>
+          <a class="oc-action oc-action-outline admin-nav-link" href="/portal/admin">${lockIcon}<span>admin</span></a>
           ${portalLogoutButton()}
         `,
       })}
@@ -464,9 +464,9 @@ function portalAdminSummary(input: {
       ${adminMetric("providers", input.providers || "none")}
     </div>
     <div class="admin-actions">
-      <a class="button secondary" href="/v1/admin/leases">leases JSON</a>
-      <a class="button secondary" href="/v1/pool">pool JSON</a>
-      <a class="button secondary" href="/v1/usage?scope=all">usage JSON</a>
+      <a class="oc-action oc-action-outline" href="/v1/admin/leases">leases JSON</a>
+      <a class="oc-action oc-action-outline" href="/v1/pool">pool JSON</a>
+      <a class="oc-action oc-action-outline" href="/v1/usage?scope=all">usage JSON</a>
     </div>
   </section>`;
 }
@@ -513,11 +513,11 @@ export function portalLeaseDetail(
     : `<tr><td colspan="8" class="empty">no recorded runs for this lease</td></tr>`;
   const vncAction =
     active && lease.desktop
-      ? `<a class="button" href="/portal/leases/${encodeURIComponent(lease.id)}/vnc">open VNC</a>`
+      ? `<a class="oc-action oc-action-primary" href="/portal/leases/${encodeURIComponent(lease.id)}/vnc">open VNC</a>`
       : `<span class="muted">no desktop</span>`;
   const codeAction =
     active && lease.code
-      ? `<a class="button" href="/portal/leases/${encodeURIComponent(lease.id)}/code/">open code</a>`
+      ? `<a class="oc-action oc-action-primary" href="/portal/leases/${encodeURIComponent(lease.id)}/code/">open code</a>`
       : `<span class="muted">no code</span>`;
   const egressAction =
     active && bridgeStatus.egress
@@ -550,7 +550,7 @@ export function portalLeaseDetail(
               ? `<a class="icon-btn" href="/portal/leases/${encodeURIComponent(lease.id)}/share" title="share lease" aria-label="share lease">${shareIcon}</a>`
               : ""
           }
-          <a class="button secondary" href="/portal">leases</a>
+          <a class="oc-action oc-action-outline" href="/portal">leases</a>
           ${portalLogoutButton()}
         `,
       })}
@@ -575,7 +575,7 @@ export function portalLeaseDetail(
           ${
             active && canManage
               ? `<form method="post" action="/portal/leases/${encodeURIComponent(lease.id)}/release" class="stop-form" data-confirm="${escapeHTML(leaseReleaseConfirmation(lease))}">
-                  <button class="button ${registered && !lease.runtimeAdapterID ? "secondary" : "danger"}" type="submit">${registered ? (lease.runtimeAdapterID ? "delete workspace" : "remove registration") : "stop lease"}</button>
+                  <button class="oc-action ${registered && !lease.runtimeAdapterID ? "oc-action-outline" : "oc-action-danger"}" type="submit">${registered ? (lease.runtimeAdapterID ? "delete workspace" : "remove registration") : "stop lease"}</button>
                 </form>`
               : ""
           }
@@ -633,7 +633,7 @@ export function portalShareLease(
               <form method="post" action="${sharePath}">
                 <input type="hidden" name="action" value="remove-user">
                 <input type="hidden" name="user" value="${escapeHTML(user)}">
-                <button class="button secondary" type="submit">remove</button>
+                <button class="oc-action oc-action-outline" type="submit">remove</button>
               </form>
             </td>
           </tr>`,
@@ -649,8 +649,8 @@ export function portalShareLease(
           : portalHeader({
               meta: `share ${escapeHTML(slug)} <span class="mono">${escapeHTML(lease.id)}</span>`,
               actions: `
-                <a class="button secondary" href="/portal/leases/${encodeURIComponent(lease.id)}">back to lease</a>
-                <a class="button secondary" href="/portal">leases</a>
+                <a class="oc-action oc-action-outline" href="/portal/leases/${encodeURIComponent(lease.id)}">back to lease</a>
+                <a class="oc-action oc-action-outline" href="/portal">leases</a>
                 ${portalLogoutButton()}
               `,
             })
@@ -667,7 +667,7 @@ export function portalShareLease(
             <option value="use"${lease.share?.org === "use" ? " selected" : ""}>use</option>
             <option value="manage"${lease.share?.org === "manage" ? " selected" : ""}>manage</option>
           </select>
-          <button class="button action" type="submit">save</button>
+          <button class="oc-action oc-action-secondary" type="submit">save</button>
         </form>
       </section>
       <section class="panel">
@@ -679,7 +679,7 @@ export function portalShareLease(
             <option value="use">use</option>
             <option value="manage">manage</option>
           </select>
-          <button class="button action" type="submit">add</button>
+          <button class="oc-action oc-action-secondary" type="submit">add</button>
         </form>
         <div class="table-scroll">
           <table>
@@ -690,7 +690,7 @@ export function portalShareLease(
       </section>
       <form method="post" action="${sharePath}">
         <input type="hidden" name="action" value="clear">
-        <button class="button danger" type="submit">clear sharing</button>
+        <button class="oc-action oc-action-danger" type="submit">clear sharing</button>
       </form>
     </main>`,
     200,
@@ -721,7 +721,7 @@ export function portalExternalRunnerDetail(
       ${portalHeader({
         meta: `${escapeHTML(runner.id)} · ${escapeHTML(runner.provider)} external runner`,
         actions: `
-          <a class="button secondary" href="/portal">leases</a>
+          <a class="oc-action oc-action-outline" href="/portal">leases</a>
           ${portalLogoutButton()}
         `,
       })}
@@ -796,13 +796,13 @@ export function portalMacHostDetail(
     : false;
   const vncAction =
     activeLease && activeLeaseVNC
-      ? `<a class="button" href="/portal/leases/${encodeURIComponent(activeLease.id)}/vnc">open VNC</a>`
+      ? `<a class="oc-action oc-action-primary" href="/portal/leases/${encodeURIComponent(activeLease.id)}/vnc">open VNC</a>`
       : activeLease
-        ? `<form method="post" action="${macHostVNCPath(host)}"><button class="button" type="submit">enable VNC</button></form>`
-        : `<button class="button" type="button" data-copy-value="${escapeHTML(startDesktopCommand)}">copy start command</button>`;
+        ? `<form method="post" action="${macHostVNCPath(host)}"><button class="oc-action oc-action-primary" type="submit">enable VNC</button></form>`
+        : `<button class="oc-action oc-action-primary" type="button" data-copy-value="${escapeHTML(startDesktopCommand)}">copy start command</button>`;
   const codeAction =
     activeLease?.code === true
-      ? `<a class="button" href="/portal/leases/${encodeURIComponent(activeLease.id)}/code/">open code</a>`
+      ? `<a class="oc-action oc-action-primary" href="/portal/leases/${encodeURIComponent(activeLease.id)}/code/">open code</a>`
       : `<span class="muted">${activeLease ? "no code" : "no active lease"}</span>`;
   const commands = activeLease
     ? [
@@ -832,7 +832,7 @@ export function portalMacHostDetail(
       ${portalHeader({
         meta: `${escapeHTML(host.id)} · ${escapeHTML(host.provider)} ${escapeHTML(host.target)} dedicated host`,
         actions: `
-          <a class="button secondary" href="/portal">leases</a>
+          <a class="oc-action oc-action-outline" href="/portal">leases</a>
           ${portalLogoutButton()}
         `,
       })}
@@ -916,8 +916,8 @@ export function portalRunDetail(
       ${portalHeader({
         meta: `${escapeHTML(run.id)} · ${escapeHTML(run.slug || run.leaseID)} · ${escapeHTML(run.state)}`,
         actions: `
-          <a class="button secondary" href="/portal/leases/${encodeURIComponent(run.leaseID)}">lease</a>
-          <a class="button secondary" href="/portal">leases</a>
+          <a class="oc-action oc-action-outline" href="/portal/leases/${encodeURIComponent(run.leaseID)}">lease</a>
+          <a class="oc-action oc-action-outline" href="/portal">leases</a>
           ${portalLogoutButton()}
         `,
       })}
@@ -950,8 +950,8 @@ export function portalRunDetail(
             <span>${run.results ? "junit" : "logs"}</span>
           </div>
           <div class="run-artifacts">
-            <a class="button" href="/portal/runs/${encodeURIComponent(run.id)}/logs">raw logs</a>
-            <a class="button secondary" href="/portal/runs/${encodeURIComponent(run.id)}/events">events json</a>
+            <a class="oc-action oc-action-primary" href="/portal/runs/${encodeURIComponent(run.id)}/logs">raw logs</a>
+            <a class="oc-action oc-action-outline" href="/portal/runs/${encodeURIComponent(run.id)}/events">events json</a>
             ${resultsSummary(run)}
           </div>
         </div>
@@ -1087,13 +1087,13 @@ export function portalVNC(
         meta: `<span>WebVNC ${escapeHTML(slug)}</span><span class="vnc-dot"></span>${providerBadge(lease.provider)}<span class="vnc-dot"></span>${targetBadge(target, lease.windowsMode)}<span class="vnc-dot"></span><span class="vnc-id">${escapeHTML(lease.id)}</span>`,
         actions: `
           <span id="status" class="status-pill">waiting for bridge</span>
-          <button id="vnc-takeover" class="button secondary vnc-control" type="button" hidden>take control</button>
+          <button id="vnc-takeover" class="oc-action oc-action-outline vnc-control" type="button" hidden>take control</button>
           <button id="vnc-copy-remote" class="icon-btn" type="button" title="copy remote clipboard" aria-label="copy remote clipboard" disabled>${copyIcon}</button>
           <button id="vnc-paste" class="icon-btn" type="button" title="paste clipboard" aria-label="paste clipboard">${pasteIcon}</button>
           <button id="vnc-reconnect" class="icon-btn" type="button" title="reconnect" aria-label="reconnect">${reconnectIcon}</button>
           <button id="vnc-fullscreen" class="icon-btn" type="button" title="fullscreen" aria-label="toggle fullscreen">${fullscreenIcon}</button>
-          ${canManage ? `<button id="vnc-share" class="button secondary" type="button">share</button>` : ""}
-          ${viewerOnly ? "" : `<a class="button secondary" href="/portal">leases</a>${portalLogoutButton()}`}
+          ${canManage ? `<button id="vnc-share" class="oc-action oc-action-outline" type="button">share</button>` : ""}
+          ${viewerOnly ? "" : `<a class="oc-action oc-action-outline" href="/portal">leases</a>${portalLogoutButton()}`}
         `,
       })}
       <section id="screen" class="screen" aria-label="WebVNC display" tabindex="0"></section>
@@ -1120,7 +1120,7 @@ export function portalVNC(
               <option value="use">Can use</option>
               <option value="manage">Can manage</option>
             </select>
-            <button id="vnc-share-add" class="button action" type="button">add</button>
+            <button id="vnc-share-add" class="oc-action oc-action-secondary" type="button">add</button>
           </div>
           <section class="vnc-share-section" aria-label="People with access">
             <h2>People with access</h2>
@@ -1144,9 +1144,9 @@ export function portalVNC(
           <p id="vnc-share-status" class="vnc-share-status" role="status"></p>
         </div>
         <div class="vnc-share-foot">
-          <button id="vnc-share-copy-link" class="button secondary" type="button">copy WebVNC link</button>
-          <button id="vnc-share-clear" class="button secondary danger-text" type="button">clear sharing</button>
-          <button id="vnc-share-done" class="button" type="button">done</button>
+          <button id="vnc-share-copy-link" class="oc-action oc-action-outline" type="button">copy WebVNC link</button>
+          <button id="vnc-share-clear" class="oc-action oc-action-outline danger-text" type="button">clear sharing</button>
+          <button id="vnc-share-done" class="oc-action oc-action-primary" type="button">done</button>
         </div>
       </dialog>`
           : ""
@@ -2011,7 +2011,7 @@ export function portalError(title: string, message: string, status = 400): Respo
       <section class="panel error">
         <h1>${escapeHTML(title)}</h1>
         <p>${escapeHTML(message)}</p>
-        <a class="button secondary" href="/portal">back to portal</a>
+        <a class="oc-action oc-action-outline" href="/portal">back to portal</a>
       </section>
     </main>`,
     status,
@@ -2034,7 +2034,7 @@ export function portalCode(lease: LeaseRecord): Response {
         actions: `
           <span id="code-status" class="status-pill">checking bridge</span>
           <button id="code-reload" class="icon-btn" type="button" title="reload" aria-label="reload">${reloadIcon}</button>
-          <a class="button secondary" href="/portal">leases</a>
+          <a class="oc-action oc-action-outline" href="/portal">leases</a>
           ${portalLogoutButton()}
         `,
       })}
@@ -2724,7 +2724,7 @@ function portalHeader(options: PortalHeaderOptions): string {
 }
 
 function portalLogoutButton(): string {
-  return `<form method="post" action="/portal/logout"><button class="button secondary" type="submit">log out</button></form>`;
+  return `<form method="post" action="/portal/logout"><button class="oc-action oc-action-outline" type="submit">log out</button></form>`;
 }
 
 function leaseOwnership(lease: PortalLeaseRecord, owner: string, org: string): "mine" | "system" {
@@ -2768,7 +2768,7 @@ function runRow(run: RunRecord): string {
     ${elapsedTimeCell(run.startedAt)}
     <td>${escapeHTML(formatDuration(run.durationMs))}</td>
     <td>${escapeHTML(runTelemetryCell(run.telemetry))}</td>
-    <td><div class="actions-cell"><a class="button secondary" href="/portal/runs/${encodeURIComponent(run.id)}/logs">logs</a><a class="button secondary" href="/portal/runs/${encodeURIComponent(run.id)}/events">events</a></div></td>
+    <td><div class="actions-cell"><a class="oc-action oc-action-outline" href="/portal/runs/${encodeURIComponent(run.id)}/logs">logs</a><a class="oc-action oc-action-outline" href="/portal/runs/${encodeURIComponent(run.id)}/events">events</a></div></td>
   </tr>`;
 }
 
@@ -3349,14 +3349,16 @@ function html(
     .section-head { display:flex; justify-content:space-between; align-items:center; min-height:34px; padding:7px 10px; border-bottom:1px solid var(--line); }
     .section-actions { display:flex; align-items:center; justify-content:flex-end; gap:8px; min-width:0; color:var(--muted); }
     .section-actions span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .button { display:inline-flex; align-items:center; justify-content:center; min-height:28px; padding:0 10px; border-radius:7px; border:1px solid transparent; background:var(--accent); color:var(--accent-fg); text-decoration:none; font-size:12px; font-weight:700; white-space:nowrap; cursor:pointer; }
-    .button.secondary { background:transparent; color:var(--fg); border:1px solid var(--line); font-weight:500; }
-    .button.secondary:hover { background:var(--hover); border-color:var(--hover-line); }
-    .button.action { min-width:56px; border:1px solid color-mix(in srgb, var(--accent) 42%, var(--line)); background:color-mix(in srgb, var(--accent) 10%, transparent); color:var(--accent-soft-fg); }
-    .button.action:hover { background:color-mix(in srgb, var(--accent) 16%, transparent); border-color:color-mix(in srgb, var(--accent) 58%, var(--line)); }
-    .button:disabled { opacity:0.45; cursor:not-allowed; }
-    .button.danger { border:1px solid color-mix(in srgb, var(--bad) 42%, var(--line)); background:color-mix(in srgb, var(--bad) 18%, transparent); color:var(--danger-fg); cursor:pointer; }
-    .button[data-state="ok"] { border-color:color-mix(in srgb, var(--ok) 45%, var(--line)); color:var(--ok); background:color-mix(in srgb, var(--ok) 12%, transparent); }
+    /* Buttons come from the vendored carapace oc-action family (base, primary,
+       secondary, ghost, focus/disabled/active states). Portal-scoped rules keep
+       operational density and add two local variants carapace lacks: a neutral
+       outline for quiet actions and a danger action. */
+    .oc-action { min-height:28px; padding:0 10px; border-radius:7px; font-size:12px; white-space:nowrap; }
+    .oc-action-secondary { min-width:56px; }
+    .oc-action-outline { border-color:var(--line); background:transparent; color:var(--fg); font-weight:500; }
+    .oc-action-outline:hover { background:var(--hover); border-color:var(--hover-line); }
+    .oc-action-danger { border-color:color-mix(in srgb, var(--bad) 42%, var(--line)); background:color-mix(in srgb, var(--bad) 18%, transparent); color:var(--danger-fg); }
+    .oc-action[data-state="ok"] { border-color:color-mix(in srgb, var(--ok) 45%, var(--line)); color:var(--ok); background:color-mix(in srgb, var(--ok) 12%, transparent); }
     .portal-dialog { width:min(460px, calc(100vw - 28px)); padding:0; border:1px solid var(--line); border-radius:12px; background:var(--panel); color:var(--fg); box-shadow:0 24px 90px rgba(0,0,0,0.58); overflow:hidden; }
     .portal-dialog::backdrop { background:rgba(0,0,0,0.58); backdrop-filter:blur(2px); }
     .portal-dialog[data-fallback-modal="true"] { position:fixed; top:50%; left:50%; z-index:101; display:block; max-height:calc(100dvh - 28px); margin:0; transform:translate(-50%,-50%); }
@@ -3405,7 +3407,7 @@ function html(
     .runner-shell .detail-grid { grid-template-columns:minmax(0,1fr) minmax(260px,0.64fr); }
     .detail-note { margin:0; padding:12px 14px; color:var(--muted); line-height:1.45; }
     .run-artifact-card .run-artifacts { gap:6px; padding:8px; }
-    .run-artifact-card .button { width:100%; }
+    .run-artifact-card .oc-action { width:100%; }
     .run-artifact-card .result-grid { grid-column:1 / -1; }
     .run-telemetry-panel { border-top:1px solid var(--line-soft); background:var(--panel-2); }
     .run-telemetry-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); }
@@ -3626,7 +3628,7 @@ function html(
       .vnc-meta { flex-wrap:wrap; gap:4px 10px; }
       .vnc-meta p .vnc-id { display:none; }
       .portal-actions { gap:6px; }
-      .portal-actions .button { min-height:30px; padding:0 10px; }
+      .portal-actions .oc-action { min-height:30px; padding:0 10px; }
       .admin-grid { grid-template-columns:1fr; }
       .admin-status-strip { grid-template-columns:1fr; }
       .provider-lease-list li { grid-template-columns:1fr; align-items:start; }
@@ -3656,8 +3658,8 @@ function html(
         </label>
       </div>
       <div class="portal-dialog-actions">
-        <button id="portal-dialog-cancel" class="button secondary" type="button">cancel</button>
-        <button id="portal-dialog-confirm" class="button" type="button">confirm</button>
+        <button id="portal-dialog-cancel" class="oc-action oc-action-outline" type="button">cancel</button>
+        <button id="portal-dialog-confirm" class="oc-action oc-action-primary" type="button">confirm</button>
       </div>
     </div>
   </dialog>
@@ -4025,13 +4027,13 @@ function portalEnhancementsScript(): string {
     const footer = document.createElement("div");
     footer.className = "table-footer";
     const prev = document.createElement("button");
-    prev.className = "button secondary";
+    prev.className = "oc-action oc-action-outline";
     prev.type = "button";
     prev.textContent = "prev";
     const pageLabel = document.createElement("span");
     pageLabel.className = "table-page";
     const next = document.createElement("button");
-    next.className = "button secondary";
+    next.className = "oc-action oc-action-outline";
     next.type = "button";
     next.textContent = "next";
     footer.append(prev, pageLabel, next);
