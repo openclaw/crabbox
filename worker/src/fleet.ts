@@ -9066,12 +9066,13 @@ export class FleetCoordinator {
     const location = `/portal/leases/${encodeURIComponent(ticket.leaseID)}/vnc`;
     const nonce = randomHexToken("");
     return new Response(
-      `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Opening WebVNC</title></head><body><p>Opening WebVNC...</p><script nonce="${nonce}">location.replace(${JSON.stringify(location)})</script></body></html>`,
+      // Palette: vendored carapace v0.6.1 neutral product tokens; self-contained flash page.
+      `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Opening WebVNC</title><style nonce="${nonce}">:root{color-scheme:dark light;font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}body{min-height:100vh;margin:0;display:grid;place-items:center;background:oklch(0.135 0 0);color:oklch(0.985 0 0)}@media (prefers-color-scheme:light){body{background:oklch(0.985 0 0);color:oklch(0.205 0 0)}}</style></head><body><p>Opening WebVNC...</p><script nonce="${nonce}">location.replace(${JSON.stringify(location)})</script></body></html>`,
       {
         status: 200,
         headers: {
           "cache-control": "no-store",
-          "content-security-policy": `default-src 'none'; base-uri 'none'; frame-ancestors 'none'; script-src 'nonce-${nonce}'`,
+          "content-security-policy": `default-src 'none'; base-uri 'none'; frame-ancestors 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'`,
           "content-type": "text/html; charset=utf-8",
           "referrer-policy": "no-referrer",
           "set-cookie": webVNCPortalViewerSessionCookie(session),

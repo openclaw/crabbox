@@ -401,12 +401,13 @@ async function canonicalPortalRedirect(
     if (/^webvnc_view_[a-f0-9]{32}$/.test(ticket)) {
       const nonce = crypto.randomUUID().replaceAll("-", "");
       return new Response(
-        `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>Opening WebVNC</title></head><body><form id="webvnc-bootstrap" method="post" action="${escapeHTMLAttribute(location.toString())}" autocomplete="off"><input type="hidden" name="ticket" value="${escapeHTMLAttribute(ticket)}"><p>Opening WebVNC...</p><button type="submit">Continue</button></form><script nonce="${nonce}">document.getElementById("webvnc-bootstrap").requestSubmit()</script></body></html>`,
+        // Palette: vendored carapace v0.6.1 neutral product tokens; self-contained flash page.
+        `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>Opening WebVNC</title><style nonce="${nonce}">:root{color-scheme:dark light;font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}body{min-height:100vh;margin:0;display:grid;place-items:center;background:oklch(0.135 0 0);color:oklch(0.985 0 0)}form{text-align:center}button{font:inherit;font-weight:700;padding:.55rem 1rem;border:1px solid transparent;border-radius:.5rem;background:#f5654a;color:oklch(0.135 0 0);cursor:pointer}@media (prefers-color-scheme:light){body{background:oklch(0.985 0 0);color:oklch(0.205 0 0)}button{background:#d84a31;color:#fff}}</style></head><body><form id="webvnc-bootstrap" method="post" action="${escapeHTMLAttribute(location.toString())}" autocomplete="off"><input type="hidden" name="ticket" value="${escapeHTMLAttribute(ticket)}"><p>Opening WebVNC...</p><button type="submit">Continue</button></form><script nonce="${nonce}">document.getElementById("webvnc-bootstrap").requestSubmit()</script></body></html>`,
         {
           status: 200,
           headers: {
             "cache-control": "no-store",
-            "content-security-policy": `default-src 'none'; base-uri 'none'; form-action ${publicURL.origin}; frame-ancestors 'none'; script-src 'nonce-${nonce}'`,
+            "content-security-policy": `default-src 'none'; base-uri 'none'; form-action ${publicURL.origin}; frame-ancestors 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'`,
             "content-type": "text/html; charset=utf-8",
             "referrer-policy": "no-referrer",
             "x-content-type-options": "nosniff",
