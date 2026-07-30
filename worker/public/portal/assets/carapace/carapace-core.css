@@ -1,7 +1,8 @@
 /*!
  * Carapace core bundle (vendored)
  * Source: https://github.com/openclaw/carapace @ v0.6.1 (3a8bcfbc7f0563f501626d37245f31efc0d7be9f)
- * Files: styles/tokens.css, styles/themes.css, styles/typography.css, styles/themes/product.css
+ * Files: styles/tokens.css, styles/themes.css, styles/typography.css,
+ *        styles/themes/product.css, styles/components.css, styles/candidate/feedback.css
  * Regenerate: see VENDORED.md in this directory.
  */
 :root {
@@ -310,3 +311,749 @@ html[data-theme="light"],
   }
 }
 
+/*
+ * Framework-neutral stable component primitives for OpenClaw surfaces.
+ * This file preserves the v0.0.1 runtime contract.
+ */
+
+.oc-app-surface {
+  --oc-component-surface: var(--oc-surface-card);
+  --oc-component-surface-strong: var(--oc-surface-card-strong);
+  --oc-component-surface-hover: var(--oc-surface-interactive);
+  --oc-component-border: var(--oc-border-subtle);
+  --oc-component-border-hover: color-mix(
+    in srgb,
+    var(--oc-text-primary) 28%,
+    var(--oc-border-subtle)
+    );
+  --oc-component-shadow: var(--oc-shadow-sm);
+  --oc-component-shadow-hover: var(--oc-shadow-md);
+
+  min-width: 0;
+  min-height: 100%;
+  background: var(--oc-bg-page);
+  color: var(--oc-text-primary);
+  font-family: var(--oc-font-body);
+}
+
+.oc-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--oc-space-3);
+  text-align: center;
+}
+
+.oc-hero-title {
+  max-width: 66rem;
+  margin: 0;
+  color: var(--oc-accent-primary);
+  font-family: var(--oc-font-mono);
+  font-size: clamp(2.25rem, 4.25vw, 3.5rem);
+  font-weight: 800;
+  line-height: 1.08;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+  text-wrap: balance;
+}
+
+.oc-hero-lede {
+  max-width: 42rem;
+  margin: 0;
+  color: var(--oc-text-secondary);
+  font-size: var(--oc-font-size-lg);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
+}
+
+.oc-section {
+  width: 100%;
+  color: var(--oc-text-primary);
+}
+
+.oc-section-header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: var(--oc-space-5);
+}
+
+.oc-section-header > * {
+  min-width: 0;
+}
+
+.oc-section-heading {
+  display: grid;
+  gap: var(--oc-space-2);
+}
+
+.oc-eyebrow {
+  margin: 0;
+  color: var(--oc-accent-primary);
+  font-family: var(--oc-font-mono);
+  font-size: var(--oc-font-size-xs);
+  font-weight: 700;
+  line-height: 1.4;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.oc-section-title {
+  margin: 0;
+  color: var(--oc-text-primary);
+  font-family: var(--oc-font-display);
+  font-size: clamp(1.5rem, 2.2vw, 2rem);
+  font-weight: 750;
+  line-height: 1.12;
+  letter-spacing: 0;
+  text-wrap: balance;
+}
+
+.oc-section-copy {
+  max-width: 60ch;
+  margin: 0;
+  color: var(--oc-text-secondary);
+  font-size: var(--oc-font-size-base);
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
+}
+
+.oc-card {
+  border: 1px solid var(--oc-component-border);
+  border-radius: var(--oc-radius-surface);
+  background: var(--oc-component-surface);
+  color: var(--oc-text-primary);
+  box-shadow: var(--oc-component-shadow);
+}
+
+.oc-card-interactive {
+  transition:
+    background var(--oc-duration-ui) var(--oc-ease-out),
+    border-color var(--oc-duration-ui) var(--oc-ease-out),
+    box-shadow var(--oc-duration-ui) var(--oc-ease-out),
+    transform var(--oc-duration-ui) var(--oc-ease-out);
+}
+
+.oc-card-interactive:hover,
+.oc-card-interactive:focus-visible {
+  border-color: var(--oc-component-border-hover);
+  background: var(--oc-component-surface-hover);
+  box-shadow: var(--oc-component-shadow-hover);
+  transform: translateY(-1px);
+}
+
+.oc-card-interactive:focus-visible {
+  outline: 2px solid var(--oc-focus-ring);
+  outline-offset: 3px;
+}
+
+.oc-card-interactive:active {
+  transform: translateY(0) scale(0.995);
+}
+
+.oc-action {
+  display: inline-flex;
+  min-height: 2.5rem;
+  align-items: center;
+  justify-content: center;
+  gap: var(--oc-space-2);
+  padding: var(--oc-space-2) var(--oc-space-4);
+  border: 1px solid transparent;
+  border-radius: var(--oc-radius-control);
+  font: inherit;
+  font-size: var(--oc-font-size-base);
+  font-weight: 700;
+  line-height: 1.2;
+  text-decoration: none;
+  touch-action: manipulation;
+  cursor: pointer;
+  transition:
+    background var(--oc-duration-fast) var(--oc-ease-out),
+    border-color var(--oc-duration-fast) var(--oc-ease-out),
+    color var(--oc-duration-fast) var(--oc-ease-out),
+    transform var(--oc-duration-fast) var(--oc-ease-out);
+}
+
+.oc-action:hover {
+  text-decoration: none;
+}
+
+.oc-action:focus-visible {
+  outline: 2px solid var(--oc-focus-ring);
+  outline-offset: 3px;
+}
+
+.oc-action:active:not(:disabled):not([aria-disabled="true"]) {
+  transform: scale(0.98);
+}
+
+.oc-action:disabled,
+.oc-action[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.oc-action[aria-disabled="true"] {
+  pointer-events: none;
+}
+
+.oc-action-primary {
+  border-color: var(--oc-accent-primary);
+  background: var(--oc-accent-primary);
+  color: var(--oc-text-on-accent);
+}
+
+.oc-action-primary:hover {
+  border-color: var(--oc-accent-primary-hover);
+  background: var(--oc-accent-primary-hover);
+  color: var(--oc-text-on-accent);
+}
+
+.oc-action-secondary {
+  border-color: var(--oc-border-accent);
+  background: var(--oc-surface-accent-soft);
+  color: var(--oc-accent-primary);
+}
+
+.oc-action-secondary:hover {
+  border-color: var(--oc-accent-primary);
+  background: color-mix(in srgb, var(--oc-surface-accent-soft) 72%, var(--oc-accent-primary));
+  color: var(--oc-text-primary);
+}
+
+html[data-theme="light"] .oc-action-secondary,
+html[data-theme-resolved="light"] .oc-action-secondary {
+  border-color: var(--oc-border-strong);
+  background: var(--oc-bg-elevated);
+  color: var(--oc-text-primary);
+}
+
+html[data-theme="light"] .oc-action-secondary:hover,
+html[data-theme-resolved="light"] .oc-action-secondary:hover {
+  border-color: var(--oc-border-strong);
+  background: var(--oc-surface-interactive-hover);
+  color: var(--oc-text-primary);
+}
+
+.oc-action-ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--oc-text-secondary);
+}
+
+.oc-action-ghost:hover {
+  background: var(--oc-surface-interactive);
+  color: var(--oc-text-primary);
+}
+
+.oc-action-icon {
+  width: 2.5rem;
+  padding: 0;
+}
+
+.oc-segmented {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: var(--oc-space-1);
+  overflow-x: auto;
+  padding: var(--oc-space-1);
+  border: 1px solid var(--oc-border-subtle);
+  border-radius: var(--oc-radius-control);
+  background: var(--oc-surface-card);
+}
+
+.oc-segmented-item {
+  display: inline-flex;
+  min-height: 2rem;
+  align-items: center;
+  justify-content: center;
+  gap: var(--oc-space-2);
+  padding: var(--oc-space-1) var(--oc-space-3);
+  border: 0;
+  border-radius: var(--oc-radius-inset);
+  background: transparent;
+  color: var(--oc-text-secondary);
+  font: inherit;
+  font-size: var(--oc-font-size-base);
+  font-weight: 650;
+  line-height: 1;
+  white-space: nowrap;
+  touch-action: manipulation;
+  cursor: pointer;
+  transition:
+    background var(--oc-duration-fast) var(--oc-ease-out),
+    color var(--oc-duration-fast) var(--oc-ease-out),
+    transform var(--oc-duration-fast) var(--oc-ease-out);
+}
+
+.oc-segmented-item:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.oc-segmented-item:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.oc-segmented-item:hover {
+  color: var(--oc-text-primary);
+}
+
+.oc-segmented-item[aria-selected="true"],
+.oc-segmented-item[aria-pressed="true"],
+.oc-segmented-item.is-active {
+  background: var(--oc-surface-interactive-hover);
+  color: var(--oc-text-primary);
+}
+
+.oc-segmented-item:focus-visible {
+  outline: 2px solid var(--oc-focus-ring);
+  outline-offset: 2px;
+}
+
+.oc-pill {
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+  min-height: 1.75rem;
+  align-items: center;
+  gap: var(--oc-space-2);
+  padding: var(--oc-space-1) var(--oc-space-3);
+  border: 1px solid var(--oc-border-subtle);
+  border-radius: var(--oc-radius-control);
+  background: var(--oc-surface-card);
+  color: var(--oc-text-secondary);
+  font-size: var(--oc-font-size-xs);
+  font-weight: 650;
+  line-height: 1;
+  overflow-wrap: anywhere;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .oc-card-interactive {
+    transition: none;
+  }
+
+  .oc-card-interactive:hover,
+  .oc-card-interactive:focus-visible,
+  .oc-card-interactive:active {
+    transform: none;
+  }
+}
+
+@media (max-width: 42rem) {
+  .oc-section-header {
+    align-items: start;
+    flex-direction: column;
+  }
+
+  .oc-hero-title {
+    font-size: clamp(2rem, 11vw, 2.75rem);
+  }
+}
+/*
+ * Opt-in candidate feedback components. Import explicitly after the canonical
+ * tokens, themes, product theme, and typography entry points.
+ */
+
+.oc-badge {
+  display: inline-flex;
+  box-sizing: border-box;
+  max-width: 100%;
+  min-width: 0;
+  min-height: 1.5rem;
+  align-items: center;
+  gap: var(--oc-space-2);
+  padding: var(--oc-space-1) var(--oc-space-2);
+  border: 1px solid var(--oc-border-subtle);
+  border-radius: var(--oc-radius-round);
+  background: var(--oc-surface-secondary-soft);
+  color: var(--oc-text-secondary);
+  font-size: var(--oc-font-size-xs);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.oc-badge::before {
+  width: 0.375rem;
+  height: 0.375rem;
+  flex: 0 0 auto;
+  border-radius: var(--oc-radius-round);
+  background: currentColor;
+  content: "";
+}
+
+.oc-badge-neutral::before {
+  display: none;
+}
+
+.oc-badge-success {
+  border-color: var(--oc-status-success-fg);
+  background: var(--oc-status-success-bg);
+  color: var(--oc-status-success-fg);
+}
+
+.oc-badge-warning {
+  border-color: var(--oc-status-warning-fg);
+  background: var(--oc-status-warning-bg);
+  color: var(--oc-status-warning-fg);
+}
+
+.oc-badge-error {
+  border-color: var(--oc-status-error-fg);
+  background: var(--oc-status-error-bg);
+  color: var(--oc-status-error-fg);
+}
+
+.oc-badge-info {
+  border-color: var(--oc-status-info-fg);
+  background: var(--oc-status-info-bg);
+  color: var(--oc-status-info-fg);
+}
+
+/* Plain badge: identity, not state. Keeps the tone dot and colored text but
+   drops the pill chrome — for markers that repeat on every row (environment
+   names, roles), where a bordered pill next to real buttons reads as one. */
+.oc-badge-plain {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.oc-banner {
+  display: grid;
+  box-sizing: border-box;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--oc-space-3);
+  padding: var(--oc-space-4);
+  border: 1px solid var(--oc-border-subtle);
+  border-radius: var(--oc-radius-surface);
+  background: var(--oc-surface-card-strong);
+  color: var(--oc-text-secondary);
+  font-size: var(--oc-font-size-sm);
+  line-height: 1.45;
+}
+
+.oc-banner-indicator {
+  width: 0.375rem;
+  height: 0.375rem;
+  margin-top: 0.45em;
+  border-radius: var(--oc-radius-round);
+  background: var(--oc-text-muted);
+}
+
+.oc-banner-content {
+  display: grid;
+  min-width: 0;
+  gap: var(--oc-space-1);
+}
+
+.oc-banner-title {
+  color: var(--oc-text-primary);
+  font-weight: 650;
+}
+
+.oc-banner p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.oc-banner-success .oc-banner-indicator {
+  background: var(--oc-status-success-fg);
+}
+
+.oc-banner-warning .oc-banner-indicator {
+  background: var(--oc-status-warning-fg);
+}
+
+.oc-banner-error .oc-banner-indicator {
+  background: var(--oc-status-error-fg);
+}
+
+.oc-banner-info .oc-banner-indicator {
+  background: var(--oc-status-info-fg);
+}
+
+.oc-empty {
+  display: grid;
+  box-sizing: border-box;
+  min-height: 12rem;
+  place-items: center;
+  padding: var(--oc-space-5);
+  text-align: center;
+}
+
+.oc-empty-content {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  max-width: 24rem;
+  justify-items: center;
+  gap: var(--oc-space-2);
+}
+
+.oc-empty-icon {
+  display: grid;
+  width: 2.75rem;
+  height: 2.75rem;
+  margin-bottom: var(--oc-space-1);
+  place-items: center;
+  border-radius: var(--oc-radius-control);
+  background: var(--oc-surface-interactive);
+  color: var(--oc-text-secondary);
+  font-family: var(--oc-font-mono);
+  font-size: var(--oc-font-size-lg);
+}
+
+.oc-empty-icon svg {
+  width: 1.25rem;
+  height: 1.25rem;
+  stroke-width: 1.75;
+}
+
+.oc-empty-title {
+  margin: 0;
+  color: var(--oc-text-primary);
+  font-family: var(--oc-font-display);
+  font-size: var(--oc-font-size-lg);
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.oc-empty-description {
+  max-width: 42ch;
+  margin: 0;
+  color: var(--oc-text-secondary);
+  font-size: var(--oc-font-size-sm);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
+}
+
+.oc-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--oc-space-2);
+  margin-top: var(--oc-space-1);
+}
+
+.oc-loader {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--oc-space-2);
+  color: var(--oc-text-secondary);
+  font-size: var(--oc-font-size-sm);
+}
+
+.oc-loader-spinner {
+  width: 1rem;
+  height: 1rem;
+  flex: 0 0 auto;
+  border: 2px solid var(--oc-border-subtle);
+  border-top-color: var(--oc-accent-primary);
+  border-radius: var(--oc-radius-round);
+  animation: oc-loader-spin 0.8s linear infinite;
+}
+
+.oc-loader-sm .oc-loader-spinner {
+  width: 0.75rem;
+  height: 0.75rem;
+  border-width: 1px;
+}
+
+.oc-loader-lg .oc-loader-spinner {
+  width: 1.5rem;
+  height: 1.5rem;
+}
+
+@keyframes oc-loader-spin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+.oc-skeleton-line {
+  display: block;
+  width: 100%;
+  height: 0.75rem;
+  overflow: hidden;
+  border-radius: var(--oc-radius-control);
+  background: var(--oc-surface-interactive);
+}
+
+.oc-skeleton-line::after {
+  display: block;
+  width: 45%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, var(--oc-border-subtle), transparent);
+  content: "";
+  animation: oc-skeleton-sweep 1.2s linear infinite;
+}
+
+.oc-skeleton-line-short {
+  width: 55%;
+}
+
+@keyframes oc-skeleton-sweep {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(225%); }
+}
+
+@media (max-width: 42rem) {
+  .oc-banner {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .oc-banner > :last-child:not(.oc-banner-content) {
+    width: 100%;
+    grid-column: 1 / -1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .oc-skeleton-line::after {
+    animation: none;
+  }
+
+  .oc-loader-spinner {
+    animation: none;
+  }
+}
+
+/* Banner variants: an adjacent action and an opt-in dismiss affordance.
+   The dismiss control is last in DOM and visual order so the action
+   stays primary; sticky update banners compose these pieces. */
+.oc-banner-action {
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+.oc-banner-dismiss {
+  display: inline-grid;
+  width: 1.5rem;
+  height: 1.5rem;
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: var(--oc-radius-inset);
+  background: none;
+  color: var(--oc-text-muted);
+  cursor: pointer;
+  place-items: center;
+}
+
+.oc-banner-dismiss:hover {
+  background: var(--oc-surface-interactive);
+  color: var(--oc-text-primary);
+}
+
+.oc-banner-dismiss:focus-visible {
+  outline: 2px solid var(--oc-focus-ring);
+  outline-offset: 1px;
+}
+
+.oc-banner-action + .oc-banner-dismiss {
+  margin-left: var(--oc-space-1);
+}
+
+/* Tooltip: promoted from the preview lab after validation across the
+   reference gallery and the krillswitch console. The trigger is described
+   by the content node (role="tooltip" + aria-describedby); the consumer
+   toggles data-open on hover/focus and owns placement/alignment choices. */
+.oc-tooltip {
+  position: relative;
+  display: inline-flex;
+}
+
+.oc-tooltip-trigger {
+  width: 2.75rem;
+  height: 2.75rem;
+  padding: 0;
+}
+
+.oc-tooltip-trigger svg {
+  width: 1rem;
+  height: 1rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.75;
+}
+
+.oc-tooltip-content {
+  position: absolute;
+  z-index: 10;
+  bottom: calc(100% + var(--oc-space-2));
+  left: 50%;
+  width: max-content;
+  max-width: min(16rem, calc(100vw - var(--oc-space-8)));
+  padding: var(--oc-space-2) var(--oc-space-3);
+  border: 1px solid var(--oc-border-subtle);
+  border-radius: var(--oc-radius-control);
+  background: var(--oc-surface-overlay);
+  box-shadow: var(--oc-shadow-md);
+  color: var(--oc-text-primary);
+  font-size: var(--oc-font-size-xs);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  opacity: 0;
+  transform: translate(-50%, var(--oc-space-1));
+  transition:
+    opacity var(--oc-duration-fast) var(--oc-ease-out),
+    transform var(--oc-duration-fast) var(--oc-ease-out);
+}
+
+.oc-tooltip:is(:hover, :focus-within) .oc-tooltip-content {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.oc-tooltip-content[data-placement="bottom"] {
+  top: calc(100% + var(--oc-space-2));
+  bottom: auto;
+  transform: translate(-50%, calc(var(--oc-space-1) * -1));
+}
+
+.oc-tooltip-content[data-align="start"] {
+  right: auto;
+  left: 0;
+  transform: translate(0, var(--oc-space-1));
+}
+
+.oc-tooltip-content[data-align="end"] {
+  right: 0;
+  left: auto;
+  transform: translate(0, var(--oc-space-1));
+}
+
+.oc-tooltip-content[data-placement="bottom"]:is([data-align="start"], [data-align="end"]) {
+  transform: translate(0, calc(var(--oc-space-1) * -1));
+}
+
+.oc-tooltip-content[data-open],
+.oc-tooltip:is(:hover, :focus-within) .oc-tooltip-content[data-placement="bottom"],
+.oc-tooltip:is(:hover, :focus-within)
+  .oc-tooltip-content:is([data-align="start"], [data-align="end"]) {
+  opacity: 1;
+  transform: translate(0, 0);
+}
+
+.oc-tooltip-content[data-open][data-align="center"] {
+  transform: translate(-50%, 0);
+}
+
+.oc-tooltip[data-suppressed] .oc-tooltip-content {
+  opacity: 0;
+}
