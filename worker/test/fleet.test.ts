@@ -20836,7 +20836,6 @@ describe("fleet lease identity and idle", () => {
     expect(viewerPortal.status).toBe(200);
     const viewerPortalBody = await viewerPortal.text();
     expect(viewerPortalBody).toContain("<strong>egress</strong><small>active</small>");
-    expect(viewerPortalBody).toContain('<span class="muted">active</span>');
     expect(viewerPortalBody).toContain('<span class="oc-badge oc-badge-success">active</span>');
     expect(viewerPortalBody).not.toContain("discord · discord.com");
     expect(viewerPortalBody).not.toContain("*.discordcdn.com");

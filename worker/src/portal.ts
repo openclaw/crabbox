@@ -519,10 +519,8 @@ export function portalLeaseDetail(
     active && lease.code
       ? `<a class="oc-action oc-action-primary" href="/portal/leases/${encodeURIComponent(lease.id)}/code/">open code</a>`
       : `<span class="muted">no code</span>`;
-  const egressAction =
-    active && bridgeStatus.egress
-      ? `<span class="muted">${escapeHTML(canManage ? egressSummary(bridgeStatus.egress) : "active")}</span>`
-      : `<span class="muted">no egress</span>`;
+  const egressDetail =
+    active && bridgeStatus.egress && canManage ? egressSummary(bridgeStatus.egress) : "";
   const commands = active
     ? [
         commandBlock("shell", `crabbox ssh --id ${shellArg(slug)}`),
@@ -588,7 +586,7 @@ export function portalLeaseDetail(
           <div class="bridge-grid">
             ${bridgeRow("WebVNC", active && lease.desktop === true, bridgeStatus.webVNCBridgeConnected, bridgeStatus.webVNCViewerConnected, vncAction)}
             ${bridgeRow("code", active && lease.code === true, bridgeStatus.codeBridgeConnected, false, codeAction)}
-            ${bridgeRow("egress", active && Boolean(bridgeStatus.egress), bridgeStatus.egress?.hostConnected ?? false, bridgeStatus.egress?.clientConnected ?? false, egressAction, "host", "client", !canManage)}
+            ${bridgeRow("egress", active && Boolean(bridgeStatus.egress), bridgeStatus.egress?.hostConnected ?? false, bridgeStatus.egress?.clientConnected ?? false, "", "host", "client", !canManage, egressDetail)}
           </div>
           <div class="access-commands">${commands}</div>
         </div>
@@ -3195,6 +3193,7 @@ function bridgeRow(
   bridgeLabel = "bridge",
   viewerLabel = "viewer",
   coarse = false,
+  detail = "",
 ): string {
   const status = coarse
     ? enabled
@@ -3209,7 +3208,7 @@ function bridgeRow(
       : "unavailable";
   const tone = enabled ? (coarse || bridgeConnected ? "ok" : "warn") : "";
   return `<div class="bridge-row">
-    <div><strong>${escapeHTML(label)}</strong><small>${escapeHTML(status)}</small></div>
+    <div><strong>${escapeHTML(label)}</strong><small>${escapeHTML(status)}</small>${detail ? `<small>${escapeHTML(detail)}</small>` : ""}</div>
     <span class="${badgeClass(tone)}">${escapeHTML(enabled ? (coarse ? "active" : bridgeConnected ? "connected" : "waiting") : "off")}</span>
     ${action}
   </div>`;
@@ -3427,7 +3426,10 @@ function html(
     .stop-form { padding:10px; }
     .bridge-grid { display:grid; gap:0; }
     .bridge-row { display:grid; grid-template-columns:minmax(0,1fr) auto auto; gap:8px; align-items:center; padding:9px 10px; border-bottom:1px solid var(--line-soft); }
-    .bridge-row small { display:block; color:var(--muted); margin-top:2px; }
+    /* Label cell must survive wide siblings: keep it shrinkable and truncate
+       status/detail lines instead of letting them collide with the badge. */
+    .bridge-row > div { min-width:0; }
+    .bridge-row small { display:block; color:var(--muted); margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .access-commands { display:grid; gap:8px; padding:10px; border-top:1px solid var(--line-soft); }
     .run-artifacts { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; padding:10px; }
     .run-shell .detail-grid { grid-template-columns:minmax(0,1fr) minmax(260px,0.42fr); }
