@@ -53,6 +53,18 @@ For a coordinator deployment, store `DAYTONA_CRABBOX_KEY` as a Worker secret.
 The optional `CRABBOX_DAYTONA_SNAPSHOT` Worker variable selects a shared
 snapshot; when it is empty, the Daytona account default is used.
 
+Clients need only normal Crabbox broker authentication. They do not need a
+Daytona CLI profile or Daytona API environment variables. Verify the fallback
+without creating a sandbox:
+
+```sh
+crabbox doctor --provider daytona
+```
+
+The broker readiness check performs a read-only sandbox inventory request and
+reports `daytona-fallback` with `client_auth=crabbox`,
+`control_plane=coordinator`, `data_plane=ssh-rsync`, and `mutation=false`.
+
 ## Auth
 
 Crabbox reads the active Daytona CLI profile when no Daytona auth values are set
@@ -138,11 +150,15 @@ The non-auth settings can also be set through environment variables:
 - Actions hydration: no.
 - Coordinator (broker): yes for Linux SSH/sync/run. The coordinator owns the
   API key and rotates the lease's SSH token.
+- Broker readiness: read-only Daytona inventory plus explicit coordinator and
+  SSH/rsync data-plane diagnostics; no sandbox is created.
 
 ## Gotchas
 
 - Direct mode requires `daytona.snapshot` (or `--daytona-snapshot`). Brokered
   mode uses the coordinator's optional `CRABBOX_DAYTONA_SNAPSHOT`.
+- Brokered release and rollback are idempotent when the owned sandbox was
+  already deleted or expired.
 - `--class` and `--type` are rejected; size the sandbox through the snapshot.
 - `--id <sandbox-id-or-slug>` is required to address an existing sandbox.
 - Daytona `run` is delegated to the toolbox APIs; it is not core-over-SSH

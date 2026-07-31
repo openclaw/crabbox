@@ -69,6 +69,13 @@ CRABBOX_DAYTONA_SSH_ACCESS_MINUTES # minimum token TTL; default 120
 ```
 
 The coordinator accepts no Daytona API credential from lease requests.
+Clients authenticate only to Crabbox; no Daytona CLI profile or Daytona API
+environment variable is required on the client.
+
+Use `crabbox doctor --provider daytona` to verify the broker fallback without
+creating a sandbox. The readiness endpoint performs a read-only inventory
+request and reports the client auth boundary, coordinator control plane,
+SSH/rsync data plane, snapshot source, and current inventory count.
 
 ## Config
 
@@ -146,8 +153,9 @@ long-lived, directly SSH-reachable runner host.
 
 In brokered mode the Worker creates and deletes the sandbox, verifies exact
 lease labels before destructive cleanup, refreshes the SSH token before expiry,
-and redacts that token from the portal. Workspaces and ready pools are disabled
-because they persist an SSH endpoint beyond the rotating credential.
+redacts that token from the portal, and treats an already absent owned sandbox
+as successful cleanup. Workspaces and ready pools are disabled because they
+persist an SSH endpoint beyond the rotating credential.
 
 See [providers.md](../commands/providers.md) for the full provider matrix and
 [capabilities.md](capabilities.md) for opt-in lease features.

@@ -11,6 +11,9 @@
 
 ### Fixed
 
+- Made brokered Daytona usable with Crabbox auth alone, added a read-only
+  fallback readiness probe with truthful control/data-plane diagnostics, and
+  made repeated sandbox cleanup idempotent.
 - Bounded device membership revalidation to one GitHub revalidation per token per minute while preserving immediate token revocation, fail-closed errors, and a distinct re-pairing response for expired OAuth grants.
 - Kept ready-pool reconciliation rollout-compatible with older CLIs and coordinators, preserved unexpired in-flight claims across policy changes, and required actual ready capacity for `pool ensure` success.
 
