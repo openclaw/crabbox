@@ -13522,7 +13522,7 @@ export class FleetCoordinator {
             error: message,
           }),
         );
-        console.warn(`aws orphan sweep failed region=${region}: ${message}`);
+        console.warn("aws orphan sweep inventory failed; inspect the sweep record for details");
       }
     }
     const inventoryKeys = new Set(
@@ -13807,7 +13807,7 @@ export class FleetCoordinator {
           error: message,
         }),
       );
-      console.warn(`azure orphan sweep failed region=${inventoryRegion}: ${message}`);
+      console.warn("azure orphan sweep inventory failed; inspect the sweep record for details");
     }
     const inventoryKeys = new Set(
       inventory.map(({ machine, region }) =>
