@@ -13495,13 +13495,19 @@ export class FleetCoordinator {
         }
         // oxlint-disable-next-line eslint/no-await-in-loop -- regions are swept independently.
         const machines = await this.provider("aws", region).listCrabboxServers();
+        let macHostClient: EC2SpotClient | undefined;
+        let macHosts: AWSMacHost[] = [];
+        if (config.macHostReleaseEnabled) {
+          macHostClient = new EC2SpotClient(this.env, region);
+          // oxlint-disable-next-line eslint/no-await-in-loop -- keep host cleanup attached to its region.
+          macHosts = await macHostClient.listMacHosts();
+        }
+        // Do not advance destructive reconciliation until every inventory for this region succeeds.
         reconciliationObservedKeys.set(region, new Set());
         scanned += machines.length;
         inventory.push(...machines.map((machine) => ({ machine, region })));
-        if (config.macHostReleaseEnabled) {
-          const client = new EC2SpotClient(this.env, region);
-          // oxlint-disable-next-line eslint/no-await-in-loop -- keep host cleanup attached to its region.
-          const macHosts = await client.listMacHosts();
+        if (macHostClient) {
+          const client = macHostClient;
           macHostsScanned += macHosts.length;
           macHostInventory.push(...macHosts.map((host) => ({ client, host, region })));
         }

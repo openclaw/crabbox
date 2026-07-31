@@ -11651,6 +11651,75 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  it("preserves AWS quarantine when EC2 Mac host inventory fails", async () => {
+    const storage = new MemoryStorage();
+    const deleted: string[] = [];
+    const oldSeconds = String(Math.trunc((Date.now() - 60 * 60 * 1000) / 1000));
+    const orphanMachine = testMachine({
+      cloudID: "i-orphan",
+      labels: {
+        crabbox: "true",
+        created_by: "crabbox",
+        provider: "aws",
+        lease: "cbx_000000000776",
+        slug: "blue-lobster",
+        owner: "peter_example.com",
+        created_at: oldSeconds,
+        expires_at: oldSeconds,
+      },
+    });
+    storage.seed(
+      "lease:cbx_000000000776",
+      testLease({
+        id: "cbx_000000000776",
+        provider: "aws",
+        cloudID: "i-orphan",
+        region: "eu-west-1",
+        state: "expired",
+        keep: false,
+      }),
+    );
+    seedProviderReconciliationEligible(storage, "aws", "eu-west-1", orphanMachine);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        ec2XMLResponse(
+          "<ErrorResponse><Error><Code>UnauthorizedOperation</Code></Error></ErrorResponse>",
+          403,
+        ),
+      ),
+    );
+    const fleet = testFleet(
+      storage,
+      {
+        aws: fakeProvider(undefined, { provider: "aws", servers: [orphanMachine] }, async (id) => {
+          deleted.push(id);
+        }),
+      },
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_ORPHAN_SWEEP_DELETE: "1",
+        CRABBOX_AWS_MAC_HOST_SWEEP_RELEASE: "1",
+        CRABBOX_AWS_ORPHAN_SWEEP_GRACE_SECONDS: "1",
+        CRABBOX_AWS_REGION: "eu-west-1",
+      },
+    );
+
+    await fleet.alarm();
+
+    expect(deleted).toEqual([]);
+    expect(storage.value("provider-reconciliation:aws:eu-west-1:i-orphan")).toMatchObject({
+      observations: 1,
+    });
+    expect(storage.value("aws-orphan-sweep:last")).toMatchObject({
+      scanned: 0,
+      terminated: 0,
+      candidates: [],
+      errors: [expect.objectContaining({ region: "eu-west-1" })],
+    });
+  });
+
   it("releases stale pending EC2 Mac hosts during the AWS orphan sweep", async () => {
     const storage = new MemoryStorage();
     const actions: string[] = [];
