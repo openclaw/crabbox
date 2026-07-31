@@ -3330,11 +3330,41 @@ function html(
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="dark light">
-  <meta name="theme-color" content="#0a0a0a">
+  <meta name="theme-color" content="#0d0b0b">
   <title>${escapeHTML(title)}</title>
   <script nonce="${pageNonce}">(function(){var s;try{s=localStorage.getItem('crabbox-theme-source')}catch(e){}var m=(s==='light'||s==='dark'||s==='system')?s:'system';var d=window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches;document.documentElement.dataset.themeSource=m;document.documentElement.dataset.theme=m==='system'?(d?'dark':'light'):m})();</script>
   <link rel="stylesheet" href="/portal/assets/carapace/carapace-core.css">
   <style>
+    /* Reports skin: retargets carapace semantic tokens to the maintainer
+       reports palette (openclaw/maintainers report-site-theme.mjs) — warm ink
+       on warm near-black, peachy coral brand, print-tone statuses instead of
+       neon hues. html:root outranks the vendored neutral defaults. */
+    html:root {
+      --oc-bg-page:#0d0b0b; --oc-bg-surface:#111010; --oc-bg-elevated:#151211; --oc-bg-recessed:#0a0908;
+      --oc-text-primary:#f4f1ef; --oc-text-secondary:#aaa19d; --oc-text-muted:#817a76; --oc-text-on-accent:#15100e;
+      --oc-border-subtle:#201d1c; --oc-border-strong:#34302e;
+      --oc-accent-primary:#ff8a5f; --oc-accent-primary-hover:#ffab8a; --oc-accent-primary-deep:#d15035;
+      --oc-accent-secondary:#48b49a; --oc-accent-secondary-deep:#2f8a75;
+      --oc-surface-accent-soft:#241915; --oc-surface-secondary-soft:rgb(72 180 154 / 0.12);
+      --oc-status-success-fg:#48b49a; --oc-status-success-bg:rgb(72 180 154 / 0.12);
+      --oc-status-warning-fg:#d97706; --oc-status-warning-bg:rgb(217 119 6 / 0.12);
+      --oc-status-error-fg:#e06a4d; --oc-status-error-bg:rgb(224 106 77 / 0.12);
+      --oc-status-info-fg:#7aa7ff; --oc-status-info-bg:rgb(122 167 255 / 0.12);
+      --panel-shadow:0 20px 70px rgb(0 0 0 / 0.28);
+    }
+    html:root[data-theme="light"] {
+      --oc-bg-page:#fbfaf7; --oc-bg-surface:#fffdfa; --oc-bg-elevated:#fffdfa; --oc-bg-recessed:#f6f2ec;
+      --oc-text-primary:#171514; --oc-text-secondary:#413b37; --oc-text-muted:#716a66; --oc-text-on-accent:#fffdfa;
+      --oc-border-subtle:#e8ddd5; --oc-border-strong:#ded0c7;
+      --oc-accent-primary:#d75a37; --oc-accent-primary-hover:#b64227; --oc-accent-primary-deep:#b64227;
+      --oc-accent-secondary:#16866f; --oc-accent-secondary-deep:#0f6a57;
+      --oc-surface-accent-soft:#f6e9e1; --oc-surface-secondary-soft:rgb(22 134 111 / 0.1);
+      --oc-status-success-fg:#16866f; --oc-status-success-bg:rgb(22 134 111 / 0.1);
+      --oc-status-warning-fg:#a15c00; --oc-status-warning-bg:rgb(161 92 0 / 0.1);
+      --oc-status-error-fg:#b64227; --oc-status-error-bg:rgb(182 66 39 / 0.1);
+      --oc-status-info-fg:#2365a8; --oc-status-info-bg:rgb(35 101 168 / 0.1);
+      --panel-shadow:0 20px 70px rgb(32 24 18 / 0.1);
+    }
     /* Portal palette is aliased onto vendored carapace semantic tokens
        (see /portal/assets/carapace/VENDORED.md); carapace owns the
        light/dark values via html[data-theme], so no per-theme block here. */
@@ -3359,7 +3389,10 @@ function html(
     }
     * { box-sizing: border-box; }
     html { min-height:100%; background:var(--bg); }
-    body { margin:0; min-height:100vh; overflow-x:hidden; background:var(--bg); color:var(--fg); font:14px/1.45 var(--oc-font-body); transition:background-color .18s,color .18s; }
+    /* Reports-style ink hierarchy: warm gray body, full ink only on headings
+       and emphasized values — the page reads softer without losing anchors. */
+    body { margin:0; min-height:100vh; overflow-x:hidden; background:var(--bg); color:var(--oc-text-secondary); font:14px/1.45 var(--oc-font-body); transition:background-color .18s,color .18s; }
+    h1, strong { color:var(--fg); }
     main { width:min(1180px, calc(100vw - 32px)); max-width:100%; margin:0 auto; padding:10px 0 22px; }
     /* overflow:auto + a floored table row: tall viewports keep the app-like
        fixed layout with internally scrolling tables, while short viewports
@@ -3372,14 +3405,14 @@ function html(
     .run-shell { height:auto; min-height:100dvh; overflow:visible; grid-template-rows:auto; }
     h1,h2,p { margin:0; }
     h1 { font-size:20px; font-weight:700; }
-    h2 { font-size:12px; text-transform:uppercase; color:var(--muted); letter-spacing:0.04em; }
+    h2 { font-size:12px; text-transform:uppercase; color:var(--muted); letter-spacing:0.04em; font-family:var(--mono); }
     a { color:inherit; }
     form { margin:0; }
     button { font:inherit; }
     code { display:block; max-width:100%; overflow:auto; padding:9px 10px; border:1px solid var(--line); border-radius:6px; background:var(--inset); color:var(--code-fg); font-family:var(--mono); }
     table { width:100%; border-collapse:collapse; table-layout:fixed; }
     th,td { padding:7px 10px; border-bottom:1px solid var(--line); text-align:left; vertical-align:middle; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; line-height:1.25; }
-    th { position:sticky; top:0; z-index:2; color:var(--muted); font-size:11px; font-weight:700; text-transform:uppercase; background:var(--panel); box-shadow:0 1px 0 var(--line); }
+    th { position:sticky; top:0; z-index:2; color:var(--muted); font-size:11px; font-weight:700; text-transform:uppercase; font-family:var(--mono); background:var(--panel); box-shadow:0 1px 0 var(--line); }
     th[data-sortable] { cursor:pointer; user-select:none; }
     th[data-sortable]::after { content:""; display:inline-block; width:0; height:0; margin-left:6px; vertical-align:middle; border-left:3px solid transparent; border-right:3px solid transparent; border-top:4px solid var(--arrow); opacity:0.75; }
     th[aria-sort="ascending"]::after { border-top:0; border-bottom:4px solid var(--accent); opacity:1; }
@@ -3391,7 +3424,7 @@ function html(
     .portal-header-meta h1 { white-space:nowrap; }
     .portal-header-meta p { font-size:12px; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .top p,.muted,.empty { color:var(--muted); }
-    .panel { min-width:0; border:1px solid var(--line); border-radius:8px; background:var(--panel); overflow:hidden; }
+    .panel { min-width:0; border:1px solid var(--line); border-radius:8px; background:var(--panel); overflow:hidden; box-shadow:var(--panel-shadow); }
     .admin-panel { border-color:color-mix(in srgb, var(--accent) 30%, var(--line)); background:linear-gradient(180deg, color-mix(in srgb, var(--accent) 8%, var(--panel)), var(--panel)); }
     .admin-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:1px; background:var(--line-soft); border-bottom:1px solid var(--line); }
     .admin-metric { min-width:0; padding:10px; background:var(--panel); }
@@ -3419,10 +3452,10 @@ function html(
     .provider-status-head { display:grid; grid-template-columns:auto minmax(0,1fr) auto; gap:9px; align-items:center; }
     .provider-favicon { width:24px; height:24px; display:grid; place-items:center; border:1px solid var(--line); border-radius:6px; background:var(--panel-2); color:var(--icon); }
     .provider-favicon svg { width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
-    .provider-favicon[data-provider="aws"] { color:#fbbf24; }
-    .provider-favicon[data-provider="azure"] { color:#60a5fa; }
-    .provider-favicon[data-provider="gcp"] { color:#34d399; }
-    .provider-favicon[data-provider="hetzner"] { color:#f87171; }
+    .provider-favicon[data-provider="aws"] { color:#d97706; }
+    .provider-favicon[data-provider="azure"] { color:#7aa7ff; }
+    .provider-favicon[data-provider="gcp"] { color:#48b49a; }
+    .provider-favicon[data-provider="hetzner"] { color:#e06a4d; }
     .provider-status-title { min-width:0; display:grid; gap:1px; }
     .provider-status-title strong,.provider-status-title span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .provider-status-title > span { display:flex; gap:6px; align-items:center; color:var(--muted); font-size:11px; }
@@ -3549,13 +3582,13 @@ function html(
     .icon-label { display:inline-flex; align-items:center; gap:7px; min-width:0; }
     .icon-label svg { width:14px; height:14px; flex:0 0 14px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; color:var(--icon); }
     .icon-label span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .icon-label[data-provider="aws"] svg { color:#fbbf24; }
-    .icon-label[data-provider="azure"] svg { color:#60a5fa; }
-    .icon-label[data-provider="hetzner"] svg { color:#ef4444; }
-    .icon-label[data-provider="blacksmith-testbox"] svg { color:#a78bfa; }
-    .icon-label[data-target="linux"] svg { color:#34d399; }
-    .icon-label[data-target="windows"] svg { color:#38bdf8; }
-    .icon-label[data-target="macos"] svg { color:#d8b4fe; }
+    .icon-label[data-provider="aws"] svg { color:#d97706; }
+    .icon-label[data-provider="azure"] svg { color:#7aa7ff; }
+    .icon-label[data-provider="hetzner"] svg { color:#e06a4d; }
+    .icon-label[data-provider="blacksmith-testbox"] svg { color:#9d8cd6; }
+    .icon-label[data-target="linux"] svg { color:#48b49a; }
+    .icon-label[data-target="windows"] svg { color:#7aa7ff; }
+    .icon-label[data-target="macos"] svg { color:#b7a6e0; }
     .actions-cell { display:flex; align-items:center; gap:5px; flex-wrap:nowrap; }
     .access-cell { display:flex; align-items:center; gap:5px; min-width:0; }
     .disabled-cell { color:var(--subtle); font-size:12px; }
@@ -3570,12 +3603,12 @@ function html(
     .external-access span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .capacity-row { background:color-mix(in srgb, var(--panel-2) 18%, transparent); }
     .dedicated-link { display:grid; grid-template-columns:18px minmax(0,1fr); align-items:center; }
-    .dedicated-link .dedicated-mark { display:inline-flex; width:18px; height:18px; color:#fbbf24; }
+    .dedicated-link .dedicated-mark { display:inline-flex; width:18px; height:18px; color:#d97706; }
     .dedicated-link .dedicated-mark svg { width:15px; height:15px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
     .access-icon { display:inline-flex; align-items:center; justify-content:center; width:24px; height:24px; border-radius:6px; border:1px solid var(--line); color:var(--icon); background:var(--inset); text-decoration:none; }
     .access-icon svg { width:14px; height:14px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
-    .access-icon[data-access="vscode"] { color:#d8b4fe; }
-    .access-icon[data-access="vnc"] { color:#38bdf8; }
+    .access-icon[data-access="vscode"] { color:#b7a6e0; }
+    .access-icon[data-access="vnc"] { color:#7aa7ff; }
     .access-icon:hover { border-color:var(--hover-line); background:var(--hover); }
     .lease-release-form { display:flex; justify-content:flex-end; }
     .lease-release { color:var(--muted); cursor:pointer; }
