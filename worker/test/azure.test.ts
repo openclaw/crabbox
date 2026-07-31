@@ -256,15 +256,13 @@ describe("azure provider", () => {
       ...baseEnv,
       CRABBOX_AZURE_IMAGE: "Canonical:custom-linux:image:latest",
     });
-    const imageForConfig = (
-      client as unknown as { imageForConfig(config: LeaseConfig): string }
-    ).imageForConfig.bind(client);
-
-    expect(imageForConfig(testLeaseConfig({ azureImage: "" }))).toBe(
+    expect(client.resolvedImageForConfig(testLeaseConfig({ azureImage: "" }))).toBe(
       "Canonical:custom-linux:image:latest",
     );
     expect(
-      imageForConfig(testLeaseConfig({ azureImage: "Canonical:custom-linux:image:latest" })),
+      client.resolvedImageForConfig(
+        testLeaseConfig({ azureImage: "Canonical:custom-linux:image:latest" }),
+      ),
     ).toBe("Canonical:custom-linux:image:latest");
   });
 
