@@ -11574,6 +11574,49 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  it("backs off Azure inventory while its reconciliation circuit is open", async () => {
+    const storage = new MemoryStorage();
+    let inventoryCalls = 0;
+    const retryAt = new Date(Date.now() + 5 * 60_000).toISOString();
+    storage.seed("provider-reconciliation-circuit:azure:eastus", {
+      consecutiveFailures: 3,
+      retryAt,
+      lastError: "inventory unavailable",
+    });
+    const fleet = testFleet(
+      storage,
+      {
+        azure: fakeProvider(undefined, {
+          provider: "azure",
+          onList() {
+            inventoryCalls += 1;
+            return [];
+          },
+        }),
+      },
+      {
+        AZURE_TENANT_ID: "tenant",
+        AZURE_CLIENT_ID: "client",
+        AZURE_CLIENT_SECRET: "secret",
+        AZURE_SUBSCRIPTION_ID: "subscription",
+        CRABBOX_AZURE_LOCATION: "eastus",
+      },
+    );
+
+    await fleet.alarm();
+
+    expect(inventoryCalls).toBe(0);
+    expect(storage.value("azure-orphan-sweep:last")).toMatchObject({
+      scanned: 0,
+      errors: [
+        {
+          region: "eastus",
+          message: `reconciliation circuit open until ${retryAt}`,
+        },
+      ],
+    });
+  });
+
   it("releases stale pending EC2 Mac hosts during the AWS orphan sweep", async () => {
     const storage = new MemoryStorage();
     const actions: string[] = [];

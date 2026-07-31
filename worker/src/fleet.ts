@@ -199,7 +199,11 @@ import {
 } from "./provider-provisioning";
 import {
   observeProviderReconciliationCandidate,
+  providerReconciliationCircuitOpen,
   providerReconciliationFingerprint,
+  recordProviderReconciliationFailure,
+  recordProviderReconciliationSuccess,
+  type ProviderReconciliationCircuit,
   type ProviderReconciliationQuarantine,
 } from "./provider-reconciliation";
 import {
@@ -345,6 +349,7 @@ const awsOrphanSweepFirstAlarmKey = "aws-orphan-sweep:first-alarm";
 const azureOrphanSweepRecordKey = "azure-orphan-sweep:last";
 const azureOrphanSweepFirstAlarmKey = "azure-orphan-sweep:first-alarm";
 const providerReconciliationStatePrefix = "provider-reconciliation:";
+const providerReconciliationCircuitPrefix = "provider-reconciliation-circuit:";
 const awsIngressReconcileRecordKey = "aws-ingress-reconcile:pending";
 const azureDeferredCleanupPrefix = "azure-cleanup:";
 const readyPoolPrefix = "ready-pool:";
@@ -13485,6 +13490,16 @@ export class FleetCoordinator {
     let macHostsScanned = 0;
     for (const region of config.regions) {
       try {
+        const circuitKey = providerReconciliationCircuitKey("aws", region);
+        // oxlint-disable-next-line eslint/no-await-in-loop -- each provider scope has independent failure state.
+        const circuit = await this.state.storage.get<ProviderReconciliationCircuit>(circuitKey);
+        if (providerReconciliationCircuitOpen(circuit, Date.now())) {
+          errors.push({
+            region,
+            message: `reconciliation circuit open until ${circuit?.retryAt}`,
+          });
+          continue;
+        }
         // oxlint-disable-next-line eslint/no-await-in-loop -- reconciliation state is scoped to the provider region.
         const state = await this.state.storage.get<ProviderReconciliationScopeState>(
           providerReconciliationStateKey("aws", region),
@@ -13510,9 +13525,23 @@ export class FleetCoordinator {
           macHostsScanned += macHosts.length;
           macHostInventory.push(...macHosts.map((host) => ({ client, host, region })));
         }
+        // oxlint-disable-next-line eslint/no-await-in-loop -- clear the exact scope after a successful inventory.
+        await this.state.storage.put(circuitKey, recordProviderReconciliationSuccess());
       } catch (error) {
         const message = coordinatorErrorMessage(this.env, error);
         errors.push({ region, message });
+        const circuitKey = providerReconciliationCircuitKey("aws", region);
+        // oxlint-disable-next-line eslint/no-await-in-loop -- preserve failure state for the exact provider scope.
+        const previous = await this.state.storage.get<ProviderReconciliationCircuit>(circuitKey);
+        // oxlint-disable-next-line eslint/no-await-in-loop -- the next admin sweep must observe this failure.
+        await this.state.storage.put(
+          circuitKey,
+          recordProviderReconciliationFailure({
+            ...(previous ? { previous } : {}),
+            now: Date.now(),
+            error: message,
+          }),
+        );
         console.warn(`aws orphan sweep failed region=${region}: ${message}`);
       }
     }
@@ -13763,35 +13792,55 @@ export class FleetCoordinator {
     let scanned = 0;
     const inventoryRegion = config.regions[0] ?? this.env.CRABBOX_AZURE_LOCATION ?? "eastus";
     try {
-      // Azure inventory is resource-group scoped, not location scoped. One successful read is authoritative.
-      const machines = await this.provider("azure", inventoryRegion).listCrabboxServers();
-      const inventoryScopes = new Set(config.regions);
-      inventoryScopes.add(inventoryRegion);
-      for (const machine of machines) {
-        scanned += 1;
-        const candidateRegion = machine.region || inventoryRegion;
-        inventoryScopes.add(candidateRegion);
-        inventory.push({ machine, region: candidateRegion });
-      }
-      for (const scope of inventoryScopes) {
-        // oxlint-disable-next-line eslint/no-await-in-loop -- each scope has an independent Durable Object record.
-        const state = await this.state.storage.get<ProviderReconciliationScopeState>(
-          providerReconciliationStateKey("azure", scope),
-        );
-        reconciliationStates.set(
-          scope,
-          state ?? {
-            provider: "azure",
+      const circuitKey = providerReconciliationCircuitKey("azure", inventoryRegion);
+      const circuit = await this.state.storage.get<ProviderReconciliationCircuit>(circuitKey);
+      if (providerReconciliationCircuitOpen(circuit, Date.now())) {
+        errors.push({
+          region: inventoryRegion,
+          message: `reconciliation circuit open until ${circuit?.retryAt}`,
+        });
+      } else {
+        // Azure inventory is resource-group scoped, not location scoped. One successful read is authoritative.
+        const machines = await this.provider("azure", inventoryRegion).listCrabboxServers();
+        const inventoryScopes = new Set(config.regions);
+        inventoryScopes.add(inventoryRegion);
+        for (const machine of machines) {
+          scanned += 1;
+          const candidateRegion = machine.region || inventoryRegion;
+          inventoryScopes.add(candidateRegion);
+          inventory.push({ machine, region: candidateRegion });
+        }
+        for (const scope of inventoryScopes) {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- each scope has an independent Durable Object record.
+          const state = await this.state.storage.get<ProviderReconciliationScopeState>(
+            providerReconciliationStateKey("azure", scope),
+          );
+          reconciliationStates.set(
             scope,
-            quarantines: {},
-            updatedAt: startedAt,
-          },
-        );
-        nextQuarantines.set(scope, {});
+            state ?? {
+              provider: "azure",
+              scope,
+              quarantines: {},
+              updatedAt: startedAt,
+            },
+          );
+          nextQuarantines.set(scope, {});
+        }
+        await this.state.storage.put(circuitKey, recordProviderReconciliationSuccess());
       }
     } catch (error) {
       const message = coordinatorErrorMessage(this.env, error);
       errors.push({ region: inventoryRegion, message });
+      const circuitKey = providerReconciliationCircuitKey("azure", inventoryRegion);
+      const previous = await this.state.storage.get<ProviderReconciliationCircuit>(circuitKey);
+      await this.state.storage.put(
+        circuitKey,
+        recordProviderReconciliationFailure({
+          ...(previous ? { previous } : {}),
+          now: Date.now(),
+          error: message,
+        }),
+      );
       console.warn(`azure orphan sweep failed region=${inventoryRegion}: ${message}`);
     }
     const inventoryKeys = new Set(
@@ -20173,6 +20222,10 @@ function cloudOrphanSweepResourceKey(cloudID: string, region: string): string {
 
 function providerReconciliationStateKey(provider: Provider, scope: string): string {
   return `${providerReconciliationStatePrefix}${provider}:${encodeURIComponent(scope)}`;
+}
+
+function providerReconciliationCircuitKey(provider: Provider, scope: string): string {
+  return `${providerReconciliationCircuitPrefix}${provider}:${encodeURIComponent(scope)}`;
 }
 
 function recordCloudOrphanSweepOwnership(
