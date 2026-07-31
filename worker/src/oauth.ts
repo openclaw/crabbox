@@ -744,7 +744,7 @@ function html(
   return new Response(
     // Palette: vendored carapace v0.6.1 neutral product tokens (see
     // worker/public/portal/assets/carapace/VENDORED.md); page stays self-contained.
-    `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapedTitle}</title><style>:root{color-scheme:dark light}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:42rem;margin:5rem auto;padding:0 1rem;line-height:1.5;background:oklch(0.135 0 0);color:oklch(0.985 0 0)}a{color:#f5654a}code{background:oklch(0.178 0 0);border:1px solid oklch(0.269 0 0);padding:.15rem .3rem;border-radius:4px}@media (prefers-color-scheme:light){body{background:oklch(0.985 0 0);color:oklch(0.205 0 0)}a{color:#d84a31}code{background:oklch(0.97 0 0);border-color:oklch(0.922 0 0)}}</style></head><body><h1>${escapedTitle}</h1><p>${escapedMessage}</p>${extraBody}</body></html>`,
+    `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapedTitle}</title><style>:root{color-scheme:dark light}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:42rem;margin:5rem auto;padding:0 1rem;line-height:1.5;background:#0d0b0b;color:#f4f1ef}a{color:#ff8a5f}code{background:#151211;border:1px solid #201d1c;padding:.15rem .3rem;border-radius:4px}@media (prefers-color-scheme:light){body{background:#fbfaf7;color:#171514}a{color:#d75a37}code{background:#f6f2ec;border-color:#e8ddd5}}</style></head><body><h1>${escapedTitle}</h1><p>${escapedMessage}</p>${extraBody}</body></html>`,
     { status, headers: responseHeaders },
   );
 }

@@ -316,8 +316,8 @@ func createMacOSWebVNCHandoff(webPort string, session macOSWebVNCSession, viewer
 	}
 	content := `<!doctype html><html><head><meta charset="utf-8"><title>Crabbox WebVNC</title><style>` +
 		// Palette: carapace ink tokens (v0.6.1); backdrop stays dark by design behind the VNC canvas.
-		`html,body{margin:0;height:100%;background:#101012;overflow:hidden}#screen{width:100%;height:100%}` +
-		`#status{position:fixed;top:0;left:0;right:0;color:#ededed;font:12px/1.6 ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,monospace;padding:4px 8px;background:rgba(16,16,18,.72);z-index:10}` +
+		`html,body{margin:0;height:100%;background:#0d0b0b;overflow:hidden}#screen{width:100%;height:100%}` +
+		`#status{position:fixed;top:0;left:0;right:0;color:#f4f1ef;font:12px/1.6 ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,monospace;padding:4px 8px;background:rgba(13,11,11,.72);z-index:10}` +
 		`</style></head><body><div id="status">connecting...</div><div id="screen"></div><script type="module">` +
 		`const source=` + string(rfbJSON) + `;const moduleURL=URL.createObjectURL(new Blob([source],{type:"text/javascript"}));` +
 		`const{default:RFB}=await import(moduleURL);const config=` + string(configJSON) + `;const status=document.getElementById("status");` +

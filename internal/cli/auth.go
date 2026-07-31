@@ -263,7 +263,7 @@ func (l *githubLoginLoopback) handle(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	// Palette: vendored carapace v0.6.1 neutral product tokens (see
 	// worker/public/portal/assets/carapace/VENDORED.md); page stays self-contained.
-	_, _ = io.WriteString(w, "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Crabbox login complete</title><style>:root{color-scheme:dark light}body{font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;max-width:42rem;margin:5rem auto;padding:0 1rem;line-height:1.5;background:oklch(0.135 0 0);color:oklch(0.985 0 0)}h1{font-size:1.25rem}p{color:oklch(0.716 0 0)}@media (prefers-color-scheme:light){body{background:oklch(0.985 0 0);color:oklch(0.205 0 0)}p{color:oklch(0.555 0 0)}}</style></head><body><h1>Crabbox login complete</h1><p>You can close this tab and return to the terminal.</p></body></html>")
+	_, _ = io.WriteString(w, "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Crabbox login complete</title><style>:root{color-scheme:dark light}body{font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif;max-width:42rem;margin:5rem auto;padding:0 1rem;line-height:1.5;background:#0d0b0b;color:#f4f1ef}h1{font-size:1.25rem}p{color:#aaa19d}@media (prefers-color-scheme:light){body{background:#fbfaf7;color:#171514}p{color:#716a66}}</style></head><body><h1>Crabbox login complete</h1><p>You can close this tab and return to the terminal.</p></body></html>")
 }
 
 func validBrowserConfirmation(value string) bool {
