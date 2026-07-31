@@ -204,6 +204,7 @@ import {
   recordProviderReconciliationFailure,
   recordProviderReconciliationSuccess,
   type ProviderReconciliationCircuit,
+  type ProviderReconciliationObservation,
   type ProviderReconciliationQuarantine,
 } from "./provider-reconciliation";
 import {
@@ -348,7 +349,7 @@ const awsOrphanSweepRecordKey = "aws-orphan-sweep:last";
 const awsOrphanSweepFirstAlarmKey = "aws-orphan-sweep:first-alarm";
 const azureOrphanSweepRecordKey = "azure-orphan-sweep:last";
 const azureOrphanSweepFirstAlarmKey = "azure-orphan-sweep:first-alarm";
-const providerReconciliationStatePrefix = "provider-reconciliation:";
+const providerReconciliationCandidatePrefix = "provider-reconciliation:";
 const providerReconciliationCircuitPrefix = "provider-reconciliation-circuit:";
 const awsIngressReconcileRecordKey = "aws-ingress-reconcile:pending";
 const azureDeferredCleanupPrefix = "azure-cleanup:";
@@ -841,13 +842,6 @@ interface CloudOrphanSweepCandidate {
 
 type AWSOrphanSweepCandidate = CloudOrphanSweepCandidate;
 type AzureOrphanSweepCandidate = CloudOrphanSweepCandidate;
-
-interface ProviderReconciliationScopeState {
-  provider: Provider;
-  scope: string;
-  quarantines: Record<string, ProviderReconciliationQuarantine>;
-  updatedAt: string;
-}
 
 interface AWSMacHostSweepCandidate {
   region: string;
@@ -13484,8 +13478,7 @@ export class FleetCoordinator {
     const errors: AWSOrphanSweepRecord["errors"] = [];
     const inventory: Array<{ machine: ProviderMachine; region: string }> = [];
     const macHostInventory: Array<{ client: EC2SpotClient; host: AWSMacHost; region: string }> = [];
-    const reconciliationStates = new Map<string, ProviderReconciliationScopeState>();
-    const nextQuarantines = new Map<string, Record<string, ProviderReconciliationQuarantine>>();
+    const reconciliationObservedKeys = new Map<string, Set<string>>();
     let scanned = 0;
     let macHostsScanned = 0;
     for (const region of config.regions) {
@@ -13500,22 +13493,9 @@ export class FleetCoordinator {
           });
           continue;
         }
-        // oxlint-disable-next-line eslint/no-await-in-loop -- reconciliation state is scoped to the provider region.
-        const state = await this.state.storage.get<ProviderReconciliationScopeState>(
-          providerReconciliationStateKey("aws", region),
-        );
         // oxlint-disable-next-line eslint/no-await-in-loop -- regions are swept independently.
         const machines = await this.provider("aws", region).listCrabboxServers();
-        reconciliationStates.set(
-          region,
-          state ?? {
-            provider: "aws",
-            scope: region,
-            quarantines: {},
-            updatedAt: startedAt,
-          },
-        );
-        nextQuarantines.set(region, {});
+        reconciliationObservedKeys.set(region, new Set());
         scanned += machines.length;
         inventory.push(...machines.map((machine) => ({ machine, region })));
         if (config.macHostReleaseEnabled) {
@@ -13603,30 +13583,31 @@ export class FleetCoordinator {
           ? ownershipLease
           : undefined;
       recordCloudOrphanSweepOwnership(candidate, exactOwnershipLease);
-      const state = reconciliationStates.get(region);
-      const scopeQuarantines = nextQuarantines.get(region);
+      const scopeObservedKeys = reconciliationObservedKeys.get(region);
       const observation =
-        exactOwnershipLease && state && scopeQuarantines
-          ? observeProviderReconciliationCandidate({
+        exactOwnershipLease && scopeObservedKeys
+          ? // oxlint-disable-next-line eslint/no-await-in-loop -- candidate state is read before its provider release decision.
+            await this.observeStoredProviderReconciliationCandidate({
+              provider: "aws",
+              scope: region,
+              resourceID: cloudID,
               fingerprint: providerReconciliationFingerprint("aws", region, machine),
-              ...(state.quarantines[cloudID] ? { previous: state.quarantines[cloudID] } : {}),
               now,
               quarantineSeconds: config.graceSeconds,
             })
           : undefined;
-      if (observation && scopeQuarantines) {
-        scopeQuarantines[cloudID] = observation.quarantine;
+      if (observation && scopeObservedKeys) {
+        scopeObservedKeys.add(observation.key);
         candidate.action = "quarantined";
       }
+      let released = false;
       if (config.deleteEnabled && exactOwnershipLease && observation?.action === "release") {
         try {
           // AWS release re-reads canonical ownership and deletes the exact instance; success means absent or terminated.
           // oxlint-disable-next-line eslint/no-await-in-loop -- release failures must stay attached to the candidate.
           await this.provider("aws", region).releaseLease(exactOwnershipLease);
           candidate.action = "terminated";
-          if (scopeQuarantines) {
-            delete scopeQuarantines[cloudID];
-          }
+          released = true;
         } catch (error) {
           candidate.action = "terminate_failed";
           candidate.error = coordinatorErrorMessage(this.env, error);
@@ -13635,19 +13616,22 @@ export class FleetCoordinator {
           );
         }
       }
+      if (observation) {
+        if (released) {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- persist each candidate's final state before advancing.
+          await this.state.storage.delete(observation.key);
+        } else {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- persist each candidate's final state before advancing.
+          await this.state.storage.put(observation.key, observation.quarantine);
+        }
+      }
       candidates.push(candidate);
     }
-    await this.state.runExclusive(async () => {
-      for (const [region, quarantines] of nextQuarantines) {
-        // oxlint-disable-next-line eslint/no-await-in-loop -- each scope is one bounded state record.
-        await this.state.storage.put(providerReconciliationStateKey("aws", region), {
-          provider: "aws",
-          scope: region,
-          quarantines,
-          updatedAt: new Date(now).toISOString(),
-        } satisfies ProviderReconciliationScopeState);
-      }
-    });
+    for (const [region, observedKeys] of reconciliationObservedKeys) {
+      // A successful regional inventory is authoritative for every previously quarantined resource in that region.
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each provider scope is cleared independently.
+      await this.clearUnobservedProviderReconciliationCandidates("aws", region, observedKeys);
+    }
     for (const { client, host, region } of macHostInventory) {
       const candidate = awsMacHostSweepCandidate(
         host,
@@ -13787,8 +13771,8 @@ export class FleetCoordinator {
     const candidates: AzureOrphanSweepCandidate[] = [];
     const errors: AzureOrphanSweepRecord["errors"] = [];
     const inventory: Array<{ machine: ProviderMachine; region: string }> = [];
-    const reconciliationStates = new Map<string, ProviderReconciliationScopeState>();
-    const nextQuarantines = new Map<string, Record<string, ProviderReconciliationQuarantine>>();
+    const reconciliationObservedKeys = new Set<string>();
+    let inventorySucceeded = false;
     let scanned = 0;
     const inventoryRegion = config.regions[0] ?? this.env.CRABBOX_AZURE_LOCATION ?? "eastus";
     try {
@@ -13802,30 +13786,12 @@ export class FleetCoordinator {
       } else {
         // Azure inventory is resource-group scoped, not location scoped. One successful read is authoritative.
         const machines = await this.provider("azure", inventoryRegion).listCrabboxServers();
-        const inventoryScopes = new Set(config.regions);
-        inventoryScopes.add(inventoryRegion);
         for (const machine of machines) {
           scanned += 1;
           const candidateRegion = machine.region || inventoryRegion;
-          inventoryScopes.add(candidateRegion);
           inventory.push({ machine, region: candidateRegion });
         }
-        for (const scope of inventoryScopes) {
-          // oxlint-disable-next-line eslint/no-await-in-loop -- each scope has an independent Durable Object record.
-          const state = await this.state.storage.get<ProviderReconciliationScopeState>(
-            providerReconciliationStateKey("azure", scope),
-          );
-          reconciliationStates.set(
-            scope,
-            state ?? {
-              provider: "azure",
-              scope,
-              quarantines: {},
-              updatedAt: startedAt,
-            },
-          );
-          nextQuarantines.set(scope, {});
-        }
+        inventorySucceeded = true;
         await this.state.storage.put(circuitKey, recordProviderReconciliationSuccess());
       }
     } catch (error) {
@@ -13890,30 +13856,30 @@ export class FleetCoordinator {
           ? ownershipLease
           : undefined;
       recordCloudOrphanSweepOwnership(candidate, exactOwnershipLease);
-      const state = reconciliationStates.get(region);
-      const scopeQuarantines = nextQuarantines.get(region);
       const observation =
-        exactOwnershipLease && state && scopeQuarantines
-          ? observeProviderReconciliationCandidate({
+        exactOwnershipLease && inventorySucceeded
+          ? // oxlint-disable-next-line eslint/no-await-in-loop -- candidate state is read before its provider release decision.
+            await this.observeStoredProviderReconciliationCandidate({
+              provider: "azure",
+              scope: region,
+              resourceID: cloudID,
               fingerprint: providerReconciliationFingerprint("azure", region, machine),
-              ...(state.quarantines[cloudID] ? { previous: state.quarantines[cloudID] } : {}),
               now,
               quarantineSeconds: config.graceSeconds,
             })
           : undefined;
-      if (observation && scopeQuarantines) {
-        scopeQuarantines[cloudID] = observation.quarantine;
+      if (observation) {
+        reconciliationObservedKeys.add(observation.key);
         candidate.action = "quarantined";
       }
+      let released = false;
       if (config.deleteEnabled && exactOwnershipLease && observation?.action === "release") {
         try {
           // Azure release uses the persisted provider scope and resumable owned-resource deletion.
           // oxlint-disable-next-line eslint/no-await-in-loop -- release failures must stay attached to the candidate.
           await this.provider("azure", region).releaseLease(exactOwnershipLease);
           candidate.action = "terminated";
-          if (scopeQuarantines) {
-            delete scopeQuarantines[cloudID];
-          }
+          released = true;
         } catch (error) {
           candidate.action = "terminate_failed";
           candidate.error = coordinatorErrorMessage(this.env, error);
@@ -13922,19 +13888,26 @@ export class FleetCoordinator {
           );
         }
       }
+      if (observation) {
+        if (released) {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- persist each candidate's final state before advancing.
+          await this.state.storage.delete(observation.key);
+        } else {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- persist each candidate's final state before advancing.
+          await this.state.storage.put(observation.key, observation.quarantine);
+        }
+      }
       candidates.push(candidate);
     }
-    await this.state.runExclusive(async () => {
-      for (const [region, quarantines] of nextQuarantines) {
-        // oxlint-disable-next-line eslint/no-await-in-loop -- each scope is one bounded state record.
-        await this.state.storage.put(providerReconciliationStateKey("azure", region), {
-          provider: "azure",
-          scope: region,
-          quarantines,
-          updatedAt: new Date(now).toISOString(),
-        } satisfies ProviderReconciliationScopeState);
-      }
-    });
+    if (inventorySucceeded) {
+      // Azure returns a resource-group-wide inventory. Clear stale candidates from every location,
+      // including locations omitted from an empty authoritative response.
+      await this.clearUnobservedProviderReconciliationCandidates(
+        "azure",
+        undefined,
+        reconciliationObservedKeys,
+      );
+    }
     const finishedAt = new Date().toISOString();
     const record: AzureOrphanSweepRecord = {
       startedAt,
@@ -14135,6 +14108,43 @@ export class FleetCoordinator {
     visitor: (lease: LeaseRecord) => Promise<boolean | void> | boolean | void,
   ): Promise<void> {
     await this.visitStorageRecords("lease:", visitor);
+  }
+
+  private async observeStoredProviderReconciliationCandidate(input: {
+    provider: Provider;
+    scope: string;
+    resourceID: string;
+    fingerprint: string;
+    now: number;
+    quarantineSeconds: number;
+  }): Promise<ProviderReconciliationObservation & { key: string }> {
+    const key = providerReconciliationCandidateKey(input.provider, input.scope, input.resourceID);
+    const previous = await this.state.storage.get<ProviderReconciliationQuarantine>(key);
+    return {
+      key,
+      ...observeProviderReconciliationCandidate({
+        fingerprint: input.fingerprint,
+        ...(previous ? { previous } : {}),
+        now: input.now,
+        quarantineSeconds: input.quarantineSeconds,
+      }),
+    };
+  }
+
+  private async clearUnobservedProviderReconciliationCandidates(
+    provider: Provider,
+    scope: string | undefined,
+    observedKeys: ReadonlySet<string>,
+  ): Promise<void> {
+    const prefix = providerReconciliationCandidatesPrefix(provider, scope);
+    await this.visitStorageRecords<ProviderReconciliationQuarantine>(
+      prefix,
+      async (_record, key) => {
+        if (!observedKeys.has(key)) {
+          await this.state.storage.delete(key);
+        }
+      },
+    );
   }
 
   private async visitStorageRecords<T>(
@@ -20220,8 +20230,17 @@ function cloudOrphanSweepResourceKey(cloudID: string, region: string): string {
   return JSON.stringify([region, cloudID]);
 }
 
-function providerReconciliationStateKey(provider: Provider, scope: string): string {
-  return `${providerReconciliationStatePrefix}${provider}:${encodeURIComponent(scope)}`;
+function providerReconciliationCandidatesPrefix(provider: Provider, scope?: string): string {
+  const providerPrefix = `${providerReconciliationCandidatePrefix}${provider}:`;
+  return scope === undefined ? providerPrefix : `${providerPrefix}${encodeURIComponent(scope)}:`;
+}
+
+function providerReconciliationCandidateKey(
+  provider: Provider,
+  scope: string,
+  resourceID: string,
+): string {
+  return `${providerReconciliationCandidatesPrefix(provider, scope)}${encodeURIComponent(resourceID)}`;
 }
 
 function providerReconciliationCircuitKey(provider: Provider, scope: string): string {

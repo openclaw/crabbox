@@ -29,11 +29,7 @@ export function providerReconciliationFingerprint(
   scope: string,
   machine: Pick<ProviderMachine, "cloudID" | "id" | "name" | "labels">,
 ): string {
-  const labels = Object.fromEntries(
-    Object.entries(machine.labels ?? {}).toSorted(([left], [right]) =>
-      left < right ? -1 : left > right ? 1 : 0,
-    ),
-  );
+  const labels = machine.labels ?? {};
   return JSON.stringify({
     provider,
     scope,
@@ -43,7 +39,9 @@ export function providerReconciliationFingerprint(
     owner: labels["owner"] ?? "",
     providerLabel: labels["provider"] ?? "",
     slug: labels["slug"] ?? "",
-    labels,
+    keep: labels["keep"] ?? "",
+    createdAt: labels["created_at"] ?? "",
+    expiresAt: labels["expires_at"] ?? "",
   });
 }
 
