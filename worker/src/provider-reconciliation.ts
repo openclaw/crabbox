@@ -30,7 +30,7 @@ export function providerReconciliationFingerprint(
   machine: Pick<ProviderMachine, "cloudID" | "id" | "name" | "labels">,
 ): string {
   const labels = Object.fromEntries(
-    Object.entries(machine.labels ?? {}).sort(([left], [right]) =>
+    Object.entries(machine.labels ?? {}).toSorted(([left], [right]) =>
       left < right ? -1 : left > right ? 1 : 0,
     ),
   );

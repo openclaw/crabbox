@@ -34,7 +34,7 @@ describe("provider reconciliation", () => {
       labels: Object.fromEntries([
         ["e\u0301", "decomposed"],
         ["\u00e9", "precomposed"],
-        ...Object.entries(machine.labels).reverse(),
+        ...Object.entries(machine.labels).toReversed(),
       ]),
     };
     const original = {

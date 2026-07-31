@@ -48,6 +48,7 @@ import {
   ProviderProvisioningCleanupError,
   providerProvisioningCleanupClaim,
 } from "../src/provider-provisioning";
+import { providerReconciliationFingerprint } from "../src/provider-reconciliation";
 import {
   runtimeAdapterDesktopRelayTimeoutMs,
   runtimeAdapterRelayFrameLimit,
@@ -11065,10 +11066,86 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  it("quarantines an exactly owned AWS candidate before releasing it", async () => {
+    const storage = new MemoryStorage();
+    const deleted: string[] = [];
+    const oldSeconds = String(Math.trunc((Date.now() - 60 * 60 * 1000) / 1000));
+    const orphanMachine = testMachine({
+      cloudID: "i-orphan",
+      labels: {
+        crabbox: "true",
+        created_by: "crabbox",
+        provider: "aws",
+        lease: "cbx_000000000776",
+        slug: "blue-lobster",
+        owner: "peter_example.com",
+        created_at: oldSeconds,
+        expires_at: oldSeconds,
+      },
+    });
+    storage.seed(
+      "lease:cbx_000000000776",
+      testLease({
+        id: "cbx_000000000776",
+        provider: "aws",
+        cloudID: "i-orphan",
+        region: "eu-west-1",
+        state: "expired",
+        keep: false,
+      }),
+    );
+    const fleet = testFleet(
+      storage,
+      {
+        aws: fakeProvider(undefined, { provider: "aws", servers: [orphanMachine] }, async (id) => {
+          deleted.push(id);
+        }),
+      },
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_ORPHAN_SWEEP_DELETE: "1",
+        CRABBOX_AWS_ORPHAN_SWEEP_GRACE_SECONDS: "1",
+      },
+    );
+
+    await fleet.alarm();
+
+    expect(deleted).toEqual([]);
+    expect(storage.value("aws-orphan-sweep:last")).toMatchObject({
+      terminated: 0,
+      candidates: [
+        expect.objectContaining({
+          cloudID: "i-orphan",
+          ownership: "coordinator-lease",
+          action: "quarantined",
+        }),
+      ],
+    });
+    expect(
+      storage.value<{ quarantines: Record<string, unknown> }>(
+        "provider-reconciliation:aws:eu-west-1",
+      )?.quarantines,
+    ).toHaveProperty("i-orphan");
+  });
+
   it("terminates AWS orphan sweep candidates with exact coordinator ownership", async () => {
     const storage = new MemoryStorage();
     const deleted: string[] = [];
     const oldSeconds = String(Math.trunc((Date.now() - 60 * 60 * 1000) / 1000));
+    const orphanMachine = testMachine({
+      cloudID: "i-orphan",
+      labels: {
+        crabbox: "true",
+        created_by: "crabbox",
+        provider: "aws",
+        lease: "cbx_000000000776",
+        slug: "blue-lobster",
+        owner: "peter_example.com",
+        created_at: oldSeconds,
+        expires_at: oldSeconds,
+      },
+    });
     storage.seed(
       "lease:cbx_000000000776",
       testLease({
@@ -11091,6 +11168,7 @@ describe("fleet lease identity and idle", () => {
         keep: false,
       }),
     );
+    seedProviderReconciliationEligible(storage, "aws", "eu-west-1", orphanMachine);
     const fleet = testFleet(
       storage,
       {
@@ -11099,15 +11177,7 @@ describe("fleet lease identity and idle", () => {
           {
             provider: "aws",
             servers: [
-              testMachine({
-                cloudID: "i-orphan",
-                labels: {
-                  crabbox: "true",
-                  lease: "cbx_missing",
-                  created_at: oldSeconds,
-                  expires_at: oldSeconds,
-                },
-              }),
+              orphanMachine,
               testMachine({
                 cloudID: "i-wrong-region",
                 labels: {
@@ -11157,9 +11227,24 @@ describe("fleet lease identity and idle", () => {
   it("deletes only coordinator-owned Azure orphan sweep candidates", async () => {
     const storage = new MemoryStorage();
     const list = vi.spyOn(storage, "list");
-    const rawDeleted: string[] = [];
     const ownedDeleted: LeaseRecord[] = [];
     const oldSeconds = String(Math.trunc((Date.now() - 60 * 60 * 1000) / 1000));
+    const orphanMachine = testMachine({
+      provider: "azure",
+      cloudID: "vm-orphan",
+      region: "westus2",
+      name: "vm-orphan",
+      labels: {
+        crabbox: "true",
+        created_by: "crabbox",
+        provider: "azure",
+        lease: "cbx_000000000776",
+        slug: "blue-lobster",
+        owner: "peter_example.com",
+        created_at: oldSeconds,
+        expires_at: oldSeconds,
+      },
+    });
     storage.seed(
       "lease:cbx_000000000776",
       testLease({
@@ -11229,107 +11314,87 @@ describe("fleet lease identity and idle", () => {
         }),
       );
     }
+    seedProviderReconciliationEligible(storage, "azure", "westus2", orphanMachine);
     const fleet = testFleet(
       storage,
       {
-        azure: fakeProvider(
-          undefined,
-          {
-            provider: "azure",
-            servers: [
-              testMachine({
-                provider: "azure",
-                cloudID: "vm-orphan",
-                region: "westus2",
-                name: "vm-orphan",
-                labels: {
-                  crabbox: "true",
-                  created_by: "crabbox",
-                  provider: "azure",
-                  lease: "cbx_000000000776",
-                  slug: "blue-lobster",
-                  owner: "peter@example.com",
-                  created_at: oldSeconds,
-                  expires_at: oldSeconds,
-                },
-              }),
-              testMachine({
-                provider: "azure",
-                cloudID: "vm-kept",
-                name: "vm-kept",
-                labels: {
-                  crabbox: "true",
-                  keep: "true",
-                  lease: "cbx_missing",
-                  created_at: oldSeconds,
-                  expires_at: oldSeconds,
-                },
-              }),
-              testMachine({
-                provider: "azure",
-                cloudID: "vm-tag-only",
-                region: "westus2",
-                name: "vm-tag-only",
-                labels: {
-                  crabbox: "true",
-                  lease: "cbx_missing",
-                  created_at: oldSeconds,
-                  expires_at: oldSeconds,
-                },
-              }),
-              testMachine({
-                provider: "azure",
-                cloudID: "vm-provisioning",
-                name: "vm-provisioning",
-                labels: {
-                  crabbox: "true",
-                  lease: "cbx_000000000777",
-                  created_at: oldSeconds,
-                  expires_at: oldSeconds,
-                },
-              }),
-              testMachine({
-                provider: "azure",
-                cloudID: "vm-cleaning",
-                name: "vm-cleaning",
-                labels: {
-                  crabbox: "true",
-                  lease: "cbx_000000000778",
-                  created_at: oldSeconds,
-                  expires_at: oldSeconds,
-                },
-              }),
-              testMachine({
-                provider: "azure",
-                cloudID: "vm-retaining",
-                name: "vm-retaining",
-                labels: {
-                  crabbox: "true",
-                  lease: "cbx_000000000779",
-                  created_at: oldSeconds,
-                  expires_at: oldSeconds,
-                },
-              }),
-              testMachine({
-                provider: "azure",
-                cloudID: "vm-retained",
-                name: "vm-retained",
-                labels: {
-                  crabbox: "true",
-                  lease: "cbx_000000000780",
-                  created_at: oldSeconds,
-                  expires_at: oldSeconds,
-                },
-              }),
-            ],
-            onDeleteOwnedServer(lease) {
-              ownedDeleted.push(structuredClone(lease));
-            },
+        azure: fakeProvider(undefined, {
+          provider: "azure",
+          servers: [
+            orphanMachine,
+            testMachine({
+              provider: "azure",
+              cloudID: "vm-kept",
+              name: "vm-kept",
+              labels: {
+                crabbox: "true",
+                keep: "true",
+                lease: "cbx_missing",
+                created_at: oldSeconds,
+                expires_at: oldSeconds,
+              },
+            }),
+            testMachine({
+              provider: "azure",
+              cloudID: "vm-tag-only",
+              region: "westus2",
+              name: "vm-tag-only",
+              labels: {
+                crabbox: "true",
+                lease: "cbx_missing",
+                created_at: oldSeconds,
+                expires_at: oldSeconds,
+              },
+            }),
+            testMachine({
+              provider: "azure",
+              cloudID: "vm-provisioning",
+              name: "vm-provisioning",
+              labels: {
+                crabbox: "true",
+                lease: "cbx_000000000777",
+                created_at: oldSeconds,
+                expires_at: oldSeconds,
+              },
+            }),
+            testMachine({
+              provider: "azure",
+              cloudID: "vm-cleaning",
+              name: "vm-cleaning",
+              labels: {
+                crabbox: "true",
+                lease: "cbx_000000000778",
+                created_at: oldSeconds,
+                expires_at: oldSeconds,
+              },
+            }),
+            testMachine({
+              provider: "azure",
+              cloudID: "vm-retaining",
+              name: "vm-retaining",
+              labels: {
+                crabbox: "true",
+                lease: "cbx_000000000779",
+                created_at: oldSeconds,
+                expires_at: oldSeconds,
+              },
+            }),
+            testMachine({
+              provider: "azure",
+              cloudID: "vm-retained",
+              name: "vm-retained",
+              labels: {
+                crabbox: "true",
+                lease: "cbx_000000000780",
+                created_at: oldSeconds,
+                expires_at: oldSeconds,
+              },
+            }),
+          ],
+          onReleaseLease(lease) {
+            ownedDeleted.push(structuredClone(lease));
           },
-          async (id) => {
-            rawDeleted.push(id);
-          },
-        ),
+        }),
       },
       {
         AZURE_TENANT_ID: "tenant",
@@ -11349,7 +11414,6 @@ describe("fleet lease identity and idle", () => {
       terminated: number;
       candidates: Array<Record<string, unknown>>;
     }>("azure-orphan-sweep:last");
-    expect(rawDeleted).toEqual([]);
     expect(ownedDeleted).toEqual([
       expect.objectContaining({
         id: "cbx_000000000776",
@@ -11383,7 +11447,7 @@ describe("fleet lease identity and idle", () => {
     ]);
   });
 
-  it("keeps Azure orphan sweep candidates when exact owned deletion rejects them", async () => {
+  it("keeps Azure candidates report-only when provider labels do not match the lease", async () => {
     const storage = new MemoryStorage();
     const rawDeleted: string[] = [];
     const ownedDeleted: LeaseRecord[] = [];
@@ -11425,11 +11489,8 @@ describe("fleet lease identity and idle", () => {
                 },
               }),
             ],
-            onDeleteOwnedServer(lease) {
+            onReleaseLease(lease) {
               ownedDeleted.push(structuredClone(lease));
-              throw new Error(
-                `refusing to delete Azure VM vm-replaced: ownership does not match lease ${lease.id}`,
-              );
             },
           },
           async (id) => {
@@ -11451,9 +11512,7 @@ describe("fleet lease identity and idle", () => {
     await fleet.alarm();
 
     expect(rawDeleted).toEqual([]);
-    expect(ownedDeleted).toEqual([
-      expect.objectContaining({ id: "cbx_000000000776", cloudID: "vm-replaced" }),
-    ]);
+    expect(ownedDeleted).toEqual([]);
     expect(storage.value("azure-orphan-sweep:last")).toMatchObject({
       mode: "delete",
       terminated: 0,
@@ -11461,12 +11520,57 @@ describe("fleet lease identity and idle", () => {
         expect.objectContaining({
           cloudID: "vm-replaced",
           leaseID: "cbx_replacement",
-          ownership: "coordinator-lease",
-          ownershipLeaseID: "cbx_000000000776",
-          action: "terminate_failed",
-          error: expect.stringContaining("ownership does not match lease cbx_000000000776"),
+          ownership: "provider-tags-only",
+          action: "reported",
         }),
       ],
+    });
+  });
+
+  it("preserves Azure quarantine state when inventory fails", async () => {
+    const storage = new MemoryStorage();
+    const quarantine = {
+      fingerprint: "existing",
+      firstObservedAt: "2026-07-31T10:00:00.000Z",
+      lastObservedAt: "2026-07-31T10:00:00.000Z",
+      eligibleAt: "2026-07-31T10:15:00.000Z",
+      observations: 1,
+    };
+    storage.seed("provider-reconciliation:azure:eastus", {
+      provider: "azure",
+      scope: "eastus",
+      quarantines: { "vm-orphan": quarantine },
+      updatedAt: "2026-07-31T10:00:00.000Z",
+    });
+    const fleet = testFleet(
+      storage,
+      {
+        azure: fakeProvider(undefined, {
+          provider: "azure",
+          async onList() {
+            throw new Error("inventory unavailable");
+          },
+        }),
+      },
+      {
+        AZURE_TENANT_ID: "tenant",
+        AZURE_CLIENT_ID: "client",
+        AZURE_CLIENT_SECRET: "secret",
+        AZURE_SUBSCRIPTION_ID: "subscription",
+        CRABBOX_AZURE_LOCATION: "eastus",
+        CRABBOX_AZURE_ORPHAN_SWEEP_DELETE: "1",
+      },
+    );
+
+    await fleet.alarm();
+
+    expect(storage.value("provider-reconciliation:azure:eastus")).toMatchObject({
+      quarantines: { "vm-orphan": quarantine },
+    });
+    expect(storage.value("azure-orphan-sweep:last")).toMatchObject({
+      scanned: 0,
+      terminated: 0,
+      errors: [{ region: "eastus", message: "inventory unavailable" }],
     });
   });
 
@@ -29449,6 +29553,29 @@ function testMachine(overrides: Partial<ProviderMachine>): ProviderMachine {
     labels: { crabbox: "true" },
     ...overrides,
   };
+}
+
+function seedProviderReconciliationEligible(
+  storage: MemoryStorage,
+  provider: "aws" | "azure",
+  scope: string,
+  machine: ProviderMachine,
+): void {
+  const observedAt = new Date(Date.now() - 60_000).toISOString();
+  storage.seed(`provider-reconciliation:${provider}:${encodeURIComponent(scope)}`, {
+    provider,
+    scope,
+    quarantines: {
+      [machine.cloudID]: {
+        fingerprint: providerReconciliationFingerprint(provider, scope, machine),
+        firstObservedAt: observedAt,
+        lastObservedAt: observedAt,
+        eligibleAt: observedAt,
+        observations: 1,
+      },
+    },
+    updatedAt: observedAt,
+  });
 }
 
 function ownedTestMachine(provider: "aws" | "azure" | "gcp", cloudID: string): ProviderMachine {
