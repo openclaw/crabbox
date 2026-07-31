@@ -267,6 +267,7 @@ export function portalAdmin(
         ${adminMetric("users", String(users.length))}
         ${adminMetric("checked", shortTime(generatedAt))}
       </section>
+      ${providerSplitStrip(providers)}
       ${body}
     </main>`,
   );
@@ -594,7 +595,7 @@ export function portalLeaseDetail(
       <section class="panel table-panel">
         <div class="section-head">
           <h2>recent runs</h2>
-          <span>${runs.length}</span>
+          <span class="runs-trend">${runDurationDelta(runs)}${runDurationBars(runs)}<span>${runs.length}</span></span>
         </div>
         <table class="run-table" data-portal-table data-page-size="8" data-search-placeholder="search runs" data-filter-buttons="succeeded:succeeded,failed:failed,running:running,all:all">
           <thead>
@@ -3161,6 +3162,78 @@ function leaseStateBadge(state: string): string {
   return badgeClass(tone);
 }
 
+// Carapace chart contract (vendored data.css): the consumer precomputes SVG
+// geometry, the component owns size and color. Quiet columns, accent on the
+// newest period; runs arrive newest-first, so the rightmost bar is runs[0].
+function runDurationBars(runs: RunRecord[]): string {
+  const durations = runs.slice(0, 12).map((run) => Math.max(0, run.commandMs ?? 0));
+  if (durations.filter((value) => value > 0).length < 2) {
+    return "";
+  }
+  const chronological = durations.toReversed();
+  const max = Math.max(...chronological);
+  const height = 20;
+  const slot = 100 / chronological.length;
+  const barWidth = Math.max(1.5, slot - 1.5);
+  const rects = chronological
+    .map((value, index) => {
+      const barHeight = max > 0 ? Math.max(1.5, (value / max) * (height - 2)) : 1.5;
+      const current = index === chronological.length - 1 ? " oc-bars-current" : "";
+      return `<rect class="oc-bars-bar${current}" x="${(index * slot).toFixed(1)}" y="${(height - barHeight).toFixed(1)}" width="${barWidth.toFixed(1)}" height="${barHeight.toFixed(1)}"/>`;
+    })
+    .join("");
+  return `<svg class="oc-bars" viewBox="0 0 100 ${height}" preserveAspectRatio="none" aria-hidden="true">${rects}</svg>`;
+}
+
+// Duration direction is a genuine judgment (slower is worse), so the delta
+// carries an explicit data-tone instead of the neutral direction-only tint.
+function runDurationDelta(runs: RunRecord[]): string {
+  const latest = runs[0]?.commandMs;
+  const previous = runs[1]?.commandMs;
+  if (!latest || !previous) {
+    return "";
+  }
+  const pct = ((latest - previous) / previous) * 100;
+  if (Math.abs(pct) < 1) {
+    return "";
+  }
+  const tone = pct > 0 ? "negative" : "positive";
+  const arrow = pct > 0 ? "&#9650;" : "&#9660;";
+  return `<span class="oc-delta" data-tone="${tone}" title="latest run duration vs previous"><span class="oc-delta-arrow">${arrow}</span>${Math.abs(pct).toFixed(0)}%</span>`;
+}
+
+// Composition of active leases by provider. Providers are identity series,
+// not statuses: segment roles rotate through the neutral chart roles.
+function providerSplitStrip(providers: PortalAdminProviderStatus[]): string {
+  const shares = providers
+    .filter((provider) => provider.activeLeases > 0)
+    .map((provider) => ({ id: String(provider.provider), count: provider.activeLeases }));
+  const total = shares.reduce((sum, share) => sum + share.count, 0);
+  if (total === 0 || shares.length < 2) {
+    return "";
+  }
+  const roles = ["", " oc-split-secondary", " oc-split-muted"];
+  let x = 0;
+  const segments = shares
+    .map((share, index) => {
+      const width = (share.count / total) * 100;
+      const rect = `<rect class="oc-split-segment${roles[index % roles.length]}" x="${x.toFixed(2)}" y="0" width="${Math.max(0.6, width - 0.4).toFixed(2)}" height="8"/>`;
+      x += width;
+      return rect;
+    })
+    .join("");
+  const legend = shares
+    .map(
+      (share, index) =>
+        `<li><span class="oc-split-key${roles[index % roles.length]}"></span>${escapeHTML(share.id)} ${share.count}</li>`,
+    )
+    .join("");
+  return `<section class="admin-split">
+    <svg class="oc-split" viewBox="0 0 100 8" preserveAspectRatio="none" aria-hidden="true">${segments}</svg>
+    <ul class="oc-split-legend">${legend}</ul>
+  </section>`;
+}
+
 function runnerStatusTone(status: string): string {
   if (status === "ready" || status === "running") {
     return "ok";
@@ -3484,6 +3557,9 @@ function html(
     .access-cell { display:flex; align-items:center; gap:5px; min-width:0; }
     .disabled-cell { color:var(--subtle); font-size:12px; }
     .state-stack { display:flex; align-items:center; gap:4px; flex-wrap:wrap; }
+    .runs-trend { display:flex; align-items:center; gap:10px; color:var(--muted); }
+    .runs-trend .oc-bars { width:96px; height:18px; }
+    .admin-split { display:grid; gap:7px; padding:9px 10px; border:1px solid var(--line); border-radius:8px; background:var(--panel); }
     .action-pill { max-width:100%; overflow:hidden; text-overflow:ellipsis; }
     .actions-stack { display:grid; gap:2px; min-width:0; }
     .actions-stack small { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); font-size:11px; }

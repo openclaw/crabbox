@@ -2,7 +2,8 @@
  * Carapace core bundle (vendored)
  * Source: https://github.com/openclaw/carapace @ v0.6.1 (3a8bcfbc7f0563f501626d37245f31efc0d7be9f)
  * Files: styles/tokens.css, styles/themes.css, styles/typography.css,
- *        styles/themes/product.css, styles/components.css, styles/candidate/feedback.css
+ *        styles/themes/product.css, styles/components.css,
+ *        styles/candidate/feedback.css, styles/candidate/data.css
  * Regenerate: see VENDORED.md in this directory.
  */
 :root {
@@ -1056,4 +1057,626 @@ html[data-theme-resolved="light"] .oc-action-secondary:hover {
 
 .oc-tooltip[data-suppressed] .oc-tooltip-content {
   opacity: 0;
+}
+/*
+ * Opt-in candidate data components. Import explicitly after the canonical
+ * tokens, themes, product theme, and typography entry points.
+ */
+
+.oc-table-wrap {
+  box-sizing: border-box;
+  width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--oc-border-subtle);
+  border-radius: var(--oc-radius-surface);
+  overscroll-behavior-inline: contain;
+  scrollbar-gutter: stable;
+}
+
+.oc-table-wrap:focus-visible {
+  outline: 2px solid var(--oc-focus-ring);
+  outline-offset: 2px;
+}
+
+.oc-table {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 36rem;
+  border-collapse: collapse;
+  background: var(--oc-surface-card);
+  color: var(--oc-text-secondary);
+  font-size: var(--oc-font-size-sm);
+}
+
+.oc-table :is(th, td) {
+  padding: var(--oc-space-3) var(--oc-space-4);
+  border-bottom: 1px solid var(--oc-border-subtle);
+  text-align: left;
+}
+
+.oc-table th {
+  color: var(--oc-text-muted);
+  font-family: var(--oc-font-mono);
+  font-size: var(--oc-font-size-xs);
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.oc-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.oc-table-interactive tbody tr:is(:hover, :focus-within) {
+  background: var(--oc-surface-interactive);
+}
+
+.oc-table td:first-child {
+  color: var(--oc-text-primary);
+  font-weight: 650;
+}
+
+.oc-resource-list {
+  box-sizing: border-box;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--oc-border-subtle);
+  border-radius: var(--oc-radius-surface);
+  background: var(--oc-surface-card);
+  list-style: none;
+}
+
+.oc-resource-list-item {
+  margin: 0;
+}
+
+.oc-resource-list-item + .oc-resource-list-item {
+  border-top: 1px solid var(--oc-border-subtle);
+}
+
+.oc-resource-list-link {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-areas: "content meta arrow";
+  align-items: center;
+  gap: var(--oc-space-4);
+  padding: var(--oc-space-4) var(--oc-space-5);
+  color: inherit;
+  text-decoration: none;
+  touch-action: manipulation;
+}
+
+.oc-resource-list-link:hover {
+  background: var(--oc-surface-interactive);
+}
+
+.oc-resource-list-link:focus-visible {
+  position: relative;
+  outline: 2px solid var(--oc-focus-ring);
+  outline-offset: -2px;
+}
+
+.oc-resource-list-content {
+  display: grid;
+  grid-area: content;
+  gap: var(--oc-space-1);
+  min-width: 0;
+}
+
+.oc-resource-list-title {
+  color: var(--oc-text-primary);
+  font-size: var(--oc-font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.oc-resource-list-description,
+.oc-resource-list-meta,
+.oc-resource-list-arrow {
+  color: var(--oc-text-muted);
+  font-size: var(--oc-font-size-sm);
+}
+
+.oc-resource-list-description {
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.oc-resource-list-meta {
+  grid-area: meta;
+}
+
+.oc-resource-list-arrow {
+  grid-area: arrow;
+  transition: transform var(--oc-duration-fast) var(--oc-ease-out);
+}
+
+.oc-resource-list-link:is(:hover, :focus-visible) .oc-resource-list-arrow {
+  color: var(--oc-text-primary);
+  transform: translateX(var(--oc-space-1));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .oc-resource-list-arrow {
+    transition: none;
+  }
+
+  .oc-resource-list-link:is(:hover, :focus-visible) .oc-resource-list-arrow {
+    transform: none;
+  }
+}
+
+@media (max-width: 42rem) {
+  .oc-resource-list-link {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "content arrow"
+      "meta arrow";
+    gap: var(--oc-space-2) var(--oc-space-3);
+  }
+}
+
+/* Table shell: toolbar, table, and footer share one bordered surface so
+   collection chrome reads as a single datatable instead of floating
+   strips. The toolbar swaps to the bulk bar on selection without moving
+   the table. */
+.oc-table-shell {
+  overflow: hidden;
+  border: 1px solid var(--oc-border-subtle);
+  border-radius: var(--oc-radius-surface);
+  background: var(--oc-bg-surface);
+}
+
+.oc-table-shell .oc-table-wrap {
+  border: 0;
+  border-radius: 0;
+}
+
+.oc-table-toolbar {
+  display: flex;
+  min-height: 3rem;
+  align-items: center;
+  gap: var(--oc-space-2);
+  padding: var(--oc-space-1) var(--oc-space-3);
+  border-bottom: 1px solid var(--oc-border-subtle);
+}
+
+.oc-table-toolbar .oc-search-field {
+  flex: 1;
+  max-width: 20rem;
+}
+
+.oc-table-bulk-bar {
+  background: var(--oc-surface-accent-soft);
+  color: var(--oc-text-primary);
+  font-size: var(--oc-font-size-xs);
+}
+
+.oc-table-bulk-count {
+  font-weight: 600;
+}
+
+.oc-table-bulk-actions {
+  display: flex;
+  margin-left: auto;
+  gap: var(--oc-space-2);
+}
+
+/* Sortable headers are real buttons; the indicator reserves space in both
+   states so toggling sort direction never shifts the column. */
+.oc-table-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--oc-space-1);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+}
+
+.oc-table-sort:focus-visible {
+  border-radius: var(--oc-radius-inset);
+  outline: 2px solid var(--oc-focus-ring);
+  outline-offset: 2px;
+}
+
+.oc-table-sort-icon {
+  display: inline-grid;
+  width: 0.875rem;
+  height: 0.875rem;
+  place-items: center;
+  color: var(--oc-text-muted);
+}
+
+.oc-table-sort[aria-sort="ascending"] .oc-table-sort-icon,
+.oc-table-sort[aria-sort="descending"] .oc-table-sort-icon,
+th[aria-sort] .oc-table-sort-icon {
+  color: var(--oc-text-primary);
+}
+
+.oc-table-empty-cell {
+  padding: var(--oc-space-6) var(--oc-space-4);
+  text-align: center;
+}
+
+.oc-table-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--oc-space-1) var(--oc-space-3);
+  border-top: 1px solid var(--oc-border-subtle);
+  color: var(--oc-text-muted);
+  font-size: var(--oc-font-size-xs);
+}
+
+/* Code block: a shared read-only code surface with an identifying header
+   and copy affordance. Consumers own highlighting; the block only styles
+   structure, scrolling, and the header strip. */
+.oc-code-block {
+  overflow: hidden;
+  border: 1px solid var(--oc-border-subtle);
+  border-radius: var(--oc-radius-surface);
+  background: var(--oc-bg-recessed);
+}
+
+.oc-code-block-header {
+  display: flex;
+  align-items: center;
+  gap: var(--oc-space-2);
+  padding: var(--oc-space-1) var(--oc-space-2) var(--oc-space-1) var(--oc-space-3);
+  border-bottom: 1px solid var(--oc-border-subtle);
+  background: var(--oc-bg-surface);
+  color: var(--oc-text-muted);
+  font-family: var(--oc-font-mono);
+  font-size: var(--oc-font-size-xs);
+}
+
+.oc-code-block pre {
+  overflow-x: auto;
+  margin: 0;
+  padding: var(--oc-space-3);
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--oc-text-primary);
+  font-family: var(--oc-font-mono);
+  font-size: var(--oc-font-size-xs);
+  line-height: 1.7;
+  tab-size: 2;
+}
+
+.oc-code-block pre:focus-visible {
+  outline: 2px solid var(--oc-focus-ring);
+  outline-offset: -2px;
+}
+
+.oc-code-block-copy {
+  display: inline-grid;
+  width: 1.5rem;
+  height: 1.5rem;
+  margin-left: auto;
+  border: 0;
+  border-radius: var(--oc-radius-inset);
+  background: none;
+  color: var(--oc-text-muted);
+  cursor: pointer;
+  place-items: center;
+}
+
+.oc-code-block-copy:hover {
+  background: var(--oc-surface-interactive);
+  color: var(--oc-text-primary);
+}
+
+.oc-code-block-copy:focus-visible {
+  outline: 2px solid var(--oc-focus-ring);
+  outline-offset: 1px;
+}
+
+.oc-code-block-copy [data-lucide],
+.oc-code-block-copy svg {
+  width: 0.875rem;
+  height: 0.875rem;
+}
+
+.oc-code-block code {
+  font-family: inherit;
+}
+
+@media (forced-colors: active) {
+  .oc-table-bulk-bar,
+  .oc-code-block {
+    border-color: CanvasText;
+  }
+}
+
+/* Expandable rows: a chevron cell toggles a full-width detail row. */
+.oc-table-expander {
+  width: 2rem;
+}
+
+.oc-table-expand {
+  display: inline-grid;
+  width: 1.5rem;
+  height: 1.5rem;
+  border: 0;
+  border-radius: var(--oc-radius-inset);
+  background: none;
+  color: var(--oc-text-muted);
+  cursor: pointer;
+  place-items: center;
+}
+
+.oc-table-expand:hover {
+  background: var(--oc-surface-interactive);
+  color: var(--oc-text-primary);
+}
+
+.oc-table-expand:focus-visible {
+  outline: 2px solid var(--oc-focus-ring);
+  outline-offset: 1px;
+}
+
+.oc-table-expand [data-lucide],
+.oc-table-expand svg {
+  width: 0.875rem;
+  height: 0.875rem;
+  transition: rotate var(--oc-duration-fast, 120ms) ease;
+}
+
+.oc-table-expand[aria-expanded="true"] [data-lucide],
+.oc-table-expand[aria-expanded="true"] svg {
+  rotate: 90deg;
+}
+
+.oc-table-expansion td {
+  border-top: 0;
+  background: var(--oc-bg-recessed);
+}
+
+/* Active filter chips live inline in the toolbar, between search and
+   actions, wrapping when narrow. */
+.oc-table-filters {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--oc-space-2);
+}
+
+.oc-table-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--oc-space-1);
+  padding: 2px var(--oc-space-1) 2px var(--oc-space-2);
+  border: 1px solid var(--oc-border-subtle);
+  border-radius: var(--oc-radius-round);
+  background: var(--oc-bg-surface);
+  color: var(--oc-text-secondary);
+  font-size: var(--oc-font-size-xs);
+}
+
+.oc-table-filter-chip button {
+  display: inline-grid;
+  width: 1rem;
+  height: 1rem;
+  border: 0;
+  border-radius: var(--oc-radius-round);
+  background: none;
+  color: var(--oc-text-muted);
+  cursor: pointer;
+  place-items: center;
+}
+
+.oc-table-filter-chip button:hover {
+  background: var(--oc-surface-interactive);
+  color: var(--oc-text-primary);
+}
+
+.oc-table-filter-chip [data-lucide],
+.oc-table-filter-chip svg {
+  width: 0.625rem;
+  height: 0.625rem;
+}
+
+.oc-table-filter-add {
+  border: 0;
+  background: none;
+  color: var(--oc-text-link);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--oc-font-size-xs);
+}
+/* Sparkline: a stepped micro-trend beside a metric. The consumer computes the
+   series and emits the stepped path at build time; the component owns size,
+   stroke, and tone. Crisp segments, not splines: trend marks stay siblings of
+   the pixel identity rather than imports from a charting kit. */
+.oc-sparkline {
+  display: block;
+  width: 100%;
+  max-width: 8.5rem;
+  height: 1.5rem;
+}
+
+.oc-sparkline-line {
+  fill: none;
+  stroke: var(--oc-text-muted);
+  stroke-width: 1.5;
+  stroke-linecap: butt;
+  stroke-linejoin: miter;
+  /* preserveAspectRatio="none" stretches the viewBox; keep the stroke true. */
+  vector-effect: non-scaling-stroke;
+}
+
+.oc-sparkline[data-tone="accent"] .oc-sparkline-line {
+  stroke: var(--oc-accent-primary);
+}
+
+.oc-sparkline-fill {
+  fill: color-mix(in srgb, var(--oc-accent-primary) 12%, transparent);
+  stroke: none;
+}
+
+.oc-sparkline-endpoint {
+  fill: var(--oc-accent-primary);
+  stroke: none;
+}
+
+/* Delta: period-over-period change beside a metric. Neutral by default --
+   activity direction is not a value judgment; reserve the status tones for
+   metrics with a genuinely good or bad direction. */
+.oc-delta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  color: var(--oc-text-muted);
+  font-size: var(--oc-font-size-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.oc-delta-arrow {
+  font-size: 0.625rem;
+  line-height: 1;
+}
+
+.oc-delta[data-tone="positive"] {
+  color: var(--oc-status-success-fg);
+}
+
+.oc-delta[data-tone="negative"] {
+  color: var(--oc-status-error-fg);
+}
+
+/* Direction tints the arrow only: a scannable up/down cue without painting
+   the whole delta as a judgment. An explicit data-tone still wins. */
+.oc-delta:not([data-tone])[data-direction="up"] .oc-delta-arrow {
+  color: var(--oc-status-success-fg);
+}
+
+.oc-delta:not([data-tone])[data-direction="down"] .oc-delta-arrow {
+  color: var(--oc-status-error-fg);
+}
+
+/* Band-size sparkline for datelines and section headers: same stepped
+   geometry, full width, taller stroke room. */
+.oc-sparkline[data-size="lg"] {
+  max-width: none;
+  height: 3rem;
+}
+
+/* Mini column chart: one precomputed rect per period, same contract as
+   the sparkline -- the consumer computes geometry, the component owns
+   color. Columns stay quiet; only the newest period carries the accent. */
+.oc-bars {
+  display: block;
+  width: 100%;
+  max-width: 8.5rem;
+  height: 1.5rem;
+}
+
+.oc-bars-bar {
+  fill: var(--oc-border-strong);
+}
+
+.oc-bars-current {
+  fill: var(--oc-accent-primary);
+}
+
+/* Composition bar: segments share one row and sum to the viewBox width.
+   Roles follow the chart color guidance -- accents for neutral series,
+   status colors only when a segment genuinely carries that meaning. */
+.oc-split {
+  display: block;
+  overflow: hidden;
+  width: 100%;
+  height: 0.5rem;
+  border-radius: 2px;
+}
+
+.oc-split-segment {
+  fill: var(--oc-chart-color, var(--oc-accent-primary));
+}
+
+.oc-split-secondary {
+  --oc-chart-color: var(--oc-accent-secondary);
+}
+
+.oc-split-success {
+  --oc-chart-color: var(--oc-status-success-fg);
+}
+
+.oc-split-warning {
+  --oc-chart-color: var(--oc-status-warning-fg);
+}
+
+.oc-split-error {
+  --oc-chart-color: var(--oc-status-error-fg);
+}
+
+.oc-split-muted {
+  --oc-chart-color: var(--oc-border-strong);
+}
+
+.oc-split-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--oc-space-1) var(--oc-space-3);
+  margin: 0;
+  padding: 0;
+  color: var(--oc-text-muted);
+  font-size: var(--oc-font-size-xs);
+  list-style: none;
+}
+
+.oc-split-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--oc-space-1);
+}
+
+.oc-split-key {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 2px;
+  background: var(--oc-chart-color, var(--oc-accent-primary));
+}
+
+/* Hover readout shell for sparkline/bars bands. The cursor and tip are
+   injected by the optional charts.js module; the CSS ships so consumers
+   opting in get the identical readout everywhere. */
+.oc-chart-hover {
+  position: relative;
+  display: block;
+}
+
+.oc-chart-tip {
+  position: absolute;
+  top: -6px;
+  z-index: 2;
+  padding: var(--oc-space-1) var(--oc-space-2);
+  border: 1px solid var(--oc-border-subtle);
+  border-radius: var(--oc-radius-control);
+  background: var(--oc-bg-elevated);
+  box-shadow: var(--oc-shadow-sm, 0 2px 8px rgb(0 0 0 / 0.2));
+  color: var(--oc-text-primary);
+  font-family: var(--oc-font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+  pointer-events: none;
+  transform: translate(-50%, -100%);
+}
+
+.oc-chart-cursor {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--oc-border-strong);
+  pointer-events: none;
 }

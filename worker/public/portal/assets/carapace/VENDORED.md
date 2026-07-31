@@ -13,6 +13,7 @@ Commit: `3a8bcfbc7f0563f501626d37245f31efc0d7be9f`
   4. `styles/themes/product.css`
   5. `styles/components.css` (oc-action buttons, oc-card, oc-segmented)
   6. `styles/candidate/feedback.css` (oc-badge, oc-banner, oc-empty, oc-loader)
+  7. `styles/candidate/data.css` (oc-table, oc-sparkline, oc-bars, oc-delta, oc-split)
 
 ## Regenerating
 
@@ -25,7 +26,8 @@ From a carapace checkout at the pinned tag:
   git show vX.Y.Z:styles/typography.css;
   git show vX.Y.Z:styles/themes/product.css;
   git show vX.Y.Z:styles/components.css;
-  git show vX.Y.Z:styles/candidate/feedback.css; } > carapace-core.css
+  git show vX.Y.Z:styles/candidate/feedback.css;
+  git show vX.Y.Z:styles/candidate/data.css; } > carapace-core.css
 ```
 
 Update the tag/commit above and in the file header when upgrading. Upgrades
