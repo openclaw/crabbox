@@ -323,6 +323,21 @@ func TestLoadBackendWrapsCoordinatorOnlyForSupportedSSHProviders(t *testing.T) {
 		t.Fatalf("backend=%T, want coordinatorLeaseBackend", backend)
 	}
 
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("DAYTONA_API_KEY", "")
+	t.Setenv("DAYTONA_JWT_TOKEN", "")
+	t.Setenv("CRABBOX_DAYTONA_API_KEY", "")
+	t.Setenv("CRABBOX_DAYTONA_JWT_TOKEN", "")
+	cfg.Provider = "daytona"
+	backend, err = loadBackend(cfg, testRuntimeWithRunner(&recordingCommandRunner{}))
+	if err != nil {
+		t.Fatalf("load Daytona coordinator backend without client Daytona auth: %v", err)
+	}
+	if _, ok := backend.(*coordinatorLeaseBackend); !ok {
+		t.Fatalf("backend=%T, want coordinatorLeaseBackend", backend)
+	}
+
 	cfg.Provider = "ssh"
 	backend, err = loadBackend(cfg, testRuntimeWithRunner(&recordingCommandRunner{}))
 	if err != nil {

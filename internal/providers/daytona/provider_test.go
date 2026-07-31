@@ -16,4 +16,18 @@ func TestProviderSupportsCoordinator(t *testing.T) {
 			t.Fatalf("features=%v missing %s", spec.Features, feature)
 		}
 	}
+	for _, unsupported := range []core.Feature{
+		core.FeatureDesktop,
+		core.FeatureBrowser,
+		core.FeatureCode,
+		core.FeatureTailscale,
+		core.FeatureCheckpoint,
+		core.FeatureFork,
+		core.FeatureRestore,
+		core.FeatureSnapshot,
+	} {
+		if spec.Features.Has(unsupported) {
+			t.Fatalf("features=%v unexpectedly includes %s", spec.Features, unsupported)
+		}
+	}
 }

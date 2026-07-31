@@ -650,7 +650,21 @@ func TestDoctorChecksProviderReadinessForCoordinatorSupportedDaytona(t *testing.
 			_ = json.NewEncoder(w).Encode(CoordinatorWhoami{Auth: "token", Owner: "alice@example.test", Org: "example-org"})
 		case "/v1/providers/daytona/readiness":
 			readinessCalled = true
-			_ = json.NewEncoder(w).Encode(CoordinatorProviderReadiness{Provider: "daytona", Configured: true})
+			_ = json.NewEncoder(w).Encode(CoordinatorProviderReadiness{
+				Provider:   "daytona",
+				Configured: true,
+				Checks: []DoctorCheck{{
+					Status:  "ok",
+					Check:   "daytona-fallback",
+					Message: "auth=ready control_plane=ready inventory=ready leases=0 mutation=false",
+					Details: map[string]string{
+						"client_auth":   "crabbox",
+						"control_plane": "coordinator",
+						"data_plane":    "ssh-rsync",
+						"mutation":      "false",
+					},
+				}},
+			})
 		default:
 			http.Error(w, "unexpected "+r.URL.Path, http.StatusBadRequest)
 		}
@@ -669,6 +683,9 @@ func TestDoctorChecksProviderReadinessForCoordinatorSupportedDaytona(t *testing.
 	}
 	if !strings.Contains(stdout.String(), "ok      provider provider=daytona coordinator_secrets=ready") {
 		t.Fatalf("missing Daytona readiness: %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "ok      daytona-fallback auth=ready control_plane=ready inventory=ready leases=0 mutation=false") {
+		t.Fatalf("missing Daytona fallback readiness: %q", stdout.String())
 	}
 }
 

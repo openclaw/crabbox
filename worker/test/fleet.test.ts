@@ -28023,13 +28023,59 @@ describe("fleet identity", () => {
       missing: ["DAYTONA_CRABBOX_KEY"],
     });
 
-    const daytonaFleet = testFleet(undefined, {}, { DAYTONA_CRABBOX_KEY: "live-key" });
+    const daytonaRequests: Request[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const daytonaRequest = input instanceof Request ? input : new Request(input, init);
+        daytonaRequests.push(daytonaRequest.clone());
+        return Response.json({
+          items: [
+            {
+              id: "sandbox-one",
+              name: "crabbox-one",
+              state: "started",
+              labels: { crabbox: "true" },
+            },
+          ],
+          nextCursor: null,
+        });
+      }),
+    );
+    const daytonaFleet = testFleet(
+      undefined,
+      {},
+      {
+        DAYTONA_CRABBOX_KEY: "live-key",
+        CRABBOX_DAYTONA_API_URL: "https://daytona.example/api",
+        CRABBOX_DAYTONA_SNAPSHOT: "crabbox-ready",
+      },
+    );
     const daytona = await daytonaFleet.fetch(request("GET", "/v1/providers/daytona/readiness"));
     await expect(daytona.json()).resolves.toMatchObject({
       provider: "daytona",
       configured: true,
       missing: [],
+      checks: [
+        {
+          status: "ok",
+          check: "daytona-fallback",
+          details: {
+            api: "list",
+            mutation: "false",
+            client_auth: "crabbox",
+            control_plane: "coordinator",
+            data_plane: "ssh-rsync",
+            snapshot: "configured",
+            leases: "1",
+          },
+        },
+      ],
     });
+    expect(daytonaRequests).toHaveLength(1);
+    expect(daytonaRequests[0]?.method).toBe("GET");
+    expect(daytonaRequests[0]?.headers.get("authorization")).toBe("Bearer live-key");
+    expect(new URL(daytonaRequests[0]!.url).pathname).toBe("/api/sandbox");
   });
 
   it("reports AWS capacity quota readiness before a lease is requested", async () => {
@@ -28080,6 +28126,54 @@ describe("fleet identity", () => {
         }),
       ]),
     );
+  });
+
+  it("reports a configured but unusable Daytona fallback without leaking its key", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              error: "unauthorized",
+              workerKey: "daytona-live-secret",
+            }),
+            { status: 401 },
+          ),
+      ),
+    );
+    const fleet = testFleet(
+      undefined,
+      {},
+      {
+        DAYTONA_CRABBOX_KEY: "daytona-live-secret",
+        CRABBOX_DAYTONA_API_URL: "https://daytona.example/api",
+      },
+    );
+
+    const response = await fleet.fetch(request("GET", "/v1/providers/daytona/readiness"));
+    expect(response.status).toBe(200);
+    const body = await response.text();
+    expect(body).not.toContain("daytona-live-secret");
+    expect(JSON.parse(body)).toMatchObject({
+      provider: "daytona",
+      configured: true,
+      missing: [],
+      checks: [
+        {
+          status: "failed",
+          check: "daytona-fallback",
+          details: {
+            api: "list",
+            mutation: "false",
+            client_auth: "crabbox",
+            control_plane: "coordinator",
+            data_plane: "ssh-rsync",
+            snapshot: "account-default",
+          },
+        },
+      ],
+    });
   });
 
   it("rejects path-bearing AWS regions before signed requests", async () => {

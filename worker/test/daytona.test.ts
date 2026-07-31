@@ -169,6 +169,19 @@ describe("daytona coordinator client", () => {
     expect(diagnostic).toContain("route=iad");
   });
 
+  it("treats an already deleted sandbox as successful cleanup", async () => {
+    const client = new DaytonaClient(baseEnv);
+    client.fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(null, { status: 404 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response("unavailable", { status: 503 }));
+
+    await expect(client.deleteServer("sandbox-one")).resolves.toBeUndefined();
+    await expect(client.deleteServer("sandbox-one")).resolves.toBeUndefined();
+    await expect(client.deleteServer("sandbox-one")).rejects.toThrow("http 503");
+  });
+
   it.each(["started", "running", "ready", "active", " Active "])(
     "accepts Daytona ready state %j",
     async (state) => {

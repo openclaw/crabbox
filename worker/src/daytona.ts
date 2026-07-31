@@ -162,7 +162,13 @@ export class DaytonaClient {
   }
 
   async deleteServer(id: string): Promise<void> {
-    await this.request<unknown>("DELETE", `/sandbox/${encodeURIComponent(id)}`);
+    try {
+      await this.request<unknown>("DELETE", `/sandbox/${encodeURIComponent(id)}`);
+    } catch (error) {
+      // A prior cleanup or Daytona-side expiry already reached the desired state.
+      // Treating 404 as success keeps release and rollback retries idempotent.
+      if (!isDaytonaNotFound(error)) throw error;
+    }
   }
 
   async createSSHAccess(

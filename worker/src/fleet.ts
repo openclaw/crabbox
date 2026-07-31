@@ -6735,6 +6735,8 @@ export class FleetCoordinator {
     );
     if (provider === "aws" && readiness.configured && !this.testProviders.aws) {
       readiness.checks = await this.awsProviderCapacityChecks(url.searchParams);
+    } else if (provider === "daytona" && readiness.configured && !this.testProviders.daytona) {
+      readiness.checks = await new DaytonaProvider(this.env).readinessChecks();
     }
     return json(readiness);
   }
@@ -20841,6 +20843,37 @@ export class DaytonaProvider implements CloudProvider {
 
   listCrabboxServers(): Promise<ProviderMachine[]> {
     return this.client.listCrabboxServers();
+  }
+
+  async readinessChecks(): Promise<ProviderReadinessCheck[]> {
+    const details = {
+      api: "list",
+      mutation: "false",
+      client_auth: "crabbox",
+      control_plane: "coordinator",
+      data_plane: "ssh-rsync",
+      snapshot: this.env.CRABBOX_DAYTONA_SNAPSHOT?.trim() ? "configured" : "account-default",
+    };
+    try {
+      const servers = await this.client.listCrabboxServers();
+      return [
+        {
+          status: "ok",
+          check: "daytona-fallback",
+          message: `auth=ready control_plane=ready inventory=ready leases=${servers.length} mutation=false`,
+          details: { ...details, leases: String(servers.length) },
+        },
+      ];
+    } catch (error) {
+      return [
+        {
+          status: "failed",
+          check: "daytona-fallback",
+          message: `auth_or_control_plane=failed mutation=false ${coordinatorErrorMessage(this.env, error)}`,
+          details,
+        },
+      ];
+    }
   }
 
   supportsSSHHostKeyInjection(): boolean {
