@@ -406,6 +406,18 @@ process.exit(1);
 ' "$1"
 }
 
+assert_selected_image() {
+  local log="$1"
+  local image_id="$2"
+  local source="$3"
+  if ! grep -Fq "image selected id=$image_id source=$source" "$log"; then
+    printf 'warmup did not prove image selection id=%s source=%s; log=%s\n' \
+      "$image_id" "$source" "$log" >&2
+    return 1
+  fi
+  printf '%s image selection proved: %s\n' "$source" "$image_id" >&2
+}
+
 warmup() {
   local label="$1"
   local log
@@ -434,6 +446,15 @@ warmup() {
   if [[ -z "$lease" ]]; then
     printf 'warmup did not return a lease id for %s\n' "$label" >&2
     return 1
+  fi
+  if [[ "$label" == "candidate" ]]; then
+    if ! assert_selected_image "$log" "$2" explicit; then
+      return 1
+    fi
+  elif [[ "$label" == "promoted" ]]; then
+    if ! assert_selected_image "$log" "$ami_id" promoted; then
+      return 1
+    fi
   fi
   if [[ "$target" == "windows" ]]; then
     sleep "$windows_warmup_settle_seconds"
@@ -514,6 +535,7 @@ if ! sh -c "$docker_probe"; then
   fi
 fi
 test -d /var/cache/crabbox/pnpm
+test -f /var/lib/crabbox/image-ready
 SHELL
   fi
 }
@@ -556,6 +578,22 @@ run_prep() {
     return
   fi
   run_cmd "$CRABBOX_BIN" run --provider aws --target "$target" --id "$lease" --no-sync --script "$prep_script"
+}
+
+mark_linux_image_ready() {
+  local lease="$1"
+  [[ "$target" == "linux" ]] || return 0
+  run_cmd "$CRABBOX_BIN" run --provider aws --target linux --id "$lease" --no-sync --shell -- \
+    "set -euo pipefail
+command -v git >/dev/null
+command -v curl >/dev/null
+command -v rsync >/dev/null
+command -v jq >/dev/null
+command -v tmux >/dev/null
+test -x /usr/sbin/sshd
+sudo install -d -m 0755 /var/lib/crabbox
+printf 'crabbox-devtools-v1\\n' | sudo tee /var/lib/crabbox/image-ready >/dev/null
+sudo chmod 0644 /var/lib/crabbox/image-ready"
 }
 
 windows_reboot_required() {
@@ -620,6 +658,7 @@ fi
 source_lease="$(warmup source)"
 run_prep "$source_lease"
 reboot_windows_source_if_needed "$source_lease"
+mark_linux_image_ready "$source_lease"
 smoke "$source_lease"
 
 image_env=(env)
@@ -667,4 +706,5 @@ fi
 
 promoted_lease="$(warmup promoted)"
 smoke "$promoted_lease"
+printf 'promoted image selection proved: %s\n' "$ami_id"
 printf 'promoted %s developer image passed: %s\n' "$target" "$ami_id"

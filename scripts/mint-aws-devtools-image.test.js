@@ -33,8 +33,14 @@ case "$1" in
     printf '%s\\n' "$count" >"$count_file"
     case "$count" in
       1) printf '{"leaseId":"cbx_source"}\\n' ;;
-      2) printf '{"leaseId":"cbx_candidate"}\\n' ;;
-      *) printf '{"leaseId":"cbx_promoted"}\\n' ;;
+      2)
+        printf 'image selected id=%s source=explicit kind=aws-ami region=%s promoted_at=-\\n' "\${CRABBOX_AWS_AMI:-}" "\${CRABBOX_AWS_REGION:-eu-west-1}"
+        printf '{"leaseId":"cbx_candidate"}\\n'
+        ;;
+      *)
+        printf 'image selected id=ami-devtools source=promoted kind=aws-ami region=%s promoted_at=2026-07-31T00:00:00Z\\n' "\${CRABBOX_AWS_REGION:-eu-west-1}"
+        printf '{"leaseId":"cbx_promoted"}\\n'
+        ;;
     esac
     if [[ "\${CRABBOX_FAKE_WARMUP_FAIL_AFTER_LEASE:-0}" == "1" ]]; then
       exit 23
@@ -167,6 +173,7 @@ test("AWS devtools mint wrapper runs linux source candidate and promoted proof",
   );
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stdout, /candidate AMI smoke passed: ami-devtools/);
+  assert.match(result.stdout, /promoted image selection proved: ami-devtools/);
   assert.match(result.stdout, /promoted linux developer image passed: ami-devtools/);
   const log = await readFile(fake.log, "utf8");
   assert.match(log, /env CRABBOX_AWS_REGION=us-west-2 AWS_REGION=us-west-2 CRABBOX_AWS_AMI= args warmup --provider aws --target linux/);
@@ -175,6 +182,7 @@ test("AWS devtools mint wrapper runs linux source candidate and promoted proof",
   assert.match(log, /--browser/);
   assert.doesNotMatch(log, /warmup .*--region us-west-2/);
   assert.match(log, /run --provider aws --target linux --id cbx_source --no-sync --script/);
+  assert.match(log, /run --provider aws --target linux --id cbx_source --no-sync --shell -- set -euo pipefail/);
   assert.match(log, /docker image inspect hello-world ubuntu:24\.04 node:24-bookworm/);
   assert.match(log, /env CRABBOX_AWS_REGION=us-west-2 AWS_REGION=us-west-2 CRABBOX_AWS_AMI= args checkpoint create --provider aws --target linux --id cbx_source --name crabbox-linux-devtools-/);
   assert.match(log, /--mode native --strategy image --no-reboot=false --wait --wait-timeout 60m/);
@@ -202,6 +210,27 @@ test("AWS devtools mint wrapper isolates warmup logs from explicit image names",
   for (const file of files) {
     assert.match(file, /^image-mint-shared-devtools-(source|candidate)-/);
   }
+});
+
+test("AWS devtools mint wrapper fails when promoted selection is not proved", async () => {
+  const fake = await setupFakeCrabbox();
+  const text = await readFile(fake.fake, "utf8");
+  await writeFile(
+    fake.fake,
+    text.replace(
+      "image selected id=ami-devtools source=promoted",
+      "image selected id=ami-other source=promoted",
+    ),
+  );
+  const result = await runScript(["--target", "linux", "--run", "--prep-script", fake.linuxPrep], {
+    CRABBOX_BIN: fake.fake,
+    CRABBOX_FAKE_LOG: fake.log,
+  });
+  assert.equal(result.code, 1, result.stderr);
+  assert.match(
+    result.stderr,
+    /warmup did not prove image selection id=ami-devtools source=promoted/,
+  );
 });
 
 test("AWS devtools mint wrapper uses sg for first docker group member", async () => {
@@ -268,7 +297,9 @@ exit 80
 `,
   );
 
-  const generated = (await readFile(smokeScript, "utf8")).replace("test -d /var/cache/crabbox/pnpm", "true");
+  const generated = (await readFile(smokeScript, "utf8"))
+    .replace("test -d /var/cache/crabbox/pnpm", "true")
+    .replace("test -f /var/lib/crabbox/image-ready", "true");
   const smoke = await new Promise((resolve, reject) => {
     const child = spawn("bash", ["-c", generated], {
       cwd: repoRoot,

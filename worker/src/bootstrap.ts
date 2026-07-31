@@ -132,8 +132,19 @@ runcmd:
         n=$((n + 1))
       done
     }
-    retry apt-get update
-    retry apt-get install -y --no-install-recommends openssh-server ca-certificates curl git rsync jq tmux
+    if test -f /var/lib/crabbox/image-ready &&
+      test -x /usr/sbin/sshd &&
+      test -s /etc/ssl/certs/ca-certificates.crt &&
+      command -v curl >/dev/null &&
+      command -v git >/dev/null &&
+      command -v rsync >/dev/null &&
+      command -v jq >/dev/null &&
+      command -v tmux >/dev/null; then
+      echo 'crabbox prebaked base packages ready; skipping apt bootstrap'
+    else
+      retry apt-get update
+      retry apt-get install -y --no-install-recommends openssh-server ca-certificates curl git rsync jq tmux
+    fi
     mkdir -p ${config.workRoot} /var/cache/crabbox/pnpm /var/cache/crabbox/npm
     chown -R ${config.sshUser}:${config.sshUser} ${config.workRoot} /var/cache/crabbox
     install -d /var/lib/crabbox

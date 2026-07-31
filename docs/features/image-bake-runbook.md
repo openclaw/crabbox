@@ -404,8 +404,12 @@ is given, so bakes do not consume the high-pressure beast class. It proves the
 source lease, candidate AMI, and promoted AMI before declaring success unless
 `--no-promote` is set, and writes warmup timing logs under
 `.crabbox/image-mint-<image-name>-*.log.*` with a per-invocation suffix. Each
-warmup prints its exact `log=` path; use those files as the evidence to compare
-before and after each bake.
+warmup prints its exact `log=` path. Candidate proof requires
+`source=explicit`; final proof requires `source=promoted` with the exact AMI ID
+created by the run. The Linux prep also writes the verified
+`/var/lib/crabbox/image-ready` marker that lets later boots skip redundant base
+APT setup. Use the timing logs to compare provider request, network readiness,
+bootstrap, and end-to-end time before and after each bake.
 
 ## macOS images
 

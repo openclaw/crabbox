@@ -30,9 +30,14 @@ Provider-owned image storage is always the source of truth for image bytes:
   Promotions may declare OS, SDK/runtime, browser, WebView2, and desktop
   capabilities. Capability-aware leases select the newest matching AMI from the
   scoped promotion catalog and fail before leasing when no image matches.
-- **Azure / GCP** — managed images and disk snapshots live in the cloud project.
-  `crabbox image create` can capture them and `crabbox image delete` can remove
-  them (`--provider azure|gcp`).
+- **Azure** — managed OS disk snapshots live in the subscription. A native
+  `crabbox checkpoint create` captures the snapshot; `crabbox image promote
+  --provider azure` records it as the default for matching target,
+  architecture, VM size, OS, and location. `crabbox image delete --provider azure`
+  removes Crabbox-owned snapshots.
+- **GCP** — machine images and disk snapshots live in the cloud project.
+  `crabbox image create` can capture them and `crabbox image delete --provider
+  gcp` can remove them.
 - **Hetzner** — snapshots live in the Hetzner project. Crabbox can already boot a
   configured image (via config or `CRABBOX_HETZNER_IMAGE`), but the
   create/promote lifecycle commands are not implemented for Hetzner. Manage
@@ -57,6 +62,12 @@ Bake stable machine capabilities:
   `build-essential`, Python, and common native-addon headers;
 - Docker Engine and supporting plugins where the platform runs headless Docker;
 - empty shared cache directories such as `/var/cache/crabbox/pnpm`.
+
+The bundled Linux developer-image prep writes
+`/var/lib/crabbox/image-ready` only after the stable tool contract is present.
+On later boots Crabbox verifies the marker plus the base binaries and skips the
+otherwise redundant base-package APT transaction. Per-lease users, SSH keys,
+work roots, optional services, and readiness checks still run normally.
 
 Do not bake scenario state:
 
@@ -123,8 +134,9 @@ guard scripts. At a high level, an AWS bake is:
    Add declarations such as `--os-version 26.04 --runtime node=24.2
    --browser --desktop` when future leases must select by baked capabilities.
 
-6. Run a normal brokered lease (no override) plus the relevant QA lane to confirm
-   the promoted image is selected and healthy.
+6. Run a normal brokered lease (no override) plus the relevant QA lane. The CLI
+   prints `image selected id=... source=promoted`; require the exact promoted
+   ID in publication proof.
 7. Keep the previous known-good AMI until the new image has real QA proof.
 
 A successful bake is not just "the browser exists." A useful image measurably
@@ -138,8 +150,9 @@ provider-side artifacts.
 
 - `crabbox image create --id <cbx_id> --name <name> [--wait]` — capture a
   provider image from a lease (`--no-reboot` defaults to true on AWS).
-- `crabbox image promote <ami-id> [--target linux|macos|windows] [--region <r>]`
-  — set the default brokered AWS image; supports `--fast-snapshot-restore` with
+- `crabbox image promote <image-id> [--provider aws|azure] [--target
+  linux|macos|windows] [--region <r>]` — set a scoped brokered AWS AMI or Azure
+  OS disk snapshot default. AWS supports `--fast-snapshot-restore` with
   `--fsr-az <az>` and capability declarations.
 - `crabbox image fsr-status <ami-id|snapshot-id>` — AWS Fast Snapshot Restore
   status.

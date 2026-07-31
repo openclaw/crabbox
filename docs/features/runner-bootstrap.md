@@ -46,6 +46,12 @@ Bootstrap installs only a small base set with `--no-install-recommends`:
 `apt-get` runs are wrapped in a retry loop (8 attempts, increasing backoff) so a
 transient mirror failure does not fail the whole boot.
 
+Images produced by the bundled Linux developer-image workflow carry
+`/var/lib/crabbox/image-ready`. When that marker and every base binary are
+present, bootstrap skips the repeated base-package APT transaction. It still
+applies all per-lease identity, SSH, work-root, optional capability, and
+readiness steps. A marker on an incomplete image does not bypass installation.
+
 ### Readiness: `crabbox-ready`
 
 Bootstrap writes `/usr/local/bin/crabbox-ready` and runs it at the end of boot.

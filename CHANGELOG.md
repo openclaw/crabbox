@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added exact brokered lease image identity and provider startup phase timings, plus Azure OS disk snapshot promotion and automatic scoped selection.
 - Added a project vision that defines Crabbox as a remote execution and evidence layer called by agents, with agent orchestration and model-credential delivery explicitly outside its scope.
 - Added coordinator-owned ready-pool desired capacity with atomic fill claims, provider-neutral compatibility keys, borrow heartbeats, abandoned-borrow quarantine, stale-record pruning, and pool counters.
 - Added reserved `CRABBOX_LEASE_ID`, `CRABBOX_RUN_ID`, and `CRABBOX_SLUG` metadata to every remote command, with Crabbox-owned values taking precedence over forwarded environment variables.
@@ -15,6 +16,7 @@
   fallback readiness probe with truthful control/data-plane diagnostics, and
   made repeated sandbox cleanup idempotent.
 - Quarantined exact-owned AWS and Azure orphan candidates across consecutive successful inventories before deletion, and added bounded provider reconciliation backoff after inventory failures.
+- Made AWS developer-image publication prove the exact promoted AMI was selected, and skip redundant base-package APT bootstrap on verified prebaked Linux images.
 - Bounded device membership revalidation to one GitHub revalidation per token per minute while preserving immediate token revocation, fail-closed errors, and a distinct re-pairing response for expired OAuth grants.
 - Kept ready-pool reconciliation rollout-compatible with older CLIs and coordinators, preserved unexpired in-flight claims across policy changes, and required actual ready capacity for `pool ensure` success.
 

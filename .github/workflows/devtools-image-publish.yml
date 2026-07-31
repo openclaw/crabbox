@@ -197,7 +197,7 @@ jobs:
             if [[ -f "$RUNNER_TEMP/devtools-image-proof/publish.log" ]]; then
               echo
               echo "### Result"
-              grep -E 'candidate AMI smoke passed|promoted (linux|windows) developer image passed|promoted macOS image lifecycle passed' \
+              grep -E 'candidate AMI smoke passed|promoted image selection proved|promoted (linux|windows) developer image passed|promoted macOS image lifecycle passed' \
                 "$RUNNER_TEMP/devtools-image-proof/publish.log" || true
             fi
           } >>"$GITHUB_STEP_SUMMARY"

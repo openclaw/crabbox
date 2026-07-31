@@ -324,6 +324,9 @@ install_docker() {
 
 prepare_fast_boot() {
   install -d -m 1777 /var/cache/crabbox /var/cache/crabbox/pnpm /var/cache/crabbox/npm /var/cache/crabbox/corepack /var/cache/crabbox/docker
+  install -d -m 0755 /var/lib/crabbox
+  printf 'crabbox-devtools-v1\n' >/var/lib/crabbox/image-ready
+  chmod 0644 /var/lib/crabbox/image-ready
   systemctl disable --now apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
   systemctl mask apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
   cloud-init clean --logs --seed 2>/dev/null || true

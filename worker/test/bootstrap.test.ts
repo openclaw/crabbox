@@ -81,6 +81,9 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("package_update: false");
     expect(got).toContain("bash -euxo pipefail <<'BOOT'");
     expect(got).toContain('Acquire::Retries "8";');
+    expect(got).toContain("test -f /var/lib/crabbox/image-ready");
+    expect(got).toContain("test -s /etc/ssl/certs/ca-certificates.crt");
+    expect(got).toContain("crabbox prebaked base packages ready; skipping apt bootstrap");
     expect(got).toContain("retry apt-get update");
     expect(got).toContain(
       "retry apt-get install -y --no-install-recommends openssh-server ca-certificates curl git rsync jq",
