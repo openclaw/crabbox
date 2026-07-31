@@ -11122,11 +11122,16 @@ describe("fleet lease identity and idle", () => {
         }),
       ],
     });
-    expect(
-      storage.value<{ quarantines: Record<string, unknown> }>(
-        "provider-reconciliation:aws:eu-west-1",
-      )?.quarantines,
-    ).toHaveProperty("i-orphan");
+    expect(storage.value("provider-reconciliation:aws:eu-west-1:i-orphan")).toMatchObject({
+      observations: 1,
+    });
+    const storedCandidates = await storage.list({
+      prefix: "provider-reconciliation:aws:eu-west-1:",
+    });
+    expect([...storedCandidates.keys()]).toEqual([
+      "provider-reconciliation:aws:eu-west-1:i-orphan",
+    ]);
+    expect([...storedCandidates.values()][0]).not.toHaveProperty("quarantines");
   });
 
   it("terminates AWS orphan sweep candidates with exact coordinator ownership", async () => {
@@ -11536,12 +11541,7 @@ describe("fleet lease identity and idle", () => {
       eligibleAt: "2026-07-31T10:15:00.000Z",
       observations: 1,
     };
-    storage.seed("provider-reconciliation:azure:eastus", {
-      provider: "azure",
-      scope: "eastus",
-      quarantines: { "vm-orphan": quarantine },
-      updatedAt: "2026-07-31T10:00:00.000Z",
-    });
+    storage.seed("provider-reconciliation:azure:eastus:vm-orphan", quarantine);
     const fleet = testFleet(
       storage,
       {
@@ -11564,13 +11564,47 @@ describe("fleet lease identity and idle", () => {
 
     await fleet.alarm();
 
-    expect(storage.value("provider-reconciliation:azure:eastus")).toMatchObject({
-      quarantines: { "vm-orphan": quarantine },
-    });
+    expect(storage.value("provider-reconciliation:azure:eastus:vm-orphan")).toEqual(quarantine);
     expect(storage.value("azure-orphan-sweep:last")).toMatchObject({
       scanned: 0,
       terminated: 0,
       errors: [{ region: "eastus", message: "inventory unavailable" }],
+    });
+  });
+
+  it("clears Azure quarantine scopes absent from a successful inventory", async () => {
+    const storage = new MemoryStorage();
+    storage.seed("provider-reconciliation:azure:westus2:vm-orphan", {
+      fingerprint: "existing",
+      firstObservedAt: "2026-07-31T10:00:00.000Z",
+      lastObservedAt: "2026-07-31T10:00:00.000Z",
+      eligibleAt: "2026-07-31T10:15:00.000Z",
+      observations: 1,
+    });
+    const fleet = testFleet(
+      storage,
+      {
+        azure: fakeProvider(undefined, {
+          provider: "azure",
+          servers: [],
+        }),
+      },
+      {
+        AZURE_TENANT_ID: "tenant",
+        AZURE_CLIENT_ID: "client",
+        AZURE_CLIENT_SECRET: "secret",
+        AZURE_SUBSCRIPTION_ID: "subscription",
+        CRABBOX_AZURE_LOCATION: "eastus",
+      },
+    );
+
+    await fleet.alarm();
+
+    expect(storage.value("provider-reconciliation:azure:westus2:vm-orphan")).toBeUndefined();
+    expect(storage.value("azure-orphan-sweep:last")).toMatchObject({
+      scanned: 0,
+      terminated: 0,
+      errors: [],
     });
   });
 
@@ -29605,20 +29639,16 @@ function seedProviderReconciliationEligible(
   machine: ProviderMachine,
 ): void {
   const observedAt = new Date(Date.now() - 60_000).toISOString();
-  storage.seed(`provider-reconciliation:${provider}:${encodeURIComponent(scope)}`, {
-    provider,
-    scope,
-    quarantines: {
-      [machine.cloudID]: {
-        fingerprint: providerReconciliationFingerprint(provider, scope, machine),
-        firstObservedAt: observedAt,
-        lastObservedAt: observedAt,
-        eligibleAt: observedAt,
-        observations: 1,
-      },
+  storage.seed(
+    `provider-reconciliation:${provider}:${encodeURIComponent(scope)}:${encodeURIComponent(machine.cloudID)}`,
+    {
+      fingerprint: providerReconciliationFingerprint(provider, scope, machine),
+      firstObservedAt: observedAt,
+      lastObservedAt: observedAt,
+      eligibleAt: observedAt,
+      observations: 1,
     },
-    updatedAt: observedAt,
-  });
+  );
 }
 
 function ownedTestMachine(provider: "aws" | "azure" | "gcp", cloudID: string): ProviderMachine {

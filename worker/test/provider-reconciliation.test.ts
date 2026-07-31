@@ -62,6 +62,20 @@ describe("provider reconciliation", () => {
     );
   });
 
+  it("keeps arbitrary provider metadata out of the persisted fingerprint", () => {
+    const withLargeDiagnosticLabel = {
+      ...machine,
+      labels: {
+        ...machine.labels,
+        provider_diagnostic: "x".repeat(256 * 1024),
+      },
+    };
+
+    expect(providerReconciliationFingerprint("aws", "eu-west-1", withLargeDiagnosticLabel)).toBe(
+      providerReconciliationFingerprint("aws", "eu-west-1", machine),
+    );
+  });
+
   it("requires the same candidate in two inventories after quarantine", () => {
     const first = observeProviderReconciliationCandidate({
       fingerprint: "abc",
