@@ -436,12 +436,17 @@ Before sync, `run` prints a compact context block with run ID, portal/log URLs,
 lease ID, slug, provider, SSH target, remote workdir, and whether the workspace
 is raw or Actions-hydrated.
 
-At the end of every command, `run` prints a one-line timing summary (sync
-duration, command duration, total duration, whether sync was skipped by
-fingerprint, and the remote exit code), followed by run details with provider,
-lease ID, slug, run ID, machine type, repo path, remote workdir, Actions URL
-when present, stop command, and idle timeout. Add `--label <text>` to attach a
-short label to the run details, timing JSON, and coordinator run record.
+For newly created brokered leases, `run` also prints the exact selected image
+ID/source and provider-side request, network-readiness, bootstrap, and total
+startup timings when the provider reports them.
+
+At the end of every command, `run` prints a one-line timing summary (lease,
+bootstrap, sync, command, total, and end-to-end duration; whether sync was
+skipped by fingerprint; and the remote exit code), followed by run details with
+provider, lease ID, slug, run ID, machine type, repo path, remote workdir,
+Actions URL when present, stop command, and idle timeout. Add `--label <text>`
+to attach a short label to the run details, timing JSON, and coordinator run
+record.
 
 When a remote command exits non-zero, `run` prints a compact failure digest
 after the timing summary: the failed phase when phase markers are known, a
@@ -452,11 +457,12 @@ or model/tool/provider limit), retryability when inferable, next commands
 or hidden local shell state.
 
 Use `--timing-json` to emit a final JSON timing record with provider, lease ID,
-slug, run ID, machine type, repo path, remote workdir, sync phases, command
-phases, command duration, total duration, exit code, normalized `runStatus`,
-optional `errorKind`, stop command, artifacts, and Actions run URL when
-available. Failed runs also include `blockedStage` and `retryLikely` when
-classifiable. Commands can emit phase markers on stdout or stderr as
+slug, run ID, machine type, repo path, remote workdir, lease acquisition,
+bootstrap, sync phases, command phases, command duration, command-path total,
+end-to-end duration, exit code, normalized `runStatus`, optional `errorKind`,
+stop command, artifacts, and Actions run URL when available. Failed runs also
+include `blockedStage` and `retryLikely` when classifiable. Commands can emit
+phase markers on stdout or stderr as
 `CRABBOX_PHASE:<name>`; Crabbox records those as `commandPhases` without removing
 the marker line from output. In `blacksmith-testbox` mode, sync is reported as
 delegated in the same schema.

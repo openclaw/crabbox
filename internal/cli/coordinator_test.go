@@ -1872,6 +1872,62 @@ func TestImageFSRStatusAcceptsFlagsAfterImageID(t *testing.T) {
 	}
 }
 
+func TestImagePromoteSupportsAzureSnapshots(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	var gotProvider, gotRegion, gotTarget string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/images/snapshot-devtools/promote" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		gotProvider = r.URL.Query().Get("provider")
+		gotRegion = r.URL.Query().Get("region")
+		gotTarget = r.URL.Query().Get("target")
+		_, _ = w.Write([]byte(`{"image":{"id":"snapshot-devtools","name":"snapshot-devtools","kind":"azure-os-disk-snapshot","state":"succeeded","region":"westeurope","promotedAt":"2026-07-31T00:00:00Z"}}`))
+	}))
+	defer server.Close()
+
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "admin-token")
+	var out bytes.Buffer
+	app := App{Stdout: &out, Stderr: io.Discard}
+	err := app.imagePromote(context.Background(), []string{
+		"--provider", "azure",
+		"--target", "linux",
+		"--region", "westeurope",
+		"snapshot-devtools",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotProvider != "azure" || gotRegion != "westeurope" || gotTarget != "linux" {
+		t.Fatalf("provider=%q region=%q target=%q", gotProvider, gotRegion, gotTarget)
+	}
+	if !strings.Contains(out.String(), "promoted image=snapshot-devtools") {
+		t.Fatalf("output=%q", out.String())
+	}
+
+	err = app.imagePromote(context.Background(), []string{
+		"--provider", "azure",
+		"--fast-snapshot-restore",
+		"snapshot-devtools",
+	})
+	if err == nil || !strings.Contains(err.Error(), "Fast Snapshot Restore is AWS-only") {
+		t.Fatalf("error=%v", err)
+	}
+
+	err = app.imagePromote(context.Background(), []string{
+		"--provider", "azure",
+		"--browser",
+		"snapshot-devtools",
+	})
+	if err == nil || !strings.Contains(err.Error(), "image capability declarations are AWS-only") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
 func TestLeaseStatusRequiresSSHReadiness(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/leases/cbx_123" {

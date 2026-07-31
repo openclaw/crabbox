@@ -1,7 +1,14 @@
 import { requireAWSRegion } from "./aws-region";
 import { normalizeImageRequirements } from "./image-capabilities";
 import { normalizeOSImage, osImageSpec } from "./os-image";
-import type { ImageRequirements, LeaseRequest, Provider, TargetOS, WindowsMode } from "./types";
+import type {
+  ImageRequirements,
+  LeaseImageIdentity,
+  LeaseRequest,
+  Provider,
+  TargetOS,
+  WindowsMode,
+} from "./types";
 
 export const awsMacOSInstanceTypeCandidates = [
   "mac2.metal",
@@ -47,6 +54,7 @@ export interface LeaseConfig {
   hostID: string;
   location: string;
   image: string;
+  selectedImage?: LeaseImageIdentity;
   awsRegion: string;
   awsAMI: string;
   awsUseStockImage?: boolean;
@@ -67,6 +75,7 @@ export interface LeaseConfig {
   awsMacHostID: string;
   azureLocation: string;
   azureImage: string;
+  azureImageExplicit?: boolean;
   azureSnapshot: string;
   azureOSDisk: AzureOSDiskMode;
   gcpProject: string;
@@ -112,6 +121,7 @@ export interface LeaseConfigDefaults {
   azureOSDisk?: string;
   azureImage?: string;
   azureWindowsARM64Image?: string;
+  allowAzurePromotedImage?: boolean;
 }
 
 const maxRequestedPondNameLength = 41;
@@ -143,7 +153,14 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     provider === "azure" && target === "windows" && architecture === "arm64"
       ? defaults.azureWindowsARM64Image
       : undefined;
+  const operatorAzureImage =
+    provider === "azure" && target === "windows" && architecture === "arm64"
+      ? undefined
+      : defaults.azureImage?.trim();
+  const selectedOperatorAzureImage =
+    target === "linux" && osExplicit ? undefined : operatorAzureImage;
   const inputAzureImage = input.azureImage?.trim() || undefined;
+  const azureImageExplicit = Boolean(inputAzureImage || selectedOperatorAzureImage);
   const azureImage =
     inputAzureImage ??
     defaultAzureImage ??
@@ -151,7 +168,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
       ? architecture === "arm64"
         ? (linuxOSImage?.azureArm64Image ?? "")
         : (linuxOSImage?.azureImage ?? "")
-      : "");
+      : (selectedOperatorAzureImage ?? ""));
   if (
     target !== "linux" &&
     !(provider === "aws" && target === "windows") &&
@@ -182,14 +199,8 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
         "brokered provider=azure target=windows architecture=arm64 supports windowsMode=normal only; windowsMode=wsl2 requires nested virtualization, which Azure Cobalt ARM64 VM sizes do not support",
       );
     }
-    if (
-      provider === "azure" &&
-      target === "windows" &&
-      !azureWindowsARM64HasExplicitImage(azureImage)
-    ) {
-      throw new Error(
-        "brokered provider=azure target=windows architecture=arm64 requires azureImage with an ARM64 Windows image; the built-in Windows default is x64",
-      );
+    if (!defaults.allowAzurePromotedImage) {
+      assertAzureWindowsARM64Image({ provider, target, architecture, azureImage });
     }
   }
   if (provider === "daytona" && architectureExplicit) {
@@ -348,6 +359,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     awsMacHostID: input.awsMacHostID ?? "",
     azureLocation: input.azureLocation ?? "",
     azureImage,
+    azureImageExplicit,
     azureSnapshot,
     azureOSDisk,
     gcpProject: input.gcpProject ?? "",
@@ -521,6 +533,21 @@ function providerServerTypeName(provider: Provider): string {
     return "AWS instance type";
   }
   return "server type";
+}
+
+export function assertAzureWindowsARM64Image(
+  config: Pick<LeaseConfig, "provider" | "target" | "architecture" | "azureImage">,
+): void {
+  if (
+    config.provider === "azure" &&
+    config.target === "windows" &&
+    config.architecture === "arm64" &&
+    !azureWindowsARM64HasExplicitImage(config.azureImage)
+  ) {
+    throw new Error(
+      "brokered provider=azure target=windows architecture=arm64 requires azureImage with an ARM64 Windows image; the built-in Windows default is x64",
+    );
+  }
 }
 
 function azureWindowsARM64HasExplicitImage(image: string | undefined): boolean {

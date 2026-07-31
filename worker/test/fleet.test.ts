@@ -24281,6 +24281,444 @@ describe("fleet lease identity and idle", () => {
     );
   });
 
+  it("records the exact promoted AWS image selected for a lease", async () => {
+    const storage = new MemoryStorage();
+    storage.seed("image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1", {
+      id: "ami-devtools",
+      name: "linux-devtools",
+      state: "available",
+      provider: "aws",
+      kind: "aws-ami",
+      target: "linux",
+      os: "ubuntu:26.04",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-07-31T00:00:00Z",
+    });
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+
+    await expect(
+      provider.prepareLeaseConfig(
+        leaseConfig({
+          provider: "aws",
+          os: "ubuntu:26.04",
+          sshPublicKey: "ssh-ed25519 test",
+        }),
+      ),
+    ).resolves.toMatchObject({
+      awsAMI: "ami-devtools",
+      selectedImage: {
+        id: "ami-devtools",
+        source: "promoted",
+        provider: "aws",
+        kind: "aws-ami",
+        region: "eu-west-1",
+        promotedAt: "2026-07-31T00:00:00Z",
+      },
+    });
+  });
+
+  it("clears primary AMI metadata when AWS starts a different promoted fallback image", async () => {
+    const provider = new AWSProvider({} as Env, "eu-west-1", new MemoryStorage());
+    const config = leaseConfig({
+      provider: "aws",
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    config.selectedImage = {
+      id: "ami-primary",
+      source: "promoted",
+      provider: "aws",
+      kind: "aws-ami",
+      region: "eu-west-1",
+      promotedAt: "2026-07-30T00:00:00Z",
+    };
+    config.awsPromotedAMIs[awsPromotedAMIConfigKey("eu-west-1", config.serverType)] =
+      "ami-fallback";
+    (
+      provider as unknown as {
+        clientValue: {
+          createServerWithFallback: () => Promise<{
+            server: ProviderMachine;
+            serverType: string;
+            market: string;
+            imageID: string;
+          }>;
+          waitForServerIP: () => Promise<ProviderMachine>;
+        };
+      }
+    ).clientValue = {
+      createServerWithFallback: async () => ({
+        server: ownedTestMachine("aws", "i-fallback"),
+        serverType: config.serverType,
+        market: "spot",
+        imageID: "ami-fallback",
+      }),
+      waitForServerIP: async () => ownedTestMachine("aws", "i-fallback"),
+    };
+
+    const result = await provider.createServerWithFallback(
+      config,
+      "cbx_abcdef123456",
+      "image-fallback",
+      "alice@example.com",
+    );
+    expect(result).toMatchObject({
+      image: {
+        id: "ami-fallback",
+        source: "promoted",
+        provider: "aws",
+        kind: "aws-ami",
+        region: "eu-west-1",
+      },
+    });
+    expect(result.image).not.toHaveProperty("sourceID");
+    expect(result.image).not.toHaveProperty("promotedAt");
+  });
+
+  it("includes failed AWS region attempts in provider startup timing", async () => {
+    const provider = new AWSProvider({} as Env, "eu-west-1", new MemoryStorage());
+    const config = leaseConfig({
+      provider: "aws",
+      awsRegion: "us-east-1",
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    let clock = 0;
+    let attempts = 0;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+    (
+      provider as unknown as {
+        region: string;
+        clientValue: {
+          createServerWithFallback: () => Promise<{
+            server: ProviderMachine;
+            serverType: string;
+            market: string;
+            imageID: string;
+          }>;
+          waitForServerIP: () => Promise<ProviderMachine>;
+        };
+      }
+    ).clientValue = {
+      createServerWithFallback: async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          clock += 100;
+          (
+            provider as unknown as {
+              region: string;
+            }
+          ).region = "us-east-1";
+          throw new Error("capacity unavailable");
+        }
+        clock += 200;
+        return {
+          server: ownedTestMachine("aws", "i-fallback"),
+          serverType: config.serverType,
+          market: "spot",
+          imageID: "ami-fallback",
+        };
+      },
+      waitForServerIP: async () => {
+        clock += 300;
+        return ownedTestMachine("aws", "i-fallback");
+      },
+    };
+
+    try {
+      const result = await provider.createServerWithFallback(
+        config,
+        "cbx_abcdef123456",
+        "region-fallback",
+        "alice@example.com",
+      );
+      expect(result.provisioningTiming).toEqual({
+        requestMs: 200,
+        networkReadyMs: 300,
+        totalMs: 600,
+      });
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("promotes and selects Azure OS disk snapshots by target, architecture, and location", async () => {
+    const storage = new MemoryStorage();
+    const provider = new AzureProvider({} as Env, undefined, storage, "westeurope");
+    const snapshot: ProviderImage = {
+      id: "snapshot-devtools",
+      name: "snapshot-devtools",
+      state: "succeeded",
+      provider: "azure",
+      kind: "azure-os-disk-snapshot",
+      resourceID:
+        "/subscriptions/test/resourceGroups/crabbox/providers/Microsoft.Compute/snapshots/snapshot-devtools",
+      target: "linux",
+      os: "ubuntu:26.04",
+      region: "westeurope",
+      architecture: "amd64",
+      serverType: "Standard_D192ds_v6",
+    };
+    const url = new URL(
+      "https://crabbox.test/v1/images/snapshot-devtools/promote?provider=azure&target=linux&region=WestEurope&os=ubuntu%3A26.04",
+    );
+
+    await expect(
+      provider.promoteImage(
+        snapshot.id,
+        snapshot,
+        new Request(url, { method: "POST", body: "{}" }),
+        url,
+      ),
+    ).resolves.toMatchObject({
+      image: {
+        id: "snapshot-devtools",
+        provider: "azure",
+        kind: "azure-os-disk-snapshot",
+        target: "linux",
+        region: "westeurope",
+      },
+    });
+    expect(
+      storage.value("image:azure:promoted:linux:amd64:standard_d192ds_v6:ubuntu26.04:westeurope"),
+    ).toEqual(expect.objectContaining({ id: "snapshot-devtools", region: "westeurope" }));
+
+    const prepared = await provider.prepareLeaseConfig({
+      ...leaseConfig({
+        provider: "azure",
+        os: "ubuntu:26.04",
+        architecture: "amd64",
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+      azureLocation: "westeurope",
+    });
+    expect(prepared).toMatchObject({
+      azureSnapshot: snapshot.resourceID,
+      selectedImage: {
+        id: "snapshot-devtools",
+        source: "promoted",
+        provider: "azure",
+        kind: "azure-os-disk-snapshot",
+        region: "westeurope",
+        sourceID: snapshot.resourceID,
+      },
+    });
+
+    const ephemeral = await provider.prepareLeaseConfig({
+      ...leaseConfig({
+        provider: "azure",
+        os: "ubuntu:26.04",
+        architecture: "amd64",
+        azureOSDisk: "ephemeral",
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+      azureLocation: "westeurope",
+    });
+    expect(ephemeral.azureSnapshot).toBe("");
+    expect(ephemeral.selectedImage).toBeUndefined();
+
+    const incompatibleSize = await provider.prepareLeaseConfig({
+      ...leaseConfig({
+        provider: "azure",
+        os: "ubuntu:26.04",
+        architecture: "amd64",
+        serverType: "Standard_D96ds_v6",
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+      azureLocation: "westeurope",
+    });
+    expect(incompatibleSize.azureSnapshot).toBe("");
+    expect(incompatibleSize.selectedImage).toBeUndefined();
+
+    const legacySnapshot = { ...snapshot, serverType: undefined };
+    const legacyURL = new URL(
+      "https://crabbox.test/v1/images/snapshot-devtools/promote?provider=azure&target=linux&region=westeurope&os=ubuntu%3A26.04&serverType=Standard_D192ds_v6",
+    );
+    await expect(
+      provider.promoteImage(
+        legacySnapshot.id,
+        legacySnapshot,
+        new Request(legacyURL, { method: "POST", body: "{}" }),
+        legacyURL,
+      ),
+    ).resolves.toMatchObject({
+      image: { id: "snapshot-devtools", serverType: "Standard_D192ds_v6" },
+    });
+  });
+
+  it("selects promoted Azure ARM64 snapshots over the configured fallback image", async () => {
+    const storage = new MemoryStorage();
+    storage.seed("image:azure:promoted:windows:arm64:standard_d32pds_v6::westeurope", {
+      id: "snapshot-windows-arm64",
+      name: "snapshot-windows-arm64",
+      state: "succeeded",
+      provider: "azure",
+      kind: "azure-os-disk-snapshot",
+      resourceID:
+        "/subscriptions/test/resourceGroups/crabbox/providers/Microsoft.Compute/snapshots/snapshot-windows-arm64",
+      target: "windows",
+      region: "westeurope",
+      architecture: "arm64",
+      serverType: "Standard_D32pds_v6",
+      promotedAt: "2026-07-31T00:00:00Z",
+    });
+    const provider = new AzureProvider({} as Env, undefined, storage, "westeurope");
+    const config = leaseConfig(
+      {
+        provider: "azure",
+        target: "windows",
+        architecture: "arm64",
+        serverType: "Standard_D32pds_v6",
+        azureLocation: "westeurope",
+        sshPublicKey: "ssh-ed25519 test",
+      },
+      { allowAzurePromotedImage: true },
+    );
+
+    await expect(provider.prepareLeaseConfig(config)).resolves.toMatchObject({
+      azureSnapshot:
+        "/subscriptions/test/resourceGroups/crabbox/providers/Microsoft.Compute/snapshots/snapshot-windows-arm64",
+      selectedImage: {
+        id: "snapshot-windows-arm64",
+        source: "promoted",
+        provider: "azure",
+        kind: "azure-os-disk-snapshot",
+        region: "westeurope",
+      },
+    });
+  });
+
+  it("rejects brokered Azure ARM64 leases when neither a promoted snapshot nor image exists", async () => {
+    const provider = new AzureProvider({} as Env, undefined, new MemoryStorage(), "westeurope");
+    const config = leaseConfig(
+      {
+        provider: "azure",
+        target: "windows",
+        architecture: "arm64",
+        serverType: "Standard_D32pds_v6",
+        azureLocation: "westeurope",
+        sshPublicKey: "ssh-ed25519 test",
+      },
+      { allowAzurePromotedImage: true },
+    );
+
+    await expect(provider.prepareLeaseConfig(config)).rejects.toThrow("requires azureImage");
+  });
+
+  it("rejects Azure promotion metadata that conflicts with the recorded snapshot scope", async () => {
+    const snapshot: ProviderImage = {
+      id: "snapshot-devtools",
+      name: "snapshot-devtools",
+      state: "succeeded",
+      provider: "azure",
+      kind: "azure-os-disk-snapshot",
+      resourceID:
+        "/subscriptions/test/resourceGroups/crabbox/providers/Microsoft.Compute/snapshots/snapshot-devtools",
+      target: "linux",
+      os: "ubuntu:26.04",
+      region: "westeurope",
+      architecture: "amd64",
+      serverType: "Standard_D192ds_v6",
+    };
+    await Promise.all(
+      [
+        "target=windows",
+        "region=eastus",
+        "architecture=arm64",
+        "serverType=Standard_D96ds_v6",
+        "os=ubuntu%3A24.04",
+      ].map(async (query) => {
+        const provider = new AzureProvider({} as Env, undefined, new MemoryStorage(), "westeurope");
+        const url = new URL(
+          `https://crabbox.test/v1/images/snapshot-devtools/promote?provider=azure&${query}`,
+        );
+        const response = await provider.promoteImage(
+          snapshot.id,
+          snapshot,
+          new Request(url, { method: "POST", body: "{}" }),
+          url,
+        );
+
+        expect(response).toBeInstanceOf(Response);
+        expect((response as Response).status).toBe(409);
+        await expect((response as Response).json()).resolves.toMatchObject({
+          error: "image_scope_mismatch",
+        });
+      }),
+    );
+
+    const provider = new AzureProvider({} as Env, undefined, new MemoryStorage(), "westeurope");
+    const invalidTargetURL = new URL(
+      "https://crabbox.test/v1/images/snapshot-devtools/promote?provider=azure&target=macos",
+    );
+    const invalidTarget = await provider.promoteImage(
+      snapshot.id,
+      snapshot,
+      new Request(invalidTargetURL, { method: "POST", body: "{}" }),
+      invalidTargetURL,
+    );
+    expect(invalidTarget).toBeInstanceOf(Response);
+    expect((invalidTarget as Response).status).toBe(400);
+    await expect((invalidTarget as Response).json()).resolves.toMatchObject({
+      error: "invalid_target",
+    });
+  });
+
+  it("rejects Azure snapshot promotion without Crabbox catalog ownership", async () => {
+    const provider = new AzureProvider({} as Env, undefined, new MemoryStorage(), "westeurope");
+    const url = new URL(
+      "https://crabbox.test/v1/images/snapshot-external/promote?provider=azure&target=linux",
+    );
+    const response = await provider.promoteImage(
+      "snapshot-external",
+      undefined,
+      new Request(url, { method: "POST", body: "{}" }),
+      url,
+    );
+
+    expect(response).toBeInstanceOf(Response);
+    expect((response as Response).status).toBe(409);
+    await expect((response as Response).json()).resolves.toMatchObject({
+      error: "image_not_owned",
+    });
+  });
+
+  it("removes Azure promotion records when deleting their snapshot", async () => {
+    const storage = new MemoryStorage();
+    const snapshot: ProviderImage = {
+      id: "snapshot-devtools",
+      name: "snapshot-devtools",
+      state: "succeeded",
+      provider: "azure",
+      kind: "azure-os-disk-snapshot",
+      resourceID:
+        "/subscriptions/test/resourceGroups/crabbox/providers/Microsoft.Compute/snapshots/snapshot-devtools",
+      target: "linux",
+      os: "ubuntu:26.04",
+      region: "westeurope",
+      architecture: "amd64",
+      serverType: "Standard_D192ds_v6",
+    };
+    const promotedKey =
+      "image:azure:promoted:linux:amd64:standard_d192ds_v6:ubuntu26.04:westeurope";
+    storage.seed(promotedKey, snapshot);
+    const provider = new AzureProvider({} as Env, undefined, storage, "westeurope");
+    const deleted: string[] = [];
+    (
+      provider as unknown as {
+        clientValue: { deleteImage: (imageID: string) => Promise<void> };
+      }
+    ).clientValue = {
+      deleteImage: async (imageID) => {
+        deleted.push(imageID);
+      },
+    };
+
+    await provider.deleteImage(snapshot.id, snapshot.kind);
+
+    expect(deleted).toEqual([snapshot.id]);
+    expect(storage.value(promotedKey)).toBeUndefined();
+  });
+
   it("preserves catalog capabilities when re-promoting an older image", async () => {
     const storage = new MemoryStorage();
     const provider = new AWSProvider({} as Env, "eu-west-1", storage);

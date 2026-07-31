@@ -811,6 +811,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}()
 		recorder.Event("leasing.started", "leasing", "")
 	}
+	endToEndStartedAt := time.Now()
+	leaseStartedAt := endToEndStartedAt
 	if *leaseIDFlag != "" {
 		var lease LeaseTarget
 		lease, err = resolveSSHLeaseTarget(ctx, sshBackend, ResolveRequest{Repo: repo, Options: options, ID: *leaseIDFlag, Reclaim: *reclaim, Prepare: true})
@@ -856,6 +858,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	if err != nil {
 		return recordFailure(err)
 	}
+	leaseDuration := time.Since(leaseStartedAt)
 	if timingRecordEnabled {
 		coldRun := acquired && strings.TrimSpace(*leaseIDFlag) == "" && borrowedPool == nil
 		timingRecordColdRun = &coldRun
@@ -970,7 +973,11 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	if cfg.Sync.BaseRef == "" {
 		cfg.Sync.BaseRef = repo.BaseRef
 	}
-	timings := runTimings{started: time.Now()}
+	timings := runTimings{
+		started:           time.Now(),
+		endToEndStartedAt: endToEndStartedAt,
+		lease:             leaseDuration,
+	}
 	exitNodeEgressChecked := false
 	workdir = remoteJoin(cfg, leaseID, repo.Name)
 	actionsEnvFile := ""
@@ -1130,7 +1137,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		acquired = false
 
+		replacementLeaseStartedAt := time.Now()
 		newLease, err := sshBackend.Acquire(ctx, AcquireRequest{Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim})
+		timings.lease += time.Since(replacementLeaseStartedAt)
 		if err != nil {
 			recorder.Event("lease.replace.failed", "leasing", err.Error())
 			return true, err
@@ -1198,8 +1207,10 @@ retrySync:
 		stepStart := time.Now()
 		recorder.Event("bootstrap.waiting", "bootstrap", "waiting for SSH before sync")
 		target = bootstrapNetworkTarget(cfg, server, target)
-		if err := waitForSSHReady(ctx, &target, a.Stderr, "before sync", 2*time.Minute); err != nil {
-			return recordFailure(err)
+		bootstrapErr := waitForSSHReady(ctx, &target, a.Stderr, "before sync", 2*time.Minute)
+		timings.bootstrap += time.Since(stepStart)
+		if bootstrapErr != nil {
+			return recordFailure(bootstrapErr)
 		}
 		a.refreshTailscaleMetadata(ctx, cfg, sshBackend, coord, useCoordinator, &server, target, leaseID)
 		_ = updateLeaseClaimEndpoint(leaseID, server, target)
@@ -1441,19 +1452,22 @@ afterSync:
 		return nil
 	}
 
-	commandStart := time.Now()
 	recorder.Event("bootstrap.waiting", "bootstrap", "waiting for SSH before command")
 	target = bootstrapNetworkTarget(cfg, server, target)
-	if err := waitForSSHReady(ctx, &target, a.Stderr, "before command", 2*time.Minute); err != nil {
-		replaced, replaceErr := replaceLeaseAfterBeforeCommandSSHFailure(err)
+	bootstrapStartedAt := time.Now()
+	bootstrapErr := waitForSSHReady(ctx, &target, a.Stderr, "before command", 2*time.Minute)
+	timings.bootstrap += time.Since(bootstrapStartedAt)
+	if bootstrapErr != nil {
+		replaced, replaceErr := replaceLeaseAfterBeforeCommandSSHFailure(bootstrapErr)
 		if replaceErr != nil {
 			return recordFailure(replaceErr)
 		}
 		if replaced {
 			goto retrySync
 		}
-		return recordFailure(err)
+		return recordFailure(bootstrapErr)
 	}
+	commandStart := time.Now()
 	a.refreshTailscaleMetadata(ctx, cfg, sshBackend, coord, useCoordinator, &server, target, leaseID)
 	_ = updateLeaseClaimEndpoint(leaseID, server, target)
 	if resolved, err := resolveNetworkTarget(ctx, cfg, server, target); err != nil {
@@ -2283,14 +2297,17 @@ func routingSafeURL(value string) string {
 }
 
 type runTimings struct {
-	started       time.Time
-	sync          time.Duration
-	command       time.Duration
-	syncSteps     syncStepTimings
-	commandPhases []timingPhase
-	syncSkipped   bool
-	blockedStage  string
-	retryLikely   string
+	started           time.Time
+	endToEndStartedAt time.Time
+	lease             time.Duration
+	bootstrap         time.Duration
+	sync              time.Duration
+	command           time.Duration
+	syncSteps         syncStepTimings
+	commandPhases     []timingPhase
+	syncSkipped       bool
+	blockedStage      string
+	retryLikely       string
 }
 
 type syncStepTimings struct {
@@ -2315,10 +2332,13 @@ type syncStepTimings struct {
 }
 
 func formatRunSummary(timings runTimings, total time.Duration, exitCode int) string {
-	summary := fmt.Sprintf("run summary sync=%s command=%s total=%s sync_skipped=%t exit=%d",
+	summary := fmt.Sprintf("run summary lease=%s bootstrap=%s sync=%s command=%s total=%s end_to_end=%s sync_skipped=%t exit=%d",
+		timings.lease.Round(time.Millisecond),
+		timings.bootstrap.Round(time.Millisecond),
 		timings.sync.Round(time.Millisecond),
 		timings.command.Round(time.Millisecond),
 		total.Round(time.Millisecond),
+		runEndToEndDuration(timings, total).Round(time.Millisecond),
 		timings.syncSkipped,
 		exitCode,
 	)
@@ -2330,6 +2350,17 @@ func formatRunSummary(timings runTimings, total time.Duration, exitCode int) str
 	}
 	summary += FormatFailureClassificationFields(FailureClassification{BlockedStage: timings.blockedStage, RetryLikely: timings.retryLikely})
 	return summary
+}
+
+func runEndToEndDuration(timings runTimings, total time.Duration) time.Duration {
+	if timings.started.IsZero() || timings.endToEndStartedAt.IsZero() {
+		return total
+	}
+	prefix := timings.started.Sub(timings.endToEndStartedAt)
+	if prefix < 0 {
+		return total
+	}
+	return prefix + total
 }
 
 func formatSyncStepTimings(steps syncStepTimings) string {

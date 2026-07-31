@@ -506,7 +506,29 @@ describe("lease config", () => {
     expect(config.serverType).toBe("Standard_D192ds_v6");
     expect(config.azureLocation).toBe("eastus");
     expect(config.azureImage).toBe("Canonical:offer:sku:latest");
+    expect(config.azureImageExplicit).toBe(true);
     expect(config.azureOSDisk).toBe("managed");
+
+    const operatorDefault = leaseConfig(
+      {
+        provider: "azure",
+        sshPublicKey: "ssh-ed25519 test",
+      },
+      { azureImage: "Contoso:operator-default:server:latest" },
+    );
+    expect(operatorDefault.azureImage).toBe("Contoso:operator-default:server:latest");
+    expect(operatorDefault.azureImageExplicit).toBe(true);
+
+    const requestedOS = leaseConfig(
+      {
+        provider: "azure",
+        os: "ubuntu:24.04",
+        sshPublicKey: "ssh-ed25519 test",
+      },
+      { azureImage: "Contoso:operator-default:server:latest" },
+    );
+    expect(requestedOS.azureImage).toBe("Canonical:ubuntu-24_04-lts:server:latest");
+    expect(requestedOS.azureImageExplicit).toBe(false);
   });
 
   it("uses Azure ARM defaults when requested", () => {
@@ -639,6 +661,7 @@ describe("lease config", () => {
       { azureWindowsARM64Image: "Contoso:windows-arm64:server:latest" },
     );
     expect(defaultImage.azureImage).toBe("Contoso:windows-arm64:server:latest");
+    expect(defaultImage.azureImageExplicit).toBe(false);
 
     const emptyRequestImage = leaseConfig(
       {
@@ -652,6 +675,7 @@ describe("lease config", () => {
       { azureWindowsARM64Image: "Contoso:windows-arm64:server:latest" },
     );
     expect(emptyRequestImage.azureImage).toBe("Contoso:windows-arm64:server:latest");
+    expect(emptyRequestImage.azureImageExplicit).toBe(false);
   });
 
   it("rejects Azure Windows ARM64 leases without an explicit ARM64 image", () => {

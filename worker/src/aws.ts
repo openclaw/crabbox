@@ -27,6 +27,7 @@ import type {
   Env,
   ProviderFastSnapshotRestore,
   ProviderImage,
+  LeaseImageIdentity,
   ProviderMachine,
   ProvisioningAttempt,
 } from "./types";
@@ -909,6 +910,7 @@ export class EC2SpotClient {
     serverType: string;
     market?: string;
     attempts?: ProvisioningAttempt[];
+    imageID: string;
   }> {
     if (!config.awsPrivate) {
       await this.ensureSSHKey(config.providerKey, config.sshPublicKey, leaseID);
@@ -1010,7 +1012,8 @@ export class EC2SpotClient {
             serverType: string;
             market?: string;
             attempts?: ProvisioningAttempt[];
-          } = { server, serverType, market: config.capacityMarket };
+            imageID: string;
+          } = { server, serverType, market: config.capacityMarket, imageID };
           if (attempts.length > 0) {
             result.attempts = attempts;
           }
@@ -1060,7 +1063,8 @@ export class EC2SpotClient {
               serverType: string;
               market?: string;
               attempts?: ProvisioningAttempt[];
-            } = { server, serverType, market: "on-demand" };
+              imageID: string;
+            } = { server, serverType, market: "on-demand", imageID };
             if (attempts.length > 0) {
               result.attempts = attempts;
             }
@@ -1888,9 +1892,17 @@ export class EC2SpotClient {
   ): Promise<ProviderMachine> {
     const now = new Date();
     const name = leaseProviderName(leaseID, slug);
-    const labels = leaseProviderLabels(config, leaseID, slug, owner, "aws", now, {
-      market: config.capacityMarket,
-    });
+    const labels = leaseProviderLabels(
+      { ...config, selectedImage: awsLeaseImageIdentity(config, imageID, this.region) },
+      leaseID,
+      slug,
+      owner,
+      "aws",
+      now,
+      {
+        market: config.capacityMarket,
+      },
+    );
     const rootGB = config.awsRootGB || positiveInt(this.env.CRABBOX_AWS_ROOT_GB) || 400;
     const instanceProfile = config.awsProfile || this.env.CRABBOX_AWS_INSTANCE_PROFILE || "";
     const subnetID = config.awsSubnetID || this.env.CRABBOX_AWS_SUBNET_ID || "";
@@ -2595,6 +2607,34 @@ export class EC2SpotClient {
   private withRegion(server: ProviderMachine): ProviderMachine {
     return { ...server, region: this.region };
   }
+}
+
+export function awsLeaseImageIdentity(
+  config: LeaseConfig,
+  imageID: string,
+  region: string,
+): LeaseImageIdentity {
+  if (config.awsSnapshot) {
+    return {
+      id: imageID,
+      source: "snapshot",
+      provider: "aws",
+      kind: "aws-ami",
+      region,
+      sourceID: config.awsSnapshot,
+    };
+  }
+  if (config.selectedImage?.id === imageID) {
+    return { ...config.selectedImage, region };
+  }
+  if (Object.values(config.awsPromotedAMIs).includes(imageID)) {
+    return { id: imageID, source: "promoted", provider: "aws", kind: "aws-ami", region };
+  }
+  const explicitImageID = config.awsAMI;
+  if (explicitImageID && !config.awsUseStockImage && explicitImageID === imageID) {
+    return { id: imageID, source: "explicit", provider: "aws", kind: "aws-ami", region };
+  }
+  return { id: imageID, source: "stock", provider: "aws", kind: "aws-ami", region };
 }
 
 function awsSSHCIDRs(config: LeaseConfig, env: Env, allowEmpty = false): string[] {

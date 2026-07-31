@@ -29,6 +29,7 @@ import {
   awsPrivateWorkspaceModeEnabled,
   awsProvisioningErrorCategory,
   awsRegionCandidates,
+  awsLeaseImageIdentity,
   isAWSInstanceCleanedAfterReadinessFailure,
   isAWSInstanceNotFoundError,
   isAWSRunInstancesOutcomeUncertain,
@@ -45,9 +46,11 @@ import {
   isIsolatedCodeRequest,
 } from "./code-origin";
 import {
+  assertAzureWindowsARM64Image,
   awsPromotedAMIConfigKey,
   azureLocationFor,
   leaseConfig,
+  normalizeArchitecture,
   validCIDRs,
   workspaceProviderKeyPrefix,
   type LeaseConfig,
@@ -251,6 +254,8 @@ import type {
   ImageCapabilities,
   Provider,
   ProviderFastSnapshotRestore,
+  LeaseImageIdentity,
+  LeaseProvisioningTiming,
   ProviderImage,
   ProviderMachine,
   ProvisioningAttempt,
@@ -2978,7 +2983,7 @@ export class FleetCoordinator {
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
     const input = await readJson<LeaseRequest>(request);
-    const defaults: LeaseConfigDefaults = {};
+    const defaults: LeaseConfigDefaults = { allowAzurePromotedImage: true };
     const azureImage = this.env.CRABBOX_AZURE_IMAGE?.trim();
     if (azureImage) defaults.azureImage = azureImage;
     const azureWindowsARM64Image = this.env.CRABBOX_AZURE_WINDOWS_ARM64_IMAGE?.trim();
@@ -3589,8 +3594,8 @@ export class FleetCoordinator {
               });
             })
           : this.withAWSIngressOperationLock(provision);
-    const { server, serverType, market, attempts } = await provisioned.catch(
-      async (error: unknown) => {
+    const { server, serverType, market, attempts, image, provisioningTiming } =
+      await provisioned.catch(async (error: unknown) => {
         const cleanupClaim = validatedProviderProvisioningCleanupClaim(error, config.provider);
         await this.state.runExclusive(async () => {
           if (prepared?.provisioning?.publishAccessBeforeProvisioning) {
@@ -3673,8 +3678,7 @@ export class FleetCoordinator {
           await this.scheduleAlarm();
         });
         throw error;
-      },
-    );
+      });
     let current = await this.getLease(record.id);
     if (!current || current.state !== "provisioning") {
       return this.abortProvisionedLeaseAfterStateChange(
@@ -3699,6 +3703,12 @@ export class FleetCoordinator {
     }
     if (attempts && attempts.length > 0) {
       record.provisioningAttempts = attempts;
+    }
+    if (image) {
+      record.image = image;
+    }
+    if (provisioningTiming) {
+      record.provisioningTiming = provisioningTiming;
     }
     record.serverID = server.id;
     record.serverName = server.name;
@@ -12909,7 +12919,10 @@ export class FleetCoordinator {
     if (method === "POST" && action === "promote") {
       if (!providerForRegion.promoteImage) {
         return json(
-          { error: "unsupported_provider", message: "image promotion is currently AWS-only" },
+          {
+            error: "unsupported_provider",
+            message: "image promotion is supported for AWS AMIs and Azure OS disk snapshots",
+          },
           { status: 400 },
         );
       }
@@ -15642,6 +15655,26 @@ function createdProviderImageKey(provider: Provider, imageID: string): string {
   return `image:${provider}:created:${encodeURIComponent(imageID)}`;
 }
 
+function promotedAzureImageKey(
+  image: Pick<ProviderImage, "target" | "architecture" | "region" | "serverType"> & {
+    os?: string;
+  },
+): string {
+  const target = image.target ?? "linux";
+  const architecture = image.architecture ?? "amd64";
+  const os = target === "linux" ? (image.os ?? defaultOSImage) : "";
+  return [
+    "image",
+    "azure",
+    "promoted",
+    target,
+    sanitizePromotedAWSImageKeyPart(architecture),
+    sanitizePromotedAWSImageKeyPart(image.serverType ?? ""),
+    sanitizePromotedAWSImageKeyPart(os),
+    sanitizePromotedAWSImageKeyPart((image.region ?? "").toLowerCase()),
+  ].join(":");
+}
+
 function validateProviderImageDeleteOwnership(
   provider: Provider,
   imageID: string,
@@ -15800,6 +15833,76 @@ function mergeAWSImageMetadata(
     result.region = metadataRegion;
   }
   return result;
+}
+
+function awsConfiguredImageIdentity(
+  config: LeaseConfig,
+  env: Pick<Env, "CRABBOX_AWS_AMI">,
+): LeaseImageIdentity | undefined {
+  if (config.awsSnapshot) {
+    return {
+      id: config.awsSnapshot,
+      source: "snapshot",
+      provider: "aws",
+      kind: "aws-ami",
+      region: config.awsRegion,
+    };
+  }
+  const explicitImageID = config.awsAMI || env.CRABBOX_AWS_AMI?.trim() || "";
+  if (explicitImageID && !config.awsUseStockImage) {
+    return {
+      id: explicitImageID,
+      source: "explicit",
+      provider: "aws",
+      kind: "aws-ami",
+      region: config.awsRegion,
+    };
+  }
+  return undefined;
+}
+
+function azureLeaseImageIdentity(
+  config: LeaseConfig,
+  imageID: string,
+  region: string,
+): LeaseImageIdentity | undefined {
+  if (config.selectedImage) {
+    return { ...config.selectedImage, region };
+  }
+  if (config.azureSnapshot) {
+    return {
+      id: imageID,
+      source: "snapshot",
+      provider: "azure",
+      kind: "azure-os-disk-snapshot",
+      region,
+    };
+  }
+  return undefined;
+}
+
+function normalizeAzureImageTarget(value: string | undefined): TargetOS | undefined {
+  switch ((value ?? "").trim().toLowerCase()) {
+    case "":
+    case "linux":
+    case "ubuntu":
+      return "linux";
+    case "windows":
+    case "win":
+      return "windows";
+    default:
+      return undefined;
+  }
+}
+
+function azureImageScopeMismatch(field: string, requested: string, recorded: string): Response {
+  return json(
+    {
+      error: "image_scope_mismatch",
+      message: `Azure snapshot ${field} ${recorded} does not match requested ${requested}`,
+    },
+    { status: 409 },
+  );
 }
 
 function normalizeAWSImageTarget(value: string | undefined): TargetOS | undefined {
@@ -20375,6 +20478,8 @@ interface CloudProvider {
     serverType: string;
     market?: string;
     attempts?: ProvisioningAttempt[];
+    image?: LeaseImageIdentity;
+    provisioningTiming?: LeaseProvisioningTiming;
   }>;
   finalizeLeaseCreate?(
     config: ReturnType<typeof leaseConfig>,
@@ -20685,9 +20790,50 @@ export class AzureProvider implements CloudProvider {
   async prepareLeaseConfig(
     config: ReturnType<typeof leaseConfig>,
   ): Promise<ReturnType<typeof leaseConfig>> {
-    return config.azureLocation
+    const located = config.azureLocation
       ? config
       : { ...config, azureLocation: azureLocationFor(this.env, "") };
+    if (located.azureSnapshot) {
+      return {
+        ...located,
+        selectedImage: {
+          id: located.azureSnapshot,
+          source: "snapshot",
+          provider: "azure",
+          kind: "azure-os-disk-snapshot",
+          region: located.azureLocation,
+        },
+      };
+    }
+    if (this.storage && !located.azureImageExplicit && located.azureOSDisk === "managed") {
+      const promoted = await this.storage.get<PromotedImageRecord>(
+        promotedAzureImageKey({
+          target: located.target,
+          architecture: located.architecture,
+          serverType: located.serverType,
+          os: located.os,
+          region: located.azureLocation,
+        }),
+      );
+      const snapshotID = promoted?.resourceID ?? promoted?.id;
+      if (promoted && snapshotID) {
+        return {
+          ...located,
+          azureSnapshot: snapshotID,
+          selectedImage: {
+            id: promoted.id,
+            source: "promoted",
+            provider: "azure",
+            kind: promoted.kind ?? "azure-os-disk-snapshot",
+            region: promoted.region ?? located.azureLocation,
+            promotedAt: promoted.promotedAt,
+            ...(snapshotID !== promoted.id ? { sourceID: snapshotID } : {}),
+          },
+        };
+      }
+    }
+    assertAzureWindowsARM64Image(located);
+    return located;
   }
 
   prepareLeaseCreate(
@@ -20710,8 +20856,25 @@ export class AzureProvider implements CloudProvider {
     serverType: string;
     market?: string;
     attempts?: ProvisioningAttempt[];
+    image?: LeaseImageIdentity;
+    provisioningTiming?: LeaseProvisioningTiming;
   }> {
-    return this.client.createServerWithFallback(config, leaseID, slug, owner);
+    const startedAt = Date.now();
+    return this.client.createServerWithFallback(config, leaseID, slug, owner).then((result) => {
+      const image = azureLeaseImageIdentity(
+        config,
+        config.azureSnapshot || this.client.resolvedImageForConfig(config),
+        result.server.region || config.azureLocation,
+      );
+      return {
+        ...result,
+        ...(image ? { image } : {}),
+        provisioningTiming: {
+          requestMs: Date.now() - startedAt,
+          totalMs: Date.now() - startedAt,
+        },
+      };
+    });
   }
 
   deleteServer(id: string): Promise<void> {
@@ -20795,6 +20958,7 @@ export class AzureProvider implements CloudProvider {
     const enriched: ProviderImage = {
       ...image,
       provider: "azure",
+      serverType: lease.serverType,
     };
     if (region) {
       enriched.region = region;
@@ -20809,8 +20973,21 @@ export class AzureProvider implements CloudProvider {
     return this.client.getImage(imageID, kind);
   }
 
-  deleteImage(imageID: string, kind?: string): Promise<void> {
-    return this.client.deleteImage(imageID, kind);
+  async deleteImage(imageID: string, kind?: string): Promise<void> {
+    await this.client.deleteImage(imageID, kind);
+    const storage = this.storage;
+    if (!storage) return;
+    const promoted = await storage.list<PromotedImageRecord>({
+      prefix: "image:azure:promoted:",
+    });
+    await Promise.all(
+      [...promoted]
+        .filter(
+          ([, image]) =>
+            image.id === imageID || image.resourceID === imageID || image.name === imageID,
+        )
+        .map(([key]) => storage.delete(key)),
+    );
   }
 
   storedImageMetadata(imageID: string): Promise<ProviderImage | undefined> {
@@ -20821,6 +20998,165 @@ export class AzureProvider implements CloudProvider {
   }
   decorateImage = passthroughProviderImage;
   validateDeleteImage = allowProviderImageDelete;
+
+  async promoteImage(
+    imageID: string,
+    known: ProviderImage | undefined,
+    request: Request,
+    url: URL,
+  ): Promise<Response | { image: ProviderImage }> {
+    if (!this.storage) {
+      return json(
+        {
+          error: "image_catalog_unavailable",
+          message: "Azure image catalog storage is unavailable",
+        },
+        { status: 503 },
+      );
+    }
+    const input: {
+      target?: string;
+      os?: string;
+      region?: string;
+      architecture?: string;
+      serverType?: string;
+    } = await readJson<{
+      target?: string;
+      os?: string;
+      region?: string;
+      architecture?: string;
+      serverType?: string;
+    }>(request).catch(() => ({}));
+    if (!known) {
+      return json(
+        {
+          error: "image_not_owned",
+          message: "Azure promotion requires a Crabbox-created OS disk snapshot",
+        },
+        { status: 409 },
+      );
+    }
+    const image = known;
+    if (image.kind !== "azure-os-disk-snapshot") {
+      return json(
+        {
+          error: "invalid_image_kind",
+          message: "Azure promotion requires a Crabbox-created OS disk snapshot",
+        },
+        { status: 409 },
+      );
+    }
+    if (!["available", "ready", "succeeded", "completed"].includes(image.state.toLowerCase())) {
+      return json(
+        { error: "image_not_available", message: `image ${imageID} is ${image.state}` },
+        { status: 409 },
+      );
+    }
+    const requestedTargetValue = input.target ?? url.searchParams.get("target") ?? undefined;
+    const requestedTarget = requestedTargetValue
+      ? normalizeAzureImageTarget(requestedTargetValue)
+      : undefined;
+    if (requestedTargetValue && !requestedTarget) {
+      return json(
+        { error: "invalid_target", message: "Azure image target must be linux or windows" },
+        { status: 400 },
+      );
+    }
+    const imageTarget = image.target ? normalizeAzureImageTarget(image.target) : undefined;
+    const target = requestedTarget ?? imageTarget ?? "linux";
+    if (requestedTarget && imageTarget && requestedTarget !== imageTarget) {
+      return azureImageScopeMismatch("target", requestedTarget, imageTarget);
+    }
+    const requestedRegion = (input.region ?? url.searchParams.get("region") ?? "").trim();
+    const imageRegion = (image.region ?? "").trim();
+    if (
+      requestedRegion &&
+      imageRegion &&
+      requestedRegion.toLowerCase() !== imageRegion.toLowerCase()
+    ) {
+      return azureImageScopeMismatch("region", requestedRegion, imageRegion);
+    }
+    const rawRegion = requestedRegion || imageRegion || this.location || "";
+    const region = rawRegion.trim().toLowerCase();
+    if (!region) {
+      return json(
+        { error: "invalid_region", message: "Azure image promotion requires a location" },
+        { status: 400 },
+      );
+    }
+    const requestedArchitectureValue =
+      input.architecture ?? url.searchParams.get("architecture") ?? undefined;
+    let requestedArchitecture: ReturnType<typeof normalizeArchitecture> | undefined;
+    let imageArchitecture: ReturnType<typeof normalizeArchitecture> | undefined;
+    try {
+      requestedArchitecture = requestedArchitectureValue
+        ? normalizeArchitecture(requestedArchitectureValue)
+        : undefined;
+      imageArchitecture = image.architecture
+        ? normalizeArchitecture(image.architecture)
+        : undefined;
+    } catch (error) {
+      return json(
+        { error: "invalid_architecture", message: coordinatorErrorMessage(this.env, error) },
+        { status: 400 },
+      );
+    }
+    if (requestedArchitecture && imageArchitecture && requestedArchitecture !== imageArchitecture) {
+      return azureImageScopeMismatch("architecture", requestedArchitecture, imageArchitecture);
+    }
+    const requestedServerType = (
+      input.serverType ??
+      url.searchParams.get("serverType") ??
+      ""
+    ).trim();
+    const imageServerType = (image.serverType ?? "").trim();
+    if (
+      requestedServerType &&
+      imageServerType &&
+      requestedServerType.toLowerCase() !== imageServerType.toLowerCase()
+    ) {
+      return azureImageScopeMismatch("serverType", requestedServerType, imageServerType);
+    }
+    const serverType = imageServerType || requestedServerType;
+    if (!serverType) {
+      return json(
+        {
+          error: "invalid_image_scope",
+          message: "Azure image promotion requires the source VM size or --type",
+        },
+        { status: 409 },
+      );
+    }
+    let os: string | undefined;
+    if (target === "linux") {
+      try {
+        const requestedOSValue = input.os ?? url.searchParams.get("os") ?? undefined;
+        const requestedOS = requestedOSValue ? normalizeOSImage(requestedOSValue) : undefined;
+        const imageOS = image.os ? normalizeOSImage(image.os) : undefined;
+        if (requestedOS && imageOS && requestedOS !== imageOS) {
+          return azureImageScopeMismatch("os", requestedOS, imageOS);
+        }
+        os = requestedOS ?? imageOS ?? defaultOSImage;
+      } catch (error) {
+        return json(
+          { error: "invalid_os", message: coordinatorErrorMessage(this.env, error) },
+          { status: 400 },
+        );
+      }
+    }
+    const promoted: PromotedImageRecord = {
+      ...image,
+      provider: "azure",
+      target,
+      ...(os ? { os } : {}),
+      region,
+      architecture: requestedArchitecture ?? imageArchitecture ?? "amd64",
+      serverType,
+      promotedAt: new Date().toISOString(),
+    };
+    await this.storage.put(promotedAzureImageKey(promoted), promoted);
+    return { image: promoted };
+  }
 
   async deleteSSHKey(): Promise<void> {
     // Azure stores the SSH public key inline on the VM; nothing to clean up.
@@ -21436,7 +21772,8 @@ export class AWSProvider implements CloudProvider {
           "image capability requirements cannot be verified for an explicit or stock image source",
         );
       }
-      return config;
+      const selectedImage = awsConfiguredImageIdentity(config, this.env);
+      return { ...config, ...(selectedImage ? { selectedImage } : {}) };
     }
     if (config.target === "macos") {
       const awsPromotedAMIs = await this.promotedImagesForFallback(config);
@@ -21463,6 +21800,18 @@ export class AWSProvider implements CloudProvider {
     return {
       ...config,
       awsAMI: promoted?.id ?? "",
+      ...(promoted
+        ? {
+            selectedImage: {
+              id: promoted.id,
+              source: "promoted" as const,
+              provider: "aws" as const,
+              kind: promoted.kind ?? "aws-ami",
+              region: promoted.region ?? config.awsRegion,
+              promotedAt: promoted.promotedAt,
+            },
+          }
+        : {}),
       ...(promoted?.region ? { awsRegion: promoted.region } : {}),
     };
   }
@@ -21691,8 +22040,11 @@ export class AWSProvider implements CloudProvider {
     serverType: string;
     market?: string;
     attempts?: ProvisioningAttempt[];
+    image?: LeaseImageIdentity;
+    provisioningTiming?: LeaseProvisioningTiming;
   }> {
     const regions = awsRegionCandidates(config, this.env, this.region);
+    const totalStartedAt = Date.now();
     const failures: string[] = [];
     const regionAttempts: ProvisioningAttempt[] = [];
     const ingressOptions =
@@ -21710,14 +22062,19 @@ export class AWSProvider implements CloudProvider {
         // Record only regions whose provisioning path is about to mutate provider state.
         // oxlint-disable-next-line eslint/no-await-in-loop -- region fallback is intentionally ordered.
         await provisioning?.onTargetAttempt?.({ region });
-        // oxlint-disable-next-line eslint/no-await-in-loop -- region fallback must preserve ordered capacity preference.
-        const { server, serverType, market, attempts } = await client.createServerWithFallback(
-          { ...config, awsRegion: region },
-          leaseID,
-          slug,
-          owner,
-          ingressOptions,
-        );
+        const requestStartedAt = Date.now();
+        const { server, serverType, market, attempts, imageID } =
+          // oxlint-disable-next-line eslint/no-await-in-loop -- region fallback must preserve ordered capacity preference.
+          await client.createServerWithFallback(
+            { ...config, awsRegion: region },
+            leaseID,
+            slug,
+            owner,
+            ingressOptions,
+          );
+        const requestMs = Date.now() - requestStartedAt;
+        const networkReadyStartedAt = Date.now();
+        let bootstrapMs = 0;
         let readyServer: ProviderMachine;
         try {
           // oxlint-disable-next-line eslint/no-await-in-loop -- wait on the region that created the instance.
@@ -21725,6 +22082,7 @@ export class AWSProvider implements CloudProvider {
           if (config.awsRequireSSM) {
             // oxlint-disable-next-line eslint/no-await-in-loop -- private readiness belongs to the selected region.
             await client.waitForSSMOnline(server.cloudID);
+            const bootstrapStartedAt = Date.now();
             // oxlint-disable-next-line eslint/no-await-in-loop -- bootstrap must finish before the lease becomes active.
             const bootstrap = await client.runSSMBootstrap(
               server.cloudID,
@@ -21732,6 +22090,7 @@ export class AWSProvider implements CloudProvider {
               config.awsSSMBootstrapCommand,
               config.awsSSMLogGroup,
             );
+            bootstrapMs = Date.now() - bootstrapStartedAt;
             readyServer = {
               ...readyServer,
               host: "",
@@ -21775,7 +22134,19 @@ export class AWSProvider implements CloudProvider {
           serverType: string;
           market?: string;
           attempts?: ProvisioningAttempt[];
-        } = { server: { ...readyServer, region }, serverType };
+          image?: LeaseImageIdentity;
+          provisioningTiming?: LeaseProvisioningTiming;
+        } = {
+          server: { ...readyServer, region },
+          serverType,
+          image: awsLeaseImageIdentity(config, imageID, region),
+          provisioningTiming: {
+            requestMs,
+            networkReadyMs: Date.now() - networkReadyStartedAt - bootstrapMs,
+            ...(bootstrapMs > 0 ? { bootstrapMs } : {}),
+            totalMs: Date.now() - totalStartedAt,
+          },
+        };
         if (market) {
           result.market = market;
         }

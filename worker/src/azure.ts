@@ -1205,7 +1205,7 @@ export class AzureClient {
         caching: "ReadWrite",
       };
     } else {
-      const image = azureImageReference(this.imageForConfig(config));
+      const image = azureImageReference(this.resolvedImageForConfig(config));
       const osDisk: Record<string, unknown> = {
         name: `${name}-osdisk`,
         createOption: "FromImage",
@@ -1269,7 +1269,7 @@ export class AzureClient {
     return toMachine(vm, ip);
   }
 
-  private imageForConfig(config: LeaseConfig): string {
+  resolvedImageForConfig(config: LeaseConfig): string {
     const image = config.azureImage || this.image;
     if (
       config.target === "linux" &&

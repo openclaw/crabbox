@@ -46,10 +46,11 @@ func (a App) imageCreate(ctx context.Context, args []string) error {
 
 func (a App) imagePromote(ctx context.Context, args []string) error {
 	fs := newFlagSet("image promote", a.Stderr)
-	target := fs.String("target", "", "AWS image target: linux, macos, or windows")
+	provider := fs.String("provider", "aws", "image provider: aws or azure")
+	target := fs.String("target", "", "image target: linux, macos, or windows")
 	osImage := fs.String("os", "", "portable Linux OS selector for promoted Linux AMIs")
-	region := fs.String("region", "", "AWS region containing the AMI")
-	serverType := fs.String("type", "", "AWS instance type the AMI boots on, for example mac1.metal")
+	region := fs.String("region", "", "provider region or Azure location containing the image")
+	serverType := fs.String("type", "", "AWS instance type or Azure VM size the image boots on")
 	serverTypeAlias := fs.String("server-type", "", "alias for --type")
 	architecture := fs.String("architecture", "", "AWS AMI architecture, for example x86_64_mac or arm64_mac")
 	osVersion := fs.String("os-version", "", "OS version present in the image")
@@ -68,7 +69,14 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return exit(2, "usage: crabbox image promote <ami-id> [--target linux|macos|windows] [--os ubuntu:26.04|ubuntu:24.04] [--region <aws-region>] [--type <instance-type>] [--architecture <arch>] [--os-version <version>] [--sdk <name=version>] [--runtime <name=version>] [--browser] [--webview2] [--desktop] [--fast-snapshot-restore --fsr-az <az>]")
+		return exit(2, "usage: crabbox image promote <image-id> [--provider aws|azure] [--target linux|macos|windows] [--os ubuntu:26.04|ubuntu:24.04] [--region <region>] [--type <instance-type>] [--architecture <arch>] [--os-version <version>] [--sdk <name=version>] [--runtime <name=version>] [--browser] [--webview2] [--desktop] [--fast-snapshot-restore --fsr-az <az>]")
+	}
+	normalizedProvider := normalizeProviderName(*provider)
+	if normalizedProvider != "aws" && normalizedProvider != "azure" {
+		return exit(2, "unsupported image promotion provider %q; use aws or azure", *provider)
+	}
+	if normalizedProvider == "azure" && (*fastSnapshotRestore || len(fastSnapshotRestoreAZs) > 0) {
+		return exit(2, "Fast Snapshot Restore is AWS-only")
 	}
 	if *serverType == "" {
 		*serverType = *serverTypeAlias
@@ -84,6 +92,15 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if normalizedProvider == "azure" &&
+		(strings.TrimSpace(*osVersion) != "" ||
+			len(sdks) > 0 ||
+			len(runtimes) > 0 ||
+			*browser ||
+			*webView2 ||
+			*desktop) {
+		return exit(2, "image capability declarations are AWS-only")
+	}
 	if flagWasSet(fs, "os") {
 		normalized, err := normalizeOSImage(*osImage)
 		if err != nil {
@@ -96,7 +113,7 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 		return err
 	}
 	image, err := coord.PromoteImage(ctx, fs.Arg(0), CoordinatorImageRef{
-		Provider:               "aws",
+		Provider:               normalizedProvider,
 		Region:                 *region,
 		Target:                 *target,
 		OSImage:                *osImage,

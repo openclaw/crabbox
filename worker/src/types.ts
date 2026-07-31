@@ -424,6 +424,8 @@ export interface LeaseRecord {
   hostID?: string;
   market?: string;
   provisioningAttempts?: ProvisioningAttempt[];
+  image?: LeaseImageIdentity;
+  provisioningTiming?: LeaseProvisioningTiming;
   awsSSMCommandID?: string;
   awsSSMCommandStatus?: string;
   awsSSMLogGroup?: string;
@@ -635,6 +637,30 @@ export interface ProvisioningAttempt {
   market?: string;
   category?: string;
   message: string;
+}
+
+export type ProviderImageSource =
+  | "promoted"
+  | "explicit"
+  | "snapshot"
+  | "stock"
+  | "provider-default";
+
+export interface LeaseImageIdentity {
+  id: string;
+  source: ProviderImageSource;
+  provider?: Provider;
+  kind?: string;
+  region?: string;
+  sourceID?: string;
+  promotedAt?: string;
+}
+
+export interface LeaseProvisioningTiming {
+  requestMs: number;
+  networkReadyMs?: number;
+  bootstrapMs?: number;
+  totalMs: number;
 }
 
 export interface CapacityHint {

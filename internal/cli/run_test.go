@@ -586,9 +586,13 @@ func TestRunWithExistingLeaseRequestsProviderPreparation(t *testing.T) {
 }
 
 func TestFormatRunSummary(t *testing.T) {
+	endToEndStartedAt := time.Unix(0, 0)
 	got := formatRunSummary(runTimings{
-		sync:    1200 * time.Millisecond,
-		command: 3400 * time.Millisecond,
+		started:           endToEndStartedAt.Add(1500 * time.Millisecond),
+		endToEndStartedAt: endToEndStartedAt,
+		lease:             time.Second,
+		sync:              1200 * time.Millisecond,
+		command:           3400 * time.Millisecond,
 		syncSteps: syncStepTimings{
 			manifest: 20 * time.Millisecond,
 			rsync:    900 * time.Millisecond,
@@ -600,6 +604,7 @@ func TestFormatRunSummary(t *testing.T) {
 		"sync=1.2s",
 		"command=3.4s",
 		"total=5s",
+		"end_to_end=6.5s",
 		"sync_skipped=true",
 		"exit=7",
 		"sync_steps=manifest:20ms,rsync:900ms",
@@ -680,9 +685,14 @@ func TestShouldReplaceLeaseAfterBeforeCommandSSHFailure(t *testing.T) {
 
 func TestTimingJSONShape(t *testing.T) {
 	var buf bytes.Buffer
+	endToEndStartedAt := time.Unix(0, 0)
 	err := writeTimingJSON(&buf, timingReportFromRun("aws", "cbx_123", "blue-crab", runTimings{
-		sync:    1200 * time.Millisecond,
-		command: 3400 * time.Millisecond,
+		started:           endToEndStartedAt.Add(2600 * time.Millisecond),
+		endToEndStartedAt: endToEndStartedAt,
+		lease:             2300 * time.Millisecond,
+		bootstrap:         700 * time.Millisecond,
+		sync:              1200 * time.Millisecond,
+		command:           3400 * time.Millisecond,
 		syncSteps: syncStepTimings{
 			rsync:                900 * time.Millisecond,
 			gitHydrateSkipped:    true,
@@ -696,9 +706,12 @@ func TestTimingJSONShape(t *testing.T) {
 	var got struct {
 		Provider    string `json:"provider"`
 		LeaseID     string `json:"leaseId"`
+		LeaseMs     int64  `json:"leaseMs"`
+		BootstrapMs int64  `json:"bootstrapMs"`
 		SyncMs      int64  `json:"syncMs"`
 		CommandMs   int64  `json:"commandMs"`
 		TotalMs     int64  `json:"totalMs"`
+		EndToEndMs  int64  `json:"endToEndMs"`
 		ExitCode    int    `json:"exitCode"`
 		RunStatus   string `json:"runStatus"`
 		ErrorKind   string `json:"errorKind"`
@@ -713,7 +726,7 @@ func TestTimingJSONShape(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Provider != "aws" || got.LeaseID != "cbx_123" || got.SyncMs != 1200 || got.CommandMs != 3400 || got.TotalMs != 5000 || got.ExitCode != 7 || !got.SyncSkipped {
+	if got.Provider != "aws" || got.LeaseID != "cbx_123" || got.LeaseMs != 2300 || got.BootstrapMs != 700 || got.SyncMs != 1200 || got.CommandMs != 3400 || got.TotalMs != 5000 || got.EndToEndMs != 7600 || got.ExitCode != 7 || !got.SyncSkipped {
 		t.Fatalf("unexpected report: %#v", got)
 	}
 	if got.RunStatus != "failed" || got.ErrorKind != "command-exit" {

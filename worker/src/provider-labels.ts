@@ -59,6 +59,10 @@ export function leaseProviderLabels(
   if (config.code) {
     labels["code"] = "true";
   }
+  if (config.selectedImage) {
+    labels["image_id"] = config.selectedImage.id;
+    labels["image_source"] = config.selectedImage.source;
+  }
   if (config.tailscale) {
     labels["tailscale"] = "true";
     labels["tailscale_state"] = "requested";

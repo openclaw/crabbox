@@ -8,6 +8,7 @@ import {
   awsCapacityReadinessCheckForQuota,
   awsInstanceTypeVCPUs,
   awsHostIDsFromSet,
+  awsLeaseImageIdentity,
   awsLaunchCandidates,
   awsMacHostIDFromDescribeHosts,
   awsMacHostOfferingsFromDescribeInstanceTypeOfferings,
@@ -37,6 +38,28 @@ afterEach(() => {
 });
 
 describe("aws provider", () => {
+  it("uses the launched fallback AMI for provider image labels", () => {
+    const config = leaseConfig({
+      provider: "aws",
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    config.selectedImage = {
+      id: "ami-primary",
+      source: "promoted",
+      provider: "aws",
+      kind: "aws-ami",
+      region: "eu-west-1",
+    };
+    config.awsPromotedAMIs[awsPromotedAMIConfigKey("us-east-1", config.serverType)] =
+      "ami-fallback";
+
+    expect(awsLeaseImageIdentity(config, "ami-fallback", "us-east-1")).toMatchObject({
+      id: "ami-fallback",
+      source: "promoted",
+      region: "us-east-1",
+    });
+  });
+
   it("rejects a canonical SSH key name reserved for another lease", async () => {
     const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>();
     vi.stubGlobal("fetch", fetchMock);
@@ -2260,6 +2283,7 @@ describe("aws provider", () => {
     expect(runImages).toEqual(["ami-promoted-mac1"]);
     expect(imageQueries).toBe(0);
     expect(result.serverType).toBe("mac1.metal");
+    expect(result.imageID).toBe("ami-promoted-mac1");
   });
 
   it("prefers region-scoped promoted macOS AMIs over a pinned AMI", async () => {

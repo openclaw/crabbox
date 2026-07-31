@@ -1,16 +1,17 @@
 # image
 
 `crabbox image` holds the trusted-operator controls for provider base images:
-creating runner images, promoting an AWS AMI as the brokered default, inspecting
-Fast Snapshot Restore, and deleting stale images. Use it for shared base images
-and explicit image cleanup, not for per-scenario state. To save one prepared
-lease and fork that exact scenario later, use
+creating runner images, promoting an AWS AMI or Azure OS disk snapshot as a
+brokered default, inspecting Fast Snapshot Restore, and deleting stale images.
+Use it for shared base images and explicit image cleanup, not for per-scenario
+state. To save one prepared lease and fork that exact scenario later, use
 [`crabbox checkpoint`](checkpoint.md).
 
 ```sh
 crabbox image create --id cbx_... --name my-runner-20260501-1246 --wait
 crabbox image promote ami-1234567890abcdef0
 crabbox image promote ami-1234567890abcdef0 --target macos --region us-east-1 --type mac2.metal
+crabbox image promote snapshot-devtools --provider azure --target linux --region westeurope
 crabbox image fsr-status ami-1234567890abcdef0 --region us-west-2 --fsr-az us-west-2a
 crabbox image delete ami-1234567890abcdef0 --region eu-west-1
 crabbox image delete my-managed-image --provider azure --region westeurope
@@ -25,10 +26,10 @@ CRABBOX_COORDINATOR_ADMIN_TOKEN`. These commands are intentionally unavailable
 to normal GitHub browser-login users.
 
 Image bytes live in the provider account, never in git or coordinator durable
-state. AWS images are AMIs backed by EBS snapshots; Azure images are managed
-images; GCP images are Compute Engine machine images. Crabbox stores promoted
-AWS AMI metadata per target, architecture, and region so future brokered AWS
-leases can resolve a matching default. Hetzner snapshots/images live in the
+state. AWS images are AMIs backed by EBS snapshots; Azure promotion uses
+managed OS disk snapshots; GCP images are Compute Engine machine images.
+Crabbox stores promoted AWS and Azure metadata in provider-specific scopes so
+future brokered leases resolve a matching default. Hetzner snapshots/images live in the
 Hetzner project and are selected through `image`/`CRABBOX_HETZNER_IMAGE`;
 Crabbox has no Hetzner create/promote lifecycle commands yet.
 
@@ -94,20 +95,22 @@ Failure handling:
 
 ## promote
 
-Promote an available AMI as the coordinator's default AWS image. Promotion is
-AWS-only.
+Promote an available AWS AMI or Crabbox-created Azure OS disk snapshot as a
+scoped coordinator default.
 
 ```sh
 crabbox image promote ami-1234567890abcdef0
+crabbox image promote snapshot-devtools --provider azure --target linux --region westeurope
 ```
 
 Flags:
 
 ```text
+--provider <name>        aws or azure (default aws)
 --target <name>          linux, macos, or windows
 --os <selector>          portable Linux OS selector for Linux AMIs (ubuntu:26.04 | ubuntu:24.04)
---region <name>          AWS region containing the AMI
---type <instance-type>   instance type the AMI boots on, for example mac2.metal
+--region <name>          AWS region or Azure location containing the image
+--type <instance-type>   AWS instance type or Azure VM size the image boots on
 --server-type <type>     alias for --type
 --architecture <arch>    AWS AMI architecture, for example x86_64_mac or arm64_mac
 --os-version <version>   numeric OS version present in the image
@@ -121,9 +124,15 @@ Flags:
 --json                   print the promoted image record as JSON
 ```
 
-Add `--target` and `--region` when promoting an AMI that was not created through
-`crabbox image create`; images created by Crabbox inherit target and region
-metadata from their source lease. For external macOS AMIs, Crabbox reads the
+For Azure, create a native `disk-snapshot` checkpoint from the prepared lease,
+wait for it to succeed, then promote its snapshot name or resource ID. Azure
+promotion accepts only Crabbox-owned OS disk snapshots and scopes selection by
+target, architecture, Azure VM size, Linux OS selector, and location. Fast Snapshot Restore
+flags are rejected for Azure.
+
+Add `--target` and `--region` when promoting an AWS AMI that was not created
+through `crabbox image create`; images created by Crabbox inherit target and
+region metadata from their source lease. For external macOS AMIs, Crabbox reads the
 architecture from AWS but also accepts `--type` or `--architecture` to pin the
 promotion metadata explicitly. Use `--os` to record the portable Linux selector
 for a promoted Linux AMI.
@@ -149,9 +158,10 @@ crabbox image promote \
 Fast Snapshot Restore is provider-billed per snapshot and availability zone. Use
 it for known hot zones, not every candidate bake.
 
-Future brokered AWS leases use the promoted image when the request does not set
-an explicit `awsAMI`/`CRABBOX_AWS_AMI` override. Promotion stores coordinator
-metadata only; it does not copy or modify the AMI. A macOS promotion is scoped
+Future brokered AWS or Azure leases use the matching promoted image when the
+request does not set an explicit provider image/snapshot override. Promotion
+stores coordinator metadata only; it does not copy or modify provider image
+bytes. An AWS macOS promotion is scoped
 to matching macOS leases and never becomes the Linux or Windows default.
 Crabbox retains a scoped catalog of promoted AMIs so a lease can select the
 newest image satisfying every requested image capability, not only the last

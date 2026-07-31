@@ -316,6 +316,47 @@ func TestCoordinatorAcquireSendsTailscaleHostnameTemplate(t *testing.T) {
 	}
 }
 
+func TestCoordinatorAcquireReportsSelectedImageAndProviderStartupTiming(t *testing.T) {
+	lease := CoordinatorLease{
+		ID:         "cbx_image",
+		Slug:       "image-proof",
+		Provider:   "aws",
+		TargetOS:   targetLinux,
+		ServerType: "m7i.large",
+		CloudID:    "i-image",
+		ServerName: "crabbox-image-proof",
+		Host:       "203.0.113.10",
+		SSHUser:    "crabbox",
+		SSHPort:    "2222",
+		WorkRoot:   defaultPOSIXWorkRoot,
+		State:      "active",
+		Image: &CoordinatorLeaseImage{
+			ID:         "ami-devtools",
+			Source:     "promoted",
+			Provider:   "aws",
+			Kind:       "aws-ami",
+			Region:     "eu-west-1",
+			PromotedAt: "2026-07-31T00:00:00Z",
+		},
+		ProvisioningTiming: &CoordinatorProvisioningTiming{
+			RequestMs:      1200,
+			NetworkReadyMs: 3400,
+			BootstrapMs:    500,
+			TotalMs:        5100,
+		},
+	}
+	var stderr bytes.Buffer
+	writeCoordinatorLeaseProvisioningDetails(&stderr, lease)
+	for _, want := range []string{
+		"image selected id=ami-devtools source=promoted kind=aws-ami region=eu-west-1 promoted_at=2026-07-31T00:00:00Z",
+		"provider startup request=1.2s network_ready=3.4s bootstrap=500ms total=5.1s",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr=%q missing %q", stderr.String(), want)
+		}
+	}
+}
+
 func TestCoordinatorCreateLeaseTimesOutWithDiagnostics(t *testing.T) {
 	oldTimeout := coordinatorCreateLeaseTimeoutForConfig
 	oldInterval := coordinatorCreateLeaseProgressInterval

@@ -10,6 +10,8 @@ type TimingReport struct {
 	Provider      string        `json:"provider"`
 	LeaseID       string        `json:"leaseId,omitempty"`
 	Slug          string        `json:"slug,omitempty"`
+	LeaseMs       int64         `json:"leaseMs,omitempty"`
+	BootstrapMs   int64         `json:"bootstrapMs,omitempty"`
 	SyncMs        int64         `json:"syncMs"`
 	SyncPhases    []TimingPhase `json:"syncPhases,omitempty"`
 	SyncSkipped   bool          `json:"syncSkipped"`
@@ -19,6 +21,7 @@ type TimingReport struct {
 	CommandMs     int64         `json:"commandMs"`
 	CommandPhases []TimingPhase `json:"commandPhases,omitempty"`
 	TotalMs       int64         `json:"totalMs"`
+	EndToEndMs    int64         `json:"endToEndMs"`
 	ExitCode      int           `json:"exitCode"`
 	RunStatus     RunStatus     `json:"runStatus,omitempty"`
 	ErrorKind     RunErrorKind  `json:"errorKind,omitempty"`
@@ -116,12 +119,15 @@ func timingReportFromRun(provider, leaseID, slug string, timings runTimings, tot
 		Provider:      provider,
 		LeaseID:       leaseID,
 		Slug:          slug,
+		LeaseMs:       timings.lease.Milliseconds(),
+		BootstrapMs:   timings.bootstrap.Milliseconds(),
 		SyncMs:        timings.sync.Milliseconds(),
 		SyncPhases:    syncTimingPhases(timings.syncSteps),
 		SyncSkipped:   timings.syncSkipped,
 		CommandMs:     timings.command.Milliseconds(),
 		CommandPhases: timings.commandPhases,
 		TotalMs:       total.Milliseconds(),
+		EndToEndMs:    runEndToEndDuration(timings, total).Milliseconds(),
 		ExitCode:      exitCode,
 		BlockedStage:  timings.blockedStage,
 		RetryLikely:   timings.retryLikely,

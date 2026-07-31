@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 )
@@ -80,6 +81,7 @@ func (b *coordinatorLeaseBackend) acquireOnce(ctx context.Context, keep bool, re
 	}
 	server, target, leaseID := leaseToServerTarget(lease, cfg)
 	fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s server=%d type=%s ip=%s via coordinator\n", leaseID, blank(lease.Slug, "-"), server.ID, server.ServerType.Name, target.Host)
+	writeCoordinatorLeaseProvisioningDetails(b.rt.Stderr, lease)
 	if summary := coordinatorFallbackSummary(lease); summary != "" {
 		fmt.Fprintf(b.rt.Stderr, "fallback resolved %s\n", summary)
 	}
@@ -101,6 +103,37 @@ func (b *coordinatorLeaseBackend) acquireOnce(ctx context.Context, keep bool, re
 	}
 	target = bootstrapTarget
 	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: b.coord}, nil
+}
+
+func writeCoordinatorLeaseProvisioningDetails(stderr io.Writer, lease CoordinatorLease) {
+	if lease.Image != nil {
+		fmt.Fprintf(
+			stderr,
+			"image selected id=%s source=%s kind=%s region=%s promoted_at=%s\n",
+			blank(lease.Image.ID, "-"),
+			blank(lease.Image.Source, "-"),
+			blank(lease.Image.Kind, "-"),
+			blank(lease.Image.Region, "-"),
+			blank(lease.Image.PromotedAt, "-"),
+		)
+	}
+	if lease.ProvisioningTiming != nil {
+		fmt.Fprintf(
+			stderr,
+			"provider startup request=%s network_ready=%s bootstrap=%s total=%s\n",
+			formatMilliseconds(lease.ProvisioningTiming.RequestMs),
+			formatMilliseconds(lease.ProvisioningTiming.NetworkReadyMs),
+			formatMilliseconds(lease.ProvisioningTiming.BootstrapMs),
+			formatMilliseconds(lease.ProvisioningTiming.TotalMs),
+		)
+	}
+}
+
+func formatMilliseconds(value int64) string {
+	if value <= 0 {
+		return "-"
+	}
+	return (time.Duration(value) * time.Millisecond).Round(time.Millisecond).String()
 }
 
 type coordinatorCreateLeaseResult struct {
