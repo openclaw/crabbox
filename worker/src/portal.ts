@@ -3361,11 +3361,14 @@ function html(
     html { min-height:100%; background:var(--bg); }
     body { margin:0; min-height:100vh; overflow-x:hidden; background:var(--bg); color:var(--fg); font:14px/1.45 var(--oc-font-body); transition:background-color .18s,color .18s; }
     main { width:min(1180px, calc(100vw - 32px)); max-width:100%; margin:0 auto; padding:10px 0 22px; }
-    .portal-shell { width:min(1240px, calc(100vw - 16px)); max-width:100%; height:100dvh; display:grid; grid-template-rows:auto minmax(0,1fr); gap:8px; padding:6px 0 8px; overflow:hidden; }
-    .lease-shell { grid-template-rows:auto auto minmax(0,1fr); }
+    /* overflow:auto + a floored table row: tall viewports keep the app-like
+       fixed layout with internally scrolling tables, while short viewports
+       scroll the shell instead of silently clipping panels below the fold. */
+    .portal-shell { width:min(1240px, calc(100vw - 16px)); max-width:100%; height:100dvh; display:grid; grid-template-rows:auto minmax(240px,1fr); gap:8px; padding:6px 0 8px; overflow:auto; }
+    .lease-shell { grid-template-rows:auto auto minmax(240px,1fr); }
     /* Admin home inserts the admin summary between header and leases; without
        the extra auto row the summary lands in the 1fr slot and fills the viewport. */
-    .admin-home-shell { grid-template-rows:auto auto minmax(0,1fr); }
+    .admin-home-shell { grid-template-rows:auto auto minmax(240px,1fr); }
     .run-shell { height:auto; min-height:100dvh; overflow:visible; grid-template-rows:auto; }
     h1,h2,p { margin:0; }
     h1 { font-size:20px; font-weight:700; }
