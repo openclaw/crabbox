@@ -1,0 +1,77 @@
+name: Rotate Coordinator Admin Token
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coordinator-admin-token-rotate
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Guard protected rotation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require the protected default-branch workflow
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REF_PROTECTED: ${{ github.ref_protected }}
+          RUN_SHA: ${{ github.sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          expected_ref="refs/heads/$DEFAULT_BRANCH"
+          expected_workflow_ref="$GITHUB_REPOSITORY/.github/workflows/coordinator-admin-token-rotate.yml@$expected_ref"
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]
+          [[ "$GITHUB_REF" == "$expected_ref" ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$expected_workflow_ref" ]]
+          [[ "$REF_PROTECTED" == true ]]
+          [[ "$WORKFLOW_SHA" == "$RUN_SHA" ]]
+
+  rotate:
+    name: Rotate crabbox-coordinator admin token
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: coordinator
+    steps:
+      - name: Check out protected source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Install
+        run: npm ci
+        working-directory: worker
+
+      - name: Rotate coordinator admin token
+        shell: bash
+        working-directory: worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: "91b59577e757131d68d55a471fe32aca"
+          CRABBOX_ADMIN_TOKEN_NEXT: ${{ secrets.CRABBOX_ADMIN_TOKEN_NEXT }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$CLOUDFLARE_API_TOKEN" ]]; then
+            echo "::error::Set CLOUDFLARE_API_TOKEN on the coordinator environment."
+            exit 1
+          fi
+          if [[ -z "$CRABBOX_ADMIN_TOKEN_NEXT" ]]; then
+            echo "::error::Set CRABBOX_ADMIN_TOKEN_NEXT on the coordinator environment."
+            exit 1
+          fi
+          printf '%s' "$CRABBOX_ADMIN_TOKEN_NEXT" | npx wrangler secret put CRABBOX_ADMIN_TOKEN

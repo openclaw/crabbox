@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added a protected default-branch workflow for rotating the coordinator admin
+  token from a one-time environment secret without exposing it on argv.
 - Added exact brokered lease image identity and provider startup phase timings, plus Azure OS disk snapshot promotion and automatic scoped selection.
 - Added a project vision that defines Crabbox as a remote execution and evidence layer called by agents, with agent orchestration and model-credential delivery explicitly outside its scope.
 - Added coordinator-owned ready-pool desired capacity with atomic fill claims, provider-neutral compatibility keys, borrow heartbeats, abandoned-borrow quarantine, stale-record pruning, and pool counters.
