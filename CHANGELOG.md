@@ -4,6 +4,9 @@
 
 ### Added
 
+- Added a protected broker soak workflow that records sanitized AWS/Azure
+  maintenance evidence and runs one bounded, cleanup-verified Daytona canary
+  without direct provider credentials or a warm pool.
 - Added a protected default-branch workflow for rotating the coordinator admin
   token from a one-time environment secret without exposing it on argv.
 - Added exact brokered lease image identity and provider startup phase timings, plus Azure OS disk snapshot promotion and automatic scoped selection.
