@@ -1,0 +1,377 @@
+name: Broker Soak Canary
+run-name: Broker soak Daytona canary
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: broker-soak-canary
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Guard protected canary
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require the protected default-branch workflow
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REF_PROTECTED: ${{ github.ref_protected }}
+          RUN_SHA: ${{ github.sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          expected_ref="refs/heads/$DEFAULT_BRANCH"
+          expected_workflow_ref="$GITHUB_REPOSITORY/.github/workflows/broker-soak-canary.yml@$expected_ref"
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]
+          [[ "$GITHUB_REF" == "$expected_ref" ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$expected_workflow_ref" ]]
+          [[ "$REF_PROTECTED" == true ]]
+          [[ "$WORKFLOW_SHA" == "$RUN_SHA" ]]
+
+  canary:
+    name: Audit maintenance and run Daytona
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: image-publisher
+    env:
+      CRABBOX_COORDINATOR: ${{ vars.CRABBOX_COORDINATOR }}
+      CRABBOX_COORDINATOR_TOKEN: ${{ secrets.CRABBOX_COORDINATOR_ADMIN_TOKEN }}
+      CRABBOX_COORDINATOR_ADMIN_TOKEN: ${{ secrets.CRABBOX_COORDINATOR_ADMIN_TOKEN }}
+      CRABBOX_ACCESS_CLIENT_ID: ${{ secrets.CRABBOX_ACCESS_CLIENT_ID }}
+      CRABBOX_ACCESS_CLIENT_SECRET: ${{ secrets.CRABBOX_ACCESS_CLIENT_SECRET }}
+      CRABBOX_OWNER: broker-soak-canary-${{ github.run_id }}@openclaw.invalid
+      CRABBOX_ORG: openclaw
+      CRABBOX_ENV_ALLOW: CI
+    steps:
+      - name: Verify broker configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$CRABBOX_COORDINATOR" ]]; then
+            echo "::error::Set the CRABBOX_COORDINATOR variable on the image-publisher environment."
+            exit 1
+          fi
+          if [[ -z "$CRABBOX_COORDINATOR_ADMIN_TOKEN" ]]; then
+            echo "::error::Set the CRABBOX_COORDINATOR_ADMIN_TOKEN secret on the image-publisher environment."
+            exit 1
+          fi
+
+      - name: Check out protected source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Build trusted Crabbox CLI
+        run: go build -trimpath -o bin/crabbox ./cmd/crabbox
+
+      - name: Collect scheduled maintenance evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROOF_DIR="$RUNNER_TEMP/broker-soak-proof"
+          mkdir -p "$PROOF_DIR"
+
+          admin_get() {
+            local route="$1"
+            local output="$2"
+            {
+              printf 'Authorization: Bearer '
+              printf '%s' "$CRABBOX_COORDINATOR_ADMIN_TOKEN"
+              printf '\n'
+              if [[ -n "$CRABBOX_ACCESS_CLIENT_ID" && -n "$CRABBOX_ACCESS_CLIENT_SECRET" ]]; then
+                printf 'CF-Access-Client-Id: %s\n' "$CRABBOX_ACCESS_CLIENT_ID"
+                printf 'CF-Access-Client-Secret: %s\n' "$CRABBOX_ACCESS_CLIENT_SECRET"
+              fi
+            } | curl --fail --silent --show-error \
+              --connect-timeout 10 \
+              --max-time 30 \
+              -H @- \
+              -o "$output" \
+              "$CRABBOX_COORDINATOR$route"
+          }
+
+          sanitize_sweep() {
+            jq '{
+              config: {
+                enabled: .config.enabled,
+                intervalSeconds: .config.intervalSeconds,
+                graceSeconds: .config.graceSeconds
+              },
+              lastRun: (
+                .lastRun
+                | if . == null then null else {
+                    startedAt,
+                    finishedAt,
+                    mode,
+                    trigger,
+                    enabled,
+                    regions,
+                    scanned,
+                    candidateCount: (.candidates | length),
+                    terminated,
+                    errorCount: (.errors | length),
+                    nextRunAt
+                  }
+                  end
+              )
+            }'
+          }
+
+          admin_get "/v1/admin/aws-orphan-sweep" "$RUNNER_TEMP/aws-sweep.json"
+          admin_get "/v1/admin/azure-orphan-sweep" "$RUNNER_TEMP/azure-sweep.json"
+          sanitize_sweep <"$RUNNER_TEMP/aws-sweep.json" >"$RUNNER_TEMP/aws-sweep-sanitized.json"
+          sanitize_sweep <"$RUNNER_TEMP/azure-sweep.json" >"$RUNNER_TEMP/azure-sweep-sanitized.json"
+          jq -n \
+            --slurpfile aws "$RUNNER_TEMP/aws-sweep-sanitized.json" \
+            --slurpfile azure "$RUNNER_TEMP/azure-sweep-sanitized.json" \
+            '{
+              capturedAt: (now | todateiso8601),
+              aws: $aws[0],
+              azure: $azure[0]
+            }' >"$PROOF_DIR/maintenance.json"
+
+          jq -e '
+            def iso_epoch:
+              sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
+            def healthy_sweep:
+              . as $sweep
+              | ($sweep.lastRun.finishedAt | iso_epoch) as $finished
+              | ($sweep.lastRun.nextRunAt | iso_epoch) as $next
+              | $sweep.config.enabled == true
+                and $sweep.lastRun.enabled == true
+                and $sweep.lastRun.trigger == "alarm"
+                and $sweep.lastRun.errorCount == 0
+                and $finished <= (now + 60)
+                and (now - $finished) <= ($sweep.config.intervalSeconds * 1.5)
+                and now <= ($next + ($sweep.config.intervalSeconds * 0.5));
+            (.aws | healthy_sweep) and (.azure | healthy_sweep)
+          ' "$PROOF_DIR/maintenance.json" >/dev/null
+
+      - name: Verify Daytona readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROOF_DIR="$RUNNER_TEMP/broker-soak-proof"
+          set +e
+          bin/crabbox doctor --provider daytona --json >"$RUNNER_TEMP/daytona-doctor.json"
+          doctor_status=$?
+          set -e
+          jq '{
+            ok,
+            provider,
+            checks: [
+              .checks[] | {
+                status,
+                check,
+                provider,
+                details: {
+                  class: .details.class,
+                  hint: .details.hint,
+                  timeout: .details.timeout
+                }
+              }
+            ]
+          }' "$RUNNER_TEMP/daytona-doctor.json" >"$PROOF_DIR/daytona-doctor.json"
+          jq -e '.ok == true and .provider == "daytona"' "$PROOF_DIR/daytona-doctor.json" >/dev/null
+          [[ "$doctor_status" -eq 0 ]]
+
+      - name: Run bounded Daytona canary
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROOF_DIR="$RUNNER_TEMP/broker-soak-proof"
+          set +e
+          # The single-quoted script expands on the remote lease.
+          # shellcheck disable=SC2016
+          timeout --signal=TERM --kill-after=30s 20m bin/crabbox run \
+            --provider daytona \
+            --target linux \
+            --network public \
+            --tailscale=false \
+            --ttl 20m \
+            --idle-timeout 5m \
+            --no-sync \
+            --stop-after always \
+            --timing-json \
+            --shell -- \
+            'set -eu; test "$(uname -s)" = Linux; printf "daytona-canary-ok\n"' \
+            >"$RUNNER_TEMP/daytona-canary.log" 2>&1
+          canary_status=$?
+          set -e
+
+          jq -Rsc '
+            [
+              split("\n")[]
+              | fromjson?
+              | select(type == "object" and has("provider") and has("exitCode"))
+            ]
+            | last // {}
+            | {
+                provider,
+                syncMs,
+                commandMs,
+                totalMs,
+                exitCode,
+                runStatus
+              }
+          ' "$RUNNER_TEMP/daytona-canary.log" >"$PROOF_DIR/daytona-canary.json"
+
+          jq -e '.provider == "daytona" and .exitCode == 0' "$PROOF_DIR/daytona-canary.json" >/dev/null
+          [[ "$canary_status" -eq 0 ]]
+
+      - name: Release and verify dedicated canary leases
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROOF_DIR="$RUNNER_TEMP/broker-soak-proof"
+          mkdir -p "$PROOF_DIR"
+
+          request_headers() {
+            printf 'Authorization: Bearer '
+            printf '%s' "$CRABBOX_COORDINATOR_ADMIN_TOKEN"
+            printf '\n'
+            if [[ -n "$CRABBOX_ACCESS_CLIENT_ID" && -n "$CRABBOX_ACCESS_CLIENT_SECRET" ]]; then
+              printf 'CF-Access-Client-Id: %s\n' "$CRABBOX_ACCESS_CLIENT_ID"
+              printf 'CF-Access-Client-Secret: %s\n' "$CRABBOX_ACCESS_CLIENT_SECRET"
+            fi
+          }
+
+          admin_get() {
+            local route="$1"
+            local output="$2"
+            request_headers | curl --fail --silent --show-error \
+              --connect-timeout 10 \
+              --max-time 30 \
+              -H @- \
+              -o "$output" \
+              "$CRABBOX_COORDINATOR$route"
+          }
+
+          admin_release() {
+            local lease_id="$1"
+            request_headers | curl --fail --silent --show-error \
+              --connect-timeout 10 \
+              --max-time 90 \
+              -X POST \
+              -H @- \
+              -H 'Content-Type: application/json' \
+              --data '{"delete":true}' \
+              -o /dev/null \
+              "$CRABBOX_COORDINATOR/v1/admin/leases/$lease_id/release"
+          }
+
+          encoded_owner="$(jq -rn --arg value "$CRABBOX_OWNER" '$value | @uri')"
+          route="/v1/admin/leases?owner=$encoded_owner&limit=100"
+          admin_get "$route" "$RUNNER_TEMP/canary-leases-before.json"
+          total_before="$(jq '.leases | length' "$RUNNER_TEMP/canary-leases-before.json")"
+          [[ "$total_before" -lt 100 ]]
+
+          # Released/expired records are clean only after provider deletion has
+          # completed and no retained-resource or retry marker remains.
+          unsafe_count() {
+            jq '[
+              .leases[]
+              | select(
+                  (.state != "released" and .state != "expired")
+                  or .releaseDeletesServer != null
+                  or .cleanupStartedAt != null
+                  or .cleanupError != null
+                  or .provisioningResourceMayExist == true
+                  or .providerKeyCleanupPending == true
+                  or .runtimeAdapterDeleteRequestedAt != null
+                )
+            ] | length' "$1"
+          }
+          unsafe_before="$(unsafe_count "$RUNNER_TEMP/canary-leases-before.json")"
+
+          jq -r '
+            .leases[]
+            | select(
+                (.state != "released" and .state != "expired")
+                or .releaseDeletesServer != null
+                or .cleanupStartedAt != null
+                or .cleanupError != null
+                or .provisioningResourceMayExist == true
+                or .providerKeyCleanupPending == true
+                or .runtimeAdapterDeleteRequestedAt != null
+              )
+            | select(.cleanupStartedAt == null and .runtimeAdapterDeleteRequestedAt == null)
+            | .id
+          ' "$RUNNER_TEMP/canary-leases-before.json" |
+            while IFS= read -r lease_id; do
+              [[ -n "$lease_id" ]] || continue
+              admin_release "$lease_id"
+            done
+
+          remaining="$unsafe_before"
+          total_after="$total_before"
+          for attempt in $(seq 1 40); do
+            admin_get "$route" "$RUNNER_TEMP/canary-leases-after.json"
+            total_after="$(jq '.leases | length' "$RUNNER_TEMP/canary-leases-after.json")"
+            [[ "$total_after" -lt 100 ]]
+            remaining="$(unsafe_count "$RUNNER_TEMP/canary-leases-after.json")"
+            [[ "$remaining" -eq 0 ]] && break
+            [[ "$attempt" -lt 40 ]] && sleep 15
+          done
+
+          jq -n \
+            --argjson totalBefore "$total_before" \
+            --argjson unsafeBefore "$unsafe_before" \
+            --argjson totalAfter "$total_after" \
+            --argjson unsafeAfter "$remaining" \
+            '{
+              ownerRecordsBefore: $totalBefore,
+              unsafeBeforeCleanup: $unsafeBefore,
+              ownerRecordsAfter: $totalAfter,
+              unsafeAfterCleanup: $unsafeAfter
+            }' >"$PROOF_DIR/cleanup.json"
+          [[ "$remaining" -eq 0 ]]
+
+      - name: Summarize broker soak
+        if: always()
+        shell: bash
+        run: |
+          PROOF_DIR="$RUNNER_TEMP/broker-soak-proof"
+          {
+            echo "## Broker soak canary"
+            echo
+            echo "- Source commit: \`$GITHUB_SHA\`"
+            if [[ -f "$PROOF_DIR/maintenance.json" ]]; then
+              jq -r '
+                "- AWS maintenance: trigger=\(.aws.lastRun.trigger) finished=\(.aws.lastRun.finishedAt) scanned=\(.aws.lastRun.scanned) candidates=\(.aws.lastRun.candidateCount) terminated=\(.aws.lastRun.terminated) errors=\(.aws.lastRun.errorCount)",
+                "- Azure maintenance: trigger=\(.azure.lastRun.trigger) finished=\(.azure.lastRun.finishedAt) scanned=\(.azure.lastRun.scanned) candidates=\(.azure.lastRun.candidateCount) terminated=\(.azure.lastRun.terminated) errors=\(.azure.lastRun.errorCount)"
+              ' "$PROOF_DIR/maintenance.json"
+            fi
+            if [[ -f "$PROOF_DIR/daytona-canary.json" ]]; then
+              jq -r '"- Daytona: status=\(.runStatus) totalMs=\(.totalMs) commandMs=\(.commandMs) exitCode=\(.exitCode)"' \
+                "$PROOF_DIR/daytona-canary.json"
+            fi
+            if [[ -f "$PROOF_DIR/cleanup.json" ]]; then
+              jq -r '"- Cleanup: unsafeBefore=\(.unsafeBeforeCleanup) unsafeAfter=\(.unsafeAfterCleanup) ownerRecords=\(.ownerRecordsAfter)"' \
+                "$PROOF_DIR/cleanup.json"
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Upload sanitized broker soak proof
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: broker-soak-${{ github.run_id }}
+          path: ${{ runner.temp }}/broker-soak-proof
+          if-no-files-found: warn
+          retention-days: 14
