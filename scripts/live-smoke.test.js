@@ -72,6 +72,80 @@ esac
   assert.match(calls, new RegExp(`^stop --provider run-cloud ${warmup[1]}$`, "m"));
 });
 
+test("Run Cloud live smoke exercises the complete retained-lease lifecycle", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-run-cloud-success-"));
+  const fakeCrabbox = path.join(dir, "crabbox");
+  const log = path.join(dir, "calls.log");
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${log}"
+case "$1" in
+  config)
+    exit 0
+    ;;
+  warmup)
+    slug=""
+    while [[ "$#" -gt 0 ]]; do
+      if [[ "$1" == "--slug" ]]; then slug="$2"; break; fi
+      shift
+    done
+    printf 'provisioned lease=cbx_abcdef123456 slug=%s state=ready\\n' "$slug"
+    ;;
+  status|ssh|stop)
+    exit 0
+    ;;
+  inspect)
+    printf '{"id":"cbx_abcdef123456","ready":true}\\n'
+    ;;
+  cache)
+    printf '[]\\n'
+    ;;
+  run)
+    printf 'crabbox-live-ok run_abcdef123456\\n'
+    ;;
+  *)
+    printf 'unexpected crabbox args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "run-cloud",
+      CRABBOX_LIVE_REPO: repoRoot,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const calls = fs.readFileSync(log, "utf8");
+  const warmup = calls.match(
+    /^warmup --provider run-cloud --slug (run-cloud-smoke-\d{14}-\d+) --ttl 15m --idle-timeout 5m$/m,
+  );
+  assert.ok(warmup, calls);
+  const slug = warmup[1];
+  for (const expected of [
+    `status --provider run-cloud --id ${slug} --wait --wait-timeout 90s`,
+    `inspect --provider run-cloud --id ${slug} --json`,
+    `ssh --provider run-cloud --id ${slug}`,
+    `cache stats --id ${slug} --json`,
+  ]) {
+    assert.match(calls, new RegExp(`^${expected}$`, "m"));
+  }
+  assert.match(calls, new RegExp(`^run --provider run-cloud --id ${slug} --shell -- `, "m"));
+  assert.match(calls, new RegExp(`^stop --provider run-cloud ${slug}$`, "m"));
+  assert.equal(calls.match(/^stop --provider run-cloud /gm)?.length, 1, calls);
+});
+
 test("OpenSandbox live smoke dispatches to the provider-specific script", () => {
   const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
     cwd: repoRoot,
