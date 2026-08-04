@@ -22,6 +22,56 @@ test("operations docs cover local runtime live-smoke dispatches", () => {
   }
 });
 
+test("Run Cloud live smoke cleans up its requested slug when warmup fails", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-run-cloud-"));
+  const fakeCrabbox = path.join(dir, "crabbox");
+  const log = path.join(dir, "calls.log");
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >>"${log}"
+case "$1" in
+  config)
+    exit 0
+    ;;
+  warmup)
+    printf 'simulated warmup failure\\n' >&2
+    exit 17
+    ;;
+  stop)
+    exit 0
+    ;;
+  *)
+    printf 'unexpected crabbox args: %s\\n' "$*" >&2
+    exit 99
+    ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "run-cloud",
+      CRABBOX_LIVE_REPO: repoRoot,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  const calls = fs.readFileSync(log, "utf8");
+  const warmup = calls.match(
+    /^warmup --provider run-cloud --slug (run-cloud-smoke-\d{14}-\d+) --ttl 15m --idle-timeout 5m$/m,
+  );
+  assert.ok(warmup, calls);
+  assert.match(calls, new RegExp(`^stop --provider run-cloud ${warmup[1]}$`, "m"));
+});
+
 test("OpenSandbox live smoke dispatches to the provider-specific script", () => {
   const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
     cwd: repoRoot,

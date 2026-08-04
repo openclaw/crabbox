@@ -218,6 +218,7 @@ type Config struct {
 	UpstashBox                    UpstashBoxConfig
 	Smolvm                        SmolvmConfig
 	AsciiBox                      AsciiBoxConfig
+	RunCloud                      RunCloudConfig
 	Cloudflare                    CloudflareConfig
 	CloudflareDynamicWorkers      CloudflareDynamicWorkersConfig
 	Semaphore                     SemaphoreConfig
@@ -1099,6 +1100,13 @@ type AsciiBoxConfig struct {
 	APIKey  string
 	BaseURL string
 	CLIPath string
+	Workdir string
+}
+
+type RunCloudConfig struct {
+	CLIPath string
+	Image   string
+	Region  string
 	Workdir string
 }
 
@@ -3223,6 +3231,11 @@ func baseConfig() Config {
 			CLIPath: "box",
 			Workdir: "/home/user/crabbox",
 		},
+		RunCloud: RunCloudConfig{
+			CLIPath: "runcloud",
+			Image:   "runcloud/agent-base",
+			Workdir: "/home/runcloud/crabbox",
+		},
 		Cloudflare: CloudflareConfig{
 			Workdir: "/workspace/crabbox",
 		},
@@ -3438,6 +3451,7 @@ type fileConfig struct {
 	UpstashBox               *fileUpstashBoxConfig               `yaml:"upstashBox,omitempty"`
 	Smolvm                   *fileSmolvmConfig                   `yaml:"smolvm,omitempty"`
 	AsciiBox                 *fileAsciiBoxConfig                 `yaml:"asciiBox,omitempty"`
+	RunCloud                 *fileRunCloudConfig                 `yaml:"runCloud,omitempty"`
 	Cloudflare               *fileCloudflareConfig               `yaml:"cloudflare,omitempty"`
 	CloudflareDynamicWorkers *fileCloudflareDynamicWorkersConfig `yaml:"cloudflareDynamicWorkers,omitempty"`
 	Semaphore                *fileSemaphoreConfig                `yaml:"semaphore,omitempty"`
@@ -4354,6 +4368,13 @@ type fileSmolvmConfig struct {
 type fileAsciiBoxConfig struct {
 	BaseURL string `yaml:"baseUrl,omitempty"`
 	CLIPath string `yaml:"cliPath,omitempty"`
+	Workdir string `yaml:"workdir,omitempty"`
+}
+
+type fileRunCloudConfig struct {
+	CLIPath string `yaml:"cliPath,omitempty"`
+	Image   string `yaml:"image,omitempty"`
+	Region  string `yaml:"region,omitempty"`
 	Workdir string `yaml:"workdir,omitempty"`
 }
 
@@ -7419,6 +7440,20 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.AsciiBox.Workdir = file.AsciiBox.Workdir
 		}
 	}
+	if file.RunCloud != nil {
+		if file.RunCloud.CLIPath != "" {
+			cfg.RunCloud.CLIPath = file.RunCloud.CLIPath
+		}
+		if file.RunCloud.Image != "" {
+			cfg.RunCloud.Image = file.RunCloud.Image
+		}
+		if file.RunCloud.Region != "" {
+			cfg.RunCloud.Region = file.RunCloud.Region
+		}
+		if file.RunCloud.Workdir != "" {
+			cfg.RunCloud.Workdir = file.RunCloud.Workdir
+		}
+	}
 	applyCloudflareFileConfig(cfg, file.Cloudflare, credentialSource)
 	if err := applyCloudflareSandboxFileConfig(cfg, file.CloudflareSandbox, trusted); err != nil {
 		return err
@@ -9419,6 +9454,10 @@ func applyEnv(cfg *Config) error {
 	}
 	cfg.AsciiBox.CLIPath = getenv("CRABBOX_ASCII_BOX_CLI", getenv("BOX_CLI", cfg.AsciiBox.CLIPath))
 	cfg.AsciiBox.Workdir = getenv("CRABBOX_ASCII_BOX_WORKDIR", cfg.AsciiBox.Workdir)
+	cfg.RunCloud.CLIPath = getenv("CRABBOX_RUN_CLOUD_CLI", cfg.RunCloud.CLIPath)
+	cfg.RunCloud.Image = getenv("CRABBOX_RUN_CLOUD_IMAGE", cfg.RunCloud.Image)
+	cfg.RunCloud.Region = getenv("CRABBOX_RUN_CLOUD_REGION", cfg.RunCloud.Region)
+	cfg.RunCloud.Workdir = getenv("CRABBOX_RUN_CLOUD_WORKDIR", cfg.RunCloud.Workdir)
 	if value := os.Getenv("CRABBOX_CLOUDFLARE_RUNNER_URL"); value != "" {
 		cfg.Cloudflare.APIURL = value
 		cfg.credentialProvenance.cloudflareAPIURL = credentialSourceEnvironment

@@ -875,6 +875,21 @@
     "auth": "API key via RUNPOD_API_KEY; direct remote GPU pod provider",
     "docs": "runpod.md"
   },
+  "run-cloud": {
+    "status": "built-in",
+    "category": "direct-cloud",
+    "substrate": "Run Cloud persistent Linux microVM sandbox",
+    "location": "provider-managed",
+    "ssh": "provider-specific",
+    "sync": "crabbox-sync",
+    "gpu": "no",
+    "lifecycle": "provider CLI",
+    "cleanup": "owned sandbox delete",
+    "bestFit": "Managed persistent Linux sandbox over authenticated SSH",
+    "caveat": "Requires the runcloud CLI, login, sandbox access, and an SSH-compatible image",
+    "auth": "Run Cloud CLI credential store populated by runcloud login; authenticated WebSocket SSH proxy; direct remote SSH lease",
+    "docs": "run-cloud.md"
+  },
   "scaleway": {
     "status": "built-in",
     "category": "direct-cloud",

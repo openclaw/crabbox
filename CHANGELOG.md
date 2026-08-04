@@ -4,6 +4,9 @@
 
 ### Added
 
+- Added `provider: run-cloud` for persistent Run Cloud Linux sandboxes, using
+  the authenticated `runcloud` SSH proxy with per-lease Crabbox keys, normal
+  rsync/run workflows, bounded lifetime, and owned sandbox cleanup.
 - Added an admin-only Daytona snapshot bootstrap route and protected
   default-branch workflow with bounded resources, immutable base images,
   applied-capacity and active-snapshot verification, sanitized proof, and

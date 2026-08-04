@@ -2153,6 +2153,19 @@ func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []strin
 		if strings.TrimSpace(cfg.Sprites.APIURL) != "" {
 			args = append(args, "--sprites-api-url", routingSafeURL(cfg.Sprites.APIURL))
 		}
+	case "run-cloud":
+		if strings.TrimSpace(cfg.RunCloud.CLIPath) != "" {
+			args = append(args, "--run-cloud-cli", cfg.RunCloud.CLIPath)
+		}
+		if strings.TrimSpace(cfg.RunCloud.Image) != "" {
+			args = append(args, "--run-cloud-image", cfg.RunCloud.Image)
+		}
+		if strings.TrimSpace(cfg.RunCloud.Region) != "" {
+			args = append(args, "--run-cloud-region", cfg.RunCloud.Region)
+		}
+		if strings.TrimSpace(cfg.RunCloud.Workdir) != "" {
+			args = append(args, "--run-cloud-workdir", cfg.RunCloud.Workdir)
+		}
 	case "semaphore":
 		if strings.TrimSpace(cfg.Semaphore.Host) != "" {
 			args = append(args, "--semaphore-host", cfg.Semaphore.Host)

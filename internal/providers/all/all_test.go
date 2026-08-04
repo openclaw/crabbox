@@ -1356,6 +1356,7 @@ func allBuiltInProviderNames() []string {
 		"phala",
 		"proxmox",
 		"railway",
+		"run-cloud",
 		"runpod",
 		"scaleway",
 		"anthropic-sandbox-runtime",

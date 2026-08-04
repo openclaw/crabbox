@@ -527,6 +527,12 @@ func configShowView(cfg Config) map[string]any {
 			"cliPath": cfg.AsciiBox.CLIPath,
 			"workdir": cfg.AsciiBox.Workdir,
 		},
+		"runCloud": map[string]any{
+			"cliPath": cfg.RunCloud.CLIPath,
+			"image":   cfg.RunCloud.Image,
+			"region":  cfg.RunCloud.Region,
+			"workdir": cfg.RunCloud.Workdir,
+		},
 		"superserve": map[string]any{
 			"baseUrl":         redactedConfigURL(cfg.Superserve.BaseURL),
 			"auth":            superserveAuthState(),

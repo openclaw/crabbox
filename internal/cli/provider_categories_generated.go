@@ -62,6 +62,7 @@ var benchmarkProviderCategories = map[string]string{
 	"phala":                      "direct-cloud",
 	"proxmox":                    "self-hosted-virtualization",
 	"railway":                    "service-control",
+	"run-cloud":                  "direct-cloud",
 	"runpod":                     "gpu-cloud",
 	"scaleway":                   "direct-cloud",
 	"sealos-devbox":              "direct-cloud",

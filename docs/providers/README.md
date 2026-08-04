@@ -87,7 +87,7 @@ selection metadata. Regenerate it with `node scripts/generate-provider-matrix.mj
 `scripts/check-docs.sh` fails when provider registration, metadata, docs paths, or
 this generated table drift.
 
-Current built-in surface: 79 providers (44 SSH lease, 31 delegated run, 4 service control).
+Current built-in surface: 80 providers (45 SSH lease, 31 delegated run, 4 service control).
 
 Access terms:
 
@@ -156,6 +156,7 @@ Access terms:
 | [phala](phala.md) (`phala-cloud`, `dstack`) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Phala Cloud confidential Intel TDX CVM | `provider-managed`; GPU: no | Phala phala CLI; CVM delete | Short-lived confidential Linux compute over SSH | Requires the phala CLI and its stored auth; verifies Intel TDX attestation by default (needs outbound Intel PCS network; --phala-skip-attestation to opt out) |
 | [proxmox](proxmox.md) | built-in; `ssh-lease` · self-hosted-virtualization | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Proxmox VE QEMU clone | `self-hosted`; GPU: optional | Crabbox; VM delete | Self-hosted Linux VM fleet | Needs a prepared template, guest agent, and network |
 | [railway](railway.md) (`rail`, `railwayapp`) | specialized; `service-control` · service-control | SSH not applicable; `none` · direct only; features: `url-bridge` | `linux`; Railway service | `cloud`; GPU: unknown | Railway; service stop only | Inspecting or stopping an existing Railway service | Cannot execute arbitrary Crabbox run commands |
+| [run-cloud](run-cloud.md) | built-in; `ssh-lease` · direct-cloud | Provider-specific SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync` | `linux`; Run Cloud persistent Linux microVM sandbox | `provider-managed`; GPU: no | provider CLI; owned sandbox delete | Managed persistent Linux sandbox over authenticated SSH | Requires the runcloud CLI, login, sandbox access, and an SSH-compatible image |
 | [runpod](runpod.md) (`run-pod`, `runpodio`) | built-in; `ssh-lease` · gpu-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync` | `linux`; RunPod GPU pod | `cloud`; GPU: yes | RunPod; pod release | GPU-backed Linux workload over public SSH | Capacity, GPU pricing, and public SSH vary |
 | [scaleway](scaleway.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `tailscale` | `linux`; Scaleway Instance | `cloud`; GPU: optional | Crabbox; instance and managed key delete | Direct Linux VM on Scaleway Instances | Direct-only; security groups must already allow SSH |
 | [sealos-devbox](sealos-devbox.md) (`sealos`, `sealos-dev`) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Sealos DevBox CRD | `provider-managed`; GPU: unknown | Sealos DevBox CRD; pause or DevBox delete | Sealos DevBox Linux workspace over SSHGate or NodePort | Requires kubectl, explicit context, DevBox CRD/RBAC, image, and SSHGate or NodePort route configuration |

@@ -247,13 +247,30 @@ provider_smoke() (
   local CRABBOX_PROVIDER="$provider"
   export CRABBOX_PROVIDER
   local lease=""
-  local slug=""
+  local requested_slug=""
+  local expect_slug=0
+  local arg
+  for arg in "$@"; do
+    if [[ "$expect_slug" -eq 1 ]]; then
+      requested_slug="$arg"
+      expect_slug=0
+      continue
+    fi
+    case "$arg" in
+      --slug) expect_slug=1 ;;
+      --slug=*) requested_slug="${arg#--slug=}" ;;
+    esac
+  done
+  local slug="$requested_slug"
   # shellcheck disable=SC2329 # The subshell EXIT trap invokes this cleanup.
   cleanup() {
     trap - EXIT
     if [[ -n "$lease" ]]; then
       stop_provider_lease "$provider" "$lease" "$slug"
       lease=""
+      slug=""
+    elif [[ -n "$slug" ]]; then
+      stop_provider_lease "$provider" "$slug" "$slug"
       slug=""
     fi
   }
@@ -263,7 +280,11 @@ provider_smoke() (
   capture_run out run_in_repo "$cb" warmup --provider "$provider" "$@"
   printf '%s\n' "$out"
   lease="$(printf '%s\n' "$out" | extract_lease)"
-  slug="$(printf '%s\n' "$out" | extract_slug)"
+  local acquired_slug
+  acquired_slug="$(printf '%s\n' "$out" | extract_slug)"
+  if [[ -n "$acquired_slug" ]]; then
+    slug="$acquired_slug"
+  fi
   test -n "$lease"
   test -n "$slug"
 
@@ -286,6 +307,7 @@ provider_smoke() (
   fi
   stop_provider_lease "$provider" "$lease" "$slug"
   lease=""
+  slug=""
 )
 
 blacksmith_smoke() {
@@ -1404,6 +1426,13 @@ fi
 
 if has_provider runpod || has_provider run-pod || has_provider runpodio; then
   "$root/scripts/live-runpod-smoke.sh"
+fi
+
+if has_provider run-cloud || has_provider runcloud; then
+  provider_smoke run-cloud \
+    --slug "run-cloud-smoke-$(date +%Y%m%d%H%M%S)-$$" \
+    --ttl 15m \
+    --idle-timeout 5m
 fi
 
 if has_provider digitalocean || has_provider do; then
