@@ -28,6 +28,7 @@ type client struct {
 const (
 	exposedSandboxCPUCoreCount = "2"
 	exposedSandboxMemoryMiB    = "24576"
+	sshRoutePort               = "22"
 )
 
 type coreCommandRunner interface {
@@ -146,7 +147,11 @@ func (c *client) ListSandboxes(ctx context.Context) ([]sandboxData, error) {
 }
 
 func (c *client) ExposeSandbox(ctx context.Context, id, name string) (boxData, error) {
-	result, err := c.run(ctx, "sandbox", "expose", id, "--name", name, "--port", "3000", "--json")
+	// Run Cloud currently attaches its authenticated SSH WebSocket transport to
+	// a box hostname. Point the hostname's ordinary route at sshd as well: using
+	// an application port here could unintentionally publish a service the user
+	// later starts inside the lease.
+	result, err := c.run(ctx, "sandbox", "expose", id, "--name", name, "--port", sshRoutePort, "--json")
 	if err != nil {
 		return boxData{}, fmt.Errorf("Run Cloud CLI expose failed: %s", commandError(result, err))
 	}

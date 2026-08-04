@@ -104,7 +104,7 @@ func TestClientUsesRunCloudCLI(t *testing.T) {
 		{"sandbox", "create", "--name", "crabbox-blue-lobster-12345678", "--image", "runcloud/agent-base", "--cpu", "2", "--memory", "24576", "--persistent", "--region", "eu-north", "--timeout", "600", "--json"},
 		{"sandbox", "get", "sbx_1", "--json"},
 		{"sandbox", "list", "--json"},
-		{"sandbox", "expose", "sbx_1", "--name", "crabbox-blue-lobster-12345678", "--port", "3000", "--json"},
+		{"sandbox", "expose", "sbx_1", "--name", "crabbox-blue-lobster-12345678", "--port", "22", "--json"},
 	}
 	if !reflect.DeepEqual(runner.commands[:len(wantPrefix)], wantPrefix) {
 		t.Fatalf("commands=%v", runner.commands)
@@ -242,11 +242,11 @@ func (r *recordingRunner) Run(_ context.Context, req LocalCommandRequest) (Local
 	case strings.HasPrefix(joined, "sandbox create "):
 		return LocalCommandResult{Stdout: `{"id":"sbx_1","name":"crabbox-blue-lobster-12345678","state":"running","image":"runcloud/agent-base"}`}, nil
 	case joined == "sandbox get sbx_1 --json":
-		return LocalCommandResult{Stdout: `{"id":"sbx_1","name":"crabbox-blue-lobster-12345678","state":"running","box":{"id":"box_1","hostname":"crabbox-box.run.cloud","port":3000}}`}, nil
+		return LocalCommandResult{Stdout: `{"id":"sbx_1","name":"crabbox-blue-lobster-12345678","state":"running","box":{"id":"box_1","hostname":"crabbox-box.run.cloud","port":22}}`}, nil
 	case joined == "sandbox list --json":
 		return LocalCommandResult{Stdout: `[{"id":"sbx_1","name":"crabbox-blue-lobster-12345678","state":"running","hostname":"crabbox-box.run.cloud"}]`}, nil
 	case strings.HasPrefix(joined, "sandbox expose "):
-		return LocalCommandResult{Stdout: `{"id":"box_1","sandboxId":"sbx_1","name":"crabbox-blue-lobster-12345678","hostname":"crabbox-box.run.cloud","port":3000,"status":"ready"}`}, nil
+		return LocalCommandResult{Stdout: `{"id":"box_1","sandboxId":"sbx_1","name":"crabbox-blue-lobster-12345678","hostname":"crabbox-box.run.cloud","port":22,"status":"ready"}`}, nil
 	case strings.HasPrefix(joined, "sandbox exec "):
 		return LocalCommandResult{Stdout: `{"exit_code":0,"stdout":"","stderr":""}`}, nil
 	case joined == "sandbox resume sbx_1 --json":
@@ -272,18 +272,18 @@ func (*fakeAPI) CreateSandbox(context.Context, createRequest) (sandboxData, erro
 }
 
 func (*fakeAPI) GetSandbox(context.Context, string) (sandboxData, error) {
-	return sandboxData{ID: "sbx_1", Name: "crabbox-blue-lobster-12345678", State: "running", Box: &boxData{ID: "box_1", Hostname: "crabbox-box.run.cloud", Port: 3000}}, nil
+	return sandboxData{ID: "sbx_1", Name: "crabbox-blue-lobster-12345678", State: "running", Box: &boxData{ID: "box_1", Hostname: "crabbox-box.run.cloud", Port: 22}}, nil
 }
 
 func (*fakeAPI) ListSandboxes(context.Context) ([]sandboxData, error) {
 	return []sandboxData{{
 		ID: "sbx_1", Name: "crabbox-blue-lobster-12345678", State: "running",
-		Box: &boxData{ID: "box_1", Hostname: "crabbox-box.run.cloud", Port: 3000},
+		Box: &boxData{ID: "box_1", Hostname: "crabbox-box.run.cloud", Port: 22},
 	}}, nil
 }
 
 func (*fakeAPI) ExposeSandbox(context.Context, string, string) (boxData, error) {
-	return boxData{ID: "box_1", SandboxID: "sbx_1", Hostname: "crabbox-box.run.cloud", Port: 3000, Status: "ready"}, nil
+	return boxData{ID: "box_1", SandboxID: "sbx_1", Hostname: "crabbox-box.run.cloud", Port: 22, Status: "ready"}, nil
 }
 
 func (f *fakeAPI) InstallSSHKey(_ context.Context, _ string, key string) error {

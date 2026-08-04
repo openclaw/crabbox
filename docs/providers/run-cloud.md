@@ -7,8 +7,8 @@ Read when:
 - changing `internal/providers/runcloud`.
 
 [Run Cloud](https://run.cloud) provides persistent Linux microVM sandboxes.
-Crabbox uses the public `runcloud` CLI for sandbox lifecycle, exposes each
-Crabbox-owned sandbox so the CLI's authenticated WebSocket SSH proxy is
+Crabbox uses the public `runcloud` CLI for sandbox lifecycle, attaches an
+SSH-only box hostname so the CLI's authenticated WebSocket SSH proxy is
 available, installs a per-lease Crabbox SSH key, and then uses the normal
 Crabbox rsync and command path.
 
@@ -82,9 +82,11 @@ the `runcloud` CLI.
    reservation used by Run Cloud's exposed-sandbox contract. It waits for the
    sandbox to reach `running` and records the exact sandbox ID in the local lease
    claim.
-2. Crabbox publishes guest port `3000` with `runcloud sandbox expose`. The
-   published application port is incidental to this adapter; SSH itself travels
-   through `runcloud sandbox proxy` and does not expose public port 22.
+2. Crabbox attaches a box hostname to guest port `22` with
+   `runcloud sandbox expose`. This avoids publishing a user application port.
+   SSH bytes travel through the hostname's authenticated `/.runcloud/ssh`
+   WebSocket via `runcloud sandbox proxy`; there is no direct public TCP SSH
+   listener.
 3. Crabbox installs its per-lease public key for the `runcloud` user, verifies
    the sync prerequisites over SSH, and uses the standard SSH lease workflow
    for repository sync and commands.
@@ -115,9 +117,10 @@ Crabbox per-lease key directory.
   a workflow needs additional tools.
 - Custom images must preserve the `runcloud` SSH user and provide the bootstrap
   prerequisites described above.
-- Run Cloud currently makes its authenticated SSH proxy available through an
-  exposed sandbox. The adapter therefore publishes guest port `3000`; do not
-  bind a sensitive unauthenticated service to that port while the lease exists.
+- Run Cloud currently makes its authenticated SSH proxy available through a
+  box hostname. The adapter binds that hostname's ordinary route to the
+  key-authenticated SSH service on guest port `22`, never to a conventional
+  application port.
 
 ## Live Validation
 
