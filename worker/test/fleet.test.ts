@@ -6596,7 +6596,7 @@ describe("fleet lease identity and idle", () => {
     expect(storage.alarm()).toBeUndefined();
   });
 
-  it("acknowledges provider cleanup before the alarm performs it", async () => {
+  it("queues provider cleanup before acknowledgement and remains visible to shipped readers", async () => {
     const storage = new MemoryStorage();
     const cleaned: string[] = [];
     const lease = testLease({
@@ -6633,8 +6633,12 @@ describe("fleet lease identity and idle", () => {
       state: "released",
       cloudID: lease.cloudID,
       releaseDeletesServer: true,
+      cleanupStartedAt: expect.any(String),
+      cleanupClaimExpiresAt: expect.any(String),
     });
-    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.cleanupStartedAt).toBeUndefined();
+    const queued = storage.value<LeaseRecord>(`lease:${lease.id}`)!;
+    expect(queued.cleanupClaimExpiresAt).toBe(queued.cleanupStartedAt);
+    expect(shippedCleanupReaderNeedsCleanup(queued)).toBe(true);
     expect(storage.alarm()).toBeLessThanOrEqual(Date.now() + 1_000);
 
     await fleet.alarm();
@@ -7100,7 +7104,18 @@ describe("fleet lease identity and idle", () => {
     expect(other.providerResourceId).not.toBe(created.providerResourceId);
 
     const released = await fleet.fetch(request("DELETE", `/v1/workspaces/${body.id}`, { headers }));
-    await expect(released.json()).resolves.toMatchObject({ status: "stopped" });
+    await expect(released.json()).resolves.toMatchObject({ status: "stopping" });
+    expect(storage.value<LeaseRecord>(`lease:${created.providerResourceId}`)).toMatchObject({
+      state: "released",
+      releaseDeletesServer: true,
+      cleanupStartedAt: expect.any(String),
+    });
+    expect(providerReleases).toBe(0);
+
+    await fleet.alarm();
+
+    const stopped = await fleet.fetch(request("GET", `/v1/workspaces/${body.id}`, { headers }));
+    await expect(stopped.json()).resolves.toMatchObject({ status: "stopped" });
     expect(providerReleases).toBe(1);
   });
 
@@ -7248,11 +7263,20 @@ describe("fleet lease identity and idle", () => {
       request("DELETE", "/v1/workspaces/fleet-prewarm-bob", { headers: bobHeaders }),
     );
     await fleet.alarm();
-    expect(providerReleases).toBe(3);
+    expect(providerReleases).toBe(2);
+    expect(storage.value<LeaseRecord>(`lease:${replenished[0]!.leaseID}`)).toMatchObject({
+      state: "released",
+      releaseDeletesServer: true,
+      cleanupStartedAt: expect.any(String),
+    });
     const activeSpares = [
       ...(await storage.list<StoredWorkspace>({ prefix: "workspace:" })).values(),
     ].filter((workspace) => workspace.prewarm && !workspace.releaseRequestedAt);
     expect(activeSpares).toHaveLength(0);
+
+    await fleet.alarm();
+
+    expect(providerReleases).toBe(3);
   });
 
   it("keeps separate workspace spares for active profiles in one organization", async () => {
@@ -7378,7 +7402,17 @@ describe("fleet lease identity and idle", () => {
           provider,
         );
         const released = await fleet.fetch(request("DELETE", `/v1/workspaces/${id}`, { headers }));
-        await expect(released.json()).resolves.toMatchObject({ status: "stopped" });
+        await expect(released.json()).resolves.toMatchObject({ status: "stopping" });
+        expect(storage.value<LeaseRecord>(`lease:${created.providerResourceId}`)).toMatchObject({
+          state: "released",
+          releaseDeletesServer: true,
+          cleanupStartedAt: expect.any(String),
+        });
+
+        await fleet.alarm();
+
+        const stopped = await fleet.fetch(request("GET", `/v1/workspaces/${id}`, { headers }));
+        await expect(stopped.json()).resolves.toMatchObject({ status: "stopped" });
       }),
     );
   });
@@ -7523,12 +7557,26 @@ describe("fleet lease identity and idle", () => {
 
     unblock.resolve();
     await provisioning;
+    const stopping = await fleet.fetch(request("GET", `/v1/workspaces/${body.id}`, { headers }));
+    await expect(stopping.json()).resolves.toMatchObject({
+      providerResourceId: pending.providerResourceId,
+      status: "stopping",
+    });
+    expect(providerCreates).toBe(1);
+    expect(providerReleases).toBe(0);
+    expect(storage.value<LeaseRecord>(`lease:${pending.providerResourceId}`)).toMatchObject({
+      state: "released",
+      releaseDeletesServer: true,
+      cleanupStartedAt: expect.any(String),
+    });
+
+    await fleet.alarm();
+
     const stopped = await fleet.fetch(request("GET", `/v1/workspaces/${body.id}`, { headers }));
     await expect(stopped.json()).resolves.toMatchObject({
       providerResourceId: pending.providerResourceId,
       status: "stopped",
     });
-    expect(providerCreates).toBe(1);
     expect(providerReleases).toBe(1);
   });
 
@@ -8605,6 +8653,16 @@ describe("fleet lease identity and idle", () => {
     } as LeaseRecord);
 
     await fleet.alarm();
+    expect(providerReleases).toBe(0);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "released",
+      cloudID: "321",
+      releaseDeletesServer: true,
+      cleanupStartedAt: expect.any(String),
+    });
+
+    await fleet.alarm();
+
     expect(providerReleases).toBe(1);
     const stopped = await fleet.fetch(
       request("GET", "/v1/workspaces/fleet-is-106", {
@@ -8652,6 +8710,14 @@ describe("fleet lease identity and idle", () => {
     const pending = await fleet.fetch(request("DELETE", `/v1/workspaces/${body.id}`, { headers }));
     await expect(pending.json()).resolves.toMatchObject({
       status: "stopping",
+      message: "workspace stopping",
+    });
+    expect(providerReleases).toBe(0);
+
+    await fleet.alarm();
+    const failed = await fleet.fetch(request("GET", `/v1/workspaces/${body.id}`, { headers }));
+    await expect(failed.json()).resolves.toMatchObject({
+      status: "stopping",
       message: "provider cleanup throttled",
     });
     const nextBody = { ...body, id: "fleet-is-107" };
@@ -8663,7 +8729,14 @@ describe("fleet lease identity and idle", () => {
     await expect(nextReady.json()).resolves.toMatchObject({ status: "ready" });
     expect(providerReleases).toBe(1);
 
-    const stopped = await fleet.fetch(request("DELETE", `/v1/workspaces/${body.id}`, { headers }));
+    const retryPending = await fleet.fetch(
+      request("DELETE", `/v1/workspaces/${body.id}`, { headers }),
+    );
+    await expect(retryPending.json()).resolves.toMatchObject({ status: "stopping" });
+    expect(providerReleases).toBe(1);
+
+    await fleet.alarm();
+    const stopped = await fleet.fetch(request("GET", `/v1/workspaces/${body.id}`, { headers }));
     await expect(stopped.json()).resolves.toMatchObject({
       status: "stopped",
       message: "workspace stopped",
@@ -8758,6 +8831,16 @@ describe("fleet lease identity and idle", () => {
       ...retryingWorkspace,
       reconcileAfter: new Date(Date.now() - 1_000).toISOString(),
     });
+    await fleet.alarm();
+
+    const queued = storage.value<LeaseRecord>(`lease:${pending.providerResourceId}`)!;
+    expect(queued).toMatchObject({
+      state: "released",
+      releaseDeletesServer: true,
+      cleanupStartedAt: expect.any(String),
+    });
+    expect(providerReleases).toBe(0);
+
     await fleet.alarm();
 
     const stopped = await fleet.fetch(request("GET", `/v1/workspaces/${body.id}`, { headers }));
@@ -8880,14 +8963,28 @@ describe("fleet lease identity and idle", () => {
 
     expect(creates).toBe(0);
     expect(recoveries).toBe(1);
-    expect(releases.toSorted()).toEqual([prewarmLeaseID, recoveredLeaseID].toSorted());
-    expect(storage.value<LeaseRecord>(`lease:${recoveredLeaseID}`)?.state).toBe("released");
-    expect(storage.value<LeaseRecord>(`lease:${prewarmLeaseID}`)?.state).toBe("released");
+    expect(releases).toEqual([]);
+    expect(storage.value<LeaseRecord>(`lease:${recoveredLeaseID}`)).toMatchObject({
+      state: "released",
+      releaseDeletesServer: true,
+      cleanupStartedAt: expect.any(String),
+    });
+    expect(storage.value<LeaseRecord>(`lease:${prewarmLeaseID}`)).toMatchObject({
+      state: "released",
+      releaseDeletesServer: true,
+      cleanupStartedAt: expect.any(String),
+    });
     expect(
       storage.value<{ releaseRequestedAt?: string }>(
         `workspace:${legacyOrg}:alice%40example.com:${recoveredWorkspace.id}`,
       )?.releaseRequestedAt,
     ).toBeDefined();
+
+    await fleet.alarm();
+
+    expect(releases.toSorted()).toEqual([prewarmLeaseID, recoveredLeaseID].toSorted());
+    expect(storage.value<LeaseRecord>(`lease:${recoveredLeaseID}`)?.state).toBe("released");
+    expect(storage.value<LeaseRecord>(`lease:${prewarmLeaseID}`)?.state).toBe("released");
   });
 
   it("uses provider-owned GCP recovery instead of project-wide label inventory", async () => {
@@ -9887,7 +9984,18 @@ describe("fleet lease identity and idle", () => {
     storage.seed(leaseKey, retained);
 
     const stopped = await fleet.fetch(request("DELETE", `/v1/workspaces/${body.id}`, { headers }));
-    await expect(stopped.json()).resolves.toMatchObject({ status: "stopped" });
+    await expect(stopped.json()).resolves.toMatchObject({ status: "stopping" });
+    expect(storage.value<LeaseRecord>(leaseKey)).toMatchObject({
+      state: "released",
+      releaseDeletesServer: true,
+      cleanupStartedAt: expect.any(String),
+    });
+    expect(providerReleases).toBe(0);
+
+    await fleet.alarm();
+
+    const completed = await fleet.fetch(request("GET", `/v1/workspaces/${body.id}`, { headers }));
+    await expect(completed.json()).resolves.toMatchObject({ status: "stopped" });
     expect(providerReleases).toBe(1);
   });
 
@@ -9920,12 +10028,30 @@ describe("fleet lease identity and idle", () => {
     const release = await fleet.fetch(
       request("POST", `/portal/leases/${pending.providerResourceId}/release`, { headers }),
     );
-    expect(release.status).toBe(500);
+    expect(release.status).toBe(303);
+
+    const queued = storage.value<LeaseRecord>(`lease:${pending.providerResourceId}`)!;
+    expect(queued).toMatchObject({
+      state: "released",
+      releaseDeletesServer: true,
+      cleanupStartedAt: expect.any(String),
+    });
+    const queuedWorkspace = await fleet.fetch(
+      request("GET", `/v1/workspaces/${body.id}`, { headers }),
+    );
+    await expect(queuedWorkspace.json()).resolves.toMatchObject({ status: "stopping" });
+
+    await fleet.alarm();
 
     const stopping = await fleet.fetch(request("GET", `/v1/workspaces/${body.id}`, { headers }));
     await expect(stopping.json()).resolves.toMatchObject({
       status: "stopping",
       message: "provider cleanup throttled",
+    });
+    expect(storage.value<LeaseRecord>(`lease:${pending.providerResourceId}`)).toMatchObject({
+      releaseDeletesServer: true,
+      cleanupError: "provider cleanup throttled",
+      cleanupRetryAt: expect.any(String),
     });
   });
 
@@ -13554,7 +13680,48 @@ describe("fleet lease identity and idle", () => {
     };
     expect(drained.entry.state).toBe("draining");
     expect(drained.lease.state).toBe("released");
+    expect(deleted).toBe("");
+
+    await fleet.alarm();
+
     expect(deleted).toBe("123");
+  });
+
+  it("keeps force-admin deletion synchronous", async () => {
+    const storage = new MemoryStorage();
+    const cleanupStarted = deferred<void>();
+    const finishCleanup = deferred<void>();
+    const lease = testLease({ id: "cbx_000000000099" });
+    storage.seed(`lease:${lease.id}`, lease);
+    const fleet = testFleet(storage, {
+      hetzner: fakeProvider(undefined, {}, async () => {
+        cleanupStarted.resolve();
+        await finishCleanup.promise;
+      }),
+    });
+    const response = fleet.fetch(
+      request("POST", `/v1/admin/leases/${lease.id}/delete`, {
+        headers: {
+          "x-crabbox-owner": lease.owner,
+          "x-crabbox-org": lease.org,
+          "x-crabbox-admin": "true",
+        },
+      }),
+    );
+
+    await cleanupStarted.promise;
+    expect(
+      await Promise.race([
+        response.then(() => true),
+        new Promise<false>((resolve) => setTimeout(() => resolve(false), 25)),
+      ]),
+    ).toBe(false);
+
+    finishCleanup.resolve();
+    expect((await response).status).toBe(200);
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)).toMatchObject({ state: "released" });
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.releaseDeletesServer).toBeUndefined();
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.cleanupStartedAt).toBeUndefined();
   });
 
   it("keeps colliding exact org labels isolated across shares, runs, and filters", async () => {
@@ -30941,6 +31108,21 @@ function testLease(overrides: Partial<LeaseRecord>): LeaseRecord {
     expiresAt: "2026-05-01T01:30:00.000Z",
     ...overrides,
   });
+}
+
+function shippedCleanupReaderNeedsCleanup(lease: LeaseRecord, now = Date.now()): boolean {
+  const live = lease.state === "active" || lease.state === "provisioning";
+  if (live && Date.parse(lease.expiresAt) <= now) {
+    return true;
+  }
+  if (lease.state === "released" && lease.releaseDeletesServer === false) {
+    return false;
+  }
+  return Boolean(
+    !live &&
+    ((lease.cloudID && (lease.cleanupError || lease.cleanupStartedAt)) ||
+      lease.providerKeyCleanupPending),
+  );
 }
 
 async function macOSPortalPage(): Promise<string> {
