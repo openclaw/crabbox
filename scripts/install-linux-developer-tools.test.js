@@ -58,6 +58,69 @@ esac
 	);
 }
 
+function runNeedRootFixture(uid, args = []) {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-linux-tools-sudo-"));
+	const bin = path.join(dir, "bin");
+	const sudoLog = path.join(dir, "sudo.log");
+	fs.mkdirSync(bin);
+	writeExecutable(
+		path.join(bin, "id"),
+		`#!/usr/bin/env bash
+[[ "$*" == "-u" ]] || exit 64
+printf '${uid}\n'
+`,
+	);
+	writeExecutable(
+		path.join(bin, "sudo"),
+		`#!/usr/bin/env bash
+printf '%s\n' "$@" >"$CRABBOX_FAKE_SUDO_LOG"
+`,
+	);
+
+	return {
+		result: spawnSync(
+			"bash",
+			["-c", `source scripts/install-linux-developer-tools.sh\nneed_root ${args.join(" ")}`],
+			{
+				cwd: repoRoot,
+				env: {
+					...process.env,
+					PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+					CRABBOX_FAKE_SUDO_LOG: sudoLog,
+				},
+				encoding: "utf8",
+			},
+		),
+		sudoLog,
+	};
+}
+
+test("linux developer tool setup isolates root HOME while preserving installer configuration", () => {
+	const { result, sudoLog } = runNeedRootFixture(1000, ["sentinel"]);
+	assert.equal(result.status, 0, result.stderr || result.stdout);
+	const args = fs.readFileSync(sudoLog, "utf8").trim().split("\n");
+	assert.equal(args[0], "-H");
+	assert.doesNotMatch(args.join("\n"), /^-E$/m);
+	const preserveArg = args.find((arg) => arg.startsWith("--preserve-env="));
+	assert.ok(preserveArg, "sudo re-exec must preserve declared installer configuration");
+	const preserved = preserveArg.slice("--preserve-env=".length).split(",").sort();
+	const script = fs.readFileSync(
+		path.join(repoRoot, "scripts/install-linux-developer-tools.sh"),
+		"utf8",
+	);
+	const configured = [
+		...script.matchAll(/\$\{(CRABBOX_LINUX_[A-Z0-9_]+):-/g),
+	].map((match) => match[1]).sort();
+	assert.deepEqual(preserved, configured);
+	assert.equal(preserved.includes("HOME"), false);
+});
+
+test("linux developer tool setup does not invoke sudo when already root", () => {
+	const { result, sudoLog } = runNeedRootFixture(0);
+	assert.equal(result.status, 0, result.stderr || result.stdout);
+	assert.equal(fs.existsSync(sudoLog), false);
+});
+
 test("linux developer tool repository setup rewrites keyrings idempotently", () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-linux-tools-"));
 	const bin = path.join(dir, "bin");
