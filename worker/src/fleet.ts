@@ -6512,7 +6512,7 @@ export class FleetCoordinator {
       return this.runtimeAdapterDeletePendingResponse(lease, request, admin);
     }
     const shouldDelete = body.delete ?? !lease.keep;
-    if (lease.cleanupStartedAt) {
+    if (lease.cleanupStartedAt || (lease.releaseDeletesServer === true && !lease.cleanupError)) {
       if (!shouldDelete) {
         return json(
           {
@@ -6526,7 +6526,10 @@ export class FleetCoordinator {
       await this.scheduleAlarm();
       return json({ lease: this.leaseForRequest(lease, request, admin) });
     }
-    const released = await this.releaseResolvedLease(lease, { deleteServer: shouldDelete });
+    const released = await this.releaseResolvedLease(lease, {
+      deleteServer: shouldDelete,
+      deferCleanup: shouldDelete,
+    });
     if (released.runtimeAdapterDeleteRequestedAt) {
       return this.runtimeAdapterDeletePendingResponse(released, request, admin);
     }
@@ -15409,7 +15412,7 @@ export class FleetCoordinator {
 
   private async releaseResolvedLease(
     lease: LeaseRecord,
-    options: { deleteServer: boolean; keep?: boolean },
+    options: { deleteServer: boolean; keep?: boolean; deferCleanup?: boolean },
   ): Promise<LeaseRecord> {
     const current = (await this.getLease(lease.id)) ?? lease;
     if (current.runtimeAdapterDeleteRequestedAt) {
@@ -15456,7 +15459,7 @@ export class FleetCoordinator {
 
   private async releaseResolvedLeaseOperation(
     lease: LeaseRecord,
-    options: { deleteServer: boolean; keep?: boolean },
+    options: { deleteServer: boolean; keep?: boolean; deferCleanup?: boolean },
   ): Promise<LeaseRecord> {
     const preparation = await this.state.runExclusive(async () => {
       const current = (await this.getLease(lease.id)) ?? structuredClone(lease);
@@ -15482,6 +15485,16 @@ export class FleetCoordinator {
         await this.markAWSIngressReconcilePending(released);
         await this.scheduleAlarm();
         return { cleanup: false as const, blocked: false as const, lease: released };
+      }
+      if (options.deferCleanup) {
+        // Commit deletion intent before acknowledging the request; the alarm owns provider I/O
+        // and durable retries, so a disconnected operator cannot orphan cleanup.
+        const pending = finalizedReleasedLease(current, true, options.keep);
+        pending.releaseDeletesServer = true;
+        await this.putLease(pending);
+        await this.markAWSIngressReconcilePending(pending);
+        await this.scheduleAlarm();
+        return { cleanup: false as const, blocked: false as const, lease: pending };
       }
       const now = new Date();
       const claimed = finalizedReleasedLease(current, true, options.keep);
@@ -20053,7 +20066,8 @@ function leaseNeedsCleanup(lease: LeaseRecord, now: number): boolean {
   }
   return Boolean(
     !leaseIsLive(lease) &&
-    ((lease.cloudID && (lease.cleanupError || lease.cleanupStartedAt)) ||
+    ((lease.cloudID &&
+      (lease.releaseDeletesServer === true || lease.cleanupError || lease.cleanupStartedAt)) ||
       lease.providerKeyCleanupPending),
   );
 }
@@ -20240,6 +20254,14 @@ function nextLeaseAlarmTime(lease: LeaseRecord, env: Pick<Env, "CF_VERSION_METAD
         ? Math.min(expiresAt, deleteAlarm)
         : deleteAlarm,
     );
+  }
+  if (
+    lease.releaseDeletesServer === true &&
+    lease.cloudID &&
+    !lease.cleanupStartedAt &&
+    !lease.cleanupRetryAt
+  ) {
+    return includeInterruptedProvisioning(now + 1);
   }
   if (lease.providerKeyCleanupPending && !lease.cleanupStartedAt) {
     const retryAt = Date.parse(lease.cleanupRetryAt ?? "");

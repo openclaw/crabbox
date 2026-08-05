@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +22,41 @@ import (
 	"testing"
 	"time"
 )
+
+func TestReleaseCoordinatorLeaseAcceptsCleanupInProgress(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		if requests == 1 {
+			w.WriteHeader(http.StatusConflict)
+			_, _ = io.WriteString(w, `{"error":"cleanup_in_progress","lease":{"id":"cbx_abcdef123456"}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"lease":{"id":"cbx_abcdef123456"}}`)
+	}))
+	defer server.Close()
+
+	coord := &CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	if err := releaseCoordinatorLease(context.Background(), coord, "cbx_abcdef123456"); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("release requests=%d, want one accepted cleanup claim", requests)
+	}
+}
+
+func TestCoordinatorCleanupInProgressRejectsOtherConflicts(t *testing.T) {
+	for _, err := range []error{
+		CoordinatorHTTPError{StatusCode: http.StatusConflict, Message: `{"error":"lease_state_changed"}`},
+		CoordinatorHTTPError{StatusCode: http.StatusBadRequest, Message: `{"error":"cleanup_in_progress"}`},
+		CoordinatorHTTPError{StatusCode: http.StatusConflict, Message: `not json`},
+	} {
+		if coordinatorCleanupInProgress(err) {
+			t.Fatalf("accepted unrelated coordinator error: %v", err)
+		}
+	}
+}
 
 func init() {
 	RegisterProvider(windowsEnvHelperTestProvider{})

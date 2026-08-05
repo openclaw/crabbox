@@ -6575,7 +6575,16 @@ describe("fleet lease identity and idle", () => {
       }),
     );
 
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(200);
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)).toMatchObject({
+      state: "released",
+      cloudID: lease.cloudID,
+      releaseDeletesServer: true,
+    });
+    expect(storage.alarm()).toBeLessThanOrEqual(Date.now() + 1_000);
+
+    await fleet.alarm();
+
     expect(storage.value<LeaseRecord>(`lease:${lease.id}`)).toMatchObject({
       state: "released",
       cloudID: lease.cloudID,
@@ -6584,6 +6593,93 @@ describe("fleet lease identity and idle", () => {
       failureError: expect.stringContaining("canonical provider scope was not persisted"),
     });
     expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.cleanupRetryAt).toBeUndefined();
+    expect(storage.alarm()).toBeUndefined();
+  });
+
+  it("acknowledges provider cleanup before the alarm performs it", async () => {
+    const storage = new MemoryStorage();
+    const cleaned: string[] = [];
+    const lease = testLease({
+      id: "cbx_abcdef123456",
+      owner: "alice@example.com",
+      org: "example-org",
+      provider: "azure",
+      cloudID: "vm-cbx-abcdef123456",
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const fleet = testFleet(storage, {
+      azure: fakeProvider(undefined, { provider: "azure" }, async (id) => {
+        cleaned.push(id);
+      }),
+    });
+    const release = (deleteServer = true) =>
+      fleet.fetch(
+        request("POST", `/v1/leases/${lease.id}/release`, {
+          headers: {
+            "x-crabbox-owner": lease.owner,
+            "x-crabbox-org": "example-org",
+          },
+          body: { delete: deleteServer },
+        }),
+      );
+
+    expect((await release()).status).toBe(200);
+    expect((await release()).status).toBe(200);
+    const retain = await release(false);
+    expect(retain.status).toBe(409);
+    await expect(retain.json()).resolves.toMatchObject({ error: "cleanup_in_progress" });
+    expect(cleaned).toEqual([]);
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)).toMatchObject({
+      state: "released",
+      cloudID: lease.cloudID,
+      releaseDeletesServer: true,
+    });
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.cleanupStartedAt).toBeUndefined();
+    expect(storage.alarm()).toBeLessThanOrEqual(Date.now() + 1_000);
+
+    await fleet.alarm();
+
+    expect(cleaned).toEqual([lease.cloudID]);
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)).toMatchObject({
+      state: "released",
+    });
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.releaseDeletesServer).toBeUndefined();
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.cleanupStartedAt).toBeUndefined();
+  });
+
+  it("keeps no-delete releases out of queued provider cleanup", async () => {
+    const storage = new MemoryStorage();
+    const cleaned: string[] = [];
+    const lease = testLease({
+      id: "cbx_abcdef123456",
+      owner: "alice@example.com",
+      org: "example-org",
+      provider: "azure",
+      cloudID: "vm-cbx-abcdef123456",
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const fleet = testFleet(storage, {
+      azure: fakeProvider(undefined, { provider: "azure" }, async (id) => {
+        cleaned.push(id);
+      }),
+    });
+
+    const response = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/release`, {
+        headers: {
+          "x-crabbox-owner": lease.owner,
+          "x-crabbox-org": "example-org",
+        },
+        body: { delete: false },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(cleaned).toEqual([]);
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)).toMatchObject({
+      state: "released",
+      releaseDeletesServer: false,
+    });
     expect(storage.alarm()).toBeUndefined();
   });
 
@@ -9328,6 +9424,10 @@ describe("fleet lease identity and idle", () => {
         }),
       );
       expect(remove.status).toBe(200);
+      expect(cleanupLeases).toHaveLength(0);
+
+      await fleet.alarm();
+
       expect(cleanupLeases).toHaveLength(1);
       expect(cleanupLeases[0]).toMatchObject({
         cloudID,
@@ -14729,6 +14829,10 @@ describe("fleet lease identity and idle", () => {
     );
 
     expect(response.status).toBe(200);
+    expect(cleanupOrder).toEqual([]);
+
+    await fleet.alarm();
+
     expect(cleanupOrder).toEqual(["provider:4242"]);
     const stored = storage.value<LeaseRecord>("lease:cbx_tailscale_cleanup");
     expect(stored?.tailscale?.deviceID).toBe("node-123");
@@ -16045,6 +16149,10 @@ describe("fleet lease identity and idle", () => {
       }),
     );
     expect(deleteKept.status).toBe(200);
+    expect(deleted).toEqual([]);
+
+    await fleet.alarm();
+
     expect(deleted).toEqual(["vm-cbx-abcdef123456"]);
 
     const retryDeleteKept = await fleet.fetch(
@@ -16200,6 +16308,10 @@ describe("fleet lease identity and idle", () => {
       }),
     );
     expect(retryDelete.status).toBe(200);
+    expect(deleted).toEqual(["vm-cbx-abcdef123456"]);
+
+    await fleet.alarm();
+
     expect(deleted).toEqual(["vm-cbx-abcdef123456", "vm-cbx-abcdef123456"]);
     const retried = storage.value<LeaseRecord>("lease:cbx_abcdef123456");
     expect(retried?.state).toBe("released");

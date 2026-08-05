@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -2982,7 +2983,7 @@ func releaseCoordinatorLease(ctx context.Context, coord *CoordinatorClient, leas
 		releaseCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		_, err := coord.ReleaseLease(releaseCtx, leaseID, true)
 		cancel()
-		if err == nil {
+		if err == nil || coordinatorCleanupInProgress(err) {
 			return nil
 		}
 		lastErr = err
@@ -2992,6 +2993,17 @@ func releaseCoordinatorLease(ctx context.Context, coord *CoordinatorClient, leas
 		time.Sleep(time.Duration(attempt*2) * time.Second)
 	}
 	return lastErr
+}
+
+func coordinatorCleanupInProgress(err error) bool {
+	var httpErr CoordinatorHTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != 409 {
+		return false
+	}
+	var response struct {
+		Error string `json:"error"`
+	}
+	return json.Unmarshal([]byte(httpErr.Message), &response) == nil && response.Error == "cleanup_in_progress"
 }
 
 type leaseCleanupResult struct {
