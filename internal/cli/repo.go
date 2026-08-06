@@ -310,19 +310,121 @@ func syncIncludes(cfg Config) []string {
 	return out
 }
 
-func syncGitSeedEnabled(cfg Config, repo Repo) bool {
-	enabled, _ := syncGitSeedDecision(cfg, repo)
-	return enabled
+type gitCoherencePlan struct{ RemoteURL, Target, Tree, Branch string }
+
+func (p gitCoherencePlan) seedEnabled() bool {
+	return p.RemoteURL != "" && normalizeGitRemoteURL(p.RemoteURL) == p.RemoteURL && p.Target != "" && p.Branch != ""
 }
 
-func syncGitSeedDecision(cfg Config, repo Repo) (enabled, credentialBlocked bool) {
-	if !cfg.Sync.GitSeed || len(syncIncludes(cfg)) != 0 || !remoteGitSeedSourceCandidate(repo) {
-		return false, false
+func (p gitCoherencePlan) enabled() bool { return p.seedEnabled() && p.Tree != "" }
+
+func syncGitCoherencePlan(cfg Config, repo Repo) (gitCoherencePlan, bool) {
+	if !cfg.Sync.GitSeed || len(syncIncludes(cfg)) != 0 || repo.Root == "" || repo.RemoteURL == "" || repo.Head == "" {
+		return gitCoherencePlan{}, false
 	}
 	if gitRemoteURLHasCredentials(repo.RemoteURL) {
-		return false, true
+		return gitCoherencePlan{}, true
 	}
-	return true, false
+	target := gitOutput(repo.Root, "rev-parse", "--verify", repo.Head+"^{commit}")
+	tree := gitOutput(repo.Root, "rev-parse", "--verify", repo.Head+"^{tree}")
+	branch := originBranchForTarget(repo.Root, repo.BaseRef, target)
+	plan := gitCoherencePlan{RemoteURL: normalizeGitRemoteURL(repo.RemoteURL), Target: target, Branch: branch}
+	if target == "" || target != repo.Head || branch == "" {
+		return gitCoherencePlan{}, false
+	}
+	overlayOnly, err := gitTargetRequiresOverlayOnly(repo.Root, target)
+	if tree == "" || err != nil || overlayOnly {
+		return plan, false
+	}
+	plan.Tree = tree
+	return plan, false
+}
+
+func originBranchForTarget(root, baseRef, target string) string {
+	if target == "" {
+		return ""
+	}
+	if branch := normalizedOriginBranch(baseRef); branch != "" &&
+		gitOutput(root, "rev-parse", "--verify", "refs/remotes/origin/"+branch+"^{commit}") == target {
+		return branch
+	}
+	originHead := gitOutput(root, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+	if branch := normalizedOriginBranch(originHead); branch != "" &&
+		gitOutput(root, "rev-parse", "--verify", "refs/remotes/origin/"+branch+"^{commit}") == target {
+		return branch
+	}
+	out := gitOutput(root, "for-each-ref", "--contains="+target, "--sort=refname", "--format=%(refname)", "refs/remotes/origin")
+	for _, line := range strings.Split(out, "\n") {
+		if branch := normalizedOriginBranch(line); branch != "" {
+			return branch
+		}
+	}
+	return ""
+}
+
+func normalizedOriginBranch(ref string) string {
+	ref = strings.TrimSpace(ref)
+	switch {
+	case strings.HasPrefix(ref, "refs/remotes/origin/"):
+		ref = strings.TrimPrefix(ref, "refs/remotes/origin/")
+	case strings.HasPrefix(ref, "refs/heads/"):
+		ref = strings.TrimPrefix(ref, "refs/heads/")
+	case strings.HasPrefix(ref, "origin/"):
+		ref = strings.TrimPrefix(ref, "origin/")
+	}
+	if ref == "" || ref == "HEAD" {
+		return ""
+	}
+	cmd := exec.Command("git", "check-ref-format", "--branch", ref)
+	cmd.Env = repositoryGitEnvironment()
+	if err := cmd.Run(); err != nil {
+		return ""
+	}
+	return ref
+}
+
+func gitTargetRequiresOverlayOnly(root, target string) (bool, error) {
+	cmd := exec.Command("git", "ls-tree", "-r", "-z", "--full-tree", target)
+	cmd.Dir = root
+	cmd.Env = repositoryGitEnvironment()
+	out, err := cmd.Output()
+	if err != nil {
+		return false, err
+	}
+	var paths bytes.Buffer
+	for _, entry := range bytes.Split(out, []byte{0}) {
+		if len(entry) == 0 {
+			continue
+		}
+		metadata, name, ok := bytes.Cut(entry, []byte{'\t'})
+		if !ok {
+			return false, fmt.Errorf("parse target tree")
+		}
+		if bytes.HasPrefix(metadata, []byte("160000 ")) {
+			return true, nil
+		}
+		paths.Write(name)
+		paths.WriteByte(0)
+	}
+	if paths.Len() == 0 {
+		return false, nil
+	}
+	cmd = exec.Command("git", "check-attr", "--source="+target, "-z", "--stdin", "filter")
+	cmd.Dir = root
+	cmd.Env = repositoryGitEnvironment()
+	cmd.Stdin = bytes.NewReader(paths.Bytes())
+	out, err = cmd.Output()
+	if err != nil {
+		return false, err
+	}
+	fields := bytes.Split(out, []byte{0})
+	for i := 2; i < len(fields); i += 3 {
+		value := string(fields[i])
+		if value != "" && value != "unspecified" && value != "unset" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func warnCredentialBearingGitSeed(w io.Writer) {
@@ -407,17 +509,6 @@ func gitOutput(root string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-func remoteGitSeedCandidate(repo Repo) bool {
-	return remoteGitSeedSourceCandidate(repo) && !gitRemoteURLHasCredentials(repo.RemoteURL)
-}
-
-func remoteGitSeedSourceCandidate(repo Repo) bool {
-	if repo.Root == "" || repo.RemoteURL == "" || repo.Head == "" {
-		return false
-	}
-	return gitOutput(repo.Root, "for-each-ref", "--contains", repo.Head, "--format=%(refname)", "refs/remotes") != ""
-}
-
 func gitRemoteURLHasCredentials(remoteURL string) bool {
 	raw := strings.TrimSpace(remoteURL)
 	schemeEnd := strings.Index(raw, "://")
@@ -458,12 +549,12 @@ func defaultBaseRef(root string) string {
 	return ""
 }
 
-func syncFingerprintForManifest(repo Repo, cfg Config, manifest SyncManifest, excludes []string) (string, error) {
-	if repo.Head == "" {
+func syncFingerprintForManifest(repo Repo, cfg Config, manifest SyncManifest, excludes []string, plan gitCoherencePlan) (string, error) {
+	if !plan.enabled() {
 		return "", nil
 	}
 	h := sha256.New()
-	fmt.Fprintf(h, "v3\nhead=%s\n", repo.Head)
+	fmt.Fprintf(h, "v4\nremote=%s\nbranch=%s\nhead=%s\ntree=%s\n", plan.RemoteURL, plan.Branch, plan.Target, plan.Tree)
 	fmt.Fprintf(h, "delete=%t\nchecksum=%t\n", cfg.Sync.Delete, cfg.Sync.Checksum)
 	fmt.Fprintf(h, "manifest=%x\n", sha256.Sum256(manifest.NUL()))
 	fmt.Fprintf(h, "deleted=%x\n", sha256.Sum256(manifest.DeletedNUL()))

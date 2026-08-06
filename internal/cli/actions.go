@@ -541,12 +541,12 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 	if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteMkdir(workdir), idempotentSSHRetryDelay); err != nil {
 		return exit(7, "create remote workdir: %v", err)
 	}
-	gitSeed, credentialBlocked := syncGitSeedDecision(cfg, repo)
+	coherence, credentialBlocked := syncGitCoherencePlan(cfg, repo)
 	if credentialBlocked {
 		warnCredentialBearingGitSeed(a.Stderr)
 	}
-	if gitSeed {
-		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteGitSeed(workdir, repo.RemoteURL, repo.Head), idempotentSSHRetryDelay); err != nil {
+	if coherence.seedEnabled() {
+		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay); err != nil {
 			fmt.Fprintf(a.Stderr, "warning: remote git seed failed: %v\n", err)
 		}
 	}
@@ -574,7 +574,7 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 	}
 	fingerprint := ""
 	if cfg.Sync.Fingerprint {
-		if value, err := syncFingerprintForManifest(repo, cfg, manifest, excludes); err == nil {
+		if value, err := syncFingerprintForManifest(repo, cfg, manifest, excludes, coherence); err == nil {
 			fingerprint = value
 		} else {
 			fmt.Fprintf(a.Stderr, "warning: sync fingerprint failed: %v\n", err)
@@ -587,6 +587,7 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 		BaseSHA:            gitHydrateBaseSHA(repo, cfg.Sync.BaseRef),
 		Fingerprint:        fingerprint,
 		Token:              finalizeToken,
+		Coherence:          coherence,
 	})
 	if out, err := runIdempotentSSHCombinedOutput(ctx, target, finalizeCommand, idempotentSSHRetryDelay); err != nil {
 		if out != "" {

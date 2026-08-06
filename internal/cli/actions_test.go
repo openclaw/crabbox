@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"io"
 	"os"
 	"os/exec"
 	"path"
@@ -542,6 +544,50 @@ func TestSelectLocalHydrateJobAllowsSingleJobWorkflow(t *testing.T) {
 	}
 	if name != "setup" || job.Name != "Setup" {
 		t.Fatalf("selected job %q %#v, want setup", name, job)
+	}
+}
+
+func TestSyncLocalActionsWorkspaceUsesGitCoherenceFinalizer(t *testing.T) {
+	f := newGitCoherenceFixture(t)
+	tools := t.TempDir()
+	logPath := filepath.Join(tools, "ssh.log")
+	sshScript := `#!/bin/sh
+last=
+for arg do last="$arg"; done
+printf '%s\n' "$last" >> "$CRABBOX_ACTIONS_SSH_LOG"
+cat >/dev/null
+`
+	if err := os.WriteFile(filepath.Join(tools, "ssh"), []byte(sshScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tools, "rsync"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_ACTIONS_SSH_LOG", logPath)
+
+	cfg := baseConfig()
+	cfg.Sync.Fingerprint = true
+	cfg.Sync.BaseRef = "main"
+	repo := Repo{Root: f.source, Name: "repo", RemoteURL: f.origin, Head: f.b, BaseRef: "main"}
+	var stderr bytes.Buffer
+	app := App{Stdout: io.Discard, Stderr: &stderr}
+	err := app.syncLocalActionsWorkspace(context.Background(), cfg, repo, SSHTarget{
+		User: "crabbox", Host: "example.test", Port: "22", TargetOS: targetLinux,
+	}, "/work/repo")
+	if err != nil {
+		t.Fatalf("sync local Actions workspace: %v\n%s", err, stderr.String())
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logData)
+	plan := f.plan(t, f.b)
+	for _, want := range []string{plan.RemoteURL, plan.Target, plan.Tree, "refs/crabbox/sync-", "read-tree --reset", "update-ref --no-deref HEAD"} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("Actions sync missing coherence contract %q:\n%s", want, log)
+		}
 	}
 }
 
