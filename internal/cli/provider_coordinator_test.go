@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -429,6 +432,192 @@ func TestCoordinatorCreateLeaseTimesOutWithDiagnostics(t *testing.T) {
 	}
 }
 
+func TestCoordinatorCreateLeaseCancellationReleasesLateAcceptedLease(t *testing.T) {
+	oldRecoveryTimeout := coordinatorCanceledCreateRecoveryTimeout
+	oldRecoveryInterval := coordinatorCreateLeaseRecoveryInterval
+	coordinatorCanceledCreateRecoveryTimeout = time.Second
+	coordinatorCreateLeaseRecoveryInterval = 10 * time.Millisecond
+	defer func() {
+		coordinatorCanceledCreateRecoveryTimeout = oldRecoveryTimeout
+		coordinatorCreateLeaseRecoveryInterval = oldRecoveryInterval
+	}()
+
+	createStarted := make(chan struct{})
+	allowCreateCommit := make(chan struct{})
+	leaseAccepted := make(chan struct{})
+	firstReconcileRelease := make(chan struct{})
+	releaseObserved := make(chan struct{})
+	var firstReleaseAttempt sync.Once
+	var firstRelease sync.Once
+	var releaseCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases":
+			close(createStarted)
+			<-allowCreateCommit // Model a coordinator/provider path that commits after client cancellation.
+			close(leaseAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+				ID:       "cbx_cancel_late",
+				Slug:     "pearl-prawn",
+				Provider: "aws",
+				TargetOS: targetLinux,
+				Host:     "203.0.113.44",
+				State:    "active",
+			}})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/cbx_cancel_late/release":
+			select {
+			case <-leaseAccepted:
+			default:
+				firstReleaseAttempt.Do(func() { close(firstReconcileRelease) })
+				http.Error(w, `{"error":"not_found"}`, http.StatusNotFound)
+				return
+			}
+			var body struct {
+				Delete bool `json:"delete"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Error(err)
+			}
+			if !body.Delete {
+				t.Error("late lease release did not request provider deletion")
+			}
+			releaseCount.Add(1)
+			firstRelease.Do(func() { close(releaseObserved) })
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+				ID:       "cbx_cancel_late",
+				Provider: "aws",
+				State:    "released",
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetLinux
+	cfg.Coordinator = server.URL
+	cfg.CoordToken = "user-token"
+	coord, _, err := newCoordinatorClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &stderr}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	resultCh := make(chan coordinatorCreateLeaseResult, 1)
+	go func() {
+		lease, err := backend.createCoordinatorLeaseWithProgress(
+			ctx,
+			cfg,
+			"ssh-rsa test",
+			false,
+			"cbx_cancel_late",
+			"pearl-prawn",
+		)
+		resultCh <- coordinatorCreateLeaseResult{lease: lease, err: err}
+	}()
+	<-createStarted
+	cancel()
+
+	select {
+	case <-firstReconcileRelease:
+	case <-time.After(250 * time.Millisecond):
+		close(allowCreateCommit)
+		t.Fatal("canceled create did not reconcile its pre-generated lease id with delete-release")
+	}
+	close(allowCreateCommit)
+
+	select {
+	case result := <-resultCh:
+		if !errors.Is(result.err, context.Canceled) {
+			t.Fatalf("create err=%v, want context canceled", result.err)
+		}
+		if result.lease.ID != "" {
+			t.Fatalf("canceled create adopted lease=%#v", result.lease)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled create did not return within its reconciliation bound")
+	}
+
+	select {
+	case <-releaseObserved:
+	case <-time.After(time.Second):
+		t.Fatalf("late accepted lease was not released; stderr=%q", stderr.String())
+	}
+	if got := releaseCount.Load(); got != 1 {
+		t.Fatalf("release requests=%d, want 1", got)
+	}
+}
+
+func TestCanceledCoordinatorCreateDeletesReleasedRetainedLease(t *testing.T) {
+	var gets atomic.Int32
+	var releases atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/cbx_cancel_retained":
+			gets.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+				ID:       "cbx_cancel_retained",
+				Slug:     "coral-crab",
+				Provider: "aws",
+				State:    "released",
+				Keep:     true,
+			}})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/cbx_cancel_retained/release":
+			var body struct {
+				Delete bool `json:"delete"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Error(err)
+			}
+			if !body.Delete {
+				t.Error("retained lease release did not request provider deletion")
+			}
+			releases.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+				ID:       "cbx_cancel_retained",
+				Provider: "aws",
+				State:    "released",
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetLinux
+	cfg.Coordinator = server.URL
+	cfg.CoordToken = "user-token"
+	coord, _, err := newCoordinatorClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &coordinatorLeaseBackend{
+		cfg:   cfg,
+		coord: coord,
+		rt:    Runtime{Stderr: &bytes.Buffer{}},
+	}
+
+	if err := backend.releaseCoordinatorLeaseAfterCanceledCreate(
+		context.Background(),
+		"cbx_cancel_retained",
+		"coral-crab",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if got := releases.Load(); got != 1 {
+		t.Fatalf("released retained lease release requests=%d, want 1", got)
+	}
+	if got := gets.Load(); got != 0 {
+		t.Fatalf("released retained lease GET requests=%d, want direct release", got)
+	}
+}
+
 func TestCoordinatorCreateLeaseRecoversLeaseCommittedAfterCreateError(t *testing.T) {
 	oldRecoveryTimeout := coordinatorCreateLeaseRecoveryTimeout
 	oldRecoveryInterval := coordinatorCreateLeaseRecoveryInterval
@@ -441,6 +630,7 @@ func TestCoordinatorCreateLeaseRecoversLeaseCommittedAfterCreateError(t *testing
 
 	var createdLeaseID string
 	gets := 0
+	releases := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases":
@@ -469,6 +659,13 @@ func TestCoordinatorCreateLeaseRecoversLeaseCommittedAfterCreateError(t *testing
 				State:              "active",
 				ServerType:         "Standard_D2ads_v6",
 				IdleTimeoutSeconds: 1800,
+			}})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/release"):
+			releases++
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+				ID:       createdLeaseID,
+				Provider: "azure",
+				State:    "released",
 			}})
 		default:
 			http.NotFound(w, r)
@@ -499,6 +696,9 @@ func TestCoordinatorCreateLeaseRecoversLeaseCommittedAfterCreateError(t *testing
 	if gets == 0 {
 		t.Fatal("expected recovery GET")
 	}
+	if releases != 0 {
+		t.Fatalf("active uncertain create release requests=%d, want 0", releases)
+	}
 	for _, want := range []string{
 		"uncertain result",
 		"recovered coordinator lease",
@@ -507,6 +707,59 @@ func TestCoordinatorCreateLeaseRecoversLeaseCommittedAfterCreateError(t *testing
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("stderr=%q missing %q", stderr.String(), want)
 		}
+	}
+}
+
+func TestCoordinatorCreateLeaseDefinitiveErrorDoesNotReconcile(t *testing.T) {
+	var gets atomic.Int32
+	var releases atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases":
+			http.Error(w, `{"error":"invalid_configuration"}`, http.StatusBadRequest)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/cbx_definitive":
+			gets.Add(1)
+			http.NotFound(w, r)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/cbx_definitive/release":
+			releases.Add(1)
+			http.NotFound(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetLinux
+	cfg.Coordinator = server.URL
+	cfg.CoordToken = "user-token"
+	coord, _, err := newCoordinatorClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &coordinatorLeaseBackend{
+		cfg:   cfg,
+		coord: coord,
+		rt:    Runtime{Stderr: &bytes.Buffer{}},
+	}
+
+	lease, err := backend.createCoordinatorLeaseWithProgress(
+		context.Background(),
+		cfg,
+		"ssh-rsa test",
+		false,
+		"cbx_definitive",
+		"amber-crab",
+	)
+	if err == nil || !strings.Contains(err.Error(), "http 400") {
+		t.Fatalf("create err=%v, want definitive http 400", err)
+	}
+	if lease.ID != "" {
+		t.Fatalf("definitive error returned lease=%#v", lease)
+	}
+	if gets.Load() != 0 || releases.Load() != 0 {
+		t.Fatalf("definitive error reconciliation gets=%d releases=%d, want 0/0", gets.Load(), releases.Load())
 	}
 }
 
