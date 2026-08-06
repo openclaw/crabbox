@@ -2175,6 +2175,8 @@ type fullResyncActionsTestOptions struct {
 	syncOnly         bool
 	failInvalidation bool
 	adoptedWorkspace string
+	workflow         string
+	mutateWorkflow   bool
 }
 
 type fullResyncActionsTestResult struct {
@@ -2195,6 +2197,46 @@ func runFullResyncActionsTest(t *testing.T, opts fullResyncActionsTestOptions) f
 	clearConfigEnv(t)
 	dir := t.TempDir()
 	isolateRunTestUserDirs(t, dir)
+	repoRoot := filepath.Join(dir, "crabbox")
+	workflowPath := filepath.Join(repoRoot, ".github", "workflows", "hydrate.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workflow := opts.workflow
+	if workflow == "" {
+		workflow = `name: Hydrate
+on:
+  workflow_dispatch:
+    inputs:
+      crabbox_id:
+        required: true
+      crabbox_runner_label:
+        required: true
+      crabbox_keep_alive_minutes:
+        required: true
+jobs:
+  hydrate:
+    steps:
+      - run: echo prepared-snapshot
+`
+	}
+	if err := os.WriteFile(workflowPath, []byte(workflow), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"config", "user.email", "test@example.com"},
+		{"config", "user.name", "Crabbox Test"},
+		{"add", "."},
+		{"commit", "-qm", "fixture"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repoRoot
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	t.Chdir(repoRoot)
 	sshPath := filepath.Join(dir, "ssh")
 	rsyncPath := filepath.Join(dir, "rsync")
 	eventsPath := filepath.Join(dir, "events")
@@ -2215,6 +2257,14 @@ case "$remote" in
     if [ "${CRABBOX_FAKE_INVALIDATE_FAIL:-0}" = "1" ]; then
       printf 'marker invalidation denied\n' >&2
       exit 1
+    fi
+    if [ "${CRABBOX_FAKE_MUTATE_WORKFLOW:-0}" = "1" ]; then
+      cat > "$CRABBOX_FAKE_WORKFLOW_PATH" <<'EOF'
+jobs:
+  hydrate:
+    steps:
+      - run: echo "${{ matrix.node }}"
+EOF
     fi
     ;;
   *"rm -rf --"*)
@@ -2275,6 +2325,7 @@ exit 0
 	t.Setenv("CRABBOX_FAKE_RESET_COMMAND", resetCommandPath)
 	t.Setenv("CRABBOX_FAKE_SYNC_TARGET", syncTargetPath)
 	t.Setenv("CRABBOX_FAKE_HYDRATION_SCRIPT", hydrationScriptPath)
+	t.Setenv("CRABBOX_FAKE_WORKFLOW_PATH", workflowPath)
 	canonicalWorkspace := remoteJoin(defaultConfig(), "cbx_env_profile_test", "crabbox")
 	adoptedWorkspace := opts.adoptedWorkspace
 	if adoptedWorkspace == "" {
@@ -2284,6 +2335,9 @@ exit 0
 	t.Setenv("CRABBOX_FAKE_ADOPTED_WORKSPACE", adoptedWorkspace)
 	if opts.failInvalidation {
 		t.Setenv("CRABBOX_FAKE_INVALIDATE_FAIL", "1")
+	}
+	if opts.mutateWorkflow {
+		t.Setenv("CRABBOX_FAKE_MUTATE_WORKFLOW", "1")
 	}
 	args := []string{
 		"--provider", "run-env-profile-test",
@@ -2344,6 +2398,29 @@ func TestRunCommandFullResyncRehydratesAdoptedActionsWorkspaceInOrder(t *testing
 		if !strings.Contains(value, canonicalWorkspace) {
 			t.Fatalf("%s does not use canonical workspace %q:\n%s", name, canonicalWorkspace, value)
 		}
+	}
+}
+
+func TestRunCommandFullResyncRejectsUnsupportedWorkflowBeforeRemoteMutation(t *testing.T) {
+	result := runFullResyncActionsTest(t, fullResyncActionsTestOptions{workflow: `jobs:
+  hydrate:
+    steps:
+      - run: echo "${{ matrix.node }}"
+`})
+	var exitErr ExitError
+	if !AsExitError(result.err, &exitErr) || exitErr.Code != 2 {
+		t.Fatalf("error=%v, want exit 2\nstdout=%s\nstderr=%s", result.err, result.stdout, result.stderr)
+	}
+	assertRunEvents(t, result.events, nil)
+}
+
+func TestRunCommandFullResyncUsesPreparedWorkflowSnapshot(t *testing.T) {
+	result := runFullResyncActionsTest(t, fullResyncActionsTestOptions{mutateWorkflow: true})
+	if result.err != nil {
+		t.Fatalf("run error=%v\nstdout=%s\nstderr=%s", result.err, result.stdout, result.stderr)
+	}
+	if !strings.Contains(result.hydrationScript, "prepared-snapshot") || strings.Contains(result.hydrationScript, "matrix.node") {
+		t.Fatalf("hydration did not use prepared workflow snapshot:\n%s", result.hydrationScript)
 	}
 }
 

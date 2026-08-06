@@ -432,35 +432,45 @@ func exitCodeForError(err error, fallback int) int {
 	return fallback
 }
 
-func (a App) hydrateActionsLocally(ctx context.Context, cfg Config, repo Repo, target SSHTarget, leaseID, expectedJob string, fields []string, waitTimeout time.Duration, streamOutput bool, syncBefore bool) (actionsHydrationState, error) {
+type localActionsHydrationPlan struct {
+	leaseID, workdir, jobName, expectedJob, script, warnings string
+}
+
+func prepareLocalActionsHydration(cfg Config, repo Repo, target SSHTarget, leaseID, expectedJob string, fields []string) (localActionsHydrationPlan, error) {
+	target = targetWithConfigDefaults(target, cfg)
 	if !supportsLocalActionsHydrateTarget(target) {
-		return actionsHydrationState{}, exit(2, "local Actions hydration currently supports Linux and Windows WSL2 targets only")
+		return localActionsHydrationPlan{}, exit(2, "local Actions hydration currently supports Linux and Windows WSL2 targets only")
 	}
 	if err := validateWorkflowInputFields(fields); err != nil {
-		return actionsHydrationState{}, err
+		return localActionsHydrationPlan{}, err
 	}
 	workflowPath, err := localActionsWorkflowPath(repo.Root, cfg.Actions.Workflow)
 	if err != nil {
-		return actionsHydrationState{}, err
+		return localActionsHydrationPlan{}, err
 	}
-	workflow, err := readLocalHydrateWorkflow(workflowPath)
+	data, err := os.ReadFile(workflowPath)
 	if err != nil {
-		return actionsHydrationState{}, err
+		return localActionsHydrationPlan{}, err
+	}
+	workflow, err := parseLocalHydrateWorkflow(data, workflowPath)
+	if err != nil {
+		return localActionsHydrationPlan{}, err
 	}
 	jobName, job, err := selectLocalHydrateJob(workflow, cfg.Actions.Job)
 	if err != nil {
-		return actionsHydrationState{}, exit(2, "workflow %s %v", cfg.Actions.Workflow, err)
+		return localActionsHydrationPlan{}, exit(2, "workflow %s %v", cfg.Actions.Workflow, err)
 	}
-	if inputs, defaults, required, ok, err := parseWorkflowDispatchInputSpecFromFile(workflowPath); err != nil {
-		return actionsHydrationState{}, err
+	var warnings strings.Builder
+	if inputs, defaults, required, ok, err := parseWorkflowDispatchInputSpec(data); err != nil {
+		return localActionsHydrationPlan{}, err
 	} else if ok {
 		fields = applyWorkflowInputDefaults(fields, defaults)
 		if missing := missingRequiredWorkflowInputs(fields, required); len(missing) > 0 {
-			return actionsHydrationState{}, exit(2, "workflow %s requires hydrate input(s) %s; pass them with -f key=value or define defaults", cfg.Actions.Workflow, strings.Join(missing, ","))
+			return localActionsHydrationPlan{}, exit(2, "workflow %s requires hydrate input(s) %s; pass them with -f key=value or define defaults", cfg.Actions.Workflow, strings.Join(missing, ","))
 		}
 		filtered, dropped := filterWorkflowInputs(fields, inputs)
 		for _, field := range dropped {
-			fmt.Fprintf(a.Stderr, "warning: workflow %s does not declare input %s; omitting it\n", cfg.Actions.Workflow, fieldName(field))
+			fmt.Fprintf(&warnings, "warning: workflow %s does not declare input %s; omitting it\n", cfg.Actions.Workflow, fieldName(field))
 		}
 		fields = filtered
 		if !workflowFieldsContain(fields, "crabbox_job") {
@@ -468,25 +478,38 @@ func (a App) hydrateActionsLocally(ctx context.Context, cfg Config, repo Repo, t
 		}
 		for _, required := range []string{"crabbox_id", "crabbox_runner_label", "crabbox_keep_alive_minutes"} {
 			if !inputs[required] {
-				return actionsHydrationState{}, exit(2, "workflow %s does not declare required hydrate input %s", cfg.Actions.Workflow, required)
+				return localActionsHydrationPlan{}, exit(2, "workflow %s does not declare required hydrate input %s", cfg.Actions.Workflow, required)
 			}
 		}
 	}
 	workdir := remoteJoin(cfg, leaseID, repo.Name)
-	if streamOutput {
-		fmt.Fprintf(a.Stdout, "local actions hydrate workflow=%s job=%s workspace=%s\n", cfg.Actions.Workflow, jobName, workdir)
+	script, err := localActionsHydrateScript(cfg, repo, workflow, job, jobName, leaseID, fields, workdir)
+	if err != nil {
+		return localActionsHydrationPlan{}, err
 	}
-	if err := clearActionsHydrationState(ctx, target, leaseID); err != nil {
+	return localActionsHydrationPlan{leaseID: leaseID, workdir: workdir, jobName: jobName, expectedJob: expectedJob, script: script, warnings: warnings.String()}, nil
+}
+
+func (a App) hydrateActionsLocally(ctx context.Context, cfg Config, repo Repo, target SSHTarget, leaseID, expectedJob string, fields []string, waitTimeout time.Duration, streamOutput bool, syncBefore bool) (actionsHydrationState, error) {
+	plan, err := prepareLocalActionsHydration(cfg, repo, target, leaseID, expectedJob, fields)
+	if err != nil {
+		return actionsHydrationState{}, err
+	}
+	return a.executeLocalActionsHydration(ctx, cfg, repo, target, plan, waitTimeout, streamOutput, syncBefore)
+}
+
+func (a App) executeLocalActionsHydration(ctx context.Context, cfg Config, repo Repo, target SSHTarget, plan localActionsHydrationPlan, waitTimeout time.Duration, streamOutput bool, syncBefore bool) (actionsHydrationState, error) {
+	fmt.Fprint(a.Stderr, plan.warnings)
+	if streamOutput {
+		fmt.Fprintf(a.Stdout, "local actions hydrate workflow=%s job=%s workspace=%s\n", cfg.Actions.Workflow, plan.jobName, plan.workdir)
+	}
+	if err := clearActionsHydrationState(ctx, target, plan.leaseID); err != nil {
 		return actionsHydrationState{}, err
 	}
 	if syncBefore {
-		if err := a.syncLocalActionsWorkspace(ctx, cfg, repo, target, workdir); err != nil {
+		if err := a.syncLocalActionsWorkspace(ctx, cfg, repo, target, plan.workdir); err != nil {
 			return actionsHydrationState{}, err
 		}
-	}
-	script, err := localActionsHydrateScript(cfg, repo, workflow, job, jobName, leaseID, fields, workdir)
-	if err != nil {
-		return actionsHydrationState{}, err
 	}
 	stdout := io.Discard
 	stderr := io.Discard
@@ -494,33 +517,33 @@ func (a App) hydrateActionsLocally(ctx context.Context, cfg Config, repo Repo, t
 		stdout = a.Stdout
 		stderr = a.Stderr
 	}
-	if err := runSSHInput(ctx, target, remoteInstallLocalActionsHydrateScript(leaseID), strings.NewReader(script), stdout, stderr); err != nil {
+	if err := runSSHInput(ctx, target, remoteInstallLocalActionsHydrateScript(plan.leaseID), strings.NewReader(plan.script), stdout, stderr); err != nil {
 		return actionsHydrationState{}, exit(7, "install local Actions hydration script on %s: %v", target.Host, err)
 	}
 	if isWindowsWSL2Target(target) {
-		if err := runSSHInput(ctx, target, remoteRunLocalActionsHydrateScriptForeground(leaseID, waitTimeout), nil, stdout, stderr); err != nil {
+		if err := runSSHInput(ctx, target, remoteRunLocalActionsHydrateScriptForeground(plan.leaseID, waitTimeout), nil, stdout, stderr); err != nil {
 			return actionsHydrationState{}, exit(7, "run local Actions hydration on %s: %v", target.Host, err)
 		}
-		state, err := readActionsHydrationState(ctx, target, leaseID)
+		state, err := readActionsHydrationState(ctx, target, plan.leaseID)
 		if err != nil || state.Workspace == "" {
 			if err != nil {
-				return actionsHydrationState{}, exit(7, "read local Actions hydration marker for %s: %v", leaseID, err)
+				return actionsHydrationState{}, exit(7, "read local Actions hydration marker for %s: %v", plan.leaseID, err)
 			}
-			return actionsHydrationState{}, exit(7, "local Actions hydration completed without marker for %s", leaseID)
+			return actionsHydrationState{}, exit(7, "local Actions hydration completed without marker for %s", plan.leaseID)
 		}
-		if expectedJob != "" && state.Job != "" && state.Job != expectedJob {
-			return actionsHydrationState{}, exit(5, "local Actions hydration marker for %s came from job %q, expected %q", leaseID, state.Job, expectedJob)
+		if plan.expectedJob != "" && state.Job != "" && state.Job != plan.expectedJob {
+			return actionsHydrationState{}, exit(5, "local Actions hydration marker for %s came from job %q, expected %q", plan.leaseID, state.Job, plan.expectedJob)
 		}
-		if err := ensureLocalActionsRunEnv(ctx, target, leaseID, state); err != nil {
+		if err := ensureLocalActionsRunEnv(ctx, target, plan.leaseID, state); err != nil {
 			return actionsHydrationState{}, err
 		}
 		return state, nil
 	}
-	pid, err := runSSHOutput(ctx, target, remoteStartLocalActionsHydrateScript(leaseID))
+	pid, err := runSSHOutput(ctx, target, remoteStartLocalActionsHydrateScript(plan.leaseID))
 	if err != nil {
 		return actionsHydrationState{}, exit(7, "start local Actions hydration on %s: %v", target.Host, err)
 	}
-	return waitForLocalActionsHydration(ctx, target, leaseID, expectedJob, strings.TrimSpace(pid), waitTimeout, stderr)
+	return waitForLocalActionsHydration(ctx, target, plan.leaseID, plan.expectedJob, strings.TrimSpace(pid), waitTimeout, stderr)
 }
 
 func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Repo, target SSHTarget, workdir string) error {
@@ -595,14 +618,6 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 		return exit(6, "remote sync finalize failed: %v", err)
 	}
 	return nil
-}
-
-func parseWorkflowDispatchInputSpecFromFile(path string) (map[string]bool, map[string]string, map[string]bool, bool, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, nil, nil, false, err
-	}
-	return parseWorkflowDispatchInputSpec(data)
 }
 
 func localActionsWorkflowPath(root, workflow string) (string, error) {
@@ -704,12 +719,8 @@ type localCompositeRuns struct {
 	Steps []localHydrateStep `yaml:"steps"`
 }
 
-func readLocalHydrateWorkflow(path string) (localHydrateWorkflow, error) {
+func parseLocalHydrateWorkflow(data []byte, path string) (localHydrateWorkflow, error) {
 	var workflow localHydrateWorkflow
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return workflow, err
-	}
 	if err := yaml.Unmarshal(data, &workflow); err != nil {
 		return workflow, err
 	}
