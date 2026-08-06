@@ -214,6 +214,13 @@ checkout path, installed dependencies, caches, runner temp/toolcache paths, and
 any project-specific preparation. See
 [Actions hydration](../features/actions-hydration.md).
 
+For an adopted Actions workspace, `--full-resync` invalidates the readiness
+marker before resetting the remote tree. A command-bearing run continues only
+when automatic local hydration can rebuild the canonical lease workspace; it
+otherwise fails before reset. Omit `--no-hydrate` and use the canonical
+workspace for the command path, or use `--sync-only` to reset and sync without
+rehydration or a user command.
+
 If a JavaScript package-manager command (`pnpm`, `npm`, `node`, `corepack`)
 runs on a raw SSH workspace before a hydration marker exists and no automatic
 hydration is available, Crabbox probes the remote tool first and fails before
