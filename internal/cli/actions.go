@@ -2289,6 +2289,22 @@ func clearActionsHydrationState(ctx context.Context, target SSHTarget, leaseID s
 	return exit(7, "clear GitHub Actions hydration marker on %s: %v", target.Host, lastErr)
 }
 
+func invalidateActionsHydrationMarker(ctx context.Context, target SSHTarget, leaseID string) error {
+	remote := remoteInvalidateActionsHydrationMarkerForTarget(target, leaseID)
+	lastOutput, lastErr := runIdempotentSSHCombinedOutput(ctx, target, remote, idempotentSSHRetryDelay)
+	if lastErr == nil {
+		return nil
+	}
+	details := strings.TrimSpace(lastOutput)
+	if target.AuthSecret {
+		details = RedactDiagnosticSecrets(details, target.User)
+	}
+	if details != "" {
+		return exit(7, "invalidate GitHub Actions hydration marker on %s: %v: %s", target.Host, lastErr, details)
+	}
+	return exit(7, "invalidate GitHub Actions hydration marker on %s: %v", target.Host, lastErr)
+}
+
 func writeActionsHydrationStop(ctx context.Context, target SSHTarget, leaseID string) error {
 	if err := runSSHQuiet(ctx, target, remoteWriteActionsHydrationStopForTarget(target, leaseID)); err != nil {
 		return exit(7, "write GitHub Actions hydration stop marker on %s: %v", target.Host, err)
@@ -2421,6 +2437,23 @@ if [ -f "$env_file" ]; then
 fi
 `
 	return "bash -lc " + shellQuote(script)
+}
+
+func remoteInvalidateActionsHydrationMarker(leaseID string) string {
+	return "rm -f \"$HOME\"/" + shellQuote(actionsHydrationStatePath(leaseID))
+}
+
+func remoteInvalidateActionsHydrationMarkerForTarget(target SSHTarget, leaseID string) string {
+	if isWindowsNativeTarget(target) {
+		return powershellCommand(`$ErrorActionPreference = "Stop"
+$path = ` + psQuote(windowsActionsHydrationPath(actionsHydrationStatePath(leaseID))) + `
+if (Test-Path -LiteralPath $path) {
+  Remove-Item -LiteralPath $path -Force -ErrorAction Stop
+}
+exit 0
+`)
+	}
+	return remoteInvalidateActionsHydrationMarker(leaseID)
 }
 
 func remoteClearActionsHydrationState(leaseID string) string {

@@ -1317,6 +1317,24 @@ retrySync:
 				}
 			}
 		}
+		if fullResyncRequested && hydratedByActions {
+			// The marker is authoritative for workspace readiness. Invalidate it
+			// before reset so afterSync must establish readiness on the new tree.
+			hydrateTarget := targetWithConfigDefaults(target, cfg)
+			if !*syncOnly && (!autoHydrateActions || !supportsLocalActionsHydrateTarget(hydrateTarget)) {
+				return recordFailure(exit(2, "--full-resync would invalidate the adopted Actions workspace for %s, but this run cannot rehydrate it; configure actions.workflow and omit --no-hydrate, or use --sync-only", leaseID))
+			}
+			localHydrateWorkdir := remoteJoin(cfg, leaseID, repo.Name)
+			if !*syncOnly && workdir != localHydrateWorkdir {
+				return recordFailure(exit(2, "--full-resync cannot rehydrate adopted Actions workspace %s because local hydration uses %s; use --sync-only or hydrate the canonical workspace first", workdir, localHydrateWorkdir))
+			}
+			if err := invalidateActionsHydrationMarker(ctx, hydrateTarget, leaseID); err != nil {
+				return recordFailure(err)
+			}
+			hydratedByActions = false
+			actionsEnvFile = ""
+			actionsURL = ""
+		}
 		if fullResyncRequested {
 			stepStart = time.Now()
 			fmt.Fprintf(a.Stderr, "full-resync resetting remote workdir %s\n", workdir)

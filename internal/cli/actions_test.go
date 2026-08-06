@@ -1395,6 +1395,46 @@ func TestRemoteClearActionsHydrationStateRemovesReadyAndStop(t *testing.T) {
 	}
 }
 
+func TestRemoteInvalidateActionsHydrationMarkerPreservesBookkeeping(t *testing.T) {
+	leaseID := "cbx_123"
+	bookkeepingPaths := []string{
+		actionsHydrationEnvPath(leaseID),
+		actionsHydrationServicesPath(leaseID),
+		actionsHydrationStopPath(leaseID),
+		actionsHydrationLocalScriptPath(leaseID),
+		actionsHydrationLocalLogPath(leaseID),
+		actionsHydrationLocalExitPath(leaseID),
+	}
+	t.Run("posix", func(t *testing.T) {
+		got := remoteInvalidateActionsHydrationMarkerForTarget(SSHTarget{TargetOS: targetLinux}, leaseID)
+		if !strings.Contains(got, actionsHydrationStatePath(leaseID)) {
+			t.Fatalf("invalidate command missing readiness marker:\n%s", got)
+		}
+		for _, path := range bookkeepingPaths {
+			if strings.Contains(got, path) {
+				t.Fatalf("invalidate command removes bookkeeping path %q:\n%s", path, got)
+			}
+		}
+	})
+	t.Run("windows", func(t *testing.T) {
+		target := SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}
+		got := decodePowerShellCommand(t, remoteInvalidateActionsHydrationMarkerForTarget(target, leaseID))
+		if !strings.Contains(got, windowsActionsHydrationPath(actionsHydrationStatePath(leaseID))) {
+			t.Fatalf("invalidate command missing readiness marker:\n%s", got)
+		}
+		for _, want := range []string{`$ErrorActionPreference = "Stop"`, "Test-Path -LiteralPath $path", "Remove-Item -LiteralPath $path -Force -ErrorAction Stop"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("invalidate command missing fail-closed operation %q:\n%s", want, got)
+			}
+		}
+		for _, path := range bookkeepingPaths {
+			if strings.Contains(got, windowsActionsHydrationPath(path)) {
+				t.Fatalf("invalidate command removes bookkeeping path %q:\n%s", path, got)
+			}
+		}
+	})
+}
+
 func TestRemoteWriteActionsHydrationStopMatchesWorkflowInput(t *testing.T) {
 	got := remoteWriteActionsHydrationStop("cbx_123")
 	for _, want := range []string{
@@ -1408,11 +1448,12 @@ func TestRemoteWriteActionsHydrationStopMatchesWorkflowInput(t *testing.T) {
 }
 
 func TestWindowsActionsHydrationMarkerCommandsUseProgramData(t *testing.T) {
-	target := SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}
+	target := targetWithConfigDefaults(SSHTarget{}, Config{TargetOS: targetWindows, WindowsMode: windowsModeNormal})
 	for name, command := range map[string]string{
-		"read":  remoteReadActionsHydrationStateForTarget(target, "cbx_123"),
-		"clear": remoteClearActionsHydrationStateForTarget(target, "cbx_123"),
-		"stop":  remoteWriteActionsHydrationStopForTarget(target, "cbx_123"),
+		"read":       remoteReadActionsHydrationStateForTarget(target, "cbx_123"),
+		"invalidate": remoteInvalidateActionsHydrationMarkerForTarget(target, "cbx_123"),
+		"clear":      remoteClearActionsHydrationStateForTarget(target, "cbx_123"),
+		"stop":       remoteWriteActionsHydrationStopForTarget(target, "cbx_123"),
 	} {
 		decoded := decodePowerShellCommand(t, command)
 		for _, want := range []string{`C:\ProgramData\crabbox\actions`, `cbx_123`} {
