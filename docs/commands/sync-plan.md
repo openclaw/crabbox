@@ -28,6 +28,11 @@ matches what an actual sync would ship:
 Ordered exclude rules are applied before size accounting; a later `!pattern`
 can re-include a path matched by an earlier rule.
 
+The same preflight rejects tracked non-gitlink paths hidden by sparse-checkout
+or `skip-worktree` state only when they remain in the effective manifest after
+`sync.include` and ordered excludes. On Git older than 2.41, an ambiguous
+missing in-scope path fails closed; out-of-scope paths do not affect the plan.
+
 ## Output
 
 The first line reports the candidate file count and total size. If the
