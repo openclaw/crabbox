@@ -106,6 +106,11 @@ type CoordinatorLease struct {
 	ProviderMetadata      map[string]any                 `json:"providerMetadata,omitempty"`
 }
 
+type CoordinatorCanceledCreateReleaseResult struct {
+	Lease          CoordinatorLease `json:"lease"`
+	RequestLeaseID string           `json:"requestLeaseID,omitempty"`
+}
+
 type CoordinatorLeaseImage struct {
 	ID         string `json:"id"`
 	Source     string `json:"source"`
@@ -1102,6 +1107,12 @@ func (c *CoordinatorClient) ReleaseLease(ctx context.Context, id string, deleteS
 	}
 	err := c.do(ctx, http.MethodPost, "/v1/leases/"+url.PathEscape(id)+"/release", map[string]any{"delete": deleteServer}, &res)
 	return res.Lease, err
+}
+
+func (c *CoordinatorClient) ReleaseLeaseAfterCanceledCreate(ctx context.Context, id string, deleteServer bool) (CoordinatorCanceledCreateReleaseResult, error) {
+	var result CoordinatorCanceledCreateReleaseResult
+	err := c.do(ctx, http.MethodPost, "/v1/leases/"+url.PathEscape(id)+"/release", map[string]any{"delete": deleteServer}, &result)
+	return result, err
 }
 
 func (c *CoordinatorClient) CompleteRuntimeAdapterDelete(ctx context.Context, id, adapterID, workspaceID, registrationID string) (CoordinatorLease, error) {

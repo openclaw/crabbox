@@ -18113,6 +18113,607 @@ describe("fleet lease identity and idle", () => {
     await expect(deletedHostReuse.json()).resolves.toMatchObject({ error: "admin_required" });
   });
 
+  it("releases a lost-response retained Mac reactivation only through its private requested-ID binding", async () => {
+    const storage = new MemoryStorage();
+    const canonicalID = "cbx_000000000110";
+    const requestLeaseID = "cbx_abcdef123460";
+    const retained = testLease({
+      id: canonicalID,
+      provider: "aws",
+      target: "macos",
+      state: "released",
+      owner: "alice@example.com",
+      org: "example-org",
+      hostId: "h-alias-success",
+      serverType: "mac2.metal",
+      providerKey: "crabbox-retained-alias",
+      cloudID: "i-retained-alias",
+      releaseDeletesServer: false,
+    });
+    storage.seed(`lease:${canonicalID}`, retained);
+    const released: LeaseRecord[] = [];
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(
+        () => {
+          throw new Error("retained instance must not launch a replacement");
+        },
+        {
+          provider: "aws",
+          onReleaseLease: (lease) => {
+            released.push(structuredClone(lease));
+          },
+        },
+      ),
+    });
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const created = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers,
+        body: {
+          leaseID: requestLeaseID,
+          provider: "aws",
+          target: "macos",
+          hostId: "h-alias-success",
+          serverType: "mac2.metal",
+          capacity: { market: "on-demand" },
+          keep: true,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+    expect(created.status).toBe(201);
+    const createdBody = (await created.json()) as { lease: LeaseRecord };
+    expect(createdBody).toMatchObject({
+      lease: { id: canonicalID, cloudID: "i-retained-alias", state: "active" },
+    });
+    expect(createdBody.lease.requestLeaseGeneration).toBeUndefined();
+    const canonical = storage.value<LeaseRecord>(`lease:${canonicalID}`)!;
+    expect(canonical.requestLeaseGeneration).toMatch(/^[0-9a-f-]{36}$/);
+    expect(storage.value(`lease-request:${requestLeaseID}`)).toMatchObject({
+      version: 1,
+      requestLeaseID,
+      leaseID: canonicalID,
+      owner: "alice@example.com",
+      org: orgKeyForLabel("example-org"),
+      cloudID: "i-retained-alias",
+      generation: canonical.requestLeaseGeneration,
+    });
+
+    const getAlias = await fleet.fetch(request("GET", `/v1/leases/${requestLeaseID}`, { headers }));
+    expect(getAlias.status).toBe(404);
+    const heartbeatAlias = await fleet.fetch(
+      request("POST", `/v1/leases/${requestLeaseID}/heartbeat`, { headers }),
+    );
+    expect(heartbeatAlias.status).toBe(404);
+    const shareAlias = await fleet.fetch(
+      request("GET", `/v1/leases/${requestLeaseID}/share`, { headers }),
+    );
+    expect(shareAlias.status).toBe(404);
+    const runAlias = await fleet.fetch(
+      request("POST", "/v1/runs", {
+        headers,
+        body: { leaseID: requestLeaseID, command: ["true"] },
+      }),
+    );
+    expect(runAlias.status).toBe(201);
+    await expect(runAlias.json()).resolves.toMatchObject({
+      run: { leaseID: requestLeaseID, leaseOwners: [], provider: "hetzner" },
+    });
+
+    const release = await fleet.fetch(
+      request("POST", `/v1/leases/${requestLeaseID}/release`, {
+        headers,
+        body: { delete: true },
+      }),
+    );
+    expect(release.status).toBe(200);
+    const releaseBody = (await release.json()) as {
+      lease: LeaseRecord;
+      requestLeaseID: string;
+    };
+    expect(releaseBody).toMatchObject({
+      requestLeaseID,
+      lease: { id: canonicalID, cloudID: "i-retained-alias", state: "released" },
+    });
+    expect(releaseBody.lease.requestLeaseGeneration).toBeUndefined();
+    expect(released).toHaveLength(1);
+    expect(released[0]).toMatchObject({ id: canonicalID, cloudID: "i-retained-alias" });
+    expect(storage.value(`lease-request:${requestLeaseID}`)).toBeDefined();
+  });
+
+  it("keeps retained request IDs permanently reserved across every lease allocator", async () => {
+    const storage = new MemoryStorage();
+    const reservedID = "cbx_aaaaaaaaaaaa";
+    storage.seed(`lease-request:${reservedID}`, {
+      version: 1,
+      requestLeaseID: reservedID,
+      leaseID: "cbx_000000000111",
+      owner: "alice@example.com",
+      org: "example-org",
+      cloudID: "i-old-generation",
+      generation: "old-generation",
+      createdAt: "2026-08-01T00:00:00.000Z",
+    });
+    storage.seed(
+      "lease:cbx_000000000112",
+      testLease({
+        id: "cbx_000000000112",
+        provider: "aws",
+        target: "macos",
+        state: "released",
+        owner: "alice@example.com",
+        org: "example-org",
+        hostId: "h-reserved-alias",
+        serverType: "mac2.metal",
+        releaseDeletesServer: false,
+      }),
+    );
+    const fleet = testFleet(
+      storage,
+      { aws: fakeProvider(undefined, { provider: "aws" }), hetzner: fakeProvider() },
+      { CRABBOX_WORKSPACE_SSH_PUBLIC_KEY: "ssh-ed25519 workspace-test" },
+    );
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const ordinary = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers,
+        body: {
+          leaseID: reservedID,
+          provider: "hetzner",
+          sshPublicKey: "ssh-ed25519 ordinary",
+        },
+      }),
+    );
+    expect(ordinary.status).toBe(409);
+    const fixed = await fleet.fetch(
+      request("PUT", `/v1/leases/${reservedID}`, {
+        headers,
+        body: { provider: "hetzner", sshPublicKey: "ssh-ed25519 fixed" },
+      }),
+    );
+    expect(fixed.status).toBe(409);
+    const registered = await fleet.fetch(
+      request("PUT", `/v1/leases/${reservedID}/registration`, {
+        headers,
+        body: { provider: "external", target: "linux", host: "host.example.test" },
+      }),
+    );
+    expect(registered.status).toBe(409);
+    const retained = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers,
+        body: {
+          leaseID: reservedID,
+          provider: "aws",
+          target: "macos",
+          hostId: "h-reserved-alias",
+          serverType: "mac2.metal",
+          capacity: { market: "on-demand" },
+          keep: true,
+          sshPublicKey: "ssh-ed25519 retained",
+        },
+      }),
+    );
+    expect(retained.status).toBe(409);
+    await Promise.all(
+      [ordinary, fixed, registered, retained].map(async (response) => {
+        await expect(response.json()).resolves.toMatchObject({ error: "lease_id_conflict" });
+      }),
+    );
+
+    let allocations = 0;
+    const random = vi.spyOn(crypto, "getRandomValues").mockImplementation((array) => {
+      (array as Uint8Array).fill(allocations++ === 0 ? 0xaa : 0xbb);
+      return array;
+    });
+    const workspace = await fleet.fetch(
+      request("POST", "/v1/workspaces", {
+        headers,
+        body: {
+          id: "reserved-alias-workspace",
+          runtime: "crabbox",
+          ttlSeconds: 1800,
+          idleTimeoutSeconds: 360,
+          capabilities: { desktop: false },
+        },
+      }),
+    );
+    random.mockRestore();
+    expect(workspace.status).toBe(202);
+    await expect(workspace.json()).resolves.toMatchObject({
+      providerResourceId: "cbx_bbbbbbbbbbbb",
+    });
+  });
+
+  it.each(["canonical lease", "workspace reservation", "request binding"])(
+    "rejects retained reactivation when its requested ID collides with a %s",
+    async (collision) => {
+      const storage = new MemoryStorage();
+      const requestLeaseID = "cbx_abcdef123461";
+      storage.seed(
+        "lease:cbx_000000000113",
+        testLease({
+          id: "cbx_000000000113",
+          provider: "aws",
+          target: "macos",
+          state: "released",
+          owner: "alice@example.com",
+          org: "example-org",
+          hostId: "h-collision",
+          serverType: "mac2.metal",
+          releaseDeletesServer: false,
+        }),
+      );
+      if (collision === "canonical lease") {
+        storage.seed(`lease:${requestLeaseID}`, testLease({ id: requestLeaseID }));
+      } else if (collision === "workspace reservation") {
+        storage.seed(`workspace-lease:${requestLeaseID}`, true);
+      } else {
+        storage.seed(`lease-request:${requestLeaseID}`, {
+          version: 1,
+          requestLeaseID,
+          leaseID: "cbx_000000000114",
+          owner: "alice@example.com",
+          org: "example-org",
+          cloudID: "i-other",
+          generation: "other-generation",
+          createdAt: "2026-08-01T00:00:00.000Z",
+        });
+      }
+      const fleet = testFleet(storage, { aws: fakeProvider(undefined, { provider: "aws" }) });
+      const response = await fleet.fetch(
+        request("POST", "/v1/leases", {
+          headers: {
+            "x-crabbox-owner": "alice@example.com",
+            "x-crabbox-org": "example-org",
+          },
+          body: {
+            leaseID: requestLeaseID,
+            provider: "aws",
+            target: "macos",
+            hostId: "h-collision",
+            serverType: "mac2.metal",
+            capacity: { market: "on-demand" },
+            keep: true,
+            sshPublicKey: "ssh-ed25519 collision",
+          },
+        }),
+      );
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({ error: "lease_id_conflict" });
+      expect(storage.value<LeaseRecord>("lease:cbx_000000000113")?.state).toBe("released");
+    },
+  );
+
+  it("fails closed for stale, interrupted, foreign, and exact-conflicting release aliases", async () => {
+    const requestLeaseID = "cbx_abcdef123462";
+    const canonicalID = "cbx_000000000115";
+    const binding = {
+      version: 1,
+      requestLeaseID,
+      leaseID: canonicalID,
+      owner: "alice@example.com",
+      org: "example-org",
+      cloudID: "i-alias-guard",
+      generation: "generation-one",
+      createdAt: "2026-08-01T00:00:00.000Z",
+    };
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    await Promise.all(
+      (["stale", "interrupted", "exact-conflict"] as const).map(async (mode) => {
+        const storage = new MemoryStorage();
+        storage.seed(`lease-request:${requestLeaseID}`, binding);
+        storage.seed(
+          `lease:${canonicalID}`,
+          testLease({
+            id: canonicalID,
+            provider: "aws",
+            target: "macos",
+            owner: "alice@example.com",
+            org: "example-org",
+            cloudID: "i-alias-guard",
+            requestLeaseGeneration:
+              mode === "stale"
+                ? "generation-two"
+                : mode === "interrupted"
+                  ? undefined
+                  : "generation-one",
+          }),
+        );
+        if (mode === "exact-conflict") {
+          storage.seed(`lease:${requestLeaseID}`, testLease({ id: requestLeaseID }));
+        }
+        let releases = 0;
+        const fleet = testFleet(storage, {
+          aws: fakeProvider(undefined, { provider: "aws", onReleaseLease: () => releases++ }),
+        });
+        const response = await fleet.fetch(
+          request("POST", `/v1/leases/${requestLeaseID}/release`, {
+            headers,
+            body: { delete: true },
+          }),
+        );
+        expect(response.status).toBe(409);
+        await expect(response.json()).resolves.toMatchObject({
+          error: "lease_request_binding_conflict",
+        });
+        expect(releases).toBe(0);
+      }),
+    );
+
+    const ownerStorage = new MemoryStorage();
+    ownerStorage.seed(`lease-request:${requestLeaseID}`, binding);
+    ownerStorage.seed(
+      `lease:${canonicalID}`,
+      testLease({
+        id: canonicalID,
+        provider: "aws",
+        target: "macos",
+        owner: "alice@example.com",
+        org: "example-org",
+        cloudID: "i-alias-guard",
+        requestLeaseGeneration: "generation-one",
+      }),
+    );
+    let releases = 0;
+    const ownerFleet = testFleet(ownerStorage, {
+      aws: fakeProvider(undefined, { provider: "aws", onReleaseLease: () => releases++ }),
+    });
+    await Promise.all(
+      [
+        { "x-crabbox-owner": "bob@example.com", "x-crabbox-org": "example-org" },
+        { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "other-org" },
+      ].map(async (foreignHeaders) => {
+        const response = await ownerFleet.fetch(
+          request("POST", `/v1/leases/${requestLeaseID}/release`, {
+            headers: foreignHeaders,
+            body: { delete: true },
+          }),
+        );
+        expect(response.status).toBe(404);
+      }),
+    );
+    expect(releases).toBe(0);
+    const adminRelease = await ownerFleet.fetch(
+      request("POST", `/v1/admin/leases/${requestLeaseID}/release`, {
+        headers: {
+          "x-crabbox-admin": "true",
+          "x-crabbox-owner": "admin@example.com",
+          "x-crabbox-org": "admin-org",
+        },
+        body: { delete: true },
+      }),
+    );
+    expect(adminRelease.status).toBe(200);
+    await expect(adminRelease.json()).resolves.toMatchObject({
+      requestLeaseID,
+      lease: { id: canonicalID, state: "released" },
+    });
+    expect(releases).toBe(1);
+  });
+
+  it("leaves an interrupted binding reserved and inert when canonical generation persistence fails", async () => {
+    const storage = new HookedMemoryStorage();
+    const canonicalID = "cbx_000000000117";
+    const requestLeaseID = "cbx_abcdef123464";
+    storage.seed(
+      `lease:${canonicalID}`,
+      testLease({
+        id: canonicalID,
+        provider: "aws",
+        target: "macos",
+        state: "released",
+        owner: "alice@example.com",
+        org: "example-org",
+        hostId: "h-interrupted-binding",
+        serverType: "mac2.metal",
+        cloudID: "i-interrupted-binding",
+        releaseDeletesServer: false,
+      }),
+    );
+    storage.beforePut = async (key, value) => {
+      if (
+        key === `lease:${canonicalID}` &&
+        (value as LeaseRecord).requestLeaseGeneration !== undefined
+      ) {
+        throw new Error("injected canonical generation write failure");
+      }
+    };
+    let releases = 0;
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(undefined, { provider: "aws", onReleaseLease: () => releases++ }),
+    });
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers,
+        body: {
+          leaseID: requestLeaseID,
+          provider: "aws",
+          target: "macos",
+          hostId: "h-interrupted-binding",
+          serverType: "mac2.metal",
+          capacity: { market: "on-demand" },
+          keep: true,
+          sshPublicKey: "ssh-ed25519 interrupted",
+        },
+      }),
+    );
+    expect(create.status).toBe(500);
+    expect(storage.value(`lease-request:${requestLeaseID}`)).toBeDefined();
+    const storedCanonical = storage.value<LeaseRecord>(`lease:${canonicalID}`)!;
+    expect(storedCanonical.state).toBe("released");
+    expect(storedCanonical.requestLeaseGeneration).toBeUndefined();
+    storage.beforePut = undefined;
+    const release = await fleet.fetch(
+      request("POST", `/v1/leases/${requestLeaseID}/release`, {
+        headers,
+        body: { delete: true },
+      }),
+    );
+    expect(release.status).toBe(409);
+    await expect(release.json()).resolves.toMatchObject({
+      error: "lease_request_binding_conflict",
+    });
+    expect(releases).toBe(0);
+  });
+
+  it("serializes alias release resolution with retained binding publication", async () => {
+    const storage = new HookedMemoryStorage();
+    const canonicalID = "cbx_000000000118";
+    const requestLeaseID = "cbx_abcdef123465";
+    storage.seed(
+      `lease:${canonicalID}`,
+      testLease({
+        id: canonicalID,
+        provider: "aws",
+        target: "macos",
+        state: "released",
+        owner: "alice@example.com",
+        org: "example-org",
+        hostId: "h-publication-race",
+        serverType: "mac2.metal",
+        cloudID: "i-publication-race",
+        releaseDeletesServer: false,
+      }),
+    );
+    let canonicalPutStarted!: () => void;
+    const canonicalPutStartedPromise = new Promise<void>((resolve) => {
+      canonicalPutStarted = resolve;
+    });
+    let allowCanonicalPut!: () => void;
+    const allowCanonicalPutPromise = new Promise<void>((resolve) => {
+      allowCanonicalPut = resolve;
+    });
+    storage.beforePut = async (key, value) => {
+      if (
+        key === `lease:${canonicalID}` &&
+        (value as LeaseRecord).requestLeaseGeneration !== undefined
+      ) {
+        canonicalPutStarted();
+        await allowCanonicalPutPromise;
+      }
+    };
+    let releases = 0;
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(
+        () => {
+          throw new Error("retained instance must not launch a replacement");
+        },
+        { provider: "aws", onReleaseLease: () => releases++ },
+      ),
+    });
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const createPromise = fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers,
+        body: {
+          leaseID: requestLeaseID,
+          provider: "aws",
+          target: "macos",
+          hostId: "h-publication-race",
+          serverType: "mac2.metal",
+          capacity: { market: "on-demand" },
+          keep: true,
+          sshPublicKey: "ssh-ed25519 publication-race",
+        },
+      }),
+    );
+    await canonicalPutStartedPromise;
+    expect(storage.value(`lease-request:${requestLeaseID}`)).toBeDefined();
+
+    const releasePromise = fleet.fetch(
+      request("POST", `/v1/leases/${requestLeaseID}/release`, {
+        headers,
+        body: { delete: true },
+      }),
+    );
+    const earlyRelease = await Promise.race([
+      releasePromise.then(() => "completed"),
+      new Promise<string>((resolve) => setTimeout(() => resolve("waiting"), 20)),
+    ]);
+    expect(earlyRelease).toBe("waiting");
+
+    allowCanonicalPut();
+    expect((await createPromise).status).toBe(201);
+    const release = await releasePromise;
+    expect(release.status).toBe(200);
+    await expect(release.json()).resolves.toMatchObject({
+      requestLeaseID,
+      lease: { id: canonicalID, state: "released" },
+    });
+    expect(releases).toBe(1);
+  });
+
+  it("rechecks the alias generation inside the release mutation lock", async () => {
+    const storage = new MemoryStorage();
+    const requestLeaseID = "cbx_abcdef123463";
+    const canonicalID = "cbx_000000000116";
+    storage.seed(`lease-request:${requestLeaseID}`, {
+      version: 1,
+      requestLeaseID,
+      leaseID: canonicalID,
+      owner: "alice@example.com",
+      org: "example-org",
+      cloudID: "i-final-generation",
+      generation: "generation-one",
+      createdAt: "2026-08-01T00:00:00.000Z",
+    });
+    const canonical = testLease({
+      id: canonicalID,
+      provider: "aws",
+      target: "macos",
+      owner: "alice@example.com",
+      org: "example-org",
+      cloudID: "i-final-generation",
+      requestLeaseGeneration: "generation-one",
+    });
+    storage.seed(`lease:${canonicalID}`, canonical);
+    let canonicalReads = 0;
+    storage.beforeGet = async (key) => {
+      if (key === `lease:${canonicalID}` && ++canonicalReads === 3) {
+        storage.seed(`lease:${canonicalID}`, {
+          ...canonical,
+          requestLeaseGeneration: "generation-two",
+        });
+      }
+    };
+    let releases = 0;
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(undefined, { provider: "aws", onReleaseLease: () => releases++ }),
+    });
+    const response = await fleet.fetch(
+      request("POST", `/v1/leases/${requestLeaseID}/release`, {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: { delete: true },
+      }),
+    );
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "lease_request_binding_conflict",
+    });
+    expect(releases).toBe(0);
+    expect(storage.value<LeaseRecord>(`lease:${canonicalID}`)?.state).toBe("active");
+  });
+
   it("reactivates a retained pinned Mac host family when the request type was defaulted", async () => {
     const storage = new MemoryStorage();
     storage.seed(

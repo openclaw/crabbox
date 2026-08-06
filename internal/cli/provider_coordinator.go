@@ -5,15 +5,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"time"
 )
 
 var (
-	coordinatorCreateLeaseProgressInterval = 30 * time.Second
-	coordinatorCreateLeaseTimeoutForConfig = defaultCoordinatorCreateLeaseTimeoutForConfig
-	coordinatorCreateLeaseRecoveryTimeout  = 90 * time.Second
-	coordinatorCreateLeaseRecoveryInterval = 5 * time.Second
+	coordinatorCreateLeaseProgressInterval   = 30 * time.Second
+	coordinatorCreateLeaseTimeoutForConfig   = defaultCoordinatorCreateLeaseTimeoutForConfig
+	coordinatorCreateLeaseRecoveryTimeout    = 90 * time.Second
+	coordinatorCreateLeaseRecoveryInterval   = 5 * time.Second
+	coordinatorCanceledCreateRecoveryTimeout = 10 * time.Second
+	coordinatorCanceledCreateFinalTimeout    = 10 * time.Second
 )
 
 type coordinatorLeaseBackend struct {
@@ -216,6 +219,9 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 	for {
 		select {
 		case result := <-resultCh:
+			if ctx.Err() != nil {
+				return CoordinatorLease{}, b.canceledCoordinatorLeaseCreateError(ctx, leaseID, slug, fixed, result.err)
+			}
 			if fixed && result.err != nil {
 				if lease, recoverErr, handled := b.recoverFixedCoordinatorLeaseAfterCreateError(ctx, cfg, publicKey, keep, leaseID, slug, result.err); handled {
 					return lease, recoverErr
@@ -235,14 +241,19 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 				}
 			}
 			if result.err == nil && result.lease.State == "provisioning" {
-				return b.waitForCoordinatorLeaseActivation(createCtx, leaseID, result.lease)
+				lease, err := b.waitForCoordinatorLeaseActivation(createCtx, leaseID, result.lease)
+				if err != nil && ctx.Err() != nil {
+					cancelErr := b.canceledCoordinatorLeaseCreateError(ctx, leaseID, slug, fixed, nil)
+					return CoordinatorLease{}, errors.Join(cancelErr, definitiveCoordinatorCreateError(err))
+				}
+				return lease, err
 			}
 			return result.lease, result.err
 		case <-ticker.C:
 			fmt.Fprintf(b.rt.Stderr, "waiting for coordinator lease provider=%s slug=%s elapsed=%s timeout=%s\n", cfg.Provider, slug, time.Since(started).Round(time.Second), timeout)
 		case <-createCtx.Done():
 			if ctx.Err() != nil {
-				return CoordinatorLease{}, ctx.Err()
+				return CoordinatorLease{}, b.canceledCoordinatorLeaseCreateError(ctx, leaseID, slug, fixed, nil)
 			}
 			err := coordinatorCreateLeaseTimeoutError(cfg, leaseID, slug, timeout)
 			if fixed {
@@ -256,9 +267,87 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 			}
 			return CoordinatorLease{}, err
 		case <-ctx.Done():
-			return CoordinatorLease{}, ctx.Err()
+			var createErr error
+			select {
+			case result := <-resultCh:
+				createErr = result.err
+			default:
+			}
+			return CoordinatorLease{}, b.canceledCoordinatorLeaseCreateError(ctx, leaseID, slug, fixed, createErr)
 		}
 	}
+}
+
+func (b *coordinatorLeaseBackend) canceledCoordinatorLeaseCreateError(ctx context.Context, leaseID, slug string, fixed bool, createErr error) error {
+	callerErr := ctx.Err()
+	if definitiveErr := definitiveCoordinatorCreateError(createErr); definitiveErr != nil {
+		return errors.Join(callerErr, definitiveErr)
+	}
+	if fixed {
+		return callerErr
+	}
+	recoverCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), coordinatorCanceledCreateRecoveryTimeout)
+	defer cancel()
+	fmt.Fprintf(b.rt.Stderr, "warning: coordinator lease create canceled for %s; reconciling late acceptance for cleanup\n", leaseID)
+	if err := b.releaseCoordinatorLeaseAfterCanceledCreate(recoverCtx, leaseID, slug); err != nil {
+		return errors.Join(callerErr, fmt.Errorf("reconcile canceled coordinator lease %s: %w", leaseID, err))
+	}
+	return callerErr
+}
+
+func (b *coordinatorLeaseBackend) releaseCoordinatorLeaseAfterCanceledCreate(ctx context.Context, leaseID, slug string) error {
+	ticker := time.NewTicker(coordinatorCreateLeaseRecoveryInterval)
+	defer ticker.Stop()
+	for {
+		result, err := b.coord.ReleaseLeaseAfterCanceledCreate(ctx, leaseID, true)
+		if err == nil {
+			return b.validateCanceledCreateRelease(result, leaseID, slug)
+		}
+		if !coordinatorCanceledCreateReleaseErrorRetryable(err) {
+			return fmt.Errorf("request delete-release: %w", err)
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return b.finalReleaseCoordinatorLeaseAfterCanceledCreate(ctx, leaseID, slug)
+		}
+	}
+}
+
+func (b *coordinatorLeaseBackend) finalReleaseCoordinatorLeaseAfterCanceledCreate(expiredCtx context.Context, leaseID, slug string) error {
+	finalCtx, cancel := context.WithTimeout(context.WithoutCancel(expiredCtx), coordinatorCanceledCreateFinalTimeout)
+	defer cancel()
+	result, err := b.coord.ReleaseLeaseAfterCanceledCreate(finalCtx, leaseID, true)
+	if err != nil {
+		return errors.Join(expiredCtx.Err(), fmt.Errorf("final request delete-release: %w", err))
+	}
+	return b.validateCanceledCreateRelease(result, leaseID, slug)
+}
+
+func (b *coordinatorLeaseBackend) validateCanceledCreateRelease(result CoordinatorCanceledCreateReleaseResult, leaseID, slug string) error {
+	if result.Lease.ID != leaseID && result.RequestLeaseID != leaseID {
+		return fmt.Errorf("coordinator returned lease %q while releasing %q without matching requestLeaseID attestation", result.Lease.ID, leaseID)
+	}
+	fmt.Fprintf(b.rt.Stderr, "released coordinator lease %s slug=%s after canceled create\n", result.Lease.ID, blank(result.Lease.Slug, slug))
+	return nil
+}
+
+func coordinatorCanceledCreateReleaseErrorRetryable(err error) bool {
+	if isCoordinatorNotFoundError(err) || coordinatorCreateLeaseErrorMayHaveCommitted(err) {
+		return true
+	}
+	var httpErr CoordinatorHTTPError
+	return errors.As(err, &httpErr) &&
+		(httpErr.StatusCode == http.StatusRequestTimeout ||
+			httpErr.StatusCode == http.StatusTooManyRequests ||
+			httpErr.StatusCode >= http.StatusInternalServerError)
+}
+
+func definitiveCoordinatorCreateError(err error) error {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || coordinatorCreateLeaseErrorMayHaveCommitted(err) {
+		return nil
+	}
+	return fmt.Errorf("create coordinator lease: %w", err)
 }
 
 func (b *coordinatorLeaseBackend) recoverFixedCoordinatorLeaseAfterCreateError(ctx context.Context, cfg Config, publicKey string, keep bool, leaseID, slug string, createErr error) (CoordinatorLease, error, bool) {

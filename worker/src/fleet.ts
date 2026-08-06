@@ -3083,14 +3083,17 @@ export class FleetCoordinator {
         config,
         normalizeLeaseSlug(input.slug ?? input.requestedSlug),
       );
-      const replay = await this.state.runExclusive(async () =>
-        this.fixedLeaseReplayResponse(
+      const replay = await this.state.runExclusive(async () => {
+        if (await this.getLeaseRequestBinding(fixedLeaseID)) {
+          return leaseRequestIDConflictResponse();
+        }
+        return this.fixedLeaseReplayResponse(
           await this.getLease(fixedLeaseID),
           owner,
           org,
           fixedCreateIntentHash!,
-        ),
-      );
+        );
+      });
       if (replay) {
         return replay;
       }
@@ -3265,14 +3268,33 @@ export class FleetCoordinator {
         ) {
           return undefined;
         }
+        if (
+          (await this.getLease(leaseID)) ||
+          (await this.state.storage.get(workspaceLeaseReservationKey(leaseID))) ||
+          (await this.getLeaseRequestBinding(leaseID))
+        ) {
+          return leaseRequestIDConflictResponse();
+        }
         const blocked = await reservationGuard?.();
         if (blocked) {
           return blocked;
         }
         const now = new Date();
         const admission = await this.leaseAdmissionState({ owner, org }, now, current.id);
+        const requestLeaseGeneration = newLeaseRequestGeneration();
+        const binding: LeaseRequestBinding = {
+          version: 1,
+          requestLeaseID: leaseID,
+          leaseID: current.id,
+          owner,
+          org,
+          cloudID: current.cloudID,
+          generation: requestLeaseGeneration,
+          createdAt: now.toISOString(),
+        };
         let reactivated: LeaseRecord = {
           ...current,
+          requestLeaseGeneration,
           profile: config.profile,
           class: config.class,
           requestedServerType: config.serverType,
@@ -3331,6 +3353,7 @@ export class FleetCoordinator {
         if (limitError) {
           return json({ error: "cost_limit_exceeded", message: limitError }, { status: 429 });
         }
+        await this.putLeaseRequestBinding(binding);
         await this.putLease(reactivated);
         await this.markAWSIngressReconcilePending(reactivated);
         await this.scheduleAlarm();
@@ -3380,6 +3403,9 @@ export class FleetCoordinator {
       }
       if (!workspaceID && (await this.state.storage.get(workspaceLeaseReservationKey(leaseID)))) {
         return workspaceManagedLeaseResponse();
+      }
+      if (await this.getLeaseRequestBinding(leaseID)) {
+        return leaseRequestIDConflictResponse();
       }
       const existingLease = await this.getLease(leaseID);
       if (existingLease && fixedLeaseID) {
@@ -4348,7 +4374,8 @@ export class FleetCoordinator {
     const leaseID = newLeaseID();
     if (
       (await this.getLease(leaseID)) ||
-      (await this.state.storage.get(workspaceLeaseReservationKey(leaseID)))
+      (await this.state.storage.get(workspaceLeaseReservationKey(leaseID))) ||
+      (await this.getLeaseRequestBinding(leaseID))
     ) {
       return await this.allocateWorkspaceLeaseID();
     }
@@ -6031,6 +6058,9 @@ export class FleetCoordinator {
     if (await this.state.storage.get(workspaceLeaseReservationKey(leaseID))) {
       return workspaceManagedLeaseResponse();
     }
+    if (await this.getLeaseRequestBinding(leaseID)) {
+      return leaseRequestIDConflictResponse();
+    }
     const existing = await this.getLease(leaseID);
     if (
       existing &&
@@ -6493,11 +6523,12 @@ export class FleetCoordinator {
   }
 
   private async releaseLease(request: Request, leaseID: string, admin: boolean): Promise<Response> {
-    const lease = await this.resolveLease(leaseID, request, admin);
-    if (!lease) {
-      return notFound();
+    const resolution = await this.resolveLeaseForRelease(leaseID, request, admin);
+    if (resolution instanceof Response) {
+      return resolution;
     }
-    if (!this.leaseManageableByRequest(lease, request, admin)) {
+    const { lease, binding } = resolution;
+    if (!binding && !this.leaseManageableByRequest(lease, request, admin)) {
       return json({ error: "forbidden", message: "lease manage access required" }, { status: 403 });
     }
     if (lease.workspaceID) {
@@ -6598,10 +6629,32 @@ export class FleetCoordinator {
           { status: 409 },
         );
       }
+      if (binding) {
+        const valid = await this.state.runExclusive(() =>
+          this.leaseRequestBindingMatchesCurrent(binding),
+        );
+        if (!valid) {
+          return leaseRequestBindingConflictResponse();
+        }
+      }
       await this.scheduleAlarm();
-      return json({ lease: this.leaseForRequest(lease, request, admin) });
+      return json({
+        lease: this.leaseForRequest(lease, request, admin),
+        ...(binding ? { requestLeaseID: leaseID } : {}),
+      });
     }
-    const released = await this.releaseResolvedLease(lease, { deleteServer: shouldDelete });
+    let released: LeaseRecord;
+    try {
+      released = await this.releaseResolvedLease(lease, {
+        deleteServer: shouldDelete,
+        ...(binding ? { requestBinding: binding } : {}),
+      });
+    } catch (error) {
+      if (error instanceof LeaseRequestBindingConflictError) {
+        return leaseRequestBindingConflictResponse();
+      }
+      throw error;
+    }
     if (released.runtimeAdapterDeleteRequestedAt) {
       return this.runtimeAdapterDeletePendingResponse(released, request, admin);
     }
@@ -6615,7 +6668,57 @@ export class FleetCoordinator {
         { status: 409 },
       );
     }
-    return json({ lease: this.leaseForRequest(released, request, admin) });
+    return json({
+      lease: this.leaseForRequest(released, request, admin),
+      ...(binding ? { requestLeaseID: leaseID } : {}),
+    });
+  }
+
+  private async resolveLeaseForRelease(
+    identifier: string,
+    request: Request,
+    admin: boolean,
+  ): Promise<{ lease: LeaseRecord; binding?: LeaseRequestBinding } | Response> {
+    return await this.state.runExclusive(async () => {
+      const exact = await this.getLease(identifier);
+      const binding = await this.getLeaseRequestBinding(identifier);
+      if (exact && binding) {
+        return leaseRequestBindingConflictResponse();
+      }
+      if (exact) {
+        return this.leaseVisibleToRequest(exact, request, admin) ? { lease: exact } : notFound();
+      }
+      if (!binding) {
+        const lease = await this.resolveLease(identifier, request, admin);
+        return lease ? { lease } : notFound();
+      }
+      if (
+        !admin &&
+        (binding.owner !== requestOwner(request) || binding.org !== requestOrg(request, this.env))
+      ) {
+        return notFound();
+      }
+      const lease = await this.getLease(binding.leaseID);
+      if (!lease || !leaseRequestBindingMatchesLease(binding, lease)) {
+        return leaseRequestBindingConflictResponse();
+      }
+      return { lease, binding };
+    });
+  }
+
+  private async leaseRequestBindingMatchesCurrent(binding: LeaseRequestBinding): Promise<boolean> {
+    const [exact, stored, lease] = await Promise.all([
+      this.getLease(binding.requestLeaseID),
+      this.getLeaseRequestBinding(binding.requestLeaseID),
+      this.getLease(binding.leaseID),
+    ]);
+    return Boolean(
+      !exact &&
+      stored &&
+      sameLeaseRequestBinding(stored, binding) &&
+      lease &&
+      leaseRequestBindingMatchesLease(binding, lease),
+    );
   }
 
   private async completeRuntimeAdapterDelete(
@@ -14350,6 +14453,16 @@ export class FleetCoordinator {
     return this.state.storage.get<LeaseRecord>(leaseKey(leaseID), options);
   }
 
+  private async getLeaseRequestBinding(
+    requestLeaseID: string,
+  ): Promise<LeaseRequestBinding | undefined> {
+    return this.state.storage.get<LeaseRequestBinding>(leaseRequestBindingKey(requestLeaseID));
+  }
+
+  private async putLeaseRequestBinding(binding: LeaseRequestBinding): Promise<void> {
+    await this.state.storage.put(leaseRequestBindingKey(binding.requestLeaseID), binding);
+  }
+
   private async resolveLease(
     identifier: string,
     request: Request,
@@ -15484,7 +15597,11 @@ export class FleetCoordinator {
 
   private async releaseResolvedLease(
     lease: LeaseRecord,
-    options: { deleteServer: boolean; keep?: boolean },
+    options: {
+      deleteServer: boolean;
+      keep?: boolean;
+      requestBinding?: LeaseRequestBinding;
+    },
   ): Promise<LeaseRecord> {
     const current = (await this.getLease(lease.id)) ?? lease;
     if (current.runtimeAdapterDeleteRequestedAt) {
@@ -15531,9 +15648,19 @@ export class FleetCoordinator {
 
   private async releaseResolvedLeaseOperation(
     lease: LeaseRecord,
-    options: { deleteServer: boolean; keep?: boolean },
+    options: {
+      deleteServer: boolean;
+      keep?: boolean;
+      requestBinding?: LeaseRequestBinding;
+    },
   ): Promise<LeaseRecord> {
     const preparation = await this.state.runExclusive(async () => {
+      if (
+        options.requestBinding &&
+        !(await this.leaseRequestBindingMatchesCurrent(options.requestBinding))
+      ) {
+        throw new LeaseRequestBindingConflictError();
+      }
       const current = (await this.getLease(lease.id)) ?? structuredClone(lease);
       if (current.runtimeAdapterDeleteRequestedAt) {
         return { cleanup: false as const, blocked: true as const, lease: current };
@@ -15667,6 +15794,19 @@ export class FleetDurableObject extends FleetCoordinator implements DurableObjec
   }
 }
 
+interface LeaseRequestBinding {
+  version: 1;
+  requestLeaseID: string;
+  leaseID: string;
+  owner: string;
+  org: string;
+  cloudID: string;
+  generation: string;
+  createdAt: string;
+}
+
+class LeaseRequestBindingConflictError extends Error {}
+
 interface ProviderReadiness {
   provider: Provider;
   configured: boolean;
@@ -15769,6 +15909,10 @@ function portalReturnLocation(request: Request): string {
 
 function leaseKey(leaseID: string): string {
   return `lease:${leaseID}`;
+}
+
+function leaseRequestBindingKey(requestLeaseID: string): string {
+  return `lease-request:${requestLeaseID}`;
 }
 
 function workspaceLeaseReservationKey(leaseID: string): string {
@@ -16582,6 +16726,10 @@ function newLeaseID(): string {
   return `cbx_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
+function newLeaseRequestGeneration(): string {
+  return crypto.randomUUID();
+}
+
 function validWorkspaceID(value: string | undefined): value is string {
   return (
     typeof value === "string" &&
@@ -16601,6 +16749,63 @@ function workspaceManagedLeaseResponse(): Response {
       message: "workspace leases must be managed through the workspace lifecycle",
     },
     { status: 409 },
+  );
+}
+
+function leaseRequestIDConflictResponse(): Response {
+  return json(
+    {
+      error: "lease_id_conflict",
+      message: "lease id is already reserved",
+    },
+    { status: 409 },
+  );
+}
+
+function leaseRequestBindingConflictResponse(): Response {
+  return json(
+    {
+      error: "lease_request_binding_conflict",
+      message: "lease request binding does not match the current canonical lease generation",
+    },
+    { status: 409 },
+  );
+}
+
+function sameLeaseRequestBinding(left: LeaseRequestBinding, right: LeaseRequestBinding): boolean {
+  return (
+    left.version === 1 &&
+    right.version === 1 &&
+    left.requestLeaseID === right.requestLeaseID &&
+    left.leaseID === right.leaseID &&
+    left.owner === right.owner &&
+    left.org === right.org &&
+    left.cloudID === right.cloudID &&
+    left.generation === right.generation &&
+    left.createdAt === right.createdAt
+  );
+}
+
+function leaseRequestBindingMatchesLease(
+  binding: LeaseRequestBinding,
+  lease: LeaseRecord,
+): boolean {
+  return (
+    binding.version === 1 &&
+    validLeaseID(binding.requestLeaseID) &&
+    validLeaseID(binding.leaseID) &&
+    binding.requestLeaseID !== binding.leaseID &&
+    binding.leaseID === lease.id &&
+    binding.owner === lease.owner &&
+    binding.org === lease.org &&
+    Boolean(binding.cloudID) &&
+    binding.cloudID === lease.cloudID &&
+    Boolean(binding.generation) &&
+    binding.generation === lease.requestLeaseGeneration &&
+    lease.provider === "aws" &&
+    lease.target === "macos" &&
+    !lease.workspaceID &&
+    !isRegisteredLease(lease)
   );
 }
 

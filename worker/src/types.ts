@@ -392,6 +392,7 @@ export interface LeaseRecord {
   slug?: string;
   fixedCreateIntentVersion?: number;
   fixedCreateIntentHash?: string;
+  requestLeaseGeneration?: string;
   workspaceID?: string;
   provider: string;
   lifecycle?: LeaseLifecycle;

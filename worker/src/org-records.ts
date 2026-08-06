@@ -22,6 +22,7 @@ export function publicLeaseRecord(record: LeaseRecord): LeaseRecord {
   delete publicRecord.provisioningRecoveryMissingSince;
   delete publicRecord.fixedCreateIntentVersion;
   delete publicRecord.fixedCreateIntentHash;
+  delete publicRecord.requestLeaseGeneration;
   return publicRecord;
 }
 
