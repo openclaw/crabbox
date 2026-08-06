@@ -1224,6 +1224,96 @@ func TestMissingRequiredWorkflowInputs(t *testing.T) {
 	}
 }
 
+func TestPrepareLocalActionsHydrationFreezesDispatchInputsAndScript(t *testing.T) {
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, ".github", "workflows", "hydrate.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workflow := `name: Hydrate
+on:
+  workflow_dispatch:
+    inputs:
+      crabbox_id:
+        required: true
+      crabbox_runner_label:
+        required: true
+      crabbox_keep_alive_minutes:
+        required: true
+      suite:
+        default: smoke
+jobs:
+  build:
+    steps:
+      - run: echo "${{ inputs.suite }}"
+`
+	if err := os.WriteFile(workflowPath, []byte(workflow), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaultConfig()
+	cfg.Actions.Workflow = ".github/workflows/hydrate.yml"
+	repo := Repo{Root: root, Name: "repo", Head: strings.Repeat("a", 40)}
+	fields := actionsHydrateFields("cbx_123", "crabbox-cbx-123", "legacy", 0, []string{"extra=value"})
+	plan, err := prepareLocalActionsHydration(cfg, repo, SSHTarget{}, "cbx_123", "legacy", fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.leaseID != "cbx_123" || plan.jobName != "build" || plan.expectedJob != "" {
+		t.Fatalf("unexpected plan identity: %#v", plan)
+	}
+	if want := remoteJoin(cfg, "cbx_123", "repo"); plan.workdir != want {
+		t.Fatalf("workdir=%q want %q", plan.workdir, want)
+	}
+	for _, want := range []string{"export INPUT_SUITE='smoke'", "does not declare input crabbox_job", "does not declare input extra"} {
+		if !strings.Contains(plan.script+plan.warnings, want) {
+			t.Fatalf("prepared plan missing %q:\nscript=%s\nwarnings=%s", want, plan.script, plan.warnings)
+		}
+	}
+	if strings.Contains(plan.script, "${{") {
+		t.Fatalf("prepared script retained expression:\n%s", plan.script)
+	}
+}
+
+func TestPrepareLocalActionsHydrationRejectsUnsupportedRenderedWorkflow(t *testing.T) {
+	tests := []struct {
+		name      string
+		step      string
+		actionYML string
+		want      string
+	}{
+		{name: "expression", step: `run: echo "${{ matrix.node }}"`, want: "does not support expression"},
+		{name: "non-composite local action", step: "uses: ./action", actionYML: "runs:\n  using: node20\n", want: "only supports repo-local composite actions"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			workflowPath := filepath.Join(root, ".github", "workflows", "hydrate.yml")
+			if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			workflow := "jobs:\n  hydrate:\n    steps:\n      - " + tt.step + "\n"
+			if err := os.WriteFile(workflowPath, []byte(workflow), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if tt.actionYML != "" {
+				actionPath := filepath.Join(root, "action", "action.yml")
+				if err := os.MkdirAll(filepath.Dir(actionPath), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(actionPath, []byte(tt.actionYML), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg := defaultConfig()
+			cfg.Actions.Workflow = ".github/workflows/hydrate.yml"
+			_, err := prepareLocalActionsHydration(cfg, Repo{Root: root, Name: "repo"}, SSHTarget{}, "cbx_123", "", nil)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error=%v want %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestLocalActionsHydrateScriptRejectsUnsupportedUses(t *testing.T) {
 	_, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
 		Steps: []localHydrateStep{{Uses: "docker/login-action@v3"}},
@@ -1395,6 +1485,46 @@ func TestRemoteClearActionsHydrationStateRemovesReadyAndStop(t *testing.T) {
 	}
 }
 
+func TestRemoteInvalidateActionsHydrationMarkerPreservesBookkeeping(t *testing.T) {
+	leaseID := "cbx_123"
+	bookkeepingPaths := []string{
+		actionsHydrationEnvPath(leaseID),
+		actionsHydrationServicesPath(leaseID),
+		actionsHydrationStopPath(leaseID),
+		actionsHydrationLocalScriptPath(leaseID),
+		actionsHydrationLocalLogPath(leaseID),
+		actionsHydrationLocalExitPath(leaseID),
+	}
+	t.Run("posix", func(t *testing.T) {
+		got := remoteInvalidateActionsHydrationMarkerForTarget(SSHTarget{TargetOS: targetLinux}, leaseID)
+		if !strings.Contains(got, actionsHydrationStatePath(leaseID)) {
+			t.Fatalf("invalidate command missing readiness marker:\n%s", got)
+		}
+		for _, path := range bookkeepingPaths {
+			if strings.Contains(got, path) {
+				t.Fatalf("invalidate command removes bookkeeping path %q:\n%s", path, got)
+			}
+		}
+	})
+	t.Run("windows", func(t *testing.T) {
+		target := SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}
+		got := decodePowerShellCommand(t, remoteInvalidateActionsHydrationMarkerForTarget(target, leaseID))
+		if !strings.Contains(got, windowsActionsHydrationPath(actionsHydrationStatePath(leaseID))) {
+			t.Fatalf("invalidate command missing readiness marker:\n%s", got)
+		}
+		for _, want := range []string{`$ErrorActionPreference = "Stop"`, "Test-Path -LiteralPath $path", "Remove-Item -LiteralPath $path -Force -ErrorAction Stop"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("invalidate command missing fail-closed operation %q:\n%s", want, got)
+			}
+		}
+		for _, path := range bookkeepingPaths {
+			if strings.Contains(got, windowsActionsHydrationPath(path)) {
+				t.Fatalf("invalidate command removes bookkeeping path %q:\n%s", path, got)
+			}
+		}
+	})
+}
+
 func TestRemoteWriteActionsHydrationStopMatchesWorkflowInput(t *testing.T) {
 	got := remoteWriteActionsHydrationStop("cbx_123")
 	for _, want := range []string{
@@ -1408,11 +1538,12 @@ func TestRemoteWriteActionsHydrationStopMatchesWorkflowInput(t *testing.T) {
 }
 
 func TestWindowsActionsHydrationMarkerCommandsUseProgramData(t *testing.T) {
-	target := SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}
+	target := targetWithConfigDefaults(SSHTarget{}, Config{TargetOS: targetWindows, WindowsMode: windowsModeNormal})
 	for name, command := range map[string]string{
-		"read":  remoteReadActionsHydrationStateForTarget(target, "cbx_123"),
-		"clear": remoteClearActionsHydrationStateForTarget(target, "cbx_123"),
-		"stop":  remoteWriteActionsHydrationStopForTarget(target, "cbx_123"),
+		"read":       remoteReadActionsHydrationStateForTarget(target, "cbx_123"),
+		"invalidate": remoteInvalidateActionsHydrationMarkerForTarget(target, "cbx_123"),
+		"clear":      remoteClearActionsHydrationStateForTarget(target, "cbx_123"),
+		"stop":       remoteWriteActionsHydrationStopForTarget(target, "cbx_123"),
 	} {
 		decoded := decodePowerShellCommand(t, command)
 		for _, want := range []string{`C:\ProgramData\crabbox\actions`, `cbx_123`} {

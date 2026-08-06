@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Rehydrated adopted Actions workspaces after `--full-resync`, and failed
+  before reset when a command-bearing run could not safely rehydrate.
+
 ## 0.41.0 - 2026-08-03
 
 ### Added

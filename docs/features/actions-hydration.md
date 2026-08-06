@@ -56,6 +56,13 @@ You can also hydrate explicitly: `crabbox actions hydrate --id <id>` syncs the
 current checkout and then runs the hydrate workflow. Automatic hydration during
 `crabbox run` reuses the run's own sync rather than syncing twice.
 
+When `--full-resync` starts from an existing readiness marker, Crabbox
+invalidates that marker before resetting the workspace. Runs with a command must
+be able to hydrate the canonical lease workspace locally after sync; unsupported
+targets, `--no-hydrate`, and noncanonical adopted workspaces fail before reset.
+Use `--sync-only` when the intent is to replace the synced tree without
+rehydrating or running a command.
+
 ## Local hydration details
 
 For local hydration Crabbox picks the workflow job to run in this order:
