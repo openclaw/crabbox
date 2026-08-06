@@ -51,6 +51,7 @@ func repositoryGitEnvironment() []string {
 type gitTrackedPath struct {
 	name         string
 	mode         string
+	stage        int
 	skipWorktree bool
 }
 
@@ -185,6 +186,7 @@ func parseGitTrackedPaths(tagged []byte) ([]gitTrackedPath, error) {
 		tracked = append(tracked, gitTrackedPath{
 			name:         string(name),
 			mode:         mode,
+			stage:        stage,
 			skipWorktree: record[0] == 'S',
 		})
 	}
@@ -583,13 +585,18 @@ func syncManifestFiltered(root string, excludes, includes []string) (SyncManifes
 	if err != nil {
 		return SyncManifest{}, fmt.Errorf("verify sync manifest scope: %w", err)
 	}
-	gitlinkPaths := trackedGitlinkPaths(tracked)
-	hidden, err := gitCheckoutHiddenOmissionForTracked(root, tracked, gitCheckoutSparseEnabled(root), func(entry gitTrackedPath) bool {
+	inManifestScope := func(entry gitTrackedPath) bool {
 		rel := filepath.ToSlash(entry.name)
-		return entry.mode != "160000" &&
-			safeRepoRel(rel) &&
+		return safeRepoRel(rel) &&
 			!pathExcluded(rel, excludes) &&
 			pathIncluded(rel, includes)
+	}
+	gitlinkPaths, err := trackedGitlinkPaths(tracked, inManifestScope)
+	if err != nil {
+		return SyncManifest{}, fmt.Errorf("verify sync manifest scope: %w", err)
+	}
+	hidden, err := gitCheckoutHiddenOmissionForTracked(root, tracked, gitCheckoutSparseEnabled(root), func(entry gitTrackedPath) bool {
+		return entry.mode != "160000" && inManifestScope(entry)
 	}, sparseCheckoutIncludedPaths)
 	if err != nil {
 		return SyncManifest{}, fmt.Errorf("verify sync manifest scope: %w", err)
@@ -634,14 +641,38 @@ func syncManifestFiltered(root string, excludes, includes []string) (SyncManifes
 	return manifest, nil
 }
 
-func trackedGitlinkPaths(tracked []gitTrackedPath) map[string]struct{} {
+func trackedGitlinkPaths(tracked []gitTrackedPath, inScope func(gitTrackedPath) bool) (map[string]struct{}, error) {
 	paths := make(map[string]struct{})
+	firstByPath := make(map[string]gitTrackedPath)
 	for _, entry := range tracked {
-		if entry.mode == "160000" {
-			paths[filepath.ToSlash(entry.name)] = struct{}{}
+		if inScope != nil && !inScope(entry) {
+			continue
 		}
+		rel := filepath.ToSlash(entry.name)
+		first, seen := firstByPath[rel]
+		if !seen {
+			firstByPath[rel] = entry
+			if entry.mode == "160000" {
+				paths[rel] = struct{}{}
+			}
+			continue
+		}
+		if (first.mode == "160000") == (entry.mode == "160000") {
+			continue
+		}
+		file, gitlink := first, entry
+		if first.mode == "160000" {
+			file, gitlink = entry, first
+		}
+		return nil, fmt.Errorf(
+			"tracked path %q has mixed file mode %s at stage %d and gitlink mode 160000 at stage %d in sync manifest scope",
+			rel,
+			file.mode,
+			file.stage,
+			gitlink.stage,
+		)
 	}
-	return paths
+	return paths, nil
 }
 
 func BuildSyncManifestFiltered(root string, excludes, includes []string) (SyncManifest, error) {

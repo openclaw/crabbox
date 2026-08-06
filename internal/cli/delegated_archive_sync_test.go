@@ -102,6 +102,38 @@ func TestRunDelegatedArchiveSyncRejectsInScopeSparseOmissionBeforeUpload(t *test
 	}
 }
 
+func TestRunDelegatedArchiveSyncRejectsMixedGitlinkConflictBeforeUpload(t *testing.T) {
+	root := newDelegatedArchiveSyncRepo(t)
+	setUnmergedIndexModes(t, root, "one.txt", "100644", "160000", "100644")
+	uploaded := false
+	executed := false
+
+	_, _, err := RunDelegatedArchiveSync(context.Background(), DelegatedArchiveSyncRequest{
+		Config:  baseConfig(),
+		Repo:    Repo{Root: root},
+		Workdir: "/workspace",
+		Upload: func(context.Context, string, io.Reader) error {
+			uploaded = true
+			return nil
+		},
+		Exec: func(context.Context, string) error {
+			executed = true
+			return nil
+		},
+	})
+	var exitErr ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 6 {
+		t.Fatalf("err=%v, want exit 6", err)
+	}
+	if !strings.Contains(err.Error(), `tracked path "one.txt"`) ||
+		!strings.Contains(err.Error(), "mixed file mode 100644 at stage 1") {
+		t.Fatalf("err=%v", err)
+	}
+	if uploaded || executed {
+		t.Fatalf("upload=%t exec=%t, want no transfer callbacks", uploaded, executed)
+	}
+}
+
 func TestRunDelegatedArchiveSyncPreflightUsesFullArchive(t *testing.T) {
 	root := newDelegatedArchiveSyncRepo(t)
 	if err := os.WriteFile(filepath.Join(root, "one.txt"), []byte("changed\n"), 0o600); err != nil {
