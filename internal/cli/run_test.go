@@ -2752,18 +2752,19 @@ func TestWriteLocalFailureBundleIncludesMetadataStreamsAndRemoteFiles(t *testing
 	}
 
 	local, _, err := writeLocalFailureBundle("bundle.tar.gz", filepath.Join(remoteWorkdir, ".crabbox", "remote.tar.gz"), FailureCaptureMetadata{
-		Provider:   "aws",
-		LeaseID:    "cbx_123",
-		Slug:       "blue-crab",
-		RunID:      "run_123",
-		Workdir:    "/work/crabbox/cbx_123/repo",
-		ExitCode:   7,
-		Timing:     timingReport{Provider: "aws", LeaseID: "cbx_123", ExitCode: 7},
-		EnvAllow:   []string{"API_TOKEN"},
-		Env:        map[string]string{"API_TOKEN": "secret-value"},
-		Config:     Config{Provider: "aws", TargetOS: targetLinux, Class: "standard", IdleTimeout: time.Minute, TTL: time.Hour, WorkRoot: "/work/crabbox"},
-		StdoutPath: stdoutPath,
-		StderrPath: stderrPath,
+		Provider:       "aws",
+		LeaseID:        "cbx_123",
+		Slug:           "blue-crab",
+		RunID:          "run_123",
+		CommandDisplay: "go test ./... --opaque secret-value",
+		Workdir:        "/work/crabbox/cbx_123/repo",
+		ExitCode:       7,
+		Timing:         timingReport{Provider: "aws", LeaseID: "cbx_123", ExitCode: 7},
+		EnvAllow:       []string{"API_TOKEN"},
+		Env:            map[string]string{"API_TOKEN": "secret-value"},
+		Config:         Config{Provider: "aws", TargetOS: targetLinux, Class: "standard", IdleTimeout: time.Minute, TTL: time.Hour, WorkRoot: "/work/crabbox"},
+		StdoutPath:     stdoutPath,
+		StderrPath:     stderrPath,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2781,6 +2782,16 @@ func TestWriteLocalFailureBundleIncludesMetadataStreamsAndRemoteFiles(t *testing
 		if _, ok := contents[want]; !ok {
 			t.Fatalf("bundle missing %q; entries=%#v", want, contents)
 		}
+	}
+	var runMetadata struct {
+		Command string `json:"command"`
+		RunID   string `json:"runId"`
+	}
+	if err := json.Unmarshal(contents["crabbox-artifacts/crabbox-run.json"], &runMetadata); err != nil {
+		t.Fatalf("decode crabbox-run.json: %v", err)
+	}
+	if runMetadata.Command != "go test ./... --opaque [redacted]" || runMetadata.RunID != "run_123" {
+		t.Fatalf("run metadata=%+v, want command and durable run ID", runMetadata)
 	}
 	for name, data := range contents {
 		if bytes.Contains(data, []byte("secret-value")) {
