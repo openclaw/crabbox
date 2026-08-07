@@ -119,9 +119,9 @@ SSH-lease providers:
 - Cirrus Labs tart local macOS VM: `internal/providers/tart`
 - Lume local macOS VM cloned from a stopped golden image: `internal/providers/lume`
 - Microsoft Hyper-V local Windows VM: `internal/providers/hyperv`
-- Daytona, Morph, exe.dev, KubeVirt, Sealos DevBox, External, Tenki, Namespace devbox, RunPod, Semaphore, Sprites, Lambda, Vast:
+- Daytona, Morph, exe.dev, KubeVirt, Sealos DevBox, External, Tenki, Namespace devbox, Run Cloud, RunPod, Semaphore, Sprites, Lambda, Vast:
   `internal/providers/daytona`, `internal/providers/morph`, `internal/providers/exedev`, `internal/providers/kubevirt`, `internal/providers/sealosdevbox`, `internal/providers/external`, `internal/providers/tenki`, `internal/providers/namespace`,
-  `internal/providers/runpod`, `internal/providers/semaphore`, `internal/providers/sprites`, `internal/providers/lambda`,
+  `internal/providers/runcloud`, `internal/providers/runpod`, `internal/providers/semaphore`, `internal/providers/sprites`, `internal/providers/lambda`,
   `internal/providers/vast`, live smoke `scripts/live-vast-smoke.sh`
 
 Delegated-run providers (no SSH lease):

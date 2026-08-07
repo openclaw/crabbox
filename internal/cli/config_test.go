@@ -395,6 +395,10 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_ASCII_BOX_CLI",
 		"BOX_CLI",
 		"CRABBOX_ASCII_BOX_WORKDIR",
+		"CRABBOX_RUN_CLOUD_CLI",
+		"CRABBOX_RUN_CLOUD_IMAGE",
+		"CRABBOX_RUN_CLOUD_REGION",
+		"CRABBOX_RUN_CLOUD_WORKDIR",
 		"CRABBOX_APPLE_CONTAINER_CLI",
 		"CRABBOX_APPLE_CONTAINER_IMAGE",
 		"CRABBOX_APPLE_CONTAINER_USER",
@@ -2978,6 +2982,37 @@ func TestAsciiBoxConfigDefaultsFileAndEnv(t *testing.T) {
 	applyEnv(&cfg)
 	if cfg.AsciiBox.APIKey != "override-key" || cfg.AsciiBox.BaseURL != "https://override.example.test" || cfg.AsciiBox.CLIPath != "/opt/box" || cfg.AsciiBox.Workdir != "/home/user/env-project" {
 		t.Fatalf("env asciiBox config not applied: %#v", cfg.AsciiBox)
+	}
+}
+
+func TestRunCloudConfigDefaultsFileAndEnv(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if cfg.RunCloud.CLIPath != "runcloud" || cfg.RunCloud.Image != "runcloud/agent-base" || cfg.RunCloud.Workdir != "/home/runcloud/crabbox" {
+		t.Fatalf("runCloud defaults not applied: %#v", cfg.RunCloud)
+	}
+	applyFileConfig(&cfg, fileConfig{
+		Provider: "run-cloud",
+		RunCloud: &fileRunCloudConfig{
+			CLIPath: "/tmp/runcloud",
+			Image:   "ubuntu:24.04",
+			Region:  "eu-north",
+			Workdir: "/workspace/project",
+		},
+	})
+	if cfg.Provider != "run-cloud" || cfg.RunCloud.CLIPath != "/tmp/runcloud" || cfg.RunCloud.Image != "ubuntu:24.04" || cfg.RunCloud.Region != "eu-north" || cfg.RunCloud.Workdir != "/workspace/project" {
+		t.Fatalf("file runCloud config not applied: %#v", cfg.RunCloud)
+	}
+
+	t.Setenv("CRABBOX_RUN_CLOUD_CLI", "/opt/runcloud")
+	t.Setenv("CRABBOX_RUN_CLOUD_IMAGE", "runcloud/custom")
+	t.Setenv("CRABBOX_RUN_CLOUD_REGION", "us-east")
+	t.Setenv("CRABBOX_RUN_CLOUD_WORKDIR", "/workspace/env-project")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv err=%v", err)
+	}
+	if cfg.RunCloud.CLIPath != "/opt/runcloud" || cfg.RunCloud.Image != "runcloud/custom" || cfg.RunCloud.Region != "us-east" || cfg.RunCloud.Workdir != "/workspace/env-project" {
+		t.Fatalf("env runCloud config not applied: %#v", cfg.RunCloud)
 	}
 }
 

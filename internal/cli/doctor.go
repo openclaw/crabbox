@@ -680,6 +680,8 @@ func doctorErrorHint(provider, class string) string {
 		return "check_semaphore_token_project_and_jobs_read"
 	case "sprites":
 		return "check_sprites_cli_auth_and_sprite_list"
+	case "run-cloud":
+		return "check_runcloud_cli_login_and_sandbox_access"
 	case "tensorlake":
 		return "check_tensorlake_cli_auth_and_sbx_ls"
 	case "cloudflare":
