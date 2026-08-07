@@ -17,6 +17,7 @@ browser_bin_dir="${CRABBOX_LINUX_BROWSER_BIN_DIR:-/usr/local/bin}"
 browser_state_dir="${CRABBOX_LINUX_BROWSER_STATE_DIR:-/var/lib/crabbox}"
 chrome_defaults_file="${CRABBOX_LINUX_CHROME_DEFAULTS_FILE:-/etc/default/google-chrome}"
 trufflehog_bin_dir="${CRABBOX_LINUX_TRUFFLEHOG_BIN_DIR:-/usr/local/bin}"
+sudo_preserve_env="CRABBOX_LINUX_PNPM_VERSION,CRABBOX_LINUX_NODE_MAJOR,CRABBOX_LINUX_DOCKER_IMAGES,CRABBOX_LINUX_DESKTOP_TOOLS,CRABBOX_LINUX_BROWSER,CRABBOX_LINUX_APT_KEYRINGS_DIR,CRABBOX_LINUX_APT_SOURCES_DIR,CRABBOX_LINUX_APT_CONF_DIR,CRABBOX_LINUX_OS_RELEASE_FILE,CRABBOX_LINUX_CHROME_POLICY_DIR,CRABBOX_LINUX_CHROMIUM_POLICY_DIR,CRABBOX_LINUX_BROWSER_BIN_DIR,CRABBOX_LINUX_BROWSER_STATE_DIR,CRABBOX_LINUX_CHROME_DEFAULTS_FILE,CRABBOX_LINUX_TRUFFLEHOG_BIN_DIR"
 nodesource_signing_key_fingerprint="6F71F525282841EEDAF851B42F59B5F99B1BE0B4"
 docker_signing_key_fingerprint="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
 google_linux_signing_key_fingerprint="EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796"
@@ -28,7 +29,7 @@ log() {
 need_root() {
   if [[ "$(id -u)" -ne 0 ]]; then
     if command -v sudo >/dev/null 2>&1; then
-      exec sudo -E bash "$0" "$@"
+      exec sudo -H "--preserve-env=$sudo_preserve_env" bash "$0" "$@"
     fi
     log "sudo is required when not running as root"
     exit 2

@@ -509,6 +509,8 @@ trufflehog --no-update --version
 command -v docker
 node --version
 node -e 'if (Number(process.versions.node.split(".")[0]) < 24) throw new Error(`Node.js 24 or newer is required, found ${process.version}`)'
+corepack --version
+pnpm --version
 docker_group_member() {
   if id -nG 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
     return 0
