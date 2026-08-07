@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -504,6 +505,30 @@ type SyncManifest struct {
 	ChangedBytes int64
 }
 
+// gitManifestError turns a raw `git ls-files` failure into an actionable,
+// workdir-aware diagnostic. Crabbox builds its sync manifest from Git, so the
+// common cause is running from a directory that is not a Git repository. Without
+// this, cmd.Output() discards Git's stderr and the caller only sees an opaque
+// "exit status 128".
+func gitManifestError(root string, err error) error {
+	stderr := ""
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		stderr = strings.TrimSpace(string(exitErr.Stderr))
+	}
+	if isNotAGitRepoError(stderr) {
+		return fmt.Errorf("%s is not a Git repository: crabbox builds its sync manifest from Git; run `git init` here to sync files, or pass --no-sync to run without syncing local files", root)
+	}
+	if stderr != "" {
+		return fmt.Errorf("git ls-files in %s failed: %s", root, firstLine(stderr))
+	}
+	return fmt.Errorf("git ls-files in %s failed: %w", root, err)
+}
+
+func isNotAGitRepoError(stderr string) bool {
+	return strings.Contains(strings.ToLower(stderr), "not a git repository")
+}
+
 func syncManifest(root string, excludes []string) (SyncManifest, error) {
 	return syncManifestFiltered(root, excludes, nil)
 }
@@ -518,7 +543,7 @@ func syncManifestFiltered(root string, excludes, includes []string) (SyncManifes
 	cmd.Env = repositoryGitEnvironment()
 	out, err := cmd.Output()
 	if err != nil {
-		return SyncManifest{}, err
+		return SyncManifest{}, gitManifestError(root, err)
 	}
 	seen := map[string]bool{}
 	manifest := SyncManifest{}
