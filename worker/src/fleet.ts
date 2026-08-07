@@ -12458,7 +12458,13 @@ export class FleetCoordinator {
     if (lease.runtimeAdapterDeleteRequestedAt) {
       return this.runtimeAdapterDeletePendingResponse(lease, request, true);
     }
-    const released = await this.releaseResolvedLease(lease, { deleteServer: true, keep: false });
+    // Force-admin delete confirms provider cleanup before reporting success; ordinary releases
+    // persist retryable cleanup intent and let the alarm own provider I/O.
+    const released = await this.releaseResolvedLease(lease, {
+      deleteServer: true,
+      keep: false,
+      awaitProviderCleanup: true,
+    });
     return released.runtimeAdapterDeleteRequestedAt
       ? this.runtimeAdapterDeletePendingResponse(released, request, true)
       : json({ lease: publicLeaseRecord(released) });
@@ -15409,7 +15415,7 @@ export class FleetCoordinator {
 
   private async releaseResolvedLease(
     lease: LeaseRecord,
-    options: { deleteServer: boolean; keep?: boolean },
+    options: { deleteServer: boolean; keep?: boolean; awaitProviderCleanup?: boolean },
   ): Promise<LeaseRecord> {
     const current = (await this.getLease(lease.id)) ?? lease;
     if (current.runtimeAdapterDeleteRequestedAt) {
@@ -15456,7 +15462,7 @@ export class FleetCoordinator {
 
   private async releaseResolvedLeaseOperation(
     lease: LeaseRecord,
-    options: { deleteServer: boolean; keep?: boolean },
+    options: { deleteServer: boolean; keep?: boolean; awaitProviderCleanup?: boolean },
   ): Promise<LeaseRecord> {
     const preparation = await this.state.runExclusive(async () => {
       const current = (await this.getLease(lease.id)) ?? structuredClone(lease);
@@ -15482,6 +15488,19 @@ export class FleetCoordinator {
         await this.markAWSIngressReconcilePending(released);
         await this.scheduleAlarm();
         return { cleanup: false as const, blocked: false as const, lease: released };
+      }
+      if (!options.awaitProviderCleanup) {
+        const pending = finalizedReleasedLease(current, true, options.keep);
+        // A zero-duration cleanup claim keeps queued deletion visible to shipped rollback readers
+        // while allowing either coordinator version to reclaim it immediately.
+        const queuedAt = new Date().toISOString();
+        pending.releaseDeletesServer = true;
+        pending.cleanupStartedAt = queuedAt;
+        pending.cleanupClaimExpiresAt = queuedAt;
+        await this.putLease(pending);
+        await this.markAWSIngressReconcilePending(pending);
+        await this.scheduleAlarm();
+        return { cleanup: false as const, blocked: false as const, lease: pending };
       }
       const now = new Date();
       const claimed = finalizedReleasedLease(current, true, options.keep);
