@@ -12,6 +12,10 @@ boundary for the deterministic evidence work tracked by
 [openclaw/crabbox#280](https://github.com/openclaw/crabbox/issues/280), so the
 runtime can land later in smaller, testable slices.
 
+The detailed workload, Wasmtime fuel measurement, v1 JSON schema, subprocess
+isolation decision, and phased implementation plan live in the
+[deterministic perf evidence design](../plan/deterministic-perf-evidence.md).
+
 Crabbox already records wall-clock timing, phases, test results, proof blocks,
 and run artifacts. Those are useful operational evidence, but wall-clock timing
 is too noisy to be a hard cross-provider regression gate. Deterministic perf
@@ -61,13 +65,16 @@ budgets even when the source did not regress.
 ## Evidence Schema
 
 When implemented, deterministic metrics should extend timing JSON with an
-optional object. Existing timing consumers must remain unchanged when the field
-is absent.
+optional object derived from the versioned evidence artifact. Existing timing
+consumers must remain unchanged when the field is absent. The detailed design
+defines the v1 field names and fixes the metric and unit as `fuel`; do not label
+Wasmtime fuel as native instructions.
 
 ```json
 {
   "fuel": {
-    "instructions": 5821447,
+    "measured": 5821447,
+    "unit": "fuel",
     "mechanism": "wasmtime-fuel",
     "engine": "wasmtime@1.2.3",
     "module": "sha256:0123456789abcdef",
@@ -78,7 +85,8 @@ is absent.
 
 Rules:
 
-- `instructions` is the measured deterministic counter.
+- `measured` is the deterministic fuel counter.
+- `unit` is `fuel`, not native instructions, cycles, or time.
 - `mechanism` names the metering method, not the provider.
 - `engine` must include enough version identity to know whether two runs are
   comparable.
