@@ -28,10 +28,12 @@ still matches the offline contract.
    provider. Use `CRABBOX_LIVE=1`, select the exact provider, cap spend and TTL,
    arm cleanup before the first mutation, and prove create/use/destroy with zero
    residue. Funded or remote provider changes require this tier before merge.
-3. **Hosted live matrix** — not enabled. A future scheduled or manually
-   dispatched secret-backed workflow needs a separate repository policy for
-   trusted environments, provider credentials, spend limits, cancellation, and
-   orphan auditing. It must never expose secrets to pull-request code.
+3. **Hosted live matrix** — not enabled. The
+   [bounded hosted live-smoke proposal](hosted-live-smoke.md) defines the
+   provider allowlist, protected environment, credential policy, spend limits,
+   cancellation behavior, and orphan reconciliation required before a
+   scheduled or manually dispatched secret-backed workflow can be activated.
+   It must never expose secrets to pull-request code.
 
 The hermetic job is a visible merge gate, even though the broader Go job also
 runs the same packages. This deliberate overlap makes lifecycle coverage easy to
