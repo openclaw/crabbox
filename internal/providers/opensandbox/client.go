@@ -163,7 +163,7 @@ func newOpenSandboxClient(cfg Config, rt Runtime) (openSandboxClient, error) {
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
 	return &sdkOpenSandboxClient{
 		cfg:    cfg,

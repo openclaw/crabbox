@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
@@ -168,7 +169,7 @@ func newRailwayClient(cfg Config, rt Runtime) (railwayAPI, error) {
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
 	return &railwayClient{apiToken: apiToken, apiURL: apiURL, httpClient: secureRailwayHTTPClient(httpClient, apiURL)}, nil
 }

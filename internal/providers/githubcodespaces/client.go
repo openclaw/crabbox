@@ -169,7 +169,7 @@ func (m *machineRef) UnmarshalJSON(data []byte) error {
 func newClient(cfg GitHubCodespacesConfig, rt Runtime, token string) client {
 	httpClient := rt.HTTP
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
 	privateClient := *httpClient
 	// GitHub API requests carry a bearer token. API redirects are not required

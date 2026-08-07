@@ -105,7 +105,7 @@ var newAzureDynamicSessionsClient = func(ctx context.Context, cfg Config, rt Run
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
 	return &azureDynamicSessionsClient{
 		endpoint:             endpoint,
@@ -431,7 +431,7 @@ func (c *azureDynamicSessionsClient) responseError(resp *http.Response) error {
 func (c *azureDynamicSessionsClient) secureHTTPClient() *http.Client {
 	source := c.httpClient
 	if source == nil {
-		source = http.DefaultClient
+		source = &http.Client{Timeout: 60 * time.Second}
 	}
 	client := *source
 	trusted, _ := url.Parse(c.endpoint)

@@ -1232,7 +1232,7 @@ func (c *AzureClient) azureARM(ctx context.Context, method, path, apiVersion str
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
 	if err != nil {
 		return nil, nil, 0, err
 	}
@@ -1285,7 +1285,7 @@ func (c *AzureClient) azureARMOperationStatus(ctx context.Context, pollURL strin
 		return "", 0, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token.Token)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
 	if err != nil {
 		return "", 0, err
 	}

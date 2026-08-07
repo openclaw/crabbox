@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type hostingerAPI interface {
@@ -169,7 +170,7 @@ func newClient(cfg Config, rt Runtime) (hostingerAPI, error) {
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
 	httpClient = secureHostingerAPIClient(httpClient, parsed)
 	return &hostingerClient{token: token, apiURL: apiURL, httpClient: httpClient}, nil

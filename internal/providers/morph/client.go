@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
@@ -39,7 +40,7 @@ var newMorphClient = func(cfg Config, rt Runtime) (morphAPI, error) {
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
 	return &morphClient{
 		apiURL:     apiURL,

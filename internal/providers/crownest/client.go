@@ -109,7 +109,7 @@ func newClient(cfg Config, rt Runtime) (client, error) {
 	}
 	rawHTTPClient := rt.HTTP
 	if rawHTTPClient == nil {
-		rawHTTPClient = http.DefaultClient
+		rawHTTPClient = &http.Client{Timeout: 60 * time.Second}
 	}
 	return &httpClient{http: secureHTTPClient(rawHTTPClient, baseURL), baseURL: baseURL, apiKey: apiKey}, nil
 }

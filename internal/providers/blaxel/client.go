@@ -132,7 +132,7 @@ func newBlaxelClient(cfg Config, rt Runtime) (Client, error) {
 	workspace := strings.TrimSpace(cfg.Blaxel.Workspace)
 	httpClient := rt.HTTP
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
 	return &restClient{
 		base:      baseURL,

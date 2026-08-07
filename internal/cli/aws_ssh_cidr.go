@@ -33,7 +33,7 @@ func detectOutboundIPv4CIDR(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	res, err := http.DefaultClient.Do(req)
+	res, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
 	if err != nil {
 		return "", err
 	}

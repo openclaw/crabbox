@@ -138,7 +138,7 @@ func newFastAPICloudClient(cfg Config, rt Runtime) (fastAPICloudAPI, error) {
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
 	return &fastAPICloudClient{token: token, apiURL: apiURL, httpClient: secureFastAPICloudHTTPClient(httpClient, apiURL)}, nil
 }

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
@@ -130,7 +131,7 @@ func newRunpodClient(cfg Config, rt Runtime) (runpodAPI, error) {
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
 	return &runpodClient{apiKey: apiKey, apiURL: apiURL, httpClient: secureRunpodHTTPClient(httpClient, apiURL)}, nil
 }

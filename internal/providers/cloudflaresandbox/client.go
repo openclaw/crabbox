@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"time"
 )
 
 type bridgeClient interface {
@@ -106,7 +107,7 @@ func newBridgeClient(cfg Config, rt Runtime) (bridgeClient, error) {
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
 	return &client{
 		baseURL: baseURL,

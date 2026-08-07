@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 )
 
 const defaultAPIBase = "https://www.orgo.ai/api"
@@ -147,7 +148,7 @@ func newOrgoClient(cfg Config, rt Runtime) (orgoAPI, error) {
 	}
 	client := rt.HTTP
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{Timeout: 60 * time.Second}
 	}
 	return &orgoHTTPClient{
 		baseURL: strings.TrimRight(baseURL, "/"),

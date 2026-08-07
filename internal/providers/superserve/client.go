@@ -118,7 +118,7 @@ func newSuperserveClient(cfg Config, rt Runtime) (superserveClient, error) {
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
 	return &httpSuperserveClient{http: secureSuperserveHTTPClient(httpClient, baseURL), baseURL: baseURL, apiKey: apiKey}, nil
 }

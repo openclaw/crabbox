@@ -107,7 +107,7 @@ func isloHTTPClientWithRedirectGuard(baseURL string, source *http.Client) (*http
 		return nil, fmt.Errorf("islo base URL must include scheme and host")
 	}
 	if source == nil {
-		source = http.DefaultClient
+		source = &http.Client{Timeout: 60 * time.Second}
 	}
 	client := *source
 	client.CheckRedirect = isloSameOriginRedirectGuard(baseURL, source.CheckRedirect)

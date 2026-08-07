@@ -5,15 +5,32 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
 	"strings"
+	"time"
 
 	apidaytona "github.com/daytonaio/daytona/libs/api-client-go"
 	sdkdaytona "github.com/daytonaio/daytona/libs/sdk-go/pkg/daytona"
 )
+
+// transferAwareHTTPClient bounds connection setup for large archive streams without
+// applying a whole-request Timeout (which would abort valid multi-minute uploads).
+func transferAwareHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 0,
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           (&net.Dialer{Timeout: 30 * time.Second}).DialContext,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 60 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		},
+	}
+}
 
 func (b *daytonaLeaseBackend) uploadDaytonaArchive(ctx context.Context, sandboxID, archivePath string, archive *os.File) error {
 	client, err := newDaytonaClient(b.cfg, b.rt)
@@ -34,7 +51,8 @@ func (b *daytonaLeaseBackend) uploadDaytonaArchive(ctx context.Context, sandboxI
 	}
 	httpClient := b.rt.HTTP
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		// Streaming archive uploads can exceed 60s; bound dial/headers only.
+		httpClient = transferAwareHTTPClient()
 	}
 	return uploadDaytonaFileStream(ctx, httpClient, endpoint, headers, archive, path.Base(archivePath))
 }
@@ -73,7 +91,7 @@ func daytonaToolboxHeaders(cfg Config) (map[string]string, error) {
 
 func uploadDaytonaFileStream(ctx context.Context, client *http.Client, endpoint string, headers map[string]string, file io.Reader, filename string) error {
 	if client == nil {
-		client = http.DefaultClient
+		client = transferAwareHTTPClient()
 	}
 	pr, pw := io.Pipe()
 	writer := multipart.NewWriter(pw)

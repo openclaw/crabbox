@@ -111,7 +111,7 @@ func newOCAPIClient(cfg Config, rt Runtime) (*ocAPIClient, error) {
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
 	return &ocAPIClient{http: secureOCAPIClient(httpClient, baseURL), baseURL: baseURL, apiKey: apiKey}, nil
 }

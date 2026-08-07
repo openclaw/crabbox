@@ -149,7 +149,7 @@ func newUnikraftCloudClient(cfg Config, rt Runtime) (unikraftCloudAPI, error) {
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
 	return &unikraftCloudClient{
 		apiKey:     apiKey,

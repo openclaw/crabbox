@@ -101,7 +101,7 @@ var newCubeSandboxClient = func(cfg Config, rt Runtime) (cubesandboxAPI, error) 
 	apiKey := strings.TrimSpace(cfg.CubeSandbox.APIKey)
 	httpClient := rt.HTTP
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
 	apiURL, err := validateCubeSandboxAPIURL(blank(cfg.CubeSandbox.APIURL, "http://127.0.0.1:3000"))
 	if err != nil {
@@ -524,7 +524,7 @@ func (c *cubesandboxClient) dataPlaneHTTPClient() *http.Client {
 	if c.httpClient != nil {
 		return c.httpClient
 	}
-	return http.DefaultClient
+	return &http.Client{Timeout: 60 * time.Second}
 }
 
 type cubesandboxStartResponse struct {
