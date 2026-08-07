@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -49,6 +50,8 @@ func repositoryGitEnvironment() []string {
 
 type gitTrackedPath struct {
 	name         string
+	mode         string
+	stage        int
 	skipWorktree bool
 }
 
@@ -60,70 +63,134 @@ func GitCheckoutHasHiddenOmissions(root string) (bool, error) {
 }
 
 func gitCheckoutHasHiddenOmissions(root string, resolveSparseRules func(string, []gitTrackedPath) (map[string]struct{}, error)) (bool, error) {
+	path, err := gitCheckoutHiddenOmission(root, nil, resolveSparseRules)
+	return path != "", err
+}
+
+func gitCheckoutHiddenOmission(
+	root string,
+	inScope func(gitTrackedPath) bool,
+	resolveSparseRules func(string, []gitTrackedPath) (map[string]struct{}, error),
+) (string, error) {
 	if strings.TrimSpace(root) == "" {
-		return false, nil
+		return "", nil
 	}
-	sparseEnabled := strings.EqualFold(
+	sparseEnabled := gitCheckoutSparseEnabled(root)
+	if !sparseEnabled && gitOutput(root, "rev-parse", "--is-inside-work-tree") != "true" {
+		return "", nil
+	}
+	tracked, err := loadGitTrackedPaths(root)
+	if err != nil {
+		return "", err
+	}
+	return gitCheckoutHiddenOmissionForTracked(root, tracked, sparseEnabled, inScope, resolveSparseRules)
+}
+
+func gitCheckoutSparseEnabled(root string) bool {
+	return strings.EqualFold(
 		strings.TrimSpace(gitOutput(root, "config", "--bool", "core.sparseCheckout")),
 		"true",
 	)
-	if !sparseEnabled && gitOutput(root, "rev-parse", "--is-inside-work-tree") != "true" {
-		return false, nil
-	}
-	trackedCmd := exec.Command("git", "ls-files", "-t", "-z")
+}
+
+func loadGitTrackedPaths(root string) ([]gitTrackedPath, error) {
+	trackedCmd := exec.Command("git", "ls-files", "-t", "--stage", "-z")
 	trackedCmd.Dir = root
+	trackedCmd.Env = repositoryGitEnvironment()
 	tagged, err := trackedCmd.Output()
 	if err != nil {
-		return false, fmt.Errorf("list tracked paths: %w", err)
+		return nil, fmt.Errorf("list tracked paths: %w", err)
 	}
-	if len(tagged) == 0 {
-		return false, nil
+	tracked, err := parseGitTrackedPaths(tagged)
+	if err != nil {
+		return nil, err
 	}
-	tracked := make([]gitTrackedPath, 0, bytes.Count(tagged, []byte{0}))
-	for _, entry := range bytes.Split(tagged, []byte{0}) {
-		if len(entry) == 0 {
+	return tracked, nil
+}
+
+func gitCheckoutHiddenOmissionForTracked(
+	root string,
+	tracked []gitTrackedPath,
+	sparseEnabled bool,
+	inScope func(gitTrackedPath) bool,
+	resolveSparseRules func(string, []gitTrackedPath) (map[string]struct{}, error),
+) (string, error) {
+	scoped := make([]gitTrackedPath, 0, len(tracked))
+	for _, entry := range tracked {
+		if inScope != nil && !inScope(entry) {
 			continue
 		}
-		if len(entry) < 3 || entry[1] != ' ' {
-			return false, fmt.Errorf("parse tracked path metadata")
-		}
-		path := string(entry[2:])
-		tracked = append(tracked, gitTrackedPath{name: path, skipWorktree: entry[0] == 'S'})
+		scoped = append(scoped, entry)
+	}
+	if len(scoped) == 0 {
+		return "", nil
 	}
 	includedPaths := make(map[string]struct{})
 	var sparseRulesErr error
 	if sparseEnabled {
-		includedPaths, sparseRulesErr = resolveSparseRules(root, tracked)
+		includedPaths, sparseRulesErr = resolveSparseRules(root, scoped)
 	}
-	for _, path := range tracked {
-		if sparseEnabled && sparseRulesErr != nil && !path.skipWorktree {
-			exists, statErr := trackedPathExistsWithoutSymlinkAncestor(root, path.name)
+	for _, entry := range scoped {
+		if sparseEnabled && sparseRulesErr != nil && !entry.skipWorktree {
+			exists, statErr := trackedPathExistsWithoutSymlinkAncestor(root, entry.name)
 			if statErr != nil {
-				return false, fmt.Errorf("inspect tracked path %q: %w", path.name, statErr)
+				return "", fmt.Errorf("inspect tracked path %q: %w", entry.name, statErr)
 			}
 			if !exists {
-				return false, fmt.Errorf("classify missing tracked path %q without git sparse-checkout check-rules (requires Git 2.41 or newer): %w", path.name, sparseRulesErr)
+				return "", fmt.Errorf("classify missing tracked path %q without git sparse-checkout check-rules (requires Git 2.41 or newer): %w", entry.name, sparseRulesErr)
 			}
 			continue
 		}
-		hiddenCandidate := path.skipWorktree
+		hiddenCandidate := entry.skipWorktree
 		if sparseEnabled && sparseRulesErr == nil {
-			_, ruleIncludesPath := includedPaths[path.name]
+			_, ruleIncludesPath := includedPaths[entry.name]
 			hiddenCandidate = hiddenCandidate || !ruleIncludesPath
 		}
 		if !hiddenCandidate {
 			continue
 		}
-		exists, statErr := trackedPathExistsWithoutSymlinkAncestor(root, path.name)
+		exists, statErr := trackedPathExistsWithoutSymlinkAncestor(root, entry.name)
 		if statErr != nil {
-			return false, fmt.Errorf("inspect tracked path %q: %w", path.name, statErr)
+			return "", fmt.Errorf("inspect tracked path %q: %w", entry.name, statErr)
 		}
 		if exists {
 			continue
 		}
-		return true, nil
+		return entry.name, nil
 	}
-	return false, nil
+	return "", nil
+}
+
+func parseGitTrackedPaths(tagged []byte) ([]gitTrackedPath, error) {
+	tracked := make([]gitTrackedPath, 0, bytes.Count(tagged, []byte{0}))
+	for _, record := range bytes.Split(tagged, []byte{0}) {
+		if len(record) == 0 {
+			continue
+		}
+		if len(record) < 3 || record[1] != ' ' {
+			return nil, fmt.Errorf("parse tracked path metadata")
+		}
+		metadata, name, ok := bytes.Cut(record[2:], []byte{'\t'})
+		fields := bytes.Fields(metadata)
+		if !ok || len(name) == 0 || len(fields) != 3 {
+			return nil, fmt.Errorf("parse tracked path metadata")
+		}
+		mode := string(fields[0])
+		if _, err := strconv.ParseUint(mode, 8, 32); err != nil {
+			return nil, fmt.Errorf("parse tracked path mode %q", mode)
+		}
+		stage, err := strconv.Atoi(string(fields[2]))
+		if err != nil || stage < 0 || stage > 3 {
+			return nil, fmt.Errorf("parse tracked path stage %q", fields[2])
+		}
+		tracked = append(tracked, gitTrackedPath{
+			name:         string(name),
+			mode:         mode,
+			stage:        stage,
+			skipWorktree: record[0] == 'S',
+		})
+	}
+	return tracked, nil
 }
 
 func trackedPathExistsWithoutSymlinkAncestor(root, gitPath string) (bool, error) {
@@ -153,6 +220,7 @@ func sparseCheckoutIncludedPaths(root string, tracked []gitTrackedPath) (map[str
 	}
 	cmd := exec.Command("git", "sparse-checkout", "check-rules", "-z")
 	cmd.Dir = root
+	cmd.Env = repositoryGitEnvironment()
 	cmd.Stdin = bytes.NewReader(paths.Bytes())
 	out, err := cmd.Output()
 	if err != nil {
@@ -513,6 +581,29 @@ func syncManifest(root string, excludes []string) (SyncManifest, error) {
 // synced. This lets a job sync a few selected paths instead of the whole working
 // tree (e.g. sync just `src/` and `scripts/` out of a large repo).
 func syncManifestFiltered(root string, excludes, includes []string) (SyncManifest, error) {
+	tracked, err := loadGitTrackedPaths(root)
+	if err != nil {
+		return SyncManifest{}, fmt.Errorf("verify sync manifest scope: %w", err)
+	}
+	inManifestScope := func(entry gitTrackedPath) bool {
+		rel := filepath.ToSlash(entry.name)
+		return safeRepoRel(rel) &&
+			!pathExcluded(rel, excludes) &&
+			pathIncluded(rel, includes)
+	}
+	gitlinkPaths, err := trackedGitlinkPaths(tracked, inManifestScope)
+	if err != nil {
+		return SyncManifest{}, fmt.Errorf("verify sync manifest scope: %w", err)
+	}
+	hidden, err := gitCheckoutHiddenOmissionForTracked(root, tracked, gitCheckoutSparseEnabled(root), func(entry gitTrackedPath) bool {
+		return entry.mode != "160000" && inManifestScope(entry)
+	}, sparseCheckoutIncludedPaths)
+	if err != nil {
+		return SyncManifest{}, fmt.Errorf("verify sync manifest scope: %w", err)
+	}
+	if hidden != "" {
+		return SyncManifest{}, fmt.Errorf("tracked path %q is hidden by sparse checkout or skip-worktree state but remains in sync manifest scope", hidden)
+	}
 	cmd := exec.Command("git", "ls-files", "--cached", "--others", "--exclude-standard", "-z")
 	cmd.Dir = root
 	cmd.Env = repositoryGitEnvironment()
@@ -524,7 +615,7 @@ func syncManifestFiltered(root string, excludes, includes []string) (SyncManifes
 	manifest := SyncManifest{}
 	for _, rel := range splitNul(out) {
 		rel = filepath.ToSlash(rel)
-		if !safeRepoRel(rel) || pathExcluded(rel, excludes) || !pathIncluded(rel, includes) || seen[rel] {
+		if _, isGitlink := gitlinkPaths[rel]; isGitlink || !safeRepoRel(rel) || pathExcluded(rel, excludes) || !pathIncluded(rel, includes) || seen[rel] {
 			continue
 		}
 		full := filepath.Join(root, filepath.FromSlash(rel))
@@ -541,13 +632,47 @@ func syncManifestFiltered(root string, excludes, includes []string) (SyncManifes
 	if err != nil {
 		return SyncManifest{}, err
 	}
-	manifest.Deleted = filterDeletedPaths(deleted, seen)
+	manifest.Deleted = filterDeletedPaths(deleted, seen, gitlinkPaths)
 	changed, err := changedSyncPaths(root, excludes, includes)
 	if err != nil {
 		return SyncManifest{}, err
 	}
 	manifest.Changed, manifest.ChangedBytes = changedPathSetBytes(root, changed)
 	return manifest, nil
+}
+
+func trackedGitlinkPaths(tracked []gitTrackedPath, inScope func(gitTrackedPath) bool) (map[string]struct{}, error) {
+	paths := make(map[string]struct{})
+	firstByPath := make(map[string]gitTrackedPath)
+	for _, entry := range tracked {
+		if inScope != nil && !inScope(entry) {
+			continue
+		}
+		rel := filepath.ToSlash(entry.name)
+		first, seen := firstByPath[rel]
+		if !seen {
+			firstByPath[rel] = entry
+			if entry.mode == "160000" {
+				paths[rel] = struct{}{}
+			}
+			continue
+		}
+		if (first.mode == "160000") == (entry.mode == "160000") {
+			continue
+		}
+		file, gitlink := first, entry
+		if first.mode == "160000" {
+			file, gitlink = entry, first
+		}
+		return nil, fmt.Errorf(
+			"tracked path %q has mixed file mode %s at stage %d and gitlink mode 160000 at stage %d in sync manifest scope",
+			rel,
+			file.mode,
+			file.stage,
+			gitlink.stage,
+		)
+	}
+	return paths, nil
 }
 
 func BuildSyncManifestFiltered(root string, excludes, includes []string) (SyncManifest, error) {
@@ -605,10 +730,10 @@ func syncDeletedPaths(root string, excludes, includes []string) ([]string, error
 	return out, nil
 }
 
-func filterDeletedPaths(deleted []string, files map[string]bool) []string {
+func filterDeletedPaths(deleted []string, files map[string]bool, gitlinks map[string]struct{}) []string {
 	out := deleted[:0]
 	for _, rel := range deleted {
-		if !files[rel] {
+		if _, isGitlink := gitlinks[rel]; !isGitlink && !files[rel] {
 			out = append(out, rel)
 		}
 	}
