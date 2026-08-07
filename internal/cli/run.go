@@ -1297,16 +1297,20 @@ retrySync:
 			return recordFailure(err)
 		}
 		timings.syncSteps.preflight = time.Since(stepStart)
+		coherence, credentialBlocked := syncGitCoherencePlan(cfg, repo)
+		if credentialBlocked {
+			warnCredentialBearingGitSeed(a.Stderr)
+		}
 		fingerprint := ""
 		if cfg.Sync.Fingerprint && !isWindowsNativeTarget(target) {
 			stepStart = time.Now()
-			fingerprint, err = syncFingerprintForManifest(repo, cfg, manifest, excludes)
+			fingerprint, err = syncFingerprintForManifest(repo, cfg, manifest, excludes, coherence)
 			timings.syncSteps.fingerprintLocal = time.Since(stepStart)
 			if err != nil {
 				fmt.Fprintf(a.Stderr, "warning: sync fingerprint failed: %v\n", err)
 			} else if !fullResyncRequested && fingerprint != "" {
 				stepStart = time.Now()
-				remoteFingerprint, err := runSSHOutput(ctx, target, remoteReadSyncFingerprint(workdir))
+				remoteFingerprint, err := runSSHOutput(ctx, target, remoteReadSyncFingerprint(workdir, coherence))
 				timings.syncSteps.fingerprintRemote = time.Since(stepStart)
 				if err == nil && remoteFingerprint == fingerprint {
 					timings.sync = time.Since(syncStart)
@@ -1337,7 +1341,7 @@ retrySync:
 		}
 		if isWindowsNativeTarget(target) {
 			stepStart = time.Now()
-			if err := syncWindowsNative(ctx, target, repo, cfg, workdir, manifest, a.Stdout, a.Stderr, rsyncOptions{Debug: *debugSync, Delete: cfg.Sync.Delete, Checksum: cfg.Sync.Checksum, FullResync: fullResyncRequested, Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
+			if err := syncWindowsNative(ctx, target, repo, cfg, coherence, workdir, manifest, a.Stdout, a.Stderr, rsyncOptions{Debug: *debugSync, Delete: cfg.Sync.Delete, Checksum: cfg.Sync.Checksum, FullResync: fullResyncRequested, Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
 				return recordFailure(err)
 			}
 			timings.syncSteps.rsync = time.Since(stepStart)
@@ -1346,13 +1350,9 @@ retrySync:
 			recorder.Event("sync.finished", "synced", fmt.Sprintf("duration=%s mode=archive", timings.sync.Round(time.Millisecond)))
 			goto afterSync
 		}
-		gitSeed, credentialBlocked := syncGitSeedDecision(cfg, repo)
-		if credentialBlocked {
-			warnCredentialBearingGitSeed(a.Stderr)
-		}
-		if gitSeed {
+		if coherence.seedEnabled() {
 			stepStart = time.Now()
-			if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteGitSeed(workdir, repo.RemoteURL, repo.Head), idempotentSSHRetryDelay); err != nil {
+			if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay); err != nil {
 				fmt.Fprintf(a.Stderr, "warning: remote git seed failed: %v\n", err)
 			}
 			timings.syncSteps.gitSeed = time.Since(stepStart)
@@ -1421,6 +1421,7 @@ retrySync:
 			BaseSHA:            baseSHA,
 			Fingerprint:        fingerprint,
 			Token:              finalizeToken,
+			Coherence:          coherence,
 		})
 		if out, err := runIdempotentSSHCombinedOutput(ctx, target, finalizeCommand, idempotentSSHRetryDelay); err != nil {
 			if out != "" {
