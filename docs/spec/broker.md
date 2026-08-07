@@ -75,8 +75,10 @@ keys, source sync, and Actions hydration, so it registers a lease only after it
 has proved the remote endpoint and setup. The broker is the arbiter for
 exclusive borrow/return, desired-capacity fill claims, and borrow deadlines. It
 uses the recorded SSH endpoint so provider-specific port fallback does not
-repeat on every hot run. The coordinator does not issue SSH credentials; fill
-keepers and borrowers retain the existing client-owned access contract.
+repeat on every hot run. The coordinator does not issue SSH credentials today;
+fill keepers and borrowers retain the existing client-owned access contract.
+The proposed [broker-mediated SSH handoff](broker-ssh-handoff.md) defines the
+scoped, short-lived replacement needed for independently configured borrowers.
 
 ## CLI flow
 
