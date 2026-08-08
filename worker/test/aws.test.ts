@@ -1188,6 +1188,37 @@ describe("aws provider", () => {
     ).toBe("");
     expect(awsProvisioningErrorCategory("InsufficientInstanceCapacity: nope")).toBe("capacity");
     expect(awsProvisioningErrorCategory("VcpuLimitExceeded: nope")).toBe("quota");
+    expect(awsProvisioningErrorCategory("InvalidBlockDeviceMapping: nope")).toBe("");
+    expect(isRetryableAWSProvisioningError("InvalidBlockDeviceMapping: nope")).toBe(false);
+  });
+
+  it("does not retry fatal spot launch requests as on-demand", async () => {
+    const { client, config, markets } = awsMarketFallbackHarness("InvalidBlockDeviceMapping");
+
+    await expect(
+      client.createServerWithFallback(
+        config,
+        "cbx_abcdef123456",
+        "violet-prawn",
+        "alice@example.com",
+      ),
+    ).rejects.toThrow("InvalidBlockDeviceMapping");
+    expect(markets).toEqual(["spot"]);
+  });
+
+  it("falls back from spot capacity failure to on-demand", async () => {
+    const { client, config, markets } = awsMarketFallbackHarness("InsufficientInstanceCapacity");
+
+    const result = await client.createServerWithFallback(
+      config,
+      "cbx_abcdef123456",
+      "violet-prawn",
+      "alice@example.com",
+    );
+
+    expect(markets).toEqual(["spot", "on-demand"]);
+    expect(result.market).toBe("on-demand");
+    expect(result.attempts?.[0]).toMatchObject({ market: "spot", category: "capacity" });
   });
 
   it("classifies stale AWS instance ID errors", () => {
@@ -2897,6 +2928,67 @@ function ec2ConfiguredSecurityGroupResponse(
 
 function ec2XMLResponse(body: string, status = 200): Response {
   return new Response(body, { status, headers: { "content-type": "application/xml" } });
+}
+
+function awsMarketFallbackHarness(failureCode: string) {
+  const markets: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      if (new URL(request.url).hostname.startsWith("servicequotas.")) {
+        return new Response(JSON.stringify({ Quota: { Value: 999 } }), {
+          headers: { "content-type": "application/json" },
+        });
+      }
+      const params = new URLSearchParams(await request.clone().text());
+      const action = params.get("Action") ?? "";
+      const securityGroupResponse = ec2ConfiguredSecurityGroupResponse(action, params);
+      if (securityGroupResponse) return securityGroupResponse;
+      if (action === "DescribeKeyPairs") {
+        return ec2XMLResponse(
+          "<DescribeKeyPairsResponse><keySet><item><keyName>test-key</keyName><publicKey>ssh-ed25519 test</publicKey></item></keySet></DescribeKeyPairsResponse>",
+        );
+      }
+      if (action === "RunInstances") {
+        const market = params.has("InstanceMarketOptions.MarketType") ? "spot" : "on-demand";
+        markets.push(market);
+        if (markets.length === 1) {
+          return ec2XMLResponse(
+            `<Response><Errors><Error><Code>${failureCode}</Code><Message>launch failed</Message></Error></Errors></Response>`,
+            400,
+          );
+        }
+        return ec2XMLResponse(
+          "<RunInstancesResponse><instancesSet><item><instanceId>i-fallback</instanceId><instanceType>t3.small</instanceType><ipAddress>203.0.113.44</ipAddress><instanceState><name>pending</name></instanceState></item></instancesSet></RunInstancesResponse>",
+        );
+      }
+      return ec2XMLResponse(
+        `<Response><Errors><Error><Code>Unexpected</Code><Message>${action}</Message></Error></Errors></Response>`,
+        500,
+      );
+    }),
+  );
+  return {
+    client: new EC2SpotClient(
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
+        CRABBOX_AWS_SSH_CIDRS: "203.0.113.7/32",
+        CRABBOX_AWS_AMI: "ami-test",
+      } as never,
+      "eu-west-1",
+    ),
+    config: leaseConfig({
+      provider: "aws",
+      serverType: "t3.small",
+      serverTypeExplicit: true,
+      providerKey: "test-key",
+      sshPublicKey: "ssh-ed25519 test",
+    }),
+    markets,
+  };
 }
 
 async function gunzipBase64(value: string): Promise<string> {

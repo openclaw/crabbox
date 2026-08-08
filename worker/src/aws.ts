@@ -947,6 +947,7 @@ export class EC2SpotClient {
       const attempts: ProvisioningAttempt[] = [];
       const quotaCache = new Map<string, number | undefined>();
       const imageCache = new Map<string, string>();
+      let spotFailuresRetryable = config.capacityMarket === "spot";
       const pinnedMacOSImageID =
         config.target === "macos" ? config.awsAMI || this.env.CRABBOX_AWS_AMI || "" : "";
       const resolveCandidateImageID = async (candidateConfig: LeaseConfig): Promise<string> => {
@@ -1029,11 +1030,13 @@ export class EC2SpotClient {
           });
           failures.push(`${serverType}: ${message}`);
           if (!isRetryableAWSProvisioningError(message)) {
+            spotFailuresRetryable = false;
             break;
           }
         }
       }
-      if (config.capacityMarket === "spot" && config.capacityFallback.startsWith("on-demand")) {
+      // Fatal request failures are market-independent; On-Demand cannot recover them.
+      if (spotFailuresRetryable && config.capacityFallback.startsWith("on-demand")) {
         for (const serverType of candidates) {
           // oxlint-disable-next-line eslint/no-await-in-loop -- on-demand fallback must stay sequential.
           const preflight = await this.quotaPreflightAttempt(serverType, "on-demand", quotaCache);
