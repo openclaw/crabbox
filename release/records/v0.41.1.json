@@ -2,8 +2,7 @@
   "schemaVersion": 1,
   "repository": "openclaw/crabbox",
   "tag": "v0.41.1",
-  "tagObject": "PENDING_AFTER_SIGNED_TAG",
-  "sourceCommit": "PENDING_AFTER_PREPARATION_MERGE",
-  "publicationStatus": "blocked",
-  "blocker": "Pending signed v0.41.1 tag object and peeled source commit; update both fields and set publicationStatus to ready only after the tag is signed and verified."
+  "tagObject": "3e3658cb65570d88e6cf876f7155de6e357132c1",
+  "sourceCommit": "70aaebd1083615eadeddb920b1f344822a2f013b",
+  "publicationStatus": "ready"
 }
