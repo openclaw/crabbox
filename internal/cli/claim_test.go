@@ -811,6 +811,69 @@ func TestReplaceLeaseClaimIfUnchangedPreservesSelectedRuntimeState(t *testing.T)
 	}
 }
 
+func TestDurableClaimReplacementHelpersPublishOnlyAfterAction(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_durable123456"
+	if err := claimLeaseForRepoProvider(leaseID, "durable", "aws", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	current, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := cloneLeaseClaim(current)
+	replacement.Slug = "durable-returning"
+	written, err := replaceLeaseClaimIfUnchangedDurableReturning(leaseID, current, replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if written.Slug != replacement.Slug || written.Revision == current.Revision {
+		t.Fatalf("durable replacement=%#v current=%#v", written, current)
+	}
+
+	next := cloneLeaseClaim(written)
+	next.Slug = "durable-after"
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actionCalled := false
+	writtenAfter, err := replaceLeaseClaimIfUnchangedDurableAfter(leaseID, written, next, func() error {
+		actionCalled = true
+		beforePublish, exists, err := readLeaseClaimPathWithPresence(path)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return errors.New("claim disappeared before replacement action")
+		}
+		if beforePublish.Slug != written.Slug {
+			return fmt.Errorf("replacement published before action: %#v", beforePublish)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !actionCalled || writtenAfter.Slug != next.Slug || writtenAfter.Revision == written.Revision {
+		t.Fatalf("actionCalled=%t written=%#v previous=%#v", actionCalled, writtenAfter, written)
+	}
+
+	want := errors.New("provider cleanup failed")
+	failedReplacement := cloneLeaseClaim(writtenAfter)
+	failedReplacement.Slug = "must-not-publish"
+	if _, err := replaceLeaseClaimIfUnchangedDurableAfter(leaseID, writtenAfter, failedReplacement, func() error { return want }); !errors.Is(err, want) {
+		t.Fatalf("action failure err=%v", err)
+	}
+	unchanged, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Slug != writtenAfter.Slug || unchanged.Revision != writtenAfter.Revision {
+		t.Fatalf("failed action changed claim: got=%#v want=%#v", unchanged, writtenAfter)
+	}
+}
+
 func TestConditionalClaimCreateRejectsExistingEmptyFile(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_emptyclaim123"
