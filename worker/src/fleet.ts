@@ -6647,11 +6647,21 @@ export class FleetCoordinator {
     try {
       released = await this.releaseResolvedLease(lease, {
         deleteServer: shouldDelete,
+        expectedLease: lease,
         ...(binding ? { requestBinding: binding } : {}),
       });
     } catch (error) {
       if (error instanceof LeaseRequestBindingConflictError) {
         return leaseRequestBindingConflictResponse();
+      }
+      if (error instanceof LeaseReleaseResolutionConflictError) {
+        return json(
+          {
+            error: "lease_state_changed",
+            message: "lease changed after release authorization",
+          },
+          { status: 409 },
+        );
       }
       throw error;
     }
@@ -6679,14 +6689,23 @@ export class FleetCoordinator {
     request: Request,
     admin: boolean,
   ): Promise<{ lease: LeaseRecord; binding?: LeaseRequestBinding } | Response> {
-    return await this.state.runExclusive(async () => {
-      const exact = await this.getLease(identifier);
-      const binding = await this.getLeaseRequestBinding(identifier);
-      if (exact && binding) {
+    const exact = await this.getLease(identifier);
+    if (exact) {
+      if (await this.getLeaseRequestBinding(identifier)) {
         return leaseRequestBindingConflictResponse();
       }
-      if (exact) {
-        return this.leaseVisibleToRequest(exact, request, admin) ? { lease: exact } : notFound();
+      return this.leaseVisibleToRequest(exact, request, admin) ? { lease: exact } : notFound();
+    }
+    return await this.state.runExclusive(async () => {
+      const lockedExact = await this.getLease(identifier);
+      const binding = await this.getLeaseRequestBinding(identifier);
+      if (lockedExact && binding) {
+        return leaseRequestBindingConflictResponse();
+      }
+      if (lockedExact) {
+        return this.leaseVisibleToRequest(lockedExact, request, admin)
+          ? { lease: lockedExact }
+          : notFound();
       }
       if (!binding) {
         const lease = await this.resolveLease(identifier, request, admin);
@@ -15601,14 +15620,22 @@ export class FleetCoordinator {
       deleteServer: boolean;
       keep?: boolean;
       requestBinding?: LeaseRequestBinding;
+      expectedLease?: LeaseRecord;
     },
   ): Promise<LeaseRecord> {
     const current = (await this.getLease(lease.id)) ?? lease;
-    if (current.runtimeAdapterDeleteRequestedAt) {
+    if (
+      options.expectedLease &&
+      (!sameLeaseReleaseIdentity(current, options.expectedLease) || current.workspaceID)
+    ) {
+      throw new LeaseReleaseResolutionConflictError();
+    }
+    if (current.runtimeAdapterDeleteRequestedAt && !options.expectedLease) {
       return current;
     }
     await this.markWorkspaceReleaseRequested(current);
     if (
+      !options.expectedLease &&
       current.workspaceID &&
       !current.cloudID &&
       (current.state === "provisioning" ||
@@ -15652,6 +15679,7 @@ export class FleetCoordinator {
       deleteServer: boolean;
       keep?: boolean;
       requestBinding?: LeaseRequestBinding;
+      expectedLease?: LeaseRecord;
     },
   ): Promise<LeaseRecord> {
     const preparation = await this.state.runExclusive(async () => {
@@ -15661,7 +15689,14 @@ export class FleetCoordinator {
       ) {
         throw new LeaseRequestBindingConflictError();
       }
-      const current = (await this.getLease(lease.id)) ?? structuredClone(lease);
+      const stored = await this.getLease(lease.id);
+      if (
+        options.expectedLease &&
+        (!stored || !sameLeaseReleaseIdentity(stored, options.expectedLease))
+      ) {
+        throw new LeaseReleaseResolutionConflictError();
+      }
+      const current = stored ?? structuredClone(lease);
       if (current.runtimeAdapterDeleteRequestedAt) {
         return { cleanup: false as const, blocked: true as const, lease: current };
       }
@@ -15806,6 +15841,8 @@ interface LeaseRequestBinding {
 }
 
 class LeaseRequestBindingConflictError extends Error {}
+
+class LeaseReleaseResolutionConflictError extends Error {}
 
 interface ProviderReadiness {
   provider: Provider;
@@ -16769,6 +16806,16 @@ function leaseRequestBindingConflictResponse(): Response {
       message: "lease request binding does not match the current canonical lease generation",
     },
     { status: 409 },
+  );
+}
+
+function sameLeaseReleaseIdentity(left: LeaseRecord, right: LeaseRecord): boolean {
+  return (
+    left.id === right.id &&
+    left.owner === right.owner &&
+    left.org === right.org &&
+    left.createdAt === right.createdAt &&
+    left.requestLeaseGeneration === right.requestLeaseGeneration
   );
 }
 

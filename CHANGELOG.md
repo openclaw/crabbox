@@ -5,6 +5,7 @@
 ### Fixed
 
 - Redacted configured credentials reflected by provider-controlled Orgo, FastAPI Cloud, and DigitalOcean response diagnostics before they reach terminal or CI output. Thanks @coygeek.
+- Released late-accepted ordinary coordinator leases after canceled creation, with bounded transient/final retries and generation-fenced retained AWS Mac request-ID cleanup while fixed-ID leases remain available for replay. Thanks @fuller-stack-dev.
 
 ## 0.41.1 - 2026-08-09
 

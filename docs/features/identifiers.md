@@ -29,6 +29,14 @@ The CLI normally mints a provisional lease ID before calling the broker. A
 broker may return a different final ID, in which case the CLI moves the local
 SSH key directory from the provisional ID to the final ID with
 `MoveStoredTestboxKey` and re-keys the claim and other references accordingly.
+When an ordinary coordinator request reactivates a retained AWS Mac lease, the
+coordinator permanently reserves that provisional ID in a private,
+generation-bound release mapping to the retained canonical ID. Only the release
+route accepts the mapping, and only for the owning user and organization (or an
+administrator); status, heartbeat, sharing, runs, and other lease lookups remain
+canonical-only. This lets a canceled client delete a late-accepted retained
+lease even when its create response was lost, without relabeling the provider
+resource or allowing the provisional ID to target a later reactivation.
 
 Automation may instead supply the canonical ID with `warmup --lease-id`. For
 direct AWS and managed coordinator leases, that ID is an immutable create

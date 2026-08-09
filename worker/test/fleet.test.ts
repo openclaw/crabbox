@@ -18660,6 +18660,64 @@ describe("fleet lease identity and idle", () => {
     expect(releases).toBe(1);
   });
 
+  it.each([
+    { name: "before release side effects", replaceAtRead: 2 },
+    { name: "before release mutation", replaceAtRead: 3 },
+  ])("rejects an exact lease generation change $name", async ({ replaceAtRead }) => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_abcdef123466";
+    const original = testLease({
+      id: leaseID,
+      provider: "aws",
+      state: "active",
+      owner: "alice@example.com",
+      org: "example-org",
+      cloudID: "i-same-resource",
+      createdAt: "2026-08-01T00:00:00.000Z",
+      requestLeaseGeneration: "generation-one",
+    });
+    const replacement = testLease({
+      id: leaseID,
+      provider: "aws",
+      state: "active",
+      owner: "alice@example.com",
+      org: "example-org",
+      cloudID: "i-same-resource",
+      createdAt: "2026-08-01T00:00:00.000Z",
+      requestLeaseGeneration: "generation-two",
+    });
+    storage.seed(`lease:${leaseID}`, original);
+    let exactReads = 0;
+    storage.beforeGet = async (key) => {
+      if (key === `lease:${leaseID}` && ++exactReads === replaceAtRead) {
+        storage.seed(`lease:${leaseID}`, replacement);
+      }
+    };
+    let releases = 0;
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(undefined, { provider: "aws", onReleaseLease: () => releases++ }),
+    });
+
+    const response = await fleet.fetch(
+      request("POST", `/v1/leases/${leaseID}/release`, {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+        body: { delete: true },
+      }),
+    );
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({ error: "lease_state_changed" });
+    expect(releases).toBe(0);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      owner: "alice@example.com",
+      cloudID: "i-same-resource",
+      state: "active",
+      requestLeaseGeneration: "generation-two",
+    });
+  });
+
   it("rechecks the alias generation inside the release mutation lock", async () => {
     const storage = new MemoryStorage();
     const requestLeaseID = "cbx_abcdef123463";
