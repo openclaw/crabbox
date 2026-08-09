@@ -386,11 +386,14 @@ func orgoMaskExactSecret(data []byte, secret string) string {
 		}
 		offset = start + 1
 	}
-	filler := byte(0x1f)
-	for candidate := byte(33); candidate <= 126; candidate++ {
-		if !strings.ContainsRune(secret, rune(candidate)) {
-			filler = candidate
-			break
+	filler := byte('*')
+	if strings.IndexByte(secret, filler) >= 0 {
+		filler = byte(0x1f)
+		for candidate := byte(33); candidate <= 126; candidate++ {
+			if !strings.ContainsRune(secret, rune(candidate)) {
+				filler = candidate
+				break
+			}
 		}
 	}
 	const marker = "[redacted]"
