@@ -812,10 +812,22 @@ test("managed Foundation signing and notary configuration is repository-owned an
     manifest,
     /MAC_RELEASE_CODESIGN_IDENTITY='Developer ID Application: OpenClaw Foundation \(FWJYW4S8P8\)'/,
   );
+  assert.match(
+    manifest,
+    /^MAC_RELEASE_OP_ITEM='Release - App Store Connect API key \(3373VBN2P4\) - notarization'$/m,
+  );
   assert.match(manifest, /MAC_RELEASE_OP_FIELDS=NOTARYTOOL_KEYCHAIN_PROFILE/);
+  assert.match(manifest, /^MAC_RELEASE_OP_VAULT=Molty$/m);
+  assert.match(manifest, /^MAC_RELEASE_OP_USE_SERVICE_ACCOUNT=1$/m);
+  assert.match(manifest, /^MAC_RELEASE_OP_TMUX_SESSION=op-work$/m);
+  assert.match(
+    manifest,
+    /^MAC_RELEASE_CODESIGN_OP_ITEM='Release - macOS signing keychain ref - OpenClaw Foundation'$/m,
+  );
+  assert.match(manifest, /^MAC_RELEASE_CODESIGN_OP_VAULT=Molty$/m);
+  assert.match(manifest, /^MAC_RELEASE_CODESIGN_OP_USE_SERVICE_ACCOUNT=1$/m);
   assert.match(manifest, /MAC_RELEASE_CODESIGN_KEYCHAIN_MANAGED=1/);
   assert.match(manifest, /MAC_RELEASE_CODESIGN_PASSWORDLESS=1/);
-  assert.match(manifest, /MAC_RELEASE_OP_USE_SERVICE_ACCOUNT=0/);
   assert.doesNotMatch(manifest, /(?:PASSWORD|TOKEN|SECRET)=/);
   assert.match(codeowners, /^\/\.mac-release\.env @openclaw\/openclaw-secops$/m);
 });
