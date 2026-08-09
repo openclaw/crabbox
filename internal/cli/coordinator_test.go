@@ -1297,6 +1297,32 @@ func TestCoordinatorCreateLeaseSendsAWSSSHCIDRs(t *testing.T) {
 	}
 }
 
+func TestCoordinatorEnsureLeaseUsesFailClosedFixedIDRoute(t *testing.T) {
+	var method, path, bodyLeaseID string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method, path = r.Method, r.URL.Path
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		bodyLeaseID, _ = body["leaseID"].(string)
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: bodyLeaseID, State: "active"}})
+	}))
+	defer server.Close()
+
+	client := &CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	lease, err := client.EnsureLease(context.Background(), baseConfig(), "ssh-ed25519 test", true, "cbx_abcdef123456", "fixed-route")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if method != http.MethodPut || path != "/v1/leases/cbx_abcdef123456" || bodyLeaseID != "cbx_abcdef123456" {
+		t.Fatalf("request=%s %s leaseID=%q", method, path, bodyLeaseID)
+	}
+	if lease.ID != bodyLeaseID {
+		t.Fatalf("lease=%#v", lease)
+	}
+}
+
 func TestCoordinatorCreateLeaseSendsImageRequirementsOnFailClosedRoute(t *testing.T) {
 	var body struct {
 		ImageRequirements imageRequirements `json:"imageRequirements"`

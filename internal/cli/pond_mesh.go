@@ -572,7 +572,7 @@ func collectPondMembersAcrossProviders(ctx context.Context, rt Runtime, cfg Conf
 	byProvider := make(map[string][]leaseClaim)
 	order := make([]string, 0, 4)
 	for _, claim := range matches {
-		key := strings.TrimSpace(claim.Provider)
+		key := canonicalClaimProvider(claim.Provider)
 		if _, seen := byProvider[key]; !seen {
 			order = append(order, key)
 		}

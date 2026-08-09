@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -47,6 +48,31 @@ type AWSClient struct {
 	serviceQuotas *servicequotas.Client
 	sts           *sts.Client
 	region        string
+}
+
+type AWSLaunchAttempt struct {
+	Region           string `json:"region"`
+	AvailabilityZone string `json:"availabilityZone,omitempty"`
+	SubnetID         string `json:"subnetID,omitempty"`
+	ServerType       string `json:"serverType"`
+	Market           string `json:"market"`
+	ImageID          string `json:"imageID"`
+	SecurityGroupID  string `json:"securityGroupID"`
+	HostID           string `json:"hostID,omitempty"`
+	KeyPairID        string `json:"keyPairID,omitempty"`
+	ClientToken      string `json:"clientToken"`
+	ParametersSHA256 string `json:"parametersSHA256"`
+}
+
+type AWSFixedCreateControl struct {
+	CreatedAt         time.Time
+	IntentFingerprint string
+	AccountID         string
+	KeyPairID         string
+	PinnedAttempt     *AWSLaunchAttempt
+	FailedTokens      map[string]bool
+	BeforeAttempt     func(AWSLaunchAttempt) error
+	DefiniteFailure   func(AWSLaunchAttempt) error
 }
 
 func newAWSClient(ctx context.Context, cfg Config) (*AWSClient, error) {
@@ -443,6 +469,13 @@ func (c *AWSClient) DeleteCleanupSSHKeyID(ctx context.Context, keyPairID string)
 }
 
 func (c *AWSClient) CreateServerWithFallback(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, logf func(string, ...any)) (Server, Config, error) {
+	return c.CreateServerWithFallbackControl(ctx, cfg, publicKey, leaseID, slug, keep, logf, nil)
+}
+
+func (c *AWSClient) CreateServerWithFallbackControl(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, logf func(string, ...any), control *AWSFixedCreateControl) (Server, Config, error) {
+	if control != nil && control.PinnedAttempt != nil {
+		return Server{}, cfg, exit(4, "lease_id_conflict: fixed AWS lease %s has an unresolved launch attempt", leaseID)
+	}
 	regions := awsRegionCandidates(cfg, c.region)
 	if len(regions) > 1 {
 		var errs []error
@@ -461,21 +494,29 @@ func (c *AWSClient) CreateServerWithFallback(ctx context.Context, cfg Config, pu
 			if logf != nil && region != c.region {
 				logf("fallback provisioning region=%s after capacity/quota rejection\n", region)
 			}
-			server, resolved, err := client.createServerWithFallbackInRegion(ctx, next, publicKey, leaseID, slug, keep, logf)
+			server, resolved, err := client.createServerWithFallbackInRegion(ctx, next, publicKey, leaseID, slug, keep, logf, control)
 			if err == nil {
 				return server, resolved, nil
 			}
 			errs = append(errs, fmt.Errorf("%s: %w", region, err))
-			if !isRetryableAWSRegionProvisioningError(err) {
+			if !shouldRetryAWSRegionAfterCreateError(err, control) {
 				return Server{}, resolved, joinErrors(errs)
 			}
 		}
 		return Server{}, cfg, joinErrors(errs)
 	}
-	return c.createServerWithFallbackInRegion(ctx, cfg, publicKey, leaseID, slug, keep, logf)
+	return c.createServerWithFallbackInRegion(ctx, cfg, publicKey, leaseID, slug, keep, logf, control)
 }
 
-func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, logf func(string, ...any)) (result Server, resolved Config, resultErr error) {
+func shouldRetryAWSRegionAfterCreateError(err error, control *AWSFixedCreateControl) bool {
+	return (control == nil || control.PinnedAttempt == nil) && isRetryableAWSRegionProvisioningError(err)
+}
+
+func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, logf func(string, ...any), controls ...*AWSFixedCreateControl) (result Server, resolved Config, resultErr error) {
+	var control *AWSFixedCreateControl
+	if len(controls) > 0 {
+		control = controls[0]
+	}
 	if cfg.ProviderKey == "" {
 		cfg.ProviderKey = "crabbox-steipete"
 	}
@@ -483,8 +524,11 @@ func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Co
 	if err != nil {
 		return Server{}, cfg, err
 	}
+	if control != nil {
+		control.KeyPairID = keyBinding.ID
+	}
 	defer func() {
-		if resultErr == nil || !keyBinding.Created {
+		if resultErr == nil || !keyBinding.Created || (control != nil && control.PinnedAttempt != nil) {
 			return
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
@@ -498,6 +542,9 @@ func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Co
 			server.Labels["aws_key_pair_id"] = keyBinding.ID
 		}
 		return server
+	}
+	if control != nil && control.PinnedAttempt != nil {
+		return Server{}, cfg, exit(4, "lease_id_conflict: fixed AWS lease %s has an unresolved launch attempt", leaseID)
 	}
 	staticImageID := ""
 	if cfg.TargetOS != targetMacOS || cfg.AWSAMI != "" {
@@ -528,7 +575,7 @@ func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Co
 			}
 			continue
 		}
-		server, err := c.createServer(ctx, next, publicKey, leaseID, slug, keep, imageID, securityGroupID, useSpot)
+		server, err := c.createServer(ctx, next, publicKey, leaseID, slug, keep, imageID, securityGroupID, useSpot, control)
 		if err == nil {
 			return bindCleanupKey(server), next, nil
 		}
@@ -552,7 +599,7 @@ func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Co
 				}
 				continue
 			}
-			server, err := c.createServer(ctx, next, publicKey, leaseID, slug, keep, imageID, securityGroupID, false)
+			server, err := c.createServer(ctx, next, publicKey, leaseID, slug, keep, imageID, securityGroupID, false, control)
 			if err == nil {
 				return bindCleanupKey(server), next, nil
 			}
@@ -575,15 +622,25 @@ func (c *AWSClient) resolveLaunchAMI(ctx context.Context, cfg Config, staticImag
 	return c.resolveAMI(ctx, cfg)
 }
 
-func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, imageID, securityGroupID string, spot bool) (Server, error) {
+func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, imageID, securityGroupID string, spot bool, control *AWSFixedCreateControl) (Server, error) {
 	_ = publicKey
 	name := leaseProviderName(leaseID, slug)
 	if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
 		cfg.Tailscale.Hostname = renderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
 	}
 	now := time.Now().UTC()
+	if control != nil && !control.CreatedAt.IsZero() {
+		now = control.CreatedAt.UTC()
+	}
 	labels := directLeaseLabels(cfg, leaseID, slug, "aws", mapMarket(spot), keep, now)
 	labels["aws_region"] = cfg.AWSRegion
+	if control != nil {
+		labels["fixed_intent_sha256"] = control.IntentFingerprint
+		labels["aws_account_id"] = control.AccountID
+		if control.KeyPairID != "" {
+			labels["aws_key_pair_id"] = control.KeyPairID
+		}
+	}
 	userData := base64.StdEncoding.EncodeToString([]byte(awsUserData(cfg, publicKey)))
 	rootGB := cfg.AWSRootGB
 	if rootGB <= 0 {
@@ -591,12 +648,9 @@ func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 	}
 	one := int32(1)
 	rootDevice := "/dev/sda1"
-	tagSpecifications := []types.TagSpecification{
-		{ResourceType: types.ResourceTypeInstance, Tags: awsTagsWithName(labels, name)},
-		{ResourceType: types.ResourceTypeVolume, Tags: awsTagsWithName(labels, name)},
-	}
-	if spot {
-		tagSpecifications = append(tagSpecifications, types.TagSpecification{ResourceType: types.ResourceTypeSpotInstancesRequest, Tags: awsTagsWithName(labels, name)})
+	clientToken := leaseID
+	if control != nil {
+		clientToken = awsFixedAttemptClientToken(leaseID, cfg, imageID, securityGroupID, spot)
 	}
 	input := &ec2.RunInstancesInput{
 		BlockDeviceMappings: []types.BlockDeviceMapping{
@@ -610,15 +664,14 @@ func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 				},
 			},
 		},
-		ClientToken:       aws.String(leaseID),
-		ImageId:           aws.String(imageID),
-		InstanceType:      types.InstanceType(cfg.ServerType),
-		KeyName:           aws.String(cfg.ProviderKey),
-		MaxCount:          aws.Int32(one),
-		MinCount:          aws.Int32(one),
-		SecurityGroupIds:  []string{securityGroupID},
-		TagSpecifications: tagSpecifications,
-		UserData:          aws.String(userData),
+		ClientToken:      aws.String(clientToken),
+		ImageId:          aws.String(imageID),
+		InstanceType:     types.InstanceType(cfg.ServerType),
+		KeyName:          aws.String(cfg.ProviderKey),
+		MaxCount:         aws.Int32(one),
+		MinCount:         aws.Int32(one),
+		SecurityGroupIds: []string{securityGroupID},
+		UserData:         aws.String(userData),
 	}
 	if spot {
 		input.InstanceMarketOptions = &types.InstanceMarketOptionsRequest{
@@ -656,14 +709,105 @@ func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 			input.Placement = &types.Placement{AvailabilityZone: aws.String(zone)}
 		}
 	}
+	attempt := AWSLaunchAttempt{
+		Region:          cfg.AWSRegion,
+		SubnetID:        cfg.AWSSubnetID,
+		ServerType:      cfg.ServerType,
+		Market:          mapMarket(spot),
+		ImageID:         imageID,
+		SecurityGroupID: securityGroupID,
+		HostID:          cfg.HostID,
+		KeyPairID:       controlKeyPairID(control),
+		ClientToken:     clientToken,
+	}
+	if input.Placement != nil {
+		attempt.AvailabilityZone = aws.ToString(input.Placement.AvailabilityZone)
+		if attempt.HostID == "" {
+			attempt.HostID = aws.ToString(input.Placement.HostId)
+		}
+	}
+	if control != nil {
+		for key, value := range AWSFixedAttemptAttestationLabels(attempt) {
+			labels[key] = value
+		}
+	}
+	tagSpecifications := []types.TagSpecification{
+		{ResourceType: types.ResourceTypeInstance, Tags: awsTagsWithName(labels, name)},
+		{ResourceType: types.ResourceTypeVolume, Tags: awsTagsWithName(labels, name)},
+	}
+	if spot {
+		tagSpecifications = append(tagSpecifications, types.TagSpecification{ResourceType: types.ResourceTypeSpotInstancesRequest, Tags: awsTagsWithName(labels, name)})
+	}
+	input.TagSpecifications = tagSpecifications
+	parametersSHA256, err := awsRunInstancesParametersSHA256(input)
+	if err != nil {
+		return Server{}, err
+	}
+	attempt.ParametersSHA256 = parametersSHA256
+	if control != nil {
+		if control.FailedTokens[attempt.ClientToken] {
+			return Server{}, fmt.Errorf("fixed AWS launch attempt %s already failed without a resource: InsufficientInstanceCapacity", attempt.ClientToken)
+		}
+		if control.PinnedAttempt != nil {
+			return Server{}, exit(4, "lease_id_conflict: fixed AWS lease %s has an unresolved launch attempt", leaseID)
+		} else if control.BeforeAttempt != nil {
+			if err := control.BeforeAttempt(attempt); err != nil {
+				return Server{}, err
+			}
+			control.PinnedAttempt = &attempt
+		}
+	}
 	out, err := c.ec2.RunInstances(ctx, input)
 	if err != nil {
+		if control != nil && isRetryableAWSProvisioningError(err) && control.DefiniteFailure != nil {
+			if persistErr := control.DefiniteFailure(attempt); persistErr != nil {
+				return Server{}, errors.Join(err, persistErr)
+			}
+			control.PinnedAttempt = nil
+		}
 		return Server{}, err
 	}
 	if len(out.Instances) == 0 {
 		return Server{}, exit(5, "aws returned no instances")
 	}
 	return awsInstanceToServer(out.Instances[0]), nil
+}
+
+func controlKeyPairID(control *AWSFixedCreateControl) string {
+	if control == nil {
+		return ""
+	}
+	return control.KeyPairID
+}
+
+func awsFixedAttemptClientToken(leaseID string, cfg Config, imageID, securityGroupID string, spot bool) string {
+	hostID := cfg.HostID
+	if hostID == "" {
+		hostID = cfg.AWSMacHostID
+	}
+	material := strings.Join([]string{
+		"crabbox-aws-fixed-attempt-v1",
+		leaseID,
+		cfg.AWSRegion,
+		awsAvailabilityZoneForRegion(cfg, cfg.AWSRegion),
+		cfg.AWSSubnetID,
+		cfg.ServerType,
+		mapMarket(spot),
+		imageID,
+		securityGroupID,
+		hostID,
+	}, "\x00")
+	digest := sha256.Sum256([]byte(material))
+	return "cbx-" + hex.EncodeToString(digest[:])[:60]
+}
+
+func awsRunInstancesParametersSHA256(input *ec2.RunInstancesInput) (string, error) {
+	data, err := json.Marshal(input)
+	if err != nil {
+		return "", fmt.Errorf("encode AWS RunInstances parameters: %w", err)
+	}
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:]), nil
 }
 
 func mapMarket(spot bool) string {
@@ -1224,6 +1368,21 @@ func awsInstanceToServer(instance types.Instance) Server {
 			name = value
 		}
 	}
+	securityGroupIDs := make([]string, 0, len(instance.SecurityGroups))
+	for _, group := range instance.SecurityGroups {
+		if groupID := strings.TrimSpace(aws.ToString(group.GroupId)); groupID != "" {
+			securityGroupIDs = append(securityGroupIDs, groupID)
+		}
+	}
+	sort.Strings(securityGroupIDs)
+	market := "on-demand"
+	if instance.InstanceLifecycle == types.InstanceLifecycleTypeSpot {
+		market = "spot"
+	}
+	availabilityZone := ""
+	if instance.Placement != nil {
+		availabilityZone = aws.ToString(instance.Placement.AvailabilityZone)
+	}
 	server := Server{
 		CloudID:  aws.ToString(instance.InstanceId),
 		Provider: "aws",
@@ -1232,6 +1391,11 @@ func awsInstanceToServer(instance types.Instance) Server {
 		Labels:   labels,
 		ProviderMetadata: map[string]any{
 			"instanceProfileAttached": instance.IamInstanceProfile != nil,
+			"availabilityZone":        availabilityZone,
+			"subnetID":                aws.ToString(instance.SubnetId),
+			"imageID":                 aws.ToString(instance.ImageId),
+			"securityGroupIDs":        securityGroupIDs,
+			"market":                  market,
 		},
 	}
 	if instance.Placement != nil {

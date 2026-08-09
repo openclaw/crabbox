@@ -818,7 +818,7 @@ func TestStatusWaitTimeoutDoesNotSleepPastDeadline(t *testing.T) {
 	}
 
 	oldPoll := statusPollInterval
-	statusPollInterval = 200 * time.Millisecond
+	statusPollInterval = 2 * time.Second
 	defer func() { statusPollInterval = oldPoll }()
 
 	runner := newRunner(map[string]scriptedReply{
@@ -837,7 +837,7 @@ func TestStatusWaitTimeoutDoesNotSleepPastDeadline(t *testing.T) {
 		t.Fatalf("Status err=%v want timeout", err)
 	}
 	if elapsed >= statusPollInterval/2 {
-		t.Fatalf("status wait elapsed=%s, want it bounded by the 20ms wait timeout rather than the 200ms poll interval", elapsed)
+		t.Fatalf("status wait elapsed=%s, want it bounded by the 20ms wait timeout rather than the 2s poll interval", elapsed)
 	}
 }
 

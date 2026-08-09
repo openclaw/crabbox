@@ -860,6 +860,14 @@ func newCoordinatorClient(cfg Config) (*CoordinatorClient, bool, error) {
 }
 
 func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicKey string, keep bool, leaseID, slug string) (CoordinatorLease, error) {
+	return c.createLease(ctx, cfg, publicKey, keep, leaseID, slug, false)
+}
+
+func (c *CoordinatorClient) EnsureLease(ctx context.Context, cfg Config, publicKey string, keep bool, leaseID, slug string) (CoordinatorLease, error) {
+	return c.createLease(ctx, cfg, publicKey, keep, leaseID, slug, true)
+}
+
+func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicKey string, keep bool, leaseID, slug string, fixed bool) (CoordinatorLease, error) {
 	var res struct {
 		Lease CoordinatorLease `json:"lease"`
 	}
@@ -956,12 +964,16 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 		req["azureOSDisk"] = cfg.AzureOSDisk
 	}
 	addCoordinatorGCPFields(req, cfg)
+	method := http.MethodPost
 	path := "/v1/leases"
-	if !imageRequirementsEmpty(cfg.imageRequirements) {
+	if fixed {
+		method = http.MethodPut
+		path = "/v1/leases/" + url.PathEscape(leaseID)
+	} else if !imageRequirementsEmpty(cfg.imageRequirements) {
 		// Older coordinators do not have this route, so mixed-version use fails closed.
 		path = "/v1/leases/capability-aware"
 	}
-	err = c.do(ctx, http.MethodPost, path, req, &res)
+	err = c.do(ctx, method, path, req, &res)
 	return res.Lease, err
 }
 

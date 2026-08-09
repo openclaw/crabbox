@@ -66,6 +66,19 @@ func (b pondReleaseRetentionBackend) RetainLeaseClaimAfterRelease(LeaseTarget) b
 	return b.retain
 }
 
+type pondReleaseRetentionVerifierBackend struct {
+	retain bool
+	err    error
+}
+
+func (b pondReleaseRetentionVerifierBackend) Spec() ProviderSpec {
+	return ProviderSpec{Name: "test"}
+}
+
+func (b pondReleaseRetentionVerifierBackend) RetainLeaseClaimAfterReleaseWithClaim(LeaseTarget, LeaseClaim) (bool, error) {
+	return b.retain, b.err
+}
+
 func (f *fakeTailnetBridgeProvider) ValidateTailnetPeer(context.Context, string) (TailscaleMetadata, error) {
 	return f.meta, f.validateErr
 }
@@ -670,7 +683,11 @@ func TestFinalizePondReleaseClaimUsesProviderPolicy(t *testing.T) {
 			withTempClaims(t, []leaseClaim{claim})
 			lease := LeaseTarget{LeaseID: claim.LeaseID}
 
-			if got := finalizePondReleaseClaim(pondReleaseRetentionBackend{retain: tc.retain}, lease, claim); got != tc.retain {
+			got, err := finalizePondReleaseClaim(pondReleaseRetentionBackend{retain: tc.retain}, lease, claim)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.retain {
 				t.Fatalf("retained=%v want %v", got, tc.retain)
 			}
 			claims, err := listLeaseClaims()
@@ -684,6 +701,27 @@ func TestFinalizePondReleaseClaimUsesProviderPolicy(t *testing.T) {
 				t.Fatalf("released claim remains: %#v", claims)
 			}
 		})
+	}
+}
+
+func TestFinalizePondReleaseClaimPreservesClaimOnRetentionError(t *testing.T) {
+	claim := leaseClaim{LeaseID: "cbx_retention_error", Slug: "retained", Provider: "test", Pond: "demo", RepoRoot: "/repo"}
+	withTempClaims(t, []leaseClaim{claim})
+	want := errors.New("cannot re-attest durable claim")
+	retained, err := finalizePondReleaseClaim(
+		pondReleaseRetentionVerifierBackend{err: want},
+		LeaseTarget{LeaseID: claim.LeaseID},
+		claim,
+	)
+	if retained || !errors.Is(err, want) {
+		t.Fatalf("retained=%t err=%v", retained, err)
+	}
+	claims, listErr := listLeaseClaims()
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(claims) != 1 || claims[0].LeaseID != claim.LeaseID {
+		t.Fatalf("retention error erased claim: %#v", claims)
 	}
 }
 

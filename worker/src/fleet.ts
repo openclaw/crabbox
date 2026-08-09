@@ -1214,6 +1214,15 @@ export class FleetCoordinator {
       if (method === "POST" && parts.join("/") === "v1/leases/capability-aware") {
         return await this.createLease(request);
       }
+      if (
+        method === "PUT" &&
+        parts[0] === "v1" &&
+        parts[1] === "leases" &&
+        parts[2] &&
+        parts.length === 3
+      ) {
+        return await this.createLease(request, undefined, undefined, undefined, parts[2]);
+      }
       if (method === "POST" && parts.join("/") === "v1/workspaces") {
         return await this.createWorkspace(request);
       }
@@ -2990,10 +2999,22 @@ export class FleetCoordinator {
     reservationGuard?: () => Promise<Response | undefined>,
     workspaceID?: string,
     workspaceCapability?: ProviderWorkspaceCapability,
+    fixedLeaseID?: string,
   ): Promise<Response> {
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
     const input = await readJson<LeaseRequest>(request);
+    if (fixedLeaseID) {
+      if (!validLeaseID(fixedLeaseID)) {
+        return json({ error: "invalid_lease_id" }, { status: 400 });
+      }
+      if (input.leaseID !== undefined && input.leaseID !== fixedLeaseID) {
+        return json(
+          { error: "lease_id_mismatch", message: "request leaseID must match the route" },
+          { status: 400 },
+        );
+      }
+    }
     const defaults: LeaseConfigDefaults = { allowAzurePromotedImage: true };
     const azureImage = this.env.CRABBOX_AZURE_IMAGE?.trim();
     if (azureImage) defaults.azureImage = azureImage;
@@ -3053,6 +3074,27 @@ export class FleetCoordinator {
         { status: 400 },
       );
     }
+    let fixedCreateIntentHash: string | undefined;
+    if (fixedLeaseID) {
+      if (!config.providerKey) {
+        config = { ...config, providerKey: providerKeyForLease(fixedLeaseID) };
+      }
+      fixedCreateIntentHash = await fixedLeaseCreateIntentHash(
+        config,
+        normalizeLeaseSlug(input.slug ?? input.requestedSlug),
+      );
+      const replay = await this.state.runExclusive(async () =>
+        this.fixedLeaseReplayResponse(
+          await this.getLease(fixedLeaseID),
+          owner,
+          org,
+          fixedCreateIntentHash!,
+        ),
+      );
+      if (replay) {
+        return replay;
+      }
+    }
     const configProvider = this.provider(
       config.provider,
       providerRegionForConfig(config),
@@ -3082,7 +3124,7 @@ export class FleetCoordinator {
     }
     const requestedHostID = config.hostID || config.awsMacHostID;
     const retainedMacHostLease =
-      requestedHostID && config.provider === "aws" && config.target === "macos"
+      !fixedLeaseID && requestedHostID && config.provider === "aws" && config.target === "macos"
         ? await this.retainedMacHostLease(
             owner,
             org,
@@ -3131,7 +3173,7 @@ export class FleetCoordinator {
     if (retainedMacHostLease) {
       config = { ...config, providerKey: retainedMacHostLease.providerKey };
     }
-    const leaseID = validLeaseID(input.leaseID) ? input.leaseID : newLeaseID();
+    const leaseID = fixedLeaseID ?? (validLeaseID(input.leaseID) ? input.leaseID : newLeaseID());
     const canonicalProviderKey = providerKeyForLease(leaseID);
     const providerKeyLeaseID = leaseIDForProviderKey(config.providerKey);
     if (!retainedMacHostLease && providerKeyLeaseID && providerKeyLeaseID !== leaseID) {
@@ -3339,7 +3381,11 @@ export class FleetCoordinator {
       if (!workspaceID && (await this.state.storage.get(workspaceLeaseReservationKey(leaseID)))) {
         return workspaceManagedLeaseResponse();
       }
-      if (await this.getLease(leaseID)) {
+      const existingLease = await this.getLease(leaseID);
+      if (existingLease && fixedLeaseID) {
+        return this.fixedLeaseReplayResponse(existingLease, owner, org, fixedCreateIntentHash!)!;
+      }
+      if (existingLease) {
         return json(
           { error: "lease_id_conflict", message: "lease id already exists" },
           { status: 409 },
@@ -3361,6 +3407,12 @@ export class FleetCoordinator {
       let record: LeaseRecord = {
         id: leaseID,
         slug,
+        ...(fixedCreateIntentHash
+          ? {
+              fixedCreateIntentVersion: fixedLeaseCreateIntentVersion,
+              fixedCreateIntentHash,
+            }
+          : {}),
         ...(workspaceID ? { workspaceID } : {}),
         provider: config.provider,
         target: config.target,
@@ -3786,6 +3838,29 @@ export class FleetCoordinator {
       ssm_command_id: record.awsSSMCommandID,
     });
     return json({ lease: publicLeaseRecord(record) }, { status: 201 });
+  }
+
+  private fixedLeaseReplayResponse(
+    existing: LeaseRecord | undefined,
+    owner: string,
+    org: string,
+    intentHash: string,
+  ): Response | undefined {
+    if (!existing) return undefined;
+    const sameOwner = existing.owner === owner && existing.org === org;
+    const sameIntent =
+      existing.fixedCreateIntentVersion === fixedLeaseCreateIntentVersion &&
+      existing.fixedCreateIntentHash === intentHash;
+    if (!sameOwner || !sameIntent || !leaseIsLive(existing)) {
+      return json(
+        { error: "lease_id_conflict", message: "lease id is bound to another create intent" },
+        { status: 409 },
+      );
+    }
+    return json(
+      { lease: publicLeaseRecord(existing) },
+      { status: existing.state === "active" ? 200 : 202 },
+    );
   }
 
   private async createWorkspace(request: Request): Promise<Response> {
@@ -19964,6 +20039,46 @@ function boundedTelemetrySamples(samples: LeaseTelemetry[], max: number): LeaseT
   return [...byTime.values()]
     .toSorted((left, right) => left.capturedAt.localeCompare(right.capturedAt))
     .slice(-max);
+}
+
+const fixedLeaseCreateIntentVersion = 2;
+
+async function fixedLeaseCreateIntentHash(
+  config: LeaseConfig,
+  requestedSlug: string,
+): Promise<string> {
+  const { keep, ...normalizedConfig } = config;
+  const semanticConfig: Record<string, unknown> = { ...normalizedConfig };
+  delete semanticConfig["tailscaleAuthKey"];
+  delete semanticConfig["sshHostPrivateKey"];
+  delete semanticConfig["sshHostPublicKey"];
+  delete semanticConfig["sshPublicKey"];
+  if (!config.awsSSHCIDRsPinned) {
+    semanticConfig["awsSSHCIDRs"] = [];
+  }
+  semanticConfig["sshPublicKeyHash"] = await sha256Hex(config.sshPublicKey);
+  return await sha256Hex(
+    `crabbox-fixed-lease-create-v${fixedLeaseCreateIntentVersion}\0${canonicalJSONStringify({
+      requestedSlug,
+      lifecycle: { keep },
+      config: semanticConfig,
+    })}`,
+  );
+}
+
+function canonicalJSONStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJSONStringify).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .toSorted(([left], [right]) => left.localeCompare(right));
+    return `{${entries
+      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJSONStringify(item)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
 }
 
 function sanitizeTelemetryTimestamp(value: string | undefined, now: Date): string {

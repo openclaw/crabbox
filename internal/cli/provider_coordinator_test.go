@@ -4,9 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -331,6 +336,174 @@ func TestCoordinatorAcquireSendsTailscaleHostnameTemplate(t *testing.T) {
 	}
 }
 
+func TestCoordinatorFixedAcquireUsesRequestedIDAndJoinsProvisioning(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	oldInterval := coordinatorCreateLeaseRecoveryInterval
+	coordinatorCreateLeaseRecoveryInterval = time.Millisecond
+	defer func() { coordinatorCreateLeaseRecoveryInterval = oldInterval }()
+
+	puts := 0
+	gets := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/leases/cbx_abcdef123456":
+			puts++
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+				ID: "cbx_abcdef123456", Slug: "fixed-coordinator", Provider: "aws", TargetOS: targetLinux, State: "provisioning",
+			}})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/cbx_abcdef123456":
+			gets++
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+				ID: "cbx_abcdef123456", Slug: "fixed-coordinator", Provider: "aws", TargetOS: targetLinux,
+				State: "active", CloudID: "i-fixed", Host: "203.0.113.10", SSHUser: "crabbox", SSHPort: "2222", WorkRoot: defaultPOSIXWorkRoot,
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetLinux
+	cfg.Coordinator = server.URL
+	cfg.CoordToken = "user-token"
+	coord, _, err := newCoordinatorClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
+	lease, err := backend.createCoordinatorLeaseWithProgressMode(
+		context.Background(), cfg, "ssh-ed25519 test", true,
+		"cbx_abcdef123456", "fixed-coordinator", true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.ID != "cbx_abcdef123456" || lease.CloudID != "i-fixed" || puts != 1 || gets == 0 {
+		t.Fatalf("lease=%#v puts=%d gets=%d", lease, puts, gets)
+	}
+}
+
+func TestCoordinatorFixedAcquireInvokesOnAcquiredOnceAndPropagatesError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake ssh helper requires a unix-like host")
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	toolDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(toolDir, "ssh"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", toolDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	readyServer := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer readyServer.Close()
+	readyURL, err := url.Parse(readyServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, port, err := net.SplitHostPort(readyURL.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	creates := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lease := CoordinatorLease{
+			ID: "cbx_abcdef123467", Slug: "fixed-callback", Provider: "aws", TargetOS: targetLinux,
+			State: "active", CloudID: "i-fixed", Host: host, SSHUser: "crabbox", SSHPort: port, WorkRoot: defaultPOSIXWorkRoot,
+		}
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/leases/cbx_abcdef123467":
+			creates++
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/cbx_abcdef123467":
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/cbx_abcdef123467/heartbeat":
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetLinux
+	cfg.Coordinator = server.URL
+	cfg.CoordToken = "user-token"
+	coord, _, err := newCoordinatorClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
+	want := errors.New("acknowledgment rejected")
+	callbacks := 0
+	lease, err := backend.Acquire(context.Background(), AcquireRequest{
+		Keep: true, RequestedLeaseID: "cbx_abcdef123467", RequestedSlug: "fixed-callback",
+		OnAcquired: func(acquired LeaseTarget) error {
+			callbacks++
+			if acquired.LeaseID != "cbx_abcdef123467" || acquired.Server.CloudID != "i-fixed" {
+				t.Fatalf("callback acquired=%#v", acquired)
+			}
+			return want
+		},
+	})
+	if !errors.Is(err, want) || !strings.Contains(err.Error(), "acknowledge fixed coordinator acquisition") {
+		t.Fatalf("lease=%#v err=%v", lease, err)
+	}
+	if lease.LeaseID != "" {
+		t.Fatalf("error returned non-empty lease=%#v", lease)
+	}
+	if callbacks != 1 || creates != 1 {
+		t.Fatalf("callbacks=%d creates=%d, want one each", callbacks, creates)
+	}
+}
+
+func TestCoordinatorFixedAcquireDoesNotReleaseCommittedLeaseAfterClientBootstrapFailure(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	releases := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/leases/cbx_abcdef123457":
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+				ID: "cbx_abcdef123457", Slug: "fixed-bootstrap", Provider: "aws", TargetOS: targetLinux,
+				State: "active", CloudID: "i-fixed", Host: "127.0.0.1", SSHUser: "crabbox", SSHPort: "1", WorkRoot: defaultPOSIXWorkRoot,
+			}})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/cbx_abcdef123457/release":
+			releases++
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: "cbx_abcdef123457", State: "released"}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetLinux
+	cfg.Coordinator = server.URL
+	cfg.CoordToken = "user-token"
+	coord, _, err := newCoordinatorClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err = backend.Acquire(ctx, AcquireRequest{
+		Keep: true, RequestedLeaseID: "cbx_abcdef123457", RequestedSlug: "fixed-bootstrap",
+	})
+	if err == nil {
+		t.Fatal("expected client-side bootstrap failure")
+	}
+	if releases != 0 {
+		t.Fatalf("fixed replay released committed coordinator lease %d time(s)", releases)
+	}
+}
+
 func TestCoordinatorAcquireReportsSelectedImageAndProviderStartupTiming(t *testing.T) {
 	lease := CoordinatorLease{
 		ID:         "cbx_image",
@@ -507,6 +680,121 @@ func TestCoordinatorCreateLeaseRecoversLeaseCommittedAfterCreateError(t *testing
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("stderr=%q missing %q", stderr.String(), want)
 		}
+	}
+}
+
+func TestCoordinatorFixedCreateAmbiguousErrorRepeatsPutAndDoesNotAdoptConflictingGet(t *testing.T) {
+	oldRecoveryTimeout := coordinatorCreateLeaseRecoveryTimeout
+	oldRecoveryInterval := coordinatorCreateLeaseRecoveryInterval
+	coordinatorCreateLeaseRecoveryTimeout = time.Second
+	coordinatorCreateLeaseRecoveryInterval = time.Millisecond
+	defer func() {
+		coordinatorCreateLeaseRecoveryTimeout = oldRecoveryTimeout
+		coordinatorCreateLeaseRecoveryInterval = oldRecoveryInterval
+	}()
+
+	puts := 0
+	gets := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/leases/cbx_abcdef123462":
+			puts++
+			if puts == 1 {
+				http.Error(w, "error code: 1101", http.StatusInternalServerError)
+				return
+			}
+			http.Error(w, `{"error":"lease_id_conflict","message":"lease id is bound to another create intent"}`, http.StatusConflict)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/cbx_abcdef123462":
+			gets++
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+				ID: "cbx_abcdef123462", Slug: "other-intent", Provider: "aws", TargetOS: targetLinux,
+				State: "active", CloudID: "i-other", Host: "203.0.113.99",
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetLinux
+	cfg.Coordinator = server.URL
+	cfg.CoordToken = "user-token"
+	coord, _, err := newCoordinatorClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
+	_, err = backend.createCoordinatorLeaseWithProgressMode(
+		context.Background(), cfg, "ssh-ed25519 test", true,
+		"cbx_abcdef123462", "fixed-conflict", true,
+	)
+	if err == nil || !strings.Contains(err.Error(), "lease_id_conflict") {
+		t.Fatalf("err=%v, want fixed intent conflict", err)
+	}
+	if puts != 2 || gets != 0 {
+		t.Fatalf("puts=%d gets=%d, want exact PUT retry and no GET adoption", puts, gets)
+	}
+}
+
+func TestCoordinatorFixedCreateCommitThenTimeoutRepeatsPutAndCreatesOnce(t *testing.T) {
+	oldRecoveryTimeout := coordinatorCreateLeaseRecoveryTimeout
+	oldRecoveryInterval := coordinatorCreateLeaseRecoveryInterval
+	coordinatorCreateLeaseRecoveryTimeout = time.Second
+	coordinatorCreateLeaseRecoveryInterval = time.Millisecond
+	defer func() {
+		coordinatorCreateLeaseRecoveryTimeout = oldRecoveryTimeout
+		coordinatorCreateLeaseRecoveryInterval = oldRecoveryInterval
+	}()
+
+	puts := 0
+	gets := 0
+	creates := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/leases/cbx_abcdef123463":
+			puts++
+			if puts == 1 {
+				creates++
+				http.Error(w, "error code: 1101", http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+				ID: "cbx_abcdef123463", Slug: "fixed-commit", Provider: "aws", TargetOS: targetLinux, State: "provisioning",
+			}})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/cbx_abcdef123463":
+			gets++
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+				ID: "cbx_abcdef123463", Slug: "fixed-commit", Provider: "aws", TargetOS: targetLinux,
+				State: "active", CloudID: "i-fixed", Host: "203.0.113.44",
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetLinux
+	cfg.Coordinator = server.URL
+	cfg.CoordToken = "user-token"
+	coord, _, err := newCoordinatorClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
+	lease, err := backend.createCoordinatorLeaseWithProgressMode(
+		context.Background(), cfg, "ssh-ed25519 test", true,
+		"cbx_abcdef123463", "fixed-commit", true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.ID != "cbx_abcdef123463" || lease.CloudID != "i-fixed" || puts != 2 || gets == 0 || creates != 1 {
+		t.Fatalf("lease=%#v puts=%d gets=%d creates=%d", lease, puts, gets, creates)
 	}
 }
 

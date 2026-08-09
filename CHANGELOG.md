@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.41.1 - Unreleased
+
+### Fixed
+
+- Made caller-supplied `warmup --lease-id` creation idempotent across direct AWS and coordinator restarts, with exact-PUT coordinator recovery, exactly-once post-lock acquisition acknowledgment, at-most-once and attempt-attested direct AWS launch reconciliation, explicit SSH-CIDR intent binding, downgrade-safe `aws-fixed-v1` claims, stable conflicts on request drift, and compact terminal tombstones that prevent operation-ID reuse after release or missing-resource cleanup.
+
 ## 0.41.0 - 2026-08-06
 
 ### Added

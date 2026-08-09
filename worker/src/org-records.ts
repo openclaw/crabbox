@@ -20,6 +20,8 @@ export function publicLeaseRecord(record: LeaseRecord): LeaseRecord {
   delete publicRecord.provisioningCoordinatorVersion;
   delete publicRecord.provisioningRecoveryObservedAt;
   delete publicRecord.provisioningRecoveryMissingSince;
+  delete publicRecord.fixedCreateIntentVersion;
+  delete publicRecord.fixedCreateIntentHash;
   return publicRecord;
 }
 

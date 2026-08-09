@@ -390,6 +390,8 @@ export interface RunTelemetrySummary {
 export interface LeaseRecord {
   id: string;
   slug?: string;
+  fixedCreateIntentVersion?: number;
+  fixedCreateIntentHash?: string;
   workspaceID?: string;
   provider: string;
   lifecycle?: LeaseLifecycle;

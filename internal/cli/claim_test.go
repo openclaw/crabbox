@@ -12,6 +12,44 @@ import (
 	"time"
 )
 
+func TestFixedAWSClaimProviderCanonicalizesWithoutOverwritingMarker(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_abcdef123464"
+	err := withDurableLeaseClaimLock(leaseID, func(claim *leaseClaim, _ bool, persist func() error) error {
+		claim.LeaseID = leaseID
+		claim.Slug = "fixed-marker"
+		claim.Provider = FixedAWSClaimProvider
+		claim.ProviderScope = "account:123456789012"
+		claim.RepoRoot = "/repo"
+		claim.FixedCreateIntent = &FixedCreateIntent{
+			Version: 1, Fingerprint: strings.Repeat("a", 64), ProviderScope: claim.ProviderScope,
+			Slug: claim.Slug, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), State: "acquired",
+		}
+		return persist()
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canonicalClaimProvider(FixedAWSClaimProvider) != "aws" {
+		t.Fatalf("fixed marker canonicalized to %q", canonicalClaimProvider(FixedAWSClaimProvider))
+	}
+	resolved, ok, exact, err := resolveLeaseClaimForProviderWithExact(leaseID, "aws")
+	if err != nil || !ok || !exact || resolved.Provider != FixedAWSClaimProvider {
+		t.Fatalf("resolved=%#v ok=%t exact=%t err=%v", resolved, ok, exact, err)
+	}
+	if err := claimLeaseForRepoProvider(leaseID, "fixed-marker", "aws", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	after, exists, err := readLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists || after.Provider != FixedAWSClaimProvider {
+		t.Fatalf("runtime AWS claim update overwrote marker: claim=%#v exists=%t err=%v", after, exists, err)
+	}
+	peer := bridgePeerFromClaim(after, TransportNone)
+	if peer.Provider != "aws" {
+		t.Fatalf("fixed marker displayed as provider %q", peer.Provider)
+	}
+}
+
 func TestClaimEndpointReservationDeadlineStartsAfterClaimLockAcquired(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	const leaseID = "cbx_reservation_lock"

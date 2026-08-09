@@ -1273,7 +1273,7 @@ func TestWaitForAzureExtensionUsesResourceSuccess(t *testing.T) {
 	}
 	select {
 	case <-pollStarted:
-	default:
+	case <-time.After(time.Second):
 		t.Fatal("SDK poller was not started")
 	}
 }

@@ -15307,6 +15307,237 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  it("replays an identical fixed lease create without a second provider create", async () => {
+    const storage = new MemoryStorage();
+    let creates = 0;
+    const providers = {
+      azure: fakeProvider(
+        () => {
+          creates += 1;
+        },
+        { provider: "azure", cloudID: "vm-cbx-abcdef123456", region: "eastus" },
+      ),
+    };
+    const body = {
+      leaseID: "cbx_abcdef123456",
+      slug: "fixed-replay",
+      provider: "azure" as const,
+      azureLocation: "eastus",
+      sshPublicKey: "ssh-ed25519 fixed-replay",
+    };
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const firstFleet = testFleet(storage, providers);
+    const first = await firstFleet.fetch(
+      request("PUT", "/v1/leases/cbx_abcdef123456", { headers, body }),
+    );
+    expect(first.status).toBe(201);
+    const firstBody = (await first.json()) as { lease: LeaseRecord };
+    expect(firstBody.lease.fixedCreateIntentVersion).toBeUndefined();
+    expect(firstBody.lease.fixedCreateIntentHash).toBeUndefined();
+    expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")).toMatchObject({
+      fixedCreateIntentVersion: 2,
+      fixedCreateIntentHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+
+    const restartedFleet = testFleet(storage, {
+      azure: fakeProvider(
+        () => {
+          creates += 1;
+        },
+        {
+          provider: "azure",
+          cloudID: "vm-cbx-abcdef123456",
+          region: "eastus",
+          onRestrictedLeaseRequestFields: () => ["serverType"],
+        },
+      ),
+    });
+    const replay = await restartedFleet.fetch(
+      request("PUT", "/v1/leases/cbx_abcdef123456", { headers, body }),
+    );
+    expect(replay.status).toBe(200);
+    await expect(replay.json()).resolves.toMatchObject({
+      lease: { id: "cbx_abcdef123456", state: "active", cloudID: "vm-cbx-abcdef123456" },
+    });
+    expect(creates).toBe(1);
+
+    const drift = await restartedFleet.fetch(
+      request("PUT", "/v1/leases/cbx_abcdef123456", {
+        headers,
+        body: { ...body, class: "standard" },
+      }),
+    );
+    expect(drift.status).toBe(409);
+    const driftBody = await drift.json();
+    expect(driftBody).toMatchObject({ error: "lease_id_conflict" });
+    expect(creates).toBe(1);
+
+    const wrongOwner = await restartedFleet.fetch(
+      request("PUT", "/v1/leases/cbx_abcdef123456", {
+        headers: { ...headers, "x-crabbox-owner": "mallory@example.com" },
+        body,
+      }),
+    );
+    expect(wrongOwner.status).toBe(409);
+    expect(await wrongOwner.json()).toEqual(driftBody);
+    expect(creates).toBe(1);
+
+    const terminal = storage.value<LeaseRecord>("lease:cbx_abcdef123456");
+    await storage.put("lease:cbx_abcdef123456", { ...terminal!, state: "released" });
+    const terminalReplay = await restartedFleet.fetch(
+      request("PUT", "/v1/leases/cbx_abcdef123456", { headers, body }),
+    );
+    expect(terminalReplay.status).toBe(409);
+    await expect(terminalReplay.json()).resolves.toMatchObject({ error: "lease_id_conflict" });
+    expect(creates).toBe(1);
+  });
+
+  it("rejects fixed lease keep drift without another provider create", async () => {
+    const storage = new MemoryStorage();
+    let creates = 0;
+    const fleet = testFleet(storage, {
+      azure: fakeProvider(
+        () => {
+          creates += 1;
+        },
+        { provider: "azure", cloudID: "vm-fixed-keep", region: "eastus" },
+      ),
+    });
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const body = {
+      leaseID: "cbx_abcdef123470",
+      slug: "fixed-keep",
+      provider: "azure" as const,
+      azureLocation: "eastus",
+      sshPublicKey: "ssh-ed25519 fixed-keep",
+    };
+
+    const first = await fleet.fetch(
+      request("PUT", "/v1/leases/cbx_abcdef123470", { headers, body }),
+    );
+    expect(first.status).toBe(201);
+
+    const normalizedReplay = await fleet.fetch(
+      request("PUT", "/v1/leases/cbx_abcdef123470", {
+        headers,
+        body: { ...body, keep: false },
+      }),
+    );
+    expect(normalizedReplay.status).toBe(200);
+
+    const drift = await fleet.fetch(
+      request("PUT", "/v1/leases/cbx_abcdef123470", {
+        headers,
+        body: { ...body, keep: true },
+      }),
+    );
+    expect(drift.status).toBe(409);
+    await expect(drift.json()).resolves.toMatchObject({ error: "lease_id_conflict" });
+    expect(creates).toBe(1);
+  });
+
+  it("rejects normalized fixed lease slug drift without another provider create", async () => {
+    const storage = new MemoryStorage();
+    let creates = 0;
+    const fleet = testFleet(storage, {
+      azure: fakeProvider(
+        () => {
+          creates += 1;
+        },
+        { provider: "azure", cloudID: "vm-fixed-slug", region: "eastus" },
+      ),
+    });
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const config = {
+      leaseID: "cbx_abcdef123471",
+      provider: "azure" as const,
+      azureLocation: "eastus",
+      sshPublicKey: "ssh-ed25519 fixed-slug",
+    };
+
+    const first = await fleet.fetch(
+      request("PUT", "/v1/leases/cbx_abcdef123471", {
+        headers,
+        body: { ...config, slug: "Fixed Slug" },
+      }),
+    );
+    expect(first.status).toBe(201);
+
+    const normalizedReplay = await fleet.fetch(
+      request("PUT", "/v1/leases/cbx_abcdef123471", {
+        headers,
+        body: { ...config, requestedSlug: "fixed-slug" },
+      }),
+    );
+    expect(normalizedReplay.status).toBe(200);
+
+    const drift = await fleet.fetch(
+      request("PUT", "/v1/leases/cbx_abcdef123471", {
+        headers,
+        body: { ...config, requestedSlug: "other-slug" },
+      }),
+    );
+    expect(drift.status).toBe(409);
+    await expect(drift.json()).resolves.toMatchObject({ error: "lease_id_conflict" });
+    expect(creates).toBe(1);
+  });
+
+  it("joins a concurrent fixed lease create while provisioning", async () => {
+    const storage = new MemoryStorage();
+    let creates = 0;
+    let createStarted!: () => void;
+    let finishCreate!: () => void;
+    const started = new Promise<void>((resolve) => {
+      createStarted = resolve;
+    });
+    const finish = new Promise<void>((resolve) => {
+      finishCreate = resolve;
+    });
+    const fleet = testFleet(storage, {
+      azure: fakeProvider(
+        async () => {
+          creates += 1;
+          createStarted();
+          await finish;
+        },
+        { provider: "azure", cloudID: "vm-fixed-concurrent", region: "eastus" },
+      ),
+    });
+    const options = {
+      headers: {
+        "x-crabbox-owner": "alice@example.com",
+        "x-crabbox-org": "example-org",
+      },
+      body: {
+        leaseID: "cbx_abcdef123457",
+        slug: "fixed-concurrent",
+        provider: "azure" as const,
+        azureLocation: "eastus",
+        sshPublicKey: "ssh-ed25519 fixed-concurrent",
+      },
+    };
+    const first = fleet.fetch(request("PUT", "/v1/leases/cbx_abcdef123457", options));
+    await started;
+    const replay = await fleet.fetch(request("PUT", "/v1/leases/cbx_abcdef123457", options));
+    expect(replay.status).toBe(202);
+    await expect(replay.json()).resolves.toMatchObject({
+      lease: { id: "cbx_abcdef123457", state: "provisioning" },
+    });
+    expect(creates).toBe(1);
+    finishCreate();
+    expect((await first).status).toBe(201);
+    expect(creates).toBe(1);
+  });
+
   it("marks provisioning leases failed when provider create fails", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage, {

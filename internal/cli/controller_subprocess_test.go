@@ -35,10 +35,11 @@ type fixedIdentityExecControllerRunner struct {
 type confirmedAbsentCleanupTestBackend struct {
 	cleanupCalls int
 	cleanupErr   error
+	provider     string
 }
 
 func (b *confirmedAbsentCleanupTestBackend) Spec() ProviderSpec {
-	return ProviderSpec{Name: "external"}
+	return ProviderSpec{Name: blank(b.provider, "external")}
 }
 
 func (b *confirmedAbsentCleanupTestBackend) CleanupConfirmedAbsentLocalState(_ context.Context, _ ConfirmedAbsentLocalCleanupRequest) error {
@@ -1293,6 +1294,40 @@ func TestConfirmedAbsentLocalCleanupRemovesOnlyFullyMatchingClaim(t *testing.T) 
 	}
 	if claim, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists || claim.LeaseID != "" {
 		t.Fatalf("claim=%#v exists=%t err=%v", claim, exists, err)
+	}
+}
+
+func TestConfirmedAbsentLocalCleanupFailsClosedForFixedAWSMarker(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_abcdef123465"
+	const scope = "account:123456789012"
+	err := withDurableLeaseClaimLock(leaseID, func(claim *leaseClaim, _ bool, persist func() error) error {
+		claim.LeaseID = leaseID
+		claim.Slug = "fixed-confirmed-absent"
+		claim.Provider = FixedAWSClaimProvider
+		claim.ProviderScope = scope
+		claim.CloudID = "i-fixed"
+		claim.FixedCreateIntent = &FixedCreateIntent{
+			Version: 1, Fingerprint: strings.Repeat("b", 64), ProviderScope: scope,
+			Slug: claim.Slug, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), State: "acquired",
+		}
+		return persist()
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &confirmedAbsentCleanupTestBackend{provider: "aws"}
+	err = cleanupConfirmedAbsentLocalState(context.Background(), backend, ProviderIdentityExpectation{
+		LeaseID: leaseID, AttemptLeaseID: leaseID, Slug: "fixed-confirmed-absent", ResourceID: "i-fixed",
+	}, scope)
+	if err == nil || !strings.Contains(err.Error(), "claim provider changed") {
+		t.Fatalf("err=%v, want fixed marker fail-closed error", err)
+	}
+	if backend.cleanupCalls != 0 {
+		t.Fatalf("confirmed-absence sidecar cleanup calls=%d, want 0", backend.cleanupCalls)
+	}
+	if claim, exists, readErr := readLeaseClaimWithPresence(leaseID); readErr != nil || !exists || claim.Provider != FixedAWSClaimProvider {
+		t.Fatalf("fixed claim was removed: claim=%#v exists=%t err=%v", claim, exists, readErr)
 	}
 }
 
