@@ -2,6 +2,10 @@
 
 ## 0.41.2 - Unreleased
 
+### Fixed
+
+- Redacted configured credentials reflected by provider-controlled Orgo, FastAPI Cloud, and DigitalOcean response diagnostics before they reach terminal or CI output. Thanks @coygeek.
+
 ## 0.41.1 - 2026-08-09
 
 ### Fixed

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const apiBaseURL = "https://api.digitalocean.com/v2"
@@ -170,10 +171,10 @@ func (c *digitalOceanClient) do(ctx context.Context, method, path string, body a
 	defer resp.Body.Close()
 	data, readErr := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if len(data) > 400 {
-			data = data[:400]
+		body := shared.RedactErrorSecrets(strings.TrimSpace(string(data)), c.token)
+		if len(body) > 400 {
+			body = body[:400]
 		}
-		body := strings.TrimSpace(string(data))
 		if readErr != nil {
 			if body != "" {
 				body += "; "
@@ -365,7 +366,7 @@ func (c *digitalOceanClient) CreateDroplet(ctx context.Context, cfg core.Config,
 		incomplete := fmt.Errorf(
 			"digitalocean create returned incomplete droplet identity: id=%d name=%q, want name=%q",
 			res.Droplet.ID,
-			res.Droplet.Name,
+			shared.RedactErrorSecrets(res.Droplet.Name, c.token),
 			name,
 		)
 		if item, reconcileErr := c.reconcileDropletCreate(leaseTag, leaseTagResolved, leaseID, name); reconcileErr == nil {
@@ -526,7 +527,7 @@ func (c *digitalOceanClient) EnsureSSHKey(ctx context.Context, name, publicKey s
 				return sshKey{}, false, conflict
 			}
 			return sshKey{}, false, &ambiguousSSHKeyCreateError{err: errors.Join(
-				fmt.Errorf("digitalocean ssh key creation returned incomplete identity: id=%d name=%q", res.SSHKey.ID, res.SSHKey.Name),
+				fmt.Errorf("digitalocean ssh key creation returned incomplete identity: id=%d name=%q", res.SSHKey.ID, shared.RedactErrorSecrets(res.SSHKey.Name, c.token)),
 				reconcileErr,
 			)}
 		}
@@ -670,7 +671,7 @@ func (c *digitalOceanClient) resolveCreateTagConflict(ctx context.Context, tags 
 	for _, tag := range tags {
 		name := tag
 		if existingName := known[strings.ToLower(tag)]; existingName != "" {
-			name, err = canonicalTagName(tag, existingName)
+			name, err = canonicalTagName(tag, existingName, c.token)
 			if err != nil {
 				return nil, "", false, err
 			}
@@ -691,19 +692,20 @@ func (c *digitalOceanClient) resolveCanonicalLeaseTag(ctx context.Context, lease
 		return "", err
 	}
 	if existing := canonicalTagNames(tags)[strings.ToLower(requested)]; existing != "" {
-		return canonicalTagName(requested, existing)
+		return canonicalTagName(requested, existing, c.token)
 	}
 	return requested, nil
 }
 
-func canonicalTagName(requested, existing string) (string, error) {
+func canonicalTagName(requested, existing string, secrets ...string) (string, error) {
 	existing = strings.TrimSpace(existing)
 	if existing == "" {
 		existing = requested
 	}
 	requestedLabels := labelsFromTags([]string{requested})
 	if len(requestedLabels) == 0 || !maps.Equal(requestedLabels, labelsFromTags([]string{existing})) {
-		return "", core.Exit(2, "digitalocean tag %q conflicts with existing account tag %q", requested, existing)
+		safeExisting := shared.RedactErrorSecrets(existing, secrets...)
+		return "", core.Exit(2, "digitalocean tag %q conflicts with existing account tag %q", requested, safeExisting)
 	}
 	return existing, nil
 }
@@ -725,12 +727,12 @@ func (c *digitalOceanClient) GetTag(ctx context.Context, name string) (digitalOc
 func (c *digitalOceanClient) EnsureTag(ctx context.Context, tag string, known map[string]string) (string, error) {
 	key := strings.ToLower(tag)
 	if canonical := known[key]; canonical != "" {
-		return canonicalTagName(tag, canonical)
+		return canonicalTagName(tag, canonical, c.token)
 	}
 	if existing, ok, err := c.GetTag(ctx, tag); err != nil {
 		return "", err
 	} else if ok {
-		canonical, canonicalErr := canonicalTagName(tag, existing.Name)
+		canonical, canonicalErr := canonicalTagName(tag, existing.Name, c.token)
 		if canonicalErr != nil {
 			return "", canonicalErr
 		}
@@ -742,7 +744,7 @@ func (c *digitalOceanClient) EnsureTag(ctx context.Context, tag string, known ma
 	}
 	err := c.do(ctx, http.MethodPost, "/tags", map[string]any{"name": tag}, &res)
 	if err == nil {
-		canonical, canonicalErr := canonicalTagName(tag, res.Tag.Name)
+		canonical, canonicalErr := canonicalTagName(tag, res.Tag.Name, c.token)
 		if canonicalErr != nil {
 			return "", canonicalErr
 		}
@@ -761,7 +763,7 @@ func (c *digitalOceanClient) EnsureTag(ctx context.Context, tag string, known ma
 		known[folded] = canonical
 	}
 	if canonical := known[key]; canonical != "" {
-		return canonicalTagName(tag, canonical)
+		return canonicalTagName(tag, canonical, c.token)
 	}
 	return "", err
 }

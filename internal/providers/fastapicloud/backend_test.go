@@ -280,8 +280,8 @@ func TestFastAPICloudClientSurfacesNon2xxAsAPIError(t *testing.T) {
 	if apiErr.StatusCode != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", apiErr.StatusCode)
 	}
-	if !strings.Contains(apiErr.Body, "forbidden by token") {
-		t.Fatalf("body = %q, want forbidden snippet", apiErr.Body)
+	if apiErr.Body != "forbidden by token" || strings.Contains(apiErr.Body, "[redacted]") {
+		t.Fatalf("body = %q, want unchanged benign diagnostic", apiErr.Body)
 	}
 }
 
@@ -531,27 +531,100 @@ func newTestFastAPICloudClient(t *testing.T, server *httptest.Server) fastAPIClo
 	return client
 }
 
-func TestFastAPICloudClientUnauthorizedNoTokenLeak(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer secret-tok" {
-			http.Error(w, "bad bearer", http.StatusBadRequest)
-			return
-		}
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = io.WriteString(w, `{"detail":"Invalid credentials"}`)
-	}))
-	defer server.Close()
-	_, err := newTestFastAPICloudClient(t, server).GetApp(context.Background(), "app-1")
+func TestFastAPICloudClientUnauthorizedRedactsReflectedToken(t *testing.T) {
+	const token = "fastapi-secret-token"
+	client := &fastAPICloudClient{
+		token:  token,
+		apiURL: "https://api.fastapicloud.test/api/v1",
+		httpClient: &http.Client{Transport: fastAPICloudRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if got := req.Header.Get("Authorization"); got != "Bearer "+token {
+				t.Fatalf("authorization=%q", got)
+			}
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Status:     "401 upstream rejected " + token,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"detail":"credential ` + token + ` rejected","request":"safe-fastapi-context"}`)),
+				Request:    req,
+			}, nil
+		})},
+	}
+	_, err := client.GetApp(context.Background(), "app-1")
 	var apiErr *fastAPICloudAPIError
 	if !errors.As(err, &apiErr) {
 		t.Fatalf("err = %v, want *fastAPICloudAPIError", err)
 	}
-	if apiErr.StatusCode != 401 || !strings.Contains(apiErr.Body, "Invalid credentials") {
-		t.Fatalf("apiErr = %#v, want 401 with detail body", apiErr)
+	if apiErr.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status=%d, want %d", apiErr.StatusCode, http.StatusUnauthorized)
 	}
-	if strings.Contains(err.Error(), "secret-tok") {
-		t.Fatal("token leaked into error message")
+	for _, value := range []string{apiErr.Status, apiErr.Body, err.Error()} {
+		if strings.Contains(value, token) {
+			t.Fatalf("token leaked in %q", value)
+		}
+		if !strings.Contains(value, "[redacted]") {
+			t.Fatalf("reflected token was not redacted in %q", value)
+		}
 	}
+	if !strings.Contains(apiErr.Body, "safe-fastapi-context") || !strings.Contains(apiErr.Status, "upstream rejected") {
+		t.Fatalf("redacted error lost safe diagnostics: %#v", apiErr)
+	}
+}
+
+func TestFastAPICloudClientRedactsUnexpectedContentType(t *testing.T) {
+	const token = "fastapi-content-type-secret"
+	for _, tt := range []struct {
+		name          string
+		contentType   string
+		wantRedacted  bool
+		wantSafeValue string
+	}{
+		{
+			name:          "reflected token",
+			contentType:   `text/plain; credential="` + token + `"; context=safe-fastapi-content-type`,
+			wantRedacted:  true,
+			wantSafeValue: "safe-fastapi-content-type",
+		},
+		{
+			name:          "benign content type",
+			contentType:   "text/html; charset=utf-8",
+			wantSafeValue: "text/html; charset=utf-8",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &fastAPICloudClient{
+				token:  token,
+				apiURL: "https://api.fastapicloud.test/api/v1",
+				httpClient: &http.Client{Transport: fastAPICloudRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+					header := make(http.Header)
+					header.Set("Content-Type", tt.contentType)
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Status:     "200 OK",
+						Header:     header,
+						Body:       io.NopCloser(strings.NewReader(`{"id":"app-1"}`)),
+						Request:    req,
+					}, nil
+				})},
+			}
+
+			_, err := client.GetApp(context.Background(), "app-1")
+			if err == nil {
+				t.Fatal("GetApp accepted unexpected Content-Type")
+			}
+			if strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), tt.wantSafeValue) {
+				t.Fatalf("content-type diagnostic=%q", err)
+			}
+			if got := strings.Contains(err.Error(), "[redacted]"); got != tt.wantRedacted {
+				t.Fatalf("redacted=%t, want %t: %q", got, tt.wantRedacted, err)
+			}
+		})
+	}
+}
+
+type fastAPICloudRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn fastAPICloudRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
 }
 
 func TestFastAPICloudAPIErrorMessage(t *testing.T) {
