@@ -52,6 +52,8 @@ var execSeedImageCommand = func(ctx context.Context, name string, args ...string
 	return exec.CommandContext(ctx, name, args...).CombinedOutput()
 }
 
+var errRedirectToNonLoopbackHTTP = errors.New("redirect to non-loopback HTTP is not allowed")
+
 func prepareInstanceAssets(ctx context.Context, cfg startConfig) (Instance, error) {
 	inst := cfg.Instance
 	if err := ensurePrivateDir(InstanceDir(cfg.StateRoot, inst.Name)); err != nil {
@@ -254,7 +256,7 @@ func validateImageRedirect(target *url.URL, originLoopback bool) error {
 		return fmt.Errorf("redirect crosses the loopback trust boundary")
 	}
 	if target.Scheme == "http" && !targetLoopback {
-		return fmt.Errorf("redirect to non-loopback HTTP is not allowed")
+		return errRedirectToNonLoopbackHTTP
 	}
 	return nil
 }
@@ -459,6 +461,8 @@ func safeDownloadError(err error) string {
 		return "request canceled"
 	case errors.Is(err, context.DeadlineExceeded):
 		return "request timed out"
+	case errors.Is(err, errRedirectToNonLoopbackHTTP):
+		return errRedirectToNonLoopbackHTTP.Error()
 	}
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {

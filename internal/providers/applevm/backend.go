@@ -102,14 +102,14 @@ func defaultAppleVMImage(osImage string) string {
 	if image, err := core.OSImageDefaultAppleVMImage(osImage); err == nil && strings.TrimSpace(image) != "" {
 		return image
 	}
-	return "https://cloud-images.ubuntu.com/releases/resolute/release-20260520/ubuntu-26.04-server-cloudimg-arm64.img"
+	return "https://cloud-images.ubuntu.com/releases/resolute/release-20260731/ubuntu-26.04-server-cloudimg-arm64.img"
 }
 
 func defaultAppleVMImageSHA256(osImage string) string {
 	if checksum, err := core.OSImageDefaultAppleVMSHA256(osImage); err == nil && strings.TrimSpace(checksum) != "" {
 		return checksum
 	}
-	return "5e091e27d60116efbb0c743b8dd5cb2d15618e414ef04db0817ed43c8e2d7c7b"
+	return "3e113fdd41f39e13729375173bb2ae793f87dc6db4294e5251ff2476971788ba"
 }
 
 func (b *backend) Spec() core.ProviderSpec { return b.spec }

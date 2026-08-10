@@ -3220,8 +3220,16 @@ func TestAppleVMConfigDefaultsFileAndEnv(t *testing.T) {
 	if cfg.AppleVM.User != "crabbox" || cfg.AppleVM.WorkRoot != "/work/crabbox" || cfg.AppleVM.CPUs != 4 || cfg.AppleVM.MemoryMiB != 8192 || cfg.AppleVM.DiskGiB != 30 {
 		t.Fatalf("apple-vm defaults not applied: %#v", cfg.AppleVM)
 	}
-	if cfg.AppleVM.ImageSHA256 == "" {
-		t.Fatalf("apple-vm default image checksum not applied: %#v", cfg.AppleVM)
+	wantImage, err := osImageDefaultAppleVMImage("ubuntu:26.04")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSHA256, err := osImageDefaultAppleVMSHA256("ubuntu:26.04")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AppleVM.Image != wantImage || cfg.AppleVM.ImageSHA256 != wantSHA256 {
+		t.Fatalf("apple-vm default source=(%q, %q), want portable OS image source", cfg.AppleVM.Image, cfg.AppleVM.ImageSHA256)
 	}
 	if cfg.SSHUser != "crabbox" || cfg.SSHPort != "22" || cfg.WorkRoot != "/work/crabbox" || cfg.TargetOS != targetLinux {
 		t.Fatalf("apple-vm derived defaults not applied: sshUser=%q sshPort=%q workRoot=%q target=%q", cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot, cfg.TargetOS)

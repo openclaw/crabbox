@@ -201,6 +201,23 @@ func TestApplyDefaults(t *testing.T) {
 	}
 }
 
+func TestDefensiveImageFallbackMatchesPortableOSImageDefault(t *testing.T) {
+	wantImage, err := core.OSImageDefaultAppleVMImage("ubuntu:26.04")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSHA256, err := core.OSImageDefaultAppleVMSHA256("ubuntu:26.04")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := defaultAppleVMImage("unsupported"); got != wantImage {
+		t.Fatalf("defensive image fallback=%q, want portable default %q", got, wantImage)
+	}
+	if got := defaultAppleVMImageSHA256("unsupported"); got != wantSHA256 {
+		t.Fatalf("defensive digest fallback=%q, want portable default %q", got, wantSHA256)
+	}
+}
+
 func TestValidateConfigRejectsUnsafeGuestIdentity(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName

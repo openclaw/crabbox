@@ -302,6 +302,29 @@ func TestResolveSourceImageRejectsRedirectToNonLoopbackHTTP(t *testing.T) {
 	}
 }
 
+func TestSafeDownloadErrorReportsNonLoopbackHTTPRedirectWithoutURL(t *testing.T) {
+	sensitiveURL := (&url.URL{
+		Scheme:   "http",
+		Host:     "downloads.example.test",
+		Path:     "/bearer-secret/image.img",
+		RawQuery: "token=private",
+	}).String()
+	err := &url.Error{
+		Op:  http.MethodGet,
+		URL: sensitiveURL,
+		Err: errRedirectToNonLoopbackHTTP,
+	}
+	got := safeDownloadError(err)
+	if got != errRedirectToNonLoopbackHTTP.Error() {
+		t.Fatalf("safeDownloadError()=%q, want specific HTTP downgrade failure", got)
+	}
+	for _, secret := range []string{"bearer-secret", "private", "downloads.example.test"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("safe redirect diagnostic exposes URL component %q: %q", secret, got)
+		}
+	}
+}
+
 func TestValidateImageRedirectCannotCrossLoopbackBoundary(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
@@ -310,6 +333,7 @@ func TestValidateImageRedirectCannotCrossLoopbackBoundary(t *testing.T) {
 		wantErr        bool
 	}{
 		{name: "remote https", target: "https://cdn.example.test/image.img", wantErr: false},
+		{name: "remote http", target: "http://downloads.example.test/image.img", wantErr: true},
 		{name: "remote to loopback https", target: "https://127.0.0.1/image.img", wantErr: true},
 		{name: "remote to loopback http", target: "http://localhost/image.img", wantErr: true},
 		{name: "loopback http", target: "http://127.0.0.1/image.img", originLoopback: true, wantErr: false},
@@ -326,6 +350,9 @@ func TestValidateImageRedirectCannotCrossLoopbackBoundary(t *testing.T) {
 			}
 			if !tc.wantErr && err != nil {
 				t.Fatalf("redirect rejected: %v", err)
+			}
+			if tc.target == "http://downloads.example.test/image.img" && !errors.Is(err, errRedirectToNonLoopbackHTTP) {
+				t.Fatalf("redirect error=%v, want non-loopback HTTP sentinel", err)
 			}
 		})
 	}
