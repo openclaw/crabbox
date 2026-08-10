@@ -23,6 +23,7 @@ import {
   isAWSInstanceCleanedAfterReadinessFailure,
   isAWSInvalidHostIDError,
   isAWSInstanceNotFoundError,
+  isAWSMarketFallbackError,
   isRetryableAWSProvisioningError,
   staleCrabboxSSHIngressRules,
 } from "../src/aws";
@@ -1187,9 +1188,16 @@ describe("aws provider", () => {
       ),
     ).toBe("");
     expect(awsProvisioningErrorCategory("InsufficientInstanceCapacity: nope")).toBe("capacity");
+    expect(awsProvisioningErrorCategory("UnfulfillableCapacity: nope")).toBe("capacity");
     expect(awsProvisioningErrorCategory("VcpuLimitExceeded: nope")).toBe("quota");
     expect(awsProvisioningErrorCategory("InvalidBlockDeviceMapping: nope")).toBe("");
     expect(isRetryableAWSProvisioningError("InvalidBlockDeviceMapping: nope")).toBe(false);
+    expect(isAWSMarketFallbackError("UnfulfillableCapacity: nope")).toBe(true);
+    expect(isAWSMarketFallbackError("InvalidParameterValue: nope")).toBe(false);
+    expect(isAWSMarketFallbackError("UnsupportedOperation: Spot is not supported")).toBe(true);
+    expect(isAWSMarketFallbackError("UnsupportedOperation: architecture is not supported")).toBe(
+      false,
+    );
   });
 
   it("does not retry fatal spot launch requests as on-demand", async () => {
@@ -1204,6 +1212,85 @@ describe("aws provider", () => {
       ),
     ).rejects.toThrow("InvalidBlockDeviceMapping");
     expect(markets).toEqual(["spot"]);
+  });
+
+  it("does not retry opaque spot launch failures as on-demand", async () => {
+    const { client, config, markets } = awsMarketFallbackHarness("__opaque__");
+
+    await expect(
+      client.createServerWithFallback(
+        config,
+        "cbx_abcdef123456",
+        "violet-prawn",
+        "alice@example.com",
+      ),
+    ).rejects.toThrow("http 400");
+    expect(markets).toEqual(["spot"]);
+  });
+
+  it("does not retry market-independent parameter errors as on-demand", async () => {
+    const { client, config, markets } = awsMarketFallbackHarness("InvalidParameterValue");
+
+    await expect(
+      client.createServerWithFallback(
+        config,
+        "cbx_abcdef123456",
+        "violet-prawn",
+        "alice@example.com",
+      ),
+    ).rejects.toThrow("InvalidParameterValue");
+    expect(markets).toEqual(["spot"]);
+  });
+
+  it("falls back only the market-recoverable candidate from a mixed spot chain", async () => {
+    const { client, config, attempted } = awsMarketFallbackHarness(
+      ["InvalidParameterValue", "UnfulfillableCapacity"],
+      "spot",
+      ["t3.small", "t3.medium"],
+    );
+
+    const result = await client.createServerWithFallback(
+      config,
+      "cbx_abcdef123456",
+      "violet-prawn",
+      "alice@example.com",
+    );
+
+    expect(attempted).toEqual(["spot:t3.small", "spot:t3.medium", "on-demand:t3.medium"]);
+    expect(result.serverType).toBe("t3.medium");
+    expect(result.market).toBe("on-demand");
+  });
+
+  it("falls back from unfulfillable spot capacity to on-demand", async () => {
+    const { client, config, markets } = awsMarketFallbackHarness("UnfulfillableCapacity");
+
+    const result = await client.createServerWithFallback(
+      config,
+      "cbx_abcdef123456",
+      "violet-prawn",
+      "alice@example.com",
+    );
+
+    expect(markets).toEqual(["spot", "on-demand"]);
+    expect(result.market).toBe("on-demand");
+    expect(result.attempts?.[0]).toMatchObject({ market: "spot", category: "capacity" });
+  });
+
+  it("does not enter a second market pass for an on-demand request", async () => {
+    const { client, config, markets } = awsMarketFallbackHarness(
+      "UnfulfillableCapacity",
+      "on-demand",
+    );
+
+    await expect(
+      client.createServerWithFallback(
+        config,
+        "cbx_abcdef123456",
+        "violet-prawn",
+        "alice@example.com",
+      ),
+    ).rejects.toThrow("UnfulfillableCapacity");
+    expect(markets).toEqual(["on-demand"]);
   });
 
   it("falls back from spot capacity failure to on-demand", async () => {
@@ -2930,8 +3017,13 @@ function ec2XMLResponse(body: string, status = 200): Response {
   return new Response(body, { status, headers: { "content-type": "application/xml" } });
 }
 
-function awsMarketFallbackHarness(failureCode: string) {
+function awsMarketFallbackHarness(
+  failureCode: string | string[],
+  capacityMarket: "spot" | "on-demand" = "spot",
+  instanceTypes: string[] = ["t3.small"],
+) {
   const markets: string[] = [];
+  const attempted: string[] = [];
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -2952,10 +3044,17 @@ function awsMarketFallbackHarness(failureCode: string) {
       }
       if (action === "RunInstances") {
         const market = params.has("InstanceMarketOptions.MarketType") ? "spot" : "on-demand";
+        const instanceType = params.get("InstanceType") ?? "";
         markets.push(market);
-        if (markets.length === 1) {
+        attempted.push(`${market}:${instanceType}`);
+        const failureCodes = Array.isArray(failureCode) ? failureCode : [failureCode];
+        const currentFailure = failureCodes[markets.length - 1];
+        if (currentFailure) {
+          if (currentFailure === "__opaque__") {
+            return ec2XMLResponse('<?xml version="1.0" encoding="UTF-8"?>', 400);
+          }
           return ec2XMLResponse(
-            `<Response><Errors><Error><Code>${failureCode}</Code><Message>launch failed</Message></Error></Errors></Response>`,
+            `<Response><Errors><Error><Code>${currentFailure}</Code><Message>launch failed</Message></Error></Errors></Response>`,
             400,
           );
         }
@@ -2982,12 +3081,15 @@ function awsMarketFallbackHarness(failureCode: string) {
     ),
     config: leaseConfig({
       provider: "aws",
-      serverType: "t3.small",
-      serverTypeExplicit: true,
+      serverType: instanceTypes[0] ?? "t3.small",
+      serverTypeExplicit: instanceTypes.length === 1,
+      awsInstanceTypes: instanceTypes,
+      capacity: { market: capacityMarket, fallback: "on-demand-after-120s" },
       providerKey: "test-key",
       sshPublicKey: "ssh-ed25519 test",
     }),
     markets,
+    attempted,
   };
 }
 

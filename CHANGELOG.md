@@ -2,6 +2,10 @@
 
 ## 0.41.3 - Unreleased
 
+### Fixed
+
+- Stopped market-independent AWS Spot launch request errors from being retried as On-Demand while preserving fallback for Spot-recoverable capacity, quota, and unsupported-market failures. Thanks @vincentkoc.
+
 ## 0.41.2 - 2026-08-10
 
 ### Fixed

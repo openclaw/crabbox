@@ -104,6 +104,37 @@ func TestAWSFixedAttemptAttestationIsNonCircularAndSecretFree(t *testing.T) {
 	}
 }
 
+func TestAWSMarketFallbackError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "spot capacity", err: errors.New("UnfulfillableCapacity: no Spot capacity"), want: true},
+		{name: "spot quota", err: errors.New("MaxSpotInstanceCountExceeded: quota"), want: true},
+		{name: "spot unsupported", err: errors.New("UnsupportedOperation: Spot is not supported"), want: true},
+		{name: "parameter independent", err: errors.New("InvalidParameterValue: invalid subnet"), want: false},
+		{name: "unsupported independent", err: errors.New("UnsupportedOperation: architecture is not supported"), want: false},
+		{name: "image independent", err: errors.New("no AWS AMI found in eu-west-1"), want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isAWSMarketFallbackError(test.err); got != test.want {
+				t.Fatalf("isAWSMarketFallbackError(%q) = %v, want %v", test.err, got, test.want)
+			}
+		})
+	}
+	if !isRetryableAWSProvisioningError(errors.New("UnfulfillableCapacity: no Spot capacity")) {
+		t.Fatal("UnfulfillableCapacity must remain eligible for type and market fallback")
+	}
+	var candidates []string
+	candidates = appendAWSMarketFallbackCandidate(candidates, "t3.small", errors.New("InvalidParameterValue: invalid subnet"))
+	candidates = appendAWSMarketFallbackCandidate(candidates, "t3.medium", errors.New("UnfulfillableCapacity: no Spot capacity"))
+	if len(candidates) != 1 || candidates[0] != "t3.medium" {
+		t.Fatalf("mixed market fallback candidates = %v, want [t3.medium]", candidates)
+	}
+}
+
 func TestAWSFixedPinnedAttemptBlocksBroadRegionFallback(t *testing.T) {
 	control := &AWSFixedCreateControl{PinnedAttempt: &AWSLaunchAttempt{ClientToken: "pinned"}}
 	err := errors.New("transport closed while waiting for capacity response")

@@ -560,6 +560,7 @@ func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Co
 	}
 	candidates := awsLaunchCandidates(cfg)
 	useSpot := cfg.Capacity.Market != "on-demand"
+	var marketFallbackCandidates []string
 	var errs []error
 	for i, instanceType := range candidates {
 		next := cfg
@@ -573,6 +574,9 @@ func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Co
 			if !isRetryableAWSProvisioningError(err) {
 				return Server{}, next, joinErrors(errs)
 			}
+			if useSpot {
+				marketFallbackCandidates = appendAWSMarketFallbackCandidate(marketFallbackCandidates, instanceType, err)
+			}
 			continue
 		}
 		server, err := c.createServer(ctx, next, publicKey, leaseID, slug, keep, imageID, securityGroupID, useSpot, control)
@@ -583,9 +587,12 @@ func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Co
 		if !isRetryableAWSProvisioningError(err) {
 			return Server{}, next, joinErrors(errs)
 		}
+		if useSpot {
+			marketFallbackCandidates = appendAWSMarketFallbackCandidate(marketFallbackCandidates, instanceType, err)
+		}
 	}
-	if useSpot && strings.HasPrefix(cfg.Capacity.Fallback, "on-demand") {
-		for _, instanceType := range candidates {
+	if len(marketFallbackCandidates) > 0 && strings.HasPrefix(cfg.Capacity.Fallback, "on-demand") {
+		for _, instanceType := range marketFallbackCandidates {
 			next := cfg
 			next.ServerType = instanceType
 			if logf != nil {
@@ -1429,6 +1436,7 @@ func awsTagsWithName(labels map[string]string, name string) []types.Tag {
 func isRetryableAWSProvisioningError(err error) bool {
 	s := err.Error()
 	return strings.Contains(s, "InsufficientInstanceCapacity") ||
+		strings.Contains(s, "UnfulfillableCapacity") ||
 		strings.Contains(s, "MaxSpotInstanceCountExceeded") ||
 		strings.Contains(s, "VcpuLimitExceeded") ||
 		strings.Contains(s, "InvalidHostID.NotFound") ||
@@ -1441,6 +1449,31 @@ func isRetryableAWSProvisioningError(err error) bool {
 				strings.Contains(s, "eligible") ||
 				strings.Contains(s, "InstanceType") ||
 				strings.Contains(s, "instance type")))
+}
+
+func isAWSMarketFallbackError(err error) bool {
+	s := err.Error()
+	if strings.Contains(s, "InsufficientInstanceCapacity") ||
+		strings.Contains(s, "UnfulfillableCapacity") ||
+		strings.Contains(s, "MaxSpotInstanceCountExceeded") ||
+		strings.Contains(s, "VcpuLimitExceeded") {
+		return true
+	}
+	spotSpecific := strings.Contains(strings.ToLower(s), "spot")
+	return spotSpecific && (strings.Contains(s, "Unsupported") ||
+		strings.Contains(s, "InvalidParameterValue") ||
+		(strings.Contains(s, "InvalidParameterCombination") &&
+			(strings.Contains(s, "Free Tier") ||
+				strings.Contains(s, "eligible") ||
+				strings.Contains(s, "InstanceType") ||
+				strings.Contains(s, "instance type"))))
+}
+
+func appendAWSMarketFallbackCandidate(candidates []string, instanceType string, err error) []string {
+	if !isAWSMarketFallbackError(err) {
+		return candidates
+	}
+	return append(candidates, instanceType)
 }
 
 func isRetryableAWSRegionProvisioningError(err error) bool {

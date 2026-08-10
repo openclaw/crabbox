@@ -103,10 +103,11 @@ is `on-demand-after-120s`) enables the On-Demand retry pass; set it to `none`
 (or leave it empty) to never fall back.
 
 The On-Demand pass runs after every Spot candidate in the class chain has been
-tried and rejected — it reruns the same chain on On-Demand. AWS enters that pass
-only for retryable Spot provisioning failures: capacity, quota, unsupported
-type, policy, or region failures. Terminal request errors, such as an invalid
-block-device mapping, stop without an On-Demand retry. Azure
+tried and rejected. AWS retries only the candidates whose individual failures
+are Spot-recoverable, including Spot capacity or quota errors and request errors
+that explicitly identify Spot as unsupported. Market-independent request or
+image errors, such as an invalid block-device mapping, are not retried on
+On-Demand. Azure
 also treats a slow Spot VM provisioning operation as a capacity miss after the
 configured `on-demand-after-*` duration, or after the default 120 seconds when
 on-demand fallback is disabled with `spot-only` or `none`.
