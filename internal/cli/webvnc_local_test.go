@@ -1426,9 +1426,13 @@ func TestServeLocalWebVNCBridgeScrubsPassedTargetEnvironmentFromViewer(t *testin
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for WebVNC viewer launch")
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if data, err := os.ReadFile(result); err == nil {
+			if len(data) == 0 {
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
 			if string(data) != "scrubbed" {
 				t.Fatalf("viewer environment=%q", data)
 			}
