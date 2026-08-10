@@ -3269,6 +3269,33 @@ func TestAutoRouteClaimLeaseProvider(t *testing.T) {
 		}
 	})
 
+	t.Run("provider-empty slug preserves configured provider", func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		if err := claimLeaseForRepo("cbx_1257aaaa0008", "Legacy Slug", "/repo", time.Minute, false); err != nil {
+			t.Fatal(err)
+		}
+		fs, provider := newFlags(t, "hetzner")
+		cfg := Config{Provider: *provider}
+		if err := autoRouteClaimLeaseProvider(&cfg, fs, "legacy-slug"); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Provider != "hetzner" {
+			t.Fatalf("provider=%q want configured provider", cfg.Provider)
+		}
+	})
+
+	t.Run("missing identifier preserves configured provider", func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		fs, provider := newFlags(t, "hetzner")
+		cfg := Config{Provider: *provider}
+		if err := autoRouteClaimLeaseProvider(&cfg, fs, "missing-slug"); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Provider != "hetzner" {
+			t.Fatalf("provider=%q want configured provider", cfg.Provider)
+		}
+	})
+
 	t.Run("empty identifier preserves configured provider", func(t *testing.T) {
 		fs, provider := newFlags(t, "hetzner")
 		cfg := Config{Provider: *provider}
@@ -3277,6 +3304,45 @@ func TestAutoRouteClaimLeaseProvider(t *testing.T) {
 		}
 		if cfg.Provider != "hetzner" {
 			t.Fatalf("provider=%q want configured provider", cfg.Provider)
+		}
+	})
+
+	t.Run("malformed exact claim fails", func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		const leaseID = "cbx_1257aaaa0009"
+		path, err := leaseClaimPath(leaseID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		fs, provider := newFlags(t, "hetzner")
+		cfg := Config{Provider: *provider}
+		if err := autoRouteClaimLeaseProvider(&cfg, fs, leaseID); err == nil || !strings.Contains(err.Error(), "parse claim") {
+			t.Fatalf("err=%v, want malformed exact claim failure", err)
+		}
+	})
+
+	t.Run("malformed claim directory entry fails slug routing", func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		path, err := leaseClaimPath("cbx_1257aaaa0010")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		fs, provider := newFlags(t, "hetzner")
+		cfg := Config{Provider: *provider}
+		if err := autoRouteClaimLeaseProvider(&cfg, fs, "some-slug"); err == nil || !strings.Contains(err.Error(), "parse claim") {
+			t.Fatalf("err=%v, want malformed claim directory failure", err)
 		}
 	})
 }
