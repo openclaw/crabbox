@@ -74,6 +74,12 @@ jobs:
           persist-credentials: false
           ref: ${{ github.workflow_sha }}
 
+      - name: Set up Go for Apple VM source verification
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
       - name: Verify live branch and stable-tag rulesets
         shell: bash
         env:
@@ -117,6 +123,18 @@ jobs:
           git config gpg.format ssh
           git config gpg.ssh.allowedSignersFile "$GITHUB_WORKSPACE/.github/release-allowed-signers"
           scripts/verify-release-source.sh
+
+      - name: Verify shipped Apple VM image source
+        shell: bash
+        env:
+          RELEASE_COMMIT: ${{ inputs.tag_commit }}
+        run: |
+          set -euo pipefail
+          source_root="$RUNNER_TEMP/apple-vm-image-source"
+          mkdir -m 700 "$source_root" "$source_root/internal" "$source_root/internal/cli" "$source_root/internal/providers" "$source_root/internal/providers/applevm"
+          git show "$RELEASE_COMMIT:internal/cli/os_image.go" >"$source_root/internal/cli/os_image.go"
+          git show "$RELEASE_COMMIT:internal/providers/applevm/backend.go" >"$source_root/internal/providers/applevm/backend.go"
+          go run ./scripts/apple-vm-image-source "$source_root"
 
       - name: Pin exact release notes
         id: notes

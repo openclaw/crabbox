@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type fastAPICloudAPI interface {
@@ -328,14 +330,19 @@ func (c *fastAPICloudClient) get(ctx context.Context, apiPath string, params url
 		return fmt.Errorf("%s response exceeds %d bytes", providerName, fastAPICloudMaxResponseBytes)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &fastAPICloudAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: strings.TrimSpace(string(data))}
+		return &fastAPICloudAPIError{
+			StatusCode: resp.StatusCode,
+			Status:     shared.RedactErrorSecrets(resp.Status, c.token),
+			Body:       shared.RedactErrorSecrets(strings.TrimSpace(string(data)), c.token),
+		}
 	}
 	if out != nil {
 		// A 2xx with a non-JSON body (an HTML error page from a proxy, a
 		// misconfigured gateway) would otherwise surface only as an opaque
 		// json.Unmarshal error; check the media type first for a clearer message.
-		if mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type")); mediaType != "" && mediaType != "application/json" {
-			return fmt.Errorf("%s expected application/json response, got %q", providerName, resp.Header.Get("Content-Type"))
+		contentType := resp.Header.Get("Content-Type")
+		if mediaType, _, _ := mime.ParseMediaType(contentType); mediaType != "" && mediaType != "application/json" {
+			return fmt.Errorf("%s expected application/json response, got %q", providerName, shared.RedactErrorSecrets(contentType, c.token))
 		}
 		if err := json.Unmarshal(data, out); err != nil {
 			return fmt.Errorf("decode %s response: %w", providerName, err)

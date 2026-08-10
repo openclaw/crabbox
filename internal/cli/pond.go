@@ -204,7 +204,7 @@ func pondClaimProviderSummary(pond string) (bool, bool) {
 			continue
 		}
 		hasClaims = true
-		caps := providerCapabilities(claim.Provider)
+		caps := providerCapabilities(canonicalClaimProvider(claim.Provider))
 		if (caps.Tailscale || caps.TailscaleEgress) && (!caps.URLBridge || claimHasTailscaleMetadata(claim)) {
 			hasTailscale = true
 		}

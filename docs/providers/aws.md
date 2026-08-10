@@ -41,11 +41,50 @@ crabbox run --provider aws --market on-demand -- pnpm check
 crabbox warmup --provider aws --target windows --desktop
 crabbox warmup --provider aws --target windows --windows-mode wsl2
 crabbox warmup --provider aws --target macos --desktop --market on-demand
+crabbox warmup --provider aws --lease-id cbx_abcdef123456 --slug operation-display
 ```
 
 `--type` is exact: if EC2 rejects the requested type, Crabbox fails rather than
 silently substituting another instance. Use `--class` when you want capacity
 fallback across instance families.
+
+### Fixed-ID replay
+
+`warmup --lease-id cbx_<12 lowercase hex>` makes direct AWS acquisition
+idempotent across process restarts. Crabbox writes the normalized create intent
+to the ordinary durable lease claim under its existing cross-process lock
+before any provider mutation. Each resolved launch attempt records its exact
+region or availability zone, subnet, type, market, AMI, security group, keypair,
+stable timestamps, parameter hash, and a deterministic per-attempt EC2 client
+token before `RunInstances`.
+
+An ambiguous response remains pinned to that attempt. Replay first reconciles
+all matching Crabbox-tagged resources, fails closed if more than one exists,
+and fails closed without another `RunInstances` call while the resource is not
+visible. The initial request writes non-secret attempt-attestation tags, and a
+later replay adopts a visible instance only when its provider identity and every
+attempt tag match the persisted region/AZ/subnet/type/market/image/security-group/
+host/key/token tuple. This deliberately
+accepts a false-negative if the process crashes after persisting the attempt but
+before sending the network request, preserving at-most-once launch semantics.
+Capacity fallback advances only after a definite no-resource response clears
+the attempt during the original invocation. A changed create intent returns
+`lease_id_conflict`; a matching slug alone never authorizes adoption. Once
+acquisition is marked complete, a missing bound instance is also a terminal
+conflict rather than permission to call `RunInstances` again.
+
+Acknowledged stop and exact missing-resource cleanup replace the live claim
+with a compact terminal tombstone containing the versioned fingerprint,
+provider scope, slug, and terminal state. Automatic AWS cleanup does not prune
+these tombstones and there is no time-based operation-ID reuse window. Explicit
+local claim deletion forfeits this guarantee; normal automation must always use
+a new operation ID for a later lease.
+
+Fixed claims and tombstones use the local provider discriminator
+`aws-fixed-v1`. Current Crabbox resolves that marker to runtime provider AWS,
+while older clients see an unknown provider and therefore skip or refuse
+destructive AWS claim cleanup instead of erasing fixed identity state. Cloud
+resource provider tags remain `aws`.
 
 ### Instance classes
 

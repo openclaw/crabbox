@@ -1,0 +1,49 @@
+name: Verify Apple VM Image Source
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 1"
+  pull_request:
+    paths:
+      - "internal/cli/os_image.go"
+      - "internal/providers/applevm/backend.go"
+      - "docs/features/configuration.md"
+      - "docs/providers/apple-vm.md"
+      - "scripts/apple-vm-image-source/**"
+      - ".github/workflows/apple-vm-image-source.yml"
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+    paths:
+      - "internal/cli/os_image.go"
+      - "internal/providers/applevm/backend.go"
+      - "docs/features/configuration.md"
+      - "docs/providers/apple-vm.md"
+      - "scripts/apple-vm-image-source/**"
+      - ".github/workflows/apple-vm-image-source.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify pinned Canonical source
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Verify shipped image source
+        run: go run ./scripts/apple-vm-image-source

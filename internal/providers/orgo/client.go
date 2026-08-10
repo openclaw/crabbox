@@ -10,9 +10,14 @@ import (
 	"net/url"
 	"os"
 	"strings"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-const defaultAPIBase = "https://www.orgo.ai/api"
+const (
+	defaultAPIBase           = "https://www.orgo.ai/api"
+	orgoMaxResponseBodyBytes = 4 << 20
+)
 
 type orgoAPI interface {
 	CreateWorkspace(ctx context.Context, name string) (orgoWorkspace, error)
@@ -232,7 +237,8 @@ func (c *orgoHTTPClient) StartComputer(ctx context.Context, id string) error {
 		return err
 	}
 	if res.Success == nil || !*res.Success {
-		return fmt.Errorf("orgo did not start computer %s (status=%s)", id, strings.TrimSpace(res.Status))
+		status := shared.RedactErrorSecrets(strings.TrimSpace(res.Status), c.apiKey)
+		return fmt.Errorf("orgo did not start computer %s (status=%s)", id, status)
 	}
 	return nil
 }
@@ -247,7 +253,8 @@ func (c *orgoHTTPClient) deleteResource(ctx context.Context, path, kind, id stri
 		return err
 	}
 	if res.Success != nil && !*res.Success {
-		return fmt.Errorf("orgo did not delete %s %s (status=%s)", kind, id, strings.TrimSpace(res.Status))
+		status := shared.RedactErrorSecrets(strings.TrimSpace(res.Status), c.apiKey)
+		return fmt.Errorf("orgo did not delete %s %s (status=%s)", kind, id, status)
 	}
 	return nil
 }
@@ -307,12 +314,23 @@ func (c *orgoHTTPClient) doJSON(ctx context.Context, method, path string, body a
 		return err
 	}
 	defer res.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(res.Body, 4<<20))
+	responseLimit := int64(orgoMaxResponseBodyBytes)
+	safeErrorDiagnostic := true
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		responseLimit, safeErrorDiagnostic = orgoErrorResponseReadLimit(c.apiKey)
+	}
+	data, err := io.ReadAll(io.LimitReader(res.Body, responseLimit))
 	if err != nil {
 		return err
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return &orgoHTTPError{StatusCode: res.StatusCode, Body: string(data)}
+		if !safeErrorDiagnostic {
+			return &orgoHTTPError{StatusCode: res.StatusCode, Body: "response exceeds safe diagnostic limit"}
+		}
+		return &orgoHTTPError{
+			StatusCode: res.StatusCode,
+			Body:       orgoBoundedErrorDiagnostic(data, c.apiKey),
+		}
 	}
 	if out == nil {
 		return nil
@@ -328,4 +346,73 @@ func (c *orgoHTTPClient) doJSON(ctx context.Context, method, path string, body a
 		return fmt.Errorf("decode orgo response: %w", err)
 	}
 	return nil
+}
+
+func orgoErrorResponseReadLimit(apiKey string) (int64, bool) {
+	if len(apiKey) <= 1 {
+		return orgoMaxResponseBodyBytes, true
+	}
+	const maxInt64 = int64(1<<63 - 1)
+	extra := uint64(len(apiKey) - 1)
+	if extra > uint64(maxInt64-orgoMaxResponseBodyBytes) {
+		return orgoMaxResponseBodyBytes, false
+	}
+	return orgoMaxResponseBodyBytes + int64(extra), true
+}
+
+func orgoBoundedErrorDiagnostic(data []byte, apiKey string) string {
+	body := orgoMaskExactSecret(data, apiKey)
+	if len(body) > orgoMaxResponseBodyBytes {
+		body = body[:orgoMaxResponseBodyBytes]
+	}
+	return shared.RedactErrorSecrets(body, apiKey)
+}
+
+func orgoMaskExactSecret(data []byte, secret string) string {
+	if secret == "" || len(data) < len(secret) {
+		return string(data)
+	}
+	masked := append([]byte(nil), data...)
+	matched := make([]bool, len(data))
+	source := string(data)
+	for offset := 0; offset+len(secret) <= len(source); {
+		relative := strings.Index(source[offset:], secret)
+		if relative < 0 {
+			break
+		}
+		start := offset + relative
+		for index := start; index < start+len(secret); index++ {
+			matched[index] = true
+		}
+		offset = start + 1
+	}
+	filler := byte('*')
+	if strings.IndexByte(secret, filler) >= 0 {
+		filler = byte(0x1f)
+		for candidate := byte(33); candidate <= 126; candidate++ {
+			if !strings.ContainsRune(secret, rune(candidate)) {
+				filler = candidate
+				break
+			}
+		}
+	}
+	const marker = "[redacted]"
+	for start := 0; start < len(masked); {
+		if !matched[start] {
+			start++
+			continue
+		}
+		end := start + 1
+		for end < len(masked) && matched[end] {
+			end++
+		}
+		for index := start; index < end; index++ {
+			masked[index] = filler
+		}
+		if end-start >= len(marker) && !strings.Contains(marker, secret) {
+			copy(masked[start:end], marker)
+		}
+		start = end
+	}
+	return string(masked)
 }

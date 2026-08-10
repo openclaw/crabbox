@@ -106,6 +106,18 @@ type CoordinatorLease struct {
 	ProviderMetadata      map[string]any                 `json:"providerMetadata,omitempty"`
 }
 
+type CoordinatorCanceledCreateAttestation struct {
+	Version          int    `json:"version"`
+	RequestedLeaseID string `json:"requestedLeaseID"`
+	CreateAttemptID  string `json:"createAttemptID"`
+	State            string `json:"state"`
+}
+
+type CoordinatorCanceledCreateResult struct {
+	CanceledCreate CoordinatorCanceledCreateAttestation `json:"canceledCreate"`
+	Lease          *CoordinatorLease                    `json:"lease,omitempty"`
+}
+
 type CoordinatorLeaseImage struct {
 	ID         string `json:"id"`
 	Source     string `json:"source"`
@@ -860,6 +872,18 @@ func newCoordinatorClient(cfg Config) (*CoordinatorClient, bool, error) {
 }
 
 func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicKey string, keep bool, leaseID, slug string) (CoordinatorLease, error) {
+	return c.CreateLeaseWithAttempt(ctx, cfg, publicKey, keep, leaseID, slug, newCreateAttemptID())
+}
+
+func (c *CoordinatorClient) CreateLeaseWithAttempt(ctx context.Context, cfg Config, publicKey string, keep bool, leaseID, slug, createAttemptID string) (CoordinatorLease, error) {
+	return c.createLease(ctx, cfg, publicKey, keep, leaseID, slug, createAttemptID, false)
+}
+
+func (c *CoordinatorClient) EnsureLease(ctx context.Context, cfg Config, publicKey string, keep bool, leaseID, slug string) (CoordinatorLease, error) {
+	return c.createLease(ctx, cfg, publicKey, keep, leaseID, slug, "", true)
+}
+
+func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicKey string, keep bool, leaseID, slug, createAttemptID string, fixed bool) (CoordinatorLease, error) {
 	var res struct {
 		Lease CoordinatorLease `json:"lease"`
 	}
@@ -937,6 +961,9 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 		"pond":                            cfg.Pond,
 		"exposedPorts":                    cfg.ExposedPorts,
 	}
+	if !fixed {
+		req["createAttemptID"] = createAttemptID
+	}
 	if cfg.Provider != "daytona" || cfg.architectureExplicit {
 		req["architecture"] = effectiveArchitectureForConfig(cfg)
 	}
@@ -956,12 +983,16 @@ func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicK
 		req["azureOSDisk"] = cfg.AzureOSDisk
 	}
 	addCoordinatorGCPFields(req, cfg)
+	method := http.MethodPost
 	path := "/v1/leases"
-	if !imageRequirementsEmpty(cfg.imageRequirements) {
+	if fixed {
+		method = http.MethodPut
+		path = "/v1/leases/" + url.PathEscape(leaseID)
+	} else if !imageRequirementsEmpty(cfg.imageRequirements) {
 		// Older coordinators do not have this route, so mixed-version use fails closed.
 		path = "/v1/leases/capability-aware"
 	}
-	err = c.do(ctx, http.MethodPost, path, req, &res)
+	err = c.do(ctx, method, path, req, &res)
 	return res.Lease, err
 }
 
@@ -1090,6 +1121,12 @@ func (c *CoordinatorClient) ReleaseLease(ctx context.Context, id string, deleteS
 	}
 	err := c.do(ctx, http.MethodPost, "/v1/leases/"+url.PathEscape(id)+"/release", map[string]any{"delete": deleteServer}, &res)
 	return res.Lease, err
+}
+
+func (c *CoordinatorClient) CancelLeaseCreate(ctx context.Context, id, createAttemptID string) (CoordinatorCanceledCreateResult, error) {
+	var result CoordinatorCanceledCreateResult
+	err := c.do(ctx, http.MethodPost, "/v1/leases/"+url.PathEscape(id)+"/cancel-create", map[string]any{"createAttemptID": createAttemptID}, &result)
+	return result, err
 }
 
 func (c *CoordinatorClient) CompleteRuntimeAdapterDelete(ctx context.Context, id, adapterID, workspaceID, registrationID string) (CoordinatorLease, error) {

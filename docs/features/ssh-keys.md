@@ -16,6 +16,9 @@ When a lease is created, the CLI runs `ssh-keygen` to produce a key it stores
 locally. The key type is `ed25519` for most leases, and `rsa` (4096-bit) only
 for AWS and Azure Windows targets, where the platform requires RSA. Generation
 is idempotent: if a key already exists for the lease ID, it is reused as-is.
+Fixed-ID AWS acquisition holds the normal durable claim lock while creating or
+reusing this key, so concurrent replays cannot race two different keypairs into
+one EC2 idempotency identity.
 
 Local key storage lives under the Crabbox user config directory, outside the
 repository:

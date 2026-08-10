@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -183,6 +185,218 @@ func TestListWorkspacesReadsLiveProjectsEnvelope(t *testing.T) {
 	if len(workspaces) != 1 || workspaces[0].ID != "workspace_test" {
 		t.Fatalf("workspaces=%#v", workspaces)
 	}
+}
+
+func TestOrgoClientRedactsReflectedAPIKey(t *testing.T) {
+	const apiKey = "orgo-secret-token"
+	client := &orgoHTTPClient{
+		baseURL: "https://api.orgo.test",
+		apiKey:  apiKey,
+		http: &http.Client{Transport: orgoRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if got := req.Header.Get("Authorization"); got != "Bearer "+apiKey {
+				t.Fatalf("authorization=%q", got)
+			}
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"message":"credential ` + apiKey + ` rejected","request":"safe-orgo-context"}`)),
+				Request:    req,
+			}, nil
+		})},
+	}
+	_, err := client.GetWorkspace(context.Background(), "workspace_test")
+	if err == nil {
+		t.Fatal("GetWorkspace accepted unauthorized response")
+	}
+	var apiErr *orgoHTTPError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err=%T, want *orgoHTTPError", err)
+	}
+	if apiErr.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status=%d, want %d", apiErr.StatusCode, http.StatusUnauthorized)
+	}
+	for _, value := range []string{apiErr.Body, err.Error()} {
+		if strings.Contains(value, apiKey) {
+			t.Fatalf("API key leaked in %q", value)
+		}
+		if !strings.Contains(value, "[redacted]") || !strings.Contains(value, "safe-orgo-context") {
+			t.Fatalf("redacted error lost useful context: %q", value)
+		}
+	}
+}
+
+func TestOrgoClientRedactsAPIKeyAcrossResponseLimit(t *testing.T) {
+	const apiKey = "zxqv-orgo-boundary-secret-token"
+	const safeContext = "safe-orgo-boundary-context|"
+	prefixLen := orgoMaxResponseBodyBytes - len("[redacted]") - len(safeContext)
+	body := safeContext + strings.Repeat("x", prefixLen) + apiKey + " trailing provider detail"
+	client := &orgoHTTPClient{
+		baseURL: "https://api.orgo.test",
+		apiKey:  apiKey,
+		http: &http.Client{Transport: orgoRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(body)),
+				Request:    req,
+			}, nil
+		})},
+	}
+
+	_, err := client.GetWorkspace(context.Background(), "workspace_test")
+	var apiErr *orgoHTTPError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err=%v, want *orgoHTTPError", err)
+	}
+	if len(apiErr.Body) != orgoMaxResponseBodyBytes {
+		t.Fatalf("diagnostic bytes=%d, want %d", len(apiErr.Body), orgoMaxResponseBodyBytes)
+	}
+	for _, leaked := range []string{apiKey, apiKey[:10]} {
+		if strings.Contains(apiErr.Body, leaked) {
+			t.Fatalf("API key fragment %q leaked across response limit", leaked)
+		}
+	}
+	if !strings.Contains(apiErr.Body, safeContext) || !strings.HasSuffix(apiErr.Body, "[redacted]") {
+		t.Fatalf("bounded diagnostic lost safe context or redaction marker")
+	}
+}
+
+func TestOrgoClientRepeatedRedactionsDoNotExposeBoundaryFragment(t *testing.T) {
+	const apiKey = "zxqv-orgo-repeated-boundary-secret-token"
+	const safeContext = "safe-orgo-repeated-boundary-context|"
+	prefix := safeContext + apiKey + "|" + apiKey + "|"
+	body := prefix + strings.Repeat("x", orgoMaxResponseBodyBytes-len(prefix)) + apiKey
+	client := &orgoHTTPClient{
+		baseURL: "https://api.orgo.test",
+		apiKey:  apiKey,
+		http: &http.Client{Transport: orgoRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(body)),
+				Request:    req,
+			}, nil
+		})},
+	}
+
+	_, err := client.GetWorkspace(context.Background(), "workspace_test")
+	var apiErr *orgoHTTPError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err=%v, want *orgoHTTPError", err)
+	}
+	if len(apiErr.Body) != orgoMaxResponseBodyBytes {
+		t.Fatalf("diagnostic bytes=%d, want %d", len(apiErr.Body), orgoMaxResponseBodyBytes)
+	}
+	for prefixLen := 1; prefixLen <= len(apiKey); prefixLen++ {
+		if strings.HasSuffix(apiErr.Body, apiKey[:prefixLen]) {
+			t.Fatalf("API key prefix of %d bytes leaked at response boundary", prefixLen)
+		}
+	}
+	if !strings.Contains(apiErr.Body, safeContext) || strings.Count(apiErr.Body, "[redacted]") != 2 {
+		t.Fatalf("bounded diagnostic lost safe context or complete redactions")
+	}
+}
+
+func TestOrgoClientMasksOverlappingAPIKeyMatches(t *testing.T) {
+	apiKey := strings.Repeat("a", 24)
+	const safeContext = "safe-orgo-overlap-context|"
+	body := safeContext + strings.Repeat("a", 2*len(apiKey)-1)
+	client := &orgoHTTPClient{
+		baseURL: "https://api.orgo.test",
+		apiKey:  apiKey,
+		http: &http.Client{Transport: orgoRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(body)),
+				Request:    req,
+			}, nil
+		})},
+	}
+
+	_, err := client.GetWorkspace(context.Background(), "workspace_test")
+	var apiErr *orgoHTTPError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err=%v, want *orgoHTTPError", err)
+	}
+	if strings.Contains(apiErr.Body, apiKey[:len(apiKey)-1]) {
+		t.Fatalf("overlapping API key fragment leaked in %q", apiErr.Body)
+	}
+	if !strings.Contains(apiErr.Body, safeContext) || !strings.Contains(apiErr.Body, "[redacted]") {
+		t.Fatalf("overlap-safe diagnostic lost context or redaction marker: %q", apiErr.Body)
+	}
+}
+
+func TestOrgoActionErrorsRedactReflectedAPIKey(t *testing.T) {
+	const apiKey = "orgo-semantic-secret-token"
+	const safeContext = "safe-orgo-semantic-context"
+	for _, tt := range []struct {
+		name   string
+		method string
+		path   string
+		run    func(*orgoHTTPClient) error
+	}{
+		{
+			name:   "start computer",
+			method: http.MethodPost,
+			path:   "/computers/computer_test/start",
+			run: func(client *orgoHTTPClient) error {
+				return client.StartComputer(context.Background(), "computer_test")
+			},
+		},
+		{
+			name:   "delete computer",
+			method: http.MethodDelete,
+			path:   "/computers/computer_test",
+			run: func(client *orgoHTTPClient) error {
+				return client.DeleteComputer(context.Background(), "computer_test")
+			},
+		},
+		{
+			name:   "delete workspace",
+			method: http.MethodDelete,
+			path:   "/workspaces/workspace_test",
+			run: func(client *orgoHTTPClient) error {
+				return client.DeleteWorkspace(context.Background(), "workspace_test")
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &orgoHTTPClient{
+				baseURL: "https://api.orgo.test",
+				apiKey:  apiKey,
+				http: &http.Client{Transport: orgoRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+					if req.Method != tt.method || req.URL.Path != tt.path {
+						t.Fatalf("request=%s %s, want %s %s", req.Method, req.URL.Path, tt.method, tt.path)
+					}
+					if got := req.Header.Get("Authorization"); got != "Bearer "+apiKey {
+						t.Fatalf("authorization=%q", got)
+					}
+					body := `{"success":false,"status":"credential ` + apiKey + ` rejected; ` + safeContext + `"}`
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader(body)),
+						Request:    req,
+					}, nil
+				})},
+			}
+
+			err := tt.run(client)
+			if err == nil {
+				t.Fatal("semantic failure was accepted")
+			}
+			if strings.Contains(err.Error(), apiKey) || !strings.Contains(err.Error(), "[redacted]") || !strings.Contains(err.Error(), safeContext) {
+				t.Fatalf("semantic diagnostic=%q", err)
+			}
+		})
+	}
+}
+
+type orgoRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn orgoRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
 }
 
 func TestNewOrgoClientRejectsInsecureNonLoopbackAPIBase(t *testing.T) {

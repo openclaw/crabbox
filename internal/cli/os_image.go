@@ -52,8 +52,8 @@ var osImageSpecs = map[string]osImageSpec{
 		HetznerImage:    "ubuntu-24.04",
 		DockerImage:     "docker.io/library/ubuntu:26.04",
 		ContainerName:   "ubuntu:26.04",
-		AppleVMImage:    "https://cloud-images.ubuntu.com/releases/resolute/release-20260520/ubuntu-26.04-server-cloudimg-arm64.img",
-		AppleVMSHA256:   "5e091e27d60116efbb0c743b8dd5cb2d15618e414ef04db0817ed43c8e2d7c7b",
+		AppleVMImage:    "https://cloud-images.ubuntu.com/releases/resolute/release-20260731/ubuntu-26.04-server-cloudimg-arm64.img",
+		AppleVMSHA256:   "3e113fdd41f39e13729375173bb2ae793f87dc6db4294e5251ff2476971788ba",
 	},
 }
 

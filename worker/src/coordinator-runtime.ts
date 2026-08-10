@@ -32,7 +32,19 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
   ) {
     return "direct";
   }
-  if (method === "POST" && path.join("/") === "v1/leases") {
+  if (
+    method === "POST" &&
+    (path.join("/") === "v1/leases" || path.join("/") === "v1/leases/capability-aware")
+  ) {
+    return "direct";
+  }
+  if (
+    method === "PUT" &&
+    path[0] === "v1" &&
+    path[1] === "leases" &&
+    path[2] &&
+    path.length === 3
+  ) {
     return "direct";
   }
   if (path[0] === "v1" && path[1] === "workspaces") {
@@ -77,7 +89,7 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
     path[1] === "leases" &&
     path[2] &&
     method === "POST" &&
-    (path[3] === "heartbeat" || path[3] === "release")
+    (path[3] === "heartbeat" || path[3] === "release" || path[3] === "cancel-create")
   ) {
     return "direct";
   }

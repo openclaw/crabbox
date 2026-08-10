@@ -19,6 +19,10 @@ test("release workflow is verifier-only, protected-default, dual-native, and tok
   assert.match(workflow, /verify-github-release-policy\.mjs/);
   assert.match(workflow, /ref: \$\{\{ github\.workflow_sha \}\}/);
   assert.match(workflow, /persist-credentials: false/);
+  assert.match(
+    workflow,
+    /name: Set up Go for Apple VM source verification\n\s+uses: actions\/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16[\s\S]*name: Verify shipped Apple VM image source[\s\S]*git show "\$RELEASE_COMMIT:internal\/cli\/os_image[.]go"[\s\S]*git show "\$RELEASE_COMMIT:internal\/providers\/applevm\/backend[.]go"[\s\S]*go run [.][/]scripts\/apple-vm-image-source "\$source_root"/,
+  );
   assert.match(workflow, /runner: macos-15\n\s+arch: arm64/);
   assert.match(workflow, /runner: macos-15-intel\n\s+arch: x86_64/);
   assert.match(workflow, /cancel-in-progress: false/);
@@ -266,6 +270,7 @@ test("script CI fetches signed release tags for publication fixtures", () => {
   const ci = read(".github/workflows/ci.yml");
   const scriptsJob = ci.slice(ci.indexOf("  scripts:"), ci.indexOf("  docs:"));
   assert.match(scriptsJob, /uses: actions\/checkout@[^\n]+\n\s+with:\n\s+fetch-depth: 0/);
+  assert.match(scriptsJob, /timeout-minutes: 10/);
 });
 
 test("Crabbox CI cannot redefine the organization-required release check", () => {
@@ -812,10 +817,22 @@ test("managed Foundation signing and notary configuration is repository-owned an
     manifest,
     /MAC_RELEASE_CODESIGN_IDENTITY='Developer ID Application: OpenClaw Foundation \(FWJYW4S8P8\)'/,
   );
+  assert.match(
+    manifest,
+    /^MAC_RELEASE_OP_ITEM='Release - App Store Connect API key \(3373VBN2P4\) - notarization'$/m,
+  );
   assert.match(manifest, /MAC_RELEASE_OP_FIELDS=NOTARYTOOL_KEYCHAIN_PROFILE/);
+  assert.match(manifest, /^MAC_RELEASE_OP_VAULT=Molty$/m);
+  assert.match(manifest, /^MAC_RELEASE_OP_USE_SERVICE_ACCOUNT=1$/m);
+  assert.match(manifest, /^MAC_RELEASE_OP_TMUX_SESSION=op-work$/m);
+  assert.match(
+    manifest,
+    /^MAC_RELEASE_CODESIGN_OP_ITEM='Release - macOS signing keychain ref - OpenClaw Foundation'$/m,
+  );
+  assert.match(manifest, /^MAC_RELEASE_CODESIGN_OP_VAULT=Molty$/m);
+  assert.match(manifest, /^MAC_RELEASE_CODESIGN_OP_USE_SERVICE_ACCOUNT=1$/m);
   assert.match(manifest, /MAC_RELEASE_CODESIGN_KEYCHAIN_MANAGED=1/);
   assert.match(manifest, /MAC_RELEASE_CODESIGN_PASSWORDLESS=1/);
-  assert.match(manifest, /MAC_RELEASE_OP_USE_SERVICE_ACCOUNT=0/);
   assert.doesNotMatch(manifest, /(?:PASSWORD|TOKEN|SECRET)=/);
   assert.match(codeowners, /^\/\.mac-release\.env @openclaw\/openclaw-secops$/m);
 });

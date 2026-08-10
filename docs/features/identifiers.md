@@ -25,12 +25,61 @@ characters. `newLeaseID` mints one from 6 random bytes, and the regex
 `^cbx_[a-f0-9]{12}$` (`isCanonicalLeaseID`) decides whether a value is a
 canonical ID; anything that fails the pattern is treated as a slug.
 
-The CLI mints a provisional lease ID before calling the broker. The broker may
-return a different final ID (when the Worker dedupes a retried request, for
-example). When that happens, the CLI moves the local SSH key directory from the
-provisional ID to the final ID with `MoveStoredTestboxKey` (an atomic
-`os.Rename` of the per-lease directory) and re-keys the claim and other
-references accordingly.
+The CLI normally mints a provisional lease ID before calling the broker. A
+broker may return a different final ID, in which case the CLI moves the local
+SSH key directory from the provisional ID to the final ID with
+`MoveStoredTestboxKey` and re-keys the claim and other references accordingly.
+For each ordinary coordinator `POST` create, the CLI also mints a fresh opaque
+create-attempt token. The coordinator reserves the provisional ID in a private
+`pending` attempt record after synchronous request validation and before
+provider preparation. Cancellation uses the exact ID and token on the
+dedicated `cancel-create` route, so a cancel that arrives before the create
+still wins durably. An unbound canceled record tombstones only that exact
+owner/org/token operation: a fresh token may replace it after the coordinator
+rechecks that no exact lease or workspace reservation exists. Fixed-ID,
+registration, and workspace allocation also ignore unbound canceled records.
+Pending attempts and attempts bound to a canonical lease remain global ID
+reservations.
+
+New ordinary lease records bind to the token. Retained AWS Mac reactivation
+also binds the private attempt to the canonical lease, cloud ID, and a fresh
+generation. Only same-token create replay and create cancellation consume that
+mapping; status, heartbeat, sharing, runs, and normal release lookups remain
+canonical-only. Same-token concurrent creates replay the already bound
+provisioning or active canonical lease. Cancellation writes its tombstone and
+the canonical lease's release/cleanup claim together before provider deletion.
+Provisional IDs are permanently unavailable to ordinary, fixed-ID, registration,
+and workspace allocators once pending or bound to a canonical lease. Superseded
+unbound cancellations remain exact-operation tombstones, so the old token still
+returns `create_canceled` without affecting the replacement lifecycle. The
+private token and generation never appear in public lease records. Fixed-ID
+`PUT` creates do not use this protocol: their exact ID and intent hash continue
+to own replay, and caller cancellation never releases them.
+
+Automation may instead supply the canonical ID with `warmup --lease-id`. For
+direct AWS and managed coordinator leases, that ID is an immutable create
+identity: an identical semantic replay returns the same lease, while intent
+drift returns `lease_id_conflict`. The coordinator durably stores a versioned
+normalized request hash. Direct AWS durably stores the intent and current
+resolved EC2 attempt in the normal lease claim before `RunInstances`, then uses
+a deterministic regional/zonal client token. Neither path uses the slug to
+decide replay ownership.
+
+After the direct AWS launch attempt is durable, Crabbox never submits that
+attempt again. An ambiguous replay with no visible tagged instance fails closed;
+a later replay can adopt the one instance after inventory converges only when
+its non-secret attempt-attestation tags and provider-reported launch identity
+match the persisted attempt exactly. Fixed AWS
+claims use the downgrade-safe local discriminator `aws-fixed-v1`; current
+clients map it to runtime AWS, while older clients skip/refuse it.
+
+Fixed IDs are single-use operation identities. Direct AWS keeps a compact
+terminal claim tombstone after successful release or exact missing-resource
+cleanup. Tombstones contain only the ID, slug, provider scope, versioned intent
+hash, timestamps, and terminal state; automatic AWS cleanup never prunes them.
+There is no time-based reuse window. Explicitly deleting local Crabbox claim
+state forfeits this replay protection, so automation must instead mint a new
+operation ID.
 
 Provider resources reference the lease ID through a Crabbox label (the label key
 is literally `lease`):
@@ -67,6 +116,7 @@ crabbox checkpoint fork chk_abc123def456 --slug update-flow-smoke
 
 `--slug` is creation-time metadata, not a rename. It is honored only when
 Crabbox is creating a new lease; existing leases keep their assigned slug.
+It is never an operation or idempotency key.
 
 Slugs are normalized everywhere they are accepted. `normalizeLeaseSlug`
 lowercases, keeps only `[a-z0-9]`, collapses every other run of characters into

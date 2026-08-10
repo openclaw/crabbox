@@ -6,6 +6,22 @@ import (
 	"testing"
 )
 
+func TestImageRequirementsIntentChangesWithSemanticRequirements(t *testing.T) {
+	cfg := baseConfig()
+	base, err := ImageRequirementsIntent(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.imageRequirements = imageRequirements{MinOS: "15.4", SDKs: map[string]string{"xcode": "16.3"}}
+	changed, err := ImageRequirementsIntent(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base == changed || changed == "" {
+		t.Fatalf("image requirement intent did not change: base=%q changed=%q", base, changed)
+	}
+}
+
 func TestLeaseImageCapabilityFlags(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "aws"

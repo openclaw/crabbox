@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.41.3 - Unreleased
+
+## 0.41.2 - 2026-08-10
+
+### Fixed
+
+- Updated the checksum-pinned Ubuntu 26.04 Apple VM image to the current immutable Canonical release. Thanks @coygeek.
+- Redacted configured credentials reflected by provider-controlled Orgo, FastAPI Cloud, and DigitalOcean response diagnostics before they reach terminal or CI output. Thanks @coygeek.
+- Made canceled ordinary coordinator creates durable and token-bound, including concurrent same-token replay, atomic cleanup claims, late provider cleanup evidence, generation-fenced retained AWS Mac reactivation, and bounded cancellation retries while fixed-ID creates remain replay-owned. Thanks @fuller-stack-dev.
+
+## 0.41.1 - 2026-08-09
+
+### Fixed
+
+- Made caller-supplied `warmup --lease-id` creation idempotent across direct AWS and coordinator restarts, with exact-PUT coordinator recovery, exactly-once post-lock acquisition acknowledgment, at-most-once and attempt-attested direct AWS launch reconciliation, explicit SSH-CIDR intent binding, downgrade-safe `aws-fixed-v1` claims, stable conflicts on request drift, and compact terminal tombstones that prevent operation-ID reuse after release or missing-resource cleanup.
+
 ## 0.41.0 - 2026-08-06
 
 ### Added

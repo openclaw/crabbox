@@ -18,8 +18,13 @@ export function publicLeaseRecord(record: LeaseRecord): LeaseRecord {
     org: orgLabelForDisplay(record.org),
   };
   delete publicRecord.provisioningCoordinatorVersion;
+  delete publicRecord.provisioningRequestSettledAt;
   delete publicRecord.provisioningRecoveryObservedAt;
   delete publicRecord.provisioningRecoveryMissingSince;
+  delete publicRecord.fixedCreateIntentVersion;
+  delete publicRecord.fixedCreateIntentHash;
+  delete publicRecord.createAttemptID;
+  delete publicRecord.createAttemptGeneration;
   return publicRecord;
 }
 

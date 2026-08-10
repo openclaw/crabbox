@@ -950,6 +950,201 @@ func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return fn(req)
 }
 
+func TestDigitalOceanClientRedactsReflectedToken(t *testing.T) {
+	const token = "sibling-secret-token"
+	for _, tt := range []struct {
+		name        string
+		body        string
+		wantContext string
+	}{
+		{
+			name:        "ordinary reflection",
+			body:        `{"message":"credential ` + token + ` rejected","request":"safe-digitalocean-context"}`,
+			wantContext: "safe-digitalocean-context",
+		},
+		{
+			name: "credential crosses diagnostic cutoff",
+			body: strings.Repeat("x", 390) + token + " trailing provider detail",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &digitalOceanClient{
+				token:   token,
+				baseURL: "https://api.digitalocean.test",
+				client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					if got := req.Header.Get("Authorization"); got != "Bearer "+token {
+						t.Fatalf("authorization=%q", got)
+					}
+					return &http.Response{
+						StatusCode: http.StatusUnauthorized,
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader(tt.body)),
+						Request:    req,
+					}, nil
+				})},
+			}
+
+			err := client.do(context.Background(), http.MethodGet, "/account", nil, nil)
+			var apiErr *digitalOceanAPIError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("err=%v, want *digitalOceanAPIError", err)
+			}
+			if apiErr.Status != http.StatusUnauthorized {
+				t.Fatalf("status=%d, want %d", apiErr.Status, http.StatusUnauthorized)
+			}
+			for _, value := range []string{apiErr.Body, err.Error()} {
+				for _, leaked := range []string{token, token[:10]} {
+					if strings.Contains(value, leaked) {
+						t.Fatalf("token fragment %q leaked in %q", leaked, value)
+					}
+				}
+				if !strings.Contains(value, "[redacted]") {
+					t.Fatalf("reflected token was not redacted in %q", value)
+				}
+				if tt.wantContext != "" && !strings.Contains(value, tt.wantContext) {
+					t.Fatalf("redacted error lost useful context: %q", value)
+				}
+			}
+		})
+	}
+}
+
+func TestDigitalOceanClientRedactsSemanticDropletName(t *testing.T) {
+	const token = "digitalocean-droplet-secret"
+	const leaseID = "cbx_abcdef123456"
+	const publicKey = "ssh-ed25519 test"
+	keyName := providerKeyForLease(leaseID)
+	client := &digitalOceanClient{
+		token:             token,
+		baseURL:           "https://api.digitalocean.test",
+		reconcileTimeout:  time.Millisecond,
+		reconcileInterval: time.Millisecond,
+		client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if got := req.Header.Get("Authorization"); got != "Bearer "+token {
+				t.Fatalf("authorization=%q", got)
+			}
+			switch {
+			case req.Method == http.MethodGet && req.URL.Path == "/account/keys":
+				body, _ := json.Marshal(map[string]any{
+					"ssh_keys": []map[string]any{{"id": 123, "name": keyName, "public_key": publicKey}},
+					"links":    map[string]any{"pages": map[string]any{}},
+				})
+				return digitalOceanTestResponse(req, http.StatusOK, string(body)), nil
+			case req.Method == http.MethodPost && req.URL.Path == "/droplets":
+				body := `{"droplet":{"id":456,"name":"safe-droplet-context-` + token + `"}}`
+				return digitalOceanTestResponse(req, http.StatusAccepted, body), nil
+			case req.Method == http.MethodGet && req.URL.Path == "/tags":
+				return nil, errors.New("synthetic reconciliation failure")
+			default:
+				t.Fatalf("unexpected request %s %s", req.Method, req.URL.RequestURI())
+				return nil, nil
+			}
+		})},
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	cfg.ServerType = "s-1vcpu-1gb"
+
+	_, err := client.CreateDroplet(context.Background(), cfg, publicKey, leaseID, "blue", false, time.Now())
+	assertDigitalOceanSemanticDiagnostic(t, err, token, "safe-droplet-context")
+}
+
+func TestDigitalOceanClientRedactsSemanticSSHKeyName(t *testing.T) {
+	const token = "digitalocean-key-secret"
+	keyListCalls := 0
+	client := &digitalOceanClient{
+		token:             token,
+		baseURL:           "https://api.digitalocean.test",
+		reconcileTimeout:  time.Millisecond,
+		reconcileInterval: time.Millisecond,
+		client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch {
+			case req.Method == http.MethodGet && req.URL.Path == "/account/keys":
+				keyListCalls++
+				if keyListCalls == 1 {
+					return digitalOceanTestResponse(req, http.StatusOK, `{"ssh_keys":[],"links":{"pages":{}}}`), nil
+				}
+				return nil, errors.New("synthetic reconciliation failure")
+			case req.Method == http.MethodPost && req.URL.Path == "/account/keys":
+				body := `{"ssh_key":{"id":0,"name":"safe-key-context-` + token + `","public_key":"wrong"}}`
+				return digitalOceanTestResponse(req, http.StatusCreated, body), nil
+			default:
+				t.Fatalf("unexpected request %s %s", req.Method, req.URL.RequestURI())
+				return nil, nil
+			}
+		})},
+	}
+
+	_, _, err := client.EnsureSSHKey(context.Background(), "expected-key", "ssh-ed25519 expected")
+	assertDigitalOceanSemanticDiagnostic(t, err, token, "safe-key-context")
+}
+
+func TestDigitalOceanClientRedactsSemanticTagNames(t *testing.T) {
+	const token = "digitalocean-tag-secret"
+	const requested = "crabbox:slug:blue"
+	for _, tt := range []struct {
+		name string
+		http func(*http.Request) (*http.Response, error)
+		safe string
+	}{
+		{
+			name: "existing tag",
+			safe: "safe-existing-tag-context",
+			http: func(req *http.Request) (*http.Response, error) {
+				body := `{"tag":{"name":"safe-existing-tag-context-` + token + `"}}`
+				return digitalOceanTestResponse(req, http.StatusOK, body), nil
+			},
+		},
+		{
+			name: "created tag",
+			safe: "safe-created-tag-context",
+			http: func(req *http.Request) (*http.Response, error) {
+				if req.Method == http.MethodGet {
+					return digitalOceanTestResponse(req, http.StatusNotFound, `{"id":"not_found"}`), nil
+				}
+				body := `{"tag":{"name":"safe-created-tag-context-` + token + `"}}`
+				return digitalOceanTestResponse(req, http.StatusCreated, body), nil
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &digitalOceanClient{
+				token:   token,
+				baseURL: "https://api.digitalocean.test",
+				client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					if req.URL.Path != "/tags/"+requested && req.URL.Path != "/tags" {
+						t.Fatalf("unexpected request %s %s", req.Method, req.URL.RequestURI())
+					}
+					return tt.http(req)
+				})},
+			}
+
+			_, err := client.EnsureTag(context.Background(), requested, map[string]string{})
+			assertDigitalOceanSemanticDiagnostic(t, err, token, tt.safe)
+		})
+	}
+}
+
+func digitalOceanTestResponse(req *http.Request, status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    req,
+	}
+}
+
+func assertDigitalOceanSemanticDiagnostic(t *testing.T, err error, token, safeContext string) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("semantic mismatch was accepted")
+	}
+	if strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "[redacted]") || !strings.Contains(err.Error(), safeContext) {
+		t.Fatalf("semantic diagnostic=%q", err)
+	}
+}
+
 type errorAfterReader struct {
 	data []byte
 	err  error

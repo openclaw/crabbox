@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -17,6 +18,53 @@ func TestNewRunIDUsesCanonicalFormatAndIsUnique(t *testing.T) {
 	}
 	if first == second {
 		t.Fatalf("run IDs must be unique per invocation: %q", first)
+	}
+}
+
+func TestNewCreateAttemptIDIsOpaqueAndUnique(t *testing.T) {
+	first := newCreateAttemptID()
+	second := newCreateAttemptID()
+	pattern := regexp.MustCompile(`^cat_[a-f0-9]{32}$`)
+	if !pattern.MatchString(first) || !pattern.MatchString(second) {
+		t.Fatalf("create attempt IDs must use the opaque canonical format: first=%q second=%q", first, second)
+	}
+	if first == second {
+		t.Fatalf("create attempt IDs must be fresh per acquisition: %q", first)
+	}
+}
+
+func TestLeaseOperationLockSerializesFixedIDKeyCreation(t *testing.T) {
+	isolateTestUserDirs(t)
+	const leaseID = "cbx_abcdef123456"
+	start := make(chan struct{})
+	paths := make(chan string, 2)
+	errs := make(chan error, 2)
+	var ready sync.WaitGroup
+	ready.Add(2)
+	for range 2 {
+		go func() {
+			ready.Done()
+			<-start
+			err := withLeaseIDOperationLock(leaseID, func() error {
+				path, _, err := ensureTestboxKey(leaseID)
+				if err == nil {
+					paths <- path
+				}
+				return err
+			})
+			errs <- err
+		}()
+	}
+	ready.Wait()
+	close(start)
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, second := <-paths, <-paths
+	if first != second {
+		t.Fatalf("key paths differ: %q != %q", first, second)
 	}
 }
 

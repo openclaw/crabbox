@@ -239,6 +239,11 @@ type ReleaseLeaseClaimRetainer interface {
 	RetainLeaseClaimAfterRelease(lease LeaseTarget) bool
 }
 
+type ReleaseLeaseClaimRetentionVerifier interface {
+	// An error leaves claim state untouched so uncertain ownership fails closed.
+	RetainLeaseClaimAfterReleaseWithClaim(lease LeaseTarget, previous LeaseClaim) (bool, error)
+}
+
 type NativeCheckpointCapability struct {
 	Kind              string
 	Direct            bool

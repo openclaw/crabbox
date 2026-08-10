@@ -163,11 +163,13 @@ wait "$child"
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(pidPath)
 		if err == nil {
-			childPID, err = strconv.Atoi(strings.TrimSpace(string(data)))
-			if err != nil {
-				t.Fatal(err)
+			value := strings.TrimSpace(string(data))
+			if value != "" {
+				if parsed, parseErr := strconv.Atoi(value); parseErr == nil && parsed > 0 {
+					childPID = parsed
+					break
+				}
 			}
-			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

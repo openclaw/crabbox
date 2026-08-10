@@ -27,35 +27,52 @@ type leaseClaim struct {
 	// CloudNumericID binds providers whose CloudID is a reusable resource name.
 	CloudNumericID int64 `json:"cloudNumericID,omitempty"`
 	// CloudImmutableID binds providers whose immutable identity is a string.
-	CloudImmutableID                    string            `json:"cloudImmutableID,omitempty"`
-	ProviderScope                       string            `json:"providerScope,omitempty"`
-	StaticHost                          string            `json:"staticHost,omitempty"`
-	StaticUser                          string            `json:"staticUser,omitempty"`
-	StaticPort                          string            `json:"staticPort,omitempty"`
-	StaticWorkRoot                      string            `json:"staticWorkRoot,omitempty"`
-	TargetOS                            string            `json:"targetOS,omitempty"`
-	WindowsMode                         string            `json:"windowsMode,omitempty"`
-	Pond                                string            `json:"pond,omitempty"`
-	RepoRoot                            string            `json:"repoRoot"`
-	ClaimedAt                           string            `json:"claimedAt"`
-	LastUsedAt                          string            `json:"lastUsedAt"`
-	IdleTimeoutSeconds                  int               `json:"idleTimeoutSeconds,omitempty"`
-	TailscaleIPv4                       string            `json:"tailscaleIPv4,omitempty"`
-	TailscaleFQDN                       string            `json:"tailscaleFQDN,omitempty"`
-	TailscaleHostname                   string            `json:"tailscaleHostname,omitempty"`
-	TailscaleTags                       []string          `json:"tailscaleTags,omitempty"`
-	TailscaleLoginURL                   string            `json:"tailscaleLoginURL,omitempty"`
-	TailscaleExitNode                   string            `json:"tailscaleExitNode,omitempty"`
-	TailscaleExitLAN                    bool              `json:"tailscaleExitLAN,omitempty"`
-	SSHHost                             string            `json:"sshHost,omitempty"`
-	SSHPort                             int               `json:"sshPort,omitempty"`
-	BridgeURL                           string            `json:"bridgeURL,omitempty"`
-	CoordinatorRegistrationURL          string            `json:"coordinatorRegistrationURL,omitempty"`
-	RuntimeAdapterRegistrationID        string            `json:"runtimeAdapterRegistrationID,omitempty"`
-	RuntimeAdapterPendingRegistrationID string            `json:"runtimeAdapterPendingRegistrationID,omitempty"`
-	CacheVolumes                        []string          `json:"cacheVolumes,omitempty"`
-	Labels                              map[string]string `json:"labels,omitempty"`
+	CloudImmutableID                    string             `json:"cloudImmutableID,omitempty"`
+	ProviderScope                       string             `json:"providerScope,omitempty"`
+	StaticHost                          string             `json:"staticHost,omitempty"`
+	StaticUser                          string             `json:"staticUser,omitempty"`
+	StaticPort                          string             `json:"staticPort,omitempty"`
+	StaticWorkRoot                      string             `json:"staticWorkRoot,omitempty"`
+	TargetOS                            string             `json:"targetOS,omitempty"`
+	WindowsMode                         string             `json:"windowsMode,omitempty"`
+	Pond                                string             `json:"pond,omitempty"`
+	RepoRoot                            string             `json:"repoRoot"`
+	ClaimedAt                           string             `json:"claimedAt"`
+	LastUsedAt                          string             `json:"lastUsedAt"`
+	IdleTimeoutSeconds                  int                `json:"idleTimeoutSeconds,omitempty"`
+	TailscaleIPv4                       string             `json:"tailscaleIPv4,omitempty"`
+	TailscaleFQDN                       string             `json:"tailscaleFQDN,omitempty"`
+	TailscaleHostname                   string             `json:"tailscaleHostname,omitempty"`
+	TailscaleTags                       []string           `json:"tailscaleTags,omitempty"`
+	TailscaleLoginURL                   string             `json:"tailscaleLoginURL,omitempty"`
+	TailscaleExitNode                   string             `json:"tailscaleExitNode,omitempty"`
+	TailscaleExitLAN                    bool               `json:"tailscaleExitLAN,omitempty"`
+	SSHHost                             string             `json:"sshHost,omitempty"`
+	SSHPort                             int                `json:"sshPort,omitempty"`
+	BridgeURL                           string             `json:"bridgeURL,omitempty"`
+	CoordinatorRegistrationURL          string             `json:"coordinatorRegistrationURL,omitempty"`
+	RuntimeAdapterRegistrationID        string             `json:"runtimeAdapterRegistrationID,omitempty"`
+	RuntimeAdapterPendingRegistrationID string             `json:"runtimeAdapterPendingRegistrationID,omitempty"`
+	CacheVolumes                        []string           `json:"cacheVolumes,omitempty"`
+	Labels                              map[string]string  `json:"labels,omitempty"`
+	FixedCreateIntent                   *FixedCreateIntent `json:"fixedCreateIntent,omitempty"`
 }
+
+// FixedCreateIntent is the durable, provider-neutral envelope for a
+// caller-supplied lease identity. Provider adapters own the opaque attempt
+// fields and their interpretation; the claim layer only persists and locks it.
+type FixedCreateIntent struct {
+	Version        int               `json:"version"`
+	Fingerprint    string            `json:"fingerprint"`
+	ProviderScope  string            `json:"providerScope"`
+	Slug           string            `json:"slug"`
+	CreatedAt      string            `json:"createdAt"`
+	State          string            `json:"state"`
+	Attempt        map[string]string `json:"attempt,omitempty"`
+	FailedAttempts []string          `json:"failedAttempts,omitempty"`
+}
+
+const FixedAWSClaimProvider = "aws-fixed-v1"
 
 var claimMutationMutexes sync.Map
 
@@ -274,7 +291,13 @@ func claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, 
 		existing.LeaseID = leaseID
 		existing.Slug = slug
 		if provider != "" {
-			existing.Provider = provider
+			if existing.FixedCreateIntent != nil && existing.Provider != "" {
+				if canonicalClaimProvider(existing.Provider) != canonicalClaimProvider(provider) {
+					return exit(2, "lease %s fixed claim provider changed from %s to %s", leaseID, existing.Provider, provider)
+				}
+			} else {
+				existing.Provider = provider
+			}
 		}
 		if providerScope != "" {
 			existing.ProviderScope = providerScope
@@ -439,7 +462,7 @@ func updateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) e
 }
 
 func prepareLeaseClaimEndpoint(existing leaseClaim, providerName, slug string, server Server, allowProviderMetadata bool) (Server, error) {
-	provider, err := ProviderFor(firstNonBlank(existing.Provider, providerName))
+	provider, err := ProviderFor(canonicalClaimProvider(firstNonBlank(existing.Provider, providerName)))
 	if err != nil {
 		return Server{}, exit(2, "lease %s claim has unavailable provider %q", existing.LeaseID, existing.Provider)
 	}
@@ -669,6 +692,12 @@ func cloneLeaseClaim(claim leaseClaim) leaseClaim {
 	claim.Labels = cloneStringMap(claim.Labels)
 	claim.TailscaleTags = append([]string(nil), claim.TailscaleTags...)
 	claim.CacheVolumes = append([]string(nil), claim.CacheVolumes...)
+	if claim.FixedCreateIntent != nil {
+		intent := *claim.FixedCreateIntent
+		intent.Attempt = cloneStringMap(intent.Attempt)
+		intent.FailedAttempts = append([]string(nil), intent.FailedAttempts...)
+		claim.FixedCreateIntent = &intent
+	}
 	return claim
 }
 
@@ -923,6 +952,58 @@ func withLeaseClaimLock(path string, fn func() error) error {
 	return fn()
 }
 
+func withLeaseIDOperationLock(leaseID string, action func() error) error {
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return exit(2, "create claim directory: %v", err)
+	}
+	return withLeaseClaimLock(path, action)
+}
+
+func withDurableLeaseClaimLock(leaseID string, action func(*leaseClaim, bool, func() error) error) error {
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(path)
+	firstExistingDir, err := nearestExistingClaimDirectory(dir)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return exit(2, "create claim directory: %v", err)
+	}
+	return withLeaseClaimLock(path, func() error {
+		claim, exists, err := readLeaseClaimPathWithPresence(path)
+		if err != nil {
+			return err
+		}
+		if err := validateLeaseClaimFileIdentity(leaseID, claim, exists); err != nil {
+			return err
+		}
+		persist := func() error {
+			if claim.LeaseID == "" {
+				claim.LeaseID = leaseID
+			}
+			if claim.LeaseID != leaseID {
+				return invalidLeaseClaimIDError{id: claim.LeaseID}
+			}
+			if err := refreshLeaseClaimRevision(&claim); err != nil {
+				return err
+			}
+			if err := writeLeaseClaimAtomicDurableWithSync(path, claim, firstExistingDir, syncControllerDirectory); err != nil {
+				return err
+			}
+			exists = true
+			return nil
+		}
+		return action(&claim, exists, persist)
+	})
+}
+
 func leaseClaimLockPath(path string) (string, error) {
 	dir := filepath.Join(filepath.Dir(filepath.Dir(path)), "claim-locks")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -1041,6 +1122,9 @@ func fsyncDir(dir string) {
 }
 
 func canonicalClaimProvider(provider string) string {
+	if strings.TrimSpace(provider) == FixedAWSClaimProvider {
+		return "aws"
+	}
 	if resolved, err := ProviderFor(provider); err == nil {
 		return resolved.Name()
 	}
@@ -1576,6 +1660,38 @@ func replaceLeaseClaimIfUnchanged(leaseID string, current, replacement leaseClai
 
 func replaceLeaseClaimIfUnchangedDurableReturning(leaseID string, current, replacement leaseClaim) (leaseClaim, error) {
 	return replaceLeaseClaimIfUnchangedWithWrite(leaseID, current, replacement, writeLeaseClaimAtomicDurable)
+}
+
+func replaceLeaseClaimIfUnchangedDurableAfter(leaseID string, current, replacement leaseClaim, action func() error) (leaseClaim, error) {
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		return leaseClaim{}, err
+	}
+	var written leaseClaim
+	err = withLeaseClaimLock(path, func() error {
+		claim, exists, err := readLeaseClaimPathWithPresence(path)
+		if err != nil {
+			return err
+		}
+		if err := validateLeaseClaimFileIdentity(leaseID, claim, exists); err != nil {
+			return err
+		}
+		if err := unchangedLeaseClaimGuard(leaseID, current, true)(claim, exists); err != nil {
+			return err
+		}
+		if action != nil {
+			if err := action(); err != nil {
+				return err
+			}
+		}
+		written = cloneLeaseClaim(replacement)
+		written.LeaseID = leaseID
+		if err := refreshLeaseClaimRevision(&written); err != nil {
+			return err
+		}
+		return writeLeaseClaimAtomicDurable(path, written)
+	})
+	return written, err
 }
 
 func replaceLeaseClaimIfUnchangedWithWrite(leaseID string, current, replacement leaseClaim, write func(string, leaseClaim) error) (leaseClaim, error) {

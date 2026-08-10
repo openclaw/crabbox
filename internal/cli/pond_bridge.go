@@ -191,9 +191,9 @@ func (a App) pondRelease(ctx context.Context, args []string) error {
 			fmt.Fprintf(a.Stderr, "warning: skip %s/%s: load config: %v\n", claim.Provider, claim.LeaseID, cerr)
 			continue
 		}
-		cfg.Provider = claim.Provider
+		cfg.Provider = canonicalClaimProvider(claim.Provider)
 		var routeErr error
-		if claim.Provider == "external" {
+		if canonicalClaimProvider(claim.Provider) == "external" {
 			routeErr = routeExternalLeaseClaim(&cfg, claim.LeaseID)
 		} else {
 			routeErr = autoRouteExternalLeaseForConfig(&cfg, claim.LeaseID)
@@ -249,20 +249,35 @@ func (a App) pondRelease(ctx context.Context, args []string) error {
 			}
 			fmt.Fprintf(a.Stderr, "warning: %s/%s release failed: %v\n", claim.Provider, claim.LeaseID, lerr)
 		} else {
-			retained := finalizePondReleaseClaim(backend, lease, claim)
+			retained, finalizeErr := finalizePondReleaseClaim(backend, lease, claim)
+			if finalizeErr != nil {
+				if firstErr == nil {
+					firstErr = finalizeErr
+				}
+				fmt.Fprintf(a.Stderr, "warning: %s/%s claim finalization failed after release: %v\n", claim.Provider, claim.LeaseID, finalizeErr)
+				continue
+			}
 			fmt.Fprintf(a.Stderr, "released %s/%s slug=%s claim_retained=%t\n", claim.Provider, claim.LeaseID, blank(claim.Slug, "-"), retained)
 		}
 	}
 	return firstErr
 }
 
-func finalizePondReleaseClaim(backend Backend, lease LeaseTarget, claim leaseClaim) bool {
-	retainer, ok := backend.(ReleaseLeaseClaimRetainer)
-	retained := ok && retainer.RetainLeaseClaimAfterRelease(lease)
+func finalizePondReleaseClaim(backend Backend, lease LeaseTarget, claim leaseClaim) (bool, error) {
+	retained := false
+	if verifier, ok := backend.(ReleaseLeaseClaimRetentionVerifier); ok {
+		var err error
+		retained, err = verifier.RetainLeaseClaimAfterReleaseWithClaim(lease, claim)
+		if err != nil {
+			return false, err
+		}
+	} else if retainer, ok := backend.(ReleaseLeaseClaimRetainer); ok {
+		retained = retainer.RetainLeaseClaimAfterRelease(lease)
+	}
 	if !retained {
 		removeLeaseClaim(claim.LeaseID)
 	}
-	return retained
+	return retained, nil
 }
 
 // pondPeersJSON wraps the peer list so the JSON output matches the
@@ -297,7 +312,7 @@ func resolvePondPeers(ctx context.Context, rt Runtime, pond, provider string, fl
 	byProvider := make(map[string][]leaseClaim)
 	order := make([]string, 0, 4)
 	for _, claim := range matches {
-		key := strings.TrimSpace(claim.Provider)
+		key := canonicalClaimProvider(claim.Provider)
 		if _, ok := byProvider[key]; !ok {
 			order = append(order, key)
 		}
@@ -366,7 +381,7 @@ func resolvePondPeersForProvider(ctx context.Context, rt Runtime, provider strin
 	var bridgeLoadErr error
 	for _, claim := range claims {
 		peer := bridgePeerFromClaim(claim, class)
-		caps := providerCapabilities(claim.Provider)
+		caps := providerCapabilities(canonicalClaimProvider(claim.Provider))
 		urlCapable := caps.URLBridge
 		useBridge := peer.Transport == TransportURL || urlCapable
 		if useBridge {
@@ -510,11 +525,12 @@ func hasResolvedPrimary(peers []BridgePeer) bool {
 // the provider once for the fan-out path); the rest of the row is filled in
 // from the claim sidecar without any provider API calls.
 func bridgePeerFromClaim(claim leaseClaim, class string) BridgePeer {
-	caps := providerCapabilities(claim.Provider)
+	provider := canonicalClaimProvider(claim.Provider)
+	caps := providerCapabilities(provider)
 	peer := BridgePeer{
 		Slug:       claim.Slug,
 		LeaseID:    claim.LeaseID,
-		Provider:   claim.Provider,
+		Provider:   provider,
 		Pond:       claim.Pond,
 		Labels:     cloneStringMap(claim.Labels),
 		Transports: caps.Available(),
@@ -531,7 +547,7 @@ func bridgePeerFromClaim(claim leaseClaim, class string) BridgePeer {
 			// bridge (e.g. islo, which only records a tailnet IP when the lease
 			// was warmed with --tailscale), fall back to the bridge plane
 			// instead of stranding the member as "pending".
-			if providerCapabilities(claim.Provider).URLBridge {
+			if providerCapabilities(provider).URLBridge {
 				peer.Transport = TransportURL
 				peer.Endpoint = claim.BridgeURL
 				return peer
@@ -560,14 +576,14 @@ func bridgePeerFromClaim(claim leaseClaim, class string) BridgePeer {
 		peer.Endpoint = claim.BridgeURL
 	case TransportNone:
 		peer.Transport = TransportNone
-		if isBlacksmithProvider(claim.Provider) {
+		if isBlacksmithProvider(provider) {
 			peer.Note = "blacksmith owns connectivity"
 		} else {
-			peer.Note = fmt.Sprintf("no advertised pond transport for provider %s", claim.Provider)
+			peer.Note = fmt.Sprintf("no advertised pond transport for provider %s", provider)
 		}
 	default:
 		peer.Transport = TransportNone
-		peer.Note = fmt.Sprintf("no advertised pond transport for provider %s", claim.Provider)
+		peer.Note = fmt.Sprintf("no advertised pond transport for provider %s", provider)
 	}
 	return peer
 }
@@ -615,7 +631,7 @@ func filterClaimsForPond(claims []leaseClaim, pond, provider string) []leaseClai
 		if normalizePondName(claim.Pond) != pond {
 			continue
 		}
-		if provider != "" && claim.Provider != canonProvider {
+		if provider != "" && canonicalClaimProvider(claim.Provider) != canonProvider {
 			continue
 		}
 		out = append(out, claim)
