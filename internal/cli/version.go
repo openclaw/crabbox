@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-var version = "0.15.0"
+var version = "dev"
 
 func currentVersion() string {
 	buildInfoVersion := ""
@@ -16,7 +16,7 @@ func currentVersion() string {
 }
 
 func resolveVersion(injected, buildInfoVersion string) string {
-	if normalized := normalizeBuildVersion(injected); normalized != "" && !strings.HasSuffix(normalized, "-dev") {
+	if normalized := normalizeBuildVersion(injected); normalized != "" && normalized != "dev" && !strings.HasSuffix(normalized, "-dev") {
 		return normalized
 	}
 	if normalized := normalizeTaggedBuildInfoVersion(buildInfoVersion); normalized != "" {

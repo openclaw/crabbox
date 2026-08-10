@@ -2,6 +2,36 @@ package cli
 
 import "testing"
 
+func TestDefaultVersionIsDevelopmentIdentity(t *testing.T) {
+	if version != "dev" {
+		t.Fatalf("default version=%q want dev", version)
+	}
+	if got := resolveVersion(version, "(devel)"); got != "dev" {
+		t.Fatalf("plain source version=%q want dev", got)
+	}
+}
+
+func TestResolveVersionUsesTaggedBuildInfoForDevDefault(t *testing.T) {
+	got := resolveVersion("dev", "v1.2.3")
+	if got != "1.2.3" {
+		t.Fatalf("version=%q want 1.2.3", got)
+	}
+}
+
+func TestResolveVersionKeepsDevForPseudoBuildInfo(t *testing.T) {
+	got := resolveVersion("dev", "v1.2.4-0.20260810123456-abcdef123456")
+	if got != "dev" {
+		t.Fatalf("version=%q want dev", got)
+	}
+}
+
+func TestResolveVersionKeepsDevForDirtyBuildInfo(t *testing.T) {
+	got := resolveVersion("dev", "v1.2.4-0.20260810123456-abcdef123456+dirty")
+	if got != "dev" {
+		t.Fatalf("version=%q want dev", got)
+	}
+}
+
 func TestResolveVersionPrefersInjectedRelease(t *testing.T) {
 	got := resolveVersion("v1.2.3", "v9.9.9")
 	if got != "1.2.3" {
