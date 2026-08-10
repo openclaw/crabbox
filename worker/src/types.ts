@@ -179,6 +179,7 @@ export interface Env {
 
 export interface LeaseRequest {
   leaseID?: string;
+  createAttemptID?: string;
   slug?: string;
   requestedSlug?: string;
   provider?: Provider;
@@ -392,7 +393,8 @@ export interface LeaseRecord {
   slug?: string;
   fixedCreateIntentVersion?: number;
   fixedCreateIntentHash?: string;
-  requestLeaseGeneration?: string;
+  createAttemptID?: string;
+  createAttemptGeneration?: string;
   workspaceID?: string;
   provider: string;
   lifecycle?: LeaseLifecycle;
@@ -473,6 +475,7 @@ export interface LeaseRecord {
   provisioningResourceMayExist?: boolean;
   provisioningFailureRetryable?: boolean;
   provisioningRequestStartedAt?: string;
+  provisioningRequestSettledAt?: string;
   provisioningCoordinatorVersion?: string;
   provisioningRecoveryObservedAt?: string;
   provisioningRecoveryMissingSince?: string;

@@ -19,6 +19,15 @@ func newLeaseID() string {
 	return "cbx_" + hex.EncodeToString(b[:])
 }
 
+func newCreateAttemptID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		digits := strings.ReplaceAll(time.Now().UTC().Format("20060102150405.000000000"), ".", "")
+		return "cat_" + (digits + "00000000000000000000000000000000")[:32]
+	}
+	return "cat_" + hex.EncodeToString(b[:])
+}
+
 func NewLeaseID() string {
 	return newLeaseID()
 }

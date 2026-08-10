@@ -29,14 +29,32 @@ The CLI normally mints a provisional lease ID before calling the broker. A
 broker may return a different final ID, in which case the CLI moves the local
 SSH key directory from the provisional ID to the final ID with
 `MoveStoredTestboxKey` and re-keys the claim and other references accordingly.
-When an ordinary coordinator request reactivates a retained AWS Mac lease, the
-coordinator permanently reserves that provisional ID in a private,
-generation-bound release mapping to the retained canonical ID. Only the release
-route accepts the mapping, and only for the owning user and organization (or an
-administrator); status, heartbeat, sharing, runs, and other lease lookups remain
-canonical-only. This lets a canceled client delete a late-accepted retained
-lease even when its create response was lost, without relabeling the provider
-resource or allowing the provisional ID to target a later reactivation.
+For each ordinary coordinator `POST` create, the CLI also mints a fresh opaque
+create-attempt token. The coordinator reserves the provisional ID in a private
+`pending` attempt record after synchronous request validation and before
+provider preparation. Cancellation uses the exact ID and token on the
+dedicated `cancel-create` route, so a cancel that arrives before the create
+still wins durably. An unbound canceled record tombstones only that exact
+owner/org/token operation: a fresh token may replace it after the coordinator
+rechecks that no exact lease or workspace reservation exists. Fixed-ID,
+registration, and workspace allocation also ignore unbound canceled records.
+Pending attempts and attempts bound to a canonical lease remain global ID
+reservations.
+
+New ordinary lease records bind to the token. Retained AWS Mac reactivation
+also binds the private attempt to the canonical lease, cloud ID, and a fresh
+generation. Only same-token create replay and create cancellation consume that
+mapping; status, heartbeat, sharing, runs, and normal release lookups remain
+canonical-only. Same-token concurrent creates replay the already bound
+provisioning or active canonical lease. Cancellation writes its tombstone and
+the canonical lease's release/cleanup claim together before provider deletion.
+Provisional IDs are permanently unavailable to ordinary, fixed-ID, registration,
+and workspace allocators once pending or bound to a canonical lease. Superseded
+unbound cancellations remain exact-operation tombstones, so the old token still
+returns `create_canceled` without affecting the replacement lifecycle. The
+private token and generation never appear in public lease records. Fixed-ID
+`PUT` creates do not use this protocol: their exact ID and intent hash continue
+to own replay, and caller cancellation never releases them.
 
 Automation may instead supply the canonical ID with `warmup --lease-id`. For
 direct AWS and managed coordinator leases, that ID is an immutable create

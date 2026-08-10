@@ -21,6 +21,18 @@ func TestNewRunIDUsesCanonicalFormatAndIsUnique(t *testing.T) {
 	}
 }
 
+func TestNewCreateAttemptIDIsOpaqueAndUnique(t *testing.T) {
+	first := newCreateAttemptID()
+	second := newCreateAttemptID()
+	pattern := regexp.MustCompile(`^cat_[a-f0-9]{32}$`)
+	if !pattern.MatchString(first) || !pattern.MatchString(second) {
+		t.Fatalf("create attempt IDs must use the opaque canonical format: first=%q second=%q", first, second)
+	}
+	if first == second {
+		t.Fatalf("create attempt IDs must be fresh per acquisition: %q", first)
+	}
+}
+
 func TestLeaseOperationLockSerializesFixedIDKeyCreation(t *testing.T) {
 	isolateTestUserDirs(t)
 	const leaseID = "cbx_abcdef123456"
