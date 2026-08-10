@@ -68,10 +68,13 @@ func TestLocalContainerProviderE2E(t *testing.T) {
 		"--timing-json",
 		"--shell",
 		"--",
-		"set -eu; test -f go.mod; test -f internal/providers/localcontainer/backend.go; echo CRABBOX_LOCAL_CONTAINER_SYNC_OK",
+		"set -eu; test -f go.mod; test -f internal/providers/localcontainer/backend.go; printf 'CRABBOX_LOCAL_CONTAINER_IMAGE_PATH=%s\\n' \"$PATH\"; echo CRABBOX_LOCAL_CONTAINER_SYNC_OK",
 	)
 	if !strings.Contains(oneShot.Stdout, "CRABBOX_LOCAL_CONTAINER_SYNC_OK") {
 		t.Fatalf("one-shot output missing sync marker: stdout=%q stderr=%q", oneShot.Stdout, oneShot.Stderr)
+	}
+	if imagePath := localContainerE2EImagePath(t, ctx, image); imagePath != "" && !strings.Contains(oneShot.Stdout, "CRABBOX_LOCAL_CONTAINER_IMAGE_PATH="+imagePath+"\n") {
+		t.Fatalf("one-shot PATH did not preserve image PATH %q: stdout=%q stderr=%q", imagePath, oneShot.Stdout, oneShot.Stderr)
 	}
 	assertNoLocalContainerForSlug(t, ctx, oneShotSlug)
 
@@ -197,6 +200,23 @@ func runDockerLocalContainerE2EMust(t *testing.T, ctx context.Context, args ...s
 	if out, err := exec.CommandContext(commandCtx, "docker", args...).CombinedOutput(); err != nil {
 		t.Fatalf("docker %s failed: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
+}
+
+func localContainerE2EImagePath(t *testing.T, ctx context.Context, image string) string {
+	t.Helper()
+	commandCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(commandCtx, "docker", "image", "inspect", "--format", "{{range .Config.Env}}{{println .}}{{end}}", image).CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker image inspect %s failed: %v: %s", image, err, strings.TrimSpace(string(out)))
+	}
+	var imagePath string
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "PATH=") {
+			imagePath = strings.TrimPrefix(line, "PATH=")
+		}
+	}
+	return imagePath
 }
 
 func parseLocalContainerE2ELeaseID(stdout string) string {

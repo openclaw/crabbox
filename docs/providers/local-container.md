@@ -173,7 +173,8 @@ metadata updates.
 2. The provider runs `docker run -d` with Crabbox labels, loopback SSH port
    publishing, and the public-key auth environment the bootstrap script needs.
 3. On Debian/Ubuntu-compatible images, the container installs
-   `openssh-server`, `git`, `rsync`, `curl`, and `sudo` when they are missing.
+   `openssh-server`, `git`, `rsync`, `curl`, and `sudo` when they are missing,
+   then restores the selected image's declared `PATH` for the managed SSH login.
 4. With `--desktop`, the container installs and starts Xvfb, XFCE, x11vnc,
    xdotool, screenshot tools, ffmpeg, noVNC, and websockify — no systemd
    required.

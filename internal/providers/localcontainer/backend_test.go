@@ -1314,6 +1314,17 @@ func TestLocalContainerReadyCheckReportsFailureDiagnostics(t *testing.T) {
 func TestBootstrapScriptUsesAccountHomeDirectory(t *testing.T) {
 	for _, want := range []string{
 		`home_dir="$(getent passwd "$user" | cut -d: -f6)"`,
+		`image_path="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"`,
+		`printf '%s' "$image_path" > "$home_dir/.config/crabbox/image-path"`,
+		`chmod 0600 "$home_dir/.config/crabbox/image-path"`,
+		`for candidate in "$home_dir/.bash_profile" "$home_dir/.bash_login" "$home_dir/.profile"; do`,
+		`python3 - "$login_profile" <<'PY'`,
+		`def find_line_sequence(content, sequence, offset=0):`,
+		`data = data[:remove_from] + suffix`,
+		`PATH="$(cat "$HOME/.config/crabbox/image-path"; printf '\001')"`,
+		`PATH="${PATH%?}"`,
+		`path.write_bytes(data + block)`,
+		`# end crabbox managed image PATH`,
 		`"$home_dir/.ssh/authorized_keys"`,
 		`sed -i 's/^[#[:space:]]*UsePAM[[:space:]].*/UsePAM no/' /etc/ssh/sshd_config`,
 		`printf '\nUsePAM no\n' >> /etc/ssh/sshd_config`,
@@ -1387,6 +1398,99 @@ func TestBootstrapScriptUsesAccountHomeDirectory(t *testing.T) {
 	}
 	if strings.Contains(bootstrapScript, `|| XDG_RUNTIME_DIR="$runtime"`) {
 		t.Fatal("bootstrap script can launch a stale fallback swaybg after termination")
+	}
+}
+
+func TestBootstrapImagePathReadPreservesLiteralBytes(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skipf("bash unavailable: %v", err)
+	}
+	home := t.TempDir()
+	marker := filepath.Join(home, "must-not-exist")
+	want := "/opt/tool dir:$HOME:$(touch " + marker + "):`false`:\n"
+	if err := os.WriteFile(filepath.Join(home, "image-path"), []byte(want), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bash, "-c", `set -eu
+HOME="$1"
+PATH="$(cat "$HOME/image-path"; printf '\001')"
+PATH="${PATH%?}"
+printf '%s' "$PATH"
+`, "bash", home)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("read image PATH: %v: %s", err, out)
+	}
+	if got := string(out); got != want {
+		t.Fatalf("image PATH = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("image PATH content was evaluated: %v", err)
+	}
+}
+
+func TestBootstrapImagePathProfileCanonicalization(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skipf("python3 unavailable: %v", err)
+	}
+	const opener = "python3 - \"$login_profile\" <<'PY'\n"
+	const closer = "\nPY\nchown \"$user\" \"$login_profile\""
+	start := strings.Index(bootstrapScript, opener)
+	if start < 0 {
+		t.Fatal("bootstrap script missing profile transformation opener")
+	}
+	start += len(opener)
+	end := strings.Index(bootstrapScript[start:], closer)
+	if end < 0 {
+		t.Fatal("bootstrap script missing profile transformation closer")
+	}
+	script := bootstrapScript[start : start+end]
+	profile := filepath.Join(t.TempDir(), ".bash_profile")
+	run := func(input string) string {
+		t.Helper()
+		if err := os.WriteFile(profile, []byte(input), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(python, "-", profile)
+		cmd.Stdin = strings.NewReader(script)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("canonicalize login profile: %v: %s", err, out)
+		}
+		out, err := os.ReadFile(profile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(out)
+	}
+
+	canonical := run("")
+	if strings.Count(canonical, "# crabbox managed image PATH\n") != 1 ||
+		!strings.HasSuffix(canonical, "# end crabbox managed image PATH\n") {
+		t.Fatalf("unexpected canonical block: %q", canonical)
+	}
+	if got := run(canonical); got != canonical {
+		t.Fatalf("canonicalization is not idempotent:\nfirst:  %q\nsecond: %q", canonical, got)
+	}
+
+	withLaterOverride := "PATH=/before\n" + canonical + "PATH=/after\n"
+	got := run(withLaterOverride)
+	if !strings.Contains(got, "PATH=/before\nPATH=/after\n") ||
+		strings.Count(got, canonical) != 1 || !strings.HasSuffix(got, canonical) {
+		t.Fatalf("later profile content was not preserved before one final managed block: %q", got)
+	}
+
+	heredoc := "cat <<'PROFILE'\n# crabbox managed image PATH\nnot the managed block\n# end crabbox managed image PATH\nPROFILE\n"
+	got = run(heredoc)
+	if !strings.HasPrefix(got, heredoc) || strings.Count(got, "# crabbox managed image PATH\n") != 2 {
+		t.Fatalf("line-aligned marker text was modified: %q", got)
+	}
+
+	unmatched := "# crabbox managed image PATH\nPATH=/user\n"
+	got = run(unmatched)
+	if !strings.HasPrefix(got, unmatched) || strings.Count(got, "# crabbox managed image PATH\n") != 2 {
+		t.Fatalf("unmatched marker was modified: %q", got)
 	}
 }
 

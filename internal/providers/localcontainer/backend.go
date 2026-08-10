@@ -1701,6 +1701,7 @@ install_verified_apt_keyring() {
 
 const bootstrapScript = `
 set -eu
+image_path="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
 export DEBIAN_FRONTEND=noninteractive
 user="${CRABBOX_SSH_USER:-crabbox}"
 work_root="${CRABBOX_WORK_ROOT:-/work/crabbox}"
@@ -1903,6 +1904,61 @@ if [ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ]; then
 else
   chown -R "$user" "$home_dir/.ssh" "$work_root"
 fi
+mkdir -p "$home_dir/.config/crabbox"
+printf '%s' "$image_path" > "$home_dir/.config/crabbox/image-path"
+chown "$user" "$home_dir/.config" "$home_dir/.config/crabbox" "$home_dir/.config/crabbox/image-path"
+chmod 0700 "$home_dir/.config/crabbox"
+chmod 0600 "$home_dir/.config/crabbox/image-path"
+login_profile=""
+for candidate in "$home_dir/.bash_profile" "$home_dir/.bash_login" "$home_dir/.profile"; do
+  if [ -e "$candidate" ]; then
+    login_profile="$candidate"
+    break
+  fi
+done
+if [ -z "$login_profile" ]; then
+  login_profile="$home_dir/.bash_profile"
+  : > "$login_profile"
+  chmod 0644 "$login_profile"
+fi
+python3 - "$login_profile" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+data = path.read_bytes()
+block = rb'''# crabbox managed image PATH
+if [ -r "$HOME/.config/crabbox/image-path" ]; then
+  PATH="$(cat "$HOME/.config/crabbox/image-path"; printf '\001')"
+  PATH="${PATH%?}"
+  export PATH
+fi
+# end crabbox managed image PATH
+'''
+
+def find_line_sequence(content, sequence, offset=0):
+    position = content.find(sequence, offset)
+    while position >= 0:
+        if position == 0 or content[position - 1:position] == b"\n":
+            return position
+        position = content.find(sequence, position + 1)
+    return -1
+
+while True:
+    block_start = find_line_sequence(data, block)
+    if block_start < 0:
+        break
+    block_end = block_start + len(block)
+    suffix = data[block_end:]
+    remove_from = block_start
+    if not suffix and remove_from > 0 and data[remove_from - 1:remove_from] == b"\n":
+        remove_from -= 1
+    data = data[:remove_from] + suffix
+if data:
+    data += b"\n"
+path.write_bytes(data + block)
+PY
+chown "$user" "$login_profile"
 chown -R "$user" /var/cache/crabbox
 env | sed -n 's/^CRABBOX_CACHE_VOLUME_PATH_[0-9][0-9]*=//p' | while IFS= read -r cache_path; do
   [ -n "$cache_path" ] || continue
