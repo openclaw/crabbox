@@ -648,6 +648,39 @@ func TestRunWithExistingLeaseRequestsProviderPreparation(t *testing.T) {
 	}
 }
 
+func TestRunWithExistingLeaseRoutesProviderFromClaim(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_PROVIDER", "hetzner")
+	repo, err := findRepo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const leaseID = "cbx_1257abcdefff"
+	if err := claimLeaseForRepoProvider(leaseID, "claim-routed", "run-prepare-test", repo.Root, time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+
+	runPrepareTestResolveRequests = nil
+	var stdout, stderr bytes.Buffer
+	err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--id", leaseID,
+		"--no-sync",
+		"--",
+		"true",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 9 || !strings.Contains(exitErr.Message, "resolve captured") {
+		t.Fatalf("run error=%v, want claim-routed resolve-captured exit; stderr=%s", err, stderr.String())
+	}
+	if len(runPrepareTestResolveRequests) != 1 {
+		t.Fatalf("resolve requests=%#v, want one", runPrepareTestResolveRequests)
+	}
+	if got := runPrepareTestResolveRequests[0]; got.ID != leaseID || !got.Prepare {
+		t.Fatalf("resolve request=%#v, want claim-routed existing id with Prepare", got)
+	}
+}
+
 func TestFormatRunSummary(t *testing.T) {
 	endToEndStartedAt := time.Unix(0, 0)
 	got := formatRunSummary(runTimings{
@@ -3090,6 +3123,162 @@ func TestApplyCapacityMarketFlag(t *testing.T) {
 	if err := applyCapacityMarketFlag(&cfg, fs, *market); err == nil {
 		t.Fatal("expected invalid market failure")
 	}
+}
+
+func TestAutoRouteClaimLeaseProvider(t *testing.T) {
+	newFlags := func(t *testing.T, configured string, args ...string) (*flag.FlagSet, *string) {
+		t.Helper()
+		fs := newFlagSet("test", io.Discard)
+		provider := fs.String("provider", configured, "")
+		if err := parseFlags(fs, args); err != nil {
+			t.Fatal(err)
+		}
+		return fs, provider
+	}
+
+	t.Run("exact id canonicalizes fixed AWS marker", func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		const leaseID = "cbx_1257aaaa0001"
+		if err := claimLeaseForRepoProvider(leaseID, "fixed", FixedAWSClaimProvider, "/repo", time.Minute, false); err != nil {
+			t.Fatal(err)
+		}
+		fs, provider := newFlags(t, "hetzner")
+		cfg := Config{Provider: *provider}
+		if err := autoRouteClaimLeaseProvider(&cfg, fs, leaseID); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Provider != "aws" {
+			t.Fatalf("provider=%q want aws", cfg.Provider)
+		}
+	})
+
+	t.Run("exact id wins over slug collision", func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		const leaseID = "cbx_1257aaaa0002"
+		if err := claimLeaseForRepoProvider(leaseID, "exact-owner", "run-prepare-test", "/repo-a", time.Minute, false); err != nil {
+			t.Fatal(err)
+		}
+		if err := claimLeaseForRepoProvider("cbx_1257bbbb0002", leaseID, "local-container", "/repo-b", time.Minute, false); err != nil {
+			t.Fatal(err)
+		}
+		fs, provider := newFlags(t, "hetzner")
+		cfg := Config{Provider: *provider}
+		if err := autoRouteClaimLeaseProvider(&cfg, fs, leaseID); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Provider != "run-prepare-test" {
+			t.Fatalf("provider=%q want exact claim provider", cfg.Provider)
+		}
+	})
+
+	t.Run("unique slug routes provider", func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		if err := claimLeaseForRepoProvider("cbx_1257aaaa0003", "Blue Lobster", "local-container", "/repo", time.Minute, false); err != nil {
+			t.Fatal(err)
+		}
+		fs, provider := newFlags(t, "hetzner")
+		cfg := Config{Provider: *provider}
+		if err := autoRouteClaimLeaseProvider(&cfg, fs, "blue-lobster"); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Provider != "local-container" {
+			t.Fatalf("provider=%q want local-container", cfg.Provider)
+		}
+	})
+
+	t.Run("duplicate slug within one provider defers scope resolution", func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		for _, leaseID := range []string{"cbx_1257aaaa0007", "cbx_1257bbbb0007"} {
+			if err := claimLeaseForRepoProviderScope(leaseID, "Scoped Slug", "local-container", leaseID, "/repo", time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+		}
+		fs, provider := newFlags(t, "hetzner")
+		cfg := Config{Provider: *provider}
+		if err := autoRouteClaimLeaseProvider(&cfg, fs, "scoped-slug"); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Provider != "local-container" {
+			t.Fatalf("provider=%q want local-container", cfg.Provider)
+		}
+	})
+
+	t.Run("aliases of one provider do not create ambiguity", func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		for i, providerName := range []string{"external", "exec-provider"} {
+			leaseID := fmt.Sprintf("cbx_1257eeee000%d", i)
+			if err := claimLeaseForRepoProviderScope(leaseID, "External Alias", providerName, leaseID, "/repo", time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+		}
+		fs, provider := newFlags(t, "hetzner")
+		cfg := Config{Provider: *provider}
+		if err := autoRouteClaimLeaseProvider(&cfg, fs, "external-alias"); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Provider != "external" {
+			t.Fatalf("provider=%q want external", cfg.Provider)
+		}
+	})
+
+	t.Run("ambiguous slug fails with guidance", func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		if err := claimLeaseForRepoProvider("cbx_1257aaaa0004", "Shared Slug", "local-container", "/repo-a", time.Minute, false); err != nil {
+			t.Fatal(err)
+		}
+		if err := claimLeaseForRepoProvider("cbx_1257bbbb0004", "Shared Slug", "run-prepare-test", "/repo-b", time.Minute, false); err != nil {
+			t.Fatal(err)
+		}
+		fs, provider := newFlags(t, "hetzner")
+		cfg := Config{Provider: *provider}
+		err := autoRouteClaimLeaseProvider(&cfg, fs, "shared-slug")
+		if err == nil || !strings.Contains(err.Error(), "canonical lease id") || !strings.Contains(err.Error(), "--provider") {
+			t.Fatalf("err=%v, want ambiguity guidance", err)
+		}
+	})
+
+	t.Run("explicit provider remains authoritative", func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		const leaseID = "cbx_1257aaaa0005"
+		if err := claimLeaseForRepoProvider(leaseID, "explicit", "local-container", "/repo", time.Minute, false); err != nil {
+			t.Fatal(err)
+		}
+		fs, provider := newFlags(t, "hetzner", "--provider", "run-prepare-test")
+		cfg := Config{Provider: *provider}
+		if err := autoRouteClaimLeaseProvider(&cfg, fs, leaseID); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Provider != "run-prepare-test" {
+			t.Fatalf("provider=%q want explicit provider", cfg.Provider)
+		}
+	})
+
+	t.Run("legacy claim without provider preserves configured provider", func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		const leaseID = "cbx_1257aaaa0006"
+		if err := claimLeaseForRepo(leaseID, "legacy", "/repo", time.Minute, false); err != nil {
+			t.Fatal(err)
+		}
+		fs, provider := newFlags(t, "hetzner")
+		cfg := Config{Provider: *provider}
+		if err := autoRouteClaimLeaseProvider(&cfg, fs, leaseID); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Provider != "hetzner" {
+			t.Fatalf("provider=%q want configured provider", cfg.Provider)
+		}
+	})
+
+	t.Run("empty identifier preserves configured provider", func(t *testing.T) {
+		fs, provider := newFlags(t, "hetzner")
+		cfg := Config{Provider: *provider}
+		if err := autoRouteClaimLeaseProvider(&cfg, fs, ""); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Provider != "hetzner" {
+			t.Fatalf("provider=%q want configured provider", cfg.Provider)
+		}
+	})
 }
 
 func TestApplyLeaseCreateFlagsForExistingAWSMacOSLeaseDefaultsOnDemand(t *testing.T) {

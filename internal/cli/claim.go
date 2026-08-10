@@ -1122,13 +1122,51 @@ func fsyncDir(dir string) {
 }
 
 func canonicalClaimProvider(provider string) string {
-	if strings.TrimSpace(provider) == FixedAWSClaimProvider {
+	switch strings.TrimSpace(provider) {
+	case FixedAWSClaimProvider:
 		return "aws"
+	case "exec-provider":
+		return "external"
 	}
 	if resolved, err := ProviderFor(provider); err == nil {
 		return resolved.Name()
 	}
 	return normalizeProviderName(provider)
+}
+
+func claimProviderForIdentifier(identifier string) (string, bool, error) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return "", false, nil
+	}
+	exact, exists, err := readLeaseClaimWithPresence(identifier)
+	if err != nil {
+		return "", false, err
+	}
+	if exists {
+		provider := canonicalClaimProvider(exact.Provider)
+		return provider, provider != "", nil
+	}
+	claims, err := listLeaseClaims()
+	if err != nil {
+		return "", false, err
+	}
+	slug := normalizeLeaseSlug(identifier)
+	provider := ""
+	for _, claim := range claims {
+		if claim.LeaseID != identifier && (slug == "" || normalizeLeaseSlug(claim.Slug) != slug) {
+			continue
+		}
+		candidate := canonicalClaimProvider(claim.Provider)
+		if candidate == "" {
+			continue
+		}
+		if provider != "" && provider != candidate {
+			return "", false, exit(2, "lease identifier %s matches local claims from multiple providers; use a canonical lease id or pass --provider", identifier)
+		}
+		provider = candidate
+	}
+	return provider, provider != "", nil
 }
 
 func providerClaimScope(provider string, cfg Config) string {

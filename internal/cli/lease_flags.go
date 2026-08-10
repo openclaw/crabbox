@@ -88,6 +88,20 @@ func applyLeaseCreateFlagsForLease(cfg *Config, fs *flag.FlagSet, values leaseCr
 	return applyLeaseCreateFlagsForLeaseMode(cfg, fs, values, existingLeaseID, true)
 }
 
+func autoRouteClaimLeaseProvider(cfg *Config, fs *flag.FlagSet, identifier string) error {
+	if flagWasSet(fs, "provider") {
+		return nil
+	}
+	provider, ok, err := claimProviderForIdentifier(identifier)
+	if err != nil {
+		return err
+	}
+	if ok {
+		cfg.Provider = provider
+	}
+	return nil
+}
+
 func applyLeaseCreateFlagsForLeaseMode(cfg *Config, fs *flag.FlagSet, values leaseCreateFlagValues, existingLeaseID string, mutateExternal bool) error {
 	cfg.Provider = *values.Provider
 	prepareProviderDefaults(cfg)
@@ -146,6 +160,9 @@ func applyLeaseCreateFlagsForLeaseMode(cfg *Config, fs *flag.FlagSet, values lea
 	}
 	cfg.DesktopEnv = *values.DesktopEnv
 	if err := applyTargetFlagOverrides(cfg, fs, values.Target); err != nil {
+		return err
+	}
+	if err := autoRouteClaimLeaseProvider(cfg, fs, existingLeaseID); err != nil {
 		return err
 	}
 	if err := autoRouteStaticLease(cfg, fs, existingLeaseID); err != nil {

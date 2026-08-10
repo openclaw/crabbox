@@ -7,6 +7,7 @@
 - Stopped market-independent AWS Spot launch request errors from being retried as On-Demand while preserving fallback for Spot-recoverable capacity, quota, and unsupported-market failures. Thanks @vincentkoc.
 - Made plain source builds report `dev` instead of the stale `0.15.0` release identity while preserving injected release versions and tagged Go module build information. Thanks @coygeek.
 - Preserved custom local-container image `PATH` entries for commands executed through the managed SSH user. Thanks @coygeek.
+- Routed implicit `run --id` and `watch --id` reuse through the provider recorded in the local lease claim before validating the configured provider. Thanks @coygeek.
 
 ## 0.41.2 - 2026-08-10
 

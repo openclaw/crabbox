@@ -38,7 +38,12 @@ snippets, pipes, or shell expansion.
 If `--id` is omitted, Crabbox creates a fresh, non-kept lease and releases it
 when the command exits. With `--id` it reuses an existing lease; `--id` accepts
 either the stable `cbx_...` ID or the active friendly slug (see
-[identifiers](../features/identifiers.md)).
+[identifiers](../features/identifiers.md)). When `--provider` is omitted, a
+provider-bearing local claim selects the existing lease's provider before that
+provider is configured. Exact lease IDs take precedence. Slug matches may span
+multiple scopes of one canonical provider, which that provider resolves; claims
+from different providers require a canonical ID or explicit provider. An
+explicit `--provider` remains authoritative.
 
 With `--pool <key>`, Crabbox borrows one hydrated broker ready-pool lease,
 uses the pool-recorded SSH endpoint, keeps the borrow deadline alive while it

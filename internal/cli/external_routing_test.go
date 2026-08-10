@@ -560,6 +560,31 @@ func TestAutoRouteExternalLeaseUsesPersistedClaimRouting(t *testing.T) {
 	}
 }
 
+func TestAutoRouteExternalLeaseAcceptsCanonicalProviderAliasClaims(t *testing.T) {
+	for _, identifier := range []string{"cbx_1257eeee0001", "legacy-external"} {
+		t.Run(identifier, func(t *testing.T) {
+			root := setExternalRoutingTestHome(t)
+			const leaseID = "cbx_1257eeee0001"
+			routing := ExternalConfig{Command: "legacy-provider", WorkRoot: "/legacy/work"}
+			if _, err := PersistExternalRouting(leaseID, routing); err != nil {
+				t.Fatal(err)
+			}
+			if err := claimLeaseForRepoProviderScope(leaseID, "legacy-external", "exec-provider", "legacy-scope", root, time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+			cfg := baseConfig()
+			cfg.Provider = "external"
+			fs := newFlagSet("test", os.Stderr)
+			if err := autoRouteExternalLease(&cfg, fs, identifier); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.External.Command != routing.Command || cfg.External.WorkRoot != routing.WorkRoot || cfg.WorkRoot != routing.WorkRoot {
+				t.Fatalf("config=%#v", cfg)
+			}
+		})
+	}
+}
+
 func TestAutoRouteExternalLeaseRejectsAmbiguousAlias(t *testing.T) {
 	root := setExternalRoutingTestHome(t)
 	for _, leaseID := range []string{"cbx_111111111111", "cbx_222222222222"} {

@@ -255,18 +255,23 @@ metadata, and leaves legacy, unowned, shared, or custom keys intact.
 
 Resolution order:
 
-1. Read the local claim store. `resolveLeaseClaim` first tries the literal
-   identifier as a claim filename, then scans `claims/*.json` for any claim
-   whose `leaseID` or normalized `slug` matches.
-2. If a matching claim exists, use its `leaseID` as the canonical handle.
-3. If no claim is found and a coordinator is configured, ask the coordinator to
+1. Read the local claim store. A literal claim filename has precedence. When
+   `--provider` is omitted, its recorded provider is selected before backend
+   configuration; legacy claims without a provider keep the configured default.
+2. For a slug without an explicit provider, require all provider-bearing local
+   claims to agree on one canonical provider. Multiple scopes within that
+   provider remain available to its normal resolver; claims from different
+   providers fail with guidance to use a canonical lease ID or pass
+   `--provider`. An explicit provider remains authoritative.
+3. Use the matching claim's `leaseID` as the canonical handle.
+4. If no claim is found and a coordinator is configured, ask the coordinator to
    resolve the identifier (slug or canonical ID).
-4. For static SSH and direct-provider modes, fall back to the provider's
+5. For static SSH and direct-provider modes, fall back to the provider's
    `Resolve` implementation on `SSHLeaseBackend`.
 
-The first source that returns a hit wins. This is why `--id blue-lobster` works
-from any directory once a warmup ran in some other repo — the local claim
-translates the slug to a lease ID before the broker is ever involved.
+This is why `--id blue-lobster` can select both the canonical lease and its
+provider before provider credentials or configuration are validated. Exact IDs
+remain deterministic even when another claim uses the same text as a slug.
 
 ## Identifier Lifetime
 

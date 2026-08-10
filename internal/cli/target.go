@@ -499,7 +499,7 @@ func uniqueExternalLeaseClaim(identifier string, providerSelected bool) (leaseCl
 		return leaseClaim{}, false, err
 	}
 	if exists {
-		if exact.Provider != "external" {
+		if canonicalClaimProvider(exact.Provider) != "external" {
 			return leaseClaim{}, false, nil
 		}
 		return exact, true, nil
@@ -515,7 +515,7 @@ func uniqueExternalLeaseClaim(identifier string, providerSelected bool) (leaseCl
 			continue
 		}
 		matches = append(matches, claim)
-		if claim.Provider == "external" {
+		if canonicalClaimProvider(claim.Provider) == "external" {
 			externalMatches = append(externalMatches, claim)
 		}
 	}
