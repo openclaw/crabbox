@@ -74,6 +74,75 @@ func TestRepoNameFromRootAndRemoteFallsBackToRemoteBasename(t *testing.T) {
 	}
 }
 
+func TestParseGitTrackedPaths(t *testing.T) {
+	raw := []byte(
+		"H 100644 aaaa 0\tspace name.txt\x00" +
+			"S 120000 bbbb 0\ttab\tname\n.txt\x00" +
+			"M 100644 cccc 1\tconflict.txt\x00" +
+			"M 100755 dddd 2\tconflict.txt\x00" +
+			"H 160000 eeee 0\tvendor/submodule\x00",
+	)
+	got, err := parseGitTrackedPaths(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 5 {
+		t.Fatalf("tracked=%#v", got)
+	}
+	if got[0].name != "space name.txt" || got[0].mode != "100644" || got[0].stage != 0 || got[0].skipWorktree {
+		t.Fatalf("regular=%#v", got[0])
+	}
+	if got[1].name != "tab\tname\n.txt" || got[1].mode != "120000" || got[1].stage != 0 || !got[1].skipWorktree {
+		t.Fatalf("symlink=%#v", got[1])
+	}
+	if got[2].name != "conflict.txt" || got[2].stage != 1 ||
+		got[3].name != "conflict.txt" || got[3].mode != "100755" || got[3].stage != 2 {
+		t.Fatalf("unmerged=%#v", got[2:4])
+	}
+	if got[4].mode != "160000" || got[4].stage != 0 {
+		t.Fatalf("gitlink=%#v", got[4])
+	}
+}
+
+func TestParseGitTrackedPathsRejectsMalformedMetadata(t *testing.T) {
+	for _, raw := range []string{
+		"H 100644 aaaa 0 missing-tab\x00",
+		"H invalid aaaa 0\tfile.txt\x00",
+		"H 100644 aaaa 4\tfile.txt\x00",
+		"H 100644 aaaa 0\t\x00",
+	} {
+		t.Run(fmt.Sprintf("%q", raw), func(t *testing.T) {
+			if _, err := parseGitTrackedPaths([]byte(raw)); err == nil {
+				t.Fatal("malformed metadata was accepted")
+			}
+		})
+	}
+}
+
+func TestParseGitCachedDeletions(t *testing.T) {
+	raw := []byte(
+		":100644 000000 aaaa 0000 D\x00space name.txt\x00" +
+			":160000 000000 bbbb 0000 D\x00vendor/tab\tname\nmodule\x00",
+	)
+	got, err := parseGitCachedDeletions(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].name != "space name.txt" || got[0].preimageMode != "100644" ||
+		got[1].name != "vendor/tab\tname\nmodule" || got[1].preimageMode != "160000" {
+		t.Fatalf("deletions=%#v", got)
+	}
+	for _, raw := range [][]byte{
+		[]byte(":160000 000000 aaaa 0000 D\x00missing-name"),
+		[]byte(":invalid 000000 aaaa 0000 D\x00module\x00"),
+		[]byte(":160000 000000 aaaa 0000 M\x00module\x00"),
+	} {
+		if _, err := parseGitCachedDeletions(raw); err == nil {
+			t.Fatalf("malformed staged deletion metadata accepted: %q", raw)
+		}
+	}
+}
+
 func TestGitCheckoutHasHiddenOmissions(t *testing.T) {
 	dir := t.TempDir()
 	runGit(t, dir, "init")
@@ -164,6 +233,38 @@ func TestGitCheckoutHasHiddenOmissions(t *testing.T) {
 	}
 }
 
+func TestGitCheckoutHiddenOmissionAppliesScopeBeforeClassification(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	writeFile(t, filepath.Join(dir, "scoped.txt"), "scoped\n")
+	writeFile(t, filepath.Join(dir, "outside.txt"), "outside\n")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	runGit(t, dir, "sparse-checkout", "set", "--no-cone", "/*")
+	if err := os.Remove(filepath.Join(dir, "scoped.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	resolverCalls := 0
+	rulesUnavailable := func(string, []gitTrackedPath) (map[string]struct{}, error) {
+		resolverCalls++
+		return nil, fmt.Errorf("check-rules unsupported")
+	}
+	if path, err := gitCheckoutHiddenOmission(dir, func(gitTrackedPath) bool { return false }, rulesUnavailable); err != nil || path != "" {
+		t.Fatalf("empty scope path=%q err=%v", path, err)
+	}
+	if resolverCalls != 0 {
+		t.Fatalf("resolver calls=%d, want 0", resolverCalls)
+	}
+	if path, err := gitCheckoutHiddenOmission(dir, func(entry gitTrackedPath) bool {
+		return entry.name == "scoped.txt"
+	}, rulesUnavailable); path != "" || err == nil || !strings.Contains(err.Error(), "Git 2.41") {
+		t.Fatalf("old Git ambiguity path=%q err=%v", path, err)
+	}
+}
+
 func TestGitCheckoutHasHiddenOmissionsInLinkedWorktree(t *testing.T) {
 	parent := t.TempDir()
 	source := filepath.Join(parent, "source")
@@ -234,6 +335,198 @@ func TestGitCheckoutHasHiddenOmissionsThroughSymlinkAncestor(t *testing.T) {
 	}
 	if omitted, err := GitCheckoutHasHiddenOmissions(dir); err != nil || !omitted {
 		t.Fatalf("symlink-shadowed omission=%v err=%v", omitted, err)
+	}
+}
+
+func TestSyncManifestRejectsOnlyHiddenPathsInEffectiveScope(t *testing.T) {
+	tests := []struct {
+		name      string
+		excludes  []string
+		includes  []string
+		wantError bool
+	}{
+		{name: "in scope", wantError: true},
+		{name: "outside include", includes: []string{"visible"}},
+		{name: "excluded", excludes: []string{"hidden"}},
+		{name: "ordered reinclude", excludes: []string{"hidden", "!hidden/drop.txt"}, wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			runGit(t, dir, "init")
+			runGit(t, dir, "config", "user.email", "test@example.com")
+			runGit(t, dir, "config", "user.name", "Test")
+			writeFile(t, filepath.Join(dir, "visible", "keep.txt"), "keep\n")
+			writeFile(t, filepath.Join(dir, "hidden", "drop.txt"), "drop\n")
+			runGit(t, dir, "add", ".")
+			runGit(t, dir, "commit", "-m", "init")
+			runGit(t, dir, "sparse-checkout", "set", "visible")
+
+			manifest, err := syncManifestFiltered(dir, test.excludes, test.includes)
+			if test.wantError {
+				if err == nil || !strings.Contains(err.Error(), `tracked path "hidden/drop.txt"`) {
+					t.Fatalf("manifest=%#v err=%v", manifest, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Join(manifest.Files, ",") != "visible/keep.txt" {
+				t.Fatalf("manifest files=%v", manifest.Files)
+			}
+		})
+	}
+}
+
+func TestSyncManifestAllowsIntentionalDeletionInMaterializedSparseCheckout(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	writeFile(t, filepath.Join(dir, "keep.txt"), "keep\n")
+	writeFile(t, filepath.Join(dir, "deleted.txt"), "delete\n")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	runGit(t, dir, "sparse-checkout", "set", "--no-cone", "/*")
+
+	if _, err := syncManifestFiltered(dir, nil, nil); err != nil {
+		t.Fatalf("fully materialized sparse checkout: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, "deleted.txt")); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := syncManifestFiltered(dir, nil, nil)
+	if err != nil {
+		if strings.Contains(err.Error(), "Git 2.41") {
+			t.Skipf("intentional deletion classification requires Git 2.41+: %v", err)
+		}
+		t.Fatal(err)
+	}
+	if strings.Join(manifest.Deleted, ",") != "deleted.txt" {
+		t.Fatalf("deleted=%v", manifest.Deleted)
+	}
+}
+
+func TestSyncManifestTreatsSymlinksAsFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink fixture requires Unix semantics")
+	}
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	writeFile(t, filepath.Join(dir, "visible", "keep.txt"), "keep\n")
+	if err := os.MkdirAll(filepath.Join(dir, "hidden"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("missing-target", filepath.Join(dir, "hidden", "link.txt")); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	runGit(t, dir, "sparse-checkout", "set", "--no-cone", "/*")
+	runGit(t, dir, "update-index", "--skip-worktree", "hidden/link.txt")
+
+	manifest, err := syncManifestFiltered(dir, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(manifest.Files, ","), "hidden/link.txt") {
+		t.Fatalf("manifest files=%v", manifest.Files)
+	}
+
+	runGit(t, dir, "update-index", "--no-skip-worktree", "hidden/link.txt")
+	runGit(t, dir, "sparse-checkout", "set", "visible")
+	if _, err := syncManifestFiltered(dir, nil, nil); err == nil || !strings.Contains(err.Error(), "hidden/link.txt") {
+		t.Fatalf("absent sparse symlink err=%v", err)
+	}
+}
+
+func TestSyncManifestIgnoresGitlinksButWholeCheckoutGuardDoesNot(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	writeFile(t, filepath.Join(dir, "visible", "keep.txt"), "keep\n")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "base")
+	head := gitOutput(dir, "rev-parse", "HEAD")
+	runGit(t, dir, "update-index", "--add", "--cacheinfo", "160000,"+head+",vendor/submodule")
+	runGit(t, dir, "commit", "-m", "gitlink")
+	runGit(t, dir, "sparse-checkout", "set", "visible")
+
+	manifest, err := syncManifestFiltered(dir, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(manifest.Files, ",") != "visible/keep.txt" || len(manifest.Deleted) != 0 {
+		t.Fatalf("manifest=%#v", manifest)
+	}
+	if omitted, err := GitCheckoutHasHiddenOmissions(dir); err != nil || !omitted {
+		t.Fatalf("whole checkout omission=%v err=%v", omitted, err)
+	}
+}
+
+func TestSyncManifestRejectsMixedFileGitlinkConflictInEffectiveScope(t *testing.T) {
+	tests := []struct {
+		name      string
+		excludes  []string
+		includes  []string
+		wantError bool
+	}{
+		{name: "in scope", wantError: true},
+		{name: "outside include", includes: []string{"visible.txt"}},
+		{name: "excluded", excludes: []string{"conflict.txt"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			runGit(t, dir, "init")
+			runGit(t, dir, "config", "user.email", "test@example.com")
+			runGit(t, dir, "config", "user.name", "Test")
+			writeFile(t, filepath.Join(dir, "visible.txt"), "visible\n")
+			writeFile(t, filepath.Join(dir, "conflict.txt"), "conflict\n")
+			runGit(t, dir, "add", ".")
+			runGit(t, dir, "commit", "-m", "base")
+			setUnmergedIndexModes(t, dir, "conflict.txt", "100644", "160000", "100644")
+
+			manifest, err := syncManifestFiltered(dir, test.excludes, test.includes)
+			if test.wantError {
+				if err == nil ||
+					!strings.Contains(err.Error(), `tracked path "conflict.txt"`) ||
+					!strings.Contains(err.Error(), "file mode 100644 at stage 1") ||
+					!strings.Contains(err.Error(), "gitlink mode 160000 at stage 2") {
+					t.Fatalf("manifest=%#v err=%v", manifest, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Join(manifest.Files, ",") != "visible.txt" {
+				t.Fatalf("manifest files=%v", manifest.Files)
+			}
+		})
+	}
+}
+
+func TestSyncManifestKeepsFileLikeConflict(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	writeFile(t, filepath.Join(dir, "conflict.txt"), "conflict\n")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "base")
+	setUnmergedIndexModes(t, dir, "conflict.txt", "100644", "100755", "100644")
+
+	manifest, err := syncManifestFiltered(dir, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(manifest.Files, ",") != "conflict.txt" {
+		t.Fatalf("manifest files=%v", manifest.Files)
 	}
 }
 
@@ -784,6 +1077,57 @@ func TestSyncManifestDoesNotDeleteRecreatedStagedDelete(t *testing.T) {
 	}
 }
 
+func TestSyncManifestDoesNotDeleteStagedGitlink(t *testing.T) {
+	tests := []struct {
+		name     string
+		excludes []string
+		includes []string
+		want     string
+	}{
+		{name: "effective scope", want: "deleted.txt"},
+		{name: "gitlink only", includes: []string{"vendor/submodule"}},
+		{name: "outside include", includes: []string{"visible.txt"}},
+		{name: "ordinary deletion only", includes: []string{"deleted.txt"}, want: "deleted.txt"},
+		{name: "excluded", excludes: []string{"vendor/submodule"}, want: "deleted.txt"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			runGit(t, dir, "init")
+			runGit(t, dir, "config", "user.email", "test@example.com")
+			runGit(t, dir, "config", "user.name", "Test")
+			writeFile(t, filepath.Join(dir, "visible.txt"), "visible\n")
+			writeFile(t, filepath.Join(dir, "deleted.txt"), "delete\n")
+			runGit(t, dir, "add", ".")
+			runGit(t, dir, "commit", "-m", "base")
+			head := gitOutput(dir, "rev-parse", "HEAD")
+			runGit(t, dir, "update-index", "--add", "--cacheinfo", "160000,"+head+",vendor/submodule")
+			runGit(t, dir, "commit", "-m", "gitlink")
+			runGit(t, dir, "rm", "--cached", "vendor/submodule")
+			if err := os.Remove(filepath.Join(dir, "deleted.txt")); err != nil {
+				t.Fatal(err)
+			}
+
+			tracked, err := loadGitTrackedPaths(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range tracked {
+				if entry.name == "vendor/submodule" {
+					t.Fatalf("staged gitlink deletion retained current index entry: %#v", entry)
+				}
+			}
+			manifest, err := syncManifestFiltered(dir, test.excludes, test.includes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Join(manifest.Deleted, ","); got != test.want {
+				t.Fatalf("deleted=%q want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestRemoteGitSeedCandidateRequiresRemoteTrackingRef(t *testing.T) {
 	dir := t.TempDir()
 	runGit(t, dir, "init")
@@ -956,6 +1300,27 @@ func runGit(t *testing.T, dir string, args ...string) {
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+func setUnmergedIndexModes(t *testing.T, dir, rel string, modes ...string) {
+	t.Helper()
+	runGit(t, dir, "update-index", "--force-remove", "--", rel)
+	blob := gitOutput(dir, "hash-object", "--", rel)
+	commit := gitOutput(dir, "rev-parse", "HEAD")
+	var input strings.Builder
+	for i, mode := range modes {
+		object := blob
+		if mode == "160000" {
+			object = commit
+		}
+		fmt.Fprintf(&input, "%s %s %d\t%s\n", mode, object, i+1, rel)
+	}
+	cmd := exec.Command("git", "update-index", "--index-info")
+	cmd.Dir = dir
+	cmd.Stdin = strings.NewReader(input.String())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("create unmerged index for %q: %v\n%s", rel, err, out)
 	}
 }
 

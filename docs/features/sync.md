@@ -27,6 +27,17 @@ That list is then filtered by the active excludes:
 - repo-local `sync.exclude` (config) patterns;
 - root `.crabboxignore` patterns.
 
+Before transfer, Crabbox checks tracked paths that remain in the effective
+manifest scope. If sparse-checkout rules or `skip-worktree` state hide one of
+those paths, sync stops instead of treating the omission as a deletion. Hidden
+paths outside `sync.include` or removed by ordered excludes are ignored.
+Gitlinks are not manifest files or remote file deletions, while symlinks remain
+file-like.
+
+Git 2.41 or newer distinguishes an intentional in-scope deletion from a sparse
+omission after index metadata becomes ambiguous. Older Git fails closed only
+for an ambiguous missing path that remains in the effective manifest scope.
+
 Git-ignored output, dependency folders, `.git`, and common local caches stay out
 of the transfer. This keeps a first sync close to what CI would see while still
 letting you test uncommitted local edits.
