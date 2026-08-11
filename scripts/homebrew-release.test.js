@@ -909,7 +909,10 @@ test("blocked v0.37.0 record stops before the mocked brew executable", () => {
       },
     );
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /release v0\.37\.0 is blocked|protected downstream verifier tooling is dirty/);
+    assert.match(
+      result.stderr,
+      /release v0\.37\.0 is blocked|protected downstream verifier tooling is dirty|protected tooling commit is not in canonical default-branch history/,
+    );
     assert.equal(fs.existsSync(marker), false, "brew ran despite the protected blocked record");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
