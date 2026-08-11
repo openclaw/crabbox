@@ -643,6 +643,7 @@ type FailureCaptureMetadata struct {
 	LeaseID        string
 	Slug           string
 	RunID          string
+	CommandDisplay string
 	Workdir        string
 	ExitCode       int
 	ActionsRunURL  string
@@ -763,11 +764,18 @@ func writeLocalFailureBundle(name, remoteTarPath string, meta FailureCaptureMeta
 }
 
 func addFailureBundleMetadata(tw *tar.Writer, meta FailureCaptureMetadata) error {
+	commandSecrets := configuredDiagnosticSecrets(meta.Config)
+	for _, value := range meta.Env {
+		if strings.TrimSpace(value) != "" {
+			commandSecrets = append(commandSecrets, value)
+		}
+	}
 	run := map[string]any{
 		"provider":          meta.Provider,
 		"leaseId":           meta.LeaseID,
 		"slug":              meta.Slug,
 		"runId":             meta.RunID,
+		"command":           RedactDiagnosticSecrets(meta.CommandDisplay, commandSecrets...),
 		"workdir":           meta.Workdir,
 		"exitCode":          meta.ExitCode,
 		"actionsRunUrl":     meta.ActionsRunURL,

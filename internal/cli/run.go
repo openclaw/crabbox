@@ -1925,6 +1925,7 @@ afterSync:
 			LeaseID:        leaseID,
 			Slug:           serverSlug(server),
 			RunID:          executionRunID,
+			CommandDisplay: commandDisplay,
 			Workdir:        workdir,
 			ExitCode:       code,
 			ActionsRunURL:  actionsURL,

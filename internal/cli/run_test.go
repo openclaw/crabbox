@@ -2797,17 +2797,61 @@ func TestWriteLocalFailureBundleIncludesMetadataStreamsAndRemoteFiles(t *testing
 		t.Fatalf("remote capture command failed: %v\n%s", err, out)
 	}
 
+	const (
+		urlUser     = "url-user"
+		urlPassword = "url-password"
+	)
+	knownSecrets := []string{
+		"configured-overlap-secret",
+		"overlap-secret",
+		"configured-profile-secret",
+		"forwarded-exact-secret",
+		"q7x",
+		"z9q",
+		urlUser,
+		urlPassword,
+		"query-token",
+		"assignment-token",
+		"client-token",
+		"header-token",
+	}
+	commandDisplay := strings.Join([]string{
+		"deploy --region us-west-2 --artifact report.json",
+		"--endpoint=https://" + urlUser + ":" + urlPassword + "@example.test/v1?token=query-token&trace=keep",
+		"api-key=assignment-token client-secret:client-token --token=forwarded-exact-secret",
+		"configured-overlap-secret overlap-secret configured-profile-secret",
+		"forwarded-exact-secret forwarded-exact-secret q7x",
+		"--header 'Authorization: Bearer header-token'",
+		"z9q",
+	}, " ")
 	local, _, err := writeLocalFailureBundle("bundle.tar.gz", filepath.Join(remoteWorkdir, ".crabbox", "remote.tar.gz"), FailureCaptureMetadata{
-		Provider:   "aws",
-		LeaseID:    "cbx_123",
-		Slug:       "blue-crab",
-		RunID:      "run_123",
-		Workdir:    "/work/crabbox/cbx_123/repo",
-		ExitCode:   7,
-		Timing:     timingReport{Provider: "aws", LeaseID: "cbx_123", ExitCode: 7},
-		EnvAllow:   []string{"API_TOKEN"},
-		Env:        map[string]string{"API_TOKEN": "secret-value"},
-		Config:     Config{Provider: "aws", TargetOS: targetLinux, Class: "standard", IdleTimeout: time.Minute, TTL: time.Hour, WorkRoot: "/work/crabbox"},
+		Provider:       "aws",
+		LeaseID:        "cbx_123",
+		Slug:           "blue-crab",
+		RunID:          "run_123",
+		CommandDisplay: commandDisplay,
+		Workdir:        "/work/crabbox/cbx_123/repo",
+		ExitCode:       7,
+		Timing:         timingReport{Provider: "aws", LeaseID: "cbx_123", ExitCode: 7},
+		EnvAllow:       []string{"API_TOKEN", "OVERLAP_TOKEN", "SHORT_SECRET", "TRAILING_SECRET"},
+		Env: map[string]string{
+			"API_TOKEN":       "forwarded-exact-secret",
+			"OVERLAP_TOKEN":   "overlap-secret",
+			"SHORT_SECRET":    "q7x",
+			"TRAILING_SECRET": "z9q ",
+		},
+		Config: Config{
+			Provider:    "aws",
+			TargetOS:    targetLinux,
+			Class:       "standard",
+			IdleTimeout: time.Minute,
+			TTL:         time.Hour,
+			WorkRoot:    "/work/crabbox",
+			CoordToken:  "configured-overlap-secret",
+			Profiles: map[string]ProfileConfig{
+				"proof": {Env: map[string]string{"SERVICE_TOKEN": "configured-profile-secret"}},
+			},
+		},
 		StdoutPath: stdoutPath,
 		StderrPath: stderrPath,
 	})
@@ -2828,9 +2872,29 @@ func TestWriteLocalFailureBundleIncludesMetadataStreamsAndRemoteFiles(t *testing
 			t.Fatalf("bundle missing %q; entries=%#v", want, contents)
 		}
 	}
+	var runMetadata struct {
+		Command string `json:"command"`
+		RunID   string `json:"runId"`
+	}
+	if err := json.Unmarshal(contents["crabbox-artifacts/crabbox-run.json"], &runMetadata); err != nil {
+		t.Fatalf("decode crabbox-run.json: %v", err)
+	}
+	if runMetadata.RunID != "run_123" {
+		t.Fatalf("run metadata ID=%q, want durable run_123", runMetadata.RunID)
+	}
+	for _, want := range []string{"deploy", "--region us-west-2", "--artifact report.json", "example.test/v1", "trace=keep"} {
+		if !strings.Contains(runMetadata.Command, want) {
+			t.Fatalf("redacted command lost harmless context %q: %q", want, runMetadata.Command)
+		}
+	}
+	if !strings.Contains(runMetadata.Command, diagnosticRedaction) {
+		t.Fatalf("command metadata contains no redaction marker: %q", runMetadata.Command)
+	}
 	for name, data := range contents {
-		if bytes.Contains(data, []byte("secret-value")) {
-			t.Fatalf("bundle entry %s leaked secret value", name)
+		for _, secret := range knownSecrets {
+			if bytes.Contains(data, []byte(secret)) {
+				t.Fatalf("bundle entry %s leaked known secret %q", name, secret)
+			}
 		}
 	}
 }
@@ -2914,15 +2978,16 @@ func TestNativeWindowsFailureBundleUsesLocalStreams(t *testing.T) {
 		t.Fatal(err)
 	}
 	local, _, err := captureFailureBundle(context.Background(), SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, "C:\\crabbox\\repo", "cbx_win", "run_win", FailureCaptureMetadata{
-		Provider:   "aws",
-		LeaseID:    "cbx_win",
-		RunID:      "run_win",
-		Workdir:    "C:\\crabbox\\repo",
-		ExitCode:   9,
-		Timing:     timingReport{Provider: "aws", LeaseID: "cbx_win", ExitCode: 9},
-		Config:     Config{Provider: "aws", TargetOS: targetWindows, WindowsMode: windowsModeNormal},
-		StdoutPath: stdoutPath,
-		StderrPath: stderrPath,
+		Provider:       "aws",
+		LeaseID:        "cbx_win",
+		RunID:          "run_win",
+		CommandDisplay: "dotnet test --configuration Release",
+		Workdir:        "C:\\crabbox\\repo",
+		ExitCode:       9,
+		Timing:         timingReport{Provider: "aws", LeaseID: "cbx_win", ExitCode: 9},
+		Config:         Config{Provider: "aws", TargetOS: targetWindows, WindowsMode: windowsModeNormal},
+		StdoutPath:     stdoutPath,
+		StderrPath:     stderrPath,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2933,6 +2998,16 @@ func TestNativeWindowsFailureBundleUsesLocalStreams(t *testing.T) {
 	}
 	if !bytes.Contains(contents["crabbox-artifacts/stderr.log"], []byte("native stderr")) {
 		t.Fatalf("stderr missing: %#v", contents["crabbox-artifacts/stderr.log"])
+	}
+	var runMetadata struct {
+		Command string `json:"command"`
+		RunID   string `json:"runId"`
+	}
+	if err := json.Unmarshal(contents["crabbox-artifacts/crabbox-run.json"], &runMetadata); err != nil {
+		t.Fatalf("decode native Windows crabbox-run.json: %v", err)
+	}
+	if runMetadata.Command != "dotnet test --configuration Release" || runMetadata.RunID != "run_win" {
+		t.Fatalf("native Windows run metadata=%+v", runMetadata)
 	}
 	if _, ok := contents["crabbox-artifacts/remote/.crabbox/capture-manifest.txt"]; ok {
 		t.Fatalf("native Windows bundle should be local-only: %#v", contents)
