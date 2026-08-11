@@ -137,12 +137,12 @@ test("AWS devtools mint wrapper defaults to dry plan", async () => {
   await assert.rejects(readFile(fake.log, "utf8"));
 });
 
-test("AWS developer image smoke requires TruffleHog on Linux and Windows", async () => {
+test("AWS developer image smoke executes package managers and requires TruffleHog", async () => {
   const text = await readFile(script, "utf8");
   assert.match(text, /pnpm --version\ntrufflehog --no-update --version\ndocker --version/);
   assert.match(
     text,
-    /command -v pnpm\ncommand -v trufflehog\ntrufflehog --no-update --version\ncommand -v docker/,
+    /command -v pnpm\ncommand -v trufflehog\ntrufflehog --no-update --version\ncommand -v docker\nnode --version\nnode -e .*\ncorepack --version\npnpm --version\n/,
   );
 });
 
@@ -183,6 +183,8 @@ test("AWS devtools mint wrapper runs linux source candidate and promoted proof",
   assert.doesNotMatch(log, /warmup .*--region us-west-2/);
   assert.match(log, /run --provider aws --target linux --id cbx_source --no-sync --script/);
   assert.match(log, /run --provider aws --target linux --id cbx_source --no-sync --shell -- set -euo pipefail/);
+  assert.equal((log.match(/corepack --version/g) ?? []).length, 3);
+  assert.equal((log.match(/pnpm --version/g) ?? []).length, 3);
   assert.match(log, /docker image inspect hello-world ubuntu:24\.04 node:24-bookworm/);
   assert.match(log, /env CRABBOX_AWS_REGION=us-west-2 AWS_REGION=us-west-2 CRABBOX_AWS_AMI= args checkpoint create --provider aws --target linux --id cbx_source --name crabbox-linux-devtools-/);
   assert.match(log, /--mode native --strategy image --no-reboot=false --wait --wait-timeout 60m/);

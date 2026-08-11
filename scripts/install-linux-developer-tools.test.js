@@ -58,6 +58,112 @@ esac
 	);
 }
 
+function runNeedRootFixture(uid, args = [], env = {}) {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-linux-tools-sudo-"));
+	const bin = path.join(dir, "bin");
+	const sudoLog = path.join(dir, "sudo.log");
+	fs.mkdirSync(bin);
+	writeExecutable(
+		path.join(bin, "id"),
+		`#!/usr/bin/env bash
+[[ "$*" == "-u" ]] || exit 64
+printf '${uid}\n'
+`,
+	);
+	writeExecutable(
+		path.join(bin, "sudo"),
+		`#!/usr/bin/env bash
+set -euo pipefail
+printf 'arg=%s\n' "$@" >"$CRABBOX_FAKE_SUDO_LOG"
+preserve_arg=""
+for arg in "$@"; do
+  case "$arg" in
+    --preserve-env=*) preserve_arg="\${arg#--preserve-env=}" ;;
+  esac
+done
+IFS=',' read -ra preserved <<<"$preserve_arg"
+for name in "\${preserved[@]}"; do
+  printf 'env=%s=%s\n' "$name" "\${!name-}" >>"$CRABBOX_FAKE_SUDO_LOG"
+done
+`,
+	);
+
+	return {
+		result: spawnSync(
+			"bash",
+			["-c", `source scripts/install-linux-developer-tools.sh\nneed_root ${args.join(" ")}`],
+			{
+				cwd: repoRoot,
+				env: {
+					...process.env,
+					...env,
+					PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+					CRABBOX_FAKE_SUDO_LOG: sudoLog,
+				},
+				encoding: "utf8",
+			},
+		),
+		sudoLog,
+	};
+}
+
+test("linux developer tool setup isolates root HOME and preserves approved configuration", () => {
+	const script = fs.readFileSync(
+		path.join(repoRoot, "scripts/install-linux-developer-tools.sh"),
+		"utf8",
+	);
+	const configured = [
+		...script.matchAll(/\$\{(CRABBOX_LINUX_[A-Z0-9_]+):-/g),
+	].map((match) => match[1]);
+	const proxyEnv = [
+		"HTTP_PROXY",
+		"HTTPS_PROXY",
+		"NO_PROXY",
+		"http_proxy",
+		"https_proxy",
+		"no_proxy",
+		"ALL_PROXY",
+		"all_proxy",
+	];
+	const expectedEnv = Object.fromEntries(
+		[...configured, ...proxyEnv].map((name, index) => [
+			name,
+			`${name.toLowerCase()}-sentinel-${index}`,
+		]),
+	);
+	const unrelatedName = "CRABBOX_UNRELATED_SENTINEL";
+	const unrelatedValue = "must-not-cross-sudo";
+	const { result, sudoLog } = runNeedRootFixture(1000, ["sentinel"], {
+		...expectedEnv,
+		[unrelatedName]: unrelatedValue,
+	});
+	assert.equal(result.status, 0, result.stderr || result.stdout);
+	const lines = fs.readFileSync(sudoLog, "utf8").trim().split("\n");
+	const args = lines.filter((line) => line.startsWith("arg=")).map((line) => line.slice(4));
+	assert.equal(args[0], "-H");
+	assert.doesNotMatch(args.join("\n"), /^-E$/m);
+	const preserveArg = args.find((arg) => arg.startsWith("--preserve-env="));
+	assert.ok(preserveArg, "sudo re-exec must preserve approved installer configuration");
+	const preserved = preserveArg.slice("--preserve-env=".length).split(",");
+	assert.deepEqual([...preserved].sort(), [...configured, ...proxyEnv].sort());
+	assert.equal(preserved.includes("HOME"), false);
+	assert.equal(preserved.includes(unrelatedName), false);
+	const forwarded = Object.fromEntries(
+		lines.filter((line) => line.startsWith("env=")).map((line) => {
+			const separator = line.indexOf("=", 4);
+			return [line.slice(4, separator), line.slice(separator + 1)];
+		}),
+	);
+	assert.deepEqual(forwarded, expectedEnv);
+	assert.doesNotMatch(lines.join("\n"), new RegExp(`${unrelatedName}|${unrelatedValue}`));
+});
+
+test("linux developer tool setup does not invoke sudo when already root", () => {
+	const { result, sudoLog } = runNeedRootFixture(0);
+	assert.equal(result.status, 0, result.stderr || result.stdout);
+	assert.equal(fs.existsSync(sudoLog), false);
+});
+
 test("linux developer tool repository setup rewrites keyrings idempotently", () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-linux-tools-"));
 	const bin = path.join(dir, "bin");
