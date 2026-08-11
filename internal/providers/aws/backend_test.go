@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"maps"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -663,6 +664,56 @@ func TestAWSFixedAcquireRecoversCommitThenTimeoutAfterFreshBackend(t *testing.T)
 	}
 	if lease.Server.CloudID != "i-fixed" || fake.createCalls != 1 || resourceCount != 1 {
 		t.Fatalf("lease=%#v creates=%d resources=%d", lease, fake.createCalls, resourceCount)
+	}
+}
+
+func TestAWSFixedAcquireTerminalizesDefinitiveProviderRejection(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	fake := &fakeAWSClient{}
+	fake.controlCreate = func(control *core.AWSFixedCreateControl, cfg Config, leaseID, _ string) (Server, Config, error) {
+		fake.createCalls++
+		attempt := fixedAWSTestAttempt(cfg)
+		if err := control.BeforeAttempt(attempt); err != nil {
+			return Server{}, cfg, err
+		}
+		control.PinnedAttempt = &attempt
+		control.TerminalRejection = true
+		if err := control.DefiniteFailure(attempt); err != nil {
+			return Server{}, cfg, err
+		}
+		control.PinnedAttempt = nil
+		return Server{}, cfg, errors.New("AWS RunInstances rejected request (Blocked)")
+	}
+	restore := installFixedAWSTestClient(t, fake)
+	defer restore()
+	req := AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, Keep: true, RequestedLeaseID: "cbx_abcdef123488", RequestedSlug: "terminal-rejection"}
+	backend := NewAWSLeaseBackend(ProviderSpec{}, fixedAWSTestConfig(), Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+
+	_, err := backend.Acquire(context.Background(), req)
+	var exitErr core.ExitError
+	if !core.AsExitError(err, &exitErr) || exitErr.Code != 4 || !strings.Contains(err.Error(), "lease_id_conflict") {
+		t.Fatalf("err=%v, want terminal lease conflict", err)
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
+	if err != nil || !exists || claim.FixedCreateIntent == nil {
+		t.Fatalf("claim=%#v exists=%t err=%v", claim, exists, err)
+	}
+	if err := validateFixedAWSTerminalClaim(claim, core.LeaseClaim{}, req.RequestedLeaseID); err != nil {
+		t.Fatalf("terminal claim: %v", err)
+	}
+	keyPath, err := core.TestboxKeyPath(req.RequestedLeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("stored key survived terminal no-allocation result: %v", err)
+	}
+	creates := fake.createCalls
+	if _, err := backend.Acquire(context.Background(), req); err == nil || !strings.Contains(err.Error(), "terminal") {
+		t.Fatalf("terminal replay err=%v", err)
+	}
+	if fake.createCalls != creates {
+		t.Fatalf("terminal replay called create: before=%d after=%d", creates, fake.createCalls)
 	}
 }
 

@@ -211,6 +211,119 @@ func TestAWSFixedPinnedAttemptNeverResubmitsRunInstances(t *testing.T) {
 	}
 }
 
+func TestAWSFixedTerminalRunInstancesRejectionCleansKeyBeforeClearingAttempt(t *testing.T) {
+	publicKey := testOpenSSHPublicKey("ssh-ed25519", testBytes(32, 11))
+	const keyPairID = "key-terminal-rejection"
+	var actions []string
+	deleteDenied := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		params, err := url.ParseQuery(string(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		action := params.Get("Action")
+		actions = append(actions, action)
+		switch action {
+		case "DescribeKeyPairs":
+			writeEC2Error(w, "InvalidKeyPair.NotFound", "missing", http.StatusBadRequest)
+		case "ImportKeyPair":
+			writeEC2XML(w, `<ImportKeyPairResponse><keyName>crabbox-test</keyName><keyPairId>`+keyPairID+`</keyPairId></ImportKeyPairResponse>`)
+		case "DescribeSecurityGroups":
+			writeEC2XML(w, `<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-fixed</groupId></item></securityGroupInfo></DescribeSecurityGroupsResponse>`)
+		case "AuthorizeSecurityGroupIngress":
+			writeEC2XML(w, `<AuthorizeSecurityGroupIngressResponse />`)
+		case "RunInstances":
+			writeEC2Error(w, "Blocked", "encoded authorization detail must not escape", http.StatusBadRequest)
+		case "DeleteKeyPair":
+			if got := params.Get("KeyPairId"); got != keyPairID {
+				t.Fatalf("KeyPairId=%q, want %q", got, keyPairID)
+			}
+			if deleteDenied {
+				writeEC2Error(w, "UnauthorizedOperation", "encoded cleanup authorization detail must not escape", http.StatusForbidden)
+				return
+			}
+			writeEC2XML(w, `<DeleteKeyPairResponse><return>true</return></DeleteKeyPairResponse>`)
+		default:
+			writeEC2Error(w, "Unexpected", action, http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	persisted := false
+	cleared := false
+	newControl := func() *AWSFixedCreateControl {
+		control := &AWSFixedCreateControl{
+			CreatedAt: time.Now().UTC(), IntentFingerprint: strings.Repeat("b", 64),
+			AccountID: "123456789012", FailedTokens: map[string]bool{},
+		}
+		control.BeforeAttempt = func(AWSLaunchAttempt) error {
+			persisted = true
+			return nil
+		}
+		control.DefiniteFailure = func(AWSLaunchAttempt) error {
+			if got := actions[len(actions)-1]; got != "DeleteKeyPair" {
+				t.Fatalf("attempt cleared before support-resource cleanup: last action=%s", got)
+			}
+			cleared = true
+			return nil
+		}
+		return control
+	}
+	control := newControl()
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.ProviderKey = "crabbox-test"
+	cfg.AWSAMI = "ami-fixed"
+	cfg.AWSSGID = "sg-fixed"
+	cfg.ServerType = "t3.medium"
+	cfg.ServerTypeExplicit = true
+	cfg.Capacity.Market = "on-demand"
+	cfg.SSHPort = "22"
+	cfg.SSHFallbackPorts = nil
+
+	_, _, err := testAWSClient(server.URL).createServerWithFallbackInRegion(
+		context.Background(), cfg, publicKey, "cbx_abcdef123456", "fixed", true, nil, control,
+	)
+	if err == nil || !strings.Contains(err.Error(), "AWS RunInstances rejected request (Blocked)") {
+		t.Fatalf("err=%v, want sanitized terminal rejection", err)
+	}
+	if strings.Contains(err.Error(), "encoded authorization detail") {
+		t.Fatalf("terminal rejection leaked provider detail: %v", err)
+	}
+	if !persisted || !cleared || control.PinnedAttempt != nil {
+		t.Fatalf("persisted=%t cleared=%t pinned=%#v", persisted, cleared, control.PinnedAttempt)
+	}
+	wantActions := []string{"DescribeKeyPairs", "ImportKeyPair", "DescribeSecurityGroups", "AuthorizeSecurityGroupIngress", "RunInstances", "DeleteKeyPair"}
+	if !slices.Equal(actions, wantActions) {
+		t.Fatalf("actions=%v, want %v", actions, wantActions)
+	}
+
+	actions = nil
+	persisted = false
+	cleared = false
+	deleteDenied = true
+	control = newControl()
+	_, _, err = testAWSClient(server.URL).createServerWithFallbackInRegion(
+		context.Background(), cfg, publicKey, "cbx_abcdef123457", "fixed", true, nil, control,
+	)
+	if err == nil || !strings.Contains(err.Error(), "AWS DeleteKeyPair rejected request (UnauthorizedOperation)") {
+		t.Fatalf("cleanup err=%v, want sanitized DeleteKeyPair rejection", err)
+	}
+	if strings.Contains(err.Error(), "encoded cleanup authorization detail") {
+		t.Fatalf("cleanup rejection leaked provider detail: %v", err)
+	}
+	if !persisted || cleared || control.PinnedAttempt == nil {
+		t.Fatalf("cleanup failure persisted=%t cleared=%t pinned=%#v", persisted, cleared, control.PinnedAttempt)
+	}
+	if !slices.Equal(actions, wantActions) {
+		t.Fatalf("cleanup failure actions=%v, want %v", actions, wantActions)
+	}
+}
+
 func TestAWSOrdinaryRunInstancesOmitsFixedAttemptTags(t *testing.T) {
 	publicKey := testOpenSSHPublicKey("ssh-ed25519", testBytes(32, 10))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -393,7 +506,7 @@ func TestAWSCreateRollbackDeletesOnlyNewImmutableKeyID(t *testing.T) {
 	defer server.Close()
 
 	cfg := Config{Provider: "aws", ProviderKey: "crabbox-test", AWSAMI: "ami-test", AWSSGID: "sg-test"}
-	_, _, err := testAWSClient(server.URL).createServerWithFallbackInRegion(context.Background(), cfg, publicKey, "cbx_123", "rollback", false, nil)
+	_, _, err := testAWSClient(server.URL).createServerWithFallbackInRegion(context.Background(), cfg, publicKey, "cbx_123", "rollback", false, nil, nil)
 	if err == nil {
 		t.Fatal("expected create failure")
 	}
@@ -430,7 +543,7 @@ func TestAWSCreateRollbackPreservesMatchingUnmanagedKey(t *testing.T) {
 	defer server.Close()
 
 	cfg := Config{Provider: "aws", ProviderKey: "crabbox-test", AWSAMI: "ami-test", AWSSGID: "sg-test"}
-	_, _, err := testAWSClient(server.URL).createServerWithFallbackInRegion(context.Background(), cfg, publicKey, "cbx_123", "rollback", false, nil)
+	_, _, err := testAWSClient(server.URL).createServerWithFallbackInRegion(context.Background(), cfg, publicKey, "cbx_123", "rollback", false, nil, nil)
 	if err == nil {
 		t.Fatal("expected create failure")
 	}
@@ -1077,7 +1190,7 @@ func TestAWSMacOSFallbackResolvesAMIForEachInstanceType(t *testing.T) {
 		SSHPort: "22",
 	}
 
-	serverRecord, resolved, err := client.createServerWithFallbackInRegion(context.Background(), cfg, publicKey, "cbx_123", "mac-test", false, nil)
+	serverRecord, resolved, err := client.createServerWithFallbackInRegion(context.Background(), cfg, publicKey, "cbx_123", "mac-test", false, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"slices"
 	"strconv"
@@ -159,6 +160,9 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req AcquireRequest) 
 		if b.Cfg.Tailscale.Enabled && b.Cfg.Tailscale.AuthKey == "" {
 			return exit(2, "direct --tailscale requires %s to contain a Tailscale auth key; brokered mode uses coordinator OAuth secrets", b.Cfg.Tailscale.AuthKeyEnv)
 		}
+		if exists && isFixedAWSClaim(*claim) && claim.FixedCreateIntent.State == fixedAWSIntentReleased {
+			return exit(4, "lease_id_conflict: fixed lease %s is terminal and cannot be replayed", leaseID)
+		}
 		cfg := b.Cfg
 		client, err := newAWSClient(ctx, cfg)
 		if err != nil {
@@ -178,7 +182,9 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req AcquireRequest) 
 		cfg.AWSSSHCIDRsPinned = len(cfg.AWSSSHCIDRs) > 0
 		ensureAWSSSHCIDRs(ctx, &cfg)
 		requestedSlug := core.NormalizeLeaseSlug(req.RequestedSlug)
-		fingerprint, err := fixedAWSCreateFingerprint(cfg, accountID, requestedSlug, publicKey, req.Keep)
+		fingerprint, err := core.FixedAWSCreateIntentFingerprint(cfg, core.FixedAWSCreateIntentRequest{
+			AccountID: accountID, RequestedSlug: requestedSlug, SSHPublicKey: publicKey, Keep: req.Keep,
+		})
 		if err != nil {
 			return err
 		}
@@ -230,11 +236,7 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req AcquireRequest) 
 		}
 
 		intent := claim.FixedCreateIntent
-		switch intent.State {
-		case fixedAWSIntentPrepared, fixedAWSIntentAcquired:
-		case fixedAWSIntentReleased:
-			return exit(4, "lease_id_conflict: fixed lease %s is terminal and cannot be replayed", leaseID)
-		default:
+		if intent.State != fixedAWSIntentPrepared && intent.State != fixedAWSIntentAcquired {
 			return exit(4, "lease_id_conflict: fixed lease %s has invalid create state %q", leaseID, intent.State)
 		}
 		createdAt, err := time.Parse(time.RFC3339Nano, intent.CreatedAt)
@@ -293,14 +295,22 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req AcquireRequest) 
 				FailedTokens:      failed,
 			}
 			control.BeforeAttempt = func(attempt core.AWSLaunchAttempt) error {
-				encoded, err := fixedAWSAttemptMap(attempt)
+				data, err := json.Marshal(attempt)
 				if err != nil {
 					return err
 				}
-				intent.Attempt = encoded
+				intent.Attempt = map[string]string{"aws": string(data)}
 				return persist()
 			}
 			control.DefiniteFailure = func(attempt core.AWSLaunchAttempt) error {
+				if control.TerminalRejection {
+					*claim = fixedAWSTerminalClaim(*claim, time.Now().UTC())
+					if err := persist(); err != nil {
+						return err
+					}
+					core.RemoveStoredTestboxKey(leaseID)
+					return nil
+				}
 				if !failed[attempt.ClientToken] {
 					intent.FailedAttempts = append(intent.FailedAttempts, attempt.ClientToken)
 					failed[attempt.ClientToken] = true
@@ -313,6 +323,9 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req AcquireRequest) 
 				fmt.Fprintf(b.RT.Stderr, format, args...)
 			}, control)
 			if err != nil {
+				if control.TerminalRejection && control.PinnedAttempt == nil {
+					return exit(4, "lease_id_conflict: fixed AWS lease %s terminated after %v", leaseID, err)
+				}
 				return err
 			}
 		}
@@ -348,7 +361,7 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req AcquireRequest) 
 		claim.Slug = intent.Slug
 		claim.Provider = core.FixedAWSClaimProvider
 		claim.ProviderScope = providerScope
-		claim.Labels = cloneAWSLabels(server.Labels)
+		claim.Labels = maps.Clone(server.Labels)
 		claim.SSHHost = target.Host
 		claim.LastUsedAt = time.Now().UTC().Format(time.RFC3339)
 		if port, parseErr := strconv.Atoi(strings.TrimSpace(target.Port)); parseErr == nil {
@@ -370,15 +383,6 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req AcquireRequest) 
 		}
 	}
 	return acquired, nil
-}
-
-func fixedAWSCreateFingerprint(cfg Config, accountID, requestedSlug, publicKey string, keep bool) (string, error) {
-	return core.FixedAWSCreateIntentFingerprint(cfg, core.FixedAWSCreateIntentRequest{
-		AccountID:     accountID,
-		RequestedSlug: requestedSlug,
-		SSHPublicKey:  publicKey,
-		Keep:          keep,
-	})
 }
 
 func fixedAWSLeaseMatches(servers []LeaseView, leaseID string) []Server {
@@ -450,14 +454,6 @@ func validateFixedAWSAttemptProviderMetadata(server Server, attempt core.AWSLaun
 	return nil
 }
 
-func fixedAWSAttemptMap(attempt core.AWSLaunchAttempt) (map[string]string, error) {
-	data, err := json.Marshal(attempt)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]string{"aws": string(data)}, nil
-}
-
 func fixedAWSAttemptFromIntent(intent *core.FixedCreateIntent) (*core.AWSLaunchAttempt, error) {
 	if len(intent.Attempt) == 0 {
 		return nil, nil
@@ -475,14 +471,6 @@ func fixedAWSAttemptFromIntent(intent *core.FixedCreateIntent) (*core.AWSLaunchA
 		return nil, errors.New("incomplete AWS attempt payload")
 	}
 	return &attempt, nil
-}
-
-func cloneAWSLabels(labels map[string]string) map[string]string {
-	cloned := make(map[string]string, len(labels))
-	for key, value := range labels {
-		cloned[key] = value
-	}
-	return cloned
 }
 
 func (b *awsLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {

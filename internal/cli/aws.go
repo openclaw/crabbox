@@ -25,6 +25,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/servicequotas"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/aws/smithy-go"
 )
 
 const (
@@ -71,6 +72,7 @@ type AWSFixedCreateControl struct {
 	KeyPairID         string
 	PinnedAttempt     *AWSLaunchAttempt
 	FailedTokens      map[string]bool
+	TerminalRejection bool
 	BeforeAttempt     func(AWSLaunchAttempt) error
 	DefiniteFailure   func(AWSLaunchAttempt) error
 }
@@ -512,11 +514,7 @@ func shouldRetryAWSRegionAfterCreateError(err error, control *AWSFixedCreateCont
 	return (control == nil || control.PinnedAttempt == nil) && isRetryableAWSRegionProvisioningError(err)
 }
 
-func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, logf func(string, ...any), controls ...*AWSFixedCreateControl) (result Server, resolved Config, resultErr error) {
-	var control *AWSFixedCreateControl
-	if len(controls) > 0 {
-		control = controls[0]
-	}
+func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, logf func(string, ...any), control *AWSFixedCreateControl) (result Server, resolved Config, resultErr error) {
 	if cfg.ProviderKey == "" {
 		cfg.ProviderKey = "crabbox-steipete"
 	}
@@ -528,13 +526,29 @@ func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Co
 		control.KeyPairID = keyBinding.ID
 	}
 	defer func() {
-		if resultErr == nil || !keyBinding.Created || (control != nil && control.PinnedAttempt != nil) {
+		if resultErr == nil {
 			return
 		}
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
-		defer cancel()
-		if err := c.DeleteCleanupSSHKeyID(cleanupCtx, keyBinding.ID); err != nil {
-			resultErr = errors.Join(resultErr, fmt.Errorf("rollback AWS key pair %s: %w", keyBinding.ID, err))
+		terminal := control != nil && control.TerminalRejection && control.PinnedAttempt != nil
+		cleanupKey := (keyBinding.Created && (control == nil || control.PinnedAttempt == nil)) ||
+			(terminal && keyBinding.Managed)
+		if cleanupKey {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+			defer cancel()
+			if err := c.DeleteCleanupSSHKeyID(cleanupCtx, keyBinding.ID); err != nil {
+				if code := awsAPIErrorCode(err); code != "" {
+					err = fmt.Errorf("AWS DeleteKeyPair rejected request (%s)", code)
+				}
+				resultErr = errors.Join(resultErr, fmt.Errorf("rollback AWS key pair %s: %w", keyBinding.ID, err))
+				return
+			}
+		}
+		if terminal && control.DefiniteFailure != nil {
+			if err := control.DefiniteFailure(*control.PinnedAttempt); err != nil {
+				resultErr = errors.Join(resultErr, err)
+				return
+			}
+			control.PinnedAttempt = nil
 		}
 	}()
 	bindCleanupKey := func(server Server) Server {
@@ -542,9 +556,6 @@ func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Co
 			server.Labels["aws_key_pair_id"] = keyBinding.ID
 		}
 		return server
-	}
-	if control != nil && control.PinnedAttempt != nil {
-		return Server{}, cfg, exit(4, "lease_id_conflict: fixed AWS lease %s has an unresolved launch attempt", leaseID)
 	}
 	staticImageID := ""
 	if cfg.TargetOS != targetMacOS || cfg.AWSAMI != "" {
@@ -562,28 +573,28 @@ func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Co
 	useSpot := cfg.Capacity.Market != "on-demand"
 	var marketFallbackCandidates []string
 	var errs []error
-	for i, instanceType := range candidates {
+	tryCreate := func(instanceType string, spot bool, prefix string) (Server, Config, error) {
 		next := cfg
 		next.ServerType = instanceType
+		imageID, err := c.resolveLaunchAMI(ctx, next, staticImageID)
+		if err != nil {
+			return Server{}, next, fmt.Errorf("%s%s image: %w", prefix, instanceType, err)
+		}
+		server, err := c.createServer(ctx, next, publicKey, leaseID, slug, keep, imageID, securityGroupID, spot, control)
+		if err != nil {
+			return Server{}, next, fmt.Errorf("%s%s: %w", prefix, instanceType, err)
+		}
+		return bindCleanupKey(server), next, nil
+	}
+	for i, instanceType := range candidates {
 		if i > 0 && logf != nil {
 			logf("fallback provisioning type=%s after capacity/quota rejection\n", instanceType)
 		}
-		imageID, err := c.resolveLaunchAMI(ctx, next, staticImageID)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("%s image: %w", instanceType, err))
-			if !isRetryableAWSProvisioningError(err) {
-				return Server{}, next, joinErrors(errs)
-			}
-			if useSpot {
-				marketFallbackCandidates = appendAWSMarketFallbackCandidate(marketFallbackCandidates, instanceType, err)
-			}
-			continue
-		}
-		server, err := c.createServer(ctx, next, publicKey, leaseID, slug, keep, imageID, securityGroupID, useSpot, control)
+		server, next, err := tryCreate(instanceType, useSpot, "")
 		if err == nil {
-			return bindCleanupKey(server), next, nil
+			return server, next, nil
 		}
-		errs = append(errs, fmt.Errorf("%s: %w", instanceType, err))
+		errs = append(errs, err)
 		if !isRetryableAWSProvisioningError(err) {
 			return Server{}, next, joinErrors(errs)
 		}
@@ -593,24 +604,14 @@ func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Co
 	}
 	if len(marketFallbackCandidates) > 0 && strings.HasPrefix(cfg.Capacity.Fallback, "on-demand") {
 		for _, instanceType := range marketFallbackCandidates {
-			next := cfg
-			next.ServerType = instanceType
 			if logf != nil {
 				logf("fallback provisioning type=%s market=on-demand after spot rejection\n", instanceType)
 			}
-			imageID, err := c.resolveLaunchAMI(ctx, next, staticImageID)
-			if err != nil {
-				errs = append(errs, fmt.Errorf("on-demand %s image: %w", instanceType, err))
-				if !isRetryableAWSProvisioningError(err) {
-					return Server{}, next, joinErrors(errs)
-				}
-				continue
-			}
-			server, err := c.createServer(ctx, next, publicKey, leaseID, slug, keep, imageID, securityGroupID, false, control)
+			server, next, err := tryCreate(instanceType, false, "on-demand ")
 			if err == nil {
-				return bindCleanupKey(server), next, nil
+				return server, next, nil
 			}
-			errs = append(errs, fmt.Errorf("on-demand %s: %w", instanceType, err))
+			errs = append(errs, err)
 			if !isRetryableAWSProvisioningError(err) {
 				return Server{}, next, joinErrors(errs)
 			}
@@ -724,7 +725,6 @@ func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 		ImageID:         imageID,
 		SecurityGroupID: securityGroupID,
 		HostID:          cfg.HostID,
-		KeyPairID:       controlKeyPairID(control),
 		ClientToken:     clientToken,
 	}
 	if input.Placement != nil {
@@ -734,6 +734,7 @@ func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 		}
 	}
 	if control != nil {
+		attempt.KeyPairID = control.KeyPairID
 		for key, value := range AWSFixedAttemptAttestationLabels(attempt) {
 			labels[key] = value
 		}
@@ -766,6 +767,14 @@ func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 	}
 	out, err := c.ec2.RunInstances(ctx, input)
 	if err != nil {
+		code := awsAPIErrorCode(err)
+		switch code {
+		case "AuthFailure", "Blocked", "InvalidClientTokenId", "OptInRequired", "PendingVerification", "UnauthorizedOperation":
+			if control != nil {
+				control.TerminalRejection = true
+			}
+			err = fmt.Errorf("AWS RunInstances rejected request (%s)", code)
+		}
 		if control != nil && isRetryableAWSProvisioningError(err) && control.DefiniteFailure != nil {
 			if persistErr := control.DefiniteFailure(attempt); persistErr != nil {
 				return Server{}, errors.Join(err, persistErr)
@@ -780,11 +789,12 @@ func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 	return awsInstanceToServer(out.Instances[0]), nil
 }
 
-func controlKeyPairID(control *AWSFixedCreateControl) string {
-	if control == nil {
-		return ""
+func awsAPIErrorCode(err error) string {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.ErrorCode()
 	}
-	return control.KeyPairID
+	return ""
 }
 
 func awsFixedAttemptClientToken(leaseID string, cfg Config, imageID, securityGroupID string, spot bool) string {
