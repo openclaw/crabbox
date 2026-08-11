@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Made local sync report actionable non-Git workdir diagnostics and fail before lease acquisition, resolution, preparation, or ready-pool borrowing. Thanks @bunlongheng.
+
 ## 0.41.3 - 2026-08-11
 
 ### Fixed
