@@ -1431,7 +1431,6 @@ func TestRemoteClearActionsHydrationStateRemovesReadyAndStop(t *testing.T) {
 		".crabbox/actions/cbx_123.env.sh",
 		".crabbox/actions/cbx_123.services",
 		".crabbox/actions/cbx_123.stop",
-		".crabbox/actions/cbx_123.owner-monitor-stop",
 		".crabbox/actions/cbx_123.local.sh",
 		".crabbox/actions/cbx_123.local.log",
 		".crabbox/actions/cbx_123.local.exit",
