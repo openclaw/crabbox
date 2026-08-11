@@ -40,7 +40,11 @@ skipped). This changes selection only: an explicit path inside the active
 repository, or a symlink that resolves into it, still has repository trust.
 `config show` reflects the resulting effective values, including
 provider defaults applied at load time; per-command flags are not part of what
-it reports.
+it reports. The provider line also includes `provider_source` (and JSON includes
+`providerSource`) so diagnostics distinguish a `compiled_default` from a
+selection in `user_config`, `repo_config`, or the `environment`. Passing
+`config show --provider <name>` reports `flag` because that command-scoped
+override wins the merge.
 
 Secrets are never printed. Token-bearing fields are reduced to a status word:
 

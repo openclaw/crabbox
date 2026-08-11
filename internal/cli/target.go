@@ -312,7 +312,7 @@ func autoRouteStaticLease(cfg *Config, fs *flag.FlagSet, id string) error {
 		return nil
 	}
 	if !flagWasSet(fs, "provider") {
-		cfg.Provider = staticProvider
+		setProviderSelection(cfg, staticProvider, providerSelectionLeaseContext)
 	}
 	if !isStaticProvider(cfg.Provider) {
 		return nil
@@ -383,7 +383,7 @@ func autoRouteExternalLeaseWithHints(cfg *Config, id string, routingExplicit, ta
 	}
 	if routingExplicit {
 		if !cfg.providerExplicit {
-			cfg.Provider = "external"
+			setProviderSelection(cfg, "external", providerSelectionFlag)
 		}
 		return restoreExternalLeaseTarget(cfg, targetExplicit, windowsModeExplicit)
 	}
@@ -413,7 +413,7 @@ func autoRouteExternalLeaseWithHints(cfg *Config, id string, routingExplicit, ta
 		return err
 	}
 	if !cfg.providerExplicit {
-		cfg.Provider = "external"
+		setProviderSelection(cfg, "external", providerSelectionLeaseContext)
 	}
 	if err := loadExternalRoutingConfig(cfg, path, true); err != nil {
 		return err

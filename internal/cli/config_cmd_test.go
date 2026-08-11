@@ -11,6 +11,34 @@ import (
 	"time"
 )
 
+func TestConfigShowReportsProviderSelectionSource(t *testing.T) {
+	t.Run("compiled default text", func(t *testing.T) {
+		isolateDoctorProviderSelectionTest(t)
+		var stdout, stderr bytes.Buffer
+		if err := (App{Stdout: &stdout, Stderr: &stderr}).configShow(nil); err != nil {
+			t.Fatalf("config show error=%v stderr=%q", err, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "provider=hetzner provider_source=compiled_default") {
+			t.Fatalf("config show missing compiled-default provenance:\n%s", stdout.String())
+		}
+	})
+
+	t.Run("command override json", func(t *testing.T) {
+		isolateDoctorProviderSelectionTest(t)
+		var stdout, stderr bytes.Buffer
+		if err := (App{Stdout: &stdout, Stderr: &stderr}).configShow([]string{"--provider", "hetzner", "--json"}); err != nil {
+			t.Fatalf("config show error=%v stderr=%q", err, stderr.String())
+		}
+		var view map[string]any
+		if err := json.Unmarshal(stdout.Bytes(), &view); err != nil {
+			t.Fatalf("config show JSON invalid: %v\n%s", err, stdout.String())
+		}
+		if view["provider"] != "hetzner" || view["providerSource"] != "flag" {
+			t.Fatalf("config show provider provenance=%#v", view)
+		}
+	})
+}
+
 func TestNamespaceInstanceConfigShowRedactsEndpointCredentials(t *testing.T) {
 	cfg := baseConfig()
 	cfg.NamespaceInstance.Endpoint = "https://user:secret@api.example.test/path"

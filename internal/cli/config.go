@@ -18,6 +18,7 @@ import (
 type Config struct {
 	Profile                       string
 	Provider                      string
+	providerSelectionSource       providerSelectionSource
 	externalDesktopCredentialName string
 	externalDesktopCredential     transientSecret
 	externalDesktopEnvDenylist    []string
@@ -254,6 +255,30 @@ type Config struct {
 	Presets                       map[string]PresetConfig
 	ProofTemplates                map[string]ProofTemplateConfig
 	Jobs                          map[string]JobConfig
+}
+
+type providerSelectionSource string
+
+const (
+	providerSelectionCompiledDefault providerSelectionSource = "compiled_default"
+	providerSelectionUserConfig      providerSelectionSource = "user_config"
+	providerSelectionRepoConfig      providerSelectionSource = "repo_config"
+	providerSelectionEnvironment     providerSelectionSource = "environment"
+	providerSelectionFlag            providerSelectionSource = "flag"
+	providerSelectionRecordedRun     providerSelectionSource = "recorded_run"
+	providerSelectionLeaseContext    providerSelectionSource = "lease_context"
+)
+
+func setProviderSelection(cfg *Config, provider string, source providerSelectionSource) {
+	cfg.Provider = provider
+	cfg.providerSelectionSource = source
+}
+
+func providerSelectionSourceForConfigPath(trust configPathTrust) providerSelectionSource {
+	if !trust.trusted {
+		return providerSelectionRepoConfig
+	}
+	return providerSelectionUserConfig
 }
 
 type SyncConfig struct {
@@ -1652,7 +1677,7 @@ func loadConfigWithOverrides(coordinator, provider string) (Config, error) {
 		markCoordinatorDestinationExplicit(&cfg)
 	}
 	if provider = strings.TrimSpace(provider); provider != "" {
-		cfg.Provider = provider
+		setProviderSelection(&cfg, provider, providerSelectionFlag)
 		cfg.brokerProvider = ""
 	}
 	if err := normalizeBrokerConfig(&cfg); err != nil {
@@ -2823,22 +2848,23 @@ func baseConfig() Config {
 	hetznerImage, azureImage, gcpImage, linodeImage, isloImage, containerImage, _ := osImageDefaultProviderImages(osImage)
 	multipassImage, _ := osImageDefaultMultipassImage(osImage)
 	return Config{
-		Profile:          "default",
-		Provider:         provider,
-		TargetOS:         "linux",
-		Architecture:     ArchitectureAMD64,
-		OSImage:          osImage,
-		WindowsMode:      "normal",
-		DesktopEnv:       desktopEnvXFCE,
-		Network:          NetworkAuto,
-		Class:            class,
-		ServerType:       "",
-		BrokerMode:       BrokerModeManaged,
-		BrokerAutoWebVNC: true,
-		Location:         "fsn1",
-		Image:            hetznerImage,
-		AWSRegion:        "eu-west-1",
-		AWSRootGB:        400,
+		Profile:                 "default",
+		Provider:                provider,
+		providerSelectionSource: providerSelectionCompiledDefault,
+		TargetOS:                "linux",
+		Architecture:            ArchitectureAMD64,
+		OSImage:                 osImage,
+		WindowsMode:             "normal",
+		DesktopEnv:              desktopEnvXFCE,
+		Network:                 NetworkAuto,
+		Class:                   class,
+		ServerType:              "",
+		BrokerMode:              BrokerModeManaged,
+		BrokerAutoWebVNC:        true,
+		Location:                "fsn1",
+		Image:                   hetznerImage,
+		AWSRegion:               "eu-west-1",
+		AWSRootGB:               400,
 		AWSLambdaMicroVM: AWSLambdaMicroVMConfig{
 			Workdir: "/workspace/crabbox",
 		},
@@ -5013,11 +5039,11 @@ func applyConfigFile(cfg *Config, path string, trust configPathTrust) error {
 	if !trust.trusted && trust.repositoryRoot != "" {
 		cfg.credentialProvenance.repositoryRoot = trust.repositoryRoot
 	}
-	return applyFileConfigWithTrust(cfg, file, trust.trusted)
+	return applyFileConfigWithTrustAndProviderSource(cfg, file, trust.trusted, providerSelectionSourceForConfigPath(trust))
 }
 
 func applyFileConfig(cfg *Config, file fileConfig) error {
-	return applyFileConfigWithTrust(cfg, file, true)
+	return applyFileConfigWithTrustAndProviderSource(cfg, file, true, providerSelectionUserConfig)
 }
 
 func classifyConfigPath(path string) configPathTrust {
@@ -5076,6 +5102,14 @@ func inlineSSHPublicKey(value string) bool {
 }
 
 func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error {
+	source := providerSelectionRepoConfig
+	if trusted {
+		source = providerSelectionUserConfig
+	}
+	return applyFileConfigWithTrustAndProviderSource(cfg, file, trusted, source)
+}
+
+func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, trusted bool, providerSource providerSelectionSource) error {
 	credentialSource := credentialSourceForFile(trusted)
 	if !trusted && cfg.credentialProvenance.repositoryRoot == "" {
 		if root, err := os.Getwd(); err == nil {
@@ -5086,7 +5120,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 		cfg.Profile = file.Profile
 	}
 	if file.Provider != "" {
-		cfg.Provider = file.Provider
+		setProviderSelection(cfg, file.Provider, providerSource)
 		cfg.brokerProvider = ""
 	}
 	if file.Target != "" {
@@ -5170,7 +5204,7 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 			cfg.credentialProvenance.coordAdminToken = credentialSource
 		}
 		if file.Broker.Provider != "" {
-			cfg.Provider = file.Broker.Provider
+			setProviderSelection(cfg, file.Broker.Provider, providerSource)
 			cfg.brokerProvider = file.Broker.Provider
 		}
 		if file.Broker.Access != nil {
@@ -8130,7 +8164,7 @@ func appleVMEnv(name string) string {
 func applyEnv(cfg *Config) error {
 	cfg.Profile = getenv("CRABBOX_PROFILE", cfg.Profile)
 	if provider := os.Getenv("CRABBOX_PROVIDER"); provider != "" {
-		cfg.Provider = provider
+		setProviderSelection(cfg, provider, providerSelectionEnvironment)
 		cfg.brokerProvider = ""
 	}
 	if t := os.Getenv("CRABBOX_TARGET"); t != "" {

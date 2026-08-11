@@ -1186,6 +1186,7 @@ func applyProviderRoutingFlags(cfg *Config, fs *flag.FlagSet, values providerFla
 func applyProviderFlags(cfg *Config, fs *flag.FlagSet, values providerFlagValues) error {
 	if flagWasSet(fs, "provider") {
 		cfg.providerExplicit = true
+		cfg.providerSelectionSource = providerSelectionFlag
 	}
 	if _, err := routeProviderFlagOverride(cfg, fs, values); err != nil {
 		return err
@@ -1259,7 +1260,7 @@ func routeProviderFlagOverride(cfg *Config, fs *flag.FlagSet, values providerFla
 		if !ok {
 			continue
 		}
-		cfg.Provider = candidate.Name()
+		setProviderSelection(cfg, candidate.Name(), providerSelectionFlag)
 		if err := router.RouteConfig(cfg, fs, values[candidate.Name()]); err != nil {
 			return true, err
 		}

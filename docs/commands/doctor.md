@@ -2,9 +2,11 @@
 
 `crabbox doctor` runs a preflight before you commit to a long workflow. It is
 fast on a healthy machine, non-destructive, and never creates, mutates, or
-deletes provider resources. Run it before your first `crabbox run`, after
-rotating tokens or editing config, and as a sanity check in agent boot
-sequences or CI smoke jobs.
+deletes provider resources. Bare `crabbox doctor` is also the pre-configuration
+local-readiness check: when the provider comes only from Crabbox's compiled
+default, doctor reports that provenance and skips provider credential readiness
+with a warning. Run it before your first `crabbox run`, after rotating tokens or
+editing config, and as a sanity check in agent boot sequences or CI smoke jobs.
 
 ```sh
 crabbox doctor
@@ -28,6 +30,7 @@ selected provider, target, or context:
 
 ```text
 config     writable config file exists and has safe permissions (expects 0600)
+provider-selection selected provider and its winning config source
 tools      provider-applicable local tools are present and executable
 remote     optional SSH/tool probe against a resolved lease (--id / --from-run)
 coord      coordinator URL is reachable and healthy (brokered providers)
@@ -49,6 +52,16 @@ A missing tool prints `missing` and fails the run.
 ### Provider readiness
 
 Provider readiness validates the selected provider without creating a lease.
+
+Doctor first prints `provider-selection` with the resolved provider and source:
+`compiled_default`, `user_config`, `repo_config`, `environment`, `flag`,
+`recorded_run`, or `lease_context`. If the only source is `compiled_default`, doctor prints
+`warning provider ... readiness=skipped` and does not run either direct or
+coordinator provider credential readiness. This warning does not hide other
+failures: missing local tools, invalid coordinator authentication, unsafe config
+permissions, and other applicable checks still determine the exit status.
+Selecting the same provider explicitly is strict; for example,
+`crabbox doctor --provider hetzner` still fails when its credentials are absent.
 
 - When a coordinator is configured for a brokered provider (`aws`, `azure`,
   `daytona`, `gcp`, `hetzner`), doctor asks the broker for secret readiness. It
@@ -138,7 +151,9 @@ supported for native Windows targets (exits `2`).
 `crabbox doctor --from-run <run-id>` is for triaging a recorded failure. Doctor
 fetches the run record and applies its provider, target, class, server type,
 lease, and phase before running diagnostics. This requires a configured
-coordinator (exits `2` otherwise). Older run records may omit fields; doctor
+coordinator (exits `2` otherwise). An explicit `--provider` remains the
+higher-precedence provider selection while the other recorded context is
+retained. Older run records may omit fields; doctor
 prints a `warning run` line with `missing=...` and skips checks that cannot be
 tied to the run, such as the remote probe when no lease ID was recorded.
 
@@ -170,6 +185,7 @@ For the full per-check breakdown of how each one decides between `ok`, `skip`,
 
 ```text
 ok      config   ~/.config/crabbox/config.yaml permissions=0600
+ok      provider-selection provider=aws source=repo_config
 ok      git      /usr/bin/git
 ok      ssh      /usr/bin/ssh
 ok      ssh-keygen /usr/bin/ssh-keygen
@@ -186,7 +202,8 @@ exits `0` unless another check fails.
 
 `--json` prints the same checks as a structured object with `ok`, `provider`,
 and `checks` fields. Each check includes `status`, `check`, `message`, and
-parsed `details` when available.
+parsed `details` when available; the `provider-selection` details include
+`source`.
 
 Both output modes apply the same final diagnostic redaction to coordinator and
 provider messages and details. Configured credentials, authorization headers,
@@ -206,7 +223,7 @@ Exit codes:
 ## Flags
 
 ```text
---provider <name>             provider to validate (defaults to configured provider)
+--provider <name>             provider to validate strictly (defaults to resolved provider)
 --profile <name>              configured profile for remote prerequisite checks
 --id <lease-id-or-slug>       resolve a lease and run a remote SSH/tool probe
 --from-run <run-id>           load provider/target/lease/phase context from a recorded run

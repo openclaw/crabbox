@@ -400,6 +400,12 @@ func (testHetznerProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 func (p testHetznerProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
+func (p testHetznerProvider) ConfigureDoctor(Config, Runtime) (DoctorBackend, error) {
+	if _, err := newHetznerClient(); err != nil {
+		return nil, err
+	}
+	return testDoctorDelegatedBackend{testDelegatedBackend{spec: p.Spec()}}, nil
+}
 
 type testDigitalOceanProvider struct{}
 

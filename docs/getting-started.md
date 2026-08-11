@@ -25,8 +25,11 @@ crabbox doctor
 ```
 
 `crabbox doctor` prints one line per check. Local tool checks (`git`, `ssh`,
-`ssh-keygen`, `rsync`) should report `ok`. It is fine if the broker and provider
-checks fail for now - we configure those next.
+`ssh-keygen`, `rsync`) should report `ok`. On a fresh install, doctor reports the
+compiled provider default as `source=compiled_default` and warns that provider
+credential readiness was skipped; the warning does not fail the command. Once
+you select a provider through config, `CRABBOX_PROVIDER`, or `--provider`, its
+broker or direct credential check is strict and can fail until you configure it.
 
 If you do not use Homebrew, GitHub Releases ship signed archives for macOS,
 Linux, and Windows. Download the matching archive from

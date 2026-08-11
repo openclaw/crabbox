@@ -141,7 +141,7 @@ func (a App) doctor(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		if run.Provider != "" {
+		if run.Provider != "" && !flagWasSet(fs, "provider") {
 			*provider = run.Provider
 		}
 		if resolvedDoctorID == "" && run.LeaseID != "" {
@@ -177,6 +177,9 @@ func (a App) doctor(ctx context.Context, args []string) error {
 	if err := prepareProviderSelection(&cfg, *provider); err != nil {
 		return err
 	}
+	if flagWasSet(fs, "provider") && cfg.providerSelectionSource != providerSelectionRecordedRun {
+		cfg.providerSelectionSource = providerSelectionFlag
+	}
 	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
 		return err
 	}
@@ -201,6 +204,10 @@ func (a App) doctor(ctx context.Context, args []string) error {
 			return err
 		}
 	}
+	record("ok", "provider-selection", fmt.Sprintf("provider=%s source=%s", cfg.Provider, cfg.providerSelectionSource), map[string]string{
+		"provider": cfg.Provider,
+		"source":   string(cfg.providerSelectionSource),
+	})
 	for _, tool := range doctorLocalTools(providerDef.Spec()) {
 		path, err := exec.LookPath(tool)
 		if err != nil {
@@ -291,7 +298,7 @@ func (a App) doctor(ctx context.Context, args []string) error {
 					}
 					record("ok", "broker", doctorBrokerOKMessage(whoami, cfg.ServerType), details)
 				}
-				if brokerOK && coordinatorProviderReadinessSupported(cfg.Provider) {
+				if brokerOK && cfg.providerSelectionSource != providerSelectionCompiledDefault && coordinatorProviderReadinessSupported(cfg.Provider) {
 					readiness, err := coord.ProviderReadiness(ctx, cfg)
 					if err == nil {
 						if readiness.Configured {
@@ -349,6 +356,15 @@ func (a App) doctor(ctx context.Context, args []string) error {
 		}
 	} else {
 		record("ok", "ssh-key", "per-lease", map[string]string{"mode": "per-lease"})
+	}
+	if cfg.providerSelectionSource == providerSelectionCompiledDefault {
+		record("warning", "provider", fmt.Sprintf("provider=%s source=%s readiness=skipped hint=select_provider_with_flag_env_or_config", cfg.Provider, cfg.providerSelectionSource), map[string]string{
+			"provider":  cfg.Provider,
+			"source":    string(cfg.providerSelectionSource),
+			"readiness": "skipped",
+			"hint":      "select_provider_with_flag_env_or_config",
+		})
+		return finish()
 	}
 
 	if useCoordinator {
@@ -428,7 +444,7 @@ func applyDoctorFromRunContext(ctx context.Context, cfg *Config, runID string) (
 	}
 	var missing []string
 	if strings.TrimSpace(run.Provider) != "" {
-		cfg.Provider = strings.TrimSpace(run.Provider)
+		setProviderSelection(cfg, strings.TrimSpace(run.Provider), providerSelectionRecordedRun)
 		prepareProviderDefaults(cfg)
 	} else {
 		missing = append(missing, "provider")
