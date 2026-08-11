@@ -1668,6 +1668,15 @@ func isDefaultWorkRoot(value string) bool {
 
 const localContainerDockerSigningKeyFingerprint = "9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
 
+const localContainerImagePathRestoreBlock = `# crabbox managed image PATH
+if [ -r "$HOME/.config/crabbox/image-path" ]; then
+  PATH="$(/bin/cat "$HOME/.config/crabbox/image-path"; printf '\001')"
+  PATH="${PATH%?}"
+  export PATH
+fi
+# end crabbox managed image PATH
+`
+
 const installVerifiedAPTKeyringScript = `
 install_verified_apt_keyring() {
   apt_key_url="$1"
@@ -1909,6 +1918,14 @@ printf '%s' "$image_path" > "$home_dir/.config/crabbox/image-path"
 chown "$user" "$home_dir/.config" "$home_dir/.config/crabbox" "$home_dir/.config/crabbox/image-path"
 chmod 0700 "$home_dir/.config/crabbox"
 chmod 0600 "$home_dir/.config/crabbox/image-path"
+image_path_hook=/etc/profile.d/crabbox-image-path.sh
+install -d -m 0755 /etc/profile.d
+image_path_hook_tmp="$(mktemp "${image_path_hook}.tmp.XXXXXX")"
+cat > "$image_path_hook_tmp" <<'CRABBOX_IMAGE_PATH_HOOK'
+` + localContainerImagePathRestoreBlock + `CRABBOX_IMAGE_PATH_HOOK
+chown 0:0 "$image_path_hook_tmp"
+chmod 0644 "$image_path_hook_tmp"
+mv -f "$image_path_hook_tmp" "$image_path_hook"
 login_profile=""
 for candidate in "$home_dir/.bash_profile" "$home_dir/.bash_login" "$home_dir/.profile"; do
   if [ -e "$candidate" ]; then
@@ -1927,14 +1944,7 @@ import sys
 
 path = Path(sys.argv[1])
 data = path.read_bytes()
-block = rb'''# crabbox managed image PATH
-if [ -r "$HOME/.config/crabbox/image-path" ]; then
-  PATH="$(cat "$HOME/.config/crabbox/image-path"; printf '\001')"
-  PATH="${PATH%?}"
-  export PATH
-fi
-# end crabbox managed image PATH
-'''
+block = rb'''` + localContainerImagePathRestoreBlock + `'''
 
 def find_line_sequence(content, sequence, offset=0):
     position = content.find(sequence, offset)

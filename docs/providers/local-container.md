@@ -174,7 +174,10 @@ metadata updates.
    publishing, and the public-key auth environment the bootstrap script needs.
 3. On Debian/Ubuntu-compatible images, the container installs
    `openssh-server`, `git`, `rsync`, `curl`, and `sudo` when they are missing,
-   then restores the selected image's declared `PATH` for the managed SSH login.
+   then restores the selected image's declared `PATH` before each managed SSH
+   login profile. Profiles added after bootstrap can prepend to or intentionally
+   replace that baseline; the profile selected during bootstrap keeps its final
+   managed restore block.
 4. With `--desktop`, the container installs and starts Xvfb, XFCE, x11vnc,
    xdotool, screenshot tools, ffmpeg, noVNC, and websockify — no systemd
    required.

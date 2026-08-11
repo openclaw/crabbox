@@ -1317,11 +1317,16 @@ func TestBootstrapScriptUsesAccountHomeDirectory(t *testing.T) {
 		`image_path="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"`,
 		`printf '%s' "$image_path" > "$home_dir/.config/crabbox/image-path"`,
 		`chmod 0600 "$home_dir/.config/crabbox/image-path"`,
+		`image_path_hook=/etc/profile.d/crabbox-image-path.sh`,
+		`image_path_hook_tmp="$(mktemp "${image_path_hook}.tmp.XXXXXX")"`,
+		`chown 0:0 "$image_path_hook_tmp"`,
+		`chmod 0644 "$image_path_hook_tmp"`,
+		`mv -f "$image_path_hook_tmp" "$image_path_hook"`,
 		`for candidate in "$home_dir/.bash_profile" "$home_dir/.bash_login" "$home_dir/.profile"; do`,
 		`python3 - "$login_profile" <<'PY'`,
 		`def find_line_sequence(content, sequence, offset=0):`,
 		`data = data[:remove_from] + suffix`,
-		`PATH="$(cat "$HOME/.config/crabbox/image-path"; printf '\001')"`,
+		`PATH="$(/bin/cat "$HOME/.config/crabbox/image-path"; printf '\001')"`,
 		`PATH="${PATH%?}"`,
 		`path.write_bytes(data + block)`,
 		`# end crabbox managed image PATH`,
@@ -1401,7 +1406,48 @@ func TestBootstrapScriptUsesAccountHomeDirectory(t *testing.T) {
 	}
 }
 
-func TestBootstrapImagePathReadPreservesLiteralBytes(t *testing.T) {
+func TestBootstrapImagePathHookContract(t *testing.T) {
+	if strings.Count(bootstrapScript, localContainerImagePathRestoreBlock) != 2 {
+		t.Fatalf("restore block should be reused exactly by system hook and selected profile")
+	}
+	if strings.Contains(localContainerImagePathRestoreBlock, "eval") {
+		t.Fatal("image PATH restore block must not evaluate saved content")
+	}
+	for _, want := range []string{
+		"# crabbox managed image PATH\n",
+		`PATH="$(/bin/cat "$HOME/.config/crabbox/image-path"; printf '\001')"`,
+		`PATH="${PATH%?}"`,
+		"# end crabbox managed image PATH\n",
+	} {
+		if !strings.Contains(localContainerImagePathRestoreBlock, want) {
+			t.Fatalf("restore block missing %q", want)
+		}
+	}
+
+	install := strings.Join([]string{
+		`image_path_hook=/etc/profile.d/crabbox-image-path.sh`,
+		`install -d -m 0755 /etc/profile.d`,
+		`image_path_hook_tmp="$(mktemp "${image_path_hook}.tmp.XXXXXX")"`,
+		`cat > "$image_path_hook_tmp" <<'CRABBOX_IMAGE_PATH_HOOK'`,
+		localContainerImagePathRestoreBlock + `CRABBOX_IMAGE_PATH_HOOK`,
+		`chown 0:0 "$image_path_hook_tmp"`,
+		`chmod 0644 "$image_path_hook_tmp"`,
+		`mv -f "$image_path_hook_tmp" "$image_path_hook"`,
+	}, "\n")
+	if !strings.Contains(bootstrapScript, install) {
+		t.Fatal("image PATH hook is not installed atomically with root ownership and mode 0644")
+	}
+
+	savedPath := strings.Index(bootstrapScript, `printf '%s' "$image_path" > "$home_dir/.config/crabbox/image-path"`)
+	hook := strings.Index(bootstrapScript, `image_path_hook=/etc/profile.d/crabbox-image-path.sh`)
+	profile := strings.Index(bootstrapScript, `login_profile=""`)
+	sshd := strings.LastIndex(bootstrapScript, `exec /usr/sbin/sshd`)
+	if savedPath < 0 || hook <= savedPath || profile <= hook || sshd <= profile {
+		t.Fatalf("unexpected image PATH bootstrap order: saved=%d hook=%d profile=%d sshd=%d", savedPath, hook, profile, sshd)
+	}
+}
+
+func TestBootstrapImagePathRestoreIsIdempotentAndPreservesLiteralBytes(t *testing.T) {
 	bash, err := exec.LookPath("bash")
 	if err != nil {
 		t.Skipf("bash unavailable: %v", err)
@@ -1409,13 +1455,16 @@ func TestBootstrapImagePathReadPreservesLiteralBytes(t *testing.T) {
 	home := t.TempDir()
 	marker := filepath.Join(home, "must-not-exist")
 	want := "/opt/tool dir:$HOME:$(touch " + marker + "):`false`:\n"
-	if err := os.WriteFile(filepath.Join(home, "image-path"), []byte(want), 0o600); err != nil {
+	pathDir := filepath.Join(home, ".config", "crabbox")
+	if err := os.MkdirAll(pathDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pathDir, "image-path"), []byte(want), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(bash, "-c", `set -eu
 HOME="$1"
-PATH="$(cat "$HOME/image-path"; printf '\001')"
-PATH="${PATH%?}"
+`+localContainerImagePathRestoreBlock+localContainerImagePathRestoreBlock+`
 printf '%s' "$PATH"
 `, "bash", home)
 	out, err := cmd.CombinedOutput()
