@@ -691,14 +691,19 @@ func TestWatchTraversesExcludedParentForReincludedDescendant(t *testing.T) {
 	root := newWatchGitRepo(t)
 	watchTestWrite(t, root, "target/keep.txt", "source")
 	watchTestWrite(t, root, "target/drop.bin", "generated")
-	excludes := appendOrderedStrings(defaultExcludes(), "!target/keep.txt")
+	excludes := newSyncExcludeRules(appendOrderedStrings(defaultExcludes(), "!target/keep.txt"), syncExcludeConfigured)
+	tracked, err := loadGitTrackedPaths(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer watcher.Close()
 
-	files, err := addWatchTree(watcher, root, root, excludes)
+	scope := newWatchPathScope(excludes, trackedRegularPathSet(tracked))
+	files, err := addWatchTree(watcher, root, root, scope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -709,6 +714,102 @@ func TestWatchTraversesExcludedParentForReincludedDescendant(t *testing.T) {
 	if strings.Contains(got, "target/drop.bin") || strings.Contains(got, ".git/") {
 		t.Fatalf("watched files=%q should omit excluded paths", got)
 	}
+}
+
+func TestWatchSkipsAmbiguousBuiltInDirectoryWithoutTrackedDescendants(t *testing.T) {
+	root := newWatchGitRepo(t)
+	watchTestWrite(t, root, "target/generated.bin", "generated")
+	rules, err := syncExcludes(root, baseConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracked, err := loadGitTrackedPaths(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer watcher.Close()
+	scope := newWatchPathScope(rules, trackedRegularPathSet(tracked))
+	files, err := addWatchTree(watcher, root, root, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(files, ","), "target/generated.bin") {
+		t.Fatalf("untracked generated output entered watched file set: %v", files)
+	}
+	if watchListContains(watcher, filepath.Join(root, "target")) {
+		t.Fatalf("untracked artifact directory entered watch list: %v", watcher.WatchList())
+	}
+	session := &watchSession{
+		root:           root,
+		excludes:       rules,
+		trackedRegular: trackedRegularPathSet(tracked),
+		pathScope:      scope,
+		paths:          map[string]watchPathState{},
+	}
+	batch := map[string]struct{}{}
+	watchTestWrite(t, root, "target/generated.bin", "changed")
+	if session.observeEvent(nil, fsnotify.Event{Name: filepath.Join(root, "target", "generated.bin"), Op: fsnotify.Write}, batch) {
+		t.Fatalf("untracked artifact write entered debounce batch: %v", batch)
+	}
+	select {
+	case event := <-watcher.Events:
+		t.Fatalf("untracked artifact subtree produced event despite startup pruning: %+v", event)
+	case err := <-watcher.Errors:
+		t.Fatalf("watch error: %v", err)
+	case <-time.After(250 * time.Millisecond):
+	}
+}
+
+func TestWatchTraversesOnlyTrackedProtectedAncestorChain(t *testing.T) {
+	root := newWatchGitRepo(t)
+	watchTestWrite(t, root, "target/src/keep.go", "package src\n")
+	watchTestWrite(t, root, "target/generated/deep/output.bin", "generated")
+	watchTestGit(t, root, "add", "target/src/keep.go")
+	watchTestGit(t, root, "commit", "-q", "-m", "add tracked target source")
+	rules, err := syncExcludes(root, baseConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracked, err := loadGitTrackedPaths(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer watcher.Close()
+	scope := newWatchPathScope(rules, trackedRegularPathSet(tracked))
+	files, err := addWatchTree(watcher, root, root, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(files, ","); got != ".gitignore,main.go,target/src/keep.go" {
+		t.Fatalf("watched files=%q", got)
+	}
+	for _, want := range []string{root, filepath.Join(root, "target"), filepath.Join(root, "target", "src")} {
+		if !watchListContains(watcher, want) {
+			t.Errorf("watch list=%v missing ancestor %s", watcher.WatchList(), want)
+		}
+	}
+	for _, notWant := range []string{filepath.Join(root, "target", "generated"), filepath.Join(root, "target", "generated", "deep")} {
+		if watchListContains(watcher, notWant) {
+			t.Errorf("watch list=%v contains unrelated generated subtree %s", watcher.WatchList(), notWant)
+		}
+	}
+}
+
+func watchListContains(watcher *fsnotify.Watcher, want string) bool {
+	for _, watched := range watcher.WatchList() {
+		if sameLocalPath(watched, want) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestWatchQueuesReincludedDescendantWhenExcludedParentIsRemoved(t *testing.T) {
@@ -726,16 +827,24 @@ func TestWatchQueuesReincludedDescendantWhenExcludedParentIsRemoved(t *testing.T
 		t.Fatal(err)
 	}
 	defer watcher.Close()
-	files, err := addWatchTree(watcher, root, root, excludes)
+	tracked, err := loadGitTrackedPaths(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := newWatchPathScope(excludes, trackedRegularPathSet(tracked))
+	files, err := addWatchTree(watcher, root, root, scope)
 	if err != nil {
 		t.Fatal(err)
 	}
 	session := &watchSession{
-		root:     root,
-		cfg:      baseConfig(),
-		excludes: excludes,
-		paths:    map[string]watchPathState{},
-		watcher:  watcher,
+		root:           root,
+		cfg:            baseConfig(),
+		excludes:       excludes,
+		trackedRegular: trackedRegularPathSet(tracked),
+		indexRegular:   trackedRegularPathSet(tracked),
+		pathScope:      scope,
+		paths:          map[string]watchPathState{},
+		watcher:        watcher,
 	}
 	for _, file := range files {
 		session.rememberPath(file, filepath.Join(root, filepath.FromSlash(file)))
@@ -789,6 +898,215 @@ func TestWatchIncludeWhitelistFiltersReruns(t *testing.T) {
 	}
 	if executor.callCount() != 2 {
 		t.Fatalf("iterations=%d, want 2", executor.callCount())
+	}
+}
+
+func TestWatchQualifiesTrackedAmbiguousPathsButNotGeneratedOrConfiguredExcludes(t *testing.T) {
+	root := newWatchGitRepo(t)
+	watchTestWrite(t, root, "target/keep.txt", "tracked\n")
+	watchTestGit(t, root, "add", "target/keep.txt")
+	watchTestGit(t, root, "commit", "-q", "-m", "add tracked target source")
+	watchTestWrite(t, root, "target/keep.txt", "changed\n")
+	watchTestWrite(t, root, "target/generated.bin", "generated\n")
+
+	rules, err := syncExcludes(root, baseConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracked, err := loadGitTrackedPaths(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := &watchSession{
+		root:           root,
+		cfg:            baseConfig(),
+		excludes:       rules,
+		trackedRegular: trackedRegularPathSet(tracked),
+		indexRegular:   trackedRegularPathSet(tracked),
+		pathScope:      newWatchPathScope(rules, trackedRegularPathSet(tracked)),
+		paths:          map[string]watchPathState{},
+	}
+	batch := map[string]struct{}{}
+	if session.observeEvent(nil, fsnotify.Event{Name: filepath.Join(root, "target", "generated.bin"), Op: fsnotify.Write}, batch) {
+		t.Fatalf("untracked generated write entered debounce batch: %v", batch)
+	}
+
+	qualified, err := session.qualifyBatch([]string{"target/keep.txt", "target/generated.bin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(qualified, ","); got != "target/keep.txt" {
+		t.Fatalf("qualified=%q, want tracked target path only", got)
+	}
+
+	session.cfg.Sync.Excludes = []string{"target"}
+	qualified, err = session.qualifyBatch([]string{"target/keep.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(qualified) != 0 {
+		t.Fatalf("configured target exclude qualified tracked path: %v", qualified)
+	}
+	batch = map[string]struct{}{}
+	if session.observeEvent(nil, fsnotify.Event{Name: filepath.Join(root, "target", "keep.txt"), Op: fsnotify.Write}, batch) {
+		t.Fatalf("configured target exclude remained observable: %v", batch)
+	}
+
+	session.cfg.Sync.Excludes = nil
+	watchTestGit(t, root, "rm", "-q", "-f", "target/keep.txt")
+	qualified, err = session.qualifyBatch([]string{"target/keep.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(qualified, ","); got != "target/keep.txt" {
+		t.Fatalf("qualified staged deletion=%q, want target/keep.txt", got)
+	}
+}
+
+func TestWatchDiscoversFileThatBecomesTrackedUnderAmbiguousBuiltInDirectory(t *testing.T) {
+	root := newWatchGitRepo(t)
+	watchTestWrite(t, root, "target/new.go", "package target\n")
+	rules, err := syncExcludes(root, baseConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracked, err := loadGitTrackedPaths(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer watcher.Close()
+	scope := newWatchPathScope(rules, trackedRegularPathSet(tracked))
+	files, err := addWatchTree(watcher, root, root, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if watchListContains(watcher, filepath.Join(root, "target")) {
+		t.Fatalf("untracked target directory was watched at startup: %v", watcher.WatchList())
+	}
+	session := &watchSession{
+		root:           root,
+		cfg:            baseConfig(),
+		excludes:       rules,
+		trackedRegular: trackedRegularPathSet(tracked),
+		indexRegular:   trackedRegularPathSet(tracked),
+		pathScope:      scope,
+		paths:          map[string]watchPathState{},
+		watcher:        watcher,
+	}
+	for _, file := range files {
+		session.rememberPath(file, filepath.Join(root, filepath.FromSlash(file)))
+	}
+	batch := map[string]struct{}{}
+	if session.observeEvent(nil, fsnotify.Event{Name: filepath.Join(root, "target", "new.go"), Op: fsnotify.Write}, batch) {
+		t.Fatalf("untracked ambiguous path entered batch before git add: %v", batch)
+	}
+	watchTestGit(t, root, "add", "target/new.go")
+	session.gitIndexPath, err = watchGitIndexPath(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch = map[string]struct{}{}
+	if !session.observeEvent(nil, fsnotify.Event{Name: session.gitIndexPath, Op: fsnotify.Write}, batch) {
+		t.Fatal("Git index event did not queue tracked-classification refresh")
+	}
+	qualified, err := session.qualifyBatch([]string{watchGitIndexBatchKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(qualified, ","); got != "target/new.go" {
+		t.Fatalf("index-only tracked transition qualified=%q, want target/new.go", got)
+	}
+	if _, ok := session.paths["target/new.go"]; !ok {
+		t.Fatal("index-only tracked transition was not remembered for parent removal")
+	}
+	if !watchListContains(watcher, filepath.Join(root, "target")) {
+		t.Fatalf("index transition did not attach target parent watcher: %v", watcher.WatchList())
+	}
+	watchTestWrite(t, root, "target/new.go", "package target\nvar changed = true\n")
+	batch = map[string]struct{}{}
+	if !session.observeEvent(watcher, fsnotify.Event{Name: filepath.Join(root, "target", "new.go"), Op: fsnotify.Write}, batch) {
+		t.Fatal("tracked protected write did not enter batch after index attachment")
+	}
+	qualified, err = session.qualifyBatch([]string{"target/new.go"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(qualified, ","); got != "target/new.go" {
+		t.Fatalf("tracked protected write qualified=%q, want target/new.go", got)
+	}
+	batch = map[string]struct{}{}
+	if !session.observeEvent(nil, fsnotify.Event{Name: filepath.Join(root, "target"), Op: fsnotify.Rename}, batch) {
+		t.Fatal("parent rename did not queue index-discovered tracked descendant")
+	}
+	if _, ok := batch["target/new.go"]; !ok {
+		t.Fatalf("parent rename batch=%v, want target/new.go", batch)
+	}
+	session.rememberPath("target/new.go", filepath.Join(root, "target", "new.go"))
+
+	watchTestGit(t, root, "rm", "--cached", "-q", "-f", "target/new.go")
+	qualified, err = session.qualifyBatch([]string{watchGitIndexBatchKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(qualified, ","); got != "target/new.go" {
+		t.Fatalf("index-only untracked transition qualified=%q, want target/new.go", got)
+	}
+	if _, ok := session.paths["target/new.go"]; ok {
+		t.Fatal("index-only untracked transition remained in remembered path set")
+	}
+
+	session.cfg.Sync.Includes = []string{"src"}
+	watchTestGit(t, root, "add", "target/new.go")
+	qualified, err = session.qualifyBatch([]string{watchGitIndexBatchKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(qualified) != 0 {
+		t.Fatalf("index transition outside include whitelist qualified: %v", qualified)
+	}
+}
+
+func TestWatchDiscoversCommittedFileRemovedFromIndexUnderAmbiguousDirectory(t *testing.T) {
+	root := newWatchGitRepo(t)
+	watchTestWrite(t, root, "target/committed.go", "package target\n")
+	watchTestGit(t, root, "add", "target/committed.go")
+	watchTestGit(t, root, "commit", "-q", "-m", "add tracked artifact source")
+	rules, err := syncExcludes(root, baseConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracked, err := loadGitTrackedPaths(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexRegular := trackedRegularPathSet(tracked)
+	session := &watchSession{
+		root:           root,
+		cfg:            baseConfig(),
+		excludes:       rules,
+		trackedRegular: indexRegular,
+		indexRegular:   indexRegular,
+		pathScope:      newWatchPathScope(rules, indexRegular),
+		paths:          map[string]watchPathState{},
+	}
+	watchTestGit(t, root, "rm", "--cached", "-q", "target/committed.go")
+	qualified, err := session.qualifyBatch([]string{watchGitIndexBatchKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(qualified, ","); got != "target/committed.go" {
+		t.Fatalf("committed index removal qualified=%q, want target/committed.go", got)
+	}
+	manifest, err := syncManifest(root, rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(manifest.Deleted, ","); got != "target/committed.go" {
+		t.Fatalf("committed index removal delete manifest=%q", got)
 	}
 }
 

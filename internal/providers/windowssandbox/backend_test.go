@@ -289,7 +289,7 @@ func TestSyncManifestHonorsIncludes(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	manifest, err := syncManifest(repo, nil, []string{"keep.txt", "nested/"})
+	manifest, err := syncManifest(repo, core.SyncExcludeRules{}, []string{"keep.txt", "nested/"})
 	if err != nil {
 		t.Fatal(err)
 	}

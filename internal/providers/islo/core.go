@@ -91,11 +91,11 @@ func clearLeaseClaimTailscale(leaseID string) error {
 	return core.ClearLeaseClaimTailscale(leaseID)
 }
 
-func syncExcludes(root string, cfg Config) ([]string, error) {
+func syncExcludes(root string, cfg Config) (core.SyncExcludeRules, error) {
 	return core.SyncExcludes(root, cfg)
 }
 
-func syncManifest(root string, excludes, includes []string) (core.SyncManifest, error) {
+func syncManifest(root string, excludes core.SyncExcludeRules, includes []string) (core.SyncManifest, error) {
 	return core.BuildSyncManifestFiltered(root, excludes, includes)
 }
 

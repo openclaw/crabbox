@@ -28,6 +28,13 @@ matches what an actual sync would ship:
 Ordered exclude rules are applied before size accounting; a later `!pattern`
 can re-include a path matched by an earlier rule.
 
+Crabbox-owned built-ins for ambiguous artifact directory names (`dist`,
+`dist-runtime`, `coverage`, `playwright-report`, `test-results`, `.build`, and
+`target`) omit untracked output but do not silently remove Git-tracked regular
+files. Text output adds one bounded warning naming protected paths and matching
+patterns. Explicit `sync.exclude` and `.crabboxignore` rules remain
+authoritative for tracked files, including bare component-wide patterns.
+
 The same preflight rejects tracked non-gitlink paths hidden by sparse-checkout
 or `skip-worktree` state only when they remain in the effective manifest after
 `sync.include` and ordered excludes. On Git older than 2.41, an ambiguous
@@ -66,6 +73,10 @@ machine-readable shape for CI checks and agent preflights:
   "candidate": { "files": 1843, "bytes": 327680000, "humanBytes": "312.5 MiB" },
   "dirtyDelta": { "files": 12, "bytes": 524288, "humanBytes": "512.0 KiB" },
   "deletedTrackedPaths": 2,
+  "protectedTrackedFiles": {
+    "count": 1,
+    "examples": [{ "path": "internal/web/dist/stub.html", "pattern": "dist" }]
+  },
   "guardrail": {
     "scope": "dirty_delta",
     "files": 12,
@@ -83,6 +94,8 @@ machine-readable shape for CI checks and agent preflights:
 `candidate` is the full manifest that would be present on the remote after
 sync. `dirtyDelta` is the locally changed/untracked/deleted path set that
 `crabbox run` uses for large-sync guardrails when it is non-empty.
+`protectedTrackedFiles` counts tracked regular files kept despite an ambiguous
+built-in exclude and includes up to five path-and-pattern examples.
 `guardrail.scope` is therefore either `dirty_delta` or `candidate`, matching
 the sync preflight path. `guardrail.status` is `ok`, `warning`, or `failed`;
 warnings and failures are listed in `guardrail.reasons` when configured

@@ -667,7 +667,7 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 	if err != nil {
 		return err
 	}
-	manifest, err := syncManifestFiltered(repo.Root, excludes, syncIncludes(cfg))
+	manifest, err := syncManifestFilteredRules(repo.Root, excludes, syncIncludes(cfg))
 	if err != nil {
 		return exit(6, "build sync file list: %v", err)
 	}
@@ -705,7 +705,7 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 		}
 	}
 	fmt.Fprintf(a.Stderr, "syncing %s -> %s:%s for local actions hydrate\n", repo.Root, target.Host, workdir)
-	if err := rsync(ctx, target, repo.Root, workdir, excludes, a.Stdout, a.Stderr, rsyncOptions{Checksum: cfg.Sync.Checksum, UseFilesFrom: true, FilesFrom: manifestData, NoTimes: localContainerDockerSocketConfig(cfg), Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
+	if err := rsync(ctx, target, repo.Root, workdir, excludes.patterns(), a.Stdout, a.Stderr, rsyncOptions{Checksum: cfg.Sync.Checksum, UseFilesFrom: true, FilesFrom: manifestData, NoTimes: localContainerDockerSocketConfig(cfg), Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
 		return exit(6, "rsync failed: %v", err)
 	}
 	fingerprint := ""

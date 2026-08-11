@@ -168,11 +168,11 @@ func remoteJoin(cfg Config, parts ...string) string {
 	return core.RemoteJoin(cfg, parts...)
 }
 
-func syncExcludes(root string, cfg Config) ([]string, error) {
+func syncExcludes(root string, cfg Config) (core.SyncExcludeRules, error) {
 	return core.SyncExcludes(root, cfg)
 }
 
-func syncManifest(root string, excludes, includes []string) (SyncManifest, error) {
+func syncManifest(root string, excludes core.SyncExcludeRules, includes []string) (SyncManifest, error) {
 	return core.BuildSyncManifestFiltered(root, excludes, includes)
 }
 

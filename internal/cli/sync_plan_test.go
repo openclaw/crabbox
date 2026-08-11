@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,6 +97,49 @@ func TestSyncPlanJSONOutput(t *testing.T) {
 	}
 	if len(got.TopDirs) != 1 || got.TopDirs[0].Path != "assets" || got.TopDirs[0].Bytes != 16 {
 		t.Fatalf("topDirs=%+v", got.TopDirs)
+	}
+}
+
+func TestSyncPlanAnnotatesProtectedTrackedFilesWithBoundedExamples(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_PROVIDER", "")
+	t.Setenv("CRABBOX_DEFAULT_CLASS", "")
+
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	for i := 0; i < 7; i++ {
+		writeFile(t, filepath.Join(dir, "target", fmt.Sprintf("file-%d.txt", i)), "tracked\n")
+	}
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	t.Chdir(dir)
+
+	var stdout, stderr bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &stderr}
+	if err := app.Run(context.Background(), []string{"sync-plan"}); err != nil {
+		t.Fatalf("sync-plan: %v stderr=%q", err, stderr.String())
+	}
+	annotation := "warning: protected 7 tracked files from built-in artifact excludes:"
+	if !strings.Contains(stdout.String(), annotation) || !strings.Contains(stdout.String(), "target/file-0.txt (target)") || !strings.Contains(stdout.String(), "(+2 more)") {
+		t.Fatalf("sync-plan output missing bounded protection annotation:\n%s", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := app.Run(context.Background(), []string{"sync-plan", "--json"}); err != nil {
+		t.Fatalf("sync-plan --json: %v stderr=%q", err, stderr.String())
+	}
+	var got syncPlanJSONOutput
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decode sync-plan JSON: %v\n%s", err, stdout.String())
+	}
+	if got.ProtectedTracked.Count != 7 || len(got.ProtectedTracked.Examples) != protectedTrackedExcludeExampleLimit {
+		t.Fatalf("protectedTrackedFiles=%+v", got.ProtectedTracked)
 	}
 }
 

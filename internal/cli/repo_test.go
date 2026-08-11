@@ -602,7 +602,7 @@ func TestSyncManifestIncludeWhitelist(t *testing.T) {
 	runGit(t, dir, "add", ".")
 	runGit(t, dir, "commit", "-m", "init")
 
-	manifest, err := syncManifestFiltered(dir, configuredExcludes(baseConfig()), []string{"src", "scripts", "package.json"})
+	manifest, err := syncManifestFilteredRules(dir, configuredExcludes(baseConfig()), []string{"src", "scripts", "package.json"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -734,11 +734,11 @@ func TestSyncManifestPrunesNestedDefaultExcludes(t *testing.T) {
 	runGit(t, dir, "config", "user.name", "Test")
 	writeFile(t, filepath.Join(dir, "packages", "app", "node_modules", "lib.js"), "cache")
 	writeFile(t, filepath.Join(dir, ".ignored", "churn"), "cache")
-	writeFile(t, filepath.Join(dir, "playwright-report", "index.html"), "cache")
-	writeFile(t, filepath.Join(dir, "apps", "foo", ".build", "debug.o"), "cache")
 	writeFile(t, filepath.Join(dir, "apps", "foo", "src", "main.go"), "package main\n")
 	runGit(t, dir, "add", ".")
 	runGit(t, dir, "commit", "-m", "init")
+	writeFile(t, filepath.Join(dir, "playwright-report", "index.html"), "cache")
+	writeFile(t, filepath.Join(dir, "apps", "foo", ".build", "debug.o"), "cache")
 
 	manifest, err := syncManifest(dir, configuredExcludes(baseConfig()))
 	if err != nil {
@@ -750,6 +750,204 @@ func TestSyncManifestPrunesNestedDefaultExcludes(t *testing.T) {
 	}
 	if !strings.Contains(got, "apps/foo/src/main.go") {
 		t.Fatalf("manifest missing source file: %q", got)
+	}
+}
+
+func TestSyncManifestProtectsTrackedFilesFromAmbiguousBuiltInExcludes(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	ambiguous := []string{"dist", "dist-runtime", "coverage", "playwright-report", "test-results", ".build", "target"}
+	var tracked []string
+	for _, component := range ambiguous {
+		for _, rel := range []string{
+			component + "/root.txt",
+			"packages/app/" + component + "/nested.txt",
+		} {
+			writeFile(t, filepath.Join(dir, filepath.FromSlash(rel)), "tracked\n")
+			tracked = append(tracked, rel)
+		}
+	}
+	for _, rel := range []string{
+		"vendor/node_modules/pkg/index.js",
+		"nested/.cache/state.bin",
+		"python/.venv/lib.py",
+		"python/__pycache__/module.pyc",
+	} {
+		writeFile(t, filepath.Join(dir, filepath.FromSlash(rel)), "tracked cache\n")
+	}
+	writeFile(t, filepath.Join(dir, "src", "main.go"), "package main\n")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	for _, component := range ambiguous {
+		writeFile(t, filepath.Join(dir, "generated", component, "output.bin"), "untracked output\n")
+	}
+
+	manifest, err := syncManifest(dir, configuredExcludes(baseConfig()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := strings.Join(manifest.Files, ",")
+	for _, rel := range tracked {
+		if !strings.Contains(files, rel) {
+			t.Errorf("manifest missing protected tracked path %q: %s", rel, files)
+		}
+	}
+	for _, component := range ambiguous {
+		rel := "generated/" + component + "/output.bin"
+		if strings.Contains(files, rel) {
+			t.Errorf("manifest included untracked generated path %q", rel)
+		}
+	}
+	for _, rel := range []string{"vendor/node_modules/pkg/index.js", "nested/.cache/state.bin", "python/.venv/lib.py", "python/__pycache__/module.pyc"} {
+		if strings.Contains(files, rel) {
+			t.Errorf("manifest included tracked dependency/cache path %q", rel)
+		}
+	}
+	if got, want := len(manifest.ProtectedTrackedExcludes), len(tracked); got != want {
+		t.Fatalf("protected annotations=%d want %d: %+v", got, want, manifest.ProtectedTrackedExcludes)
+	}
+}
+
+func TestSyncManifestConfiguredExcludesRemainAuthoritativeForTrackedArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	for _, rel := range []string{"target/drop.txt", "target/keep.txt", "coverage/drop.txt", "coverage/keep.txt", "dist/repo-excluded.txt"} {
+		writeFile(t, filepath.Join(dir, filepath.FromSlash(rel)), "tracked\n")
+	}
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	writeFile(t, filepath.Join(dir, ".crabboxignore"), "dist\n")
+
+	cfg := baseConfig()
+	cfg.Sync.Excludes = []string{"target", "!target/keep.txt", "coverage/drop.txt"}
+	rules, err := syncExcludes(dir, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := syncManifest(dir, rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := strings.Join(manifest.Files, ",")
+	for _, want := range []string{"target/keep.txt", "coverage/keep.txt"} {
+		if !strings.Contains(files, want) {
+			t.Errorf("manifest missing %q after ordered re-include: %s", want, files)
+		}
+	}
+	for _, excluded := range []string{"target/drop.txt", "coverage/drop.txt", "dist/repo-excluded.txt"} {
+		if strings.Contains(files, excluded) {
+			t.Errorf("manifest ignored configured exclude for %q: %s", excluded, files)
+		}
+	}
+	if got := len(manifest.ProtectedTrackedExcludes); got != 1 || manifest.ProtectedTrackedExcludes[0].Path != "coverage/keep.txt" {
+		t.Fatalf("protected annotations=%+v, want only coverage/keep.txt", manifest.ProtectedTrackedExcludes)
+	}
+}
+
+func TestSyncManifestIncludeWhitelistScopesTrackedProtection(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	writeFile(t, filepath.Join(dir, "target", "keep.txt"), "tracked\n")
+	writeFile(t, filepath.Join(dir, "dist", "outside.txt"), "tracked\n")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+
+	manifest, err := syncManifestFilteredRules(dir, configuredExcludes(baseConfig()), []string{"target"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(manifest.Files, ","); got != "target/keep.txt" {
+		t.Fatalf("manifest files=%q", got)
+	}
+	if got := manifest.ProtectedTrackedExcludes; len(got) != 1 || got[0].Path != "target/keep.txt" || got[0].Pattern != "target" {
+		t.Fatalf("protected annotations=%+v", got)
+	}
+}
+
+func TestSyncManifestTrackedAmbiguousDeletionFollowsEffectiveRules(t *testing.T) {
+	for _, staged := range []bool{false, true} {
+		t.Run(fmt.Sprintf("staged=%t", staged), func(t *testing.T) {
+			dir := t.TempDir()
+			runGit(t, dir, "init")
+			runGit(t, dir, "config", "user.email", "test@example.com")
+			runGit(t, dir, "config", "user.name", "Test")
+			writeFile(t, filepath.Join(dir, "target", "obsolete.txt"), "tracked\n")
+			runGit(t, dir, "add", ".")
+			runGit(t, dir, "commit", "-m", "init")
+			if staged {
+				runGit(t, dir, "rm", "target/obsolete.txt")
+			} else if err := os.Remove(filepath.Join(dir, "target", "obsolete.txt")); err != nil {
+				t.Fatal(err)
+			}
+
+			manifest, err := syncManifest(dir, configuredExcludes(baseConfig()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Join(manifest.Deleted, ","); got != "target/obsolete.txt" {
+				t.Fatalf("default deleted=%q", got)
+			}
+			if got := strings.Join(manifest.Changed, ","); got != "target/obsolete.txt" {
+				t.Fatalf("default dirty delta=%q", got)
+			}
+
+			cfg := baseConfig()
+			cfg.Sync.Excludes = []string{"target"}
+			manifest, err = syncManifest(dir, configuredExcludes(cfg))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(manifest.Deleted) != 0 || len(manifest.Changed) != 0 {
+				t.Fatalf("configured exclude should omit deletion and dirty delta: %+v", manifest)
+			}
+		})
+	}
+}
+
+func TestSyncFingerprintIncludesExcludeRuleProvenance(t *testing.T) {
+	plan := gitCoherencePlan{RemoteURL: "https://example.test/repo.git", Target: "target", Tree: "tree", Branch: "main"}
+	builtIn := newSyncExcludeRules([]string{"target"}, syncExcludeBuiltIn)
+	configured := newSyncExcludeRules([]string{"target"}, syncExcludeConfigured)
+	a, err := syncFingerprintForManifest(Repo{Root: t.TempDir()}, baseConfig(), SyncManifest{}, builtIn, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := syncFingerprintForManifest(Repo{Root: t.TempDir()}, baseConfig(), SyncManifest{}, configured, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == b {
+		t.Fatalf("fingerprint did not distinguish built-in and configured provenance: %q", a)
+	}
+}
+
+func TestSyncExcludeRuleUpgradeCompatibilityPreservesRenderedOrder(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, ".crabboxignore"), "coverage\n!coverage/keep.txt\n")
+	cfg := baseConfig()
+	cfg.Sync.Excludes = []string{"target", "!target/keep.txt"}
+
+	rules, err := syncExcludes(dir, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := appendOrderedStrings(defaultExcludes(), cfg.Sync.Excludes...)
+	want = appendOrderedStrings(want, "coverage", "!coverage/keep.txt")
+	want = appendOrderedStrings(want, protectedSyncExcludes()...)
+	if got := strings.Join(rules.patterns(), "\n"); got != strings.Join(want, "\n") {
+		t.Fatalf("rendered rule order changed across provenance upgrade:\n%s", got)
+	}
+	if !pathExcludedByRules("target/drop.txt", rules, true) || pathExcludedByRules("target/keep.txt", rules, true) {
+		t.Fatal("ordered configured target rules lost authority")
+	}
+	if !pathExcludedByRules("coverage/drop.txt", rules, true) || pathExcludedByRules("coverage/keep.txt", rules, true) {
+		t.Fatal("ordered .crabboxignore coverage rules lost authority")
 	}
 }
 
@@ -830,16 +1028,16 @@ func TestCrabboxIgnoreExtendsSyncExcludes(t *testing.T) {
 	}
 }
 
-func TestCrabboxIgnoreCanReincludeDefaultExcludedSourcePath(t *testing.T) {
+func TestCrabboxIgnoreCanReincludeDefaultExcludedUntrackedPath(t *testing.T) {
 	dir := t.TempDir()
 	runGit(t, dir, "init")
 	runGit(t, dir, "config", "user.email", "test@example.com")
 	runGit(t, dir, "config", "user.name", "Test")
 	writeFile(t, filepath.Join(dir, ".crabboxignore"), "!apps/backend/app/connectors/target\n")
+	runGit(t, dir, "add", ".crabboxignore")
+	runGit(t, dir, "commit", "-m", "init")
 	writeFile(t, filepath.Join(dir, "apps", "backend", "app", "connectors", "target", "schemas.py"), "class Schema: ...\n")
 	writeFile(t, filepath.Join(dir, "build", "target", "debug.o"), "cache")
-	runGit(t, dir, "add", ".")
-	runGit(t, dir, "commit", "-m", "init")
 
 	excludes, err := syncExcludes(dir, baseConfig())
 	if err != nil {
@@ -901,7 +1099,7 @@ func TestCrabboxRuntimeExcludesCannotBeReincluded(t *testing.T) {
 		if strings.Contains(got, notWant) {
 			t.Fatalf("manifest %q should not include protected runtime path %q", got, notWant)
 		}
-		if !pathExcluded(notWant, excludes) {
+		if !pathExcludedByRules(notWant, excludes, true) {
 			t.Fatalf("protected runtime path %q was re-included: %v", notWant, excludes)
 		}
 	}
@@ -912,7 +1110,7 @@ func TestCrabboxRuntimeExcludesCannotBeReincluded(t *testing.T) {
 		".crabbox/CAPTURES/failure.tgz",
 		".CRABBOX/RUNS/run_123/artifact.tgz",
 	} {
-		if !pathExcluded(alias, excludes) {
+		if !pathExcludedByRules(alias, excludes, true) {
 			t.Fatalf("case alias of protected runtime path %q was re-included: %v", alias, excludes)
 		}
 	}
@@ -948,10 +1146,10 @@ func TestSyncExcludesPreservesRepeatedRuleOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pathExcluded("apps/backend/target/schema.py", excludes) {
+	if pathExcludedByRules("apps/backend/target/schema.py", excludes, true) {
 		t.Fatal("final precise negation should reinclude source target path")
 	}
-	if !pathExcluded("build/target/debug.o", excludes) {
+	if !pathExcludedByRules("build/target/debug.o", excludes, false) {
 		t.Fatal("repeated target rule should re-exclude unrelated target path")
 	}
 }
@@ -1175,7 +1373,7 @@ func TestSyncGitCoherencePlanSelectsEligibleOriginBranch(t *testing.T) {
 		if !plan.seedEnabled() || plan.enabled() {
 			t.Fatalf("plan should seed without coherence: %#v", plan)
 		}
-		fingerprint, _ := syncFingerprintForManifest(Repo{}, baseConfig(), SyncManifest{}, nil, plan)
+		fingerprint, _ := syncFingerprintForManifest(Repo{}, baseConfig(), SyncManifest{}, SyncExcludeRules{}, plan)
 		if fingerprint != "" {
 			t.Fatalf("ineligible coherence published fingerprint %q", fingerprint)
 		}

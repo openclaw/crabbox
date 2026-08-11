@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Kept Git-tracked regular files under ambiguous built-in artifact directories in sync manifests while preserving authoritative project excludes, untracked-output filtering, ordered re-includes, and bounded path-and-pattern warnings. Thanks @salmonumbrella.
 - Clarified that POSIX SSH `run --script` uploads a content-hashed standalone copy whose `$0` points under `.crabbox/scripts/`, and documented synced-path execution for scripts that need adjacent repository assets. Thanks @coygeek.
 - Classified per-run local-container cgroup OOM-kill increments as memory resource exhaustion, with bounded evidence collection and actionable memory/concurrency guidance while ignoring historical OOM counts on reused leases. Thanks @coygeek.
 - Made bare `crabbox doctor` report compiled-default provider provenance and skip that unchosen provider's credential readiness without weakening explicitly configured provider checks. Thanks @coygeek.

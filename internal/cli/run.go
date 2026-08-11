@@ -1405,7 +1405,7 @@ retrySync:
 			return recordFailure(err)
 		}
 		stepStart = time.Now()
-		manifest, err := syncManifestFiltered(repo.Root, excludes, syncIncludes(cfg))
+		manifest, err := syncManifestFilteredRules(repo.Root, excludes, syncIncludes(cfg))
 		if err != nil {
 			return recordFailure(exit(6, "build sync file list: %v", err))
 		}
@@ -1527,7 +1527,7 @@ retrySync:
 			timings.syncSteps.prune = time.Since(stepStart)
 		}
 		stepStart = time.Now()
-		if err := rsync(ctx, target, repo.Root, workdir, excludes, a.Stdout, a.Stderr, rsyncOptions{Debug: *debugSync, Delete: cfg.Sync.Delete, Checksum: cfg.Sync.Checksum, UseFilesFrom: true, FilesFrom: manifestData, NoTimes: localContainerDockerSocketSync(cfg, server), Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
+		if err := rsync(ctx, target, repo.Root, workdir, excludes.patterns(), a.Stdout, a.Stderr, rsyncOptions{Debug: *debugSync, Delete: cfg.Sync.Delete, Checksum: cfg.Sync.Checksum, UseFilesFrom: true, FilesFrom: manifestData, NoTimes: localContainerDockerSocketSync(cfg, server), Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
 			return recordFailure(exit(6, "rsync failed: %v", err))
 		}
 		timings.syncSteps.rsync = time.Since(stepStart)

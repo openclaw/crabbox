@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -56,6 +55,8 @@ var watchFilterSourceFiles = map[string]bool{
 	"crabbox.yaml":   true,
 	".crabbox.yaml":  true,
 }
+
+const watchGitIndexBatchKey = "\x00git-index"
 
 type watchOptions struct {
 	LeaseID        string
@@ -237,18 +238,22 @@ func (a App) watchLoop(ctx context.Context, opts watchOptions, repo Repo, cfg Co
 }
 
 type watchSession struct {
-	root     string
-	leaseID  string
-	runArgs  []string
-	command  []string
-	debounce time.Duration
-	idleExit time.Duration
-	cfg      Config
-	execute  watchRunExecutor
-	stderr   io.Writer
-	excludes []string
-	watcher  *fsnotify.Watcher
-	paths    map[string]watchPathState
+	root           string
+	leaseID        string
+	runArgs        []string
+	command        []string
+	debounce       time.Duration
+	idleExit       time.Duration
+	cfg            Config
+	execute        watchRunExecutor
+	stderr         io.Writer
+	excludes       SyncExcludeRules
+	trackedRegular map[string]struct{}
+	indexRegular   map[string]struct{}
+	pathScope      watchPathScope
+	gitIndexPath   string
+	watcher        *fsnotify.Watcher
+	paths          map[string]watchPathState
 }
 
 type watchPathState struct {
@@ -269,7 +274,24 @@ func (s *watchSession) run(ctx context.Context) error {
 	}
 	defer watcher.Close()
 	s.watcher = watcher
-	files, err := addWatchTree(watcher, s.root, s.root, s.excludes)
+	s.gitIndexPath, err = watchGitIndexPath(s.root)
+	if err != nil {
+		return exit(1, "watch: resolve Git index: %v", err)
+	}
+	if err := watcher.Add(filepath.Dir(s.gitIndexPath)); err != nil {
+		return exit(1, "watch: watch Git index: %v", err)
+	}
+	tracked, err := loadGitTrackedPaths(s.root)
+	if err != nil {
+		return exit(1, "watch: list tracked paths: %v", err)
+	}
+	s.indexRegular = trackedRegularPathSet(tracked)
+	s.trackedRegular, err = trackedRegularPathSetWithCachedDeletions(s.root, tracked)
+	if err != nil {
+		return exit(1, "watch: classify tracked paths: %v", err)
+	}
+	s.pathScope = newWatchPathScope(s.excludes, s.trackedRegular)
+	files, err := addWatchTree(watcher, s.root, s.root, s.pathScope)
 	if err != nil {
 		return exit(1, "watch: watch %s: %v", s.root, err)
 	}
@@ -394,6 +416,10 @@ func (s *watchSession) run(ctx context.Context) error {
 }
 
 func (s *watchSession) observeEvent(watcher *fsnotify.Watcher, event fsnotify.Event, batch map[string]struct{}) bool {
+	if s.gitIndexPath != "" && (sameLocalPath(event.Name, s.gitIndexPath) || sameLocalPath(event.Name, s.gitIndexPath+".lock")) {
+		batch[watchGitIndexBatchKey] = struct{}{}
+		return true
+	}
 	rel, err := filepath.Rel(s.root, event.Name)
 	if err != nil {
 		return false
@@ -402,21 +428,12 @@ func (s *watchSession) observeEvent(watcher *fsnotify.Watcher, event fsnotify.Ev
 	if rel == "." || !safeRepoRel(rel) {
 		return false
 	}
-	excluded := pathExcluded(rel, s.excludes)
-	if excluded {
-		if !excludedDirMayContainReinclude(rel, s.excludes) {
+	if !s.pathScope.pathEligible(rel) {
+		if !s.pathScope.traverseExcludedDir(rel) {
 			return false
 		}
 		if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
-			changed := false
-			for path := range s.paths {
-				if strings.HasPrefix(path, rel+"/") && !pathExcluded(path, s.excludes) {
-					delete(s.paths, path)
-					batch[path] = struct{}{}
-					changed = true
-				}
-			}
-			return changed
+			return s.queueRemovedDescendants(rel, batch)
 		}
 		if event.Op&fsnotify.Create == 0 {
 			return false
@@ -425,7 +442,7 @@ func (s *watchSession) observeEvent(watcher *fsnotify.Watcher, event fsnotify.Ev
 		if err != nil || !info.IsDir() {
 			return false
 		}
-		files, err := addWatchTree(watcher, s.root, event.Name, s.excludes)
+		files, err := addWatchTree(watcher, s.root, event.Name, s.pathScope)
 		if err != nil {
 			return false
 		}
@@ -443,7 +460,7 @@ func (s *watchSession) observeEvent(watcher *fsnotify.Watcher, event fsnotify.Ev
 	}
 	if event.Op&fsnotify.Create != 0 {
 		if info, err := os.Lstat(event.Name); err == nil && info.IsDir() {
-			if files, err := addWatchTree(watcher, s.root, event.Name, s.excludes); err == nil {
+			if files, err := addWatchTree(watcher, s.root, event.Name, s.pathScope); err == nil {
 				for _, file := range files {
 					s.rememberPath(file, filepath.Join(s.root, filepath.FromSlash(file)))
 					batch[file] = struct{}{}
@@ -453,6 +470,18 @@ func (s *watchSession) observeEvent(watcher *fsnotify.Watcher, event fsnotify.Ev
 	}
 	batch[rel] = struct{}{}
 	return true
+}
+
+func (s *watchSession) queueRemovedDescendants(rel string, batch map[string]struct{}) bool {
+	changed := false
+	for path := range s.paths {
+		if strings.HasPrefix(path, rel+"/") && s.pathScope.pathEligible(path) {
+			delete(s.paths, path)
+			batch[path] = struct{}{}
+			changed = true
+		}
+	}
+	return changed
 }
 
 func (s *watchSession) rememberPath(rel, name string) bool {
@@ -489,10 +518,26 @@ func (s *watchSession) qualifyBatch(paths []string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	excludesChanged := !slices.Equal(excludes, s.excludes)
+	previousIndexRegular := s.indexRegular
+	tracked, err := loadGitTrackedPaths(s.root)
+	if err != nil {
+		return nil, exit(1, "watch: list tracked paths: %v", err)
+	}
+	trackedRegular, err := trackedRegularPathSetWithCachedDeletions(s.root, tracked)
+	if err != nil {
+		return nil, exit(1, "watch: classify tracked paths: %v", err)
+	}
+	excludesChanged := !syncExcludeRulesEqual(excludes, s.excludes)
+	indexRegular := trackedRegularPathSet(tracked)
 	s.excludes = excludes
+	s.indexRegular = indexRegular
+	s.trackedRegular = trackedRegular
+	s.pathScope = newWatchPathScope(excludes, trackedRegular)
+	includes := syncIncludes(s.cfg)
+	var indexQualified []string
+	paths, indexQualified = expandWatchGitIndexBatch(paths, previousIndexRegular, indexRegular, excludes, includes)
 	if excludesChanged && s.watcher != nil {
-		files, err := addWatchTree(s.watcher, s.root, s.root, s.excludes)
+		files, err := addWatchTree(s.watcher, s.root, s.root, s.pathScope)
 		if err != nil {
 			return nil, exit(1, "watch: rewatch %s after filter change: %v", s.root, err)
 		}
@@ -500,11 +545,10 @@ func (s *watchSession) qualifyBatch(paths []string) ([]string, error) {
 			s.rememberPath(file, filepath.Join(s.root, filepath.FromSlash(file)))
 		}
 	}
-	includes := syncIncludes(s.cfg)
 	existing := make([]string, 0, len(paths))
 	missing := make([]string, 0, len(paths))
 	for _, path := range paths {
-		if !safeRepoRel(path) || pathExcluded(path, s.excludes) {
+		if !safeRepoRel(path) || !s.pathScope.pathEligible(path) {
 			continue
 		}
 		if _, err := os.Lstat(filepath.Join(s.root, filepath.FromSlash(path))); err == nil {
@@ -513,14 +557,26 @@ func (s *watchSession) qualifyBatch(paths []string) ([]string, error) {
 			missing = append(missing, path)
 		}
 	}
-	qualified := map[string]struct{}{}
+	qualified := make(map[string]struct{}, len(indexQualified))
+	for _, rel := range indexQualified {
+		qualified[rel] = struct{}{}
+		_, trackedRegular := s.indexRegular[rel]
+		if trackedRegular && s.pathScope.pathEligible(rel) {
+			if err := addWatchParentChain(s.watcher, s.root, rel); err != nil {
+				return nil, exit(1, "watch: attach tracked path %s: %v", rel, err)
+			}
+			s.rememberPath(rel, filepath.Join(s.root, filepath.FromSlash(rel)))
+		} else {
+			delete(s.paths, rel)
+		}
+	}
 	if len(existing) > 0 {
 		universe, err := watchGitPaths(s.root, existing, "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--")
 		if err != nil {
 			return nil, err
 		}
 		for _, rel := range universe {
-			if safeRepoRel(rel) && !pathExcluded(rel, s.excludes) && pathIncluded(rel, includes) {
+			if safeRepoRel(rel) && s.pathScope.pathEligible(rel) && pathIncluded(rel, includes) {
 				qualified[rel] = struct{}{}
 			}
 		}
@@ -561,6 +617,62 @@ func (s *watchSession) qualifyBatch(paths []string) ([]string, error) {
 	}
 	sort.Strings(result)
 	return result, nil
+}
+
+func watchGitIndexPath(root string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--git-path", "index")
+	cmd.Dir = root
+	cmd.Env = repositoryGitEnvironment()
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	indexPath := strings.TrimSpace(string(out))
+	if indexPath == "" {
+		return "", fmt.Errorf("empty Git index path")
+	}
+	if !filepath.IsAbs(indexPath) {
+		indexPath = filepath.Join(root, indexPath)
+	}
+	return filepath.Clean(indexPath), nil
+}
+
+func sameLocalPath(a, b string) bool {
+	return filepath.Clean(a) == filepath.Clean(b)
+}
+
+func expandWatchGitIndexBatch(paths []string, before, after map[string]struct{}, rules SyncExcludeRules, includes []string) ([]string, []string) {
+	indexChanged := false
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if path == watchGitIndexBatchKey {
+			indexChanged = true
+			continue
+		}
+		out = append(out, path)
+	}
+	if !indexChanged {
+		return out, nil
+	}
+	changed := map[string]struct{}{}
+	for path := range before {
+		if _, ok := after[path]; !ok && watchRulesProtectTrackedPath(path, rules) && pathIncluded(path, includes) {
+			changed[path] = struct{}{}
+		}
+	}
+	for path := range after {
+		if _, ok := before[path]; !ok && watchRulesProtectTrackedPath(path, rules) && pathIncluded(path, includes) {
+			changed[path] = struct{}{}
+		}
+	}
+	for path := range changed {
+		out = append(out, path)
+	}
+	qualified := make([]string, 0, len(changed))
+	for path := range changed {
+		qualified = append(qualified, path)
+	}
+	return out, qualified
 }
 
 func watchGitPaths(root string, paths []string, gitArgs ...string) ([]string, error) {
@@ -623,7 +735,7 @@ func isWatchIterationResult(err error) bool {
 	return strings.HasPrefix(exitErr.Message, "remote command exited") || strings.HasPrefix(exitErr.Message, "JUnit results contain")
 }
 
-func addWatchTree(watcher *fsnotify.Watcher, root, dir string, excludes []string) ([]string, error) {
+func addWatchTree(watcher *fsnotify.Watcher, root, dir string, scope watchPathScope) ([]string, error) {
 	var files []string
 	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -639,8 +751,7 @@ func addWatchTree(watcher *fsnotify.Watcher, root, dir string, excludes []string
 		rel = filepath.ToSlash(rel)
 		if entry.IsDir() {
 			if rel != "." &&
-				(!safeRepoRel(rel) ||
-					(pathExcluded(rel, excludes) && !excludedDirMayContainReinclude(rel, excludes))) {
+				(!safeRepoRel(rel) || !scope.traverseDir(rel)) {
 				return fs.SkipDir
 			}
 			if err := watcher.Add(path); err != nil {
@@ -654,13 +765,98 @@ func addWatchTree(watcher *fsnotify.Watcher, root, dir string, excludes []string
 		if entry.Type()&fs.ModeSymlink != 0 {
 			return nil
 		}
-		if !safeRepoRel(rel) || pathExcluded(rel, excludes) {
+		if !safeRepoRel(rel) || !scope.pathEligible(rel) {
 			return nil
 		}
 		files = append(files, rel)
 		return nil
 	})
 	return files, err
+}
+
+type watchPathScope struct {
+	rules                     SyncExcludeRules
+	trackedRegular            map[string]struct{}
+	protectedTrackedAncestors map[string]struct{}
+}
+
+func newWatchPathScope(rules SyncExcludeRules, trackedRegular map[string]struct{}) watchPathScope {
+	scope := watchPathScope{
+		rules:                     rules,
+		trackedRegular:            trackedRegular,
+		protectedTrackedAncestors: map[string]struct{}{},
+	}
+	for rel := range trackedRegular {
+		if !watchRulesProtectTrackedPath(rel, rules) {
+			continue
+		}
+		for parent := filepath.ToSlash(filepath.Dir(filepath.FromSlash(rel))); parent != "."; parent = filepath.ToSlash(filepath.Dir(filepath.FromSlash(parent))) {
+			scope.protectedTrackedAncestors[parent] = struct{}{}
+		}
+	}
+	return scope
+}
+
+func (s watchPathScope) pathEligible(rel string) bool {
+	_, trackedRegular := s.trackedRegular[rel]
+	return !pathExcludedByRules(rel, s.rules, trackedRegular)
+}
+
+func (s watchPathScope) traverseDir(rel string) bool {
+	if !pathExcludedByRules(rel, s.rules, false) {
+		return true
+	}
+	return s.traverseExcludedDir(rel)
+}
+
+func (s watchPathScope) traverseExcludedDir(rel string) bool {
+	if excludedDirMayContainReinclude(rel, s.rules.patterns()) {
+		return true
+	}
+	_, ok := s.protectedTrackedAncestors[rel]
+	return ok
+}
+
+func addWatchParentChain(watcher *fsnotify.Watcher, root, rel string) error {
+	if watcher == nil || !safeRepoRel(filepath.ToSlash(rel)) {
+		return nil
+	}
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	current := root
+	for _, part := range parts[:len(parts)-1] {
+		current = filepath.Join(current, filepath.FromSlash(part))
+		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("parent %s is not a directory", current)
+		}
+		if err := watcher.Add(current); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func syncExcludeRulesEqual(a, b SyncExcludeRules) bool {
+	if len(a.rules) != len(b.rules) {
+		return false
+	}
+	for i := range a.rules {
+		if a.rules[i] != b.rules[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func watchRulesProtectTrackedPath(rel string, rules SyncExcludeRules) bool {
+	excluded, protectedPattern := pathExcludeDecision(rel, rules, true)
+	return !excluded && protectedPattern != ""
 }
 
 func splitWatchArgs(args []string) ([]string, []string) {

@@ -68,7 +68,7 @@ func RunDelegatedArchiveSync(ctx context.Context, req DelegatedArchiveSyncReques
 		return nil, 0, err
 	}
 	manifestStart := now()
-	manifest, err := syncManifestFiltered(req.Repo.Root, excludes, req.Config.Sync.Includes)
+	manifest, err := syncManifestFilteredRules(req.Repo.Root, excludes, req.Config.Sync.Includes)
 	if err != nil {
 		return nil, 0, exit(6, "build sync file list: %v", err)
 	}

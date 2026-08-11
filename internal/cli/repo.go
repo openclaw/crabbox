@@ -331,18 +331,65 @@ func defaultExcludes() []string {
 	return append(excludes, protectedSyncExcludes()...)
 }
 
-func configuredExcludes(cfg Config) []string {
-	return appendOrderedStrings(defaultExcludes(), cfg.Sync.Excludes...)
+type syncExcludeOrigin uint8
+
+const (
+	syncExcludeBuiltIn syncExcludeOrigin = iota
+	syncExcludeConfigured
+	syncExcludeProtected
+)
+
+type syncExcludeRule struct {
+	pattern string
+	origin  syncExcludeOrigin
 }
 
-func syncExcludes(root string, cfg Config) ([]string, error) {
+// SyncExcludeRules keeps ordered matcher provenance internal while allowing
+// provider adapters to pass the rules back to the core manifest owner.
+type SyncExcludeRules struct {
+	rules []syncExcludeRule
+}
+
+func configuredExcludes(cfg Config) SyncExcludeRules {
+	rules := newSyncExcludeRules(defaultExcludes(), syncExcludeBuiltIn)
+	for i := range rules.rules {
+		if isProtectedSyncExclude(rules.rules[i].pattern) {
+			rules.rules[i].origin = syncExcludeProtected
+		}
+	}
+	return rules.append(cfg.Sync.Excludes, syncExcludeConfigured)
+}
+
+func syncExcludes(root string, cfg Config) (SyncExcludeRules, error) {
 	excludes := configuredExcludes(cfg)
 	ignore, err := readCrabboxIgnore(root)
 	if err != nil {
-		return nil, err
+		return SyncExcludeRules{}, err
 	}
-	excludes = appendOrderedStrings(excludes, ignore...)
-	return appendOrderedStrings(excludes, protectedSyncExcludes()...), nil
+	excludes = excludes.append(ignore, syncExcludeConfigured)
+	return excludes.append(protectedSyncExcludes(), syncExcludeProtected), nil
+}
+
+func newSyncExcludeRules(patterns []string, origin syncExcludeOrigin) SyncExcludeRules {
+	return (SyncExcludeRules{}).append(patterns, origin)
+}
+
+func (r SyncExcludeRules) append(patterns []string, origin syncExcludeOrigin) SyncExcludeRules {
+	out := SyncExcludeRules{rules: append([]syncExcludeRule(nil), r.rules...)}
+	for _, pattern := range patterns {
+		if pattern = strings.TrimSpace(pattern); pattern != "" {
+			out.rules = append(out.rules, syncExcludeRule{pattern: pattern, origin: origin})
+		}
+	}
+	return out
+}
+
+func (r SyncExcludeRules) patterns() []string {
+	out := make([]string, 0, len(r.rules))
+	for _, rule := range r.rules {
+		out = append(out, rule.pattern)
+	}
+	return out
 }
 
 func protectedSyncExcludes() []string {
@@ -352,6 +399,30 @@ func protectedSyncExcludes() []string {
 		".crabbox/logs",
 		".crabbox/captures",
 		".crabbox/runs",
+	}
+}
+
+func isProtectedSyncExclude(pattern string) bool {
+	pattern = strings.ToLower(strings.Trim(filepath.ToSlash(pattern), "/"))
+	for _, protected := range protectedSyncExcludes() {
+		if pattern == protected {
+			return true
+		}
+	}
+	return false
+}
+
+func isAmbiguousBuiltInExclude(pattern string) bool {
+	pattern, negated := excludeRule(pattern)
+	if negated {
+		return false
+	}
+	pattern = strings.Trim(filepath.ToSlash(pattern), "/")
+	switch pattern {
+	case "dist", "dist-runtime", "coverage", "playwright-report", "test-results", ".build", "apps/*/.build", "target":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -500,7 +571,7 @@ func warnCredentialBearingGitSeed(w io.Writer) {
 	fmt.Fprintln(w, "warning: git seed disabled because origin URL contains embedded credentials; continuing with file sync without forwarding the remote URL")
 }
 
-func SyncExcludes(root string, cfg Config) ([]string, error) {
+func SyncExcludes(root string, cfg Config) (SyncExcludeRules, error) {
 	return syncExcludes(root, cfg)
 }
 
@@ -618,17 +689,17 @@ func defaultBaseRef(root string) string {
 	return ""
 }
 
-func syncFingerprintForManifest(repo Repo, cfg Config, manifest SyncManifest, excludes []string, plan gitCoherencePlan) (string, error) {
+func syncFingerprintForManifest(repo Repo, cfg Config, manifest SyncManifest, excludes SyncExcludeRules, plan gitCoherencePlan) (string, error) {
 	if !plan.enabled() {
 		return "", nil
 	}
 	h := sha256.New()
-	fmt.Fprintf(h, "v4\nremote=%s\nbranch=%s\nhead=%s\ntree=%s\n", plan.RemoteURL, plan.Branch, plan.Target, plan.Tree)
+	fmt.Fprintf(h, "v5\nremote=%s\nbranch=%s\nhead=%s\ntree=%s\n", plan.RemoteURL, plan.Branch, plan.Target, plan.Tree)
 	fmt.Fprintf(h, "delete=%t\nchecksum=%t\n", cfg.Sync.Delete, cfg.Sync.Checksum)
 	fmt.Fprintf(h, "manifest=%x\n", sha256.Sum256(manifest.NUL()))
 	fmt.Fprintf(h, "deleted=%x\n", sha256.Sum256(manifest.DeletedNUL()))
-	for _, exclude := range excludes {
-		fmt.Fprintf(h, "exclude=%s\n", exclude)
+	for _, exclude := range excludes.rules {
+		fmt.Fprintf(h, "exclude=%d:%s\n", exclude.origin, exclude.pattern)
 	}
 	for _, rel := range manifest.Changed {
 		fmt.Fprintf(h, "path=%s\n", rel)
@@ -657,11 +728,17 @@ func syncFingerprintForManifest(repo Repo, cfg Config, manifest SyncManifest, ex
 }
 
 type SyncManifest struct {
-	Files        []string
-	Deleted      []string
-	Changed      []string
-	Bytes        int64
-	ChangedBytes int64
+	Files                    []string
+	Deleted                  []string
+	Changed                  []string
+	ProtectedTrackedExcludes []SyncProtectedTrackedExclude
+	Bytes                    int64
+	ChangedBytes             int64
+}
+
+type SyncProtectedTrackedExclude struct {
+	Path    string `json:"path"`
+	Pattern string `json:"pattern"`
 }
 
 // gitManifestError turns a raw git ls-files failure into an actionable,
@@ -696,8 +773,8 @@ func gitSyncFileList(root string) ([]byte, error) {
 	return out, nil
 }
 
-func syncManifest(root string, excludes []string) (SyncManifest, error) {
-	return syncManifestFiltered(root, excludes, nil)
+func syncManifest(root string, excludes SyncExcludeRules) (SyncManifest, error) {
+	return syncManifestFilteredRules(root, excludes, nil)
 }
 
 // syncManifestFiltered builds the sync manifest applying excludes and, when
@@ -705,6 +782,10 @@ func syncManifest(root string, excludes []string) (SyncManifest, error) {
 // synced. This lets a job sync a few selected paths instead of the whole working
 // tree (e.g. sync just `src/` and `scripts/` out of a large repo).
 func syncManifestFiltered(root string, excludes, includes []string) (SyncManifest, error) {
+	return syncManifestFilteredRules(root, newSyncExcludeRules(excludes, syncExcludeConfigured), includes)
+}
+
+func syncManifestFilteredRules(root string, excludes SyncExcludeRules, includes []string) (SyncManifest, error) {
 	out, err := gitSyncFileList(root)
 	if err != nil {
 		return SyncManifest{}, err
@@ -713,10 +794,11 @@ func syncManifestFiltered(root string, excludes, includes []string) (SyncManifes
 	if err != nil {
 		return SyncManifest{}, fmt.Errorf("verify sync manifest scope: %w", err)
 	}
+	trackedRegular := trackedRegularPathSet(tracked)
 	inManifestScope := func(entry gitTrackedPath) bool {
 		rel := filepath.ToSlash(entry.name)
 		return safeRepoRel(rel) &&
-			!pathExcluded(rel, excludes) &&
+			!pathExcludedByRules(rel, excludes, gitModeIsRegular(entry.mode)) &&
 			pathIncluded(rel, includes)
 	}
 	gitlinkPaths, err := trackedGitlinkPaths(tracked, inManifestScope)
@@ -736,7 +818,9 @@ func syncManifestFiltered(root string, excludes, includes []string) (SyncManifes
 	manifest := SyncManifest{}
 	for _, rel := range splitNul(out) {
 		rel = filepath.ToSlash(rel)
-		if _, isGitlink := gitlinkPaths[rel]; isGitlink || !safeRepoRel(rel) || pathExcluded(rel, excludes) || !pathIncluded(rel, includes) || seen[rel] {
+		_, isTrackedRegular := trackedRegular[rel]
+		excluded, protectedPattern := pathExcludeDecision(rel, excludes, isTrackedRegular)
+		if _, isGitlink := gitlinkPaths[rel]; isGitlink || !safeRepoRel(rel) || excluded || !pathIncluded(rel, includes) || seen[rel] {
 			continue
 		}
 		full := filepath.Join(root, filepath.FromSlash(rel))
@@ -747,9 +831,18 @@ func syncManifestFiltered(root string, excludes, includes []string) (SyncManifes
 		seen[rel] = true
 		manifest.Files = append(manifest.Files, rel)
 		manifest.Bytes += info.Size()
+		if protectedPattern != "" {
+			manifest.ProtectedTrackedExcludes = append(manifest.ProtectedTrackedExcludes, SyncProtectedTrackedExclude{
+				Path:    rel,
+				Pattern: protectedPattern,
+			})
+		}
 	}
 	sort.Strings(manifest.Files)
-	deleted, deletedGitlinks, err := syncDeletedPaths(root, excludes, includes)
+	sort.Slice(manifest.ProtectedTrackedExcludes, func(i, j int) bool {
+		return manifest.ProtectedTrackedExcludes[i].Path < manifest.ProtectedTrackedExcludes[j].Path
+	})
+	deleted, deletedGitlinks, deletedRegular, err := syncDeletedPaths(root, excludes, includes, trackedRegular)
 	if err != nil {
 		return SyncManifest{}, err
 	}
@@ -757,12 +850,29 @@ func syncManifestFiltered(root string, excludes, includes []string) (SyncManifes
 		gitlinkPaths[rel] = struct{}{}
 	}
 	manifest.Deleted = filterDeletedPaths(deleted, seen, gitlinkPaths)
-	changed, err := changedSyncPaths(root, excludes, includes)
+	for rel := range deletedRegular {
+		trackedRegular[rel] = struct{}{}
+	}
+	changed, err := changedSyncPaths(root, excludes, includes, trackedRegular)
 	if err != nil {
 		return SyncManifest{}, err
 	}
 	manifest.Changed, manifest.ChangedBytes = changedPathSetBytes(root, changed)
 	return manifest, nil
+}
+
+func trackedRegularPathSet(tracked []gitTrackedPath) map[string]struct{} {
+	paths := make(map[string]struct{})
+	for _, entry := range tracked {
+		if gitModeIsRegular(entry.mode) {
+			paths[filepath.ToSlash(entry.name)] = struct{}{}
+		}
+	}
+	return paths
+}
+
+func gitModeIsRegular(mode string) bool {
+	return mode == "100644" || mode == "100755"
 }
 
 func trackedGitlinkPaths(tracked []gitTrackedPath, inScope func(gitTrackedPath) bool) (map[string]struct{}, error) {
@@ -799,8 +909,8 @@ func trackedGitlinkPaths(tracked []gitTrackedPath, inScope func(gitTrackedPath) 
 	return paths, nil
 }
 
-func BuildSyncManifestFiltered(root string, excludes, includes []string) (SyncManifest, error) {
-	return syncManifestFiltered(root, excludes, includes)
+func BuildSyncManifestFiltered(root string, excludes SyncExcludeRules, includes []string) (SyncManifest, error) {
+	return syncManifestFilteredRules(root, excludes, includes)
 }
 
 func (m SyncManifest) NUL() []byte {
@@ -826,44 +936,46 @@ type gitCachedDeletion struct {
 	preimageMode string
 }
 
-func syncDeletedPaths(root string, excludes, includes []string) ([]string, map[string]struct{}, error) {
+func syncDeletedPaths(root string, excludes SyncExcludeRules, includes []string, trackedRegular map[string]struct{}) ([]string, map[string]struct{}, map[string]struct{}, error) {
 	cmd := exec.Command("git", "ls-files", "--deleted", "-z")
 	cmd.Dir = root
 	cmd.Env = repositoryGitEnvironment()
 	worktreeOut, err := cmd.Output()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	cmd = exec.Command("git", "diff", "--cached", "--raw", "--format=", "-z", "--diff-filter=D", "--no-renames")
-	cmd.Dir = root
-	cmd.Env = repositoryGitEnvironment()
-	cachedOut, err := cmd.Output()
+	cached, err := loadGitCachedDeletions(root)
 	if err != nil {
-		return nil, nil, err
-	}
-	cached, err := parseGitCachedDeletions(cachedOut)
-	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	seen := map[string]bool{}
 	gitlinks := map[string]struct{}{}
-	inScope := func(rel string) bool {
-		return safeRepoRel(rel) && !pathExcluded(rel, excludes) && pathIncluded(rel, includes)
+	regular := map[string]struct{}{}
+	inScope := func(rel string, isRegular bool) bool {
+		return safeRepoRel(rel) && !pathExcludedByRules(rel, excludes, isRegular) && pathIncluded(rel, includes)
 	}
 	for _, rel := range splitNul(worktreeOut) {
 		rel = filepath.ToSlash(rel)
-		if inScope(rel) {
+		_, isRegular := trackedRegular[rel]
+		if inScope(rel, isRegular) {
 			seen[rel] = true
+			if isRegular {
+				regular[rel] = struct{}{}
+			}
 		}
 	}
 	for _, deletion := range cached {
 		rel := filepath.ToSlash(deletion.name)
-		if !inScope(rel) {
+		isRegular := gitModeIsRegular(deletion.preimageMode)
+		if !inScope(rel, isRegular) {
 			continue
 		}
 		seen[rel] = true
 		if deletion.preimageMode == "160000" {
 			gitlinks[rel] = struct{}{}
+		}
+		if isRegular {
+			regular[rel] = struct{}{}
 		}
 	}
 	out := make([]string, 0, len(seen))
@@ -871,7 +983,32 @@ func syncDeletedPaths(root string, excludes, includes []string) ([]string, map[s
 		out = append(out, rel)
 	}
 	sort.Strings(out)
-	return out, gitlinks, nil
+	return out, gitlinks, regular, nil
+}
+
+func loadGitCachedDeletions(root string) ([]gitCachedDeletion, error) {
+	cmd := exec.Command("git", "diff", "--cached", "--raw", "--format=", "-z", "--diff-filter=D", "--no-renames")
+	cmd.Dir = root
+	cmd.Env = repositoryGitEnvironment()
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	return parseGitCachedDeletions(out)
+}
+
+func trackedRegularPathSetWithCachedDeletions(root string, tracked []gitTrackedPath) (map[string]struct{}, error) {
+	paths := trackedRegularPathSet(tracked)
+	deletions, err := loadGitCachedDeletions(root)
+	if err != nil {
+		return nil, err
+	}
+	for _, deletion := range deletions {
+		if gitModeIsRegular(deletion.preimageMode) {
+			paths[filepath.ToSlash(deletion.name)] = struct{}{}
+		}
+	}
+	return paths, nil
 }
 
 func parseGitCachedDeletions(raw []byte) ([]gitCachedDeletion, error) {
@@ -947,6 +1084,7 @@ func safeRepoRel(rel string) bool {
 func checkSyncPreflight(manifest SyncManifest, cfg Config, force bool, stderr io.Writer) error {
 	fileCount := len(manifest.Files)
 	guard := evaluateSyncGuardrail(manifest, cfg, force)
+	printProtectedTrackedExcludes(stderr, manifest)
 	if len(manifest.Changed) > 0 {
 		fmt.Fprintf(stderr, "sync candidate: %d files, %s dirty_delta=%d files, %s\n", fileCount, humanBytes(manifest.Bytes), len(manifest.Changed), humanBytes(manifest.ChangedBytes))
 	} else {
@@ -978,6 +1116,25 @@ func checkSyncPreflight(manifest SyncManifest, cfg Config, force bool, stderr io
 		printSyncTopDirs(stderr, guard.Paths)
 	}
 	return nil
+}
+
+func printProtectedTrackedExcludes(w io.Writer, manifest SyncManifest) {
+	if w == nil || len(manifest.ProtectedTrackedExcludes) == 0 {
+		return
+	}
+	limit := len(manifest.ProtectedTrackedExcludes)
+	if limit > protectedTrackedExcludeExampleLimit {
+		limit = protectedTrackedExcludeExampleLimit
+	}
+	items := make([]string, 0, limit)
+	for _, protected := range manifest.ProtectedTrackedExcludes[:limit] {
+		items = append(items, fmt.Sprintf("%s (%s)", protected.Path, protected.Pattern))
+	}
+	more := ""
+	if remaining := len(manifest.ProtectedTrackedExcludes) - limit; remaining > 0 {
+		more = fmt.Sprintf(" (+%d more)", remaining)
+	}
+	fmt.Fprintf(w, "warning: protected %d tracked files from built-in artifact excludes: %s%s\n", len(manifest.ProtectedTrackedExcludes), strings.Join(items, ", "), more)
 }
 
 type syncGuardrailEvaluation struct {
@@ -1101,7 +1258,7 @@ func humanBytes(n int64) string {
 	return fmt.Sprintf("%.1f PiB", value/unit)
 }
 
-func changedSyncPaths(root string, excludes, includes []string) ([]string, error) {
+func changedSyncPaths(root string, excludes SyncExcludeRules, includes []string, trackedRegular map[string]struct{}) ([]string, error) {
 	sets := [][]string{}
 	for _, args := range [][]string{
 		{"diff", "--name-only", "-z"},
@@ -1121,7 +1278,8 @@ func changedSyncPaths(root string, excludes, includes []string) ([]string, error
 	for _, set := range sets {
 		for _, rel := range set {
 			rel = filepath.ToSlash(rel)
-			if rel == "" || pathExcluded(rel, excludes) || !pathIncluded(rel, includes) {
+			_, isTrackedRegular := trackedRegular[rel]
+			if rel == "" || pathExcludedByRules(rel, excludes, isTrackedRegular) || !pathIncluded(rel, includes) {
 				continue
 			}
 			seen[rel] = true
@@ -1150,15 +1308,35 @@ func splitNul(data []byte) []string {
 }
 
 func pathExcluded(rel string, excludes []string) bool {
+	rules := newSyncExcludeRules(excludes, syncExcludeConfigured)
+	excluded, _ := pathExcludeDecision(rel, rules, false)
+	return excluded
+}
+
+func pathExcludedByRules(rel string, rules SyncExcludeRules, trackedRegular bool) bool {
+	excluded, _ := pathExcludeDecision(rel, rules, trackedRegular)
+	return excluded
+}
+
+func pathExcludeDecision(rel string, rules SyncExcludeRules, trackedRegular bool) (bool, string) {
 	rel = filepath.ToSlash(rel)
 	excluded := false
-	for _, exclude := range excludes {
-		exclude, negated := excludeRule(exclude)
+	protectedPattern := ""
+	for _, rule := range rules.rules {
+		exclude, negated := excludeRule(rule.pattern)
 		if excludeMatches(rel, exclude) || protectedSyncExcludeMatches(rel, exclude) {
+			if trackedRegular && rule.origin == syncExcludeBuiltIn && !negated && isAmbiguousBuiltInExclude(rule.pattern) {
+				protectedPattern = exclude
+				continue
+			}
 			excluded = !negated
+			protectedPattern = ""
 		}
 	}
-	return excluded
+	if excluded {
+		protectedPattern = ""
+	}
+	return excluded, protectedPattern
 }
 
 func excludeRule(rule string) (pattern string, negated bool) {

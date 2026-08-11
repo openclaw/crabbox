@@ -47,9 +47,27 @@ such as `node_modules`, `.git`, `dist`, `coverage`, `playwright-report`,
 `test-results`, `.next`, `.vite`, `.turbo`, `target`, `.venv`, `__pycache__`,
 `.gradle`, and Crabbox runtime state under `.crabbox/env`,
 `.crabbox/scripts`, `.crabbox/logs`, `.crabbox/captures`, and
-`.crabbox/runs`. Crabbox does not globally drop tracked source files just
-because a path segment happens to be named `build` or `out`. Put
-project-specific generated directories in `.crabboxignore` or `sync.exclude`.
+`.crabbox/runs`. Built-in rules for the ambiguous artifact names `dist`,
+`dist-runtime`, `coverage`, `playwright-report`, `test-results`, `.build`, and
+`target` still omit untracked output, but do not omit a Git-tracked regular file
+solely because one of those names appears in its path. Crabbox reports a bounded
+path-and-pattern summary when it protects such files. Unmistakable dependency
+and cache rules such as `node_modules`, `.cache`, `.venv`, and `__pycache__`
+remain component-wide, including for tracked files.
+
+Except for the protected Crabbox runtime state described below, rules from
+`sync.exclude` and `.crabboxignore` are authoritative, including bare
+component-wide patterns. They can deliberately exclude tracked artifact files
+or trees, and a later `!pattern` can re-include them. This keeps existing
+repository policy intact across upgrades while making Crabbox-owned ambiguous
+defaults safe. Crabbox also does not globally drop tracked source files just
+because a path segment happens to be named `build` or `out`. Put project-specific
+generated directories in `.crabboxignore` or `sync.exclude`.
+
+`crabbox watch` observes only the ancestor chains needed by tracked protected
+files or explicit re-includes, so unrelated untracked artifact trees do not
+create watch churn. It also watches Git's resolved index and attaches the parent
+chain when an index-only transition makes an artifact path tracked.
 
 ## Excludes
 
@@ -183,8 +201,11 @@ PR head; add `--apply-local-patch` to layer your local git diff on top. The
 
 Use `crabbox sync-plan` to inspect the manifest before leasing a box. It prints
 the candidate file count, total bytes, the count of deleted tracked paths, and
-the largest files and directories, using the same excludes as `run`. Use
-`--limit` to change how many top files and directories are listed (default 20).
+the largest files and directories, using the same excludes as `run`. When an
+ambiguous built-in artifact rule would otherwise hide a tracked regular file,
+the plan also prints a bounded annotation naming the protected paths and
+patterns. Use `--limit` to change how many top files and directories are listed
+(default 20).
 
 ```text
 $ crabbox sync-plan

@@ -19,9 +19,15 @@ type syncPlanJSONOutput struct {
 	Candidate           syncPlanJSONSize      `json:"candidate"`
 	DirtyDelta          syncPlanJSONSize      `json:"dirtyDelta"`
 	DeletedTrackedPaths int                   `json:"deletedTrackedPaths"`
+	ProtectedTracked    syncPlanJSONProtected `json:"protectedTrackedFiles"`
 	Guardrail           syncPlanJSONGuardrail `json:"guardrail"`
 	TopFiles            []syncPlanJSONRow     `json:"topFiles"`
 	TopDirs             []syncPlanJSONRow     `json:"topDirs"`
+}
+
+type syncPlanJSONProtected struct {
+	Count    int                           `json:"count"`
+	Examples []SyncProtectedTrackedExclude `json:"examples,omitempty"`
 }
 
 type syncPlanJSONSize struct {
@@ -84,7 +90,7 @@ func (a App) syncPlan(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	manifest, err := syncManifestFiltered(repo.Root, excludes, syncIncludes(cfg))
+	manifest, err := syncManifestFilteredRules(repo.Root, excludes, syncIncludes(cfg))
 	if err != nil {
 		return exit(6, "build sync file list: %v", err)
 	}
@@ -97,6 +103,7 @@ func (a App) syncPlan(ctx context.Context, args []string) error {
 		return nil
 	}
 	fmt.Fprintf(a.Stdout, "sync candidate: %d files, %s\n", len(manifest.Files), humanBytes(manifest.Bytes))
+	printProtectedTrackedExcludes(a.Stdout, manifest)
 	if len(manifest.Deleted) > 0 {
 		fmt.Fprintf(a.Stdout, "deleted tracked paths: %d\n", len(manifest.Deleted))
 	}
@@ -116,9 +123,23 @@ func syncPlanJSON(manifest SyncManifest, files, dirs []syncPlanRow, cfg Config) 
 		Candidate:           syncPlanJSONSizeFor(len(manifest.Files), manifest.Bytes),
 		DirtyDelta:          syncPlanJSONSizeFor(len(manifest.Changed), manifest.ChangedBytes),
 		DeletedTrackedPaths: len(manifest.Deleted),
+		ProtectedTracked:    syncPlanJSONProtectedFor(manifest),
 		Guardrail:           syncPlanJSONGuardrailFor(manifest, cfg),
 		TopFiles:            syncPlanJSONRows(files),
 		TopDirs:             syncPlanJSONRows(dirs),
+	}
+}
+
+const protectedTrackedExcludeExampleLimit = 5
+
+func syncPlanJSONProtectedFor(manifest SyncManifest) syncPlanJSONProtected {
+	examples := manifest.ProtectedTrackedExcludes
+	if len(examples) > protectedTrackedExcludeExampleLimit {
+		examples = examples[:protectedTrackedExcludeExampleLimit]
+	}
+	return syncPlanJSONProtected{
+		Count:    len(manifest.ProtectedTrackedExcludes),
+		Examples: append([]SyncProtectedTrackedExclude(nil), examples...),
 	}
 }
 
