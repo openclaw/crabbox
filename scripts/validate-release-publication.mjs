@@ -26,6 +26,13 @@ function positiveSafeInteger(value, label) {
   return value;
 }
 
+function commitSha(value, label) {
+  if (typeof value !== "string" || !/^[0-9a-f]{40}$/.test(value)) {
+    fail(`${label} must be a full lowercase commit SHA`);
+  }
+  return value;
+}
+
 function timestamp(value, label) {
   if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) {
     fail(`${label} must be an RFC 3339 timestamp`);
@@ -41,13 +48,15 @@ function sha256(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
+const verifierCommit = requireValue("CRABBOX_PUBLISH_VERIFIER_COMMIT");
 const metadata = {
   repository: requireValue("CRABBOX_PUBLISH_REPOSITORY"),
   releaseId: Number(requireValue("CRABBOX_PUBLISH_RELEASE_ID")),
   tag: requireValue("CRABBOX_PUBLISH_TAG"),
   tagObject: requireValue("CRABBOX_PUBLISH_TAG_OBJECT"),
   sourceCommit: requireValue("CRABBOX_PUBLISH_SOURCE_COMMIT"),
-  verifierCommit: requireValue("CRABBOX_PUBLISH_VERIFIER_COMMIT"),
+  verifierCommit,
+  workflowCommit: process.env.CRABBOX_PUBLISH_WORKFLOW_COMMIT || verifierCommit,
   verifierRunId: Number(requireValue("CRABBOX_PUBLISH_VERIFIER_RUN_ID")),
   defaultBranch: requireValue("CRABBOX_PUBLISH_DEFAULT_BRANCH"),
   workflowPath: requireValue("CRABBOX_PUBLISH_WORKFLOW_PATH"),
@@ -55,6 +64,8 @@ const metadata = {
 };
 positiveSafeInteger(metadata.releaseId, "release ID");
 positiveSafeInteger(metadata.verifierRunId, "verifier run ID");
+commitSha(metadata.verifierCommit, "verifier commit");
+commitSha(metadata.workflowCommit, "workflow commit");
 
 function expectedAssetNames(file) {
   const names = fs.readFileSync(file, "utf8").split("\n").filter(Boolean);
@@ -169,10 +180,10 @@ function validateWorkflowRun(run, workflow, state = "draft") {
     run.status !== "completed" ||
     run.conclusion !== "success" ||
     run.head_branch !== metadata.defaultBranch ||
-    run.head_sha !== metadata.verifierCommit ||
+    run.head_sha !== metadata.workflowCommit ||
     run.repository?.full_name !== metadata.repository ||
     run.head_repository?.full_name !== metadata.repository ||
-    run.head_commit?.id !== metadata.verifierCommit
+    run.head_commit?.id !== metadata.workflowCommit
   ) {
     fail("native verifier run does not match the exact protected workflow identity");
   }
@@ -214,7 +225,7 @@ function validateArtifactList(value) {
     if (
       artifact.workflow_run?.id !== metadata.verifierRunId ||
       artifact.workflow_run?.head_branch !== metadata.defaultBranch ||
-      artifact.workflow_run?.head_sha !== metadata.verifierCommit
+      artifact.workflow_run?.head_sha !== metadata.workflowCommit
     ) {
       fail(`native proof artifact is not bound to the selected verifier run: ${artifact.name}`);
     }
@@ -273,6 +284,7 @@ function validateProof(manifest, arch, expectedRecord, state = "draft") {
     manifest.tagObject !== metadata.tagObject ||
     manifest.sourceCommit !== metadata.sourceCommit ||
     manifest.verifierCommit !== metadata.verifierCommit ||
+    (manifest.workflowCommit ?? manifest.verifierCommit) !== metadata.workflowCommit ||
     manifest.verifierArch !== arch
   ) {
     fail(`${arch} proof does not bind the exact ${state} release and protected verifier inputs`);
@@ -352,7 +364,13 @@ function publicProof(args) {
       fail(`local public asset digest differs from GitHub: ${asset.name}`);
     }
   }
-  process.stdout.write(`${JSON.stringify(current, null, 2)}\n`);
+  process.stdout.write(
+    `${JSON.stringify({
+      ...current,
+      verifierCommit: metadata.verifierCommit,
+      workflowCommit: metadata.workflowCommit,
+    }, null, 2)}\n`,
+  );
 }
 
 function preflight(args) {
@@ -418,6 +436,7 @@ function preflight(args) {
     tagObject: metadata.tagObject,
     sourceCommit: metadata.sourceCommit,
     verifierCommit: metadata.verifierCommit,
+    workflowCommit: metadata.workflowCommit,
     verifierRunId: metadata.verifierRunId,
     createdAt: release.created_at,
     releaseUpdatedAt: release.updated_at,
@@ -449,6 +468,7 @@ function assertState(args) {
     snapshot.tagObject !== metadata.tagObject ||
     snapshot.sourceCommit !== metadata.sourceCommit ||
     snapshot.verifierCommit !== metadata.verifierCommit ||
+    (snapshot.workflowCommit ?? snapshot.verifierCommit) !== metadata.workflowCommit ||
     snapshot.verifierRunId !== metadata.verifierRunId ||
     snapshot.notesSha256 !== sha256(Buffer.from(notes, "utf8"))
   ) {

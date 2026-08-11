@@ -88,6 +88,7 @@ assert_clean_homebrew_environment() {
   while IFS= read -r name; do
     case "$name" in
       CRABBOX_HOMEBREW_CLEAN_CHILD | \
+        CRABBOX_VERIFY_TOOLING_COMMIT | \
         HOME | HOMEBREW_CACHE | HOMEBREW_NO_ANALYTICS | HOMEBREW_NO_AUTO_UPDATE | \
         HOMEBREW_NO_ENV_HINTS | HOMEBREW_NO_INSTALL_CLEANUP | \
         LC_ALL | LOGNAME | NONINTERACTIVE | PATH | PWD | SHLVL | TMPDIR | USER) ;;
@@ -101,16 +102,27 @@ assert_clean_homebrew_environment() {
 
 validate_release_identity() {
   local tag=${1:-} tag_object=${2:-} source_commit=${3:-} verifier_commit=${4:-}
+  local tooling_commit=${CRABBOX_VERIFY_TOOLING_COMMIT:-$verifier_commit}
   [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] &&
     [[ "$tag_object" =~ ^[0-9a-f]{40}$ ]] &&
     [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] &&
-    [[ "$verifier_commit" =~ ^[0-9a-f]{40}$ ]] || usage
+    [[ "$verifier_commit" =~ ^[0-9a-f]{40}$ ]] &&
+    [[ "$tooling_commit" =~ ^[0-9a-f]{40}$ ]] || usage
 }
 
 require_publishable_source() {
   local tag=$1 tag_object=$2 source_commit=$3 verifier_commit=$4
-  [[ "$(git -C "$ROOT" rev-parse HEAD)" == "$verifier_commit" ]] || {
-    echo "protected verifier checkout does not match the supplied verifier commit" >&2
+  local tooling_commit=${CRABBOX_VERIFY_TOOLING_COMMIT:-$verifier_commit}
+  [[ "$(git -C "$ROOT" rev-parse HEAD)" == "$tooling_commit" ]] || {
+    echo "protected tooling checkout does not match the supplied tooling commit" >&2
+    return 1
+  }
+  git -C "$ROOT" merge-base --is-ancestor "$verifier_commit" "$tooling_commit" || {
+    echo "provenance verifier commit is not an ancestor of protected tooling" >&2
+    return 1
+  }
+  git -C "$ROOT" merge-base --is-ancestor "$source_commit" "$verifier_commit" || {
+    echo "release source commit is not an ancestor of the provenance verifier" >&2
     return 1
   }
   (
@@ -119,14 +131,15 @@ require_publishable_source() {
       RELEASE_TAG="$tag" \
       EXPECTED_TAG_OBJECT="$tag_object" \
       EXPECTED_TAG_COMMIT="$source_commit" \
-      TRUSTED_HEAD="$verifier_commit" \
+      TRUSTED_HEAD="$tooling_commit" \
       REQUIRE_PUBLISHABLE=1 \
       "$ROOT/scripts/verify-release-source.sh" >/dev/null
   )
 }
 
 require_protected_homebrew_tooling() {
-  local verifier_commit=$1 tag=$2 tooling_status
+  local verifier_commit=$1 tag=$2 tooling_status expected_remote remote_commit
+  local tooling_commit=${CRABBOX_VERIFY_TOOLING_COMMIT:-$verifier_commit}
   tooling_status=$(git -C "$ROOT" status --porcelain=v1 --untracked-files=all -- \
     "${PROTECTED_HOMEBREW_TOOLING[@]}" "release/records/$tag.json")
   [[ -z "$tooling_status" ]] || {
@@ -134,9 +147,33 @@ require_protected_homebrew_tooling() {
     printf '%s\n' "$tooling_status" >&2
     return 1
   }
-  git -C "$ROOT" diff --quiet "$verifier_commit" -- \
+  expected_remote="https://github.com/$CRABBOX_RELEASE_REPOSITORY"
+  case "$(git -C "$ROOT" remote get-url origin)" in
+    "$expected_remote" | "$expected_remote.git") ;;
+    *)
+      echo "protected downstream verifier requires canonical origin $expected_remote" >&2
+      return 1
+      ;;
+  esac
+  remote_commit=$(git ls-remote "$expected_remote" \
+    "refs/heads/$CRABBOX_RELEASE_DEFAULT_BRANCH" | awk '{print $1}')
+  [[ "$remote_commit" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "canonical default-branch tip is invalid" >&2
+    return 1
+  }
+  git -C "$ROOT" -c fetch.writeCommitGraph=false fetch --quiet --no-tags \
+    "$expected_remote" "$remote_commit"
+  git -C "$ROOT" merge-base --is-ancestor "$tooling_commit" "$remote_commit" || {
+    echo "protected tooling commit is not in canonical default-branch history" >&2
+    return 1
+  }
+  git -C "$ROOT" merge-base --is-ancestor "$verifier_commit" "$tooling_commit" || {
+    echo "provenance verifier commit is not an ancestor of protected tooling" >&2
+    return 1
+  }
+  git -C "$ROOT" diff --quiet "$tooling_commit" -- \
     "${PROTECTED_HOMEBREW_TOOLING[@]}" "release/records/$tag.json" || {
-    echo "protected downstream verifier tooling differs from $verifier_commit" >&2
+    echo "protected downstream verifier tooling differs from $tooling_commit" >&2
     return 1
   }
 }
@@ -145,11 +182,19 @@ sha256_file() {
   shasum -a 256 "$1" | awk '{print $1}'
 }
 
+require_public_workflow_ancestry() {
+  local verifier_commit=$1 workflow_commit=$2
+  git -C "$ROOT" merge-base --is-ancestor "$verifier_commit" "$workflow_commit" || {
+    echo "public workflow commit is not a descendant of the provenance verifier" >&2
+    return 1
+  }
+}
+
 freeze_public_release() {
   [[ $# -eq 10 ]] || usage
   local tag=$1 asset_dir=$2 tag_object=$3 source_commit=$4 verifier_commit=$5
   local release_id=$6 run_id=$7 proof_dir=$8 work=$9 node_bin=${10}
-  local repository=$CRABBOX_RELEASE_REPOSITORY version=${tag#v} workflow_id arch
+  local repository=$CRABBOX_RELEASE_REPOSITORY version=${tag#v} workflow_id workflow_commit arch
   [[ "$release_id" =~ ^[1-9][0-9]*$ && "$run_id" =~ ^[1-9][0-9]*$ ]] || usage
   [[ -d "$proof_dir" && ! -L "$proof_dir" ]] || {
     echo "public proof ZIP directory must be a real directory" >&2
@@ -185,6 +230,9 @@ freeze_public_release() {
   }
   public_api_get "repos/$repository/releases/$release_id" >"$work/public-release.json"
   public_api_get "repos/$repository/actions/runs/$run_id" >"$work/public-run.json"
+  workflow_commit=$(jq -er '.head_sha | select(type == "string" and test("^[0-9a-f]{40}$"))' \
+    "$work/public-run.json")
+  require_public_workflow_ancestry "$verifier_commit" "$workflow_commit"
   workflow_id=$(jq -er '.workflow_id | select(type == "number" and . > 0)' "$work/public-run.json")
   public_api_get "repos/$repository/actions/workflows/$workflow_id" >"$work/public-workflow.json"
   public_api_get "repos/$repository/actions/runs/$run_id/artifacts?per_page=100" \
@@ -218,6 +266,7 @@ freeze_public_release() {
     CRABBOX_PUBLISH_TAG_OBJECT="$tag_object" \
     CRABBOX_PUBLISH_SOURCE_COMMIT="$source_commit" \
     CRABBOX_PUBLISH_VERIFIER_COMMIT="$verifier_commit" \
+    CRABBOX_PUBLISH_WORKFLOW_COMMIT="$workflow_commit" \
     CRABBOX_PUBLISH_VERIFIER_RUN_ID="$run_id" \
     CRABBOX_PUBLISH_DEFAULT_BRANCH="$CRABBOX_RELEASE_DEFAULT_BRANCH" \
     CRABBOX_PUBLISH_WORKFLOW_PATH=.github/workflows/release-assets.yml \
@@ -453,6 +502,7 @@ homebrew_phase() {
   (
     cd "$ROOT"
     CRABBOX_VERIFY_EXEC_ARCH="$native_arch" \
+      CRABBOX_VERIFY_TOOLING_COMMIT="${CRABBOX_VERIFY_TOOLING_COMMIT:-$verifier_commit}" \
       "$ROOT/scripts/verify-release.sh" \
       "$tag" "$asset_dir" "$tag_object" "$source_commit" "$verifier_commit"
   )
@@ -594,8 +644,9 @@ main() {
   [[ $# -eq 8 ]] || usage
   local tag=$1 asset_dir=$2 tag_object=$3 source_commit=$4 verifier_commit=$5
   local release_id=$6 public_run_id=$7 proof_dir=$8
-  local native_arch brew_bin node_bin go_bin work clean_path user_name homebrew_home homebrew_cache source_asset_dir
+  local native_arch brew_bin node_bin go_bin work clean_path user_name homebrew_home homebrew_cache source_asset_dir tooling_commit
   validate_release_identity "$tag" "$tag_object" "$source_commit" "$verifier_commit"
+  tooling_commit=${CRABBOX_VERIFY_TOOLING_COMMIT:-$verifier_commit}
   assert_no_downstream_credentials
   case "${CRABBOX_HOMEBREW_EXTERNAL_PUBLIC_POSTFLIGHT:-}" in
     "") ;;
@@ -671,6 +722,7 @@ main() {
     HOMEBREW_NO_INSTALL_CLEANUP=1 \
     NONINTERACTIVE=1 \
     CRABBOX_HOMEBREW_CLEAN_CHILD=1 \
+    CRABBOX_VERIFY_TOOLING_COMMIT="$tooling_commit" \
     /bin/bash -c 'source "$1"; shift; homebrew_phase "$@"' \
       crabbox-homebrew-phase "$SCRIPT_PATH" \
       "$tag" "$asset_dir" "$tag_object" "$source_commit" "$verifier_commit" \

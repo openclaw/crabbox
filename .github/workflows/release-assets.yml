@@ -21,7 +21,11 @@ on:
         required: true
         type: string
       verifier_commit:
-        description: "Protected default-branch verifier commit SHA"
+        description: "Immutable candidate provenance verifier commit SHA"
+        required: true
+        type: string
+      workflow_commit:
+        description: "Current protected default-branch workflow commit SHA"
         required: true
         type: string
       draft:
@@ -57,22 +61,36 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           RELEASE_TAG: ${{ inputs.tag }}
           VERIFIER_COMMIT: ${{ inputs.verifier_commit }}
+          WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
         run: |
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ ]]
           [[ "$VERIFIER_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$WORKFLOW_COMMIT" =~ ^[0-9a-f]{40}$ ]]
           expected_ref="refs/heads/$DEFAULT_BRANCH"
           expected_workflow_ref="$GITHUB_REPOSITORY/.github/workflows/release-assets.yml@$expected_ref"
           [[ "$GITHUB_REF" == "$expected_ref" ]]
           [[ "$GITHUB_WORKFLOW_REF" == "$expected_workflow_ref" ]]
-          [[ "${{ github.workflow_sha }}" == "$VERIFIER_COMMIT" ]]
+          [[ "${{ github.workflow_sha }}" == "$WORKFLOW_COMMIT" ]]
 
-      - name: Check out protected verifier tooling
+      - name: Check out protected workflow tooling
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
           ref: ${{ github.workflow_sha }}
+
+      - name: Bind provenance verifier to protected workflow ancestry
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ inputs.tag_commit }}
+          VERIFIER_COMMIT: ${{ inputs.verifier_commit }}
+          WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$WORKFLOW_COMMIT"
+          git merge-base --is-ancestor "$SOURCE_COMMIT" "$VERIFIER_COMMIT"
+          git merge-base --is-ancestor "$VERIFIER_COMMIT" "$WORKFLOW_COMMIT"
 
       - name: Set up Go for Apple VM source verification
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
@@ -113,9 +131,9 @@ jobs:
           EXPECTED_TAG_COMMIT: ${{ inputs.tag_commit }}
           EXPECTED_TAG_OBJECT: ${{ inputs.tag_object }}
           RELEASE_TAG: ${{ inputs.tag }}
-          TRUSTED_HEAD: ${{ inputs.verifier_commit }}
+          TRUSTED_HEAD: ${{ inputs.workflow_commit }}
           WORKFLOW_REF: ${{ github.ref }}
-          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          WORKFLOW_SHA: ${{ inputs.workflow_commit }}
           REQUIRE_PUBLISHABLE: "1"
         run: |
           set -euo pipefail
@@ -252,7 +270,7 @@ jobs:
           - runner: macos-15-intel
             arch: x86_64
     steps:
-      - name: Check out protected verifier tooling
+      - name: Check out protected workflow tooling
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
@@ -291,6 +309,7 @@ jobs:
           RELEASE_TAG_OBJECT: ${{ inputs.tag_object }}
           RELEASE_COMMIT: ${{ inputs.tag_commit }}
           VERIFIER_COMMIT: ${{ inputs.verifier_commit }}
+          WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
           VERIFY_ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
@@ -298,6 +317,7 @@ jobs:
           env -i \
             CRABBOX_VERIFY_EXEC_ARCH="$VERIFY_ARCH" \
             CRABBOX_VERIFY_MODE=static \
+            CRABBOX_VERIFY_TOOLING_COMMIT="$WORKFLOW_COMMIT" \
             HOME="$RUNNER_TEMP/verify-home" LANG=C LC_ALL=C \
             PATH="$PATH" TMPDIR="$RUNNER_TEMP" \
             scripts/verify-release.sh \
@@ -311,6 +331,7 @@ jobs:
           RELEASE_TAG_OBJECT: ${{ inputs.tag_object }}
           RELEASE_COMMIT: ${{ inputs.tag_commit }}
           VERIFIER_COMMIT: ${{ inputs.verifier_commit }}
+          WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
           VERIFY_ARCH: ${{ matrix.arch }}
           EXPECTED_DRAFT: ${{ inputs.draft }}
         run: |
@@ -321,7 +342,7 @@ jobs:
             RELEASE_ID="$RELEASE_ID" RELEASE_JSON="$RUNNER_TEMP/release-input/release.json" \
             RELEASE_PROOF="$RUNNER_TEMP/verified-assets.json" RELEASE_TAG="$RELEASE_TAG" \
             RELEASE_TAG_OBJECT="$RELEASE_TAG_OBJECT" VERIFIER_COMMIT="$VERIFIER_COMMIT" \
-            PATH="$PATH" VERIFY_ARCH="$VERIFY_ARCH" node <<'NODE'
+            WORKFLOW_COMMIT="$WORKFLOW_COMMIT" PATH="$PATH" VERIFY_ARCH="$VERIFY_ARCH" node <<'NODE'
           const crypto = require('node:crypto');
           const fs = require('node:fs');
           const path = require('node:path');
@@ -344,6 +365,7 @@ jobs:
             tagObject: process.env.RELEASE_TAG_OBJECT,
             sourceCommit: process.env.RELEASE_COMMIT,
             verifierCommit: process.env.VERIFIER_COMMIT,
+            workflowCommit: process.env.WORKFLOW_COMMIT,
             verifierArch: process.env.VERIFY_ARCH,
             title: release.name,
             targetCommitish: release.target_commitish,
@@ -385,7 +407,7 @@ jobs:
           - runner: macos-15-intel
             arch: x86_64
     steps:
-      - name: Check out protected verifier tooling
+      - name: Check out protected workflow tooling
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
@@ -424,6 +446,7 @@ jobs:
           RELEASE_TAG_OBJECT: ${{ inputs.tag_object }}
           RELEASE_COMMIT: ${{ inputs.tag_commit }}
           VERIFIER_COMMIT: ${{ inputs.verifier_commit }}
+          WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
           VERIFY_ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
@@ -431,6 +454,7 @@ jobs:
           exec env -i \
             CRABBOX_VERIFY_EXEC_ARCH="$VERIFY_ARCH" \
             CRABBOX_VERIFY_MODE=execute \
+            CRABBOX_VERIFY_TOOLING_COMMIT="$WORKFLOW_COMMIT" \
             HOME="$RUNNER_TEMP/execute-home" LANG=C LC_ALL=C \
             PATH="$PATH" TMPDIR="$RUNNER_TEMP" \
             scripts/verify-release.sh \

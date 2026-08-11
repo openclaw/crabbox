@@ -82,11 +82,12 @@ jobs:
             ' "$work/release.json" >/dev/null
           jq -e \
             --argjson id "$PUBLIC_VERIFIER_RUN_ID" \
-            --arg branch "$DEFAULT_BRANCH" \
-            --arg sha "$VERIFIER_COMMIT" '
+            --arg branch "$DEFAULT_BRANCH" '
               .id == $id and .event == "workflow_dispatch" and
               .status == "completed" and .conclusion == "success" and
-              .head_branch == $branch and .head_sha == $sha and
+              .head_branch == $branch and
+              (.head_sha | type == "string" and test("^[0-9a-f]{40}$")) and
+              .head_commit.id == .head_sha and
               .repository.full_name == env.GITHUB_REPOSITORY and
               .head_repository.full_name == env.GITHUB_REPOSITORY
             ' "$work/run.json" >/dev/null
@@ -143,10 +144,10 @@ jobs:
             arch: x86_64
     steps:
 
-      - name: Check out protected release verifier
+      - name: Check out protected Homebrew tooling
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ inputs.verifier_commit }}
+          ref: ${{ github.workflow_sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -162,7 +163,7 @@ jobs:
           name: homebrew-public-witness-${{ github.run_id }}
           path: ${{ runner.temp }}/public-witness
 
-      - name: Preserve pinned release tools in the frozen verifier path
+      - name: Preserve protected release tools in the workflow path
         shell: bash
         run: |
           set -euo pipefail
@@ -212,10 +213,10 @@ jobs:
         shell: bash
         env:
           RELEASE_TAG: ${{ inputs.tag }}
-          VERIFIER_COMMIT: ${{ inputs.verifier_commit }}
+          WORKFLOW_COMMIT: ${{ github.workflow_sha }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$VERIFIER_COMMIT"
+          test "$(git rev-parse HEAD)" = "$WORKFLOW_COMMIT"
           version=${RELEASE_TAG#v}
           assets=(
             checksums.txt
@@ -269,12 +270,14 @@ jobs:
           TAG_OBJECT: ${{ inputs.tag_object }}
           PUBLIC_VERIFIER_RUN_ID: ${{ inputs.public_verifier_run_id }}
           VERIFIER_COMMIT: ${{ inputs.verifier_commit }}
+          WORKFLOW_COMMIT: ${{ github.workflow_sha }}
         run: |
           set -euo pipefail
           unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_RUNTIME_TOKEN GH_TOKEN GITHUB_TOKEN
           unset HOMEBREW_GITHUB_API_TOKEN HOMEBREW_TAP_GITHUB_TOKEN
           HOMEBREW_NO_AUTO_UPDATE=1 brew tap openclaw/tap
-          scripts/verify-homebrew-release.sh \
+          CRABBOX_VERIFY_TOOLING_COMMIT="$WORKFLOW_COMMIT" \
+            scripts/verify-homebrew-release.sh \
             "$RELEASE_TAG" "$RUNNER_TEMP/release-assets" \
             "$TAG_OBJECT" "$SOURCE_COMMIT" "$VERIFIER_COMMIT" \
             "$RELEASE_ID" "$PUBLIC_VERIFIER_RUN_ID" "$RUNNER_TEMP/public-proofs"

@@ -384,6 +384,11 @@ test("Homebrew verifier is publishability-gated, native, token-free, and read-on
   assert.match(source, /validate-release-publication\.mjs" public-proof/);
   assert.match(source, /public-verifier-run-id/);
   assert.match(source, /artifact\.digest|\.digest \| select/);
+  assert.match(source, /git -C "\$ROOT" remote get-url origin/);
+  assert.match(source, /git ls-remote "\$expected_remote"/);
+  assert.match(source, /fetch --quiet --no-tags/);
+  assert.match(source, /merge-base --is-ancestor "\$tooling_commit" "\$remote_commit"/);
+  assert.match(source, /protected tooling commit is not in canonical default-branch history/);
   assert.match(
     source,
     /CRABBOX_VERIFY_EXEC_ARCH="\$native_arch"[\s\S]*scripts\/verify-release\.sh/,
@@ -434,6 +439,59 @@ test("Homebrew verifier cleanup survives main function scope", () => {
   assert.equal(fs.existsSync(root), false);
 });
 
+test("public workflow commit must descend from the provenance verifier", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-public-workflow-ancestry-"));
+  try {
+    execFileSync("git", ["init", "-b", "main"], { cwd: root, stdio: "ignore" });
+    execFileSync("git", ["config", "user.name", "Release Test"], { cwd: root });
+    execFileSync("git", ["config", "user.email", "release@example.test"], { cwd: root });
+    fs.writeFileSync(path.join(root, "base.txt"), "verifier\n");
+    execFileSync("git", ["add", "base.txt"], { cwd: root });
+    execFileSync("git", ["commit", "-m", "verifier"], { cwd: root, stdio: "ignore" });
+    const verifierCommit = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: root,
+      encoding: "utf8",
+    }).trim();
+    fs.writeFileSync(path.join(root, "workflow.txt"), "workflow\n");
+    execFileSync("git", ["add", "workflow.txt"], { cwd: root });
+    execFileSync("git", ["commit", "-m", "workflow"], { cwd: root, stdio: "ignore" });
+    const workflowCommit = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: root,
+      encoding: "utf8",
+    }).trim();
+    const emptyTree = execFileSync("git", ["hash-object", "-w", "-t", "tree", "/dev/null"], {
+      cwd: root,
+      encoding: "utf8",
+    }).trim();
+    const divergentCommit = execFileSync("git", ["commit-tree", emptyTree, "-m", "divergent"], {
+      cwd: root,
+      encoding: "utf8",
+    }).trim();
+    const runAncestry = (commit) =>
+      spawnSync(
+        "/bin/bash",
+        [
+          "-c",
+          'source "$1"; ROOT=$2; require_public_workflow_ancestry "$3" "$4"',
+          "public-workflow-ancestry",
+          verifier,
+          root,
+          verifierCommit,
+          commit,
+        ],
+        { encoding: "utf8" },
+      );
+
+    const valid = runAncestry(workflowCommit);
+    assert.equal(valid.status, 0, valid.stderr);
+    const divergent = runAncestry(divergentCommit);
+    assert.notEqual(divergent.status, 0);
+    assert.match(divergent.stderr, /public workflow commit is not a descendant/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("public Homebrew proof binds the current release, successful run, both native proofs, and local bytes", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-public-proof-"));
   const assetDirectory = path.join(root, "assets");
@@ -450,6 +508,9 @@ test("public Homebrew proof binds the current release, successful run, both nati
     }),
   );
   const notes = "exact notes\n";
+  const verifierCommit = "c".repeat(40);
+  const workflowCommit = "d".repeat(40);
+  const wrongCommit = "e".repeat(40);
   fs.writeFileSync(path.join(root, "names.txt"), `${names.join("\n")}\n`);
   fs.writeFileSync(path.join(root, "notes.md"), notes);
   const assets = names.map((name, index) => ({
@@ -478,7 +539,7 @@ test("public Homebrew proof binds the current release, successful run, both nati
   const run = {
     id: 9002,
     name: "Verify Release Assets",
-    display_title: `Verify published 123 for v1.2.3 at ${"c".repeat(40)}`,
+    display_title: `Verify published 123 for v1.2.3 at ${verifierCommit}`,
     path: ".github/workflows/release-assets.yml",
     workflow_id: 77,
     workflow_url: "https://api.github.com/repos/openclaw/crabbox/actions/workflows/77",
@@ -486,10 +547,10 @@ test("public Homebrew proof binds the current release, successful run, both nati
     status: "completed",
     conclusion: "success",
     head_branch: "main",
-    head_sha: "c".repeat(40),
+    head_sha: workflowCommit,
     repository: { full_name: "openclaw/crabbox" },
     head_repository: { full_name: "openclaw/crabbox" },
-    head_commit: { id: "c".repeat(40) },
+    head_commit: { id: workflowCommit },
     run_attempt: 1,
     created_at: "2026-07-10T10:10:00Z",
     run_started_at: "2026-07-10T10:10:01Z",
@@ -512,7 +573,7 @@ test("public Homebrew proof binds the current release, successful run, both nati
         expired: false,
         created_at: "2026-07-10T10:11:00Z",
         updated_at: "2026-07-10T10:11:00Z",
-        workflow_run: { id: 9002, head_branch: "main", head_sha: "c".repeat(40) },
+        workflow_run: { id: 9002, head_branch: "main", head_sha: workflowCommit },
       }),
     ),
   };
@@ -525,7 +586,8 @@ test("public Homebrew proof binds the current release, successful run, both nati
       tag: "v1.2.3",
       tagObject: "a".repeat(40),
       sourceCommit: "b".repeat(40),
-      verifierCommit: "c".repeat(40),
+      verifierCommit,
+      workflowCommit,
       verifierArch: arch,
       title: "v1.2.3",
       targetCommitish: "main",
@@ -566,7 +628,8 @@ test("public Homebrew proof binds the current release, successful run, both nati
     CRABBOX_PUBLISH_TAG: "v1.2.3",
     CRABBOX_PUBLISH_TAG_OBJECT: "a".repeat(40),
     CRABBOX_PUBLISH_SOURCE_COMMIT: "b".repeat(40),
-    CRABBOX_PUBLISH_VERIFIER_COMMIT: "c".repeat(40),
+    CRABBOX_PUBLISH_VERIFIER_COMMIT: verifierCommit,
+    CRABBOX_PUBLISH_WORKFLOW_COMMIT: workflowCommit,
     CRABBOX_PUBLISH_VERIFIER_RUN_ID: "9002",
     CRABBOX_PUBLISH_DEFAULT_BRANCH: "main",
     CRABBOX_PUBLISH_WORKFLOW_PATH: ".github/workflows/release-assets.yml",
@@ -574,6 +637,42 @@ test("public Homebrew proof binds the current release, successful run, both nati
   try {
     const valid = spawnSync(process.execPath, args, { encoding: "utf8", env });
     assert.equal(valid.status, 0, valid.stderr);
+    assert.equal(JSON.parse(valid.stdout).verifierCommit, verifierCommit);
+    assert.equal(JSON.parse(valid.stdout).workflowCommit, workflowCommit);
+
+    const wrongWorkflow = spawnSync(process.execPath, args, {
+      encoding: "utf8",
+      env: { ...env, CRABBOX_PUBLISH_WORKFLOW_COMMIT: wrongCommit },
+    });
+    assert.notEqual(wrongWorkflow.status, 0);
+    assert.match(wrongWorkflow.stderr, /protected workflow identity/);
+
+    const armProof = proof("arm64");
+    armProof.workflowCommit = wrongCommit;
+    delete armProof.manifestSha256;
+    armProof.manifestSha256 = createHash("sha256").update(JSON.stringify(armProof)).digest("hex");
+    writeJson("arm.json", armProof);
+    const wrongProofWorkflow = spawnSync(process.execPath, args, { encoding: "utf8", env });
+    assert.notEqual(wrongProofWorkflow.status, 0);
+    assert.match(wrongProofWorkflow.stderr, /proof does not bind/);
+    writeJson("arm.json", proof("arm64"));
+
+    artifacts.artifacts[1].workflow_run.head_sha = wrongCommit;
+    writeJson("artifacts.json", artifacts);
+    const artifactHeadDrift = spawnSync(process.execPath, args, { encoding: "utf8", env });
+    assert.notEqual(artifactHeadDrift.status, 0);
+    assert.match(artifactHeadDrift.stderr, /not bound to the selected verifier run/);
+    artifacts.artifacts[1].workflow_run.head_sha = workflowCommit;
+    writeJson("artifacts.json", artifacts);
+
+    run.head_sha = wrongCommit;
+    run.head_commit.id = wrongCommit;
+    writeJson("run.json", run);
+    const runHeadDrift = spawnSync(process.execPath, args, { encoding: "utf8", env });
+    assert.notEqual(runHeadDrift.status, 0);
+    assert.match(runHeadDrift.stderr, /protected workflow identity/);
+    run.head_sha = workflowCommit;
+    run.head_commit.id = workflowCommit;
 
     run.created_at = "2026-07-10T10:03:00Z";
     run.run_started_at = "2026-07-10T10:04:00Z";
@@ -581,6 +680,31 @@ test("public Homebrew proof binds the current release, successful run, both nati
     const stale = spawnSync(process.execPath, args, { encoding: "utf8", env });
     assert.notEqual(stale.status, 0);
     assert.match(stale.stderr, /not newer than release updated_at/);
+
+    run.head_sha = verifierCommit;
+    run.head_commit.id = verifierCommit;
+    run.created_at = "2026-07-10T10:10:00Z";
+    run.run_started_at = "2026-07-10T10:10:01Z";
+    writeJson("run.json", run);
+    for (const artifact of artifacts.artifacts) artifact.workflow_run.head_sha = verifierCommit;
+    writeJson("artifacts.json", artifacts);
+    for (const arch of ["arm64", "x86_64"]) {
+      const compatible = proof(arch);
+      compatible.workflowCommit = verifierCommit;
+      delete compatible.manifestSha256;
+      delete compatible.workflowCommit;
+      compatible.manifestSha256 = createHash("sha256")
+        .update(JSON.stringify(compatible))
+        .digest("hex");
+      writeJson(arch === "arm64" ? "arm.json" : "x86.json", compatible);
+    }
+    const compatibleEnv = { ...env };
+    delete compatibleEnv.CRABBOX_PUBLISH_WORKFLOW_COMMIT;
+    const sameCommitCompatible = spawnSync(process.execPath, args, {
+      encoding: "utf8",
+      env: compatibleEnv,
+    });
+    assert.equal(sameCommitCompatible.status, 0, sameCommitCompatible.stderr);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -17,6 +17,10 @@ test("release workflow is verifier-only, protected-default, dual-native, and tok
   assert.match(workflow, /expected_workflow_ref="\$GITHUB_REPOSITORY\/\.github\/workflows\/release-assets\.yml@\$expected_ref"/);
   assert.match(workflow, /\[\[ "\$GITHUB_WORKFLOW_REF" == "\$expected_workflow_ref" \]\]/);
   assert.match(workflow, /verify-github-release-policy\.mjs/);
+  assert.match(workflow, /workflow_commit:\n\s+description: "Current protected default-branch workflow commit SHA"\n\s+required: true/);
+  assert.match(workflow, /\[\[ "\$\{\{ github\.workflow_sha \}\}" == "\$WORKFLOW_COMMIT" \]\]/);
+  assert.match(workflow, /git merge-base --is-ancestor "\$VERIFIER_COMMIT" "\$WORKFLOW_COMMIT"/);
+  assert.match(workflow, /git merge-base --is-ancestor "\$SOURCE_COMMIT" "\$VERIFIER_COMMIT"/);
   assert.match(workflow, /ref: \$\{\{ github\.workflow_sha \}\}/);
   assert.match(workflow, /persist-credentials: false/);
   assert.match(
@@ -40,6 +44,8 @@ test("release workflow is verifier-only, protected-default, dual-native, and tok
   );
   assert.match(workflow, /name: Execute candidate in isolated clean job without release credentials[\s\S]*exec env -i/);
   assert.match(workflow, /CRABBOX_VERIFY_EXEC_ARCH="\$VERIFY_ARCH"/);
+  assert.equal((workflow.match(/CRABBOX_VERIFY_TOOLING_COMMIT="\$WORKFLOW_COMMIT"/g) ?? []).length, 2);
+  assert.match(workflow, /verifierCommit: process\.env\.VERIFIER_COMMIT,\n\s+workflowCommit: process\.env\.WORKFLOW_COMMIT,/);
   assert.match(workflow, /scripts\/verify-release\.sh/);
   assert.match(workflow, /name: release-input/);
   assert.match(workflow, /name: verified-assets-\$\{\{ matrix\.arch \}\}/);
@@ -61,6 +67,97 @@ test("release workflow is verifier-only, protected-default, dual-native, and tok
   );
 });
 
+test("release verifier rejects provenance that is not an ancestor of protected tooling", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-verifier-ancestry-"));
+  try {
+    fs.mkdirSync(path.join(directory, "scripts"));
+    fs.copyFileSync(
+      path.join(repoRoot, "scripts", "verify-release.sh"),
+      path.join(directory, "scripts", "verify-release.sh"),
+    );
+    fs.writeFileSync(path.join(directory, "scripts", "release-config.sh"), "#!/usr/bin/env bash\n");
+    execFileSync("git", ["init", "-b", "main"], { cwd: directory, stdio: "ignore" });
+    execFileSync("git", ["config", "user.name", "Release Test"], { cwd: directory });
+    execFileSync("git", ["config", "user.email", "release@example.test"], { cwd: directory });
+    execFileSync("git", ["add", "scripts"], { cwd: directory });
+    execFileSync("git", ["commit", "-m", "tooling base"], { cwd: directory, stdio: "ignore" });
+    const base = execFileSync("git", ["rev-parse", "HEAD"], { cwd: directory, encoding: "utf8" }).trim();
+    fs.writeFileSync(path.join(directory, "tooling.txt"), "protected tooling\n");
+    execFileSync("git", ["add", "tooling.txt"], { cwd: directory });
+    execFileSync("git", ["commit", "-m", "tooling head"], { cwd: directory, stdio: "ignore" });
+    const tooling = execFileSync("git", ["rev-parse", "HEAD"], { cwd: directory, encoding: "utf8" }).trim();
+    execFileSync("git", ["switch", "--detach", base], { cwd: directory, stdio: "ignore" });
+    fs.writeFileSync(path.join(directory, "unrelated.txt"), "unrelated verifier\n");
+    execFileSync("git", ["add", "unrelated.txt"], { cwd: directory });
+    execFileSync("git", ["commit", "-m", "unrelated verifier"], { cwd: directory, stdio: "ignore" });
+    const unrelated = execFileSync("git", ["rev-parse", "HEAD"], { cwd: directory, encoding: "utf8" }).trim();
+    execFileSync("git", ["switch", "--detach", tooling], { cwd: directory, stdio: "ignore" });
+
+    const bin = path.join(directory, "bin");
+    fs.mkdirSync(bin);
+    fs.writeFileSync(
+      path.join(bin, "uname"),
+      "#!/bin/sh\ncase \"${1:-}\" in -s) echo Darwin ;; -m) echo arm64 ;; *) exit 64 ;; esac\n",
+    );
+    fs.chmodSync(path.join(bin, "uname"), 0o755);
+    for (const tool of ["codesign", "lipo"]) {
+      fs.writeFileSync(path.join(bin, tool), "#!/bin/sh\nexit 0\n");
+      fs.chmodSync(path.join(bin, tool), 0o755);
+    }
+    const result = spawnSync(
+      "bash",
+      [
+        path.join(directory, "scripts", "verify-release.sh"),
+        "v1.2.3",
+        directory,
+        "a".repeat(40),
+        "b".repeat(40),
+        unrelated,
+      ],
+      {
+        cwd: directory,
+        encoding: "utf8",
+        env: {
+          HOME: process.env.HOME,
+          PATH: `${bin}:${process.env.PATH}`,
+          CRABBOX_VERIFY_EXEC_ARCH: "arm64",
+          CRABBOX_VERIFY_MODE: "static",
+          CRABBOX_VERIFY_TOOLING_COMMIT: tooling,
+        },
+      },
+    );
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /provenance verifier commit is not an ancestor of protected tooling/);
+
+    const sourceDrift = spawnSync(
+      "bash",
+      [
+        path.join(directory, "scripts", "verify-release.sh"),
+        "v1.2.3",
+        directory,
+        "a".repeat(40),
+        unrelated,
+        base,
+      ],
+      {
+        cwd: directory,
+        encoding: "utf8",
+        env: {
+          HOME: process.env.HOME,
+          PATH: `${bin}:${process.env.PATH}`,
+          CRABBOX_VERIFY_EXEC_ARCH: "arm64",
+          CRABBOX_VERIFY_MODE: "static",
+          CRABBOX_VERIFY_TOOLING_COMMIT: tooling,
+        },
+      },
+    );
+    assert.notEqual(sourceDrift.status, 0);
+    assert.match(sourceDrift.stderr, /release source commit is not an ancestor of the provenance verifier/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("Homebrew verifier keeps downloaded proof inputs outside the protected checkout", () => {
   const workflow = read(".github/workflows/verify-homebrew.yml");
   const proofDownloadStart = workflow.indexOf("      - name: Download immutable native proof ZIPs");
@@ -68,7 +165,7 @@ test("Homebrew verifier keeps downloaded proof inputs outside the protected chec
     "      - name: Verify public Homebrew install without credentials",
   );
   const toolsStepStart = workflow.indexOf(
-    "      - name: Preserve pinned release tools in the frozen verifier path",
+    "      - name: Preserve protected release tools in the workflow path",
   );
   const toolsStepEnd = workflow.indexOf("      - name: Download frozen public release assets");
   assert.notEqual(proofDownloadStart, -1);
@@ -87,13 +184,15 @@ test("Homebrew verifier keeps downloaded proof inputs outside the protected chec
   assert.match(workflow, /WORKFLOW_SHA: \$\{\{ github\.workflow_sha \}\}/);
   assert.match(workflow, /RUN_SHA: \$\{\{ github\.sha \}\}/);
   assert.match(workflow, /\[\[ "\$WORKFLOW_SHA" == "\$RUN_SHA" \]\]/);
+  assert.match(workflow, /name: Check out protected Homebrew tooling[\s\S]*ref: \$\{\{ github\.workflow_sha \}\}/);
+  assert.doesNotMatch(workflow, /ref: \$\{\{ inputs\.verifier_commit \}\}/);
   assert.match(
     workflow,
     /name: Set up Go for build-info inspection\n\s+uses: actions\/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16/,
   );
   assert.match(workflow, /go-version-file: go\.mod/);
   assert.match(workflow, /go-version-file: go\.mod\n\s+cache: false/);
-  assert.match(workflow, /name: Preserve pinned release tools in the frozen verifier path/);
+  assert.match(workflow, /name: Preserve protected release tools in the workflow path/);
   assert.match(workflow, /tools="\$RUNNER_TEMP\/release-tools"/);
   assert.match(workflow, /brew_path=\$\(command -v brew\)/);
   assert.match(workflow, /curl_path=\$\(command -v curl\)/);
@@ -137,6 +236,8 @@ test("Homebrew verifier keeps downloaded proof inputs outside the protected chec
     /for name in artifacts\.json release\.json run\.json workflow\.json manifest\.sha256; do[\s\S]*cmp/,
   );
   const homebrewVerifier = read("scripts/verify-homebrew-release.sh");
+  assert.match(homebrewVerifier, /workflow_commit=\$\(jq -er '\.head_sha/);
+  assert.match(homebrewVerifier, /CRABBOX_PUBLISH_WORKFLOW_COMMIT="\$workflow_commit"/);
   assert.match(homebrewVerifier, /external public postflight requires the protected Homebrew workflow/);
   assert.equal(
     (homebrewVerifier.match(/freeze_public_release \\\n/g) ?? []).length,

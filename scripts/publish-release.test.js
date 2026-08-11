@@ -494,6 +494,7 @@ function prepareFixture({ publishable = true, dynamicRunName = true } = {}) {
   ];
   let driftArmZipSize = 0;
   let metadataDriftArmZipSize = 0;
+  let workflowDriftArmZipSize = 0;
   for (const [arch, artifactId] of [
     ["arm64", 501],
     ["x86_64", 502],
@@ -556,6 +557,24 @@ function prepareFixture({ publishable = true, dynamicRunName = true } = {}) {
         path.join(metadataDriftDirectory, "verified-assets.json"),
       ]);
       metadataDriftArmZipSize = fs.statSync(metadataDriftZip).size;
+
+      const workflowDriftProof = structuredClone(proof);
+      workflowDriftProof.workflowCommit = "d".repeat(40);
+      delete workflowDriftProof.manifestSha256;
+      workflowDriftProof.manifestSha256 = sha256(
+        Buffer.from(JSON.stringify(workflowDriftProof), "utf8"),
+      );
+      const workflowDriftDirectory = path.join(root, "proof-arm64-workflow-drift");
+      fs.mkdirSync(workflowDriftDirectory);
+      writeJson(path.join(workflowDriftDirectory, "verified-assets.json"), workflowDriftProof);
+      const workflowDriftZip = path.join(api, "proof-arm64-workflow-drift.zip");
+      execFileSync("zip", [
+        "-q",
+        "-j",
+        workflowDriftZip,
+        path.join(workflowDriftDirectory, "verified-assets.json"),
+      ]);
+      workflowDriftArmZipSize = fs.statSync(workflowDriftZip).size;
     }
     artifactRows.push({
       id: artifactId,
@@ -590,6 +609,13 @@ function prepareFixture({ publishable = true, dynamicRunName = true } = {}) {
   writeJson(path.join(api, "artifacts-proof-metadata-drift.json"), {
     total_count: 3,
     artifacts: proofMetadataDriftArtifacts,
+  });
+  const proofWorkflowDriftArtifacts = structuredClone(artifactRows);
+  proofWorkflowDriftArtifacts[1].size_in_bytes = workflowDriftArmZipSize;
+  proofWorkflowDriftArtifacts[1].digest = `sha256:${sha256(fs.readFileSync(path.join(api, "proof-arm64-workflow-drift.zip")))}`;
+  writeJson(path.join(api, "artifacts-proof-workflow-drift.json"), {
+    total_count: 3,
+    artifacts: proofWorkflowDriftArtifacts,
   });
 
   const gh = path.join(bin, "gh");
@@ -724,7 +750,9 @@ else if (endpoint === "repos/${repository}/actions/runs/${runId}/artifacts?per_p
       : process.env.MOCK_MODE === "proof-drift"
         ? "artifacts-proof-drift.json"
         : process.env.MOCK_MODE === "proof-metadata-drift"
-          ? "artifacts-proof-metadata-drift.json"
+        ? "artifacts-proof-metadata-drift.json"
+        : process.env.MOCK_MODE === "proof-workflow-drift"
+          ? "artifacts-proof-workflow-drift.json"
           : "artifacts.json",
   );
 } else if (endpoint === "repos/${repository}/actions/artifacts/501/zip") {
@@ -733,7 +761,9 @@ else if (endpoint === "repos/${repository}/actions/runs/${runId}/artifacts?per_p
       ? "proof-arm64-drift.zip"
       : process.env.MOCK_MODE === "proof-metadata-drift"
         ? "proof-arm64-metadata-drift.zip"
-        : "proof-arm64.zip",
+        : process.env.MOCK_MODE === "proof-workflow-drift"
+          ? "proof-arm64-workflow-drift.zip"
+          : "proof-arm64.zip",
   );
 }
 else if (endpoint === "repos/${repository}/actions/artifacts/502/zip") outputFile("proof-x86_64.zip");
@@ -848,6 +878,15 @@ test("tampered native proof draft metadata fails before any mutation", () => {
     const result = run("proof-metadata-drift");
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /proof draft record differs from current release/);
+    assert.deepEqual(mutations(), []);
+  });
+});
+
+test("tampered native proof workflow commit fails before any mutation", () => {
+  withFixture({}, ({ run, mutations }) => {
+    const result = run("proof-workflow-drift");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /proof does not bind/);
     assert.deepEqual(mutations(), []);
   });
 });

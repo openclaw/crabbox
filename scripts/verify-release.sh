@@ -10,13 +10,15 @@ ASSET_DIR=${2:-"$ROOT/dist-release"}
 TAG_OBJECT=${3:-}
 TAG_COMMIT=${4:-}
 VERIFIER_COMMIT=${5:-}
+TOOLING_COMMIT=${CRABBOX_VERIFY_TOOLING_COMMIT:-$VERIFIER_COMMIT}
 EXEC_ARCH=${CRABBOX_VERIFY_EXEC_ARCH:-}
 VERIFY_MODE=${CRABBOX_VERIFY_MODE:-execute}
 
 if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
   [[ ! "$TAG_OBJECT" =~ ^[0-9a-f]{40}$ ]] ||
   [[ ! "$TAG_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
-  [[ ! "$VERIFIER_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+  [[ ! "$VERIFIER_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
+  [[ ! "$TOOLING_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
   echo "usage: $0 vX.Y.Z <asset-directory> <tag-object> <tag-commit> <verifier-commit>" >&2
   exit 2
 fi
@@ -61,15 +63,23 @@ for tool in codesign git go lipo node shasum tar unzip; do
   }
 done
 
-[[ "$(git -C "$ROOT" rev-parse HEAD)" == "$VERIFIER_COMMIT" ]] || {
-  echo "protected verifier checkout does not match provenance" >&2
+[[ "$(git -C "$ROOT" rev-parse HEAD)" == "$TOOLING_COMMIT" ]] || {
+  echo "protected tooling checkout does not match tooling commit" >&2
+  exit 1
+}
+git -C "$ROOT" merge-base --is-ancestor "$VERIFIER_COMMIT" "$TOOLING_COMMIT" || {
+  echo "provenance verifier commit is not an ancestor of protected tooling" >&2
+  exit 1
+}
+git -C "$ROOT" merge-base --is-ancestor "$TAG_COMMIT" "$VERIFIER_COMMIT" || {
+  echo "release source commit is not an ancestor of the provenance verifier" >&2
   exit 1
 }
 DEFAULT_BRANCH="$CRABBOX_RELEASE_DEFAULT_BRANCH" \
 RELEASE_TAG="$TAG" \
 EXPECTED_TAG_OBJECT="$TAG_OBJECT" \
 EXPECTED_TAG_COMMIT="$TAG_COMMIT" \
-TRUSTED_HEAD="$VERIFIER_COMMIT" \
+TRUSTED_HEAD="$TOOLING_COMMIT" \
   "$ROOT/scripts/verify-release-source.sh" >/dev/null
 [[ -z "$(git -C "$ROOT" status --porcelain --untracked-files=normal)" ]] || {
   echo "protected verifier checkout is not clean" >&2
@@ -176,7 +186,7 @@ provenance_vmd_sha=$(node -e '
 ' "$ASSET_DIR/provenance.json")
 
 if [[ "$VERIFY_MODE" == static ]]; then
-  echo "Statically verified $TAG release assets from $TAG_COMMIT with protected tooling $VERIFIER_COMMIT"
+  echo "Statically verified $TAG release assets from $TAG_COMMIT with provenance $VERIFIER_COMMIT and protected tooling $TOOLING_COMMIT"
   exit 0
 fi
 
@@ -217,4 +227,4 @@ actual_version=$(env -i \
   exit 1
 }
 
-echo "Verified $TAG release assets from $TAG_COMMIT with protected tooling $VERIFIER_COMMIT"
+echo "Verified $TAG release assets from $TAG_COMMIT with provenance $VERIFIER_COMMIT and protected tooling $TOOLING_COMMIT"

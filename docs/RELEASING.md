@@ -198,6 +198,7 @@ TAG=vX.Y.Z
 TAG_OBJECT=$(git rev-parse "refs/tags/$TAG")
 TAG_COMMIT=$(git rev-parse "refs/tags/$TAG^{commit}")
 VERIFIER_COMMIT=$(git rev-parse HEAD)
+WORKFLOW_COMMIT=$VERIFIER_COMMIT
 
 DEFAULT_BRANCH=main \
 RELEASE_TAG="$TAG" \
@@ -295,6 +296,7 @@ gh workflow run release-assets.yml \
   -f tag_object="$TAG_OBJECT" \
   -f tag_commit="$TAG_COMMIT" \
   -f verifier_commit="$VERIFIER_COMMIT" \
+  -f workflow_commit="$WORKFLOW_COMMIT" \
   -f draft=true
 
 : "${DRAFT_VERIFIER_RUN_ID:?set to the numeric ID of that exact draft run}"
@@ -313,9 +315,16 @@ scripts/publish-release.sh \
 ```
 
 Stop again. Dispatch a new native run against the published state; do not reuse
-the draft proof. Capture and wait for the exact new run:
+the draft proof. `VERIFIER_COMMIT` remains the immutable candidate-provenance
+commit. Bind the new run separately to the current protected workflow commit,
+which must descend from that verifier, then capture and wait for the exact run:
 
 ```sh
+WORKFLOW_COMMIT=$(git rev-parse HEAD)
+test "$(git ls-remote origin refs/heads/main | awk '{print $1}')" = "$WORKFLOW_COMMIT"
+git merge-base --is-ancestor "$VERIFIER_COMMIT" "$WORKFLOW_COMMIT"
+git merge-base --is-ancestor "$TAG_COMMIT" "$VERIFIER_COMMIT"
+
 gh workflow run release-assets.yml \
   --repo openclaw/crabbox \
   --ref main \
@@ -324,6 +333,7 @@ gh workflow run release-assets.yml \
   -f tag_object="$TAG_OBJECT" \
   -f tag_commit="$TAG_COMMIT" \
   -f verifier_commit="$VERIFIER_COMMIT" \
+  -f workflow_commit="$WORKFLOW_COMMIT" \
   -f draft=false
 
 : "${PUBLIC_VERIFIER_RUN_ID:?set to the numeric ID of that exact public run}"
@@ -397,7 +407,19 @@ emitted only after success, so retries cannot append to partial JSON. The wrappe
 never adds an authorization header or skips a pre/postflight read.
 
 ```sh
-
+HOMEBREW_TOOLING_COMMIT=$(git rev-parse HEAD)
+case "$(git remote get-url origin)" in
+  https://github.com/openclaw/crabbox | https://github.com/openclaw/crabbox.git) ;;
+  *) false ;;
+esac
+REMOTE_MAIN=$(git ls-remote https://github.com/openclaw/crabbox \
+  refs/heads/main | awk '{print $1}')
+git -c fetch.writeCommitGraph=false fetch --quiet --no-tags \
+  https://github.com/openclaw/crabbox "$REMOTE_MAIN"
+git merge-base --is-ancestor "$HOMEBREW_TOOLING_COMMIT" "$REMOTE_MAIN"
+git merge-base --is-ancestor "$VERIFIER_COMMIT" "$HOMEBREW_TOOLING_COMMIT"
+git merge-base --is-ancestor "$TAG_COMMIT" "$VERIFIER_COMMIT"
+CRABBOX_VERIFY_TOOLING_COMMIT="$HOMEBREW_TOOLING_COMMIT" \
 scripts/verify-homebrew-release.sh \
   "$TAG" "$PUBLIC_ASSETS" \
   "$TAG_OBJECT" "$TAG_COMMIT" "$VERIFIER_COMMIT" \
@@ -416,8 +438,8 @@ comparison to close the verification window. It does not update the tap. The
 tap formula must be byte-for-byte output from the protected
 `scripts/render-homebrew-formula.mjs`; any additional Ruby, interpolation, or
 format drift is rejected before Homebrew evaluates it. Protected downstream
-tooling must remain clean at the verifier commit before and after candidate
-execution. The
+tooling must remain clean at the explicit tooling commit, and the immutable
+candidate verifier must be its ancestor, before and after candidate execution. The
 lower-level `codesign-macos.sh`, `extract-release-notes.sh`,
 `release-provenance.mjs`, `validate-release-publication.mjs`,
 `verify-go-release-binary.mjs`, and `verify-macos-binary.sh` are internal to the
@@ -530,10 +552,12 @@ notarization checks. Apple Silicon also runs the helper's non-mutating info path
 This bounded verifier is the installed-binary smoke; it does not create a lease.
 Only both native proofs complete the Homebrew gate.
 
-The Homebrew workflow itself runs from the current protected `main` commit,
-while its verification checkout remains pinned to the release record's
-protected verifier commit. This keeps published provenance immutable while
-allowing a protected workflow-only repair to restore the downstream proof.
+The Homebrew workflow and verification checkout run from the current protected
+`main` commit. The public release run and proof bind their own workflow commit,
+while candidate provenance remains pinned to the older verifier commit; each
+tooling commit must descend from that immutable verifier. This keeps published
+provenance immutable while allowing a protected workflow-only repair to restore
+the downstream proof.
 
 ## Cancellation And Recovery
 
