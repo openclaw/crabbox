@@ -222,7 +222,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	captureOnFail := fs.Bool("capture-on-fail", false, "compatibility alias; failure bundles are saved by default on non-zero exit")
 	preflight := fs.Bool("preflight", false, "print remote capability preflight before running the command")
 	preflightTools := fs.String("preflight-tools", "", "comma-separated preflight tools to probe; overrides run.preflightTools")
-	scriptPath := fs.String("script", "", "upload and run a local script file")
+	scriptPath := fs.String("script", "", "on POSIX SSH leases, upload and run a standalone content-hashed copy under .crabbox/scripts/; delegated module runtimes use source input")
 	scriptStdin := fs.Bool("script-stdin", false, "read a script from stdin, upload it, and run it")
 	freshPRValue := fs.String("fresh-pr", "", "run from a fresh remote checkout of a GitHub PR: owner/repo#123, URL, or number")
 	applyLocalPatch := fs.Bool("apply-local-patch", false, "apply the local git diff on top of --fresh-pr checkout")

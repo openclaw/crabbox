@@ -41,6 +41,19 @@ func TestCleanupHelpListsRegisteredXCPNgProvider(t *testing.T) {
 	}
 }
 
+func TestRunHelpDescribesStandaloneScriptUpload(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).Run(context.Background(), []string{"run", "--help"})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 0 {
+		t.Fatalf("crabbox run --help error=%v stderr=%q", err, stderr.String())
+	}
+	want := "on POSIX SSH leases, upload and run a standalone content-hashed copy under .crabbox/scripts/; delegated module runtimes use source input"
+	if !strings.Contains(stderr.String(), want) {
+		t.Fatalf("run help omitted standalone script upload semantics:\n%s", stderr.String())
+	}
+}
+
 func TestTopLevelAndCommandHelpDescribeInteractiveConnect(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	app := App{Stdout: &stdout, Stderr: &stderr}

@@ -299,11 +299,25 @@ page.
 
 ## Scripts
 
-Use `--script <file>` or `--script-stdin` for multi-line remote commands.
-Crabbox uploads the script into `.crabbox/scripts/` under the remote workdir,
-runs it as a file, and includes that script directory in failure bundles. A
-shebang is honored on POSIX targets; scripts without one run through `bash`.
-Native Windows targets run uploaded scripts through Windows PowerShell, and
+Use `--script <file>` or `--script-stdin` for multi-line remote commands. On
+POSIX SSH leases, Crabbox uploads a standalone, content-hashed copy into
+`.crabbox/scripts/` under the remote workdir and executes that copy with the
+workdir as its process PWD. `$0` identifies the generated upload path, so
+`dirname "$0"` resolves to `.crabbox/scripts/`, not the script's original local
+directory. That directory component is not preserved in the uploaded copy and
+cannot be recovered from `$0`. Standalone uploaded scripts should resolve
+synced project assets from `$PWD`.
+
+If a Git-managed script needs its synced repository path or adjacent assets,
+invoke it as trailing argv so the project copy runs in place:
+
+```sh
+crabbox run -- ./scripts/check.sh
+```
+
+Crabbox includes the uploaded script directory in failure bundles. A shebang is
+honored on POSIX targets; scripts without one run through `bash`. Native Windows
+targets run uploaded scripts through Windows PowerShell, and
 `--script-stdin` is treated as a PowerShell script; a non-`.ps1` script path
 gets a `.ps1` extension added before upload. Trailing arguments after `--` are
 passed to the script. This is an SSH-run feature for OS-backed providers.

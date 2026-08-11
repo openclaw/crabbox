@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Clarified that POSIX SSH `run --script` uploads a content-hashed standalone copy whose `$0` points under `.crabbox/scripts/`, and documented synced-path execution for scripts that need adjacent repository assets. Thanks @coygeek.
 - Reconciled exact-owned Azure VM, NIC, public IP, and managed OS disk orphan sets with stable-identity quarantine and fail-closed durable deletion progress. Thanks @chsong1.
 - Invalidated adopted Actions workspace readiness markers before full resync and rehydrated the canonical workspace before running commands. Thanks @vincentkoc.
 - Stopped sparse-checkout and skip-worktree omissions from deleting in-scope remote files, and kept staged gitlink removals out of file-deletion manifests. Thanks @vincentkoc.
