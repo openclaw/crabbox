@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Made future Linux developer-image preparation use root-owned Corepack state while source, candidate, and promoted smoke checks exercise Corepack and pnpm as the runtime user. Thanks @fuller-stack-dev.
 - Made local sync report actionable non-Git workdir diagnostics and fail before lease acquisition, resolution, preparation, or ready-pool borrowing. Thanks @bunlongheng.
 
 ## 0.41.3 - 2026-08-11
