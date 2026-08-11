@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,6 +26,7 @@ import (
 func init() {
 	RegisterProvider(windowsEnvHelperTestProvider{})
 	RegisterProvider(runEnvProfileTestProvider{})
+	RegisterProvider(runReadyPoolPreflightTestProvider{})
 	RegisterProvider(runPrepareTestProvider{})
 	RegisterProvider(runModuleRuntimeTestProvider{})
 }
@@ -473,6 +476,31 @@ func (p runEnvProfileTestProvider) Configure(Config, Runtime) (Backend, error) {
 	return runEnvProfileTestBackend{spec: p.Spec()}, nil
 }
 
+type runReadyPoolPreflightTestProvider struct{}
+
+func (runReadyPoolPreflightTestProvider) Name() string { return "run-ready-pool-preflight-test" }
+func (runReadyPoolPreflightTestProvider) Aliases() []string {
+	return nil
+}
+func (runReadyPoolPreflightTestProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "run-ready-pool-preflight-test",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync},
+		Coordinator: CoordinatorSupported,
+	}
+}
+func (runReadyPoolPreflightTestProvider) RegisterFlags(*flag.FlagSet, Config) any {
+	return noProviderFlags{}
+}
+func (runReadyPoolPreflightTestProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (p runReadyPoolPreflightTestProvider) Configure(Config, Runtime) (Backend, error) {
+	return runEnvProfileTestBackend{spec: p.Spec()}, nil
+}
+
 type runEnvProfileTestBackend struct {
 	spec ProviderSpec
 }
@@ -482,9 +510,13 @@ func (b runEnvProfileTestBackend) AcquireIsExclusiveOneShot() bool { return true
 var runEnvProfileTestReleaseErr error
 var runEnvProfileTestReleaseHook func() error
 var runEnvProfileTestConnectionCleanupSafe = true
+var runEnvProfileTestAcquireHook func(AcquireRequest)
 
 func (b runEnvProfileTestBackend) Spec() ProviderSpec { return b.spec }
-func (b runEnvProfileTestBackend) Acquire(context.Context, AcquireRequest) (LeaseTarget, error) {
+func (b runEnvProfileTestBackend) Acquire(_ context.Context, req AcquireRequest) (LeaseTarget, error) {
+	if runEnvProfileTestAcquireHook != nil {
+		runEnvProfileTestAcquireHook(req)
+	}
 	return LeaseTarget{
 		Server: Server{Provider: b.spec.Name},
 		SSH: SSHTarget{
@@ -519,6 +551,128 @@ func (b runEnvProfileTestBackend) Touch(context.Context, TouchRequest) (Server, 
 }
 func (b runEnvProfileTestBackend) ReleaseLeaseConnectionCleanupSafe() bool {
 	return runEnvProfileTestConnectionCleanupSafe
+}
+
+func TestRunNonGitWorkdirFailsBeforeAcquire(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	t.Chdir(dir)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+	acquireCalls := 0
+	runEnvProfileTestAcquireHook = func(AcquireRequest) { acquireCalls++ }
+	t.Cleanup(func() { runEnvProfileTestAcquireHook = nil })
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-env-profile-test",
+		"--", "true",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 6 {
+		t.Fatalf("error=%v, want exit 6\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	if acquireCalls != 0 {
+		t.Fatalf("Acquire called %d time(s) before local manifest failure", acquireCalls)
+	}
+	for _, want := range []string{dir, "not a Git repository", "git init", "--no-sync"} {
+		if !strings.Contains(exitErr.Message, want) {
+			t.Fatalf("message missing %q: %q", want, exitErr.Message)
+		}
+	}
+}
+
+func TestRunNonGitWorkdirFailsBeforeReadyPoolBorrow(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	t.Chdir(dir)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+	requests := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- r.Method + " " + r.URL.Path
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "test-token")
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-ready-pool-preflight-test",
+		"--pool", "shared-linux",
+		"--pool-return", "drain",
+		"--", "true",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 6 || !strings.Contains(exitErr.Message, "not a Git repository") {
+		t.Fatalf("error=%v, want non-Git exit 6\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	select {
+	case request := <-requests:
+		t.Fatalf("ready-pool request occurred before local manifest failure: %s", request)
+	default:
+	}
+}
+
+func TestRunBuildsSyncManifestAfterAcquire(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	t.Chdir(dir)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	writeFile(t, filepath.Join(dir, "before-acquire.txt"), "before\n")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sshPath := filepath.Join(binDir, "ssh")
+	if err := os.WriteFile(sshPath, []byte("#!/bin/sh\n/bin/cat >/dev/null || true\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rsyncLog := filepath.Join(dir, "rsync-manifest.log")
+	rsyncPath := filepath.Join(binDir, "rsync")
+	if err := os.WriteFile(rsyncPath, []byte("#!/bin/sh\n/bin/cat > \"$CRABBOX_FAKE_RSYNC_STDIN_LOG\"\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_RSYNC_STDIN_LOG", rsyncLog)
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
+	t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
+	acquireCalls := 0
+	runEnvProfileTestAcquireHook = func(req AcquireRequest) {
+		acquireCalls++
+		writeFile(t, filepath.Join(req.Repo.Root, "after-acquire.txt"), "after\n")
+	}
+	t.Cleanup(func() { runEnvProfileTestAcquireHook = nil })
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-env-profile-test",
+		"--", "true",
+	})
+	if err != nil {
+		t.Fatalf("run error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	if acquireCalls != 1 {
+		t.Fatalf("Acquire calls=%d, want 1", acquireCalls)
+	}
+	manifest, err := os.ReadFile(rsyncLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(manifest, []byte("before-acquire.txt\x00")) {
+		t.Fatalf("ordinary sync omitted initial file: %q", manifest)
+	}
+	if !bytes.Contains(manifest, []byte("after-acquire.txt\x00")) {
+		t.Fatalf("ordinary sync reused the pre-acquisition file list: %q", manifest)
+	}
 }
 
 type runPrepareTestProvider struct{}
@@ -635,6 +789,11 @@ func (b runModuleRuntimeTestBackend) Stop(context.Context, StopRequest) error {
 }
 
 func TestRunWithExistingLeaseRequestsProviderPreparation(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	t.Chdir(dir)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
 	runPrepareTestResolveRequests = nil
 	var stdout, stderr bytes.Buffer
 	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
@@ -653,6 +812,53 @@ func TestRunWithExistingLeaseRequestsProviderPreparation(t *testing.T) {
 	}
 	if got := runPrepareTestResolveRequests[0]; got.ID != "cbx_existing" || !got.Prepare {
 		t.Fatalf("resolve request=%#v, want existing id with Prepare", got)
+	}
+}
+
+func TestRunNonGitWorkdirFailsBeforeExistingLeaseResolveAndPrepare(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	t.Chdir(dir)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+	runPrepareTestResolveRequests = nil
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-prepare-test",
+		"--id", "cbx_existing",
+		"--", "true",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 6 || !strings.Contains(exitErr.Message, "not a Git repository") {
+		t.Fatalf("error=%v, want non-Git exit 6\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	if len(runPrepareTestResolveRequests) != 0 {
+		t.Fatalf("Resolve/Prepare called before local manifest failure: %#v", runPrepareTestResolveRequests)
+	}
+}
+
+func TestRunNonGitFreshPRStillResolvesExistingLease(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	t.Chdir(dir)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+	runPrepareTestResolveRequests = nil
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-prepare-test",
+		"--id", "cbx_existing",
+		"--fresh-pr", "example-org/my-app#123",
+		"--", "true",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 9 || !strings.Contains(exitErr.Message, "resolve captured") {
+		t.Fatalf("run error=%v, want resolve-captured exit\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	if len(runPrepareTestResolveRequests) != 1 || !runPrepareTestResolveRequests[0].Prepare {
+		t.Fatalf("fresh-PR run did not reach Resolve/Prepare: %#v", runPrepareTestResolveRequests)
 	}
 }
 
@@ -1041,8 +1247,13 @@ func TestRunCommandRejectsDelegatedScriptStdinBeforeReading(t *testing.T) {
 }
 
 func TestRunCommandPassesScriptToModuleDelegatedProvider(t *testing.T) {
+	clearConfigEnv(t)
 	runModuleRuntimeTestRequests = nil
-	script := filepath.Join(t.TempDir(), "worker.mjs")
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	t.Chdir(dir)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+	script := filepath.Join(dir, "worker.mjs")
 	if err := os.WriteFile(script, []byte("export default { fetch() { return new Response('ok') } }\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

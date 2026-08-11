@@ -792,6 +792,12 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	if !ok {
 		return exit(2, "provider=%s does not support run", backend.Spec().Name)
 	}
+	if !*noSync && freshPR.Empty() {
+		_, err = gitSyncFileList(repo.Root)
+		if err != nil {
+			return exit(6, "build sync file list: %v", err)
+		}
+	}
 	coord := backendCoordinator(backend)
 	var registrationCoord *CoordinatorClient
 	if shouldRegisterCoordinatorLease(cfg) {

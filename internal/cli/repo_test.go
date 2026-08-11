@@ -271,6 +271,31 @@ func TestSyncManifestUsesGitFilesAndIgnoresIgnoredJunk(t *testing.T) {
 	}
 }
 
+func TestSyncManifestNonGitWorkdirReturnsActionableError(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "main.txt"), "hello\n")
+
+	_, err := syncManifest(dir, configuredExcludes(baseConfig()))
+	if err == nil {
+		t.Fatal("expected error for non-Git workdir, got nil")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "exit status") {
+		t.Fatalf("error should not surface an opaque process status: %q", msg)
+	}
+	if !strings.Contains(msg, dir) {
+		t.Fatalf("error should name the workdir %q: %q", dir, msg)
+	}
+	if !strings.Contains(msg, "not a Git repository") {
+		t.Fatalf("error should identify the non-Git cause: %q", msg)
+	}
+	for _, want := range []string{"git init", "--no-sync"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error should suggest %q: %q", want, msg)
+		}
+	}
+}
+
 func TestSyncManifestIncludeWhitelist(t *testing.T) {
 	dir := t.TempDir()
 	runGit(t, dir, "init")
