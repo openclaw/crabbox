@@ -1068,6 +1068,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	actionsURL := ""
 	hydratedByActions = false
 	autoHydrateActions := shouldAutoHydrateActions(cfg, *noHydrate, *noSync, freshPR, *syncOnly)
+	var preparedActionsHydration *localActionsHydrationPlan
 	if !freshPR.Empty() {
 		workdir = remoteJoin(cfg, leaseID, freshPR.WorkdirName())
 	} else {
@@ -1159,6 +1160,15 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		suggestion := rawJSRuntimeHydrateSuggestion(cfg, hydrateTarget, leaseID, acquired, *keep, *keepOnFailure)
 		return rawJSRuntimeMissingError(cfg, missing, command, *shellMode, suggestion)
 	}
+	handleActionsHydrationFailure := func(currentTarget SSHTarget, failure error) error {
+		if *keepOnFailure {
+			if acquired && !*keep {
+				keepFailedLease = true
+			}
+			printKeepOnFailureSSHHint(a.Stderr, cfg, leaseID, server, currentTarget)
+		}
+		return failure
+	}
 	autoHydrateActionsIfNeeded := func(currentTarget SSHTarget) error {
 		if !autoHydrateActions || hydratedByActions {
 			return nil
@@ -1175,16 +1185,25 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		fields := actionsHydrateFields(leaseID, githubActionsLeaseLabel(leaseID), cfg.Actions.Job, 0, cfg.Actions.Fields)
 		recorder.Event("actions.hydrate.started", "hydrate", cfg.Actions.Workflow)
-		state, err := a.hydrateActionsLocally(ctx, cfg, repo, currentTarget, leaseID, cfg.Actions.Job, fields, 20*time.Minute, false, false, lifecycleOwner)
+		plan := preparedActionsHydration
+		preparedActionsHydration = nil
+		var state actionsHydrationState
+		var err error
+		if plan == nil {
+			var prepared localActionsHydrationPlan
+			prepared, err = prepareLocalActionsHydration(cfg, repo, currentTarget, leaseID, cfg.Actions.Job, fields)
+			if err == nil {
+				plan = &prepared
+			}
+		} else if plan.leaseID != leaseID || plan.workdir != workdir {
+			err = exit(7, "prepared local Actions hydration no longer matches lease=%s workspace=%s", leaseID, workdir)
+		}
+		if err == nil {
+			state, err = a.executeLocalActionsHydration(ctx, cfg, repo, currentTarget, *plan, 20*time.Minute, false, false, lifecycleOwner)
+		}
 		if err != nil {
 			recorder.Event("actions.hydrate.failed", "hydrate", err.Error())
-			if *keepOnFailure {
-				if acquired && !*keep {
-					keepFailedLease = true
-				}
-				printKeepOnFailureSSHHint(a.Stderr, cfg, leaseID, server, currentTarget)
-			}
-			return err
+			return handleActionsHydrationFailure(currentTarget, err)
 		}
 		workdir = state.Workspace
 		actionsEnvFile = state.EnvFile
@@ -1264,6 +1283,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if !freshPR.Empty() {
 			workdir = remoteJoin(cfg, leaseID, freshPR.WorkdirName())
 		}
+		preparedActionsHydration = nil
 		actionsEnvFile = ""
 		profileEnvFile = ""
 		actionsURL = ""
@@ -1280,6 +1300,21 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		return true, nil
 	}
 retrySync:
+	if fullResyncRequested && hydratedByActions && !*syncOnly {
+		if !autoHydrateActions {
+			return recordFailure(exit(2, "--full-resync would invalidate the adopted Actions workspace for %s, but this run cannot rehydrate it; configure actions.workflow and omit --no-hydrate, or use --sync-only", leaseID))
+		}
+		localHydrateWorkdir := remoteJoin(cfg, leaseID, repo.Name)
+		if workdir != localHydrateWorkdir {
+			return recordFailure(exit(2, "--full-resync cannot rehydrate adopted Actions workspace %s because local hydration uses %s; use --sync-only or hydrate the canonical workspace first", workdir, localHydrateWorkdir))
+		}
+		fields := actionsHydrateFields(leaseID, githubActionsLeaseLabel(leaseID), cfg.Actions.Job, 0, cfg.Actions.Fields)
+		plan, err := prepareLocalActionsHydration(cfg, repo, target, leaseID, cfg.Actions.Job, fields)
+		if err != nil {
+			return recordFailure(handleActionsHydrationFailure(target, err))
+		}
+		preparedActionsHydration = &plan
+	}
 	if !*noSync {
 		syncStart := time.Now()
 		if freshPR.Empty() {
@@ -1403,6 +1438,17 @@ retrySync:
 					goto afterSync
 				}
 			}
+		}
+		if fullResyncRequested && hydratedByActions {
+			// Readiness belongs to the adopted tree. Invalidate it before reset so
+			// afterSync must establish readiness on the replacement tree.
+			hydrateTarget := targetWithConfigDefaults(target, cfg)
+			if err := invalidateActionsHydrationMarker(ctx, hydrateTarget, leaseID); err != nil {
+				return recordFailure(err)
+			}
+			hydratedByActions = false
+			actionsEnvFile = ""
+			actionsURL = ""
 		}
 		if fullResyncRequested {
 			stepStart = time.Now()

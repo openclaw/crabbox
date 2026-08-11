@@ -239,6 +239,14 @@ Standalone `crabbox actions hydrate --id ...` acquires the same remote workspace
 owner as ordinary reused runs, so hydration cannot overlap a sync, command,
 collection, or cleanup from another client.
 
+For an adopted Actions workspace, `--full-resync` invalidates the readiness
+marker before resetting the remote tree. A command-bearing run continues only
+when automatic local hydration can rebuild the canonical lease workspace; it
+otherwise fails before reset. Omit `--no-hydrate` and use the canonical
+workspace for the command path, or use `--sync-only` to reset and sync without
+rehydration or a user command. The full invalidation, reset, sync, hydration,
+and command sequence remains under the reusable workspace owner.
+
 If a JavaScript package-manager command (`pnpm`, `npm`, `node`, `corepack`)
 runs on a raw SSH workspace before a hydration marker exists and no automatic
 hydration is available, Crabbox probes the remote tool first and fails before
