@@ -344,7 +344,25 @@ describe("private AWS workspaces", () => {
       }),
     );
     expect(stopped.status).toBe(200);
-    await expect(stopped.json()).resolves.toMatchObject({ status: "stopped" });
+    await expect(stopped.json()).resolves.toMatchObject({ status: "stopping" });
+    expect(releases).toBe(0);
+    expect(await runtime.storage.get<LeaseRecord>(`lease:${lease!.id}`)).toMatchObject({
+      state: "released",
+      releaseDeletesServer: true,
+      cleanupStartedAt: expect.any(String),
+    });
+
+    await fleet.alarm();
+
+    const completed = await fleet.fetch(
+      new Request("https://coordinator.test/v1/workspaces/private-gateway", {
+        headers: {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        },
+      }),
+    );
+    await expect(completed.json()).resolves.toMatchObject({ status: "stopped" });
     expect(releases).toBe(1);
 
     const repeated = await fleet.fetch(
@@ -442,11 +460,26 @@ describe("private AWS workspaces", () => {
 
     expect(state.recovers).toBe(1);
     expect(state.resumes).toBe(0);
-    expect(state.releases).toBe(1);
+    expect(state.releases).toBe(0);
+    const queuedLeases = await runtime.storage.list<LeaseRecord>({ prefix: "lease:" });
+    expect([...queuedLeases.values()][0]).toMatchObject({
+      state: "released",
+      cloudID: "i-recovered123",
+      releaseDeletesServer: true,
+      cleanupStartedAt: expect.any(String),
+    });
     const status = await fleet.fetch(
       new Request("https://coordinator.test/v1/workspaces/private-gateway", { headers }),
     );
-    await expect(status.json()).resolves.toMatchObject({ status: "stopped" });
+    await expect(status.json()).resolves.toMatchObject({ status: "stopping" });
+
+    await fleet.alarm();
+
+    expect(state.releases).toBe(1);
+    const completed = await fleet.fetch(
+      new Request("https://coordinator.test/v1/workspaces/private-gateway", { headers }),
+    );
+    await expect(completed.json()).resolves.toMatchObject({ status: "stopped" });
   });
 
   it("does not reactivate when delete arrives during recovered bootstrap", async () => {
@@ -504,13 +537,29 @@ describe("private AWS workspaces", () => {
     await recovery;
 
     expect(state.resumes).toBe(1);
-    expect(state.releases).toBe(1);
+    expect(state.releases).toBe(0);
+    const queuedLeases = await runtime.storage.list<LeaseRecord>({ prefix: "lease:" });
+    expect([...queuedLeases.values()][0]).toMatchObject({
+      state: "released",
+      cloudID: "i-recovered123",
+      releaseDeletesServer: true,
+      cleanupStartedAt: expect.any(String),
+    });
     const status = await fleet.fetch(
       new Request("https://coordinator.test/v1/workspaces/private-gateway", { headers }),
     );
-    await expect(status.json()).resolves.toMatchObject({ status: "stopped" });
-    const leases = await runtime.storage.list<LeaseRecord>({ prefix: "lease:" });
-    expect([...leases.values()].some((lease) => lease.state === "active")).toBe(false);
+    await expect(status.json()).resolves.toMatchObject({ status: "stopping" });
+    expect([...queuedLeases.values()].some((lease) => lease.state === "active")).toBe(false);
+
+    await fleet.alarm();
+
+    expect(state.releases).toBe(1);
+    const completed = await fleet.fetch(
+      new Request("https://coordinator.test/v1/workspaces/private-gateway", { headers }),
+    );
+    await expect(completed.json()).resolves.toMatchObject({ status: "stopped" });
+    const completedLeases = await runtime.storage.list<LeaseRecord>({ prefix: "lease:" });
+    expect([...completedLeases.values()].some((lease) => lease.state === "active")).toBe(false);
   });
 
   it("uses configured runtime-adapter ownership without changing legacy defaults", async () => {

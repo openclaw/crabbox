@@ -13100,7 +13100,25 @@ export class FleetCoordinator {
     if (lease.runtimeAdapterDeleteRequestedAt) {
       return this.runtimeAdapterDeletePendingResponse(lease, request, true);
     }
-    const released = await this.releaseResolvedLease(lease, { deleteServer: true, keep: false });
+    let released: LeaseRecord;
+    try {
+      released = await this.releaseResolvedLease(lease, {
+        deleteServer: true,
+        keep: false,
+        awaitProviderCleanup: true,
+      });
+    } catch (error) {
+      if (error instanceof LeaseCleanupInProgressError) {
+        return json(
+          {
+            error: "cleanup_in_progress",
+            message: "lease cleanup is already owned by another operation",
+          },
+          { status: 409 },
+        );
+      }
+      throw error;
+    }
     return released.runtimeAdapterDeleteRequestedAt
       ? this.runtimeAdapterDeletePendingResponse(released, request, true)
       : json({ lease: publicLeaseRecord(released) });
@@ -16117,6 +16135,7 @@ export class FleetCoordinator {
     options: {
       deleteServer: boolean;
       keep?: boolean;
+      awaitProviderCleanup?: boolean;
       expectedCreateAttempt?: CreateAttemptRecord;
       expectedLease?: LeaseRecord;
     },
@@ -16187,6 +16206,7 @@ export class FleetCoordinator {
     options: {
       deleteServer: boolean;
       keep?: boolean;
+      awaitProviderCleanup?: boolean;
       expectedCreateAttempt?: CreateAttemptRecord;
       expectedLease?: LeaseRecord;
     },
@@ -16217,7 +16237,15 @@ export class FleetCoordinator {
         return { cleanup: false as const, blocked: true as const, lease: current };
       }
       if (current.cleanupStartedAt) {
-        return { cleanup: false as const, blocked: false as const, lease: current };
+        if (options.awaitProviderCleanup && cleanupClaimDeadline(current) <= Date.now()) {
+          // Reclaim the expired claim below. Its prior owner remains fenced by the
+          // cleanupStartedAt comparison in finishLeaseCleanupClaim.
+        } else {
+          if (options.awaitProviderCleanup) {
+            throw new LeaseCleanupInProgressError();
+          }
+          return { cleanup: false as const, blocked: false as const, lease: current };
+        }
       }
       const deleteServer = options.deleteServer && !isRegisteredLease(current);
       const shouldDelete = Boolean(
@@ -16235,6 +16263,19 @@ export class FleetCoordinator {
         await this.markAWSIngressReconcilePending(released);
         await this.scheduleAlarm();
         return { cleanup: false as const, blocked: false as const, lease: released };
+      }
+      if (!options.awaitProviderCleanup) {
+        const pending = finalizedReleasedLease(current, true, options.keep);
+        // A zero-duration cleanup claim keeps queued deletion visible to rollback readers
+        // while allowing either coordinator version to reclaim it immediately.
+        const queuedAt = new Date().toISOString();
+        pending.releaseDeletesServer = true;
+        pending.cleanupStartedAt = queuedAt;
+        pending.cleanupClaimExpiresAt = queuedAt;
+        await this.putLease(pending);
+        await this.markAWSIngressReconcilePending(pending);
+        await this.scheduleAlarm();
+        return { cleanup: false as const, blocked: false as const, lease: pending };
       }
       const now = new Date();
       const claimed = finalizedReleasedLease(current, true, options.keep);
@@ -16375,6 +16416,8 @@ interface CreateAttemptRecord {
 class CreateAttemptConflictError extends Error {}
 
 class LeaseReleaseResolutionConflictError extends Error {}
+
+class LeaseCleanupInProgressError extends Error {}
 
 class CreateAttemptCanceledError extends Error {}
 
