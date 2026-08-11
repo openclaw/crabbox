@@ -87,6 +87,9 @@ jobs:
       - name: Test pond mesh cancellation
         run: go test ./internal/cli/ -run PondMeshCancel -count=1 -v
 
+      - name: Test Git workspace coherence
+        run: go test ./internal/cli/ -run '^(TestWindowsGitRootIdentityAcceptsShortAliasAndRejectsDistinctRoot|TestWindowsGitCoherenceRollbackRestoresIndexAfterSymbolicHeadFailure|TestWindowsGitSeedReplacesUnusableExactRootsAfterVerifiedClone|TestWindowsGitCoherenceSupportsDetachedSparseSplitAndLinkedIndexes|TestWorkspaceOwnerWindowsProtocolBehavior)$' -count=1 -v
+
   connector-lifecycles:
     name: Connector Lifecycles
     runs-on: ubuntu-latest

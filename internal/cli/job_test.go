@@ -169,13 +169,18 @@ func TestJobRunInjectsReservedExecutionMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	logText := string(data)
-	for _, want := range []string{"CRABBOX_LEASE_ID='cbx_env_profile_test'", "CRABBOX_SLUG=''"} {
+	for _, want := range []string{"CRABBOX_LEASE_ID=", "cbx_env_profile_test", "CRABBOX_SLUG="} {
 		if !strings.Contains(logText, want) {
 			t.Fatalf("job command missing %q:\n%s", want, logText)
 		}
 	}
-	if !regexp.MustCompile(`CRABBOX_RUN_ID='run_[a-f0-9]{12}'`).MatchString(logText) {
+	if !regexp.MustCompile(`CRABBOX_RUN_ID=.*run_[a-f0-9]{12}`).MatchString(logText) {
 		t.Fatalf("job command missing run metadata:\n%s", logText)
+	}
+	invalidate := strings.Index(logText, `rm -f "$meta_dir/sync-fingerprint"`)
+	command := strings.Index(logText, "CRABBOX_LEASE_ID=")
+	if invalidate < 0 || command <= invalidate {
+		t.Fatalf("job command ran before fingerprint invalidation:\n%s", logText)
 	}
 }
 

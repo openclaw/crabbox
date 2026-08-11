@@ -225,6 +225,12 @@ func installRecordingSSH(t *testing.T, dir string) string {
 cmd=""
 for arg do cmd="$arg"; done
 printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
+case "$cmd" in
+  *"protocol_action='acquire'"*) printf ACQUIRED; exit 0 ;;
+  *"protocol_action='renew'"*) printf RENEWED; exit 0 ;;
+  *"protocol_action='inspect'"*) printf OWNED; exit 0 ;;
+  *"protocol_action='release'"*) printf RELEASED; exit 0 ;;
+esac
 if [ -n "${CRABBOX_FAKE_SSH_STDIN_LOG:-}" ]; then
   /bin/cat >> "$CRABBOX_FAKE_SSH_STDIN_LOG" || true
 else
@@ -1975,7 +1981,7 @@ for arg do
 done
 printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
 case "$cmd" in
-  *"nohup bash -c"*) printf '123\n'; exit 0 ;;
+  *"nohup sh -c"*) printf '123\n'; exit 0 ;;
   *"kill -0 '123'"*) printf 'exit=unknown\nno marker written\n'; exit 0 ;;
 esac
 exit 0

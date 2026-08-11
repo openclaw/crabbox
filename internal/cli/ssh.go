@@ -441,6 +441,7 @@ func runSSHQuietWithOptions(ctx context.Context, target SSHTarget, remote, conne
 }
 
 func runSSHQuietWithOptionsResolvePort(ctx context.Context, target *SSHTarget, remote, connectTimeout, connectionAttempts string) error {
+	remote = wrapWorkspaceOwnerRemote(ctx, remote, false)
 	remote = wrapRemoteForTarget(*target, remote)
 	var lastErr error
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
@@ -462,6 +463,7 @@ func runSSHQuietWithOptionsResolvePort(ctx context.Context, target *SSHTarget, r
 }
 
 func runSSHQuietWithRemoteWaitTimeout(ctx context.Context, target SSHTarget, remote string, waitTimeout time.Duration, connectTimeout, connectionAttempts string) error {
+	remote = wrapWorkspaceOwnerRemote(ctx, remote, false)
 	remote = wrapRemoteForTargetWithWaitTimeout(target, remote, waitTimeout)
 	var lastErr error
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
@@ -482,6 +484,7 @@ func runSSHQuietWithRemoteWaitTimeout(ctx context.Context, target SSHTarget, rem
 }
 
 func runSSHOutput(ctx context.Context, target SSHTarget, remote string) (string, error) {
+	remote = wrapWorkspaceOwnerRemote(ctx, remote, false)
 	remote = wrapRemoteForTarget(target, remote)
 	var lastOut []byte
 	var lastErr error
@@ -504,6 +507,7 @@ func runSSHOutput(ctx context.Context, target SSHTarget, remote string) (string,
 }
 
 func runSSHOutputWithRemoteWaitTimeout(ctx context.Context, target SSHTarget, remote string, waitTimeout time.Duration, connectTimeout, connectionAttempts string) (string, error) {
+	remote = wrapWorkspaceOwnerRemote(ctx, remote, false)
 	remote = wrapRemoteForTargetWithWaitTimeout(target, remote, waitTimeout)
 	var lastOut []byte
 	var lastErr error
@@ -527,6 +531,7 @@ func runSSHOutputWithRemoteWaitTimeout(ctx context.Context, target SSHTarget, re
 }
 
 func runSSHCombinedOutput(ctx context.Context, target SSHTarget, remote string) (string, error) {
+	remote = wrapWorkspaceOwnerRemote(ctx, remote, false)
 	remote = wrapRemoteForTarget(target, remote)
 	var lastOut []byte
 	var lastErr error
@@ -571,6 +576,7 @@ func runIdempotentSSHCombinedOutput(ctx context.Context, target SSHTarget, remot
 }
 
 func runWSL2ControlScriptCombinedOutput(ctx context.Context, target SSHTarget, remote string, waitTimeout time.Duration, connectTimeout, connectionAttempts string) (string, error) {
+	remote = wrapWorkspaceOwnerRemote(ctx, remote, false)
 	command := wsl2StdinScriptCommandWithWaitTimeout(waitTimeout)
 	var lastOut []byte
 	var lastErr error
@@ -599,6 +605,7 @@ func runSSHInputQuiet(ctx context.Context, target SSHTarget, remote, input strin
 }
 
 func runSSHInput(ctx context.Context, target SSHTarget, remote string, input io.Reader, stdout, stderr io.Writer) error {
+	remote = wrapWorkspaceOwnerRemote(ctx, remote, true)
 	remote = wrapRemoteForTarget(target, remote)
 	if input == nil {
 		input = strings.NewReader("")
@@ -626,6 +633,7 @@ func runSSHInput(ctx context.Context, target SSHTarget, remote string, input io.
 }
 
 func runSSHInputStream(ctx context.Context, target SSHTarget, remote string, input io.ReadSeeker, stdout, stderr io.Writer) error {
+	remote = wrapWorkspaceOwnerRemote(ctx, remote, true)
 	remote = wrapRemoteForTarget(target, remote)
 	if input == nil {
 		input = strings.NewReader("")
@@ -657,6 +665,7 @@ func runSSHStream(ctx context.Context, target SSHTarget, remote string, stdout, 
 }
 
 func runSSHStreamResult(ctx context.Context, target SSHTarget, remote string, stdout, stderr io.Writer) (int, error) {
+	remote = wrapWorkspaceOwnerRemote(ctx, remote, false)
 	remote = wrapRemoteForTarget(target, remote)
 	lastCode := 7
 	var lastErr error
@@ -868,6 +877,21 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 		ctx, cancel = context.WithTimeout(ctx, opts.Timeout)
 		defer cancel()
 	}
+	owner := workspaceOwnerFromContext(ctx)
+	guardStarted := false
+	if owner != nil && !isWindowsNativeTarget(target) {
+		rawCtx := contextWithoutWorkspaceOwner(ctx)
+		if err := runSSHQuiet(rawCtx, target, owner.rsyncPrepareCommand()); err != nil {
+			return exit(7, "prepare rsync workspace witness: %v", err)
+		}
+		if _, err := runSSHOutput(rawCtx, target, owner.WrapBackgroundCommand(owner.rsyncGuardPayload(dst))); err != nil {
+			return exit(7, "start rsync workspace witness: %v", err)
+		}
+		if err := owner.WaitForChild(rawCtx, 10*time.Second); err != nil {
+			return err
+		}
+		guardStarted = true
+	}
 	args := []string{
 		"-az",
 		"-e", strings.Join(shellWords(append([]string{"ssh"}, sshBaseArgs(target)...)), " "),
@@ -912,6 +936,22 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 	stopHeartbeat := startSyncHeartbeat(stderr, start, opts.HeartbeatInterval)
 	err := cmd.Run()
 	stopHeartbeat()
+	if guardStarted {
+		guardCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
+		rawGuardCtx := contextWithoutWorkspaceOwner(guardCtx)
+		guardErr := runSSHQuiet(rawGuardCtx, target, owner.rsyncStopCommand())
+		if guardErr == nil {
+			guardErr = waitWorkspaceOwnerNoChild(rawGuardCtx, owner, 15*time.Second)
+		}
+		cleanupErr := runSSHQuiet(rawGuardCtx, target, owner.rsyncPrepareCommand())
+		cancel()
+		if guardErr == nil {
+			guardErr = cleanupErr
+		}
+		if guardErr != nil && err == nil {
+			err = exit(7, "finish rsync workspace witness: %v", guardErr)
+		}
+	}
 	if ctx.Err() == context.DeadlineExceeded {
 		return exit(6, "rsync timed out after %s; next_action=retry with --full-resync, then use a fresh lease if sync still stalls", opts.Timeout)
 	}
@@ -1474,14 +1514,50 @@ func remoteResetWorkdir(workdir string) string {
 	return "bash -lc " + shellQuote(script)
 }
 
+func remoteGitWorkspaceFunctions() string {
+	return `exact_git_root() {
+  git_root="$(git rev-parse --show-toplevel 2>/dev/null)" || return 1
+  git_root="$(cd -P -- "$git_root" 2>/dev/null && pwd -P)" || return 1
+  [ "$git_root" = "$(pwd -P)" ]
+}
+usable_git_workspace() (
+  exact_git_root || exit 1
+  git rev-parse --verify HEAD^{commit} >/dev/null 2>&1 || exit 1
+  workspace_index="$(git rev-parse --git-path index 2>/dev/null)" || exit 1
+  case "$workspace_index" in /*) ;; *) workspace_index="$PWD/$workspace_index" ;; esac
+  [ -f "$workspace_index" ] || exit 1
+  workspace_tree="$(git write-tree 2>/dev/null)" || exit 1
+  [ -n "$workspace_tree" ]
+)
+normalize_git_remote() {
+  case "$1" in
+    git@github.com:*) remote_path="${1#git@github.com:}"; remote_path="${remote_path%.git}"; printf 'https://github.com/%s.git' "$remote_path" ;;
+    *) printf %s "$1" ;;
+  esac
+}
+origin_matches() {
+  actual_origin="$(git remote get-url origin 2>/dev/null)" || return 1
+  [ "$(normalize_git_remote "$actual_origin")" = "$expected_origin" ]
+}
+repair_origin() {
+  if git remote get-url origin >/dev/null 2>&1; then
+    git remote set-url origin "$expected_origin" >/dev/null 2>&1
+  else
+    git remote add origin "$expected_origin" >/dev/null 2>&1
+  fi && origin_matches
+}
+`
+}
+
 func remoteGitHydrateStatus(workdir, baseRef, expectedSHA string) string {
 	if baseRef == "" || expectedSHA == "" {
 		return "printf ''"
 	}
-	script := `cd ` + shellQuote(workdir) + ` && ` + remoteSyncMetaDirScript() + `
-if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+	script := `cd ` + shellQuote(workdir) + ` && ` + remoteGitWorkspaceFunctions() + `
+if ! exact_git_root; then
   exit 0
 fi
+` + remoteSyncMetaDirScript() + `
 marker="$meta_dir/git-hydrate-base"
 remote_sha="$(git rev-parse --verify ` + shellQuote("refs/remotes/origin/"+baseRef+"^{commit}") + ` 2>/dev/null || git rev-parse --verify ` + shellQuote("origin/"+baseRef+"^{commit}") + ` 2>/dev/null || true)"
 if [ "$remote_sha" = ` + shellQuote(expectedSHA) + ` ]; then
@@ -1498,21 +1574,42 @@ fi`
 	return "bash -lc " + shellQuote(script)
 }
 
-func remoteGitSeed(workdir, remoteURL, head string) string {
-	remoteURL = normalizeGitRemoteURL(remoteURL)
-	if remoteURL == "" || head == "" {
+func remoteGitSeed(workdir string, plan gitCoherencePlan) string {
+	if !plan.seedEnabled() {
 		return "true"
 	}
 	parent := filepath.ToSlash(filepath.Dir(workdir))
-	return "if [ ! -d " + shellQuote(workdir+"/.git") + " ]; then " +
-		"mkdir -p " + shellQuote(parent) + "; " +
-		"tmp=$(mktemp -d " + shellQuote(parent+"/.seed.XXXXXX") + "); " +
-		"if git clone --quiet --filter=blob:none --no-checkout " + shellQuote(remoteURL) + " \"$tmp\" >/dev/null 2>&1; then " +
-		"if (cd \"$tmp\" && (git fetch --quiet --depth=1 origin " + shellQuote(head) + " || true) && (git checkout --quiet " + shellQuote(head) + " || git checkout --quiet FETCH_HEAD)); then " +
-		"rm -rf " + shellQuote(workdir) + " && mv \"$tmp\" " + shellQuote(workdir) + "; " +
-		"else rm -rf \"$tmp\"; fi; " +
-		"else rm -rf \"$tmp\"; fi; " +
-		"fi"
+	script := `set -e
+workdir=` + shellQuote(workdir) + `
+expected_origin=` + shellQuote(plan.RemoteURL) + `
+expected_tree=` + shellQuote(plan.Tree) + `
+` + remoteGitWorkspaceFunctions() + `
+if [ -d "$workdir" ]; then
+  cd "$workdir"
+  if usable_git_workspace; then
+    repair_origin
+    exit 0
+  fi
+fi
+mkdir -p ` + shellQuote(parent) + `
+tmp="$(mktemp -d ` + shellQuote(parent+"/.seed.XXXXXX") + `)"
+cleanup_seed() { rm -rf -- "$tmp"; }
+trap cleanup_seed EXIT
+git clone --quiet --filter=blob:none --no-checkout --single-branch --branch ` + shellQuote(plan.Branch) + ` "$expected_origin" "$tmp" >/dev/null 2>&1
+git -C "$tmp" checkout --quiet --detach ` + shellQuote(plan.Target) + `
+[ "$(git -C "$tmp" rev-parse --verify HEAD^{commit})" = ` + shellQuote(plan.Target) + ` ]
+cd "$tmp"
+usable_git_workspace
+if [ -n "$expected_tree" ]; then
+  [ "$(git write-tree)" = "$expected_tree" ]
+fi
+repair_origin
+cd /
+rm -rf -- "$workdir"
+mv -- "$tmp" "$workdir"
+trap - EXIT
+`
+	return "bash -lc " + shellQuote(script)
 }
 
 func normalizeGitRemoteURL(remoteURL string) string {
@@ -1525,8 +1622,35 @@ func normalizeGitRemoteURL(remoteURL string) string {
 	return remoteURL
 }
 
-func remoteReadSyncFingerprint(workdir string) string {
-	script := "cd " + shellQuote(workdir) + " && " + remoteSyncMetaDirScript() + "cat \"$meta_dir/sync-fingerprint\" 2>/dev/null || true"
+func remoteReadSyncFingerprint(workdir string, plan gitCoherencePlan) string {
+	if !plan.enabled() {
+		return "printf ''"
+	}
+	script := "cd " + shellQuote(workdir) + " && " + `expected_origin=` + shellQuote(plan.RemoteURL) + `
+` + remoteGitWorkspaceFunctions() + `
+if ! exact_git_root || ! origin_matches; then
+  exit 0
+fi
+` + remoteSyncMetaDirScript() + `
+committed="$meta_dir/sync-finalize-token"
+complete="$meta_dir/sync-finalize-complete-token"
+if [ -f "$committed" ] && [ -f "$complete" ] &&
+   [ "$(cat "$committed")" = "$(cat "$complete")" ] &&
+   [ "$(git rev-parse --verify HEAD^{commit} 2>/dev/null || true)" = ` + shellQuote(plan.Target) + ` ] &&
+   [ "$(git write-tree 2>/dev/null || true)" = ` + shellQuote(plan.Tree) + ` ]; then
+  cat "$meta_dir/sync-fingerprint" 2>/dev/null || true
+fi`
+	return "bash -lc " + shellQuote(script)
+}
+
+func remoteInvalidateSyncFingerprintForTarget(target SSHTarget, workdir string) string {
+	if isWindowsNativeTarget(target) {
+		return powershellCommand("exit 0")
+	}
+	script := `set -e
+cd ` + shellQuote(workdir) + `
+` + remoteSyncMetaDirScript() + `
+rm -f "$meta_dir/sync-fingerprint"`
 	return "bash -lc " + shellQuote(script)
 }
 
@@ -1537,6 +1661,7 @@ type remoteSyncFinalizeOptions struct {
 	BaseSHA            string
 	Fingerprint        string
 	Token              string
+	Coherence          gitCoherencePlan
 }
 
 func remoteSyncPendingManifestName(token string) string {
@@ -1637,14 +1762,15 @@ with open(sys.argv[2], "wb") as handle:
 }
 
 func remoteSyncAbandonedMetadataCleanup() string {
-	return `find "$meta_dir" -type f \( -name 'sync-manifest.new' -o -name 'sync-deleted.new' -o -name 'sync-manifest.*.new' -o -name 'sync-deleted.*.new' -o -name 'sync-manifest.*.sorted' -o -name 'sync-finalize-token.tmp.*' -o -name 'sync-finalize-complete-token.tmp.*' \) -mtime +7 -exec rm -f -- {} \; 2>/dev/null || true`
+	return `find "$meta_dir" -type f \( -name 'sync-manifest.new' -o -name 'sync-deleted.new' -o -name 'sync-manifest.*.new' -o -name 'sync-deleted.*.new' -o -name 'sync-manifest.*.sorted' -o -name 'sync-finalize-token.tmp.*' -o -name 'sync-finalize-complete-token.tmp.*' -o -name 'sync-git-status.*' \) -mtime +7 -exec rm -f -- {} \; 2>/dev/null || true`
 }
 
 func remoteSeedSyncManifestFromGit(workdir string) string {
 	script := "set -e\ncd " + shellQuote(workdir) + `
+` + remoteGitWorkspaceFunctions() + `
 ` + remoteSyncMetaDirScript() + `
 old="$meta_dir/sync-manifest"
-if [ ! -f "$old" ] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+if [ ! -f "$old" ] && exact_git_root; then
   mkdir -p "$meta_dir"
   git ls-files -z > "$old"
 fi
@@ -1769,6 +1895,7 @@ func remoteFinalizeSync(workdir string, opts remoteSyncFinalizeOptions) string {
 	deletedName := remoteSyncPendingDeletedName(opts.Token)
 	script := `set -e
 cd ` + shellQuote(workdir) + `
+` + remoteGitWorkspaceFunctions() + `
 ` + remoteSyncMetaDirScript() + `
 mkdir -p "$meta_dir"
 new="$meta_dir/` + manifestName + `"
@@ -1777,17 +1904,19 @@ manifest="$meta_dir/sync-manifest"
 committed_token="$meta_dir/sync-finalize-token"
 complete_token="$meta_dir/sync-finalize-complete-token"
 expected_token=` + shellQuote(opts.Token) + `
+publish_fingerprint=` + shellQuote(opts.Fingerprint) + `
 case "$expected_token" in
   ''|*[!0-9a-f]*) echo "remote sync finalize failed: invalid sync token" >&2; exit 67 ;;
 esac
 ` + remoteSyncFinalizeLockScript() + `
+git_status="$meta_dir/sync-git-status.$expected_token.$$"
+rm -f "$git_status"
 if [ -f "$manifest" ] &&
-   [ -f "$committed_token" ] &&
-   [ "$(cat "$committed_token")" = "$expected_token" ] &&
-   [ -f "$complete_token" ] &&
-   [ "$(cat "$complete_token")" = "$expected_token" ]; then
+   [ -f "$committed_token" ] && [ "$(cat "$committed_token")" = "$expected_token" ] &&
+   [ -f "$complete_token" ] && [ "$(cat "$complete_token")" = "$expected_token" ]; then
   exit 0
 fi
+rm -f "$complete_token"
 if [ -f "$new" ]; then
   committed_tmp="$committed_token.tmp.$$"
   printf %s "$expected_token" > "$committed_tmp"
@@ -1798,35 +1927,102 @@ elif [ ! -f "$manifest" ] || [ ! -f "$committed_token" ] || [ "$(cat "$committed
   echo "remote sync finalize failed: no committed manifest for this sync" >&2
   exit 67
 fi
-if test -d .git && git status --short >/tmp/crabbox-git-status 2>/dev/null; then
-  deletions=$(awk '/^ D|^D / { n++ } END { print n+0 }' /tmp/crabbox-git-status)
+`
+	if opts.Coherence.enabled() {
+		script += remoteGitCoherenceFinalizeScript(opts.Coherence, allowValue)
+	} else {
+		script += `publish_fingerprint=
+if exact_git_root && git status --short >"$git_status" 2>/dev/null; then
+  deletions=$(awk '/^ D|^D / { n++ } END { print n+0 }' "$git_status")
   if [ ` + shellQuote(allowValue) + ` != '1' ] && [ "$deletions" -ge 200 ]; then
     echo "remote sync sanity failed: $deletions tracked deletions" >&2
-    awk '/^ D|^D / { print "  " substr($0,4) }' /tmp/crabbox-git-status | head -20 >&2
+    awk '/^ D|^D / { print "  " substr($0,4) }' "$git_status" | head -20 >&2
     exit 66
   fi
 fi
 `
+	}
 	if opts.HydrateGit && opts.BaseRef != "" {
 		refspec := "+refs/heads/" + opts.BaseRef + ":refs/remotes/origin/" + opts.BaseRef
-		script += `if git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git remote get-url origin >/dev/null 2>&1; then
+		script += `if exact_git_root && git remote get-url origin >/dev/null 2>&1; then
   git fetch --quiet --unshallow origin ` + shellQuote(refspec) + ` || git fetch --quiet --depth=1000 origin ` + shellQuote(refspec) + ` || git fetch --quiet origin ` + shellQuote(refspec) + ` || git fetch --quiet origin ` + shellQuote(opts.BaseRef) + ` || true
 fi
 `
 	}
 	if opts.BaseRef != "" && opts.BaseSHA != "" {
-		script += `printf %s ` + shellQuote(opts.BaseRef+" "+opts.BaseSHA+"\n") + ` > "$meta_dir/git-hydrate-base" || true
+		script += `base_tmp="$meta_dir/git-hydrate-base.tmp.$$"
+printf %s ` + shellQuote(opts.BaseRef+" "+opts.BaseSHA+"\n") + ` > "$base_tmp"
+mv "$base_tmp" "$meta_dir/git-hydrate-base"
 `
 	}
-	if opts.Fingerprint != "" {
-		script += `printf %s ` + shellQuote(opts.Fingerprint) + ` > "$meta_dir/sync-fingerprint" || true
-`
-	}
-	script += `complete_tmp="$complete_token.tmp.$$"
+	script += `if [ -n "$publish_fingerprint" ]; then
+  fingerprint_tmp="$meta_dir/sync-fingerprint.tmp.$$"
+  printf %s "$publish_fingerprint" > "$fingerprint_tmp"
+  mv "$fingerprint_tmp" "$meta_dir/sync-fingerprint"
+else
+  rm -f "$meta_dir/sync-fingerprint"
+fi
+complete_tmp="$complete_token.tmp.$$"
 printf %s "$expected_token" > "$complete_tmp"
 mv "$complete_tmp" "$complete_token"
+coherence_committed=1
 `
 	return "bash -lc " + shellQuote(script)
+}
+
+func remoteGitCoherenceFinalizeScript(plan gitCoherencePlan, allowMassDeletions string) string {
+	return `
+coherence_committed=; coherence_mutated=; head_changed=; index_changed=
+tmp_ref="refs/crabbox/sync-$expected_token"; advertised_branch=` + shellQuote(plan.Branch) + `; expected_origin=` + shellQuote(plan.RemoteURL) + `
+if ! exact_git_root; then
+	publish_fingerprint=
+elif ! repair_origin; then
+	echo "remote sync finalize failed: Git origin repair failed" >&2; cleanup_finalize_lock; exit 67
+elif ! git fetch --quiet --no-tags "$expected_origin" "+refs/heads/$advertised_branch:$tmp_ref"; then
+	git update-ref -d "$tmp_ref" >/dev/null 2>&1 || true; echo "remote sync finalize failed: Git coherence fetch failed" >&2; cleanup_finalize_lock; exit 67
+elif ! git merge-base --is-ancestor ` + shellQuote(plan.Target) + ` "$tmp_ref" >/dev/null 2>&1; then
+	git update-ref -d "$tmp_ref" >/dev/null 2>&1 || true; echo "remote sync finalize failed: requested commit is not on advertised branch" >&2; cleanup_finalize_lock; exit 67
+elif [ "$(git rev-parse --verify ` + shellQuote(plan.Target+"^{tree}") + ` 2>/dev/null || true)" != ` + shellQuote(plan.Tree) + ` ]; then
+	git update-ref -d "$tmp_ref" >/dev/null 2>&1 || true; echo "remote sync finalize failed: requested Git tree verification failed" >&2; cleanup_finalize_lock; exit 67
+else
+  coherence_cleanup() {
+    status=$?
+    if [ -z "$coherence_committed" ] && [ -n "$coherence_mutated" ]; then
+      if [ -n "$head_changed" ]; then
+        if git update-ref --no-deref HEAD "$old_head" ` + shellQuote(plan.Target) + `; then
+          if [ -n "$old_sym" ] && ! git symbolic-ref -q HEAD >/dev/null 2>&1 &&
+             [ "$(git rev-parse --verify HEAD^{commit} 2>/dev/null || true)" = "$old_head" ] &&
+             [ "$(git rev-parse --verify "$old_sym^{commit}" 2>/dev/null || true)" = "$old_head" ]; then git symbolic-ref HEAD "$old_sym" || status=67; fi
+        else status=67; fi
+      fi
+      if [ -n "$index_changed" ] && [ "$(cat "$index_lock" 2>/dev/null || true)" = "$index_marker" ] && cmp -s "$index_path" "$index_verify"; then
+        cp -p "$index_backup" "$index_restore" && mv "$index_restore" "$index_path" || status=67
+      elif [ -n "$index_changed" ]; then status=67; fi
+    fi
+    git update-ref -d "$tmp_ref" "$fetched_head" >/dev/null 2>&1 || true; rm -f "${index_backup:-}" "${index_candidate:-}" "${index_verify:-}" "${index_restore:-}"
+    if [ -n "${index_lock:-}" ] && [ "$(cat "$index_lock" 2>/dev/null || true)" = "${index_marker:-}" ]; then rm -f "$index_lock"; fi
+    cleanup_finalize_lock; exit "$status"
+  }
+  trap coherence_cleanup EXIT
+  fetched_head="$(git rev-parse --verify "$tmp_ref^{commit}")"; old_head="$(git rev-parse --verify HEAD^{commit})"
+  old_sym="$(git symbolic-ref -q HEAD 2>/dev/null || true)"
+  index_path="$(git rev-parse --git-path index)"
+  case "$index_path" in /*) ;; *) index_path="$PWD/$index_path" ;; esac
+  index_lock="$index_path.lock"; index_marker="$expected_token.$$"
+  index_backup="$index_path.crabbox.$$.backup"; index_candidate="$index_path.crabbox.$$.new"; index_verify="$index_path.crabbox.$$.verify"; index_restore="$index_path.crabbox.$$.restore"
+  cp -p "$index_path" "$index_backup"; git read-tree --reset --index-output="$index_candidate" ` + shellQuote(plan.Target) + `
+  [ "$(GIT_INDEX_FILE="$index_candidate" git write-tree)" = ` + shellQuote(plan.Tree) + ` ]
+  GIT_INDEX_FILE="$index_candidate" git diff-files --name-status >"$git_status" 2>/dev/null ||
+    { echo "remote sync sanity failed: candidate Git index inspection failed" >&2; exit 67; }
+  deletions=$(awk '$1 == "D" { n++ } END { print n+0 }' "$git_status"); [ ` + shellQuote(allowMassDeletions) + ` = '1' ] || [ "$deletions" -lt 200 ]
+  (set -C; printf %s "$index_marker" > "$index_lock") || { echo "remote sync finalize failed: Git index is busy" >&2; exit 67; }
+  cmp -s "$index_path" "$index_backup" || { echo "remote sync finalize failed: Git index changed concurrently" >&2; exit 67; }
+  cp -p "$index_candidate" "$index_verify"; mv "$index_candidate" "$index_path"; index_changed=1; coherence_mutated=1
+  cmp -s "$index_path" "$index_verify" && [ "$(GIT_INDEX_FILE="$index_verify" git write-tree)" = ` + shellQuote(plan.Tree) + ` ] || { echo "remote sync finalize failed: installed Git index verification failed" >&2; exit 67; }
+  git update-ref --no-deref HEAD ` + shellQuote(plan.Target) + ` "$old_head"; head_changed=1
+  [ "$(git rev-parse --verify HEAD^{commit})" = ` + shellQuote(plan.Target) + ` ]
+fi
+`
 }
 
 func remoteSyncFinalizeLockScript() string {
@@ -1874,6 +2070,9 @@ while ! ln -s "$$" "$lock_path" 2>/dev/null; do
   fi
 done
 cleanup_finalize_lock() {
+  if [ -n "${git_status:-}" ]; then
+    rm -f -- "$git_status"
+  fi
   if [ "$(readlink "$lock_path" 2>/dev/null || true)" = "$$" ]; then
     rm -f "$lock_path"
   fi
@@ -1886,7 +2085,11 @@ trap 'exit 143' TERM
 }
 
 func remoteSyncMetaDirScript() string {
-	return "meta_dir=$(if [ -d .git ]; then printf %s .git/crabbox; else printf %s .crabbox; fi); "
+	return `meta_dir=$(git_root=; if git_root="$(git rev-parse --show-toplevel 2>/dev/null)" &&
+  git_root="$(cd -P -- "$git_root" 2>/dev/null && pwd -P)" &&
+  [ "$git_root" = "$(pwd -P)" ]; then git rev-parse --git-path crabbox; else printf %s .crabbox; fi)
+case "$meta_dir" in /*) ;; *) meta_dir="$PWD/$meta_dir" ;; esac
+`
 }
 
 func remoteSyncSanity(workdir string, allowMassDeletions bool) string {
@@ -1895,11 +2098,11 @@ func remoteSyncSanity(workdir string, allowMassDeletions bool) string {
 		allowValue = "1"
 	}
 	return "cd " + shellQuote(workdir) + " && " +
-		"if test -d .git && git status --short >/tmp/crabbox-git-status 2>/dev/null; then " +
-		"deletions=$(awk '/^ D|^D / { n++ } END { print n+0 }' /tmp/crabbox-git-status); " +
+		"if test -d .git && git_status_output=$(git status --short 2>/dev/null); then " +
+		"deletions=$(printf '%s\\n' \"$git_status_output\" | awk '/^ D|^D / { n++ } END { print n+0 }'); " +
 		"if [ " + shellQuote(allowValue) + " != '1' ] && [ \"$deletions\" -ge 200 ]; then " +
 		"echo \"remote sync sanity failed: $deletions tracked deletions\" >&2; " +
-		"awk '/^ D|^D / { print \"  \" substr($0,4) }' /tmp/crabbox-git-status | head -20 >&2; " +
+		"printf '%s\\n' \"$git_status_output\" | awk '/^ D|^D / { print \"  \" substr($0,4) }' | head -20 >&2; " +
 		"exit 66; " +
 		"fi; " +
 		"fi"

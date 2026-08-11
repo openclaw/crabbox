@@ -342,19 +342,19 @@ func TestSyncGitSeedDisabledByIncludeWhitelist(t *testing.T) {
 	repo := Repo{Root: dir, RemoteURL: "https://github.com/example-org/my-app.git", Head: head}
 
 	cfg := baseConfig()
-	if !syncGitSeedEnabled(cfg, repo) {
+	if plan, _ := syncGitCoherencePlan(cfg, repo); !plan.seedEnabled() {
 		t.Fatal("seedable repo without includes should use git seed")
 	}
 	cfg.Sync.Includes = []string{"src"}
-	if syncGitSeedEnabled(cfg, repo) {
+	if plan, _ := syncGitCoherencePlan(cfg, repo); plan.seedEnabled() {
 		t.Fatal("sync.include should disable full-repo git seed")
 	}
 	cfg.Sync.Includes = []string{" "}
-	if !syncGitSeedEnabled(cfg, repo) {
+	if plan, _ := syncGitCoherencePlan(cfg, repo); !plan.seedEnabled() {
 		t.Fatal("blank include entries should not disable git seed")
 	}
 	cfg.Sync.GitSeed = false
-	if syncGitSeedEnabled(cfg, repo) {
+	if plan, _ := syncGitCoherencePlan(cfg, repo); plan.seedEnabled() {
 		t.Fatal("gitSeed=false should disable git seed")
 	}
 }
@@ -369,17 +369,14 @@ func TestSyncGitSeedRejectsCredentialBearingRemote(t *testing.T) {
 	runGit(t, dir, "commit", "-m", "init")
 	runGit(t, dir, "update-ref", "refs/remotes/origin/main", "HEAD")
 	for _, remoteURL := range []string{
-		"https://runner:do-not-forward@example.test/repo.git",
-		"ssh://runner:do-not-forward@example.test/repo.git",
-		"git+https://runner:do-not-forward@example.test/repo.git",
+		"https://runner:do-not-forward@example.test/repo.git",     // trufflehog:ignore
+		"ssh://runner:do-not-forward@example.test/repo.git",       // trufflehog:ignore
+		"git+https://runner:do-not-forward@example.test/repo.git", // trufflehog:ignore
 	} {
 		t.Run(remoteURL, func(t *testing.T) {
 			repo := Repo{Root: dir, RemoteURL: remoteURL, Head: gitOutput(dir, "rev-parse", "HEAD")}
-			if enabled, blocked := syncGitSeedDecision(baseConfig(), repo); enabled || !blocked {
-				t.Fatalf("enabled=%v blocked=%v", enabled, blocked)
-			}
-			if remoteGitSeedCandidate(repo) {
-				t.Fatal("credential-bearing remote must not be a seed candidate")
+			if plan, blocked := syncGitCoherencePlan(baseConfig(), repo); plan.seedEnabled() || !blocked {
+				t.Fatalf("plan=%#v blocked=%v", plan, blocked)
 			}
 		})
 	}
@@ -392,15 +389,15 @@ func TestGitRemoteURLHasCredentials(t *testing.T) {
 	}{
 		{remote: "https://example.test/repo.git", want: false},
 		{remote: "https://runner@example.test/repo.git", want: true},
-		{remote: "https://runner:token@example.test/repo.git", want: true},
-		{remote: "HTTPS://runner:token@example.test/repo.git", want: true},
+		{remote: "https://runner:token@example.test/repo.git", want: true}, // trufflehog:ignore
+		{remote: "HTTPS://runner:token@example.test/repo.git", want: true}, // trufflehog:ignore
 		{remote: "https://runner%zz@example.test/repo.git", want: true},
 		{remote: "ssh://git@example.test/repo.git", want: false},
-		{remote: "ssh://git:token@example.test/repo.git", want: true},
-		{remote: "SSH://git:token@example.test/repo.git", want: true},
+		{remote: "ssh://git:token@example.test/repo.git", want: true}, // trufflehog:ignore
+		{remote: "SSH://git:token@example.test/repo.git", want: true}, // trufflehog:ignore
 		{remote: "ssh://git:@example.test/repo.git", want: true},
-		{remote: "ssh://git%zz:token@example.test/repo.git", want: true},
-		{remote: "git+https://runner:token@example.test/repo.git", want: true},
+		{remote: "ssh://git%zz:token@example.test/repo.git", want: true},       // trufflehog:ignore
+		{remote: "git+https://runner:token@example.test/repo.git", want: true}, // trufflehog:ignore
 		{remote: "git@example.test:repo.git", want: false},
 	}
 	for _, tt := range tests {
@@ -773,13 +770,103 @@ func TestRemoteGitSeedCandidateRequiresRemoteTrackingRef(t *testing.T) {
 	head := gitOutput(dir, "rev-parse", "HEAD")
 
 	repo := Repo{Root: dir, RemoteURL: "https://github.com/openclaw/crabbox.git", Head: head}
-	if remoteGitSeedCandidate(repo) {
+	if plan, _ := syncGitCoherencePlan(baseConfig(), repo); plan.enabled() {
 		t.Fatal("unpublished head should not be a seed candidate")
 	}
 	runGit(t, dir, "update-ref", "refs/remotes/origin/main", head)
-	if !remoteGitSeedCandidate(repo) {
+	if plan, _ := syncGitCoherencePlan(baseConfig(), repo); !plan.enabled() {
 		t.Fatal("head in a remote-tracking ref should be a seed candidate")
 	}
+}
+
+func TestSyncGitCoherencePlanSelectsEligibleOriginBranch(t *testing.T) {
+	newRepo := func(t *testing.T) string {
+		t.Helper()
+		dir := t.TempDir()
+		runGit(t, dir, "init")
+		runGit(t, dir, "config", "user.email", "test@example.com")
+		runGit(t, dir, "config", "user.name", "Test")
+		writeFile(t, filepath.Join(dir, "plain.txt"), "plain\n")
+		runGit(t, dir, "add", ".")
+		runGit(t, dir, "commit", "-m", "init")
+		runGit(t, dir, "update-ref", "refs/remotes/origin/main", "HEAD")
+		return dir
+	}
+	planFor := func(dir, target, baseRef string) gitCoherencePlan {
+		plan, _ := syncGitCoherencePlan(baseConfig(), Repo{
+			Root:      dir,
+			RemoteURL: "https://example.test/repo.git",
+			Head:      target,
+			BaseRef:   baseRef,
+		})
+		return plan
+	}
+	requireSeedOnly := func(t *testing.T, plan gitCoherencePlan) {
+		t.Helper()
+		if !plan.seedEnabled() || plan.enabled() {
+			t.Fatalf("plan should seed without coherence: %#v", plan)
+		}
+		fingerprint, _ := syncFingerprintForManifest(Repo{}, baseConfig(), SyncManifest{}, nil, plan)
+		if fingerprint != "" {
+			t.Fatalf("ineligible coherence published fingerprint %q", fingerprint)
+		}
+		if remoteGitSeed("/work/repo", plan) == "true" {
+			t.Fatal("ineligible coherence disabled Git seed")
+		}
+	}
+
+	t.Run("exact base ref wins with multiple containing refs", func(t *testing.T) {
+		dir := newRepo(t)
+		runGit(t, dir, "update-ref", "refs/remotes/origin/release", "HEAD")
+		plan := planFor(dir, gitOutput(dir, "rev-parse", "HEAD"), "release")
+		if !plan.enabled() || plan.Branch != "release" {
+			t.Fatalf("exact BaseRef plan=%#v", plan)
+		}
+	})
+
+	t.Run("origin HEAD exact tip fallback", func(t *testing.T) {
+		dir := newRepo(t)
+		runGit(t, dir, "update-ref", "refs/remotes/origin/trunk", "HEAD")
+		runGit(t, dir, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+		plan := planFor(dir, gitOutput(dir, "rev-parse", "HEAD"), "missing")
+		if !plan.enabled() || plan.Branch != "trunk" {
+			t.Fatalf("origin/HEAD plan=%#v", plan)
+		}
+	})
+
+	t.Run("deterministic containing ref fallback", func(t *testing.T) {
+		dir := newRepo(t)
+		target := gitOutput(dir, "rev-parse", "HEAD")
+		writeFile(t, filepath.Join(dir, "later.txt"), "later\n")
+		runGit(t, dir, "add", ".")
+		runGit(t, dir, "commit", "-m", "later")
+		runGit(t, dir, "update-ref", "refs/remotes/origin/zeta", "HEAD")
+		runGit(t, dir, "update-ref", "refs/remotes/origin/alpha", "HEAD")
+		runGit(t, dir, "update-ref", "-d", "refs/remotes/origin/main")
+		plan := planFor(dir, target, "")
+		if !plan.enabled() || plan.Branch != "alpha" {
+			t.Fatalf("deterministic containing-ref plan=%#v", plan)
+		}
+	})
+
+	t.Run("filter managed path", func(t *testing.T) {
+		dir := newRepo(t)
+		writeFile(t, filepath.Join(dir, ".gitattributes"), "*.bin filter=fixture -text\n")
+		writeFile(t, filepath.Join(dir, "asset.bin"), "payload\n")
+		runGit(t, dir, "-c", "filter.fixture.clean=cat", "-c", "filter.fixture.required=false", "add", ".")
+		runGit(t, dir, "commit", "-m", "filter")
+		runGit(t, dir, "update-ref", "refs/remotes/origin/main", "HEAD")
+		requireSeedOnly(t, planFor(dir, gitOutput(dir, "rev-parse", "HEAD"), ""))
+	})
+
+	t.Run("gitlink", func(t *testing.T) {
+		dir := newRepo(t)
+		head := gitOutput(dir, "rev-parse", "HEAD")
+		runGit(t, dir, "update-index", "--add", "--cacheinfo", "160000,"+head+",nested")
+		runGit(t, dir, "commit", "-m", "gitlink")
+		runGit(t, dir, "update-ref", "refs/remotes/origin/main", "HEAD")
+		requireSeedOnly(t, planFor(dir, gitOutput(dir, "rev-parse", "HEAD"), ""))
+	})
 }
 
 func TestCheckSyncPreflightFailsLargeCandidate(t *testing.T) {

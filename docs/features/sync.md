@@ -77,7 +77,22 @@ Secrets must never be passed as command-line arguments or via broad env globs.
 
 ## Sync flow
 
-For an SSH-lease run, sync runs these steps:
+For an existing SSH lease, Crabbox first acquires a remote lease-scoped
+workspace owner. It does this before reading hydration state, Git metadata, or
+the sync fingerprint, and retains ownership through command execution, evidence
+collection, failure capture, and ready-pool cleanup. Separate clients and watch
+iterations contend on the same owner. Newly acquired one-shot leases bypass it
+because the acquisition itself is exclusive.
+
+The owner state lives under the remote user's Crabbox state directory, outside
+the replaceable checkout. Its filename is derived from a non-reversible lease
+digest, and its bounded contents contain only protocol version, expiry, random
+fencing token, and an optional witnessed child PID/start identity. Token-bound
+renewal and release fail closed. After a client crash, an expired owner is
+recoverable only when the exact witnessed child is no longer alive. POSIX,
+WSL2, and native Windows targets share these semantics.
+
+Once ownership is established, sync runs these steps:
 
 1. Resolve the local repository root.
 2. Build the sync manifest (the NUL-delimited file list) and a parallel list of

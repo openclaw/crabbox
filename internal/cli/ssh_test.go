@@ -474,14 +474,15 @@ exit 0
 	cfg.Sync.Delete = false
 	target := SSHTarget{User: "crabbox", Host: "203.0.113.10", Port: "22", TargetOS: targetWindows, WindowsMode: windowsModeNormal}
 	repo := Repo{Root: repoRoot, RemoteURL: "https://example.test/repo.git", Head: head}
-	if err := syncWindowsNative(context.Background(), target, repo, cfg, `C:\crabbox\cbx\repo`, manifest, io.Discard, io.Discard, rsyncOptions{FullResync: true}); err != nil {
+	coherence, _ := syncGitCoherencePlan(cfg, repo)
+	if err := syncWindowsNative(context.Background(), target, repo, cfg, coherence, `C:\crabbox\cbx\repo`, manifest, io.Discard, io.Discard, rsyncOptions{FullResync: true}); err != nil {
 		t.Fatal(err)
 	}
 	logData, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := strings.Count(string(logData), "ssh\n"), 4; got != want {
+	if got, want := strings.Count(string(logData), "ssh\n"), 5; got != want {
 		t.Fatalf("ssh calls=%d want %d; log:\n%s", got, want, logData)
 	}
 
@@ -491,7 +492,11 @@ exit 0
 	const secret = "do-not-forward"
 	repo.RemoteURL = "https://runner:" + secret + "@example.test/repo.git"
 	var stderr bytes.Buffer
-	if err := syncWindowsNative(context.Background(), target, repo, cfg, `C:\crabbox\cbx\repo`, manifest, io.Discard, &stderr, rsyncOptions{FullResync: true}); err != nil {
+	coherence, blocked := syncGitCoherencePlan(cfg, repo)
+	if blocked {
+		warnCredentialBearingGitSeed(&stderr)
+	}
+	if err := syncWindowsNative(context.Background(), target, repo, cfg, coherence, `C:\crabbox\cbx\repo`, manifest, io.Discard, &stderr, rsyncOptions{FullResync: true}); err != nil {
 		t.Fatal(err)
 	}
 	logData, err = os.ReadFile(logPath)
@@ -527,6 +532,25 @@ func decodePowerShellCommand(t *testing.T, command string) string {
 		units[i] = uint16(raw[i*2]) | uint16(raw[i*2+1])<<8
 	}
 	return string(utf16.Decode(units))
+}
+
+func runDecodedWindowsPowerShell(t *testing.T, command string) ([]byte, error) {
+	t.Helper()
+	return runWindowsPowerShellScript(t, decodePowerShellCommand(t, command))
+}
+
+func runWindowsPowerShellScript(t *testing.T, script string) ([]byte, error) {
+	t.Helper()
+	powerShell, err := exec.LookPath("powershell.exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scriptPath := filepath.Join(t.TempDir(), "script.ps1")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(powerShell, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath)
+	return cmd.CombinedOutput()
 }
 
 func TestWSL2WrapsRemoteCommand(t *testing.T) {
@@ -1714,10 +1738,7 @@ func TestRemoteApplySyncManifestOnlyCommitsManifest(t *testing.T) {
 func TestRemoteFinalizeSyncCommitsMetadataInOneCommand(t *testing.T) {
 	const finalizeToken = "0123456789abcdef0123456789abcdef"
 	workdir := t.TempDir()
-	if err := os.Mkdir(filepath.Join(workdir, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	metaDir := filepath.Join(workdir, ".git", "crabbox")
+	metaDir := filepath.Join(workdir, ".crabbox")
 	if err := os.MkdirAll(metaDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1729,10 +1750,9 @@ func TestRemoteFinalizeSyncCommitsMetadataInOneCommand(t *testing.T) {
 	}
 
 	remote := remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
-		BaseRef:     "main",
-		BaseSHA:     "abc123",
-		Fingerprint: "fp123",
-		Token:       finalizeToken,
+		BaseRef: "main",
+		BaseSHA: "abc123",
+		Token:   finalizeToken,
 	})
 	for attempt := 1; attempt <= 2; attempt++ {
 		if out, err := exec.Command("bash", "-lc", remote).CombinedOutput(); err != nil {
@@ -1756,12 +1776,8 @@ func TestRemoteFinalizeSyncCommitsMetadataInOneCommand(t *testing.T) {
 	if string(marker) != "main abc123\n" {
 		t.Fatalf("unexpected hydrate marker: %q", marker)
 	}
-	fingerprint, err := os.ReadFile(filepath.Join(metaDir, "sync-fingerprint"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(fingerprint) != "fp123" {
-		t.Fatalf("unexpected fingerprint: %q", fingerprint)
+	if _, err := os.Stat(filepath.Join(metaDir, "sync-fingerprint")); !os.IsNotExist(err) {
+		t.Fatalf("overlay-only finalize should not publish fingerprint: %v", err)
 	}
 	token, err := os.ReadFile(filepath.Join(metaDir, "sync-finalize-token"))
 	if err != nil {
@@ -1983,6 +1999,15 @@ func TestRemoteFinalizeSyncWaitIsContextBounded(t *testing.T) {
 	if err == nil || ctx.Err() != context.DeadlineExceeded {
 		t.Fatalf("err=%v context=%v", err, ctx.Err())
 	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if err := os.RemoveAll(workdir); err == nil {
+			break
+		} else if time.Now().After(deadline) {
+			t.Fatalf("clean canceled finalize fixture: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func TestRemoteSyncFinalizeLockSerializesLiveOwner(t *testing.T) {
@@ -2051,6 +2076,168 @@ func TestRemoteSyncFinalizeLockSerializesLiveOwner(t *testing.T) {
 	}
 }
 
+func TestRemoteFinalizeSyncStatusIsWorkspaceScoped(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell finalization fixture")
+	}
+	f := newGitCoherenceFixture(t)
+	coherentWorkdir := f.workspace(t, f.a, true)
+	overlayWorkdir := f.workspace(t, f.a, false)
+	plan := f.plan(t, f.b)
+	mustWriteTestFile(t, filepath.Join(coherentWorkdir, "tracked.txt"), "B\n")
+	const token = "abababababababababababababababab"
+	stageCoherenceFinalize(t, coherentWorkdir, token)
+	stageCoherenceFinalize(t, overlayWorkdir, token)
+
+	tools := t.TempDir()
+	coherentReady := filepath.Join(tools, "coherent-ready")
+	overlayWrote := filepath.Join(tools, "overlay-wrote")
+	releaseOverlay := filepath.Join(tools, "release-overlay")
+	gitScript := `#!/bin/sh
+case "$CRABBOX_STATUS_ROLE:$1" in
+  coherent:diff-files)
+    touch "$CRABBOX_COHERENT_READY"
+    while [ ! -f "$CRABBOX_OVERLAY_WROTE" ]; do sleep 0.01; done
+    exit 0
+    ;;
+  overlay:status)
+    i=0
+    while [ "$i" -lt 200 ]; do
+      printf ' D deleted-%03d\n' "$i"
+      i=$((i + 1))
+    done
+    touch "$CRABBOX_OVERLAY_WROTE"
+    while [ ! -f "$CRABBOX_RELEASE_OVERLAY" ]; do sleep 0.01; done
+    exit 0
+    ;;
+esac
+exec ` + shellQuote(gitOutput("", "--exec-path")+"/git") + ` "$@"
+`
+	if err := os.WriteFile(filepath.Join(tools, "git"), []byte(gitScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	envFile := filepath.Join(tools, "env")
+	if err := os.WriteFile(envFile, []byte("export PATH="+shellQuote(tools)+":$PATH\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	commonEnv := []string{
+		"BASH_ENV=" + envFile,
+		"CRABBOX_COHERENT_READY=" + coherentReady,
+		"CRABBOX_OVERLAY_WROTE=" + overlayWrote,
+		"CRABBOX_RELEASE_OVERLAY=" + releaseOverlay,
+	}
+	coherent := exec.Command("bash", "-lc", remoteFinalizeSync(coherentWorkdir, remoteSyncFinalizeOptions{
+		Token:       token,
+		Fingerprint: "coherent",
+		Coherence:   plan,
+	}))
+	coherent.Env = append(os.Environ(), append(commonEnv, "CRABBOX_STATUS_ROLE=coherent")...)
+	var coherentOutput bytes.Buffer
+	coherent.Stdout = &coherentOutput
+	coherent.Stderr = &coherentOutput
+	if err := coherent.Start(); err != nil {
+		t.Fatal(err)
+	}
+	var overlay *exec.Cmd
+	t.Cleanup(func() {
+		_ = os.WriteFile(releaseOverlay, []byte("release"), 0o644)
+		if coherent.Process != nil {
+			_ = coherent.Process.Kill()
+		}
+		if overlay != nil && overlay.Process != nil {
+			_ = overlay.Process.Kill()
+		}
+	})
+	coherentDone := make(chan error, 1)
+	go func() { coherentDone <- coherent.Wait() }()
+
+	waitForPath := func(path, message string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if _, err := os.Stat(path); err == nil {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatal(message)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	waitForPath(coherentReady, "coherent finalizer did not reach candidate status inspection")
+
+	overlay = exec.Command("bash", "-lc", remoteFinalizeSync(overlayWorkdir, remoteSyncFinalizeOptions{Token: token}))
+	overlay.Env = append(os.Environ(), append(commonEnv, "CRABBOX_STATUS_ROLE=overlay")...)
+	var overlayOutput bytes.Buffer
+	overlay.Stdout = &overlayOutput
+	overlay.Stderr = &overlayOutput
+	if err := overlay.Start(); err != nil {
+		t.Fatal(err)
+	}
+	overlayDone := make(chan error, 1)
+	go func() { overlayDone <- overlay.Wait() }()
+	waitForPath(overlayWrote, "overlay finalizer did not publish its deletion status")
+
+	select {
+	case err := <-coherentDone:
+		if err != nil {
+			t.Fatalf("coherent finalizer consumed another workspace status: %v\n%s", err, coherentOutput.Bytes())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("coherent finalizer did not finish")
+	}
+	if err := os.WriteFile(releaseOverlay, []byte("release"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-overlayDone:
+		if err == nil || exitCode(err) != 66 {
+			t.Fatalf("overlay finalizer err=%v output=%q, want deletion failure", err, overlayOutput.Bytes())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("overlay finalizer did not finish")
+	}
+	for _, workdir := range []string{coherentWorkdir, overlayWorkdir} {
+		statusFiles, err := filepath.Glob(filepath.Join(coherenceMetaDir(t, workdir), "sync-git-status.*"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(statusFiles) != 0 {
+			t.Fatalf("finalizer left status files in %s: %v", workdir, statusFiles)
+		}
+	}
+	for _, script := range []string{
+		remoteFinalizeSync(coherentWorkdir, remoteSyncFinalizeOptions{Token: token, Coherence: plan}),
+		remoteFinalizeSync(overlayWorkdir, remoteSyncFinalizeOptions{Token: token}),
+	} {
+		if strings.Contains(script, "/tmp/crabbox-git-status") {
+			t.Fatalf("finalizer still uses a global status file: %q", script)
+		}
+	}
+}
+
+func TestRemoteSyncAbandonedMetadataCleanupRemovesStatusFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell metadata cleanup fixture")
+	}
+	metaDir := t.TempDir()
+	statusPath := filepath.Join(metaDir, "sync-git-status.abandoned")
+	if err := os.WriteFile(statusPath, []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-9 * 24 * time.Hour)
+	if err := os.Chtimes(statusPath, old, old); err != nil {
+		t.Fatal(err)
+	}
+	script := "set -e\nmeta_dir=" + shellQuote(metaDir) + "\n" + remoteSyncAbandonedMetadataCleanup()
+	if out, err := exec.Command("bash", "-c", script).CombinedOutput(); err != nil {
+		t.Fatalf("cleanup abandoned status: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(statusPath); !os.IsNotExist(err) {
+		t.Fatalf("abandoned status file survived cleanup: %v", err)
+	}
+}
+
 func TestRemoteFinalizeSyncDoesNotConsumeNewerPendingManifest(t *testing.T) {
 	const currentToken = "0123456789abcdef0123456789abcdef"
 	const newerToken = "fedcba9876543210fedcba9876543210"
@@ -2079,12 +2266,989 @@ func TestRemoteFinalizeSyncDoesNotConsumeNewerPendingManifest(t *testing.T) {
 	}
 }
 
-func TestRemoteGitSeedRemovesFailedCheckout(t *testing.T) {
-	got := remoteGitSeed("/work/repo", "https://github.com/openclaw/crabbox.git", "missing-sha")
+type gitCoherenceFixture struct {
+	source string
+	origin string
+	a      string
+	b      string
+	c      string
+}
+
+func newGitCoherenceFixture(t *testing.T) gitCoherenceFixture {
+	t.Helper()
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	if err := os.Mkdir(source, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "init")
+	runGit(t, source, "config", "user.email", "test@example.com")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "branch", "-M", "main")
+	mustWriteTestFile(t, filepath.Join(source, "tracked.txt"), "A\n")
+	mustWriteTestFile(t, filepath.Join(source, "modified.txt"), "base\n")
+	mustWriteTestFile(t, filepath.Join(source, "deleted.txt"), "base\n")
+	mustWriteTestFile(t, filepath.Join(source, "src", "keep.txt"), "keep\n")
+	mustWriteTestFile(t, filepath.Join(source, "other", "omit.txt"), "omit\n")
+	runGit(t, source, "add", ".")
+	runGit(t, source, "commit", "-m", "A")
+	a := gitOutput(source, "rev-parse", "HEAD")
+	mustWriteTestFile(t, filepath.Join(source, "tracked.txt"), "B\n")
+	runGit(t, source, "commit", "-am", "B")
+	b := gitOutput(source, "rev-parse", "HEAD")
+	mustWriteTestFile(t, filepath.Join(source, "tracked.txt"), "C\n")
+	runGit(t, source, "commit", "-am", "C")
+	c := gitOutput(source, "rev-parse", "HEAD")
+	origin := filepath.Join(root, "origin.git")
+	if out, err := exec.Command("git", "clone", "--bare", source, origin).CombinedOutput(); err != nil {
+		t.Fatalf("create origin: %v\n%s", err, out)
+	}
+	runGit(t, source, "remote", "add", "origin", origin)
+	runGit(t, source, "fetch", "origin", "+refs/heads/*:refs/remotes/origin/*")
+	return gitCoherenceFixture{source: source, origin: origin, a: a, b: b, c: c}
+}
+
+func (f gitCoherenceFixture) plan(t *testing.T, target string) gitCoherencePlan {
+	t.Helper()
+	plan, blocked := syncGitCoherencePlan(baseConfig(), Repo{Root: f.source, RemoteURL: f.origin, Head: target})
+	if blocked || !plan.enabled() {
+		t.Fatalf("coherence plan unavailable: blocked=%v plan=%#v", blocked, plan)
+	}
+	return plan
+}
+
+func (f gitCoherenceFixture) workspace(t *testing.T, target string, symbolic bool) string {
+	t.Helper()
+	workdir := filepath.Join(t.TempDir(), "work")
+	if out, err := exec.Command("git", "clone", "--quiet", f.origin, workdir).CombinedOutput(); err != nil {
+		t.Fatalf("clone workspace: %v\n%s", err, out)
+	}
+	if symbolic {
+		runGit(t, workdir, "checkout", "-q", "-B", "workspace", target)
+	} else {
+		runGit(t, workdir, "checkout", "-q", "--detach", target)
+	}
+	return workdir
+}
+
+func (f gitCoherenceFixture) linkedWorkspace(t *testing.T, target string) string {
+	t.Helper()
+	base := filepath.Join(t.TempDir(), "base")
+	if out, err := exec.Command("git", "clone", "--quiet", f.origin, base).CombinedOutput(); err != nil {
+		t.Fatalf("clone linked base: %v\n%s", err, out)
+	}
+	workdir := filepath.Join(filepath.Dir(base), "linked")
+	runGit(t, base, "worktree", "add", "--detach", workdir, target)
+	return workdir
+}
+
+func coherenceMetaDir(t *testing.T, workdir string) string {
+	t.Helper()
+	meta := gitOutput(workdir, "rev-parse", "--git-path", "crabbox")
+	if !filepath.IsAbs(meta) {
+		meta = filepath.Join(workdir, meta)
+	}
+	if err := os.MkdirAll(meta, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return meta
+}
+
+func stageCoherenceFinalize(t *testing.T, workdir, token string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(coherenceMetaDir(t, workdir), remoteSyncPendingManifestName(token)), []byte("tracked.txt\x00"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func runCoherenceFinalize(workdir string, plan gitCoherencePlan, token, fingerprint string, env ...string) ([]byte, error) {
+	cmd := exec.Command("bash", "-lc", remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
+		Token:       token,
+		Fingerprint: fingerprint,
+		Coherence:   plan,
+	}))
+	cmd.Env = append(os.Environ(), env...)
+	return cmd.CombinedOutput()
+}
+
+func readCoherentFingerprint(t *testing.T, workdir string, plan gitCoherencePlan) string {
+	t.Helper()
+	out, err := exec.Command("bash", "-lc", remoteReadSyncFingerprint(workdir, plan)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("read fingerprint: %v\n%s", err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func coherenceIndexPath(t *testing.T, workdir string) string {
+	t.Helper()
+	index := gitOutput(workdir, "rev-parse", "--git-path", "index")
+	if !filepath.IsAbs(index) {
+		index = filepath.Join(workdir, index)
+	}
+	return index
+}
+
+func coherenceIndexBytes(t *testing.T, workdir string) []byte {
+	t.Helper()
+	index := coherenceIndexPath(t, workdir)
+	data, err := os.ReadFile(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func requireGitOutput(t *testing.T, workdir, want string, args ...string) {
+	t.Helper()
+	if got := gitOutput(workdir, args...); got != want {
+		t.Fatalf("git %v=%q want %q", args, got, want)
+	}
+}
+func TestRemoteGitCoherenceRepairsReuseBeforeFingerprintSkip(t *testing.T) {
+	f := newGitCoherenceFixture(t)
+	workdir := f.workspace(t, f.a, true)
+	planB := f.plan(t, f.b)
+	meta := coherenceMetaDir(t, workdir)
+	for name, value := range map[string]string{
+		"sync-fingerprint":             "fp-b",
+		"sync-finalize-token":          "stale",
+		"sync-finalize-complete-token": "stale",
+	} {
+		if err := os.WriteFile(filepath.Join(meta, name), []byte(value), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := readCoherentFingerprint(t, workdir, planB); got != "" {
+		t.Fatalf("stale A metadata certified B fingerprint %q", got)
+	}
+
+	mustWriteTestFile(t, filepath.Join(workdir, "tracked.txt"), "B\n")
+	mustWriteTestFile(t, filepath.Join(workdir, "modified.txt"), "dirty\n")
+	if err := os.Remove(filepath.Join(workdir, "deleted.txt")); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteTestFile(t, filepath.Join(workdir, "untracked.txt"), "keep\n")
+	const tokenB = "11111111111111111111111111111111"
+	stageCoherenceFinalize(t, workdir, tokenB)
+	if out, err := runCoherenceFinalize(workdir, planB, tokenB, "fp-b"); err != nil {
+		t.Fatalf("finalize B: %v\n%s", err, out)
+	}
+	requireGitOutput(t, workdir, f.b, "rev-parse", "HEAD")
+	requireGitOutput(t, workdir, planB.Tree, "write-tree")
+	requireGitOutput(t, workdir, f.a, "rev-parse", "refs/heads/workspace")
+	requireGitOutput(t, workdir, "", "symbolic-ref", "-q", "HEAD")
+	for path, want := range map[string]string{"tracked.txt": "B\n", "modified.txt": "dirty\n", "untracked.txt": "keep\n"} {
+		got, err := os.ReadFile(filepath.Join(workdir, path))
+		if err != nil || string(got) != want {
+			t.Fatalf("%s=%q err=%v want %q", path, got, err, want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(workdir, "deleted.txt")); !os.IsNotExist(err) {
+		t.Fatalf("deleted overlay path was restored: %v", err)
+	}
+	if got := readCoherentFingerprint(t, workdir, planB); got != "fp-b" {
+		t.Fatalf("coherent B fingerprint=%q", got)
+	}
+	if out, err := exec.Command("bash", "-lc", remoteInvalidateSyncFingerprintForTarget(SSHTarget{TargetOS: targetLinux}, workdir)).CombinedOutput(); err != nil {
+		t.Fatalf("invalidate fingerprint: %v\n%s", err, out)
+	}
+	if got := readCoherentFingerprint(t, workdir, planB); got != "" {
+		t.Fatalf("executed workspace retained fingerprint %q", got)
+	}
+
+	planC := f.plan(t, f.c)
+	mustWriteTestFile(t, filepath.Join(workdir, "tracked.txt"), "C\n")
+	const tokenC = "22222222222222222222222222222222"
+	stageCoherenceFinalize(t, workdir, tokenC)
+	if out, err := runCoherenceFinalize(workdir, planC, tokenC, "fp-c"); err != nil {
+		t.Fatalf("finalize C: %v\n%s", err, out)
+	}
+	if got := gitOutput(workdir, "rev-parse", "HEAD"); got != f.c {
+		t.Fatalf("HEAD=%s want C=%s", got, f.c)
+	}
+	if got := readCoherentFingerprint(t, workdir, planC); got != "fp-c" {
+		t.Fatalf("coherent C fingerprint=%q", got)
+	}
+}
+
+func TestRemoteGitCoherenceFailsClosedWhenAdvertisedBranchCannotBeVerified(t *testing.T) {
+	f := newGitCoherenceFixture(t)
+	workdir := f.workspace(t, f.a, true)
+	plan := f.plan(t, f.b)
+	plan.RemoteURL = filepath.Join(t.TempDir(), "missing-origin.git")
+	const token = "abababababababababababababababab"
+	stageCoherenceFinalize(t, workdir, token)
+	out, err := runCoherenceFinalize(workdir, plan, token, "must-not-publish")
+	if err == nil || !strings.Contains(string(out), "Git coherence fetch failed") {
+		t.Fatalf("unverified coherence out=%q err=%v", out, err)
+	}
+	requireGitOutput(t, workdir, f.a, "rev-parse", "HEAD")
+	if got := readCoherentFingerprint(t, workdir, plan); got != "" {
+		t.Fatalf("failed coherence published fingerprint %q", got)
+	}
+	if _, statErr := os.Lstat(filepath.Join(coherenceMetaDir(t, workdir), "sync-finalize-lock")); !os.IsNotExist(statErr) {
+		t.Fatalf("failed coherence stranded finalization lock: %v", statErr)
+	}
+}
+
+func TestRemoteGitCoherenceSupportsDetachedSparseSplitAndLinkedIndexes(t *testing.T) {
+	f := newGitCoherenceFixture(t)
+	for _, mode := range []string{"detached", "sparse", "split", "linked"} {
+		t.Run(mode, func(t *testing.T) {
+			workdir := f.workspace(t, f.a, false)
+			switch mode {
+			case "sparse":
+				runGit(t, workdir, "sparse-checkout", "init", "--cone", "--sparse-index")
+				runGit(t, workdir, "sparse-checkout", "set", "src")
+			case "split":
+				runGit(t, workdir, "update-index", "--split-index")
+			case "linked":
+				workdir = f.linkedWorkspace(t, f.a)
+			}
+			mustWriteTestFile(t, filepath.Join(workdir, "tracked.txt"), "B\n")
+			token := fmt.Sprintf("%032x", len(mode)+10)
+			plan := f.plan(t, f.b)
+			stageCoherenceFinalize(t, workdir, token)
+			if out, err := runCoherenceFinalize(workdir, plan, token, "fp-"+mode); err != nil {
+				t.Fatalf("finalize: %v\n%s", err, out)
+			}
+			if got := gitOutput(workdir, "rev-parse", "HEAD"); got != f.b {
+				t.Fatalf("HEAD=%s want %s", got, f.b)
+			}
+			if got := gitOutput(workdir, "write-tree"); got != plan.Tree {
+				t.Fatalf("tree=%s want %s", got, plan.Tree)
+			}
+		})
+	}
+}
+
+func coherenceFailureTools(t *testing.T, target string) string {
+	t.Helper()
+	dir := t.TempDir()
+	gitScript := `#!/bin/sh
+case "$CRABBOX_FAIL_GIT:$1" in
+  read-tree:read-tree|write-tree:write-tree|diff-files:diff-files) exit 91 ;;
+esac
+if [ "$CRABBOX_FAIL_GIT" = cas ] && [ "$1" = update-ref ] && [ "$2" = --no-deref ] && [ "$3" = HEAD ]; then exit 92; fi
+if [ "$CRABBOX_FAIL_GIT" = raw ] && [ "$1" = fetch ]; then
+  for arg do case "$arg" in +` + target + `:refs/crabbox/*) exit 93 ;; esac; done
+fi
+exec ` + shellQuote(gitOutput("", "--exec-path")+"/git") + ` "$@"
+`
+	mvScript := `#!/bin/sh
+last=
+for arg do last="$arg"; done
+case "$CRABBOX_FAIL_MV:$last" in
+  fingerprint:*/sync-fingerprint|complete:*/sync-finalize-complete-token) exit 94 ;;
+esac
+if [ "$CRABBOX_FAIL_MV" = concurrent-index ]; then
+  case "$last" in */sync-fingerprint) index=$(` + shellQuote(gitOutput("", "--exec-path")+"/git") + ` -C "$CRABBOX_CONCURRENT_WORKDIR" rev-parse --git-path index); case "$index" in /*) ;; *) index="$CRABBOX_CONCURRENT_WORKDIR/$index" ;; esac; printf concurrent-index > "$index"; exit 94 ;; esac
+fi
+if [ "$CRABBOX_FAIL_MV" = concurrent-head ]; then
+  case "$last" in */sync-fingerprint) ` + shellQuote(gitOutput("", "--exec-path")+"/git") + ` -C "$CRABBOX_CONCURRENT_WORKDIR" update-ref --no-deref HEAD "$CRABBOX_CONCURRENT_HEAD" "$CRABBOX_TARGET_HEAD"; exit 94 ;; esac
+fi
+if [ "$CRABBOX_FAIL_MV" = concurrent-branch ]; then
+  case "$last" in */sync-fingerprint) ` + shellQuote(gitOutput("", "--exec-path")+"/git") + ` -C "$CRABBOX_CONCURRENT_WORKDIR" update-ref refs/heads/workspace "$CRABBOX_CONCURRENT_HEAD" "$CRABBOX_OLD_HEAD"; exit 94 ;; esac
+fi
+if [ "$CRABBOX_FAIL_MV" = post-install-index ]; then case "$1" in *index.crabbox*) /bin/mv "$@"; printf post-install-index > "$last"; exit 0 ;; esac; fi
+exec /bin/mv "$@"
+`
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(gitScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "mv"), []byte(mvScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "env"), []byte("export PATH="+shellQuote(dir)+":$PATH\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestRemoteGitCoherenceRollsBackFailuresAndRetries(t *testing.T) {
+	f := newGitCoherenceFixture(t)
+	for _, failure := range []string{"read-tree", "write-tree", "diff-files", "cas", "fingerprint", "complete"} {
+		t.Run(failure, func(t *testing.T) {
+			workdir := f.workspace(t, f.a, true)
+			plan := f.plan(t, f.b)
+			mustWriteTestFile(t, filepath.Join(workdir, "tracked.txt"), "B\n")
+			token := fmt.Sprintf("%032x", len(failure)+100)
+			stageCoherenceFinalize(t, workdir, token)
+			beforeIndex := coherenceIndexBytes(t, workdir)
+			tools := coherenceFailureTools(t, plan.Target)
+			env := []string{"BASH_ENV=" + filepath.Join(tools, "env")}
+			if failure == "fingerprint" || failure == "complete" {
+				env = append(env, "CRABBOX_FAIL_MV="+failure)
+			} else {
+				env = append(env, "CRABBOX_FAIL_GIT="+failure)
+			}
+			if out, err := runCoherenceFinalize(workdir, plan, token, "fp-"+failure, env...); err == nil {
+				t.Fatalf("fault %s unexpectedly succeeded\n%s", failure, out)
+			}
+			requireGitOutput(t, workdir, f.a, "rev-parse", "HEAD")
+			requireGitOutput(t, workdir, "refs/heads/workspace", "symbolic-ref", "-q", "HEAD")
+			if afterIndex := coherenceIndexBytes(t, workdir); !bytes.Equal(afterIndex, beforeIndex) {
+				t.Fatal("index bytes changed after failed finalization")
+			}
+			if got := readCoherentFingerprint(t, workdir, plan); got != "" {
+				t.Fatalf("failed finalization certified fingerprint %q", got)
+			}
+			if out, err := runCoherenceFinalize(workdir, plan, token, "fp-"+failure); err != nil {
+				t.Fatalf("retry: %v\n%s", err, out)
+			}
+			if got := readCoherentFingerprint(t, workdir, plan); got != "fp-"+failure {
+				t.Fatalf("retry fingerprint=%q", got)
+			}
+		})
+	}
+}
+func TestRemoteGitCoherenceDoesNotOverwriteConcurrentRollbackChanges(t *testing.T) {
+	f := newGitCoherenceFixture(t)
+	for _, failure := range []string{"concurrent-index", "post-install-index", "concurrent-head", "concurrent-branch"} {
+		t.Run(failure, func(t *testing.T) {
+			workdir := f.workspace(t, f.a, true)
+			plan := f.plan(t, f.b)
+			mustWriteTestFile(t, filepath.Join(workdir, "tracked.txt"), "B\n")
+			token := fmt.Sprintf("%032x", len(failure)+200)
+			stageCoherenceFinalize(t, workdir, token)
+			tools := coherenceFailureTools(t, plan.Target)
+			env := []string{"BASH_ENV=" + filepath.Join(tools, "env"), "CRABBOX_FAIL_MV=" + failure, "CRABBOX_CONCURRENT_WORKDIR=" + workdir, "CRABBOX_CONCURRENT_HEAD=" + f.c, "CRABBOX_TARGET_HEAD=" + f.b, "CRABBOX_OLD_HEAD=" + f.a}
+			out, err := runCoherenceFinalize(workdir, plan, token, "fp-"+failure, env...)
+			if err == nil {
+				t.Fatalf("concurrent fault unexpectedly succeeded\n%s", out)
+			}
+			switch failure {
+			case "concurrent-index", "post-install-index":
+				if got := coherenceIndexBytes(t, workdir); string(got) != failure {
+					t.Fatalf("concurrent index overwritten: %q", got)
+				}
+				requireGitOutput(t, workdir, f.a, "rev-parse", "HEAD")
+				if failure == "post-install-index" {
+					requireGitOutput(t, workdir, "refs/heads/workspace", "symbolic-ref", "-q", "HEAD")
+				}
+			case "concurrent-head":
+				requireGitOutput(t, workdir, f.c, "rev-parse", "HEAD")
+			case "concurrent-branch":
+				requireGitOutput(t, workdir, f.a, "rev-parse", "HEAD")
+				requireGitOutput(t, workdir, "", "symbolic-ref", "-q", "HEAD")
+				requireGitOutput(t, workdir, f.c, "rev-parse", "refs/heads/workspace")
+			}
+		})
+	}
+}
+func TestRemoteGitCoherenceRepairsAndVerifiesMismatchedOrigin(t *testing.T) {
+	f := newGitCoherenceFixture(t)
+	workdir := f.workspace(t, f.a, false)
+	wrong := filepath.Join(t.TempDir(), "wrong.git")
+	if err := os.Mkdir(wrong, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, wrong, "init", "--bare")
+	runGit(t, workdir, "remote", "set-url", "origin", wrong)
+	plan := f.plan(t, f.b)
+	mustWriteTestFile(t, filepath.Join(workdir, "tracked.txt"), "B\n")
+	const token = "33333333333333333333333333333333"
+	meta := coherenceMetaDir(t, workdir)
+	for name, value := range map[string]string{
+		"sync-fingerprint":             "stale",
+		"sync-finalize-token":          token,
+		"sync-finalize-complete-token": token,
+	} {
+		if err := os.WriteFile(filepath.Join(meta, name), []byte(value), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := readCoherentFingerprint(t, workdir, plan); got != "" {
+		t.Fatalf("mismatched origin certified fingerprint %q", got)
+	}
+	stageCoherenceFinalize(t, workdir, token)
+	if out, err := runCoherenceFinalize(workdir, plan, token, "fp-b"); err != nil {
+		t.Fatalf("repair origin: %v\n%s", err, out)
+	}
+	if got := gitOutput(workdir, "remote", "get-url", "origin"); got != plan.RemoteURL {
+		t.Fatalf("repaired origin=%q want planned origin", got)
+	}
+	if got := gitOutput(workdir, "rev-parse", "HEAD"); got != f.b {
+		t.Fatalf("HEAD=%s want %s", got, f.b)
+	}
+	if got := readCoherentFingerprint(t, workdir, plan); got != "fp-b" {
+		t.Fatalf("repaired origin fingerprint=%q", got)
+	}
+}
+
+func TestRemoteGitCoherenceRejectsAncestorRepository(t *testing.T) {
+	f := newGitCoherenceFixture(t)
+	outer := f.workspace(t, f.b, false)
+	workdir := filepath.Join(outer, "nested")
+	if err := os.Mkdir(workdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	plan := f.plan(t, f.b)
+	const token = "44444444444444444444444444444444"
+	meta := filepath.Join(workdir, ".crabbox")
+	if err := os.Mkdir(meta, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string]string{
+		"sync-fingerprint":                   "ancestor",
+		"sync-finalize-token":                token,
+		"sync-finalize-complete-token":       token,
+		remoteSyncPendingManifestName(token): "nested.txt\x00",
+		remoteSyncPendingDeletedName(token):  "",
+	} {
+		if err := os.WriteFile(filepath.Join(meta, name), []byte(value), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := readCoherentFingerprint(t, workdir, plan); got != "" {
+		t.Fatalf("ancestor repository certified fingerprint %q", got)
+	}
+	if out, err := runCoherenceFinalize(workdir, plan, token, "nested"); err != nil {
+		t.Fatalf("ancestor finalize: %v\n%s", err, out)
+	}
+	if got := gitOutput(outer, "rev-parse", "HEAD"); got != f.b {
+		t.Fatalf("ancestor HEAD changed to %s", got)
+	}
+	if _, err := os.Stat(filepath.Join(meta, "sync-fingerprint")); !os.IsNotExist(err) {
+		t.Fatalf("ancestor finalize published fingerprint: %v", err)
+	}
+}
+
+func TestWindowsGitCoherenceGeneration(t *testing.T) {
+	decoded := decodePowerShellCommand(t, windowsGitCoherence(`C:\work\repo`, gitCoherencePlan{
+		RemoteURL: "https://example.test/repo.git",
+		Target:    strings.Repeat("a", 40),
+		Tree:      strings.Repeat("b", 40),
+		Branch:    "main",
+	}))
 	for _, want := range []string{
-		"if (cd \"$tmp\"",
-		"git checkout --quiet 'missing-sha' || git checkout --quiet FETCH_HEAD",
-		"else rm -rf \"$tmp\"; fi",
+		"refs/crabbox/sync-",
+		"https://example.test/repo.git",
+		"+refs/heads/",
+		"rev-parse --show-toplevel",
+		"GetFinalPathNameByHandle",
+		"Test-CrabboxSameDirectory $workdir $reportedRoot",
+		"remote set-url origin",
+		"git read-tree --reset",
+		"git write-tree",
+		"& git update-ref --no-deref HEAD $target $oldHead",
+		"& git update-ref --no-deref HEAD $oldHead $target",
+		"Git HEAD remained symbolic during coherence",
+		"Git symbolic branch changed during coherence",
+		"Git coherence fetch failed",
+		"requested commit is not on advertised branch",
+		"requested Git tree verification failed",
+		"& git symbolic-ref HEAD $oldSym",
+		"[IO.File]::Replace($candidate, $index, $replaceBackup)",
+		"[IO.File]::Replace($replaceBackup, $index, $rollbackBackup)",
+		"ReadAllBytes($replaceBackup), [IO.File]::ReadAllBytes($compare)",
+		"ReadAllBytes($index), [IO.File]::ReadAllBytes($verify)",
+		"$failure = $_",
+		"$rollbackError = $null",
+	} {
+		if !strings.Contains(decoded, want) {
+			t.Fatalf("Windows coherence script missing %q:\n%s", want, decoded)
+		}
+	}
+	mergeBase := strings.Index(decoded, "& git merge-base --is-ancestor")
+	ancestryStatus := strings.Index(decoded, "$isAncestor = $LASTEXITCODE -eq 0")
+	targetTree := strings.Index(decoded, "$targetTree = & git rev-parse")
+	if mergeBase < 0 || ancestryStatus <= mergeBase || targetTree <= ancestryStatus {
+		t.Fatalf("Windows ancestry status is not preserved before target-tree inspection:\n%s", decoded)
+	}
+	if strings.Contains(decoded, "reset --hard") {
+		t.Fatalf("Windows coherence script uses destructive Git:\n%s", decoded)
+	}
+	if strings.Contains(decoded, "Resolve-Path -LiteralPath $workdir") {
+		t.Fatalf("Windows coherence script compares textual root paths:\n%s", decoded)
+	}
+	if strings.Contains(decoded, `[IO.File]::Replace($candidate, $index, $null)`) ||
+		strings.Contains(decoded, "NullString") {
+		t.Fatalf("Windows coherence script uses an invalid replacement backup path:\n%s", decoded)
+	}
+	headRollback := strings.Index(decoded, `[InvalidOperationException]::new("Git HEAD rollback failed")`)
+	indexRollback := strings.Index(decoded, `[IO.File]::Replace($replaceBackup, $index, $rollbackBackup)`)
+	throwRollback := strings.Index(decoded, `if ($rollbackError) { throw $rollbackError }`)
+	if headRollback < 0 || indexRollback <= headRollback || throwRollback <= indexRollback {
+		t.Fatalf("Windows rollback does not preserve the first error through index restoration:\n%s", decoded)
+	}
+	if got := strings.Count(decoded, "& git update-ref --no-deref HEAD"); got != 2 {
+		t.Fatalf("Windows coherence has %d detached HEAD updates, want mutation and rollback only:\n%s", got, decoded)
+	}
+	if strings.Contains(decoded, "git update-ref $oldSym") {
+		t.Fatalf("Windows coherence advances a symbolic branch ref:\n%s", decoded)
+	}
+}
+
+func TestWindowsGitSeedChecksGitBeforeInstallingClone(t *testing.T) {
+	decoded := decodePowerShellCommand(t, windowsGitSeed(`C:\work\repo`, gitCoherencePlan{
+		RemoteURL: "https://example.test/repo.git",
+		Target:    strings.Repeat("a", 40),
+		Tree:      strings.Repeat("b", 40),
+		Branch:    "main",
+	}))
+	clone := strings.Index(decoded, "& git clone")
+	cloneCheck := strings.Index(decoded, `if ($LASTEXITCODE -ne 0) { throw "Git seed clone failed" }`)
+	checkout := strings.Index(decoded, "& git -C $tmp checkout")
+	checkoutCheck := strings.Index(decoded, `if ($LASTEXITCODE -ne 0) { throw "Git seed checkout failed" }`)
+	removeWorkdir := strings.Index(decoded, "Remove-Item -LiteralPath $workdir -Recurse -Force")
+	moveClone := strings.Index(decoded, "Move-Item -LiteralPath $tmp -Destination $workdir")
+	if clone < 0 || cloneCheck <= clone || checkout <= cloneCheck || checkoutCheck <= checkout ||
+		removeWorkdir <= checkoutCheck || moveClone <= removeWorkdir {
+		t.Fatalf("Windows seed can install before clone and checkout verification:\n%s", decoded)
+	}
+	for _, want := range []string{
+		"rev-parse --show-toplevel",
+		"GetFinalPathNameByHandle",
+		"Test-CrabboxSameDirectory $Path $reportedRoot",
+		"Test-UsableGitWorkspace",
+		`$ErrorActionPreference = "Continue"`,
+		"rev-parse --verify 'HEAD^{commit}'",
+		"rev-parse --git-path index",
+		"Test-Path -LiteralPath $index -PathType Leaf",
+		"git -C $Path write-tree",
+		"remote set-url origin",
+		`if ($tmp -and (Test-Path -LiteralPath $tmp))`,
+	} {
+		if !strings.Contains(decoded, want) {
+			t.Fatalf("Windows seed missing %q:\n%s", want, decoded)
+		}
+	}
+	if strings.Contains(decoded, "Resolve-Path -LiteralPath $Path") {
+		t.Fatalf("Windows seed compares textual root paths:\n%s", decoded)
+	}
+	usable := strings.Index(decoded, "function Test-UsableGitWorkspace")
+	if usable < 0 {
+		t.Fatalf("Windows seed is missing the workspace usability probe:\n%s", decoded)
+	}
+	probePreference := usable + strings.Index(decoded[usable:], `$ErrorActionPreference = "Continue"`)
+	headProbe := usable + strings.Index(decoded[usable:], "$head = & git -C $Path rev-parse --verify")
+	if probePreference <= usable || headProbe <= probePreference {
+		t.Fatalf("Windows seed does not scope expected native Git failures before probing HEAD:\n%s", decoded)
+	}
+	reuse := strings.Index(decoded, "if (Test-UsableGitWorkspace $workdir)")
+	startClone := strings.Index(decoded, "$tmp = Join-Path")
+	if reuse < 0 || startClone <= reuse || !strings.Contains(decoded[reuse:startClone], "Repair-Origin $workdir\n  exit 0") {
+		t.Fatalf("Windows seed does not reject unborn or missing-index roots before reuse:\n%s", decoded)
+	}
+	verifyWorkspace := strings.Index(decoded, "if (-not (Test-UsableGitWorkspace $tmp))")
+	verifyTree := strings.Index(decoded, "if ($expectedTree) {")
+	if verifyWorkspace <= checkoutCheck || verifyTree <= verifyWorkspace || removeWorkdir <= verifyTree {
+		t.Fatalf("Windows seed can replace a workspace before the candidate index and tree are verified:\n%s", decoded)
+	}
+}
+
+func TestWindowsGitSeedSeedOnlyPlanSkipsTreeEquality(t *testing.T) {
+	decoded := decodePowerShellCommand(t, windowsGitSeed(`C:\work\repo`, gitCoherencePlan{
+		RemoteURL: "https://example.test/repo.git",
+		Target:    strings.Repeat("a", 40),
+		Branch:    "main",
+	}))
+	for _, want := range []string{
+		"$expectedTree = ''",
+		"Test-UsableGitWorkspace $tmp",
+		"return $treeStatus -eq 0 -and [bool]$tree",
+		"if ($expectedTree) {",
+		"([string]$seedTree).Trim() -ne $expectedTree",
+	} {
+		if !strings.Contains(decoded, want) {
+			t.Fatalf("Windows seed-only script missing %q:\n%s", want, decoded)
+		}
+	}
+	if strings.Contains(decoded, "([string]$seedTree).Trim() -ne ''") {
+		t.Fatalf("Windows seed-only script unconditionally compares against an empty tree:\n%s", decoded)
+	}
+}
+
+func TestWindowsGitRootIdentityGeneration(t *testing.T) {
+	script := windowsGitRootIdentityScript()
+	for _, want := range []string{
+		"GetFinalPathNameByHandle",
+		"Microsoft.Win32.SafeHandles.SafeFileHandle",
+		"[IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete",
+		"0x02000000",
+		"Test-CrabboxSameDirectory",
+		"[StringComparison]::OrdinalIgnoreCase",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("Windows Git root identity script missing %q:\n%s", want, script)
+		}
+	}
+	if strings.Contains(script, "Resolve-Path") {
+		t.Fatalf("Windows Git root identity relies on textual path normalization:\n%s", script)
+	}
+}
+
+func TestWindowsGitRootIdentityAcceptsShortAliasAndRejectsDistinctRoot(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows path identity is covered by Windows CI")
+	}
+	base := t.TempDir()
+	root := filepath.Join(base, "workspace with a long name")
+	other := filepath.Join(base, "different workspace")
+	for _, path := range []string{root, other} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	script := `$ErrorActionPreference = "Stop"
+` + windowsGitRootIdentityScript() + `
+Add-Type -Name ShortPath -Namespace Cbx -MemberDefinition '[DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)]public static extern uint GetShortPathName(string l,System.Text.StringBuilder s,uint n);'
+$longPath = Get-CrabboxFinalDirectoryPath ` + psQuote(root) + `
+$buffer = New-Object Text.StringBuilder 32768
+$length = [Cbx.ShortPath]::GetShortPathName($longPath, $buffer, $buffer.Capacity)
+if ($length -eq 0 -or $length -ge $buffer.Capacity) { throw "short path lookup failed" }
+$shortPath = $buffer.ToString()
+if ([string]::Equals($shortPath, $longPath, [StringComparison]::OrdinalIgnoreCase)) { throw "short path fixture did not produce an alias" }
+if (-not (Test-CrabboxSameDirectory $shortPath $longPath)) { throw "short and long paths did not match" }
+if (Test-CrabboxSameDirectory $shortPath ` + psQuote(other) + `) { throw "distinct roots matched" }
+`
+	if out, err := runWindowsPowerShellScript(t, script); err != nil {
+		t.Fatalf("Windows Git root identity failed: %v\n%s", err, out)
+	}
+}
+
+func requireWindowsExactGitRoot(t *testing.T, workdir string) {
+	t.Helper()
+	actual := gitOutput(workdir, "rev-parse", "--show-toplevel")
+	if actual == "" {
+		t.Fatal("Git reported no top-level worktree")
+	}
+	actualInfo, err := os.Stat(filepath.FromSlash(actual))
+	if err != nil {
+		t.Fatalf("stat reported Git root %q: %v", actual, err)
+	}
+	expectedInfo, err := os.Stat(workdir)
+	if err != nil {
+		t.Fatalf("stat expected workdir %q: %v", workdir, err)
+	}
+	if !os.SameFile(actualInfo, expectedInfo) {
+		t.Fatalf("Git root=%q does not identify exact workdir %q", actual, workdir)
+	}
+}
+
+func requireWindowsGitWorkspaceState(t *testing.T, workdir string, plan gitCoherencePlan) {
+	t.Helper()
+	requireWindowsExactGitRoot(t, workdir)
+	requireGitOutput(t, workdir, plan.Target, "rev-parse", "HEAD")
+	requireGitOutput(t, workdir, plan.Tree, "write-tree")
+	requireGitOutput(t, workdir, plan.RemoteURL, "remote", "get-url", "origin")
+	index := gitOutput(workdir, "rev-parse", "--git-path", "index")
+	if !filepath.IsAbs(index) {
+		index = filepath.Join(workdir, index)
+	}
+	if _, err := os.Stat(index); err != nil {
+		t.Fatalf("Git index missing: %v", err)
+	}
+}
+
+func TestWindowsGitSeedReplacesUnusableExactRootsAfterVerifiedClone(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows PowerShell execution is covered by Windows CI")
+	}
+	f := newGitCoherenceFixture(t)
+	plan := f.plan(t, f.b)
+	for _, mode := range []string{"unborn", "missing-index"} {
+		t.Run(mode, func(t *testing.T) {
+			workdir := filepath.Join(t.TempDir(), "work")
+			var missingIndex string
+			switch mode {
+			case "unborn":
+				if err := os.MkdirAll(workdir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				runGit(t, workdir, "init")
+			case "missing-index":
+				if out, err := exec.Command("git", "clone", "--quiet", f.origin, workdir).CombinedOutput(); err != nil {
+					t.Fatalf("clone missing-index fixture: %v\n%s", err, out)
+				}
+				missingIndex = gitOutput(workdir, "rev-parse", "--git-path", "index")
+				if !filepath.IsAbs(missingIndex) {
+					missingIndex = filepath.Join(workdir, missingIndex)
+				}
+				if err := os.Remove(missingIndex); err != nil {
+					t.Fatal(err)
+				}
+			}
+			requireWindowsExactGitRoot(t, workdir)
+			marker := filepath.Join(workdir, "preserve-until-verified.txt")
+			mustWriteTestFile(t, marker, "preserve\n")
+
+			unverified := plan
+			unverified.Tree = strings.Repeat("f", 40)
+			out, err := runDecodedWindowsPowerShell(t, windowsGitSeed(workdir, unverified))
+			if err == nil || !strings.Contains(string(out), "Git seed tree verification failed") {
+				t.Fatalf("unverified seed err=%v\n%s", err, out)
+			}
+			requireWindowsExactGitRoot(t, workdir)
+			if got, readErr := os.ReadFile(marker); readErr != nil || string(got) != "preserve\n" {
+				t.Fatalf("unverified seed replaced existing root: data=%q err=%v", got, readErr)
+			}
+			if missingIndex != "" {
+				if _, statErr := os.Stat(missingIndex); !os.IsNotExist(statErr) {
+					t.Fatalf("unverified seed changed missing-index root: %v", statErr)
+				}
+			}
+
+			if out, err := runDecodedWindowsPowerShell(t, windowsGitSeed(workdir, plan)); err != nil {
+				t.Fatalf("verified seed failed: %v\n%s", err, out)
+			}
+			requireWindowsGitWorkspaceState(t, workdir, plan)
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Fatalf("verified seed did not replace unusable root: %v", err)
+			}
+		})
+	}
+}
+
+func TestWindowsGitCoherenceSupportsDetachedSparseSplitAndLinkedIndexes(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows PowerShell execution is covered by Windows CI")
+	}
+	f := newGitCoherenceFixture(t)
+	plan := f.plan(t, f.b)
+	for _, mode := range []string{"detached", "sparse-index", "split-index", "linked-worktree"} {
+		t.Run(mode, func(t *testing.T) {
+			var workdir string
+			switch mode {
+			case "linked-worktree":
+				workdir = f.linkedWorkspace(t, f.a)
+				gitFile, err := os.ReadFile(filepath.Join(workdir, ".git"))
+				if err != nil || !strings.HasPrefix(string(gitFile), "gitdir: ") {
+					t.Fatalf("linked worktree .git=%q err=%v", gitFile, err)
+				}
+			default:
+				workdir = f.workspace(t, f.a, false)
+			}
+			switch mode {
+			case "sparse-index":
+				runGit(t, workdir, "sparse-checkout", "init", "--cone", "--sparse-index")
+				runGit(t, workdir, "sparse-checkout", "set", "src")
+			case "split-index":
+				runGit(t, workdir, "update-index", "--split-index")
+			}
+			requireWindowsExactGitRoot(t, workdir)
+			requireGitOutput(t, workdir, f.a, "rev-parse", "HEAD")
+			mustWriteTestFile(t, filepath.Join(workdir, "tracked.txt"), "B\n")
+
+			if out, err := runDecodedWindowsPowerShell(t, windowsGitCoherence(workdir, plan)); err != nil {
+				t.Fatalf("Windows coherence failed: %v\n%s", err, out)
+			}
+			requireWindowsGitWorkspaceState(t, workdir, plan)
+		})
+	}
+}
+
+func TestWindowsGitCoherenceRollbackRestoresIndexAfterSymbolicHeadFailure(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows PowerShell execution is covered by Windows CI")
+	}
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newGitCoherenceFixture(t)
+	plan := f.plan(t, f.b)
+	for _, tc := range []struct {
+		name                  string
+		symbolic              bool
+		injectRollbackFailure bool
+		wantError             string
+	}{
+		{name: "symbolic", symbolic: true, injectRollbackFailure: true, wantError: "Git symbolic HEAD rollback failed"},
+		{name: "detached", wantError: "Git coherence verification failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workdir := f.workspace(t, f.a, tc.symbolic)
+			mustWriteTestFile(t, filepath.Join(workdir, "tracked.txt"), "B\n")
+			beforeIndex := coherenceIndexBytes(t, workdir)
+			beforeTree := gitOutput(workdir, "write-tree")
+			beforeSym := gitOutput(workdir, "symbolic-ref", "-q", "HEAD")
+			if beforeTree == plan.Tree || tc.symbolic != (beforeSym != "") {
+				t.Fatalf("invalid rollback fixture: tree=%q target=%q sym=%q", beforeTree, plan.Tree, beforeSym)
+			}
+
+			shimDir := t.TempDir()
+			tracePath := filepath.Join(shimDir, "git-shim.trace")
+			beforeIndexPath := filepath.Join(shimDir, "before.index")
+			if err := os.WriteFile(beforeIndexPath, beforeIndex, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			injectRollbackFailure := "$false"
+			if tc.injectRollbackFailure {
+				injectRollbackFailure = "$true"
+			}
+			script := `$ErrorActionPreference = "Stop"
+$script:realGit = ` + psQuote(realGit) + `
+$script:workdir = ` + psQuote(workdir) + `
+$script:indexPath = ` + psQuote(coherenceIndexPath(t, workdir)) + `
+$script:beforeIndexPath = ` + psQuote(beforeIndexPath) + `
+$script:expectedOldHead = ` + psQuote(f.a) + `
+$script:expectedTarget = ` + psQuote(plan.Target) + `
+$script:expectedSymbolicHead = ` + psQuote(beforeSym) + `
+$script:injectRollbackFailure = ` + injectRollbackFailure + `
+$script:tracePath = ` + psQuote(tracePath) + `
+$script:gitShimCalls = 0
+$script:gitTrace = [Collections.Generic.List[string]]::new()
+$script:headUpdateObserved = $false
+$script:indexReplacementObserved = $false
+$script:targetHeadObserved = $false
+$script:symbolicHeadPreservedAtTarget = $false
+$script:postHeadFailureInjected = $false
+$script:branchRollbackCallObserved = $false
+$script:symbolicHeadRestoredBeforeFailure = $false
+$script:branchRollbackFailureInjected = $false
+function git {
+  $gitArgs = @($args | ForEach-Object { [string]$_ })
+  $script:gitShimCalls++
+  $null = $script:gitTrace.Add(($gitArgs -join '|'))
+  $verb = if ($gitArgs.Count -gt 0) { $gitArgs[0] } else { "" }
+  $isPostHeadVerify = $gitArgs.Count -ge 3 -and $verb -eq 'rev-parse' -and $gitArgs[1] -eq '--verify' -and $gitArgs[2] -eq 'HEAD^{commit}'
+  if ($script:headUpdateObserved -and -not $script:postHeadFailureInjected -and $isPostHeadVerify) {
+    $indexBytes = [IO.File]::ReadAllBytes($script:indexPath)
+    if ([Linq.Enumerable]::SequenceEqual($indexBytes, [IO.File]::ReadAllBytes($script:beforeIndexPath))) {
+      throw "Git shim reached post-HEAD verification before index replacement"
+    }
+    $verifyPattern = [IO.Path]::GetFileName($script:indexPath) + ".crabbox.*.verify"
+    $verifyFiles = @(Get-ChildItem -LiteralPath ([IO.Path]::GetDirectoryName($script:indexPath)) -Filter $verifyPattern -File)
+    if ($verifyFiles.Count -ne 1 -or -not [Linq.Enumerable]::SequenceEqual($indexBytes, [IO.File]::ReadAllBytes($verifyFiles[0].FullName))) {
+      throw "Git shim did not observe the verified candidate index after replacement"
+    }
+    $installedHead = & $script:realGit -C $script:workdir rev-parse --verify 'HEAD^{commit}' 2>$null
+    $headExit = $LASTEXITCODE
+    if ($headExit -ne 0 -or ([string]$installedHead).Trim() -ne $script:expectedTarget) {
+      throw "Git shim reached post-HEAD verification before HEAD replacement"
+    }
+	    if ($script:expectedSymbolicHead) {
+	      $installedSym = & $script:realGit -C $script:workdir symbolic-ref -q HEAD 2>$null
+	      $symExit = $LASTEXITCODE
+	      $installedBranch = & $script:realGit -C $script:workdir rev-parse --verify ($script:expectedSymbolicHead + "^{commit}") 2>$null
+	      $branchExit = $LASTEXITCODE
+	      if ($symExit -eq 0 -or -not [string]::IsNullOrWhiteSpace([string]$installedSym) -or $branchExit -ne 0 -or ([string]$installedBranch).Trim() -ne $script:expectedOldHead) {
+	        throw "Git shim did not observe detached HEAD with the symbolic branch preserved"
+	      }
+	      $script:symbolicHeadPreservedAtTarget = $true
+    }
+    $script:indexReplacementObserved = $true
+    $script:targetHeadObserved = $true
+    $script:postHeadFailureInjected = $true
+    $global:LASTEXITCODE = 95
+    return
+  }
+	  $isBranchRollback = $gitArgs.Count -ge 3 -and $verb -eq 'symbolic-ref' -and $gitArgs[1] -eq 'HEAD' -and $gitArgs[2] -eq $script:expectedSymbolicHead
+  if ($script:injectRollbackFailure -and $script:postHeadFailureInjected -and $isBranchRollback -and -not $script:branchRollbackFailureInjected) {
+    $script:branchRollbackCallObserved = $true
+    & $script:realGit @gitArgs
+    $rollbackExit = $LASTEXITCODE
+    if ($rollbackExit -ne 0) {
+      return
+    }
+    $restoredSym = & $script:realGit -C $script:workdir symbolic-ref -q HEAD 2>$null
+    $symExit = $LASTEXITCODE
+    $restoredBranch = & $script:realGit -C $script:workdir rev-parse --verify ($script:expectedSymbolicHead + "^{commit}") 2>$null
+    $branchExit = $LASTEXITCODE
+    if ($symExit -ne 0 -or ([string]$restoredSym).Trim() -ne $script:expectedSymbolicHead -or $branchExit -ne 0 -or ([string]$restoredBranch).Trim() -ne $script:expectedOldHead) {
+	      throw "Git shim did not restore symbolic HEAD without changing its branch before fault injection"
+    }
+    $script:symbolicHeadRestoredBeforeFailure = $true
+    $script:branchRollbackFailureInjected = $true
+    $global:LASTEXITCODE = 96
+    return
+  }
+  & $script:realGit @gitArgs
+  $gitExit = $LASTEXITCODE
+	  $isDetachedUpdate = $gitArgs.Count -ge 5 -and $verb -eq 'update-ref' -and $gitArgs[1] -eq '--no-deref' -and $gitArgs[2] -eq 'HEAD' -and $gitArgs[3] -eq $script:expectedTarget -and $gitArgs[4] -eq $script:expectedOldHead
+	  if ($gitExit -eq 0 -and $isDetachedUpdate) {
+    $script:headUpdateObserved = $true
+  }
+}
+$script:coherenceError = $null
+try {
+  & {
+` + decodePowerShellCommand(t, windowsGitCoherence(workdir, plan)) + `
+  }
+} catch {
+  $script:coherenceError = $_
+}
+@(
+  "calls=$($script:gitShimCalls)"
+  "head-update=$($script:headUpdateObserved)"
+  "index-installed=$($script:indexReplacementObserved)"
+  "target-head=$($script:targetHeadObserved)"
+  "symbolic-head-at-target=$($script:symbolicHeadPreservedAtTarget)"
+  "post-head-failure=$($script:postHeadFailureInjected)"
+  "branch-rollback-call=$($script:branchRollbackCallObserved)"
+  "symbolic-head-restored=$($script:symbolicHeadRestoredBeforeFailure)"
+  "branch-rollback-failure=$($script:branchRollbackFailureInjected)"
+  "coherence-error=$(if ($script:coherenceError) { $script:coherenceError.Exception.Message } else { '<none>' })"
+  $script:gitTrace | ForEach-Object { "git=$_" }
+) | Set-Content -LiteralPath $script:tracePath -Encoding ASCII
+if ($script:gitShimCalls -eq 0) { throw "Git shim was not invoked" }
+if (-not $script:headUpdateObserved) { throw "Git shim did not observe the HEAD update" }
+if (-not $script:postHeadFailureInjected) { throw "Git shim did not inject the post-HEAD verification failure" }
+if ($script:injectRollbackFailure -and -not $script:branchRollbackFailureInjected) { throw "Git shim did not inject the symbolic branch rollback failure" }
+if (-not $script:injectRollbackFailure -and $script:branchRollbackFailureInjected) { throw "Git shim unexpectedly injected a detached HEAD rollback failure" }
+if ($null -eq $script:coherenceError) { throw "Git coherence unexpectedly succeeded" }
+throw $script:coherenceError
+`
+			out, err := runWindowsPowerShellScript(t, script)
+			if err == nil {
+				t.Fatalf("injected rollback failure unexpectedly succeeded\n%s", out)
+			}
+			trace, readErr := os.ReadFile(tracePath)
+			if readErr != nil {
+				t.Fatalf("read Git shim trace: %v", readErr)
+			}
+			if !strings.Contains(string(out), tc.wantError) {
+				t.Fatalf("unexpected rollback failure: %v\n%s\ntrace:\n%s", err, out, trace)
+			}
+			for _, want := range []string{
+				"head-update=True",
+				"index-installed=True",
+				"target-head=True",
+				"post-head-failure=True",
+			} {
+				if !strings.Contains(string(trace), want) {
+					t.Fatalf("Git shim trace missing %q:\n%s", want, trace)
+				}
+			}
+			for _, state := range []struct {
+				key  string
+				want bool
+			}{
+				{key: "branch-rollback-call", want: tc.injectRollbackFailure},
+				{key: "symbolic-head-at-target", want: tc.symbolic},
+				{key: "symbolic-head-restored", want: tc.injectRollbackFailure},
+				{key: "branch-rollback-failure", want: tc.injectRollbackFailure},
+			} {
+				if got := strings.Contains(string(trace), state.key+"=True"); got != state.want {
+					t.Fatalf("Git shim trace %s=%t want %t:\n%s", state.key, got, state.want, trace)
+				}
+			}
+			if !strings.Contains(string(trace), "calls=") || strings.Contains(string(trace), "calls=0") {
+				t.Fatalf("Git shim was not invoked:\n%s", trace)
+			}
+			if afterIndex := coherenceIndexBytes(t, workdir); !bytes.Equal(afterIndex, beforeIndex) {
+				t.Fatal("Windows rollback did not restore the original index")
+			}
+			requireGitOutput(t, workdir, beforeTree, "write-tree")
+			requireGitOutput(t, workdir, f.a, "rev-parse", "HEAD")
+			requireGitOutput(t, workdir, beforeSym, "symbolic-ref", "-q", "HEAD")
+			if tc.symbolic {
+				requireGitOutput(t, workdir, f.a, "rev-parse", beforeSym+"^{commit}")
+			}
+		})
+	}
+}
+
+func TestRemoteGitSeedRemovesFailedCheckout(t *testing.T) {
+	got := remoteGitSeed("/work/repo", gitCoherencePlan{RemoteURL: "https://github.com/openclaw/crabbox.git", Target: "missing-sha", Tree: "tree", Branch: "main"})
+	for _, want := range []string{
+		"git -C \"$tmp\" checkout --quiet --detach",
+		"cleanup_seed() { rm -rf -- \"$tmp\"; }",
+		"trap cleanup_seed EXIT",
+		"mv -- \"$tmp\" \"$workdir\"",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("remoteGitSeed missing %q in %q", want, got)
@@ -2104,8 +3268,8 @@ func TestGitSeedCommandsRejectCredentialBearingRemote(t *testing.T) {
 	} {
 		t.Run(remoteName, func(t *testing.T) {
 			for target, command := range map[string]string{
-				"linux":   remoteGitSeed("/work/repo", remote, "abc123"),
-				"windows": windowsGitSeed(`C:\crabbox\repo`, remote, "abc123"),
+				"linux":   remoteGitSeed("/work/repo", gitCoherencePlan{RemoteURL: remote, Target: "abc123", Tree: "tree", Branch: "main"}),
+				"windows": windowsGitSeed(`C:\crabbox\repo`, gitCoherencePlan{RemoteURL: remote, Target: "abc123", Tree: "tree", Branch: "main"}),
 			} {
 				t.Run(target, func(t *testing.T) {
 					if strings.Contains(command, secret) || strings.Contains(command, "example.test") {
@@ -2133,20 +3297,44 @@ func TestRemoteGitSeedLocalCanary(t *testing.T) {
 	runGit(t, source, "add", ".")
 	runGit(t, source, "commit", "-m", "seed")
 	head := gitOutput(source, "rev-parse", "HEAD")
+	tree := gitOutput(source, "rev-parse", "HEAD^{tree}")
+	branch := gitOutput(source, "branch", "--show-current")
 	origin := filepath.Join(root, "origin.git")
 	clone := exec.Command("git", "clone", "--bare", source, origin)
 	if out, err := clone.CombinedOutput(); err != nil {
 		t.Fatalf("create bare origin: %v\n%s", err, out)
 	}
+	plan := gitCoherencePlan{RemoteURL: origin, Target: head, Tree: tree, Branch: branch}
+	runSeed := func(label, workdir string) {
+		t.Helper()
+		seed := exec.Command("bash", "-lc", remoteGitSeed(workdir, plan))
+		if out, err := seed.CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v\n%s", label, err, out)
+		}
+	}
+	requireSeeded := func(workdir string) {
+		t.Helper()
+		if got := gitOutput(workdir, "remote", "get-url", "origin"); got != origin {
+			t.Fatalf("seeded origin=%q want %q", got, origin)
+		}
+		if got := gitOutput(workdir, "rev-parse", "HEAD"); got != head {
+			t.Fatalf("seeded HEAD=%q want %q", got, head)
+		}
+		if got := gitOutput(workdir, "write-tree"); got != tree {
+			t.Fatalf("seeded tree=%q want %q", got, tree)
+		}
+		index := gitOutput(workdir, "rev-parse", "--git-path", "index")
+		if !filepath.IsAbs(index) {
+			index = filepath.Join(workdir, index)
+		}
+		if _, err := os.Stat(index); err != nil {
+			t.Fatalf("seeded index missing: %v", err)
+		}
+	}
 
 	workdir := filepath.Join(root, "safe-workdir")
-	seed := exec.Command("bash", "-lc", remoteGitSeed(workdir, origin, head))
-	if out, err := seed.CombinedOutput(); err != nil {
-		t.Fatalf("run safe seed: %v\n%s", err, out)
-	}
-	if got := gitOutput(workdir, "remote", "get-url", "origin"); got != origin {
-		t.Fatalf("seeded origin=%q want %q", got, origin)
-	}
+	runSeed("run safe seed", workdir)
+	requireSeeded(workdir)
 	proof, err := os.ReadFile(filepath.Join(workdir, "proof.txt"))
 	if err != nil {
 		t.Fatal(err)
@@ -2154,14 +3342,96 @@ func TestRemoteGitSeedLocalCanary(t *testing.T) {
 	if got := strings.TrimSpace(string(proof)); got != "safe seed" {
 		t.Fatalf("seeded proof=%q", got)
 	}
+	preserved := filepath.Join(workdir, "local-overlay.txt")
+	mustWriteTestFile(t, preserved, "preserve\n")
+	runGit(t, workdir, "remote", "set-url", "origin", filepath.Join(root, "wrong.git"))
+	runSeed("reuse valid workspace", workdir)
+	requireSeeded(workdir)
+	if got, err := os.ReadFile(preserved); err != nil || string(got) != "preserve\n" {
+		t.Fatalf("valid reusable workspace was replaced: data=%q err=%v", got, err)
+	}
+
+	unbornWorkdir := filepath.Join(root, "unborn-workdir")
+	if err := os.Mkdir(unbornWorkdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, unbornWorkdir, "init")
+	mustWriteTestFile(t, filepath.Join(unbornWorkdir, "stale-unborn.txt"), "stale\n")
+	runSeed("replace unborn workspace", unbornWorkdir)
+	requireSeeded(unbornWorkdir)
+	if _, err := os.Stat(filepath.Join(unbornWorkdir, "stale-unborn.txt")); !os.IsNotExist(err) {
+		t.Fatalf("unborn workspace was reused instead of reseeded: %v", err)
+	}
+
+	missingIndexWorkdir := filepath.Join(root, "missing-index-workdir")
+	if out, err := exec.Command("git", "clone", "--quiet", origin, missingIndexWorkdir).CombinedOutput(); err != nil {
+		t.Fatalf("clone missing-index fixture: %v\n%s", err, out)
+	}
+	missingIndex := gitOutput(missingIndexWorkdir, "rev-parse", "--git-path", "index")
+	if !filepath.IsAbs(missingIndex) {
+		missingIndex = filepath.Join(missingIndexWorkdir, missingIndex)
+	}
+	if err := os.Remove(missingIndex); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteTestFile(t, filepath.Join(missingIndexWorkdir, "stale-missing-index.txt"), "stale\n")
+	runSeed("replace missing-index workspace", missingIndexWorkdir)
+	requireSeeded(missingIndexWorkdir)
+	if _, err := os.Stat(filepath.Join(missingIndexWorkdir, "stale-missing-index.txt")); !os.IsNotExist(err) {
+		t.Fatalf("missing-index workspace was reused instead of reseeded: %v", err)
+	}
+
+	nestedWorkdir := filepath.Join(source, "nested-workdir")
+	if err := os.Mkdir(nestedWorkdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runSeed("seed inside ancestor repository", nestedWorkdir)
+	wantNestedRoot, err := filepath.EvalSymlinks(nestedWorkdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gitOutput(nestedWorkdir, "rev-parse", "--show-toplevel"); got != wantNestedRoot {
+		t.Fatalf("ancestor repository counted as nested seed root: got %q want %q", got, wantNestedRoot)
+	}
 
 	blockedWorkdir := filepath.Join(root, "blocked-workdir")
-	blocked := exec.Command("bash", "-lc", remoteGitSeed(blockedWorkdir, "https://runner:do-not-forward@example.test/repo.git", head))
+	blockedRemote := "https://runner:" + "do-not-forward" + "@example.test/repo.git"
+	blocked := exec.Command("bash", "-lc", remoteGitSeed(blockedWorkdir, gitCoherencePlan{RemoteURL: blockedRemote, Target: head, Tree: tree, Branch: branch}))
 	if out, err := blocked.CombinedOutput(); err != nil {
 		t.Fatalf("run blocked seed: %v\n%s", err, out)
 	}
 	if _, err := os.Stat(blockedWorkdir); !os.IsNotExist(err) {
 		t.Fatalf("credential-blocked seed created workdir: %v", err)
+	}
+}
+
+func TestRemoteGitSeedSupportsSeedOnlyPlanWithoutTree(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell Git seed fixture")
+	}
+	f := newGitCoherenceFixture(t)
+	plan := gitCoherencePlan{
+		RemoteURL: f.origin,
+		Target:    f.b,
+		Branch:    "main",
+	}
+	if !plan.seedEnabled() || plan.enabled() {
+		t.Fatalf("expected seed-only plan, got %#v", plan)
+	}
+	workdir := filepath.Join(t.TempDir(), "seed-only")
+	if out, err := exec.Command("bash", "-lc", remoteGitSeed(workdir, plan)).CombinedOutput(); err != nil {
+		t.Fatalf("seed-only Git seed failed: %v\n%s", err, out)
+	}
+	requireGitOutput(t, workdir, f.b, "rev-parse", "HEAD")
+	if tree := gitOutput(workdir, "write-tree"); tree == "" {
+		t.Fatal("seed-only Git seed produced no usable index tree")
+	}
+	index := gitOutput(workdir, "rev-parse", "--git-path", "index")
+	if !filepath.IsAbs(index) {
+		index = filepath.Join(workdir, index)
+	}
+	if _, err := os.Stat(index); err != nil {
+		t.Fatalf("seed-only Git seed index missing: %v", err)
 	}
 }
 
@@ -2393,9 +3663,7 @@ func mustWriteTestFailingCommand(t *testing.T, dir, name string, code int) {
 
 func TestRemoteSyncMetadataUsesGitDirForGitWorktree(t *testing.T) {
 	workdir := t.TempDir()
-	if err := os.Mkdir(filepath.Join(workdir, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	runGit(t, workdir, "init")
 	cmd := exec.Command("bash", "-lc", remoteWriteSyncManifestNew(workdir))
 	cmd.Stdin = strings.NewReader("tracked.txt\x00")
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -2828,5 +4096,8 @@ func TestRemoteSyncSanityReportsDeletionSample(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("remoteSyncSanity() missing %q in %q", want, got)
 		}
+	}
+	if strings.Contains(got, "/tmp/crabbox-git-status") {
+		t.Fatalf("remoteSyncSanity() uses a global status file: %q", got)
 	}
 }

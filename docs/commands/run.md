@@ -170,6 +170,22 @@ full source upload. Crabbox also records a local/remote sync fingerprint and
 skips rsync when the tracked commit, manifest, and dirty metadata have not
 changed.
 
+Existing SSH leases use one remote, lease-scoped workspace owner before Crabbox
+reads hydration state, Git metadata, or the sync fingerprint. The owner remains
+held through sync or fresh checkout, Actions hydration, the command, result and
+artifact collection, failure capture, and ready-pool scrub/return. Separate
+clients and `watch` iterations therefore cannot mutate or execute the same
+reused workspace concurrently. A contending client waits for a bounded interval
+and prints periodic progress. Newly acquired one-shot leases are already
+exclusive and bypass this owner.
+
+Ownership is fenced with a random token and renewed while the lifecycle is
+active. If the local client disappears, Crabbox recovers an expired owner only
+after verifying that its witnessed remote child is no longer alive. Ambiguous
+renewal, release, token, or child state fails closed instead of risking a
+concurrent checkout. POSIX, WSL2, and native Windows targets implement the same
+protocol; the small sync-finalization lock remains nested inside it.
+
 Use `--full-resync` (alias `--fresh-sync`) when a warm lease smells stale:
 Crabbox deletes the remote workdir, skips the fingerprint fast path, reseeds Git
 when possible, and uploads the checkout from scratch. Use `--checksum` for a
@@ -218,6 +234,10 @@ or `--no-sync` is set. This preserves the setup the workflow performed:
 checkout path, installed dependencies, caches, runner temp/toolcache paths, and
 any project-specific preparation. See
 [Actions hydration](../features/actions-hydration.md).
+
+Standalone `crabbox actions hydrate --id ...` acquires the same remote workspace
+owner as ordinary reused runs, so hydration cannot overlap a sync, command,
+collection, or cleanup from another client.
 
 If a JavaScript package-manager command (`pnpm`, `npm`, `node`, `corepack`)
 runs on a raw SSH workspace before a hydration marker exists and no automatic

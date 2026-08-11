@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"io"
 	"os"
 	"os/exec"
 	"path"
@@ -542,6 +544,50 @@ func TestSelectLocalHydrateJobAllowsSingleJobWorkflow(t *testing.T) {
 	}
 	if name != "setup" || job.Name != "Setup" {
 		t.Fatalf("selected job %q %#v, want setup", name, job)
+	}
+}
+
+func TestSyncLocalActionsWorkspaceUsesGitCoherenceFinalizer(t *testing.T) {
+	f := newGitCoherenceFixture(t)
+	tools := t.TempDir()
+	logPath := filepath.Join(tools, "ssh.log")
+	sshScript := `#!/bin/sh
+last=
+for arg do last="$arg"; done
+printf '%s\n' "$last" >> "$CRABBOX_ACTIONS_SSH_LOG"
+cat >/dev/null
+`
+	if err := os.WriteFile(filepath.Join(tools, "ssh"), []byte(sshScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tools, "rsync"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_ACTIONS_SSH_LOG", logPath)
+
+	cfg := baseConfig()
+	cfg.Sync.Fingerprint = true
+	cfg.Sync.BaseRef = "main"
+	repo := Repo{Root: f.source, Name: "repo", RemoteURL: f.origin, Head: f.b, BaseRef: "main"}
+	var stderr bytes.Buffer
+	app := App{Stdout: io.Discard, Stderr: &stderr}
+	err := app.syncLocalActionsWorkspace(context.Background(), cfg, repo, SSHTarget{
+		User: "crabbox", Host: "example.test", Port: "22", TargetOS: targetLinux,
+	}, "/work/repo")
+	if err != nil {
+		t.Fatalf("sync local Actions workspace: %v\n%s", err, stderr.String())
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logData)
+	plan := f.plan(t, f.b)
+	for _, want := range []string{plan.RemoteURL, plan.Target, plan.Tree, "refs/crabbox/sync-", "read-tree --reset", "update-ref --no-deref HEAD"} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("Actions sync missing coherence contract %q:\n%s", want, log)
+		}
 	}
 }
 
@@ -1385,6 +1431,7 @@ func TestRemoteClearActionsHydrationStateRemovesReadyAndStop(t *testing.T) {
 		".crabbox/actions/cbx_123.env.sh",
 		".crabbox/actions/cbx_123.services",
 		".crabbox/actions/cbx_123.stop",
+		".crabbox/actions/cbx_123.owner-monitor-stop",
 		".crabbox/actions/cbx_123.local.sh",
 		".crabbox/actions/cbx_123.local.log",
 		".crabbox/actions/cbx_123.local.exit",
@@ -1447,7 +1494,6 @@ func TestLocalActionsRemoteCommandsQuoteLeasePaths(t *testing.T) {
 		want string
 	}{
 		"install":    {remoteInstallLocalActionsHydrateScript(leaseID), "\"$HOME\"/" + shellQuote(actionsHydrationLocalScriptPath(leaseID))},
-		"start":      {remoteStartLocalActionsHydrateScript(leaseID), "\"$HOME\"/" + shellQuote(actionsHydrationLocalLogPath(leaseID))},
 		"foreground": {remoteRunLocalActionsHydrateScriptForeground(leaseID, time.Minute), "\"$HOME\"/" + shellQuote(actionsHydrationLocalLogPath(leaseID))},
 		"status":     {remoteLocalActionsHydrateStatus(leaseID, "123"), "\"$HOME\"/" + shellQuote(actionsHydrationLocalExitPath(leaseID))},
 	} {
@@ -1456,6 +1502,28 @@ func TestLocalActionsRemoteCommandsQuoteLeasePaths(t *testing.T) {
 		}
 		if !strings.Contains(tc.got, tc.want) {
 			t.Fatalf("%s command missing quoted path %q:\n%s", name, tc.want, tc.got)
+		}
+	}
+	payload := remoteLocalActionsHydrateBackgroundPayload(leaseID)
+	wantLog := "\"$HOME\"/" + shellQuote(actionsHydrationLocalLogPath(leaseID))
+	if !strings.Contains(payload, wantLog) || !strings.Contains(remoteStartLocalActionsHydrateScript(leaseID), shellQuote(payload)) {
+		t.Fatalf("background hydrate command did not preserve nested path quoting:\npayload=%s\nstart=%s", payload, remoteStartLocalActionsHydrateScript(leaseID))
+	}
+}
+
+func TestActionsHydrationOwnerMonitorGeneration(t *testing.T) {
+	leaseID := "cbx_123"
+	owner := &workspaceOwner{key: strings.Repeat("a", 64), token: strings.Repeat("b", 64)}
+	posix := remoteActionsHydrationMonitorForTarget(SSHTarget{TargetOS: targetLinux}, leaseID, 90*time.Second, owner)
+	for _, want := range []string{actionsHydrationStatePath(leaseID), actionsHydrationOwnerMonitorStopPath(leaseID), owner.key + ".owner", "state_expiry", "systemctl stop crabbox-actions-runner.service", "[R]unner.Worker", "exit 125"} {
+		if !strings.Contains(posix, want) {
+			t.Fatalf("POSIX owner monitor missing %q:\n%s", want, posix)
+		}
+	}
+	windows := decodePowerShellCommand(t, remoteActionsHydrationMonitorForTarget(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, leaseID, 90*time.Second, owner))
+	for _, want := range []string{windowsActionsHydrationPath(actionsHydrationStatePath(leaseID)), windowsActionsHydrationPath(actionsHydrationOwnerMonitorStopPath(leaseID)), owner.key + ".owner", "Stop-CrabboxRunner", "Runner.Worker", "ToUnixTimeSeconds()", "exit 125"} {
+		if !strings.Contains(windows, want) {
+			t.Fatalf("Windows owner monitor missing %q:\n%s", want, windows)
 		}
 	}
 }

@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Serialized each reused SSH lease's complete workspace lifecycle across clients and watch iterations, from hydration-state and fingerprint inspection through sync, execution, evidence collection, failure capture, and pool scrub/return, with fenced stale-owner recovery on POSIX, WSL2, and native Windows. Reused Git workspaces now also keep `HEAD`, the index, the requested tree, and sync fingerprints coherent without advancing symbolic branches. Thanks @vincentkoc.
 - Stopped market-independent AWS Spot launch request errors from being retried as On-Demand while preserving fallback for Spot-recoverable capacity, quota, and unsupported-market failures. Thanks @vincentkoc.
 - Made plain source builds report `dev` instead of the stale `0.15.0` release identity while preserving injected release versions and tagged Go module build information. Thanks @coygeek.
 - Preserved custom local-container image `PATH` entries across managed SSH logins, including when users add or switch login-profile files after bootstrap. Thanks @coygeek.

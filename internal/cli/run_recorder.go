@@ -127,7 +127,7 @@ func (r *runRecorder) CaptureTelemetryStart(ctx context.Context, target SSHTarge
 	if r == nil || r.telemetryStart != nil {
 		return
 	}
-	r.telemetryStart = collectLeaseTelemetryBestEffort(ctx, leaseTelemetryCollectorForTarget(target))
+	r.telemetryStart = collectLeaseTelemetryBestEffort(contextWithoutWorkspaceOwner(ctx), leaseTelemetryCollectorForTarget(target))
 	r.recordTelemetrySample(r.telemetryStart)
 	r.appendTelemetryBestEffort(r.telemetryStart)
 }
@@ -141,7 +141,7 @@ func (r *runRecorder) StartTelemetrySampler(ctx context.Context, target SSHTarge
 		r.telemetryMu.Unlock()
 		return
 	}
-	sampleCtx, cancel := context.WithCancel(ctx)
+	sampleCtx, cancel := context.WithCancel(contextWithoutWorkspaceOwner(ctx))
 	done := make(chan struct{})
 	r.telemetryCancel = cancel
 	r.telemetryDone = done
@@ -187,7 +187,7 @@ func (r *runRecorder) Finish(ctx context.Context, target SSHTarget, exitCode int
 	r.waitForOutputEvents(runEventOutputPostWait)
 	r.finished = true
 	r.stopTelemetrySampler()
-	telemetryEnd := collectLeaseTelemetryBestEffort(ctx, leaseTelemetryCollectorForTarget(target))
+	telemetryEnd := collectLeaseTelemetryBestEffort(contextWithoutWorkspaceOwner(ctx), leaseTelemetryCollectorForTarget(target))
 	r.recordTelemetrySample(telemetryEnd)
 	ctx, cancel := context.WithTimeout(context.Background(), runRecorderFinishTimeout)
 	defer cancel()

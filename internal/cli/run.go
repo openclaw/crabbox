@@ -565,6 +565,31 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	var runFailure error
 	var workdir string
 	var hydratedByActions bool
+	var lifecycleOwner *workspaceOwner
+	ownerParentCtx := ctx
+	defer func() {
+		if lifecycleOwner == nil {
+			return
+		}
+		if cleanup.Stopped {
+			if closeErr := lifecycleOwner.CloseAfterLeaseRelease(); closeErr != nil {
+				runFailure = recordRunFailure(&runFailure, closeErr)
+				err = errors.Join(err, closeErr)
+				fmt.Fprintf(a.Stderr, "warning: workspace owner stopped with released lease after renewal failure: %v\n", closeErr)
+			}
+			return
+		}
+		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), 30*time.Second)
+		closeErr := lifecycleOwner.Close(releaseCtx)
+		cancel()
+		if closeErr != nil {
+			runFailure = recordRunFailure(&runFailure, closeErr)
+			err = errors.Join(err, closeErr)
+			fmt.Fprintf(a.Stderr, "warning: workspace owner release failed: %v\n", closeErr)
+			return
+		}
+		fmt.Fprintln(a.Stderr, "workspace owner released")
+	}()
 	defer func() {
 		if borrowedPool == nil {
 			return
@@ -578,6 +603,25 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		failure := runFailure
 		if failure == nil {
 			failure = err
+		}
+		ownerQuiescent := true
+		if lifecycleOwner != nil {
+			inspectCtx, cancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), 15*time.Second)
+			ownerErr := lifecycleOwner.ConfirmNoChild(inspectCtx)
+			cancel()
+			if ownerErr != nil {
+				ownerQuiescent = false
+				failure = ownerErr
+				runFailure = recordRunFailure(&runFailure, ownerErr)
+				if err == nil {
+					err = ownerErr
+				}
+				fmt.Fprintf(a.Stderr, "warning: ready-pool workspace owner is not quiescent: %v\n", ownerErr)
+			}
+		}
+		if !ownerQuiescent {
+			fmt.Fprintf(a.Stderr, "warning: ready-pool return deferred while a witnessed workspace child may still be alive\n")
+			return
 		}
 		var preparedCommit string
 		var scrubErr error
@@ -610,7 +654,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			}
 			return
 		}
-		if readyPoolReturnNeedsHydrationStop(result) {
+		if ownerQuiescent && readyPoolReturnNeedsHydrationStop(result) {
 			a.writeActionsHydrationStopBestEffort(context.WithoutCancel(ctx), target, borrowedPool.Entry.LeaseID)
 		}
 		if stopReadyPoolHeartbeat != nil {
@@ -894,6 +938,18 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if !shouldReleaseRunLease(acquired, *keep, keepFailedLease, *stopAfter, runFailure) {
 			return
 		}
+		if lifecycleOwner != nil {
+			inspectCtx, cancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), 15*time.Second)
+			ownerErr := lifecycleOwner.ConfirmNoChild(inspectCtx)
+			cancel()
+			if ownerErr != nil {
+				cleanup.Err = ownerErr
+				runFailure = recordRunFailure(&runFailure, ownerErr)
+				err = errors.Join(err, ownerErr)
+				fmt.Fprintf(a.Stderr, "lease cleanup skipped while workspace child remains possible: %v\n", ownerErr)
+				return
+			}
+		}
 		releaseApp := a
 		if *timingJSON {
 			releaseApp.Stderr = io.Discard
@@ -968,6 +1024,28 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		startRunHeartbeat(heartbeatIdleTimeout)
 	} else if registrationCoord != nil && leaseID != "" {
 		startRunHeartbeat(nil)
+	}
+	if shouldAcquireWorkspaceOwner(acquired) {
+		target = bootstrapNetworkTarget(cfg, server, target)
+		if waitErr := waitForSSHReady(ctx, &target, a.Stderr, "workspace owner", 2*time.Minute); waitErr != nil {
+			return recordFailure(waitErr)
+		}
+		a.refreshTailscaleMetadata(ctx, cfg, sshBackend, coord, useCoordinator, &server, target, leaseID)
+		_ = updateLeaseClaimEndpoint(leaseID, server, target)
+		if resolved, resolveErr := resolveNetworkTarget(ctx, cfg, server, target); resolveErr != nil {
+			return recordFailure(resolveErr)
+		} else {
+			target = resolved.Target
+			_ = updateLeaseClaimEndpoint(leaseID, server, target)
+			if resolved.FallbackReason != "" {
+				fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
+			}
+		}
+		lifecycleOwner, err = acquireWorkspaceOwner(ctx, target, leaseID, a.Stderr)
+		if err != nil {
+			return recordFailure(err)
+		}
+		ctx = contextWithWorkspaceOwner(lifecycleOwner.Context(), lifecycleOwner)
 	}
 
 	if cfg.Sync.BaseRef == "" {
@@ -1092,7 +1170,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		fields := actionsHydrateFields(leaseID, githubActionsLeaseLabel(leaseID), cfg.Actions.Job, 0, cfg.Actions.Fields)
 		recorder.Event("actions.hydrate.started", "hydrate", cfg.Actions.Workflow)
-		state, err := a.hydrateActionsLocally(ctx, cfg, repo, currentTarget, leaseID, cfg.Actions.Job, fields, 20*time.Minute, false, false)
+		state, err := a.hydrateActionsLocally(ctx, cfg, repo, currentTarget, leaseID, cfg.Actions.Job, fields, 20*time.Minute, false, false, lifecycleOwner)
 		if err != nil {
 			recorder.Event("actions.hydrate.failed", "hydrate", err.Error())
 			if *keepOnFailure {
@@ -1297,16 +1375,20 @@ retrySync:
 			return recordFailure(err)
 		}
 		timings.syncSteps.preflight = time.Since(stepStart)
+		coherence, credentialBlocked := syncGitCoherencePlan(cfg, repo)
+		if credentialBlocked {
+			warnCredentialBearingGitSeed(a.Stderr)
+		}
 		fingerprint := ""
 		if cfg.Sync.Fingerprint && !isWindowsNativeTarget(target) {
 			stepStart = time.Now()
-			fingerprint, err = syncFingerprintForManifest(repo, cfg, manifest, excludes)
+			fingerprint, err = syncFingerprintForManifest(repo, cfg, manifest, excludes, coherence)
 			timings.syncSteps.fingerprintLocal = time.Since(stepStart)
 			if err != nil {
 				fmt.Fprintf(a.Stderr, "warning: sync fingerprint failed: %v\n", err)
 			} else if !fullResyncRequested && fingerprint != "" {
 				stepStart = time.Now()
-				remoteFingerprint, err := runSSHOutput(ctx, target, remoteReadSyncFingerprint(workdir))
+				remoteFingerprint, err := runSSHOutput(ctx, target, remoteReadSyncFingerprint(workdir, coherence))
 				timings.syncSteps.fingerprintRemote = time.Since(stepStart)
 				if err == nil && remoteFingerprint == fingerprint {
 					timings.sync = time.Since(syncStart)
@@ -1337,7 +1419,7 @@ retrySync:
 		}
 		if isWindowsNativeTarget(target) {
 			stepStart = time.Now()
-			if err := syncWindowsNative(ctx, target, repo, cfg, workdir, manifest, a.Stdout, a.Stderr, rsyncOptions{Debug: *debugSync, Delete: cfg.Sync.Delete, Checksum: cfg.Sync.Checksum, FullResync: fullResyncRequested, Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
+			if err := syncWindowsNative(ctx, target, repo, cfg, coherence, workdir, manifest, a.Stdout, a.Stderr, rsyncOptions{Debug: *debugSync, Delete: cfg.Sync.Delete, Checksum: cfg.Sync.Checksum, FullResync: fullResyncRequested, Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
 				return recordFailure(err)
 			}
 			timings.syncSteps.rsync = time.Since(stepStart)
@@ -1346,13 +1428,9 @@ retrySync:
 			recorder.Event("sync.finished", "synced", fmt.Sprintf("duration=%s mode=archive", timings.sync.Round(time.Millisecond)))
 			goto afterSync
 		}
-		gitSeed, credentialBlocked := syncGitSeedDecision(cfg, repo)
-		if credentialBlocked {
-			warnCredentialBearingGitSeed(a.Stderr)
-		}
-		if gitSeed {
+		if coherence.seedEnabled() {
 			stepStart = time.Now()
-			if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteGitSeed(workdir, repo.RemoteURL, repo.Head), idempotentSSHRetryDelay); err != nil {
+			if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay); err != nil {
 				fmt.Fprintf(a.Stderr, "warning: remote git seed failed: %v\n", err)
 			}
 			timings.syncSteps.gitSeed = time.Since(stepStart)
@@ -1421,6 +1499,7 @@ retrySync:
 			BaseSHA:            baseSHA,
 			Fingerprint:        fingerprint,
 			Token:              finalizeToken,
+			Coherence:          coherence,
 		})
 		if out, err := runIdempotentSSHCombinedOutput(ctx, target, finalizeCommand, idempotentSSHRetryDelay); err != nil {
 			if out != "" {
@@ -1437,6 +1516,11 @@ retrySync:
 		recorder.Event("sync.finished", "synced", "skipped by --no-sync")
 	}
 afterSync:
+	if !*syncOnly && !*noSync {
+		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteInvalidateSyncFingerprintForTarget(target, workdir), idempotentSSHRetryDelay); err != nil {
+			return recordFailure(exit(7, "invalidate reusable sync fingerprint before execution: %v", err))
+		}
+	}
 	if !*noSync {
 		if err := autoHydrateActionsIfNeeded(target); err != nil {
 			return recordFailure(err)
@@ -1500,6 +1584,9 @@ afterSync:
 		}
 		if _, err := runIdempotentSSHCombinedOutput(ctx, target, mkdirCommand, idempotentSSHRetryDelay); err != nil {
 			return recordFailure(exit(7, "create remote workdir: %v", err))
+		}
+		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteInvalidateSyncFingerprintForTarget(target, workdir), idempotentSSHRetryDelay); err != nil {
+			return recordFailure(exit(7, "invalidate reusable sync fingerprint before execution: %v", err))
 		}
 	}
 	if err := preflightRawJSRuntime(target); err != nil {
@@ -1671,6 +1758,9 @@ afterSync:
 	stderrPhaseWriter.Flush()
 	timings.command = time.Since(commandStart)
 	timings.commandPhases = phaseTracker.Finish(time.Now())
+	if err := waitWorkspaceOwnerNoChild(ctx, lifecycleOwner, 10*time.Second); err != nil {
+		return recordFailure(exit(7, "remote command child ownership remains active; refusing collection and cleanup: %v", err))
+	}
 	var results *TestResultSummary
 	if cfg.Results.Auto || len(cfg.Results.JUnit) > 0 {
 		results, err = collectRemoteJUnitResults(ctx, target, workdir, cfg.Results, resultsMarker)
