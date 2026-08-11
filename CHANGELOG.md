@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Stopped sparse-checkout and skip-worktree omissions from deleting in-scope remote files, and kept staged gitlink removals out of file-deletion manifests. Thanks @vincentkoc.
 - Deferred ordinary coordinator lease provider cleanup to durable alarm-owned retries while preserving synchronous force-admin deletion and visible retry state. Thanks @fuller-stack-dev.
 - Made future Linux developer-image preparation use root-owned Corepack state while source, candidate, and promoted smoke checks exercise Corepack and pnpm as the runtime user. Thanks @fuller-stack-dev.
 - Made local sync report actionable non-Git workdir diagnostics and fail before lease acquisition, resolution, preparation, or ready-pool borrowing. Thanks @bunlongheng.
