@@ -17115,7 +17115,7 @@ describe("fleet lease identity and idle", () => {
     expect(otherPrepared.lease.network?.awsSecurityGroupName).not.toBe(managedGroupName);
   });
 
-  it("preserves configured AWS SSH CIDRs when refreshing lease access", async () => {
+  it("preserves lease SSH CIDRs when refreshing access", async () => {
     const provider = new AWSProvider({} as Env, "eu-west-1", new MemoryStorage());
     vi.spyOn(provider, "reconcileLeaseAccess").mockResolvedValue();
     expect(
@@ -17154,10 +17154,13 @@ describe("fleet lease identity and idle", () => {
       network: { sshSourceCIDRs: ["198.51.100.7/32"], sshSourceCIDRsComplete: true },
     });
     const refreshedDynamic = await provider.refreshLeaseAccess(dynamic, {
-      requestSourceCIDRs: ["203.0.113.8/32"],
+      requestSourceCIDRs: ["2001:db8::8/128"],
       activeLeases: [dynamic],
     });
-    expect(refreshedDynamic?.network?.sshSourceCIDRs).toEqual(["203.0.113.8/32"]);
+    expect(refreshedDynamic?.network?.sshSourceCIDRs).toEqual([
+      "198.51.100.7/32",
+      "2001:db8::8/128",
+    ]);
   });
 
   it("reports each AWS fallback region before provisioning mutates it", async () => {

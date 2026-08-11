@@ -23579,7 +23579,13 @@ export class AWSProvider implements CloudProvider {
       sourceCIDRs.length > 0
         ? withLeaseSSHSourceCIDRs(
             lease,
-            uniqueNonEmpty([...(lease.network?.sshPinnedSourceCIDRs ?? []), ...sourceCIDRs]),
+            // Broker HTTP and direct SSH can use different routes or address families.
+            // Keep lease-proven sources until lifecycle reconciliation removes its access.
+            uniqueNonEmpty([
+              ...(lease.network?.sshSourceCIDRs ?? []),
+              ...(lease.network?.sshPinnedSourceCIDRs ?? []),
+              ...sourceCIDRs,
+            ]),
             true,
           )
         : lease;
