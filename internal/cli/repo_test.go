@@ -369,9 +369,9 @@ func TestSyncGitSeedRejectsCredentialBearingRemote(t *testing.T) {
 	runGit(t, dir, "commit", "-m", "init")
 	runGit(t, dir, "update-ref", "refs/remotes/origin/main", "HEAD")
 	for _, remoteURL := range []string{
-		"https://runner:do-not-forward@example.test/repo.git",     // trufflehog:ignore
-		"ssh://runner:do-not-forward@example.test/repo.git",       // trufflehog:ignore
-		"git+https://runner:do-not-forward@example.test/repo.git", // trufflehog:ignore
+		"https://runner:do-not-forward@example.test/repo.git",
+		"ssh://runner:do-not-forward@example.test/repo.git",
+		"git+https://runner:do-not-forward@example.test/repo.git",
 	} {
 		t.Run(remoteURL, func(t *testing.T) {
 			repo := Repo{Root: dir, RemoteURL: remoteURL, Head: gitOutput(dir, "rev-parse", "HEAD")}
@@ -389,15 +389,15 @@ func TestGitRemoteURLHasCredentials(t *testing.T) {
 	}{
 		{remote: "https://example.test/repo.git", want: false},
 		{remote: "https://runner@example.test/repo.git", want: true},
-		{remote: "https://runner:token@example.test/repo.git", want: true}, // trufflehog:ignore
-		{remote: "HTTPS://runner:token@example.test/repo.git", want: true}, // trufflehog:ignore
+		{remote: "https://runner:token@example.test/repo.git", want: true},
+		{remote: "HTTPS://runner:token@example.test/repo.git", want: true},
 		{remote: "https://runner%zz@example.test/repo.git", want: true},
 		{remote: "ssh://git@example.test/repo.git", want: false},
-		{remote: "ssh://git:token@example.test/repo.git", want: true}, // trufflehog:ignore
-		{remote: "SSH://git:token@example.test/repo.git", want: true}, // trufflehog:ignore
+		{remote: "ssh://git:token@example.test/repo.git", want: true},
+		{remote: "SSH://git:token@example.test/repo.git", want: true},
 		{remote: "ssh://git:@example.test/repo.git", want: true},
-		{remote: "ssh://git%zz:token@example.test/repo.git", want: true},       // trufflehog:ignore
-		{remote: "git+https://runner:token@example.test/repo.git", want: true}, // trufflehog:ignore
+		{remote: "ssh://git%zz:token@example.test/repo.git", want: true},
+		{remote: "git+https://runner:token@example.test/repo.git", want: true},
 		{remote: "git@example.test:repo.git", want: false},
 	}
 	for _, tt := range tests {

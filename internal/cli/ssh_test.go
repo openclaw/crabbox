@@ -3394,9 +3394,12 @@ func TestRemoteGitSeedLocalCanary(t *testing.T) {
 		t.Fatalf("ancestor repository counted as nested seed root: got %q want %q", got, wantNestedRoot)
 	}
 
+	renderGitSeed := remoteGitSeed
+	remoteGitSeed := func(workdir, remoteURL, target string) string {
+		return renderGitSeed(workdir, gitCoherencePlan{RemoteURL: remoteURL, Target: target, Tree: tree, Branch: branch})
+	}
 	blockedWorkdir := filepath.Join(root, "blocked-workdir")
-	blockedRemote := "https://runner:" + "do-not-forward" + "@example.test/repo.git"
-	blocked := exec.Command("bash", "-lc", remoteGitSeed(blockedWorkdir, gitCoherencePlan{RemoteURL: blockedRemote, Target: head, Tree: tree, Branch: branch}))
+	blocked := exec.Command("bash", "-lc", remoteGitSeed(blockedWorkdir, "https://runner:do-not-forward@example.test/repo.git", head))
 	if out, err := blocked.CombinedOutput(); err != nil {
 		t.Fatalf("run blocked seed: %v\n%s", err, out)
 	}
