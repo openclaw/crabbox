@@ -1513,18 +1513,53 @@ func TestLocalActionsRemoteCommandsQuoteLeasePaths(t *testing.T) {
 
 func TestActionsHydrationOwnerMonitorGeneration(t *testing.T) {
 	leaseID := "cbx_123"
-	owner := &workspaceOwner{key: strings.Repeat("a", 64), token: strings.Repeat("b", 64)}
-	posix := remoteActionsHydrationMonitorForTarget(SSHTarget{TargetOS: targetLinux}, leaseID, 90*time.Second, owner)
-	for _, want := range []string{actionsHydrationStatePath(leaseID), actionsHydrationOwnerMonitorStopPath(leaseID), owner.key + ".owner", "state_expiry", "systemctl stop crabbox-actions-runner.service", "[R]unner.Worker", "exit 125"} {
+	ownerA := &workspaceOwner{key: strings.Repeat("a", 64), token: strings.Repeat("b", 64)}
+	ownerB := &workspaceOwner{key: ownerA.key, token: strings.Repeat("c", 64)}
+	markerA := actionsHydrationOwnerMonitorStopPath(leaseID, ownerA.token)
+	markerB := actionsHydrationOwnerMonitorStopPath(leaseID, ownerB.token)
+	if markerA == markerB {
+		t.Fatal("Actions owner monitor stop markers must be generation-specific")
+	}
+
+	posix := remoteActionsHydrationMonitorForTarget(SSHTarget{TargetOS: targetLinux}, leaseID, 90*time.Second, ownerB)
+	for _, want := range []string{actionsHydrationStatePath(leaseID), markerB, ownerB.key + ".owner", "state_expiry", "systemctl stop crabbox-actions-runner.service", "[R]unner.Worker", "exit 125"} {
 		if !strings.Contains(posix, want) {
 			t.Fatalf("POSIX owner monitor missing %q:\n%s", want, posix)
 		}
 	}
-	windows := decodePowerShellCommand(t, remoteActionsHydrationMonitorForTarget(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, leaseID, 90*time.Second, owner))
-	for _, want := range []string{windowsActionsHydrationPath(actionsHydrationStatePath(leaseID)), windowsActionsHydrationPath(actionsHydrationOwnerMonitorStopPath(leaseID)), owner.key + ".owner", "Stop-CrabboxRunner", "Runner.Worker", "ToUnixTimeSeconds()", "exit 125"} {
+	if strings.Contains(posix, markerA) {
+		t.Fatalf("POSIX generation B monitor watches generation A cancellation:\n%s", posix)
+	}
+	if cancelA := remoteCancelActionsHydrationMonitorForTarget(SSHTarget{TargetOS: targetLinux}, leaseID, ownerA); !strings.Contains(cancelA, markerA) || strings.Contains(cancelA, markerB) {
+		t.Fatalf("POSIX generation A cancellation is not isolated:\n%s", cancelA)
+	}
+	if prepareB := remotePrepareActionsHydrationMonitorForTarget(SSHTarget{TargetOS: targetLinux}, leaseID, ownerB); !strings.Contains(prepareB, markerB) || strings.Contains(prepareB, markerA) {
+		t.Fatalf("POSIX generation B preparation is not isolated:\n%s", prepareB)
+	}
+
+	windowsTarget := SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}
+	windows := decodePowerShellCommand(t, remoteActionsHydrationMonitorForTarget(windowsTarget, leaseID, 90*time.Second, ownerB))
+	for _, want := range []string{windowsActionsHydrationPath(actionsHydrationStatePath(leaseID)), windowsActionsHydrationPath(markerB), ownerB.key + ".owner", "Stop-CrabboxRunner", "Runner.Worker", "ToUnixTimeSeconds()", "exit 125"} {
 		if !strings.Contains(windows, want) {
 			t.Fatalf("Windows owner monitor missing %q:\n%s", want, windows)
 		}
+	}
+	if strings.Contains(windows, windowsActionsHydrationPath(markerA)) {
+		t.Fatalf("Windows generation B monitor watches generation A cancellation:\n%s", windows)
+	}
+	windowsCancelA := decodePowerShellCommand(t, remoteCancelActionsHydrationMonitorForTarget(windowsTarget, leaseID, ownerA))
+	if !strings.Contains(windowsCancelA, windowsActionsHydrationPath(markerA)) || strings.Contains(windowsCancelA, windowsActionsHydrationPath(markerB)) {
+		t.Fatalf("Windows generation A cancellation is not isolated:\n%s", windowsCancelA)
+	}
+	windowsPrepareB := decodePowerShellCommand(t, remotePrepareActionsHydrationMonitorForTarget(windowsTarget, leaseID, ownerB))
+	if !strings.Contains(windowsPrepareB, windowsActionsHydrationPath(markerB)) || strings.Contains(windowsPrepareB, windowsActionsHydrationPath(markerA)) {
+		t.Fatalf("Windows generation B preparation is not isolated:\n%s", windowsPrepareB)
+	}
+	if clear := remoteClearActionsHydrationState(leaseID); strings.Contains(clear, "owner-monitor-stop") {
+		t.Fatalf("broad POSIX hydration cleanup removed generation-specific monitor state:\n%s", clear)
+	}
+	if clear := decodePowerShellCommand(t, remoteClearActionsHydrationStateForTarget(windowsTarget, leaseID)); strings.Contains(clear, "owner-monitor-stop") {
+		t.Fatalf("broad Windows hydration cleanup removed generation-specific monitor state:\n%s", clear)
 	}
 }
 

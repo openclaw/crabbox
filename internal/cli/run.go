@@ -657,15 +657,14 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if ownerQuiescent && readyPoolReturnNeedsHydrationStop(result) {
 			a.writeActionsHydrationStopBestEffort(context.WithoutCancel(ctx), target, borrowedPool.Entry.LeaseID)
 		}
-		if stopReadyPoolHeartbeat != nil {
-			stopReadyPoolHeartbeat()
-			stopReadyPoolHeartbeat = nil
-		}
 		returnCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-		_, returnErr := coord.ReturnReadyPoolLease(returnCtx, borrowedPool.Entry.Key, borrowedPool.Entry.LeaseID, result, reason, borrowedPool.Entry.BorrowToken)
+		returnErr := returnReadyPoolAfterWorkspaceOwner(returnCtx, &lifecycleOwner, func() error {
+			_, err := coord.ReturnReadyPoolLease(returnCtx, borrowedPool.Entry.Key, borrowedPool.Entry.LeaseID, result, reason, borrowedPool.Entry.BorrowToken)
+			return err
+		})
 		cancel()
 		if returnErr != nil {
-			fmt.Fprintf(a.Stderr, "warning: ready-pool return failed for %s: %v\n", borrowedPool.Entry.LeaseID, returnErr)
+			fmt.Fprintf(a.Stderr, "warning: ready-pool owner release/return failed for %s: %v\n", borrowedPool.Entry.LeaseID, returnErr)
 			if failure == nil && scrubErr == nil {
 				err = returnErr
 			}
@@ -1025,7 +1024,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	} else if registrationCoord != nil && leaseID != "" {
 		startRunHeartbeat(nil)
 	}
-	if shouldAcquireWorkspaceOwner(acquired) {
+	if shouldAcquireWorkspaceOwner(acquired, sshBackend) {
 		target = bootstrapNetworkTarget(cfg, server, target)
 		if waitErr := waitForSSHReady(ctx, &target, a.Stderr, "workspace owner", 2*time.Minute); waitErr != nil {
 			return recordFailure(waitErr)
@@ -1964,6 +1963,17 @@ afterSync:
 		return recordFailure(ExitError{Code: code, Message: fmt.Sprintf("remote command exited %d", code)})
 	}
 	return nil
+}
+
+func returnReadyPoolAfterWorkspaceOwner(ctx context.Context, owner **workspaceOwner, returnLease func() error) error {
+	if owner != nil && *owner != nil {
+		current := *owner
+		*owner = nil
+		if err := current.Close(ctx); err != nil {
+			return fmt.Errorf("release workspace owner before pool return: %w", err)
+		}
+	}
+	return returnLease()
 }
 
 func applyRunEnvAllowFlags(cfg *Config, values []string) {

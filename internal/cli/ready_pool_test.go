@@ -11,6 +11,19 @@ import (
 	"time"
 )
 
+type readyPoolWorkspaceOwnerTransport struct {
+	events     *[]string
+	releaseErr error
+}
+
+func (t readyPoolWorkspaceOwnerTransport) Do(_ context.Context, req workspaceOwnerRemoteRequest) (string, error) {
+	*t.events = append(*t.events, "owner."+string(req.Action))
+	if t.releaseErr != nil {
+		return "", t.releaseErr
+	}
+	return "RELEASED", nil
+}
+
 func TestReadyPoolReturnNeedsHydrationStop(t *testing.T) {
 	for _, tc := range []struct {
 		result string
@@ -24,6 +37,69 @@ func TestReadyPoolReturnNeedsHydrationStop(t *testing.T) {
 		if got := readyPoolReturnNeedsHydrationStop(tc.result); got != tc.want {
 			t.Fatalf("readyPoolReturnNeedsHydrationStop(%q)=%v, want %v", tc.result, got, tc.want)
 		}
+	}
+}
+
+func TestReadyPoolReturnReleasesWorkspaceOwnerBeforeCoordinator(t *testing.T) {
+	for _, disposition := range []string{"ready", "drain", "release"} {
+		t.Run(disposition, func(t *testing.T) {
+			events := []string{}
+			done := make(chan struct{})
+			close(done)
+			owner := &workspaceOwner{
+				transport: readyPoolWorkspaceOwnerTransport{events: &events},
+				key:       strings.Repeat("a", 64),
+				token:     strings.Repeat("b", 64),
+				stop:      make(chan struct{}),
+				done:      done,
+			}
+			err := returnReadyPoolAfterWorkspaceOwner(context.Background(), &owner, func() error {
+				events = append(events, "coordinator."+disposition)
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The run defer stops the borrow heartbeat only after this helper returns.
+			events = append(events, "heartbeat.stop")
+			want := "owner.release,coordinator." + disposition + ",heartbeat.stop"
+			if got := strings.Join(events, ","); got != want {
+				t.Fatalf("event order=%q, want %q", got, want)
+			}
+			if owner != nil {
+				t.Fatal("released owner remained installed for the outer defer")
+			}
+		})
+	}
+}
+
+func TestReadyPoolReturnStopsWhenWorkspaceOwnerReleaseFails(t *testing.T) {
+	events := []string{}
+	done := make(chan struct{})
+	close(done)
+	owner := &workspaceOwner{
+		transport: readyPoolWorkspaceOwnerTransport{events: &events, releaseErr: errors.New("release response lost")},
+		key:       strings.Repeat("a", 64),
+		token:     strings.Repeat("b", 64),
+		stop:      make(chan struct{}),
+		done:      done,
+	}
+	returned := false
+	err := returnReadyPoolAfterWorkspaceOwner(context.Background(), &owner, func() error {
+		returned = true
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "ambiguous remote state") {
+		t.Fatalf("release error=%v, want ambiguous failure", err)
+	}
+	if returned {
+		t.Fatal("coordinator return ran after workspace owner release failure")
+	}
+	if got := strings.Join(events, ","); got != "owner.release" {
+		t.Fatalf("events=%q, want only owner release", got)
+	}
+	if owner != nil {
+		t.Fatal("failed-close owner remained installed for a double close")
 	}
 }
 

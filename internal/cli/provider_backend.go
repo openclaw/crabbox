@@ -126,6 +126,13 @@ type SSHLeaseBackend interface {
 	ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error
 }
 
+// ExclusiveOneShotAcquireBackend marks Acquire results that are newly
+// provisioned and exclusive to the caller until the one-shot run completes.
+// Backends are non-exclusive by default.
+type ExclusiveOneShotAcquireBackend interface {
+	AcquireIsExclusiveOneShot() bool
+}
+
 // StatusTouchClaimValidator lets a provider require identity labels that core
 // cannot interpret before status --wait extends a remotely visible lease.
 type StatusTouchClaimValidator interface {

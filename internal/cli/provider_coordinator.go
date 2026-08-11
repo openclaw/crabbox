@@ -28,6 +28,8 @@ type coordinatorLeaseBackend struct {
 	rt     Runtime
 }
 
+func (b *coordinatorLeaseBackend) AcquireIsExclusiveOneShot() bool { return true }
+
 func (b *coordinatorLeaseBackend) Spec() ProviderSpec { return b.spec }
 
 func (b *coordinatorLeaseBackend) SupportsRequestedLeaseID() bool { return true }

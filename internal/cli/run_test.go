@@ -477,6 +477,8 @@ type runEnvProfileTestBackend struct {
 	spec ProviderSpec
 }
 
+func (b runEnvProfileTestBackend) AcquireIsExclusiveOneShot() bool { return true }
+
 var runEnvProfileTestReleaseErr error
 var runEnvProfileTestReleaseHook func() error
 var runEnvProfileTestConnectionCleanupSafe = true
@@ -1137,7 +1139,7 @@ func TestRunCommandInjectsReservedMetadataIntoStaticSSH(t *testing.T) {
 	logPath := installRecordingSSH(t, dir)
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
 	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+	args := []string{
 		"--provider", "ssh",
 		"--static-host", "127.0.0.1",
 		"--static-user", "runner",
@@ -1145,9 +1147,11 @@ func TestRunCommandInjectsReservedMetadataIntoStaticSSH(t *testing.T) {
 		"--no-sync",
 		"--",
 		"env",
-	})
-	if err != nil {
-		t.Fatalf("static SSH run error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	for iteration := 0; iteration < 2; iteration++ {
+		if err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), args); err != nil {
+			t.Fatalf("static SSH run %d error=%v\nstdout=%s\nstderr=%s", iteration+1, err, stdout.String(), stderr.String())
+		}
 	}
 	data, err := os.ReadFile(logPath)
 	if err != nil {
@@ -1155,13 +1159,16 @@ func TestRunCommandInjectsReservedMetadataIntoStaticSSH(t *testing.T) {
 	}
 	logText := string(data)
 	for _, pattern := range []string{
-		`CRABBOX_LEASE_ID='static_[^']+'`,
-		`CRABBOX_RUN_ID='run_[a-f0-9]{12}'`,
-		`CRABBOX_SLUG=''`,
+		`CRABBOX_LEASE_ID=.*static_127-0-0-1`,
+		`CRABBOX_RUN_ID=.*run_[a-f0-9]{12}`,
+		`CRABBOX_SLUG=`,
 	} {
 		if !regexp.MustCompile(pattern).MatchString(logText) {
 			t.Fatalf("static SSH metadata %q missing:\n%s", pattern, logText)
 		}
+	}
+	if got := strings.Count(logText, "protocol_action='acquire'"); got != 2 {
+		t.Fatalf("static no-id owner acquisitions=%d want 2:\n%s", got, logText)
 	}
 }
 

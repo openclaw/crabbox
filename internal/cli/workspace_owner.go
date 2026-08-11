@@ -97,8 +97,12 @@ func workspaceOwnerKey(leaseID string) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte("crabbox-workspace-owner-v1\x00"+leaseID)))
 }
 
-func shouldAcquireWorkspaceOwner(acquired bool) bool {
-	return !acquired
+func shouldAcquireWorkspaceOwner(acquired bool, backend SSHLeaseBackend) bool {
+	if !acquired {
+		return true
+	}
+	exclusive, ok := backend.(ExclusiveOneShotAcquireBackend)
+	return !ok || !exclusive.AcquireIsExclusiveOneShot()
 }
 
 func acquireWorkspaceOwner(ctx context.Context, target SSHTarget, leaseID string, stderr io.Writer) (*workspaceOwner, error) {
@@ -431,12 +435,14 @@ case "$action" in
   renew)
     read_state || { printf AMBIGUOUS; exit 74; }
     [ "$state_token" = "$token" ] || { printf MISMATCH; exit 75; }
+    [ "$state_expiry" -gt "$(date +%s)" ] || { printf EXPIRED; exit 75; }
     write_state
     printf RENEWED
     ;;
   inspect)
     read_state || { printf AMBIGUOUS; exit 74; }
     [ "$state_token" = "$token" ] || { printf MISMATCH; exit 75; }
+    [ "$state_expiry" -gt "$(date +%s)" ] || { printf EXPIRED; exit 75; }
     if child_status; then printf CHILD; exit 0; else child_rc=$?; fi
     [ "$child_rc" -ne 2 ] || { printf AMBIGUOUS; exit 74; }
     rm -f "$child"
@@ -570,12 +576,14 @@ try {
     }
     "renew" {
       if ($null -eq $current -or $current.Token -ne $token) { Write-Output "MISMATCH"; exit 75 }
+      if ($current.Expiry -le [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) { Write-Output "EXPIRED"; exit 75 }
       Write-State
       Write-Output "RENEWED"
       break
     }
     "inspect" {
       if ($null -eq $current -or $current.Token -ne $token) { Write-Output "MISMATCH"; exit 75 }
+      if ($current.Expiry -le [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) { Write-Output "EXPIRED"; exit 75 }
       $childStatus = Get-ChildStatus
       if ($childStatus -eq "live") { Write-Output "CHILD"; break }
       if ($childStatus -eq "ambiguous") { throw "workspace owner child state is ambiguous" }
@@ -616,6 +624,9 @@ func remoteWorkspaceOwnerPOSIXWitness(key, token, remote string, preserveInput .
 	}
 	installBody := `set -eu
 [ "$(sed -n '2p' "$state" 2>/dev/null || true)" = "$token" ] || exit 75
+owner_expiry=$(sed -n '3p' "$state" 2>/dev/null || true)
+case "$owner_expiry" in ''|*[!0-9]*) exit 74 ;; esac
+[ "$owner_expiry" -gt "$(date +%s)" ] || exit 75
 if [ -f "$child" ]; then
 	existing_pid=$(sed -n '1p' "$child" 2>/dev/null || true)
 	existing_identity=$(sed -n '2p' "$child" 2>/dev/null || true)
@@ -725,6 +736,11 @@ function Read-Token {
 	if ($lines.Count -ne 3 -or $lines[0] -ne "v1") { throw "ambiguous owner state" }
 	return [string]$lines[1]
 }
+function Read-Expiry {
+	$lines = @(Get-Content -LiteralPath $state -ErrorAction Stop)
+	if ($lines.Count -ne 3 -or $lines[0] -ne "v1" -or $lines[2] -notmatch "^[0-9]+$") { throw "ambiguous owner state" }
+	return [Int64]$lines[2]
+}
 function Get-ExistingChildStatus {
 	if (-not (Test-Path -LiteralPath $child -PathType Leaf)) { return "dead" }
 	$lines = @(Get-Content -LiteralPath $child -ErrorAction Stop)
@@ -759,6 +775,7 @@ $gateStream = Enter-Gate
 if ($null -eq $gateStream) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue; throw "ambiguous owner gate" }
 try {
 	if ((Read-Token) -ne $token) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue; exit 75 }
+	if ((Read-Expiry) -le [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue; exit 75 }
 	$existingStatus = Get-ExistingChildStatus
 	if ($existingStatus -eq "live") { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue; exit 75 }
 	if ($existingStatus -eq "ambiguous") { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue; exit 74 }

@@ -255,7 +255,7 @@ func (a App) hydrateActionsWithGitHubRunner(ctx context.Context, cfg Config, rep
 	}
 	monitorStarted := false
 	if owner != nil {
-		if err := runSSHQuiet(ctx, target, remotePrepareActionsHydrationMonitorForTarget(target, leaseID)); err != nil {
+		if err := runSSHQuiet(ctx, target, remotePrepareActionsHydrationMonitorForTarget(target, leaseID, owner)); err != nil {
 			return actionsHydrationState{}, exit(7, "prepare Actions hydration child witness on %s: %v", target.Host, err)
 		}
 		monitor := remoteActionsHydrationMonitorForTarget(target, leaseID, waitTimeout, owner)
@@ -270,9 +270,14 @@ func (a App) hydrateActionsWithGitHubRunner(ctx context.Context, cfg Config, rep
 		}
 		cancelCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 45*time.Second)
 		cancelCtx = contextWithoutWorkspaceOwner(cancelCtx)
-		_ = runSSHQuiet(cancelCtx, target, remoteCancelActionsHydrationMonitorForTarget(target, leaseID))
+		_ = runSSHQuiet(cancelCtx, target, remoteCancelActionsHydrationMonitorForTarget(target, leaseID, owner))
 		cancel()
-		_ = waitWorkspaceOwnerNoChild(context.WithoutCancel(ctx), owner, 40*time.Second)
+		if waitWorkspaceOwnerNoChild(context.WithoutCancel(ctx), owner, 40*time.Second) == nil {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			cleanupCtx = contextWithoutWorkspaceOwner(cleanupCtx)
+			_ = runSSHQuiet(cleanupCtx, target, remotePrepareActionsHydrationMonitorForTarget(target, leaseID, owner))
+			cleanupCancel()
+		}
 	}
 	if err := dispatchGitHubActionsWorkflow(ctx, repo.Root, ghRepo, cfg.Actions.Workflow, ref, fields, target.ChildEnvDenylist); err != nil {
 		if expectedJob != "" && strings.Contains(err.Error(), "Unexpected input") {
@@ -2495,7 +2500,7 @@ func remoteActionsHydrationMonitorForTarget(target SSHTarget, leaseID string, ti
 	}
 	if isWindowsNativeTarget(target) {
 		path := windowsActionsHydrationPath(actionsHydrationStatePath(leaseID))
-		stop := windowsActionsHydrationPath(actionsHydrationOwnerMonitorStopPath(leaseID))
+		stop := windowsActionsHydrationPath(actionsHydrationOwnerMonitorStopPath(leaseID, ownerToken(owner)))
 		if owner != nil {
 			return powershellCommand(`$marker = ` + psQuote(path) + `
 $stop = ` + psQuote(stop) + `
@@ -2534,7 +2539,7 @@ exit 124
 `)
 	}
 	path := "\"$HOME\"/" + shellQuote(actionsHydrationStatePath(leaseID))
-	stop := "\"$HOME\"/" + shellQuote(actionsHydrationOwnerMonitorStopPath(leaseID))
+	stop := "\"$HOME\"/" + shellQuote(actionsHydrationOwnerMonitorStopPath(leaseID, ownerToken(owner)))
 	if owner != nil {
 		return `marker=` + path + `
 stop=` + stop + `
@@ -2569,24 +2574,26 @@ done`
 	return "deadline=$(($(date +%s) + " + strconv.Itoa(seconds) + ")); while [ \"$(date +%s)\" -lt \"$deadline\" ]; do [ -f " + path + " ] && exit 0; [ -f " + stop + " ] && exit 125; sleep 1; done; exit 124"
 }
 
-func remotePrepareActionsHydrationMonitorForTarget(target SSHTarget, leaseID string) string {
+func remotePrepareActionsHydrationMonitorForTarget(target SSHTarget, leaseID string, owner *workspaceOwner) string {
+	path := actionsHydrationOwnerMonitorStopPath(leaseID, ownerToken(owner))
 	if isWindowsNativeTarget(target) {
-		return powershellCommand(`Remove-Item -LiteralPath ` + psQuote(windowsActionsHydrationPath(actionsHydrationOwnerMonitorStopPath(leaseID))) + ` -Force -ErrorAction SilentlyContinue
+		return powershellCommand(`Remove-Item -LiteralPath ` + psQuote(windowsActionsHydrationPath(path)) + ` -Force -ErrorAction SilentlyContinue
 exit 0
 `)
 	}
-	return "rm -f \"$HOME\"/" + shellQuote(actionsHydrationOwnerMonitorStopPath(leaseID))
+	return "rm -f \"$HOME\"/" + shellQuote(path)
 }
 
-func remoteCancelActionsHydrationMonitorForTarget(target SSHTarget, leaseID string) string {
+func remoteCancelActionsHydrationMonitorForTarget(target SSHTarget, leaseID string, owner *workspaceOwner) string {
+	path := actionsHydrationOwnerMonitorStopPath(leaseID, ownerToken(owner))
 	if isWindowsNativeTarget(target) {
-		return powershellCommand(`$path = ` + psQuote(windowsActionsHydrationPath(actionsHydrationOwnerMonitorStopPath(leaseID))) + `
+		return powershellCommand(`$path = ` + psQuote(windowsActionsHydrationPath(path)) + `
 New-Item -ItemType Directory -Force -Path ([IO.Path]::GetDirectoryName($path)) | Out-Null
 New-Item -ItemType File -Force -Path $path | Out-Null
 exit 0
 `)
 	}
-	return "mkdir -p \"$HOME\"/" + shellQuote(actionsHydrationDir()) + " && touch \"$HOME\"/" + shellQuote(actionsHydrationOwnerMonitorStopPath(leaseID))
+	return "mkdir -p \"$HOME\"/" + shellQuote(actionsHydrationDir()) + " && touch \"$HOME\"/" + shellQuote(path)
 }
 
 func waitWorkspaceOwnerNoChild(ctx context.Context, owner *workspaceOwner, timeout time.Duration) error {
@@ -2670,7 +2677,7 @@ fi
 }
 
 func remoteClearActionsHydrationState(leaseID string) string {
-	return "rm -f \"$HOME\"/" + shellQuote(actionsHydrationStatePath(leaseID)) + " \"$HOME\"/" + shellQuote(actionsHydrationEnvPath(leaseID)) + " \"$HOME\"/" + shellQuote(actionsHydrationServicesPath(leaseID)) + " \"$HOME\"/" + shellQuote(actionsHydrationStopPath(leaseID)) + " \"$HOME\"/" + shellQuote(actionsHydrationOwnerMonitorStopPath(leaseID)) + " \"$HOME\"/" + shellQuote(actionsHydrationLocalScriptPath(leaseID)) + " \"$HOME\"/" + shellQuote(actionsHydrationLocalLogPath(leaseID)) + " \"$HOME\"/" + shellQuote(actionsHydrationLocalExitPath(leaseID))
+	return "rm -f \"$HOME\"/" + shellQuote(actionsHydrationStatePath(leaseID)) + " \"$HOME\"/" + shellQuote(actionsHydrationEnvPath(leaseID)) + " \"$HOME\"/" + shellQuote(actionsHydrationServicesPath(leaseID)) + " \"$HOME\"/" + shellQuote(actionsHydrationStopPath(leaseID)) + " \"$HOME\"/" + shellQuote(actionsHydrationLocalScriptPath(leaseID)) + " \"$HOME\"/" + shellQuote(actionsHydrationLocalLogPath(leaseID)) + " \"$HOME\"/" + shellQuote(actionsHydrationLocalExitPath(leaseID))
 }
 
 func remoteClearActionsHydrationStateForTarget(target SSHTarget, leaseID string) string {
@@ -2680,7 +2687,6 @@ func remoteClearActionsHydrationStateForTarget(target SSHTarget, leaseID string)
 			windowsActionsHydrationPath(actionsHydrationEnvPath(leaseID)),
 			windowsActionsHydrationPath(actionsHydrationServicesPath(leaseID)),
 			windowsActionsHydrationPath(actionsHydrationStopPath(leaseID)),
-			windowsActionsHydrationPath(actionsHydrationOwnerMonitorStopPath(leaseID)),
 			windowsActionsHydrationPath(actionsHydrationLocalScriptPath(leaseID)),
 			windowsActionsHydrationPath(actionsHydrationLocalLogPath(leaseID)),
 			windowsActionsHydrationPath(actionsHydrationLocalExitPath(leaseID)),
@@ -2722,8 +2728,15 @@ func actionsHydrationStopPath(leaseID string) string {
 	return actionsHydrationDir() + "/" + leaseID + ".stop"
 }
 
-func actionsHydrationOwnerMonitorStopPath(leaseID string) string {
-	return actionsHydrationDir() + "/" + leaseID + ".owner-monitor-stop"
+func ownerToken(owner *workspaceOwner) string {
+	if owner == nil || owner.token == "" {
+		return "unowned"
+	}
+	return owner.token
+}
+
+func actionsHydrationOwnerMonitorStopPath(leaseID, token string) string {
+	return actionsHydrationDir() + "/" + leaseID + ".owner-monitor-stop." + token
 }
 
 func actionsHydrationLocalScriptPath(leaseID string) string {

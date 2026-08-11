@@ -288,10 +288,15 @@ func TestWorkspaceOwnerTokenAndTransportFailuresFailClosed(t *testing.T) {
 }
 
 func TestWorkspaceOwnerAcquisitionBoundary(t *testing.T) {
-	if shouldAcquireWorkspaceOwner(true) {
-		t.Fatal("newly acquired one-shot lease must bypass the reuse owner")
+	nonExclusive := newWatchTestBackend()
+	if !shouldAcquireWorkspaceOwner(true, nonExclusive) {
+		t.Fatal("a successful non-exclusive acquisition must acquire the workspace owner")
 	}
-	if !shouldAcquireWorkspaceOwner(false) {
+	exclusive := runEnvProfileTestBackend{}
+	if shouldAcquireWorkspaceOwner(true, exclusive) {
+		t.Fatal("newly acquired exclusive one-shot lease must bypass the workspace owner")
+	}
+	if !shouldAcquireWorkspaceOwner(false, exclusive) {
 		t.Fatal("existing, pooled, and watch-reused leases must acquire the reuse owner")
 	}
 }
@@ -326,14 +331,17 @@ func TestWorkspaceOwnerLifecycleBoundaryMatrix(t *testing.T) {
 		"watch iteration",
 	} {
 		t.Run(lifecycle, func(t *testing.T) {
-			if !shouldAcquireWorkspaceOwner(false) {
+			if !shouldAcquireWorkspaceOwner(false, nil) {
 				t.Fatalf("reused %s path bypassed workspace ownership", lifecycle)
 			}
 		})
 	}
 }
 
-func TestWorkspaceOwnerSerializesRunAndStandaloneActionsHydration(t *testing.T) {
+func TestWorkspaceOwnerSerializesStaticRunAndStandaloneActionsHydration(t *testing.T) {
+	if !shouldAcquireWorkspaceOwner(true, testStaticSSHBackend{}) {
+		t.Fatal("static SSH acquisition bypassed workspace ownership")
+	}
 	remote := newFakeWorkspaceOwnerRemote()
 	remote.blockBusyAcquire = true
 	runOwner := acquireFakeWorkspaceOwner(t, context.Background(), remote, "cbx_run_hydrate")
@@ -381,7 +389,7 @@ func TestWorkspaceOwnerProtocolGeneration(t *testing.T) {
 	if posix != wsl {
 		t.Fatal("POSIX and WSL2 must use the same owner protocol")
 	}
-	for _, want := range []string{".crabbox/workspace-owners", key + ".gate", "$key.owner", "$key.child", "flock -x -w 0", "lockf -t 0", "ps -o lstart=", "RECOVERED", "MISMATCH", "AMBIGUOUS"} {
+	for _, want := range []string{".crabbox/workspace-owners", key + ".gate", "$key.owner", "$key.child", "flock -x -w 0", "lockf -t 0", "ps -o lstart=", "RECOVERED", "MISMATCH", "EXPIRED", "AMBIGUOUS", `[ "$state_expiry" -gt "$(date +%s)" ]`} {
 		if !strings.Contains(posix, want) {
 			t.Fatalf("POSIX protocol missing %q:\n%s", want, posix)
 		}
@@ -391,7 +399,7 @@ func TestWorkspaceOwnerProtocolGeneration(t *testing.T) {
 	}
 
 	windows := decodePowerShellCommand(t, remoteWorkspaceOwnerCommand(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, req))
-	for _, want := range []string{".crabbox\\workspace-owners", "$key = '" + key + "'", "$key + \".owner\"", "$key + \".child\"", "[Diagnostics.Process]::GetProcessById", "return \"ambiguous\"", "StartTime.ToUniversalTime().Ticks", "RECOVERED", "MISMATCH", "AMBIGUOUS"} {
+	for _, want := range []string{".crabbox\\workspace-owners", "$key = '" + key + "'", "$key + \".owner\"", "$key + \".child\"", "[Diagnostics.Process]::GetProcessById", "return \"ambiguous\"", "StartTime.ToUniversalTime().Ticks", "RECOVERED", "MISMATCH", "EXPIRED", "AMBIGUOUS", "$current.Expiry -le [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()"} {
 		if !strings.Contains(windows, want) {
 			t.Fatalf("Windows protocol missing %q:\n%s", want, windows)
 		}
@@ -400,13 +408,13 @@ func TestWorkspaceOwnerProtocolGeneration(t *testing.T) {
 		t.Fatalf("Windows protocol exposed raw lease ID: %s", windows)
 	}
 	posixWitness := remoteWorkspaceOwnerPOSIXWitness(key, token, "printf ok")
-	for _, want := range []string{"child_identity=$(ps -o lstart=", "mv \"$child_tmp\" \"$child\"", "touch \"$start\"", "wait \"$child_pid\"", "rm -f \"$child\""} {
+	for _, want := range []string{"child_identity=$(ps -o lstart=", "owner_expiry=$(sed -n", "owner_expiry", "date +%s", "mv \"$child_tmp\" \"$child\"", "touch \"$start\"", "wait \"$child_pid\"", "rm -f \"$child\""} {
 		if !strings.Contains(posixWitness, want) {
 			t.Fatalf("POSIX child witness missing %q:\n%s", want, posixWitness)
 		}
 	}
 	windowsWitness := decodePowerShellCommand(t, remoteWorkspaceOwnerWindowsWitness(key, token, "Write-Output ok"))
-	for _, want := range []string{"Start-Process", "StartTime.ToUniversalTime().Ticks", "Move-Item -LiteralPath $tmp -Destination $child", "$process.WaitForExit()", "Remove-Item -LiteralPath $child"} {
+	for _, want := range []string{"Start-Process", "StartTime.ToUniversalTime().Ticks", "Read-Expiry", "(Read-Expiry) -le [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()", "Move-Item -LiteralPath $tmp -Destination $child", "$process.WaitForExit()", "Remove-Item -LiteralPath $child"} {
 		if !strings.Contains(windowsWitness, want) {
 			t.Fatalf("Windows child witness missing %q:\n%s", want, windowsWitness)
 		}
@@ -444,6 +452,34 @@ func TestWorkspaceOwnerPOSIXProtocolBehavior(t *testing.T) {
 	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerRenew, tokenB))); err == nil || out != "MISMATCH" {
 		t.Fatalf("mismatched renew out=%q err=%v", out, err)
 	}
+	statePath := filepath.Join(home, ".crabbox", "workspace-owners", key+".owner")
+	childPath := filepath.Join(home, ".crabbox", "workspace-owners", key+".child")
+	expiredState := "v1\n" + tokenA + "\n1\n"
+	if err := os.WriteFile(statePath, []byte(expiredState), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerRenew, tokenA))); err == nil || out != "EXPIRED" {
+		t.Fatalf("late same-token renew out=%q err=%v", out, err)
+	}
+	if data, err := os.ReadFile(statePath); err != nil || string(data) != expiredState {
+		t.Fatalf("late renew changed expired state: data=%q err=%v", data, err)
+	}
+	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerInspect, tokenA))); err == nil || out != "EXPIRED" {
+		t.Fatalf("late same-token inspect out=%q err=%v", out, err)
+	}
+	lateResultPath := filepath.Join(home, "late-child.txt")
+	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIXWitness(key, tokenA, "touch "+shellQuote(lateResultPath))); err == nil {
+		t.Fatalf("late same-token witness succeeded: out=%q", out)
+	}
+	if _, err := os.Stat(childPath); !os.IsNotExist(err) {
+		t.Fatalf("late witness published child state: %v", err)
+	}
+	if _, err := os.Stat(lateResultPath); !os.IsNotExist(err) {
+		t.Fatalf("late witness executed child command: %v", err)
+	}
+	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerAcquire, tokenA))); err != nil || out != "RECOVERED" {
+		t.Fatalf("recover expired generation out=%q err=%v", out, err)
+	}
 
 	resultPath := filepath.Join(home, "revision.txt")
 	witness := remoteWorkspaceOwnerPOSIXWitness(key, tokenA, "printf revision-a > "+shellQuote(resultPath))
@@ -469,7 +505,6 @@ func TestWorkspaceOwnerPOSIXProtocolBehavior(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity := strings.TrimSpace(strings.Join(strings.Fields(string(identityOut)), " "))
-	childPath := filepath.Join(home, ".crabbox", "workspace-owners", key+".child")
 	existingWitness := strconv.Itoa(os.Getpid()) + "\n" + identity + "\n"
 	if err := os.WriteFile(childPath, []byte(existingWitness), 0o600); err != nil {
 		t.Fatal(err)
@@ -514,7 +549,6 @@ func TestWorkspaceOwnerPOSIXProtocolBehavior(t *testing.T) {
 		t.Fatalf("child witness remained after exit: %v", err)
 	}
 
-	statePath := filepath.Join(home, ".crabbox", "workspace-owners", key+".owner")
 	if err := os.WriteFile(statePath, []byte("v1\n"+tokenA+"\n1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -575,6 +609,38 @@ Set-Content -LiteralPath (Join-Path $root (` + psQuote(key) + ` + ".gate")) -Val
 	req := workspaceOwnerRemoteRequest{Action: workspaceOwnerAcquire, Key: key, Token: token, TTL: 30 * time.Second}
 	if out, err := runWindowsPowerShellScript(t, decodePowerShellCommand(t, remoteWorkspaceOwnerWindows(req))); err != nil || !strings.Contains(string(out), "ACQUIRED") {
 		t.Fatalf("Windows acquire out=%q err=%v", out, err)
+	}
+	expire := `$root = Join-Path $HOME ".crabbox\workspace-owners"
+$state = Join-Path $root (` + psQuote(key) + ` + ".owner")
+Set-Content -LiteralPath $state -Value @("v1", ` + psQuote(token) + `, "1") -Encoding ASCII
+`
+	if out, err := runWindowsPowerShellScript(t, expire); err != nil {
+		t.Fatalf("expire Windows owner state out=%q err=%v", out, err)
+	}
+	req.Action = workspaceOwnerRenew
+	if out, err := runWindowsPowerShellScript(t, decodePowerShellCommand(t, remoteWorkspaceOwnerWindows(req))); err == nil || !strings.Contains(string(out), "EXPIRED") {
+		t.Fatalf("late Windows renew out=%q err=%v", out, err)
+	}
+	req.Action = workspaceOwnerInspect
+	if out, err := runWindowsPowerShellScript(t, decodePowerShellCommand(t, remoteWorkspaceOwnerWindows(req))); err == nil || !strings.Contains(string(out), "EXPIRED") {
+		t.Fatalf("late Windows inspect out=%q err=%v", out, err)
+	}
+	if out, err := runWindowsPowerShellScript(t, decodePowerShellCommand(t, remoteWorkspaceOwnerWindowsWitness(key, token, "Write-Output late-child"))); err == nil || strings.Contains(string(out), "late-child") {
+		t.Fatalf("late Windows witness executed: out=%q err=%v", out, err)
+	}
+	verifyExpired := `$root = Join-Path $HOME ".crabbox\workspace-owners"
+$state = Join-Path $root (` + psQuote(key) + ` + ".owner")
+$child = Join-Path $root (` + psQuote(key) + ` + ".child")
+$lines = @(Get-Content -LiteralPath $state -ErrorAction Stop)
+if ($lines.Count -ne 3 -or $lines[2] -ne "1") { throw "expired state changed" }
+if (Test-Path -LiteralPath $child) { throw "late witness published child" }
+`
+	if out, err := runWindowsPowerShellScript(t, verifyExpired); err != nil {
+		t.Fatalf("verify expired Windows generation out=%q err=%v", out, err)
+	}
+	req.Action = workspaceOwnerAcquire
+	if out, err := runWindowsPowerShellScript(t, decodePowerShellCommand(t, remoteWorkspaceOwnerWindows(req))); err != nil || !strings.Contains(string(out), "RECOVERED") {
+		t.Fatalf("recover expired Windows generation out=%q err=%v", out, err)
 	}
 	if out, err := runWindowsPowerShellScript(t, decodePowerShellCommand(t, remoteWorkspaceOwnerWindowsWitness(key, token, "Write-Output child-ok"))); err != nil || !strings.Contains(string(out), "child-ok") {
 		t.Fatalf("Windows witnessed child out=%q err=%v", out, err)
