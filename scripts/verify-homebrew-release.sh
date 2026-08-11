@@ -183,9 +183,13 @@ sha256_file() {
 }
 
 require_public_workflow_ancestry() {
-  local verifier_commit=$1 workflow_commit=$2
+  local verifier_commit=$1 workflow_commit=$2 tooling_commit=$3
   git -C "$ROOT" merge-base --is-ancestor "$verifier_commit" "$workflow_commit" || {
     echo "public workflow commit is not a descendant of the provenance verifier" >&2
+    return 1
+  }
+  git -C "$ROOT" merge-base --is-ancestor "$workflow_commit" "$tooling_commit" || {
+    echo "public workflow commit is not an ancestor of protected tooling" >&2
     return 1
   }
 }
@@ -194,7 +198,8 @@ freeze_public_release() {
   [[ $# -eq 10 ]] || usage
   local tag=$1 asset_dir=$2 tag_object=$3 source_commit=$4 verifier_commit=$5
   local release_id=$6 run_id=$7 proof_dir=$8 work=$9 node_bin=${10}
-  local repository=$CRABBOX_RELEASE_REPOSITORY version=${tag#v} workflow_id workflow_commit arch
+  local repository=$CRABBOX_RELEASE_REPOSITORY version=${tag#v} workflow_id workflow_commit tooling_commit arch
+  tooling_commit=${CRABBOX_VERIFY_TOOLING_COMMIT:-$verifier_commit}
   [[ "$release_id" =~ ^[1-9][0-9]*$ && "$run_id" =~ ^[1-9][0-9]*$ ]] || usage
   [[ -d "$proof_dir" && ! -L "$proof_dir" ]] || {
     echo "public proof ZIP directory must be a real directory" >&2
@@ -232,7 +237,7 @@ freeze_public_release() {
   public_api_get "repos/$repository/actions/runs/$run_id" >"$work/public-run.json"
   workflow_commit=$(jq -er '.head_sha | select(type == "string" and test("^[0-9a-f]{40}$"))' \
     "$work/public-run.json")
-  require_public_workflow_ancestry "$verifier_commit" "$workflow_commit"
+  require_public_workflow_ancestry "$verifier_commit" "$workflow_commit" "$tooling_commit"
   workflow_id=$(jq -er '.workflow_id | select(type == "number" and . > 0)' "$work/public-run.json")
   public_api_get "repos/$repository/actions/workflows/$workflow_id" >"$work/public-workflow.json"
   public_api_get "repos/$repository/actions/runs/$run_id/artifacts?per_page=100" \

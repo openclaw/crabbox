@@ -186,6 +186,15 @@ test("Homebrew verifier keeps downloaded proof inputs outside the protected chec
   assert.match(workflow, /\[\[ "\$WORKFLOW_SHA" == "\$RUN_SHA" \]\]/);
   assert.match(workflow, /name: Check out protected Homebrew tooling[\s\S]*ref: \$\{\{ github\.workflow_sha \}\}/);
   assert.doesNotMatch(workflow, /ref: \$\{\{ inputs\.verifier_commit \}\}/);
+  assert.ok((workflow.match(/fetch-depth: 0/g) ?? []).length >= 2);
+  for (const ancestry of [
+    /git merge-base --is-ancestor "\$SOURCE_COMMIT" "\$VERIFIER_COMMIT"/g,
+    /git merge-base --is-ancestor "\$VERIFIER_COMMIT" "\$public_workflow_commit"/g,
+    /git merge-base --is-ancestor "\$public_workflow_commit" "\$WORKFLOW_SHA"/g,
+    /git merge-base --is-ancestor "\$WORKFLOW_SHA" "\$canonical_commit"/g,
+  ]) {
+    assert.equal((workflow.match(ancestry) ?? []).length, 2);
+  }
   assert.match(
     workflow,
     /name: Set up Go for build-info inspection\n\s+uses: actions\/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16/,
@@ -229,7 +238,7 @@ test("Homebrew verifier keeps downloaded proof inputs outside the protected chec
   assert.equal(
     (workflow.match(/unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_RUNTIME_TOKEN GH_TOKEN GITHUB_TOKEN/g) ?? [])
       .length,
-    3,
+    4,
   );
   assert.match(
     workflow,
@@ -238,6 +247,10 @@ test("Homebrew verifier keeps downloaded proof inputs outside the protected chec
   const homebrewVerifier = read("scripts/verify-homebrew-release.sh");
   assert.match(homebrewVerifier, /workflow_commit=\$\(jq -er '\.head_sha/);
   assert.match(homebrewVerifier, /CRABBOX_PUBLISH_WORKFLOW_COMMIT="\$workflow_commit"/);
+  assert.match(
+    homebrewVerifier,
+    /merge-base --is-ancestor "\$workflow_commit" "\$tooling_commit"/,
+  );
   assert.match(homebrewVerifier, /external public postflight requires the protected Homebrew workflow/);
   assert.equal(
     (homebrewVerifier.match(/freeze_public_release \\\n/g) ?? []).length,

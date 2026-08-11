@@ -39,6 +39,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Check out protected Homebrew workflow tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: Guard published release and protected verifier run
         shell: bash
         env:
@@ -47,6 +54,7 @@ jobs:
           REF_PROTECTED: ${{ github.ref_protected }}
           RELEASE_ID: ${{ inputs.release_id }}
           RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
           PUBLIC_VERIFIER_RUN_ID: ${{ inputs.public_verifier_run_id }}
           RUN_SHA: ${{ github.sha }}
           VERIFIER_COMMIT: ${{ inputs.verifier_commit }}
@@ -54,6 +62,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ ]]
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
           [[ "$VERIFIER_COMMIT" =~ ^[0-9a-f]{40}$ ]]
           [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$PUBLIC_VERIFIER_RUN_ID" =~ ^[1-9][0-9]*$ ]]
@@ -72,6 +81,8 @@ jobs:
           workflow_id=$(jq -er '.workflow_id | select(type == "number" and . > 0)' "$work/run.json")
           gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_id" \
             >"$work/workflow.json"
+          gh api --method GET "repos/$GITHUB_REPOSITORY/branches/$DEFAULT_BRANCH" \
+            >"$work/branch.json"
           jq -e \
             --argjson id "$RELEASE_ID" \
             --arg tag "$RELEASE_TAG" '
@@ -94,6 +105,19 @@ jobs:
           jq -e '
             .path == ".github/workflows/release-assets.yml" and .state == "active"
           ' "$work/workflow.json" >/dev/null
+          public_workflow_commit=$(jq -er '.head_sha' "$work/run.json")
+          canonical_commit=$(jq -er \
+            --arg branch "$DEFAULT_BRANCH" '
+              select(.name == $branch and .protected == true) | .commit.sha |
+              select(type == "string" and test("^[0-9a-f]{40}$"))
+            ' "$work/branch.json")
+          git -c fetch.writeCommitGraph=false fetch --quiet --no-tags \
+            "https://github.com/$GITHUB_REPOSITORY" "$canonical_commit"
+          test "$(git rev-parse HEAD)" = "$WORKFLOW_SHA"
+          git merge-base --is-ancestor "$SOURCE_COMMIT" "$VERIFIER_COMMIT"
+          git merge-base --is-ancestor "$VERIFIER_COMMIT" "$public_workflow_commit"
+          git merge-base --is-ancestor "$public_workflow_commit" "$WORKFLOW_SHA"
+          git merge-base --is-ancestor "$WORKFLOW_SHA" "$canonical_commit"
 
   public-witness-preflight:
     name: freeze-anonymous-public-witness
@@ -105,6 +129,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Freeze anonymous public metadata before native execution
@@ -119,6 +144,30 @@ jobs:
           scripts/fetch-public-release-witness.sh \
             "$GITHUB_REPOSITORY" "$RELEASE_ID" "$PUBLIC_VERIFIER_RUN_ID" \
             "$RUNNER_TEMP/public-witness"
+
+      - name: Verify frozen public workflow ancestry
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          VERIFIER_COMMIT: ${{ inputs.verifier_commit }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_RUNTIME_TOKEN GH_TOKEN GITHUB_TOKEN
+          public_workflow_commit=$(jq -er \
+            '.head_sha | select(type == "string" and test("^[0-9a-f]{40}$"))' \
+            "$RUNNER_TEMP/public-witness/run.json")
+          canonical_commit=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY" \
+            "refs/heads/$DEFAULT_BRANCH" | awk '{print $1}')
+          [[ "$canonical_commit" =~ ^[0-9a-f]{40}$ ]]
+          git -c fetch.writeCommitGraph=false fetch --quiet --no-tags \
+            "https://github.com/$GITHUB_REPOSITORY" "$canonical_commit"
+          test "$(git rev-parse HEAD)" = "$WORKFLOW_SHA"
+          git merge-base --is-ancestor "$SOURCE_COMMIT" "$VERIFIER_COMMIT"
+          git merge-base --is-ancestor "$VERIFIER_COMMIT" "$public_workflow_commit"
+          git merge-base --is-ancestor "$public_workflow_commit" "$WORKFLOW_SHA"
+          git merge-base --is-ancestor "$WORKFLOW_SHA" "$canonical_commit"
 
       - name: Freeze public witness for native jobs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

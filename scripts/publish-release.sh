@@ -4,18 +4,25 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 usage() {
-  echo "usage: $0 <release-id> <tag> <tag-object> <source-commit> <verifier-commit> <native-verifier-run-id> <confirm-tag>" >&2
+  echo "usage: $0 <release-id> <tag> <tag-object> <source-commit> <verifier-commit> [<workflow-commit>] <native-verifier-run-id> <confirm-tag>" >&2
   exit 2
 }
 
-[[ $# -eq 7 ]] || usage
+[[ $# -eq 7 || $# -eq 8 ]] || usage
 RELEASE_ID=$1
 TAG=$2
 TAG_OBJECT=$3
 SOURCE_COMMIT=$4
 VERIFIER_COMMIT=$5
-VERIFIER_RUN_ID=$6
-CONFIRM_TAG=$7
+if [[ $# -eq 8 ]]; then
+  WORKFLOW_COMMIT=$6
+  VERIFIER_RUN_ID=$7
+  CONFIRM_TAG=$8
+else
+  WORKFLOW_COMMIT=$VERIFIER_COMMIT
+  VERIFIER_RUN_ID=$6
+  CONFIRM_TAG=$7
+fi
 
 [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]] || usage
 [[ "$VERIFIER_RUN_ID" =~ ^[1-9][0-9]*$ ]] || usage
@@ -23,6 +30,7 @@ CONFIRM_TAG=$7
 [[ "$TAG_OBJECT" =~ ^[0-9a-f]{40}$ ]] || usage
 [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || usage
 [[ "$VERIFIER_COMMIT" =~ ^[0-9a-f]{40}$ ]] || usage
+[[ "$WORKFLOW_COMMIT" =~ ^[0-9a-f]{40}$ ]] || usage
 [[ "$CONFIRM_TAG" == "$TAG" ]] || {
   echo "publication confirmation must exactly equal $TAG" >&2
   exit 2
@@ -48,18 +56,26 @@ PROTECTED_TOOLING=(
   scripts/verify-release-source.sh
 )
 actual_head=$(git -C "$ROOT" rev-parse --verify 'HEAD^{commit}')
-[[ "$actual_head" == "$VERIFIER_COMMIT" ]] || {
-  echo "local HEAD must exactly equal protected verifier commit $VERIFIER_COMMIT" >&2
+[[ "$actual_head" == "$WORKFLOW_COMMIT" ]] || {
+  echo "local HEAD must exactly equal protected workflow commit $WORKFLOW_COMMIT" >&2
+  exit 1
+}
+git -C "$ROOT" merge-base --is-ancestor "$SOURCE_COMMIT" "$VERIFIER_COMMIT" || {
+  echo "release source commit is not an ancestor of the provenance verifier" >&2
+  exit 1
+}
+git -C "$ROOT" merge-base --is-ancestor "$VERIFIER_COMMIT" "$WORKFLOW_COMMIT" || {
+  echo "provenance verifier commit is not an ancestor of protected workflow tooling" >&2
   exit 1
 }
 tooling_status=$(git -C "$ROOT" status --porcelain=v1 --untracked-files=all -- "${PROTECTED_TOOLING[@]}")
 [[ -z "$tooling_status" ]] || {
-  echo "protected release tooling is dirty; publish only from the exact clean verifier commit" >&2
+  echo "protected release tooling is dirty; publish only from the exact clean workflow commit" >&2
   printf '%s\n' "$tooling_status" >&2
   exit 1
 }
-git -C "$ROOT" diff --quiet "$VERIFIER_COMMIT" -- "${PROTECTED_TOOLING[@]}" || {
-  echo "protected release tooling does not match verifier commit $VERIFIER_COMMIT" >&2
+git -C "$ROOT" diff --quiet "$WORKFLOW_COMMIT" -- "${PROTECTED_TOOLING[@]}" || {
+  echo "protected release tooling does not match workflow commit $WORKFLOW_COMMIT" >&2
   exit 1
 }
 [[ "${CRABBOX_RELEASE_SERIALIZATION_CONFIRMED:-}" == "$TAG:$RELEASE_ID" ]] || {
@@ -77,12 +93,12 @@ WORKFLOW_PATH=.github/workflows/release-assets.yml
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/crabbox-publish-release.XXXXXX")
 chmod 700 "$WORK"
 trap 'rm -rf "$WORK"' EXIT
-git -C "$ROOT" show "$VERIFIER_COMMIT:release/records/$TAG.json" >"$WORK/protected-release-record.json" || {
-  echo "protected verifier commit does not contain the release record for $TAG" >&2
+git -C "$ROOT" show "$WORKFLOW_COMMIT:release/records/$TAG.json" >"$WORK/protected-release-record.json" || {
+  echo "protected workflow commit does not contain the release record for $TAG" >&2
   exit 1
 }
-git -C "$ROOT" show "$VERIFIER_COMMIT:.github/release-allowed-signers" >"$WORK/protected-release-allowed-signers" || {
-  echo "protected verifier commit does not contain the release signer policy" >&2
+git -C "$ROOT" show "$WORKFLOW_COMMIT:.github/release-allowed-signers" >"$WORK/protected-release-allowed-signers" || {
+  echo "protected workflow commit does not contain the release signer policy" >&2
   exit 1
 }
 
@@ -115,6 +131,7 @@ publication_environment() {
     "CRABBOX_PUBLISH_TAG_OBJECT=$TAG_OBJECT" \
     "CRABBOX_PUBLISH_SOURCE_COMMIT=$SOURCE_COMMIT" \
     "CRABBOX_PUBLISH_VERIFIER_COMMIT=$VERIFIER_COMMIT" \
+    "CRABBOX_PUBLISH_WORKFLOW_COMMIT=$WORKFLOW_COMMIT" \
     "CRABBOX_PUBLISH_VERIFIER_RUN_ID=$VERIFIER_RUN_ID" \
     "CRABBOX_PUBLISH_DEFAULT_BRANCH=$DEFAULT_BRANCH" \
     "CRABBOX_PUBLISH_WORKFLOW_PATH=$WORKFLOW_PATH" \
@@ -158,10 +175,10 @@ verify_protected_source() {
     "$REPOSITORY" "$DEFAULT_BRANCH" "$TAG" >/dev/null
   jq -e \
     --arg branch "$DEFAULT_BRANCH" \
-    --arg commit "$VERIFIER_COMMIT" '
+    --arg commit "$WORKFLOW_COMMIT" '
       .name == $branch and .protected == true and .commit.sha == $commit
     ' "$WORK/$prefix-branch.json" >/dev/null || {
-    echo "protected default-branch head does not match the verifier commit" >&2
+    echo "protected default-branch head does not match the workflow commit" >&2
     exit 1
   }
   jq -e \
@@ -192,7 +209,7 @@ verify_protected_source() {
   RELEASE_TAG=$TAG \
   EXPECTED_TAG_OBJECT=$TAG_OBJECT \
   EXPECTED_TAG_COMMIT=$SOURCE_COMMIT \
-  TRUSTED_HEAD=$VERIFIER_COMMIT \
+  TRUSTED_HEAD=$WORKFLOW_COMMIT \
   RELEASE_RECORD="$WORK/protected-release-record.json" \
   ALLOWED_SIGNERS="$WORK/protected-release-allowed-signers" \
   REQUIRE_PUBLISHABLE=1 \

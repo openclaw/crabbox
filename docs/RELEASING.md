@@ -305,13 +305,15 @@ gh run watch "$DRAFT_VERIFIER_RUN_ID" \
 ```
 
 Stop for the publication gate. Publication takes the exact successful draft
-run ID and repeats the tag as its explicit confirmation:
+run ID, its protected workflow commit, and repeats the tag as its explicit
+confirmation. The seven-argument compatibility form is only for historical
+runs where `WORKFLOW_COMMIT` exactly equals `VERIFIER_COMMIT`:
 
 ```sh
 CRABBOX_RELEASE_SERIALIZATION_CONFIRMED="$TAG:$RELEASE_ID" \
 scripts/publish-release.sh \
   "$RELEASE_ID" "$TAG" "$TAG_OBJECT" "$TAG_COMMIT" \
-  "$VERIFIER_COMMIT" "$DRAFT_VERIFIER_RUN_ID" "$TAG"
+  "$VERIFIER_COMMIT" "$WORKFLOW_COMMIT" "$DRAFT_VERIFIER_RUN_ID" "$TAG"
 ```
 
 Stop again. Dispatch a new native run against the published state; do not reuse

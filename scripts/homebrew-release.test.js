@@ -439,7 +439,7 @@ test("Homebrew verifier cleanup survives main function scope", () => {
   assert.equal(fs.existsSync(root), false);
 });
 
-test("public workflow commit must descend from the provenance verifier", () => {
+test("public workflow commit must be between the provenance verifier and protected tooling", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-public-workflow-ancestry-"));
   try {
     execFileSync("git", ["init", "-b", "main"], { cwd: root, stdio: "ignore" });
@@ -459,34 +459,52 @@ test("public workflow commit must descend from the provenance verifier", () => {
       cwd: root,
       encoding: "utf8",
     }).trim();
+    fs.writeFileSync(path.join(root, "tooling.txt"), "tooling\n");
+    execFileSync("git", ["add", "tooling.txt"], { cwd: root });
+    execFileSync("git", ["commit", "-m", "tooling"], { cwd: root, stdio: "ignore" });
+    const toolingCommit = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: root,
+      encoding: "utf8",
+    }).trim();
     const emptyTree = execFileSync("git", ["hash-object", "-w", "-t", "tree", "/dev/null"], {
       cwd: root,
       encoding: "utf8",
     }).trim();
-    const divergentCommit = execFileSync("git", ["commit-tree", emptyTree, "-m", "divergent"], {
+    const orphanCommit = execFileSync("git", ["commit-tree", emptyTree, "-m", "orphan"], {
       cwd: root,
       encoding: "utf8",
     }).trim();
-    const runAncestry = (commit) =>
+    const divergentCommit = execFileSync(
+      "git",
+      ["commit-tree", emptyTree, "-p", verifierCommit, "-m", "divergent"],
+      { cwd: root, encoding: "utf8" },
+    ).trim();
+    const runAncestry = (commit, tooling = toolingCommit) =>
       spawnSync(
         "/bin/bash",
         [
           "-c",
-          'source "$1"; ROOT=$2; require_public_workflow_ancestry "$3" "$4"',
+          'source "$1"; ROOT=$2; require_public_workflow_ancestry "$3" "$4" "$5"',
           "public-workflow-ancestry",
           verifier,
           root,
           verifierCommit,
           commit,
+          tooling,
         ],
         { encoding: "utf8" },
       );
 
     const valid = runAncestry(workflowCommit);
     assert.equal(valid.status, 0, valid.stderr);
+    const current = runAncestry(toolingCommit);
+    assert.equal(current.status, 0, current.stderr);
+    const orphan = runAncestry(orphanCommit);
+    assert.notEqual(orphan.status, 0);
+    assert.match(orphan.stderr, /public workflow commit is not a descendant/);
     const divergent = runAncestry(divergentCommit);
     assert.notEqual(divergent.status, 0);
-    assert.match(divergent.stderr, /public workflow commit is not a descendant/);
+    assert.match(divergent.stderr, /public workflow commit is not an ancestor of protected tooling/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
