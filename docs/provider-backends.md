@@ -207,6 +207,25 @@ Native checkpoint and fork support follow the same pattern through
 provider-specific capability areas, such as pricing or image management, should
 add similarly narrow interfaces rather than widening the base backend.
 
+Failed-run evidence for SSH leases is also optional. A supporting backend may
+capture a bounded, per-command baseline immediately before execution and return
+a collector that core calls only after a nonzero exit or command-transport
+failure:
+
+```go
+type SSHRunFailureEvidenceBackend interface {
+	Backend
+	BeginRunFailureEvidence(context.Context, RunFailureEvidenceRequest) (RunFailureEvidenceCollector, error)
+}
+```
+
+The collector keeps provider-native counters and parsing inside the adapter. It
+returns only normalized `RunFailureEvidence` values; initially the sole resource
+exhaustion reason is `memory`. Baseline and collection errors are warnings and
+must never replace the command failure. A fresh collector is created for every
+command, including watch iterations and reused leases, so historical provider
+counters cannot be attributed to a later run.
+
 ## Package layout
 
 Built-in providers live under `internal/providers/<name>`. The registry is

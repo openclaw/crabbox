@@ -1,17 +1,33 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"strings"
+	"time"
 )
 
+const runFailureEvidenceTimeout = 5 * time.Second
+
 type FailureClassification struct {
-	BlockedStage string
-	RetryLikely  string
+	BlockedStage       string
+	ResourceExhaustion ResourceExhaustionReason
+	RetryLikely        string
 }
 
 func ClassifyRunFailure(exitCode int, text string, phases []TimingPhase) FailureClassification {
+	return ClassifyRunFailureWithEvidence(exitCode, text, phases, RunFailureEvidence{})
+}
+
+func ClassifyRunFailureWithEvidence(exitCode int, text string, phases []TimingPhase, evidence RunFailureEvidence) FailureClassification {
+	if evidence.ResourceExhaustion == ResourceExhaustionMemory {
+		return FailureClassification{
+			BlockedStage:       "resource_exhaustion",
+			ResourceExhaustion: ResourceExhaustionMemory,
+			RetryLikely:        "false",
+		}
+	}
 	if exitCode == 0 {
 		return FailureClassification{}
 	}
@@ -52,6 +68,14 @@ func ClassifyRunFailure(exitCode int, text string, phases []TimingPhase) Failure
 	return FailureClassification{BlockedStage: "unknown", RetryLikely: "unknown"}
 }
 
+func classifyRunOutcomeFailure(exitCode int, text string, phases []TimingPhase, evidence RunFailureEvidence, testResultsFailed bool) FailureClassification {
+	classification := ClassifyRunFailureWithEvidence(exitCode, text, phases, evidence)
+	if testResultsFailed && classification.ResourceExhaustion == "" {
+		return FailureClassification{BlockedStage: "test", RetryLikely: "false"}
+	}
+	return classification
+}
+
 func isBlacksmithActionsCancelled(lower string) bool {
 	if !strings.Contains(lower, "testbox ready") {
 		return false
@@ -76,6 +100,7 @@ func ApplyFailureClassification(report *TimingReport, classification FailureClas
 		return
 	}
 	report.BlockedStage = classification.BlockedStage
+	report.ResourceExhaustion = classification.ResourceExhaustion
 	report.RetryLikely = classification.RetryLikely
 }
 
@@ -87,7 +112,53 @@ func FormatFailureClassificationFields(classification FailureClassification) str
 	if retry == "" {
 		retry = "unknown"
 	}
-	return fmt.Sprintf(" blocked_stage=%s retry_likely=%s", classification.BlockedStage, retry)
+	fields := fmt.Sprintf(" blocked_stage=%s", classification.BlockedStage)
+	if classification.ResourceExhaustion != "" {
+		fields += fmt.Sprintf(" resource_exhaustion=%s", classification.ResourceExhaustion)
+	}
+	return fields + fmt.Sprintf(" retry_likely=%s", retry)
+}
+
+func beginRunFailureEvidence(ctx context.Context, backend SSHLeaseBackend, lease LeaseTarget, warnings io.Writer) RunFailureEvidenceCollector {
+	capability, ok := backend.(SSHRunFailureEvidenceBackend)
+	if !ok {
+		return nil
+	}
+	bounded, cancel := context.WithTimeout(ctx, runFailureEvidenceTimeout)
+	defer cancel()
+	collector, err := capability.BeginRunFailureEvidence(bounded, RunFailureEvidenceRequest{Lease: lease})
+	if err != nil {
+		fmt.Fprintf(nonNilWriter(warnings), "warning: failed-run evidence baseline unavailable: %v\n", err)
+		return nil
+	}
+	return collector
+}
+
+func collectRunFailureEvidence(ctx context.Context, collector RunFailureEvidenceCollector, warnings io.Writer) RunFailureEvidence {
+	if collector == nil {
+		return RunFailureEvidence{}
+	}
+	bounded, cancel := context.WithTimeout(context.WithoutCancel(ctx), runFailureEvidenceTimeout)
+	defer cancel()
+	evidence, err := collector(bounded)
+	if err != nil {
+		fmt.Fprintf(nonNilWriter(warnings), "warning: failed-run evidence collection incomplete: %v\n", err)
+		return RunFailureEvidence{}
+	}
+	switch evidence.ResourceExhaustion {
+	case "", ResourceExhaustionMemory:
+		return evidence
+	default:
+		fmt.Fprintf(nonNilWriter(warnings), "warning: failed-run evidence collection returned unsupported resource exhaustion reason %q\n", evidence.ResourceExhaustion)
+		return RunFailureEvidence{}
+	}
+}
+
+func nonNilWriter(w io.Writer) io.Writer {
+	if w == nil {
+		return io.Discard
+	}
+	return w
 }
 
 func RedactKnownFailureBody(text string) (string, bool) {
@@ -191,6 +262,12 @@ func printRunFailureDigest(w io.Writer, input runFailureDigestInput, stdoutTail,
 	fmt.Fprintf(w, "  phase: %s\n", blank(phase, "unknown"))
 	fmt.Fprintf(w, "  area: %s\n", area)
 	fmt.Fprintf(w, "  retryable: %s\n", retry)
+	if input.Classification.ResourceExhaustion != "" {
+		fmt.Fprintf(w, "  resource_exhaustion: %s\n", input.Classification.ResourceExhaustion)
+	}
+	if input.Classification.ResourceExhaustion == ResourceExhaustionMemory {
+		fmt.Fprintln(w, "  hint: increase the memory limit or reduce workload concurrency before retrying")
+	}
 	if input.RunHistoryUnavailable {
 		fmt.Fprintln(w, "  run_history: unavailable; use lease-based recovery commands below")
 	}
@@ -246,6 +323,8 @@ func failureDigestArea(classification FailureClassification, phase string) strin
 		return "install_setup"
 	case "model_call":
 		return "model_tool_provider_limit"
+	case "resource_exhaustion":
+		return "resource_exhaustion"
 	}
 	switch {
 	case strings.Contains(phase, "sync"):

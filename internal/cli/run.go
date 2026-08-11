@@ -1795,9 +1795,16 @@ afterSync:
 			return recordFailure(exit(7, "prepare test result freshness marker: %v", err))
 		}
 	}
+	leaseForEvidence := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord}
+	failureEvidenceCollector := beginRunFailureEvidence(ctx, sshBackend, leaseForEvidence, a.Stderr)
 	code, streamErr := runSSHStreamResult(ctx, target, remote, stdout, stderr)
-	if err := streamCaptures.closeAfterStream(streamErr, code, a.Stderr); err != nil {
-		return recordFailure(err)
+	failureEvidence := RunFailureEvidence{}
+	if code != 0 || streamErr != nil {
+		failureEvidence = collectRunFailureEvidence(ctx, failureEvidenceCollector, a.Stderr)
+	}
+	streamCaptureErr := streamCaptures.closeAfterStream(streamErr, code, a.Stderr)
+	if streamCaptureErr != nil && failureEvidence.ResourceExhaustion == "" {
+		return recordFailure(streamCaptureErr)
 	}
 	if !stdoutCaptured {
 		stdoutEvents.Flush()
@@ -1881,11 +1888,9 @@ afterSync:
 		if artifactFailure != nil {
 			classificationLog = strings.TrimSpace(classificationLog + "\n" + artifactFailure.Error())
 		}
-		classification = ClassifyRunFailure(code, classificationLog, timings.commandPhases)
-		if testResultsFailure != nil {
-			classification = FailureClassification{BlockedStage: "test", RetryLikely: "false"}
-		}
+		classification = classifyRunOutcomeFailure(code, classificationLog, timings.commandPhases, failureEvidence, testResultsFailure != nil)
 		timings.blockedStage = classification.BlockedStage
+		timings.resourceExhaustion = classification.ResourceExhaustion
 		timings.retryLikely = classification.RetryLikely
 		failureClassificationPrinted = true
 	}
@@ -2012,6 +2017,9 @@ afterSync:
 		}
 		if testResultsFailure != nil {
 			return recordFailure(testResultsFailure)
+		}
+		if streamCaptureErr != nil {
+			return recordFailure(streamCaptureErr)
 		}
 		return recordFailure(ExitError{Code: code, Message: fmt.Sprintf("remote command exited %d", code)})
 	}
@@ -2455,17 +2463,18 @@ func routingSafeURL(value string) string {
 }
 
 type runTimings struct {
-	started           time.Time
-	endToEndStartedAt time.Time
-	lease             time.Duration
-	bootstrap         time.Duration
-	sync              time.Duration
-	command           time.Duration
-	syncSteps         syncStepTimings
-	commandPhases     []timingPhase
-	syncSkipped       bool
-	blockedStage      string
-	retryLikely       string
+	started            time.Time
+	endToEndStartedAt  time.Time
+	lease              time.Duration
+	bootstrap          time.Duration
+	sync               time.Duration
+	command            time.Duration
+	syncSteps          syncStepTimings
+	commandPhases      []timingPhase
+	syncSkipped        bool
+	blockedStage       string
+	resourceExhaustion ResourceExhaustionReason
+	retryLikely        string
 }
 
 type syncStepTimings struct {
@@ -2506,7 +2515,7 @@ func formatRunSummary(timings runTimings, total time.Duration, exitCode int) str
 	if breakdown := formatCommandPhaseTimings(timings.commandPhases); breakdown != "" {
 		summary += " command_phases=" + breakdown
 	}
-	summary += FormatFailureClassificationFields(FailureClassification{BlockedStage: timings.blockedStage, RetryLikely: timings.retryLikely})
+	summary += FormatFailureClassificationFields(FailureClassification{BlockedStage: timings.blockedStage, ResourceExhaustion: timings.resourceExhaustion, RetryLikely: timings.retryLikely})
 	return summary
 }
 

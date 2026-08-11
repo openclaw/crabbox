@@ -28,6 +28,14 @@ type coordinatorLeaseBackend struct {
 	rt     Runtime
 }
 
+func (b *coordinatorLeaseBackend) BeginRunFailureEvidence(ctx context.Context, req RunFailureEvidenceRequest) (RunFailureEvidenceCollector, error) {
+	capability, ok := b.direct.(SSHRunFailureEvidenceBackend)
+	if !ok {
+		return nil, nil
+	}
+	return capability.BeginRunFailureEvidence(ctx, req)
+}
+
 func (b *coordinatorLeaseBackend) AcquireIsExclusiveOneShot() bool { return true }
 
 func (b *coordinatorLeaseBackend) Spec() ProviderSpec { return b.spec }

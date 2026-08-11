@@ -126,6 +126,31 @@ type SSHLeaseBackend interface {
 	ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error
 }
 
+// SSHRunFailureEvidenceBackend optionally captures provider-owned state just
+// before an SSH command starts. The returned collector retains that baseline
+// inside the provider and returns only normalized evidence to core after a
+// command or transport failure.
+type SSHRunFailureEvidenceBackend interface {
+	Backend
+	BeginRunFailureEvidence(ctx context.Context, req RunFailureEvidenceRequest) (RunFailureEvidenceCollector, error)
+}
+
+type RunFailureEvidenceRequest struct {
+	Lease LeaseTarget
+}
+
+type RunFailureEvidenceCollector func(context.Context) (RunFailureEvidence, error)
+
+type RunFailureEvidence struct {
+	ResourceExhaustion ResourceExhaustionReason
+}
+
+type ResourceExhaustionReason string
+
+const (
+	ResourceExhaustionMemory ResourceExhaustionReason = "memory"
+)
+
 // ExclusiveOneShotAcquireBackend marks Acquire results that are newly
 // provisioned and exclusive to the caller until the one-shot run completes.
 // Backends are non-exclusive by default.

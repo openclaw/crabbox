@@ -87,6 +87,21 @@ When `runtime` is unset or left at `docker`, Crabbox detects an installed
 container CLI. If both `docker` and `podman` are available, `docker` is selected
 unless `runtime` is set explicitly.
 
+### Memory-failure evidence
+
+For every user command, Local Container reads the container cgroup OOM-kill
+counter immediately before execution. After a nonzero exit or SSH transport
+failure, it reads the counter again. Only a positive increment for that command
+is reported as `resource_exhaustion=memory`; an OOM from an earlier command on a
+reused lease does not classify a later ordinary failure. Docker/Podman cgroup
+paths and counter parsing remain inside this provider.
+
+The failure digest marks this condition non-retryable with the unchanged
+configuration and suggests increasing `localContainer.memory` (or
+`--local-container-memory`) or reducing workload concurrency. If cgroup evidence
+cannot be read, Crabbox prints a diagnostic warning and preserves the original
+command failure and ordinary user-command classification.
+
 Provider flags:
 
 ```text

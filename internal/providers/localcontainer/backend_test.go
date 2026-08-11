@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -82,6 +83,237 @@ func testBackend(runner *recordingRunner) *backend {
 		Network:  "bridge",
 	}
 	return newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+}
+
+func TestRunFailureEvidenceUsesPerRunOOMKillIncrement(t *testing.T) {
+	tests := []struct {
+		name              string
+		counts            []string
+		baselineOOMKilled bool
+		expected          core.ResourceExhaustionReason
+	}{
+		{name: "increment", counts: []string{"oom 3\noom_kill 4\n", "oom 4\noom_kill 5\n"}, expected: core.ResourceExhaustionMemory},
+		{name: "no increment", counts: []string{"oom 3\noom_kill 4\n", "oom 3\noom_kill 4\n"}},
+		{name: "counter reset", counts: []string{"oom 8\noom_kill 9\n", "oom 0\noom_kill 0\n"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			index := 0
+			runner := &recordingRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				if req.Args[0] == "inspect" {
+					return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"Id":"container-123","State":{"Running":true,"OOMKilled":%t}}]`, tt.baselineOOMKilled)}, nil
+				}
+				if len(req.Args) != 4 || req.Args[0] != "exec" || req.Args[1] != "container-123" || req.Args[2] != "cat" || req.Args[3] != cgroupOOMCounterPaths[0] {
+					t.Fatalf("unexpected runtime request: %#v", req.Args)
+				}
+				if index >= len(tt.counts) {
+					t.Fatalf("unexpected extra OOM counter read")
+				}
+				result := core.LocalCommandResult{Stdout: tt.counts[index]}
+				index++
+				return result, nil
+			}}
+			b := testBackend(runner)
+			core.MarkLocalContainerRuntimeExplicit(&b.cfg)
+			collector, err := b.BeginRunFailureEvidence(context.Background(), core.RunFailureEvidenceRequest{
+				Lease: core.LeaseTarget{Server: core.Server{CloudID: "container-123"}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			evidence, err := collector(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if evidence.ResourceExhaustion != tt.expected {
+				t.Fatalf("resource exhaustion=%q, want %q", evidence.ResourceExhaustion, tt.expected)
+			}
+			if index != 2 {
+				t.Fatalf("counter reads=%d, want 2", index)
+			}
+		})
+	}
+}
+
+func TestRunFailureEvidenceReusedLeaseGetsFreshBaseline(t *testing.T) {
+	counts := []string{
+		"oom_kill 4\n",
+		"oom_kill 5\n",
+		"oom_kill 5\n",
+		"oom_kill 5\n",
+	}
+	index := 0
+	runner := &recordingRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		if req.Args[0] == "inspect" {
+			return core.LocalCommandResult{Stdout: `[{"Id":"container-reused","State":{"Running":true,"OOMKilled":false}}]`}, nil
+		}
+		if req.Args[0] != "exec" || req.Args[1] != "container-reused" {
+			t.Fatalf("unexpected runtime request: %#v", req.Args)
+		}
+		result := core.LocalCommandResult{Stdout: counts[index]}
+		index++
+		return result, nil
+	}}
+	b := testBackend(runner)
+	core.MarkLocalContainerRuntimeExplicit(&b.cfg)
+	req := core.RunFailureEvidenceRequest{Lease: core.LeaseTarget{Server: core.Server{CloudID: "container-reused"}}}
+
+	first, err := b.BeginRunFailureEvidence(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstEvidence, err := first(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstEvidence.ResourceExhaustion != core.ResourceExhaustionMemory {
+		t.Fatalf("first run evidence=%#v, want memory exhaustion", firstEvidence)
+	}
+
+	second, err := b.BeginRunFailureEvidence(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondEvidence, err := second(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondEvidence.ResourceExhaustion != "" {
+		t.Fatalf("historical OOM misclassified reused run: %#v", secondEvidence)
+	}
+}
+
+func TestRunFailureEvidenceReadErrorsRemainDiagnostic(t *testing.T) {
+	t.Run("baseline", func(t *testing.T) {
+		runner := &recordingRunner{run: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+			return core.LocalCommandResult{ExitCode: 1}, errors.New("counter unavailable")
+		}}
+		b := testBackend(runner)
+		core.MarkLocalContainerRuntimeExplicit(&b.cfg)
+		collector, err := b.BeginRunFailureEvidence(context.Background(), core.RunFailureEvidenceRequest{
+			Lease: core.LeaseTarget{Server: core.Server{CloudID: "container-123"}},
+		})
+		if err == nil || collector != nil {
+			t.Fatalf("collector=%v err=%v, want baseline error", collector != nil, err)
+		}
+	})
+
+	t.Run("collection", func(t *testing.T) {
+		reads := 0
+		runner := &recordingRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+			if req.Args[0] == "inspect" && reads == 1 {
+				return core.LocalCommandResult{Stdout: `[{"Id":"container-123","State":{"Running":true,"OOMKilled":false}}]`}, nil
+			}
+			reads++
+			if reads == 1 {
+				return core.LocalCommandResult{Stdout: "oom_kill 2\n"}, nil
+			}
+			return core.LocalCommandResult{ExitCode: 1}, errors.New("counter unavailable")
+		}}
+		b := testBackend(runner)
+		core.MarkLocalContainerRuntimeExplicit(&b.cfg)
+		collector, err := b.BeginRunFailureEvidence(context.Background(), core.RunFailureEvidenceRequest{
+			Lease: core.LeaseTarget{Server: core.Server{CloudID: "container-123"}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if evidence, err := collector(context.Background()); err == nil || evidence.ResourceExhaustion != "" {
+			t.Fatalf("evidence=%#v err=%v, want collection error without classification", evidence, err)
+		}
+	})
+}
+
+func TestRunFailureEvidenceUsesContainerOOMStateWhenCounterBecomesUnreadable(t *testing.T) {
+	reads := 0
+	inspects := 0
+	runner := &recordingRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		if req.Args[0] == "exec" {
+			reads++
+			if reads == 1 {
+				return core.LocalCommandResult{Stdout: "oom_kill 0\n"}, nil
+			}
+			return core.LocalCommandResult{ExitCode: 128}, errors.New("container is not running")
+		}
+		if req.Args[0] == "inspect" {
+			inspects++
+			oomKilled := inspects > 1
+			return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"Id":"container-123","State":{"Status":"exited","Running":false,"OOMKilled":%t}}]`, oomKilled)}, nil
+		}
+		t.Fatalf("unexpected runtime request: %#v", req.Args)
+		return core.LocalCommandResult{}, nil
+	}}
+	b := testBackend(runner)
+	core.MarkLocalContainerRuntimeExplicit(&b.cfg)
+	collector, err := b.BeginRunFailureEvidence(context.Background(), core.RunFailureEvidenceRequest{
+		Lease: core.LeaseTarget{Server: core.Server{CloudID: "container-123"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := collector(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.ResourceExhaustion != core.ResourceExhaustionMemory {
+		t.Fatalf("evidence=%#v, want memory exhaustion", evidence)
+	}
+}
+
+func TestRunFailureEvidenceDoesNotReuseHistoricalContainerOOMState(t *testing.T) {
+	reads := 0
+	runner := &recordingRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		if req.Args[0] == "exec" {
+			reads++
+			if reads == 1 {
+				return core.LocalCommandResult{Stdout: "oom_kill 3\n"}, nil
+			}
+			return core.LocalCommandResult{ExitCode: 128}, errors.New("container is not running")
+		}
+		if req.Args[0] == "inspect" {
+			return core.LocalCommandResult{Stdout: `[{"Id":"container-123","State":{"Status":"running","Running":true,"OOMKilled":true}}]`}, nil
+		}
+		t.Fatalf("unexpected runtime request: %#v", req.Args)
+		return core.LocalCommandResult{}, nil
+	}}
+	b := testBackend(runner)
+	core.MarkLocalContainerRuntimeExplicit(&b.cfg)
+	collector, err := b.BeginRunFailureEvidence(context.Background(), core.RunFailureEvidenceRequest{
+		Lease: core.LeaseTarget{Server: core.Server{CloudID: "container-123"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := collector(context.Background())
+	if err == nil {
+		t.Fatal("unreadable post-run counter should remain a diagnostic error")
+	}
+	if evidence.ResourceExhaustion != "" {
+		t.Fatalf("historical container OOM state was reused: %#v", evidence)
+	}
+}
+
+func TestReadOOMKillCountFallsBackToCgroupV1(t *testing.T) {
+	runner := &recordingRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		switch req.Args[3] {
+		case cgroupOOMCounterPaths[0]:
+			return core.LocalCommandResult{ExitCode: 1}, errors.New("not found")
+		case cgroupOOMCounterPaths[1]:
+			return core.LocalCommandResult{Stdout: "oom_kill_disable 0\nunder_oom 0\noom_kill 7\n"}, nil
+		default:
+			t.Fatalf("unexpected cgroup path: %#v", req.Args)
+			return core.LocalCommandResult{}, nil
+		}
+	}}
+	b := testBackend(runner)
+	core.MarkLocalContainerRuntimeExplicit(&b.cfg)
+	count, err := b.readOOMKillCount(context.Background(), "container-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 7 {
+		t.Fatalf("count=%d, want 7", count)
+	}
 }
 
 func TestDockerPinsCheckpointForkScope(t *testing.T) {
@@ -294,6 +526,9 @@ func TestProviderAliases(t *testing.T) {
 	}
 	if !spec.Features.Has(core.FeatureCacheVolume) {
 		t.Fatalf("local-container features=%v, want cache-volume", spec.Features)
+	}
+	if _, ok := newBackend(spec, core.BaseConfig(), core.Runtime{Exec: &recordingRunner{}}).(core.SSHRunFailureEvidenceBackend); !ok {
+		t.Fatal("local-container backend does not expose failed-run evidence capability")
 	}
 }
 

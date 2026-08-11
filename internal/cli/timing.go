@@ -7,35 +7,36 @@ import (
 )
 
 type TimingReport struct {
-	Provider      string        `json:"provider"`
-	LeaseID       string        `json:"leaseId,omitempty"`
-	Slug          string        `json:"slug,omitempty"`
-	LeaseMs       int64         `json:"leaseMs,omitempty"`
-	BootstrapMs   int64         `json:"bootstrapMs,omitempty"`
-	SyncMs        int64         `json:"syncMs"`
-	SyncPhases    []TimingPhase `json:"syncPhases,omitempty"`
-	SyncSkipped   bool          `json:"syncSkipped"`
-	SyncDelegated bool          `json:"syncDelegated,omitempty"`
-	HydrateMs     int64         `json:"hydrateMs,omitempty"`
-	ProbeMs       int64         `json:"probeMs,omitempty"`
-	CommandMs     int64         `json:"commandMs"`
-	CommandPhases []TimingPhase `json:"commandPhases,omitempty"`
-	TotalMs       int64         `json:"totalMs"`
-	EndToEndMs    int64         `json:"endToEndMs"`
-	ExitCode      int           `json:"exitCode"`
-	RunStatus     RunStatus     `json:"runStatus,omitempty"`
-	ErrorKind     RunErrorKind  `json:"errorKind,omitempty"`
-	ActionsRunURL string        `json:"actionsRunUrl,omitempty"`
-	RunID         string        `json:"runId,omitempty"`
-	Label         string        `json:"label,omitempty"`
-	MachineType   string        `json:"machineType,omitempty"`
-	RepoPath      string        `json:"repoPath,omitempty"`
-	Workdir       string        `json:"workdir,omitempty"`
-	StopCommand   string        `json:"stopCommand,omitempty"`
-	IdleTimeout   string        `json:"idleTimeout,omitempty"`
-	BlockedStage  string        `json:"blockedStage,omitempty"`
-	RetryLikely   string        `json:"retryLikely,omitempty"`
-	Artifacts     []runArtifact `json:"artifacts,omitempty"`
+	Provider           string                   `json:"provider"`
+	LeaseID            string                   `json:"leaseId,omitempty"`
+	Slug               string                   `json:"slug,omitempty"`
+	LeaseMs            int64                    `json:"leaseMs,omitempty"`
+	BootstrapMs        int64                    `json:"bootstrapMs,omitempty"`
+	SyncMs             int64                    `json:"syncMs"`
+	SyncPhases         []TimingPhase            `json:"syncPhases,omitempty"`
+	SyncSkipped        bool                     `json:"syncSkipped"`
+	SyncDelegated      bool                     `json:"syncDelegated,omitempty"`
+	HydrateMs          int64                    `json:"hydrateMs,omitempty"`
+	ProbeMs            int64                    `json:"probeMs,omitempty"`
+	CommandMs          int64                    `json:"commandMs"`
+	CommandPhases      []TimingPhase            `json:"commandPhases,omitempty"`
+	TotalMs            int64                    `json:"totalMs"`
+	EndToEndMs         int64                    `json:"endToEndMs"`
+	ExitCode           int                      `json:"exitCode"`
+	RunStatus          RunStatus                `json:"runStatus,omitempty"`
+	ErrorKind          RunErrorKind             `json:"errorKind,omitempty"`
+	ActionsRunURL      string                   `json:"actionsRunUrl,omitempty"`
+	RunID              string                   `json:"runId,omitempty"`
+	Label              string                   `json:"label,omitempty"`
+	MachineType        string                   `json:"machineType,omitempty"`
+	RepoPath           string                   `json:"repoPath,omitempty"`
+	Workdir            string                   `json:"workdir,omitempty"`
+	StopCommand        string                   `json:"stopCommand,omitempty"`
+	IdleTimeout        string                   `json:"idleTimeout,omitempty"`
+	BlockedStage       string                   `json:"blockedStage,omitempty"`
+	ResourceExhaustion ResourceExhaustionReason `json:"resourceExhaustion,omitempty"`
+	RetryLikely        string                   `json:"retryLikely,omitempty"`
+	Artifacts          []runArtifact            `json:"artifacts,omitempty"`
 
 	SchemaValidations []SchemaValidationResult `json:"schemaValidations,omitempty"`
 
@@ -116,21 +117,22 @@ func DurationMinutesCeil(duration time.Duration) int {
 
 func timingReportFromRun(provider, leaseID, slug string, timings runTimings, total time.Duration, exitCode int) timingReport {
 	return timingReport{
-		Provider:      provider,
-		LeaseID:       leaseID,
-		Slug:          slug,
-		LeaseMs:       timings.lease.Milliseconds(),
-		BootstrapMs:   timings.bootstrap.Milliseconds(),
-		SyncMs:        timings.sync.Milliseconds(),
-		SyncPhases:    syncTimingPhases(timings.syncSteps),
-		SyncSkipped:   timings.syncSkipped,
-		CommandMs:     timings.command.Milliseconds(),
-		CommandPhases: timings.commandPhases,
-		TotalMs:       total.Milliseconds(),
-		EndToEndMs:    runEndToEndDuration(timings, total).Milliseconds(),
-		ExitCode:      exitCode,
-		BlockedStage:  timings.blockedStage,
-		RetryLikely:   timings.retryLikely,
+		Provider:           provider,
+		LeaseID:            leaseID,
+		Slug:               slug,
+		LeaseMs:            timings.lease.Milliseconds(),
+		BootstrapMs:        timings.bootstrap.Milliseconds(),
+		SyncMs:             timings.sync.Milliseconds(),
+		SyncPhases:         syncTimingPhases(timings.syncSteps),
+		SyncSkipped:        timings.syncSkipped,
+		CommandMs:          timings.command.Milliseconds(),
+		CommandPhases:      timings.commandPhases,
+		TotalMs:            total.Milliseconds(),
+		EndToEndMs:         runEndToEndDuration(timings, total).Milliseconds(),
+		ExitCode:           exitCode,
+		BlockedStage:       timings.blockedStage,
+		ResourceExhaustion: timings.resourceExhaustion,
+		RetryLikely:        timings.retryLikely,
 	}
 }
 

@@ -25,7 +25,13 @@ const (
 	workRootMarkerName  = ".crabbox-local-container-work-root"
 	dockerSocketInGuest = "/var/run/docker.sock"
 	rollbackTimeout     = 10 * time.Second
+	cgroupEvidenceLimit = 4 << 10
 )
+
+var cgroupOOMCounterPaths = []string{
+	"/sys/fs/cgroup/memory.events",
+	"/sys/fs/cgroup/memory/memory.oom_control",
+}
 
 type backend struct {
 	spec core.ProviderSpec
@@ -48,8 +54,9 @@ type inspectConfig struct {
 }
 
 type inspectState struct {
-	Status  string `json:"Status"`
-	Running bool   `json:"Running"`
+	Status    string `json:"Status"`
+	Running   bool   `json:"Running"`
+	OOMKilled bool   `json:"OOMKilled"`
 }
 
 type inspectNetworking struct {
@@ -67,6 +74,73 @@ func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.B
 }
 
 func (b *backend) Spec() core.ProviderSpec { return b.spec }
+
+func (b *backend) BeginRunFailureEvidence(ctx context.Context, req core.RunFailureEvidenceRequest) (core.RunFailureEvidenceCollector, error) {
+	containerID := strings.TrimSpace(req.Lease.Server.CloudID)
+	if containerID == "" {
+		return nil, core.Exit(2, "local-container failed-run evidence requires a container id")
+	}
+	baseline, err := b.readOOMKillCount(ctx, containerID)
+	if err != nil {
+		return nil, err
+	}
+	baselineContainer, err := b.inspectContainer(ctx, containerID)
+	if err != nil {
+		return nil, err
+	}
+	return func(ctx context.Context) (core.RunFailureEvidence, error) {
+		current, err := b.readOOMKillCount(ctx, containerID)
+		if err == nil && current > baseline {
+			return core.RunFailureEvidence{ResourceExhaustion: core.ResourceExhaustionMemory}, nil
+		}
+		if err == nil {
+			return core.RunFailureEvidence{}, nil
+		}
+		container, inspectErr := b.inspectContainer(ctx, containerID)
+		if inspectErr == nil && !baselineContainer.State.OOMKilled && container.State.OOMKilled {
+			return core.RunFailureEvidence{ResourceExhaustion: core.ResourceExhaustionMemory}, nil
+		}
+		if inspectErr != nil {
+			return core.RunFailureEvidence{}, fmt.Errorf("%v; inspect container OOM state: %w", err, inspectErr)
+		}
+		return core.RunFailureEvidence{}, err
+	}, nil
+}
+
+func (b *backend) readOOMKillCount(ctx context.Context, containerID string) (uint64, error) {
+	var failures []string
+	for _, cgroupPath := range cgroupOOMCounterPaths {
+		result, err := b.docker(ctx, []string{"exec", containerID, "cat", cgroupPath}, nil, nil)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", cgroupPath, err))
+			continue
+		}
+		count, err := parseOOMKillCount(result.Stdout)
+		if err == nil {
+			return count, nil
+		}
+		failures = append(failures, fmt.Sprintf("%s: %v", cgroupPath, err))
+	}
+	return 0, core.Exit(2, "read local-container OOM counter: %s", strings.Join(failures, "; "))
+}
+
+func parseOOMKillCount(text string) (uint64, error) {
+	if len(text) > cgroupEvidenceLimit {
+		return 0, fmt.Errorf("cgroup counter output exceeds %d bytes", cgroupEvidenceLimit)
+	}
+	fields := strings.Fields(text)
+	for i := 0; i+1 < len(fields); i += 2 {
+		if fields[i] != "oom_kill" {
+			continue
+		}
+		count, err := strconv.ParseUint(fields[i+1], 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("parse oom_kill counter: %w", err)
+		}
+		return count, nil
+	}
+	return 0, fmt.Errorf("oom_kill counter is missing")
+}
 
 func (b *backend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID string) error {
 	core.UseStoredTestboxKey(&target.SSH, leaseID)

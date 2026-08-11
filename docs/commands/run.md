@@ -498,17 +498,23 @@ record.
 When a remote command exits non-zero, `run` prints a compact failure digest
 after the timing summary: the failed phase when phase markers are known, a
 likely area (provider auth, SSH/connectivity, sync, install/setup, user command,
-or model/tool/provider limit), retryability when inferable, next commands
+model/tool/provider limit, or resource exhaustion), retryability when inferable, next commands
 (`logs`, `events`, `doctor --from-run`, `ssh`, retrying with `--fresh-sync`, and
 `stop`), and a short redacted stdout/stderr tail. It does not reconstruct secrets
-or hidden local shell state.
+or hidden local shell state. When an SSH backend supplies per-run memory
+exhaustion evidence, the summary and digest use
+`blocked_stage=resource_exhaustion resource_exhaustion=memory retry_likely=false`
+and recommend increasing the memory limit or reducing workload concurrency.
+Evidence read failures are warnings and do not replace the original command
+failure.
 
 Use `--timing-json` to emit a final JSON timing record with provider, lease ID,
 slug, run ID, machine type, repo path, remote workdir, lease acquisition,
 bootstrap, sync phases, command phases, command duration, command-path total,
 end-to-end duration, exit code, normalized `runStatus`, optional `errorKind`,
 stop command, artifacts, and Actions run URL when available. Failed runs also
-include `blockedStage` and `retryLikely` when classifiable. Commands can emit
+include `blockedStage`, `resourceExhaustion`, and `retryLikely` when classifiable.
+Commands can emit
 phase markers on stdout or stderr as
 `CRABBOX_PHASE:<name>`; Crabbox records those as `commandPhases` without removing
 the marker line from output. In `blacksmith-testbox` mode, sync is reported as

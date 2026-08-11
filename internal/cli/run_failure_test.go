@@ -2,11 +2,39 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 )
+
+type fakeRunFailureEvidenceBackend struct {
+	begin func(context.Context, RunFailureEvidenceRequest) (RunFailureEvidenceCollector, error)
+}
+
+func (b fakeRunFailureEvidenceBackend) Spec() ProviderSpec {
+	return ProviderSpec{Name: "evidence-test"}
+}
+func (b fakeRunFailureEvidenceBackend) Acquire(context.Context, AcquireRequest) (LeaseTarget, error) {
+	return LeaseTarget{}, nil
+}
+func (b fakeRunFailureEvidenceBackend) Resolve(context.Context, ResolveRequest) (LeaseTarget, error) {
+	return LeaseTarget{}, nil
+}
+func (b fakeRunFailureEvidenceBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
+	return nil, nil
+}
+func (b fakeRunFailureEvidenceBackend) ReleaseLease(context.Context, ReleaseLeaseRequest) error {
+	return nil
+}
+func (b fakeRunFailureEvidenceBackend) Touch(context.Context, TouchRequest) (Server, error) {
+	return Server{}, nil
+}
+func (b fakeRunFailureEvidenceBackend) BeginRunFailureEvidence(ctx context.Context, req RunFailureEvidenceRequest) (RunFailureEvidenceCollector, error) {
+	return b.begin(ctx, req)
+}
 
 func TestClassifyRunFailureStages(t *testing.T) {
 	tests := []struct {
@@ -28,6 +56,65 @@ func TestClassifyRunFailureStages(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestClassifyRunFailureUsesNormalizedMemoryEvidence(t *testing.T) {
+	got := ClassifyRunFailureWithEvidence(255, "connection reset by peer", []TimingPhase{{Name: "test"}}, RunFailureEvidence{
+		ResourceExhaustion: ResourceExhaustionMemory,
+	})
+	if got.BlockedStage != "resource_exhaustion" || got.ResourceExhaustion != ResourceExhaustionMemory || got.RetryLikely != "false" {
+		t.Fatalf("ClassifyRunFailureWithEvidence()=%#v", got)
+	}
+	fields := FormatFailureClassificationFields(got)
+	for _, want := range []string{"blocked_stage=resource_exhaustion", "resource_exhaustion=memory", "retry_likely=false"} {
+		if !strings.Contains(fields, want) {
+			t.Fatalf("classification fields missing %q: %s", want, fields)
+		}
+	}
+}
+
+func TestRunOutcomeFailureKeepsMemoryEvidenceAcrossSecondaryFailures(t *testing.T) {
+	got := classifyRunOutcomeFailure(0, "", nil, RunFailureEvidence{
+		ResourceExhaustion: ResourceExhaustionMemory,
+	}, true)
+	if got.BlockedStage != "resource_exhaustion" || got.ResourceExhaustion != ResourceExhaustionMemory || got.RetryLikely != "false" {
+		t.Fatalf("classifyRunOutcomeFailure()=%#v, want memory exhaustion", got)
+	}
+
+	got = classifyRunOutcomeFailure(0, "", nil, RunFailureEvidence{}, true)
+	if got.BlockedStage != "test" || got.ResourceExhaustion != "" || got.RetryLikely != "false" {
+		t.Fatalf("classifyRunOutcomeFailure()=%#v, want test failure", got)
+	}
+}
+
+func TestRunFailureEvidenceErrorsAreWarnings(t *testing.T) {
+	t.Run("baseline", func(t *testing.T) {
+		var warnings bytes.Buffer
+		backend := fakeRunFailureEvidenceBackend{begin: func(context.Context, RunFailureEvidenceRequest) (RunFailureEvidenceCollector, error) {
+			return nil, errors.New("baseline read failed")
+		}}
+		if collector := beginRunFailureEvidence(context.Background(), backend, LeaseTarget{}, &warnings); collector != nil {
+			t.Fatal("baseline error returned a collector")
+		}
+		if !strings.Contains(warnings.String(), "warning: failed-run evidence baseline unavailable") {
+			t.Fatalf("missing baseline warning: %s", warnings.String())
+		}
+	})
+
+	t.Run("collection", func(t *testing.T) {
+		var warnings bytes.Buffer
+		collector := RunFailureEvidenceCollector(func(context.Context) (RunFailureEvidence, error) {
+			return RunFailureEvidence{}, errors.New("post-failure read failed")
+		})
+		canceled, cancel := context.WithCancel(context.Background())
+		cancel()
+		if evidence := collectRunFailureEvidence(canceled, collector, &warnings); evidence.ResourceExhaustion != "" {
+			t.Fatalf("evidence=%#v, want empty", evidence)
+		}
+		if !strings.Contains(warnings.String(), "warning: failed-run evidence collection incomplete") {
+			t.Fatalf("missing collection warning: %s", warnings.String())
+		}
+	})
 }
 
 func TestClassifyRunFailureBlacksmithInfraStages(t *testing.T) {
@@ -146,8 +233,9 @@ func TestFormatRunSummaryIncludesFailureClassification(t *testing.T) {
 
 func TestTimingJSONIncludesFailureClassification(t *testing.T) {
 	report := timingReportFromRun("aws", "cbx_123", "slug", runTimings{
-		blockedStage: "ssh",
-		retryLikely:  "true",
+		blockedStage:       "resource_exhaustion",
+		resourceExhaustion: ResourceExhaustionMemory,
+		retryLikely:        "false",
 	}, time.Second, 1)
 	var buf bytes.Buffer
 	if err := writeTimingJSON(&buf, report); err != nil {
@@ -157,8 +245,35 @@ func TestTimingJSONIncludesFailureClassification(t *testing.T) {
 	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.BlockedStage != "ssh" || got.RetryLikely != "true" {
+	if got.BlockedStage != "resource_exhaustion" || got.ResourceExhaustion != ResourceExhaustionMemory || got.RetryLikely != "false" {
 		t.Fatalf("classification not encoded: %#v", got)
+	}
+}
+
+func TestPrintRunFailureDigestIncludesMemoryGuidance(t *testing.T) {
+	var buf bytes.Buffer
+	printRunFailureDigest(&buf, runFailureDigestInput{
+		LeaseID:        "cbx_123",
+		CommandDisplay: "go test ./...",
+		Classification: FailureClassification{
+			BlockedStage:       "resource_exhaustion",
+			ResourceExhaustion: ResourceExhaustionMemory,
+			RetryLikely:        "false",
+		},
+	}, newStreamTailBuffer(40), newStreamTailBuffer(40), "", "")
+	out := buf.String()
+	for _, want := range []string{
+		"area: resource_exhaustion",
+		"retryable: false",
+		"resource_exhaustion: memory",
+		"hint: increase the memory limit or reduce workload concurrency before retrying",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("digest missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "next: crabbox run") {
+		t.Fatalf("deterministic memory exhaustion should not suggest an unchanged retry:\n%s", out)
 	}
 }
 
