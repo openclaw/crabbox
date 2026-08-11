@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Reconciled exact-owned Azure VM, NIC, public IP, and managed OS disk orphan sets with stable-identity quarantine and fail-closed durable deletion progress. Thanks @chsong1.
 - Invalidated adopted Actions workspace readiness markers before full resync and rehydrated the canonical workspace before running commands. Thanks @vincentkoc.
 - Stopped sparse-checkout and skip-worktree omissions from deleting in-scope remote files, and kept staged gitlink removals out of file-deletion manifests. Thanks @vincentkoc.
 - Deferred ordinary coordinator lease provider cleanup to durable alarm-owned retries while preserving synchronous force-admin deletion and visible retry state. Thanks @fuller-stack-dev.
