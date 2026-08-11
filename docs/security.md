@@ -671,8 +671,8 @@ Layered protections:
 - Explicit release (`crabbox stop` / `release`).
 - A Durable Object alarm or pg-boss job that expires leases and reschedules the
   next pending deadline, plus periodic reconciliation.
-- A coordinator-side AWS orphan sweep over current broker credentials and
-  capacity regions.
+- Coordinator-side AWS and Azure orphan sweeps over current broker credentials
+  and configured provider scopes.
 - A provider-label sweep for clearly expired, inactive orphan machines.
 
 In direct-CLI mode, cleanup runs from the CLI using provider labels: it skips
@@ -686,11 +686,9 @@ Provider tags discover candidates and explain why they look stale, but do not
 authorize a destructive action. Automatic AWS or Azure deletion requires an
 exact retained coordinator lease binding for the same provider resource and
 region; EC2 Mac host release likewise requires an exact retained host binding.
-Before coordinator Azure cleanup deletes a VM, it also persists the managed
-disk's immutable ID while the live `managedBy` association still matches that
-VM. Later disk deletion revalidates that identity and any current attachment;
-an interrupted cleanup may continue after the VM is gone without trusting
-self-written tags, while missing or mismatched claims fail closed.
+Azure's canonical-set, topology, stable-identity, quarantine, and fresh-preflight
+rules are maintained in [Lifecycle and cleanup](features/lifecycle-cleanup.md);
+shared VNets, subnets, NSGs, and resource groups are never sweep candidates.
 Tag-only and legacy candidates remain report-only. Sweeps skip `keep=true`
 resources and apply a grace window before reporting missing labels or stale
 lease mappings.

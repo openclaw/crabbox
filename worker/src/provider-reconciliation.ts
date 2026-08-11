@@ -27,7 +27,7 @@ export type ProviderReconciliationObservation =
 export function providerReconciliationFingerprint(
   provider: Provider,
   scope: string,
-  machine: Pick<ProviderMachine, "cloudID" | "id" | "name" | "labels">,
+  machine: Pick<ProviderMachine, "cloudID" | "id" | "name" | "labels" | "resourceIdentity">,
 ): string {
   const labels = machine.labels ?? {};
   return JSON.stringify({
@@ -42,6 +42,9 @@ export function providerReconciliationFingerprint(
     keep: labels["keep"] ?? "",
     createdAt: labels["created_at"] ?? "",
     expiresAt: labels["expires_at"] ?? "",
+    ...(machine.resourceIdentity === undefined
+      ? {}
+      : { resourceIdentity: machine.resourceIdentity }),
   });
 }
 

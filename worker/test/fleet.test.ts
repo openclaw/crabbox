@@ -11822,15 +11822,19 @@ describe("fleet lease identity and idle", () => {
   });
 
   it("deletes only coordinator-owned Azure orphan sweep candidates", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-01T00:00:00.000Z"));
     const storage = new MemoryStorage();
     const list = vi.spyOn(storage, "list");
     const ownedDeleted: LeaseRecord[] = [];
+    const releaseContexts: Array<{ resourceIdentity?: string } | undefined> = [];
     const oldSeconds = String(Math.trunc((Date.now() - 60 * 60 * 1000) / 1000));
     const orphanMachine = testMachine({
       provider: "azure",
       cloudID: "vm-orphan",
       region: "westus2",
       name: "vm-orphan",
+      resourceIdentity: "azure-components-v1",
       labels: {
         crabbox: "true",
         created_by: "crabbox",
@@ -11911,13 +11915,13 @@ describe("fleet lease identity and idle", () => {
         }),
       );
     }
-    seedProviderReconciliationEligible(storage, "azure", "westus2", orphanMachine);
     const fleet = testFleet(
       storage,
       {
         azure: fakeProvider(undefined, {
           provider: "azure",
-          servers: [
+          servers: [],
+          reconciliationServers: [
             orphanMachine,
             testMachine({
               provider: "azure",
@@ -11988,8 +11992,9 @@ describe("fleet lease identity and idle", () => {
               },
             }),
           ],
-          onReleaseLease(lease) {
+          onReleaseLease(lease, context) {
             ownedDeleted.push(structuredClone(lease));
+            releaseContexts.push(context);
           },
         }),
       },
@@ -12000,11 +12005,54 @@ describe("fleet lease identity and idle", () => {
         AZURE_SUBSCRIPTION_ID: "subscription",
         CRABBOX_AZURE_LOCATION: "eastus",
         CRABBOX_AZURE_ORPHAN_SWEEP_DELETE: "1",
+        CRABBOX_AZURE_ORPHAN_SWEEP_INTERVAL_SECONDS: "1",
         CRABBOX_AZURE_ORPHAN_SWEEP_GRACE_SECONDS: "1",
       },
     );
 
     await fleet.alarm();
+
+    const firstSweep = storage.value<{
+      mode: string;
+      terminated: number;
+      candidates: Array<Record<string, unknown>>;
+    }>("azure-orphan-sweep:last");
+    expect(ownedDeleted).toEqual([]);
+    expect(firstSweep).toMatchObject({ mode: "delete", terminated: 0 });
+    expect(firstSweep?.candidates).toEqual([
+      expect.objectContaining({
+        cloudID: "vm-orphan",
+        region: "westus2",
+        leaseID: "cbx_000000000776",
+        reason: "expired-provider-tag",
+        ownership: "coordinator-lease",
+        ownershipLeaseID: "cbx_000000000776",
+        action: "quarantined",
+      }),
+      expect.objectContaining({
+        cloudID: "vm-tag-only",
+        region: "westus2",
+        ownership: "provider-tags-only",
+        action: "reported",
+      }),
+    ]);
+    expect(firstSweep?.candidates.map((candidate) => candidate.cloudID)).not.toEqual(
+      expect.arrayContaining([
+        "vm-kept",
+        "vm-provisioning",
+        "vm-cleaning",
+        "vm-retaining",
+        "vm-retained",
+      ]),
+    );
+    expect(storage.value("provider-reconciliation:azure:westus2:vm-orphan")).toMatchObject({
+      observations: 1,
+    });
+
+    seedProviderReconciliationEligible(storage, "azure", "westus2", orphanMachine);
+    vi.setSystemTime(new Date("2026-08-01T00:00:02.000Z"));
+    await fleet.alarm();
+    vi.useRealTimers();
 
     const sweep = storage.value<{
       mode: string;
@@ -12020,10 +12068,12 @@ describe("fleet lease identity and idle", () => {
         providerScope: "/subscriptions/subscription/resourceGroups/crabbox-leases",
       }),
     ]);
+    expect(releaseContexts).toEqual([{ resourceIdentity: "azure-components-v1" }]);
     const boundedLeaseScans = list.mock.calls.filter(
       ([options]) => options?.prefix === "lease:" && options.limit === 128,
     );
     expect(boundedLeaseScans.length).toBeGreaterThanOrEqual(2);
+    expect(storage.value("provider-reconciliation:azure:westus2:vm-orphan")).toBeUndefined();
     expect(sweep).toMatchObject({ mode: "delete", terminated: 1 });
     expect(sweep?.candidates).toEqual([
       expect.objectContaining({
@@ -32480,6 +32530,8 @@ function fakeProvider(
     market?: string;
     attempts?: ProvisioningAttempt[];
     servers?: ProviderMachine[];
+    reconciliationServers?: ProviderMachine[];
+    onListReconciliationResources?: () => Promise<ProviderMachine[]> | ProviderMachine[];
     onList?: () => Promise<ProviderMachine[]> | ProviderMachine[];
     onCreateImage?: (
       instanceID: string,
@@ -32549,7 +32601,10 @@ function fakeProvider(
           lease: LeaseRecord;
         }
       | undefined;
-    onReleaseLease?: (lease: LeaseRecord) => Promise<void> | void;
+    onReleaseLease?: (
+      lease: LeaseRecord,
+      context?: { resourceIdentity?: string },
+    ) => Promise<void> | void;
     onDeleteOwnedServer?: (lease: LeaseRecord) => Promise<void> | void;
     onRecoverServer?: (
       lease: LeaseRecord,
@@ -32569,6 +32624,16 @@ function fakeProvider(
       }
       return result.servers ?? [];
     },
+    ...(result.onListReconciliationResources || result.reconciliationServers !== undefined
+      ? {
+          async listReconciliationResources() {
+            if (result.onListReconciliationResources) {
+              return await result.onListReconciliationResources();
+            }
+            return result.reconciliationServers ?? [];
+          },
+        }
+      : {}),
     supportsSSHHostKeyInjection(config: LeaseConfig) {
       const provider = result.provider ?? config.provider;
       return (
@@ -32740,8 +32805,8 @@ function fakeProvider(
           },
         }
       : {}),
-    async releaseLease(lease: LeaseRecord) {
-      await result.onReleaseLease?.(lease);
+    async releaseLease(lease: LeaseRecord, context?: { resourceIdentity?: string }) {
+      await result.onReleaseLease?.(lease, context);
       await onDelete?.(
         (lease.provider ?? result.provider) === "hetzner" ? String(lease.serverID) : lease.cloudID,
       );

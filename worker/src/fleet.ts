@@ -14763,7 +14763,10 @@ export class FleetCoordinator {
         });
       } else {
         // Azure inventory is resource-group scoped, not location scoped. One successful read is authoritative.
-        const machines = await this.provider("azure", inventoryRegion).listCrabboxServers();
+        const provider = this.provider("azure", inventoryRegion);
+        const machines = provider.listReconciliationResources
+          ? await provider.listReconciliationResources()
+          : await provider.listCrabboxServers();
         for (const machine of machines) {
           scanned += 1;
           const candidateRegion = machine.region || inventoryRegion;
@@ -14855,7 +14858,9 @@ export class FleetCoordinator {
         try {
           // Azure release uses the persisted provider scope and resumable owned-resource deletion.
           // oxlint-disable-next-line eslint/no-await-in-loop -- release failures must stay attached to the candidate.
-          await this.provider("azure", region).releaseLease(exactOwnershipLease);
+          await this.provider("azure", region).releaseLease(exactOwnershipLease, {
+            resourceIdentity: machine.resourceIdentity ?? "",
+          });
           candidate.action = "terminated";
           released = true;
         } catch (error) {
@@ -21996,6 +22001,7 @@ function parseProviderLabelTime(value: string | undefined): number {
 
 interface CloudProvider {
   listCrabboxServers(): Promise<ProviderMachine[]>;
+  listReconciliationResources?(): Promise<ProviderMachine[]>;
   workspaceCapability?(
     lease?: LeaseRecord,
     purpose?: "operate" | "observe",
@@ -22045,7 +22051,7 @@ interface CloudProvider {
     server: ProviderMachine,
     attempts: ProvisioningAttempt[],
   ): Promise<ProviderLeaseCreateFinalization>;
-  releaseLease(lease: LeaseRecord): Promise<void>;
+  releaseLease(lease: LeaseRecord, context?: ProviderReleaseContext): Promise<void>;
   deleteServer(id: string): Promise<void>;
   deleteOwnedServer?(lease: LeaseRecord): Promise<void>;
   supportsNativeImages(): boolean;
@@ -22134,6 +22140,10 @@ interface ProviderStateStorage {
 interface ProviderAccessContext {
   requestSourceCIDRs: string[];
   activeLeases: LeaseRecord[];
+}
+
+interface ProviderReleaseContext {
+  resourceIdentity?: string;
 }
 
 interface ProviderLeaseCreatePreparation {
@@ -22333,6 +22343,10 @@ export class AzureProvider implements CloudProvider {
     return this.client.listCrabboxServers();
   }
 
+  listReconciliationResources(): Promise<ProviderMachine[]> {
+    return this.client.listReconciliationResources();
+  }
+
   supportsSSHHostKeyInjection(config: ReturnType<typeof leaseConfig>): boolean {
     return config.target === "linux" && !config.azureSnapshot;
   }
@@ -22458,7 +22472,7 @@ export class AzureProvider implements CloudProvider {
     return this.client.deleteServer(id);
   }
 
-  deleteOwnedServer(lease: LeaseRecord): Promise<void> {
+  deleteOwnedServer(lease: LeaseRecord, context?: ProviderReleaseContext): Promise<void> {
     const scope = azureProviderScope(lease.providerScope);
     if (!scope) {
       return Promise.reject(
@@ -22467,13 +22481,16 @@ export class AzureProvider implements CloudProvider {
         ),
       );
     }
-    return new AzureClient(this.env, {
+    const client = new AzureClient(this.env, {
       ...(this.location ? { location: this.location } : {}),
       ...(this.deferredCleanup ? { deferredCleanup: this.deferredCleanup } : {}),
       subscription: scope.subscription,
       resourceGroup: scope.resourceGroup,
       ...(this.storage ? { ownedDeleteClaimStorage: this.storage } : {}),
-    }).deleteOwnedServer(lease);
+    });
+    return context?.resourceIdentity === undefined
+      ? client.deleteOwnedServer(lease)
+      : client.deleteOwnedServer(lease, { resourceIdentity: context.resourceIdentity });
   }
 
   async finalizeLeaseCreate(
@@ -22496,8 +22513,12 @@ export class AzureProvider implements CloudProvider {
     return { config: nextConfig, lease: nextLease };
   }
 
-  async releaseLease(lease: LeaseRecord): Promise<void> {
-    await this.deleteOwnedServer(lease);
+  async releaseLease(lease: LeaseRecord, context?: ProviderReleaseContext): Promise<void> {
+    if (context === undefined) {
+      await this.deleteOwnedServer(lease);
+      return;
+    }
+    await this.deleteOwnedServer(lease, context);
   }
 
   supportsNativeImages(): boolean {

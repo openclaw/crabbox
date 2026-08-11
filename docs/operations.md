@@ -469,6 +469,10 @@ CRABBOX_AWS_ORPHAN_SWEEP_DELETE   optional; set 1 to terminate coordinator-owned
 CRABBOX_AWS_ORPHAN_SWEEP_INTERVAL_SECONDS optional; default 3600
 CRABBOX_AWS_ORPHAN_SWEEP_GRACE_SECONDS    optional; default 900
 CRABBOX_AWS_MAC_HOST_SWEEP_RELEASE optional; set 1 to release stale pending EC2 Mac hosts during orphan sweep
+CRABBOX_AZURE_ORPHAN_SWEEP_ENABLED optional; defaults on when Azure broker credentials exist
+CRABBOX_AZURE_ORPHAN_SWEEP_DELETE   optional; set 1 to release coordinator-owned Azure orphan resources
+CRABBOX_AZURE_ORPHAN_SWEEP_INTERVAL_SECONDS optional; default 3600
+CRABBOX_AZURE_ORPHAN_SWEEP_GRACE_SECONDS    optional; default 900
 ```
 
 Normal SSH-based AWS workspace bridges use a dedicated `crabbox-workspaces`
@@ -632,9 +636,18 @@ bin/crabbox inspect --id blue-lobster --json
 bin/crabbox stop blue-lobster
 ```
 
-Azure release persists an immutable managed-disk cleanup claim before deleting
-the VM. Retries use that durable claim and recheck any live disk attachment;
-they never treat names or Crabbox-written ownership tags as sufficient proof.
+Azure brokered release persists a durable claim for the observed canonical
+resource set, including stable resource identities. Retries recheck live
+attachments and identity before each deletion; names or Crabbox-written
+ownership tags are never sufficient proof. Successful per-member deletion
+progress is transactionally merged before cleanup advances, and an absent member
+without that exact progress makes the remaining set report-only. Fresh reads
+also reject changed ownership labels and any VM data-disk attachment. See
+[Lifecycle and cleanup](features/lifecycle-cleanup.md) for the VM-less orphan-set
+and quarantine rules. Legacy claims may upgrade only from a fully present
+canonical set (including the explicit ephemeral-OS-disk shape); partial legacy
+claims require manual resolution. New claims use a version-2 transactional
+preparation state, which older workers reject safely.
 
 Trusted operators can use `crabbox admin release` or `crabbox admin delete --force` for stuck leases.
 
@@ -677,6 +690,22 @@ curl -X POST -H "Authorization: Bearer $CRABBOX_COORDINATOR_ADMIN_TOKEN" \
 ```
 
 See [Lifecycle and Cleanup](features/lifecycle-cleanup.md) for the full lease-expiry model.
+
+### Azure orphan sweep
+
+Trusted admins can inspect or trigger the coordinator's Azure orphan sweep:
+
+```sh
+curl -H "Authorization: Bearer $CRABBOX_COORDINATOR_ADMIN_TOKEN" \
+  https://broker.example.com/v1/admin/azure-orphan-sweep
+
+curl -X POST -H "Authorization: Bearer $CRABBOX_COORDINATOR_ADMIN_TOKEN" \
+  https://broker.example.com/v1/admin/azure-orphan-sweep
+```
+
+The sweep uses the configured Azure resource group and the Azure orphan-sweep
+settings listed above. See [Lifecycle and Cleanup](features/lifecycle-cleanup.md)
+for its inventory, quarantine, and deletion rules.
 
 ## AWS Security Guardrails
 

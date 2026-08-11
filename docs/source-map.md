@@ -168,7 +168,9 @@ Coordinator-side provider operations (brokered providers only):
 
 - Hetzner: `worker/src/hetzner.ts`
 - AWS EC2 (provision, capacity fallback, private SSM workspaces, Mac hosts, orphan sweep): `worker/src/aws.ts`
-- Azure / GCP provision and image routes: `worker/src/azure.ts`, `worker/src/gcp.ts`
+- Azure VM provision, canonical resource inventory, and owned-resource cleanup:
+  `worker/src/azure.ts`; coordinator lease and sweep orchestration:
+  `worker/src/fleet.ts`; GCP provision and image routes: `worker/src/gcp.ts`
 - Daytona sandbox lifecycle and rotating SSH access: `worker/src/daytona.ts`
 - Image create/read/delete/promote routing: `worker/src/fleet.ts`, `worker/src/os-image.ts`
 

@@ -191,8 +191,8 @@ crabbox admin leases --state active
 - Use `crabbox stop <id-or-slug>` for active leases; reserve provider/admin
   cleanup (`crabbox cleanup`, `crabbox admin delete`) for confirmed orphans.
 
-The broker also sweeps untracked AWS instances and idle Mac dedicated hosts on a
-schedule. See [lifecycle & cleanup](features/lifecycle-cleanup.md).
+The broker also sweeps untracked AWS instances, Azure per-lease resource sets,
+and idle Mac dedicated hosts on a schedule. See [lifecycle & cleanup](features/lifecycle-cleanup.md).
 
 ## SSH never becomes ready
 

@@ -51,6 +51,24 @@ describe("provider reconciliation", () => {
     );
   });
 
+  it("preserves legacy fingerprints for providers without resource identity", () => {
+    expect(providerReconciliationFingerprint("aws", "eu-west-1", machine)).toBe(
+      JSON.stringify({
+        provider: "aws",
+        scope: "eu-west-1",
+        cloudID: "i-123",
+        name: "crabbox-cbx_123456789abc",
+        lease: "cbx_123456789abc",
+        owner: "alice",
+        providerLabel: "aws",
+        slug: "blue-box",
+        keep: "",
+        createdAt: "",
+        expiresAt: "",
+      }),
+    );
+  });
+
   it("changes the fingerprint when ownership identity changes", () => {
     const changed = {
       ...machine,
@@ -73,6 +91,32 @@ describe("provider reconciliation", () => {
 
     expect(providerReconciliationFingerprint("aws", "eu-west-1", withLargeDiagnosticLabel)).toBe(
       providerReconciliationFingerprint("aws", "eu-west-1", machine),
+    );
+  });
+
+  it("changes the provider fingerprint for reconciliation resource identity while ignoring metadata", () => {
+    const withIdentity: ProviderMachine = {
+      ...machine,
+      resourceIdentity: "azure-components-v1",
+    };
+    const changedIdentity: ProviderMachine = {
+      ...withIdentity,
+      resourceIdentity: "azure-components-v2",
+    };
+    const withMetadata: ProviderMachine = {
+      ...withIdentity,
+      host: "198.51.100.42",
+      labels: {
+        ...withIdentity.labels,
+        provider_diagnostic: "inventory-page-2",
+      },
+    };
+
+    expect(providerReconciliationFingerprint("azure", "eastus", changedIdentity)).not.toBe(
+      providerReconciliationFingerprint("azure", "eastus", withIdentity),
+    );
+    expect(providerReconciliationFingerprint("azure", "eastus", withMetadata)).toBe(
+      providerReconciliationFingerprint("azure", "eastus", withIdentity),
     );
   });
 

@@ -942,6 +942,7 @@ export interface ProviderMachine {
   awsRootVolumeID?: string;
   awsRootDeleteOnTermination?: boolean;
   labels: Record<string, string>;
+  resourceIdentity?: string;
   providerKey?: string;
   awsSSMCommandID?: string;
   awsSSMCommandStatus?: string;

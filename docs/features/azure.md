@@ -276,6 +276,10 @@ Direct cleanup is best-effort through Crabbox lease tags. `crabbox cleanup
 unexpired leases, and cascade-deletes expired ones. The shared resource group,
 vnet, subnet, and NSG are preserved.
 
+Brokered Azure orphan cleanup uses the coordinator's canonical-resource checks;
+see [Lifecycle and cleanup](lifecycle-cleanup.md) for the fail-closed inventory,
+quarantine, and deletion rules.
+
 ## Related docs
 
 - [Provider Reference](../providers/README.md)

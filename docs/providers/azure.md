@@ -230,8 +230,10 @@ until the required service-principal secrets are present.
     enable WSL/VirtualMachinePlatform/HypervisorPlatform, reboot as needed, import
     Ubuntu, and wait for the Linux-side `crabbox-ready` check.
 11. Let core sync and run over SSH.
-12. On release/cleanup, cascade-delete VM -> NIC -> public IP -> OS disk. The
-    shared infra remains.
+12. On direct release/cleanup, cascade-delete VM -> NIC -> public IP -> OS disk;
+    the shared infra remains. Brokered release and orphan cleanup use the
+    coordinator's canonical-resource, quarantine, and fresh-preflight rules; see
+    [Lifecycle and cleanup](../features/lifecycle-cleanup.md).
 
 ## Classes
 

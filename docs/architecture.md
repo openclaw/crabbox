@@ -158,8 +158,9 @@ One logical `FleetCoordinator` (`worker/src/fleet.ts`) owns:
   owner/org/provider/server type for the month; served at `GET /v1/usage`.
 - **Cleanup and expiry** — runtime alarms/jobs and reconciliation run maintenance:
   `expireLeases` deletes the cloud server for active leases past `expiresAt`
-  (retrying after a 5-minute backoff on failure), then an optional AWS orphan
-  sweep, then `scheduleAlarm` arms the next alarm at the soonest pending expiry.
+  (retrying after a 5-minute backoff on failure), then optional AWS and Azure
+  orphan sweeps, then `scheduleAlarm` arms the next alarm at the soonest pending
+  expiry.
 - **Runs, run events, run logs, and telemetry** — see
   [What Flows on a Run](#what-flows-on-a-run).
 - **Live bridges** — WebSocket relays for WebVNC (agent ↔ viewer), the
@@ -237,7 +238,10 @@ GET  /v1/admin/leases
 GET  /v1/admin/lease-audit
 POST /v1/admin/leases/{id-or-slug}/release | delete
 GET  /v1/admin/hosts
+GET  /v1/admin/aws-orphan-sweep
 POST /v1/admin/aws-orphan-sweep
+GET  /v1/admin/azure-orphan-sweep
+POST /v1/admin/azure-orphan-sweep
 ```
 
 `GET /v1/pool` and `/v1/admin/*` require the admin token. User tokens scope

@@ -134,10 +134,10 @@ coordinator keeps the lease `active`, records `cleanupAttempts`,
 5 minutes) rather than marking the lease `expired` while the machine may still
 exist. On success the lease moves to `expired`.
 
-Maintenance runs at the earliest active-lease expiry or AWS orphan-sweep time.
-The orphan sweep (report or delete mode, gated by
-`CRABBOX_AWS_ORPHAN_SWEEP_*`) reports untracked instances and releases or
-terminates only exact resources retained in coordinator lease state.
+Maintenance runs at the earliest active-lease expiry or provider orphan-sweep
+time. The AWS and Azure orphan sweeps (report or delete mode, gated by
+provider-specific settings) report untracked provider resources and release or
+terminate only exact resources retained in coordinator lease state.
 
 Direct cleanup only deletes machines that are clearly safe:
 

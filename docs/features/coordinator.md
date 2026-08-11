@@ -248,6 +248,8 @@ GET    /v1/admin/hosts/...
 GET    /v1/admin/mac-hosts/...
 GET    /v1/admin/aws-orphan-sweep
 POST   /v1/admin/aws-orphan-sweep
+GET    /v1/admin/azure-orphan-sweep
+POST   /v1/admin/azure-orphan-sweep
 POST   /v1/admin/leases/{id-or-slug}/release
 POST   /v1/admin/leases/{id-or-slug}/delete
 POST   /v1/images
@@ -336,11 +338,12 @@ request 404s or 401s.
 
 **Expiry and cleanup.** A DO alarm and the cron both run maintenance:
 `expireLeases` deletes cloud servers for active leases past `expiresAt`
-(state `expired`), retrying after ~5 minutes on failure, and an AWS orphan sweep
-(report or delete, gated by `CRABBOX_AWS_ORPHAN_SWEEP_*`) reports untracked
-instances and deletes or releases only resources with exact retained coordinator
-bindings. The next alarm is scheduled for
-the soonest upcoming expiry or sweep time.
+(state `expired`), retrying after ~5 minutes on failure, and the AWS and Azure
+orphan sweeps report untracked provider resources and delete or release only
+resources with exact retained coordinator bindings. Each sweep is gated by its
+provider-specific settings. See [Lifecycle and cleanup](lifecycle-cleanup.md)
+for the detailed cleanup rules. The next alarm is scheduled for the soonest
+upcoming expiry or sweep time.
 
 Lease responses carry the canonical `cbx_...` ID, the friendly slug when present,
 provider metadata, owner/org, `createdAt`, `lastTouchedAt`, `idleTimeoutSeconds`,
