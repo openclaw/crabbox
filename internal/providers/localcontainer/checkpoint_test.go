@@ -24,6 +24,46 @@ func TestNativeCheckpointWorkdirUsesResolvedLeaseRoot(t *testing.T) {
 	}
 }
 
+func TestPodmanScopeCapturesConnectionAndRuntimeIdentity(t *testing.T) {
+	dir := t.TempDir()
+	runtimePath := filepath.Join(dir, "podman")
+	script := `#!/bin/sh
+case "$*" in
+  "system connection list --format json")
+    printf '[{"Name":"team","URI":"%s","Default":true}]\n' "${PODMAN_TEST_URI:-ssh://runner@example.invalid/run/podman.sock}"
+    ;;
+  "--connection team info --format "*)
+    printf '%s\n' 'host-a|/var/lib/containers|/run/containers|/run/podman.sock|true'
+    ;;
+  *)
+    printf 'unexpected args: %s\n' "$*" >&2
+    exit 2
+    ;;
+esac
+`
+	if err := os.WriteFile(runtimePath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CONTAINER_CONNECTION", "team")
+	t.Setenv("CONTAINER_HOST", "")
+	t.Setenv("DOCKER_HOST", "tcp://unrelated-docker.invalid:2376")
+	cfg := core.Config{LocalContainer: core.LocalContainerConfig{Runtime: runtimePath}}
+	scope, err := podmanScopeForConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scope.Runtime != runtimePath || scope.Context != "team" || scope.Endpoint != "ssh://runner@example.invalid/run/podman.sock" || !strings.HasPrefix(scope.DaemonID, "podman-") {
+		t.Fatalf("scope=%#v", scope)
+	}
+	if err := validateCheckpointScope(context.Background(), scope); err != nil {
+		t.Fatalf("validate matching scope: %v", err)
+	}
+	t.Setenv("PODMAN_TEST_URI", "ssh://runner@other.invalid/run/podman.sock")
+	if err := validateCheckpointScope(context.Background(), scope); err == nil {
+		t.Fatal("repointed Podman connection validated")
+	}
+}
+
 func TestCheckpointImageNameNormalizesAndBoundsRepository(t *testing.T) {
 	got := checkpointImageName("___", "sha256:ABCDEF0123456789")
 	if got != "crabbox-checkpoint-checkpoint-abcdef012345" {

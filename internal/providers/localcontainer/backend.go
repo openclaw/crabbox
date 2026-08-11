@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -20,12 +21,15 @@ import (
 )
 
 const (
-	providerName        = "local-container"
-	sshPort             = "2222"
-	workRootMarkerName  = ".crabbox-local-container-work-root"
-	dockerSocketInGuest = "/var/run/docker.sock"
-	rollbackTimeout     = 10 * time.Second
-	cgroupEvidenceLimit = 4 << 10
+	providerName          = "local-container"
+	sshPort               = "2222"
+	workRootMarkerName    = ".crabbox-local-container-work-root"
+	dockerSocketInGuest   = "/var/run/docker.sock"
+	rollbackTimeout       = 10 * time.Second
+	cgroupEvidenceLimit   = 4 << 10
+	pendingClaimState     = "provisioning"
+	pendingRecoveryKind   = "ssh-readiness-pending"
+	pendingRecoveryReason = "post-create failure; exact claim retained"
 )
 
 var cgroupOOMCounterPaths = []string{
@@ -34,9 +38,16 @@ var cgroupOOMCounterPaths = []string{
 }
 
 type backend struct {
-	spec core.ProviderSpec
-	cfg  core.Config
-	rt   core.Runtime
+	spec                   core.ProviderSpec
+	cfg                    core.Config
+	rt                     core.Runtime
+	waitForSSHReady        func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error
+	captureRuntimeScope    func(context.Context, core.Config) (checkpointScope, error)
+	validateRuntimeScope   func(context.Context, checkpointScope) error
+	confirmContainerAbsent func(context.Context, string) (bool, error)
+	removeAll              func(string) error
+	beforeCleanupMutation  func(string)
+	afterClaimCleanup      func(string)
 }
 
 type inspectContainer struct {
@@ -70,7 +81,16 @@ type inspectPort struct {
 
 func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	applyDefaults(&cfg)
-	return &backend{spec: spec, cfg: cfg, rt: rt}
+	b := &backend{spec: spec, cfg: cfg, rt: rt, waitForSSHReady: core.WaitForSSHReady, removeAll: os.RemoveAll}
+	b.captureRuntimeScope = func(ctx context.Context, cfg core.Config) (checkpointScope, error) {
+		if isPodmanRuntime(cfg.LocalContainer.Runtime) {
+			return podmanScopeForConfig(ctx, cfg)
+		}
+		return checkpointScopeForServer(ctx, cfg, core.Server{})
+	}
+	b.validateRuntimeScope = validateCheckpointScope
+	b.confirmContainerAbsent = b.exactContainerAbsent
+	return b
 }
 
 func (b *backend) Spec() core.ProviderSpec { return b.spec }
@@ -152,6 +172,17 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if err := validateCheckpointFork(ctx, cfg); err != nil {
 		return core.LeaseTarget{}, err
 	}
+	if len(cfg.LocalContainer.CheckpointMetadata) == 0 {
+		scope, err := b.captureRuntimeScope(ctx, cfg)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
+		if strings.TrimSpace(scope.DaemonID) == "" {
+			return core.LeaseTarget{}, core.Exit(2, "local-container runtime identity is unavailable; refusing to create an unscoped lease")
+		}
+		cfg.LocalContainer.CheckpointMetadata = checkpointScopeMetadata(scope)
+		b.cfg.LocalContainer.CheckpointMetadata = checkpointScopeMetadata(scope)
+	}
 	leaseID := core.NewLeaseID()
 	containers, err := b.listContainers(ctx)
 	if err != nil {
@@ -164,6 +195,10 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	slug, err := core.AllocateDirectLeaseSlug(leaseID, req.RequestedSlug, servers)
 	if err != nil {
 		return core.LeaseTarget{}, err
+	}
+	claimScope := b.claimScope(ctx)
+	if strings.TrimSpace(claimScope) == "" {
+		return core.LeaseTarget{}, core.Exit(2, "local-container runtime scope is unavailable; refusing to create an unscoped lease")
 	}
 	keyPath, publicKey, err := core.EnsureTestboxKeyForConfig(cfg, leaseID)
 	if err != nil {
@@ -178,48 +213,348 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	cfg.SSHKey = keyPath
 	name := core.LeaseProviderName(leaseID, slug)
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s runtime=%s image=%s keep=%v\n", providerName, leaseID, slug, cfg.LocalContainer.Runtime, cfg.LocalContainer.Image, req.Keep)
-	containerID, bootstrapDir, err := b.createContainer(ctx, cfg, name, leaseID, slug, publicKey, req.Keep)
+	containerID, bootstrapDir, createErr := b.createContainer(ctx, cfg, name, leaseID, slug, publicKey, req.Keep)
+	if containerID == "" {
+		return core.LeaseTarget{}, createErr
+	}
+	lease := createdPendingLease(cfg, containerID, leaseID, slug, bootstrapDir, req.Keep)
+	pendingClaim, err := b.publishCreatedPendingClaim(leaseID, slug, claimScope, req, cfg, lease)
 	if err != nil {
-		if req.Keep && containerID != "" {
-			cleanupKey = false
-		}
-		return core.LeaseTarget{}, err
-	}
-	if req.Keep {
 		cleanupKey = false
+		rollbackErr := b.rollbackUnclaimedContainer(containerID, leaseID, bootstrapDir, &lease.Server)
+		if rollbackErr != nil {
+			if retryClaim, retryErr := b.publishCreatedPendingClaim(leaseID, slug, claimScope, req, cfg, lease); retryErr == nil {
+				pendingClaim = retryClaim
+				b.printPendingRecovery(leaseID, slug, pendingClaim, errors.Join(err, rollbackErr))
+				return core.LeaseTarget{}, errors.Join(err, rollbackErr)
+			}
+		}
+		return core.LeaseTarget{}, errors.Join(err, rollbackErr)
 	}
-	cleanupContainer := func() {
+	cleanupKey = false
+	if createErr != nil {
 		if req.Keep {
-			return
+			b.printPendingRecovery(leaseID, slug, pendingClaim, createErr)
+			return core.LeaseTarget{}, createErr
 		}
-		if err := b.removeContainer(context.Background(), containerID); err != nil {
-			return
+		rollbackErr := b.rollbackPendingLease(pendingClaim, lease, bootstrapDir)
+		if rollbackErr != nil {
+			b.printPendingRecovery(leaseID, slug, pendingClaim, rollbackErr)
 		}
-		if bootstrapDir != "" && trustedBootstrapDir(bootstrapDir) {
-			_ = os.RemoveAll(bootstrapDir)
-		}
+		return core.LeaseTarget{}, errors.Join(createErr, rollbackErr)
 	}
 	container, err := b.inspectContainer(ctx, containerID)
 	if err != nil {
-		cleanupContainer()
-		return core.LeaseTarget{}, err
+		if req.Keep {
+			b.printPendingRecovery(leaseID, slug, pendingClaim, err)
+			return core.LeaseTarget{}, err
+		}
+		rollbackErr := b.rollbackPendingLease(pendingClaim, lease, bootstrapDir)
+		if rollbackErr != nil {
+			b.printPendingRecovery(leaseID, slug, pendingClaim, rollbackErr)
+		}
+		return core.LeaseTarget{}, errors.Join(err, rollbackErr)
 	}
-	lease, err := b.prepareLease(ctx, cfg, container, leaseID, slug, true)
+	lease = b.pendingLease(cfg, container, leaseID, slug)
+	markPendingLease(&lease.Server)
+	updatedPendingClaim, err := core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, pendingClaim, lease.Server, lease.SSH)
 	if err != nil {
-		cleanupContainer()
-		return core.LeaseTarget{}, err
+		retained, reconcileErr := b.reconcileChangedClaim(lease, bootstrapDir)
+		if retained {
+			b.printPendingRecovery(leaseID, slug, pendingClaim, err)
+		}
+		return core.LeaseTarget{}, errors.Join(err, reconcileErr)
 	}
-	if err := core.ClaimLeaseForRepoProviderScopePondCacheVolumes(leaseID, slug, providerName, b.claimScope(ctx), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, core.CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes)); err != nil {
-		cleanupContainer()
-		return core.LeaseTarget{}, err
+	pendingClaim = updatedPendingClaim
+	lease, err = b.waitForContainerEndpoint(ctx, cfg, containerID, leaseID, slug)
+	if err != nil {
+		retained, reconcileErr := b.reconcileReadinessFailure(req.Keep, pendingClaim, lease, bootstrapDir)
+		if retained {
+			b.printPendingRecovery(leaseID, slug, pendingClaim, err)
+		}
+		return core.LeaseTarget{}, errors.Join(err, reconcileErr)
 	}
-	if err := core.UpdateLeaseClaimEndpoint(leaseID, lease.Server, lease.SSH); err != nil {
-		cleanupContainer()
-		return core.LeaseTarget{}, err
+	markPendingLease(&lease.Server)
+	updatedPendingClaim, err = core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, pendingClaim, lease.Server, lease.SSH)
+	if err != nil {
+		retained, reconcileErr := b.reconcileChangedClaim(lease, bootstrapDir)
+		if retained {
+			b.printPendingRecovery(leaseID, slug, pendingClaim, err)
+			return core.LeaseTarget{}, err
+		}
+		return core.LeaseTarget{}, errors.Join(err, reconcileErr)
 	}
-	cleanupKey = false
+	pendingClaim = updatedPendingClaim
+	if err := b.waitForSSHReady(ctx, &lease.SSH, b.rt.Stderr, "local container ssh", core.BootstrapWaitTimeout(cfg)); err != nil {
+		retained, reconcileErr := b.reconcileReadinessFailure(req.Keep, pendingClaim, lease, bootstrapDir)
+		if retained {
+			b.printPendingRecovery(leaseID, slug, pendingClaim, err)
+		}
+		return core.LeaseTarget{}, errors.Join(err, reconcileErr)
+	}
+	lease.Server.Status = "ready"
+	lease.Server.Labels = cloneLabels(lease.Server.Labels)
+	lease.Server.Labels["state"] = "ready"
+	delete(lease.Server.Labels, "recovery")
+	readyClaim, err := core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, pendingClaim, lease.Server, lease.SSH)
+	if err != nil {
+		retained, reconcileErr := b.reconcileChangedClaim(lease, bootstrapDir)
+		if retained {
+			b.printPendingRecovery(leaseID, slug, pendingClaim, err)
+			return core.LeaseTarget{}, err
+		}
+		return core.LeaseTarget{}, errors.Join(err, reconcileErr)
+	}
+	core.SetServerLeaseClaimSnapshot(&lease.Server, readyClaim, true)
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s container=%s state=ready\n", leaseID, shortID(container.ID))
 	return lease, nil
+}
+
+func createdPendingLease(cfg core.Config, containerID, leaseID, slug, bootstrapDir string, keep bool) core.LeaseTarget {
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, time.Now().UTC())
+	labels["state"] = pendingClaimState
+	labels["recovery"] = pendingRecoveryKind
+	labels["ssh_key_owned"] = "true"
+	labels["bootstrap_owned"] = "true"
+	labels["bootstrap_dir"] = bootstrapDir
+	labels["runtime"] = cfg.LocalContainer.Runtime
+	labels["image"] = localContainerDisplayImage(cfg)
+	labels["ssh_user"] = cfg.LocalContainer.User
+	labels["ssh_port"] = sshPort
+	labels["docker_socket"] = boolEnv(cfg.LocalContainer.DockerSocket)
+	containerWorkRoot := cfg.LocalContainer.WorkRoot
+	if cfg.LocalContainer.DockerSocket {
+		hostWorkRoot, resolvedWorkRoot := dockerSocketWorkRoots(cfg)
+		labels["host_work_root"] = hostWorkRoot
+		containerWorkRoot = resolvedWorkRoot
+	}
+	labels["work_root"] = containerWorkRoot
+	for _, key := range checkpointScopeMetadataKeys {
+		if value := strings.TrimSpace(cfg.LocalContainer.CheckpointMetadata[key]); value != "" {
+			labels[key] = value
+		}
+	}
+	if contextName := strings.TrimSpace(cfg.LocalContainer.CheckpointMetadata[checkpointMetadataContext]); contextName != "" {
+		labels["runtime_context"] = contextName
+	}
+	server := core.Server{
+		CloudID:  containerID,
+		Provider: providerName,
+		Name:     core.LeaseProviderName(leaseID, slug),
+		Status:   pendingClaimState,
+		Labels:   labels,
+	}
+	server.ServerType.Name = localContainerDisplayImage(cfg)
+	target := core.SSHTargetFromConfig(cfg, "")
+	target.Port = ""
+	target.ReadyCheck = localContainerReadyCheck(cfg)
+	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
+}
+
+func (b *backend) publishCreatedPendingClaim(leaseID, slug, claimScope string, req core.AcquireRequest, cfg core.Config, lease core.LeaseTarget) (core.LeaseClaim, error) {
+	claim, err := core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurable(
+		leaseID,
+		slug,
+		cfg,
+		claimScope,
+		lease.Server,
+		lease.SSH,
+		req.Repo.Root,
+		cfg.IdleTimeout,
+		req.Reclaim,
+		core.LeaseClaim{},
+		false,
+	)
+	if err == nil && claim.LeaseID != leaseID {
+		err = core.Exit(2, "local-container pending claim was not persisted for lease=%s", leaseID)
+	}
+	return claim, err
+}
+
+func (b *backend) pendingLease(cfg core.Config, container inspectContainer, leaseID, slug string) core.LeaseTarget {
+	server := b.serverFromContainer(container, cfg)
+	if user := strings.TrimSpace(server.Labels["ssh_user"]); user != "" {
+		cfg.LocalContainer.User = user
+		cfg.SSHUser = user
+	}
+	if root := strings.TrimSpace(server.Labels["work_root"]); root != "" {
+		cfg.LocalContainer.WorkRoot = root
+		cfg.WorkRoot = root
+	}
+	host, port, _ := containerSSHHostPort(container)
+	if keyPath, err := core.TestboxKeyPath(leaseID); err == nil {
+		if _, statErr := os.Stat(keyPath); statErr == nil {
+			cfg.SSHKey = keyPath
+		}
+	}
+	target := core.SSHTargetFromConfig(cfg, host)
+	target.Port = port
+	target.ReadyCheck = localContainerReadyCheck(cfg)
+	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
+}
+
+func (b *backend) waitForContainerEndpoint(ctx context.Context, cfg core.Config, containerID, leaseID, slug string) (core.LeaseTarget, error) {
+	deadline := time.Now().Add(30 * time.Second)
+	var lastErr error
+	for {
+		if err := context.Cause(ctx); err != nil {
+			return core.LeaseTarget{LeaseID: leaseID, Server: core.Server{CloudID: containerID}}, err
+		}
+		container, err := b.inspectContainer(ctx, containerID)
+		if err == nil {
+			lease, prepareErr := b.prepareLease(ctx, cfg, container, leaseID, slug, false)
+			if prepareErr == nil {
+				return lease, nil
+			}
+			lastErr = prepareErr
+		} else {
+			lastErr = err
+		}
+		if time.Now().After(deadline) {
+			return core.LeaseTarget{LeaseID: leaseID, Server: core.Server{CloudID: containerID}}, core.Exit(5, "timed out waiting for SSH port on local-container %s: %v", shortID(containerID), lastErr)
+		}
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return core.LeaseTarget{LeaseID: leaseID, Server: core.Server{CloudID: containerID}}, context.Cause(ctx)
+		case <-timer.C:
+		}
+	}
+}
+
+func markPendingLease(server *core.Server) {
+	if server.Labels == nil {
+		server.Labels = map[string]string{}
+	} else {
+		server.Labels = cloneLabels(server.Labels)
+	}
+	server.Status = pendingClaimState
+	server.Labels["state"] = pendingClaimState
+	server.Labels["recovery"] = pendingRecoveryKind
+	server.Labels["ssh_key_owned"] = "true"
+	server.Labels["bootstrap_owned"] = "true"
+}
+
+func (b *backend) rollbackUnclaimedContainer(containerID, leaseID, bootstrapDir string, server *core.Server) error {
+	lease := core.LeaseTarget{LeaseID: leaseID, Server: core.Server{CloudID: containerID}}
+	if server != nil {
+		lease.Server = *server
+		lease.Server.CloudID = containerID
+	}
+	retained, err := b.reconcileChangedClaim(lease, bootstrapDir)
+	if retained {
+		return errors.Join(err, core.Exit(2, "lease %s claim changed to own container %s; refusing stale rollback", leaseID, shortID(containerID)))
+	}
+	return err
+}
+
+func (b *backend) reconcileChangedClaim(lease core.LeaseTarget, bootstrapDir string) (bool, error) {
+	rollbackCtx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
+	defer cancel()
+	retained := false
+	err := core.WithDurableLeaseClaimLock(lease.LeaseID, func(claim *core.LeaseClaim, exists bool, _ func() error) error {
+		if exists && strings.TrimSpace(claim.CloudID) == strings.TrimSpace(lease.Server.CloudID) {
+			retained = true
+			return nil
+		}
+		if err := b.removeContainer(rollbackCtx, lease.Server.CloudID); err != nil {
+			return fmt.Errorf("rollback unclaimed local-container resource %s: %w", shortID(lease.Server.CloudID), err)
+		}
+		var cleanupErrs []error
+		if hostRoot := hostLeaseWorkRoot(lease); hostRoot != "" {
+			winningHostRoot := ""
+			if exists {
+				winningHostRoot = hostLeaseWorkRoot(core.LeaseTarget{LeaseID: claim.LeaseID, Server: core.Server{Labels: claim.Labels}})
+			}
+			if hostRoot != winningHostRoot {
+				if err := b.removeAll(hostRoot); err != nil {
+					cleanupErrs = append(cleanupErrs, fmt.Errorf("remove local-container host work root %s: %w", hostRoot, err))
+				}
+			}
+		}
+		if bootstrapDir != "" && trustedBootstrapDir(bootstrapDir) {
+			winningBootstrapDir := ""
+			if exists {
+				winningBootstrapDir = strings.TrimSpace(claim.Labels["bootstrap_dir"])
+			}
+			if bootstrapDir != winningBootstrapDir {
+				if err := b.removeAll(bootstrapDir); err != nil {
+					cleanupErrs = append(cleanupErrs, fmt.Errorf("remove local-container bootstrap directory %s: %w", bootstrapDir, err))
+				}
+			}
+		}
+		if !exists {
+			core.RemoveStoredTestboxKey(lease.LeaseID)
+		}
+		return errors.Join(cleanupErrs...)
+	})
+	return retained, err
+}
+
+func (b *backend) reconcileReadinessFailure(keep bool, expected core.LeaseClaim, lease core.LeaseTarget, bootstrapDir string) (bool, error) {
+	lease.Server = mergeLocalContainerClaim(lease.Server, expected)
+	if lease.Server.CloudID == "" {
+		lease.Server.CloudID = expected.CloudID
+	}
+	if !keep {
+		rollbackErr := b.rollbackPendingLease(expected, lease, bootstrapDir)
+		if rollbackErr == nil {
+			return false, nil
+		}
+		retained, reconcileErr := b.reconcileChangedClaim(lease, bootstrapDir)
+		return retained, errors.Join(rollbackErr, reconcileErr)
+	}
+	return b.reconcileChangedClaim(lease, bootstrapDir)
+}
+
+func (b *backend) rollbackPendingLease(expected core.LeaseClaim, lease core.LeaseTarget, bootstrapDir string) error {
+	lease.Server = mergeLocalContainerClaim(lease.Server, expected)
+	if lease.Server.CloudID == "" {
+		lease.Server.CloudID = expected.CloudID
+	}
+	rollbackCtx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
+	defer cancel()
+	err := core.RemoveLeaseClaimIfUnchangedAfter(lease.LeaseID, expected, func() error {
+		if err := b.removeContainer(rollbackCtx, lease.Server.CloudID); err != nil {
+			return err
+		}
+		var cleanupErrs []error
+		if hostRoot := hostLeaseWorkRoot(lease); hostRoot != "" {
+			if err := b.removeAll(hostRoot); err != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove local-container host work root %s: %w", hostRoot, err))
+			}
+		}
+		if bootstrapDir != "" && trustedBootstrapDir(bootstrapDir) {
+			if err := b.removeAll(bootstrapDir); err != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove local-container bootstrap directory %s: %w", bootstrapDir, err))
+			}
+		}
+		core.RemoveStoredTestboxKey(lease.LeaseID)
+		return errors.Join(cleanupErrs...)
+	})
+	if b.afterClaimCleanup != nil {
+		b.afterClaimCleanup(lease.LeaseID)
+	}
+	return err
+}
+
+func (b *backend) printPendingRecovery(leaseID, slug string, claim core.LeaseClaim, _ error) {
+	runtimeName := firstNonBlank(claim.Labels[checkpointMetadataRuntime], claim.Labels["runtime"], b.cfg.LocalContainer.Runtime, "docker")
+	envPrefix := []string{"CRABBOX_LOCAL_CONTAINER_RUNTIME=" + core.ShellQuote(runtimeName)}
+	scope := checkpointScopeFromMetadata(checkpointScopeMetadataFromLabels(claim.Labels), runtimeName)
+	if isDockerRuntime(runtimeName) && scope.Context != "" {
+		envPrefix = append(envPrefix, "DOCKER_CONTEXT="+core.ShellQuote(scope.Context))
+	}
+	if isPodmanRuntime(runtimeName) && scope.Context != "" && scope.Context != "default" && scope.Host == "" {
+		envPrefix = append(envPrefix, "CONTAINER_CONNECTION="+core.ShellQuote(scope.Context))
+	}
+	routeEnv := strings.Join(envPrefix, " ")
+	idArg := core.ShellQuote(leaseID)
+	fmt.Fprintf(b.rt.Stderr, "retained provider=%s lease=%s slug=%s state=%s reason=%q\n", providerName, leaseID, blank(slug, "-"), pendingClaimState, pendingRecoveryReason)
+	fmt.Fprintf(b.rt.Stderr, "inspect: %s crabbox inspect --provider %s --id %s --json\n", routeEnv, providerName, idArg)
+	fmt.Fprintf(b.rt.Stderr, "reclaim: %s crabbox run --provider %s --id %s --reclaim --keep --sync-only\n", routeEnv, providerName, idArg)
+	fmt.Fprintf(b.rt.Stderr, "cleanup: %s crabbox stop --provider %s --id %s\n", routeEnv, providerName, idArg)
 }
 
 func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
@@ -234,6 +569,15 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		}
 		return core.LeaseTarget{}, err
 	}
+	if leaseID != "" {
+		if claim, ok, exact, claimErr := core.ResolveLeaseClaimForProviderWithExact(leaseID, providerName); claimErr != nil {
+			return core.LeaseTarget{}, claimErr
+		} else if ok && exact {
+			if _, scopeErr := b.applyCheckpointScopeLabels(ctx, claim.Labels); scopeErr != nil {
+				return core.LeaseTarget{}, scopeErr
+			}
+		}
+	}
 	cfg := b.configForRun()
 	readOnlyStatus := req.StatusOnly && !req.ReleaseOnly
 	if strings.TrimSpace(leaseID) == "" && (!readOnlyStatus || req.Reclaim) {
@@ -247,17 +591,119 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		return core.LeaseTarget{}, localContainerOwnershipError(leaseID, container.ID)
 	}
 	if req.ReleaseOnly {
-		return core.LeaseTarget{Server: b.serverFromContainer(container, cfg), LeaseID: leaseID}, nil
+		claim, err := b.requireExactLocalContainerClaim(ctx, leaseID, container.ID)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
+		server := mergeLocalContainerClaim(b.serverFromContainer(container, cfg), claim)
+		core.SetServerLeaseClaimSnapshot(&server, claim, true)
+		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
-	lease, err := b.prepareLease(ctx, cfg, container, leaseID, slug, false)
-	if err != nil {
-		return core.LeaseTarget{}, err
+	var exactClaim core.LeaseClaim
+	if owned {
+		claim, ok, exact, claimErr := core.ResolveLeaseClaimForProviderWithExact(leaseID, providerName)
+		if claimErr != nil {
+			return core.LeaseTarget{}, claimErr
+		}
+		legacyReclaim := req.Reclaim && !hasCompleteCapturedRuntimeScope(claim.Labels) && strings.TrimSpace(claim.ProviderScope) == strings.TrimSpace(b.claimScope(ctx))
+		if !ok || !exact || claim.CloudID != container.ID || (!b.claimMatchesCurrentScope(ctx, claim) && !legacyReclaim) {
+			return core.LeaseTarget{}, localContainerOwnershipError(leaseID, container.ID)
+		}
+		exactClaim = claim
 	}
-	if req.Repo.Root != "" && (!readOnlyStatus || req.Reclaim) {
-		if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, b.claimScope(ctx), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, lease.Server, lease.SSH); err != nil {
+	var lease core.LeaseTarget
+	if isPendingLocalContainerClaim(exactClaim) {
+		lease = b.pendingLease(cfg, container, leaseID, slug)
+		if req.Prepare {
+			keep := strings.EqualFold(exactClaim.Labels["keep"], "true")
+			bootstrapDir := strings.TrimSpace(exactClaim.Labels["bootstrap_dir"])
+			lease, err = b.waitForContainerEndpoint(ctx, cfg, container.ID, leaseID, slug)
+			if err != nil {
+				retained, reconcileErr := b.reconcileReadinessFailure(keep, exactClaim, lease, bootstrapDir)
+				if retained {
+					b.printPendingRecovery(leaseID, slug, exactClaim, err)
+				}
+				return core.LeaseTarget{}, errors.Join(err, reconcileErr)
+			}
+			markPendingLease(&lease.Server)
+			updatedClaim, updateErr := core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, exactClaim, lease.Server, lease.SSH)
+			err = updateErr
+			if err != nil {
+				retained, reconcileErr := b.reconcileChangedClaim(lease, bootstrapDir)
+				if retained {
+					b.printPendingRecovery(leaseID, slug, exactClaim, err)
+				}
+				return core.LeaseTarget{}, errors.Join(err, reconcileErr)
+			}
+			exactClaim = updatedClaim
+			if err := b.waitForSSHReady(ctx, &lease.SSH, b.rt.Stderr, "local container ssh", core.BootstrapWaitTimeout(cfg)); err != nil {
+				retained, reconcileErr := b.reconcileReadinessFailure(keep, exactClaim, lease, bootstrapDir)
+				if retained {
+					b.printPendingRecovery(leaseID, slug, exactClaim, err)
+				}
+				return core.LeaseTarget{}, errors.Join(err, reconcileErr)
+			}
+			lease.Server.Status = "ready"
+			lease.Server.Labels = cloneLabels(lease.Server.Labels)
+			lease.Server.Labels["state"] = "ready"
+			delete(lease.Server.Labels, "recovery")
+			updatedClaim, updateErr = core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, exactClaim, lease.Server, lease.SSH)
+			err = updateErr
+			if err != nil {
+				retained, reconcileErr := b.reconcileChangedClaim(lease, bootstrapDir)
+				if retained {
+					b.printPendingRecovery(leaseID, slug, exactClaim, err)
+				}
+				return core.LeaseTarget{}, errors.Join(err, reconcileErr)
+			}
+			exactClaim = updatedClaim
+		}
+	} else {
+		lease, err = b.prepareLease(ctx, cfg, container, leaseID, slug, false)
+		if err != nil {
 			return core.LeaseTarget{}, err
 		}
 	}
+	if owned {
+		lease.Server = mergeLocalContainerClaim(lease.Server, exactClaim)
+		core.SetServerLeaseClaimSnapshot(&lease.Server, exactClaim, true)
+	}
+	if req.Reclaim && (!owned || !hasCompleteCapturedRuntimeScope(exactClaim.Labels)) {
+		scope, scopeErr := b.captureRuntimeScope(ctx, cfg)
+		if scopeErr != nil {
+			return core.LeaseTarget{}, scopeErr
+		}
+		if strings.TrimSpace(scope.DaemonID) == "" {
+			return core.LeaseTarget{}, core.Exit(2, "local-container runtime identity is unavailable; refusing reclaim")
+		}
+		metadata := checkpointScopeMetadata(scope)
+		cfg.LocalContainer.CheckpointMetadata = metadata
+		b.cfg.LocalContainer.CheckpointMetadata = metadata
+		if lease.Server.Labels == nil {
+			lease.Server.Labels = map[string]string{}
+		}
+		for key, value := range metadata {
+			if strings.TrimSpace(value) != "" {
+				lease.Server.Labels[key] = value
+			}
+		}
+	}
+	if req.Repo.Root != "" && (!readOnlyStatus || req.Reclaim) {
+		var claimErr error
+		if expected, exists, set := core.ServerLeaseClaimSnapshot(lease.Server); set {
+			var updated core.LeaseClaim
+			updated, claimErr = core.ClaimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug, cfg, b.claimScope(ctx), lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, expected, exists)
+			if claimErr == nil {
+				core.SetServerLeaseClaimSnapshot(&lease.Server, updated, true)
+			}
+		} else {
+			claimErr = core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, b.claimScope(ctx), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, lease.Server, lease.SSH)
+		}
+		if claimErr != nil {
+			return core.LeaseTarget{}, claimErr
+		}
+	}
+	lease.Server.Labels = publicLocalContainerClaimLabels(lease.Server.Labels)
 	return lease, nil
 }
 
@@ -267,9 +713,44 @@ func (b *backend) List(ctx context.Context, _ core.ListRequest) ([]core.LeaseVie
 	if err != nil {
 		return nil, err
 	}
-	servers := make([]core.LeaseView, 0, len(containers))
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		return nil, err
+	}
+	claimScope := b.claimScope(ctx)
+	claimsByLease := make(map[string]core.LeaseClaim, len(claims))
+	for _, claim := range claims {
+		if claim.Provider == providerName && claim.ProviderScope == claimScope {
+			claimsByLease[claim.LeaseID] = claim
+		}
+	}
+	servers := make([]core.LeaseView, 0, len(containers)+len(claimsByLease))
+	seenClaims := make(map[string]struct{}, len(containers))
 	for _, container := range containers {
-		servers = append(servers, b.serverFromContainer(container, cfg))
+		server := b.serverFromContainer(container, cfg)
+		leaseID := strings.TrimSpace(server.Labels["lease"])
+		if claim, ok := claimsByLease[leaseID]; ok && claim.CloudID == container.ID {
+			server = mergeLocalContainerClaim(server, claim)
+			seenClaims[leaseID] = struct{}{}
+		}
+		servers = append(servers, server)
+	}
+	for leaseID, claim := range claimsByLease {
+		if _, ok := seenClaims[leaseID]; ok || !isPendingLocalContainerClaim(claim) {
+			continue
+		}
+		labels := publicLocalContainerClaimLabels(claim.Labels)
+		labels["missing_container"] = "1"
+		server := core.Server{
+			CloudID:  claim.CloudID,
+			Provider: providerName,
+			Name:     core.LeaseProviderName(claim.LeaseID, claim.Slug),
+			Status:   "missing",
+			Labels:   labels,
+		}
+		server.PublicNet.IPv4.IP = claim.SSHHost
+		server.ServerType.Name = labels["server_type"]
+		servers = append(servers, server)
 	}
 	return servers, nil
 }
@@ -291,7 +772,11 @@ func (b *backend) Doctor(ctx context.Context, req core.DoctorRequest) (core.Doct
 
 func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
 	lease := req.Lease
-	appliedScope, err := b.applyCheckpointScopeLabels(ctx, lease.Server.Labels)
+	scopeLabels := lease.Server.Labels
+	if snapshot, exists, set := core.ServerLeaseClaimSnapshot(lease.Server); set && exists {
+		scopeLabels = snapshot.Labels
+	}
+	appliedScope, err := b.applyCheckpointScopeLabels(ctx, scopeLabels)
 	if err != nil {
 		return err
 	}
@@ -307,8 +792,8 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	}
 	id := strings.TrimSpace(req.Lease.Server.CloudID)
 	if id == "" {
-		if b.releaseMissingClaim(lease) {
-			return nil
+		if handled, err := b.releaseMissingClaim(ctx, lease); handled || err != nil {
+			return err
 		}
 		container, leaseID, _, err := b.resolveContainer(ctx, req.Lease.LeaseID)
 		if err != nil {
@@ -323,27 +808,46 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if id == "" {
 		return core.Exit(2, "provider=%s release requires a container id", providerName)
 	}
-	if err := b.requireExactLocalContainerClaim(ctx, lease.LeaseID, id); err != nil {
-		return err
-	}
-	hostLeaseRoot := hostLeaseWorkRoot(lease)
-	bootstrapDir := strings.TrimSpace(lease.Server.Labels["bootstrap_dir"])
-	if err := b.removeContainer(ctx, id); err != nil {
-		return err
-	}
-	var cleanupErr error
-	if hostLeaseRoot != "" {
-		cleanupErr = os.RemoveAll(hostLeaseRoot)
-	}
-	if bootstrapDir != "" && trustedBootstrapDir(bootstrapDir) {
-		if err := os.RemoveAll(bootstrapDir); err != nil && cleanupErr == nil {
-			cleanupErr = err
+	claim, claimExists, snapshotSet := core.ServerLeaseClaimSnapshot(lease.Server)
+	if snapshotSet {
+		if !claimExists {
+			return localContainerOwnershipError(lease.LeaseID, id)
+		}
+		if err := b.validateExactLocalContainerClaim(ctx, claim, lease.LeaseID, id); err != nil {
+			return err
+		}
+	} else {
+		claim, err = b.requireExactLocalContainerClaim(ctx, lease.LeaseID, id)
+		if err != nil {
+			return err
 		}
 	}
-	core.RemoveLeaseClaim(lease.LeaseID)
-	core.RemoveStoredTestboxKey(lease.LeaseID)
-	if cleanupErr != nil {
-		return core.Exit(2, "remove local-container host work root %s: %v", hostLeaseRoot, cleanupErr)
+	lease.Server = mergeLocalContainerClaim(lease.Server, claim)
+	hostLeaseRoot := hostLeaseWorkRoot(lease)
+	bootstrapDir := strings.TrimSpace(lease.Server.Labels["bootstrap_dir"])
+	err = core.RemoveLeaseClaimIfUnchangedAfter(lease.LeaseID, claim, func() error {
+		if err := b.removeContainer(ctx, id); err != nil {
+			return err
+		}
+		var cleanupErrs []error
+		if hostLeaseRoot != "" {
+			if err := b.removeAll(hostLeaseRoot); err != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove local-container host work root %s: %w", hostLeaseRoot, err))
+			}
+		}
+		if bootstrapDir != "" && trustedBootstrapDir(bootstrapDir) {
+			if err := b.removeAll(bootstrapDir); err != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove local-container bootstrap directory %s: %w", bootstrapDir, err))
+			}
+		}
+		core.RemoveStoredTestboxKey(lease.LeaseID)
+		return errors.Join(cleanupErrs...)
+	})
+	if b.afterClaimCleanup != nil {
+		b.afterClaimCleanup(lease.LeaseID)
+	}
+	if err != nil {
+		return err
 	}
 	return nil
 }
@@ -376,28 +880,75 @@ func localContainerOwnershipError(leaseID, containerID string) error {
 	return core.Exit(4, "local-container lease %q has no exact local claim bound to container %q in the current runtime scope; adopt it with an explicit --reclaim reuse before stop", strings.TrimSpace(leaseID), strings.TrimSpace(containerID))
 }
 
-func (b *backend) requireExactLocalContainerClaim(ctx context.Context, leaseID, containerID string) error {
-	owned, _, err := b.localContainerClaimStatus(ctx, leaseID, containerID)
+func (b *backend) requireExactLocalContainerClaim(ctx context.Context, leaseID, containerID string) (core.LeaseClaim, error) {
+	claim, ok, exact, err := core.ResolveLeaseClaimForProviderWithExact(leaseID, providerName)
 	if err != nil {
-		return err
+		return core.LeaseClaim{}, err
 	}
-	if !owned {
+	if !ok || !exact {
+		return core.LeaseClaim{}, localContainerOwnershipError(leaseID, containerID)
+	}
+	if err := b.validateExactLocalContainerClaim(ctx, claim, leaseID, containerID); err != nil {
+		return core.LeaseClaim{}, err
+	}
+	return claim, nil
+}
+
+func (b *backend) validateExactLocalContainerClaim(ctx context.Context, claim core.LeaseClaim, leaseID, containerID string) error {
+	claimScope := strings.TrimSpace(claim.ProviderScope)
+	currentScope := strings.TrimSpace(b.claimScope(ctx))
+	if claim.LeaseID != strings.TrimSpace(leaseID) || claim.Provider != providerName ||
+		claim.CloudID == "" || claim.CloudID != strings.TrimSpace(containerID) ||
+		claimScope == "" || currentScope == "" || claimScope != currentScope {
+		return localContainerOwnershipError(leaseID, containerID)
+	}
+	if err := b.validateClaimRuntimeScope(ctx, claim); err != nil {
 		return localContainerOwnershipError(leaseID, containerID)
 	}
 	return nil
 }
 
-func (b *backend) releaseMissingClaim(lease core.LeaseTarget) bool {
+func (b *backend) releaseMissingClaim(ctx context.Context, lease core.LeaseTarget) (bool, error) {
 	leaseID := strings.TrimSpace(firstNonBlank(lease.LeaseID, lease.Server.Labels["lease"]))
 	if leaseID == "" || strings.TrimSpace(lease.Server.CloudID) != "" {
-		return false
+		return false, nil
 	}
 	if lease.Server.Labels["missing_container"] != "1" {
-		return false
+		return false, nil
 	}
-	core.RemoveLeaseClaim(leaseID)
-	core.RemoveStoredTestboxKey(leaseID)
-	return true
+	claim, claimExists, snapshotSet := core.ServerLeaseClaimSnapshot(lease.Server)
+	if !snapshotSet || !claimExists || claim.LeaseID != leaseID || claim.Provider != providerName || !b.claimMatchesCurrentScope(ctx, claim) {
+		return true, localContainerOwnershipError(leaseID, claim.CloudID)
+	}
+	err := core.RemoveLeaseClaimIfUnchangedAfter(leaseID, claim, func() error {
+		absent, err := b.confirmContainerAbsent(ctx, claim.CloudID)
+		if err != nil {
+			return err
+		}
+		if !absent {
+			return core.Exit(4, "local-container %s still exists; refusing to remove its claim", shortID(claim.CloudID))
+		}
+		var cleanupErrs []error
+		if hostRoot := hostLeaseWorkRoot(core.LeaseTarget{LeaseID: leaseID, Server: core.Server{Labels: claim.Labels}}); hostRoot != "" {
+			if err := b.removeAll(hostRoot); err != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove local-container host work root %s: %w", hostRoot, err))
+			}
+		}
+		if bootstrapDir := strings.TrimSpace(claim.Labels["bootstrap_dir"]); bootstrapDir != "" && trustedBootstrapDir(bootstrapDir) {
+			if err := b.removeAll(bootstrapDir); err != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove local-container bootstrap directory %s: %w", bootstrapDir, err))
+			}
+		}
+		core.RemoveStoredTestboxKey(leaseID)
+		return errors.Join(cleanupErrs...)
+	})
+	if b.afterClaimCleanup != nil {
+		b.afterClaimCleanup(leaseID)
+	}
+	if err != nil {
+		return true, err
+	}
+	return true, nil
 }
 
 func (b *backend) resolveMissingClaimForRelease(ctx context.Context, identifier string) (core.LeaseTarget, bool, error) {
@@ -418,11 +969,11 @@ func (b *backend) resolveMissingClaimForRelease(ctx context.Context, identifier 
 		"missing_container": "1",
 	}
 	for key, value := range claim.Labels {
-		if strings.TrimSpace(value) != "" {
+		if strings.TrimSpace(value) != "" && !privateLocalContainerScopeLabel(key) {
 			labels[key] = value
 		}
 	}
-	return core.LeaseTarget{
+	lease := core.LeaseTarget{
 		LeaseID: claim.LeaseID,
 		Server: core.Server{
 			Provider: providerName,
@@ -430,7 +981,9 @@ func (b *backend) resolveMissingClaimForRelease(ctx context.Context, identifier 
 			Status:   "missing",
 			Labels:   labels,
 		},
-	}, true, nil
+	}
+	core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
+	return lease, true, nil
 }
 
 func localContainerClaimByIDOrSlug(identifier string) (core.LeaseClaim, bool, error) {
@@ -473,12 +1026,57 @@ func (b *backend) claimMatchesCurrentScope(ctx context.Context, claim core.Lease
 	if claimScope == "" {
 		return true
 	}
-	return claimScope == strings.TrimSpace(b.claimScope(ctx))
+	if claimScope != strings.TrimSpace(b.claimScope(ctx)) {
+		return false
+	}
+	return b.validateClaimRuntimeScope(ctx, claim) == nil
+}
+
+func (b *backend) validateClaimRuntimeScope(ctx context.Context, claim core.LeaseClaim) error {
+	metadata := checkpointScopeMetadataFromLabels(claim.Labels)
+	if !hasCompleteCapturedRuntimeScope(claim.Labels) {
+		return core.Exit(4, "local-container claim lacks captured runtime identity")
+	}
+	expected := checkpointScopeFromMetadata(metadata, claim.Labels["runtime"])
+	currentMetadata := b.cfg.LocalContainer.CheckpointMetadata
+	if len(currentMetadata) == 0 {
+		return core.Exit(4, "local-container captured runtime scope is not hydrated")
+	}
+	current := checkpointScopeFromMetadata(currentMetadata, b.cfg.LocalContainer.Runtime)
+	if !sameCheckpointScope(expected, current) {
+		return core.Exit(4, "local-container captured runtime scope changed")
+	}
+	if err := b.validateRuntimeScope(ctx, expected); err != nil {
+		return core.Exit(4, "local-container captured runtime identity changed")
+	}
+	return nil
+}
+
+func hasCompleteCapturedRuntimeScope(labels map[string]string) bool {
+	metadata := checkpointScopeMetadataFromLabels(labels)
+	return strings.TrimSpace(metadata[checkpointMetadataRuntime]) != "" &&
+		strings.TrimSpace(metadata[checkpointMetadataEndpoint]) != "" &&
+		strings.TrimSpace(metadata[checkpointMetadataDaemonID]) != "" &&
+		(strings.TrimSpace(metadata[checkpointMetadataContext]) != "" || strings.TrimSpace(metadata[checkpointMetadataHost]) != "")
+}
+
+func sameCheckpointScope(a, b checkpointScope) bool {
+	return strings.TrimSpace(a.Runtime) == strings.TrimSpace(b.Runtime) &&
+		strings.TrimSpace(a.Host) == strings.TrimSpace(b.Host) &&
+		strings.TrimSpace(a.Context) == strings.TrimSpace(b.Context) &&
+		strings.TrimSpace(a.Config) == strings.TrimSpace(b.Config) &&
+		strings.TrimSpace(a.Endpoint) == strings.TrimSpace(b.Endpoint) &&
+		strings.TrimSpace(a.DaemonID) == strings.TrimSpace(b.DaemonID)
 }
 
 func isExitCode(err error, code int) bool {
 	var exit core.ExitError
 	return core.AsExitError(err, &exit) && exit.Code == code
+}
+
+type cleanupMutationOutcome struct {
+	changed          bool
+	scopeUnavailable bool
 }
 
 func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
@@ -520,33 +1118,46 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			fmt.Fprintf(b.rt.Stderr, "skip container id=%s name=%s reason=%s\n", server.DisplayID(), server.Name, reason)
 			continue
 		}
-		if req.DryRun {
-			fmt.Fprintf(b.rt.Stdout, "would remove container id=%s name=%s lease=%s reason=%s\n", server.DisplayID(), server.Name, blank(leaseID, "-"), reason)
-			continue
+		if leaseID != "" && b.beforeCleanupMutation != nil {
+			b.beforeCleanupMutation(leaseID)
 		}
-		fmt.Fprintf(b.rt.Stdout, "remove container id=%s name=%s lease=%s reason=%s\n", server.DisplayID(), server.Name, blank(leaseID, "-"), reason)
-		if err := b.removeContainer(ctx, container.ID); err != nil {
-			return err
-		}
-		var cleanupErr error
-		hostLeaseRoot := hostLeaseWorkRootFromLabels(leaseID, server.Labels)
-		if hostLeaseRoot != "" {
-			cleanupErr = os.RemoveAll(hostLeaseRoot)
-		}
-		bootstrapDir := strings.TrimSpace(server.Labels["bootstrap_dir"])
-		if bootstrapDir != "" && trustedBootstrapDir(bootstrapDir) {
-			if err := os.RemoveAll(bootstrapDir); err != nil && cleanupErr == nil {
-				cleanupErr = err
+		if hasClaim {
+			outcome, cleanupErr := b.cleanupClaimedContainer(ctx, claim, container.ID, req.DryRun)
+			if outcome.changed {
+				fmt.Fprintf(b.rt.Stderr, "skip container id=%s name=%s reason=changed-during-cleanup err=%v\n", server.DisplayID(), server.Name, cleanupErr)
+				continue
+			}
+			if outcome.scopeUnavailable {
+				fmt.Fprintf(b.rt.Stderr, "skip container id=%s name=%s reason=captured-scope-unavailable err=%v\n", server.DisplayID(), server.Name, cleanupErr)
+				continue
+			}
+			if cleanupErr != nil {
+				return cleanupErr
+			}
+		} else if leaseID != "" {
+			claimAppeared, cleanupErr := b.cleanupClaimlessContainer(ctx, leaseID, container.ID, server.Labels, req.DryRun)
+			if claimAppeared {
+				fmt.Fprintf(b.rt.Stderr, "skip container id=%s name=%s reason=changed-during-cleanup\n", server.DisplayID(), server.Name)
+				continue
+			}
+			if cleanupErr != nil {
+				return cleanupErr
+			}
+		} else if !req.DryRun {
+			if err := b.removeContainer(ctx, container.ID); err != nil {
+				return err
+			}
+			if err := b.cleanupContainerSidecars("", server.Labels, false); err != nil {
+				return err
 			}
 		}
-		if leaseID != "" {
-			core.RemoveLeaseClaim(leaseID)
-			core.RemoveStoredTestboxKey(leaseID)
+		verb := "remove"
+		if req.DryRun {
+			verb = "would remove"
+		} else {
+			removed++
 		}
-		if cleanupErr != nil {
-			return core.Exit(2, "remove local-container host work root %s: %v", hostLeaseRoot, cleanupErr)
-		}
-		removed++
+		fmt.Fprintf(b.rt.Stdout, "%s container id=%s name=%s lease=%s reason=%s\n", verb, server.DisplayID(), server.Name, blank(leaseID, "-"), reason)
 	}
 	claimsRemoved := 0
 	for _, claim := range orphanCandidates {
@@ -559,7 +1170,41 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		if !localContainerClaimMatchesScope(claim, claimScope, now) {
 			continue
 		}
+		if isPendingLocalContainerClaim(claim) && strings.EqualFold(claim.Labels["keep"], "true") {
+			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s slug=%s reason=pending-readiness-recovery\n", claim.LeaseID, blank(claim.Slug, "-"))
+			continue
+		}
+		missing, scopeErr := b.claimMissingInCapturedScope(ctx, claim)
+		if scopeErr != nil {
+			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s slug=%s reason=captured-scope-unavailable err=%v\n", claim.LeaseID, blank(claim.Slug, "-"), scopeErr)
+			continue
+		}
+		if !missing {
+			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s slug=%s reason=container-present-in-captured-scope\n", claim.LeaseID, blank(claim.Slug, "-"))
+			continue
+		}
 		reason := "missing container"
+		if isPendingLocalContainerClaim(claim) {
+			reason = "missing non-keep pending container"
+			if b.beforeCleanupMutation != nil {
+				b.beforeCleanupMutation(claim.LeaseID)
+			}
+			outcome, removeErr := b.cleanupMissingPendingClaim(ctx, claim, req.DryRun)
+			if outcome.changed {
+				fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s slug=%s reason=changed-during-cleanup err=%v\n", claim.LeaseID, blank(claim.Slug, "-"), removeErr)
+				continue
+			}
+			if removeErr != nil {
+				return removeErr
+			}
+			if req.DryRun {
+				fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=%s\n", claim.LeaseID, blank(claim.Slug, "-"), reason)
+				continue
+			}
+			fmt.Fprintf(b.rt.Stdout, "remove claim lease=%s slug=%s reason=%s\n", claim.LeaseID, blank(claim.Slug, "-"), reason)
+			claimsRemoved++
+			continue
+		}
 		if req.DryRun {
 			if err := core.VerifyLeaseClaimUnchanged(claim.LeaseID, claim); err != nil {
 				fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s slug=%s reason=changed-during-cleanup err=%v\n", claim.LeaseID, blank(claim.Slug, "-"), err)
@@ -591,6 +1236,152 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	}
 	if !req.DryRun {
 		fmt.Fprintf(b.rt.Stdout, "%s cleanup removed=%d claims_removed=%d checked=%d\n", providerName, removed, claimsRemoved, len(containers))
+	}
+	return nil
+}
+
+func (b *backend) claimMissingInCapturedScope(ctx context.Context, claim core.LeaseClaim) (bool, error) {
+	originalCfg := b.cfg
+	defer func() { b.cfg = originalCfg }()
+	if _, err := b.applyCheckpointScopeLabels(ctx, claim.Labels); err != nil {
+		return false, err
+	}
+	if err := b.validateClaimRuntimeScope(ctx, claim); err != nil {
+		return false, err
+	}
+	_, _, _, err := b.findContainerForClaim(ctx, claim)
+	if err == nil {
+		return false, nil
+	}
+	if isExitCode(err, 4) {
+		return true, nil
+	}
+	return false, err
+}
+
+func (b *backend) cleanupClaimedContainer(ctx context.Context, claim core.LeaseClaim, containerID string, dryRun bool) (cleanupMutationOutcome, error) {
+	originalCfg := b.cfg
+	defer func() { b.cfg = originalCfg }()
+	actionEntered := false
+	mutationEntered := false
+	action := func() error {
+		actionEntered = true
+		if err := b.validateCleanupClaim(ctx, claim, claim.LeaseID, containerID); err != nil {
+			return err
+		}
+		if dryRun {
+			return nil
+		}
+		mutationEntered = true
+		if err := b.removeContainer(ctx, containerID); err != nil {
+			return err
+		}
+		return b.cleanupContainerSidecars(claim.LeaseID, claim.Labels, true)
+	}
+	var err error
+	if dryRun {
+		err = core.WithLeaseClaimUnchanged(claim.LeaseID, claim, action)
+	} else {
+		err = core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, action)
+	}
+	if err == nil {
+		return cleanupMutationOutcome{}, nil
+	}
+	if !actionEntered {
+		return cleanupMutationOutcome{changed: true}, err
+	}
+	if !mutationEntered {
+		return cleanupMutationOutcome{scopeUnavailable: true}, err
+	}
+	return cleanupMutationOutcome{}, err
+}
+
+func (b *backend) cleanupClaimlessContainer(ctx context.Context, leaseID, containerID string, labels map[string]string, dryRun bool) (bool, error) {
+	claimAppeared := false
+	err := core.WithDurableLeaseClaimLock(leaseID, func(_ *core.LeaseClaim, exists bool, _ func() error) error {
+		if exists {
+			claimAppeared = true
+			return nil
+		}
+		if dryRun {
+			return nil
+		}
+		if err := b.removeContainer(ctx, containerID); err != nil {
+			return err
+		}
+		return b.cleanupContainerSidecars(leaseID, labels, true)
+	})
+	return claimAppeared, err
+}
+
+func (b *backend) cleanupMissingPendingClaim(ctx context.Context, claim core.LeaseClaim, dryRun bool) (cleanupMutationOutcome, error) {
+	originalCfg := b.cfg
+	defer func() { b.cfg = originalCfg }()
+	actionEntered := false
+	action := func() error {
+		actionEntered = true
+		checkCtx, cancel := context.WithTimeout(ctx, rollbackTimeout)
+		defer cancel()
+		if err := b.validateCleanupClaim(checkCtx, claim, claim.LeaseID, claim.CloudID); err != nil {
+			return err
+		}
+		absent, err := b.confirmContainerAbsent(checkCtx, claim.CloudID)
+		if err != nil {
+			return err
+		}
+		if !absent {
+			return core.Exit(4, "local-container %s reappeared; refusing to remove its pending claim", shortID(claim.CloudID))
+		}
+		if dryRun {
+			return nil
+		}
+		return b.cleanupContainerSidecars(claim.LeaseID, claim.Labels, true)
+	}
+	var err error
+	if dryRun {
+		err = core.WithLeaseClaimUnchanged(claim.LeaseID, claim, action)
+	} else {
+		err = core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, action)
+	}
+	if err != nil && !actionEntered {
+		return cleanupMutationOutcome{changed: true}, err
+	}
+	return cleanupMutationOutcome{}, err
+}
+
+func (b *backend) validateCleanupClaim(ctx context.Context, claim core.LeaseClaim, leaseID, containerID string) error {
+	if claim.LeaseID != strings.TrimSpace(leaseID) || claim.Provider != providerName ||
+		strings.TrimSpace(claim.CloudID) == "" || strings.TrimSpace(claim.CloudID) != strings.TrimSpace(containerID) ||
+		!hasCompleteCapturedRuntimeScope(claim.Labels) {
+		return localContainerOwnershipError(leaseID, containerID)
+	}
+	applied, err := b.applyCheckpointScopeLabels(ctx, claim.Labels)
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return core.Exit(4, "local-container claim lacks captured runtime identity")
+	}
+	return b.validateExactLocalContainerClaim(ctx, claim, leaseID, containerID)
+}
+
+func (b *backend) cleanupContainerSidecars(leaseID string, labels map[string]string, removeKey bool) error {
+	var cleanupErrs []error
+	if hostRoot := hostLeaseWorkRootFromLabels(leaseID, labels); hostRoot != "" {
+		if err := b.removeAll(hostRoot); err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove local-container host work root %s: %w", hostRoot, err))
+		}
+	}
+	if bootstrapDir := strings.TrimSpace(labels["bootstrap_dir"]); bootstrapDir != "" && trustedBootstrapDir(bootstrapDir) {
+		if err := b.removeAll(bootstrapDir); err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove local-container bootstrap directory %s: %w", bootstrapDir, err))
+		}
+	}
+	if len(cleanupErrs) != 0 {
+		return errors.Join(cleanupErrs...)
+	}
+	if removeKey && leaseID != "" {
+		core.RemoveStoredTestboxKey(leaseID)
 	}
 	return nil
 }
@@ -719,9 +1510,13 @@ func localContainerDisplayImage(cfg core.Config) string {
 
 func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, leaseID, slug, publicKey string, keep bool) (string, string, error) {
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, time.Now().UTC())
+	labels["state"] = pendingClaimState
+	labels["recovery"] = pendingRecoveryKind
+	labels["ssh_key_owned"] = "true"
+	labels["bootstrap_owned"] = "true"
 	labels["runtime"] = cfg.LocalContainer.Runtime
 	labels["image"] = localContainerDisplayImage(cfg)
-	for _, key := range checkpointScopeMetadataKeys {
+	for _, key := range []string{checkpointMetadataRuntime, checkpointMetadataContext, checkpointMetadataDaemonID} {
 		if value := strings.TrimSpace(cfg.LocalContainer.CheckpointMetadata[key]); value != "" {
 			labels[key] = value
 		}
@@ -840,17 +1635,11 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
 		defer cancel()
 		containerID, owned, inspectErr := b.ownedContainerID(cleanupCtx, leaseID, bootstrapDir)
-		if owned && keep {
+		if owned {
 			cleanupHostLeaseWorkRoot = false
 			return containerID, bootstrapDir, commandError("container run", result, err)
 		}
-		if owned {
-			if removeErr := b.removeContainer(cleanupCtx, containerID); removeErr == nil {
-				os.RemoveAll(bootstrapDir)
-			} else {
-				cleanupHostLeaseWorkRoot = false
-			}
-		} else if inspectErr == nil {
+		if inspectErr == nil {
 			os.RemoveAll(bootstrapDir)
 		} else {
 			cleanupHostLeaseWorkRoot = false
@@ -1123,6 +1912,61 @@ func (b *backend) inspectContainer(ctx context.Context, id string) (inspectConta
 	return containers[0], nil
 }
 
+func (b *backend) exactContainerAbsent(ctx context.Context, id string) (bool, error) {
+	result, err := b.docker(ctx, []string{"inspect", "--type", "container", id}, nil, nil)
+	if err == nil {
+		return false, nil
+	}
+	detail := strings.ToLower(strings.TrimSpace(firstNonBlank(result.Stderr, result.Stdout)))
+	if localContainerRouteFailure(detail) {
+		return false, commandError("confirm local-container absence", result, err)
+	}
+	containerID := strings.ToLower(strings.TrimSpace(id))
+	for _, marker := range []string{
+		"no such object: " + containerID,
+		"no such container: " + containerID,
+		"container " + containerID + " not found",
+		"container " + containerID + " does not exist",
+		"no container with name or id \"" + containerID + "\" found",
+		"no container with id or name \"" + containerID + "\" found",
+		"no such object: '" + containerID + "'",
+		"no such container: '" + containerID + "'",
+	} {
+		if containerID != "" && strings.Contains(detail, marker) {
+			return true, nil
+		}
+	}
+	return false, commandError("confirm local-container absence", result, err)
+}
+
+func localContainerRouteFailure(detail string) bool {
+	for _, marker := range []string{
+		"cannot connect to the docker daemon",
+		"cannot connect to podman",
+		"connection refused",
+		"error during connect",
+		"failed to connect",
+		"daemon not found",
+		"daemon does not exist",
+		"daemon unavailable",
+	} {
+		if strings.Contains(detail, marker) {
+			return true
+		}
+	}
+	for _, route := range []string{"context", "connection", "endpoint", "socket", "transport"} {
+		if !strings.Contains(detail, route) {
+			continue
+		}
+		for _, failure := range []string{"not found", "does not exist", "unavailable", "cannot connect", "refused"} {
+			if strings.Contains(detail, failure) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (b *backend) resolveContainer(ctx context.Context, identifier string) (inspectContainer, string, string, error) {
 	identifier = strings.TrimSpace(identifier)
 	if identifier == "" {
@@ -1191,12 +2035,15 @@ func (b *backend) resolveContainer(ctx context.Context, identifier string) (insp
 }
 
 func (b *backend) applyCheckpointScopeLabels(ctx context.Context, labels map[string]string) (bool, error) {
+	if !hasCompleteCapturedRuntimeScope(labels) {
+		return false, nil
+	}
 	metadata := checkpointScopeMetadataFromLabels(labels)
 	if len(metadata) == 0 {
 		return false, nil
 	}
 	scope := checkpointScopeFromMetadata(metadata, b.cfg.LocalContainer.Runtime)
-	if err := validateCheckpointScope(ctx, scope); err != nil {
+	if err := b.validateRuntimeScope(ctx, scope); err != nil {
 		return false, err
 	}
 	b.cfg.LocalContainer.CheckpointMetadata = metadata
@@ -1248,26 +2095,39 @@ func (b *backend) removeContainer(ctx context.Context, id string) error {
 }
 
 func (b *backend) ownedContainerID(ctx context.Context, leaseID, bootstrapDir string) (string, bool, error) {
-	result, err := b.docker(ctx, []string{"ps", "-aq", "--filter", "label=lease=" + leaseID}, nil, nil)
+	result, err := b.docker(ctx, []string{
+		"ps", "-aq", "--no-trunc",
+		"--filter", "label=provider=" + providerName,
+		"--filter", "label=lease=" + leaseID,
+		"--filter", "label=bootstrap_dir=" + bootstrapDir,
+	}, nil, nil)
 	if err != nil {
 		return "", false, err
 	}
-	for _, id := range strings.Fields(result.Stdout) {
-		container, err := b.inspectContainer(ctx, id)
-		if err != nil {
-			return "", false, err
-		}
-		labels := container.Config.Labels
-		if labels["lease"] != leaseID || labels["bootstrap_dir"] != bootstrapDir {
-			continue
-		}
-		containerID := strings.TrimSpace(container.ID)
-		if containerID == "" {
-			containerID = id
-		}
-		return containerID, true, nil
+	ids := strings.Fields(result.Stdout)
+	if len(ids) > 1 {
+		return "", false, core.Exit(2, "local-container lease %s matches multiple exact bootstrap identities", leaseID)
 	}
-	return "", false, nil
+	if len(ids) == 0 {
+		return "", false, nil
+	}
+	id := strings.TrimSpace(ids[0])
+	if !isFullContainerID(id) {
+		return "", false, core.Exit(2, "local-container runtime returned a truncated or invalid container id")
+	}
+	return id, true, nil
+}
+
+func isFullContainerID(id string) bool {
+	if len(id) != 64 {
+		return false
+	}
+	for _, r := range id {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 func (b *backend) runtimeInfo(ctx context.Context) (string, string) {
@@ -1287,7 +2147,10 @@ func (b *backend) runtimeContext(ctx context.Context, runtimeName string) string
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(contextName.Stdout)
+	if name := strings.TrimSpace(contextName.Stdout); name != "" {
+		return name
+	}
+	return "default"
 }
 
 func (b *backend) claimScope(ctx context.Context) string {
@@ -1372,8 +2235,10 @@ func (b *backend) docker(ctx context.Context, args []string, stdout, stderr io.W
 	var env []string
 	if metadata := cfg.LocalContainer.CheckpointMetadata; len(metadata) != 0 {
 		scope := checkpointScopeFromMetadata(metadata, cfg.LocalContainer.Runtime)
-		if scope.Context != "" {
+		if isDockerRuntime(scope.Runtime) && scope.Context != "" && scope.Context != "default" {
 			args = append([]string{"--context", scope.Context}, args...)
+		} else if isPodmanRuntime(scope.Runtime) && scope.Context != "" && scope.Context != "default" && scope.Host == "" {
+			args = append([]string{"--connection", scope.Context}, args...)
 		}
 		env = checkpointEnvForScope(scope)
 	}
@@ -1389,7 +2254,7 @@ func (b *backend) docker(ctx context.Context, args []string, stdout, stderr io.W
 func (b *backend) serverFromContainer(container inspectContainer, cfg core.Config) core.Server {
 	labels := map[string]string{}
 	for key, value := range container.Config.Labels {
-		if strings.TrimSpace(value) == "" {
+		if strings.TrimSpace(value) == "" || privateLocalContainerScopeLabel(key) {
 			continue
 		}
 		labels[key] = value
@@ -1421,6 +2286,66 @@ func (b *backend) serverFromContainer(container inspectContainer, cfg core.Confi
 	server.PublicNet.IPv4.IP = host
 	server.ServerType.Name = firstNonBlank(labels["server_type"], cfg.LocalContainer.Image)
 	return server
+}
+
+func mergeLocalContainerClaim(server core.Server, claim core.LeaseClaim) core.Server {
+	labels := publicLocalContainerClaimLabels(server.Labels)
+	for key, value := range claim.Labels {
+		if strings.TrimSpace(value) != "" && !privateLocalContainerScopeLabel(key) {
+			labels[key] = value
+		}
+	}
+	if _, ok := claim.Labels["recovery"]; !ok {
+		delete(labels, "recovery")
+	}
+	server.Labels = labels
+	state := strings.TrimSpace(labels["state"])
+	observedRunning := strings.EqualFold(server.Status, "running") || strings.EqualFold(server.Status, "ready")
+	if state != "" && observedRunning {
+		server.Status = state
+	}
+	if server.CloudID == "" {
+		server.CloudID = claim.CloudID
+	}
+	if server.PublicNet.IPv4.IP == "" {
+		server.PublicNet.IPv4.IP = claim.SSHHost
+	}
+	return server
+}
+
+func publicLocalContainerClaimLabels(labels map[string]string) map[string]string {
+	out := cloneLabels(labels)
+	for key := range out {
+		if privateLocalContainerScopeLabel(key) {
+			delete(out, key)
+		}
+	}
+	return out
+}
+
+func privateLocalContainerScopeLabel(key string) bool {
+	switch key {
+	case checkpointMetadataHost, checkpointMetadataEndpoint, checkpointMetadataConfig:
+		return true
+	default:
+		return false
+	}
+}
+
+func isPendingLocalContainerClaim(claim core.LeaseClaim) bool {
+	return claim.Provider == providerName &&
+		strings.EqualFold(strings.TrimSpace(claim.Labels["state"]), pendingClaimState) &&
+		strings.TrimSpace(claim.Labels["recovery"]) == pendingRecoveryKind &&
+		strings.TrimSpace(claim.CloudID) != "" &&
+		strings.TrimSpace(claim.ProviderScope) != ""
+}
+
+func cloneLabels(labels map[string]string) map[string]string {
+	cloned := make(map[string]string, len(labels))
+	for key, value := range labels {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func containerSSHHostPort(container inspectContainer) (string, string, error) {

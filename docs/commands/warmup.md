@@ -45,6 +45,14 @@ stderr.
 Warmup records a local claim binding the lease to the current repo checkout. Use
 `--reclaim` to overwrite an existing claim for that lease.
 
+For `local-container`, the default `--keep=true` also covers SSH readiness
+failure: once Docker has returned an exact container identity, Crabbox persists
+a scoped `provisioning` claim before inspecting the container or waiting for
+SSH. Cancellation or timeout retains that pending lease and prints exact
+inspect, reclaim, and cleanup commands.
+`warmup --keep=false` rolls the container and all per-lease local state back
+instead.
+
 ## Lifetime: TTL and idle timeout
 
 - `--ttl <duration>` is the maximum wall-clock lifetime. Default `90m`.

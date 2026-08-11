@@ -58,6 +58,7 @@ func TestCleanupOrphanSweepDeletesConcurrentAcquireClaim(t *testing.T) {
 	}
 	runner := &recordingRunner{}
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: &out, Stderr: io.Discard, Exec: runner}).(*backend)
+	b.validateRuntimeScope = func(context.Context, checkpointScope) error { return nil }
 
 	var once sync.Once
 	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
@@ -84,6 +85,7 @@ func TestCleanupOrphanSweepDeletesConcurrentAcquireClaim(t *testing.T) {
 						"state":    "ready",
 					},
 				}
+				server.Labels = cleanupTOCTOUScopeLabels(server.Labels, "test-context")
 				if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(
 					newLease, "fresh-slug", providerName, scope, "", repoRoot,
 					30*time.Minute, false, server, core.SSHTarget{},
@@ -150,6 +152,7 @@ func TestCleanupOrphanSweepGuardDeclinesReclaimedCandidate(t *testing.T) {
 	}
 	runner := &recordingRunner{}
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: &out, Stderr: io.Discard, Exec: runner}).(*backend)
+	b.validateRuntimeScope = func(context.Context, checkpointScope) error { return nil }
 
 	var scope string
 	var once sync.Once
@@ -174,6 +177,7 @@ func TestCleanupOrphanSweepGuardDeclinesReclaimedCandidate(t *testing.T) {
 						"state":    "ready",
 					},
 				}
+				rebound.Labels = cleanupTOCTOUScopeLabels(rebound.Labels, "test-context")
 				if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(
 					orphanLease, "orphan-slug", providerName, scope, "", repoRoot,
 					30*time.Minute, false, rebound, core.SSHTarget{},
@@ -206,6 +210,7 @@ func TestCleanupOrphanSweepGuardDeclinesReclaimedCandidate(t *testing.T) {
 			"state":    "idle",
 		},
 	}
+	origServer.Labels = cleanupTOCTOUScopeLabels(origServer.Labels, "test-context")
 	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(
 		orphanLease, "orphan-slug", providerName, scope, "", repoRoot,
 		30*time.Minute, false, origServer, core.SSHTarget{},
@@ -248,6 +253,7 @@ func TestCleanupDryRunDoesNotPlanReclaimedCandidateRemoval(t *testing.T) {
 	}
 	runner := &recordingRunner{}
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: &out, Stderr: &out, Exec: runner}).(*backend)
+	b.validateRuntimeScope = func(context.Context, checkpointScope) error { return nil }
 
 	var scope string
 	var once sync.Once
@@ -261,6 +267,7 @@ func TestCleanupDryRunDoesNotPlanReclaimedCandidateRemoval(t *testing.T) {
 					CloudID: orphanContainer, Provider: providerName, Name: orphanContainer, Status: "ready",
 					Labels: map[string]string{"crabbox": "true", "provider": providerName, "lease": orphanLease, "slug": "dryrun-slug", "state": "ready"},
 				}
+				rebound.Labels = cleanupTOCTOUScopeLabels(rebound.Labels, "test-context")
 				if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(
 					orphanLease, "dryrun-slug", providerName, scope, "", repoRoot,
 					30*time.Minute, false, rebound, core.SSHTarget{},
@@ -281,6 +288,7 @@ func TestCleanupDryRunDoesNotPlanReclaimedCandidateRemoval(t *testing.T) {
 		CloudID: orphanContainer, Provider: providerName, Name: orphanContainer, Status: "idle",
 		Labels: map[string]string{"crabbox": "true", "provider": providerName, "lease": orphanLease, "slug": "dryrun-slug", "state": "idle"},
 	}
+	original.Labels = cleanupTOCTOUScopeLabels(original.Labels, "test-context")
 	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(
 		orphanLease, "dryrun-slug", providerName, scope, "", repoRoot,
 		30*time.Minute, false, original, core.SSHTarget{},
@@ -337,6 +345,7 @@ func TestCleanupRetainsKeyPreparedByConcurrentAcquire(t *testing.T) {
 	}
 	runner := &recordingRunner{}
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: &out, Stderr: io.Discard, Exec: runner}).(*backend)
+	b.validateRuntimeScope = func(context.Context, checkpointScope) error { return nil }
 
 	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		switch {
@@ -360,6 +369,7 @@ func TestCleanupRetainsKeyPreparedByConcurrentAcquire(t *testing.T) {
 		CloudID: orphanContainer, Provider: providerName, Name: orphanContainer, Status: "idle",
 		Labels: map[string]string{"crabbox": "true", "provider": providerName, "lease": lease, "slug": "keyretain-slug", "state": "idle"},
 	}
+	server.Labels = cleanupTOCTOUScopeLabels(server.Labels, "test-context")
 	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(
 		lease, "keyretain-slug", providerName, scope, "", repoRoot, 30*time.Minute, false, server, core.SSHTarget{},
 	); err != nil {
@@ -394,4 +404,16 @@ func TestCleanupRetainsKeyPreparedByConcurrentAcquire(t *testing.T) {
 	if _, err := os.Stat(keyPath); err != nil {
 		t.Fatalf("cleanup deleted a stored key prepared by a concurrent Acquire (availability regression): %v\ncleanup output:\n%s", err, out.String())
 	}
+}
+
+func cleanupTOCTOUScopeLabels(labels map[string]string, contextName string) map[string]string {
+	out := cloneLabels(labels)
+	for key, value := range checkpointScopeMetadata(checkpointScope{
+		Runtime: "docker", Context: contextName, Endpoint: "unix:///tmp/docker-test.sock", DaemonID: "daemon-test",
+	}) {
+		if value != "" {
+			out[key] = value
+		}
+	}
+	return out
 }

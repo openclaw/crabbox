@@ -185,6 +185,15 @@ validate that the current repo matches the claim; deleting a lease removes its
 claim. Move a claim to a different repo deliberately with `--reclaim`. See
 [Identifiers](identifiers.md) for the claim file format and location.
 
+Providers may durably publish an exact-resource claim with the generic
+`state=provisioning` label before post-create readiness completes. Such a claim
+is recovery authority, not proof that the lease is ready: inventory and status
+must keep it non-ready until a fenced claim update records `state=ready`.
+Provider adapters own the immutable resource identity and routing scope needed
+to inspect or delete that pending resource. Cleanup must compare the unchanged
+claim under its lifecycle fence before mutation so an old readiness or cleanup
+attempt cannot overwrite or delete a newer claim.
+
 ## Related docs
 
 - [stop command](../commands/stop.md)

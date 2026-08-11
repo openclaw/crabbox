@@ -43,6 +43,25 @@ func (Provider) CreationOnlyFlagNames() []string {
 	return []string{"local-container-volume"}
 }
 
+func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, slug string, server core.Server, _ bool) (core.Server, error) {
+	if existing.CloudID != "" && server.CloudID != "" && existing.CloudID != server.CloudID {
+		return core.Server{}, core.Exit(2, "local-container lease %s is bound to container %s; refusing endpoint rewrite to %s", existing.LeaseID, shortID(existing.CloudID), shortID(server.CloudID))
+	}
+	labels := cloneLabels(server.Labels)
+	for _, key := range append([]string{
+		"bootstrap_dir", "bootstrap_owned", "docker_socket", "host_work_root", "keep", "runtime", "runtime_context", "ssh_key_owned", "ssh_user", "work_root",
+	}, checkpointScopeMetadataKeys...) {
+		if strings.TrimSpace(labels[key]) == "" && strings.TrimSpace(existing.Labels[key]) != "" {
+			labels[key] = existing.Labels[key]
+		}
+	}
+	if !strings.EqualFold(labels["state"], "ready") && strings.TrimSpace(labels["recovery"]) == "" {
+		labels["recovery"] = existing.Labels["recovery"]
+	}
+	server.Labels = labels
+	return server, nil
+}
+
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
 		return nil, core.Exit(2, "provider=%s supports target=linux only", providerName)

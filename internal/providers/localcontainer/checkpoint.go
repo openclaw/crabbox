@@ -2,6 +2,7 @@ package localcontainer
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -269,6 +270,9 @@ func checkpointScopeForServer(ctx context.Context, cfg core.Config, server core.
 		return scope, nil
 	}
 	scope := checkpointScope{Runtime: runtimeName}
+	if isPodmanRuntime(runtimeName) {
+		return podmanScopeForConfig(ctx, cfg)
+	}
 	if !isDockerRuntime(runtimeName) {
 		return scope, nil
 	}
@@ -318,6 +322,63 @@ func checkpointScopeForServer(ctx context.Context, cfg core.Config, server core.
 	}
 	scope.DaemonID = daemonID
 	return scope, nil
+}
+
+type podmanConnection struct {
+	Name    string `json:"Name"`
+	URI     string `json:"URI"`
+	Default bool   `json:"Default"`
+}
+
+func podmanScopeForConfig(ctx context.Context, cfg core.Config) (checkpointScope, error) {
+	runtimeName := firstCheckpointValue(cfg.LocalContainer.Runtime, "podman")
+	scope := checkpointScope{Runtime: runtimeName}
+	if host := strings.TrimSpace(os.Getenv("CONTAINER_HOST")); host != "" {
+		scope.Host = host
+		scope.Endpoint = host
+	} else {
+		connectionName := strings.TrimSpace(os.Getenv("CONTAINER_CONNECTION"))
+		connections, err := listPodmanConnections(ctx, runtimeName)
+		if err != nil {
+			return checkpointScope{}, err
+		}
+		for _, connection := range connections {
+			if connection.Name == connectionName || (connectionName == "" && connection.Default) {
+				scope.Context = connection.Name
+				scope.Endpoint = connection.URI
+				break
+			}
+		}
+		if connectionName != "" && scope.Context == "" {
+			return checkpointScope{}, core.Exit(2, "Podman connection %s is unavailable", connectionName)
+		}
+		if scope.Context == "" {
+			scope.Context = "default"
+			scope.Endpoint = "local"
+		}
+	}
+	daemonID, err := checkpointDaemonID(ctx, scope)
+	if err != nil {
+		return checkpointScope{}, err
+	}
+	scope.DaemonID = daemonID
+	return scope, nil
+}
+
+func listPodmanConnections(ctx context.Context, runtimeName string) ([]podmanConnection, error) {
+	cmd := exec.CommandContext(ctx, runtimeName, "system", "connection", "list", "--format", "json")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, core.Exit(2, "list Podman connections: %v", err)
+	}
+	var connections []podmanConnection
+	if len(strings.TrimSpace(string(out))) == 0 {
+		return connections, nil
+	}
+	if err := json.Unmarshal(out, &connections); err != nil {
+		return nil, core.Exit(2, "parse Podman connections: %v", err)
+	}
+	return connections, nil
 }
 
 func checkpointScopeFromRequest(req core.NativeCheckpointResourceRequest) checkpointScope {
@@ -381,6 +442,35 @@ func checkpointScopeMetadataFromLabels(labels map[string]string) map[string]stri
 }
 
 func validateCheckpointScope(ctx context.Context, scope checkpointScope) error {
+	if isPodmanRuntime(scope.Runtime) {
+		if scope.Context != "" && scope.Context != "default" && scope.Endpoint != "" {
+			connections, err := listPodmanConnections(ctx, scope.Runtime)
+			if err != nil {
+				return err
+			}
+			matched := false
+			for _, connection := range connections {
+				if connection.Name == scope.Context && connection.URI == scope.Endpoint {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return core.Exit(7, "Podman connection routing changed; refusing operation")
+			}
+		}
+		if scope.DaemonID == "" {
+			return core.Exit(7, "Podman runtime identity is missing; refusing operation")
+		}
+		currentDaemonID, err := checkpointDaemonID(ctx, scope)
+		if err != nil {
+			return err
+		}
+		if currentDaemonID != scope.DaemonID {
+			return core.Exit(7, "Podman runtime identity changed; refusing operation")
+		}
+		return nil
+	}
 	if scope.Context != "" && scope.Endpoint != "" {
 		current, err := checkpointContextEndpoint(ctx, scope)
 		if err != nil {
@@ -448,6 +538,21 @@ func checkpointContextEndpoint(ctx context.Context, scope checkpointScope) (stri
 }
 
 func checkpointDaemonID(ctx context.Context, scope checkpointScope) (string, error) {
+	if isPodmanRuntime(scope.Runtime) {
+		var stderr strings.Builder
+		cmd := checkpointCommand(ctx, scope, "info", "--format", `{{.Host.Hostname}}|{{.Store.GraphRoot}}|{{.Store.RunRoot}}|{{.Host.RemoteSocket.Path}}|{{.Host.Security.Rootless}}`)
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if err != nil {
+			return "", core.Exit(7, "resolve Podman runtime identity: %v: %s", err, trimCheckpointFailure(stderr.String()))
+		}
+		identity := strings.TrimSpace(string(out))
+		if identity == "" {
+			return "", core.Exit(7, "resolve Podman runtime identity: command returned an empty identity")
+		}
+		sum := sha256.Sum256([]byte(identity))
+		return fmt.Sprintf("podman-%x", sum[:16]), nil
+	}
 	var stderr strings.Builder
 	cmd := checkpointCommand(ctx, scope, "info", "--format", "{{.ID}}")
 	cmd.Stderr = &stderr
@@ -487,8 +592,10 @@ func checkpointConfigPath() (string, error) {
 
 func checkpointCommand(ctx context.Context, scope checkpointScope, args ...string) *exec.Cmd {
 	full := args
-	if scope.Context != "" {
+	if isDockerRuntime(scope.Runtime) && scope.Context != "" && scope.Context != "default" {
 		full = append([]string{"--context", scope.Context}, args...)
+	} else if isPodmanRuntime(scope.Runtime) && scope.Context != "" && scope.Context != "default" && scope.Host == "" {
+		full = append([]string{"--connection", scope.Context}, args...)
 	}
 	cmd := exec.CommandContext(ctx, scope.Runtime, full...)
 	if env := checkpointEnvForScope(scope); env != nil {
@@ -503,9 +610,27 @@ func checkpointEnvForScope(scope checkpointScope) []string {
 	}
 	base := os.Environ()
 	out := make([]string, 0, len(base)+2)
+	if isPodmanRuntime(scope.Runtime) {
+		for _, value := range base {
+			if strings.HasPrefix(value, "CONTAINER_HOST=") || strings.HasPrefix(value, "CONTAINER_CONNECTION=") || strings.HasPrefix(value, "DOCKER_HOST=") {
+				continue
+			}
+			out = append(out, value)
+		}
+		if scope.Host != "" {
+			out = append(out, "CONTAINER_HOST="+scope.Host)
+		} else if scope.Context != "" && scope.Context != "default" {
+			out = append(out, "CONTAINER_CONNECTION="+scope.Context)
+		}
+		return out
+	}
+	effectiveHost := scope.Host
+	if isDockerRuntime(scope.Runtime) && scope.Context == "default" && effectiveHost == "" {
+		effectiveHost = scope.Endpoint
+	}
 	for _, value := range base {
 		if strings.HasPrefix(value, "DOCKER_CONTEXT=") ||
-			(scope.Host != "" || scope.Context != "") && strings.HasPrefix(value, "DOCKER_HOST=") ||
+			(effectiveHost != "" || scope.Context != "") && strings.HasPrefix(value, "DOCKER_HOST=") ||
 			scope.Config != "" && strings.HasPrefix(value, "DOCKER_CONFIG=") {
 			continue
 		}
@@ -514,8 +639,8 @@ func checkpointEnvForScope(scope checkpointScope) []string {
 	if scope.Config != "" {
 		out = append(out, "DOCKER_CONFIG="+scope.Config)
 	}
-	if scope.Host != "" {
-		out = append(out, "DOCKER_HOST="+scope.Host)
+	if effectiveHost != "" {
+		out = append(out, "DOCKER_HOST="+effectiveHost)
 	}
 	return out
 }
