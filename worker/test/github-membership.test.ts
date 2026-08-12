@@ -54,6 +54,22 @@ function membershipResponse(state = "active", org = "example-org"): Response {
   return Response.json({ state, organization: { login: org } });
 }
 
+function teamIdentity(): {
+  accessToken: string;
+  tokenID: string;
+  owner: string;
+  org: string;
+  login: string;
+} {
+  return {
+    accessToken,
+    tokenID: "team-scope-token",
+    owner: `github:${accountID}`,
+    org: "example-org",
+    login: "alice",
+  };
+}
+
 function membershipFetch(): ReturnType<typeof vi.fn> {
   return vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
     async (input, init) => {
@@ -195,6 +211,49 @@ describe("GitHub user-token membership", () => {
     );
 
     await expect(authenticateRequest(tokenRequest(token), env)).resolves.toBeUndefined();
+  });
+
+  it.each([
+    [
+      "a team qualified for another configured org",
+      "example-org/operators,partner-org/contractors",
+    ],
+    ["no team configured for the org being authorized", "partner-org/contractors"],
+  ])("fails closed on %s", async (_label, teams) => {
+    const env = testEnv({ CRABBOX_GITHUB_ALLOWED_TEAMS: teams });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<(input: RequestInfo | URL) => Promise<Response>>(async (input) => {
+        const url = String(input);
+        if (url === "https://api.github.com/user") return userResponse();
+        if (url.includes("/user/teams")) {
+          return Response.json([{ slug: "contractors", organization: { login: "partner-org" } }]);
+        }
+        return membershipResponse();
+      }),
+    );
+
+    await expect(requireFreshGitHubMembership(teamIdentity(), env)).rejects.toThrow(/example-org/);
+  });
+
+  it.each([
+    ["an org-qualified entry", "example-org/operators,partner-org/contractors"],
+    ["an unqualified entry resolved against the authorized org", "operators"],
+  ])("accepts a team membership matched by %s", async (_label, teams) => {
+    const env = testEnv({ CRABBOX_GITHUB_ALLOWED_TEAMS: teams });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<(input: RequestInfo | URL) => Promise<Response>>(async (input) => {
+        const url = String(input);
+        if (url === "https://api.github.com/user") return userResponse();
+        if (url.includes("/user/teams")) {
+          return Response.json([{ slug: "operators", organization: { login: "example-org" } }]);
+        }
+        return membershipResponse();
+      }),
+    );
+
+    await expect(requireFreshGitHubMembership(teamIdentity(), env)).resolves.toBeUndefined();
   });
 
   it.each([`github:${accountID}`, `owner:github:${accountID}`])(

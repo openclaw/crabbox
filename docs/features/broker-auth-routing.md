@@ -178,6 +178,10 @@ Login is gated by GitHub org membership before a user token is minted:
 - If `CRABBOX_GITHUB_ALLOWED_TEAMS` (or `CRABBOX_GITHUB_ALLOWED_TEAM`) is set, the user must
   also belong to at least one listed team after org membership passes. Entries are team
   slugs: use `team-slug` for the resolved org, or `org/team-slug` to qualify the org.
+- The team check is **scoped to the org being authorized**: only entries that resolve to that
+  org can satisfy it, so a team in a different configured org never grants access. If teams are
+  configured but none resolve to the org being authorized, that org is **rejected** — list at
+  least one team per allowed org, or leave the setting unset to gate on org membership alone.
 
 ### Coordinator secrets for login
 

@@ -218,7 +218,19 @@ async function requireAllowedTeamMembership(
 ): Promise<void> {
   const allowed = allowedGitHubTeams(env, org);
   if (allowed.length === 0) return;
-  const allowedKeys = new Set(allowed.map((team) => teamKey(team.org, team.slug)));
+  // /user/teams spans every org the caller belongs to, so the allowlist must be
+  // narrowed to the org being authorized. Without this, a team in another
+  // configured org would satisfy this org's gate.
+  const allowedKeys = new Set(
+    allowed
+      .filter((team) => team.org.toLowerCase() === org)
+      .map((team) => teamKey(team.org, team.slug)),
+  );
+  if (allowedKeys.size === 0) {
+    throw new GitHubAuthorizationError(
+      `GitHub organization ${org} has no allowed team configured.`,
+    );
+  }
   for (const team of await userGitHubTeams(accessToken)) {
     const teamOrg = team.organization?.login?.toLowerCase() ?? "";
     const teamSlug = team.slug?.toLowerCase() ?? "";

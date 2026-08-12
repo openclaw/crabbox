@@ -97,7 +97,9 @@ by coordinator config:
 - `CRABBOX_GITHUB_ALLOWED_ORG` / `CRABBOX_GITHUB_ALLOWED_ORGS` restrict login to
   members of the listed GitHub org(s).
 - `CRABBOX_GITHUB_ALLOWED_TEAMS` (or `CRABBOX_GITHUB_ALLOWED_TEAM`) further
-  narrows access to selected team slugs after org membership passes.
+  narrows access to selected team slugs after org membership passes. The check is
+  scoped to the org being authorized, so a team in another configured org cannot
+  satisfy it; an org with teams configured but none of its own is rejected.
 - `CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS` controls successful request-time
   membership caching (default 300, maximum 3600; set 0 to check every request).
 - `CRABBOX_GITHUB_REVOKED_USERS` immediately rejects comma-separated immutable
