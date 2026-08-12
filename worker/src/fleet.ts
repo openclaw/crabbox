@@ -229,7 +229,6 @@ import {
 import {
   InvalidLeaseSlugError,
   leaseSlugFromID,
-  maxRequestedLeaseSlugLength,
   normalizeLeaseSlug,
   requestedLeaseSlug,
   slugWithCollisionSuffix,
@@ -6550,12 +6549,10 @@ export class FleetCoordinator {
     if (!host) {
       return json({ error: "host_required" }, { status: 400 });
     }
-    if (normalizeLeaseSlug(input.slug).length > maxRequestedLeaseSlugLength) {
-      return json(
-        { error: "invalid_slug", message: new InvalidLeaseSlugError().message },
-        { status: 400 },
-      );
-    }
+    // No slug bound here on purpose. A registered lease records an already-provisioned
+    // external machine and never derives a provider resource name from the slug — the CLI
+    // sends the machine's existing `slug` label back (serverSlug in coordinator_registration.go).
+    // Rejecting a long one would break re-registering a machine that already exists.
     const runtimeAdapterID = input.runtimeAdapterID;
     const runtimeAdapterWorkspaceID = input.runtimeAdapterWorkspaceID;
     const runtimeAdapterRegistrationID = input.runtimeAdapterRegistrationID;

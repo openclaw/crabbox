@@ -32083,6 +32083,28 @@ describe("fleet identity", () => {
     await expect(response.json()).resolves.toMatchObject({ error: "invalid_slug" });
   });
 
+  // A registered lease records an already-provisioned external machine and never derives a
+  // provider resource name, so the create-path bound must not reject its existing slug label.
+  it("registers an external lease whose existing slug exceeds the create bound", async () => {
+    const fleet = testFleet();
+    const longSlug = "a".repeat(64);
+    const response = await fleet.fetch(
+      request("PUT", "/v1/leases/cbx_0000000slug/registration", {
+        body: {
+          provider: "external",
+          target: "linux",
+          host: "203.0.113.10",
+          slug: longSlug,
+        },
+      }),
+    );
+
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({
+      lease: { lifecycle: "registered", slug: longSlug },
+    });
+  });
+
   it("fails brokered Azure leases with provider_not_configured before constructing Azure", async () => {
     const fleet = testFleet();
     const response = await fleet.fetch(
