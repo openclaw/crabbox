@@ -682,9 +682,14 @@ func (a App) publishArtifactDirectory(ctx context.Context, opts artifactPublishO
 	}
 	body := artifactTemplateMarkdown(opts.Template, summary, "", "", published)
 	bodyPath := filepath.Join(opts.Directory, "published-artifacts.md")
-	// Same reason as the manifest: artifactTemplateMarkdown embeds each file's URL, which
-	// under the signed-url access policy is a presigned bearer capability.
-	if err := writeArtifactBundleFile(bundleRoot, "published-artifacts.md", []byte(body), privateRunOutputFileMode); err != nil {
+	// artifactTemplateMarkdown embeds each file's URL. Restrict the summary only when one of
+	// those URLs is a presigned bearer capability; a public or local summary is meant to be
+	// shared, so it keeps the readable mode it has always had.
+	bodyMode := os.FileMode(0o644)
+	if artifactFilesContainSignedURL(published) {
+		bodyMode = privateRunOutputFileMode
+	}
+	if err := writeArtifactBundleFile(bundleRoot, "published-artifacts.md", []byte(body), bodyMode); err != nil {
 		return nil, "", "", err
 	}
 	if opts.PR > 0 && !opts.NoComment {

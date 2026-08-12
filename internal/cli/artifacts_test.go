@@ -1528,6 +1528,8 @@ func TestWriteArtifactBundleFilePreservesExistingMode(t *testing.T) {
 //
 // published-artifacts.md is the sibling instance: artifactTemplateMarkdown embeds the same
 // URLs, so both bundle files that can carry a presigned URL are covered here.
+//
+// The summary's mode is conditional — see TestPublishedArtifactsSummaryModeFollowsURLKind.
 func TestWriteArtifactBundleCredentialFilesKeepOwnerOnlyMode(t *testing.T) {
 	for _, name := range []string{artifactManifestFilename, "published-artifacts.md"} {
 		for _, existing := range []os.FileMode{0, 0o644, 0o600} {
@@ -1561,6 +1563,50 @@ func TestWriteArtifactBundleCredentialFilesKeepOwnerOnlyMode(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// The summary is meant to be shared (it is the PR comment body), so it may only be
+// restricted when it actually embeds a presigned URL. A public or local bundle keeps the
+// readable mode it has always had.
+func TestPublishedArtifactsSummaryModeFollowsURLKind(t *testing.T) {
+	signed := "https://bucket.s3.amazonaws.com/proof.txt?X-Amz-Signature=deadbeef&X-Amz-Expires=900"
+	for _, item := range []struct {
+		name    string
+		files   []artifactFile
+		private bool
+	}{
+		{name: "signed", files: []artifactFile{{Kind: "proof", Name: "proof.txt", URL: signed}}, private: true},
+		{name: "public", files: []artifactFile{{Kind: "proof", Name: "proof.txt", URL: "https://artifacts.example.com/proof.txt"}}, private: false},
+		{name: "local", files: []artifactFile{{Kind: "proof", Name: "proof.txt", Path: "proof.txt"}}, private: false},
+		{name: "mixed", files: []artifactFile{{Kind: "a", Name: "a.txt", URL: "https://artifacts.example.com/a.txt"}, {Kind: "b", Name: "b.txt", URL: signed}}, private: true},
+	} {
+		t.Run(item.name, func(t *testing.T) {
+			if got := artifactFilesContainSignedURL(item.files); got != item.private {
+				t.Fatalf("artifactFilesContainSignedURL=%t, want %t", got, item.private)
+			}
+			mode := os.FileMode(0o644)
+			if item.private {
+				mode = privateRunOutputFileMode
+			}
+			dir := t.TempDir()
+			root, err := os.OpenRoot(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			if err := writeArtifactBundleFile(root, "published-artifacts.md", []byte("body"), mode); err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(filepath.Join(dir, "published-artifacts.md"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			restricted := info.Mode().Perm()&0o077 == 0
+			if restricted != item.private {
+				t.Fatalf("summary mode=%#o restricted=%t, want restricted=%t", info.Mode().Perm(), restricted, item.private)
+			}
+		})
 	}
 }
 
