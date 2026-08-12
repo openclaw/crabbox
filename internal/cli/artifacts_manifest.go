@@ -137,7 +137,10 @@ func writeArtifactManifest(root *os.Root, opts artifactPublishOptions, files []a
 		return "", nil, exit(2, "encode artifact manifest: %v", err)
 	}
 	data = append(data, '\n')
-	if err := writeArtifactBundleFile(root, artifactManifestFilename, data, 0o644); err != nil {
+	// The manifest embeds each file's URL, which for the signed-url access policy is a
+	// presigned bearer capability. Keep it owner-only even when --output selects a
+	// directory that is not itself private.
+	if err := writeArtifactBundleFile(root, artifactManifestFilename, data, privateRunOutputFileMode); err != nil {
 		return "", nil, err
 	}
 	return path, data, nil

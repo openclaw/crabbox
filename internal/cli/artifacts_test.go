@@ -1522,6 +1522,92 @@ func TestWriteArtifactBundleFilePreservesExistingMode(t *testing.T) {
 	}
 }
 
+// The manifest carries presigned upload/read URLs, which are bearer capabilities, so it
+// must stay owner-only even when --output selects a non-private directory and even when
+// an earlier bundle left a world-readable manifest in place.
+//
+// published-artifacts.md is the sibling instance: artifactTemplateMarkdown embeds the same
+// URLs, so both bundle files that can carry a presigned URL are covered here.
+func TestWriteArtifactBundleCredentialFilesKeepOwnerOnlyMode(t *testing.T) {
+	for _, name := range []string{artifactManifestFilename, "published-artifacts.md"} {
+		for _, existing := range []os.FileMode{0, 0o644, 0o600} {
+			t.Run(fmt.Sprintf("%s/%#o", name, existing), func(t *testing.T) {
+				dir := t.TempDir()
+				path := filepath.Join(dir, name)
+				if existing != 0 {
+					if err := os.WriteFile(path, []byte("old"), existing); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Chmod(path, existing); err != nil {
+						t.Fatal(err)
+					}
+				}
+				root, err := os.OpenRoot(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer root.Close()
+
+				if err := writeArtifactBundleFile(root, name, []byte("body"), privateRunOutputFileMode); err != nil {
+					t.Fatal(err)
+				}
+
+				info, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := info.Mode().Perm(); got&0o077 != 0 {
+					t.Fatalf("%s mode=%#o, want no group or other access", name, got)
+				}
+			})
+		}
+	}
+}
+
+func TestWriteArtifactManifestKeepsOwnerOnlyMode(t *testing.T) {
+	for _, existing := range []struct {
+		name string
+		mode os.FileMode
+	}{
+		{name: "fresh", mode: 0},
+		{name: "world-readable", mode: 0o644},
+		{name: "already-private", mode: 0o600},
+	} {
+		t.Run(existing.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, artifactManifestFilename)
+			if existing.mode != 0 {
+				if err := os.WriteFile(path, []byte("old"), existing.mode); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(path, existing.mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			root, err := os.OpenRoot(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+
+			if _, _, err := writeArtifactManifest(root, artifactPublishOptions{
+				Directory: dir,
+				Storage:   "broker",
+			}, nil); err != nil {
+				t.Fatal(err)
+			}
+
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := info.Mode().Perm(); got&0o077 != 0 {
+				t.Fatalf("manifest mode=%#o, want no group or other access", got)
+			}
+		})
+	}
+}
+
 func TestArtifactsPublishRejectsReservedOutputDirectoriesBeforeSideEffects(t *testing.T) {
 	for _, reservedName := range []string{
 		artifactManifestFilename,

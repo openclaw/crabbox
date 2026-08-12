@@ -437,7 +437,10 @@ func writeArtifactBundleFile(root *os.Root, name string, data []byte, perm os.Fi
 	if info, statErr := root.Lstat(name); statErr == nil {
 		if info.Mode().IsRegular() {
 			createPerm = 0o600
-			existingMode = info.Mode().Perm()
+			// Respect a mode the user already narrowed, but never widen past what the
+			// caller asked for: a republished manifest must not inherit a world-readable
+			// mode from an earlier bundle.
+			existingMode = info.Mode().Perm() & perm
 			preserveExistingMode = true
 		}
 	} else if !os.IsNotExist(statErr) {
