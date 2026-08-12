@@ -109,6 +109,39 @@ describe("artifact broker namespaces", () => {
       ),
     ).rejects.toThrow(`artifact upload ${label} identity is required`);
   });
+
+  it("binds a declared sha256 into the signed upload grant", async () => {
+    // sha256 of the empty string, so the expected base64 digest is verifiable by hand.
+    const sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    const response = await artifactUploadResponse(
+      artifactEnv(),
+      { files: [{ name: "result.txt", size: 0, sha256 }] },
+      { org: "example-org", owner: "alice" },
+    );
+
+    const grant = response.files[0]!;
+    expect(grant.upload.headers["x-amz-checksum-sha256"]).toBe(
+      "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+    );
+    expect(grant.upload.url.toLowerCase()).toContain("x-amz-checksum-sha256");
+  });
+
+  it("omits the checksum header when no usable digest is declared", async () => {
+    const response = await artifactUploadResponse(
+      artifactEnv(),
+      {
+        files: [
+          { name: "result.txt", size: 1 },
+          { name: "other.txt", size: 1, sha256: "not-a-digest" },
+        ],
+      },
+      { org: "example-org", owner: "alice" },
+    );
+
+    for (const grant of response.files) {
+      expect(grant.upload.headers).not.toHaveProperty("x-amz-checksum-sha256");
+    }
+  });
 });
 
 function artifactEnv(overrides: Partial<Env> = {}): Env {

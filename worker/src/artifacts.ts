@@ -263,8 +263,20 @@ function artifactObjectKey(prefix: string, name: string): string {
 function artifactUploadHeaders(file: Required<ArtifactUploadFile>): Record<string, string> {
   return {
     ...(file.contentType ? { "content-type": file.contentType } : {}),
+    // Signed alongside content-length so the store rejects a body that does not match the
+    // declared digest. Without this the caller-supplied sha256 would assure nothing.
+    ...(file.sha256 ? { "x-amz-checksum-sha256": base64FromHex(file.sha256) } : {}),
     "content-length": String(file.size),
   };
+}
+
+/** normalizeHash guarantees 64 lowercase hex characters, so this always yields 32 bytes. */
+function base64FromHex(value: string): string {
+  let binary = "";
+  for (let index = 0; index < value.length; index += 2) {
+    binary += String.fromCharCode(Number.parseInt(value.slice(index, index + 2), 16));
+  }
+  return btoa(binary);
 }
 
 async function artifactReadURL(config: ArtifactConfig, key: string): Promise<string> {

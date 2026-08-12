@@ -233,7 +233,10 @@ need normal Crabbox coordinator auth; the coordinator holds the storage keys and
 signs one upload request per artifact. Each upload grant carries a signed
 `content-length`, so the size cap is enforced by the storage backend, not just
 by request metadata — the CLI verifies the file size still matches the grant
-before uploading. The broker enforces a 1 GiB per-file cap and a 5 GiB
+before uploading. When the caller declares a `sha256` for a file, the grant also
+carries a signed `x-amz-checksum-sha256`, so the storage backend rejects a body
+whose contents do not match the declared digest — integrity is enforced by the
+store, not merely asserted in the request. The broker enforces a 1 GiB per-file cap and a 5 GiB
 per-request aggregate cap before minting upload URLs. When you do not pass
 `--prefix`, hosted publishing adds a unique PR/bundle/timestamp prefix so later
 bundles cannot overwrite links from earlier QA comments.
