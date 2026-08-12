@@ -859,9 +859,12 @@ func TestAWSFixedAcquireOnAcquiredCanReenterClaimLock(t *testing.T) {
 		result <- acquireResult{lease: lease, err: err}
 	}()
 
-	timeout := 2 * time.Second
+	// Acquire does real claim-lock and state-file work (~1.3s unloaded), so this budget
+	// only has to sit far enough above that to survive a loaded runner and the race
+	// detector's slowdown. A genuine deadlock still fails the test, just later.
+	timeout := 60 * time.Second
 	if testing.Short() {
-		timeout = time.Second
+		timeout = 10 * time.Second
 	}
 	select {
 	case got := <-result:
@@ -872,7 +875,7 @@ func TestAWSFixedAcquireOnAcquiredCanReenterClaimLock(t *testing.T) {
 			t.Fatalf("lease=%#v", got.lease)
 		}
 	case <-time.After(timeout):
-		t.Fatal("fixed OnAcquired callback deadlocked while re-entering the claim lock")
+		t.Fatalf("fixed OnAcquired did not return within %s; the callback is likely deadlocked re-entering the claim lock", timeout)
 	}
 	select {
 	case <-callbackCalled:
