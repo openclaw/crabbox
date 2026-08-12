@@ -238,14 +238,22 @@ function allowedGitHubOrgs(env: GitHubMembershipEnv): string[] {
 
 function allowedGitHubTeams(env: GitHubMembershipEnv, defaultOrg: string): AllowedGitHubTeam[] {
   const raw = env.CRABBOX_GITHUB_ALLOWED_TEAMS || env.CRABBOX_GITHUB_ALLOWED_TEAM;
-  return envList(raw)
-    .map((value) => parseAllowedGitHubTeam(value, defaultOrg))
-    .filter((team): team is AllowedGitHubTeam => team !== undefined);
+  return envList(raw).map((value) => parseAllowedGitHubTeam(value, defaultOrg));
 }
 
-function parseAllowedGitHubTeam(value: string, defaultOrg: string): AllowedGitHubTeam | undefined {
-  const [org, slug] = value.includes("/") ? value.split("/", 2) : [defaultOrg, value];
-  if (!org || !slug) return undefined;
+/**
+ * Accepts only `team-slug` or `org/team-slug`. A malformed entry throws rather than
+ * being dropped: silently skipping it would either widen the entry to a different team
+ * or, if every entry is malformed, disable the team gate entirely.
+ */
+function parseAllowedGitHubTeam(value: string, defaultOrg: string): AllowedGitHubTeam {
+  const segments = value.includes("/") ? value.split("/") : [defaultOrg, value];
+  const [org, slug] = segments;
+  if (segments.length !== 2 || !org || !slug) {
+    throw new GitHubAuthorizationError(
+      "CRABBOX_GITHUB_ALLOWED_TEAMS contains an invalid entry. Use team-slug or org/team-slug.",
+    );
+  }
   return { org, slug };
 }
 

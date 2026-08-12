@@ -177,7 +177,9 @@ Login is gated by GitHub org membership before a user token is minted:
 - The user must be an **active** member of an allowed org.
 - If `CRABBOX_GITHUB_ALLOWED_TEAMS` (or `CRABBOX_GITHUB_ALLOWED_TEAM`) is set, the user must
   also belong to at least one listed team after org membership passes. Entries are team
-  slugs: use `team-slug` for the resolved org, or `org/team-slug` to qualify the org.
+  slugs: use `team-slug` for the resolved org, or `org/team-slug` to qualify the org. Any other
+  shape (a nested `org/team/extra` path, or a missing org or slug) is rejected and fails all
+  GitHub auth closed until corrected, so a typo cannot silently widen or disable the team gate.
 
 ### Coordinator secrets for login
 

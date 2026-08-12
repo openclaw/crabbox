@@ -197,6 +197,38 @@ describe("GitHub user-token membership", () => {
     await expect(authenticateRequest(tokenRequest(token), env)).resolves.toBeUndefined();
   });
 
+  it.each([
+    ["a nested path", "example-org/operators/leads"],
+    ["a missing org", "/operators"],
+    ["a missing slug", "example-org/"],
+  ])("fails closed on an allowed-team entry with %s", async (_label, teams) => {
+    const env = testEnv({ CRABBOX_GITHUB_ALLOWED_TEAMS: teams });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<(input: RequestInfo | URL) => Promise<Response>>(async (input) => {
+        const url = String(input);
+        if (url === "https://api.github.com/user") return userResponse();
+        if (url.includes("/user/teams")) {
+          return Response.json([{ slug: "operators", organization: { login: "example-org" } }]);
+        }
+        return membershipResponse();
+      }),
+    );
+
+    await expect(
+      requireFreshGitHubMembership(
+        {
+          accessToken,
+          tokenID: "team-entry",
+          owner: `github:${accountID}`,
+          org: "example-org",
+          login: "alice",
+        },
+        env,
+      ),
+    ).rejects.toThrow(/CRABBOX_GITHUB_ALLOWED_TEAMS/);
+  });
+
   it.each([`github:${accountID}`, `owner:github:${accountID}`])(
     "applies narrow revocation %s before the GitHub cache",
     async (revoked) => {
