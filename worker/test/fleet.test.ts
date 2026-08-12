@@ -32067,6 +32067,22 @@ describe("fleet identity", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("rejects a requested slug that would overflow the provider resource name", async () => {
+    const fleet = testFleet();
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        body: {
+          provider: "hetzner",
+          sshPublicKey: "ssh-ed25519 test",
+          slug: "a".repeat(42),
+        },
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_slug" });
+  });
+
   it("fails brokered Azure leases with provider_not_configured before constructing Azure", async () => {
     const fleet = testFleet();
     const response = await fleet.fetch(

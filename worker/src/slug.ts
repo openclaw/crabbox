@@ -24,6 +24,29 @@ export function leaseSlugFromID(leaseID: string): string {
   return `${adjective}-${noun}`;
 }
 
+/**
+ * Bounds a requested slug so `leaseProviderName` always fits a 63-character provider
+ * resource name: 41 + 5 (collision suffix) + 17 ("crabbox-", the separator, and the
+ * 8-hex lease hash) = 63. Mirrors maxRequestedLeaseSlugLength in internal/cli/slug.go.
+ */
+export const maxRequestedLeaseSlugLength = 41;
+
+export class InvalidLeaseSlugError extends Error {
+  constructor() {
+    super(`slug must be ${maxRequestedLeaseSlugLength} characters or fewer after normalization`);
+    this.name = "InvalidLeaseSlugError";
+  }
+}
+
+/** Validates a client-requested slug; normalization alone cannot bound length. */
+export function requestedLeaseSlug(value: string | undefined): string {
+  const slug = normalizeLeaseSlug(value);
+  if (slug.length > maxRequestedLeaseSlugLength) {
+    throw new InvalidLeaseSlugError();
+  }
+  return slug;
+}
+
 export function normalizeLeaseSlug(value: string | undefined): string {
   let out = "";
   let lastDash = false;
@@ -45,7 +68,11 @@ export function normalizeLeaseSlug(value: string | undefined): string {
 
 export function slugWithCollisionSuffix(base: string, seed: string): string {
   const normalized = normalizeLeaseSlug(base) || leaseSlugFromID(seed);
-  return `${normalized}-${(slugHash(seed) & 0xffff).toString(16).padStart(4, "0")}`;
+  const bounded =
+    normalized.length > maxRequestedLeaseSlugLength
+      ? trimDashes(normalized.slice(0, maxRequestedLeaseSlugLength))
+      : normalized;
+  return `${bounded}-${(slugHash(seed) & 0xffff).toString(16).padStart(4, "0")}`;
 }
 
 export function leaseProviderName(leaseID: string, slug: string | undefined): string {

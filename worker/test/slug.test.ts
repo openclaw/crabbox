@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  InvalidLeaseSlugError,
   leaseProviderName,
   leaseSlugFromID,
+  maxRequestedLeaseSlugLength,
   normalizeLeaseSlug,
+  requestedLeaseSlug,
   slugWithCollisionSuffix,
 } from "../src/slug";
 
@@ -34,5 +37,33 @@ describe("lease slugs", () => {
       "crabbox-blue-lobster-c80c2195",
     );
     expect(leaseProviderName("cbx_abcdef123456", "")).toBe("crabbox-cbx-abcdef123456");
+  });
+
+  it("accepts a requested slug up to the provider-name bound", () => {
+    const longest = "a".repeat(maxRequestedLeaseSlugLength);
+    expect(requestedLeaseSlug(longest)).toBe(longest);
+    expect(requestedLeaseSlug(undefined)).toBe("");
+    // 8 ("crabbox-") + 41 + 1 + 8 (lease hash); the 5-char collision suffix fills it to 63.
+    expect(leaseProviderName("cbx_abcdef123456", longest).length).toBe(58);
+    expect(
+      leaseProviderName("cbx_abcdef123456", slugWithCollisionSuffix(longest, "cbx_abcdef123456"))
+        .length,
+    ).toBe(63);
+  });
+
+  it("rejects a requested slug longer than the provider-name bound", () => {
+    expect(() => requestedLeaseSlug("a".repeat(maxRequestedLeaseSlugLength + 1))).toThrow(
+      InvalidLeaseSlugError,
+    );
+    // Normalization collapses separators, so length is measured after normalizing.
+    expect(() => requestedLeaseSlug("A! ".repeat(maxRequestedLeaseSlugLength))).toThrow(
+      InvalidLeaseSlugError,
+    );
+  });
+
+  it("keeps collision suffixes inside the provider-name bound", () => {
+    const suffixed = slugWithCollisionSuffix("b".repeat(80), "cbx_abcdef123456");
+    expect(suffixed).toMatch(/^b{41}-[a-f0-9]{4}$/);
+    expect(leaseProviderName("cbx_abcdef123456", suffixed).length).toBeLessThanOrEqual(63);
   });
 });

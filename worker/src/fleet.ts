@@ -226,7 +226,14 @@ import {
   type RuntimeAdapterRelayRequest,
   type RuntimeAdapterRelayResponse,
 } from "./runtime-adapter-relay";
-import { leaseSlugFromID, normalizeLeaseSlug, slugWithCollisionSuffix } from "./slug";
+import {
+  InvalidLeaseSlugError,
+  leaseSlugFromID,
+  maxRequestedLeaseSlugLength,
+  normalizeLeaseSlug,
+  requestedLeaseSlug,
+  slugWithCollisionSuffix,
+} from "./slug";
 import {
   createTailscaleAuthKey,
   renderTailscaleHostname,
@@ -3353,8 +3360,10 @@ export class FleetCoordinator {
     if (azureWindowsARM64Image) defaults.azureWindowsARM64Image = azureWindowsARM64Image;
     if (this.env.CRABBOX_AZURE_OS_DISK) defaults.azureOSDisk = this.env.CRABBOX_AZURE_OS_DISK;
     let config: LeaseConfig;
+    let requestedSlug: string;
     try {
       config = leaseConfig(input, defaults);
+      requestedSlug = requestedLeaseSlug(input.slug ?? input.requestedSlug);
     } catch (error) {
       if (error instanceof InvalidAWSRegionError) {
         return json({ error: "invalid_region", message: error.message }, { status: 400 });
@@ -3364,6 +3373,9 @@ export class FleetCoordinator {
           { error: "invalid_image_requirements", message: error.message },
           { status: 400 },
         );
+      }
+      if (error instanceof InvalidLeaseSlugError) {
+        return json({ error: "invalid_slug", message: error.message }, { status: 400 });
       }
       throw error;
     }
@@ -3410,10 +3422,7 @@ export class FleetCoordinator {
       if (!config.providerKey) {
         config = { ...config, providerKey: providerKeyForLease(fixedLeaseID) };
       }
-      fixedCreateIntentHash = await fixedLeaseCreateIntentHash(
-        config,
-        normalizeLeaseSlug(input.slug ?? input.requestedSlug),
-      );
+      fixedCreateIntentHash = await fixedLeaseCreateIntentHash(config, requestedSlug);
       const replay = await this.state.runExclusive(async () => {
         if (createAttemptBlocksLeaseID(await this.getCreateAttempt(fixedLeaseID))) {
           return createAttemptIDConflictResponse();
@@ -3872,7 +3881,7 @@ export class FleetCoordinator {
       const createAttemptGeneration = currentAttempt ? newCreateAttemptGeneration() : undefined;
       const admission = await this.leaseAdmissionState({ owner, org }, now);
       const slug = allocateLeaseSlug(
-        normalizeLeaseSlug(input.slug ?? input.requestedSlug) || leaseSlugFromID(leaseID),
+        requestedSlug || leaseSlugFromID(leaseID),
         leaseID,
         owner,
         org,
@@ -6540,6 +6549,12 @@ export class FleetCoordinator {
     }
     if (!host) {
       return json({ error: "host_required" }, { status: 400 });
+    }
+    if (normalizeLeaseSlug(input.slug).length > maxRequestedLeaseSlugLength) {
+      return json(
+        { error: "invalid_slug", message: new InvalidLeaseSlugError().message },
+        { status: 400 },
+      );
     }
     const runtimeAdapterID = input.runtimeAdapterID;
     const runtimeAdapterWorkspaceID = input.runtimeAdapterWorkspaceID;
