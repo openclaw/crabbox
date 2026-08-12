@@ -100,7 +100,24 @@ function redactDiagnosticPass(value: string, secrets: readonly string[]): string
     );
   }
   for (const match of value.matchAll(
-    /(^|[^?&A-Za-z0-9_-])(authorization|proxy-authorization|x-api-key|api[-_]?key|access[-_]?token|refresh[-_]?token|id[-_]?token|client[-_]?secret|secret[-_]?access[-_]?key|api[-_]?secret|session[-_]?token|token|password)[ \t]*[:=][ \t]*(?:(?:bearer|basic)(?:[ \t]*:[ \t]*\r?\n[ \t]+|[ \t]*:[ \t]*|[ \t]*\r?\n[ \t]+|[ \t]+))?(?:\\.|[^\s"])+/gi,
+    /(^|[^?&A-Za-z0-9_-])(authorization|proxy-authorization|x-amz-security-token|x-goog-security-token|x-api-key|api[-_]?key|api[-_]?token|auth[-_]?key|access[-_]?token|refresh[-_]?token|id[-_]?token|client[-_]?secret|secret[-_]?access[-_]?key|api[-_]?secret|session[-_]?token|set-cookie|cookie|token|password)[ \t]*[:=][ \t]*(?:(?:bearer|basic)(?:[ \t]*:[ \t]*\r?\n[ \t]+|[ \t]*:[ \t]*|[ \t]*\r?\n[ \t]+|[ \t]+))?(?:\\.|[^\s"])+/gi,
+  )) {
+    const full = match[0];
+    const keyEnd = (match[1]?.length ?? 0) + (match[2]?.length ?? 0);
+    const separator = diagnosticSeparator(full, keyEnd);
+    if (separator < 0) continue;
+    const fullStart = match.index;
+    addRedaction(
+      fullStart + diagnosticSkipHorizontalSpace(full, separator + 1, full.length),
+      fullStart + full.length,
+    );
+  }
+  // Environment-style assignments (AWS_SECRET_ACCESS_KEY=..., GITHUB_TOKEN=...). The rules
+  // above deliberately refuse a keyword preceded by "_" or "-" so a query parameter cannot
+  // over-match past its "&" separator, which leaves the whole NAME_SUFFIX= shape uncovered.
+  // Anchoring on whitespace keeps that separation: a URL never has whitespace before a param.
+  for (const match of value.matchAll(
+    /(^|[\s;,(){}[\]'"`])([A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)*[-_](?:tokens?|secrets?|keys?|password|passwd|credentials?|authkey|apikey))[ \t]*=[ \t]*(?:\\.|[^\s"])+/gi,
   )) {
     const full = match[0];
     const keyEnd = (match[1]?.length ?? 0) + (match[2]?.length ?? 0);
@@ -113,7 +130,7 @@ function redactDiagnosticPass(value: string, secrets: readonly string[]): string
     );
   }
   for (const match of value.matchAll(
-    /"(authorization|proxy-authorization|x-api-key|apiKey|api-key|api_key|accessToken|access-token|access_token|refreshToken|refresh-token|refresh_token|idToken|id-token|id_token|clientSecret|client-secret|client_secret|secretAccessKey|secret-access-key|secret_access_key|apiSecret|api-secret|api_secret|credential|credentials|privateKey|private-key|private_key|secret|sessionToken|session-token|session_token|token|password)"\s*:\s*"(?:\\(?:[\s\S]|$)|[^"\\])*(?:"|$)/gi,
+    /"(authorization|proxy-authorization|x-api-key|apiKey|api-key|api_key|apiToken|api-token|api_token|authKey|auth-key|auth_key|setCookie|set-cookie|cookie|accessToken|access-token|access_token|refreshToken|refresh-token|refresh_token|idToken|id-token|id_token|clientSecret|client-secret|client_secret|secretAccessKey|secret-access-key|secret_access_key|apiSecret|api-secret|api_secret|credential|credentials|privateKey|private-key|private_key|secret|sessionToken|session-token|session_token|token|password)"\s*:\s*"(?:\\(?:[\s\S]|$)|[^"\\])*(?:"|$)/gi,
   )) {
     const full = match[0];
     const separator = full.indexOf(":");
@@ -124,7 +141,7 @@ function redactDiagnosticPass(value: string, secrets: readonly string[]): string
     addRedaction(fullStart + quote + 1, fullStart + secretEnd);
   }
   for (const match of value.matchAll(
-    /([?&](?:authorization|proxy-authorization|x-api-key|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|secret[_-]?access[_-]?key|api[_-]?secret|session[_-]?token|password|token|signature|sig|x-amz-credential|x-amz-signature|x-amz-security-token|x-goog-credential|x-goog-signature|x-goog-security-token)=)[^&#\s]+/gi,
+    /([?&](?:authorization|proxy-authorization|x-api-key|api[_-]?key|api[_-]?token|auth[_-]?key|cookie|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|secret[_-]?access[_-]?key|api[_-]?secret|session[_-]?token|password|token|signature|sig|x-amz-credential|x-amz-signature|x-amz-security-token|x-goog-credential|x-goog-signature|x-goog-security-token)=)[^&#\s]+/gi,
   )) {
     addRedaction(match.index + match[1]!.length, match.index + match[0].length);
   }

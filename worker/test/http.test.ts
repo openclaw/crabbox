@@ -1642,6 +1642,50 @@ describe("http responses", () => {
     expect(redactDiagnosticSecrets(redacted, secrets)).toBe(redacted);
   });
 
+  it.each([
+    [
+      "AWS env assignment",
+      "bootstrap failed: AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI",
+      "wJalrXUtnFEMI",
+    ],
+    [
+      "GitHub env assignment",
+      "sh: GITHUB_TOKEN=ghp_16C7e42F292c6912: not found",
+      "ghp_16C7e42F292c6912",
+    ],
+    ["shell export", "export TAILSCALE_AUTHKEY=tskey-auth-k7Yh2", "tskey-auth-k7Yh2"],
+    ["quoted env assignment", `run "CI_API_KEY=abcdef123456"`, "abcdef123456"],
+    ["set-cookie header", "upstream: Set-Cookie: sid=s%3AabcdefQRST", "s%3AabcdefQRST"],
+    ["cookie header", "Cookie: session=abcdefghij1234567890", "abcdefghij1234567890"],
+    ["amz security token header", "x-amz-security-token: FwoGZXIvYXdzEBYa", "FwoGZXIvYXdzEBYa"],
+    ["camelCase api token", "stringData:\n  apiToken: sk-live-9f8e7d6c", "sk-live-9f8e7d6c"],
+  ])("redacts a credential carried by %s", (_label, diagnostic, secret) => {
+    const redacted = redactDiagnosticSecrets(diagnostic);
+    expect(redacted).not.toContain(secret);
+    expect(redacted).toContain("[redacted]");
+    expect(redactDiagnosticSecrets(redacted)).toBe(redacted);
+  });
+
+  it("keeps redacting query parameters at their own separator", () => {
+    const redacted = redactDiagnosticSecrets(
+      "https://host.example.test/p?id_token=query-id-token&X-Amz-Security-Token=amz-token&region=eu",
+    );
+    expect(redacted).not.toContain("query-id-token");
+    expect(redacted).not.toContain("amz-token");
+    expect(redacted).toContain("region=eu");
+  });
+
+  it("leaves non-credential assignments and identifiers intact", () => {
+    for (const value of [
+      "region=eu-central-1",
+      "token_type=Bearer_placeholder",
+      "retry_count=3",
+      "instance-type=c7a.4xlarge",
+    ]) {
+      expect(redactDiagnosticSecrets(value)).toBe(value);
+    }
+  });
+
   it("preserves already-redacted and non-userinfo URL at-signs", () => {
     const value =
       "http://<redacted>@broker.example.test https://[redacted]@api.example.test https://host.example.test?email=alice@example.test https://host.example.test#realm@tenant";
