@@ -10,6 +10,7 @@
 - Preserved pinned AWS SSH ingress and dynamic CIDRs from the other IP family when broker heartbeats refresh access, while replacing obsolete same-family dynamic sources. Thanks @jalehman.
 - Made `cache stats --json` emit an empty array for empty inventories while live smoke accepts legacy null and object reports but rejects other scalar shapes before workloads. Thanks @excelsier.
 - Derived implicit Static SSH macOS work roots from the resolved SSH user while preserving explicit roots and EC2 Mac defaults. Thanks @osouthgate.
+- Reported explicit stdout and stderr capture paths and byte counts in emitted run proofs without reading or embedding captured content. Thanks @coygeek.
 
 ## 0.41.5 - 2026-08-12
 

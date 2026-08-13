@@ -1908,6 +1908,7 @@ afterSync:
 			RunID:       executionRunID,
 			Command:     commandDisplay,
 			LogExcerpt:  selectProofLogExcerpt(logBuffer.String()),
+			Captures:    streamCaptures.metadata(),
 			ActionsURL:  actionsURL,
 			Artifacts:   runArtifacts,
 			Variables:   expansion.Variables,

@@ -2821,6 +2821,189 @@ func TestRunCommandPreflightsLocalOutputOptions(t *testing.T) {
 	}
 }
 
+func TestFailureStreamCaptureRetainsMetadataAfterClose(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stdout.bin")
+	capture := &failureStreamCapture{label: "stdout", explicitPath: path}
+	writer, explicit, err := capture.writer(io.Discard, &phaseMarkerWriter{}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !explicit {
+		t.Fatal("explicit capture was not selected")
+	}
+	if _, ok := capture.metadata(); ok {
+		t.Fatal("capture metadata became available before close")
+	}
+	payload := []byte{0, 1, 2, 3, 4}
+	if _, err := writer.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := capture.closeAfterStream(nil, 0, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	metadata, ok := capture.metadata()
+	if !ok {
+		t.Fatal("capture metadata missing after close")
+	}
+	if metadata.Label != "stdout" || metadata.Path != path || metadata.Bytes != int64(len(payload)) {
+		t.Fatalf("metadata=%+v", metadata)
+	}
+}
+
+func TestRunCommandProofReportsExplicitStreamCaptures(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake ssh fixture")
+	}
+	tests := []struct {
+		name          string
+		mode          string
+		captureStdout bool
+		captureStderr bool
+		stdoutData    []byte
+		stderrData    []byte
+		proofContains []string
+		proofExcludes []string
+	}{
+		{
+			name:          "text stdout capture",
+			mode:          "text-stdout",
+			captureStdout: true,
+			stdoutData:    []byte("captured text stdout\n"),
+			proofExcludes: []string{"captured text stdout", "(no console output captured)"},
+		},
+		{
+			name:          "binary control stdout capture",
+			mode:          "binary-stdout",
+			captureStdout: true,
+			stdoutData:    []byte{0, 1, 0x1b, '[', '3', '1', 'm', 'S', 'E', 'C', 'R', 'E', 'T', 0xff},
+			proofExcludes: []string{"SECRET", "\x00", "\x01", "\x1b", "(no console output captured)"},
+		},
+		{
+			name:          "both streams captured",
+			mode:          "both",
+			captureStdout: true,
+			captureStderr: true,
+			stdoutData:    []byte("stdout-only\n"),
+			stderrData:    []byte("stderr-only\n"),
+			proofExcludes: []string{"stdout-only", "stderr-only", "(no console output captured)"},
+		},
+		{
+			name:          "live stderr and captured stdout",
+			mode:          "live-stderr",
+			captureStdout: true,
+			stdoutData:    []byte("hidden stdout\n"),
+			stderrData:    []byte("visible live stderr\n"),
+			proofContains: []string{"visible live stderr"},
+			proofExcludes: []string{"hidden stdout", "(no console output captured)"},
+		},
+		{
+			name:          "no output and no captures",
+			mode:          "none",
+			proofContains: []string{"(no console output captured)"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			dir := t.TempDir()
+			isolateRunTestUserDirs(t, dir)
+			sshPath := filepath.Join(dir, "ssh")
+			sshScript := `#!/bin/sh
+remote=""
+for arg do remote="$arg"; done
+case "$remote" in
+  *"proof-capture-fixture"*)
+    case "$CRABBOX_TEST_CAPTURE_MODE" in
+      text-stdout) printf 'captured text stdout\n' ;;
+      binary-stdout) printf '\000\001\033[31mSECRET\377' ;;
+      both) printf 'stdout-only\n'; printf 'stderr-only\n' >&2 ;;
+      live-stderr) printf 'hidden stdout\n'; printf 'visible live stderr\n' >&2 ;;
+    esac
+    ;;
+esac
+exit 0
+`
+			if err := os.WriteFile(sshPath, []byte(sshScript), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+			t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
+			t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
+			t.Setenv("CRABBOX_TEST_CAPTURE_MODE", tt.mode)
+
+			proofPath := filepath.Join(dir, "proof.md")
+			args := []string{
+				"--provider", "run-env-profile-test",
+				"--no-sync",
+				"--no-hydrate",
+				"--keep",
+				"--emit-proof", proofPath,
+			}
+			var stdoutPath, stderrPath string
+			if tt.captureStdout {
+				stdoutPath = filepath.Join(dir, "stdout`\n# proof-injection.bin")
+				args = append(args, "--capture-stdout", stdoutPath)
+			}
+			if tt.captureStderr {
+				stderrPath = filepath.Join(dir, "stderr.bin")
+				args = append(args, "--capture-stderr", stderrPath)
+			}
+			args = append(args, "--", "proof-capture-fixture")
+			var stdout, stderr bytes.Buffer
+			if err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), args); err != nil {
+				t.Fatalf("run error=%v\nstdout=%q\nstderr=%s", err, stdout.Bytes(), stderr.String())
+			}
+			proofData, err := os.ReadFile(proofPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			proof := string(proofData)
+			if tt.captureStdout {
+				got, err := os.ReadFile(stdoutPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(got, tt.stdoutData) {
+					t.Fatalf("stdout capture=%q want=%q", got, tt.stdoutData)
+				}
+				metadata := fmt.Sprintf("captured stream=stdout path=%s bytes=%d", quoteProofCapturePath(stdoutPath), len(tt.stdoutData))
+				if !strings.Contains(proof, metadata) {
+					t.Fatalf("proof missing stdout metadata %q:\n%s", metadata, proof)
+				}
+			}
+			if tt.captureStderr {
+				got, err := os.ReadFile(stderrPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(got, tt.stderrData) {
+					t.Fatalf("stderr capture=%q want=%q", got, tt.stderrData)
+				}
+				metadata := fmt.Sprintf("captured stream=stderr path=%s bytes=%d", quoteProofCapturePath(stderrPath), len(tt.stderrData))
+				if !strings.Contains(proof, metadata) {
+					t.Fatalf("proof missing stderr metadata %q:\n%s", metadata, proof)
+				}
+			}
+			if tt.captureStdout && tt.captureStderr {
+				if strings.Index(proof, "captured stream=stdout") > strings.Index(proof, "captured stream=stderr") {
+					t.Fatalf("capture metadata order is not stdout then stderr:\n%s", proof)
+				}
+			}
+			for _, want := range tt.proofContains {
+				if !strings.Contains(proof, want) {
+					t.Fatalf("proof missing %q:\n%s", want, proof)
+				}
+			}
+			for _, forbidden := range tt.proofExcludes {
+				if strings.Contains(proof, forbidden) {
+					t.Fatalf("proof contains forbidden %q:\n%s", forbidden, proof)
+				}
+			}
+		})
+	}
+}
+
 func TestWriteRunLeaseOutput(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session.json")
 	session := &RunSessionHandle{

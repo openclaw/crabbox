@@ -515,6 +515,68 @@ func TestRenderRunProofUsesSafeMarkdownFence(t *testing.T) {
 	}
 }
 
+func TestRenderRunProofIncludesCaptureMetadataWithoutCapturedContent(t *testing.T) {
+	unsafePath := "captures/stdout`\n# forged heading\x1b.md"
+	got, err := renderRunProof(proofRenderInput{
+		Provider:   "aws",
+		LeaseID:    "cbx_123",
+		Command:    "make test",
+		LogExcerpt: "live stderr remains",
+		Captures: []streamCaptureMetadata{
+			{Label: "stdout", Path: unsafePath, Bytes: 19},
+			{Label: "stderr", Path: "captures/stderr.bin", Bytes: 7},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"live stderr remains",
+		`captured stream=stdout path="captures/stdout\x60\x0a\x23 forged heading\x1b.md" bytes=19`,
+		`captured stream=stderr path="captures/stderr.bin" bytes=7`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("proof missing %q:\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{"stdout`", "\n# forged heading", "\x1b"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("proof contains unsafe capture path fragment %q:\n%s", forbidden, got)
+		}
+	}
+}
+
+func TestRenderRunProofUsesCaptureMetadataInsteadOfNoOutputSentinel(t *testing.T) {
+	got, err := renderRunProof(proofRenderInput{
+		LogExcerpt: "(no console output captured)",
+		Captures: []streamCaptureMetadata{
+			{Label: "stdout", Path: "/tmp/stdout.bin", Bytes: 0},
+			{Label: "stderr", Path: "/tmp/stderr.bin", Bytes: 12},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout := `captured stream=stdout path="/tmp/stdout.bin" bytes=0`
+	stderr := `captured stream=stderr path="/tmp/stderr.bin" bytes=12`
+	if !strings.Contains(got, stdout+"\n"+stderr) {
+		t.Fatalf("capture metadata order is not deterministic:\n%s", got)
+	}
+	if strings.Contains(got, "(no console output captured)") {
+		t.Fatalf("proof kept no-output sentinel with explicit captures:\n%s", got)
+	}
+}
+
+func TestRenderRunProofKeepsNoOutputSentinelWithoutCaptures(t *testing.T) {
+	got, err := renderRunProof(proofRenderInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "(no console output captured)") {
+		t.Fatalf("proof lost no-output sentinel:\n%s", got)
+	}
+}
+
 func TestSelectProofLogExcerptStripsTerminalControl(t *testing.T) {
 	got := selectProofLogExcerpt("\x1b[2KWaiting for testbox... queued\r\x1b[2KTestbox ready!\nblacksmith-proof-live-ok\n")
 	for _, want := range []string{"Waiting for testbox... queued", "Testbox ready!", "blacksmith-proof-live-ok"} {

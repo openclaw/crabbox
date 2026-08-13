@@ -450,7 +450,10 @@ Use `--capture-stdout <path>` when stdout is binary or terminal-hostile. Crabbox
 writes the remote stdout bytes directly to the local file, leaves stderr on the
 terminal, and skips stdout run-log/event capture. `--capture-stderr <path>`
 works the same way for stderr. Both are SSH-run-only; delegated providers reject
-them.
+them. When `--emit-proof` is also set, the proof includes the safely escaped
+local capture path and final byte count for each redirected stream, but never
+reads or embeds the captured bytes. Any other live console output remains in
+the proof's redacted tail excerpt.
 
 When the remote command exits non-zero, Crabbox writes a local-only
 `.crabbox/captures/*.tar.gz` failure bundle by default. SSH-backed bundles
