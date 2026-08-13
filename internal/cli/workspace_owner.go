@@ -356,14 +356,15 @@ Write-Output $p.Id
 exit 0
 `)
 	}
-	return "nohup sh -c " + shellQuote(wrapped) + " >/dev/null 2>&1 < /dev/null & printf '%s\\n' \"$!\""
+	background := "nohup /bin/sh -c " + shellQuote(wrapped) + " >/dev/null 2>&1 < /dev/null & printf '%s\\n' \"$!\""
+	return remoteWorkspaceOwnerPOSIXLauncher(o.key, o.token, background)
 }
 
 func remoteWorkspaceOwnerCommand(target SSHTarget, req workspaceOwnerRemoteRequest) string {
 	if isWindowsNativeTarget(target) {
 		return remoteWorkspaceOwnerWindows(req)
 	}
-	return remoteWorkspaceOwnerPOSIX(req)
+	return remoteWorkspaceOwnerPOSIXLauncher(req.Key, req.Token, remoteWorkspaceOwnerPOSIX(req))
 }
 
 func workspaceOwnerTTLSeconds(ttl time.Duration) int64 {
@@ -473,9 +474,9 @@ gate="$root/` + req.Key + `.gate"
 body=` + shellQuote(body) + `
 run_locked() {
 	if command -v flock >/dev/null 2>&1; then
-		flock -x -w ` + timeout + ` "$gate" bash -c "$body"
+		flock -x -w ` + timeout + ` "$gate" /bin/sh -c "$body"
 	elif command -v lockf >/dev/null 2>&1; then
-		lockf -t ` + timeout + ` "$gate" bash -c "$body"
+		lockf -t ` + timeout + ` "$gate" /bin/sh -c "$body"
 	else
 		return 73
 	fi
@@ -614,7 +615,20 @@ try {
 `)
 }
 
+func remoteWorkspaceOwnerPOSIXLauncher(key, token, script string) string {
+	return remoteWorkspaceOwnerPOSIXEncodedLauncher(key, token, base64.StdEncoding.EncodeToString([]byte(script)), len(script))
+}
+
+func remoteWorkspaceOwnerPOSIXEncodedLauncher(key, token, encoded string, decodedSize int) string {
+	launcher := `set -u; umask 077; root="$HOME/.crabbox/workspace-owners"; run_dir="$root/` + key + `.launcher.` + token + `.$$"; script="$run_dir/script"; cleanup_launcher() { rm -f "$script"; rmdir "$run_dir" 2>/dev/null || true; }; decoded_size_ok() { set -- $(wc -c <"$script"); [ "$#" -eq 1 ] && [ "$1" = ` + strconv.Itoa(decodedSize) + ` ]; }; mkdir -p "$root" || exit 74; chmod 700 "$HOME/.crabbox" "$root" 2>/dev/null || true; mkdir -m 700 "$run_dir" || exit 74; payload_b64="` + encoded + `"; decoded=; if command -v base64 >/dev/null 2>&1; then if printf %s "$payload_b64" | base64 --decode >"$script" 2>/dev/null && decoded_size_ok; then decoded=1; elif printf %s "$payload_b64" | base64 -d >"$script" 2>/dev/null && decoded_size_ok; then decoded=1; elif printf %s "$payload_b64" | base64 -D >"$script" 2>/dev/null && decoded_size_ok; then decoded=1; fi; fi; if [ -z "$decoded" ] && command -v openssl >/dev/null 2>&1; then if printf %s "$payload_b64" | openssl base64 -d -A >"$script" 2>/dev/null && decoded_size_ok; then decoded=1; fi; fi; if [ -z "$decoded" ]; then cleanup_launcher; exit 74; fi; /bin/sh "$script"; code=$?; cleanup_launcher; exit "$code"`
+	return "exec /bin/sh -c " + shellQuote(launcher)
+}
+
 func remoteWorkspaceOwnerPOSIXWitness(key, token, remote string, preserveInput ...bool) string {
+	return remoteWorkspaceOwnerPOSIXLauncher(key, token, remoteWorkspaceOwnerPOSIXWitnessScript(key, token, remote, preserveInput...))
+}
+
+func remoteWorkspaceOwnerPOSIXWitnessScript(key, token, remote string, preserveInput ...bool) string {
 	inputSetup := ""
 	inputRedirect := ""
 	if len(preserveInput) > 0 && preserveInput[0] {
@@ -660,9 +674,9 @@ run_dir="$root/$key.run.$token"
 start="$run_dir/start"
 run_owner_gate() {
 	if command -v flock >/dev/null 2>&1; then
-		flock -x -w 5 "$gate" bash -c "$1"
+		flock -x -w 5 "$gate" /bin/sh -c "$1"
 	elif command -v lockf >/dev/null 2>&1; then
-		lockf -t 5 "$gate" bash -c "$1"
+		lockf -t 5 "$gate" /bin/sh -c "$1"
 	else
 		return 74
 	fi

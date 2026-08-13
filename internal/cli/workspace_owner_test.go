@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -304,11 +305,17 @@ func TestWorkspaceOwnerAcquisitionBoundary(t *testing.T) {
 func TestWorkspaceOwnerContextWrapsEverySSHChild(t *testing.T) {
 	owner := &workspaceOwner{target: SSHTarget{TargetOS: targetLinux}, key: strings.Repeat("a", 64), token: strings.Repeat("b", 64)}
 	ctx := contextWithWorkspaceOwner(context.Background(), owner)
-	if got := wrapWorkspaceOwnerRemote(ctx, "printf ok", false); !strings.Contains(got, "child_identity=$(ps -o lstart=") {
+	if got, want := wrapWorkspaceOwnerRemote(ctx, "printf ok", false), remoteWorkspaceOwnerPOSIXWitness(owner.key, owner.token, "printf ok"); got != want {
 		t.Fatalf("ordinary SSH child was not witnessed:\n%s", got)
 	}
-	if got := wrapWorkspaceOwnerRemote(ctx, "cat", true); !strings.Contains(got, `cat >"$run_dir/input"`) || !strings.Contains(got, `<"$run_dir/input"`) {
+	if script := remoteWorkspaceOwnerPOSIXWitnessScript(owner.key, owner.token, "printf ok"); !strings.Contains(script, "child_identity=$(ps -o lstart=") {
+		t.Fatalf("ordinary SSH child witness lost identity fencing:\n%s", script)
+	}
+	if got, want := wrapWorkspaceOwnerRemote(ctx, "cat", true), remoteWorkspaceOwnerPOSIXWitness(owner.key, owner.token, "cat", true); got != want {
 		t.Fatalf("input SSH child did not preserve stdin:\n%s", got)
+	}
+	if script := remoteWorkspaceOwnerPOSIXWitnessScript(owner.key, owner.token, "cat", true); !strings.Contains(script, `cat >"$run_dir/input"`) || !strings.Contains(script, `<"$run_dir/input"`) {
+		t.Fatalf("input SSH child witness lost stdin preservation:\n%s", script)
 	}
 	if got := wrapWorkspaceOwnerRemote(contextWithoutWorkspaceOwner(ctx), "printf raw", false); got != "printf raw" {
 		t.Fatalf("owner bypass wrapped protocol-internal command: %q", got)
@@ -384,11 +391,15 @@ func TestWorkspaceOwnerProtocolGeneration(t *testing.T) {
 	token := strings.Repeat("a", 64)
 	req := workspaceOwnerRemoteRequest{Action: workspaceOwnerAcquire, Key: key, Token: token, TTL: time.Minute}
 
-	posix := remoteWorkspaceOwnerCommand(SSHTarget{TargetOS: targetLinux}, req)
+	posixTransport := remoteWorkspaceOwnerCommand(SSHTarget{TargetOS: targetLinux}, req)
 	wsl := remoteWorkspaceOwnerCommand(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, req)
-	if posix != wsl {
+	if posixTransport != wsl {
 		t.Fatal("POSIX and WSL2 must use the same owner protocol")
 	}
+	if !strings.HasPrefix(posixTransport, "exec /bin/sh -c '") || strings.Contains(posixTransport, "\n") || strings.Count(posixTransport, "'") != 2 {
+		t.Fatalf("POSIX owner protocol must use the portable launcher: %q", posixTransport[:min(len(posixTransport), 80)])
+	}
+	posix := remoteWorkspaceOwnerPOSIX(req)
 	for _, want := range []string{".crabbox/workspace-owners", key + ".gate", "$key.owner", "$key.child", "flock -x -w 0", "lockf -t 0", "ps -o lstart=", "RECOVERED", "MISMATCH", "EXPIRED", "AMBIGUOUS", `[ "$state_expiry" -gt "$(date +%s)" ]`} {
 		if !strings.Contains(posix, want) {
 			t.Fatalf("POSIX protocol missing %q:\n%s", want, posix)
@@ -407,7 +418,11 @@ func TestWorkspaceOwnerProtocolGeneration(t *testing.T) {
 	if strings.Contains(windows, leaseID) {
 		t.Fatalf("Windows protocol exposed raw lease ID: %s", windows)
 	}
-	posixWitness := remoteWorkspaceOwnerPOSIXWitness(key, token, "printf ok")
+	posixWitnessTransport := remoteWorkspaceOwnerPOSIXWitness(key, token, "printf ok")
+	if !strings.HasPrefix(posixWitnessTransport, "exec /bin/sh -c '") || strings.Contains(posixWitnessTransport, "\n") || strings.Count(posixWitnessTransport, "'") != 2 {
+		t.Fatalf("POSIX child witness must use the portable launcher: %q", posixWitnessTransport[:min(len(posixWitnessTransport), 80)])
+	}
+	posixWitness := remoteWorkspaceOwnerPOSIXWitnessScript(key, token, "printf ok")
 	for _, want := range []string{"child_identity=$(ps -o lstart=", "owner_expiry=$(sed -n", "owner_expiry", "date +%s", "mv \"$child_tmp\" \"$child\"", "touch \"$start\"", "wait \"$child_pid\"", "rm -f \"$child\""} {
 		if !strings.Contains(posixWitness, want) {
 			t.Fatalf("POSIX child witness missing %q:\n%s", want, posixWitness)
@@ -424,6 +439,224 @@ func TestWorkspaceOwnerProtocolGeneration(t *testing.T) {
 		if !strings.Contains(windowsInputWitness, want) {
 			t.Fatalf("Windows input witness missing %q:\n%s", want, windowsInputWitness)
 		}
+	}
+}
+
+func TestWorkspaceOwnerPOSIXTransportIsLoginShellIndependent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX transport execution requires POSIX shells")
+	}
+
+	shells := []struct {
+		name string
+		args []string
+	}{
+		{name: "bash", args: []string{"--noprofile", "--norc", "-c"}},
+		{name: "zsh", args: []string{"-f", "-c"}},
+		{name: "fish", args: []string{"--no-config", "-c"}},
+	}
+	for _, shell := range shells {
+		t.Run(shell.name, func(t *testing.T) {
+			shellPath, err := exec.LookPath(shell.name)
+			if err != nil {
+				t.Skipf("%s is not installed; portable launcher source remains covered", shell.name)
+			}
+			if shell.name == "bash" {
+				if _, err := os.Stat("/bin/bash"); err == nil {
+					shellPath = "/bin/bash"
+				}
+			}
+			if shell.name == "zsh" {
+				if _, err := os.Stat("/bin/zsh"); err == nil {
+					shellPath = "/bin/zsh"
+				}
+			}
+
+			const finalizeToken = "0123456789abcdef0123456789abcdef"
+			home := filepath.Join(t.TempDir(), "owner's home")
+			workdir := filepath.Join(home, "work root's checkout")
+			metaDir := filepath.Join(workdir, ".crabbox")
+			ownerRoot := filepath.Join(home, ".crabbox", "workspace-owners")
+			if err := os.MkdirAll(metaDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(ownerRoot, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(metaDir, remoteSyncPendingManifestName(finalizeToken)), []byte("tracked.txt\x00"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			key := workspaceOwnerKey("cbx_login_shell_" + shell.name)
+			token := strings.Repeat("a", 64)
+			request := workspaceOwnerRemoteRequest{Action: workspaceOwnerAcquire, Key: key, Token: token, TTL: time.Minute}
+			acquireTransport := remoteWorkspaceOwnerCommand(SSHTarget{TargetOS: targetLinux}, request)
+			if !strings.HasPrefix(acquireTransport, "exec /bin/sh -c '") || strings.Contains(acquireTransport, "\n") || strings.Count(acquireTransport, "'") != 2 {
+				t.Fatalf("workspace owner protocol is raw login-shell input: %q", acquireTransport[:min(len(acquireTransport), 80)])
+			}
+			acquireCmd := exec.Command(shellPath, append(shell.args, acquireTransport)...)
+			acquireCmd.Env = append(os.Environ(), "HOME="+home)
+			if out, err := acquireCmd.CombinedOutput(); err != nil || string(out) != "ACQUIRED" {
+				t.Fatalf("owner acquisition failed through %s: out=%q err=%v", shell.name, out, err)
+			}
+
+			inputPath := filepath.Join(workdir, "preserved input.txt")
+			payload := remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
+				HydrateGit:  true,
+				BaseRef:     "main",
+				BaseSHA:     "abc123",
+				Fingerprint: "fingerprint-with-a-'quote",
+				Token:       finalizeToken,
+				Coherence: gitCoherencePlan{
+					RemoteURL: "https://example.test/owner's/repo.git",
+					Target:    strings.Repeat("1", 40),
+					Tree:      strings.Repeat("2", 40),
+					Branch:    "main",
+				},
+			}) + " && cat > " + shellQuote(inputPath)
+			transportCommand := remoteWorkspaceOwnerPOSIXWitness(key, token, payload, true)
+			if !strings.HasPrefix(transportCommand, "exec /bin/sh -c '") || strings.Contains(transportCommand, "\n") || strings.Count(transportCommand, "'") != 2 {
+				t.Fatalf("workspace owner transport is raw login-shell input: %q", transportCommand[:min(len(transportCommand), 80)])
+			}
+			if len(transportCommand) >= 30_000 {
+				t.Fatalf("workspace owner transport is too large for a bounded Windows SSH command: %d bytes", len(transportCommand))
+			}
+			cmd := exec.Command(shellPath, append(shell.args, transportCommand)...)
+			cmd.Env = append(os.Environ(), "HOME="+home)
+			cmd.Stdin = strings.NewReader("preserved stdin\n")
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("assembled transport failed through %s: %v\n%s", shell.name, err, out)
+			}
+			if got, err := os.ReadFile(filepath.Join(metaDir, "sync-manifest")); err != nil || string(got) != "tracked.txt\x00" {
+				t.Fatalf("finalized manifest=%q err=%v", got, err)
+			}
+			if got, err := os.ReadFile(inputPath); err != nil || string(got) != "preserved stdin\n" {
+				t.Fatalf("preserved input=%q err=%v", got, err)
+			}
+			entries, err := os.ReadDir(ownerRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range entries {
+				if strings.Contains(entry.Name(), ".launcher.") || strings.Contains(entry.Name(), ".run.") || strings.HasSuffix(entry.Name(), ".child") {
+					t.Fatalf("successful transport left temporary owner state %q", entry.Name())
+				}
+			}
+
+			nonzero := remoteWorkspaceOwnerPOSIXWitness(key, token, "exit 23")
+			nonzeroCmd := exec.Command(shellPath, append(shell.args, nonzero)...)
+			nonzeroCmd.Env = append(os.Environ(), "HOME="+home)
+			if out, err := nonzeroCmd.CombinedOutput(); err == nil || exitCode(err) != 23 {
+				t.Fatalf("nonzero child through %s: out=%q err=%v", shell.name, out, err)
+			}
+		})
+	}
+}
+
+func TestWorkspaceOwnerPOSIXLauncherRejectsMalformedPayload(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX transport execution requires sh")
+	}
+	home := t.TempDir()
+	key := workspaceOwnerKey("cbx_malformed_launcher")
+	token := strings.Repeat("b", 64)
+	marker := filepath.Join(home, "payload-ran")
+	script := "touch " + shellQuote(marker)
+	encoded := base64.StdEncoding.EncodeToString([]byte(script))
+	transport := remoteWorkspaceOwnerPOSIXEncodedLauncher(key, token, encoded[:len(encoded)-1], len(script))
+	cmd := exec.Command("sh", "-c", transport)
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	if out, err := cmd.CombinedOutput(); err == nil || exitCode(err) != 74 {
+		t.Fatalf("malformed launcher payload out=%q err=%v", out, err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("malformed launcher executed payload: %v", err)
+	}
+	ownerRoot := filepath.Join(home, ".crabbox", "workspace-owners")
+	entries, err := os.ReadDir(ownerRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".launcher.") {
+			t.Fatalf("malformed launcher left private payload state %q", entry.Name())
+		}
+	}
+}
+
+func TestWorkspaceOwnerPOSIXLauncherDecoderFallbacks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX transport execution requires sh")
+	}
+	realBase64, err := exec.LookPath("base64")
+	if err != nil {
+		t.Skip("base64 is not installed")
+	}
+	realFlag := ""
+	for _, flag := range []string{"--decode", "-d", "-D"} {
+		cmd := exec.Command(realBase64, flag)
+		cmd.Stdin = strings.NewReader("b2s=")
+		if out, err := cmd.Output(); err == nil && string(out) == "ok" {
+			realFlag = flag
+			break
+		}
+	}
+	if realFlag == "" {
+		t.Skip("installed base64 has no supported decode flag")
+	}
+
+	tests := []struct {
+		name          string
+		acceptedFlag  string
+		useOpenSSL    bool
+		wantLogSuffix string
+	}{
+		{name: "long-gnu", acceptedFlag: "--decode", wantLogSuffix: "base64:--decode\n"},
+		{name: "short-gnu", acceptedFlag: "-d", wantLogSuffix: "base64:--decode\nbase64:-d\n"},
+		{name: "bsd", acceptedFlag: "-D", wantLogSuffix: "base64:--decode\nbase64:-d\nbase64:-D\n"},
+		{name: "openssl", useOpenSSL: true, wantLogSuffix: "base64:--decode\nbase64:-d\nbase64:-D\nopenssl\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			tools := filepath.Join(home, "tools")
+			if err := os.MkdirAll(tools, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			logPath := filepath.Join(home, "decoder.log")
+			base64Script := "#!/bin/sh\nprintf 'base64:%s\\n' \"$1\" >> \"$CRABBOX_DECODER_LOG\"\n"
+			if tt.useOpenSSL {
+				base64Script += "exit 2\n"
+			} else {
+				base64Script += "[ \"$1\" = " + shellQuote(tt.acceptedFlag) + " ] || exit 2\nexec " + shellQuote(realBase64) + " " + shellQuote(realFlag) + "\n"
+			}
+			if err := os.WriteFile(filepath.Join(tools, "base64"), []byte(base64Script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			opensslScript := "#!/bin/sh\nprintf 'openssl\\n' >> \"$CRABBOX_DECODER_LOG\"\n"
+			if tt.useOpenSSL {
+				opensslScript += "[ \"$1\" = base64 ] || exit 2\nexec " + shellQuote(realBase64) + " " + shellQuote(realFlag) + "\n"
+			} else {
+				opensslScript += "exit 2\n"
+			}
+			if err := os.WriteFile(filepath.Join(tools, "openssl"), []byte(opensslScript), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			marker := filepath.Join(home, "decoded")
+			transport := remoteWorkspaceOwnerPOSIXLauncher(strings.Repeat("c", 64), strings.Repeat("d", 64), "printf decoder-ok > "+shellQuote(marker))
+			cmd := exec.Command("sh", "-c", transport)
+			cmd.Env = append(os.Environ(), "HOME="+home, "PATH="+tools+string(os.PathListSeparator)+os.Getenv("PATH"), "CRABBOX_DECODER_LOG="+logPath)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("decoder fallback failed: %v\n%s", err, out)
+			}
+			if got, err := os.ReadFile(marker); err != nil || string(got) != "decoder-ok" {
+				t.Fatalf("decoded payload=%q err=%v", got, err)
+			}
+			if got, err := os.ReadFile(logPath); err != nil || string(got) != tt.wantLogSuffix {
+				t.Fatalf("decoder attempts=%q want %q err=%v", got, tt.wantLogSuffix, err)
+			}
+		})
 	}
 }
 

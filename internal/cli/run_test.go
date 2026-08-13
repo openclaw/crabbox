@@ -227,8 +227,20 @@ func installRecordingSSH(t *testing.T, dir string) string {
 	script := `#!/bin/sh
 cmd=""
 for arg do cmd="$arg"; done
-printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
+decoded=""
 case "$cmd" in
+  *'payload_b64="'*'"; decoded=; if command -v base64'*)
+    payload_b64=${cmd#*'payload_b64="'}
+    payload_b64=${payload_b64%%'"; decoded=; if command -v base64'*}
+    decoded=$(printf %s "$payload_b64" | /usr/bin/base64 --decode 2>/dev/null) ||
+      decoded=$(printf %s "$payload_b64" | /usr/bin/base64 -d 2>/dev/null) ||
+      decoded=$(printf %s "$payload_b64" | /usr/bin/base64 -D 2>/dev/null) || decoded=""
+    ;;
+esac
+printf '%s\n%s\n---\n' "$cmd" "$decoded" >> "$CRABBOX_FAKE_SSH_LOG"
+match=$cmd
+if [ -n "$decoded" ]; then match=$decoded; fi
+case "$match" in
   *"protocol_action='acquire'"*) printf ACQUIRED; exit 0 ;;
   *"protocol_action='renew'"*) printf RENEWED; exit 0 ;;
   *"protocol_action='inspect'"*) printf OWNED; exit 0 ;;
@@ -2643,6 +2655,25 @@ jobs:
 	sshScript := `#!/bin/sh
 remote=""
 for arg do remote="$arg"; done
+current=$remote
+decoded_view=""
+decode_depth=0
+while [ "$decode_depth" -lt 3 ]; do
+  case "$current" in
+    *'payload_b64="'*'"; decoded=; if command -v base64'*)
+      payload_b64=${current#*'payload_b64="'}
+      payload_b64=${payload_b64%%'"; decoded=; if command -v base64'*}
+      current=$(printf %s "$payload_b64" | /usr/bin/base64 --decode 2>/dev/null) ||
+        current=$(printf %s "$payload_b64" | /usr/bin/base64 -d 2>/dev/null) ||
+        current=$(printf %s "$payload_b64" | /usr/bin/base64 -D 2>/dev/null) || break
+      decoded_view="$decoded_view
+$current"
+      decode_depth=$((decode_depth + 1))
+      ;;
+    *) break ;;
+  esac
+done
+if [ -n "$decoded_view" ]; then remote=$decoded_view; fi
 case "$remote" in
   *"protocol_action='acquire'"*) printf 'owner-acquire\n' >> "$CRABBOX_FAKE_EVENTS"; printf ACQUIRED; exit 0 ;;
   *"protocol_action='renew'"*) printf RENEWED; exit 0 ;;
@@ -2659,6 +2690,11 @@ case "$remote" in
   *'touch "$HOME/.crabbox/workspace-owners/'*"rsync-stop."*)
     rm -f "$CRABBOX_FAKE_OWNER_CHILD"
     exit 0
+    ;;
+  *"nohup"*"cbx_env_profile_test.local.sh"*)
+    printf 'hydrate\n' >> "$CRABBOX_FAKE_EVENTS"
+    : > "$CRABBOX_FAKE_HYDRATED"
+    printf '123\n'
     ;;
   *"rm -f"*".crabbox/actions/cbx_env_profile_test.env.sh"*)
     printf 'clear\n' >> "$CRABBOX_FAKE_EVENTS"
@@ -2685,11 +2721,6 @@ EOF
   *"cat >"*"cbx_env_profile_test.local.sh"*)
     /bin/cat > "$CRABBOX_FAKE_HYDRATION_SCRIPT"
     exit 0
-    ;;
-  *"nohup"*"cbx_env_profile_test.local.sh"*)
-    printf 'hydrate\n' >> "$CRABBOX_FAKE_EVENTS"
-    : > "$CRABBOX_FAKE_HYDRATED"
-    printf '123\n'
     ;;
   *"cat "*".crabbox/actions/cbx_env_profile_test.env"*)
     if [ -e "$CRABBOX_FAKE_HYDRATED" ]; then

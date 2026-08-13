@@ -53,6 +53,9 @@ Static SSH supports all four targets:
 
 `target` and (for Windows) `windows.mode` must match the real host — Crabbox
 cannot infer whether a Windows host runs native PowerShell or WSL2 commands.
+On Linux, macOS, and WSL2 targets, Crabbox's workspace-owner protocol invokes
+`/bin/sh` explicitly and does not require the SSH account to use a POSIX login
+shell; zsh, Bash, and Fish login shells are supported.
 
 ## Configuration
 

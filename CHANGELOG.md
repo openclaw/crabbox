@@ -13,6 +13,7 @@
 - Derived implicit Static SSH macOS work roots from the resolved SSH user while preserving explicit roots and EC2 Mac defaults. Thanks @osouthgate.
 - Reported explicit stdout and stderr capture paths and byte counts in emitted run proofs without reading or embedding captured content. Thanks @coygeek.
 - Routed implicit `status` and `inspect` lease identifiers through the provider recorded in local claims before initializing the configured provider, while preserving explicit-provider precedence and missing-claim fallback. Thanks @coygeek.
+- Made POSIX workspace ownership independent of the remote account's login shell by transporting owner scripts through a private `/bin/sh` launcher, fixing static macOS sync under zsh, Bash, and Fish. Thanks @osouthgate and @hosmelq.
 
 ## 0.41.5 - 2026-08-12
 
