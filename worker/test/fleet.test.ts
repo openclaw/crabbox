@@ -17150,6 +17150,70 @@ describe("fleet lease identity and idle", () => {
     expect(refreshed?.network?.sshSourceCIDRs).toEqual(["0.0.0.0/0", "203.0.113.7/32"]);
   });
 
+  it.each([
+    {
+      name: "replaces dynamic IPv4 with incoming IPv4",
+      existing: ["198.51.100.7/32"],
+      incoming: ["203.0.113.8/32"],
+      expected: ["203.0.113.8/32"],
+    },
+    {
+      name: "retains dynamic IPv4 with incoming IPv6",
+      existing: ["198.51.100.7/32"],
+      incoming: ["2001:db8::8/128"],
+      expected: ["198.51.100.7/32", "2001:db8::8/128"],
+    },
+    {
+      name: "replaces dynamic IPv6 with incoming IPv6",
+      existing: ["2001:db8::7/128"],
+      incoming: ["2001:db8::8/128"],
+      expected: ["2001:db8::8/128"],
+    },
+    {
+      name: "retains dynamic IPv6 with incoming IPv4",
+      existing: ["2001:db8::7/128"],
+      incoming: ["203.0.113.8/32"],
+      expected: ["2001:db8::7/128", "203.0.113.8/32"],
+    },
+    {
+      name: "retains pinned CIDRs from both families",
+      existing: ["192.0.2.0/24", "2001:db8:1::/64", "198.51.100.7/32", "2001:db8::7/128"],
+      pinned: ["192.0.2.0/24", "2001:db8:1::/64"],
+      incoming: ["203.0.113.8/32", "2001:db8::8/128"],
+      expected: ["192.0.2.0/24", "2001:db8:1::/64", "203.0.113.8/32", "2001:db8::8/128"],
+    },
+    {
+      name: "retains multiple incoming CIDRs from one family",
+      existing: ["198.51.100.7/32", "2001:db8::7/128"],
+      incoming: ["203.0.113.8/32", "203.0.113.9/32"],
+      expected: ["2001:db8::7/128", "203.0.113.8/32", "203.0.113.9/32"],
+    },
+    {
+      name: "does not preserve invalid stored CIDRs",
+      existing: ["not-a-cidr", "198.51.100.7/32"],
+      incoming: ["2001:db8::8/128"],
+      expected: ["198.51.100.7/32", "2001:db8::8/128"],
+    },
+  ])("$name", async ({ existing, pinned = [], incoming, expected }) => {
+    const provider = new AWSProvider({} as Env, "eu-west-1", new MemoryStorage());
+    vi.spyOn(provider, "reconcileLeaseAccess").mockResolvedValue();
+    const lease = testLease({
+      provider: "aws",
+      network: {
+        sshSourceCIDRs: existing,
+        sshPinnedSourceCIDRs: pinned,
+        sshSourceCIDRsComplete: true,
+      },
+    });
+
+    const refreshed = await provider.refreshLeaseAccess(lease, {
+      requestSourceCIDRs: incoming,
+      activeLeases: [lease],
+    });
+
+    expect(refreshed?.network?.sshSourceCIDRs).toEqual(expected);
+  });
+
   it("keeps IPv4 SSH ingress when an HTTP heartbeat arrives over IPv6", async () => {
     const storage = new MemoryStorage();
     const ingressRequests: Array<{ action: string; ipv4: string; ipv6: string }> = [];

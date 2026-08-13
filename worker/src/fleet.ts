@@ -21728,6 +21728,20 @@ function awsGlobalSSHSourceCIDRs(env: Env): string[] {
   return uniqueNonEmpty(validCIDRs((env.CRABBOX_AWS_SSH_CIDRS ?? "").split(",")));
 }
 
+// A refresh owns only dynamic CIDRs from address families represented by the incoming request.
+function refreshedAWSSSHSourceCIDRs(lease: LeaseRecord, incomingCIDRs: string[]): string[] {
+  const pinnedCIDRs = uniqueNonEmpty(validCIDRs(lease.network?.sshPinnedSourceCIDRs ?? []));
+  const pinned = new Set(pinnedCIDRs);
+  const incoming = uniqueNonEmpty(validCIDRs(incomingCIDRs));
+  const refreshedFamilies = new Set(incoming.map((cidr) => (cidr.includes(":") ? "ipv6" : "ipv4")));
+  const retainedDynamicCIDRs = uniqueNonEmpty(
+    validCIDRs(lease.network?.sshSourceCIDRs ?? []),
+  ).filter(
+    (cidr) => !pinned.has(cidr) && !refreshedFamilies.has(cidr.includes(":") ? "ipv6" : "ipv4"),
+  );
+  return uniqueNonEmpty([...pinnedCIDRs, ...retainedDynamicCIDRs, ...incoming]);
+}
+
 function withLeaseSSHSourceCIDRs(
   lease: LeaseRecord,
   cidrs: string[],
@@ -23574,20 +23588,10 @@ export class AWSProvider implements CloudProvider {
     if (lease.state !== "active") {
       return;
     }
-    const sourceCIDRs = context.requestSourceCIDRs;
+    const sourceCIDRs = validCIDRs(context.requestSourceCIDRs);
     const nextLease =
       sourceCIDRs.length > 0
-        ? withLeaseSSHSourceCIDRs(
-            lease,
-            // Broker HTTP and direct SSH can use different routes or address families.
-            // Keep lease-proven sources until lifecycle reconciliation removes its access.
-            uniqueNonEmpty([
-              ...(lease.network?.sshSourceCIDRs ?? []),
-              ...(lease.network?.sshPinnedSourceCIDRs ?? []),
-              ...sourceCIDRs,
-            ]),
-            true,
-          )
+        ? withLeaseSSHSourceCIDRs(lease, refreshedAWSSSHSourceCIDRs(lease, sourceCIDRs), true)
         : lease;
     const activeLeases = replaceProviderAccessState(context.activeLeases, nextLease);
     try {
