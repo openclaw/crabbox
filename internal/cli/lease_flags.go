@@ -407,6 +407,10 @@ type leaseTargetConfigOptions struct {
 	// ssh provider so callers don't have to re-pass --provider / --static-host
 	// that warmup already implied.
 	LeaseID string
+	// ProviderResourceID marks LeaseID as a provider-native resource identifier,
+	// not a Crabbox lease identifier. Native snapshot operations use this to
+	// avoid routing an unrelated local claim whose slug happens to match.
+	ProviderResourceID bool
 }
 
 func loadLeaseTargetConfig(fs *flag.FlagSet, provider string, targetFlags targetFlagValues, networkFlags networkModeFlagValues, opts leaseTargetConfigOptions) (Config, error) {
@@ -421,6 +425,11 @@ func loadLeaseTargetConfig(fs *flag.FlagSet, provider string, targetFlags target
 	}
 	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
 		return Config{}, err
+	}
+	if !opts.ProviderResourceID {
+		if err := autoRouteClaimLeaseProvider(&cfg, fs, opts.LeaseID); err != nil {
+			return Config{}, err
+		}
 	}
 	if err := autoRouteStaticLease(&cfg, fs, opts.LeaseID); err != nil {
 		return Config{}, err

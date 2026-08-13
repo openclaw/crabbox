@@ -252,7 +252,7 @@ func (a App) checkpointList(ctx context.Context, args []string) error {
 	}
 	setIDFromFirstArg(fs, id)
 	if strings.TrimSpace(*id) != "" || flagWasSet(fs, "provider") || flagWasSet(fs, "parallels-template") {
-		cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
+		cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id, ProviderResourceID: true})
 		if err != nil {
 			return err
 		}
@@ -542,7 +542,7 @@ func (a App) checkpointRestore(ctx context.Context, args []string) error {
 		if fs.NArg() != 0 {
 			return exit(2, "usage: crabbox checkpoint restore --provider parallels --id <vm-or-lease> --snapshot <name-or-id>")
 		}
-		cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
+		cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id, ProviderResourceID: true})
 		if err != nil {
 			return err
 		}
@@ -1065,7 +1065,7 @@ func (a App) checkpointDelete(ctx context.Context, args []string) error {
 		if *localOnly {
 			return exit(2, "--local-only applies only to recorded checkpoints")
 		}
-		cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *sourceID})
+		cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *sourceID, ProviderResourceID: true})
 		if err != nil {
 			return err
 		}

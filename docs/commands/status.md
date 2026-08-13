@@ -20,6 +20,12 @@ crabbox status --provider ssh --target macos --static-host mac-studio.local
 `--id` is optional: status resolves the configured static target or the local
 claim for the current repo.
 
+When `--provider` is omitted, an exact local claim or an unambiguous claimed
+slug selects its recorded provider before that provider is initialized. An
+explicit `--provider` still wins; a slug claimed by multiple providers asks
+you to pass a canonical lease ID or `--provider`, and an identifier without a
+local claim keeps the configured-provider fallback.
+
 Several delegated and direct providers resolve their own native identifiers in
 addition to the Crabbox lease ID and local slug:
 

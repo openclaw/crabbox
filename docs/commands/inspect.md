@@ -20,6 +20,12 @@ You can also pass the lease id or slug as a positional argument instead of
 crabbox inspect blue-lobster
 ```
 
+When `--provider` is omitted, an exact local claim or an unambiguous claimed
+slug selects its recorded provider before provider initialization. An explicit
+`--provider` remains authoritative; ambiguous claimed slugs require a canonical
+lease ID or `--provider`, while missing claims keep the configured-provider
+fallback.
+
 ## Output
 
 Human output prints one `key=value` line per field, followed by any Tailscale

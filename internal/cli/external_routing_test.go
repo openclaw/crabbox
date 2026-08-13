@@ -855,3 +855,39 @@ func TestLeaseTargetConfigPreservesExplicitNonExternalProvider(t *testing.T) {
 		t.Fatalf("config=%#v", cfg)
 	}
 }
+
+func TestLeaseTargetConfigPreservesImplicitExternalClaimRouting(t *testing.T) {
+	root := setExternalRoutingTestHome(t)
+	leaseID := "cbx_1293ee000001"
+	routing := ExternalConfig{Command: "claimed-provider", WorkRoot: "/claimed/work"}
+	wantPath, err := PersistExternalRouting(leaseID, routing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := claimLeaseForRepoProviderScope(leaseID, "claimed-external", "external", "claimed-scope", root, time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "crabbox.yaml")
+	if err := os.WriteFile(configPath, []byte("provider: aws\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	defaults := defaultConfig()
+	fs := newFlagSet("status", os.Stderr)
+	provider := fs.String("provider", defaults.Provider, "")
+	targetFlags := registerTargetFlags(fs, defaults)
+	networkFlags := registerNetworkModeFlag(fs, defaults)
+	if err := parseFlags(fs, nil); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: "claimed-external"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "external" || cfg.External.RoutingFile != wantPath || cfg.External.Command != routing.Command || cfg.WorkRoot != routing.WorkRoot {
+		t.Fatalf("config=%#v", cfg)
+	}
+	if cfg.providerSelectionSource != providerSelectionLeaseContext {
+		t.Fatalf("provider source=%q want %q", cfg.providerSelectionSource, providerSelectionLeaseContext)
+	}
+}

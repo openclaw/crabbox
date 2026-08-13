@@ -114,6 +114,43 @@ func TestAutoRouteStaticLeaseRestoresFriendlySlugClaim(t *testing.T) {
 	}
 }
 
+func TestLeaseTargetConfigPreservesImplicitStaticClaimRouting(t *testing.T) {
+	isolateTestUserDirs(t)
+	claimed := baseConfig()
+	claimed.Provider = staticProvider
+	claimed.Static.Host = "claimed-static.example.com"
+	claimed.Static.User = "builder"
+	claimed.Static.Port = "2202"
+	claimed.Static.WorkRoot = "/work/claimed-static"
+	claimed.TargetOS = targetMacOS
+	if err := claimLeaseForRepoConfig("static_claimed-static", "claimed-static", claimed, "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "crabbox.yaml")
+	if err := os.WriteFile(configPath, []byte("provider: aws\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	defaults := defaultConfig()
+	fs := newFlagSet("status", io.Discard)
+	provider := fs.String("provider", defaults.Provider, "")
+	targetFlags := registerTargetFlags(fs, defaults)
+	networkFlags := registerNetworkModeFlag(fs, defaults)
+	if err := parseFlags(fs, nil); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: "claimed-static"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != staticProvider || cfg.Static.Host != claimed.Static.Host || cfg.Static.User != claimed.Static.User || cfg.Static.Port != claimed.Static.Port || cfg.WorkRoot != claimed.Static.WorkRoot || cfg.TargetOS != targetMacOS {
+		t.Fatalf("config=%#v static=%#v", cfg, cfg.Static)
+	}
+	if cfg.providerSelectionSource != providerSelectionLeaseContext {
+		t.Fatalf("provider source=%q want %q", cfg.providerSelectionSource, providerSelectionLeaseContext)
+	}
+}
+
 func TestAutoRouteStaticLeaseDoesNotGuessHostWithoutClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	defaults := baseConfig()
