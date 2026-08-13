@@ -38,6 +38,40 @@ func (a App) claimResolvedLeaseTargetForRepoAndRegister(
 	return err
 }
 
+func (a App) claimRunLeaseTargetForRepoAndRegister(
+	ctx context.Context,
+	leaseID, slug string,
+	cfg Config,
+	server *Server,
+	target SSHTarget,
+	repoRoot string,
+	reclaim, resolved bool,
+) error {
+	claimed, err := a.claimLeaseTargetForRepoAndRegisterMode(ctx, leaseID, slug, cfg, *server, target, repoRoot, reclaim, resolved)
+	if claimed.LeaseID != "" {
+		SetServerLeaseClaimSnapshot(server, claimed, true)
+	}
+	return err
+}
+
+func refreshRunLeaseClaimEndpoint(leaseID string, server *Server, target SSHTarget) {
+	if server == nil {
+		return
+	}
+	expected, exists, set := ServerLeaseClaimSnapshot(*server)
+	if !set {
+		_ = updateLeaseClaimEndpoint(leaseID, *server, target)
+		return
+	}
+	if !exists {
+		return
+	}
+	updated, err := updateLeaseClaimEndpointIfUnchanged(leaseID, expected, *server, target)
+	if err == nil {
+		SetServerLeaseClaimSnapshot(server, updated, true)
+	}
+}
+
 func (a App) claimLeaseTargetForRepoAndRegisterMode(
 	ctx context.Context,
 	leaseID, slug string,

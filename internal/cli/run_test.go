@@ -509,13 +509,18 @@ func (b runEnvProfileTestBackend) AcquireIsExclusiveOneShot() bool { return true
 
 var runEnvProfileTestReleaseErr error
 var runEnvProfileTestReleaseHook func() error
+var runEnvProfileTestReleaseRequestHook func(ReleaseLeaseRequest) error
 var runEnvProfileTestConnectionCleanupSafe = true
 var runEnvProfileTestAcquireHook func(AcquireRequest)
+var runEnvProfileTestAcquireLease func(AcquireRequest) (LeaseTarget, error)
 
 func (b runEnvProfileTestBackend) Spec() ProviderSpec { return b.spec }
 func (b runEnvProfileTestBackend) Acquire(_ context.Context, req AcquireRequest) (LeaseTarget, error) {
 	if runEnvProfileTestAcquireHook != nil {
 		runEnvProfileTestAcquireHook(req)
+	}
+	if runEnvProfileTestAcquireLease != nil {
+		return runEnvProfileTestAcquireLease(req)
 	}
 	return LeaseTarget{
 		Server: Server{Provider: b.spec.Name},
@@ -544,10 +549,143 @@ func (b runEnvProfileTestBackend) ReleaseLease(ctx context.Context, req ReleaseL
 			return err
 		}
 	}
+	if runEnvProfileTestReleaseRequestHook != nil {
+		if err := runEnvProfileTestReleaseRequestHook(req); err != nil {
+			return err
+		}
+	}
 	return runEnvProfileTestReleaseErr
 }
-func (b runEnvProfileTestBackend) Touch(context.Context, TouchRequest) (Server, error) {
-	return Server{Provider: b.spec.Name}, nil
+func (b runEnvProfileTestBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {
+	server := req.Lease.Server
+	server.Provider = b.spec.Name
+	return server, nil
+}
+
+func setupRunClaimSnapshotTest(t *testing.T) (LeaseTarget, leaseClaim) {
+	t.Helper()
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	installRecordingSSH(t, dir)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
+	t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
+
+	repo, err := findRepo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	cfg.Provider = runEnvProfileTestProvider{}.Name()
+	lease := LeaseTarget{
+		LeaseID: "cbx_env_profile_test",
+		Server: Server{
+			CloudID:  "task-owned-container",
+			Provider: cfg.Provider,
+			Labels: map[string]string{
+				"lease":    "cbx_env_profile_test",
+				"provider": cfg.Provider,
+				"slug":     "claim-snapshot",
+				"state":    "ready",
+			},
+		},
+		SSH: SSHTarget{
+			User:           "crabbox",
+			Host:           "127.0.0.1",
+			Port:           "22",
+			TargetOS:       targetLinux,
+			SSHConfigProxy: true,
+		},
+	}
+	if err := claimLeaseTargetForRepoConfig(lease.LeaseID, "claim-snapshot", cfg, lease.Server, lease.SSH, repo.Root, cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := readLeaseClaim(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	SetServerLeaseClaimSnapshot(&lease.Server, initial, true)
+	runEnvProfileTestAcquireLease = func(AcquireRequest) (LeaseTarget, error) { return lease, nil }
+	t.Cleanup(func() {
+		runEnvProfileTestAcquireLease = nil
+		runEnvProfileTestReleaseRequestHook = nil
+		removeLeaseClaim(lease.LeaseID)
+	})
+	return lease, initial
+}
+
+func TestRunCommandOneShotCleanupUsesUpdatedClaimSnapshot(t *testing.T) {
+	lease, initial := setupRunClaimSnapshotTest(t)
+	resourceDeleted := false
+	runEnvProfileTestReleaseRequestHook = func(req ReleaseLeaseRequest) error {
+		claim, exists, set := ServerLeaseClaimSnapshot(req.Lease.Server)
+		if !set || !exists {
+			return errors.New("release did not receive a claim snapshot")
+		}
+		if claim.Revision == initial.Revision {
+			return errors.New("release received the pre-registration claim snapshot")
+		}
+		return removeLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, claim, func() error {
+			resourceDeleted = true
+			return nil
+		})
+	}
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", runEnvProfileTestProvider{}.Name(),
+		"--no-sync",
+		"--",
+		"true",
+	})
+	if err != nil {
+		t.Fatalf("run error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	if !resourceDeleted {
+		t.Fatal("task-owned resource was not deleted")
+	}
+	if _, exists, err := readLeaseClaimWithPresence(lease.LeaseID); err != nil || exists {
+		t.Fatalf("claim exists=%v err=%v after successful cleanup", exists, err)
+	}
+}
+
+func TestRunCommandCleanupRejectsClaimReplacedAfterRegistration(t *testing.T) {
+	lease, _ := setupRunClaimSnapshotTest(t)
+	resourceDeleted := false
+	runEnvProfileTestReleaseRequestHook = func(req ReleaseLeaseRequest) error {
+		claim, exists, set := ServerLeaseClaimSnapshot(req.Lease.Server)
+		if !set || !exists {
+			return errors.New("release did not receive a claim snapshot")
+		}
+		labels := cloneStringMap(claim.Labels)
+		labels["owner"] = "replacement-process"
+		if _, err := updateLeaseClaimLabelsIfUnchanged(req.Lease.LeaseID, claim, labels); err != nil {
+			return err
+		}
+		return removeLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, claim, func() error {
+			resourceDeleted = true
+			return nil
+		})
+	}
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", runEnvProfileTestProvider{}.Name(),
+		"--no-sync",
+		"--",
+		"true",
+	})
+	if err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("run error=%v, want ownership-change cleanup failure\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	if resourceDeleted {
+		t.Fatal("replacement-owned resource was deleted")
+	}
+	replacement, readErr := readLeaseClaim(lease.LeaseID)
+	if readErr != nil || replacement.Labels["owner"] != "replacement-process" {
+		t.Fatalf("replacement claim=%#v err=%v", replacement, readErr)
+	}
 }
 func (b runEnvProfileTestBackend) ReleaseLeaseConnectionCleanupSafe() bool {
 	return runEnvProfileTestConnectionCleanupSafe

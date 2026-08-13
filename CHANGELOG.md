@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Kept the exact updated lease-claim snapshot through one-shot run registration and replacement retries so task-owned local containers can clean up without weakening concurrent replacement fences. Thanks @coygeek.
 - Made GitHub team authorization fail closed on malformed selectors, enforced same-org team scope, and invalidated membership and device proofs when the normalized policy changes. Thanks @dwin-gharibi.
 - Rejected invalid or overlong coordinator-requested lease slugs before provisioning while preserving exact fixed-ID replays created under the legacy length behavior. Thanks @dwin-gharibi.
 - Bound valid caller-declared artifact SHA-256 digests into signed broker upload grants, rejected malformed nonblank digests instead of silently disabling integrity checks, and made object storage reject mismatching payloads. Thanks @dwin-gharibi.

@@ -809,6 +809,104 @@ func TestResolvedLeaseClaimAllowsUnclaimedResourceAdoption(t *testing.T) {
 	}
 }
 
+func TestClaimRunLeaseTargetForRepoAndRegisterRetainsReplacementSnapshot(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := baseConfig()
+	cfg.Provider = "local-container"
+	cfg.IdleTimeout = time.Hour
+	leaseID := "cbx_replacement_snapshot"
+	server := Server{
+		CloudID:  "replacement-container",
+		Provider: cfg.Provider,
+		Labels: map[string]string{
+			"lease":    leaseID,
+			"provider": cfg.Provider,
+			"slug":     "replacement",
+			"state":    "ready",
+		},
+	}
+	target := SSHTarget{Host: "127.0.0.1", Port: "49152"}
+	if err := claimLeaseTargetForRepoConfig(leaseID, "replacement", cfg, server, target, "/repo", cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	acquired, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	SetServerLeaseClaimSnapshot(&server, acquired, true)
+
+	if err := (App{}).claimRunLeaseTargetForRepoAndRegister(
+		context.Background(), leaseID, "replacement", cfg, &server, target, "/repo", false, false,
+	); err != nil {
+		t.Fatal(err)
+	}
+	registered, exists, set := ServerLeaseClaimSnapshot(server)
+	if !set || !exists {
+		t.Fatal("replacement server did not retain its registered claim snapshot")
+	}
+	current, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if registered.Revision == acquired.Revision || registered.Revision != current.Revision {
+		t.Fatalf("acquired=%q registered=%q current=%q", acquired.Revision, registered.Revision, current.Revision)
+	}
+}
+
+func TestClaimRunLeaseTargetForRepoAndRegisterRetainsSnapshotOnRegistrationError(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_ADAPTER_ID", "")
+	t.Setenv(controllerWorkspaceIDEnv, "")
+	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"error":"registration unavailable"}`, http.StatusServiceUnavailable)
+	}))
+	defer coordinator.Close()
+
+	cfg := baseConfig()
+	cfg.Provider = "local-container"
+	cfg.Coordinator = coordinator.URL
+	cfg.CoordToken = "test-token"
+	cfg.BrokerMode = BrokerModeRegistered
+	cfg.macOSPortalAuto = true
+	cfg.IdleTimeout = time.Hour
+	leaseID := "cbx_registration_error"
+	server := Server{
+		CloudID:  "registration-error-container",
+		Provider: cfg.Provider,
+		Labels: map[string]string{
+			"lease":    leaseID,
+			"provider": cfg.Provider,
+			"slug":     "registration-error",
+			"state":    "ready",
+		},
+	}
+	target := SSHTarget{Host: "127.0.0.1", Port: "49153"}
+	err := (App{Stderr: &bytes.Buffer{}}).claimRunLeaseTargetForRepoAndRegister(
+		context.Background(), leaseID, "registration-error", cfg, &server, target, "/repo", false, false,
+	)
+	if err == nil || !strings.Contains(err.Error(), "register macOS portal lease") {
+		t.Fatalf("registration error=%v", err)
+	}
+	registered, exists, set := ServerLeaseClaimSnapshot(server)
+	if !set || !exists {
+		t.Fatal("registration error discarded the updated claim snapshot")
+	}
+	current, readErr := readLeaseClaim(leaseID)
+	if readErr != nil || registered.Revision != current.Revision {
+		t.Fatalf("registered=%#v current=%#v err=%v", registered, current, readErr)
+	}
+	resourceDeleted := false
+	if err := removeLeaseClaimIfUnchangedAfter(leaseID, registered, func() error {
+		resourceDeleted = true
+		return nil
+	}); err != nil {
+		t.Fatalf("failure cleanup: %v", err)
+	}
+	if !resourceDeleted {
+		t.Fatal("failure cleanup did not delete the task-owned resource")
+	}
+}
+
 func TestResolvedLeaseClaimUpdatesRejectActiveStateChange(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	cfg := baseConfig()
