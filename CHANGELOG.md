@@ -5,6 +5,7 @@
 ### Fixed
 
 - Made GitHub team authorization fail closed on malformed selectors, enforced same-org team scope, and invalidated membership and device proofs when the normalized policy changes. Thanks @dwin-gharibi.
+- Rejected invalid or overlong coordinator-requested lease slugs before provisioning while preserving exact fixed-ID replays created under the legacy length behavior. Thanks @dwin-gharibi.
 
 ## 0.41.5 - 2026-08-12
 

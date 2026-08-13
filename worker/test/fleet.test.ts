@@ -32,6 +32,7 @@ import {
   codeForwardHeaders,
   codeResponseCookiePath,
   codeResponseHeaders,
+  fixedLeaseCreateIntentHash,
   flushPendingWebVNC,
   forwardOrBufferWebVNC,
   resetWebVNCBridge,
@@ -15564,6 +15565,60 @@ describe("fleet lease identity and idle", () => {
     expect(terminalReplay.status).toBe(409);
     await expect(terminalReplay.json()).resolves.toMatchObject({ error: "lease_id_conflict" });
     expect(creates).toBe(1);
+  });
+
+  it("replays only the identical legacy fixed intent with an overlong requested slug", async () => {
+    const storage = new MemoryStorage();
+    const create = vi.fn<(config: LeaseConfig) => void>();
+    const leaseID = "cbx_abcdef123472";
+    const longSlug = "legacy-" + "a".repeat(41);
+    const providerKey = "crabbox-cbx-abcdef123472";
+    const body = {
+      leaseID,
+      slug: longSlug,
+      provider: "azure" as const,
+      providerKey,
+      azureLocation: "eastus",
+      sshPublicKey: "ssh-ed25519 legacy-fixed-replay",
+    };
+    const config = leaseConfig(body, { allowAzurePromotedImage: true });
+    const intentHash = await fixedLeaseCreateIntentHash(config, longSlug);
+    storage.seed(
+      `lease:${leaseID}`,
+      testLease({
+        id: leaseID,
+        slug: longSlug,
+        provider: "azure",
+        providerKey,
+        cloudID: "vm-legacy-fixed-replay",
+        owner: "alice@example.com",
+        org: "example-org",
+        fixedCreateIntentVersion: 2,
+        fixedCreateIntentHash: intentHash,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    );
+    const fleet = testFleet(storage, { azure: fakeProvider(create, { provider: "azure" }) });
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+
+    const replay = await fleet.fetch(request("PUT", `/v1/leases/${leaseID}`, { headers, body }));
+    expect(replay.status).toBe(200);
+    await expect(replay.json()).resolves.toMatchObject({
+      lease: { id: leaseID, slug: longSlug, cloudID: "vm-legacy-fixed-replay" },
+    });
+
+    const drift = await fleet.fetch(
+      request("PUT", `/v1/leases/${leaseID}`, {
+        headers,
+        body: { ...body, class: "standard" },
+      }),
+    );
+    expect(drift.status).toBe(409);
+    await expect(drift.json()).resolves.toMatchObject({ error: "lease_id_conflict" });
+    expect(create).not.toHaveBeenCalled();
   });
 
   it("rejects fixed lease keep drift without another provider create", async () => {
@@ -32067,20 +32122,31 @@ describe("fleet identity", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("rejects a requested slug that would overflow the provider resource name", async () => {
-    const fleet = testFleet();
+  it.each([
+    { field: "slug", label: "slug", value: "a".repeat(42) },
+    { field: "requestedSlug", label: "requestedSlug alias", value: "a".repeat(42) },
+    { field: "slug", label: "punctuation-only slug", value: " !@#$%^&*() " },
+    {
+      field: "requestedSlug",
+      label: "punctuation-only requestedSlug alias",
+      value: " !@#$%^&*() ",
+    },
+  ] as const)("rejects a new $label before calling the provider", async ({ field, value }) => {
+    const create = vi.fn<(config: LeaseConfig) => void>();
+    const fleet = testFleet(undefined, { hetzner: fakeProvider(create) });
     const response = await fleet.fetch(
       request("POST", "/v1/leases", {
         body: {
           provider: "hetzner",
           sshPublicKey: "ssh-ed25519 test",
-          slug: "a".repeat(42),
+          [field]: value,
         },
       }),
     );
 
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toMatchObject({ error: "invalid_slug" });
+    expect(create).not.toHaveBeenCalled();
   });
 
   // A registered lease records an already-provisioned external machine and never derives a

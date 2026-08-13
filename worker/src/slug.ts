@@ -32,17 +32,28 @@ export function leaseSlugFromID(leaseID: string): string {
 export const maxRequestedLeaseSlugLength = 41;
 
 export class InvalidLeaseSlugError extends Error {
-  constructor() {
-    super(`slug must be ${maxRequestedLeaseSlugLength} characters or fewer after normalization`);
+  readonly reason: "empty" | "too_long";
+
+  constructor(reason: "empty" | "too_long") {
+    super(
+      reason === "empty"
+        ? "slug must contain at least one letter or digit"
+        : `slug must be ${maxRequestedLeaseSlugLength} characters or fewer after normalization`,
+    );
     this.name = "InvalidLeaseSlugError";
+    this.reason = reason;
   }
 }
 
 /** Validates a client-requested slug; normalization alone cannot bound length. */
 export function requestedLeaseSlug(value: string | undefined): string {
+  if (!value?.trim()) return "";
   const slug = normalizeLeaseSlug(value);
+  if (!slug) {
+    throw new InvalidLeaseSlugError("empty");
+  }
   if (slug.length > maxRequestedLeaseSlugLength) {
-    throw new InvalidLeaseSlugError();
+    throw new InvalidLeaseSlugError("too_long");
   }
   return slug;
 }

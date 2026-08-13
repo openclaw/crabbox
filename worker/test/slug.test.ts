@@ -43,6 +43,7 @@ describe("lease slugs", () => {
     const longest = "a".repeat(maxRequestedLeaseSlugLength);
     expect(requestedLeaseSlug(longest)).toBe(longest);
     expect(requestedLeaseSlug(undefined)).toBe("");
+    expect(requestedLeaseSlug("   ")).toBe("");
     // 8 ("crabbox-") + 41 + 1 + 8 (lease hash); the 5-char collision suffix fills it to 63.
     expect(leaseProviderName("cbx_abcdef123456", longest).length).toBe(58);
     expect(
@@ -58,6 +59,12 @@ describe("lease slugs", () => {
     // Normalization collapses separators, so length is measured after normalizing.
     expect(() => requestedLeaseSlug("A! ".repeat(maxRequestedLeaseSlugLength))).toThrow(
       InvalidLeaseSlugError,
+    );
+  });
+
+  it("rejects a nonblank requested slug that normalizes to empty", () => {
+    expect(() => requestedLeaseSlug(" !@#$%^&*() ")).toThrow(
+      "slug must contain at least one letter or digit",
     );
   });
 

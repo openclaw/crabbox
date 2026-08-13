@@ -3352,6 +3352,18 @@ export class FleetCoordinator {
         return replay;
       }
     }
+    const requestedSlugInput = input.slug ?? input.requestedSlug;
+    let requestedSlug = normalizeLeaseSlug(requestedSlugInput);
+    let deferredSlugError: InvalidLeaseSlugError | undefined;
+    try {
+      requestedSlug = requestedLeaseSlug(requestedSlugInput);
+    } catch (error) {
+      if (!(error instanceof InvalidLeaseSlugError)) throw error;
+      if (error.reason === "empty" || !fixedLeaseID) {
+        return json({ error: "invalid_slug", message: error.message }, { status: 400 });
+      }
+      deferredSlugError = error;
+    }
     const defaults: LeaseConfigDefaults = { allowAzurePromotedImage: true };
     const azureImage = this.env.CRABBOX_AZURE_IMAGE?.trim();
     if (azureImage) defaults.azureImage = azureImage;
@@ -3359,10 +3371,8 @@ export class FleetCoordinator {
     if (azureWindowsARM64Image) defaults.azureWindowsARM64Image = azureWindowsARM64Image;
     if (this.env.CRABBOX_AZURE_OS_DISK) defaults.azureOSDisk = this.env.CRABBOX_AZURE_OS_DISK;
     let config: LeaseConfig;
-    let requestedSlug: string;
     try {
       config = leaseConfig(input, defaults);
-      requestedSlug = requestedLeaseSlug(input.slug ?? input.requestedSlug);
     } catch (error) {
       if (error instanceof InvalidAWSRegionError) {
         return json({ error: "invalid_region", message: error.message }, { status: 400 });
@@ -3372,9 +3382,6 @@ export class FleetCoordinator {
           { error: "invalid_image_requirements", message: error.message },
           { status: 400 },
         );
-      }
-      if (error instanceof InvalidLeaseSlugError) {
-        return json({ error: "invalid_slug", message: error.message }, { status: 400 });
       }
       throw error;
     }
@@ -3436,6 +3443,9 @@ export class FleetCoordinator {
       if (replay) {
         return replay;
       }
+    }
+    if (deferredSlugError) {
+      return json({ error: "invalid_slug", message: deferredSlugError.message }, { status: 400 });
     }
     const configProvider = this.provider(
       config.provider,
@@ -20969,7 +20979,7 @@ function boundedTelemetrySamples(samples: LeaseTelemetry[], max: number): LeaseT
 
 const fixedLeaseCreateIntentVersion = 2;
 
-async function fixedLeaseCreateIntentHash(
+export async function fixedLeaseCreateIntentHash(
   config: LeaseConfig,
   requestedSlug: string,
 ): Promise<string> {
