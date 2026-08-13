@@ -15864,15 +15864,16 @@ describe("fleet lease identity and idle", () => {
   it("redacts legacy stored diagnostics from lease get and list responses", async () => {
     const storage = new MemoryStorage();
     const configuredSecret = "configured-aws-secret";
-    const reflectedSecret = "legacy-reflected-secret";
+    const environmentSecret = "legacy-environment-secret";
+    const cookieSecret = "legacy-cookie-secret";
     storage.seed(
       "lease:cbx_abcdef123456",
       testLease({
         id: "cbx_abcdef123456",
         owner: "alice@example.com",
         org: "example-org",
-        cleanupError: `cleanup failed ${configuredSecret}`,
-        failureError: `X-API-Key: ${reflectedSecret}`,
+        cleanupError: `cleanup failed ${configuredSecret} AWS_SECRET_ACCESS_KEY=${environmentSecret} region=eu`,
+        failureError: `Cookie: session=${cookieSecret}`,
       }),
     );
     const fleet = testFleet(storage, {}, { AWS_SECRET_ACCESS_KEY: configuredSecret });
@@ -15894,11 +15895,16 @@ describe("fleet lease identity and idle", () => {
     );
     for (const body of bodies) {
       expect(body).toContain("[redacted]");
+      expect(body).toContain("region=eu");
       expect(body).not.toContain(configuredSecret);
-      expect(body).not.toContain(reflectedSecret);
+      expect(body).not.toContain(environmentSecret);
+      expect(body).not.toContain(cookieSecret);
     }
     expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")?.cleanupError).toContain(
       configuredSecret,
+    );
+    expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")?.cleanupError).toContain(
+      environmentSecret,
     );
   });
 

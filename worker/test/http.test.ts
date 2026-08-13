@@ -1642,6 +1642,270 @@ describe("http responses", () => {
     expect(redactDiagnosticSecrets(redacted, secrets)).toBe(redacted);
   });
 
+  it.each([
+    [
+      "compound AWS environment name",
+      "bootstrap failed: AWS_SECRET_ACCESS_KEY=aws-secret-value",
+      "aws-secret-value",
+    ],
+    [
+      "compound GitHub environment name",
+      "sh: GITHUB_TOKEN=github-secret-value: not found",
+      "github-secret-value",
+    ],
+    [
+      "auth-key environment name",
+      "export TAILSCALE_AUTHKEY=auth-secret-value",
+      "auth-secret-value",
+    ],
+    ["cookie assignment", 'COOKIE="cookie secret value"', "cookie secret value"],
+    [
+      "Set-Cookie header",
+      'Set-Cookie: sid="quoted-cookie-secret"; HttpOnly',
+      "quoted-cookie-secret",
+    ],
+    [
+      "multi-pair Cookie header",
+      "Cookie: theme=light; sid=later-cookie-secret",
+      "later-cookie-secret",
+    ],
+    [
+      "AWS security-token header",
+      "x-amz-security-token: security-token-secret",
+      "security-token-secret",
+    ],
+    ["camel-case API token", "apiToken: api-token-secret", "api-token-secret"],
+    ["double-quoted assignment", 'GITHUB_TOKEN="github quoted secret"', "github quoted secret"],
+    ["single-quoted assignment", "DB_PASSWORD='database quoted secret'", "database quoted secret"],
+    ["mixed shell assignment", "DB_PASSWORD=prefix'secret middle'suffix", "secret middle"],
+    ["adjacent shell segments", "TOKEN=''actual-secret", "actual-secret"],
+  ])("redacts %s", (_label, diagnostic, secret) => {
+    const redacted = redactDiagnosticSecrets(diagnostic);
+    expect(redacted).not.toContain(secret);
+    expect(redacted).toContain("[redacted]");
+    expect(redactDiagnosticSecrets(redacted)).toBe(redacted);
+  });
+
+  it("bounds structured credentials without hiding diagnostic context", () => {
+    expect(redactDiagnosticSecrets('env "DB_PASSWORD=correct horse" command')).toBe(
+      'env "DB_PASSWORD=[redacted]" command',
+    );
+    expect(redactDiagnosticSecrets("env 'GITHUB_TOKEN='ghp_secret command")).toBe(
+      "env 'GITHUB_TOKEN='[redacted] command",
+    );
+    expect(redactDiagnosticSecrets('GITHUB_TOKEN="line-secret\nnext diagnostic remains')).toBe(
+      "GITHUB_TOKEN=[redacted]\nnext diagnostic remains",
+    );
+    expect(
+      redactDiagnosticSecrets("DB_PASSWORD=prefix'correct horse\nnext diagnostic remains"),
+    ).toBe("DB_PASSWORD=[redacted]\nnext diagnostic remains");
+    expect(redactDiagnosticSecrets("DB_PASSWORD=line-secret\\\ncontinued-secret remains")).toBe(
+      "DB_PASSWORD=[redacted] remains",
+    );
+  });
+
+  it("redacts an unquoted shell continuation as one assignment value", () => {
+    expect(redactDiagnosticSecrets("GITHUB_TOKEN=\\\nghp_actual_secret requestId=useful")).toBe(
+      "GITHUB_TOKEN=[redacted] requestId=useful",
+    );
+  });
+
+  it("redacts quoted assignments that close across diagnostic lines", () => {
+    expect(
+      redactDiagnosticSecrets("DB_PASSWORD='first-secret\nsecond-secret'\nnext diagnostic remains"),
+    ).toBe("DB_PASSWORD=[redacted]\nnext diagnostic remains");
+    expect(redactDiagnosticSecrets('env "DB_PASSWORD=first-secret\nsecond-secret" command')).toBe(
+      'env "DB_PASSWORD=[redacted]" command',
+    );
+    expect(redactDiagnosticSecrets('env "prefix\nDB_PASSWORD=correct horse" command')).toBe(
+      'env "prefix\nDB_PASSWORD=[redacted]" command',
+    );
+  });
+
+  it("redacts balanced structured environment values through internal whitespace", () => {
+    expect(
+      redactDiagnosticSecrets(
+        'GOOGLE_CREDENTIALS={"type":"service_account", "private_key":"structured-secret"} requestId=useful',
+      ),
+    ).toBe("GOOGLE_CREDENTIALS=[redacted] requestId=useful");
+  });
+
+  it("recognizes strong credential components before an environment-name suffix", () => {
+    expect(redactDiagnosticSecrets("SECRET_KEY_BASE=rails-secret requestId=useful")).toBe(
+      "SECRET_KEY_BASE=[redacted] requestId=useful",
+    );
+  });
+
+  it.each([
+    ["Cookie", "Cookie: sid=first-cookie;\r\n private=second-cookie"],
+    ["AWS security token", "x-amz-security-token: first-token\n second-token"],
+  ])("redacts folded %s headers without consuming the next diagnostic", (_label, header) => {
+    const redacted = redactDiagnosticSecrets(`${header}\nnext diagnostic remains`);
+    expect(redacted).toBe(
+      `${header.slice(0, header.indexOf(":"))}: [redacted]\nnext diagnostic remains`,
+    );
+  });
+
+  it("redacts every equals-form cookie pair without hiding later context", () => {
+    expect(redactDiagnosticSecrets("Cookie=theme=light; sid=session-secret requestId=useful")).toBe(
+      "Cookie=[redacted] requestId=useful",
+    );
+    expect(
+      redactDiagnosticSecrets("Cookie=theme=light ; sid=spaced-session-secret requestId=useful"),
+    ).toBe("Cookie=[redacted] requestId=useful");
+    expect(redactDiagnosticSecrets("worker's Cookie: marker=abc'; session=apostrophe-secret")).toBe(
+      "worker's Cookie: [redacted]",
+    );
+    expect(
+      redactDiagnosticSecrets("Set-Cookie=safe=1; session=set-cookie-secret requestId=useful"),
+    ).toBe("Set-Cookie=[redacted] requestId=useful");
+  });
+
+  it.each([
+    [
+      "flag assignment",
+      "docker --env=AWS_SECRET_ACCESS_KEY=flag-secret requestId=useful",
+      "docker --env=AWS_SECRET_ACCESS_KEY=[redacted] requestId=useful",
+    ],
+    [
+      "colon prefix",
+      "env:AWS_SECRET_ACCESS_KEY=colon-secret requestId=useful",
+      "env:AWS_SECRET_ACCESS_KEY=[redacted] requestId=useful",
+    ],
+    [
+      "ambiguous comma value",
+      "AWS_SECRET_ACCESS_KEY=comma-secret,region=eu",
+      "AWS_SECRET_ACCESS_KEY=[redacted]",
+    ],
+    [
+      "semicolon context",
+      "AWS_SECRET_ACCESS_KEY=semicolon-secret;requestId=useful",
+      "AWS_SECRET_ACCESS_KEY=[redacted]",
+    ],
+    [
+      "query assignment",
+      "https://example.test/p?AWS_SECRET_ACCESS_KEY=query-secret&region=eu",
+      "https://example.test/p?AWS_SECRET_ACCESS_KEY=[redacted]&region=eu",
+    ],
+    [
+      "leading underscore name",
+      "_SERVICE_TOKEN=leading-secret requestId=useful",
+      "_SERVICE_TOKEN=[redacted] requestId=useful",
+    ],
+    [
+      "repeated underscore name",
+      "DATABASE__PASSWORD=nested-secret requestId=useful",
+      "DATABASE__PASSWORD=[redacted] requestId=useful",
+    ],
+    [
+      "process.env qualifier",
+      "process.env.AWS_SECRET_ACCESS_KEY=qualified-secret requestId=useful",
+      "process.env.AWS_SECRET_ACCESS_KEY=[redacted] requestId=useful",
+    ],
+    [
+      "env qualifier",
+      "env.GITHUB_TOKEN=qualified-token requestId=useful",
+      "env.GITHUB_TOKEN=[redacted] requestId=useful",
+    ],
+  ])("bounds a compound environment %s", (_label, diagnostic, expected) => {
+    expect(redactDiagnosticSecrets(diagnostic)).toBe(expected);
+  });
+
+  it("fails closed on assignment-like text inside a comma-bearing credential", () => {
+    expect(redactDiagnosticSecrets("AWS_SECRET_ACCESS_KEY=,region=eu")).toBe(
+      "AWS_SECRET_ACCESS_KEY=[redacted]",
+    );
+    expect(redactDiagnosticSecrets("DB_PASSWORD=prefix,part=secret")).toBe(
+      "DB_PASSWORD=[redacted]",
+    );
+  });
+
+  it("fails closed on punctuation-bearing environment values", () => {
+    expect(redactDiagnosticSecrets("DB_PASSWORD=abc;def requestId=useful")).toBe(
+      "DB_PASSWORD=[redacted] requestId=useful",
+    );
+    expect(redactDiagnosticSecrets("DB_PASSWORD=abc&def requestId=useful")).toBe(
+      "DB_PASSWORD=[redacted] requestId=useful",
+    );
+  });
+
+  it("fails closed on ambiguous spaced equals-form assignments", () => {
+    expect(redactDiagnosticSecrets("TOKEN= requestId=useful")).toBe("TOKEN= [redacted]");
+    expect(redactDiagnosticSecrets("TOKEN= top-secret requestId=useful")).toBe(
+      "TOKEN= [redacted] requestId=useful",
+    );
+    expect(redactDiagnosticSecrets("AWS_SECRET_ACCESS_KEY = aws-secret requestId=useful")).toBe(
+      "AWS_SECRET_ACCESS_KEY = [redacted] requestId=useful",
+    );
+  });
+
+  it("stops a whole quoted assignment at compact structured punctuation", () => {
+    expect(redactDiagnosticSecrets('{"message":"DB_PASSWORD=secret","requestId":"useful"}')).toBe(
+      '{"message":"DB_PASSWORD=[redacted]","requestId":"useful"}',
+    );
+  });
+
+  it("rescans a shared separator for nested environment assignments", () => {
+    expect(
+      redactDiagnosticSecrets("env=AWS_SECRET_ACCESS_KEY=nested-secret requestId=useful"),
+    ).toBe("env=AWS_SECRET_ACCESS_KEY=[redacted] requestId=useful");
+  });
+
+  it("bounds header and colon-form fields embedded in structured strings", () => {
+    expect(
+      redactDiagnosticSecrets('{"message":"Cookie: sid=cookie-secret","requestId":"useful"}'),
+    ).toBe('{"message":"Cookie: [redacted]","requestId":"useful"}');
+    expect(redactDiagnosticSecrets('{"message":"apiToken: api-secret","requestId":"useful"}')).toBe(
+      '{"message":"apiToken: [redacted]","requestId":"useful"}',
+    );
+    expect(
+      redactDiagnosticSecrets(
+        '{"message":"upstream Cookie: sid=prefixed-cookie-secret","requestId":"useful"}',
+      ),
+    ).toBe('{"message":"upstream Cookie: [redacted]","requestId":"useful"}');
+    expect(
+      redactDiagnosticSecrets(
+        '{"message":"upstream x-api-key: prefixed-api-secret","requestId":"useful"}',
+      ),
+    ).toBe('{"message":"upstream x-api-key: [redacted]","requestId":"useful"}');
+  });
+
+  it("uses JSON and query bounds for newly recognized credential fields", () => {
+    expect(
+      redactDiagnosticSecrets(
+        '{"set-cookie":["sid=array-secret; HttpOnly","csrf=second-secret"],"requestId":"useful"}',
+      ),
+    ).toBe('{"set-cookie":["[redacted]","[redacted]"],"requestId":"useful"}');
+    expect(redactDiagnosticSecrets('{"set-cookie":["unterminated-array-secret"')).toBe(
+      '{"set-cookie":["[redacted]"',
+    );
+    expect(
+      redactDiagnosticSecrets('{"Set-Cookie":["sid=capitalized-array-secret"],"region":"eu"}'),
+    ).toBe('{"Set-Cookie":["[redacted]"],"region":"eu"}');
+    expect(
+      redactDiagnosticSecrets(
+        '{"cookie":"json-cookie-secret","apiToken":"json-api-secret","requestId":"useful"}',
+      ),
+    ).toBe('{"cookie":"[redacted]","apiToken":"[redacted]","requestId":"useful"}');
+    expect(
+      redactDiagnosticSecrets(
+        "https://host.example.test/p?api_token=query-api-secret&cookie=query-cookie-secret&region=eu",
+      ),
+    ).toBe("https://host.example.test/p?api_token=[redacted]&cookie=[redacted]&region=eu");
+  });
+
+  it("leaves operational assignment context readable", () => {
+    for (const diagnostic of [
+      "region=eu-central-1",
+      "requestId=req-123",
+      "retry_count=3",
+      "instance-type=c7a.4xlarge",
+      "token_type=Bearer_placeholder",
+    ]) {
+      expect(redactDiagnosticSecrets(diagnostic)).toBe(diagnostic);
+    }
+  });
+
   it("preserves already-redacted and non-userinfo URL at-signs", () => {
     const value =
       "http://<redacted>@broker.example.test https://[redacted]@api.example.test https://host.example.test?email=alice@example.test https://host.example.test#realm@tenant";

@@ -2,6 +2,10 @@
 
 ## 0.41.7 - Unreleased
 
+### Fixed
+
+- Redacted compound environment assignments, cookie and security-token headers, and camel-case API-token fields from client-visible coordinator diagnostics while preserving surrounding operational context. Thanks @dwin-gharibi.
+
 ## 0.41.6 - 2026-08-13
 
 ### Fixed
