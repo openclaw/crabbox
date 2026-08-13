@@ -218,6 +218,22 @@ func TestStickyRunOutputReplaceAllowed(t *testing.T) {
 	}
 }
 
+func TestSecurePrivateFileRejectsDirectoryWithoutChangingMode(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if err := securePrivateFile(file); err == nil {
+		t.Fatal("expected directory to be rejected")
+	}
+	assertRunOutputMode(t, dir, 0o700)
+}
+
 func assertRunOutputMode(t *testing.T, path string, want os.FileMode) {
 	t.Helper()
 	info, err := os.Stat(path)

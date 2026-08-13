@@ -429,7 +429,16 @@ S3, R2, or Cloudflare uploads, so later bundle path replacement cannot change
 uploaded bytes. Local and dry-run manifests hash through rooted validated file
 handles without duplicating the bundle. Generated manifest and Markdown files
 replace reserved outputs through root-confined temporary files without
-following symlinks. Required artifact paths must resolve to regular files.
+following symlinks. Manifests and summaries that contain signed bearer URLs are
+restricted to the current OS user before their sensitive bytes are written and
+are verified before publication: mode `0600` on POSIX, with inherited macOS
+ACLs removed, and a protected, current-user-owned DACL with no unrelated grants
+on Windows. Public-URL and local-path artifact outputs retain their shareable
+permissions. The same local
+private-file boundary protects Crabbox-generated run outputs and the managed
+attestation signing key; replacement or reuse tightens an older broad mode or
+DACL instead of preserving it. Required artifact paths must resolve to regular
+files.
 Automatic remote failure bundles confine member names and link targets to their
 generated subtree and omit
 escaping, rooted, empty, or special-file entries. These filesystem checks do

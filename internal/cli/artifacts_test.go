@@ -1550,10 +1550,13 @@ func TestWriteArtifactBundleCredentialFilesKeepOwnerOnlyMode(t *testing.T) {
 				}
 				defer root.Close()
 
-				if err := writeArtifactBundleFile(root, name, []byte("body"), privateRunOutputFileMode); err != nil {
+				if err := writePrivateArtifactBundleFile(root, name, []byte("body")); err != nil {
 					t.Fatal(err)
 				}
 
+				if runtime.GOOS == "windows" {
+					return
+				}
 				info, err := os.Stat(path)
 				if err != nil {
 					t.Fatal(err)
@@ -1585,18 +1588,22 @@ func TestPublishedArtifactsSummaryModeFollowsURLKind(t *testing.T) {
 			if got := artifactFilesContainSignedURL(item.files); got != item.private {
 				t.Fatalf("artifactFilesContainSignedURL=%t, want %t", got, item.private)
 			}
-			mode := os.FileMode(0o644)
-			if item.private {
-				mode = privateRunOutputFileMode
-			}
 			dir := t.TempDir()
 			root, err := os.OpenRoot(dir)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer root.Close()
-			if err := writeArtifactBundleFile(root, "published-artifacts.md", []byte("body"), mode); err != nil {
+			if item.private {
+				err = writePrivateArtifactBundleFile(root, "published-artifacts.md", []byte("body"))
+			} else {
+				err = writeArtifactBundleFile(root, "published-artifacts.md", []byte("body"), 0o644)
+			}
+			if err != nil {
 				t.Fatal(err)
+			}
+			if runtime.GOOS == "windows" {
+				return
 			}
 			info, err := os.Stat(filepath.Join(dir, "published-artifacts.md"))
 			if err != nil {
@@ -1610,7 +1617,15 @@ func TestPublishedArtifactsSummaryModeFollowsURLKind(t *testing.T) {
 	}
 }
 
-func TestWriteArtifactManifestKeepsOwnerOnlyMode(t *testing.T) {
+func TestWriteSensitiveArtifactManifestKeepsOwnerOnlyMode(t *testing.T) {
+	signedFile := artifactFile{
+		Kind:          "proof",
+		Name:          "proof.txt",
+		URL:           "https://bucket.s3.amazonaws.com/proof.txt?X-Amz-Signature=deadbeef&X-Amz-Expires=900",
+		snapshotValid: true,
+		snapshotHash:  strings.Repeat("a", 64),
+		snapshotSize:  1,
+	}
 	for _, existing := range []struct {
 		name string
 		mode os.FileMode
@@ -1639,16 +1654,77 @@ func TestWriteArtifactManifestKeepsOwnerOnlyMode(t *testing.T) {
 			if _, _, err := writeArtifactManifest(root, artifactPublishOptions{
 				Directory: dir,
 				Storage:   "broker",
-			}, nil); err != nil {
+			}, []artifactFile{signedFile}); err != nil {
 				t.Fatal(err)
 			}
 
+			if runtime.GOOS == "windows" {
+				return
+			}
 			info, err := os.Stat(path)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if got := info.Mode().Perm(); got&0o077 != 0 {
 				t.Fatalf("manifest mode=%#o, want no group or other access", got)
+			}
+		})
+	}
+}
+
+func TestPublicAndLocalArtifactManifestPreserveSharedModes(t *testing.T) {
+	for _, item := range []struct {
+		name     string
+		url      string
+		existing os.FileMode
+		want     os.FileMode
+	}{
+		{name: "public fresh", url: "https://artifacts.example.com/proof.txt", want: 0o644},
+		{name: "local fresh", want: 0o644},
+		{name: "public narrowed", url: "https://artifacts.example.com/proof.txt", existing: 0o640, want: 0o640},
+		{name: "public writable capped", url: "https://artifacts.example.com/proof.txt", existing: 0o666, want: 0o644},
+		{name: "local private", existing: 0o600, want: 0o600},
+	} {
+		t.Run(item.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, artifactManifestFilename)
+			if item.existing != 0 {
+				if err := os.WriteFile(path, []byte("old"), item.existing); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(path, item.existing); err != nil {
+					t.Fatal(err)
+				}
+			}
+			root, err := os.OpenRoot(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			file := artifactFile{
+				Kind:          "proof",
+				Name:          "proof.txt",
+				Path:          "proof.txt",
+				URL:           item.url,
+				snapshotValid: true,
+				snapshotHash:  strings.Repeat("b", 64),
+				snapshotSize:  1,
+			}
+			if _, _, err := writeArtifactManifest(root, artifactPublishOptions{
+				Directory: dir,
+				Storage:   "local",
+			}, []artifactFile{file}); err != nil {
+				t.Fatal(err)
+			}
+			if runtime.GOOS == "windows" {
+				return
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := info.Mode().Perm(); got != item.want {
+				t.Fatalf("manifest mode=%#o, want %#o", got, item.want)
 			}
 		})
 	}

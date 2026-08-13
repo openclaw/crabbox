@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -15,7 +14,11 @@ import (
 const webVNCPortalBootstrapTempAttempts = 32
 
 func createWebVNCPortalBootstrapFile() (string, string, *os.File, error) {
-	security, userSID, err := webVNCPortalBootstrapSecurity()
+	directorySecurity, userSID, err := privateWindowsSecurityAttributes(true)
+	if err != nil {
+		return "", "", nil, err
+	}
+	fileSecurity, _, err := privateWindowsSecurityAttributes(false)
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -29,7 +32,7 @@ func createWebVNCPortalBootstrapFile() (string, string, *os.File, error) {
 		if err != nil {
 			return "", "", nil, err
 		}
-		if err := windows.CreateDirectory(dirUTF16, security); err != nil {
+		if err := windows.CreateDirectory(dirUTF16, directorySecurity); err != nil {
 			if errors.Is(err, windows.ERROR_ALREADY_EXISTS) || errors.Is(err, windows.ERROR_FILE_EXISTS) {
 				continue
 			}
@@ -53,7 +56,7 @@ func createWebVNCPortalBootstrapFile() (string, string, *os.File, error) {
 			pathUTF16,
 			windows.GENERIC_WRITE|windows.READ_CONTROL,
 			windows.FILE_SHARE_READ,
-			security,
+			fileSecurity,
 			windows.CREATE_NEW,
 			windows.FILE_ATTRIBUTE_TEMPORARY,
 			0,
@@ -78,24 +81,6 @@ func createWebVNCPortalBootstrapFile() (string, string, *os.File, error) {
 	return "", "", nil, fmt.Errorf("allocate private WebVNC bootstrap directory")
 }
 
-func webVNCPortalBootstrapSecurity() (*windows.SecurityAttributes, *windows.SID, error) {
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil {
-		return nil, nil, err
-	}
-	if user == nil || user.User.Sid == nil {
-		return nil, nil, fmt.Errorf("current Windows user SID is unavailable")
-	}
-	sid := user.User.Sid.String()
-	sd, err := windows.SecurityDescriptorFromString("O:" + sid + "D:P(A;;GA;;;" + sid + ")")
-	if err != nil {
-		return nil, nil, err
-	}
-	attributes := &windows.SecurityAttributes{SecurityDescriptor: sd}
-	attributes.Length = uint32(unsafe.Sizeof(*attributes))
-	return attributes, user.User.Sid, nil
-}
-
 func validateWebVNCPortalBootstrapWindowsPath(path string, currentUser *windows.SID) error {
 	descriptor, err := windows.GetNamedSecurityInfo(
 		path,
@@ -105,19 +90,5 @@ func validateWebVNCPortalBootstrapWindowsPath(path string, currentUser *windows.
 	if err != nil {
 		return err
 	}
-	owner, _, err := descriptor.Owner()
-	if err != nil {
-		return err
-	}
-	if owner == nil || currentUser == nil || !owner.Equals(currentUser) {
-		return fmt.Errorf("must be owned by the current user")
-	}
-	control, _, err := descriptor.Control()
-	if err != nil {
-		return err
-	}
-	if control&windows.SE_DACL_PROTECTED == 0 {
-		return fmt.Errorf("must have a protected access-control list")
-	}
-	return validateExternalRoutingWindowsPrivateDACL(descriptor, currentUser)
+	return validateCurrentUserPrivateWindowsDescriptor(descriptor, currentUser)
 }

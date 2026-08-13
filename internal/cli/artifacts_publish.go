@@ -426,6 +426,14 @@ func requireArtifactValidation(file artifactFile) error {
 }
 
 func writeArtifactBundleFile(root *os.Root, name string, data []byte, perm os.FileMode) error {
+	return writeArtifactBundleFileWithPrivacy(root, name, data, perm, false)
+}
+
+func writePrivateArtifactBundleFile(root *os.Root, name string, data []byte) error {
+	return writeArtifactBundleFileWithPrivacy(root, name, data, privateRunOutputFileMode, true)
+}
+
+func writeArtifactBundleFileWithPrivacy(root *os.Root, name string, data []byte, perm os.FileMode, private bool) error {
 	token, err := randomHex(12)
 	if err != nil {
 		return exit(2, "create private temporary name for %s: %v", name, err)
@@ -437,16 +445,17 @@ func writeArtifactBundleFile(root *os.Root, name string, data []byte, perm os.Fi
 	if info, statErr := root.Lstat(name); statErr == nil {
 		if info.Mode().IsRegular() {
 			createPerm = 0o600
-			// Respect a mode the user already narrowed, but never widen past what the
-			// caller asked for: a republished manifest must not inherit a world-readable
-			// mode from an earlier bundle.
-			existingMode = info.Mode().Perm() & perm
-			preserveExistingMode = true
+			if !private {
+				// Preserve modes the user narrowed, but do not retain permissions
+				// broader than this shared output requests.
+				existingMode = info.Mode().Perm() & perm
+				preserveExistingMode = true
+			}
 		}
 	} else if !os.IsNotExist(statErr) {
 		return exit(2, "inspect existing artifact output %s: %v", name, statErr)
 	}
-	file, err := root.OpenFile(tempName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, createPerm)
+	file, err := openArtifactBundleTemp(root, tempName, createPerm, private)
 	if err != nil {
 		return exit(2, "create private temporary artifact output for %s: %v", name, err)
 	}

@@ -289,6 +289,15 @@ published file:
 }
 ```
 
+When a generated manifest contains a signed or presigned bearer URL, Crabbox
+keeps the local manifest owner-only: mode `0600` on POSIX, with inherited
+extended ACLs removed on macOS, and a protected DACL owned by and limited to
+the current user on Windows. The generated
+`published-artifacts.md` summary uses the same protection only when it embeds a
+signed URL. Republishing tightens an older broad file instead of preserving its
+permissions. Manifests and summaries containing only local paths or public URLs
+keep their existing shared-output `0644` and mode-preservation behavior.
+
 Inspect or fetch that manifest later:
 
 ```sh

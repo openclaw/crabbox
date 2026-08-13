@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"os"
-	"path/filepath"
 )
 
 const (
@@ -13,24 +12,14 @@ const (
 	privateRunOutputFileMode = 0o600
 )
 
-func createPrivateRunOutputDir(path string) error {
-	return os.MkdirAll(path, privateRunOutputDirMode)
-}
-
 func writePrivateRunOutputFileIfAbsent(path string, data []byte) (bool, error) {
-	dir := filepath.Dir(path)
-	file, err := os.CreateTemp(dir, "."+filepath.Base(path)+".crabbox-*")
+	file, tempPath, err := createPrivateRunOutputTemp(path)
 	if err != nil {
 		return false, err
 	}
-	tempPath := file.Name()
 	cleanup := func() {
 		_ = file.Close()
 		_ = os.Remove(tempPath)
-	}
-	if err := file.Chmod(privateRunOutputFileMode); err != nil {
-		cleanup()
-		return false, err
 	}
 	if _, err := io.Copy(file, bytes.NewReader(data)); err != nil {
 		cleanup()

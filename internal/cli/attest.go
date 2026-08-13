@@ -52,12 +52,12 @@ func ensureAttestKey() (ed25519.PrivateKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := os.Stat(path); err == nil {
-		return loadAttestKey(path)
-	} else if !errors.Is(err, os.ErrNotExist) {
+	if err := ensurePrivateRunOutputDir(filepath.Dir(path)); err != nil {
 		return nil, err
 	}
-	if err := ensurePrivateRunOutputDir(filepath.Dir(path)); err != nil {
+	if _, err := os.Stat(path); err == nil {
+		return loadManagedAttestKey(path)
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
 	_, key, err := ed25519.GenerateKey(rand.Reader)
@@ -74,7 +74,7 @@ func ensureAttestKey() (ed25519.PrivateKey, error) {
 		return nil, err
 	}
 	if !created {
-		return loadAttestKey(path)
+		return loadManagedAttestKey(path)
 	}
 	return key, nil
 }
@@ -161,11 +161,28 @@ func preflightAttestPaths(opts attestPathPreflight) error {
 	return nil
 }
 
+func loadManagedAttestKey(path string) (ed25519.PrivateKey, error) {
+	file, err := openExistingPrivateRunOutputFile(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return nil, err
+	}
+	return parseAttestKey(path, data)
+}
+
 func loadAttestKey(path string) (ed25519.PrivateKey, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
+	return parseAttestKey(path, data)
+}
+
+func parseAttestKey(path string, data []byte) (ed25519.PrivateKey, error) {
 	block, rest := pem.Decode(data)
 	if block == nil {
 		return nil, fmt.Errorf("attest key %s is not PEM encoded", path)
