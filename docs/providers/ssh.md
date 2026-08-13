@@ -83,6 +83,10 @@ static:
   workRoot: /Users/alice/crabbox
 ```
 
+When no generic or `static.workRoot` override is configured, a macOS target
+uses `/Users/<resolved-user>/crabbox`, where `<resolved-user>` is the final SSH
+user after applying `ssh.user` and `static.user` precedence.
+
 ### Windows (native)
 
 ```yaml

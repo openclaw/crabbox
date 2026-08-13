@@ -467,6 +467,118 @@ func TestNormalizeTargetConfigForcesAWSMacOSLaunchdSSHPort(t *testing.T) {
 	}
 }
 
+func TestNormalizeTargetConfigWorkRoots(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*Config)
+		wantUser  string
+		wantRoot  string
+	}{
+		{
+			name: "static macOS uses static user",
+			configure: func(cfg *Config) {
+				cfg.Provider = staticProvider
+				cfg.TargetOS = targetMacOS
+				cfg.Static.User = "alice"
+			},
+			wantUser: "alice",
+			wantRoot: "/Users/alice/crabbox",
+		},
+		{
+			name: "static macOS uses explicit SSH user",
+			configure: func(cfg *Config) {
+				cfg.Provider = staticProvider
+				cfg.TargetOS = targetMacOS
+				cfg.Static.User = "alice"
+				cfg.SSHUser = "builder"
+				MarkSSHUserExplicit(cfg)
+			},
+			wantUser: "builder",
+			wantRoot: "/Users/builder/crabbox",
+		},
+		{
+			name: "static macOS preserves static work root",
+			configure: func(cfg *Config) {
+				cfg.Provider = staticProvider
+				cfg.TargetOS = targetMacOS
+				cfg.Static.User = "alice"
+				cfg.Static.WorkRoot = "/Volumes/build/crabbox"
+			},
+			wantUser: "alice",
+			wantRoot: "/Volumes/build/crabbox",
+		},
+		{
+			name: "static macOS preserves generic work root",
+			configure: func(cfg *Config) {
+				cfg.Provider = staticProvider
+				cfg.TargetOS = targetMacOS
+				cfg.Static.User = "alice"
+				cfg.WorkRoot = "/srv/crabbox"
+				MarkWorkRootExplicit(cfg)
+			},
+			wantUser: "alice",
+			wantRoot: "/srv/crabbox",
+		},
+		{
+			name: "AWS macOS keeps EC2 Mac default",
+			configure: func(cfg *Config) {
+				cfg.Provider = "aws"
+				cfg.TargetOS = targetMacOS
+			},
+			wantUser: "ec2-user",
+			wantRoot: defaultMacOSWorkRoot,
+		},
+		{
+			name: "static Linux keeps POSIX default",
+			configure: func(cfg *Config) {
+				cfg.Provider = staticProvider
+				cfg.TargetOS = targetLinux
+				cfg.Static.User = "alice"
+			},
+			wantUser: "alice",
+			wantRoot: defaultPOSIXWorkRoot,
+		},
+		{
+			name: "static native Windows keeps Windows default",
+			configure: func(cfg *Config) {
+				cfg.Provider = staticProvider
+				cfg.TargetOS = targetWindows
+				cfg.WindowsMode = windowsModeNormal
+				cfg.Static.User = "alice"
+			},
+			wantUser: "alice",
+			wantRoot: defaultWindowsWorkRoot,
+		},
+		{
+			name: "static WSL2 keeps POSIX default",
+			configure: func(cfg *Config) {
+				cfg.Provider = staticProvider
+				cfg.TargetOS = targetWindows
+				cfg.WindowsMode = windowsModeWSL2
+				cfg.Static.User = "alice"
+			},
+			wantUser: "alice",
+			wantRoot: defaultPOSIXWorkRoot,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := baseConfig()
+			tt.configure(&cfg)
+
+			normalizeTargetConfig(&cfg)
+
+			if cfg.SSHUser != tt.wantUser {
+				t.Fatalf("SSHUser=%q want %q", cfg.SSHUser, tt.wantUser)
+			}
+			if cfg.WorkRoot != tt.wantRoot {
+				t.Fatalf("WorkRoot=%q want %q", cfg.WorkRoot, tt.wantRoot)
+			}
+		})
+	}
+}
+
 func TestNormalizeTargetConfigUsesSealosWorkRoot(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "sealos-devbox"

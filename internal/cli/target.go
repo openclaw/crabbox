@@ -51,7 +51,11 @@ func normalizeTargetConfig(cfg *Config) {
 		}
 	}
 	if shouldDeriveTargetWorkRoot(cfg) {
-		cfg.WorkRoot = defaultWorkRootForTarget(cfg.TargetOS, cfg.WindowsMode)
+		if isStaticProvider(cfg.Provider) && cfg.TargetOS == targetMacOS {
+			cfg.WorkRoot = path.Join("/Users", cfg.SSHUser, "crabbox")
+		} else {
+			cfg.WorkRoot = defaultWorkRootForTarget(cfg.TargetOS, cfg.WindowsMode)
+		}
 	}
 	if isStaticProvider(cfg.Provider) {
 		if cfg.Static.Port != "" && cfg.SSHPort == baseConfig().SSHPort {
