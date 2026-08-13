@@ -29254,11 +29254,112 @@ describe("fleet lease identity and idle", () => {
     expect(body.files[0].accessPolicy).toBe("public");
     expect(body.files[0].upload.headers["content-length"]).toBe("123");
     expect(body.files[0].upload.headers["content-type"]).toBe("image/png");
+    expect(body.files[0].upload.headers["x-amz-checksum-sha256"]).toBe(
+      "85WSOT7whZyxlqUmk9LOoA+y33hLPASuVKp8rbjlYvg=",
+    );
     expect(body.files[0].upload.url).toContain("X-Amz-Signature=");
     expect(new URL(body.files[0].upload.url).searchParams.get("X-Amz-SignedHeaders")).toContain(
       "content-length",
     );
+    expect(new URL(body.files[0].upload.url).searchParams.get("X-Amz-SignedHeaders")).toContain(
+      "x-amz-checksum-sha256",
+    );
     expect(JSON.stringify(body)).not.toContain("super-secret");
+  });
+
+  it.each([
+    { label: "an omitted digest", sha256: undefined },
+    { label: "a blank digest", sha256: " \t " },
+  ])("keeps artifact sha256 optional for $label", async ({ sha256 }) => {
+    const fleet = testFleet(
+      new MemoryStorage(),
+      {},
+      {
+        CRABBOX_ARTIFACTS_BACKEND: "r2",
+        CRABBOX_ARTIFACTS_BUCKET: "qa-artifacts",
+        CRABBOX_ARTIFACTS_ENDPOINT_URL: "https://account.r2.cloudflarestorage.com",
+        CRABBOX_ARTIFACTS_ACCESS_KEY_ID: "access-key",
+        CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY: "super-secret",
+      },
+    );
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/artifacts/uploads", {
+        headers: { "x-crabbox-owner": "alice@example.com" },
+        body: { files: [{ name: "result.txt", size: 0, sha256 }] },
+      }),
+    );
+
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as {
+      files: Array<{ upload: { headers: Record<string, string> } }>;
+    };
+    expect(body.files[0].upload.headers).not.toHaveProperty("x-amz-checksum-sha256");
+  });
+
+  it("normalizes an uppercase artifact sha256 before binding it to the upload grant", async () => {
+    const fleet = testFleet(
+      new MemoryStorage(),
+      {},
+      {
+        CRABBOX_ARTIFACTS_BACKEND: "r2",
+        CRABBOX_ARTIFACTS_BUCKET: "qa-artifacts",
+        CRABBOX_ARTIFACTS_ENDPOINT_URL: "https://account.r2.cloudflarestorage.com",
+        CRABBOX_ARTIFACTS_ACCESS_KEY_ID: "access-key",
+        CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY: "super-secret",
+      },
+    );
+    const sha256 = "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855";
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/artifacts/uploads", {
+        headers: { "x-crabbox-owner": "alice@example.com" },
+        body: { files: [{ name: "result.txt", size: 0, sha256 }] },
+      }),
+    );
+
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as {
+      files: Array<{ upload: { headers: Record<string, string>; url: string } }>;
+    };
+    expect(body.files[0].upload.headers["x-amz-checksum-sha256"]).toBe(
+      "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=",
+    );
+    expect(new URL(body.files[0].upload.url).searchParams.get("X-Amz-SignedHeaders")).toContain(
+      "x-amz-checksum-sha256",
+    );
+  });
+
+  it.each([
+    { label: "too short", sha256: "a".repeat(63) },
+    { label: "too long", sha256: "a".repeat(65) },
+    { label: "non-hex", sha256: `${"a".repeat(63)}g` },
+    { label: "whitespace-padded", sha256: ` ${"a".repeat(64)} ` },
+  ])("returns the artifact route's normal 400 error for a $label sha256", async ({ sha256 }) => {
+    const fleet = testFleet(
+      new MemoryStorage(),
+      {},
+      {
+        CRABBOX_ARTIFACTS_BACKEND: "r2",
+        CRABBOX_ARTIFACTS_BUCKET: "qa-artifacts",
+        CRABBOX_ARTIFACTS_ENDPOINT_URL: "https://account.r2.cloudflarestorage.com",
+        CRABBOX_ARTIFACTS_ACCESS_KEY_ID: "access-key",
+        CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY: "super-secret",
+      },
+    );
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/artifacts/uploads", {
+        headers: { "x-crabbox-owner": "alice@example.com" },
+        body: { files: [{ name: "result.txt", size: 1, sha256 }] },
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "artifact_upload_unavailable",
+      message: "invalid artifact sha256 for result.txt",
+    });
   });
 
   it("isolates artifact grants by opaque organization and owner identities", async () => {

@@ -2,6 +2,7 @@ import { AwsClient } from "aws4fetch";
 import { describe, expect, it } from "vitest";
 
 import { artifactUploadResponse } from "../src/artifacts";
+import { sha256Hex } from "../src/auth";
 import type { Env } from "../src/types";
 
 const liveAccessKeyID = process.env.CRABBOX_ARTIFACTS_ACCESS_KEY_ID;
@@ -15,9 +16,15 @@ const liveConfigured =
 
 describe("artifact broker live", () => {
   it.skipIf(!liveConfigured)(
-    "live: signs private R2 reads and leaves no object residue",
+    "live: R2 enforces signed checksums and leaves no rejected object residue",
     async () => {
-      const body = new TextEncoder().encode(`crabbox-artifact-live-${crypto.randomUUID()}\n`);
+      const nonce = crypto.randomUUID();
+      const matchingText = `crabbox-artifact-live-${nonce}-match\n`;
+      const mismatchingText = `crabbox-artifact-live-${nonce}-wrong\n`;
+      const matchingBody = new TextEncoder().encode(matchingText);
+      const mismatchingBody = new TextEncoder().encode(mismatchingText);
+      expect(mismatchingBody.byteLength).toBe(matchingBody.byteLength);
+      const declaredSHA256 = await sha256Hex(matchingText);
       const env = {
         CRABBOX_ARTIFACTS_BACKEND: "r2",
         CRABBOX_ARTIFACTS_BUCKET: liveBucket,
@@ -29,18 +36,24 @@ describe("artifact broker live", () => {
         CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY: liveSecretAccessKey,
         CRABBOX_ARTIFACTS_SESSION_TOKEN: liveSessionToken,
       } as Env;
+      const prefix = crypto.randomUUID();
       const response = await artifactUploadResponse(
         env,
         {
-          prefix: crypto.randomUUID(),
-          files: [{ name: "proof.txt", size: body.byteLength, contentType: "text/plain" }],
+          prefix: `${prefix}/matching`,
+          files: [
+            {
+              name: "proof.txt",
+              size: matchingBody.byteLength,
+              contentType: "text/plain",
+              sha256: declaredSHA256,
+            },
+          ],
         },
         { org: "example-org", owner: "alice@example.com" },
       );
       const grant = response.files[0]!;
       const readURL = new URL(grant.url);
-      const objectURL = new URL(readURL);
-      objectURL.search = "";
 
       expect(response.accessPolicy).toBe("signed-url");
       expect(grant.accessPolicy).toBe("signed-url");
@@ -55,20 +68,58 @@ describe("artifact broker live", () => {
         region: "auto",
         retries: 0,
       });
+      const cleanupURLs: URL[] = [];
+      const matchingObjectURL = new URL(readURL);
+      matchingObjectURL.search = "";
+      cleanupURLs.push(matchingObjectURL);
       try {
         const upload = await fetch(grant.upload.url, {
           method: grant.upload.method,
           headers: grant.upload.headers,
-          body,
+          body: matchingBody,
         });
         expect(upload.ok).toBe(true);
 
         const download = await fetch(grant.url);
         expect(download.ok).toBe(true);
-        expect(new Uint8Array(await download.arrayBuffer())).toEqual(body);
+        expect(new Uint8Array(await download.arrayBuffer())).toEqual(matchingBody);
+
+        const mismatchResponse = await artifactUploadResponse(
+          env,
+          {
+            prefix: `${prefix}/mismatch`,
+            files: [
+              {
+                name: "proof.txt",
+                size: mismatchingBody.byteLength,
+                contentType: "text/plain",
+                sha256: declaredSHA256,
+              },
+            ],
+          },
+          { org: "example-org", owner: "alice@example.com" },
+        );
+        const mismatchGrant = mismatchResponse.files[0]!;
+        const mismatchObjectURL = new URL(mismatchGrant.url);
+        mismatchObjectURL.search = "";
+        cleanupURLs.push(mismatchObjectURL);
+
+        const mismatchUpload = await fetch(mismatchGrant.upload.url, {
+          method: mismatchGrant.upload.method,
+          headers: mismatchGrant.upload.headers,
+          body: mismatchingBody,
+        });
+        expect(mismatchUpload.status).toBe(400);
+
+        const rejectedObject = await fetch(mismatchGrant.url);
+        expect(rejectedObject.status).toBe(404);
       } finally {
-        const cleanup = await client.fetch(objectURL, { method: "DELETE" });
-        expect(cleanup.ok).toBe(true);
+        const cleanups = await Promise.all(
+          cleanupURLs.map((objectURL) => client.fetch(objectURL, { method: "DELETE" })),
+        );
+        for (const cleanup of cleanups) {
+          expect(cleanup.ok).toBe(true);
+        }
       }
 
       const missing = await fetch(grant.url);

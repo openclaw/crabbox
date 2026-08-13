@@ -236,7 +236,10 @@ by request metadata — the CLI verifies the file size still matches the grant
 before uploading. When the caller declares a `sha256` for a file, the grant also
 carries a signed `x-amz-checksum-sha256`, so the storage backend rejects a body
 whose contents do not match the declared digest — integrity is enforced by the
-store, not merely asserted in the request. The broker enforces a 1 GiB per-file cap and a 5 GiB
+store, not merely asserted in the request. Omitted or blank digests remain
+optional, while every nonblank digest must contain exactly 64 hexadecimal
+characters; malformed declarations are rejected rather than silently losing
+integrity enforcement. The broker enforces a 1 GiB per-file cap and a 5 GiB
 per-request aggregate cap before minting upload URLs. When you do not pass
 `--prefix`, hosted publishing adds a unique PR/bundle/timestamp prefix so later
 bundles cannot overwrite links from earlier QA comments.

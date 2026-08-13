@@ -186,7 +186,7 @@ function normalizeArtifactFiles(files: ArtifactUploadFile[]): Required<ArtifactU
       name,
       size,
       contentType: normalizeContentType(file.contentType),
-      sha256: normalizeHash(file.sha256),
+      sha256: normalizeHash(file.sha256, name),
     };
   });
   if (totalSize > maxArtifactBatchBytes) {
@@ -208,9 +208,14 @@ function normalizeContentType(value: string | undefined): string {
   return trimmed(value).slice(0, 200);
 }
 
-function normalizeHash(value: string | undefined): string {
-  const hash = trimmed(value).toLowerCase();
-  return /^[a-f0-9]{64}$/.test(hash) ? hash : "";
+function normalizeHash(value: string | undefined, name: string): string {
+  if (value === undefined || (typeof value === "string" && !value.trim())) {
+    return "";
+  }
+  if (typeof value !== "string" || !/^[a-fA-F0-9]{64}$/.test(value)) {
+    throw new Error(`invalid artifact sha256 for ${name}`);
+  }
+  return value.toLowerCase();
 }
 
 function artifactPrefix(

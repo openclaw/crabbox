@@ -1694,6 +1694,7 @@ func TestPublishArtifactFilesBrokerUploadsViaGrantedURL(t *testing.T) {
 	}
 	defer cleanup()
 	wantHash := fmt.Sprintf("%x", sha256.Sum256([]byte("png-data")))
+	wantChecksumHeader := "cGluLWRhdGEtY2hlY2tzdW0="
 	var uploaded string
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1715,10 +1716,10 @@ func TestPublishArtifactFilesBrokerUploadsViaGrantedURL(t *testing.T) {
 				"files":[{
 					"name":"screenshot.png",
 					"key":"runs/abc/screenshot.png",
-					"upload":{"method":"PUT","url":%q,"headers":{"content-type":"image/png","content-length":"8"},"expiresAt":"2026-05-08T00:00:00Z"},
+					"upload":{"method":"PUT","url":%q,"headers":{"content-type":"image/png","content-length":"8","x-amz-checksum-sha256":%q},"expiresAt":"2026-05-08T00:00:00Z"},
 					"url":"https://artifacts.example.com/runs/abc/screenshot.png"
 				}]
-			}`, server.URL+"/upload/screenshot.png")
+			}`, server.URL+"/upload/screenshot.png", wantChecksumHeader)
 		case "/upload/screenshot.png":
 			if r.Method != http.MethodPut {
 				t.Fatalf("method=%s", r.Method)
@@ -1728,6 +1729,9 @@ func TestPublishArtifactFilesBrokerUploadsViaGrantedURL(t *testing.T) {
 			}
 			if len(r.TransferEncoding) > 0 {
 				t.Fatalf("transfer encoding=%v", r.TransferEncoding)
+			}
+			if got := r.Header.Get("x-amz-checksum-sha256"); got != wantChecksumHeader {
+				t.Fatalf("checksum header=%q, want %q", got, wantChecksumHeader)
 			}
 			data, _ := io.ReadAll(r.Body)
 			uploaded = string(data)

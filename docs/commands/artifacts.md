@@ -243,11 +243,16 @@ For brokered publishing, the CLI never receives object-store credentials. It
 sends artifact names, sizes, content types, and hashes to
 `POST /v1/artifacts/uploads`; the coordinator returns one short-lived upload URL
 per file plus the final URL to place in Markdown. Upload grants are signed with
-the declared `content-length`, so the object store rejects oversized PUTs during
-the grant window, and the broker caps each upload request at 5 GiB total before
-signing grants. When `--prefix` is omitted for hosted publishing, the CLI
-derives a unique prefix from the PR number, bundle directory, and current time
-so later QA comments do not overwrite earlier evidence.
+the declared `content-length` and, when supplied, the file's `sha256` as a
+base64 `x-amz-checksum-sha256`, so the object store rejects bodies whose size or
+contents do not match the grant. The `sha256` field may be omitted or blank; a
+nonblank value must be exactly 64 hexadecimal characters, with uppercase input
+normalized to lowercase. Malformed values receive the route's standard 400
+response instead of minting a grant without checksum enforcement. The broker
+caps each upload request at 5 GiB total before signing grants. When `--prefix`
+is omitted for hosted publishing, the CLI derives a unique prefix from the PR
+number, bundle directory, and current time so later QA comments do not overwrite
+earlier evidence.
 
 The coordinator scopes each new grant under versioned base64url encodings of
 the exact authenticated organization and owner. These values are reversible,

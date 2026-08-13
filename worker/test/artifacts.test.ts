@@ -126,13 +126,13 @@ describe("artifact broker namespaces", () => {
     expect(grant.upload.url.toLowerCase()).toContain("x-amz-checksum-sha256");
   });
 
-  it("omits the checksum header when no usable digest is declared", async () => {
+  it("omits the checksum header when the digest is omitted or blank", async () => {
     const response = await artifactUploadResponse(
       artifactEnv(),
       {
         files: [
           { name: "result.txt", size: 1 },
-          { name: "other.txt", size: 1, sha256: "not-a-digest" },
+          { name: "other.txt", size: 1, sha256: " \t " },
         ],
       },
       { org: "example-org", owner: "alice" },
@@ -141,6 +141,16 @@ describe("artifact broker namespaces", () => {
     for (const grant of response.files) {
       expect(grant.upload.headers).not.toHaveProperty("x-amz-checksum-sha256");
     }
+  });
+
+  it("rejects a malformed nonblank digest", async () => {
+    await expect(
+      artifactUploadResponse(
+        artifactEnv(),
+        { files: [{ name: "result.txt", size: 1, sha256: "not-a-digest" }] },
+        { org: "example-org", owner: "alice" },
+      ),
+    ).rejects.toThrow("invalid artifact sha256 for result.txt");
   });
 });
 
