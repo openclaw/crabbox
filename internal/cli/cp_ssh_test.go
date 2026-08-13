@@ -387,7 +387,7 @@ func TestCopyOverResolvedSSHRejectsNativeWindows(t *testing.T) {
 	}
 }
 
-func TestCopyOverResolvedSSHRejectsUnsafeRsyncBeforeTransfer(t *testing.T) {
+func TestCopyOverResolvedSSHFallsBackWithoutStartingUnsafeRsync(t *testing.T) {
 	if os.PathSeparator == '\\' {
 		t.Skip("POSIX fake rsync helper")
 	}
@@ -404,11 +404,16 @@ printf started > "$CRABBOX_TEST_RSYNC_TRANSFER_MARKER"
 	if err := os.WriteFile(rsyncPath, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	writeExecutable(t, filepath.Join(dir, "ssh"), "#!/bin/sh\nexit 86\n")
+	input := filepath.Join(dir, "input")
+	if err := os.WriteFile(input, []byte("archive fallback"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CRABBOX_TEST_RSYNC_TRANSFER_MARKER", transferMarker)
-	err := copyOverResolvedSSH(t.Context(), SSHTarget{User: "alice", Host: "example.test", Port: "22"}, "./input", "SANDBOX:/tmp/input", false, &bytes.Buffer{}, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), "rsync 3.4.3 or newer") {
+	err := copyOverResolvedSSH(t.Context(), SSHTarget{User: "alice", Host: "example.test", Port: "22"}, input, "SANDBOX:/tmp/input", false, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || strings.Contains(err.Error(), "rsync 3.4.3 or newer") {
 		t.Fatalf("err=%v", err)
 	}
 	if _, err := os.Stat(transferMarker); !os.IsNotExist(err) {

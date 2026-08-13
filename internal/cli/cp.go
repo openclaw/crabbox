@@ -98,11 +98,22 @@ func copyOverResolvedSSH(ctx context.Context, target SSHTarget, src, dst string,
 		return ctxErr
 	}
 	if !capabilities.safeTransport {
-		version := capabilities.version
-		if version == "" {
-			version = "unknown"
+		if runtime.GOOS == "windows" {
+			return exit(2, "SSH cp archive fallback is unavailable on Windows operator hosts; install rsync 3.4.3 or newer")
 		}
-		return exit(2, "SSH cp requires rsync 3.4.3 or newer for secure transfers; found %s", version)
+		// The archive fallback is driven by native Go on the operator host, so it
+		// must use the native OpenSSH session even when Windows rsync probing chose
+		// a WSL session.
+		if wslExe != "" {
+			if closeErr := session.Close(); closeErr != nil {
+				return closeErr
+			}
+			session, err = newSSHTransportSession(ctx, target, false)
+			if err != nil {
+				return err
+			}
+		}
+		return copyOverResolvedSSHArchive(ctx, session, target, src, dst, followLink, stdout, stderr)
 	}
 	// Prefer secluded arguments whenever the remote rsync supports them: the
 	// paths then travel over the rsync protocol stream instead of the remote
