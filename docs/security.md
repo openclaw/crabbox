@@ -99,7 +99,9 @@ by coordinator config:
 - `CRABBOX_GITHUB_ALLOWED_TEAMS` (or `CRABBOX_GITHUB_ALLOWED_TEAM`) further
   narrows access to selected team slugs after org membership passes. The check is
   scoped to the org being authorized, so a team in another configured org cannot
-  satisfy it; an org with teams configured but none of its own is rejected.
+  satisfy it; an org with teams configured but none of its own is rejected. Every
+  nonblank selector must be `team-slug` or `org/team-slug`; malformed paths, invalid
+  tokens, comma-only values, and mixed empty entries fail authorization closed.
 - `CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS` controls successful request-time
   membership caching (default 300, maximum 3600; set 0 to check every request).
 - `CRABBOX_GITHUB_REVOKED_USERS` immediately rejects comma-separated immutable

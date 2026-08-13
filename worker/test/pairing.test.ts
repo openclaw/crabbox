@@ -472,6 +472,44 @@ describe("coordinator device pairing", () => {
     expect(fixture.membershipChecks).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    ["malformed", "operators,"],
+    ["qualified for another organization", "partner-org/contractors"],
+  ])("invalidates a warm device membership when policy becomes %s", async (_label, teams) => {
+    const fixture = await pairingFixture();
+    fixture.env.CRABBOX_GITHUB_ALLOWED_TEAMS = "example-org/operators";
+    const { token } = await fixture.pair();
+    fixture.membershipChecks.mockClear();
+
+    expect((await fixture.request("/v1/leases", deviceRequest(token))).status).toBe(200);
+    expect(fixture.membershipChecks).toHaveBeenCalledTimes(1);
+
+    fixture.env.CRABBOX_GITHUB_ALLOWED_TEAMS = teams;
+    const denied = await fixture.request("/v1/leases", deviceRequest(token));
+
+    expect(denied.status).toBe(401);
+    await expect(denied.json()).resolves.toEqual({ error: "device_owner_unauthorized" });
+    expect(fixture.membershipChecks).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not reuse a warm device proof after changing valid team A to team B", async () => {
+    const fixture = await pairingFixture();
+    fixture.env.CRABBOX_GITHUB_ALLOWED_TEAMS = "example-org/operators";
+    const { token } = await fixture.pair();
+    fixture.membershipChecks.mockClear();
+
+    expect((await fixture.request("/v1/leases", deviceRequest(token))).status).toBe(200);
+    expect(fixture.membershipChecks).toHaveBeenCalledTimes(1);
+
+    fixture.env.CRABBOX_GITHUB_ALLOWED_TEAMS = "example-org/release-captains";
+    fixture.membershipAllowed.value = false;
+    const denied = await fixture.request("/v1/leases", deviceRequest(token));
+
+    expect(denied.status).toBe(401);
+    await expect(denied.json()).resolves.toEqual({ error: "device_owner_unauthorized" });
+    expect(fixture.membershipChecks).toHaveBeenCalledTimes(2);
+  });
+
   it("fails closed on a lookup error after a warm membership entry expires", async () => {
     vi.useFakeTimers({ now: new Date("2026-07-27T12:00:00Z") });
     const fixture = await pairingFixture();

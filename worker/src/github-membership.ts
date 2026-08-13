@@ -23,6 +23,12 @@ interface AllowedGitHubTeam {
   slug: string;
 }
 
+export interface GitHubMembershipPolicy {
+  org: string;
+  allowedTeams: readonly string[];
+  cacheKey: string;
+}
+
 export interface GitHubMembershipIdentity {
   accessToken: string;
   tokenID: string;
@@ -61,15 +67,16 @@ export async function requireGitHubLoginMembership(
   if (!org) {
     throw new GitHubAuthorizationError("GitHub login is not configured with an allowed org.");
   }
-  return requireExactGitHubMembership(accessToken, identity.login, org, env);
+  const policy = githubMembershipPolicy({ ...identity, org }, env);
+  return requireExactGitHubMembership(accessToken, identity.login, policy);
 }
 
 export async function requireCurrentGitHubMembership(
   identity: GitHubMembershipIdentity,
   env: GitHubMembershipEnv,
 ): Promise<void> {
-  requireGitHubMembershipPolicy(identity, env);
-  const key = membershipCacheKey(identity, env);
+  const policy = githubMembershipPolicy(identity, env);
+  const key = membershipCacheKey(identity, policy);
   const now = Date.now();
   const cachedUntil = membershipCache.get(key) ?? 0;
   if (cachedUntil > now) {
@@ -81,9 +88,7 @@ export async function requireCurrentGitHubMembership(
     return loading;
   }
   const load = requireExactGitHubAccount(identity.accessToken, identity.owner, identity.login)
-    .then(() =>
-      requireExactGitHubMembership(identity.accessToken, identity.login, identity.org, env),
-    )
+    .then(() => requireExactGitHubMembership(identity.accessToken, identity.login, policy))
     .then(() => {
       const ttlSeconds = membershipCacheSeconds(env);
       if (ttlSeconds > 0) {
@@ -100,23 +105,41 @@ export async function requireCurrentGitHubMembership(
 export async function requireFreshGitHubMembership(
   identity: GitHubMembershipIdentity,
   env: GitHubMembershipEnv,
+  normalizedPolicy?: GitHubMembershipPolicy,
 ): Promise<void> {
-  requireGitHubMembershipPolicy(identity, env);
+  const policy = normalizedPolicy ?? githubMembershipPolicy(identity, env);
   await requireExactGitHubAccount(identity.accessToken, identity.owner, identity.login);
-  await requireExactGitHubMembership(identity.accessToken, identity.login, identity.org, env);
+  await requireExactGitHubMembership(identity.accessToken, identity.login, policy);
 }
 
-export function requireGitHubMembershipPolicy(
+export function githubMembershipPolicy(
   identity: Pick<GitHubMembershipIdentity, "owner" | "org" | "login">,
   env: GitHubMembershipEnv,
-): void {
+): GitHubMembershipPolicy {
   requireSafeGitHubRevocationConfig(env);
   if (githubUserIsRevoked(identity, env)) {
     throw new GitHubAuthorizationError(`GitHub user ${identity.login} has been revoked.`);
   }
-  if (!allowedGitHubOrgs(env).includes(identity.org.trim().toLowerCase())) {
+  const org = identity.org.trim().toLowerCase();
+  const allowedOrgs = allowedGitHubOrgs(env);
+  if (!allowedOrgs.includes(org)) {
     throw new GitHubAuthorizationError(`GitHub organization ${identity.org} is no longer allowed.`);
   }
+  const configuredTeams = allowedGitHubTeams(env, org)
+    .map((team) => teamKey(team.org, team.slug))
+    .toSorted();
+  const normalizedTeams = [...new Set(configuredTeams)];
+  const allowedTeams = normalizedTeams.filter((team) => team.startsWith(`${org}/`));
+  if (normalizedTeams.length > 0 && allowedTeams.length === 0) {
+    throw new GitHubAuthorizationError(
+      `GitHub organization ${org} has no allowed team configured.`,
+    );
+  }
+  return {
+    org,
+    allowedTeams,
+    cacheKey: JSON.stringify([[...new Set(allowedOrgs)].toSorted(), normalizedTeams]),
+  };
 }
 
 function githubUserIsRevoked(
@@ -180,13 +203,9 @@ export function githubAccountID(owner: string): number | undefined {
 async function requireExactGitHubMembership(
   accessToken: string,
   login: string,
-  org: string,
-  env: GitHubMembershipEnv,
+  policy: GitHubMembershipPolicy,
 ): Promise<string> {
-  const exactOrg = org.trim().toLowerCase();
-  if (!allowedGitHubOrgs(env).includes(exactOrg)) {
-    throw new GitHubAuthorizationError(`GitHub organization ${org} is no longer allowed.`);
-  }
+  const exactOrg = policy.org;
   const response = await fetch(
     `${githubAPIURL}/user/memberships/orgs/${encodeURIComponent(exactOrg)}`,
     { headers: githubHeaders(accessToken) },
@@ -206,38 +225,24 @@ async function requireExactGitHubMembership(
       `GitHub user ${login} is not an active member of ${exactOrg}.`,
     );
   }
-  await requireAllowedTeamMembership(accessToken, login, exactOrg, env);
+  await requireAllowedTeamMembership(accessToken, login, policy);
   return membership.organization.login || exactOrg;
 }
 
 async function requireAllowedTeamMembership(
   accessToken: string,
   login: string,
-  org: string,
-  env: GitHubMembershipEnv,
+  policy: GitHubMembershipPolicy,
 ): Promise<void> {
-  const allowed = allowedGitHubTeams(env, org);
-  if (allowed.length === 0) return;
-  // /user/teams spans every org the caller belongs to, so the allowlist must be
-  // narrowed to the org being authorized. Without this, a team in another
-  // configured org would satisfy this org's gate.
-  const allowedKeys = new Set(
-    allowed
-      .filter((team) => team.org.toLowerCase() === org)
-      .map((team) => teamKey(team.org, team.slug)),
-  );
-  if (allowedKeys.size === 0) {
-    throw new GitHubAuthorizationError(
-      `GitHub organization ${org} has no allowed team configured.`,
-    );
-  }
+  if (policy.allowedTeams.length === 0) return;
+  const allowedKeys = new Set(policy.allowedTeams);
   for (const team of await userGitHubTeams(accessToken)) {
     const teamOrg = team.organization?.login?.toLowerCase() ?? "";
     const teamSlug = team.slug?.toLowerCase() ?? "";
     if (teamOrg && teamSlug && allowedKeys.has(teamKey(teamOrg, teamSlug))) return;
   }
   throw new GitHubAuthorizationError(
-    `GitHub user ${login} is not a member of an allowed team in ${org}.`,
+    `GitHub user ${login} is not a member of an allowed team in ${policy.org}.`,
   );
 }
 
@@ -249,16 +254,42 @@ function allowedGitHubOrgs(env: GitHubMembershipEnv): string[] {
 }
 
 function allowedGitHubTeams(env: GitHubMembershipEnv, defaultOrg: string): AllowedGitHubTeam[] {
-  const raw = env.CRABBOX_GITHUB_ALLOWED_TEAMS || env.CRABBOX_GITHUB_ALLOWED_TEAM;
-  return envList(raw)
-    .map((value) => parseAllowedGitHubTeam(value, defaultOrg))
-    .filter((team): team is AllowedGitHubTeam => team !== undefined);
+  const plural = env.CRABBOX_GITHUB_ALLOWED_TEAMS;
+  const raw =
+    plural === undefined || plural.trim() === "" ? env.CRABBOX_GITHUB_ALLOWED_TEAM : plural;
+  if (raw === undefined || raw.trim() === "") return [];
+  const values = raw.split(",").map((value) => value.trim().toLowerCase());
+  if (values.some((value) => value === "")) throw invalidAllowedTeamConfig();
+  return values.map((value) => parseAllowedGitHubTeam(value, defaultOrg));
 }
 
-function parseAllowedGitHubTeam(value: string, defaultOrg: string): AllowedGitHubTeam | undefined {
-  const [org, slug] = value.includes("/") ? value.split("/", 2) : [defaultOrg, value];
-  if (!org || !slug) return undefined;
+function parseAllowedGitHubTeam(value: string, defaultOrg: string): AllowedGitHubTeam {
+  const segments = value.split("/");
+  if (segments.length > 2) throw invalidAllowedTeamConfig();
+  const [org, slug] = segments.length === 2 ? segments : [defaultOrg, segments[0]];
+  if (!validGitHubOrgSelector(org) || !validGitHubTeamSlug(slug)) {
+    throw invalidAllowedTeamConfig();
+  }
   return { org, slug };
+}
+
+function validGitHubOrgSelector(value: string | undefined): value is string {
+  return Boolean(
+    value &&
+    value.length <= 39 &&
+    /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(value) &&
+    !value.includes("--"),
+  );
+}
+
+function validGitHubTeamSlug(value: string | undefined): value is string {
+  return Boolean(value && value.length <= 100 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(value));
+}
+
+function invalidAllowedTeamConfig(): GitHubAuthorizationError {
+  return new GitHubAuthorizationError(
+    "CRABBOX_GITHUB_ALLOWED_TEAMS contains an invalid entry. Use team-slug or org/team-slug without empty entries.",
+  );
 }
 
 async function userGitHubTeams(accessToken: string): Promise<GitHubTeam[]> {
@@ -285,15 +316,13 @@ async function userGitHubTeams(accessToken: string): Promise<GitHubTeam[]> {
 
 function membershipCacheKey(
   identity: Pick<GitHubMembershipIdentity, "tokenID" | "owner" | "org">,
-  env: GitHubMembershipEnv,
+  policy: GitHubMembershipPolicy,
 ): string {
   return JSON.stringify([
     identity.tokenID,
     identity.owner.toLowerCase(),
     identity.org.toLowerCase(),
-    envList(env.CRABBOX_GITHUB_ALLOWED_ORGS || env.CRABBOX_GITHUB_ALLOWED_ORG),
-    envList(env.CRABBOX_GITHUB_ALLOWED_TEAMS || env.CRABBOX_GITHUB_ALLOWED_TEAM),
-    envList(env.CRABBOX_DEFAULT_ORG),
+    policy.cacheKey,
   ]);
 }
 

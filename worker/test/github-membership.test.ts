@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { authenticateRequest, issueUserToken } from "../src/auth";
 import { prepareCoordinatorRequest } from "../src/coordinator-entry";
-import { requireFreshGitHubMembership } from "../src/github-membership";
+import { githubMembershipPolicy, requireFreshGitHubMembership } from "../src/github-membership";
 import type { Env } from "../src/types";
 
 const accessToken = "github-access-token-for-tests";
@@ -54,7 +54,7 @@ function membershipResponse(state = "active", org = "example-org"): Response {
   return Response.json({ state, organization: { login: org } });
 }
 
-function teamIdentity(): {
+function teamIdentity(org = "example-org"): {
   accessToken: string;
   tokenID: string;
   owner: string;
@@ -63,9 +63,9 @@ function teamIdentity(): {
 } {
   return {
     accessToken,
-    tokenID: "team-scope-token",
+    tokenID: `team-scope-token-${org}`,
     owner: `github:${accountID}`,
-    org: "example-org",
+    org,
     login: "alice",
   };
 }
@@ -214,6 +214,59 @@ describe("GitHub user-token membership", () => {
   });
 
   it.each([
+    ["a missing org", "/operators"],
+    ["a missing slug", "example-org/"],
+    ["an extra path component", "example-org/operators/extra"],
+    ["only commas", ", ,"],
+    ["a valid selector mixed with an empty entry", "operators,"],
+    ["an invalid org token", "example_org/operators"],
+    ["an invalid team token", "example-org/operator!"],
+  ])("fails closed on allowed-team configuration with %s", async (_label, teams) => {
+    const env = testEnv({
+      CRABBOX_GITHUB_ALLOWED_TEAMS: teams,
+      CRABBOX_GITHUB_ALLOWED_TEAM: "fallback-team",
+    });
+    const token = await testToken(env);
+    const fetchMock = vi.fn<() => void>();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(authenticateRequest(tokenRequest(token), env)).resolves.toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["an unset team policy", {}, []],
+    ["an empty plural policy", { CRABBOX_GITHUB_ALLOWED_TEAMS: "" }, []],
+    [
+      "an empty plural policy with singular fallback",
+      { CRABBOX_GITHUB_ALLOWED_TEAMS: "", CRABBOX_GITHUB_ALLOWED_TEAM: "operators" },
+      ["example-org/operators"],
+    ],
+    [
+      "a whitespace-only plural policy with singular fallback",
+      { CRABBOX_GITHUB_ALLOWED_TEAMS: " \t ", CRABBOX_GITHUB_ALLOWED_TEAM: "operators" },
+      ["example-org/operators"],
+    ],
+    [
+      "a singular-only policy",
+      { CRABBOX_GITHUB_ALLOWED_TEAM: "example-org/operators" },
+      ["example-org/operators"],
+    ],
+    [
+      "a configured plural policy taking precedence over singular",
+      {
+        CRABBOX_GITHUB_ALLOWED_TEAMS: "release-captains",
+        CRABBOX_GITHUB_ALLOWED_TEAM: "operators",
+      },
+      ["example-org/release-captains"],
+    ],
+  ])("normalizes %s", (_label, overrides, expectedTeams) => {
+    const policy = githubMembershipPolicy(teamIdentity(), testEnv(overrides));
+
+    expect(policy.allowedTeams).toEqual(expectedTeams);
+  });
+
+  it.each([
     [
       "a team qualified for another configured org",
       "example-org/operators,partner-org/contractors",
@@ -254,6 +307,113 @@ describe("GitHub user-token membership", () => {
     );
 
     await expect(requireFreshGitHubMembership(teamIdentity(), env)).resolves.toBeUndefined();
+  });
+
+  it.each(["example-org", "partner-org"])(
+    "binds a bare team slug to the selected organization %s",
+    (org) => {
+      const env = testEnv({
+        CRABBOX_GITHUB_ALLOWED_ORG: undefined,
+        CRABBOX_GITHUB_ALLOWED_ORGS: "example-org,partner-org",
+        CRABBOX_GITHUB_ALLOWED_TEAMS: "operators",
+      });
+
+      expect(githubMembershipPolicy(teamIdentity(org), env).allowedTeams).toEqual([
+        `${org}/operators`,
+      ]);
+    },
+  );
+
+  it("allows an org-qualified team only for that exact selected organization", async () => {
+    const env = testEnv({
+      CRABBOX_GITHUB_ALLOWED_ORG: undefined,
+      CRABBOX_GITHUB_ALLOWED_ORGS: "example-org,partner-org",
+      CRABBOX_GITHUB_ALLOWED_TEAMS: "partner-org/contractors",
+    });
+    const fetchMock = vi.fn<(input: RequestInfo | URL) => Promise<Response>>(async (input) => {
+      const url = String(input);
+      if (url === "https://api.github.com/user") return userResponse();
+      if (url === "https://api.github.com/user/memberships/orgs/partner-org") {
+        return membershipResponse("active", "partner-org");
+      }
+      if (url.includes("/user/teams")) {
+        return Response.json([{ slug: "contractors", organization: { login: "partner-org" } }]);
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(requireFreshGitHubMembership(teamIdentity("example-org"), env)).rejects.toThrow(
+      /no allowed team configured/,
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+    await expect(
+      requireFreshGitHubMembership(teamIdentity("partner-org"), env),
+    ).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not migrate a session to another allowed organization", async () => {
+    const env = testEnv({
+      CRABBOX_DEFAULT_ORG: "partner-org",
+      CRABBOX_GITHUB_ALLOWED_ORG: "partner-org",
+      CRABBOX_GITHUB_ALLOWED_TEAMS: "partner-org/contractors",
+    });
+    const fetchMock = vi.fn<() => void>();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(requireFreshGitHubMembership(teamIdentity("example-org"), env)).rejects.toThrow(
+      /no longer allowed/,
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("invalidates the ordinary membership cache when a valid team policy changes", async () => {
+    const env = testEnv({
+      CRABBOX_GITHUB_ALLOWED_TEAMS: "example-org/operators",
+      CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS: "300",
+    });
+    const token = await testToken(env);
+    const fetchMock = vi.fn<(input: RequestInfo | URL) => Promise<Response>>(async (input) => {
+      const url = String(input);
+      if (url === "https://api.github.com/user") return userResponse();
+      if (url.includes("/user/teams")) {
+        return Response.json([{ slug: "operators", organization: { login: "example-org" } }]);
+      }
+      return membershipResponse();
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(authenticateRequest(tokenRequest(token), env)).resolves.toMatchObject({
+      authorized: true,
+    });
+    env.CRABBOX_GITHUB_ALLOWED_TEAMS = "example-org/release-captains";
+    await expect(authenticateRequest(tokenRequest(token), env)).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+  });
+
+  it("rejects malformed team policy before consulting a warm ordinary cache", async () => {
+    const env = testEnv({
+      CRABBOX_GITHUB_ALLOWED_TEAMS: "example-org/operators",
+      CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS: "300",
+    });
+    const token = await testToken(env);
+    const fetchMock = vi.fn<(input: RequestInfo | URL) => Promise<Response>>(async (input) => {
+      const url = String(input);
+      if (url === "https://api.github.com/user") return userResponse();
+      if (url.includes("/user/teams")) {
+        return Response.json([{ slug: "operators", organization: { login: "example-org" } }]);
+      }
+      return membershipResponse();
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(authenticateRequest(tokenRequest(token), env)).resolves.toMatchObject({
+      authorized: true,
+    });
+    env.CRABBOX_GITHUB_ALLOWED_TEAMS = "operators,";
+    await expect(authenticateRequest(tokenRequest(token), env)).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it.each([`github:${accountID}`, `owner:github:${accountID}`])(

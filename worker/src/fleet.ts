@@ -76,8 +76,8 @@ import {
 } from "./daytona";
 import { GCPClient, gcpProviderLabelValue } from "./gcp";
 import {
+  githubMembershipPolicy,
   requireFreshGitHubMembership,
-  requireGitHubMembershipPolicy,
   type GitHubMembershipEnv,
   type GitHubMembershipIdentity,
 } from "./github-membership";
@@ -1615,8 +1615,8 @@ export class FleetCoordinator {
     identity: GitHubMembershipIdentity,
     env: GitHubMembershipEnv,
   ): Promise<void> {
-    requireGitHubMembershipPolicy(identity, env);
-    const key = deviceMembershipCacheKey(record);
+    const policy = githubMembershipPolicy(identity, env);
+    const key = deviceMembershipCacheKey(record, policy.cacheKey);
     const now = Date.now();
     const cached = this.deviceMembershipCache.get(key);
     if (cached?.expiresAt && cached.expiresAt > now) {
@@ -1628,8 +1628,10 @@ export class FleetCoordinator {
     this.deviceMembershipCache.delete(key);
 
     const entry: DeviceMembershipCacheEntry = { expiresAt: 0 };
-    const membership = this.authContext.githubMembership ?? requireFreshGitHubMembership;
-    entry.load = membership(identity, env).then(
+    const membership = this.authContext.githubMembership;
+    entry.load = (
+      membership ? membership(identity, env) : requireFreshGitHubMembership(identity, env, policy)
+    ).then(
       () => {
         if (this.deviceMembershipCache.get(key) === entry) {
           entry.expiresAt = Date.now() + deviceMembershipCacheTTLMS;
@@ -1686,7 +1688,7 @@ export class FleetCoordinator {
 
   private async revokeDeviceRecord(record: DeviceTokenRecord): Promise<void> {
     await this.state.storage.delete(deviceTokenKey(record.id));
-    this.deviceMembershipCache.delete(deviceMembershipCacheKey(record));
+    deleteDeviceMembershipCacheEntries(this.deviceMembershipCache, record);
     await this.state.storage.delete(deviceOwnerIndexKey(record.owner, record.org, record.id));
   }
 
@@ -18906,8 +18908,27 @@ function pairingBrowserSession(
   return { login, grant: { tokenID, sealedCredential, expiresAt } };
 }
 
-function deviceMembershipCacheKey(record: Pick<DeviceTokenRecord, "id" | "tokenHash">): string {
-  return `${record.id}:${record.tokenHash}`;
+function deviceMembershipCacheKey(
+  record: Pick<DeviceTokenRecord, "id" | "tokenHash">,
+  policyKey: string,
+): string {
+  return `${deviceMembershipCacheKeyPrefix(record)}${policyKey}`;
+}
+
+function deviceMembershipCacheKeyPrefix(
+  record: Pick<DeviceTokenRecord, "id" | "tokenHash">,
+): string {
+  return `${record.id}:${record.tokenHash}\0`;
+}
+
+function deleteDeviceMembershipCacheEntries(
+  cache: Map<string, DeviceMembershipCacheEntry>,
+  record: Pick<DeviceTokenRecord, "id" | "tokenHash">,
+): void {
+  const prefix = deviceMembershipCacheKeyPrefix(record);
+  for (const key of cache.keys()) {
+    if (key.startsWith(prefix)) cache.delete(key);
+  }
 }
 
 function trimDeviceMembershipCache(cache: Map<string, DeviceMembershipCacheEntry>): void {

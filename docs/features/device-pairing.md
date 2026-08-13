@@ -72,10 +72,12 @@ repository configuration.
 The coordinator stores the paired browser session's sealed GitHub authorization
 grant beside the token hash. Every device request reads the durable token
 verifier, checks the sealed grant's expiry and readability, and applies current
-local revoked-user and allowed-organization policy. Successful remote GitHub
+local revoked-user and allowed-organization/team policy. Successful remote GitHub
 account and organization/team membership checks are cached for 60 seconds per
-exact device token. The cache is bounded and never shared by devices, owners, or
-organizations.
+exact device token and normalized organization/team policy. The cache is bounded
+and never shared by devices, owners, organizations, or policy versions. A policy
+change is therefore enforced on the next request even while an older proof is warm;
+malformed team configuration fails closed before cache lookup.
 
 After a cache miss or expiry, GitHub errors, account mismatch, removed
 membership, revoked users, or a no-longer-allowed organization fail closed with
@@ -125,11 +127,12 @@ failures after that deadline deny access rather than extending the window.
 
 The window does not apply to the durable device-token verifier, device-token
 expiry, sealed-grant expiry or decryption, configured revoked-user policy,
-allowed-organization policy, or current lease visibility. Those checks run on
-every request. Individual or bulk device revocation deletes the verifier first
-and takes effect on the next request regardless of cache state. Cache entries
-are keyed by the exact device ID and token hash and are held only in bounded
-ephemeral Worker memory, preventing cross-token or cross-tenant reuse.
+allowed-organization/team policy, or current lease visibility. Those checks run
+on every request. Individual or bulk device revocation deletes the verifier first
+and takes effect on the next request regardless of cache state. Cache entries are
+keyed by the exact device ID, token hash, and normalized org/team policy and are
+held only in bounded ephemeral Worker memory, preventing cross-token,
+cross-tenant, or cross-policy reuse.
 
 ## Non-goals
 

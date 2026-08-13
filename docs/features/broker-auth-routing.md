@@ -182,6 +182,11 @@ Login is gated by GitHub org membership before a user token is minted:
   org can satisfy it, so a team in a different configured org never grants access. If teams are
   configured but none resolve to the org being authorized, that org is **rejected** — list at
   least one team per allowed org, or leave the setting unset to gate on org membership alone.
+- Every nonblank selector must be exactly `team-slug` or `org/team-slug`, using GitHub-style
+  letters, numbers, and hyphens. Missing components, extra slashes, invalid tokens, comma-only
+  values, and empty entries mixed into a list fail GitHub authorization closed. A nonblank
+  plural value takes precedence over the legacy singular alias; an unset, empty, or
+  whitespace-only plural value may fall back to the singular value.
 
 ### Coordinator secrets for login
 
