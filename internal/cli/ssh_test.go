@@ -1795,6 +1795,82 @@ func TestRemoteFinalizeSyncCommitsMetadataInOneCommand(t *testing.T) {
 	}
 }
 
+func TestRemoteFinalizeSyncHydratesForRepositoryDepth(t *testing.T) {
+	const finalizeToken = "0123456789abcdef0123456789abcdef"
+	fixture := newGitCoherenceFixture(t)
+	realGit := filepath.Join(gitOutput("", "--exec-path"), "git")
+	refspec := "+refs/heads/main:refs/remotes/origin/main"
+
+	tests := []struct {
+		name          string
+		shallow       bool
+		wantUnshallow bool
+	}{
+		{name: "complete", shallow: false, wantUnshallow: false},
+		{name: "shallow", shallow: true, wantUnshallow: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workdir := filepath.Join(t.TempDir(), "work")
+			cloneArgs := []string{"clone", "--quiet"}
+			origin := fixture.origin
+			if tt.shallow {
+				cloneArgs = append(cloneArgs, "--depth=1")
+				origin = "file://" + filepath.ToSlash(origin)
+			}
+			cloneArgs = append(cloneArgs, origin, workdir)
+			if out, err := exec.Command("git", cloneArgs...).CombinedOutput(); err != nil {
+				t.Fatalf("clone workspace: %v\n%s", err, out)
+			}
+			if got := gitOutput(workdir, "rev-parse", "--is-shallow-repository"); got != strconv.FormatBool(tt.shallow) {
+				t.Fatalf("is-shallow-repository=%q, want %t", got, tt.shallow)
+			}
+			stageCoherenceFinalize(t, workdir, finalizeToken)
+
+			tools := t.TempDir()
+			fetchLog := filepath.Join(tools, "fetch.log")
+			gitScript := `#!/bin/sh
+if [ "$1" = fetch ]; then
+  printf '%s\n' "$*" >> "$CRABBOX_GIT_FETCH_LOG"
+fi
+exec ` + shellQuote(realGit) + ` "$@"
+`
+			if err := os.WriteFile(filepath.Join(tools, "git"), []byte(gitScript), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			envFile := filepath.Join(tools, "env")
+			if err := os.WriteFile(envFile, []byte("export PATH="+shellQuote(tools)+":\"$PATH\"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			cmd := exec.Command("bash", "-lc", remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
+				HydrateGit: true,
+				BaseRef:    "main",
+				Token:      finalizeToken,
+			}))
+			cmd.Env = append(os.Environ(), "BASH_ENV="+envFile, "CRABBOX_GIT_FETCH_LOG="+fetchLog)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("remote finalize: %v\n%s", err, out)
+			}
+			fetches, err := os.ReadFile(fetchLog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := string(fetches)
+			if strings.Contains(got, "--unshallow") != tt.wantUnshallow {
+				t.Fatalf("fetch log unshallow=%t, want %t: %q", strings.Contains(got, "--unshallow"), tt.wantUnshallow, got)
+			}
+			wantFetch := "fetch --quiet origin " + refspec
+			if tt.shallow {
+				wantFetch = "fetch --quiet --unshallow origin " + refspec
+			}
+			if !strings.Contains(got, wantFetch) {
+				t.Fatalf("fetch log missing requested refspec: %q", got)
+			}
+		})
+	}
+}
+
 func TestRemoteFinalizeSyncRetriesAfterAmbiguousTransportFailure(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell ssh fixture")
@@ -2405,6 +2481,15 @@ func requireGitOutput(t *testing.T, workdir, want string, args ...string) {
 		t.Fatalf("git %v=%q want %q", args, got, want)
 	}
 }
+
+func TestRemoteGitCoherenceCleanupAvoidsSuccessfulReexit(t *testing.T) {
+	script := remoteGitCoherenceFinalizeScript(gitCoherencePlan{}, "")
+	want := `cleanup_finalize_lock; trap - EXIT; if [ "$status" -ne 0 ]; then exit "$status"; fi`
+	if !strings.Contains(script, want) {
+		t.Fatalf("coherence cleanup does not avoid re-exiting after successful teardown:\n%s", script)
+	}
+}
+
 func TestRemoteGitCoherenceRepairsReuseBeforeFingerprintSkip(t *testing.T) {
 	f := newGitCoherenceFixture(t)
 	workdir := f.workspace(t, f.a, true)

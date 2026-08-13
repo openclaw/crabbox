@@ -680,8 +680,10 @@ gate_status=$?
 set -e
 if [ "$gate_status" -ne 0 ]; then kill "$child_pid" 2>/dev/null || true; rm -rf "$run_dir"; exit "$gate_status"; fi
 touch "$start"
+set +e
 wait "$child_pid"
 code=$?
+set -e
 set +e
 run_owner_gate ` + shellQuote(clearBody) + `
 clear_status=$?

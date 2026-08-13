@@ -500,6 +500,24 @@ func TestWorkspaceOwnerPOSIXProtocolBehavior(t *testing.T) {
 	if data, err := os.ReadFile(inputPath); err != nil || string(data) != "registration-input" {
 		t.Fatalf("witnessed input=%q err=%v", data, err)
 	}
+	const childExitCode = 42
+	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIXWitness(key, tokenA, "exit "+strconv.Itoa(childExitCode))); err == nil {
+		t.Fatalf("nonzero witnessed command succeeded: out=%q", out)
+	} else if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != childExitCode {
+		t.Fatalf("nonzero witnessed command out=%q err=%v, want exit code %d", out, err, childExitCode)
+	}
+	for _, path := range []string{childPath, filepath.Join(home, ".crabbox", "workspace-owners", key+".run."+tokenA)} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("nonzero witnessed command left run state %q: %v", path, err)
+		}
+	}
+	laterResultPath := filepath.Join(home, "after-nonzero.txt")
+	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIXWitness(key, tokenA, "touch "+shellQuote(laterResultPath))); err != nil {
+		t.Fatalf("witness after nonzero child out=%q err=%v", out, err)
+	}
+	if _, err := os.Stat(laterResultPath); err != nil {
+		t.Fatalf("command after nonzero child did not proceed: %v", err)
+	}
 	identityOut, err := exec.Command("ps", "-o", "lstart=", "-p", strconv.Itoa(os.Getpid())).Output()
 	if err != nil {
 		t.Fatal(err)
