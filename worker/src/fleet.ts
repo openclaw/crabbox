@@ -14891,7 +14891,7 @@ export class FleetCoordinator {
           candidate.action = "terminate_failed";
           candidate.error = coordinatorErrorMessage(this.env, error);
           console.warn(
-            `azure orphan sweep terminate failed region=${region} cloud=${machine.cloudID}: ${candidate.error}`,
+            `azure orphan sweep terminate failed region=${region} cloud=${cloudID}; inspect the sweep record for details`,
           );
         }
       }

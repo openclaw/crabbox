@@ -12095,6 +12095,92 @@ describe("fleet lease identity and idle", () => {
     ]);
   });
 
+  it("keeps Azure orphan release diagnostics out of console warnings", async () => {
+    const storage = new MemoryStorage();
+    const azureSecret = "configured-azure-orphan-secret";
+    const oldSeconds = String(Math.trunc((Date.now() - 60 * 60 * 1000) / 1000));
+    const orphanMachine = testMachine({
+      provider: "azure",
+      cloudID: "vm-release-failure",
+      region: "westus2",
+      name: "vm-release-failure",
+      resourceIdentity: "azure-components-v1",
+      labels: {
+        crabbox: "true",
+        created_by: "crabbox",
+        provider: "azure",
+        lease: "cbx_000000000781",
+        slug: "blue-lobster",
+        owner: "alice_example.com",
+        created_at: oldSeconds,
+        expires_at: oldSeconds,
+      },
+    });
+    storage.seed(
+      "lease:cbx_000000000781",
+      testLease({
+        id: "cbx_000000000781",
+        provider: "azure",
+        cloudID: "vm-release-failure",
+        region: "westus2",
+        providerScope: "/subscriptions/subscription/resourceGroups/crabbox-leases",
+        owner: "alice_example.com",
+        state: "expired",
+        keep: false,
+      }),
+    );
+    seedProviderReconciliationEligible(storage, "azure", "westus2", orphanMachine);
+    const fleet = testFleet(
+      storage,
+      {
+        azure: fakeProvider(undefined, {
+          provider: "azure",
+          reconciliationServers: [orphanMachine],
+          onReleaseLease() {
+            throw new Error(
+              `azure release failed AZURE_CLIENT_SECRET=${azureSecret} requestId=req-123`,
+            );
+          },
+        }),
+      },
+      {
+        AZURE_TENANT_ID: "tenant",
+        AZURE_CLIENT_ID: "client",
+        AZURE_CLIENT_SECRET: azureSecret,
+        AZURE_SUBSCRIPTION_ID: "subscription",
+        CRABBOX_AZURE_LOCATION: "eastus",
+        CRABBOX_AZURE_ORPHAN_SWEEP_DELETE: "1",
+        CRABBOX_AZURE_ORPHAN_SWEEP_GRACE_SECONDS: "1",
+      },
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    try {
+      await fleet.alarm();
+
+      expect(storage.value("azure-orphan-sweep:last")).toMatchObject({
+        terminated: 0,
+        candidates: [
+          expect.objectContaining({
+            region: "westus2",
+            cloudID: "vm-release-failure",
+            action: "terminate_failed",
+            error: "azure release failed AZURE_CLIENT_SECRET=[redacted] requestId=req-123",
+          }),
+        ],
+      });
+      const warningOutput = warn.mock.calls.flat().join(" ");
+      expect(warningOutput).toContain(
+        "azure orphan sweep terminate failed region=westus2 cloud=vm-release-failure",
+      );
+      expect(warningOutput).not.toContain(azureSecret);
+      expect(warningOutput).not.toContain("AZURE_CLIENT_SECRET");
+      expect(warningOutput).not.toContain("requestId=req-123");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("keeps Azure candidates report-only when provider labels do not match the lease", async () => {
     const storage = new MemoryStorage();
     const rawDeleted: string[] = [];
