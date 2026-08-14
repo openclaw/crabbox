@@ -665,6 +665,13 @@ func extractValidatedCopyArchive(ctx context.Context, archive io.Reader, stage, 
 		if rel != "" {
 			destination = filepath.Join(destination, filepath.FromSlash(rel))
 		}
+		// Defense in depth: validatedCopyArchiveEntryPath already rejects
+		// traversal, but assert containment at the use site so the guarantee
+		// is local and provable independent of the sanitizer.
+		payloadRoot := filepath.Join(stage, copyArchivePayloadRoot)
+		if destination != payloadRoot && !strings.HasPrefix(destination, payloadRoot+string(os.PathSeparator)) {
+			return exit(2, "copy archive entry escapes the staging root: %q", header.Name)
+		}
 		switch header.Typeflag {
 		case tar.TypeDir:
 			if err := directories.ensure(stage, archiveRoot, rel); err != nil {
