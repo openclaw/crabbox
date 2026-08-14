@@ -2,6 +2,10 @@
 
 ## 0.41.7 - Unreleased
 
+### Added
+
+- Added a checksummed, validated archive fallback for SSH-backed `cp` from POSIX operator hosts to native Linux or macOS leases (not WSL2) when local rsync is missing or older than 3.4.3, including stock macOS OpenRsync. Thanks @coygeek.
+
 ### Fixed
 
 - Rejected native Jujutsu workspaces before Git-manifest sync can fall through to an outer checkout, while preserving colocated Git workspaces and `--no-sync`. Thanks @atimmer.

@@ -15,13 +15,29 @@ SSH rules.
 
 `crabbox cp` preserves provider-native copy when available. If the backend has
 no native copy capability but does expose a managed SSH lease, Crabbox maps the
-single `SANDBOX:PATH` operand to the remote side and runs rsync over the resolved
+single `SANDBOX:PATH` operand to the remote side and transfers over the resolved
 transport. Both upload and download preserve the existing cp syntax. `-L`
 follows host-side symlinks during upload.
 
-Transfers require local rsync 3.4.3 or newer. Crabbox rejects older clients
-before connecting because known sender and receiver vulnerabilities cross the
-lease trust boundary.
+Crabbox prefers local rsync 3.4.3 or newer and rejects older clients for data
+transfer because known sender and receiver vulnerabilities cross the lease
+trust boundary. From POSIX operator hosts to native Linux or macOS leases, when local
+rsync is missing or older—including stock macOS OpenRsync—Crabbox creates or validates a checksummed tar+gzip stream in Go and
+carries it over the same private SSH session. The remote uses standard POSIX
+archive and filesystem tools only as the archive endpoint; Crabbox does not
+fall back to rsync, scp, or another copy protocol.
+
+Archive entries are confined to one root with bounded entry and byte counts.
+Downloads reject links, special files, duplicate paths, and invalid checksums
+before replacing the destination. Archive uploads reject symlinks unless `-L`
+follows them. Archive transfers stage the complete
+operand and replace its selected destination only after validation. An
+interruption before publication keeps the prior contents at the target or in a
+durable backup that the next copy restores. After publication, the new target
+remains and the next copy finishes backup cleanup. Target-named sidecars recover either state
+after a process or host crash. Unlike rsync's incremental merge,
+a successful archive transfer replaces that selected subtree and does not
+preserve unrelated entries already inside it.
 
 Downloads accept regular files and directories, not lease-provided symlinks or
 special files. Ownership and group metadata are discarded, and newly created

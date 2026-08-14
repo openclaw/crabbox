@@ -98,8 +98,8 @@ func copyOverResolvedSSH(ctx context.Context, target SSHTarget, src, dst string,
 		return ctxErr
 	}
 	if !capabilities.safeTransport {
-		if runtime.GOOS == "windows" {
-			return exit(2, "SSH cp archive fallback is unavailable on Windows operator hosts; install rsync 3.4.3 or newer")
+		if runtime.GOOS == "windows" || isWindowsWSL2Target(target) {
+			return exit(2, "SSH cp archive fallback requires a POSIX operator host and native Linux or macOS lease (not WSL2); install rsync 3.4.3 or newer")
 		}
 		// The archive fallback is driven by native Go on the operator host, so it
 		// must use the native OpenSSH session even when Windows rsync probing chose
