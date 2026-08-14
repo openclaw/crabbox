@@ -657,6 +657,12 @@ func extractValidatedCopyArchive(ctx context.Context, archive io.Reader, stage, 
 		if err != nil {
 			return err
 		}
+		// validatedCopyArchiveEntryPath normalizes and containment-checks the
+		// entry; this explicit dot-dot rejection restates the guarantee in the
+		// form static dataflow analysis recognizes (go/zipslip sanitizer).
+		if strings.Contains(clean, "..") || strings.Contains(rel, "..") {
+			return exit(2, "copy archive contains unsafe path: %q", header.Name)
+		}
 		if seen[clean] {
 			return exit(2, "copy archive contains duplicate entry: %s", clean)
 		}
