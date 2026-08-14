@@ -12169,13 +12169,15 @@ describe("fleet lease identity and idle", () => {
           }),
         ],
       });
-      const warningOutput = warn.mock.calls.flat().join(" ");
-      expect(warningOutput).toContain(
-        "azure orphan sweep terminate failed region=westus2 cloud=vm-release-failure",
+      expect(warn).toHaveBeenCalledWith(
+        "azure orphan sweep terminate failed; inspect the sweep record for details",
       );
+      const warningOutput = warn.mock.calls.flat().join(" ");
       expect(warningOutput).not.toContain(azureSecret);
       expect(warningOutput).not.toContain("AZURE_CLIENT_SECRET");
       expect(warningOutput).not.toContain("requestId=req-123");
+      expect(warningOutput).not.toContain("westus2");
+      expect(warningOutput).not.toContain("vm-release-failure");
     } finally {
       warn.mockRestore();
     }
