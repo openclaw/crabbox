@@ -2137,6 +2137,84 @@ func TestImagePromoteSupportsAzureSnapshots(t *testing.T) {
 	}
 }
 
+func TestImagePromoteCatalogOnly(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		response   string
+		wantOutput string
+		wantError  string
+	}{
+		{
+			name:       "text output and interspersed flag",
+			args:       []string{"ami-variant", "--catalog-only", "--sdk", "toolkit=2.0"},
+			response:   `{"image":{"id":"ami-variant","name":"variant","state":"available","region":"eu-west-1","promotedAt":"2026-08-15T00:00:00Z","catalogOnly":true}}`,
+			wantOutput: "catalogOnly=true",
+		},
+		{
+			name:       "JSON output",
+			args:       []string{"--catalog-only", "--runtime", "node=24.2", "--json", "ami-variant"},
+			response:   `{"image":{"id":"ami-variant","name":"variant","state":"available","region":"eu-west-1","promotedAt":"2026-08-15T00:00:00Z","catalogOnly":true}}`,
+			wantOutput: `"catalogOnly":true`,
+		},
+		{
+			name:      "capability required",
+			args:      []string{"--catalog-only", "ami-variant"},
+			wantError: "--catalog-only requires at least one capability declaration",
+		},
+		{
+			name:      "Azure rejected",
+			args:      []string{"--provider", "azure", "--catalog-only", "--sdk", "toolkit=2.0", "snapshot-variant"},
+			wantError: "--catalog-only is AWS-only",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				if r.Method != http.MethodPost || r.URL.Path != "/v1/images/ami-variant/promote" {
+					t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+				}
+				if r.URL.Query().Get("catalogOnly") != "true" {
+					t.Fatalf("catalogOnly query=%q", r.URL.Query().Get("catalogOnly"))
+				}
+				_, _ = w.Write([]byte(test.response))
+			}))
+			defer server.Close()
+
+			t.Setenv("CRABBOX_COORDINATOR", server.URL)
+			t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "admin-token")
+			var out bytes.Buffer
+			app := App{Stdout: &out, Stderr: io.Discard}
+			err := app.imagePromote(context.Background(), test.args)
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("error=%v", err)
+				}
+				if requests != 0 {
+					t.Fatalf("requests=%d", requests)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if requests != 1 {
+				t.Fatalf("requests=%d", requests)
+			}
+			if !strings.Contains(out.String(), test.wantOutput) {
+				t.Fatalf("output=%q", out.String())
+			}
+		})
+	}
+}
+
 func TestLeaseStatusRequiresSSHReadiness(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/leases/cbx_123" {

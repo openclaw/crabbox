@@ -84,6 +84,11 @@ func imageRequirementsEmpty(value imageRequirements) bool {
 		!value.Browser && !value.WebView2 && !value.Desktop
 }
 
+func imageCapabilitiesEmpty(value imageCapabilities) bool {
+	return value.OSVersion == "" && len(value.SDKs) == 0 && len(value.Runtimes) == 0 &&
+		!value.Browser && !value.WebView2 && !value.Desktop
+}
+
 func validateReadyPoolImageRequirements(value imageRequirements, pool string) error {
 	if strings.TrimSpace(pool) != "" && !imageRequirementsEmpty(value) {
 		return exit(2, "--pool cannot verify image capability requirements; omit --pool or the --image-* flags")

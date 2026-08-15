@@ -286,6 +286,7 @@ type CoordinatorImage struct {
 	PromotedAt           string                           `json:"promotedAt,omitempty"`
 	FastSnapshotRestores []CoordinatorFastSnapshotRestore `json:"fastSnapshotRestores,omitempty"`
 	Capabilities         *imageCapabilities               `json:"capabilities,omitempty"`
+	CatalogOnly          bool                             `json:"catalogOnly"`
 }
 
 type CoordinatorFastSnapshotRestore struct {
@@ -357,6 +358,7 @@ type CoordinatorImageRef struct {
 	FastSnapshotRestore    bool
 	FastSnapshotRestoreAZs []string
 	Capabilities           imageCapabilities
+	CatalogOnly            bool
 }
 
 type CoordinatorGitHubLoginStart struct {
@@ -1876,6 +1878,9 @@ func imagePath(imageID, action string, refs ...CoordinatorImageRef) string {
 		}
 		if ref.FastSnapshotRestore {
 			values.Set("fastSnapshotRestore", "true")
+		}
+		if ref.CatalogOnly {
+			values.Set("catalogOnly", "true")
 		}
 		for _, zone := range ref.FastSnapshotRestoreAZs {
 			if strings.TrimSpace(zone) != "" {

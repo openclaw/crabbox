@@ -119,6 +119,7 @@ Flags:
 --browser                image includes browser support
 --webview2               image includes Microsoft WebView2
 --desktop                image includes desktop support
+--catalog-only           publish an AWS capability variant without changing the default image
 --fast-snapshot-restore  enable AWS Fast Snapshot Restore for the backing snapshots
 --fsr-az <az>            availability zone for Fast Snapshot Restore (repeatable)
 --json                   print the promoted image record as JSON
@@ -141,6 +142,11 @@ Capability declarations make the AMI eligible for capability-aware selection.
 Versions use numeric dot notation, for example `--os-version 15.5`,
 `--sdk xcode=16.4`, or `--runtime node=24.2`. Omitted capabilities remain
 unknown and do not satisfy an explicit image requirement.
+
+Variant images carry capabilities that ordinary leases do not need. Promote an
+AWS variant with `--catalog-only` plus at least one capability declaration, such
+as `--sdk toolkit=2.0`; ordinary leases keep the scoped default while matching
+`--image-sdk` or `--image-runtime` requests can select the variant.
 
 Add `--fast-snapshot-restore` plus one or more `--fsr-az` values when the
 promoted image backs hot lanes that need immediate EBS snapshot reads:

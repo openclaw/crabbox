@@ -134,6 +134,12 @@ guard scripts. At a high level, an AWS bake is:
    Add declarations such as `--os-version 26.04 --runtime node=24.2
    --browser --desktop` when future leases must select by baked capabilities.
 
+### Variant images
+
+Bake capabilities most leases do not need as AWS catalog-only variants. Promote
+them with `--catalog-only`; matching `--image-sdk` or `--image-runtime` requests
+select them without changing the ordinary lease default.
+
 6. Run a normal brokered lease (no override) plus the relevant QA lane. The CLI
    prints `image selected id=... source=promoted`; require the exact promoted
    ID in publication proof.
@@ -153,7 +159,7 @@ provider-side artifacts.
 - `crabbox image promote <image-id> [--provider aws|azure] [--target
   linux|macos|windows] [--region <r>]` — set a scoped brokered AWS AMI or Azure
   OS disk snapshot default. AWS supports `--fast-snapshot-restore` with
-  `--fsr-az <az>` and capability declarations.
+  `--fsr-az <az>`, `--catalog-only`, and capability declarations.
 - `crabbox image fsr-status <ami-id|snapshot-id>` — AWS Fast Snapshot Restore
   status.
 - `crabbox image delete <image-id> [--provider aws|azure|gcp]` — remove a

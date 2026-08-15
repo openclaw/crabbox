@@ -178,6 +178,9 @@ Promote only after a candidate smoke passes:
 crabbox image promote ami-1234567890abcdef0 --json
 ```
 
+- For a capability variant, add `--catalog-only` and at least one `--sdk`,
+  `--runtime`, `--os-version`, `--browser`, `--webview2`, or `--desktop` declaration.
+
 Then confirm a normal brokered lease, with no override, uses the promoted image:
 
 ```bash

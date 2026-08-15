@@ -22810,13 +22810,25 @@ export class AzureProvider implements CloudProvider {
       region?: string;
       architecture?: string;
       serverType?: string;
+      catalogOnly?: unknown;
     } = await readJson<{
       target?: string;
       os?: string;
       region?: string;
       architecture?: string;
       serverType?: string;
+      catalogOnly?: unknown;
     }>(request).catch(() => ({}));
+    const catalogOnly = boolFromUnknown(input.catalogOnly ?? url.searchParams.get("catalogOnly"));
+    if (catalogOnly) {
+      return json(
+        {
+          error: "unsupported_provider",
+          message: "catalog-only image promotion is AWS-only",
+        },
+        { status: 400 },
+      );
+    }
     if (!known) {
       return json(
         {
@@ -24163,6 +24175,7 @@ export class AWSProvider implements CloudProvider {
       serverType?: string;
       architecture?: string;
       capabilities?: ImageCapabilities;
+      catalogOnly?: unknown;
       fastSnapshotRestore?: unknown;
       fastSnapshotRestoreAvailabilityZones?: string[];
     } = await readJson<{
@@ -24172,6 +24185,7 @@ export class AWSProvider implements CloudProvider {
       serverType?: string;
       architecture?: string;
       capabilities?: ImageCapabilities;
+      catalogOnly?: unknown;
       fastSnapshotRestore?: unknown;
       fastSnapshotRestoreAvailabilityZones?: string[];
     }>(request).catch(() => ({}));
@@ -24226,8 +24240,36 @@ export class AWSProvider implements CloudProvider {
     if (architecture) {
       metadata.architecture = architecture;
     }
+    let declaredCapabilities: ImageCapabilities | undefined;
     let capabilities: ImageCapabilities | undefined;
     try {
+      declaredCapabilities = normalizeImageCapabilities({
+        ...input.capabilities,
+        osVersion: input.capabilities?.osVersion ?? url.searchParams.get("osVersion") ?? undefined,
+        sdks:
+          input.capabilities?.sdks ??
+          promotionVersionMap(url.searchParams.getAll("sdk")) ??
+          undefined,
+        runtimes:
+          input.capabilities?.runtimes ??
+          promotionVersionMap(url.searchParams.getAll("runtime")) ??
+          undefined,
+        browser:
+          input.capabilities?.browser ??
+          (url.searchParams.has("browser")
+            ? boolFromUnknown(url.searchParams.get("browser"))
+            : undefined),
+        webview2:
+          input.capabilities?.webview2 ??
+          (url.searchParams.has("webview2")
+            ? boolFromUnknown(url.searchParams.get("webview2"))
+            : undefined),
+        desktop:
+          input.capabilities?.desktop ??
+          (url.searchParams.has("desktop")
+            ? boolFromUnknown(url.searchParams.get("desktop"))
+            : undefined),
+      });
       capabilities = normalizeImageCapabilities({
         ...prior?.capabilities,
         ...input.capabilities,
@@ -24265,6 +24307,16 @@ export class AWSProvider implements CloudProvider {
     } catch (error) {
       return json(
         { error: "invalid_image_capabilities", message: coordinatorErrorMessage(this.env, error) },
+        { status: 400 },
+      );
+    }
+    const catalogOnly = boolFromUnknown(input.catalogOnly ?? url.searchParams.get("catalogOnly"));
+    if (catalogOnly && !declaredCapabilities) {
+      return json(
+        {
+          error: "catalog_only_capabilities_required",
+          message: "catalog-only image promotion requires at least one capability declaration",
+        },
         { status: 400 },
       );
     }
@@ -24331,18 +24383,23 @@ export class AWSProvider implements CloudProvider {
         image.architecture ?? awsImageArchitectureForTarget(target, image.serverType ?? ""),
       promotedAt: new Date().toISOString(),
       ...(capabilities ? { capabilities } : {}),
+      ...(catalogOnly ? { catalogOnly: true } : {}),
     };
-    await this.storage.put(promotedAWSImageKey(promoted), promoted);
-    await this.storage.put(promotedAWSImageCatalogKey(promoted), promoted);
-    if (target === "linux" && promoted.os) {
-      await this.storage.put(promotedAWSLinuxOSImageKey(promoted), promoted);
-    }
-    if (
-      target === "linux" &&
-      (!promoted.os || promoted.os === "ubuntu:24.04") &&
-      legacyPromotedAWSImageCompatible(promoted)
-    ) {
-      await this.storage.put(legacyPromotedAWSImageKey(), promoted);
+    if (catalogOnly) {
+      await this.storage.put(promotedAWSImageCatalogKey(promoted), promoted);
+    } else {
+      await this.storage.put(promotedAWSImageKey(promoted), promoted);
+      await this.storage.put(promotedAWSImageCatalogKey(promoted), promoted);
+      if (target === "linux" && promoted.os) {
+        await this.storage.put(promotedAWSLinuxOSImageKey(promoted), promoted);
+      }
+      if (
+        target === "linux" &&
+        (!promoted.os || promoted.os === "ubuntu:24.04") &&
+        legacyPromotedAWSImageCompatible(promoted)
+      ) {
+        await this.storage.put(legacyPromotedAWSImageKey(), promoted);
+      }
     }
     return { image: promoted };
   }

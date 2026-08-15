@@ -28014,6 +28014,166 @@ describe("fleet lease identity and idle", () => {
     );
   });
 
+  it("stores catalog-only AWS promotions without changing default keys", async () => {
+    const storage = new MemoryStorage();
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockResolvedValue({
+      id: "ami-desktop",
+      name: "linux-desktop",
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      snapshots: ["snap-root"],
+    });
+    const enableFastSnapshotRestore = vi
+      .spyOn(provider, "enableFastSnapshotRestore")
+      .mockResolvedValue([
+        { snapshotID: "snap-root", availabilityZone: "eu-west-1a", state: "enabling" },
+      ]);
+    const url = new URL(
+      "https://crabbox.test/v1/images/ami-desktop/promote?target=linux&os=ubuntu%3A24.04&region=eu-west-1&sdk=toolkit%3D1.2&catalogOnly=true&fastSnapshotRestore=true&fsrAz=eu-west-1a",
+    );
+
+    const response = await provider.promoteImage(
+      "ami-desktop",
+      undefined,
+      new Request(url, { method: "POST", body: "{}" }),
+      url,
+    );
+
+    expect(response).toMatchObject({
+      image: {
+        id: "ami-desktop",
+        catalogOnly: true,
+        capabilities: { sdks: { toolkit: "1.2" } },
+      },
+    });
+    expect(enableFastSnapshotRestore).toHaveBeenCalledWith(["snap-root"], ["eu-west-1a"]);
+    expect(
+      storage.value("image:aws:catalog:linux:x86_64:ubuntu24.04:eu-west-1:ami-desktop"),
+    ).toEqual(expect.objectContaining({ id: "ami-desktop", catalogOnly: true }));
+    expect(storage.value("image:aws:promoted:linux:x86_64:ubuntu24.04:eu-west-1")).toBeUndefined();
+    expect(storage.value("image:aws:promoted:linux:x86_64:ubuntu24.04")).toBeUndefined();
+    expect(storage.value("image:aws:promoted")).toBeUndefined();
+  });
+
+  it("keeps default selection unchanged after a catalog-only promotion", async () => {
+    const storage = new MemoryStorage();
+    storage.seed("image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1", {
+      id: "ami-default",
+      name: "default",
+      state: "available",
+      target: "linux",
+      os: "ubuntu:26.04",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-07-01T00:00:00Z",
+    });
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockResolvedValue({
+      id: "ami-variant",
+      name: "variant",
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    });
+    const url = new URL(
+      "https://crabbox.test/v1/images/ami-variant/promote?target=linux&region=eu-west-1&sdk=toolkit%3D2.0&catalogOnly=true",
+    );
+    await provider.promoteImage(
+      "ami-variant",
+      undefined,
+      new Request(url, { method: "POST", body: "{}" }),
+      url,
+    );
+
+    const config = leaseConfig({
+      provider: "aws",
+      os: "ubuntu:26.04",
+      sshPublicKey: "ssh-ed25519 test",
+    });
+
+    await expect(provider.prepareLeaseConfig(config)).resolves.toMatchObject({
+      awsAMI: "ami-default",
+      selectedImage: { id: "ami-default" },
+    });
+  });
+
+  it("selects a matching catalog-only AWS image for capability-aware leases", async () => {
+    const storage = new MemoryStorage();
+    storage.seed("image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1", {
+      id: "ami-default",
+      name: "default",
+      state: "available",
+      target: "linux",
+      os: "ubuntu:26.04",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-07-01T00:00:00Z",
+    });
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockResolvedValue({
+      id: "ami-variant",
+      name: "variant",
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    });
+    const url = new URL(
+      "https://crabbox.test/v1/images/ami-variant/promote?target=linux&region=eu-west-1&sdk=toolkit%3D2.0&catalogOnly=true",
+    );
+    await provider.promoteImage(
+      "ami-variant",
+      undefined,
+      new Request(url, { method: "POST", body: "{}" }),
+      url,
+    );
+
+    const config = leaseConfig({
+      provider: "aws",
+      os: "ubuntu:26.04",
+      sshPublicKey: "ssh-ed25519 test",
+      imageRequirements: { sdks: { toolkit: "2" } },
+    });
+
+    await expect(provider.prepareLeaseConfig(config)).resolves.toMatchObject({
+      awsAMI: "",
+      awsPromotedAMIs: expect.objectContaining({
+        [awsPromotedAMIConfigKey("eu-west-1", config.serverType)]: "ami-variant",
+      }),
+    });
+  });
+
+  it("rejects catalog-only AWS promotions without capabilities", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(
+      storage,
+      {},
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "test",
+        CRABBOX_AWS_REGION: "eu-west-1",
+      },
+    );
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/images/ami-variant/promote?catalogOnly=true", {
+        headers: { "x-crabbox-admin": "true" },
+        body: {},
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "catalog_only_capabilities_required",
+      message: "catalog-only image promotion requires at least one capability declaration",
+    });
+    expect(await storage.list({ prefix: "image:aws:" })).toHaveLength(0);
+  });
+
   it("records the exact promoted AWS image selected for a lease", async () => {
     const storage = new MemoryStorage();
     storage.seed("image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1", {
@@ -28320,6 +28480,42 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  it("rejects catalog-only Azure image promotion", async () => {
+    const storage = new MemoryStorage();
+    const provider = new AzureProvider({} as Env, undefined, storage, "westeurope");
+    const snapshot: ProviderImage = {
+      id: "snapshot-variant",
+      name: "snapshot-variant",
+      state: "succeeded",
+      provider: "azure",
+      kind: "azure-os-disk-snapshot",
+      target: "linux",
+      os: "ubuntu:26.04",
+      region: "westeurope",
+      architecture: "amd64",
+      serverType: "Standard_D192ds_v6",
+    };
+    const url = new URL(
+      "https://crabbox.test/v1/images/snapshot-variant/promote?provider=azure&catalogOnly=true",
+    );
+
+    const response = await provider.promoteImage(
+      snapshot.id,
+      snapshot,
+      new Request(url, { method: "POST", body: "{}" }),
+      url,
+    );
+
+    expect(response).toBeInstanceOf(Response);
+    if (!(response instanceof Response)) throw new Error("expected error response");
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "unsupported_provider",
+      message: "catalog-only image promotion is AWS-only",
+    });
+    expect(await storage.list({ prefix: "image:azure:promoted:" })).toHaveLength(0);
+  });
+
   it("rejects brokered Azure ARM64 leases when neither a promoted snapshot nor image exists", async () => {
     const provider = new AzureProvider({} as Env, undefined, new MemoryStorage(), "westeurope");
     const config = leaseConfig(
@@ -28463,9 +28659,9 @@ describe("fleet lease identity and idle", () => {
       region: "eu-west-1",
       architecture: "x86_64",
     }));
-    const promote = async (imageID: string, runtime?: string) => {
+    const promote = async (imageID: string, runtime?: string, browser?: boolean) => {
       const url = new URL(
-        `https://crabbox.test/v1/images/${imageID}/promote?target=linux&region=eu-west-1${runtime ? `&runtime=node%3D${runtime}` : ""}`,
+        `https://crabbox.test/v1/images/${imageID}/promote?target=linux&region=eu-west-1${runtime ? `&runtime=node%3D${runtime}` : ""}${browser === undefined ? "" : `&browser=${browser}`}`,
       );
       return provider.promoteImage(
         imageID,
@@ -28475,7 +28671,7 @@ describe("fleet lease identity and idle", () => {
       );
     };
 
-    await promote("ami-a", "24.2");
+    await promote("ami-a", "24.2", true);
     await promote("ami-b", "22.17");
     const rollback = await promote("ami-a");
 
@@ -28483,8 +28679,16 @@ describe("fleet lease identity and idle", () => {
       image: { id: "ami-a", capabilities: { runtimes: { node: "24.2" } } },
     });
     expect(storage.value("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-a")).toEqual(
-      expect.objectContaining({ capabilities: { runtimes: { node: "24.2" } } }),
+      expect.objectContaining({
+        capabilities: { runtimes: { node: "24.2" }, browser: true },
+      }),
     );
+
+    const cleared = await promote("ami-a", undefined, false);
+    expect(cleared).toMatchObject({
+      image: { id: "ami-a", capabilities: { runtimes: { node: "24.2" } } },
+    });
+    expect(cleared).not.toMatchObject({ image: { capabilities: { browser: true } } });
   });
 
   it("selects the newest promoted AWS image satisfying every requirement", async () => {
