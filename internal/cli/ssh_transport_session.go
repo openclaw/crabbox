@@ -589,7 +589,7 @@ func probeSSHTransportRouteCapabilities(ctx context.Context, target SSHTarget, c
 }
 
 func runOwnedSSHTransportCommand(ctx context.Context, target SSHTarget, args []string, stdout, stderr io.Writer) error {
-	handle := pondMeshExecCommand(ctx, target.ChildEnvDenylist, "ssh", args...)
+	handle := pondMeshExecCommand(ctx, target.ChildEnvDenylist, directSSHExecutable(), args...)
 	if execHandle, ok := handle.(*pondMeshExecHandle); ok {
 		execHandle.cmd.Stdout = stdout
 		execHandle.cmd.Stderr = stderr
@@ -640,7 +640,7 @@ func writeSSHTransportJumpConfig(dir, userConfigPath, proxyJump string, remoteCo
 		path := filepath.Join(dir, name)
 		proxyCommand := ""
 		if previousPath != "" {
-			proxyCommand = proxyJumpDirectCommand(previousPath, hops[index-1])
+			proxyCommand = proxyJumpDirectCommand(directSSHExecutable(), previousPath, hops[index-1])
 		}
 		config := renderSSHTransportJumpConfig(userConfigPath, proxyCommand, remoteCommandSupported)
 		if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
@@ -731,11 +731,11 @@ func expandSSHProxyJumpTokens(command, originalHost, host, user, port string) st
 
 func proxyJumpCommand(route sshTransportConfigRoute) string {
 	hops := strings.Split(route.proxyJump, ",")
-	return proxyJumpDirectCommand(route.jumpConfigPath, hops[len(hops)-1])
+	return proxyJumpDirectCommand(directSSHExecutable(), route.jumpConfigPath, hops[len(hops)-1])
 }
 
-func proxyJumpDirectCommand(configPath, hop string) string {
-	args := []string{"ssh"}
+func proxyJumpDirectCommand(sshExecutable, configPath, hop string) string {
+	args := []string{sshExecutable}
 	if configPath != "" {
 		// This command is embedded in ProxyCommand. Protect path percent signs
 		// from the outer OpenSSH client's token expansion.

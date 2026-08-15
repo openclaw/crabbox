@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +12,58 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestResolvedSSHCopyCommandUsesNativeWindowsSiblingPair(t *testing.T) {
+	toolDir := filepath.Join(t.TempDir(), "MSYS2 tools")
+	if err := os.MkdirAll(toolDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"rsync.exe", "ssh.exe"} {
+		if err := os.WriteFile(filepath.Join(toolDir, name), []byte("fixture"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", toolDir)
+	handle, err := resolvedSSHCopyCommandForGOOS(context.Background(), "windows", SSHTarget{}, []string{
+		"-az", "-e", "'ssh' '-F' 'private config'", "--", "source", "target:dest",
+	}, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	execHandle, ok := handle.(*pondMeshExecHandle)
+	if !ok {
+		t.Fatalf("handle=%T", handle)
+	}
+	if execHandle.cmd.Path != filepath.Join(toolDir, "rsync.exe") {
+		t.Fatalf("rsync path=%q", execHandle.cmd.Path)
+	}
+	wantSSH := rsyncShellWords([]string{filepath.Join(toolDir, "ssh.exe")})[0]
+	if got := execHandle.cmd.Args[3]; !strings.HasPrefix(got, wantSSH+" ") || !strings.Contains(got, "'private config'") {
+		t.Fatalf("paired remote shell=%q", got)
+	}
+	joinedEnv := strings.Join(execHandle.cmd.Env, "\n")
+	if !strings.Contains(joinedEnv, "MSYS2_ARG_CONV_EXCL=*") || !strings.Contains(joinedEnv, "MSYS_NO_PATHCONV=1") || !strings.Contains(joinedEnv, "CYGWIN=nodosfilewarning") {
+		t.Fatalf("native rsync environment=%q", execHandle.cmd.Env)
+	}
+}
+
+func TestResolvedSSHCopyCommandFailsClosedWithoutNativeWindowsSibling(t *testing.T) {
+	toolDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(toolDir, "rsync.exe"), []byte("fixture"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", toolDir)
+	_, err := resolvedSSHCopyCommandForGOOS(context.Background(), "windows", SSHTarget{}, []string{
+		"-az", "-e", "'ssh' '-F' 'private config'", "--", "source", "target:dest",
+	}, "", "")
+	var exitErr ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 2 {
+		t.Fatalf("error=%v, want exit 2", err)
+	}
+	if !strings.Contains(err.Error(), "sibling OpenSSH") || !strings.Contains(err.Error(), "WSL2") {
+		t.Fatalf("diagnostic=%q", err)
+	}
+}
 
 func TestResolvedSSHCopyArgs(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())

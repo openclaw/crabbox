@@ -93,6 +93,20 @@ func TestRunCommandWithPlatformStreamsAllowsNilWriters(t *testing.T) {
 	}
 }
 
+func TestCommandStreamFileSecurityIsCurrentUserPrivate(t *testing.T) {
+	attributes, err := commandStreamFileSecurity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := currentWindowsUserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateCurrentUserPrivateWindowsDescriptor(attributes.SecurityDescriptor, user); err != nil {
+		t.Fatalf("command stream security is not current-user private: %v", err)
+	}
+}
+
 func TestCommandStreamRotationNeededBoundsSpool(t *testing.T) {
 	spool, err := newCommandStreamSpool()
 	if err != nil {

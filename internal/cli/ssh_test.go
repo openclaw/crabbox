@@ -22,6 +22,149 @@ import (
 
 const powerShellEncodedCommandPrefix = "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "
 
+func TestDirectSSHExecutableSelection(t *testing.T) {
+	windowsDir := t.TempDir()
+	nativeSSH := filepath.Join(windowsDir, "System32", "OpenSSH", "ssh.exe")
+	if err := os.MkdirAll(filepath.Dir(nativeSSH), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nativeSSH, []byte("fixture"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name       string
+		goos       string
+		windowsDir string
+		want       string
+	}{
+		{name: "Windows native path exists", goos: "windows", windowsDir: windowsDir, want: nativeSSH},
+		{name: "Windows native path missing", goos: "windows", windowsDir: filepath.Join(t.TempDir(), "missing"), want: "ssh"},
+		{name: "non-Windows", goos: "linux", windowsDir: windowsDir, want: "ssh"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := directSSHExecutableForGOOS(test.goos, func(name string) string {
+				if name != "WINDIR" {
+					t.Fatalf("environment lookup=%q", name)
+				}
+				return test.windowsDir
+			}, os.Stat)
+			if got != test.want {
+				t.Fatalf("executable=%q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestResolveWindowsNativeRsyncPairUsesExactSibling(t *testing.T) {
+	toolDir := filepath.Join(t.TempDir(), "MSYS2 tools with spaces")
+	if err := os.MkdirAll(toolDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rsyncPath := filepath.Join(toolDir, "rsync.exe")
+	sshPath := filepath.Join(toolDir, "ssh.exe")
+	for _, path := range []string{rsyncPath, sshPath} {
+		if err := os.WriteFile(path, []byte("fixture"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gotRsync, gotSSH, err := resolveWindowsNativeRsyncPair(func(name string) (string, error) {
+		if name != "rsync.exe" {
+			t.Fatalf("lookup=%q", name)
+		}
+		return rsyncPath, nil
+	}, os.Stat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotRsync != rsyncPath || gotSSH != sshPath {
+		t.Fatalf("pair=(%q, %q), want (%q, %q)", gotRsync, gotSSH, rsyncPath, sshPath)
+	}
+}
+
+func TestResolveWindowsNativeRsyncPairFailsClosedWithoutSibling(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		directory bool
+	}{
+		{name: "missing"},
+		{name: "not a regular file", directory: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			toolDir := t.TempDir()
+			rsyncPath := filepath.Join(toolDir, "rsync.exe")
+			if err := os.WriteFile(rsyncPath, []byte("fixture"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if test.directory {
+				if err := os.Mkdir(filepath.Join(toolDir, "ssh.exe"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, _, err := resolveWindowsNativeRsyncPair(func(string) (string, error) { return rsyncPath, nil }, os.Stat)
+			var exitErr ExitError
+			if !errors.As(err, &exitErr) || exitErr.Code != 2 {
+				t.Fatalf("error=%v, want exit 2", err)
+			}
+			for _, want := range []string{"sibling OpenSSH", "ssh.exe", "WSL2"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("diagnostic=%q missing %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestBindWindowsNativeRsyncSSHPreservesOwnedArguments(t *testing.T) {
+	sshPath := `C:\Program Files\MSYS2\usr\bin\ssh.exe`
+	remoteShell := `'ssh' '-F' 'C:\Users\alice\private ssh_config' '-o' 'ProxyCommand=provider-helper token'`
+	args := []string{"-az", "-e", remoteShell, "--", "source", "target:/work/repo"}
+	got, err := bindWindowsNativeRsyncSSH(args, sshPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantShell := rsyncShellWords([]string{sshPath})[0] + remoteShell[len("'ssh'"):]
+	if got[2] != wantShell {
+		t.Fatalf("remote shell=%q, want %q", got[2], wantShell)
+	}
+	if !reflect.DeepEqual(got[:2], args[:2]) || !reflect.DeepEqual(got[3:], args[3:]) {
+		t.Fatalf("paired args changed unrelated values: got=%#v want=%#v", got, args)
+	}
+	if args[2] != remoteShell {
+		t.Fatalf("input args mutated: %#v", args)
+	}
+}
+
+func TestWindowsNativeRsyncCommandUsesSiblingPairAndEnvironment(t *testing.T) {
+	toolDir := filepath.Join(t.TempDir(), "native tools")
+	if err := os.MkdirAll(toolDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"rsync.exe", "ssh.exe"} {
+		if err := os.WriteFile(filepath.Join(toolDir, name), []byte("fixture"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", toolDir)
+	cmd, err := windowsNativeRsyncCommand(t.Context(), []string{"-e", "'ssh' '-i' 'injected key'", "source", "host:dest"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cmd.Path != filepath.Join(toolDir, "rsync.exe") {
+		t.Fatalf("rsync path=%q", cmd.Path)
+	}
+	if got := cmd.Args[2]; !strings.HasPrefix(got, rsyncShellWords([]string{filepath.Join(toolDir, "ssh.exe")})[0]+" ") || !strings.Contains(got, "'injected key'") {
+		t.Fatalf("paired remote shell=%q", got)
+	}
+	joinedEnv := strings.Join(cmd.Env, "\n")
+	for _, want := range []string{"MSYS2_ARG_CONV_EXCL=*", "MSYS_NO_PATHCONV=1", "CYGWIN=nodosfilewarning"} {
+		if !strings.Contains(joinedEnv, want) {
+			t.Fatalf("environment missing %q: %q", want, cmd.Env)
+		}
+	}
+}
+
 func TestApplyTargetChildEnvironmentAddsOverridesAndRemovesAmbientValue(t *testing.T) {
 	cmd := &exec.Cmd{Env: []string{"PATH=/bin", "GH_HOST=ambient.example"}}
 	applyTargetChildEnvironment(cmd, SSHTarget{
@@ -3615,9 +3758,9 @@ func TestRemoteWriteSyncDeletedNew(t *testing.T) {
 func TestRemoteWriteSyncManifestsNew(t *testing.T) {
 	const finalizeToken = "0123456789abcdef0123456789abcdef"
 	workdir := t.TempDir()
-	manifest := "keep.txt\x00"
-	deleted := "old.txt\x00"
-	input := fmt.Sprintf("%d\n", len(manifest)) + manifest + deleted
+	manifest := "keep.txt\x00binary\xff\x00"
+	deleted := "old.txt\x00gone\xfe\x00"
+	input := syncManifestInputForTarget(SSHTarget{TargetOS: targetLinux}, []byte(manifest), []byte(deleted))
 	cmd := exec.Command("bash", "-lc", remoteWriteSyncManifestsNew(workdir, finalizeToken))
 	cmd.Stdin = strings.NewReader(input)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -3668,9 +3811,20 @@ func TestRemoteWriteSyncManifestsNewForTargetUsesInterpretedWriterForWSL2(t *tes
 	if strings.Contains(plain, "status=none") {
 		t.Fatalf("non-WSL2 manifest writer should not require GNU dd extensions: %q", plain)
 	}
+	if strings.Count(plain, "dd bs=1 count=\"") != 2 {
+		t.Fatalf("non-WSL2 manifest writer should exact-read both blobs: %q", plain)
+	}
+	if strings.Contains(plain, "cat >") {
+		t.Fatalf("non-WSL2 manifest writer should not read either blob through EOF: %q", plain)
+	}
+	for _, want := range []string{"IFS= read -r manifest_len", "IFS= read -r deleted_len", "wc -c", "short sync manifest", "short sync deleted manifest"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("non-WSL2 manifest writer missing %q: %q", want, plain)
+		}
+	}
 }
 
-func TestSyncManifestInputForTargetFramesDeletedLengthForWSL2(t *testing.T) {
+func TestSyncManifestInputForTargetFramesBothLengths(t *testing.T) {
 	manifest := []byte("keep.txt\x00")
 	deleted := []byte("old.txt\x00")
 	got := syncManifestInputForTarget(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, manifest, deleted)
@@ -3682,9 +3836,126 @@ func TestSyncManifestInputForTargetFramesDeletedLengthForWSL2(t *testing.T) {
 	}
 
 	plain := syncManifestInputForTarget(SSHTarget{TargetOS: targetLinux}, manifest, deleted)
-	plainWant := fmt.Sprintf("%d\n", len(manifest)) + string(manifest) + string(deleted)
+	plainWant := fmt.Sprintf("%d\n%d\n", len(manifest), len(deleted)) + string(manifest) + string(deleted)
 	if plain != plainWant {
 		t.Fatalf("plain manifest input = %q, want %q", plain, plainWant)
+	}
+}
+
+func TestSyncManifestInputForTargetFramesEmptyDeletedData(t *testing.T) {
+	manifest := []byte("keep.txt\x00")
+	got := syncManifestInputForTarget(SSHTarget{TargetOS: targetLinux}, manifest, nil)
+	want := fmt.Sprintf("%d\n0\n", len(manifest)) + string(manifest)
+	if got != want {
+		t.Fatalf("plain manifest input = %q, want %q", got, want)
+	}
+}
+
+func TestRemoteWriteSyncManifestsNewRejectsMalformedLengths(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "missing manifest length", input: "", want: "invalid sync manifest length"},
+		{name: "non-decimal manifest length", input: "x\n0\n", want: "invalid sync manifest length"},
+		{name: "non-canonical manifest length", input: "01\n0\n", want: "invalid sync manifest length"},
+		{name: "missing deleted length", input: "0\n", want: "invalid sync deleted length"},
+		{name: "non-decimal deleted length", input: "0\nx\n", want: "invalid sync deleted length"},
+		{name: "non-canonical deleted length", input: "0\n01\n", want: "invalid sync deleted length"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cmd := exec.Command("bash", "-lc", remoteWriteSyncManifestsNew(t.TempDir(), "0123456789abcdef0123456789abcdef"))
+			cmd.Stdin = strings.NewReader(test.input)
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("malformed frame unexpectedly succeeded: %q", out)
+			}
+			if !strings.Contains(string(out), test.want) {
+				t.Fatalf("output=%q, want %q", out, test.want)
+			}
+		})
+	}
+}
+
+func TestRemoteWriteSyncManifestsNewRejectsShortInput(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "manifest", input: "2\n0\na", want: "short sync manifest: got 1 want 2"},
+		{name: "deleted", input: "1\n2\nab", want: "short sync deleted manifest: got 1 want 2"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cmd := exec.Command("bash", "-lc", remoteWriteSyncManifestsNew(t.TempDir(), "0123456789abcdef0123456789abcdef"))
+			cmd.Stdin = strings.NewReader(test.input)
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("short frame unexpectedly succeeded: %q", out)
+			}
+			if !strings.Contains(string(out), test.want) {
+				t.Fatalf("output=%q, want %q", out, test.want)
+			}
+		})
+	}
+}
+
+func TestRemoteWriteSyncManifestsNewDoesNotWaitForEOF(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		deleted []byte
+	}{
+		{name: "empty deleted data"},
+		{name: "non-empty deleted data", deleted: []byte("old.txt\x00")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			const finalizeToken = "0123456789abcdef0123456789abcdef"
+			workdir := t.TempDir()
+			manifest := []byte("keep.txt\x00")
+			cmd := exec.Command("bash", "-lc", remoteWriteSyncManifestsNew(workdir, finalizeToken))
+			stdin, err := cmd.StdinPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := io.WriteString(stdin, syncManifestInputForTarget(SSHTarget{TargetOS: targetLinux}, manifest, test.deleted)); err != nil {
+				t.Fatal(err)
+			}
+
+			done := make(chan error, 1)
+			go func() { done <- cmd.Wait() }()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("write manifests before EOF failed: %v", err)
+				}
+			case <-time.After(2 * time.Second):
+				_ = stdin.Close()
+				_ = cmd.Process.Kill()
+				<-done
+				t.Fatal("manifest writer waited for transport EOF after a complete deleted frame")
+			}
+			_ = stdin.Close()
+
+			metaDir := filepath.Join(workdir, ".crabbox")
+			gotManifest, err := os.ReadFile(filepath.Join(metaDir, remoteSyncPendingManifestName(finalizeToken)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(gotManifest, manifest) {
+				t.Fatalf("manifest=%q, want %q", gotManifest, manifest)
+			}
+			gotDeleted, err := os.ReadFile(filepath.Join(metaDir, remoteSyncPendingDeletedName(finalizeToken)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(gotDeleted, test.deleted) {
+				t.Fatalf("deleted manifest=%q, want %q", gotDeleted, test.deleted)
+			}
+		})
 	}
 }
 
@@ -3737,11 +4008,14 @@ func TestRemoteWriteSyncManifestsNewReadsChunkedInput(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := io.WriteString(stdin, fmt.Sprintf("%d\n", len(manifest))+manifest[:1]); err != nil {
+	frame := syncManifestInputForTarget(SSHTarget{TargetOS: targetLinux}, []byte(manifest), []byte(deleted))
+	headerLen := strings.Index(frame, "\n") + 1
+	headerLen += strings.Index(frame[headerLen:], "\n") + 1
+	if _, err := io.WriteString(stdin, frame[:headerLen+1]); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(100 * time.Millisecond)
-	if _, err := io.WriteString(stdin, manifest[1:]+deleted); err != nil {
+	if _, err := io.WriteString(stdin, frame[headerLen+1:]); err != nil {
 		t.Fatal(err)
 	}
 	if err := stdin.Close(); err != nil {

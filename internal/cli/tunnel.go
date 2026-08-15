@@ -96,7 +96,7 @@ func runSSHLocalForward(ctx context.Context, target SSHTarget, requestedLocalPor
 	forwardCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	args := resolvedSSHTunnelArgs(session, reservation.port, remotePort)
-	handle := pondMeshExecCommand(forwardCtx, target.ChildEnvDenylist, "ssh", args...)
+	handle := pondMeshExecCommand(forwardCtx, target.ChildEnvDenylist, directSSHExecutable(), args...)
 	output := newSynchronizedTailBuffer(failureTailLines)
 	if execHandle, ok := handle.(*pondMeshExecHandle); ok {
 		execHandle.cmd.Stdout = output

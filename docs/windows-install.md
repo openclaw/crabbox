@@ -1,25 +1,37 @@
 # Install Crabbox on Windows
 
-The currently supported Windows client setup uses the native `crabbox.exe`
-from the latest GitHub Release and WSL2 Ubuntu's native Linux `rsync` and
-OpenSSH client for repository transfer. Native Windows Git, OpenSSH
-(`ssh.exe` and `ssh-keygen.exe`), and `curl.exe` must also be on `PATH`.
+The supported Windows client setup uses the native `crabbox.exe` from the
+latest GitHub Release, native Windows OpenSSH for Crabbox control commands,
+and one of two matched transfer toolchains:
+
+1. A default WSL2 distribution with native Linux `rsync` and OpenSSH. This is
+   the preferred path.
+2. On x64 only, no WSL: MSYS2 `rsync.exe` and the sibling MSYS2 `ssh.exe`
+   from the exact same directory.
+
+Native Windows Git, the Windows OpenSSH Client capability (`ssh.exe` and
+`ssh-keygen.exe`), and `curl.exe` are required for both paths.
+
+The native Crabbox release installer below supports both amd64 and arm64
+archives. The no-WSL MSYS2 transport has been live-proven and is supported on
+x64 Windows only; use the preferred WSL2 path on Windows ARM64.
 
 Crabbox invokes `wsl.exe` without naming a distribution, so it probes the
 default WSL distribution. This guide configures Ubuntu as that default, but
 Ubuntu is not a code requirement: another distribution works when it is the
 default and provides native Linux `rsync` and `ssh` commands.
 
-The automatic WSL transport selection documented here requires a build that
-contains the direct-output detection fix: current `main` or Crabbox v0.42.1
-and newer. Crabbox v0.42.0 and older can silently fall back to an incompatible
-Windows shim even when the native WSL tools are installed.
+The transport selection documented here requires current `main` or Crabbox
+v0.42.1 and newer. Crabbox v0.42.0 and older can silently select an
+incompatible Windows SSH pairing.
 
-A native no-WSL rsync/OpenSSH transport tuple is not yet supported. In
-particular, do not pair MSYS2 or Cygwin rsync with native Windows OpenSSH:
-rsync can exit while its SSH child remains connected. Crabbox therefore
-prefers native WSL tools and rejects `.exe` files and tools resolved through
-mounted Windows paths when probing WSL.
+Crabbox never pairs MSYS2 or Cygwin rsync with the native System32 OpenSSH
+client. That combination is unsupported: rsync can exit while its SSH child
+remains connected. Crabbox prefers native WSL tools when both are available;
+without WSL, it resolves `rsync.exe` from `PATH` and fails closed unless a
+regular `ssh.exe` exists beside it. Direct control commands separately use
+`%WINDIR%\System32\OpenSSH\ssh.exe` when present, ignoring an MSYS2 SSH that
+appears earlier on `PATH`.
 
 ## Install the native Crabbox executable
 
@@ -152,19 +164,128 @@ wsl.exe --distribution Ubuntu -- bash -lc 'sudo apt-get update && sudo apt-get i
 If you prefer another WSL distribution, set that distribution as the default
 instead and install its native `rsync` and OpenSSH client packages there.
 
-## Verify the installation
+## Install no-WSL transfer tools with MSYS2
 
-Open a fresh, ordinary PowerShell session. The first command checks the native
-Windows tools. The second exactly matches Crabbox's unqualified
-default-distribution probe and deliberately uses direct `command -v` output:
-both paths must be Linux paths such as `/usr/bin/rsync` and `/usr/bin/ssh`,
-never `.exe` files or paths below `/mnt/<drive>` or `/mnt/host/<drive>`.
+Skip this section when using the WSL2 path above. In an **elevated PowerShell**
+session on x64 Windows, download the official maintained MSYS2 self-extracting
+base archive, verify the exact digest exercised by the live proof, extract it
+to `C:\msys64`, and install both transfer packages. This path intentionally
+does not depend on Winget, which was unavailable on the clean AWS Windows image
+used for the live proof.
 
 ```powershell
-Get-Command crabbox.exe, git.exe, ssh.exe, ssh-keygen.exe, curl.exe
-wsl.exe sh -c 'command -v rsync || exit 1; command -v ssh || exit 1'
+$ErrorActionPreference = "Stop"
+$msysRoot = "C:\msys64"
+$msysBin = Join-Path $msysRoot "usr\bin"
+$msysBash = Join-Path $msysBin "bash.exe"
+$msysURL = "https://github.com/msys2/msys2-installer/releases/download/2026-06-11/msys2-base-x86_64-20260611.sfx.exe"
+$expectedMSYSHash = "c105946e64e08f099ac0e4647461ce762b95333ad211777666476a9a41451d65"
+$downloadDir = Join-Path ([IO.Path]::GetTempPath()) ("crabbox-msys2-" + [guid]::NewGuid())
+$msysSFX = Join-Path $downloadDir "msys2-base-x86_64-20260611.sfx.exe"
+
+New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
+try {
+    Invoke-WebRequest -Uri $msysURL -OutFile $msysSFX
+    $actualMSYSHash = (Get-FileHash -Algorithm SHA256 -Path $msysSFX).Hash
+    if ($actualMSYSHash -ine $expectedMSYSHash) {
+        throw "MSYS2 SHA-256 mismatch; do not bypass checksum verification."
+    }
+
+    $extract = Start-Process -FilePath $msysSFX `
+        -ArgumentList "-y", "-oC:\" `
+        -Wait -PassThru -NoNewWindow
+    if ($extract.ExitCode -ne 0) { throw "MSYS2 extraction failed." }
+} finally {
+    Remove-Item -LiteralPath $downloadDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+if (-not (Test-Path -LiteralPath $msysBash -PathType Leaf)) {
+    throw "MSYS2 bash was not installed at $msysBash."
+}
+
+& $msysBash -lc 'pacman -Sy --needed --noconfirm rsync openssh'
+if ($LASTEXITCODE -ne 0) { throw "MSYS2 rsync/OpenSSH installation failed." }
+
+$requiredTransferTools = @(
+    (Join-Path $msysBin "rsync.exe")
+    (Join-Path $msysBin "ssh.exe")
+)
+foreach ($tool in $requiredTransferTools) {
+    if (-not (Test-Path -LiteralPath $tool -PathType Leaf)) {
+        throw "Required no-WSL transfer tool is missing: $tool"
+    }
+}
+
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+$userPathParts = @($userPath -split ';' | Where-Object { $_ })
+if ($userPathParts -notcontains $msysBin) {
+    [Environment]::SetEnvironmentVariable(
+        "Path",
+        (@($msysBin) + $userPathParts) -join ';',
+        "User"
+    )
+}
+if (($env:Path -split ';') -notcontains $msysBin) {
+    $env:Path = "$msysBin;$env:Path"
+}
+```
+
+The URL and digest above pin the immutable MSYS2 2026-06-11 base archive.
+The digest verifies that archive, while `pacman` installs the current package
+versions rather than pinning them.
+
+This deliberately places `C:\msys64\usr\bin\rsync.exe` and its sibling
+`ssh.exe` together on `PATH`. Crabbox binds native rsync's `-e` remote shell to
+that exact sibling executable, including when the directory contains spaces.
+It still uses System32 OpenSSH for direct control, probes, connect, and tunnel
+commands. Do not remove the sibling MSYS2 `ssh.exe` or substitute System32
+OpenSSH in rsync configuration.
+
+The x64 live proof installed MSYS2 rsync 3.5.0 and OpenSSH 10.5p1, and that
+tuple completed a real 64 MiB Windows-to-Linux sync. Those package versions
+describe the proven run; the `pacman` command above does not pin future installs
+to identical versions. The no-WSL tuple has not been live-proven on Windows
+ARM64, so use WSL2 there.
+
+## Verify the installation
+
+Open a fresh, ordinary PowerShell session and verify the shared native tools:
+
+```powershell
+Get-Command crabbox.exe, git.exe, ssh-keygen.exe, curl.exe
+Test-Path -LiteralPath "$env:WINDIR\System32\OpenSSH\ssh.exe" -PathType Leaf
 crabbox --version
 crabbox doctor
+```
+
+For WSL2, run Crabbox's unqualified default-distribution probe. Both results
+must be Linux paths such as `/usr/bin/rsync` and `/usr/bin/ssh`, never `.exe`
+files or paths below `/mnt/<drive>` or `/mnt/host/<drive>`:
+
+```powershell
+wsl.exe sh -c 'command -v rsync || exit 1; command -v ssh || exit 1'
+```
+
+For no-WSL MSYS2 on x64, verify that PATH-selected rsync and its required
+sibling are the exact two files installed together. `Get-Command ssh.exe` may
+report the MSYS2 binary; Crabbox still selects System32 OpenSSH for direct
+control.
+
+```powershell
+$expectedRsync = "C:\msys64\usr\bin\rsync.exe"
+$expectedSiblingSSH = "C:\msys64\usr\bin\ssh.exe"
+$rsync = (Get-Command rsync.exe -CommandType Application).Source
+$siblingSSH = Join-Path (Split-Path -Parent $rsync) "ssh.exe"
+$rsync
+$siblingSSH
+if ($rsync -ine $expectedRsync -or $siblingSSH -ine $expectedSiblingSSH) {
+    throw "PATH-selected rsync.exe and its sibling ssh.exe are not the verified C:\msys64\usr\bin pair."
+}
+foreach ($tool in @($expectedRsync, $expectedSiblingSSH)) {
+    if (-not (Test-Path -LiteralPath $tool -PathType Leaf)) {
+        throw "Required no-WSL transfer tool is missing: $tool"
+    }
+}
 ```
 
 A provider-neutral `crabbox doctor` can report `no provider selected`. That is
@@ -176,7 +297,7 @@ remote lifecycle command.
 
 If Docker Desktop is already installed and running, this secretless local
 container smoke creates and commits a fixture in a temporary repository, syncs
-that repository through the configured default WSL transport, verifies the
+that repository through the selected Windows transfer transport, verifies the
 fixture in the container, and removes both the container and local repository:
 
 ```powershell
@@ -189,7 +310,7 @@ $smokeRepo = Join-Path ([IO.Path]::GetTempPath()) ("crabbox-windows-sync-" + [gu
 New-Item -ItemType Directory -Path $smokeRepo | Out-Null
 
 try {
-    Set-Content -LiteralPath (Join-Path $smokeRepo "fixture.txt") -Value "crabbox-wsl-sync-ok" -NoNewline
+    Set-Content -LiteralPath (Join-Path $smokeRepo "fixture.txt") -Value "crabbox-windows-sync-ok" -NoNewline
     Push-Location $smokeRepo
     try {
         git init
@@ -201,7 +322,7 @@ try {
         git -c 'user.name=Crabbox Sync Test' -c 'user.email=crabbox-sync-test@example.invalid' commit -m 'test: add sync fixture'
         if ($LASTEXITCODE -ne 0) { throw "git commit failed." }
 
-        crabbox run --provider local-container --local-container-runtime docker --stop-after always -- sh -lc 'test "$(cat fixture.txt)" = "crabbox-wsl-sync-ok"'
+        crabbox run --provider local-container --local-container-runtime docker --stop-after always -- sh -lc 'test "$(cat fixture.txt)" = "crabbox-windows-sync-ok"'
         if ($LASTEXITCODE -ne 0) { throw "Crabbox repository sync smoke failed." }
     } finally {
         Pop-Location

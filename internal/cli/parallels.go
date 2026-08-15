@@ -720,7 +720,7 @@ func (c *ParallelsClient) prlctl(ctx context.Context, extraEnv []string, args ..
 			host = c.Cfg.Parallels.HostUser + "@" + host
 		}
 		sshArgs = append(sshArgs, host, remote)
-		return c.Runner.Run(ctx, LocalCommandRequest{Name: "ssh", Args: sshArgs, Env: extraEnv})
+		return c.Runner.Run(ctx, LocalCommandRequest{Name: directSSHExecutable(), Args: sshArgs, Env: extraEnv})
 	}
 	return c.Runner.Run(ctx, LocalCommandRequest{Name: "prlctl", Args: args, Env: extraEnv})
 }

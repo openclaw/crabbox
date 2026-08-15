@@ -441,7 +441,7 @@ func vncTunnelCommand(target SSHTarget, localPort string) string {
 }
 
 func startVNCTunnel(ctx context.Context, target SSHTarget, localPort, remoteHost, remotePort string) (int, error) {
-	cmd := exec.Command("ssh", vncTunnelArgs(target, localPort, remoteHost, remotePort)...)
+	cmd := exec.Command(directSSHExecutable(), vncTunnelArgs(target, localPort, remoteHost, remotePort)...)
 	applyTargetChildEnvironment(cmd, target)
 	configureDaemonCommand(cmd)
 	var output bytes.Buffer

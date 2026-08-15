@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -202,8 +203,27 @@ func applyTargetChildEnvironment(cmd *exec.Cmd, target SSHTarget) {
 	cmd.Env = env
 }
 
+func directSSHExecutable() string {
+	return directSSHExecutableForGOOS(runtime.GOOS, os.Getenv, os.Stat)
+}
+
+func directSSHExecutableForGOOS(goos string, getenv func(string) string, stat func(string) (os.FileInfo, error)) string {
+	if goos != "windows" {
+		return "ssh"
+	}
+	windowsDir := strings.TrimSpace(getenv("WINDIR"))
+	if windowsDir == "" {
+		return "ssh"
+	}
+	candidate := filepath.Join(windowsDir, "System32", "OpenSSH", "ssh.exe")
+	if info, err := stat(candidate); err == nil && info.Mode().IsRegular() {
+		return candidate
+	}
+	return "ssh"
+}
+
 func sshCommandContext(ctx context.Context, target SSHTarget, args ...string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "ssh", args...)
+	cmd := exec.CommandContext(ctx, directSSHExecutable(), args...)
 	applyTargetChildEnvironment(cmd, target)
 	return cmd
 }
@@ -575,9 +595,16 @@ func runIdempotentSSHCombinedOutput(ctx context.Context, target SSHTarget, remot
 	return lastOut, lastErr
 }
 
-func runWSL2ControlScriptCombinedOutput(ctx context.Context, target SSHTarget, remote string, waitTimeout time.Duration, connectTimeout, connectionAttempts string) (string, error) {
+func runWSL2ControlScriptCombinedOutput(ctx context.Context, target SSHTarget, remote string, waitTimeout time.Duration, connectTimeout, connectionAttempts string) (output string, err error) {
 	remote = wrapWorkspaceOwnerRemote(ctx, remote, false)
 	command := wsl2StdinScriptCommandWithWaitTimeout(waitTimeout)
+	input, err := newReplayableSSHInput([]byte(remote))
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		err = errors.Join(err, input.close())
+	}()
 	var lastOut []byte
 	var lastErr error
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
@@ -585,9 +612,12 @@ func runWSL2ControlScriptCombinedOutput(ctx context.Context, target SSHTarget, r
 		probe.Port = port
 		probe.FallbackPorts = []string{}
 		cmd := sshCommandContext(ctx, probe, sshArgsWithOptions(probe, command, connectTimeout, connectionAttempts)...)
-		cmd.Stdin = strings.NewReader(remote)
+		cmd.Stdin, err = input.reset()
+		if err != nil {
+			return "", err
+		}
 		var out synchronizedBuffer
-		err := runSSHCommand(cmd, &out, &out)
+		err = runSSHCommand(cmd, &out, &out)
 		if err == nil {
 			return strings.TrimSpace(out.String()), nil
 		}
@@ -604,7 +634,7 @@ func runSSHInputQuiet(ctx context.Context, target SSHTarget, remote, input strin
 	return runSSHInput(ctx, target, remote, strings.NewReader(input), io.Discard, io.Discard)
 }
 
-func runSSHInput(ctx context.Context, target SSHTarget, remote string, input io.Reader, stdout, stderr io.Writer) error {
+func runSSHInput(ctx context.Context, target SSHTarget, remote string, input io.Reader, stdout, stderr io.Writer) (err error) {
 	remote = wrapWorkspaceOwnerRemote(ctx, remote, true)
 	remote = wrapRemoteForTarget(target, remote)
 	if input == nil {
@@ -614,13 +644,23 @@ func runSSHInput(ctx context.Context, target SSHTarget, remote string, input io.
 	if err != nil {
 		return err
 	}
+	replayableInput, err := newReplayableSSHInput(data)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		err = errors.Join(err, replayableInput.close())
+	}()
 	var lastErr error
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 		probe := target
 		probe.Port = port
 		cmd := sshCommandContext(ctx, probe, sshArgs(probe, remote)...)
-		cmd.Stdin = bytes.NewReader(data)
-		err := runSSHCommand(cmd, stdout, stderr)
+		cmd.Stdin, err = replayableInput.reset()
+		if err != nil {
+			return err
+		}
+		err = runSSHCommand(cmd, stdout, stderr)
 		if err == nil {
 			return nil
 		}
@@ -877,21 +917,6 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 		ctx, cancel = context.WithTimeout(ctx, opts.Timeout)
 		defer cancel()
 	}
-	owner := workspaceOwnerFromContext(ctx)
-	guardStarted := false
-	if owner != nil && !isWindowsNativeTarget(target) {
-		rawCtx := contextWithoutWorkspaceOwner(ctx)
-		if err := runSSHQuiet(rawCtx, target, owner.rsyncPrepareCommand()); err != nil {
-			return exit(7, "prepare rsync workspace witness: %v", err)
-		}
-		if _, err := runSSHOutput(rawCtx, target, owner.WrapBackgroundCommand(owner.rsyncGuardPayload(dst))); err != nil {
-			return exit(7, "start rsync workspace witness: %v", err)
-		}
-		if err := owner.WaitForChild(rawCtx, 10*time.Second); err != nil {
-			return err
-		}
-		guardStarted = true
-	}
 	args := []string{
 		"-az",
 		"-e", strings.Join(shellWords(append([]string{"ssh"}, sshBaseArgs(target)...)), " "),
@@ -920,21 +945,40 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 		args = append(args, "--stats", "--itemize-changes", "--progress")
 	}
 	args = append(args, ensureTrailingSlash(rsyncLocalPath(src)), target.User+"@"+target.Host+":"+dst+"/")
-	start := time.Now()
 	var cmd *exec.Cmd
+	var err error
 	if runtime.GOOS == "windows" {
-		cmd = windowsRsyncCommand(ctx, target, args)
+		cmd, err = windowsRsyncCommand(ctx, target, args)
+		if err != nil {
+			return err
+		}
 	} else {
 		cmd = exec.CommandContext(ctx, "rsync", args...)
 	}
 	applyTargetChildEnvironment(cmd, target)
+	owner := workspaceOwnerFromContext(ctx)
+	guardStarted := false
+	if owner != nil && !isWindowsNativeTarget(target) {
+		rawCtx := contextWithoutWorkspaceOwner(ctx)
+		if err := runSSHQuiet(rawCtx, target, owner.rsyncPrepareCommand()); err != nil {
+			return exit(7, "prepare rsync workspace witness: %v", err)
+		}
+		if _, err := runSSHOutput(rawCtx, target, owner.WrapBackgroundCommand(owner.rsyncGuardPayload(dst))); err != nil {
+			return exit(7, "start rsync workspace witness: %v", err)
+		}
+		if err := owner.WaitForChild(rawCtx, 10*time.Second); err != nil {
+			return err
+		}
+		guardStarted = true
+	}
+	start := time.Now()
 	if opts.UseFilesFrom {
 		cmd.Stdin = bytes.NewReader(opts.FilesFrom)
 	}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	stopHeartbeat := startSyncHeartbeat(stderr, start, opts.HeartbeatInterval)
-	err := cmd.Run()
+	err = cmd.Run()
 	stopHeartbeat()
 	if guardStarted {
 		guardCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
@@ -1115,7 +1159,7 @@ func rsyncLocalPathForGOOS(goos, path string) string {
 // processes, so we prefer WSL rsync when available. The SSH key is copied
 // into WSL /tmp with correct permissions, and paths within args are
 // converted to WSL mount paths.
-func windowsRsyncCommand(ctx context.Context, target SSHTarget, args []string) *exec.Cmd {
+func windowsRsyncCommand(ctx context.Context, target SSHTarget, args []string) (*exec.Cmd, error) {
 	wslExe, ok := windowsRsyncWSLExecutable(ctx, target)
 	if !ok {
 		return windowsNativeRsyncCommand(ctx, args)
@@ -1134,7 +1178,7 @@ func windowsRsyncWSLExecutable(ctx context.Context, target SSHTarget) (string, b
 	return wslExe, true
 }
 
-func windowsWSLRsyncCommand(ctx context.Context, target SSHTarget, args []string, wslExe string) *exec.Cmd {
+func windowsWSLRsyncCommand(ctx context.Context, target SSHTarget, args []string, wslExe string) (*exec.Cmd, error) {
 	mountRoot := windowsWSLMountRoot(ctx, target, wslExe)
 
 	// Prepare WSL key: copy with correct permissions.
@@ -1191,13 +1235,72 @@ func windowsWSLRsyncCommand(ctx context.Context, target SSHTarget, args []string
 		}
 		wslArgs[i] = converted
 	}
-	return exec.CommandContext(ctx, wslExe, append([]string{"rsync"}, wslArgs...)...)
+	return exec.CommandContext(ctx, wslExe, append([]string{"rsync"}, wslArgs...)...), nil
 }
 
-func windowsNativeRsyncCommand(ctx context.Context, args []string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "rsync", args...)
-	cmd.Env = append(os.Environ(), "MSYS2_ARG_CONV_EXCL=*", "MSYS_NO_PATHCONV=1", "CYGWIN=nodosfilewarning")
-	return cmd
+func windowsNativeRsyncCommand(ctx context.Context, args []string) (*exec.Cmd, error) {
+	name, pairedArgs, err := windowsNativeRsyncCommandSpec(args)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, name, pairedArgs...)
+	applyWindowsNativeRsyncEnvironment(cmd)
+	return cmd, nil
+}
+
+func windowsNativeRsyncCommandSpec(args []string) (string, []string, error) {
+	rsyncPath, sshPath, err := resolveWindowsNativeRsyncPair(exec.LookPath, os.Stat)
+	if err != nil {
+		return "", nil, err
+	}
+	pairedArgs, err := bindWindowsNativeRsyncSSH(args, sshPath)
+	if err != nil {
+		return "", nil, err
+	}
+	return rsyncPath, pairedArgs, nil
+}
+
+func resolveWindowsNativeRsyncPair(lookPath func(string) (string, error), stat func(string) (os.FileInfo, error)) (string, string, error) {
+	rsyncPath, err := lookPath("rsync.exe")
+	if err != nil {
+		return "", "", exit(2, "native Windows transfers require rsync.exe on PATH with a sibling ssh.exe in the same directory; install MSYS2 rsync and OpenSSH together, or use the supported WSL2 transport")
+	}
+	if absolute, absoluteErr := filepath.Abs(rsyncPath); absoluteErr == nil {
+		rsyncPath = absolute
+	}
+	sshPath := filepath.Join(filepath.Dir(rsyncPath), "ssh.exe")
+	info, err := stat(sshPath)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", "", exit(2, "native Windows rsync requires its matching sibling OpenSSH at %s next to %s; install MSYS2 rsync and OpenSSH together, or use the supported WSL2 transport", sshPath, rsyncPath)
+	}
+	return rsyncPath, sshPath, nil
+}
+
+func bindWindowsNativeRsyncSSH(args []string, sshPath string) ([]string, error) {
+	paired := append([]string(nil), args...)
+	for index := 0; index < len(paired); index++ {
+		if paired[index] != "-e" {
+			continue
+		}
+		if index+1 >= len(paired) {
+			return nil, exit(2, "native Windows rsync command is missing its owned -e remote shell value")
+		}
+		const ownedSSH = "'ssh'"
+		remoteShell := paired[index+1]
+		if !strings.HasPrefix(remoteShell, ownedSSH) || len(remoteShell) > len(ownedSSH) && remoteShell[len(ownedSSH)] != ' ' {
+			return nil, exit(2, "native Windows rsync command has an unsupported -e remote shell; Crabbox must own the OpenSSH pairing")
+		}
+		paired[index+1] = rsyncShellWords([]string{sshPath})[0] + remoteShell[len(ownedSSH):]
+		return paired, nil
+	}
+	return nil, exit(2, "native Windows rsync command is missing its owned -e remote shell")
+}
+
+func applyWindowsNativeRsyncEnvironment(cmd *exec.Cmd) {
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
+	}
+	cmd.Env = append(cmd.Env, "MSYS2_ARG_CONV_EXCL=*", "MSYS_NO_PATHCONV=1", "CYGWIN=nodosfilewarning")
 }
 
 func windowsHostPath(path string) string {
@@ -1702,15 +1805,35 @@ func remoteWriteSyncManifestsNew(workdir, finalizeToken string) string {
 	deletedName := remoteSyncPendingDeletedName(finalizeToken)
 	script := "set -e\nmkdir -p " + shellQuote(workdir) + "\ncd " + shellQuote(workdir) + "\n" + remoteSyncMetaDirScript() + `mkdir -p "$meta_dir"
 ` + remoteSyncAbandonedMetadataCleanup() + `
-IFS= read -r manifest_len
+if ! IFS= read -r manifest_len; then
+  echo "invalid sync manifest length" >&2
+  exit 1
+fi
 case "$manifest_len" in
-  ''|*[!0-9]*) echo "invalid sync manifest length" >&2; exit 1 ;;
+  ''|*[!0-9]*|0[0-9]*) echo "invalid sync manifest length" >&2; exit 1 ;;
+esac
+if ! IFS= read -r deleted_len; then
+  echo "invalid sync deleted length" >&2
+  exit 1
+fi
+case "$deleted_len" in
+  ''|*[!0-9]*|0[0-9]*) echo "invalid sync deleted length" >&2; exit 1 ;;
 esac
 # Keep this to POSIX dd operands: minimal guests commonly provide BusyBox dd,
-# which rejects GNU's progress-suppression extension. Suppress only the summary;
-# dd's exit status still makes the fail-closed script abort on a short write.
+# which rejects GNU's progress-suppression extension. Check the output size too:
+# portable dd can exit successfully after reading fewer records than requested.
 dd bs=1 count="$manifest_len" of="$meta_dir/` + manifestName + `" 2>/dev/null
-cat > "$meta_dir/` + deletedName + `"
+manifest_size=$(wc -c < "$meta_dir/` + manifestName + `" | tr -d '[:space:]')
+if [ "$manifest_size" != "$manifest_len" ]; then
+  echo "short sync manifest: got $manifest_size want $manifest_len" >&2
+  exit 1
+fi
+dd bs=1 count="$deleted_len" of="$meta_dir/` + deletedName + `" 2>/dev/null
+deleted_size=$(wc -c < "$meta_dir/` + deletedName + `" | tr -d '[:space:]')
+if [ "$deleted_size" != "$deleted_len" ]; then
+  echo "short sync deleted manifest: got $deleted_size want $deleted_len" >&2
+  exit 1
+fi
 `
 	return "bash -lc " + shellQuote(script)
 }
@@ -1721,7 +1844,7 @@ func syncManifestInputForTarget(target SSHTarget, manifestData, deletedData []by
 		deletedEncoded := base64.StdEncoding.EncodeToString(deletedData)
 		return fmt.Sprintf("%d\n%d\n", len(manifestEncoded), len(deletedEncoded)) + manifestEncoded + deletedEncoded
 	}
-	return fmt.Sprintf("%d\n", len(manifestData)) + string(manifestData) + string(deletedData)
+	return fmt.Sprintf("%d\n%d\n", len(manifestData), len(deletedData)) + string(manifestData) + string(deletedData)
 }
 
 func remoteWriteSyncManifestsNewForTarget(target SSHTarget, workdir, finalizeToken string) string {

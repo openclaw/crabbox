@@ -151,7 +151,7 @@ func (w *copyArchiveBoundedWriter) Write(data []byte) (int, error) {
 
 func runResolvedSSHArchiveCommand(ctx context.Context, session *sshTransportSession, target SSHTarget, remote string, stdin io.Reader, stdout io.Writer, stderr anyWriter) error {
 	args := append(session.commandPrefix(), "-T", "--", session.host(), wrapRemoteForTarget(target, remote))
-	handle := pondMeshExecCommand(ctx, target.ChildEnvDenylist, "ssh", args...)
+	handle := pondMeshExecCommand(ctx, target.ChildEnvDenylist, directSSHExecutable(), args...)
 	execHandle, ok := handle.(*pondMeshExecHandle)
 	if !ok {
 		return errors.New("resolved SSH archive transport does not expose process streams")

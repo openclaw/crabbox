@@ -385,17 +385,8 @@ func closeCommandThreadHandles(handles []windows.Handle) {
 }
 
 func commandStreamFileSecurity() (*windows.SecurityAttributes, error) {
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil {
-		return nil, err
-	}
-	sd, err := windows.SecurityDescriptorFromString("D:P(A;;GA;;;" + user.User.Sid.String() + ")")
-	if err != nil {
-		return nil, err
-	}
-	attributes := &windows.SecurityAttributes{SecurityDescriptor: sd}
-	attributes.Length = uint32(unsafe.Sizeof(*attributes))
-	return attributes, nil
+	attributes, _, err := privateWindowsSecurityAttributes(false)
+	return attributes, err
 }
 
 func markCommandStreamDeletePending(handle windows.Handle, path *uint16) error {

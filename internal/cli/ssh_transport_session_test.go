@@ -508,6 +508,14 @@ func TestProxyJumpCommandPreservesMultiHopChainAndOwnership(t *testing.T) {
 	}
 }
 
+func TestProxyJumpDirectCommandUsesProvidedExecutable(t *testing.T) {
+	command := proxyJumpDirectCommand("ssh", "/tmp/jump-config", "jump.example.test")
+	wantPrefix := sshProxyCommandWords([]string{"ssh"})[0] + " "
+	if !strings.HasPrefix(command, wantPrefix) {
+		t.Fatalf("command=%q, want prefix %q", command, wantPrefix)
+	}
+}
+
 func TestSSHTransportConfigsHonorRemoteCommandCapability(t *testing.T) {
 	legacyJump := renderSSHTransportJumpConfig("/tmp/user-config", "", false)
 	if strings.Contains(legacyJump, "RemoteCommand") {

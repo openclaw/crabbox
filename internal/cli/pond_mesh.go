@@ -476,7 +476,7 @@ func (a App) pondConnect(ctx context.Context, args []string) error {
 		var startedGroups []pondMeshForwardGroup
 		for _, group := range groups {
 			args := pondMeshSSHArgsForForwards(group.Target, group.Forwards)
-			handle := pondMeshRunnerCommand(context.Background(), daemonRunner, group.Target, "ssh", args...)
+			handle := pondMeshRunnerCommand(context.Background(), daemonRunner, group.Target, directSSHExecutable(), args...)
 			if err := handle.Start(); err != nil {
 				stopDaemonHandles(started)
 				return fmt.Errorf("start ssh forwards for %s: %w", pondMeshForwardGroupLabel(group.Forwards), err)
@@ -1171,7 +1171,7 @@ func runPondMeshForwards(ctx context.Context, opts pondConnectOptions, members [
 	}
 	for _, group := range groups {
 		args := pondMeshSSHArgsForForwards(group.Target, group.Forwards)
-		handle := pondMeshRunnerCommand(ctx, runner, group.Target, "ssh", args...)
+		handle := pondMeshRunnerCommand(ctx, runner, group.Target, directSSHExecutable(), args...)
 		if err := handle.Start(); err != nil {
 			parentErr := terminationCtx.Err()
 			cancel()

@@ -9,7 +9,7 @@
 ### Fixed
 
 - Bounded fallback HTTP clients for finite provider control calls without truncating uploads, downloads, or streaming executions. Thanks @SebTardif.
-- Selected native WSL rsync and OpenSSH correctly on Windows instead of falling back to incompatible Windows shims.
+- Selected native WSL rsync and OpenSSH correctly on Windows, while x64 no-WSL transfers now keep direct control on System32 OpenSSH and bind native rsync to its sibling OpenSSH.
 - Made default `run --emit-proof` headings context-neutral instead of claiming every run occurred after a patch or fix.
 - Preserved authoritative recorded-run and lease-claim provider routes while keeping unselected inspection and archive dry-run output provider-neutral.
 - Bound coordinator release, heartbeat, and Tailscale mutations to the CLI-selected provider, preventing cross-provider lease deletion or metadata changes.

@@ -47,6 +47,7 @@ func TestPondMeshCancelRunForwardsReturnsNoErrorOnWindows(t *testing.T) {
 		t.Fatal(err)
 	}
 	ready := filepath.Join(t.TempDir(), "ready")
+	t.Setenv("WINDIR", t.TempDir())
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv(pondMeshWindowsCancelHelperEnv, "1")
 	t.Setenv("CRABBOX_POND_MESH_WINDOWS_CANCEL_READY", ready)
