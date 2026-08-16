@@ -56,24 +56,32 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 	osVersion := fs.String("os-version", "", "OS version present in the image")
 	var sdkVersions stringListFlag
 	var runtimeVersions stringListFlag
+	var variantSDKVersions stringListFlag
+	var variantRuntimeVersions stringListFlag
 	fs.Var(&sdkVersions, "sdk", "SDK present in name=version form; repeatable")
 	fs.Var(&runtimeVersions, "runtime", "runtime present in name=version form; repeatable")
+	fs.Var(&variantSDKVersions, "variant-sdk", "SDK that explicitly activates a catalog-only image; repeatable")
+	fs.Var(&variantRuntimeVersions, "variant-runtime", "runtime that explicitly activates a catalog-only image; repeatable")
 	browser := fs.Bool("browser", false, "image includes a browser")
 	webView2 := fs.Bool("webview2", false, "image includes Microsoft WebView2")
 	desktop := fs.Bool("desktop", false, "image includes desktop support")
+	catalogOnly := fs.Bool("catalog-only", false, "publish an AWS capability variant without changing the default image")
 	fastSnapshotRestore := fs.Bool("fast-snapshot-restore", false, "enable AWS Fast Snapshot Restore for the promoted AMI snapshots")
 	var fastSnapshotRestoreAZs stringListFlag
 	fs.Var(&fastSnapshotRestoreAZs, "fsr-az", "availability zone for Fast Snapshot Restore; repeatable")
 	jsonOut := fs.Bool("json", false, "print JSON")
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return exit(2, "usage: crabbox image promote <image-id> [--provider aws|azure] [--target linux|macos|windows] [--os ubuntu:26.04|ubuntu:24.04] [--region <region>] [--type <instance-type>] [--architecture <arch>] [--os-version <version>] [--sdk <name=version>] [--runtime <name=version>] [--browser] [--webview2] [--desktop] [--fast-snapshot-restore --fsr-az <az>]")
+		return exit(2, "usage: crabbox image promote <image-id> [--provider aws|azure] [--target linux|macos|windows] [--os ubuntu:26.04|ubuntu:24.04] [--region <region>] [--type <instance-type>] [--architecture <arch>] [--os-version <version>] [--sdk <name=version>] [--runtime <name=version>] [--variant-sdk <name=version>] [--variant-runtime <name=version>] [--browser] [--webview2] [--desktop] [--catalog-only] [--fast-snapshot-restore --fsr-az <az>]")
 	}
 	normalizedProvider := normalizeProviderName(*provider)
 	if normalizedProvider != "aws" && normalizedProvider != "azure" {
 		return exit(2, "unsupported image promotion provider %q; use aws or azure", *provider)
+	}
+	if normalizedProvider == "azure" && *catalogOnly {
+		return exit(2, "--catalog-only is AWS-only")
 	}
 	if normalizedProvider == "azure" && (*fastSnapshotRestore || len(fastSnapshotRestoreAZs) > 0) {
 		return exit(2, "Fast Snapshot Restore is AWS-only")
@@ -89,6 +97,29 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 		return err
 	}
 	runtimes, err := parseImageVersions(runtimeVersions, "runtime")
+	if err != nil {
+		return err
+	}
+	variantSDKs, err := parseImageVersions(variantSDKVersions, "variant-sdk")
+	if err != nil {
+		return err
+	}
+	variantRuntimes, err := parseImageVersions(variantRuntimeVersions, "variant-runtime")
+	if err != nil {
+		return err
+	}
+	variantSelectors := imageVariantSelectors{SDKs: variantSDKs, Runtimes: variantRuntimes}
+	if *catalogOnly && imageVariantSelectorsEmpty(variantSelectors) {
+		return exit(2, "--catalog-only requires at least one --variant-sdk or --variant-runtime declaration")
+	}
+	if !*catalogOnly && !imageVariantSelectorsEmpty(variantSelectors) {
+		return exit(2, "--variant-sdk and --variant-runtime require --catalog-only")
+	}
+	sdks, err = mergeImageVersions(sdks, variantSDKs, "sdk", "variant-sdk")
+	if err != nil {
+		return err
+	}
+	runtimes, err = mergeImageVersions(runtimes, variantRuntimes, "runtime", "variant-runtime")
 	if err != nil {
 		return err
 	}
@@ -119,6 +150,7 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 		OSImage:                *osImage,
 		ServerType:             *serverType,
 		Architecture:           *architecture,
+		CatalogOnly:            *catalogOnly,
 		FastSnapshotRestore:    *fastSnapshotRestore,
 		FastSnapshotRestoreAZs: fastSnapshotRestoreAZs,
 		Capabilities: imageCapabilities{
@@ -129,6 +161,7 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 			WebView2:  *webView2,
 			Desktop:   *desktop,
 		},
+		VariantSelectors: variantSelectors,
 	})
 	if err != nil {
 		return err
@@ -136,7 +169,11 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 	if *jsonOut {
 		return json.NewEncoder(a.Stdout).Encode(image)
 	}
-	fmt.Fprintf(a.Stdout, "promoted image=%s name=%s state=%s region=%s\n", image.ID, image.Name, image.State, blank(image.Region, "-"))
+	fmt.Fprintf(a.Stdout, "promoted image=%s name=%s state=%s region=%s", image.ID, image.Name, image.State, blank(image.Region, "-"))
+	if image.CatalogOnly {
+		fmt.Fprint(a.Stdout, " catalogOnly=true")
+	}
+	fmt.Fprintln(a.Stdout)
 	return nil
 }
 

@@ -1,4 +1,4 @@
-import type { ImageCapabilities, ImageRequirements } from "./types";
+import type { ImageCapabilities, ImageRequirements, ImageVariantSelectors } from "./types";
 
 const maxVersionEntries = 32;
 const maxVersionLength = 128;
@@ -87,6 +87,18 @@ export function normalizeImageCapabilities(value: unknown): ImageCapabilities | 
   return hasValues(normalized) ? normalized : undefined;
 }
 
+export function normalizeImageVariantSelectors(value: unknown): ImageVariantSelectors | undefined {
+  if (value === undefined || value === null) return undefined;
+  const input = imageCapabilityObject(value, "variantSelectors", ["sdks", "runtimes"]);
+  const sdks = normalizedVersions(input["sdks"], "variantSelectors.sdks");
+  const runtimes = normalizedVersions(input["runtimes"], "variantSelectors.runtimes");
+  if (!sdks && !runtimes) return undefined;
+  return {
+    ...(sdks ? { sdks } : {}),
+    ...(runtimes ? { runtimes } : {}),
+  };
+}
+
 export function normalizeImageRequirements(value: unknown): ImageRequirements {
   if (value === undefined || value === null) return {};
   const input = imageCapabilityObject(value, "imageRequirements", [
@@ -161,6 +173,22 @@ export function imageSatisfiesRequirements(
   requirements: ImageRequirements,
 ): boolean {
   return missingImageCapabilities(capabilities, requirements).length === 0;
+}
+
+export function catalogOnlyImageRequested(
+  selectors: ImageVariantSelectors | undefined,
+  requirements: ImageRequirements,
+): boolean {
+  return (
+    Object.entries(selectors?.sdks ?? {}).some(([name, version]) => {
+      const requested = requirements.sdks?.[name];
+      return requested !== undefined && version === requested;
+    }) ||
+    Object.entries(selectors?.runtimes ?? {}).some(([name, version]) => {
+      const requested = requirements.runtimes?.[name];
+      return requested !== undefined && version === requested;
+    })
+  );
 }
 
 function versionAtLeast(actual: string | undefined, required: string): boolean {

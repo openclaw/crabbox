@@ -15,6 +15,11 @@ type imageCapabilities struct {
 	Desktop   bool              `json:"desktop,omitempty"`
 }
 
+type imageVariantSelectors struct {
+	SDKs     map[string]string `json:"sdks,omitempty"`
+	Runtimes map[string]string `json:"runtimes,omitempty"`
+}
+
 type imageRequirements struct {
 	MinOS    string            `json:"minOS,omitempty"`
 	SDKs     map[string]string `json:"sdks,omitempty"`
@@ -36,12 +41,53 @@ func parseImageVersions(values []string, flagName string) (map[string]string, er
 		if !ok || !validImageCapabilityName(name) || !validImageVersion(version) {
 			return nil, exit(2, "--%s must use name=dot.separated.numeric.version", flagName)
 		}
+		if existing, ok := parsed[name]; ok && existing != version {
+			return nil, exit(2, "--%s declares conflicting versions for %s", flagName, name)
+		}
 		parsed[name] = version
 	}
 	if len(parsed) == 0 {
 		return nil, nil
 	}
 	return parsed, nil
+}
+
+func mergeImageVersions(base, additions map[string]string, baseFlag, additionsFlag string) (map[string]string, error) {
+	merged := make(map[string]string, len(base)+len(additions))
+	for name, version := range base {
+		merged[name] = version
+	}
+	for name, version := range additions {
+		if existing, ok := merged[name]; ok && existing != version {
+			return nil, exit(2, "--%s and --%s declare conflicting versions for %s", baseFlag, additionsFlag, name)
+		}
+		merged[name] = version
+	}
+	if len(merged) == 0 {
+		return nil, nil
+	}
+	return merged, nil
+}
+
+func imageVariantSelectorsEmpty(value imageVariantSelectors) bool {
+	return len(value.SDKs) == 0 && len(value.Runtimes) == 0
+}
+
+func imageVariantSelectorsEqual(left, right imageVariantSelectors) bool {
+	if len(left.SDKs) != len(right.SDKs) || len(left.Runtimes) != len(right.Runtimes) {
+		return false
+	}
+	for name, version := range left.SDKs {
+		if right.SDKs[name] != version {
+			return false
+		}
+	}
+	for name, version := range left.Runtimes {
+		if right.Runtimes[name] != version {
+			return false
+		}
+	}
+	return true
 }
 
 func validImageCapabilityName(value string) bool {

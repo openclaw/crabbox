@@ -266,6 +266,11 @@ export interface ImageCapabilities {
   desktop?: boolean;
 }
 
+export interface ImageVariantSelectors {
+  sdks?: Record<string, string>;
+  runtimes?: Record<string, string>;
+}
+
 export interface ImageRequirements {
   minOS?: string;
   sdks?: Record<string, string>;
@@ -716,6 +721,8 @@ export interface ProviderFastSnapshotRestore {
 
 export interface PromotedImageRecord extends ProviderImage {
   promotedAt: string;
+  catalogOnly?: boolean;
+  variantSelectors?: ImageVariantSelectors;
 }
 
 export interface RunRecord {

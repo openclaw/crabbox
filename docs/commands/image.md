@@ -118,9 +118,12 @@ Flags:
 --os-version <version>   numeric OS version present in the image
 --sdk <name=version>     SDK present in the image (repeatable)
 --runtime <name=version> runtime present in the image (repeatable)
+--variant-sdk <name=version>     SDK that explicitly activates a catalog-only image (repeatable)
+--variant-runtime <name=version> runtime that explicitly activates a catalog-only image (repeatable)
 --browser                image includes browser support
 --webview2               image includes Microsoft WebView2
 --desktop                image includes desktop support
+--catalog-only           publish an AWS capability variant without changing the default image
 --fast-snapshot-restore  enable AWS Fast Snapshot Restore for the backing snapshots
 --fsr-az <az>            availability zone for Fast Snapshot Restore (repeatable)
 --json                   print the promoted image record as JSON
@@ -143,6 +146,17 @@ Capability declarations make the AMI eligible for capability-aware selection.
 Versions use numeric dot notation, for example `--os-version 15.5`,
 `--sdk xcode=16.4`, or `--runtime node=24.2`. Omitted capabilities remain
 unknown and do not satisfy an explicit image requirement.
+
+AWS catalog-only images keep specialized variants out of the scoped default.
+Each promotion requires at least one `--variant-sdk` or `--variant-runtime`;
+the variant flag both declares the capability and records it as an activation
+selector. Ordinary `--sdk` and `--runtime` flags remain capability inventory
+only. For example, an image promoted with `--catalog-only --variant-sdk
+toolkit=2.0 --runtime node=24` is activated by an exactly matching `--image-sdk
+toolkit=2.0` request, not by a Node-only request. After activation, every
+requested capability must still match. Catalog-only promotion uses the
+dedicated `POST /v1/images/<id>/promote-catalog` route and fails closed against
+older coordinators.
 
 Add `--fast-snapshot-restore` plus one or more `--fsr-az` values when the
 promoted image backs hot lanes that need immediate EBS snapshot reads:

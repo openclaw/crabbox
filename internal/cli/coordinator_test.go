@@ -2137,6 +2137,198 @@ func TestImagePromoteSupportsAzureSnapshots(t *testing.T) {
 	}
 }
 
+func TestImagePromoteCatalogOnlyValidation(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "catalog only requires selector",
+			args: []string{"ami-variant", "--catalog-only", "--sdk", "toolkit=2.0"},
+			want: "--catalog-only requires at least one --variant-sdk or --variant-runtime",
+		},
+		{
+			name: "selector requires catalog only",
+			args: []string{"ami-variant", "--variant-sdk", "toolkit=2.0"},
+			want: "--variant-sdk and --variant-runtime require --catalog-only",
+		},
+		{
+			name: "azure rejects catalog only",
+			args: []string{"ami-variant", "--provider", "azure", "--catalog-only", "--variant-sdk", "toolkit=2.0"},
+			want: "--catalog-only is AWS-only",
+		},
+		{
+			name: "conflicting repeated selector",
+			args: []string{"ami-variant", "--catalog-only", "--variant-sdk", "toolkit=2.0", "--variant-sdk", "toolkit=3.0"},
+			want: "--variant-sdk declares conflicting versions for toolkit",
+		},
+		{
+			name: "conflicting inventory and selector",
+			args: []string{"ami-variant", "--catalog-only", "--sdk", "toolkit=1.0", "--variant-sdk", "toolkit=2.0"},
+			want: "--sdk and --variant-sdk declare conflicting versions for toolkit",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := (App{Stdout: io.Discard, Stderr: io.Discard}).imagePromote(context.Background(), test.args)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error=%v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestImagePromoteCatalogOnlyCoordinatorContract(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	t.Run("interspersed flags merge and coalesce capabilities", func(t *testing.T) {
+		var requests int
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests++
+			if r.Method != http.MethodPost || r.URL.Path != "/v1/images/ami-variant/promote-catalog" {
+				t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+			}
+			if got := r.URL.Query()["sdk"]; !reflect.DeepEqual(got, []string{"toolkit=2.0"}) {
+				t.Fatalf("sdk=%#v", got)
+			}
+			if got := r.URL.Query()["runtime"]; !reflect.DeepEqual(got, []string{"node=24"}) {
+				t.Fatalf("runtime=%#v", got)
+			}
+			var body struct {
+				VariantSelectors imageVariantSelectors `json:"variantSelectors"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			wantSelectors := imageVariantSelectors{
+				SDKs:     map[string]string{"toolkit": "2.0"},
+				Runtimes: map[string]string{"node": "24"},
+			}
+			if !imageVariantSelectorsEqual(body.VariantSelectors, wantSelectors) {
+				t.Fatalf("variantSelectors=%#v", body.VariantSelectors)
+			}
+			_, _ = w.Write([]byte(`{"image":{"id":"ami-variant","name":"variant","state":"available","region":"eu-west-1","catalogOnly":true,"variantSelectors":{"sdks":{"toolkit":"2.0"},"runtimes":{"node":"24"}}}}`))
+		}))
+		defer server.Close()
+		t.Setenv("CRABBOX_COORDINATOR", server.URL)
+		t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "admin-token")
+
+		var out bytes.Buffer
+		err := (App{Stdout: &out, Stderr: io.Discard}).imagePromote(context.Background(), []string{
+			"ami-variant",
+			"--catalog-only",
+			"--sdk", "toolkit=2.0",
+			"--variant-sdk", "toolkit=2.0",
+			"--variant-sdk", "toolkit=2.0",
+			"--variant-runtime", "node=24",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if requests != 1 {
+			t.Fatalf("requests=%d", requests)
+		}
+		if got, want := out.String(), "promoted image=ami-variant name=variant state=available region=eu-west-1 catalogOnly=true\n"; got != want {
+			t.Fatalf("output=%q, want %q", got, want)
+		}
+	})
+
+	tests := []struct {
+		name       string
+		status     int
+		response   string
+		want       string
+		forbidPath string
+	}{
+		{
+			name:       "old coordinator does not fall back",
+			status:     http.StatusNotFound,
+			response:   `{"error":"not_found"}`,
+			want:       "coordinator does not support catalog-only image promotion",
+			forbidPath: "/v1/images/ami-variant/promote",
+		},
+		{
+			name:     "response must confirm catalog only",
+			status:   http.StatusOK,
+			response: `{"image":{"id":"ami-variant","name":"variant","state":"available","variantSelectors":{"sdks":{"toolkit":"2.0"}}}}`,
+			want:     "coordinator did not confirm catalog-only promotion",
+		},
+		{
+			name:     "response must confirm selectors",
+			status:   http.StatusOK,
+			response: `{"image":{"id":"ami-variant","name":"variant","state":"available","catalogOnly":true,"variantSelectors":{"sdks":{"other":"2.0"}}}}`,
+			want:     "coordinator did not confirm variant selectors",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if test.forbidPath != "" && r.URL.Path == test.forbidPath {
+					t.Fatalf("catalog-only promotion fell back to %s", r.URL.Path)
+				}
+				w.WriteHeader(test.status)
+				_, _ = w.Write([]byte(test.response))
+			}))
+			defer server.Close()
+			t.Setenv("CRABBOX_COORDINATOR", server.URL)
+			t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "admin-token")
+
+			err := (App{Stdout: io.Discard, Stderr: io.Discard}).imagePromote(context.Background(), []string{
+				"--catalog-only", "--variant-sdk", "toolkit=2.0", "ami-variant",
+			})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error=%v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestImagePromoteOrdinaryOutputCompatibility(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/images/ami-default/promote" {
+			t.Fatalf("path=%q", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"image":{"id":"ami-default","name":"default","state":"available","region":"eu-west-1"}}`))
+	}))
+	defer server.Close()
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "admin-token")
+
+	var textOut bytes.Buffer
+	if err := (App{Stdout: &textOut, Stderr: io.Discard}).imagePromote(context.Background(), []string{"ami-default"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := textOut.String(), "promoted image=ami-default name=default state=available region=eu-west-1\n"; got != want {
+		t.Fatalf("text output=%q, want %q", got, want)
+	}
+
+	var jsonOut bytes.Buffer
+	if err := (App{Stdout: &jsonOut, Stderr: io.Discard}).imagePromote(context.Background(), []string{"ami-default", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(jsonOut.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := decoded["catalogOnly"]; ok {
+		t.Fatalf("ordinary JSON gained catalogOnly: %s", jsonOut.String())
+	}
+	if _, ok := decoded["variantSelectors"]; ok {
+		t.Fatalf("ordinary JSON gained variantSelectors: %s", jsonOut.String())
+	}
+}
+
 func TestLeaseStatusRequiresSSHReadiness(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/leases/cbx_123" {

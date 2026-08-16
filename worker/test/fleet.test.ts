@@ -28016,6 +28016,284 @@ describe("fleet lease identity and idle", () => {
     );
   });
 
+  it("stores catalog-only variants with explicit selectors without replacing the default", async () => {
+    const storage = new MemoryStorage();
+    const defaultKey = "image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1";
+    storage.seed(defaultKey, {
+      id: "ami-default",
+      name: "default",
+      state: "available",
+      target: "linux",
+      os: "ubuntu:26.04",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-07-01T00:00:00Z",
+      capabilities: { runtimes: { node: "24" } },
+    });
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockResolvedValue({
+      id: "ami-variant",
+      name: "variant",
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    });
+    const url = new URL(
+      "https://crabbox.test/v1/images/ami-variant/promote-catalog?target=linux&region=eu-west-1&catalogOnly=true&runtime=node%3D24&desktop=true",
+    );
+
+    await expect(
+      provider.promoteImage(
+        "ami-variant",
+        undefined,
+        new Request(url, {
+          method: "POST",
+          body: JSON.stringify({
+            catalogOnly: false,
+            variantSelectors: { sdks: { toolkit: "2.0" } },
+          }),
+        }),
+        url,
+      ),
+    ).resolves.toMatchObject({
+      image: {
+        id: "ami-variant",
+        catalogOnly: true,
+        variantSelectors: { sdks: { toolkit: "2.0" } },
+        capabilities: {
+          sdks: { toolkit: "2.0" },
+          runtimes: { node: "24" },
+          desktop: true,
+        },
+      },
+    });
+    expect(storage.value(defaultKey)).toEqual(expect.objectContaining({ id: "ami-default" }));
+    expect(
+      storage.value("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-variant"),
+    ).toEqual(
+      expect.objectContaining({
+        id: "ami-variant",
+        catalogOnly: true,
+        variantSelectors: { sdks: { toolkit: "2.0" } },
+      }),
+    );
+  });
+
+  it("serves catalog-only promotion on its dedicated coordinator route", async () => {
+    const aws = fakeProvider();
+    const promote = vi
+      .spyOn(aws, "promoteImage")
+      .mockImplementation(async (_id, _known, _request, url) => {
+        expect(url.searchParams.get("catalogOnly")).toBe("true");
+        const body = (await _request.clone().json()) as { variantSelectors?: unknown };
+        expect(body.variantSelectors).toEqual({ sdks: { toolkit: "2.0" } });
+        const image: ProviderImage & {
+          catalogOnly: true;
+          variantSelectors: { sdks: { toolkit: string } };
+        } = {
+          id: "ami-variant",
+          name: "variant",
+          state: "available",
+          provider: "aws",
+          catalogOnly: true,
+          variantSelectors: { sdks: { toolkit: "2.0" } },
+        };
+        return { image };
+      });
+    const fleet = testFleet(new MemoryStorage(), { aws });
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/images/ami-variant/promote-catalog?provider=aws", {
+        headers: { "x-crabbox-admin": "true" },
+        body: {
+          catalogOnly: false,
+          variantSelectors: { sdks: { toolkit: "2.0" } },
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(promote).toHaveBeenCalledOnce();
+    await expect(response.json()).resolves.toMatchObject({
+      image: {
+        id: "ami-variant",
+        catalogOnly: true,
+        variantSelectors: { sdks: { toolkit: "2.0" } },
+      },
+    });
+  });
+
+  it("rejects missing, detached, or conflicting catalog variant selectors", async () => {
+    const provider = new AWSProvider({} as Env, "eu-west-1", new MemoryStorage());
+    vi.spyOn(provider, "getImage").mockResolvedValue({
+      id: "ami-variant",
+      name: "variant",
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    });
+    const promote = async (query: string, body: Record<string, unknown> = {}) => {
+      const url = new URL(
+        `https://crabbox.test/v1/images/ami-variant/promote?target=linux&region=eu-west-1&${query}`,
+      );
+      return provider.promoteImage(
+        "ami-variant",
+        undefined,
+        new Request(url, { method: "POST", body: JSON.stringify(body) }),
+        url,
+      );
+    };
+
+    const missing = await promote("catalogOnly=true&sdk=toolkit%3D2.0");
+    expect(missing).toBeInstanceOf(Response);
+    await expect((missing as Response).json()).resolves.toMatchObject({
+      error: "catalog_only_variant_selectors_required",
+    });
+
+    const detached = await promote("", { variantSelectors: { sdks: { toolkit: "2.0" } } });
+    expect(detached).toBeInstanceOf(Response);
+    await expect((detached as Response).json()).resolves.toMatchObject({
+      error: "variant_selectors_require_catalog_only",
+    });
+
+    const conflicting = await promote("catalogOnly=true&sdk=toolkit%3D1.0", {
+      variantSelectors: { sdks: { toolkit: "2.0" } },
+    });
+    expect(conflicting).toBeInstanceOf(Response);
+    await expect((conflicting as Response).json()).resolves.toMatchObject({
+      error: "invalid_image_capabilities",
+      message: expect.stringContaining("conflicting versions for toolkit"),
+    });
+  });
+
+  it("activates catalog-only images only through explicit variant selectors", async () => {
+    const storage = new MemoryStorage();
+    const defaultImage = {
+      id: "ami-default",
+      name: "default",
+      state: "available",
+      target: "linux" as const,
+      os: "ubuntu:26.04",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-07-01T00:00:00Z",
+      capabilities: {
+        osVersion: "26.04",
+        runtimes: { node: "24" },
+        browser: true,
+        desktop: true,
+      },
+    };
+    const variantImage = {
+      id: "ami-variant",
+      name: "variant",
+      state: "available",
+      target: "linux" as const,
+      os: "ubuntu:26.04",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-07-02T00:00:00Z",
+      catalogOnly: true,
+      variantSelectors: {
+        sdks: { toolkit: "2.0" },
+        runtimes: { special: "3.0" },
+      },
+      capabilities: {
+        osVersion: "26.04",
+        sdks: { toolkit: "2.0" },
+        runtimes: { node: "24", special: "3.0" },
+        browser: true,
+        desktop: true,
+      },
+    };
+    storage.seed("image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1", defaultImage);
+    storage.seed("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-default", defaultImage);
+    storage.seed("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-variant", variantImage);
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    const selected = async (
+      imageRequirements: ReturnType<typeof leaseConfig>["imageRequirements"],
+    ) => {
+      const config = leaseConfig({
+        provider: "aws",
+        os: "ubuntu:26.04",
+        sshPublicKey: "ssh-ed25519 test",
+        imageRequirements,
+      });
+      const prepared = await provider.prepareLeaseConfig(config);
+      return prepared.awsPromotedAMIs[awsPromotedAMIConfigKey("eu-west-1", config.serverType)];
+    };
+
+    await expect(selected({ runtimes: { node: "24" } })).resolves.toBe("ami-default");
+    await expect(selected({ sdks: { toolkit: "2.0" } })).resolves.toBe("ami-variant");
+    await expect(selected({ runtimes: { special: "3.0" } })).resolves.toBe("ami-variant");
+    await expect(selected({ sdks: { toolkit: "2.0" }, runtimes: { node: "25" } })).rejects.toThrow(
+      "no promoted AWS linux image satisfies",
+    );
+    await expect(selected({ sdks: { other: "1.0" } })).rejects.toThrow(
+      "no promoted AWS linux image satisfies",
+    );
+    await expect(selected({ sdks: { toolkit: "2.1" } })).rejects.toThrow(
+      "no promoted AWS linux image satisfies",
+    );
+    await expect(selected({ sdks: { toolkit: "1.0" } })).rejects.toThrow(
+      "no promoted AWS linux image satisfies",
+    );
+    await expect(selected({ desktop: true })).resolves.toBe("ami-default");
+    await expect(selected({ browser: true })).resolves.toBe("ami-default");
+    await expect(selected({ minOS: "26.04" })).resolves.toBe("ami-default");
+  });
+
+  it("clears catalog-only selector metadata on ordinary re-promotion", async () => {
+    const storage = new MemoryStorage();
+    const catalogKey = "image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-variant";
+    storage.seed(catalogKey, {
+      id: "ami-variant",
+      name: "variant",
+      state: "available",
+      target: "linux",
+      os: "ubuntu:26.04",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-07-01T00:00:00Z",
+      catalogOnly: true,
+      variantSelectors: { sdks: { toolkit: "2.0" } },
+      capabilities: { sdks: { toolkit: "2.0" }, runtimes: { node: "24" } },
+    });
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockResolvedValue({
+      id: "ami-variant",
+      name: "variant",
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    });
+    const url = new URL(
+      "https://crabbox.test/v1/images/ami-variant/promote?target=linux&region=eu-west-1&catalogOnly=false",
+    );
+
+    await provider.promoteImage(
+      "ami-variant",
+      undefined,
+      new Request(url, { method: "POST", body: JSON.stringify({ catalogOnly: true }) }),
+      url,
+    );
+
+    const scoped = storage.value("image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1");
+    expect(scoped).toEqual(
+      expect.objectContaining({
+        id: "ami-variant",
+        capabilities: { sdks: { toolkit: "2.0" }, runtimes: { node: "24" } },
+      }),
+    );
+    expect(scoped).not.toHaveProperty("catalogOnly");
+    expect(scoped).not.toHaveProperty("variantSelectors");
+    expect(storage.value(catalogKey)).not.toHaveProperty("catalogOnly");
+    expect(storage.value(catalogKey)).not.toHaveProperty("variantSelectors");
+  });
+
   it("records the exact promoted AWS image selected for a lease", async () => {
     const storage = new MemoryStorage();
     storage.seed("image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1", {
@@ -28277,6 +28555,36 @@ describe("fleet lease identity and idle", () => {
       ),
     ).resolves.toMatchObject({
       image: { id: "snapshot-devtools", serverType: "Standard_D192ds_v6" },
+    });
+  });
+
+  it("rejects catalog-only Azure image promotion", async () => {
+    const provider = new AzureProvider({} as Env, undefined, new MemoryStorage(), "westeurope");
+    const snapshot: ProviderImage = {
+      id: "snapshot-variant",
+      name: "snapshot-variant",
+      state: "succeeded",
+      provider: "azure",
+      kind: "azure-os-disk-snapshot",
+      target: "linux",
+      region: "westeurope",
+      architecture: "amd64",
+    };
+    const url = new URL(
+      "https://crabbox.test/v1/images/snapshot-variant/promote-catalog?provider=azure&catalogOnly=true",
+    );
+
+    const response = await provider.promoteImage(
+      snapshot.id,
+      snapshot,
+      new Request(url, { method: "POST", body: JSON.stringify({ catalogOnly: false }) }),
+      url,
+    );
+    expect(response).toBeInstanceOf(Response);
+    expect((response as Response).status).toBe(400);
+    await expect((response as Response).json()).resolves.toMatchObject({
+      error: "unsupported_provider",
+      message: "catalog-only image promotion is AWS-only",
     });
   });
 

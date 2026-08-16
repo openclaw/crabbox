@@ -100,10 +100,12 @@ import {
   requestOwner,
 } from "./http";
 import {
+  catalogOnlyImageRequested,
   hasImageRequirements,
   imageSatisfiesRequirements,
   InvalidImageCapabilitiesError,
   normalizeImageCapabilities,
+  normalizeImageVariantSelectors,
 } from "./image-capabilities";
 import {
   MarketplaceInputError,
@@ -259,6 +261,7 @@ import type {
   LeaseShareRole,
   LeaseTelemetry,
   ImageCapabilities,
+  ImageVariantSelectors,
   Provider,
   ProviderFastSnapshotRestore,
   LeaseImageIdentity,
@@ -13825,7 +13828,8 @@ export class FleetCoordinator {
       await providerForRegion.deleteImage(decodedImageID, kind, metadata);
       return json({ imageID: decodedImageID, deleted: true });
     }
-    if (method === "POST" && action === "promote") {
+    if (method === "POST" && (action === "promote" || action === "promote-catalog")) {
+      url.searchParams.set("catalogOnly", action === "promote-catalog" ? "true" : "false");
       if (!providerForRegion.promoteImage) {
         return json(
           {
@@ -17064,12 +17068,36 @@ class ImageCapabilityMismatchError extends Error {
   }
 }
 
-function promotionVersionMap(values: string[]): Record<string, string> | undefined {
-  const entries = values.map((value) => {
+function promotionVersionMap(values: string[], label: string): Record<string, string> | undefined {
+  const versions: Record<string, string> = {};
+  for (const value of values) {
     const separator = value.indexOf("=");
-    return separator > 0 ? [value.slice(0, separator), value.slice(separator + 1)] : [value, ""];
-  });
-  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+    const name = (separator > 0 ? value.slice(0, separator) : value).trim().toLowerCase();
+    const version = (separator > 0 ? value.slice(separator + 1) : "").trim();
+    if (Object.hasOwn(versions, name) && versions[name] !== version) {
+      throw new InvalidImageCapabilitiesError(`${label} declares conflicting versions for ${name}`);
+    }
+    versions[name] = version;
+  }
+  return values.length > 0 ? versions : undefined;
+}
+
+function mergePromotionVersions(
+  inventory: Record<string, string> | undefined,
+  selectors: Record<string, string> | undefined,
+  inventoryLabel: string,
+  selectorLabel: string,
+): Record<string, string> | undefined {
+  for (const [name, version] of Object.entries(selectors ?? {})) {
+    const inventoryVersion = inventory?.[name];
+    if (inventoryVersion !== undefined && inventoryVersion !== version) {
+      throw new InvalidImageCapabilitiesError(
+        `${inventoryLabel} and ${selectorLabel} declare conflicting versions for ${name}`,
+      );
+    }
+  }
+  if (!inventory && !selectors) return undefined;
+  return { ...inventory, ...selectors };
 }
 
 function promotedAWSImageKey(
@@ -22877,13 +22905,25 @@ export class AzureProvider implements CloudProvider {
       region?: string;
       architecture?: string;
       serverType?: string;
+      catalogOnly?: unknown;
     } = await readJson<{
       target?: string;
       os?: string;
       region?: string;
       architecture?: string;
       serverType?: string;
+      catalogOnly?: unknown;
     }>(request).catch(() => ({}));
+    const catalogOnly = boolFromUnknown(url.searchParams.get("catalogOnly") ?? input.catalogOnly);
+    if (catalogOnly) {
+      return json(
+        {
+          error: "unsupported_provider",
+          message: "catalog-only image promotion is AWS-only",
+        },
+        { status: 400 },
+      );
+    }
     if (!known) {
       return json(
         {
@@ -24267,6 +24307,8 @@ export class AWSProvider implements CloudProvider {
       serverType?: string;
       architecture?: string;
       capabilities?: ImageCapabilities;
+      catalogOnly?: unknown;
+      variantSelectors?: ImageVariantSelectors;
       fastSnapshotRestore?: unknown;
       fastSnapshotRestoreAvailabilityZones?: string[];
     } = await readJson<{
@@ -24276,6 +24318,8 @@ export class AWSProvider implements CloudProvider {
       serverType?: string;
       architecture?: string;
       capabilities?: ImageCapabilities;
+      catalogOnly?: unknown;
+      variantSelectors?: ImageVariantSelectors;
       fastSnapshotRestore?: unknown;
       fastSnapshotRestoreAvailabilityZones?: string[];
     }>(request).catch(() => ({}));
@@ -24320,7 +24364,14 @@ export class AWSProvider implements CloudProvider {
         { status: 400 },
       );
     }
-    const metadata: Partial<ProviderImage> = { ...prior, target, region: imageRegion };
+    const {
+      catalogOnly: _priorCatalogOnly,
+      variantSelectors: _priorVariantSelectors,
+      ...priorMetadata
+    } = prior ?? {};
+    void _priorCatalogOnly;
+    void _priorVariantSelectors;
+    const metadata: Partial<ProviderImage> = { ...priorMetadata, target, region: imageRegion };
     const serverType = input.serverType ?? url.searchParams.get("serverType") ?? prior?.serverType;
     if (serverType) {
       metadata.serverType = serverType;
@@ -24331,44 +24382,84 @@ export class AWSProvider implements CloudProvider {
       metadata.architecture = architecture;
     }
     let capabilities: ImageCapabilities | undefined;
+    let variantSelectors: ImageVariantSelectors | undefined;
     try {
-      capabilities = normalizeImageCapabilities({
-        ...prior?.capabilities,
+      const declaredCapabilities = normalizeImageCapabilities({
         ...input.capabilities,
-        osVersion:
-          input.capabilities?.osVersion ??
-          url.searchParams.get("osVersion") ??
-          prior?.capabilities?.osVersion,
+        osVersion: input.capabilities?.osVersion ?? url.searchParams.get("osVersion") ?? undefined,
         sdks:
           input.capabilities?.sdks ??
-          promotionVersionMap(url.searchParams.getAll("sdk")) ??
-          prior?.capabilities?.sdks,
+          promotionVersionMap(url.searchParams.getAll("sdk"), "sdk") ??
+          undefined,
         runtimes:
           input.capabilities?.runtimes ??
-          promotionVersionMap(url.searchParams.getAll("runtime")) ??
-          prior?.capabilities?.runtimes,
+          promotionVersionMap(url.searchParams.getAll("runtime"), "runtime") ??
+          undefined,
         browser:
           input.capabilities?.browser ??
           (url.searchParams.has("browser")
             ? boolFromUnknown(url.searchParams.get("browser"))
-            : undefined) ??
-          prior?.capabilities?.browser,
+            : undefined),
         webview2:
           input.capabilities?.webview2 ??
           (url.searchParams.has("webview2")
             ? boolFromUnknown(url.searchParams.get("webview2"))
-            : undefined) ??
-          prior?.capabilities?.webview2,
+            : undefined),
         desktop:
           input.capabilities?.desktop ??
           (url.searchParams.has("desktop")
             ? boolFromUnknown(url.searchParams.get("desktop"))
-            : undefined) ??
-          prior?.capabilities?.desktop,
+            : undefined),
+      });
+      variantSelectors = normalizeImageVariantSelectors(input.variantSelectors);
+      const declaredSDKs = mergePromotionVersions(
+        declaredCapabilities?.sdks,
+        variantSelectors?.sdks,
+        "sdk",
+        "variantSelectors.sdks",
+      );
+      const declaredRuntimes = mergePromotionVersions(
+        declaredCapabilities?.runtimes,
+        variantSelectors?.runtimes,
+        "runtime",
+        "variantSelectors.runtimes",
+      );
+      capabilities = normalizeImageCapabilities({
+        ...prior?.capabilities,
+        ...declaredCapabilities,
+        osVersion: declaredCapabilities?.osVersion ?? prior?.capabilities?.osVersion,
+        sdks: declaredSDKs
+          ? { ...prior?.capabilities?.sdks, ...declaredSDKs }
+          : prior?.capabilities?.sdks,
+        runtimes: declaredRuntimes
+          ? { ...prior?.capabilities?.runtimes, ...declaredRuntimes }
+          : prior?.capabilities?.runtimes,
+        browser: declaredCapabilities?.browser ?? prior?.capabilities?.browser,
+        webview2: declaredCapabilities?.webview2 ?? prior?.capabilities?.webview2,
+        desktop: declaredCapabilities?.desktop ?? prior?.capabilities?.desktop,
       });
     } catch (error) {
       return json(
         { error: "invalid_image_capabilities", message: coordinatorErrorMessage(this.env, error) },
+        { status: 400 },
+      );
+    }
+    const catalogOnly = boolFromUnknown(url.searchParams.get("catalogOnly") ?? input.catalogOnly);
+    if (catalogOnly && !variantSelectors) {
+      return json(
+        {
+          error: "catalog_only_variant_selectors_required",
+          message: "catalog-only image promotion requires at least one variant selector",
+        },
+        { status: 400 },
+      );
+    }
+    if (!catalogOnly && variantSelectors) {
+      return json(
+        {
+          error: "variant_selectors_require_catalog_only",
+          message: "variant selectors require catalog-only image promotion",
+        },
         { status: 400 },
       );
     }
@@ -24435,18 +24526,23 @@ export class AWSProvider implements CloudProvider {
         image.architecture ?? awsImageArchitectureForTarget(target, image.serverType ?? ""),
       promotedAt: new Date().toISOString(),
       ...(capabilities ? { capabilities } : {}),
+      ...(catalogOnly && variantSelectors ? { catalogOnly: true, variantSelectors } : {}),
     };
-    await this.storage.put(promotedAWSImageKey(promoted), promoted);
-    await this.storage.put(promotedAWSImageCatalogKey(promoted), promoted);
-    if (target === "linux" && promoted.os) {
-      await this.storage.put(promotedAWSLinuxOSImageKey(promoted), promoted);
-    }
-    if (
-      target === "linux" &&
-      (!promoted.os || promoted.os === "ubuntu:24.04") &&
-      legacyPromotedAWSImageCompatible(promoted)
-    ) {
-      await this.storage.put(legacyPromotedAWSImageKey(), promoted);
+    if (catalogOnly) {
+      await this.storage.put(promotedAWSImageCatalogKey(promoted), promoted);
+    } else {
+      await this.storage.put(promotedAWSImageKey(promoted), promoted);
+      await this.storage.put(promotedAWSImageCatalogKey(promoted), promoted);
+      if (target === "linux" && promoted.os) {
+        await this.storage.put(promotedAWSLinuxOSImageKey(promoted), promoted);
+      }
+      if (
+        target === "linux" &&
+        (!promoted.os || promoted.os === "ubuntu:24.04") &&
+        legacyPromotedAWSImageCompatible(promoted)
+      ) {
+        await this.storage.put(legacyPromotedAWSImageKey(), promoted);
+      }
     }
     return { image: promoted };
   }
@@ -24501,6 +24597,11 @@ export class AWSProvider implements CloudProvider {
       );
       return [...candidates.values()]
         .filter((image) => imageSatisfiesRequirements(image.capabilities, config.imageRequirements))
+        .filter(
+          (image) =>
+            !image.catalogOnly ||
+            catalogOnlyImageRequested(image.variantSelectors, config.imageRequirements),
+        )
         .toSorted(
           (left, right) =>
             right.promotedAt.localeCompare(left.promotedAt) || left.id.localeCompare(right.id),
