@@ -77,7 +77,6 @@ function formula(overrides = {}, { literalUrls = true } = {}) {
 class Crabbox < Formula
   desc "Remote software testing and execution"
   homepage "https://github.com/openclaw/crabbox"
-  version "1.2.3"
   license "MIT"
 
   on_macos do
@@ -796,6 +795,12 @@ test("mocked Homebrew phase rejects the installed CLI version last", () => {
 test("formula verifier accepts only the exact four frozen archive mappings", () => {
   const exactCanonical = verifyFormula(formula());
   assert.equal(exactCanonical.status, 0, exactCanonical.stderr);
+
+  const explicitVersion = verifyFormula(
+    formula().replace('  license "MIT"', '  version "1.2.3"\n  license "MIT"'),
+  );
+  assert.notEqual(explicitVersion.status, 0);
+  assert.match(explicitVersion.stderr, /exact protected canonical program/);
 
   const interpolationTemplate = verifyFormula(formula({}, { literalUrls: false }));
   assert.notEqual(interpolationTemplate.status, 0);

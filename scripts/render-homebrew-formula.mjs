@@ -18,7 +18,6 @@ process.stdout.write(`# typed: false
 class Crabbox < Formula
   desc "Remote software testing and execution"
   homepage "https://github.com/openclaw/crabbox"
-  version "${version}"
   license "MIT"
 
   on_macos do

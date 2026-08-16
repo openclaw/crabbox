@@ -355,11 +355,9 @@ const expected = new Map([
 ]);
 
 const lines = fs.readFileSync(formulaFile, "utf8").split(/\r?\n/);
-const versions = lines
-  .map((line) => /^\s*version "([^"]+)"\s*$/.exec(line)?.[1])
-  .filter(Boolean);
-if (versions.length !== 1 || versions[0] !== version) {
-  throw new Error("Homebrew formula version does not match the exact release");
+const versions = lines.filter((line) => /^\s*version\b/.test(line));
+if (versions.length !== 0) {
+  throw new Error("Homebrew formula version must be derived from the exact release URL");
 }
 if (lines.filter((line) => line.trim() === "class Crabbox < Formula").length !== 1) {
   throw new Error("Homebrew formula class is not exactly Crabbox");
