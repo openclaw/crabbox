@@ -210,6 +210,7 @@ Commands:
   cache       Inspect, purge, warm, or list remote cache volumes
   status      Show lease state; add --wait to block until ready
   heartbeat   Refresh a lease idle deadline and print its state
+  claims      Inspect unverified local lease claims without loading providers
   list        List Crabbox machines
   share       Share a lease with users or the owning org
   unshare     Remove lease sharing
@@ -248,6 +249,7 @@ Common Flows:
   crabbox warmup
   crabbox status --id blue-lobster --wait
   crabbox heartbeat --id blue-lobster --idle-timeout 90m
+  crabbox claims list
   crabbox run --id blue-lobster --shell 'pnpm install --frozen-lockfile && pnpm test'
   crabbox run --timing-record=default -- pnpm test
   crabbox bench run --providers aws,hetzner --repeats 3 -- pnpm test

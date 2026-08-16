@@ -3,6 +3,11 @@
 `crabbox list` shows the current Crabbox machines (leases) for a provider. It is
 read-only and never provisions or releases anything.
 
+To inspect unverified claim files across every locally recorded provider without
+loading a backend or requiring provider credentials, use
+[`crabbox claims list`](claims.md). The meanings of bare `list`, `--provider`,
+and `--all` remain provider-scoped.
+
 ```sh
 crabbox list
 crabbox list --provider aws

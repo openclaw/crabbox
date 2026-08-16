@@ -48,6 +48,7 @@ crabbox bench run --providers a,b -- <cmd>   run a workload and record benchmark
 crabbox status --id <id>                     show lease state (--wait to block)
 crabbox heartbeat --id <id>                  refresh the lease idle deadline
 crabbox inspect --id <id>                     print lease/provider details
+crabbox claims list [--json]                  list unverified local claims without provider access
 crabbox list                                  list machines (alias: crabbox pool list)
 crabbox share --id <id> [--user|--org]        grant access to a lease
 crabbox unshare --id <id> [--user|--org|--all]
@@ -61,7 +62,7 @@ crabbox pool ready [key]                      list hydrated broker ready-pool le
 See [warmup](commands/warmup.md), [prewarm](commands/prewarm.md),
 [run](commands/run.md), [watch](commands/watch.md),
 [status](commands/status.md), [heartbeat](commands/heartbeat.md), [inspect](commands/inspect.md),
-[list](commands/list.md), [share](commands/share.md),
+[claims](commands/claims.md), [list](commands/list.md), [share](commands/share.md),
 [unshare](commands/unshare.md), [stop](commands/stop.md),
 [pause](commands/pause.md), [resume](commands/resume.md),
 [cleanup](commands/cleanup.md), [pool](commands/pool.md).

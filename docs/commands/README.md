@@ -34,6 +34,7 @@ same order as the CLI help.
 - [cache](cache.md)
 - [status](status.md)
 - [heartbeat](heartbeat.md)
+- [claims](claims.md)
 - [list](list.md)
 - [share](share.md)
 - [unshare](unshare.md)

@@ -5,6 +5,7 @@
 ### Added
 
 - Added `crabbox heartbeat` so external SSH drivers can refresh owned lease idle deadlines and optionally update the idle timeout.
+- Added credential-free `crabbox claims list` output for deterministic, secret-safe inspection of unverified local lease claims across providers. Thanks @coygeek.
 
 ### Fixed
 

@@ -38,6 +38,7 @@ type crabboxKongCLI struct {
 	Cache       cacheKongCmd       `cmd:"" help:"Inspect, purge, or warm remote caches."`
 	Status      statusKongCmd      `cmd:"" passthrough:"" help:"Show lease state; add --wait to block until ready."`
 	Heartbeat   heartbeatKongCmd   `cmd:"" passthrough:"" help:"Refresh a lease idle deadline and print its state."`
+	Claims      claimsKongCmd      `cmd:"" help:"Inspect unverified local lease claims without loading providers."`
 	List        listKongCmd        `cmd:"" passthrough:"" help:"List Crabbox machines."`
 	Ports       portsKongCmd       `cmd:"" passthrough:"" help:"Publish, list, or unpublish provider-native ports."`
 	Cp          cpKongCmd          `cmd:"" name:"cp" passthrough:"" help:"Copy files between the host and a lease."`
@@ -133,7 +134,7 @@ func normalizeKongHelpArgs(args []string) []string {
 
 func isKongCommandGroup(command string) bool {
 	switch command {
-	case "actions", "adapter", "admin", "artifacts", "azure", "bench", "cache", "capsule", "checkpoint", "config", "pond", "desktop", "image", "job", "machine", "marketplace", "media", "pool":
+	case "actions", "adapter", "admin", "artifacts", "azure", "bench", "cache", "capsule", "checkpoint", "claims", "config", "pond", "desktop", "image", "job", "machine", "marketplace", "media", "pool":
 		return true
 	default:
 		return false
@@ -231,6 +232,12 @@ type statusKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type heartbeatKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type claimsKongCmd struct {
+	List claimsListKongCmd `cmd:"" passthrough:"" help:"List unverified local lease claims without loading providers."`
+}
+type claimsListKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type listKongCmd struct {
@@ -656,10 +663,13 @@ func (c *cpKongCmd) Run(ctx context.Context, app App) error        { return app.
 func (c *tunnelKongCmd) Run(ctx context.Context, app App) error    { return app.tunnel(ctx, c.Args) }
 func (c *statusKongCmd) Run(ctx context.Context, app App) error    { return app.status(ctx, c.Args) }
 func (c *heartbeatKongCmd) Run(ctx context.Context, app App) error { return app.heartbeat(ctx, c.Args) }
-func (c *listKongCmd) Run(ctx context.Context, app App) error      { return app.list(ctx, c.Args) }
-func (c *shareKongCmd) Run(ctx context.Context, app App) error     { return app.share(ctx, c.Args) }
-func (c *unshareKongCmd) Run(ctx context.Context, app App) error   { return app.unshare(ctx, c.Args) }
-func (c *usageKongCmd) Run(ctx context.Context, app App) error     { return app.usage(ctx, c.Args) }
+func (c *claimsListKongCmd) Run(_ context.Context, app App) error {
+	return app.claimsList(stripKongCommandPath(c.Args, "claims", "list"))
+}
+func (c *listKongCmd) Run(ctx context.Context, app App) error    { return app.list(ctx, c.Args) }
+func (c *shareKongCmd) Run(ctx context.Context, app App) error   { return app.share(ctx, c.Args) }
+func (c *unshareKongCmd) Run(ctx context.Context, app App) error { return app.unshare(ctx, c.Args) }
+func (c *usageKongCmd) Run(ctx context.Context, app App) error   { return app.usage(ctx, c.Args) }
 func (c *marketplaceStatusKongCmd) Run(ctx context.Context, app App) error {
 	return app.marketplaceStatus(ctx, c.Args)
 }
