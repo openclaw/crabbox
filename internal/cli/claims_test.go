@@ -119,6 +119,23 @@ func TestClaimsListScansDoNotCreateLocksOrMutateState(t *testing.T) {
 	}
 }
 
+func TestClaimsListClaimStoreFailureIsNotMalformedPartialOutput(t *testing.T) {
+	stateRoot := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateRoot)
+	if err := os.WriteFile(filepath.Join(stateRoot, "crabbox"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, err := runClaimsList(t, "--json")
+	assertClaimsExitCode(t, err, 1)
+	if stdout != "" {
+		t.Fatalf("fatal store error wrote partial output: %q", stdout)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr=%q", stderr)
+	}
+}
+
 func TestRuntimeClaimsSnapshotRetainsLockedReader(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	writeClaimsListFixture(t, "cbx_runtime.json", leaseClaim{LeaseID: "cbx_runtime", Provider: "local-container"})

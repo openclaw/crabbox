@@ -109,7 +109,11 @@ type leaseClaimSnapshotReader func(path, leaseID string, expected os.FileInfo) (
 // bypasses claim locks so scanning a readable store never creates lock state or
 // requires write access. Runtime paths continue to use snapshotLeaseClaims.
 func snapshotLeaseClaimsReadOnly() (leaseClaimsSnapshot, error) {
-	return snapshotLeaseClaimsWithReader(readLeaseClaimSnapshotWithPresence)
+	snapshot, err := snapshotLeaseClaimsWithReader(readLeaseClaimSnapshotWithPresence)
+	if err != nil {
+		return leaseClaimsSnapshot{}, exit(1, "%v", err)
+	}
+	return snapshot, nil
 }
 
 func snapshotLeaseClaimsReadOnlyWithReader(read leaseClaimSnapshotReader) (leaseClaimsSnapshot, error) {
