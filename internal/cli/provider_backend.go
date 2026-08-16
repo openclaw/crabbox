@@ -38,6 +38,12 @@ type ProviderConfigDefaulter interface {
 	ApplyConfigDefaults(cfg *Config) error
 }
 
+// ProviderArchitectureCapability lets a provider admit architecture requests
+// whose runtime feasibility is validated inside the provider adapter.
+type ProviderArchitectureCapability interface {
+	SupportsArchitecture(cfg Config, architecture string) bool
+}
+
 // ProviderClaimScoper contributes opaque routing identity to local claims.
 // Core persists and compares the value without interpreting provider fields.
 type ProviderClaimScoper interface {

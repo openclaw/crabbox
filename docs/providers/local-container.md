@@ -87,6 +87,15 @@ When `runtime` is unset or left at `docker`, Crabbox detects an installed
 container CLI. If both `docker` and `podman` are available, `docker` is selected
 unless `runtime` is set explicitly.
 
+An explicit `--arch amd64|arm64` is a native-architecture assertion against the
+selected Docker daemon or Podman service, including a named remote context or
+connection. Crabbox normalizes `x86_64` to `amd64` and `aarch64` to `arm64`,
+continues only when the daemon matches, and reports the normalized architecture
+in `--preflight` output. A mismatch or unrecognized daemon response fails before
+container creation. Crabbox never adds `--platform` or opts into emulation for
+this assertion. When `--arch` is omitted, the runtime keeps its existing native
+behavior without an added architecture guarantee or probe.
+
 ### Memory-failure evidence
 
 For every user command, Local Container reads the container cgroup OOM-kill
@@ -154,7 +163,9 @@ host paths are machine-specific and benefit from invocation-time review.
 For runtimes that use Docker contexts or Docker-compatible API sockets, the
 active socket is selected from `DOCKER_HOST` or the Docker context when socket
 pass-through is enabled. Remote TCP contexts are not the intended path because
-Crabbox connects to the published SSH port from the local machine.
+Crabbox connects to the published SSH port from the local machine. Architecture
+assertions still describe the selected daemon, not the machine running the
+Crabbox CLI.
 
 ### Socket pass-through
 

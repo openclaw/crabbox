@@ -1,12 +1,54 @@
 package cli
 
 import (
+	"flag"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+type architectureCapabilityTestProvider struct{}
+
+func (architectureCapabilityTestProvider) Name() string {
+	return "architecture-capability-test"
+}
+func (architectureCapabilityTestProvider) Aliases() []string { return nil }
+func (architectureCapabilityTestProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "architecture-capability-test",
+		Family:      "architecture-capability-test",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (architectureCapabilityTestProvider) RegisterFlags(*flag.FlagSet, Config) any {
+	return noProviderFlags{}
+}
+func (architectureCapabilityTestProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (architectureCapabilityTestProvider) Configure(Config, Runtime) (Backend, error) {
+	return nil, nil
+}
+func (architectureCapabilityTestProvider) SupportsArchitecture(_ Config, architecture string) bool {
+	return architecture == ArchitectureAMD64 || architecture == ArchitectureARM64
+}
+
+func TestProviderArchitectureCapabilityAdmitsStaticArchitecture(t *testing.T) {
+	provider := architectureCapabilityTestProvider{}
+	for _, architecture := range []string{ArchitectureAMD64, ArchitectureARM64} {
+		t.Run(architecture, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.TargetOS = targetLinux
+			if !providerSupportsArchitecture(provider, cfg, architecture) {
+				t.Fatalf("architecture capability rejected %s", architecture)
+			}
+		})
+	}
+}
 
 func TestValidateProviderTargetRejectsUnsupportedAWSTargets(t *testing.T) {
 	t.Run("macOS needs dedicated host", func(t *testing.T) {

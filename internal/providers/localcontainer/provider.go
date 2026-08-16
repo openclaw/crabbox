@@ -39,6 +39,10 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	return applyFlags(cfg, fs, values)
 }
 
+func (Provider) SupportsArchitecture(cfg core.Config, architecture string) bool {
+	return cfg.TargetOS == core.TargetLinux && (architecture == core.ArchitectureAMD64 || architecture == core.ArchitectureARM64)
+}
+
 func (Provider) CreationOnlyFlagNames() []string {
 	return []string{"local-container-volume"}
 }

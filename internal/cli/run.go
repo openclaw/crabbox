@@ -1132,7 +1132,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			hydrateTarget.WindowsMode = cfg.WindowsMode
 		}
 		hydrateSupported := supportsLocalActionsHydrateTarget(hydrateTarget) || supportsGitHubActionsRunnerTarget(hydrateTarget)
-		printRemoteCapabilityPreflight(ctx, a.Stderr, cfg, currentTarget, leaseID, workdir, remoteRunEnvFiles(actionsEnvFile, profileEnvFile), hydratedByActions, actionsURL, hydrateSupported, envSelection.Inline)
+		printRemoteCapabilityPreflight(ctx, a.Stderr, cfg, server, currentTarget, leaseID, workdir, remoteRunEnvFiles(actionsEnvFile, profileEnvFile), hydratedByActions, actionsURL, hydrateSupported, envSelection.Inline)
 		preflightPrinted = true
 	}
 	preflightRawJSRuntime := func(currentTarget SSHTarget) error {

@@ -1131,8 +1131,11 @@ they fail loud if the provider rejects the type.
 
 Set `architecture: arm64` (or `--arch arm64`) for Linux ARM capacity on AWS or
 Azure. Apple Container defaults to native ARM64 and also accepts explicit ARM64
-or AMD64 guest selection. Explicit ARM cloud provider types select matching ARM
-Linux images when no provider-specific image override is set.
+or AMD64 guest selection. Local Container treats explicit `amd64` or `arm64` as
+an assertion about the selected Docker/Podman daemon's native architecture,
+including remote contexts; it does not add `--platform` or enable emulation.
+Explicit ARM cloud provider types select matching ARM Linux images when no
+provider-specific image override is set.
 
 ## Environment variables
 

@@ -173,6 +173,13 @@ func (b *backend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID st
 
 func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
 	cfg := b.configForRun()
+	architecture, err := b.assertRequestedArchitecture(ctx, cfg)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	if architecture != "" {
+		cfg.Architecture = architecture
+	}
 	if err := validateCheckpointFork(ctx, cfg); err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -316,6 +323,9 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 
 func createdPendingLease(cfg core.Config, containerID, leaseID, slug, bootstrapDir string, keep bool) core.LeaseTarget {
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, time.Now().UTC())
+	if core.IsArchitectureExplicit(cfg) {
+		labels["architecture"] = cfg.Architecture
+	}
 	labels["state"] = pendingClaimState
 	labels["recovery"] = pendingRecoveryKind
 	labels["ssh_key_owned"] = "true"
@@ -1514,6 +1524,9 @@ func localContainerDisplayImage(cfg core.Config) string {
 
 func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, leaseID, slug, publicKey string, keep bool) (string, string, error) {
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, time.Now().UTC())
+	if core.IsArchitectureExplicit(cfg) {
+		labels["architecture"] = cfg.Architecture
+	}
 	labels["state"] = pendingClaimState
 	labels["recovery"] = pendingRecoveryKind
 	labels["ssh_key_owned"] = "true"
@@ -2235,7 +2248,10 @@ func localContainerClaimExpired(claim core.LeaseClaim, now time.Time) bool {
 }
 
 func (b *backend) docker(ctx context.Context, args []string, stdout, stderr io.Writer) (core.LocalCommandResult, error) {
-	cfg := b.configForRun()
+	return b.containerRuntime(ctx, b.configForRun(), args, stdout, stderr)
+}
+
+func (b *backend) containerRuntime(ctx context.Context, cfg core.Config, args []string, stdout, stderr io.Writer) (core.LocalCommandResult, error) {
 	var env []string
 	if metadata := cfg.LocalContainer.CheckpointMetadata; len(metadata) != 0 {
 		scope := checkpointScopeFromMetadata(metadata, cfg.LocalContainer.Runtime)
@@ -2253,6 +2269,35 @@ func (b *backend) docker(ctx context.Context, args []string, stdout, stderr io.W
 		Stdout: stdout,
 		Stderr: stderr,
 	})
+}
+
+func (b *backend) assertRequestedArchitecture(ctx context.Context, cfg core.Config) (string, error) {
+	if !core.IsArchitectureExplicit(cfg) {
+		return "", nil
+	}
+	requested, err := core.NormalizeArchitecture(cfg.Architecture)
+	if err != nil {
+		return "", err
+	}
+	format := "{{.Architecture}}"
+	runtimeLabel := "Docker"
+	if isPodmanRuntime(cfg.LocalContainer.Runtime) {
+		format = "{{.Host.Arch}}"
+		runtimeLabel = "Podman"
+	}
+	result, runErr := b.containerRuntime(ctx, cfg, []string{"info", "--format", format}, nil, nil)
+	if runErr != nil {
+		return "", core.Exit(2, "local-container architecture assertion failed: requested=%s available=unknown: query %s daemon architecture: %v", requested, runtimeLabel, commandError("container runtime info", result, runErr))
+	}
+	raw := strings.TrimSpace(result.Stdout)
+	available, normalizeErr := core.NormalizeArchitecture(raw)
+	if raw == "" || normalizeErr != nil {
+		return "", core.Exit(2, "local-container architecture assertion failed: requested=%s available=%q: %s daemon returned an unrecognized architecture", requested, raw, runtimeLabel)
+	}
+	if requested != available {
+		return "", core.Exit(2, "local-container architecture mismatch: requested=%s available=%s", requested, available)
+	}
+	return available, nil
 }
 
 func (b *backend) serverFromContainer(container inspectContainer, cfg core.Config) core.Server {

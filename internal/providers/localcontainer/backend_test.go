@@ -655,6 +655,198 @@ func TestProviderAliases(t *testing.T) {
 	if _, ok := newBackend(spec, core.BaseConfig(), core.Runtime{Exec: &recordingRunner{}}).(core.SSHRunFailureEvidenceBackend); !ok {
 		t.Fatal("local-container backend does not expose failed-run evidence capability")
 	}
+	capability, ok := any(Provider{}).(core.ProviderArchitectureCapability)
+	if !ok {
+		t.Fatal("local-container provider does not expose architecture capability")
+	}
+	for _, architecture := range []string{core.ArchitectureAMD64, core.ArchitectureARM64} {
+		cfg := core.BaseConfig()
+		cfg.TargetOS = core.TargetLinux
+		if !capability.SupportsArchitecture(cfg, architecture) {
+			t.Fatalf("architecture capability rejected %s", architecture)
+		}
+	}
+}
+
+func TestAssertRequestedArchitectureNormalizesDockerAndPodman(t *testing.T) {
+	tests := []struct {
+		runtime   string
+		requested string
+		available string
+		want      string
+	}{
+		{runtime: "docker", requested: core.ArchitectureAMD64, available: "amd64", want: core.ArchitectureAMD64},
+		{runtime: "docker", requested: core.ArchitectureAMD64, available: "x86_64", want: core.ArchitectureAMD64},
+		{runtime: "docker", requested: core.ArchitectureARM64, available: "arm64", want: core.ArchitectureARM64},
+		{runtime: "docker", requested: core.ArchitectureARM64, available: "aarch64", want: core.ArchitectureARM64},
+		{runtime: "podman", requested: core.ArchitectureAMD64, available: "amd64", want: core.ArchitectureAMD64},
+		{runtime: "podman", requested: core.ArchitectureAMD64, available: "x86_64", want: core.ArchitectureAMD64},
+		{runtime: "podman", requested: core.ArchitectureARM64, available: "arm64", want: core.ArchitectureARM64},
+		{runtime: "podman", requested: core.ArchitectureARM64, available: "aarch64", want: core.ArchitectureARM64},
+	}
+	for _, tc := range tests {
+		t.Run(tc.runtime+"_"+tc.available, func(t *testing.T) {
+			runner := &recordingRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				wantFormat := "{{.Architecture}}"
+				if tc.runtime == "podman" {
+					wantFormat = "{{.Host.Arch}}"
+				}
+				if req.Name != tc.runtime || !slices.Equal(req.Args, []string{"info", "--format", wantFormat}) {
+					t.Fatalf("runtime request name=%q args=%v", req.Name, req.Args)
+				}
+				return core.LocalCommandResult{Stdout: tc.available + "\n"}, nil
+			}}
+			b := testBackend(runner)
+			cfg := b.cfg
+			cfg.LocalContainer.Runtime = tc.runtime
+			cfg.Architecture = tc.requested
+			core.MarkArchitectureExplicit(&cfg)
+			got, err := b.assertRequestedArchitecture(context.Background(), cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("architecture=%q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAssertRequestedArchitectureRejectsMismatchAndUnrecognizedOutput(t *testing.T) {
+	tests := []struct {
+		name          string
+		runtime       string
+		requested     string
+		available     string
+		wantAvailable string
+	}{
+		{name: "docker mismatch", runtime: "docker", requested: core.ArchitectureARM64, available: "x86_64", wantAvailable: "available=amd64"},
+		{name: "podman mismatch", runtime: "podman", requested: core.ArchitectureAMD64, available: "aarch64", wantAvailable: "available=arm64"},
+		{name: "docker unrecognized", runtime: "docker", requested: core.ArchitectureAMD64, available: "ppc64le", wantAvailable: `available="ppc64le"`},
+		{name: "podman malformed", runtime: "podman", requested: core.ArchitectureARM64, available: "amd64\narm64", wantAvailable: `available="amd64\narm64"`},
+		{name: "docker empty", runtime: "docker", requested: core.ArchitectureAMD64, available: "", wantAvailable: `available=""`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &recordingRunner{run: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				return core.LocalCommandResult{Stdout: tc.available}, nil
+			}}
+			b := testBackend(runner)
+			cfg := b.cfg
+			cfg.LocalContainer.Runtime = tc.runtime
+			cfg.Architecture = tc.requested
+			core.MarkArchitectureExplicit(&cfg)
+			_, err := b.assertRequestedArchitecture(context.Background(), cfg)
+			if err == nil || !strings.Contains(err.Error(), "requested="+tc.requested) || !strings.Contains(err.Error(), tc.wantAvailable) {
+				t.Fatalf("err=%v, want requested and available architecture", err)
+			}
+		})
+	}
+}
+
+func TestAssertRequestedArchitectureUsesCapturedRemoteRuntimeRoute(t *testing.T) {
+	tests := []struct {
+		name       string
+		runtime    string
+		context    string
+		wantPrefix []string
+		wantFormat string
+	}{
+		{name: "docker context", runtime: "docker", context: "remote-docker", wantPrefix: []string{"--context", "remote-docker"}, wantFormat: "{{.Architecture}}"},
+		{name: "podman connection", runtime: "podman", context: "remote-podman", wantPrefix: []string{"--connection", "remote-podman"}, wantFormat: "{{.Host.Arch}}"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &recordingRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				want := append(append([]string{}, tc.wantPrefix...), "info", "--format", tc.wantFormat)
+				if req.Name != tc.runtime || !slices.Equal(req.Args, want) {
+					t.Fatalf("runtime request name=%q args=%v want=%v", req.Name, req.Args, want)
+				}
+				return core.LocalCommandResult{Stdout: "arm64\n"}, nil
+			}}
+			b := testBackend(runner)
+			cfg := b.cfg
+			cfg.LocalContainer.Runtime = tc.runtime
+			cfg.LocalContainer.CheckpointMetadata = checkpointScopeMetadata(checkpointScope{
+				Runtime: tc.runtime, Context: tc.context, Endpoint: "remote", DaemonID: "daemon-remote",
+			})
+			cfg.Architecture = core.ArchitectureARM64
+			core.MarkArchitectureExplicit(&cfg)
+			if _, err := b.assertRequestedArchitecture(context.Background(), cfg); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestAssertRequestedArchitectureOmittedDoesNotProbe(t *testing.T) {
+	runner := &recordingRunner{}
+	b := testBackend(runner)
+	if got, err := b.assertRequestedArchitecture(context.Background(), b.cfg); err != nil || got != "" {
+		t.Fatalf("architecture=%q err=%v", got, err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("omitted architecture probed runtime: %#v", runner.calls)
+	}
+}
+
+func TestAcquireArchitectureMismatchFailsBeforeContainerCreation(t *testing.T) {
+	for _, runtimeName := range []string{"docker", "podman"} {
+		t.Run(runtimeName, func(t *testing.T) {
+			runner := &recordingRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				if slices.Contains(req.Args, "run") {
+					t.Fatalf("container creation attempted after architecture mismatch: %v", req.Args)
+				}
+				return core.LocalCommandResult{Stdout: "amd64\n"}, nil
+			}}
+			b := testBackend(runner)
+			b.cfg.LocalContainer.Runtime = runtimeName
+			b.cfg.Architecture = core.ArchitectureARM64
+			core.MarkArchitectureExplicit(&b.cfg)
+			_, err := b.Acquire(context.Background(), core.AcquireRequest{})
+			if err == nil || !strings.Contains(err.Error(), "requested=arm64 available=amd64") {
+				t.Fatalf("err=%v", err)
+			}
+			if len(runner.calls) != 1 {
+				t.Fatalf("runtime calls=%d, want architecture probe only: %#v", len(runner.calls), runner.calls)
+			}
+		})
+	}
+}
+
+func TestCreateContainerNeverRequestsEmulationPlatform(t *testing.T) {
+	tests := []struct {
+		runtime      string
+		architecture string
+	}{
+		{runtime: "docker", architecture: core.ArchitectureAMD64},
+		{runtime: "docker", architecture: core.ArchitectureARM64},
+		{runtime: "podman", architecture: core.ArchitectureAMD64},
+		{runtime: "podman", architecture: core.ArchitectureARM64},
+	}
+	for _, tc := range tests {
+		t.Run(tc.runtime+"_"+tc.architecture, func(t *testing.T) {
+			runner := &recordingRunner{responses: map[string]core.LocalCommandResult{"run": {Stdout: "container123456\n"}}}
+			b := testBackend(runner)
+			b.cfg.LocalContainer.Runtime = tc.runtime
+			core.MarkLocalContainerRuntimeExplicit(&b.cfg)
+			cfg := b.configForRun()
+			cfg.Architecture = tc.architecture
+			core.MarkArchitectureExplicit(&cfg)
+			_, bootstrapDir, err := b.createContainer(context.Background(), cfg, "crabbox-arch", "cbx_arch", "arch-test", "ssh-ed25519 AAAA test", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(bootstrapDir) })
+			args := recordedArgsForCommand(t, runner, "run")
+			if strings.Contains(args, "--platform") {
+				t.Fatalf("native architecture assertion emitted platform selection:\n%s", args)
+			}
+			if !strings.Contains(args, "--label\narchitecture="+tc.architecture) {
+				t.Fatalf("normalized architecture label missing:\n%s", args)
+			}
+		})
+	}
 }
 
 func TestCreateContainerUsesDockerCompatibleSSHLease(t *testing.T) {

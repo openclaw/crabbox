@@ -209,6 +209,10 @@ func IsArchitectureExplicit(cfg Config) bool {
 	return cfg.architectureExplicit
 }
 
+func MarkArchitectureExplicit(cfg *Config) {
+	cfg.architectureExplicit = true
+}
+
 func NormalizeArchitecture(value string) (string, error) {
 	return normalizeArchitecture(value)
 }

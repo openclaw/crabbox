@@ -3705,7 +3705,7 @@ func TestWindowsRemoteCapabilityPreflightUploadsScriptBeforeRunning(t *testing.T
 	env := map[string]string{"CRABBOX_LONG_ENV": strings.Repeat("x", 40000)}
 
 	var out bytes.Buffer
-	printRemoteCapabilityPreflight(context.Background(), &out, cfg, target, "cbx_123", `C:\crabbox\repo`, []string{`.crabbox\env\run.env`}, true, "", true, env)
+	printRemoteCapabilityPreflight(context.Background(), &out, cfg, Server{}, target, "cbx_123", `C:\crabbox\repo`, []string{`.crabbox\env\run.env`}, true, "", true, env)
 
 	data, err := os.ReadFile(logPath)
 	if err != nil {
@@ -3802,7 +3802,7 @@ func TestWindowsWSL2RemoteCapabilityPreflightUsesBoundedWrapper(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	printRemoteCapabilityPreflight(context.Background(), &out, cfg, target, "cbx_123", `/work/repo`, nil, false, "", true, nil)
+	printRemoteCapabilityPreflight(context.Background(), &out, cfg, Server{}, target, "cbx_123", `/work/repo`, nil, false, "", true, nil)
 
 	data, err := os.ReadFile(logPath)
 	if err != nil {
@@ -3839,13 +3839,24 @@ func TestRemotePreflightNonePrintsWorkspaceOnly(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.Run.PreflightTools = []string{"none"}
 	var out bytes.Buffer
-	printRemoteCapabilityPreflight(context.Background(), &out, cfg, SSHTarget{TargetOS: targetLinux}, "cbx_123", "/work/repo", nil, false, "", false, nil)
+	printRemoteCapabilityPreflight(context.Background(), &out, cfg, Server{}, SSHTarget{TargetOS: targetLinux}, "cbx_123", "/work/repo", nil, false, "", false, nil)
 	got := out.String()
 	if !strings.Contains(got, "remote preflight workspace=raw workdir=/work/repo hydrate_supported=false") {
 		t.Fatalf("missing workspace summary: %q", got)
 	}
 	if strings.Contains(got, "remote preflight failed") || strings.Contains(got, "remote preflight user=") || strings.Contains(got, "remote preflight cwd=") {
 		t.Fatalf("none should skip remote probes, got %q", got)
+	}
+}
+
+func TestRemotePreflightPrintsEffectiveArchitectureEvidence(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Run.PreflightTools = []string{"none"}
+	server := Server{Labels: map[string]string{"architecture": ArchitectureARM64}}
+	var out bytes.Buffer
+	printRemoteCapabilityPreflight(context.Background(), &out, cfg, server, SSHTarget{TargetOS: targetLinux}, "cbx_123", "/work/repo", nil, false, "", false, nil)
+	if !strings.Contains(out.String(), "remote preflight architecture=arm64\n") {
+		t.Fatalf("missing architecture evidence: %q", out.String())
 	}
 }
 

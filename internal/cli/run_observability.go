@@ -149,12 +149,15 @@ func runLogsURL(coord *CoordinatorClient, runID string) string {
 	return strings.TrimRight(coord.BaseURL, "/") + "/v1/runs/" + url.PathEscape(runID) + "/logs"
 }
 
-func printRemoteCapabilityPreflight(ctx context.Context, w io.Writer, cfg Config, target SSHTarget, leaseID, workdir string, envFiles []string, hydrated bool, actionsURL string, hydrateSupported bool, env map[string]string) {
+func printRemoteCapabilityPreflight(ctx context.Context, w io.Writer, cfg Config, server Server, target SSHTarget, leaseID, workdir string, envFiles []string, hydrated bool, actionsURL string, hydrateSupported bool, env map[string]string) {
 	if w == nil {
 		return
 	}
 	for _, line := range remotePreflightWorkspaceLines(cfg, target, leaseID, workdir, hydrated, actionsURL, hydrateSupported) {
 		fmt.Fprintln(w, line)
+	}
+	if architecture := strings.TrimSpace(server.Labels["architecture"]); architecture != "" {
+		fmt.Fprintf(w, "remote preflight architecture=%s\n", architecture)
 	}
 	tools := preflightToolsForTarget(target, cfg.Run.PreflightTools)
 	if len(tools) == 0 {
