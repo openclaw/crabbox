@@ -85,3 +85,42 @@ func TestClaimsListReadableNonWritableStore(t *testing.T) {
 		})
 	}
 }
+
+func TestRuntimeClaimsSnapshotChecksFileTypeInsideLock(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	stateDir, err := crabboxStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimsDir := filepath.Join(stateDir, "claims")
+	if err := os.MkdirAll(claimsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(stateDir, "outside-claim.json")
+	if err := os.WriteFile(target, []byte(`{"leaseID":"cbx_link"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(claimsDir, "cbx_link.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(claimsDir, "cbx_dir.json"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := snapshotLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.claims) != 0 {
+		t.Fatalf("claims=%#v", snapshot.claims)
+	}
+	for _, leaseID := range []string{"cbx_dir", "cbx_link"} {
+		var fileErr *leaseClaimFileError
+		if !errors.As(snapshot.invalid[leaseID], &fileErr) || fileErr.code != "non_regular_file" {
+			t.Fatalf("invalid[%s]=%v", leaseID, snapshot.invalid[leaseID])
+		}
+		if _, err := os.Stat(filepath.Join(stateDir, "claim-locks", leaseID+".json.lock")); err != nil {
+			t.Fatalf("runtime lock missing for %s: %v", leaseID, err)
+		}
+	}
+}
