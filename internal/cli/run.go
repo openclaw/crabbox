@@ -960,7 +960,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	runReq.RunID = executionRunID
 	runReq.Env = envSelection.Effective
 	keepFailedLease := false
-	releaseUnreportedLease := false
+	// A newly acquired retained lease is not safe to keep until its requested
+	// cleanup handle has been written successfully.
+	releaseUnreportedLease := acquired && leaseOutputPath != ""
 	defer func() {
 		if !releaseUnreportedLease && !shouldReleaseRunLease(acquired, *keep, keepFailedLease, *stopAfter, runFailure) {
 			return
@@ -1016,11 +1018,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			handleErr = writeRunLeaseOutput(leaseOutputPath, session)
 		}
 		if handleErr != nil {
-			// A reused lease was already named by the caller. Only a fresh lease would
-			// otherwise become an unreported retained resource when the write fails.
-			releaseUnreportedLease = acquired
 			return recordFailure(handleErr)
 		}
+		releaseUnreportedLease = false
 	}
 	a.startRegisteredWebVNCDaemonBestEffort(cfg, target, leaseID, acquired && *keep)
 	if !useCoordinator && leaseID != "" {

@@ -1889,6 +1889,7 @@ func TestRunCommandRejectsReadyPoolLeaseOutput(t *testing.T) {
 			args := []string{
 				"--provider", "local-container",
 				"--pool", "shared-linux",
+				"--pool-return", "drain",
 				"--lease-output", filepath.Join(dir, "session.json"),
 			}
 			args = append(args, tc.args...)
@@ -1937,6 +1938,52 @@ func TestRunCommandLocalContainerLeaseOutputSurvivesCommandAndSyncFailure(t *tes
 				t.Fatalf("session after %s failure=%#v", phase, session)
 			}
 		})
+	}
+}
+
+func TestRunCommandLocalContainerLeaseOutputClaimFailureReleasesFreshLease(t *testing.T) {
+	dir, _ := setupLocalContainerRunSessionTest(t, "#!/bin/sh\ncase \"$1\" in *session-should-not-run*) : > \"$CRABBOX_COMMAND_MARKER\" ;; esac\nexit 0\n")
+	path := filepath.Join(dir, "session.json")
+	marker := filepath.Join(dir, "command-ran")
+	t.Setenv("CRABBOX_COMMAND_MARKER", marker)
+	runEnvProfileTestAcquireHook = func(AcquireRequest) {
+		if err := claimLeaseForRepoProvider(
+			localContainerRunSessionTestLeaseID,
+			"session-slug",
+			"local-container",
+			filepath.Join(dir, "other-repo"),
+			time.Minute,
+			false,
+		); err != nil {
+			t.Errorf("install conflicting claim: %v", err)
+		}
+	}
+	releases := 0
+	runEnvProfileTestReleaseHook = func() error {
+		releases++
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(t.Context(), []string{
+		"--provider", "local-container",
+		"--keep",
+		"--no-sync",
+		"--no-hydrate",
+		"--lease-output", path,
+		"--", "session-should-not-run",
+	})
+	if err == nil || !strings.Contains(err.Error(), "use --reclaim") {
+		t.Fatalf("error=%v want claim failure\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	if releases != 1 {
+		t.Fatalf("fresh unreported lease released %d time(s), want 1", releases)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("lease output exists after claim failure: %v", statErr)
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("user command ran after claim failure: %v", statErr)
 	}
 }
 
