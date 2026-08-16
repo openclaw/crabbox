@@ -1997,6 +1997,9 @@ func (b *backend) resolveContainer(ctx context.Context, identifier string) (insp
 		if _, err := b.applyCheckpointScopeLabels(ctx, exactClaim.Labels); err != nil {
 			return inspectContainer{}, "", "", err
 		}
+		if err := b.assertResolveRequestedArchitecture(ctx); err != nil {
+			return inspectContainer{}, "", "", err
+		}
 		return b.findContainerForClaim(ctx, exactClaim)
 	}
 	claims, err := core.ListLeaseClaims()
@@ -2016,6 +2019,14 @@ func (b *backend) resolveContainer(ctx context.Context, identifier string) (insp
 	}
 	if len(slugClaims) > 1 {
 		return inspectContainer{}, "", "", core.Exit(2, "local-container slug %s is ambiguous across %d lease claims; use a lease id", identifier, len(slugClaims))
+	}
+	if len(slugClaims) == 1 && core.IsArchitectureExplicit(b.cfg) {
+		if _, err := b.applyCheckpointScopeLabels(ctx, slugClaims[0].Labels); err != nil {
+			return inspectContainer{}, "", "", err
+		}
+	}
+	if err := b.assertResolveRequestedArchitecture(ctx); err != nil {
+		return inspectContainer{}, "", "", err
 	}
 	containers, listErr := b.listContainers(ctx)
 	for _, container := range containers {
@@ -2049,6 +2060,18 @@ func (b *backend) resolveContainer(ctx context.Context, identifier string) (insp
 		return inspectContainer{}, "", "", listErr
 	}
 	return inspectContainer{}, "", "", core.Exit(4, "local-container lease not found: %s", identifier)
+}
+
+func (b *backend) assertResolveRequestedArchitecture(ctx context.Context) error {
+	cfg := b.configForRun()
+	architecture, err := b.assertRequestedArchitecture(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	if architecture != "" {
+		b.cfg.Architecture = architecture
+	}
+	return nil
 }
 
 func (b *backend) applyCheckpointScopeLabels(ctx context.Context, labels map[string]string) (bool, error) {
@@ -2307,6 +2330,9 @@ func (b *backend) serverFromContainer(container inspectContainer, cfg core.Confi
 			continue
 		}
 		labels[key] = value
+	}
+	if core.IsArchitectureExplicit(cfg) {
+		labels["architecture"] = cfg.Architecture
 	}
 	labels["container_id"] = shortID(container.ID)
 	if labels["provider"] == "" {

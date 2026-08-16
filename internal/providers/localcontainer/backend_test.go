@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
@@ -812,6 +813,199 @@ func TestAcquireArchitectureMismatchFailsBeforeContainerCreation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResolveArchitectureAssertionMatchesAndNormalizesAliases(t *testing.T) {
+	tests := []struct {
+		name      string
+		runtime   string
+		requested string
+		available string
+		want      string
+		context   string
+	}{
+		{name: "docker canonical", runtime: "docker", requested: core.ArchitectureAMD64, available: "amd64", want: core.ArchitectureAMD64, context: "default"},
+		{name: "docker daemon alias", runtime: "docker", requested: core.ArchitectureAMD64, available: "x86_64", want: core.ArchitectureAMD64, context: "default"},
+		{name: "docker request alias", runtime: "docker", requested: "aarch64", available: "arm64", want: core.ArchitectureARM64, context: "default"},
+		{name: "podman aliases", runtime: "podman", requested: "x86_64", available: "amd64", want: core.ArchitectureAMD64, context: "default"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			b, runner, leaseID, _ := resolveArchitectureFixture(t, tc.runtime, tc.context, tc.requested, tc.available)
+			lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := lease.Server.Labels["architecture"]; got != tc.want {
+				t.Fatalf("resolved architecture=%q, want %q", got, tc.want)
+			}
+			if len(runner.calls) != 3 {
+				t.Fatalf("runtime calls=%d, want info/list/inspect: %#v", len(runner.calls), runner.calls)
+			}
+			for _, call := range runner.calls {
+				if slices.Contains(call.Args, "--platform") {
+					t.Fatalf("reuse architecture assertion requested emulation: %#v", call.Args)
+				}
+			}
+		})
+	}
+}
+
+func TestResolveArchitectureAssertionUsesCapturedRemoteRuntimeRoute(t *testing.T) {
+	tests := []struct {
+		name      string
+		runtime   string
+		context   string
+		requested string
+		available string
+	}{
+		{name: "docker context", runtime: "docker", context: "remote-docker", requested: core.ArchitectureAMD64, available: "x86_64"},
+		{name: "podman connection", runtime: "podman", context: "remote-podman", requested: core.ArchitectureARM64, available: "aarch64"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			b, runner, leaseID, _ := resolveArchitectureFixture(t, tc.runtime, tc.context, tc.requested, tc.available)
+			lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := core.NormalizeArchitecture(tc.requested)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := lease.Server.Labels["architecture"]; got != want {
+				t.Fatalf("resolved architecture=%q, want %q", got, want)
+			}
+			if len(runner.calls) != 3 {
+				t.Fatalf("runtime calls=%d, want info/list/inspect: %#v", len(runner.calls), runner.calls)
+			}
+		})
+	}
+}
+
+func TestResolveArchitectureAssertionFailurePrecedesContainerUseAndClaimMutation(t *testing.T) {
+	tests := []struct {
+		name      string
+		runtime   string
+		context   string
+		requested string
+		available string
+		wantError string
+	}{
+		{name: "docker mismatch", runtime: "docker", context: "default", requested: core.ArchitectureARM64, available: "x86_64", wantError: "requested=arm64 available=amd64"},
+		{name: "malformed remote docker response", runtime: "docker", context: "remote-docker", requested: core.ArchitectureAMD64, available: "amd64\narm64", wantError: `available="amd64\narm64"`},
+		{name: "remote podman mismatch", runtime: "podman", context: "remote-podman", requested: core.ArchitectureAMD64, available: "aarch64", wantError: "requested=amd64 available=arm64"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			b, runner, leaseID, before := resolveArchitectureFixture(t, tc.runtime, tc.context, tc.requested, tc.available)
+			_, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, Repo: core.Repo{Root: t.TempDir()}})
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("Resolve error=%v, want %q", err, tc.wantError)
+			}
+			if len(runner.calls) != 1 {
+				t.Fatalf("runtime calls=%d, want architecture probe only: %#v", len(runner.calls), runner.calls)
+			}
+			for _, forbidden := range []string{"ps", "inspect", "exec", "run", "rm"} {
+				if slices.Contains(runner.calls[0].Args, forbidden) {
+					t.Fatalf("architecture failure reached container %s: %#v", forbidden, runner.calls[0].Args)
+				}
+			}
+			after, readErr := core.ReadLeaseClaim(leaseID)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("architecture failure mutated claim:\nbefore=%#v\nafter=%#v", before, after)
+			}
+		})
+	}
+}
+
+func resolveArchitectureFixture(t *testing.T, runtimeName, contextName, requested, available string) (*backend, *recordingRunner, string, core.LeaseClaim) {
+	t.Helper()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_resolve_arch"
+	slug := "resolve-arch"
+	containerID := "resolve-arch-container"
+	scope := checkpointScope{
+		Runtime:  runtimeName,
+		Context:  contextName,
+		Endpoint: "unix:///tmp/resolve-arch.sock",
+		DaemonID: "resolve-arch-daemon",
+	}
+	labels := map[string]string{
+		"crabbox": "true", "provider": providerName, "lease": leaseID, "slug": slug,
+		"state": "ready", "runtime": runtimeName, "ssh_user": "runner", "work_root": "/workspace/crabbox",
+	}
+	for key, value := range checkpointScopeMetadata(scope) {
+		if value != "" {
+			labels[key] = value
+		}
+	}
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(
+		leaseID,
+		slug,
+		providerName,
+		localContainerClaimScope(runtimeName, contextName),
+		"",
+		t.TempDir(),
+		time.Minute,
+		false,
+		core.Server{CloudID: containerID, Provider: providerName, Labels: labels},
+		core.SSHTarget{Host: "127.0.0.1", Port: "49153"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	before, err := core.ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspectJSON := fmt.Sprintf(`[{"Id":%q,"Name":"/crabbox-resolve-arch","Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":%q,"slug":%q,"state":"ready","runtime":%q,"ssh_user":"runner","work_root":"/workspace/crabbox"}},"State":{"Status":"running","Running":true},"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49153"}]}}}]`, containerID, leaseID, slug, runtimeName)
+	prefix := []string{}
+	if contextName != "" && contextName != "default" {
+		if runtimeName == "podman" {
+			prefix = []string{"--connection", contextName}
+		} else {
+			prefix = []string{"--context", contextName}
+		}
+	}
+	runner := &recordingRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		if req.Name != runtimeName || len(req.Args) < len(prefix)+1 || !slices.Equal(req.Args[:len(prefix)], prefix) {
+			t.Fatalf("runtime request name=%q args=%v, want %s prefix=%v", req.Name, req.Args, runtimeName, prefix)
+		}
+		args := req.Args[len(prefix):]
+		switch args[0] {
+		case "info":
+			wantFormat := "{{.Architecture}}"
+			if runtimeName == "podman" {
+				wantFormat = "{{.Host.Arch}}"
+			}
+			if !slices.Equal(args, []string{"info", "--format", wantFormat}) {
+				t.Fatalf("architecture probe args=%v", req.Args)
+			}
+			return core.LocalCommandResult{Stdout: available + "\n"}, nil
+		case "ps":
+			return core.LocalCommandResult{Stdout: containerID + "\n"}, nil
+		case "inspect":
+			return core.LocalCommandResult{Stdout: inspectJSON}, nil
+		default:
+			t.Fatalf("unexpected runtime request: %#v", req.Args)
+			return core.LocalCommandResult{}, nil
+		}
+	}}
+	b := testBackend(runner)
+	b.cfg.LocalContainer.Runtime = runtimeName
+	core.MarkLocalContainerRuntimeExplicit(&b.cfg)
+	b.cfg.Architecture = requested
+	core.MarkArchitectureExplicit(&b.cfg)
+	b.validateRuntimeScope = func(_ context.Context, got checkpointScope) error {
+		if !sameCheckpointScope(got, scope) {
+			t.Fatalf("validated scope=%#v, want %#v", got, scope)
+		}
+		return nil
+	}
+	return b, runner, leaseID, before
 }
 
 func TestCreateContainerNeverRequestsEmulationPlatform(t *testing.T) {
