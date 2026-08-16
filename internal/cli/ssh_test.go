@@ -22,6 +22,35 @@ import (
 
 const powerShellEncodedCommandPrefix = "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "
 
+func TestSSHCommandContextBoundsPipeDrainAfterCancellation(t *testing.T) {
+	cmd := sshCommandContext(context.Background(), SSHTarget{}, "-V")
+	if cmd.WaitDelay != sshCommandWaitDelay {
+		t.Fatalf("SSH command WaitDelay=%s want %s", cmd.WaitDelay, sshCommandWaitDelay)
+	}
+}
+
+func TestWindowsPowerShellStdinScriptCommandUsesExactLengthFrame(t *testing.T) {
+	command := windowsPowerShellStdinScriptCommand(12_345)
+	if len(command) >= 8191 {
+		t.Fatalf("stdin script command length=%d exceeds cmd.exe limit", len(command))
+	}
+	decoded := decodePowerShellCommand(t, command)
+	for _, want := range []string{
+		"$remaining = [Int64]12345",
+		"$stdin.Read($buffer, 0, $readSize)",
+		"SSH stdin ended before the framed payload",
+		"$scriptFile.Flush($true)",
+		"-File $path",
+	} {
+		if !strings.Contains(decoded, want) {
+			t.Fatalf("stdin script command missing %q:\n%s", want, decoded)
+		}
+	}
+	if strings.Contains(decoded, "ReadToEnd") || strings.Contains(decoded, "CopyTo") {
+		t.Fatalf("stdin script command still depends on EOF:\n%s", decoded)
+	}
+}
+
 func TestDirectSSHExecutableSelection(t *testing.T) {
 	windowsDir := t.TempDir()
 	nativeSSH := filepath.Join(windowsDir, "System32", "OpenSSH", "ssh.exe")

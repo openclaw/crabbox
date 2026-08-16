@@ -1075,7 +1075,7 @@ func runDesktopLaunchRemoteCombinedOutput(ctx context.Context, target SSHTarget,
 	err := runSSHInput(
 		ctx,
 		target,
-		windowsPowerShellStdinScriptCommand(),
+		windowsPowerShellStdinScriptCommand(len([]byte(remote))),
 		strings.NewReader(remote),
 		&output,
 		&output,

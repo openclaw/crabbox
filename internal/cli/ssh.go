@@ -222,8 +222,14 @@ func directSSHExecutableForGOOS(goos string, getenv func(string) string, stat fu
 	return "ssh"
 }
 
+const sshCommandWaitDelay = 5 * time.Second
+
 func sshCommandContext(ctx context.Context, target SSHTarget, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, directSSHExecutable(), args...)
+	// A cancelled multiplexed SSH session can leave its ControlPersist master
+	// holding inherited pipes after the session process exits. Bound Go's pipe
+	// drain so cancellation cannot strand the caller in Cmd.Wait.
+	cmd.WaitDelay = sshCommandWaitDelay
 	applyTargetChildEnvironment(cmd, target)
 	return cmd
 }
@@ -461,7 +467,7 @@ func runSSHQuietWithOptions(ctx context.Context, target SSHTarget, remote, conne
 }
 
 func runSSHQuietWithOptionsResolvePort(ctx context.Context, target *SSHTarget, remote, connectTimeout, connectionAttempts string) (err error) {
-	prepared, err := prepareWorkspaceOwnerRemote(ctx, *target, remote, false)
+	prepared, err := prepareWorkspaceOwnerRemote(ctx, *target, remote, nil)
 	if err != nil {
 		return err
 	}
@@ -492,7 +498,7 @@ func runSSHQuietWithOptionsResolvePort(ctx context.Context, target *SSHTarget, r
 }
 
 func runSSHQuietWithRemoteWaitTimeout(ctx context.Context, target SSHTarget, remote string, waitTimeout time.Duration, connectTimeout, connectionAttempts string) (err error) {
-	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, false)
+	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, nil)
 	if err != nil {
 		return err
 	}
@@ -522,7 +528,7 @@ func runSSHQuietWithRemoteWaitTimeout(ctx context.Context, target SSHTarget, rem
 }
 
 func runSSHOutput(ctx context.Context, target SSHTarget, remote string) (output string, err error) {
-	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, false)
+	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, nil)
 	if err != nil {
 		return "", err
 	}
@@ -554,7 +560,7 @@ func runSSHOutput(ctx context.Context, target SSHTarget, remote string) (output 
 }
 
 func runSSHOutputWithRemoteWaitTimeout(ctx context.Context, target SSHTarget, remote string, waitTimeout time.Duration, connectTimeout, connectionAttempts string) (output string, err error) {
-	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, false)
+	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, nil)
 	if err != nil {
 		return "", err
 	}
@@ -587,7 +593,7 @@ func runSSHOutputWithRemoteWaitTimeout(ctx context.Context, target SSHTarget, re
 }
 
 func runSSHCombinedOutput(ctx context.Context, target SSHTarget, remote string) (output string, err error) {
-	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, false)
+	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, nil)
 	if err != nil {
 		return "", err
 	}
@@ -641,7 +647,7 @@ func runIdempotentSSHCombinedOutput(ctx context.Context, target SSHTarget, remot
 }
 
 func runWSL2ControlScriptCombinedOutput(ctx context.Context, target SSHTarget, remote string, waitTimeout time.Duration, connectTimeout, connectionAttempts string) (output string, err error) {
-	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, false)
+	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, nil)
 	if err != nil {
 		return "", err
 	}
@@ -689,7 +695,15 @@ func runSSHInputQuiet(ctx context.Context, target SSHTarget, remote, input strin
 }
 
 func runSSHInputCombinedOutput(ctx context.Context, target SSHTarget, remote string, input io.Reader) (output string, err error) {
-	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, true)
+	if input == nil {
+		input = strings.NewReader("")
+	}
+	data, err := io.ReadAll(input)
+	if err != nil {
+		return "", err
+	}
+	inputSize := int64(len(data))
+	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, &inputSize)
 	if err != nil {
 		return "", err
 	}
@@ -699,13 +713,6 @@ func runSSHInputCombinedOutput(ctx context.Context, target SSHTarget, remote str
 		}
 	}()
 	remote = wrapRemoteForTarget(target, prepared.command)
-	if input == nil {
-		input = strings.NewReader("")
-	}
-	data, err := io.ReadAll(input)
-	if err != nil {
-		return "", err
-	}
 	replayableInput, err := newReplayableSSHInput(data)
 	if err != nil {
 		return "", err
@@ -736,7 +743,15 @@ func runSSHInputCombinedOutput(ctx context.Context, target SSHTarget, remote str
 }
 
 func runSSHInput(ctx context.Context, target SSHTarget, remote string, input io.Reader, stdout, stderr io.Writer) (err error) {
-	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, true)
+	if input == nil {
+		input = strings.NewReader("")
+	}
+	data, err := io.ReadAll(input)
+	if err != nil {
+		return err
+	}
+	inputSize := int64(len(data))
+	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, &inputSize)
 	if err != nil {
 		return err
 	}
@@ -745,15 +760,7 @@ func runSSHInput(ctx context.Context, target SSHTarget, remote string, input io.
 			err = errors.Join(err, prepared.close(ctx, target))
 		}
 	}()
-	remote = prepared.command
-	remote = wrapRemoteForTarget(target, remote)
-	if input == nil {
-		input = strings.NewReader("")
-	}
-	data, err := io.ReadAll(input)
-	if err != nil {
-		return err
-	}
+	remote = wrapRemoteForTarget(target, prepared.command)
 	replayableInput, err := newReplayableSSHInput(data)
 	if err != nil {
 		return err
@@ -783,7 +790,17 @@ func runSSHInput(ctx context.Context, target SSHTarget, remote string, input io.
 }
 
 func runSSHInputStream(ctx context.Context, target SSHTarget, remote string, input io.ReadSeeker, stdout, stderr io.Writer) (err error) {
-	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, true)
+	if input == nil {
+		input = strings.NewReader("")
+	}
+	inputSize, err := input.Seek(0, io.SeekEnd)
+	if err != nil {
+		return err
+	}
+	if _, err := input.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, &inputSize)
 	if err != nil {
 		return err
 	}
@@ -792,11 +809,7 @@ func runSSHInputStream(ctx context.Context, target SSHTarget, remote string, inp
 			err = errors.Join(err, prepared.close(ctx, target))
 		}
 	}()
-	remote = prepared.command
-	remote = wrapRemoteForTarget(target, remote)
-	if input == nil {
-		input = strings.NewReader("")
-	}
+	remote = wrapRemoteForTarget(target, prepared.command)
 	var lastErr error
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 		if _, err := input.Seek(0, io.SeekStart); err != nil {
@@ -824,7 +837,7 @@ func runSSHStream(ctx context.Context, target SSHTarget, remote string, stdout, 
 }
 
 func runSSHStreamResult(ctx context.Context, target SSHTarget, remote string, stdout, stderr io.Writer) (int, error) {
-	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, false)
+	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, nil)
 	if err != nil {
 		return 7, err
 	}
@@ -1571,8 +1584,40 @@ func powershellCommand(script string) string {
 	return "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " + encoded
 }
 
-func windowsPowerShellStdinScriptCommand() string {
-	return `powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$path=Join-Path $env:TEMP ('crabbox-stdin-command-'+[Guid]::NewGuid().ToString('N')+'.ps1');$source=[Console]::In.ReadToEnd();[IO.File]::WriteAllText($path,$source,(New-Object Text.UTF8Encoding($false)));try{& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $path;$code=$LASTEXITCODE}finally{Remove-Item -Force -LiteralPath $path -ErrorAction SilentlyContinue};if($null -eq $code){$code=0};exit $code"`
+func windowsPowerShellCopyExactInput(destination string, inputSize int64) string {
+	return `$stdin = [Console]::OpenStandardInput()
+$remaining = [Int64]` + strconv.FormatInt(inputSize, 10) + `
+$buffer = New-Object byte[] 65536
+while ($remaining -gt 0) {
+	$readSize = [int][Math]::Min([Int64]$buffer.Length, $remaining)
+	$read = $stdin.Read($buffer, 0, $readSize)
+	if ($read -le 0) { throw "SSH stdin ended before the framed payload" }
+	` + destination + `.Write($buffer, 0, $read)
+	$remaining -= $read
+}
+`
+}
+
+func windowsPowerShellStdinScriptCommand(inputSize int) string {
+	return powershellCommand(`$ErrorActionPreference = "Stop"
+$path = Join-Path $env:TEMP ("crabbox-stdin-command-" + [Guid]::NewGuid().ToString("N") + ".ps1")
+try {
+	$scriptFile = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+	try {
+		$bom = [byte[]](0xEF, 0xBB, 0xBF)
+		$scriptFile.Write($bom, 0, $bom.Length)
+` + windowsPowerShellCopyExactInput("$scriptFile", int64(inputSize)) + `		$scriptFile.Flush($true)
+	} finally {
+		$scriptFile.Dispose()
+	}
+	& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $path
+	$code = $LASTEXITCODE
+} finally {
+	Remove-Item -Force -LiteralPath $path -ErrorAction SilentlyContinue
+}
+if ($null -eq $code) { $code = 0 }
+exit $code
+`)
 }
 
 func utf16LE(input []byte) []byte {

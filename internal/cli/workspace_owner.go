@@ -51,7 +51,8 @@ func (t sshWorkspaceOwnerTransport) Do(ctx context.Context, req workspaceOwnerRe
 		out, err := runSSHCombinedOutput(ctx, t.target, remoteWorkspaceOwnerCommand(t.target, req))
 		return strings.TrimSpace(out), err
 	}
-	return runSSHInputCombinedOutput(ctx, t.target, windowsPowerShellStdinScriptCommand(), strings.NewReader(remoteWorkspaceOwnerWindows(req)))
+	script := remoteWorkspaceOwnerWindows(req)
+	return runSSHInputCombinedOutput(ctx, t.target, windowsPowerShellStdinScriptCommand(len([]byte(script))), strings.NewReader(script))
 }
 
 type workspaceOwner struct {
@@ -91,15 +92,15 @@ type workspaceOwnerRemotePreparation struct {
 	name    string
 }
 
-func prepareWorkspaceOwnerRemote(ctx context.Context, target SSHTarget, remote string, preserveInput bool) (workspaceOwnerRemotePreparation, error) {
+func prepareWorkspaceOwnerRemote(ctx context.Context, target SSHTarget, remote string, inputSize *int64) (workspaceOwnerRemotePreparation, error) {
 	owner := workspaceOwnerFromContext(ctx)
 	if owner == nil {
 		return workspaceOwnerRemotePreparation{command: remote}, nil
 	}
 	if !isWindowsNativeTarget(target) {
-		return workspaceOwnerRemotePreparation{command: owner.wrapPOSIXCommand(remote, preserveInput)}, nil
+		return workspaceOwnerRemotePreparation{command: owner.wrapPOSIXCommand(remote, inputSize != nil)}, nil
 	}
-	return stageWorkspaceOwnerWindowsWitness(contextWithoutWorkspaceOwner(ctx), target, owner, remote, preserveInput, false)
+	return stageWorkspaceOwnerWindowsWitness(contextWithoutWorkspaceOwner(ctx), target, owner, remote, inputSize, false)
 }
 
 func (p workspaceOwnerRemotePreparation) close(ctx context.Context, target SSHTarget) error {
@@ -111,18 +112,18 @@ func (p workspaceOwnerRemotePreparation) close(ctx context.Context, target SSHTa
 	return runSSHQuiet(contextWithoutWorkspaceOwner(cleanupCtx), target, p.cleanup)
 }
 
-func stageWorkspaceOwnerWindowsWitness(ctx context.Context, target SSHTarget, owner *workspaceOwner, remote string, preserveInput, selfCleaning bool) (workspaceOwnerRemotePreparation, error) {
+func stageWorkspaceOwnerWindowsWitness(ctx context.Context, target SSHTarget, owner *workspaceOwner, remote string, inputSize *int64, selfCleaning bool) (workspaceOwnerRemotePreparation, error) {
 	nonce, err := randomHex(16)
 	if err != nil {
 		return workspaceOwnerRemotePreparation{}, fmt.Errorf("create native Windows workspace witness name: %w", err)
 	}
 	name := owner.key + ".witness." + owner.token + "." + nonce + ".ps1"
-	script := remoteWorkspaceOwnerWindowsWitness(owner.key, owner.token, remote, preserveInput)
+	script := remoteWorkspaceOwnerWindowsWitness(owner.key, owner.token, remote, inputSize)
 	if selfCleaning {
 		script = remoteWorkspaceOwnerWindowsSelfCleaningWitness(name, script)
 	}
 	var output synchronizedBuffer
-	if err := runSSHInput(ctx, target, remoteWorkspaceOwnerWindowsStageWitnessCommand(owner.key, owner.token, name), strings.NewReader(script), &output, &output); err != nil {
+	if err := runSSHInput(ctx, target, remoteWorkspaceOwnerWindowsStageWitnessCommand(owner.key, owner.token, name, int64(len([]byte(script)))), strings.NewReader(script), &output, &output); err != nil {
 		detail := trimFailureDetail(strings.TrimSpace(output.String()))
 		if detail != "" {
 			return workspaceOwnerRemotePreparation{}, fmt.Errorf("stage native Windows workspace witness: %w: %s", err, detail)
@@ -144,7 +145,7 @@ func runWorkspaceOwnerBackgroundOutput(ctx context.Context, target SSHTarget, ow
 	if !isWindowsNativeTarget(target) {
 		return runSSHOutput(ctx, target, owner.wrapPOSIXBackgroundCommand(remote))
 	}
-	prepared, err := stageWorkspaceOwnerWindowsWitness(ctx, target, owner, remote, false, true)
+	prepared, err := stageWorkspaceOwnerWindowsWitness(ctx, target, owner, remote, nil, true)
 	if err != nil {
 		return "", err
 	}
@@ -418,7 +419,7 @@ func (o *workspaceOwner) wrapPOSIXBackgroundCommand(remote string) string {
 
 func remoteWorkspaceOwnerCommand(target SSHTarget, req workspaceOwnerRemoteRequest) string {
 	if isWindowsNativeTarget(target) {
-		return windowsPowerShellStdinScriptCommand()
+		return windowsPowerShellStdinScriptCommand(len([]byte(remoteWorkspaceOwnerWindows(req))))
 	}
 	return remoteWorkspaceOwnerPOSIXLauncher(req.Key, req.Token, remoteWorkspaceOwnerPOSIX(req))
 }
@@ -764,7 +765,7 @@ exit "$code"
 `
 }
 
-func remoteWorkspaceOwnerWindowsStageWitnessCommand(key, token, name string) string {
+func remoteWorkspaceOwnerWindowsStageWitnessCommand(key, token, name string, scriptSize int64) string {
 	return powershellCommand(`$ErrorActionPreference = "Stop"
 $root = Join-Path $HOME ".crabbox\workspace-owners"
 $state = Join-Path $root (` + psQuote(key) + ` + ".owner")
@@ -781,7 +782,7 @@ try {
 	$created = $true
 	$bom = [byte[]](0xEF, 0xBB, 0xBF)
 	$stream.Write($bom, 0, $bom.Length)
-	[Console]::OpenStandardInput().CopyTo($stream)
+` + windowsPowerShellCopyExactInput("$stream", scriptSize) + `	if ($stream.Length -ne ` + strconv.FormatInt(scriptSize+3, 10) + `) { throw "staged workspace witness length is ambiguous" }
 	$stream.Flush($true)
 } catch {
 	if ($null -ne $stream) { $stream.Dispose(); $stream = $null }
@@ -839,14 +840,16 @@ try {
 `)
 }
 
-func remoteWorkspaceOwnerWindowsWitness(key, token, remote string, preserveInput ...bool) string {
+func remoteWorkspaceOwnerWindowsWitness(key, token, remote string, inputSize *int64) string {
 	payload := base64.StdEncoding.EncodeToString([]byte(remote))
 	inputSetup := ""
 	inputArgument := ""
-	if len(preserveInput) > 0 && preserveInput[0] {
+	if inputSize != nil {
 		inputSetup = `$inputPath = Join-Path $runDir "input"
 $inputFile = [IO.File]::Open($inputPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-try { [Console]::OpenStandardInput().CopyTo($inputFile); $inputFile.Flush() } finally { $inputFile.Dispose() }
+try {
+` + windowsPowerShellCopyExactInput("$inputFile", *inputSize) + `	$inputFile.Flush($true)
+} finally { $inputFile.Dispose() }
 `
 		inputArgument = ` -RedirectStandardInput $inputPath`
 	}
@@ -911,14 +914,20 @@ $childSource = @'
 $ErrorActionPreference = "Stop"
 while (-not (Test-Path -LiteralPath '__START__')) { Start-Sleep -Milliseconds 50 }
 $payload = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__PAYLOAD__'))
+$global:LASTEXITCODE = $null
 & ([ScriptBlock]::Create($payload))
-exit $LASTEXITCODE
+$payloadSucceeded = $?
+$payloadExitCode = $global:LASTEXITCODE
+if ($null -ne $payloadExitCode) { exit [int]$payloadExitCode }
+if (-not $payloadSucceeded) { exit 1 }
+exit 0
 '@
 $childSource = $childSource.Replace('__START__', $start.Replace("'", "''")).Replace('__PAYLOAD__', ` + psQuote(payload) + `)
 $childScript = Join-Path $runDir "child.ps1"
 [IO.File]::WriteAllText($childScript, $childSource, [Text.UTF8Encoding]::new($true))
 $childFileArg = '"' + $childScript + '"'
 $process = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", $childFileArg) -NoNewWindow -PassThru` + inputArgument + `
+$null = $process.Handle
 $identity = [string]$process.StartTime.ToUniversalTime().Ticks
 $gateStream = Enter-Gate
 if ($null -eq $gateStream) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue; throw "ambiguous owner gate" }

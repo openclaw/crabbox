@@ -343,7 +343,7 @@ func TestAcquiredRunMayRetainLease(t *testing.T) {
 func TestWorkspaceOwnerContextWrapsEverySSHChild(t *testing.T) {
 	owner := &workspaceOwner{target: SSHTarget{TargetOS: targetLinux}, key: strings.Repeat("a", 64), token: strings.Repeat("b", 64)}
 	ctx := contextWithWorkspaceOwner(context.Background(), owner)
-	prepared, err := prepareWorkspaceOwnerRemote(ctx, owner.target, "printf ok", false)
+	prepared, err := prepareWorkspaceOwnerRemote(ctx, owner.target, "printf ok", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +353,8 @@ func TestWorkspaceOwnerContextWrapsEverySSHChild(t *testing.T) {
 	if script := remoteWorkspaceOwnerPOSIXWitnessScript(owner.key, owner.token, "printf ok"); !strings.Contains(script, "child_identity=$(ps -o lstart=") {
 		t.Fatalf("ordinary SSH child witness lost identity fencing:\n%s", script)
 	}
-	prepared, err = prepareWorkspaceOwnerRemote(ctx, owner.target, "cat", true)
+	inputSize := int64(0)
+	prepared, err = prepareWorkspaceOwnerRemote(ctx, owner.target, "cat", &inputSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +364,7 @@ func TestWorkspaceOwnerContextWrapsEverySSHChild(t *testing.T) {
 	if script := remoteWorkspaceOwnerPOSIXWitnessScript(owner.key, owner.token, "cat", true); !strings.Contains(script, `cat >"$run_dir/input"`) || !strings.Contains(script, `<"$run_dir/input"`) {
 		t.Fatalf("input SSH child witness lost stdin preservation:\n%s", script)
 	}
-	prepared, err = prepareWorkspaceOwnerRemote(contextWithoutWorkspaceOwner(ctx), owner.target, "printf raw", false)
+	prepared, err = prepareWorkspaceOwnerRemote(contextWithoutWorkspaceOwner(ctx), owner.target, "printf raw", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,14 +479,15 @@ func TestWorkspaceOwnerProtocolGeneration(t *testing.T) {
 			t.Fatalf("POSIX child witness missing %q:\n%s", want, posixWitness)
 		}
 	}
-	windowsWitness := remoteWorkspaceOwnerWindowsWitness(key, token, "Write-Output ok")
-	for _, want := range []string{"Start-Process", "StartTime.ToUniversalTime().Ticks", "Read-Expiry", "(Read-Expiry) -le [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()", "Move-Item -LiteralPath $tmp -Destination $child", "$process.WaitForExit()", "Remove-Item -LiteralPath $child"} {
+	windowsWitness := remoteWorkspaceOwnerWindowsWitness(key, token, "Write-Output ok", nil)
+	for _, want := range []string{"Start-Process", "$null = $process.Handle", "StartTime.ToUniversalTime().Ticks", "Read-Expiry", "(Read-Expiry) -le [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()", "Move-Item -LiteralPath $tmp -Destination $child", "$payloadExitCode = $global:LASTEXITCODE", "if (-not $payloadSucceeded) { exit 1 }", "$process.WaitForExit()", "Remove-Item -LiteralPath $child"} {
 		if !strings.Contains(windowsWitness, want) {
 			t.Fatalf("Windows child witness missing %q:\n%s", want, windowsWitness)
 		}
 	}
-	windowsInputWitness := remoteWorkspaceOwnerWindowsWitness(key, token, "Write-Output ok", true)
-	for _, want := range []string{"[Console]::OpenStandardInput().CopyTo($inputFile)", "-RedirectStandardInput $inputPath", "[IO.FileShare]::None"} {
+	windowsInputSize := int64(len("input"))
+	windowsInputWitness := remoteWorkspaceOwnerWindowsWitness(key, token, "Write-Output ok", &windowsInputSize)
+	for _, want := range []string{"$remaining = [Int64]5", "$stdin.Read($buffer, 0, $readSize)", "-RedirectStandardInput $inputPath", "[IO.FileShare]::None"} {
 		if !strings.Contains(windowsInputWitness, want) {
 			t.Fatalf("Windows input witness missing %q:\n%s", want, windowsInputWitness)
 		}
@@ -500,7 +502,7 @@ func TestWorkspaceOwnerNativeWindowsCommandLengthBaseline(t *testing.T) {
 	name := key + ".witness." + token + "." + strings.Repeat("b", 32) + ".ps1"
 	commands := map[string]string{
 		"owner acquire":       acquire,
-		"large witness stage": remoteWorkspaceOwnerWindowsStageWitnessCommand(key, token, name),
+		"large witness stage": remoteWorkspaceOwnerWindowsStageWitnessCommand(key, token, name, 20_000),
 		"large witness run":   remoteWorkspaceOwnerWindowsRunWitnessCommand(name),
 		"witness cleanup":     remoteWorkspaceOwnerWindowsCleanupWitnessCommand(name),
 		"background witness":  remoteWorkspaceOwnerWindowsStartBackgroundWitnessCommand(name),
@@ -579,7 +581,7 @@ func TestWorkspaceOwnerNativeWindowsProtocolStreamsScriptsOverStdin(t *testing.T
 			t.Fatalf("%s response=%q err=%v", test.action, got, err)
 		}
 		command, input := readWorkspaceOwnerSSHCall(t, dir, i+1)
-		if command != windowsPowerShellStdinScriptCommand() {
+		if command != windowsPowerShellStdinScriptCommand(len([]byte(input))) {
 			t.Fatalf("%s command=%q", test.action, command)
 		}
 		if len(command) >= 8191 {
@@ -609,7 +611,7 @@ func TestWorkspaceOwnerNativeWindowsProtocolKeepsOnlySuccessfulFallbackOutput(t 
 	}
 	for _, index := range []int{1, 2} {
 		command, input := readWorkspaceOwnerSSHCall(t, dir, index)
-		if command != windowsPowerShellStdinScriptCommand() || !strings.Contains(input, "$action = 'acquire'") {
+		if command != windowsPowerShellStdinScriptCommand(len([]byte(input))) || !strings.Contains(input, "$action = 'acquire'") {
 			t.Fatalf("fallback attempt %d command=%q", index, command)
 		}
 	}
@@ -628,7 +630,7 @@ func TestWorkspaceOwnerNativeWindowsWitnessStagesRawScriptAndPreservesInput(t *t
 
 	stageCommand, stagedScript := readWorkspaceOwnerSSHCall(t, dir, 1)
 	stage := decodePowerShellCommand(t, stageCommand)
-	for _, want := range []string{"[IO.FileMode]::CreateNew", "[IO.FileShare]::None", "OpenStandardInput().CopyTo($stream)", owner.key, owner.token} {
+	for _, want := range []string{"[IO.FileMode]::CreateNew", "[IO.FileShare]::None", "$stdin.Read($buffer, 0, $readSize)", "staged workspace witness length is ambiguous", owner.key, owner.token} {
 		if !strings.Contains(stage, want) {
 			t.Fatalf("stage command missing %q", want)
 		}
@@ -1176,7 +1178,7 @@ Set-Content -LiteralPath $state -Value @("v1", ` + psQuote(token) + `, "1") -Enc
 	if out, err := runWindowsPowerShellScript(t, remoteWorkspaceOwnerWindows(req)); err == nil || !strings.Contains(string(out), "EXPIRED") {
 		t.Fatalf("late Windows inspect out=%q err=%v", out, err)
 	}
-	if out, err := runWindowsPowerShellScript(t, remoteWorkspaceOwnerWindowsWitness(key, token, "Write-Output late-child")); err == nil || strings.Contains(string(out), "late-child") {
+	if out, err := runWindowsPowerShellScript(t, remoteWorkspaceOwnerWindowsWitness(key, token, "Write-Output late-child", nil)); err == nil || strings.Contains(string(out), "late-child") {
 		t.Fatalf("late Windows witness executed: out=%q err=%v", out, err)
 	}
 	verifyExpired := `$root = Join-Path $HOME ".crabbox\workspace-owners"
@@ -1193,8 +1195,11 @@ if (Test-Path -LiteralPath $child) { throw "late witness published child" }
 	if out, err := runWindowsPowerShellScript(t, remoteWorkspaceOwnerWindows(req)); err != nil || !strings.Contains(string(out), "RECOVERED") {
 		t.Fatalf("recover expired Windows generation out=%q err=%v", out, err)
 	}
-	if out, err := runWindowsPowerShellScript(t, remoteWorkspaceOwnerWindowsWitness(key, token, "Write-Output child-ok")); err != nil || !strings.Contains(string(out), "child-ok") {
+	if out, err := runWindowsPowerShellScript(t, remoteWorkspaceOwnerWindowsWitness(key, token, "Write-Output child-ok", nil)); err != nil || !strings.Contains(string(out), "child-ok") {
 		t.Fatalf("Windows witnessed child out=%q err=%v", out, err)
+	}
+	if out, err := runWindowsPowerShellScript(t, remoteWorkspaceOwnerWindowsWitness(key, token, "exit 23", nil)); err == nil || exitCode(err) != 23 {
+		t.Fatalf("Windows nonzero witnessed child out=%q err=%v", out, err)
 	}
 	req.Action = workspaceOwnerRelease
 	if out, err := runWindowsPowerShellScript(t, remoteWorkspaceOwnerWindows(req)); err != nil || !strings.Contains(string(out), "RELEASED") {
