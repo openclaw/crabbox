@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,7 +18,7 @@ func TestClaimsListReadsTwoProvidersWithoutBackendOrCredentials(t *testing.T) {
 	clearConfigEnv(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(configPath, []byte("provider: hetzner\n"), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte("provider: backend-that-must-not-load\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("CRABBOX_CONFIG", configPath)
@@ -77,6 +78,123 @@ func TestClaimsListKeepsStaleValidClaimAndLabelsHumanOutputUnverified(t *testing
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("human output missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
+func TestClaimsListScansDoNotCreateLocksOrMutateState(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		malformed bool
+		wantCode  int
+	}{
+		{name: "clean", wantCode: 0},
+		{name: "malformed", malformed: true, wantCode: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			writeClaimsListFixture(t, "cbx_valid.json", leaseClaim{LeaseID: "cbx_valid", Provider: "local-container"})
+			if test.malformed {
+				writeClaimsListRawFixture(t, "cbx_broken.json", []byte("{"))
+			}
+
+			stateDir, err := crabboxStateDir()
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := captureClaimsListState(t, stateDir)
+			stdout, stderr, runErr := runClaimsList(t, "--json")
+			assertClaimsExitCode(t, runErr, test.wantCode)
+			if stderr != "" || !strings.Contains(stdout, `"leaseId":"cbx_valid"`) {
+				t.Fatalf("stdout=%q stderr=%q", stdout, stderr)
+			}
+			after := captureClaimsListState(t, stateDir)
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("claims scan mutated state\nbefore=%#v\nafter=%#v", before, after)
+			}
+			if _, err := os.Stat(filepath.Join(stateDir, "claim-locks")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("claim-locks created or unreadable: %v", err)
+			}
+		})
+	}
+}
+
+func TestRuntimeClaimsSnapshotRetainsLockedReader(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	writeClaimsListFixture(t, "cbx_runtime.json", leaseClaim{LeaseID: "cbx_runtime", Provider: "local-container"})
+
+	snapshot, err := snapshotLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.claims) != 1 || snapshot.claims[0].LeaseID != "cbx_runtime" {
+		t.Fatalf("claims=%#v", snapshot.claims)
+	}
+	stateDir, err := crabboxStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockPath := filepath.Join(stateDir, "claim-locks", "cbx_runtime.json.lock")
+	if info, err := os.Stat(lockPath); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("runtime claim lock missing or invalid: info=%v err=%v", info, err)
+	}
+}
+
+func TestClaimsListConcurrentDeleteAndChangeProduceDeterministicProblems(t *testing.T) {
+	var want localClaimsListOutput
+	for iteration := 0; iteration < 2; iteration++ {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		writeClaimsListFixture(t, "cbx_change.json", leaseClaim{LeaseID: "cbx_change", Slug: "before"})
+		writeClaimsListFixture(t, "cbx_delete.json", leaseClaim{LeaseID: "cbx_delete"})
+		writeClaimsListFixture(t, "cbx_valid.json", leaseClaim{LeaseID: "cbx_valid", Provider: "local-container"})
+
+		reader := func(path, leaseID string, expected os.FileInfo) (leaseClaim, bool, error) {
+			var mutate func() error
+			switch leaseID {
+			case "cbx_change":
+				mutate = func() error {
+					return os.WriteFile(path, []byte(`{"leaseID":"cbx_change","slug":"changed-during-scan"}`), 0o600)
+				}
+			case "cbx_delete":
+				mutate = func() error { return os.Remove(path) }
+			}
+			if mutate != nil {
+				result := make(chan error, 1)
+				go func() { result <- mutate() }()
+				if err := <-result; err != nil {
+					t.Fatalf("concurrent mutation: %v", err)
+				}
+			}
+			return readLeaseClaimSnapshotWithPresence(path, leaseID, expected)
+		}
+
+		snapshot, err := snapshotLeaseClaimsReadOnlyWithReader(reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		output := projectLocalClaims(snapshot)
+		if len(output.Claims) != 1 || output.Claims[0].LeaseID != "cbx_valid" {
+			t.Fatalf("partial claims=%#v", output.Claims)
+		}
+		if len(output.Problems) != 2 || len(output.Problems) > maxLocalClaimProblems {
+			t.Fatalf("problems=%#v", output.Problems)
+		}
+		for i, problem := range output.Problems {
+			if problem.Code != "read_error" || problem.Message != "claim file could not be read" {
+				t.Fatalf("problem[%d]=%#v", i, problem)
+			}
+		}
+		if iteration == 0 {
+			want = output
+		} else if !reflect.DeepEqual(output, want) {
+			t.Fatalf("nondeterministic output\nfirst=%#v\nsecond=%#v", want, output)
+		}
+		stateDir, err := crabboxStateDir()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(stateDir, "claim-locks")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("claim-locks created or unreadable: %v", err)
 		}
 	}
 }
@@ -323,6 +441,38 @@ func makeClaimsListDirectoryFixture(t *testing.T, name string) {
 	if err := os.MkdirAll(filepath.Join(dir, "claims", name), 0o700); err != nil {
 		t.Fatal(err)
 	}
+}
+
+type claimsListStateEntry struct {
+	Mode os.FileMode
+	Data string
+}
+
+func captureClaimsListState(t *testing.T, root string) map[string]claimsListStateEntry {
+	t.Helper()
+	state := make(map[string]claimsListStateEntry)
+	if err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		entry := claimsListStateEntry{Mode: info.Mode()}
+		if info.Mode().IsRegular() {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			entry.Data = string(data)
+		}
+		state[rel] = entry
+		return nil
+	}); err != nil {
+		t.Fatalf("capture state: %v", err)
+	}
+	return state
 }
 
 func assertClaimsExitCode(t *testing.T, err error, want int) {

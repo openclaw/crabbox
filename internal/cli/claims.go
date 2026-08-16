@@ -54,7 +54,7 @@ func (a App) claimsList(args []string) error {
 		return exit(2, "claims list does not accept positional arguments")
 	}
 
-	snapshot, err := snapshotLeaseClaims()
+	snapshot, err := snapshotLeaseClaimsReadOnly()
 	if err != nil {
 		return err
 	}
