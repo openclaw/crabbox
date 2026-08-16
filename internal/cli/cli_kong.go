@@ -37,6 +37,7 @@ type crabboxKongCLI struct {
 	Verify      verifyKongCmd      `cmd:"" passthrough:"" help:"Verify a signed run receipt."`
 	Cache       cacheKongCmd       `cmd:"" help:"Inspect, purge, or warm remote caches."`
 	Status      statusKongCmd      `cmd:"" passthrough:"" help:"Show lease state; add --wait to block until ready."`
+	Heartbeat   heartbeatKongCmd   `cmd:"" passthrough:"" help:"Refresh a lease idle deadline and print its state."`
 	List        listKongCmd        `cmd:"" passthrough:"" help:"List Crabbox machines."`
 	Ports       portsKongCmd       `cmd:"" passthrough:"" help:"Publish, list, or unpublish provider-native ports."`
 	Cp          cpKongCmd          `cmd:"" name:"cp" passthrough:"" help:"Copy files between the host and a lease."`
@@ -227,6 +228,9 @@ type tunnelKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type statusKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type heartbeatKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type listKongCmd struct {
@@ -651,6 +655,7 @@ func (c *portsKongCmd) Run(ctx context.Context, app App) error     { return app.
 func (c *cpKongCmd) Run(ctx context.Context, app App) error        { return app.copyCommand(ctx, c.Args) }
 func (c *tunnelKongCmd) Run(ctx context.Context, app App) error    { return app.tunnel(ctx, c.Args) }
 func (c *statusKongCmd) Run(ctx context.Context, app App) error    { return app.status(ctx, c.Args) }
+func (c *heartbeatKongCmd) Run(ctx context.Context, app App) error { return app.heartbeat(ctx, c.Args) }
 func (c *listKongCmd) Run(ctx context.Context, app App) error      { return app.list(ctx, c.Args) }
 func (c *shareKongCmd) Run(ctx context.Context, app App) error     { return app.share(ctx, c.Args) }
 func (c *unshareKongCmd) Run(ctx context.Context, app App) error   { return app.unshare(ctx, c.Args) }

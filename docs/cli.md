@@ -46,6 +46,7 @@ crabbox run --timing-record=default -- <cmd> append timing to the local benchmar
 crabbox watch -- <command...>                re-run on a warm lease when local files change
 crabbox bench run --providers a,b -- <cmd>   run a workload and record benchmark timings
 crabbox status --id <id>                     show lease state (--wait to block)
+crabbox heartbeat --id <id>                  refresh the lease idle deadline
 crabbox inspect --id <id>                     print lease/provider details
 crabbox list                                  list machines (alias: crabbox pool list)
 crabbox share --id <id> [--user|--org]        grant access to a lease
@@ -59,7 +60,7 @@ crabbox pool ready [key]                      list hydrated broker ready-pool le
 
 See [warmup](commands/warmup.md), [prewarm](commands/prewarm.md),
 [run](commands/run.md), [watch](commands/watch.md),
-[status](commands/status.md), [inspect](commands/inspect.md),
+[status](commands/status.md), [heartbeat](commands/heartbeat.md), [inspect](commands/inspect.md),
 [list](commands/list.md), [share](commands/share.md),
 [unshare](commands/unshare.md), [stop](commands/stop.md),
 [pause](commands/pause.md), [resume](commands/resume.md),

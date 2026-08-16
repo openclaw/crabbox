@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Added `crabbox heartbeat` so external SSH drivers can refresh owned lease idle deadlines and optionally update the idle timeout.
+
 ## 0.43.0 - 2026-08-15
 
 ### Added

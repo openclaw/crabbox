@@ -425,6 +425,7 @@ crabbox sync-plan
 crabbox warmup --class beast
 crabbox prewarm
 crabbox status --id <lease> --wait
+crabbox heartbeat --id <lease> --idle-timeout 90m
 crabbox inspect --id <lease> --json
 crabbox run --id <lease> --preflight --timing-json -- pnpm test
 crabbox job list

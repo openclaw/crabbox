@@ -930,6 +930,31 @@ func (b *coordinatorLeaseBackend) Touch(ctx context.Context, req TouchRequest) (
 	return server, nil
 }
 
+// HeartbeatLease sends one owner-scoped coordinator heartbeat and returns the
+// committed lease state. A non-nil idle timeout uses the existing heartbeat
+// override field; ordinary touches intentionally leave that field unset.
+func (b *coordinatorLeaseBackend) HeartbeatLease(ctx context.Context, leaseID string, idleTimeout *time.Duration) (CoordinatorLease, error) {
+	expectedProvider, err := b.expectedProvider()
+	if err != nil {
+		return CoordinatorLease{}, err
+	}
+	lease, err := heartbeatCoordinatorLease(ctx, b.coord, leaseID, expectedProvider, idleTimeout)
+	if err != nil {
+		return CoordinatorLease{}, err
+	}
+	if err := b.validateCoordinatorLeaseProviderIdentity(lease); err != nil {
+		return CoordinatorLease{}, err
+	}
+	return lease, nil
+}
+
+func heartbeatCoordinatorLease(ctx context.Context, coord *CoordinatorClient, leaseID, expectedProvider string, idleTimeout *time.Duration) (CoordinatorLease, error) {
+	if idleTimeout != nil {
+		return coord.UpdateLeaseIdleTimeoutForProvider(ctx, leaseID, expectedProvider, *idleTimeout)
+	}
+	return coord.TouchLeaseForProvider(ctx, leaseID, expectedProvider)
+}
+
 func coordinatorMachinesToServers(machines []CoordinatorMachine, activeLeaseIDs map[string]struct{}) []Server {
 	servers := make([]Server, 0, len(machines))
 	for _, machine := range machines {

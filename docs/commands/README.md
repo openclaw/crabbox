@@ -33,6 +33,7 @@ same order as the CLI help.
 - [verify](verify.md)
 - [cache](cache.md)
 - [status](status.md)
+- [heartbeat](heartbeat.md)
 - [list](list.md)
 - [share](share.md)
 - [unshare](unshare.md)

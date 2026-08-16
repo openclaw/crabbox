@@ -107,6 +107,8 @@ func (a App) directCommandHelp(ctx context.Context, args []string) (error, bool)
 		return a.verify(ctx, helpArgs), true
 	case "status":
 		return a.status(ctx, helpArgs), true
+	case "heartbeat":
+		return a.heartbeat(ctx, helpArgs), true
 	case "list":
 		return a.list(ctx, helpArgs), true
 	case "usage":
@@ -207,6 +209,7 @@ Commands:
   verify      Verify a signed run receipt
   cache       Inspect, purge, warm, or list remote cache volumes
   status      Show lease state; add --wait to block until ready
+  heartbeat   Refresh a lease idle deadline and print its state
   list        List Crabbox machines
   share       Share a lease with users or the owning org
   unshare     Remove lease sharing
@@ -244,6 +247,7 @@ Common Flows:
   crabbox job run openclaw-wsl2
   crabbox warmup
   crabbox status --id blue-lobster --wait
+  crabbox heartbeat --id blue-lobster --idle-timeout 90m
   crabbox run --id blue-lobster --shell 'pnpm install --frozen-lockfile && pnpm test'
   crabbox run --timing-record=default -- pnpm test
   crabbox bench run --providers aws,hetzner --repeats 3 -- pnpm test
