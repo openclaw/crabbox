@@ -335,6 +335,12 @@ const (
 )
 ```
 
+`FeatureRunSession` is provider-neutral and explicitly opt-in. A delegated
+backend may return a validated handle in `RunResult`; an SSH-lease provider may
+instead have core emit the handle after exact claim recording only when its
+spec also advertises `FeatureSSH` and `FeatureCleanup`. Only `local-container`
+currently opts into that SSH-lease contract.
+
 Actions-runner hydration is **not** modeled as a provider feature. That workflow
 is core-over-SSH after a Linux or Windows lease exists, so `--actions-runner`
 validates as "requires `SSHLeaseBackend`, target linux or windows, and not
@@ -350,6 +356,7 @@ aws                     ssh-lease      supported    ssh, crabbox-sync, cleanup, 
 azure                   ssh-lease      supported    ssh, crabbox-sync, cleanup, desktop, browser, code, tailscale
 gcp                     ssh-lease      supported    ssh, crabbox-sync, cleanup, tailscale
 ssh                     ssh-lease      never        ssh, crabbox-sync, desktop, browser, code
+local-container         ssh-lease      never        ssh, crabbox-sync, cleanup, run-session
 daytona                 ssh-lease      supported    ssh, crabbox-sync, archive-sync
 blacksmith-testbox      delegated-run  never        run-proof, run-session
 islo                    delegated-run  never        url-bridge
