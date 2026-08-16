@@ -115,7 +115,7 @@ func snapshotLeaseClaims() (leaseClaimsSnapshot, error) {
 			continue
 		}
 		leaseID := strings.TrimSuffix(entry.Name(), ".json")
-		if !validLeaseClaimID(leaseID) {
+		if !validLeaseClaimPathID(leaseID) {
 			snapshot.invalid[leaseID] = &leaseClaimFileError{
 				code: "invalid_filename",
 				err:  exit(2, "claim filename is not a valid lease id"),
@@ -167,7 +167,7 @@ func snapshotLeaseClaimsReadOnlyWithReader(read leaseClaimSnapshotReader) (lease
 			continue
 		}
 		leaseID := strings.TrimSuffix(entry.Name(), ".json")
-		if !validLeaseClaimID(leaseID) {
+		if !validLeaseClaimPathID(leaseID) {
 			snapshot.invalid[leaseID] = &leaseClaimFileError{
 				code: "invalid_filename",
 				err:  exit(2, "claim filename is not a valid lease id"),
@@ -2081,10 +2081,7 @@ func decodeLeaseClaim(path string, data []byte) (leaseClaim, error) {
 }
 
 func leaseClaimPath(leaseID string) (string, error) {
-	if leaseID != strings.TrimSpace(leaseID) {
-		return "", invalidLeaseClaimIDError{id: leaseID}
-	}
-	if !validLeaseClaimID(leaseID) {
+	if !validLeaseClaimPathID(leaseID) {
 		return "", invalidLeaseClaimIDError{id: leaseID}
 	}
 	dir, err := crabboxStateDir()
@@ -2092,6 +2089,10 @@ func leaseClaimPath(leaseID string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "claims", leaseID+".json"), nil
+}
+
+func validLeaseClaimPathID(leaseID string) bool {
+	return leaseID == strings.TrimSpace(leaseID) && validLeaseClaimID(leaseID)
 }
 
 func validLeaseClaimID(leaseID string) bool {

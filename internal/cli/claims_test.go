@@ -84,18 +84,24 @@ func TestClaimsListKeepsStaleValidClaimAndLabelsHumanOutputUnverified(t *testing
 
 func TestClaimsListScansDoNotCreateLocksOrMutateState(t *testing.T) {
 	for _, test := range []struct {
-		name      string
-		malformed bool
-		wantCode  int
+		name               string
+		malformedJSON      bool
+		whitespaceFilename bool
+		wantCode           int
+		wantProblemCode    string
 	}{
 		{name: "clean", wantCode: 0},
-		{name: "malformed", malformed: true, wantCode: 2},
+		{name: "malformed", malformedJSON: true, wantCode: 2, wantProblemCode: "invalid_json"},
+		{name: "whitespace_filename", whitespaceFilename: true, wantCode: 2, wantProblemCode: "invalid_filename"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			writeClaimsListFixture(t, "cbx_valid.json", leaseClaim{LeaseID: "cbx_valid", Provider: "local-container"})
-			if test.malformed {
+			if test.malformedJSON {
 				writeClaimsListRawFixture(t, "cbx_broken.json", []byte("{"))
+			}
+			if test.whitespaceFilename {
+				writeClaimsListFixture(t, " cbx_padded.json", leaseClaim{LeaseID: " cbx_padded"})
 			}
 
 			stateDir, err := crabboxStateDir()
@@ -107,6 +113,20 @@ func TestClaimsListScansDoNotCreateLocksOrMutateState(t *testing.T) {
 			assertClaimsExitCode(t, runErr, test.wantCode)
 			if stderr != "" || !strings.Contains(stdout, `"leaseId":"cbx_valid"`) {
 				t.Fatalf("stdout=%q stderr=%q", stdout, stderr)
+			}
+			var output localClaimsListOutput
+			if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+				t.Fatalf("decode output: %v\n%s", err, stdout)
+			}
+			if len(output.Claims) != 1 || output.Claims[0].LeaseID != "cbx_valid" {
+				t.Fatalf("claims=%#v", output.Claims)
+			}
+			if test.wantProblemCode == "" {
+				if len(output.Problems) != 0 {
+					t.Fatalf("problems=%#v", output.Problems)
+				}
+			} else if len(output.Problems) != 1 || output.Problems[0].Code != test.wantProblemCode {
+				t.Fatalf("problems=%#v want code=%s", output.Problems, test.wantProblemCode)
 			}
 			after := captureClaimsListState(t, stateDir)
 			if !reflect.DeepEqual(after, before) {
@@ -160,6 +180,9 @@ func TestRuntimeClaimsSnapshotRetainsLockedReader(t *testing.T) {
 func TestLeaseClaimsSnapshotBoundaryHandling(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	writeClaimsListRawFixture(t, ".json", []byte(`{"leaseID":"ignored"}`))
+	writeClaimsListFixture(t, " cbx_leading.json", leaseClaim{LeaseID: " cbx_leading"})
+	writeClaimsListFixture(t, "cbx_trailing .json", leaseClaim{LeaseID: "cbx_trailing "})
+	writeClaimsListFixture(t, "   .json", leaseClaim{LeaseID: "   "})
 	writeClaimsListRawFixture(t, "ignored.txt", []byte("not a claim"))
 	writeClaimsListFixture(t, "cbx_empty.json", leaseClaim{})
 	writeClaimsListFixture(t, "cbx_mismatch.json", leaseClaim{LeaseID: "cbx_other"})
@@ -172,15 +195,35 @@ func TestLeaseClaimsSnapshotBoundaryHandling(t *testing.T) {
 	if len(snapshot.claims) != 1 || snapshot.claims[0].LeaseID != "cbx_skip" {
 		t.Fatalf("claims=%#v", snapshot.claims)
 	}
-	for leaseID, wantCode := range map[string]string{
-		"":             "invalid_filename",
-		"cbx_empty":    "empty_lease_id",
-		"cbx_mismatch": "lease_id_mismatch",
-	} {
+	wantInvalidCodes := map[string]string{
+		"":              "invalid_filename",
+		" cbx_leading":  "invalid_filename",
+		"cbx_trailing ": "invalid_filename",
+		"   ":           "invalid_filename",
+		"cbx_empty":     "empty_lease_id",
+		"cbx_mismatch":  "lease_id_mismatch",
+	}
+	for leaseID, wantCode := range wantInvalidCodes {
 		var fileErr *leaseClaimFileError
 		if !errors.As(snapshot.invalid[leaseID], &fileErr) || fileErr.code != wantCode {
 			t.Fatalf("invalid[%q]=%v want code=%s", leaseID, snapshot.invalid[leaseID], wantCode)
 		}
+	}
+	stateDir, err := crabboxStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockEntries, err := os.ReadDir(filepath.Join(stateDir, "claim-locks"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotLocks := make([]string, 0, len(lockEntries))
+	for _, entry := range lockEntries {
+		gotLocks = append(gotLocks, entry.Name())
+	}
+	wantLocks := []string{"cbx_empty.json.lock", "cbx_mismatch.json.lock", "cbx_skip.json.lock"}
+	if !reflect.DeepEqual(gotLocks, wantLocks) {
+		t.Fatalf("runtime locks=%q want=%q", gotLocks, wantLocks)
 	}
 
 	if claim, exists, err := readLeaseClaimSnapshotLockedWithPresence("bad/name"); err != nil || exists || claim.LeaseID != "" {
@@ -201,9 +244,11 @@ func TestLeaseClaimsSnapshotBoundaryHandling(t *testing.T) {
 	if readCalls != 3 || len(readOnly.claims) != 0 {
 		t.Fatalf("read calls=%d snapshot=%#v", readCalls, readOnly)
 	}
-	stateDir, err := crabboxStateDir()
-	if err != nil {
-		t.Fatal(err)
+	for _, leaseID := range []string{"", " cbx_leading", "cbx_trailing ", "   "} {
+		var fileErr *leaseClaimFileError
+		if !errors.As(readOnly.invalid[leaseID], &fileErr) || fileErr.code != "invalid_filename" {
+			t.Fatalf("read-only invalid[%q]=%v want code=invalid_filename", leaseID, readOnly.invalid[leaseID])
+		}
 	}
 	claimsDir := filepath.Join(stateDir, "claims")
 	dirInfo, err := os.Stat(claimsDir)
@@ -293,6 +338,9 @@ func TestClaimsListReportsMalformedRecordsWithStablePartialOutput(t *testing.T) 
 	writeClaimsListFixture(t, "cbx_zulu.json", leaseClaim{LeaseID: "cbx_zulu", Provider: "aws"})
 	writeClaimsListFixture(t, "cbx_alpha.json", leaseClaim{LeaseID: "cbx_alpha", Provider: "hetzner"})
 	writeClaimsListRawFixture(t, ".json", []byte(`{"leaseID":"ignored"}`))
+	writeClaimsListFixture(t, " cbx_leading.json", leaseClaim{LeaseID: " cbx_leading"})
+	writeClaimsListFixture(t, "cbx_trailing .json", leaseClaim{LeaseID: "cbx_trailing "})
+	writeClaimsListFixture(t, "   .json", leaseClaim{LeaseID: "   "})
 	writeClaimsListRawFixture(t, "z-invalid.json", []byte(`{"token":"invalid-json-secret"`))
 	writeClaimsListRawFixture(t, "y-invalid-utf8.json", append([]byte(`{"leaseID":"y-invalid-utf8","slug":"`), 0xff, '"', '}'))
 	writeClaimsListRawFixture(t, "m-empty.json", []byte(`{"leaseID":""}`))
@@ -314,38 +362,39 @@ func TestClaimsListReportsMalformedRecordsWithStablePartialOutput(t *testing.T) 
 	if got := []string{output.Claims[0].LeaseID, output.Claims[1].LeaseID}; !reflect.DeepEqual(got, []string{"cbx_alpha", "cbx_zulu"}) {
 		t.Fatalf("claim order=%q", got)
 	}
-	wantCodes := map[string]bool{
-		"invalid_filename":  false,
-		"empty_lease_id":    false,
-		"lease_id_mismatch": false,
-		"non_regular_file":  false,
+	wantCodeCounts := map[string]int{
+		"invalid_filename":  4,
+		"invalid_json":      2,
+		"empty_lease_id":    1,
+		"lease_id_mismatch": 1,
+		"non_regular_file":  1,
 	}
-	if len(output.Problems) != len(wantCodes)+2 {
+	if len(output.Problems) != 9 {
 		t.Fatalf("problems=%#v", output.Problems)
 	}
-	invalidJSONProblems := 0
+	gotCodeCounts := make(map[string]int)
 	for i, problem := range output.Problems {
 		if i > 0 && localClaimProblemLess(problem, output.Problems[i-1]) {
 			t.Fatalf("problems not sorted: %#v", output.Problems)
 		}
-		if problem.Code == "invalid_json" {
-			invalidJSONProblems++
-		} else if _, ok := wantCodes[problem.Code]; !ok {
+		if _, ok := wantCodeCounts[problem.Code]; !ok {
 			t.Fatalf("unexpected problem=%#v", problem)
-		} else {
-			wantCodes[problem.Code] = true
+		}
+		gotCodeCounts[problem.Code]++
+		if problem.Code == "invalid_filename" && !strings.HasPrefix(problem.File, "sha256:") {
+			t.Fatalf("invalid filename was not fingerprinted: %#v", problem)
 		}
 		if problem.Message == "" || len(problem.File) > maxLocalClaimProblemFileBytes {
 			t.Fatalf("unbounded or empty problem=%#v", problem)
 		}
 	}
-	for code, seen := range wantCodes {
-		if !seen {
-			t.Fatalf("missing problem code %s: %#v", code, output.Problems)
-		}
+	if !reflect.DeepEqual(gotCodeCounts, wantCodeCounts) {
+		t.Fatalf("problem counts=%v want=%v: %#v", gotCodeCounts, wantCodeCounts, output.Problems)
 	}
-	if invalidJSONProblems != 2 {
-		t.Fatalf("invalid JSON problems=%d want=2: %#v", invalidJSONProblems, output.Problems)
+	secondStdout, secondStderr, secondErr := runClaimsList(t, "--json")
+	assertClaimsExitCode(t, secondErr, 2)
+	if secondStderr != "" || secondStdout != stdout {
+		t.Fatalf("nondeterministic output\nfirst stdout=%q\nsecond stdout=%q\nsecond stderr=%q", stdout, secondStdout, secondStderr)
 	}
 }
 

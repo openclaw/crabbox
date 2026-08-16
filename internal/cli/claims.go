@@ -137,7 +137,7 @@ func projectLocalClaims(snapshot leaseClaimsSnapshot) localClaimsListOutput {
 
 func localClaimProblemFile(leaseID string) string {
 	name := leaseID + ".json"
-	if validLeaseClaimID(leaseID) && len(name) <= maxLocalClaimProblemFileBytes {
+	if validLeaseClaimPathID(leaseID) && len(name) <= maxLocalClaimProblemFileBytes {
 		return RedactDiagnosticSecrets(name)
 	}
 	digest := sha256.Sum256([]byte(name))
