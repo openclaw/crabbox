@@ -33,6 +33,29 @@ The trailing command after `--` is sent to the box verbatim as argv. Use
 `--shell` to run it through the remote shell instead, for multi-statement
 snippets, pipes, or shell expansion.
 
+## Remote workspace root
+
+Use `CRABBOX_WORK_ROOT` to change the portable base root for one run without
+selecting a provider-specific flag:
+
+```sh
+CRABBOX_WORK_ROOT=/srv/crabbox \
+  crabbox run --provider "$PROVIDER" -- pnpm test
+```
+
+This changes the base root, not the command's exact working directory. A normal
+SSH-backed run derives `<root>/<lease>/<repository>`, syncs the checkout there,
+and uses that derived repository workspace as the command PWD. There is no
+provider-neutral exact-chdir flag; provider adapters and hydration own their
+workspace semantics.
+
+An explicitly configured provider-specific work root or workdir takes
+precedence over the generic root. If the lease has a valid GitHub Actions
+hydration marker, its canonical `WORKSPACE` takes precedence over both roots
+for sync and command execution. See [Configuration](../features/configuration.md#work-roots)
+for configuration precedence and [Sync](../features/sync.md#remote-workspace-path)
+for path resolution.
+
 ## Leasing model
 
 If `--id` is omitted, Crabbox creates a fresh, non-kept lease and releases it

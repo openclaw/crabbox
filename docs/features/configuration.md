@@ -108,6 +108,7 @@ class: beast             # standard | fast | large | beast
 serverType: c7a.48xlarge # explicit provider type; overrides class fallback
 network: auto            # auto | tailscale | public
 hostId: h-0123456789abcdef0 # brokered use requires admin authentication
+workRoot: /srv/crabbox   # portable base root; not an exact command PWD
 
 lease:
   idleTimeout: 30m
@@ -126,6 +127,39 @@ invokes provider deletion. `CRABBOX_COORDINATOR_MODE` and
 default class is `beast`, the default TTL is `90m`, and the default idle
 timeout is `30m`. Setting `serverType` (or `--type` on the command line) pins
 that exact provider type and disables class fallback.
+
+### Work roots
+
+Top-level `workRoot` is the provider-neutral base for remote workspaces.
+`CRABBOX_WORK_ROOT` overrides that generic value for the current process, so a
+portable one-run override is:
+
+```sh
+CRABBOX_WORK_ROOT=/srv/crabbox \
+  crabbox run --provider "$PROVIDER" -- pnpm test
+```
+
+For a normal SSH-backed run, Crabbox appends the lease and repository names and
+uses `<root>/<lease>/<repository>` for sync and command execution. The generic
+value therefore does not request an exact remote `chdir`. Delegated adapters
+may own an exact workdir instead, and a valid Actions hydration marker owns the
+canonical workspace used by subsequent syncs and commands.
+
+Root selection has two levels of precedence:
+
+1. For one setting, the normal source order remains flags, environment,
+   repo-local config, user config, then defaults.
+2. After provider routing, an explicitly configured provider-specific work-root
+   or workdir setting is more specific than top-level `workRoot` or
+   `CRABBOX_WORK_ROOT`. If no provider-specific value is explicit, providers
+   that support the generic root inherit it. Provider validation and path
+   translation still apply.
+
+For example, `localContainer.workRoot`,
+`CRABBOX_LOCAL_CONTAINER_WORK_ROOT`, or `--local-container-work-root` wins over
+the generic root. Within that provider-specific setting, the normal source
+order above decides the value. Use `crabbox config show` to inspect the resolved
+root before starting a lease.
 
 ### Profiles and presets
 

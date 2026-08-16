@@ -12,6 +12,24 @@ own their own file transfer and reject the local sync options. Native Windows
 targets use the same file list but ship it as a tar archive over OpenSSH instead
 of rsync.
 
+## Remote workspace path
+
+For normal SSH-backed runs, sync starts from the effective work root and derives
+the repository workspace as `<root>/<lease>/<repository>`. Top-level
+`workRoot` and `CRABBOX_WORK_ROOT` change only `<root>`; they do not name the
+exact sync target or command working directory. An explicitly configured
+provider-specific work root or workdir takes precedence over the generic root
+and remains subject to that adapter's validation and path translation.
+
+Actions hydration has final authority over the exact workspace. When a lease
+has a valid hydration marker, Crabbox uses the marker's canonical `WORKSPACE`
+for both sync and command execution instead of the base-derived candidate.
+Changing `CRABBOX_WORK_ROOT` does not relocate an already adopted Actions
+workspace. Local automatic hydration uses the canonical lease workspace it
+derived before writing the marker; `--full-resync` refuses a noncanonical
+adopted workspace when it cannot safely rebuild that path. See
+[Actions hydration](actions-hydration.md) for the marker lifecycle.
+
 ## What gets synced
 
 Sync transfers the Git-managed working set, not the whole directory tree. The
