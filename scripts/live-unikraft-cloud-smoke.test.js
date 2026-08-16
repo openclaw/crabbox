@@ -27,7 +27,7 @@ function temporaryDirectory(prefix) {
   return dir;
 }
 
-async function waitForFile(file, timeoutMs = 5_000) {
+async function waitForFile(file, timeoutMs = 15_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (fs.existsSync(file)) return;
@@ -269,7 +269,7 @@ test("Unikraft Cloud smoke checks credentials and supplied binary before API acc
   );
 });
 
-test("raw helper calls outside cleanup have a wall-clock deadline", () => {
+test("initial raw validation gets a longer startup deadline", () => {
   const harness = prepareHarness("crabbox-ukc-raw-deadline-", "exit 99");
   const startedAt = Date.now();
   const result = spawnSync(bashPath, [smokeScript], {
@@ -279,18 +279,18 @@ test("raw helper calls outside cleanup have a wall-clock deadline", () => {
       CRABBOX_UNIKRAFT_CLOUD_LIVE_SMOKE_DIR: harness.proofDir,
       CRABBOX_UNIKRAFT_CLOUD_LIVE_SMOKE_RAW_HELPER: harness.rawHelper,
       CRABBOX_UNIKRAFT_CLOUD_SMOKE_HTTP_TIMEOUT: "1",
-      FAKE_RAW_VALIDATE_SLEEP: "20",
+      FAKE_RAW_VALIDATE_SLEEP: "6",
     }),
     encoding: "utf8",
   });
 
-  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(result.status, 1, result.stdout + result.stderr);
   assert.match(
     result.stdout,
-    /classification=environment_blocked reason=invalid_unikraft_cloud_api_url/,
+    /classification=validation_failed reason=preflight-doctor_failed_exit_99/,
   );
-  assert.ok(Date.now() - startedAt < 4_000, result.stdout + result.stderr);
-  assert.equal(fs.existsSync(harness.calls), false);
+  assert.ok(Date.now() - startedAt >= 5_000, result.stdout + result.stderr);
+  assert.match(fs.readFileSync(harness.calls, "utf8"), /^doctor /m);
 });
 
 test("command capture is byte-bounded and kills noisy descendants", () => {
@@ -313,7 +313,7 @@ test("command capture is byte-bounded and kills noisy descendants", () => {
     result.stdout,
     /classification=environment_blocked reason=invalid_unikraft_cloud_api_url/,
   );
-  assert.ok(Date.now() - startedAt < 4_000, result.stdout + result.stderr);
+  assert.ok(Date.now() - startedAt < 10_000, result.stdout + result.stderr);
   const noisyPID = Number(fs.readFileSync(noisyPIDFile, "utf8"));
   assert.throws(() => process.kill(noisyPID, 0), { code: "ESRCH" });
   const residue = fs

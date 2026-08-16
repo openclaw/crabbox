@@ -618,6 +618,7 @@ func TestWorkspaceOwnerPOSIXLauncherDecoderFallbacks(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			home := t.TempDir()
 			tools := filepath.Join(home, "tools")
 			if err := os.MkdirAll(tools, 0o755); err != nil {

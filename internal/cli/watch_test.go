@@ -537,8 +537,10 @@ func TestWatchRewatchesDirectoriesWhenExclusionsRelax(t *testing.T) {
 	watchTestWrite(t, root, "generated/seed.txt", "seeded before start")
 	executor := newWatchTestExecutor()
 	session := newWatchTestSession(root, executor.run, 25*time.Millisecond, 3*time.Second, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- session.run(context.Background()) }()
+	go func() { done <- session.run(ctx) }()
 	executor.awaitStart(t)
 	time.Sleep(100 * time.Millisecond)
 	watchTestWrite(t, root, ".crabboxignore", "")
@@ -546,6 +548,7 @@ func TestWatchRewatchesDirectoriesWhenExclusionsRelax(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	watchTestWrite(t, root, "generated/data.txt", "now visible")
 	executor.awaitStart(t)
+	cancel()
 	if err := <-done; err != nil {
 		t.Fatalf("session.run: %v", err)
 	}

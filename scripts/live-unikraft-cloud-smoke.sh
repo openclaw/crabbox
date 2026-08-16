@@ -770,11 +770,11 @@ remaining_cleanup_seconds() {
   fi
 }
 
-raw_call() {
+raw_call_with_timeout() {
+  local timeout="$1"
+  shift
   raw_call_counter=$((raw_call_counter + 1))
   local capture="$proof_dir/.raw-call-${raw_call_counter}.capture"
-  local timeout
-  timeout="$(remaining_cleanup_seconds)"
   if [[ "$timeout" -le 0 ]]; then
     raw_output="cleanup deadline expired"
     return 124
@@ -801,6 +801,12 @@ raw_call() {
   fi
   raw_output="$process_output"
   return "$rc"
+}
+
+raw_call() {
+  local timeout
+  timeout="$(remaining_cleanup_seconds)"
+  raw_call_with_timeout "$timeout" "$@"
 }
 
 raw_inventory() {
@@ -1226,7 +1232,7 @@ export CRABBOX_UNIKRAFT_CLOUD_IMAGE="$image"
 prepare_proof_dir
 write_capture_runner
 write_raw_helper
-if ! raw_call validate >/dev/null 2>&1; then
+if ! raw_call_with_timeout 15 validate >/dev/null 2>&1; then
   classify_and_exit environment_blocked invalid_unikraft_cloud_api_url
 fi
 
