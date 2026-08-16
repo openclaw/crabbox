@@ -157,6 +157,78 @@ func TestRuntimeClaimsSnapshotRetainsLockedReader(t *testing.T) {
 	}
 }
 
+func TestLeaseClaimsSnapshotBoundaryHandling(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	writeClaimsListRawFixture(t, ".json", []byte(`{"leaseID":"ignored"}`))
+	writeClaimsListRawFixture(t, "ignored.txt", []byte("not a claim"))
+	writeClaimsListFixture(t, "cbx_empty.json", leaseClaim{})
+	writeClaimsListFixture(t, "cbx_mismatch.json", leaseClaim{LeaseID: "cbx_other"})
+	writeClaimsListFixture(t, "cbx_skip.json", leaseClaim{LeaseID: "cbx_skip"})
+
+	snapshot, err := snapshotLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.claims) != 1 || snapshot.claims[0].LeaseID != "cbx_skip" {
+		t.Fatalf("claims=%#v", snapshot.claims)
+	}
+	for leaseID, wantCode := range map[string]string{
+		"":             "invalid_filename",
+		"cbx_empty":    "empty_lease_id",
+		"cbx_mismatch": "lease_id_mismatch",
+	} {
+		var fileErr *leaseClaimFileError
+		if !errors.As(snapshot.invalid[leaseID], &fileErr) || fileErr.code != wantCode {
+			t.Fatalf("invalid[%q]=%v want code=%s", leaseID, snapshot.invalid[leaseID], wantCode)
+		}
+	}
+
+	if claim, exists, err := readLeaseClaimSnapshotLockedWithPresence("bad/name"); err != nil || exists || claim.LeaseID != "" {
+		t.Fatalf("invalid ID read=(%#v, %t, %v)", claim, exists, err)
+	}
+	if claim, exists, err := readLeaseClaimSnapshotLockedWithPresence("cbx_missing"); err != nil || exists || claim.LeaseID != "" {
+		t.Fatalf("missing read=(%#v, %t, %v)", claim, exists, err)
+	}
+
+	readCalls := 0
+	readOnly, err := snapshotLeaseClaimsReadOnlyWithReader(func(_ string, _ string, _ os.FileInfo) (leaseClaim, bool, error) {
+		readCalls++
+		return leaseClaim{}, false, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readCalls != 3 || len(readOnly.claims) != 0 {
+		t.Fatalf("read calls=%d snapshot=%#v", readCalls, readOnly)
+	}
+	stateDir, err := crabboxStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimsDir := filepath.Join(stateDir, "claims")
+	dirInfo, err := os.Stat(claimsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists, err := readLeaseClaimSnapshotWithPresence(claimsDir, "cbx_directory", dirInfo); err == nil || !exists {
+		t.Fatalf("directory snapshot read=(exists=%t, err=%v)", exists, err)
+	}
+
+	sentinel := errors.New("sentinel")
+	if !errors.Is(&leaseClaimFileError{code: "test", err: sentinel}, sentinel) {
+		t.Fatal("lease claim file error did not unwrap")
+	}
+
+	brokenStateRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(brokenStateRoot, "crabbox"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_STATE_HOME", brokenStateRoot)
+	if _, err := snapshotLeaseClaims(); err == nil {
+		t.Fatal("runtime snapshot accepted an unreadable claims directory")
+	}
+}
+
 func TestClaimsListConcurrentDeleteAndChangeProduceDeterministicProblems(t *testing.T) {
 	var want localClaimsListOutput
 	for iteration := 0; iteration < 2; iteration++ {
