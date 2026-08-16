@@ -262,7 +262,7 @@ func (a App) hydrateActionsWithGitHubRunner(ctx context.Context, cfg Config, rep
 			return actionsHydrationState{}, exit(7, "prepare Actions hydration child witness on %s: %v", target.Host, err)
 		}
 		monitor := remoteActionsHydrationMonitorForTarget(target, leaseID, waitTimeout, owner)
-		if _, err := runSSHOutput(contextWithoutWorkspaceOwner(ctx), target, owner.WrapBackgroundCommand(monitor)); err != nil {
+		if _, err := runWorkspaceOwnerBackgroundOutput(ctx, target, owner, monitor); err != nil {
 			return actionsHydrationState{}, exit(7, "start Actions hydration child witness on %s: %v", target.Host, err)
 		}
 		monitorStarted = true
@@ -620,14 +620,17 @@ func (a App) executeLocalActionsHydration(ctx context.Context, cfg Config, repo 
 		return state, nil
 	}
 	startRemote := remoteStartLocalActionsHydrateScript(plan.leaseID)
-	if owner != nil {
-		startRemote = owner.WrapBackgroundCommand(remoteLocalActionsHydrateBackgroundPayload(plan.leaseID))
-	}
 	startCtx := ctx
 	if owner != nil {
 		startCtx = contextWithoutWorkspaceOwner(ctx)
 	}
-	pid, err := runSSHOutput(startCtx, target, startRemote)
+	var pid string
+	var err error
+	if owner != nil {
+		pid, err = runWorkspaceOwnerBackgroundOutput(startCtx, target, owner, remoteLocalActionsHydrateBackgroundPayload(plan.leaseID))
+	} else {
+		pid, err = runSSHOutput(startCtx, target, startRemote)
+	}
 	if err != nil {
 		return actionsHydrationState{}, exit(7, "start local Actions hydration on %s: %v", target.Host, err)
 	}

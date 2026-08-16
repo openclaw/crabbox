@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -342,19 +343,31 @@ func TestAcquiredRunMayRetainLease(t *testing.T) {
 func TestWorkspaceOwnerContextWrapsEverySSHChild(t *testing.T) {
 	owner := &workspaceOwner{target: SSHTarget{TargetOS: targetLinux}, key: strings.Repeat("a", 64), token: strings.Repeat("b", 64)}
 	ctx := contextWithWorkspaceOwner(context.Background(), owner)
-	if got, want := wrapWorkspaceOwnerRemote(ctx, "printf ok", false), remoteWorkspaceOwnerPOSIXWitness(owner.key, owner.token, "printf ok"); got != want {
+	prepared, err := prepareWorkspaceOwnerRemote(ctx, owner.target, "printf ok", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := prepared.command, remoteWorkspaceOwnerPOSIXWitness(owner.key, owner.token, "printf ok"); got != want {
 		t.Fatalf("ordinary SSH child was not witnessed:\n%s", got)
 	}
 	if script := remoteWorkspaceOwnerPOSIXWitnessScript(owner.key, owner.token, "printf ok"); !strings.Contains(script, "child_identity=$(ps -o lstart=") {
 		t.Fatalf("ordinary SSH child witness lost identity fencing:\n%s", script)
 	}
-	if got, want := wrapWorkspaceOwnerRemote(ctx, "cat", true), remoteWorkspaceOwnerPOSIXWitness(owner.key, owner.token, "cat", true); got != want {
+	prepared, err = prepareWorkspaceOwnerRemote(ctx, owner.target, "cat", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := prepared.command, remoteWorkspaceOwnerPOSIXWitness(owner.key, owner.token, "cat", true); got != want {
 		t.Fatalf("input SSH child did not preserve stdin:\n%s", got)
 	}
 	if script := remoteWorkspaceOwnerPOSIXWitnessScript(owner.key, owner.token, "cat", true); !strings.Contains(script, `cat >"$run_dir/input"`) || !strings.Contains(script, `<"$run_dir/input"`) {
 		t.Fatalf("input SSH child witness lost stdin preservation:\n%s", script)
 	}
-	if got := wrapWorkspaceOwnerRemote(contextWithoutWorkspaceOwner(ctx), "printf raw", false); got != "printf raw" {
+	prepared, err = prepareWorkspaceOwnerRemote(contextWithoutWorkspaceOwner(ctx), owner.target, "printf raw", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := prepared.command; got != "printf raw" {
 		t.Fatalf("owner bypass wrapped protocol-internal command: %q", got)
 	}
 }
@@ -446,7 +459,7 @@ func TestWorkspaceOwnerProtocolGeneration(t *testing.T) {
 		t.Fatalf("POSIX protocol exposed raw lease ID: %s", posix)
 	}
 
-	windows := decodePowerShellCommand(t, remoteWorkspaceOwnerCommand(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, req))
+	windows := remoteWorkspaceOwnerWindows(req)
 	for _, want := range []string{".crabbox\\workspace-owners", "$key = '" + key + "'", "$key + \".owner\"", "$key + \".child\"", "[Diagnostics.Process]::GetProcessById", "return \"ambiguous\"", "StartTime.ToUniversalTime().Ticks", "RECOVERED", "MISMATCH", "EXPIRED", "AMBIGUOUS", "$current.Expiry -le [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()"} {
 		if !strings.Contains(windows, want) {
 			t.Fatalf("Windows protocol missing %q:\n%s", want, windows)
@@ -465,17 +478,266 @@ func TestWorkspaceOwnerProtocolGeneration(t *testing.T) {
 			t.Fatalf("POSIX child witness missing %q:\n%s", want, posixWitness)
 		}
 	}
-	windowsWitness := decodePowerShellCommand(t, remoteWorkspaceOwnerWindowsWitness(key, token, "Write-Output ok"))
+	windowsWitness := remoteWorkspaceOwnerWindowsWitness(key, token, "Write-Output ok")
 	for _, want := range []string{"Start-Process", "StartTime.ToUniversalTime().Ticks", "Read-Expiry", "(Read-Expiry) -le [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()", "Move-Item -LiteralPath $tmp -Destination $child", "$process.WaitForExit()", "Remove-Item -LiteralPath $child"} {
 		if !strings.Contains(windowsWitness, want) {
 			t.Fatalf("Windows child witness missing %q:\n%s", want, windowsWitness)
 		}
 	}
-	windowsInputWitness := decodePowerShellCommand(t, remoteWorkspaceOwnerWindowsWitness(key, token, "Write-Output ok", true))
+	windowsInputWitness := remoteWorkspaceOwnerWindowsWitness(key, token, "Write-Output ok", true)
 	for _, want := range []string{"[Console]::OpenStandardInput().CopyTo($inputFile)", "-RedirectStandardInput $inputPath", "[IO.FileShare]::None"} {
 		if !strings.Contains(windowsInputWitness, want) {
 			t.Fatalf("Windows input witness missing %q:\n%s", want, windowsInputWitness)
 		}
+	}
+}
+
+func TestWorkspaceOwnerNativeWindowsCommandLengthBaseline(t *testing.T) {
+	key := workspaceOwnerKey("cbx_windows_command_length")
+	token := strings.Repeat("a", 64)
+	req := workspaceOwnerRemoteRequest{Action: workspaceOwnerAcquire, Key: key, Token: token, TTL: time.Minute}
+	acquire := remoteWorkspaceOwnerCommand(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, req)
+	name := key + ".witness." + token + "." + strings.Repeat("b", 32) + ".ps1"
+	commands := map[string]string{
+		"owner acquire":       acquire,
+		"large witness stage": remoteWorkspaceOwnerWindowsStageWitnessCommand(key, token, name),
+		"large witness run":   remoteWorkspaceOwnerWindowsRunWitnessCommand(name),
+		"witness cleanup":     remoteWorkspaceOwnerWindowsCleanupWitnessCommand(name),
+		"background witness":  remoteWorkspaceOwnerWindowsStartBackgroundWitnessCommand(name),
+	}
+	for label, command := range commands {
+		t.Logf("%s command length=%d", label, len(command))
+		if len(command) >= 8191 {
+			t.Fatalf("%s command length=%d exceeds cmd.exe limit", label, len(command))
+		}
+		if strings.Contains(command, strings.Repeat("Write-Output 'large witness'\n", 512)) {
+			t.Fatalf("%s embeds the large witness payload", label)
+		}
+	}
+}
+
+func installWorkspaceOwnerRecordingSSH(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "ssh")
+	script := `#!/bin/sh
+log_dir=$CRABBOX_OWNER_SSH_LOG_DIR
+count=0
+if [ -f "$log_dir/count" ]; then read count < "$log_dir/count"; fi
+count=$((count + 1))
+printf '%s' "$count" > "$log_dir/count"
+command=
+for arg do command=$arg; done
+printf '%s' "$command" > "$log_dir/$count.command"
+/bin/cat > "$log_dir/$count.stdin"
+if [ "${CRABBOX_OWNER_SSH_RETRY_CALL:-}" = "$count" ]; then printf 'failed port diagnostic\n' >&2; exit 255; fi
+if [ "${CRABBOX_OWNER_SSH_FAIL_CALL:-}" = "$count" ]; then exit 7; fi
+if /usr/bin/grep -Fq "\$action = 'acquire'" "$log_dir/$count.stdin"; then printf ACQUIRED; fi
+if /usr/bin/grep -Fq "\$action = 'renew'" "$log_dir/$count.stdin"; then printf RENEWED; fi
+if /usr/bin/grep -Fq "\$action = 'inspect'" "$log_dir/$count.stdin"; then printf OWNED; fi
+if /usr/bin/grep -Fq "\$action = 'release'" "$log_dir/$count.stdin"; then printf RELEASED; fi
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_OWNER_SSH_LOG_DIR", dir)
+	return dir
+}
+
+func readWorkspaceOwnerSSHCall(t *testing.T, dir string, index int) (string, string) {
+	t.Helper()
+	command, err := os.ReadFile(filepath.Join(dir, strconv.Itoa(index)+".command"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err := os.ReadFile(filepath.Join(dir, strconv.Itoa(index)+".stdin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(command), string(input)
+}
+
+func TestWorkspaceOwnerNativeWindowsProtocolStreamsScriptsOverStdin(t *testing.T) {
+	dir := installWorkspaceOwnerRecordingSSH(t)
+	target := SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22", TargetOS: targetWindows, WindowsMode: windowsModeNormal}
+	transport := sshWorkspaceOwnerTransport{target: target}
+	key := workspaceOwnerKey("cbx_windows_protocol_transport")
+	token := strings.Repeat("c", 64)
+	actions := []struct {
+		action workspaceOwnerAction
+		want   string
+	}{
+		{workspaceOwnerAcquire, "ACQUIRED"},
+		{workspaceOwnerRenew, "RENEWED"},
+		{workspaceOwnerInspect, "OWNED"},
+		{workspaceOwnerRelease, "RELEASED"},
+	}
+	for i, test := range actions {
+		got, err := transport.Do(context.Background(), workspaceOwnerRemoteRequest{Action: test.action, Key: key, Token: token, TTL: time.Minute})
+		if err != nil || got != test.want {
+			t.Fatalf("%s response=%q err=%v", test.action, got, err)
+		}
+		command, input := readWorkspaceOwnerSSHCall(t, dir, i+1)
+		if command != windowsPowerShellStdinScriptCommand() {
+			t.Fatalf("%s command=%q", test.action, command)
+		}
+		if len(command) >= 8191 {
+			t.Fatalf("%s command length=%d exceeds cmd.exe limit", test.action, len(command))
+		}
+		for _, want := range []string{"$action = " + psQuote(string(test.action)), "$key = " + psQuote(key), "$token = " + psQuote(token)} {
+			if !strings.Contains(input, want) {
+				t.Fatalf("%s stdin script missing %q", test.action, want)
+			}
+		}
+		if strings.Contains(command, "$action") || strings.Contains(command, key) || strings.Contains(command, token) {
+			t.Fatalf("%s script leaked into SSH command argv", test.action)
+		}
+	}
+}
+
+func TestWorkspaceOwnerNativeWindowsProtocolKeepsOnlySuccessfulFallbackOutput(t *testing.T) {
+	dir := installWorkspaceOwnerRecordingSSH(t)
+	t.Setenv("CRABBOX_OWNER_SSH_RETRY_CALL", "1")
+	target := SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "2222", FallbackPorts: []string{"22"}, TargetOS: targetWindows, WindowsMode: windowsModeNormal}
+	transport := sshWorkspaceOwnerTransport{target: target}
+	key := workspaceOwnerKey("cbx_windows_protocol_fallback")
+	token := strings.Repeat("7", 64)
+	got, err := transport.Do(context.Background(), workspaceOwnerRemoteRequest{Action: workspaceOwnerAcquire, Key: key, Token: token, TTL: time.Minute})
+	if err != nil || got != "ACQUIRED" {
+		t.Fatalf("fallback response=%q err=%v", got, err)
+	}
+	for _, index := range []int{1, 2} {
+		command, input := readWorkspaceOwnerSSHCall(t, dir, index)
+		if command != windowsPowerShellStdinScriptCommand() || !strings.Contains(input, "$action = 'acquire'") {
+			t.Fatalf("fallback attempt %d command=%q", index, command)
+		}
+	}
+}
+
+func TestWorkspaceOwnerNativeWindowsWitnessStagesRawScriptAndPreservesInput(t *testing.T) {
+	dir := installWorkspaceOwnerRecordingSSH(t)
+	target := SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22", TargetOS: targetWindows, WindowsMode: windowsModeNormal}
+	owner := &workspaceOwner{target: target, key: workspaceOwnerKey("cbx_windows_witness_transport"), token: strings.Repeat("d", 64)}
+	ctx := contextWithWorkspaceOwner(context.Background(), owner)
+	payload := strings.Repeat("Write-Output 'large witness'\n", 512)
+	userInput := "preserved user stdin\n"
+	if err := runSSHInput(ctx, target, payload, strings.NewReader(userInput), io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+
+	stageCommand, stagedScript := readWorkspaceOwnerSSHCall(t, dir, 1)
+	stage := decodePowerShellCommand(t, stageCommand)
+	for _, want := range []string{"[IO.FileMode]::CreateNew", "[IO.FileShare]::None", "OpenStandardInput().CopyTo($stream)", owner.key, owner.token} {
+		if !strings.Contains(stage, want) {
+			t.Fatalf("stage command missing %q", want)
+		}
+	}
+	encodedPayload := base64.StdEncoding.EncodeToString([]byte(payload))
+	if !strings.Contains(stagedScript, encodedPayload) {
+		t.Fatal("raw staged witness omitted the large remote payload")
+	}
+	for _, want := range []string{"$childScript = Join-Path $runDir \"child.ps1\"", "-File", "Remove-Item -LiteralPath $runDir"} {
+		if !strings.Contains(stagedScript, want) {
+			t.Fatalf("staged witness missing %q", want)
+		}
+	}
+	if strings.Contains(stagedScript, "-EncodedCommand") {
+		t.Fatal("staged witness still launches its child through EncodedCommand")
+	}
+
+	runCommand, runInput := readWorkspaceOwnerSSHCall(t, dir, 2)
+	run := decodePowerShellCommand(t, runCommand)
+	for _, want := range []string{"& powershell.exe", "-File $path", "finally", "Remove-Item -LiteralPath $path"} {
+		if !strings.Contains(run, want) {
+			t.Fatalf("run command missing %q", want)
+		}
+	}
+	if runInput != userInput {
+		t.Fatalf("witnessed command stdin=%q want=%q", runInput, userInput)
+	}
+
+	count, err := os.ReadFile(filepath.Join(dir, "count"))
+	if err != nil || string(count) != "2" {
+		t.Fatalf("SSH call count=%q err=%v; successful self-cleaning run must not open a cleanup connection", count, err)
+	}
+	for label, command := range map[string]string{"stage": stageCommand, "run": runCommand} {
+		if len(command) >= 8191 {
+			t.Fatalf("%s command length=%d exceeds cmd.exe limit", label, len(command))
+		}
+		if strings.Contains(command, payload) {
+			t.Fatalf("%s command embeds the large witness payload", label)
+		}
+	}
+}
+
+func TestWorkspaceOwnerNativeWindowsWitnessFallsBackToCleanupAfterFailure(t *testing.T) {
+	dir := installWorkspaceOwnerRecordingSSH(t)
+	t.Setenv("CRABBOX_OWNER_SSH_FAIL_CALL", "2")
+	target := SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22", TargetOS: targetWindows, WindowsMode: windowsModeNormal}
+	owner := &workspaceOwner{target: target, key: workspaceOwnerKey("cbx_windows_witness_cleanup"), token: strings.Repeat("9", 64)}
+	ctx := contextWithWorkspaceOwner(context.Background(), owner)
+	if err := runSSHInput(ctx, target, "Write-Output fail", strings.NewReader("input"), io.Discard, io.Discard); err == nil {
+		t.Fatal("failed witnessed command returned success")
+	}
+	cleanupCommand, cleanupInput := readWorkspaceOwnerSSHCall(t, dir, 3)
+	cleanup := decodePowerShellCommand(t, cleanupCommand)
+	if !strings.Contains(cleanup, "Remove-Item -LiteralPath $path") || cleanupInput != "" {
+		t.Fatalf("fallback cleanup command=%q stdin=%q", cleanup, cleanupInput)
+	}
+}
+
+func TestWorkspaceOwnerNativeWindowsBackgroundWitnessStagesSelfCleaningScript(t *testing.T) {
+	dir := installWorkspaceOwnerRecordingSSH(t)
+	target := SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22", TargetOS: targetWindows, WindowsMode: windowsModeNormal}
+	owner := &workspaceOwner{target: target, key: workspaceOwnerKey("cbx_windows_background_transport"), token: strings.Repeat("e", 64)}
+	payload := strings.Repeat("Write-Output background\n", 512)
+	if _, err := runWorkspaceOwnerBackgroundOutput(context.Background(), target, owner, payload); err != nil {
+		t.Fatal(err)
+	}
+	_, stagedScript := readWorkspaceOwnerSSHCall(t, dir, 1)
+	if !strings.Contains(stagedScript, base64.StdEncoding.EncodeToString([]byte(payload))) || !strings.Contains(stagedScript, "$selfPath") || !strings.Contains(stagedScript, "finally") {
+		t.Fatal("background witness was not staged with self-cleanup")
+	}
+	backgroundCommand, backgroundInput := readWorkspaceOwnerSSHCall(t, dir, 2)
+	background := decodePowerShellCommand(t, backgroundCommand)
+	for _, want := range []string{"Start-Process", "-File", "-WindowStyle Hidden", "Write-Output $process.Id"} {
+		if !strings.Contains(background, want) {
+			t.Fatalf("background command missing %q", want)
+		}
+	}
+	if backgroundInput != "" || len(backgroundCommand) >= 8191 || strings.Contains(backgroundCommand, payload) {
+		t.Fatalf("background command length=%d stdin=%q", len(backgroundCommand), backgroundInput)
+	}
+}
+
+func TestWorkspaceOwnerNativeWindowsStreamPathsUseStagedWitnesses(t *testing.T) {
+	dir := installWorkspaceOwnerRecordingSSH(t)
+	target := SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22", TargetOS: targetWindows, WindowsMode: windowsModeNormal}
+	owner := &workspaceOwner{target: target, key: workspaceOwnerKey("cbx_windows_stream_transport"), token: strings.Repeat("f", 64)}
+	ctx := contextWithWorkspaceOwner(context.Background(), owner)
+	payload := strings.Repeat("Write-Output stream\n", 512)
+	if code, err := runSSHStreamResult(ctx, target, payload, io.Discard, io.Discard); err != nil || code != 0 {
+		t.Fatalf("output stream code=%d err=%v", code, err)
+	}
+	streamInput := "streamed user input\n"
+	if err := runSSHInputStream(ctx, target, payload, strings.NewReader(streamInput), io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	for _, index := range []int{1, 3} {
+		stageCommand, stagedScript := readWorkspaceOwnerSSHCall(t, dir, index)
+		if len(stageCommand) >= 8191 || !strings.Contains(stagedScript, base64.StdEncoding.EncodeToString([]byte(payload))) {
+			t.Fatalf("stream stage %d command length=%d", index, len(stageCommand))
+		}
+	}
+	_, noInput := readWorkspaceOwnerSSHCall(t, dir, 2)
+	_, preservedInput := readWorkspaceOwnerSSHCall(t, dir, 4)
+	if noInput != "" || preservedInput != streamInput {
+		t.Fatalf("stream inputs output=%q input=%q", noInput, preservedInput)
+	}
+	count, err := os.ReadFile(filepath.Join(dir, "count"))
+	if err != nil || string(count) != "4" {
+		t.Fatalf("SSH call count=%q err=%v; staging must bypass owner recursion", count, err)
 	}
 }
 
@@ -808,7 +1070,7 @@ func TestWorkspaceOwnerPOSIXProtocolBehavior(t *testing.T) {
 		t.Fatal(err)
 	}
 	guardOwner := &workspaceOwner{target: SSHTarget{TargetOS: targetLinux}, key: key, token: tokenA}
-	if out, err := runPOSIXWorkspaceOwnerScript(t, home, guardOwner.WrapBackgroundCommand(guardOwner.rsyncGuardPayload(filepath.Join(home, "guard-destination")))); err != nil || strings.TrimSpace(out) == "" {
+	if out, err := runPOSIXWorkspaceOwnerScript(t, home, guardOwner.wrapPOSIXBackgroundCommand(guardOwner.rsyncGuardPayload(filepath.Join(home, "guard-destination")))); err != nil || strings.TrimSpace(out) == "" {
 		t.Fatalf("start rsync guard out=%q err=%v", out, err)
 	}
 	deadline := time.Now().Add(3 * time.Second)
@@ -896,7 +1158,7 @@ Set-Content -LiteralPath (Join-Path $root (` + psQuote(key) + ` + ".gate")) -Val
 		t.Fatalf("prepare abandoned Windows gate out=%q err=%v", out, err)
 	}
 	req := workspaceOwnerRemoteRequest{Action: workspaceOwnerAcquire, Key: key, Token: token, TTL: 30 * time.Second}
-	if out, err := runWindowsPowerShellScript(t, decodePowerShellCommand(t, remoteWorkspaceOwnerWindows(req))); err != nil || !strings.Contains(string(out), "ACQUIRED") {
+	if out, err := runWindowsPowerShellScript(t, remoteWorkspaceOwnerWindows(req)); err != nil || !strings.Contains(string(out), "ACQUIRED") {
 		t.Fatalf("Windows acquire out=%q err=%v", out, err)
 	}
 	expire := `$root = Join-Path $HOME ".crabbox\workspace-owners"
@@ -907,14 +1169,14 @@ Set-Content -LiteralPath $state -Value @("v1", ` + psQuote(token) + `, "1") -Enc
 		t.Fatalf("expire Windows owner state out=%q err=%v", out, err)
 	}
 	req.Action = workspaceOwnerRenew
-	if out, err := runWindowsPowerShellScript(t, decodePowerShellCommand(t, remoteWorkspaceOwnerWindows(req))); err == nil || !strings.Contains(string(out), "EXPIRED") {
+	if out, err := runWindowsPowerShellScript(t, remoteWorkspaceOwnerWindows(req)); err == nil || !strings.Contains(string(out), "EXPIRED") {
 		t.Fatalf("late Windows renew out=%q err=%v", out, err)
 	}
 	req.Action = workspaceOwnerInspect
-	if out, err := runWindowsPowerShellScript(t, decodePowerShellCommand(t, remoteWorkspaceOwnerWindows(req))); err == nil || !strings.Contains(string(out), "EXPIRED") {
+	if out, err := runWindowsPowerShellScript(t, remoteWorkspaceOwnerWindows(req)); err == nil || !strings.Contains(string(out), "EXPIRED") {
 		t.Fatalf("late Windows inspect out=%q err=%v", out, err)
 	}
-	if out, err := runWindowsPowerShellScript(t, decodePowerShellCommand(t, remoteWorkspaceOwnerWindowsWitness(key, token, "Write-Output late-child"))); err == nil || strings.Contains(string(out), "late-child") {
+	if out, err := runWindowsPowerShellScript(t, remoteWorkspaceOwnerWindowsWitness(key, token, "Write-Output late-child")); err == nil || strings.Contains(string(out), "late-child") {
 		t.Fatalf("late Windows witness executed: out=%q err=%v", out, err)
 	}
 	verifyExpired := `$root = Join-Path $HOME ".crabbox\workspace-owners"
@@ -928,14 +1190,14 @@ if (Test-Path -LiteralPath $child) { throw "late witness published child" }
 		t.Fatalf("verify expired Windows generation out=%q err=%v", out, err)
 	}
 	req.Action = workspaceOwnerAcquire
-	if out, err := runWindowsPowerShellScript(t, decodePowerShellCommand(t, remoteWorkspaceOwnerWindows(req))); err != nil || !strings.Contains(string(out), "RECOVERED") {
+	if out, err := runWindowsPowerShellScript(t, remoteWorkspaceOwnerWindows(req)); err != nil || !strings.Contains(string(out), "RECOVERED") {
 		t.Fatalf("recover expired Windows generation out=%q err=%v", out, err)
 	}
-	if out, err := runWindowsPowerShellScript(t, decodePowerShellCommand(t, remoteWorkspaceOwnerWindowsWitness(key, token, "Write-Output child-ok"))); err != nil || !strings.Contains(string(out), "child-ok") {
+	if out, err := runWindowsPowerShellScript(t, remoteWorkspaceOwnerWindowsWitness(key, token, "Write-Output child-ok")); err != nil || !strings.Contains(string(out), "child-ok") {
 		t.Fatalf("Windows witnessed child out=%q err=%v", out, err)
 	}
 	req.Action = workspaceOwnerRelease
-	if out, err := runWindowsPowerShellScript(t, decodePowerShellCommand(t, remoteWorkspaceOwnerWindows(req))); err != nil || !strings.Contains(string(out), "RELEASED") {
+	if out, err := runWindowsPowerShellScript(t, remoteWorkspaceOwnerWindows(req)); err != nil || !strings.Contains(string(out), "RELEASED") {
 		t.Fatalf("Windows release out=%q err=%v", out, err)
 	}
 }

@@ -10,6 +10,7 @@
 
 - Omitted coordinator-only history commands from failure digests when run history is unavailable, while preserving direct lease recovery guidance.
 - Bypassed reusable-workspace ownership for fresh non-retained local-container runs while preserving ownership for retained and reused leases.
+- Streamed workspace-owner scripts outside native Windows SSH command arguments so retained runs no longer exceed the `cmd.exe` command-line limit.
 
 ## 0.43.0 - 2026-08-15
 
