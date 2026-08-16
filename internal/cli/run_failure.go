@@ -340,7 +340,7 @@ func failureDigestArea(classification FailureClassification, phase string) strin
 
 func failureDigestNextCommands(input runFailureDigestInput, retry string) []string {
 	var commands []string
-	if input.RunID != "" {
+	if input.RunID != "" && !input.RunHistoryUnavailable {
 		commands = append(commands,
 			"crabbox logs "+input.RunID+" --tail 80",
 			"crabbox events "+input.RunID+" --type stderr",

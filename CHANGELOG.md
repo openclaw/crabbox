@@ -6,6 +6,10 @@
 
 - Added `crabbox heartbeat` so external SSH drivers can refresh owned lease idle deadlines and optionally update the idle timeout.
 
+### Fixed
+
+- Omitted coordinator-only history commands from failure digests when run history is unavailable, while preserving direct lease recovery guidance.
+
 ## 0.43.0 - 2026-08-15
 
 ### Added

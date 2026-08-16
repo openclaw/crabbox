@@ -311,6 +311,7 @@ func TestPrintRunFailureDigestExplainsUnavailableRunHistory(t *testing.T) {
 	printRunFailureDigest(&buf, runFailureDigestInput{
 		LeaseID:               "cbx_123",
 		Slug:                  "blue-lobster",
+		RunID:                 "run_local123",
 		RunHistoryUnavailable: true,
 		CommandDisplay:        "go test ./...",
 		Classification:        FailureClassification{BlockedStage: "unknown", RetryLikely: "unknown"},
@@ -327,11 +328,59 @@ func TestPrintRunFailureDigestExplainsUnavailableRunHistory(t *testing.T) {
 	}
 	for _, unexpected := range []string{
 		"crabbox logs run_",
+		"crabbox events run_",
 		"crabbox doctor --from-run run_",
 	} {
 		if strings.Contains(out, unexpected) {
 			t.Fatalf("digest should not include run-based command %q:\n%s", unexpected, out)
 		}
+	}
+}
+
+func TestFailureDigestNextCommandsRespectRunHistoryAvailability(t *testing.T) {
+	historyCommands := []string{
+		"crabbox logs run_123 --tail 80",
+		"crabbox events run_123 --type stderr",
+		"crabbox doctor --from-run run_123",
+	}
+	leaseCommands := []string{
+		"crabbox ssh --provider local-container --id retained-direct",
+		"crabbox run --provider local-container --id retained-direct --fresh-sync -- go test ./...",
+		"crabbox stop --provider local-container retained-direct",
+	}
+	tests := []struct {
+		name               string
+		runID              string
+		historyUnavailable bool
+		wantHistory        bool
+	}{
+		{name: "run ID with unavailable history", runID: "run_123", historyUnavailable: true},
+		{name: "run ID with available history", runID: "run_123", wantHistory: true},
+		{name: "no run ID", historyUnavailable: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			commands := failureDigestNextCommands(runFailureDigestInput{
+				Provider:              "local-container",
+				LeaseID:               "cbx_123",
+				Slug:                  "retained-direct",
+				RunID:                 tt.runID,
+				RunHistoryUnavailable: tt.historyUnavailable,
+				CommandDisplay:        "go test ./...",
+				Classification:        FailureClassification{RetryLikely: "unknown"},
+			}, "unknown")
+			joined := strings.Join(commands, "\n")
+			for _, command := range historyCommands {
+				if got := strings.Contains(joined, command); got != tt.wantHistory {
+					t.Fatalf("history command presence=%v, want %v for %q:\n%s", got, tt.wantHistory, command, joined)
+				}
+			}
+			for _, command := range leaseCommands {
+				if !strings.Contains(joined, command) {
+					t.Fatalf("lease recovery command missing %q:\n%s", command, joined)
+				}
+			}
+		})
 	}
 }
 
