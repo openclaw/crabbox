@@ -462,8 +462,10 @@ Checkpoint-related features are reserved for versioned workspaces:
   warmup/run.
 - `FeatureRunProof`: delegated provider can return bounded stream/timing metadata
   for core `crabbox run --emit-proof` rendering.
-- `FeatureRunSession`: delegated proof/session runner that exposes a run session
-  handle.
+- `FeatureRunSession`: exposes a provider-neutral run-session handle. Delegated
+  adapters may return it in `RunResult`; an explicitly opted-in SSH-lease
+  provider may have core emit it after claim recording. SSH participants must
+  also advertise `FeatureSSH` and `FeatureCleanup`.
 - `FeatureRunArtifacts`: delegated provider can validate and collect bounded run
   artifact globs after a successful command, including required artifacts.
 - `FeatureRunDownloads`: delegated provider can materialize bounded single-file

@@ -43,6 +43,21 @@ crabbox ssh --provider docker --id local-smoke
 crabbox stop --provider docker local-smoke
 ```
 
+Retained run-session handle:
+
+```sh
+crabbox run --provider local-container --keep --no-sync \
+  --lease-output session.json -- true
+jq . session.json
+# Run the exact cleanupCommand from session.json when finished.
+```
+
+`--lease-output` also works with a reused `--id` lease when its final stop
+policy cannot release the lease (the default or `--stop-after never`). Fresh
+runs require `--keep`. Crabbox rejects conflicting stop policies before it
+creates or resolves a container, records the handle after the exact local claim,
+and leaves it in place if later sync or command execution fails.
+
 Cache volume smoke:
 
 ```sh
@@ -215,14 +230,18 @@ metadata updates.
    key, bootstrap directory, and host-work-root ownership. Later inspect and
    endpoint discoveries are compare-and-swap claim transitions. The claim
    changes to `state=ready` only after the SSH readiness check succeeds.
-7. Crabbox syncs tracked and non-ignored files into
+7. When `--lease-output` is requested for a retained run, core writes the
+   provider-neutral run-session handle after the exact claim is recorded and
+   before sync. It includes the exact lease ID and cleanup command, but no SSH
+   endpoint, key path, workdir, claim internals, or container metadata.
+8. Crabbox syncs tracked and non-ignored files into
    `localContainer.workRoot`, then drives the command over the normal SSH
    executor.
-8. `status`, `list`, and `stop` inspect or remove labeled containers.
-9. `cleanup --provider docker` removes stopped containers and running
+9. `status`, `list`, and `stop` inspect or remove labeled containers.
+10. `cleanup --provider docker` removes stopped containers and running
    non-`keep` containers whose local claim or lease labels are stale past the
    idle timeout plus a safety grace period.
-10. If a local claim remains after its container was removed outside Crabbox,
+11. If a local claim remains after its container was removed outside Crabbox,
    `crabbox stop --provider docker <lease-or-slug>` removes the stale claim and
    stored SSH key.
 

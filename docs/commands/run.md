@@ -112,7 +112,16 @@ newly acquired one-shot lease is released after the command and an existing
 stop ...` command. Use `--keep-on-failure` to keep a newly acquired lease alive
 for debugging when the remote command exits non-zero; Crabbox then prints
 inspect/SSH/stop commands for the exact failed box. Add `--lease-output <file>`
-with `--keep` to write a small JSON lease handle for orchestrators.
+with `--keep` to write a small JSON lease handle for orchestrators on providers
+that advertise `run-session`. Delegated providers return their own handle.
+`local-container` opts into the same schema through the core SSH path: a fresh
+run requires `--keep`, while a reused `--id` run requires the default or
+`--stop-after never` policy so the lease cannot be released after the handle is
+reported. Conflicting policies are rejected before acquisition. Core writes the
+handle after recording the exact lease claim and before sync or command
+execution, so later run failures leave the cleanup handle available. The handle
+contains only the provider, exact lease ID, optional slug, reused/kept state,
+optional run ID, and the exact `crabbox stop` cleanup command.
 
 ## Delegated providers
 
@@ -661,7 +670,7 @@ Run-specific flags:
 --keep
 --keep-on-failure
 --stop-after success|always|failure|never
---lease-output <file>
+--lease-output <file>        Write a retained run-session handle when supported.
 --no-sync
 --sync-only
 --no-hydrate

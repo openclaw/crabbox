@@ -235,7 +235,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	attestOut := fs.String("attest", "", "write a signed run receipt after a successful run")
 	attestKeyOverride := fs.String("attest-key", "", "path to an existing PKCS8 PEM ed25519 private key for --attest")
 	stopAfter := fs.String("stop-after", "", "stop policy for the lease: success, always, failure, or never")
-	leaseOutput := fs.String("lease-output", "", "write a small JSON lease handle for orchestrators")
+	leaseOutput := fs.String("lease-output", "", "write a retained JSON lease handle for orchestrators on supported providers")
 	readyPool := fs.String("pool", "", "borrow a broker ready-pool lease")
 	readyPoolCompatibilityKey := fs.String("pool-compatibility-key", "", "provider-neutral ready-pool capability and size key")
 	readyPoolReturn := fs.String("pool-return", "auto", "ready-pool return policy: auto, ready, drain, release")
@@ -731,10 +731,17 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		fmt.Fprintf(a.Stderr, "returned pool=%s lease=%s result=%s\n", borrowedPool.Entry.Key, borrowedPool.Entry.LeaseID, result)
 	}()
-	if strings.TrimSpace(*leaseOutput) != "" && !backend.Spec().Features.Has(FeatureRunSession) {
-		// TODO: Let other reusable delegated providers populate RunResult.Session
-		// and advertise FeatureRunSession once their lifecycle contract is covered.
-		return exit(2, "--lease-output is not supported for provider=%s yet", backend.Spec().Name)
+	leaseOutputPath := strings.TrimSpace(*leaseOutput)
+	if leaseOutputPath != "" {
+		if !backend.Spec().Features.Has(FeatureRunSession) {
+			return exit(2, "--lease-output is not supported for provider=%s yet", backend.Spec().Name)
+		}
+		if err := ValidateRunSessionFeatureSpec(backend.Spec()); err != nil {
+			return err
+		}
+		if err := validateSSHRunLeaseOutputPolicy(backend.Spec(), strings.TrimSpace(*leaseIDFlag), *keep, *keepOnFailure, *stopAfter); err != nil {
+			return err
+		}
 	}
 	if delegated, ok := backend.(DelegatedRunBackend); ok {
 		if err := validateDelegatedRunRouting(backend.Spec(), runReq, *readyPool, len(requiredArtifactSchemas) > 0, expansion.Profile.Doctor.Enabled); err != nil {
@@ -767,7 +774,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			fmt.Fprintf(a.Stderr, "warning: ignoring invalid delegated run session: %v\n", sessionErr)
 			result.Session = nil
 		}
-		if err := writeRunLeaseOutput(strings.TrimSpace(*leaseOutput), result.Session); err != nil {
+		if err := writeRunLeaseOutput(leaseOutputPath, result.Session); err != nil {
 			if runErr == nil {
 				return err
 			}
@@ -953,8 +960,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	runReq.RunID = executionRunID
 	runReq.Env = envSelection.Effective
 	keepFailedLease := false
+	releaseUnreportedLease := false
 	defer func() {
-		if !shouldReleaseRunLease(acquired, *keep, keepFailedLease, *stopAfter, runFailure) {
+		if !releaseUnreportedLease && !shouldReleaseRunLease(acquired, *keep, keepFailedLease, *stopAfter, runFailure) {
 			return
 		}
 		if lifecycleOwner != nil {
@@ -992,6 +1000,27 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}()
 	if err := a.claimRunLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, &server, target, repo.Root, *reclaim || borrowedPool != nil, *leaseIDFlag != ""); err != nil {
 		return recordFailure(err)
+	}
+	if leaseOutputPath != "" {
+		session := &RunSessionHandle{
+			Provider:       backend.Spec().Name,
+			LeaseID:        leaseID,
+			Slug:           serverSlug(server),
+			Reused:         !acquired,
+			Kept:           true,
+			RunID:          executionRunID,
+			CleanupCommand: runStopCommand(cfg, leaseID),
+		}
+		handleErr := ValidateRunSessionForSpec(backend.Spec(), RunResult{Session: session})
+		if handleErr == nil {
+			handleErr = writeRunLeaseOutput(leaseOutputPath, session)
+		}
+		if handleErr != nil {
+			// A reused lease was already named by the caller. Only a fresh lease would
+			// otherwise become an unreported retained resource when the write fails.
+			releaseUnreportedLease = acquired
+			return recordFailure(handleErr)
+		}
 	}
 	a.startRegisteredWebVNCDaemonBestEffort(cfg, target, leaseID, acquired && *keep)
 	if !useCoordinator && leaseID != "" {
@@ -2099,6 +2128,27 @@ func validateRunStopAfterPolicy(policy string) error {
 	default:
 		return exit(2, "--stop-after must be success, always, failure, or never")
 	}
+}
+
+func validateSSHRunLeaseOutputPolicy(spec ProviderSpec, leaseID string, keep, keepOnFailure bool, stopAfter string) error {
+	if spec.Kind != ProviderKindSSHLease {
+		return nil
+	}
+	provider := blank(strings.TrimSpace(spec.Name), "provider")
+	reused := strings.TrimSpace(leaseID) != ""
+	acquired := !reused
+	if acquired && !keep {
+		return exit(2, "--lease-output for provider=%s requires --keep when creating a new lease", provider)
+	}
+	if runStopPolicyMayRelease(acquired, keep, keepOnFailure, stopAfter) {
+		return exit(2, "--lease-output for provider=%s requires a final stop policy that cannot release the lease; --stop-after=%s may release it", provider, blank(strings.ToLower(strings.TrimSpace(stopAfter)), "auto"))
+	}
+	return nil
+}
+
+func runStopPolicyMayRelease(acquired, keep, keepFailedLease bool, stopAfter string) bool {
+	return shouldReleaseRunLease(acquired, keep, keepFailedLease, stopAfter, nil) ||
+		shouldReleaseRunLease(acquired, keep, keepFailedLease, stopAfter, errors.New("run failed"))
 }
 
 func shouldReleaseRunLease(acquired, keep, keepFailedLease bool, stopAfter string, runFailure error) bool {

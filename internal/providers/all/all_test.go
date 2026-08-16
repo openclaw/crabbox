@@ -3,6 +3,7 @@ package all
 import (
 	"io"
 	"slices"
+	"strings"
 	"testing"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -662,7 +663,6 @@ func TestProviderKindFeatureContracts(t *testing.T) {
 		for _, feature := range []core.Feature{
 			core.FeatureModuleRun,
 			core.FeatureRunProof,
-			core.FeatureRunSession,
 			core.FeatureRunArtifacts,
 			core.FeatureRunDownloads,
 			core.FeaturePauseResume,
@@ -671,6 +671,9 @@ func TestProviderKindFeatureContracts(t *testing.T) {
 			if spec.Features.Has(feature) && spec.Kind != core.ProviderKindDelegatedRun {
 				t.Fatalf("%s advertises %s but kind=%s", name, feature, spec.Kind)
 			}
+		}
+		if err := core.ValidateRunSessionFeatureSpec(spec); err != nil {
+			t.Fatalf("%s has invalid %s contract: %v", name, core.FeatureRunSession, err)
 		}
 	}
 }
@@ -815,7 +818,7 @@ func TestProviderKindRequiresBackendInterface(t *testing.T) {
 	}
 }
 
-func TestRunSessionFeatureRequiresDelegatedBackendAndValidHandle(t *testing.T) {
+func TestRunSessionFeatureRequiresCompatibleBackendAndValidHandle(t *testing.T) {
 	checked := 0
 	for _, name := range allBuiltInProviderNames() {
 		provider := mustProvider(t, name)
@@ -830,8 +833,8 @@ func TestRunSessionFeatureRequiresDelegatedBackendAndValidHandle(t *testing.T) {
 			}
 			continue
 		}
-		if spec.Kind != core.ProviderKindDelegatedRun {
-			t.Fatalf("%s advertises %s but kind=%s", name, core.FeatureRunSession, spec.Kind)
+		if err := core.ValidateRunSessionFeatureSpec(spec); err != nil {
+			t.Fatalf("%s advertises invalid %s contract: %v", name, core.FeatureRunSession, err)
 		}
 		cfg, ok := offlineConformanceConfig(name)
 		if !ok {
@@ -841,8 +844,17 @@ func TestRunSessionFeatureRequiresDelegatedBackendAndValidHandle(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s configure error: %v", name, err)
 		}
-		if _, ok := backend.(core.DelegatedRunBackend); !ok {
-			t.Fatalf("%s advertises %s but backend %T is not DelegatedRunBackend", name, core.FeatureRunSession, backend)
+		switch spec.Kind {
+		case core.ProviderKindDelegatedRun:
+			if _, ok := backend.(core.DelegatedRunBackend); !ok {
+				t.Fatalf("%s advertises %s but backend %T is not DelegatedRunBackend", name, core.FeatureRunSession, backend)
+			}
+		case core.ProviderKindSSHLease:
+			if _, ok := backend.(core.SSHLeaseBackend); !ok {
+				t.Fatalf("%s advertises %s but backend %T is not SSHLeaseBackend", name, core.FeatureRunSession, backend)
+			}
+		default:
+			t.Fatalf("%s advertises %s but kind=%s", name, core.FeatureRunSession, spec.Kind)
 		}
 		if err := core.ValidateRunSessionForSpec(spec, core.RunResult{Session: &core.RunSessionHandle{
 			Provider:       name,
@@ -855,6 +867,37 @@ func TestRunSessionFeatureRequiresDelegatedBackendAndValidHandle(t *testing.T) {
 	}
 	if checked == 0 {
 		t.Fatalf("no providers advertised %s; conformance test is stale", core.FeatureRunSession)
+	}
+}
+
+func TestRunSessionFeatureRejectsInvalidSSHProviderFeatureSets(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		spec core.ProviderSpec
+		want string
+	}{
+		{
+			name: "missing ssh",
+			spec: core.ProviderSpec{Name: "invalid-ssh-session", Kind: core.ProviderKindSSHLease, Features: core.FeatureSet{core.FeatureCleanup, core.FeatureRunSession}},
+			want: string(core.FeatureSSH),
+		},
+		{
+			name: "missing cleanup",
+			spec: core.ProviderSpec{Name: "invalid-ssh-session", Kind: core.ProviderKindSSHLease, Features: core.FeatureSet{core.FeatureSSH, core.FeatureRunSession}},
+			want: string(core.FeatureCleanup),
+		},
+		{
+			name: "service control",
+			spec: core.ProviderSpec{Name: "invalid-service-session", Kind: core.ProviderKindServiceControl, Features: core.FeatureSet{core.FeatureRunSession}},
+			want: "unsupported provider kind",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := core.ValidateRunSessionFeatureSpec(tc.spec)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error=%v want %q", err, tc.want)
+			}
+		})
 	}
 }
 

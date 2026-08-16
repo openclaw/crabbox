@@ -1026,6 +1026,27 @@ type RunSessionHandle struct {
 	CleanupCommand string `json:"cleanupCommand"`
 }
 
+func ValidateRunSessionFeatureSpec(spec ProviderSpec) error {
+	if !featureSetHas(spec.Features, FeatureRunSession) {
+		return nil
+	}
+	provider := blank(strings.TrimSpace(spec.Name), "provider")
+	switch spec.Kind {
+	case ProviderKindDelegatedRun:
+		return nil
+	case ProviderKindSSHLease:
+		if !featureSetHas(spec.Features, FeatureSSH) {
+			return exit(2, "%s advertises %s as an SSH lease provider without %s", provider, FeatureRunSession, FeatureSSH)
+		}
+		if !featureSetHas(spec.Features, FeatureCleanup) {
+			return exit(2, "%s advertises %s as an SSH lease provider without %s", provider, FeatureRunSession, FeatureCleanup)
+		}
+		return nil
+	default:
+		return exit(2, "%s advertises %s with unsupported provider kind %s", provider, FeatureRunSession, spec.Kind)
+	}
+}
+
 func ValidateRunSessionForSpec(spec ProviderSpec, result RunResult) error {
 	session := result.Session
 	if session == nil {
@@ -1034,6 +1055,9 @@ func ValidateRunSessionForSpec(spec ProviderSpec, result RunResult) error {
 	provider := blank(strings.TrimSpace(spec.Name), "provider")
 	if !featureSetHas(spec.Features, FeatureRunSession) {
 		return exit(2, "%s returned a run session but does not advertise %s", provider, FeatureRunSession)
+	}
+	if err := ValidateRunSessionFeatureSpec(spec); err != nil {
+		return err
 	}
 	if strings.TrimSpace(session.Provider) == "" {
 		return exit(2, "%s returned a run session without provider", provider)
