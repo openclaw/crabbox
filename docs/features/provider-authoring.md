@@ -194,8 +194,14 @@ Rules:
     provider-native workspace/VM state operations beyond the generic local
     ledger (the constant values are `workspace-checkpoint`, `workspace-fork`,
     `workspace-restore`, `provider-snapshot`).
-  - `FeatureRunProof`, `FeatureRunSession` — delegated backend can return
-    bounded stream/timing proof metadata or a reusable run session.
+  - `FeatureRunProof` — delegated backend can return bounded stream/timing
+    proof metadata.
+  - `FeatureRunSession` — exposes a provider-neutral run-session handle.
+    Delegated backends may return a validated handle in `RunResult`. An
+    explicitly opted-in SSH-lease provider that also advertises `FeatureSSH`
+    and `FeatureCleanup` may instead have core emit the handle after recording
+    the exact lease claim. This SSH-lease contract is opt-in; only
+    `local-container` currently uses it.
   - `FeatureMCP` — delegated backend can attach MCP server references when it
     creates a sandbox. This is a create-time attachment contract, not a generic
     Crabbox MCP host.

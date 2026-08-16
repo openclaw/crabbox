@@ -1868,6 +1868,43 @@ func TestRunCommandRejectsLocalContainerLeaseOutputStopPoliciesBeforeAcquisition
 	}
 }
 
+func TestRunCommandRejectsReadyPoolLeaseOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "without keep", want: "requires --keep"},
+		{name: "with keep", args: []string{"--keep"}, want: "--pool uses --pool-return for lifecycle"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			dir := t.TempDir()
+			isolateRunTestUserDirs(t, dir)
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+			acquireCalls := 0
+			runEnvProfileTestAcquireHook = func(AcquireRequest) { acquireCalls++ }
+			t.Cleanup(func() { runEnvProfileTestAcquireHook = nil })
+
+			args := []string{
+				"--provider", "local-container",
+				"--pool", "shared-linux",
+				"--lease-output", filepath.Join(dir, "session.json"),
+			}
+			args = append(args, tc.args...)
+			args = append(args, "--", "true")
+			err := (App{Stdout: io.Discard, Stderr: io.Discard}).runCommand(t.Context(), args)
+			var exitErr ExitError
+			if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, tc.want) {
+				t.Fatalf("error=%v, want exit 2 containing %q", err, tc.want)
+			}
+			if acquireCalls != 0 {
+				t.Fatalf("backend acquisition calls=%d, want 0", acquireCalls)
+			}
+		})
+	}
+}
+
 func TestRunCommandLocalContainerLeaseOutputSurvivesCommandAndSyncFailure(t *testing.T) {
 	for _, phase := range []string{"command", "sync"} {
 		t.Run(phase, func(t *testing.T) {
