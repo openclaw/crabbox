@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Rejected native Jujutsu and other unsupported local sync sources before delegated archive providers can provision or execute a remote sandbox.
 - Omitted coordinator-only history commands from failure digests when run history is unavailable, while preserving direct lease recovery guidance.
 - Bypassed reusable-workspace ownership for fresh non-retained local-container runs while preserving ownership for retained and reused leases.
 - Framed workspace-owner scripts outside native Windows SSH command arguments so retained runs avoid `cmd.exe` limits, preserve finite stdin and nonzero exits, and clean up promptly.

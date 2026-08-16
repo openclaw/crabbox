@@ -936,6 +936,13 @@ func gitSyncFileList(root string) ([]byte, error) {
 	return out, nil
 }
 
+func validateLocalWorkspaceSyncSource(repo Repo) error {
+	if _, err := gitSyncFileList(repo.Root); err != nil {
+		return exit(6, "build sync file list: %v", err)
+	}
+	return nil
+}
+
 func syncManifest(root string, excludes SyncExcludeRules) (SyncManifest, error) {
 	return syncManifestFilteredRules(root, excludes, nil)
 }

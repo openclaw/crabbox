@@ -20,6 +20,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -30,6 +31,7 @@ func init() {
 	RegisterProvider(runReadyPoolPreflightTestProvider{})
 	RegisterProvider(runPrepareTestProvider{})
 	RegisterProvider(runModuleRuntimeTestProvider{})
+	RegisterProvider(runArchiveSyncPreflightTestProvider{})
 }
 
 type warmupFailureReleaseBackend struct {
@@ -811,6 +813,182 @@ type runWorkdirCase struct {
 	native     bool
 	diagnostic string
 	guidance   []string
+}
+
+type runArchiveSyncPreflightTestProvider struct{}
+
+func (runArchiveSyncPreflightTestProvider) Name() string { return "run-archive-sync-preflight-test" }
+func (runArchiveSyncPreflightTestProvider) Aliases() []string {
+	return nil
+}
+func (runArchiveSyncPreflightTestProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "run-archive-sync-preflight-test",
+		Kind:        ProviderKindDelegatedRun,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureArchiveSync},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (runArchiveSyncPreflightTestProvider) RegisterFlags(*flag.FlagSet, Config) any {
+	return noProviderFlags{}
+}
+func (runArchiveSyncPreflightTestProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (p runArchiveSyncPreflightTestProvider) Configure(Config, Runtime) (Backend, error) {
+	runArchiveSyncPreflightProviderCalls.Add(1)
+	return runArchiveSyncPreflightTestBackend{spec: p.Spec()}, nil
+}
+
+type runArchiveSyncPreflightTestBackend struct {
+	spec ProviderSpec
+}
+
+var runArchiveSyncPreflightProviderCalls atomic.Int64
+
+func (b runArchiveSyncPreflightTestBackend) Spec() ProviderSpec { return b.spec }
+func (runArchiveSyncPreflightTestBackend) Warmup(context.Context, WarmupRequest) error {
+	runArchiveSyncPreflightProviderCalls.Add(1)
+	return nil
+}
+func (b runArchiveSyncPreflightTestBackend) Run(context.Context, RunRequest) (RunResult, error) {
+	runArchiveSyncPreflightProviderCalls.Add(1)
+	return RunResult{Provider: b.spec.Name}, nil
+}
+func (runArchiveSyncPreflightTestBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
+	runArchiveSyncPreflightProviderCalls.Add(1)
+	return nil, nil
+}
+func (runArchiveSyncPreflightTestBackend) Status(context.Context, StatusRequest) (StatusView, error) {
+	runArchiveSyncPreflightProviderCalls.Add(1)
+	return StatusView{}, nil
+}
+func (runArchiveSyncPreflightTestBackend) Stop(context.Context, StopRequest) error {
+	runArchiveSyncPreflightProviderCalls.Add(1)
+	return nil
+}
+
+func setupDelegatedArchiveSyncPreflightWorkspace(t *testing.T, colocatedGit, invalidGitMarker bool) string {
+	t.Helper()
+	clearConfigEnv(t)
+	outer := t.TempDir()
+	runGit(t, outer, "init")
+	root := filepath.Join(outer, "native-workspace")
+	makeNativeJujutsuWorkspace(t, root)
+	if colocatedGit {
+		runGit(t, root, "init")
+	} else if invalidGitMarker {
+		if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile(t, filepath.Join(root, "tracked.txt"), "tracked\n")
+	if colocatedGit {
+		runGit(t, root, "add", "tracked.txt")
+	}
+	isolateRunTestUserDirs(t, root)
+	t.Chdir(root)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(root, "missing.yaml"))
+	return root
+}
+
+func TestRunDelegatedArchiveSyncValidatesSourceBeforeProviderCall(t *testing.T) {
+	provider := runArchiveSyncPreflightTestProvider{}.Name()
+
+	t.Run("native Jujutsu", func(t *testing.T) {
+		root := setupDelegatedArchiveSyncPreflightWorkspace(t, false, false)
+		runArchiveSyncPreflightProviderCalls.Store(0)
+
+		var stdout, stderr bytes.Buffer
+		err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+			"--provider", provider,
+			"--", "true",
+		})
+		var exitErr ExitError
+		if !AsExitError(err, &exitErr) || exitErr.Code != 6 {
+			t.Fatalf("error=%v, want exit 6\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+		}
+		for _, want := range []string{root, "native Jujutsu workspace", "Git-manifest-based", "wrong revision", "colocated Git workspace", "jj git init --git-repo=.", "--no-sync"} {
+			if !strings.Contains(exitErr.Message, want) {
+				t.Fatalf("message missing %q: %q", want, exitErr.Message)
+			}
+		}
+		if calls := runArchiveSyncPreflightProviderCalls.Load(); calls != 0 {
+			t.Fatalf("delegated provider calls=%d, want zero before source validation", calls)
+		}
+	})
+
+	t.Run("invalid colocated Git marker", func(t *testing.T) {
+		setupDelegatedArchiveSyncPreflightWorkspace(t, false, true)
+		runArchiveSyncPreflightProviderCalls.Store(0)
+
+		err := (App{Stdout: io.Discard, Stderr: io.Discard}).runCommand(context.Background(), []string{
+			"--provider", provider,
+			"--", "true",
+		})
+		var exitErr ExitError
+		if !AsExitError(err, &exitErr) || exitErr.Code != 6 || !strings.Contains(exitErr.Message, "native Jujutsu workspace") {
+			t.Fatalf("error=%v, want native Jujutsu exit 6", err)
+		}
+		if calls := runArchiveSyncPreflightProviderCalls.Load(); calls != 0 {
+			t.Fatalf("delegated provider calls=%d, want zero for invalid Git metadata", calls)
+		}
+	})
+
+	t.Run("no sync", func(t *testing.T) {
+		setupDelegatedArchiveSyncPreflightWorkspace(t, false, false)
+		runArchiveSyncPreflightProviderCalls.Store(0)
+
+		err := (App{Stdout: io.Discard, Stderr: io.Discard}).runCommand(context.Background(), []string{
+			"--provider", provider,
+			"--no-sync",
+			"--", "true",
+		})
+		if err != nil {
+			t.Fatalf("run error=%v", err)
+		}
+		if calls := runArchiveSyncPreflightProviderCalls.Load(); calls != 2 {
+			t.Fatalf("delegated provider calls=%d, want configure and --no-sync run", calls)
+		}
+	})
+
+	t.Run("colocated Git", func(t *testing.T) {
+		setupDelegatedArchiveSyncPreflightWorkspace(t, true, false)
+		runArchiveSyncPreflightProviderCalls.Store(0)
+
+		err := (App{Stdout: io.Discard, Stderr: io.Discard}).runCommand(context.Background(), []string{
+			"--provider", provider,
+			"--", "true",
+		})
+		if err != nil {
+			t.Fatalf("run error=%v", err)
+		}
+		if calls := runArchiveSyncPreflightProviderCalls.Load(); calls != 2 {
+			t.Fatalf("delegated provider calls=%d, want configure and colocated Git run", calls)
+		}
+	})
+
+	t.Run("fresh PR remains provider option validation", func(t *testing.T) {
+		setupDelegatedArchiveSyncPreflightWorkspace(t, false, false)
+		runArchiveSyncPreflightProviderCalls.Store(0)
+
+		err := (App{Stdout: io.Discard, Stderr: io.Discard}).runCommand(context.Background(), []string{
+			"--provider", provider,
+			"--fresh-pr", "example-org/my-app#1",
+			"--", "true",
+		})
+		var exitErr ExitError
+		if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, "--fresh-pr is not supported") {
+			t.Fatalf("error=%v, want delegated fresh-PR rejection", err)
+		}
+		if strings.Contains(exitErr.Message, "native Jujutsu workspace") {
+			t.Fatalf("fresh-PR option rejection triggered local source validation: %q", exitErr.Message)
+		}
+		if calls := runArchiveSyncPreflightProviderCalls.Load(); calls != 0 {
+			t.Fatalf("delegated provider calls=%d, want zero for rejected fresh PR", calls)
+		}
+	})
 }
 
 func runWorkdirCases() []runWorkdirCase {

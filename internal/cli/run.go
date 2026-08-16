@@ -548,6 +548,65 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return exit(2, "profile doctor is not supported for native Windows targets")
 		}
 	}
+	options := leaseOptionsFromConfig(cfg)
+	scriptRequested := *scriptPath != "" || *scriptStdin
+	var script *RunScriptSpec
+	runReq := RunRequest{
+		Repo:                  repo,
+		ID:                    *leaseIDFlag,
+		RunID:                 executionRunID,
+		Options:               options,
+		Keep:                  *keep,
+		KeepOnFailure:         *keepOnFailure,
+		Reclaim:               *reclaim,
+		NoSync:                *noSync,
+		SyncOnly:              *syncOnly,
+		DebugSync:             *debugSync,
+		ShellMode:             *shellMode,
+		ChecksumSync:          *checksumSync,
+		ForceSyncLarge:        *forceSyncLarge,
+		FullResync:            fullResyncRequested,
+		EnvHelper:             envHelperName,
+		CaptureStdout:         *captureStdout,
+		CaptureStderr:         *captureStderr,
+		CaptureOnFail:         *captureOnFail,
+		Preflight:             *preflight,
+		Downloads:             downloads,
+		Env:                   envSelection.Effective,
+		EnvSummary:            envSelection.SummaryRequested,
+		ScriptRequested:       scriptRequested,
+		FreshPR:               freshPR,
+		ApplyLocalPatch:       *applyLocalPatch,
+		Command:               command,
+		Label:                 runLabelValue,
+		RequestedSlug:         requestedSlug,
+		TimingJSON:            *timingJSON || timingRecordEnabled,
+		ArtifactGlobs:         expansion.ArtifactGlobs,
+		RequiredArtifactGlobs: requiredArtifactGlobs,
+		EmitProof:             strings.TrimSpace(*emitProof),
+		ProofTemplate:         strings.TrimSpace(*proofTemplate),
+		ProfileVariables:      expansion.Variables,
+		StopAfter:             strings.TrimSpace(*stopAfter),
+	}
+	delegatedRoutePreflighted := false
+	if providerSelectionIsActionable(cfg) {
+		provider, err := ProviderFor(cfg.Provider)
+		if err != nil {
+			return err
+		}
+		providerSpec := provider.Spec()
+		if providerSpec.Kind == ProviderKindDelegatedRun {
+			if err := validateDelegatedRunRouting(providerSpec, runReq, *readyPool, len(requiredArtifactSchemas) > 0, expansion.Profile.Doctor.Enabled); err != nil {
+				return err
+			}
+			if delegatedRunNeedsLocalWorkspaceSync(providerSpec, runReq) {
+				if err := validateLocalWorkspaceSyncSource(repo); err != nil {
+					return err
+				}
+			}
+			delegatedRoutePreflighted = true
+		}
+	}
 	backendRuntime := runtimeForApp(a)
 	if timingRecordEnabled {
 		delegatedTimingCapture = &capturedTimingReportWriter{writer: a.Stderr}
@@ -677,58 +736,14 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		// and advertise FeatureRunSession once their lifecycle contract is covered.
 		return exit(2, "--lease-output is not supported for provider=%s yet", backend.Spec().Name)
 	}
-	options := leaseOptionsFromConfig(cfg)
-	scriptRequested := *scriptPath != "" || *scriptStdin
-	var script *RunScriptSpec
-	runReq := RunRequest{
-		Repo:                  repo,
-		ID:                    *leaseIDFlag,
-		RunID:                 executionRunID,
-		Options:               options,
-		Keep:                  *keep,
-		KeepOnFailure:         *keepOnFailure,
-		Reclaim:               *reclaim,
-		NoSync:                *noSync,
-		SyncOnly:              *syncOnly,
-		DebugSync:             *debugSync,
-		ShellMode:             *shellMode,
-		ChecksumSync:          *checksumSync,
-		ForceSyncLarge:        *forceSyncLarge,
-		FullResync:            fullResyncRequested,
-		EnvHelper:             envHelperName,
-		CaptureStdout:         *captureStdout,
-		CaptureStderr:         *captureStderr,
-		CaptureOnFail:         *captureOnFail,
-		Preflight:             *preflight,
-		Downloads:             downloads,
-		Env:                   envSelection.Effective,
-		EnvSummary:            envSelection.SummaryRequested,
-		ScriptRequested:       scriptRequested,
-		FreshPR:               freshPR,
-		ApplyLocalPatch:       *applyLocalPatch,
-		Command:               command,
-		Label:                 runLabelValue,
-		RequestedSlug:         requestedSlug,
-		TimingJSON:            *timingJSON || timingRecordEnabled,
-		ArtifactGlobs:         expansion.ArtifactGlobs,
-		RequiredArtifactGlobs: requiredArtifactGlobs,
-		EmitProof:             strings.TrimSpace(*emitProof),
-		ProofTemplate:         strings.TrimSpace(*proofTemplate),
-		ProfileVariables:      expansion.Variables,
-		StopAfter:             strings.TrimSpace(*stopAfter),
-	}
 	if delegated, ok := backend.(DelegatedRunBackend); ok {
-		if strings.TrimSpace(*readyPool) != "" {
-			return exit(2, "--pool requires a brokered SSH lease provider")
-		}
-		if len(requiredArtifactSchemas) > 0 {
-			return exit(2, "--require-artifact-schema is not supported for provider=%s yet; use an SSH-backed provider", backend.Spec().Name)
-		}
-		if expansion.Profile.Doctor.Enabled {
-			return exit(2, "%s delegates run execution; profile doctor is not supported", backend.Spec().Name)
-		}
-		if err := RejectDelegatedSyncOptionsForSpec(backend.Spec(), runReq); err != nil {
+		if err := validateDelegatedRunRouting(backend.Spec(), runReq, *readyPool, len(requiredArtifactSchemas) > 0, expansion.Profile.Doctor.Enabled); err != nil {
 			return err
+		}
+		if !delegatedRoutePreflighted && delegatedRunNeedsLocalWorkspaceSync(backend.Spec(), runReq) {
+			if err := validateLocalWorkspaceSyncSource(repo); err != nil {
+				return err
+			}
 		}
 		if scriptRequested && backend.Spec().Features.Has(FeatureModuleRun) {
 			script, err = loadRunScript(*scriptPath, *scriptStdin, a.Stdin)
@@ -793,9 +808,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		return exit(2, "provider=%s does not support run", backend.Spec().Name)
 	}
 	if !*noSync && freshPR.Empty() {
-		_, err = gitSyncFileList(repo.Root)
-		if err != nil {
-			return exit(6, "build sync file list: %v", err)
+		if err := validateLocalWorkspaceSyncSource(repo); err != nil {
+			return err
 		}
 	}
 	coord := backendCoordinator(backend)
@@ -2585,6 +2599,23 @@ func commandNeedsHydrationHint(command []string, shellMode bool) bool {
 
 func shouldAutoHydrateActions(cfg Config, noHydrate, noSync bool, freshPR FreshPRSpec, syncOnly bool) bool {
 	return strings.TrimSpace(cfg.Actions.Workflow) != "" && !noHydrate && !noSync && freshPR.Empty() && !syncOnly
+}
+
+func delegatedRunNeedsLocalWorkspaceSync(spec ProviderSpec, req RunRequest) bool {
+	return spec.Features.Has(FeatureArchiveSync) && !req.NoSync && req.FreshPR.Empty()
+}
+
+func validateDelegatedRunRouting(spec ProviderSpec, req RunRequest, readyPool string, hasArtifactSchemas, profileDoctor bool) error {
+	if strings.TrimSpace(readyPool) != "" {
+		return exit(2, "--pool requires a brokered SSH lease provider")
+	}
+	if hasArtifactSchemas {
+		return exit(2, "--require-artifact-schema is not supported for provider=%s yet; use an SSH-backed provider", spec.Name)
+	}
+	if profileDoctor {
+		return exit(2, "%s delegates run execution; profile doctor is not supported", spec.Name)
+	}
+	return RejectDelegatedSyncOptionsForSpec(spec, req)
 }
 
 func rawJSRuntimeHydrateSuggestion(cfg Config, target SSHTarget, leaseID string, acquired, keep, keepOnFailure bool) string {
