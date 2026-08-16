@@ -3852,11 +3852,23 @@ func TestRemotePreflightNonePrintsWorkspaceOnly(t *testing.T) {
 func TestRemotePreflightPrintsEffectiveArchitectureEvidence(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.Run.PreflightTools = []string{"none"}
+	cfg.architectureExplicit = true
 	server := Server{Labels: map[string]string{"architecture": ArchitectureARM64}}
 	var out bytes.Buffer
 	printRemoteCapabilityPreflight(context.Background(), &out, cfg, server, SSHTarget{TargetOS: targetLinux}, "cbx_123", "/work/repo", nil, false, "", false, nil)
 	if !strings.Contains(out.String(), "remote preflight architecture=arm64\n") {
 		t.Fatalf("missing architecture evidence: %q", out.String())
+	}
+}
+
+func TestRemotePreflightOmitsUnassertedArchitectureLabel(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Run.PreflightTools = []string{"none"}
+	server := Server{Labels: map[string]string{"architecture": ArchitectureARM64}}
+	var out bytes.Buffer
+	printRemoteCapabilityPreflight(context.Background(), &out, cfg, server, SSHTarget{TargetOS: targetLinux}, "cbx_123", "/work/repo", nil, false, "", false, nil)
+	if strings.Contains(out.String(), "remote preflight architecture=") {
+		t.Fatalf("omitted architecture printed stale evidence: %q", out.String())
 	}
 }
 

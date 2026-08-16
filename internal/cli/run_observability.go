@@ -156,8 +156,10 @@ func printRemoteCapabilityPreflight(ctx context.Context, w io.Writer, cfg Config
 	for _, line := range remotePreflightWorkspaceLines(cfg, target, leaseID, workdir, hydrated, actionsURL, hydrateSupported) {
 		fmt.Fprintln(w, line)
 	}
-	if architecture := strings.TrimSpace(server.Labels["architecture"]); architecture != "" {
-		fmt.Fprintf(w, "remote preflight architecture=%s\n", architecture)
+	if cfg.architectureExplicit {
+		if architecture := strings.TrimSpace(server.Labels["architecture"]); architecture != "" {
+			fmt.Fprintf(w, "remote preflight architecture=%s\n", architecture)
+		}
 	}
 	tools := preflightToolsForTarget(target, cfg.Run.PreflightTools)
 	if len(tools) == 0 {
