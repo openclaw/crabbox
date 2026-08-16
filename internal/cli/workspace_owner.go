@@ -92,6 +92,13 @@ type workspaceOwnerRemotePreparation struct {
 	name    string
 }
 
+const (
+	workspaceOwnerCleanupTimeout         = 30 * time.Second
+	workspaceOwnerCanceledCleanupTimeout = 5 * time.Second
+)
+
+type workspaceOwnerCleanupRunner func(context.Context, SSHTarget, string) error
+
 func prepareWorkspaceOwnerRemote(ctx context.Context, target SSHTarget, remote string, inputSize *int64) (workspaceOwnerRemotePreparation, error) {
 	owner := workspaceOwnerFromContext(ctx)
 	if owner == nil {
@@ -104,12 +111,24 @@ func prepareWorkspaceOwnerRemote(ctx context.Context, target SSHTarget, remote s
 }
 
 func (p workspaceOwnerRemotePreparation) close(ctx context.Context, target SSHTarget) error {
+	return p.closeWithRunner(ctx, target, runSSHQuiet)
+}
+
+func (p workspaceOwnerRemotePreparation) closeWithRunner(ctx context.Context, target SSHTarget, run workspaceOwnerCleanupRunner) error {
+	timeout := workspaceOwnerCleanupTimeout
+	if ctx.Err() != nil {
+		timeout = workspaceOwnerCanceledCleanupTimeout
+	}
+	return p.closeWithin(ctx, target, timeout, run)
+}
+
+func (p workspaceOwnerRemotePreparation) closeWithin(ctx context.Context, target SSHTarget, timeout time.Duration, run workspaceOwnerCleanupRunner) error {
 	if p.cleanup == "" {
 		return nil
 	}
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 	defer cancel()
-	return runSSHQuiet(contextWithoutWorkspaceOwner(cleanupCtx), target, p.cleanup)
+	return run(contextWithoutWorkspaceOwner(cleanupCtx), target, p.cleanup)
 }
 
 func stageWorkspaceOwnerWindowsWitness(ctx context.Context, target SSHTarget, owner *workspaceOwner, remote string, inputSize *int64, selfCleaning bool) (workspaceOwnerRemotePreparation, error) {
@@ -122,19 +141,22 @@ func stageWorkspaceOwnerWindowsWitness(ctx context.Context, target SSHTarget, ow
 	if selfCleaning {
 		script = remoteWorkspaceOwnerWindowsSelfCleaningWitness(name, script)
 	}
+	prepared := workspaceOwnerRemotePreparation{
+		command: remoteWorkspaceOwnerWindowsRunWitnessCommand(name),
+		cleanup: remoteWorkspaceOwnerWindowsCleanupWitnessCommand(name),
+		name:    name,
+	}
 	var output synchronizedBuffer
 	if err := runSSHInput(ctx, target, remoteWorkspaceOwnerWindowsStageWitnessCommand(owner.key, owner.token, name, int64(len([]byte(script)))), strings.NewReader(script), &output, &output); err != nil {
 		detail := trimFailureDetail(strings.TrimSpace(output.String()))
+		// The remote write may have succeeded even when its SSH result was lost.
+		_ = prepared.closeWithin(ctx, target, workspaceOwnerCanceledCleanupTimeout, runSSHQuiet)
 		if detail != "" {
 			return workspaceOwnerRemotePreparation{}, fmt.Errorf("stage native Windows workspace witness: %w: %s", err, detail)
 		}
 		return workspaceOwnerRemotePreparation{}, fmt.Errorf("stage native Windows workspace witness: %w", err)
 	}
-	return workspaceOwnerRemotePreparation{
-		command: remoteWorkspaceOwnerWindowsRunWitnessCommand(name),
-		cleanup: remoteWorkspaceOwnerWindowsCleanupWitnessCommand(name),
-		name:    name,
-	}, nil
+	return prepared, nil
 }
 
 func runWorkspaceOwnerBackgroundOutput(ctx context.Context, target SSHTarget, owner *workspaceOwner, remote string) (string, error) {

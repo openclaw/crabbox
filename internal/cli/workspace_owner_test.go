@@ -617,6 +617,78 @@ func TestWorkspaceOwnerNativeWindowsProtocolKeepsOnlySuccessfulFallbackOutput(t 
 	}
 }
 
+func TestWorkspaceOwnerNativeWindowsAmbiguousStageCleansExactWitness(t *testing.T) {
+	dir := installWorkspaceOwnerRecordingSSH(t)
+	t.Setenv("CRABBOX_OWNER_SSH_FAIL_CALL", "1")
+	target := SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22", FallbackPorts: []string{"2222"}, TargetOS: targetWindows, WindowsMode: windowsModeNormal}
+	owner := &workspaceOwner{target: target, key: workspaceOwnerKey("cbx_windows_ambiguous_stage"), token: strings.Repeat("8", 64)}
+	ctx := contextWithWorkspaceOwner(context.Background(), owner)
+	_, err := prepareWorkspaceOwnerRemote(ctx, target, "Write-Output ambiguous-stage", nil)
+	if err == nil || exitCode(err) != 7 || !strings.Contains(err.Error(), "stage native Windows workspace witness") {
+		t.Fatalf("ambiguous stage err=%v", err)
+	}
+
+	stageCommand, stagedScript := readWorkspaceOwnerSSHCall(t, dir, 1)
+	if !strings.Contains(stagedScript, base64.StdEncoding.EncodeToString([]byte("Write-Output ambiguous-stage"))) {
+		t.Fatal("staging failure did not follow a complete remote witness write")
+	}
+	stage := decodePowerShellCommand(t, stageCommand)
+	prefix := owner.key + ".witness." + owner.token + "."
+	start := strings.Index(stage, prefix)
+	if start < 0 {
+		t.Fatalf("stage command missing witness prefix %q", prefix)
+	}
+	end := strings.Index(stage[start:], ".ps1")
+	if end < 0 {
+		t.Fatalf("stage command missing witness suffix: %s", stage)
+	}
+	name := stage[start : start+end+len(".ps1")]
+	cleanupCommand, cleanupInput := readWorkspaceOwnerSSHCall(t, dir, 2)
+	if cleanupCommand != remoteWorkspaceOwnerWindowsCleanupWitnessCommand(name) || cleanupInput != "" {
+		t.Fatalf("cleanup command=%q stdin=%q want exact witness=%q", cleanupCommand, cleanupInput, name)
+	}
+	count, readErr := os.ReadFile(filepath.Join(dir, "count"))
+	if readErr != nil || string(count) != "2" {
+		t.Fatalf("SSH call count=%q err=%v; want one failed stage and one cleanup without fallback", count, readErr)
+	}
+}
+
+func TestWorkspaceOwnerCanceledCleanupUsesShortDetachedBudget(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	cancel()
+	prepared := workspaceOwnerRemotePreparation{cleanup: "cleanup", name: "witness.ps1"}
+	started := time.Now()
+	var observedBudget time.Duration
+	err := prepared.closeWithRunner(parent, SSHTarget{}, func(ctx context.Context, _ SSHTarget, command string) error {
+		if command != prepared.cleanup {
+			t.Fatalf("cleanup command=%q want %q", command, prepared.cleanup)
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("cleanup inherited caller cancellation: %v", ctx.Err())
+		}
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("cleanup context has no deadline")
+		}
+		observedBudget = time.Until(deadline)
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	elapsed := time.Since(started)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("cleanup err=%v want deadline exceeded", err)
+	}
+	if observedBudget <= 0 || observedBudget > workspaceOwnerCanceledCleanupTimeout+250*time.Millisecond {
+		t.Fatalf("cleanup budget=%s want at most %s", observedBudget, workspaceOwnerCanceledCleanupTimeout)
+	}
+	if elapsed > workspaceOwnerCanceledCleanupTimeout+2*time.Second {
+		t.Fatalf("cancelled cleanup elapsed=%s exceeded short budget %s", elapsed, workspaceOwnerCanceledCleanupTimeout)
+	}
+	if observedBudget >= workspaceOwnerCleanupTimeout {
+		t.Fatalf("cancelled cleanup inherited normal timeout %s", workspaceOwnerCleanupTimeout)
+	}
+}
+
 func TestWorkspaceOwnerNativeWindowsWitnessStagesRawScriptAndPreservesInput(t *testing.T) {
 	dir := installWorkspaceOwnerRecordingSSH(t)
 	target := SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22", TargetOS: targetWindows, WindowsMode: windowsModeNormal}
