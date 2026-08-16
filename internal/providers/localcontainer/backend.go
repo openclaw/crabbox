@@ -50,6 +50,8 @@ type backend struct {
 	afterClaimCleanup      func(string)
 }
 
+var _ core.ExclusiveOneShotAcquireBackend = (*backend)(nil)
+
 type inspectContainer struct {
 	ID              string            `json:"Id"`
 	Name            string            `json:"Name"`
@@ -94,6 +96,8 @@ func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.B
 }
 
 func (b *backend) Spec() core.ProviderSpec { return b.spec }
+
+func (b *backend) AcquireIsExclusiveOneShot() bool { return true }
 
 func (b *backend) BeginRunFailureEvidence(ctx context.Context, req core.RunFailureEvidenceRequest) (core.RunFailureEvidenceCollector, error) {
 	containerID := strings.TrimSpace(req.Lease.Server.CloudID)

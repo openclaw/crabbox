@@ -1818,9 +1818,7 @@ esac
 printf 'Live harness ready: baseUrl=http://127.0.0.1:28008/\nscenario pass login-regression 33.8s\nsuite pass 4/4 total=81.2s\n'
 exit 0
 `
-	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	installWorkspaceOwnerAwareSSH(t, sshPath, script)
 	var stdout, stderr bytes.Buffer
 	err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
 		"--provider", "run-env-profile-test",

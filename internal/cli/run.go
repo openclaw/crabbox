@@ -1036,7 +1036,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return recordFailure(err)
 		}
 	}
-	if shouldAcquireWorkspaceOwner(acquired, sshBackend) {
+	if shouldAcquireWorkspaceOwner(acquired, acquiredRunMayRetainLease(*keep, *keepOnFailure, *stopAfter), sshBackend) {
 		target = bootstrapNetworkTarget(cfg, server, target)
 		if waitErr := waitForSSHReady(ctx, &target, a.Stderr, "workspace owner", 2*time.Minute); waitErr != nil {
 			return recordFailure(waitErr)

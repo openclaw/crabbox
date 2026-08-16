@@ -290,15 +290,52 @@ func TestWorkspaceOwnerTokenAndTransportFailuresFailClosed(t *testing.T) {
 
 func TestWorkspaceOwnerAcquisitionBoundary(t *testing.T) {
 	nonExclusive := newWatchTestBackend()
-	if !shouldAcquireWorkspaceOwner(true, nonExclusive) {
+	if !shouldAcquireWorkspaceOwner(true, false, nonExclusive) {
 		t.Fatal("a successful non-exclusive acquisition must acquire the workspace owner")
 	}
 	exclusive := runEnvProfileTestBackend{}
-	if shouldAcquireWorkspaceOwner(true, exclusive) {
-		t.Fatal("newly acquired exclusive one-shot lease must bypass the workspace owner")
+	tests := []struct {
+		name      string
+		acquired  bool
+		mayRetain bool
+		wantOwner bool
+	}{
+		{name: "fresh one-shot cleanup", acquired: true, wantOwner: false},
+		{name: "fresh keep", acquired: true, mayRetain: true, wantOwner: true},
+		{name: "fresh keep-on-failure", acquired: true, mayRetain: true, wantOwner: true},
+		{name: "reused retained lease", acquired: false, wantOwner: true},
 	}
-	if !shouldAcquireWorkspaceOwner(false, exclusive) {
-		t.Fatal("existing, pooled, and watch-reused leases must acquire the reuse owner")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldAcquireWorkspaceOwner(tt.acquired, tt.mayRetain, exclusive); got != tt.wantOwner {
+				t.Fatalf("shouldAcquireWorkspaceOwner()=%t, want %t", got, tt.wantOwner)
+			}
+		})
+	}
+}
+
+func TestAcquiredRunMayRetainLease(t *testing.T) {
+	tests := []struct {
+		name          string
+		keep          bool
+		keepOnFailure bool
+		stopAfter     string
+		want          bool
+	}{
+		{name: "default cleanup"},
+		{name: "always cleanup", stopAfter: "always"},
+		{name: "keep", keep: true, want: true},
+		{name: "keep on failure", keepOnFailure: true, want: true},
+		{name: "success policy may retain failure", stopAfter: "success", want: true},
+		{name: "failure policy may retain success", stopAfter: "failure", want: true},
+		{name: "never cleanup", stopAfter: "never", want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := acquiredRunMayRetainLease(tt.keep, tt.keepOnFailure, tt.stopAfter); got != tt.want {
+				t.Fatalf("acquiredRunMayRetainLease()=%t, want %t", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -338,7 +375,7 @@ func TestWorkspaceOwnerLifecycleBoundaryMatrix(t *testing.T) {
 		"watch iteration",
 	} {
 		t.Run(lifecycle, func(t *testing.T) {
-			if !shouldAcquireWorkspaceOwner(false, nil) {
+			if !shouldAcquireWorkspaceOwner(false, false, nil) {
 				t.Fatalf("reused %s path bypassed workspace ownership", lifecycle)
 			}
 		})
@@ -346,7 +383,7 @@ func TestWorkspaceOwnerLifecycleBoundaryMatrix(t *testing.T) {
 }
 
 func TestWorkspaceOwnerSerializesStaticRunAndStandaloneActionsHydration(t *testing.T) {
-	if !shouldAcquireWorkspaceOwner(true, testStaticSSHBackend{}) {
+	if !shouldAcquireWorkspaceOwner(true, false, testStaticSSHBackend{}) {
 		t.Fatal("static SSH acquisition bypassed workspace ownership")
 	}
 	remote := newFakeWorkspaceOwnerRemote()

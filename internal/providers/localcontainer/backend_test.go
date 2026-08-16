@@ -93,6 +93,14 @@ func testBackend(runner *recordingRunner) *backend {
 	return b
 }
 
+func TestBackendAdvertisesExclusiveOneShotAcquireOnly(t *testing.T) {
+	b := testBackend(&recordingRunner{})
+	capability, ok := any(b).(core.ExclusiveOneShotAcquireBackend)
+	if !ok || !capability.AcquireIsExclusiveOneShot() {
+		t.Fatal("local-container must advertise exclusive fresh acquisitions")
+	}
+}
+
 func TestRunFailureEvidenceUsesPerRunOOMKillIncrement(t *testing.T) {
 	tests := []struct {
 		name              string

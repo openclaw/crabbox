@@ -321,6 +321,49 @@ exit 0
 	return logPath
 }
 
+func installWorkspaceOwnerAwareSSH(t *testing.T, sshPath, commandScript string) {
+	t.Helper()
+	commandPath := filepath.Join(filepath.Dir(sshPath), "ssh-command")
+	if err := os.WriteFile(commandPath, []byte(commandScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wrapper := `#!/bin/sh
+cmd=""
+for arg do cmd="$arg"; done
+current=$cmd
+decode_depth=0
+while [ "$decode_depth" -lt 8 ]; do
+  case "$current" in
+    *'payload_b64="'*'"; decoded=; if command -v base64'*)
+      payload_b64=${current#*'payload_b64="'}
+      payload_b64=${payload_b64%%'"; decoded=; if command -v base64'*}
+      current=$(printf %s "$payload_b64" | /usr/bin/base64 --decode 2>/dev/null) ||
+        current=$(printf %s "$payload_b64" | /usr/bin/base64 -d 2>/dev/null) ||
+        current=$(printf %s "$payload_b64" | /usr/bin/base64 -D 2>/dev/null) || break
+      decode_depth=$((decode_depth + 1))
+      ;;
+    *) break ;;
+  esac
+done
+case "$current" in
+  *"protocol_action='acquire'"*) printf ACQUIRED; exit 0 ;;
+  *"protocol_action='renew'"*) printf RENEWED; exit 0 ;;
+  *"protocol_action='inspect'"*)
+    if [ -e "$(dirname "$0")/owner-child" ]; then printf CHILD; else printf OWNED; fi
+    exit 0
+    ;;
+  *"protocol_action='release'"*) printf RELEASED; exit 0 ;;
+  *"rsync-stop."*"phase_live="*) : > "$(dirname "$0")/owner-child"; printf '123\n'; exit 0 ;;
+  *'touch "$HOME/.crabbox/workspace-owners/'*"rsync-stop."*) rm -f "$(dirname "$0")/owner-child"; exit 0 ;;
+  *"kill -0"*"exit=unknown"*) printf 'exit=unknown\nno marker written\n'; exit 0 ;;
+esac
+exec "$(dirname "$0")/ssh-command" "$current"
+`
+	if err := os.WriteFile(sshPath, []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func assertSSHLogContains(t *testing.T, logPath, want string) {
 	t.Helper()
 	data, err := os.ReadFile(logPath)
@@ -1958,9 +2001,7 @@ func TestRunCommandTimingJSONRemainsFinalLineWithCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(sshPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	installWorkspaceOwnerAwareSSH(t, sshPath, "#!/bin/sh\nexit 0\n")
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
@@ -2015,9 +2056,7 @@ func TestRunCommandTimingJSONSurfacesCleanupFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(sshPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	installWorkspaceOwnerAwareSSH(t, sshPath, "#!/bin/sh\nexit 0\n")
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
@@ -2083,9 +2122,7 @@ case "$cmd" in
 esac
 exit 0
 `
-	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	installWorkspaceOwnerAwareSSH(t, sshPath, script)
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CRABBOX_FAKE_SSH_LOG", logPath)
 	t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
@@ -2374,9 +2411,7 @@ case "$cmd" in
 esac
 exit 0
 `
-	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	installWorkspaceOwnerAwareSSH(t, sshPath, script)
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CRABBOX_FAKE_SSH_LOG", logPath)
 	t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
@@ -2444,9 +2479,7 @@ case "$cmd" in
 esac
 exit 0
 `
-	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	installWorkspaceOwnerAwareSSH(t, sshPath, script)
 	if err := os.WriteFile(rsyncPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -3182,9 +3215,7 @@ case "$remote" in
 esac
 exit 0
 `
-			if err := os.WriteFile(sshPath, []byte(sshScript), 0o755); err != nil {
-				t.Fatal(err)
-			}
+			installWorkspaceOwnerAwareSSH(t, sshPath, sshScript)
 			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
 			t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")

@@ -97,12 +97,24 @@ func workspaceOwnerKey(leaseID string) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte("crabbox-workspace-owner-v1\x00"+leaseID)))
 }
 
-func shouldAcquireWorkspaceOwner(acquired bool, backend SSHLeaseBackend) bool {
-	if !acquired {
+func shouldAcquireWorkspaceOwner(acquired, mayRetain bool, backend SSHLeaseBackend) bool {
+	if !acquired || mayRetain {
 		return true
 	}
 	exclusive, ok := backend.(ExclusiveOneShotAcquireBackend)
 	return !ok || !exclusive.AcquireIsExclusiveOneShot()
+}
+
+func acquiredRunMayRetainLease(keep, keepOnFailure bool, stopAfter string) bool {
+	if keep || keepOnFailure {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(stopAfter)) {
+	case "", "always":
+		return false
+	default:
+		return true
+	}
 }
 
 func acquireWorkspaceOwner(ctx context.Context, target SSHTarget, leaseID string, stderr io.Writer) (*workspaceOwner, error) {
