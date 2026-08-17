@@ -28,6 +28,8 @@ func TestHeartbeatIdentifierSyntax(t *testing.T) {
 	}{
 		{name: "positional", args: []string{"--provider", heartbeatDirectProviderName, "direct-heartbeat"}, valid: true, wantID: "cbx_direct_heartbeat"},
 		{name: "id flag", args: []string{"--provider", heartbeatDirectProviderName, "--id", "direct-heartbeat"}, valid: true, wantID: "cbx_direct_heartbeat"},
+		{name: "repeated id flags", args: []string{"--provider", heartbeatDirectProviderName, "--id", "first", "--id", "second"}},
+		{name: "repeated id equals flags", args: []string{"--provider", heartbeatDirectProviderName, "--id=first", "--id=second"}},
 		{name: "id flag and one positional", args: []string{"--provider", heartbeatDirectProviderName, "--id", "direct-heartbeat", "extra"}},
 		{name: "id flag and two positionals", args: []string{"--provider", heartbeatDirectProviderName, "--id", "direct-heartbeat", "extra", "second"}},
 		{name: "two positionals", args: []string{"--provider", heartbeatDirectProviderName, "direct-heartbeat", "extra"}},

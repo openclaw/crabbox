@@ -23,15 +23,20 @@ func (a App) heartbeat(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("heartbeat", a.Stderr)
 	provider := registerProviderSelectionFlag(fs, defaults, providerHelpSSH())
-	id := fs.String("id", "", "lease id or slug")
+	id := new(string)
+	idOccurrences := 0
+	fs.Func("id", "lease id or slug", func(value string) error {
+		*id = value
+		idOccurrences++
+		return nil
+	})
 	idleTimeout := fs.Duration("idle-timeout", 0, "replace the lease idle timeout while heartbeating")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	idFlagSet := flagWasSet(fs, "id")
 	setIDFromFirstArg(fs, id)
-	if strings.TrimSpace(*id) == "" || fs.NArg() > 1 || (idFlagSet && fs.NArg() > 0) {
+	if strings.TrimSpace(*id) == "" || idOccurrences > 1 || fs.NArg() > 1 || (idOccurrences == 1 && fs.NArg() > 0) {
 		return exit(2, "usage: crabbox heartbeat --id <lease-id-or-slug> [--provider <provider>] [--idle-timeout <duration>] [--json]")
 	}
 	idleTimeoutSet := flagWasSet(fs, "idle-timeout")
