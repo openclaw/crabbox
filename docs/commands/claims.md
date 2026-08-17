@@ -50,12 +50,17 @@ details, labels, login and registration URLs or IDs, credentials, cache
 metadata, revisions, and fixed-create internals are never included. Claims are
 sorted by lease ID, provider, and slug.
 
-Malformed files do not hide valid claims. Each problem has stable `file`, `code`,
-and `message` fields. Supported codes are `invalid_filename`, `invalid_json`,
-`empty_lease_id`, `lease_id_mismatch`, `read_error`, and `invalid_claim`. Unsafe
-or overlong filenames are represented by a short SHA-256 fingerprint instead of
-their contents. Non-regular claim paths use `non_regular_file`. At most 100
-problem entries are emitted; the final
+Malformed files do not hide valid claims. For this read-only inventory, each
+local claim file has an inclusive 1 MiB implementation limit. Files that exceed
+the limit while being read use `claim_too_large` and are never read into memory
+in full; other concurrent changes remain `read_error`. This inventory limit does
+not change the runtime claim loader. Each problem has stable `file`, `code`, and
+`message` fields. Supported codes are
+`invalid_filename`, `invalid_json`, `claim_too_large`, `empty_lease_id`,
+`lease_id_mismatch`, `read_error`, and `invalid_claim`. Unsafe or overlong
+filenames are represented by a short SHA-256 fingerprint instead of their
+contents. Non-regular claim paths use `non_regular_file`. At most 100 problem
+entries are emitted; the final
 `problems_truncated` entry reports when additional files were omitted. Problems
 are sorted by file reference and code.
 

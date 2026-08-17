@@ -150,6 +150,8 @@ func localClaimProblemMessage(code string) string {
 		return "claim filename is not a valid lease id; filename replaced by a fingerprint"
 	case "invalid_json":
 		return "claim file is not valid JSON"
+	case "claim_too_large":
+		return "claim file exceeds the 1 MiB inventory limit"
 	case "empty_lease_id":
 		return "claim file has a missing or empty leaseId"
 	case "lease_id_mismatch":

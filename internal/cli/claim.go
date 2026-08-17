@@ -76,6 +76,8 @@ type FixedCreateIntent struct {
 
 const FixedAWSClaimProvider = "aws-fixed-v1"
 
+const maxLocalClaimInventoryFileBytes int64 = 1 * 1024 * 1024
+
 var claimMutationMutexes sync.Map
 
 type invalidLeaseClaimIDError struct{ id string }
@@ -2009,10 +2011,16 @@ func readLeaseClaimSnapshotWithPresence(path, leaseID string, expected os.FileIn
 	if !sameLeaseClaimSnapshotFile(expected, opened) {
 		return leaseClaim{}, true, leaseClaimSnapshotReadError(leaseID, "verify opened", errors.New("claim file changed during scan"))
 	}
+	if opened.Size() > maxLocalClaimInventoryFileBytes {
+		return leaseClaim{}, true, leaseClaimSnapshotTooLargeError(leaseID)
+	}
 
-	data, err := io.ReadAll(file)
+	data, tooLarge, err := readLocalClaimInventoryData(file)
 	if err != nil {
 		return leaseClaim{}, true, leaseClaimSnapshotReadError(leaseID, "read", err)
+	}
+	if tooLarge {
+		return leaseClaim{}, true, leaseClaimSnapshotTooLargeError(leaseID)
 	}
 	afterRead, err := file.Stat()
 	if err != nil {
@@ -2036,6 +2044,11 @@ func readLeaseClaimSnapshotWithPresence(path, leaseID string, expected os.FileIn
 	return claim, true, nil
 }
 
+func readLocalClaimInventoryData(r io.Reader) ([]byte, bool, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxLocalClaimInventoryFileBytes+1))
+	return data, int64(len(data)) > maxLocalClaimInventoryFileBytes, err
+}
+
 func sameLeaseClaimSnapshotFile(a, b os.FileInfo) bool {
 	return a != nil && b != nil && os.SameFile(a, b) && a.Mode() == b.Mode() && a.Size() == b.Size() && a.ModTime().Equal(b.ModTime())
 }
@@ -2044,6 +2057,13 @@ func leaseClaimSnapshotReadError(leaseID, action string, err error) error {
 	return &leaseClaimFileError{
 		code: "read_error",
 		err:  exit(2, "%s claim file %s: %v", action, leaseID, err),
+	}
+}
+
+func leaseClaimSnapshotTooLargeError(leaseID string) error {
+	return &leaseClaimFileError{
+		code: "claim_too_large",
+		err:  exit(2, "claim file %s exceeds the 1 MiB inventory limit", leaseID),
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -136,6 +137,100 @@ func TestClaimsListScansDoNotCreateLocksOrMutateState(t *testing.T) {
 				t.Fatalf("claim-locks created or unreadable: %v", err)
 			}
 		})
+	}
+}
+
+func TestClaimsListEnforcesInclusiveClaimFileSizeLimit(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	writeClaimsListFixture(t, "cbx_partial.json", leaseClaim{LeaseID: "cbx_partial", Provider: "local-container"})
+	writeClaimsListRawFixture(t, "cbx_exact.json", sizedClaimsListJSON(t, "cbx_exact", int(maxLocalClaimInventoryFileBytes)))
+	writeClaimsListRawFixture(t, "cbx_large_valid.json", sizedClaimsListJSON(t, "cbx_large_valid", int(maxLocalClaimInventoryFileBytes+1)))
+	writeClaimsListRawFixture(t, "cbx_large_malformed.json", bytes.Repeat([]byte("{"), int(maxLocalClaimInventoryFileBytes+1)))
+
+	stdout, stderr, err := runClaimsList(t, "--json")
+	assertClaimsExitCode(t, err, 2)
+	if stderr != "" {
+		t.Fatalf("stderr=%q", stderr)
+	}
+	var output localClaimsListOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, stdout)
+	}
+	if len(output.Claims) != 2 || output.Claims[0].LeaseID != "cbx_exact" || output.Claims[1].LeaseID != "cbx_partial" {
+		t.Fatalf("partial claims=%#v", output.Claims)
+	}
+	wantProblems := []localClaimProblem{
+		{File: "cbx_large_malformed.json", Code: "claim_too_large", Message: "claim file exceeds the 1 MiB inventory limit"},
+		{File: "cbx_large_valid.json", Code: "claim_too_large", Message: "claim file exceeds the 1 MiB inventory limit"},
+	}
+	if !reflect.DeepEqual(output.Problems, wantProblems) {
+		t.Fatalf("problems=%#v want=%#v", output.Problems, wantProblems)
+	}
+
+	human, humanStderr, humanErr := runClaimsList(t)
+	assertClaimsExitCode(t, humanErr, 2)
+	if humanStderr != "" {
+		t.Fatalf("human stderr=%q", humanStderr)
+	}
+	for _, want := range []string{
+		`leaseId: "cbx_exact"`,
+		`leaseId: "cbx_partial"`,
+		`"cbx_large_malformed.json": claim file exceeds the 1 MiB inventory limit (claim_too_large)`,
+		`"cbx_large_valid.json": claim file exceeds the 1 MiB inventory limit (claim_too_large)`,
+	} {
+		if !strings.Contains(human, want) {
+			t.Fatalf("human output missing %q:\n%s", want, human)
+		}
+	}
+	stateDir, err := crabboxStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "claim-locks")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("claim-locks created or unreadable: %v", err)
+	}
+}
+
+func TestClaimsListSizeLimitDoesNotChangeRuntimeClaimReader(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_runtime_large"
+	writeClaimsListRawFixture(t, leaseID+".json", sizedClaimsListJSON(t, leaseID, int(maxLocalClaimInventoryFileBytes+1)))
+
+	stdout, _, inventoryErr := runClaimsList(t, "--json")
+	assertClaimsExitCode(t, inventoryErr, 2)
+	var output localClaimsListOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatal(err)
+	}
+	if len(output.Claims) != 0 || len(output.Problems) != 1 || output.Problems[0].Code != "claim_too_large" {
+		t.Fatalf("inventory output=%#v", output)
+	}
+	stateDir, err := crabboxStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "claim-locks")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("inventory created claim locks: %v", err)
+	}
+
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatalf("runtime reader rejected compatible large claim: %v", err)
+	}
+	if claim.LeaseID != leaseID {
+		t.Fatalf("runtime claim=%#v", claim)
+	}
+}
+
+func TestLocalClaimInventoryBoundsUnknownOrGrowingRead(t *testing.T) {
+	reader := &claimsListRepeatingReader{remaining: 1 * 1024 * 1024 * 1024}
+	data, tooLarge, err := readLocalClaimInventoryData(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRead := maxLocalClaimInventoryFileBytes + 1
+	if !tooLarge || int64(len(data)) != wantRead || reader.read != wantRead {
+		t.Fatalf("tooLarge=%t bytes=%d sourceRead=%d want=%d", tooLarge, len(data), reader.read, wantRead)
 	}
 }
 
@@ -280,6 +375,7 @@ func TestClaimsListConcurrentDeleteAndChangeProduceDeterministicProblems(t *test
 		t.Setenv("XDG_STATE_HOME", t.TempDir())
 		writeClaimsListFixture(t, "cbx_change.json", leaseClaim{LeaseID: "cbx_change", Slug: "before"})
 		writeClaimsListFixture(t, "cbx_delete.json", leaseClaim{LeaseID: "cbx_delete"})
+		writeClaimsListFixture(t, "cbx_grow.json", leaseClaim{LeaseID: "cbx_grow"})
 		writeClaimsListFixture(t, "cbx_valid.json", leaseClaim{LeaseID: "cbx_valid", Provider: "local-container"})
 
 		reader := func(path, leaseID string, expected os.FileInfo) (leaseClaim, bool, error) {
@@ -291,6 +387,8 @@ func TestClaimsListConcurrentDeleteAndChangeProduceDeterministicProblems(t *test
 				}
 			case "cbx_delete":
 				mutate = func() error { return os.Remove(path) }
+			case "cbx_grow":
+				mutate = func() error { return os.Truncate(path, maxLocalClaimInventoryFileBytes+1) }
 			}
 			if mutate != nil {
 				result := make(chan error, 1)
@@ -310,7 +408,7 @@ func TestClaimsListConcurrentDeleteAndChangeProduceDeterministicProblems(t *test
 		if len(output.Claims) != 1 || output.Claims[0].LeaseID != "cbx_valid" {
 			t.Fatalf("partial claims=%#v", output.Claims)
 		}
-		if len(output.Problems) != 2 || len(output.Problems) > maxLocalClaimProblems {
+		if len(output.Problems) != 3 || len(output.Problems) > maxLocalClaimProblems {
 			t.Fatalf("problems=%#v", output.Problems)
 		}
 		for i, problem := range output.Problems {
@@ -568,6 +666,41 @@ func writeClaimsListRawFixture(t *testing.T, name string, data []byte) {
 	if err := os.WriteFile(filepath.Join(claimsDir, name), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func sizedClaimsListJSON(t *testing.T, leaseID string, size int) []byte {
+	t.Helper()
+	prefix := []byte(fmt.Sprintf(`{"leaseID":%q,"padding":"`, leaseID))
+	suffix := []byte(`"}`)
+	if size < len(prefix)+len(suffix) {
+		t.Fatalf("claim fixture size %d is too small", size)
+	}
+	data := make([]byte, 0, size)
+	data = append(data, prefix...)
+	data = append(data, bytes.Repeat([]byte("x"), size-len(prefix)-len(suffix))...)
+	data = append(data, suffix...)
+	return data
+}
+
+type claimsListRepeatingReader struct {
+	remaining int64
+	read      int64
+}
+
+func (r *claimsListRepeatingReader) Read(p []byte) (int, error) {
+	if r.remaining == 0 {
+		return 0, io.EOF
+	}
+	n := int64(len(p))
+	if n > r.remaining {
+		n = r.remaining
+	}
+	for i := range p[:n] {
+		p[i] = 'x'
+	}
+	r.remaining -= n
+	r.read += n
+	return int(n), nil
 }
 
 func makeClaimsListDirectoryFixture(t *testing.T, name string) {
