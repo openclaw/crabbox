@@ -110,6 +110,7 @@ class MemoryStorage {
   beforeGet?: (key: string) => Promise<void>;
   afterGet?: (key: string, value: unknown) => Promise<void> | void;
   beforePut?: (key: string, value: unknown) => Promise<void>;
+  beforeDelete?: (key: string) => Promise<void>;
 
   async get<T>(key: string, _options?: { noCache?: boolean }): Promise<T | undefined> {
     await this.beforeGet?.(key);
@@ -124,6 +125,7 @@ class MemoryStorage {
   }
 
   async delete(key: string): Promise<void> {
+    await this.beforeDelete?.(key);
     this.values.delete(key);
   }
 
@@ -29228,6 +29230,274 @@ describe("fleet lease identity and idle", () => {
     );
     expect(allowed.status).toBe(200);
     expect(deleted).toBe("ami-000000000001");
+  });
+
+  it("does not claim AWS images that fail ownership or promotion validation", async () => {
+    const imageID = "ami-000000000000";
+    const claimKey = `image:aws:deletion:${imageID}`;
+    const storage = new MemoryStorage();
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    const getImage = vi.fn<() => Promise<ProviderImage>>(async () => ({
+      id: imageID,
+      name: "unowned",
+      state: "available",
+      provider: "aws",
+      kind: "aws-ami",
+      region: "eu-west-1",
+      snapshots: ["snap-unowned"],
+    }));
+    const deleteImage = vi.fn<() => Promise<void>>(async () => undefined);
+    (
+      provider as unknown as {
+        clientValue: { getImage: typeof getImage; deleteImage: typeof deleteImage };
+      }
+    ).clientValue = { getImage, deleteImage };
+    const fleet = testFleet(storage, { aws: provider });
+    const deleteRequest = () =>
+      request("DELETE", `/v1/images/${imageID}`, {
+        headers: { "x-crabbox-admin": "true" },
+        body: {},
+      });
+
+    const unowned = await fleet.fetch(deleteRequest());
+    expect(unowned.status).toBe(409);
+    expect(storage.value(claimKey)).toBeUndefined();
+
+    storage.seed("image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1", {
+      id: imageID,
+      name: "promoted",
+      state: "available",
+      provider: "aws",
+      kind: "aws-ami",
+      region: "eu-west-1",
+      promotedAt: "2026-08-01T00:00:00Z",
+    });
+    const promoted = await fleet.fetch(deleteRequest());
+    expect(promoted.status).toBe(409);
+    expect(storage.value(claimKey)).toBeUndefined();
+    expect(getImage).not.toHaveBeenCalled();
+    expect(deleteImage).not.toHaveBeenCalled();
+  });
+
+  it("claims AWS snapshot inputs before provider deletion and reuses them on retry", async () => {
+    const imageID = "ami-000000000001";
+    const claimKey = `image:aws:deletion:${imageID}`;
+    const storage = new MemoryStorage();
+    const image: ProviderImage = {
+      id: imageID,
+      name: "checkpoint",
+      state: "available",
+      provider: "aws",
+      kind: "aws-ami",
+      region: "eu-west-1",
+    };
+    storage.seed(`image:aws:created:${imageID}`, image);
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    const getImage = vi.fn<() => Promise<ProviderImage>>(async () => ({
+      ...image,
+      snapshots: ["snap-root", "snap-data"],
+    }));
+    let providerAttempts = 0;
+    const deleteImage = vi.fn<(_imageID: string, snapshotIDs?: string[]) => Promise<void>>(
+      async (_imageID, snapshotIDs) => {
+        expect(storage.value(claimKey)).toMatchObject({
+          version: 1,
+          imageID,
+          snapshotIDs: ["snap-root", "snap-data"],
+          phase: "claimed",
+        });
+        expect(snapshotIDs).toEqual(["snap-root", "snap-data"]);
+        providerAttempts += 1;
+        if (providerAttempts === 1) {
+          throw new Error("injected AWS snapshot deletion failure");
+        }
+      },
+    );
+    (
+      provider as unknown as {
+        clientValue: { getImage: typeof getImage; deleteImage: typeof deleteImage };
+      }
+    ).clientValue = { getImage, deleteImage };
+    const fleet = testFleet(storage, { aws: provider });
+    const deleteRequest = () =>
+      request("DELETE", `/v1/images/${imageID}`, {
+        headers: { "x-crabbox-admin": "true" },
+        body: {},
+      });
+
+    const failed = await fleet.fetch(deleteRequest());
+    expect(failed.status).toBe(500);
+    expect(getImage).toHaveBeenCalledTimes(1);
+    expect(storage.value(claimKey)).toMatchObject({ phase: "claimed" });
+
+    const retried = await fleet.fetch(deleteRequest());
+    expect(retried.status).toBe(200);
+    expect(getImage).toHaveBeenCalledTimes(1);
+    expect(deleteImage).toHaveBeenCalledTimes(2);
+    expect(storage.value(`image:aws:created:${imageID}`)).toBeUndefined();
+    expect(storage.value(claimKey)).toBeUndefined();
+  });
+
+  it("retries AWS provider cleanup when persisting provider progress fails", async () => {
+    const imageID = "ami-000000000002";
+    const claimKey = `image:aws:deletion:${imageID}`;
+    const storage = new MemoryStorage();
+    const image: ProviderImage = {
+      id: imageID,
+      name: "checkpoint-progress",
+      state: "available",
+      provider: "aws",
+      kind: "aws-ami",
+      region: "eu-west-1",
+    };
+    storage.seed(`image:aws:created:${imageID}`, image);
+    let failProgressWrite = true;
+    storage.beforePut = async (key, value) => {
+      if (
+        failProgressWrite &&
+        key === claimKey &&
+        (value as { phase?: string }).phase === "provider-deleted"
+      ) {
+        failProgressWrite = false;
+        throw new Error("injected AWS deletion progress write failure");
+      }
+    };
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    const getImage = vi.fn<() => Promise<ProviderImage>>(async () => ({
+      ...image,
+      snapshots: ["snap-progress"],
+    }));
+    const deleteImage = vi.fn<() => Promise<void>>(async () => undefined);
+    (
+      provider as unknown as {
+        clientValue: { getImage: typeof getImage; deleteImage: typeof deleteImage };
+      }
+    ).clientValue = { getImage, deleteImage };
+    const fleet = testFleet(storage, { aws: provider });
+    const deleteRequest = () =>
+      request("DELETE", `/v1/images/${imageID}`, {
+        headers: { "x-crabbox-admin": "true" },
+        body: {},
+      });
+
+    const failed = await fleet.fetch(deleteRequest());
+    expect(failed.status).toBe(500);
+    expect(storage.value(claimKey)).toMatchObject({
+      phase: "claimed",
+      snapshotIDs: ["snap-progress"],
+    });
+
+    storage.beforePut = undefined;
+    const retried = await fleet.fetch(deleteRequest());
+    expect(retried.status).toBe(200);
+    expect(getImage).toHaveBeenCalledTimes(1);
+    expect(deleteImage).toHaveBeenCalledTimes(2);
+    expect(storage.value(claimKey)).toBeUndefined();
+  });
+
+  it("retries partial AWS catalog deletion and removes only records for the claimed image", async () => {
+    const imageID = "ami-000000000003";
+    const otherImageID = "ami-000000000004";
+    const claimKey = `image:aws:deletion:${imageID}`;
+    const targetCreatedKey = `image:aws:created:${imageID}`;
+    const otherCreatedKey = `image:aws:created:${otherImageID}`;
+    const targetSelectorKey = "image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1";
+    const targetLegacySelectorKey = "image:aws:promoted:linux:x86_64:ubuntu26.04";
+    const otherSelectorKey = "image:aws:promoted:linux:x86_64:ubuntu26.04:us-east-1";
+    const targetCatalogKeyA =
+      "image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-000000000003";
+    const targetCatalogKeyB =
+      "image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-000000000003-variant";
+    const otherCatalogKey = "image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-000000000004";
+    const storage = new MemoryStorage();
+    const image: ProviderImage = {
+      id: imageID,
+      name: "checkpoint-catalog",
+      state: "available",
+      provider: "aws",
+      kind: "aws-ami",
+      region: "eu-west-1",
+    };
+    const otherImage: ProviderImage = { ...image, id: otherImageID, name: "unrelated" };
+    storage.seed(targetCreatedKey, image);
+    storage.seed(otherCreatedKey, otherImage);
+    storage.seed(targetCatalogKeyA, image);
+    storage.seed(targetCatalogKeyB, image);
+    storage.seed(otherCatalogKey, otherImage);
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    const getImage = vi.fn<() => Promise<ProviderImage>>(async () => ({
+      ...image,
+      snapshots: ["snap-catalog"],
+    }));
+    const deleteImage = vi.fn<() => Promise<void>>(async () => {
+      storage.seed(targetSelectorKey, { ...image, promotedAt: "2026-08-01T00:00:00Z" });
+      storage.seed(targetLegacySelectorKey, {
+        ...image,
+        promotedAt: "2026-07-01T00:00:00Z",
+      });
+      storage.seed(otherSelectorKey, {
+        ...otherImage,
+        promotedAt: "2026-08-01T00:00:00Z",
+      });
+    });
+    (
+      provider as unknown as {
+        clientValue: { getImage: typeof getImage; deleteImage: typeof deleteImage };
+      }
+    ).clientValue = { getImage, deleteImage };
+    let failCatalogDelete = true;
+    let claimDeletedAfterCatalog = false;
+    let recordsPresentWhenClaimDeleted: Array<string | undefined> | undefined;
+    storage.beforeDelete = async (key) => {
+      if (failCatalogDelete && key === targetCatalogKeyB) {
+        failCatalogDelete = false;
+        throw new Error("injected AWS catalog delete failure");
+      }
+      if (key === claimKey) {
+        recordsPresentWhenClaimDeleted = [
+          storage.value(targetCreatedKey),
+          storage.value(targetSelectorKey),
+          storage.value(targetLegacySelectorKey),
+          storage.value(targetCatalogKeyA),
+          storage.value(targetCatalogKeyB),
+        ];
+        claimDeletedAfterCatalog = true;
+      }
+    };
+    const fleet = testFleet(storage, { aws: provider });
+    const deleteRequest = () =>
+      request("DELETE", `/v1/images/${imageID}`, {
+        headers: { "x-crabbox-admin": "true" },
+        body: {},
+      });
+
+    const failed = await fleet.fetch(deleteRequest());
+    expect(failed.status).toBe(500);
+    expect(storage.value(targetCreatedKey)).toBeUndefined();
+    expect(storage.value(targetCatalogKeyB)).toEqual(image);
+    expect(storage.value(claimKey)).toMatchObject({ phase: "provider-deleted" });
+
+    const retried = await fleet.fetch(deleteRequest());
+    expect(retried.status).toBe(200);
+    expect(getImage).toHaveBeenCalledTimes(1);
+    expect(deleteImage).toHaveBeenCalledTimes(1);
+    expect(storage.value(targetCreatedKey)).toBeUndefined();
+    expect(storage.value(targetSelectorKey)).toBeUndefined();
+    expect(storage.value(targetLegacySelectorKey)).toBeUndefined();
+    expect(storage.value(targetCatalogKeyA)).toBeUndefined();
+    expect(storage.value(targetCatalogKeyB)).toBeUndefined();
+    expect(storage.value(otherCreatedKey)).toEqual(otherImage);
+    expect(storage.value(otherSelectorKey)).toMatchObject({ id: otherImageID });
+    expect(storage.value(otherCatalogKey)).toEqual(otherImage);
+    expect(storage.value(claimKey)).toBeUndefined();
+    expect(claimDeletedAfterCatalog).toBe(true);
+    expect(recordsPresentWhenClaimDeleted).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ]);
   });
 
   it("rejects deleting AWS images without Crabbox ownership metadata", async () => {

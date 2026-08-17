@@ -13822,7 +13822,7 @@ export class FleetCoordinator {
       if (deleteBlocked) {
         return json(deleteBlocked.body, { status: deleteBlocked.status });
       }
-      await providerForRegion.deleteImage(decodedImageID, kind);
+      await providerForRegion.deleteImage(decodedImageID, kind, metadata);
       return json({ imageID: decodedImageID, deleted: true });
     }
     if (method === "POST" && action === "promote") {
@@ -16905,6 +16905,73 @@ function runEventKey(runID: string, seq: number): string {
 
 function createdAWSImageKey(imageID: string): string {
   return `image:aws:created:${imageID}`;
+}
+
+const awsImageDeletionClaimVersion = 1;
+
+interface AWSImageDeletionClaim {
+  version: typeof awsImageDeletionClaimVersion;
+  imageID: string;
+  metadata: ProviderImage;
+  snapshotIDs: string[];
+  phase: "claimed" | "provider-deleted";
+  claimedAt: string;
+  providerDeletedAt?: string;
+}
+
+function awsImageDeletionClaimKey(imageID: string): string {
+  return `image:aws:deletion:${encodeURIComponent(imageID)}`;
+}
+
+function validAWSImageDeletionClaim(
+  value: unknown,
+  imageID: string,
+): value is AWSImageDeletionClaim {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const claim = value as Partial<AWSImageDeletionClaim>;
+  return (
+    claim.version === awsImageDeletionClaimVersion &&
+    claim.imageID === imageID &&
+    claim.metadata?.id === imageID &&
+    claim.metadata.provider === "aws" &&
+    Array.isArray(claim.snapshotIDs) &&
+    claim.snapshotIDs.every((snapshotID) => typeof snapshotID === "string" && snapshotID !== "") &&
+    (claim.phase === "claimed" || claim.phase === "provider-deleted") &&
+    typeof claim.claimedAt === "string"
+  );
+}
+
+function awsImageDeletionSnapshotIDs(image: ProviderImage): string[] {
+  return [
+    ...new Set((image.snapshots ?? []).map((snapshotID) => snapshotID.trim()).filter(Boolean)),
+  ];
+}
+
+function awsImageDeletionMetadata(
+  imageID: string,
+  described: ProviderImage,
+  stored?: Partial<ProviderImage>,
+): ProviderImage {
+  const merged = mergeAWSImageMetadata(described, stored);
+  const snapshots = awsImageDeletionSnapshotIDs(described);
+  const metadata: ProviderImage = {
+    id: imageID,
+    name: merged.name,
+    state: merged.state,
+    provider: "aws",
+    kind: merged.kind ?? (imageID.startsWith("snap-") ? "aws-ebs-snapshot" : "aws-ami"),
+    resourceID: imageID,
+    snapshots,
+  };
+  const region = sanitizeAWSRegion(merged.region ?? "");
+  if (region) metadata.region = region;
+  if (merged.target) metadata.target = merged.target;
+  if (merged.os) metadata.os = merged.os;
+  if (merged.windowsMode) metadata.windowsMode = merged.windowsMode;
+  if (merged.serverType) metadata.serverType = merged.serverType;
+  if (merged.architecture) metadata.architecture = merged.architecture;
+  if (merged.capabilities) metadata.capabilities = structuredClone(merged.capabilities);
+  return metadata;
 }
 
 function createdProviderImageKey(provider: Provider, imageID: string): string {
@@ -22260,7 +22327,7 @@ interface CloudProvider {
     strategy: "image" | "disk-snapshot",
   ): Promise<ProviderImage>;
   getImage(imageID: string, kind?: string): Promise<ProviderImage>;
-  deleteImage(imageID: string, kind?: string): Promise<void>;
+  deleteImage(imageID: string, kind?: string, metadata?: ProviderImage): Promise<void>;
   storedImageMetadata(imageID: string): Promise<ProviderImage | undefined>;
   decorateImage(image: ProviderImage, metadata?: Partial<ProviderImage>): ProviderImage;
   validateDeleteImage(
@@ -24071,21 +24138,41 @@ export class AWSProvider implements CloudProvider {
     return this.client.fastSnapshotRestoreStatus(snapshotIDs, availabilityZones);
   }
 
-  async deleteImage(imageID: string): Promise<void> {
-    await this.client.deleteImage(imageID);
-    const catalog = await this.storage.list<PromotedImageRecord>({ prefix: "image:aws:catalog:" });
-    await Promise.all(
-      [...catalog.entries()]
-        .filter(([, image]) => image.id === imageID)
-        .map(([key]) => this.storage.delete(key)),
-    );
+  async deleteImage(imageID: string, _kind?: string, metadata?: ProviderImage): Promise<void> {
+    let claim = await this.imageDeletionClaim(imageID);
+    if (!claim) {
+      const described = await this.client.getImage(imageID);
+      claim = {
+        version: awsImageDeletionClaimVersion,
+        imageID,
+        metadata: awsImageDeletionMetadata(imageID, described, metadata),
+        snapshotIDs: awsImageDeletionSnapshotIDs(described),
+        phase: "claimed",
+        claimedAt: new Date().toISOString(),
+      };
+      await this.storage.put(awsImageDeletionClaimKey(imageID), claim);
+    }
+    if (claim.phase !== "provider-deleted") {
+      await this.client.deleteImage(imageID, claim.snapshotIDs);
+      claim = {
+        ...claim,
+        phase: "provider-deleted",
+        providerDeletedAt: new Date().toISOString(),
+      };
+      await this.storage.put(awsImageDeletionClaimKey(imageID), claim);
+    }
+    await this.deleteMatchingImageRecords("image:aws:created:", imageID);
+    await this.deleteMatchingImageRecords(promotedAWSImagePrefix(), imageID);
+    await this.deleteMatchingImageRecords("image:aws:catalog:", imageID);
+    await this.storage.delete(awsImageDeletionClaimKey(imageID));
   }
 
   async storedImageMetadata(imageID: string): Promise<ProviderImage | undefined> {
     return (
       (await this.promotedImageByID(imageID)) ??
       (await this.storage.get<ProviderImage>(createdAWSImageKey(imageID))) ??
-      (await this.storage.get<ProviderImage>(createdProviderImageKey("aws", imageID)))
+      (await this.storage.get<ProviderImage>(createdProviderImageKey("aws", imageID))) ??
+      (await this.imageDeletionClaim(imageID))?.metadata
     );
   }
 
@@ -24097,6 +24184,9 @@ export class AWSProvider implements CloudProvider {
     imageID: string,
     metadata?: Partial<ProviderImage>,
   ): Promise<{ status: number; body: Record<string, unknown> } | undefined> {
+    if (await this.imageDeletionClaim(imageID)) {
+      return undefined;
+    }
     if (metadata?.id === imageID && "promotedAt" in metadata) {
       return {
         status: 409,
@@ -24107,6 +24197,20 @@ export class AWSProvider implements CloudProvider {
       };
     }
     return undefined;
+  }
+
+  private async imageDeletionClaim(imageID: string): Promise<AWSImageDeletionClaim | undefined> {
+    const claim = await this.storage.get<unknown>(awsImageDeletionClaimKey(imageID));
+    return validAWSImageDeletionClaim(claim, imageID) ? claim : undefined;
+  }
+
+  private async deleteMatchingImageRecords(prefix: string, imageID: string): Promise<void> {
+    const records = await this.storage.list<ProviderImage>({ prefix });
+    for (const [key, image] of records) {
+      if (image.id !== imageID && image.resourceID !== imageID) continue;
+      // oxlint-disable-next-line eslint/no-await-in-loop -- ordered deletes leave a retryable durable prefix boundary.
+      await this.storage.delete(key);
+    }
   }
 
   async fastSnapshotRestoreForImage(

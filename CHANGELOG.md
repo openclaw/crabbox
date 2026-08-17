@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Made AWS image deletion resume from owner-level durable snapshot claims after AMI deregistration or catalog cleanup failures, preventing stale ordinary and capability-variant records from remaining selectable.
 - Bounded Lambda MicroVM runner response-header waits without limiting uploads or streamed executions, while preserving injected HTTP clients. Thanks @SebTardif.
 - Rejected native Jujutsu and other unsupported local sync sources before delegated archive providers can provision or execute a remote sandbox.
 - Accepted explicit local-container architecture assertions only when the selected Docker or Podman daemon reports a matching native architecture, without enabling emulation. Thanks @coygeek.

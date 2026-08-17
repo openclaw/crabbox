@@ -1412,19 +1412,22 @@ export class EC2SpotClient {
     };
   }
 
-  async deleteImage(imageID: string): Promise<void> {
+  async deleteImage(imageID: string, knownSnapshotIDs?: string[]): Promise<void> {
     if (imageID.startsWith("snap-")) {
       await this.deleteSnapshotWithRetry(imageID);
       return;
     }
-    const image = await this.getImage(imageID);
+    const snapshotIDs =
+      knownSnapshotIDs === undefined
+        ? ((await this.getImage(imageID)).snapshots ?? [])
+        : uniqueStrings(knownSnapshotIDs);
     await this.ec2("DeregisterImage", { ImageId: imageID }).catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
       if (!message.includes("InvalidAMIID.NotFound")) {
         throw error;
       }
     });
-    for (const snapshotID of image.snapshots ?? []) {
+    for (const snapshotID of snapshotIDs) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- EBS snapshot deletes are independent cleanup calls.
       await this.deleteSnapshotWithRetry(snapshotID);
     }

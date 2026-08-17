@@ -2930,6 +2930,51 @@ describe("aws provider", () => {
     ]);
   });
 
+  it("resumes image deletion from known snapshots after the AMI is missing", async () => {
+    const actions: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        const body = await request.clone().text();
+        const params = new URLSearchParams(body);
+        const action = params.get("Action") ?? "";
+        actions.push(action);
+        if (action === "DeregisterImage") {
+          return ec2XMLResponse(
+            "<Response><Errors><Error><Code>InvalidAMIID.NotFound</Code><Message>AMI is already gone</Message></Error></Errors></Response>",
+            400,
+          );
+        }
+        if (action === "DeleteSnapshot" && params.get("SnapshotId") === "snap-missing") {
+          return ec2XMLResponse(
+            "<Response><Errors><Error><Code>InvalidSnapshot.NotFound</Code><Message>snapshot is already gone</Message></Error></Errors></Response>",
+            400,
+          );
+        }
+        if (action === "DeleteSnapshot") {
+          return ec2XMLResponse("<DeleteSnapshotResponse />");
+        }
+        return ec2XMLResponse(
+          `<Response><Errors><Error><Code>Unexpected</Code><Message>${action}</Message></Error></Errors></Response>`,
+          500,
+        );
+      }),
+    );
+
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+      "eu-west-1",
+    );
+    await client.deleteImage("ami-000000000001", ["snap-present", "snap-missing"]);
+
+    expect(actions).toEqual(["DeregisterImage", "DeleteSnapshot", "DeleteSnapshot"]);
+
+    actions.length = 0;
+    await client.deleteImage("snap-direct", ["snap-ignored"]);
+    expect(actions).toEqual(["DeleteSnapshot"]);
+  });
+
   it("describes Fast Snapshot Restore status for selected snapshots and zones", async () => {
     const actions: string[] = [];
     const queries: URLSearchParams[] = [];
