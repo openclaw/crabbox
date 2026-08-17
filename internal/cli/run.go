@@ -928,37 +928,6 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	if err != nil {
 		return recordFailure(err)
 	}
-	leaseDuration := time.Since(leaseStartedAt)
-	if timingRecordEnabled {
-		coldRun := acquired && strings.TrimSpace(*leaseIDFlag) == "" && borrowedPool == nil
-		timingRecordColdRun = &coldRun
-	}
-	applyResolvedServerConfig(&cfg, server)
-	stripTargetCredentialsFromRunEnv(&envSelection, target)
-	if borrowedPool != nil && strings.TrimSpace(borrowedPool.Entry.WorkRoot) != "" {
-		cfg.WorkRoot = strings.TrimSpace(borrowedPool.Entry.WorkRoot)
-	}
-	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
-		return recordFailure(err)
-	}
-	if err := validateRunArtifactGlobTarget(target, expansion.ArtifactGlobs); err != nil {
-		return recordFailure(err)
-	}
-	if err := validateRequiredRunArtifactGlobTarget(target, requiredArtifactGlobs); err != nil {
-		return recordFailure(err)
-	}
-	if expansion.Profile.Doctor.Enabled && isWindowsNativeTarget(target) {
-		return recordFailure(exit(2, "profile doctor is not supported for native Windows targets"))
-	}
-	if useCoordinator {
-		recorder.AttachLease(leaseID, serverSlug(server), cfg)
-	}
-	if recorder.runID != "" {
-		executionRunID = recorder.runID
-	}
-	applyRunExecutionMetadata(&envSelection, leaseID, executionRunID, serverSlug(server))
-	runReq.RunID = executionRunID
-	runReq.Env = envSelection.Effective
 	keepFailedLease := false
 	// A newly acquired retained lease is not safe to keep until its requested
 	// cleanup handle has been written successfully.
@@ -1000,6 +969,37 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			fmt.Fprintf(a.Stderr, "lease cleanup stopped=true policy=%s lease=%s slug=%s\n", blank(*stopAfter, "auto"), leaseID, blank(serverSlug(server), "-"))
 		}
 	}()
+	leaseDuration := time.Since(leaseStartedAt)
+	if timingRecordEnabled {
+		coldRun := acquired && strings.TrimSpace(*leaseIDFlag) == "" && borrowedPool == nil
+		timingRecordColdRun = &coldRun
+	}
+	applyResolvedServerConfig(&cfg, server)
+	stripTargetCredentialsFromRunEnv(&envSelection, target)
+	if borrowedPool != nil && strings.TrimSpace(borrowedPool.Entry.WorkRoot) != "" {
+		cfg.WorkRoot = strings.TrimSpace(borrowedPool.Entry.WorkRoot)
+	}
+	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
+		return recordFailure(err)
+	}
+	if err := validateRunArtifactGlobTarget(target, expansion.ArtifactGlobs); err != nil {
+		return recordFailure(err)
+	}
+	if err := validateRequiredRunArtifactGlobTarget(target, requiredArtifactGlobs); err != nil {
+		return recordFailure(err)
+	}
+	if expansion.Profile.Doctor.Enabled && isWindowsNativeTarget(target) {
+		return recordFailure(exit(2, "profile doctor is not supported for native Windows targets"))
+	}
+	if useCoordinator {
+		recorder.AttachLease(leaseID, serverSlug(server), cfg)
+	}
+	if recorder.runID != "" {
+		executionRunID = recorder.runID
+	}
+	applyRunExecutionMetadata(&envSelection, leaseID, executionRunID, serverSlug(server))
+	runReq.RunID = executionRunID
+	runReq.Env = envSelection.Effective
 	if err := a.claimRunLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, &server, target, repo.Root, *reclaim || borrowedPool != nil, *leaseIDFlag != ""); err != nil {
 		return recordFailure(err)
 	}

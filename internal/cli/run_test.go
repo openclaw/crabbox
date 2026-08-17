@@ -1728,6 +1728,31 @@ func readRunSessionHandleTest(t *testing.T, path string) (RunSessionHandle, map[
 	return session, fields, data
 }
 
+func installRunSessionValidationFailureMarkers(t *testing.T, dir string) (string, string) {
+	t.Helper()
+	commandMarker := filepath.Join(dir, "command-ran")
+	syncMarker := filepath.Join(dir, "sync-ran")
+	t.Setenv("CRABBOX_COMMAND_MARKER", commandMarker)
+	t.Setenv("CRABBOX_SYNC_MARKER", syncMarker)
+	if err := os.WriteFile(filepath.Join(dir, "rsync"), []byte("#!/bin/sh\n: > \"$CRABBOX_SYNC_MARKER\"\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return commandMarker, syncMarker
+}
+
+func assertRunSessionValidationStoppedBeforeWork(t *testing.T, sessionPath, commandMarker, syncMarker string) {
+	t.Helper()
+	for label, path := range map[string]string{
+		"lease output": sessionPath,
+		"user command": commandMarker,
+		"sync":         syncMarker,
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("%s unexpectedly exists after validation failure: %v", label, err)
+		}
+	}
+}
+
 func TestRunCommandWritesFreshLocalContainerLeaseOutputAfterClaim(t *testing.T) {
 	dir, _ := setupLocalContainerRunSessionTest(t, "")
 	path := filepath.Join(dir, "session.json")
@@ -1830,6 +1855,161 @@ func TestRunCommandWritesReusedLocalContainerLeaseOutput(t *testing.T) {
 	}
 }
 
+func TestRunCommandLocalContainerLeaseOutputValidationFailureReleasesFreshLease(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		args        []string
+		configure   func(*testing.T, string)
+		mutateLease func(*LeaseTarget)
+		want        string
+	}{
+		{
+			name: "managed capability",
+			args: []string{"--desktop"},
+			want: "was not created with desktop=true",
+		},
+		{
+			name: "target",
+			args: []string{"--artifact-glob", "artifacts/**"},
+			mutateLease: func(lease *LeaseTarget) {
+				lease.SSH.TargetOS = targetMacOS
+			},
+			want: "--artifact-glob is not supported for macOS targets",
+		},
+		{
+			name: "required artifact target",
+			args: []string{"--require-artifact", "reports/data/manifest.json"},
+			mutateLease: func(lease *LeaseTarget) {
+				lease.SSH.TargetOS = targetMacOS
+			},
+			want: "--require-artifact is not supported for macOS targets",
+		},
+		{
+			name: "native Windows profile doctor",
+			args: []string{"--profile", "qa"},
+			configure: func(t *testing.T, dir string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(dir, "missing.yaml"), []byte(`
+profiles:
+  qa:
+    doctor:
+      enabled: true
+      tools: [node]
+`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			mutateLease: func(lease *LeaseTarget) {
+				lease.SSH.TargetOS = targetWindows
+				lease.SSH.WindowsMode = windowsModeNormal
+			},
+			want: "profile doctor is not supported for native Windows targets",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, lease := setupLocalContainerRunSessionTest(t, "#!/bin/sh\ncase \"$1\" in *session-should-not-run*) : > \"$CRABBOX_COMMAND_MARKER\" ;; esac\nexit 0\n")
+			if tc.configure != nil {
+				tc.configure(t, dir)
+			}
+			if tc.mutateLease != nil {
+				tc.mutateLease(&lease)
+				runEnvProfileTestAcquireLease = func(AcquireRequest) (LeaseTarget, error) { return lease, nil }
+			}
+			path := filepath.Join(dir, "session.json")
+			commandMarker, syncMarker := installRunSessionValidationFailureMarkers(t, dir)
+			releases := 0
+			runEnvProfileTestReleaseRequestHook = func(req ReleaseLeaseRequest) error {
+				releases++
+				if req.Lease.LeaseID != localContainerRunSessionTestLeaseID || req.Lease.Server.CloudID != "container-secret-id" {
+					t.Errorf("released unexpected lease: %#v", req.Lease)
+				}
+				return nil
+			}
+
+			args := []string{
+				"--provider", "local-container",
+				"--keep",
+				"--lease-output", path,
+			}
+			args = append(args, tc.args...)
+			args = append(args, "--", "session-should-not-run")
+			var stdout, stderr bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(t.Context(), args)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error=%v want %q\nstdout=%s\nstderr=%s", err, tc.want, stdout.String(), stderr.String())
+			}
+			if releases != 1 {
+				t.Fatalf("fresh unreported lease released %d time(s), want 1", releases)
+			}
+			assertRunSessionValidationStoppedBeforeWork(t, path, commandMarker, syncMarker)
+			if _, exists, readErr := readLeaseClaimWithPresence(localContainerRunSessionTestLeaseID); readErr != nil || exists {
+				t.Fatalf("claim after validation failure exists=%t err=%v", exists, readErr)
+			}
+		})
+	}
+}
+
+func TestRunCommandLocalContainerLeaseOutputValidationFailureDoesNotReleaseReusedLease(t *testing.T) {
+	dir, _ := setupLocalContainerRunSessionTest(t, "#!/bin/sh\ncase \"$1\" in *session-should-not-run*) : > \"$CRABBOX_COMMAND_MARKER\" ;; esac\nexit 0\n")
+	path := filepath.Join(dir, "session.json")
+	commandMarker, syncMarker := installRunSessionValidationFailureMarkers(t, dir)
+	releases := 0
+	runEnvProfileTestReleaseHook = func() error {
+		releases++
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(t.Context(), []string{
+		"--provider", "local-container",
+		"--id", localContainerRunSessionTestLeaseID,
+		"--lease-output", path,
+		"--desktop",
+		"--", "session-should-not-run",
+	})
+	if err == nil || !strings.Contains(err.Error(), "was not created with desktop=true") {
+		t.Fatalf("error=%v want managed-capability validation failure\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	if releases != 0 {
+		t.Fatalf("reused lease released %d time(s), want 0", releases)
+	}
+	assertRunSessionValidationStoppedBeforeWork(t, path, commandMarker, syncMarker)
+}
+
+func TestRunCommandLocalContainerLeaseOutputCleanupFailurePreservesValidationError(t *testing.T) {
+	dir, _ := setupLocalContainerRunSessionTest(t, "#!/bin/sh\ncase \"$1\" in *session-should-not-run*) : > \"$CRABBOX_COMMAND_MARKER\" ;; esac\nexit 0\n")
+	path := filepath.Join(dir, "session.json")
+	commandMarker, syncMarker := installRunSessionValidationFailureMarkers(t, dir)
+	releases := 0
+	runEnvProfileTestReleaseHook = func() error {
+		releases++
+		return errors.New("release failure sentinel")
+	}
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(t.Context(), []string{
+		"--provider", "local-container",
+		"--keep",
+		"--lease-output", path,
+		"--desktop",
+		"--", "session-should-not-run",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, "was not created with desktop=true") {
+		t.Fatalf("error=%v want original exit 2 managed-capability failure", err)
+	}
+	if strings.Contains(err.Error(), "release failure sentinel") {
+		t.Fatalf("cleanup failure replaced original validation error: %v", err)
+	}
+	if releases != 1 {
+		t.Fatalf("fresh unreported lease release attempts=%d, want 1", releases)
+	}
+	if got := stderr.String(); !strings.Contains(got, "lease cleanup stopped=false") || !strings.Contains(got, `error="release failure sentinel"`) {
+		t.Fatalf("cleanup failure not reported with lifecycle convention: %q", got)
+	}
+	assertRunSessionValidationStoppedBeforeWork(t, path, commandMarker, syncMarker)
+}
+
 func TestRunCommandRejectsLocalContainerLeaseOutputStopPoliciesBeforeAcquisition(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1913,6 +2093,11 @@ func TestRunCommandLocalContainerLeaseOutputSurvivesCommandAndSyncFailure(t *tes
 			dir, _ := setupLocalContainerRunSessionTest(t, commandScript)
 			path := filepath.Join(dir, "session.json")
 			t.Setenv("CRABBOX_SESSION_PATH", path)
+			releases := 0
+			runEnvProfileTestReleaseHook = func() error {
+				releases++
+				return nil
+			}
 			args := []string{
 				"--provider", "local-container",
 				"--keep",
@@ -1936,6 +2121,9 @@ func TestRunCommandLocalContainerLeaseOutputSurvivesCommandAndSyncFailure(t *tes
 			session, _, _ := readRunSessionHandleTest(t, path)
 			if session.LeaseID != localContainerRunSessionTestLeaseID || !session.Kept {
 				t.Fatalf("session after %s failure=%#v", phase, session)
+			}
+			if releases != 0 {
+				t.Fatalf("reported retained lease released %d time(s) after %s failure", releases, phase)
 			}
 		})
 	}
