@@ -48,6 +48,7 @@ func TestProvidersDescribeBuiltBinaryContract(t *testing.T) {
 		"TMPDIR=" + tmp,
 		"CRABBOX_CONFIG=" + invalidConfig,
 		"CRABBOX_LOCAL_CONTAINER_IMAGE=ENV_SECRET_MARKER",
+		"CRABBOX_SERVER_TYPE=SERVER_TYPE_SECRET_MARKER",
 		"CRABBOX_COORDINATOR_TOKEN=TOKEN_SECRET_MARKER",
 		"HTTPS_PROXY=http://127.0.0.1:1",
 		"HTTP_PROXY=http://127.0.0.1:1",
@@ -122,6 +123,10 @@ func TestProvidersDescribeBuiltBinaryContract(t *testing.T) {
 	}
 	if defaults, ok := localFlags["local-container-volume"].Default.([]any); !ok || defaults == nil || len(defaults) != 0 {
 		t.Fatalf("local-container volume default=%#v", localFlags["local-container-volume"].Default)
+	}
+	sharedFlags := descriptionFlagMap(local.SharedFlags)
+	if sharedFlags["type"].Default != baseConfig().ServerType {
+		t.Fatalf("type default=%#v, want compiled base default %#v", sharedFlags["type"].Default, baseConfig().ServerType)
 	}
 	for _, excluded := range []string{"aws-lambda-microvm-image", "azure-backend", "daytona-api-url", "tart-image"} {
 		if _, ok := localFlags[excluded]; ok {

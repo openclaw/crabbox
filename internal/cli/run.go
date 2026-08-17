@@ -245,8 +245,8 @@ type runFlagValues struct {
 	TimingRecord           *string
 }
 
-func registerRunFlags(fs *flag.FlagSet, defaults Config, observe providerFlagRegistrationObserver) runFlagValues {
-	leaseFlags := registerLeaseCreateFlagsObserved(fs, defaults, observe)
+func registerRunFlags(fs *flag.FlagSet, defaults Config, options leaseCreateFlagRegistrationOptions) runFlagValues {
+	leaseFlags := registerLeaseCreateFlagsWithOptions(fs, defaults, options)
 	values := runFlagValues{
 		Lease:                  leaseFlags,
 		LeaseID:                fs.String("id", "", "existing lease or server id"),
@@ -314,7 +314,7 @@ func (a App) runCommand(ctx context.Context, args []string) error {
 func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, benchmarkCtx benchmarkRecordContext) (err error) {
 	defaults := defaultConfig()
 	fs := newFlagSet("run", a.Stderr)
-	runFlags := registerRunFlags(fs, defaults, nil)
+	runFlags := registerRunFlags(fs, defaults, ordinaryLeaseCreateFlagRegistrationOptions())
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}

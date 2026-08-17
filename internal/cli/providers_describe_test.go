@@ -150,6 +150,7 @@ func TestDescribeProviderRegistersOnlyAndUsesBaseDefaults(t *testing.T) {
 	providerRegistry[provider.Name()] = provider
 	t.Cleanup(func() { delete(providerRegistry, provider.Name()) })
 	t.Setenv("CRABBOX_PROVIDER", "ENV_SECRET_MARKER")
+	t.Setenv("CRABBOX_SERVER_TYPE", "SERVER_TYPE_SECRET_MARKER")
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
 
 	description, err := describeProvider(provider.Name())
@@ -162,6 +163,10 @@ func TestDescribeProviderRegistersOnlyAndUsesBaseDefaults(t *testing.T) {
 	flag := descriptionFlagMap(description.ProviderFlags)["counting-describe-default"]
 	if flag.Default != "default" {
 		t.Fatalf("flag default=%#v, want compiled base default", flag.Default)
+	}
+	typeFlag := descriptionFlagMap(description.SharedFlags)["type"]
+	if typeFlag.Default != baseConfig().ServerType {
+		t.Fatalf("type default=%#v, want compiled base default %#v", typeFlag.Default, baseConfig().ServerType)
 	}
 	encoded, err := json.Marshal(description)
 	if err != nil {

@@ -108,14 +108,18 @@ func describeProvider(requestedName string) (providerDescription, error) {
 	}
 
 	providerOwned := map[string]map[string]bool{}
+	defaults := baseConfig()
 	runFlags := newFlagSet("run", io.Discard)
 	defer clearFlagAnnotations(runFlags)
-	registerRunFlags(runFlags, baseConfig(), func(owner Provider, added []*flag.Flag) {
-		owned := map[string]bool{}
-		for _, item := range added {
-			owned[item.Name] = true
-		}
-		providerOwned[normalizeProviderName(owner.Name())] = owned
+	registerRunFlags(runFlags, defaults, leaseCreateFlagRegistrationOptions{
+		serverTypeDefault: defaults.ServerType,
+		observe: func(owner Provider, added []*flag.Flag) {
+			owned := map[string]bool{}
+			for _, item := range added {
+				owned[item.Name] = true
+			}
+			providerOwned[normalizeProviderName(owner.Name())] = owned
+		},
 	})
 
 	routing, err := providerFlagContractNames(provider, providerOwned[canonical], "routing")

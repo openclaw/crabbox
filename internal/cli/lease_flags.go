@@ -40,11 +40,22 @@ type leaseCreateFlagValues struct {
 	Network       networkFlagValues
 }
 
-func registerLeaseCreateFlags(fs *flag.FlagSet, defaults Config) leaseCreateFlagValues {
-	return registerLeaseCreateFlagsObserved(fs, defaults, nil)
+type leaseCreateFlagRegistrationOptions struct {
+	serverTypeDefault string
+	observe           providerFlagRegistrationObserver
 }
 
-func registerLeaseCreateFlagsObserved(fs *flag.FlagSet, defaults Config, observe providerFlagRegistrationObserver) leaseCreateFlagValues {
+func ordinaryLeaseCreateFlagRegistrationOptions() leaseCreateFlagRegistrationOptions {
+	return leaseCreateFlagRegistrationOptions{
+		serverTypeDefault: getenv("CRABBOX_SERVER_TYPE", ""),
+	}
+}
+
+func registerLeaseCreateFlags(fs *flag.FlagSet, defaults Config) leaseCreateFlagValues {
+	return registerLeaseCreateFlagsWithOptions(fs, defaults, ordinaryLeaseCreateFlagRegistrationOptions())
+}
+
+func registerLeaseCreateFlagsWithOptions(fs *flag.FlagSet, defaults Config, options leaseCreateFlagRegistrationOptions) leaseCreateFlagValues {
 	expose := stringListFlag{}
 	cacheVolumes := stringListFlag{}
 	imageSDK := stringListFlag{}
@@ -59,7 +70,7 @@ func registerLeaseCreateFlagsObserved(fs *flag.FlagSet, defaults Config, observe
 		Class:         fs.String("class", defaults.Class, "machine class"),
 		Architecture:  fs.String("arch", defaults.Architecture, "CPU architecture: amd64 or arm64"),
 		OSImage:       fs.String("os", defaults.OSImage, "portable Linux OS image selector, for example ubuntu:26.04"),
-		ServerType:    fs.String("type", getenv("CRABBOX_SERVER_TYPE", ""), "provider server/instance type"),
+		ServerType:    fs.String("type", options.serverTypeDefault, "provider server/instance type"),
 		SSHPort:       fs.String("ssh-port", defaults.SSHPort, "SSH port for the leased target"),
 		Market:        fs.String("market", defaults.Capacity.Market, "capacity market: spot or on-demand"),
 		Slug:          fs.String("slug", "", "request a friendly slug for a new lease"),
@@ -78,7 +89,7 @@ func registerLeaseCreateFlagsObserved(fs *flag.FlagSet, defaults Config, observe
 		ImageWebView2: fs.Bool("image-require-webview2", false, "require WebView2 support in the promoted image"),
 		ImageDesktop:  fs.Bool("image-require-desktop", false, "require desktop support in the promoted image"),
 		Code:          fs.Bool("code", defaults.Code, "provision or require web code-server capability"),
-		ProviderFlags: registerProviderFlagsObserved(fs, defaults, observe),
+		ProviderFlags: registerProviderFlagsObserved(fs, defaults, options.observe),
 		Target:        registerTargetFlags(fs, defaults),
 		Network:       registerNetworkFlags(fs, defaults),
 	}
