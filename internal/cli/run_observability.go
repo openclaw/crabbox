@@ -165,26 +165,41 @@ func printRemoteCapabilityPreflight(ctx context.Context, w io.Writer, cfg Config
 	if len(tools) == 0 {
 		return
 	}
-	var out string
-	var err error
-	if isWindowsNativeTarget(target) {
-		out, err = runWindowsRemoteCapabilityPreflight(ctx, target, workdir, env, envFiles, tools)
-	} else if isWindowsWSL2Target(target) {
-		out, err = runWSL2RemoteCapabilityPreflight(ctx, target, workdir, env, envFiles, tools)
-	} else {
-		out, err = runSSHCombinedOutput(ctx, target, remoteCapabilityPreflightCommand(workdir, env, envFiles, tools))
-	}
-	if err != nil {
-		fmt.Fprintf(w, "remote preflight failed: %v\n", err)
-		if strings.TrimSpace(out) != "" {
-			fmt.Fprintf(w, "remote preflight output: %s\n", strings.TrimSpace(out))
+	baseTools := make([]string, 0, len(tools))
+	rawSocketRequested := false
+	for _, tool := range tools {
+		if tool == rawSocketPreflightTool {
+			rawSocketRequested = true
+			continue
 		}
-		return
+		baseTools = append(baseTools, tool)
 	}
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		if strings.TrimSpace(line) != "" {
-			fmt.Fprintf(w, "remote preflight %s\n", strings.TrimSpace(line))
+	if len(baseTools) > 0 {
+		var out string
+		var err error
+		if isWindowsNativeTarget(target) {
+			out, err = runWindowsRemoteCapabilityPreflight(ctx, target, workdir, env, envFiles, baseTools)
+		} else if isWindowsWSL2Target(target) {
+			out, err = runWSL2RemoteCapabilityPreflight(ctx, target, workdir, env, envFiles, baseTools)
+		} else {
+			out, err = runSSHCombinedOutput(ctx, target, remoteCapabilityPreflightCommand(workdir, env, envFiles, baseTools))
 		}
+		if err != nil {
+			fmt.Fprintf(w, "remote preflight failed: %v\n", err)
+			if strings.TrimSpace(out) != "" {
+				fmt.Fprintf(w, "remote preflight output: %s\n", strings.TrimSpace(out))
+			}
+		} else {
+			for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+				if strings.TrimSpace(line) != "" {
+					fmt.Fprintf(w, "remote preflight %s\n", strings.TrimSpace(line))
+				}
+			}
+		}
+	}
+	if rawSocketRequested {
+		state := runRawSocketCapabilityPreflight(ctx, target, workdir, env, envFiles)
+		fmt.Fprintf(w, "remote preflight %s=%s\n", rawSocketPreflightTool, state)
 	}
 }
 
@@ -501,31 +516,175 @@ type preflightToolSpec struct {
 	OS      map[string]bool
 }
 
+const (
+	rawSocketPreflightTool    = "raw_socket"
+	rawSocketPreflightTimeout = 30 * time.Second
+	rawSocketProbePrefix      = "__crabbox_raw_socket_v1__:"
+	rawSocketProbeDirect      = rawSocketProbePrefix + "direct"
+	rawSocketProbeSudo        = rawSocketProbePrefix + "sudo"
+	rawSocketProbeUnavailable = rawSocketProbePrefix + "unavailable"
+	rawSocketProbeMissing     = rawSocketProbePrefix + "probe_missing"
+)
+
+const rawSocketPythonProbe = `import sys
+sys.path = [entry for entry in sys.path if entry not in ("", ".")]
+import errno
+import socket
+try:
+    probe = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW)
+    probe.close()
+except socket.error as exc:
+    if getattr(exc, "errno", None) in (errno.EPERM, errno.EACCES):
+        sys.exit(77)
+    sys.exit(78)
+except BaseException:
+    sys.exit(78)`
+
 var preflightToolRegistry = map[string]preflightToolSpec{
-	"apt":              {Posix: []string{"apt-get", "--version"}, OS: map[string]bool{"linux": true}},
-	"bubblewrap":       {Posix: []string{"bwrap", "--version"}, OS: map[string]bool{"linux": true}},
-	"bun":              {Posix: []string{"bun", "--version"}, Windows: []string{"bun", "--version"}},
-	"bwrap":            {Posix: []string{"bwrap", "--version"}, OS: map[string]bool{"linux": true}},
-	"cargo":            {Posix: []string{"cargo", "--version"}, Windows: []string{"cargo", "--version"}},
-	"corepack":         {Posix: []string{"corepack", "--version"}, Windows: []string{"corepack", "--version"}},
-	"docker":           {Posix: []string{"docker", "--version"}, Windows: []string{"docker", "--version"}},
-	"execution_policy": {Windows: []string{"Get-ExecutionPolicy -Scope Process"}, OS: map[string]bool{"windows": true}},
-	"git":              {Posix: []string{"git", "--version"}, Windows: []string{"git", "--version"}},
-	"go":               {Posix: []string{"go", "version"}, Windows: []string{"go", "version"}},
-	"longpaths":        {Windows: []string{"git config --global --get core.longpaths"}, OS: map[string]bool{"windows": true}},
-	"make":             {Posix: []string{"make", "--version"}},
-	"node":             {Posix: []string{"node", "--version"}, Windows: []string{"node", "--version"}},
-	"npm":              {Posix: []string{"npm", "--version"}, Windows: []string{"npm", "--version"}},
-	"pnpm":             {Posix: []string{"pnpm", "--version"}, Windows: []string{"pnpm", "--version"}},
-	"powershell":       {Windows: []string{"$PSVersionTable.PSVersion.ToString()"}, OS: map[string]bool{"windows": true}},
-	"python":           {Posix: []string{"python", "--version"}, Windows: []string{"python", "--version"}},
-	"python3":          {Posix: []string{"python3", "--version"}, Windows: []string{"python3", "--version"}},
-	"pwsh":             {Windows: []string{"pwsh", "--version"}, OS: map[string]bool{"windows": true}},
-	"sudo":             {OS: map[string]bool{"linux": true, "macos": true}},
-	"tar":              {Posix: []string{"tar", "--version"}, Windows: []string{"tar", "--version"}},
-	"temp":             {Windows: []string{"$env:TEMP"}, OS: map[string]bool{"windows": true}},
-	"uv":               {Posix: []string{"uv", "--version"}, Windows: []string{"uv", "--version"}},
-	"yarn":             {Posix: []string{"yarn", "--version"}, Windows: []string{"yarn", "--version"}},
+	"apt":                  {Posix: []string{"apt-get", "--version"}, OS: map[string]bool{"linux": true}},
+	"bubblewrap":           {Posix: []string{"bwrap", "--version"}, OS: map[string]bool{"linux": true}},
+	"bun":                  {Posix: []string{"bun", "--version"}, Windows: []string{"bun", "--version"}},
+	"bwrap":                {Posix: []string{"bwrap", "--version"}, OS: map[string]bool{"linux": true}},
+	"cargo":                {Posix: []string{"cargo", "--version"}, Windows: []string{"cargo", "--version"}},
+	"corepack":             {Posix: []string{"corepack", "--version"}, Windows: []string{"corepack", "--version"}},
+	"docker":               {Posix: []string{"docker", "--version"}, Windows: []string{"docker", "--version"}},
+	"execution_policy":     {Windows: []string{"Get-ExecutionPolicy -Scope Process"}, OS: map[string]bool{"windows": true}},
+	"git":                  {Posix: []string{"git", "--version"}, Windows: []string{"git", "--version"}},
+	"go":                   {Posix: []string{"go", "version"}, Windows: []string{"go", "version"}},
+	"longpaths":            {Windows: []string{"git config --global --get core.longpaths"}, OS: map[string]bool{"windows": true}},
+	"make":                 {Posix: []string{"make", "--version"}},
+	"node":                 {Posix: []string{"node", "--version"}, Windows: []string{"node", "--version"}},
+	"npm":                  {Posix: []string{"npm", "--version"}, Windows: []string{"npm", "--version"}},
+	"pnpm":                 {Posix: []string{"pnpm", "--version"}, Windows: []string{"pnpm", "--version"}},
+	"powershell":           {Windows: []string{"$PSVersionTable.PSVersion.ToString()"}, OS: map[string]bool{"windows": true}},
+	"python":               {Posix: []string{"python", "--version"}, Windows: []string{"python", "--version"}},
+	"python3":              {Posix: []string{"python3", "--version"}, Windows: []string{"python3", "--version"}},
+	"pwsh":                 {Windows: []string{"pwsh", "--version"}, OS: map[string]bool{"windows": true}},
+	rawSocketPreflightTool: {OS: map[string]bool{"linux": true}},
+	"sudo":                 {OS: map[string]bool{"linux": true, "macos": true}},
+	"tar":                  {Posix: []string{"tar", "--version"}, Windows: []string{"tar", "--version"}},
+	"temp":                 {Windows: []string{"$env:TEMP"}, OS: map[string]bool{"windows": true}},
+	"uv":                   {Posix: []string{"uv", "--version"}, Windows: []string{"uv", "--version"}},
+	"yarn":                 {Posix: []string{"yarn", "--version"}, Windows: []string{"yarn", "--version"}},
+}
+
+const rawSocketSudoPATH = "/usr/local/bin:/usr/bin:/bin:/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin:/run/current-system/profile/bin"
+
+func rawSocketPreflightScript() string {
+	return rawSocketPreflightScriptWithSudoEnvironment([]string{
+		"/usr/bin/sudo",
+		"/bin/sudo",
+		"/usr/local/bin/sudo",
+		"/run/wrappers/bin/sudo",
+		"/run/setuid-programs/sudo",
+	}, rawSocketSudoPATH)
+}
+
+func rawSocketPreflightScriptWithSudoEnvironment(sudoExecutables []string, sudoPath string) string {
+	probe := shellQuote(rawSocketPythonProbe)
+	sudoCandidates := make([]string, 0, len(sudoExecutables))
+	for _, sudo := range sudoExecutables {
+		sudoCandidates = append(sudoCandidates, shellQuote(sudo))
+	}
+	if len(sudoCandidates) == 0 {
+		sudoCandidates = append(sudoCandidates, "__crabbox_no_trusted_sudo__")
+	}
+	sudoProbe := shellQuote(`PATH=` + shellQuote(sudoPath) + `
+export PATH
+case "$1" in
+  python3|python) ;;
+  *) exit 79 ;;
+esac
+command -v "$1" >/dev/null 2>&1 || exit 79
+exec "$1" -B -E -S -c "$2"`)
+	return `found_interpreter=0
+for interpreter_name in python3 python; do
+  interpreter="$(command -v "$interpreter_name" 2>/dev/null || true)"
+  if [ -z "$interpreter" ] || [ ! -x "$interpreter" ]; then
+    continue
+  fi
+  found_interpreter=1
+  direct_status=0
+  "$interpreter" -B -E -S -c ` + probe + ` >/dev/null 2>&1 || direct_status=$?
+  if [ "$direct_status" -eq 0 ]; then
+    printf '` + rawSocketProbeDirect + `\n'
+    exit 0
+  fi
+  if [ "$direct_status" -ne 77 ]; then
+    continue
+  fi
+  # Resolve the same interpreter name only inside a fixed root-side PATH, never the workload PATH.
+  for sudo_executable in ` + strings.Join(sudoCandidates, " ") + `; do
+    if [ ! -x "$sudo_executable" ]; then
+      continue
+    fi
+    if "$sudo_executable" -n -- /bin/sh -c ` + sudoProbe + ` crabbox-raw-socket "$interpreter_name" ` + probe + ` >/dev/null 2>&1; then
+      printf '` + rawSocketProbeSudo + `\n'
+      exit 0
+    fi
+  done
+done
+if [ "$found_interpreter" -eq 0 ]; then
+  printf '` + rawSocketProbeMissing + `\n'
+else
+  printf '` + rawSocketProbeUnavailable + `\n'
+fi
+`
+}
+
+func runRawSocketCapabilityPreflight(ctx context.Context, target SSHTarget, workdir string, env map[string]string, envFiles []string) string {
+	command := rawSocketCapabilityPreflightCommand(workdir, env, envFiles)
+	return runRawSocketCapabilityPreflightWithRunner(ctx, rawSocketPreflightTimeout, func(probeCtx context.Context) (string, error) {
+		if isWindowsWSL2Target(target) {
+			return runWSL2ControlCombinedOutput(probeCtx, target, command)
+		}
+		return runSSHCombinedOutput(probeCtx, target, command)
+	})
+}
+
+func rawSocketCapabilityPreflightCommand(workdir string, env map[string]string, envFiles []string) string {
+	return remoteShellCommandWithEnvFiles(workdir, env, envFiles, rawSocketPreflightScript())
+}
+
+func runRawSocketCapabilityPreflightWithRunner(ctx context.Context, timeout time.Duration, runner func(context.Context) (string, error)) string {
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	out, err := runner(probeCtx)
+	if err != nil || probeCtx.Err() != nil {
+		return "unavailable"
+	}
+	return parseRawSocketProbeOutput(out)
+}
+
+func parseRawSocketProbeOutput(out string) string {
+	state := ""
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, rawSocketProbePrefix) {
+			continue
+		}
+		var next string
+		switch line {
+		case rawSocketProbeDirect:
+			next = "direct"
+		case rawSocketProbeSudo:
+			next = "sudo"
+		case rawSocketProbeMissing:
+			next = "probe_missing"
+		case rawSocketProbeUnavailable:
+			next = "unavailable"
+		default:
+			return "unavailable"
+		}
+		if state != "" {
+			return "unavailable"
+		}
+		state = next
+	}
+	if state == "" {
+		return "unavailable"
+	}
+	return state
 }
 
 var defaultPreflightToolNames = []string{"git", "tar", "node", "npm", "corepack", "pnpm", "yarn", "bun", "docker", "sudo", "apt", "bubblewrap", "powershell", "execution_policy", "longpaths", "temp", "pwsh"}

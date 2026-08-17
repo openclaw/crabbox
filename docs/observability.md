@@ -300,20 +300,29 @@ script/command itself.
 The built-in probes cover common toolchains — `git`, `tar`, `node`, `npm`,
 `corepack`, `pnpm`, `yarn`, `bun`, `docker`, and opt-in `uv`, `python`, and
 `python3` — plus target-specific probes such as `sudo`, `apt`, `bubblewrap`,
-`powershell`, `execution_policy`, `longpaths`, `temp`, and `pwsh`. Override the
-probe list per run:
+`powershell`, `execution_policy`, `longpaths`, `temp`, and `pwsh`. Linux and
+WSL2 also support an opt-in `raw_socket` capability probe. Override the probe
+list per run:
 
 ```sh
 crabbox run --preflight --preflight-tools python,python3 -- python3 -m pytest
+crabbox run --preflight --preflight-tools raw_socket -- ./packet-tests
 ```
+
+`raw_socket` reports `direct` when the execution user can open and immediately
+close `socket(AF_INET, SOCK_RAW, IPPROTO_RAW)`, `sudo` when only the same
+bounded probe succeeds through `sudo -n`, `unavailable` otherwise, and
+`probe_missing` when neither `python3` nor `python` exists. It never sends a
+packet or elevates the workload. This kernel capability is distinct from
+Python, Scapy, tcpdump, libpcap, or packet-capture-tool availability, and
+unsupported targets skip the probe.
 
 Or per repository:
 
 ```yaml
 run:
   preflightTools:
-    - python
-    - python3
+    - raw_socket
 ```
 
 ## Actions hydration

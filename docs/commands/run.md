@@ -401,8 +401,9 @@ or the command/script you run.
 By default it probes common language and infrastructure tools plus OS-specific
 basics. Default generic probes are `git`, `tar`, `node`, `npm`, `corepack`,
 `pnpm`, `yarn`, `bun`, and `docker`; `uv`, `python`, and `python3` are available
-as additional opt-in built-ins. POSIX/Linux/WSL probes also include `sudo`,
-`apt`, and `bubblewrap`; native Windows probes include `powershell`,
+as additional opt-in built-ins. Linux and WSL2 also support the opt-in
+`raw_socket` capability probe. POSIX/Linux/WSL probes include `sudo`, `apt`,
+and `bubblewrap`; native Windows probes include `powershell`,
 `execution_policy`, `longpaths`, `temp`, and `pwsh`.
 
 Use `--preflight-tools` to replace the default tool list for one run:
@@ -411,6 +412,7 @@ Use `--preflight-tools` to replace the default tool list for one run:
 crabbox run --preflight --preflight-tools node,bun,docker -- bun test
 crabbox run --preflight --preflight-tools default,uv -- node --test
 crabbox run --preflight --preflight-tools python,python3 -- python3 -m pytest
+crabbox run --preflight --preflight-tools raw_socket -- ./packet-tests
 crabbox run --preflight --preflight-tools none -- ./smoke.sh
 ```
 
@@ -422,13 +424,21 @@ including `python` and `python3` on native Windows; Crabbox does not map either
 name to `py`. An unavailable literal command prints `<name>=missing` and the run
 continues.
 
+`raw_socket` uses `python3`, then `python`, to open and immediately close
+`socket(AF_INET, SOCK_RAW, IPPROTO_RAW)` without binding, connecting, sending,
+or receiving. Its stable result is `direct`, `sudo`, `unavailable`, or
+`probe_missing`. `sudo` means only that the same bounded probe succeeded through
+non-interactive `sudo -n`; Crabbox never elevates the workload, grants
+capabilities, installs software, or changes an image or container. The probe is
+separate from Python, Scapy, tcpdump, libpcap, and packet-capture availability.
+Unsupported targets skip it through normal preflight target filtering.
+
 Configure the default per repo:
 
 ```yaml
 run:
   preflightTools:
-    - python
-    - python3
+    - raw_socket
 ```
 
 ## Profiles, presets, and proof

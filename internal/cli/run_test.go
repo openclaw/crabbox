@@ -4512,6 +4512,400 @@ func TestPythonPreflightWindowsProbeUsesLiteralExecutableAndMissingContract(t *t
 	}
 }
 
+func TestRawSocketPreflightToolValidationAndTargetFiltering(t *testing.T) {
+	if err := validatePreflightTools([]string{rawSocketPreflightTool}); err != nil {
+		t.Fatalf("raw_socket should validate: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		target SSHTarget
+		want   string
+	}{
+		{name: "linux", target: SSHTarget{TargetOS: targetLinux}, want: rawSocketPreflightTool},
+		{name: "wsl2", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, want: rawSocketPreflightTool},
+		{name: "macos", target: SSHTarget{TargetOS: targetMacOS}},
+		{name: "native_windows", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := strings.Join(preflightToolsForTarget(tt.target, []string{rawSocketPreflightTool}), ",")
+			if got != tt.want {
+				t.Fatalf("tools=%q want %q", got, tt.want)
+			}
+		})
+	}
+
+	for _, tool := range preflightToolsForTarget(SSHTarget{TargetOS: targetLinux}, nil) {
+		if tool == rawSocketPreflightTool {
+			t.Fatalf("raw_socket must remain opt-in, default tools=%v", defaultPreflightToolNames)
+		}
+	}
+}
+
+func TestRawSocketPreflightConfigRoundTripAndValidation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "crabbox.yaml")
+	if err := os.WriteFile(path, []byte("run:\n  preflightTools: [raw_socket]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaultConfig()
+	if err := applyConfigFile(&cfg, path, configPathTrust{trusted: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(cfg.Run.PreflightTools, ","); got != rawSocketPreflightTool {
+		t.Fatalf("run.preflightTools=%q", got)
+	}
+	if err := validatePreflightTools(cfg.Run.PreflightTools); err != nil {
+		t.Fatalf("configured raw_socket should validate: %v", err)
+	}
+}
+
+func TestRawSocketOnlyPreflightUsesOneBoundedRemoteCommand(t *testing.T) {
+	dir := t.TempDir()
+	logPath := installRecordingSSH(t, dir)
+	cfg := defaultConfig()
+	cfg.Run.PreflightTools = []string{rawSocketPreflightTool}
+	target := SSHTarget{
+		User:     "crabbox",
+		Host:     "127.0.0.1",
+		Port:     "22",
+		TargetOS: targetLinux,
+	}
+
+	var out bytes.Buffer
+	printRemoteCapabilityPreflight(context.Background(), &out, cfg, Server{}, target, "cbx_123", "/work/repo", nil, false, "", true, nil)
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commands := recordedSSHCommands(string(data))
+	if len(commands) != 1 {
+		t.Fatalf("raw_socket-only SSH commands=%d want 1:\n%s", len(commands), data)
+	}
+	if !strings.Contains(commands[0], rawSocketProbePrefix) {
+		t.Fatalf("raw_socket command missing protocol: %q", commands[0])
+	}
+	if !strings.Contains(out.String(), "remote preflight raw_socket=unavailable\n") {
+		t.Fatalf("unexpected preflight output: %q", out.String())
+	}
+}
+
+func TestRawSocketPreflightScriptIsMinimalAndProtocolBound(t *testing.T) {
+	script := rawSocketPreflightScript()
+	for _, want := range []string{
+		"for interpreter_name in python3 python",
+		`"$interpreter" -B -E -S -c ` + shellQuote(rawSocketPythonProbe) + ` >/dev/null 2>&1`,
+		`for sudo_executable in '/usr/bin/sudo' '/bin/sudo' '/usr/local/bin/sudo' '/run/wrappers/bin/sudo' '/run/setuid-programs/sudo'`,
+		`"$sudo_executable" -n -- /bin/sh -c `,
+		`case "$1" in`,
+		`python3|python) ;;`,
+		rawSocketSudoPATH,
+		rawSocketProbeDirect,
+		rawSocketProbeSudo,
+		rawSocketProbeUnavailable,
+		rawSocketProbeMissing,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("raw socket script missing %q in %q", want, script)
+		}
+	}
+	if strings.Count(script, rawSocketPythonProbe) != 2 {
+		t.Fatalf("direct and sudo attempts must use identical code: %q", script)
+	}
+	if strings.Contains(script, "command -v sudo") || strings.Contains(script, " sudo -n") {
+		t.Fatalf("sudo must not resolve through workload PATH: %q", script)
+	}
+	if strings.Count(rawSocketPythonProbe, "socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW)") != 1 || strings.Count(rawSocketPythonProbe, "probe.close()") != 1 {
+		t.Fatalf("unexpected Python probe: %q", rawSocketPythonProbe)
+	}
+	if strings.Contains(rawSocketPythonProbe, "PermissionError") || strings.Contains(script, " -I ") || !strings.Contains(script, " -B -E -S -c ") {
+		t.Fatalf("probe must remain bytecode-free and compatible with the literal python fallback: %q", script)
+	}
+	for _, forbidden := range []string{".bind(", ".connect(", ".send(", ".sendto(", ".recv(", "scapy", "tcpdump", "setcap", "cap_net_raw", "apt ", "install "} {
+		if strings.Contains(strings.ToLower(rawSocketPythonProbe), forbidden) {
+			t.Fatalf("Python probe contains forbidden operation %q: %q", forbidden, rawSocketPythonProbe)
+		}
+	}
+	ordinary := remoteCapabilityPreflightCommand("/work/repo", nil, nil, []string{"node"})
+	if strings.Contains(ordinary, rawSocketProbePrefix) || strings.Contains(ordinary, "sudo -n --") {
+		t.Fatalf("ordinary preflight gained raw-socket elevation: %q", ordinary)
+	}
+
+	workdir := "/work/runner's repo"
+	envFile := "/work/env file's/run.env"
+	command := rawSocketCapabilityPreflightCommand(workdir, map[string]string{"CI": "value with ' quote"}, []string{envFile})
+	for _, want := range []string{
+		"cd " + shellQuote(workdir),
+		". " + shellQuote(envFile),
+		"CI=" + shellQuote("value with ' quote"),
+		shellQuote(rawSocketPythonProbe),
+	} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("quoted raw socket command missing %q in %q", want, command)
+		}
+	}
+}
+
+func TestRawSocketPreflightStatesAndPermissionFallback(t *testing.T) {
+	tests := []struct {
+		name          string
+		pythonName    string
+		directExit    int
+		sudoExit      int
+		installPython bool
+		installSudo   bool
+		want          string
+		wantSudo      bool
+		errexit       bool
+	}{
+		{name: "direct", pythonName: "python3", directExit: 0, sudoExit: 0, installPython: true, installSudo: true, want: "direct"},
+		{name: "sudo", pythonName: "python3", directExit: 77, sudoExit: 0, installPython: true, installSudo: true, want: "sudo", wantSudo: true},
+		{name: "sudo_with_errexit", pythonName: "python3", directExit: 77, sudoExit: 0, installPython: true, installSudo: true, want: "sudo", wantSudo: true, errexit: true},
+		{name: "permission_denied_without_sudo", pythonName: "python3", directExit: 77, sudoExit: 0, installPython: true, want: "unavailable"},
+		{name: "permission_denied_sudo_fails", pythonName: "python3", directExit: 77, sudoExit: 78, installPython: true, installSudo: true, want: "unavailable", wantSudo: true},
+		{name: "other_error_does_not_elevate", pythonName: "python3", directExit: 78, sudoExit: 0, installPython: true, installSudo: true, want: "unavailable"},
+		{name: "python_fallback", pythonName: "python", directExit: 0, installPython: true, want: "direct"},
+		{name: "probe_missing", want: "probe_missing"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			sudoLog := filepath.Join(dir, "sudo.log")
+			if tt.installPython {
+				python := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' '%s'
+if [ "${CRABBOX_TEST_RAW_SOCKET_SUDO:-}" = 1 ]; then exit %d; fi
+exit %d
+`, rawSocketProbeDirect, tt.sudoExit, tt.directExit)
+				if err := os.WriteFile(filepath.Join(dir, tt.pythonName), []byte(python), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.installSudo {
+				sudo := `#!/bin/sh
+printf 'called\n' >> ` + shellQuote(sudoLog) + `
+if [ "$1" = -n ]; then shift; fi
+if [ "$1" = -- ]; then shift; fi
+CRABBOX_TEST_RAW_SOCKET_SUDO=1
+export CRABBOX_TEST_RAW_SOCKET_SUDO
+exec "$@"
+`
+				if err := os.WriteFile(filepath.Join(dir, "sudo"), []byte(sudo), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			script := rawSocketPreflightScriptWithSudoEnvironment([]string{filepath.Join(dir, "sudo")}, dir)
+			if tt.errexit {
+				script = "set -e\n" + script
+			}
+			cmd := exec.Command("/bin/bash", "-c", script)
+			cmd.Env = []string{"PATH=" + dir}
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("probe script: %v: %s", err, out)
+			}
+			if got := parseRawSocketProbeOutput(string(out)); got != tt.want {
+				t.Fatalf("state=%q want %q, output=%q", got, tt.want, out)
+			}
+			_, statErr := os.Stat(sudoLog)
+			if gotSudo := statErr == nil; gotSudo != tt.wantSudo {
+				t.Fatalf("sudo called=%t want %t", gotSudo, tt.wantSudo)
+			}
+		})
+	}
+}
+
+func TestRawSocketPreflightTriesEachTrustedSudoCandidate(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "sudo.log")
+	python := `#!/bin/sh
+if [ "${CRABBOX_TEST_RAW_SOCKET_SUDO:-}" = 1 ]; then exit 0; fi
+exit 77
+`
+	if err := os.WriteFile(filepath.Join(dir, "python3"), []byte(python), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	firstSudo := filepath.Join(dir, "sudo-first")
+	if err := os.WriteFile(firstSudo, []byte("#!/bin/sh\nprintf 'first\\n' >> "+shellQuote(logPath)+"\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	secondSudo := filepath.Join(dir, "sudo-second")
+	sudo := `#!/bin/sh
+printf 'second\n' >> ` + shellQuote(logPath) + `
+if [ "$1" = -n ]; then shift; fi
+if [ "$1" = -- ]; then shift; fi
+CRABBOX_TEST_RAW_SOCKET_SUDO=1
+export CRABBOX_TEST_RAW_SOCKET_SUDO
+exec "$@"
+`
+	if err := os.WriteFile(secondSudo, []byte(sudo), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	script := rawSocketPreflightScriptWithSudoEnvironment([]string{firstSudo, secondSudo}, dir)
+	cmd := exec.Command("/bin/bash", "-c", script)
+	cmd.Env = []string{"PATH=" + dir}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("probe script: %v: %s", err, out)
+	}
+	if got := parseRawSocketProbeOutput(string(out)); got != "sudo" {
+		t.Fatalf("state=%q want sudo, output=%q", got, out)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != "first\nsecond\n" {
+		t.Fatalf("sudo attempts=%q", got)
+	}
+}
+
+func TestRawSocketPreflightFallsBackAfterBrokenPython3(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "interpreters.log")
+	python3 := "#!/bin/sh\nprintf 'python3\\n' >> " + shellQuote(logPath) + "\nexit 78\n"
+	if err := os.WriteFile(filepath.Join(dir, "python3"), []byte(python3), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	python := "#!/bin/sh\nprintf 'python\\n' >> " + shellQuote(logPath) + "\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "python"), []byte(python), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("/bin/bash", "-c", rawSocketPreflightScriptWithSudoEnvironment(nil, dir))
+	cmd.Env = []string{"PATH=" + dir}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("probe script: %v: %s", err, out)
+	}
+	if got := parseRawSocketProbeOutput(string(out)); got != "direct" {
+		t.Fatalf("state=%q want direct, output=%q", got, out)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != "python3\npython\n" {
+		t.Fatalf("interpreter order=%q", got)
+	}
+}
+
+func TestRawSocketPreflightDoesNotResolveSudoInterpreterFromWorkloadPATH(t *testing.T) {
+	dir := t.TempDir()
+	sudoPath := t.TempDir()
+	privilegedMarker := filepath.Join(dir, "privileged")
+	python := `#!/bin/sh
+if [ "${CRABBOX_TEST_RAW_SOCKET_SUDO:-}" = 1 ]; then
+  printf 'ran\n' > ` + shellQuote(privilegedMarker) + `
+  exit 0
+fi
+exit 77
+`
+	if err := os.WriteFile(filepath.Join(dir, "python3"), []byte(python), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sudoLog := filepath.Join(dir, "sudo.log")
+	sudo := `#!/bin/sh
+printf 'called\n' >> ` + shellQuote(sudoLog) + `
+if [ "$1" = -n ]; then shift; fi
+if [ "$1" = -- ]; then shift; fi
+CRABBOX_TEST_RAW_SOCKET_SUDO=1
+export CRABBOX_TEST_RAW_SOCKET_SUDO
+exec "$@"
+`
+	sudoExecutable := filepath.Join(dir, "sudo")
+	if err := os.WriteFile(sudoExecutable, []byte(sudo), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	script := rawSocketPreflightScriptWithSudoEnvironment([]string{sudoExecutable}, sudoPath)
+	cmd := exec.Command("/bin/bash", "-c", script)
+	cmd.Env = []string{"PATH=" + dir}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("probe script: %v: %s", err, out)
+	}
+	if got := parseRawSocketProbeOutput(string(out)); got != "unavailable" {
+		t.Fatalf("state=%q want unavailable, output=%q", got, out)
+	}
+	if _, err := os.Stat(sudoLog); err != nil {
+		t.Fatalf("sudo fallback not attempted: %v", err)
+	}
+	if _, err := os.Stat(privilegedMarker); !os.IsNotExist(err) {
+		t.Fatalf("workload PATH interpreter ran through sudo: %v", err)
+	}
+}
+
+func TestRawSocketPythonProbeIgnoresWorkdirModuleShadow(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 unavailable")
+	}
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "shadow-imported")
+	shadow := "from pathlib import Path\nPath(" + fmt.Sprintf("%q", marker) + ").write_text('imported')\n"
+	if err := os.WriteFile(filepath.Join(dir, "socket.py"), []byte(shadow), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(python, "-B", "-E", "-S", "-c", rawSocketPythonProbe)
+	cmd.Dir = dir
+	_ = cmd.Run()
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("workdir socket.py was imported: %v", err)
+	}
+	cmd = exec.Command(python, "-B", "-E", "-S", "-c", `import sys; print("site" in sys.modules, sys.dont_write_bytecode)`)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("check isolated Python startup: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "False True" {
+		t.Fatalf("isolated bytecode-free Python startup not active: %q", got)
+	}
+}
+
+func TestRawSocketPreflightProtocolRejectsAmbiguousMarkersAndToleratesNoise(t *testing.T) {
+	valid := map[string]string{
+		rawSocketProbeDirect:                       "direct",
+		rawSocketProbeSudo:                         "sudo",
+		rawSocketProbeUnavailable:                  "unavailable",
+		rawSocketProbeMissing:                      "probe_missing",
+		"login banner\n" + rawSocketProbeDirect:    "direct",
+		rawSocketProbeSudo + "\nlogout diagnostic": "sudo",
+	}
+	for output, want := range valid {
+		if got := parseRawSocketProbeOutput(output); got != want {
+			t.Fatalf("output %q produced %q want %q", output, got, want)
+		}
+	}
+	for _, out := range []string{
+		rawSocketProbeDirect + "\n" + rawSocketProbeUnavailable,
+		rawSocketProbePrefix + "unknown",
+		"raw_socket=direct",
+		"direct",
+		"",
+	} {
+		if got := parseRawSocketProbeOutput(out); got != "unavailable" {
+			t.Fatalf("ambiguous output %q produced %q", out, got)
+		}
+	}
+}
+
+func TestRawSocketPreflightAttemptIsBounded(t *testing.T) {
+	started := time.Now()
+	state := runRawSocketCapabilityPreflightWithRunner(context.Background(), 20*time.Millisecond, func(ctx context.Context) (string, error) {
+		<-ctx.Done()
+		return rawSocketProbeDirect, ctx.Err()
+	})
+	if state != "unavailable" {
+		t.Fatalf("state=%q want unavailable", state)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("probe timeout took %s", elapsed)
+	}
+}
+
 func TestDelegatedPreflightPrintsUnsupportedMessage(t *testing.T) {
 	var stderr bytes.Buffer
 	printDelegatedPreflightUnsupported(&stderr, "e2b")
