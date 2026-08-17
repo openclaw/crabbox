@@ -29,6 +29,7 @@ crabbox warmup --provider hetzner --class beast
 crabbox run --provider hetzner --class standard -- pnpm test
 crabbox warmup --provider hetzner --desktop --browser
 crabbox vnc --id blue-lobster --open
+crabbox checkpoint create --provider hetzner --id blue-lobster --mode native
 ```
 
 ## Server classes and types
@@ -89,7 +90,7 @@ CRABBOX_HETZNER_SSH_KEY    # hetzner.sshKey    (reuse a named Hetzner key)
 ## Capabilities
 
 The Hetzner adapter advertises `ssh`, `crabbox-sync`, `cleanup`, `desktop`,
-`browser`, `code`, and `tailscale`.
+`browser`, `code`, `tailscale`, native checkpoints, and checkpoint forks.
 
 - `--desktop` / `--browser` use the Linux VNC path: resize-capable TigerVNC and
   a lightweight XFCE session, with VNC bound to `127.0.0.1:5900`. `crabbox vnc`
@@ -99,6 +100,11 @@ The Hetzner adapter advertises `ssh`, `crabbox-sync`, `cleanup`, `desktop`,
 - `--tailscale` joins the lease to a tailnet. In direct mode this requires an
   auth key in the configured `--tailscale-auth-key-env` variable; brokered mode
   uses the coordinator's OAuth secrets. See [Tailscale](tailscale.md).
+- Direct Linux leases support `checkpoint create --mode native`, verify,
+  delete, and fork through Hetzner project snapshots. Snapshot operations bind
+  the provider image to the exact local checkpoint and lease claim. Brokered
+  Hetzner leases continue to use archive checkpoints, and Hetzner `image
+  create`/`image promote` remain unsupported coordinator operations.
 
 ## Cleanup
 

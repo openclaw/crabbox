@@ -29,6 +29,7 @@ const (
 	checkpointKindAzureOS      = "azure-os-disk-snapshot"
 	checkpointKindGCP          = "gcp-machine-image"
 	checkpointKindGCPDisk      = "gcp-disk-snapshot"
+	checkpointKindHetzner      = "hetzner-snapshot"
 	checkpointKindParallels    = "parallels-snapshot"
 	checkpointKindDockerCommit = "docker-commit"
 
@@ -56,20 +57,21 @@ type checkpointRecord struct {
 	ArchivePath    string `json:"archivePath,omitempty"`
 	ArchiveBytes   int64  `json:"archiveBytes,omitempty"`
 	Native         struct {
-		Provider    string            `json:"provider,omitempty"`
-		ImageID     string            `json:"imageId,omitempty"`
-		Kind        string            `json:"kind,omitempty"`
-		Name        string            `json:"name,omitempty"`
-		State       string            `json:"state,omitempty"`
-		Region      string            `json:"region,omitempty"`
-		AccountID   string            `json:"accountId,omitempty"`
-		Project     string            `json:"project,omitempty"`
-		Resource    string            `json:"resource,omitempty"`
-		SnapshotIDs []string          `json:"snapshotIds,omitempty"`
-		Direct      bool              `json:"direct,omitempty"`
-		Strategy    string            `json:"strategy,omitempty"`
-		NoReboot    bool              `json:"noReboot,omitempty"`
-		Metadata    map[string]string `json:"metadata,omitempty"`
+		Provider     string            `json:"provider,omitempty"`
+		ImageID      string            `json:"imageId,omitempty"`
+		Kind         string            `json:"kind,omitempty"`
+		Name         string            `json:"name,omitempty"`
+		State        string            `json:"state,omitempty"`
+		Region       string            `json:"region,omitempty"`
+		AccountID    string            `json:"accountId,omitempty"`
+		Project      string            `json:"project,omitempty"`
+		Resource     string            `json:"resource,omitempty"`
+		Architecture string            `json:"architecture,omitempty"`
+		SnapshotIDs  []string          `json:"snapshotIds,omitempty"`
+		Direct       bool              `json:"direct,omitempty"`
+		Strategy     string            `json:"strategy,omitempty"`
+		NoReboot     bool              `json:"noReboot,omitempty"`
+		Metadata     map[string]string `json:"metadata,omitempty"`
 	} `json:"native,omitempty"`
 	Repo struct {
 		Root      string `json:"root,omitempty"`
@@ -148,7 +150,7 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	}
 	createKind := checkpointCreateMode(*mode, *strategy, cfg, server, target, *recipeOnly)
 	switch createKind {
-	case checkpointKindRecipe, checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindParallels, checkpointKindDockerCommit, checkpointKindArchive:
+	case checkpointKindRecipe, checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindParallels, checkpointKindDockerCommit, checkpointKindArchive:
 		record.Kind = createKind
 	default:
 		return exit(2, "checkpoint mode must be auto, native, or archive")
@@ -165,8 +167,9 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	}()
 	switch createKind {
 	case checkpointKindRecipe:
-	case checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindParallels, checkpointKindDockerCommit:
-		image, metadata, err := a.createNativeCheckpoint(ctx, cfg, server, target, leaseID, record.Name, repo.Name, workdir, checkpointStrategyForKind(createKind), *noReboot, *wait, *waitTimeout)
+	case checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindParallels, checkpointKindDockerCommit:
+		createStrategy := checkpointCreateStrategy(*mode, *strategy, createKind)
+		image, metadata, err := a.createNativeCheckpoint(ctx, cfg, server, target, record.ID, leaseID, record.Name, repo.Name, workdir, createStrategy, *noReboot, *wait, *waitTimeout)
 		if image.ID != "" {
 			applyNativeImageCheckpointRecord(&record, image, *noReboot)
 			record.Native.Metadata = metadata
@@ -1603,6 +1606,19 @@ func normalizeCheckpointStrategy(strategy string) string {
 	}
 }
 
+func checkpointCreateStrategy(mode, strategy, kind string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "ami", "image":
+		return checkpointStrategyImage
+	case "snapshot", "disk-snapshot", "disk":
+		return checkpointStrategyDiskSnapshot
+	}
+	if !isAutoCheckpointStrategy(strategy) {
+		return normalizeCheckpointStrategy(strategy)
+	}
+	return checkpointStrategyForKind(kind)
+}
+
 func validCheckpointStrategy(strategy string) bool {
 	switch strings.ToLower(strings.TrimSpace(strategy)) {
 	case "", checkpointStrategyAuto, checkpointStrategyDiskSnapshot, checkpointStrategyImage, "snapshot", "disk", "ami", "machine-image", "managed-image", "disk_snapshot":
@@ -1633,7 +1649,7 @@ func nativeCheckpointForkWorkdir(cfg Config, leaseID, repoName, override string)
 }
 
 func isNativeCheckpointKind(kind string) bool {
-	return kind == checkpointKindAWSAMI || kind == checkpointKindAWSEBS || kind == checkpointKindAzure || kind == checkpointKindAzureOS || kind == checkpointKindGCP || kind == checkpointKindGCPDisk || kind == checkpointKindParallels || kind == checkpointKindDockerCommit
+	return kind == checkpointKindAWSAMI || kind == checkpointKindAWSEBS || kind == checkpointKindAzure || kind == checkpointKindAzureOS || kind == checkpointKindGCP || kind == checkpointKindGCPDisk || kind == checkpointKindHetzner || kind == checkpointKindParallels || kind == checkpointKindDockerCommit
 }
 
 func checkpointProviderForKind(kind string) string {
@@ -1644,6 +1660,8 @@ func checkpointProviderForKind(kind string) string {
 		return "azure"
 	case checkpointKindGCP, checkpointKindGCPDisk:
 		return "gcp"
+	case checkpointKindHetzner:
+		return "hetzner"
 	case checkpointKindParallels:
 		return "parallels"
 	case checkpointKindDockerCommit:

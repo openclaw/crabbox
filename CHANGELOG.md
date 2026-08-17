@@ -5,6 +5,7 @@
 ### Added
 
 - Added checkpoint last-use tracking and composable `checkpoint prune --unused-for` cleanup for inactive local records and provider artifacts.
+- Added provider-native create, verify, delete, and fork lifecycle for direct Hetzner project-snapshot checkpoints, including exact local-claim image deletion.
 - Added `crabbox heartbeat` so external SSH drivers can refresh owned lease idle deadlines and optionally update the idle timeout.
 - Added credential-free `crabbox claims list` output for deterministic, secret-safe inspection of unverified local lease claims across providers. Thanks @coygeek.
 - Added retained local-container `--lease-output` run-session handles with pre-sync emission and exact cleanup on output failure. Thanks @coygeek.

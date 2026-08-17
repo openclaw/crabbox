@@ -185,18 +185,37 @@ func (a App) imageFSRStatus(ctx context.Context, args []string) error {
 
 func (a App) imageDelete(ctx context.Context, args []string) error {
 	fs := newFlagSet("image delete", a.Stderr)
-	provider := fs.String("provider", "aws", "image provider: aws, azure, or gcp")
+	provider := fs.String("provider", "aws", "image provider: aws, azure, gcp, or hetzner")
 	region := fs.String("region", "", "region, location, or zone containing the image")
 	project := fs.String("project", "", "GCP project containing the image")
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return exit(2, "usage: crabbox image delete <image-id> [--provider aws|azure|gcp] [--region <region>] [--project <project>]")
+		return exit(2, "usage: crabbox image delete <image-id> [--provider aws|azure|gcp|hetzner] [--region <region>] [--project <project>]")
 	}
 	normalizedProvider := normalizeProviderName(*provider)
-	if normalizedProvider != "aws" && normalizedProvider != "azure" && normalizedProvider != "gcp" {
-		return exit(2, "unsupported image provider %q; use aws, azure, or gcp", *provider)
+	if normalizedProvider != "aws" && normalizedProvider != "azure" && normalizedProvider != "gcp" && normalizedProvider != "hetzner" {
+		return exit(2, "unsupported image provider %q; use aws, azure, gcp, or hetzner", *provider)
+	}
+	if normalizedProvider == "hetzner" {
+		if strings.TrimSpace(*project) != "" {
+			return exit(2, "--project is not supported for Hetzner image deletion")
+		}
+		store, err := defaultCheckpointStore()
+		if err != nil {
+			return err
+		}
+		lifecycle, ok := nativeCheckpointLifecycleProvider(Config{Provider: "hetzner"}, Server{})
+		if !ok {
+			return exit(2, "Hetzner snapshot lifecycle provider is unavailable")
+		}
+		record, err := deleteHetznerCheckpointImage(ctx, store, lifecycle, fs.Arg(0), strings.TrimSpace(*region))
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(a.Stdout, "deleted image=%s provider=hetzner region=%s project=- checkpoint=%s\n", fs.Arg(0), blank(record.Native.Region, "-"), record.ID)
+		return nil
 	}
 	coord, err := configuredAdminCoordinator()
 	if err != nil {
@@ -208,6 +227,36 @@ func (a App) imageDelete(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(a.Stdout, "deleted image=%s provider=%s region=%s project=%s\n", fs.Arg(0), normalizedProvider, blank(*region, "-"), blank(*project, "-"))
 	return nil
+}
+
+func deleteHetznerCheckpointImage(ctx context.Context, store checkpointStore, lifecycle NativeCheckpointLifecycleProvider, imageID, region string) (checkpointRecord, error) {
+	records, err := store.List()
+	if err != nil {
+		return checkpointRecord{}, err
+	}
+	matches := make([]checkpointRecord, 0, 1)
+	for _, record := range records {
+		if record.Kind == checkpointKindHetzner && record.Native.ImageID == imageID {
+			matches = append(matches, record)
+		}
+	}
+	if len(matches) == 0 {
+		return checkpointRecord{}, exit(2, "refusing to delete Hetzner snapshot %s without an exact local hetzner-snapshot checkpoint record", imageID)
+	}
+	if len(matches) > 1 {
+		return checkpointRecord{}, exit(2, "refusing to delete Hetzner snapshot %s because %d local checkpoint records claim it", imageID, len(matches))
+	}
+	record := matches[0]
+	if region != "" && region != record.Native.Region {
+		return checkpointRecord{}, exit(2, "Hetzner snapshot %s location mismatch: recorded=%s requested=%s", imageID, blank(record.Native.Region, "unknown"), region)
+	}
+	if err := lifecycle.DeleteNativeCheckpoint(ctx, nativeCheckpointResourceRequest(record)); err != nil {
+		return checkpointRecord{}, err
+	}
+	if err := store.Delete(record.ID); err != nil {
+		return checkpointRecord{}, err
+	}
+	return record, nil
 }
 
 func waitForImage(ctx context.Context, coord *CoordinatorClient, imageID string, ref CoordinatorImageRef, timeout time.Duration, stderr io.Writer) (CoordinatorImage, error) {

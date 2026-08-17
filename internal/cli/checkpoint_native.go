@@ -237,21 +237,22 @@ func nativeCheckpointCreateDriver(cfg Config, server Server, target SSHTarget, s
 	return nil, false
 }
 
-func (a App) createNativeCheckpoint(ctx context.Context, cfg Config, server Server, target SSHTarget, leaseID, name, repoName, workdir, strategy string, noReboot, wait bool, waitTimeout time.Duration) (CoordinatorImage, map[string]string, error) {
+func (a App) createNativeCheckpoint(ctx context.Context, cfg Config, server Server, target SSHTarget, checkpointID, leaseID, name, repoName, workdir, strategy string, noReboot, wait bool, waitTimeout time.Duration) (CoordinatorImage, map[string]string, error) {
 	if provider, ok := nativeCheckpointLifecycleProvider(cfg, server); ok {
 		result, err := provider.CreateNativeCheckpoint(ctx, NativeCheckpointCreateRequest{
-			Config:      cfg,
-			Server:      server,
-			Target:      target,
-			LeaseID:     leaseID,
-			Name:        name,
-			RepoName:    repoName,
-			Workdir:     workdir,
-			Strategy:    strategy,
-			NoReboot:    noReboot,
-			Wait:        wait,
-			WaitTimeout: waitTimeout,
-			Stderr:      a.Stderr,
+			Config:       cfg,
+			Server:       server,
+			Target:       target,
+			CheckpointID: checkpointID,
+			LeaseID:      leaseID,
+			Name:         name,
+			RepoName:     repoName,
+			Workdir:      workdir,
+			Strategy:     strategy,
+			NoReboot:     noReboot,
+			Wait:         wait,
+			WaitTimeout:  waitTimeout,
+			Stderr:       a.Stderr,
 		})
 		return coordinatorImageFromNativeCheckpoint(result.Image), result.Metadata, err
 	}
@@ -280,20 +281,21 @@ func (a App) createNativeCheckpoint(ctx context.Context, cfg Config, server Serv
 }
 
 func (a App) createAWSAMICheckpoint(ctx context.Context, cfg Config, target SSHTarget, leaseID, name, repoName string, noReboot, wait bool, waitTimeout time.Duration) (CoordinatorImage, error) {
-	image, _, err := a.createNativeCheckpoint(ctx, cfg, Server{Provider: "aws", CloudID: leaseID}, target, leaseID, name, repoName, "", checkpointStrategyImage, noReboot, wait, waitTimeout)
+	image, _, err := a.createNativeCheckpoint(ctx, cfg, Server{Provider: "aws", CloudID: leaseID}, target, "", leaseID, name, repoName, "", checkpointStrategyImage, noReboot, wait, waitTimeout)
 	return image, err
 }
 
 func coordinatorImageFromNativeCheckpoint(image NativeCheckpointImage) CoordinatorImage {
 	return CoordinatorImage{
-		ID:         image.ID,
-		Name:       image.Name,
-		State:      image.State,
-		Provider:   image.Provider,
-		Kind:       image.Kind,
-		Region:     image.Region,
-		ResourceID: image.ResourceID,
-		Direct:     image.Direct,
+		ID:           image.ID,
+		Name:         image.Name,
+		State:        image.State,
+		Provider:     image.Provider,
+		Kind:         image.Kind,
+		Region:       image.Region,
+		ResourceID:   image.ResourceID,
+		Architecture: image.Architecture,
+		Direct:       image.Direct,
 	}
 }
 
@@ -470,6 +472,7 @@ func (record *checkpointRecord) applyNativeImage(image CoordinatorImage, noReboo
 	record.Native.AccountID = image.AccountID
 	record.Native.Project = image.Project
 	record.Native.Resource = image.ResourceID
+	record.Native.Architecture = image.Architecture
 	record.Native.SnapshotIDs = image.SnapshotIDs
 	record.Native.Direct = image.Direct
 	record.Native.Strategy = checkpointStrategyForKind(record.Kind)
@@ -495,14 +498,15 @@ func nativeCheckpointDeleteID(record checkpointRecord) string {
 func nativeCheckpointResourceRequest(record checkpointRecord) NativeCheckpointResourceRequest {
 	return NativeCheckpointResourceRequest{
 		Image: NativeCheckpointImage{
-			ID:         record.Native.ImageID,
-			Name:       record.Native.Name,
-			State:      record.Native.State,
-			Provider:   record.nativeProvider(),
-			Kind:       record.Kind,
-			Region:     record.Native.Region,
-			ResourceID: record.Native.Resource,
-			Direct:     record.Native.Direct,
+			ID:           record.Native.ImageID,
+			Name:         record.Native.Name,
+			State:        record.Native.State,
+			Provider:     record.nativeProvider(),
+			Kind:         record.Kind,
+			Region:       record.Native.Region,
+			ResourceID:   record.Native.Resource,
+			Architecture: record.Native.Architecture,
+			Direct:       record.Native.Direct,
 		},
 		Metadata: record.Native.Metadata,
 	}
@@ -516,6 +520,8 @@ func checkpointKindForProviderImage(image CoordinatorImage) string {
 		return checkpointKindAzureOS
 	case checkpointKindGCPDisk:
 		return checkpointKindGCPDisk
+	case checkpointKindHetzner:
+		return checkpointKindHetzner
 	case checkpointKindDockerCommit:
 		return checkpointKindDockerCommit
 	}
@@ -524,6 +530,8 @@ func checkpointKindForProviderImage(image CoordinatorImage) string {
 		return checkpointKindAzure
 	case "gcp":
 		return checkpointKindGCP
+	case "hetzner":
+		return checkpointKindHetzner
 	case "parallels":
 		return checkpointKindParallels
 	case "local-container":
@@ -537,7 +545,7 @@ func checkpointStrategyForKind(kind string) string {
 	switch kind {
 	case checkpointKindAWSAMI, checkpointKindAzure, checkpointKindGCP, checkpointKindDockerCommit:
 		return checkpointStrategyImage
-	case checkpointKindAWSEBS, checkpointKindAzureOS, checkpointKindGCPDisk, checkpointKindParallels:
+	case checkpointKindAWSEBS, checkpointKindAzureOS, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindParallels:
 		return checkpointStrategyDiskSnapshot
 	default:
 		return ""
@@ -664,19 +672,20 @@ func nativeCoordinatorImageRef(record checkpointRecord) CoordinatorImageRef {
 
 func nativeCheckpointForkRecord(record checkpointRecord) NativeCheckpointForkRecord {
 	return NativeCheckpointForkRecord{
-		Kind:        record.Kind,
-		ImageID:     record.Native.ImageID,
-		Name:        record.Native.Name,
-		Resource:    record.Native.Resource,
-		Region:      record.Native.Region,
-		Project:     record.Native.Project,
-		Direct:      record.Native.Direct,
-		HostID:      record.HostID,
-		TargetOS:    record.TargetOS,
-		WindowsMode: record.WindowsMode,
-		Desktop:     record.Desktop,
-		ServerType:  record.ServerType,
-		Metadata:    record.Native.Metadata,
+		Kind:         record.Kind,
+		ImageID:      record.Native.ImageID,
+		Name:         record.Native.Name,
+		Resource:     record.Native.Resource,
+		Region:       record.Native.Region,
+		Project:      record.Native.Project,
+		Direct:       record.Native.Direct,
+		HostID:       record.HostID,
+		TargetOS:     record.TargetOS,
+		WindowsMode:  record.WindowsMode,
+		Desktop:      record.Desktop,
+		ServerType:   record.ServerType,
+		Architecture: record.Native.Architecture,
+		Metadata:     record.Native.Metadata,
 	}
 }
 

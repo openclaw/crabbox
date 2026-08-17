@@ -1238,9 +1238,7 @@ func TestPopulateRunTimingMetadata(t *testing.T) {
 	populateRunTimingMetadata(&report,
 		Config{Provider: "aws", IdleTimeout: 30},
 		Repo{Root: "/repo/app"},
-		Server{ServerType: struct {
-			Name string `json:"name"`
-		}{Name: "cpx31"}},
+		Server{ServerType: ServerTypeInfo{Name: "cpx31"}},
 		"cbx_123",
 		"run_123",
 		"/work/cbx_123/app",

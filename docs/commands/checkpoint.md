@@ -17,7 +17,7 @@ Subcommands: `create`, `list`, `inspect`, `restore`, `fork`, `delete`, `prune`.
 tools, caches, services. Stored in the provider account, so it incurs provider
 storage costs. Recorded as one of `aws-ami`, `aws-ebs-snapshot`,
 `azure-managed-image`, `azure-os-disk-snapshot`, `gcp-machine-image`,
-`gcp-disk-snapshot`, or `parallels-snapshot`.
+`gcp-disk-snapshot`, `hetzner-snapshot`, or `parallels-snapshot`.
 
 **Archive (workspace tarball)** — captures only the contents of the remote
 workdir as `workspace.tar.gz`. Portable across any POSIX SSH lease, but it does
@@ -73,6 +73,9 @@ crabbox checkpoint create --id swift-crab --strategy image
 # Direct AWS lease (no coordinator): force a native AMI
 crabbox checkpoint create --provider aws --id swift-crab --mode native
 
+# Direct Hetzner lease: create a project snapshot
+crabbox checkpoint create --provider hetzner --id swift-crab --mode native
+
 # Azure Windows: permit a bounded deallocate/snapshot/restart cycle
 crabbox checkpoint create --provider azure --target windows --id swift-crab \
   --strategy disk-snapshot --no-reboot=false
@@ -109,10 +112,10 @@ resolves to a disk snapshot where the provider supports one.
 
 **Strategy details**
 
-- `disk-snapshot` — EBS / Azure managed-OS-disk / GCP persistent-disk snapshot;
-  Parallels VM snapshot. AWS macOS always uses an AMI-backed checkpoint (with a
-  backing EBS snapshot) because relaunching an EC2 Mac from a raw root snapshot
-  loses required launch metadata.
+- `disk-snapshot` — EBS / Azure managed-OS-disk / GCP persistent-disk / direct
+  Hetzner project snapshot; Parallels VM snapshot. AWS macOS always uses an
+  AMI-backed checkpoint (with a backing EBS snapshot) because relaunching an EC2
+  Mac from a raw root snapshot loses required launch metadata.
 - `image` — AWS AMI / GCP machine image. Slower, but preserves full VM config.
 - Azure cannot create a managed image from an active VM, so the Azure native
   path uses a managed OS-disk snapshot. That snapshot requires a managed OS disk
@@ -153,8 +156,8 @@ provider resource id; for archives, the tarball path and size.
 > tarball. Lose either side and the checkpoint is unusable.
 
 `--verify` audits the other half. For archives it confirms the local tarball
-still exists; for native checkpoints it asks the provider (directly for AWS, or
-via the coordinator) whether the snapshot or image is still present. JSON output
+still exists; for native checkpoints it asks the provider (directly for AWS and
+Hetzner, or via the coordinator) whether the snapshot or image is still present. JSON output
 includes `localState`, `providerState`, and `nextAction`.
 
 ### Parallels: live VM snapshots
@@ -364,6 +367,7 @@ the detailed lifecycle behavior and scheduled-job recipe.
 | Azure Linux | Managed OS-disk snapshot | not supported from an active VM |
 | Azure Windows (`windows.mode=normal`) | Managed OS-disk snapshot (`--no-reboot=false`) | not supported |
 | GCP Linux | Persistent-disk snapshot | Machine image |
+| Hetzner Linux (direct only) | Project snapshot | not supported |
 | Parallels | VM snapshot | — |
 
 Brokered native checkpoints (through a configured coordinator) cover AWS
@@ -373,6 +377,9 @@ AMIs locally without a coordinator: `--mode auto` falls back to a workspace
 archive when no coordinator is configured, while `--mode native` or
 `--strategy image` creates an AMI in the configured AWS region. Parallels native
 snapshots run directly against the Parallels host.
+Direct Hetzner Linux leases create project snapshots with `--mode native` or an
+explicit disk-snapshot strategy; default auto mode retains the archive fallback.
+Brokered Hetzner leases always use archive checkpoints.
 
 **Archive checkpoints**
 

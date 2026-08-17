@@ -15,8 +15,25 @@ import (
 )
 
 type HetznerClient struct {
-	Token  string
-	Client *http.Client
+	Token   string
+	Client  *http.Client
+	BaseURL string
+}
+
+type HetznerHTTPError struct {
+	Method     string
+	Path       string
+	StatusCode int
+	Detail     string
+}
+
+func (e HetznerHTTPError) Error() string {
+	return fmt.Sprintf("hetzner %s %s: http %d: %s", e.Method, e.Path, e.StatusCode, e.Detail)
+}
+
+func IsHetznerNotFound(err error) bool {
+	var httpErr HetznerHTTPError
+	return errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound
 }
 
 // privateNet carries a server's private-network IP from any provider. It
@@ -34,6 +51,19 @@ type privateNet struct {
 	IPv4 struct {
 		IP string `json:"ip"`
 	} `json:"ipv4"`
+}
+
+type ServerTypeInfo struct {
+	Name         string `json:"name"`
+	Architecture string `json:"architecture,omitempty"`
+}
+
+type ServerLocationInfo struct {
+	Name string `json:"name"`
+}
+
+type ServerImageInfo struct {
+	Architecture string `json:"architecture"`
 }
 
 func (p *privateNet) UnmarshalJSON(data []byte) error {
@@ -92,10 +122,24 @@ type Server struct {
 	// best-effort populates IPv4.IP from the first array entry, and accepts
 	// the legacy struct shape so direct field assignment in Azure / Proxmox
 	// keeps the field shape unchanged for callers.
-	PrivateNet privateNet `json:"private_net"`
-	ServerType struct {
+	PrivateNet privateNet          `json:"private_net"`
+	ServerType ServerTypeInfo      `json:"server_type"`
+	Location   *ServerLocationInfo `json:"location,omitempty"`
+	Image      *ServerImageInfo    `json:"image,omitempty"`
+}
+
+type HetznerImage struct {
+	ID           int64             `json:"id"`
+	Type         string            `json:"type"`
+	Status       string            `json:"status"`
+	Name         string            `json:"name"`
+	Description  string            `json:"description"`
+	Architecture string            `json:"architecture"`
+	Labels       map[string]string `json:"labels"`
+	CreatedFrom  *struct {
+		ID   int64  `json:"id"`
 		Name string `json:"name"`
-	} `json:"server_type"`
+	} `json:"created_from"`
 }
 
 type SSHKey struct {
@@ -120,7 +164,7 @@ func newHetznerClient() (*HetznerClient, error) {
 	if token == "" {
 		return nil, exit(3, "HCLOUD_TOKEN or HETZNER_TOKEN is required")
 	}
-	return &HetznerClient{Token: token, Client: &http.Client{Timeout: 60 * time.Second}}, nil
+	return &HetznerClient{Token: token, Client: &http.Client{Timeout: 60 * time.Second}, BaseURL: "https://api.hetzner.cloud/v1"}, nil
 }
 
 func NewHetznerClient() (*HetznerClient, error) {
@@ -136,7 +180,11 @@ func (c *HetznerClient) do(ctx context.Context, method, path string, body any, o
 		}
 		r = &buf
 	}
-	req, err := http.NewRequestWithContext(ctx, method, "https://api.hetzner.cloud/v1"+path, r)
+	baseURL := strings.TrimRight(c.BaseURL, "/")
+	if baseURL == "" {
+		baseURL = "https://api.hetzner.cloud/v1"
+	}
+	req, err := http.NewRequestWithContext(ctx, method, baseURL+path, r)
 	if err != nil {
 		return err
 	}
@@ -152,7 +200,7 @@ func (c *HetznerClient) do(ctx context.Context, method, path string, body any, o
 		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("hetzner %s %s: http %d: %s", method, path, resp.StatusCode, summarizeJSON(data))
+		return HetznerHTTPError{Method: method, Path: path, StatusCode: resp.StatusCode, Detail: summarizeJSON(data)}
 	}
 	if out != nil {
 		if err := json.Unmarshal(data, out); err != nil {
@@ -324,6 +372,35 @@ func (c *HetznerClient) GetServer(ctx context.Context, id int64) (Server, error)
 
 func (c *HetznerClient) DeleteServer(ctx context.Context, id int64) error {
 	return c.do(ctx, http.MethodDelete, fmt.Sprintf("/servers/%d", id), nil, nil)
+}
+
+func (c *HetznerClient) CreateServerSnapshot(ctx context.Context, serverID int64, description string, labels map[string]string) (HetznerImage, error) {
+	body := struct {
+		Type        string            `json:"type"`
+		Description string            `json:"description"`
+		Labels      map[string]string `json:"labels"`
+	}{Type: "snapshot", Description: description, Labels: labels}
+	var res struct {
+		Image HetznerImage `json:"image"`
+	}
+	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/servers/%d/actions/create_image", serverID), body, &res); err != nil {
+		return HetznerImage{}, err
+	}
+	return res.Image, nil
+}
+
+func (c *HetznerClient) GetImage(ctx context.Context, imageID int64) (HetznerImage, error) {
+	var res struct {
+		Image HetznerImage `json:"image"`
+	}
+	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/images/%d", imageID), nil, &res); err != nil {
+		return HetznerImage{}, err
+	}
+	return res.Image, nil
+}
+
+func (c *HetznerClient) DeleteImage(ctx context.Context, imageID int64) error {
+	return c.do(ctx, http.MethodDelete, fmt.Sprintf("/images/%d", imageID), nil, nil)
 }
 
 func (c *HetznerClient) SetLabels(ctx context.Context, id int64, labels map[string]string) error {

@@ -365,7 +365,8 @@ func deleteServerWithClient(ctx context.Context, client hetznerClient, server Se
 	return true, nil
 }
 func hetznerServerAlreadyAbsent(err error, serverID int64) bool {
-	return strings.HasPrefix(err.Error(), fmt.Sprintf("hetzner DELETE /servers/%d: http 404:", serverID))
+	var httpErr core.HetznerHTTPError
+	return errors.As(err, &httpErr) && httpErr.StatusCode == 404 && httpErr.Method == "DELETE" && httpErr.Path == fmt.Sprintf("/servers/%d", serverID)
 }
 func validateHetznerServerOwnership(server Server, allowLegacyProvider bool) error {
 	provider := strings.TrimSpace(server.Labels["provider"])

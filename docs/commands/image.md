@@ -16,10 +16,11 @@ crabbox image fsr-status ami-1234567890abcdef0 --region us-west-2 --fsr-az us-we
 crabbox image delete ami-1234567890abcdef0 --region eu-west-1
 crabbox image delete my-managed-image --provider azure --region westeurope
 crabbox image delete my-machine-image --provider gcp --region europe-west1-b --project example-project
+crabbox image delete 123456789 --provider hetzner --region fsn1
 ```
 
-Every `image` subcommand requires a configured coordinator (broker) **and**
-admin-token auth. Set `broker.adminToken` or `CRABBOX_COORDINATOR_ADMIN_TOKEN`
+Every `image` subcommand except direct Hetzner snapshot deletion requires a
+configured coordinator (broker) **and** admin-token auth. Set `broker.adminToken` or `CRABBOX_COORDINATOR_ADMIN_TOKEN`
 locally; the Worker validates it against `CRABBOX_ADMIN_TOKEN`. Without an admin
 token the command exits early with `admin command requires broker.adminToken or
 CRABBOX_COORDINATOR_ADMIN_TOKEN`. These commands are intentionally unavailable
@@ -31,7 +32,8 @@ managed OS disk snapshots; GCP images are Compute Engine machine images.
 Crabbox stores promoted AWS and Azure metadata in provider-specific scopes so
 future brokered leases resolve a matching default. Hetzner snapshots/images live in the
 Hetzner project and are selected through `image`/`CRABBOX_HETZNER_IMAGE`;
-Crabbox has no Hetzner create/promote lifecycle commands yet.
+Crabbox has no Hetzner create/promote lifecycle commands. Direct native
+checkpoints own the supported Hetzner snapshot creation and fork path.
 
 ## create
 
@@ -227,24 +229,34 @@ Delete a Crabbox-created provider image.
 crabbox image delete ami-1234567890abcdef0 --region eu-west-1
 crabbox image delete my-managed-image --provider azure --region westeurope
 crabbox image delete my-machine-image --provider gcp --region europe-west1-b --project example-project
+crabbox image delete 123456789 --provider hetzner --region fsn1
 ```
 
 Flags:
 
 ```text
---provider <name>   image provider: aws, azure, or gcp (default aws)
+--provider <name>   image provider: aws, azure, gcp, or hetzner (default aws)
 --region <name>     region, location, or zone containing the image
 --project <name>    GCP project containing the image
 ```
 
 AWS deletion deregisters the AMI and then deletes the EBS snapshots referenced by
 its block-device mappings. Azure deletion removes the managed image or disk
-snapshot. GCP deletion removes the machine image or disk snapshot. Any other
-`--provider` value is rejected.
+snapshot. GCP deletion removes the machine image or disk snapshot.
+
+Hetzner deletion runs directly without coordinator admin auth. It rejects
+`--project`, requires any supplied `--region` to match the recorded source
+location, and requires exactly one local `hetzner-snapshot` checkpoint whose
+`native.imageId` is the requested numeric ID. It then reuses checkpoint deletion
+to verify the remote image is an owned, exactly bound snapshot, deletes the
+provider resource, and only then removes the local record. Zero or multiple
+local matches are refused; this is not a general Hetzner delete-by-ID path.
 
 Deletion fails closed unless the coordinator has stored Crabbox-created image
-metadata for the target. This protects unrelated provider images and snapshots
-that happen to live in the same cloud account, resource group, or project.
+metadata for the target, or (for direct Hetzner) the exact local checkpoint
+record and remote labels prove the claim. This protects unrelated provider
+images and snapshots that happen to live in the same cloud account, resource
+group, or project.
 
 ## Related docs
 

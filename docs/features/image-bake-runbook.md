@@ -663,10 +663,13 @@ crabbox image promote ami-1234567890abcdef0 --target macos --region us-east-1 --
 ## Hetzner status
 
 Hetzner image bytes belong in the Hetzner project. Crabbox can boot a configured
-image through `image` or `CRABBOX_HETZNER_IMAGE`, but Hetzner image
-create/promote lifecycle commands are not implemented yet. Until then, create
-and manage Hetzner snapshots with Hetzner tooling, then configure Crabbox to use
-the selected image.
+image through `image` or `CRABBOX_HETZNER_IMAGE`. Direct native checkpoints can
+create, verify, delete, and fork Hetzner project snapshots, while brokered
+Hetzner checkpoints remain workspace archives. Hetzner `image create` and
+`image promote` remain unsupported coordinator operations. Direct `image
+delete --provider hetzner` only accepts a snapshot backed by exactly one local
+`hetzner-snapshot` checkpoint record and applies the checkpoint ownership checks
+before deletion.
 
 ## Related docs
 

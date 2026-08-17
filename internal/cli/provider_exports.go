@@ -610,6 +610,7 @@ const (
 	CheckpointKindAzureOS          = checkpointKindAzureOS
 	CheckpointKindGCP              = checkpointKindGCP
 	CheckpointKindGCPDisk          = checkpointKindGCPDisk
+	CheckpointKindHetzner          = checkpointKindHetzner
 	CheckpointKindParallels        = checkpointKindParallels
 	CheckpointKindDockerCommit     = checkpointKindDockerCommit
 	CheckpointStrategyImage        = checkpointStrategyImage
@@ -618,4 +619,8 @@ const (
 
 func NormalizeCheckpointStrategy(value string) string {
 	return normalizeCheckpointStrategy(value)
+}
+
+func PrepareNativeImageSource(ctx context.Context, target SSHTarget) error {
+	return prepareNativeImageSource(ctx, target)
 }

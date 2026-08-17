@@ -15,10 +15,9 @@ results, and cleanup.
 ## When to use it
 
 Reach for Hetzner for fast, low-overhead Linux work — CI-style runs, desktop and
-browser leases, code-server leases — when you do not need managed Windows or
-macOS targets or cloud-specific capacity controls. For non-Linux targets or
-provider-native snapshots, use [AWS](aws.md), [GCP](gcp.md), [Azure](azure.md),
-or a container/sandbox provider instead.
+browser leases, code-server leases, and direct project-snapshot checkpoints —
+when you do not need managed Windows or macOS targets or cloud-specific capacity
+controls.
 
 Hetzner is one of the five brokerable providers: it runs **direct from the CLI**
 by default and goes **through the coordinator** only when a coordinator URL and
@@ -32,6 +31,7 @@ crabbox warmup --provider hetzner --class beast
 crabbox run --provider hetzner --class standard -- pnpm test
 crabbox warmup --provider hetzner --desktop --browser
 crabbox ssh --provider hetzner --id swift-crab
+crabbox checkpoint create --provider hetzner --id swift-crab --mode native
 crabbox stop --provider hetzner swift-crab
 ```
 
@@ -92,6 +92,35 @@ AWS, GCP, Azure, or a container provider, whose image maps already point at a
 6. Delete the server (and managed SSH key) on release, `cleanup`, or — in
    brokered mode — coordinator expiry.
 
+## Native checkpoints
+
+Direct Linux leases with a real numeric Hetzner server ID can create
+`hetzner-snapshot` checkpoints with `--mode native` or an explicit
+`--strategy disk-snapshot`. The default `--mode auto --strategy auto` retains
+the direct-provider archive fallback. `--strategy image` is rejected because
+Hetzner's native primitive is a project snapshot.
+
+Before creation Crabbox re-reads the server, verifies canonical remote labels
+and the exact local lease claim, holds that claim fence while it runs
+`cloud-init clean --logs; sync`, and starts snapshot creation. The local record
+stores the numeric snapshot ID, actual source location and architecture, state,
+and source server/lease/checkpoint binding metadata. `--wait=false` records the
+creating state; wait failures retain a partial record once Hetzner has returned
+the snapshot ID.
+
+Verify and delete re-read the image and require `type=snapshot` plus every
+recorded ownership and binding label before deletion. `checkpoint delete`
+deletes the provider snapshot before local metadata; `--local-only` preserves
+the project snapshot. `checkpoint fork` boots through the normal Hetzner create
+path with the numeric snapshot ID, recorded location, and compatible
+architecture. Explicit `--class` and `--type` fork overrides still apply.
+
+Brokered Hetzner leases continue to use workspace archives. The coordinator
+does not implement Hetzner snapshot creation or promotion. A direct
+`crabbox image delete <snapshot-id> --provider hetzner` is available only when
+exactly one local `hetzner-snapshot` record claims that ID; it reuses the same
+remote verification and removes that record only after successful deletion.
+
 Direct destructive operations require both canonical remote ownership labels
 and the exact local claim bound to the Hetzner server ID. A weakly labeled,
 unclaimed, or stale-claim server remains visible only through Hetzner's own
@@ -126,6 +155,8 @@ when Hetzner reports a capacity or quota error.
   coordinator-side OAuth secrets.
 - **Actions hydration**: yes (Linux SSH leases).
 - **Cleanup**: yes.
+- **Native checkpoint / fork**: yes for direct Linux leases; brokered leases use
+  workspace archives.
 - **Coordinator**: supported.
 
 ## Gotchas

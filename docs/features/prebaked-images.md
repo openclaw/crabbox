@@ -38,10 +38,12 @@ Provider-owned image storage is always the source of truth for image bytes:
 - **GCP** — machine images and disk snapshots live in the cloud project.
   `crabbox image create` can capture them and `crabbox image delete --provider
   gcp` can remove them.
-- **Hetzner** — snapshots live in the Hetzner project. Crabbox can already boot a
-  configured image (via config or `CRABBOX_HETZNER_IMAGE`), but the
-  create/promote lifecycle commands are not implemented for Hetzner. Manage
-  Hetzner snapshots with Hetzner tooling, then point Crabbox at the result.
+- **Hetzner** — snapshots live in the Hetzner project. A direct native
+  checkpoint can create, verify, delete, and fork one; brokered Hetzner
+  checkpoints remain workspace archives. `image create` and `image promote`
+  remain coordinator operations and are unsupported for Hetzner. Direct
+  `image delete --provider hetzner` is limited to a snapshot claimed by exactly
+  one local `hetzner-snapshot` checkpoint record.
 - **Delegated runners** (for example Blacksmith) — images are owned by the
   provider's runner infrastructure, not by Crabbox.
 
@@ -145,8 +147,9 @@ keeping credentials, login state, and repository artifacts out of the image.
 
 ## Image commands
 
-All image commands require coordinator admin auth and can create paid
-provider-side artifacts.
+Image creation, promotion, Fast Snapshot Restore, and AWS/Azure/GCP deletion
+require coordinator admin auth and can create or remove paid provider-side
+artifacts. The direct Hetzner deletion exception is described below.
 
 - `crabbox image create --id <cbx_id> --name <name> [--wait]` — capture a
   provider image from a lease (`--no-reboot` defaults to true on AWS).
@@ -156,9 +159,11 @@ provider-side artifacts.
   `--fsr-az <az>` and capability declarations.
 - `crabbox image fsr-status <ami-id|snapshot-id>` — AWS Fast Snapshot Restore
   status.
-- `crabbox image delete <image-id> [--provider aws|azure|gcp]` — remove a
+- `crabbox image delete <image-id> [--provider aws|azure|gcp|hetzner]` — remove a
   Crabbox-created provider image. Deletion requires stored Crabbox ownership
-  metadata and refuses unrelated provider-native image or snapshot IDs.
+  metadata and refuses unrelated provider-native image or snapshot IDs. For
+  Hetzner, this runs directly and requires exactly one matching local native
+  checkpoint record; it does not provide general delete-by-ID access.
 
 See the [image command reference](../commands/image.md) for full flags.
 

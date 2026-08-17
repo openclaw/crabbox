@@ -29,7 +29,8 @@ A native checkpoint snapshots the VM at the provider level.
 - Fast to fork (cloud-native snapshot/image).
 - Lives in the provider account and incurs storage cost until deleted.
 - Supported on brokered AWS Linux/macOS leases, brokered Azure/GCP Linux leases,
-  direct AWS Linux/macOS leases, and Parallels (local or remote Mac) clones.
+  direct AWS Linux/macOS and Hetzner Linux leases, and Parallels (local or
+  remote Mac) clones.
 
 ### Archive (workspace tarball)
 
@@ -64,6 +65,7 @@ Native checkpoints use one of two provider primitives, selected with
 | AWS macOS | `aws-ami` (AMI-backed; raw EC2 Mac root snapshots lack enough launch metadata to fork reliably) |
 | Azure Linux or native Windows (`windows.mode=normal`) | `azure-os-disk-snapshot` |
 | GCP | `gcp-disk-snapshot` |
+| Hetzner Linux (direct only) | `hetzner-snapshot` |
 | Parallels | `parallels-snapshot` |
 
 Disk snapshots are faster to create and (on AWS and GCP) boot with fresh
@@ -87,6 +89,14 @@ loopback-only TightVNC credentials.
 Images are slower to create but preserve complete launch configuration. Direct
 AWS Linux/macOS leases use the AMI path for native checkpoints because AMIs fork
 directly without a coordinator.
+
+**Hetzner notes.** Direct Hetzner Linux leases with a numeric server ID support
+`--mode native` and create a project snapshot. `--strategy image` is not
+supported. Crabbox re-reads the source server, requires its canonical ownership
+labels and exact local lease claim, resets cloud-init, and binds the snapshot to
+the checkpoint, lease, source server, location, and architecture. Brokered
+Hetzner leases continue to use workspace archives; the coordinator does not
+create Hetzner snapshots.
 
 **`docker-commit`** — the `local-container` provider's native primitive (opt in
 with `--mode native`; `auto` keeps the workspace-archive default). `crabbox
@@ -235,8 +245,8 @@ crabbox checkpoint restore chk_abc123 --id purple-whale
 - Archive checkpoints extract back into the workdir; `--clear` (default true)
   wipes the target workdir first, and `--workdir` overrides the destination.
 - Parallels native checkpoints switch the VM to the snapshot.
-- AWS/Azure/GCP native checkpoints are VM images, not in-place restores — use
-  `fork` to create a lease from them.
+- AWS/Azure/GCP/Hetzner native checkpoints are VM images, not in-place restores
+  — use `fork` to create a lease from them.
 - `--dry-run` prints the target without changing anything.
 
 Parallels also supports restoring a snapshot by name directly:
@@ -290,14 +300,15 @@ crabbox checkpoint prune --unused-for 30d --kind native --dry-run
 ```
 
 `delete` removes the provider snapshot/image (AWS AMI + backing snapshots, Azure
-or GCP image, Parallels snapshot) and then the local record. `--local-only`
-deletes the record only. Provider deletion remains first: if it fails, Crabbox
-keeps the local record. `prune` requires at least one age filter. `--older-than`
-selects by creation time and `--unused-for` selects by last-use time (`30m`,
-`12h`, `7d`, …). When both are supplied, a checkpoint must satisfy both; the
-optional `--kind native|archive` filter is also composed with them. Pair the
-final filter set with `--dry-run` first. Deleting a non-Crabbox Parallels
-snapshot requires `--yes`.
+or GCP image, Hetzner project snapshot, Parallels snapshot) and then the local
+record. Hetzner first verifies the remote snapshot type and every recorded
+ownership/source-binding label. `--local-only` deletes the record only. Provider
+deletion remains first: if it fails, Crabbox keeps the local record. `prune`
+requires at least one age filter. `--older-than` selects by creation time and
+`--unused-for` selects by last-use time (`30m`, `12h`, `7d`, …). When both are
+supplied, a checkpoint must satisfy both; the optional `--kind native|archive`
+filter is also composed with them. Pair the final filter set with `--dry-run`
+first. Deleting a non-Crabbox Parallels snapshot requires `--yes`.
 
 For example, this user crontab previews the policy interactively first, then
 removes native checkpoints that have not been forked or restored for 30 days:

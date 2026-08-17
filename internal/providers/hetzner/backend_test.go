@@ -202,7 +202,7 @@ func TestHetznerReleaseKeepsServerReachableUntilKeyDeleteSucceeds(t *testing.T) 
 
 func TestHetznerReleaseTreatsMissingServerAsGone(t *testing.T) {
 	leaseID := "cbx_abcdef123456"
-	client := &fakeHetznerClient{deleteErr: errors.New(`hetzner DELETE /servers/42: http 404: {"error":{"code":"not_found"}}`)}
+	client := &fakeHetznerClient{deleteErr: core.HetznerHTTPError{Method: "DELETE", Path: "/servers/42", StatusCode: 404, Detail: `{"error":{"code":"not_found"}}`}}
 	installHetznerTestHooks(t, client)
 	installHetznerClaimState(t)
 

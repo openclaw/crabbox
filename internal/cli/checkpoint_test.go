@@ -1514,6 +1514,7 @@ func TestCreateNativeCheckpointRejectsAzureImageBeforeAdminAndCloudInit(t *testi
 		cfg,
 		Server{Provider: "azure", CloudID: "crabbox-source"},
 		SSHTarget{TargetOS: targetLinux},
+		"chk_test",
 		"cbx_123",
 		"",
 		"repo",

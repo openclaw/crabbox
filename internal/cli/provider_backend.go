@@ -301,29 +301,31 @@ type NativeCheckpointProvider interface {
 }
 
 type NativeCheckpointImage struct {
-	ID         string
-	Name       string
-	State      string
-	Provider   string
-	Kind       string
-	Region     string
-	ResourceID string
-	Direct     bool
+	ID           string
+	Name         string
+	State        string
+	Provider     string
+	Kind         string
+	Region       string
+	ResourceID   string
+	Architecture string
+	Direct       bool
 }
 
 type NativeCheckpointCreateRequest struct {
-	Config      Config
-	Server      Server
-	Target      SSHTarget
-	LeaseID     string
-	Name        string
-	RepoName    string
-	Workdir     string
-	Strategy    string
-	NoReboot    bool
-	Wait        bool
-	WaitTimeout time.Duration
-	Stderr      io.Writer
+	Config       Config
+	Server       Server
+	Target       SSHTarget
+	CheckpointID string
+	LeaseID      string
+	Name         string
+	RepoName     string
+	Workdir      string
+	Strategy     string
+	NoReboot     bool
+	Wait         bool
+	WaitTimeout  time.Duration
+	Stderr       io.Writer
 }
 
 type NativeCheckpointCreateResult struct {
@@ -359,19 +361,20 @@ type NativeCheckpointLifecycleProvider interface {
 }
 
 type NativeCheckpointForkRecord struct {
-	Kind        string
-	ImageID     string
-	Name        string
-	Resource    string
-	Region      string
-	Project     string
-	Direct      bool
-	HostID      string
-	TargetOS    string
-	WindowsMode string
-	Desktop     bool
-	ServerType  string
-	Metadata    map[string]string
+	Kind         string
+	ImageID      string
+	Name         string
+	Resource     string
+	Region       string
+	Project      string
+	Direct       bool
+	HostID       string
+	TargetOS     string
+	WindowsMode  string
+	Desktop      bool
+	ServerType   string
+	Architecture string
+	Metadata     map[string]string
 }
 
 type NativeCheckpointForkRequest struct {
