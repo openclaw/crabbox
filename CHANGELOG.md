@@ -13,6 +13,7 @@
 ### Fixed
 
 - Bounded Lambda MicroVM runner response-header waits without limiting uploads or streamed executions, while preserving injected HTTP clients. Thanks @SebTardif.
+- Fixed native local-container checkpoint forks to complete their recorded Docker runtime scope before claim creation, allowing immediate commands and safe normal stop while preserving exact claim validation.
 - Rejected native Jujutsu and other unsupported local sync sources before delegated archive providers can provision or execute a remote sandbox.
 - Accepted explicit local-container architecture assertions only when the selected Docker or Podman daemon reports a matching native architecture, without enabling emulation. Thanks @coygeek.
 - Omitted coordinator-only history commands from failure digests when run history is unavailable, while preserving direct lease recovery guidance.

@@ -262,10 +262,32 @@ func inspectCheckpointTag(ctx context.Context, scope checkpointScope, image core
 
 func checkpointScopeForServer(ctx context.Context, cfg core.Config, server core.Server) (checkpointScope, error) {
 	runtimeName := leaseRuntime(server, cfg.LocalContainer.Runtime)
-	if metadata := checkpointScopeMetadataFromLabels(server.Labels); len(metadata) != 0 {
+	scopeLabels := server.Labels
+	if claim, exists, set := core.ServerLeaseClaimSnapshot(server); set && exists {
+		scopeLabels = claim.Labels
+	}
+	if metadata := checkpointScopeMetadataFromLabels(scopeLabels); len(metadata) != 0 {
 		scope := checkpointScopeFromMetadata(metadata, runtimeName)
 		if err := validateCheckpointScope(ctx, scope); err != nil {
 			return checkpointScope{}, err
+		}
+		if scope.Config == "" && scope.Host == "" {
+			configPath, err := checkpointConfigPath()
+			if err != nil {
+				return checkpointScope{}, err
+			}
+			scope.Config = configPath
+		}
+		if scope.Endpoint == "" {
+			if scope.Host != "" {
+				scope.Endpoint = scope.Host
+			} else if scope.Context != "" {
+				endpoint, err := checkpointContextEndpoint(ctx, scope)
+				if err != nil {
+					return checkpointScope{}, err
+				}
+				scope.Endpoint = endpoint
+			}
 		}
 		return scope, nil
 	}

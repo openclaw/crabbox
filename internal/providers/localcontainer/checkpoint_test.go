@@ -284,6 +284,48 @@ func TestCheckpointScopeForServerUsesPersistedLabels(t *testing.T) {
 	}
 }
 
+func TestCheckpointScopeForServerUsesExactClaimSnapshot(t *testing.T) {
+	binDir := writeCheckpointScopeDocker(t, "unix:///claim/docker.sock", "daemon-123")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("DOCKER_CONTEXT", "ambient-invalid")
+	t.Setenv("DOCKER_HOST", "tcp://ambient.invalid:2376")
+	server := core.Server{Labels: map[string]string{
+		checkpointMetadataRuntime:  "docker",
+		checkpointMetadataContext:  "remote-context",
+		checkpointMetadataDaemonID: "daemon-123",
+	}}
+	claimLabels := cloneLabels(server.Labels)
+	claimLabels[checkpointMetadataConfig] = "/claim/docker-config"
+	claimLabels[checkpointMetadataEndpoint] = "unix:///claim/docker.sock"
+	core.SetServerLeaseClaimSnapshot(&server, core.LeaseClaim{Labels: claimLabels}, true)
+	scope, err := checkpointScopeForServer(context.Background(), core.Config{}, server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scope.Context != "remote-context" || scope.Config != "/claim/docker-config" || scope.Endpoint != "unix:///claim/docker.sock" || scope.DaemonID != "daemon-123" {
+		t.Fatalf("claim scope=%#v", scope)
+	}
+}
+
+func TestCheckpointScopeForServerCompletesPrivateRoutingOmittedFromLabels(t *testing.T) {
+	binDir := writeCheckpointScopeDocker(t, "unix:///tmp/docker.sock", "daemon-123")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("DOCKER_CONTEXT", "ambient-invalid")
+	t.Setenv("DOCKER_HOST", "tcp://ambient.invalid:2376")
+	labels := map[string]string{
+		checkpointMetadataRuntime:  "docker",
+		checkpointMetadataContext:  "remote-context",
+		checkpointMetadataDaemonID: "daemon-123",
+	}
+	scope, err := checkpointScopeForServer(context.Background(), core.Config{}, core.Server{Labels: labels})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scope.Context != "remote-context" || scope.Endpoint != "unix:///tmp/docker.sock" || scope.Config == "" || scope.DaemonID != "daemon-123" {
+		t.Fatalf("completed scope=%#v", scope)
+	}
+}
+
 func TestCheckpointMetadataForServerPreservesUserAndWorkRoot(t *testing.T) {
 	metadata := checkpointMetadataForServer(
 		checkpointScope{Runtime: "docker", DaemonID: "daemon-123"},

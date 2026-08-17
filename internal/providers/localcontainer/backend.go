@@ -88,7 +88,7 @@ func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.B
 		if isPodmanRuntime(cfg.LocalContainer.Runtime) {
 			return podmanScopeForConfig(ctx, cfg)
 		}
-		return checkpointScopeForServer(ctx, cfg, core.Server{})
+		return checkpointScopeForServer(ctx, cfg, core.Server{Labels: cfg.LocalContainer.CheckpointMetadata})
 	}
 	b.validateRuntimeScope = validateCheckpointScope
 	b.confirmContainerAbsent = b.exactContainerAbsent
@@ -183,16 +183,21 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if err := validateCheckpointFork(ctx, cfg); err != nil {
 		return core.LeaseTarget{}, err
 	}
-	if len(cfg.LocalContainer.CheckpointMetadata) == 0 {
+	if !hasCompleteCapturedRuntimeScope(cfg.LocalContainer.CheckpointMetadata) {
 		scope, err := b.captureRuntimeScope(ctx, cfg)
 		if err != nil {
 			return core.LeaseTarget{}, err
 		}
-		if strings.TrimSpace(scope.DaemonID) == "" {
-			return core.LeaseTarget{}, core.Exit(2, "local-container runtime identity is unavailable; refusing to create an unscoped lease")
+		completedScope := checkpointScopeMetadata(scope)
+		if !hasCompleteCapturedRuntimeScope(completedScope) {
+			return core.LeaseTarget{}, core.Exit(2, "local-container runtime identity is incomplete; refusing to create an unscoped lease")
 		}
-		cfg.LocalContainer.CheckpointMetadata = checkpointScopeMetadata(scope)
-		b.cfg.LocalContainer.CheckpointMetadata = checkpointScopeMetadata(scope)
+		metadata := cloneLabels(cfg.LocalContainer.CheckpointMetadata)
+		for _, key := range checkpointScopeMetadataKeys {
+			metadata[key] = completedScope[key]
+		}
+		cfg.LocalContainer.CheckpointMetadata = cloneLabels(metadata)
+		b.cfg.LocalContainer.CheckpointMetadata = cloneLabels(metadata)
 	}
 	leaseID := core.NewLeaseID()
 	containers, err := b.listContainers(ctx)

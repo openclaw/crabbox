@@ -2149,6 +2149,112 @@ func TestAcquirePinsDockerLifecycleToCapturedContext(t *testing.T) {
 	}
 }
 
+func TestAcquireCheckpointForkCompletesClaimRuntimeScope(t *testing.T) {
+	const (
+		checkpointImageID  = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+		checkpointImage    = "crabbox-checkpoint-pinned"
+		checkpointUser     = "checkpoint-user"
+		checkpointWorkRoot = "/checkpoint/work"
+	)
+	binDir := t.TempDir()
+	dockerScript := `#!/bin/sh
+if [ "$1" = "--context" ]; then
+  shift 2
+fi
+case "$1" in
+  info) printf '%s\n' 'daemon-pinned' ;;
+  image) printf '%s\n' 'sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "docker"), []byte(dockerScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	b, runner, _, leaseID, _, _ := pendingAcquireBackend(t)
+	originalRun := runner.run
+	var dockerRunArgs []string
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		if len(req.Args) < 3 || req.Args[0] != "--context" || req.Args[1] != "pinned-context" {
+			t.Fatalf("Docker lifecycle command was not pinned: %v", req.Args)
+		}
+		req.Args = req.Args[2:]
+		if firstArg(req.Args) == "run" {
+			dockerRunArgs = append([]string(nil), req.Args...)
+		}
+		return originalRun(req)
+	}
+	checkpointMetadata := map[string]string{
+		checkpointMetadataRuntime:  "docker",
+		checkpointMetadataContext:  "pinned-context",
+		checkpointMetadataDaemonID: "daemon-pinned",
+		checkpointMetadataUser:     checkpointUser,
+		checkpointMetadataWorkRoot: checkpointWorkRoot,
+	}
+	if err := (Provider{}).ApplyNativeCheckpointForkConfig(core.NativeCheckpointForkRequest{
+		Config: &b.cfg,
+		Record: core.NativeCheckpointForkRecord{
+			Kind:     core.CheckpointKindDockerCommit,
+			ImageID:  checkpointImageID,
+			Name:     checkpointImage,
+			Metadata: checkpointMetadata,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	applyDefaults(&b.cfg)
+	captures := 0
+	b.captureRuntimeScope = func(context.Context, core.Config) (checkpointScope, error) {
+		captures++
+		return checkpointScope{
+			Runtime:  "docker",
+			Context:  "pinned-context",
+			Config:   "/tmp/docker-config",
+			Endpoint: "unix:///pinned.sock",
+			DaemonID: "daemon-pinned",
+		}, nil
+	}
+	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Keep: true, Repo: core.Repo{Root: t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if captures != 1 {
+		t.Fatalf("runtime scope captures=%d, want 1", captures)
+	}
+	for key, want := range map[string]string{
+		checkpointMetadataForkID:   checkpointImageID,
+		checkpointMetadataForkName: checkpointImage,
+		checkpointMetadataUser:     checkpointUser,
+		checkpointMetadataWorkRoot: checkpointWorkRoot,
+	} {
+		if got := b.cfg.LocalContainer.CheckpointMetadata[key]; got != want {
+			t.Fatalf("checkpoint metadata %s=%q, want %q", key, got, want)
+		}
+	}
+	if !slices.Contains(dockerRunArgs, checkpointImageID) {
+		t.Fatalf("Docker run did not use checkpoint image id: %v", dockerRunArgs)
+	}
+	for key, want := range map[string]string{
+		"image":     checkpointImage,
+		"ssh_user":  checkpointUser,
+		"work_root": checkpointWorkRoot,
+	} {
+		if got := labelFromRunArgs(t, dockerRunArgs, key); got != want {
+			t.Fatalf("Docker run label %s=%q, want %q", key, got, want)
+		}
+	}
+	claim, err := core.ReadLeaseClaim(*leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasCompleteCapturedRuntimeScope(claim.Labels) || claim.Labels[checkpointMetadataConfig] != "/tmp/docker-config" || claim.Labels[checkpointMetadataEndpoint] != "unix:///pinned.sock" {
+		t.Fatalf("checkpoint fork claim scope=%#v", claim.Labels)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatalf("release checkpoint fork: %v", err)
+	}
+}
+
 func TestUnclaimedRollbackContinuesSidecarCleanupAfterError(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
