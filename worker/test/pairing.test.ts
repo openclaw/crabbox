@@ -6,6 +6,7 @@ import {
   type CoordinatorRuntime,
   type CoordinatorSocketHandlers,
   type CoordinatorStorage,
+  type CoordinatorStorageView,
   type CoordinatorWebSocketUpgradeOptions,
 } from "../src/coordinator-runtime";
 import { deviceMembershipCacheTTLMS, FleetCoordinator } from "../src/fleet";
@@ -79,6 +80,10 @@ class MemoryStorage implements CoordinatorStorage {
     const value = this.values.get(key) as T | undefined;
     this.values.delete(key);
     return Promise.resolve(value);
+  }
+
+  transaction<T>(callback: (transaction: CoordinatorStorageView) => Promise<T>): Promise<T> {
+    return callback(this);
   }
 
   resetObservations(): void {

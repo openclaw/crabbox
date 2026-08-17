@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { CoordinatorStorage } from "../src/coordinator-runtime";
+import type { CoordinatorStorage, CoordinatorStorageView } from "../src/coordinator-runtime";
 import { githubAuthRoute, githubPortalLogin } from "../src/oauth";
 import type { Env } from "../src/types";
 
@@ -38,6 +38,10 @@ class MemoryStorage implements CoordinatorStorage {
         value as T,
       ]),
     );
+  }
+
+  transaction<T>(callback: (transaction: CoordinatorStorageView) => Promise<T>): Promise<T> {
+    return callback(this);
   }
 }
 

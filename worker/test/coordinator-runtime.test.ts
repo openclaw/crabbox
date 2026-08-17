@@ -7,6 +7,7 @@ import {
   type CoordinatorRuntime,
   type CoordinatorSocketHandlers,
   type CoordinatorStorage,
+  type CoordinatorStorageView,
   type CoordinatorWebSocketUpgradeOptions,
 } from "../src/coordinator-runtime";
 import { FleetCoordinator } from "../src/fleet";
@@ -57,6 +58,10 @@ class MemoryStorage implements CoordinatorStorage {
         value as T,
       ]),
     );
+  }
+
+  transaction<T>(callback: (transaction: CoordinatorStorageView) => Promise<T>): Promise<T> {
+    return callback(this);
   }
 
   value<T>(key: string): T | undefined {
@@ -585,6 +590,28 @@ describe("coordinator runtimes", () => {
         }),
       ),
     ).toBe("lifecycle");
+  });
+
+  it("serializes existing-image mutations while keeping image reads and creation direct", () => {
+    for (const [method, path] of [
+      ["POST", "/v1/images/ami-1/promote"],
+      ["POST", "/v1/images/ami-1/promote-catalog"],
+      ["DELETE", "/v1/images/ami-1"],
+      ["DELETE", "/v1/images/ami-1/promote-catalog"],
+    ]) {
+      expect(
+        coordinatorRequestQueue(new Request(`https://coordinator.test${path}`, { method })),
+      ).toBe("lifecycle");
+    }
+    for (const [method, path] of [
+      ["POST", "/v1/images"],
+      ["GET", "/v1/images/ami-1"],
+      ["GET", "/v1/images/ami-1/fast-snapshot-restore"],
+    ]) {
+      expect(
+        coordinatorRequestQueue(new Request(`https://coordinator.test${path}`, { method })),
+      ).toBe("direct");
+    }
   });
 
   it("does not hold the lifecycle queue across GitHub OAuth requests", async () => {

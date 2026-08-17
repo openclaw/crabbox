@@ -2142,6 +2142,17 @@ func TestImagePromoteCatalogOnlyValidation(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
+	sdkOverflow := []string{"ami-variant", "--catalog-only"}
+	for index := range 32 {
+		sdkOverflow = append(sdkOverflow, "--sdk", fmt.Sprintf("sdk%d=1", index))
+	}
+	sdkOverflow = append(sdkOverflow, "--variant-sdk", "extra=1")
+	runtimeOverflow := []string{"ami-variant", "--catalog-only"}
+	for index := range 32 {
+		runtimeOverflow = append(runtimeOverflow, "--runtime", fmt.Sprintf("runtime%d=1", index))
+	}
+	runtimeOverflow = append(runtimeOverflow, "--variant-runtime", "extra=1")
+
 	tests := []struct {
 		name string
 		args []string
@@ -2172,6 +2183,16 @@ func TestImagePromoteCatalogOnlyValidation(t *testing.T) {
 			args: []string{"ami-variant", "--catalog-only", "--sdk", "toolkit=1.0", "--variant-sdk", "toolkit=2.0"},
 			want: "--sdk and --variant-sdk declare conflicting versions for toolkit",
 		},
+		{
+			name: "combined SDK limit",
+			args: sdkOverflow,
+			want: "--sdk and --variant-sdk support at most 32 combined entries",
+		},
+		{
+			name: "combined runtime limit",
+			args: runtimeOverflow,
+			want: "--runtime and --variant-runtime support at most 32 combined entries",
+		},
 	}
 
 	for _, test := range tests {
@@ -2182,6 +2203,87 @@ func TestImagePromoteCatalogOnlyValidation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestImageDeleteCatalogOnlyCoordinatorContract(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "admin-token")
+
+	t.Run("uses dedicated route and reports retired variants", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodDelete || r.URL.Path != "/v1/images/ami-external/promote-catalog" {
+				t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+			}
+			if got := r.URL.Query().Get("provider"); got != "aws" {
+				t.Fatalf("provider=%q", got)
+			}
+			if got := r.URL.Query().Get("region"); got != "us-east-1" {
+				t.Fatalf("region=%q", got)
+			}
+			_, _ = w.Write([]byte(`{"imageID":"ami-external","catalogOnly":true,"retired":2}`))
+		}))
+		defer server.Close()
+		t.Setenv("CRABBOX_COORDINATOR", server.URL)
+
+		var out bytes.Buffer
+		err := (App{Stdout: &out, Stderr: io.Discard}).imageDelete(context.Background(), []string{
+			"ami-external", "--catalog-only", "--region", "us-east-1",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := out.String(), "retired catalog-only image=ami-external provider=aws variants=2\n"; got != want {
+			t.Fatalf("output=%q, want %q", got, want)
+		}
+	})
+
+	t.Run("old coordinator fails closed", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodDelete || r.URL.Path != "/v1/images/ami-external/promote-catalog" {
+				t.Fatalf("catalog-only retirement fell back to %s %s", r.Method, r.URL.Path)
+			}
+			http.NotFound(w, r)
+		}))
+		defer server.Close()
+		t.Setenv("CRABBOX_COORDINATOR", server.URL)
+
+		err := (App{Stdout: io.Discard, Stderr: io.Discard}).imageDelete(context.Background(), []string{
+			"ami-external", "--catalog-only",
+		})
+		if err == nil || !strings.Contains(err.Error(), "coordinator does not support catalog-only image retirement") {
+			t.Fatalf("error=%v", err)
+		}
+	})
+
+	t.Run("Azure fails before coordinator access", func(t *testing.T) {
+		err := (App{Stdout: io.Discard, Stderr: io.Discard}).imageDelete(context.Background(), []string{
+			"snapshot-variant", "--provider", "azure", "--catalog-only",
+		})
+		if err == nil || !strings.Contains(err.Error(), "--catalog-only is AWS-only") {
+			t.Fatalf("error=%v", err)
+		}
+	})
+
+	t.Run("invalid Region is visible to the operator", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("region") != "not-a-region" {
+				t.Fatalf("region=%q", r.URL.Query().Get("region"))
+			}
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"invalid_region","message":"region must be an AWS region name"}`))
+		}))
+		defer server.Close()
+		t.Setenv("CRABBOX_COORDINATOR", server.URL)
+
+		err := (App{Stdout: io.Discard, Stderr: io.Discard}).imageDelete(context.Background(), []string{
+			"ami-external", "--catalog-only", "--region", "not-a-region",
+		})
+		if err == nil || !strings.Contains(err.Error(), "region must be an AWS region name") {
+			t.Fatalf("error=%v", err)
+		}
+	})
 }
 
 func TestImagePromoteCatalogOnlyCoordinatorContract(t *testing.T) {

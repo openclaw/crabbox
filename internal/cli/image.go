@@ -225,15 +225,19 @@ func (a App) imageDelete(ctx context.Context, args []string) error {
 	provider := fs.String("provider", "aws", "image provider: aws, azure, gcp, or hetzner")
 	region := fs.String("region", "", "region, location, or zone containing the image")
 	project := fs.String("project", "", "GCP project containing the image")
+	catalogOnly := fs.Bool("catalog-only", false, "unpublish AWS catalog-only variants without deleting the AMI")
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return exit(2, "usage: crabbox image delete <image-id> [--provider aws|azure|gcp|hetzner] [--region <region>] [--project <project>]")
+		return exit(2, "usage: crabbox image delete <image-id> [--provider aws|azure|gcp|hetzner] [--region <region>] [--project <project>] [--catalog-only]")
 	}
 	normalizedProvider := normalizeProviderName(*provider)
 	if normalizedProvider != "aws" && normalizedProvider != "azure" && normalizedProvider != "gcp" && normalizedProvider != "hetzner" {
 		return exit(2, "unsupported image provider %q; use aws, azure, gcp, or hetzner", *provider)
+	}
+	if *catalogOnly && normalizedProvider != "aws" {
+		return exit(2, "--catalog-only is AWS-only")
 	}
 	if normalizedProvider == "hetzner" {
 		if strings.TrimSpace(*project) != "" {
@@ -259,6 +263,14 @@ func (a App) imageDelete(ctx context.Context, args []string) error {
 		return err
 	}
 	ref := CoordinatorImageRef{Provider: normalizedProvider, Region: *region, Project: *project}
+	if *catalogOnly {
+		retired, err := coord.RetireCatalogImage(ctx, fs.Arg(0), ref)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(a.Stdout, "retired catalog-only image=%s provider=aws variants=%d\n", fs.Arg(0), retired.Retired)
+		return nil
+	}
 	if err := coord.DeleteImage(ctx, fs.Arg(0), ref); err != nil {
 		return err
 	}

@@ -1,4 +1,4 @@
-export interface CoordinatorStorage {
+export interface CoordinatorStorageView {
   get<T>(key: string, options?: { noCache?: boolean }): Promise<T | undefined>;
   put<T>(key: string, value: T, options?: { noCache?: boolean }): Promise<void>;
   delete(key: string): Promise<unknown>;
@@ -8,6 +8,12 @@ export interface CoordinatorStorage {
     startAfter?: string;
     noCache?: boolean;
   }): Promise<Map<string, T>>;
+}
+
+export interface CoordinatorStorage extends CoordinatorStorageView {
+  // Implementations may retry callbacks after serialization conflicts; callbacks must contain
+  // only storage reads/writes and must not perform external or otherwise non-idempotent effects.
+  transaction<T>(callback: (transaction: CoordinatorStorageView) => Promise<T>): Promise<T>;
 }
 
 export type CoordinatorRequestQueue = "direct" | "lifecycle";
@@ -70,6 +76,20 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
   }
   if (path[0] === "v1" && path[1] === "ready-pools") {
     return "direct";
+  }
+  if (
+    path[0] === "v1" &&
+    path[1] === "images" &&
+    path[2] &&
+    ((method === "POST" &&
+      path.length === 4 &&
+      (path[3] === "promote" || path[3] === "promote-catalog")) ||
+      (method === "DELETE" &&
+        (path.length === 3 || (path.length === 4 && path[3] === "promote-catalog"))))
+  ) {
+    // Existing-image mutations intentionally hold the lifecycle queue across provider I/O:
+    // these rare admin calls must validate, re-read, clean up, and publish as one serialized commit.
+    return "lifecycle";
   }
   if (path[0] === "v1" && path[1] === "images") {
     return "direct";

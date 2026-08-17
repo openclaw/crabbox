@@ -63,6 +63,9 @@ func mergeImageVersions(base, additions map[string]string, baseFlag, additionsFl
 		}
 		merged[name] = version
 	}
+	if len(merged) > 32 {
+		return nil, exit(2, "--%s and --%s support at most 32 combined entries", baseFlag, additionsFlag)
+	}
 	if len(merged) == 0 {
 		return nil, nil
 	}

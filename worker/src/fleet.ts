@@ -68,6 +68,8 @@ import {
   controlMessageOwnsTransaction,
   coordinatorRequestQueue,
   type CoordinatorRuntime,
+  type CoordinatorStorage,
+  type CoordinatorStorageView,
 } from "./coordinator-runtime";
 import {
   DaytonaClient,
@@ -13813,20 +13815,46 @@ export class FleetCoordinator {
       return result instanceof Response ? result : json(result);
     }
     if (method === "DELETE" && action === undefined) {
+      const ownershipMetadata = providerForRegion.storedImageDeleteMetadata
+        ? await providerForRegion.storedImageDeleteMetadata(decodedImageID)
+        : metadata;
       const ownershipBlocked = validateProviderImageDeleteOwnership(
         provider,
         decodedImageID,
-        metadata,
+        ownershipMetadata,
       );
       if (ownershipBlocked) {
         return json(ownershipBlocked.body, { status: ownershipBlocked.status });
       }
-      const deleteBlocked = await providerForRegion.validateDeleteImage(decodedImageID, metadata);
+      const deleteBlocked = await providerForRegion.validateDeleteImage(
+        decodedImageID,
+        ownershipMetadata,
+      );
       if (deleteBlocked) {
         return json(deleteBlocked.body, { status: deleteBlocked.status });
       }
       await providerForRegion.deleteImage(decodedImageID, kind, metadata);
       return json({ imageID: decodedImageID, deleted: true });
+    }
+    if (method === "DELETE" && action === "promote-catalog") {
+      const retirementRegion = region === undefined ? undefined : sanitizeAWSRegion(region);
+      if (region !== undefined && !retirementRegion) {
+        return json(
+          { error: "invalid_region", message: "region must be an AWS region name" },
+          { status: 400 },
+        );
+      }
+      if (!providerForRegion.retireCatalogImage) {
+        return json(
+          {
+            error: "unsupported_provider",
+            message: "catalog-only image retirement is AWS-only",
+          },
+          { status: 400 },
+        );
+      }
+      const retired = await providerForRegion.retireCatalogImage(decodedImageID, retirementRegion);
+      return json({ imageID: decodedImageID, catalogOnly: true, retired });
     }
     if (method === "POST" && (action === "promote" || action === "promote-catalog")) {
       url.searchParams.set("catalogOnly", action === "promote-catalog" ? "true" : "false");
@@ -17061,6 +17089,19 @@ function promotedAWSImageCatalogKey(image: PromotedImageRecord): string {
   return `${promotedAWSImageCatalogPrefix(image)}${encodeURIComponent(image.id)}`;
 }
 
+function promotedAWSImageVariantPrefix(
+  image: Pick<ProviderImage, "target" | "architecture" | "region" | "serverType"> & {
+    os?: string;
+  },
+): string {
+  const scope = promotedAWSImageKey(image).slice(`${promotedAWSImagePrefix()}:`.length);
+  return `image:aws:variant:${scope}:`;
+}
+
+function promotedAWSImageVariantKey(image: PromotedImageRecord): string {
+  return `${promotedAWSImageVariantPrefix(image)}${encodeURIComponent(image.id)}`;
+}
+
 class ImageCapabilityMismatchError extends Error {
   constructor(message: string) {
     super(message);
@@ -17069,7 +17110,7 @@ class ImageCapabilityMismatchError extends Error {
 }
 
 function promotionVersionMap(values: string[], label: string): Record<string, string> | undefined {
-  const versions: Record<string, string> = {};
+  const versions = Object.create(null) as Record<string, string>;
   for (const value of values) {
     const separator = value.indexOf("=");
     const name = (separator > 0 ? value.slice(0, separator) : value).trim().toLowerCase();
@@ -22356,7 +22397,9 @@ interface CloudProvider {
   ): Promise<ProviderImage>;
   getImage(imageID: string, kind?: string): Promise<ProviderImage>;
   deleteImage(imageID: string, kind?: string, metadata?: ProviderImage): Promise<void>;
+  retireCatalogImage?(imageID: string, region?: string): Promise<number>;
   storedImageMetadata(imageID: string): Promise<ProviderImage | undefined>;
+  storedImageDeleteMetadata?(imageID: string): Promise<ProviderImage | undefined>;
   decorateImage(image: ProviderImage, metadata?: Partial<ProviderImage>): ProviderImage;
   validateDeleteImage(
     imageID: string,
@@ -22417,12 +22460,8 @@ interface ProviderWorkspaceCapability {
   log(event: ProviderWorkspaceLifecycleEvent, fields: Record<string, string | undefined>): void;
 }
 
-interface ProviderStateStorage {
-  get<T>(key: string): Promise<T | undefined>;
-  put<T>(key: string, value: T): Promise<void>;
-  list<T>(options?: { prefix?: string }): Promise<Map<string, T>>;
-  delete(key: string): Promise<unknown>;
-}
+type ProviderStateStorage = CoordinatorStorage;
+type ProviderStateStorageView = CoordinatorStorageView;
 
 interface ProviderAccessContext {
   requestSourceCIDRs: string[];
@@ -24201,19 +24240,58 @@ export class AWSProvider implements CloudProvider {
       };
       await this.storage.put(awsImageDeletionClaimKey(imageID), claim);
     }
-    await this.deleteMatchingImageRecords("image:aws:created:", imageID);
-    await this.deleteMatchingImageRecords(promotedAWSImagePrefix(), imageID);
-    await this.deleteMatchingImageRecords("image:aws:catalog:", imageID);
-    await this.storage.delete(awsImageDeletionClaimKey(imageID));
+    await this.deleteMatchingImageRecords("image:aws:created:", imageID, this.region);
+    await this.deleteMatchingImageRecords(promotedAWSImagePrefix(), imageID, this.region);
+    await imageCatalogTransaction(this.storage, async (transaction) => {
+      await deletePromotedAWSImageRecords(
+        transaction,
+        imageID,
+        ["image:aws:catalog:", "image:aws:variant:"],
+        { region: this.region },
+      );
+      await transaction.delete(awsImageDeletionClaimKey(imageID));
+    });
+  }
+
+  retireCatalogImage(imageID: string, region?: string): Promise<number> {
+    return imageCatalogTransaction(
+      this.storage,
+      async (transaction) =>
+        await deletePromotedAWSImageRecords(
+          transaction,
+          imageID,
+          ["image:aws:variant:"],
+          region ? { region } : {},
+        ),
+    );
   }
 
   async storedImageMetadata(imageID: string): Promise<ProviderImage | undefined> {
-    return (
-      (await this.promotedImageByID(imageID)) ??
+    const promoted = await this.promotedImagesByID(imageID);
+    const currentPromoted = promoted.find((image) => image.region === this.region);
+    if (currentPromoted) return currentPromoted;
+    const created =
       (await this.storage.get<ProviderImage>(createdAWSImageKey(imageID))) ??
       (await this.storage.get<ProviderImage>(createdProviderImageKey("aws", imageID))) ??
-      (await this.imageDeletionClaim(imageID))?.metadata
+      (await this.imageDeletionClaim(imageID))?.metadata;
+    if (created?.region === this.region) return created;
+    const variants = await this.variantImagesByID(imageID);
+    return (
+      variants.find((image) => image.region === this.region) ??
+      promoted[0] ??
+      created ??
+      variants[0]
     );
+  }
+
+  async storedImageDeleteMetadata(imageID: string): Promise<ProviderImage | undefined> {
+    const promoted = await this.promotedImageByID(imageID);
+    if (promoted) return promoted;
+    const created =
+      (await this.storage.get<ProviderImage>(createdAWSImageKey(imageID))) ??
+      (await this.storage.get<ProviderImage>(createdProviderImageKey("aws", imageID))) ??
+      (await this.imageDeletionClaim(imageID))?.metadata;
+    return created?.region === this.region ? created : undefined;
   }
 
   decorateImage(image: ProviderImage, metadata?: Partial<ProviderImage>): ProviderImage {
@@ -24244,10 +24322,15 @@ export class AWSProvider implements CloudProvider {
     return validAWSImageDeletionClaim(claim, imageID) ? claim : undefined;
   }
 
-  private async deleteMatchingImageRecords(prefix: string, imageID: string): Promise<void> {
+  private async deleteMatchingImageRecords(
+    prefix: string,
+    imageID: string,
+    region?: string,
+  ): Promise<void> {
     const records = await this.storage.list<ProviderImage>({ prefix });
     for (const [key, image] of records) {
       if (image.id !== imageID && image.resourceID !== imageID) continue;
+      if (region !== undefined && image.region !== region) continue;
       // oxlint-disable-next-line eslint/no-await-in-loop -- ordered deletes leave a retryable durable prefix boundary.
       await this.storage.delete(key);
     }
@@ -24324,15 +24407,20 @@ export class AWSProvider implements CloudProvider {
       fastSnapshotRestoreAvailabilityZones?: string[];
     }>(request).catch(() => ({}));
     const requestedRegion = input.region ?? url.searchParams.get("region") ?? "";
-    const cataloged = await this.promotedCatalogImageByID(imageID, requestedRegion);
-    const priorCapabilities = known?.capabilities ?? cataloged?.capabilities;
-    const prior =
-      known || cataloged
-        ? {
-            ...cataloged,
-            ...known,
-            ...(priorCapabilities ? { capabilities: priorCapabilities } : {}),
-          }
+    const requestedImageRegion = requestedRegion ? sanitizeAWSRegion(requestedRegion) : "";
+    if (requestedRegion && !requestedImageRegion) {
+      return json(
+        { error: "invalid_region", message: "region must be an AWS region name" },
+        { status: 400 },
+      );
+    }
+    const historyRegion =
+      requestedImageRegion || sanitizeAWSRegion(known?.region ?? "") || this.region;
+    const cataloged = await this.promotedImageMetadataByID(imageID, historyRegion, known);
+    const prior: (ProviderImage & Partial<PromotedImageRecord>) | undefined = cataloged
+      ? { ...(known?.region === historyRegion ? known : {}), ...cataloged }
+      : known?.region === historyRegion
+        ? known
         : undefined;
     const target = normalizeAWSImageTarget(
       input.target ?? url.searchParams.get("target") ?? prior?.target ?? "linux",
@@ -24356,14 +24444,8 @@ export class AWSProvider implements CloudProvider {
         );
       }
     }
-    const rawRegion = requestedRegion || prior?.region || "";
+    const rawRegion = requestedRegion || prior?.region || known?.region || "";
     const imageRegion = sanitizeAWSRegion(rawRegion);
-    if (rawRegion && !imageRegion) {
-      return json(
-        { error: "invalid_region", message: "region must be an AWS region name" },
-        { status: 400 },
-      );
-    }
     const {
       catalogOnly: _priorCatalogOnly,
       variantSelectors: _priorVariantSelectors,
@@ -24381,10 +24463,12 @@ export class AWSProvider implements CloudProvider {
     if (architecture) {
       metadata.architecture = architecture;
     }
-    let capabilities: ImageCapabilities | undefined;
+    let declaredCapabilities: ImageCapabilities | undefined;
+    let declaredSDKs: Record<string, string> | undefined;
+    let declaredRuntimes: Record<string, string> | undefined;
     let variantSelectors: ImageVariantSelectors | undefined;
     try {
-      const declaredCapabilities = normalizeImageCapabilities({
+      declaredCapabilities = normalizeImageCapabilities({
         ...input.capabilities,
         osVersion: input.capabilities?.osVersion ?? url.searchParams.get("osVersion") ?? undefined,
         sdks:
@@ -24412,38 +24496,41 @@ export class AWSProvider implements CloudProvider {
             : undefined),
       });
       variantSelectors = normalizeImageVariantSelectors(input.variantSelectors);
-      const declaredSDKs = mergePromotionVersions(
+      declaredSDKs = mergePromotionVersions(
         declaredCapabilities?.sdks,
         variantSelectors?.sdks,
         "sdk",
         "variantSelectors.sdks",
       );
-      const declaredRuntimes = mergePromotionVersions(
+      declaredRuntimes = mergePromotionVersions(
         declaredCapabilities?.runtimes,
         variantSelectors?.runtimes,
         "runtime",
         "variantSelectors.runtimes",
       );
-      capabilities = normalizeImageCapabilities({
-        ...prior?.capabilities,
-        ...declaredCapabilities,
-        osVersion: declaredCapabilities?.osVersion ?? prior?.capabilities?.osVersion,
-        sdks: declaredSDKs
-          ? { ...prior?.capabilities?.sdks, ...declaredSDKs }
-          : prior?.capabilities?.sdks,
-        runtimes: declaredRuntimes
-          ? { ...prior?.capabilities?.runtimes, ...declaredRuntimes }
-          : prior?.capabilities?.runtimes,
-        browser: declaredCapabilities?.browser ?? prior?.capabilities?.browser,
-        webview2: declaredCapabilities?.webview2 ?? prior?.capabilities?.webview2,
-        desktop: declaredCapabilities?.desktop ?? prior?.capabilities?.desktop,
-      });
     } catch (error) {
       return json(
         { error: "invalid_image_capabilities", message: coordinatorErrorMessage(this.env, error) },
         { status: 400 },
       );
     }
+    const accumulatedCapabilities = (
+      priorCapabilities: ImageCapabilities | undefined,
+    ): ImageCapabilities | undefined =>
+      normalizeImageCapabilities({
+        ...priorCapabilities,
+        ...declaredCapabilities,
+        osVersion: declaredCapabilities?.osVersion ?? priorCapabilities?.osVersion,
+        sdks: declaredSDKs
+          ? { ...priorCapabilities?.sdks, ...declaredSDKs }
+          : priorCapabilities?.sdks,
+        runtimes: declaredRuntimes
+          ? { ...priorCapabilities?.runtimes, ...declaredRuntimes }
+          : priorCapabilities?.runtimes,
+        browser: declaredCapabilities?.browser ?? priorCapabilities?.browser,
+        webview2: declaredCapabilities?.webview2 ?? priorCapabilities?.webview2,
+        desktop: declaredCapabilities?.desktop ?? priorCapabilities?.desktop,
+      });
     const catalogOnly = boolFromUnknown(url.searchParams.get("catalogOnly") ?? input.catalogOnly);
     if (catalogOnly && !variantSelectors) {
       return json(
@@ -24509,6 +24596,25 @@ export class AWSProvider implements CloudProvider {
         { status: 409 },
       );
     }
+    const effectiveRegion = sanitizeAWSRegion(image.region ?? imageRegion) || region;
+    const preflightCataloged = await this.promotedImageMetadataByID(
+      imageID,
+      effectiveRegion,
+      known,
+    );
+    const preflightPrior = preflightCataloged
+      ? { ...(known?.region === effectiveRegion ? known : {}), ...preflightCataloged }
+      : known?.region === effectiveRegion
+        ? known
+        : undefined;
+    try {
+      accumulatedCapabilities(preflightPrior?.capabilities);
+    } catch (error) {
+      return json(
+        { error: "invalid_image_capabilities", message: coordinatorErrorMessage(this.env, error) },
+        { status: 400 },
+      );
+    }
     const fastSnapshotRestores =
       fastSnapshotRestoreAvailabilityZones.length > 0
         ? await provider.enableFastSnapshotRestore(
@@ -24516,35 +24622,69 @@ export class AWSProvider implements CloudProvider {
             fastSnapshotRestoreAvailabilityZones,
           )
         : undefined;
-    const promoted: PromotedImageRecord = {
-      ...image,
-      ...(fastSnapshotRestores ? { fastSnapshotRestores } : {}),
-      target,
-      ...(imageOS ? { os: imageOS } : {}),
-      region: image.region ?? imageRegion,
-      architecture:
-        image.architecture ?? awsImageArchitectureForTarget(target, image.serverType ?? ""),
-      promotedAt: new Date().toISOString(),
-      ...(capabilities ? { capabilities } : {}),
-      ...(catalogOnly && variantSelectors ? { catalogOnly: true, variantSelectors } : {}),
-    };
-    if (catalogOnly) {
-      await this.storage.put(promotedAWSImageCatalogKey(promoted), promoted);
-    } else {
-      await this.storage.put(promotedAWSImageKey(promoted), promoted);
-      await this.storage.put(promotedAWSImageCatalogKey(promoted), promoted);
-      if (target === "linux" && promoted.os) {
-        await this.storage.put(promotedAWSLinuxOSImageKey(promoted), promoted);
+    const { capabilities: _providerCapabilities, ...validatedImage } = image;
+    void _providerCapabilities;
+    try {
+      const promoted = await imageCatalogTransaction(this.storage, async (transaction) => {
+        const currentCataloged = await this.promotedImageMetadataByID(
+          imageID,
+          effectiveRegion,
+          known,
+          transaction,
+        );
+        const currentPrior: (ProviderImage & Partial<PromotedImageRecord>) | undefined =
+          currentCataloged
+            ? { ...(known?.region === effectiveRegion ? known : {}), ...currentCataloged }
+            : known?.region === effectiveRegion
+              ? known
+              : undefined;
+        const capabilities = accumulatedCapabilities(currentPrior?.capabilities);
+        const next: PromotedImageRecord = {
+          ...validatedImage,
+          ...(fastSnapshotRestores ? { fastSnapshotRestores } : {}),
+          target,
+          ...(imageOS ? { os: imageOS } : {}),
+          region: effectiveRegion,
+          architecture:
+            image.architecture ?? awsImageArchitectureForTarget(target, image.serverType ?? ""),
+          promotedAt: new Date().toISOString(),
+          ...(capabilities ? { capabilities } : {}),
+          ...(catalogOnly && variantSelectors ? { catalogOnly: true, variantSelectors } : {}),
+        };
+        await deletePromotedAWSImageRecords(transaction, imageID, ["image:aws:variant:"], {
+          region: effectiveRegion,
+        });
+        if (catalogOnly) {
+          await transaction.put(promotedAWSImageVariantKey(next), next);
+          return next;
+        }
+        await transaction.put(promotedAWSImageCatalogKey(next), next);
+        if (target === "linux" && next.os) {
+          await transaction.put(promotedAWSLinuxOSImageKey(next), next);
+        }
+        if (
+          target === "linux" &&
+          (!next.os || next.os === "ubuntu:24.04") &&
+          legacyPromotedAWSImageCompatible(next)
+        ) {
+          await transaction.put(legacyPromotedAWSImageKey(), next);
+        }
+        await transaction.put(promotedAWSImageKey(next), next);
+        return next;
+      });
+      return { image: promoted };
+    } catch (error) {
+      if (error instanceof InvalidImageCapabilitiesError) {
+        return json(
+          {
+            error: "invalid_image_capabilities",
+            message: coordinatorErrorMessage(this.env, error),
+          },
+          { status: 400 },
+        );
       }
-      if (
-        target === "linux" &&
-        (!promoted.os || promoted.os === "ubuntu:24.04") &&
-        legacyPromotedAWSImageCompatible(promoted)
-      ) {
-        await this.storage.put(legacyPromotedAWSImageKey(), promoted);
-      }
+      throw error;
     }
-    return { image: promoted };
   }
 
   async deleteSSHKey(name: string, leaseID: string): Promise<void> {
@@ -24584,28 +24724,34 @@ export class AWSProvider implements CloudProvider {
         serverType: config.serverType,
         region: config.awsRegion,
       };
-      const [selected, catalog] = await Promise.all([
+      const [selected, catalog, variants] = await Promise.all([
         this.storage.get<PromotedImageRecord>(promotedAWSImageKey(imageScope)),
         this.storage.list<PromotedImageRecord>({
           prefix: promotedAWSImageCatalogPrefix(imageScope),
         }),
+        this.storage.list<PromotedImageRecord>({
+          prefix: promotedAWSImageVariantPrefix(imageScope),
+        }),
       ]);
-      const candidates = new Map(
-        [selected, ...catalog.values()]
+      const candidates = [
+        ...[selected, ...catalog.values()]
           .filter((image): image is PromotedImageRecord => Boolean(image))
-          .map((image) => [image.id, image]),
-      );
-      return [...candidates.values()]
-        .filter((image) => imageSatisfiesRequirements(image.capabilities, config.imageRequirements))
+          .map((image) => ({ image, variant: false })),
+        ...[...variants.values()].map((image) => ({ image, variant: true })),
+      ];
+      return candidates
+        .filter(({ image }) =>
+          imageSatisfiesRequirements(image.capabilities, config.imageRequirements),
+        )
         .filter(
-          (image) =>
-            !image.catalogOnly ||
-            catalogOnlyImageRequested(image.variantSelectors, config.imageRequirements),
+          ({ image, variant }) =>
+            !variant || catalogOnlyImageRequested(image.variantSelectors, config.imageRequirements),
         )
         .toSorted(
           (left, right) =>
-            right.promotedAt.localeCompare(left.promotedAt) || left.id.localeCompare(right.id),
-        )[0];
+            right.image.promotedAt.localeCompare(left.image.promotedAt) ||
+            left.image.id.localeCompare(right.image.id),
+        )[0]?.image;
     }
     const scoped = await this.storage.get<PromotedImageRecord>(
       promotedAWSImageKey({
@@ -24673,20 +24819,119 @@ export class AWSProvider implements CloudProvider {
   }
 
   private async promotedImageByID(imageID: string): Promise<PromotedImageRecord | undefined> {
+    const matches = await this.promotedImagesByID(imageID);
+    return matches.find((image) => image.region === this.region);
+  }
+
+  private async promotedImagesByID(imageID: string): Promise<PromotedImageRecord[]> {
     const promoted = await this.storage.list<PromotedImageRecord>({
       prefix: promotedAWSImagePrefix(),
     });
-    return [...promoted.values()].find((image) => image.id === imageID);
+    return [...promoted.values()].filter((image) => image.id === imageID);
   }
 
-  private async promotedCatalogImageByID(
-    imageID: string,
-    preferredRegion: string,
-  ): Promise<PromotedImageRecord | undefined> {
-    const catalog = await this.storage.list<PromotedImageRecord>({ prefix: "image:aws:catalog:" });
-    const matches = [...catalog.values()].filter((image) => image.id === imageID);
-    return matches.find((image) => image.region === preferredRegion) ?? matches[0];
+  private async variantImagesByID(imageID: string): Promise<PromotedImageRecord[]> {
+    const variants = await this.storage.list<PromotedImageRecord>({ prefix: "image:aws:variant:" });
+    return [...variants.values()].filter((image) => image.id === imageID);
   }
+
+  private async promotedImageMetadataByID(
+    imageID: string,
+    region: string,
+    known?: ProviderImage,
+    storage: ProviderStateStorageView = this.storage,
+  ): Promise<PromotedImageRecord | undefined> {
+    const [catalog, variants] = await Promise.all([
+      storage.list<PromotedImageRecord>({ prefix: "image:aws:catalog:" }),
+      storage.list<PromotedImageRecord>({ prefix: "image:aws:variant:" }),
+    ]);
+    const matches = [
+      ...[...catalog.values()]
+        .filter((image) => image.id === imageID && image.region === region)
+        .map((image) => ({ image, variant: false })),
+      ...[...variants.values()]
+        .filter((image) => image.id === imageID && image.region === region)
+        .map((image) => ({ image, variant: true })),
+    ];
+    if (known?.region === region && typeof (known as PromotedImageRecord).promotedAt === "string") {
+      const knownPromotion = known as PromotedImageRecord;
+      const alreadyCataloged = matches.some(
+        ({ image, variant }) =>
+          !variant &&
+          image.promotedAt === knownPromotion.promotedAt &&
+          image.target === knownPromotion.target &&
+          image.region === knownPromotion.region,
+      );
+      if (!alreadyCataloged) matches.push({ image: knownPromotion, variant: false });
+    }
+    return mergedPromotedAWSImageHistory(matches);
+  }
+}
+
+async function deletePromotedAWSImageRecords(
+  storage: ProviderStateStorageView,
+  imageID: string,
+  prefixes: string[],
+  options: { region?: string } = {},
+): Promise<number> {
+  const catalogs = await Promise.all(
+    prefixes.map(async (prefix) => await storage.list<PromotedImageRecord>({ prefix })),
+  );
+  const keys = catalogs.flatMap((catalog) =>
+    [...catalog.entries()]
+      .filter(
+        ([, image]) =>
+          image.id === imageID && (options.region === undefined || image.region === options.region),
+      )
+      .map(([key]) => key),
+  );
+  await Promise.all(keys.map(async (key) => await storage.delete(key)));
+  return keys.length;
+}
+
+async function imageCatalogTransaction<T>(
+  storage: ProviderStateStorage,
+  callback: (transaction: ProviderStateStorageView) => Promise<T>,
+): Promise<T> {
+  if (typeof storage.transaction !== "function") {
+    throw new Error("transactional image catalog storage is required");
+  }
+  return storage.transaction(callback);
+}
+
+function mergedPromotedAWSImageHistory(
+  records: Array<{ image: PromotedImageRecord; variant: boolean }>,
+): PromotedImageRecord | undefined {
+  const ordered = records.toSorted(
+    (left, right) =>
+      left.image.promotedAt.localeCompare(right.image.promotedAt) ||
+      Number(left.variant) - Number(right.variant) ||
+      left.image.id.localeCompare(right.image.id),
+  );
+  const latest = ordered.at(-1);
+  if (!latest) return undefined;
+  const capabilities = ordered.reduce<ImageCapabilities | undefined>(
+    (inventory, { image }) => mergeImageCapabilityInventory(inventory, image.capabilities),
+    undefined,
+  );
+  return { ...latest.image, ...(capabilities ? { capabilities } : {}) };
+}
+
+function mergeImageCapabilityInventory(
+  inventory: ImageCapabilities | undefined,
+  additions: ImageCapabilities | undefined,
+): ImageCapabilities | undefined {
+  if (!additions) return inventory;
+  return {
+    ...inventory,
+    ...additions,
+    ...(inventory?.sdks || additions.sdks
+      ? { sdks: { ...inventory?.sdks, ...additions.sdks } }
+      : {}),
+    ...(inventory?.runtimes || additions.runtimes
+      ? { runtimes: { ...inventory?.runtimes, ...additions.runtimes } }
+      : {}),
+  };
 }
 
 function isRetryableAWSRegionProvisioningError(message: string): boolean {

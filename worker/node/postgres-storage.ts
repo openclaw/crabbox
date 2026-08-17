@@ -1,12 +1,15 @@
-import { Pool } from "pg";
+import { Pool, type PoolClient, type QueryResult, type QueryResultRow } from "pg";
 
-import type { CoordinatorStorage } from "../src/coordinator-runtime";
+import type { CoordinatorStorage, CoordinatorStorageView } from "../src/coordinator-runtime";
 
 const schema = "crabbox";
 const table = `${schema}.coordinator_kv`;
+const transactionAttempts = 3;
+const retryableTransactionErrorCodes = new Set(["40001", "40P01"]);
 
 export class PostgresCoordinatorStorage implements CoordinatorStorage {
   readonly pool: Pool;
+  private readonly view: PostgresCoordinatorStorageView;
 
   constructor(connectionString: string, pool?: Pool) {
     this.pool =
@@ -20,6 +23,7 @@ export class PostgresCoordinatorStorage implements CoordinatorStorage {
           10_000,
         ),
       });
+    this.view = new PostgresCoordinatorStorageView(storageQuery(this.pool));
   }
 
   async initialize(): Promise<void> {
@@ -51,43 +55,15 @@ export class PostgresCoordinatorStorage implements CoordinatorStorage {
   }
 
   async get<T>(key: string, _options?: { noCache?: boolean }): Promise<T | undefined> {
-    const result = await this.pool.query<{ encoded_value: unknown }>(
-      `
-        select case
-          when value_text_updated_at = updated_at then value_text
-          else value::text
-        end as encoded_value
-        from ${table}
-        where key = $1
-      `,
-      [key],
-    );
-    const row = result.rows[0];
-    return row ? decodeStoredValue<T>(row.encoded_value) : undefined;
+    return this.view.get<T>(key);
   }
 
   async put<T>(key: string, value: T, _options?: { noCache?: boolean }): Promise<void> {
-    const encoded = JSON.stringify(value);
-    if (encoded === undefined) {
-      throw new TypeError("coordinator storage cannot persist undefined");
-    }
-    const jsonbEncoded = jsonbCompatibleEncoding(encoded);
-    await this.pool.query(
-      `
-        insert into ${table} (key, value, value_text, value_text_updated_at)
-        values ($1, $2::jsonb, $3, now())
-        on conflict (key) do update
-        set value = excluded.value,
-            value_text = excluded.value_text,
-            value_text_updated_at = now(),
-            updated_at = now()
-      `,
-      [key, jsonbEncoded, encoded],
-    );
+    await this.view.put(key, value);
   }
 
   async delete(key: string): Promise<void> {
-    await this.pool.query(`delete from ${table} where key = $1`, [key]);
+    await this.view.delete(key);
   }
 
   async take<T>(key: string): Promise<T | undefined> {
@@ -116,10 +92,132 @@ export class PostgresCoordinatorStorage implements CoordinatorStorage {
     startAfter?: string;
     noCache?: boolean;
   } = {}): Promise<Map<string, T>> {
+    return this.view.list<T>({ prefix, limit, startAfter });
+  }
+
+  async transaction<T>(callback: (transaction: CoordinatorStorageView) => Promise<T>): Promise<T> {
+    const attempt = async (remaining: number): Promise<T> => {
+      try {
+        return await this.transactionAttempt(callback);
+      } catch (error) {
+        if (remaining > 1 && retryablePostgresTransactionError(error)) {
+          return attempt(remaining - 1);
+        }
+        throw error;
+      }
+    };
+    return attempt(transactionAttempts);
+  }
+
+  private async transactionAttempt<T>(
+    callback: (transaction: CoordinatorStorageView) => Promise<T>,
+  ): Promise<T> {
+    const client = await this.pool.connect();
+    let releaseError: Error | undefined;
+    try {
+      await client.query("begin isolation level serializable");
+      const result = await callback(new PostgresCoordinatorStorageView(storageQuery(client)));
+      await client.query("commit");
+      return result;
+    } catch (error) {
+      try {
+        await client.query("rollback");
+      } catch (rollbackError) {
+        releaseError =
+          rollbackError instanceof Error
+            ? rollbackError
+            : new Error("PostgreSQL rollback failed", { cause: rollbackError });
+        const aggregate = new AggregateError(
+          [error, rollbackError],
+          "PostgreSQL transaction failed and rollback also failed",
+          { cause: error },
+        );
+        throw aggregate;
+      }
+      throw error;
+    } finally {
+      if (releaseError) {
+        client.release(releaseError);
+      } else {
+        client.release();
+      }
+    }
+  }
+}
+
+function retryablePostgresTransactionError(error: unknown): boolean {
+  if (error instanceof AggregateError || !error || typeof error !== "object") return false;
+  const code = "code" in error ? error.code : undefined;
+  return typeof code === "string" && retryableTransactionErrorCodes.has(code);
+}
+
+type StorageQuery = <T extends QueryResultRow>(
+  text: string,
+  values?: unknown[],
+) => Promise<QueryResult<T>>;
+
+function storageQuery(queryable: Pick<Pool | PoolClient, "query">): StorageQuery {
+  return async <T extends QueryResultRow>(text: string, values?: unknown[]) =>
+    await queryable.query<T>(text, values);
+}
+
+class PostgresCoordinatorStorageView implements CoordinatorStorageView {
+  constructor(private readonly query: StorageQuery) {}
+
+  async get<T>(key: string, _options?: { noCache?: boolean }): Promise<T | undefined> {
+    const result = await this.query<{ encoded_value: unknown }>(
+      `
+        select case
+          when value_text_updated_at = updated_at then value_text
+          else value::text
+        end as encoded_value
+        from ${table}
+        where key = $1
+      `,
+      [key],
+    );
+    const row = result.rows[0];
+    return row ? decodeStoredValue<T>(row.encoded_value) : undefined;
+  }
+
+  async put<T>(key: string, value: T, _options?: { noCache?: boolean }): Promise<void> {
+    const encoded = JSON.stringify(value);
+    if (encoded === undefined) {
+      throw new TypeError("coordinator storage cannot persist undefined");
+    }
+    const jsonbEncoded = jsonbCompatibleEncoding(encoded);
+    await this.query(
+      `
+        insert into ${table} (key, value, value_text, value_text_updated_at)
+        values ($1, $2::jsonb, $3, now())
+        on conflict (key) do update
+        set value = excluded.value,
+            value_text = excluded.value_text,
+            value_text_updated_at = now(),
+            updated_at = now()
+      `,
+      [key, jsonbEncoded, encoded],
+    );
+  }
+
+  async delete(key: string): Promise<void> {
+    await this.query(`delete from ${table} where key = $1`, [key]);
+  }
+
+  async list<T>({
+    prefix = "",
+    limit,
+    startAfter,
+  }: {
+    prefix?: string;
+    limit?: number;
+    startAfter?: string;
+    noCache?: boolean;
+  } = {}): Promise<Map<string, T>> {
     const values: unknown[] = [`${escapeLike(prefix)}%`];
     const afterClause = startAfter ? `and key > $${values.push(startAfter)}` : "";
     const limitClause = limit === undefined ? "" : `limit $${values.push(limit)}`;
-    const result = await this.pool.query<{ key: string; encoded_value: unknown }>(
+    const result = await this.query<{ key: string; encoded_value: unknown }>(
       `
         select key,
                case

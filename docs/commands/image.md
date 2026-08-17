@@ -14,6 +14,7 @@ crabbox image promote ami-1234567890abcdef0 --target macos --region us-east-1 --
 crabbox image promote snapshot-devtools --provider azure --target linux --region westeurope
 crabbox image fsr-status ami-1234567890abcdef0 --region us-west-2 --fsr-az us-west-2a
 crabbox image delete ami-1234567890abcdef0 --region eu-west-1
+crabbox image delete ami-external --catalog-only
 crabbox image delete my-managed-image --provider azure --region westeurope
 crabbox image delete my-machine-image --provider gcp --region europe-west1-b --project example-project
 crabbox image delete 123456789 --provider hetzner --region fsn1
@@ -241,6 +242,7 @@ Delete a Crabbox-created provider image.
 
 ```sh
 crabbox image delete ami-1234567890abcdef0 --region eu-west-1
+crabbox image delete ami-external --catalog-only
 crabbox image delete my-managed-image --provider azure --region westeurope
 crabbox image delete my-machine-image --provider gcp --region europe-west1-b --project example-project
 crabbox image delete 123456789 --provider hetzner --region fsn1
@@ -252,11 +254,30 @@ Flags:
 --provider <name>   image provider: aws, azure, gcp, or hetzner (default aws)
 --region <name>     region, location, or zone containing the image
 --project <name>    GCP project containing the image
+--catalog-only      unpublish every AWS catalog-only role without deleting the AMI
 ```
 
 AWS deletion deregisters the AMI and then deletes the EBS snapshots referenced by
 its block-device mappings. Azure deletion removes the managed image or disk
 snapshot. GCP deletion removes the machine image or disk snapshot.
+
+For an externally sourced AWS variant, use `--catalog-only` to remove every
+catalog-only role for the AMI while leaving the provider-owned AMI untouched.
+The command uses the dedicated `DELETE /v1/images/<id>/promote-catalog` route,
+never falls back to provider deletion, and fails with an upgrade error when the
+coordinator does not support safe retirement.
+
+Because AWS AMI IDs are regional, `--catalog-only --region <region>` retires
+only variant roles in that Region. Omitting `--region` is the explicit
+convenience form that retires every regional variant role with the same AMI ID.
+Its text output is:
+
+```text
+retired catalog-only image=ami-external provider=aws variants=1
+```
+
+Without `--catalog-only`, `image delete` keeps the existing provider deletion
+and ownership checks.
 
 Hetzner deletion runs directly without coordinator admin auth. It rejects
 `--project`, requires any supplied `--region` to match the recorded source

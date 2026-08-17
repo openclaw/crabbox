@@ -17,6 +17,8 @@ import {
   CloudflareCoordinatorRuntime,
   type CoordinatorRuntime,
   type CoordinatorSocketHandlers,
+  type CoordinatorStorage,
+  type CoordinatorStorageView,
   type CoordinatorWebSocketUpgradeOptions,
 } from "../src/coordinator-runtime";
 import {
@@ -105,12 +107,16 @@ function workspaceFixtureKey(
 }
 
 class MemoryStorage {
-  private readonly values = new Map<string, unknown>();
+  private values: Map<string, unknown>;
   private alarmTime: number | undefined;
   beforeGet?: (key: string) => Promise<void>;
   afterGet?: (key: string, value: unknown) => Promise<void> | void;
   beforePut?: (key: string, value: unknown) => Promise<void>;
   beforeDelete?: (key: string) => Promise<void>;
+
+  constructor(values = new Map<string, unknown>()) {
+    this.values = values;
+  }
 
   async get<T>(key: string, _options?: { noCache?: boolean }): Promise<T | undefined> {
     await this.beforeGet?.(key);
@@ -141,8 +147,15 @@ class MemoryStorage {
     this.alarmTime = time;
   }
 
-  async transaction<T>(callback: (transaction: MemoryStorage) => Promise<T>): Promise<T> {
-    return await callback(this);
+  async transaction<T>(callback: (transaction: CoordinatorStorageView) => Promise<T>): Promise<T> {
+    const transaction = new MemoryStorage(new Map(this.values));
+    transaction.beforeGet = this.beforeGet;
+    transaction.afterGet = this.afterGet;
+    transaction.beforePut = this.beforePut;
+    transaction.beforeDelete = this.beforeDelete;
+    const result = await callback(transaction);
+    this.values = new Map(transaction.values);
+    return result;
   }
 
   async list<T>({
@@ -28070,7 +28083,7 @@ describe("fleet lease identity and idle", () => {
     });
     expect(storage.value(defaultKey)).toEqual(expect.objectContaining({ id: "ami-default" }));
     expect(
-      storage.value("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-variant"),
+      storage.value("image:aws:variant:linux:x86_64:ubuntu26.04:eu-west-1:ami-variant"),
     ).toEqual(
       expect.objectContaining({
         id: "ami-variant",
@@ -28078,6 +28091,10 @@ describe("fleet lease identity and idle", () => {
         variantSelectors: { sdks: { toolkit: "2.0" } },
       }),
     );
+    expect(
+      storage.value("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-variant"),
+    ).toBeUndefined();
+    await expect(storage.list({ prefix: "image:aws:catalog:" })).resolves.toHaveLength(0);
   });
 
   it("serves catalog-only promotion on its dedicated coordinator route", async () => {
@@ -28124,6 +28141,61 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  it("serializes image mutations across provider awaits", async () => {
+    const order: string[] = [];
+    let releaseFirst!: () => void;
+    let markFirstStarted!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const firstStarted = new Promise<void>((resolve) => {
+      markFirstStarted = resolve;
+    });
+    const aws = fakeProvider();
+    vi.spyOn(aws, "promoteImage").mockImplementation(async (imageID) => {
+      order.push(`${imageID}:start`);
+      if (imageID === "ami-first") {
+        markFirstStarted();
+        await firstBlocked;
+      }
+      order.push(`${imageID}:end`);
+      return {
+        image: {
+          id: imageID,
+          name: imageID,
+          state: "available",
+          provider: "aws",
+          region: "eu-west-1",
+        },
+      };
+    });
+    const fleet = testFleet(new MemoryStorage(), { aws });
+
+    const first = fleet.fetch(
+      request("POST", "/v1/images/ami-first/promote?provider=aws", {
+        headers: { "x-crabbox-admin": "true" },
+      }),
+    );
+    await firstStarted;
+    const second = fleet.fetch(
+      request("POST", "/v1/images/ami-second/promote?provider=aws", {
+        headers: { "x-crabbox-admin": "true" },
+      }),
+    );
+    await Promise.resolve();
+    expect(order).toEqual(["ami-first:start"]);
+
+    releaseFirst();
+    const responses = await Promise.all([first, second]);
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    expect(order).toEqual([
+      "ami-first:start",
+      "ami-first:end",
+      "ami-second:start",
+      "ami-second:end",
+    ]);
+  });
+
   it("rejects missing, detached, or conflicting catalog variant selectors", async () => {
     const provider = new AWSProvider({} as Env, "eu-west-1", new MemoryStorage());
     vi.spyOn(provider, "getImage").mockResolvedValue({
@@ -28165,6 +28237,35 @@ describe("fleet lease identity and idle", () => {
     await expect((conflicting as Response).json()).resolves.toMatchObject({
       error: "invalid_image_capabilities",
       message: expect.stringContaining("conflicting versions for toolkit"),
+    });
+  });
+
+  it("rejects prototype-shaped promotion capability names", async () => {
+    const provider = new AWSProvider({} as Env, "eu-west-1", new MemoryStorage());
+    vi.spyOn(provider, "getImage").mockResolvedValue({
+      id: "ami-invalid",
+      name: "invalid",
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    });
+    const url = new URL(
+      "https://crabbox.test/v1/images/ami-invalid/promote?target=linux&region=eu-west-1&sdk=__proto__%3D1",
+    );
+
+    const response = await provider.promoteImage(
+      "ami-invalid",
+      undefined,
+      new Request(url, { method: "POST", body: "{}" }),
+      url,
+    );
+
+    expect(response).toBeInstanceOf(Response);
+    expect((response as Response).status).toBe(400);
+    await expect((response as Response).json()).resolves.toMatchObject({
+      error: "invalid_image_capabilities",
+      message: expect.stringContaining('capabilities.sdks name "__proto__" is invalid'),
     });
   });
 
@@ -28210,7 +28311,7 @@ describe("fleet lease identity and idle", () => {
     };
     storage.seed("image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1", defaultImage);
     storage.seed("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-default", defaultImage);
-    storage.seed("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-variant", variantImage);
+    storage.seed("image:aws:variant:linux:x86_64:ubuntu26.04:eu-west-1:ami-variant", variantImage);
     const provider = new AWSProvider({} as Env, "eu-west-1", storage);
     const selected = async (
       imageRequirements: ReturnType<typeof leaseConfig>["imageRequirements"],
@@ -28245,9 +28346,52 @@ describe("fleet lease identity and idle", () => {
     await expect(selected({ minOS: "26.04" })).resolves.toBe("ami-default");
   });
 
+  it("preserves ordinary and variant roles when they share an AMI ID", async () => {
+    const storage = new MemoryStorage();
+    const ordinary = {
+      id: "ami-shared",
+      name: "shared",
+      state: "available",
+      target: "linux" as const,
+      os: "ubuntu:26.04",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-07-01T00:00:00Z",
+      capabilities: { runtimes: { node: "24" } },
+    };
+    const variant = {
+      ...ordinary,
+      promotedAt: "2026-07-02T00:00:00Z",
+      catalogOnly: true,
+      variantSelectors: { sdks: { toolkit: "2.0" } },
+      capabilities: { sdks: { toolkit: "2.0" }, runtimes: { node: "24" } },
+    };
+    storage.seed("image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1", ordinary);
+    storage.seed("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-shared", ordinary);
+    storage.seed("image:aws:variant:linux:x86_64:ubuntu26.04:eu-west-1:ami-shared", variant);
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    const selected = async (
+      imageRequirements: ReturnType<typeof leaseConfig>["imageRequirements"],
+    ) => {
+      const config = leaseConfig({
+        provider: "aws",
+        os: "ubuntu:26.04",
+        sshPublicKey: "ssh-ed25519 test",
+        imageRequirements,
+      });
+      const prepared = await provider.prepareLeaseConfig(config);
+      return prepared.awsPromotedAMIs[awsPromotedAMIConfigKey("eu-west-1", config.serverType)];
+    };
+
+    await expect(selected({ runtimes: { node: "24" } })).resolves.toBe("ami-shared");
+    await expect(selected({ sdks: { toolkit: "2.0" }, runtimes: { node: "24" } })).resolves.toBe(
+      "ami-shared",
+    );
+  });
+
   it("clears catalog-only selector metadata on ordinary re-promotion", async () => {
     const storage = new MemoryStorage();
-    const catalogKey = "image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-variant";
+    const catalogKey = "image:aws:variant:linux:x86_64:ubuntu26.04:eu-west-1:ami-variant";
     storage.seed(catalogKey, {
       id: "ami-variant",
       name: "variant",
@@ -28290,8 +28434,398 @@ describe("fleet lease identity and idle", () => {
     );
     expect(scoped).not.toHaveProperty("catalogOnly");
     expect(scoped).not.toHaveProperty("variantSelectors");
-    expect(storage.value(catalogKey)).not.toHaveProperty("catalogOnly");
-    expect(storage.value(catalogKey)).not.toHaveProperty("variantSelectors");
+    expect(storage.value(catalogKey)).toBeUndefined();
+    expect(
+      storage.value("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-variant"),
+    ).toEqual(
+      expect.objectContaining({
+        capabilities: { sdks: { toolkit: "2.0" }, runtimes: { node: "24" } },
+      }),
+    );
+  });
+
+  it("moves a catalog-only AMI to one canonical variant scope", async () => {
+    const storage = new MemoryStorage();
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockResolvedValue({
+      id: "ami-variant",
+      name: "variant",
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    });
+    const promote = async (target: "linux" | "windows") => {
+      const url = new URL(
+        `https://crabbox.test/v1/images/ami-variant/promote-catalog?target=${target}&region=eu-west-1&catalogOnly=true`,
+      );
+      return await provider.promoteImage(
+        "ami-variant",
+        undefined,
+        new Request(url, {
+          method: "POST",
+          body: JSON.stringify({ variantSelectors: { sdks: { toolkit: "2.0" } } }),
+        }),
+        url,
+      );
+    };
+
+    await promote("linux");
+    await promote("windows");
+
+    expect(
+      storage.value("image:aws:variant:linux:x86_64:ubuntu26.04:eu-west-1:ami-variant"),
+    ).toBeUndefined();
+    expect(storage.value("image:aws:variant:windows:x86_64:eu-west-1:ami-variant")).toEqual(
+      expect.objectContaining({ id: "ami-variant", target: "windows" }),
+    );
+    await expect(storage.list({ prefix: "image:aws:variant:" })).resolves.toHaveLength(1);
+  });
+
+  it("does not publish a new variant when stale-role cleanup fails", async () => {
+    const storage = new MemoryStorage();
+    const staleKey = "image:aws:variant:linux:x86_64:ubuntu26.04:eu-west-1:ami-variant";
+    storage.seed(staleKey, {
+      id: "ami-variant",
+      state: "available",
+      provider: "aws",
+      target: "linux",
+      os: "ubuntu:26.04",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-07-01T00:00:00Z",
+      catalogOnly: true,
+      variantSelectors: { sdks: { toolkit: "1.0" } },
+    });
+    storage.beforeDelete = async () => {
+      throw new Error("variant cleanup failed");
+    };
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockResolvedValue({
+      id: "ami-variant",
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    });
+    const url = new URL(
+      "https://crabbox.test/v1/images/ami-variant/promote-catalog?target=windows&region=eu-west-1&catalogOnly=true",
+    );
+
+    await expect(
+      provider.promoteImage(
+        "ami-variant",
+        undefined,
+        new Request(url, {
+          method: "POST",
+          body: JSON.stringify({ variantSelectors: { sdks: { toolkit: "2.0" } } }),
+        }),
+        url,
+      ),
+    ).rejects.toThrow("variant cleanup failed");
+    expect(storage.value(staleKey)).toBeDefined();
+    expect(storage.value("image:aws:variant:windows:x86_64:eu-west-1:ami-variant")).toBeUndefined();
+  });
+
+  it("rolls back catalog-only replacement when the final variant write fails", async () => {
+    const storage = new MemoryStorage();
+    const staleKey = "image:aws:variant:linux:x86_64:ubuntu26.04:eu-west-1:ami-variant";
+    const stale = {
+      id: "ami-variant",
+      state: "available",
+      provider: "aws",
+      target: "linux",
+      os: "ubuntu:26.04",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-07-01T00:00:00Z",
+      catalogOnly: true,
+      variantSelectors: { sdks: { toolkit: "1.0" } },
+    };
+    storage.seed(staleKey, stale);
+    storage.beforePut = async (key) => {
+      if (key === "image:aws:variant:windows:x86_64:eu-west-1:ami-variant") {
+        throw new Error("variant publish failed");
+      }
+    };
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockResolvedValue({
+      id: "ami-variant",
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    });
+    const url = new URL(
+      "https://crabbox.test/v1/images/ami-variant/promote-catalog?target=windows&region=eu-west-1&catalogOnly=true",
+    );
+
+    await expect(
+      provider.promoteImage(
+        "ami-variant",
+        undefined,
+        new Request(url, {
+          method: "POST",
+          body: JSON.stringify({ variantSelectors: { sdks: { toolkit: "2.0" } } }),
+        }),
+        url,
+      ),
+    ).rejects.toThrow("variant publish failed");
+    expect(storage.value(staleKey)).toEqual(stale);
+    await expect(storage.list({ prefix: "image:aws:variant:" })).resolves.toHaveLength(1);
+  });
+
+  it("keeps the previous ordinary default when variant cleanup fails", async () => {
+    const storage = new MemoryStorage();
+    const defaultKey = "image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1";
+    storage.seed(defaultKey, {
+      id: "ami-default",
+      state: "available",
+      provider: "aws",
+      target: "linux",
+      os: "ubuntu:26.04",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-07-01T00:00:00Z",
+    });
+    storage.seed("image:aws:variant:linux:x86_64:ubuntu26.04:eu-west-1:ami-next", {
+      id: "ami-next",
+      state: "available",
+      provider: "aws",
+      target: "linux",
+      os: "ubuntu:26.04",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-07-02T00:00:00Z",
+      catalogOnly: true,
+      variantSelectors: { sdks: { toolkit: "2.0" } },
+    });
+    storage.beforeDelete = async () => {
+      throw new Error("variant cleanup failed");
+    };
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockResolvedValue({
+      id: "ami-next",
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    });
+    const url = new URL(
+      "https://crabbox.test/v1/images/ami-next/promote?target=linux&region=eu-west-1",
+    );
+
+    await expect(
+      provider.promoteImage(
+        "ami-next",
+        undefined,
+        new Request(url, { method: "POST", body: "{}" }),
+        url,
+      ),
+    ).rejects.toThrow("variant cleanup failed");
+    expect(storage.value(defaultKey)).toEqual(expect.objectContaining({ id: "ami-default" }));
+    expect(
+      storage.value("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-next"),
+    ).toBeUndefined();
+  });
+
+  it("keeps the previous ordinary default when the new default write fails", async () => {
+    const storage = new MemoryStorage();
+    const defaultKey = "image:aws:promoted:windows:x86_64:eu-west-1";
+    storage.seed(defaultKey, {
+      id: "ami-default",
+      state: "available",
+      provider: "aws",
+      target: "windows",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-07-01T00:00:00Z",
+    });
+    storage.beforePut = async (key) => {
+      if (key === defaultKey) throw new Error("default publish failed");
+    };
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockResolvedValue({
+      id: "ami-next",
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    });
+    const url = new URL(
+      "https://crabbox.test/v1/images/ami-next/promote?target=windows&region=eu-west-1",
+    );
+
+    await expect(
+      provider.promoteImage(
+        "ami-next",
+        undefined,
+        new Request(url, { method: "POST", body: "{}" }),
+        url,
+      ),
+    ).rejects.toThrow("default publish failed");
+    expect(storage.value(defaultKey)).toEqual(expect.objectContaining({ id: "ami-default" }));
+    expect(storage.value("image:aws:catalog:windows:x86_64:eu-west-1:ami-next")).toBeUndefined();
+  });
+
+  it("re-reads regional capability history after provider validation", async () => {
+    const storage = new MemoryStorage();
+    const catalogKey = "image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-shared";
+    storage.seed(catalogKey, {
+      id: "ami-shared",
+      state: "available",
+      provider: "aws",
+      target: "linux",
+      os: "ubuntu:26.04",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-07-01T00:00:00Z",
+      capabilities: { runtimes: { node: "22" } },
+    });
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockImplementation(async () => {
+      storage.seed("image:aws:variant:linux:x86_64:ubuntu26.04:eu-west-1:ami-shared", {
+        id: "ami-shared",
+        state: "available",
+        provider: "aws",
+        target: "linux",
+        os: "ubuntu:26.04",
+        region: "eu-west-1",
+        architecture: "x86_64",
+        promotedAt: "2026-07-02T00:00:00Z",
+        catalogOnly: true,
+        variantSelectors: { sdks: { toolkit: "2.0" } },
+        capabilities: {
+          sdks: { toolkit: "2.0" },
+          runtimes: { node: "24" },
+        },
+      });
+      return {
+        id: "ami-shared",
+        state: "available",
+        provider: "aws",
+        region: "eu-west-1",
+        architecture: "x86_64",
+      };
+    });
+    const url = new URL(
+      "https://crabbox.test/v1/images/ami-shared/promote?target=linux&region=eu-west-1",
+    );
+
+    await provider.promoteImage(
+      "ami-shared",
+      undefined,
+      new Request(url, { method: "POST", body: "{}" }),
+      url,
+    );
+
+    expect(storage.value(catalogKey)).toEqual(
+      expect.objectContaining({
+        capabilities: { sdks: { toolkit: "2.0" }, runtimes: { node: "24" } },
+      }),
+    );
+  });
+
+  it("keeps same-string AMI history and cleanup within the effective Region", async () => {
+    const storage = new MemoryStorage();
+    const euVariantKey = "image:aws:variant:linux:x86_64:ubuntu26.04:eu-west-1:ami-shared";
+    const usVariantKey = "image:aws:variant:linux:x86_64:ubuntu26.04:us-east-1:ami-shared";
+    storage.seed(euVariantKey, {
+      id: "ami-shared",
+      state: "available",
+      provider: "aws",
+      target: "linux",
+      os: "ubuntu:26.04",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-07-03T00:00:00Z",
+      catalogOnly: true,
+      variantSelectors: { sdks: { toolkit: "2.0" } },
+      capabilities: { sdks: { toolkit: "2.0" } },
+    });
+    storage.seed(usVariantKey, {
+      id: "ami-shared",
+      state: "available",
+      provider: "aws",
+      target: "linux",
+      os: "ubuntu:26.04",
+      region: "us-east-1",
+      architecture: "x86_64",
+      promotedAt: "2026-07-02T00:00:00Z",
+      catalogOnly: true,
+      variantSelectors: { sdks: { go: "1.25" } },
+      capabilities: { sdks: { go: "1.25" } },
+    });
+    const provider = new AWSProvider({} as Env, "us-east-1", storage);
+    vi.spyOn(provider, "getImage").mockResolvedValue({
+      id: "ami-shared",
+      state: "available",
+      provider: "aws",
+      region: "us-east-1",
+      architecture: "x86_64",
+    });
+    const url = new URL(
+      "https://crabbox.test/v1/images/ami-shared/promote?target=linux&region=us-east-1&runtime=node%3D24",
+    );
+
+    await provider.promoteImage(
+      "ami-shared",
+      undefined,
+      new Request(url, { method: "POST", body: "{}" }),
+      url,
+    );
+
+    expect(storage.value(euVariantKey)).toBeDefined();
+    expect(storage.value(usVariantKey)).toBeUndefined();
+    const promoted = storage.value<{
+      capabilities?: { sdks?: Record<string, string>; runtimes?: Record<string, string> };
+    }>("image:aws:catalog:linux:x86_64:ubuntu26.04:us-east-1:ami-shared");
+    expect(promoted?.capabilities).toEqual({
+      sdks: { go: "1.25" },
+      runtimes: { node: "24" },
+    });
+    expect(promoted?.capabilities?.sdks).not.toHaveProperty("toolkit");
+  });
+
+  it("preserves capability inventory through ordinary to variant to ordinary routes", async () => {
+    const storage = new MemoryStorage();
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockResolvedValue({
+      id: "ami-shared",
+      name: "shared",
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    });
+    const fleet = testFleet(storage, { aws: provider });
+    const promote = async (path: string, body: Record<string, unknown> = {}) => {
+      const response = await fleet.fetch(
+        request("POST", path, {
+          headers: { "x-crabbox-admin": "true" },
+          body,
+        }),
+      );
+      expect(response.status).toBe(200);
+    };
+
+    await promote(
+      "/v1/images/ami-shared/promote?provider=aws&target=linux&region=eu-west-1&runtime=node%3D22",
+    );
+    await promote(
+      "/v1/images/ami-shared/promote-catalog?provider=aws&target=linux&region=eu-west-1&runtime=node%3D24",
+      { variantSelectors: { sdks: { toolkit: "2.0" } } },
+    );
+    await promote("/v1/images/ami-shared/promote?provider=aws&target=linux&region=eu-west-1");
+
+    expect(
+      storage.value("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-shared"),
+    ).toEqual(
+      expect.objectContaining({
+        capabilities: { sdks: { toolkit: "2.0" }, runtimes: { node: "24" } },
+      }),
+    );
+    await expect(storage.list({ prefix: "image:aws:variant:" })).resolves.toHaveLength(0);
   });
 
   it("records the exact promoted AWS image selected for a lease", async () => {
@@ -29115,6 +29649,50 @@ describe("fleet lease identity and idle", () => {
     );
   });
 
+  it("validates accumulated capabilities before enabling Fast Snapshot Restore", async () => {
+    const storage = new MemoryStorage();
+    storage.seed("image:aws:catalog:windows:x86_64:eu-west-1:ami-tools", {
+      id: "ami-tools",
+      state: "available",
+      provider: "aws",
+      target: "windows",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-08-01T00:00:00Z",
+      capabilities: {
+        sdks: Object.fromEntries(Array.from({ length: 32 }, (_, index) => [`sdk${index}`, "1"])),
+      },
+    });
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockResolvedValue({
+      id: "ami-tools",
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      snapshots: ["snap-root"],
+    });
+    const enable = vi.spyOn(provider, "enableFastSnapshotRestore").mockResolvedValue([]);
+    const url = new URL(
+      "https://crabbox.test/v1/images/ami-tools/promote?target=windows&region=eu-west-1&sdk=extra%3D1&fastSnapshotRestore=true&fsrAz=eu-west-1a",
+    );
+
+    const response = await provider.promoteImage(
+      "ami-tools",
+      undefined,
+      new Request(url, { method: "POST", body: "{}" }),
+      url,
+    );
+
+    expect(response).toBeInstanceOf(Response);
+    expect((response as Response).status).toBe(400);
+    await expect((response as Response).json()).resolves.toMatchObject({
+      error: "invalid_image_capabilities",
+      message: expect.stringContaining("supports at most 32 entries"),
+    });
+    expect(enable).not.toHaveBeenCalled();
+  });
+
   it("returns current AWS Fast Snapshot Restore status for promoted images", async () => {
     const storage = new MemoryStorage();
     const statusCalls: Array<{ snapshots: string[]; zones: string[] | undefined }> = [];
@@ -29799,13 +30377,513 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value(otherCatalogKey)).toEqual(otherImage);
     expect(storage.value(claimKey)).toBeUndefined();
     expect(claimDeletedAfterCatalog).toBe(true);
-    expect(recordsPresentWhenClaimDeleted).toEqual([
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
+    expect(recordsPresentWhenClaimDeleted).toEqual([undefined, undefined, undefined, image, image]);
+  });
+
+  it("reroutes implicit AWS image GET and deletion to stored Regions", async () => {
+    const storage = new MemoryStorage();
+    storage.seed("image:aws:promoted:linux:x86_64:ubuntu26.04:us-east-1", {
+      id: "ami-promoted",
+      name: "promoted",
+      state: "available",
+      provider: "aws",
+      target: "linux",
+      os: "ubuntu:26.04",
+      region: "us-east-1",
+      architecture: "x86_64",
+      promotedAt: "2026-08-01T00:00:00Z",
+    });
+    storage.seed("image:aws:created:ami-created", {
+      id: "ami-created",
+      name: "created",
+      state: "available",
+      provider: "aws",
+      region: "us-east-1",
+      architecture: "x86_64",
+    });
+    const calls: Array<{ action: string; host: string; imageID: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
+        async (input, init) => {
+          const providerRequest = input instanceof Request ? input : new Request(input, init);
+          const params = new URLSearchParams(await providerRequest.clone().text());
+          const action = params.get("Action") ?? "";
+          const imageID = params.get("ImageId.1") ?? params.get("ImageId") ?? "";
+          calls.push({ action, host: new URL(providerRequest.url).host, imageID });
+          if (action === "DescribeImages") {
+            return ec2XMLResponse(`
+              <DescribeImagesResponse><imagesSet><item>
+                <imageId>${imageID}</imageId><name>${imageID}</name>
+                <imageState>available</imageState><architecture>x86_64</architecture>
+              </item></imagesSet></DescribeImagesResponse>
+            `);
+          }
+          if (action === "DeregisterImage") {
+            return ec2XMLResponse("<DeregisterImageResponse />");
+          }
+          return ec2XMLResponse("<ErrorResponse />", 500);
+        },
+      ),
+    );
+    const fleet = testFleet(
+      storage,
+      {},
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_REGION: "eu-west-1",
+      },
+    );
+
+    const get = await fleet.fetch(
+      request("GET", "/v1/images/ami-promoted?provider=aws", {
+        headers: { "x-crabbox-admin": "true" },
+      }),
+    );
+    const deleted = await fleet.fetch(
+      request("DELETE", "/v1/images/ami-created?provider=aws", {
+        headers: { "x-crabbox-admin": "true" },
+      }),
+    );
+
+    expect(get.status).toBe(200);
+    await expect(get.json()).resolves.toMatchObject({ image: { region: "us-east-1" } });
+    expect(deleted.status).toBe(200);
+    expect(calls).toEqual([
+      { action: "DescribeImages", host: "ec2.us-east-1.amazonaws.com", imageID: "ami-promoted" },
+      { action: "DescribeImages", host: "ec2.us-east-1.amazonaws.com", imageID: "ami-created" },
+      { action: "DeregisterImage", host: "ec2.us-east-1.amazonaws.com", imageID: "ami-created" },
     ]);
+  });
+
+  it("prefers current-Region ordinary metadata when an AMI ID exists in multiple Regions", async () => {
+    const storage = new MemoryStorage();
+    for (const region of ["eu-west-1", "us-east-1"]) {
+      storage.seed(`image:aws:promoted:windows:x86_64:${region}`, {
+        id: "ami-shared",
+        state: "available",
+        provider: "aws",
+        target: "windows",
+        region,
+        architecture: "x86_64",
+        promotedAt: "2026-08-01T00:00:00Z",
+      });
+    }
+
+    const metadata = await new AWSProvider({} as Env, "us-east-1", storage).storedImageMetadata(
+      "ami-shared",
+    );
+
+    expect(metadata?.region).toBe("us-east-1");
+  });
+
+  it("prefers a current-Region variant over an ordinary fallback from another Region", async () => {
+    const storage = new MemoryStorage();
+    storage.seed("image:aws:promoted:windows:x86_64:eu-west-1", {
+      id: "ami-shared",
+      state: "available",
+      provider: "aws",
+      target: "windows",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-08-01T00:00:00Z",
+    });
+    storage.seed("image:aws:variant:windows:x86_64:us-east-1:ami-shared", {
+      id: "ami-shared",
+      state: "available",
+      provider: "aws",
+      target: "windows",
+      region: "us-east-1",
+      architecture: "x86_64",
+      promotedAt: "2026-08-02T00:00:00Z",
+      catalogOnly: true,
+      variantSelectors: { sdks: { toolkit: "2.0" } },
+    });
+    storage.seed("image:aws:created:ami-shared", {
+      id: "ami-shared",
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    });
+
+    const metadata = await new AWSProvider({} as Env, "us-east-1", storage).storedImageMetadata(
+      "ami-shared",
+    );
+
+    expect(metadata?.region).toBe("us-east-1");
+    expect(metadata).toHaveProperty("catalogOnly", true);
+  });
+
+  it("uses external variant metadata for implicit reads without granting delete ownership", async () => {
+    const storage = new MemoryStorage();
+    storage.seed("image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1", {
+      id: "ami-external",
+      name: "remote-ordinary",
+      state: "available",
+      provider: "aws",
+      target: "linux",
+      os: "ubuntu:26.04",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      promotedAt: "2026-07-01T00:00:00Z",
+    });
+    storage.seed("image:aws:created:ami-external", {
+      id: "ami-external",
+      name: "remote-created",
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      architecture: "x86_64",
+    });
+    const variantKey = "image:aws:variant:linux:x86_64:ubuntu26.04:us-east-1:ami-external";
+    storage.seed(variantKey, {
+      id: "ami-external",
+      name: "external",
+      state: "available",
+      provider: "aws",
+      target: "linux",
+      os: "ubuntu:26.04",
+      region: "us-east-1",
+      architecture: "x86_64",
+      promotedAt: "2026-08-01T00:00:00Z",
+      catalogOnly: true,
+      variantSelectors: { sdks: { toolkit: "2.0" } },
+    });
+    const calls: Array<{ action: string; host: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
+        async (input, init) => {
+          const providerRequest = input instanceof Request ? input : new Request(input, init);
+          const action =
+            new URLSearchParams(await providerRequest.clone().text()).get("Action") ?? "";
+          calls.push({ action, host: new URL(providerRequest.url).host });
+          if (action === "DescribeImages") {
+            return ec2XMLResponse(`
+              <DescribeImagesResponse><imagesSet><item>
+                <imageId>ami-external</imageId><name>external</name>
+                <imageState>available</imageState><architecture>x86_64</architecture>
+                <blockDeviceMapping><item><ebs><snapshotId>snap-root</snapshotId></ebs></item></blockDeviceMapping>
+              </item></imagesSet></DescribeImagesResponse>
+            `);
+          }
+          if (action === "DescribeFastSnapshotRestores") {
+            return ec2XMLResponse(`
+              <DescribeFastSnapshotRestoresResponse><fastSnapshotRestoreSet><item>
+                <snapshotId>snap-root</snapshotId><availabilityZone>us-east-1a</availabilityZone>
+                <state>enabled</state>
+              </item></fastSnapshotRestoreSet></DescribeFastSnapshotRestoresResponse>
+            `);
+          }
+          return ec2XMLResponse("<ErrorResponse />", 500);
+        },
+      ),
+    );
+    const fleet = testFleet(
+      storage,
+      {},
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_AWS_REGION: "us-east-1",
+      },
+    );
+
+    const get = await fleet.fetch(
+      request("GET", "/v1/images/ami-external?provider=aws", {
+        headers: { "x-crabbox-admin": "true" },
+      }),
+    );
+    const fsr = await fleet.fetch(
+      request("GET", "/v1/images/ami-external/fast-snapshot-restore?provider=aws", {
+        headers: { "x-crabbox-admin": "true" },
+      }),
+    );
+    const providerDelete = await fleet.fetch(
+      request("DELETE", "/v1/images/ami-external?provider=aws", {
+        headers: { "x-crabbox-admin": "true" },
+      }),
+    );
+    const retirement = await fleet.fetch(
+      request("DELETE", "/v1/images/ami-external/promote-catalog?provider=aws", {
+        headers: { "x-crabbox-admin": "true" },
+      }),
+    );
+
+    expect(get.status).toBe(200);
+    await expect(get.json()).resolves.toMatchObject({ image: { region: "us-east-1" } });
+    expect(fsr.status).toBe(200);
+    await expect(fsr.json()).resolves.toMatchObject({
+      fastSnapshotRestores: [
+        { snapshotID: "snap-root", availabilityZone: "us-east-1a", state: "enabled" },
+      ],
+    });
+    expect(providerDelete.status).toBe(409);
+    await expect(providerDelete.json()).resolves.toMatchObject({ error: "image_not_owned" });
+    expect(retirement.status).toBe(200);
+    await expect(retirement.json()).resolves.toMatchObject({ retired: 1 });
+    expect(storage.value(variantKey)).toBeUndefined();
+    expect(calls).toEqual([
+      { action: "DescribeImages", host: "ec2.us-east-1.amazonaws.com" },
+      { action: "DescribeImages", host: "ec2.us-east-1.amazonaws.com" },
+      { action: "DescribeFastSnapshotRestores", host: "ec2.us-east-1.amazonaws.com" },
+    ]);
+  });
+
+  it("retires external AWS variants without deleting the provider image", async () => {
+    const storage = new MemoryStorage();
+    const euKey = "image:aws:variant:linux:x86_64:ubuntu26.04:eu-west-1:ami-external";
+    const usKey = "image:aws:variant:linux:x86_64:ubuntu26.04:us-east-1:ami-external";
+    for (const [key, region] of [
+      [euKey, "eu-west-1"],
+      [usKey, "us-east-1"],
+    ]) {
+      storage.seed(key, {
+        id: "ami-external",
+        name: "external",
+        state: "available",
+        provider: "aws",
+        target: "linux",
+        os: "ubuntu:26.04",
+        region,
+        architecture: "x86_64",
+        promotedAt: "2026-08-01T00:00:00Z",
+        catalogOnly: true,
+        variantSelectors: { sdks: { toolkit: "2.0" } },
+      });
+    }
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    const deleteImage = vi.fn<(imageID: string) => Promise<void>>(async () => {});
+    (
+      provider as unknown as {
+        clientValue: { deleteImage: typeof deleteImage };
+      }
+    ).clientValue = { deleteImage };
+    const fleet = testFleet(storage, { aws: provider });
+
+    const regional = await fleet.fetch(
+      request("DELETE", "/v1/images/ami-external/promote-catalog?provider=aws&region=us-east-1", {
+        headers: { "x-crabbox-admin": "true" },
+      }),
+    );
+
+    expect(regional.status).toBe(200);
+    expect(deleteImage).not.toHaveBeenCalled();
+    expect(storage.value(usKey)).toBeUndefined();
+    expect(storage.value(euKey)).toBeDefined();
+    await expect(regional.json()).resolves.toEqual({
+      imageID: "ami-external",
+      catalogOnly: true,
+      retired: 1,
+    });
+
+    const allRegions = await fleet.fetch(
+      request("DELETE", "/v1/images/ami-external/promote-catalog?provider=aws", {
+        headers: { "x-crabbox-admin": "true" },
+      }),
+    );
+
+    expect(allRegions.status).toBe(200);
+    expect(deleteImage).not.toHaveBeenCalled();
+    expect(storage.value(euKey)).toBeUndefined();
+    await expect(allRegions.json()).resolves.toEqual({
+      imageID: "ami-external",
+      catalogOnly: true,
+      retired: 1,
+    });
+  });
+
+  it("rolls back catalog-only retirement when any metadata delete fails", async () => {
+    const storage = new MemoryStorage();
+    const keys = [
+      "image:aws:variant:linux:x86_64:ubuntu26.04:eu-west-1:ami-external",
+      "image:aws:variant:windows:x86_64:eu-west-1:ami-external",
+    ];
+    for (const key of keys) {
+      storage.seed(key, {
+        id: "ami-external",
+        state: "available",
+        provider: "aws",
+        region: "eu-west-1",
+        promotedAt: "2026-08-01T00:00:00Z",
+        catalogOnly: true,
+        variantSelectors: { sdks: { toolkit: "2.0" } },
+      });
+    }
+    storage.beforeDelete = async (key) => {
+      if (key === keys[1]) throw new Error("retirement delete failed");
+    };
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+
+    await expect(provider.retireCatalogImage("ami-external", "eu-west-1")).rejects.toThrow(
+      "retirement delete failed",
+    );
+    for (const key of keys) expect(storage.value(key)).toBeDefined();
+  });
+
+  it("fails closed when image catalog storage is not transactional", async () => {
+    const storage = {
+      get: async () => undefined,
+      put: async () => {},
+      delete: async () => {},
+      list: async () => new Map(),
+    } as unknown as CoordinatorStorage;
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+
+    await expect(provider.retireCatalogImage("ami-external")).rejects.toThrow(
+      "transactional image catalog storage is required",
+    );
+  });
+
+  it("rejects catalog-only retirement for non-AWS providers", async () => {
+    const fleet = testFleet(new MemoryStorage(), {
+      azure: fakeProvider(undefined, { provider: "azure" }),
+    });
+
+    const response = await fleet.fetch(
+      request("DELETE", "/v1/images/snapshot-variant/promote-catalog?provider=azure", {
+        headers: { "x-crabbox-admin": "true" },
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "unsupported_provider",
+      message: "catalog-only image retirement is AWS-only",
+    });
+  });
+
+  it("rejects an invalid explicit catalog-only retirement Region", async () => {
+    const storage = new MemoryStorage();
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    const retire = vi.spyOn(provider, "retireCatalogImage");
+    const fleet = testFleet(storage, { aws: provider });
+
+    const response = await fleet.fetch(
+      request(
+        "DELETE",
+        "/v1/images/ami-external/promote-catalog?provider=aws&region=not-a-region",
+        { headers: { "x-crabbox-admin": "true" } },
+      ),
+    );
+
+    expect(response.status).toBe(400);
+    expect(retire).not.toHaveBeenCalled();
+    await expect(response.json()).resolves.toEqual({
+      error: "invalid_region",
+      message: "region must be an AWS region name",
+    });
+  });
+
+  it("removes ordinary and variant catalog metadata after provider image deletion", async () => {
+    const storage = new MemoryStorage();
+    const image = {
+      id: "ami-stale",
+      name: "stale",
+      state: "available",
+      provider: "aws" as const,
+      region: "eu-west-1",
+      architecture: "x86_64",
+    };
+    const catalogKey = "image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-stale";
+    const variantKey = "image:aws:variant:windows:x86_64:eu-west-1:ami-stale";
+    const remoteCatalogKey = "image:aws:catalog:linux:x86_64:ubuntu26.04:us-east-1:ami-stale";
+    const remoteVariantKey = "image:aws:variant:windows:x86_64:us-east-1:ami-stale";
+    const remotePromotedKey = "image:aws:promoted:linux:x86_64:ubuntu26.04:us-east-1";
+    storage.seed("image:aws:created:ami-stale", image);
+    storage.seed(catalogKey, { ...image, promotedAt: "2026-07-01T00:00:00Z" });
+    storage.seed(variantKey, {
+      ...image,
+      promotedAt: "2026-07-02T00:00:00Z",
+      catalogOnly: true,
+      variantSelectors: { sdks: { toolkit: "2.0" } },
+    });
+    storage.seed(remoteCatalogKey, {
+      ...image,
+      region: "us-east-1",
+      promotedAt: "2026-07-01T00:00:00Z",
+    });
+    storage.seed(remoteVariantKey, {
+      ...image,
+      region: "us-east-1",
+      promotedAt: "2026-07-02T00:00:00Z",
+      catalogOnly: true,
+      variantSelectors: { sdks: { toolkit: "2.0" } },
+    });
+    storage.seed(remotePromotedKey, {
+      ...image,
+      region: "us-east-1",
+      promotedAt: "2026-07-02T00:00:00Z",
+    });
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    const getImage = vi.fn<(imageID: string) => Promise<ProviderImage>>(async () => ({
+      ...image,
+      snapshots: [],
+    }));
+    const deleteImage = vi.fn<(imageID: string, snapshotIDs?: string[]) => Promise<void>>(
+      async () => {},
+    );
+    (
+      provider as unknown as {
+        clientValue: { getImage: typeof getImage; deleteImage: typeof deleteImage };
+      }
+    ).clientValue = { getImage, deleteImage };
+    const fleet = testFleet(storage, { aws: provider });
+
+    const response = await fleet.fetch(
+      request("DELETE", "/v1/images/ami-stale?provider=aws&region=eu-west-1", {
+        headers: { "x-crabbox-admin": "true" },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(deleteImage).toHaveBeenCalledWith("ami-stale", []);
+    expect(storage.value(catalogKey)).toBeUndefined();
+    expect(storage.value(variantKey)).toBeUndefined();
+    expect(storage.value(remoteCatalogKey)).toBeDefined();
+    expect(storage.value(remoteVariantKey)).toBeDefined();
+    expect(storage.value(remotePromotedKey)).toBeDefined();
+  });
+
+  it("rolls back post-provider-delete catalog cleanup on metadata failure", async () => {
+    const storage = new MemoryStorage();
+    const catalogKey = "image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-stale";
+    const variantKey = "image:aws:variant:windows:x86_64:eu-west-1:ami-stale";
+    for (const key of [catalogKey, variantKey]) {
+      storage.seed(key, {
+        id: "ami-stale",
+        state: "available",
+        provider: "aws",
+        region: "eu-west-1",
+        promotedAt: "2026-07-01T00:00:00Z",
+      });
+    }
+    storage.beforeDelete = async (key) => {
+      if (key === variantKey) throw new Error("catalog cleanup failed");
+    };
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    const getImage = vi.fn<(imageID: string) => Promise<ProviderImage>>(async () => ({
+      id: "ami-stale",
+      state: "available",
+      provider: "aws",
+      region: "eu-west-1",
+      snapshots: [],
+    }));
+    const deleteImage = vi.fn<(imageID: string, snapshotIDs?: string[]) => Promise<void>>(
+      async () => {},
+    );
+    (
+      provider as unknown as {
+        clientValue: { getImage: typeof getImage; deleteImage: typeof deleteImage };
+      }
+    ).clientValue = { getImage, deleteImage };
+
+    await expect(provider.deleteImage("ami-stale")).rejects.toThrow("catalog cleanup failed");
+    expect(deleteImage).toHaveBeenCalledWith("ami-stale", []);
+    expect(storage.value(catalogKey)).toBeDefined();
+    expect(storage.value(variantKey)).toBeDefined();
   });
 
   it("rejects deleting AWS images without Crabbox ownership metadata", async () => {

@@ -105,6 +105,19 @@ describe("Node server support", () => {
     ).toBe("direct");
   });
 
+  it("routes Node existing-image mutations through the lifecycle queue", () => {
+    for (const [method, path] of [
+      ["POST", "/v1/images/ami-1/promote"],
+      ["POST", "/v1/images/ami-1/promote-catalog"],
+      ["DELETE", "/v1/images/ami-1"],
+      ["DELETE", "/v1/images/ami-1/promote-catalog"],
+    ]) {
+      expect(fleetRequestQueue(new Request(`https://coordinator.test${path}`, { method }))).toBe(
+        "lifecycle",
+      );
+    }
+  });
+
   it("waits for queued and active work to drain", async () => {
     const mutex = new AsyncMutex();
     const tracker = new AsyncOperationTracker();

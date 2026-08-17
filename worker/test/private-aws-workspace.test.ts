@@ -6,6 +6,7 @@ import type {
   CoordinatorRuntime,
   CoordinatorSocketHandlers,
   CoordinatorStorage,
+  CoordinatorStorageView,
   CoordinatorWebSocketUpgradeOptions,
 } from "../src/coordinator-runtime";
 import { AWSProvider, FleetCoordinator } from "../src/fleet";
@@ -38,6 +39,10 @@ class MemoryStorage implements CoordinatorStorage {
         .filter(([key]) => key.startsWith(prefix))
         .map(([key, value]) => [key, value as T]),
     );
+  }
+
+  transaction<T>(callback: (transaction: CoordinatorStorageView) => Promise<T>): Promise<T> {
+    return callback(this);
   }
 }
 

@@ -363,6 +363,11 @@ type CoordinatorImageRef struct {
 	VariantSelectors       imageVariantSelectors
 }
 
+type CoordinatorCatalogImageRetirement struct {
+	ImageID string `json:"imageID"`
+	Retired int    `json:"retired"`
+}
+
 type CoordinatorGitHubLoginStart struct {
 	LoginID   string `json:"loginID"`
 	URL       string `json:"url"`
@@ -1866,6 +1871,18 @@ func (c *CoordinatorClient) FastSnapshotRestoreStatus(ctx context.Context, image
 
 func (c *CoordinatorClient) DeleteImage(ctx context.Context, imageID string, refs ...CoordinatorImageRef) error {
 	return c.do(ctx, http.MethodDelete, imagePath(imageID, "", refs...), nil, nil)
+}
+
+func (c *CoordinatorClient) RetireCatalogImage(ctx context.Context, imageID string, refs ...CoordinatorImageRef) (CoordinatorCatalogImageRetirement, error) {
+	var res CoordinatorCatalogImageRetirement
+	err := c.do(ctx, http.MethodDelete, imagePath(imageID, "promote-catalog", refs...), nil, &res)
+	if err != nil {
+		if isCoordinatorNotFound(err) {
+			return CoordinatorCatalogImageRetirement{}, fmt.Errorf("coordinator does not support catalog-only image retirement; upgrade the coordinator before unpublishing variant images (%w)", err)
+		}
+		return CoordinatorCatalogImageRetirement{}, err
+	}
+	return res, nil
 }
 
 func imagePath(imageID, action string, refs ...CoordinatorImageRef) string {

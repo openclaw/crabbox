@@ -1,4 +1,4 @@
-import type { Pool, QueryResult, QueryResultRow } from "pg";
+import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 import { describe, expect, it, vi } from "vitest";
 
 import { PostgresCoordinatorStorage } from "../node/postgres-storage";
@@ -104,6 +104,133 @@ describe("PostgresCoordinatorStorage", () => {
     expect(String(pool.query.mock.calls[0]?.[0])).toContain("returning case");
     expect(value).toEqual({ ticket: "one-time" });
   });
+
+  it("commits transaction-scoped storage work on one checked-out client", async () => {
+    const { pool, clientQuery, connect, release } = fakeTransactionalPool();
+    const storage = new PostgresCoordinatorStorage("postgres://unused", pool);
+
+    await storage.transaction(async (transaction) => {
+      await transaction.put("image:one", { id: "one" });
+      await transaction.delete("image:stale");
+    });
+
+    expect(connect).toHaveBeenCalledOnce();
+    expect(pool.query).not.toHaveBeenCalled();
+    expect(clientQuery.mock.calls.map(([sql]) => String(sql).trim().split(/\s+/, 1)[0])).toEqual([
+      "begin",
+      "insert",
+      "delete",
+      "commit",
+    ]);
+    expect(String(clientQuery.mock.calls[0]?.[0]).trim()).toBe(
+      "begin isolation level serializable",
+    );
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it("rolls back transaction-scoped storage work when the callback fails", async () => {
+    const { pool, clientQuery, release } = fakeTransactionalPool();
+    const storage = new PostgresCoordinatorStorage("postgres://unused", pool);
+
+    await expect(
+      storage.transaction(async (transaction) => {
+        await transaction.put("image:one", { id: "one" });
+        throw new Error("publish failed");
+      }),
+    ).rejects.toThrow("publish failed");
+
+    expect(clientQuery.mock.calls.map(([sql]) => String(sql).trim().split(/\s+/, 1)[0])).toEqual([
+      "begin",
+      "insert",
+      "rollback",
+    ]);
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { code: "40001", label: "serialization failure" },
+    { code: "40P01", label: "deadlock" },
+  ])("retries one $label on a fresh client", async ({ code }) => {
+    const { pool, clients, connect } = fakeRetryTransactionalPool();
+    const storage = new PostgresCoordinatorStorage("postgres://unused", pool);
+    const retryableError = postgresError(code, "retry transaction");
+    let callbackInvocations = 0;
+
+    const result = await storage.transaction(async () => {
+      callbackInvocations++;
+      if (callbackInvocations === 1) throw retryableError;
+      return "committed";
+    });
+
+    expect(result).toBe("committed");
+    expect(callbackInvocations).toBe(2);
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(clients).toHaveLength(2);
+    expect(clients[0]?.query.mock.calls.map(([sql]) => String(sql).trim())).toEqual([
+      "begin isolation level serializable",
+      "rollback",
+    ]);
+    expect(clients[1]?.query.mock.calls.map(([sql]) => String(sql).trim())).toEqual([
+      "begin isolation level serializable",
+      "commit",
+    ]);
+    expect(clients[0]?.release).toHaveBeenCalledWith();
+    expect(clients[1]?.release).toHaveBeenCalledWith();
+  });
+
+  it("stops after three serialization failures and rethrows the database error", async () => {
+    const { pool, clients, connect } = fakeRetryTransactionalPool();
+    const storage = new PostgresCoordinatorStorage("postgres://unused", pool);
+    const serializationError = postgresError("40001", "serialization failed");
+    let callbackInvocations = 0;
+
+    await expect(
+      storage.transaction(async () => {
+        callbackInvocations++;
+        throw serializationError;
+      }),
+    ).rejects.toBe(serializationError);
+
+    expect(callbackInvocations).toBe(3);
+    expect(connect).toHaveBeenCalledTimes(3);
+    expect(clients).toHaveLength(3);
+    for (const client of clients) {
+      expect(client.query.mock.calls.map(([sql]) => String(sql).trim())).toEqual([
+        "begin isolation level serializable",
+        "rollback",
+      ]);
+      expect(client.release).toHaveBeenCalledWith();
+    }
+  });
+
+  it("preserves transaction and rollback failures and evicts the uncertain client", async () => {
+    const rollbackError = new Error("rollback failed");
+    const originalError = postgresError("40001", "publish failed");
+    const { pool, clientQuery, connect, release } = fakeTransactionalPool(rollbackError);
+    const storage = new PostgresCoordinatorStorage("postgres://unused", pool);
+    let callbackInvocations = 0;
+
+    let observed: unknown;
+    try {
+      await storage.transaction(async () => {
+        callbackInvocations++;
+        throw originalError;
+      });
+    } catch (error) {
+      observed = error;
+    }
+
+    expect(observed).toBeInstanceOf(AggregateError);
+    expect((observed as AggregateError).errors).toEqual([originalError, rollbackError]);
+    expect((observed as AggregateError).cause).toBe(originalError);
+    expect(clientQuery.mock.calls.map(([sql]) => String(sql).trim())).toEqual([
+      "begin isolation level serializable",
+      "rollback",
+    ]);
+    expect(callbackInvocations).toBe(1);
+    expect(connect).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledWith(rollbackError);
+  });
 });
 
 function fakePool(rows: QueryResultRow[] = []) {
@@ -112,6 +239,57 @@ function fakePool(rows: QueryResultRow[] = []) {
   );
   const end = vi.fn<() => Promise<void>>(async () => undefined);
   return { query, end } as unknown as Pool & { query: typeof query };
+}
+
+function fakeTransactionalPool(rollbackError?: Error) {
+  const clientQuery = vi.fn<
+    (text: string, values?: unknown[]) => Promise<QueryResult<QueryResultRow>>
+  >(async (text) => {
+    if (text.trim() === "rollback" && rollbackError) throw rollbackError;
+    return queryResult([]);
+  });
+  const release = vi.fn<(error?: Error | boolean) => void>();
+  const client = { query: clientQuery, release } as unknown as PoolClient;
+  const connect = vi.fn<() => Promise<PoolClient>>(async () => client);
+  const query = vi.fn<(text: string, values?: unknown[]) => Promise<QueryResult<QueryResultRow>>>(
+    async () => queryResult([]),
+  );
+  const end = vi.fn<() => Promise<void>>(async () => undefined);
+  const pool = { query, connect, end } as unknown as Pool & { query: typeof query };
+  return { pool, clientQuery, connect, release };
+}
+
+function fakeRetryTransactionalPool() {
+  const clients: Array<{
+    query: ReturnType<typeof transactionClientQuery>;
+    release: ReturnType<typeof transactionClientRelease>;
+  }> = [];
+  const connect = vi.fn<() => Promise<PoolClient>>(async () => {
+    const query = transactionClientQuery();
+    const release = transactionClientRelease();
+    clients.push({ query, release });
+    return { query, release } as unknown as PoolClient;
+  });
+  const query = vi.fn<(text: string, values?: unknown[]) => Promise<QueryResult<QueryResultRow>>>(
+    async () => queryResult([]),
+  );
+  const end = vi.fn<() => Promise<void>>(async () => undefined);
+  const pool = { query, connect, end } as unknown as Pool & { query: typeof query };
+  return { pool, clients, connect };
+}
+
+function transactionClientQuery() {
+  return vi.fn<(text: string, values?: unknown[]) => Promise<QueryResult<QueryResultRow>>>(
+    async () => queryResult([]),
+  );
+}
+
+function transactionClientRelease() {
+  return vi.fn<(error?: Error | boolean) => void>();
+}
+
+function postgresError(code: string, message: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code });
 }
 
 function queryResult<T extends QueryResultRow>(rows: T[]): QueryResult<T> {
