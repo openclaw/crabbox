@@ -199,6 +199,7 @@ func (b *staticLeaseBackend) Touch(_ context.Context, req TouchRequest) (Server,
 		server.Status = state
 	}
 	core.SetServerLeaseClaimSnapshot(&server, updated, true)
+	b.refreshAcquiredLeaseServer(req.Lease.LeaseID, server)
 	return server, nil
 }
 
@@ -216,6 +217,14 @@ func (b *staticLeaseBackend) rememberAcquiredLease(lease LeaseTarget) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.acquired = lease
+}
+
+func (b *staticLeaseBackend) refreshAcquiredLeaseServer(leaseID string, server Server) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.acquired.LeaseID == leaseID {
+		b.acquired.Server = server
+	}
 }
 
 func (b *staticLeaseBackend) acquiredLeaseForID(id string) (LeaseTarget, bool) {

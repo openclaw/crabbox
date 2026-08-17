@@ -86,6 +86,43 @@ func TestStaticSSHTouchPersistsExplicitIdleTimeoutForFreshResolve(t *testing.T) 
 	}
 }
 
+func TestStaticSSHTouchRefreshesAcquiredLeaseCache(t *testing.T) {
+	cfg, lease, initial := acquireStaticLifecycleLease(t, 30*time.Minute)
+	touchedAt := unixLabelTime(t, initial.Labels["last_touched_at"]).Add(time.Minute)
+	backend := newStaticLifecycleBackend(cfg, touchedAt)
+	backend.rememberAcquiredLease(lease)
+
+	override := 45 * time.Minute
+	touched, err := backend.Touch(context.Background(), TouchRequest{
+		Lease:               lease,
+		State:               "busy",
+		IdleTimeoutOverride: &override,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, err := backend.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Server.Labels["idle_timeout_secs"] != "2700" || !reflect.DeepEqual(resolved.Server.Labels, touched.Labels) {
+		t.Fatalf("cached resolve did not observe touch: resolved=%#v touched=%#v", resolved.Server.Labels, touched.Labels)
+	}
+	listed, err := backend.List(context.Background(), ListRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || !reflect.DeepEqual(listed[0].Labels, touched.Labels) {
+		t.Fatalf("cached list did not observe touch: listed=%#v touched=%#v", listed, touched.Labels)
+	}
+
+	backend.RT.Clock = staticLifecycleClock{now: touchedAt.Add(time.Minute)}
+	if _, err := backend.Touch(context.Background(), TouchRequest{Lease: resolved, State: "ready"}); err != nil {
+		t.Fatalf("touch using cached refreshed snapshot: %v", err)
+	}
+}
+
 func TestStaticSSHTouchWithoutOverridePreservesPersistedIdleTimeout(t *testing.T) {
 	cfg, lease, initial := acquireStaticLifecycleLease(t, 37*time.Minute)
 	touchedAt := unixLabelTime(t, initial.Labels["last_touched_at"]).Add(time.Minute)
