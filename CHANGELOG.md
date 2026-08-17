@@ -19,6 +19,7 @@
 - Fixed native local-container checkpoint forks to complete their recorded Docker runtime scope before claim creation, allowing immediate commands and safe normal stop while preserving exact claim validation.
 - Split fallback E2B HTTP ownership so finite lifecycle calls cannot hang indefinitely while uploads and process streams remain caller-controlled. Thanks @SebTardif.
 - Split fallback HTTP ownership for Azure Dynamic Sessions, Blaxel, Cloudflare Sandbox, Freestyle, Orgo, and SmolVM so finite control calls cannot hang while data-plane lifetimes remain caller-controlled. Thanks @SebTardif.
+- Rejected ambiguous or extra `crabbox heartbeat` identifiers before configuration or provider resolution, preventing malformed commands from reaching lease mutation. Thanks @coygeek.
 - Rejected native Jujutsu and other unsupported local sync sources before delegated archive providers can provision or execute a remote sandbox.
 - Accepted explicit local-container architecture assertions only when the selected Docker or Podman daemon reports a matching native architecture, without enabling emulation. Thanks @coygeek.
 - Omitted coordinator-only history commands from failure digests when run history is unavailable, while preserving direct lease recovery guidance.

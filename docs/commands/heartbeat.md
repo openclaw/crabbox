@@ -5,6 +5,7 @@ the resulting lease state. It is intended for external drivers that keep a
 lease busy over SSH without running commands through `crabbox run`.
 
 ```sh
+crabbox heartbeat swift-crab
 crabbox heartbeat --id swift-crab
 crabbox heartbeat --id swift-crab --idle-timeout 90m
 crabbox heartbeat --id cbx_abcdef123456 --provider aws --json
@@ -12,7 +13,9 @@ crabbox heartbeat --id cbx_abcdef123456 --provider aws --json
 
 ## Identifying the lease
 
-`--id` accepts a canonical `cbx_...` lease ID or an active slug. When
+Supply exactly one identifier, either as the positional argument or with
+`--id`; combining the two is a usage error. The identifier accepts a canonical
+`cbx_...` lease ID or an active slug. When
 `--provider` is omitted, Crabbox uses the same local-claim routing as `status`
 and `inspect`; an explicit provider still wins.
 

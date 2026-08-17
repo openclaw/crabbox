@@ -11,11 +11,102 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestHeartbeatIdentifierSyntax(t *testing.T) {
+	tests := []struct {
+		name   string
+		args   []string
+		valid  bool
+		wantID string
+	}{
+		{name: "positional", args: []string{"--provider", heartbeatDirectProviderName, "direct-heartbeat"}, valid: true, wantID: "cbx_direct_heartbeat"},
+		{name: "id flag", args: []string{"--provider", heartbeatDirectProviderName, "--id", "direct-heartbeat"}, valid: true, wantID: "cbx_direct_heartbeat"},
+		{name: "id flag and one positional", args: []string{"--provider", heartbeatDirectProviderName, "--id", "direct-heartbeat", "extra"}},
+		{name: "id flag and two positionals", args: []string{"--provider", heartbeatDirectProviderName, "--id", "direct-heartbeat", "extra", "second"}},
+		{name: "two positionals", args: []string{"--provider", heartbeatDirectProviderName, "direct-heartbeat", "extra"}},
+		{name: "missing identifier", args: []string{"--provider", heartbeatDirectProviderName}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			stateRoot := t.TempDir()
+			t.Setenv("XDG_STATE_HOME", stateRoot)
+
+			backend := &heartbeatDirectBackend{lease: heartbeatDirectTestLease("cbx_direct_heartbeat", "direct-heartbeat")}
+			heartbeatDirectBackendForTest = backend
+			t.Cleanup(func() { heartbeatDirectBackendForTest = nil })
+
+			var coordinatorRequests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				coordinatorRequests.Add(1)
+				if r.Method != http.MethodPost || r.URL.Path != "/v1/leases/cbx_direct_heartbeat/heartbeat" {
+					t.Errorf("request=%s %s, want registered heartbeat POST", r.Method, r.URL.Path)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+					ID: "cbx_direct_heartbeat", Slug: "direct-heartbeat", Provider: heartbeatDirectProviderName, State: "active",
+				}})
+			}))
+			defer server.Close()
+
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			if test.valid {
+				config := fmt.Sprintf("provider: %s\nbroker:\n  url: %s\n  mode: registered\n", heartbeatDirectProviderName, server.URL)
+				if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cfg := defaultConfig()
+				cfg.Provider = heartbeatDirectProviderName
+				if err := claimLeaseTargetForRepoConfig(backend.lease.LeaseID, serverSlug(backend.lease.Server), cfg, backend.lease.Server, SSHTarget{}, "/repo", 30*time.Minute, false); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Mkdir(configPath, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CRABBOX_CONFIG", configPath)
+			t.Setenv("CRABBOX_COORDINATOR", server.URL)
+			t.Setenv("CRABBOX_COORDINATOR_TOKEN", "user-token")
+
+			before := captureClaimsListState(t, stateRoot)
+			var stdout, stderr bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: &stderr}).Run(context.Background(), append([]string{"heartbeat"}, test.args...))
+			if test.valid {
+				if err != nil {
+					t.Fatalf("heartbeat error=%v stderr=%q", err, stderr.String())
+				}
+				if coordinatorRequests.Load() != 1 || backend.resolves != 1 || len(backend.touches) != 1 {
+					t.Fatalf("side effects: requests=%d configures=%d resolves=%d touches=%d", coordinatorRequests.Load(), backend.configures, backend.resolves, len(backend.touches))
+				}
+				if !strings.Contains(stdout.String(), "heartbeat lease="+test.wantID) {
+					t.Fatalf("heartbeat output=%q", stdout.String())
+				}
+				return
+			}
+
+			var exitErr ExitError
+			if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.HasPrefix(exitErr.Message, "usage: crabbox heartbeat") {
+				t.Fatalf("error=%v, want heartbeat usage with exit 2", err)
+			}
+			if stdout.Len() != 0 || stderr.Len() != 0 {
+				t.Fatalf("invalid syntax wrote stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			if backend.configures != 0 || backend.resolves != 0 || len(backend.touches) != 0 || coordinatorRequests.Load() != 0 {
+				t.Fatalf("invalid syntax crossed side-effect boundary: requests=%d configures=%d resolves=%d touches=%d", coordinatorRequests.Load(), backend.configures, backend.resolves, len(backend.touches))
+			}
+			after := captureClaimsListState(t, stateRoot)
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("invalid syntax mutated claim state\nbefore=%#v\nafter=%#v", before, after)
+			}
+		})
+	}
+}
 
 func TestHeartbeatCoordinatorPassesIdleTimeoutAndPrintsLeaseState(t *testing.T) {
 	var requestBody map[string]any
@@ -222,12 +313,15 @@ func (heartbeatDirectProvider) Configure(Config, Runtime) (Backend, error) {
 	if heartbeatDirectBackendForTest == nil {
 		return nil, errors.New("heartbeat direct test backend is not configured")
 	}
+	heartbeatDirectBackendForTest.configures++
 	return heartbeatDirectBackendForTest, nil
 }
 
 type heartbeatDirectBackend struct {
-	lease   LeaseTarget
-	touches []TouchRequest
+	lease      LeaseTarget
+	configures int
+	resolves   int
+	touches    []TouchRequest
 }
 
 func (*heartbeatDirectBackend) Spec() ProviderSpec { return heartbeatDirectProvider{}.Spec() }
@@ -235,6 +329,7 @@ func (b *heartbeatDirectBackend) Acquire(context.Context, AcquireRequest) (Lease
 	return b.lease, nil
 }
 func (b *heartbeatDirectBackend) Resolve(_ context.Context, req ResolveRequest) (LeaseTarget, error) {
+	b.resolves++
 	if req.ID != b.lease.LeaseID && req.ID != serverSlug(b.lease.Server) {
 		return LeaseTarget{}, fmt.Errorf("lease %s not found", req.ID)
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 )
 
@@ -28,8 +29,9 @@ func (a App) heartbeat(ctx context.Context, args []string) error {
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
+	idFlagSet := flagWasSet(fs, "id")
 	setIDFromFirstArg(fs, id)
-	if fs.NArg() > 1 {
+	if strings.TrimSpace(*id) == "" || fs.NArg() > 1 || (idFlagSet && fs.NArg() > 0) {
 		return exit(2, "usage: crabbox heartbeat --id <lease-id-or-slug> [--provider <provider>] [--idle-timeout <duration>] [--json]")
 	}
 	idleTimeoutSet := flagWasSet(fs, "idle-timeout")
