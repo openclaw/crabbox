@@ -153,6 +153,23 @@ macOS). Each entry holds a `checkpoint.json` record plus, for archives, a
 delete by checkpoint ID; deleting the provider resource leaves the local record
 unable to fork.
 
+## Lifecycle and expiry
+
+Checkpoint records store both `createdAt` and `lastUsedAt`. A new checkpoint
+initializes `lastUsedAt` to exactly `createdAt`; each successful recorded
+`checkpoint fork` or `checkpoint restore` updates it. Dry runs and failed
+consumption attempts do not count as use. For records written by older Crabbox
+versions without `lastUsedAt`, reads treat `createdAt` as the last-use time.
+This fallback does not eagerly rewrite or migrate the record.
+
+Crabbox does not run an automatic checkpoint reaper yet. Use `checkpoint prune`
+manually or schedule it in the environment that owns the local checkpoint
+records. Native provider snapshots and images can keep incurring provider
+storage charges even when no lease uses them, while archive checkpoints consume
+disk in the local state directory. Choose an unused interval that reflects the
+cost of rebuilding the checkpoint and preview it with `--dry-run` before making
+the scheduled job destructive.
+
 ## Commands
 
 ```
@@ -162,7 +179,7 @@ crabbox checkpoint inspect <checkpoint-id> [--json] [--verify]
 crabbox checkpoint restore <checkpoint-id> --id <lease> [--clear=false]
 crabbox checkpoint fork    <checkpoint-id> [--class <class>] [--keep] [--count <n>]
 crabbox checkpoint delete  <checkpoint-id> [--local-only]
-crabbox checkpoint prune   --older-than <duration> [--kind native|archive] [--dry-run]
+crabbox checkpoint prune   [--older-than <duration>] [--unused-for <duration>] [--kind native|archive] [--dry-run]
 ```
 
 Checkpoint IDs look like `chk_<hex>` (see [identifiers](identifiers.md)).
@@ -269,14 +286,37 @@ crabbox checkpoint fork --provider parallels --id <vm> --snapshot <name-or-id> [
 crabbox checkpoint delete chk_abc123          # remove provider resource + local record
 crabbox checkpoint delete chk_abc123 --local-only   # keep provider resource
 crabbox checkpoint prune --older-than 7d --kind native --dry-run
+crabbox checkpoint prune --unused-for 30d --kind native --dry-run
 ```
 
 `delete` removes the provider snapshot/image (AWS AMI + backing snapshots, Azure
 or GCP image, Parallels snapshot) and then the local record. `--local-only`
-deletes the record only. `prune` deletes records older than `--older-than`
-(`30m`, `12h`, `7d`, …), optionally filtered by `--kind native|archive`; pair it
-with `--dry-run` first. Deleting a non-Crabbox Parallels snapshot requires
-`--yes`.
+deletes the record only. Provider deletion remains first: if it fails, Crabbox
+keeps the local record. `prune` requires at least one age filter. `--older-than`
+selects by creation time and `--unused-for` selects by last-use time (`30m`,
+`12h`, `7d`, …). When both are supplied, a checkpoint must satisfy both; the
+optional `--kind native|archive` filter is also composed with them. Pair the
+final filter set with `--dry-run` first. Deleting a non-Crabbox Parallels
+snapshot requires `--yes`.
+
+For example, this user crontab previews the policy interactively first, then
+removes native checkpoints that have not been forked or restored for 30 days:
+
+```sh
+crabbox checkpoint prune --unused-for 30d --kind native --dry-run
+
+# crontab -e (run as the same user that created the checkpoint records)
+SHELL=/bin/sh
+PATH=/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin
+XDG_STATE_HOME=/home/alice/.local/state
+CRABBOX_CONFIG=/home/alice/.config/crabbox/config.yaml
+15 3 * * * crabbox checkpoint prune --unused-for 30d --kind native >> /home/alice/.local/state/crabbox/checkpoint-prune.log 2>&1
+```
+
+The scheduler invokes the CLI; Crabbox itself does not run an automatic
+checkpoint reaper yet. The scheduled environment must point at the same state
+directory and config as the checkpoint owner and provide whatever provider
+credentials or local runtime access deletion requires.
 
 ## When to use which
 

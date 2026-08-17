@@ -24,6 +24,9 @@ func TestCheckpointStoreCreateReadList(t *testing.T) {
 	if first.ID != "chk_first" {
 		t.Fatalf("id=%q", first.ID)
 	}
+	if first.LastUsedAt != first.CreatedAt {
+		t.Fatalf("lastUsedAt=%q, want createdAt=%q", first.LastUsedAt, first.CreatedAt)
+	}
 	second, err := store.Create(checkpointRecord{
 		ID:        "chk_second",
 		Name:      "second",
@@ -202,5 +205,38 @@ func TestCheckpointStoreFillsIDAndCreatedAt(t *testing.T) {
 	}
 	if record.CreatedAt == "" {
 		t.Fatal("createdAt not filled")
+	}
+	if record.LastUsedAt != record.CreatedAt {
+		t.Fatalf("lastUsedAt=%q, want createdAt=%q", record.LastUsedAt, record.CreatedAt)
+	}
+}
+
+func TestCheckpointStoreDefaultsMissingLastUsedAtOnReadWithoutMigration(t *testing.T) {
+	store := checkpointStore{root: t.TempDir()}
+	paths, err := store.Paths("chk_legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(paths.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacy := []byte(`{"id":"chk_legacy","kind":"workspace-archive","createdAt":"2026-05-09T10:00:00Z","crabboxVersion":"0.42.0","repo":{}}` + "\n")
+	if err := os.WriteFile(paths.Meta, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	record, _, err := store.Read("chk_legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.LastUsedAt != record.CreatedAt {
+		t.Fatalf("lastUsedAt=%q, want createdAt=%q", record.LastUsedAt, record.CreatedAt)
+	}
+	data, err := os.ReadFile(paths.Meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "lastUsedAt") {
+		t.Fatalf("read eagerly migrated legacy metadata: %s", data)
 	}
 }

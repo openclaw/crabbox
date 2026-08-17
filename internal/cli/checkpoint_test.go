@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -206,7 +208,8 @@ func TestCheckpointRestoreDryRunDoesNotResolveLease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record, err := store.Create(checkpointRecord{ID: "chk_restore_dryrun", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339), Workdir: "/work/cbx_old/my-app"})
+	const lastUsedAt = "2026-05-14T10:00:00Z"
+	record, err := store.Create(checkpointRecord{ID: "chk_restore_dryrun", Kind: checkpointKindArchive, CreatedAt: "2026-05-13T10:00:00Z", LastUsedAt: lastUsedAt, Workdir: "/work/cbx_old/my-app"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,6 +221,7 @@ func TestCheckpointRestoreDryRunDoesNotResolveLease(t *testing.T) {
 	if !strings.Contains(stdout.String(), "would restore checkpoint") || !strings.Contains(stdout.String(), "cbx_missing") {
 		t.Fatalf("stdout=%q", stdout.String())
 	}
+	assertCheckpointLastUsedAt(t, store, record.ID, lastUsedAt)
 }
 
 func TestCheckpointRestoreDryRunUsesStoredLeaseTarget(t *testing.T) {
@@ -227,7 +231,8 @@ func TestCheckpointRestoreDryRunUsesStoredLeaseTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record, err := store.Create(checkpointRecord{ID: "chk_restore_windows_dryrun", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339), Workdir: "/work/cbx_old/my-app"})
+	const lastUsedAt = "2026-05-14T11:00:00Z"
+	record, err := store.Create(checkpointRecord{ID: "chk_restore_windows_dryrun", Kind: checkpointKindArchive, CreatedAt: "2026-05-13T11:00:00Z", LastUsedAt: lastUsedAt, Workdir: "/work/cbx_old/my-app"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,6 +256,59 @@ func TestCheckpointRestoreDryRunUsesStoredLeaseTarget(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), `workdir=C:\crabbox\`+leaseID+`\crabbox`) {
 		t.Fatalf("stdout=%q", stdout.String())
+	}
+	assertCheckpointLastUsedAt(t, store, record.ID, lastUsedAt)
+}
+
+func TestCheckpointRestoreUpdatesLastUsedAtOnSuccess(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("POSIX fake SSH helper")
+	}
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	tools := t.TempDir()
+	writeExecutable(t, filepath.Join(tools, "ssh"), "#!/bin/sh\ncat >/dev/null\n")
+	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	backend := &checkpointForkReleaseBackend{leaseID: "cbx_restore_success"}
+	testAWSBackendOverride = backend
+	t.Cleanup(func() { testAWSBackendOverride = nil })
+
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const lastUsedAt = "2026-05-14T11:30:00Z"
+	record, err := store.Create(checkpointRecord{
+		ID:          "chk_restore_success",
+		Kind:        checkpointKindArchive,
+		CreatedAt:   "2026-05-13T11:30:00Z",
+		LastUsedAt:  lastUsedAt,
+		ArchivePath: checkpointArchive,
+		Workdir:     "/work/cbx_source/my-app",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := store.Paths(record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.Archive, []byte("archive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	if err := app.checkpointRestore(context.Background(), []string{record.ID, "--id", backend.leaseID, "--provider", "aws"}); err != nil {
+		t.Fatal(err)
+	}
+	stored, _, err := store.Read(record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.LastUsedAt == lastUsedAt {
+		t.Fatal("successful restore did not update lastUsedAt")
 	}
 }
 
@@ -296,7 +354,8 @@ func TestCheckpointForkDryRunDoesNotAcquireLease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record, err := store.Create(checkpointRecord{ID: "chk_fork_dryrun", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339)})
+	const lastUsedAt = "2026-05-14T12:00:00Z"
+	record, err := store.Create(checkpointRecord{ID: "chk_fork_dryrun", Kind: checkpointKindArchive, CreatedAt: "2026-05-13T12:00:00Z", LastUsedAt: lastUsedAt})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,6 +367,7 @@ func TestCheckpointForkDryRunDoesNotAcquireLease(t *testing.T) {
 	if !strings.Contains(stdout.String(), "would fork checkpoint") || !strings.Contains(stdout.String(), "fork-dryrun") {
 		t.Fatalf("stdout=%q", stdout.String())
 	}
+	assertCheckpointLastUsedAt(t, store, record.ID, lastUsedAt)
 }
 
 func TestCheckpointForkArchiveDryRunRequiresProviderIntent(t *testing.T) {
@@ -335,7 +395,8 @@ func TestCheckpointForkNativeDryRunUsesRecordedProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record := checkpointRecord{ID: "chk_native_recorded_provider", Kind: checkpointKindDockerCommit, CreatedAt: time.Now().UTC().Format(time.RFC3339), TargetOS: targetLinux}
+	const lastUsedAt = "2026-05-14T13:00:00Z"
+	record := checkpointRecord{ID: "chk_native_recorded_provider", Kind: checkpointKindDockerCommit, CreatedAt: "2026-05-13T13:00:00Z", LastUsedAt: lastUsedAt, TargetOS: targetLinux}
 	record.Native.ImageID = "sha256:checkpoint"
 	record.Native.Direct = true
 	if _, err := store.Create(record); err != nil {
@@ -349,6 +410,7 @@ func TestCheckpointForkNativeDryRunUsesRecordedProvider(t *testing.T) {
 	if !strings.Contains(stdout.String(), "provider=local-container") {
 		t.Fatalf("stdout=%q", stdout.String())
 	}
+	assertCheckpointLastUsedAt(t, store, record.ID, lastUsedAt)
 }
 
 func TestCheckpointForkParallelsTemplateDryRunConfigMarksProviderIntent(t *testing.T) {
@@ -378,7 +440,8 @@ func TestCheckpointForkDryRunFansOutRequestedSlug(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record, err := store.Create(checkpointRecord{ID: "chk_fork_fanout", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339)})
+	const lastUsedAt = "2026-05-14T14:00:00Z"
+	record, err := store.Create(checkpointRecord{ID: "chk_fork_fanout", Kind: checkpointKindArchive, CreatedAt: "2026-05-13T14:00:00Z", LastUsedAt: lastUsedAt})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -401,6 +464,7 @@ func TestCheckpointForkDryRunFansOutRequestedSlug(t *testing.T) {
 	if got := strings.Count(out, "would fork checkpoint"); got != 3 {
 		t.Fatalf("dry-run fork lines=%d, want 3:\n%s", got, out)
 	}
+	assertCheckpointLastUsedAt(t, store, record.ID, lastUsedAt)
 }
 
 func TestCheckpointForkDryRunFansOutCommand(t *testing.T) {
@@ -410,7 +474,8 @@ func TestCheckpointForkDryRunFansOutCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record, err := store.Create(checkpointRecord{ID: "chk_fork_run_fanout", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339)})
+	const lastUsedAt = "2026-05-14T15:00:00Z"
+	record, err := store.Create(checkpointRecord{ID: "chk_fork_run_fanout", Kind: checkpointKindArchive, CreatedAt: "2026-05-13T15:00:00Z", LastUsedAt: lastUsedAt})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -433,6 +498,7 @@ func TestCheckpointForkDryRunFansOutCommand(t *testing.T) {
 			t.Fatalf("stdout missing %q:\n%s", want, out)
 		}
 	}
+	assertCheckpointLastUsedAt(t, store, record.ID, lastUsedAt)
 }
 
 func TestCheckpointForkRejectsInvalidCount(t *testing.T) {
@@ -712,6 +778,229 @@ func TestCheckpointPruneDryRunAndDelete(t *testing.T) {
 	}
 }
 
+func TestCheckpointPruneUnusedForComposesWithAgeAndKind(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	records := []checkpointRecord{
+		{ID: "chk_old_unused_archive", Kind: checkpointKindArchive, CreatedAt: now.Add(-96 * time.Hour).Format(time.RFC3339), LastUsedAt: now.Add(-72 * time.Hour).Format(time.RFC3339)},
+		{ID: "chk_old_used_archive", Kind: checkpointKindArchive, CreatedAt: now.Add(-96 * time.Hour).Format(time.RFC3339), LastUsedAt: now.Add(-2 * time.Hour).Format(time.RFC3339)},
+		{ID: "chk_new_archive", Kind: checkpointKindArchive, CreatedAt: now.Add(-12 * time.Hour).Format(time.RFC3339), LastUsedAt: now.Add(-12 * time.Hour).Format(time.RFC3339)},
+		{ID: "chk_old_unused_native", Kind: checkpointKindAzureOS, CreatedAt: now.Add(-96 * time.Hour).Format(time.RFC3339), LastUsedAt: now.Add(-72 * time.Hour).Format(time.RFC3339)},
+	}
+	for _, record := range records {
+		if _, err := store.Create(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: io.Discard}
+	if err := app.checkpointPrune(context.Background(), []string{
+		"--older-than", "48h",
+		"--unused-for", "24h",
+		"--kind", "archive",
+		"--dry-run",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "would delete id=chk_old_unused_archive") || !strings.Contains(out, "last_used=") {
+		t.Fatalf("dry-run stdout=%q", out)
+	}
+	for _, excluded := range []string{"chk_old_used_archive", "chk_new_archive", "chk_old_unused_native"} {
+		if strings.Contains(out, excluded) {
+			t.Fatalf("dry-run unexpectedly selected %s: %q", excluded, out)
+		}
+	}
+	for _, record := range records {
+		if _, _, err := store.Read(record.ID); err != nil {
+			t.Fatalf("dry-run removed %s: %v", record.ID, err)
+		}
+	}
+}
+
+func TestCheckpointPruneUnusedForUsesCreatedAtFallback(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := store.Paths("chk_legacy_unused")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(paths.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	createdAt := time.Now().Add(-72 * time.Hour).UTC().Format(time.RFC3339)
+	legacy := fmt.Sprintf(`{"id":"chk_legacy_unused","kind":"workspace-archive","createdAt":%q,"repo":{}}`+"\n", createdAt)
+	if err := os.WriteFile(paths.Meta, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: io.Discard}
+	if err := app.checkpointPrune(context.Background(), []string{"--unused-for", "24h", "--dry-run"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "would delete id=chk_legacy_unused") || !strings.Contains(stdout.String(), "last_used="+createdAt) {
+		t.Fatalf("stdout=%q", stdout.String())
+	}
+	data, err := os.ReadFile(paths.Meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "lastUsedAt") {
+		t.Fatalf("dry-run migrated legacy metadata: %s", data)
+	}
+}
+
+func TestCheckpointPruneProviderDeleteFailureRetainsRecord(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "provider delete failed", http.StatusBadGateway)
+	}))
+	defer server.Close()
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "admin")
+
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := checkpointRecord{
+		ID:         "chk_provider_delete_failure",
+		Kind:       checkpointKindAzureOS,
+		CreatedAt:  time.Now().Add(-72 * time.Hour).UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339),
+	}
+	record.Native.Provider = "azure"
+	record.Native.Resource = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/snapshots/checkpoint"
+	if _, err := store.Create(record); err != nil {
+		t.Fatal(err)
+	}
+
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	if err := app.checkpointPrune(context.Background(), []string{"--unused-for", "24h"}); err == nil {
+		t.Fatal("prune succeeded despite provider deletion failure")
+	}
+	if _, _, err := store.Read(record.ID); err != nil {
+		t.Fatalf("provider deletion failure removed local record: %v", err)
+	}
+}
+
+func TestCheckpointForkUseTimestampChangesOnlyAfterConsumption(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Create(checkpointRecord{
+		ID:         "chk_fork_use",
+		Kind:       checkpointKindAWSEBS,
+		CreatedAt:  "2026-05-01T10:00:00Z",
+		LastUsedAt: "2026-05-01T10:00:00Z",
+		TargetOS:   targetWindows,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := store.Paths(record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := newWatchTestBackend()
+	backend.acquireErr = errors.New("acquire failed")
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	cfg := Config{Provider: "watch-test"}
+	repo := Repo{Root: t.TempDir(), Name: "my-app"}
+	if err := app.checkpointForkRecordOnce(context.Background(), cfg, backend, backend, repo, store, &record, paths, true, false, "", "", true, checkpointForkRunOptions{}); err == nil {
+		t.Fatal("failed checkpoint consumption succeeded")
+	}
+	stored, _, err := store.Read(record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.LastUsedAt != "2026-05-01T10:00:00Z" {
+		t.Fatalf("failed consumption updated lastUsedAt=%q", stored.LastUsedAt)
+	}
+
+	backend.acquireErr = nil
+	if err := app.checkpointForkRecordOnce(context.Background(), cfg, backend, backend, repo, store, &record, paths, true, false, "", "", true, checkpointForkRunOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	stored, _, err = store.Read(record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.LastUsedAt == "2026-05-01T10:00:00Z" {
+		t.Fatal("successful consumption did not update lastUsedAt")
+	}
+}
+
+func TestCheckpointForkMetadataWriteFailureReleasesProvisionedLease(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Create(checkpointRecord{
+		ID:         "chk_fork_write_failure",
+		Kind:       checkpointKindAWSEBS,
+		CreatedAt:  "2026-05-01T11:00:00Z",
+		LastUsedAt: "2026-05-01T11:00:00Z",
+		TargetOS:   targetWindows,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := store.Paths(record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := newWatchTestBackend()
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: io.Discard}
+	cfg := Config{Provider: "watch-test"}
+	repo := Repo{Root: t.TempDir(), Name: "my-app"}
+	failingRoot := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(failingRoot, []byte("block checkpoint metadata writes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	failingStore := checkpointStore{root: failingRoot}
+	if err := app.checkpointForkRecordOnce(context.Background(), cfg, backend, backend, repo, failingStore, &record, paths, true, false, "", "", true, checkpointForkRunOptions{}); err == nil {
+		t.Fatal("checkpoint fork succeeded despite metadata write failure")
+	}
+	_, _, releases := backend.counts()
+	if releases != 1 {
+		t.Fatalf("metadata write failure releases=%d, want 1", releases)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("metadata write failure printed an untracked fork: %q", stdout.String())
+	}
+	assertCheckpointLastUsedAt(t, store, record.ID, "2026-05-01T11:00:00Z")
+}
+
+func assertCheckpointLastUsedAt(t *testing.T, store checkpointStore, id, want string) {
+	t.Helper()
+	record, _, err := store.Read(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.LastUsedAt != want {
+		t.Fatalf("checkpoint %s lastUsedAt=%q, want %q", id, record.LastUsedAt, want)
+	}
+}
+
 func TestCheckpointPruneRejectsOperands(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	store, err := defaultCheckpointStore()
@@ -732,6 +1021,9 @@ func TestCheckpointPruneRejectsOperands(t *testing.T) {
 	}
 	if _, _, err := store.Read("chk_old"); err != nil {
 		t.Fatalf("checkpoint removed after invalid prune command: %v", err)
+	}
+	if err := app.checkpointPrune(context.Background(), nil); err == nil {
+		t.Fatal("expected prune without an age filter to fail")
 	}
 }
 
@@ -1585,7 +1877,7 @@ func (b *checkpointForkReleaseBackend) Acquire(_ context.Context, req AcquireReq
 	b.acquireSlug = req.RequestedSlug
 	return LeaseTarget{
 		Server:  Server{Provider: "aws", CloudID: "i-123", Labels: map[string]string{}},
-		SSH:     SSHTarget{User: "crabbox", Port: "22", TargetOS: targetLinux},
+		SSH:     SSHTarget{User: "crabbox", Host: "checkpoint.example.test", Port: "22", TargetOS: targetLinux},
 		LeaseID: b.leaseID,
 	}, nil
 }

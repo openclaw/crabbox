@@ -145,8 +145,8 @@ crabbox checkpoint inspect chk_abc123 --verify
 
 `list` and `inspect` read the local checkpoint records. Each record holds the
 checkpoint id/name/kind, source lease/provider/region, repo name and git head,
-workdir, creation time, and — for native checkpoints — the provider resource id;
-for archives, the tarball path and size.
+workdir, creation and last-use times, and — for native checkpoints — the
+provider resource id; for archives, the tarball path and size.
 
 > A native checkpoint needs **both** halves to fork: the local metadata and the
 > provider resource. An archive checkpoint needs the local metadata and the
@@ -317,27 +317,37 @@ Crabbox (manual cleanup, account migration, and so on).
 
 ## prune
 
-Delete checkpoints older than a cutoff, optionally restricted to one kind.
+Delete checkpoints selected by creation age, time since last use, or both,
+optionally restricted to one kind.
 
 ```sh
 crabbox checkpoint prune --older-than 30d --dry-run
-crabbox checkpoint prune --older-than 30d --kind archive
-crabbox checkpoint prune --older-than 30d --kind native
+crabbox checkpoint prune --unused-for 14d --dry-run
+crabbox checkpoint prune --older-than 30d --unused-for 14d --kind native
 ```
 
 **Flags**
 
 ```
---older-than <duration> Required. Delete checkpoints older than this. Accepts a
-                        Go duration (e.g. 720h) or a whole number of days (30d).
+--older-than <duration> Select checkpoints created before this age.
+--unused-for <duration> Select checkpoints whose last successful fork or
+                        restore was before this age.
 --kind native|archive   Restrict to one kind.
---dry-run               Print matches without deleting.
+--dry-run               Print matches, including creation and last-use times,
+                        without deleting.
 --local-only            Skip provider deletion for native checkpoints.
 ```
 
-Native checkpoints prune through the same provider-deletion path as
-`checkpoint delete`. Keep `--dry-run` in operator automation until the match set
-looks right.
+At least one of `--older-than` or `--unused-for` is required; when both are
+present, a checkpoint must satisfy both. Durations accept Go syntax such as
+`720h` or a whole number of days such as `30d`. Native checkpoints prune through
+the same provider-first deletion path as `checkpoint delete`, so a provider
+failure keeps the local record. Preview the exact match set with `--dry-run`.
+
+Crabbox does not run an automatic checkpoint reaper. Any scheduler must invoke
+this CLI as the user and in the environment that owns the local checkpoint
+records. See [Checkpoints](../features/checkpoints.md#lifecycle-and-expiry) for
+the detailed lifecycle behavior and scheduled-job recipe.
 
 > Provider snapshots and images keep accruing storage cost while they exist.
 > Prune stale checkpoints periodically, and name checkpoints after the scenario

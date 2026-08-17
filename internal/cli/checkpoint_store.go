@@ -68,8 +68,11 @@ func (s checkpointStore) Reserve(record checkpointRecord) (checkpointRecord, che
 	if record.CreatedAt == "" {
 		record.CreatedAt = time.Now().UTC().Format(time.RFC3339)
 	}
-	if _, err := time.Parse(time.RFC3339, record.CreatedAt); err != nil {
-		return checkpointRecord{}, checkpointPaths{}, exit(2, "checkpoint createdAt must be RFC3339: %v", err)
+	if record.LastUsedAt == "" {
+		record.LastUsedAt = record.CreatedAt
+	}
+	if err := validateCheckpointRecordTimes(record); err != nil {
+		return checkpointRecord{}, checkpointPaths{}, err
 	}
 	paths, err := s.Paths(record.ID)
 	if err != nil {
@@ -110,6 +113,9 @@ func (s checkpointStore) Create(record checkpointRecord) (checkpointRecord, erro
 }
 
 func (s checkpointStore) Write(record checkpointRecord) error {
+	if err := validateCheckpointRecordTimes(record); err != nil {
+		return err
+	}
 	paths, err := s.Paths(record.ID)
 	if err != nil {
 		return err
@@ -154,7 +160,25 @@ func (s checkpointStore) Read(id string) (checkpointRecord, checkpointPaths, err
 	} else if record.ID != dirID {
 		return checkpointRecord{}, checkpointPaths{}, exit(2, "checkpoint %s metadata id mismatch: %s", dirID, record.ID)
 	}
+	if record.LastUsedAt == "" {
+		record.LastUsedAt = record.CreatedAt
+	}
 	return record, paths, nil
+}
+
+func validateCheckpointRecordTimes(record checkpointRecord) error {
+	if _, err := time.Parse(time.RFC3339, record.CreatedAt); err != nil {
+		return exit(2, "checkpoint createdAt must be RFC3339: %v", err)
+	}
+	if _, err := time.Parse(time.RFC3339, record.LastUsedAt); err != nil {
+		return exit(2, "checkpoint lastUsedAt must be RFC3339: %v", err)
+	}
+	return nil
+}
+
+func recordCheckpointUse(store checkpointStore, record *checkpointRecord) error {
+	record.LastUsedAt = time.Now().UTC().Format(time.RFC3339)
+	return store.Write(*record)
 }
 
 func (s checkpointStore) List() ([]checkpointRecord, error) {

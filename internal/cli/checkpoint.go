@@ -42,6 +42,7 @@ type checkpointRecord struct {
 	Name           string `json:"name,omitempty"`
 	Kind           string `json:"kind"`
 	CreatedAt      string `json:"createdAt"`
+	LastUsedAt     string `json:"lastUsedAt"`
 	CrabboxVersion string `json:"crabboxVersion"`
 	Provider       string `json:"provider,omitempty"`
 	LeaseID        string `json:"leaseId,omitempty"`
@@ -298,7 +299,7 @@ func (a App) checkpointList(ctx context.Context, args []string) error {
 			if audit.Error != "" {
 				extra += fmt.Sprintf(" error=%q", audit.Error)
 			}
-			fmt.Fprintf(a.Stdout, "%s kind=%s name=%q repo=%s lease=%s %s next=%s created=%s\n", record.ID, record.Kind, record.Name, record.Repo.Name, blank(record.LeaseID, "-"), extra, audit.NextAction, record.CreatedAt)
+			fmt.Fprintf(a.Stdout, "%s kind=%s name=%q repo=%s lease=%s %s next=%s created=%s last_used=%s\n", record.ID, record.Kind, record.Name, record.Repo.Name, blank(record.LeaseID, "-"), extra, audit.NextAction, record.CreatedAt, record.LastUsedAt)
 		}
 		return nil
 	}
@@ -314,7 +315,7 @@ func (a App) checkpointList(ctx context.Context, args []string) error {
 		if isNativeCheckpointKind(record.Kind) {
 			extra = fmt.Sprintf("resource=%s state=%s region=%s", blank(record.Native.ImageID, "-"), blank(record.Native.State, "-"), blank(record.Native.Region, "-"))
 		}
-		fmt.Fprintf(a.Stdout, "%s kind=%s name=%q repo=%s lease=%s %s created=%s\n", record.ID, record.Kind, record.Name, record.Repo.Name, blank(record.LeaseID, "-"), extra, record.CreatedAt)
+		fmt.Fprintf(a.Stdout, "%s kind=%s name=%q repo=%s lease=%s %s created=%s last_used=%s\n", record.ID, record.Kind, record.Name, record.Repo.Name, blank(record.LeaseID, "-"), extra, record.CreatedAt, record.LastUsedAt)
 	}
 	return nil
 }
@@ -505,8 +506,8 @@ func (a App) checkpointInspect(ctx context.Context, args []string) error {
 }
 
 func printCheckpointInspect(stdout io.Writer, record checkpointRecord) {
-	fmt.Fprintf(stdout, "id=%s\nkind=%s\nname=%s\ncreated=%s\nprovider=%s\nlease=%s\nrepo=%s\nhead=%s\nserver_type=%s\nworkdir=%s\narchive=%s\nbytes=%s\n",
-		record.ID, record.Kind, blank(record.Name, "-"), record.CreatedAt, blank(record.Provider, "-"), blank(record.LeaseID, "-"), blank(record.Repo.Name, "-"), blank(record.Repo.Head, "-"), blank(record.ServerType, "-"), blank(record.Workdir, "-"), blank(record.ArchivePath, "-"), humanBytes(record.ArchiveBytes))
+	fmt.Fprintf(stdout, "id=%s\nkind=%s\nname=%s\ncreated=%s\nlast_used=%s\nprovider=%s\nlease=%s\nrepo=%s\nhead=%s\nserver_type=%s\nworkdir=%s\narchive=%s\nbytes=%s\n",
+		record.ID, record.Kind, blank(record.Name, "-"), record.CreatedAt, record.LastUsedAt, blank(record.Provider, "-"), blank(record.LeaseID, "-"), blank(record.Repo.Name, "-"), blank(record.Repo.Head, "-"), blank(record.ServerType, "-"), blank(record.Workdir, "-"), blank(record.ArchivePath, "-"), humanBytes(record.ArchiveBytes))
 	if isNativeCheckpointKind(record.Kind) {
 		fmt.Fprintf(stdout, "resource=%s\nresource_name=%s\nresource_state=%s\nresource_region=%s\nstrategy=%s\nno_reboot=%t\n",
 			blank(record.Native.ImageID, "-"), blank(record.Native.Name, "-"), blank(record.Native.State, "-"), blank(record.Native.Region, "-"), blank(record.Native.Strategy, checkpointStrategyImage), record.Native.NoReboot)
@@ -611,6 +612,9 @@ func (a App) checkpointRestore(ctx context.Context, args []string) error {
 				if err := NewParallelsClient(restoreCfg, nil).SwitchSnapshot(ctx, server.CloudID, record.Native.ImageID, true); err != nil {
 					return err
 				}
+				if err := recordCheckpointUse(store, &record); err != nil {
+					return err
+				}
 				fmt.Fprintf(a.Stdout, "checkpoint restored id=%s lease=%s snapshot=%s\n", record.ID, blank(server.Labels["lease"], server.CloudID), record.Native.ImageID)
 				return nil
 			}
@@ -656,6 +660,9 @@ func (a App) checkpointRestore(ctx context.Context, args []string) error {
 		return err
 	}
 	if err := restoreCheckpointArchive(ctx, target, checkpointArchivePath(paths, record), record.ID, workdir, *clear); err != nil {
+		return err
+	}
+	if err := recordCheckpointUse(store, &record); err != nil {
 		return err
 	}
 	fmt.Fprintf(a.Stdout, "checkpoint restored id=%s lease=%s workdir=%s\n", record.ID, leaseID, workdir)
@@ -761,7 +768,7 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 	for i := 1; i <= *count; i++ {
 		slug := checkpointForkFanoutSlug(requestedSlug, i, *count)
 		runOpts := checkpointForkRunOptions{Command: runArgs, Index: i, Total: *count}
-		if err := a.checkpointForkRecordOnce(ctx, cfg, backend, sshBackend, repo, record, paths, *keep, *reclaim, slug, strings.TrimSpace(*workdirOverride), *clear, runOpts); err != nil {
+		if err := a.checkpointForkRecordOnce(ctx, cfg, backend, sshBackend, repo, store, &record, paths, *keep, *reclaim, slug, strings.TrimSpace(*workdirOverride), *clear, runOpts); err != nil {
 			return err
 		}
 	}
@@ -891,8 +898,8 @@ func (a App) provisionCheckpointFork(ctx context.Context, cfg Config, backend Ba
 	return checkpointForkProvision{Lease: forkLease, Workdir: workdir, Release: release}, nil
 }
 
-func (a App) checkpointForkRecordOnce(ctx context.Context, cfg Config, backend Backend, sshBackend SSHLeaseBackend, repo Repo, record checkpointRecord, paths checkpointPaths, keep, reclaim bool, requestedSlug, workdirOverride string, clear bool, runOpts checkpointForkRunOptions) error {
-	provision, err := a.provisionCheckpointFork(ctx, cfg, backend, sshBackend, repo, record, paths, keep, reclaim, requestedSlug, workdirOverride, clear)
+func (a App) checkpointForkRecordOnce(ctx context.Context, cfg Config, backend Backend, sshBackend SSHLeaseBackend, repo Repo, store checkpointStore, record *checkpointRecord, paths checkpointPaths, keep, reclaim bool, requestedSlug, workdirOverride string, clear bool, runOpts checkpointForkRunOptions) error {
+	provision, err := a.provisionCheckpointFork(ctx, cfg, backend, sshBackend, repo, *record, paths, keep, reclaim, requestedSlug, workdirOverride, clear)
 	if err != nil {
 		return err
 	}
@@ -901,10 +908,14 @@ func (a App) checkpointForkRecordOnce(ctx context.Context, cfg Config, backend B
 			provision.Release(context.Background())
 		}
 	}()
+	if err := recordCheckpointUse(store, record); err != nil {
+		provision.Release(context.Background())
+		return err
+	}
 	leaseID := provision.Lease.LeaseID
 	slug := serverSlug(provision.Lease.Server)
 	if isNativeCheckpointKind(record.Kind) {
-		fmt.Fprintf(a.Stdout, "checkpoint forked id=%s lease=%s slug=%s image=%s workdir=%s\n", record.ID, leaseID, blank(slug, "-"), nativeCheckpointResourceID(record), blank(provision.Workdir, "-"))
+		fmt.Fprintf(a.Stdout, "checkpoint forked id=%s lease=%s slug=%s image=%s workdir=%s\n", record.ID, leaseID, blank(slug, "-"), nativeCheckpointResourceID(*record), blank(provision.Workdir, "-"))
 	} else {
 		fmt.Fprintf(a.Stdout, "checkpoint forked id=%s lease=%s slug=%s workdir=%s\n", record.ID, leaseID, blank(slug, "-"), provision.Workdir)
 	}
@@ -1210,21 +1221,29 @@ func deleteCheckpoint(ctx context.Context, store checkpointStore, id string, loc
 func (a App) checkpointPrune(ctx context.Context, args []string) error {
 	fs := newFlagSet("checkpoint prune", a.Stderr)
 	olderThan := fs.String("older-than", "", "delete checkpoints older than this duration")
+	unusedFor := fs.String("unused-for", "", "delete checkpoints unused for this duration")
 	kind := fs.String("kind", "", "checkpoint kind filter: native or archive")
 	dryRun := fs.Bool("dry-run", false, "print checkpoints that would be deleted")
 	localOnly := fs.Bool("local-only", false, "delete local checkpoint records without deleting provider resources")
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
+	usage := "usage: crabbox checkpoint prune [--older-than <duration>] [--unused-for <duration>] [--kind native|archive] [--dry-run]"
 	if fs.NArg() != 0 {
-		return exit(2, "usage: crabbox checkpoint prune --older-than <duration> [--kind native|archive] [--dry-run]")
+		return exit(2, "%s", usage)
 	}
-	pruneAge, err := parseCheckpointPruneDuration(*olderThan)
+	createdAge, err := parseCheckpointPruneDuration(*olderThan)
 	if err != nil {
 		return err
 	}
-	if pruneAge <= 0 {
-		return exit(2, "usage: crabbox checkpoint prune --older-than <duration> [--kind native|archive] [--dry-run]")
+	unusedAge, err := parseCheckpointPruneDurationFlag("--unused-for", *unusedFor)
+	if err != nil {
+		return err
+	}
+	invalidCreatedAge := strings.TrimSpace(*olderThan) != "" && createdAge <= 0
+	invalidUnusedAge := strings.TrimSpace(*unusedFor) != "" && unusedAge <= 0
+	if invalidCreatedAge || invalidUnusedAge || createdAge == 0 && unusedAge == 0 {
+		return exit(2, "%s", usage)
 	}
 	kindFilter := strings.TrimSpace(*kind)
 	if kindFilter != "" && kindFilter != "native" && kindFilter != "archive" {
@@ -1238,25 +1257,33 @@ func (a App) checkpointPrune(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	cutoff := time.Now().Add(-pruneAge)
+	now := time.Now()
+	createdCutoff := now.Add(-createdAge)
+	unusedCutoff := now.Add(-unusedAge)
 	matched := 0
 	for _, record := range records {
 		created, err := time.Parse(time.RFC3339, record.CreatedAt)
 		if err != nil {
 			return exit(2, "checkpoint %s has invalid createdAt: %v", record.ID, err)
 		}
-		if !created.Before(cutoff) || !checkpointMatchesPruneKind(record, kindFilter) {
+		lastUsed, err := time.Parse(time.RFC3339, record.LastUsedAt)
+		if err != nil {
+			return exit(2, "checkpoint %s has invalid lastUsedAt: %v", record.ID, err)
+		}
+		matchesCreatedAge := createdAge == 0 || created.Before(createdCutoff)
+		matchesUnusedAge := unusedAge == 0 || lastUsed.Before(unusedCutoff)
+		if !matchesCreatedAge || !matchesUnusedAge || !checkpointMatchesPruneKind(record, kindFilter) {
 			continue
 		}
 		matched++
 		if *dryRun {
-			fmt.Fprintf(a.Stdout, "would delete id=%s kind=%s created=%s\n", record.ID, record.Kind, record.CreatedAt)
+			fmt.Fprintf(a.Stdout, "would delete id=%s kind=%s created=%s last_used=%s\n", record.ID, record.Kind, record.CreatedAt, record.LastUsedAt)
 			continue
 		}
 		if err := deleteCheckpoint(ctx, store, record.ID, *localOnly); err != nil {
 			return err
 		}
-		fmt.Fprintf(a.Stdout, "checkpoint pruned id=%s kind=%s created=%s\n", record.ID, record.Kind, record.CreatedAt)
+		fmt.Fprintf(a.Stdout, "checkpoint pruned id=%s kind=%s created=%s last_used=%s\n", record.ID, record.Kind, record.CreatedAt, record.LastUsedAt)
 	}
 	if matched == 0 {
 		fmt.Fprintln(a.Stdout, "no checkpoints matched prune criteria")
@@ -1265,6 +1292,10 @@ func (a App) checkpointPrune(ctx context.Context, args []string) error {
 }
 
 func parseCheckpointPruneDuration(value string) (time.Duration, error) {
+	return parseCheckpointPruneDurationFlag("--older-than", value)
+}
+
+func parseCheckpointPruneDurationFlag(flagName, value string) (time.Duration, error) {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
 		return 0, nil
@@ -1272,13 +1303,13 @@ func parseCheckpointPruneDuration(value string) (time.Duration, error) {
 	if strings.HasSuffix(trimmed, "d") {
 		days, err := strconv.Atoi(strings.TrimSuffix(trimmed, "d"))
 		if err != nil || days <= 0 {
-			return 0, exit(2, "--older-than day duration must be a positive integer")
+			return 0, exit(2, "%s day duration must be a positive integer", flagName)
 		}
 		return time.Duration(days) * 24 * time.Hour, nil
 	}
 	duration, err := time.ParseDuration(trimmed)
 	if err != nil {
-		return 0, exit(2, "parse --older-than: %v", err)
+		return 0, exit(2, "parse %s: %v", flagName, err)
 	}
 	return duration, nil
 }
@@ -1447,11 +1478,13 @@ func newCheckpointRecord(repo Repo, cfg Config, server Server, target SSHTarget,
 	if err != nil {
 		return checkpointRecord{}, "", err
 	}
+	createdAt := time.Now().UTC().Format(time.RFC3339)
 	record := checkpointRecord{
 		ID:             id,
 		Name:           strings.TrimSpace(name),
 		Kind:           checkpointKindArchive,
-		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
+		CreatedAt:      createdAt,
+		LastUsedAt:     createdAt,
 		CrabboxVersion: currentVersion(),
 		Provider:       firstNonBlank(server.Provider, cfg.Provider),
 		LeaseID:        leaseID,
