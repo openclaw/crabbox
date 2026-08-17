@@ -164,6 +164,7 @@ See [pond](commands/pond.md) and the [pond feature](features/pond.md).
 
 ```text
 crabbox providers                             show provider capabilities
+crabbox providers describe <provider>         show compiled run flags for one runnable provider
 crabbox usage [--scope user|org|all]          cost and usage estimates
 crabbox marketplace status|quote              preview the credits gateway and smart-routing quotes
 crabbox admin leases|lease-audit|providers|hosts|release|delete

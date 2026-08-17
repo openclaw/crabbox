@@ -1182,10 +1182,33 @@ func isBlacksmithProvider(provider string) bool {
 
 type providerFlagValues map[string]any
 
+type providerFlagRegistrationObserver func(provider Provider, flags []*flag.Flag)
+
 func registerProviderFlags(fs *flag.FlagSet, defaults Config) providerFlagValues {
+	return registerProviderFlagsObserved(fs, defaults, nil)
+}
+
+func registerProviderFlagsObserved(fs *flag.FlagSet, defaults Config, observe providerFlagRegistrationObserver) providerFlagValues {
 	values := providerFlagValues{}
 	for _, provider := range registeredProviders() {
+		var before map[string]bool
+		if observe != nil {
+			before = map[string]bool{}
+			fs.VisitAll(func(item *flag.Flag) { before[item.Name] = true })
+		}
 		values[provider.Name()] = provider.RegisterFlags(fs, defaults)
+		if observe != nil {
+			var added []*flag.Flag
+			fs.VisitAll(func(item *flag.Flag) {
+				if !before[item.Name] {
+					added = append(added, item)
+				}
+			})
+			observe(provider, added)
+		}
+	}
+	if observe == nil {
+		clearFlagAnnotations(fs)
 	}
 	return values
 }

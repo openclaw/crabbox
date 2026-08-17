@@ -41,6 +41,10 @@ type leaseCreateFlagValues struct {
 }
 
 func registerLeaseCreateFlags(fs *flag.FlagSet, defaults Config) leaseCreateFlagValues {
+	return registerLeaseCreateFlagsObserved(fs, defaults, nil)
+}
+
+func registerLeaseCreateFlagsObserved(fs *flag.FlagSet, defaults Config, observe providerFlagRegistrationObserver) leaseCreateFlagValues {
 	expose := stringListFlag{}
 	cacheVolumes := stringListFlag{}
 	imageSDK := stringListFlag{}
@@ -74,7 +78,7 @@ func registerLeaseCreateFlags(fs *flag.FlagSet, defaults Config) leaseCreateFlag
 		ImageWebView2: fs.Bool("image-require-webview2", false, "require WebView2 support in the promoted image"),
 		ImageDesktop:  fs.Bool("image-require-desktop", false, "require desktop support in the promoted image"),
 		Code:          fs.Bool("code", defaults.Code, "provision or require web code-server capability"),
-		ProviderFlags: registerProviderFlags(fs, defaults),
+		ProviderFlags: registerProviderFlagsObserved(fs, defaults, observe),
 		Target:        registerTargetFlags(fs, defaults),
 		Network:       registerNetworkFlags(fs, defaults),
 	}

@@ -281,6 +281,43 @@ Conventions:
   (`RouteConfig`) and `ProviderRoutingFlagProvider` (`RoutingFlagNames`) so a
   family-shared flag selects the right sibling. Most new providers do not need
   this.
+- Providers with flags valid only while creating a lease should implement
+  `ProviderCreationOnlyFlagProvider` (`CreationOnlyFlagNames`). Both routing and
+  creation-only names must refer to flags registered by that provider;
+  `providers describe` fails closed if the contracts drift.
+
+`crabbox providers describe` observes each real `RegisterFlags` call while
+registering the complete `run` flag set against `baseConfig()`. Do not maintain
+a second flag inventory. Standard string, bool, int, int64, float64, and
+`time.Duration` values are discoverable automatically. A custom repeatable
+string value must implement `flag.Getter` and return a defensive `[]string`
+copy:
+
+```go
+type stringListFlag []string
+
+func (f *stringListFlag) String() string { return strings.Join(*f, ",") }
+func (f *stringListFlag) Set(value string) error {
+	*f = append(*f, value)
+	return nil
+}
+func (f *stringListFlag) Get() any {
+	return append([]string{}, (*f)...)
+}
+```
+
+Unsupported custom values make discovery fail rather than guessing a type or
+serializing `String()` output. Keep `RegisterFlags` side-effect free: discovery
+calls it for every provider, but never calls `ApplyFlags`, `Configure`, config
+loading, clients, credentials, or provider state.
+
+When renaming a flag, register the compatibility spelling beside the canonical
+flag and call `core.MarkFlagDeprecated(fs, "old-name", "new-name")` immediately
+in the same registration function. The annotation validates that both real
+flags exist, preserves normal help and parsing behavior, and supplies
+deprecation/replacement metadata without a detached provider-name or flag
+table. Keep precedence in `ApplyFlags`; canonical-wins behavior is an execution
+contract, not metadata inference.
 
 Never accept secrets as flag arguments. Pull them from environment variables,
 SDK config, the broker, or the operator's credential store. Flags are visible in

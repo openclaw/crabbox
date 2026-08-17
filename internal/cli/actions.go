@@ -3205,3 +3205,7 @@ func (f *stringListFlag) Set(value string) error {
 	*f = append(*f, value)
 	return nil
 }
+
+func (f *stringListFlag) Get() any {
+	return append([]string{}, (*f)...)
+}

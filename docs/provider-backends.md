@@ -538,6 +538,12 @@ unknown flags. `RegisterFlags` must be cheap and side-effect free. It returns an
 opaque values struct passed back into `ApplyFlags` only after config and common
 flags select the provider.
 
+The same real registration is the source for `crabbox providers describe`.
+Discovery passes `baseConfig()` compiled defaults, attributes flags added by
+each `Provider.RegisterFlags` invocation, and treats everything else registered
+by `run` as a shared command flag. It never calls `ApplyFlags` or `Configure`.
+Do not add a parallel flag inventory.
+
 Pattern for a provider with typed config fields:
 
 ```go
@@ -562,6 +568,19 @@ func (Provider) ApplyFlags(cfg *cli.Config, fs *flag.FlagSet, values any) error 
 	return nil
 }
 ```
+
+Custom repeatable string-list values must also implement `flag.Getter` and
+return a defensive `[]string` copy. Discovery supports standard string, bool,
+int, int64, float64, and duration values and fails closed on any other custom
+getter type. Routing names from `ProviderRoutingFlagProvider` and create-only
+names from `ProviderCreationOnlyFlagProvider` must resolve to flags registered
+by that provider.
+
+Register renamed compatibility flags with their canonical spelling and annotate
+them in place with `cli.MarkFlagDeprecated(fs, "old-name", "new-name")`. The
+annotation checks that both registered flags exist, feeds discovery metadata,
+and leaves help, parsing, and provider-owned canonical-wins application logic
+unchanged.
 
 `Config` does not have a generic provider config bag. New provider packages
 should either add typed config fields and use `cli.FlagWasSet` from the provider

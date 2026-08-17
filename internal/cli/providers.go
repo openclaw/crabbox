@@ -78,6 +78,9 @@ type providerMatrixFilterFlagValues struct {
 }
 
 func (a App) providers(_ context.Context, args []string) error {
+	if len(args) > 0 && args[0] == "describe" {
+		return a.providerDescribe(args[1:])
+	}
 	if len(args) > 0 && args[0] == "filters" {
 		return a.providerFilters(args[1:])
 	}
@@ -195,26 +198,31 @@ func providerMatrix() []providerMatrixEntry {
 	providers := registeredProviders()
 	entries := make([]providerMatrixEntry, 0, len(providers))
 	for _, provider := range providers {
-		spec := provider.Spec()
-		category := benchmarkProviderCategories[firstNonBlank(spec.Name, provider.Name())]
-		targets := formatProviderTargets(spec.Targets)
-		entries = append(entries, providerMatrixEntry{
-			Provider:     firstNonBlank(spec.Name, provider.Name()),
-			Family:       firstNonBlank(spec.Family, provider.Name()),
-			Aliases:      append([]string(nil), provider.Aliases()...),
-			Kind:         spec.Kind,
-			Category:     category,
-			Targets:      targets,
-			Features:     append(FeatureSet{}, spec.Features...),
-			Runtime:      runtimeCapabilitiesForProvider(firstNonBlank(spec.Name, provider.Name()), spec.Kind, category, targets, spec.Features),
-			Reachability: reachabilityCapabilitiesForProvider(firstNonBlank(spec.Name, provider.Name())),
-			Workspace:    workspaceCapabilitiesForFeatures(spec.Features),
-			Evidence:     evidenceCapabilitiesForFeatures(spec.Features),
-			Lifecycle:    lifecycleCapabilitiesForProvider(spec.Coordinator, spec.Features),
-			Coordinator:  string(spec.Coordinator),
-		})
+		entries = append(entries, providerMatrixEntryFor(provider))
 	}
 	return entries
+}
+
+func providerMatrixEntryFor(provider Provider) providerMatrixEntry {
+	spec := provider.Spec()
+	name := firstNonBlank(spec.Name, provider.Name())
+	category := benchmarkProviderCategories[name]
+	targets := formatProviderTargets(spec.Targets)
+	return providerMatrixEntry{
+		Provider:     name,
+		Family:       firstNonBlank(spec.Family, provider.Name()),
+		Aliases:      append([]string(nil), provider.Aliases()...),
+		Kind:         spec.Kind,
+		Category:     category,
+		Targets:      targets,
+		Features:     append(FeatureSet{}, spec.Features...),
+		Runtime:      runtimeCapabilitiesForProvider(name, spec.Kind, category, targets, spec.Features),
+		Reachability: reachabilityCapabilitiesForProvider(name),
+		Workspace:    workspaceCapabilitiesForFeatures(spec.Features),
+		Evidence:     evidenceCapabilitiesForFeatures(spec.Features),
+		Lifecycle:    lifecycleCapabilitiesForProvider(spec.Coordinator, spec.Features),
+		Coordinator:  string(spec.Coordinator),
+	}
 }
 
 func registerProviderMatrixFilterFlags(fs *flag.FlagSet) *providerMatrixFilterFlagValues {

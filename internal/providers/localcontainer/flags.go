@@ -14,6 +14,7 @@ func (f *volumeListFlag) Set(value string) error {
 	*f = append(*f, value)
 	return nil
 }
+func (f *volumeListFlag) Get() any { return append([]string{}, (*f)...) }
 
 type flagValues struct {
 	Runtime      *string

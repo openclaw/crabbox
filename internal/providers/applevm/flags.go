@@ -30,7 +30,7 @@ type flagValues struct {
 }
 
 func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
-	return flagValues{
+	values := flagValues{
 		HelperPath:  fs.String("apple-vm-helper", defaults.AppleVM.HelperPath, "apple-vm helper binary path"),
 		Image:       fs.String("apple-vm-image", applevmhelper.ImageIdentity(defaults.AppleVM.Image, defaults.AppleVM.ImageSHA256), "apple-vm local source image path"),
 		ImageSHA256: fs.String("apple-vm-image-sha256", defaults.AppleVM.ImageSHA256, "expected SHA-256 for apple-vm source image downloads"),
@@ -49,6 +49,15 @@ func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 		LegacyMemoryMiB:   fs.Int("apple-vz-memory", defaults.AppleVM.MemoryMiB, "deprecated alias for --apple-vm-memory"),
 		LegacyDiskGiB:     fs.Int("apple-vz-disk", defaults.AppleVM.DiskGiB, "deprecated alias for --apple-vm-disk"),
 	}
+	core.MarkFlagDeprecated(fs, "apple-vz-helper", "apple-vm-helper")
+	core.MarkFlagDeprecated(fs, "apple-vz-image", "apple-vm-image")
+	core.MarkFlagDeprecated(fs, "apple-vz-image-sha256", "apple-vm-image-sha256")
+	core.MarkFlagDeprecated(fs, "apple-vz-user", "apple-vm-user")
+	core.MarkFlagDeprecated(fs, "apple-vz-work-root", "apple-vm-work-root")
+	core.MarkFlagDeprecated(fs, "apple-vz-cpus", "apple-vm-cpus")
+	core.MarkFlagDeprecated(fs, "apple-vz-memory", "apple-vm-memory")
+	core.MarkFlagDeprecated(fs, "apple-vz-disk", "apple-vm-disk")
+	return values
 }
 
 // stringFlag returns the effective value of a renamed flag: the current name

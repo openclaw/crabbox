@@ -1919,15 +1919,12 @@ type testLocalContainerFlagValues struct {
 	Memory       *string
 	Network      *string
 	DockerSocket *bool
-	Volumes      *[]string
+	Volumes      *stringListFlag
 }
 
 func (testLocalContainerProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
-	volumes := append([]string(nil), defaults.LocalContainer.Volumes...)
-	fs.Func("local-container-volume", "container volume", func(value string) error {
-		volumes = append(volumes, value)
-		return nil
-	})
+	volumes := stringListFlag(append([]string{}, defaults.LocalContainer.Volumes...))
+	fs.Var(&volumes, "local-container-volume", "container volume")
 	return testLocalContainerFlagValues{
 		Runtime:      fs.String("local-container-runtime", defaults.LocalContainer.Runtime, "Docker-compatible CLI"),
 		Image:        fs.String("local-container-image", defaults.LocalContainer.Image, "container image"),
@@ -2038,7 +2035,7 @@ type testAppleVMFlagValues struct {
 }
 
 func (testAppleVMProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
-	return testAppleVMFlagValues{
+	values := testAppleVMFlagValues{
 		HelperPath:  fs.String("apple-vm-helper", defaults.AppleVM.HelperPath, "apple-vm helper"),
 		Image:       fs.String("apple-vm-image", defaults.AppleVM.Image, "apple-vm image"),
 		ImageSHA256: fs.String("apple-vm-image-sha256", defaults.AppleVM.ImageSHA256, "apple-vm image sha256"),
@@ -2048,6 +2045,23 @@ func (testAppleVMProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any 
 		MemoryMiB:   fs.Int("apple-vm-memory", defaults.AppleVM.MemoryMiB, "apple-vm memory MiB"),
 		DiskGiB:     fs.Int("apple-vm-disk", defaults.AppleVM.DiskGiB, "apple-vm disk GiB"),
 	}
+	fs.String("apple-vz-helper", defaults.AppleVM.HelperPath, "deprecated alias for --apple-vm-helper")
+	fs.String("apple-vz-image", defaults.AppleVM.Image, "deprecated alias for --apple-vm-image")
+	fs.String("apple-vz-image-sha256", defaults.AppleVM.ImageSHA256, "deprecated alias for --apple-vm-image-sha256")
+	fs.String("apple-vz-user", defaults.AppleVM.User, "deprecated alias for --apple-vm-user")
+	fs.String("apple-vz-work-root", defaults.AppleVM.WorkRoot, "deprecated alias for --apple-vm-work-root")
+	fs.Int("apple-vz-cpus", defaults.AppleVM.CPUs, "deprecated alias for --apple-vm-cpus")
+	fs.Int("apple-vz-memory", defaults.AppleVM.MemoryMiB, "deprecated alias for --apple-vm-memory")
+	fs.Int("apple-vz-disk", defaults.AppleVM.DiskGiB, "deprecated alias for --apple-vm-disk")
+	MarkFlagDeprecated(fs, "apple-vz-helper", "apple-vm-helper")
+	MarkFlagDeprecated(fs, "apple-vz-image", "apple-vm-image")
+	MarkFlagDeprecated(fs, "apple-vz-image-sha256", "apple-vm-image-sha256")
+	MarkFlagDeprecated(fs, "apple-vz-user", "apple-vm-user")
+	MarkFlagDeprecated(fs, "apple-vz-work-root", "apple-vm-work-root")
+	MarkFlagDeprecated(fs, "apple-vz-cpus", "apple-vm-cpus")
+	MarkFlagDeprecated(fs, "apple-vz-memory", "apple-vm-memory")
+	MarkFlagDeprecated(fs, "apple-vz-disk", "apple-vm-disk")
+	return values
 }
 func (testAppleVMProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	v, ok := values.(testAppleVMFlagValues)

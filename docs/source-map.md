@@ -39,7 +39,9 @@ Crabbox has three implementation surfaces:
 - `login`/`logout`/`whoami` and `config path|show|set-broker`: `internal/cli/auth.go`, `internal/cli/config_cmd.go`
 - `azure login` (subscription detection via `az` CLI): `internal/cli/azure_login.go`, `internal/cli/azure_cli.go`
 - Doctor checks, broker/provider readiness output, and pond doctor: `internal/cli/doctor.go`, `internal/cli/doctor_pond.go`
-- `providers`, `usage`, and admin commands: `internal/cli/providers.go`, `internal/cli/usage.go`, `internal/cli/admin.go`
+- Provider matrix/filter/recommend output: `internal/cli/providers.go`
+- Provider-scoped `run` flag discovery and JSON schema v1: `internal/cli/providers_describe.go`, with the real reusable registration owner in `internal/cli/run.go` and coupled flag annotations in `internal/cli/flag_metadata.go`
+- `usage` and admin commands: `internal/cli/usage.go`, `internal/cli/admin.go`
 - Provider image bake/promote/fsr-status/delete: `internal/cli/image.go`, `internal/cli/os_image.go`, `internal/cli/coordinator.go`
 - Deterministic perf evidence is contract-only for now:
   `docs/features/deterministic-perf-evidence.md`; no `--perf-budget`,

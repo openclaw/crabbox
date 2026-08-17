@@ -194,6 +194,119 @@ type benchmarkRecordContext struct {
 	OnRecord    func()
 }
 
+type runFlagValues struct {
+	Lease                  leaseCreateFlagValues
+	LeaseID                *string
+	Keep                   *bool
+	KeepOnFailure          *bool
+	NoSync                 *bool
+	SyncOnly               *bool
+	NoHydrate              *bool
+	DebugSync              *bool
+	ShellMode              *bool
+	ChecksumSync           *bool
+	ForceSyncLarge         *bool
+	FullResync             *bool
+	FreshSync              *bool
+	JUnitResults           *string
+	ResultsAuto            *bool
+	FailOnTestFailures     *bool
+	CaptureStdout          *string
+	CaptureStderr          *string
+	CaptureOnFail          *bool
+	Preflight              *bool
+	PreflightTools         *string
+	ScriptPath             *string
+	ScriptStdin            *bool
+	FreshPR                *string
+	ApplyLocalPatch        *bool
+	EnvHelper              *string
+	RunLabel               *string
+	PresetName             *string
+	Scenario               *string
+	EmitProof              *string
+	ProofTemplate          *string
+	AttestOut              *string
+	AttestKeyOverride      *string
+	StopAfter              *string
+	LeaseOutput            *string
+	ReadyPool              *string
+	ReadyPoolCompatibility *string
+	ReadyPoolReturn        *string
+	Downloads              *stringListFlag
+	AllowEnv               *stringListFlag
+	EnvProfiles            *stringListFlag
+	PresetVars             *stringListFlag
+	ArtifactGlobs          *stringListFlag
+	RequiredArtifacts      *stringListFlag
+	RequiredSchemas        *stringListFlag
+	Reclaim                *bool
+	TimingJSON             *bool
+	TimingRecord           *string
+}
+
+func registerRunFlags(fs *flag.FlagSet, defaults Config, observe providerFlagRegistrationObserver) runFlagValues {
+	leaseFlags := registerLeaseCreateFlagsObserved(fs, defaults, observe)
+	values := runFlagValues{
+		Lease:                  leaseFlags,
+		LeaseID:                fs.String("id", "", "existing lease or server id"),
+		Keep:                   fs.Bool("keep", false, "keep server after command"),
+		KeepOnFailure:          fs.Bool("keep-on-failure", false, "keep a newly acquired lease when the remote command exits non-zero"),
+		NoSync:                 fs.Bool("no-sync", false, "skip rsync"),
+		SyncOnly:               fs.Bool("sync-only", false, "sync and exit"),
+		NoHydrate:              fs.Bool("no-hydrate", false, "skip configured Actions hydration"),
+		DebugSync:              fs.Bool("debug", false, "print detailed sync timing"),
+		ShellMode:              fs.Bool("shell", false, "run command through the remote shell"),
+		ChecksumSync:           fs.Bool("checksum", false, "use checksum rsync instead of size/time"),
+		ForceSyncLarge:         fs.Bool("force-sync-large", false, "allow unusually large sync candidates"),
+		FullResync:             fs.Bool("full-resync", false, "reset the remote workdir and force a complete sync"),
+		FreshSync:              fs.Bool("fresh-sync", false, "alias for --full-resync"),
+		JUnitResults:           fs.String("junit", "", "comma-separated remote JUnit XML paths to record"),
+		ResultsAuto:            fs.Bool("results-auto", false, "scan common remote JUnit XML paths after the command"),
+		FailOnTestFailures:     fs.Bool("fail-on-test-failures", false, "exit non-zero when collected JUnit reports contain failures or errors"),
+		CaptureStdout:          fs.String("capture-stdout", "", "write remote stdout to a local file instead of the terminal"),
+		CaptureStderr:          fs.String("capture-stderr", "", "write remote stderr to a local file instead of the terminal"),
+		CaptureOnFail:          fs.Bool("capture-on-fail", false, "compatibility alias; failure bundles are saved by default on non-zero exit"),
+		Preflight:              fs.Bool("preflight", false, "print remote capability preflight before running the command"),
+		PreflightTools:         fs.String("preflight-tools", "", "comma-separated preflight tools to probe; overrides run.preflightTools"),
+		ScriptPath:             fs.String("script", "", "on POSIX SSH leases, upload and run a standalone content-hashed copy under .crabbox/scripts/; delegated module runtimes use source input"),
+		ScriptStdin:            fs.Bool("script-stdin", false, "read a script from stdin, upload it, and run it"),
+		FreshPR:                fs.String("fresh-pr", "", "run from a fresh remote checkout of a GitHub PR: owner/repo#123, URL, or number"),
+		ApplyLocalPatch:        fs.Bool("apply-local-patch", false, "apply the local git diff on top of --fresh-pr checkout"),
+		EnvHelper:              fs.String("env-helper", "", "persist profile env as a reusable remote helper name under .crabbox/env/"),
+		RunLabel:               fs.String("label", "", "human-readable label for this run"),
+		PresetName:             fs.String("preset", "", "configured profile preset to expand into a command"),
+		Scenario:               fs.String("scenario", "", "preset variable shorthand for --preset-var scenario=<value>"),
+		EmitProof:              fs.String("emit-proof", "", "write a generated proof block after a successful run"),
+		ProofTemplate:          fs.String("proof-template", "", "proof template name from the selected profile"),
+		AttestOut:              fs.String("attest", "", "write a signed run receipt after a successful run"),
+		AttestKeyOverride:      fs.String("attest-key", "", "path to an existing PKCS8 PEM ed25519 private key for --attest"),
+		StopAfter:              fs.String("stop-after", "", "stop policy for the lease: success, always, failure, or never"),
+		LeaseOutput:            fs.String("lease-output", "", "write a retained JSON lease handle for orchestrators on supported providers"),
+		ReadyPool:              fs.String("pool", "", "borrow a broker ready-pool lease"),
+		ReadyPoolCompatibility: fs.String("pool-compatibility-key", "", "provider-neutral ready-pool capability and size key"),
+		ReadyPoolReturn:        fs.String("pool-return", "auto", "ready-pool return policy: auto, ready, drain, release"),
+		Downloads:              &stringListFlag{},
+		AllowEnv:               &stringListFlag{},
+		EnvProfiles:            &stringListFlag{},
+		PresetVars:             &stringListFlag{},
+		ArtifactGlobs:          &stringListFlag{},
+		RequiredArtifacts:      &stringListFlag{},
+		RequiredSchemas:        &stringListFlag{},
+	}
+	fs.Var(values.Downloads, "download", "download a remote file after command success: remote=local; repeatable")
+	fs.Var(values.AllowEnv, "allow-env", "allow an environment variable for this run; repeatable or comma-separated")
+	fs.Var(values.EnvProfiles, "env-from-profile", "load allowed environment values from a local profile file; repeatable")
+	fs.Var(values.PresetVars, "preset-var", "preset template variable name=value; repeatable or comma-separated")
+	fs.Var(values.ArtifactGlobs, "artifact-glob", "collect remote files matching a safe glob into a local run artifact tarball; repeatable")
+	fs.Var(values.RequiredArtifacts, "require-artifact", "require a remote file matching a safe glob after command success; repeatable")
+	fs.Var(values.RequiredSchemas, "require-artifact-schema", "validate a required artifact's JSON content against a schema file after command success: remote=schema.json; repeatable")
+	values.Reclaim = fs.Bool("reclaim", false, "claim this lease for the current repo")
+	values.TimingJSON = fs.Bool("timing-json", false, "print final timing as JSON")
+	values.TimingRecord = fs.String("timing-record", "", "append final timing to benchmark JSONL store: default, off, or path")
+	return values
+}
+
 func (a App) runCommand(ctx context.Context, args []string) error {
 	return a.runCommandWithBenchmarkRecord(ctx, args, benchmarkRecordContext{})
 }
@@ -201,64 +314,58 @@ func (a App) runCommand(ctx context.Context, args []string) error {
 func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, benchmarkCtx benchmarkRecordContext) (err error) {
 	defaults := defaultConfig()
 	fs := newFlagSet("run", a.Stderr)
-	leaseFlags := registerLeaseCreateFlags(fs, defaults)
-	leaseIDFlag := fs.String("id", "", "existing lease or server id")
-	keep := fs.Bool("keep", false, "keep server after command")
-	keepOnFailure := fs.Bool("keep-on-failure", false, "keep a newly acquired lease when the remote command exits non-zero")
-	noSync := fs.Bool("no-sync", false, "skip rsync")
-	syncOnly := fs.Bool("sync-only", false, "sync and exit")
-	noHydrate := fs.Bool("no-hydrate", false, "skip configured Actions hydration")
-	debugSync := fs.Bool("debug", false, "print detailed sync timing")
-	shellMode := fs.Bool("shell", false, "run command through the remote shell")
-	checksumSync := fs.Bool("checksum", false, "use checksum rsync instead of size/time")
-	forceSyncLarge := fs.Bool("force-sync-large", false, "allow unusually large sync candidates")
-	fullResync := fs.Bool("full-resync", false, "reset the remote workdir and force a complete sync")
-	freshSync := fs.Bool("fresh-sync", false, "alias for --full-resync")
-	junitResults := fs.String("junit", "", "comma-separated remote JUnit XML paths to record")
-	resultsAuto := fs.Bool("results-auto", false, "scan common remote JUnit XML paths after the command")
-	failOnTestFailures := fs.Bool("fail-on-test-failures", false, "exit non-zero when collected JUnit reports contain failures or errors")
-	captureStdout := fs.String("capture-stdout", "", "write remote stdout to a local file instead of the terminal")
-	captureStderr := fs.String("capture-stderr", "", "write remote stderr to a local file instead of the terminal")
-	captureOnFail := fs.Bool("capture-on-fail", false, "compatibility alias; failure bundles are saved by default on non-zero exit")
-	preflight := fs.Bool("preflight", false, "print remote capability preflight before running the command")
-	preflightTools := fs.String("preflight-tools", "", "comma-separated preflight tools to probe; overrides run.preflightTools")
-	scriptPath := fs.String("script", "", "on POSIX SSH leases, upload and run a standalone content-hashed copy under .crabbox/scripts/; delegated module runtimes use source input")
-	scriptStdin := fs.Bool("script-stdin", false, "read a script from stdin, upload it, and run it")
-	freshPRValue := fs.String("fresh-pr", "", "run from a fresh remote checkout of a GitHub PR: owner/repo#123, URL, or number")
-	applyLocalPatch := fs.Bool("apply-local-patch", false, "apply the local git diff on top of --fresh-pr checkout")
-	envHelper := fs.String("env-helper", "", "persist profile env as a reusable remote helper name under .crabbox/env/")
-	runLabel := fs.String("label", "", "human-readable label for this run")
-	presetName := fs.String("preset", "", "configured profile preset to expand into a command")
-	scenario := fs.String("scenario", "", "preset variable shorthand for --preset-var scenario=<value>")
-	emitProof := fs.String("emit-proof", "", "write a generated proof block after a successful run")
-	proofTemplate := fs.String("proof-template", "", "proof template name from the selected profile")
-	attestOut := fs.String("attest", "", "write a signed run receipt after a successful run")
-	attestKeyOverride := fs.String("attest-key", "", "path to an existing PKCS8 PEM ed25519 private key for --attest")
-	stopAfter := fs.String("stop-after", "", "stop policy for the lease: success, always, failure, or never")
-	leaseOutput := fs.String("lease-output", "", "write a retained JSON lease handle for orchestrators on supported providers")
-	readyPool := fs.String("pool", "", "borrow a broker ready-pool lease")
-	readyPoolCompatibilityKey := fs.String("pool-compatibility-key", "", "provider-neutral ready-pool capability and size key")
-	readyPoolReturn := fs.String("pool-return", "auto", "ready-pool return policy: auto, ready, drain, release")
-	var downloads stringListFlag
-	var allowEnvFlags stringListFlag
-	var envProfileFlags stringListFlag
-	var presetVars stringListFlag
-	var artifactGlobs stringListFlag
-	var requiredArtifactGlobs stringListFlag
-	var requiredArtifactSchemas stringListFlag
-	fs.Var(&downloads, "download", "download a remote file after command success: remote=local; repeatable")
-	fs.Var(&allowEnvFlags, "allow-env", "allow an environment variable for this run; repeatable or comma-separated")
-	fs.Var(&envProfileFlags, "env-from-profile", "load allowed environment values from a local profile file; repeatable")
-	fs.Var(&presetVars, "preset-var", "preset template variable name=value; repeatable or comma-separated")
-	fs.Var(&artifactGlobs, "artifact-glob", "collect remote files matching a safe glob into a local run artifact tarball; repeatable")
-	fs.Var(&requiredArtifactGlobs, "require-artifact", "require a remote file matching a safe glob after command success; repeatable")
-	fs.Var(&requiredArtifactSchemas, "require-artifact-schema", "validate a required artifact's JSON content against a schema file after command success: remote=schema.json; repeatable")
-	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
-	timingJSON := fs.Bool("timing-json", false, "print final timing as JSON")
-	timingRecord := fs.String("timing-record", "", "append final timing to benchmark JSONL store: default, off, or path")
+	runFlags := registerRunFlags(fs, defaults, nil)
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
+	leaseFlags := runFlags.Lease
+	leaseIDFlag := runFlags.LeaseID
+	keep := runFlags.Keep
+	keepOnFailure := runFlags.KeepOnFailure
+	noSync := runFlags.NoSync
+	syncOnly := runFlags.SyncOnly
+	noHydrate := runFlags.NoHydrate
+	debugSync := runFlags.DebugSync
+	shellMode := runFlags.ShellMode
+	checksumSync := runFlags.ChecksumSync
+	forceSyncLarge := runFlags.ForceSyncLarge
+	fullResync := runFlags.FullResync
+	freshSync := runFlags.FreshSync
+	junitResults := runFlags.JUnitResults
+	resultsAuto := runFlags.ResultsAuto
+	failOnTestFailures := runFlags.FailOnTestFailures
+	captureStdout := runFlags.CaptureStdout
+	captureStderr := runFlags.CaptureStderr
+	captureOnFail := runFlags.CaptureOnFail
+	preflight := runFlags.Preflight
+	preflightTools := runFlags.PreflightTools
+	scriptPath := runFlags.ScriptPath
+	scriptStdin := runFlags.ScriptStdin
+	freshPRValue := runFlags.FreshPR
+	applyLocalPatch := runFlags.ApplyLocalPatch
+	envHelper := runFlags.EnvHelper
+	runLabel := runFlags.RunLabel
+	presetName := runFlags.PresetName
+	scenario := runFlags.Scenario
+	emitProof := runFlags.EmitProof
+	proofTemplate := runFlags.ProofTemplate
+	attestOut := runFlags.AttestOut
+	attestKeyOverride := runFlags.AttestKeyOverride
+	stopAfter := runFlags.StopAfter
+	leaseOutput := runFlags.LeaseOutput
+	readyPool := runFlags.ReadyPool
+	readyPoolCompatibilityKey := runFlags.ReadyPoolCompatibility
+	readyPoolReturn := runFlags.ReadyPoolReturn
+	downloads := append(stringListFlag(nil), (*runFlags.Downloads)...)
+	allowEnvFlags := append(stringListFlag(nil), (*runFlags.AllowEnv)...)
+	envProfileFlags := append(stringListFlag(nil), (*runFlags.EnvProfiles)...)
+	presetVars := append(stringListFlag(nil), (*runFlags.PresetVars)...)
+	artifactGlobs := append(stringListFlag(nil), (*runFlags.ArtifactGlobs)...)
+	requiredArtifactGlobs := append(stringListFlag(nil), (*runFlags.RequiredArtifacts)...)
+	requiredArtifactSchemas := append(stringListFlag(nil), (*runFlags.RequiredSchemas)...)
+	reclaim := runFlags.Reclaim
+	timingJSON := runFlags.TimingJSON
+	timingRecord := runFlags.TimingRecord
 	timingRecordPath, timingRecordEnabled, err := resolveBenchmarkTimingStore(*timingRecord)
 	if err != nil {
 		return err

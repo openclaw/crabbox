@@ -10,6 +10,8 @@ crabbox providers
 crabbox providers --json
 crabbox providers filters
 crabbox providers filters --json
+crabbox providers describe local-container
+crabbox providers describe docker --json
 crabbox providers --reachability provider-url --evidence preview-url
 crabbox providers --lifecycle cleanup --lifecycle workspace-state
 crabbox providers --target linux --workspace checkpoint --workspace fork --json
@@ -63,6 +65,128 @@ the current binary.
 
 The matrix form takes no positional arguments. Use `providers recommend` for
 workflow-oriented ranked selection guidance.
+
+## `providers describe`
+
+`crabbox providers describe <provider>` reports the selected runnable
+provider's canonical identity, normalized capabilities, and the exact flags
+registered by `crabbox run`. An alias is accepted before or after `--json`:
+
+```sh
+crabbox providers describe local-container
+crabbox providers describe docker --json
+crabbox providers describe --json docker
+```
+
+Alias input is visible in both formats. Human output starts with the
+canonicalization and keeps command-level and provider-owned flags separate:
+
+```text
+docker -> local-container
+  kind: ssh-lease
+  runnable: true
+  family: container
+  aliases: container,docker,local-docker
+  deprecated: false
+  replacement: -
+  targets: linux
+  features: browser,cache-volume,cleanup,crabbox-sync,desktop,run-session,ssh,workspace-checkpoint,workspace-fork
+  runtime: interactive,local-runtime,ssh-host
+  reachability: ssh-tunnel
+  workspace: checkpoint,fork
+  evidence: session
+  lifecycle: cleanup,run-session,workspace-state
+  coordinator: never
+
+Shared run flags:
+  --arch
+    type: string; value shape: scalar; default: "amd64"; repeatable: false
+    deprecated: false; replacement: -; routing: false; creation-only: false
+    CPU architecture: amd64 or arm64
+  ...
+
+local-container flags:
+  --local-container-volume
+    type: string; value shape: string-list; default: []; repeatable: true
+    deprecated: false; replacement: -; routing: false; creation-only: true
+    bind-mount a host path into the container; host:container[:ro]; repeatable
+```
+
+Providers with no provider-owned flags still print `Shared run flags` and an
+explicit `(none)` in their provider section. Shared flags are command-level
+`run` workflow flags; their presence does not bypass ordinary capability,
+target, provider-kind, or option-combination validation.
+
+### JSON schema v1
+
+`--json` emits one object. Every array is present, including empty arrays, and
+identity aliases, targets, capability arrays, and flag records are sorted for
+deterministic output:
+
+```json
+{
+  "schemaVersion": 1,
+  "provider": {
+    "requested": "docker",
+    "canonical": "local-container",
+    "inputAlias": "docker",
+    "aliases": ["container", "docker", "local-docker"],
+    "deprecated": false,
+    "replacement": ""
+  },
+  "runnable": true,
+  "kind": "ssh-lease",
+  "family": "container",
+  "targets": ["linux"],
+  "capabilities": {
+    "features": ["browser", "cache-volume", "cleanup", "crabbox-sync", "desktop", "run-session", "ssh", "workspace-checkpoint", "workspace-fork"],
+    "runtime": ["interactive", "local-runtime", "ssh-host"],
+    "reachability": ["ssh-tunnel"],
+    "workspace": ["checkpoint", "fork"],
+    "evidence": ["session"],
+    "lifecycle": ["cleanup", "run-session", "workspace-state"],
+    "coordinator": "never"
+  },
+  "sharedFlags": [],
+  "providerFlags": []
+}
+```
+
+The abbreviated empty flag arrays above have this stable record shape when
+populated:
+
+```json
+{
+  "name": "local-container-volume",
+  "type": "string",
+  "valueShape": "string-list",
+  "default": [],
+  "repeatable": true,
+  "usage": "bind-mount a host path into the container; host:container[:ro]; repeatable",
+  "deprecated": false,
+  "replacement": "",
+  "routing": false,
+  "creationOnly": true
+}
+```
+
+Scalar `type` values are `string`, `bool`, `int`, `int64`, `float64`, or
+`duration`; durations use canonical Go duration strings. A repeatable string
+list has `type: "string"`, `valueShape: "string-list"`, a JSON string-array
+default, and `repeatable: true`.
+
+Defaults come from the compiled `baseConfig()` passed through the real `run`
+flag registration. The command does not load config files or environment
+overrides, inspect credentials, configure or apply a provider, create clients,
+contact a network, read claims/state/locks, or write files. Consequently it
+never serializes live config, credential, or environment values. Provider-level
+deprecation is currently always `false` with an empty replacement because the
+registry has equivalent aliases but no deprecated-provider contract. Flag
+deprecations are explicit per flag and point to their canonical replacement.
+
+Only `ssh-lease` and `delegated-run` providers are runnable. Unknown providers,
+`service-control` providers, future unsupported provider kinds, missing names,
+and extra names fail with exit 2 and produce no partial JSON.
 
 ## `providers filters`
 

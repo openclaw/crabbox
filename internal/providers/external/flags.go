@@ -143,6 +143,10 @@ func (f *stringListFlag) Set(value string) error {
 	return nil
 }
 
+func (f *stringListFlag) Get() any {
+	return append([]string{}, f.values...)
+}
+
 func validateConfig(cfg core.Config) error {
 	hasCommand := strings.TrimSpace(cfg.External.Command) != ""
 	hasLifecycle := lifecycleConfigured(cfg.External)

@@ -23,6 +23,10 @@ func (f *stringListFlag) Set(value string) error {
 	return nil
 }
 
+func (f *stringListFlag) Get() any {
+	return append([]string{}, (*f)...)
+}
+
 type flagValues struct {
 	CLIPath         *string
 	Agent           *string

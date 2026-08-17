@@ -35,6 +35,10 @@ func (s *modalSecretList) Set(value string) error {
 	return nil
 }
 
+func (s *modalSecretList) Get() any {
+	return append([]string{}, s.values...)
+}
+
 func RegisterModalProviderFlags(fs *flag.FlagSet, defaults Config) any {
 	secrets := modalSecretList{values: append([]string(nil), defaults.Modal.Secrets...)}
 	fs.Var(&secrets, "modal-secret", "named Modal Secret to inject into the sandbox; repeatable or comma-separated")

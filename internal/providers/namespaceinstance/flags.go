@@ -14,6 +14,7 @@ func (f *stringListFlag) Set(value string) error {
 	*f = append(*f, strings.TrimSpace(value))
 	return nil
 }
+func (f *stringListFlag) Get() any { return append([]string{}, (*f)...) }
 
 type flagValues struct {
 	CLIPath     *string
