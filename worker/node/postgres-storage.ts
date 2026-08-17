@@ -92,7 +92,11 @@ export class PostgresCoordinatorStorage implements CoordinatorStorage {
     startAfter?: string;
     noCache?: boolean;
   } = {}): Promise<Map<string, T>> {
-    return this.view.list<T>({ prefix, limit, startAfter });
+    return this.view.list<T>({
+      prefix,
+      ...(limit === undefined ? {} : { limit }),
+      ...(startAfter === undefined ? {} : { startAfter }),
+    });
   }
 
   async transaction<T>(callback: (transaction: CoordinatorStorageView) => Promise<T>): Promise<T> {
