@@ -392,6 +392,3 @@ func claimLeaseTargetForRepoConfig(leaseID, slug string, cfg Config, server Serv
 func resolveLeaseClaimForProvider(id, provider string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaimForProvider(id, provider)
 }
-func touchDirectLeaseLabels(labels map[string]string, cfg Config, state string, now time.Time) map[string]string {
-	return core.TouchDirectLeaseLabels(labels, cfg, state, now)
-}
