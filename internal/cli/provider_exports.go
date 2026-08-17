@@ -326,6 +326,12 @@ func UpdateLeaseClaimLabelsAndLastUsedIfUnchanged(leaseID string, expected Lease
 	return updateLeaseClaimLabelsAndLastUsedIfUnchanged(leaseID, expected, labels, lastUsed)
 }
 
+// UpdateLeaseClaimTouchIfUnchanged atomically commits touched lifecycle labels,
+// last-use time, and an explicitly requested idle-timeout replacement.
+func UpdateLeaseClaimTouchIfUnchanged(leaseID string, expected LeaseClaim, labels map[string]string, lastUsed time.Time, idleTimeoutOverride *time.Duration) (LeaseClaim, error) {
+	return updateLeaseClaimTouchIfUnchanged(leaseID, expected, labels, lastUsed, idleTimeoutOverride)
+}
+
 func UpdateLeaseClaimLabelsIfUnchangedAfter(leaseID string, expected LeaseClaim, labels map[string]string, action func() error) (LeaseClaim, error) {
 	return updateLeaseClaimLabelsIfUnchangedAfter(leaseID, expected, labels, action)
 }
@@ -508,6 +514,10 @@ func DirectLeaseLabels(cfg Config, leaseID, slug, provider, market string, keep 
 
 func TouchDirectLeaseLabels(labels map[string]string, cfg Config, state string, now time.Time) map[string]string {
 	return touchDirectLeaseLabels(labels, cfg, state, now)
+}
+
+func TouchDirectLeaseLabelsWithIdleTimeoutOverride(labels map[string]string, cfg Config, state string, now time.Time, idleTimeoutOverride *time.Duration) map[string]string {
+	return touchDirectLeaseLabelsWithIdleTimeoutOverride(labels, cfg, state, now, idleTimeoutOverride)
 }
 
 func LeaseLabelTime(t time.Time) string {

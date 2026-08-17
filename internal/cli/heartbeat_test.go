@@ -169,7 +169,7 @@ func TestHeartbeatRegisteredModeUsesCoordinator(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(backend.touches) != 1 || backend.touches[0].IdleTimeout != time.Hour {
+	if len(backend.touches) != 1 || backend.touches[0].IdleTimeout != time.Hour || backend.touches[0].IdleTimeoutOverride == nil || *backend.touches[0].IdleTimeoutOverride != time.Hour {
 		t.Fatalf("registered heartbeat direct touches=%#v", backend.touches)
 	}
 }
@@ -264,7 +264,7 @@ func TestHeartbeatDirectProviderUsesTouchForExactClaim(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(backend.touches) != 1 || backend.touches[0].IdleTimeout != 45*time.Minute {
+	if len(backend.touches) != 1 || backend.touches[0].IdleTimeout != 45*time.Minute || backend.touches[0].IdleTimeoutOverride == nil || *backend.touches[0].IdleTimeoutOverride != 45*time.Minute {
 		t.Fatalf("touches=%#v", backend.touches)
 	}
 	var got leaseHeartbeatView
@@ -273,6 +273,18 @@ func TestHeartbeatDirectProviderUsesTouchForExactClaim(t *testing.T) {
 	}
 	if got.ID != backend.lease.LeaseID || got.IdleTimeout != "45m0s" || got.LastTouchedAt != "2026-08-16T20:00:00Z" {
 		t.Fatalf("heartbeat output=%#v", got)
+	}
+}
+
+func TestHeartbeatDirectProviderOmitsIdleTimeoutOverrideIntent(t *testing.T) {
+	backend := configureHeartbeatDirectTest(t, true)
+	if err := (App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}).heartbeat(context.Background(), []string{
+		"--provider", heartbeatDirectProviderName, "--id", "direct-heartbeat",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(backend.touches) != 1 || backend.touches[0].IdleTimeoutOverride != nil {
+		t.Fatalf("omitted timeout carried replacement intent: %#v", backend.touches)
 	}
 }
 

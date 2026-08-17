@@ -745,6 +745,32 @@ func updateLeaseClaimLabelsAndLastUsedIfUnchanged(leaseID string, expected lease
 	return updated, err
 }
 
+func updateLeaseClaimTouchIfUnchanged(leaseID string, expected leaseClaim, labels map[string]string, lastUsed time.Time, idleTimeoutOverride *time.Duration) (leaseClaim, error) {
+	if leaseID == "" {
+		return leaseClaim{}, nil
+	}
+	if idleTimeoutOverride != nil && *idleTimeoutOverride <= 0 {
+		return leaseClaim{}, exit(2, "lease %s idle timeout override must be positive", leaseID)
+	}
+	var updated leaseClaim
+	err := mutateLeaseClaimGuarded(leaseID, unchangedLeaseClaimGuard(leaseID, expected, true), func(claim *leaseClaim) error {
+		if claim.LeaseID == "" {
+			return nil
+		}
+		claim.Labels = cloneStringMap(labels)
+		claim.LastUsedAt = lastUsed.UTC().Format(time.RFC3339)
+		if idleTimeoutOverride != nil {
+			claim.IdleTimeoutSeconds = int(idleTimeoutOverride.Round(time.Second) / time.Second)
+			if claim.IdleTimeoutSeconds <= 0 {
+				return exit(2, "lease %s idle timeout override must be at least one second", leaseID)
+			}
+		}
+		updated = cloneLeaseClaim(*claim)
+		return nil
+	})
+	return updated, err
+}
+
 func updateLeaseClaimLabelsIfUnchangedAfter(leaseID string, expected leaseClaim, labels map[string]string, action func() error) (leaseClaim, error) {
 	if leaseID == "" {
 		return leaseClaim{}, nil

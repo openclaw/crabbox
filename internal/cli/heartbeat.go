@@ -44,8 +44,10 @@ func (a App) heartbeat(ctx context.Context, args []string) error {
 	if err := requireLeaseID(*id, "crabbox heartbeat --id <lease-id-or-slug>", cfg); err != nil {
 		return err
 	}
+	var idleTimeoutOverride *time.Duration
 	if idleTimeoutSet {
 		cfg.IdleTimeout = *idleTimeout
+		idleTimeoutOverride = idleTimeout
 	}
 
 	backend, err := loadBackend(cfg, runtimeForApp(a))
@@ -53,11 +55,7 @@ func (a App) heartbeat(ctx context.Context, args []string) error {
 		return err
 	}
 	if coordinator, ok := backend.(*coordinatorLeaseBackend); ok {
-		var override *time.Duration
-		if idleTimeoutSet {
-			override = idleTimeout
-		}
-		lease, err := coordinator.HeartbeatLease(ctx, *id, override)
+		lease, err := coordinator.HeartbeatLease(ctx, *id, idleTimeoutOverride)
 		if err != nil {
 			return err
 		}
@@ -116,12 +114,8 @@ func (a App) heartbeat(ctx context.Context, args []string) error {
 	}
 	var registeredLease *CoordinatorLease
 	if registeredCoord != nil {
-		var override *time.Duration
-		if idleTimeoutSet {
-			override = idleTimeout
-		}
 		canonicalLeaseID := lease.LeaseID
-		coordinatorLease, err := heartbeatCoordinatorLease(ctx, registeredCoord, canonicalLeaseID, cfg.Provider, override)
+		coordinatorLease, err := heartbeatCoordinatorLease(ctx, registeredCoord, canonicalLeaseID, cfg.Provider, idleTimeoutOverride)
 		if err != nil {
 			return err
 		}
@@ -134,9 +128,10 @@ func (a App) heartbeat(ctx context.Context, args []string) error {
 		registeredLease = &coordinatorLease
 	}
 	touched, err := sshBackend.Touch(ctx, TouchRequest{
-		Lease:       lease,
-		State:       state,
-		IdleTimeout: cfg.IdleTimeout,
+		Lease:               lease,
+		State:               state,
+		IdleTimeout:         cfg.IdleTimeout,
+		IdleTimeoutOverride: idleTimeoutOverride,
 	})
 	if err != nil {
 		return err

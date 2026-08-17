@@ -102,6 +102,27 @@ func TestTouchDirectLeaseLabelsMovesExpiryForwardToTTLCap(t *testing.T) {
 	}
 }
 
+func TestTouchDirectLeaseLabelsExplicitIdleTimeoutOverridesStoredValue(t *testing.T) {
+	created := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	touched := created.Add(time.Minute)
+	labels := directLeaseLabels(Config{
+		TTL:         2 * time.Hour,
+		IdleTimeout: 30 * time.Minute,
+	}, "cbx_abcdef123456", "blue-lobster", "ssh", "", true, created)
+	override := 45 * time.Minute
+
+	got := touchDirectLeaseLabelsWithIdleTimeoutOverride(labels, Config{
+		TTL:         2 * time.Hour,
+		IdleTimeout: 5 * time.Minute,
+	}, "ready", touched, &override)
+	if got["idle_timeout"] != "2700" || got["idle_timeout_secs"] != "2700" {
+		t.Fatalf("idle timeout labels=%#v want explicit 2700", got)
+	}
+	if got["expires_at"] != leaseLabelTime(touched.Add(override)) {
+		t.Fatalf("expires_at=%q want=%q", got["expires_at"], leaseLabelTime(touched.Add(override)))
+	}
+}
+
 func TestParseLeaseLabelTimeAcceptsLegacyRFC3339(t *testing.T) {
 	legacy := "2026-05-01T12:00:00Z"
 	got, ok := parseLeaseLabelTime(legacy)

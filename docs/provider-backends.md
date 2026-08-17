@@ -620,7 +620,12 @@ available.
 rendering belongs to core.
 
 `Touch` should update provider labels/tags with idle and state metadata when the
-provider supports it. Static providers can update only the in-memory view.
+provider supports it. `TouchRequest.IdleTimeoutOverride` is non-nil only for an
+explicit replacement; omission must preserve the persisted timeout. Static
+providers must atomically compare-and-swap lifecycle labels and an optional
+timeout into the exact canonical local claim, then reconstruct later `Resolve`
+results from that claim. An in-memory-only static touch is not durable enough
+for heartbeat.
 
 `ReleaseLease` should be idempotent where practical. Remove local claims after the
 provider release succeeds or is known to be unnecessary.

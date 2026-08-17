@@ -606,9 +606,10 @@ type ReleaseLeaseRequest struct {
 }
 
 type TouchRequest struct {
-	Lease       LeaseTarget
-	State       string
-	IdleTimeout time.Duration
+	Lease               LeaseTarget
+	State               string
+	IdleTimeout         time.Duration
+	IdleTimeoutOverride *time.Duration
 }
 ```
 

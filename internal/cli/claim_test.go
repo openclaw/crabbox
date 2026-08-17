@@ -1256,6 +1256,52 @@ func TestUpdateLeaseClaimLabelsAndLastUsedIfUnchanged(t *testing.T) {
 	}
 }
 
+func TestUpdateLeaseClaimTouchIfUnchangedCommitsOptionalTimeoutAtomically(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "static_touch_claim"
+	expected, err := claimLeaseForRepoProviderScopePondWithLabels(
+		leaseID, "static-touch", "ssh", "", "", "/repo", 30*time.Minute,
+		map[string]string{"state": "ready", "idle_timeout_secs": "1800"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	firstTouch := time.Date(2026, time.August, 16, 20, 0, 0, 0, time.UTC)
+	preserved, err := updateLeaseClaimTouchIfUnchanged(leaseID, expected, map[string]string{
+		"state": "ready", "idle_timeout_secs": "1800", "last_touched_at": leaseLabelTime(firstTouch),
+	}, firstTouch, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preserved.IdleTimeoutSeconds != 1800 || preserved.LastUsedAt != firstTouch.Format(time.RFC3339) {
+		t.Fatalf("preserved claim=%#v", preserved)
+	}
+
+	secondTouch := firstTouch.Add(time.Minute)
+	override := 45 * time.Minute
+	replaced, err := updateLeaseClaimTouchIfUnchanged(leaseID, preserved, map[string]string{
+		"state": "ready", "idle_timeout_secs": "2700", "last_touched_at": leaseLabelTime(secondTouch),
+	}, secondTouch, &override)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replaced.IdleTimeoutSeconds != 2700 || replaced.LastUsedAt != secondTouch.Format(time.RFC3339) || replaced.Labels["idle_timeout_secs"] != "2700" {
+		t.Fatalf("replaced claim=%#v", replaced)
+	}
+
+	if _, err := updateLeaseClaimTouchIfUnchanged(leaseID, preserved, nil, time.Now(), nil); err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("stale touch err=%v", err)
+	}
+	removeLeaseClaim(leaseID)
+	if _, err := updateLeaseClaimTouchIfUnchanged(leaseID, replaced, nil, time.Now(), nil); err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("raced-away touch err=%v", err)
+	}
+	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists {
+		t.Fatalf("raced-away touch recreated claim: exists=%t err=%v", exists, err)
+	}
+}
+
 func TestConditionalClaimEndpointActionUpdatesAtomically(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_conditionalendpoint123"

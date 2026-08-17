@@ -3,6 +3,8 @@ package ssh
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -63,6 +65,15 @@ func (b *staticLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (L
 	lease := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
 	if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), cfg, server, target, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
 		return LeaseTarget{}, err
+	}
+	claim, claimed, exact, err := core.ResolveLeaseClaimForProviderWithExact(leaseID, staticProvider)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	if claimed && exact && staticLeaseClaimMatchesConfig(cfg, claim) {
+		core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
+	} else if req.Repo.Root != "" {
+		return LeaseTarget{}, exit(4, "static lease %s claim changed after acquisition", leaseID)
 	}
 	b.rememberAcquiredLease(lease)
 	return lease, nil
@@ -157,11 +168,37 @@ func (b *staticLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
 }
 
 func (b *staticLeaseBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {
-	server := req.Lease.Server
-	if server.Labels == nil {
-		server.Labels = map[string]string{}
+	expected, exists, set := core.ServerLeaseClaimSnapshot(req.Lease.Server)
+	if !set || !exists {
+		return Server{}, exit(4, "static lease %s has no exact claim snapshot; refusing touch", req.Lease.LeaseID)
 	}
-	server.Labels = touchDirectLeaseLabels(server.Labels, b.Cfg, req.State, time.Now().UTC())
+	if err := validateStaticTouchIdentity(b.Cfg, req.Lease, expected); err != nil {
+		return Server{}, err
+	}
+	if req.IdleTimeoutOverride != nil && *req.IdleTimeoutOverride <= 0 {
+		return Server{}, exit(2, "static lease %s idle timeout override must be positive", req.Lease.LeaseID)
+	}
+
+	now := time.Now().UTC()
+	if b.RT.Clock != nil {
+		now = b.RT.Clock.Now().UTC()
+	}
+	cfg := b.Cfg
+	if expected.IdleTimeoutSeconds > 0 {
+		cfg.IdleTimeout = time.Duration(expected.IdleTimeoutSeconds) * time.Second
+	}
+	labels := staticLeaseLabelsFromClaim(expected)
+	labels = core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(labels, cfg, req.State, now, req.IdleTimeoutOverride)
+	updated, err := core.UpdateLeaseClaimTouchIfUnchanged(req.Lease.LeaseID, expected, labels, now, req.IdleTimeoutOverride)
+	if err != nil {
+		return Server{}, err
+	}
+	server := req.Lease.Server
+	server.Labels = labels
+	if state := strings.TrimSpace(labels["state"]); state != "" {
+		server.Status = state
+	}
+	core.SetServerLeaseClaimSnapshot(&server, updated, true)
 	return server, nil
 }
 
@@ -259,7 +296,77 @@ func staticLeaseFromClaim(cfg Config, claim core.LeaseClaim) (Server, SSHTarget,
 			cfg.WindowsMode = claim.WindowsMode
 		}
 	}
-	return staticLease(cfg)
+	if claim.IdleTimeoutSeconds > 0 {
+		cfg.IdleTimeout = time.Duration(claim.IdleTimeoutSeconds) * time.Second
+	}
+	server, target, leaseID, err := staticLease(cfg)
+	if err != nil {
+		return Server{}, SSHTarget{}, "", err
+	}
+	server.Labels = staticLeaseLabelsFromClaim(claim)
+	if state := strings.TrimSpace(server.Labels["state"]); state != "" {
+		server.Status = state
+	}
+	core.SetServerLeaseClaimSnapshot(&server, claim, true)
+	return server, target, leaseID, nil
+}
+
+func staticLeaseLabelsFromClaim(claim core.LeaseClaim) map[string]string {
+	labels := make(map[string]string, len(claim.Labels)+6)
+	for key, value := range claim.Labels {
+		labels[key] = value
+	}
+	labels["lease"] = claim.LeaseID
+	labels["slug"] = claim.Slug
+	labels["provider"] = staticProvider
+	if claim.TargetOS != "" {
+		labels["target"] = claim.TargetOS
+	}
+	if claim.WindowsMode != "" {
+		labels["windows_mode"] = claim.WindowsMode
+	}
+	if claim.IdleTimeoutSeconds > 0 {
+		seconds := strconv.Itoa(claim.IdleTimeoutSeconds)
+		labels["idle_timeout"] = seconds
+		labels["idle_timeout_secs"] = seconds
+	}
+	if labels["created_at"] == "" {
+		labels["created_at"] = persistedClaimTimeLabel(claim.ClaimedAt)
+	}
+	if labels["last_touched_at"] == "" {
+		labels["last_touched_at"] = persistedClaimTimeLabel(claim.LastUsedAt)
+	}
+	return labels
+}
+
+func persistedClaimTimeLabel(value string) string {
+	for _, layout := range []string{time.RFC3339, time.RFC3339Nano} {
+		if parsed, err := time.Parse(layout, strings.TrimSpace(value)); err == nil {
+			return core.LeaseLabelTime(parsed)
+		}
+	}
+	return ""
+}
+
+func validateStaticTouchIdentity(cfg Config, lease LeaseTarget, claim core.LeaseClaim) error {
+	leaseID := strings.TrimSpace(lease.LeaseID)
+	if leaseID == "" || claim.LeaseID != leaseID {
+		return exit(4, "static lease claim ID mismatch: expected %s, found %s", leaseID, claim.LeaseID)
+	}
+	if claim.Provider != staticProvider || lease.Server.Provider != staticProvider || claim.Labels["provider"] != staticProvider {
+		return exit(4, "static lease %s provider identity mismatch", leaseID)
+	}
+	if claim.ProviderScope != core.ProviderClaimScope(staticProvider, cfg) {
+		return exit(4, "static lease %s provider scope mismatch", leaseID)
+	}
+	if claim.CloudID == "" || claim.CloudID != leaseID || lease.Server.CloudID != claim.CloudID || claim.Labels["lease"] != leaseID {
+		return exit(4, "static lease %s resource identity mismatch", leaseID)
+	}
+	host := strings.TrimSpace(claim.StaticHost)
+	if host == "" || strings.TrimSpace(cfg.Static.Host) != host || strings.TrimSpace(lease.SSH.Host) != host || strings.TrimSpace(lease.Server.PublicNet.IPv4.IP) != host {
+		return exit(4, "static lease %s host identity mismatch", leaseID)
+	}
+	return nil
 }
 
 func staticLeaseClaimMatchesConfig(cfg Config, claim core.LeaseClaim) bool {

@@ -65,6 +65,10 @@ func directLeaseLabels(cfg Config, leaseID, slug, provider, market string, keep 
 }
 
 func touchDirectLeaseLabels(labels map[string]string, cfg Config, state string, now time.Time) map[string]string {
+	return touchDirectLeaseLabelsWithIdleTimeoutOverride(labels, cfg, state, now, nil)
+}
+
+func touchDirectLeaseLabelsWithIdleTimeoutOverride(labels map[string]string, cfg Config, state string, now time.Time, idleTimeoutOverride *time.Duration) map[string]string {
 	next := make(map[string]string, len(labels)+4)
 	for key, value := range labels {
 		next[key] = value
@@ -78,10 +82,14 @@ func touchDirectLeaseLabels(labels map[string]string, cfg Config, state string, 
 		next["created_at"] = leaseLabelTime(createdAt)
 	}
 	idleTimeout := cfg.IdleTimeout
-	if stored, ok := parseDurationSecondsLabel(next["idle_timeout_secs"]); ok {
-		idleTimeout = stored
-	} else if stored, ok := parseDurationSecondsLabel(next["idle_timeout"]); ok {
-		idleTimeout = stored
+	if idleTimeoutOverride != nil {
+		idleTimeout = *idleTimeoutOverride
+	} else {
+		if stored, ok := parseDurationSecondsLabel(next["idle_timeout_secs"]); ok {
+			idleTimeout = stored
+		} else if stored, ok := parseDurationSecondsLabel(next["idle_timeout"]); ok {
+			idleTimeout = stored
+		}
 	}
 	if idleTimeout <= 0 {
 		idleTimeout = defaultConfig().IdleTimeout

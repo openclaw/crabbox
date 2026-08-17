@@ -326,8 +326,17 @@ fresh key.
 `List` — core renders the table.
 
 `Touch` updates idle/state metadata on the provider when possible. Use the
-`internal/cli/provider_labels.go` helpers for safe label encoding. For static
-providers, an in-memory update is enough.
+`internal/cli/provider_labels.go` helpers for safe label encoding. The optional
+`TouchRequest.IdleTimeoutOverride` carries replacement intent: `nil` preserves
+the current lease timeout, while a non-nil value replaces it. Do not infer
+replacement intent from the effective `IdleTimeout` fallback.
+
+Static providers must commit touched lifecycle labels and any explicit timeout
+replacement to their durable local claim. `Resolve` must reconstruct lifecycle
+state from that claim, and `Touch` must compare-and-swap the exact canonical
+claim under its claim lock after revalidating provider, scope, resource, and
+host identity. Updating only the returned in-memory `Server` makes heartbeat
+success disappear in a fresh process and is not sufficient.
 
 `ReleaseLease` is called when a lease ends or expires. Make it idempotent; treat
 "not found" as success. Remove local claims and the per-lease key directory

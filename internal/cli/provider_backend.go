@@ -843,9 +843,10 @@ func ValidateLeaseTargetProviderIdentity(lease LeaseTarget, expected ProviderIde
 }
 
 type TouchRequest struct {
-	Lease       LeaseTarget
-	State       string
-	IdleTimeout time.Duration
+	Lease               LeaseTarget
+	State               string
+	IdleTimeout         time.Duration
+	IdleTimeoutOverride *time.Duration
 }
 
 type ListRequest struct {

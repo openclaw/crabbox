@@ -156,9 +156,11 @@ func (a App) actionsHydrate(ctx context.Context, args []string) (err error) {
 		fmt.Fprintln(a.Stderr, "workspace owner released")
 	}()
 	ctx = contextWithWorkspaceOwner(owner.Context(), owner)
-	if _, err := updateLeaseClaimEndpointIfUnchanged(leaseID, ownedClaim, server, target); err != nil {
+	updatedClaim, err := updateLeaseClaimEndpointIfUnchanged(leaseID, ownedClaim, server, target)
+	if err != nil {
 		return err
 	}
+	SetServerLeaseClaimSnapshot(&server, updatedClaim, true)
 	a.registerCoordinatorLeaseBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID})
 	backend, err := loadBackend(cfg, runtimeForApp(a))
 	if err != nil {
