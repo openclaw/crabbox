@@ -34096,7 +34096,7 @@ describe("fleet identity", () => {
       githubFetchMock({
         member: true,
         profileEmail: "victim@example.com",
-        emailStatus: 500,
+        emailStatus: 401,
       }),
     );
 
@@ -34113,7 +34113,7 @@ describe("fleet identity", () => {
     expect(poll.status).toBe(400);
     await expect(poll.json()).resolves.toMatchObject({
       status: "failed",
-      error: "github email lookup failed: 500",
+      error: "github email lookup failed: 401",
     });
   });
 

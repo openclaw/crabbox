@@ -1,14 +1,20 @@
 import {
   issuePortalToken,
   issueUserToken,
+  openPendingGitHubCredential,
   portalTokenExpiresAt,
+  sealPendingGitHubCredential,
   sha256Hex,
   userTokenExpiresAt,
   userTokenSigningConfigurationError,
 } from "./auth";
 import { legacyPortalSessionCookieName, portalSessionCookieName } from "./cookies";
 import type { CoordinatorRuntime, CoordinatorStorage } from "./coordinator-runtime";
-import { GitHubAuthorizationError, requireGitHubLoginMembership } from "./github-membership";
+import {
+  GitHubAuthorizationError,
+  GitHubTransientError,
+  requireGitHubLoginMembership,
+} from "./github-membership";
 import { errorMessage, json, readJson } from "./http";
 import { requestOrgLabel } from "./org-identity";
 import { timingSafeEqual } from "./timing-safe";
@@ -21,6 +27,7 @@ const portalOAuthCookiePrefix = "__Host-crabbox_oauth_";
 const pendingOAuthTTLSeconds = 10 * 60;
 const maxPendingOAuthLogins = 100;
 const maxPendingOAuthLoginsPerSource = 10;
+const githubPostExchangeRetryDelayMS = 200;
 const defaultUserTokenTTLSeconds = 180 * 24 * 60 * 60;
 const minUserTokenTTLSeconds = 60 * 60;
 const maxUserTokenTTLSeconds = 365 * 24 * 60 * 60;
@@ -45,6 +52,7 @@ interface OAuthPending {
   login?: string;
   error?: string;
   callbackClaim?: string;
+  githubCredential?: string;
   sourceHash?: string;
 }
 
@@ -327,10 +335,36 @@ async function githubAuthCallback(
     );
   }
   try {
-    const accessToken = await exchangeGitHubCode(code, pending.redirectURI, env);
-    const identity = await githubIdentity(accessToken);
+    let accessToken: string;
+    if (pending.githubCredential) {
+      const opened = await openPendingGitHubCredential(env, pending.githubCredential);
+      if (!opened) throw new Error("Stored GitHub credential is invalid");
+      accessToken = opened;
+    } else {
+      accessToken = await exchangeGitHubCode(code, pending.redirectURI, env);
+      // The OAuth code is one-use, so retain the credential securely for callback retries.
+      const githubCredential = await sealPendingGitHubCredential(env, accessToken);
+      const stored = await storeClaimedGitHubCredential(
+        runtime,
+        pending.id,
+        claim,
+        githubCredential,
+      );
+      if (!stored) {
+        return expiredOAuthResponse(pending);
+      }
+    }
     const requestedOrg = requestOrgLabel(new Request(request.url), env);
-    const org = await requireGitHubLoginMembership(accessToken, identity, requestedOrg, env);
+    const { identity, org } = await retryGitHubPostExchange(async () => {
+      const resolvedIdentity = await githubIdentity(accessToken);
+      const resolvedOrg = await requireGitHubLoginMembership(
+        accessToken,
+        resolvedIdentity,
+        requestedOrg,
+        env,
+      );
+      return { identity: resolvedIdentity, org: resolvedOrg };
+    });
     const ttlSeconds = userTokenTTLSeconds(env);
     const tokenInput = {
       owner: identity.owner,
@@ -397,6 +431,12 @@ async function githubAuthCallback(
       "referrer-policy": "no-referrer",
     });
   } catch (err) {
+    if (err instanceof GitHubTransientError) {
+      const released = await releasePendingOAuthClaim(runtime, pending.id, claim);
+      return released
+        ? retryableOAuthResponse(request.url, pending.mode)
+        : expiredOAuthResponse(pending);
+    }
     await finishPendingOAuth(runtime, pending.id, claim, { error: errorMessage(err) });
     if (err instanceof GitHubAuthorizationError) {
       return html("Crabbox login denied", err.message, 403, terminalPortalOAuthHeaders(pending));
@@ -408,6 +448,47 @@ async function githubAuthCallback(
       terminalPortalOAuthHeaders(pending),
     );
   }
+}
+
+async function storeClaimedGitHubCredential(
+  runtime: Pick<CoordinatorRuntime, "storage" | "runExclusive">,
+  id: string,
+  claim: string,
+  githubCredential: string,
+): Promise<boolean> {
+  return runtime.runExclusive(async () => {
+    const pending = await runtime.storage.get<OAuthPending>(oauthKey(id));
+    if (
+      !pending ||
+      pending.callbackClaim !== claim ||
+      Date.parse(pending.expiresAt) <= Date.now()
+    ) {
+      return false;
+    }
+    pending.githubCredential = githubCredential;
+    await runtime.storage.put(oauthKey(pending.id), pending);
+    return true;
+  });
+}
+
+async function releasePendingOAuthClaim(
+  runtime: Pick<CoordinatorRuntime, "storage" | "runExclusive">,
+  id: string,
+  claim: string,
+): Promise<boolean> {
+  return runtime.runExclusive(async () => {
+    const pending = await runtime.storage.get<OAuthPending>(oauthKey(id));
+    if (
+      !pending ||
+      pending.callbackClaim !== claim ||
+      Date.parse(pending.expiresAt) <= Date.now()
+    ) {
+      return false;
+    }
+    delete pending.callbackClaim;
+    await runtime.storage.put(oauthKey(pending.id), pending);
+    return true;
+  });
 }
 
 async function claimPendingOAuth(
@@ -464,6 +545,7 @@ async function finishPendingOAuth(
     }
     Object.assign(pending, result);
     delete pending.callbackClaim;
+    delete pending.githubCredential;
     await runtime.storage.put(oauthKey(pending.id), pending);
     return structuredClone(pending);
   });
@@ -475,6 +557,24 @@ function expiredOAuthResponse(pending?: OAuthPending): Response {
     "The login request expired. Run crabbox login --url <broker-url> again.",
     400,
     pending ? terminalPortalOAuthHeaders(pending) : undefined,
+  );
+}
+
+function retryableOAuthResponse(callbackURL: string, mode: OAuthPending["mode"]): Response {
+  const message =
+    mode === "portal"
+      ? "Your Crabbox portal login is still waiting. Click the link below to retry."
+      : "The Crabbox CLI is still waiting for this login. Click the link below to retry.";
+  return html(
+    "Crabbox login delayed",
+    `GitHub is temporarily unavailable. ${message}`,
+    503,
+    {
+      "cache-control": "no-store",
+      "referrer-policy": "no-referrer",
+      "retry-after": "2",
+    },
+    `<p><a href="${escapeHTML(callbackURL)}">Retry GitHub login</a></p>`,
   );
 }
 
@@ -630,9 +730,20 @@ async function exchangeGitHubCode(code: string, redirectURI: string, env: Env): 
     },
     body,
   });
-  const data = (await response.json()) as { access_token?: string; error?: string };
-  if (!response.ok || !data.access_token) {
-    throw new Error(data.error || `github token exchange failed: ${response.status}`);
+  if (!response.ok) {
+    let error = "";
+    try {
+      const data = (await response.json()) as { error?: string };
+      error = data.error ?? "";
+    } catch {
+      // GitHub may return an HTML or empty body during an upstream outage.
+    }
+    const message = error || `github token exchange failed: ${response.status}`;
+    throw githubLookupError(message, response.status);
+  }
+  const data = (await response.json()) as { access_token?: string };
+  if (!data.access_token) {
+    throw new Error("github token exchange failed: missing access token");
   }
   return data.access_token;
 }
@@ -651,7 +762,10 @@ async function githubIdentity(accessToken: string): Promise<{
   };
   const userResponse = await fetch(`${githubAPIURL}/user`, { headers });
   if (!userResponse.ok) {
-    throw new Error(`github user lookup failed: ${userResponse.status}`);
+    throw githubLookupError(
+      `github user lookup failed: ${userResponse.status}`,
+      userResponse.status,
+    );
   }
   const user = (await userResponse.json()) as GitHubUser;
   if (typeof user.id !== "number" || !Number.isSafeInteger(user.id) || user.id <= 0) {
@@ -660,7 +774,10 @@ async function githubIdentity(accessToken: string): Promise<{
   const login = user.login || "unknown";
   const emailResponse = await fetch(`${githubAPIURL}/user/emails`, { headers });
   if (!emailResponse.ok) {
-    throw new Error(`github email lookup failed: ${emailResponse.status}`);
+    throw githubLookupError(
+      `github email lookup failed: ${emailResponse.status}`,
+      emailResponse.status,
+    );
   }
   const emails = (await emailResponse.json()) as GitHubEmail[];
   const verifiedEmails = emails.filter(
@@ -683,6 +800,20 @@ async function githubIdentity(accessToken: string): Promise<{
     identity.name = user.name;
   }
   return identity;
+}
+
+async function retryGitHubPostExchange<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (err) {
+    if (!(err instanceof GitHubTransientError)) throw err;
+    await new Promise<void>((resolve) => setTimeout(resolve, githubPostExchangeRetryDelayMS));
+    return operation();
+  }
+}
+
+function githubLookupError(message: string, status: number): Error {
+  return status === 429 || status >= 500 ? new GitHubTransientError(message) : new Error(message);
 }
 
 async function deletePendingOAuth(

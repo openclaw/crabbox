@@ -366,10 +366,10 @@ function githubHeaders(accessToken: string): Record<string, string> {
   };
 }
 
-async function githubResponseError(
-  response: Response,
-  message: string,
-): Promise<GitHubAuthorizationError> {
+async function githubResponseError(response: Response, message: string): Promise<Error> {
+  if (response.status === 429 || response.status >= 500) {
+    return new GitHubTransientError(message);
+  }
   if (response.status === 401) return new GitHubCredentialError(message);
   if (response.status !== 403) return new GitHubAuthorizationError(message);
 
@@ -424,3 +424,5 @@ function github403RequiresReauthentication(details: {
 export class GitHubAuthorizationError extends Error {}
 
 export class GitHubCredentialError extends GitHubAuthorizationError {}
+
+export class GitHubTransientError extends Error {}

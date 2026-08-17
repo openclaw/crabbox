@@ -325,6 +325,23 @@ export async function issuePortalToken(
   return issueSignedUserToken(env, input, "crabbox-portal", portalTokenPrefix);
 }
 
+export async function sealPendingGitHubCredential(
+  env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_SECRET">,
+  accessToken: string,
+): Promise<string> {
+  if (!accessToken || accessToken.length > githubAccessTokenMaxChars) {
+    throw new Error("GitHub access token is invalid");
+  }
+  return sealGitHubCredential(accessToken, sessionSecret(env));
+}
+
+export async function openPendingGitHubCredential(
+  env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_SECRET">,
+  credential: string,
+): Promise<string | undefined> {
+  return openGitHubCredential(credential, sessionSecret(env));
+}
+
 async function issueSignedUserToken(
   env: Pick<Env, "CRABBOX_SHARED_TOKEN" | "CRABBOX_SESSION_SECRET">,
   input: SignedUserTokenInput,
