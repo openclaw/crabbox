@@ -226,6 +226,24 @@ must never replace the command failure. A fresh collector is created for every
 command, including watch iterations and reused leases, so historical provider
 counters cannot be attributed to a later run.
 
+Exact status/heartbeat claim authorization is optional for providers with a
+runtime-derived ownership scope:
+
+```go
+type StatusTouchClaimAuthorizer interface {
+	AuthorizeStatusTouchClaim(context.Context, LeaseTarget, LeaseClaim) error
+}
+```
+
+Core requires an exact claim for the canonical provider before calling this
+hook. Implementations then own the full authorization decision; only `nil`
+permits a touch. They must validate the canonical lease and resource IDs, a
+non-empty current scope, and all provider-native context, endpoint, account,
+daemon, or immutable runtime identity recorded by the claim. Hydration may
+select the recorded runtime route, but it must not mutate or adopt ownership.
+Providers without this capability retain core's exact static provider-scope
+and resource comparison, plus any `StatusTouchClaimValidator` check.
+
 ## Package layout
 
 Built-in providers live under `internal/providers/<name>`. The registry is
@@ -621,11 +639,12 @@ rendering belongs to core.
 
 `Touch` should update provider labels/tags with idle and state metadata when the
 provider supports it. `TouchRequest.IdleTimeoutOverride` is non-nil only for an
-explicit replacement; omission must preserve the persisted timeout. Static
-providers must atomically compare-and-swap lifecycle labels and an optional
-timeout into the exact canonical local claim, then reconstruct later `Resolve`
-results from that claim. An in-memory-only static touch is not durable enough
-for heartbeat.
+explicit replacement; omission must preserve the persisted timeout. Static and
+local-runtime providers must atomically compare-and-swap lifecycle labels and
+an optional timeout into the exact canonical local claim, then reconstruct
+later `Resolve` results from that claim. `Touch` must require the exact claim
+snapshot carried by `Resolve` and revalidate ownership before the CAS. An
+in-memory-only touch is not durable enough for heartbeat.
 
 `ReleaseLease` should be idempotent where practical. Remove local claims after the
 provider release succeeds or is known to be unnecessary.

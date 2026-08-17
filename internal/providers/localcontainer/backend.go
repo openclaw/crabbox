@@ -51,6 +51,7 @@ type backend struct {
 }
 
 var _ core.ExclusiveOneShotAcquireBackend = (*backend)(nil)
+var _ core.StatusTouchClaimAuthorizer = (*backend)(nil)
 
 type inspectContainer struct {
 	ID              string            `json:"Id"`
@@ -927,6 +928,23 @@ func (b *backend) validateExactLocalContainerClaim(ctx context.Context, claim co
 	return nil
 }
 
+func (b *backend) AuthorizeStatusTouchClaim(ctx context.Context, lease core.LeaseTarget, claim core.LeaseClaim) error {
+	leaseID := strings.TrimSpace(lease.LeaseID)
+	containerID := strings.TrimSpace(lease.Server.CloudID)
+	if lease.Server.Provider != providerName || claim.LeaseID != leaseID || claim.Provider != providerName ||
+		claim.CloudID == "" || claim.CloudID != containerID {
+		return localContainerOwnershipError(lease.LeaseID, lease.Server.CloudID)
+	}
+	applied, err := b.applyCheckpointScopeLabels(ctx, claim.Labels)
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return localContainerOwnershipError(lease.LeaseID, lease.Server.CloudID)
+	}
+	return b.validateExactLocalContainerClaim(ctx, claim, lease.LeaseID, lease.Server.CloudID)
+}
+
 func (b *backend) releaseMissingClaim(ctx context.Context, lease core.LeaseTarget) (bool, error) {
 	leaseID := strings.TrimSpace(firstNonBlank(lease.LeaseID, lease.Server.Labels["lease"]))
 	if leaseID == "" || strings.TrimSpace(lease.Server.CloudID) != "" {
@@ -1405,21 +1423,47 @@ func (b *backend) cleanupContainerSidecars(leaseID string, labels map[string]str
 	return nil
 }
 
-func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, error) {
-	server := req.Lease.Server
-	if server.Labels == nil {
-		server.Labels = map[string]string{}
+func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
+	expected, exists, set := core.ServerLeaseClaimSnapshot(req.Lease.Server)
+	if !set || !exists {
+		return core.Server{}, core.Exit(4, "local-container lease %s has no exact claim snapshot; refusing touch", req.Lease.LeaseID)
 	}
-	original := server.Labels
-	server.Labels = core.TouchDirectLeaseLabels(original, b.configForRun(), req.State, time.Now().UTC())
-	preservedKeys := []string{"bootstrap_dir", "container_id", "docker_socket", "host_work_root", "image", "runtime", "runtime_context", "ssh_port", "ssh_user", "work_root"}
-	preservedKeys = append(preservedKeys, checkpointScopeMetadataKeys...)
-	for _, key := range preservedKeys {
-		if value := strings.TrimSpace(original[key]); value != "" {
-			server.Labels[key] = value
-		}
+	if err := b.AuthorizeStatusTouchClaim(ctx, req.Lease, expected); err != nil {
+		return core.Server{}, err
 	}
+	if req.IdleTimeoutOverride != nil && *req.IdleTimeoutOverride <= 0 {
+		return core.Server{}, core.Exit(2, "local-container lease %s idle timeout override must be positive", req.Lease.LeaseID)
+	}
+
+	now := time.Now().UTC()
+	if b.rt.Clock != nil {
+		now = b.rt.Clock.Now().UTC()
+	}
+	cfg := b.configForRun()
+	if expected.IdleTimeoutSeconds > 0 {
+		cfg.IdleTimeout = time.Duration(expected.IdleTimeoutSeconds) * time.Second
+	}
+	labels := localContainerTouchLabels(expected, cfg, req.State, now, req.IdleTimeoutOverride)
+	updated, err := core.UpdateLeaseClaimTouchIfUnchanged(req.Lease.LeaseID, expected, labels, now, req.IdleTimeoutOverride)
+	if err != nil {
+		return core.Server{}, err
+	}
+	server := mergeLocalContainerClaim(req.Lease.Server, updated)
+	core.SetServerLeaseClaimSnapshot(&server, updated, true)
 	return server, nil
+}
+
+func localContainerTouchLabels(claim core.LeaseClaim, cfg core.Config, state string, now time.Time, idleTimeoutOverride *time.Duration) map[string]string {
+	labels := cloneLabels(claim.Labels)
+	labels = core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(labels, cfg, state, now, idleTimeoutOverride)
+	for key, value := range claim.Labels {
+		switch key {
+		case "state", "last_touched_at", "idle_timeout", "idle_timeout_secs", "expires_at":
+			continue
+		}
+		labels[key] = value
+	}
+	return labels
 }
 
 func (b *backend) ValidateCheckpointForkWorkdir(ctx context.Context, lease core.LeaseTarget, workdir string) error {

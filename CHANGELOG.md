@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Made local-container heartbeat authorize recorded dynamic runtime scopes and durably compare-and-swap exact claim lifecycle state without recreating or overwriting changed claims. Thanks @coygeek.
 - Made AWS image deletion resume from owner-level durable snapshot claims after AMI deregistration or catalog cleanup failures, preventing stale ordinary and capability-variant records from remaining selectable.
 - Made static SSH heartbeats persist touched timestamps and explicit idle-timeout replacements across fresh CLI processes, while omitted overrides preserve the stored timeout. Thanks @coygeek.
 - Bounded Lambda MicroVM runner response-header waits without limiting uploads or streamed executions, while preserving injected HTTP clients. Thanks @SebTardif.

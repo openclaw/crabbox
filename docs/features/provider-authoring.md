@@ -338,6 +338,23 @@ claim under its claim lock after revalidating provider, scope, resource, and
 host identity. Updating only the returned in-memory `Server` makes heartbeat
 success disappear in a fresh process and is not sufficient.
 
+Providers whose exact ownership scope is captured from a runtime rather than
+derived statically from config may implement the narrow optional capability:
+
+```go
+type StatusTouchClaimAuthorizer interface {
+	AuthorizeStatusTouchClaim(context.Context, LeaseTarget, LeaseClaim) error
+}
+```
+
+Core first resolves an exact claim for the canonical provider, then delegates
+the complete status/heartbeat authorization decision to this method. The
+backend must fail closed unless the lease ID, provider, non-empty current
+scope, live resource, and every provider-owned runtime identity field match.
+If authorization requires hydrating a recorded context or endpoint, validate
+that captured route and its live immutable identity before returning `nil`.
+This hook must not adopt, rewrite, or otherwise repair a claim.
+
 `ReleaseLease` is called when a lease ends or expires. Make it idempotent; treat
 "not found" as success. Remove local claims and the per-lease key directory
 after the provider release succeeds.

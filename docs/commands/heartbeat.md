@@ -30,16 +30,23 @@ with the same idle timeout before reporting success.
 
 Without a coordinator, Crabbox resolves the direct SSH lease and calls the
 provider's existing `Touch` capability. This fallback requires an exact local
-claim that matches the provider scope and live resource identity, and it
-rejects terminal leases before touching them. Providers without lease-touch
-support fail with `provider=<name> does not support lease heartbeat`.
+claim for the canonical provider. Static scopes must match the configured
+provider scope and live resource identity exactly. Providers with a dynamic
+runtime scope may hydrate their recorded context, but must validate the live
+endpoint/daemon identity and exact resource before authorizing. The provider
+then compare-and-swaps the carried claim snapshot, so a disappeared or replaced
+claim is never recreated or overwritten. Terminal leases are rejected before
+touch. Providers without lease-touch support fail with
+`provider=<name> does not support lease heartbeat`.
 
 ## Idle timeout
 
 `--idle-timeout <duration>` optionally replaces the lease's idle window while
 refreshing it. The value must be positive. Omitting the flag preserves the
 current direct-provider timeout when it is available in lease metadata and
-omits the coordinator heartbeat override.
+omits the coordinator heartbeat override. Direct static and local-runtime
+providers persist the refreshed timestamps, expiry, and any explicit timeout
+replacement in the exact claim so a fresh CLI process observes the same state.
 
 ## Output
 

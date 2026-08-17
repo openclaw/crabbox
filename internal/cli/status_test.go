@@ -188,20 +188,20 @@ func TestStatusWaitRequestsReadyProbe(t *testing.T) {
 		t.Fatal(err)
 	}
 	providerScope := leaseOptionsFromConfig(cfg).ProviderScope
-	claimed, err := statusLeaseHasExactClaim(backend, LeaseTarget{LeaseID: "cbx_status", Server: claimServer}, "aws", providerScope)
+	claimed, err := statusLeaseHasExactClaim(context.Background(), backend, LeaseTarget{LeaseID: "cbx_status", Server: claimServer}, "aws", providerScope)
 	if err != nil || !claimed {
 		t.Fatalf("matching exact claim allowed=%t err=%v", claimed, err)
 	}
 	rejecting := &statusTouchClaimRejectingBackend{statusResolveRecordingBackend: backend}
-	if claimed, err := statusLeaseHasExactClaim(rejecting, LeaseTarget{LeaseID: "cbx_status", Server: claimServer}, "aws", providerScope); err != nil || claimed {
+	if claimed, err := statusLeaseHasExactClaim(context.Background(), rejecting, LeaseTarget{LeaseID: "cbx_status", Server: claimServer}, "aws", providerScope); err != nil || claimed {
 		t.Fatalf("provider identity-rejected claim allowed=%t err=%v", claimed, err)
 	}
-	if claimed, err := statusLeaseHasExactClaim(backend, LeaseTarget{LeaseID: "cbx_status", Server: claimServer}, "aws", providerScope+"-other"); err != nil || claimed {
+	if claimed, err := statusLeaseHasExactClaim(context.Background(), backend, LeaseTarget{LeaseID: "cbx_status", Server: claimServer}, "aws", providerScope+"-other"); err != nil || claimed {
 		t.Fatalf("scope-mismatched claim allowed=%t err=%v", claimed, err)
 	}
 	wrongResource := claimServer
 	wrongResource.CloudID = "i-other"
-	if claimed, err := statusLeaseHasExactClaim(backend, LeaseTarget{LeaseID: "cbx_status", Server: wrongResource}, "aws", providerScope); err != nil || claimed {
+	if claimed, err := statusLeaseHasExactClaim(context.Background(), backend, LeaseTarget{LeaseID: "cbx_status", Server: wrongResource}, "aws", providerScope); err != nil || claimed {
 		t.Fatalf("resource-mismatched claim allowed=%t err=%v", claimed, err)
 	}
 	err = app.status(context.Background(), []string{"--provider", "aws", "--id", "cbx_status", "--wait", "--wait-timeout", "1ns"})
@@ -210,6 +210,60 @@ func TestStatusWaitRequestsReadyProbe(t *testing.T) {
 	}
 	if len(backend.touches) != 1 {
 		t.Fatalf("claimed status --wait touch calls=%d want 1", len(backend.touches))
+	}
+}
+
+func TestStatusLeaseExactClaimAuthorizerOwnsDynamicScopeValidation(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_dynamic_status"
+	server := Server{Provider: "aws", CloudID: "dynamic-resource", Labels: map[string]string{
+		"lease": leaseID, "provider": "aws", "runtime_scope": "runtime:dynamic/context:owned",
+	}}
+	if err := claimLeaseForRepoProviderScopePondEndpoint(
+		leaseID,
+		"dynamic-status",
+		"aws",
+		"runtime:dynamic/context:owned",
+		"",
+		t.TempDir(),
+		time.Minute,
+		false,
+		server,
+		SSHTarget{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.WithValue(context.Background(), statusAuthorizerContextKey{}, "present")
+	backend := &statusTouchClaimAuthorizingBackend{}
+	claimed, err := statusLeaseHasExactClaim(ctx, backend, LeaseTarget{LeaseID: leaseID, Server: server}, "aws", "")
+	if err != nil || !claimed {
+		t.Fatalf("dynamic claim authorized=%t err=%v", claimed, err)
+	}
+	if backend.calls != 1 || backend.contextValue != "present" || backend.claim.ProviderScope != "runtime:dynamic/context:owned" {
+		t.Fatalf("authorizer calls=%d context=%q claim=%#v", backend.calls, backend.contextValue, backend.claim)
+	}
+
+	backend.err = errors.New("dynamic ownership mismatch")
+	claimed, err = statusLeaseHasExactClaim(ctx, backend, LeaseTarget{LeaseID: leaseID, Server: server}, "aws", "")
+	if claimed || err == nil || !strings.Contains(err.Error(), "dynamic ownership mismatch") {
+		t.Fatalf("rejected dynamic claim authorized=%t err=%v", claimed, err)
+	}
+
+	backend.calls = 0
+	wrongProvider := server
+	wrongProvider.Provider = "gcp"
+	if claimed, err := statusLeaseHasExactClaim(ctx, backend, LeaseTarget{LeaseID: leaseID, Server: wrongProvider}, "aws", ""); err != nil || claimed {
+		t.Fatalf("wrong-provider claim authorized=%t err=%v", claimed, err)
+	}
+	if backend.calls != 0 {
+		t.Fatalf("authorizer called before exact canonical-provider claim check: %d", backend.calls)
+	}
+	if claimed, err := statusLeaseHasExactClaim(ctx, backend, LeaseTarget{LeaseID: "cbx_missing_dynamic", Server: server}, "aws", ""); err != nil || claimed {
+		t.Fatalf("missing claim authorized=%t err=%v", claimed, err)
+	}
+	if backend.calls != 0 {
+		t.Fatalf("authorizer called for missing claim: %d", backend.calls)
 	}
 }
 
@@ -267,6 +321,23 @@ type statusTouchClaimRejectingBackend struct {
 
 func (*statusTouchClaimRejectingBackend) StatusTouchClaimMatches(LeaseTarget, LeaseClaim) bool {
 	return false
+}
+
+type statusAuthorizerContextKey struct{}
+
+type statusTouchClaimAuthorizingBackend struct {
+	testSSHBackend
+	calls        int
+	contextValue string
+	claim        LeaseClaim
+	err          error
+}
+
+func (b *statusTouchClaimAuthorizingBackend) AuthorizeStatusTouchClaim(ctx context.Context, _ LeaseTarget, claim LeaseClaim) error {
+	b.calls++
+	b.contextValue, _ = ctx.Value(statusAuthorizerContextKey{}).(string)
+	b.claim = claim
+	return b.err
 }
 
 func (b *statusResolveRecordingBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {

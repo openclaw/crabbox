@@ -238,10 +238,15 @@ metadata updates.
    `localContainer.workRoot`, then drives the command over the normal SSH
    executor.
 9. `status`, `list`, and `stop` inspect or remove labeled containers.
-10. `cleanup --provider docker` removes stopped containers and running
+10. `heartbeat` and `status --wait` hydrate the exact claim's recorded runtime
+   route, verify its context, endpoint, daemon, and container ID, then
+   compare-and-swap touched timestamps, expiry, and any explicit idle-timeout
+   replacement into that same claim. Omitting `--idle-timeout` preserves the
+   stored timeout even when current config differs.
+11. `cleanup --provider docker` removes stopped containers and running
    non-`keep` containers whose local claim or lease labels are stale past the
    idle timeout plus a safety grace period.
-11. If a local claim remains after its container was removed outside Crabbox,
+12. If a local claim remains after its container was removed outside Crabbox,
    `crabbox stop --provider docker <lease-or-slug>` removes the stale claim and
    stored SSH key.
 
@@ -263,6 +268,9 @@ Named Docker contexts and Podman connections are included in those recovery
 commands. Custom runtime endpoints remain private in the local claim rather
 than being printed; exact-ID commands hydrate that route from the claim before
 their first runtime lookup and reject a changed endpoint or daemon identity.
+Heartbeat uses the same fail-closed ownership boundary. A missing claim, stale
+resolved snapshot, changed provider/runtime scope, replaced daemon, or different
+container ID leaves both the container and claim untouched.
 
 ## Limits and caveats
 

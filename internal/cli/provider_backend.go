@@ -170,6 +170,12 @@ type StatusTouchClaimValidator interface {
 	StatusTouchClaimMatches(LeaseTarget, LeaseClaim) bool
 }
 
+// StatusTouchClaimAuthorizer lets a provider fully authorize an exact claim
+// whose ownership scope must be hydrated or validated at runtime.
+type StatusTouchClaimAuthorizer interface {
+	AuthorizeStatusTouchClaim(context.Context, LeaseTarget, LeaseClaim) error
+}
+
 type ResolvedLeaseTargetRebinder interface {
 	RebindResolvedLeaseTarget(target *LeaseTarget, leaseID string) error
 }
