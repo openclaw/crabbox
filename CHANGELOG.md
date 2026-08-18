@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.44.1 - Unreleased
+
+### Fixed
+
+- Made private draft verification resolve the exact draft by tag and numeric release ID instead of relying on a release-list endpoint that can omit drafts.
+
 ## 0.44.0 - 2026-08-18
 
 ### Added

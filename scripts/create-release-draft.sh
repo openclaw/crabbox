@@ -89,13 +89,12 @@ env -i \
   "$ROOT/scripts/verify-release.sh" \
     "$TAG" "$ASSET_DIR" "$TAG_OBJECT" "$TAG_COMMIT" "$VERIFIER_COMMIT"
 
-releases="$verify_home/releases.json"
-gh api --paginate --slurp "repos/$CRABBOX_RELEASE_REPOSITORY/releases?per_page=100" >"$releases"
-matches=$(jq --arg tag "$TAG" '[.[][] | select(.tag_name == $tag)] | length' "$releases")
-[[ "$matches" == 0 ]] || {
+release_view="$verify_home/release-view.json"
+if gh release view "$TAG" --repo "$CRABBOX_RELEASE_REPOSITORY" \
+  --json databaseId >"$release_view" 2>/dev/null; then
   echo "release record already exists for $TAG; refusing to delete or replace it" >&2
   exit 1
-}
+fi
 
 notes="$verify_home/release-notes.md"
 tagged_changelog="$verify_home/tagged-changelog.md"
@@ -117,12 +116,9 @@ gh release create "$TAG" \
   --notes-file "$notes" \
   "${assets[@]}"
 
-gh api --paginate --slurp "repos/$CRABBOX_RELEASE_REPOSITORY/releases?per_page=100" >"$releases"
-jq --arg tag "$TAG" \
-  '[.[][] | select(.tag_name == $tag and .draft == true and .prerelease == false)]
-   | if length == 1 then .[0] else error("expected exactly one private draft") end' \
-  "$releases" >"$verify_home/release.json"
-release_id=$(jq -r '.id' "$verify_home/release.json")
+gh release view "$TAG" --repo "$CRABBOX_RELEASE_REPOSITORY" \
+  --json databaseId >"$release_view"
+release_id=$(jq -r '.databaseId' "$release_view")
 [[ "$release_id" =~ ^[1-9][0-9]*$ ]]
 gh api --method GET "repos/$CRABBOX_RELEASE_REPOSITORY/releases/$release_id" \
   >"$verify_home/release.json"

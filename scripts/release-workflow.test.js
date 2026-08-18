@@ -1001,9 +1001,9 @@ test("credential-bearing packager is pipefail-safe and removes read-only Go tool
 test("draft creation performs static-only verification and never deletes or replaces partial records", () => {
   const script = read("scripts/create-release-draft.sh");
   const verifyIndex = script.indexOf('env -i');
-  const listIndex = script.indexOf('gh api --paginate');
+  const lookupIndex = script.indexOf('gh release view "$TAG"');
   const createIndex = script.indexOf('gh release create');
-  assert.ok(verifyIndex >= 0 && verifyIndex < listIndex && listIndex < createIndex);
+  assert.ok(verifyIndex >= 0 && verifyIndex < lookupIndex && lookupIndex < createIndex);
   assert.match(script, /CRABBOX_VERIFY_MODE=static/);
   assert.doesNotMatch(script, /CRABBOX_VERIFY_MODE=execute/);
   assert.match(script, /--draft/);
@@ -1011,6 +1011,9 @@ test("draft creation performs static-only verification and never deletes or repl
   assert.doesNotMatch(script, /--target/);
   assert.doesNotMatch(script, /target_commitish !== process\.env\.RELEASE_COMMIT/);
   assert.match(script, /--notes-file "\$notes"/);
+  assert.match(script, /--json databaseId/);
+  assert.match(script, /releases\/\$release_id/);
+  assert.doesNotMatch(script, /gh api --paginate/);
   assert.match(script, /refusing to delete or replace it/);
   assert.doesNotMatch(script, /--method (?:DELETE|PATCH|PUT)|gh release (?:delete|edit|upload)/);
 });
