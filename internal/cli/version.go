@@ -9,18 +9,31 @@ var version = "dev"
 
 func currentVersion() string {
 	buildInfoVersion := ""
+	localVCSBuild := false
 	if info, ok := debug.ReadBuildInfo(); ok {
 		buildInfoVersion = info.Main.Version
+		for _, setting := range info.Settings {
+			if setting.Key == "vcs.revision" {
+				localVCSBuild = true
+				break
+			}
+		}
 	}
-	return resolveVersion(version, buildInfoVersion)
+	return resolveVersionForBuild(version, buildInfoVersion, localVCSBuild)
 }
 
 func resolveVersion(injected, buildInfoVersion string) string {
+	return resolveVersionForBuild(injected, buildInfoVersion, false)
+}
+
+func resolveVersionForBuild(injected, buildInfoVersion string, localVCSBuild bool) string {
 	if normalized := normalizeBuildVersion(injected); normalized != "" && normalized != "dev" && !strings.HasSuffix(normalized, "-dev") {
 		return normalized
 	}
-	if normalized := normalizeModuleBuildInfoVersion(buildInfoVersion); normalized != "" {
-		return normalized
+	if !localVCSBuild {
+		if normalized := normalizeModuleBuildInfoVersion(buildInfoVersion); normalized != "" {
+			return normalized
+		}
 	}
 	if normalized := normalizeBuildVersion(injected); normalized != "" {
 		return normalized

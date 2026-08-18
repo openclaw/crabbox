@@ -25,6 +25,20 @@ func TestResolveVersionUsesPseudoBuildInfoForRevisionInstall(t *testing.T) {
 	}
 }
 
+func TestResolveVersionIgnoresPseudoVersionForLocalVCSBuild(t *testing.T) {
+	got := resolveVersionForBuild("dev", "v1.2.4-0.20260810123456-abcdef123456", true)
+	if got != "dev" {
+		t.Fatalf("version=%q want dev", got)
+	}
+}
+
+func TestResolveVersionKeepsInjectedReleaseForLocalVCSBuild(t *testing.T) {
+	got := resolveVersionForBuild("v1.2.3", "v1.2.4-0.20260810123456-abcdef123456", true)
+	if got != "1.2.3" {
+		t.Fatalf("version=%q want injected release", got)
+	}
+}
+
 func TestResolveVersionKeepsDevForDirtyBuildInfo(t *testing.T) {
 	got := resolveVersion("dev", "v1.2.4-0.20260810123456-abcdef123456+dirty")
 	if got != "dev" {
