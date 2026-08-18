@@ -737,14 +737,6 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if lifecycleOwner == nil {
 			return
 		}
-		if cleanup.Stopped {
-			if closeErr := lifecycleOwner.CloseAfterLeaseRelease(); closeErr != nil {
-				runFailure = recordRunFailure(&runFailure, closeErr)
-				err = errors.Join(err, closeErr)
-				fmt.Fprintf(a.Stderr, "warning: workspace owner stopped with released lease after renewal failure: %v\n", closeErr)
-			}
-			return
-		}
 		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), 30*time.Second)
 		closeErr := lifecycleOwner.Close(releaseCtx)
 		cancel()
@@ -1045,13 +1037,13 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		if lifecycleOwner != nil {
 			inspectCtx, cancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), 15*time.Second)
-			ownerErr := lifecycleOwner.ConfirmNoChild(inspectCtx)
+			ownerErr := lifecycleOwner.QuiesceForLeaseRelease(inspectCtx)
 			cancel()
 			if ownerErr != nil {
 				cleanup.Err = ownerErr
 				runFailure = recordRunFailure(&runFailure, ownerErr)
 				err = errors.Join(err, ownerErr)
-				fmt.Fprintf(a.Stderr, "lease cleanup skipped while workspace child remains possible: %v\n", ownerErr)
+				fmt.Fprintf(a.Stderr, "lease cleanup skipped while workspace owner remains ambiguous: %v\n", ownerErr)
 				return
 			}
 		}
@@ -1063,6 +1055,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		cleanup.Err = releaseApp.releaseBackendLeaseBestEffort(context.Background(), sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord})
 		cleanup.Stopped = cleanup.Err == nil
 		if cleanup.Err == nil {
+			// Destructive cleanup owns the quiesced owner once the lease is gone.
+			lifecycleOwner = nil
 			recorder.Event("lease.released", "released", "")
 		}
 		if !*timingJSON {
@@ -1202,7 +1196,11 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 				fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
 			}
 		}
-		lifecycleOwner, err = acquireWorkspaceOwner(ctx, target, leaseID, a.Stderr)
+		if a.workspaceOwnerAcquirer != nil {
+			lifecycleOwner, err = a.workspaceOwnerAcquirer(ctx, target, leaseID, a.Stderr)
+		} else {
+			lifecycleOwner, err = acquireWorkspaceOwner(ctx, target, leaseID, a.Stderr)
+		}
 		if err != nil {
 			return recordFailure(err)
 		}

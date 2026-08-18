@@ -14,6 +14,7 @@
 
 ### Fixed
 
+- Prevented confirmed `run --stop-after always` teardown from racing workspace-owner renewal and replacing successful, evidence-backed runs with exit 7. Thanks @coygeek.
 - Retried brief GitHub API failures during browser login and kept exhausted post-exchange attempts safely retryable instead of turning the next CLI poll into a terminal failure.
 - Bounded `crabbox claims list` inventory reads to 1 MiB per local claim while preserving valid partial output for oversized files. Thanks @coygeek.
 - Made local-container heartbeat authorize recorded dynamic runtime scopes and durably compare-and-swap exact claim lifecycle state without recreating or overwriting changed claims. Thanks @coygeek.

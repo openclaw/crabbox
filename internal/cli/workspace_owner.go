@@ -279,17 +279,21 @@ func (o *workspaceOwner) Context() context.Context {
 }
 
 func (o *workspaceOwner) renewLoop(interval time.Duration) {
-	defer close(o.done)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	o.renewLoopWithTicks(ticker.C, interval)
+}
+
+func (o *workspaceOwner) renewLoopWithTicks(ticks <-chan time.Time, callTimeout time.Duration) {
+	defer close(o.done)
 	for {
 		select {
 		case <-o.stop:
 			return
 		case <-o.ctx.Done():
 			return
-		case <-ticker.C:
-			callCtx, cancel := context.WithTimeout(context.WithoutCancel(o.ctx), interval)
+		case <-ticks:
+			callCtx, cancel := context.WithTimeout(context.WithoutCancel(o.ctx), callTimeout)
 			response, err := o.transport.Do(callCtx, workspaceOwnerRemoteRequest{Action: workspaceOwnerRenew, Key: o.key, Token: o.token, TTL: o.ttl})
 			cancel()
 			if err == nil && response == "RENEWED" {
@@ -398,10 +402,7 @@ func (o *workspaceOwner) Close(ctx context.Context) error {
 	if o == nil {
 		return nil
 	}
-	o.closeOnce.Do(func() {
-		close(o.stop)
-		<-o.done
-	})
+	o.stopRenewal()
 	renewErr := o.Err()
 	response, releaseErr := o.transport.Do(ctx, workspaceOwnerRemoteRequest{Action: workspaceOwnerRelease, Key: o.key, Token: o.token, TTL: o.ttl})
 	if releaseErr != nil {
@@ -412,15 +413,25 @@ func (o *workspaceOwner) Close(ctx context.Context) error {
 	return errors.Join(renewErr, releaseErr)
 }
 
-func (o *workspaceOwner) CloseAfterLeaseRelease() error {
+func (o *workspaceOwner) QuiesceForLeaseRelease(ctx context.Context) error {
 	if o == nil {
 		return nil
+	}
+	if err := o.ConfirmNoChild(ctx); err != nil {
+		return err
+	}
+	o.stopRenewal()
+	return o.Err()
+}
+
+func (o *workspaceOwner) stopRenewal() {
+	if o == nil {
+		return
 	}
 	o.closeOnce.Do(func() {
 		close(o.stop)
 		<-o.done
 	})
-	return o.Err()
 }
 
 func (o *workspaceOwner) wrapPOSIXCommand(remote string, preserveInput bool) string {

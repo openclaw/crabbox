@@ -14,7 +14,8 @@ type App struct {
 	Stderr io.Writer
 	Stdin  io.Reader
 
-	runOutcome *shardRunOutcome
+	runOutcome             *shardRunOutcome
+	workspaceOwnerAcquirer func(context.Context, SSHTarget, string, io.Writer) (*workspaceOwner, error)
 }
 
 func Run(ctx context.Context, args []string) error {
