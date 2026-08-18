@@ -413,6 +413,35 @@ test("GoReleaser is credential-free build-only with exact binary archives", () =
   assert.doesNotMatch(build, /gh release|HOMEBREW_TAP_GITHUB_TOKEN=.*\$\{/);
 });
 
+test("versioned Go installation is hermetic and precedes release builds", () => {
+  const gate = read("scripts/verify-go-install.sh");
+  assert.match(gate, /go install "\$MODULE\/cmd\/crabbox@\$VERSION"/);
+  assert.match(gate, /GOPROXY="file:\/\/\$PROXY" GOSUMDB=off GOTOOLCHAIN=local GOWORK=off/);
+  assert.match(gate, /GOPROXY=https:\/\/proxy\.golang\.org GOSUMDB=sum\.golang\.org/);
+  assert.doesNotMatch(gate, /proxy\.golang\.org,direct/);
+  assert.match(gate, /GOENV=off GOMODCACHE="\$INSTALL_MODCACHE" GOPATH="\$INSTALL_GOPATH"/);
+  assert.match(gate, /go version -m -json "\$BINARY"/);
+  assert.match(gate, /github\.com\/steipete\/jsonschema\/v6/);
+  assert.match(gate, /dependency\.Replace != nil/);
+  assert.match(gate, /"\$BINARY" --help/);
+  assert.match(gate, /"\$BINARY" run --help/);
+  assert.doesNotMatch(gate, /-mindepth|< <\(find|find "\$ZIP_SOURCE"/);
+  assert.match(gate, /func sanitizeNestedModules\(root string\)[\s\S]*filepath\.Walk\(root/);
+  assert.match(gate, /path != rootGoMod[\s\S]*os\.RemoveAll\(dir\)/);
+  assert.match(gate, /go run "\$VERIFY_GO" sanitize-zip "\$ZIP_SOURCE"/);
+
+  const ci = read(".github/workflows/ci.yml");
+  assert.match(ci, /scripts\/verify-go-install\.sh v0\.0\.0 "\$\(git rev-parse HEAD\)"/);
+
+  const producer = read("scripts/build-release-candidate.sh");
+  const gateIndex = producer.indexOf('verify-go-install.sh" "$TAG" "$TAG_COMMIT"');
+  const releaseIndex = producer.indexOf("goreleaser release --clean --skip=publish");
+  assert.ok(gateIndex >= 0 && gateIndex < releaseIndex);
+
+  const codeowners = read(".github/CODEOWNERS");
+  assert.match(codeowners, /^\/scripts\/verify-go-install\.sh @openclaw\/openclaw-secops$/m);
+});
+
 test("release config emits the exact immutable eight-asset inventory", () => {
   const config = path.join(repoRoot, "scripts", "release-config.sh");
   const output = execFileSync(config, ["assets", "v0.37.0"], { encoding: "utf8" })

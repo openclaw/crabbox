@@ -789,6 +789,7 @@ Before creating or reusing a signed release tag:
 - `go vet ./...`
 - `go test -race ./...`
 - `scripts/test-go-modules.sh`
+- `scripts/verify-go-install.sh v0.0.0 "$(git rev-parse HEAD)"`
 - `go build -trimpath -o bin/crabbox ./cmd/crabbox`
 - `scripts/check-go-coverage.sh 90.0`
 - Worker gate: `npm run format:check --prefix worker && npm run lint --prefix worker && npm run check --prefix worker && npm test --prefix worker && npm run build --prefix worker`
@@ -830,7 +831,14 @@ Then advance exactly one gate at a time:
    ID and repeat the exact metadata, checksum, signature, notarization, native
    execution, and notes proof. The proof must be newer than publication and
    every release or asset mutation.
-7. **Homebrew.** Only after published verification, grant a separate tap-update
+7. **Public Go installation.** From fresh `HOME`, `GOPATH`, module/build caches,
+   and `GOBIN`, install
+   `github.com/openclaw/crabbox/cmd/crabbox@vX.Y.Z` using only the public Go
+   module proxy. Require exact replacement-free build metadata, the immutable
+   JSON Schema fork version, exact `--version`, `--help`, and `run --help` as
+   documented in [Release engineering](RELEASING.md#operator-command-sequence).
+8. **Homebrew.** Only after published verification and the public Go-install
+   proof, grant a separate tap-update
    gate. Bind every formula URL and SHA-256 to the frozen release record, then
    run the documented downstream verifier on clean native Apple Silicon and
    Intel hosts. The verifier re-fetches the current public release and run,

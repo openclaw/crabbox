@@ -5,6 +5,7 @@
 ### Added
 
 - Added credential-free `crabbox providers describe` discovery for canonical provider-scoped run flags and compiled defaults. Thanks @coygeek.
+- Added supported versioned `go install` as a CLI-only installation channel, with clean module dependency semantics, source-derived release and revision versions, and hermetic release verification. Thanks @coygeek.
 - Added an opt-in Linux/WSL2 `raw_socket` preflight probe that distinguishes direct, non-interactive-sudo, unavailable, and missing-interpreter states without sending packets or elevating workloads. Thanks @coygeek.
 - Added checkpoint last-use tracking and composable `checkpoint prune --unused-for` cleanup for inactive local records and provider artifacts.
 - Added provider-native create, verify, delete, and fork lifecycle for direct Hetzner project-snapshot checkpoints, including exact local-claim image deletion.

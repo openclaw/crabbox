@@ -48,11 +48,9 @@ require (
 	nhooyr.io/websocket v1.8.17
 )
 
-require github.com/santhosh-tekuri/jsonschema/v6 v6.0.3-0.20260218184449-befd2c18b2f0
+require github.com/steipete/jsonschema/v6 v6.0.3-0.20260817142523-966654abed4a
 
 require golang.org/x/sync v0.22.0 // indirect
-
-replace github.com/santhosh-tekuri/jsonschema/v6 => github.com/steipete/jsonschema/v6 v6.0.3-0.20260717053323-7235d3ee9642
 
 require (
 	cloud.google.com/go/auth v0.20.0 // indirect

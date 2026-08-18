@@ -18,10 +18,10 @@ func TestResolveVersionUsesTaggedBuildInfoForDevDefault(t *testing.T) {
 	}
 }
 
-func TestResolveVersionKeepsDevForPseudoBuildInfo(t *testing.T) {
+func TestResolveVersionUsesPseudoBuildInfoForRevisionInstall(t *testing.T) {
 	got := resolveVersion("dev", "v1.2.4-0.20260810123456-abcdef123456")
-	if got != "dev" {
-		t.Fatalf("version=%q want dev", got)
+	if got != "1.2.4-0.20260810123456-abcdef123456" {
+		t.Fatalf("version=%q want normalized pseudo-version", got)
 	}
 }
 
@@ -60,10 +60,10 @@ func TestResolveVersionIgnoresDevelBuildInfo(t *testing.T) {
 	}
 }
 
-func TestResolveVersionIgnoresPseudoBuildInfo(t *testing.T) {
+func TestResolveVersionUsesPseudoBuildInfoBeforeInjectedDevFallback(t *testing.T) {
 	got := resolveVersion("0.13.0-dev", "v0.13.1-0.20260514070813-eb9404600773")
-	if got != "0.13.0-dev" {
-		t.Fatalf("version=%q want 0.13.0-dev", got)
+	if got != "0.13.1-0.20260514070813-eb9404600773" {
+		t.Fatalf("version=%q want normalized pseudo-version", got)
 	}
 }
 

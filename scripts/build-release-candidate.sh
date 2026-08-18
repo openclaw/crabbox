@@ -100,6 +100,7 @@ if [[ -n "${DEVELOPER_DIR:-}" ]]; then
     exit 1
   }
 fi
+"$ROOT/scripts/verify-go-install.sh" "$TAG" "$TAG_COMMIT"
 git clone --quiet --no-local --no-checkout "$ROOT" "$SOURCE"
 git -C "$SOURCE" checkout --quiet --detach "$TAG_COMMIT"
 [[ "$(git -C "$SOURCE" rev-parse "refs/tags/$TAG")" == "$TAG_OBJECT" ]]

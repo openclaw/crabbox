@@ -21,7 +21,7 @@ import (
 	"unicode/utf8"
 
 	regexp2syntax "github.com/dlclark/regexp2/syntax"
-	jsonschema "github.com/santhosh-tekuri/jsonschema/v6"
+	jsonschema "github.com/steipete/jsonschema/v6"
 )
 
 const (

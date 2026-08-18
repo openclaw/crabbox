@@ -77,6 +77,11 @@ to `Virtualization.framework`. A managed daemon is refreshed only when its
 signed copy no longer matches the recorded SHA-256 digest, and older inactive
 copies are pruned as new versions are installed.
 
+Direct `go install github.com/openclaw/crabbox/cmd/crabbox@vX.Y.Z` installs
+only the CLI, not this helper or its embedded daemon. It therefore does not
+provide the complete Apple VM distribution; use Homebrew or the Apple Silicon
+release archive when this provider is required.
+
 For source development:
 
 ```sh

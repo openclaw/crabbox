@@ -137,20 +137,35 @@ doc-to-code map, see [Source Map](docs/source-map.md).
 
 ## Install
 
+Homebrew installs the complete release distribution:
+
 ```sh
 brew install openclaw/tap/crabbox
 crabbox --version
 ```
 
-No Homebrew? Grab a [GoReleaser archive](https://github.com/openclaw/crabbox/releases)
-for macOS, Linux, or Windows.
+The [release archives](https://github.com/openclaw/crabbox/releases) are the
+other complete distribution for macOS, Linux, and Windows. Go users can instead
+compile and install only the CLI from an explicit release version (supported
+starting with v0.44.0; do not use `@latest` while older releases remain visible):
+
+```sh
+go install github.com/openclaw/crabbox/cmd/crabbox@v0.44.0
+```
+
+The module requires Go 1.26 and declares go1.26.5 as its preferred toolchain;
+use Go 1.26.5 or newer, or leave Go's automatic toolchain selection enabled.
+`go install` builds the Go CLI locally. It does not install release companion
+executables or assets, especially `crabbox-apple-vm-helper`, and it is not the
+signed/notarized prebuilt distribution. Use Homebrew or a release archive for
+complete platform capabilities, notably the Apple VM provider on Apple Silicon.
 
 Supported WSL2 and x64 no-WSL Windows transfer selection requires a build from
 current `main` or Crabbox v0.42.1 and newer. Follow the
 [Windows installation guide](docs/windows-install.md) for the supported setup.
 
 The Apple Silicon Homebrew install uses the release archive that also contains
-the native `crabbox-apple-vm-helper` for the local Apple VZ provider.
+the native `crabbox-apple-vm-helper` for the local Apple VM provider.
 
 Laptop prerequisites: `git`, `ssh`, `ssh-keygen`, `rsync`, `curl`.
 

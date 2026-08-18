@@ -9,6 +9,7 @@
 /scripts/*publish* @openclaw/openclaw-secops
 /scripts/codesign-* @openclaw/openclaw-secops
 /scripts/render-homebrew-formula.mjs @openclaw/openclaw-secops
+/scripts/verify-go-install.sh @openclaw/openclaw-secops
 /scripts/verify-macos-* @openclaw/openclaw-secops
 
 # Every eventually executed Apple VM Mach-O shares this boundary.

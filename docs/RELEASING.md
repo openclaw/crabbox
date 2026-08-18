@@ -71,6 +71,12 @@ Production macOS packaging runs locally on a trusted Mac through the shared
 managed-keychain release wrapper. Signing keys and notary credentials remain in
 the local keychain/approved secret store and never enter GitHub Actions or Git.
 
+Before GoReleaser runs, the credential-free producer calls
+`scripts/verify-go-install.sh` with the actual release tag and peeled source
+commit. That gate constructs a complete read-only local module proxy from the
+exact commit and verifies a cold, version-suffixed `go install` outside the
+checkout. It must pass before candidate production begins.
+
 Run the credential-free producer first and capture its printed manifest digest:
 
 ```sh
@@ -343,6 +349,45 @@ gh run watch "$PUBLIC_VERIFIER_RUN_ID" \
   --repo openclaw/crabbox --exit-status
 ```
 
+Prove the newly public source-install channel from the public Go module proxy,
+not from a checkout, local proxy, or direct VCS fallback. Use fresh state and
+require the exact public tag, fork dependency, replacement-free build metadata,
+version, and help surfaces:
+
+```sh
+PUBLIC_GO_INSTALL=$(mktemp -d "${TMPDIR:-/tmp}/crabbox-public-go-install.XXXXXX")
+mkdir -m 700 \
+  "$PUBLIC_GO_INSTALL/home" "$PUBLIC_GO_INSTALL/gopath" \
+  "$PUBLIC_GO_INSTALL/gomodcache" "$PUBLIC_GO_INSTALL/gocache" \
+  "$PUBLIC_GO_INSTALL/bin" "$PUBLIC_GO_INSTALL/tmp" "$PUBLIC_GO_INSTALL/work"
+(
+  cd "$PUBLIC_GO_INSTALL/work"
+  env -i \
+    GOBIN="$PUBLIC_GO_INSTALL/bin" GOCACHE="$PUBLIC_GO_INSTALL/gocache" \
+    GOENV=off GOMODCACHE="$PUBLIC_GO_INSTALL/gomodcache" \
+    GOPATH="$PUBLIC_GO_INSTALL/gopath" GOPROXY=https://proxy.golang.org \
+    GOSUMDB=sum.golang.org GOTOOLCHAIN=local GOWORK=off \
+    HOME="$PUBLIC_GO_INSTALL/home" PATH="$PATH" TMPDIR="$PUBLIC_GO_INSTALL/tmp" \
+    go install "github.com/openclaw/crabbox/cmd/crabbox@$TAG"
+)
+go version -m -json "$PUBLIC_GO_INSTALL/bin/crabbox" >"$PUBLIC_GO_INSTALL/build.json"
+jq -e --arg version "$TAG" \
+  --arg forkVersion v6.0.3-0.20260817142523-966654abed4a '
+  .Path == "github.com/openclaw/crabbox/cmd/crabbox" and
+  .Main.Path == "github.com/openclaw/crabbox" and
+  .Main.Version == $version and .Main.Replace == null and
+  ([.Deps[] | select(
+    .Path == "github.com/steipete/jsonschema/v6" and
+    .Version == $forkVersion and .Replace == null
+  )] | length == 1) and
+  ([.Deps[] | select(.Replace != null)] | length == 0) and
+  ([.Deps[] | select(.Path == "github.com/santhosh-tekuri/jsonschema/v6")] | length == 0)
+' "$PUBLIC_GO_INSTALL/build.json"
+test "$(cd "$PUBLIC_GO_INSTALL/work" && "$PUBLIC_GO_INSTALL/bin/crabbox" --version)" = "${TAG#v}"
+(cd "$PUBLIC_GO_INSTALL/work" && "$PUBLIC_GO_INSTALL/bin/crabbox" --help >/dev/null 2>&1)
+(cd "$PUBLIC_GO_INSTALL/work" && "$PUBLIC_GO_INSTALL/bin/crabbox" run --help >/dev/null 2>&1)
+```
+
 Only after that public run and a separate tap-update authorization, update the
 formula with the four verified public archive hashes. Generate the only
 accepted Ruby program with protected tooling (the four digest arguments are
@@ -536,7 +581,16 @@ provenance, native architecture, signature, online notarization, and clean
 candidate-execution checks. The successful public verifier run must be newer
 than the publication and every release or asset update.
 
-### 5. Update and prove Homebrew
+### 5. Verify public Go installation
+
+Install `github.com/openclaw/crabbox/cmd/crabbox@$TAG` from the public Go module
+proxy with the fresh, proxy-only procedure above. This gate is distinct from
+the pre-release hermetic fixture: it proves that the actual published tag is
+remotely resolvable. Preserve its structured build metadata with the release
+proof. Do not substitute a checkout, `replace`, pseudo-version, local proxy, or
+`,direct` fallback.
+
+### 6. Update and prove Homebrew
 
 Homebrew mutation needs a final separate authorization and a successful public
 verifier proof. Re-download the frozen public assets immediately before the tap
