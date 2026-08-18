@@ -546,6 +546,7 @@ var preflightToolRegistry = map[string]preflightToolSpec{
 	"bun":                  {Posix: []string{"bun", "--version"}, Windows: []string{"bun", "--version"}},
 	"bwrap":                {Posix: []string{"bwrap", "--version"}, OS: map[string]bool{"linux": true}},
 	"cargo":                {Posix: []string{"cargo", "--version"}, Windows: []string{"cargo", "--version"}},
+	"cmake":                {Posix: []string{"cmake", "--version"}, Windows: []string{"cmake", "--version"}},
 	"corepack":             {Posix: []string{"corepack", "--version"}, Windows: []string{"corepack", "--version"}},
 	"docker":               {Posix: []string{"docker", "--version"}, Windows: []string{"docker", "--version"}},
 	"execution_policy":     {Windows: []string{"Get-ExecutionPolicy -Scope Process"}, OS: map[string]bool{"windows": true}},

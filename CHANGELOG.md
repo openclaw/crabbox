@@ -2,6 +2,10 @@
 
 ## 0.44.1 - Unreleased
 
+### Added
+
+- Added an opt-in `cmake --version` preflight probe for POSIX, WSL2, and native Windows targets. Thanks @coygeek.
+
 ### Fixed
 
 - Made private draft verification resolve the exact draft by tag and numeric release ID instead of relying on a release-list endpoint that can omit drafts.

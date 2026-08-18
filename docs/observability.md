@@ -298,16 +298,23 @@ a prebaked image, a devcontainer/Nix/mise/asdf setup, or the uploaded
 script/command itself.
 
 The built-in probes cover common toolchains — `git`, `tar`, `node`, `npm`,
-`corepack`, `pnpm`, `yarn`, `bun`, `docker`, and opt-in `uv`, `python`, and
-`python3` — plus target-specific probes such as `sudo`, `apt`, `bubblewrap`,
-`powershell`, `execution_policy`, `longpaths`, `temp`, and `pwsh`. Linux and
-WSL2 also support an opt-in `raw_socket` capability probe. Override the probe
-list per run:
+`corepack`, `pnpm`, `yarn`, `bun`, and `docker`; opt-in `go`, `cargo`, `cmake`,
+`uv`, `python`, and `python3` on POSIX, WSL2, and native Windows; and opt-in
+`make` on POSIX and WSL2 — plus target-specific probes such as `sudo`, `apt`,
+`bubblewrap`, `powershell`, `execution_policy`, `longpaths`, `temp`, and `pwsh`.
+Linux and WSL2 also support an opt-in `raw_socket` capability probe. Override
+the probe list per run:
 
 ```sh
 crabbox run --preflight --preflight-tools python,python3 -- python3 -m pytest
+crabbox run --preflight --preflight-tools default,cmake -- cmake --build build
 crabbox run --preflight --preflight-tools raw_socket -- ./packet-tests
 ```
+
+The opt-in CMake probe invokes the literal `cmake --version` command on POSIX,
+WSL2, and native Windows targets. It reports only the first output line or
+`cmake=missing`; the result is diagnostic only, so missing CMake does not block
+the workload or trigger installation or upgrades.
 
 `raw_socket` reports `direct` when the execution user can open and immediately
 close `socket(AF_INET, SOCK_RAW, IPPROTO_RAW)`, `sudo` when only the same
@@ -322,7 +329,8 @@ Or per repository:
 ```yaml
 run:
   preflightTools:
-    - raw_socket
+    - default
+    - cmake
 ```
 
 ## Actions hydration

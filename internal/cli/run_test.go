@@ -4512,6 +4512,204 @@ func TestPythonPreflightWindowsProbeUsesLiteralExecutableAndMissingContract(t *t
 	}
 }
 
+func TestCMakePreflightToolValidationAndTargetFiltering(t *testing.T) {
+	if err := validatePreflightTools([]string{"cmake"}); err != nil {
+		t.Fatalf("cmake should validate: %v", err)
+	}
+
+	targets := []struct {
+		name   string
+		target SSHTarget
+	}{
+		{name: "linux", target: SSHTarget{TargetOS: targetLinux}},
+		{name: "macos", target: SSHTarget{TargetOS: targetMacOS}},
+		{name: "wsl2", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}},
+		{name: "native_windows", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}},
+	}
+	for _, tt := range targets {
+		t.Run(tt.name, func(t *testing.T) {
+			got := preflightToolsForTarget(tt.target, []string{"cmake"})
+			if strings.Join(got, ",") != "cmake" {
+				t.Fatalf("tools=%v", got)
+			}
+		})
+	}
+
+	for _, tool := range preflightToolsForTarget(SSHTarget{TargetOS: targetLinux}, nil) {
+		if tool == "cmake" {
+			t.Fatalf("cmake must remain opt-in, default tools=%v", defaultPreflightToolNames)
+		}
+	}
+	tools := normalizePreflightToolNames([]string{"default,cmake,cmake"})
+	if count := strings.Count(","+strings.Join(tools, ",")+",", ",cmake,"); count != 1 {
+		t.Fatalf("default plus duplicate cmake tools=%v, cmake count=%d", tools, count)
+	}
+	if len(tools) != len(defaultPreflightToolNames)+1 {
+		t.Fatalf("default plus cmake tools=%v, want %d entries", tools, len(defaultPreflightToolNames)+1)
+	}
+}
+
+func TestCMakePreflightLiteralCommandGeneration(t *testing.T) {
+	const posixProbe = `preflight_cmd '\''cmake'\'' '\''cmake'\'' cmake --version`
+	posix := remoteCapabilityPreflightCommand("/work/repo", nil, nil, []string{"cmake"})
+	if !strings.Contains(posix, posixProbe) {
+		t.Fatalf("POSIX preflight script missing %q in %q", posixProbe, posix)
+	}
+	wsl2Tools := preflightToolsForTarget(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, []string{"cmake"})
+	wsl2 := remoteCapabilityPreflightCommand("/work/repo", nil, nil, wsl2Tools)
+	if !strings.Contains(wsl2, posixProbe) {
+		t.Fatalf("WSL2 preflight script missing %q in %q", posixProbe, wsl2)
+	}
+	windows := windowsRemoteCapabilityPreflightScript(`C:\crabbox\repo`, nil, nil, []string{"cmake"})
+	if !strings.Contains(windows, `Test-Tool 'cmake' 'cmake' @('--version')`) {
+		t.Fatalf("native Windows preflight script does not use literal cmake command: %q", windows)
+	}
+	for name, script := range map[string]string{"posix": posix, "wsl2": wsl2, "windows": windows} {
+		if strings.Contains(script, "cmake3") {
+			t.Fatalf("%s preflight script contains unsupported alias: %q", name, script)
+		}
+	}
+}
+
+func TestCMakePreflightPOSIXPresentFirstLineAndMissing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell behavior is covered on non-Windows CI")
+	}
+
+	run := func(t *testing.T, installCMake bool) string {
+		t.Helper()
+		binDir := t.TempDir()
+		bash := "#!/bin/sh\nif [ \"$1\" = \"-lc\" ]; then exec /bin/bash --noprofile --norc -c \"$2\"; fi\nexec /bin/bash \"$@\"\n"
+		if err := os.WriteFile(filepath.Join(binDir, "bash"), []byte(bash), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for name, path := range map[string]string{"id": "/usr/bin/id", "sed": "/usr/bin/sed", "whoami": "/usr/bin/whoami"} {
+			if err := os.Symlink(path, filepath.Join(binDir, name)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if installCMake {
+			cmake := "#!/bin/sh\nprintf 'cmake version 9.8.7\\nignored second line\\n'\n"
+			if err := os.WriteFile(filepath.Join(binDir, "cmake"), []byte(cmake), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		command := remoteCapabilityPreflightCommand(t.TempDir(), map[string]string{"PATH": binDir}, nil, []string{"cmake"})
+		cmd := exec.Command("/bin/sh", "-c", command)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("run POSIX preflight: %v\n%s", err, out)
+		}
+		return string(out)
+	}
+
+	present := run(t, true)
+	if !strings.Contains(present, "cmake=cmake version 9.8.7\n") || strings.Contains(present, "ignored second line") {
+		t.Fatalf("present output did not preserve first-line contract: %q", present)
+	}
+	missing := run(t, false)
+	if !strings.Contains(missing, "cmake=missing\n") {
+		t.Fatalf("missing output did not preserve diagnostic-only contract: %q", missing)
+	}
+}
+
+func TestCMakePreflightNativeWindowsPresentAndMissing(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows PowerShell behavior requires windows-latest")
+	}
+
+	run := func(t *testing.T, installCMake bool) string {
+		t.Helper()
+		binDir := t.TempDir()
+		if installCMake {
+			cmake := "@echo off\r\necho cmake version 9.8.7\r\necho ignored second line\r\n"
+			if err := os.WriteFile(filepath.Join(binDir, "cmake.cmd"), []byte(cmake), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		script := windowsRemoteCapabilityPreflightScript(t.TempDir(), map[string]string{"Path": binDir}, nil, []string{"cmake"})
+		out, err := runWindowsPowerShellScript(t, script)
+		if err != nil {
+			t.Fatalf("run native Windows preflight: %v\n%s", err, out)
+		}
+		return strings.ReplaceAll(string(out), "\r\n", "\n")
+	}
+
+	present := run(t, true)
+	if !strings.Contains(present, "cmake=cmake version 9.8.7\n") || strings.Contains(present, "ignored second line") {
+		t.Fatalf("present output did not preserve first-line contract: %q", present)
+	}
+	missing := run(t, false)
+	if !strings.Contains(missing, "cmake=missing\n") {
+		t.Fatalf("missing output did not preserve diagnostic-only contract: %q", missing)
+	}
+}
+
+func TestCMakePreflightUserAndRepositoryConfig(t *testing.T) {
+	for _, source := range []string{"user", "repository"} {
+		t.Run(source, func(t *testing.T) {
+			clearConfigEnv(t)
+			root := t.TempDir()
+			home := filepath.Join(root, "home")
+			repo := filepath.Join(root, "repo")
+			if err := os.MkdirAll(repo, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+			t.Setenv("CRABBOX_CONFIG", "")
+			t.Chdir(repo)
+
+			path := filepath.Join(repo, ".crabbox.yaml")
+			if source == "user" {
+				path = userConfigPath()
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(path, []byte("run:\n  preflightTools: [cmake]\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := loadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Join(cfg.Run.PreflightTools, ","); got != "cmake" {
+				t.Fatalf("%s run.preflightTools=%q", source, got)
+			}
+			if err := validatePreflightTools(cfg.Run.PreflightTools); err != nil {
+				t.Fatalf("%s cmake config should validate: %v", source, err)
+			}
+		})
+	}
+}
+
+func TestCMakeUnknownPreflightToolFailsBeforeAcquire(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+	acquireCalls := 0
+	runEnvProfileTestAcquireHook = func(AcquireRequest) { acquireCalls++ }
+	t.Cleanup(func() { runEnvProfileTestAcquireHook = nil })
+
+	err := (App{Stdout: io.Discard, Stderr: io.Discard}).runCommand(t.Context(), []string{
+		"--provider", runEnvProfileTestProvider{}.Name(),
+		"--preflight",
+		"--preflight-tools", "cmake,cmake3",
+		"--no-sync",
+		"--no-hydrate",
+		"--", "true",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, `unknown preflight tool "cmake3"`) {
+		t.Fatalf("error=%v, want exit 2 for unknown cmake alias", err)
+	}
+	if acquireCalls != 0 {
+		t.Fatalf("Acquire called %d time(s) before unknown preflight tool rejection", acquireCalls)
+	}
+}
+
 func TestRawSocketPreflightToolValidationAndTargetFiltering(t *testing.T) {
 	if err := validatePreflightTools([]string{rawSocketPreflightTool}); err != nil {
 		t.Fatalf("raw_socket should validate: %v", err)

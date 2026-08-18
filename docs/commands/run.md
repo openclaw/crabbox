@@ -400,10 +400,11 @@ or the command/script you run.
 
 By default it probes common language and infrastructure tools plus OS-specific
 basics. Default generic probes are `git`, `tar`, `node`, `npm`, `corepack`,
-`pnpm`, `yarn`, `bun`, and `docker`; `uv`, `python`, and `python3` are available
-as additional opt-in built-ins. Linux and WSL2 also support the opt-in
-`raw_socket` capability probe. POSIX/Linux/WSL probes include `sudo`, `apt`,
-and `bubblewrap`; native Windows probes include `powershell`,
+`pnpm`, `yarn`, `bun`, and `docker`. Additional opt-in built-ins are `go`,
+`cargo`, `cmake`, `uv`, `python`, and `python3` on POSIX, WSL2, and native
+Windows targets, plus `make` on POSIX and WSL2. Linux and WSL2 also support the
+opt-in `raw_socket` capability probe. POSIX/Linux/WSL probes include `sudo`,
+`apt`, and `bubblewrap`; native Windows probes include `powershell`,
 `execution_policy`, `longpaths`, `temp`, and `pwsh`.
 
 Use `--preflight-tools` to replace the default tool list for one run:
@@ -411,6 +412,7 @@ Use `--preflight-tools` to replace the default tool list for one run:
 ```sh
 crabbox run --preflight --preflight-tools node,bun,docker -- bun test
 crabbox run --preflight --preflight-tools default,uv -- node --test
+crabbox run --preflight --preflight-tools default,cmake -- cmake --build build
 crabbox run --preflight --preflight-tools python,python3 -- python3 -m pytest
 crabbox run --preflight --preflight-tools raw_socket -- ./packet-tests
 crabbox run --preflight --preflight-tools none -- ./smoke.sh
@@ -419,9 +421,13 @@ crabbox run --preflight --preflight-tools none -- ./smoke.sh
 `default` expands to the default probe list; `none` keeps only the workspace
 summary. Unknown tool names fail before leasing so typos do not hide missing
 diagnostics. Unsupported OS-specific probes are skipped for the current target.
-The Python probes always invoke the literal requested command with `--version`,
-including `python` and `python3` on native Windows; Crabbox does not map either
-name to `py`. An unavailable literal command prints `<name>=missing` and the run
+The CMake probe invokes the literal `cmake --version` command on POSIX, WSL2,
+and native Windows targets. It prints only the first output line when CMake is
+present or `cmake=missing` when it is unavailable; either result is diagnostic
+only and does not block the workload. There is no `cmake3` alias. The Python
+probes likewise invoke the literal requested command with `--version`, including
+`python` and `python3` on native Windows; Crabbox does not map either name to
+`py`. An unavailable literal command prints `<name>=missing` and the run
 continues.
 
 `raw_socket` uses `python3`, then `python`, to open and immediately close

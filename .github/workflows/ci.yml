@@ -108,8 +108,8 @@ jobs:
       - name: Test Windows SSH and rsync transport selection
         run: go test ./internal/cli/ -run '^(TestWindowsWSLNativeToolProbeUsesDirectCommandOutput|TestWindowsWSLNativeToolPathsRejectsWindowsShims|TestDirectSSHExecutableSelection|TestSSHCommandContextUsesNativeWindowsOpenSSHEvenWhenPATHSelectsMSYS2|TestResolveWindowsNativeRsyncPairUsesExactSibling|TestResolveWindowsNativeRsyncPairFailsClosedWithoutSibling|TestBindWindowsNativeRsyncSSHPreservesOwnedArguments|TestWindowsNativeRsyncCommandUsesSiblingPairAndEnvironment|TestResolvedSSHCopyCommandUsesNativeWindowsSiblingPair|TestResolvedSSHCopyCommandFailsClosedWithoutNativeWindowsSibling)$' -count=1 -v
 
-      - name: Test native Windows Python preflight probes
-        run: go test ./internal/cli/ -run '^(TestPythonPreflightToolValidationAndTargetFiltering|TestPythonPreflightWindowsProbeUsesLiteralExecutableAndMissingContract)$' -count=1 -v
+      - name: Test native Windows Python and CMake preflight probes
+        run: go test ./internal/cli/ -run '^(TestPythonPreflightToolValidationAndTargetFiltering|TestPythonPreflightWindowsProbeUsesLiteralExecutableAndMissingContract|TestCMakePreflightNativeWindowsPresentAndMissing)$' -count=1 -v
 
       - name: Test Git workspace coherence
         run: go test ./internal/cli/ -run '^(TestWindowsGitRootIdentityAcceptsShortAliasAndRejectsDistinctRoot|TestWindowsGitCoherenceRollbackRestoresIndexAfterSymbolicHeadFailure|TestWindowsGitSeedReplacesUnusableExactRootsAfterVerifiedClone|TestWindowsGitCoherenceSupportsDetachedSparseSplitAndLinkedIndexes|TestWorkspaceOwnerWindowsProtocolBehavior)$' -count=1 -v

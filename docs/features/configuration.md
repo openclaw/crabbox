@@ -996,17 +996,20 @@ list, and explicit `--allow-env` flags append afterward. See
 ```yaml
 run:
   preflightTools:
-    - python
-    - python3
+    - default
+    - cmake
 ```
 
 `run.preflightTools` configures which built-in probes `crabbox run --preflight`
 executes before the remote command. The CLI flag
-`--preflight-tools python,python3` overrides this list for one run. Both names
-are opt-in and probe the corresponding literal command with `--version`. Use
-`default` to include Crabbox's default built-ins and `none` to print only the
-workspace summary. Preflight probes only report availability; they do not
-install toolchains or mutate the machine.
+`--preflight-tools default,cmake` overrides this list for one run. Opt-in probes
+include `go`, `cargo`, `cmake`, `uv`, `python`, and `python3` on POSIX, WSL2,
+and native Windows, plus `make` on POSIX and WSL2. The CMake probe invokes only
+the literal `cmake --version` command and reports its first output line or
+`cmake=missing`. Use `default` to include Crabbox's default built-ins and `none`
+to print only the workspace summary. Preflight probes are diagnostic only: a
+missing tool does not block the workload, and Crabbox does not install or
+upgrade toolchains.
 
 ### Actions
 
