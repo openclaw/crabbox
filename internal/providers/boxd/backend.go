@@ -619,13 +619,45 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			return fmt.Errorf("finalize boxd machine cleanup claim: %w", err)
 		}
 	}
-	// Reap claims whose machine no longer exists.
+	// Reap claims whose machine is PROVABLY gone. A claim is the sole
+	// ownership record of its machine, so a transient inventory omission
+	// (a list or get miss) must never reap the claim of a still-live VM:
+	// absence has to be corroborated by a direct read — and, for a real
+	// removal, survive the same bounded visibility grace release uses. A
+	// name present with a DIFFERENT immutable id is definitive (the claimed
+	// machine is gone); a matching or unverifiable id retains the claim.
 	for leaseID, claim := range claims {
 		if _, ok := live[leaseID]; ok || claim.LeaseID == "" {
 			continue
 		}
+		machineName := firstNonBlank(strings.TrimSpace(claim.Labels["machine"]), machineNameForLease(leaseID))
+		boundID := claimBoundMachineID(claim, machineName)
+		summary, found, err := b.getMachine(ctx, cfg, machineName)
+		if err != nil {
+			return err
+		}
+		if found {
+			currentID := strings.TrimSpace(summary.ID)
+			if boundID == "" || currentID == "" || currentID == boundID {
+				fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s reason=machine %s still present (claimed vm_id=%q, current=%q)\n", claim.LeaseID, machineName, boundID, currentID)
+				continue
+			}
+			// Name reused by a replacement: the claimed machine is gone.
+		} else if req.DryRun {
+			fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s reason=missing boxd machine (if absence persists through the visibility grace)\n", claim.LeaseID)
+			continue
+		} else {
+			gone, err := b.machineAbsentThroughGrace(ctx, cfg, machineName)
+			if err != nil {
+				return err
+			}
+			if !gone {
+				fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s reason=machine %s reappeared within the visibility grace\n", claim.LeaseID, machineName)
+				continue
+			}
+		}
 		if req.DryRun {
-			fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s reason=missing boxd machine\n", claim.LeaseID)
+			fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s reason=machine %s was replaced\n", claim.LeaseID, machineName)
 			continue
 		}
 		if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
@@ -633,6 +665,30 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		}
 	}
 	return nil
+}
+
+// machineAbsentThroughGrace reports whether the machine stays absent through
+// the same bounded visibility grace release uses, so a transient inventory
+// gap never counts as proof of absence.
+func (b *backend) machineAbsentThroughGrace(ctx context.Context, cfg core.Config, name string) (bool, error) {
+	start := b.now()
+	for {
+		_, found, err := b.getMachine(ctx, cfg, name)
+		if err != nil {
+			return false, err
+		}
+		if found {
+			return false, nil
+		}
+		if b.now().Sub(start) >= b.releaseNotFoundGrace {
+			return true, nil
+		}
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-time.After(b.readyPollInterval):
+		}
+	}
 }
 
 // waitMachineReady polls `machine get` until the machine is SSH-reachable

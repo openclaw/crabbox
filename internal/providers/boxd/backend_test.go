@@ -762,9 +762,11 @@ func TestResolveRefusesReplacedMachine(t *testing.T) {
 func TestCleanupSkipsReplacedMachineAndReapsClaim(t *testing.T) {
 	name := "crabbox-cbx-aaaabbbbcccc"
 	leaseID := "cbx_aaaabbbbcccc"
+	replacementGet := ok(fmt.Sprintf(`{"name":%q,"id":"vm-REPLACEMENT","status":"running","url":"%s.boxd.sh"}`, name, name))
 	runner := &scriptedRunner{scripts: []func([]string) (core.LocalCommandResult, error){
 		ok(fmt.Sprintf(`[{"name":%q,"status":"running","url":"%s.boxd.sh","source":"standalone","sharing":"private"}]`, name, name)),
-		ok(fmt.Sprintf(`{"name":%q,"id":"vm-REPLACEMENT","status":"running","url":"%s.boxd.sh"}`, name, name)),
+		replacementGet, // main-pass identity check
+		replacementGet, // orphan-pass corroboration: id mismatch is definitive
 	}}
 	b := testBackend(t, runner)
 	cfg := b.configForRun()
@@ -782,6 +784,64 @@ func TestCleanupSkipsReplacedMachineAndReapsClaim(t *testing.T) {
 	}
 	if claims, _ := boxdClaims(cfg); len(claims) != 0 {
 		t.Fatalf("stale claim not reaped by the orphan pass: %v", claims)
+	}
+}
+
+// TestCleanupRetainsClaimOnTransientListMiss pins the transient-inventory
+// rule: a claim whose machine is missing from one listing but present on a
+// direct read is NOT an orphan — reaping it would drop the sole ownership
+// record of a live machine.
+func TestCleanupRetainsClaimOnTransientListMiss(t *testing.T) {
+	name := "crabbox-cbx-aaaabbbbcccc"
+	leaseID := "cbx_aaaabbbbcccc"
+	runner := &scriptedRunner{scripts: []func([]string) (core.LocalCommandResult, error){
+		ok(`[]`), // list omission
+		ok(fmt.Sprintf(`{"name":%q,"id":"vm-9","status":"running","url":"%s.boxd.sh"}`, name, name)), // direct read: alive
+	}}
+	b := testBackend(t, runner)
+	var stderr strings.Builder
+	b.rt.Stderr = &stderr
+	cfg := b.configForRun()
+	server := core.Server{CloudID: "vm-9", Provider: providerName, Name: name, Labels: map[string]string{"machine": name, "lease": leaseID, "vm_id": "vm-9"}}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, "", cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr.String(), "still present") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+	if claims, _ := boxdClaims(cfg); len(claims) != 1 {
+		t.Fatalf("claim of a live machine was reaped on a transient list miss: %v", claims)
+	}
+}
+
+// TestCleanupReapsClaimAfterSustainedAbsence pins that a claim is reaped only
+// after the machine stays absent through the bounded visibility grace.
+func TestCleanupReapsClaimAfterSustainedAbsence(t *testing.T) {
+	name := "crabbox-cbx-aaaabbbbcccc"
+	leaseID := "cbx_aaaabbbbcccc"
+	notFound := fail("Error: VM '" + name + "' not found")
+	scripts := []func([]string) (core.LocalCommandResult, error){ok(`[]`)}
+	for i := 0; i < 200; i++ {
+		scripts = append(scripts, notFound)
+	}
+	runner := &scriptedRunner{scripts: scripts}
+	b := testBackend(t, runner)
+	cfg := b.configForRun()
+	server := core.Server{CloudID: "vm-9", Provider: providerName, Name: name, Labels: map[string]string{"machine": name, "lease": leaseID, "vm_id": "vm-9"}}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, "", cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) < 3 {
+		t.Fatalf("absence must be confirmed through the grace, calls=%v", runner.calls)
+	}
+	if claims, _ := boxdClaims(cfg); len(claims) != 0 {
+		t.Fatalf("claim not reaped after sustained absence: %v", claims)
 	}
 }
 
