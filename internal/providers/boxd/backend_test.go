@@ -292,8 +292,8 @@ func TestAcquireRollsBackOnTerminalMachine(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 	last := runner.calls[len(runner.calls)-1]
-	if last.args[0] != "machine" || last.args[1] != "remove" || !contains(last.args, "--confirm") {
-		t.Fatalf("rollback did not destroy the machine: %v", last.args)
+	if last.args[0] != "machine" || last.args[1] != "remove" || last.args[2] != "vm-1" || !contains(last.args, "--confirm") {
+		t.Fatalf("rollback must destroy by machine id: %v", last.args)
 	}
 }
 
@@ -356,8 +356,8 @@ func TestAcquireRefusesBlankReadyID(t *testing.T) {
 		t.Fatalf("blank ready id must be refused, err=%v", err)
 	}
 	last := runner.calls[len(runner.calls)-1]
-	if last.args[1] != "remove" {
-		t.Fatalf("verified rollback did not destroy our machine: %v", runner.calls)
+	if last.args[1] != "remove" || last.args[2] != "vm-1" {
+		t.Fatalf("verified rollback must destroy by machine id: %v", runner.calls)
 	}
 	if claims, _ := boxdClaims(b.configForRun()); len(claims) != 0 {
 		t.Fatalf("claim persisted despite unverified ready id: %v", claims)
@@ -451,8 +451,10 @@ func TestReleaseDestroysAndRemovesClaim(t *testing.T) {
 		t.Fatalf("claim not removed: %v", claims)
 	}
 	last := runner.calls[len(runner.calls)-1]
-	if last.args[1] != "remove" || last.args[2] != name {
-		t.Fatalf("release argv=%v", last.args)
+	// The remove must be addressed by the immutable id, not the reusable
+	// name, so a replacement created after the identity read cannot be hit.
+	if last.args[1] != "remove" || last.args[2] != "vm-9" {
+		t.Fatalf("release must remove by machine id, argv=%v", last.args)
 	}
 }
 
@@ -507,8 +509,8 @@ func TestReleaseStopModeStopsAndRetainsClaim(t *testing.T) {
 		t.Fatal("stop-mode release must retain the claim")
 	}
 	last := runner.calls[len(runner.calls)-1]
-	if last.args[1] != "stop" || last.args[2] != name {
-		t.Fatalf("release argv=%v", last.args)
+	if last.args[1] != "stop" || last.args[2] != "vm-9" {
+		t.Fatalf("stop must be addressed by machine id, argv=%v", last.args)
 	}
 	claims, _ := boxdClaims(cfg)
 	claim, okClaim := claims[leaseID]
@@ -702,6 +704,35 @@ func TestCleanupRefusesUnverifiableClaim(t *testing.T) {
 	}
 	if claims, _ := boxdClaims(cfg); len(claims) != 1 {
 		t.Fatalf("unverifiable claim must be retained: %v", claims)
+	}
+}
+
+// TestCleanupDestroysByMachineID pins the race fence on cleanup's destroy: the
+// vendor mutation is addressed by the immutable id, so a name reused after the
+// corroborating read cannot be hit.
+func TestCleanupDestroysByMachineID(t *testing.T) {
+	name := "crabbox-cbx-aaaabbbbcccc"
+	leaseID := "cbx_aaaabbbbcccc"
+	runner := &scriptedRunner{scripts: []func([]string) (core.LocalCommandResult, error){
+		ok(fmt.Sprintf(`[{"name":%q,"status":"running","url":"%s.boxd.sh","source":"standalone","sharing":"private"}]`, name, name)),
+		ok(fmt.Sprintf(`{"name":%q,"id":"vm-9","status":"running","url":"%s.boxd.sh"}`, name, name)),
+		ok(`{"removed":true}`),
+	}}
+	b := testBackend(t, runner)
+	cfg := b.configForRun()
+	server := core.Server{CloudID: "vm-9", Provider: providerName, Name: name, Labels: map[string]string{"machine": name, "lease": leaseID, "vm_id": "vm-9", "recovery": "rollback-cleanup"}}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, "", cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	last := runner.calls[len(runner.calls)-1]
+	if last.args[1] != "remove" || last.args[2] != "vm-9" {
+		t.Fatalf("cleanup must destroy by machine id, argv=%v", last.args)
+	}
+	if claims, _ := boxdClaims(cfg); len(claims) != 0 {
+		t.Fatalf("claim not reaped after cleanup destroy: %v", claims)
 	}
 }
 

@@ -98,7 +98,10 @@ not create.
 Release enforces the same fence directly: a canonical machine name or lease id
 with no matching local claim is refused before any `machine stop` or
 `machine remove` is issued, and a claim authorizes exactly the machine it
-recorded. Because boxd retains destroyed machine names for reuse, the claim is
+recorded. Every mutating vendor call (stop, start, remove) is addressed by the
+machine's immutable id, never the reusable name, so a name reused between the
+identity read and the mutation cannot redirect it to a replacement. Because
+boxd retains destroyed machine names for reuse, the claim is
 bound to the machine's immutable id, not just its name: when the claimed
 machine is gone and its name has been taken by a replacement, resolve refuses,
 release reaps the stale claim without touching the replacement, and cleanup

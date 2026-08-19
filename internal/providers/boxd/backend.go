@@ -121,7 +121,10 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 			if getErr == nil && found {
 				currentID := strings.TrimSpace(summary.ID)
 				if currentID == createdID {
-					if destroyErr := b.destroyMachine(cleanupCtx, cfg, name); destroyErr != nil {
+					// Address the mutation by the immutable id: even if the
+					// name is reused between this read and the remove, an
+					// id-addressed remove can never hit a replacement.
+					if destroyErr := b.destroyMachine(cleanupCtx, cfg, createdID); destroyErr != nil {
 						claimErr := b.persistRecoveryClaim(cfg, leaseID, slug, name, created.ID, labels, req)
 						return errors.Join(cause, fmt.Errorf("destroy leaked boxd machine %s: %w", name, destroyErr), claimErr)
 					}
@@ -170,9 +173,8 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	}
 	// Verify the id before it anchors the claim: the ready machine must be
 	// the one the create returned, not a same-named machine that raced in.
-	// Do NOT roll back here — rollback destroys by name, which would hit the
-	// replacement; our machine is necessarily gone if the name resolves to a
-	// different id, and the replacement is not ours to touch.
+	// No rollback here: our machine is necessarily gone if the name resolves
+	// to a different id, and the replacement is not ours to touch.
 	if readyID := strings.TrimSpace(ready.ID); readyID == "" {
 		// A blank id cannot prove the ready machine is ours: fail closed. The
 		// rollback verifies identity itself before any destroy.
@@ -282,7 +284,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	}
 	if boxdState(summary.Status) == "stopped" {
 		fmt.Fprintf(b.rt.Stderr, "starting stopped boxd machine %s\n", name)
-		if err := b.startMachine(ctx, cfg, name); err != nil {
+		if err := b.startMachine(ctx, cfg, strings.TrimSpace(summary.ID)); err != nil {
 			return core.LeaseTarget{}, err
 		}
 	}
@@ -408,7 +410,8 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 				return releaseReplaced(summary.ID)
 			}
 			if boxdState(summary.Status) != "stopped" {
-				if err := b.stopMachine(ctx, cfg, name); err != nil {
+				// Id-addressed so a name reused after this read cannot be hit.
+				if err := b.stopMachine(ctx, cfg, boundID); err != nil {
 					return err
 				}
 			}
@@ -444,7 +447,9 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 			if strings.TrimSpace(summary.ID) != boundID {
 				return releaseReplaced(summary.ID)
 			}
-			if err := b.destroyMachine(ctx, cfg, name); err != nil {
+			// Address the destroy by the immutable id: name reuse between the
+			// read above and this remove cannot redirect it to a replacement.
+			if err := b.destroyMachine(ctx, cfg, boundID); err != nil {
 				return err
 			}
 			break
@@ -614,7 +619,9 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			return fmt.Errorf("claim boxd machine %s for cleanup: %w", row.Name, err)
 		}
 		fmt.Fprintf(b.rt.Stdout, "destroy machine=%s lease=%s reason=%s\n", row.Name, leaseID, reason)
-		if err := b.destroyMachine(ctx, cfg, row.Name); err != nil {
+		// Id-addressed so a name reused after the corroborating read above
+		// cannot redirect the remove to a replacement.
+		if err := b.destroyMachine(ctx, cfg, boundID); err != nil {
 			return err
 		}
 		if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
