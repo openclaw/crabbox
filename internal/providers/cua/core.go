@@ -25,7 +25,6 @@ type StatusView = core.StatusView
 type StopRequest = core.StopRequest
 type CleanupRequest = core.CleanupRequest
 type LocalCommandRequest = core.LocalCommandRequest
-type LocalCommandResult = core.LocalCommandResult
 type Server = core.Server
 type Repo = core.Repo
 type LeaseClaim = core.LeaseClaim

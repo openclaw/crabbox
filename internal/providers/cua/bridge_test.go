@@ -1,6 +1,7 @@
 package cua
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,8 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
+type LocalCommandResult = core.LocalCommandResult
+
 type recordingRunner struct {
 	calls []LocalCommandRequest
 	fn    func(LocalCommandRequest) (LocalCommandResult, error)
@@ -25,7 +28,16 @@ type recordingRunner struct {
 func (r *recordingRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
 	r.calls = append(r.calls, req)
 	if r.fn != nil {
-		return r.fn(req)
+		var stdout, stderr bytes.Buffer
+		req.Stdout, req.Stderr = &stdout, &stderr
+		result, err := r.fn(req)
+		if result.Stdout == "" {
+			result.Stdout = stdout.String()
+		}
+		if result.Stderr == "" {
+			result.Stderr = stderr.String()
+		}
+		return result, err
 	}
 	return LocalCommandResult{ExitCode: 0}, nil
 }
@@ -143,6 +155,9 @@ func TestBridgeSendsJSONOnStdinAndMapsSecretOnlyToSDKEnv(t *testing.T) {
 	if !strings.Contains(call.Args[2], "def doctor") {
 		t.Fatalf("embedded script missing doctor implementation")
 	}
+	if call.MaxCapturedOutputBytes != bridgeOutputLimit || call.CancelGracePeriod != 2*time.Second {
+		t.Fatalf("bridge limits=%d/%s", call.MaxCapturedOutputBytes, call.CancelGracePeriod)
+	}
 }
 
 func TestNotFoundClassificationRequiresStructuredSignal(t *testing.T) {
@@ -216,6 +231,14 @@ func TestBridgeMutationsFailClosedBeforeRunner(t *testing.T) {
 	}
 	if len(runner.calls) != 0 {
 		t.Fatalf("mutation guard must fail before Python bridge, calls=%d", len(runner.calls))
+	}
+}
+
+func TestBridgeRequiresRunner(t *testing.T) {
+	var exitErr ExitError
+	_, err := newBridgeClient(testConfig(), Runtime{}).RoundTrip(context.Background(), bridgeRequest{Action: "doctor"})
+	if !errors.As(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(err.Error(), "requires Runtime.Exec") {
+		t.Fatalf("RoundTrip error=%v", err)
 	}
 }
 

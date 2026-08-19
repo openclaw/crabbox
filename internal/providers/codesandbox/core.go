@@ -38,7 +38,6 @@ type ExitError = core.ExitError
 type timingReport = core.TimingReport
 type timingPhase = core.TimingPhase
 type LocalCommandRequest = core.LocalCommandRequest
-type LocalCommandResult = core.LocalCommandResult
 
 const (
 	providerName         = "codesandbox"

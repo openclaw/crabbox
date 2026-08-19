@@ -1,17 +1,17 @@
 package cua
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared/procjson"
 )
 
 const (
@@ -183,42 +183,24 @@ func (c *bridgeClient) RoundTrip(ctx context.Context, req bridgeRequest) (bridge
 	}
 	req.Version = bridgeVersion
 	req.Config = bridgeConfigForConfig(c.cfg)
-	payload, err := json.Marshal(req)
-	if err != nil {
-		return bridgeResponse{}, err
-	}
 	timeout := bridgeTimeout(c.cfg, req)
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	var stdout, stderr bytes.Buffer
 	dir, err := bridgeWorkingDir()
 	if err != nil {
 		return bridgeResponse{}, err
 	}
 	defer os.RemoveAll(dir)
-	result, runErr := c.rt.Exec.Run(ctx, LocalCommandRequest{
-		Name:                   bridgeCommand(c.cfg),
-		Args:                   []string{"-I", "-c", bridgeScript},
-		Env:                    bridgeEnv(c.cfg, dir),
-		Dir:                    dir,
-		Stdin:                  bytes.NewReader(payload),
-		Stdout:                 &stdout,
-		Stderr:                 &stderr,
-		MaxCapturedOutputBytes: bridgeOutputLimit,
-		CancelGracePeriod:      2 * time.Second,
-	})
-	if runErr != nil || result.ExitCode != 0 {
-		return bridgeResponse{}, bridgeCommandError(result.ExitCode, stdout.String(), stderr.String(), runErr)
-	}
-	data := bytes.TrimSpace(stdout.Bytes())
-	if len(data) == 0 {
-		return bridgeResponse{}, fmt.Errorf("provider=cua bridge returned empty JSON output")
-	}
-	var resp bridgeResponse
-	if err := json.Unmarshal(data, &resp); err != nil {
+	command := LocalCommandRequest{Name: strings.TrimSpace(blank(c.cfg.Cua.BridgeCommand, defaultBridgeCommand)), Args: []string{"-I", "-c", bridgeScript}, Env: bridgeEnv(c.cfg, dir), Dir: dir}
+	resp, result, err := procjson.Exchange[bridgeRequest, bridgeResponse](ctx, c.rt.Exec, command, req, procjson.Limits{MaxBytesPerStream: bridgeOutputLimit, CancelGrace: 2 * time.Second})
+	if err != nil {
+		failure, _ := err.(*procjson.Failure)
+		if failure != nil && failure.Stage == procjson.StageRun {
+			return bridgeResponse{}, bridgeCommandError(result.ExitCode, result.Stdout, result.Stderr, failure.RunErr)
+		}
 		return bridgeResponse{}, fmt.Errorf("decode provider=cua bridge JSON: %w", err)
 	}
 	resp = redactBridgeResponse(resp)
@@ -245,14 +227,9 @@ func bridgeConfigForConfig(cfg Config) bridgeConfig {
 	}
 }
 
-func bridgeCommand(cfg Config) string {
-	return strings.TrimSpace(blank(cfg.Cua.BridgeCommand, defaultBridgeCommand))
-}
-
 func bridgeTimeout(cfg Config, req bridgeRequest) time.Duration {
 	seconds := cfg.Cua.ExecTimeoutSecs
-	switch req.Action {
-	case "doctor":
+	if req.Action == "doctor" {
 		seconds = 15
 	}
 	if seconds <= 0 {

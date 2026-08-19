@@ -50,8 +50,7 @@ func (h *bridgeHarness) Run(_ context.Context, req LocalCommandRequest) (LocalCo
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	_, _ = req.Stdout.Write(encoded)
-	return LocalCommandResult{ExitCode: 0}, nil
+	return LocalCommandResult{ExitCode: 0, Stdout: string(encoded)}, nil
 }
 
 func testBackend(t *testing.T, harness *bridgeHarness) backend {

@@ -19,6 +19,8 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
+type LocalCommandResult = core.LocalCommandResult
+
 func TestSDKBridgeSendsJSONOnStdinAndTokenOnlyInEnv(t *testing.T) {
 	setBridgeTestCacheDir(t)
 	secret := "csb-secret-value"
@@ -74,8 +76,19 @@ func TestSDKBridgeSendsJSONOnStdinAndTokenOnlyInEnv(t *testing.T) {
 	if call.Name != "node" {
 		t.Fatalf("command=%q", call.Name)
 	}
+	if call.MaxCapturedOutputBytes != codeSandboxBridgeOutputLimit || call.CancelGracePeriod != 2*time.Second {
+		t.Fatalf("control limits=%d/%s", call.MaxCapturedOutputBytes, call.CancelGracePeriod)
+	}
 	if !reflect.DeepEqual(call.Args[:2], []string{"--input-type=module", "-e"}) {
 		t.Fatalf("args=%#v", call.Args)
+	}
+}
+
+func TestSDKBridgeRequiresRunnerBeforeSDKSetup(t *testing.T) {
+	var exitErr ExitError
+	_, err := NewSDKBridge(newTestConfig().CodeSandbox, Runtime{}).RoundTrip(context.Background(), "secret", BridgeRequest{Operation: "list_sandboxes"})
+	if !errors.As(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(err.Error(), "requires Runtime.Exec") {
+		t.Fatalf("RoundTrip error=%v", err)
 	}
 }
 
@@ -124,6 +137,19 @@ func TestSDKBridgeRedactsTokenFromCommandFailures(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[redacted]") {
 		t.Fatalf("error was not redacted: %v", err)
+	}
+}
+
+func TestSDKBridgeRedactsTokenFromRunnerError(t *testing.T) {
+	setBridgeTestCacheDir(t)
+	secret := "csb-secret-value"
+	cause := errors.New("denied " + secret)
+	runner := &recordingBridgeRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
+		return LocalCommandResult{ExitCode: 1}, cause
+	}}
+	_, err := NewSDKBridge(newTestConfig().CodeSandbox, Runtime{Exec: runner}).RoundTrip(context.Background(), secret, BridgeRequest{Operation: "list_sandboxes"})
+	if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[redacted]") || !errors.Is(err, cause) {
+		t.Fatalf("runner error was not redacted: %v", err)
 	}
 }
 
@@ -523,7 +549,16 @@ func (r *recordingBridgeRunner) Run(ctx context.Context, req LocalCommandRequest
 		return LocalCommandResult{ExitCode: 0}, nil
 	}
 	if r.fn != nil {
-		return r.fn(req)
+		var stdout, stderr bytes.Buffer
+		req.Stdout, req.Stderr = &stdout, &stderr
+		result, err := r.fn(req)
+		if result.Stdout == "" {
+			result.Stdout = stdout.String()
+		}
+		if result.Stderr == "" {
+			result.Stderr = stderr.String()
+		}
+		return result, err
 	}
 	return LocalCommandResult{ExitCode: 0}, nil
 }
@@ -535,10 +570,11 @@ func (actualBridgeRunner) Run(ctx context.Context, req LocalCommandRequest) (Loc
 	cmd.Dir = req.Dir
 	cmd.Env = req.Env
 	cmd.Stdin = req.Stdin
-	cmd.Stdout = req.Stdout
-	cmd.Stderr = req.Stderr
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 	err := cmd.Run()
-	result := LocalCommandResult{}
+	result := LocalCommandResult{Stdout: stdout.String(), Stderr: stderr.String()}
 	if cmd.ProcessState != nil {
 		result.ExitCode = cmd.ProcessState.ExitCode()
 	}

@@ -1,7 +1,6 @@
 package external
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared/procjson"
 )
 
 const externalProviderOutputMaxBytes = 1 << 20
@@ -596,30 +596,17 @@ func (b *leaseBackend) invoke(ctx context.Context, request protocolRequest) (pro
 func (b *leaseBackend) invokeProtocol(ctx context.Context, request protocolRequest) (protocolResponse, error) {
 	request.ProtocolVersion = protocolVersion
 	request.Config = b.cfg.External.Config
-	var stdin bytes.Buffer
-	if err := json.NewEncoder(&stdin).Encode(request); err != nil {
-		return protocolResponse{}, fmt.Errorf("encode external provider request: %w", err)
-	}
-	result, err := b.rt.Exec.Run(ctx, core.LocalCommandRequest{
-		Name:                   strings.TrimSpace(b.cfg.External.Command),
-		Args:                   append([]string(nil), b.cfg.External.Args...),
-		Env:                    externalAdapterEnv(b.cfg, nil),
-		Stdin:                  &stdin,
-		Stderr:                 b.rt.Stderr,
-		MaxCapturedOutputBytes: externalProviderOutputMaxBytes,
-	})
-	if limitErr := validateExternalCommandOutputSize(result); limitErr != nil {
-		return protocolResponse{}, limitErr
-	}
+	command := core.LocalCommandRequest{Name: strings.TrimSpace(b.cfg.External.Command), Args: append([]string(nil), b.cfg.External.Args...), Env: externalAdapterEnv(b.cfg, nil), Stderr: b.rt.Stderr}
+	response, result, err := procjson.Exchange[protocolRequest, protocolResponse](ctx, b.rt.Exec, command, request, procjson.Limits{MaxBytesPerStream: externalProviderOutputMaxBytes})
 	if err != nil {
-		message := strings.TrimSpace(result.Stderr)
-		if message == "" {
-			message = strings.TrimSpace(result.Stdout)
+		failure, _ := err.(*procjson.Failure)
+		if failure != nil && failure.Stage == procjson.StageRun {
+			message := strings.TrimSpace(core.Blank(strings.TrimSpace(result.Stderr), result.Stdout))
+			return protocolResponse{}, core.Exit(result.ExitCode, "external provider command failed: %v: %s", failure.Err, message)
 		}
-		return protocolResponse{}, core.Exit(result.ExitCode, "external provider command failed: %v: %s", err, message)
-	}
-	var response protocolResponse
-	if err := json.Unmarshal([]byte(result.Stdout), &response); err != nil {
+		if failure != nil && failure.Stage == procjson.StageOutputLimit {
+			return protocolResponse{}, core.Exit(5, "external provider %v", failure.Err)
+		}
 		return protocolResponse{}, core.Exit(5, "external provider returned invalid JSON: %v", err)
 	}
 	if message := strings.TrimSpace(response.Error); message != "" {

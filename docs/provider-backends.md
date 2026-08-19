@@ -328,6 +328,13 @@ retryability, identity and ownership validation, side effects, diagnostics,
 and exact error text; the helper does not normalize states, mutate claims,
 detach contexts, call provider actions, or log.
 
+Strict one-request/one-response JSON subprocesses may use
+`internal/providers/shared/procjson`. It owns bounded capture, cancellation
+grace, request encoding, and exact single-document decoding. Keep response
+envelopes, versions, identity checks, redaction, and provider error semantics in
+the adapter. Do not use it for noisy CLI output, streaming or NDJSON protocols,
+or commands with ambiguous side effects.
+
 ## Provider registration
 
 A provider implements `cli.Provider`:

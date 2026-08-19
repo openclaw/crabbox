@@ -493,6 +493,10 @@ Rules:
 - Use `rt.Exec.Run(ctx, core.LocalCommandRequest{...})` for every subprocess.
   Never call `exec.CommandContext` directly. Tests pass a fake `CommandRunner`
   to assert on argv without spawning real processes.
+- Use `shared/procjson` only for a strict, bounded subprocess that accepts one
+  JSON request and returns exactly one JSON response. It is not for noisy CLI
+  output, streaming or NDJSON, or operations whose side effects are ambiguous;
+  adapters still own response validation, redaction, and error classification.
 - Use `rt.Clock.Now()` for timing inside the backend. The default is wall-clock;
   tests can pass a fake clock for deterministic timing assertions.
 - Use `rt.Stdout` and `rt.Stderr` for streaming and warnings. Do not write

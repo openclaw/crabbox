@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared/procjson"
 )
 
 const (
@@ -68,10 +70,6 @@ func (b *SDKBridge) RoundTrip(ctx context.Context, token string, req BridgeReque
 	if b.rt.Exec == nil {
 		return BridgeResponse{}, exit(2, "codesandbox bridge requires Runtime.Exec")
 	}
-	payload, err := json.Marshal(req)
-	if err != nil {
-		return BridgeResponse{}, err
-	}
 	dir, err := bridgeWorkingDir()
 	if err != nil {
 		return BridgeResponse{}, err
@@ -80,32 +78,23 @@ func (b *SDKBridge) RoundTrip(ctx context.Context, token string, req BridgeReque
 	if err := b.ensureBridgeSDK(ctx, dir, spec); err != nil {
 		return BridgeResponse{}, err
 	}
-	ctx, cancel := withBridgeTimeout(ctx, b.cfg, req)
+	timeout := operationTimeout(b.cfg)
+	if commandTimeout := time.Duration(req.Timeout+10) * time.Second; req.Operation == "run_command" && req.Timeout > 0 && commandTimeout > timeout {
+		timeout = commandTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	var stdout, stderr bytes.Buffer
-	result, runErr := b.rt.Exec.Run(ctx, LocalCommandRequest{
-		Name:                   bridgeCommand(b.cfg),
-		Args:                   []string{"--input-type=module", "-e", codeSandboxBridgeScript},
-		Env:                    bridgeEnv(b.cfg, token, spec.ImportSpec),
-		Dir:                    dir,
-		Stdin:                  bytes.NewReader(payload),
-		Stdout:                 &stdout,
-		Stderr:                 &stderr,
-		MaxCapturedOutputBytes: bridgeOutputLimit(req),
-		CancelGracePeriod:      2 * time.Second,
-	})
-	if runErr != nil {
-		return BridgeResponse{}, bridgeCommandError(result.ExitCode, stdout.String(), stderr.String(), token, runErr)
+	limit := codeSandboxBridgeOutputLimit
+	if req.Operation == "run_command" {
+		limit = codeSandboxRunCommandOutputLimit
 	}
-	if result.ExitCode != 0 {
-		return BridgeResponse{}, bridgeCommandError(result.ExitCode, stdout.String(), stderr.String(), token, nil)
-	}
-	data := bytes.TrimSpace(stdout.Bytes())
-	if len(data) == 0 {
-		return BridgeResponse{}, fmt.Errorf("codesandbox bridge returned empty JSON output")
-	}
-	var resp BridgeResponse
-	if err := json.Unmarshal(data, &resp); err != nil {
+	command := LocalCommandRequest{Name: bridgeCommand(b.cfg), Args: []string{"--input-type=module", "-e", codeSandboxBridgeScript}, Env: bridgeEnv(b.cfg, token, spec.ImportSpec), Dir: dir}
+	resp, result, err := procjson.Exchange[BridgeRequest, BridgeResponse](ctx, b.rt.Exec, command, req, procjson.Limits{MaxBytesPerStream: limit, CancelGrace: 2 * time.Second})
+	if err != nil {
+		failure, _ := err.(*procjson.Failure)
+		if failure != nil && failure.Stage == procjson.StageRun {
+			return BridgeResponse{}, bridgeCommandError(result.ExitCode, result.Stdout, result.Stderr, token, failure.RunErr)
+		}
 		return BridgeResponse{}, fmt.Errorf("decode codesandbox bridge JSON: %w", err)
 	}
 	if !resp.OK {
@@ -115,17 +104,6 @@ func (b *SDKBridge) RoundTrip(ctx context.Context, token string, req BridgeReque
 		return BridgeResponse{}, fmt.Errorf("codesandbox bridge %s: %s", blank(resp.Error.Code, "error"), redactToken(resp.Error.Message, token))
 	}
 	return resp, nil
-}
-
-func withBridgeTimeout(ctx context.Context, cfg CodeSandboxConfig, req BridgeRequest) (context.Context, context.CancelFunc) {
-	timeout := operationTimeout(cfg)
-	if req.Operation == "run_command" && req.Timeout > 0 {
-		commandTimeout := time.Duration(req.Timeout+10) * time.Second
-		if commandTimeout > timeout {
-			timeout = commandTimeout
-		}
-	}
-	return context.WithTimeout(ctx, timeout)
 }
 
 func (b *SDKBridge) ensureBridgeSDK(ctx context.Context, dir string, spec bridgeSDKSpec) error {
@@ -161,13 +139,6 @@ func (b *SDKBridge) ensureBridgeSDK(ctx context.Context, dir string, spec bridge
 		return fmt.Errorf("write codesandbox bridge SDK marker: %w", err)
 	}
 	return nil
-}
-
-func bridgeOutputLimit(req BridgeRequest) int {
-	if req.Operation == "run_command" {
-		return codeSandboxRunCommandOutputLimit
-	}
-	return codeSandboxBridgeOutputLimit
 }
 
 func bridgeEnv(cfg CodeSandboxConfig, token, importSpec string) []string {
@@ -324,16 +295,7 @@ func upsertEnv(env []string, key, value string) []string {
 }
 
 func bridgeSetupError(exitCode int, stdout, stderr string, err error) error {
-	message := strings.TrimSpace(stderr)
-	if message == "" {
-		message = strings.TrimSpace(stdout)
-	}
-	if message == "" && err != nil {
-		message = err.Error()
-	}
-	if message == "" {
-		message = "no output"
-	}
+	message := bridgeErrorMessage(stdout, stderr, err)
 	if err != nil {
 		return fmt.Errorf("codesandbox bridge SDK setup failed exit=%d: %s: %w", exitCode, message, err)
 	}
@@ -341,21 +303,27 @@ func bridgeSetupError(exitCode int, stdout, stderr string, err error) error {
 }
 
 func bridgeCommandError(exitCode int, stdout, stderr, token string, err error) error {
-	message := strings.TrimSpace(stderr)
-	if message == "" {
-		message = strings.TrimSpace(stdout)
-	}
-	if message == "" && err != nil {
-		message = err.Error()
-	}
-	if message == "" {
-		message = "no output"
-	}
-	message = redactToken(message, token)
+	message := redactToken(bridgeErrorMessage(stdout, stderr, err), token)
 	if err != nil {
-		return fmt.Errorf("codesandbox bridge failed exit=%d: %s: %w", exitCode, message, err)
+		return fmt.Errorf("codesandbox bridge failed exit=%d: %s: %w", exitCode, message, redactedBridgeError{err: err, token: token})
 	}
 	return fmt.Errorf("codesandbox bridge failed exit=%d: %s", exitCode, message)
+}
+
+type redactedBridgeError struct {
+	err   error
+	token string
+}
+
+func (e redactedBridgeError) Error() string { return redactToken(e.err.Error(), e.token) }
+func (e redactedBridgeError) Unwrap() error { return e.err }
+
+func bridgeErrorMessage(stdout, stderr string, err error) string {
+	fallback := "no output"
+	if err != nil {
+		fallback = err.Error()
+	}
+	return strings.TrimSpace(blank(stderr, blank(stdout, fallback)))
 }
 
 const codeSandboxBridgeScript = `
