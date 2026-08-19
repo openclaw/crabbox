@@ -19,8 +19,11 @@ step. Repeat `--artifact-glob <glob>` to archive matching files from the remote
 workdir after a successful SSH-backed command; profile and preset `artifactGlobs`
 feed the same collector. The local tarball lands under
 `.crabbox/runs/<run-or-lease>/` and is listed in the final run details and in
-the `--timing-json` artifact array. Native Windows and macOS targets reject this
-collector; use Linux or Windows WSL2.
+the `--timing-json` artifact array. The collector supports ordinary SSH-backed
+Linux, macOS, and Windows WSL2 targets. Native Windows remains unsupported, and
+delegated providers still need an advertised bounded-artifact capability. On
+macOS, the remote needs stock `/bin/bash`, `find` with `-print0`, `tar`,
+`base64`, and `/bin/rm`.
 
 Repeat `--require-artifact <glob>` when the run should fail unless a proof file,
 manifest, or report exists after the command exits successfully. Required
@@ -28,6 +31,9 @@ artifacts use the same safe relative glob syntax and target limits as
 `--artifact-glob`; each required glob must resolve to at least one regular file.
 A symlink counts only when its target is a regular file; dangling symlinks and
 symlinks to directories do not satisfy the proof gate or enter artifact archives.
+Directory symlinks are never traversed during matching, including when a
+glob's literal search root contains one. `.git` and `.crabbox` path components
+are excluded at every depth.
 Crabbox checks required artifacts before local `--download` outputs, then
 includes required artifacts in the run artifact tarball. Callers can pair
 `--require-artifact reports/data/manifest.json` with a broader

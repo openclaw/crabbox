@@ -1489,6 +1489,129 @@ func TestRunArtifactCollectScriptSkipsDanglingSymlink(t *testing.T) {
 	}
 }
 
+func TestRunArtifactCollectScriptLeafSymlinkPolicy(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		setup   func(t *testing.T, dir, link string)
+		wantHit bool
+	}{
+		{
+			name: "symlink to regular file",
+			setup: func(t *testing.T, dir, link string) {
+				target := filepath.Join(dir, "target.txt")
+				if err := os.WriteFile(target, []byte("proof\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, link); err != nil {
+					t.Skipf("symlink unavailable: %v", err)
+				}
+			},
+			wantHit: true,
+		},
+		{
+			name: "symlink to directory",
+			setup: func(t *testing.T, dir, link string) {
+				target := filepath.Join(dir, "target-dir")
+				if err := os.Mkdir(target, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, link); err != nil {
+					t.Skipf("symlink unavailable: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(dir, "artifacts"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			tt.setup(t, dir, filepath.Join(dir, "artifacts", "proof.txt"))
+			archivePath := filepath.Join(dir, ".crabbox", "artifacts.tgz")
+			out, err := exec.Command("bash", "-lc", runArtifactCollectScript(dir, ".crabbox/artifacts.tgz", []string{"artifacts/proof.txt"})).CombinedOutput()
+			if err != nil {
+				t.Fatalf("collect script failed: %v\n%s", err, out)
+			}
+			names := tarGzNames(t, archivePath)
+			if got := stringSliceContains(names, "artifacts/proof.txt"); got != tt.wantHit {
+				t.Fatalf("archive names=%#v, matched=%t want %t; output=%s", names, got, tt.wantHit, out)
+			}
+		})
+	}
+}
+
+func TestRunArtifactScriptsDoNotFollowIntermediateDirectorySymlinks(t *testing.T) {
+	for _, glob := range []string{"safe/link/*.txt", "safe/**/*.txt"} {
+		t.Run(glob, func(t *testing.T) {
+			dir := t.TempDir()
+			outside := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(dir, "safe"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(outside, "proof.txt"), []byte("outside\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, filepath.Join(dir, "safe", "link")); err != nil {
+				t.Skipf("symlink unavailable: %v", err)
+			}
+
+			requireOut, requireErr := exec.Command("bash", "-lc", runArtifactRequireScript(dir, []string{glob})).CombinedOutput()
+			var exitErr *exec.ExitError
+			if !errors.As(requireErr, &exitErr) || exitErr.ExitCode() != 8 {
+				t.Fatalf("require error=%v, want exit 8; output=%s", requireErr, requireOut)
+			}
+
+			archivePath := filepath.Join(dir, ".crabbox", "artifacts.tgz")
+			collectOut, collectErr := exec.Command("bash", "-lc", runArtifactCollectScript(dir, ".crabbox/artifacts.tgz", []string{glob})).CombinedOutput()
+			if collectErr != nil {
+				t.Fatalf("collect script failed: %v\n%s", collectErr, collectOut)
+			}
+			if names := tarGzNames(t, archivePath); len(names) != 0 {
+				t.Fatalf("archive followed intermediate symlink for %q: %#v", glob, names)
+			}
+		})
+	}
+}
+
+func TestRunArtifactScriptsExcludeProtectedComponentsAtAnyDepth(t *testing.T) {
+	dir := t.TempDir()
+	for _, path := range []string{
+		filepath.Join("output", ".git"),
+		filepath.Join("output", ".crabbox"),
+		filepath.Join("output", "visible"),
+	} {
+		if err := os.MkdirAll(filepath.Join(dir, path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, path := range []string{
+		filepath.Join("output", ".git", "proof.txt"),
+		filepath.Join("output", ".crabbox", "proof.txt"),
+		filepath.Join("output", "visible", "proof.txt"),
+	} {
+		if err := os.WriteFile(filepath.Join(dir, path), []byte("proof\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	archivePath := filepath.Join(dir, ".crabbox", "artifacts.tgz")
+	if out, err := exec.Command("bash", "-lc", runArtifactCollectScript(dir, ".crabbox/artifacts.tgz", []string{"output/**"})).CombinedOutput(); err != nil {
+		t.Fatalf("collect script failed: %v\n%s", err, out)
+	}
+	names := tarGzNames(t, archivePath)
+	if len(names) != 1 || names[0] != "output/visible/proof.txt" {
+		t.Fatalf("protected paths were not excluded: %#v", names)
+	}
+
+	for _, glob := range []string{"output/.git/*.txt", "output/.crabbox/*.txt"} {
+		out, err := exec.Command("bash", "-lc", runArtifactRequireScript(dir, []string{glob})).CombinedOutput()
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 8 {
+			t.Fatalf("protected require glob %q error=%v, want exit 8; output=%s", glob, err, out)
+		}
+	}
+}
+
 func TestRunArtifactCollectScriptRecursiveGlobIncludesZeroDepthMatches(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".artifacts", "nested"), 0o755); err != nil {
@@ -1568,6 +1691,59 @@ func TestArtifactGlobSearchRootUsesLiteralPrefix(t *testing.T) {
 	}
 }
 
+func TestArtifactScriptGeneratorsNeverExpandUserGlobs(t *testing.T) {
+	glob := "reports/*.json"
+	scripts := []string{
+		runArtifactRequireScript("/work", []string{glob}),
+		runArtifactCollectScript("/work", ".crabbox/artifacts.tgz", []string{glob}),
+		DelegatedRunArtifactScript([]string{glob}, []string{glob}, 16, 1024*1024),
+	}
+	for _, script := range scripts {
+		if strings.Contains(script, "for f in "+glob) {
+			t.Fatalf("generated script directly expands the artifact glob:\n%s", script)
+		}
+		if !strings.Contains(script, `find "$artifact_root"`) || !strings.Contains(script, "-print0") {
+			t.Fatalf("generated script does not use shared find enumeration:\n%s", script)
+		}
+	}
+}
+
+func TestRemoteRunArtifactCommandsUseTargetTools(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		target   SSHTarget
+		wantBash string
+		wantRM   string
+	}{
+		{name: "linux", target: SSHTarget{TargetOS: targetLinux}, wantBash: "bash", wantRM: "rm"},
+		{name: "macos", target: SSHTarget{TargetOS: targetMacOS}, wantBash: "/bin/bash", wantRM: "/bin/rm"},
+		{name: "wsl2", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, wantBash: "bash", wantRM: "rm"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			commands := []string{
+				remoteRequireArtifactGlobsCommand(tt.target, "/work", []string{"reports/proof.json"}),
+				remoteCollectArtifactGlobsCommand(tt.target, "/work", ".crabbox/artifacts.tgz", []string{"reports/**"}),
+			}
+			wantCommands := []string{
+				tt.wantBash + " -lc " + shellQuote(runArtifactRequireScript("/work", []string{"reports/proof.json"})),
+				tt.wantBash + " -lc " + shellQuote(runArtifactCollectScript("/work", ".crabbox/artifacts.tgz", []string{"reports/**"})),
+			}
+			for i, command := range commands {
+				if command != wantCommands[i] {
+					t.Fatalf("command=%q, want %q", command, wantCommands[i])
+				}
+			}
+
+			remove := remoteRemoveRunArtifactCommand(tt.target, "/work", ".crabbox/artifacts.tgz")
+			removeScript := "set -eu\ncd '/work'\n" + tt.wantRM + " -f -- '.crabbox/artifacts.tgz'"
+			wantRemove := tt.wantBash + " -lc " + shellQuote(removeScript)
+			if remove != wantRemove {
+				t.Fatalf("remove command=%q, want %q", remove, wantRemove)
+			}
+		})
+	}
+}
+
 func tarGzNames(t *testing.T, path string) []string {
 	t.Helper()
 	file, err := os.Open(path)
@@ -1605,21 +1781,34 @@ func stringSliceContains(values []string, want string) bool {
 }
 
 func TestValidateRunArtifactGlobTargetRejectsNativeWindows(t *testing.T) {
-	err := validateRunArtifactGlobTarget(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, []string{".artifacts/**"})
-	var exitErr ExitError
-	if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, "native Windows") {
-		t.Fatalf("error=%v, want native Windows artifact rejection", err)
+	target := SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}
+	for _, err := range []error{
+		validateRunArtifactGlobTarget(target, []string{".artifacts/**"}),
+		validateRequiredRunArtifactGlobTarget(target, []string{"reports/proof.json"}),
+	} {
+		var exitErr ExitError
+		if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, "native Windows") {
+			t.Fatalf("error=%v, want native Windows artifact rejection", err)
+		}
 	}
 	if err := validateRunArtifactGlobTarget(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, []string{".artifacts/**"}); err != nil {
 		t.Fatalf("wsl2 artifact glob rejected: %v", err)
 	}
 }
 
-func TestValidateRunArtifactGlobTargetRejectsMacOS(t *testing.T) {
-	err := validateRunArtifactGlobTarget(SSHTarget{TargetOS: targetMacOS}, []string{".artifacts/**"})
-	var exitErr ExitError
-	if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, "macOS") {
-		t.Fatalf("error=%v, want macOS artifact rejection", err)
+func TestValidateRunArtifactGlobTargetAllowsPOSIXTargets(t *testing.T) {
+	targets := []SSHTarget{
+		{TargetOS: targetLinux},
+		{TargetOS: targetMacOS},
+		{TargetOS: targetWindows, WindowsMode: windowsModeWSL2},
+	}
+	for _, target := range targets {
+		if err := validateRunArtifactGlobTarget(target, []string{".artifacts/**"}); err != nil {
+			t.Fatalf("artifact glob rejected for target=%+v: %v", target, err)
+		}
+		if err := validateRequiredRunArtifactGlobTarget(target, []string{"reports/proof.json"}); err != nil {
+			t.Fatalf("required artifact rejected for target=%+v: %v", target, err)
+		}
 	}
 }
 

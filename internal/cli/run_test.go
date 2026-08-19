@@ -1869,22 +1869,6 @@ func TestRunCommandLocalContainerLeaseOutputValidationFailureReleasesFreshLease(
 			want: "was not created with desktop=true",
 		},
 		{
-			name: "target",
-			args: []string{"--artifact-glob", "artifacts/**"},
-			mutateLease: func(lease *LeaseTarget) {
-				lease.SSH.TargetOS = targetMacOS
-			},
-			want: "--artifact-glob is not supported for macOS targets",
-		},
-		{
-			name: "required artifact target",
-			args: []string{"--require-artifact", "reports/data/manifest.json"},
-			mutateLease: func(lease *LeaseTarget) {
-				lease.SSH.TargetOS = targetMacOS
-			},
-			want: "--require-artifact is not supported for macOS targets",
-		},
-		{
 			name: "native Windows profile doctor",
 			args: []string{"--profile", "qa"},
 			configure: func(t *testing.T, dir string) {
@@ -2651,16 +2635,6 @@ func TestRunCommandRejectsTargetOnlyProfileOutputsBeforeLease(t *testing.T) {
 		want   string
 	}{
 		{
-			name: "macos artifacts",
-			args: []string{"--provider", "ssh", "--target", "macos", "--artifact-glob", ".artifacts/**", "--", "true"},
-			want: "--artifact-glob is not supported for macOS targets",
-		},
-		{
-			name: "macos required artifact",
-			args: []string{"--provider", "ssh", "--target", "macos", "--require-artifact", "reports/data/manifest.json", "--", "true"},
-			want: "--require-artifact is not supported for macOS targets",
-		},
-		{
 			name: "native windows doctor",
 			config: `
 profiles:
@@ -2918,15 +2892,12 @@ exit 0
 	}
 }
 
-func TestRunCommandRequireArtifactCollectsRequiredArtifactE2E(t *testing.T) {
-	clearConfigEnv(t)
+func TestRunCommandMacOSMissingRequiredArtifactE2E(t *testing.T) {
 	dir := t.TempDir()
 	isolateRunTestUserDirs(t, dir)
-	t.Chdir(dir)
-
 	sshPath := filepath.Join(dir, "ssh")
 	logPath := filepath.Join(dir, "ssh.log")
-	remoteRoot := filepath.Join(dir, "remote-root")
+	downloadPath := filepath.Join(dir, "manifest.json")
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -2950,62 +2921,201 @@ cmd=""
 for arg do cmd="$arg"; done
 printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
 case "$cmd" in
-  mkdir\ -p*|cd\ *|bash\ -lc*) exec sh -c "$cmd" ;;
+  *"check_artifact_file()"*) printf 'missing required artifact: reports/data/manifest.json\n' >&2; exit 8 ;;
 esac
 exit 0
 `
-	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	installWorkspaceOwnerAwareSSH(t, sshPath, script)
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
 	t.Setenv("CRABBOX_FAKE_SSH_LOG", logPath)
 	t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
-	t.Setenv("CRABBOX_WORK_ROOT", remoteRoot)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+	runEnvProfileTestAcquireLease = func(AcquireRequest) (LeaseTarget, error) {
+		return LeaseTarget{
+			Server:  Server{Provider: "run-env-profile-test"},
+			SSH:     SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: sshPort, TargetOS: targetMacOS},
+			LeaseID: "cbx_env_profile_test",
+		}, nil
+	}
+	t.Cleanup(func() { runEnvProfileTestAcquireLease = nil })
+	releases := 0
+	runEnvProfileTestReleaseHook = func() error {
+		releases++
+		file, openErr := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if openErr != nil {
+			return openErr
+		}
+		_, writeErr := file.WriteString("RELEASE\n")
+		return errors.Join(writeErr, file.Close())
+	}
+	t.Cleanup(func() { runEnvProfileTestReleaseHook = nil })
 
 	var stdout, stderr bytes.Buffer
 	err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
 		"--provider", "run-env-profile-test",
 		"--no-sync",
+		"--stop-after", "always",
 		"--require-artifact", "reports/data/manifest.json",
-		"--artifact-glob", "reports/data/*.txt",
-		"--", "sh", "-c", "mkdir -p reports/data && printf '{}\n' > reports/data/manifest.json && printf 'ok\n' > reports/data/quality.txt && printf 'data run complete\n'",
+		"--download", "reports/data/manifest.json=" + downloadPath,
+		"--", "true",
 	})
-	if err != nil {
-		t.Fatalf("runCommand error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 7 {
+		t.Fatalf("error=%v, want exit 7\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "data run complete") {
-		t.Fatalf("stdout missing command output:\n%s", stdout.String())
+	if releases != 1 {
+		t.Fatalf("release calls=%d, want 1", releases)
 	}
-	for _, want := range []string{
-		"required artifact reports/data/manifest.json matched=1",
-		"artifact kind=artifact-glob",
-	} {
-		if !strings.Contains(stderr.String(), want) {
-			t.Fatalf("stderr missing %q:\n%s", want, stderr.String())
-		}
-	}
-	matches, err := filepath.Glob(filepath.Join(dir, ".crabbox", "runs", "*", "*-artifacts.tgz"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(matches) != 1 {
-		t.Fatalf("artifact tarballs=%#v, want exactly one", matches)
-	}
-	names := tarGzNames(t, matches[0])
-	for _, want := range []string{"reports/data/manifest.json", "reports/data/quality.txt"} {
-		if !stringSliceContains(names, want) {
-			t.Fatalf("archive missing %q: %#v", want, names)
-		}
+	if _, err := os.Stat(downloadPath); !os.IsNotExist(err) {
+		t.Fatalf("download ran before required artifact failure, stat err=%v", err)
 	}
 	logData, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"check_artifact_file()", "tar -czf", "base64 <"} {
-		if !strings.Contains(string(logData), want) {
-			t.Fatalf("ssh log missing %q:\n%s", want, logData)
-		}
+	logText := string(logData)
+	requireIndex := strings.Index(logText, "check_artifact_file()")
+	releaseIndex := strings.Index(logText, "RELEASE")
+	if requireIndex < 0 || releaseIndex <= requireIndex {
+		t.Fatalf("required check and release were not ordered correctly:\n%s", logText)
+	}
+	if strings.Contains(logText, "test -f 'reports/data/manifest.json' && base64 < 'reports/data/manifest.json'") || strings.Contains(logText, "-artifacts.tgz") {
+		t.Fatalf("download or artifact collection ran after missing required evidence:\n%s", logText)
+	}
+}
+
+func TestRunCommandSSHArtifactE2E(t *testing.T) {
+	for _, targetOS := range []string{targetLinux, targetMacOS} {
+		t.Run(targetOS, func(t *testing.T) {
+			clearConfigEnv(t)
+			dir := t.TempDir()
+			isolateRunTestUserDirs(t, dir)
+			t.Chdir(dir)
+
+			sshPath := filepath.Join(dir, "ssh")
+			logPath := filepath.Join(dir, "ssh.log")
+			remoteRoot := filepath.Join(dir, "remote-root")
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			go func() {
+				for {
+					conn, err := listener.Accept()
+					if err != nil {
+						return
+					}
+					_ = conn.Close()
+				}
+			}()
+			_, sshPort, err := net.SplitHostPort(listener.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			script := `#!/bin/sh
+cmd=""
+for arg do cmd="$arg"; done
+printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
+case "$cmd" in
+  mkdir\ -p*|cd\ *|bash\ -lc*|/bin/bash\ -lc*) exec sh -c "$cmd" ;;
+esac
+exit 0
+`
+			if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+			t.Setenv("CRABBOX_FAKE_SSH_LOG", logPath)
+			t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
+			t.Setenv("CRABBOX_WORK_ROOT", remoteRoot)
+			runEnvProfileTestAcquireLease = func(AcquireRequest) (LeaseTarget, error) {
+				return LeaseTarget{
+					Server:  Server{Provider: "run-env-profile-test"},
+					SSH:     SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: sshPort, TargetOS: targetOS},
+					LeaseID: "cbx_env_profile_test",
+				}, nil
+			}
+			t.Cleanup(func() { runEnvProfileTestAcquireLease = nil })
+			releases := 0
+			runEnvProfileTestReleaseHook = func() error {
+				releases++
+				remoteArchives, globErr := filepath.Glob(filepath.Join(remoteRoot, "cbx_env_profile_test", "crabbox", ".crabbox", "*-artifacts.tgz"))
+				if globErr != nil {
+					return globErr
+				}
+				if len(remoteArchives) != 0 {
+					return fmt.Errorf("remote archives still present at release: %v", remoteArchives)
+				}
+				file, openErr := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+				if openErr != nil {
+					return openErr
+				}
+				_, writeErr := file.WriteString("RELEASE\n")
+				return errors.Join(writeErr, file.Close())
+			}
+			t.Cleanup(func() { runEnvProfileTestReleaseHook = nil })
+
+			var stdout, stderr bytes.Buffer
+			err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+				"--provider", "run-env-profile-test",
+				"--no-sync",
+				"--stop-after", "always",
+				"--require-artifact", "reports/data/manifest.json",
+				"--artifact-glob", "reports/data/*.txt",
+				"--", "sh", "-c", "mkdir -p reports/data && printf '{}\n' > reports/data/manifest.json && printf 'ok\n' > reports/data/quality.txt && printf 'data run complete\n'",
+			})
+			if err != nil {
+				t.Fatalf("runCommand error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+			}
+			if releases != 1 {
+				t.Fatalf("release calls=%d, want 1", releases)
+			}
+			if !strings.Contains(stdout.String(), "data run complete") {
+				t.Fatalf("stdout missing command output:\n%s", stdout.String())
+			}
+			for _, want := range []string{"required artifact reports/data/manifest.json matched=1", "artifact kind=artifact-glob"} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("stderr missing %q:\n%s", want, stderr.String())
+				}
+			}
+			matches, err := filepath.Glob(filepath.Join(dir, ".crabbox", "runs", "*", "*-artifacts.tgz"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(matches) != 1 {
+				t.Fatalf("artifact tarballs=%#v, want exactly one", matches)
+			}
+			names := tarGzNames(t, matches[0])
+			for _, want := range []string{"reports/data/manifest.json", "reports/data/quality.txt"} {
+				if !stringSliceContains(names, want) {
+					t.Fatalf("archive missing %q: %#v", want, names)
+				}
+			}
+			if info, err := os.Stat(filepath.Dir(matches[0])); err != nil || info.Mode().Perm() != 0o700 {
+				t.Fatalf("artifact directory mode info=%v err=%v, want 0700", info, err)
+			}
+			if info, err := os.Stat(matches[0]); err != nil || info.Mode().Perm() != 0o600 {
+				t.Fatalf("artifact file mode info=%v err=%v, want 0600", info, err)
+			}
+			logData, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			logText := string(logData)
+			previous := -1
+			for _, want := range []string{"check_artifact_file()", "tar -czf", "base64 <", "rm -f --", "RELEASE"} {
+				index := strings.Index(logText, want)
+				if index < 0 {
+					t.Fatalf("ssh log missing %q:\n%s", want, logText)
+				}
+				if index <= previous {
+					t.Fatalf("ssh log has %q out of order:\n%s", want, logText)
+				}
+				previous = index
+			}
+		})
 	}
 }
 
@@ -3071,6 +3181,30 @@ func TestDelegatedRunArtifactScriptRejectsDanglingRequiredArtifact(t *testing.T)
 		t.Fatalf("error=%v, want exit 8; output=%s", err, out)
 	}
 	if !strings.Contains(string(out), "missing required artifact: reports/data/**/*.json") {
+		t.Fatalf("missing required artifact output:\n%s", out)
+	}
+}
+
+func TestDelegatedRunArtifactScriptRejectsIntermediateSymlinkRoot(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	t.Chdir(dir)
+	if err := os.MkdirAll("safe", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "proof.txt"), []byte("outside\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join("safe", "link")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	out, err := exec.Command("bash", "-c", DelegatedRunArtifactScript([]string{"safe/link/*.txt"}, nil, 16, 1024*1024)).CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 8 {
+		t.Fatalf("error=%v, want exit 8; output=%s", err, out)
+	}
+	if !strings.Contains(string(out), "missing required artifact: safe/link/*.txt") {
 		t.Fatalf("missing required artifact output:\n%s", out)
 	}
 }

@@ -480,8 +480,12 @@ successful SSH-backed run. Globs resolve relative to the remote workdir and are
 stored locally under `.crabbox/runs/<run-or-lease>/` as a tarball. Profile and
 preset `artifactGlobs` are collected the same way. Delegated providers accept
 artifact globs only when their adapter advertises bounded run artifact
-retrieval; otherwise they reject the flag. Native Windows and macOS targets
-reject artifact globs; use Linux or Windows WSL2.
+retrieval; otherwise they reject the flag. Ordinary SSH-backed Linux, macOS,
+and Windows WSL2 targets support artifact globs; native Windows still rejects
+them. A macOS target needs stock `/bin/bash`, `find` with `-print0`, `tar`,
+`base64`, and `/bin/rm`. Crabbox does not traverse directory symlinks while
+matching. A matched leaf symlink is accepted only when it points to a regular
+file.
 
 Use repeatable `--require-artifact <glob>` when a successful command must emit a
 proof file, manifest, report, or other evidence artifact. Required artifact globs

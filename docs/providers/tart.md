@@ -81,6 +81,22 @@ and process metadata.
 7. For `--desktop` leases, `tart exec` turns on the guest's built-in macOS Screen Sharing (native VNC on port 5900). No VNC password is provisioned — authentication uses the guest account's own credentials.
 8. `tart stop` + `tart delete` on release.
 
+## Run artifacts
+
+Tart uses the ordinary SSH artifact collector, so `crabbox run` supports both
+`--artifact-glob` and `--require-artifact` on its macOS guests. Required
+evidence is checked after a successful command and before downloads,
+collection, or `--stop-after always` teardown; required matches are included
+in the downloaded artifact archive. Task-created remote archives are removed
+after retrieval.
+
+The guest needs stock `/bin/bash`, `find` with `-print0`, `tar`, `base64`, and
+`/bin/rm`. Matching never follows directory symlinks and excludes `.git` and
+`.crabbox` components. A matched leaf symlink is accepted only when it resolves
+to a regular file. These flags remain unsupported on native Windows, and
+delegated-run providers still require their advertised bounded-artifact
+capability.
+
 ## Desktop / VNC
 
 Lease with `--desktop` to get a visible macOS session:
