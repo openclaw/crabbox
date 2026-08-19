@@ -135,6 +135,33 @@ type DoctorBackend interface {
 	Doctor(ctx context.Context, req DoctorRequest) (DoctorResult, error)
 }
 
+// ProviderSizeCatalogBackend exposes a provider's live, provider-owned machine
+// catalog without teaching core about provider-specific size slugs or regions.
+type ProviderSizeCatalogBackend interface {
+	Backend
+	SizeCatalog(ctx context.Context, refresh bool) ([]ProviderSize, error)
+}
+
+type ProviderSize struct {
+	Name                string            `json:"name"`
+	VCPU                int               `json:"vcpu"`
+	RAMGB               int               `json:"ramGb"`
+	DiskGB              int               `json:"diskGb"`
+	GPU                 *ProviderSizeGPU  `json:"gpu,omitempty"`
+	Regions             []string          `json:"regions"`
+	PricePerHourMicro   int64             `json:"pricePerHourMicro"`
+	TransferGiBPerMonth int64             `json:"transferGiBPerMonth,omitempty"`
+	EstimatedSnapshotGB int               `json:"estimatedSnapshotGb,omitempty"`
+	DefaultImage        string            `json:"defaultImage,omitempty"`
+	ProviderMetadata    map[string]string `json:"providerMetadata,omitempty"`
+}
+
+type ProviderSizeGPU struct {
+	Label         string `json:"label"`
+	VRAMGB        int    `json:"vramGb"`
+	ScratchDiskGB int    `json:"scratchDiskGb,omitempty"`
+}
+
 type SSHLoginBackend interface {
 	Backend
 	Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error)

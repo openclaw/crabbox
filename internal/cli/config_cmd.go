@@ -603,6 +603,19 @@ func configShowView(cfg Config) map[string]any {
 			"disk":          cfg.Multipass.Disk,
 			"launchTimeout": cfg.Multipass.LaunchTimeout.String(),
 		},
+		"machine0": map[string]any{
+			"cliPath":       cfg.Machine0.CLIPath,
+			"image":         cfg.Machine0.Image,
+			"imageVersion":  cfg.Machine0.ImageVersion,
+			"desktopImage":  cfg.Machine0.DesktopImage,
+			"size":          cfg.Machine0.Size,
+			"region":        cfg.Machine0.Region,
+			"key":           cfg.Machine0.Key,
+			"workRoot":      machine0ConfigWorkRoot(cfg.Machine0.WorkRoot),
+			"releasePolicy": cfg.Machine0.ReleasePolicy,
+			"createTimeout": cfg.Machine0.CreateTimeout.String(),
+			"pollInterval":  cfg.Machine0.PollInterval.String(),
+		},
 		"tart": map[string]any{
 			"image":    cfg.Tart.Image,
 			"user":     cfg.Tart.User,
@@ -799,6 +812,7 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "mxc cli=%s version=%s containment=%s network=%s readonly_paths=%d readwrite_paths=%d allowed_hosts=%d blocked_hosts=%d allow_dacl_mutation=%t allow_windows_ui=%t experimental=%t\n", cfg.MXC.CLIPath, cfg.MXC.Version, cfg.MXC.Containment, cfg.MXC.Network, len(cfg.MXC.ReadOnlyPaths), len(cfg.MXC.ReadWritePaths), len(cfg.MXC.AllowedHosts), len(cfg.MXC.BlockedHosts), cfg.MXC.AllowDACLMutation, cfg.MXC.AllowWindowsUI, cfg.MXC.Experimental)
 	fmt.Fprintf(w, "docker_sandbox cli=%s agent=%s template=%s cpus=%g memory=%s clone=%t workdir=%s extra_workspaces=%s mcp=%s kit=%s\n", cfg.DockerSandbox.CLIPath, cfg.DockerSandbox.Agent, blank(cfg.DockerSandbox.Template, "-"), cfg.DockerSandbox.CPUs, blank(cfg.DockerSandbox.Memory, "-"), cfg.DockerSandbox.Clone, blank(cfg.DockerSandbox.Workdir, "-"), blank(strings.Join(cfg.DockerSandbox.ExtraWorkspaces, ","), "-"), blank(strings.Join(cfg.DockerSandbox.MCP, ","), "-"), blank(strings.Join(cfg.DockerSandbox.Kit, ","), "-"))
 	fmt.Fprintf(w, "multipass cli=%s image=%s user=%s work_root=%s cpus=%d memory=%s disk=%s launch_timeout=%s\n", cfg.Multipass.CLIPath, cfg.Multipass.Image, cfg.Multipass.User, cfg.Multipass.WorkRoot, cfg.Multipass.CPUs, blank(cfg.Multipass.Memory, "-"), blank(cfg.Multipass.Disk, "-"), cfg.Multipass.LaunchTimeout)
+	fmt.Fprintf(w, "machine0 cli=%s image=%s image_version=%d desktop_image=%s size=%s region=%s key=%s work_root=%s release_policy=%s create_timeout=%s poll_interval=%s auth=cli\n", cfg.Machine0.CLIPath, cfg.Machine0.Image, cfg.Machine0.ImageVersion, blank(cfg.Machine0.DesktopImage, "-"), cfg.Machine0.Size, cfg.Machine0.Region, blank(cfg.Machine0.Key, "default"), machine0ConfigWorkRoot(cfg.Machine0.WorkRoot), cfg.Machine0.ReleasePolicy, cfg.Machine0.CreateTimeout, cfg.Machine0.PollInterval)
 	fmt.Fprintf(w, "tart image=%s user=%s work_root=%s cpus=%d memory=%d disk=%d\n", cfg.Tart.Image, cfg.Tart.User, cfg.Tart.WorkRoot, cfg.Tart.CPUs, cfg.Tart.Memory, cfg.Tart.Disk)
 	fmt.Fprintf(w, "lume cli=%s base=%s storage=%s user=%s work_root=%s\n", cfg.Lume.CLIPath, cfg.Lume.Base, blank(cfg.Lume.Storage, "default"), cfg.Lume.User, cfg.Lume.WorkRoot)
 	fmt.Fprintf(w, "cloudflare api_url=%s workdir=%s auth=%s\n", blank(redactedConfigURL(cfg.Cloudflare.APIURL), "-"), cfg.Cloudflare.Workdir, tokenState(cfg.Cloudflare.Token))
@@ -1208,6 +1222,13 @@ func accessAuthState(access AccessConfig) string {
 		return "incomplete"
 	}
 	return "missing"
+}
+
+func machine0ConfigWorkRoot(value string) string {
+	if value == "" {
+		return "<dynamic:/home/<resolved-ssh-user>/crabbox>"
+	}
+	return value
 }
 
 func blank(value, fallback string) string {

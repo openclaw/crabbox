@@ -1,0 +1,978 @@
+package machine0
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"hash/fnv"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
+)
+
+type backend struct {
+	spec                     ProviderSpec
+	cfg                      Config
+	rt                       Runtime
+	api                      machine0API
+	sleep                    func(context.Context, time.Duration) error
+	waitSSH                  func(context.Context, *SSHTarget, time.Duration) error
+	prepareNativeImageSource func(context.Context, SSHTarget) error
+}
+
+type machine0PrepareOptions struct {
+	Check          bool
+	ResetHostTrust bool
+}
+
+func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
+	applyDefaults(&cfg)
+	b := &backend{spec: spec, cfg: cfg, rt: rt}
+	b.api = &client{cfg: cfg.Machine0, rt: rt, sleep: sleepContext}
+	b.sleep = sleepContext
+	b.waitSSH = func(ctx context.Context, target *SSHTarget, timeout time.Duration) error {
+		return waitForSSHReady(ctx, target, rt.Stderr, "machine0", timeout)
+	}
+	b.prepareNativeImageSource = core.PrepareNativeImageSource
+	return b
+}
+
+func applyDefaults(cfg *Config) {
+	base := core.BaseConfig().Machine0
+	cfg.Provider = providerName
+	if cfg.TargetOS == "" {
+		cfg.TargetOS = targetLinux
+	}
+	cfg.WindowsMode = ""
+	cfg.SSHPort = sshPort
+	cfg.SSHFallbackPorts = nil
+	if strings.TrimSpace(cfg.Machine0.CLIPath) == "" {
+		cfg.Machine0.CLIPath = base.CLIPath
+	}
+	if strings.TrimSpace(cfg.Machine0.Image) == "" {
+		cfg.Machine0.Image = base.Image
+	}
+	if strings.TrimSpace(cfg.Machine0.Size) == "" {
+		cfg.Machine0.Size = base.Size
+	}
+	if strings.TrimSpace(cfg.Machine0.Region) == "" {
+		cfg.Machine0.Region = base.Region
+	}
+	if strings.TrimSpace(cfg.Machine0.WorkRoot) == "" {
+		cfg.Machine0.WorkRoot = base.WorkRoot
+	}
+	if strings.TrimSpace(cfg.Machine0.ReleasePolicy) == "" {
+		cfg.Machine0.ReleasePolicy = base.ReleasePolicy
+	}
+	if cfg.Machine0.CreateTimeout <= 0 {
+		cfg.Machine0.CreateTimeout = base.CreateTimeout
+	}
+	if cfg.Machine0.PollInterval <= 0 {
+		cfg.Machine0.PollInterval = base.PollInterval
+	}
+	cfg.WorkRoot = cfg.Machine0.WorkRoot
+	cfg.ServerType = cfg.Machine0.Size
+}
+
+func (b *backend) Spec() ProviderSpec { return b.spec }
+
+func (b *backend) now() time.Time {
+	if b.rt.Clock != nil {
+		return b.rt.Clock.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (b *backend) configForRun() Config {
+	cfg := b.cfg
+	applyDefaults(&cfg)
+	return cfg
+}
+
+func effectiveMachine0Config(cfg Config, item machine) Config {
+	user := machine0SSHUser(item)
+	workRoot := cfg.Machine0.WorkRoot
+	if strings.TrimSpace(workRoot) == "" {
+		workRoot = "/home/" + user + "/crabbox"
+	}
+	cfg.SSHUser = user
+	cfg.WorkRoot = workRoot
+	cfg.Machine0.WorkRoot = workRoot
+	return cfg
+}
+
+func machine0SSHUser(item machine) string {
+	if user := strings.TrimSpace(item.DefaultSSHUsername); user != "" {
+		return user
+	}
+	if strings.EqualFold(strings.TrimSpace(item.Distribution), "nixos") {
+		return "nix"
+	}
+	return "ubuntu"
+}
+
+func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
+	cfg := b.configForRun()
+	if err := b.validateCatalogSelection(ctx, cfg.Machine0.Size, cfg.Machine0.Region); err != nil {
+		return LeaseTarget{}, err
+	}
+	machines, err := b.api.List(ctx)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	claims, err := machine0Claims()
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	servers := make([]Server, 0, len(machines))
+	for _, item := range machines {
+		servers = append(servers, b.serverFromMachine(item, claims[item.ID], cfg))
+	}
+	leaseID := newLeaseID()
+	slug, err := allocateDirectLeaseSlug(leaseID, req.RequestedSlug, servers)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	name := machine0MachineName(leaseID, slug)
+	image := cfg.Machine0.Image
+	if req.Options.Desktop && strings.TrimSpace(cfg.Machine0.DesktopImage) != "" {
+		image = cfg.Machine0.DesktopImage
+	}
+	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s name=%s size=%s region=%s image=%s keep=%v\n", providerName, leaseID, slug, name, cfg.Machine0.Size, cfg.Machine0.Region, image, req.Keep)
+	if err := b.api.Create(ctx, createMachineRequest{Name: name, Size: cfg.Machine0.Size, Region: cfg.Machine0.Region, Image: image, ImageVersion: cfg.Machine0.ImageVersion, Key: cfg.Machine0.Key}); err != nil {
+		return LeaseTarget{}, err
+	}
+	rollback := func(cause error) error {
+		if req.Keep {
+			return cause
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if cleanupErr := b.api.Remove(cleanupCtx, name); cleanupErr != nil {
+			return errors.Join(cause, fmt.Errorf("machine0 rollback failed for %s: %w", name, cleanupErr))
+		}
+		return cause
+	}
+	item, err := b.waitForRunning(ctx, name, cfg.Machine0.CreateTimeout)
+	if err != nil {
+		return LeaseTarget{}, rollback(err)
+	}
+	if item.Name != name {
+		return LeaseTarget{}, rollback(exit(5, "machine0 create returned mismatched machine name: expected %s, found %s", name, item.Name))
+	}
+	cfg = effectiveMachine0Config(cfg, item)
+	claim := LeaseClaim{LeaseID: leaseID, Slug: slug, Provider: providerName, ProviderScope: machineScope(item.ID)}
+	server := b.serverFromMachine(item, claim, cfg)
+	server.Labels = machineLabels(cfg, item, leaseID, slug, req.Keep, b.now())
+	lease, err := b.prepareLease(ctx, item, server, leaseID, true)
+	if err != nil {
+		return LeaseTarget{}, rollback(err)
+	}
+	if req.OnAcquired != nil {
+		if err := req.OnAcquired(lease); err != nil {
+			return LeaseTarget{}, rollback(err)
+		}
+	}
+	if err := claimLease(leaseID, slug, cfg, req.Repo.Root, req.Reclaim, lease.Server, lease.SSH); err != nil {
+		return LeaseTarget{}, rollback(err)
+	}
+	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s machine=%s resource=%s state=ready\n", leaseID, item.Name, item.ID)
+	return lease, nil
+}
+
+func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
+	baseCfg := b.configForRun()
+	claim, claimed, err := resolveClaim(req.ID)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	lookup := strings.TrimSpace(req.ID)
+	if claimed {
+		lookup = firstNonBlank(claim.Labels["machine0_name"], claim.CloudID, lookup)
+	}
+	item, err := b.api.Get(ctx, lookup)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	cfg := effectiveMachine0Config(baseCfg, item)
+	if claimed && claim.CloudID != "" && claim.CloudID != item.ID {
+		return LeaseTarget{}, exit(4, "machine0 lease=%s resource identity changed: expected %s, found %s", claim.LeaseID, claim.CloudID, item.ID)
+	}
+	if !claimed && !req.Reclaim && !req.ReleaseOnly && !req.StatusOnly {
+		return LeaseTarget{}, exit(4, "machine0 machine %q has no Crabbox lease claim; reuse it with explicit --reclaim", item.Name)
+	}
+	leaseID := claim.LeaseID
+	slug := claim.Slug
+	if !claimed && req.Reclaim {
+		if req.Repo.Root == "" {
+			return LeaseTarget{}, exit(2, "machine0 --reclaim requires repository context")
+		}
+		leaseID = newLeaseID()
+		slug = core.NormalizeLeaseSlug(item.Name)
+		if slug == "" {
+			slug = core.NewLeaseSlug(leaseID)
+		}
+		claim = LeaseClaim{LeaseID: leaseID, Slug: slug, Provider: providerName, ProviderScope: machineScope(item.ID)}
+	}
+	server := b.serverFromMachine(item, claim, cfg)
+	if req.ReleaseOnly || (req.StatusOnly && !req.ReadyProbe) {
+		return LeaseTarget{Server: server, LeaseID: leaseID}, nil
+	}
+	resetHostTrust := !machineRunning(item.Status)
+	if resetHostTrust {
+		item, err = b.waitForResolveRunning(ctx, item, cfg.Machine0.CreateTimeout)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+		cfg = effectiveMachine0Config(baseCfg, item)
+		server = b.serverFromMachine(item, claim, cfg)
+	}
+	lease, err := b.prepareLeaseWithOptions(ctx, item, server, leaseID, machine0PrepareOptions{Check: req.Prepare || req.ReadyProbe, ResetHostTrust: resetHostTrust})
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	if !claimed && req.Reclaim {
+		lease.Server.Labels = machineLabels(cfg, item, leaseID, slug, true, b.now())
+		if err := claimLease(leaseID, slug, cfg, req.Repo.Root, true, lease.Server, lease.SSH); err != nil {
+			return LeaseTarget{}, err
+		}
+	} else if claimed {
+		if _, err := updateClaim(leaseID, claim, lease.Server, lease.SSH); err != nil {
+			return LeaseTarget{}, err
+		}
+	}
+	return lease, nil
+}
+
+func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
+	cfg := b.configForRun()
+	machines, err := b.api.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	claims, err := machine0Claims()
+	if err != nil {
+		return nil, err
+	}
+	views := make([]LeaseView, 0, len(machines))
+	for _, item := range machines {
+		claim := claims[item.ID]
+		if claim.LeaseID == "" && !req.All {
+			continue
+		}
+		views = append(views, b.serverFromMachine(item, claim, effectiveMachine0Config(cfg, item)))
+	}
+	return views, nil
+}
+
+func (b *backend) Touch(_ context.Context, req TouchRequest) (Server, error) {
+	server := req.Lease.Server
+	if server.Labels == nil {
+		server.Labels = map[string]string{}
+	}
+	original := server.Labels
+	server.Labels = touchDirectLeaseLabels(original, b.configForRun(), req.State, b.now())
+	for _, key := range machineLabelKeys {
+		if value := original[key]; value != "" {
+			server.Labels[key] = value
+		}
+	}
+	return server, nil
+}
+
+func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+	if err := core.ValidateLeaseTargetProviderIdentity(req.Lease, req.ExpectedProviderIdentity); err != nil {
+		return err
+	}
+	claim, item, err := b.releaseTarget(ctx, req.Lease)
+	if err != nil {
+		return err
+	}
+	if normalizeReleasePolicy(b.configForRun().Machine0.ReleasePolicy) == "suspend" {
+		return b.suspendClaimedMachine(ctx, claim, item)
+	}
+	return removeClaimAfter(claim.LeaseID, claim, func() error { return b.api.Remove(ctx, item.Name) })
+}
+
+func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
+	cfg := b.configForRun()
+	machines, err := b.api.List(ctx)
+	if err != nil {
+		return err
+	}
+	claims, err := machine0Claims()
+	if err != nil {
+		return err
+	}
+	liveClaims := map[string]bool{}
+	removed := 0
+	for _, item := range machines {
+		claim := claims[item.ID]
+		if claim.LeaseID != "" {
+			liveClaims[claim.LeaseID] = true
+		}
+		if err := validateMachineClaimOwnership(claim, item); err != nil {
+			fmt.Fprintf(b.rt.Stderr, "skip machine name=%s reason=ownership: %v\n", item.Name, err)
+			continue
+		}
+		server := b.serverFromMachine(item, claim, cfg)
+		should, reason := shouldCleanupMachine0(server, claim, claim.LeaseID != "", b.now())
+		if !should {
+			fmt.Fprintf(b.rt.Stderr, "skip machine name=%s reason=%s\n", item.Name, reason)
+			continue
+		}
+		actionName := "remove"
+		if normalizeReleasePolicy(cfg.Machine0.ReleasePolicy) == "suspend" {
+			actionName = "suspend"
+		}
+		if req.DryRun {
+			fmt.Fprintf(b.rt.Stdout, "would %s machine name=%s lease=%s reason=%s\n", actionName, item.Name, claim.LeaseID, reason)
+			continue
+		}
+		fmt.Fprintf(b.rt.Stdout, "%s machine name=%s lease=%s reason=%s\n", actionName, item.Name, claim.LeaseID, reason)
+		if normalizeReleasePolicy(cfg.Machine0.ReleasePolicy) == "suspend" {
+			if err := b.suspendClaimedMachine(ctx, claim, item); err != nil {
+				return err
+			}
+		} else if err := removeClaimAfter(claim.LeaseID, claim, func() error { return b.api.Remove(ctx, item.Name) }); err != nil {
+			return err
+		}
+		removed++
+	}
+	claimsRemoved := 0
+	for _, claim := range claims {
+		if claim.LeaseID == "" || liveClaims[claim.LeaseID] {
+			continue
+		}
+		if claim.CloudID == "" || claim.ProviderScope != machineScope(claim.CloudID) {
+			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s reason=ownership: incomplete Machine0 identity\n", claim.LeaseID)
+			continue
+		}
+		if req.DryRun {
+			fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s reason=missing machine\n", claim.LeaseID)
+			continue
+		}
+		if err := removeClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+			return err
+		}
+		claimsRemoved++
+	}
+	if !req.DryRun {
+		fmt.Fprintf(b.rt.Stdout, "%s cleanup removed=%d claims_removed=%d checked=%d\n", providerName, removed, claimsRemoved, len(machines))
+	}
+	return nil
+}
+
+func (b *backend) RetainLeaseClaimAfterRelease(LeaseTarget) bool {
+	return normalizeReleasePolicy(b.configForRun().Machine0.ReleasePolicy) == "suspend"
+}
+
+func (b *backend) ReleaseLeaseMessage(lease LeaseTarget) string {
+	action := normalizeReleasePolicy(b.configForRun().Machine0.ReleasePolicy)
+	return fmt.Sprintf("released lease=%s machine=%s action=%s", lease.LeaseID, blank(lease.Server.Name, "-"), action)
+}
+
+func (b *backend) Pause(ctx context.Context, req PauseRequest) error {
+	claim, item, err := b.releaseTarget(ctx, LeaseTarget{LeaseID: req.ID})
+	if err != nil {
+		return err
+	}
+	return b.suspendClaimedMachine(ctx, claim, item)
+}
+
+func (b *backend) Resume(ctx context.Context, req ResumeRequest) error {
+	claim, item, err := b.releaseTarget(ctx, LeaseTarget{LeaseID: req.ID})
+	if err != nil {
+		return err
+	}
+	resetHostTrust := !machineRunning(item.Status)
+	if resetHostTrust {
+		if err := withClaimUnchanged(claim.LeaseID, claim, func() error { return b.api.Start(ctx, item.Name) }); err != nil {
+			return err
+		}
+		item, err = b.waitForRunningAfterStart(ctx, item.Name, b.configForRun().Machine0.CreateTimeout)
+		if err != nil {
+			return err
+		}
+	}
+	server := b.serverFromMachine(item, claim, b.configForRun())
+	lease, err := b.prepareLeaseWithOptions(ctx, item, server, claim.LeaseID, machine0PrepareOptions{Check: true, ResetHostTrust: resetHostTrust})
+	if err != nil {
+		return err
+	}
+	_, err = updateClaim(claim.LeaseID, claim, lease.Server, lease.SSH)
+	return err
+}
+
+func (b *backend) Doctor(ctx context.Context, req DoctorRequest) (DoctorResult, error) {
+	version, err := b.api.Version(ctx)
+	if err != nil {
+		return DoctorResult{}, err
+	}
+	sizes, err := b.api.Sizes(ctx)
+	if err != nil {
+		return DoctorResult{}, err
+	}
+	machines, err := b.api.List(ctx)
+	if err != nil {
+		return DoctorResult{}, err
+	}
+	probe := "unchecked"
+	if req.ProbeSSH {
+		probe = "requires_running_lease"
+	}
+	return DoctorResult{Provider: providerName, Message: fmt.Sprintf("cli=ready auth=ready control_plane=ready inventory=ready mutation=false leases=%d sizes=%d runtime=%s version=%s", len(machines), len(sizes), probe, firstLine(version))}, nil
+}
+
+func (b *backend) SizeCatalog(ctx context.Context, _ bool) ([]core.ProviderSize, error) {
+	sizes, err := b.api.Sizes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]core.ProviderSize, 0, len(sizes))
+	for _, size := range sizes {
+		entry := core.ProviderSize{Name: size.Size, VCPU: size.VCPU, RAMGB: size.RAMGB, DiskGB: size.DiskGB, Regions: append([]string(nil), size.Regions...), PricePerHourMicro: size.PricePerHourMicro, TransferGiBPerMonth: size.TransferGiBPerMonth, EstimatedSnapshotGB: size.EstimatedSnapshotGB, DefaultImage: size.DefaultImage}
+		if size.GPU != nil {
+			entry.GPU = &core.ProviderSizeGPU{Label: size.GPU.Label, VRAMGB: size.GPU.VRAMGB, ScratchDiskGB: size.GPU.ScratchDiskGB}
+		}
+		if len(size.ProviderMetadata) > 0 {
+			entry.ProviderMetadata = map[string]string{}
+			for key, value := range size.ProviderMetadata {
+				entry.ProviderMetadata[key] = fmt.Sprint(value)
+			}
+		}
+		out = append(out, entry)
+	}
+	return out, nil
+}
+
+func (b *backend) validateCatalogSelection(ctx context.Context, sizeName, region string) error {
+	sizes, err := b.api.Sizes(ctx)
+	if err != nil {
+		return err
+	}
+	for _, size := range sizes {
+		if size.Size != sizeName {
+			continue
+		}
+		for _, available := range size.Regions {
+			if available == region {
+				return nil
+			}
+		}
+		return exit(2, "machine0 size %q is not currently available in region %q; available regions: %s", sizeName, region, blank(strings.Join(size.Regions, ","), "none"))
+	}
+	available := make([]string, 0, len(sizes))
+	for _, size := range sizes {
+		available = append(available, size.Size)
+	}
+	return exit(2, "machine0 size %q is not in the live catalog; available: %s", sizeName, strings.Join(available, ","))
+}
+
+func (b *backend) waitForRunning(ctx context.Context, name string, timeout time.Duration) (machine, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var last machine
+	for {
+		item, err := b.api.Get(waitCtx, name)
+		if err != nil {
+			return last, err
+		}
+		last = item
+		if machineRunning(item.Status) {
+			if strings.TrimSpace(item.IP) == "" {
+				return last, exit(5, "machine0 machine %s is RUNNING without an IP", item.Name)
+			}
+			return item, nil
+		}
+		if machineTerminal(item.Status) {
+			return item, terminalMachineError(item)
+		}
+		if machineStopped(item.Status) {
+			return item, exit(5, "machine0 machine %s reached stable state %s while waiting for creation", item.Name, item.Status)
+		}
+		if !machineAcquirePending(item.Status) {
+			return item, exit(5, "machine0 machine %s entered unexpected state %s", item.Name, item.Status)
+		}
+		if err := b.sleep(waitCtx, b.configForRun().Machine0.PollInterval); err != nil {
+			if errors.Is(waitCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+				return last, exit(5, "timed out waiting for machine0 machine %s; last state=%s", name, blank(last.Status, "unknown"))
+			}
+			return last, err
+		}
+	}
+}
+
+func (b *backend) waitForRunningAfterStart(ctx context.Context, name string, timeout time.Duration) (machine, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var last machine
+	for {
+		item, err := b.api.Get(waitCtx, name)
+		if err != nil {
+			return last, err
+		}
+		last = item
+		if machineRunning(item.Status) {
+			if strings.TrimSpace(item.IP) == "" {
+				return last, exit(5, "machine0 machine %s is RUNNING without an IP", item.Name)
+			}
+			return item, nil
+		}
+		if machineTerminal(item.Status) {
+			return item, terminalMachineError(item)
+		}
+		if !machinePending(item.Status) && !machineStopped(item.Status) {
+			return item, exit(5, "machine0 machine %s entered unexpected state %s after start", item.Name, item.Status)
+		}
+		if err := b.sleep(waitCtx, b.configForRun().Machine0.PollInterval); err != nil {
+			return last, b.machineWaitError(ctx, waitCtx, err, "RUNNING after start", name, last.Status)
+		}
+	}
+}
+
+func (b *backend) waitForResolveRunning(ctx context.Context, initial machine, timeout time.Duration) (machine, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	last := initial
+	started := false
+	for {
+		if machineRunning(last.Status) {
+			if strings.TrimSpace(last.IP) == "" {
+				return last, exit(5, "machine0 machine %s is RUNNING without an IP", last.Name)
+			}
+			return last, nil
+		}
+		if machineTerminal(last.Status) {
+			return last, terminalMachineError(last)
+		}
+		if machineStopped(last.Status) && !started {
+			if err := b.api.Start(waitCtx, last.Name); err != nil {
+				return last, err
+			}
+			started = true
+		} else if !machinePending(last.Status) && !machineStopped(last.Status) {
+			return last, exit(5, "machine0 machine %s entered unexpected state %s while resolving", last.Name, last.Status)
+		}
+		if err := b.sleep(waitCtx, b.configForRun().Machine0.PollInterval); err != nil {
+			return last, b.machineWaitError(ctx, waitCtx, err, "RUNNING during resolve", last.Name, last.Status)
+		}
+		next, err := b.api.Get(waitCtx, last.Name)
+		if err != nil {
+			return last, err
+		}
+		last = next
+	}
+}
+
+func (b *backend) waitForSuspended(ctx context.Context, name string, timeout time.Duration) (machine, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var last machine
+	for {
+		item, err := b.api.Get(waitCtx, name)
+		if err != nil {
+			return last, err
+		}
+		last = item
+		if strings.EqualFold(strings.TrimSpace(item.Status), "SUSPENDED") {
+			item.IP = ""
+			return item, nil
+		}
+		if machineTerminal(item.Status) {
+			return item, terminalMachineError(item)
+		}
+		if !machineRunning(item.Status) && !machineStopped(item.Status) && !machineSuspending(item.Status) {
+			return item, exit(5, "machine0 machine %s entered unexpected state %s while suspending", item.Name, item.Status)
+		}
+		if err := b.sleep(waitCtx, b.configForRun().Machine0.PollInterval); err != nil {
+			return last, b.machineWaitError(ctx, waitCtx, err, "SUSPENDED", name, last.Status)
+		}
+	}
+}
+
+func (b *backend) waitForStopped(ctx context.Context, name string, timeout time.Duration) (machine, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var last machine
+	for {
+		item, err := b.api.Get(waitCtx, name)
+		if err != nil {
+			return last, err
+		}
+		last = item
+		if strings.EqualFold(strings.TrimSpace(item.Status), "STOPPED") {
+			return item, nil
+		}
+		if machineTerminal(item.Status) {
+			return item, terminalMachineError(item)
+		}
+		if !machineRunning(item.Status) && !strings.EqualFold(strings.TrimSpace(item.Status), "STOPPING") {
+			return item, exit(5, "machine0 machine %s entered unexpected state %s while stopping", item.Name, item.Status)
+		}
+		if err := b.sleep(waitCtx, b.configForRun().Machine0.PollInterval); err != nil {
+			return last, b.machineWaitError(ctx, waitCtx, err, "STOPPED", name, last.Status)
+		}
+	}
+}
+
+func (b *backend) machineWaitError(parent, waitCtx context.Context, waitErr error, target, name, lastState string) error {
+	if parentErr := parent.Err(); parentErr != nil {
+		return parentErr
+	}
+	if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+		return exit(5, "timed out waiting for machine0 machine %s to reach %s; last state=%s", name, target, blank(lastState, "unknown"))
+	}
+	return waitErr
+}
+
+func (b *backend) suspendClaimedMachine(ctx context.Context, claim LeaseClaim, item machine) error {
+	_, _, _, err := updateClaimAction(claim.LeaseID, claim, func() (Server, SSHTarget, bool, error) {
+		suspended := item
+		var err error
+		if !strings.EqualFold(strings.TrimSpace(item.Status), "SUSPENDED") {
+			if err := b.api.Suspend(ctx, item.Name); err != nil {
+				return Server{}, SSHTarget{}, false, err
+			}
+			suspended, err = b.waitForSuspended(ctx, item.Name, b.configForRun().Machine0.CreateTimeout)
+			if err != nil {
+				return Server{}, SSHTarget{}, false, err
+			}
+		}
+		suspended.IP = ""
+		server := b.serverFromMachine(suspended, claim, b.configForRun())
+		return server, SSHTarget{}, true, nil
+	})
+	return err
+}
+
+func (b *backend) prepareLease(ctx context.Context, item machine, server Server, leaseID string, check bool) (LeaseTarget, error) {
+	return b.prepareLeaseWithOptions(ctx, item, server, leaseID, machine0PrepareOptions{Check: check})
+}
+
+func (b *backend) prepareLeaseWithOptions(ctx context.Context, item machine, server Server, leaseID string, opts machine0PrepareOptions) (LeaseTarget, error) {
+	if !machineRunning(item.Status) || strings.TrimSpace(item.IP) == "" {
+		return LeaseTarget{}, exit(4, "machine0 machine %s is not ready for SSH; state=%s", item.Name, item.Status)
+	}
+	cfg := b.configForRun()
+	user := machine0SSHUser(item)
+	keyPath := cfg.SSHKey
+	keyRoot := strings.TrimSpace(os.Getenv("SSH_KEY_PATH"))
+	if item.Key != nil && strings.TrimSpace(item.Key.FileName) != "" {
+		keyFileName := strings.TrimSpace(item.Key.FileName)
+		if keyRoot == "" {
+			home, err := os.UserHomeDir()
+			if err != nil || strings.TrimSpace(home) == "" {
+				return LeaseTarget{}, exit(2, "resolve Machine0 SSH key directory for %s: set SSH_KEY_PATH or configure a user home", item.Name)
+			}
+			keyRoot = filepath.Join(home, ".ssh")
+		}
+		keyPath = filepath.Join(keyRoot, keyFileName)
+		if opts.Check {
+			info, err := os.Stat(keyPath)
+			switch {
+			case err == nil && info.IsDir():
+				return LeaseTarget{}, exit(2, "Machine0 SSH key path %q is a directory; set SSH_KEY_PATH to the directory containing private key %s", keyPath, keyFileName)
+			case err == nil:
+			case !errors.Is(err, os.ErrNotExist):
+				return LeaseTarget{}, exit(2, "inspect Machine0 SSH key %q: %v", keyPath, err)
+			default:
+				primeErr := b.api.PrimeSSH(ctx, item.Name)
+				info, statErr := os.Stat(keyPath)
+				if statErr != nil || info.IsDir() {
+					missingErr := exit(2, "Machine0 SSH key %q is missing after `machine0 ssh %s true`; set SSH_KEY_PATH to the directory containing private key %s (resolved directory: %q), or ensure Machine0 can materialize it", keyPath, item.Name, keyFileName, keyRoot)
+					if primeErr != nil {
+						return LeaseTarget{}, errors.Join(primeErr, missingErr)
+					}
+					return LeaseTarget{}, missingErr
+				}
+				if primeErr != nil {
+					return LeaseTarget{}, primeErr
+				}
+			}
+		}
+	}
+	if keyRoot == "" {
+		if strings.TrimSpace(keyPath) != "" {
+			keyRoot = filepath.Dir(keyPath)
+		} else {
+			home, err := os.UserHomeDir()
+			if err != nil || strings.TrimSpace(home) == "" {
+				return LeaseTarget{}, exit(2, "resolve Machine0 SSH trust directory for %s: set SSH_KEY_PATH or configure a user home", item.Name)
+			}
+			keyRoot = filepath.Join(home, ".ssh")
+		}
+	}
+	knownHostsFile, err := machine0KnownHostsFile(keyRoot, item.ID)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	if opts.ResetHostTrust {
+		if err := resetMachine0HostTrust(knownHostsFile); err != nil {
+			return LeaseTarget{}, err
+		}
+	}
+	target := SSHTarget{User: user, Host: item.IP, Key: keyPath, KnownHostsFile: knownHostsFile, Port: sshPort, TargetOS: targetLinux, NetworkKind: core.NetworkPublic, ReadyCheck: "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null"}
+	if opts.Check {
+		if err := b.waitSSH(ctx, &target, bootstrapWaitTimeout(cfg)); err != nil {
+			return LeaseTarget{}, err
+		}
+	}
+	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+}
+
+func machine0KnownHostsFile(keyRoot, machineID string) (string, error) {
+	machineID = strings.TrimSpace(machineID)
+	if machineID == "" {
+		return "", exit(2, "resolve Machine0 SSH host trust: missing immutable machine id")
+	}
+	dir := filepath.Join(keyRoot, "crabbox", providerName, "known_hosts.d")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", exit(2, "create Machine0 SSH host trust directory %q: %v", dir, err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return "", exit(2, "secure Machine0 SSH host trust directory %q: %v", dir, err)
+	}
+	sum := sha256.Sum256([]byte(machineID))
+	return filepath.Join(dir, hex.EncodeToString(sum[:8])), nil
+}
+
+func resetMachine0HostTrust(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return exit(2, "inspect Machine0 SSH host trust %q before reset: %v", path, err)
+	}
+	if info.IsDir() {
+		return exit(2, "refusing to reset Machine0 SSH host trust %q because it is a directory", path)
+	}
+	if err := os.Remove(path); err != nil {
+		return exit(2, "reset Machine0 SSH host trust %q: %v", path, err)
+	}
+	return nil
+}
+
+func (b *backend) releaseTarget(ctx context.Context, lease LeaseTarget) (LeaseClaim, machine, error) {
+	identifier := firstNonBlank(lease.LeaseID, lease.Server.Labels["lease"], lease.Server.CloudID, lease.Server.Name)
+	claim, claimed, err := resolveClaim(identifier)
+	if err != nil {
+		return LeaseClaim{}, machine{}, err
+	}
+	if !claimed {
+		return LeaseClaim{}, machine{}, exit(2, "refusing to release machine0 machine without an exact local Crabbox claim")
+	}
+	lookup := firstNonBlank(claim.Labels["machine0_name"], claim.CloudID)
+	item, err := b.api.Get(ctx, lookup)
+	if err != nil {
+		return LeaseClaim{}, machine{}, err
+	}
+	if err := validateMachineClaimOwnership(claim, item); err != nil {
+		return LeaseClaim{}, machine{}, exit(2, "refusing machine0 release for lease=%s: %v", claim.LeaseID, err)
+	}
+	return claim, item, nil
+}
+
+func validateMachineClaimOwnership(claim LeaseClaim, item machine) error {
+	if strings.TrimSpace(claim.LeaseID) == "" {
+		return errors.New("missing lease identity")
+	}
+	if strings.TrimSpace(claim.CloudID) == "" {
+		return errors.New("missing immutable Machine0 id")
+	}
+	if claim.CloudID != item.ID {
+		return fmt.Errorf("Machine0 id mismatch: claim=%s machine=%s", claim.CloudID, item.ID)
+	}
+	if claim.ProviderScope != machineScope(item.ID) {
+		return fmt.Errorf("provider scope mismatch: claim=%s machine=%s", blank(claim.ProviderScope, "missing"), machineScope(item.ID))
+	}
+	return nil
+}
+
+func machine0Claims() (map[string]LeaseClaim, error) {
+	claims, err := listClaims()
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]LeaseClaim{}
+	for _, claim := range claims {
+		if claim.Provider != providerName {
+			continue
+		}
+		id := firstNonBlank(claim.CloudID, claim.Labels["machine0_id"])
+		if id != "" {
+			out[id] = claim
+		}
+	}
+	return out, nil
+}
+
+func (b *backend) serverFromMachine(item machine, claim LeaseClaim, cfg Config) Server {
+	cfg = effectiveMachine0Config(cfg, item)
+	labels := map[string]string{}
+	for key, value := range claim.Labels {
+		labels[key] = value
+	}
+	leaseID, slug := claim.LeaseID, claim.Slug
+	if len(labels) == 0 {
+		labels = machineLabels(cfg, item, leaseID, slug, false, b.now())
+	}
+	for key, value := range machineDynamicLabels(item) {
+		labels[key] = value
+	}
+	labels["work_root"] = cfg.WorkRoot
+	server := Server{CloudID: item.ID, ImmutableID: item.ID, Provider: providerName, Name: item.Name, Status: normalizeMachineState(item.Status), Labels: labels, ProviderMetadata: machineProviderMetadata(item)}
+	server.PublicNet.IPv4.IP = item.IP
+	server.ServerType.Name = item.Size
+	return server
+}
+
+var machineLabelKeys = []string{"machine0_id", "machine0_name", "machine0_status", "machine0_url", "image", "image_version", "size", "region", "ssh_user", "ssh_key", "release_policy", "price_per_hour_micro", "work_root"}
+
+func machineLabels(cfg Config, item machine, leaseID, slug string, keep bool, now time.Time) map[string]string {
+	cfg = effectiveMachine0Config(cfg, item)
+	labels := directLeaseLabels(cfg, leaseID, slug, keep, now)
+	for key, value := range machineDynamicLabels(item) {
+		labels[key] = value
+	}
+	labels["release_policy"] = normalizeReleasePolicy(cfg.Machine0.ReleasePolicy)
+	labels["work_root"] = cfg.WorkRoot
+	return labels
+}
+
+func machineDynamicLabels(item machine) map[string]string {
+	labels := map[string]string{"machine0_id": item.ID, "machine0_name": item.Name, "machine0_status": item.Status, "machine0_url": item.URL, "image": item.Image, "image_version": strconv.Itoa(item.ImageVersion), "size": item.Size, "region": item.Region, "ssh_user": machine0SSHUser(item), "price_per_hour_micro": strconv.FormatInt(item.PricePerHour, 10), "state": normalizeMachineState(item.Status)}
+	if item.Key != nil {
+		labels["ssh_key"] = item.Key.Name
+	}
+	return labels
+}
+
+func machineProviderMetadata(item machine) map[string]any {
+	return map[string]any{"url": item.URL, "status": item.Status, "ip": item.IP, "size": item.Size, "vcpu": item.VCPU, "ram": item.RAM, "disk": item.Disk, "region": item.Region, "provider": item.Provider, "image": item.Image, "imageVersion": item.ImageVersion, "defaultSSHUsername": item.DefaultSSHUsername, "distribution": item.Distribution, "ageMinutes": item.AgeMinutes, "totalCostMicro": item.TotalCost, "pricePerHourMicro": item.PricePerHour, "mountPaths": item.MountPaths}
+}
+
+func machineScope(id string) string { return providerName + ":" + strings.TrimSpace(id) }
+
+const machine0MachineNameMaxLength = 31
+
+func machine0MachineName(leaseID, slug string) string {
+	base := core.NormalizeLeaseSlug(slug)
+	if base == "" {
+		base = core.NormalizeLeaseSlug(strings.ReplaceAll(leaseID, "_", "-"))
+	}
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(leaseID))
+	suffix := fmt.Sprintf("%08x", hash.Sum32())
+	maxBase := machine0MachineNameMaxLength - len("crabbox--") - len(suffix)
+	if len(base) > maxBase {
+		base = strings.Trim(base[:maxBase], "-")
+	}
+	if base == "" {
+		base = "vm"
+	}
+	return "crabbox-" + base + "-" + suffix
+}
+
+func shouldCleanupMachine0(server Server, claim LeaseClaim, hasClaim bool, now time.Time) (bool, string) {
+	if strings.EqualFold(server.Labels["keep"], "true") {
+		return false, "keep=true"
+	}
+	if !hasClaim {
+		return false, "missing claim"
+	}
+	if machineStopped(server.Labels["machine0_status"]) || machineTerminal(server.Labels["machine0_status"]) {
+		return true, "machine state=" + blank(server.Labels["machine0_status"], "unknown")
+	}
+	lastUsed, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.LastUsedAt))
+	if err != nil || lastUsed.IsZero() || claim.IdleTimeoutSeconds <= 0 {
+		return false, "claim active"
+	}
+	if now.After(lastUsed.Add(time.Duration(claim.IdleTimeoutSeconds) * time.Second).Add(12 * time.Hour)) {
+		return true, "claim expired"
+	}
+	return false, "claim active"
+}
+
+func normalizeReleasePolicy(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), "suspend") {
+		return "suspend"
+	}
+	return "destroy"
+}
+func normalizeMachineState(value string) string {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "RUNNING":
+		return "ready"
+	case "CREATING", "STARTING":
+		return "initializing"
+	case "STOPPED":
+		return "stopped"
+	case "SUSPENDED":
+		return "suspended"
+	case "STOPPING", "SUSPENDING":
+		return "stopping"
+	case "DELETING", "DELETED":
+		return "deleted"
+	case "ERRORED", "UNAVAILABLE":
+		return "failed"
+	default:
+		return strings.ToLower(strings.TrimSpace(value))
+	}
+}
+
+func machineRunning(value string) bool { return strings.EqualFold(strings.TrimSpace(value), "RUNNING") }
+func machineStopped(value string) bool {
+	value = strings.ToUpper(strings.TrimSpace(value))
+	return value == "STOPPED" || value == "SUSPENDED"
+}
+func machinePending(value string) bool {
+	value = strings.ToUpper(strings.TrimSpace(value))
+	return value == "CREATING" || value == "STARTING" || value == "STOPPING" || value == "SUSPENDING"
+}
+func machineAcquirePending(value string) bool {
+	value = strings.ToUpper(strings.TrimSpace(value))
+	return value == "CREATING" || value == "STARTING"
+}
+func machineSuspending(value string) bool {
+	value = strings.ToUpper(strings.TrimSpace(value))
+	return value == "SUSPENDING" || value == "STOPPING"
+}
+func machineTerminal(value string) bool {
+	value = strings.ToUpper(strings.TrimSpace(value))
+	return value == "ERRORED" || value == "UNAVAILABLE"
+}
+func terminalMachineError(item machine) error {
+	return exit(5, "machine0 machine %s entered terminal state %s: %s", item.Name, item.Status, blank(item.LastErrorMessage, "run `machine0 get "+item.Name+" --json` for diagnostics"))
+}
+func sleepContext(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+func firstNonBlank(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+func firstLine(value string) string {
+	if line, _, ok := strings.Cut(strings.TrimSpace(value), "\n"); ok {
+		return line
+	}
+	return strings.TrimSpace(value)
+}

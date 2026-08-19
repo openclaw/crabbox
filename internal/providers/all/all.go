@@ -43,6 +43,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/linode"
 	_ "github.com/openclaw/crabbox/internal/providers/localcontainer"
 	_ "github.com/openclaw/crabbox/internal/providers/lume"
+	_ "github.com/openclaw/crabbox/internal/providers/machine0"
 	_ "github.com/openclaw/crabbox/internal/providers/modal"
 	_ "github.com/openclaw/crabbox/internal/providers/morph"
 	_ "github.com/openclaw/crabbox/internal/providers/multipass"

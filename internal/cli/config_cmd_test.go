@@ -2309,3 +2309,12 @@ func TestConfigShowRejectsInvalidDockerSandboxCPUConfig(t *testing.T) {
 		t.Fatalf("configShow --json err=%v, want docker-sandbox whole-number validation", err)
 	}
 }
+
+func TestMachine0ConfigWorkRootDisplay(t *testing.T) {
+	if got := machine0ConfigWorkRoot(""); got != "<dynamic:/home/<resolved-ssh-user>/crabbox>" {
+		t.Fatalf("dynamic work root display=%q", got)
+	}
+	if got := machine0ConfigWorkRoot("/srv/explicit"); got != "/srv/explicit" {
+		t.Fatalf("explicit work root display=%q", got)
+	}
+}

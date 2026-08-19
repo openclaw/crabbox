@@ -3375,6 +3375,43 @@ func TestMultipassConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestMachine0ConfigDefaultsFileAndEnvPrecedence(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if cfg.Machine0.CLIPath != "machine0" || cfg.Machine0.Image != "ubuntu-24-04-loaded" || cfg.Machine0.Size != "large" || cfg.Machine0.Region != "eu" || cfg.Machine0.WorkRoot != "" || cfg.Machine0.ReleasePolicy != "destroy" || cfg.Machine0.PollInterval != 5*time.Second {
+		t.Fatalf("machine0 defaults not applied: %#v", cfg.Machine0)
+	}
+	imageVersion := 2
+	applyFileConfig(&cfg, fileConfig{Provider: "machine0", Machine0: &fileMachine0Config{
+		CLIPath: "/opt/bin/machine0", Image: "ubuntu-ci", ImageVersion: &imageVersion, DesktopImage: "ubuntu-desktop", Size: "xl-nvme", Region: "us-west", Key: "ci-key", WorkRoot: "/work/example", ReleasePolicy: "suspend", CreateTimeout: "9m", PollInterval: "3s",
+	}})
+	if cfg.Machine0.CLIPath != "/opt/bin/machine0" || cfg.Machine0.Image != "ubuntu-ci" || cfg.Machine0.ImageVersion != 2 || cfg.Machine0.DesktopImage != "ubuntu-desktop" || cfg.Machine0.Size != "xl-nvme" || cfg.Machine0.Region != "us-west" || cfg.Machine0.Key != "ci-key" || cfg.Machine0.WorkRoot != "/work/example" || cfg.Machine0.ReleasePolicy != "suspend" || cfg.Machine0.CreateTimeout != 9*time.Minute || cfg.Machine0.PollInterval != 3*time.Second {
+		t.Fatalf("file machine0 config not applied: %#v", cfg.Machine0)
+	}
+	activeVersion := 0
+	applyFileConfig(&cfg, fileConfig{Machine0: &fileMachine0Config{ImageVersion: &activeVersion}})
+	if cfg.Machine0.ImageVersion != 0 {
+		t.Fatalf("higher-precedence YAML could not reset imageVersion to active: %#v", cfg.Machine0)
+	}
+	t.Setenv("CRABBOX_MACHINE0_CLI", "/usr/local/bin/machine0")
+	t.Setenv("CRABBOX_MACHINE0_IMAGE", "ubuntu-env")
+	t.Setenv("CRABBOX_MACHINE0_IMAGE_VERSION", "4")
+	t.Setenv("CRABBOX_MACHINE0_DESKTOP_IMAGE", "desktop-env")
+	t.Setenv("CRABBOX_MACHINE0_SIZE", "gpu-h100-1")
+	t.Setenv("CRABBOX_MACHINE0_REGION", "us-east")
+	t.Setenv("CRABBOX_MACHINE0_KEY", "env-key")
+	t.Setenv("CRABBOX_MACHINE0_WORK_ROOT", "/work/env")
+	t.Setenv("CRABBOX_MACHINE0_RELEASE_POLICY", "destroy")
+	t.Setenv("CRABBOX_MACHINE0_CREATE_TIMEOUT", "12m")
+	t.Setenv("CRABBOX_MACHINE0_POLL_INTERVAL", "5s")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Machine0.CLIPath != "/usr/local/bin/machine0" || cfg.Machine0.Image != "ubuntu-env" || cfg.Machine0.ImageVersion != 4 || cfg.Machine0.DesktopImage != "desktop-env" || cfg.Machine0.Size != "gpu-h100-1" || cfg.Machine0.Region != "us-east" || cfg.Machine0.Key != "env-key" || cfg.Machine0.WorkRoot != "/work/env" || cfg.Machine0.ReleasePolicy != "destroy" || cfg.Machine0.CreateTimeout != 12*time.Minute || cfg.Machine0.PollInterval != 5*time.Second {
+		t.Fatalf("environment did not override machine0 file config: %#v", cfg.Machine0)
+	}
+}
+
 func TestTartConfigDefaultsFileAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()

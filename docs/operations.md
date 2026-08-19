@@ -60,6 +60,7 @@ CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=namespace-instance CRABBOX_LIVE_COORDINATO
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=semaphore         CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=sprites           CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=tenki CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
+CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=machine0 CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_MACHINE0_SIZE=medium CRABBOX_LIVE_MACHINE0_IMAGE=ubuntu-24-04 CRABBOX_LIVE_MACHINE0_REGION=eu CRABBOX_LIVE_MACHINE0_KEY=ci-key CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=wandb CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_REPO=/path/to/my-app scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=kubevirt CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_KUBEVIRT_TEMPLATE=/path/to/vm.yaml scripts/live-smoke.sh
 CRABBOX_LIVE=1 CRABBOX_LIVE_PROVIDERS=external CRABBOX_LIVE_COORDINATOR=0 CRABBOX_LIVE_EXTERNAL_COMMAND=/path/to/provider scripts/live-smoke.sh
@@ -146,6 +147,19 @@ Per-provider smoke prerequisites:
   Tenki lifecycle commands until `tenki status --json` reports a logged-in CLI,
   then creates one session, runs one no-sync command, verifies paused-session
   status waits do not resume it, and stops the lease.
+- **Machine0** — the authenticated `machine0` CLI on `PATH` or
+  `CRABBOX_LIVE_MACHINE0_CLI`, plus a registered disposable SSH key named by
+  `CRABBOX_LIVE_MACHINE0_KEY`. The runner performs read-only auth, size/region,
+  and key checks before mutation; builds the current Crabbox binary unless
+  `CRABBOX_BIN` is explicit; creates one `medium` `ubuntu-24-04` VM in `eu` by
+  default; proves no-sync execution and ID-stable suspend/resume with a fresh
+  IP; creates, verifies, and deletes a named native checkpoint by default; then
+  destroys the VM and proves the provider resource, checkpoint image, and local
+  claim are absent. Override the test capacity with
+  `CRABBOX_LIVE_MACHINE0_SIZE`, `CRABBOX_LIVE_MACHINE0_IMAGE`, and
+  `CRABBOX_LIVE_MACHINE0_REGION`; set
+  `CRABBOX_LIVE_MACHINE0_CHECKPOINT=0` only when checkpoint coverage is
+  intentionally unavailable.
 - **KubeVirt** — `kubectl`, `virtctl`, a namespace with KubeVirt access, and an SSH-ready VM template.
 - **Agent Sandbox** — `kubectl`, an absolute kubeconfig or inherited
   `KUBECONFIG`, an explicit context, a namespace, and a configured

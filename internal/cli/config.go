@@ -238,6 +238,7 @@ type Config struct {
 	MXC                           MXCConfig
 	Multipass                     MultipassConfig
 	multipassImageExplicit        bool
+	Machine0                      Machine0Config
 	Tart                          TartConfig
 	tartImageExplicit             bool
 	tartDiskExplicit              bool
@@ -1373,6 +1374,20 @@ type MultipassConfig struct {
 	Memory        string
 	Disk          string
 	LaunchTimeout time.Duration
+}
+
+type Machine0Config struct {
+	CLIPath       string
+	Image         string
+	ImageVersion  int
+	DesktopImage  string
+	Size          string
+	Region        string
+	Key           string
+	WorkRoot      string
+	ReleasePolicy string
+	CreateTimeout time.Duration
+	PollInterval  time.Duration
 }
 
 type TartConfig struct {
@@ -3358,6 +3373,15 @@ func baseConfig() Config {
 			Disk:          "30G",
 			LaunchTimeout: 20 * time.Minute,
 		},
+		Machine0: Machine0Config{
+			CLIPath:       "machine0",
+			Image:         "ubuntu-24-04-loaded",
+			Size:          "large",
+			Region:        "eu",
+			ReleasePolicy: "destroy",
+			CreateTimeout: 15 * time.Minute,
+			PollInterval:  5 * time.Second,
+		},
 		Tart: TartConfig{
 			Image:    "ghcr.io/cirruslabs/macos-sequoia-base:latest",
 			User:     "admin",
@@ -3502,6 +3526,7 @@ type fileConfig struct {
 	AppleVZLegacy            *fileAppleVMConfig                  `yaml:"appleVZ,omitempty"`
 	MXC                      *fileMXCConfig                      `yaml:"mxc,omitempty"`
 	Multipass                *fileMultipassConfig                `yaml:"multipass,omitempty"`
+	Machine0                 *fileMachine0Config                 `yaml:"machine0,omitempty"`
 	Tart                     *fileTartConfig                     `yaml:"tart,omitempty"`
 	Lume                     *fileLumeConfig                     `yaml:"lume,omitempty"`
 	HyperV                   *fileHyperVConfig                   `yaml:"hyperv,omitempty"`
@@ -4657,6 +4682,20 @@ type fileMultipassConfig struct {
 	Memory        string `yaml:"memory,omitempty"`
 	Disk          string `yaml:"disk,omitempty"`
 	LaunchTimeout string `yaml:"launchTimeout,omitempty"`
+}
+
+type fileMachine0Config struct {
+	CLIPath       string `yaml:"cliPath,omitempty"`
+	Image         string `yaml:"image,omitempty"`
+	ImageVersion  *int   `yaml:"imageVersion,omitempty"`
+	DesktopImage  string `yaml:"desktopImage,omitempty"`
+	Size          string `yaml:"size,omitempty"`
+	Region        string `yaml:"region,omitempty"`
+	Key           string `yaml:"key,omitempty"`
+	WorkRoot      string `yaml:"workRoot,omitempty"`
+	ReleasePolicy string `yaml:"releasePolicy,omitempty"`
+	CreateTimeout string `yaml:"createTimeout,omitempty"`
+	PollInterval  string `yaml:"pollInterval,omitempty"`
 }
 
 type fileTartConfig struct {
@@ -7673,6 +7712,41 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			applyLeaseDuration(&cfg.Multipass.LaunchTimeout, file.Multipass.LaunchTimeout)
 		}
 	}
+	if file.Machine0 != nil {
+		if file.Machine0.CLIPath != "" {
+			cfg.Machine0.CLIPath = file.Machine0.CLIPath
+		}
+		if file.Machine0.Image != "" {
+			cfg.Machine0.Image = file.Machine0.Image
+		}
+		if file.Machine0.ImageVersion != nil {
+			cfg.Machine0.ImageVersion = *file.Machine0.ImageVersion
+		}
+		if file.Machine0.DesktopImage != "" {
+			cfg.Machine0.DesktopImage = file.Machine0.DesktopImage
+		}
+		if file.Machine0.Size != "" {
+			cfg.Machine0.Size = file.Machine0.Size
+		}
+		if file.Machine0.Region != "" {
+			cfg.Machine0.Region = file.Machine0.Region
+		}
+		if file.Machine0.Key != "" {
+			cfg.Machine0.Key = file.Machine0.Key
+		}
+		if file.Machine0.WorkRoot != "" {
+			cfg.Machine0.WorkRoot = file.Machine0.WorkRoot
+		}
+		if file.Machine0.ReleasePolicy != "" {
+			cfg.Machine0.ReleasePolicy = file.Machine0.ReleasePolicy
+		}
+		if file.Machine0.CreateTimeout != "" {
+			applyLeaseDuration(&cfg.Machine0.CreateTimeout, file.Machine0.CreateTimeout)
+		}
+		if file.Machine0.PollInterval != "" {
+			applyLeaseDuration(&cfg.Machine0.PollInterval, file.Machine0.PollInterval)
+		}
+	}
 	if file.Tart != nil {
 		if file.Tart.Image != "" {
 			cfg.Tart.Image = file.Tart.Image
@@ -9651,6 +9725,21 @@ func applyEnv(cfg *Config) error {
 	cfg.Multipass.Disk = getenv("CRABBOX_MULTIPASS_DISK", cfg.Multipass.Disk)
 	if timeout := os.Getenv("CRABBOX_MULTIPASS_LAUNCH_TIMEOUT"); timeout != "" {
 		applyLeaseDuration(&cfg.Multipass.LaunchTimeout, timeout)
+	}
+	cfg.Machine0.CLIPath = getenv("CRABBOX_MACHINE0_CLI", cfg.Machine0.CLIPath)
+	cfg.Machine0.Image = getenv("CRABBOX_MACHINE0_IMAGE", cfg.Machine0.Image)
+	cfg.Machine0.ImageVersion = getenvInt("CRABBOX_MACHINE0_IMAGE_VERSION", cfg.Machine0.ImageVersion)
+	cfg.Machine0.DesktopImage = getenv("CRABBOX_MACHINE0_DESKTOP_IMAGE", cfg.Machine0.DesktopImage)
+	cfg.Machine0.Size = getenv("CRABBOX_MACHINE0_SIZE", cfg.Machine0.Size)
+	cfg.Machine0.Region = getenv("CRABBOX_MACHINE0_REGION", cfg.Machine0.Region)
+	cfg.Machine0.Key = getenv("CRABBOX_MACHINE0_KEY", cfg.Machine0.Key)
+	cfg.Machine0.WorkRoot = getenv("CRABBOX_MACHINE0_WORK_ROOT", cfg.Machine0.WorkRoot)
+	cfg.Machine0.ReleasePolicy = getenv("CRABBOX_MACHINE0_RELEASE_POLICY", cfg.Machine0.ReleasePolicy)
+	if timeout := os.Getenv("CRABBOX_MACHINE0_CREATE_TIMEOUT"); timeout != "" {
+		applyLeaseDuration(&cfg.Machine0.CreateTimeout, timeout)
+	}
+	if interval := os.Getenv("CRABBOX_MACHINE0_POLL_INTERVAL"); interval != "" {
+		applyLeaseDuration(&cfg.Machine0.PollInterval, interval)
 	}
 	if image := os.Getenv("CRABBOX_TART_IMAGE"); image != "" {
 		cfg.Tart.Image = image

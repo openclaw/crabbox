@@ -612,6 +612,21 @@
     "caveat": "Apple silicon host, stopped prepared base, and Lume bootstrap account required",
     "docs": "lume.md"
   },
+  "machine0": {
+    "status": "built-in",
+    "category": "direct-cloud",
+    "substrate": "Machine0 persistent Linux KVM VM",
+    "location": "provider-managed",
+    "ssh": "crabbox-managed",
+    "sync": "crabbox-sync",
+    "gpu": "optional",
+    "lifecycle": "Machine0 CLI",
+    "cleanup": "VM destroy by default; explicit suspend optional",
+    "bestFit": "Persistent Linux VM workflows with live CPU and GPU sizing",
+    "caveat": "Stopping preserves the VM but does not avoid compute cost; suspend retains billed snapshot storage",
+    "auth": "Machine0 CLI login or MACHINE0_API_TOKEN; Crabbox never reads or stores the token",
+    "docs": "machine0.md"
+  },
   "modal": {
     "status": "built-in",
     "category": "delegated-sandbox",

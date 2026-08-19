@@ -204,8 +204,11 @@ type DoctorProvider interface {
 
 Native checkpoint and fork support follow the same pattern through
 `NativeCheckpointProvider` and `NativeCheckpointForkProvider`. Future
-provider-specific capability areas, such as pricing or image management, should
-add similarly narrow interfaces rather than widening the base backend.
+provider-specific capability areas should add similarly narrow interfaces
+rather than widening the base backend. Live provider-owned machine catalogs use
+`ProviderSizeCatalogBackend`; core exposes them through `crabbox providers sizes
+<provider>` while the adapter retains size slugs, region availability, exact
+microcurrency prices, and GPU metadata.
 
 Failed-run evidence for SSH leases is also optional. A supporting backend may
 capture a bounded, per-command baseline immediately before execution and return

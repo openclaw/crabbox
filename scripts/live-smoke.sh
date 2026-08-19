@@ -189,6 +189,10 @@ extract_tenki_session() {
   sed -n 's/.*tenki_session=\([^ ]*\).*/\1/p' | tail -1
 }
 
+extract_checkpoint() {
+  rg -o 'chk_[a-f0-9]{16}' | tail -1
+}
+
 extract_coder_workspace() {
   sed -n 's/.*workspace=\([^ ]*\).*/\1/p' | tail -1
 }
@@ -1043,6 +1047,198 @@ tenki_smoke() {
   lease=""
 }
 
+machine0_smoke() (
+  need_tool jq
+  need_tool rg
+
+  local machine0_cli="${CRABBOX_LIVE_MACHINE0_CLI:-${CRABBOX_MACHINE0_CLI:-machine0}}"
+  need_tool "$machine0_cli"
+  if [[ -z "${CRABBOX_BIN:-}" ]]; then
+    need_tool go
+    (cd "$root" && go build -trimpath -o "$cb" ./cmd/crabbox)
+  fi
+
+  local size="${CRABBOX_LIVE_MACHINE0_SIZE:-medium}"
+  local image="${CRABBOX_LIVE_MACHINE0_IMAGE:-ubuntu-24-04}"
+  local region="${CRABBOX_LIVE_MACHINE0_REGION:-eu}"
+  local key="${CRABBOX_LIVE_MACHINE0_KEY:-${CRABBOX_MACHINE0_KEY:-}}"
+  if [[ -z "$key" ]]; then
+    echo "machine0 smoke requires CRABBOX_LIVE_MACHINE0_KEY (a registered Machine0 SSH key name)" >&2
+    return 2
+  fi
+
+  local CRABBOX_PROVIDER="machine0"
+  local CRABBOX_MACHINE0_CLI="$machine0_cli"
+  local CRABBOX_MACHINE0_SIZE="$size"
+  local CRABBOX_MACHINE0_IMAGE="$image"
+  local CRABBOX_MACHINE0_REGION="$region"
+  local CRABBOX_MACHINE0_KEY="$key"
+  local CRABBOX_MACHINE0_RELEASE_POLICY="destroy"
+  export CRABBOX_PROVIDER CRABBOX_MACHINE0_CLI CRABBOX_MACHINE0_SIZE
+  export CRABBOX_MACHINE0_IMAGE CRABBOX_MACHINE0_REGION CRABBOX_MACHINE0_KEY
+  export CRABBOX_MACHINE0_RELEASE_POLICY
+
+  local whoami_json
+  capture_stdout whoami_json "$machine0_cli" whoami --json
+  if ! printf '%s\n' "$whoami_json" | jq -e 'type == "object"' >/dev/null; then
+    echo "machine0 smoke requires an authenticated Machine0 CLI; run machine0 login or set MACHINE0_API_TOKEN" >&2
+    return 2
+  fi
+  "$machine0_cli" --version
+  "$machine0_cli" sizes --all --json | jq -e --arg size "$size" --arg region "$region" \
+    'any(.[]; .size == $size and (.regions | index($region)) != null)' >/dev/null
+  "$machine0_cli" keys get "$key" --json | jq -e --arg key "$key" '.name == $key' >/dev/null
+
+  run_in_repo "$cb" doctor --provider machine0
+
+  local unique
+  unique="$(date -u +%H%M%S)-$$"
+  local requested_slug="${CRABBOX_LIVE_MACHINE0_SLUG:-m0-${unique}}"
+  local checkpoint_name="${CRABBOX_LIVE_MACHINE0_CHECKPOINT_NAME:-crabbox-m0-${unique}}"
+  local checkpoint_enabled="${CRABBOX_LIVE_MACHINE0_CHECKPOINT:-1}"
+  local checkpoint_requested=1
+  case "$checkpoint_enabled" in
+    0|false|no|skip) checkpoint_requested=0 ;;
+  esac
+  local machine_name_base
+  machine_name_base="$(printf '%s' "$requested_slug" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-14)"
+  local baseline_machine_ids
+  baseline_machine_ids="$("$machine0_cli" ls --json | jq -c '[.[].id]')"
+  local lease=""
+  local slug=""
+  local machine_id=""
+  local machine_name=""
+  local checkpoint_id=""
+  local finished_lease=""
+
+  # shellcheck disable=SC2329 # The subshell EXIT trap invokes this cleanup.
+  cleanup() {
+    trap - EXIT
+    if [[ "$checkpoint_requested" == "1" && -z "$checkpoint_id" && -n "$checkpoint_name" ]]; then
+      checkpoint_id="$(run_in_repo "$cb" checkpoint list --json 2>/dev/null | jq -r --arg name "$checkpoint_name" '(. // [])[]? | select(.name == $name) | .id' | head -1 || true)"
+    fi
+    if [[ -n "$checkpoint_id" ]]; then
+      run_in_repo "$cb" checkpoint delete "$checkpoint_id" || true
+      checkpoint_id=""
+    fi
+    if [[ -n "$lease" ]]; then
+      stop_provider_lease machine0 "$lease" "$slug"
+      lease=""
+      slug=""
+    fi
+    local leftover_name
+    while IFS= read -r leftover_name; do
+      [[ -n "$leftover_name" ]] || continue
+      "$machine0_cli" rm "$leftover_name" --yes || true
+    done < <("$machine0_cli" ls --json 2>/dev/null | jq -r --argjson baseline "$baseline_machine_ids" --arg prefix "crabbox-${machine_name_base}-" '.[] | select((.id as $id | ($baseline | index($id)) == null) and (.name | startswith($prefix))) | .name' || true)
+  }
+  trap cleanup EXIT
+
+  if [[ "$checkpoint_requested" == "1" ]] && "$machine0_cli" images ls --json | jq -e --arg name "$checkpoint_name" 'any(.[]; .name == $name)' >/dev/null; then
+    echo "machine0 smoke checkpoint image already exists: $checkpoint_name" >&2
+    return 2
+  fi
+
+  local out
+  local warmup_status=0
+  capture_run_live out run_in_repo "$cb" warmup \
+    --provider machine0 \
+    --machine0-cli "$machine0_cli" \
+    --machine0-size "$size" \
+    --machine0-image "$image" \
+    --machine0-region "$region" \
+    --machine0-key "$key" \
+    --machine0-release-policy destroy \
+    --slug "$requested_slug" \
+    --ttl "${CRABBOX_LIVE_MACHINE0_TTL:-20m}" \
+    --idle-timeout "${CRABBOX_LIVE_MACHINE0_IDLE_TIMEOUT:-5m}" \
+    --timing-json || warmup_status=$?
+  lease="$(printf '%s\n' "$out" | extract_lease)"
+  slug="$(printf '%s\n' "$out" | extract_slug)"
+  if [[ "$warmup_status" -ne 0 ]]; then
+    return "$warmup_status"
+  fi
+  test -n "$lease"
+  test -n "$slug"
+
+  run_in_repo "$cb" status --provider machine0 --id "$slug" --wait --wait-timeout "${CRABBOX_LIVE_MACHINE0_WAIT_TIMEOUT:-180s}"
+  # shellcheck disable=SC2016 # Expanded by the remote shell.
+  run_in_repo "$cb" run --provider machine0 --id "$slug" --no-sync -- sh -lc 'printf "crabbox-machine0-ok id=%s\n" "$(cat /etc/machine-id 2>/dev/null || hostname)"'
+
+  local before
+  capture_stdout before run_in_repo "$cb" inspect --provider machine0 --id "$slug" --json
+  machine_id="$(printf '%s\n' "$before" | jq -r '.serverId // empty')"
+  machine_name="$(printf '%s\n' "$before" | jq -r '.labels.machine0_name // empty')"
+  local ip_before
+  ip_before="$(printf '%s\n' "$before" | jq -r '.host // .sshHost // empty')"
+  test -n "$machine_id"
+  test -n "$machine_name"
+  test -n "$ip_before"
+  log_step "machine0 ownership lease=$lease slug=$slug machine_id=$machine_id machine_name=$machine_name"
+
+  run_in_repo "$cb" pause --provider machine0 "$slug"
+  local suspended
+  capture_stdout suspended "$machine0_cli" get "$machine_name" --json
+  if ! printf '%s\n' "$suspended" | jq -e --arg id "$machine_id" '.id == $id and .status == "SUSPENDED"' >/dev/null; then
+    echo "machine0 pause did not preserve id=$machine_id in SUSPENDED state" >&2
+    return 1
+  fi
+
+  run_in_repo "$cb" resume --provider machine0 "$slug"
+  local after
+  capture_stdout after run_in_repo "$cb" inspect --provider machine0 --id "$slug" --json
+  local resumed_id ip_after
+  resumed_id="$(printf '%s\n' "$after" | jq -r '.serverId // empty')"
+  ip_after="$(printf '%s\n' "$after" | jq -r '.host // .sshHost // empty')"
+  if [[ "$resumed_id" != "$machine_id" || -z "$ip_after" || "$ip_after" == "$ip_before" ]]; then
+    echo "machine0 resume identity/IP proof failed: before_id=$machine_id after_id=${resumed_id:-missing} before_ip=$ip_before after_ip=${ip_after:-missing}" >&2
+    return 1
+  fi
+  run_in_repo "$cb" run --provider machine0 --id "$slug" --no-sync -- echo crabbox-machine0-resumed
+
+  if [[ "$checkpoint_requested" == "1" ]]; then
+    local checkpoint_out
+    capture_run checkpoint_out run_in_repo "$cb" checkpoint create \
+      --provider machine0 \
+      --id "$slug" \
+      --name "$checkpoint_name" \
+      --mode native \
+      --strategy image \
+      --wait \
+      --wait-timeout "${CRABBOX_LIVE_MACHINE0_CHECKPOINT_WAIT_TIMEOUT:-20m}"
+    printf '%s\n' "$checkpoint_out"
+    checkpoint_id="$(printf '%s\n' "$checkpoint_out" | extract_checkpoint)"
+    test -n "$checkpoint_id"
+    run_in_repo "$cb" checkpoint inspect "$checkpoint_id" --verify --json | jq -e \
+      '.providerState == "ACTIVE" or .providerState == "DRAFT" or .providerState == "READY"' >/dev/null
+    run_in_repo "$cb" checkpoint delete "$checkpoint_id"
+    checkpoint_id=""
+  fi
+
+  finished_lease="$lease"
+  if ! run_in_repo "$cb" stop --provider machine0 --machine0-release-policy destroy "$slug"; then
+    run_in_repo "$cb" stop --provider machine0 --machine0-release-policy destroy "$lease"
+  fi
+  lease=""
+
+  if "$machine0_cli" ls --json | jq -e --arg id "$machine_id" --arg name "$machine_name" 'any(.[]; .id == $id or .name == $name)' >/dev/null; then
+    echo "machine0 smoke cleanup left machine id=$machine_id name=$machine_name" >&2
+    return 1
+  fi
+  if run_in_repo "$cb" list --provider machine0 --all --json | jq -e --arg lease_id "$finished_lease" --arg machine_id "$machine_id" 'any(.[]; .CloudID == $machine_id or .labels.lease == $lease_id)' >/dev/null; then
+    echo "machine0 smoke cleanup left a Crabbox-owned machine or claim" >&2
+    return 1
+  fi
+  if run_in_repo "$cb" claims list --json | jq -e --arg lease_id "$finished_lease" 'any(.claims[]; .leaseId == $lease_id)' >/dev/null; then
+    echo "machine0 smoke cleanup left local claim lease=$finished_lease" >&2
+    return 1
+  fi
+  if [[ "$checkpoint_requested" == "1" ]] && "$machine0_cli" images ls --json | jq -e --arg name "$checkpoint_name" 'any(.[]; .name == $name)' >/dev/null; then
+    echo "machine0 smoke cleanup left checkpoint image=$checkpoint_name" >&2
+    return 1
+  fi
+)
+
 kubevirt_smoke() {
   need_tool jq
   need_tool rg
@@ -1518,6 +1714,10 @@ fi
 
 if has_provider tenki; then
   tenki_smoke
+fi
+
+if has_provider machine0; then
+  machine0_smoke
 fi
 
 if has_provider wandb; then

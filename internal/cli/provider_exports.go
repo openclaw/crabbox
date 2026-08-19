@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"time"
 )
 
@@ -15,6 +16,16 @@ func BaseConfig() Config {
 
 func LoadConfig() (Config, error) {
 	return loadConfig()
+}
+
+// RuntimeForProviderOperation supplies the standard local command runner for
+// provider lifecycle capabilities that are invoked on Provider rather than an
+// already-configured Backend.
+func RuntimeForProviderOperation(stderr io.Writer) Runtime {
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	return Runtime{Stdout: io.Discard, Stderr: stderr, Clock: realClock{}, Exec: execCommandRunner{}}
 }
 
 // ProviderSelectionIsAuthoritativeRoute reports whether cfg names an exact
@@ -326,6 +337,14 @@ func UpdateLeaseClaimEndpointIfUnchangedAction(
 	return updateLeaseClaimEndpointIfUnchangedAction(leaseID, expected, action)
 }
 
+func ReplaceLeaseClaimEndpointIfUnchangedAction(
+	leaseID string,
+	expected LeaseClaim,
+	action func() (Server, SSHTarget, bool, error),
+) (LeaseClaim, Server, SSHTarget, error) {
+	return replaceLeaseClaimEndpointIfUnchangedAction(leaseID, expected, action)
+}
+
 func UpdateLeaseClaimLabelsIfUnchanged(leaseID string, expected LeaseClaim, labels map[string]string) (LeaseClaim, error) {
 	return updateLeaseClaimLabelsIfUnchanged(leaseID, expected, labels)
 }
@@ -629,6 +648,7 @@ const (
 	CheckpointKindGCP              = checkpointKindGCP
 	CheckpointKindGCPDisk          = checkpointKindGCPDisk
 	CheckpointKindHetzner          = checkpointKindHetzner
+	CheckpointKindMachine0         = checkpointKindMachine0
 	CheckpointKindParallels        = checkpointKindParallels
 	CheckpointKindDockerCommit     = checkpointKindDockerCommit
 	CheckpointStrategyImage        = checkpointStrategyImage

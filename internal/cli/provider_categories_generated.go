@@ -45,6 +45,7 @@ var benchmarkProviderCategories = map[string]string{
 	"linode":                     "direct-cloud",
 	"local-container":            "local-runtime",
 	"lume":                       "local-vm",
+	"machine0":                   "direct-cloud",
 	"modal":                      "delegated-sandbox",
 	"morph":                      "direct-cloud",
 	"multipass":                  "local-vm",

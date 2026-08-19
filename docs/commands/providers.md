@@ -20,6 +20,8 @@ crabbox providers recommend agent-sandbox --json
 crabbox providers recommend run-evidence
 crabbox providers recommend run-evidence --reachability provider-url --evidence preview-url
 crabbox providers recommend versioned-workspace
+crabbox providers sizes machine0
+crabbox providers sizes machine0 --all --refresh --json
 ```
 
 ## Flags
@@ -65,6 +67,57 @@ the current binary.
 
 The matrix form takes no positional arguments. Use `providers recommend` for
 workflow-oriented ranked selection guidance.
+
+## `providers sizes`
+
+`crabbox providers sizes <provider>` reads the selected provider's live machine
+catalog. Unlike the static provider matrix, it loads merged configuration and
+may invoke an authenticated provider client. Providers without the narrow live
+size-catalog capability fail clearly instead of returning a guessed catalog.
+
+```sh
+crabbox providers sizes machine0
+crabbox providers sizes machine0 --json
+crabbox providers sizes machine0 --all --refresh
+```
+
+Flags:
+
+- `--json` emits the complete catalog as a JSON array.
+- `--all` includes currently unavailable sizes whose live `regions` array is
+  empty. Without it, those entries are omitted.
+- `--refresh` asks the provider to bypass any catalog cache. Providers that
+  always fetch live data already satisfy this request without retaining a
+  cache.
+
+Human output includes size, vCPU, GPU label, RAM GB, disk GB, hourly cost,
+and current regions. JSON preserves the provider's exact integer
+`pricePerHourMicro` value, where `1_000_000` is one currency unit, rather than
+rounding it for display. Entries use this shape:
+
+```json
+{
+  "name": "gpu-h100-1",
+  "vcpu": 20,
+  "ramGb": 240,
+  "diskGb": 720,
+  "gpu": {
+    "label": "1x H100",
+    "vramGb": 80,
+    "scratchDiskGb": 5000
+  },
+  "regions": ["eu", "us-east"],
+  "pricePerHourMicro": 4851000,
+  "transferGiBPerMonth": 9313,
+  "estimatedSnapshotGb": 200,
+  "defaultImage": "gpu-h100x1-base"
+}
+```
+
+CPU sizes omit `gpu`; GPU sizes retain the provider's label, VRAM, and optional
+scratch-disk capacity. Optional `providerMetadata` is present only when the
+provider returns forward-compatible catalog fields not yet normalized by
+Crabbox.
 
 ## `providers describe`
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -79,7 +80,7 @@ type providerMatrixFilterFlagValues struct {
 	Lifecycle    stringListFlag
 }
 
-func (a App) providers(_ context.Context, args []string) error {
+func (a App) providers(ctx context.Context, args []string) error {
 	if len(args) > 0 && args[0] == "describe" {
 		return a.providerDescribe(args[1:])
 	}
@@ -88,6 +89,9 @@ func (a App) providers(_ context.Context, args []string) error {
 	}
 	if len(args) > 0 && args[0] == "recommend" {
 		return a.providerRecommendations(args[1:])
+	}
+	if len(args) > 0 && args[0] == "sizes" {
+		return a.providerSizes(ctx, args[1:])
 	}
 	fs := newFlagSet("providers", a.Stderr)
 	jsonOut := fs.Bool("json", false, "print JSON")
@@ -109,6 +113,70 @@ func (a App) providers(_ context.Context, args []string) error {
 	}
 	printProviderMatrix(a.Stdout, entries)
 	return nil
+}
+
+func (a App) providerSizes(ctx context.Context, args []string) error {
+	fs := newFlagSet("providers sizes", a.Stderr)
+	jsonOut := fs.Bool("json", false, "print JSON")
+	refresh := fs.Bool("refresh", false, "bypass any provider catalog cache")
+	includeUnavailable := fs.Bool("all", false, "include sizes with no currently available regions")
+	if err := parseInterspersedFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return exit(2, "usage: crabbox providers sizes <provider> [--all] [--refresh] [--json]")
+	}
+	provider, err := ProviderFor(fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	setProviderSelection(&cfg, provider.Name(), providerSelectionFlag)
+	backend, err := loadBackend(cfg, runtimeForApp(a))
+	if err != nil {
+		return err
+	}
+	catalog, ok := backend.(ProviderSizeCatalogBackend)
+	if !ok {
+		return exit(2, "provider=%s does not expose a live size catalog", provider.Name())
+	}
+	sizes, err := catalog.SizeCatalog(ctx, *refresh)
+	if err != nil {
+		return err
+	}
+	if !*includeUnavailable {
+		filtered := sizes[:0]
+		for _, size := range sizes {
+			if len(size.Regions) > 0 {
+				filtered = append(filtered, size)
+			}
+		}
+		sizes = filtered
+	}
+	if *jsonOut {
+		return json.NewEncoder(a.Stdout).Encode(sizes)
+	}
+	fmt.Fprintln(a.Stdout, "SIZE\tCPU\tGPU\tRAM_GB\tDISK_GB\tPRICE_PER_HOUR\tREGIONS")
+	for _, size := range sizes {
+		gpu := "-"
+		if size.GPU != nil {
+			gpu = size.GPU.Label
+		}
+		fmt.Fprintf(a.Stdout, "%s\t%d\t%s\t%d\t%d\t%s\t%s\n", size.Name, size.VCPU, gpu, size.RAMGB, size.DiskGB, providerHourlyMicro(size.PricePerHourMicro), strings.Join(size.Regions, ","))
+	}
+	return nil
+}
+
+func providerHourlyMicro(value int64) string {
+	amount := strconv.FormatFloat(float64(value)/1_000_000, 'f', 6, 64)
+	amount = strings.TrimRight(strings.TrimRight(amount, "0"), ".")
+	if amount == "" {
+		amount = "0"
+	}
+	return "$" + amount
 }
 
 func (a App) providerFilters(args []string) error {

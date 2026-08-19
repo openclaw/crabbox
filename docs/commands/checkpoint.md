@@ -17,7 +17,8 @@ Subcommands: `create`, `list`, `inspect`, `restore`, `fork`, `delete`, `prune`.
 tools, caches, services. Stored in the provider account, so it incurs provider
 storage costs. Recorded as one of `aws-ami`, `aws-ebs-snapshot`,
 `azure-managed-image`, `azure-os-disk-snapshot`, `gcp-machine-image`,
-`gcp-disk-snapshot`, `hetzner-snapshot`, or `parallels-snapshot`.
+`gcp-disk-snapshot`, `hetzner-snapshot`, `machine0-image`, or
+`parallels-snapshot`.
 
 **Archive (workspace tarball)** — captures only the contents of the remote
 workdir as `workspace.tar.gz`. Portable across any POSIX SSH lease, but it does
@@ -76,6 +77,10 @@ crabbox checkpoint create --provider aws --id swift-crab --mode native
 # Direct Hetzner lease: create a project snapshot
 crabbox checkpoint create --provider hetzner --id swift-crab --mode native
 
+# Machine0 named image; draft readiness requires snapshotStatus=READY
+crabbox checkpoint create --provider machine0 --id swift-crab \
+  --mode native --strategy image --name ci-baseline
+
 # Azure Windows: permit a bounded deallocate/snapshot/restart cycle
 crabbox checkpoint create --provider azure --target windows --id swift-crab \
   --strategy disk-snapshot --no-reboot=false
@@ -116,7 +121,8 @@ resolves to a disk snapshot where the provider supports one.
   Hetzner project snapshot; Parallels VM snapshot. AWS macOS always uses an
   AMI-backed checkpoint (with a backing EBS snapshot) because relaunching an EC2
   Mac from a raw root snapshot loses required launch metadata.
-- `image` — AWS AMI / GCP machine image. Slower, but preserves full VM config.
+- `image` — AWS AMI / GCP machine image / Machine0 named image. Slower, but
+  preserves full VM config.
 - Azure cannot create a managed image from an active VM, so the Azure native
   path uses a managed OS-disk snapshot. That snapshot requires a managed OS disk
   (the default); creation refuses leases started with
@@ -129,6 +135,15 @@ resolves to a disk snapshot where the provider supports one.
   and loopback-only VNC credentials when each fork boots.
 - Azure snapshot names use letters, digits, underscores, and hyphens and are
   limited to 80 characters; generated names retain a unique timestamp suffix.
+- Machine0 named images require a stopped source. Crabbox flushes a running
+  source, stops it, initiates the image save, and keeps it stopped until the
+  exact new version's underlying snapshot is `READY`. It then starts the source
+  and atomically refreshes the claimed SSH endpoint. A source that was already
+  stopped waits for snapshot readiness but remains stopped. This mandatory
+  barrier also applies with `--wait=false`, using `--wait-timeout` when positive
+  or the Machine0 create timeout otherwise. Machine0 stop preserves the
+  instance and is still compute-billed; it is a consistency step, not a
+  cost-saving lifecycle mode.
 
 Before a native snapshot, Crabbox cleans the source: on Linux it runs
 `cloud-init clean --logs` (so a forked box regenerates SSH host keys) and
@@ -302,6 +317,12 @@ For native checkpoints, delete removes the provider resource first (AMIs are
 deregistered along with their backing EBS snapshots; disk snapshots are
 deleted), then removes the local record. Archive checkpoints just lose their
 tarball and record.
+
+Machine0 whole-image deletion is additionally fenced against later versions.
+Even when the checkpoint originally created the image name, Crabbox refuses
+`images rm` unless the exact metadata-bound version is still the image's only
+version. Resolve extra versions manually so checkpoint deletion cannot erase
+unrelated work.
 
 **Flags**
 

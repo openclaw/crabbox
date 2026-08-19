@@ -87,7 +87,7 @@ selection metadata. Regenerate it with `node scripts/generate-provider-matrix.mj
 `scripts/check-docs.sh` fails when provider registration, metadata, docs paths, or
 this generated table drift.
 
-Current built-in surface: 79 providers (44 SSH lease, 31 delegated run, 4 service control).
+Current built-in surface: 80 providers (45 SSH lease, 31 delegated run, 4 service control).
 
 Access terms:
 
@@ -139,6 +139,7 @@ Access terms:
 | [linode](linode.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `tailscale` | `linux`; Linode instance | `cloud`; GPU: optional | Crabbox; instance and key delete | Straightforward direct Linux VM | Direct-only; optional firewall must already exist |
 | [local-container](local-container.md) (`docker`, `container`, `local-docker`) | built-in; `ssh-lease` · local-runtime | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop`, `browser`, `cache-volume`, `workspace-checkpoint`, `workspace-fork`, `run-session` | `linux`; Docker-compatible container | `local`; GPU: optional | Crabbox; container delete | Fast local Linux test environment | Isolation follows the local container runtime |
 | [lume](lume.md) (`local-lume`, `lume-macos`) | built-in; `ssh-lease` · local-vm | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `macos`; Lume Apple silicon macOS VM | `local`; GPU: no | Crabbox; verified VM stop and delete | Layered local macOS VM development sessions | Apple silicon host, stopped prepared base, and Lume bootstrap account required |
+| [machine0](machine0.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop`, `browser`, `code`, `pause-resume`, `workspace-checkpoint`, `workspace-fork`, `provider-snapshot` | `linux`; Machine0 persistent Linux KVM VM | `provider-managed`; GPU: optional | Machine0 CLI; VM destroy by default; explicit suspend optional | Persistent Linux VM workflows with live CPU and GPU sizing | Stopping preserves the VM but does not avoid compute cost; suspend retains billed snapshot storage |
 | [modal](modal.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `run-session` | `linux`; Modal Sandbox | `provider-managed`; GPU: optional | Modal; sandbox termination | Hosted Python or GPU-oriented delegated workloads | Provider owns execution; no normal SSH lease |
 | [morph](morph.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync` | `linux`; Morph Cloud VM | `provider-managed`; GPU: unknown | Morph; pause by default; optional delete | Managed Linux VM over SSH | Release retains the paused instance unless deleteOnRelease is enabled |
 | [multipass](multipass.md) (`mp`, `canonical-multipass`) | built-in; `ssh-lease` · local-vm | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `cache-volume` | `linux`; Canonical Multipass VM | `local`; GPU: no | Crabbox; VM delete and purge | Portable local Ubuntu VM | Ubuntu-only first implementation |

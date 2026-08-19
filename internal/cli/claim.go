@@ -644,6 +644,23 @@ func updateLeaseClaimEndpointIfUnchangedAction(
 	expected leaseClaim,
 	action func() (Server, SSHTarget, bool, error),
 ) (leaseClaim, Server, SSHTarget, error) {
+	return updateLeaseClaimEndpointIfUnchangedActionMode(leaseID, expected, action, false)
+}
+
+func replaceLeaseClaimEndpointIfUnchangedAction(
+	leaseID string,
+	expected leaseClaim,
+	action func() (Server, SSHTarget, bool, error),
+) (leaseClaim, Server, SSHTarget, error) {
+	return updateLeaseClaimEndpointIfUnchangedActionMode(leaseID, expected, action, true)
+}
+
+func updateLeaseClaimEndpointIfUnchangedActionMode(
+	leaseID string,
+	expected leaseClaim,
+	action func() (Server, SSHTarget, bool, error),
+	replaceEndpoint bool,
+) (leaseClaim, Server, SSHTarget, error) {
 	path, err := leaseClaimPath(leaseID)
 	if err != nil {
 		return leaseClaim{}, Server{}, SSHTarget{}, err
@@ -674,7 +691,19 @@ func updateLeaseClaimEndpointIfUnchangedAction(
 		if err != nil {
 			return err
 		}
+		if replaceEndpoint {
+			clearLeaseClaimTailscaleFields(&claim)
+			claim.BridgeURL = ""
+		}
 		applyLeaseClaimEndpoint(&claim, prepared, target)
+		if replaceEndpoint {
+			claim.SSHHost = target.Host
+			if port, err := strconv.Atoi(strings.TrimSpace(target.Port)); err == nil && port > 0 {
+				claim.SSHPort = port
+			} else {
+				claim.SSHPort = 0
+			}
+		}
 		updated = cloneLeaseClaim(claim)
 		return writeLeaseClaimAtomic(path, claim)
 	})

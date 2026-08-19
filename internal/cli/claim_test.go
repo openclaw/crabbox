@@ -1374,6 +1374,18 @@ func TestConditionalClaimEndpointActionBuildsResultUnderLock(t *testing.T) {
 	if guarded.LeaseID != updated.LeaseID || guarded.CloudID != updated.CloudID || guarded.SSHHost != updated.SSHHost {
 		t.Fatalf("nil-action claim=%#v want=%#v", guarded, updated)
 	}
+	stopped := ready
+	stopped.Labels = map[string]string{"provider": "aws", "state": "stopped"}
+	replaced, gotServer, gotTarget, err := replaceLeaseClaimEndpointIfUnchangedAction(leaseID, updated, func() (Server, SSHTarget, bool, error) {
+		return stopped, SSHTarget{}, true, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotServer.Labels["state"] != "stopped" || gotTarget.Host != "" || replaced.SSHHost != "" || replaced.SSHPort != 0 || replaced.Labels["state"] != "stopped" {
+		t.Fatalf("replaced server=%#v target=%#v claim=%#v", gotServer, gotTarget, replaced)
+	}
+	updated = replaced
 
 	if err := updateLeaseClaimEndpoint(leaseID, Server{Provider: "aws", CloudID: "i-456"}, SSHTarget{}); err != nil {
 		t.Fatal(err)

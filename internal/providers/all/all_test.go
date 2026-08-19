@@ -665,12 +665,14 @@ func TestProviderKindFeatureContracts(t *testing.T) {
 			core.FeatureRunProof,
 			core.FeatureRunArtifacts,
 			core.FeatureRunDownloads,
-			core.FeaturePauseResume,
 			core.FeatureMCP,
 		} {
 			if spec.Features.Has(feature) && spec.Kind != core.ProviderKindDelegatedRun {
 				t.Fatalf("%s advertises %s but kind=%s", name, feature, spec.Kind)
 			}
+		}
+		if spec.Features.Has(core.FeaturePauseResume) && spec.Kind != core.ProviderKindDelegatedRun && spec.Kind != core.ProviderKindSSHLease {
+			t.Fatalf("%s advertises %s but kind=%s", name, core.FeaturePauseResume, spec.Kind)
 		}
 		if err := core.ValidateRunSessionFeatureSpec(spec); err != nil {
 			t.Fatalf("%s has invalid %s contract: %v", name, core.FeatureRunSession, err)
@@ -1382,6 +1384,7 @@ func allBuiltInProviderNames() []string {
 		"linode",
 		"local-container",
 		"lume",
+		"machine0",
 		"modal",
 		"morph",
 		"multipass",

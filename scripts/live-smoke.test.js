@@ -1466,6 +1466,153 @@ esac
   assert.equal(fs.readFileSync(stateFile, "utf8").trim(), "PAUSED");
 });
 
+test("Machine0 live smoke proves guarded lifecycle, IP refresh, checkpoint, and cleanup", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-machine0-"));
+  const bin = path.join(dir, "bin");
+  const fakeCrabbox = path.join(bin, "crabbox");
+  const fakeMachine0 = path.join(bin, "machine0");
+  const calls = path.join(dir, "calls.log");
+  const state = path.join(dir, "state");
+  const imageState = path.join(dir, "image-state");
+  fs.mkdirSync(bin);
+
+  writeExecutable(
+    fakeMachine0,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf 'machine0 %s\n' "$*" >>"${calls}"
+case "$*" in
+  "whoami --json") printf '{"authenticated":true}\n' ;;
+  "--version") printf 'machine0 1.0.155\n' ;;
+  "sizes --all --json") printf '[{"size":"medium","regions":["eu"]}]\n' ;;
+  "keys get ci-key --json") printf '{"name":"ci-key"}\n' ;;
+  "images ls --json")
+    if [[ -f "${imageState}" ]]; then printf '[{"id":"img-1","name":"m0-checkpoint","status":"READY"}]\n'; else printf '[]\n'; fi
+    ;;
+  "ls --json")
+    case "$(cat "${state}" 2>/dev/null || true)" in
+      running) printf '[{"id":"vm-123","name":"crabbox-m0-smoke-deadbeef","status":"RUNNING","ip":"203.0.113.10"}]\n' ;;
+      paused) printf '[{"id":"vm-123","name":"crabbox-m0-smoke-deadbeef","status":"SUSPENDED","ip":""}]\n' ;;
+      resumed) printf '[{"id":"vm-123","name":"crabbox-m0-smoke-deadbeef","status":"RUNNING","ip":"203.0.113.11"}]\n' ;;
+      *) printf '[]\n' ;;
+    esac
+    ;;
+  "get "*)
+    case "$(cat "${state}" 2>/dev/null || true)" in
+      paused) printf '{"id":"vm-123","name":"crabbox-m0-smoke-deadbeef","status":"SUSPENDED","ip":""}\n' ;;
+      *) printf '{"id":"vm-123","name":"crabbox-m0-smoke-deadbeef","status":"RUNNING","ip":"203.0.113.11"}\n' ;;
+    esac
+    ;;
+  "rm "*" --yes") printf 'removed\n'; rm -f "${state}" ;;
+  *) printf 'unexpected machine0 args: %s\n' "$*" >&2; exit 99 ;;
+esac
+`,
+  );
+
+  writeExecutable(
+    fakeCrabbox,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf 'crabbox %s\n' "$*" >>"${calls}"
+case "$1" in
+  config) exit 0 ;;
+  doctor) printf 'ok provider=machine0 mutation=false\n' ;;
+  warmup)
+    printf 'running' >"${state}"
+    printf 'provisioning provider=machine0 lease=cbx_123456789abc slug=m0-smoke name=crabbox-m0-smoke-deadbeef\n'
+    printf 'provisioned lease=cbx_123456789abc slug=m0-smoke state=ready\n'
+    if [[ "\${MACHINE0_FAIL_WARMUP:-}" == "1" ]]; then exit 42; fi
+    ;;
+  status) printf 'lease=cbx_123456789abc slug=m0-smoke provider=machine0 state=ready ready=true\n' ;;
+  run) printf 'crabbox-machine0-ok\ncrabbox-machine0-resumed\n' ;;
+  inspect)
+    if [[ "$(cat "${state}")" == "resumed" ]]; then ip=203.0.113.11; else ip=203.0.113.10; fi
+    printf '{"id":"cbx_123456789abc","slug":"m0-smoke","provider":"machine0","state":"ready","serverId":"vm-123","host":"%s","sshHost":"%s","labels":{"machine0_name":"crabbox-m0-smoke-deadbeef"}}\n' "$ip" "$ip"
+    ;;
+  pause) printf 'paused' >"${state}" ;;
+  resume) printf 'resumed' >"${state}" ;;
+  checkpoint)
+    case "\${2:-}" in
+      create) touch "${imageState}"; printf 'checkpoint created id=chk_abcdef1234567890 kind=machine0-image state=DRAFT\n' ;;
+      inspect) printf '{"providerState":"DRAFT","nextAction":"fork_or_delete"}\n' ;;
+      delete) rm -f "${imageState}"; printf 'deleted checkpoint=chk_abcdef1234567890\n' ;;
+      list) printf 'null\n' ;;
+      *) exit 98 ;;
+    esac
+    ;;
+  stop) rm -f "${state}"; printf 'released lease=cbx_123456789abc machine=crabbox-m0-smoke-deadbeef action=destroy\n' ;;
+  list) printf '[]\n' ;;
+  claims) printf '{"version":1,"source":"local-claims","claims":[],"problems":[]}\n' ;;
+  *) printf 'unexpected crabbox args: %s\n' "$*" >&2; exit 99 ;;
+esac
+`,
+  );
+
+  const result = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_MACHINE0_CHECKPOINT_NAME: "m0-checkpoint",
+      CRABBOX_LIVE_MACHINE0_KEY: "ci-key",
+      CRABBOX_LIVE_MACHINE0_SLUG: "m0-smoke",
+      CRABBOX_LIVE_PROVIDERS: "machine0",
+      CRABBOX_LIVE_REPO: repoRoot,
+    },
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /crabbox-machine0-ok/);
+  assert.match(result.stdout, /crabbox-machine0-resumed/);
+  assert.doesNotMatch(result.stderr, /Cannot iterate over null/);
+  assert.equal(fs.existsSync(state), false);
+  assert.equal(fs.existsSync(imageState), false);
+  const log = fs.readFileSync(calls, "utf8");
+  assert.match(log, /^machine0 whoami --json$/m);
+  assert.match(log, /^machine0 sizes --all --json$/m);
+  assert.match(log, /^machine0 keys get ci-key --json$/m);
+  assert.match(log, /^crabbox warmup --provider machine0 .*--machine0-size medium .*--machine0-image ubuntu-24-04 .*--machine0-region eu .*--machine0-key ci-key .*--machine0-release-policy destroy/m);
+  assert.match(log, /^crabbox run --provider machine0 --id m0-smoke --no-sync /m);
+  assert.match(log, /^crabbox pause --provider machine0 m0-smoke$/m);
+  assert.match(log, /^crabbox resume --provider machine0 m0-smoke$/m);
+  assert.match(log, /^crabbox checkpoint create --provider machine0 --id m0-smoke --name m0-checkpoint --mode native --strategy image --wait /m);
+  assert.match(log, /^crabbox checkpoint inspect chk_abcdef1234567890 --verify --json$/m);
+  assert.match(log, /^crabbox checkpoint delete chk_abcdef1234567890$/m);
+  assert.match(log, /^crabbox stop --provider machine0 --machine0-release-policy destroy m0-smoke$/m);
+  assert.match(log, /^crabbox claims list --json$/m);
+  assert.doesNotMatch(log, /\b(vnc|webvnc|--desktop)\b/);
+
+  const failed = spawnSync("bash", ["scripts/live-smoke.sh"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+      CRABBOX_BIN: fakeCrabbox,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_MACHINE0_CHECKPOINT: "0",
+      CRABBOX_LIVE_MACHINE0_KEY: "ci-key",
+      CRABBOX_LIVE_MACHINE0_SLUG: "m0-smoke",
+      CRABBOX_LIVE_PROVIDERS: "machine0",
+      CRABBOX_LIVE_REPO: repoRoot,
+      MACHINE0_FAIL_WARMUP: "1",
+    },
+    encoding: "utf8",
+  });
+  assert.equal(failed.status, 42, failed.stdout + failed.stderr);
+  assert.equal(fs.existsSync(state), false, "EXIT trap must destroy a partially reported warmup lease");
+  const failedLog = fs.readFileSync(calls, "utf8");
+  assert.equal(
+    (failedLog.match(/^crabbox stop --provider machine0.*m0-smoke$/gm) ?? []).length,
+    2,
+    failedLog,
+  );
+});
+
 test("blacksmith live smoke requires an explicit organization", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-blacksmith-missing-org-"));
   const bin = path.join(dir, "bin");

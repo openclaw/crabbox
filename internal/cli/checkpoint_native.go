@@ -522,6 +522,8 @@ func checkpointKindForProviderImage(image CoordinatorImage) string {
 		return checkpointKindGCPDisk
 	case checkpointKindHetzner:
 		return checkpointKindHetzner
+	case checkpointKindMachine0:
+		return checkpointKindMachine0
 	case checkpointKindDockerCommit:
 		return checkpointKindDockerCommit
 	}
@@ -532,6 +534,8 @@ func checkpointKindForProviderImage(image CoordinatorImage) string {
 		return checkpointKindGCP
 	case "hetzner":
 		return checkpointKindHetzner
+	case "machine0":
+		return checkpointKindMachine0
 	case "parallels":
 		return checkpointKindParallels
 	case "local-container":
@@ -543,7 +547,7 @@ func checkpointKindForProviderImage(image CoordinatorImage) string {
 
 func checkpointStrategyForKind(kind string) string {
 	switch kind {
-	case checkpointKindAWSAMI, checkpointKindAzure, checkpointKindGCP, checkpointKindDockerCommit:
+	case checkpointKindAWSAMI, checkpointKindAzure, checkpointKindGCP, checkpointKindMachine0, checkpointKindDockerCommit:
 		return checkpointStrategyImage
 	case checkpointKindAWSEBS, checkpointKindAzureOS, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindParallels:
 		return checkpointStrategyDiskSnapshot
