@@ -46,7 +46,7 @@ func TestExchangeEncodesRequestAndOwnsStdin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(payload) != `{"operation":"list","count":3}` || got.Value != 7 {
+	if string(payload) != "{\"operation\":\"list\",\"count\":3}\n" || got.Value != 7 {
 		t.Fatalf("payload=%q response=%#v", payload, got)
 	}
 	if runner.req.MaxCapturedOutputBytes != 1024 || runner.req.CancelGracePeriod != grace {

@@ -47,7 +47,7 @@ func Exchange[Input, Output any](ctx context.Context, runner core.CommandRunner,
 	if err != nil {
 		return output, core.LocalCommandResult{}, fmt.Errorf("encode JSON request: %w", err)
 	}
-	req.Stdin, req.MaxCapturedOutputBytes, req.CancelGracePeriod = bytes.NewReader(payload), limits.MaxBytesPerStream, limits.CancelGrace
+	req.Stdin, req.MaxCapturedOutputBytes, req.CancelGracePeriod = bytes.NewReader(append(payload, '\n')), limits.MaxBytesPerStream, limits.CancelGrace
 	result, err = runner.Run(ctx, req)
 	runErr := err
 	if len(result.Stdout) > limits.MaxBytesPerStream || len(result.Stderr) > limits.MaxBytesPerStream {

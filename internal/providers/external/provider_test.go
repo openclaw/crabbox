@@ -1,6 +1,7 @@
 package external
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -3664,7 +3665,7 @@ func TestLeaseSlugForClaimUsesProviderReturnedSlug(t *testing.T) {
 	}
 }
 
-func TestDoctorExecutesProviderAsChildProcess(t *testing.T) {
+func TestDoctorExecutesLineOrientedProviderAsChildProcess(t *testing.T) {
 	cfg := testConfig()
 	cfg.External.Command = os.Args[0]
 	cfg.External.Args = []string{"-test.run=TestExternalProviderHelperProcess", "--"}
@@ -4456,8 +4457,12 @@ func TestExternalProviderHelperProcess(t *testing.T) {
 	if !strings.Contains(strings.Join(os.Args, " "), "TestExternalProviderHelperProcess") {
 		return
 	}
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil {
+		os.Exit(2)
+	}
 	var request protocolRequest
-	if err := json.NewDecoder(os.Stdin).Decode(&request); err != nil {
+	if err := json.Unmarshal([]byte(line), &request); err != nil {
 		os.Exit(2)
 	}
 	if request.ProtocolVersion != protocolVersion || request.Operation != "doctor" || request.Config["namespace"] != "dev" {
