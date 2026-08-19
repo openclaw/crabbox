@@ -20,9 +20,6 @@ const (
 	boxdNotFoundGrace    = 60 * time.Second
 	boxdReadyTimeout     = 5 * time.Minute
 	boxdReadyPollDefault = 2 * time.Second
-	// How long release waits through not-found reads before concluding the
-	// machine is provably gone (vs not visible yet).
-	boxdReleaseNotFoundRetries = 3
 )
 
 var waitForBoxdSSHReady = core.WaitForSSHReady
@@ -33,21 +30,23 @@ type backend struct {
 	rt   core.Runtime
 
 	// Test seams.
-	sshConfigPath     string
-	readyPollInterval time.Duration
-	readyTimeout      time.Duration
-	rollbackTimeout   time.Duration
+	sshConfigPath        string
+	readyPollInterval    time.Duration
+	readyTimeout         time.Duration
+	rollbackTimeout      time.Duration
+	releaseNotFoundGrace time.Duration
 }
 
 func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) *backend {
 	return &backend{
-		spec:              spec,
-		cfg:               cfg,
-		rt:                rt,
-		sshConfigPath:     defaultSSHConfigPath(),
-		readyPollInterval: boxdReadyPollDefault,
-		readyTimeout:      boxdReadyTimeout,
-		rollbackTimeout:   boxdRollbackTimeout,
+		spec:                 spec,
+		cfg:                  cfg,
+		rt:                   rt,
+		sshConfigPath:        defaultSSHConfigPath(),
+		readyPollInterval:    boxdReadyPollDefault,
+		readyTimeout:         boxdReadyTimeout,
+		rollbackTimeout:      boxdRollbackTimeout,
+		releaseNotFoundGrace: boxdNotFoundGrace,
 	}
 }
 
@@ -108,6 +107,14 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		return cause
 	}
 
+	// The machine id is the anchor of the replacement fence (boxd retains
+	// destroyed names for reuse): a claim persisted without a verified id
+	// would leave that lease with no protection against later name reuse.
+	// Fail closed — the rollback destroys the machine we just created.
+	if strings.TrimSpace(created.ID) == "" {
+		return core.LeaseTarget{}, rollback(core.Exit(5, "boxd machine new %s response did not include a machine id; refusing to lease without a replacement fence", name))
+	}
+
 	zone := firstNonBlank(zoneFromHost(created.URL, name), defaultBoxdZone)
 	labels["machine"] = name
 	labels["vm_id"] = created.ID
@@ -124,8 +131,17 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		}
 	}
 
-	if _, err := b.waitMachineReady(ctx, cfg, name); err != nil {
+	ready, err := b.waitMachineReady(ctx, cfg, name)
+	if err != nil {
 		return core.LeaseTarget{}, rollback(err)
+	}
+	// Verify the id before it anchors the claim: the ready machine must be
+	// the one the create returned, not a same-named machine that raced in.
+	// Do NOT roll back here — rollback destroys by name, which would hit the
+	// replacement; our machine is necessarily gone if the name resolves to a
+	// different id, and the replacement is not ours to touch.
+	if readyID := strings.TrimSpace(ready.ID); readyID != "" && readyID != strings.TrimSpace(created.ID) {
+		return core.LeaseTarget{}, core.Exit(4, "boxd machine %s changed identity during provisioning (created id=%s, current=%s); leaving the current machine untouched", name, created.ID, ready.ID)
 	}
 	target, err := b.resolveSSHTarget(ctx, cfg, name, zone)
 	if err != nil {
@@ -350,9 +366,14 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		return nil
 	}
 	// Delete mode. Distinguish "provably gone" from "not visible yet": the
-	// control plane is eventually consistent, and treating a transient
-	// not-found as success would leak a live machine with no anchor.
-	for attempt := 0; ; attempt++ {
+	// control plane is eventually consistent, and reaping the claim on a
+	// transient inventory gap would orphan a LIVE machine (the claim is the
+	// sole anchor, so List and Cleanup would never see it again). The machine
+	// must stay absent through the same visibility grace acquire uses before
+	// it counts as provably gone; an interrupted wait keeps the claim so a
+	// retry can finish the release.
+	start := b.now()
+	for {
 		summary, found, err := b.getMachine(ctx, cfg, name)
 		if err != nil {
 			return err
@@ -366,7 +387,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 			}
 			break
 		}
-		if attempt >= boxdReleaseNotFoundRetries-1 {
+		if b.now().Sub(start) >= b.releaseNotFoundGrace {
 			break
 		}
 		select {

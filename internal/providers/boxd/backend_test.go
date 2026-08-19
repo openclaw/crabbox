@@ -59,6 +59,7 @@ func testBackend(t *testing.T, runner *scriptedRunner) *backend {
 	b.sshConfigPath = filepath.Join(t.TempDir(), "ssh_config")
 	b.readyPollInterval = time.Millisecond
 	b.readyTimeout = 2 * time.Second
+	b.releaseNotFoundGrace = 5 * time.Millisecond
 	return b
 }
 
@@ -278,6 +279,65 @@ func TestAcquireRollsBackOnTerminalMachine(t *testing.T) {
 	}
 }
 
+// TestAcquireRefusesCreateWithoutMachineID pins that a claim is never
+// persisted without a verified machine id (the anchor of the replacement
+// fence) and that the id-less machine is rolled back, not leaked.
+func TestAcquireRefusesCreateWithoutMachineID(t *testing.T) {
+	runner := &scriptedRunner{}
+	runner.scripts = []func([]string) (core.LocalCommandResult, error){
+		ok(`[]`),
+		func(args []string) (core.LocalCommandResult, error) { // machine new: no id
+			name := args[2]
+			return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"name":%q,"url":"%s.boxd.sh"}`, name, name)}, nil
+		},
+		ok(`{"removed":true}`), // rollback destroy
+	}
+	b := testBackend(t, runner)
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{})
+	if err == nil || !strings.Contains(err.Error(), "did not include a machine id") {
+		t.Fatalf("id-less create must be refused, err=%v", err)
+	}
+	last := runner.calls[len(runner.calls)-1]
+	if last.args[1] != "remove" {
+		t.Fatalf("id-less machine was not rolled back: %v", runner.calls)
+	}
+	if claims, _ := boxdClaims(b.configForRun()); len(claims) != 0 {
+		t.Fatalf("claim persisted without a verified id: %v", claims)
+	}
+}
+
+// TestAcquireRefusesIdentityChangeWithoutTouchingReplacement pins that when
+// the ready machine's id differs from the created id (name raced to a
+// replacement), acquire fails WITHOUT destroying by name — the replacement is
+// not ours to touch.
+func TestAcquireRefusesIdentityChangeWithoutTouchingReplacement(t *testing.T) {
+	runner := &scriptedRunner{}
+	runner.scripts = []func([]string) (core.LocalCommandResult, error){
+		ok(`[]`),
+		func(args []string) (core.LocalCommandResult, error) {
+			name := args[2]
+			return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"name":%q,"id":"vm-OURS","url":"%s.boxd.sh"}`, name, name)}, nil
+		},
+		func(args []string) (core.LocalCommandResult, error) { // machine get: different id
+			name := args[2]
+			return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"name":%q,"id":"vm-REPLACEMENT","status":"running","url":"%s.boxd.sh"}`, name, name)}, nil
+		},
+	}
+	b := testBackend(t, runner)
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{})
+	if err == nil || !strings.Contains(err.Error(), "changed identity") {
+		t.Fatalf("identity change must be refused, err=%v", err)
+	}
+	for _, c := range runner.calls {
+		if len(c.args) > 1 && (c.args[1] == "remove" || c.args[1] == "stop") {
+			t.Fatalf("replacement machine was touched during identity-change bailout: %v", runner.calls)
+		}
+	}
+	if claims, _ := boxdClaims(b.configForRun()); len(claims) != 0 {
+		t.Fatalf("claim persisted despite identity change: %v", claims)
+	}
+}
+
 func TestReleaseDestroysAndRemovesClaim(t *testing.T) {
 	name := "crabbox-cbx-aaaabbbbcccc"
 	leaseID := "cbx_aaaabbbbcccc"
@@ -308,7 +368,11 @@ func TestReleaseTreatsPersistentNotFoundAsGone(t *testing.T) {
 	name := "crabbox-cbx-aaaabbbbcccc"
 	leaseID := "cbx_aaaabbbbcccc"
 	notFound := fail("Error: VM '" + name + "' not found")
-	runner := &scriptedRunner{scripts: []func([]string) (core.LocalCommandResult, error){notFound, notFound, notFound}}
+	scripts := make([]func([]string) (core.LocalCommandResult, error), 0, 200)
+	for i := 0; i < 200; i++ {
+		scripts = append(scripts, notFound)
+	}
+	runner := &scriptedRunner{scripts: scripts}
 	b := testBackend(t, runner)
 	cfg := b.configForRun()
 	server := core.Server{Provider: providerName, Name: name, Labels: map[string]string{"machine": name, "lease": leaseID}}
