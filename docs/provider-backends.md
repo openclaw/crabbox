@@ -255,7 +255,7 @@ populated by side-effect `init()` registration, gathered in
 
 ```text
 internal/providers/all                  # side-effect imports of every provider
-internal/providers/shared               # shared direct SSH retry/touch/cleanup helpers
+internal/providers/shared               # shared lifecycle observation and direct SSH helpers
 internal/providers/aws                  # AWS EC2 SSH lease backend (coordinator)
 internal/providers/azure                # Azure VM SSH lease backend (coordinator)
 internal/providers/azuredynamicsessions # Azure Container Apps delegated runner
@@ -318,6 +318,15 @@ Provider packages may use small exported core helpers for claims, labels, sync
 preflight, timing JSON, and SSH key storage. Keep that helper surface narrow: if
 a provider needs broad command orchestration, the behavior probably belongs in
 core instead.
+
+Lifecycle polling is the exception that belongs in
+`internal/providers/shared`, not command core. `shared.Poll` centralizes only
+the repeated read mechanics: last-success retention, attempt limits,
+context-aware waits, and optional progress. The adapter creates any timeout or
+detached context and maps its cause. It also keeps native state semantics,
+retryability, identity and ownership validation, side effects, diagnostics,
+and exact error text; the helper does not normalize states, mutate claims,
+detach contexts, call provider actions, or log.
 
 ## Provider registration
 

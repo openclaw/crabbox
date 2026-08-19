@@ -1,6 +1,7 @@
 package tenki
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -431,6 +432,182 @@ func TestTenkiEnsureSessionReadySurfacesResumeFailure(t *testing.T) {
 	}
 }
 
+func TestTenkiEnsureSessionReadyWaitsForPauseThenResumes(t *testing.T) {
+	runner := &fakeRunner{}
+	getCalls := 0
+	resumeCalls := 0
+	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		switch strings.Join(req.Args, " ") {
+		case "sandbox get --output json session-1":
+			getCalls++
+			if getCalls == 1 {
+				return LocalCommandResult{Stdout: `{"id":"session-1","state":"PAUSED"}`}, nil
+			}
+			return LocalCommandResult{Stdout: `{"id":"session-1","state":"RUNNING"}`}, nil
+		case "sandbox resume --session session-1":
+			resumeCalls++
+			return LocalCommandResult{}, nil
+		default:
+			t.Fatalf("unexpected command: %s", strings.Join(req.Args, " "))
+		}
+		return LocalCommandResult{}, nil
+	}
+	backend := &tenkiBackend{
+		cfg:   Config{Tenki: TenkiConfig{CLIPath: "tenki"}},
+		rt:    Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
+		sleep: func(context.Context, time.Duration) error { return nil },
+	}
+
+	session, err := backend.ensureSessionReadyForSSH(context.Background(), backend.configForRun(), tenkiSession{ID: "session-1", State: "PAUSING"})
+	if err != nil || session.State != "RUNNING" || getCalls != 2 || resumeCalls != 1 {
+		t.Fatalf("session=%#v err=%v getCalls=%d resumeCalls=%d", session, err, getCalls, resumeCalls)
+	}
+}
+
+func TestTenkiEnsureSessionReadyAcceptsRunningWhilePausing(t *testing.T) {
+	runner := &fakeRunner{}
+	commands := 0
+	runner.run = func(req LocalCommandRequest) (LocalCommandResult, error) {
+		commands++
+		if got := strings.Join(req.Args, " "); got != "sandbox get --output json session-1" {
+			t.Fatalf("unexpected command: %s", got)
+		}
+		return LocalCommandResult{Stdout: `{"id":"session-1","state":"RUNNING"}`}, nil
+	}
+	backend := &tenkiBackend{
+		cfg: Config{Tenki: TenkiConfig{CLIPath: "tenki"}},
+		rt:  Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
+	}
+	session, err := backend.ensureSessionReadyForSSH(context.Background(), backend.configForRun(), tenkiSession{ID: "session-1", State: "PAUSING"})
+	if err != nil || session.State != "RUNNING" || commands != 1 {
+		t.Fatalf("session=%#v err=%v commands=%d", session, err, commands)
+	}
+}
+
+func TestTenkiSessionObserverRetriesTransientGetError(t *testing.T) {
+	runner := &fakeRunner{}
+	calls := 0
+	runner.run = func(LocalCommandRequest) (LocalCommandResult, error) {
+		calls++
+		if calls == 1 {
+			return LocalCommandResult{ExitCode: 1}, errors.New("temporary get failure")
+		}
+		return LocalCommandResult{Stdout: `{"id":"session-1","state":"RUNNING"}`}, nil
+	}
+	backend := &tenkiBackend{
+		cfg:   Config{Tenki: TenkiConfig{CLIPath: "tenki"}},
+		rt:    Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
+		sleep: func(context.Context, time.Duration) error { return nil },
+	}
+	session, err := backend.waitForSessionReady(context.Background(), "session-1", time.Minute)
+	if err != nil || session.State != "RUNNING" || calls != 2 {
+		t.Fatalf("session=%#v err=%v calls=%d", session, err, calls)
+	}
+}
+
+func TestTenkiSessionObserverRejectsTerminalStates(t *testing.T) {
+	for _, state := range []string{"TERMINATING", "TERMINATED"} {
+		t.Run(strings.ToLower(state), func(t *testing.T) {
+			runner := &fakeRunner{run: func(LocalCommandRequest) (LocalCommandResult, error) {
+				return LocalCommandResult{Stdout: `{"id":"session-1","state":"` + state + `"}`}, nil
+			}}
+			backend := &tenkiBackend{cfg: Config{Tenki: TenkiConfig{CLIPath: "tenki"}}, rt: Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+			if _, err := backend.waitForSessionReady(context.Background(), "session-1", time.Minute); err == nil || !strings.Contains(err.Error(), strings.ToLower(state)) {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
+func TestTenkiSessionObserverPreservesTerminalStateAtDeadline(t *testing.T) {
+	runner := &fakeRunner{runCtx: func(ctx context.Context, _ LocalCommandRequest) (LocalCommandResult, error) {
+		<-ctx.Done()
+		return LocalCommandResult{Stdout: `{"id":"session-1","state":"TERMINATED"}`}, nil
+	}}
+	backend := &tenkiBackend{
+		cfg: Config{Tenki: TenkiConfig{CLIPath: "tenki"}},
+		rt:  Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
+	}
+	_, err := backend.waitForSessionReady(context.Background(), "session-1", 10*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "terminated") || strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestTenkiSessionObserverReturnsParentCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	runner := &fakeRunner{run: func(LocalCommandRequest) (LocalCommandResult, error) {
+		return LocalCommandResult{Stdout: `{"id":"session-1","state":"RESUMING"}`}, nil
+	}}
+	backend := &tenkiBackend{
+		cfg: Config{Tenki: TenkiConfig{CLIPath: "tenki"}},
+		rt:  Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
+		sleep: func(context.Context, time.Duration) error {
+			cancel()
+			return context.Canceled
+		},
+	}
+	_, err := backend.waitForSessionReady(ctx, "session-1", time.Minute)
+	if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestTenkiSessionObserverTimeoutIncludesLastGetError(t *testing.T) {
+	runner := &fakeRunner{run: func(LocalCommandRequest) (LocalCommandResult, error) {
+		return LocalCommandResult{ExitCode: 1}, errors.New("control plane unavailable")
+	}}
+	backend := &tenkiBackend{
+		cfg: Config{Tenki: TenkiConfig{CLIPath: "tenki"}},
+		rt:  Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
+		sleep: func(ctx context.Context, _ time.Duration) error {
+			<-ctx.Done()
+			return context.Cause(ctx)
+		},
+	}
+	_, err := backend.waitForSessionReady(context.Background(), "session-1", 10*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "timed out") || !strings.Contains(err.Error(), "control plane unavailable") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestTenkiSessionObserverProgress(t *testing.T) {
+	var stderr bytes.Buffer
+	calls := 0
+	runner := &fakeRunner{run: func(LocalCommandRequest) (LocalCommandResult, error) {
+		calls++
+		state := "RESUMING"
+		if calls == 2 {
+			state = "RUNNING"
+		}
+		return LocalCommandResult{Stdout: `{"id":"session-1","state":"` + state + `"}`}, nil
+	}}
+	backend := &tenkiBackend{cfg: Config{Tenki: TenkiConfig{CLIPath: "tenki"}}, rt: Runtime{Exec: runner, Stdout: io.Discard, Stderr: &stderr}, sleep: func(context.Context, time.Duration) error { return nil }}
+	if _, err := backend.waitForSessionReady(context.Background(), "session-1", 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if got := stderr.String(); got != "waiting for tenki session=session-1 state=RESUMING remaining=10s\n" {
+		t.Fatalf("progress=%q", got)
+	}
+}
+
+func TestTenkiEnsureSessionReadyPreservesUnknownCreateStates(t *testing.T) {
+	for _, state := range []string{"", "CREATING", "SOMETHING_NEW"} {
+		t.Run(blank(state, "empty"), func(t *testing.T) {
+			runner := &fakeRunner{run: func(req LocalCommandRequest) (LocalCommandResult, error) {
+				t.Fatalf("state %q unexpectedly ran %s", state, strings.Join(req.Args, " "))
+				return LocalCommandResult{}, nil
+			}}
+			backend := &tenkiBackend{rt: Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+			initial := tenkiSession{ID: "session-1", State: state}
+			got, err := backend.ensureSessionReadyForSSH(context.Background(), backend.configForRun(), initial)
+			if err != nil || got.State != state {
+				t.Fatalf("state=%q got=%#v err=%v", state, got, err)
+			}
+		})
+	}
+}
+
 func TestTenkiSSHTargetUsesProxyCommand(t *testing.T) {
 	backend := &tenkiBackend{cfg: Config{Tenki: TenkiConfig{
 		CLIPath:  "/opt/Tenki CLI/tenki",
@@ -594,11 +771,15 @@ func TestTenkiWaitForSSHCommandUsesStructuredOutput(t *testing.T) {
 }
 
 type fakeRunner struct {
-	calls []LocalCommandRequest
-	run   func(LocalCommandRequest) (LocalCommandResult, error)
+	calls  []LocalCommandRequest
+	run    func(LocalCommandRequest) (LocalCommandResult, error)
+	runCtx func(context.Context, LocalCommandRequest) (LocalCommandResult, error)
 }
 
-func (f *fakeRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (f *fakeRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+	if f.runCtx != nil {
+		return f.runCtx(ctx, req)
+	}
 	if f.run == nil {
 		return LocalCommandResult{}, errors.New("unexpected command")
 	}

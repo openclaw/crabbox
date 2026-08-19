@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -393,6 +394,31 @@ func isDigitalOceanUnprocessable(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.Status == http.StatusUnprocessableEntity
 }
 
+func pollReconciliation[T any](
+	ctx context.Context, interval time.Duration,
+	fetch func(context.Context) ([]T, error),
+	selectOne func([]T) (T, bool, error),
+	notFound error,
+) (T, error) {
+	var selected T
+	result, err := shared.Poll(ctx, 0, interval, shared.SleepContext, fetch, func(_ context.Context, values []T, fetchErr error) (bool, error) {
+		if fetchErr != nil {
+			return false, nil
+		}
+		var found bool
+		var selectErr error
+		selected, found, selectErr = selectOne(values)
+		return found, selectErr
+	}, nil)
+	if err == nil || context.Cause(ctx) == nil || !errors.Is(err, context.Cause(ctx)) {
+		return selected, err
+	}
+	if result.Err != nil {
+		notFound = result.Err
+	}
+	return selected, errors.Join(notFound, err)
+}
+
 func (c *digitalOceanClient) reconcileDropletCreate(leaseTag string, leaseTagResolved bool, leaseID, name string) (droplet, error) {
 	timeout := c.reconcileTimeout
 	if timeout <= 0 {
@@ -412,36 +438,26 @@ func (c *digitalOceanClient) reconcileDropletCreate(leaseTag string, leaseTagRes
 		}
 		leaseTag = canonical
 	}
-	var lastErr error
-	for {
-		droplets, err := c.listDropletsByTag(ctx, leaseTag)
-		if err == nil {
-			var matches []droplet
-			for _, item := range droplets {
-				if item.Name == name && isOwnedDroplet(item) && labelsFromTags(item.Tags)["lease"] == leaseID {
-					matches = append(matches, item)
-				}
+	return pollReconciliation(ctx, interval,
+		func(observeCtx context.Context) ([]droplet, error) {
+			droplets, err := c.listDropletsByTag(observeCtx, leaseTag)
+			if err != nil {
+				return nil, err
 			}
+			return slices.DeleteFunc(droplets, func(item droplet) bool {
+				return item.Name != name || !isOwnedDroplet(item) || labelsFromTags(item.Tags)["lease"] != leaseID
+			}), nil
+		},
+		func(matches []droplet) (droplet, bool, error) {
 			switch len(matches) {
 			case 1:
-				return matches[0], nil
+				return matches[0], true, nil
 			case 0:
-				lastErr = core.Exit(4, "digitalocean create reconciliation did not find lease=%s", leaseID)
+				return droplet{}, false, nil
 			default:
-				return droplet{}, core.Exit(2, "digitalocean create reconciliation found multiple droplets for lease=%s", leaseID)
+				return droplet{}, false, core.Exit(2, "digitalocean create reconciliation found multiple droplets for lease=%s", leaseID)
 			}
-		} else {
-			lastErr = err
-		}
-
-		timer := time.NewTimer(interval)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return droplet{}, errors.Join(lastErr, ctx.Err())
-		case <-timer.C:
-		}
-	}
+		}, core.Exit(4, "digitalocean create reconciliation did not find lease=%s", leaseID))
 }
 
 func (c *digitalOceanClient) rollbackCreatedSSHKey(key sshKey, cause error) error {
@@ -552,28 +568,9 @@ func (c *digitalOceanClient) reconcileSSHKey(name, publicKey string) (sshKey, er
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	var lastErr error
-	for {
-		keys, err := c.ListSSHKeys(ctx)
-		if err == nil {
-			if key, found, selectErr := selectSSHKey(keys, name, publicKey); selectErr != nil {
-				return sshKey{}, selectErr
-			} else if found {
-				return key, nil
-			}
-			lastErr = core.Exit(4, "digitalocean ssh key reconciliation did not find %q", name)
-		} else {
-			lastErr = err
-		}
-
-		timer := time.NewTimer(interval)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return sshKey{}, errors.Join(lastErr, ctx.Err())
-		case <-timer.C:
-		}
-	}
+	return pollReconciliation(ctx, interval, c.ListSSHKeys, func(keys []sshKey) (sshKey, bool, error) {
+		return selectSSHKey(keys, name, publicKey)
+	}, core.Exit(4, "digitalocean ssh key reconciliation did not find %q", name))
 }
 
 func selectSSHKey(keys []sshKey, name, publicKey string) (sshKey, bool, error) {

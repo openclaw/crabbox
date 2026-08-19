@@ -396,6 +396,14 @@ This hook must not adopt, rewrite, or otherwise repair a claim.
 "not found" as success. Remove local claims and the per-lease key directory
 after the provider release succeeds.
 
+Repeated lifecycle reads should use `shared.Poll` from
+`internal/providers/shared`. The caller owns any bounded or detached context
+and maps its deadline or cancellation cause to provider diagnostics. The helper
+only retains the last successful typed value, counts attempts, waits between
+reads, and invokes adapter checks and progress. Keep state strings,
+retryability, normalization, ownership checks, provider actions, claim updates,
+cleanup, and error wording in the adapter.
+
 If cleanup is meaningful, also implement:
 
 ```go

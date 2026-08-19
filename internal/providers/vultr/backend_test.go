@@ -20,6 +20,7 @@ type fakeVultrAPI struct {
 	instances    []vultrInstance
 	createErr    error
 	getErr       error
+	getFn        func(context.Context, string) (vultrInstance, error)
 	deleteErr    error
 	keyDeleteErr error
 	updateErr    error
@@ -60,7 +61,10 @@ func (f *fakeVultrAPI) ListCrabboxInstances(context.Context) ([]vultrInstance, e
 	return out, nil
 }
 
-func (f *fakeVultrAPI) GetInstance(_ context.Context, id string) (vultrInstance, error) {
+func (f *fakeVultrAPI) GetInstance(ctx context.Context, id string) (vultrInstance, error) {
+	if f.getFn != nil {
+		return f.getFn(ctx, id)
+	}
 	if f.getErr != nil {
 		return vultrInstance{}, f.getErr
 	}
@@ -184,6 +188,79 @@ func newTestBackend(t *testing.T, api *fakeVultrAPI) *backend {
 	b.clientFactory = func(core.Runtime) (vultrAPI, error) { return api, nil }
 	b.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error { return nil }
 	return b
+}
+
+func TestWaitForInstanceReady(t *testing.T) {
+	const instanceID = "11111111-1111-4111-8111-111111111111"
+	t.Run("pending to ready", func(t *testing.T) {
+		calls := 0
+		api := &fakeVultrAPI{getFn: func(context.Context, string) (vultrInstance, error) {
+			calls++
+			if calls == 1 {
+				return vultrInstance{ID: instanceID, Status: "pending", MainIP: "0.0.0.0"}, nil
+			}
+			return vultrInstance{ID: instanceID, Status: "active", PowerStatus: "running", ServerStatus: "ok", MainIP: "203.0.113.20"}, nil
+		}}
+		got, err := newTestBackend(t, api).waitForInstanceReady(context.Background(), api, instanceID, time.Minute)
+		if err != nil || got.ID != instanceID || calls != 2 {
+			t.Fatalf("instance=%#v err=%v calls=%d", got, err, calls)
+		}
+	})
+
+	t.Run("read error", func(t *testing.T) {
+		wantErr := errors.New("read denied")
+		calls := 0
+		api := &fakeVultrAPI{getFn: func(context.Context, string) (vultrInstance, error) {
+			calls++
+			return vultrInstance{}, wantErr
+		}}
+		_, err := newTestBackend(t, api).waitForInstanceReady(context.Background(), api, instanceID, time.Minute)
+		if !errors.Is(err, wantErr) || calls != 1 {
+			t.Fatalf("err=%v calls=%d", err, calls)
+		}
+	})
+
+	t.Run("client deadline", func(t *testing.T) {
+		api := &fakeVultrAPI{getErr: context.DeadlineExceeded}
+		_, err := newTestBackend(t, api).waitForInstanceReady(context.Background(), api, instanceID, time.Minute)
+		if !errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "timed out waiting") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	t.Run("read error at deadline", func(t *testing.T) {
+		wantErr := errors.New("late read denied")
+		api := &fakeVultrAPI{getFn: func(ctx context.Context, _ string) (vultrInstance, error) {
+			<-ctx.Done()
+			return vultrInstance{}, wantErr
+		}}
+		_, err := newTestBackend(t, api).waitForInstanceReady(context.Background(), api, instanceID, 10*time.Millisecond)
+		if !errors.Is(err, wantErr) || strings.Contains(err.Error(), "timed out") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	t.Run("cancellation during delay", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		calls := 0
+		api := &fakeVultrAPI{getFn: func(context.Context, string) (vultrInstance, error) {
+			calls++
+			time.AfterFunc(time.Millisecond, cancel)
+			return vultrInstance{ID: instanceID, Status: "pending", MainIP: "0.0.0.0"}, nil
+		}}
+		_, err := newTestBackend(t, api).waitForInstanceReady(ctx, api, instanceID, time.Minute)
+		if !errors.Is(err, context.Canceled) || calls != 1 {
+			t.Fatalf("err=%v calls=%d", err, calls)
+		}
+	})
+
+	t.Run("timeout", func(t *testing.T) {
+		api := &fakeVultrAPI{instances: []vultrInstance{{ID: instanceID, Status: "pending", MainIP: "0.0.0.0"}}}
+		_, err := newTestBackend(t, api).waitForInstanceReady(context.Background(), api, instanceID, 10*time.Millisecond)
+		if err == nil || err.Error() != "timed out waiting for Vultr instance IP" {
+			t.Fatalf("err=%v", err)
+		}
+	})
 }
 
 func TestLimitedUserSchemeDefaultsSSHUser(t *testing.T) {

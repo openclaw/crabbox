@@ -5,6 +5,7 @@
 ### Fixed
 
 - Enforced coordinator-provided SSH host keys before first transport and removed per-lease local SSH credentials after confirmed brokered release.
+- Shared lifecycle observation across Machine0, Tenki, DigitalOcean, Linode, Vultr, and Morph while keeping provider state handling adapter-owned, and made canceled Tenki readiness waits report cancellation instead of timeout.
 
 ## 0.45.0 - 2026-08-19
 

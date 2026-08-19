@@ -191,7 +191,7 @@ func (b *linodeLeaseBackend) acquireOnce(ctx context.Context, req core.AcquireRe
 		}
 		return core.LeaseTarget{}, err
 	}
-	waited, waitErr := b.waitForLinodeIP(ctx, client, created.ID)
+	waited, waitErr := b.waitForLinodeIP(ctx, client, created.ID, 5*time.Minute)
 	if waitErr != nil {
 		return core.LeaseTarget{}, waitErr
 	}
@@ -868,27 +868,21 @@ func applyTailscaleMetadata(labels map[string]string, meta core.TailscaleMetadat
 	}
 }
 
-func (b *linodeLeaseBackend) waitForLinodeIP(ctx context.Context, client linodeAPI, id int64) (linodeInstance, error) {
-	deadline := b.now().Add(5 * time.Minute)
-	for {
-		item, err := client.GetLinode(ctx, id)
-		if err != nil {
-			return linodeInstance{}, err
-		}
-		if publicIPv4(item) != "" {
-			return item, nil
-		}
-		if b.now().After(deadline) {
+func (b *linodeLeaseBackend) waitForLinodeIP(ctx context.Context, client linodeAPI, id int64, timeout time.Duration) (linodeInstance, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	result, err := shared.Poll(waitCtx, 0, 3*time.Second, shared.SleepContext,
+		func(ctx context.Context) (linodeInstance, error) { return client.GetLinode(ctx, id) },
+		func(_ context.Context, item linodeInstance, fetchErr error) (bool, error) {
+			return publicIPv4(item) != "", fetchErr
+		}, nil)
+	if err != nil {
+		if context.Cause(ctx) == nil && errors.Is(context.Cause(waitCtx), context.DeadlineExceeded) && errors.Is(err, context.DeadlineExceeded) {
 			return linodeInstance{}, core.Exit(5, "timed out waiting for Linode instance IP")
 		}
-		timer := time.NewTimer(3 * time.Second)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return linodeInstance{}, ctx.Err()
-		case <-timer.C:
-		}
+		result.Value = linodeInstance{}
 	}
+	return result.Value, err
 }
 
 func (b *linodeLeaseBackend) now() time.Time {

@@ -28,6 +28,7 @@ type fakeLinodeAPI struct {
 	nextID             int64
 	createErr          error
 	getErr             error
+	getFn              func(context.Context, int64) (linodeInstance, error)
 	deleteErr          error
 	created            []linodeInstance
 	deleted            []int64
@@ -60,7 +61,10 @@ func (f *fakeLinodeAPI) ListLinodes(context.Context) ([]linodeInstance, error) {
 	return append(append([]linodeInstance(nil), f.linodes...), f.created...), nil
 }
 
-func (f *fakeLinodeAPI) GetLinode(_ context.Context, id int64) (linodeInstance, error) {
+func (f *fakeLinodeAPI) GetLinode(ctx context.Context, id int64) (linodeInstance, error) {
+	if f.getFn != nil {
+		return f.getFn(ctx, id)
+	}
 	if f.getErr != nil {
 		return linodeInstance{}, f.getErr
 	}
@@ -149,6 +153,78 @@ func newTestBackend(t *testing.T, api *fakeLinodeAPI) *linodeLeaseBackend {
 	backend.clientFactory = func(core.Runtime) (linodeAPI, error) { return api, nil }
 	backend.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error { return nil }
 	return backend
+}
+
+func TestWaitForLinodeIP(t *testing.T) {
+	t.Run("pending to ready", func(t *testing.T) {
+		calls := 0
+		api := &fakeLinodeAPI{getFn: func(context.Context, int64) (linodeInstance, error) {
+			calls++
+			if calls == 1 {
+				return linodeInstance{ID: 42, Status: "provisioning"}, nil
+			}
+			return linodeInstance{ID: 42, Status: "offline", IPv4: []string{"203.0.113.42"}}, nil
+		}}
+		got, err := newTestBackend(t, api).waitForLinodeIP(context.Background(), api, 42, time.Minute)
+		if err != nil || got.ID != 42 || calls != 2 {
+			t.Fatalf("instance=%#v err=%v calls=%d", got, err, calls)
+		}
+	})
+
+	t.Run("read error", func(t *testing.T) {
+		wantErr := errors.New("read denied")
+		calls := 0
+		api := &fakeLinodeAPI{getFn: func(context.Context, int64) (linodeInstance, error) {
+			calls++
+			return linodeInstance{}, wantErr
+		}}
+		_, err := newTestBackend(t, api).waitForLinodeIP(context.Background(), api, 42, time.Minute)
+		if !errors.Is(err, wantErr) || calls != 1 {
+			t.Fatalf("err=%v calls=%d", err, calls)
+		}
+	})
+
+	t.Run("client deadline", func(t *testing.T) {
+		api := &fakeLinodeAPI{getErr: context.DeadlineExceeded}
+		_, err := newTestBackend(t, api).waitForLinodeIP(context.Background(), api, 42, time.Minute)
+		if !errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "timed out waiting") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	t.Run("read error at deadline", func(t *testing.T) {
+		wantErr := errors.New("late read denied")
+		api := &fakeLinodeAPI{getFn: func(ctx context.Context, _ int64) (linodeInstance, error) {
+			<-ctx.Done()
+			return linodeInstance{}, wantErr
+		}}
+		_, err := newTestBackend(t, api).waitForLinodeIP(context.Background(), api, 42, 10*time.Millisecond)
+		if !errors.Is(err, wantErr) || strings.Contains(err.Error(), "timed out") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	t.Run("cancellation during delay", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		calls := 0
+		api := &fakeLinodeAPI{getFn: func(context.Context, int64) (linodeInstance, error) {
+			calls++
+			time.AfterFunc(time.Millisecond, cancel)
+			return linodeInstance{ID: 42, Status: "provisioning"}, nil
+		}}
+		_, err := newTestBackend(t, api).waitForLinodeIP(ctx, api, 42, time.Minute)
+		if !errors.Is(err, context.Canceled) || calls != 1 {
+			t.Fatalf("err=%v calls=%d", err, calls)
+		}
+	})
+
+	t.Run("timeout", func(t *testing.T) {
+		api := &fakeLinodeAPI{linodes: []linodeInstance{{ID: 42, Status: "provisioning"}}}
+		_, err := newTestBackend(t, api).waitForLinodeIP(context.Background(), api, 42, 10*time.Millisecond)
+		if err == nil || err.Error() != "timed out waiting for Linode instance IP" {
+			t.Fatalf("err=%v", err)
+		}
+	})
 }
 
 func TestAcquireCreatesLinodeClaimsLeaseAndMarksReady(t *testing.T) {

@@ -950,6 +950,116 @@ func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return fn(req)
 }
 
+func TestDigitalOceanDropletReconciliationZeroThenOne(t *testing.T) {
+	leaseID := "cbx_abcdef123456"
+	name := core.LeaseProviderName(leaseID, "blue")
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	standardCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("type") == "gpus" {
+			_, _ = w.Write([]byte(`{"droplets":[],"links":{"pages":{}}}`))
+			return
+		}
+		standardCalls++
+		items := []droplet(nil)
+		if standardCalls == 2 {
+			items = []droplet{{ID: 42, Name: name, Tags: leaseTags(cfg, leaseID, "blue", "provisioning", false, time.Now())}}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"droplets": items, "links": map[string]any{"pages": map[string]any{}}})
+	}))
+	defer server.Close()
+	client := &digitalOceanClient{token: "token", client: server.Client(), baseURL: server.URL, reconcileTimeout: time.Second, reconcileInterval: time.Nanosecond}
+
+	item, err := client.reconcileDropletCreate("crabbox:lease:"+leaseID, true, leaseID, name)
+	if err != nil || item.ID != 42 || standardCalls != 2 {
+		t.Fatalf("droplet=%#v err=%v standardCalls=%d", item, err, standardCalls)
+	}
+}
+
+func TestDigitalOceanDropletReconciliationMultipleMatchesFailsImmediately(t *testing.T) {
+	leaseID := "cbx_abcdef123456"
+	name := core.LeaseProviderName(leaseID, "blue")
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	standardCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		items := []droplet(nil)
+		if r.URL.Query().Get("type") != "gpus" {
+			standardCalls++
+			tags := leaseTags(cfg, leaseID, "blue", "provisioning", false, time.Now())
+			items = []droplet{{ID: 42, Name: name, Tags: tags}, {ID: 43, Name: name, Tags: tags}}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"droplets": items, "links": map[string]any{"pages": map[string]any{}}})
+	}))
+	defer server.Close()
+	client := &digitalOceanClient{token: "token", client: server.Client(), baseURL: server.URL, reconcileTimeout: time.Second, reconcileInterval: time.Hour}
+
+	_, err := client.reconcileDropletCreate("crabbox:lease:"+leaseID, true, leaseID, name)
+	if err == nil || !strings.Contains(err.Error(), "found multiple droplets") || standardCalls != 1 {
+		t.Fatalf("err=%v standardCalls=%d", err, standardCalls)
+	}
+}
+
+func TestDigitalOceanDropletReconciliationRetainsLastListError(t *testing.T) {
+	client := &digitalOceanClient{
+		token: "token",
+		client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusServiceUnavailable,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("list unavailable marker")),
+			}, nil
+		})},
+		baseURL:           "https://api.digitalocean.test",
+		reconcileTimeout:  20 * time.Millisecond,
+		reconcileInterval: time.Millisecond,
+	}
+
+	_, err := client.reconcileDropletCreate("crabbox:lease:cbx_abcdef123456", true, "cbx_abcdef123456", "crabbox-blue")
+	if err == nil || !strings.Contains(err.Error(), "list unavailable marker") || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestDigitalOceanSSHKeyReconciliationZeroThenOne(t *testing.T) {
+	listCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		listCalls++
+		keys := []sshKey(nil)
+		if listCalls == 2 {
+			keys = []sshKey{{ID: 7, Name: "crabbox-key", PublicKey: "ssh-ed25519 expected"}}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ssh_keys": keys, "links": map[string]any{"pages": map[string]any{}}})
+	}))
+	defer server.Close()
+	client := &digitalOceanClient{token: "token", client: server.Client(), baseURL: server.URL, reconcileTimeout: time.Second, reconcileInterval: time.Nanosecond}
+
+	key, err := client.reconcileSSHKey("crabbox-key", "ssh-ed25519 expected")
+	if err != nil || key.ID != 7 || listCalls != 2 {
+		t.Fatalf("key=%#v err=%v listCalls=%d", key, err, listCalls)
+	}
+}
+
+func TestDigitalOceanSSHKeyReconciliationMultipleMatchesFailsImmediately(t *testing.T) {
+	listCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		listCalls++
+		keys := []sshKey{
+			{ID: 7, Name: "crabbox-key", PublicKey: "ssh-ed25519 expected"},
+			{ID: 8, Name: "crabbox-key", PublicKey: "ssh-ed25519 expected"},
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ssh_keys": keys, "links": map[string]any{"pages": map[string]any{}}})
+	}))
+	defer server.Close()
+	client := &digitalOceanClient{token: "token", client: server.Client(), baseURL: server.URL, reconcileTimeout: time.Second, reconcileInterval: time.Hour}
+
+	_, err := client.reconcileSSHKey("crabbox-key", "ssh-ed25519 expected")
+	if err == nil || !strings.Contains(err.Error(), "multiple entries matching") || listCalls != 1 {
+		t.Fatalf("err=%v listCalls=%d", err, listCalls)
+	}
+}
+
 func TestDigitalOceanClientRedactsReflectedToken(t *testing.T) {
 	const token = "sibling-secret-token"
 	for _, tt := range []struct {

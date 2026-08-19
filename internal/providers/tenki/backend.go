@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type tenkiFlagValues struct {
@@ -115,7 +117,7 @@ func NewTenkiBackend(spec ProviderSpec, cfg Config, rt Runtime) (Backend, error)
 	cfg.SSHFallbackPorts = nil
 	cfg.Network = networkPublic
 	cfg.WorkRoot = tenkiWorkRoot(cfg)
-	return &tenkiBackend{spec: spec, cfg: cfg, rt: rt}, nil
+	return &tenkiBackend{spec: spec, cfg: cfg, rt: rt, sleep: shared.SleepContext}, nil
 }
 
 func validateTenkiOptions(cfg Config) error {
@@ -148,9 +150,10 @@ func normalizeTenkiProviderConfig(cfg *Config) {
 }
 
 type tenkiBackend struct {
-	spec ProviderSpec
-	cfg  Config
-	rt   Runtime
+	spec  ProviderSpec
+	cfg   Config
+	rt    Runtime
+	sleep func(context.Context, time.Duration) error
 }
 
 func (b *tenkiBackend) Spec() ProviderSpec { return b.spec }
@@ -490,44 +493,32 @@ func (b *tenkiBackend) waitForSessionReady(ctx context.Context, sessionID string
 }
 
 func (b *tenkiBackend) waitForSessionState(ctx context.Context, sessionID string, timeout time.Duration, done func(tenkiSession) (bool, error)) (tenkiSession, error) {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-
-	deadline := time.Now().Add(timeout)
-	var last tenkiSession
-	var lastErr error
-	for {
-		session, err := b.getSession(ctx, sessionID)
-		if err == nil {
-			last = session
-			ok, stateErr := done(session)
-			if stateErr != nil {
-				return tenkiSession{}, stateErr
+	result, err := shared.Poll(waitCtx, 0, 5*time.Second, b.sleep,
+		func(ctx context.Context) (tenkiSession, error) { return b.getSession(ctx, sessionID) },
+		func(_ context.Context, session tenkiSession, fetchErr error) (bool, error) {
+			if fetchErr == nil {
+				return done(session)
 			}
-			if ok {
-				return session, nil
-			}
-			lastErr = nil
-		} else {
-			lastErr = err
-		}
-
-		if ctx.Err() != nil {
-			if lastErr != nil {
-				return tenkiSession{}, exit(5, "timed out waiting for Tenki session %s to become ready: %v", sessionID, lastErr)
-			}
-			return tenkiSession{}, exit(5, "timed out waiting for Tenki session %s to become ready; last state=%s", sessionID, last.State)
-		}
-		fmt.Fprintf(b.rt.Stderr, "waiting for tenki session=%s state=%s remaining=%s\n", sessionID, blank(last.State, "unknown"), time.Until(deadline).Round(time.Second))
-		select {
-		case <-ctx.Done():
-			if lastErr != nil {
-				return tenkiSession{}, exit(5, "timed out waiting for Tenki session %s to become ready: %v", sessionID, lastErr)
-			}
-			return tenkiSession{}, exit(5, "timed out waiting for Tenki session %s to become ready; last state=%s", sessionID, last.State)
-		case <-time.After(5 * time.Second):
-		}
+			return false, nil
+		},
+		func(result shared.PollResult[tenkiSession]) {
+			fmt.Fprintf(b.rt.Stderr, "waiting for tenki session=%s state=%s remaining=%s\n", sessionID, blank(result.Value.State, "unknown"), result.Remaining.Round(time.Second))
+		})
+	if err == nil {
+		return result.Value, nil
 	}
+	if cause := context.Cause(ctx); cause != nil && err == cause {
+		return tenkiSession{}, cause
+	}
+	if cause := context.Cause(waitCtx); cause != context.DeadlineExceeded || err != cause {
+		return tenkiSession{}, err
+	}
+	if result.Err != nil {
+		return tenkiSession{}, exit(5, "timed out waiting for Tenki session %s to become ready: %v", sessionID, result.Err)
+	}
+	return tenkiSession{}, exit(5, "timed out waiting for Tenki session %s to become ready; last state=%s", sessionID, result.Value.State)
 }
 
 func (b *tenkiBackend) listSessions(ctx context.Context, all bool) ([]tenkiSession, error) {

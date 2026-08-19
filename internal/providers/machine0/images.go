@@ -11,6 +11,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const (
@@ -348,53 +349,53 @@ func checkpointBackend(cfg Config) (*backend, error) {
 }
 
 func (b *backend) waitForImageVersion(ctx context.Context, name string, previous int, expectedMetadata map[string]string, wait bool, timeout time.Duration, stderr interface{ Write([]byte) (int, error) }) (machineImageDetail, machineImageVersion, error) {
-	deadlineCtx := ctx
+	pollCtx := ctx
 	cancel := func() {}
 	if wait {
-		deadlineCtx, cancel = context.WithTimeout(ctx, timeout)
+		pollCtx, cancel = context.WithTimeout(ctx, timeout)
 	}
 	defer cancel()
 	var lastDetail machineImageDetail
 	var lastVersion machineImageVersion
-	observed := false
-	for {
-		detail, err := b.api.GetImage(deadlineCtx, name)
-		if err != nil {
-			return lastDetail, lastVersion, err
+	result, err := shared.Poll(pollCtx, 0, b.configForRun().Machine0.PollInterval, b.sleep, func(observeCtx context.Context) (machineImageDetail, error) {
+		return b.api.GetImage(observeCtx, name)
+	}, func(_ context.Context, detail machineImageDetail, fetchErr error) (bool, error) {
+		if fetchErr != nil {
+			return false, fetchErr
 		}
 		sort.Slice(detail.Versions, func(i, j int) bool { return detail.Versions[i].Version > detail.Versions[j].Version })
-		for _, version := range detail.Versions {
-			if version.Version <= previous || !machine0ImageVersionMetadataMatches(version, expectedMetadata) {
-				continue
+		var version machineImageVersion
+		for _, candidate := range detail.Versions {
+			if candidate.Version > previous && machine0ImageVersionMetadataMatches(candidate, expectedMetadata) {
+				version = candidate
+				break
 			}
-			lastDetail, lastVersion, observed = detail, version, true
-			if !wait || imageVersionReady(version) {
-				return detail, version, nil
-			}
-			if imageVersionTerminal(version) {
-				return detail, version, exit(5, "Machine0 image %s v%d entered terminal state %s", name, version.Version, imageVersionState(version))
-			}
-			if stderr != nil {
-				_, _ = fmt.Fprintf(stderr, "waiting image=%s version=%d state=%s\n", name, version.Version, imageVersionState(version))
-			}
-			break
 		}
-		if !wait {
-			return detail, machineImageVersion{}, exit(5, "Machine0 did not report a new image version for %s", name)
-		}
-		if err := b.sleep(deadlineCtx, b.configForRun().Machine0.PollInterval); err != nil {
-			var waitErr error
-			if deadlineCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
-				waitErr = exit(5, "timed out waiting for Machine0 image %s", name)
-			} else {
-				waitErr = err
+		if version.Version == 0 {
+			if !wait {
+				return false, exit(5, "Machine0 did not report a new image version for %s", name)
 			}
-			if observed {
-				return lastDetail, lastVersion, waitErr
-			}
-			return detail, machineImageVersion{}, waitErr
+			return false, nil
 		}
+		lastDetail, lastVersion = detail, version
+		if !wait || imageVersionReady(version) {
+			return true, nil
+		}
+		if imageVersionTerminal(version) {
+			return false, exit(5, "Machine0 image %s v%d entered terminal state %s", name, version.Version, imageVersionState(version))
+		}
+		if stderr != nil {
+			_, _ = fmt.Fprintf(stderr, "waiting image=%s version=%d state=%s\n", name, version.Version, imageVersionState(version))
+		}
+		return false, nil
+	}, nil)
+	if err != nil && wait && context.Cause(ctx) == nil && errors.Is(context.Cause(pollCtx), context.DeadlineExceeded) && errors.Is(err, context.DeadlineExceeded) {
+		err = exit(5, "timed out waiting for Machine0 image %s", name)
 	}
+	if lastVersion.Version > 0 {
+		return lastDetail, lastVersion, err
+	}
+	return result.Value, machineImageVersion{}, err
 }
 
 func machine0ImageVersionMetadataMatches(version machineImageVersion, expected map[string]string) bool {

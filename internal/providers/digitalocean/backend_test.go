@@ -23,6 +23,8 @@ type fakeDigitalOceanAPI struct {
 	nextID         int64
 	createErr      error
 	getErr         error
+	getFn          func(context.Context, int64) (droplet, error)
+	getCalls       int
 	deleteErr      error
 	deleteSawDone  bool
 	keyDeleteErr   error
@@ -70,7 +72,11 @@ func (f *fakeDigitalOceanAPI) ListCrabboxDroplets(context.Context) ([]droplet, e
 	return out, nil
 }
 
-func (f *fakeDigitalOceanAPI) GetDroplet(_ context.Context, id int64) (droplet, error) {
+func (f *fakeDigitalOceanAPI) GetDroplet(ctx context.Context, id int64) (droplet, error) {
+	f.getCalls++
+	if f.getFn != nil {
+		return f.getFn(ctx, id)
+	}
 	if f.getErr != nil {
 		return droplet{}, f.getErr
 	}

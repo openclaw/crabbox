@@ -20,6 +20,7 @@ import (
 type fakeAPI struct {
 	machine                machine
 	getSequence            []machine
+	getFn                  func(context.Context, string) (machine, error)
 	sizes                  []machineSize
 	created                []createMachineRequest
 	stopped                []string
@@ -31,6 +32,7 @@ type fakeAPI struct {
 	imageDetail            machineImageDetail
 	imageDetails           []machineImageDetail
 	imageErrors            []error
+	imageFn                func(context.Context, string) (machineImageDetail, error)
 	savedImages            [][2]string
 	removedImage           []string
 	stopErr                error
@@ -49,7 +51,10 @@ func (f *fakeAPI) List(context.Context) ([]machine, error) {
 	}
 	return []machine{f.machine}, nil
 }
-func (f *fakeAPI) Get(context.Context, string) (machine, error) {
+func (f *fakeAPI) Get(ctx context.Context, name string) (machine, error) {
+	if f.getFn != nil {
+		return f.getFn(ctx, name)
+	}
 	if len(f.getSequence) > 0 {
 		item := f.getSequence[0]
 		f.getSequence = f.getSequence[1:]
@@ -96,7 +101,10 @@ func (f *fakeAPI) PrimeSSH(_ context.Context, name string) error {
 }
 func (f *fakeAPI) Sizes(context.Context) ([]machineSize, error)       { return f.sizes, nil }
 func (f *fakeAPI) ListImages(context.Context) ([]machineImage, error) { return f.images, nil }
-func (f *fakeAPI) GetImage(context.Context, string) (machineImageDetail, error) {
+func (f *fakeAPI) GetImage(ctx context.Context, name string) (machineImageDetail, error) {
+	if f.imageFn != nil {
+		return f.imageFn(ctx, name)
+	}
 	if len(f.imageErrors) > 0 && f.imageErrors[0] != nil {
 		err := f.imageErrors[0]
 		f.imageErrors = f.imageErrors[1:]
@@ -703,6 +711,32 @@ func TestWaitForSuspendedHonorsContextAndTimeout(t *testing.T) {
 	}
 }
 
+func TestMachineWaitPreservesTerminalStateAtDeadline(t *testing.T) {
+	failed := readyMachine("")
+	failed.Status = "ERRORED"
+	failed.LastErrorMessage = "late provider failure"
+	api := &fakeAPI{getFn: func(ctx context.Context, _ string) (machine, error) {
+		<-ctx.Done()
+		return failed, nil
+	}}
+	b := testBackendWithAPI(api)
+	_, err := b.waitForRunning(context.Background(), failed.Name, 10*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "late provider failure") || strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestMachineWaitPreservesClientDeadline(t *testing.T) {
+	api := &fakeAPI{getFn: func(context.Context, string) (machine, error) {
+		return machine{}, context.DeadlineExceeded
+	}}
+	b := testBackendWithAPI(api)
+	_, err := b.waitForRunning(context.Background(), "late-machine", time.Minute)
+	if !errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "timed out waiting") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestResolveStartsOnceAfterStoppingTransition(t *testing.T) {
 	for _, transition := range []struct {
 		name   string
@@ -1107,7 +1141,7 @@ func TestCreateNativeCheckpointJoinsSnapshotAndRestartFailures(t *testing.T) {
 func TestCreateNativeCheckpointRestartsAfterSnapshotTimeout(t *testing.T) {
 	b, api, _, claim, req := checkpointCreateFixture(t)
 	req.Wait = false
-	req.WaitTimeout = time.Nanosecond
+	req.WaitTimeout = 10 * time.Millisecond
 	b.sleep = sleepContext
 	api.imageDetail = checkpointImageSnapshotState(req, claim, 1, "CREATING")
 	api.getSequence = []machine{
@@ -1144,7 +1178,7 @@ func TestCreateNativeCheckpointRestartsAfterCallerCancellation(t *testing.T) {
 	if err == nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
-	if result.Image.ID != "img-1@v1" || strings.Join(api.actions, ",") != "stop,save,image:CREATING,start" {
+	if result.Image.ID != "" || strings.Join(api.actions, ",") != "stop,start" {
 		t.Fatalf("result=%#v actions=%v", result, api.actions)
 	}
 	if len(api.started) != 1 {
@@ -1356,10 +1390,21 @@ func TestImageWaitKeepsObservedVersionOnTimeoutAndError(t *testing.T) {
 		Version: 2, Status: "DRAFT", DisplayStatus: "DRAFT", SnapshotStatus: "CREATING", Metadata: map[string]any{"crabbox_checkpoint": "chk_123", "crabbox_lease": "cbx_123", "crabbox_source": "vm-123"},
 	}}}
 
-	t.Run("timeout", func(t *testing.T) {
+	t.Run("immediate timeout does not fetch", func(t *testing.T) {
+		b := testBackendWithAPI(&fakeAPI{imageDetail: pending})
+		detail, version, err := b.waitForImageVersion(context.Background(), "baseline", 1, expected, true, 0, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "timed out") {
+			t.Fatalf("err=%v", err)
+		}
+		if detail.Image.ID != "" || version.Version != 0 {
+			t.Fatalf("immediate timeout fetched identity: detail=%#v version=%#v", detail, version)
+		}
+	})
+
+	t.Run("timeout retains observed identity", func(t *testing.T) {
 		b := testBackendWithAPI(&fakeAPI{imageDetail: pending})
 		b.sleep = sleepContext
-		detail, version, err := b.waitForImageVersion(context.Background(), "baseline", 1, expected, true, 0, io.Discard)
+		detail, version, err := b.waitForImageVersion(context.Background(), "baseline", 1, expected, true, 10*time.Millisecond, io.Discard)
 		if err == nil || !strings.Contains(err.Error(), "timed out") {
 			t.Fatalf("err=%v", err)
 		}
@@ -1380,6 +1425,72 @@ func TestImageWaitKeepsObservedVersionOnTimeoutAndError(t *testing.T) {
 			t.Fatalf("error lost observed identity: detail=%#v version=%#v", detail, version)
 		}
 	})
+
+	t.Run("terminal state at deadline", func(t *testing.T) {
+		terminal := pending
+		terminal.Versions = append([]machineImageVersion(nil), pending.Versions...)
+		terminal.Versions[0].SnapshotStatus = "FAILED"
+		api := &fakeAPI{imageFn: func(ctx context.Context, _ string) (machineImageDetail, error) {
+			<-ctx.Done()
+			return terminal, nil
+		}}
+		b := testBackendWithAPI(api)
+		_, version, err := b.waitForImageVersion(context.Background(), "baseline", 1, expected, true, 10*time.Millisecond, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "terminal state") || strings.Contains(err.Error(), "timed out") || version.Version != 2 {
+			t.Fatalf("version=%#v err=%v", version, err)
+		}
+	})
+
+	t.Run("client deadline", func(t *testing.T) {
+		api := &fakeAPI{imageFn: func(context.Context, string) (machineImageDetail, error) {
+			return machineImageDetail{}, context.DeadlineExceeded
+		}}
+		b := testBackendWithAPI(api)
+		_, _, err := b.waitForImageVersion(context.Background(), "baseline", 1, expected, true, time.Minute, io.Discard)
+		if !errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "timed out waiting") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	t.Run("later response omits version", func(t *testing.T) {
+		api := &fakeAPI{imageDetails: []machineImageDetail{pending, {Image: machineImage{ID: "img-1", Name: "baseline"}}}}
+		b := testBackendWithAPI(api)
+		sleeps := 0
+		b.sleep = func(ctx context.Context, _ time.Duration) error {
+			sleeps++
+			if sleeps == 1 {
+				return nil
+			}
+			<-ctx.Done()
+			return context.Cause(ctx)
+		}
+		detail, version, err := b.waitForImageVersion(context.Background(), "baseline", 1, expected, true, 10*time.Millisecond, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "timed out") {
+			t.Fatalf("err=%v", err)
+		}
+		if detail.Image.ID != "img-1" || version.Version != 2 {
+			t.Fatalf("later response lost observed identity: detail=%#v version=%#v", detail, version)
+		}
+	})
+}
+
+func TestImageWaitReportsProgressOnlyWhileContinuing(t *testing.T) {
+	expected := map[string]string{"crabbox_checkpoint": "chk_123", "crabbox_lease": "cbx_123", "crabbox_source": "vm-123"}
+	pending := machineImageDetail{Image: machineImage{ID: "img-1", Name: "baseline"}, Versions: []machineImageVersion{{
+		Version: 2, Status: "DRAFT", DisplayStatus: "DRAFT", SnapshotStatus: "CREATING", Metadata: map[string]any{"crabbox_checkpoint": "chk_123", "crabbox_lease": "cbx_123", "crabbox_source": "vm-123"},
+	}}}
+	ready := pending
+	ready.Versions = append([]machineImageVersion(nil), pending.Versions...)
+	ready.Versions[0].SnapshotStatus = "READY"
+	b := testBackendWithAPI(&fakeAPI{imageDetails: []machineImageDetail{pending, ready}})
+	var progress bytes.Buffer
+	_, _, err := b.waitForImageVersion(context.Background(), "baseline", 1, expected, true, time.Minute, &progress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := progress.String(); got != "waiting image=baseline version=2 state=DRAFT\n" {
+		t.Fatalf("progress=%q", got)
+	}
 }
 
 func TestImageWaitSelectsMatchingConcurrentSaveVersion(t *testing.T) {

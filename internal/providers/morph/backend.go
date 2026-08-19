@@ -3,6 +3,7 @@ package morph
 import (
 	"context"
 	"encoding/pem"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -589,38 +591,36 @@ func (b *morphLeaseBackend) listInstances(ctx context.Context, client morphAPI, 
 }
 
 func (b *morphLeaseBackend) waitForInstanceReady(ctx context.Context, client morphAPI, instanceID string, allowPaused bool) (morphInstance, error) {
-	waitCtx := ctx
-	cancel := func() {}
+	waitCtx, cancel := ctx, func() {}
 	if b.readyTimeout > 0 {
 		waitCtx, cancel = context.WithTimeout(ctx, b.readyTimeout)
 	}
 	defer cancel()
-	for {
-		instance, err := client.GetInstance(waitCtx, instanceID)
-		if err != nil {
-			if isMorphNotFound(err) {
-				return morphInstance{}, exit(4, "morph instance %s disappeared while waiting for readiness", instanceID)
+	result, err := shared.Poll(waitCtx, 0, b.readyPollInterval, shared.SleepContext,
+		func(ctx context.Context) (morphInstance, error) { return client.GetInstance(ctx, instanceID) },
+		func(_ context.Context, instance morphInstance, fetchErr error) (bool, error) {
+			switch {
+			case isMorphNotFound(fetchErr):
+				return false, exit(4, "morph instance %s disappeared while waiting for readiness", instanceID)
+			case fetchErr != nil:
+				return false, exit(1, "morph get instance %s failed: %v", instanceID, fetchErr)
+			case morphInstanceReady(instance) || allowPaused && morphInstancePaused(instance):
+				return true, nil
+			case morphInstanceTerminal(instance):
+				return false, exit(1, "morph instance %s entered terminal state %q", instanceID, blank(instance.Status, "unknown"))
 			}
-			return morphInstance{}, exit(1, "morph get instance %s failed: %v", instanceID, err)
+			return false, nil
+		}, nil)
+	if waitErr := waitCtx.Err(); waitErr != nil && errors.Is(err, context.Cause(waitCtx)) {
+		if waitErr == context.DeadlineExceeded {
+			return morphInstance{}, exit(5, "timed out waiting for morph instance %s to become ready", instanceID)
 		}
-		if morphInstanceReady(instance) {
-			return instance, nil
-		}
-		if allowPaused && morphInstancePaused(instance) {
-			return instance, nil
-		}
-		if morphInstanceTerminal(instance) {
-			return morphInstance{}, exit(1, "morph instance %s entered terminal state %q", instanceID, blank(instance.Status, "unknown"))
-		}
-		select {
-		case <-waitCtx.Done():
-			if waitCtx.Err() == context.DeadlineExceeded {
-				return morphInstance{}, exit(5, "timed out waiting for morph instance %s to become ready", instanceID)
-			}
-			return morphInstance{}, waitCtx.Err()
-		case <-time.After(b.readyPollInterval):
-		}
+		return morphInstance{}, waitErr
 	}
+	if err == nil {
+		return result.Value, nil
+	}
+	return morphInstance{}, err
 }
 
 func (b *morphLeaseBackend) resolveSSHTarget(ctx context.Context, cfg Config, client morphAPI, leaseID string, instance morphInstance, waitReady bool) (SSHTarget, error) {

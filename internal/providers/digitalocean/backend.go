@@ -206,7 +206,7 @@ func (b *digitalOceanLeaseBackend) acquireOnce(ctx context.Context, req core.Acq
 		}
 		return core.LeaseTarget{}, err
 	}
-	waited, waitErr := b.waitForDropletIP(ctx, client, created.ID)
+	waited, waitErr := b.waitForDropletIP(ctx, client, created.ID, 5*time.Minute)
 	if waitErr != nil {
 		return core.LeaseTarget{}, waitErr
 	}
@@ -497,44 +497,32 @@ func (b *digitalOceanLeaseBackend) releaseTargetFromClaim(ctx context.Context, c
 }
 
 func (b *digitalOceanLeaseBackend) reconcilePendingRecovery(ctx context.Context, client digitalOceanAPI, claim core.LeaseClaim, accountID string) (core.LeaseTarget, bool, error) {
-	polls := b.recoveryReconcilePolls
-	if polls <= 0 {
-		polls = ambiguousCreateRecoveryPolls
-	}
-	interval := b.recoveryReconcileInterval
-	if interval <= 0 {
-		interval = ambiguousCreateRecoveryInterval
-	}
-	for poll := 0; poll < polls; poll++ {
-		droplets, err := client.ListCrabboxDroplets(ctx)
-		if err != nil {
-			return core.LeaseTarget{}, false, err
-		}
-		matches := pendingRecoveryMatches(droplets, claim)
-		switch len(matches) {
-		case 1:
-			server := serverFromDroplet(matches[0], b.Cfg)
-			server.Labels[digitalOceanAccountLabel] = accountID
-			preserveDigitalOceanKeyIdentity(server.Labels, claim.Labels)
-			if _, err := core.UpdateLeaseClaimEndpointIfUnchangedWithProviderMetadata(claim.LeaseID, claim, server, core.SSHTarget{}); err != nil {
-				return core.LeaseTarget{}, false, fmt.Errorf("persist recovered digitalocean droplet: %w", err)
+	polls, interval := b.recoveryPolling()
+	var target core.LeaseTarget
+	_, err := shared.Poll(ctx, polls, interval, shared.SleepContext,
+		func(ctx context.Context) ([]droplet, error) { return client.ListCrabboxDroplets(ctx) },
+		func(_ context.Context, droplets []droplet, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
 			}
-			return core.LeaseTarget{LeaseID: claim.LeaseID, Server: server}, true, nil
-		case 0:
-		default:
-			return core.LeaseTarget{}, false, core.Exit(2, "digitalocean ambiguous create recovery found multiple droplets for lease=%s", claim.LeaseID)
-		}
-		if poll+1 < polls {
-			timer := time.NewTimer(interval)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return core.LeaseTarget{}, false, ctx.Err()
-			case <-timer.C:
+			matches := pendingRecoveryMatches(droplets, claim)
+			switch len(matches) {
+			case 1:
+				server := serverFromDroplet(matches[0], b.Cfg)
+				server.Labels[digitalOceanAccountLabel] = accountID
+				preserveDigitalOceanKeyIdentity(server.Labels, claim.Labels)
+				if _, err := core.UpdateLeaseClaimEndpointIfUnchangedWithProviderMetadata(claim.LeaseID, claim, server, core.SSHTarget{}); err != nil {
+					return false, fmt.Errorf("persist recovered digitalocean droplet: %w", err)
+				}
+				target = core.LeaseTarget{LeaseID: claim.LeaseID, Server: server}
+				return true, nil
+			case 0:
+				return false, nil
+			default:
+				return false, core.Exit(2, "digitalocean ambiguous create recovery found multiple droplets for lease=%s", claim.LeaseID)
 			}
-		}
-	}
-	return core.LeaseTarget{}, false, nil
+		}, nil)
+	return target, target.LeaseID != "", err
 }
 
 func (b *digitalOceanLeaseBackend) reconcilePendingKeyRecovery(ctx context.Context, client digitalOceanAPI, claim core.LeaseClaim) (core.LeaseTarget, bool, error) {
@@ -550,23 +538,26 @@ func (b *digitalOceanLeaseBackend) reconcilePendingKeyRecovery(ctx context.Conte
 	if publicKey == "" {
 		return core.LeaseTarget{}, false, core.Exit(2, "retained digitalocean SSH public key is empty for lease=%s", claim.LeaseID)
 	}
-	polls := b.recoveryReconcilePolls
-	if polls <= 0 {
-		polls = ambiguousCreateRecoveryPolls
-	}
-	interval := b.recoveryReconcileInterval
-	if interval <= 0 {
-		interval = ambiguousCreateRecoveryInterval
-	}
+	polls, interval := b.recoveryPolling()
 	keyName := providerKeyForLease(claim.LeaseID)
-	for poll := 0; poll < polls; poll++ {
-		key, found, err := client.FindSSHKey(ctx, keyName, publicKey)
-		if err != nil {
-			return core.LeaseTarget{}, false, err
-		}
-		if found {
+	var target core.LeaseTarget
+	_, err = shared.Poll(ctx, polls, interval, shared.SleepContext,
+		func(observeCtx context.Context) (*sshKey, error) {
+			key, found, err := client.FindSSHKey(observeCtx, keyName, publicKey)
+			if !found || err != nil {
+				return nil, err
+			}
+			return &key, nil
+		},
+		func(_ context.Context, key *sshKey, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
+			}
+			if key == nil {
+				return false, nil
+			}
 			if strings.TrimSpace(key.PublicKey) != publicKey {
-				return core.LeaseTarget{}, false, core.Exit(2, "refusing to delete digitalocean SSH key %q with a different public key", keyName)
+				return false, core.Exit(2, "refusing to delete digitalocean SSH key %q with a different public key", keyName)
 			}
 			labels := make(map[string]string, len(claim.Labels)+1)
 			for label, value := range claim.Labels {
@@ -574,30 +565,25 @@ func (b *digitalOceanLeaseBackend) reconcilePendingKeyRecovery(ctx context.Conte
 			}
 			labels[digitalOceanRecoveryKeyIDLabel] = strconv.FormatInt(key.ID, 10)
 			labels[digitalOceanKeyOwnedLabel] = "true"
-			server := core.Server{
-				Provider: providerName,
-				Name:     claim.Slug,
-				Labels:   labels,
-			}
+			server := core.Server{Provider: providerName, Name: claim.Slug, Labels: labels}
 			if _, err := core.UpdateLeaseClaimEndpointIfUnchangedWithProviderMetadata(claim.LeaseID, claim, server, core.SSHTarget{}); err != nil {
-				return core.LeaseTarget{}, false, fmt.Errorf("persist recovered digitalocean SSH key identity: %w", err)
+				return false, fmt.Errorf("persist recovered digitalocean SSH key identity: %w", err)
 			}
-			return core.LeaseTarget{
-				LeaseID: claim.LeaseID,
-				Server:  server,
-			}, true, nil
-		}
-		if poll+1 < polls {
-			timer := time.NewTimer(interval)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return core.LeaseTarget{}, false, ctx.Err()
-			case <-timer.C:
-			}
-		}
+			target = core.LeaseTarget{LeaseID: claim.LeaseID, Server: server}
+			return true, nil
+		}, nil)
+	return target, target.LeaseID != "", err
+}
+
+func (b *digitalOceanLeaseBackend) recoveryPolling() (int, time.Duration) {
+	polls, interval := b.recoveryReconcilePolls, b.recoveryReconcileInterval
+	if polls <= 0 {
+		polls = ambiguousCreateRecoveryPolls
 	}
-	return core.LeaseTarget{}, false, nil
+	if interval <= 0 {
+		interval = ambiguousCreateRecoveryInterval
+	}
+	return polls, interval
 }
 
 func validateDigitalOceanAcquireConfig(cfg core.Config, osImageExplicit bool) error {
@@ -1147,34 +1133,26 @@ func (b *digitalOceanLeaseBackend) recoverDigitalOceanKeyIdentity(ctx context.Co
 	return key.ID, false, true, nil
 }
 
-func (b *digitalOceanLeaseBackend) waitForDropletIP(ctx context.Context, client digitalOceanAPI, id int64) (droplet, error) {
-	deadline := time.Now().Add(5 * time.Minute)
-	for {
-		item, err := client.GetDroplet(ctx, id)
-		if err != nil {
-			return droplet{}, err
-		}
-		if publicIPv4(item) != "" {
-			return item, nil
-		}
-		if time.Now().After(deadline) {
+func (b *digitalOceanLeaseBackend) waitForDropletIP(ctx context.Context, client digitalOceanAPI, id int64, timeout time.Duration) (droplet, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	result, err := shared.Poll(waitCtx, 0, 3*time.Second, shared.SleepContext,
+		func(observeCtx context.Context) (droplet, error) {
+			return client.GetDroplet(observeCtx, id)
+		},
+		func(_ context.Context, item droplet, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
+			}
+			return publicIPv4(item) != "", nil
+		}, nil)
+	if err != nil {
+		if context.Cause(ctx) == nil && errors.Is(context.Cause(waitCtx), context.DeadlineExceeded) && errors.Is(err, context.DeadlineExceeded) {
 			return droplet{}, core.Exit(5, "timed out waiting for DigitalOcean Droplet IP")
 		}
-		if err := sleepContext(ctx, 3*time.Second); err != nil {
-			return droplet{}, err
-		}
+		return droplet{}, err
 	}
-}
-
-func sleepContext(ctx context.Context, delay time.Duration) error {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
+	return result.Value, nil
 }
 
 func (b *digitalOceanLeaseBackend) now() time.Time {

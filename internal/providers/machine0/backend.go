@@ -14,6 +14,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type backend struct {
@@ -480,160 +481,126 @@ func (b *backend) validateCatalogSelection(ctx context.Context, sizeName, region
 }
 
 func (b *backend) waitForRunning(ctx context.Context, name string, timeout time.Duration) (machine, error) {
-	waitCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	var last machine
-	for {
-		item, err := b.api.Get(waitCtx, name)
-		if err != nil {
-			return last, err
-		}
-		last = item
-		if machineRunning(item.Status) {
-			if strings.TrimSpace(item.IP) == "" {
-				return last, exit(5, "machine0 machine %s is RUNNING without an IP", item.Name)
-			}
-			return item, nil
-		}
-		if machineTerminal(item.Status) {
-			return item, terminalMachineError(item)
-		}
-		if machineStopped(item.Status) {
-			return item, exit(5, "machine0 machine %s reached stable state %s while waiting for creation", item.Name, item.Status)
-		}
-		if !machineAcquirePending(item.Status) {
-			return item, exit(5, "machine0 machine %s entered unexpected state %s", item.Name, item.Status)
-		}
-		if err := b.sleep(waitCtx, b.configForRun().Machine0.PollInterval); err != nil {
-			if errors.Is(waitCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-				return last, exit(5, "timed out waiting for machine0 machine %s; last state=%s", name, blank(last.Status, "unknown"))
-			}
-			return last, err
-		}
-	}
+	return b.waitForRunningState(ctx, name, timeout, "")
 }
 
 func (b *backend) waitForRunningAfterStart(ctx context.Context, name string, timeout time.Duration) (machine, error) {
-	waitCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	var last machine
-	for {
-		item, err := b.api.Get(waitCtx, name)
-		if err != nil {
-			return last, err
+	return b.waitForRunningState(ctx, name, timeout, "RUNNING after start")
+}
+
+func (b *backend) waitForRunningState(ctx context.Context, name string, timeout time.Duration, target string) (machine, error) {
+	return b.pollMachine(ctx, name, timeout, target, nil, func(_ context.Context, item machine) (bool, error) {
+		if done, err := runningMachineResult(item); done || err != nil {
+			return done, err
 		}
-		last = item
-		if machineRunning(item.Status) {
-			if strings.TrimSpace(item.IP) == "" {
-				return last, exit(5, "machine0 machine %s is RUNNING without an IP", item.Name)
+		if target == "" {
+			switch {
+			case machineStopped(item.Status):
+				return false, exit(5, "machine0 machine %s reached stable state %s while waiting for creation", item.Name, item.Status)
+			case !machineAcquirePending(item.Status):
+				return false, exit(5, "machine0 machine %s entered unexpected state %s", item.Name, item.Status)
 			}
-			return item, nil
+		} else if !machinePending(item.Status) && !machineStopped(item.Status) {
+			return false, exit(5, "machine0 machine %s entered unexpected state %s after start", item.Name, item.Status)
 		}
-		if machineTerminal(item.Status) {
-			return item, terminalMachineError(item)
-		}
-		if !machinePending(item.Status) && !machineStopped(item.Status) {
-			return item, exit(5, "machine0 machine %s entered unexpected state %s after start", item.Name, item.Status)
-		}
-		if err := b.sleep(waitCtx, b.configForRun().Machine0.PollInterval); err != nil {
-			return last, b.machineWaitError(ctx, waitCtx, err, "RUNNING after start", name, last.Status)
-		}
-	}
+		return false, nil
+	})
 }
 
 func (b *backend) waitForResolveRunning(ctx context.Context, initial machine, timeout time.Duration) (machine, error) {
-	waitCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	last := initial
 	started := false
-	for {
-		if machineRunning(last.Status) {
-			if strings.TrimSpace(last.IP) == "" {
-				return last, exit(5, "machine0 machine %s is RUNNING without an IP", last.Name)
-			}
-			return last, nil
+	return b.pollMachine(ctx, initial.Name, timeout, "RUNNING during resolve", &initial, func(observeCtx context.Context, item machine) (bool, error) {
+		if done, err := runningMachineResult(item); done || err != nil {
+			return done, err
 		}
-		if machineTerminal(last.Status) {
-			return last, terminalMachineError(last)
-		}
-		if machineStopped(last.Status) && !started {
-			if err := b.api.Start(waitCtx, last.Name); err != nil {
-				return last, err
+		switch {
+		case machineStopped(item.Status) && !started:
+			if err := b.api.Start(observeCtx, item.Name); err != nil {
+				return false, err
 			}
 			started = true
-		} else if !machinePending(last.Status) && !machineStopped(last.Status) {
-			return last, exit(5, "machine0 machine %s entered unexpected state %s while resolving", last.Name, last.Status)
+		case !machinePending(item.Status) && !machineStopped(item.Status):
+			return false, exit(5, "machine0 machine %s entered unexpected state %s while resolving", item.Name, item.Status)
 		}
-		if err := b.sleep(waitCtx, b.configForRun().Machine0.PollInterval); err != nil {
-			return last, b.machineWaitError(ctx, waitCtx, err, "RUNNING during resolve", last.Name, last.Status)
-		}
-		next, err := b.api.Get(waitCtx, last.Name)
-		if err != nil {
-			return last, err
-		}
-		last = next
-	}
+		return false, nil
+	})
 }
 
 func (b *backend) waitForSuspended(ctx context.Context, name string, timeout time.Duration) (machine, error) {
-	waitCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	var last machine
-	for {
-		item, err := b.api.Get(waitCtx, name)
-		if err != nil {
-			return last, err
-		}
-		last = item
-		if strings.EqualFold(strings.TrimSpace(item.Status), "SUSPENDED") {
-			item.IP = ""
-			return item, nil
-		}
-		if machineTerminal(item.Status) {
-			return item, terminalMachineError(item)
-		}
-		if !machineRunning(item.Status) && !machineStopped(item.Status) && !machineSuspending(item.Status) {
-			return item, exit(5, "machine0 machine %s entered unexpected state %s while suspending", item.Name, item.Status)
-		}
-		if err := b.sleep(waitCtx, b.configForRun().Machine0.PollInterval); err != nil {
-			return last, b.machineWaitError(ctx, waitCtx, err, "SUSPENDED", name, last.Status)
-		}
+	item, err := b.waitForExactMachine(ctx, name, timeout, "SUSPENDED", "suspending", func(item machine) bool {
+		return machineRunning(item.Status) || machineStopped(item.Status) || machineSuspending(item.Status)
+	})
+	if err == nil {
+		item.IP = ""
 	}
+	return item, err
 }
 
 func (b *backend) waitForStopped(ctx context.Context, name string, timeout time.Duration) (machine, error) {
-	waitCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	var last machine
-	for {
-		item, err := b.api.Get(waitCtx, name)
-		if err != nil {
-			return last, err
-		}
-		last = item
-		if strings.EqualFold(strings.TrimSpace(item.Status), "STOPPED") {
-			return item, nil
-		}
-		if machineTerminal(item.Status) {
-			return item, terminalMachineError(item)
-		}
-		if !machineRunning(item.Status) && !strings.EqualFold(strings.TrimSpace(item.Status), "STOPPING") {
-			return item, exit(5, "machine0 machine %s entered unexpected state %s while stopping", item.Name, item.Status)
-		}
-		if err := b.sleep(waitCtx, b.configForRun().Machine0.PollInterval); err != nil {
-			return last, b.machineWaitError(ctx, waitCtx, err, "STOPPED", name, last.Status)
-		}
-	}
+	return b.waitForExactMachine(ctx, name, timeout, "STOPPED", "stopping", func(item machine) bool {
+		return machineRunning(item.Status) || strings.EqualFold(strings.TrimSpace(item.Status), "STOPPING")
+	})
 }
 
-func (b *backend) machineWaitError(parent, waitCtx context.Context, waitErr error, target, name, lastState string) error {
-	if parentErr := parent.Err(); parentErr != nil {
-		return parentErr
+func (b *backend) waitForExactMachine(ctx context.Context, name string, timeout time.Duration, target, phase string, pending func(machine) bool) (machine, error) {
+	return b.pollMachine(ctx, name, timeout, target, nil, func(_ context.Context, item machine) (bool, error) {
+		if strings.EqualFold(strings.TrimSpace(item.Status), target) {
+			return true, nil
+		}
+		if machineTerminal(item.Status) {
+			return false, terminalMachineError(item)
+		}
+		if !pending(item) {
+			return false, exit(5, "machine0 machine %s entered unexpected state %s while %s", item.Name, item.Status, phase)
+		}
+		return false, nil
+	})
+}
+
+func (b *backend) pollMachine(
+	ctx context.Context,
+	name string,
+	timeout time.Duration,
+	target string,
+	initial *machine,
+	check func(context.Context, machine) (bool, error),
+) (machine, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	result, err := shared.Poll(waitCtx, 0, b.configForRun().Machine0.PollInterval, b.sleep, func(observeCtx context.Context) (machine, error) {
+		if initial != nil {
+			item := *initial
+			initial = nil
+			return item, nil
+		}
+		return b.api.Get(observeCtx, name)
+	}, func(checkCtx context.Context, item machine, fetchErr error) (bool, error) {
+		if fetchErr != nil {
+			return false, fetchErr
+		}
+		return check(checkCtx, item)
+	}, nil)
+	if err != nil && context.Cause(ctx) == nil && errors.Is(context.Cause(waitCtx), context.DeadlineExceeded) && errors.Is(err, context.DeadlineExceeded) {
+		if target == "" {
+			err = exit(5, "timed out waiting for machine0 machine %s; last state=%s", name, blank(result.Value.Status, "unknown"))
+		} else {
+			err = exit(5, "timed out waiting for machine0 machine %s to reach %s; last state=%s", name, target, blank(result.Value.Status, "unknown"))
+		}
 	}
-	if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
-		return exit(5, "timed out waiting for machine0 machine %s to reach %s; last state=%s", name, target, blank(lastState, "unknown"))
+	return result.Value, err
+}
+
+func runningMachineResult(item machine) (bool, error) {
+	if machineTerminal(item.Status) {
+		return false, terminalMachineError(item)
 	}
-	return waitErr
+	if !machineRunning(item.Status) {
+		return false, nil
+	}
+	if strings.TrimSpace(item.IP) == "" {
+		return false, exit(5, "machine0 machine %s is RUNNING without an IP", item.Name)
+	}
+	return true, nil
 }
 
 func (b *backend) suspendClaimedMachine(ctx context.Context, claim LeaseClaim, item machine) error {

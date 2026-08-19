@@ -571,26 +571,20 @@ func validateVultrClaimIdentity(claim core.LeaseClaim, leaseID, slug string) err
 }
 
 func (b *backend) waitForInstanceReady(ctx context.Context, client vultrAPI, id string, timeout time.Duration) (vultrInstance, error) {
-	deadline := b.now().Add(timeout)
-	for {
-		item, err := client.GetInstance(ctx, id)
-		if err != nil {
-			return vultrInstance{}, err
-		}
-		if instanceReady(item) {
-			return item, nil
-		}
-		if b.now().After(deadline) {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	result, err := shared.Poll(waitCtx, 0, 3*time.Second, shared.SleepContext,
+		func(ctx context.Context) (vultrInstance, error) { return client.GetInstance(ctx, id) },
+		func(_ context.Context, item vultrInstance, fetchErr error) (bool, error) {
+			return instanceReady(item), fetchErr
+		}, nil)
+	if err != nil {
+		if context.Cause(ctx) == nil && errors.Is(context.Cause(waitCtx), context.DeadlineExceeded) && errors.Is(err, context.DeadlineExceeded) {
 			return vultrInstance{}, core.Exit(5, "timed out waiting for Vultr instance IP")
 		}
-		timer := time.NewTimer(3 * time.Second)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return vultrInstance{}, ctx.Err()
-		case <-timer.C:
-		}
+		result.Value = vultrInstance{}
 	}
+	return result.Value, err
 }
 
 func instanceReady(item vultrInstance) bool {
