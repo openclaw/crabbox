@@ -16,10 +16,11 @@ func (Provider) Aliases() []string { return nil }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name:    providerName,
-		Family:  providerName,
-		Kind:    core.ProviderKindSSHLease,
-		Targets: []core.TargetSpec{{OS: core.TargetLinux}},
+		Name:             providerName,
+		Family:           providerName,
+		Kind:             core.ProviderKindSSHLease,
+		ClassDisposition: core.ProviderClassDispositionUnmapped,
+		Targets:          []core.TargetSpec{{OS: core.TargetLinux}},
 		Features: core.FeatureSet{
 			core.FeatureSSH,
 			core.FeatureCrabboxSync,

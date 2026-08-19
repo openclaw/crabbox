@@ -70,8 +70,8 @@ func TestProductionProviderClassCatalogCompleteness(t *testing.T) {
 			}
 		}
 	}
-	if counts[core.ProviderClassDispositionMapped] != 14 || counts[core.ProviderClassDispositionUnmapped] != 65 || len(counts) != 2 {
-		t.Fatalf("class disposition counts=%v want mapped=14 unmapped=65", counts)
+	if counts[core.ProviderClassDispositionMapped] != 14 || counts[core.ProviderClassDispositionUnmapped] != 66 || len(counts) != 2 {
+		t.Fatalf("class disposition counts=%v want mapped=14 unmapped=66", counts)
 	}
 }
 
