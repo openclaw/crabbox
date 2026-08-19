@@ -173,6 +173,21 @@
     "auth": "API key via CRABBOX_BLAXEL_API_KEY or BL_API_KEY; env-only remote sandbox auth",
     "docs": "blaxel.md"
   },
+  "boxd": {
+    "status": "built-in",
+    "category": "direct-cloud",
+    "substrate": "boxd KVM microVM (Ubuntu 24.04)",
+    "location": "provider-managed",
+    "ssh": "crabbox-managed",
+    "sync": "crabbox-sync",
+    "gpu": "no",
+    "lifecycle": "boxd CLI",
+    "cleanup": "machine destroy (claim-gated)",
+    "bestFit": "Fast-boot isolated Linux microVMs over SSH with Docker preinstalled",
+    "caveat": "Requires the boxd CLI and its auth (boxd auth login or BOXD_TOKEN); machine sizing follows the boxd account quota; machines are always created isolated",
+    "auth": "boxd CLI stored login or BOXD_TOKEN; the CLI manages and links the SSH key",
+    "docs": "boxd.md"
+  },
   "cloud-run-sandbox": {
     "status": "built-in",
     "category": "delegated-sandbox",

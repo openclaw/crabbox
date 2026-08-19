@@ -127,7 +127,7 @@ func TestFixedAWSCreateIntentClassifiesEveryExportedConfigField(t *testing.T) {
 		GCPSSHCIDRs GCPRootGB GCPServiceAccount DigitalOcean Vultr Linode GitHubCodespaces
 		Lambda Nebius OVH Scaleway TencentCloud Incus Proxmox Firecracker XCPNg Parallels
 		Blacksmith KubeVirt SealosDevbox AgentSandbox External Namespace NamespaceInstance
-		Phala Coder Morph Daytona E2B CubeSandbox ExeDev Railway FastAPICloud UnikraftCloud
+		Phala Boxd Coder Morph Daytona E2B CubeSandbox ExeDev Railway FastAPICloud UnikraftCloud
 		Runpod Vast NvidiaBrev Hostinger Wandb Orgo Islo Freestyle Tenki Tensorlake Cua
 		OpenComputer CodeSandbox OpenSandbox Nomad Blaxel VercelSandbox CloudflareSandbox
 		Superserve Crownest DockerSandbox AnthropicSRT CloudRunSandbox Modal UpstashBox

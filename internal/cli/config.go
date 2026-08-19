@@ -175,6 +175,7 @@ type Config struct {
 	NamespaceInstance             NamespaceInstanceConfig
 	Phala                         PhalaConfig
 	phalaTypeExplicitOrder        uint64
+	Boxd                          BoxdConfig
 	Coder                         CoderConfig
 	Morph                         MorphConfig
 	Daytona                       DaytonaConfig
@@ -3051,6 +3052,11 @@ func baseConfig() Config {
 			// writable. /var/volatile is a writable tmpfs on every dstack guest.
 			WorkRoot: "/var/volatile/crabbox",
 		},
+		Boxd: BoxdConfig{
+			CLIPath:         "boxd",
+			WorkRoot:        "/home/boxd/crabbox",
+			DeleteOnRelease: true,
+		},
 		Coder: CoderConfig{
 			CLIPath:         "coder",
 			WorkspacePrefix: "crabbox-",
@@ -3480,6 +3486,7 @@ type fileConfig struct {
 	Namespace                *fileNamespaceConfig                `yaml:"namespace,omitempty"`
 	NamespaceInstance        *fileNamespaceInstanceConfig        `yaml:"namespaceInstance,omitempty"`
 	Phala                    *filePhalaConfig                    `yaml:"phala,omitempty"`
+	Boxd                     *fileBoxdConfig                     `yaml:"boxd,omitempty"`
 	Coder                    *fileCoderConfig                    `yaml:"coder,omitempty"`
 	Morph                    *fileMorphConfig                    `yaml:"morph,omitempty"`
 	Daytona                  *fileDaytonaConfig                  `yaml:"daytona,omitempty"`
@@ -3985,6 +3992,32 @@ type fileNamespaceInstanceConfig struct {
 	Volumes     []string `yaml:"volumes,omitempty"`
 	WorkRoot    string   `yaml:"workRoot,omitempty"`
 	Bare        *bool    `yaml:"bare,omitempty"`
+}
+
+// BoxdConfig configures the boxd (boxd.sh) KVM microVM provider. The backend
+// drives the external `boxd` CLI, which authenticates through its own stored
+// credentials (`boxd auth login`) or the BOXD_TOKEN environment variable, so
+// no API token is held here.
+type BoxdConfig struct {
+	CLIPath string
+	// APIURL selects a non-default boxd control plane (self-hosted or staging
+	// clusters); empty uses the CLI's baked-in default. Passed as --api-url.
+	APIURL string
+	// Org selects the boxd organization context; empty uses the CLI's active
+	// org. Passed as --org.
+	Org      string
+	WorkRoot string
+	// DeleteOnRelease destroys machines on release (default). False stops the
+	// machine instead: the disk persists and a later resolve restarts it.
+	DeleteOnRelease bool
+}
+
+type fileBoxdConfig struct {
+	CLIPath         string `yaml:"cli,omitempty"`
+	APIURL          string `yaml:"apiUrl,omitempty"`
+	Org             string `yaml:"org,omitempty"`
+	WorkRoot        string `yaml:"workRoot,omitempty"`
+	DeleteOnRelease *bool  `yaml:"deleteOnRelease,omitempty"`
 }
 
 type filePhalaConfig struct {
@@ -6470,6 +6503,30 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Phala.Attest = &value
 		}
 	}
+	if file.Boxd != nil {
+		// cli/apiUrl/org come only from trusted config: an untrusted repo
+		// config could otherwise run an arbitrary binary, point the CLI (and
+		// its bearer token) at an attacker's control plane, or redirect
+		// machine billing to another org.
+		if trusted {
+			if file.Boxd.CLIPath != "" {
+				cfg.Boxd.CLIPath = expandUserPath(file.Boxd.CLIPath)
+			}
+			if file.Boxd.APIURL != "" {
+				cfg.Boxd.APIURL = file.Boxd.APIURL
+			}
+			if file.Boxd.Org != "" {
+				cfg.Boxd.Org = file.Boxd.Org
+			}
+		}
+		if file.Boxd.WorkRoot != "" {
+			cfg.Boxd.WorkRoot = file.Boxd.WorkRoot
+		}
+		if file.Boxd.DeleteOnRelease != nil {
+			cfg.Boxd.DeleteOnRelease = *file.Boxd.DeleteOnRelease
+			MarkDeleteOnReleaseExplicit(cfg, "boxd")
+		}
+	}
 	if file.Coder != nil {
 		if file.Coder.CLIPath != "" {
 			cfg.Coder.CLIPath = expandUserPath(file.Coder.CLIPath)
@@ -8936,6 +8993,14 @@ func applyEnv(cfg *Config) error {
 	if value := os.Getenv("CRABBOX_MORPH_API_URL"); value != "" {
 		cfg.Morph.APIURL = value
 		cfg.credentialProvenance.morphAPIURL = credentialSourceEnvironment
+	}
+	cfg.Boxd.CLIPath = expandUserPath(getenv("CRABBOX_BOXD_CLI", cfg.Boxd.CLIPath))
+	cfg.Boxd.APIURL = getenv("CRABBOX_BOXD_API_URL", cfg.Boxd.APIURL)
+	cfg.Boxd.Org = getenv("CRABBOX_BOXD_ORG", cfg.Boxd.Org)
+	cfg.Boxd.WorkRoot = getenv("CRABBOX_BOXD_WORK_ROOT", cfg.Boxd.WorkRoot)
+	if value, ok := getenvBool("CRABBOX_BOXD_DELETE_ON_RELEASE"); ok {
+		cfg.Boxd.DeleteOnRelease = value
+		MarkDeleteOnReleaseExplicit(cfg, "boxd")
 	}
 	cfg.Coder.CLIPath = expandUserPath(getenv("CRABBOX_CODER_CLI", cfg.Coder.CLIPath))
 	cfg.Coder.Template = getenv("CRABBOX_CODER_TEMPLATE", cfg.Coder.Template)
