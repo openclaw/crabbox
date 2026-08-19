@@ -685,6 +685,44 @@ describe("aws provider", () => {
     expect(check.message).toContain("capacity=quota_pressure");
   });
 
+  it("recommends the published two-vCPU fallback when quota is minimal", () => {
+    const check = awsCapacityReadinessCheckForQuota(
+      {
+        target: "linux",
+        architecture: "amd64",
+        windowsMode: "normal",
+        class: "beast",
+        serverType: "c7a.48xlarge",
+        capacityMarket: "spot",
+        capacityFallback: "on-demand-after-120s",
+      },
+      "spot",
+      "eu-west-1",
+      2,
+    );
+
+    expect(check).toMatchObject({
+      status: "warning",
+      details: {
+        recommended_class: "standard",
+        recommended_type: "t3.small",
+      },
+    });
+  });
+
+  it("does not launch a canonical class as a literal type for an unsupported selector", () => {
+    expect(
+      awsLaunchCandidates({
+        serverType: "fast",
+        serverTypeExplicit: false,
+        class: "fast",
+        target: "windows",
+        windowsMode: "normal",
+        architecture: "arm64",
+      }),
+    ).toEqual([]);
+  });
+
   it("skips AWS vCPU quota readiness when quota cannot be inspected", () => {
     const check = awsCapacityReadinessCheckForQuota(
       {

@@ -15,12 +15,13 @@ func (Provider) Aliases() []string { return []string{"applemachine"} }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name:        providerName,
-		Family:      "container",
-		Kind:        core.ProviderKindDelegatedRun,
-		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{core.FeatureRunSession},
-		Coordinator: core.CoordinatorNever,
+		Name:             providerName,
+		Family:           "container",
+		Kind:             core.ProviderKindDelegatedRun,
+		Targets:          []core.TargetSpec{{OS: core.TargetLinux}},
+		Features:         core.FeatureSet{core.FeatureRunSession},
+		Coordinator:      core.CoordinatorNever,
+		ClassDisposition: core.ProviderClassDispositionUnmapped,
 	}
 }
 

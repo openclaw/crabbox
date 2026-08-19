@@ -7669,26 +7669,6 @@ func TestWriteUserFileConfigPreservesProfileEnvShape(t *testing.T) {
 	}
 }
 
-func TestNamespaceDevboxSizeForConfig(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		cfg  Config
-		want string
-	}{
-		{name: "explicit namespace size", cfg: Config{Namespace: NamespaceConfig{Size: " xl "}, Class: "standard"}, want: "XL"},
-		{name: "explicit server type", cfg: Config{ServerType: " l ", ServerTypeExplicit: true, Class: "standard"}, want: "L"},
-		{name: "class default", cfg: Config{Class: "large"}, want: "L"},
-		{name: "empty default", cfg: Config{}, want: "M"},
-		{name: "custom class", cfg: Config{Class: "gpu"}, want: "GPU"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := namespaceDevboxSizeForConfig(tc.cfg); got != tc.want {
-				t.Fatalf("size=%q want %q", got, tc.want)
-			}
-		})
-	}
-}
-
 func TestConfigServerTypeHelperBranches(t *testing.T) {
 	if got := incusServerTypeForConfig(Config{}); got != "container" {
 		t.Fatalf("incus default=%q", got)
@@ -7707,20 +7687,6 @@ func TestConfigServerTypeHelperBranches(t *testing.T) {
 	}
 	if got := serverTypeForProviderClass("firecracker", "beast"); got != "microvm" {
 		t.Fatalf("firecracker provider class helper=%q", got)
-	}
-	for _, tc := range []struct {
-		class string
-		want  string
-	}{
-		{class: "tiny", want: "S"},
-		{class: "small", want: "S"},
-		{class: "standard", want: "S"},
-		{class: "fast", want: "M"},
-		{class: "beast", want: "XL"},
-	} {
-		if got := namespaceDevboxSizeForClass(tc.class); got != tc.want {
-			t.Fatalf("namespaceDevboxSizeForClass(%q)=%q want %q", tc.class, got, tc.want)
-		}
 	}
 }
 

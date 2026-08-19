@@ -9857,22 +9857,25 @@ func redactRemoteURL(value string) string {
 	return "<remote-image>"
 }
 
-func serverTypeForClass(class string) string {
-	return serverTypeCandidatesForClass(class)[0]
-}
-
 func serverTypeForConfig(cfg Config) string {
 	if resolved, err := ProviderFor(cfg.Provider); err == nil {
 		cfg.Provider = resolved.Name()
+		if resolved.Spec().ClassDisposition == ProviderClassDispositionMapped {
+			if cfg.ServerTypeExplicit && strings.TrimSpace(cfg.ServerType) != "" {
+				return cfg.ServerType
+			}
+			if override, ok := resolved.(ProviderServerTypeOverrideProvider); ok {
+				if serverType, selected := override.ServerTypeOverrideForConfig(cfg); selected {
+					return serverType
+				}
+			}
+		}
 		if typer, ok := resolved.(ProviderServerTypeProvider); ok {
 			return typer.ServerTypeForConfig(cfg)
 		}
 	}
 	if isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider) || cfg.Provider == "islo" || cfg.Provider == "sprites" || cfg.Provider == "local-container" || cfg.Provider == "multipass" {
 		return ""
-	}
-	if cfg.Provider == "namespace-devbox" || cfg.Provider == "namespace" {
-		return namespaceDevboxSizeForConfig(cfg)
 	}
 	if cfg.Provider == "e2b" {
 		return blank(cfg.E2B.Template, "base")
@@ -9889,18 +9892,6 @@ func serverTypeForConfig(cfg Config) string {
 	if cfg.Provider == "daytona" {
 		return "snapshot"
 	}
-	if cfg.Provider == "cloudflare" {
-		return cloudflareContainerInstanceTypeForClass(cfg.Class)
-	}
-	if cfg.Provider == "aws" {
-		return awsInstanceTypeCandidatesForConfig(cfg)[0]
-	}
-	if cfg.Provider == "azure" {
-		return azureVMSizeCandidatesForConfig(cfg)[0]
-	}
-	if cfg.Provider == "gcp" {
-		return gcpMachineTypeCandidatesForClass(cfg.Class)[0]
-	}
 	if cfg.Provider == "proxmox" {
 		return proxmoxServerTypeForConfig(cfg)
 	}
@@ -9913,7 +9904,7 @@ func serverTypeForConfig(cfg Config) string {
 	if cfg.Provider == "parallels" {
 		return parallelsServerTypeForConfig(cfg)
 	}
-	return serverTypeForClass(cfg.Class)
+	return ""
 }
 
 func serverTypeForProviderClass(provider, class string) string {
@@ -9925,9 +9916,6 @@ func serverTypeForProviderClass(provider, class string) string {
 	}
 	if isBlacksmithProvider(provider) || isStaticProvider(provider) || provider == "islo" || provider == "sprites" || provider == "local-container" || provider == "multipass" {
 		return ""
-	}
-	if provider == "namespace-devbox" || provider == "namespace" {
-		return namespaceDevboxSizeForClass(class)
 	}
 	if provider == "e2b" {
 		return "base"
@@ -9941,18 +9929,6 @@ func serverTypeForProviderClass(provider, class string) string {
 	if provider == "daytona" {
 		return "snapshot"
 	}
-	if provider == "cloudflare" {
-		return cloudflareContainerInstanceTypeForClass(class)
-	}
-	if provider == "aws" {
-		return awsInstanceTypeCandidatesForClass(class)[0]
-	}
-	if provider == "azure" {
-		return azureVMSizeCandidatesForClass(class)[0]
-	}
-	if provider == "gcp" {
-		return gcpMachineTypeCandidatesForClass(class)[0]
-	}
 	if provider == "proxmox" {
 		return "template"
 	}
@@ -9965,7 +9941,7 @@ func serverTypeForProviderClass(provider, class string) string {
 	if provider == "parallels" {
 		return "template"
 	}
-	return serverTypeForClass(class)
+	return ""
 }
 
 func incusServerTypeForConfig(cfg Config) string {
@@ -10121,36 +10097,6 @@ func ApplyParallelsTemplateConfig(cfg *Config, name string) error {
 	return nil
 }
 
-func namespaceDevboxSizeForConfig(cfg Config) string {
-	if strings.TrimSpace(cfg.Namespace.Size) != "" {
-		return strings.ToUpper(strings.TrimSpace(cfg.Namespace.Size))
-	}
-	if cfg.ServerTypeExplicit && strings.TrimSpace(cfg.ServerType) != "" {
-		return strings.ToUpper(strings.TrimSpace(cfg.ServerType))
-	}
-	return namespaceDevboxSizeForClass(cfg.Class)
-}
-
-func namespaceDevboxSizeForClass(class string) string {
-	switch strings.ToLower(strings.TrimSpace(class)) {
-	case "tiny", "small":
-		return "S"
-	case "standard":
-		return "S"
-	case "fast":
-		return "M"
-	case "large":
-		return "L"
-	case "beast":
-		return "XL"
-	default:
-		if class == "" {
-			return "M"
-		}
-		return strings.ToUpper(strings.TrimSpace(class))
-	}
-}
-
 func cloudflareContainerInstanceTypes() []string {
 	return []string{"lite", "basic", "standard-1", "standard-2", "standard-3", "standard-4"}
 }
@@ -10174,15 +10120,13 @@ func NormalizeCloudflareContainerInstanceType(value string) (string, bool) {
 }
 
 func cloudflareContainerInstanceTypeForClass(class string) string {
-	switch strings.ToLower(strings.TrimSpace(class)) {
-	case "", "tiny", "small", "standard", "fast", "large", "beast":
-		return "standard-4"
-	default:
-		if instanceType, ok := normalizeCloudflareContainerInstanceType(class); ok {
-			return instanceType
+	provider, err := ProviderFor("cloudflare")
+	if err == nil {
+		if resolver, ok := provider.(ProviderServerTypeProvider); ok {
+			return resolver.ServerTypeForClass(class)
 		}
-		return strings.TrimSpace(class)
 	}
+	return strings.TrimSpace(class)
 }
 
 func CloudflareContainerInstanceTypeForClass(class string) string {
@@ -10190,137 +10134,69 @@ func CloudflareContainerInstanceTypeForClass(class string) string {
 }
 
 func serverTypeCandidatesForClass(class string) []string {
-	switch class {
-	case "tiny":
-		return []string{"ccx13", "cpx22", "cx23"}
-	case "small":
-		return []string{"ccx23", "cpx32", "cx33"}
-	case "standard":
-		return []string{"ccx33", "cpx62", "cx53"}
-	case "fast":
-		return []string{"ccx43", "cpx62", "cx53"}
-	case "large":
-		return []string{"ccx53", "ccx43", "cpx62", "cx53"}
-	case "beast":
-		return []string{"ccx63", "ccx53", "ccx43", "cpx62", "cx53"}
-	default:
-		return []string{class}
-	}
+	cfg := Config{Provider: "hetzner", TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: class, architectureExplicit: true}
+	return hetznerServerTypeCandidatesForConfig(cfg)
 }
 
-func awsInstanceTypeCandidatesForTargetClass(target, class string) []string {
-	return awsInstanceTypeCandidatesForTargetModeClass(target, windowsModeNormal, class)
+func hetznerServerTypeCandidatesForConfig(cfg Config) []string {
+	if cfg.ServerTypeExplicit {
+		if strings.TrimSpace(cfg.ServerType) != "" {
+			return []string{cfg.ServerType}
+		}
+	}
+	serverType := concreteStoredServerType(cfg)
+	if candidates, matched := providerClassCandidatesForConfig(cfg); matched {
+		return appendUniqueExactStrings([]string{serverType}, candidates...)
+	}
+	if IsCanonicalProviderClass(cfg.Class) {
+		if serverType != "" {
+			return []string{serverType}
+		}
+		return nil
+	}
+	candidates := []string{cfg.Class}
+	if serverType == "" || serverType == cfg.Class {
+		return candidates
+	}
+	return append([]string{serverType}, candidates...)
 }
 
 func awsInstanceTypeCandidatesForConfig(cfg Config) []string {
-	return awsInstanceTypeCandidatesForTargetModeArchitectureClass(cfg.TargetOS, cfg.WindowsMode, effectiveArchitectureForConfig(cfg), cfg.Class)
+	candidates, _ := awsClassCandidatesForConfig(cfg)
+	return candidates
 }
 
-func awsInstanceTypeCandidatesForTargetModeClass(target, windowsMode, class string) []string {
-	return awsInstanceTypeCandidatesForTargetModeArchitectureClass(target, windowsMode, ArchitectureAMD64, class)
+func awsClassCandidatesForConfig(cfg Config) ([]string, bool) {
+	if candidates, matched := providerClassCandidatesForConfig(cfg); matched {
+		return candidates, true
+	}
+	if normalizeTargetOS(cfg.TargetOS) == targetMacOS {
+		standard := cfg
+		standard.Class = "standard"
+		if candidates, matched := providerClassCandidatesForConfig(standard); matched {
+			return appendUniqueExactStrings([]string{cfg.Class}, candidates...), false
+		}
+	}
+	if IsCanonicalProviderClass(cfg.Class) {
+		if storedType := concreteStoredServerType(cfg); storedType != "" {
+			return []string{storedType}, true
+		}
+		return nil, false
+	}
+	return appendUniqueExactStrings([]string{concreteStoredServerType(cfg)}, cfg.Class), false
 }
 
 func awsInstanceTypeCandidatesForTargetModeArchitectureClass(target, windowsMode, architecture, class string) []string {
-	switch target {
-	case targetMacOS:
-		return awsMacOSInstanceTypeCandidates()
-	case targetWindows:
-		if windowsMode == windowsModeWSL2 {
-			switch class {
-			case "tiny":
-				return []string{"m8i.large", "m8i-flex.large", "c8i.xlarge", "r8i.large"}
-			case "small":
-				return []string{"c8i.2xlarge", "m8i.xlarge", "m8i-flex.xlarge", "r8i.large", "c8i.xlarge"}
-			case "standard":
-				return []string{"m8i.large", "m8i-flex.large", "c8i.large", "r8i.large"}
-			case "fast":
-				return []string{"m8i.xlarge", "m8i-flex.xlarge", "c8i.xlarge", "r8i.xlarge"}
-			case "large":
-				return []string{"m8i.2xlarge", "m8i-flex.2xlarge", "c8i.2xlarge", "r8i.2xlarge"}
-			case "beast":
-				return []string{"m8i.4xlarge", "m8i-flex.4xlarge", "c8i.4xlarge", "r8i.4xlarge", "m8i.2xlarge"}
-			default:
-				return []string{class}
-			}
-		}
-		switch class {
-		case "tiny":
-			return []string{"m7a.large", "m7i.large", "t3.large"}
-		case "small":
-			return []string{"c7a.2xlarge", "c7i.2xlarge", "m7a.xlarge", "m7i.xlarge", "t3.xlarge"}
-		case "standard":
-			return []string{"m7i.large", "m7a.large", "t3.large"}
-		case "fast":
-			return []string{"m7i.xlarge", "m7a.xlarge", "t3.xlarge"}
-		case "large":
-			return []string{"m7i.2xlarge", "m7a.2xlarge", "t3.2xlarge"}
-		case "beast":
-			return []string{"m7i.4xlarge", "m7a.4xlarge", "m7i.2xlarge"}
-		default:
-			return []string{class}
-		}
-	default:
-		return awsInstanceTypeCandidatesForArchitectureClass(architecture, class)
-	}
+	cfg := Config{Provider: "aws", TargetOS: target, WindowsMode: windowsMode, Architecture: architecture, Class: class, architectureExplicit: true}
+	return awsInstanceTypeCandidatesForConfig(cfg)
 }
 
 func awsMacOSInstanceTypeCandidates() []string {
-	return []string{
-		"mac2.metal",
-		"mac2-m2.metal",
-		"mac2-m2pro.metal",
-		"mac-m4.metal",
-		"mac-m4pro.metal",
-		"mac-m4max.metal",
-		"mac2-m1ultra.metal",
-		"mac-m3ultra.metal",
-		"mac1.metal",
-	}
+	return awsInstanceTypeCandidatesForTargetModeArchitectureClass(targetMacOS, windowsModeNormal, ArchitectureAMD64, "standard")
 }
 
 func awsInstanceTypeCandidatesForClass(class string) []string {
-	return awsInstanceTypeCandidatesForArchitectureClass(ArchitectureAMD64, class)
-}
-
-func awsInstanceTypeCandidatesForArchitectureClass(architecture, class string) []string {
-	if architecture == ArchitectureARM64 {
-		return awsARM64InstanceTypeCandidatesForClass(class)
-	}
-	switch class {
-	case "tiny":
-		return []string{"m7a.large", "m7i.large", "c7a.xlarge", "c7i.xlarge"}
-	case "small":
-		return []string{"c7a.2xlarge", "c7i.2xlarge", "m7a.xlarge", "m7i.xlarge", "c7a.xlarge"}
-	case "standard":
-		return []string{"c7a.8xlarge", "c7i.8xlarge", "m7a.8xlarge", "m7i.8xlarge", "c7a.4xlarge"}
-	case "fast":
-		return []string{"c7a.16xlarge", "c7i.16xlarge", "m7a.16xlarge", "m7i.16xlarge", "c7a.12xlarge", "c7a.8xlarge"}
-	case "large":
-		return []string{"c7a.24xlarge", "c7i.24xlarge", "m7a.24xlarge", "m7i.24xlarge", "r7a.24xlarge", "c7a.16xlarge", "c7a.12xlarge"}
-	case "beast":
-		return []string{"c7a.48xlarge", "c7i.48xlarge", "m7a.48xlarge", "m7i.48xlarge", "r7a.48xlarge", "c7a.32xlarge", "c7i.32xlarge", "m7a.32xlarge", "c7a.24xlarge", "c7a.16xlarge"}
-	default:
-		return []string{class}
-	}
-}
-
-func awsARM64InstanceTypeCandidatesForClass(class string) []string {
-	switch class {
-	case "tiny":
-		return []string{"m7g.large", "c7g.xlarge", "r7g.large"}
-	case "small":
-		return []string{"c7g.2xlarge", "m7g.xlarge", "r7g.large", "c7g.xlarge"}
-	case "standard":
-		return []string{"c7g.8xlarge", "m7g.8xlarge", "r7g.8xlarge", "c7g.4xlarge"}
-	case "fast":
-		return []string{"c7g.16xlarge", "m7g.16xlarge", "r7g.16xlarge", "c7g.12xlarge", "c7g.8xlarge"}
-	case "large":
-		return []string{"c7g.16xlarge", "m7g.16xlarge", "r7g.16xlarge", "c7g.12xlarge"}
-	case "beast":
-		return []string{"c7g.16xlarge", "m7g.16xlarge", "r7g.16xlarge", "c7g.12xlarge"}
-	default:
-		return []string{class}
-	}
+	return awsInstanceTypeCandidatesForTargetModeArchitectureClass(targetLinux, windowsModeNormal, ArchitectureAMD64, class)
 }
 
 func awsInstanceTypeIsARM64(instanceType string) bool {

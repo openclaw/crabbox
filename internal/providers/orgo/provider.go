@@ -18,11 +18,12 @@ func (Provider) Aliases() []string { return []string{"orgo-ai"} }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name:        providerName,
-		Family:      "orgo",
-		Kind:        core.ProviderKindDelegatedRun,
-		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Coordinator: core.CoordinatorNever,
+		Name:             providerName,
+		Family:           "orgo",
+		Kind:             core.ProviderKindDelegatedRun,
+		Targets:          []core.TargetSpec{{OS: core.TargetLinux}},
+		Coordinator:      core.CoordinatorNever,
+		ClassDisposition: core.ProviderClassDispositionUnmapped,
 	}
 }
 

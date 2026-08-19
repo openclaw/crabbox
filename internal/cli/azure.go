@@ -247,26 +247,36 @@ func azureWindowsARM64HasExplicitImage(cfg Config) bool {
 	return image != "" && image != defaultAzureWindowsImage && !isAzureDefaultLinuxImage(image)
 }
 
-func azureVMSizeCandidatesForTargetModeClass(target, windowsMode, class string) []string {
-	switch target {
-	case targetLinux:
-		return azureVMSizeCandidatesForArchitectureClass(ArchitectureAMD64, class)
-	case targetWindows:
-		if windowsMode == windowsModeNormal || windowsMode == windowsModeWSL2 {
-			return azureWindowsVMSizeCandidatesForClass(class)
-		}
-		return []string{class}
-	default:
-		return []string{class}
-	}
-}
-
 func azureVMSizeCandidatesForClass(class string) []string {
-	return azureVMSizeCandidatesForArchitectureClass(ArchitectureAMD64, class)
+	return azureVMSizeCandidatesForTargetModeArchitectureClass(targetLinux, windowsModeNormal, ArchitectureAMD64, class)
 }
 
 func azureVMSizeCandidatesForConfig(cfg Config) []string {
-	candidates := azureVMSizeCandidatesForTargetModeArchitectureClass(cfg.TargetOS, cfg.WindowsMode, effectiveArchitectureForConfig(cfg), cfg.Class)
+	provider, err := ProviderFor(cfg.Provider)
+	if err != nil {
+		return nil
+	}
+	source, ok := provider.(ProviderClassProfileProvider)
+	if !ok {
+		return nil
+	}
+	return AzureVMSizeCandidatesForProfiles(cfg, source.ClassProfiles())
+}
+
+func AzureVMSizeCandidatesForProfiles(cfg Config, profiles []ProviderClassProfile) []string {
+	candidates, matched := ProviderClassCandidatesForProfiles(profiles, cfg)
+	if !matched && IsCanonicalProviderClass(cfg.Class) {
+		storedType := concreteStoredServerType(cfg)
+		if storedType == "" || !azureCanPrependNonExplicitServerType(cfg) {
+			return nil
+		}
+		candidates = []string{storedType}
+	}
+	if !matched {
+		if len(candidates) == 0 {
+			candidates = []string{cfg.Class}
+		}
+	}
 	mode, err := NormalizeAzureOSDiskMode(cfg.AzureOSDisk)
 	if cfg.AzureSnapshot != "" {
 		mode = AzureOSDiskManaged
@@ -274,68 +284,18 @@ func azureVMSizeCandidatesForConfig(cfg Config) []string {
 	if err != nil || !azureOSDiskUsesFullCaching(mode) {
 		return candidates
 	}
-	return azureEphemeralFullCachingCandidates(cfg, candidates)
+	return azureEphemeralFullCachingCandidates(cfg, candidates, profiles)
 }
 
 func azureVMSizeCandidatesForTargetModeArchitectureClass(target, windowsMode, architecture, class string) []string {
-	switch target {
-	case targetLinux:
-		return azureVMSizeCandidatesForArchitectureClass(architecture, class)
-	case targetWindows:
-		if windowsMode == windowsModeNormal || windowsMode == windowsModeWSL2 {
-			if architecture == ArchitectureARM64 {
-				if windowsMode == windowsModeWSL2 {
-					return []string{class}
-				}
-				return azureARM64VMSizeCandidatesForClass(class)
-			}
-			return azureWindowsVMSizeCandidatesForClass(class)
-		}
-		return []string{class}
-	default:
-		return []string{class}
+	cfg := Config{Provider: "azure", TargetOS: target, WindowsMode: windowsMode, Architecture: architecture, Class: class, architectureExplicit: true}
+	if candidates, matched := providerClassCandidatesForConfig(cfg); matched {
+		return candidates
 	}
-}
-
-func azureVMSizeCandidatesForArchitectureClass(architecture, class string) []string {
-	if architecture == ArchitectureARM64 {
-		return azureARM64VMSizeCandidatesForClass(class)
+	if IsCanonicalProviderClass(class) {
+		return nil
 	}
-	switch class {
-	case "tiny":
-		return []string{"Standard_D2ads_v6", "Standard_D2ds_v6", "Standard_D2ads_v5", "Standard_D2ds_v5", "Standard_F2s_v2"}
-	case "small":
-		return []string{"Standard_D8ads_v6", "Standard_D8ds_v6", "Standard_F8s_v2", "Standard_D8ads_v5", "Standard_D8ds_v5", "Standard_D4ads_v6", "Standard_D4ds_v6", "Standard_F4s_v2"}
-	case "standard":
-		return []string{"Standard_D32ads_v6", "Standard_D32ds_v6", "Standard_F32s_v2", "Standard_D32ads_v5", "Standard_D32ds_v5", "Standard_D16ads_v6", "Standard_D16ds_v6", "Standard_F16s_v2"}
-	case "fast":
-		return []string{"Standard_D64ads_v6", "Standard_D64ds_v6", "Standard_F64s_v2", "Standard_D64ads_v5", "Standard_D64ds_v5", "Standard_D48ads_v6", "Standard_D48ds_v6", "Standard_F48s_v2", "Standard_D32ads_v6", "Standard_D32ds_v6", "Standard_F32s_v2"}
-	case "large":
-		return []string{"Standard_D96ads_v6", "Standard_D96ds_v6", "Standard_D96ads_v5", "Standard_D96ds_v5", "Standard_D64ads_v6", "Standard_D64ds_v6", "Standard_F64s_v2", "Standard_D48ads_v6", "Standard_D48ds_v6", "Standard_F48s_v2"}
-	case "beast":
-		return []string{"Standard_D192ds_v6", "Standard_D128ds_v6", "Standard_D96ads_v6", "Standard_D96ds_v6", "Standard_D96ads_v5", "Standard_D96ds_v5", "Standard_D64ads_v6", "Standard_D64ds_v6", "Standard_F64s_v2"}
-	default:
-		return []string{class}
-	}
-}
-
-func azureARM64VMSizeCandidatesForClass(class string) []string {
-	switch class {
-	case "tiny":
-		return []string{"Standard_D2pds_v6", "Standard_D2ps_v6"}
-	case "small":
-		return []string{"Standard_D8pds_v6", "Standard_D8ps_v6", "Standard_D4pds_v6", "Standard_D4ps_v6"}
-	case "standard":
-		return []string{"Standard_D32pds_v6", "Standard_D32ps_v6", "Standard_D16pds_v6", "Standard_D16ps_v6"}
-	case "fast":
-		return []string{"Standard_D64pds_v6", "Standard_D64ps_v6", "Standard_D48pds_v6", "Standard_D48ps_v6", "Standard_D32pds_v6", "Standard_D32ps_v6"}
-	case "large":
-		return []string{"Standard_D96pds_v6", "Standard_D96ps_v6", "Standard_D64pds_v6", "Standard_D64ps_v6", "Standard_D48pds_v6", "Standard_D48ps_v6"}
-	case "beast":
-		return []string{"Standard_D96pds_v6", "Standard_D96ps_v6", "Standard_D64pds_v6", "Standard_D64ps_v6"}
-	default:
-		return []string{class}
-	}
+	return []string{class}
 }
 
 func azureVMSizeIsARM64(vmSize string) bool {
@@ -343,36 +303,23 @@ func azureVMSizeIsARM64(vmSize string) bool {
 	return strings.Contains(normalized, "ps_v6") || strings.Contains(normalized, "pds_v6") || strings.Contains(normalized, "pls_v6") || strings.Contains(normalized, "plds_v6")
 }
 
-func azureWindowsVMSizeCandidatesForClass(class string) []string {
-	switch class {
-	case "tiny":
-		return []string{"Standard_D2ads_v6", "Standard_D2ds_v6", "Standard_D2ads_v5", "Standard_D2ds_v5", "Standard_D2as_v6"}
-	case "small":
-		return []string{"Standard_D8ads_v6", "Standard_D8ds_v6", "Standard_D8ads_v5", "Standard_D8ds_v5", "Standard_D8as_v6"}
-	case "standard":
-		return []string{"Standard_D2ads_v6", "Standard_D2ds_v6", "Standard_D2ads_v5", "Standard_D2ds_v5", "Standard_D2as_v6"}
-	case "fast":
-		return []string{"Standard_D4ads_v6", "Standard_D4ds_v6", "Standard_D4ads_v5", "Standard_D4ds_v5", "Standard_D4as_v6"}
-	case "large":
-		return []string{"Standard_D8ads_v6", "Standard_D8ds_v6", "Standard_D8ads_v5", "Standard_D8ds_v5", "Standard_D8as_v6"}
-	case "beast":
-		return []string{"Standard_D16ads_v6", "Standard_D16ds_v6", "Standard_D16ads_v5", "Standard_D16ds_v5", "Standard_D8ads_v6"}
-	default:
-		return []string{class}
-	}
-}
-
-func azureEphemeralFullCachingCandidates(cfg Config, candidates []string) []string {
+func azureEphemeralFullCachingCandidates(cfg Config, candidates []string, profiles []ProviderClassProfile) []string {
 	filtered := filterAzureEphemeralFullCachingCandidates(candidates)
 	if len(filtered) > 0 {
 		return filtered
 	}
 	if cfg.TargetOS == targetWindows {
 		return filterAzureEphemeralFullCachingCandidates(appendUniqueStrings(
-			azureVMSizeCandidatesForTargetModeArchitectureClass(targetWindows, cfg.WindowsMode, effectiveArchitectureForConfig(cfg), "large"),
-			azureVMSizeCandidatesForTargetModeArchitectureClass(targetWindows, cfg.WindowsMode, effectiveArchitectureForConfig(cfg), "beast")...,
+			azureClassCandidatesForAlternateClass(cfg, "large", profiles),
+			azureClassCandidatesForAlternateClass(cfg, "beast", profiles)...,
 		))
 	}
+	return candidates
+}
+
+func azureClassCandidatesForAlternateClass(cfg Config, class string, profiles []ProviderClassProfile) []string {
+	cfg.Class = class
+	candidates, _ := ProviderClassCandidatesForProfiles(profiles, cfg)
 	return candidates
 }
 
@@ -835,6 +782,16 @@ func (c *AzureClient) LeaseClaimScope() string {
 
 func (c *AzureClient) createServerWithFallbackInLocation(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, logf func(string, ...any)) (Server, Config, error) {
 	candidates := azureProvisioningCandidatesForConfig(cfg)
+	if len(candidates) == 0 {
+		provider, _ := ProviderFor(cfg.Provider)
+		if provider == nil {
+			return Server{}, cfg, exit(2, "provider=%s has no class profile for class=%s", cfg.Provider, cfg.Class)
+		}
+		if err := validateProviderClassSelector(provider, cfg); err != nil {
+			return Server{}, cfg, err
+		}
+		return Server{}, cfg, exit(2, "provider=%s has no usable provisioning candidates for class=%s", cfg.Provider, cfg.Class)
+	}
 	var errs []error
 	sharedInfraReady := false
 	for i, vmSize := range candidates {
@@ -900,13 +857,15 @@ func azureProvisioningCandidatesForConfig(cfg Config) []string {
 		return []string{cfg.ServerType}
 	}
 	candidates := azureVMSizeCandidatesForConfig(cfg)
-	if cfg.ServerType == "" || len(candidates) == 0 || cfg.ServerType == candidates[0] {
+	storedType := concreteStoredServerType(cfg)
+	if storedType == "" || len(candidates) == 0 || storedType == candidates[0] {
 		return candidates
 	}
+	cfg.ServerType = storedType
 	if !azureCanPrependNonExplicitServerType(cfg) {
 		return candidates
 	}
-	return append([]string{cfg.ServerType}, candidates...)
+	return appendUniqueExactStrings([]string{storedType}, candidates...)
 }
 
 func azureCanPrependNonExplicitServerType(cfg Config) bool {
@@ -921,6 +880,10 @@ func azureCanPrependNonExplicitServerType(cfg Config) bool {
 		return azureSupportsEphemeralFullCaching(cfg.ServerType)
 	}
 	return true
+}
+
+func AzureCanPrependNonExplicitServerType(cfg Config) bool {
+	return azureCanPrependNonExplicitServerType(cfg)
 }
 
 func azureRegionCandidates(cfg Config, preferredLocation string) []string {

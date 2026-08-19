@@ -13,7 +13,7 @@ func init() {
 
 type Provider struct{}
 
-var _ core.ProviderClassSpecProvider = Provider{}
+var _ core.ProviderClassProfileProvider = Provider{}
 
 // AWS publishes C7 compute-optimized instances at 2 GiB/vCPU, M7/M8
 // general-purpose instances at 4 GiB/vCPU, and R7/R8 memory-optimized instances
@@ -22,17 +22,21 @@ var _ core.ProviderClassSpecProvider = Provider{}
 // https://docs.aws.amazon.com/ec2/latest/instancetypes/gp.html
 // https://docs.aws.amazon.com/ec2/latest/instancetypes/mo.html
 var memoryGiBPerVCPU = map[string]int{
-	"c7a": 2,
-	"c7g": 2,
-	"c7i": 2,
-	"m7a": 4,
-	"m7g": 4,
-	"m7i": 4,
-	"m8i": 4,
-	"r7a": 8,
-	"r7g": 8,
-	"r8i": 8,
+	"c7a":      2,
+	"c7g":      2,
+	"c7i":      2,
+	"c8i":      2,
+	"m7a":      4,
+	"m7g":      4,
+	"m7i":      4,
+	"m8i":      4,
+	"m8i-flex": 4,
+	"r7a":      8,
+	"r7g":      8,
+	"r8i":      8,
 }
+
+var classProfiles = buildClassProfiles()
 
 func (Provider) Name() string      { return "aws" }
 func (Provider) Aliases() []string { return nil }
@@ -47,8 +51,9 @@ func (Provider) Spec() core.ProviderSpec {
 			{OS: core.TargetWindows, WindowsMode: "wsl2"},
 			{OS: core.TargetMacOS},
 		},
-		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureDesktop, core.FeatureBrowser, core.FeatureCode},
-		Coordinator: core.CoordinatorSupported,
+		Features:         core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureDesktop, core.FeatureBrowser, core.FeatureCode},
+		Coordinator:      core.CoordinatorSupported,
+		ClassDisposition: core.ProviderClassDispositionMapped,
 	}
 }
 func (Provider) RegisterFlags(*flag.FlagSet, core.Config) any { return core.NoProviderFlags() }
@@ -87,22 +92,85 @@ func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, sl
 }
 
 func (Provider) ServerTypeForConfig(cfg core.Config) string {
-	return core.AWSInstanceTypeCandidatesForConfig(cfg)[0]
+	candidates := awsCandidatesForConfig(cfg)
+	if len(candidates) == 0 {
+		return ""
+	}
+	return candidates[0]
 }
 
 func (Provider) ServerTypeForClass(class string) string {
-	return core.AWSInstanceTypeCandidatesForClass(class)[0]
+	return awsInstanceTypeCandidatesForClass(class)[0]
 }
 
-func (Provider) ClassSpecs() []core.ClassSpec {
-	classes := core.MachineClassOrder
-	specs := make([]core.ClassSpec, 0, len(classes))
-	for _, class := range classes {
-		instanceType := core.AWSInstanceTypeCandidatesForClass(class)[0]
-		vcpus, memoryGB := instanceShape(instanceType)
-		specs = append(specs, core.ClassSpec{Class: class, Type: instanceType, VCPUs: vcpus, MemoryGB: memoryGB})
+func (Provider) ClassProfiles() []core.ProviderClassProfile {
+	return classProfiles
+}
+
+func buildClassProfiles() []core.ProviderClassProfile {
+	profiles := make([]core.ProviderClassProfile, 0, 20)
+	for _, class := range core.CanonicalProviderClasses() {
+		profiles = append(profiles,
+			awsClassProfile(class, core.TargetLinux, "", core.ProviderClassArchitectureAMD64, awsInstanceTypeCandidatesForClass(class)),
+			awsClassProfile(class, core.TargetLinux, "", core.ProviderClassArchitectureARM64, awsARM64InstanceTypeCandidatesForClass(class)),
+			awsClassProfile(class, core.TargetWindows, core.WindowsModeNormal, core.ProviderClassArchitectureAMD64, awsWindowsInstanceTypeCandidatesForClass(class)),
+			awsClassProfile(class, core.TargetWindows, core.WindowsModeWSL2, core.ProviderClassArchitectureAMD64, awsWSL2InstanceTypeCandidatesForClass(class)),
+			awsClassProfile(class, core.TargetMacOS, "", core.ProviderClassArchitectureMixed, awsMacOSInstanceTypeCandidates()),
+		)
 	}
-	return specs
+	return profiles
+}
+
+func awsClassProfile(class, target, windowsMode string, architecture core.ProviderClassArchitecture, candidates []string) core.ProviderClassProfile {
+	machines := make([]core.ProviderClassMachine, 0, len(candidates))
+	for _, instanceType := range candidates {
+		machineArchitecture := architecture
+		if architecture == core.ProviderClassArchitectureMixed {
+			machineArchitecture = core.ProviderClassArchitectureARM64
+			if instanceType == "mac1.metal" {
+				machineArchitecture = core.ProviderClassArchitectureAMD64
+			}
+		}
+		machines = append(machines, awsClassMachine(instanceType, machineArchitecture))
+	}
+	return core.ProviderClassProfileFromMachines(class, target, windowsMode, architecture, machines)
+}
+
+func awsCandidatesForConfig(cfg core.Config) []string {
+	if candidates, matched := core.ProviderClassCandidatesForProfiles(classProfiles, cfg); matched {
+		return candidates
+	}
+	if core.IsCanonicalProviderClass(cfg.Class) {
+		return nil
+	}
+	if cfg.TargetOS == core.TargetMacOS {
+		standard := cfg
+		standard.Class = "standard"
+		candidates, _ := core.ProviderClassCandidatesForProfiles(classProfiles, standard)
+		return candidates
+	}
+	if cfg.TargetOS == core.TargetWindows {
+		if cfg.WindowsMode == core.WindowsModeWSL2 {
+			return awsWSL2InstanceTypeCandidatesForClass(cfg.Class)
+		}
+		return awsWindowsInstanceTypeCandidatesForClass(cfg.Class)
+	}
+	if cfg.Architecture == core.ArchitectureARM64 {
+		return awsARM64InstanceTypeCandidatesForClass(cfg.Class)
+	}
+	return awsInstanceTypeCandidatesForClass(cfg.Class)
+}
+
+func awsClassMachine(instanceType string, architecture core.ProviderClassArchitecture) core.ProviderClassMachine {
+	vcpus, memoryGiB := instanceShape(instanceType)
+	machine := core.ProviderClassMachine{Type: instanceType, Architecture: architecture}
+	if vcpus > 0 {
+		machine.VCPU = &vcpus
+	}
+	if memoryGiB > 0 {
+		machine.Memory = &core.ProviderMemory{Value: float64(memoryGiB), Unit: core.ProviderMemoryUnitGiB}
+	}
+	return machine
 }
 
 func instanceShape(instanceType string) (int, int) {
@@ -110,11 +178,79 @@ func instanceShape(instanceType string) (int, int) {
 	if vcpus == 0 {
 		return 0, 0
 	}
+	switch instanceType {
+	case "t3.small", "t4g.small":
+		return vcpus, 2
+	case "t3.large":
+		return vcpus, 8
+	}
 	family, _, ok := strings.Cut(strings.ToLower(strings.TrimSpace(instanceType)), ".")
 	if !ok {
 		return vcpus, 0
 	}
 	return vcpus, vcpus * memoryGiBPerVCPU[family]
+}
+
+func awsInstanceTypeCandidatesForClass(class string) []string {
+	switch class {
+	case "standard":
+		return []string{"c7a.8xlarge", "c7i.8xlarge", "m7a.8xlarge", "m7i.8xlarge", "c7a.4xlarge", "t3.small"}
+	case "fast":
+		return []string{"c7a.16xlarge", "c7i.16xlarge", "m7a.16xlarge", "m7i.16xlarge", "c7a.12xlarge", "c7a.8xlarge", "t3.small"}
+	case "large":
+		return []string{"c7a.24xlarge", "c7i.24xlarge", "m7a.24xlarge", "m7i.24xlarge", "r7a.24xlarge", "c7a.16xlarge", "c7a.12xlarge", "t3.small"}
+	case "beast":
+		return []string{"c7a.48xlarge", "c7i.48xlarge", "m7a.48xlarge", "m7i.48xlarge", "r7a.48xlarge", "c7a.32xlarge", "c7i.32xlarge", "m7a.32xlarge", "c7a.24xlarge", "c7a.16xlarge", "t3.small"}
+	default:
+		return []string{class}
+	}
+}
+
+func awsARM64InstanceTypeCandidatesForClass(class string) []string {
+	switch class {
+	case "standard":
+		return []string{"c7g.8xlarge", "m7g.8xlarge", "r7g.8xlarge", "c7g.4xlarge", "t4g.small"}
+	case "fast":
+		return []string{"c7g.16xlarge", "m7g.16xlarge", "r7g.16xlarge", "c7g.12xlarge", "c7g.8xlarge", "t4g.small"}
+	case "large", "beast":
+		return []string{"c7g.16xlarge", "m7g.16xlarge", "r7g.16xlarge", "c7g.12xlarge", "t4g.small"}
+	default:
+		return []string{class}
+	}
+}
+
+func awsWindowsInstanceTypeCandidatesForClass(class string) []string {
+	switch class {
+	case "standard":
+		return []string{"m7i.large", "m7a.large", "t3.large"}
+	case "fast":
+		return []string{"m7i.xlarge", "m7a.xlarge", "t3.xlarge", "t3.large"}
+	case "large":
+		return []string{"m7i.2xlarge", "m7a.2xlarge", "t3.2xlarge", "t3.large"}
+	case "beast":
+		return []string{"m7i.4xlarge", "m7a.4xlarge", "m7i.2xlarge", "t3.large"}
+	default:
+		return []string{class}
+	}
+}
+
+func awsWSL2InstanceTypeCandidatesForClass(class string) []string {
+	switch class {
+	case "standard":
+		return []string{"m8i.large", "m8i-flex.large", "c8i.large", "r8i.large"}
+	case "fast":
+		return []string{"m8i.xlarge", "m8i-flex.xlarge", "c8i.xlarge", "r8i.xlarge", "m8i.large"}
+	case "large":
+		return []string{"m8i.2xlarge", "m8i-flex.2xlarge", "c8i.2xlarge", "r8i.2xlarge", "m8i.large"}
+	case "beast":
+		return []string{"m8i.4xlarge", "m8i-flex.4xlarge", "c8i.4xlarge", "r8i.4xlarge", "m8i.2xlarge", "m8i.large"}
+	default:
+		return []string{class}
+	}
+}
+
+func awsMacOSInstanceTypeCandidates() []string {
+	return []string{"mac2.metal", "mac2-m2.metal", "mac2-m2pro.metal", "mac-m4.metal", "mac-m4pro.metal", "mac-m4max.metal", "mac2-m1ultra.metal", "mac-m3ultra.metal", "mac1.metal"}
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {

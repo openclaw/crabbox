@@ -1,23 +1,23 @@
 package aws
 
 import (
-	"reflect"
 	"testing"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func TestClassSpecs(t *testing.T) {
-	want := []core.ClassSpec{
-		{Class: "tiny", Type: "m7a.large", VCPUs: 2, MemoryGB: 8},
-		{Class: "small", Type: "c7a.2xlarge", VCPUs: 8, MemoryGB: 16},
-		{Class: "standard", Type: "c7a.8xlarge", VCPUs: 32, MemoryGB: 64},
-		{Class: "fast", Type: "c7a.16xlarge", VCPUs: 64, MemoryGB: 128},
-		{Class: "large", Type: "c7a.24xlarge", VCPUs: 96, MemoryGB: 192},
-		{Class: "beast", Type: "c7a.48xlarge", VCPUs: 192, MemoryGB: 384},
+func TestClassProfilesCoverAWSVariants(t *testing.T) {
+	profiles := (Provider{}).ClassProfiles()
+	if len(profiles) != 20 {
+		t.Fatalf("ClassProfiles len=%d want 20", len(profiles))
 	}
-	if got := (Provider{}).ClassSpecs(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("ClassSpecs()=%#v want %#v", got, want)
+	for _, profile := range profiles {
+		if profile.Primary.Type == "" || profile.Fallbacks == nil {
+			t.Fatalf("incomplete profile: %#v", profile)
+		}
+		if profile.Target == core.TargetMacOS && profile.Architecture != core.ProviderClassArchitectureMixed {
+			t.Fatalf("macOS profile architecture=%q", profile.Architecture)
+		}
 	}
 }
 

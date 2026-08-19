@@ -28,6 +28,27 @@ func TestNamespaceSSHTargetParsesPrepareResult(t *testing.T) {
 	}
 }
 
+func TestProviderServerTypeResolution(t *testing.T) {
+	provider := Provider{}
+	for _, test := range []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{name: "provider size", cfg: Config{Provider: namespaceProvider, Namespace: NamespaceConfig{Size: " xl "}, Class: "standard"}, want: "XL"},
+		{name: "explicit type", cfg: Config{Provider: namespaceProvider, ServerType: " l ", ServerTypeExplicit: true, Class: "standard"}, want: "L"},
+		{name: "canonical class", cfg: Config{Provider: namespaceProvider, TargetOS: targetLinux, Architecture: "amd64", Class: "large"}, want: "L"},
+		{name: "empty default", cfg: Config{Provider: namespaceProvider}, want: "M"},
+		{name: "custom class", cfg: Config{Provider: namespaceProvider, Class: "gpu"}, want: "GPU"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := provider.ServerTypeForConfig(test.cfg); got != test.want {
+				t.Fatalf("server type=%q want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestParseNamespaceListAcceptsArrayAndWrappedObjects(t *testing.T) {
 	for name, input := range map[string]string{
 		"array":   `[{"name":"crabbox-blue-lobster-deadbeef","status":"running","size":"L","repository":"github.com/openclaw/crabbox","created_at":"2026-05-09T12:00:00Z"}]`,

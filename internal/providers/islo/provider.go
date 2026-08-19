@@ -24,6 +24,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Targets:             []core.TargetSpec{{OS: core.TargetLinux}},
 		Features:            core.FeatureSet{core.FeatureSSH, core.FeatureURLBridge, core.FeatureRunSession, core.FeatureTailscale, core.FeaturePauseResume, core.FeatureRunDownloads},
 		Coordinator:         core.CoordinatorNever,
+		ClassDisposition:    core.ProviderClassDispositionUnmapped,
 		TailscaleEgressOnly: true,
 	}
 }

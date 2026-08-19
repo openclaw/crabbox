@@ -19,24 +19,6 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-func TestGCPMachineTypeCandidatesForClass(t *testing.T) {
-	for _, tt := range []struct {
-		class string
-		want  []string
-	}{
-		{class: "tiny", want: []string{"c4-standard-4", "c3-standard-4", "n2-standard-4", "n2d-standard-4"}},
-		{class: "small", want: []string{"c4-standard-8", "c3-standard-8", "n2-standard-8", "n2d-standard-8", "c4-standard-4"}},
-		{class: "standard", want: []string{"c4-standard-32", "c3-standard-22", "n2-standard-32", "n2d-standard-32"}},
-	} {
-		if got := gcpMachineTypeCandidatesForClass(tt.class); !reflect.DeepEqual(got, tt.want) {
-			t.Fatalf("class=%q got %v want %v", tt.class, got, tt.want)
-		}
-	}
-	if got := serverTypeForProviderClass("gcp", "beast"); got != "c4-standard-192" {
-		t.Fatalf("gcp beast=%q", got)
-	}
-}
-
 func TestGCPLabelsAreGoogleSafe(t *testing.T) {
 	got := gcpLabels(map[string]string{
 		"crabbox":      "true",

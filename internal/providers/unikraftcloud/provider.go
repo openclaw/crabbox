@@ -17,12 +17,13 @@ func (Provider) Aliases() []string { return []string{"unikraftcloud", "ukc"} }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name:        providerName,
-		Family:      "unikraft-cloud",
-		Kind:        core.ProviderKindServiceControl,
-		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{core.FeatureCleanup},
-		Coordinator: core.CoordinatorNever,
+		Name:             providerName,
+		Family:           "unikraft-cloud",
+		Kind:             core.ProviderKindServiceControl,
+		Targets:          []core.TargetSpec{{OS: core.TargetLinux}},
+		Features:         core.FeatureSet{core.FeatureCleanup},
+		Coordinator:      core.CoordinatorNever,
+		ClassDisposition: core.ProviderClassDispositionUnmapped,
 	}
 }
 

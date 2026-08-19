@@ -24,11 +24,12 @@ func (Provider) ServerTypeForConfig(core.Config) string { return "" }
 func (Provider) ServerTypeForClass(string) string       { return "" }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name:        "freestyle",
-		Kind:        core.ProviderKindDelegatedRun,
-		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{core.FeatureArchiveSync, core.FeatureRunSession},
-		Coordinator: core.CoordinatorNever,
+		Name:             "freestyle",
+		Kind:             core.ProviderKindDelegatedRun,
+		Targets:          []core.TargetSpec{{OS: core.TargetLinux}},
+		Features:         core.FeatureSet{core.FeatureArchiveSync, core.FeatureRunSession},
+		Coordinator:      core.CoordinatorNever,
+		ClassDisposition: core.ProviderClassDispositionUnmapped,
 	}
 }
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {

@@ -16,19 +16,22 @@ func init() {
 
 type Provider struct{}
 
-var _ core.ProviderClassSpecProvider = Provider{}
+var _ core.ProviderClassProfileProvider = Provider{}
+
+var classProfiles = buildClassProfiles()
 
 func (Provider) Name() string      { return providerName }
 func (Provider) Aliases() []string { return []string{"namespace-compute"} }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name:        providerName,
-		Family:      providerName,
-		Kind:        core.ProviderKindSSHLease,
-		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup},
-		Coordinator: core.CoordinatorNever,
+		Name:             providerName,
+		Family:           providerName,
+		Kind:             core.ProviderKindSSHLease,
+		Targets:          []core.TargetSpec{{OS: core.TargetLinux}},
+		Features:         core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup},
+		Coordinator:      core.CoordinatorNever,
+		ClassDisposition: core.ProviderClassDispositionMapped,
 	}
 }
 
@@ -131,22 +134,43 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	if cfg.NamespaceInstance.MachineType != "" {
 		return cfg.NamespaceInstance.MachineType
 	}
+	if candidates, matched := core.ProviderClassCandidatesForProfiles(classProfiles, cfg); matched {
+		return candidates[0]
+	}
+	if core.IsCanonicalProviderClass(cfg.Class) {
+		return ""
+	}
 	return machineTypeForClass(cfg.Class)
+}
+
+func (Provider) ServerTypeOverrideForConfig(cfg core.Config) (string, bool) {
+	machineType := strings.TrimSpace(cfg.NamespaceInstance.MachineType)
+	return machineType, machineType != ""
 }
 
 func (Provider) ServerTypeForClass(class string) string {
 	return machineTypeForClass(class)
 }
 
-func (Provider) ClassSpecs() []core.ClassSpec {
-	classes := core.MachineClassOrder
-	specs := make([]core.ClassSpec, 0, len(classes))
-	for _, class := range classes {
-		machineType := machineTypeForClass(class)
-		vcpus, memoryGB := machineShape(machineType)
-		specs = append(specs, core.ClassSpec{Class: class, Type: machineType, VCPUs: vcpus, MemoryGB: memoryGB})
+func (Provider) ClassProfiles() []core.ProviderClassProfile {
+	return classProfiles
+}
+
+func buildClassProfiles() []core.ProviderClassProfile {
+	types := []string{"4x8", "8x16", "16x32", "32x64"}
+	classes := core.CanonicalProviderClasses()
+	profiles := make([]core.ProviderClassProfile, 0, len(classes))
+	for index, class := range classes {
+		vcpus, memoryGB := machineShape(types[index])
+		profiles = append(profiles, core.ProviderClassProfileFromMachines(
+			class, core.TargetLinux, "", core.ProviderClassArchitectureAMD64,
+			[]core.ProviderClassMachine{{
+				Type: types[index], Architecture: core.ProviderClassArchitectureAMD64,
+				VCPU: &vcpus, Memory: &core.ProviderMemory{Value: float64(memoryGB), Unit: core.ProviderMemoryUnitGB},
+			}},
+		))
 	}
-	return specs
+	return profiles
 }
 
 func machineShape(machineType string) (int, int) {

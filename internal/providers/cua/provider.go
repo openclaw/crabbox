@@ -28,8 +28,9 @@ func (Provider) Spec() core.ProviderSpec {
 			{OS: core.TargetMacOS},
 			{OS: core.TargetWindows, WindowsMode: core.WindowsModeNormal},
 		},
-		Features:    core.FeatureSet{},
-		Coordinator: core.CoordinatorNever,
+		Features:         core.FeatureSet{},
+		Coordinator:      core.CoordinatorNever,
+		ClassDisposition: core.ProviderClassDispositionUnmapped,
 	}
 }
 

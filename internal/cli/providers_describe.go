@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const providerDescriptionSchemaVersion = 1
+const providerDescriptionSchemaVersion = 2
 
 type providerDescription struct {
 	SchemaVersion int                         `json:"schemaVersion"`
@@ -20,6 +20,7 @@ type providerDescription struct {
 	Family        string                      `json:"family"`
 	Targets       []string                    `json:"targets"`
 	Capabilities  providerDescriptionCaps     `json:"capabilities"`
+	Classes       ProviderClassCatalog        `json:"classes"`
 	SharedFlags   []providerDescriptionFlag   `json:"sharedFlags"`
 	ProviderFlags []providerDescriptionFlag   `json:"providerFlags"`
 }
@@ -201,6 +202,7 @@ func describeProvider(requestedName string) (providerDescription, error) {
 			Lifecycle:    normalizedSortedStrings(entry.Lifecycle),
 			Coordinator:  firstNonBlank(entry.Coordinator, string(CoordinatorNever)),
 		},
+		Classes:       entry.Classes,
 		SharedFlags:   shared,
 		ProviderFlags: selected,
 	}, nil

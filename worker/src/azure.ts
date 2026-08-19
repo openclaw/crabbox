@@ -3,6 +3,9 @@ import {
   azureSupportsEphemeralFullCaching,
   azureSupportsEphemeralOS,
   azureVMSizeCandidatesForTargetClass,
+  concreteStoredServerType,
+  isCanonicalProviderClass,
+  uniqueProviderMachineCandidates,
   sshPorts,
   validatedCIDRs,
   type LeaseConfig,
@@ -3808,7 +3811,19 @@ function azureOSDiskUsesFullCaching(mode: string): boolean {
   return mode === "ephemeral-preview";
 }
 
-function azureProvisioningCandidatesForConfig(config: LeaseConfig): string[] {
+export function azureProvisioningCandidatesForConfig(
+  config: Pick<
+    LeaseConfig,
+    | "serverType"
+    | "serverTypeExplicit"
+    | "class"
+    | "target"
+    | "windowsMode"
+    | "architecture"
+    | "azureSnapshot"
+    | "azureOSDisk"
+  >,
+): string[] {
   if (config.serverTypeExplicit && config.serverType) {
     return [config.serverType];
   }
@@ -3820,15 +3835,23 @@ function azureProvisioningCandidatesForConfig(config: LeaseConfig): string[] {
     config.architecture,
     azureOSDisk,
   );
-  if (!config.serverType || config.serverType === candidates[0]) {
+  if (candidates.length === 0 && isCanonicalProviderClass(config.class)) {
+    const storedType = concreteStoredServerType(config.serverType, config.class);
+    if (!storedType) return [];
+    return azureOSDiskUsesFullCaching(azureOSDisk) && !azureSupportsEphemeralFullCaching(storedType)
+      ? []
+      : [storedType];
+  }
+  const storedType = concreteStoredServerType(config.serverType, config.class);
+  if (!storedType || storedType === candidates[0]) {
     return candidates;
   }
   if (azureOSDiskUsesFullCaching(azureOSDisk)) {
-    return azureSupportsEphemeralFullCaching(config.serverType)
-      ? prependUnique(config.serverType, candidates)
+    return azureSupportsEphemeralFullCaching(storedType)
+      ? uniqueProviderMachineCandidates([storedType, ...candidates])
       : candidates;
   }
-  return prependUnique(config.serverType, candidates);
+  return uniqueProviderMachineCandidates([storedType, ...candidates]);
 }
 
 function azureComputeAPIVersionForOSDisk(mode: string): string {
@@ -3958,10 +3981,6 @@ export function conciseAzureProvisioningMessage(message: string): string {
   const parsed = parseAzureStatusMessage(message);
   const raw = parsed || message;
   return raw.split(/\n|\. /, 1)[0]?.trim() || raw.trim();
-}
-
-function prependUnique(first: string, rest: string[]): string[] {
-  return [first, ...rest.filter((value) => value !== first)];
 }
 
 function splitCommaList(value: string): string[] {

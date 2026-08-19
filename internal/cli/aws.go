@@ -1510,20 +1510,24 @@ func awsLaunchCandidates(cfg Config) []string {
 	if cfg.ServerTypeExplicit {
 		return []string{cfg.ServerType}
 	}
-	if cfg.TargetOS == targetMacOS {
-		return appendUniqueStrings([]string{cfg.ServerType}, awsInstanceTypeCandidatesForConfig(cfg)...)
+	candidates, matched := awsClassCandidatesForConfig(cfg)
+	if !matched && IsCanonicalProviderClass(cfg.Class) {
+		return nil
 	}
-	fallback := "t3.small"
-	if cfg.TargetOS == targetLinux && effectiveArchitectureForConfig(cfg) == ArchitectureARM64 {
-		fallback = "t4g.small"
-	}
-	if cfg.TargetOS == targetWindows {
-		fallback = "t3.large"
-		if cfg.WindowsMode == windowsModeWSL2 {
-			fallback = "m8i.large"
+	if !matched && cfg.TargetOS != targetMacOS {
+		fallback := "t3.small"
+		if cfg.TargetOS == targetLinux && effectiveArchitectureForConfig(cfg) == ArchitectureARM64 {
+			fallback = "t4g.small"
 		}
+		if cfg.TargetOS == targetWindows {
+			fallback = "t3.large"
+			if cfg.WindowsMode == windowsModeWSL2 {
+				fallback = "m8i.large"
+			}
+		}
+		candidates = appendUniqueExactStrings(candidates, fallback)
 	}
-	return appendUniqueStrings([]string{cfg.ServerType}, append(awsInstanceTypeCandidatesForConfig(cfg), fallback)...)
+	return appendUniqueExactStrings([]string{concreteStoredServerType(cfg)}, candidates...)
 }
 
 func awsCapacityDoctorMarkets(cfg Config) []string {

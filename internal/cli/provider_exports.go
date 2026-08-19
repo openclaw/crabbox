@@ -47,8 +47,20 @@ func ServerTypeForProviderClass(provider, class string) string {
 	return serverTypeForProviderClass(provider, class)
 }
 
+func ProviderClassCatalogFor(provider Provider) ProviderClassCatalog {
+	return providerClassCatalogFor(provider)
+}
+
+func ProviderClassCandidatesForConfig(cfg Config) ([]string, bool) {
+	return providerClassCandidatesForConfig(cfg)
+}
+
 func AWSInstanceTypeCandidatesForConfig(cfg Config) []string {
 	return awsInstanceTypeCandidatesForConfig(cfg)
+}
+
+func AWSLaunchCandidates(cfg Config) []string {
+	return awsLaunchCandidates(cfg)
 }
 
 func AWSInstanceTypeCandidatesForClass(class string) []string {
@@ -75,8 +87,16 @@ func GCPMachineTypeCandidatesForClass(class string) []string {
 	return gcpMachineTypeCandidatesForClass(class)
 }
 
+func GCPMachineTypeCandidatesForConfig(cfg Config) []string {
+	return gcpMachineTypeCandidatesForConfig(cfg)
+}
+
 func HetznerServerTypeCandidatesForClass(class string) []string {
 	return serverTypeCandidatesForClass(class)
+}
+
+func HetznerServerTypeCandidatesForConfig(cfg Config) []string {
+	return hetznerServerTypeCandidatesForConfig(cfg)
 }
 
 func ProxmoxServerTypeForConfig(cfg Config) string {

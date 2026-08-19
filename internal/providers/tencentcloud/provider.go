@@ -15,6 +15,10 @@ func init() {
 
 type Provider struct{}
 
+var classProfiles = buildClassProfiles()
+
+var _ core.ProviderClassProfileProvider = Provider{}
+
 func (Provider) Name() string { return providerName }
 func (Provider) Aliases() []string {
 	return []string{"tencent", "tencent-cvm", "cvm"}
@@ -22,13 +26,31 @@ func (Provider) Aliases() []string {
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name:        providerName,
-		Family:      providerName,
-		Kind:        core.ProviderKindSSHLease,
-		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureTailscale},
-		Coordinator: core.CoordinatorNever,
+		Name:             providerName,
+		Family:           providerName,
+		Kind:             core.ProviderKindSSHLease,
+		Targets:          []core.TargetSpec{{OS: core.TargetLinux}},
+		Features:         core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureTailscale},
+		Coordinator:      core.CoordinatorNever,
+		ClassDisposition: core.ProviderClassDispositionMapped,
 	}
+}
+
+func (Provider) ClassProfiles() []core.ProviderClassProfile {
+	return classProfiles
+}
+
+func buildClassProfiles() []core.ProviderClassProfile {
+	classes := core.CanonicalProviderClasses()
+	types := []string{defaultType, "SA5.LARGE8", "SA5.2XLARGE16", "SA5.8XLARGE64"}
+	profiles := make([]core.ProviderClassProfile, 0, len(classes))
+	for index, class := range classes {
+		profiles = append(profiles, core.ProviderClassProfileFromMachines(
+			class, core.TargetLinux, "", core.ProviderClassArchitectureAMD64,
+			[]core.ProviderClassMachine{{Type: types[index], Architecture: core.ProviderClassArchitectureAMD64}},
+		))
+	}
+	return profiles
 }
 
 type flagValues struct {
@@ -112,13 +134,12 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 }
 
 func (Provider) ServerTypeForConfig(cfg core.Config) string {
-	if cfg.ServerTypeExplicit && cfg.ServerType != "" {
-		return cfg.ServerType
-	}
-	if cfg.TencentCloud.Type != "" {
-		return cfg.TencentCloud.Type
-	}
-	return serverTypeForClass(cfg.Class)
+	return serverTypeForConfig(cfg)
+}
+
+func (Provider) ServerTypeOverrideForConfig(cfg core.Config) (string, bool) {
+	serverType := strings.TrimSpace(cfg.TencentCloud.Type)
+	return serverType, core.TencentCloudTypeWasExplicit(cfg) && serverType != ""
 }
 
 func (Provider) ServerTypeForClass(class string) string {

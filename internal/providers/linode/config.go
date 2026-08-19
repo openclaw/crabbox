@@ -51,12 +51,13 @@ func linodeServerTypeForConfig(cfg core.Config) string {
 }
 
 func linodeServerTypeForClass(class string) string {
-	switch strings.ToLower(strings.TrimSpace(class)) {
-	case "standard", "fast", "large", "beast":
-		return defaultType
-	default:
-		return defaultType
+	normalized := strings.ToLower(strings.TrimSpace(class))
+	for _, profile := range classProfiles {
+		if profile.Class == normalized {
+			return profile.Primary.Type
+		}
 	}
+	return defaultType
 }
 
 func validateFoundationConfig(cfg core.Config) error {

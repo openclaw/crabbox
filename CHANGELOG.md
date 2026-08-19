@@ -5,17 +5,18 @@
 ### Added
 
 - Added `tiny` and `small` machine classes for lower-cost smoke checks and small repositories.
+- Added provider-owned machine-class profiles with target, architecture, ordered fallback, and explicit shape units to both JSON provider discovery commands.
 - Added an opt-in `cmake --version` preflight probe for POSIX, WSL2, and native Windows targets. Thanks @coygeek.
 
 ### Fixed
 
+- Kept explicit Hetzner server-type requests exact instead of continuing through class fallback candidates after capacity errors.
 - Made private draft verification resolve the exact draft by tag and numeric release ID instead of relying on a release-list endpoint that can omit drafts.
 
 ## 0.44.0 - 2026-08-18
 
 ### Added
 
-- Added concrete primary machine types, vCPU counts, and RAM sizes to `crabbox providers` class reporting.
 - Added credential-free `crabbox providers describe` discovery for canonical provider-scoped run flags and compiled defaults. Thanks @coygeek.
 - Added supported versioned `go install` as a CLI-only installation channel, with clean module dependency semantics, source-derived release and revision versions, and hermetic release verification. Thanks @coygeek.
 - Added an opt-in Linux/WSL2 `raw_socket` preflight probe that distinguishes direct, non-interactive-sudo, unavailable, and missing-interpreter states without sending packets or elevating workloads. Thanks @coygeek.

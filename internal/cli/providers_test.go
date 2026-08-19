@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -93,15 +95,15 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	if firecracker == nil {
 		t.Fatal("firecracker provider not found")
 	}
-	if len(firecracker.Classes) != 0 {
-		t.Fatalf("firecracker classes=%#v want omitted", firecracker.Classes)
+	if len(firecracker.Classes.Profiles) != 0 {
+		t.Fatalf("firecracker classes=%#v want no profiles", firecracker.Classes)
 	}
 	encodedFirecracker, err := json.Marshal(firecracker)
 	if err != nil {
 		t.Fatalf("marshal firecracker matrix entry: %v", err)
 	}
-	if bytes.Contains(encodedFirecracker, []byte(`"classes"`)) {
-		t.Fatalf("firecracker JSON unexpectedly contains classes: %s", encodedFirecracker)
+	if !bytes.Contains(encodedFirecracker, []byte(`"classes"`)) {
+		t.Fatalf("firecracker JSON missing classes: %s", encodedFirecracker)
 	}
 	if vast == nil {
 		t.Fatal("vast provider not found")
@@ -412,7 +414,7 @@ func TestProvidersCommandHumanOutput(t *testing.T) {
 	}
 }
 
-func TestPrintProviderMatrixClasses(t *testing.T) {
+func TestPrintProviderMatrixDoesNotPrintClasses(t *testing.T) {
 	var output bytes.Buffer
 	printProviderMatrix(&output, []providerMatrixEntry{{
 		Provider:    "example",
@@ -421,52 +423,38 @@ func TestPrintProviderMatrixClasses(t *testing.T) {
 		Targets:     []string{targetLinux},
 		Features:    FeatureSet{},
 		Coordinator: string(CoordinatorNever),
-		Classes: []ClassSpec{
-			{Class: "standard", Type: "shape-1", VCPUs: 4, MemoryGB: 8},
-			{Class: "fast", Type: "shape-2", VCPUs: 8},
-			{Class: "large", Type: "shape-3", MemoryGB: 32},
-			{Class: "beast", Type: "shape-4"},
-		},
+		Classes: ProviderClassCatalog{Disposition: ProviderClassDispositionMapped, Profiles: []ProviderClassProfile{
+			{Class: "standard", Target: targetLinux, Architecture: ProviderClassArchitectureAMD64, Primary: ProviderClassMachine{Type: "shape-1", Architecture: ProviderClassArchitectureAMD64}, Fallbacks: []ProviderClassMachine{}},
+		}},
 	}})
-	for _, want := range []string{
-		"  class standard: shape-1 (4 vCPU, 8 GB RAM)\n",
-		"  class fast: shape-2 (8 vCPU)\n",
-		"  class large: shape-3 (32 GB RAM)\n",
-		"  class beast: shape-4\n",
-	} {
-		if !strings.Contains(output.String(), want) {
-			t.Fatalf("provider matrix output missing %q:\n%s", want, output.String())
-		}
+	if strings.Contains(output.String(), "class standard") || strings.Contains(output.String(), "shape-1") {
+		t.Fatalf("provider matrix unexpectedly printed JSON-only classes:\n%s", output.String())
 	}
 }
 
-func TestClassSpecJSON(t *testing.T) {
-	tests := []struct {
-		name string
-		spec ClassSpec
-		want string
-	}{
-		{
-			name: "known shape",
-			spec: ClassSpec{Class: "standard", Type: "shape-1", VCPUs: 4, MemoryGB: 8},
-			want: `{"class":"standard","type":"shape-1","vcpu":4,"memoryGb":8}`,
-		},
-		{
-			name: "unknown shape",
-			spec: ClassSpec{Class: "standard", Type: "shape-1"},
-			want: `{"class":"standard","type":"shape-1"}`,
-		},
+func TestProviderClassMachineJSONUsesNullForUnknownShape(t *testing.T) {
+	machine := ProviderClassMachine{
+		Type:         "shape-1",
+		Architecture: ProviderClassArchitectureAMD64,
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			encoded, err := json.Marshal(test.spec)
-			if err != nil {
-				t.Fatalf("marshal ClassSpec: %v", err)
-			}
-			if string(encoded) != test.want {
-				t.Fatalf("ClassSpec JSON=%s want %s", encoded, test.want)
-			}
-		})
+	encoded, err := json.Marshal(machine)
+	if err != nil {
+		t.Fatalf("marshal ProviderClassMachine: %v", err)
+	}
+	want := `{"type":"shape-1","architecture":"amd64","vcpu":null,"memory":null}`
+	if string(encoded) != want {
+		t.Fatalf("ProviderClassMachine JSON=%s want %s", encoded, want)
+	}
+}
+
+func TestProviderClassCatalogJSONKeepsArrays(t *testing.T) {
+	catalog := ProviderClassCatalog{Disposition: ProviderClassDispositionUnmapped, Profiles: []ProviderClassProfile{}}
+	encoded, err := json.Marshal(catalog)
+	if err != nil {
+		t.Fatalf("marshal ProviderClassCatalog: %v", err)
+	}
+	if string(encoded) != `{"disposition":"unmapped","profiles":[]}` {
+		t.Fatalf("ProviderClassCatalog JSON=%s", encoded)
 	}
 }
 
@@ -1948,13 +1936,19 @@ func TestProvidersJSONIncludesBuiltIns(t *testing.T) {
 		if entry == nil {
 			t.Fatalf("built binary providers json missing %s", provider)
 		}
-		if len(entry.Classes) != len(MachineClassOrder) {
-			t.Fatalf("%s classes=%#v want %d entries", provider, entry.Classes, len(MachineClassOrder))
+		if entry.Classes.Disposition != ProviderClassDispositionMapped || len(entry.Classes.Profiles) < 4 {
+			t.Fatalf("%s classes=%#v want mapped profiles", provider, entry.Classes)
 		}
-		for classIndex, className := range MachineClassOrder {
-			classSpec := entry.Classes[classIndex]
-			if classSpec.Class != className || classSpec.Type == "" || classSpec.VCPUs <= 0 || classSpec.MemoryGB <= 0 {
-				t.Fatalf("%s class[%d]=%#v", provider, classIndex, classSpec)
+		seen := map[string]bool{}
+		for _, profile := range entry.Classes.Profiles {
+			seen[profile.Class] = true
+			if profile.Primary.Type == "" || profile.Fallbacks == nil {
+				t.Fatalf("%s profile=%#v", provider, profile)
+			}
+		}
+		for _, className := range CanonicalProviderClasses() {
+			if !seen[className] {
+				t.Fatalf("%s missing class=%s", provider, className)
 			}
 		}
 	}
@@ -1963,6 +1957,9 @@ func TestProvidersJSONIncludesBuiltIns(t *testing.T) {
 	}
 	if firecracker.Kind != ProviderKindSSHLease || firecracker.Family != "firecracker" || firecracker.Coordinator != string(CoordinatorNever) {
 		t.Fatalf("firecracker built-in spec=%#v", *firecracker)
+	}
+	if firecracker.Classes.Disposition != ProviderClassDispositionUnmapped || len(firecracker.Classes.Profiles) != 0 {
+		t.Fatalf("firecracker classes=%#v", firecracker.Classes)
 	}
 	if !containsString(firecracker.Targets, targetLinux) {
 		t.Fatalf("firecracker built-in targets=%v", firecracker.Targets)
@@ -1974,6 +1971,42 @@ func TestProvidersJSONIncludesBuiltIns(t *testing.T) {
 	}
 	if len(firecracker.Aliases) != 0 {
 		t.Fatalf("firecracker built-in aliases=%v, want none", firecracker.Aliases)
+	}
+
+	for _, smoke := range []struct {
+		requested string
+		canonical string
+	}{{requested: "aws", canonical: "aws"}, {requested: "google", canonical: "gcp"}} {
+		var matrix *providerMatrixEntry
+		for index := range entries {
+			if entries[index].Provider == smoke.canonical {
+				matrix = &entries[index]
+				break
+			}
+		}
+		if matrix == nil {
+			t.Fatalf("built binary providers json missing %s", smoke.canonical)
+		}
+		discoveryHome := t.TempDir()
+		describe := exec.Command(binary, "providers", "describe", smoke.requested, "--json")
+		describe.Dir = root
+		describe.Env = []string{
+			"PATH=" + os.Getenv("PATH"),
+			"HOME=" + discoveryHome,
+			"CRABBOX_CONFIG=" + filepath.Join(discoveryHome, "missing.yaml"),
+			"CRABBOX_PROVIDER=static-discovery-marker",
+		}
+		describeOutput, err := describe.CombinedOutput()
+		if err != nil {
+			t.Fatalf("crabbox providers describe %s --json: %v\n%s", smoke.requested, err, describeOutput)
+		}
+		var description providerDescription
+		if err := json.Unmarshal(describeOutput, &description); err != nil {
+			t.Fatalf("invalid providers describe %s json: %v\n%s", smoke.requested, err, describeOutput)
+		}
+		if description.SchemaVersion != 2 || !reflect.DeepEqual(description.Classes, matrix.Classes) {
+			t.Fatalf("provider=%s requested=%s schema=%d describe classes=%#v matrix classes=%#v", smoke.canonical, smoke.requested, description.SchemaVersion, description.Classes, matrix.Classes)
+		}
 	}
 }
 

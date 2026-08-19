@@ -20,12 +20,13 @@ func (Provider) Aliases() []string {
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name:        providerName,
-		Family:      "local-sandbox",
-		Kind:        core.ProviderKindDelegatedRun,
-		Targets:     []core.TargetSpec{{OS: core.TargetWindows, WindowsMode: core.WindowsModeNormal}},
-		Features:    core.FeatureSet{core.FeatureArchiveSync},
-		Coordinator: core.CoordinatorNever,
+		Name:             providerName,
+		Family:           "local-sandbox",
+		Kind:             core.ProviderKindDelegatedRun,
+		Targets:          []core.TargetSpec{{OS: core.TargetWindows, WindowsMode: core.WindowsModeNormal}},
+		Features:         core.FeatureSet{core.FeatureArchiveSync},
+		Coordinator:      core.CoordinatorNever,
+		ClassDisposition: core.ProviderClassDispositionUnmapped,
 	}
 }
 

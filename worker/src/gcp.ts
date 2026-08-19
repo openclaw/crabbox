@@ -1,8 +1,11 @@
 import { cloudInit } from "./bootstrap";
 import {
+  concreteStoredServerType,
   gcpMachineTypeCandidatesForClass,
+  isCanonicalProviderClass,
   sshPorts,
   validatedCIDRs,
+  uniqueProviderMachineCandidates,
   type LeaseConfig,
 } from "./config";
 import {
@@ -195,10 +198,7 @@ export class GCPClient {
     market?: string;
     attempts?: ProvisioningAttempt[];
   }> {
-    const candidates =
-      config.serverTypeExplicit && config.serverType
-        ? [config.serverType]
-        : prependUnique(config.serverType, gcpMachineTypeCandidatesForClass(config.class));
+    const candidates = gcpProvisioningCandidatesForConfig(config);
     const zones = prependUnique(
       config.gcpZone || this.zone,
       config.capacityAvailabilityZones.length > 0 ? config.capacityAvailabilityZones : [this.zone],
@@ -839,6 +839,32 @@ export class GCPClient {
       ? subnet
       : `projects/${this.project}/regions/${regionFromZone(this.zone)}/subnetworks/${subnet}`;
   }
+}
+
+export function gcpProvisioningCandidatesForConfig(
+  config: Pick<
+    LeaseConfig,
+    "serverType" | "serverTypeExplicit" | "class" | "target" | "architecture"
+  >,
+): string[] {
+  if (config.serverTypeExplicit && config.serverType) {
+    return [config.serverType];
+  }
+  let profileCandidates =
+    config.target === "linux" && config.architecture === "amd64"
+      ? gcpMachineTypeCandidatesForClass(config.class)
+      : [];
+  if (profileCandidates.length === 0 && isCanonicalProviderClass(config.class)) {
+    const storedType = concreteStoredServerType(config.serverType, config.class);
+    return storedType ? [storedType] : [];
+  }
+  if (profileCandidates.length === 0) {
+    profileCandidates = [config.class];
+  }
+  const storedType = concreteStoredServerType(config.serverType, config.class);
+  return storedType
+    ? uniqueProviderMachineCandidates([storedType, ...profileCandidates])
+    : profileCandidates;
 }
 
 async function serviceAccountAssertion(env: Env, now: number): Promise<string> {

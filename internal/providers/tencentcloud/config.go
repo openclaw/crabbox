@@ -30,9 +30,8 @@ func cfgForRun(cfg core.Config) core.Config {
 	if cfg.TencentCloud.Zone == "" {
 		cfg.TencentCloud.Zone = defaultZone
 	}
-	if cfg.TencentCloud.Type == "" {
-		cfg.TencentCloud.Type = serverTypeForClass(cfg.Class)
-	}
+	resolvedType := serverTypeForConfig(cfg)
+	cfg.TencentCloud.Type = resolvedType
 	if cfg.TencentCloud.RootGB == 0 {
 		cfg.TencentCloud.RootGB = defaultRootGB
 	}
@@ -49,9 +48,7 @@ func cfgForRun(cfg core.Config) core.Config {
 		cfg.SSHPort = "22"
 	}
 	cfg.SSHFallbackPorts = nil
-	if !cfg.ServerTypeExplicit || cfg.ServerType == "" {
-		cfg.ServerType = cfg.TencentCloud.Type
-	}
+	cfg.ServerType = resolvedType
 	return cfg
 }
 
@@ -77,23 +74,45 @@ func serverTypeForConfig(cfg core.Config) string {
 	if cfg.ServerTypeExplicit && strings.TrimSpace(cfg.ServerType) != "" {
 		return strings.TrimSpace(cfg.ServerType)
 	}
+	if value := strings.TrimSpace(cfg.TencentCloud.Type); core.TencentCloudTypeWasExplicit(cfg) && value != "" {
+		return value
+	}
+	if core.ClassWasExplicit(cfg) {
+		if candidates, matched := core.ProviderClassCandidatesForProfiles(classProfiles, cfg); matched {
+			return candidates[0]
+		}
+		if core.IsCanonicalProviderClass(cfg.Class) {
+			return ""
+		}
+		return serverTypeForClass(cfg.Class)
+	}
 	if value := strings.TrimSpace(cfg.TencentCloud.Type); value != "" {
 		return value
 	}
-	return serverTypeForClass(cfg.Class)
+	return defaultType
 }
 
 func serverTypeForClass(class string) string {
-	switch strings.ToLower(strings.TrimSpace(class)) {
-	case "fast":
-		return "SA5.LARGE8"
-	case "large":
-		return "SA5.2XLARGE16"
-	case "beast":
-		return "SA5.8XLARGE64"
-	default:
-		return defaultType
+	if serverType, ok := providerClassType(class); ok {
+		return serverType
 	}
+	normalized := strings.ToLower(strings.TrimSpace(class))
+	if normalized != class {
+		if serverType, ok := providerClassType(normalized); ok {
+			return serverType
+		}
+	}
+	return defaultType
+}
+
+func providerClassType(class string) (string, bool) {
+	candidates, ok := core.ProviderClassCandidatesForProfiles(classProfiles, core.Config{
+		Provider: providerName, TargetOS: core.TargetLinux, Architecture: core.ArchitectureAMD64, Class: class,
+	})
+	if !ok {
+		return "", false
+	}
+	return candidates[0], true
 }
 
 func validateAcquireConfig(cfg core.Config) error {

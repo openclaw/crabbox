@@ -210,9 +210,9 @@ func validateProviderTarget(cfg Config) error {
 		if cfg.Capacity.Market != "on-demand" {
 			return exit(2, "provider=aws target=macos requires --market on-demand; EC2 Mac instances are not Spot")
 		}
-		return nil
+		return validateProviderClassSelector(provider, cfg)
 	}
-	return nil
+	return validateProviderClassSelector(provider, cfg)
 }
 
 func providerSupportsArchitecture(provider Provider, cfg Config, architecture string) bool {

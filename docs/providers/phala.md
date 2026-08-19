@@ -74,9 +74,10 @@ phala:
 ```
 
 Class defaults are `tiny=tdx.small`, `small=tdx.small`, `standard=tdx.small`,
-`fast=tdx.medium`, `large=tdx.large`, and `beast=tdx.xlarge`. Use `--type` or
-`--phala-instance-type` for an exact
-Phala instance shape.
+`fast=tdx.medium`, `large=tdx.large`, and `beast=tdx.xlarge`. When class is only
+the inherited global default, Phala keeps its inexpensive `tdx.small` or
+configured provider-native default. Use `--type` or `--phala-instance-type`
+for an exact Phala instance shape.
 
 Provider flags:
 

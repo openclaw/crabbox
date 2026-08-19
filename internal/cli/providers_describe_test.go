@@ -46,7 +46,7 @@ func TestDescribeProviderAliasSchemaCapabilitiesAndFlags(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if description.SchemaVersion != 1 || description.Provider.Requested != "docker" || description.Provider.Canonical != "local-container" || description.Provider.InputAlias != "docker" {
+	if description.SchemaVersion != 2 || description.Provider.Requested != "docker" || description.Provider.Canonical != "local-container" || description.Provider.InputAlias != "docker" {
 		t.Fatalf("identity=%#v schema=%d", description.Provider, description.SchemaVersion)
 	}
 	if description.Provider.Deprecated || description.Provider.Replacement != "" {
@@ -104,6 +104,27 @@ func TestDescribeProviderAliasSchemaCapabilitiesAndFlags(t *testing.T) {
 	}
 	if _, ok := shared["provider"]; !ok {
 		t.Fatal("shared flags omitted --provider")
+	}
+}
+
+func TestDescribeProviderClassesMatchMatrixForCanonicalAndAliases(t *testing.T) {
+	for _, provider := range registeredProviders() {
+		if provider.Spec().Kind != ProviderKindSSHLease && provider.Spec().Kind != ProviderKindDelegatedRun {
+			continue
+		}
+		matrixCatalog := providerMatrixEntryFor(provider).Classes
+		for _, requested := range append([]string{provider.Name()}, provider.Aliases()...) {
+			description, err := describeProvider(requested)
+			if err != nil {
+				t.Fatalf("describeProvider(%q): %v", requested, err)
+			}
+			if description.SchemaVersion != 2 {
+				t.Errorf("describeProvider(%q) schema=%d want 2", requested, description.SchemaVersion)
+			}
+			if !reflect.DeepEqual(description.Classes, matrixCatalog) {
+				t.Errorf("describeProvider(%q) classes=%#v matrix=%#v", requested, description.Classes, matrixCatalog)
+			}
+		}
 	}
 }
 

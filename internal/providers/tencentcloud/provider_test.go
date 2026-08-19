@@ -7,6 +7,8 @@ import (
 	"flag"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -59,6 +61,109 @@ func TestProviderFlagsApply(t *testing.T) {
 	}
 	if cfg.TencentCloud.APIEndpoint != "cvm.intl.tencentcloudapi.com" {
 		t.Fatalf("api endpoint=%q", cfg.TencentCloud.APIEndpoint)
+	}
+}
+
+func TestServerTypeForConfigHonorsClassAndTypeProvenance(t *testing.T) {
+	provider := Provider{}
+	defaults := core.BaseConfig()
+	defaults.Provider = providerName
+	defaults.TencentCloud.Type = ""
+	if got := provider.ServerTypeForConfig(defaults); got != defaultType {
+		t.Fatalf("inherited class server type=%q want provider default %q", got, defaultType)
+	}
+
+	providerDefault := defaults
+	providerDefault.TencentCloud.Type = "S5.SMALL2"
+	if got := provider.ServerTypeForConfig(providerDefault); got != "S5.SMALL2" {
+		t.Fatalf("non-explicit provider default=%q", got)
+	}
+
+	explicitClass := defaults
+	explicitClass.Class = "fast"
+	core.MarkClassExplicit(&explicitClass)
+	if got := provider.ServerTypeForConfig(explicitClass); got != "SA5.LARGE8" {
+		t.Fatalf("explicit class server type=%q", got)
+	}
+
+	explicitProviderType := explicitClass
+	explicitProviderType.TencentCloud.Type = "S5.SMALL2"
+	core.SetTencentCloudTypeExplicit(&explicitProviderType)
+	if got := provider.ServerTypeForConfig(explicitProviderType); got != "S5.SMALL2" {
+		t.Fatalf("explicit provider type=%q", got)
+	}
+
+	explicitGenericType := explicitProviderType
+	explicitGenericType.ServerType = "S6.MEDIUM4"
+	explicitGenericType.ServerTypeExplicit = true
+	if got := provider.ServerTypeForConfig(explicitGenericType); got != "S6.MEDIUM4" {
+		t.Fatalf("explicit generic type=%q", got)
+	}
+}
+
+func TestServerTypeForConfigUsesExplicitCLIClass(t *testing.T) {
+	provider := Provider{}
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TencentCloud.Type = ""
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	class := fs.String("class", cfg.Class, "machine class")
+	values := provider.RegisterFlags(fs, cfg)
+	if err := fs.Parse([]string{"--class", "fast"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Class = *class
+	core.MarkClassExplicit(&cfg)
+	if err := provider.ApplyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if got := provider.ServerTypeForConfig(cfg); got != "SA5.LARGE8" {
+		t.Fatalf("server type=%q want SA5.LARGE8", got)
+	}
+}
+
+func TestCfgForRunPreservesLoadedMachineTypePrecedence(t *testing.T) {
+	fastType, ok := providerClassType("fast")
+	if !ok {
+		t.Fatal("fast class profile is missing")
+	}
+	tests := []struct {
+		name            string
+		content         string
+		classEnv        string
+		wantClass       string
+		wantType        string
+		wantClassIntent bool
+	}{
+		{name: "inherited default", content: "provider: tencentcloud\n", wantClass: "beast", wantType: defaultType},
+		{name: "YAML class", content: "provider: tencentcloud\nclass: fast\n", wantClass: "fast", wantType: fastType, wantClassIntent: true},
+		{name: "environment class", content: "provider: tencentcloud\n", classEnv: "fast", wantClass: "fast", wantType: fastType, wantClassIntent: true},
+		{name: "explicit Tencent type", content: "provider: tencentcloud\nclass: fast\ntencentcloud:\n  type: S5.SMALL2\n", wantClass: "fast", wantType: "S5.SMALL2", wantClassIntent: true},
+		{name: "explicit generic type", content: "provider: tencentcloud\nclass: fast\nserverType: S6.MEDIUM4\n", wantClass: "fast", wantType: "S6.MEDIUM4", wantClassIntent: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(configPath, []byte(test.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CRABBOX_CONFIG", configPath)
+			t.Setenv("CRABBOX_DEFAULT_CLASS", test.classEnv)
+			cfg, err := core.LoadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Class != test.wantClass || core.ClassWasExplicit(cfg) != test.wantClassIntent {
+				t.Fatalf("loaded class=%q explicit=%v", cfg.Class, core.ClassWasExplicit(cfg))
+			}
+			if cfg.TencentCloud.Type == "" {
+				t.Fatal("LoadConfig did not populate TencentCloud.Type")
+			}
+			runtime := cfgForRun(cfg)
+			if runtime.TencentCloud.Type != test.wantType || runtime.ServerType != test.wantType {
+				t.Fatalf("runtime type=%q serverType=%q want %q", runtime.TencentCloud.Type, runtime.ServerType, test.wantType)
+			}
+		})
 	}
 }
 

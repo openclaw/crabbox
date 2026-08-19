@@ -18,12 +18,13 @@ func (Provider) Aliases() []string {
 }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name:        "blacksmith-testbox",
-		Family:      "blacksmith",
-		Kind:        core.ProviderKindDelegatedRun,
-		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{core.FeatureCacheVolume, core.FeatureRunProof, core.FeatureRunSession, core.FeatureRunArtifacts},
-		Coordinator: core.CoordinatorNever,
+		Name:             "blacksmith-testbox",
+		Family:           "blacksmith",
+		Kind:             core.ProviderKindDelegatedRun,
+		Targets:          []core.TargetSpec{{OS: core.TargetLinux}},
+		Features:         core.FeatureSet{core.FeatureCacheVolume, core.FeatureRunProof, core.FeatureRunSession, core.FeatureRunArtifacts},
+		Coordinator:      core.CoordinatorNever,
+		ClassDisposition: core.ProviderClassDispositionUnmapped,
 	}
 }
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {

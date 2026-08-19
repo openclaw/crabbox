@@ -1,6 +1,9 @@
 import { cloudInit } from "./bootstrap";
 import {
+  concreteStoredServerType,
+  isCanonicalProviderClass,
   serverTypeCandidatesForClass,
+  uniqueProviderMachineCandidates,
   workspaceProviderKeyPrefix,
   type LeaseConfig,
 } from "./config";
@@ -278,10 +281,7 @@ export class HetznerClient {
       ensuredKey.key.name === providerKeyForLease(leaseID) &&
       providerKeyOwnedByLease(ensuredKey.key.labels ?? {}, leaseID);
     const resolvedConfig = { ...config, providerKey: ensuredKey.key.name };
-    const candidates = prependUnique(
-      resolvedConfig.serverType,
-      serverTypeCandidatesForClass(resolvedConfig.class),
-    );
+    const candidates = hetznerProvisioningCandidatesForConfig(resolvedConfig);
     const failures: string[] = [];
     let resourceMayExist = false;
     let retryable = false;
@@ -467,6 +467,31 @@ export class HetznerClient {
   }
 }
 
+export function hetznerProvisioningCandidatesForConfig(
+  config: Pick<
+    LeaseConfig,
+    "serverType" | "serverTypeExplicit" | "class" | "target" | "architecture"
+  >,
+): string[] {
+  if (config.serverTypeExplicit && config.serverType.trim()) {
+    return [config.serverType];
+  }
+  const storedType = concreteStoredServerType(config.serverType, config.class);
+  let profileCandidates =
+    config.target === "linux" && config.architecture === "amd64"
+      ? serverTypeCandidatesForClass(config.class)
+      : [];
+  if (profileCandidates.length === 0 && isCanonicalProviderClass(config.class)) {
+    return storedType ? [storedType] : [];
+  }
+  if (profileCandidates.length === 0) {
+    profileCandidates = [config.class];
+  }
+  return storedType
+    ? uniqueProviderMachineCandidates([storedType, ...profileCandidates])
+    : profileCandidates;
+}
+
 export function isRetryableProvisioningError(message: string): boolean {
   return (
     message.includes("dedicated_core_limit") ||
@@ -495,10 +520,6 @@ function reusableHetznerSSHKey(
   // Hetzner makes public-key material account-unique. A differently named match
   // is therefore shared and retained; lease finalization records its actual name.
   return keys.find((entry) => sshPublicKeyIdentity(entry.public_key) === identity);
-}
-
-function prependUnique(first: string, rest: string[]): string[] {
-  return [first, ...rest.filter((value) => value !== first)];
 }
 
 function eurToUSD(env: Env): number {

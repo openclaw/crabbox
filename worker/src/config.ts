@@ -909,11 +909,11 @@ export function azureVMSizeCandidatesForTargetClass(
     candidates =
       architecture === "arm64"
         ? windowsMode === "wsl2"
-          ? [machineClass]
+          ? providerClassLiteralCandidates(machineClass)
           : azureARM64VMSizeCandidatesForClass(machineClass)
         : azureWindowsVMSizeCandidatesForClass(machineClass);
   } else {
-    candidates = [machineClass];
+    candidates = providerClassLiteralCandidates(machineClass);
   }
   if (azureOSDisk === "ephemeral-preview") {
     return azureEphemeralFullCachingCandidates(target, candidates, architecture, windowsMode);
@@ -1127,16 +1127,26 @@ export function awsInstanceTypeCandidatesForTargetClass(
     return awsMacOSInstanceTypeCandidates;
   }
   if (target === "windows") {
+    if (architecture === "arm64") {
+      return providerClassLiteralCandidates(machineClass);
+    }
     if (windowsMode === "wsl2") {
       switch (machineClass) {
         case "standard":
           return ["m8i.large", "m8i-flex.large", "c8i.large", "r8i.large"];
         case "fast":
-          return ["m8i.xlarge", "m8i-flex.xlarge", "c8i.xlarge", "r8i.xlarge"];
+          return ["m8i.xlarge", "m8i-flex.xlarge", "c8i.xlarge", "r8i.xlarge", "m8i.large"];
         case "large":
-          return ["m8i.2xlarge", "m8i-flex.2xlarge", "c8i.2xlarge", "r8i.2xlarge"];
+          return ["m8i.2xlarge", "m8i-flex.2xlarge", "c8i.2xlarge", "r8i.2xlarge", "m8i.large"];
         case "beast":
-          return ["m8i.4xlarge", "m8i-flex.4xlarge", "c8i.4xlarge", "r8i.4xlarge", "m8i.2xlarge"];
+          return [
+            "m8i.4xlarge",
+            "m8i-flex.4xlarge",
+            "c8i.4xlarge",
+            "r8i.4xlarge",
+            "m8i.2xlarge",
+            "m8i.large",
+          ];
         default:
           return [machineClass];
       }
@@ -1145,16 +1155,43 @@ export function awsInstanceTypeCandidatesForTargetClass(
       case "standard":
         return ["m7i.large", "m7a.large", "t3.large"];
       case "fast":
-        return ["m7i.xlarge", "m7a.xlarge", "t3.xlarge"];
+        return ["m7i.xlarge", "m7a.xlarge", "t3.xlarge", "t3.large"];
       case "large":
-        return ["m7i.2xlarge", "m7a.2xlarge", "t3.2xlarge"];
+        return ["m7i.2xlarge", "m7a.2xlarge", "t3.2xlarge", "t3.large"];
       case "beast":
-        return ["m7i.4xlarge", "m7a.4xlarge", "m7i.2xlarge"];
+        return ["m7i.4xlarge", "m7a.4xlarge", "m7i.2xlarge", "t3.large"];
       default:
         return [machineClass];
     }
   }
   return awsInstanceTypeCandidatesForArchitectureClass(architecture, machineClass);
+}
+
+const canonicalProviderClasses = new Set(["standard", "fast", "large", "beast"]);
+
+export function isCanonicalProviderClass(machineClass: string): boolean {
+  return canonicalProviderClasses.has(machineClass);
+}
+
+export function concreteStoredServerType(serverType: string, machineClass: string): string {
+  return serverType !== machineClass && !isCanonicalProviderClass(serverType) && serverType.trim()
+    ? serverType
+    : "";
+}
+
+export function uniqueProviderMachineCandidates(values: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (!value.trim() || seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+  }
+  return out;
+}
+
+function providerClassLiteralCandidates(machineClass: string): string[] {
+  return isCanonicalProviderClass(machineClass) ? [] : [machineClass];
 }
 
 export function serverTypeCandidatesForClass(machineClass: string): string[] {
@@ -1185,7 +1222,14 @@ export function awsInstanceTypeCandidatesForArchitectureClass(
   }
   switch (machineClass) {
     case "standard":
-      return ["c7a.8xlarge", "c7i.8xlarge", "m7a.8xlarge", "m7i.8xlarge", "c7a.4xlarge"];
+      return [
+        "c7a.8xlarge",
+        "c7i.8xlarge",
+        "m7a.8xlarge",
+        "m7i.8xlarge",
+        "c7a.4xlarge",
+        "t3.small",
+      ];
     case "fast":
       return [
         "c7a.16xlarge",
@@ -1194,6 +1238,7 @@ export function awsInstanceTypeCandidatesForArchitectureClass(
         "m7i.16xlarge",
         "c7a.12xlarge",
         "c7a.8xlarge",
+        "t3.small",
       ];
     case "large":
       return [
@@ -1204,6 +1249,7 @@ export function awsInstanceTypeCandidatesForArchitectureClass(
         "r7a.24xlarge",
         "c7a.16xlarge",
         "c7a.12xlarge",
+        "t3.small",
       ];
     case "beast":
       return [
@@ -1217,6 +1263,7 @@ export function awsInstanceTypeCandidatesForArchitectureClass(
         "m7a.32xlarge",
         "c7a.24xlarge",
         "c7a.16xlarge",
+        "t3.small",
       ];
     default:
       return [machineClass];
@@ -1226,13 +1273,20 @@ export function awsInstanceTypeCandidatesForArchitectureClass(
 export function awsARM64InstanceTypeCandidatesForClass(machineClass: string): string[] {
   switch (machineClass) {
     case "standard":
-      return ["c7g.8xlarge", "m7g.8xlarge", "r7g.8xlarge", "c7g.4xlarge"];
+      return ["c7g.8xlarge", "m7g.8xlarge", "r7g.8xlarge", "c7g.4xlarge", "t4g.small"];
     case "fast":
-      return ["c7g.16xlarge", "m7g.16xlarge", "r7g.16xlarge", "c7g.12xlarge", "c7g.8xlarge"];
+      return [
+        "c7g.16xlarge",
+        "m7g.16xlarge",
+        "r7g.16xlarge",
+        "c7g.12xlarge",
+        "c7g.8xlarge",
+        "t4g.small",
+      ];
     case "large":
-      return ["c7g.16xlarge", "m7g.16xlarge", "r7g.16xlarge", "c7g.12xlarge"];
+      return ["c7g.16xlarge", "m7g.16xlarge", "r7g.16xlarge", "c7g.12xlarge", "t4g.small"];
     case "beast":
-      return ["c7g.16xlarge", "m7g.16xlarge", "r7g.16xlarge", "c7g.12xlarge"];
+      return ["c7g.16xlarge", "m7g.16xlarge", "r7g.16xlarge", "c7g.12xlarge", "t4g.small"];
     default:
       return [machineClass];
   }

@@ -14,18 +14,40 @@ func init() {
 
 type Provider struct{}
 
+var classProfiles = buildClassProfiles()
+
+var _ core.ProviderClassProfileProvider = Provider{}
+
 func (Provider) Name() string      { return providerName }
 func (Provider) Aliases() []string { return []string{"phala-cloud", "dstack"} }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name:        providerName,
-		Family:      providerName,
-		Kind:        core.ProviderKindSSHLease,
-		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup},
-		Coordinator: core.CoordinatorNever,
+		Name:             providerName,
+		Family:           providerName,
+		Kind:             core.ProviderKindSSHLease,
+		Targets:          []core.TargetSpec{{OS: core.TargetLinux}},
+		Features:         core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup},
+		Coordinator:      core.CoordinatorNever,
+		ClassDisposition: core.ProviderClassDispositionMapped,
 	}
+}
+
+func (Provider) ClassProfiles() []core.ProviderClassProfile {
+	return classProfiles
+}
+
+func buildClassProfiles() []core.ProviderClassProfile {
+	classes := core.CanonicalProviderClasses()
+	types := []string{"tdx.small", "tdx.medium", "tdx.large", "tdx.xlarge"}
+	profiles := make([]core.ProviderClassProfile, 0, len(classes))
+	for index, class := range classes {
+		profiles = append(profiles, core.ProviderClassProfileFromMachines(
+			class, core.TargetLinux, "", core.ProviderClassArchitectureAMD64,
+			[]core.ProviderClassMachine{{Type: types[index], Architecture: core.ProviderClassArchitectureAMD64}},
+		))
+	}
+	return profiles
 }
 
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
@@ -92,6 +114,12 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 		return cfg.Phala.InstanceType
 	}
 	if core.ClassWasExplicit(cfg) {
+		if candidates, matched := core.ProviderClassCandidatesForProfiles(classProfiles, cfg); matched {
+			return candidates[0]
+		}
+		if core.IsCanonicalProviderClass(cfg.Class) {
+			return ""
+		}
 		return instanceTypeForClass(cfg.Class)
 	}
 	// Preserve Phala's inexpensive provider default when the generic Crabbox
@@ -99,7 +127,13 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	if cfg.Phala.InstanceType != "" {
 		return cfg.Phala.InstanceType
 	}
-	return instanceTypeForClass(cfg.Class)
+	return defaultInstanceType
+}
+
+func (Provider) ServerTypeOverrideForConfig(cfg core.Config) (string, bool) {
+	instanceType := strings.TrimSpace(cfg.Phala.InstanceType)
+	selected := core.PhalaInstanceTypeWasExplicit(cfg) && core.PhalaInstanceTypeOverridesClass(cfg) && instanceType != ""
+	return instanceType, selected
 }
 
 func (Provider) ServerTypeForClass(class string) string {

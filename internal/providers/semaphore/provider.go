@@ -18,12 +18,13 @@ func (Provider) Name() string      { return "semaphore" }
 func (Provider) Aliases() []string { return []string{"sem"} }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name:        "semaphore",
-		Family:      "semaphore",
-		Kind:        core.ProviderKindSSHLease,
-		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync},
-		Coordinator: core.CoordinatorNever,
+		Name:             "semaphore",
+		Family:           "semaphore",
+		Kind:             core.ProviderKindSSHLease,
+		Targets:          []core.TargetSpec{{OS: core.TargetLinux}},
+		Features:         core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync},
+		Coordinator:      core.CoordinatorNever,
+		ClassDisposition: core.ProviderClassDispositionUnmapped,
 	}
 }
 

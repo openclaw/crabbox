@@ -226,20 +226,29 @@ func applyDefaults(cfg *core.Config) {
 }
 
 func instanceTypeForClass(class string) string {
-	switch strings.ToLower(strings.TrimSpace(class)) {
-	case "tiny", "small":
-		return "tdx.small"
-	case "", "standard":
-		return "tdx.small"
-	case "fast":
-		return "tdx.medium"
-	case "large":
-		return "tdx.large"
-	case "beast":
-		return "tdx.xlarge"
-	default:
-		return strings.TrimSpace(class)
+	if instanceType, ok := providerClassType(class); ok {
+		return instanceType
 	}
+	normalized := strings.ToLower(strings.TrimSpace(class))
+	if normalized == "" {
+		normalized = "standard"
+	}
+	if normalized != class {
+		if instanceType, ok := providerClassType(normalized); ok {
+			return instanceType
+		}
+	}
+	return strings.TrimSpace(class)
+}
+
+func providerClassType(class string) (string, bool) {
+	candidates, ok := core.ProviderClassCandidatesForProfiles(classProfiles, core.Config{
+		Provider: providerName, TargetOS: core.TargetLinux, Architecture: core.ArchitectureAMD64, Class: class,
+	})
+	if !ok {
+		return "", false
+	}
+	return candidates[0], true
 }
 
 func (b *backend) Spec() core.ProviderSpec { return b.spec }

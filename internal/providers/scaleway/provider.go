@@ -27,17 +27,26 @@ func init() {
 
 type Provider struct{}
 
+var _ core.ProviderClassProfileProvider = Provider{}
+
+var classProfiles = core.UniformLinuxAMD64ClassProfiles(core.ProviderClassMachine{Type: "DEV1-S"})
+
 func (Provider) Name() string      { return providerName }
 func (Provider) Aliases() []string { return nil }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name:        providerName,
-		Family:      providerName,
-		Kind:        core.ProviderKindSSHLease,
-		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureTailscale},
-		Coordinator: core.CoordinatorNever,
+		Name:             providerName,
+		Family:           providerName,
+		Kind:             core.ProviderKindSSHLease,
+		Targets:          []core.TargetSpec{{OS: core.TargetLinux}},
+		Features:         core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureTailscale},
+		Coordinator:      core.CoordinatorNever,
+		ClassDisposition: core.ProviderClassDispositionMapped,
 	}
+}
+
+func (Provider) ClassProfiles() []core.ProviderClassProfile {
+	return classProfiles
 }
 
 type flagValues struct {
@@ -111,7 +120,18 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	if cfg.Scaleway.Type != "" {
 		return cfg.Scaleway.Type
 	}
+	if candidates, matched := core.ProviderClassCandidatesForProfiles(classProfiles, cfg); matched {
+		return candidates[0]
+	}
+	if core.IsCanonicalProviderClass(cfg.Class) {
+		return ""
+	}
 	return scalewayServerTypeForClass(cfg.Class)
+}
+
+func (Provider) ServerTypeOverrideForConfig(cfg core.Config) (string, bool) {
+	serverType := strings.TrimSpace(cfg.Scaleway.Type)
+	return serverType, serverType != ""
 }
 
 func (Provider) ServerTypeForClass(class string) string {
@@ -1129,12 +1149,12 @@ func (b *Backend) clockNow() time.Time {
 }
 
 func scalewayServerTypeForClass(class string) string {
-	switch class {
-	case "standard", "fast", "large", "beast":
-		return "DEV1-S"
-	default:
-		return "DEV1-S"
+	for _, profile := range classProfiles {
+		if profile.Class == class {
+			return profile.Primary.Type
+		}
 	}
+	return "DEV1-S"
 }
 
 func validateScalewayLabels(labels map[string]string) error {

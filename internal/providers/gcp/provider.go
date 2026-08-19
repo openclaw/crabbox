@@ -14,7 +14,7 @@ func init() {
 
 type Provider struct{}
 
-var _ core.ProviderClassSpecProvider = Provider{}
+var _ core.ProviderClassProfileProvider = Provider{}
 
 // Google publishes these standard machine-family ratios in the Compute Engine
 // machine-family tables: https://cloud.google.com/compute/docs/general-purpose-machines
@@ -24,6 +24,8 @@ var memoryQuarterGBPerVCPU = map[string]int{
 	"n2-standard":  16,
 	"n2d-standard": 16,
 }
+
+var classProfiles = buildClassProfiles()
 
 func (Provider) Name() string { return "gcp" }
 func (Provider) Aliases() []string {
@@ -37,8 +39,9 @@ func (Provider) Spec() core.ProviderSpec {
 		Targets: []core.TargetSpec{
 			{OS: core.TargetLinux},
 		},
-		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureTailscale},
-		Coordinator: core.CoordinatorSupported,
+		Features:         core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureTailscale},
+		Coordinator:      core.CoordinatorSupported,
+		ClassDisposition: core.ProviderClassDispositionMapped,
 	}
 }
 func (Provider) RegisterFlags(*flag.FlagSet, core.Config) any { return core.NoProviderFlags() }
@@ -83,25 +86,51 @@ func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, sl
 }
 
 func (Provider) ServerTypeForConfig(cfg core.Config) string {
-	return core.GCPMachineTypeCandidatesForClass(cfg.Class)[0]
+	if candidates, matched := core.ProviderClassCandidatesForProfiles(classProfiles, cfg); matched {
+		return candidates[0]
+	}
+	if core.IsCanonicalProviderClass(cfg.Class) {
+		return ""
+	}
+	return gcpMachineTypeCandidatesForClass(cfg.Class)[0]
 }
 
 func (Provider) ServerTypeForClass(class string) string {
-	return core.GCPMachineTypeCandidatesForClass(class)[0]
+	return gcpMachineTypeCandidatesForClass(class)[0]
 }
 
-func (Provider) ClassSpecs() []core.ClassSpec {
-	classes := core.MachineClassOrder
-	specs := make([]core.ClassSpec, 0, len(classes))
-	for _, class := range classes {
-		machineType := core.GCPMachineTypeCandidatesForClass(class)[0]
-		vcpus, memoryGB := machineShape(machineType)
-		specs = append(specs, core.ClassSpec{Class: class, Type: machineType, VCPUs: vcpus, MemoryGB: memoryGB})
+func (Provider) ClassProfiles() []core.ProviderClassProfile {
+	return classProfiles
+}
+
+func buildClassProfiles() []core.ProviderClassProfile {
+	profiles := make([]core.ProviderClassProfile, 0, 4)
+	for _, class := range core.CanonicalProviderClasses() {
+		candidates := gcpMachineTypeCandidatesForClass(class)
+		machines := make([]core.ProviderClassMachine, 0, len(candidates))
+		for _, machineType := range candidates {
+			machines = append(machines, gcpClassMachine(machineType))
+		}
+		profiles = append(profiles, core.ProviderClassProfileFromMachines(
+			class, core.TargetLinux, "", core.ProviderClassArchitectureAMD64, machines,
+		))
 	}
-	return specs
+	return profiles
 }
 
-func machineShape(machineType string) (int, int) {
+func gcpClassMachine(machineType string) core.ProviderClassMachine {
+	vcpus, memoryGB := machineShape(machineType)
+	machine := core.ProviderClassMachine{Type: machineType, Architecture: core.ProviderClassArchitectureAMD64}
+	if vcpus > 0 {
+		machine.VCPU = &vcpus
+	}
+	if memoryGB > 0 {
+		machine.Memory = &core.ProviderMemory{Value: memoryGB, Unit: core.ProviderMemoryUnitGB}
+	}
+	return machine
+}
+
+func machineShape(machineType string) (int, float64) {
 	normalized := strings.ToLower(strings.TrimSpace(machineType))
 	separator := strings.LastIndexByte(normalized, '-')
 	if separator < 0 || separator == len(normalized)-1 {
@@ -115,11 +144,22 @@ func machineShape(machineType string) (int, int) {
 	if !ok {
 		return vcpus, 0
 	}
-	memoryQuarters := vcpus * memoryQuartersPerVCPU
-	if memoryQuarters%4 != 0 {
-		return vcpus, 0
+	return vcpus, float64(vcpus*memoryQuartersPerVCPU) / 4
+}
+
+func gcpMachineTypeCandidatesForClass(class string) []string {
+	switch class {
+	case "standard":
+		return []string{"c4-standard-32", "c3-standard-22", "n2-standard-32", "n2d-standard-32"}
+	case "fast":
+		return []string{"c4-standard-64", "c3-standard-44", "n2-standard-64", "n2d-standard-64", "c4-standard-32"}
+	case "large":
+		return []string{"c4-standard-96", "c3-standard-88", "n2-standard-80", "n2d-standard-96", "c4-standard-64"}
+	case "beast":
+		return []string{"c4-standard-192", "c4-standard-96", "c3-standard-176", "c3-standard-88", "n2d-standard-224", "n2-standard-128"}
+	default:
+		return []string{class}
 	}
-	return vcpus, memoryQuarters / 4
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {

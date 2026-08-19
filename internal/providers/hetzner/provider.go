@@ -14,7 +14,7 @@ func init() {
 
 type Provider struct{}
 
-var _ core.ProviderClassSpecProvider = Provider{}
+var _ core.ProviderClassProfileProvider = Provider{}
 
 // Hetzner publishes these dedicated-vCPU shapes in its General Purpose plan:
 // https://www.hetzner.com/cloud/general-purpose/
@@ -30,16 +30,19 @@ var serverShapes = map[string]struct {
 	"ccx63": {vcpus: 48, memoryGB: 192},
 }
 
+var classProfiles = buildClassProfiles()
+
 func (Provider) Name() string      { return "hetzner" }
 func (Provider) Aliases() []string { return nil }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name:        "hetzner",
-		Family:      "hetzner",
-		Kind:        core.ProviderKindSSHLease,
-		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureDesktop, core.FeatureBrowser, core.FeatureCode, core.FeatureTailscale, core.FeatureCheckpoint, core.FeatureFork, core.FeatureSnapshot},
-		Coordinator: core.CoordinatorSupported,
+		Name:             "hetzner",
+		Family:           "hetzner",
+		Kind:             core.ProviderKindSSHLease,
+		Targets:          []core.TargetSpec{{OS: core.TargetLinux}},
+		Features:         core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureDesktop, core.FeatureBrowser, core.FeatureCode, core.FeatureTailscale, core.FeatureCheckpoint, core.FeatureFork, core.FeatureSnapshot},
+		Coordinator:      core.CoordinatorSupported,
+		ClassDisposition: core.ProviderClassDispositionMapped,
 	}
 }
 
@@ -100,15 +103,56 @@ func (Provider) ApplyFlags(*core.Config, *flag.FlagSet, any) error {
 	return nil
 }
 
-func (Provider) ClassSpecs() []core.ClassSpec {
-	classes := core.MachineClassOrder
-	specs := make([]core.ClassSpec, 0, len(classes))
-	for _, class := range classes {
-		serverType := core.HetznerServerTypeCandidatesForClass(class)[0]
-		vcpus, memoryGB := serverShape(serverType)
-		specs = append(specs, core.ClassSpec{Class: class, Type: serverType, VCPUs: vcpus, MemoryGB: memoryGB})
+func (Provider) ServerTypeForConfig(cfg core.Config) string {
+	if cfg.ServerTypeExplicit && strings.TrimSpace(cfg.ServerType) != "" {
+		return strings.TrimSpace(cfg.ServerType)
 	}
-	return specs
+	if candidates, matched := core.ProviderClassCandidatesForProfiles(classProfiles, cfg); matched {
+		return candidates[0]
+	}
+	if core.IsCanonicalProviderClass(cfg.Class) {
+		return ""
+	}
+	return cfg.Class
+}
+
+func (Provider) ServerTypeForClass(class string) string {
+	cfg := core.Config{Provider: "hetzner", TargetOS: core.TargetLinux, Architecture: core.ArchitectureAMD64, Class: class}
+	if candidates, matched := core.ProviderClassCandidatesForProfiles(classProfiles, cfg); matched {
+		return candidates[0]
+	}
+	return class
+}
+
+func (Provider) ClassProfiles() []core.ProviderClassProfile {
+	return classProfiles
+}
+
+func buildClassProfiles() []core.ProviderClassProfile {
+	profiles := make([]core.ProviderClassProfile, 0, 4)
+	for _, class := range core.CanonicalProviderClasses() {
+		candidates := serverTypeCandidatesForClass(class)
+		machines := make([]core.ProviderClassMachine, 0, len(candidates))
+		for _, serverType := range candidates {
+			machines = append(machines, hetznerClassMachine(serverType))
+		}
+		profiles = append(profiles, core.ProviderClassProfileFromMachines(
+			class, core.TargetLinux, "", core.ProviderClassArchitectureAMD64, machines,
+		))
+	}
+	return profiles
+}
+
+func hetznerClassMachine(serverType string) core.ProviderClassMachine {
+	vcpus, memoryGB := serverShape(serverType)
+	machine := core.ProviderClassMachine{Type: serverType, Architecture: core.ProviderClassArchitectureAMD64}
+	if vcpus > 0 {
+		machine.VCPU = &vcpus
+	}
+	if memoryGB > 0 {
+		machine.Memory = &core.ProviderMemory{Value: float64(memoryGB), Unit: core.ProviderMemoryUnitGB}
+	}
+	return machine
 }
 
 func serverShape(serverType string) (int, int) {
@@ -117,6 +161,21 @@ func serverShape(serverType string) (int, int) {
 		return 0, 0
 	}
 	return shape.vcpus, shape.memoryGB
+}
+
+func serverTypeCandidatesForClass(class string) []string {
+	switch class {
+	case "standard":
+		return []string{"ccx33", "cpx62", "cx53"}
+	case "fast":
+		return []string{"ccx43", "cpx62", "cx53"}
+	case "large":
+		return []string{"ccx53", "ccx43", "cpx62", "cx53"}
+	case "beast":
+		return []string{"ccx63", "ccx53", "ccx43", "cpx62", "cx53"}
+	default:
+		return []string{class}
+	}
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {

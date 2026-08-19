@@ -109,7 +109,7 @@ func cloudflareContainerInstanceTypes() []string {
 }
 
 func cloudflareContainerInstanceTypeForClass(class string) string {
-	return core.CloudflareContainerInstanceTypeForClass(class)
+	return (Provider{}).ServerTypeForClass(class)
 }
 
 func normalizeCloudflareContainerInstanceType(value string) (string, bool) {

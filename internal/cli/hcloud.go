@@ -314,11 +314,20 @@ func (c *HetznerClient) CreateServer(ctx context.Context, cfg Config, publicKey,
 }
 
 func (c *HetznerClient) CreateServerWithFallback(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, logf func(string, ...any)) (Server, Config, error) {
-	candidates := serverTypeCandidatesForClass(cfg.Class)
-	if cfg.ServerType != "" && cfg.ServerType != candidates[0] {
-		candidates = append([]string{cfg.ServerType}, candidates...)
+	candidates := hetznerServerTypeCandidatesForConfig(cfg)
+	if len(candidates) == 0 && cfg.ServerTypeExplicit && cfg.ServerType != "" {
+		candidates = []string{cfg.ServerType}
 	}
-
+	if len(candidates) == 0 {
+		provider, _ := ProviderFor(cfg.Provider)
+		if provider == nil {
+			return Server{}, cfg, exit(2, "provider=%s has no class profile for class=%s", cfg.Provider, cfg.Class)
+		}
+		if err := validateProviderClassSelector(provider, cfg); err != nil {
+			return Server{}, cfg, err
+		}
+		return Server{}, cfg, exit(2, "provider=%s has no usable provisioning candidates for class=%s", cfg.Provider, cfg.Class)
+	}
 	var errs []error
 	for i, serverType := range candidates {
 		next := cfg

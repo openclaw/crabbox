@@ -6,6 +6,9 @@ import { awsRunInstancesUserData } from "./bootstrap";
 import {
   awsPromotedAMIConfigKey,
   awsInstanceTypeCandidatesForTargetClass,
+  concreteStoredServerType,
+  isCanonicalProviderClass,
+  uniqueProviderMachineCandidates,
   sshPorts,
   validatedAWSInstanceTypes,
   validatedCIDRs,
@@ -3119,16 +3122,22 @@ export function awsLaunchCandidates(
   if (config.serverTypeExplicit) {
     return [config.serverType];
   }
+  let profileCandidates = awsInstanceTypeCandidatesForTargetClass(
+    config.target,
+    config.class,
+    config.windowsMode,
+    config.architecture,
+  );
+  if (config.target === "macos" && !isCanonicalProviderClass(config.class)) {
+    profileCandidates = uniqueProviderMachineCandidates([config.class, ...profileCandidates]);
+  }
+  if (profileCandidates.length === 0 && isCanonicalProviderClass(config.class)) {
+    const storedType = concreteStoredServerType(config.serverType, config.class);
+    return storedType ? [storedType] : [];
+  }
+  const storedType = concreteStoredServerType(config.serverType, config.class);
   if (config.target === "macos") {
-    return uniqueStrings([
-      config.serverType,
-      ...awsInstanceTypeCandidatesForTargetClass(
-        config.target,
-        config.class,
-        config.windowsMode,
-        config.architecture,
-      ),
-    ]);
+    return uniqueProviderMachineCandidates([storedType, ...profileCandidates]);
   }
   const policyFallback =
     config.target === "windows"
@@ -3138,16 +3147,7 @@ export function awsLaunchCandidates(
       : config.architecture === "arm64"
         ? "t4g.small"
         : "t3.small";
-  return uniqueStrings([
-    config.serverType,
-    ...awsInstanceTypeCandidatesForTargetClass(
-      config.target,
-      config.class,
-      config.windowsMode,
-      config.architecture,
-    ),
-    policyFallback,
-  ]);
+  return uniqueProviderMachineCandidates([storedType, ...profileCandidates, policyFallback]);
 }
 
 export function awsRegionCandidates(

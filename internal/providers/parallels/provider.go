@@ -38,7 +38,8 @@ func (Provider) Spec() core.ProviderSpec {
 			core.FeatureRestore,
 			core.FeatureSnapshot,
 		},
-		Coordinator: core.CoordinatorNever,
+		Coordinator:      core.CoordinatorNever,
+		ClassDisposition: core.ProviderClassDispositionUnmapped,
 	}
 }
 

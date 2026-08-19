@@ -77,22 +77,16 @@ func applyDefaults(cfg *core.Config) {
 }
 
 func machineTypeForClass(class string) string {
-	switch strings.ToLower(strings.TrimSpace(class)) {
-	case "tiny":
-		return "1x2"
-	case "small":
-		return "2x4"
-	case "", "standard":
-		return "4x8"
-	case "fast":
-		return "8x16"
-	case "large":
-		return "16x32"
-	case "beast":
-		return "32x64"
-	default:
-		return strings.TrimSpace(class)
+	normalized := strings.ToLower(strings.TrimSpace(class))
+	if normalized == "" {
+		normalized = "standard"
 	}
+	for _, profile := range classProfiles {
+		if profile.Class == normalized {
+			return profile.Primary.Type
+		}
+	}
+	return strings.TrimSpace(class)
 }
 
 func (b *backend) Spec() core.ProviderSpec { return b.spec }

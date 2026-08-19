@@ -13,7 +13,7 @@ func init() {
 
 type Provider struct{}
 
-var _ core.ProviderClassSpecProvider = Provider{}
+var _ core.ProviderClassProfileProvider = Provider{}
 
 type flagValues struct {
 	Backend     *string
@@ -21,6 +21,8 @@ type flagValues struct {
 	SnapshotSKU *string
 	OSDiskSKU   *string
 }
+
+var classProfiles = buildClassProfiles()
 
 func (Provider) Name() string      { return "azure" }
 func (Provider) Aliases() []string { return nil }
@@ -37,8 +39,9 @@ func (Provider) Spec() core.ProviderSpec {
 			{OS: core.TargetWindows, WindowsMode: "normal"},
 			{OS: core.TargetWindows, WindowsMode: "wsl2"},
 		},
-		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureDesktop, core.FeatureBrowser, core.FeatureCode, core.FeatureTailscale},
-		Coordinator: core.CoordinatorSupported,
+		Features:         core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureDesktop, core.FeatureBrowser, core.FeatureCode, core.FeatureTailscale},
+		Coordinator:      core.CoordinatorSupported,
+		ClassDisposition: core.ProviderClassDispositionMapped,
 	}
 }
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
@@ -154,38 +157,122 @@ func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, sl
 }
 
 func (Provider) ServerTypeForConfig(cfg core.Config) string {
-	return core.AzureVMSizeCandidatesForConfig(cfg)[0]
+	if cfg.ServerTypeExplicit && strings.TrimSpace(cfg.ServerType) != "" {
+		return strings.TrimSpace(cfg.ServerType)
+	}
+	profileConfig := cfg
+	profileConfig.ServerType = ""
+	candidates := core.AzureVMSizeCandidatesForProfiles(profileConfig, classProfiles)
+	if len(candidates) == 0 {
+		return ""
+	}
+	return candidates[0]
 }
 
 func (Provider) ServerTypeForClass(class string) string {
-	return core.AzureVMSizeCandidatesForClass(class)[0]
+	return azureVMSizeCandidatesForClass(class)[0]
 }
 
-func (Provider) ClassSpecs() []core.ClassSpec {
-	classes := core.MachineClassOrder
-	specs := make([]core.ClassSpec, 0, len(classes))
-	for _, class := range classes {
-		vmSize := core.AzureVMSizeCandidatesForClass(class)[0]
-		vcpus, memoryGB := vmShape(vmSize)
-		specs = append(specs, core.ClassSpec{Class: class, Type: vmSize, VCPUs: vcpus, MemoryGB: memoryGB})
+func (Provider) ClassProfiles() []core.ProviderClassProfile {
+	return classProfiles
+}
+
+func buildClassProfiles() []core.ProviderClassProfile {
+	profiles := make([]core.ProviderClassProfile, 0, 20)
+	for _, class := range core.CanonicalProviderClasses() {
+		profiles = append(profiles,
+			azureClassProfile(class, core.TargetLinux, "", core.ProviderClassArchitectureAMD64, azureVMSizeCandidatesForClass(class)),
+			azureClassProfile(class, core.TargetLinux, "", core.ProviderClassArchitectureARM64, azureARM64VMSizeCandidatesForClass(class)),
+			azureClassProfile(class, core.TargetWindows, core.WindowsModeNormal, core.ProviderClassArchitectureAMD64, azureWindowsVMSizeCandidatesForClass(class)),
+			azureClassProfile(class, core.TargetWindows, core.WindowsModeNormal, core.ProviderClassArchitectureARM64, azureARM64VMSizeCandidatesForClass(class)),
+			azureClassProfile(class, core.TargetWindows, core.WindowsModeWSL2, core.ProviderClassArchitectureAMD64, azureWindowsVMSizeCandidatesForClass(class)),
+		)
 	}
-	return specs
+	return profiles
+}
+
+func azureClassProfile(class, target, windowsMode string, architecture core.ProviderClassArchitecture, candidates []string) core.ProviderClassProfile {
+	machines := make([]core.ProviderClassMachine, 0, len(candidates))
+	for _, vmSize := range candidates {
+		machines = append(machines, azureClassMachine(vmSize, architecture))
+	}
+	return core.ProviderClassProfileFromMachines(class, target, windowsMode, architecture, machines)
+}
+
+func azureClassMachine(vmSize string, architecture core.ProviderClassArchitecture) core.ProviderClassMachine {
+	vcpus, memoryGiB := vmShape(vmSize)
+	machine := core.ProviderClassMachine{Type: vmSize, Architecture: architecture}
+	if vcpus > 0 {
+		machine.VCPU = &vcpus
+	}
+	if memoryGiB > 0 {
+		machine.Memory = &core.ProviderMemory{Value: float64(memoryGiB), Unit: core.ProviderMemoryUnitGiB}
+	}
+	return machine
 }
 
 func vmShape(vmSize string) (int, int) {
 	normalized := strings.ToLower(strings.TrimSpace(vmSize))
-	const prefix = "standard_d"
-	if !strings.HasPrefix(normalized, prefix) || len(normalized) == len(prefix) || normalized[len(prefix)] < '0' || normalized[len(prefix)] > '9' || !strings.HasSuffix(normalized, "_v6") {
+	const dPrefix = "standard_d"
+	if strings.HasPrefix(normalized, dPrefix) && (len(normalized) == len(dPrefix) || normalized[len(dPrefix)] < '0' || normalized[len(dPrefix)] > '9') {
 		return 0, 0
 	}
 	vcpus, ok := core.AzureVMSizeVCPUCount(vmSize)
 	if !ok || vcpus <= 0 {
 		return 0, 0
 	}
+	if !strings.HasPrefix(normalized, dPrefix) || (!strings.HasSuffix(normalized, "_v5") && !strings.HasSuffix(normalized, "_v6")) {
+		return vcpus, 0
+	}
 	// Azure publishes both Dadsv6 and Ddsv6 at 4 GiB per vCPU:
 	// https://learn.microsoft.com/azure/virtual-machines/sizes/general-purpose/dadsv6-series
 	// https://learn.microsoft.com/azure/virtual-machines/sizes/general-purpose/ddsv6-series
 	return vcpus, vcpus * 4
+}
+
+func azureVMSizeCandidatesForClass(class string) []string {
+	switch class {
+	case "standard":
+		return []string{"Standard_D32ads_v6", "Standard_D32ds_v6", "Standard_F32s_v2", "Standard_D32ads_v5", "Standard_D32ds_v5", "Standard_D16ads_v6", "Standard_D16ds_v6", "Standard_F16s_v2"}
+	case "fast":
+		return []string{"Standard_D64ads_v6", "Standard_D64ds_v6", "Standard_F64s_v2", "Standard_D64ads_v5", "Standard_D64ds_v5", "Standard_D48ads_v6", "Standard_D48ds_v6", "Standard_F48s_v2", "Standard_D32ads_v6", "Standard_D32ds_v6", "Standard_F32s_v2"}
+	case "large":
+		return []string{"Standard_D96ads_v6", "Standard_D96ds_v6", "Standard_D96ads_v5", "Standard_D96ds_v5", "Standard_D64ads_v6", "Standard_D64ds_v6", "Standard_F64s_v2", "Standard_D48ads_v6", "Standard_D48ds_v6", "Standard_F48s_v2"}
+	case "beast":
+		return []string{"Standard_D192ds_v6", "Standard_D128ds_v6", "Standard_D96ads_v6", "Standard_D96ds_v6", "Standard_D96ads_v5", "Standard_D96ds_v5", "Standard_D64ads_v6", "Standard_D64ds_v6", "Standard_F64s_v2"}
+	default:
+		return []string{class}
+	}
+}
+
+func azureARM64VMSizeCandidatesForClass(class string) []string {
+	switch class {
+	case "standard":
+		return []string{"Standard_D32pds_v6", "Standard_D32ps_v6", "Standard_D16pds_v6", "Standard_D16ps_v6"}
+	case "fast":
+		return []string{"Standard_D64pds_v6", "Standard_D64ps_v6", "Standard_D48pds_v6", "Standard_D48ps_v6", "Standard_D32pds_v6", "Standard_D32ps_v6"}
+	case "large":
+		return []string{"Standard_D96pds_v6", "Standard_D96ps_v6", "Standard_D64pds_v6", "Standard_D64ps_v6", "Standard_D48pds_v6", "Standard_D48ps_v6"}
+	case "beast":
+		return []string{"Standard_D96pds_v6", "Standard_D96ps_v6", "Standard_D64pds_v6", "Standard_D64ps_v6"}
+	default:
+		return []string{class}
+	}
+}
+
+func azureWindowsVMSizeCandidatesForClass(class string) []string {
+	switch class {
+	case "standard":
+		return []string{"Standard_D2ads_v6", "Standard_D2ds_v6", "Standard_D2ads_v5", "Standard_D2ds_v5", "Standard_D2as_v6"}
+	case "fast":
+		return []string{"Standard_D4ads_v6", "Standard_D4ds_v6", "Standard_D4ads_v5", "Standard_D4ds_v5", "Standard_D4as_v6"}
+	case "large":
+		return []string{"Standard_D8ads_v6", "Standard_D8ds_v6", "Standard_D8ads_v5", "Standard_D8ds_v5", "Standard_D8as_v6"}
+	case "beast":
+		return []string{"Standard_D16ads_v6", "Standard_D16ds_v6", "Standard_D16ads_v5", "Standard_D16ds_v5", "Standard_D8ads_v6"}
+	default:
+		return []string{class}
+	}
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {

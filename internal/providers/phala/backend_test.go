@@ -201,6 +201,38 @@ func TestClassFlagOverridesInheritedPhalaInstanceType(t *testing.T) {
 	}
 }
 
+func TestServerTypeForConfigUsesExplicitFileAndEnvironmentClass(t *testing.T) {
+	provider := Provider{}
+	tests := []struct {
+		name    string
+		content string
+		env     string
+	}{
+		{name: "config", content: "provider: phala\nclass: fast\n"},
+		{name: "environment", content: "provider: phala\n", env: "fast"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(configPath, []byte(test.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CRABBOX_CONFIG", configPath)
+			t.Setenv("CRABBOX_DEFAULT_CLASS", test.env)
+			cfg, err := core.LoadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !core.ClassWasExplicit(cfg) {
+				t.Fatal("class provenance was not explicit")
+			}
+			if got := provider.ServerTypeForConfig(cfg); got != "tdx.medium" {
+				t.Fatalf("server type=%q want tdx.medium", got)
+			}
+		})
+	}
+}
+
 func TestFlagsApplyPhalaOptions(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName

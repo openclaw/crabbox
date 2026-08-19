@@ -18,12 +18,13 @@ func (Provider) Aliases() []string {
 }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name:        "daytona",
-		Family:      "daytona",
-		Kind:        core.ProviderKindSSHLease,
-		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureArchiveSync},
-		Coordinator: core.CoordinatorSupported,
+		Name:             "daytona",
+		Family:           "daytona",
+		Kind:             core.ProviderKindSSHLease,
+		Targets:          []core.TargetSpec{{OS: core.TargetLinux}},
+		Features:         core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureArchiveSync},
+		Coordinator:      core.CoordinatorSupported,
+		ClassDisposition: core.ProviderClassDispositionUnmapped,
 	}
 }
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {

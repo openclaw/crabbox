@@ -171,8 +171,9 @@ func (testAzureProvider) Spec() ProviderSpec {
 			{OS: targetWindows, WindowsMode: windowsModeNormal},
 			{OS: targetWindows, WindowsMode: windowsModeWSL2},
 		},
-		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser, FeatureCode, FeatureTailscale},
-		Coordinator: CoordinatorSupported,
+		Features:         FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser, FeatureCode, FeatureTailscale},
+		Coordinator:      CoordinatorSupported,
+		ClassDisposition: ProviderClassDispositionMapped,
 	}
 }
 func (testAzureProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
@@ -222,7 +223,11 @@ func (p testAzureProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any)
 	return nil
 }
 func (testAzureProvider) ServerTypeForConfig(cfg Config) string {
-	return azureVMSizeCandidatesForConfig(cfg)[0]
+	candidates := azureVMSizeCandidatesForConfig(cfg)
+	if len(candidates) == 0 {
+		return ""
+	}
+	return candidates[0]
 }
 func (testAzureProvider) ServerTypeForClass(class string) string {
 	return azureVMSizeCandidatesForClass(class)[0]
@@ -392,16 +397,27 @@ func (testHetznerProvider) Name() string      { return "hetzner" }
 func (testHetznerProvider) Aliases() []string { return nil }
 func (testHetznerProvider) Spec() ProviderSpec {
 	return ProviderSpec{
-		Name:        "hetzner",
-		Kind:        ProviderKindSSHLease,
-		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser, FeatureCode, FeatureTailscale},
-		Coordinator: CoordinatorSupported,
+		Name:             "hetzner",
+		Kind:             ProviderKindSSHLease,
+		Targets:          []TargetSpec{{OS: targetLinux}},
+		Features:         FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser, FeatureCode, FeatureTailscale},
+		Coordinator:      CoordinatorSupported,
+		ClassDisposition: ProviderClassDispositionMapped,
 	}
 }
 func (testHetznerProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
 func (testHetznerProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
+}
+func (testHetznerProvider) ServerTypeForConfig(cfg Config) string {
+	candidates := hetznerServerTypeCandidatesForConfig(cfg)
+	if len(candidates) == 0 {
+		return ""
+	}
+	return candidates[0]
+}
+func (testHetznerProvider) ServerTypeForClass(class string) string {
+	return serverTypeCandidatesForClass(class)[0]
 }
 func (p testHetznerProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testHetznerBackend{testSSHBackend{spec: p.Spec()}}, nil
@@ -598,16 +614,27 @@ func (testGCPProvider) Aliases() []string {
 }
 func (testGCPProvider) Spec() ProviderSpec {
 	return ProviderSpec{
-		Name:        "gcp",
-		Kind:        ProviderKindSSHLease,
-		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureTailscale},
-		Coordinator: CoordinatorSupported,
+		Name:             "gcp",
+		Kind:             ProviderKindSSHLease,
+		Targets:          []TargetSpec{{OS: targetLinux}},
+		Features:         FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureTailscale},
+		Coordinator:      CoordinatorSupported,
+		ClassDisposition: ProviderClassDispositionMapped,
 	}
 }
 func (testGCPProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
 func (testGCPProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
+}
+func (testGCPProvider) ServerTypeForConfig(cfg Config) string {
+	candidates := gcpMachineTypeCandidatesForConfig(cfg)
+	if len(candidates) == 0 {
+		return ""
+	}
+	return candidates[0]
+}
+func (testGCPProvider) ServerTypeForClass(class string) string {
+	return gcpMachineTypeCandidatesForClass(class)[0]
 }
 func (p testGCPProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
@@ -656,13 +683,24 @@ func (testAWSProvider) Spec() ProviderSpec {
 			{OS: targetWindows, WindowsMode: windowsModeWSL2},
 			{OS: targetMacOS},
 		},
-		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser, FeatureCode},
-		Coordinator: CoordinatorSupported,
+		Features:         FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser, FeatureCode},
+		Coordinator:      CoordinatorSupported,
+		ClassDisposition: ProviderClassDispositionMapped,
 	}
 }
 func (testAWSProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
 func (testAWSProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
+}
+func (testAWSProvider) ServerTypeForConfig(cfg Config) string {
+	candidates := awsInstanceTypeCandidatesForConfig(cfg)
+	if len(candidates) == 0 {
+		return ""
+	}
+	return candidates[0]
+}
+func (testAWSProvider) ServerTypeForClass(class string) string {
+	return awsInstanceTypeCandidatesForClass(class)[0]
 }
 func (p testAWSProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	if testAWSBackendOverride != nil {
@@ -1272,11 +1310,12 @@ func (testNamespaceProvider) Aliases() []string {
 }
 func (testNamespaceProvider) Spec() ProviderSpec {
 	return ProviderSpec{
-		Name:        "namespace-devbox",
-		Kind:        ProviderKindSSHLease,
-		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync},
-		Coordinator: CoordinatorNever,
+		Name:             "namespace-devbox",
+		Kind:             ProviderKindSSHLease,
+		Targets:          []TargetSpec{{OS: targetLinux}},
+		Features:         FeatureSet{FeatureSSH, FeatureCrabboxSync},
+		Coordinator:      CoordinatorNever,
+		ClassDisposition: ProviderClassDispositionMapped,
 	}
 }
 func (testNamespaceProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
@@ -1301,6 +1340,34 @@ func (testNamespaceProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values an
 		cfg.Namespace.WorkRoot = *v.WorkRoot
 	}
 	return nil
+}
+func (testNamespaceProvider) ServerTypeForConfig(cfg Config) string {
+	if cfg.Namespace.Size != "" {
+		return strings.ToUpper(strings.TrimSpace(cfg.Namespace.Size))
+	}
+	if cfg.ServerTypeExplicit && cfg.ServerType != "" {
+		return strings.ToUpper(strings.TrimSpace(cfg.ServerType))
+	}
+	if candidates, matched := providerClassCandidatesForConfig(cfg); matched {
+		return candidates[0]
+	}
+	if IsCanonicalProviderClass(cfg.Class) {
+		return ""
+	}
+	if cfg.Class == "" {
+		return "M"
+	}
+	return strings.ToUpper(strings.TrimSpace(cfg.Class))
+}
+func (testNamespaceProvider) ServerTypeForClass(class string) string {
+	cfg := Config{Provider: "namespace-devbox", TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: class}
+	if candidates, matched := providerClassCandidatesForConfig(cfg); matched {
+		return candidates[0]
+	}
+	if class == "" {
+		return "M"
+	}
+	return strings.ToUpper(strings.TrimSpace(class))
 }
 func (p testNamespaceProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
@@ -1678,11 +1745,12 @@ func (testCloudflareProvider) Aliases() []string {
 }
 func (testCloudflareProvider) Spec() ProviderSpec {
 	return ProviderSpec{
-		Name:        "cloudflare",
-		Kind:        ProviderKindDelegatedRun,
-		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureArchiveSync, FeatureCleanup},
-		Coordinator: CoordinatorNever,
+		Name:             "cloudflare",
+		Kind:             ProviderKindDelegatedRun,
+		Targets:          []TargetSpec{{OS: targetLinux}},
+		Features:         FeatureSet{FeatureArchiveSync, FeatureCleanup},
+		Coordinator:      CoordinatorNever,
+		ClassDisposition: ProviderClassDispositionMapped,
 	}
 }
 func (testCloudflareProvider) RegisterFlags(*flag.FlagSet, Config) any {
@@ -1690,6 +1758,29 @@ func (testCloudflareProvider) RegisterFlags(*flag.FlagSet, Config) any {
 }
 func (testCloudflareProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
+}
+func (testCloudflareProvider) ServerTypeForConfig(cfg Config) string {
+	if candidates, matched := providerClassCandidatesForConfig(cfg); matched {
+		return candidates[0]
+	}
+	if IsCanonicalProviderClass(cfg.Class) {
+		return ""
+	}
+	return cloudflareContainerInstanceTypeForClass(cfg.Class)
+}
+func (testCloudflareProvider) ServerTypeForClass(class string) string {
+	normalized := strings.ToLower(strings.TrimSpace(class))
+	if normalized == "" {
+		normalized = "standard"
+	}
+	cfg := Config{Provider: "cloudflare", TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: normalized}
+	if candidates, matched := providerClassCandidatesForConfig(cfg); matched {
+		return candidates[0]
+	}
+	if instanceType, ok := normalizeCloudflareContainerInstanceType(class); ok {
+		return instanceType
+	}
+	return strings.TrimSpace(class)
 }
 func (p testCloudflareProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testDoctorDelegatedBackend{testDelegatedBackend{spec: p.Spec()}}, nil

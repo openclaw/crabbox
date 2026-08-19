@@ -25,8 +25,9 @@ func (Provider) Spec() core.ProviderSpec {
 			{OS: core.TargetLinux},
 			{OS: core.TargetMacOS},
 		},
-		Features:    core.FeatureSet{},
-		Coordinator: core.CoordinatorNever,
+		Features:         core.FeatureSet{},
+		Coordinator:      core.CoordinatorNever,
+		ClassDisposition: core.ProviderClassDispositionUnmapped,
 	}
 }
 

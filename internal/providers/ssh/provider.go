@@ -27,8 +27,9 @@ func (Provider) Spec() core.ProviderSpec {
 			{OS: core.TargetWindows, WindowsMode: "wsl2"},
 			{OS: core.TargetMacOS},
 		},
-		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureDesktop, core.FeatureBrowser, core.FeatureCode},
-		Coordinator: core.CoordinatorNever,
+		Features:         core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureDesktop, core.FeatureBrowser, core.FeatureCode},
+		Coordinator:      core.CoordinatorNever,
+		ClassDisposition: core.ProviderClassDispositionUnmapped,
 	}
 }
 func (Provider) RegisterFlags(*flag.FlagSet, core.Config) any { return core.NoProviderFlags() }

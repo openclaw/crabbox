@@ -17,12 +17,13 @@ func (Provider) Aliases() []string { return []string{"rail", "railwayapp"} }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name:        providerName,
-		Family:      "railway",
-		Kind:        core.ProviderKindServiceControl,
-		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{core.FeatureURLBridge},
-		Coordinator: core.CoordinatorNever,
+		Name:             providerName,
+		Family:           "railway",
+		Kind:             core.ProviderKindServiceControl,
+		Targets:          []core.TargetSpec{{OS: core.TargetLinux}},
+		Features:         core.FeatureSet{core.FeatureURLBridge},
+		Coordinator:      core.CoordinatorNever,
+		ClassDisposition: core.ProviderClassDispositionUnmapped,
 	}
 }
 

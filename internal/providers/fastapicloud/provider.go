@@ -17,12 +17,13 @@ func (Provider) Aliases() []string { return []string{"fastapicloud", "fastapi"} 
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name:        providerName,
-		Family:      "fastapi-cloud",
-		Kind:        core.ProviderKindServiceControl,
-		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{},
-		Coordinator: core.CoordinatorNever,
+		Name:             providerName,
+		Family:           "fastapi-cloud",
+		Kind:             core.ProviderKindServiceControl,
+		Targets:          []core.TargetSpec{{OS: core.TargetLinux}},
+		Features:         core.FeatureSet{},
+		Coordinator:      core.CoordinatorNever,
+		ClassDisposition: core.ProviderClassDispositionUnmapped,
 	}
 }
 

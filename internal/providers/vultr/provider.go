@@ -14,18 +14,27 @@ func init() {
 
 type Provider struct{}
 
+var _ core.ProviderClassProfileProvider = Provider{}
+
+var classProfiles = core.UniformLinuxAMD64ClassProfiles(core.ProviderClassMachine{Type: "vc2-1c-1gb"})
+
 func (Provider) Name() string      { return providerName }
 func (Provider) Aliases() []string { return nil }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name:        providerName,
-		Family:      providerName,
-		Kind:        core.ProviderKindSSHLease,
-		Targets:     []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:    core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup},
-		Coordinator: core.CoordinatorNever,
+		Name:             providerName,
+		Family:           providerName,
+		Kind:             core.ProviderKindSSHLease,
+		Targets:          []core.TargetSpec{{OS: core.TargetLinux}},
+		Features:         core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup},
+		Coordinator:      core.CoordinatorNever,
+		ClassDisposition: core.ProviderClassDispositionMapped,
 	}
+}
+
+func (Provider) ClassProfiles() []core.ProviderClassProfile {
+	return classProfiles
 }
 
 func (Provider) RegisterFlags(*flag.FlagSet, core.Config) any { return core.NoProviderFlags() }
@@ -37,6 +46,12 @@ func (Provider) ApplyFlags(*core.Config, *flag.FlagSet, any) error {
 func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	if cfg.ServerTypeExplicit && cfg.ServerType != "" {
 		return cfg.ServerType
+	}
+	if candidates, matched := core.ProviderClassCandidatesForProfiles(classProfiles, cfg); matched {
+		return candidates[0]
+	}
+	if core.IsCanonicalProviderClass(cfg.Class) {
+		return ""
 	}
 	return vultrServerTypeForClass(cfg.Class)
 }
@@ -62,10 +77,10 @@ func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.Doctor
 }
 
 func vultrServerTypeForClass(class string) string {
-	switch class {
-	case "standard", "fast", "large", "beast":
-		return "vc2-1c-1gb"
-	default:
-		return "vc2-1c-1gb"
+	for _, profile := range classProfiles {
+		if profile.Class == class {
+			return profile.Primary.Type
+		}
 	}
+	return "vc2-1c-1gb"
 }

@@ -33,8 +33,9 @@ Each adapter declares a `Spec` that drives how Crabbox treats it:
   without SSH, POSIX shell, or filesystem sync semantics.
 
 `internal/cli/provider_backend.go` defines the kinds, coordinator modes, and
-feature flags; `internal/cli/config.go` holds the per-provider config sections
-and the class-to-machine-type maps.
+feature flags; `internal/cli/config.go` holds per-provider config sections.
+Mapped provider adapters own their class-profile catalog and runtime candidate
+order.
 
 When an SSH-lease provider can be exercised from local credentials, add a
 provider-specific path in `scripts/live-smoke.sh`. The smoke should use explicit
@@ -61,15 +62,17 @@ OS, substrate, location, GPU orientation, cleanup behavior, best fit, and main
 caveat. The matrix is generated from the live CLI provider spec plus checked-in
 selection metadata, so registration and documentation drift fail the docs gate.
 
-`crabbox providers --json` remains the low-level live spec. `crabbox doctor`
+`crabbox providers --json` remains the low-level compiled spec. `crabbox doctor`
 checks whether the selected provider is usable from the current environment.
 
 ## Machine classes
 
-`--class tiny|small|standard|fast|large|beast` (default `beast`) maps to an ordered list of
-provider machine types. Crabbox tries each in turn, falling back when capacity or
-quota rejects a request. The maps below come from `internal/cli/config.go` and
-the corresponding provider adapters:
+An explicitly selected canonical `--class tiny|small|standard|fast|large|beast` maps to an
+ordered list of provider machine types. Crabbox tries the profile `primary`
+first and then its declared `fallbacks` in order when provider policy permits a
+capacity retry. An inherited global class does not override provider-native
+defaults unless that provider already defines such behavior. The catalog in
+each mapped provider adapter is also the runtime source of truth:
 
 ```text
 Hetzner
@@ -81,12 +84,12 @@ large     ccx53 (32 vCPU, 128 GB RAM), ccx43, cpx62, cx53
 beast     ccx63 (48 vCPU, 192 GB RAM), ccx53, ccx43, cpx62, cx53
 
 AWS (Linux)
-tiny      m7a.large (2 vCPU, 8 GB RAM), m7i.large, c7a.xlarge, c7i.xlarge
-small     c7a.2xlarge (8 vCPU, 16 GB RAM), c7i.2xlarge, m7a.xlarge, m7i.xlarge, c7a.xlarge
-standard  c7a.8xlarge (32 vCPU, 64 GB RAM), c7i.8xlarge, m7a.8xlarge, m7i.8xlarge, c7a.4xlarge
-fast      c7a.16xlarge (64 vCPU, 128 GB RAM), c7i.16xlarge, m7a.16xlarge, m7i.16xlarge, c7a.12xlarge, c7a.8xlarge
-large     c7a.24xlarge (96 vCPU, 192 GB RAM), c7i.24xlarge, m7a.24xlarge, m7i.24xlarge, r7a.24xlarge, c7a.16xlarge, c7a.12xlarge
-beast     c7a.48xlarge (192 vCPU, 384 GB RAM), c7i.48xlarge, m7a.48xlarge, m7i.48xlarge, r7a.48xlarge, c7a.32xlarge, c7i.32xlarge, m7a.32xlarge, c7a.24xlarge, c7a.16xlarge
+tiny      m7a.large (2 vCPU, 8 GiB RAM), m7i.large, c7a.xlarge, c7i.xlarge, t3.small
+small     c7a.2xlarge (8 vCPU, 16 GiB RAM), c7i.2xlarge, m7a.xlarge, m7i.xlarge, c7a.xlarge, t3.small
+standard  c7a.8xlarge (32 vCPU, 64 GiB RAM), c7i.8xlarge, m7a.8xlarge, m7i.8xlarge, c7a.4xlarge, t3.small
+fast      c7a.16xlarge (64 vCPU, 128 GiB RAM), c7i.16xlarge, m7a.16xlarge, m7i.16xlarge, c7a.12xlarge, c7a.8xlarge, t3.small
+large     c7a.24xlarge (96 vCPU, 192 GiB RAM), c7i.24xlarge, m7a.24xlarge, m7i.24xlarge, r7a.24xlarge, c7a.16xlarge, c7a.12xlarge, t3.small
+beast     c7a.48xlarge (192 vCPU, 384 GiB RAM), c7i.48xlarge, m7a.48xlarge, m7i.48xlarge, r7a.48xlarge, c7a.32xlarge, c7i.32xlarge, m7a.32xlarge, c7a.24xlarge, c7a.16xlarge, t3.small
 
 AWS (Linux ARM64)
 tiny      m7g.large, c7g.xlarge, r7g.large
@@ -96,17 +99,17 @@ AWS Windows (normal)
 tiny      m7a.large, m7i.large, t3.large
 small     c7a.2xlarge, c7i.2xlarge, m7a.xlarge, m7i.xlarge, t3.xlarge
 standard  m7i.large, m7a.large, t3.large
-fast      m7i.xlarge, m7a.xlarge, t3.xlarge
-large     m7i.2xlarge, m7a.2xlarge, t3.2xlarge
-beast     m7i.4xlarge, m7a.4xlarge, m7i.2xlarge
+fast      m7i.xlarge, m7a.xlarge, t3.xlarge, t3.large
+large     m7i.2xlarge, m7a.2xlarge, t3.2xlarge, t3.large
+beast     m7i.4xlarge, m7a.4xlarge, m7i.2xlarge, t3.large
 
 AWS Windows WSL2
 tiny      m8i.large, m8i-flex.large, c8i.xlarge, r8i.large
 small     c8i.2xlarge, m8i.xlarge, m8i-flex.xlarge, r8i.large, c8i.xlarge
 standard  m8i.large, m8i-flex.large, c8i.large, r8i.large
-fast      m8i.xlarge, m8i-flex.xlarge, c8i.xlarge, r8i.xlarge
-large     m8i.2xlarge, m8i-flex.2xlarge, c8i.2xlarge, r8i.2xlarge
-beast     m8i.4xlarge, m8i-flex.4xlarge, c8i.4xlarge, r8i.4xlarge, m8i.2xlarge
+fast      m8i.xlarge, m8i-flex.xlarge, c8i.xlarge, r8i.xlarge, m8i.large
+large     m8i.2xlarge, m8i-flex.2xlarge, c8i.2xlarge, r8i.2xlarge, m8i.large
+beast     m8i.4xlarge, m8i-flex.4xlarge, c8i.4xlarge, r8i.4xlarge, m8i.2xlarge, m8i.large
 
 AWS macOS (all classes)
 mac2.metal, mac2-m2.metal, mac2-m2pro.metal, mac-m4.metal, mac-m4pro.metal,
@@ -122,12 +125,12 @@ large     c4-standard-96 (96 vCPU, 360 GB RAM), c3-standard-88, n2-standard-80, 
 beast     c4-standard-192 (192 vCPU, 720 GB RAM), c4-standard-96, c3-standard-176, c3-standard-88, n2d-standard-224, n2-standard-128
 
 Azure (Linux)
-tiny      Standard_D2ads_v6 (2 vCPU, 8 GB RAM), Standard_D2ds_v6, Standard_D2ads_v5, Standard_D2ds_v5, Standard_F2s_v2
-small     Standard_D8ads_v6 (8 vCPU, 32 GB RAM), Standard_D8ds_v6, Standard_F8s_v2, Standard_D8ads_v5, Standard_D8ds_v5, Standard_D4ads_v6, Standard_D4ds_v6, Standard_F4s_v2
-standard  Standard_D32ads_v6 (32 vCPU, 128 GB RAM), Standard_D32ds_v6, Standard_F32s_v2, Standard_D32ads_v5, Standard_D32ds_v5, Standard_D16ads_v6, Standard_D16ds_v6, Standard_F16s_v2
-fast      Standard_D64ads_v6 (64 vCPU, 256 GB RAM), Standard_D64ds_v6, Standard_F64s_v2, Standard_D64ads_v5, Standard_D64ds_v5, Standard_D48ads_v6, Standard_D48ds_v6, Standard_F48s_v2, Standard_D32ads_v6, Standard_D32ds_v6, Standard_F32s_v2
-large     Standard_D96ads_v6 (96 vCPU, 384 GB RAM), Standard_D96ds_v6, Standard_D96ads_v5, Standard_D96ds_v5, Standard_D64ads_v6, Standard_D64ds_v6, Standard_F64s_v2, Standard_D48ads_v6, Standard_D48ds_v6, Standard_F48s_v2
-beast     Standard_D192ds_v6 (192 vCPU, 768 GB RAM), Standard_D128ds_v6, Standard_D96ads_v6, Standard_D96ds_v6, Standard_D96ads_v5, Standard_D96ds_v5, Standard_D64ads_v6, Standard_D64ds_v6, Standard_F64s_v2
+tiny      Standard_D2ads_v6 (2 vCPU, 8 GiB RAM), Standard_D2ds_v6, Standard_D2ads_v5, Standard_D2ds_v5, Standard_F2s_v2
+small     Standard_D8ads_v6 (8 vCPU, 32 GiB RAM), Standard_D8ds_v6, Standard_F8s_v2, Standard_D8ads_v5, Standard_D8ds_v5, Standard_D4ads_v6, Standard_D4ds_v6, Standard_F4s_v2
+standard  Standard_D32ads_v6 (32 vCPU, 128 GiB RAM), Standard_D32ds_v6, Standard_F32s_v2, Standard_D32ads_v5, Standard_D32ds_v5, Standard_D16ads_v6, Standard_D16ds_v6, Standard_F16s_v2
+fast      Standard_D64ads_v6 (64 vCPU, 256 GiB RAM), Standard_D64ds_v6, Standard_F64s_v2, Standard_D64ads_v5, Standard_D64ds_v5, Standard_D48ads_v6, Standard_D48ds_v6, Standard_F48s_v2, Standard_D32ads_v6, Standard_D32ds_v6, Standard_F32s_v2
+large     Standard_D96ads_v6 (96 vCPU, 384 GiB RAM), Standard_D96ds_v6, Standard_D96ads_v5, Standard_D96ds_v5, Standard_D64ads_v6, Standard_D64ds_v6, Standard_F64s_v2, Standard_D48ads_v6, Standard_D48ds_v6, Standard_F48s_v2
+beast     Standard_D192ds_v6 (192 vCPU, 768 GiB RAM), Standard_D128ds_v6, Standard_D96ads_v6, Standard_D96ds_v6, Standard_D96ads_v5, Standard_D96ds_v5, Standard_D64ads_v6, Standard_D64ds_v6, Standard_F64s_v2
 
 Namespace Instance
 tiny      1x2 (1 vCPU, 2 GB RAM)
@@ -157,34 +160,70 @@ fast      M
 large     L
 beast     XL
 
-Namespace Instance
-tiny      1x2
-small     2x4
-standard  4x8
-fast      8x16
-large     16x32
-beast     32x64
-
-Cloudflare Containers (any class -> standard-4)
+Cloudflare Containers (each canonical class -> standard-4)
 lite, basic, standard-1, standard-2, standard-3, standard-4
 ```
 
-An explicit `--type` is treated as an exact provider type request. If that type
-is rejected, Crabbox fails clearly instead of silently choosing a different
-instance type. Drop `--type` and use a class when you want fallback. See
-[Capacity and fallback](capacity-fallback.md) for the full fallback model.
+The four canonical classes are profiled per exact selector. AWS declares
+Linux/amd64, Linux/arm64, Windows normal/amd64, Windows WSL2/amd64, and
+macOS/mixed. Its macOS sequence is Apple Silicon first and ends with the Intel
+`mac1.metal`; every canonical class exposes the same sequence. Azure declares
+Linux/amd64, Linux/arm64, Windows normal/amd64, Windows normal/arm64, and
+Windows WSL2/amd64. It intentionally has no Windows WSL2/arm64 profile because
+that combination is rejected. GCP, Hetzner, Namespace Devbox,
+Namespace Instance, Cloudflare, DigitalOcean, Linode, OVHcloud, Scaleway,
+Vultr, Phala, and Tencent Cloud declare Linux/amd64 profiles.
+Windows with no mode normalizes to `normal`; selection prefers an exact
+architecture and may fall back only to a declared `mixed` profile. It never
+crosses Windows modes or amd64/arm64 profiles.
+An exact lowercase canonical class with no exact or `mixed` selector match
+fails with exit 2 rather than becoming a literal provider-native type.
+Noncanonical uppercase, padded, and custom strings retain provider-specific
+legacy handling.
 
-DigitalOcean maps every class to the smallest Phase 1 default size
+Both `crabbox providers --json` and schema-v2
+`crabbox providers describe <provider> --json` expose the same `classes`
+catalog. `disposition` is `mapped` when explicit canonical class intent has a
+supported provider-owned machine profile, and `unmapped` otherwise. Unmapped
+does not promise that every input provenance rejects class or that no legacy
+metadata can contain one. The `profiles` and every `fallbacks` field are always
+arrays. Profiles are sorted by
+canonical class, target, Windows mode, and architecture, while machine
+fallbacks stay in runtime order. Unknown vCPU or memory metadata is `null`.
+Known memory always carries its provider-native `MB`, `MiB`, `GB`, or `GiB`
+unit; GCP decimal GB ratios are not relabeled as GiB. The catalog is compiled
+static data and does not read config, credentials, provider state, local files,
+or the network.
+
+Azure full-caching ephemeral-disk eligibility remains a runtime policy layered
+over its stable base profiles, not another profile dimension. Snapshot runs use
+managed disks; supported stored types can still prepend; and Windows may expand
+from the selected class to large then beast before applying the existing
+full-caching filter.
+
+An explicit `--type` bypasses class-profile selection. Provider-native override
+fields and stored non-explicit types retain their documented precedence. Every
+provider treats explicit type as exact. Drop `--type` and use a class when you
+want the portable profile and capacity-fallback order. See
+[Capacity and fallback](capacity-fallback.md).
+
+Phala and Tencent Cloud apply these profiles when class is explicitly selected
+through CLI, YAML, or environment provenance. Without explicit class intent,
+Phala preserves its inexpensive `tdx.small`/provider-native default and Tencent
+Cloud preserves its `SA5.MEDIUM2`/provider-native default. Explicit generic and
+provider-native type overrides keep precedence.
+
+DigitalOcean maps every canonical class to the smallest Phase 1 default size
 `s-1vcpu-1gb`. Use `--type <droplet-size-slug>` when you need a larger exact
 Droplet size.
 
-Linode maps every class to the smallest Phase 1 default size `g6-standard-1`.
+Linode maps every canonical class to the smallest Phase 1 default size `g6-standard-1`.
 Use `--type <linode-type-slug>` when you need a different exact instance type.
 
-Vultr maps every class to the smallest Phase 1 default plan `vc2-1c-1gb`.
+Vultr maps every canonical class to the smallest Phase 1 default plan `vc2-1c-1gb`.
 Use `--type <vultr-plan-id>` when you need a different exact instance type.
 
-Scaleway maps every class to the smallest foundation default type `DEV1-S`.
+Scaleway maps every canonical class to the smallest foundation default type `DEV1-S`.
 Use `--type <scaleway-commercial-type>` when you need a different exact
 Scaleway Instances commercial type. The live lifecycle backend is not
 implemented yet, so this is a config/provider contract rather than a live

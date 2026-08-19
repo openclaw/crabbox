@@ -89,22 +89,26 @@ func newGCPClientWithOptions(ctx context.Context, cfg Config, opts ...option.Cli
 }
 
 func gcpMachineTypeCandidatesForClass(class string) []string {
-	switch class {
-	case "tiny":
-		return []string{"c4-standard-4", "c3-standard-4", "n2-standard-4", "n2d-standard-4"}
-	case "small":
-		return []string{"c4-standard-8", "c3-standard-8", "n2-standard-8", "n2d-standard-8", "c4-standard-4"}
-	case "standard":
-		return []string{"c4-standard-32", "c3-standard-22", "n2-standard-32", "n2d-standard-32"}
-	case "fast":
-		return []string{"c4-standard-64", "c3-standard-44", "n2-standard-64", "n2d-standard-64", "c4-standard-32"}
-	case "large":
-		return []string{"c4-standard-96", "c3-standard-88", "n2-standard-80", "n2d-standard-96", "c4-standard-64"}
-	case "beast":
-		return []string{"c4-standard-192", "c4-standard-96", "c3-standard-176", "c3-standard-88", "n2d-standard-224", "n2-standard-128"}
-	default:
-		return []string{class}
+	cfg := Config{Provider: "gcp", TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: class, architectureExplicit: true}
+	return gcpMachineTypeCandidatesForConfig(cfg)
+}
+
+func gcpMachineTypeCandidatesForConfig(cfg Config) []string {
+	if cfg.ServerTypeExplicit {
+		if strings.TrimSpace(cfg.ServerType) != "" {
+			return []string{cfg.ServerType}
+		}
 	}
+	if candidates, matched := providerClassCandidatesForConfig(cfg); matched {
+		return appendUniqueExactStrings([]string{concreteStoredServerType(cfg)}, candidates...)
+	}
+	if IsCanonicalProviderClass(cfg.Class) {
+		if storedType := concreteStoredServerType(cfg); storedType != "" {
+			return []string{storedType}
+		}
+		return nil
+	}
+	return appendUniqueExactStrings([]string{concreteStoredServerType(cfg)}, cfg.Class)
 }
 
 func (c *GCPClient) CreateServerWithFallback(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, logf func(string, ...any)) (Server, Config, error) {
@@ -112,9 +116,16 @@ func (c *GCPClient) CreateServerWithFallback(ctx context.Context, cfg Config, pu
 	if cfg.ServerTypeExplicit && cfg.ServerType != "" {
 		candidates = []string{cfg.ServerType}
 	} else {
-		candidates = gcpMachineTypeCandidatesForClass(cfg.Class)
-		if cfg.ServerType != "" && cfg.ServerType != candidates[0] {
-			candidates = append([]string{cfg.ServerType}, candidates...)
+		candidates = gcpMachineTypeCandidatesForConfig(cfg)
+		if len(candidates) == 0 {
+			provider, _ := ProviderFor(cfg.Provider)
+			if provider == nil {
+				return Server{}, cfg, exit(2, "provider=%s has no class profile for class=%s", cfg.Provider, cfg.Class)
+			}
+			if err := validateProviderClassSelector(provider, cfg); err != nil {
+				return Server{}, cfg, err
+			}
+			return Server{}, cfg, exit(2, "provider=%s has no usable provisioning candidates for class=%s", cfg.Provider, cfg.Class)
 		}
 	}
 	zones := uniqueStrings(append([]string{cfg.GCPZone}, cfg.Capacity.AvailabilityZones...))
