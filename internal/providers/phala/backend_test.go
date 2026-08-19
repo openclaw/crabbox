@@ -136,6 +136,8 @@ func TestInstanceTypeForClass(t *testing.T) {
 		class string
 		want  string
 	}{
+		{"tiny", "tdx.small"},
+		{"small", "tdx.small"},
 		{"standard", "tdx.small"},
 		{"fast", "tdx.medium"},
 		{"large", "tdx.large"},

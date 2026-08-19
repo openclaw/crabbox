@@ -78,6 +78,10 @@ func applyDefaults(cfg *core.Config) {
 
 func machineTypeForClass(class string) string {
 	switch strings.ToLower(strings.TrimSpace(class)) {
+	case "tiny":
+		return "1x2"
+	case "small":
+		return "2x4"
 	case "", "standard":
 		return "4x8"
 	case "fast":

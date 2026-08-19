@@ -90,6 +90,10 @@ func newGCPClientWithOptions(ctx context.Context, cfg Config, opts ...option.Cli
 
 func gcpMachineTypeCandidatesForClass(class string) []string {
 	switch class {
+	case "tiny":
+		return []string{"c4-standard-4", "c3-standard-4", "n2-standard-4", "n2d-standard-4"}
+	case "small":
+		return []string{"c4-standard-8", "c3-standard-8", "n2-standard-8", "n2d-standard-8", "c4-standard-4"}
 	case "standard":
 		return []string{"c4-standard-32", "c3-standard-22", "n2-standard-32", "n2d-standard-32"}
 	case "fast":

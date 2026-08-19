@@ -297,6 +297,8 @@ func TestAzureVMSizeCandidatesForClass(t *testing.T) {
 		class string
 		want  []string
 	}{
+		{class: "tiny", want: []string{"Standard_D2ads_v6", "Standard_D2ds_v6", "Standard_D2ads_v5", "Standard_D2ds_v5", "Standard_F2s_v2"}},
+		{class: "small", want: []string{"Standard_D8ads_v6", "Standard_D8ds_v6", "Standard_F8s_v2", "Standard_D8ads_v5", "Standard_D8ds_v5", "Standard_D4ads_v6", "Standard_D4ds_v6", "Standard_F4s_v2"}},
 		{class: "standard", want: []string{"Standard_D32ads_v6", "Standard_D32ds_v6", "Standard_F32s_v2", "Standard_D32ads_v5", "Standard_D32ds_v5", "Standard_D16ads_v6", "Standard_D16ds_v6", "Standard_F16s_v2"}},
 		{class: "fast", want: []string{"Standard_D64ads_v6", "Standard_D64ds_v6", "Standard_F64s_v2", "Standard_D64ads_v5", "Standard_D64ds_v5", "Standard_D48ads_v6", "Standard_D48ds_v6", "Standard_F48s_v2", "Standard_D32ads_v6", "Standard_D32ds_v6", "Standard_F32s_v2"}},
 		{class: "large", want: []string{"Standard_D96ads_v6", "Standard_D96ds_v6", "Standard_D96ads_v5", "Standard_D96ds_v5", "Standard_D64ads_v6", "Standard_D64ds_v6", "Standard_F64s_v2", "Standard_D48ads_v6", "Standard_D48ds_v6", "Standard_F48s_v2"}},
@@ -313,10 +315,17 @@ func TestAzureVMSizeCandidatesForClass(t *testing.T) {
 
 func TestAzureARM64VMSizeCandidatesForClass(t *testing.T) {
 	t.Parallel()
-	got := azureARM64VMSizeCandidatesForClass("beast")
-	want := []string{"Standard_D96pds_v6", "Standard_D96ps_v6", "Standard_D64pds_v6", "Standard_D64ps_v6"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("got %v, want %v", got, want)
+	for _, tt := range []struct {
+		class string
+		want  []string
+	}{
+		{class: "tiny", want: []string{"Standard_D2pds_v6", "Standard_D2ps_v6"}},
+		{class: "small", want: []string{"Standard_D8pds_v6", "Standard_D8ps_v6", "Standard_D4pds_v6", "Standard_D4ps_v6"}},
+		{class: "beast", want: []string{"Standard_D96pds_v6", "Standard_D96ps_v6", "Standard_D64pds_v6", "Standard_D64ps_v6"}},
+	} {
+		if got := azureARM64VMSizeCandidatesForClass(tt.class); !reflect.DeepEqual(got, tt.want) {
+			t.Fatalf("class=%q got %v, want %v", tt.class, got, tt.want)
+		}
 	}
 }
 
@@ -696,10 +705,17 @@ func TestAzureWindowsSnapshotRehydrateDefinesVNCPathWithoutDesktop(t *testing.T)
 
 func TestAzureWindowsVMSizeCandidatesForClass(t *testing.T) {
 	t.Parallel()
-	got := azureWindowsVMSizeCandidatesForClass("beast")
-	want := []string{"Standard_D16ads_v6", "Standard_D16ds_v6", "Standard_D16ads_v5", "Standard_D16ds_v5", "Standard_D8ads_v6"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("got %v, want %v", got, want)
+	for _, tt := range []struct {
+		class string
+		want  []string
+	}{
+		{class: "tiny", want: []string{"Standard_D2ads_v6", "Standard_D2ds_v6", "Standard_D2ads_v5", "Standard_D2ds_v5", "Standard_D2as_v6"}},
+		{class: "small", want: []string{"Standard_D8ads_v6", "Standard_D8ds_v6", "Standard_D8ads_v5", "Standard_D8ds_v5", "Standard_D8as_v6"}},
+		{class: "beast", want: []string{"Standard_D16ads_v6", "Standard_D16ds_v6", "Standard_D16ads_v5", "Standard_D16ds_v5", "Standard_D8ads_v6"}},
+	} {
+		if got := azureWindowsVMSizeCandidatesForClass(tt.class); !reflect.DeepEqual(got, tt.want) {
+			t.Fatalf("class=%q got %v, want %v", tt.class, got, tt.want)
+		}
 	}
 }
 

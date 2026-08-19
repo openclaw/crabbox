@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `tiny` and `small` machine classes for lower-cost smoke checks and small repositories.
 - Added an opt-in `cmake --version` preflight probe for POSIX, WSL2, and native Windows targets. Thanks @coygeek.
 
 ### Fixed

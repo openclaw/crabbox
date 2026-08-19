@@ -411,53 +411,71 @@ The providers below fall back across ordered instance-type lists unless `--type`
 pins a specific provider-native size.
 
 ```text
-Hetzner    standard  ccx33, cpx62, cx53
+Hetzner    tiny      ccx13, cpx22, cx23
+           small     ccx23, cpx32, cx33
+           standard  ccx33, cpx62, cx53
            fast      ccx43, cpx62, cx53
            large     ccx53, ccx43, cpx62, cx53
            beast     ccx63, ccx53, ccx43, cpx62, cx53
 
-AWS Linux  standard  c7a/c7i/m7a/m7i.8xlarge family
+AWS Linux  tiny      m7a.large, m7i.large, c7a.xlarge, c7i.xlarge
+           small     c7a.2xlarge, c7i.2xlarge, m7a.xlarge, m7i.xlarge, c7a.xlarge
+           standard  c7a/c7i/m7a/m7i.8xlarge family
            fast      …16xlarge family
            large     …24xlarge family
            beast     …48xlarge family, falling back to 32x/24x/16x
            arm64     c7g/m7g/r7g families with --arch arm64
 
-AWS Win    standard  m7i.large, m7a.large, t3.large
+AWS Win    tiny      m7a.large, m7i.large, t3.large
+           small     c7a.2xlarge, c7i.2xlarge, m7a.xlarge, m7i.xlarge, t3.xlarge
+           standard  m7i.large, m7a.large, t3.large
            fast      m7i.xlarge, m7a.xlarge, t3.xlarge
            large     m7i.2xlarge, m7a.2xlarge, t3.2xlarge
            beast     m7i.4xlarge, m7a.4xlarge, m7i.2xlarge
 
-AWS WSL2   standard  m8i.large, m8i-flex.large, c8i.large, r8i.large
+AWS WSL2   tiny      m8i.large, m8i-flex.large, c8i.xlarge, r8i.large
+           small     c8i.2xlarge, m8i.xlarge, m8i-flex.xlarge, r8i.large, c8i.xlarge
+           standard  m8i.large, m8i-flex.large, c8i.large, r8i.large
            fast      m8i.xlarge, m8i-flex.xlarge, c8i.xlarge, r8i.xlarge
            large     m8i.2xlarge, m8i-flex.2xlarge, c8i.2xlarge, r8i.2xlarge
            beast     m8i.4xlarge, m8i-flex.4xlarge, c8i.4xlarge, r8i.4xlarge, m8i.2xlarge
 
 AWS macOS  all       mac2.metal, then mac1.metal unless --type is set
 
-Azure      standard  Standard_D32ads_v6, Standard_D32ds_v6, Standard_F32s_v2, then 16-vCPU fallbacks
+Azure      tiny      Standard_D2ads_v6, Standard_D2ds_v6, then v5/F2 fallbacks
+           small     Standard_D8ads_v6, Standard_D8ds_v6, then v5/F8/4-vCPU fallbacks
+           standard  Standard_D32ads_v6, Standard_D32ds_v6, Standard_F32s_v2, then 16-vCPU fallbacks
            fast      Standard_D64ads_v6, Standard_D64ds_v6, Standard_F64s_v2, then 48/32-vCPU fallbacks
            large     Standard_D96ads_v6, Standard_D96ds_v6, then 64/48-vCPU fallbacks
            beast     Standard_D192ds_v6, Standard_D128ds_v6, then 96/64-vCPU fallbacks
            arm64     Standard_D*ps_v6 / D*pds_v6 Cobalt families with --arch arm64
 
 Azure Win/
-WSL2       standard  Standard_D2ads_v6, Standard_D2ds_v6, Standard_D2ads_v5, Standard_D2ds_v5, Standard_D2as_v6
+WSL2       tiny      Standard_D2ads_v6, Standard_D2ds_v6, Standard_D2ads_v5, Standard_D2ds_v5, Standard_D2as_v6
+           small     Standard_D8ads_v6, Standard_D8ds_v6, Standard_D8ads_v5, Standard_D8ds_v5, Standard_D8as_v6
+           standard  Standard_D2ads_v6, Standard_D2ds_v6, Standard_D2ads_v5, Standard_D2ds_v5, Standard_D2as_v6
            fast      Standard_D4ads_v6, Standard_D4ds_v6, Standard_D4ads_v5, Standard_D4ds_v5, Standard_D4as_v6
            large     Standard_D8ads_v6, Standard_D8ds_v6, Standard_D8ads_v5, Standard_D8ds_v5, Standard_D8as_v6
            beast     Standard_D16ads_v6, Standard_D16ds_v6, Standard_D16ads_v5, Standard_D16ds_v5, Standard_D8ads_v6
 
-Namespace  standard  S
+Namespace  tiny      S
+           small     S
+           standard  S
            fast      M
            large     L
            beast     XL
 
 Namespace
-Compute    standard  4x8
+Compute    tiny      1x2
+           small     2x4
+           standard  4x8
            fast      8x16
            large     16x32
            beast     32x64
 
-Cloudflare standard  standard-4
+Cloudflare tiny      standard-4
+           small     standard-4
+           standard  standard-4
            fast      standard-4
            large     standard-4
            beast     standard-4

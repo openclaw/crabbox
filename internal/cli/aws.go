@@ -1641,7 +1641,7 @@ func awsRecommendedClassForQuota(cfg Config, limitVCPUs int) (string, string) {
 		return "", ""
 	}
 	architecture := effectiveArchitectureForConfig(cfg)
-	classes := []string{"beast", "large", "fast", "standard"}
+	classes := []string{"beast", "large", "fast", "standard", "small", "tiny"}
 	for _, class := range classes {
 		candidates := awsInstanceTypeCandidatesForTargetModeArchitectureClass(cfg.TargetOS, cfg.WindowsMode, architecture, class)
 		if len(candidates) == 0 {

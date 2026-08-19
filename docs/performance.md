@@ -177,7 +177,9 @@ package-backed lane for release confidence.
 Pick the smallest class that keeps the target command CPU-bound without hitting
 queue or quota failures. Typical choices:
 
-- `standard` — cheap smoke checks and small repos.
+- `tiny` — minimal smoke checks.
+- `small` — small repositories and light CI lanes.
+- `standard` — typical CI lanes.
 - `fast` — general maintainer testing.
 - `large` — broad test shards or heavy builds.
 - `beast` — high-core changed-test runs.

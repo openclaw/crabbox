@@ -716,6 +716,27 @@ func TestAWSCapacityDoctorCheckWarnsWhenQuotaBelowDefaultClass(t *testing.T) {
 	}
 }
 
+func TestAWSRecommendedClassForQuotaIncludesSmallClasses(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetLinux
+
+	for _, tt := range []struct {
+		limitVCPUs int
+		wantClass  string
+		wantType   string
+	}{
+		{limitVCPUs: 2, wantClass: "tiny", wantType: "m7a.large"},
+		{limitVCPUs: 8, wantClass: "small", wantType: "c7a.2xlarge"},
+	} {
+		gotClass, gotType := awsRecommendedClassForQuota(cfg, tt.limitVCPUs)
+		if gotClass != tt.wantClass || gotType != tt.wantType {
+			t.Fatalf("limit=%d got=(%q,%q) want=(%q,%q)", tt.limitVCPUs, gotClass, gotType, tt.wantClass, tt.wantType)
+		}
+	}
+}
+
 func TestAWSCapacityDoctorCheckRecommendsARM64Types(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.Provider = "aws"

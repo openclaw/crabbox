@@ -266,6 +266,8 @@ project plus either a complete service-account key pair or
 ## Machine classes
 
 ```text
+tiny      c4-standard-4, c3-standard-4, n2-standard-4, n2d-standard-4
+small     c4-standard-8, c3-standard-8, n2-standard-8, n2d-standard-8, c4-standard-4
 standard  c4-standard-32, c3-standard-22, n2-standard-32, n2d-standard-32
 fast      c4-standard-64, c3-standard-44, n2-standard-64, n2d-standard-64, c4-standard-32
 large     c4-standard-96, c3-standard-88, n2-standard-80, n2d-standard-96, c4-standard-64

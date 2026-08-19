@@ -504,6 +504,8 @@ command can override with `--class`. The default class is `beast`.
 Hetzner server types per class:
 
 ```text
+tiny      ccx13, cpx22, cx23
+small     ccx23, cpx32, cx33
 standard  ccx33, cpx62, cx53
 fast      ccx43, cpx62, cx53
 large     ccx53, ccx43, cpx62, cx53
@@ -514,18 +516,24 @@ AWS instance types per class:
 
 ```text
 Linux
+tiny      m7a.large, m7i.large, c7a.xlarge, c7i.xlarge
+small     c7a.2xlarge, c7i.2xlarge, m7a.xlarge, m7i.xlarge, c7a.xlarge
 standard  c7a.8xlarge, c7i.8xlarge, m7a.8xlarge, m7i.8xlarge, c7a.4xlarge
 fast      c7a.16xlarge, c7i.16xlarge, m7a.16xlarge, m7i.16xlarge, c7a.12xlarge, c7a.8xlarge
 large     c7a.24xlarge, c7i.24xlarge, m7a.24xlarge, m7i.24xlarge, r7a.24xlarge, c7a.16xlarge, c7a.12xlarge
 beast     c7a.48xlarge, c7i.48xlarge, m7a.48xlarge, m7i.48xlarge, r7a.48xlarge, c7a.32xlarge, ...
 
 Windows
+tiny      m7a.large, m7i.large, t3.large
+small     c7a.2xlarge, c7i.2xlarge, m7a.xlarge, m7i.xlarge, t3.xlarge
 standard  m7i.large, m7a.large, t3.large
 fast      m7i.xlarge, m7a.xlarge, t3.xlarge
 large     m7i.2xlarge, m7a.2xlarge, t3.2xlarge
 beast     m7i.4xlarge, m7a.4xlarge, m7i.2xlarge
 
 Windows WSL2
+tiny      m8i.large, m8i-flex.large, c8i.xlarge, r8i.large
+small     c8i.2xlarge, m8i.xlarge, m8i-flex.xlarge, r8i.large, c8i.xlarge
 standard  m8i.large, m8i-flex.large, c8i.large, r8i.large
 fast      m8i.xlarge, m8i-flex.xlarge, c8i.xlarge, r8i.xlarge
 large     m8i.2xlarge, m8i-flex.2xlarge, c8i.2xlarge, r8i.2xlarge

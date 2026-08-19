@@ -227,6 +227,8 @@ func applyDefaults(cfg *core.Config) {
 
 func instanceTypeForClass(class string) string {
 	switch strings.ToLower(strings.TrimSpace(class)) {
+	case "tiny", "small":
+		return "tdx.small"
 	case "", "standard":
 		return "tdx.small"
 	case "fast":

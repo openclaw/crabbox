@@ -7712,6 +7712,8 @@ func TestConfigServerTypeHelperBranches(t *testing.T) {
 		class string
 		want  string
 	}{
+		{class: "tiny", want: "S"},
+		{class: "small", want: "S"},
 		{class: "standard", want: "S"},
 		{class: "fast", want: "M"},
 		{class: "beast", want: "XL"},

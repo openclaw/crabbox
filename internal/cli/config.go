@@ -10133,6 +10133,8 @@ func namespaceDevboxSizeForConfig(cfg Config) string {
 
 func namespaceDevboxSizeForClass(class string) string {
 	switch strings.ToLower(strings.TrimSpace(class)) {
+	case "tiny", "small":
+		return "S"
 	case "standard":
 		return "S"
 	case "fast":
@@ -10173,7 +10175,7 @@ func NormalizeCloudflareContainerInstanceType(value string) (string, bool) {
 
 func cloudflareContainerInstanceTypeForClass(class string) string {
 	switch strings.ToLower(strings.TrimSpace(class)) {
-	case "", "standard", "fast", "large", "beast":
+	case "", "tiny", "small", "standard", "fast", "large", "beast":
 		return "standard-4"
 	default:
 		if instanceType, ok := normalizeCloudflareContainerInstanceType(class); ok {
@@ -10189,6 +10191,10 @@ func CloudflareContainerInstanceTypeForClass(class string) string {
 
 func serverTypeCandidatesForClass(class string) []string {
 	switch class {
+	case "tiny":
+		return []string{"ccx13", "cpx22", "cx23"}
+	case "small":
+		return []string{"ccx23", "cpx32", "cx33"}
 	case "standard":
 		return []string{"ccx33", "cpx62", "cx53"}
 	case "fast":
@@ -10221,6 +10227,10 @@ func awsInstanceTypeCandidatesForTargetModeArchitectureClass(target, windowsMode
 	case targetWindows:
 		if windowsMode == windowsModeWSL2 {
 			switch class {
+			case "tiny":
+				return []string{"m8i.large", "m8i-flex.large", "c8i.xlarge", "r8i.large"}
+			case "small":
+				return []string{"c8i.2xlarge", "m8i.xlarge", "m8i-flex.xlarge", "r8i.large", "c8i.xlarge"}
 			case "standard":
 				return []string{"m8i.large", "m8i-flex.large", "c8i.large", "r8i.large"}
 			case "fast":
@@ -10234,6 +10244,10 @@ func awsInstanceTypeCandidatesForTargetModeArchitectureClass(target, windowsMode
 			}
 		}
 		switch class {
+		case "tiny":
+			return []string{"m7a.large", "m7i.large", "t3.large"}
+		case "small":
+			return []string{"c7a.2xlarge", "c7i.2xlarge", "m7a.xlarge", "m7i.xlarge", "t3.xlarge"}
 		case "standard":
 			return []string{"m7i.large", "m7a.large", "t3.large"}
 		case "fast":
@@ -10273,6 +10287,10 @@ func awsInstanceTypeCandidatesForArchitectureClass(architecture, class string) [
 		return awsARM64InstanceTypeCandidatesForClass(class)
 	}
 	switch class {
+	case "tiny":
+		return []string{"m7a.large", "m7i.large", "c7a.xlarge", "c7i.xlarge"}
+	case "small":
+		return []string{"c7a.2xlarge", "c7i.2xlarge", "m7a.xlarge", "m7i.xlarge", "c7a.xlarge"}
 	case "standard":
 		return []string{"c7a.8xlarge", "c7i.8xlarge", "m7a.8xlarge", "m7i.8xlarge", "c7a.4xlarge"}
 	case "fast":
@@ -10288,6 +10306,10 @@ func awsInstanceTypeCandidatesForArchitectureClass(architecture, class string) [
 
 func awsARM64InstanceTypeCandidatesForClass(class string) []string {
 	switch class {
+	case "tiny":
+		return []string{"m7g.large", "c7g.xlarge", "r7g.large"}
+	case "small":
+		return []string{"c7g.2xlarge", "m7g.xlarge", "r7g.large", "c7g.xlarge"}
 	case "standard":
 		return []string{"c7g.8xlarge", "m7g.8xlarge", "r7g.8xlarge", "c7g.4xlarge"}
 	case "fast":

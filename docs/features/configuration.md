@@ -104,7 +104,7 @@ windows:
   mode: normal           # normal | wsl2 when target=windows
 
 profile: project-check
-class: beast             # standard | fast | large | beast
+class: beast             # tiny | small | standard | fast | large | beast
 serverType: c7a.48xlarge # explicit provider type; overrides class fallback
 network: auto            # auto | tailscale | public
 hostId: h-0123456789abcdef0 # brokered use requires admin authentication
@@ -1122,6 +1122,8 @@ the list when the first candidate cannot be provisioned.
 
 | Class | Intent |
 |:------|:-------|
+| `tiny` | smoke checks and minimal repositories |
+| `small` | small repositories and light CI lanes |
 | `standard` | typical CI lane |
 | `fast` | ~2x more cores than standard for parallel-friendly suites |
 | `large` | memory-heavy or many-process workloads |

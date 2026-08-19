@@ -155,6 +155,8 @@ predefined Cloudflare instance type. Crabbox maps every generic class to
 default Linux classes on other providers.
 
 ```text
+--class tiny      standard-4
+--class small     standard-4
 --class standard  standard-4
 --class fast      standard-4
 --class large     standard-4

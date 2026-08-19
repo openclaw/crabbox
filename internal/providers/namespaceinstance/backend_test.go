@@ -175,6 +175,8 @@ func TestMachineTypeForClass(t *testing.T) {
 		class string
 		want  string
 	}{
+		{"tiny", "1x2"},
+		{"small", "2x4"},
 		{"standard", "4x8"},
 		{"fast", "8x16"},
 		{"large", "16x32"},

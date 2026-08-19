@@ -4381,6 +4381,8 @@ func TestCloudflareContainerInstanceTypeMapping(t *testing.T) {
 		want  string
 	}{
 		{class: "", want: "standard-4"},
+		{class: "tiny", want: "standard-4"},
+		{class: "small", want: "standard-4"},
 		{class: "standard", want: "standard-4"},
 		{class: "fast", want: "standard-4"},
 		{class: "large", want: "standard-4"},
@@ -4465,13 +4467,19 @@ func TestAWSInstanceTypeCandidatesForTargetsAndModes(t *testing.T) {
 		want        []string
 	}{
 		{name: "macos", target: targetMacOS, class: "beast", want: awsMacOSInstanceTypeCandidates()},
+		{name: "windows normal tiny", target: targetWindows, class: "tiny", want: []string{"m7a.large", "m7i.large", "t3.large"}},
+		{name: "windows normal small", target: targetWindows, class: "small", want: []string{"c7a.2xlarge", "c7i.2xlarge", "m7a.xlarge", "m7i.xlarge", "t3.xlarge"}},
 		{name: "windows normal standard", target: targetWindows, class: "standard", want: []string{"m7i.large", "m7a.large", "t3.large"}},
 		{name: "windows normal custom", target: targetWindows, class: "m7i.8xlarge", want: []string{"m7i.8xlarge"}},
+		{name: "windows wsl2 tiny", target: targetWindows, windowsMode: windowsModeWSL2, class: "tiny", want: []string{"m8i.large", "m8i-flex.large", "c8i.xlarge", "r8i.large"}},
+		{name: "windows wsl2 small", target: targetWindows, windowsMode: windowsModeWSL2, class: "small", want: []string{"c8i.2xlarge", "m8i.xlarge", "m8i-flex.xlarge", "r8i.large", "c8i.xlarge"}},
 		{name: "windows wsl2 standard", target: targetWindows, windowsMode: windowsModeWSL2, class: "standard", want: []string{"m8i.large", "m8i-flex.large", "c8i.large", "r8i.large"}},
 		{name: "windows wsl2 fast", target: targetWindows, windowsMode: windowsModeWSL2, class: "fast", want: []string{"m8i.xlarge", "m8i-flex.xlarge", "c8i.xlarge", "r8i.xlarge"}},
 		{name: "windows wsl2 large", target: targetWindows, windowsMode: windowsModeWSL2, class: "large", want: []string{"m8i.2xlarge", "m8i-flex.2xlarge", "c8i.2xlarge", "r8i.2xlarge"}},
 		{name: "windows wsl2 beast", target: targetWindows, windowsMode: windowsModeWSL2, class: "beast", want: []string{"m8i.4xlarge", "m8i-flex.4xlarge", "c8i.4xlarge", "r8i.4xlarge", "m8i.2xlarge"}},
 		{name: "windows wsl2 custom", target: targetWindows, windowsMode: windowsModeWSL2, class: "m8i.8xlarge", want: []string{"m8i.8xlarge"}},
+		{name: "linux tiny", target: targetLinux, class: "tiny", want: []string{"m7a.large", "m7i.large", "c7a.xlarge", "c7i.xlarge"}},
+		{name: "linux small", target: targetLinux, class: "small", want: []string{"c7a.2xlarge", "c7i.2xlarge", "m7a.xlarge", "m7i.xlarge", "c7a.xlarge"}},
 		{name: "linux large", target: targetLinux, class: "large", want: []string{"c7a.24xlarge", "c7i.24xlarge", "m7a.24xlarge", "m7i.24xlarge", "r7a.24xlarge", "c7a.16xlarge", "c7a.12xlarge"}},
 	}
 	for _, tt := range tests {
@@ -4488,10 +4496,32 @@ func TestAWSInstanceTypeCandidatesForTargetsAndModes(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("target class candidates=%v want %v", got, want)
 	}
-	got = awsInstanceTypeCandidatesForTargetModeArchitectureClass(targetLinux, windowsModeNormal, ArchitectureARM64, "fast")
-	want = []string{"c7g.16xlarge", "m7g.16xlarge", "r7g.16xlarge", "c7g.12xlarge", "c7g.8xlarge"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("arm target class candidates=%v want %v", got, want)
+	for _, tt := range []struct {
+		class string
+		want  []string
+	}{
+		{class: "tiny", want: []string{"m7g.large", "c7g.xlarge", "r7g.large"}},
+		{class: "small", want: []string{"c7g.2xlarge", "m7g.xlarge", "r7g.large", "c7g.xlarge"}},
+		{class: "fast", want: []string{"c7g.16xlarge", "m7g.16xlarge", "r7g.16xlarge", "c7g.12xlarge", "c7g.8xlarge"}},
+	} {
+		got = awsInstanceTypeCandidatesForTargetModeArchitectureClass(targetLinux, windowsModeNormal, ArchitectureARM64, tt.class)
+		if !reflect.DeepEqual(got, tt.want) {
+			t.Fatalf("arm target class=%q candidates=%v want %v", tt.class, got, tt.want)
+		}
+	}
+}
+
+func TestHetznerServerTypeCandidatesForSmallClasses(t *testing.T) {
+	for _, tt := range []struct {
+		class string
+		want  []string
+	}{
+		{class: "tiny", want: []string{"ccx13", "cpx22", "cx23"}},
+		{class: "small", want: []string{"ccx23", "cpx32", "cx33"}},
+	} {
+		if got := serverTypeCandidatesForClass(tt.class); !reflect.DeepEqual(got, tt.want) {
+			t.Fatalf("class=%q candidates=%v want %v", tt.class, got, tt.want)
+		}
 	}
 }
 

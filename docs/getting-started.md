@@ -153,7 +153,7 @@ The generated `.crabbox.yaml` ships sensible defaults. Adjust the parts that
 matter for your repo:
 
 - `profile`: a name for this lane (the template uses `<repo>-check`);
-- `class`: `standard`, `fast`, `large`, or `beast` (the template uses `beast`);
+- `class`: `tiny`, `small`, `standard`, `fast`, `large`, or `beast` (the template uses `beast`);
 - `sync.exclude`: directories that should never be sent to the runner;
 - `sync.include`: an optional root-relative whitelist — when set, **only** these
   paths are synced (after excludes), so you can ship a few paths out of a large

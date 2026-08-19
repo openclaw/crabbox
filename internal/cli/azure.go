@@ -302,6 +302,10 @@ func azureVMSizeCandidatesForArchitectureClass(architecture, class string) []str
 		return azureARM64VMSizeCandidatesForClass(class)
 	}
 	switch class {
+	case "tiny":
+		return []string{"Standard_D2ads_v6", "Standard_D2ds_v6", "Standard_D2ads_v5", "Standard_D2ds_v5", "Standard_F2s_v2"}
+	case "small":
+		return []string{"Standard_D8ads_v6", "Standard_D8ds_v6", "Standard_F8s_v2", "Standard_D8ads_v5", "Standard_D8ds_v5", "Standard_D4ads_v6", "Standard_D4ds_v6", "Standard_F4s_v2"}
 	case "standard":
 		return []string{"Standard_D32ads_v6", "Standard_D32ds_v6", "Standard_F32s_v2", "Standard_D32ads_v5", "Standard_D32ds_v5", "Standard_D16ads_v6", "Standard_D16ds_v6", "Standard_F16s_v2"}
 	case "fast":
@@ -317,6 +321,10 @@ func azureVMSizeCandidatesForArchitectureClass(architecture, class string) []str
 
 func azureARM64VMSizeCandidatesForClass(class string) []string {
 	switch class {
+	case "tiny":
+		return []string{"Standard_D2pds_v6", "Standard_D2ps_v6"}
+	case "small":
+		return []string{"Standard_D8pds_v6", "Standard_D8ps_v6", "Standard_D4pds_v6", "Standard_D4ps_v6"}
 	case "standard":
 		return []string{"Standard_D32pds_v6", "Standard_D32ps_v6", "Standard_D16pds_v6", "Standard_D16ps_v6"}
 	case "fast":
@@ -337,6 +345,10 @@ func azureVMSizeIsARM64(vmSize string) bool {
 
 func azureWindowsVMSizeCandidatesForClass(class string) []string {
 	switch class {
+	case "tiny":
+		return []string{"Standard_D2ads_v6", "Standard_D2ds_v6", "Standard_D2ads_v5", "Standard_D2ds_v5", "Standard_D2as_v6"}
+	case "small":
+		return []string{"Standard_D8ads_v6", "Standard_D8ds_v6", "Standard_D8ads_v5", "Standard_D8ds_v5", "Standard_D8as_v6"}
 	case "standard":
 		return []string{"Standard_D2ads_v6", "Standard_D2ds_v6", "Standard_D2ads_v5", "Standard_D2ds_v5", "Standard_D2as_v6"}
 	case "fast":

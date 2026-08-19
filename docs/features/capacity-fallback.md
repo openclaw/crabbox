@@ -26,13 +26,15 @@ resource.
 Class names are provider-neutral intent labels:
 
 ```text
+tiny      smoke checks and minimal repositories
+small     small repositories and light CI lanes
 standard  typical CI lane
 fast      more cores for parallel-friendly suites
 large     memory-heavy or many-process workloads
 beast     maximum capacity within the provider's family
 ```
 
-Each provider maps the four class names to an ordered list of concrete
+Each provider maps the six class names to an ordered list of concrete
 instance types. That list *is* the fallback chain: try the first; if it is
 rejected, try the next; and so on until one succeeds or the chain is exhausted.
 

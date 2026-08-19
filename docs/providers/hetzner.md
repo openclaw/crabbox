@@ -135,6 +135,8 @@ Classes expand to an ordered list of Hetzner server types; provisioning tries
 each in turn until one has capacity:
 
 ```text
+tiny      ccx13, cpx22, cx23
+small     ccx23, cpx32, cx33
 standard  ccx33, cpx62, cx53
 fast      ccx43, cpx62, cx53
 large     ccx53, ccx43, cpx62, cx53

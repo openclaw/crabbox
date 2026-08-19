@@ -73,8 +73,9 @@ phala:
   attest: true   # verify Intel TDX attestation before trusting the CVM (default)
 ```
 
-Class defaults are `standard=tdx.small`, `fast=tdx.medium`, `large=tdx.large`,
-and `beast=tdx.xlarge`. Use `--type` or `--phala-instance-type` for an exact
+Class defaults are `tiny=tdx.small`, `small=tdx.small`, `standard=tdx.small`,
+`fast=tdx.medium`, `large=tdx.large`, and `beast=tdx.xlarge`. Use `--type` or
+`--phala-instance-type` for an exact
 Phala instance shape.
 
 Provider flags:

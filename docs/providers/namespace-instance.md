@@ -48,8 +48,9 @@ namespaceInstance:
   bare: true
 ```
 
-Class defaults are `standard=4x8`, `fast=8x16`, `large=16x32`, and
-`beast=32x64`. Use `--type` or `--namespace-instance-machine-type` for an exact
+Class defaults are `tiny=1x2`, `small=2x4`, `standard=4x8`, `fast=8x16`,
+`large=16x32`, and `beast=32x64`. Use `--type` or
+`--namespace-instance-machine-type` for an exact
 Namespace `CPUxMemoryGB` shape.
 
 Provider flags:

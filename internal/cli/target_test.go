@@ -116,7 +116,10 @@ func TestValidateProviderTargetRejectsAWSWSL2ExactTypeWithoutNestedVirtualizatio
 	cfg.ServerTypeExplicit = true
 
 	err := validateProviderTarget(cfg)
-	if err == nil || !strings.Contains(err.Error(), "nested virtualization") || !strings.Contains(err.Error(), "m8i.4xlarge") {
+	if err == nil ||
+		!strings.Contains(err.Error(), "nested virtualization") ||
+		!strings.Contains(err.Error(), "m8i.4xlarge") ||
+		!strings.Contains(err.Error(), "class=tiny|small|standard|fast|large|beast") {
 		t.Fatalf("err=%v", err)
 	}
 }

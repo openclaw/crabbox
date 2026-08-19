@@ -240,6 +240,8 @@ until the required service-principal secrets are present.
 Default Linux SKU candidates (first that provisions wins):
 
 ```text
+tiny      Standard_D2ads_v6, Standard_D2ds_v6, Standard_D2ads_v5, Standard_D2ds_v5, Standard_F2s_v2
+small     Standard_D8ads_v6, Standard_D8ds_v6, Standard_F8s_v2, Standard_D8ads_v5, Standard_D8ds_v5, then D/F 4-vCPU fallbacks
 standard  Standard_D32ads_v6, Standard_D32ds_v6, Standard_F32s_v2, Standard_D32ads_v5, Standard_D32ds_v5, then D/F 16-vCPU fallbacks
 fast      Standard_D64ads_v6, Standard_D64ds_v6, Standard_F64s_v2, Standard_D64ads_v5, Standard_D64ds_v5, then D/F 48-vCPU and 32-vCPU fallbacks
 large     Standard_D96ads_v6, Standard_D96ds_v6, Standard_D96ads_v5, Standard_D96ds_v5, then D/F 64-vCPU and 48-vCPU fallbacks
@@ -249,6 +251,8 @@ beast     Standard_D192ds_v6, Standard_D128ds_v6, then D/F 96-vCPU and 64-vCPU f
 Default native Windows and WSL2 SKU candidates:
 
 ```text
+tiny      Standard_D2ads_v6, Standard_D2ds_v6, Standard_D2ads_v5, Standard_D2ds_v5, then Standard_D2as_v6
+small     Standard_D8ads_v6, Standard_D8ds_v6, Standard_D8ads_v5, Standard_D8ds_v5, then Standard_D8as_v6
 standard  Standard_D2ads_v6, Standard_D2ds_v6, Standard_D2ads_v5, Standard_D2ds_v5, then Standard_D2as_v6
 fast      Standard_D4ads_v6, Standard_D4ds_v6, Standard_D4ads_v5, Standard_D4ds_v5, then Standard_D4as_v6
 large     Standard_D8ads_v6, Standard_D8ds_v6, Standard_D8ads_v5, Standard_D8ds_v5, then Standard_D8as_v6

@@ -139,6 +139,8 @@ derives it from `--class`:
 
 | Class      | Size |
 | ---------- | ---- |
+| `tiny`     | `S`  |
+| `small`    | `S`  |
 | `standard` | `S`  |
 | `fast`     | `M`  |
 | `large`    | `L`  |

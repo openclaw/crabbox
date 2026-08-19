@@ -94,6 +94,8 @@ Linux the classes resolve to (first candidate shown):
 
 | Class | First candidate | vCPUs |
 | --- | --- | --- |
+| `tiny` | `m7a.large` | 2 |
+| `small` | `c7a.2xlarge` | 8 |
 | `standard` | `c7a.8xlarge` | 32 |
 | `fast` | `c7a.16xlarge` | 64 |
 | `large` | `c7a.24xlarge` | 96 |
