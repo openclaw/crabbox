@@ -189,6 +189,10 @@ func TestAcquireCreatesIsolatedMachine(t *testing.T) {
 			writeTestHostKeyPin(t, b.knownHostsPath, name+".boxd.sh", "12345")
 			return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"name":%q,"status":"running","url":"%s.boxd.sh","source":"standalone","sharing":"private"}]`, name, name)}, nil
 		},
+		func(args []string) (core.LocalCommandResult, error) { // post-endpoint identity verify
+			name := args[2]
+			return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"name":%q,"id":"vm-1234","status":"running","url":"%s.boxd.sh"}`, name, name)}, nil
+		},
 	}
 	b = testBackend(t, runner)
 	restore := waitForBoxdSSHReady
@@ -516,6 +520,80 @@ func TestReleaseStopModeStopsAndRetainsClaim(t *testing.T) {
 	claim, okClaim := claims[leaseID]
 	if !okClaim || claim.Labels["state"] != "stopped" {
 		t.Fatalf("claim after stop-release=%v", claims)
+	}
+}
+
+// TestAcquireRefusesEndpointSwap pins the identity-handoff fence: a
+// replacement racing into the name while the SSH endpoint is resolved (a
+// name-based read) is detected by the post-resolution id revalidation, and
+// the replacement is never destroyed by the rollback.
+func TestAcquireRefusesEndpointSwap(t *testing.T) {
+	var b *backend
+	runner := &scriptedRunner{}
+	runner.scripts = []func([]string) (core.LocalCommandResult, error){
+		ok(`[]`),
+		func(args []string) (core.LocalCommandResult, error) { // machine new
+			name := args[2]
+			return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"name":%q,"id":"vm-OURS","url":"%s.boxd.sh"}`, name, name)}, nil
+		},
+		func(args []string) (core.LocalCommandResult, error) { // readiness: ours
+			name := args[2]
+			return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"name":%q,"id":"vm-OURS","status":"running","url":"%s.boxd.sh"}`, name, name)}, nil
+		},
+		func([]string) (core.LocalCommandResult, error) { // ssh sync
+			name := runner.calls[1].args[2]
+			writeTestSSHEntry(t, b.sshConfigPath, name+".boxd.sh", "12345")
+			writeTestHostKeyPin(t, b.knownHostsPath, name+".boxd.sh", "12345")
+			return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"name":%q,"status":"running","url":"%s.boxd.sh","source":"standalone","sharing":"private"}]`, name, name)}, nil
+		},
+		func(args []string) (core.LocalCommandResult, error) { // post-endpoint verify: REPLACED
+			name := args[2]
+			return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"name":%q,"id":"vm-REPLACEMENT","status":"running","url":"%s.boxd.sh"}`, name, name)}, nil
+		},
+		func(args []string) (core.LocalCommandResult, error) { // rollback identity check: still replaced
+			name := args[2]
+			return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"name":%q,"id":"vm-REPLACEMENT","status":"running","url":"%s.boxd.sh"}`, name, name)}, nil
+		},
+	}
+	b = testBackend(t, runner)
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{})
+	if err == nil || !strings.Contains(err.Error(), "was replaced during ssh endpoint resolution") {
+		t.Fatalf("endpoint swap must be refused, err=%v", err)
+	}
+	for _, c := range runner.calls {
+		if len(c.args) > 1 && (c.args[1] == "remove" || c.args[1] == "stop") {
+			t.Fatalf("replacement machine was touched: %v", runner.calls)
+		}
+	}
+	if claims, _ := boxdClaims(b.configForRun()); len(claims) != 0 {
+		t.Fatalf("claim persisted for a swapped endpoint: %v", claims)
+	}
+}
+
+// TestResolveRefusesReadinessSwap pins that a replacement appearing during the
+// readiness wait (a name-based read whose id previously went unchecked) is
+// refused before any SSH target is returned.
+func TestResolveRefusesReadinessSwap(t *testing.T) {
+	name := "crabbox-cbx-aaaabbbbcccc"
+	leaseID := "cbx_aaaabbbbcccc"
+	runner := &scriptedRunner{scripts: []func([]string) (core.LocalCommandResult, error){
+		ok(fmt.Sprintf(`{"name":%q,"id":"vm-ORIGINAL","status":"starting","url":"%s.boxd.sh"}`, name, name)),   // initial gate: ours
+		ok(fmt.Sprintf(`{"name":%q,"id":"vm-REPLACEMENT","status":"running","url":"%s.boxd.sh"}`, name, name)), // readiness wait: swapped
+	}}
+	b := testBackend(t, runner)
+	cfg := b.configForRun()
+	server := core.Server{CloudID: "vm-ORIGINAL", Provider: providerName, Name: name, Labels: map[string]string{"machine": name, "lease": leaseID, "vm_id": "vm-ORIGINAL"}}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, "", cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	_, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID})
+	if err == nil || !strings.Contains(err.Error(), "replaced during the readiness wait") {
+		t.Fatalf("readiness swap must be refused, err=%v", err)
+	}
+	for _, c := range runner.calls {
+		if len(c.args) > 1 && (c.args[1] == "remove" || c.args[1] == "stop" || c.args[1] == "start") {
+			t.Fatalf("resolve mutated a machine across the swap: %v", runner.calls)
+		}
 	}
 }
 

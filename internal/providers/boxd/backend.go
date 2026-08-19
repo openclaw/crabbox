@@ -186,6 +186,14 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, rollback(err)
 	}
+	// Endpoint resolution reads state by reusable name: revalidate the
+	// immutable id afterwards so a replacement racing into the name in that
+	// interval never supplies the endpoint this lease connects to. (The
+	// id-verified rollback is safe on every failure shape here: a mismatch
+	// leaves the replacement untouched, not-found is a no-op.)
+	if err := b.verifyMachineID(ctx, cfg, name, created.ID, "ssh endpoint resolution"); err != nil {
+		return core.LeaseTarget{}, rollback(err)
+	}
 	if err := waitForBoxdSSHReady(ctx, &target, b.rt.Stderr, "boxd machine ssh", core.BootstrapWaitTimeout(cfg)); err != nil {
 		return core.LeaseTarget{}, rollback(err)
 	}
@@ -288,12 +296,24 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 			return core.LeaseTarget{}, err
 		}
 	}
-	if _, err := b.waitMachineReady(ctx, cfg, name); err != nil {
+	ready, err := b.waitMachineReady(ctx, cfg, name)
+	if err != nil {
 		return core.LeaseTarget{}, err
+	}
+	// The readiness wait reads by reusable name: require the ready machine to
+	// still carry the claimed id, so a replacement appearing after the first
+	// identity check cannot pass readiness and supply an SSH target.
+	if readyID := strings.TrimSpace(ready.ID); readyID == "" || readyID != boundID {
+		return core.LeaseTarget{}, core.Exit(4, "lease %s machine %s was replaced during the readiness wait (claimed vm_id=%s, current=%q); refusing to touch the replacement", req.ID, name, boundID, readyID)
 	}
 	zone := firstNonBlank(labels["zone"], zoneFromHost(summary.URL, name), defaultBoxdZone)
 	target, err := b.resolveSSHTarget(ctx, cfg, name, zone)
 	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	// Same revalidation after endpoint resolution as acquire: the ssh-config
+	// re-sync reads by name too.
+	if err := b.verifyMachineID(ctx, cfg, name, boundID, "ssh endpoint resolution"); err != nil {
 		return core.LeaseTarget{}, err
 	}
 	if !req.StatusOnly {
@@ -464,6 +484,24 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		}
 	}
 	core.RemoveLeaseClaim(leaseID)
+	return nil
+}
+
+// verifyMachineID re-reads the machine and requires its immutable id to still
+// match, closing identity-handoff windows after any read or side effect that
+// went through the reusable name.
+func (b *backend) verifyMachineID(ctx context.Context, cfg core.Config, name, wantID, phase string) error {
+	summary, found, err := b.getMachine(ctx, cfg, name)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return core.Exit(4, "boxd machine %s disappeared during %s", name, phase)
+	}
+	currentID := strings.TrimSpace(summary.ID)
+	if currentID != strings.TrimSpace(wantID) {
+		return core.Exit(4, "boxd machine %s was replaced during %s (expected vm_id=%s, current=%q); refusing to touch the replacement", name, phase, wantID, currentID)
+	}
 	return nil
 }
 
