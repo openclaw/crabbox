@@ -9,6 +9,8 @@ import (
 
 func TestClassSpecs(t *testing.T) {
 	want := []core.ClassSpec{
+		{Class: "tiny", Type: "m7a.large", VCPUs: 2, MemoryGB: 8},
+		{Class: "small", Type: "c7a.2xlarge", VCPUs: 8, MemoryGB: 16},
 		{Class: "standard", Type: "c7a.8xlarge", VCPUs: 32, MemoryGB: 64},
 		{Class: "fast", Type: "c7a.16xlarge", VCPUs: 64, MemoryGB: 128},
 		{Class: "large", Type: "c7a.24xlarge", VCPUs: 96, MemoryGB: 192},
