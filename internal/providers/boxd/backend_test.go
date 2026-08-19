@@ -402,6 +402,32 @@ func TestAcquireRefusesCreateWithoutMachineID(t *testing.T) {
 	}
 }
 
+// TestAcquireDestroysMisnamedCreateByID pins that a create returning a
+// DIFFERENT machine name never leaves that machine unmanaged: it is destroyed
+// by its immutable id (name-independent) and the lease is refused.
+func TestAcquireDestroysMisnamedCreateByID(t *testing.T) {
+	runner := &scriptedRunner{}
+	runner.scripts = []func([]string) (core.LocalCommandResult, error){
+		ok(`[]`),
+		func([]string) (core.LocalCommandResult, error) { // machine new: different name
+			return core.LocalCommandResult{Stdout: `{"name":"other-machine","id":"vm-MISNAMED","url":"other-machine.boxd.sh"}`}, nil
+		},
+		ok(`{"removed":true}`), // id-addressed destroy of the misnamed machine
+	}
+	b := testBackend(t, runner)
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{})
+	if err == nil || !strings.Contains(err.Error(), "different machine name") {
+		t.Fatalf("misnamed create must be refused, err=%v", err)
+	}
+	last := runner.calls[len(runner.calls)-1]
+	if last.args[1] != "remove" || last.args[2] != "vm-MISNAMED" {
+		t.Fatalf("misnamed machine must be destroyed by id, argv=%v", last.args)
+	}
+	if claims, _ := boxdClaims(b.configForRun()); len(claims) != 0 {
+		t.Fatalf("no claim should remain after a destroyed misnamed create: %v", claims)
+	}
+}
+
 // TestAcquireRefusesIdentityChangeWithoutTouchingReplacement pins that when
 // the ready machine's id differs from the created id (name raced to a
 // replacement), acquire fails WITHOUT destroying by name — the replacement is

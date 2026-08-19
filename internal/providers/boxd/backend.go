@@ -143,6 +143,35 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		return errors.Join(cause, fmt.Errorf("boxd machine %s identity could not be verified during rollback; retained a recovery claim — inspect and remove the machine via the boxd CLI, then `crabbox cleanup` reaps the claim", name))
 	}
 
+	// The create must come back under the REQUESTED name: every later step
+	// (polling, ssh-config lookup, rollback, the claim) targets that name, so
+	// a machine created under any other name would end up live, billing, and
+	// unmanaged. Destroy it by its immutable id (name-independent); with no
+	// id, retain a recovery claim under the RETURNED name so cleanup and the
+	// operator can still find it.
+	if returned := strings.TrimSpace(created.Name); returned != name {
+		cause := core.Exit(5, "boxd machine new %s returned a different machine name %q; refusing the lease", name, returned)
+		if req.Keep {
+			if claimErr := b.persistRecoveryClaim(cfg, leaseID, slug, returned, created.ID, labels, req); claimErr != nil {
+				return core.LeaseTarget{}, errors.Join(cause, fmt.Errorf("persist kept boxd machine claim: %w", claimErr))
+			}
+			return core.LeaseTarget{}, cause
+		}
+		if id := strings.TrimSpace(created.ID); id != "" {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), b.rollbackTimeout)
+			defer cancel()
+			if destroyErr := b.destroyMachine(cleanupCtx, cfg, id); destroyErr != nil {
+				claimErr := b.persistRecoveryClaim(cfg, leaseID, slug, returned, id, labels, req)
+				return core.LeaseTarget{}, errors.Join(cause, fmt.Errorf("destroy misnamed boxd machine %s (id %s): %w", returned, id, destroyErr), claimErr)
+			}
+			return core.LeaseTarget{}, cause
+		}
+		if claimErr := b.persistRecoveryClaim(cfg, leaseID, slug, returned, "", labels, req); claimErr != nil {
+			return core.LeaseTarget{}, errors.Join(cause, fmt.Errorf("persist boxd misnamed-create recovery claim: %w", claimErr))
+		}
+		return core.LeaseTarget{}, errors.Join(cause, fmt.Errorf("machine %s has no id to destroy by; retained a recovery claim — inspect and remove it via the boxd CLI", returned))
+	}
+
 	// The machine id is the anchor of the replacement fence (boxd retains
 	// destroyed names for reuse): a claim persisted without a verified id
 	// would leave that lease with no protection against later name reuse.
