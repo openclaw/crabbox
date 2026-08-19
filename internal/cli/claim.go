@@ -75,6 +75,7 @@ type FixedCreateIntent struct {
 }
 
 const FixedAWSClaimProvider = "aws-fixed-v1"
+const FixedMachine0ClaimProvider = "machine0-fixed-v1"
 
 const maxLocalClaimInventoryFileBytes int64 = 1 * 1024 * 1024
 
@@ -1274,6 +1275,8 @@ func canonicalClaimProvider(provider string) string {
 	switch strings.TrimSpace(provider) {
 	case FixedAWSClaimProvider:
 		return "aws"
+	case FixedMachine0ClaimProvider:
+		return "machine0"
 	case "exec-provider":
 		return "external"
 	}

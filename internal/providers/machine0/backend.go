@@ -87,6 +87,8 @@ func applyDefaults(cfg *Config) {
 
 func (b *backend) Spec() ProviderSpec { return b.spec }
 
+func (b *backend) SupportsRequestedLeaseID() bool { return true }
+
 func (b *backend) now() time.Time {
 	if b.rt.Clock != nil {
 		return b.rt.Clock.Now().UTC()
@@ -123,6 +125,9 @@ func machine0SSHUser(item machine) string {
 }
 
 func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
+	if strings.TrimSpace(req.RequestedLeaseID) != "" {
+		return b.acquireFixed(ctx, req)
+	}
 	cfg := b.configForRun()
 	if err := b.validateCatalogSelection(ctx, cfg.Machine0.Size, cfg.Machine0.Region); err != nil {
 		return LeaseTarget{}, err
@@ -302,7 +307,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 	if normalizeReleasePolicy(b.configForRun().Machine0.ReleasePolicy) == "suspend" {
 		return b.suspendClaimedMachine(ctx, claim, item)
 	}
-	return removeClaimAfter(claim.LeaseID, claim, func() error { return b.api.Remove(ctx, item.Name) })
+	return finalizeMachine0ClaimAfterCleanup(claim, func() error { return b.api.Remove(ctx, item.Name) })
 }
 
 func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
@@ -345,7 +350,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			if err := b.suspendClaimedMachine(ctx, claim, item); err != nil {
 				return err
 			}
-		} else if err := removeClaimAfter(claim.LeaseID, claim, func() error { return b.api.Remove(ctx, item.Name) }); err != nil {
+		} else if err := finalizeMachine0ClaimAfterCleanup(claim, func() error { return b.api.Remove(ctx, item.Name) }); err != nil {
 			return err
 		}
 		removed++
@@ -353,6 +358,9 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	claimsRemoved := 0
 	for _, claim := range claims {
 		if claim.LeaseID == "" || liveClaims[claim.LeaseID] {
+			continue
+		}
+		if isFixedMachine0Claim(claim) && claim.FixedCreateIntent.State == fixedMachine0IntentReleased {
 			continue
 		}
 		if claim.CloudID == "" || claim.ProviderScope != machineScope(claim.CloudID) {
@@ -363,7 +371,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s reason=missing machine\n", claim.LeaseID)
 			continue
 		}
-		if err := removeClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+		if err := finalizeMachine0ClaimAfterCleanup(claim, nil); err != nil {
 			return err
 		}
 		claimsRemoved++
@@ -374,8 +382,13 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	return nil
 }
 
-func (b *backend) RetainLeaseClaimAfterRelease(LeaseTarget) bool {
-	return normalizeReleasePolicy(b.configForRun().Machine0.ReleasePolicy) == "suspend"
+func (b *backend) RetainLeaseClaimAfterRelease(lease LeaseTarget) bool {
+	retained, err := b.retainLeaseClaimAfterRelease(lease, LeaseClaim{})
+	return retained || err != nil
+}
+
+func (b *backend) RetainLeaseClaimAfterReleaseWithClaim(lease LeaseTarget, previous LeaseClaim) (bool, error) {
+	return b.retainLeaseClaimAfterRelease(lease, previous)
 }
 
 func (b *backend) ReleaseLeaseMessage(lease LeaseTarget) string {
@@ -777,12 +790,14 @@ func machine0Claims() (map[string]LeaseClaim, error) {
 	}
 	out := map[string]LeaseClaim{}
 	for _, claim := range claims {
-		if claim.Provider != providerName {
+		if !isMachine0ClaimProvider(claim.Provider) {
 			continue
 		}
 		id := firstNonBlank(claim.CloudID, claim.Labels["machine0_id"])
 		if id != "" {
 			out[id] = claim
+		} else if isFixedMachine0Claim(claim) && claim.ProviderScope != "" {
+			out[claim.ProviderScope] = claim
 		}
 	}
 	return out, nil

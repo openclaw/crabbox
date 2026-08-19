@@ -19,8 +19,11 @@ import (
 
 type fakeAPI struct {
 	machine                machine
+	machines               []machine
 	getSequence            []machine
 	getFn                  func(context.Context, string) (machine, error)
+	createFn               func(context.Context, createMachineRequest) error
+	createErr              error
 	sizes                  []machineSize
 	created                []createMachineRequest
 	stopped                []string
@@ -45,7 +48,11 @@ type fakeAPI struct {
 }
 
 func (f *fakeAPI) Version(context.Context) (string, error) { return "machine0 1.0.155", nil }
+
 func (f *fakeAPI) List(context.Context) ([]machine, error) {
+	if f.machines != nil {
+		return append([]machine(nil), f.machines...), nil
+	}
 	if f.machine.ID == "" {
 		return nil, nil
 	}
@@ -63,12 +70,15 @@ func (f *fakeAPI) Get(ctx context.Context, name string) (machine, error) {
 	}
 	return f.machine, nil
 }
-func (f *fakeAPI) Create(_ context.Context, req createMachineRequest) error {
+func (f *fakeAPI) Create(ctx context.Context, req createMachineRequest) error {
 	f.created = append(f.created, req)
 	for index := range f.getSequence {
 		f.getSequence[index].Name = req.Name
 	}
-	return nil
+	if f.createFn != nil {
+		return f.createFn(ctx, req)
+	}
+	return f.createErr
 }
 func (f *fakeAPI) Start(_ context.Context, name string) error {
 	f.started = append(f.started, name)
@@ -86,6 +96,12 @@ func (f *fakeAPI) Stop(_ context.Context, name string) error {
 func (f *fakeAPI) Suspend(_ context.Context, name string) error {
 	f.suspended = append(f.suspended, name)
 	f.machine.Status, f.machine.IP = "SUSPENDED", ""
+	for index := range f.machines {
+		if f.machines[index].Name == name {
+			f.machines[index].Status = "SUSPENDED"
+			f.machines[index].IP = ""
+		}
+	}
 	return nil
 }
 func (f *fakeAPI) Remove(_ context.Context, name string) error {

@@ -50,6 +50,12 @@ func TestFixedAWSClaimProviderCanonicalizesWithoutOverwritingMarker(t *testing.T
 	}
 }
 
+func TestFixedMachine0ClaimProviderCanonicalizes(t *testing.T) {
+	if got := canonicalClaimProvider(FixedMachine0ClaimProvider); got != "machine0" {
+		t.Fatalf("fixed Machine0 marker canonicalized to %q", got)
+	}
+}
+
 func TestClaimEndpointReservationDeadlineStartsAfterClaimLockAcquired(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	const leaseID = "cbx_reservation_lock"

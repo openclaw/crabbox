@@ -57,13 +57,19 @@ private token and generation never appear in public lease records. Fixed-ID
 to own replay, and caller cancellation never releases them.
 
 Automation may instead supply the canonical ID with `warmup --lease-id`. For
-direct AWS and managed coordinator leases, that ID is an immutable create
-identity: an identical semantic replay returns the same lease, while intent
-drift returns `lease_id_conflict`. The coordinator durably stores a versioned
-normalized request hash. Direct AWS durably stores the intent and current
-resolved EC2 attempt in the normal lease claim before `RunInstances`, then uses
-a deterministic regional/zonal client token. Neither path uses the slug to
-decide replay ownership.
+direct AWS, direct Machine0, and managed coordinator leases, that ID is an
+immutable create identity: an identical semantic replay returns the same lease,
+while intent drift returns `lease_id_conflict`. The coordinator durably stores
+a versioned normalized request hash. Direct AWS durably stores the intent and
+current resolved EC2 attempt in the normal lease claim before `RunInstances`,
+then uses a deterministic regional/zonal client token. Neither path uses the
+slug to decide replay ownership.
+
+Direct Machine0 binds the intent to its deterministic VM name before creation;
+the durable attempt binds the first visible match to its Machine0 resource ID,
+and every later adoption requires that exact recorded ID. Its fixed claims use
+the downgrade-safe `machine0-fixed-v1` marker alongside AWS's `aws-fixed-v1`
+marker.
 
 After the direct AWS launch attempt is durable, Crabbox never submits that
 attempt again. An ambiguous replay with no visible tagged instance fails closed;
@@ -73,10 +79,11 @@ match the persisted attempt exactly. Fixed AWS
 claims use the downgrade-safe local discriminator `aws-fixed-v1`; current
 clients map it to runtime AWS, while older clients skip/refuse it.
 
-Fixed IDs are single-use operation identities. Direct AWS keeps a compact
-terminal claim tombstone after successful release or exact missing-resource
-cleanup. Tombstones contain only the ID, slug, provider scope, versioned intent
-hash, timestamps, and terminal state; automatic AWS cleanup never prunes them.
+Fixed IDs are single-use operation identities. Direct AWS and Machine0 keep a
+compact terminal claim tombstone after successful destroy release or exact
+missing-resource cleanup. Tombstones contain only the ID, slug, provider scope,
+versioned intent hash, timestamps, and terminal state; automatic provider
+cleanup never prunes them.
 There is no time-based reuse window. Explicitly deleting local Crabbox claim
 state forfeits this replay protection, so automation must instead mint a new
 operation ID.

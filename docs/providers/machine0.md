@@ -159,6 +159,40 @@ Machine0 VM names are limited to 31 lowercase letters, digits, and hyphens.
 Crabbox truncates only the human slug portion and retains an eight-character
 lease hash, so long requested slugs remain deterministic and collision-safe.
 
+### Fixed-ID replay
+
+`warmup --lease-id cbx_<12 lowercase hex>` makes direct Machine0 acquisition
+idempotent across process restarts. Before `machine0 new`, Crabbox writes the
+normalized create intent and exact create request to the ordinary durable lease
+claim under its existing cross-process lock. The intent is bound to the
+deterministic VM name derived from the lease ID and allocated slug. The durable
+create attempt authorizes the first visible matching VM and records its exact
+Machine0 resource ID; every later adoption must match that ID. A matching name
+or slug alone never authorizes reuse.
+
+An ambiguous create remains pinned to its original name, size, region, image,
+image version, and key. Replay fails closed without another `machine0 new` call
+while that attempt has no visible machine, deliberately accepting a false
+negative if the process stopped after persisting the attempt but before sending
+the request. When `machine0 new` returns an error, the original invocation polls
+inventory for a bounded 60-second reconciliation window. A machine that appears
+is retained and adopted; a definite no-machine result clears the attempt so an
+ordinary capacity failure remains retryable.
+
+Once creation may have succeeded, later readiness or SSH failures never roll the
+VM back: the caller's fixed lease identity remains bound to it, and a matching
+replay can finish adoption. Repository binding is also durable; `--reclaim` is
+the explicit override for replay from a different repository. With
+`machine0.releasePolicy: suspend`, release keeps the live fixed claim and replay
+starts the exact suspended machine before refreshing its endpoint.
+
+Destroy release replaces the live claim with a compact terminal tombstone, so a
+fixed ID is single-use and automatic cleanup never makes it replayable. Fixed
+claims and tombstones use the downgrade-safe local discriminator
+`machine0-fixed-v1`: current clients map it to runtime provider `machine0`, while
+older clients see an unknown provider and skip or refuse destructive cleanup
+instead of erasing fixed identity state.
+
 Machine0 stop and suspend are intentionally distinct:
 
 - `machine0 stop` preserves the instance and IP and continues billing compute.
