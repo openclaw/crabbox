@@ -111,6 +111,11 @@ type ClassSpec struct {
 
 // ProviderClassSpecProvider reports provider-owned machine class resolutions
 // for the provider matrix.
+// MachineClassOrder lists every portable machine class from smallest to
+// largest. Providers iterate it so a new class reaches every ClassSpecs()
+// implementation at once instead of drifting per provider.
+var MachineClassOrder = []string{"tiny", "small", "standard", "fast", "large", "beast"}
+
 type ProviderClassSpecProvider interface {
 	ClassSpecs() []ClassSpec
 }

@@ -1431,3 +1431,40 @@ func mustProvider(t *testing.T, name string) core.Provider {
 	}
 	return provider
 }
+
+func TestClassSpecsReportCompleteShapesForEveryClass(t *testing.T) {
+	seen := 0
+	for _, providerName := range core.RegisteredProviderNames() {
+		provider, err := core.ProviderFor(providerName)
+		if err != nil {
+			t.Fatalf("ProviderFor(%q): %v", providerName, err)
+		}
+		specs, ok := provider.(core.ProviderClassSpecProvider)
+		if !ok {
+			continue
+		}
+		seen++
+		classes := specs.ClassSpecs()
+		if got, want := len(classes), len(core.MachineClassOrder); got != want {
+			t.Errorf("%s reports %d classes, want %d", providerName, got, want)
+			continue
+		}
+		for i, class := range classes {
+			if class.Class != core.MachineClassOrder[i] {
+				t.Errorf("%s class %d = %q, want %q", providerName, i, class.Class, core.MachineClassOrder[i])
+			}
+			if class.Type == "" {
+				t.Errorf("%s/%s has no type", providerName, class.Class)
+			}
+			// A class present in the type tables but absent from the provider's
+			// shape data would otherwise render with no CPU/RAM at all.
+			if class.VCPUs <= 0 || class.MemoryGB <= 0 {
+				t.Errorf("%s/%s (%s) reports incomplete shape vcpu=%d memoryGb=%d",
+					providerName, class.Class, class.Type, class.VCPUs, class.MemoryGB)
+			}
+		}
+	}
+	if seen == 0 {
+		t.Fatal("no providers implement ClassSpecs; test would be vacuous")
+	}
+}

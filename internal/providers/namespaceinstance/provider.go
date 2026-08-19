@@ -139,7 +139,7 @@ func (Provider) ServerTypeForClass(class string) string {
 }
 
 func (Provider) ClassSpecs() []core.ClassSpec {
-	classes := []string{"standard", "fast", "large", "beast"}
+	classes := core.MachineClassOrder
 	specs := make([]core.ClassSpec, 0, len(classes))
 	for _, class := range classes {
 		machineType := machineTypeForClass(class)

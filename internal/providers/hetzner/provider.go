@@ -22,6 +22,8 @@ var serverShapes = map[string]struct {
 	vcpus    int
 	memoryGB int
 }{
+	"ccx13": {vcpus: 2, memoryGB: 8},
+	"ccx23": {vcpus: 4, memoryGB: 16},
 	"ccx33": {vcpus: 8, memoryGB: 32},
 	"ccx43": {vcpus: 16, memoryGB: 64},
 	"ccx53": {vcpus: 32, memoryGB: 128},
@@ -99,7 +101,7 @@ func (Provider) ApplyFlags(*core.Config, *flag.FlagSet, any) error {
 }
 
 func (Provider) ClassSpecs() []core.ClassSpec {
-	classes := []string{"standard", "fast", "large", "beast"}
+	classes := core.MachineClassOrder
 	specs := make([]core.ClassSpec, 0, len(classes))
 	for _, class := range classes {
 		serverType := core.HetznerServerTypeCandidatesForClass(class)[0]
