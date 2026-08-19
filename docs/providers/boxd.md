@@ -20,8 +20,10 @@ does not store boxd API tokens in Crabbox config.
 
 ## Requirements
 
-- boxd CLI installed and on `PATH` (`curl -fsSL https://boxd.sh/downloads/install.sh | sh`),
-  or set `boxd.cli`.
+- boxd CLI installed and on `PATH`, or set `boxd.cli`. Follow the
+  installation instructions at [boxd.sh](https://boxd.sh); if you use the
+  vendor's installer script, download and review it before executing it.
+  `boxd version` confirms the install.
 - A boxd login (`boxd auth login`), or a long-lived API key in `BOXD_TOKEN`
   (`boxd auth keys create`).
 - Machine quota on the boxd account for at least one more machine.
