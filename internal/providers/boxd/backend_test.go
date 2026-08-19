@@ -266,6 +266,10 @@ func TestAcquireRollsBackOnTerminalMachine(t *testing.T) {
 			name := args[2]
 			return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"name":%q,"id":"vm-1","status":"failed","url":"%s.boxd.sh"}`, name, name)}, nil
 		},
+		func(args []string) (core.LocalCommandResult, error) { // rollback identity check
+			name := args[2]
+			return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"name":%q,"id":"vm-1","status":"failed","url":"%s.boxd.sh"}`, name, name)}, nil
+		},
 		ok(`{"removed":true}`), // machine remove (rollback)
 	}
 	b := testBackend(t, runner)
@@ -279,9 +283,77 @@ func TestAcquireRollsBackOnTerminalMachine(t *testing.T) {
 	}
 }
 
+// TestRollbackLeavesReplacementUntouched pins that the rollback destroy is
+// id-fenced: when the name already belongs to a machine with a different id,
+// rollback leaves it alone.
+func TestRollbackLeavesReplacementUntouched(t *testing.T) {
+	runner := &scriptedRunner{}
+	runner.scripts = []func([]string) (core.LocalCommandResult, error){
+		ok(`[]`),
+		func(args []string) (core.LocalCommandResult, error) {
+			name := args[2]
+			return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"name":%q,"id":"vm-OURS","url":"%s.boxd.sh"}`, name, name)}, nil
+		},
+		func(args []string) (core.LocalCommandResult, error) { // readiness: terminal
+			name := args[2]
+			return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"name":%q,"id":"vm-OURS","status":"failed","url":"%s.boxd.sh"}`, name, name)}, nil
+		},
+		func(args []string) (core.LocalCommandResult, error) { // rollback identity check: replaced
+			name := args[2]
+			return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"name":%q,"id":"vm-REPLACEMENT","status":"running","url":"%s.boxd.sh"}`, name, name)}, nil
+		},
+	}
+	b := testBackend(t, runner)
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{})
+	if err == nil || !strings.Contains(err.Error(), "terminal state") {
+		t.Fatalf("err=%v", err)
+	}
+	for _, c := range runner.calls {
+		if len(c.args) > 1 && c.args[1] == "remove" {
+			t.Fatalf("rollback destroyed a replacement machine: %v", runner.calls)
+		}
+	}
+}
+
+// TestAcquireRefusesBlankReadyID pins that a blank id on the ready read fails
+// closed: the lease is refused and the rollback (id-verified) removes the
+// machine this acquire created.
+func TestAcquireRefusesBlankReadyID(t *testing.T) {
+	runner := &scriptedRunner{}
+	runner.scripts = []func([]string) (core.LocalCommandResult, error){
+		ok(`[]`),
+		func(args []string) (core.LocalCommandResult, error) {
+			name := args[2]
+			return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"name":%q,"id":"vm-1","url":"%s.boxd.sh"}`, name, name)}, nil
+		},
+		func(args []string) (core.LocalCommandResult, error) { // readiness: blank id
+			name := args[2]
+			return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"name":%q,"status":"running","url":"%s.boxd.sh"}`, name, name)}, nil
+		},
+		func(args []string) (core.LocalCommandResult, error) { // rollback identity check: ours
+			name := args[2]
+			return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"name":%q,"id":"vm-1","status":"running","url":"%s.boxd.sh"}`, name, name)}, nil
+		},
+		ok(`{"removed":true}`), // rollback destroy
+	}
+	b := testBackend(t, runner)
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{})
+	if err == nil || !strings.Contains(err.Error(), "cannot verify the created machine's identity") {
+		t.Fatalf("blank ready id must be refused, err=%v", err)
+	}
+	last := runner.calls[len(runner.calls)-1]
+	if last.args[1] != "remove" {
+		t.Fatalf("verified rollback did not destroy our machine: %v", runner.calls)
+	}
+	if claims, _ := boxdClaims(b.configForRun()); len(claims) != 0 {
+		t.Fatalf("claim persisted despite unverified ready id: %v", claims)
+	}
+}
+
 // TestAcquireRefusesCreateWithoutMachineID pins that a claim is never
 // persisted without a verified machine id (the anchor of the replacement
-// fence) and that the id-less machine is rolled back, not leaked.
+// fence). With no id there is nothing to fence a destroy on, so the rollback
+// must NOT remove by reusable name — it retains a recovery claim instead.
 func TestAcquireRefusesCreateWithoutMachineID(t *testing.T) {
 	runner := &scriptedRunner{}
 	runner.scripts = []func([]string) (core.LocalCommandResult, error){
@@ -290,19 +362,25 @@ func TestAcquireRefusesCreateWithoutMachineID(t *testing.T) {
 			name := args[2]
 			return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"name":%q,"url":"%s.boxd.sh"}`, name, name)}, nil
 		},
-		ok(`{"removed":true}`), // rollback destroy
 	}
 	b := testBackend(t, runner)
 	_, err := b.Acquire(context.Background(), core.AcquireRequest{})
 	if err == nil || !strings.Contains(err.Error(), "did not include a machine id") {
 		t.Fatalf("id-less create must be refused, err=%v", err)
 	}
-	last := runner.calls[len(runner.calls)-1]
-	if last.args[1] != "remove" {
-		t.Fatalf("id-less machine was not rolled back: %v", runner.calls)
+	for _, c := range runner.calls {
+		if len(c.args) > 1 && (c.args[1] == "remove" || c.args[1] == "stop") {
+			t.Fatalf("id-less rollback must not destroy by name: %v", runner.calls)
+		}
 	}
-	if claims, _ := boxdClaims(b.configForRun()); len(claims) != 0 {
-		t.Fatalf("claim persisted without a verified id: %v", claims)
+	claims, _ := boxdClaims(b.configForRun())
+	if len(claims) != 1 {
+		t.Fatalf("id-less rollback must retain a recovery claim: %v", claims)
+	}
+	for _, claim := range claims {
+		if claim.Labels["recovery"] != "rollback-cleanup" {
+			t.Fatalf("recovery claim labels=%v", claim.Labels)
+		}
 	}
 }
 
@@ -403,7 +481,7 @@ func TestReleaseStopModeStopsAndRetainsClaim(t *testing.T) {
 	b.cfg.Boxd.DeleteOnRelease = false
 	core.MarkDeleteOnReleaseExplicit(&b.cfg, providerName)
 	cfg := b.configForRun()
-	server := core.Server{Provider: providerName, Name: name, Labels: map[string]string{"machine": name, "lease": leaseID}}
+	server := core.Server{CloudID: "vm-9", Provider: providerName, Name: name, Labels: map[string]string{"machine": name, "lease": leaseID, "vm_id": "vm-9"}}
 	if err := core.ClaimLeaseTargetForConfig(leaseID, "", cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
 		t.Fatal(err)
 	}
@@ -531,7 +609,7 @@ func TestCleanupDryRunNeverDestroys(t *testing.T) {
 	var stdout strings.Builder
 	b.rt.Stdout = &stdout
 	cfg := b.configForRun()
-	server := core.Server{Provider: providerName, Name: name, Labels: map[string]string{"machine": name, "lease": leaseID, "recovery": "rollback-cleanup"}}
+	server := core.Server{CloudID: "vm-9", Provider: providerName, Name: name, Labels: map[string]string{"machine": name, "lease": leaseID, "vm_id": "vm-9", "recovery": "rollback-cleanup"}}
 	if err := core.ClaimLeaseTargetForConfig(leaseID, "", cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
 		t.Fatal(err)
 	}
@@ -545,6 +623,40 @@ func TestCleanupDryRunNeverDestroys(t *testing.T) {
 		if len(c.args) > 1 && c.args[1] == "remove" {
 			t.Fatalf("dry-run must not destroy: %v", runner.calls)
 		}
+	}
+}
+
+// TestCleanupRefusesUnverifiableClaim pins that destructive cleanup requires a
+// verified identity: a claim with no id binding never authorizes a destroy,
+// and the claim is retained rather than silently reaped.
+func TestCleanupRefusesUnverifiableClaim(t *testing.T) {
+	name := "crabbox-cbx-aaaabbbbcccc"
+	leaseID := "cbx_aaaabbbbcccc"
+	runner := &scriptedRunner{scripts: []func([]string) (core.LocalCommandResult, error){
+		ok(fmt.Sprintf(`[{"name":%q,"status":"running","url":"%s.boxd.sh","source":"standalone","sharing":"private"}]`, name, name)),
+		ok(fmt.Sprintf(`{"name":%q,"id":"vm-9","status":"running","url":"%s.boxd.sh"}`, name, name)),
+	}}
+	b := testBackend(t, runner)
+	var stderr strings.Builder
+	b.rt.Stderr = &stderr
+	cfg := b.configForRun()
+	server := core.Server{Provider: providerName, Name: name, Labels: map[string]string{"machine": name, "lease": leaseID, "recovery": "rollback-cleanup"}}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, "", cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range runner.calls {
+		if len(c.args) > 1 && c.args[1] == "remove" {
+			t.Fatalf("cleanup destroyed without a verified identity: %v", runner.calls)
+		}
+	}
+	if !strings.Contains(stderr.String(), "cannot verify identity") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+	if claims, _ := boxdClaims(cfg); len(claims) != 1 {
+		t.Fatalf("unverifiable claim must be retained: %v", claims)
 	}
 }
 

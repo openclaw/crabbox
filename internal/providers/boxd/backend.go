@@ -100,11 +100,36 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), b.rollbackTimeout)
 		defer cancel()
-		if destroyErr := b.destroyMachine(cleanupCtx, cfg, name); destroyErr != nil {
-			claimErr := b.persistRecoveryClaim(cfg, leaseID, slug, name, created.ID, labels, req)
-			return errors.Join(cause, fmt.Errorf("destroy leaked boxd machine %s: %w", name, destroyErr), claimErr)
+		// Never remove by reusable name alone, even here: verify the live
+		// machine is the one THIS acquire created before the rollback destroy.
+		// When identity cannot be verified (id-less create response, blank
+		// read, transport failure), retain a recovery claim for id-fenced
+		// cleanup instead of destroying.
+		if createdID := strings.TrimSpace(created.ID); createdID != "" {
+			summary, found, getErr := b.getMachine(cleanupCtx, cfg, name)
+			if getErr == nil && !found {
+				return cause // already gone; nothing to roll back
+			}
+			if getErr == nil && found {
+				currentID := strings.TrimSpace(summary.ID)
+				if currentID == createdID {
+					if destroyErr := b.destroyMachine(cleanupCtx, cfg, name); destroyErr != nil {
+						claimErr := b.persistRecoveryClaim(cfg, leaseID, slug, name, created.ID, labels, req)
+						return errors.Join(cause, fmt.Errorf("destroy leaked boxd machine %s: %w", name, destroyErr), claimErr)
+					}
+					return cause
+				}
+				if currentID != "" {
+					// The name now belongs to a replacement; ours is gone.
+					fmt.Fprintf(b.rt.Stderr, "boxd machine %s was replaced during rollback (created id=%s, current=%s); leaving the current machine untouched\n", name, createdID, currentID)
+					return cause
+				}
+			}
 		}
-		return cause
+		if claimErr := b.persistRecoveryClaim(cfg, leaseID, slug, name, created.ID, labels, req); claimErr != nil {
+			return errors.Join(cause, fmt.Errorf("persist boxd rollback recovery claim: %w", claimErr))
+		}
+		return errors.Join(cause, fmt.Errorf("boxd machine %s identity could not be verified during rollback; retained a recovery claim — inspect and remove the machine via the boxd CLI, then `crabbox cleanup` reaps the claim", name))
 	}
 
 	// The machine id is the anchor of the replacement fence (boxd retains
@@ -140,7 +165,11 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	// Do NOT roll back here — rollback destroys by name, which would hit the
 	// replacement; our machine is necessarily gone if the name resolves to a
 	// different id, and the replacement is not ours to touch.
-	if readyID := strings.TrimSpace(ready.ID); readyID != "" && readyID != strings.TrimSpace(created.ID) {
+	if readyID := strings.TrimSpace(ready.ID); readyID == "" {
+		// A blank id cannot prove the ready machine is ours: fail closed. The
+		// rollback verifies identity itself before any destroy.
+		return core.LeaseTarget{}, rollback(core.Exit(5, "boxd machine get %s response did not include a machine id; cannot verify the created machine's identity", name))
+	} else if readyID != strings.TrimSpace(created.ID) {
 		return core.LeaseTarget{}, core.Exit(4, "boxd machine %s changed identity during provisioning (created id=%s, current=%s); leaving the current machine untouched", name, created.ID, ready.ID)
 	}
 	target, err := b.resolveSSHTarget(ctx, cfg, name, zone)
@@ -346,12 +375,17 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		if err != nil {
 			return err
 		}
-		if found && boundID != "" && strings.TrimSpace(summary.ID) != boundID {
-			return releaseReplaced(summary.ID)
-		}
-		if found && boxdState(summary.Status) != "stopped" {
-			if err := b.stopMachine(ctx, cfg, name); err != nil {
-				return err
+		if found {
+			if boundID == "" || strings.TrimSpace(summary.ID) == "" {
+				return core.Exit(4, "refusing to stop boxd machine %s: cannot verify identity (claimed vm_id=%q, current=%q); act on it via the boxd CLI if intended", name, boundID, summary.ID)
+			}
+			if strings.TrimSpace(summary.ID) != boundID {
+				return releaseReplaced(summary.ID)
+			}
+			if boxdState(summary.Status) != "stopped" {
+				if err := b.stopMachine(ctx, cfg, name); err != nil {
+					return err
+				}
 			}
 		}
 		labels := make(map[string]string, len(claim.Labels)+2)
@@ -379,7 +413,10 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 			return err
 		}
 		if found {
-			if boundID != "" && strings.TrimSpace(summary.ID) != boundID {
+			if boundID == "" || strings.TrimSpace(summary.ID) == "" {
+				return core.Exit(4, "refusing to destroy boxd machine %s: cannot verify identity (claimed vm_id=%q, current=%q); remove it via the boxd CLI if intended", name, boundID, summary.ID)
+			}
+			if strings.TrimSpace(summary.ID) != boundID {
 				return releaseReplaced(summary.ID)
 			}
 			if err := b.destroyMachine(ctx, cfg, name); err != nil {
@@ -493,7 +530,17 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		if !found {
 			continue
 		}
-		if boundID := claimBoundMachineID(claim, row.Name); boundID != "" && strings.TrimSpace(summary.ID) != boundID {
+		boundID := claimBoundMachineID(claim, row.Name)
+		if boundID == "" || strings.TrimSpace(summary.ID) == "" {
+			// Destructive cleanup requires a verified identity. An unbound
+			// claim (id-less create recovery) or a blank read proves nothing;
+			// keep both the claim and the machine and leave the decision to
+			// the operator via the boxd CLI.
+			fmt.Fprintf(b.rt.Stderr, "skip machine=%s reason=cannot verify identity (claimed vm_id=%q, current=%q); act on it via the boxd CLI if intended\n", row.Name, boundID, summary.ID)
+			live[leaseID] = struct{}{}
+			continue
+		}
+		if strings.TrimSpace(summary.ID) != boundID {
 			fmt.Fprintf(b.rt.Stderr, "skip machine=%s reason=claimed machine was replaced (claimed vm_id=%s, current=%s)\n", row.Name, boundID, summary.ID)
 			continue
 		}
