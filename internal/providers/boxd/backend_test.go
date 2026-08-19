@@ -547,6 +547,37 @@ func TestResolveRefusesUnclaimedMachine(t *testing.T) {
 	}
 }
 
+// TestResolveRefusesUnboundClaim pins the last laundering path: an UNBOUND
+// recovery claim (id-less create failure) must not let resolve start a
+// same-name replacement, hand out its SSH target, or refresh the claim with
+// the replacement's identity.
+func TestResolveRefusesUnboundClaim(t *testing.T) {
+	name := "crabbox-cbx-aaaabbbbcccc"
+	leaseID := "cbx_aaaabbbbcccc"
+	runner := &scriptedRunner{scripts: []func([]string) (core.LocalCommandResult, error){
+		ok(fmt.Sprintf(`{"name":%q,"id":"vm-REPLACEMENT","status":"stopped","url":"%s.boxd.sh"}`, name, name)),
+	}}
+	b := testBackend(t, runner)
+	cfg := b.configForRun()
+	server := core.Server{Provider: providerName, Name: name, Labels: map[string]string{"machine": name, "lease": leaseID, "recovery": "rollback-cleanup"}}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, "", cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	_, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, Repo: core.Repo{Root: t.TempDir()}})
+	if err == nil || !strings.Contains(err.Error(), "cannot be verified") {
+		t.Fatalf("unbound claim must be refused, err=%v", err)
+	}
+	for _, c := range runner.calls {
+		if len(c.args) > 1 && (c.args[1] == "start" || c.args[1] == "stop" || c.args[1] == "remove") {
+			t.Fatalf("resolve mutated a machine through an unbound claim: %v", runner.calls)
+		}
+	}
+	claims, _ := boxdClaims(cfg)
+	if claim, okClaim := claims[leaseID]; !okClaim || claim.Labels["vm_id"] != "" {
+		t.Fatalf("unbound claim must be retained unchanged: %v", claims)
+	}
+}
+
 // TestReleaseRefusesClaimMachineMismatch pins that a claim authorizes exactly
 // the machine it recorded, not any machine sharing the lease id.
 func TestReleaseRefusesClaimMachineMismatch(t *testing.T) {

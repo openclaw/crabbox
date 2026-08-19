@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -35,6 +36,11 @@ type backend struct {
 	readyTimeout         time.Duration
 	rollbackTimeout      time.Duration
 	releaseNotFoundGrace time.Duration
+
+	// replacedReleases marks leases whose release reaped a stale claim
+	// without touching a live replacement, keyed by lease id.
+	replacedMu       sync.Mutex
+	replacedReleases map[string]bool
 }
 
 func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) *backend {
@@ -244,14 +250,30 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	}
 	// boxd retains destroyed machine names for reuse: bind on the immutable
 	// machine id so a stale claim can never hand this lease a replacement
-	// machine of the same name.
-	if boundID := claimBoundMachineID(claim, name); boundID != "" && strings.TrimSpace(summary.ID) != boundID {
-		return core.LeaseTarget{}, core.Exit(4, "lease %s machine %s was replaced (claimed vm_id=%s, current=%s); refusing to touch the replacement", req.ID, name, boundID, summary.ID)
-	}
+	// machine of the same name. An UNBOUND claim (an id-less create-failure
+	// recovery) or a blank live read proves nothing, so resolving through it
+	// could start a replacement, hand out its SSH target, and refresh the
+	// claim with the replacement's identity — fail closed instead. The
+	// read-only release/status view below stays reachable so release and
+	// cleanup can still surface the claim.
+	boundID := claimBoundMachineID(claim, name)
+	currentID := strings.TrimSpace(summary.ID)
+	identityErr := func() error {
+		if boundID == "" || currentID == "" {
+			return core.Exit(4, "lease %s machine %s identity cannot be verified (claimed vm_id=%q, current=%q); act on it via the boxd CLI if intended", req.ID, name, boundID, currentID)
+		}
+		if currentID != boundID {
+			return core.Exit(4, "lease %s machine %s was replaced (claimed vm_id=%s, current=%s); refusing to touch the replacement", req.ID, name, boundID, currentID)
+		}
+		return nil
+	}()
 	labels := b.labelsFor(name, summary.ID, summary.Status, cfg, claim, claimed)
 	server := b.serverFromLabels(name, summary.ID, boxdState(summary.Status), cfg, labels)
 	if req.ReleaseOnly || (req.StatusOnly && !req.ReadyProbe) {
 		return core.LeaseTarget{LeaseID: leaseID, Server: server}, nil
+	}
+	if identityErr != nil {
+		return core.LeaseTarget{}, identityErr
 	}
 	if leaseID == "" {
 		return core.LeaseTarget{}, core.Exit(4, "boxd machine %s has no crabbox lease id", name)
@@ -366,6 +388,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	releaseReplaced := func(currentID string) error {
 		fmt.Fprintf(b.rt.Stderr, "boxd machine %s was replaced (claimed vm_id=%s, current=%s); leaving the current machine untouched\n", name, boundID, currentID)
 		core.RemoveLeaseClaim(leaseID)
+		b.recordReplacedRelease(leaseID)
 		return nil
 	}
 	if !deleteOnRelease(req.Lease, cfg) {
@@ -451,10 +474,31 @@ func claimBoundMachineID(claim core.LeaseClaim, name string) string {
 
 func (b *backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
 	name := firstNonBlank(lease.Server.Labels["machine"], lease.Server.Name)
+	if b.wasReplacedRelease(lease.LeaseID) {
+		return fmt.Sprintf("reaped stale claim lease=%s machine=%s (machine was replaced; left untouched)", lease.LeaseID, name)
+	}
 	if deleteOnRelease(lease, b.configForRun()) {
 		return fmt.Sprintf("destroyed lease=%s machine=%s", lease.LeaseID, name)
 	}
 	return fmt.Sprintf("stopped lease=%s machine=%s retained=true", lease.LeaseID, name)
+}
+
+// recordReplacedRelease remembers, for this backend instance, that a release
+// reaped a stale claim without touching the live replacement machine, so the
+// user-facing release message never claims a destroy that did not happen.
+func (b *backend) recordReplacedRelease(leaseID string) {
+	b.replacedMu.Lock()
+	defer b.replacedMu.Unlock()
+	if b.replacedReleases == nil {
+		b.replacedReleases = map[string]bool{}
+	}
+	b.replacedReleases[leaseID] = true
+}
+
+func (b *backend) wasReplacedRelease(leaseID string) bool {
+	b.replacedMu.Lock()
+	defer b.replacedMu.Unlock()
+	return b.replacedReleases[leaseID]
 }
 
 func (b *backend) RetainLeaseClaimAfterRelease(lease core.LeaseTarget) bool {
