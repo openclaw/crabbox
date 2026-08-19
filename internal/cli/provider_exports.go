@@ -51,20 +51,8 @@ func ProviderClassCatalogFor(provider Provider) ProviderClassCatalog {
 	return providerClassCatalogFor(provider)
 }
 
-func ProviderClassCandidatesForConfig(cfg Config) ([]string, bool) {
-	return providerClassCandidatesForConfig(cfg)
-}
-
-func AWSInstanceTypeCandidatesForConfig(cfg Config) []string {
-	return awsInstanceTypeCandidatesForConfig(cfg)
-}
-
 func AWSLaunchCandidates(cfg Config) []string {
 	return awsLaunchCandidates(cfg)
-}
-
-func AWSInstanceTypeCandidatesForClass(class string) []string {
-	return awsInstanceTypeCandidatesForClass(class)
 }
 
 func AWSInstanceTypeVCPUs(instanceType string) int {
@@ -75,24 +63,12 @@ func AzureVMSizeCandidatesForConfig(cfg Config) []string {
 	return azureVMSizeCandidatesForConfig(cfg)
 }
 
-func AzureVMSizeCandidatesForClass(class string) []string {
-	return azureVMSizeCandidatesForClass(class)
-}
-
 func AzureVMSizeVCPUCount(vmSize string) (int, bool) {
 	return azureVMSizeVCPUCount(vmSize)
 }
 
-func GCPMachineTypeCandidatesForClass(class string) []string {
-	return gcpMachineTypeCandidatesForClass(class)
-}
-
 func GCPMachineTypeCandidatesForConfig(cfg Config) []string {
 	return gcpMachineTypeCandidatesForConfig(cfg)
-}
-
-func HetznerServerTypeCandidatesForClass(class string) []string {
-	return serverTypeCandidatesForClass(class)
 }
 
 func HetznerServerTypeCandidatesForConfig(cfg Config) []string {

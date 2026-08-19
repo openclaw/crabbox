@@ -882,10 +882,6 @@ func azureCanPrependNonExplicitServerType(cfg Config) bool {
 	return true
 }
 
-func AzureCanPrependNonExplicitServerType(cfg Config) bool {
-	return azureCanPrependNonExplicitServerType(cfg)
-}
-
 func azureRegionCandidates(cfg Config, preferredLocation string) []string {
 	return appendUniqueStrings([]string{cfg.AzureLocation, preferredLocation}, cfg.Capacity.Regions...)
 }
