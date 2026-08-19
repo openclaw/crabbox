@@ -585,24 +585,252 @@ function goFunctionBody(source: string, name: string): string {
 
 function parseGoStringArrayCases(source: string): Record<string, string[]> {
   const out: Record<string, string[]> = {};
-  const pattern = /case\s+((?:"[^"]+"\s*,?\s*)+):\s*return \[\]string\{([^}]*)\}/g;
-  for (const match of source.matchAll(pattern)) {
-    const keys = match[1];
-    const body = match[2];
-    if (keys === undefined || body === undefined) {
+  let pendingKeys: string[] | undefined;
+  let arrayValues: string[] | undefined;
+  let caseLines: string[] | undefined;
+
+  const finishArray = () => {
+    if (pendingKeys === undefined || arrayValues === undefined) {
+      return;
+    }
+    for (const key of pendingKeys) {
+      out[key] = arrayValues;
+    }
+    pendingKeys = undefined;
+    arrayValues = undefined;
+  };
+
+  for (const sourceLine of source.split("\n")) {
+    let line = sourceLine;
+    if (pendingKeys !== undefined && arrayValues !== undefined) {
+      if (isGoCaseStart(line)) {
+        pendingKeys = undefined;
+        arrayValues = undefined;
+      } else {
+        if (scanGoStringArrayLine(line, 0, arrayValues, pendingKeys)) {
+          finishArray();
+        }
+        continue;
+      }
+    }
+
+    const startsCase = isGoCaseStart(line);
+    if (caseLines !== undefined && startsCase) {
+      caseLines = undefined;
+    }
+    if (caseLines !== undefined) {
+      caseLines.push(line);
+      const state = scanGoCaseLine(line);
+      if (state === "invalid") {
+        caseLines = undefined;
+        continue;
+      }
+      if (state === "continued") {
+        continue;
+      }
+      line = caseLines.join("\n");
+      caseLines = undefined;
+    } else if (startsCase) {
+      const state = scanGoCaseLine(line);
+      if (state === "invalid") {
+        continue;
+      }
+      if (state === "continued") {
+        caseLines = [line];
+        continue;
+      }
+    }
+
+    const caseClause = startsCase || line.includes("\n") ? parseGoCaseClause(line) : undefined;
+    if (caseClause !== undefined) {
+      pendingKeys = caseClause.keys;
+      line = caseClause.remainder;
+    } else if (pendingKeys === undefined) {
       continue;
     }
-    const values = [...body.matchAll(/"([^"]+)"/g)].map((item) => item[1]).filter(isString);
-    for (const key of [...keys.matchAll(/"([^"]+)"/g)].map((item) => item[1]).filter(isString)) {
-      out[key] = values;
+
+    const returnLine = line.trimStart();
+    const prefix = "return []string{";
+    if (returnLine.length === 0) {
+      continue;
     }
+    if (!returnLine.startsWith(prefix)) {
+      pendingKeys = undefined;
+      continue;
+    }
+
+    arrayValues = [];
+    if (scanGoStringArrayLine(returnLine, prefix.length, arrayValues, pendingKeys)) {
+      finishArray();
+    }
+  }
+
+  if (arrayValues !== undefined) {
+    throw new Error(`unterminated []string return for case ${pendingKeys?.join(", ")}`);
   }
   return out;
 }
 
-function isString(value: string | undefined): value is string {
-  return value !== undefined;
+function isGoCaseStart(line: string): boolean {
+  const trimmed = line.trimStart();
+  return trimmed.startsWith("case") && isGoWhitespace(trimmed[4]);
 }
+
+function scanGoCaseLine(line: string): "complete" | "continued" | "invalid" {
+  let quoted = false;
+  let escaped = false;
+  for (const char of line) {
+    if (quoted) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        quoted = false;
+      }
+    } else if (char === '"') {
+      quoted = true;
+    } else if (char === ":") {
+      return "complete";
+    }
+  }
+  return quoted ? "invalid" : "continued";
+}
+
+function parseGoCaseClause(line: string): { keys: string[]; remainder: string } | undefined {
+  const trimmed = line.trimStart();
+  if (!isGoCaseStart(trimmed)) {
+    return undefined;
+  }
+
+  const keys: string[] = [];
+  let index = "case".length;
+  while (index < trimmed.length) {
+    while (isGoWhitespace(trimmed[index])) {
+      index += 1;
+    }
+    const key = readGoQuotedString(trimmed, index);
+    if (key === undefined) {
+      return undefined;
+    }
+    keys.push(key.value);
+    index = key.next;
+
+    while (isGoWhitespace(trimmed[index])) {
+      index += 1;
+    }
+    if (trimmed[index] === ":") {
+      return { keys, remainder: trimmed.slice(index + 1) };
+    }
+    if (trimmed[index] !== ",") {
+      return undefined;
+    }
+    index += 1;
+  }
+  return undefined;
+}
+
+function readGoQuotedString(
+  source: string,
+  start: number,
+): { value: string; next: number } | undefined {
+  if (source[start] !== '"') {
+    return undefined;
+  }
+  const value: string[] = [];
+  let escaped = false;
+  for (let index = start + 1; index < source.length; index += 1) {
+    const char = source[index];
+    if (escaped) {
+      value.push(char);
+      escaped = false;
+    } else if (char === "\\") {
+      value.push(char);
+      escaped = true;
+    } else if (char === '"') {
+      return { value: value.join(""), next: index + 1 };
+    } else {
+      value.push(char);
+    }
+  }
+  return undefined;
+}
+
+function scanGoStringArrayLine(
+  line: string,
+  start: number,
+  values: string[],
+  keys: string[],
+): boolean {
+  for (let index = start; index < line.length; index += 1) {
+    const char = line[index];
+    if (char === "}") {
+      return true;
+    }
+    if (char !== '"') {
+      continue;
+    }
+
+    const value = readGoQuotedString(line, index);
+    if (value === undefined) {
+      throw new Error(`unterminated quoted string in []string return for case ${keys.join(", ")}`);
+    }
+    values.push(value.value);
+    index = value.next - 1;
+  }
+  return false;
+}
+
+function isGoWhitespace(char: string | undefined): boolean {
+  return char === " " || char === "\t" || char === "\r" || char === "\n";
+}
+
+describe("parseGoStringArrayCases", () => {
+  it("parses a single case key", () => {
+    expect(parseGoStringArrayCases('case "tiny": return []string{"first", "second"}')).toEqual({
+      tiny: ["first", "second"],
+    });
+  });
+
+  it("preserves multiple case keys in source order", () => {
+    const parsed = parseGoStringArrayCases(`
+      case "small",
+        "standard":
+        return []string{"shared"}
+    `);
+    expect(Object.keys(parsed)).toEqual(["small", "standard"]);
+    expect(parsed).toEqual({ small: ["shared"], standard: ["shared"] });
+  });
+
+  it("parses multiline string arrays", () => {
+    expect(
+      parseGoStringArrayCases(`
+        case "large":
+          return []string{
+            "first",
+            "second",
+          }
+      `),
+    ).toEqual({ large: ["first", "second"] });
+  });
+
+  it("ignores a long unterminated case key without matching a later return", () => {
+    const malformed = `case "${"x".repeat(100_000)}\nreturn []string{"wrong"}`;
+    expect(parseGoStringArrayCases(malformed)).toEqual({});
+  });
+
+  it("does not associate valid cases with malformed predecessors", () => {
+    const parsed = parseGoStringArrayCases(`
+      case "unclosed-array":
+        return []string{
+      case "good":
+        return []string{"right"}
+      case "unclosed-key
+        ": return []string{"wrong"}
+    `);
+    expect(parsed).toEqual({ good: ["right"] });
+  });
+});
 
 describe("lease config", () => {
   it("requires an ssh public key", () => {
