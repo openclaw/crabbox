@@ -19,11 +19,12 @@ import (
 // connection model the nvidia-brev and tenki providers use.
 
 type boxdSSHConfigEntry struct {
-	Aliases      []string
-	HostName     string
-	Port         string
-	User         string
-	IdentityFile string
+	Aliases        []string
+	HostName       string
+	Port           string
+	User           string
+	IdentityFile   string
+	KnownHostsFile string
 }
 
 func defaultSSHConfigPath() string {
@@ -32,6 +33,35 @@ func defaultSSHConfigPath() string {
 		return filepath.Join(".ssh", "config")
 	}
 	return filepath.Join(home, ".ssh", "config")
+}
+
+// defaultKnownHostsPath is where the boxd CLI pre-trusts the proxy host key
+// for every machine, as `[<host>]:<port> <keytype> <key>` lines.
+func defaultKnownHostsPath() string {
+	return filepath.Join(filepath.Dir(defaultSSHConfigPath()), "known_hosts")
+}
+
+// pinnedHostKey returns the "<keytype> <key>" the boxd CLI pinned for exactly
+// `[host]:port`, or "" when no pin is present (or the file is unreadable).
+func pinnedHostKey(data, host, port string) string {
+	want := "[" + strings.TrimSpace(host) + "]:" + strings.TrimSpace(port)
+	scanner := bufio.NewScanner(strings.NewReader(data))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "@") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		for _, pattern := range strings.Split(fields[0], ",") {
+			if pattern == want {
+				return fields[1] + " " + fields[2]
+			}
+		}
+	}
+	return ""
 }
 
 func parseSSHConfigEntries(data string) []boxdSSHConfigEntry {
@@ -69,6 +99,8 @@ func parseSSHConfigEntries(data string) []boxdSSHConfigEntry {
 			current.User = unquoteSSHConfigValue(value)
 		case "identityfile":
 			current.IdentityFile = unquoteSSHConfigValue(value)
+		case "userknownhostsfile":
+			current.KnownHostsFile = unquoteSSHConfigValue(value)
 		}
 	}
 	return entries
@@ -161,7 +193,15 @@ func selectBoxdSSHEntry(data, host string) (boxdSSHConfigEntry, bool, error) {
 // session's forwarding state per TCP connection, so ControlMaster-shared
 // connections would clobber each other (the boxd CLI's own ssh-config block
 // documents the same constraint).
-func sshTargetFromEntry(entry boxdSSHConfigEntry, host string) (core.SSHTarget, error) {
+//
+// Host trust is the vendor-managed pin: the target carries the CLI-maintained
+// known_hosts file, and when that file pins this exact `[host]:port` the pin
+// is surfaced as SSHHostKey — which flips the shared SSH transport to
+// StrictHostKeyChecking=yes with GlobalKnownHostsFile/KnownHostsCommand
+// disabled, so a mismatched edge key is rejected instead of trusted on first
+// use. Without a pin (an older CLI, or a sync race) the transport still
+// verifies against the vendor file, where accept-new rejects a CHANGED key.
+func sshTargetFromEntry(entry boxdSSHConfigEntry, host, knownHostsPath string) (core.SSHTarget, error) {
 	port := strings.TrimSpace(entry.Port)
 	if port == "" {
 		return core.SSHTarget{}, core.Exit(5, "boxd ssh-config entry for %q has no Port (machine SSH port not yet allocated)", host)
@@ -175,14 +215,20 @@ func sshTargetFromEntry(entry boxdSSHConfigEntry, host string) (core.SSHTarget, 
 	}
 	hostname := firstNonBlank(entry.HostName, host)
 	user := firstNonBlank(entry.User, boxdSSHUser)
-	return core.SSHTarget{
+	knownHosts := firstNonBlank(strings.TrimSpace(entry.KnownHostsFile), strings.TrimSpace(knownHostsPath), defaultKnownHostsPath())
+	target := core.SSHTarget{
 		User:            user,
 		Host:            hostname,
 		Port:            port,
 		Key:             key,
+		KnownHostsFile:  knownHosts,
 		TargetOS:        core.TargetLinux,
 		NetworkKind:     "public",
 		ReadyCheck:      boxdReadyCheck,
 		NoControlMaster: true,
-	}, nil
+	}
+	if data, err := os.ReadFile(knownHosts); err == nil {
+		target.SSHHostKey = pinnedHostKey(string(data), hostname, port)
+	}
+	return target, nil
 }

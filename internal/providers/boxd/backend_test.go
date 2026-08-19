@@ -57,6 +57,7 @@ func testBackend(t *testing.T, runner *scriptedRunner) *backend {
 	applyDefaults(&cfg)
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard})
 	b.sshConfigPath = filepath.Join(t.TempDir(), "ssh_config")
+	b.knownHostsPath = filepath.Join(t.TempDir(), "known_hosts")
 	b.readyPollInterval = time.Millisecond
 	b.readyTimeout = 2 * time.Second
 	b.releaseNotFoundGrace = 5 * time.Millisecond

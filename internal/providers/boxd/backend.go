@@ -32,6 +32,7 @@ type backend struct {
 
 	// Test seams.
 	sshConfigPath        string
+	knownHostsPath       string
 	readyPollInterval    time.Duration
 	readyTimeout         time.Duration
 	rollbackTimeout      time.Duration
@@ -49,6 +50,7 @@ func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) *backe
 		cfg:                  cfg,
 		rt:                   rt,
 		sshConfigPath:        defaultSSHConfigPath(),
+		knownHostsPath:       defaultKnownHostsPath(),
 		readyPollInterval:    boxdReadyPollDefault,
 		readyTimeout:         boxdReadyTimeout,
 		rollbackTimeout:      boxdRollbackTimeout,
@@ -755,7 +757,7 @@ func (b *backend) resolveSSHTarget(ctx context.Context, cfg core.Config, name, z
 			return core.SSHTarget{}, selErr
 		}
 		if found && strings.TrimSpace(entry.Port) != "" {
-			return sshTargetFromEntry(entry, host)
+			return sshTargetFromEntry(entry, host, b.knownHostsPath)
 		}
 		select {
 		case <-waitCtx.Done():

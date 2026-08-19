@@ -121,6 +121,12 @@ user `boxd`, IdentityFile) into an explicit SSH target and disables connection
 multiplexing — the proxy keeps one interactive session's state per TCP
 connection, so ControlMaster-shared connections would clobber each other.
 
+Host trust is the vendor-managed pin: the CLI pre-trusts the proxy host key in
+`~/.ssh/known_hosts` for every machine `[host]:port`, the target verifies
+against that file, and a present pin is enforced with
+`StrictHostKeyChecking=yes` — a mismatched edge key is rejected, never trusted
+on first use.
+
 Machines in `standby` (idle auto-suspend) or `hibernated` states wake
 automatically on SSH ingress; only explicitly `stopped` machines need a start,
 which resolve performs.
