@@ -1948,10 +1948,10 @@ func TestProvidersJSONIncludesBuiltIns(t *testing.T) {
 		if entry == nil {
 			t.Fatalf("built binary providers json missing %s", provider)
 		}
-		if len(entry.Classes) != 4 {
-			t.Fatalf("%s classes=%#v want four entries", provider, entry.Classes)
+		if len(entry.Classes) != len(MachineClassOrder) {
+			t.Fatalf("%s classes=%#v want %d entries", provider, entry.Classes, len(MachineClassOrder))
 		}
-		for classIndex, className := range []string{"standard", "fast", "large", "beast"} {
+		for classIndex, className := range MachineClassOrder {
 			classSpec := entry.Classes[classIndex]
 			if classSpec.Class != className || classSpec.Type == "" || classSpec.VCPUs <= 0 || classSpec.MemoryGB <= 0 {
 				t.Fatalf("%s class[%d]=%#v", provider, classIndex, classSpec)
