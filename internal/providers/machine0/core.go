@@ -45,7 +45,6 @@ func exit(code int, format string, args ...any) core.ExitError {
 func flagWasSet(fs *flag.FlagSet, name string) bool { return core.FlagWasSet(fs, name) }
 func blank(value, fallback string) string           { return core.Blank(value, fallback) }
 func newLeaseID() string                            { return core.NewLeaseID() }
-func leaseProviderName(leaseID, slug string) string { return core.LeaseProviderName(leaseID, slug) }
 
 func allocateDirectLeaseSlug(leaseID, requested string, servers []Server) (string, error) {
 	return core.AllocateDirectLeaseSlug(leaseID, requested, servers)
@@ -71,10 +70,6 @@ func listClaims() ([]LeaseClaim, error) { return core.ListLeaseClaims() }
 
 func updateClaim(leaseID string, expected LeaseClaim, server Server, target SSHTarget) (LeaseClaim, error) {
 	return core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, expected, server, target)
-}
-
-func updateClaimAfter(leaseID string, expected LeaseClaim, server Server, target SSHTarget, action func() error) (LeaseClaim, error) {
-	return core.UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID, expected, server, target, action)
 }
 
 func updateClaimAction(leaseID string, expected LeaseClaim, action func() (Server, SSHTarget, bool, error)) (LeaseClaim, Server, SSHTarget, error) {
