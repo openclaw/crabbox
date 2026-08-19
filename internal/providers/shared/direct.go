@@ -61,10 +61,7 @@ func (b *DirectSSHBackend) CleanupServers(ctx context.Context, req core.CleanupR
 }
 
 func ServerWithDefaultLabel(server core.Server, key, value string) core.Server {
-	labels := make(map[string]string, len(server.Labels)+1)
-	for label, current := range server.Labels {
-		labels[label] = current
-	}
+	labels := CloneLabels(server.Labels)
 	if labels[key] == "" {
 		labels[key] = value
 	}

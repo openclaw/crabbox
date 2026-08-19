@@ -367,13 +367,13 @@ func (b *digitalOceanLeaseBackend) releaseTargetFromClaim(ctx context.Context, c
 		ok    bool
 		err   error
 	)
+	providerScope := core.ProviderClaimScope(providerName, b.Cfg)
 	if dropletID, numeric := parseDropletID(id); numeric {
 		id = strconv.FormatInt(dropletID, 10)
-		claim, ok, err = core.ResolveLeaseClaimForProviderCloudID(id, providerName)
+		claim, ok, err = core.ResolveLeaseClaimForProviderCloudIDScope(id, providerName, providerScope)
 	} else {
-		var exact bool
-		claim, ok, exact, err = core.ResolveLeaseClaimForProviderWithExact(id, providerName)
-		if err == nil && (exact || core.IsCanonicalLeaseID(id)) && (!exact || !ok || claim.LeaseID != id) {
+		claim, ok, err = shared.ResolveProviderClaimStrict(id, providerName, providerScope)
+		if errors.Is(err, shared.ErrStrictClaimMismatch) {
 			return core.LeaseTarget{}, core.Exit(2, "digitalocean exact lease identifier %q does not match a valid digitalocean claim", id)
 		}
 	}
@@ -382,9 +382,6 @@ func (b *digitalOceanLeaseBackend) releaseTargetFromClaim(ctx context.Context, c
 	}
 	if !ok || claim.LeaseID == "" {
 		return core.LeaseTarget{}, core.Exit(4, "lease/droplet not found: %s", id)
-	}
-	if !core.LeaseClaimMatchesIdentifier(claim, id) {
-		return core.LeaseTarget{}, core.Exit(2, "digitalocean lease claim does not match requested identifier %q", id)
 	}
 	if err := validateDropletLabels(claim.Labels); err != nil {
 		return core.LeaseTarget{}, err
@@ -559,10 +556,7 @@ func (b *digitalOceanLeaseBackend) reconcilePendingKeyRecovery(ctx context.Conte
 			if strings.TrimSpace(key.PublicKey) != publicKey {
 				return false, core.Exit(2, "refusing to delete digitalocean SSH key %q with a different public key", keyName)
 			}
-			labels := make(map[string]string, len(claim.Labels)+1)
-			for label, value := range claim.Labels {
-				labels[label] = value
-			}
+			labels := shared.CloneLabels(claim.Labels)
 			labels[digitalOceanRecoveryKeyIDLabel] = strconv.FormatInt(key.ID, 10)
 			labels[digitalOceanKeyOwnedLabel] = "true"
 			server := core.Server{Provider: providerName, Name: claim.Slug, Labels: labels}
@@ -646,13 +640,8 @@ func isPendingRecoveryClaim(claim core.LeaseClaim, leaseID string) bool {
 }
 
 func validateDigitalOceanClaimIdentity(claim core.LeaseClaim, leaseID, slug string) error {
-	if claim.LeaseID != leaseID ||
-		claim.Provider != providerName ||
-		claim.Slug == "" ||
-		(slug != "" && claim.Slug != slug) ||
-		claim.Labels["lease"] != leaseID ||
-		claim.Labels["slug"] != claim.Slug ||
-		claim.Labels["provider"] != providerName {
+	binding := shared.ClaimBinding{Provider: providerName, LeaseID: leaseID, Slug: slug}
+	if claim.Slug == "" || shared.ValidateClaimBinding(claim, binding) != nil {
 		return core.Exit(2, "digitalocean lease claim identity does not match lease=%s slug=%s", leaseID, slug)
 	}
 	return nil
@@ -815,11 +804,7 @@ func (b *digitalOceanLeaseBackend) Touch(ctx context.Context, req core.TouchRequ
 	}
 	if req.IdleTimeout > 0 {
 		cfg.IdleTimeout = req.IdleTimeout
-		updated := make(map[string]string, len(labels))
-		for key, value := range labels {
-			updated[key] = value
-		}
-		labels = updated
+		labels = shared.CloneLabels(labels)
 		delete(labels, "idle_timeout")
 		delete(labels, "idle_timeout_secs")
 	}
@@ -931,10 +916,7 @@ func (b *digitalOceanLeaseBackend) deleteServer(ctx context.Context, _ core.Conf
 		return err
 	}
 	cleanupServer := server
-	cleanupServer.Labels = make(map[string]string, len(server.Labels)+1)
-	for key, value := range server.Labels {
-		cleanupServer.Labels[key] = value
-	}
+	cleanupServer.Labels = shared.CloneLabels(server.Labels)
 	accountID, err := client.AccountID(ctx)
 	if err != nil {
 		return err
@@ -1009,10 +991,7 @@ func (b *digitalOceanLeaseBackend) deleteServer(ctx context.Context, _ core.Conf
 		if parseErr != nil || keyID <= 0 {
 			return core.Exit(2, "invalid digitalocean recovery SSH key id %q", recoveryKeyID)
 		}
-		labels := make(map[string]string, len(claim.Labels)+1)
-		for key, value := range claim.Labels {
-			labels[key] = value
-		}
+		labels := shared.CloneLabels(claim.Labels)
 		labels[digitalOceanKeyDeleteAuthorizedLabel] = recoveryKeyID
 		claim, err = core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, claim, labels)
 		if err != nil {

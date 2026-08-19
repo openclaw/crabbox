@@ -477,7 +477,7 @@ func (b *Backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 	if err := validateLiveOVHInstance(live, server); err != nil {
 		return core.Server{}, err
 	}
-	labels := copyLabels(server.Labels)
+	labels := shared.CloneLabels(server.Labels)
 	claim, claimExists, err := core.ReadLeaseClaimWithPresence(server.Labels["lease"])
 	if err != nil {
 		return core.Server{}, err
@@ -489,7 +489,7 @@ func (b *Backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 		if claim.Labels["state"] == "cleanup" {
 			return core.Server{}, core.Exit(4, "ovh lease=%s cleanup is already in progress", claim.LeaseID)
 		}
-		labels = copyLabels(claim.Labels)
+		labels = shared.CloneLabels(claim.Labels)
 	}
 	cfg := b.Cfg
 	if req.IdleTimeout > 0 {
@@ -531,7 +531,7 @@ func (b *Backend) UpdateTailscaleMetadata(ctx context.Context, lease core.LeaseT
 	if err := validateLiveOVHInstance(live, server); err != nil {
 		return core.Server{}, err
 	}
-	labels := copyLabels(server.Labels)
+	labels := shared.CloneLabels(server.Labels)
 	if claim, exists, err := core.ReadLeaseClaimWithPresence(server.Labels["lease"]); err != nil {
 		return core.Server{}, err
 	} else if exists {
@@ -541,7 +541,7 @@ func (b *Backend) UpdateTailscaleMetadata(ctx context.Context, lease core.LeaseT
 		if claim.Labels["state"] == "cleanup" {
 			return core.Server{}, core.Exit(4, "ovh lease=%s cleanup is already in progress", claim.LeaseID)
 		}
-		labels = copyLabels(claim.Labels)
+		labels = shared.CloneLabels(claim.Labels)
 		applyTailscaleMetadata(labels, meta)
 		if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels); err != nil {
 			return core.Server{}, err
@@ -598,14 +598,14 @@ func (b *Backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		if b.beforeCleanupClaimUpdate != nil {
 			b.beforeCleanupClaimUpdate()
 		}
-		labels := copyLabels(claim.Labels)
+		labels := shared.CloneLabels(claim.Labels)
 		labels["state"] = "cleanup"
 		transitioned, err := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels)
 		if err != nil {
 			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=claim changed during cleanup\n", server.DisplayID(), server.Name)
 			continue
 		}
-		server.Labels = copyLabels(transitioned.Labels)
+		server.Labels = shared.CloneLabels(transitioned.Labels)
 		if err := b.deleteServer(ctx, b.Cfg, server); err != nil {
 			return err
 		}
@@ -939,7 +939,7 @@ func (b *Backend) reconcilePendingSSHKey(ctx context.Context, client API, claim 
 	if err != nil || !found {
 		return core.LeaseTarget{}, false, err
 	}
-	labels := copyLabels(claim.Labels)
+	labels := shared.CloneLabels(claim.Labels)
 	labels[ovhSSHKeyIDLabel] = key.ID
 	labels[ovhSSHKeyOwnedLabel] = "true"
 	updated, err := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels)
@@ -1007,7 +1007,7 @@ func claimOnlyServer(claim core.LeaseClaim) core.Server {
 		Provider: providerName,
 		CloudID:  claim.CloudID,
 		Name:     core.LeaseProviderName(claim.LeaseID, claim.Slug),
-		Labels:   copyLabels(claim.Labels),
+		Labels:   shared.CloneLabels(claim.Labels),
 	}
 }
 
@@ -1163,7 +1163,7 @@ func claimMatchesOVHProject(claim core.LeaseClaim, projectID string) bool {
 
 func overlayClaimLabels(server core.Server, claim core.LeaseClaim) core.Server {
 	merged := server
-	merged.Labels = copyLabels(server.Labels)
+	merged.Labels = shared.CloneLabels(server.Labels)
 	for key, value := range claim.Labels {
 		if isOVHLiveIdentityLabel(key) && strings.TrimSpace(merged.Labels[key]) != "" {
 			continue
@@ -1184,21 +1184,13 @@ func isOVHLiveIdentityLabel(key string) bool {
 
 func overlayExpectedOVHLabels(live, expected core.Server) core.Server {
 	merged := live
-	merged.Labels = copyLabels(live.Labels)
+	merged.Labels = shared.CloneLabels(live.Labels)
 	for _, key := range []string{"crabbox", "created_by", "provider", "lease", "slug", ovhProjectLabel, ovhRegionLabel, ovhSSHKeyIDLabel, ovhSSHKeyOwnedLabel} {
 		if strings.TrimSpace(merged.Labels[key]) == "" && expected.Labels[key] != "" {
 			merged.Labels[key] = expected.Labels[key]
 		}
 	}
 	return merged
-}
-
-func copyLabels(labels map[string]string) map[string]string {
-	out := make(map[string]string, len(labels))
-	for key, value := range labels {
-		out[key] = value
-	}
-	return out
 }
 
 func applyTailscaleMetadata(labels map[string]string, meta core.TailscaleMetadata) {

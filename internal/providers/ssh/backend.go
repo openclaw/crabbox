@@ -321,10 +321,7 @@ func staticLeaseFromClaim(cfg Config, claim core.LeaseClaim) (Server, SSHTarget,
 }
 
 func staticLeaseLabelsFromClaim(claim core.LeaseClaim) map[string]string {
-	labels := make(map[string]string, len(claim.Labels)+6)
-	for key, value := range claim.Labels {
-		labels[key] = value
-	}
+	labels := shared.CloneLabels(claim.Labels)
 	labels["lease"] = claim.LeaseID
 	labels["slug"] = claim.Slug
 	labels["provider"] = staticProvider

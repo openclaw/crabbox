@@ -520,10 +520,7 @@ func (b *Backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 	labels := live.Labels
 	if req.IdleTimeout > 0 {
 		cfg.IdleTimeout = req.IdleTimeout
-		labels = make(map[string]string, len(live.Labels))
-		for key, value := range live.Labels {
-			labels[key] = value
-		}
+		labels = shared.CloneLabels(live.Labels)
 		delete(labels, "idle_timeout")
 		delete(labels, "idle_timeout_secs")
 	}

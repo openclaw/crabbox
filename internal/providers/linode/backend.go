@@ -307,20 +307,15 @@ func (b *linodeLeaseBackend) Resolve(ctx context.Context, req core.ResolveReques
 }
 
 func (b *linodeLeaseBackend) releaseTargetFromClaim(ctx context.Context, client linodeAPI, id, accountID string) (core.LeaseTarget, error) {
-	var (
-		claim core.LeaseClaim
-		ok    bool
-		err   error
-	)
-	var exact bool
-	claim, ok, exact, err = core.ResolveLeaseClaimForProviderWithExact(id, providerName)
-	if err == nil && (exact || core.IsCanonicalLeaseID(id)) && (!exact || !ok || claim.LeaseID != id) {
+	providerScope := core.ProviderClaimScope(providerName, b.Cfg)
+	claim, ok, err := shared.ResolveProviderClaimStrict(id, providerName, providerScope)
+	if errors.Is(err, shared.ErrStrictClaimMismatch) {
 		return core.LeaseTarget{}, core.Exit(2, "linode exact lease identifier %q does not match a valid linode claim", id)
 	}
 	if err == nil && !ok {
 		if linodeID, numeric := parseLinodeID(id); numeric {
 			id = strconv.FormatInt(linodeID, 10)
-			claim, ok, err = core.ResolveLeaseClaimForProviderCloudID(id, providerName)
+			claim, ok, err = core.ResolveLeaseClaimForProviderCloudIDScope(id, providerName, providerScope)
 		}
 	}
 	if err != nil {
@@ -328,9 +323,6 @@ func (b *linodeLeaseBackend) releaseTargetFromClaim(ctx context.Context, client 
 	}
 	if !ok || claim.LeaseID == "" {
 		return core.LeaseTarget{}, core.Exit(4, "lease/linode not found: %s", id)
-	}
-	if !core.LeaseClaimMatchesIdentifier(claim, id) {
-		return core.LeaseTarget{}, core.Exit(2, "linode lease claim does not match requested identifier %q", id)
 	}
 	if err := validateLinodeLabels(claim.Labels); err != nil {
 		return core.LeaseTarget{}, err
@@ -576,11 +568,7 @@ func (b *linodeLeaseBackend) Touch(ctx context.Context, req core.TouchRequest) (
 	}
 	if req.IdleTimeout > 0 {
 		cfg.IdleTimeout = req.IdleTimeout
-		updated := make(map[string]string, len(labels))
-		for key, value := range labels {
-			updated[key] = value
-		}
-		labels = updated
+		labels = shared.CloneLabels(labels)
 		delete(labels, "idle_timeout")
 		delete(labels, "idle_timeout_secs")
 	}
@@ -657,10 +645,7 @@ func (b *linodeLeaseBackend) deleteServer(ctx context.Context, _ core.Config, se
 		return err
 	}
 	cleanupServer := server
-	cleanupServer.Labels = make(map[string]string, len(server.Labels)+1)
-	for key, value := range server.Labels {
-		cleanupServer.Labels[key] = value
-	}
+	cleanupServer.Labels = shared.CloneLabels(server.Labels)
 	accountID, err := client.AccountID(ctx)
 	if err != nil {
 		return err
@@ -785,13 +770,8 @@ func isPendingRecoveryClaim(claim core.LeaseClaim, leaseID string) bool {
 }
 
 func validateLinodeClaimIdentity(claim core.LeaseClaim, leaseID, slug string) error {
-	if claim.LeaseID != leaseID ||
-		claim.Provider != providerName ||
-		claim.Slug == "" ||
-		(slug != "" && claim.Slug != slug) ||
-		claim.Labels["lease"] != leaseID ||
-		claim.Labels["slug"] != claim.Slug ||
-		claim.Labels["provider"] != providerName {
+	binding := shared.ClaimBinding{Provider: providerName, LeaseID: leaseID, Slug: slug}
+	if claim.Slug == "" || shared.ValidateClaimBinding(claim, binding) != nil {
 		return core.Exit(2, "linode lease claim identity does not match lease=%s slug=%s", leaseID, slug)
 	}
 	return nil

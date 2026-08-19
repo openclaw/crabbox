@@ -319,6 +319,18 @@ preflight, timing JSON, and SSH key storage. Keep that helper surface narrow: if
 a provider needs broad command orchestration, the behavior probably belongs in
 core instead.
 
+Claim-only recovery adapters may use `shared.ResolveProviderClaimStrict` to
+resolve an exact provider/scope-bound claim before a slug while preventing a
+canonical lease ID from falling through. `shared.ValidateClaimBinding` compares
+only exact structural fields and required labels; retain the complete resolved
+claim, including its revision, as the snapshot for guarded mutations. Raw
+provider resource IDs, recovery-state interpretation, account and key
+authorization, live endpoint checks, and deletion remain adapter-owned and
+must not be inferred from the shared structural result.
+Use `shared.CloneLabels` for plain writable label copies; it returns an empty
+non-nil map for nil input. Keep preservation helpers local when missing, empty,
+and non-empty source values have provider-specific meaning.
+
 Lifecycle polling is the exception that belongs in
 `internal/providers/shared`, not command core. `shared.Poll` centralizes only
 the repeated read mechanics: last-success retention, attempt limits,

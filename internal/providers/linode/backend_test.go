@@ -467,6 +467,22 @@ func TestReleaseCanonicalIdentifierDoesNotFallBackToClaimSlug(t *testing.T) {
 	}
 }
 
+func TestReleaseCanonicalIdentifierRejectsMismatchedProviderScope(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	backend := newTestBackend(t, &fakeLinodeAPI{})
+	const leaseID = "cbx_abcdef123476"
+	labels := core.DirectLeaseLabels(backend.Cfg, leaseID, "wrong-scope", providerName, "", false, time.Now())
+	labels[linodeAccountLabel] = "euuid:account-a"
+	server := core.Server{Provider: providerName, CloudID: "476", ID: 476, Name: core.LeaseProviderName(leaseID, "wrong-scope"), Labels: labels}
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "wrong-scope", providerName, "account:other", "", t.TempDir(), time.Minute, false, server, core.SSHTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := backend.releaseTargetFromClaim(context.Background(), &fakeLinodeAPI{}, leaseID, "euuid:account-a")
+	if err == nil || !strings.Contains(err.Error(), "exact lease identifier") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestResolveReadOnlyDoesNotClaimVisibleLinode(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName

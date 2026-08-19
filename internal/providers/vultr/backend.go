@@ -338,7 +338,8 @@ func (b *backend) deleteServer(ctx context.Context, _ core.Config, server core.S
 	if expected := strings.TrimSpace(server.Labels[vultrAccountLabel]); expected != "" && expected != accountID {
 		return core.Exit(3, "vultr account mismatch: current account %s does not match lease account %s", accountID, expected)
 	}
-	cleanupServer := copyServer(server)
+	cleanupServer := server
+	cleanupServer.Labels = shared.CloneLabels(server.Labels)
 	cleanupServer.Labels[vultrAccountLabel] = accountID
 	if cleanupServer.CloudID != "" {
 		item, err := client.GetInstance(ctx, cleanupServer.CloudID)
@@ -456,12 +457,12 @@ func (b *backend) releaseTargetFromClaim(id, accountID string) (core.LeaseTarget
 		ok    bool
 		err   error
 	)
+	providerScope := core.ProviderClaimScope(providerName, b.Cfg)
 	if isVultrInstanceID(id) {
-		claim, ok, err = core.ResolveLeaseClaimForProviderCloudID(id, providerName)
+		claim, ok, err = core.ResolveLeaseClaimForProviderCloudIDScope(id, providerName, providerScope)
 	} else {
-		var exact bool
-		claim, ok, exact, err = core.ResolveLeaseClaimForProviderWithExact(id, providerName)
-		if err == nil && (exact || core.IsCanonicalLeaseID(id)) && (!exact || !ok || claim.LeaseID != id) {
+		claim, ok, err = shared.ResolveProviderClaimStrict(id, providerName, providerScope)
+		if errors.Is(err, shared.ErrStrictClaimMismatch) {
 			return core.LeaseTarget{}, core.Exit(2, "vultr exact lease identifier %q does not match a valid vultr claim", id)
 		}
 	}
@@ -558,13 +559,8 @@ func (b *backend) ensureCleanupClaim(server core.Server) (core.LeaseClaim, error
 }
 
 func validateVultrClaimIdentity(claim core.LeaseClaim, leaseID, slug string) error {
-	if claim.LeaseID != leaseID ||
-		claim.Provider != providerName ||
-		claim.Slug == "" ||
-		(slug != "" && claim.Slug != slug) ||
-		claim.Labels["lease"] != leaseID ||
-		claim.Labels["slug"] != claim.Slug ||
-		claim.Labels["provider"] != providerName {
+	binding := shared.ClaimBinding{Provider: providerName, LeaseID: leaseID, Slug: slug}
+	if claim.Slug == "" || shared.ValidateClaimBinding(claim, binding) != nil {
 		return core.Exit(2, "vultr lease claim identity does not match lease=%s slug=%s", leaseID, slug)
 	}
 	return nil
@@ -765,19 +761,6 @@ func (b *backend) now() time.Time {
 func isVultrInstanceID(value string) bool {
 	value = strings.TrimSpace(value)
 	return vultrInstanceIDRe.MatchString(value)
-}
-
-func copyServer(server core.Server) core.Server {
-	server.Labels = copyLabels(server.Labels)
-	return server
-}
-
-func copyLabels(labels map[string]string) map[string]string {
-	out := make(map[string]string, len(labels))
-	for key, value := range labels {
-		out[key] = value
-	}
-	return out
 }
 
 func firstNonBlank(values ...string) string {

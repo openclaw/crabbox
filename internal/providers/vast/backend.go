@@ -593,7 +593,7 @@ func (b *backend) prepareCleanupServer(server core.Server) (core.Server, error) 
 		return server, nil
 	}
 
-	labels := cloneLabels(server.Labels)
+	labels := shared.CloneLabels(server.Labels)
 	labels["state"] = "expired"
 	labels["expires_at"] = core.LeaseLabelTime(b.now().Add(-time.Second))
 	server.Labels = labels
@@ -644,7 +644,7 @@ func (b *backend) deleteServer(ctx context.Context, _ core.Config, server core.S
 		if _, err := client.ManageInstance(ctx, instanceID, vastManageInstanceInput{State: "stopped", Label: encodeVastOwnershipLabel(leaseID, server.Labels["slug"], "stopped")}); err != nil {
 			return err
 		}
-		labels := cloneLabels(claim.Labels)
+		labels := shared.CloneLabels(claim.Labels)
 		labels["state"] = "stopped"
 		labels[vastReleaseActionLabel] = "stop"
 		if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, claim, labels); err != nil {
@@ -747,16 +747,8 @@ func vastLeaseLabels(cfg core.Config, leaseID, slug, state string, keep bool, no
 	return labels
 }
 
-func cloneLabels(labels map[string]string) map[string]string {
-	out := make(map[string]string, len(labels))
-	for key, value := range labels {
-		out[key] = value
-	}
-	return out
-}
-
 func preserveVastClaimMetadata(labels, existing map[string]string) map[string]string {
-	out := cloneLabels(labels)
+	out := shared.CloneLabels(labels)
 	for _, key := range []string{
 		vastReleaseActionLabel,
 		vastKeyIDLabel,
@@ -803,13 +795,8 @@ func validateLiveVastInstance(item vastInstance, expected core.Server) error {
 }
 
 func validateVastClaimIdentity(claim core.LeaseClaim, leaseID, slug, cloudID string) error {
-	if claim.LeaseID != leaseID ||
-		claim.Provider != providerName ||
-		claim.Slug == "" ||
-		(slug != "" && claim.Slug != slug) ||
-		claim.Labels["lease"] != leaseID ||
-		claim.Labels["slug"] != claim.Slug ||
-		claim.Labels["provider"] != providerName {
+	binding := shared.ClaimBinding{Provider: providerName, LeaseID: leaseID, Slug: slug}
+	if claim.Slug == "" || shared.ValidateClaimBinding(claim, binding) != nil {
 		return exit(2, "vast lease claim identity does not match lease=%s slug=%s", leaseID, slug)
 	}
 	if cloudID != "" {

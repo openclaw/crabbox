@@ -11,6 +11,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
@@ -818,6 +819,23 @@ func TestReleaseCanonicalIdentifierDoesNotFallBackToClaimSlug(t *testing.T) {
 	}
 }
 
+func TestReleaseCanonicalIdentifierRejectsMismatchedProviderScope(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	backend := newTestBackend(t, &fakeVultrAPI{})
+	const leaseID = "cbx_abcdef123476"
+	labels := core.DirectLeaseLabels(backend.Cfg, leaseID, "wrong-scope", providerName, "", false, time.Now())
+	labels[vultrAccountLabel] = "account:test-account"
+	labels[vultrKeyOwnedLabel] = "false"
+	server := core.Server{Provider: providerName, CloudID: "99999999-9999-4999-8999-999999999476", Name: core.LeaseProviderName(leaseID, "wrong-scope"), Labels: labels}
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "wrong-scope", providerName, "account:other", "", t.TempDir(), time.Minute, false, server, core.SSHTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := backend.releaseTargetFromClaim(leaseID, "account:test-account")
+	if err == nil || !strings.Contains(err.Error(), "exact lease identifier") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestTouchAppliesIdleTimeoutOverride(t *testing.T) {
 	api := &fakeVultrAPI{}
 	b := newTestBackend(t, api)
@@ -825,7 +843,7 @@ func TestTouchAppliesIdleTimeoutOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	labels := copyLabels(lease.Server.Labels)
+	labels := shared.CloneLabels(lease.Server.Labels)
 	labels["idle_timeout_secs"] = "3600"
 	labels["idle_timeout"] = "1h0m0s"
 	tags := tagsFromLabels(labels)

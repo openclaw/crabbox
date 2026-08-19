@@ -253,10 +253,7 @@ func (b *leaseBackend) releaseTargetFromClaim(ctx context.Context, client proxmo
 	if exists {
 		return LeaseTarget{}, exit(2, "refusing to accept missing Proxmox VM %s from lease=%s because it still exists in the cluster", cloudID, claim.LeaseID)
 	}
-	labels := make(map[string]string, len(claim.Labels)+2)
-	for key, value := range claim.Labels {
-		labels[key] = value
-	}
+	labels := shared.CloneLabels(claim.Labels)
 	if leaseLabel := strings.TrimSpace(labels["lease"]); leaseLabel != "" && leaseLabel != claim.LeaseID {
 		return LeaseTarget{}, exit(2, "proxmox lease claim label mismatch for lease=%s", claim.LeaseID)
 	}

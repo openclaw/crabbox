@@ -11,6 +11,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type fakeLambdaAPI struct {
@@ -601,7 +602,7 @@ func TestReleaseRefusesRequestSSHKeyOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 	server = attachLambdaClaimSnapshot(t, server, leaseID)
-	requestLabels := cloneLambdaLabels(labels)
+	requestLabels := shared.CloneLabels(labels)
 	requestLabels[lambdaKeyIDLabel] = "key-unclaimed"
 	server.Labels = requestLabels
 	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}})
@@ -633,7 +634,7 @@ func TestReleaseRefusesRefreshedClaimSnapshot(t *testing.T) {
 		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
 	}
 	core.SetServerLeaseClaimSnapshot(&server, claim, true)
-	freshLabels := cloneLambdaLabels(labels)
+	freshLabels := shared.CloneLabels(labels)
 	freshLabels["last_touched_at"] = core.LeaseLabelTime(time.Now())
 	if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, claim, freshLabels); err != nil {
 		t.Fatal(err)
@@ -1011,7 +1012,7 @@ func TestTouchAndTailscaleMetadataAreLocalOnly(t *testing.T) {
 		DeviceID: "node-lambda-touch",
 	}
 	pending := touched
-	pending.Labels = cloneLambdaLabels(touched.Labels)
+	pending.Labels = shared.CloneLabels(touched.Labels)
 	applyTailscaleMetadata(pending.Labels, meta)
 	updated, err := b.UpdateTailscaleMetadata(context.Background(), core.LeaseTarget{LeaseID: lease.LeaseID, Server: pending}, meta)
 	if err != nil {

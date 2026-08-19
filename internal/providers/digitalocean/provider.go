@@ -4,6 +4,7 @@ import (
 	"flag"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func init() {
@@ -64,10 +65,7 @@ func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, sl
 	if allowProviderMetadata {
 		return server, nil
 	}
-	labels := make(map[string]string, len(server.Labels)+5)
-	for key, value := range server.Labels {
-		labels[key] = value
-	}
+	labels := shared.CloneLabels(server.Labels)
 	for _, key := range []string{
 		digitalOceanAccountLabel,
 		digitalOceanRecoveryKeyIDLabel,

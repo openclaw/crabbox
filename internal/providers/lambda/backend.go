@@ -486,12 +486,12 @@ func (b *backend) UpdateTailscaleMetadata(ctx context.Context, lease core.LeaseT
 		return core.Server{}, core.Exit(2, "lambda lease=%s has no exact local claim snapshot; refusing metadata update", lease.LeaseID)
 	}
 	baseline := server
-	baseline.Labels = cloneLambdaLabels(expected.Labels)
+	baseline.Labels = shared.CloneLabels(expected.Labels)
 	claim, err := revalidateLambdaClaimSnapshot(baseline)
 	if err != nil {
 		return core.Server{}, err
 	}
-	labels := cloneLambdaLabels(claim.Labels)
+	labels := shared.CloneLabels(claim.Labels)
 	applyTailscaleMetadata(labels, meta)
 	labels[lambdaTouchLocalLabel] = "true"
 	server.Labels = labels
@@ -528,7 +528,7 @@ func (b *backend) deleteServer(ctx context.Context, _ core.Config, server core.S
 		return err
 	}
 	server.CloudID = instanceID
-	server.Labels = cloneLambdaLabels(claim.Labels)
+	server.Labels = shared.CloneLabels(claim.Labels)
 	if claim.CloudID == "" && claim.Labels[lambdaRecoveryKeyLabel] == "ambiguous-create" {
 		updated, err := core.UpdateLeaseClaimEndpointIfUnchangedAfter(claim.LeaseID, claim, server, core.SSHTarget{}, func() error {
 			instances, err := client.ListInstances(ctx)
@@ -728,7 +728,7 @@ func serverFromLambdaClaim(item Instance, cfg core.Config, claim core.LeaseClaim
 		return core.Server{}, err
 	}
 	server := serverFromInstance(item, cfg)
-	server.Labels = cloneLambdaLabels(claim.Labels)
+	server.Labels = shared.CloneLabels(claim.Labels)
 	core.SetServerLeaseClaimSnapshot(&server, claim, true)
 	return server, nil
 }
@@ -836,14 +836,6 @@ func validateUniqueAmbiguousLaunchInstance(instanceID string, instances []Instan
 		return core.Exit(2, "refusing to release Lambda instance %s without its recovery SSH key binding", instanceID)
 	}
 	return nil
-}
-
-func cloneLambdaLabels(labels map[string]string) map[string]string {
-	out := make(map[string]string, len(labels))
-	for key, value := range labels {
-		out[key] = value
-	}
-	return out
 }
 
 func rollbackLambdaAcquire(client lambdaAPI, instanceID string, key lambdaSSHKeyIdentity) error {

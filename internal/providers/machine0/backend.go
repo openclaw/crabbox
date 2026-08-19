@@ -790,10 +790,7 @@ func machine0Claims() (map[string]LeaseClaim, error) {
 
 func (b *backend) serverFromMachine(item machine, claim LeaseClaim, cfg Config) Server {
 	cfg = effectiveMachine0Config(cfg, item)
-	labels := map[string]string{}
-	for key, value := range claim.Labels {
-		labels[key] = value
-	}
+	labels := shared.CloneLabels(claim.Labels)
 	leaseID, slug := claim.LeaseID, claim.Slug
 	if len(labels) == 0 {
 		labels = machineLabels(cfg, item, leaseID, slug, false, b.now())

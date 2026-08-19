@@ -247,7 +247,7 @@ func (b *backend) acquireOnce(ctx context.Context, req AcquireRequest) (LeaseTar
 		CNIConfDir:      cfg.Firecracker.CNIConfDir,
 		CNIBinDir:       cfg.Firecracker.CNIBinDir,
 		DeleteOnRelease: cfg.Firecracker.DeleteOnRelease,
-		Labels:          cloneLabels(labels),
+		Labels:          shared.CloneLabels(labels),
 		CreatedAt:       now.Format(time.RFC3339Nano),
 		UpdatedAt:       now.Format(time.RFC3339Nano),
 	}
@@ -477,7 +477,7 @@ func (b *backend) Touch(_ context.Context, req TouchRequest) (Server, error) {
 
 	record, err := b.readStateRecord(leaseID)
 	if err == nil {
-		record.Labels = cloneLabels(server.Labels)
+		record.Labels = shared.CloneLabels(server.Labels)
 		record.UpdatedAt = b.currentTime().UTC().Format(time.RFC3339Nano)
 		if writeErr := b.writeStateRecord(record); writeErr != nil {
 			fmt.Fprintf(b.rt.Stderr, "warning: touch firecracker state=%s lease=%s: %v\n", state, leaseID, writeErr)
@@ -583,7 +583,7 @@ func (b *backend) targetFromRecord(cfg Config, record leaseStateRecord) (SSHTarg
 }
 
 func (b *backend) serverFromRecord(cfg Config, record leaseStateRecord, running bool) Server {
-	labels := cloneLabels(record.Labels)
+	labels := shared.CloneLabels(record.Labels)
 	status := strings.TrimSpace(labels["state"])
 	if status == "" {
 		status = "ready"
@@ -605,7 +605,7 @@ func (b *backend) serverFromRecord(cfg Config, record leaseStateRecord, running 
 }
 
 func serverFromClaim(cfg Config, claim LeaseClaim) Server {
-	labels := cloneLabels(claim.Labels)
+	labels := shared.CloneLabels(claim.Labels)
 	name := firstNonBlank(labels["instance"], core.LeaseProviderName(claim.LeaseID, claim.Slug))
 	server := Server{
 		CloudID:  name,
@@ -768,17 +768,6 @@ func firstNonBlank(values ...string) string {
 		}
 	}
 	return ""
-}
-
-func cloneLabels(labels map[string]string) map[string]string {
-	if labels == nil {
-		return map[string]string{}
-	}
-	out := make(map[string]string, len(labels))
-	for key, value := range labels {
-		out[key] = value
-	}
-	return out
 }
 
 func removeIfExists(path string) error {

@@ -359,6 +359,15 @@ paths. Accept canonical lease IDs; accept slugs and provider-native IDs when you
 can. Return the stored per-lease SSH key when available so reuse does not need a
 fresh key.
 
+Direct adapters with claim-only recovery may use
+`shared.ResolveProviderClaimStrict` for the provider/scope-bound local lookup:
+it checks an exact claim first and never lets a canonical lease ID fall through
+to an unrelated slug. Keep provider-native resource-ID lookup explicit in the
+adapter. Use `shared.ValidateClaimBinding` only for common structural fields and
+required labels, and carry the returned full claim as the exact snapshot for
+later fenced updates. Recovery phases, account or key authorization, live
+resource validation, and every deletion decision remain adapter-owned.
+
 `List` returns `[]LeaseView` (a type alias for `Server`). Do not print from
 `List` — core renders the table.
 

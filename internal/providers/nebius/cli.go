@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type cliRunner struct {
@@ -280,10 +282,7 @@ func instanceFromObject(object map[string]any) nebiusInstance {
 }
 
 func serverFromInstance(item nebiusInstance, cfg Config) Server {
-	labels := make(map[string]string, len(item.Labels))
-	for key, value := range item.Labels {
-		labels[key] = value
-	}
+	labels := shared.CloneLabels(item.Labels)
 	server := Server{
 		CloudID:  item.ID,
 		Provider: providerName,

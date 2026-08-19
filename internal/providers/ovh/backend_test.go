@@ -12,6 +12,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type fakeAPI struct {
@@ -649,7 +650,7 @@ func TestReleaseRejectsClaimWithMismatchedLiveSSHKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	labels := copyLabels(claim.Labels)
+	labels := shared.CloneLabels(claim.Labels)
 	labels[ovhSSHKeyIDLabel] = "different-key"
 	if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, claim, labels); err != nil {
 		t.Fatal(err)
@@ -699,8 +700,8 @@ func TestCleanupDryRunAndExpiredOwnedOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	labels := copyLabels(claim.Labels)
-	unclaimedLabels := copyLabels(labels)
+	labels := shared.CloneLabels(claim.Labels)
+	unclaimedLabels := shared.CloneLabels(labels)
 	unclaimedLabels["lease"] = "cbx_unclaimed"
 	unclaimedLabels["slug"] = "unclaimed"
 	fake.instances = append(fake.instances, Instance{ID: "foreign", Name: "crabbox-foreign", Labels: map[string]string{"crabbox": "true"}})
@@ -781,7 +782,7 @@ func TestCleanupSkipsClaimRenewedBeforeTransition(t *testing.T) {
 		if readErr != nil {
 			t.Fatal(readErr)
 		}
-		labels := copyLabels(claim.Labels)
+		labels := shared.CloneLabels(claim.Labels)
 		labels["state"] = "ready"
 		labels["expires_at"] = time.Now().Add(time.Hour).Format(time.RFC3339)
 		if _, updateErr := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels); updateErr != nil {
@@ -943,7 +944,7 @@ func TestTouchPreservesLocalClaimMetadataWithoutLiveLabels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	labels := copyLabels(claim.Labels)
+	labels := shared.CloneLabels(claim.Labels)
 	labels["tailscale"] = "true"
 	labels["tailscale_fqdn"] = "touch-claim.example.ts.net"
 	labels["tailscale_tags"] = "tag:ci,tag:crabbox"
@@ -995,7 +996,7 @@ func TestTouchRejectsConcurrentClaimUpdate(t *testing.T) {
 		if readErr != nil {
 			t.Fatal(readErr)
 		}
-		labels := copyLabels(claim.Labels)
+		labels := shared.CloneLabels(claim.Labels)
 		labels["concurrent"] = "preserved"
 		if _, updateErr := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels); updateErr != nil {
 			t.Fatal(updateErr)

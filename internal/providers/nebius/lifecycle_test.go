@@ -10,6 +10,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type fakeNebiusAPI struct {
@@ -123,12 +124,12 @@ func TestLabelOwnershipRequiresCompleteMatchingScope(t *testing.T) {
 	if err := validateNebiusOwnership(labels, cfg); err != nil {
 		t.Fatalf("complete labels rejected: %v", err)
 	}
-	partial := cloneLabels(labels)
+	partial := shared.CloneLabels(labels)
 	delete(partial, nebiusScopeLabel)
 	if err := validateNebiusOwnership(partial, cfg); err == nil {
 		t.Fatal("partial ownership accepted")
 	}
-	foreign := cloneLabels(labels)
+	foreign := shared.CloneLabels(labels)
 	foreign[nebiusParentLabel] = "other-project"
 	if err := validateNebiusOwnership(foreign, cfg); err == nil {
 		t.Fatal("foreign parent ownership accepted")
@@ -320,7 +321,7 @@ func TestResolveAssociatesLiveInstanceWithRepoUnlessMutationsDisabled(t *testing
 func TestReleaseAndCleanupRefuseForeignOrAmbiguousResources(t *testing.T) {
 	cfg := testConfig()
 	owned := nebiusLeaseLabels(cfg, "cbx_deadbeef1234", "old", "leased", false, time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
-	foreign := cloneLabels(owned)
+	foreign := shared.CloneLabels(owned)
 	foreign[nebiusScopeLabel] = "foreign"
 	api := &fakeNebiusAPI{items: []nebiusInstance{
 		{ID: "vm-owned", Name: "old", Status: "RUNNING", Labels: owned, PublicIP: "203.0.113.10"},
@@ -383,7 +384,7 @@ func TestTouchUpdatesLabelsWithoutLosingOwnership(t *testing.T) {
 func TestTouchRefusesLiveOwnershipMismatch(t *testing.T) {
 	cfg := testConfig()
 	labels := nebiusLeaseLabels(cfg, "cbx_123456789abc", "demo", "leased", false, time.Unix(1000, 0))
-	liveLabels := cloneLabels(labels)
+	liveLabels := shared.CloneLabels(labels)
 	liveLabels["lease"] = "cbx_other123456"
 	liveLabels[nebiusLeaseLabel] = "cbx_other123456"
 	api := &fakeNebiusAPI{items: []nebiusInstance{{ID: "vm-1", Name: "demo", Status: "RUNNING", Labels: liveLabels, PublicIP: "203.0.113.10"}}}
@@ -551,7 +552,7 @@ func TestReleaseRetainsClaimChangedDuringDelete(t *testing.T) {
 		t.Fatalf("claim exists=%v err=%v", exists, err)
 	}
 	api.deleteFn = func(context.Context, string) {
-		changed := cloneLabels(original.Labels)
+		changed := shared.CloneLabels(original.Labels)
 		changed["state"] = "renewed"
 		if _, updateErr := core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, original, changed); updateErr != nil {
 			t.Errorf("update claim during delete: %v", updateErr)
@@ -637,7 +638,7 @@ func TestResolveReleaseOnlyFindsClaimByCloudID(t *testing.T) {
 func TestReleaseRefusesLiveOwnershipMismatch(t *testing.T) {
 	cfg := testConfig()
 	labels := nebiusLeaseLabels(cfg, "cbx_deadbeef1234", "gone", "ready", false, time.Unix(1000, 0))
-	liveLabels := cloneLabels(labels)
+	liveLabels := shared.CloneLabels(labels)
 	liveLabels["lease"] = "cbx_other123456"
 	liveLabels[nebiusLeaseLabel] = "cbx_other123456"
 	api := &fakeNebiusAPI{items: []nebiusInstance{{ID: "vm-1", Name: "other", Status: "RUNNING", Labels: liveLabels, PublicIP: "203.0.113.10"}}}
@@ -696,12 +697,4 @@ func TestClassifyNebiusInstanceNotFoundRequiresInstanceEvidence(t *testing.T) {
 	if isNebiusInstanceNotFound(errors.New("profile production not found"), "vm-gone") {
 		t.Fatal("unrelated not found classified as instance absence")
 	}
-}
-
-func cloneLabels(in map[string]string) map[string]string {
-	out := make(map[string]string, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
-	return out
 }
