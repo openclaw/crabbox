@@ -39,7 +39,7 @@ func (Provider) ClassProfiles() []core.ProviderClassProfile {
 
 func buildClassProfiles() []core.ProviderClassProfile {
 	classes := core.CanonicalProviderClasses()
-	types := []string{"tdx.small", "tdx.medium", "tdx.large", "tdx.xlarge"}
+	types := []string{"tdx.small", "tdx.small", "tdx.small", "tdx.medium", "tdx.large", "tdx.xlarge"}
 	profiles := make([]core.ProviderClassProfile, 0, len(classes))
 	for index, class := range classes {
 		profiles = append(profiles, core.ProviderClassProfileFromMachines(

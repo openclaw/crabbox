@@ -57,7 +57,7 @@ func TestProviderServerTypeDefaults(t *testing.T) {
 	if got := provider.ServerTypeForConfig(core.Config{ServerType: "vc2-2c-2gb", ServerTypeExplicit: true}); got != "vc2-2c-2gb" {
 		t.Fatalf("explicit ServerTypeForConfig=%q", got)
 	}
-	for _, class := range []string{"standard", "fast", "large", "beast", "unknown"} {
+	for _, class := range []string{"tiny", "small", "standard", "fast", "large", "beast", "unknown"} {
 		if got := provider.ServerTypeForClass(class); got != "vc2-1c-1gb" {
 			t.Fatalf("ServerTypeForClass(%q)=%q", class, got)
 		}

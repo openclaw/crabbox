@@ -115,7 +115,7 @@ func (Provider) ClassSpecs() []core.ClassSpec {
 }
 
 func buildClassProfiles() []core.ProviderClassProfile {
-	profiles := make([]core.ProviderClassProfile, 0, 20)
+	profiles := make([]core.ProviderClassProfile, 0, 30)
 	for _, class := range core.CanonicalProviderClasses() {
 		profiles = append(profiles,
 			awsClassProfile(class, core.TargetLinux, "", core.ProviderClassArchitectureAMD64, awsInstanceTypeCandidatesForClass(class)),
@@ -200,6 +200,10 @@ func instanceShape(instanceType string) (int, int) {
 
 func awsInstanceTypeCandidatesForClass(class string) []string {
 	switch class {
+	case "tiny":
+		return []string{"m7a.large", "m7i.large", "c7a.xlarge", "c7i.xlarge", "t3.small"}
+	case "small":
+		return []string{"c7a.2xlarge", "c7i.2xlarge", "m7a.xlarge", "m7i.xlarge", "c7a.xlarge", "t3.small"}
 	case "standard":
 		return []string{"c7a.8xlarge", "c7i.8xlarge", "m7a.8xlarge", "m7i.8xlarge", "c7a.4xlarge", "t3.small"}
 	case "fast":
@@ -215,6 +219,10 @@ func awsInstanceTypeCandidatesForClass(class string) []string {
 
 func awsARM64InstanceTypeCandidatesForClass(class string) []string {
 	switch class {
+	case "tiny":
+		return []string{"m7g.large", "c7g.xlarge", "r7g.large", "t4g.small"}
+	case "small":
+		return []string{"c7g.2xlarge", "m7g.xlarge", "r7g.large", "c7g.xlarge", "t4g.small"}
 	case "standard":
 		return []string{"c7g.8xlarge", "m7g.8xlarge", "r7g.8xlarge", "c7g.4xlarge", "t4g.small"}
 	case "fast":
@@ -228,6 +236,10 @@ func awsARM64InstanceTypeCandidatesForClass(class string) []string {
 
 func awsWindowsInstanceTypeCandidatesForClass(class string) []string {
 	switch class {
+	case "tiny":
+		return []string{"m7a.large", "m7i.large", "t3.large"}
+	case "small":
+		return []string{"c7a.2xlarge", "c7i.2xlarge", "m7a.xlarge", "m7i.xlarge", "t3.xlarge", "t3.large"}
 	case "standard":
 		return []string{"m7i.large", "m7a.large", "t3.large"}
 	case "fast":
@@ -243,6 +255,10 @@ func awsWindowsInstanceTypeCandidatesForClass(class string) []string {
 
 func awsWSL2InstanceTypeCandidatesForClass(class string) []string {
 	switch class {
+	case "tiny":
+		return []string{"m8i.large", "m8i-flex.large", "c8i.xlarge", "r8i.large"}
+	case "small":
+		return []string{"c8i.2xlarge", "m8i.xlarge", "m8i-flex.xlarge", "r8i.large", "c8i.xlarge", "m8i.large"}
 	case "standard":
 		return []string{"m8i.large", "m8i-flex.large", "c8i.large", "r8i.large"}
 	case "fast":

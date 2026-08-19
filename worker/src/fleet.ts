@@ -17840,7 +17840,9 @@ function workspaceCommand(value: string | undefined): string | undefined {
 
 function workspaceClass(configured: string | undefined): string {
   const machineClass = configured?.trim() || "standard";
-  return ["standard", "fast", "large", "beast"].includes(machineClass) ? machineClass : "standard";
+  return ["tiny", "small", "standard", "fast", "large", "beast"].includes(machineClass)
+    ? machineClass
+    : "standard";
 }
 
 function workspacePrewarmCount(value: string | undefined): number {

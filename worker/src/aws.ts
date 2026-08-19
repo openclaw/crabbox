@@ -3385,7 +3385,7 @@ function awsRecommendedClassForQuota(
   if (limitVCPUs <= 0) {
     return undefined;
   }
-  for (const machineClass of ["beast", "large", "fast", "standard"]) {
+  for (const machineClass of ["beast", "large", "fast", "standard", "small", "tiny"]) {
     const [serverType] = awsInstanceTypeCandidatesForTargetClass(
       config.target,
       machineClass,

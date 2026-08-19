@@ -42,7 +42,7 @@ func (Provider) ClassProfiles() []core.ProviderClassProfile {
 
 func buildClassProfiles() []core.ProviderClassProfile {
 	classes := core.CanonicalProviderClasses()
-	types := []string{defaultType, "SA5.LARGE8", "SA5.2XLARGE16", "SA5.8XLARGE64"}
+	types := []string{defaultType, defaultType, defaultType, "SA5.LARGE8", "SA5.2XLARGE16", "SA5.8XLARGE64"}
 	profiles := make([]core.ProviderClassProfile, 0, len(classes))
 	for index, class := range classes {
 		profiles = append(profiles, core.ProviderClassProfileFromMachines(

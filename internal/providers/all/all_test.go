@@ -1445,13 +1445,14 @@ func TestClassSpecsReportCompleteShapesForEveryClass(t *testing.T) {
 		}
 		seen++
 		classes := specs.ClassSpecs()
-		if got, want := len(classes), len(core.MachineClassOrder); got != want {
+		classOrder := core.CanonicalProviderClasses()
+		if got, want := len(classes), len(classOrder); got != want {
 			t.Errorf("%s reports %d classes, want %d", providerName, got, want)
 			continue
 		}
 		for i, class := range classes {
-			if class.Class != core.MachineClassOrder[i] {
-				t.Errorf("%s class %d = %q, want %q", providerName, i, class.Class, core.MachineClassOrder[i])
+			if class.Class != classOrder[i] {
+				t.Errorf("%s class %d = %q, want %q", providerName, i, class.Class, classOrder[i])
 			}
 			if class.Type == "" {
 				t.Errorf("%s/%s has no type", providerName, class.Class)

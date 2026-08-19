@@ -82,12 +82,12 @@ func TestProviderClassSpecsFromProfilesProjectsDefaultSelector(t *testing.T) {
 }
 
 func (testAWSProvider) ClassProfiles() []ProviderClassProfile {
-	primaryAMD64 := map[string]string{"standard": "c7a.8xlarge", "fast": "c7a.16xlarge", "large": "c7a.24xlarge", "beast": "c7a.48xlarge"}
-	primaryARM64 := map[string]string{"standard": "c7g.8xlarge", "fast": "c7g.16xlarge", "large": "c7g.16xlarge", "beast": "c7g.16xlarge"}
-	primaryWindows := map[string]string{"standard": "m7i.large", "fast": "m7i.xlarge", "large": "m7i.2xlarge", "beast": "m7i.4xlarge"}
-	primaryWSL2 := map[string]string{"standard": "m8i.large", "fast": "m8i.xlarge", "large": "m8i.2xlarge", "beast": "m8i.4xlarge"}
+	primaryAMD64 := map[string]string{"tiny": "m7a.large", "small": "c7a.2xlarge", "standard": "c7a.8xlarge", "fast": "c7a.16xlarge", "large": "c7a.24xlarge", "beast": "c7a.48xlarge"}
+	primaryARM64 := map[string]string{"tiny": "m7g.large", "small": "c7g.2xlarge", "standard": "c7g.8xlarge", "fast": "c7g.16xlarge", "large": "c7g.16xlarge", "beast": "c7g.16xlarge"}
+	primaryWindows := map[string]string{"tiny": "m7a.large", "small": "c7a.2xlarge", "standard": "m7i.large", "fast": "m7i.xlarge", "large": "m7i.2xlarge", "beast": "m7i.4xlarge"}
+	primaryWSL2 := map[string]string{"tiny": "m8i.large", "small": "c8i.2xlarge", "standard": "m8i.large", "fast": "m8i.xlarge", "large": "m8i.2xlarge", "beast": "m8i.4xlarge"}
 	mac := []string{"mac2.metal", "mac2-m2.metal", "mac2-m2pro.metal", "mac-m4.metal", "mac-m4pro.metal", "mac-m4max.metal", "mac2-m1ultra.metal", "mac-m3ultra.metal", "mac1.metal"}
-	profiles := make([]ProviderClassProfile, 0, 20)
+	profiles := make([]ProviderClassProfile, 0, 30)
 	for _, class := range CanonicalProviderClasses() {
 		profiles = append(profiles,
 			testProfile(class, targetLinux, "", ProviderClassArchitectureAMD64, primaryAMD64[class], "t3.small"),
@@ -102,19 +102,22 @@ func (testAWSProvider) ClassProfiles() []ProviderClassProfile {
 
 func (testAzureProvider) ClassProfiles() []ProviderClassProfile {
 	linuxAMD64 := map[string][]string{
+		"tiny": {"Standard_D2ads_v6"}, "small": {"Standard_D8ads_v6"},
 		"standard": {"Standard_D32ads_v6"}, "fast": {"Standard_D64ads_v6"}, "large": {"Standard_D96ads_v6"}, "beast": {"Standard_D192ds_v6"},
 	}
 	arm64 := map[string][]string{
+		"tiny": {"Standard_D2pds_v6"}, "small": {"Standard_D8pds_v6"},
 		"standard": {"Standard_D32pds_v6", "Standard_D32ps_v6", "Standard_D16pds_v6", "Standard_D16ps_v6"},
 		"fast":     {"Standard_D64pds_v6"}, "large": {"Standard_D96pds_v6"}, "beast": {"Standard_D96pds_v6"},
 	}
 	windows := map[string][]string{
+		"tiny": {"Standard_D2ads_v6"}, "small": {"Standard_D8ads_v6"},
 		"standard": {"Standard_D2ads_v6", "Standard_D2ds_v6", "Standard_D2ads_v5", "Standard_D2ds_v5", "Standard_D2as_v6"},
 		"fast":     {"Standard_D4ads_v6"},
 		"large":    {"Standard_D8ads_v6", "Standard_D8ds_v6", "Standard_D8ads_v5", "Standard_D8ds_v5", "Standard_D8as_v6"},
 		"beast":    {"Standard_D16ads_v6", "Standard_D16ds_v6", "Standard_D16ads_v5", "Standard_D16ds_v5", "Standard_D8ads_v6"},
 	}
-	profiles := make([]ProviderClassProfile, 0, 20)
+	profiles := make([]ProviderClassProfile, 0, 30)
 	for _, class := range CanonicalProviderClasses() {
 		profiles = append(profiles,
 			testProfile(class, targetLinux, "", ProviderClassArchitectureAMD64, linuxAMD64[class]...),
@@ -128,15 +131,15 @@ func (testAzureProvider) ClassProfiles() []ProviderClassProfile {
 }
 
 func (testGCPProvider) ClassProfiles() []ProviderClassProfile {
-	return testLinuxProfiles([]string{"c4-standard-32", "c4-standard-64", "c4-standard-96", "c4-standard-192"})
+	return testLinuxProfiles([]string{"c4-standard-4", "c4-standard-8", "c4-standard-32", "c4-standard-64", "c4-standard-96", "c4-standard-192"})
 }
 
 func (testHetznerProvider) ClassProfiles() []ProviderClassProfile {
-	return testLinuxProfiles([]string{"ccx33", "ccx43", "ccx53", "ccx63"})
+	return testLinuxProfiles([]string{"ccx13", "ccx23", "ccx33", "ccx43", "ccx53", "ccx63"})
 }
 
 func (testNamespaceProvider) ClassProfiles() []ProviderClassProfile {
-	return testLinuxProfiles([]string{"S", "M", "L", "XL"})
+	return testLinuxProfiles([]string{"S", "S", "S", "M", "L", "XL"})
 }
 
 func (testCloudflareProvider) ClassProfiles() []ProviderClassProfile {
@@ -591,9 +594,12 @@ func TestProviderClassCatalogSortsProfilesWithoutSortingFallbacks(t *testing.T) 
 }
 
 func TestProviderClassConstructorsKeepCanonicalDataImmutable(t *testing.T) {
+	if got, want := CanonicalProviderClasses(), []string{"tiny", "small", "standard", "fast", "large", "beast"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("canonical classes=%v want %v", got, want)
+	}
 	classes := CanonicalProviderClasses()
 	classes[0] = "changed"
-	if got := CanonicalProviderClasses()[0]; got != "standard" {
+	if got := CanonicalProviderClasses()[0]; got != "tiny" {
 		t.Fatalf("canonical classes mutated: %v", CanonicalProviderClasses())
 	}
 

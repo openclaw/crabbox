@@ -66,7 +66,8 @@ tencentcloud:
 
 Without an explicitly selected class, Tencent Cloud keeps the configured
 provider-native type or the compiled `SA5.MEDIUM2` default. Explicit canonical
-classes map to `standard=SA5.MEDIUM2`, `fast=SA5.LARGE8`,
+classes map to `tiny=SA5.MEDIUM2`, `small=SA5.MEDIUM2`,
+`standard=SA5.MEDIUM2`, `fast=SA5.LARGE8`,
 `large=SA5.2XLARGE16`, and `beast=SA5.8XLARGE64`. Explicit `--type` and
 `tencentcloud.type`/`--tencentcloud-type` values take precedence over class.
 

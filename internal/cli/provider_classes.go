@@ -60,7 +60,7 @@ type ProviderClassProfileProvider interface {
 	ClassProfiles() []ProviderClassProfile
 }
 
-var canonicalProviderClasses = [...]string{"standard", "fast", "large", "beast"}
+var canonicalProviderClasses = [...]string{"tiny", "small", "standard", "fast", "large", "beast"}
 
 func CanonicalProviderClasses() []string {
 	return append([]string(nil), canonicalProviderClasses[:]...)

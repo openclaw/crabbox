@@ -106,6 +106,46 @@ func TestAWSAndAzureClassProfileVariantCoverage(t *testing.T) {
 	}
 }
 
+func TestTinyAndSmallProfilePrimariesForMappedProviders(t *testing.T) {
+	want := map[string]map[string]string{
+		"aws":                {"tiny": "m7a.large", "small": "c7a.2xlarge"},
+		"azure":              {"tiny": "Standard_D2ads_v6", "small": "Standard_D8ads_v6"},
+		"cloudflare":         {"tiny": "standard-4", "small": "standard-4"},
+		"digitalocean":       {"tiny": "s-1vcpu-1gb", "small": "s-1vcpu-1gb"},
+		"gcp":                {"tiny": "c4-standard-4", "small": "c4-standard-8"},
+		"hetzner":            {"tiny": "ccx13", "small": "ccx23"},
+		"linode":             {"tiny": "g6-standard-1", "small": "g6-standard-1"},
+		"namespace-devbox":   {"tiny": "S", "small": "S"},
+		"namespace-instance": {"tiny": "1x2", "small": "2x4"},
+		"ovh":                {"tiny": "b3-8", "small": "b3-8"},
+		"phala":              {"tiny": "tdx.small", "small": "tdx.small"},
+		"scaleway":           {"tiny": "DEV1-S", "small": "DEV1-S"},
+		"tencentcloud":       {"tiny": "SA5.MEDIUM2", "small": "SA5.MEDIUM2"},
+		"vultr":              {"tiny": "vc2-1c-1gb", "small": "vc2-1c-1gb"},
+	}
+	for providerName, classes := range want {
+		provider, err := core.ProviderFor(providerName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		profiles := provider.(core.ProviderClassProfileProvider).ClassProfiles()
+		for class, wantType := range classes {
+			found := false
+			for _, profile := range profiles {
+				if profile.Class == class && profile.Target == core.TargetLinux && profile.Architecture == core.ProviderClassArchitectureAMD64 {
+					found = true
+					if profile.Primary.Type != wantType {
+						t.Errorf("provider=%s class=%s primary=%q want %q", providerName, class, profile.Primary.Type, wantType)
+					}
+				}
+			}
+			if !found {
+				t.Errorf("provider=%s class=%s missing linux/amd64 profile", providerName, class)
+			}
+		}
+	}
+}
+
 func TestClassProfileCandidatesMatchRuntimeLoops(t *testing.T) {
 	for _, name := range []string{"aws", "azure", "gcp", "hetzner"} {
 		provider, err := core.ProviderFor(name)
@@ -218,6 +258,9 @@ func validateProviderClassProfiles(t *testing.T, provider core.Provider) {
 		classesByVariant[key][profile.Class] = struct{}{}
 	}
 	for key, classes := range classesByVariant {
+		if len(classes) != len(core.CanonicalProviderClasses()) {
+			t.Errorf("variant=%s has %d classes, want %d", key, len(classes), len(core.CanonicalProviderClasses()))
+		}
 		for _, class := range core.CanonicalProviderClasses() {
 			if _, ok := classes[class]; !ok {
 				t.Errorf("variant=%s missing class=%s", key, class)

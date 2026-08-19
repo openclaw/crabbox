@@ -9,6 +9,8 @@ import (
 
 func TestClassSpecs(t *testing.T) {
 	want := []core.ClassSpec{
+		{Class: "tiny", Type: "1x2", VCPUs: 1, MemoryGB: 2},
+		{Class: "small", Type: "2x4", VCPUs: 2, MemoryGB: 4},
 		{Class: "standard", Type: "4x8", VCPUs: 4, MemoryGB: 8},
 		{Class: "fast", Type: "8x16", VCPUs: 8, MemoryGB: 16},
 		{Class: "large", Type: "16x32", VCPUs: 16, MemoryGB: 32},
@@ -21,8 +23,8 @@ func TestClassSpecs(t *testing.T) {
 
 func TestClassProfilesCoverCanonicalClasses(t *testing.T) {
 	profiles := (Provider{}).ClassProfiles()
-	if len(profiles) != 4 {
-		t.Fatalf("ClassProfiles len=%d want 4", len(profiles))
+	if len(profiles) != len(core.CanonicalProviderClasses()) {
+		t.Fatalf("ClassProfiles len=%d want %d", len(profiles), len(core.CanonicalProviderClasses()))
 	}
 	for _, profile := range profiles {
 		if profile.Primary.Type == "" || profile.Fallbacks == nil {

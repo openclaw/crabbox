@@ -39,7 +39,7 @@ func (Provider) ClassProfiles() []core.ProviderClassProfile {
 
 func buildClassProfiles() []core.ProviderClassProfile {
 	classes := core.CanonicalProviderClasses()
-	types := []string{"S", "M", "L", "XL"}
+	types := []string{"S", "S", "S", "M", "L", "XL"}
 	profiles := make([]core.ProviderClassProfile, 0, len(classes))
 	for index, class := range classes {
 		profiles = append(profiles, core.ProviderClassProfileFromMachines(

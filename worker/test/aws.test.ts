@@ -685,29 +685,34 @@ describe("aws provider", () => {
     expect(check.message).toContain("capacity=quota_pressure");
   });
 
-  it("recommends the published two-vCPU fallback when quota is minimal", () => {
-    const check = awsCapacityReadinessCheckForQuota(
-      {
-        target: "linux",
-        architecture: "amd64",
-        windowsMode: "normal",
-        class: "beast",
-        serverType: "c7a.48xlarge",
-        capacityMarket: "spot",
-        capacityFallback: "on-demand-after-120s",
-      },
-      "spot",
-      "eu-west-1",
-      2,
-    );
+  it("recommends tiny and small classes for low quotas", () => {
+    for (const [limit, machineClass, serverType] of [
+      [2, "tiny", "m7a.large"],
+      [8, "small", "c7a.2xlarge"],
+    ] as const) {
+      const check = awsCapacityReadinessCheckForQuota(
+        {
+          target: "linux",
+          architecture: "amd64",
+          windowsMode: "normal",
+          class: "beast",
+          serverType: "c7a.48xlarge",
+          capacityMarket: "spot",
+          capacityFallback: "on-demand-after-120s",
+        },
+        "spot",
+        "eu-west-1",
+        limit,
+      );
 
-    expect(check).toMatchObject({
-      status: "warning",
-      details: {
-        recommended_class: "standard",
-        recommended_type: "t3.small",
-      },
-    });
+      expect(check).toMatchObject({
+        status: "warning",
+        details: {
+          recommended_class: machineClass,
+          recommended_type: serverType,
+        },
+      });
+    }
   });
 
   it("does not launch a canonical class as a literal type for an unsupported selector", () => {

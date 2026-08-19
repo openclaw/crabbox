@@ -136,7 +136,7 @@ func (Provider) ClassSpecs() []core.ClassSpec {
 }
 
 func buildClassProfiles() []core.ProviderClassProfile {
-	profiles := make([]core.ProviderClassProfile, 0, 4)
+	profiles := make([]core.ProviderClassProfile, 0, len(core.CanonicalProviderClasses()))
 	for _, class := range core.CanonicalProviderClasses() {
 		candidates := serverTypeCandidatesForClass(class)
 		machines := make([]core.ProviderClassMachine, 0, len(candidates))
@@ -172,6 +172,10 @@ func serverShape(serverType string) (int, int) {
 
 func serverTypeCandidatesForClass(class string) []string {
 	switch class {
+	case "tiny":
+		return []string{"ccx13", "cpx22", "cx23"}
+	case "small":
+		return []string{"ccx23", "cpx32", "cx33"}
 	case "standard":
 		return []string{"ccx33", "cpx62", "cx53"}
 	case "fast":

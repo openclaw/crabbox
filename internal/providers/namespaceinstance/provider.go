@@ -164,7 +164,7 @@ func (Provider) ClassSpecs() []core.ClassSpec {
 }
 
 func buildClassProfiles() []core.ProviderClassProfile {
-	types := []string{"4x8", "8x16", "16x32", "32x64"}
+	types := []string{"1x2", "2x4", "4x8", "8x16", "16x32", "32x64"}
 	classes := core.CanonicalProviderClasses()
 	profiles := make([]core.ProviderClassProfile, 0, len(classes))
 	for index, class := range classes {

@@ -92,12 +92,12 @@ large     c7a.24xlarge (96 vCPU, 192 GiB RAM), c7i.24xlarge, m7a.24xlarge, m7i.2
 beast     c7a.48xlarge (192 vCPU, 384 GiB RAM), c7i.48xlarge, m7a.48xlarge, m7i.48xlarge, r7a.48xlarge, c7a.32xlarge, c7i.32xlarge, m7a.32xlarge, c7a.24xlarge, c7a.16xlarge, t3.small
 
 AWS (Linux ARM64)
-tiny      m7g.large, c7g.xlarge, r7g.large
-small     c7g.2xlarge, m7g.xlarge, r7g.large, c7g.xlarge
+tiny      m7g.large, c7g.xlarge, r7g.large, t4g.small
+small     c7g.2xlarge, m7g.xlarge, r7g.large, c7g.xlarge, t4g.small
 
 AWS Windows (normal)
 tiny      m7a.large, m7i.large, t3.large
-small     c7a.2xlarge, c7i.2xlarge, m7a.xlarge, m7i.xlarge, t3.xlarge
+small     c7a.2xlarge, c7i.2xlarge, m7a.xlarge, m7i.xlarge, t3.xlarge, t3.large
 standard  m7i.large, m7a.large, t3.large
 fast      m7i.xlarge, m7a.xlarge, t3.xlarge, t3.large
 large     m7i.2xlarge, m7a.2xlarge, t3.2xlarge, t3.large
@@ -105,7 +105,7 @@ beast     m7i.4xlarge, m7a.4xlarge, m7i.2xlarge, t3.large
 
 AWS Windows WSL2
 tiny      m8i.large, m8i-flex.large, c8i.xlarge, r8i.large
-small     c8i.2xlarge, m8i.xlarge, m8i-flex.xlarge, r8i.large, c8i.xlarge
+small     c8i.2xlarge, m8i.xlarge, m8i-flex.xlarge, r8i.large, c8i.xlarge, m8i.large
 standard  m8i.large, m8i-flex.large, c8i.large, r8i.large
 fast      m8i.xlarge, m8i-flex.xlarge, c8i.xlarge, r8i.xlarge, m8i.large
 large     m8i.2xlarge, m8i-flex.2xlarge, c8i.2xlarge, r8i.2xlarge, m8i.large
@@ -140,10 +140,6 @@ fast      8x16 (8 vCPU, 16 GB RAM)
 large     16x32 (16 vCPU, 32 GB RAM)
 beast     32x64 (32 vCPU, 64 GB RAM)
 
-Azure (Linux)
-tiny      Standard_D2ads_v6, Standard_D2ds_v6, Standard_D2ads_v5, Standard_D2ds_v5, Standard_F2s_v2
-small     Standard_D8ads_v6, Standard_D8ds_v6, Standard_F8s_v2, Standard_D8ads_v5, Standard_D8ds_v5, Standard_D4ads_v6, Standard_D4ds_v6, Standard_F4s_v2
-
 Azure (Linux/Windows ARM64)
 tiny      Standard_D2pds_v6, Standard_D2ps_v6
 small     Standard_D8pds_v6, Standard_D8ps_v6, Standard_D4pds_v6, Standard_D4ps_v6
@@ -164,7 +160,7 @@ Cloudflare Containers (each canonical class -> standard-4)
 lite, basic, standard-1, standard-2, standard-3, standard-4
 ```
 
-The four canonical classes are profiled per exact selector. AWS declares
+All six canonical classes are profiled per exact selector. AWS declares
 Linux/amd64, Linux/arm64, Windows normal/amd64, Windows WSL2/amd64, and
 macOS/mixed. Its macOS sequence is Apple Silicon first and ends with the Intel
 `mac1.metal`; every canonical class exposes the same sequence. Azure declares

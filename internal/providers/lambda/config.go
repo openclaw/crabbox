@@ -54,7 +54,7 @@ func imageForConfig(cfg core.Config) string {
 
 func serverTypeForClass(class string) string {
 	switch strings.ToLower(strings.TrimSpace(class)) {
-	case "standard", "fast", "large", "beast":
+	case "tiny", "small", "standard", "fast", "large", "beast":
 		return defaultType
 	default:
 		return defaultType

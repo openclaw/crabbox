@@ -9,6 +9,8 @@ import (
 
 func TestClassSpecs(t *testing.T) {
 	want := []core.ClassSpec{
+		{Class: "tiny", Type: "ccx13", VCPUs: 2, MemoryGB: 8},
+		{Class: "small", Type: "ccx23", VCPUs: 4, MemoryGB: 16},
 		{Class: "standard", Type: "ccx33", VCPUs: 8, MemoryGB: 32},
 		{Class: "fast", Type: "ccx43", VCPUs: 16, MemoryGB: 64},
 		{Class: "large", Type: "ccx53", VCPUs: 32, MemoryGB: 128},
@@ -21,12 +23,24 @@ func TestClassSpecs(t *testing.T) {
 
 func TestClassProfilesCoverCanonicalClasses(t *testing.T) {
 	profiles := (Provider{}).ClassProfiles()
-	if len(profiles) != 4 {
-		t.Fatalf("ClassProfiles len=%d want 4", len(profiles))
+	if len(profiles) != len(core.CanonicalProviderClasses()) {
+		t.Fatalf("ClassProfiles len=%d want %d", len(profiles), len(core.CanonicalProviderClasses()))
 	}
 	for _, profile := range profiles {
 		if profile.Primary.Type == "" || profile.Fallbacks == nil {
 			t.Fatalf("incomplete profile: %#v", profile)
+		}
+	}
+}
+
+func TestTinyAndSmallCandidateMappings(t *testing.T) {
+	tests := map[string][]string{
+		"tiny":  {"ccx13", "cpx22", "cx23"},
+		"small": {"ccx23", "cpx32", "cx33"},
+	}
+	for class, want := range tests {
+		if got := serverTypeCandidatesForClass(class); !reflect.DeepEqual(got, want) {
+			t.Errorf("class=%s candidates=%v want %v", class, got, want)
 		}
 	}
 }

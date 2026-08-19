@@ -468,7 +468,7 @@ describe("machine class config", () => {
       new URL("../../internal/providers/hetzner/provider.go", import.meta.url),
       "utf8",
     );
-    const classes = ["standard", "fast", "large", "beast"];
+    const classes = ["tiny", "small", "standard", "fast", "large", "beast"];
     const hetzner = parseGoStringArrayCases(
       goFunctionBody(goHetzner, "serverTypeCandidatesForClass"),
     );
