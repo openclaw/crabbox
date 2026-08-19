@@ -461,6 +461,7 @@ func TestCleanupDryRunNeverDestroys(t *testing.T) {
 	leaseID := "cbx_aaaabbbbcccc"
 	runner := &scriptedRunner{scripts: []func([]string) (core.LocalCommandResult, error){
 		ok(fmt.Sprintf(`[{"name":%q,"status":"running","url":"%s.boxd.sh","source":"standalone","sharing":"private"}]`, name, name)),
+		ok(fmt.Sprintf(`{"name":%q,"id":"vm-9","status":"running","url":"%s.boxd.sh"}`, name, name)),
 	}}
 	b := testBackend(t, runner)
 	var stdout strings.Builder
@@ -501,6 +502,79 @@ func TestCleanupSkipsUnclaimedMachines(t *testing.T) {
 		if len(c.args) > 1 && c.args[1] == "remove" {
 			t.Fatalf("cleanup destroyed an unclaimed machine: %v", runner.calls)
 		}
+	}
+}
+
+// The next three tests pin the machine-id binding: boxd retains destroyed
+// machine names for reuse, so a stale claim plus a name match must never
+// authorize touching a REPLACEMENT machine with a different immutable id.
+
+func TestReleaseLeavesReplacedMachineUntouched(t *testing.T) {
+	name := "crabbox-cbx-aaaabbbbcccc"
+	leaseID := "cbx_aaaabbbbcccc"
+	runner := &scriptedRunner{scripts: []func([]string) (core.LocalCommandResult, error){
+		ok(fmt.Sprintf(`{"name":%q,"id":"vm-REPLACEMENT","status":"running","url":"%s.boxd.sh"}`, name, name)),
+	}}
+	b := testBackend(t, runner)
+	cfg := b.configForRun()
+	server := core.Server{CloudID: "vm-ORIGINAL", Provider: providerName, Name: name, Labels: map[string]string{"machine": name, "lease": leaseID, "vm_id": "vm-ORIGINAL"}}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, "", cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
+		t.Fatalf("release of a replaced machine must succeed without touching it: %v", err)
+	}
+	for _, c := range runner.calls {
+		if len(c.args) > 1 && (c.args[1] == "remove" || c.args[1] == "stop") {
+			t.Fatalf("replacement machine was touched: %v", runner.calls)
+		}
+	}
+	if claims, _ := boxdClaims(cfg); len(claims) != 0 {
+		t.Fatalf("stale claim not reaped: %v", claims)
+	}
+}
+
+func TestResolveRefusesReplacedMachine(t *testing.T) {
+	name := "crabbox-cbx-aaaabbbbcccc"
+	leaseID := "cbx_aaaabbbbcccc"
+	runner := &scriptedRunner{scripts: []func([]string) (core.LocalCommandResult, error){
+		ok(fmt.Sprintf(`{"name":%q,"id":"vm-REPLACEMENT","status":"running","url":"%s.boxd.sh"}`, name, name)),
+	}}
+	b := testBackend(t, runner)
+	cfg := b.configForRun()
+	server := core.Server{CloudID: "vm-ORIGINAL", Provider: providerName, Name: name, Labels: map[string]string{"machine": name, "lease": leaseID, "vm_id": "vm-ORIGINAL"}}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, "", cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	_, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID})
+	if err == nil || !strings.Contains(err.Error(), "was replaced") {
+		t.Fatalf("resolve of a replaced machine must be refused, err=%v", err)
+	}
+}
+
+func TestCleanupSkipsReplacedMachineAndReapsClaim(t *testing.T) {
+	name := "crabbox-cbx-aaaabbbbcccc"
+	leaseID := "cbx_aaaabbbbcccc"
+	runner := &scriptedRunner{scripts: []func([]string) (core.LocalCommandResult, error){
+		ok(fmt.Sprintf(`[{"name":%q,"status":"running","url":"%s.boxd.sh","source":"standalone","sharing":"private"}]`, name, name)),
+		ok(fmt.Sprintf(`{"name":%q,"id":"vm-REPLACEMENT","status":"running","url":"%s.boxd.sh"}`, name, name)),
+	}}
+	b := testBackend(t, runner)
+	cfg := b.configForRun()
+	server := core.Server{CloudID: "vm-ORIGINAL", Provider: providerName, Name: name, Labels: map[string]string{"machine": name, "lease": leaseID, "vm_id": "vm-ORIGINAL", "recovery": "rollback-cleanup"}}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, "", cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range runner.calls {
+		if len(c.args) > 1 && c.args[1] == "remove" {
+			t.Fatalf("cleanup destroyed a replacement machine: %v", runner.calls)
+		}
+	}
+	if claims, _ := boxdClaims(cfg); len(claims) != 0 {
+		t.Fatalf("stale claim not reaped by the orphan pass: %v", claims)
 	}
 }
 

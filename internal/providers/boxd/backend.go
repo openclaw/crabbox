@@ -197,6 +197,12 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if !found {
 		return core.LeaseTarget{}, core.Exit(4, "lease %s not found for provider=%s (machine %s does not exist)", req.ID, providerName, name)
 	}
+	// boxd retains destroyed machine names for reuse: bind on the immutable
+	// machine id so a stale claim can never hand this lease a replacement
+	// machine of the same name.
+	if boundID := claimBoundMachineID(claim, name); boundID != "" && strings.TrimSpace(summary.ID) != boundID {
+		return core.LeaseTarget{}, core.Exit(4, "lease %s machine %s was replaced (claimed vm_id=%s, current=%s); refusing to touch the replacement", req.ID, name, boundID, summary.ID)
+	}
 	labels := b.labelsFor(name, summary.ID, summary.Status, cfg, claim, claimed)
 	server := b.serverFromLabels(name, summary.ID, boxdState(summary.Status), cfg, labels)
 	if req.ReleaseOnly || (req.StatusOnly && !req.ReadyProbe) {
@@ -307,12 +313,25 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if claimedMachine := strings.TrimSpace(claim.Labels["machine"]); claimedMachine != "" && claimedMachine != name {
 		return core.Exit(4, "refusing to release boxd machine %s: local claim for lease %s names machine %s", name, leaseID, claimedMachine)
 	}
+	// boxd retains destroyed machine names for reuse, so the name alone cannot
+	// prove the live machine is the claimed one: bind on the immutable machine
+	// id the claim recorded. On mismatch the CLAIMED machine is provably gone
+	// — reap the stale claim and leave the replacement untouched.
+	boundID := claimBoundMachineID(claim, name)
+	releaseReplaced := func(currentID string) error {
+		fmt.Fprintf(b.rt.Stderr, "boxd machine %s was replaced (claimed vm_id=%s, current=%s); leaving the current machine untouched\n", name, boundID, currentID)
+		core.RemoveLeaseClaim(leaseID)
+		return nil
+	}
 	if !deleteOnRelease(req.Lease, cfg) {
 		// Keep mode: stop the machine (disk persists; a later resolve restarts
 		// it) and retain the claim as the ownership anchor.
 		summary, found, err := b.getMachine(ctx, cfg, name)
 		if err != nil {
 			return err
+		}
+		if found && boundID != "" && strings.TrimSpace(summary.ID) != boundID {
+			return releaseReplaced(summary.ID)
 		}
 		if found && boxdState(summary.Status) != "stopped" {
 			if err := b.stopMachine(ctx, cfg, name); err != nil {
@@ -334,11 +353,14 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	// control plane is eventually consistent, and treating a transient
 	// not-found as success would leak a live machine with no anchor.
 	for attempt := 0; ; attempt++ {
-		_, found, err := b.getMachine(ctx, cfg, name)
+		summary, found, err := b.getMachine(ctx, cfg, name)
 		if err != nil {
 			return err
 		}
 		if found {
+			if boundID != "" && strings.TrimSpace(summary.ID) != boundID {
+				return releaseReplaced(summary.ID)
+			}
 			if err := b.destroyMachine(ctx, cfg, name); err != nil {
 				return err
 			}
@@ -355,6 +377,18 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	}
 	core.RemoveLeaseClaim(leaseID)
 	return nil
+}
+
+// claimBoundMachineID returns the immutable boxd machine id (vm uuid) the
+// claim recorded at acquire time, or "" when the claim carries no id binding.
+// The CloudID fallback can be the machine name itself, which carries no id
+// authority.
+func claimBoundMachineID(claim core.LeaseClaim, name string) string {
+	id := strings.TrimSpace(firstNonBlank(claim.Labels["vm_id"], claim.CloudID))
+	if id == "" || id == name {
+		return ""
+	}
+	return id
 }
 
 func (b *backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
@@ -419,7 +453,6 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		if leaseID == "" {
 			continue
 		}
-		live[leaseID] = struct{}{}
 		claim, ok := claims[leaseID]
 		// boxd has no server-side ownership labels: a crabbox-named machine
 		// with no matching local claim cannot be proven ours. Never delete it.
@@ -427,6 +460,23 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			fmt.Fprintf(b.rt.Stderr, "skip machine=%s reason=no local claim for lease %s\n", row.Name, leaseID)
 			continue
 		}
+		// boxd retains destroyed machine names for reuse, and `machine list`
+		// carries no ids: corroborate the claim's immutable machine id via
+		// `machine get` before any destructive decision. On mismatch the
+		// CLAIMED machine is gone and the live one is a foreign replacement —
+		// leave it untouched and let the orphan pass reap the stale claim.
+		summary, found, err := b.getMachine(ctx, cfg, row.Name)
+		if err != nil {
+			return err
+		}
+		if !found {
+			continue
+		}
+		if boundID := claimBoundMachineID(claim, row.Name); boundID != "" && strings.TrimSpace(summary.ID) != boundID {
+			fmt.Fprintf(b.rt.Stderr, "skip machine=%s reason=claimed machine was replaced (claimed vm_id=%s, current=%s)\n", row.Name, boundID, summary.ID)
+			continue
+		}
+		live[leaseID] = struct{}{}
 		server := b.server(row.Name, row.Status, row.URL, cfg, claims)
 		remove, reason := core.ShouldCleanupServer(server, b.now())
 		if recoveryRemove, recoveryReason, handled := boxdRecoveryCleanup(claim); handled {
