@@ -5,7 +5,7 @@
 ### Added
 
 - Added `tiny` and `small` machine classes for lower-cost smoke checks and small repositories.
-- Added provider-owned machine-class profiles with target, architecture, ordered fallback, and explicit shape units to both JSON provider discovery commands.
+- Added authoritative, target-aware machine-class catalogs to both JSON provider discovery commands while preserving the initial default-target class summaries.
 - Added an opt-in `cmake --version` preflight probe for POSIX, WSL2, and native Windows targets. Thanks @coygeek.
 
 ### Fixed
@@ -17,6 +17,7 @@
 
 ### Added
 
+- Added concrete primary machine types, vCPU counts, and RAM sizes to `crabbox providers` class reporting.
 - Added credential-free `crabbox providers describe` discovery for canonical provider-scoped run flags and compiled defaults. Thanks @coygeek.
 - Added supported versioned `go install` as a CLI-only installation channel, with clean module dependency semantics, source-derived release and revision versions, and hermetic release verification. Thanks @coygeek.
 - Added an opt-in Linux/WSL2 `raw_socket` preflight probe that distinguishes direct, non-interactive-sudo, unavailable, and missing-interpreter states without sending packets or elevating workloads. Thanks @coygeek.

@@ -1,8 +1,23 @@
 package gcp
 
 import (
+	"reflect"
 	"testing"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func TestClassSpecs(t *testing.T) {
+	want := []core.ClassSpec{
+		{Class: "standard", Type: "c4-standard-32", VCPUs: 32, MemoryGB: 120},
+		{Class: "fast", Type: "c4-standard-64", VCPUs: 64, MemoryGB: 240},
+		{Class: "large", Type: "c4-standard-96", VCPUs: 96, MemoryGB: 360},
+		{Class: "beast", Type: "c4-standard-192", VCPUs: 192, MemoryGB: 720},
+	}
+	if got := (Provider{}).ClassSpecs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("ClassSpecs()=%#v want %#v", got, want)
+	}
+}
 
 func TestClassProfilesCoverCanonicalClasses(t *testing.T) {
 	profiles := (Provider{}).ClassProfiles()

@@ -1,10 +1,23 @@
 package azure
 
 import (
+	"reflect"
 	"testing"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func TestClassSpecs(t *testing.T) {
+	want := []core.ClassSpec{
+		{Class: "standard", Type: "Standard_D32ads_v6", VCPUs: 32, MemoryGB: 128},
+		{Class: "fast", Type: "Standard_D64ads_v6", VCPUs: 64, MemoryGB: 256},
+		{Class: "large", Type: "Standard_D96ads_v6", VCPUs: 96, MemoryGB: 384},
+		{Class: "beast", Type: "Standard_D192ds_v6", VCPUs: 192, MemoryGB: 768},
+	}
+	if got := (Provider{}).ClassSpecs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("ClassSpecs()=%#v want %#v", got, want)
+	}
+}
 
 func TestClassProfilesCoverAzureVariants(t *testing.T) {
 	profiles := (Provider{}).ClassProfiles()

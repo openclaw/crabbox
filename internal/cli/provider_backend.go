@@ -100,6 +100,21 @@ type ProviderServerTypeProvider interface {
 	ServerTypeForClass(class string) string
 }
 
+// ClassSpec reports the concrete machine one class resolves to on this
+// provider's default target, with its nominal shape when known.
+type ClassSpec struct {
+	Class    string `json:"class"`
+	Type     string `json:"type"`
+	VCPUs    int    `json:"vcpu,omitempty"`
+	MemoryGB int    `json:"memoryGb,omitempty"`
+}
+
+// ProviderClassSpecProvider reports provider-owned machine class resolutions
+// for the provider matrix.
+type ProviderClassSpecProvider interface {
+	ClassSpecs() []ClassSpec
+}
+
 // ProviderServerTypeOverrideProvider reports an exact provider-native machine
 // selection that outranks a non-explicit stored ServerType.
 type ProviderServerTypeOverrideProvider interface {

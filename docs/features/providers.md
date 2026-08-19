@@ -182,8 +182,8 @@ Noncanonical uppercase, padded, and custom strings retain provider-specific
 legacy handling.
 
 Both `crabbox providers --json` and schema-v2
-`crabbox providers describe <provider> --json` expose the same `classes`
-catalog. `disposition` is `mapped` when explicit canonical class intent has a
+`crabbox providers describe <provider> --json` expose the same authoritative
+`classCatalog`. `disposition` is `mapped` when explicit canonical class intent has a
 supported provider-owned machine profile, and `unmapped` otherwise. Unmapped
 does not promise that every input provenance rejects class or that no legacy
 metadata can contain one. The `profiles` and every `fallbacks` field are always
@@ -194,6 +194,13 @@ Known memory always carries its provider-native `MB`, `MiB`, `GB`, or `GiB`
 unit; GCP decimal GB ratios are not relabeled as GiB. The catalog is compiled
 static data and does not read config, credentials, provider state, local files,
 or the network.
+
+For compatibility, unversioned `crabbox providers --json` also keeps the
+`classes` array introduced for AWS, Azure, GCP, Hetzner, and Namespace
+Instance. It is a default Linux/amd64 summary derived from those providers'
+authoritative profiles, not a second runtime mapping source. Other providers
+omit it. Human `crabbox providers` prints this same five-provider projection;
+target-aware and fallback-aware discovery belongs to `classCatalog`.
 
 Azure full-caching ephemeral-disk eligibility remains a runtime policy layered
 over its stable base profiles, not another profile dimension. Snapshot runs use

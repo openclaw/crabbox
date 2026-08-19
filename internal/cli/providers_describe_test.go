@@ -107,12 +107,12 @@ func TestDescribeProviderAliasSchemaCapabilitiesAndFlags(t *testing.T) {
 	}
 }
 
-func TestDescribeProviderClassesMatchMatrixForCanonicalAndAliases(t *testing.T) {
+func TestDescribeProviderClassCatalogMatchesMatrixForCanonicalAndAliases(t *testing.T) {
 	for _, provider := range registeredProviders() {
 		if provider.Spec().Kind != ProviderKindSSHLease && provider.Spec().Kind != ProviderKindDelegatedRun {
 			continue
 		}
-		matrixCatalog := providerMatrixEntryFor(provider).Classes
+		matrixCatalog := providerMatrixEntryFor(provider).ClassCatalog
 		for _, requested := range append([]string{provider.Name()}, provider.Aliases()...) {
 			description, err := describeProvider(requested)
 			if err != nil {
@@ -121,8 +121,8 @@ func TestDescribeProviderClassesMatchMatrixForCanonicalAndAliases(t *testing.T) 
 			if description.SchemaVersion != 2 {
 				t.Errorf("describeProvider(%q) schema=%d want 2", requested, description.SchemaVersion)
 			}
-			if !reflect.DeepEqual(description.Classes, matrixCatalog) {
-				t.Errorf("describeProvider(%q) classes=%#v matrix=%#v", requested, description.Classes, matrixCatalog)
+			if !reflect.DeepEqual(description.ClassCatalog, matrixCatalog) {
+				t.Errorf("describeProvider(%q) classCatalog=%#v matrix=%#v", requested, description.ClassCatalog, matrixCatalog)
 			}
 		}
 	}

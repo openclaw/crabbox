@@ -13,7 +13,10 @@ func init() {
 
 type Provider struct{}
 
-var _ core.ProviderClassProfileProvider = Provider{}
+var (
+	_ core.ProviderClassProfileProvider = Provider{}
+	_ core.ProviderClassSpecProvider    = Provider{}
+)
 
 // AWS publishes C7 compute-optimized instances at 2 GiB/vCPU, M7/M8
 // general-purpose instances at 4 GiB/vCPU, and R7/R8 memory-optimized instances
@@ -105,6 +108,10 @@ func (Provider) ServerTypeForClass(class string) string {
 
 func (Provider) ClassProfiles() []core.ProviderClassProfile {
 	return classProfiles
+}
+
+func (Provider) ClassSpecs() []core.ClassSpec {
+	return core.ProviderClassSpecsFromProfiles(classProfiles)
 }
 
 func buildClassProfiles() []core.ProviderClassProfile {

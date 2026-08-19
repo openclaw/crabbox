@@ -47,6 +47,40 @@ func testLinuxProfiles(types []string) []ProviderClassProfile {
 	return profiles
 }
 
+func TestProviderClassSpecsFromProfilesProjectsDefaultSelector(t *testing.T) {
+	intPointer := func(value int) *int { return &value }
+	profiles := []ProviderClassProfile{
+		ProviderClassProfileFromMachines("beast", targetLinux, "", ProviderClassArchitectureAMD64, []ProviderClassMachine{{
+			Type: "beast-primary", Architecture: ProviderClassArchitectureAMD64, VCPU: intPointer(32),
+			Memory: &ProviderMemory{Value: 64, Unit: ProviderMemoryUnitGB},
+		}}),
+		ProviderClassProfileFromMachines("standard", targetLinux, "", ProviderClassArchitectureARM64, []ProviderClassMachine{{
+			Type: "wrong-architecture", Architecture: ProviderClassArchitectureARM64,
+		}}),
+		ProviderClassProfileFromMachines("fast", targetLinux, "", ProviderClassArchitectureAMD64, []ProviderClassMachine{
+			{Type: "fast-primary", Architecture: ProviderClassArchitectureAMD64, VCPU: intPointer(8), Memory: &ProviderMemory{Value: 15.5, Unit: ProviderMemoryUnitGB}},
+			{Type: "fast-fallback", Architecture: ProviderClassArchitectureAMD64, VCPU: intPointer(4), Memory: &ProviderMemory{Value: 8, Unit: ProviderMemoryUnitGB}},
+		}),
+		ProviderClassProfileFromMachines("large", targetLinux, "", ProviderClassArchitectureAMD64, []ProviderClassMachine{{
+			Type: "large-primary", Architecture: ProviderClassArchitectureAMD64, Memory: &ProviderMemory{Value: 32768, Unit: ProviderMemoryUnitMiB},
+		}}),
+		ProviderClassProfileFromMachines("standard", targetLinux, "", ProviderClassArchitectureAMD64, []ProviderClassMachine{{
+			Type: "standard-primary", Architecture: ProviderClassArchitectureAMD64, VCPU: intPointer(4),
+			Memory: &ProviderMemory{Value: 8, Unit: ProviderMemoryUnitGiB},
+		}}),
+	}
+
+	want := []ClassSpec{
+		{Class: "standard", Type: "standard-primary", VCPUs: 4, MemoryGB: 8},
+		{Class: "fast", Type: "fast-primary", VCPUs: 8},
+		{Class: "large", Type: "large-primary"},
+		{Class: "beast", Type: "beast-primary", VCPUs: 32, MemoryGB: 64},
+	}
+	if got := ProviderClassSpecsFromProfiles(profiles); !reflect.DeepEqual(got, want) {
+		t.Fatalf("compatibility projection=%#v want %#v", got, want)
+	}
+}
+
 func (testAWSProvider) ClassProfiles() []ProviderClassProfile {
 	primaryAMD64 := map[string]string{"standard": "c7a.8xlarge", "fast": "c7a.16xlarge", "large": "c7a.24xlarge", "beast": "c7a.48xlarge"}
 	primaryARM64 := map[string]string{"standard": "c7g.8xlarge", "fast": "c7g.16xlarge", "large": "c7g.16xlarge", "beast": "c7g.16xlarge"}

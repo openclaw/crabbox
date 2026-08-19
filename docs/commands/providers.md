@@ -147,7 +147,7 @@ deterministic output:
     "lifecycle": ["cleanup", "run-session", "workspace-state"],
     "coordinator": "never"
   },
-  "classes": {"disposition": "unmapped", "profiles": []},
+  "classCatalog": {"disposition": "unmapped", "profiles": []},
   "sharedFlags": [],
   "providerFlags": []
 }
@@ -377,6 +377,10 @@ aws
   runtime: ssh-host,interactive
   reachability: ssh-tunnel
   coordinator: supported
+  class standard: c7a.8xlarge (32 vCPU, 64 GB RAM)
+  class fast: c7a.16xlarge (64 vCPU, 128 GB RAM)
+  class large: c7a.24xlarge (96 vCPU, 192 GB RAM)
+  class beast: c7a.48xlarge (192 vCPU, 384 GB RAM)
 
 parallels
   family: parallels
@@ -456,8 +460,9 @@ Direct self-hosted SSH-lease providers such as `firecracker`, `proxmox`, and
 `xcp-ng` report `coordinator: never`, `targets: linux`, and features including
 `ssh`, `crabbox-sync`, and `cleanup`.
 
-`--json` returns one object per provider. The AWS catalog below is abbreviated
-to one profile and one fallback to show the record shape:
+`--json` returns one object per provider. The compatibility `classes` summary
+is complete; the authoritative AWS `classCatalog` below is abbreviated to one
+profile and one fallback to show the richer record shape:
 
 ```json
 [
@@ -472,7 +477,13 @@ to one profile and one fallback to show the record shape:
     "reachability": ["ssh-tunnel"],
     "lifecycle": ["coordinator-governed", "cleanup"],
     "coordinator": "supported",
-    "classes": {
+    "classes": [
+      {"class": "standard", "type": "c7a.8xlarge", "vcpu": 32, "memoryGb": 64},
+      {"class": "fast", "type": "c7a.16xlarge", "vcpu": 64, "memoryGb": 128},
+      {"class": "large", "type": "c7a.24xlarge", "vcpu": 96, "memoryGb": 192},
+      {"class": "beast", "type": "c7a.48xlarge", "vcpu": 192, "memoryGb": 384}
+    ],
+    "classCatalog": {
       "disposition": "mapped",
       "profiles": [
         {
@@ -499,7 +510,7 @@ to one profile and one fallback to show the record shape:
     "evidence": ["proof", "artifacts", "session"],
     "lifecycle": ["run-session"],
     "coordinator": "never",
-    "classes": {"disposition": "unmapped", "profiles": []}
+    "classCatalog": {"disposition": "unmapped", "profiles": []}
   }
 ]
 ```
@@ -565,9 +576,15 @@ to one profile and one fallback to show the record shape:
   - `supported`: the provider can be brokered through the coordinator when a
     broker URL is configured; otherwise it runs direct from the CLI.
   - `never`: the provider always runs direct from the CLI.
-- `classes`: the provider-owned class catalog. It is always present in JSON and
-  is deeply identical in `providers --json` and `providers describe --json`,
-  including when the requested description used an alias.
+- `classes`: compatibility summary of the primary machine selected for each
+  class on the default Linux/amd64 selector. It is present only for the five
+  providers covered by the initial contract: AWS, Azure, GCP, Hetzner, and
+  Namespace Instance. The array remains ordered as `standard`, `fast`, `large`,
+  and `beast`, with nominal integral `vcpu` and `memoryGb` values when known.
+- `classCatalog`: the authoritative provider-owned class catalog. It is always
+  present in JSON and is deeply identical in `providers --json` and
+  `providers describe --json`, including when the requested description used
+  an alias.
   - `disposition` is `mapped` when an explicitly selected canonical class has
     a supported provider-owned machine profile. `unmapped` means no supported
     static class-to-machine profile is exposed; it does not promise uniform
@@ -591,7 +608,8 @@ Profile order is deterministic: canonical class order (`standard`, `fast`,
 `large`, `beast`), then target, Windows mode, and architecture. The catalog is
 compiled static data; discovery does not read config or local state, inspect
 credentials, contact a provider, or make network calls. The human-readable
-provider output intentionally does not dump class profiles.
+provider output prints only the compatibility `classes` summary for the same
+five providers; it does not dump authoritative profiles.
 
 Profiles describe explicit canonical class intent. When class is inherited
 rather than explicitly selected, provider-native defaults and overrides may

@@ -24,7 +24,8 @@ type providerMatrixEntry struct {
 	Evidence     []string             `json:"evidence,omitempty"`
 	Lifecycle    []string             `json:"lifecycle,omitempty"`
 	Coordinator  string               `json:"coordinator"`
-	Classes      ProviderClassCatalog `json:"classes"`
+	Classes      []ClassSpec          `json:"classes,omitempty"`
+	ClassCatalog ProviderClassCatalog `json:"classCatalog"`
 }
 
 type providerRecommendationEntry struct {
@@ -223,7 +224,10 @@ func providerMatrixEntryFor(provider Provider) providerMatrixEntry {
 		Evidence:     evidenceCapabilitiesForFeatures(spec.Features),
 		Lifecycle:    lifecycleCapabilitiesForProvider(spec.Coordinator, spec.Features),
 		Coordinator:  string(spec.Coordinator),
-		Classes:      providerClassCatalogFor(provider),
+		ClassCatalog: providerClassCatalogFor(provider),
+	}
+	if classProvider, ok := provider.(ProviderClassSpecProvider); ok {
+		entry.Classes = append([]ClassSpec(nil), classProvider.ClassSpecs()...)
 	}
 	return entry
 }
@@ -1676,6 +1680,18 @@ func printProviderMatrix(out io.Writer, entries []providerMatrixEntry) {
 		fmt.Fprintf(out, "  coordinator: %s\n", blank(entry.Coordinator, "never"))
 		if len(entry.Aliases) > 0 {
 			fmt.Fprintf(out, "  aliases: %s\n", strings.Join(entry.Aliases, ","))
+		}
+		for _, class := range entry.Classes {
+			shape := ""
+			switch {
+			case class.VCPUs > 0 && class.MemoryGB > 0:
+				shape = fmt.Sprintf(" (%d vCPU, %d GB RAM)", class.VCPUs, class.MemoryGB)
+			case class.VCPUs > 0:
+				shape = fmt.Sprintf(" (%d vCPU)", class.VCPUs)
+			case class.MemoryGB > 0:
+				shape = fmt.Sprintf(" (%d GB RAM)", class.MemoryGB)
+			}
+			fmt.Fprintf(out, "  class %s: %s%s\n", class.Class, class.Type, shape)
 		}
 	}
 }

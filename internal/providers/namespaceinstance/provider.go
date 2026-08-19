@@ -16,7 +16,10 @@ func init() {
 
 type Provider struct{}
 
-var _ core.ProviderClassProfileProvider = Provider{}
+var (
+	_ core.ProviderClassProfileProvider = Provider{}
+	_ core.ProviderClassSpecProvider    = Provider{}
+)
 
 var classProfiles = buildClassProfiles()
 
@@ -154,6 +157,10 @@ func (Provider) ServerTypeForClass(class string) string {
 
 func (Provider) ClassProfiles() []core.ProviderClassProfile {
 	return classProfiles
+}
+
+func (Provider) ClassSpecs() []core.ClassSpec {
+	return core.ProviderClassSpecsFromProfiles(classProfiles)
 }
 
 func buildClassProfiles() []core.ProviderClassProfile {

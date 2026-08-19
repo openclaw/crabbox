@@ -1,8 +1,23 @@
 package namespaceinstance
 
 import (
+	"reflect"
 	"testing"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func TestClassSpecs(t *testing.T) {
+	want := []core.ClassSpec{
+		{Class: "standard", Type: "4x8", VCPUs: 4, MemoryGB: 8},
+		{Class: "fast", Type: "8x16", VCPUs: 8, MemoryGB: 16},
+		{Class: "large", Type: "16x32", VCPUs: 16, MemoryGB: 32},
+		{Class: "beast", Type: "32x64", VCPUs: 32, MemoryGB: 64},
+	}
+	if got := (Provider{}).ClassSpecs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("ClassSpecs()=%#v want %#v", got, want)
+	}
+}
 
 func TestClassProfilesCoverCanonicalClasses(t *testing.T) {
 	profiles := (Provider{}).ClassProfiles()

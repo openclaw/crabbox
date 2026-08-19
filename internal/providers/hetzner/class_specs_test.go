@@ -1,8 +1,23 @@
 package hetzner
 
 import (
+	"reflect"
 	"testing"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func TestClassSpecs(t *testing.T) {
+	want := []core.ClassSpec{
+		{Class: "standard", Type: "ccx33", VCPUs: 8, MemoryGB: 32},
+		{Class: "fast", Type: "ccx43", VCPUs: 16, MemoryGB: 64},
+		{Class: "large", Type: "ccx53", VCPUs: 32, MemoryGB: 128},
+		{Class: "beast", Type: "ccx63", VCPUs: 48, MemoryGB: 192},
+	}
+	if got := (Provider{}).ClassSpecs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("ClassSpecs()=%#v want %#v", got, want)
+	}
+}
 
 func TestClassProfilesCoverCanonicalClasses(t *testing.T) {
 	profiles := (Provider{}).ClassProfiles()

@@ -95,15 +95,18 @@ func TestProviderMatrixIncludesCapabilities(t *testing.T) {
 	if firecracker == nil {
 		t.Fatal("firecracker provider not found")
 	}
-	if len(firecracker.Classes.Profiles) != 0 {
-		t.Fatalf("firecracker classes=%#v want no profiles", firecracker.Classes)
+	if len(firecracker.Classes) != 0 {
+		t.Fatalf("firecracker classes=%#v want omitted", firecracker.Classes)
 	}
 	encodedFirecracker, err := json.Marshal(firecracker)
 	if err != nil {
 		t.Fatalf("marshal firecracker matrix entry: %v", err)
 	}
-	if !bytes.Contains(encodedFirecracker, []byte(`"classes"`)) {
-		t.Fatalf("firecracker JSON missing classes: %s", encodedFirecracker)
+	if bytes.Contains(encodedFirecracker, []byte(`"classes"`)) {
+		t.Fatalf("firecracker JSON unexpectedly contains classes: %s", encodedFirecracker)
+	}
+	if !bytes.Contains(encodedFirecracker, []byte(`"classCatalog"`)) {
+		t.Fatalf("firecracker JSON missing classCatalog: %s", encodedFirecracker)
 	}
 	if vast == nil {
 		t.Fatal("vast provider not found")
@@ -414,7 +417,7 @@ func TestProvidersCommandHumanOutput(t *testing.T) {
 	}
 }
 
-func TestPrintProviderMatrixDoesNotPrintClasses(t *testing.T) {
+func TestPrintProviderMatrixClasses(t *testing.T) {
 	var output bytes.Buffer
 	printProviderMatrix(&output, []providerMatrixEntry{{
 		Provider:    "example",
@@ -423,12 +426,52 @@ func TestPrintProviderMatrixDoesNotPrintClasses(t *testing.T) {
 		Targets:     []string{targetLinux},
 		Features:    FeatureSet{},
 		Coordinator: string(CoordinatorNever),
-		Classes: ProviderClassCatalog{Disposition: ProviderClassDispositionMapped, Profiles: []ProviderClassProfile{
-			{Class: "standard", Target: targetLinux, Architecture: ProviderClassArchitectureAMD64, Primary: ProviderClassMachine{Type: "shape-1", Architecture: ProviderClassArchitectureAMD64}, Fallbacks: []ProviderClassMachine{}},
-		}},
+		Classes: []ClassSpec{
+			{Class: "standard", Type: "shape-1", VCPUs: 4, MemoryGB: 8},
+			{Class: "fast", Type: "shape-2", VCPUs: 8},
+			{Class: "large", Type: "shape-3", MemoryGB: 32},
+			{Class: "beast", Type: "shape-4"},
+		},
 	}})
-	if strings.Contains(output.String(), "class standard") || strings.Contains(output.String(), "shape-1") {
-		t.Fatalf("provider matrix unexpectedly printed JSON-only classes:\n%s", output.String())
+	for _, want := range []string{
+		"  class standard: shape-1 (4 vCPU, 8 GB RAM)\n",
+		"  class fast: shape-2 (8 vCPU)\n",
+		"  class large: shape-3 (32 GB RAM)\n",
+		"  class beast: shape-4\n",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("provider matrix output missing %q:\n%s", want, output.String())
+		}
+	}
+}
+
+func TestClassSpecJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		spec ClassSpec
+		want string
+	}{
+		{
+			name: "known shape",
+			spec: ClassSpec{Class: "standard", Type: "shape-1", VCPUs: 4, MemoryGB: 8},
+			want: `{"class":"standard","type":"shape-1","vcpu":4,"memoryGb":8}`,
+		},
+		{
+			name: "unknown shape",
+			spec: ClassSpec{Class: "standard", Type: "shape-1"},
+			want: `{"class":"standard","type":"shape-1"}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			encoded, err := json.Marshal(test.spec)
+			if err != nil {
+				t.Fatalf("marshal ClassSpec: %v", err)
+			}
+			if string(encoded) != test.want {
+				t.Fatalf("ClassSpec JSON=%s want %s", encoded, test.want)
+			}
+		})
 	}
 }
 
@@ -1936,20 +1979,17 @@ func TestProvidersJSONIncludesBuiltIns(t *testing.T) {
 		if entry == nil {
 			t.Fatalf("built binary providers json missing %s", provider)
 		}
-		if entry.Classes.Disposition != ProviderClassDispositionMapped || len(entry.Classes.Profiles) < 4 {
-			t.Fatalf("%s classes=%#v want mapped profiles", provider, entry.Classes)
+		if len(entry.Classes) != 4 {
+			t.Fatalf("%s classes=%#v want four entries", provider, entry.Classes)
 		}
-		seen := map[string]bool{}
-		for _, profile := range entry.Classes.Profiles {
-			seen[profile.Class] = true
-			if profile.Primary.Type == "" || profile.Fallbacks == nil {
-				t.Fatalf("%s profile=%#v", provider, profile)
+		for classIndex, className := range CanonicalProviderClasses() {
+			classSpec := entry.Classes[classIndex]
+			if classSpec.Class != className || classSpec.Type == "" || classSpec.VCPUs <= 0 || classSpec.MemoryGB <= 0 {
+				t.Fatalf("%s class[%d]=%#v", provider, classIndex, classSpec)
 			}
 		}
-		for _, className := range CanonicalProviderClasses() {
-			if !seen[className] {
-				t.Fatalf("%s missing class=%s", provider, className)
-			}
+		if entry.ClassCatalog.Disposition != ProviderClassDispositionMapped || len(entry.ClassCatalog.Profiles) < 4 {
+			t.Fatalf("%s classCatalog=%#v want mapped profiles", provider, entry.ClassCatalog)
 		}
 	}
 	if firecracker == nil {
@@ -1958,8 +1998,8 @@ func TestProvidersJSONIncludesBuiltIns(t *testing.T) {
 	if firecracker.Kind != ProviderKindSSHLease || firecracker.Family != "firecracker" || firecracker.Coordinator != string(CoordinatorNever) {
 		t.Fatalf("firecracker built-in spec=%#v", *firecracker)
 	}
-	if firecracker.Classes.Disposition != ProviderClassDispositionUnmapped || len(firecracker.Classes.Profiles) != 0 {
-		t.Fatalf("firecracker classes=%#v", firecracker.Classes)
+	if firecracker.ClassCatalog.Disposition != ProviderClassDispositionUnmapped || len(firecracker.ClassCatalog.Profiles) != 0 {
+		t.Fatalf("firecracker classCatalog=%#v", firecracker.ClassCatalog)
 	}
 	if !containsString(firecracker.Targets, targetLinux) {
 		t.Fatalf("firecracker built-in targets=%v", firecracker.Targets)
@@ -2004,8 +2044,8 @@ func TestProvidersJSONIncludesBuiltIns(t *testing.T) {
 		if err := json.Unmarshal(describeOutput, &description); err != nil {
 			t.Fatalf("invalid providers describe %s json: %v\n%s", smoke.requested, err, describeOutput)
 		}
-		if description.SchemaVersion != 2 || !reflect.DeepEqual(description.Classes, matrix.Classes) {
-			t.Fatalf("provider=%s requested=%s schema=%d describe classes=%#v matrix classes=%#v", smoke.canonical, smoke.requested, description.SchemaVersion, description.Classes, matrix.Classes)
+		if description.SchemaVersion != 2 || !reflect.DeepEqual(description.ClassCatalog, matrix.ClassCatalog) {
+			t.Fatalf("provider=%s requested=%s schema=%d describe classCatalog=%#v matrix classCatalog=%#v", smoke.canonical, smoke.requested, description.SchemaVersion, description.ClassCatalog, matrix.ClassCatalog)
 		}
 	}
 }

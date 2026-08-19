@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"math"
 	"sort"
 	"strings"
 )
@@ -126,6 +127,33 @@ func UniformLinuxAMD64ClassProfiles(machine ProviderClassMachine) []ProviderClas
 		))
 	}
 	return profiles
+}
+
+// ProviderClassSpecsFromProfiles projects the default Linux/amd64 primary
+// machines into the compatibility class summary used by provider discovery.
+func ProviderClassSpecsFromProfiles(profiles []ProviderClassProfile) []ClassSpec {
+	specs := make([]ClassSpec, 0, len(canonicalProviderClasses))
+	for _, class := range canonicalProviderClasses {
+		for _, profile := range profiles {
+			if profile.Class != class ||
+				normalizeTargetOS(profile.Target) != targetLinux ||
+				profile.Architecture != ProviderClassArchitectureAMD64 {
+				continue
+			}
+			spec := ClassSpec{Class: class, Type: profile.Primary.Type}
+			if profile.Primary.VCPU != nil {
+				spec.VCPUs = *profile.Primary.VCPU
+			}
+			if memory := profile.Primary.Memory; memory != nil &&
+				(memory.Unit == ProviderMemoryUnitGB || memory.Unit == ProviderMemoryUnitGiB) &&
+				memory.Value > 0 && memory.Value == math.Trunc(memory.Value) {
+				spec.MemoryGB = int(memory.Value)
+			}
+			specs = append(specs, spec)
+			break
+		}
+	}
+	return specs
 }
 
 func providerClassCatalogFor(provider Provider) ProviderClassCatalog {

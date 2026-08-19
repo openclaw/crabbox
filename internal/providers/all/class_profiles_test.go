@@ -16,6 +16,9 @@ func TestProductionProviderClassCatalogCompleteness(t *testing.T) {
 		"namespace-devbox": {}, "namespace-instance": {}, "ovh": {}, "phala": {}, "scaleway": {}, "tencentcloud": {}, "vultr": {},
 	}
 	counts := map[core.ProviderClassDisposition]int{}
+	compatibilityProviders := map[string]struct{}{
+		"aws": {}, "azure": {}, "gcp": {}, "hetzner": {}, "namespace-instance": {},
+	}
 	for _, name := range core.RegisteredProviderNames() {
 		provider, err := core.ProviderFor(name)
 		if err != nil {
@@ -25,6 +28,11 @@ func TestProductionProviderClassCatalogCompleteness(t *testing.T) {
 		catalog := core.ProviderClassCatalogFor(provider)
 		counts[spec.ClassDisposition]++
 		source, hasProfiles := provider.(core.ProviderClassProfileProvider)
+		_, hasCompatibilitySummary := provider.(core.ProviderClassSpecProvider)
+		_, wantsCompatibilitySummary := compatibilityProviders[name]
+		if hasCompatibilitySummary != wantsCompatibilitySummary {
+			t.Errorf("provider=%s compatibility summary=%t want %t", name, hasCompatibilitySummary, wantsCompatibilitySummary)
+		}
 		_, shouldBeMapped := mappedProviders[name]
 		if shouldBeMapped {
 			if spec.ClassDisposition != core.ProviderClassDispositionMapped {
