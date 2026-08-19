@@ -1321,12 +1321,20 @@ func scpBaseArgs(target SSHTarget) []string {
 	}
 	args = append(args,
 		"-o", "BatchMode=yes",
-		"-o", "StrictHostKeyChecking=accept-new",
-		"-o", "UserKnownHostsFile="+sshConfigFileValue(knownHostsFile(target)),
+	)
+	args = append(args, sshHostKeyVerificationArgs(target)...)
+	args = append(args,
 		"-o", "ConnectTimeout=10",
 		"-o", "ConnectionAttempts=3",
 		"-P", target.Port,
 	)
+	if strings.TrimSpace(target.SSHHostKey) != "" {
+		args = append(args,
+			"-o", "ControlMaster=no",
+			"-o", "ControlPath=none",
+			"-o", "ControlPersist=no",
+		)
+	}
 	if target.Key != "" {
 		args = append([]string{"-i", target.Key, "-o", "IdentitiesOnly=yes"}, args...)
 	}

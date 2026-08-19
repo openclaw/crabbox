@@ -485,12 +485,15 @@ func startVNCTunnel(ctx context.Context, target SSHTarget, localPort, remoteHost
 func vncTunnelArgs(target SSHTarget, localPort, remoteHost, remotePort string) []string {
 	args := append(sshForwardingDenyArgs(),
 		"-o", "BatchMode=yes",
-		"-o", "StrictHostKeyChecking=accept-new",
-		"-o", "UserKnownHostsFile="+sshConfigFileValue(knownHostsFile(target)),
+	)
+	args = append(args, sshHostKeyVerificationArgs(target)...)
+	args = append(args,
 		"-o", "ConnectTimeout="+strconv.Itoa(int(vncTunnelSSHConnectTimeout/time.Second)),
 		"-o", "ConnectionAttempts=1",
 		"-o", "ExitOnForwardFailure=yes",
 		"-o", "GatewayPorts=no",
+		// Never attach a tunnel to an ambient master: doing so would bypass
+		// this target's authoritative host-key verification and forwarding policy.
 		"-o", "ControlMaster=no",
 		"-o", "ControlPath=none",
 		"-o", "ControlPersist=no",

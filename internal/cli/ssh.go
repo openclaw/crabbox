@@ -21,6 +21,8 @@ import (
 	"syscall"
 	"time"
 	"unicode/utf16"
+
+	xssh "golang.org/x/crypto/ssh"
 )
 
 type SSHTarget struct {
@@ -942,35 +944,22 @@ func sshBaseArgsWithOptions(target SSHTarget, connectTimeout, connectionAttempts
 		"-o", "ServerAliveCountMax=2",
 		"-p", target.Port,
 	)
-	if target.DisableHostKeyChecking {
-		args = append(args,
-			"-o", "StrictHostKeyChecking=no",
-			"-o", "UserKnownHostsFile=/dev/null",
-			"-o", "LogLevel=ERROR",
-		)
-	} else {
-		strictHostKeyChecking := "accept-new"
-		if target.HostKeyAlias != "" {
-			strictHostKeyChecking = "yes"
-		}
-		args = append(args,
-			"-o", "StrictHostKeyChecking="+strictHostKeyChecking,
-			"-o", "UserKnownHostsFile="+sshConfigFileValue(knownHostsFile(target)),
-		)
-		if target.HostKeyAlias != "" {
-			args = append(args,
-				"-o", "HostKeyAlias="+target.HostKeyAlias,
-				"-o", "HostKeyAlgorithms=ssh-ed25519",
-			)
-		}
-	}
+	args = append(args, sshHostKeyVerificationArgs(target)...)
 	if target.AuthSecret || target.NoControlMaster {
-		args = append(args, "-o", "ControlMaster=no")
+		args = append(args,
+			"-o", "ControlMaster=no",
+			"-o", "ControlPath=none",
+			"-o", "ControlPersist=no",
+		)
 	} else if runtime.GOOS == "windows" {
 		// Windows OpenSSH does not support Unix domain sockets for
 		// connection multiplexing; ControlMaster causes
 		// "getsockname failed: Not a socket" errors.
-		args = append(args, "-o", "ControlMaster=no")
+		args = append(args,
+			"-o", "ControlMaster=no",
+			"-o", "ControlPath=none",
+			"-o", "ControlPersist=no",
+		)
 	} else {
 		args = append(args,
 			"-o", "ControlMaster=auto",
@@ -988,6 +977,51 @@ func sshBaseArgsWithOptions(target SSHTarget, connectTimeout, connectionAttempts
 		args = append(args, "-o", "ProxyCommand="+target.ProxyCommand)
 	}
 	return args
+}
+
+func sshHostKeyVerificationArgs(target SSHTarget) []string {
+	if target.DisableHostKeyChecking {
+		return []string{
+			"-o", "StrictHostKeyChecking=no",
+			"-o", "UserKnownHostsFile=/dev/null",
+			"-o", "LogLevel=ERROR",
+		}
+	}
+	strictHostKeyChecking := "accept-new"
+	if target.HostKeyAlias != "" || strings.TrimSpace(target.SSHHostKey) != "" {
+		strictHostKeyChecking = "yes"
+	}
+	args := []string{
+		"-o", "StrictHostKeyChecking=" + strictHostKeyChecking,
+		"-o", "UserKnownHostsFile=" + sshConfigFileValue(knownHostsFile(target)),
+	}
+	if strings.TrimSpace(target.SSHHostKey) != "" {
+		args = append(args,
+			"-o", "GlobalKnownHostsFile=none",
+			"-o", "KnownHostsCommand=none",
+			"-o", "VerifyHostKeyDNS=no",
+			"-o", "UpdateHostKeys=no",
+			"-o", "CheckHostIP=no",
+		)
+	}
+	if target.HostKeyAlias != "" {
+		args = append(args,
+			"-o", "HostKeyAlias="+target.HostKeyAlias,
+		)
+		args = append(args, "-o", "HostKeyAlgorithms="+sshHostKeyAlgorithms(target))
+	}
+	return args
+}
+
+func sshHostKeyAlgorithms(target SSHTarget) string {
+	algorithm := "ssh-ed25519"
+	if fields := strings.Fields(target.SSHHostKey); len(fields) > 0 {
+		algorithm = fields[0]
+	}
+	if algorithm == xssh.KeyAlgoRSA {
+		return xssh.KeyAlgoRSASHA512 + "," + xssh.KeyAlgoRSASHA256
+	}
+	return algorithm
 }
 
 func minDuration(left, right time.Duration) time.Duration {
@@ -1021,6 +1055,7 @@ func sshControlPath(target SSHTarget) string {
 		target.CertificateFile,
 		target.KnownHostsFile,
 		target.HostKeyAlias,
+		strings.TrimSpace(target.SSHHostKey),
 		target.ProxyCommand,
 	}, "\x00")
 	sum := sha1.Sum([]byte(scope))

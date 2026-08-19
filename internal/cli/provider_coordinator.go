@@ -127,10 +127,17 @@ func (b *coordinatorLeaseBackend) expectedProvider() (string, error) {
 }
 
 func (b *coordinatorLeaseBackend) coordinatorLeaseTarget(lease CoordinatorLease, coord *CoordinatorClient) (LeaseTarget, error) {
+	return b.coordinatorLeaseTargetForConfig(lease, b.cfg, coord)
+}
+
+func (b *coordinatorLeaseBackend) coordinatorLeaseTargetForConfig(lease CoordinatorLease, cfg Config, coord *CoordinatorClient) (LeaseTarget, error) {
 	if err := b.validateCoordinatorLeaseProviderIdentity(lease); err != nil {
 		return LeaseTarget{}, err
 	}
-	server, target, leaseID := leaseToServerTarget(lease, b.cfg)
+	server, target, leaseID := leaseToServerTarget(lease, cfg)
+	if err := prepareLeaseSSHTrust(&target, leaseID); err != nil {
+		return LeaseTarget{}, err
+	}
 	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord}, nil
 }
 
@@ -223,13 +230,22 @@ func (b *coordinatorLeaseBackend) acquireOnceWithLeaseID(ctx context.Context, ke
 	}
 	if err := validateCoordinatorLeaseCapabilities(cfg, lease); err != nil {
 		if requestedLeaseID == "" {
-			if releaseErr := releaseCoordinatorLease(context.Background(), b.coord, blank(lease.ID, leaseID), cfg.Provider); releaseErr != nil {
-				fmt.Fprintf(b.rt.Stderr, "warning: release failed after capability mismatch for %s: %v\n", blank(lease.ID, leaseID), releaseErr)
-			}
+			cleanupLeaseID := blank(lease.ID, leaseID)
+			released, releaseErr := releaseCoordinatorLeaseResult(context.Background(), b.coord, cleanupLeaseID, cfg.Provider)
+			reportCoordinatorAcquisitionRollback(b.rt.Stderr, cleanupLeaseID, "capability mismatch", released, releaseErr)
 		}
 		return LeaseTarget{}, err
 	}
-	server, target, leaseID := leaseToServerTarget(lease, cfg)
+	resolvedLease, err := b.coordinatorLeaseTargetForConfig(lease, cfg, b.coord)
+	if err != nil {
+		if requestedLeaseID == "" {
+			cleanupLeaseID := blank(lease.ID, leaseID)
+			released, releaseErr := releaseCoordinatorLeaseResult(context.Background(), b.coord, cleanupLeaseID, cfg.Provider)
+			reportCoordinatorAcquisitionRollback(b.rt.Stderr, cleanupLeaseID, "SSH trust preparation error", released, releaseErr)
+		}
+		return LeaseTarget{}, err
+	}
+	server, target, leaseID := resolvedLease.Server, resolvedLease.SSH, resolvedLease.LeaseID
 	fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s server=%d type=%s ip=%s via coordinator\n", leaseID, blank(lease.Slug, "-"), server.ID, server.ServerType.Name, target.Host)
 	writeCoordinatorLeaseProvisioningDetails(b.rt.Stderr, lease)
 	if summary := coordinatorFallbackSummary(lease); summary != "" {
@@ -250,14 +266,34 @@ func (b *coordinatorLeaseBackend) acquireOnceWithLeaseID(ctx context.Context, ke
 	bootstrapTarget := bootstrapNetworkTarget(cfg, server, target)
 	if err := bootstrapManagedWindowsDesktop(waitCtx, cfg, &bootstrapTarget, publicKey, b.rt.Stderr); err != nil {
 		if requestedLeaseID == "" {
-			if releaseErr := releaseCoordinatorLease(context.Background(), b.coord, leaseID, cfg.Provider); releaseErr != nil {
-				fmt.Fprintf(b.rt.Stderr, "warning: release failed after bootstrap error for %s: %v\n", leaseID, releaseErr)
-			}
+			released, releaseErr := releaseCoordinatorLeaseResult(context.Background(), b.coord, leaseID, cfg.Provider)
+			reportCoordinatorAcquisitionRollback(b.rt.Stderr, leaseID, "bootstrap error", released, releaseErr)
 		}
 		return LeaseTarget{}, err
 	}
 	target = bootstrapTarget
 	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: b.coord}, nil
+}
+
+func reportCoordinatorAcquisitionRollback(stderr io.Writer, leaseID, reason string, released CoordinatorLease, releaseErr error) {
+	if releaseErr != nil {
+		fmt.Fprintf(stderr, "warning: release failed after %s for %s: %v\n", reason, leaseID, releaseErr)
+		return
+	}
+	if coordinatorProviderReleaseConfirmed(released) {
+		cleanupReleasedCoordinatorLeaseArtifacts(stderr, leaseID)
+		return
+	}
+	state := "returned an unexpected non-final state"
+	switch {
+	case retainedCoordinatorRelease(released):
+		state = "retained the provider resource"
+	case coordinatorReleaseCleanupFailed(released):
+		state = "reported a cleanup failure or scheduled retry"
+	case released.State == "released" && released.CleanupStartedAt != "":
+		state = "is still pending"
+	}
+	fmt.Fprintf(stderr, "warning: release after %s for %s did not confirm provider cleanup (%s); local SSH artifacts were preserved\n", reason, leaseID, state)
 }
 
 func writeCoordinatorLeaseProvisioningDetails(stderr io.Writer, lease CoordinatorLease) {
@@ -719,14 +755,20 @@ func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest)
 	if err := b.validateCoordinatorLeaseProviderIdentity(lease); err != nil {
 		return statusView{}, err
 	}
-	server, target, _ := leaseToServerTarget(lease, b.cfg)
+	server, target, leaseID := leaseToServerTarget(lease, b.cfg)
 	resolved, err := resolveNetworkTarget(ctx, b.cfg, server, target)
 	if err != nil {
 		return statusView{}, err
 	}
 	target = resolved.Target
 	hasHost := lease.Host != ""
-	ready := lease.State == "active" && hasHost && probeSSHReady(ctx, &target, 4*time.Second)
+	ready := false
+	if lease.State == "active" && hasHost {
+		if err := prepareLeaseSSHTrust(&target, leaseID); err != nil {
+			return statusView{}, err
+		}
+		ready = probeSSHReady(ctx, &target, 4*time.Second)
+	}
 	return statusView{
 		ID:               lease.ID,
 		Slug:             lease.Slug,
@@ -886,18 +928,52 @@ func (b *coordinatorLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseL
 	if err := validateCoordinatorProviderIdentity(expectedProvider, req.Lease.LeaseID, req.Lease.Server.Provider, false); err != nil {
 		return err
 	}
-	if err := releaseCoordinatorLease(ctx, b.coord, req.Lease.LeaseID, expectedProvider); err != nil {
+	released, err := releaseCoordinatorLeaseResult(ctx, b.coord, req.Lease.LeaseID, expectedProvider)
+	observationCoord := b.coord
+	if err != nil {
 		if b.cfg.CoordAdminToken != "" && (isCoordinatorNotFoundError(err) || isCoordinatorUnauthorized(err)) {
 			adminCoord, adminErr := b.adminCoordinatorClient()
 			if adminErr != nil {
 				return err
 			}
-			if _, adminErr = adminCoord.AdminReleaseLeaseForProvider(ctx, req.Lease.LeaseID, true, expectedProvider); adminErr == nil {
-				removeLeaseClaim(req.Lease.LeaseID)
+			if released, adminErr = releaseCoordinatorLeaseMutation(ctx, req.Lease.LeaseID, expectedProvider, func(releaseCtx context.Context) (CoordinatorLease, error) {
+				return adminCoord.AdminReleaseLeaseForProvider(releaseCtx, req.Lease.LeaseID, true, expectedProvider)
+			}); adminErr != nil {
+				return adminErr
+			}
+			observationCoord = adminCoord
+		} else {
+			return err
+		}
+	}
+	if req.DeferProviderCleanupObservation {
+		if retainedCoordinatorRelease(released) {
+			return nil
+		}
+		if coordinatorProviderReleaseConfirmed(released) {
+			if cleanupReleasedCoordinatorLeaseArtifacts(b.rt.Stderr, req.Lease.LeaseID) != nil {
 				return nil
 			}
+			removeLeaseClaim(req.Lease.LeaseID)
+			return nil
 		}
+		if coordinatorReleaseCleanupFailed(released) || released.State == "released" && released.CleanupStartedAt != "" {
+			fmt.Fprintf(b.rt.Stderr, "warning: coordinator accepted release for %s; remote cleanup remains pending and local claim/SSH artifacts were preserved\n", req.Lease.LeaseID)
+			return nil
+		}
+		return coordinatorReleaseObservationError(req.Lease.LeaseID, "returned an unexpected non-final state")
+	}
+	released, err = observeCoordinatorReleaseCompletion(ctx, observationCoord, released, req.Lease.LeaseID, expectedProvider)
+	if err != nil {
 		return err
+	}
+	if retainedCoordinatorRelease(released) {
+		return nil
+	}
+	if coordinatorProviderReleaseConfirmed(released) {
+		if cleanupReleasedCoordinatorLeaseArtifacts(b.rt.Stderr, req.Lease.LeaseID) != nil {
+			return nil
+		}
 	}
 	removeLeaseClaim(req.Lease.LeaseID)
 	return nil

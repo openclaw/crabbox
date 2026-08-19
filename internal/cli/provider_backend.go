@@ -810,6 +810,10 @@ type ReleaseLeaseRequest struct {
 	Lease                    LeaseTarget
 	Force                    bool
 	ExpectedProviderIdentity ProviderIdentityExpectation
+	// DeferProviderCleanupObservation queues coordinator cleanup without waiting
+	// for provider deletion. Automatic release paths use this so a completed run
+	// is not held open by asynchronous coordinator cleanup.
+	DeferProviderCleanupObservation bool
 	// GuardedRemoteCleanup lets providers that fence release authorization run
 	// generic remote teardown only after ownership is verified under that fence.
 	GuardedRemoteCleanup func(context.Context, LeaseTarget)

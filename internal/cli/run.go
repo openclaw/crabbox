@@ -3332,23 +3332,139 @@ func shouldReplaceLeaseAfterBeforeCommandSSHFailure(err error, acquired, useCoor
 }
 
 func releaseCoordinatorLease(ctx context.Context, coord *CoordinatorClient, leaseID, expectedProvider string) error {
+	_, err := releaseCoordinatorLeaseResult(ctx, coord, leaseID, expectedProvider)
+	return err
+}
+
+func releaseCoordinatorLeaseResult(ctx context.Context, coord *CoordinatorClient, leaseID, expectedProvider string) (CoordinatorLease, error) {
+	return releaseCoordinatorLeaseMutation(ctx, leaseID, expectedProvider, func(releaseCtx context.Context) (CoordinatorLease, error) {
+		return coord.ReleaseLeaseForProvider(releaseCtx, leaseID, true, expectedProvider)
+	})
+}
+
+var coordinatorReleaseBackoff = func(attempt int) time.Duration {
+	return time.Duration(attempt*2) * time.Second
+}
+
+func releaseCoordinatorLeaseMutation(
+	ctx context.Context,
+	leaseID, expectedProvider string,
+	release func(context.Context) (CoordinatorLease, error),
+) (CoordinatorLease, error) {
+	var lastLease CoordinatorLease
 	var lastErr error
 	for attempt := 1; attempt <= 5; attempt++ {
 		releaseCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-		_, err := coord.ReleaseLeaseForProvider(releaseCtx, leaseID, true, expectedProvider)
+		lease, err := release(releaseCtx)
 		cancel()
+		lastLease = lease
 		if err == nil {
-			return nil
+			if err := validateCoordinatorProviderIdentity(expectedProvider, leaseID, lease.Provider, true); err != nil {
+				return lease, err
+			}
+			return lease, nil
 		}
 		lastErr = err
 		if attempt == 5 {
 			break
 		}
-		if err := sleepContext(ctx, time.Duration(attempt*2)*time.Second); err != nil {
-			return err
+		if err := sleepContext(ctx, coordinatorReleaseBackoff(attempt)); err != nil {
+			return lastLease, err
 		}
 	}
-	return lastErr
+	return lastLease, lastErr
+}
+
+var coordinatorReleaseObservationTimeout = 5 * time.Minute
+
+var coordinatorReleaseObservationCadence = func(int) time.Duration {
+	return 2 * time.Second
+}
+
+func observeCoordinatorReleaseCompletion(
+	ctx context.Context,
+	coord *CoordinatorClient,
+	lease CoordinatorLease,
+	leaseID, expectedProvider string,
+) (CoordinatorLease, error) {
+	if retainedCoordinatorRelease(lease) || coordinatorProviderReleaseConfirmed(lease) {
+		return lease, nil
+	}
+	if coordinatorReleaseCleanupFailed(lease) {
+		return lease, coordinatorReleaseObservationError(leaseID, "reported a cleanup failure or scheduled retry")
+	}
+	if lease.State != "released" || lease.CleanupStartedAt == "" {
+		return lease, coordinatorReleaseObservationError(leaseID, "returned an unexpected non-final state")
+	}
+
+	timeout := coordinatorReleaseObservationTimeout
+	if timeout <= 0 {
+		return lease, coordinatorReleaseObservationError(leaseID, "is still pending")
+	}
+	observeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for observation := 1; ; observation++ {
+		if err := sleepContext(observeCtx, coordinatorReleaseObservationCadence(observation)); err != nil {
+			if cause := context.Cause(ctx); cause != nil {
+				return lease, errors.Join(cause, coordinatorReleaseObservationError(leaseID, "observation was canceled"))
+			}
+			return lease, coordinatorReleaseObservationError(leaseID, fmt.Sprintf("is still pending after %s", timeout))
+		}
+		observed, err := coord.GetLease(observeCtx, leaseID)
+		if err != nil {
+			if cause := context.Cause(ctx); cause != nil {
+				return lease, errors.Join(cause, coordinatorReleaseObservationError(leaseID, "observation was canceled"))
+			}
+			if errors.Is(observeCtx.Err(), context.DeadlineExceeded) {
+				return lease, coordinatorReleaseObservationError(leaseID, fmt.Sprintf("is still pending after %s", timeout))
+			}
+			if isCoordinatorNotFoundError(err) {
+				return lease, coordinatorReleaseObservationError(leaseID, "could not be confirmed because the accepted lease record is no longer available")
+			}
+			return lease, errors.Join(coordinatorReleaseObservationError(leaseID, "could not be observed"), err)
+		}
+		if err := validateCoordinatorProviderIdentity(expectedProvider, leaseID, observed.Provider, false); err != nil {
+			return lease, err
+		}
+		lease = observed
+		if retainedCoordinatorRelease(lease) || coordinatorProviderReleaseConfirmed(lease) {
+			return lease, nil
+		}
+		if coordinatorReleaseCleanupFailed(lease) {
+			return lease, coordinatorReleaseObservationError(leaseID, "reported a cleanup failure or scheduled retry")
+		}
+		if lease.State != "released" || lease.CleanupStartedAt == "" {
+			return lease, coordinatorReleaseObservationError(leaseID, "returned an unexpected non-final state")
+		}
+	}
+}
+
+func retainedCoordinatorRelease(lease CoordinatorLease) bool {
+	return lease.ReleaseDeletesServer != nil && !*lease.ReleaseDeletesServer
+}
+
+func coordinatorReleaseCleanupFailed(lease CoordinatorLease) bool {
+	return lease.CleanupError != "" || lease.CleanupRetryAt != ""
+}
+
+func coordinatorReleaseObservationError(leaseID, state string) error {
+	return exit(5, "coordinator accepted release for %s, but remote cleanup %s; local claim and SSH artifacts were preserved; retry crabbox stop after coordinator cleanup advances", leaseID, state)
+}
+
+func coordinatorProviderReleaseConfirmed(lease CoordinatorLease) bool {
+	return lease.State == "released" &&
+		lease.CleanupStartedAt == "" &&
+		lease.CleanupError == "" &&
+		lease.CleanupRetryAt == "" &&
+		(lease.ReleaseDeletesServer == nil || *lease.ReleaseDeletesServer)
+}
+
+func cleanupReleasedCoordinatorLeaseArtifacts(stderr io.Writer, leaseID string) error {
+	if err := removeStoredTestboxConnectionArtifacts(leaseID); err != nil {
+		fmt.Fprintf(stderr, "warning: released lease %s but local SSH artifact cleanup failed: %v\n", leaseID, err)
+		return err
+	}
+	return nil
 }
 
 type leaseCleanupResult struct {
@@ -3431,7 +3547,7 @@ func (a App) cleanupBackendLeaseRemoteConnectionsBestEffort(ctx context.Context,
 
 func (a App) releaseBackendLease(ctx context.Context, backend SSHLeaseBackend, cfg Config, lease LeaseTarget) error {
 	fmt.Fprintf(a.Stderr, "releasing %s server=%s\n", lease.LeaseID, lease.Server.DisplayID())
-	request := ReleaseLeaseRequest{Lease: lease, Force: true}
+	request := ReleaseLeaseRequest{Lease: lease, Force: true, DeferProviderCleanupObservation: true}
 	if !releaseLeaseConnectionCleanupSafe(backend) {
 		request.GuardedRemoteCleanup = a.cleanupBackendLeaseRemoteConnectionsBestEffort
 	}

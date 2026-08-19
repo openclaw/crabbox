@@ -111,7 +111,16 @@ func TestReleaseBackendLeaseBestEffortCleansMediatedEgressBeforeRelease(t *testi
 		assertSSHLogContains(t, logPath, remoteStopEgressClientCommand())
 		return nil
 	}
-	t.Cleanup(func() { runEnvProfileTestReleaseHook = nil })
+	runEnvProfileTestReleaseRequestHook = func(req ReleaseLeaseRequest) error {
+		if !req.DeferProviderCleanupObservation {
+			return errors.New("automatic release did not defer provider cleanup observation")
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		runEnvProfileTestReleaseHook = nil
+		runEnvProfileTestReleaseRequestHook = nil
+	})
 
 	backend := runEnvProfileTestBackend{spec: runEnvProfileTestProvider{}.Spec()}
 	lease := LeaseTarget{
@@ -209,7 +218,16 @@ func TestStopCleansMediatedEgressBeforeRelease(t *testing.T) {
 		assertSSHLogContains(t, logPath, remoteStopEgressClientCommand())
 		return nil
 	}
-	t.Cleanup(func() { runEnvProfileTestReleaseHook = nil })
+	runEnvProfileTestReleaseRequestHook = func(req ReleaseLeaseRequest) error {
+		if req.DeferProviderCleanupObservation {
+			return errors.New("explicit stop deferred provider cleanup observation")
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		runEnvProfileTestReleaseHook = nil
+		runEnvProfileTestReleaseRequestHook = nil
+	})
 
 	var stdout, stderr bytes.Buffer
 	err := (App{Stdout: &stdout, Stderr: &stderr}).stop(context.Background(), []string{

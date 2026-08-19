@@ -52,6 +52,26 @@ func TestSSHTransportConfigParsesWithOpenSSH(t *testing.T) {
 	}
 }
 
+func TestSSHTransportRouteOnlyAliasPreservesTOFUAndAlgorithms(t *testing.T) {
+	config, err := renderSSHTransportConfigWithRoute(
+		SSHTarget{User: "alice", Host: "routed.example.test", Port: "22"},
+		false,
+		sshTransportConfigRoute{hostKeyAlias: "operator-route-alias"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(config, "StrictHostKeyChecking accept-new") {
+		t.Fatalf("route-only alias lost TOFU behavior:\n%s", config)
+	}
+	if !strings.Contains(config, `HostKeyAlias "operator-route-alias"`) {
+		t.Fatalf("route-only alias missing from config:\n%s", config)
+	}
+	if strings.Contains(config, "HostKeyAlgorithms") {
+		t.Fatalf("route-only alias unexpectedly restricted host-key algorithms:\n%s", config)
+	}
+}
+
 func TestSSHTransportProxyCommandExecutesAsCommand(t *testing.T) {
 	ssh, err := exec.LookPath("ssh")
 	if err != nil || os.PathSeparator == '\\' {

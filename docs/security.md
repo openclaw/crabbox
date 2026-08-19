@@ -617,6 +617,14 @@ never proxies SSH traffic. The posture:
   (`<user-config>/crabbox/testboxes/<lease-id>/id_ed25519`; RSA for AWS/Azure
   Windows). Matching cloud key pairs are removed when Crabbox deletes the box.
   See [SSH keys](features/ssh-keys.md).
+- Supported brokered leases install the coordinator-provided public host key in
+  that lease's isolated `known_hosts` file under a stable alias before the first
+  readiness probe, command, copy, tunnel, or desktop connection. Strict checking
+  stays enabled, and malformed keys or unsafe local paths fail closed.
+- Confirmed brokered deletion removes only the generated per-lease connection
+  directory. Pending, failed, retained, canceled, or ownership-mismatched
+  releases preserve local artifacts; configured shared keys and the operator's
+  global `known_hosts` are never cleanup targets.
 - CLI-managed SSH, rsync, SCP, VNC, and port-forward connections explicitly
   disable agent and X11 forwarding, overriding broad settings inherited from
   the operator's OpenSSH configuration.

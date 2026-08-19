@@ -1023,13 +1023,15 @@ func TestSSHArgsAuthSecretDisablesControlMaster(t *testing.T) {
 		Port:       "22",
 		AuthSecret: true,
 	}, "true"), "\n")
-	for _, unwanted := range []string{"ControlMaster=auto", "ControlPersist=", "ControlPath="} {
+	for _, unwanted := range []string{"ControlMaster=auto", "ControlPersist=10m"} {
 		if strings.Contains(got, unwanted) {
 			t.Fatalf("sshArgs() should omit mux option %q for secret auth target: %q", unwanted, got)
 		}
 	}
-	if !strings.Contains(got, "ControlMaster=no") {
-		t.Fatalf("sshArgs() missing ControlMaster=no for secret auth target: %q", got)
+	for _, required := range []string{"ControlMaster=no", "ControlPath=none", "ControlPersist=no"} {
+		if !strings.Contains(got, required) {
+			t.Fatalf("sshArgs() missing %q for secret auth target: %q", required, got)
+		}
 	}
 }
 
@@ -1042,13 +1044,15 @@ func TestSSHArgsNoControlMaster(t *testing.T) {
 		Key:             "/tmp/key",
 		NoControlMaster: true,
 	}, "true"), "\n")
-	for _, unwanted := range []string{"ControlMaster=auto", "ControlPersist=", "ControlPath="} {
+	for _, unwanted := range []string{"ControlMaster=auto", "ControlPersist=10m"} {
 		if strings.Contains(got, unwanted) {
 			t.Fatalf("sshArgs() should omit mux option %q: %q", unwanted, got)
 		}
 	}
-	if !strings.Contains(got, "ControlMaster=no") {
-		t.Fatalf("sshArgs() missing ControlMaster=no: %q", got)
+	for _, required := range []string{"ControlMaster=no", "ControlPath=none", "ControlPersist=no"} {
+		if !strings.Contains(got, required) {
+			t.Fatalf("sshArgs() missing %q: %q", required, got)
+		}
 	}
 }
 
@@ -1441,6 +1445,25 @@ func TestSSHControlPathIsScopedByProxyAndCertificate(t *testing.T) {
 	}
 	if sshControlPath(base) == sshControlPath(otherProxy) {
 		t.Fatal("control paths should differ for different proxy commands")
+	}
+}
+
+func TestSSHControlPathIsScopedByAuthoritativeHostKey(t *testing.T) {
+	base := SSHTarget{
+		User:           "crabbox",
+		Key:            "/tmp/lease/id_ed25519",
+		KnownHostsFile: "/tmp/lease/known_hosts",
+		HostKeyAlias:   "crabbox-lease-stable",
+	}
+	first := base
+	first.SSHHostKey = "ssh-ed25519 AAAA-first"
+	second := base
+	second.SSHHostKey = "ssh-ed25519 AAAA-second"
+	if sshControlPath(base) == sshControlPath(first) {
+		t.Fatal("adding an authoritative host key reused the TOFU control path")
+	}
+	if sshControlPath(first) == sshControlPath(second) {
+		t.Fatal("rotating an authoritative host key reused the prior control path")
 	}
 }
 

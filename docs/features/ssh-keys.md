@@ -69,7 +69,15 @@ host-identity pinning.
 ## Host-key trust and connection reuse
 
 A per-lease `known_hosts` file lives next to the key
-(`<lease>/known_hosts`). All SSH connections use:
+(`<lease>/known_hosts`). When a coordinator response contains `sshHostKey`, the
+CLI validates the OpenSSH public key and atomically writes exactly that key
+under a stable lease alias before any readiness probe or other SSH transport.
+Those connections use `StrictHostKeyChecking=yes`; an invalid key or unsafe
+local trust path fails closed without attempting SSH. A refreshed authoritative
+key replaces the prior isolated pin rather than appending stale trust.
+
+Targets without authoritative host-key metadata preserve the existing behavior.
+Their SSH connections use:
 
 - `StrictHostKeyChecking=accept-new` — trust a host's key on first contact, then
   pin it;
@@ -83,8 +91,8 @@ Because host keys are scoped to the lease's own file, a reused provider IP from
 a previous lease never poisons the user's global `~/.ssh/known_hosts`, and two
 leases sharing an address do not cross host-key state.
 
-The coordinator host-key metadata does not change this interactive trust path:
-`crabbox ssh` continues to use per-lease TOFU with `accept-new`.
+Provider-owned isolated trust flows, including Machine0 host rotation and Lume
+bootstrap attestation, keep their own aliases and lifecycle rules.
 
 On macOS and Linux, connection multiplexing is enabled
 (`ControlMaster=auto`, `ControlPersist=10m`) with a `ControlPath` scoped by the
@@ -113,9 +121,13 @@ later `status`, `ssh`, `run --id`, and `stop` commands keep finding the key.
 
 Provider delete paths remove the per-lease cloud key or key pair when the
 machine is deleted (for example AWS `DeleteKeyPair`, Hetzner SSH-key delete, and
-the equivalent on other adapters). Several provider backends also remove the
-local key directory when they release or clean up a lease (for example the
-Parallels, local-container, Semaphore, Blacksmith, and Sprites adapters).
+the equivalent on other adapters). After a brokered provider deletion is
+confirmed, the CLI removes that lease's local connection directory, including
+its private/public key, certificate, `known_hosts`, and control artifacts. It
+preserves the directory when cleanup is queued, failed, canceled, retained, or
+ownership cannot be confirmed, and never removes a configured shared key path.
+Several direct provider backends likewise remove their generated lease directory
+after confirmed destructive cleanup.
 
 ## Bringing your own key
 

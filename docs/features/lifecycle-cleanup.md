@@ -50,15 +50,27 @@ busy lease still expires at its TTL regardless of activity.
 
 Both release and expiry call the same provider delete path:
 
-- **Release** (`POST /v1/leases/{id}/release`, e.g. `crabbox stop`) deletes the
-  cloud server when the lease is still active and sets state `released`. The
-  body defaults `delete` to `!keep`.
+- **Release** (`POST /v1/leases/{id}/release`, e.g. `crabbox stop`) records
+  state `released` and queues provider deletion when the lease is still active.
+  The body defaults `delete` to `!keep`; normal release does not synchronously
+  await provider cleanup.
 - **Expiry** is driven by the runtime scheduler. `expireLeases` deletes the
   cloud server for every active lease past `expiresAt`, then sets state
   `expired`.
 
 `keep=true` only suppresses the automatic release when a `run` command exits; it
 does **not** exempt a lease from idle or TTL expiry.
+
+After one release mutation is accepted, an explicit CLI stop observes the lease
+with read-only requests until provider deletion is final or a bounded wait ends.
+The CLI removes its local per-lease SSH connection directory only after final
+cleanup state is observed. Pending or retrying cleanup, observation timeout or
+cancellation, provider errors, ownership mismatches, and retained resources keep
+the local claim and credentials available for a safe retry. Acquisition rollback
+and automatic post-run release only queue cleanup and do not wait for provider
+deletion; they preserve local state while cleanup is pending. Local cleanup is
+scoped to `<user-config>/crabbox/testboxes/<lease-id>` and never follows configured
+or shared SSH key paths.
 
 ### Cleanup retries
 

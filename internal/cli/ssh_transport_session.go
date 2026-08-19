@@ -801,7 +801,10 @@ func renderSSHTransportConfigWithRoute(target SSHTarget, localForward bool, rout
 			return "", err
 		}
 	}
-	hostKeyAlias := route.hostKeyAlias
+	hostKeyAlias := target.HostKeyAlias
+	if hostKeyAlias == "" {
+		hostKeyAlias = route.hostKeyAlias
+	}
 	proxyCommand := target.ProxyCommand
 	if proxyCommand == "" {
 		proxyCommand = route.proxyCommand
@@ -893,8 +896,19 @@ func renderSSHTransportConfigWithRoute(target SSHTarget, localForward bool, rout
 		writeSSHTransportLiteralConfigValue(&b, "UserKnownHostsFile", "/dev/null")
 		b.WriteString("  LogLevel ERROR\n")
 	} else {
-		b.WriteString("  StrictHostKeyChecking accept-new\n")
+		if target.HostKeyAlias != "" || strings.TrimSpace(target.SSHHostKey) != "" {
+			b.WriteString("  StrictHostKeyChecking yes\n")
+		} else {
+			b.WriteString("  StrictHostKeyChecking accept-new\n")
+		}
 		writeSSHTransportLiteralConfigValue(&b, "UserKnownHostsFile", knownHostsFile(target))
+		if strings.TrimSpace(target.SSHHostKey) != "" {
+			b.WriteString("  GlobalKnownHostsFile none\n")
+			b.WriteString("  KnownHostsCommand none\n")
+			b.WriteString("  VerifyHostKeyDNS no\n")
+			b.WriteString("  UpdateHostKeys no\n")
+			b.WriteString("  CheckHostIP no\n")
+		}
 	}
 	// A transport command owns one process tree. Never let a multiplexed master
 	// retain a copy or forward after that process exits.
@@ -915,6 +929,9 @@ func renderSSHTransportConfigWithRoute(target SSHTarget, localForward bool, rout
 	}
 	if hostKeyAlias != "" {
 		writeSSHTransportLiteralConfigValue(&b, "HostKeyAlias", hostKeyAlias)
+	}
+	if target.HostKeyAlias != "" || strings.TrimSpace(target.SSHHostKey) != "" {
+		writeSSHTransportLiteralConfigValue(&b, "HostKeyAlgorithms", sshHostKeyAlgorithms(target))
 	}
 	if proxyCommand != "" {
 		// ProxyCommand consumes the rest of its config line as a shell command.

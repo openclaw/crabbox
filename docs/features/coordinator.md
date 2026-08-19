@@ -349,7 +349,14 @@ explicit `{"delete":true}` instead initiates the same owner/org-scoped,
 immutable-registration-generation-fenced delete used by the portal and returns
 `202` while confirmed-absence cleanup is pending. Omitting `delete` preserves
 metadata-only registered release. The CLI client retries as admin when a user
-request 404s or 401s.
+request 404s or 401s. A successful managed release normally returns queued
+cleanup state; the CLI does not repeat the mutation. Explicit stop polls the
+lease read-only with the same authenticated client until provider deletion is
+final or a bounded wait, cleanup failure, or cancellation preserves the local
+claim and credentials for retry. Acquisition rollback queues release without
+waiting, as does automatic post-run release, so asynchronous provider cleanup
+does not delay an otherwise completed run. Isolated local lease credentials are
+removed only after final deletion is observed; retained releases preserve them.
 
 **Expiry and cleanup.** A DO alarm and the cron both run maintenance:
 `expireLeases` deletes cloud servers for active leases past `expiresAt`

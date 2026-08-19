@@ -100,8 +100,10 @@ type CoordinatorLease struct {
 	Telemetry             *LeaseTelemetry                `json:"telemetry,omitempty"`
 	TelemetryHistory      []*LeaseTelemetry              `json:"telemetryHistory,omitempty"`
 	CleanupAttempts       int                            `json:"cleanupAttempts,omitempty"`
+	CleanupStartedAt      string                         `json:"cleanupStartedAt,omitempty"`
 	CleanupError          string                         `json:"cleanupError,omitempty"`
 	CleanupRetryAt        string                         `json:"cleanupRetryAt,omitempty"`
+	ReleaseDeletesServer  *bool                          `json:"releaseDeletesServer,omitempty"`
 	FailureError          string                         `json:"failureError,omitempty"`
 	ProviderMetadata      map[string]any                 `json:"providerMetadata,omitempty"`
 }

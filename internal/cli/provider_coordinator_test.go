@@ -233,7 +233,8 @@ func TestCoordinatorStatusRedactsDaytonaSSHAccessToken(t *testing.T) {
 }
 
 func TestCoordinatorInspectJSONIncludesOptionalSSHHostKey(t *testing.T) {
-	const sshHostKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILocalAuthoritativeHostKey"
+	isolateTestUserDirs(t)
+	sshHostKey := testOpenSSHPublicKey("ssh-ed25519", testBytes(32, 47))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, "/v1/leases/") {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
@@ -289,6 +290,13 @@ func TestCoordinatorInspectJSONIncludesOptionalSSHHostKey(t *testing.T) {
 			metadata, ok := got["providerMetadata"].(map[string]any)
 			if !ok || metadata["instanceProfileAttached"] != false {
 				t.Fatalf("providerMetadata=%#v, want authoritative false", got["providerMetadata"])
+			}
+			keyPath, err := testboxKeyPath(test.id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(filepath.Dir(keyPath)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("metadata-only inspect created SSH trust state: %v", err)
 			}
 		})
 	}
@@ -2032,10 +2040,20 @@ func assertCoordinatorProviderIdentityError(t *testing.T, err error, returnedPro
 
 func TestCoordinatorReleaseFallsBackToAdminToken(t *testing.T) {
 	isolateTestUserDirs(t)
+	configureCoordinatorReleaseTestTiming(t, time.Second, 0)
 	adminReleased := false
+	adminObservations := 0
 	var payloads []map[string]any
 	var paths []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/leases/cbx_admin" {
+			if r.Header.Get("Authorization") != "Bearer admin-token" {
+				t.Fatalf("observation auth=%q, want admin token", r.Header.Get("Authorization"))
+			}
+			adminObservations++
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: "cbx_admin", Provider: "aws", State: "released"}})
+			return
+		}
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/admin/leases/cbx_admin/release" && r.URL.Path != "/v1/leases/cbx_admin/release" {
 			http.NotFound(w, r)
 			return
@@ -2054,7 +2072,8 @@ func TestCoordinatorReleaseFallsBackToAdminToken(t *testing.T) {
 				t.Fatalf("admin release path=%s", r.URL.Path)
 			}
 			adminReleased = true
-			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: "cbx_admin", Provider: "aws", State: "released"}})
+			deleting := true
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: "cbx_admin", Provider: "aws", State: "released", CleanupStartedAt: "2026-08-19T00:00:00Z", ReleaseDeletesServer: &deleting}})
 		default:
 			t.Fatalf("unexpected auth %q", r.Header.Get("Authorization"))
 		}
@@ -2083,6 +2102,9 @@ func TestCoordinatorReleaseFallsBackToAdminToken(t *testing.T) {
 	if !adminReleased {
 		t.Fatal("admin release was not called")
 	}
+	if adminObservations != 1 {
+		t.Fatalf("admin observations=%d want 1", adminObservations)
+	}
 	if len(payloads) != 6 || paths[len(paths)-1] != "/v1/admin/leases/cbx_admin/release" {
 		t.Fatalf("release paths=%#v payloads=%#v", paths, payloads)
 	}
@@ -2090,6 +2112,97 @@ func TestCoordinatorReleaseFallsBackToAdminToken(t *testing.T) {
 		if payload["expectedProvider"] != "aws" {
 			t.Fatalf("release payload %d=%#v, want expectedProvider=aws", i, payload)
 		}
+	}
+}
+
+func TestCoordinatorAcquireRollbackQueuesReleaseOnceWithoutObservation(t *testing.T) {
+	isolateTestUserDirs(t)
+	var releasePosts, observations int
+	leaseID := ""
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			leaseID, _ = body["leaseID"].(string)
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+				ID: leaseID, Provider: "aws", TargetOS: targetLinux, State: "active", Desktop: false,
+			}})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/"+leaseID+"/release":
+			releasePosts++
+			deleting := true
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+				ID: leaseID, Provider: "aws", State: "released", CleanupStartedAt: "2026-08-19T00:00:00Z", ReleaseDeletesServer: &deleting,
+			}})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/"+leaseID:
+			observations++
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: leaseID, Provider: "aws", State: "released"}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetLinux
+	cfg.Desktop = true
+	cfg.AWSSSHCIDRs = []string{"127.0.0.1/32"}
+	cfg.Coordinator = server.URL
+	cfg.CoordToken = "user-token"
+	coord, _, err := newCoordinatorClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	backend := &coordinatorLeaseBackend{spec: ProviderSpec{Name: "aws"}, cfg: cfg, coord: coord, rt: Runtime{Stderr: &stderr}}
+	_, err = backend.acquireOnceWithLeaseID(context.Background(), false, "", "rollback-test")
+	if err == nil || !strings.Contains(err.Error(), "did not provision desktop=true") {
+		t.Fatalf("acquire error=%v, want capability mismatch", err)
+	}
+	if releasePosts != 1 || observations != 0 {
+		t.Fatalf("rollback release POSTs=%d observations=%d want 1/0", releasePosts, observations)
+	}
+	keyPath, err := testboxKeyPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Dir(keyPath)); err != nil {
+		t.Fatalf("pending rollback removed local SSH artifacts: %v", err)
+	}
+	if got := stderr.String(); !strings.Contains(got, "did not confirm provider cleanup (is still pending)") || !strings.Contains(got, leaseID) {
+		t.Fatalf("pending rollback warning missing: %q", got)
+	}
+}
+
+func TestCoordinatorAcquireRollbackReportsNonFinalRelease(t *testing.T) {
+	deleting := true
+	retained := false
+	tests := []struct {
+		name     string
+		lease    CoordinatorLease
+		release  error
+		contains string
+	}{
+		{name: "retained", lease: CoordinatorLease{State: "released", ReleaseDeletesServer: &retained}, contains: "retained the provider resource"},
+		{name: "cleanup failed", lease: CoordinatorLease{State: "released", CleanupError: "sensitive provider detail", ReleaseDeletesServer: &deleting}, contains: "reported a cleanup failure or scheduled retry"},
+		{name: "cleanup retry", lease: CoordinatorLease{State: "released", CleanupRetryAt: "2026-08-19T00:05:00Z", ReleaseDeletesServer: &deleting}, contains: "reported a cleanup failure or scheduled retry"},
+		{name: "unexpected", lease: CoordinatorLease{State: "active"}, contains: "returned an unexpected non-final state"},
+		{name: "request failed", release: errors.New("release request failed"), contains: "release failed after test rollback"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			reportCoordinatorAcquisitionRollback(&stderr, "cbx_abcdef123456", "test rollback", tc.lease, tc.release)
+			got := stderr.String()
+			if !strings.Contains(got, tc.contains) || !strings.Contains(got, "cbx_abcdef123456") {
+				t.Fatalf("rollback warning=%q, want %q and lease ID", got, tc.contains)
+			}
+			if strings.Contains(got, "sensitive provider detail") {
+				t.Fatalf("rollback warning leaked coordinator cleanup detail: %q", got)
+			}
+		})
 	}
 }
 
