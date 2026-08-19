@@ -7,6 +7,10 @@ import (
 	"os"
 )
 
+func createPrivateSSHTransportDirectory(path string) error {
+	return os.Mkdir(path, 0o700)
+}
+
 func secureSSHTransportPath(path string, directory bool) error {
 	mode := os.FileMode(0o600)
 	if directory {

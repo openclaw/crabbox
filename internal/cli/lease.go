@@ -101,7 +101,7 @@ func ensureTestboxLeaseDirectory(leaseID string) (string, error) {
 		current = filepath.Join(current, component)
 		info, err := os.Lstat(current)
 		if errors.Is(err, os.ErrNotExist) {
-			if err := os.Mkdir(current, 0o700); err != nil {
+			if err := createPrivateSSHTransportDirectory(current); err != nil {
 				return "", exit(2, "create private lease SSH directory: %v", err)
 			}
 			info, err = os.Lstat(current)

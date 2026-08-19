@@ -72,6 +72,8 @@ printf 'err\n' >&2
 		"-o", "UserKnownHostsFile=/dev/null",
 		"-o", "LogLevel=ERROR",
 		"-o", "ControlMaster=no",
+		"-o", "ControlPath=none",
+		"-o", "ControlPersist=no",
 		"-o", "CertificateFile=/tmp/crabbox-cert.pub",
 		"-o", "ProxyCommand=provider proxy %h %p",
 		"crabbox@203.0.113.10",
