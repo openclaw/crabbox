@@ -361,6 +361,55 @@ func TestReleaseStopModeStopsAndRetainsClaim(t *testing.T) {
 	}
 }
 
+// TestReleaseRefusesUnclaimedMachine pins the destructive ownership fence: a
+// canonical crabbox-cbx-* machine name or lease id with no matching local
+// claim must never reach `machine stop`/`machine remove` — a same-account
+// machine managed by a different crabbox install is not ours to touch.
+func TestReleaseRefusesUnclaimedMachine(t *testing.T) {
+	foreign := "crabbox-cbx-ffffeeeedddd"
+	runner := &scriptedRunner{} // any CLI invocation would fail the test
+	b := testBackend(t, runner)
+
+	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{
+		Lease: core.LeaseTarget{Server: core.Server{Name: foreign, Labels: map[string]string{"machine": foreign}}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "no local claim") {
+		t.Fatalf("unclaimed machine name must be refused, err=%v", err)
+	}
+	err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{
+		Lease: core.LeaseTarget{LeaseID: "cbx_ffffeeeedddd"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "no local claim") {
+		t.Fatalf("unclaimed lease id must be refused, err=%v", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("release of unclaimed identities must not invoke the boxd CLI: %v", runner.calls)
+	}
+}
+
+// TestReleaseRefusesClaimMachineMismatch pins that a claim authorizes exactly
+// the machine it recorded, not any machine sharing the lease id.
+func TestReleaseRefusesClaimMachineMismatch(t *testing.T) {
+	leaseID := "cbx_aaaabbbbcccc"
+	claimedName := "crabbox-cbx-aaaabbbbcccc"
+	runner := &scriptedRunner{}
+	b := testBackend(t, runner)
+	cfg := b.configForRun()
+	server := core.Server{Provider: providerName, Name: claimedName, Labels: map[string]string{"machine": claimedName, "lease": leaseID}}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, "", cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{
+		Lease: core.LeaseTarget{LeaseID: leaseID, Server: core.Server{Labels: map[string]string{"machine": "crabbox-cbx-other0000000"}}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "names machine") {
+		t.Fatalf("claim/machine mismatch must be refused, err=%v", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("mismatched release must not invoke the boxd CLI: %v", runner.calls)
+	}
+}
+
 // TestListRequiresLocalClaim pins the ownership rule: boxd has no server-side
 // labels, so a crabbox-named machine with no matching local claim is foreign
 // and must not be surfaced as a lease.

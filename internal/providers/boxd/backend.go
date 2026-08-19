@@ -282,6 +282,22 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 			return core.Exit(4, "refusing to release boxd machine %s without a crabbox lease id", name)
 		}
 	}
+	// The local claim is the ownership fence for every destructive boxd
+	// operation (boxd has no server-side labels). A canonical machine name or
+	// lease id alone must never authorize a stop or destroy: a machine in the
+	// same boxd account that merely follows the naming convention — for
+	// example one managed by a different crabbox install — is not ours to
+	// touch. Cleanup enforces this; direct release must too.
+	claim, claimed, err := resolveBoxdClaim(leaseID, cfg)
+	if err != nil {
+		return err
+	}
+	if !claimed {
+		return core.Exit(4, "refusing to release boxd machine %s: no local claim for lease %s on this crabbox install", name, leaseID)
+	}
+	if claimedMachine := strings.TrimSpace(claim.Labels["machine"]); claimedMachine != "" && claimedMachine != name {
+		return core.Exit(4, "refusing to release boxd machine %s: local claim for lease %s names machine %s", name, leaseID, claimedMachine)
+	}
 	if !deleteOnRelease(req.Lease, cfg) {
 		// Keep mode: stop the machine (disk persists; a later resolve restarts
 		// it) and retain the claim as the ownership anchor.
@@ -294,16 +310,14 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 				return err
 			}
 		}
-		if claim, ok, err := resolveBoxdClaim(leaseID, cfg); err == nil && ok {
-			labels := make(map[string]string, len(claim.Labels)+2)
-			for key, value := range claim.Labels {
-				labels[key] = value
-			}
-			labels["state"] = "stopped"
-			labels["release"] = "stop"
-			if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels); err != nil {
-				return err
-			}
+		labels := make(map[string]string, len(claim.Labels)+2)
+		for key, value := range claim.Labels {
+			labels[key] = value
+		}
+		labels["state"] = "stopped"
+		labels["release"] = "stop"
+		if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels); err != nil {
+			return err
 		}
 		return nil
 	}

@@ -90,6 +90,11 @@ destroyed or surfaced as a lease.
 Crabbox can resolve a boxd lease by Crabbox lease ID, local slug, or machine
 name.
 
+Release enforces the same fence directly: a canonical machine name or lease id
+with no matching local claim is refused before any `machine stop` or
+`machine remove` is issued, and a claim authorizes exactly the machine it
+recorded.
+
 Release destroys the machine by default (`boxd machine remove --confirm`) and
 removes the local claim. With `boxd.deleteOnRelease: false` or
 `--boxd-delete-on-release=false`, release stops the machine instead: the disk
