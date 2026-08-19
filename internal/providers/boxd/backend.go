@@ -181,6 +181,15 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	// Machines are never ADOPTED by name: resolving an unclaimed identity and
+	// then writing a repo claim for it would launder a same-account machine
+	// that merely follows the naming convention into "locally owned", making
+	// it a later destructive-release target. Every lease this install created
+	// has a local claim (acquire writes one on success and on every recovery
+	// path), so an unclaimed identity is simply not ours.
+	if !claimed {
+		return core.LeaseTarget{}, core.Exit(4, "lease %s not found for provider=%s on this crabbox install (no local claim; machines are never adopted by name)", req.ID, providerName)
+	}
 	summary, found, err := b.getMachine(ctx, cfg, name)
 	if err != nil {
 		return core.LeaseTarget{}, err

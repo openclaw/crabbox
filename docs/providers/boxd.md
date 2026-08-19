@@ -88,7 +88,10 @@ claim — a foreign machine that merely copies the naming convention is never
 destroyed or surfaced as a lease.
 
 Crabbox can resolve a boxd lease by Crabbox lease ID, local slug, or machine
-name.
+name — but only when this install holds the matching local claim. Resolve
+never adopts a machine by name: an unclaimed identity is refused before any
+CLI call, so resolve can never mint a claim for a machine this install did
+not create.
 
 Release enforces the same fence directly: a canonical machine name or lease id
 with no matching local claim is refused before any `machine stop` or

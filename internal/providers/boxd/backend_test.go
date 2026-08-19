@@ -387,6 +387,24 @@ func TestReleaseRefusesUnclaimedMachine(t *testing.T) {
 	}
 }
 
+// TestResolveRefusesUnclaimedMachine pins that resolve never ADOPTS a machine:
+// an unclaimed canonical name or lease id is refused before any CLI call, so
+// resolve cannot mint a claim that would later authorize destroying a
+// same-account machine this install does not own.
+func TestResolveRefusesUnclaimedMachine(t *testing.T) {
+	runner := &scriptedRunner{} // any CLI invocation would fail the test
+	b := testBackend(t, runner)
+	for _, id := range []string{"crabbox-cbx-ffffeeeedddd", "cbx_ffffeeeedddd"} {
+		_, err := b.Resolve(context.Background(), core.ResolveRequest{ID: id})
+		if err == nil || !strings.Contains(err.Error(), "never adopted") {
+			t.Fatalf("unclaimed identity %q must be refused, err=%v", id, err)
+		}
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("resolve of unclaimed identities must not invoke the boxd CLI: %v", runner.calls)
+	}
+}
+
 // TestReleaseRefusesClaimMachineMismatch pins that a claim authorizes exactly
 // the machine it recorded, not any machine sharing the lease id.
 func TestReleaseRefusesClaimMachineMismatch(t *testing.T) {
