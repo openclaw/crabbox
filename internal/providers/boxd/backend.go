@@ -756,13 +756,26 @@ func (b *backend) resolveSSHTarget(ctx context.Context, cfg core.Config, name, z
 		if selErr != nil {
 			return core.SSHTarget{}, selErr
 		}
+		var pinErr error
 		if found && strings.TrimSpace(entry.Port) != "" {
-			return sshTargetFromEntry(entry, host, b.knownHostsPath)
+			target, err := sshTargetFromEntry(entry, host, b.knownHostsPath)
+			if err == nil {
+				return target, nil
+			}
+			// A missing host-key pin is retryable: the next `machine list`
+			// re-sync rewrites the vendor known_hosts. Anything else is fatal.
+			if !errors.Is(err, errHostKeyPinMissing) {
+				return core.SSHTarget{}, err
+			}
+			pinErr = err
 		}
 		select {
 		case <-waitCtx.Done():
 			if !found {
 				return core.SSHTarget{}, core.Exit(5, "timed out waiting for the boxd CLI to write an ssh-config entry for %s", host)
+			}
+			if pinErr != nil {
+				return core.SSHTarget{}, core.Exit(5, "timed out waiting for the boxd host-key pin: %v", pinErr)
 			}
 			return core.SSHTarget{}, core.Exit(5, "timed out waiting for boxd to allocate an SSH port for %s", host)
 		case <-time.After(b.readyPollInterval):

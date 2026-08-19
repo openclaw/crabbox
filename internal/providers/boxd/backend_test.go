@@ -80,6 +80,15 @@ func writeTestSSHEntry(t *testing.T, path, host, port string) {
 	}
 }
 
+// writeTestHostKeyPin mimics the boxd CLI pre-trusting the proxy host key.
+func writeTestHostKeyPin(t *testing.T, path, host, port string) {
+	t.Helper()
+	line := "[" + host + "]:" + port + " ssh-ed25519 AAAATESTPIN boxd-hosts\n"
+	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestProviderContract(t *testing.T) {
 	provider := Provider{}
 	if provider.Name() != providerName || provider.Aliases() != nil {
@@ -177,6 +186,7 @@ func TestAcquireCreatesIsolatedMachine(t *testing.T) {
 		func([]string) (core.LocalCommandResult, error) { // machine list (ssh sync)
 			name := runner.calls[1].args[2]
 			writeTestSSHEntry(t, b.sshConfigPath, name+".boxd.sh", "12345")
+			writeTestHostKeyPin(t, b.knownHostsPath, name+".boxd.sh", "12345")
 			return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"name":%q,"status":"running","url":"%s.boxd.sh","source":"standalone","sharing":"private"}]`, name, name)}, nil
 		},
 	}
@@ -214,6 +224,9 @@ func TestAcquireCreatesIsolatedMachine(t *testing.T) {
 	}
 	if lease.SSH.Key == "" {
 		t.Fatal("ssh target missing the CLI-managed identity file")
+	}
+	if lease.SSH.SSHHostKey != "ssh-ed25519 AAAATESTPIN" || lease.SSH.KnownHostsFile != b.knownHostsPath {
+		t.Fatalf("ssh target must carry the vendor host-key pin: %#v", lease.SSH)
 	}
 	claims, err := boxdClaims(b.configForRun())
 	if err != nil {

@@ -2,6 +2,8 @@ package boxd
 
 import (
 	"bufio"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -194,13 +196,13 @@ func selectBoxdSSHEntry(data, host string) (boxdSSHConfigEntry, bool, error) {
 // connections would clobber each other (the boxd CLI's own ssh-config block
 // documents the same constraint).
 //
-// Host trust is the vendor-managed pin: the target carries the CLI-maintained
-// known_hosts file, and when that file pins this exact `[host]:port` the pin
-// is surfaced as SSHHostKey — which flips the shared SSH transport to
+// Host trust is the vendor-managed pin, REQUIRED: the target carries the
+// CLI-maintained known_hosts file, and that file's exact `[host]:port` pin is
+// surfaced as SSHHostKey — which flips the shared SSH transport to
 // StrictHostKeyChecking=yes with GlobalKnownHostsFile/KnownHostsCommand
 // disabled, so a mismatched edge key is rejected instead of trusted on first
-// use. Without a pin (an older CLI, or a sync race) the transport still
-// verifies against the vendor file, where accept-new rejects a CHANGED key.
+// use. A missing pin fails closed (errHostKeyPinMissing); the caller retries
+// behind a CLI re-sync, so a first connection is never trusted blind.
 func sshTargetFromEntry(entry boxdSSHConfigEntry, host, knownHostsPath string) (core.SSHTarget, error) {
 	port := strings.TrimSpace(entry.Port)
 	if port == "" {
@@ -216,19 +218,30 @@ func sshTargetFromEntry(entry boxdSSHConfigEntry, host, knownHostsPath string) (
 	hostname := firstNonBlank(entry.HostName, host)
 	user := firstNonBlank(entry.User, boxdSSHUser)
 	knownHosts := firstNonBlank(strings.TrimSpace(entry.KnownHostsFile), strings.TrimSpace(knownHostsPath), defaultKnownHostsPath())
-	target := core.SSHTarget{
+	pin := ""
+	if data, err := os.ReadFile(knownHosts); err == nil {
+		pin = pinnedHostKey(string(data), hostname, port)
+	}
+	if pin == "" {
+		// The vendor pin is the host-trust contract: never fall back to
+		// trusting a first public-edge connection. The caller retries behind a
+		// CLI re-sync (which rewrites the pin) before this becomes fatal.
+		return core.SSHTarget{}, fmt.Errorf("%w: no [%s]:%s host-key pin in %s; run any boxd command (e.g. `boxd machine list`) to refresh it, or update the boxd CLI", errHostKeyPinMissing, hostname, port, knownHosts)
+	}
+	return core.SSHTarget{
 		User:            user,
 		Host:            hostname,
 		Port:            port,
 		Key:             key,
 		KnownHostsFile:  knownHosts,
+		SSHHostKey:      pin,
 		TargetOS:        core.TargetLinux,
 		NetworkKind:     "public",
 		ReadyCheck:      boxdReadyCheck,
 		NoControlMaster: true,
-	}
-	if data, err := os.ReadFile(knownHosts); err == nil {
-		target.SSHHostKey = pinnedHostKey(string(data), hostname, port)
-	}
-	return target, nil
+	}, nil
 }
+
+// errHostKeyPinMissing marks a target whose vendor host-key pin is not (yet)
+// present: retryable behind a CLI re-sync, fatal after the bounded wait.
+var errHostKeyPinMissing = errors.New("boxd host-key pin missing")

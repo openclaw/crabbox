@@ -1,6 +1,7 @@
 package boxd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -59,7 +60,11 @@ func TestSSHTargetFromEntryRequiresPortAndIdentity(t *testing.T) {
 
 func TestSSHTargetFromEntryDisablesMultiplexing(t *testing.T) {
 	entry, _, _ := selectBoxdSSHEntry(testSSHConfig, "crabbox-cbx-a1b2c3d4e5f6.boxd.sh")
-	target, err := sshTargetFromEntry(entry, "crabbox-cbx-a1b2c3d4e5f6.boxd.sh", "")
+	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(knownHosts, []byte("[crabbox-cbx-a1b2c3d4e5f6.boxd.sh]:14022 ssh-ed25519 AAAATESTKEY\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target, err := sshTargetFromEntry(entry, "crabbox-cbx-a1b2c3d4e5f6.boxd.sh", knownHosts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,22 +108,21 @@ func TestSSHTargetPinsVendorHostKey(t *testing.T) {
 	}
 }
 
-// TestSSHTargetWithoutPinKeepsVendorKnownHosts pins the fallback: with no pin
-// for this host:port, SSHHostKey stays empty but verification still runs
-// against the vendor-managed file (never a key-directory-derived one), where
-// accept-new rejects a CHANGED key for known entries.
-func TestSSHTargetWithoutPinKeepsVendorKnownHosts(t *testing.T) {
+// TestSSHTargetRequiresVendorPin pins fail-closed host trust: with no exact
+// pin for this host:port the target is refused (retryable behind a CLI
+// re-sync) instead of falling back to trusting a first connection.
+func TestSSHTargetRequiresVendorPin(t *testing.T) {
 	entry, _, _ := selectBoxdSSHEntry(testSSHConfig, "crabbox-cbx-a1b2c3d4e5f6.boxd.sh")
 	knownHosts := filepath.Join(t.TempDir(), "known_hosts")
 	if err := os.WriteFile(knownHosts, []byte("[unrelated.boxd.sh]:1 ssh-ed25519 AAAAX\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	target, err := sshTargetFromEntry(entry, "crabbox-cbx-a1b2c3d4e5f6.boxd.sh", knownHosts)
-	if err != nil {
-		t.Fatal(err)
+	_, err := sshTargetFromEntry(entry, "crabbox-cbx-a1b2c3d4e5f6.boxd.sh", knownHosts)
+	if err == nil || !errors.Is(err, errHostKeyPinMissing) {
+		t.Fatalf("missing pin must fail closed, err=%v", err)
 	}
-	if target.KnownHostsFile != knownHosts || target.SSHHostKey != "" {
-		t.Fatalf("target=%#v want vendor known_hosts with empty SSHHostKey", target)
+	if _, err := sshTargetFromEntry(entry, "crabbox-cbx-a1b2c3d4e5f6.boxd.sh", filepath.Join(t.TempDir(), "absent")); err == nil || !errors.Is(err, errHostKeyPinMissing) {
+		t.Fatalf("absent known_hosts must fail closed, err=%v", err)
 	}
 }
 
