@@ -309,7 +309,7 @@ func TestCoordinatorAcquireSendsTailscaleHostnameTemplate(t *testing.T) {
 			}
 			gotHostname, _ = body["tailscaleHostname"].(string)
 			gotSlug, _ = body["slug"].(string)
-			http.Error(w, `{"error":"stop after request capture"}`, http.StatusInternalServerError)
+			http.Error(w, `{"error":"stop after request capture"}`, http.StatusBadRequest)
 		default:
 			http.NotFound(w, r)
 		}

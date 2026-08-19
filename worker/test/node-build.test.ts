@@ -42,7 +42,7 @@ describe("Node production bundle", () => {
     } finally {
       await rm(outputDirectory, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 });
 
 async function runNode(

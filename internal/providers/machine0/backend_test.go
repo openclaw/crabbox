@@ -310,6 +310,75 @@ func TestPrepareLeaseMachine0FilenameOverridesGenericSSHKey(t *testing.T) {
 	}
 }
 
+func TestPrepareLeaseValidatesMachine0KeyFilenameBeforeSideEffects(t *testing.T) {
+	tests := []struct {
+		name     string
+		fileName string
+		wantOK   bool
+	}{
+		{name: "safe basename", fileName: "id_ed25519", wantOK: true},
+		{name: "safe basename with whitespace", fileName: "  id_ed25519  ", wantOK: true},
+		{name: "parent traversal", fileName: "../other-key"},
+		{name: "subdirectory", fileName: "subdir/key"},
+		{name: "absolute POSIX path", fileName: "/tmp/other-key"},
+		{name: "Windows separator", fileName: `subdir\key`},
+		{name: "absolute Windows path", fileName: `C:\keys\other-key`},
+		{name: "current directory", fileName: "."},
+		{name: "parent directory", fileName: ".."},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			keyRoot := t.TempDir()
+			t.Setenv("SSH_KEY_PATH", keyRoot)
+			if tc.wantOK {
+				if err := os.WriteFile(filepath.Join(keyRoot, "id_ed25519"), []byte("test private key"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			item := readyMachine("203.0.113.10")
+			item.Key = &machineKey{Name: "ci", FileName: tc.fileName}
+			api := &fakeAPI{machine: item}
+			b := testBackendWithAPI(api)
+			statCalls := 0
+			b.stat = func(path string) (os.FileInfo, error) {
+				statCalls++
+				return os.Stat(path)
+			}
+			hostTrustCalls := 0
+			b.knownHostsFile = func(root, machineID string) (string, error) {
+				hostTrustCalls++
+				return machine0KnownHostsFile(root, machineID)
+			}
+			sshCalls := 0
+			b.waitSSH = func(context.Context, *SSHTarget, time.Duration) error {
+				sshCalls++
+				return nil
+			}
+
+			lease, err := b.prepareLease(context.Background(), item, Server{CloudID: item.ID}, "cbx_key_validation", true)
+			if tc.wantOK {
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantKey := filepath.Join(keyRoot, "id_ed25519")
+				if lease.SSH.Key != wantKey || statCalls != 1 || hostTrustCalls != 1 || sshCalls != 1 || len(api.primed) != 0 {
+					t.Fatalf("key=%q stat=%d hostTrust=%d ssh=%d primed=%v", lease.SSH.Key, statCalls, hostTrustCalls, sshCalls, api.primed)
+				}
+				return
+			}
+
+			var exitErr core.ExitError
+			if !errors.As(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(err.Error(), "Machine0") || !strings.Contains(err.Error(), "key filename must be a single basename") {
+				t.Fatalf("err=%v", err)
+			}
+			if statCalls != 0 || hostTrustCalls != 0 || sshCalls != 0 || len(api.primed) != 0 {
+				t.Fatalf("unsafe filename reached side effects: stat=%d hostTrust=%d ssh=%d primed=%v", statCalls, hostTrustCalls, sshCalls, api.primed)
+			}
+		})
+	}
+}
+
 func TestPrepareLeasePrimesMissingMachine0KeyAndVerifiesMaterialization(t *testing.T) {
 	keyRoot := t.TempDir()
 	t.Setenv("SSH_KEY_PATH", keyRoot)

@@ -22,6 +22,8 @@ type backend struct {
 	rt                       Runtime
 	api                      machine0API
 	sleep                    func(context.Context, time.Duration) error
+	stat                     func(string) (os.FileInfo, error)
+	knownHostsFile           func(string, string) (string, error)
 	waitSSH                  func(context.Context, *SSHTarget, time.Duration) error
 	prepareNativeImageSource func(context.Context, SSHTarget) error
 }
@@ -36,6 +38,8 @@ func newBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	b := &backend{spec: spec, cfg: cfg, rt: rt}
 	b.api = &client{cfg: cfg.Machine0, rt: rt, sleep: sleepContext}
 	b.sleep = sleepContext
+	b.stat = os.Stat
+	b.knownHostsFile = machine0KnownHostsFile
 	b.waitSSH = func(ctx context.Context, target *SSHTarget, timeout time.Duration) error {
 		return waitForSSHReady(ctx, target, rt.Stderr, "machine0", timeout)
 	}
@@ -666,6 +670,9 @@ func (b *backend) prepareLeaseWithOptions(ctx context.Context, item machine, ser
 	keyRoot := strings.TrimSpace(os.Getenv("SSH_KEY_PATH"))
 	if item.Key != nil && strings.TrimSpace(item.Key.FileName) != "" {
 		keyFileName := strings.TrimSpace(item.Key.FileName)
+		if filepath.IsAbs(keyFileName) || keyFileName == "." || keyFileName == ".." || strings.ContainsAny(keyFileName, `/\`) || filepath.Base(keyFileName) != keyFileName {
+			return LeaseTarget{}, exit(2, "Machine0 returned invalid SSH key filename %q; key filename must be a single basename", keyFileName)
+		}
 		if keyRoot == "" {
 			home, err := os.UserHomeDir()
 			if err != nil || strings.TrimSpace(home) == "" {
@@ -675,7 +682,7 @@ func (b *backend) prepareLeaseWithOptions(ctx context.Context, item machine, ser
 		}
 		keyPath = filepath.Join(keyRoot, keyFileName)
 		if opts.Check {
-			info, err := os.Stat(keyPath)
+			info, err := b.stat(keyPath)
 			switch {
 			case err == nil && info.IsDir():
 				return LeaseTarget{}, exit(2, "Machine0 SSH key path %q is a directory; set SSH_KEY_PATH to the directory containing private key %s", keyPath, keyFileName)
@@ -684,7 +691,7 @@ func (b *backend) prepareLeaseWithOptions(ctx context.Context, item machine, ser
 				return LeaseTarget{}, exit(2, "inspect Machine0 SSH key %q: %v", keyPath, err)
 			default:
 				primeErr := b.api.PrimeSSH(ctx, item.Name)
-				info, statErr := os.Stat(keyPath)
+				info, statErr := b.stat(keyPath)
 				if statErr != nil || info.IsDir() {
 					missingErr := exit(2, "Machine0 SSH key %q is missing after `machine0 ssh %s true`; set SSH_KEY_PATH to the directory containing private key %s (resolved directory: %q), or ensure Machine0 can materialize it", keyPath, item.Name, keyFileName, keyRoot)
 					if primeErr != nil {
@@ -709,7 +716,7 @@ func (b *backend) prepareLeaseWithOptions(ctx context.Context, item machine, ser
 			keyRoot = filepath.Join(home, ".ssh")
 		}
 	}
-	knownHostsFile, err := machine0KnownHostsFile(keyRoot, item.ID)
+	knownHostsFile, err := b.knownHostsFile(keyRoot, item.ID)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
