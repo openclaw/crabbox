@@ -1420,7 +1420,10 @@ morph_smoke() {
 boxd_smoke() {
   need_tool jq
 
-  local boxd_cli="${CRABBOX_BOXD_CLI:-$(config_value boxd.cli || true)}"
+  # The CLI selection is executed with the operator's boxd credentials, so it
+  # must never come from the repository config a malicious checkout controls:
+  # environment override or TRUSTED config only (same gate as the Go adapter).
+  local boxd_cli="${CRABBOX_BOXD_CLI:-$(trusted_config_value boxd.cli || true)}"
   boxd_cli="${boxd_cli:-boxd}"
   if ! command -v "$boxd_cli" >/dev/null 2>&1; then
     echo "install the boxd CLI (or set CRABBOX_BOXD_CLI) to run boxd live smoke" >&2

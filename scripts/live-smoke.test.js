@@ -2829,6 +2829,18 @@ test("RunPod live smoke dispatches to the provider-specific script", () => {
   );
 });
 
+test("boxd live smoke reads the CLI selection from trusted config only", () => {
+  const script = fs.readFileSync(path.join(repoRoot, "scripts", "live-smoke.sh"), "utf8");
+  const boxdSmoke = script.slice(script.indexOf("boxd_smoke()"), script.indexOf("orgo_smoke()"));
+  // The selected binary runs with the operator's stored boxd login or
+  // BOXD_TOKEN, so a repository checkout must never choose it.
+  assert.match(
+    boxdSmoke,
+    /CRABBOX_BOXD_CLI:-\$\(trusted_config_value boxd\.cli/,
+  );
+  assert.doesNotMatch(boxdSmoke, /[^_]config_value boxd\.cli/);
+});
+
 test("vultr live smoke dispatches to the provider-specific smoke", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-vultr-dispatch-"));
   const bin = path.join(dir, "bin");
