@@ -887,6 +887,20 @@ describe("coordinator-managed checkpoints", () => {
       checkpointRequest("DELETE", `/v1/checkpoints/${record.id}`),
     );
     await expect(blocked.json()).resolves.toMatchObject({ error: "checkpoint_pinned" });
+    const forbiddenRetirement = await coordinator.fetch(
+      checkpointRequest(
+        "DELETE",
+        `/v1/images/${record.image!.id}/promote?provider=aws&region=eu-west-1`,
+      ),
+    );
+    expect(forbiddenRetirement.status).toBe(403);
+    await expect(forbiddenRetirement.json()).resolves.toMatchObject({ error: "forbidden" });
+    expect(await storage.get(checkpointKey(record.id))).toMatchObject({
+      pinCount: pinned.pinCount,
+    });
+    expect(await storage.list({ prefix: `checkpoint-pin:${record.id}:` })).toHaveLength(
+      pinned.pinCount,
+    );
     const retired = await coordinator.fetch(
       checkpointRequest(
         "DELETE",

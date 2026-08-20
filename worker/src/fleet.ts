@@ -14743,6 +14743,9 @@ export class FleetCoordinator {
       return json({ imageID: decodedImageID, deleted: true });
     }
     if (method === "DELETE" && (action === "promote-catalog" || action === "promote")) {
+      if (!isAdminRequest(request)) {
+        return json({ error: "forbidden", message: "admin token required" }, { status: 403 });
+      }
       if (action === "promote") {
         if (!providerForRegion.retirePromotedImage) {
           return json(
