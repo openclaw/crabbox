@@ -360,6 +360,79 @@ an existing redirect hook, and otherwise applies the standard redirect limit.
 The adapter supplies the exact refusal error and retains any additional path,
 method, transport, previous-hop, or provider-specific origin policy locally.
 
+## Acquisition stays adapter-owned
+
+SSH lease acquisition is a provider-owned transaction, not a shared sequence of
+create, claim, bootstrap, and cleanup steps. Similar-looking acquisition bodies
+protect different ownership windows, credential dependencies, failure policies,
+and security boundaries. Share small primitives without centralizing their order.
+
+Acquisition already shares the mechanics that have provider-neutral contracts:
+
+- `shared.AcquireAttemptsRetry` retries eligible fresh acquisitions outside the
+  individual provider transaction and preserves bootstrap-failure/keep policy.
+- `core.NewLeaseID` and `core.AllocateDirectLeaseSlug` generate lease identities
+  and collision-safe slugs using inventory selected by the adapter.
+- `core.EnsureTestboxKeyForConfig` creates Crabbox-owned per-lease SSH keys;
+  `core.ProviderKeyForLease` names provider-side keys when applicable.
+- `shared.Poll` repeats observations while the adapter owns readiness predicates,
+  identity checks, side effects, timeouts, and diagnostics.
+- `core.SSHTargetFromConfig` constructs conventional SSH endpoints, and
+  `core.WaitForSSHReady` proves the common SSH bootstrap contract.
+- `shared.ClaimBinding`, `shared.ValidateClaimBinding`,
+  `shared.ResolveProviderClaimStrict`, and `shared.ErrStrictClaimMismatch`
+  validate structural identity and exact provider/scope-bound claim lookup;
+  `shared.CloneLabels` supplies writable label copies.
+- `core.AcquireFixedLease`, `core.FixedAcquireOptions`,
+  `core.FixedLeaseBinding`, and `core.FixedLeaseKind` already share durable
+  fixed-ID intent locking, replay validation, acquired-state commit, and
+  terminal tombstones for AWS and Machine0. Their adapters still own exact
+  create attempts, provider reconciliation, and immutable resource identity.
+
+The transaction boundary deliberately remains inside each adapter:
+
+- **Claim-persistence windows:** Lume persists storage-fenced ownership before
+  cloning, DigitalOcean writes a recovery claim after an ambiguous provider
+  mutation, and Hetzner returns an unclaimed successful target for command core
+  to claim. Moving every claim before creation or after readiness changes crash
+  recovery and ownership; purchase recovery records and repeated guarded claim
+  transitions likewise remain in their original provider-defined windows.
+- **Rollback ordering:** Hetzner deletes its provider key before its server;
+  Vultr deletes the instance first and preserves its key when instance deletion
+  fails; Vast detaches its instance key before destruction. Hostinger cannot
+  cancel or delete an already purchased server and may only stop it. A generic
+  cleanup stack cannot preserve these access, ownership, and billing boundaries.
+- **Credential ownership and ambiguous outcomes:** Morph receives a
+  provider-issued private key after boot, and Machine0 materializes a
+  provider-managed key and validates immutable-machine trust. Neither may be
+  forced through `core.EnsureTestboxKeyForConfig`; providers with separately
+  created account keys must also distinguish owned keys, reused keys, and
+  unresolved mutations before deciding what to retain or delete.
+- **`Keep` failure semantics:** Morph may retain a failed acquisition when
+  `Keep` is true; Scaleway normally does the same but forces rollback when
+  `OnAcquired` fails; Hostinger remains financially committed regardless of
+  whether its purchased server is stopped. Other providers intentionally roll
+  back failed creation even with `Keep`, so retention cannot be a global rule.
+- **`OnAcquired` placement:** Lume acknowledges an early provisional identity,
+  Vast acknowledges after readiness but before its final claim, and fixed-ID
+  Machine0 acknowledges only after durable commit and lock release. Moving the
+  callback changes when controller ownership transfers and which transaction
+  must clean up if acknowledgment fails.
+- **Security-critical bootstrap ordering:** Hyper-V locks down guest SSH before
+  attaching networking; Lume pins authenticated guest identity before accepting
+  SSH; Vast probes initial access, installs required tools, and only then proves
+  full readiness. A universal endpoint-then-SSH sequence would erase required
+  isolation, identity, or staged-bootstrap guarantees.
+
+Review proposals to centralize acquisition orchestration against every existing
+provider: they must preserve exact claim windows, rollback and credential
+ordering, `Keep` failure behavior, callback placement, and security-critical
+bootstrap sequencing. A preparation-only helper for IDs, slugs, and local keys
+was also evaluated across ten compatible providers; its estimated savings of
+only 20–70 lines did not cover the additional state, callback plumbing, and
+semantic tests required by the mechanism. Keep acquisition adapter-owned unless
+a future proposal proves both behavior preservation and meaningful net value.
+
 ## Provider registration
 
 A provider implements `cli.Provider`:
