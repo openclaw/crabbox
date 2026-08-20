@@ -9,6 +9,7 @@
 ### Fixed
 
 - Documented which acquisition responsibilities deliberately remain provider-owned and why centralizing them was rejected.
+- Documented which delegated-run lifecycle responsibilities deliberately remain provider-owned and why centralizing them was rejected.
 - Made doctor configuration fail with a clear provider error instead of panicking when a backend lacks doctor capability.
 - Consolidated nine small cross-provider helper clusters (Tailscale metadata, exact tag codecs, gateway URL validation, cache-volume naming, scoped claim resolution, envd transport scaffolding, delegated status polling, workspace archive sync, and exact-duplicate micro-utilities) into shared helpers while keeping divergent variants adapter-owned.
 - Shared the doctor-capability configuration boilerplate across sixty-six providers while keeping direct-construction variants, provider-specific validation, and divergent failure semantics adapter-owned.

@@ -432,6 +432,77 @@ was also evaluated across ten compatible providers; its estimated savings of
 only 20–70 lines did not cover the additional state, callback plumbing, and
 semantic tests required by the mechanism. Keep acquisition adapter-owned unless
 a future proposal proves both behavior preservation and meaningful net value.
+## Delegated-run lifecycles stay adapter-owned
+
+Delegated execution is a provider-owned transaction, not a shared sequence of
+claim, create, run, retain, and cleanup steps. The common `DelegatedRunBackend`
+method surface describes routing and capabilities, not a common transaction.
+Share small primitives without centralizing provider lifecycle decisions.
+
+Delegated execution already shares mechanics with provider-neutral contracts:
+
+- `procjson.Exchange` bounds strict subprocess JSON exchanges, cancellation
+  grace, and decoding; streaming bridges and provider envelopes stay local.
+- `shared.Poll` repeats observations without owning state interpretation,
+  readiness, deadlines, or side effects; `shared.PollDelegatedStatus` handles
+  narrow status projection without centralizing provider lifecycle decisions.
+- `shared.LockLeaseOperation`, `shared.LockOperation`, and
+  `shared.LockOperationFile` serialize cross-process operations; adapters choose
+  which transaction holds a lock and when it must be released.
+- `shared.SecureHTTPClient` and `shared.SameOrigin` enforce the common redirect
+  policy while preserving provider-specific transport and refusal semantics.
+- `core.RunDelegatedArchiveSync` owns bounded archive preparation, upload,
+  staged replacement, and cleanup; `shared.RunSandboxArchiveSync` supplies
+  conventional sandbox wiring when its contract fits the provider.
+- `shared.ScopedLeaseResolver`, `shared.ResolveScopedLeaseID`,
+  `shared.ResolveScopedLeaseClaim`, `shared.FinishScopedLease`, and
+  `shared.ValidateClaimBinding` share claim mechanics;
+  `core.RemoveLeaseClaimIfUnchangedAfter` fences claim removal around an
+  adapter-owned action without deciding destructive authority.
+- `core.HandleDelegatedRunFailure` shares basic keep-on-failure bookkeeping;
+  `shared.StartEnvdProcess` shares one execution protocol, not a lifecycle.
+
+The transaction boundary deliberately remains inside each adapter:
+
+- **Claim and ownership models:** Eleven of twelve sampled providers maintain
+  durable local claims with materially different ownership bindings. E2B binds
+  an endpoint and exact sandbox, Vercel binds project/team ownership, W&B binds
+  entity/project scope, Nomad binds a job and allocation, and Cloudflare claims
+  retained or recovery state. Anthropic Sandbox Runtime is stateless and has no
+  claim, durable resource, warmup, or stop transaction to centralize.
+- **Creation and retention:** Azure materializes sessions through runner access
+  and deletes unkept warmups; W&B supplies environment only when creating a
+  sandbox; Vercel must choose persistence before creation and repair tentative
+  ownership; OpenSandbox reconciles ambiguous creation and enforces absolute
+  lifetimes. Docker retains successful clone-mode sessions to preserve commits,
+  while Cloudflare retention depends on cache mode and execution coordination.
+- **Workload cancellation:** Only OpenSandbox and Blaxel explicitly attempt
+  remote command cancellation, through `InterruptCommand` and `StopProcess`.
+  Anthropic cancels its local workload by terminating the subprocess; E2B,
+  Azure, Vercel, W&B, and AWS otherwise cancel transport without proving the
+  remote command stopped. Cloudflare Durable Objects return HTTP 409 during
+  active execution: removing completed metadata is not workload cancellation.
+- **Cleanup ordering:** E2B and W&B hold claim transactions across verified
+  remote deletion; OpenSandbox, Vercel, and AWS hold provider operation locks;
+  Nomad deregisters its job, waits for scheduler convergence, confirms absence,
+  and only then removes an unchanged claim. Blacksmith additionally removes a
+  locally owned private key; Cloudflare deletes completed run metadata instead
+  of stopping active execution. These are different ownership transactions.
+- **Failure handling:** Blaxel and OpenSandbox can retain recovery claims after
+  ambiguous creation; Vercel and AWS propagate cleanup failures, while other
+  adapters intentionally warn. Blacksmith preserves Actions proof, artifacts,
+  and workflow-cancellation diagnostics; OpenSandbox refreshes retained
+  activity while enforcing absolute lifetime. Setup failures, rollback,
+  keep-on-failure handling, and final result timing remain provider decisions.
+
+Review proposals to centralize delegated-run orchestration against every
+existing provider: they must preserve exact claim and ownership models,
+creation and retention decisions, actual workload-cancellation guarantees,
+cleanup and lock ordering, and failure-handling behavior. A lifecycle engine
+that transfers these decisions into shared callbacks merely rebuilds adapter
+dispatch while weakening transaction boundaries. Keep delegated-run lifecycles
+adapter-owned unless a future proposal proves both per-provider behavior
+preservation across these dimensions and meaningful net value.
 
 ## Provider registration
 
