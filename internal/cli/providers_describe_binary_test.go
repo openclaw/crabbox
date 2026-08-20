@@ -165,9 +165,9 @@ func TestProvidersDescribeBuiltBinaryContract(t *testing.T) {
 		t.Fatalf("run --help exit=%d stdout=%q stderr=%q", helpCode, helpStdout, helpStderr)
 	}
 	digest := sha256.Sum256(helpStderr)
-	const baselineSHA256 = "58465abab3d45593df5b62cd86ebb3644207011ac07f1d7bbb14ae98032a4011"
-	if got := hex.EncodeToString(digest[:]); got != baselineSHA256 || len(helpStderr) != 60698 {
-		t.Fatalf("run --help changed: sha256=%s bytes=%d, want sha256=%s bytes=60698", got, len(helpStderr), baselineSHA256)
+	const baselineSHA256 = "cdca000cc825bf1e30826325144acb0fce0aa2b9869c79c079f7945be8d0e250"
+	if got := hex.EncodeToString(digest[:]); got != baselineSHA256 || len(helpStderr) != 60763 {
+		t.Fatalf("run --help changed: sha256=%s bytes=%d, want sha256=%s bytes=60763", got, len(helpStderr), baselineSHA256)
 	}
 }
 

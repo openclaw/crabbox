@@ -413,6 +413,7 @@ export interface LeaseRecord {
   runtimeAdapterDeleteAttempts?: number;
   runtimeAdapterDeleteError?: string;
   target: TargetOS;
+  architecture?: string;
   os?: string;
   windowsMode?: WindowsMode;
   desktop?: boolean;
@@ -492,6 +493,24 @@ export interface LeaseRecord {
 
 export type ReadyPoolEntryState = "ready" | "busy" | "draining" | "quarantined" | "stale";
 
+export interface ReadyPoolIdentityV1 {
+  schema: "crabbox-ready-pool-identity/v1";
+  profile: string;
+  recipeDigest: string;
+  inventoryDigest: string;
+  imageID: string;
+  architecture: string;
+  seedDigest: string;
+  cacheABIDigest: string;
+}
+
+export interface ReadyPoolReadinessEvidence {
+  schema: string;
+  profile: string;
+  recipeDigest: string;
+  inventoryDigest: string;
+}
+
 export interface ReadyPoolEntry {
   key: string;
   leaseID: string;
@@ -503,6 +522,7 @@ export interface ReadyPoolEntry {
   commit?: string;
   fingerprint?: string;
   compatibilityKey?: string;
+  identity?: ReadyPoolIdentityV1 | { schema: string; [key: string]: unknown };
   image?: string;
   provider?: string;
   target?: TargetOS;
@@ -535,6 +555,8 @@ export interface ReadyPoolRegisterRequest {
   commit?: string;
   fingerprint?: string;
   compatibilityKey?: string;
+  identity?: ReadyPoolIdentityV1;
+  readinessEvidence?: ReadyPoolReadinessEvidence;
   fillClaimToken?: string;
   image?: string;
   sshHost?: string;
@@ -550,6 +572,7 @@ export interface ReadyPoolBorrowRequest {
   allowMissingCommit?: boolean;
   fingerprint?: string;
   compatibilityKey?: string;
+  identity?: ReadyPoolIdentityV1;
   heartbeat?: boolean;
   provider?: Provider;
   target?: TargetOS;
@@ -560,6 +583,8 @@ export interface ReadyPoolReturnRequest {
   result?: "ready" | "drain" | "release";
   reason?: string;
   borrowToken?: string;
+  identity?: ReadyPoolIdentityV1;
+  readinessEvidence?: ReadyPoolReadinessEvidence;
 }
 
 export interface ReadyPoolBorrowHeartbeatRequest {

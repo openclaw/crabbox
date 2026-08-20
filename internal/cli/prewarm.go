@@ -32,6 +32,7 @@ func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFi
 	probeCommand := fs.String("probe-command", "", "optional shell command to prove the hydrated box is test-ready")
 	poolKey := fs.String("pool", "", "register the hydrated lease in a broker ready pool")
 	poolCompatibilityKey := fs.String("pool-compatibility-key", "", "provider-neutral ready-pool capability and size key")
+	poolIdentityFile := fs.String("pool-identity-file", "", "typed ready-pool identity JSON")
 	dryRun := fs.Bool("dry-run", false, "print the planned Crabbox commands without running them")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	timingJSON := fs.Bool("timing-json", false, "print final timing as JSON")
@@ -142,7 +143,7 @@ func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFi
 	}
 	if readyPoolKey != "" {
 		if err := a.runPrewarmPostWarmupStep(ctx, backend, cfg, acquiredLease, "pool registration", func() error {
-			return a.registerPrewarmedLeaseInReadyPool(ctx, cfg, leaseID, readyPoolKey, *poolCompatibilityKey, poolFillClaim, *githubRunner)
+			return a.registerPrewarmedLeaseInReadyPool(ctx, cfg, acquiredLease, leaseID, readyPoolKey, *poolCompatibilityKey, *poolIdentityFile, poolFillClaim, *githubRunner)
 		}); err != nil {
 			return err
 		}
@@ -200,7 +201,7 @@ func prewarmWarmupArgs(args []string) []string {
 	valueFlags := map[string]struct{}{
 		"repo": {}, "workflow": {}, "job": {}, "ref": {},
 		"wait-timeout": {}, "keep-alive-minutes": {}, "probe-command": {}, "pool": {},
-		"pool-compatibility-key": {},
+		"pool-compatibility-key": {}, "pool-identity-file": {},
 	}
 	boolFlags := map[string]struct{}{
 		"no-hydrate": {}, "github-runner": {}, "dry-run": {}, "timing-json": {},
@@ -230,7 +231,7 @@ func prewarmWarmupArgs(args []string) []string {
 	return out
 }
 
-func (a App) registerPrewarmedLeaseInReadyPool(ctx context.Context, cfg Config, leaseID, poolKey, compatibilityKey, fillClaim string, githubRunner bool) error {
+func (a App) registerPrewarmedLeaseInReadyPool(ctx context.Context, cfg Config, acquiredLease LeaseTarget, leaseID, poolKey, compatibilityKey, identityFile, fillClaim string, githubRunner bool) error {
 	repo, _ := findRepo()
 	input := map[string]any{"leaseID": leaseID}
 	if repoValue := firstNonBlank(cfg.Actions.Repo, bestEffortGitHubRepoSlug(repo, cfg)); repoValue != "" {
@@ -251,7 +252,36 @@ func (a App) registerPrewarmedLeaseInReadyPool(ctx context.Context, cfg Config, 
 	if err != nil {
 		return err
 	}
-	res, err := coord.RegisterReadyPoolLease(ctx, poolKey, input)
+	var res CoordinatorReadyPoolResponse
+	if strings.TrimSpace(identityFile) == "" {
+		res, err = coord.RegisterReadyPoolLease(ctx, poolKey, input)
+	} else {
+		identity, identityErr := loadReadyPoolIdentity(identityFile)
+		if identityErr != nil {
+			return identityErr
+		}
+		if seedErr := validateReadyPoolSeedIdentity(identity, readyPoolInputString(input, "repo"), readyPoolInputString(input, "ref"), readyPoolInputString(input, "commit"), readyPoolInputString(input, "fingerprint")); seedErr != nil {
+			return seedErr
+		}
+		lease, leaseErr := coord.GetLease(ctx, leaseID)
+		if leaseErr != nil {
+			return leaseErr
+		}
+		if identityErr := readyPoolIdentityMatchesLease(identity, lease); identityErr != nil {
+			return identityErr
+		}
+		evidence, evidenceErr := readReadyPoolReadinessEvidence(ctx, acquiredLease.SSH)
+		if evidenceErr != nil {
+			return evidenceErr
+		}
+		if evidenceErr := validateReadyPoolReadinessIdentity(identity, evidence); evidenceErr != nil {
+			return evidenceErr
+		}
+		res, err = coord.RegisterTypedReadyPoolLease(ctx, poolKey, typedReadyPoolRegisterRequest(input, identity, evidence))
+		if err == nil {
+			err = validateTypedReadyPoolResponseIdentity(res, identity)
+		}
+	}
 	if err != nil {
 		return err
 	}

@@ -232,6 +232,7 @@ type runFlagValues struct {
 	LeaseOutput            *string
 	ReadyPool              *string
 	ReadyPoolCompatibility *string
+	ReadyPoolIdentityFile  *string
 	ReadyPoolReturn        *string
 	Downloads              *stringListFlag
 	AllowEnv               *stringListFlag
@@ -285,6 +286,7 @@ func registerRunFlags(fs *flag.FlagSet, defaults Config, options leaseCreateFlag
 		LeaseOutput:            fs.String("lease-output", "", "write a retained JSON lease handle for orchestrators on supported providers"),
 		ReadyPool:              fs.String("pool", "", "borrow a broker ready-pool lease"),
 		ReadyPoolCompatibility: fs.String("pool-compatibility-key", "", "provider-neutral ready-pool capability and size key"),
+		ReadyPoolIdentityFile:  fs.String("pool-identity-file", "", "typed ready-pool identity JSON"),
 		ReadyPoolReturn:        fs.String("pool-return", "auto", "ready-pool return policy: auto, ready, drain, release"),
 		Downloads:              &stringListFlag{},
 		AllowEnv:               &stringListFlag{},
@@ -355,6 +357,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	leaseOutput := runFlags.LeaseOutput
 	readyPool := runFlags.ReadyPool
 	readyPoolCompatibilityKey := runFlags.ReadyPoolCompatibility
+	readyPoolIdentityFile := runFlags.ReadyPoolIdentityFile
 	readyPoolReturn := runFlags.ReadyPoolReturn
 	downloads := append(stringListFlag(nil), (*runFlags.Downloads)...)
 	allowEnvFlags := append(stringListFlag(nil), (*runFlags.AllowEnv)...)
@@ -441,6 +444,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	if strings.TrimSpace(*readyPoolCompatibilityKey) != "" && strings.TrimSpace(*readyPool) == "" {
 		return exit(2, "--pool-compatibility-key requires --pool")
+	}
+	if strings.TrimSpace(*readyPoolIdentityFile) != "" && strings.TrimSpace(*readyPool) == "" {
+		return exit(2, "--pool-identity-file requires --pool")
 	}
 	if strings.TrimSpace(*readyPool) != "" && strings.TrimSpace(*stopAfter) != "" {
 		return exit(2, "--pool uses --pool-return for cleanup policy; omit --stop-after")
@@ -815,6 +821,19 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		result := readyPoolRunReturnResult(*readyPoolReturn, failure, scrubErr, metadataCompatible)
 		reason := readyPoolRunReturnReason(failure, result, preparedCommit, scrubErr, metadataCompatible)
+		var readinessEvidence *CoordinatorReadyPoolReadinessEvidence
+		if result == "ready" && borrowedPool.Entry.Identity != nil {
+			evidenceCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			evidence, evidenceErr := readReadyPoolReadinessEvidence(evidenceCtx, target)
+			cancel()
+			if evidenceErr != nil || validateReadyPoolReadinessIdentity(*borrowedPool.Entry.Identity, evidence) != nil {
+				result = "drain"
+				reason = "typed ready-pool readiness evidence changed on return"
+				fmt.Fprintf(a.Stderr, "pool=%s lease=%s readiness identity stale; draining entry\n", borrowedPool.Entry.Key, borrowedPool.Entry.LeaseID)
+			} else {
+				readinessEvidence = &evidence
+			}
+		}
 		coord, coordErr := readyPoolCoordinatorFromConfig(cfg)
 		if coordErr != nil {
 			fmt.Fprintf(a.Stderr, "warning: ready-pool return skipped for %s: %v\n", borrowedPool.Entry.LeaseID, coordErr)
@@ -828,7 +847,19 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		returnCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		returnErr := returnReadyPoolAfterWorkspaceOwner(returnCtx, &lifecycleOwner, func() error {
-			_, err := coord.ReturnReadyPoolLease(returnCtx, borrowedPool.Entry.Key, borrowedPool.Entry.LeaseID, result, reason, borrowedPool.Entry.BorrowToken)
+			var err error
+			if borrowedPool.Entry.Identity == nil {
+				_, err = coord.ReturnReadyPoolLease(returnCtx, borrowedPool.Entry.Key, borrowedPool.Entry.LeaseID, result, reason, borrowedPool.Entry.BorrowToken)
+			} else {
+				_, err = coord.ReturnTypedReadyPoolLease(returnCtx, borrowedPool.Entry.Key, CoordinatorReadyPoolReturnIdentityRequest{
+					LeaseID:           borrowedPool.Entry.LeaseID,
+					Result:            result,
+					Reason:            reason,
+					BorrowToken:       borrowedPool.Entry.BorrowToken,
+					Identity:          borrowedPool.Entry.Identity,
+					ReadinessEvidence: readinessEvidence,
+				})
+			}
 			return err
 		})
 		cancel()
@@ -962,7 +993,25 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		addStringInput(borrowInput, "compatibilityKey", *readyPoolCompatibilityKey)
 		borrowStartedAt := time.Now()
-		res, err := coord.BorrowReadyPoolLease(ctx, strings.TrimSpace(*readyPool), borrowInput)
+		var res CoordinatorReadyPoolResponse
+		if strings.TrimSpace(*readyPoolIdentityFile) == "" {
+			res, err = coord.BorrowReadyPoolLease(ctx, strings.TrimSpace(*readyPool), borrowInput)
+		} else {
+			identity, identityErr := loadReadyPoolIdentity(*readyPoolIdentityFile)
+			if identityErr != nil {
+				return identityErr
+			}
+			if seedErr := validateReadyPoolSeedIdentity(identity, readyPoolInputString(borrowInput, "repo"), readyPoolInputString(borrowInput, "ref"), readyPoolInputString(borrowInput, "commit"), readyPoolInputString(borrowInput, "fingerprint")); seedErr != nil {
+				return seedErr
+			}
+			res, err = borrowValidatedTypedReadyPoolLease(
+				ctx,
+				coord,
+				strings.TrimSpace(*readyPool),
+				typedReadyPoolBorrowRequest(borrowInput, identity),
+				identity,
+			)
+		}
 		runnerBorrowDuration = time.Since(borrowStartedAt)
 		if err != nil {
 			return err

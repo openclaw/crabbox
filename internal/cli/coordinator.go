@@ -57,6 +57,7 @@ type CoordinatorLease struct {
 	RuntimeWorkspaceID    string                         `json:"runtimeAdapterWorkspaceID,omitempty"`
 	RuntimeRegistrationID string                         `json:"runtimeAdapterRegistrationID,omitempty"`
 	TargetOS              string                         `json:"target,omitempty"`
+	Architecture          string                         `json:"architecture,omitempty"`
 	WindowsMode           string                         `json:"windowsMode,omitempty"`
 	Desktop               bool                           `json:"desktop,omitempty"`
 	DesktopEnv            string                         `json:"desktopEnv,omitempty"`
@@ -535,38 +536,102 @@ type CoordinatorExternalRunnerSyncResponse struct {
 }
 
 type CoordinatorReadyPoolEntry struct {
-	Key               string `json:"key"`
-	LeaseID           string `json:"leaseID"`
-	State             string `json:"state"`
-	Owner             string `json:"owner"`
-	Org               string `json:"org"`
-	Repo              string `json:"repo,omitempty"`
-	Ref               string `json:"ref,omitempty"`
-	Commit            string `json:"commit,omitempty"`
-	Fingerprint       string `json:"fingerprint,omitempty"`
-	CompatibilityKey  string `json:"compatibilityKey,omitempty"`
-	Image             string `json:"image,omitempty"`
-	Provider          string `json:"provider,omitempty"`
-	TargetOS          string `json:"target,omitempty"`
-	WindowsMode       string `json:"windowsMode,omitempty"`
-	Class             string `json:"class,omitempty"`
-	ServerType        string `json:"serverType,omitempty"`
-	SSHHost           string `json:"sshHost,omitempty"`
-	SSHUser           string `json:"sshUser,omitempty"`
-	SSHPort           string `json:"sshPort,omitempty"`
-	WorkRoot          string `json:"workRoot,omitempty"`
-	BorrowedBy        string `json:"borrowedBy,omitempty"`
-	BorrowedAt        string `json:"borrowedAt,omitempty"`
-	BorrowHeartbeatAt string `json:"borrowHeartbeatAt,omitempty"`
-	BorrowExpiresAt   string `json:"borrowExpiresAt,omitempty"`
-	BorrowToken       string `json:"borrowToken,omitempty"`
-	LastReadyAt       string `json:"lastReadyAt,omitempty"`
-	LastUsedAt        string `json:"lastUsedAt,omitempty"`
-	LastResult        string `json:"lastResult,omitempty"`
-	FailureCount      int    `json:"failureCount,omitempty"`
-	CreatedAt         string `json:"createdAt"`
-	UpdatedAt         string `json:"updatedAt"`
-	ExpiresAt         string `json:"expiresAt"`
+	Key               string                          `json:"key"`
+	LeaseID           string                          `json:"leaseID"`
+	State             string                          `json:"state"`
+	Owner             string                          `json:"owner"`
+	Org               string                          `json:"org"`
+	Repo              string                          `json:"repo,omitempty"`
+	Ref               string                          `json:"ref,omitempty"`
+	Commit            string                          `json:"commit,omitempty"`
+	Fingerprint       string                          `json:"fingerprint,omitempty"`
+	CompatibilityKey  string                          `json:"compatibilityKey,omitempty"`
+	Identity          *CoordinatorReadyPoolIdentityV1 `json:"identity,omitempty"`
+	Image             string                          `json:"image,omitempty"`
+	Provider          string                          `json:"provider,omitempty"`
+	TargetOS          string                          `json:"target,omitempty"`
+	WindowsMode       string                          `json:"windowsMode,omitempty"`
+	Class             string                          `json:"class,omitempty"`
+	ServerType        string                          `json:"serverType,omitempty"`
+	SSHHost           string                          `json:"sshHost,omitempty"`
+	SSHUser           string                          `json:"sshUser,omitempty"`
+	SSHPort           string                          `json:"sshPort,omitempty"`
+	WorkRoot          string                          `json:"workRoot,omitempty"`
+	BorrowedBy        string                          `json:"borrowedBy,omitempty"`
+	BorrowedAt        string                          `json:"borrowedAt,omitempty"`
+	BorrowHeartbeatAt string                          `json:"borrowHeartbeatAt,omitempty"`
+	BorrowExpiresAt   string                          `json:"borrowExpiresAt,omitempty"`
+	BorrowToken       string                          `json:"borrowToken,omitempty"`
+	LastReadyAt       string                          `json:"lastReadyAt,omitempty"`
+	LastUsedAt        string                          `json:"lastUsedAt,omitempty"`
+	LastResult        string                          `json:"lastResult,omitempty"`
+	FailureCount      int                             `json:"failureCount,omitempty"`
+	CreatedAt         string                          `json:"createdAt"`
+	UpdatedAt         string                          `json:"updatedAt"`
+	ExpiresAt         string                          `json:"expiresAt"`
+}
+
+type CoordinatorReadyPoolIdentityV1 struct {
+	Schema          string `json:"schema"`
+	Profile         string `json:"profile"`
+	RecipeDigest    string `json:"recipeDigest"`
+	InventoryDigest string `json:"inventoryDigest"`
+	ImageID         string `json:"imageID"`
+	Architecture    string `json:"architecture"`
+	SeedDigest      string `json:"seedDigest"`
+	CacheABIDigest  string `json:"cacheABIDigest"`
+}
+
+type CoordinatorReadyPoolReadinessEvidence struct {
+	Schema          string `json:"schema"`
+	Profile         string `json:"profile"`
+	RecipeDigest    string `json:"recipeDigest"`
+	InventoryDigest string `json:"inventoryDigest"`
+}
+
+type CoordinatorReadyPoolRegisterIdentityRequest struct {
+	LeaseID           string                                `json:"leaseID"`
+	Repo              string                                `json:"repo,omitempty"`
+	Ref               string                                `json:"ref,omitempty"`
+	Commit            string                                `json:"commit,omitempty"`
+	Fingerprint       string                                `json:"fingerprint,omitempty"`
+	CompatibilityKey  string                                `json:"compatibilityKey,omitempty"`
+	FillClaimToken    string                                `json:"fillClaimToken,omitempty"`
+	Identity          CoordinatorReadyPoolIdentityV1        `json:"identity"`
+	ReadinessEvidence CoordinatorReadyPoolReadinessEvidence `json:"readinessEvidence"`
+	SSHHost           string                                `json:"sshHost,omitempty"`
+	SSHUser           string                                `json:"sshUser,omitempty"`
+	SSHPort           string                                `json:"sshPort,omitempty"`
+	WorkRoot          string                                `json:"workRoot,omitempty"`
+}
+
+type CoordinatorReadyPoolBorrowIdentityRequest struct {
+	Repo               string                         `json:"repo,omitempty"`
+	Ref                string                         `json:"ref,omitempty"`
+	Commit             string                         `json:"commit,omitempty"`
+	AllowMissingCommit bool                           `json:"allowMissingCommit,omitempty"`
+	Fingerprint        string                         `json:"fingerprint,omitempty"`
+	CompatibilityKey   string                         `json:"compatibilityKey,omitempty"`
+	Heartbeat          bool                           `json:"heartbeat,omitempty"`
+	Provider           string                         `json:"provider,omitempty"`
+	Target             string                         `json:"target,omitempty"`
+	Identity           CoordinatorReadyPoolIdentityV1 `json:"identity"`
+}
+
+type CoordinatorReadyPoolReconcileIdentityRequest struct {
+	CoordinatorReadyPoolBorrowIdentityRequest
+	MinReady int  `json:"minReady"`
+	MaxReady int  `json:"maxReady"`
+	Claim    bool `json:"claim,omitempty"`
+}
+
+type CoordinatorReadyPoolReturnIdentityRequest struct {
+	LeaseID           string                                 `json:"leaseID"`
+	Result            string                                 `json:"result,omitempty"`
+	Reason            string                                 `json:"reason,omitempty"`
+	BorrowToken       string                                 `json:"borrowToken,omitempty"`
+	Identity          *CoordinatorReadyPoolIdentityV1        `json:"identity,omitempty"`
+	ReadinessEvidence *CoordinatorReadyPoolReadinessEvidence `json:"readinessEvidence,omitempty"`
 }
 
 type CoordinatorReadyPoolResponse struct {
@@ -1341,9 +1406,21 @@ func (c *CoordinatorClient) RegisterReadyPoolLease(ctx context.Context, key stri
 	return res, err
 }
 
+func (c *CoordinatorClient) RegisterTypedReadyPoolLease(ctx context.Context, key string, input CoordinatorReadyPoolRegisterIdentityRequest) (CoordinatorReadyPoolResponse, error) {
+	var res CoordinatorReadyPoolResponse
+	err := c.do(ctx, http.MethodPost, "/v1/ready-pools/"+url.PathEscape(key)+"/register-identity", input, &res)
+	return res, err
+}
+
 func (c *CoordinatorClient) BorrowReadyPoolLease(ctx context.Context, key string, input map[string]any) (CoordinatorReadyPoolResponse, error) {
 	var res CoordinatorReadyPoolResponse
 	err := c.do(ctx, http.MethodPost, "/v1/ready-pools/"+url.PathEscape(key)+"/borrow", input, &res)
+	return res, err
+}
+
+func (c *CoordinatorClient) BorrowTypedReadyPoolLease(ctx context.Context, key string, input CoordinatorReadyPoolBorrowIdentityRequest) (CoordinatorReadyPoolResponse, error) {
+	var res CoordinatorReadyPoolResponse
+	err := c.do(ctx, http.MethodPost, "/v1/ready-pools/"+url.PathEscape(key)+"/borrow-identity", input, &res)
 	return res, err
 }
 
@@ -1359,6 +1436,12 @@ func (c *CoordinatorClient) HeartbeatReadyPoolBorrow(ctx context.Context, key, l
 func (c *CoordinatorClient) ReconcileReadyPool(ctx context.Context, key string, input map[string]any) (CoordinatorReadyPoolReconcileResponse, error) {
 	var res CoordinatorReadyPoolReconcileResponse
 	err := c.do(ctx, http.MethodPost, "/v1/ready-pools/"+url.PathEscape(key)+"/reconcile", input, &res)
+	return res, err
+}
+
+func (c *CoordinatorClient) ReconcileTypedReadyPool(ctx context.Context, key string, input CoordinatorReadyPoolReconcileIdentityRequest) (CoordinatorReadyPoolReconcileResponse, error) {
+	var res CoordinatorReadyPoolReconcileResponse
+	err := c.do(ctx, http.MethodPost, "/v1/ready-pools/"+url.PathEscape(key)+"/reconcile-identity", input, &res)
 	return res, err
 }
 
@@ -1384,6 +1467,12 @@ func (c *CoordinatorClient) ReturnReadyPoolLease(ctx context.Context, key, lease
 		body["borrowToken"] = borrowToken
 	}
 	err := c.do(ctx, http.MethodPost, "/v1/ready-pools/"+url.PathEscape(key)+"/return", body, &res)
+	return res, err
+}
+
+func (c *CoordinatorClient) ReturnTypedReadyPoolLease(ctx context.Context, key string, input CoordinatorReadyPoolReturnIdentityRequest) (CoordinatorReadyPoolResponse, error) {
+	var res CoordinatorReadyPoolResponse
+	err := c.do(ctx, http.MethodPost, "/v1/ready-pools/"+url.PathEscape(key)+"/return-identity", input, &res)
 	return res, err
 }
 
@@ -2422,6 +2511,7 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 			"slug":              lease.Slug,
 			"keep":              fmt.Sprint(lease.Keep),
 			"target":            blank(lease.TargetOS, cfg.TargetOS),
+			"architecture":      blank(lease.Architecture, effectiveArchitectureForConfig(cfg)),
 			"host_id":           hostID,
 			"windows_mode":      blank(lease.WindowsMode, cfg.WindowsMode),
 			"desktop":           fmt.Sprint(lease.Desktop),
@@ -2433,6 +2523,9 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 			"last_touched_at":   lease.LastTouchedAt,
 			"idle_timeout_secs": fmt.Sprint(lease.IdleTimeoutSeconds),
 		},
+	}
+	if lease.Image != nil {
+		server.Labels["image_id"] = lease.Image.ID
 	}
 	if pond := normalizePondName(lease.Pond); pond != "" {
 		server.Labels[pondLabelKey] = pond

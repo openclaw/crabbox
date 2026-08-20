@@ -278,6 +278,8 @@ import type {
   ReadyPoolDesiredCapacity,
   ReadyPoolEntry,
   ReadyPoolFillClaim,
+  ReadyPoolIdentityV1,
+  ReadyPoolReadinessEvidence,
   ReadyPoolReconcileRequest,
   ReadyPoolRegisterRequest,
   ReadyPoolReturnRequest,
@@ -376,6 +378,7 @@ const azureDeferredCleanupPrefix = "azure-cleanup:";
 const readyPoolPrefix = "ready-pool:";
 const readyPoolDesiredPrefix = "ready-pool-desired:";
 const readyPoolFillClaimPrefix = "ready-pool-fill-claim:";
+const readyPoolSeedFieldMaxBytes = 1024;
 const readyPoolCountersPrefix = "ready-pool-counters:";
 const readyPoolBorrowTimeoutMs = 2 * 60_000;
 const readyPoolFillClaimTimeoutMs = 15 * 60_000;
@@ -3913,6 +3916,7 @@ export class FleetCoordinator {
         ...(workspaceID ? { workspaceID } : {}),
         provider: config.provider,
         target: config.target,
+        architecture: config.architecture,
         os: config.os,
         desktop: config.desktop,
         desktopEnv: config.desktopEnv,
@@ -11903,8 +11907,14 @@ export class FleetCoordinator {
     if (method === "POST" && action === "register") {
       return await this.registerReadyPoolLease(request, key);
     }
+    if (method === "POST" && action === "register-identity") {
+      return await this.registerReadyPoolLease(request, key, true);
+    }
     if (method === "POST" && action === "borrow") {
       return await this.borrowReadyPoolLease(request, key);
+    }
+    if (method === "POST" && action === "borrow-identity") {
+      return await this.borrowReadyPoolLease(request, key, true);
     }
     if (method === "POST" && action === "heartbeat") {
       return await this.heartbeatReadyPoolBorrow(request, key);
@@ -11912,8 +11922,14 @@ export class FleetCoordinator {
     if (method === "POST" && action === "return") {
       return await this.returnReadyPoolLease(request, key);
     }
+    if (method === "POST" && action === "return-identity") {
+      return await this.returnReadyPoolLease(request, key, true);
+    }
     if (method === "POST" && action === "reconcile") {
       return await this.reconcileReadyPoolCapacity(request, key);
+    }
+    if (method === "POST" && action === "reconcile-identity") {
+      return await this.reconcileReadyPoolCapacity(request, key, true);
     }
     if (method === "POST" && action === "release-fill-claim") {
       return await this.releaseReadyPoolFillClaim(request, key);
@@ -11950,8 +11966,27 @@ export class FleetCoordinator {
       .toSorted((a, b) => a.key.localeCompare(b.key) || a.leaseID.localeCompare(b.leaseID));
   }
 
-  private async registerReadyPoolLease(request: Request, key: string): Promise<Response> {
+  private async registerReadyPoolLease(
+    request: Request,
+    key: string,
+    typedIdentity = false,
+  ): Promise<Response> {
     const input = await readJson<ReadyPoolRegisterRequest>(request);
+    const identityError = readyPoolIdentityRequestError(input.identity, typedIdentity);
+    if (identityError) {
+      return identityError;
+    }
+    const readinessError = readyPoolReadinessEvidenceRequestError(
+      input.readinessEvidence,
+      typedIdentity,
+    );
+    if (readinessError) {
+      return readinessError;
+    }
+    const seedError = await readyPoolSeedIdentityRequestError(input.identity, input);
+    if (seedError) {
+      return seedError;
+    }
     const leaseID = input.leaseID ?? "";
     const compatibilityKey = normalizeReadyPoolCompatibilityKey(input.compatibilityKey);
     if (input.compatibilityKey !== undefined && !compatibilityKey) {
@@ -12000,6 +12035,19 @@ export class FleetCoordinator {
         if (lease.state !== "active" || Date.parse(lease.expiresAt) <= Date.now()) {
           return json({ error: "lease_not_active" }, { status: 409 });
         }
+        if (
+          typedIdentity &&
+          !readyPoolIdentityMatchesLease(input.identity!, input.readinessEvidence!, lease)
+        ) {
+          return json(
+            {
+              error: "ready_pool_identity_evidence_mismatch",
+              message:
+                "typed ready-pool identity does not match fresh readiness, image, or architecture evidence",
+            },
+            { status: 409 },
+          );
+        }
         const fillClaimToken = nonSecretString(input.fillClaimToken);
         const fillClaim = fillClaimToken
           ? await this.state.storage.get<ReadyPoolFillClaim>(readyPoolFillClaimKey(fillClaimToken))
@@ -12029,6 +12077,31 @@ export class FleetCoordinator {
         const existingPoolEntries = (await this.readyPoolEntries()).filter(
           (entry) => entry.leaseID === leaseID,
         );
+        if (!typedIdentity && existingPoolEntries.some((entry) => entry.identity !== undefined)) {
+          return json(
+            {
+              error: "typed_identity_route_required",
+              message: "typed ready-pool entries cannot be replaced through the legacy route",
+            },
+            { status: 409 },
+          );
+        }
+        if (
+          typedIdentity &&
+          existingPoolEntries.some(
+            (entry) =>
+              entry.identity !== undefined &&
+              !readyPoolIdentityEqual(entry.identity, input.identity),
+          )
+        ) {
+          return json(
+            {
+              error: "ready_pool_identity_mismatch",
+              message: "drain the existing typed entry before changing its identity",
+            },
+            { status: 409 },
+          );
+        }
         if (existingPoolEntries.some((entry) => entry.state === "busy")) {
           return json(
             {
@@ -12054,16 +12127,28 @@ export class FleetCoordinator {
           updatedAt: now,
           expiresAt: lease.expiresAt,
         };
-        addReadyPoolEntryString(entry, "repo", input.repo);
-        addReadyPoolEntryString(entry, "ref", input.ref);
-        addReadyPoolEntryString(entry, "commit", input.commit);
-        addReadyPoolEntryString(entry, "fingerprint", input.fingerprint);
+        if (typedIdentity) {
+          addReadyPoolSeedEntryString(entry, "repo", input.repo);
+          addReadyPoolSeedEntryString(entry, "ref", input.ref);
+          addReadyPoolSeedEntryString(entry, "commit", input.commit);
+          addReadyPoolSeedEntryString(entry, "fingerprint", input.fingerprint);
+        } else {
+          addReadyPoolEntryString(entry, "repo", input.repo);
+          addReadyPoolEntryString(entry, "ref", input.ref);
+          addReadyPoolEntryString(entry, "commit", input.commit);
+          addReadyPoolEntryString(entry, "fingerprint", input.fingerprint);
+        }
         addReadyPoolEntryString(
           entry,
           "compatibilityKey",
           fillClaim?.compatibilityKey ?? compatibilityKey,
         );
-        addReadyPoolEntryString(entry, "image", input.image);
+        if (typedIdentity) {
+          entry.identity = input.identity!;
+          entry.image = input.identity!.imageID;
+        } else {
+          addReadyPoolEntryString(entry, "image", input.image);
+        }
         addReadyPoolEntryString(entry, "sshHost", readyPoolLeaseSSHHost(lease, input.sshHost));
         addReadyPoolEntryString(entry, "sshUser", readyPoolLeaseSSHUser(lease, input.sshUser));
         addReadyPoolEntryString(entry, "sshPort", readyPoolLeaseSSHPort(lease, input.sshPort));
@@ -12096,8 +12181,20 @@ export class FleetCoordinator {
     );
   }
 
-  private async borrowReadyPoolLease(request: Request, key: string): Promise<Response> {
+  private async borrowReadyPoolLease(
+    request: Request,
+    key: string,
+    typedIdentity = false,
+  ): Promise<Response> {
     const input = await readJson<ReadyPoolBorrowRequest>(request);
+    const identityError = readyPoolIdentityRequestError(input.identity, typedIdentity);
+    if (identityError) {
+      return identityError;
+    }
+    const seedError = await readyPoolSeedIdentityRequestError(input.identity, input);
+    if (seedError) {
+      return seedError;
+    }
     const compatibilityKey = normalizeReadyPoolCompatibilityKey(input.compatibilityKey);
     if (input.compatibilityKey !== undefined && !compatibilityKey) {
       return json({ error: "invalid_compatibility_key" }, { status: 400 });
@@ -12248,8 +12345,20 @@ export class FleetCoordinator {
     );
   }
 
-  private async reconcileReadyPoolCapacity(request: Request, key: string): Promise<Response> {
+  private async reconcileReadyPoolCapacity(
+    request: Request,
+    key: string,
+    typedIdentity = false,
+  ): Promise<Response> {
     const input = await readJson<ReadyPoolReconcileRequest>(request);
+    const identityError = readyPoolIdentityRequestError(input.identity, typedIdentity);
+    if (identityError) {
+      return identityError;
+    }
+    const seedError = await readyPoolSeedIdentityRequestError(input.identity, input);
+    if (seedError) {
+      return seedError;
+    }
     const minReady = nonNegativeReadyPoolCapacity(input.minReady, 1);
     if (minReady === undefined) {
       return json(
@@ -12284,7 +12393,7 @@ export class FleetCoordinator {
         await this.maintainReadyPools(nowMs);
         const owner = requestOwner(request);
         const org = requestOrg(request, this.env);
-        const policyKey = readyPoolDesiredKey(owner, org, key, compatibilityKey);
+        const policyKey = readyPoolDesiredKey(owner, org, key, compatibilityKey, input.identity);
         const previous = await this.state.storage.get<ReadyPoolDesiredCapacity>(policyKey);
         const now = new Date(nowMs).toISOString();
         const desired: ReadyPoolDesiredCapacity = {
@@ -12420,7 +12529,11 @@ export class FleetCoordinator {
     );
   }
 
-  private async returnReadyPoolLease(request: Request, key: string): Promise<Response> {
+  private async returnReadyPoolLease(
+    request: Request,
+    key: string,
+    typedIdentity = false,
+  ): Promise<Response> {
     const input = await readJson<ReadyPoolReturnRequest>(request);
     const leaseID = input.leaseID ?? "";
     if (!validLeaseID(leaseID)) {
@@ -12460,7 +12573,7 @@ export class FleetCoordinator {
           { status: 409 },
         );
       }
-      const result = String(input.result ?? "ready");
+      let result = String(input.result ?? "ready");
       if (result !== "ready" && result !== "drain" && result !== "release") {
         return json(
           { error: "invalid_result", message: "result must be ready, drain, or release" },
@@ -12475,6 +12588,45 @@ export class FleetCoordinator {
           },
           { status: 409 },
         );
+      }
+      if (result === "ready") {
+        if (!typedIdentity && current.identity !== undefined) {
+          return json(
+            {
+              error: "typed_identity_route_required",
+              message: "typed ready-pool entries must use return-identity before becoming ready",
+            },
+            { status: 409 },
+          );
+        }
+        if (typedIdentity && current.identity === undefined) {
+          return json(
+            {
+              error: "legacy_ready_pool_entry",
+              message: "legacy ready-pool entries must use the legacy return route",
+            },
+            { status: 409 },
+          );
+        }
+        if (typedIdentity) {
+          const identityError = readyPoolIdentityRequestError(input.identity, true);
+          const readinessError = readyPoolReadinessEvidenceRequestError(
+            input.readinessEvidence,
+            true,
+          );
+          if (
+            identityError ||
+            readinessError ||
+            !readyPoolIdentityEqual(current.identity, input.identity) ||
+            !lease ||
+            !readyPoolIdentityMatchesLease(input.identity!, input.readinessEvidence!, lease)
+          ) {
+            result = "drain";
+            input.reason =
+              nonSecretString(input.reason) ||
+              "typed ready-pool identity evidence changed on return";
+          }
+        }
       }
       if (result === "release" || result === "drain") {
         if (!canManage) {
@@ -16705,6 +16857,268 @@ function normalizeReadyPoolCompatibilityKey(value: unknown): string | undefined 
   return normalized || undefined;
 }
 
+const readyPoolIdentitySchemaV1 = "crabbox-ready-pool-identity/v1";
+const linuxReadinessSchemaV1 = "crabbox-linux-readiness/v1";
+const sha256DigestPattern = /^sha256:[0-9a-f]{64}$/;
+
+function readyPoolIdentityRequestError(value: unknown, required: boolean): Response | undefined {
+  if (!required && value === undefined) {
+    return undefined;
+  }
+  if (!required) {
+    return json(
+      {
+        error: "typed_identity_route_required",
+        message: "ready-pool identity requires the dedicated typed route",
+      },
+      { status: 400 },
+    );
+  }
+  if (!validReadyPoolIdentityV1(value)) {
+    return json(
+      {
+        error: "invalid_ready_pool_identity",
+        message: `identity must be a complete ${readyPoolIdentitySchemaV1} object`,
+      },
+      { status: 400 },
+    );
+  }
+  return undefined;
+}
+
+function readyPoolReadinessEvidenceRequestError(
+  value: unknown,
+  required: boolean,
+): Response | undefined {
+  if (!required && value === undefined) {
+    return undefined;
+  }
+  if (!required) {
+    return json(
+      {
+        error: "typed_identity_route_required",
+        message: "readiness evidence requires the dedicated typed route",
+      },
+      { status: 400 },
+    );
+  }
+  if (!validReadyPoolReadinessEvidence(value)) {
+    return json(
+      {
+        error: "invalid_readiness_evidence",
+        message: `readinessEvidence must be a complete ${linuxReadinessSchemaV1} manifest`,
+      },
+      { status: 400 },
+    );
+  }
+  return undefined;
+}
+
+async function readyPoolSeedIdentityRequestError(
+  identity: ReadyPoolIdentityV1 | undefined,
+  metadata: Pick<ReadyPoolBorrowRequest, "repo" | "ref" | "commit" | "fingerprint">,
+): Promise<Response | undefined> {
+  if (!identity || !validReadyPoolIdentityV1(identity)) {
+    return undefined;
+  }
+  let seedDigest: string;
+  try {
+    seedDigest = await readyPoolSeedDigestV1(metadata);
+  } catch (error) {
+    return json(
+      {
+        error: "invalid_ready_pool_seed_metadata",
+        message: errorMessage(error),
+      },
+      { status: 400 },
+    );
+  }
+  if (identity.seedDigest === seedDigest) {
+    return undefined;
+  }
+  return json(
+    {
+      error: "ready_pool_seed_mismatch",
+      message: "identity seedDigest does not match repo, ref, commit, and fingerprint",
+    },
+    { status: 409 },
+  );
+}
+
+export async function readyPoolSeedDigestV1(
+  metadata: Pick<ReadyPoolBorrowRequest, "repo" | "ref" | "commit" | "fingerprint">,
+): Promise<string> {
+  const fields = (
+    [
+      ["repo", metadata.repo],
+      ["ref", metadata.ref],
+      ["commit", metadata.commit],
+      ["fingerprint", metadata.fingerprint],
+    ] as const
+  ).map(([name, raw], index) => {
+    const value = raw ?? "";
+    if (typeof value !== "string" || !validUnicodeScalarString(value)) {
+      throw new Error(`ready-pool seed ${name} must be valid UTF-8`);
+    }
+    const encoded = textEncoder.encode(value);
+    if (encoded.byteLength > readyPoolSeedFieldMaxBytes) {
+      throw new Error(`ready-pool seed ${name} exceeds ${readyPoolSeedFieldMaxBytes} UTF-8 bytes`);
+    }
+    return { tag: index + 1, encoded };
+  });
+  const domain = textEncoder.encode("crabbox-ready-pool-seed/v1\0");
+  const payload = new Uint8Array(
+    domain.byteLength + fields.reduce((total, field) => total + 5 + field.encoded.byteLength, 0),
+  );
+  payload.set(domain);
+  const view = new DataView(payload.buffer);
+  let offset = domain.byteLength;
+  for (const field of fields) {
+    payload[offset] = field.tag;
+    view.setUint32(offset + 1, field.encoded.byteLength, false);
+    offset += 5;
+    payload.set(field.encoded, offset);
+    offset += field.encoded.byteLength;
+  }
+  const digest = await crypto.subtle.digest("SHA-256", payload);
+  return `sha256:${[...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("")}`;
+}
+
+function validUnicodeScalarString(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) {
+        return false;
+      }
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function validReadyPoolIdentityV1(value: unknown): value is ReadyPoolIdentityV1 {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const identity = value as Record<string, unknown>;
+  if (
+    Object.keys(identity).toSorted().join(",") !==
+    [
+      "architecture",
+      "cacheABIDigest",
+      "imageID",
+      "inventoryDigest",
+      "profile",
+      "recipeDigest",
+      "schema",
+      "seedDigest",
+    ].join(",")
+  ) {
+    return false;
+  }
+  const architecture = nonSecretString(identity["architecture"]);
+  let normalizedArchitecture: string;
+  try {
+    normalizedArchitecture = normalizeArchitecture(architecture);
+  } catch {
+    return false;
+  }
+  return (
+    identity["schema"] === readyPoolIdentitySchemaV1 &&
+    validReadyPoolIdentityName(identity["profile"]) &&
+    validReadyPoolIdentityValue(identity["imageID"], 1024) &&
+    normalizedArchitecture === architecture &&
+    sha256DigestPattern.test(nonSecretString(identity["recipeDigest"])) &&
+    sha256DigestPattern.test(nonSecretString(identity["inventoryDigest"])) &&
+    sha256DigestPattern.test(nonSecretString(identity["seedDigest"])) &&
+    sha256DigestPattern.test(nonSecretString(identity["cacheABIDigest"]))
+  );
+}
+
+function validReadyPoolReadinessEvidence(value: unknown): value is ReadyPoolReadinessEvidence {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const evidence = value as Record<string, unknown>;
+  return (
+    Object.keys(evidence).toSorted().join(",") ===
+      ["inventoryDigest", "profile", "recipeDigest", "schema"].join(",") &&
+    evidence["schema"] === linuxReadinessSchemaV1 &&
+    validReadyPoolIdentityName(evidence["profile"]) &&
+    sha256DigestPattern.test(nonSecretString(evidence["recipeDigest"])) &&
+    sha256DigestPattern.test(nonSecretString(evidence["inventoryDigest"]))
+  );
+}
+
+function validReadyPoolIdentityName(value: unknown): boolean {
+  const name = nonSecretString(value);
+  return name.length > 0 && name.length <= 128 && /^[a-z0-9][a-z0-9._/-]*$/.test(name);
+}
+
+function validReadyPoolIdentityValue(value: unknown, maxLength: number): boolean {
+  const normalized = nonSecretString(value);
+  return normalized.length > 0 && normalized.length <= maxLength;
+}
+
+function readyPoolIdentityEqual(
+  stored: ReadyPoolEntry["identity"] | undefined,
+  requested: ReadyPoolIdentityV1 | undefined,
+): boolean {
+  if (requested === undefined) {
+    return stored === undefined;
+  }
+  if (!validReadyPoolIdentityV1(stored)) {
+    return false;
+  }
+  return (
+    stored.schema === requested.schema &&
+    stored.profile === requested.profile &&
+    stored.recipeDigest === requested.recipeDigest &&
+    stored.inventoryDigest === requested.inventoryDigest &&
+    stored.imageID === requested.imageID &&
+    stored.architecture === requested.architecture &&
+    stored.seedDigest === requested.seedDigest &&
+    stored.cacheABIDigest === requested.cacheABIDigest
+  );
+}
+
+function readyPoolIdentityMatchesLease(
+  identity: ReadyPoolIdentityV1,
+  evidence: ReadyPoolReadinessEvidence,
+  lease: LeaseRecord,
+): boolean {
+  return (
+    lease.target === "linux" &&
+    identity.profile === evidence.profile &&
+    identity.recipeDigest === evidence.recipeDigest &&
+    identity.inventoryDigest === evidence.inventoryDigest &&
+    identity.imageID === nonSecretString(lease.image?.id) &&
+    identity.architecture === nonSecretString(lease.architecture)
+  );
+}
+
+function readyPoolIdentityStorageKey(identity: ReadyPoolIdentityV1 | undefined): string {
+  if (!identity) {
+    return "";
+  }
+  return [
+    identity.schema,
+    identity.profile,
+    identity.recipeDigest,
+    identity.inventoryDigest,
+    identity.imageID,
+    identity.architecture,
+    identity.seedDigest,
+    identity.cacheABIDigest,
+  ].join("\0");
+}
+
 function decodeReadyPoolRouteKey(value: string): string | undefined {
   try {
     return decodeURIComponent(value);
@@ -16714,11 +17128,18 @@ function decodeReadyPoolRouteKey(value: string): string | undefined {
 }
 
 function readyPoolEntryMatches(entry: ReadyPoolEntry, input: ReadyPoolBorrowRequest): boolean {
+  const exactSeed = input.identity !== undefined;
   return (
-    readyPoolFieldMatches(entry.repo, input.repo) &&
-    readyPoolFieldMatches(entry.ref, input.ref) &&
-    readyPoolFieldMatches(entry.commit, input.commit, input.allowMissingCommit === true) &&
-    readyPoolFieldMatches(entry.fingerprint, input.fingerprint) &&
+    readyPoolIdentityEqual(entry.identity, input.identity) &&
+    readyPoolFieldMatches(entry.repo, input.repo, false, exactSeed) &&
+    readyPoolFieldMatches(entry.ref, input.ref, false, exactSeed) &&
+    readyPoolFieldMatches(
+      entry.commit,
+      input.commit,
+      input.allowMissingCommit === true,
+      exactSeed,
+    ) &&
+    readyPoolFieldMatches(entry.fingerprint, input.fingerprint, false, exactSeed) &&
     readyPoolFieldMatches(entry.compatibilityKey, input.compatibilityKey) &&
     readyPoolFieldMatches(entry.provider, input.provider) &&
     readyPoolFieldMatches(entry.target, input.target)
@@ -16727,7 +17148,13 @@ function readyPoolEntryMatches(entry: ReadyPoolEntry, input: ReadyPoolBorrowRequ
 
 function readyPoolCriteria(input: ReadyPoolBorrowRequest): ReadyPoolBorrowRequest {
   const criteria: ReadyPoolBorrowRequest = {};
-  for (const key of ["repo", "ref", "commit", "fingerprint", "provider", "target"] as const) {
+  for (const key of ["repo", "ref", "commit", "fingerprint"] as const) {
+    const value = input.identity ? readyPoolSeedString(input[key]) : nonSecretString(input[key]);
+    if (value) {
+      (criteria as Record<string, unknown>)[key] = value;
+    }
+  }
+  for (const key of ["provider", "target"] as const) {
     const value = nonSecretString(input[key]);
     if (value) {
       (criteria as Record<string, unknown>)[key] = value;
@@ -16740,6 +17167,9 @@ function readyPoolCriteria(input: ReadyPoolBorrowRequest): ReadyPoolBorrowReques
   if (input.allowMissingCommit === true) {
     criteria.allowMissingCommit = true;
   }
+  if (input.identity) {
+    criteria.identity = input.identity;
+  }
   return criteria;
 }
 
@@ -16747,7 +17177,25 @@ function readyPoolCriteriaEqual(
   left: ReadyPoolBorrowRequest,
   right: ReadyPoolBorrowRequest,
 ): boolean {
-  return JSON.stringify(readyPoolCriteria(left)) === JSON.stringify(readyPoolCriteria(right));
+  const normalizedLeft = readyPoolCriteria(left);
+  const normalizedRight = readyPoolCriteria(right);
+  for (const key of [
+    "repo",
+    "ref",
+    "commit",
+    "fingerprint",
+    "compatibilityKey",
+    "provider",
+    "target",
+  ] as const) {
+    if (normalizedLeft[key] !== normalizedRight[key]) {
+      return false;
+    }
+  }
+  return (
+    normalizedLeft.allowMissingCommit === normalizedRight.allowMissingCommit &&
+    readyPoolIdentityEqual(normalizedLeft.identity, normalizedRight.identity)
+  );
 }
 
 function readyPoolCapacityCounts(
@@ -16834,6 +17282,17 @@ function addReadyPoolEntryString(
   }
 }
 
+function addReadyPoolSeedEntryString(
+  entry: ReadyPoolEntry,
+  key: "repo" | "ref" | "commit" | "fingerprint",
+  value: unknown,
+): void {
+  const text = readyPoolSeedString(value);
+  if (text) {
+    entry[key] = text;
+  }
+}
+
 function readyPoolLeaseSSHHost(lease: LeaseRecord, requested: unknown): string {
   const host = nonSecretString(requested);
   const allowed = new Set(
@@ -16867,13 +17326,18 @@ function readyPoolFieldMatches(
   stored: string | undefined,
   requested: string | undefined,
   allowMissing = false,
+  exact = false,
 ): boolean {
-  const want = nonSecretString(requested);
+  const want = exact ? readyPoolSeedString(requested) : nonSecretString(requested);
   if (!want) {
     return true;
   }
-  const got = nonSecretString(stored);
+  const got = exact ? readyPoolSeedString(stored) : nonSecretString(stored);
   return got === want || (allowMissing && got === "");
+}
+
+function readyPoolSeedString(value: unknown): string {
+  return typeof value === "string" ? value : "";
 }
 
 function readyPoolKey(key: string, leaseID: string): string {
@@ -16885,10 +17349,13 @@ function readyPoolDesiredKey(
   org: string,
   key: string,
   compatibilityKey?: string,
+  identity?: ReadyPoolIdentityV1,
 ): string {
-  return `${readyPoolDesiredPrefix}${[org, owner, key, compatibilityKey ?? ""]
-    .map((part) => encodeURIComponent(part))
-    .join(":")}`;
+  const parts = [org, owner, key, compatibilityKey ?? ""];
+  if (identity) {
+    parts.push(readyPoolIdentityStorageKey(identity));
+  }
+  return `${readyPoolDesiredPrefix}${parts.map((part) => encodeURIComponent(part)).join(":")}`;
 }
 
 function readyPoolFillClaimKey(token: string): string {
@@ -23177,12 +23644,49 @@ export class GCPProvider implements CloudProvider {
   async prepareLeaseConfig(
     config: ReturnType<typeof leaseConfig>,
   ): Promise<ReturnType<typeof leaseConfig>> {
-    if (config.gcpProject) {
-      return config;
+    const located = config.gcpProject
+      ? config
+      : {
+          ...config,
+          gcpProject: this.env.CRABBOX_GCP_PROJECT?.trim() || this.env.GCP_PROJECT_ID?.trim() || "",
+        };
+    const project = located.gcpProject || this.client.project;
+    const region = located.gcpZone || this.client.zone;
+    const scopedClient = this.client.forScope(region, project);
+    if (located.gcpMachineImage) {
+      const resolved = await scopedClient.resolveMachineImage(located.gcpMachineImage);
+      return {
+        ...located,
+        gcpMachineImage: resolved.launchSource,
+        selectedImage: {
+          ...resolved.identity,
+          source: "snapshot",
+          region,
+        },
+      };
     }
+    if (located.gcpSnapshot) {
+      const resolved = await scopedClient.resolveDiskSnapshot(located.gcpSnapshot);
+      return {
+        ...located,
+        gcpSnapshot: resolved.launchSource,
+        selectedImage: {
+          ...resolved.identity,
+          source: "snapshot",
+          region,
+        },
+      };
+    }
+    const requestedImage = located.gcpImage || scopedClient.image;
+    const resolved = await scopedClient.resolveBootImage(requestedImage);
     return {
-      ...config,
-      gcpProject: this.env.CRABBOX_GCP_PROJECT?.trim() || this.env.GCP_PROJECT_ID?.trim() || "",
+      ...located,
+      gcpImage: resolved.launchSource,
+      selectedImage: {
+        ...resolved.identity,
+        source: located.gcpImage ? "explicit" : "provider-default",
+        region,
+      },
     };
   }
 
@@ -23204,8 +23708,22 @@ export class GCPProvider implements CloudProvider {
     serverType: string;
     market?: string;
     attempts?: ProvisioningAttempt[];
+    image?: LeaseImageIdentity;
   }> {
-    return this.client.createServerWithFallback(config, leaseID, slug, owner, provisioning);
+    return this.client
+      .forScope(config.gcpZone || this.client.zone, config.gcpProject || this.client.project)
+      .createServerWithFallback(config, leaseID, slug, owner, provisioning)
+      .then((result) => ({
+        ...result,
+        ...(config.selectedImage
+          ? {
+              image: {
+                ...config.selectedImage,
+                region: result.server.region ?? config.gcpZone ?? config.selectedImage.region,
+              },
+            }
+          : {}),
+      }));
   }
 
   deleteServer(id: string): Promise<void> {

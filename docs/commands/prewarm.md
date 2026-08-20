@@ -9,6 +9,7 @@ Blacksmith Testbox, hydration stays provider-owned.
 crabbox prewarm
 crabbox prewarm --provider azure --probe-command 'node -v && pnpm -v'
 crabbox prewarm --pool example/app/main/linux --pool-compatibility-key linux-16-vcpu
+crabbox prewarm --pool example/app/main/linux --pool-identity-file ./ready-pool-identity.json
 crabbox prewarm --dry-run
 ```
 
@@ -44,6 +45,8 @@ the upload quickly when nothing changed.
 - Optionally runs `--probe-command` without source sync to prove the hydrated
   runtime is usable.
 - Optionally registers the hydrated lease in a broker ready pool with `--pool`.
+- With `--pool-identity-file`, proves the fresh remote readiness manifest and
+  the broker lease's immutable image and architecture before typed registration.
 - `--timing-json` includes `hydrateMs` and `probeMs`.
 
 ## Flags
@@ -63,6 +66,7 @@ same way they do on `warmup`.
 --keep-alive-minutes <n>     GitHub-runner keep-alive window
 --probe-command <command>    shell probe to run after hydration
 --pool <key>                 register the hydrated lease in a broker ready pool
+--pool-identity-file <path>  require an exact typed ready-pool identity
 --dry-run                    print planned commands
 --timing-json                print machine-readable timing
 ```
