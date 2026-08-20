@@ -131,10 +131,16 @@ type CoordinatorLeaseImage struct {
 }
 
 type CoordinatorProvisioningTiming struct {
-	RequestMs      int64 `json:"requestMs"`
-	NetworkReadyMs int64 `json:"networkReadyMs,omitempty"`
-	BootstrapMs    int64 `json:"bootstrapMs,omitempty"`
-	TotalMs        int64 `json:"totalMs"`
+	RequestMs      int64                          `json:"requestMs"`
+	NetworkReadyMs int64                          `json:"networkReadyMs,omitempty"`
+	BootstrapMs    int64                          `json:"bootstrapMs,omitempty"`
+	TotalMs        int64                          `json:"totalMs"`
+	Phases         []CoordinatorProvisioningPhase `json:"phases,omitempty"`
+}
+
+type CoordinatorProvisioningPhase struct {
+	Name string `json:"name"`
+	Ms   int64  `json:"ms"`
 }
 
 type CoordinatorLeaseRegistration struct {

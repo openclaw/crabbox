@@ -22642,6 +22642,25 @@ export class HetznerProvider implements CloudProvider {
   }
 }
 
+function withProvisioningPhases(
+  timing: Omit<LeaseProvisioningTiming, "phases">,
+): LeaseProvisioningTiming {
+  const phases: NonNullable<LeaseProvisioningTiming["phases"]> = [];
+  let remaining = Math.max(0, timing.totalMs);
+  const append = (name: NonNullable<LeaseProvisioningTiming["phases"]>[number]["name"], ms = 0) => {
+    const bounded = Math.min(Math.max(0, ms), remaining);
+    if (bounded > 0) {
+      phases.push({ name, ms: bounded });
+      remaining -= bounded;
+    }
+  };
+  append("request", timing.requestMs);
+  append("network_ready", timing.networkReadyMs);
+  append("bootstrap", timing.bootstrapMs);
+  append("unattributed", remaining);
+  return { ...timing, phases };
+}
+
 export class AzureProvider implements CloudProvider {
   private clientValue?: AzureClient;
 
@@ -22788,10 +22807,10 @@ export class AzureProvider implements CloudProvider {
       return {
         ...result,
         ...(image ? { image } : {}),
-        provisioningTiming: {
+        provisioningTiming: withProvisioningPhases({
           requestMs: Date.now() - startedAt,
           totalMs: Date.now() - startedAt,
-        },
+        }),
       };
     });
   }
@@ -24078,12 +24097,12 @@ export class AWSProvider implements CloudProvider {
           server: { ...readyServer, region },
           serverType,
           image: awsLeaseImageIdentity(config, imageID, region),
-          provisioningTiming: {
+          provisioningTiming: withProvisioningPhases({
             requestMs,
             networkReadyMs: Date.now() - networkReadyStartedAt - bootstrapMs,
             ...(bootstrapMs > 0 ? { bootstrapMs } : {}),
             totalMs: Date.now() - totalStartedAt,
-          },
+          }),
         };
         if (market) {
           result.market = market;
