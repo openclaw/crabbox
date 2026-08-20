@@ -136,6 +136,7 @@ func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req RunRequest) (
 
 	workspace, err := azureDynamicSessionsWorkspace(b.cfg)
 	if err != nil {
+		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 		return RunResult{}, err
 	}
 	syncDuration := time.Duration(0)
@@ -143,10 +144,12 @@ func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req RunRequest) (
 	if !req.NoSync {
 		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, leaseID, req, workspace)
 		if err != nil {
+			handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 			return RunResult{Total: b.now().Sub(started), SyncDelegated: true, Provider: providerName, LeaseID: leaseID, Slug: slug}, err
 		}
 		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
-	} else if err := b.prepareWorkspace(ctx, client, leaseID, workspace, false); err != nil {
+	} else if err := b.prepareWorkspace(ctx, client, leaseID, workspace); err != nil {
+		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 		return RunResult{}, err
 	}
 	if req.SyncOnly {
@@ -284,16 +287,23 @@ func (b *azureDynamicSessionsBackend) Status(ctx context.Context, req StatusRequ
 	if err != nil {
 		return statusView{}, err
 	}
-	leaseID, slug, err := b.resolveSessionID(ctx, client, req.ID, "", false)
+	waitTimeout := req.WaitTimeout
+	if waitTimeout <= 0 {
+		waitTimeout = 5 * time.Minute
+	}
+	deadline := b.now().Add(waitTimeout)
+	pollCtx := ctx
+	cancel := func() {}
+	if req.Wait {
+		pollCtx, cancel = context.WithTimeout(ctx, waitTimeout)
+	}
+	defer cancel()
+	leaseID, slug, err := b.resolveSessionID(pollCtx, client, req.ID, "", false)
 	if err != nil {
 		return statusView{}, err
 	}
-	deadline := b.now().Add(req.WaitTimeout)
-	if req.WaitTimeout <= 0 {
-		deadline = b.now().Add(5 * time.Minute)
-	}
 	for {
-		session, err := client.GetSession(ctx, leaseID)
+		session, err := client.GetSession(pollCtx, leaseID)
 		if err == nil {
 			view := b.statusView(leaseID, slug, session)
 			if !req.Wait || view.Ready {
@@ -303,11 +313,20 @@ func (b *azureDynamicSessionsBackend) Status(ctx context.Context, req StatusRequ
 				return statusView{}, exit(5, "timed out waiting for session %s to become ready", leaseID)
 			}
 			select {
-			case <-ctx.Done():
-				return statusView{}, ctx.Err()
+			case <-pollCtx.Done():
+				if errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+					return statusView{}, exit(5, "timed out waiting for session %s to become ready", leaseID)
+				}
+				return statusView{}, pollCtx.Err()
 			case <-time.After(2 * time.Second):
 			}
 			continue
+		}
+		if req.Wait && errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+			return statusView{}, exit(5, "timed out waiting for session %s to become ready", leaseID)
+		}
+		if ctx.Err() != nil {
+			return statusView{}, ctx.Err()
 		}
 		if !isNotFoundError(err) || !req.Wait {
 			return statusView{}, providerError("get session", err)
@@ -316,8 +335,11 @@ func (b *azureDynamicSessionsBackend) Status(ctx context.Context, req StatusRequ
 			return statusView{}, exit(5, "timed out waiting for session %s to become ready", leaseID)
 		}
 		select {
-		case <-ctx.Done():
-			return statusView{}, ctx.Err()
+		case <-pollCtx.Done():
+			if errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+				return statusView{}, exit(5, "timed out waiting for session %s to become ready", leaseID)
+			}
+			return statusView{}, pollCtx.Err()
 		case <-time.After(2 * time.Second):
 		}
 	}

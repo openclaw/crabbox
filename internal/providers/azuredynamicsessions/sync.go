@@ -9,75 +9,45 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func (b *azureDynamicSessionsBackend) syncWorkspace(ctx context.Context, client azureDynamicSessionsAPI, sessionID string, req RunRequest, workspace string) ([]timingPhase, time.Duration, error) {
-	start := b.now()
-	syncCtx := ctx
-	cancel := func() {}
-	if b.cfg.Sync.Timeout > 0 {
-		syncCtx, cancel = context.WithTimeout(ctx, b.cfg.Sync.Timeout)
-	}
-	defer cancel()
-
-	excludes, err := syncExcludes(req.Repo.Root, b.cfg)
+	workspace, err := cleanAzureDynamicSessionsWorkspacePath(workspace)
 	if err != nil {
 		return nil, 0, err
 	}
-	manifestStarted := b.now()
-	manifest, err := syncManifest(req.Repo.Root, excludes, b.cfg.Sync.Includes)
-	if err != nil {
-		return nil, 0, exit(6, "build sync file list: %v", err)
-	}
-	manifestDuration := b.now().Sub(manifestStarted)
-	preflightStarted := b.now()
-	if err := checkSyncPreflight(manifest, b.cfg, req.ForceSyncLarge, b.rt.Stderr); err != nil {
-		return nil, 0, err
-	}
-	preflightDuration := b.now().Sub(preflightStarted)
-	prepareStarted := b.now()
-	if err := b.prepareWorkspace(syncCtx, client, sessionID, workspace, b.cfg.Sync.Delete); err != nil {
-		return nil, 0, err
-	}
-	prepareDuration := b.now().Sub(prepareStarted)
-	archiveStarted := b.now()
-	archive, err := createAzureDynamicSessionsSyncArchive(syncCtx, req.Repo, manifest)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer os.Remove(archive.Name())
-	defer archive.Close()
-	archiveDuration := b.now().Sub(archiveStarted)
-	uploadStarted := b.now()
-	remoteArchive := azureDynamicSessionsRemoteArchivePath()
-	if err := client.UploadFile(syncCtx, sessionID, archive.Name(), remoteArchive); err != nil {
-		return nil, 0, providerError("upload archive", err)
-	}
-	if err := b.execShell(syncCtx, client, sessionID, azureDynamicSessionsExtractArchiveCommand(remoteArchive, workspace), io.Discard); err != nil {
-		return nil, 0, err
-	}
-	uploadDuration := b.now().Sub(uploadStarted)
-	total := b.now().Sub(start)
-	return []timingPhase{
-		{Name: "manifest", Ms: manifestDuration.Milliseconds()},
-		{Name: "preflight", Ms: preflightDuration.Milliseconds()},
-		{Name: "prepare", Ms: prepareDuration.Milliseconds()},
-		{Name: "archive", Ms: archiveDuration.Milliseconds()},
-		{Name: "upload", Ms: uploadDuration.Milliseconds()},
-		{Name: "azure_dynamic_sessions_sync", Ms: total.Milliseconds()},
-	}, total, nil
+	return shared.RunSandboxArchiveSync(ctx, shared.SandboxArchiveSyncRequest{
+		Config:              b.cfg,
+		Repo:                req.Repo,
+		ForceSyncLarge:      req.ForceSyncLarge,
+		Workdir:             workspace,
+		TempPattern:         "crabbox-azds-sync-*.tgz",
+		RemoteArchivePrefix: "crabbox-azds-sync-",
+		PhaseName:           "azure_dynamic_sessions_sync",
+		Provider:            providerName,
+		Stderr:              b.rt.Stderr,
+		Now:                 b.now,
+		Upload: func(uploadCtx context.Context, remoteArchive string, body io.Reader) error {
+			archive, ok := body.(*os.File)
+			if !ok {
+				return fmt.Errorf("%s sync archive must be a local file", providerName)
+			}
+			return providerError("upload archive", client.UploadFile(uploadCtx, sessionID, archive.Name(), remoteArchive))
+		},
+		Exec: func(execCtx context.Context, command string) error {
+			return b.execShell(execCtx, client, sessionID, command, io.Discard)
+		},
+	})
 }
 
-func (b *azureDynamicSessionsBackend) prepareWorkspace(ctx context.Context, client azureDynamicSessionsAPI, sessionID, workspace string, reset bool) error {
+func (b *azureDynamicSessionsBackend) prepareWorkspace(ctx context.Context, client azureDynamicSessionsAPI, sessionID, workspace string) error {
 	workspace, err := cleanAzureDynamicSessionsWorkspacePath(workspace)
 	if err != nil {
 		return err
 	}
-	command := "mkdir -p " + shellQuote(workspace)
-	if reset {
-		command = "rm -rf " + shellQuote(workspace) + " && " + command
-	}
-	return b.execShell(ctx, client, sessionID, command, io.Discard)
+	return b.execShell(ctx, client, sessionID, "mkdir -p "+shellQuote(workspace), io.Discard)
 }
 
 func (b *azureDynamicSessionsBackend) execShell(ctx context.Context, client azureDynamicSessionsAPI, sessionID, command string, stdout io.Writer) error {
@@ -133,19 +103,4 @@ func buildAzureDynamicSessionsCommand(command []string, shellMode bool) (string,
 		return shellScriptFromArgv(command), nil
 	}
 	return strings.Join(shellWords(command), " "), nil
-}
-
-func azureDynamicSessionsRemoteArchivePath() string {
-	return path.Join("/tmp", "crabbox-azds-sync-"+time.Now().UTC().Format("20060102150405.000000000")+".tgz")
-}
-
-func azureDynamicSessionsExtractArchiveCommand(remoteArchive, workdir string) string {
-	return strings.Join([]string{
-		"tar -xzf " + shellQuote(remoteArchive) + " -C " + shellQuote(workdir),
-		"status=$?",
-		"rm -f " + shellQuote(remoteArchive),
-		"cleanup=$?",
-		`if [ "$status" -ne 0 ]; then exit "$status"; fi`,
-		`exit "$cleanup"`,
-	}, "; ")
 }

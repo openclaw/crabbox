@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -806,6 +807,77 @@ func TestE2BSyncWorkspaceCleansRemoteArchiveWhenExtractFails(t *testing.T) {
 	}
 }
 
+func TestE2BSyncDeletePreservesWorkspaceWhenReplacementFails(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		uploadErr   error
+		failExtract bool
+	}{
+		{name: "upload", uploadErr: errors.New("upload failed")},
+		{name: "extract", failExtract: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := newE2BSyncTestRepo(t)
+			workspace := filepath.Join(t.TempDir(), "workspace")
+			if err := os.Mkdir(workspace, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			previous := filepath.Join(workspace, "previous.txt")
+			if err := os.WriteFile(previous, []byte("keep me"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			client := &fakeE2BSyncClient{
+				uploadErr:    tc.uploadErr,
+				failExtract:  tc.failExtract,
+				executeShell: true,
+			}
+			backend := &e2bBackend{rt: Runtime{Stderr: io.Discard}}
+			backend.cfg.Sync.Delete = true
+
+			_, _, err := backend.syncWorkspace(t.Context(), client, e2bSession{SandboxID: "sbx_1"}, RunRequest{
+				Repo: Repo{Root: root, Name: "repo"},
+			}, workspace)
+			if err == nil {
+				t.Fatal("sync unexpectedly succeeded")
+			}
+			content, err := os.ReadFile(previous)
+			if err != nil || string(content) != "keep me" {
+				t.Fatalf("previous workspace content=%q err=%v", content, err)
+			}
+			if matches, err := filepath.Glob(filepath.Join(filepath.Dir(workspace), ".workspace.crabbox-sync-*")); err != nil || len(matches) != 0 {
+				t.Fatalf("staging directories=%v err=%v, want none", matches, err)
+			}
+			if !client.cleanupDeadlineSet {
+				t.Fatal("failed sync cleanup did not use a bounded context")
+			}
+		})
+	}
+}
+
+func TestE2BSyncWorkspaceHonorsConfiguredTimeout(t *testing.T) {
+	root := newE2BSyncTestRepo(t)
+	client := &fakeE2BSyncClient{uploadWaitForCancel: true}
+	backend := &e2bBackend{rt: Runtime{Stderr: io.Discard}}
+	backend.cfg.Sync.Timeout = 500 * time.Millisecond
+	started := time.Now()
+
+	_, _, err := backend.syncWorkspace(t.Context(), client, e2bSession{SandboxID: "sbx_1"}, RunRequest{
+		Repo: Repo{Root: root, Name: "repo"},
+	}, "/home/user/repo")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("sync err=%v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("sync timeout returned after %s", elapsed)
+	}
+	if !client.uploadDeadlineSet {
+		t.Fatal("upload did not receive the configured sync deadline")
+	}
+	if !client.cleanupDeadlineSet {
+		t.Fatal("timed-out sync cleanup did not use an independent bounded context")
+	}
+}
+
 func TestE2BPrepareWorkspaceRejectsUnsafePath(t *testing.T) {
 	client := &fakeE2BSyncClient{}
 	cfg := Config{}
@@ -846,6 +918,43 @@ func TestE2BStatusReady(t *testing.T) {
 	}
 	if e2bStatusReady("paused") {
 		t.Fatal("paused should not be ready")
+	}
+}
+
+func TestE2BStatusWaitBoundsInFlightSandboxLookup(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		getWaitAfterCalls int
+	}{
+		{name: "lease resolution"},
+		{name: "readiness poll", getWaitAfterCalls: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			client := &fakeE2BSyncClient{}
+			restore := swapNewE2BClient(client)
+			defer restore()
+			backend := &e2bBackend{
+				cfg: Config{E2B: E2BConfig{APIURL: "https://api.example.test", Template: "base"}},
+				rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+			}
+			leaseID, _, _, err := backend.createSandbox(t.Context(), client, Repo{Root: t.TempDir()}, true, false, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			client.getWaitForCancel = true
+			client.getWaitAfterCalls = tc.getWaitAfterCalls
+			started := time.Now()
+
+			_, err = backend.Status(t.Context(), StatusRequest{ID: leaseID, Wait: true, WaitTimeout: 30 * time.Millisecond})
+			var exitErr ExitError
+			if !errors.As(err, &exitErr) || exitErr.Code != 5 || !strings.Contains(err.Error(), "timed out waiting for sandbox") {
+				t.Fatalf("status err=%v, want sandbox wait timeout with exit code 5", err)
+			}
+			if elapsed := time.Since(started); elapsed > time.Second {
+				t.Fatalf("in-flight sandbox lookup returned after %s", elapsed)
+			}
+		})
 	}
 }
 
@@ -1004,6 +1113,62 @@ func TestE2BRunReturnsSessionHandleWhenKeepOnFailureRetainsSandbox(t *testing.T)
 	}
 	if report["runStatus"] != "failed" || report["errorKind"] != "command-exit" {
 		t.Fatalf("timing outcome status=%v kind=%v", report["runStatus"], report["errorKind"])
+	}
+}
+
+func TestE2BRunKeepOnFailureRetainsSandboxAfterSetupFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		noSync       bool
+		uploadErr    error
+		connectErr   error
+		processCodes []int
+	}{
+		{name: "archive sync", uploadErr: errors.New("upload failed")},
+		{name: "workspace setup", noSync: true, processCodes: []int{7}},
+		{name: "sandbox connection", noSync: true, connectErr: errors.New("connect failed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			client := &fakeE2BSyncClient{
+				uploadErr:    tc.uploadErr,
+				connectErr:   tc.connectErr,
+				processCodes: tc.processCodes,
+			}
+			restore := swapNewE2BClient(client)
+			defer restore()
+			var stderr bytes.Buffer
+			backend := &e2bBackend{
+				cfg: Config{
+					IdleTimeout: 30 * time.Minute,
+					TTL:         2 * time.Minute,
+					E2B:         E2BConfig{APIKey: "test", Workdir: "repo"},
+				},
+				rt: Runtime{Stdout: io.Discard, Stderr: &stderr},
+			}
+
+			result, err := backend.Run(t.Context(), RunRequest{
+				Repo:          Repo{Name: "repo", Root: newE2BSyncTestRepo(t)},
+				Command:       []string{"true"},
+				KeepOnFailure: true,
+				NoSync:        tc.noSync,
+			})
+			if err == nil {
+				t.Fatal("run unexpectedly succeeded")
+			}
+			if result.Session == nil || !result.Session.Kept || result.Session.Reused {
+				t.Fatalf("session=%#v, want retained new sandbox", result.Session)
+			}
+			if len(client.deleteIDs) != 0 {
+				t.Fatalf("deleted sandbox=%v, want retained sandbox", client.deleteIDs)
+			}
+			if _, exists, claimErr := readLeaseClaimWithPresence(result.Session.LeaseID); claimErr != nil || !exists {
+				t.Fatalf("retained sandbox claim exists=%t err=%v", exists, claimErr)
+			}
+			if !strings.Contains(stderr.String(), "keep-on-failure") {
+				t.Fatalf("stderr=%q, want retention guidance", stderr.String())
+			}
+		})
 	}
 }
 
@@ -1255,19 +1420,28 @@ func TestE2BReclaimAndStopAdoptsExactSandbox(t *testing.T) {
 }
 
 type fakeE2BSyncClient struct {
-	commands          []string
-	users             []string
-	sandbox           e2bSandbox
-	createReq         e2bCreateSandboxRequest
-	createCalls       int
-	getIDs            []string
-	getErr            error
-	deleteIDs         []string
-	deleteErr         error
-	deleteDeadlineSet bool
-	uploadPath        string
-	uploaded          bytes.Buffer
-	processCodes      []int
+	commands            []string
+	users               []string
+	sandbox             e2bSandbox
+	createReq           e2bCreateSandboxRequest
+	createCalls         int
+	getIDs              []string
+	getErr              error
+	getWaitForCancel    bool
+	getWaitAfterCalls   int
+	deleteIDs           []string
+	deleteErr           error
+	deleteDeadlineSet   bool
+	uploadPath          string
+	uploaded            bytes.Buffer
+	uploadErr           error
+	uploadWaitForCancel bool
+	uploadDeadlineSet   bool
+	connectErr          error
+	executeShell        bool
+	failExtract         bool
+	cleanupDeadlineSet  bool
+	processCodes        []int
 }
 
 func swapNewE2BClient(fake e2bAPI) func() {
@@ -1287,11 +1461,15 @@ func (f *fakeE2BSyncClient) CreateSandbox(_ context.Context, req e2bCreateSandbo
 }
 
 func (f *fakeE2BSyncClient) ConnectSandbox(context.Context, string, int) (e2bSession, error) {
-	return e2bSession{}, nil
+	return e2bSession{}, f.connectErr
 }
 
-func (f *fakeE2BSyncClient) GetSandbox(_ context.Context, sandboxID string) (e2bSandbox, error) {
+func (f *fakeE2BSyncClient) GetSandbox(ctx context.Context, sandboxID string) (e2bSandbox, error) {
 	f.getIDs = append(f.getIDs, sandboxID)
+	if f.getWaitForCancel && len(f.getIDs) > f.getWaitAfterCalls {
+		<-ctx.Done()
+		return e2bSandbox{}, ctx.Err()
+	}
 	if f.getErr != nil {
 		return e2bSandbox{}, f.getErr
 	}
@@ -1311,21 +1489,65 @@ func (f *fakeE2BSyncClient) DeleteSandbox(ctx context.Context, sandboxID string)
 	return f.deleteErr
 }
 
-func (f *fakeE2BSyncClient) UploadFile(_ context.Context, _ e2bSession, targetPath string, r io.Reader) error {
+func (f *fakeE2BSyncClient) UploadFile(ctx context.Context, _ e2bSession, targetPath string, r io.Reader) error {
 	f.uploadPath = targetPath
-	_, err := io.Copy(&f.uploaded, r)
-	return err
+	_, f.uploadDeadlineSet = ctx.Deadline()
+	if f.uploadWaitForCancel {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	if f.uploadErr != nil {
+		return f.uploadErr
+	}
+	if _, err := io.Copy(&f.uploaded, r); err != nil {
+		return err
+	}
+	if f.executeShell {
+		return os.WriteFile(targetPath, f.uploaded.Bytes(), 0o600)
+	}
+	return nil
 }
 
-func (f *fakeE2BSyncClient) StartProcess(_ context.Context, _ e2bSession, req e2bProcessRequest) (int, error) {
+func (f *fakeE2BSyncClient) StartProcess(ctx context.Context, _ e2bSession, req e2bProcessRequest) (int, error) {
 	f.commands = append(f.commands, req.Command)
 	f.users = append(f.users, req.User)
+	if strings.HasPrefix(req.Command, "rm -f ") {
+		_, f.cleanupDeadlineSet = ctx.Deadline()
+	}
+	if f.failExtract && strings.HasPrefix(req.Command, "tar -xzf ") {
+		return 7, nil
+	}
 	if len(f.processCodes) > 0 {
 		code := f.processCodes[0]
 		f.processCodes = f.processCodes[1:]
 		return code, nil
 	}
+	if f.executeShell {
+		if err := exec.CommandContext(ctx, "sh", "-c", req.Command).Run(); err != nil {
+			return 1, err
+		}
+	}
 	return 0, nil
+}
+
+func newE2BSyncTestRepo(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	if _, err := exec.LookPath("tar"); err != nil {
+		t.Skip("tar not available")
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/repo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("git", "init")
+	command.Dir = root
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, output)
+	}
+	return root
 }
 
 func (f *fakeE2BSyncClient) commandContains(value string) bool {

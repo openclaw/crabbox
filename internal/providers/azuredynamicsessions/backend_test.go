@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -166,6 +169,114 @@ func TestRunKeepOnFailureRetainsNewSession(t *testing.T) {
 	}
 }
 
+func TestRunKeepOnFailureRetainsNewSessionAfterSetupFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		noSync        bool
+		uploadErr     error
+		failWorkspace bool
+	}{
+		{name: "archive sync", uploadErr: errors.New("upload failed")},
+		{name: "workspace setup", noSync: true, failWorkspace: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			fake := &recordingAzureDynamicSessionsAPI{
+				uploadErr:     tc.uploadErr,
+				failWorkspace: tc.failWorkspace,
+			}
+			restoreAzureDynamicSessionsClient(t, fake)
+			backend := testAzureDynamicSessionsBackend()
+			repo := newAzureDynamicSessionsSyncTestRepo(t)
+
+			result, err := backend.Run(t.Context(), RunRequest{
+				Repo:          Repo{Root: repo, Name: "repo"},
+				NoSync:        tc.noSync,
+				KeepOnFailure: true,
+				Command:       []string{"true"},
+			})
+			if err == nil {
+				t.Fatal("run unexpectedly succeeded")
+			}
+			if result.Session == nil || !result.Session.Kept || result.Session.Reused {
+				t.Fatalf("session=%#v, want retained new session", result.Session)
+			}
+			if len(fake.deleted) != 0 {
+				t.Fatalf("deleted sessions=%v, want retained session", fake.deleted)
+			}
+			if claim, ok, claimErr := resolveLeaseClaimForProvider(result.LeaseID, providerName); claimErr != nil || !ok || claim.RepoRoot != repo {
+				t.Fatalf("retained claim ok=%t claim=%#v err=%v", ok, claim, claimErr)
+			}
+			if !strings.Contains(backend.rt.Stderr.(*bytes.Buffer).String(), "keep-on-failure") {
+				t.Fatalf("stderr=%q, want retention guidance", backend.rt.Stderr)
+			}
+		})
+	}
+}
+
+func TestSyncDeletePreservesWorkspaceWhenReplacementFails(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		uploadErr   error
+		failExtract bool
+	}{
+		{name: "upload", uploadErr: errors.New("upload failed")},
+		{name: "extract", failExtract: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workspace := filepath.Join(t.TempDir(), "workspace")
+			if err := os.Mkdir(workspace, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			previous := filepath.Join(workspace, "previous.txt")
+			if err := os.WriteFile(previous, []byte("keep me"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			fake := &recordingAzureDynamicSessionsAPI{
+				uploadErr:    tc.uploadErr,
+				failExtract:  tc.failExtract,
+				executeShell: true,
+			}
+			backend := testAzureDynamicSessionsBackend()
+			backend.cfg.Sync.Delete = true
+
+			_, _, err := backend.syncWorkspace(t.Context(), fake, "azds-session", RunRequest{
+				Repo: Repo{Root: newAzureDynamicSessionsSyncTestRepo(t), Name: "repo"},
+			}, workspace)
+			if err == nil {
+				t.Fatal("sync unexpectedly succeeded")
+			}
+			content, err := os.ReadFile(previous)
+			if err != nil || string(content) != "keep me" {
+				t.Fatalf("previous workspace content=%q err=%v", content, err)
+			}
+			if matches, err := filepath.Glob(filepath.Join(filepath.Dir(workspace), ".workspace.crabbox-sync-*")); err != nil || len(matches) != 0 {
+				t.Fatalf("staging directories=%v err=%v, want none", matches, err)
+			}
+		})
+	}
+}
+
+func TestStatusWaitBoundsInFlightSessionLookup(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	claimAzureDynamicSessionsLease(t, "azds-wait", "waiting-session", t.TempDir(), time.Minute)
+	fake := &recordingAzureDynamicSessionsAPI{getWaitForCancel: true}
+	restoreAzureDynamicSessionsClient(t, fake)
+	backend := testAzureDynamicSessionsBackend()
+	started := time.Now()
+
+	_, err := backend.Status(t.Context(), StatusRequest{
+		ID: "waiting-session", Wait: true, WaitTimeout: 30 * time.Millisecond,
+	})
+	var exitErr ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 5 || !strings.Contains(err.Error(), "timed out waiting for session azds-wait") {
+		t.Fatalf("status err=%v, want session wait timeout with exit code 5", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("in-flight session lookup returned after %s", elapsed)
+	}
+}
+
 func TestRunReusesClaimWithoutStoppingSession(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	repo := t.TempDir()
@@ -322,6 +433,11 @@ type recordingAzureDynamicSessionsAPI struct {
 	commandExit         int
 	deleteErr           error
 	deleteWaitForCancel bool
+	uploadErr           error
+	failWorkspace       bool
+	failExtract         bool
+	executeShell        bool
+	getWaitForCancel    bool
 }
 
 func (r *recordingAzureDynamicSessionsAPI) CheckRunner(context.Context, string) error {
@@ -329,20 +445,45 @@ func (r *recordingAzureDynamicSessionsAPI) CheckRunner(context.Context, string) 
 	return nil
 }
 
-func (r *recordingAzureDynamicSessionsAPI) UploadFile(context.Context, string, string, string) error {
-	return nil
+func (r *recordingAzureDynamicSessionsAPI) UploadFile(_ context.Context, _ string, localPath, remotePath string) error {
+	if r.uploadErr != nil {
+		return r.uploadErr
+	}
+	if !r.executeShell {
+		return nil
+	}
+	archive, err := os.ReadFile(localPath)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(remotePath, archive, 0o600)
 }
 
-func (r *recordingAzureDynamicSessionsAPI) ExecStream(_ context.Context, _ string, req azureDynamicSessionsExecRequest, _ io.Writer, _ io.Writer) (int, error) {
+func (r *recordingAzureDynamicSessionsAPI) ExecStream(ctx context.Context, _ string, req azureDynamicSessionsExecRequest, _ io.Writer, _ io.Writer) (int, error) {
 	r.execs = append(r.execs, req)
+	if r.failWorkspace && strings.HasPrefix(req.Command, "mkdir -p ") {
+		return 7, nil
+	}
+	if r.failExtract && strings.HasPrefix(req.Command, "tar -xzf ") {
+		return 7, nil
+	}
 	if r.commandExit != 0 && !strings.HasPrefix(req.Command, "mkdir -p ") {
 		return r.commandExit, nil
+	}
+	if r.executeShell {
+		if err := exec.CommandContext(ctx, "sh", "-c", req.Command).Run(); err != nil {
+			return 1, err
+		}
 	}
 	return 0, nil
 }
 
-func (r *recordingAzureDynamicSessionsAPI) GetSession(context.Context, string) (azureDynamicSessionsSession, error) {
+func (r *recordingAzureDynamicSessionsAPI) GetSession(ctx context.Context, _ string) (azureDynamicSessionsSession, error) {
 	r.getSessionCalls++
+	if r.getWaitForCancel {
+		<-ctx.Done()
+		return azureDynamicSessionsSession{}, ctx.Err()
+	}
 	return azureDynamicSessionsSession{}, nil
 }
 
@@ -382,4 +523,24 @@ func testAzureDynamicSessionsBackend() *azureDynamicSessionsBackend {
 			Stderr: &bytes.Buffer{},
 		},
 	}
+}
+
+func newAzureDynamicSessionsSyncTestRepo(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	if _, err := exec.LookPath("tar"); err != nil {
+		t.Skip("tar not available")
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/repo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("git", "init")
+	command.Dir = root
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, output)
+	}
+	return root
 }

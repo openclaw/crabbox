@@ -167,6 +167,7 @@ func (b *e2bBackend) Run(ctx context.Context, req RunRequest) (RunResult, error)
 
 	session, err := client.ConnectSandbox(ctx, sandboxID, e2bTimeoutSeconds(b.cfg.TTL))
 	if err != nil {
+		handleDelegatedRunFailure(b.rt.Stderr, req, e2bProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 		return finishResult(), e2bError("connect sandbox", err)
 	}
 	workspace := e2bWorkspacePath(b.cfg)
@@ -175,10 +176,12 @@ func (b *e2bBackend) Run(ctx context.Context, req RunRequest) (RunResult, error)
 	if !req.NoSync {
 		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, session, req, workspace)
 		if err != nil {
+			handleDelegatedRunFailure(b.rt.Stderr, req, e2bProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 			return finishResult(), err
 		}
 		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
 	} else if err := b.prepareWorkspace(ctx, client, session, workspace); err != nil {
+		handleDelegatedRunFailure(b.rt.Stderr, req, e2bProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 		return finishResult(), err
 	}
 	if req.SyncOnly {
@@ -284,17 +287,36 @@ func (b *e2bBackend) Status(ctx context.Context, req StatusRequest) (statusView,
 	if err != nil {
 		return statusView{}, err
 	}
-	leaseID, sandboxID, _, err := b.resolveSandboxID(ctx, client, req.ID, "", false)
+	waitTimeout := req.WaitTimeout
+	if waitTimeout <= 0 {
+		waitTimeout = 5 * time.Minute
+	}
+	deadline := b.now().Add(waitTimeout)
+	pollCtx := ctx
+	cancel := func() {}
+	if req.Wait {
+		pollCtx, cancel = context.WithTimeout(ctx, waitTimeout)
+	}
+	defer cancel()
+	leaseID, sandboxID, _, err := b.resolveSandboxID(pollCtx, client, req.ID, "", false)
 	if err != nil {
+		if req.Wait && errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+			return statusView{}, exit(5, "timed out waiting for sandbox %s to become ready", req.ID)
+		}
+		if ctx.Err() != nil {
+			return statusView{}, ctx.Err()
+		}
 		return statusView{}, err
 	}
-	deadline := b.now().Add(req.WaitTimeout)
-	if req.WaitTimeout <= 0 {
-		deadline = b.now().Add(5 * time.Minute)
-	}
 	for {
-		sandbox, err := client.GetSandbox(ctx, sandboxID)
+		sandbox, err := client.GetSandbox(pollCtx, sandboxID)
 		if err != nil {
+			if req.Wait && errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+				return statusView{}, exit(5, "timed out waiting for sandbox %s to become ready", sandboxID)
+			}
+			if ctx.Err() != nil {
+				return statusView{}, ctx.Err()
+			}
 			return statusView{}, e2bError("get sandbox", err)
 		}
 		view := e2bStatusView(leaseID, sandbox)
@@ -305,8 +327,11 @@ func (b *e2bBackend) Status(ctx context.Context, req StatusRequest) (statusView,
 			return statusView{}, exit(5, "timed out waiting for sandbox %s to become ready", sandboxID)
 		}
 		select {
-		case <-ctx.Done():
-			return statusView{}, ctx.Err()
+		case <-pollCtx.Done():
+			if errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+				return statusView{}, exit(5, "timed out waiting for sandbox %s to become ready", sandboxID)
+			}
+			return statusView{}, pollCtx.Err()
 		case <-time.After(2 * time.Second):
 		}
 	}

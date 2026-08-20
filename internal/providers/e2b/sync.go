@@ -4,10 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"path"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func (b *e2bBackend) syncWorkspace(ctx context.Context, client e2bAPI, session e2bSession, req RunRequest, workspace string) ([]timingPhase, time.Duration, error) {
@@ -15,61 +16,24 @@ func (b *e2bBackend) syncWorkspace(ctx context.Context, client e2bAPI, session e
 	if err != nil {
 		return nil, 0, err
 	}
-	start := b.now()
-	excludes, err := syncExcludes(req.Repo.Root, b.cfg)
-	if err != nil {
-		return nil, 0, err
-	}
-	manifestStarted := b.now()
-	manifest, err := syncManifest(req.Repo.Root, excludes, b.cfg.Sync.Includes)
-	if err != nil {
-		return nil, 0, exit(6, "build sync file list: %v", err)
-	}
-	manifestDuration := b.now().Sub(manifestStarted)
-	preflightStarted := b.now()
-	if err := checkSyncPreflight(manifest, b.cfg, req.ForceSyncLarge, b.rt.Stderr); err != nil {
-		return nil, 0, err
-	}
-	preflightDuration := b.now().Sub(preflightStarted)
-	prepareStarted := b.now()
-	if err := b.prepareWorkspace(ctx, client, session, workspace); err != nil {
-		return nil, 0, err
-	}
-	prepareDuration := b.now().Sub(prepareStarted)
-	archiveStarted := b.now()
-	archive, err := createE2BSyncArchive(ctx, req.Repo, manifest, b.rt.Stderr)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer os.Remove(archive.Name())
-	defer archive.Close()
-	archiveDuration := b.now().Sub(archiveStarted)
-	uploadStarted := b.now()
-	if _, err := archive.Seek(0, 0); err != nil {
-		return nil, 0, fmt.Errorf("e2b rewind archive: %w", err)
-	}
-	remoteArchive := path.Join("/tmp", "crabbox-"+e2bRandomSuffix()+".tgz")
-	if err := client.UploadFile(ctx, session, remoteArchive, archive); err != nil {
-		return nil, 0, e2bError("upload archive", err)
-	}
-	extract := strings.Join([]string{
-		"tar -xzf " + shellQuote(remoteArchive) + " -C " + shellQuote(workspace),
-		"rm -f " + shellQuote(remoteArchive),
-	}, " && ")
-	if err := b.execShell(ctx, client, session, extract, io.Discard); err != nil {
-		_ = b.execShell(context.Background(), client, session, "rm -f "+shellQuote(remoteArchive), io.Discard)
-		return nil, 0, err
-	}
-	uploadDuration := b.now().Sub(uploadStarted)
-	total := b.now().Sub(start)
-	return []timingPhase{
-		{Name: "manifest", Ms: manifestDuration.Milliseconds()},
-		{Name: "preflight", Ms: preflightDuration.Milliseconds()},
-		{Name: "prepare", Ms: prepareDuration.Milliseconds()},
-		{Name: "archive", Ms: archiveDuration.Milliseconds()},
-		{Name: "upload", Ms: uploadDuration.Milliseconds()},
-		{Name: "e2b_sync", Ms: total.Milliseconds()},
-	}, total, nil
+	return shared.RunSandboxArchiveSync(ctx, shared.SandboxArchiveSyncRequest{
+		Config:              b.cfg,
+		Repo:                req.Repo,
+		ForceSyncLarge:      req.ForceSyncLarge,
+		Workdir:             workspace,
+		TempPattern:         "crabbox-e2b-sync-*.tgz",
+		RemoteArchivePrefix: "crabbox-",
+		PhaseName:           "e2b_sync",
+		Provider:            e2bProvider,
+		Stderr:              b.rt.Stderr,
+		Now:                 b.now,
+		Upload: func(uploadCtx context.Context, remoteArchive string, archive io.Reader) error {
+			return e2bError("upload archive", client.UploadFile(uploadCtx, session, remoteArchive, archive))
+		},
+		Exec: func(execCtx context.Context, command string) error {
+			return b.execShell(execCtx, client, session, command, io.Discard)
+		},
+	})
 }
 
 func (b *e2bBackend) prepareWorkspace(ctx context.Context, client e2bAPI, session e2bSession, workspace string) error {
@@ -77,11 +41,7 @@ func (b *e2bBackend) prepareWorkspace(ctx context.Context, client e2bAPI, sessio
 	if err != nil {
 		return err
 	}
-	command := "mkdir -p " + shellQuote(workspace)
-	if b.cfg.Sync.Delete {
-		command = "rm -rf " + shellQuote(workspace) + " && " + command
-	}
-	return b.execShell(ctx, client, session, command, io.Discard)
+	return b.execShell(ctx, client, session, "mkdir -p "+shellQuote(workspace), io.Discard)
 }
 
 func cleanE2BWorkspacePath(workspace string) (string, error) {
@@ -119,12 +79,4 @@ func (b *e2bBackend) execShell(ctx context.Context, client e2bAPI, session e2bSe
 		return exit(code, "e2b exec %q exited %d", command, code)
 	}
 	return nil
-}
-
-func createE2BSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, _ io.Writer) (*os.File, error) {
-	return createPortableSyncArchive(ctx, repo, manifest, "crabbox-e2b-sync-*.tgz")
-}
-
-func e2bRandomSuffix() string {
-	return strings.ReplaceAll(time.Now().UTC().Format("20060102150405.000000000"), ".", "")
 }

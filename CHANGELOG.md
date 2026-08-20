@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Made E2B and Azure Dynamic Sessions workspace sync transactional, retained newly created resources after requested sync/setup failures, and enforced sync, status-wait, and cleanup deadlines.
 - Documented which acquisition responsibilities deliberately remain provider-owned and why centralizing them was rejected.
 - Made doctor configuration fail with a clear provider error instead of panicking when a backend lacks doctor capability.
 - Consolidated nine small cross-provider helper clusters (Tailscale metadata, exact tag codecs, gateway URL validation, cache-volume naming, scoped claim resolution, envd transport scaffolding, delegated status polling, workspace archive sync, and exact-duplicate micro-utilities) into shared helpers while keeping divergent variants adapter-owned.
