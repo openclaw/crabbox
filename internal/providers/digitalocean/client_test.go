@@ -1449,6 +1449,48 @@ func TestDigitalOceanClientFindSSHKeyRejectsDuplicatePublicKeyMatches(t *testing
 	}
 }
 
+func TestDigitalOceanClientFindSSHKeyByImmutableID(t *testing.T) {
+	for _, test := range []struct {
+		name, body string
+		status     int
+		found      bool
+	}{
+		{name: "found", status: http.StatusOK, body: `{"ssh_key":{"id":123,"name":"crabbox-key","public_key":"ssh-ed25519 exact"}}`, found: true},
+		{name: "absent", status: http.StatusNotFound, body: `{"id":"not_found"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/account/keys/123" {
+					t.Fatalf("request=%s %s", r.Method, r.URL.RequestURI())
+				}
+				w.WriteHeader(test.status)
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			client := &digitalOceanClient{token: "token", client: server.Client(), baseURL: server.URL}
+			key, found, err := client.FindSSHKeyByID(context.Background(), 123)
+			if err != nil || found != test.found || (found && key.ID != 123) {
+				t.Fatalf("key=%#v found=%v err=%v", key, found, err)
+			}
+		})
+	}
+}
+
+func TestDigitalOceanClientFindSSHKeyByPublicKeyIgnoresName(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/account/keys" {
+			t.Fatalf("request=%s %s", r.Method, r.URL.RequestURI())
+		}
+		_, _ = w.Write([]byte(`{"ssh_keys":[{"id":123,"name":"renamed","public_key":"ssh-ed25519 exact"}],"links":{"pages":{}}}`))
+	}))
+	defer server.Close()
+	client := &digitalOceanClient{token: "token", client: server.Client(), baseURL: server.URL}
+	key, found, err := client.FindSSHKeyByPublicKey(context.Background(), "ssh-ed25519 exact")
+	if err != nil || !found || key.ID != 123 {
+		t.Fatalf("key=%#v found=%v err=%v", key, found, err)
+	}
+}
+
 func TestDigitalOceanClientEnsureSSHKeyPreservesAmbiguousCreate(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {

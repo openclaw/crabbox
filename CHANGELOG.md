@@ -28,6 +28,7 @@
 - Shared lifecycle observation across Machine0, Tenki, DigitalOcean, Linode, Vultr, and Morph while keeping provider state handling adapter-owned, and made canceled Tenki readiness waits report cancellation instead of timeout.
 - Closed Linode cleanup and release claim races by carrying exact revisioned claims into claim-locked provider deletion while preserving retryable claims and SSH keys on failure.
 - Fenced Vultr instance and managed SSH-key cleanup with exact revisioned claims, preserving ownership metadata and local credentials for safe retries after partial deletion.
+- Fenced DigitalOcean Droplet and managed SSH-key cleanup with exact revisioned claims, live account and immutable-resource revalidation, instance-first deletion, and retry-safe retention after partial cleanup.
 - Preserved account-bound Vast recovery claims and SSH keys after ambiguous instance creation, and surfaced claim-persistence failures during rollback cleanup.
 
 ## 0.45.0 - 2026-08-19

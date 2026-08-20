@@ -58,10 +58,6 @@ func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, sl
 	if expectedAccountID == "" || expectedAccountID != server.Labels[digitalOceanAccountLabel] {
 		return core.Server{}, core.Exit(3, "refusing to rewrite digitalocean lease=%s with mismatched account identity", existing.LeaseID)
 	}
-	authorizedKeyID := server.Labels[digitalOceanKeyDeleteAuthorizedLabel]
-	if authorizedKeyID != "" && authorizedKeyID != server.Labels[digitalOceanRecoveryKeyIDLabel] {
-		return core.Server{}, core.Exit(2, "refusing to rewrite digitalocean lease=%s with mismatched key-delete authorization", existing.LeaseID)
-	}
 	if allowProviderMetadata {
 		return server, nil
 	}
@@ -70,7 +66,6 @@ func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, sl
 		digitalOceanAccountLabel,
 		digitalOceanRecoveryKeyIDLabel,
 		digitalOceanKeyOwnedLabel,
-		digitalOceanKeyDeleteAuthorizedLabel,
 		"recovery",
 	} {
 		if value, ok := existing.Labels[key]; ok {

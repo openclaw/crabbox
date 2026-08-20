@@ -614,6 +614,39 @@ func (c *digitalOceanClient) FindSSHKey(ctx context.Context, name, publicKey str
 	return selectSSHKey(keys, name, publicKey)
 }
 
+func (c *digitalOceanClient) FindSSHKeyByID(ctx context.Context, id int64) (sshKey, bool, error) {
+	var res struct {
+		SSHKey sshKey `json:"ssh_key"`
+	}
+	err := c.do(ctx, http.MethodGet, fmt.Sprintf("/account/keys/%d", id), nil, &res)
+	if isDigitalOceanNotFound(err) {
+		return sshKey{}, false, nil
+	}
+	if err != nil {
+		return sshKey{}, false, err
+	}
+	return res.SSHKey, true, nil
+}
+
+func (c *digitalOceanClient) FindSSHKeyByPublicKey(ctx context.Context, publicKey string) (sshKey, bool, error) {
+	keys, err := c.ListSSHKeys(ctx)
+	if err != nil {
+		return sshKey{}, false, err
+	}
+	publicKey = strings.TrimSpace(publicKey)
+	var match sshKey
+	matches := 0
+	for _, key := range keys {
+		if strings.TrimSpace(key.PublicKey) == publicKey {
+			match, matches = key, matches+1
+		}
+	}
+	if matches > 1 {
+		return sshKey{}, false, core.Exit(4, "digitalocean SSH key has multiple entries matching the retained public key")
+	}
+	return match, matches == 1, nil
+}
+
 func (c *digitalOceanClient) DeleteSSHKey(ctx context.Context, id int64) error {
 	err := c.do(ctx, http.MethodDelete, fmt.Sprintf("/account/keys/%d", id), nil, nil)
 	if isDigitalOceanNotFound(err) {

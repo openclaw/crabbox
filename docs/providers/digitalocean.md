@@ -126,9 +126,8 @@ explicit VPC. Do not broaden scopes inside scripts.
 5. Add ready-state Crabbox tags and claim the lease locally.
 6. Run normal Crabbox sync/run/ssh workflows over SSH.
 7. Delete the Droplet and managed SSH key on `stop`; `cleanup` deletes only
-   resources with complete Crabbox DigitalOcean ownership tags and an exact
-   account- and Droplet-bound local claim. Failed post-delete or key-only
-   rollback cleanup retains that claim so `stop` can retry it.
+   resources authorized by the exact revisioned account- and Droplet-bound
+   local claim. The Droplet is deleted before a provider-managed SSH key.
 
 If Droplet creation returns an indeterminate transport or server failure,
 Crabbox retains the SSH credentials and records a pending local recovery claim.
@@ -158,6 +157,28 @@ also require an exact local claim for the same DigitalOcean account, lease, and
 Droplet id. Droplets with partial, foreign, malformed, claimless, or mismatched
 ownership are skipped or refused; a claimless Droplet must first be adopted
 through explicit supported `--reclaim` reuse.
+
+Every release target carries the full revisioned claim that authorized it.
+Immediately before deletion, Crabbox locks that exact claim, re-reads the
+token's current team or user account, and revalidates the immutable Droplet id,
+canonical name, ownership tags, and provider-key tag. If Crabbox created the
+account SSH key, it also requires the recorded immutable key id to match the
+retained local public key. A renamed key remains identifiable by immutable id;
+a replaced key, changed public key, missing local public key, stale claim, or
+account switch is refused before either resource is mutated.
+
+DigitalOcean account keys and Droplets are scoped to the token's current team
+(or user account for a personal token). Crabbox does not configure DigitalOcean
+Projects, so project membership is not a separate cleanup authority; region and
+VPC choices remain creation-time Droplet placement settings.
+
+If Droplet deletion succeeds but key deletion fails, Crabbox retains the exact
+claim, key identity, and local key. A retry confirms that the same Droplet is
+absent, authorizes only the same immutable key, deletes it, and removes local
+state only after durable claim removal. Confirmed provider `not found` results
+are idempotent success. Ambiguous create or key recovery may persist only the
+immutable identities needed for deletion before the final lock; cleanup
+preparation and `cleanup --dry-run` observe recovery without changing claims.
 
 Tag updates apply only the set difference. Crabbox detaches obsolete tags from
 the Droplet but does not delete account-level tag objects: DigitalOcean tag
