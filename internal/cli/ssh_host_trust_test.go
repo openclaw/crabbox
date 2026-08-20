@@ -726,6 +726,9 @@ func coordinatorReleaseTestBackend(server *httptest.Server, stderr io.Writer) *c
 
 func configureCoordinatorReleaseTestTiming(t *testing.T, timeout, cadence time.Duration) {
 	t.Helper()
+	// Coordinator requests otherwise infer the owner with a git subprocess. Keep
+	// short synthetic observation deadlines independent of process startup time.
+	t.Setenv("CRABBOX_OWNER", "test@example.com")
 	originalBackoff := coordinatorReleaseBackoff
 	originalTimeout := coordinatorReleaseObservationTimeout
 	originalCadence := coordinatorReleaseObservationCadence
