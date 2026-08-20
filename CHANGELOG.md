@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Completed the shared lifecycle polling sweep across fourteen more providers, leaving only SSH-observer delegates, schedule-selected retry delays, and lock acquisitions hand-rolled by design.
 - Adopted shared lifecycle polling in nine more providers (Apple Container, Asciibox, Blaxel, Daytona, Hostinger, Nomad, NVIDIA Brev, OpenSandbox, and Tart), preserving event-driven waits, jittered backoff, and provider-specific deadline diagnostics adapter-side.
 - Adopted shared lifecycle polling in the Agent Sandbox, XCP-ng, GitHub Codespaces, Lume, Hyper-V, Proxmox, and Sealos Devbox providers, unifying timeout, cadence, and cancellation semantics while keeping event-driven and multi-clock waits adapter-owned.
 - Shared the fixed idempotent lease-ID mechanism (durable create intent, claim locking, terminal tombstones) between the AWS and Machine0 providers while keeping launch attempts, adoption validation, and provider bindings adapter-owned.
