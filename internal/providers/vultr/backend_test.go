@@ -1303,6 +1303,99 @@ func TestCleanupDryRunWithExactClaimDoesNotMutate(t *testing.T) {
 	}
 }
 
+func TestCleanupDryRunAmbiguousCreateRecoveryDoesNotMutate(t *testing.T) {
+	const (
+		leaseID = "cbx_dadadadadada"
+		slug    = "late-instance"
+	)
+	api := &fakeVultrAPI{}
+	b := newTestBackend(t, api)
+	now := time.Now().UTC()
+	keyPath, publicKey, err := core.EnsureTestboxKeyForConfig(b.Cfg, leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.sshKeys = append(api.sshKeys, vultrSSHKey{ID: "late-instance-key", Name: providerKeyForLease(leaseID), SSHKey: publicKey})
+	labels := core.DirectLeaseLabels(b.Cfg, leaseID, slug, providerName, "", false, now.Add(-48*time.Hour))
+	labels["state"] = "provisioning"
+	labels["recovery"] = "ambiguous-create"
+	labels[vultrAccountLabel] = "account:test-account"
+	setVultrKeyIdentity(labels, "late-instance-key", true)
+	claimServer := core.Server{Provider: providerName, Name: core.LeaseProviderName(leaseID, slug), Labels: labels}
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, b.Cfg, claimServer, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	api.instances = []vultrInstance{{
+		ID:           "dadadada-dada-4ada-8ada-dadadadadada",
+		Label:        claimServer.Name,
+		MainIP:       "203.0.113.92",
+		Status:       "active",
+		PowerStatus:  "running",
+		ServerStatus: "ok",
+		Plan:         b.Cfg.ServerType,
+		Tags:         tagsFromLabels(labels),
+	}}
+	before, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists || before.Revision == "" {
+		t.Fatalf("before=%#v exists=%v err=%v", before, exists, err)
+	}
+	b.RT.Clock = vultrTestClock{now: now}
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	after, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists || after.Revision != before.Revision || !reflect.DeepEqual(after, before) {
+		t.Fatalf("after=%#v exists=%v err=%v before=%#v", after, exists, err, before)
+	}
+	if len(api.created) != 0 || len(api.updated) != 0 || len(api.deleted) != 0 || len(api.deletedKeys) != 0 {
+		t.Fatalf("dry-run provider mutations created=%v updated=%v instance=%v key=%v", api.created, api.updated, api.deleted, api.deletedKeys)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("stored key changed during dry-run: %v", err)
+	}
+}
+
+func TestCleanupDryRunAmbiguousSSHKeyCreateRecoveryDoesNotMutate(t *testing.T) {
+	const (
+		leaseID = "cbx_bebebebebebe"
+		slug    = "late-key"
+	)
+	api := &fakeVultrAPI{}
+	b := newTestBackend(t, api)
+	now := time.Now().UTC()
+	keyPath, publicKey, err := core.EnsureTestboxKeyForConfig(b.Cfg, leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := core.DirectLeaseLabels(b.Cfg, leaseID, slug, providerName, "", false, now.Add(-48*time.Hour))
+	labels["state"] = "provisioning"
+	labels["recovery"] = "ambiguous-key-create"
+	labels[vultrAccountLabel] = "account:test-account"
+	server := core.Server{Provider: providerName, Name: core.LeaseProviderName(leaseID, slug), Labels: labels}
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, b.Cfg, server, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	api.sshKeys = append(api.sshKeys, vultrSSHKey{ID: "late-key", Name: providerKeyForLease(leaseID), SSHKey: publicKey})
+	before := attachCurrentVultrClaim(t, &server, leaseID)
+	if before.Revision == "" {
+		t.Fatalf("before=%#v", before)
+	}
+	b.RT.Clock = vultrTestClock{now: now}
+	if err := b.CleanupServers(context.Background(), core.CleanupRequest{DryRun: true}, []core.Server{server}); err != nil {
+		t.Fatal(err)
+	}
+	after, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists || after.Revision != before.Revision || !reflect.DeepEqual(after, before) {
+		t.Fatalf("after=%#v exists=%v err=%v before=%#v", after, exists, err, before)
+	}
+	if len(api.created) != 0 || len(api.updated) != 0 || len(api.deleted) != 0 || len(api.deletedKeys) != 0 {
+		t.Fatalf("dry-run provider mutations created=%v updated=%v instance=%v key=%v", api.created, api.updated, api.deleted, api.deletedKeys)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("stored key changed during dry-run: %v", err)
+	}
+}
+
 func TestCleanupSkipsClaimlessBeforeClaimedInstance(t *testing.T) {
 	var stderr bytes.Buffer
 	api := &fakeVultrAPI{}
@@ -1428,14 +1521,18 @@ func TestAmbiguousCreateRecoveryDeletesAfterLiveInstanceIsFound(t *testing.T) {
 	api.instances = []vultrInstance{live}
 	server := serverFromInstance(live, b.Cfg)
 	preserveVultrIdentity(server.Labels, labels)
+	before, beforeExists, err := core.ReadLeaseClaimWithPresence("cbx_eeeeeeeeeeee")
+	if err != nil || !beforeExists || before.Revision == "" {
+		t.Fatalf("before=%#v exists=%v err=%v", before, beforeExists, err)
+	}
 	prepared, err := b.prepareCleanupServer(context.Background(), server)
 	if err != nil {
 		t.Fatal(err)
 	}
 	snapshot, exists, set := core.ServerLeaseClaimSnapshot(prepared)
 	current, currentExists, err := core.ReadLeaseClaimWithPresence("cbx_eeeeeeeeeeee")
-	if err != nil || !set || !exists || !currentExists || snapshot.CloudID != live.ID || !reflect.DeepEqual(snapshot, current) {
-		t.Fatalf("snapshot=%#v exists=%v set=%v current=%#v currentExists=%v err=%v", snapshot, exists, set, current, currentExists, err)
+	if err != nil || !set || !exists || !currentExists || prepared.CloudID != live.ID || snapshot.CloudID != "" || snapshot.Revision != before.Revision || !reflect.DeepEqual(snapshot, before) || !reflect.DeepEqual(current, before) {
+		t.Fatalf("prepared=%#v snapshot=%#v exists=%v set=%v current=%#v currentExists=%v before=%#v err=%v", prepared, snapshot, exists, set, current, currentExists, before, err)
 	}
 	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "cbx_eeeeeeeeeeee", Server: prepared}}); err != nil {
 		t.Fatal(err)
@@ -1499,14 +1596,18 @@ func TestAmbiguousSSHKeyCreateRecoveryDeletesExactDiscoveredKeyUnderFence(t *tes
 	if _, exists, set := core.ServerLeaseClaimSnapshot(target.Server); !set || !exists {
 		t.Fatalf("release target missing exact claim snapshot: %#v", target)
 	}
+	before, beforeExists, err := core.ReadLeaseClaimWithPresence(claims[0].LeaseID)
+	if err != nil || !beforeExists || before.Revision == "" {
+		t.Fatalf("before=%#v exists=%v err=%v", before, beforeExists, err)
+	}
 	prepared, err := b.prepareCleanupServer(context.Background(), target.Server)
 	if err != nil {
 		t.Fatal(err)
 	}
 	snapshot, exists, set := core.ServerLeaseClaimSnapshot(prepared)
 	current, currentExists, err := core.ReadLeaseClaimWithPresence(claims[0].LeaseID)
-	if err != nil || !set || !exists || !currentExists || snapshot.Labels[vultrKeyOwnedLabel] != "true" || snapshot.Labels[vultrKeyIDLabel] != "late-key" || !reflect.DeepEqual(snapshot, current) {
-		t.Fatalf("snapshot=%#v exists=%v set=%v current=%#v currentExists=%v err=%v", snapshot, exists, set, current, currentExists, err)
+	if err != nil || !set || !exists || !currentExists || snapshot.Labels[vultrKeyOwnedLabel] != "" || snapshot.Labels[vultrKeyIDLabel] != "" || snapshot.Revision != before.Revision || !reflect.DeepEqual(snapshot, before) || !reflect.DeepEqual(current, before) {
+		t.Fatalf("snapshot=%#v exists=%v set=%v current=%#v currentExists=%v before=%#v err=%v", snapshot, exists, set, current, currentExists, before, err)
 	}
 	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: target.LeaseID, Server: prepared}}); err != nil {
 		t.Fatal(err)

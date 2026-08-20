@@ -337,7 +337,7 @@ func (b *backend) prepareCleanupServer(ctx context.Context, server core.Server) 
 	if !claimExists {
 		return core.Server{}, core.Exit(2, "vultr lease=%s has no exact local claim; refusing cleanup", leaseID)
 	}
-	prepared, claim, err := b.recoverCleanupClaim(ctx, client, server, claim, accountID)
+	prepared, claim, err := b.recoverCleanupClaim(ctx, client, server, claim, accountID, false)
 	if err != nil {
 		return core.Server{}, err
 	}
@@ -345,7 +345,7 @@ func (b *backend) prepareCleanupServer(ctx context.Context, server core.Server) 
 	return prepared, nil
 }
 
-func (b *backend) recoverCleanupClaim(ctx context.Context, client vultrAPI, server core.Server, claim core.LeaseClaim, accountID string) (core.Server, core.LeaseClaim, error) {
+func (b *backend) recoverCleanupClaim(ctx context.Context, client vultrAPI, server core.Server, claim core.LeaseClaim, accountID string, persist bool) (core.Server, core.LeaseClaim, error) {
 	if err := validateVultrCleanupClaim(server, claim, accountID); err != nil {
 		return core.Server{}, core.LeaseClaim{}, err
 	}
@@ -396,7 +396,7 @@ func (b *backend) recoverCleanupClaim(ctx context.Context, client vultrAPI, serv
 		setVultrKeyIdentity(replacement.Labels, key.ID, true)
 		changed = true
 	}
-	if changed {
+	if changed && persist {
 		var err error
 		claim, err = core.ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, claim, replacement)
 		if err != nil {
@@ -501,7 +501,7 @@ func (b *backend) deleteServer(ctx context.Context, _ core.Config, server core.S
 	if err != nil {
 		return err
 	}
-	server, expectedClaim, err = b.recoverCleanupClaim(ctx, client, server, expectedClaim, accountID)
+	server, expectedClaim, err = b.recoverCleanupClaim(ctx, client, server, expectedClaim, accountID, true)
 	if err != nil {
 		return err
 	}
