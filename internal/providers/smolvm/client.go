@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -170,8 +169,8 @@ var newAPI = func(cfg Config, rt Runtime) (api, error) {
 	return &client{
 		apiKey:   apiKey,
 		base:     base,
-		http:     secureSmolvmHTTPClient(httpClient, base),
-		dataHTTP: secureSmolvmHTTPClient(dataHTTPClient, base),
+		http:     shared.SecureHTTPClient(httpClient, parsed, smolvmRedirectError),
+		dataHTTP: shared.SecureHTTPClient(dataHTTPClient, parsed, smolvmRedirectError),
 	}, nil
 }
 
@@ -182,44 +181,8 @@ func smolvmHTTPClients(injected *http.Client, controlTimeout time.Duration) (*ht
 	return &http.Client{Timeout: controlTimeout}, &http.Client{}
 }
 
-func secureSmolvmHTTPClient(source *http.Client, apiURL string) *http.Client {
-	client := *source
-	trusted, _ := url.Parse(apiURL)
-	originalCheckRedirect := source.CheckRedirect
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if !sameSmolvmOrigin(trusted, req.URL) {
-			return fmt.Errorf("%s refused cross-origin redirect to %s", providerName, req.URL.Redacted())
-		}
-		if originalCheckRedirect != nil {
-			return originalCheckRedirect(req, via)
-		}
-		if len(via) >= 10 {
-			return errors.New("stopped after 10 redirects")
-		}
-		return nil
-	}
-	return &client
-}
-
-func sameSmolvmOrigin(a, b *url.URL) bool {
-	return a != nil && b != nil &&
-		strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
-		effectiveSmolvmPort(a) == effectiveSmolvmPort(b)
-}
-
-func effectiveSmolvmPort(value *url.URL) string {
-	if port := value.Port(); port != "" {
-		return port
-	}
-	switch strings.ToLower(value.Scheme) {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	default:
-		return ""
-	}
+func smolvmRedirectError(destination *url.URL) error {
+	return fmt.Errorf("%s refused cross-origin redirect to %s", providerName, destination.Redacted())
 }
 
 func trustedSmolvmAPIHost(parsed *url.URL) bool {

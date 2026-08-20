@@ -18,6 +18,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -1331,8 +1332,8 @@ func TestSameOCOriginNormalizesDefaultPorts(t *testing.T) {
 		{a: "https://api.example.test", b: "http://api.example.test:443", want: false},
 		{a: "https://api.example.test", b: "https://other.example.test", want: false},
 	} {
-		if got := sameOCOrigin(parse(tc.a), parse(tc.b)); got != tc.want {
-			t.Errorf("sameOCOrigin(%q, %q)=%t want %t", tc.a, tc.b, got, tc.want)
+		if got := shared.SameOrigin(parse(tc.a), parse(tc.b)); got != tc.want {
+			t.Errorf("shared.SameOrigin(%q, %q)=%t want %t", tc.a, tc.b, got, tc.want)
 		}
 	}
 }

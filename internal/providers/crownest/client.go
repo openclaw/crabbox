@@ -13,6 +13,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const defaultRequestTimeout = 2 * time.Minute
@@ -111,26 +113,12 @@ func newClient(cfg Config, rt Runtime) (client, error) {
 	if rawHTTPClient == nil {
 		rawHTTPClient = http.DefaultClient
 	}
-	return &httpClient{http: secureHTTPClient(rawHTTPClient, baseURL), baseURL: baseURL, apiKey: apiKey}, nil
+	trusted, _ := url.Parse(baseURL)
+	return &httpClient{http: shared.SecureHTTPClient(rawHTTPClient, trusted, crownestRedirectError), baseURL: baseURL, apiKey: apiKey}, nil
 }
 
-func secureHTTPClient(source *http.Client, baseURL string) *http.Client {
-	client := *source
-	trusted, _ := url.Parse(baseURL)
-	originalCheckRedirect := source.CheckRedirect
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if !sameOrigin(trusted, req.URL) {
-			return fmt.Errorf("crownest refused cross-origin redirect to %s", req.URL.Redacted())
-		}
-		if originalCheckRedirect != nil {
-			return originalCheckRedirect(req, via)
-		}
-		if len(via) >= 10 {
-			return errors.New("stopped after 10 redirects")
-		}
-		return nil
-	}
-	return &client
+func crownestRedirectError(destination *url.URL) error {
+	return fmt.Errorf("crownest refused cross-origin redirect to %s", destination.Redacted())
 }
 
 func sameOrigin(a, b *url.URL) bool {

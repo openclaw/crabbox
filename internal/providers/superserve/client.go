@@ -16,6 +16,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const (
@@ -120,47 +122,12 @@ func newSuperserveClient(cfg Config, rt Runtime) (superserveClient, error) {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	return &httpSuperserveClient{http: secureSuperserveHTTPClient(httpClient, baseURL), baseURL: baseURL, apiKey: apiKey}, nil
-}
-
-func secureSuperserveHTTPClient(source *http.Client, baseURL string) *http.Client {
-	client := *source
 	trusted, _ := url.Parse(baseURL)
-	originalCheckRedirect := source.CheckRedirect
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if !sameSuperserveOrigin(trusted, req.URL) {
-			return fmt.Errorf("superserve refused cross-origin redirect to %s", req.URL.Redacted())
-		}
-		if originalCheckRedirect != nil {
-			return originalCheckRedirect(req, via)
-		}
-		if len(via) >= 10 {
-			return errors.New("stopped after 10 redirects")
-		}
-		return nil
-	}
-	return &client
+	return &httpSuperserveClient{http: shared.SecureHTTPClient(httpClient, trusted, superserveRedirectError), baseURL: baseURL, apiKey: apiKey}, nil
 }
 
-func sameSuperserveOrigin(a, b *url.URL) bool {
-	return a != nil && b != nil &&
-		strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
-		effectiveSuperservePort(a) == effectiveSuperservePort(b)
-}
-
-func effectiveSuperservePort(value *url.URL) string {
-	if port := value.Port(); port != "" {
-		return port
-	}
-	switch strings.ToLower(value.Scheme) {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	default:
-		return ""
-	}
+func superserveRedirectError(destination *url.URL) error {
+	return fmt.Errorf("superserve refused cross-origin redirect to %s", destination.Redacted())
 }
 
 func (c *httpSuperserveClient) BaseURL() string { return c.baseURL }

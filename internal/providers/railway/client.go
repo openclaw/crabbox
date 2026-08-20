@@ -171,47 +171,11 @@ func newRailwayClient(cfg Config, rt Runtime) (railwayAPI, error) {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
-	return &railwayClient{apiToken: apiToken, apiURL: apiURL, httpClient: secureRailwayHTTPClient(httpClient, apiURL)}, nil
+	return &railwayClient{apiToken: apiToken, apiURL: apiURL, httpClient: shared.SecureHTTPClient(httpClient, parsed, newRailwayRedirectError)}, nil
 }
 
-func secureRailwayHTTPClient(source *http.Client, apiURL string) *http.Client {
-	client := *source
-	trusted, _ := url.Parse(apiURL)
-	originalCheckRedirect := source.CheckRedirect
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if !sameRailwayOrigin(trusted, req.URL) {
-			return &railwayRedirectError{origin: railwayRedirectOrigin(req.URL)}
-		}
-		if originalCheckRedirect != nil {
-			return originalCheckRedirect(req, via)
-		}
-		if len(via) >= 10 {
-			return errors.New("stopped after 10 redirects")
-		}
-		return nil
-	}
-	return &client
-}
-
-func sameRailwayOrigin(a, b *url.URL) bool {
-	return a != nil && b != nil &&
-		strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
-		effectiveRailwayPort(a) == effectiveRailwayPort(b)
-}
-
-func effectiveRailwayPort(value *url.URL) string {
-	if port := value.Port(); port != "" {
-		return port
-	}
-	switch strings.ToLower(value.Scheme) {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	default:
-		return ""
-	}
+func newRailwayRedirectError(destination *url.URL) error {
+	return &railwayRedirectError{origin: railwayRedirectOrigin(destination)}
 }
 
 type railwayRedirectError struct {

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type hostingerAPI interface {
@@ -172,7 +173,7 @@ func newClient(cfg Config, rt Runtime) (hostingerAPI, error) {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
-	httpClient = secureHostingerAPIClient(httpClient, parsed)
+	httpClient = shared.SecureHTTPClient(httpClient, parsed, hostingerRedirectError)
 	return &hostingerClient{token: token, apiURL: apiURL, httpClient: httpClient}, nil
 }
 
@@ -184,42 +185,8 @@ func isLoopbackHTTPURL(u *url.URL) bool {
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
-func secureHostingerAPIClient(source *http.Client, trusted *url.URL) *http.Client {
-	client := *source
-	originalCheckRedirect := source.CheckRedirect
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if !sameHostingerOrigin(trusted, req.URL) {
-			return fmt.Errorf("hostinger refused cross-origin or insecure redirect to %s", req.URL.Redacted())
-		}
-		if originalCheckRedirect != nil {
-			return originalCheckRedirect(req, via)
-		}
-		if len(via) >= 10 {
-			return errors.New("stopped after 10 redirects")
-		}
-		return nil
-	}
-	return &client
-}
-
-func sameHostingerOrigin(a, b *url.URL) bool {
-	return a != nil && b != nil &&
-		strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
-		effectiveHostingerPort(a) == effectiveHostingerPort(b)
-}
-
-func effectiveHostingerPort(u *url.URL) string {
-	if port := u.Port(); port != "" {
-		return port
-	}
-	if strings.EqualFold(u.Scheme, "https") {
-		return "443"
-	}
-	if strings.EqualFold(u.Scheme, "http") {
-		return "80"
-	}
-	return ""
+func hostingerRedirectError(destination *url.URL) error {
+	return fmt.Errorf("hostinger refused cross-origin or insecure redirect to %s", destination.Redacted())
 }
 
 func (c *hostingerClient) do(ctx context.Context, method, path string, body any, out any) error {

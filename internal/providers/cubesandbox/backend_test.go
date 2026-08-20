@@ -22,6 +22,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type cubesandboxRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -534,7 +535,7 @@ func TestCubeSandboxEnvdClientRefusesCrossOriginRedirectBeforeReplay(t *testing.
 		t.Fatal(err)
 	}
 	req.Header.Set("X-Access-Token", "envd-token")
-	resp, err := secureCubeSandboxHTTPClient(trusted.Client(), trustedURL).Do(req)
+	resp, err := shared.SecureHTTPClient(trusted.Client(), trustedURL, cubeSandboxRedirectError).Do(req)
 	if resp != nil {
 		resp.Body.Close()
 	}

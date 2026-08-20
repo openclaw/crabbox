@@ -16,6 +16,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 // sandboxTransport is the lifecycle surface for either a remote ComputeSDK
@@ -72,12 +74,13 @@ var newTransport = func(cfg Config, rt Runtime) (sandboxTransport, error) {
 		if httpClient == nil {
 			httpClient = http.DefaultClient
 		}
+		trusted, _ := url.Parse(validated)
 		return &remoteTransport{
 			baseURL:   validated,
 			secret:    secret,
 			authToken: firstNonEmpty(os.Getenv("CRABBOX_CLOUD_RUN_SANDBOX_AUTH_TOKEN"), os.Getenv("CLOUD_RUN_AUTH_TOKEN")),
 			cfg:       cfg,
-			http:      secureHTTPClient(httpClient, validated),
+			http:      shared.SecureHTTPClient(httpClient, trusted, cloudRunSandboxRedirectError),
 		}, nil
 	}
 	if rt.Exec == nil {
@@ -135,44 +138,8 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func secureHTTPClient(source *http.Client, baseURL string) *http.Client {
-	client := *source
-	trusted, _ := url.Parse(baseURL)
-	original := source.CheckRedirect
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if !sameOrigin(trusted, req.URL) {
-			return fmt.Errorf("cloud-run-sandbox refused cross-origin redirect to %s", req.URL.Redacted())
-		}
-		if original != nil {
-			return original(req, via)
-		}
-		if len(via) >= 10 {
-			return errors.New("stopped after 10 redirects")
-		}
-		return nil
-	}
-	return &client
-}
-
-func sameOrigin(a, b *url.URL) bool {
-	return a != nil && b != nil &&
-		strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
-		effectivePort(a) == effectivePort(b)
-}
-
-func effectivePort(value *url.URL) string {
-	if port := value.Port(); port != "" {
-		return port
-	}
-	switch strings.ToLower(value.Scheme) {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	default:
-		return ""
-	}
+func cloudRunSandboxRedirectError(destination *url.URL) error {
+	return fmt.Errorf("cloud-run-sandbox refused cross-origin redirect to %s", destination.Redacted())
 }
 
 func validateSandboxID(id string) error {

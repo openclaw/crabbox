@@ -8,9 +8,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func TestBridgeFallbackBoundsControlAndPreservesExecStream(t *testing.T) {
@@ -37,11 +40,12 @@ func TestBridgeFallbackBoundsControlAndPreservesExecStream(t *testing.T) {
 	defer server.Close()
 
 	control, data := cloudflareSandboxHTTPClients(nil, controlTimeout)
+	trusted, _ := url.Parse(server.URL)
 	client := &client{
 		baseURL:  server.URL,
 		token:    "test-token",
-		http:     secureCloudflareSandboxHTTPClient(control, server.URL),
-		dataHTTP: secureCloudflareSandboxHTTPClient(data, server.URL),
+		http:     shared.SecureHTTPClient(control, trusted, cloudflareSandboxRedirectError),
+		dataHTTP: shared.SecureHTTPClient(data, trusted, cloudflareSandboxRedirectError),
 	}
 	started := time.Now()
 	_, err := client.GetSandbox(context.Background(), "sb_123")
@@ -256,7 +260,8 @@ func TestBridgeClientPreservesCallerRedirectPolicy(t *testing.T) {
 
 func TestBridgeClientRetainsDefaultRedirectLimitWithoutMutatingSource(t *testing.T) {
 	source := &http.Client{}
-	secured := secureCloudflareSandboxHTTPClient(source, "http://localhost")
+	trusted, _ := url.Parse("http://localhost")
+	secured := shared.SecureHTTPClient(source, trusted, cloudflareSandboxRedirectError)
 	req, err := http.NewRequest(http.MethodGet, "http://localhost/redirected", nil)
 	if err != nil {
 		t.Fatal(err)

@@ -10,9 +10,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func TestFastAPICloudProviderSpec(t *testing.T) {
@@ -59,10 +62,11 @@ func TestFastAPICloudFallbackHTTPClientTimesOutStalledControlResponse(t *testing
 	}))
 	defer server.Close()
 	fallback := fastAPICloudHTTPClient(nil, timeout)
+	trusted, _ := url.Parse(server.URL)
 	client := &fastAPICloudClient{
 		token:      "test-token",
 		apiURL:     server.URL,
-		httpClient: secureFastAPICloudHTTPClient(fallback, server.URL),
+		httpClient: shared.SecureHTTPClient(fallback, trusted, newFastAPICloudRedirectError),
 	}
 	started := time.Now()
 	_, err := client.GetApp(context.Background(), "app-1")

@@ -140,7 +140,8 @@ func newFastAPICloudClient(cfg Config, rt Runtime) (fastAPICloudAPI, error) {
 		return nil, err
 	}
 	httpClient := fastAPICloudHTTPClient(rt.HTTP, fastAPICloudControlTimeout)
-	return &fastAPICloudClient{token: token, apiURL: apiURL, httpClient: secureFastAPICloudHTTPClient(httpClient, apiURL)}, nil
+	trusted, _ := url.Parse(apiURL)
+	return &fastAPICloudClient{token: token, apiURL: apiURL, httpClient: shared.SecureHTTPClient(httpClient, trusted, newFastAPICloudRedirectError)}, nil
 }
 
 func fastAPICloudHTTPClient(injected *http.Client, fallbackTimeout time.Duration) *http.Client {
@@ -166,44 +167,8 @@ func validateFastAPICloudAPIURL(raw string) (string, error) {
 	return apiURL, nil
 }
 
-func secureFastAPICloudHTTPClient(source *http.Client, apiURL string) *http.Client {
-	client := *source
-	trusted, _ := url.Parse(apiURL)
-	originalCheckRedirect := source.CheckRedirect
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if !sameFastAPICloudOrigin(trusted, req.URL) {
-			return &fastAPICloudRedirectError{origin: fastAPICloudRedirectOrigin(req.URL)}
-		}
-		if originalCheckRedirect != nil {
-			return originalCheckRedirect(req, via)
-		}
-		if len(via) >= 10 {
-			return errors.New("stopped after 10 redirects")
-		}
-		return nil
-	}
-	return &client
-}
-
-func sameFastAPICloudOrigin(a, b *url.URL) bool {
-	return a != nil && b != nil &&
-		strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
-		effectiveFastAPICloudPort(a) == effectiveFastAPICloudPort(b)
-}
-
-func effectiveFastAPICloudPort(value *url.URL) string {
-	if port := value.Port(); port != "" {
-		return port
-	}
-	switch strings.ToLower(value.Scheme) {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	default:
-		return ""
-	}
+func newFastAPICloudRedirectError(destination *url.URL) error {
+	return &fastAPICloudRedirectError{origin: fastAPICloudRedirectOrigin(destination)}
 }
 
 type fastAPICloudRedirectError struct {

@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type vastAPI interface {
@@ -147,26 +149,11 @@ func newVastClient(cfg VastConfig, rt Runtime) (vastAPI, error) {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
-	return &vastClient{apiKey: apiKey, apiURL: apiURL, httpClient: secureVastHTTPClient(httpClient, apiURL)}, nil
+	return &vastClient{apiKey: apiKey, apiURL: apiURL, httpClient: shared.SecureHTTPClient(httpClient, parsed, vastRedirectError)}, nil
 }
 
-func secureVastHTTPClient(source *http.Client, apiURL string) *http.Client {
-	client := *source
-	trusted, _ := url.Parse(apiURL)
-	originalCheckRedirect := source.CheckRedirect
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if !sameVastOrigin(trusted, req.URL) {
-			return fmt.Errorf("%s refused cross-origin redirect to %s", providerName, req.URL.Redacted())
-		}
-		if originalCheckRedirect != nil {
-			return originalCheckRedirect(req, via)
-		}
-		if len(via) >= 10 {
-			return errors.New("stopped after 10 redirects")
-		}
-		return nil
-	}
-	return &client
+func vastRedirectError(destination *url.URL) error {
+	return fmt.Errorf("%s refused cross-origin redirect to %s", providerName, destination.Redacted())
 }
 
 func (c *vastClient) do(ctx context.Context, method, path string, body any, out any) error {
@@ -648,27 +635,6 @@ func normalizeVastInstance(instance vastInstance) vastInstance {
 		instance.Status = instance.IntendedStatus
 	}
 	return instance
-}
-
-func sameVastOrigin(a, b *url.URL) bool {
-	return a != nil && b != nil &&
-		strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
-		effectiveVastPort(a) == effectiveVastPort(b)
-}
-
-func effectiveVastPort(value *url.URL) string {
-	if port := value.Port(); port != "" {
-		return port
-	}
-	switch strings.ToLower(value.Scheme) {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	default:
-		return ""
-	}
 }
 
 func isLoopbackHTTPURL(parsed *url.URL) bool {

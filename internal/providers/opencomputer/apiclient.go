@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 // ocAPIClient is a thin REST client for the OpenComputer control plane. The
@@ -113,7 +115,8 @@ func newOCAPIClient(cfg Config, rt Runtime) (*ocAPIClient, error) {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	return &ocAPIClient{http: secureOCAPIClient(httpClient, baseURL), baseURL: baseURL, apiKey: apiKey}, nil
+	trusted, _ := url.Parse(baseURL)
+	return &ocAPIClient{http: shared.SecureHTTPClient(httpClient, trusted, ocRedirectError), baseURL: baseURL, apiKey: apiKey}, nil
 }
 
 func validateOCAPIURL(raw string) (string, error) {
@@ -164,44 +167,8 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func secureOCAPIClient(source *http.Client, baseURL string) *http.Client {
-	client := *source
-	trusted, _ := url.Parse(baseURL)
-	originalCheckRedirect := source.CheckRedirect
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if !sameOCOrigin(trusted, req.URL) {
-			return fmt.Errorf("opencomputer refused cross-origin redirect to %s", req.URL.Redacted())
-		}
-		if originalCheckRedirect != nil {
-			return originalCheckRedirect(req, via)
-		}
-		if len(via) >= 10 {
-			return errors.New("stopped after 10 redirects")
-		}
-		return nil
-	}
-	return &client
-}
-
-func sameOCOrigin(a, b *url.URL) bool {
-	return a != nil && b != nil &&
-		strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
-		effectiveOCPort(a) == effectiveOCPort(b)
-}
-
-func effectiveOCPort(value *url.URL) string {
-	if port := value.Port(); port != "" {
-		return port
-	}
-	switch strings.ToLower(value.Scheme) {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	default:
-		return ""
-	}
+func ocRedirectError(destination *url.URL) error {
+	return fmt.Errorf("opencomputer refused cross-origin redirect to %s", destination.Redacted())
 }
 
 func (c *ocAPIClient) newRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {

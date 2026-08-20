@@ -7,9 +7,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func TestFreestyleFallbackBoundsControlAndPreservesCommand(t *testing.T) {
@@ -31,11 +34,12 @@ func TestFreestyleFallbackBoundsControlAndPreservesCommand(t *testing.T) {
 	}))
 	defer server.Close()
 	control, data := freestyleHTTPClients(nil, controlTimeout)
+	trusted, _ := url.Parse(server.URL)
 	client := &freestyleHTTPClient{
 		apiKey:         "test-key",
 		apiURL:         server.URL,
-		httpClient:     secureFreestyleHTTPClient(control, server.URL),
-		dataHTTPClient: secureFreestyleHTTPClient(data, server.URL),
+		httpClient:     shared.SecureHTTPClient(control, trusted, freestyleRedirectError),
+		dataHTTPClient: shared.SecureHTTPClient(data, trusted, freestyleRedirectError),
 	}
 	started := time.Now()
 	_, err := client.GetVM(context.Background(), "vm123")

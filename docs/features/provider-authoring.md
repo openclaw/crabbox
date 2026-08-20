@@ -418,6 +418,14 @@ reads, and invokes adapter checks and progress. Keep state strings,
 retryability, normalization, ownership checks, provider actions, claim updates,
 cleanup, and error wording in the adapter.
 
+Vanilla provider HTTP redirect guards should use `shared.SecureHTTPClient` and
+`shared.SameOrigin`. The shared policy compares scheme and hostname
+case-insensitively, normalizes the default HTTP and HTTPS ports, preserves an
+injected redirect hook, and otherwise retains the standard 10-redirect cap.
+The adapter still builds its exact provider-specific refusal error. Keep a
+provider-local guard when it enforces additional path, method, transport, or
+previous-hop policy, or when its origin semantics differ.
+
 If cleanup is meaningful, also implement:
 
 ```go

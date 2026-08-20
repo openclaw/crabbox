@@ -42,10 +42,11 @@ var newMorphClient = func(cfg Config, rt Runtime) (morphAPI, error) {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
+	trusted, _ := url.Parse(apiURL)
 	return &morphClient{
 		apiURL:     apiURL,
 		apiKey:     apiKey,
-		httpClient: secureMorphHTTPClient(httpClient, apiURL),
+		httpClient: shared.SecureHTTPClient(httpClient, trusted, newMorphRedirectError),
 	}, nil
 }
 
@@ -55,44 +56,8 @@ type morphClient struct {
 	httpClient *http.Client
 }
 
-func secureMorphHTTPClient(source *http.Client, apiURL string) *http.Client {
-	client := *source
-	trusted, _ := url.Parse(apiURL)
-	originalCheckRedirect := source.CheckRedirect
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if !sameMorphOrigin(trusted, req.URL) {
-			return &morphRedirectError{origin: morphRedirectOrigin(req.URL)}
-		}
-		if originalCheckRedirect != nil {
-			return originalCheckRedirect(req, via)
-		}
-		if len(via) >= 10 {
-			return errors.New("stopped after 10 redirects")
-		}
-		return nil
-	}
-	return &client
-}
-
-func sameMorphOrigin(a, b *url.URL) bool {
-	return a != nil && b != nil &&
-		strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
-		effectiveMorphPort(a) == effectiveMorphPort(b)
-}
-
-func effectiveMorphPort(value *url.URL) string {
-	if port := value.Port(); port != "" {
-		return port
-	}
-	switch strings.ToLower(value.Scheme) {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	default:
-		return ""
-	}
+func newMorphRedirectError(destination *url.URL) error {
+	return &morphRedirectError{origin: morphRedirectOrigin(destination)}
 }
 
 type morphRedirectError struct {

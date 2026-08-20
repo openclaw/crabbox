@@ -255,7 +255,7 @@ populated by side-effect `init()` registration, gathered in
 
 ```text
 internal/providers/all                  # side-effect imports of every provider
-internal/providers/shared               # shared lifecycle observation, operation locks, and direct SSH helpers
+internal/providers/shared               # shared lifecycle observation, operation locks, HTTP safety, and direct SSH helpers
 internal/providers/aws                  # AWS EC2 SSH lease backend (coordinator)
 internal/providers/azure                # Azure VM SSH lease backend (coordinator)
 internal/providers/azuredynamicsessions # Azure Container Apps delegated runner
@@ -352,6 +352,13 @@ grace, request encoding, and exact single-document decoding. Keep response
 envelopes, versions, identity checks, redaction, and provider error semantics in
 the adapter. Do not use it for noisy CLI output, streaming or NDJSON protocols,
 or commands with ambiguous side effects.
+
+Vanilla provider HTTP redirect policy also belongs in
+`internal/providers/shared`. `shared.SecureHTTPClient` clones an injected
+client, rejects destinations outside a trusted `shared.SameOrigin`, preserves
+an existing redirect hook, and otherwise applies the standard redirect limit.
+The adapter supplies the exact refusal error and retains any additional path,
+method, transport, previous-hop, or provider-specific origin policy locally.
 
 ## Provider registration
 

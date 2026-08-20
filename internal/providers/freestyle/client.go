@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -13,6 +12,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type freestyleAPI interface {
@@ -96,11 +97,12 @@ var newFreestyleClient = func(cfg Config, rt Runtime) (freestyleAPI, error) {
 		return nil, err
 	}
 	httpClient, dataHTTPClient := freestyleHTTPClients(rt.HTTP, freestyleControlTimeout)
+	trusted, _ := url.Parse(apiURL)
 	return &freestyleHTTPClient{
 		apiKey:         apiKey,
 		apiURL:         apiURL,
-		httpClient:     secureFreestyleHTTPClient(httpClient, apiURL),
-		dataHTTPClient: secureFreestyleHTTPClient(dataHTTPClient, apiURL),
+		httpClient:     shared.SecureHTTPClient(httpClient, trusted, freestyleRedirectError),
+		dataHTTPClient: shared.SecureHTTPClient(dataHTTPClient, trusted, freestyleRedirectError),
 	}, nil
 }
 
@@ -148,44 +150,8 @@ func isFreestyleLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func secureFreestyleHTTPClient(source *http.Client, apiURL string) *http.Client {
-	client := *source
-	trusted, _ := url.Parse(apiURL)
-	originalCheckRedirect := source.CheckRedirect
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if !sameFreestyleOrigin(trusted, req.URL) {
-			return fmt.Errorf("freestyle refused cross-origin redirect to %s", req.URL.Redacted())
-		}
-		if originalCheckRedirect != nil {
-			return originalCheckRedirect(req, via)
-		}
-		if len(via) >= 10 {
-			return errors.New("stopped after 10 redirects")
-		}
-		return nil
-	}
-	return &client
-}
-
-func sameFreestyleOrigin(a, b *url.URL) bool {
-	return a != nil && b != nil &&
-		strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
-		effectiveFreestylePort(a) == effectiveFreestylePort(b)
-}
-
-func effectiveFreestylePort(value *url.URL) string {
-	if port := value.Port(); port != "" {
-		return port
-	}
-	switch strings.ToLower(value.Scheme) {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	default:
-		return ""
-	}
+func freestyleRedirectError(destination *url.URL) error {
+	return fmt.Errorf("freestyle refused cross-origin redirect to %s", destination.Redacted())
 }
 
 func (c *freestyleHTTPClient) do(ctx context.Context, method, urlPath string, body io.Reader) (*http.Response, error) {

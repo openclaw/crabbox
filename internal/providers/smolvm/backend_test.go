@@ -18,6 +18,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func TestProviderSpecAndAliases(t *testing.T) {
@@ -258,11 +259,12 @@ func TestSmolVMFallbackBoundsControlAndPreservesCommand(t *testing.T) {
 	}))
 	defer server.Close()
 	control, data := smolvmHTTPClients(nil, controlTimeout)
+	trusted, _ := url.Parse(server.URL)
 	client := &client{
 		apiKey:   "smk_key",
 		base:     server.URL,
-		http:     secureSmolvmHTTPClient(control, server.URL),
-		dataHTTP: secureSmolvmHTTPClient(data, server.URL),
+		http:     shared.SecureHTTPClient(control, trusted, smolvmRedirectError),
+		dataHTTP: shared.SecureHTTPClient(data, trusted, smolvmRedirectError),
 	}
 	started := time.Now()
 	_, err := client.GetMachine(context.Background(), "mach_1")
@@ -410,8 +412,8 @@ func TestSameSmolvmOrigin(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := sameSmolvmOrigin(base, redirected); got != tc.want {
-				t.Fatalf("sameSmolvmOrigin(%q) = %v, want %v", tc.url, got, tc.want)
+			if got := shared.SameOrigin(base, redirected); got != tc.want {
+				t.Fatalf("shared.SameOrigin(%q) = %v, want %v", tc.url, got, tc.want)
 			}
 		})
 	}

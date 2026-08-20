@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func TestMorphClientRedactsReflectedCredential(t *testing.T) {
@@ -167,8 +169,8 @@ func TestSameMorphOrigin(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			candidate, _ := url.Parse(test.raw)
-			if got := sameMorphOrigin(trusted, candidate); got != test.want {
-				t.Fatalf("sameMorphOrigin(%q)=%v, want %v", test.raw, got, test.want)
+			if got := shared.SameOrigin(trusted, candidate); got != test.want {
+				t.Fatalf("shared.SameOrigin(%q)=%v, want %v", test.raw, got, test.want)
 			}
 		})
 	}

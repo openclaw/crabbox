@@ -18,6 +18,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type cloudflareClient struct {
@@ -112,7 +113,7 @@ func newCloudflareClient(cfg Config, rt Runtime) (*cloudflareClient, error) {
 		baseURL:      baseURL,
 		token:        token,
 		instanceType: instanceType,
-		http:         secureCloudflareHTTPClient(httpClient, baseURL),
+		http:         shared.SecureHTTPClient(httpClient, parsed, cloudflareRedirectError),
 	}, nil
 }
 
@@ -135,44 +136,8 @@ func defaultCloudflareHTTPClient() (*http.Client, error) {
 	return &http.Client{Transport: transport}, nil
 }
 
-func secureCloudflareHTTPClient(source *http.Client, baseURL string) *http.Client {
-	client := *source
-	trusted, _ := url.Parse(baseURL)
-	originalCheckRedirect := source.CheckRedirect
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if !sameCloudflareOrigin(trusted, req.URL) {
-			return fmt.Errorf("%s refused cross-origin redirect to %s", providerName, req.URL.Redacted())
-		}
-		if originalCheckRedirect != nil {
-			return originalCheckRedirect(req, via)
-		}
-		if len(via) >= 10 {
-			return errors.New("stopped after 10 redirects")
-		}
-		return nil
-	}
-	return &client
-}
-
-func sameCloudflareOrigin(a, b *url.URL) bool {
-	return a != nil && b != nil &&
-		strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
-		effectiveCloudflarePort(a) == effectiveCloudflarePort(b)
-}
-
-func effectiveCloudflarePort(value *url.URL) string {
-	if port := value.Port(); port != "" {
-		return port
-	}
-	switch strings.ToLower(value.Scheme) {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	default:
-		return ""
-	}
+func cloudflareRedirectError(destination *url.URL) error {
+	return fmt.Errorf("%s refused cross-origin redirect to %s", providerName, destination.Redacted())
 }
 
 func isLoopbackHTTPURL(parsed *url.URL) bool {

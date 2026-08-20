@@ -20,6 +20,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type e2bRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -649,7 +650,7 @@ func TestE2BEnvdClientRefusesCrossOriginRedirectBeforeReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	req.Header.Set("X-Access-Token", "envd-token")
-	resp, err := secureE2BHTTPClient(trusted.Client(), trustedURL).Do(req)
+	resp, err := shared.SecureHTTPClient(trusted.Client(), trustedURL, e2bRedirectError).Do(req)
 	if resp != nil {
 		resp.Body.Close()
 	}

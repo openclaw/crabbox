@@ -14,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func TestRailwayProviderSpec(t *testing.T) {
@@ -241,8 +243,8 @@ func TestSameRailwayOrigin(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			candidate, _ := url.Parse(test.raw)
-			if got := sameRailwayOrigin(trusted, candidate); got != test.want {
-				t.Fatalf("sameRailwayOrigin(%q)=%v, want %v", test.raw, got, test.want)
+			if got := shared.SameOrigin(trusted, candidate); got != test.want {
+				t.Fatalf("shared.SameOrigin(%q)=%v, want %v", test.raw, got, test.want)
 			}
 		})
 	}
