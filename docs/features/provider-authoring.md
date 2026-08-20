@@ -510,7 +510,10 @@ boundary intact across those flows.
 
 - `DoctorProvider` / `DoctorBackend` — add `ConfigureDoctor` plus a `Doctor`
   method so `crabbox doctor --provider <name>` returns structured
-  `DoctorCheck` items instead of a generic message.
+  `DoctorCheck` items instead of a generic message. When `ConfigureDoctor`
+  configures the standard backend and requires that capability, delegate the
+  assertion to `shared.ConfigureDoctor`; keep direct doctor-backend construction
+  and provider-specific validation local.
 - `JSONListBackend` — add `ListJSON` only when a script-facing JSON shape
   already exists and callers depend on it. This is a compatibility escape hatch;
   new providers should return normalized `[]LeaseView` from `List` and let core

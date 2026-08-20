@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func init() {
@@ -50,15 +51,7 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 }
 
 func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	backend, err := p.Configure(cfg, rt)
-	if err != nil {
-		return nil, err
-	}
-	doctor, ok := backend.(core.DoctorBackend)
-	if !ok {
-		return nil, exit(2, "nebius doctor backend unavailable")
-	}
-	return doctor, nil
+	return shared.ConfigureDoctor("nebius", func() (core.Backend, error) { return p.Configure(cfg, rt) })
 }
 
 func (Provider) ValidateConfig(cfg core.Config) error {

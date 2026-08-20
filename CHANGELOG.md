@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Shared the doctor-capability configuration boilerplate across sixty-six providers while keeping direct-construction variants, provider-specific validation, and divergent failure semantics adapter-owned.
 - Completed the shared lifecycle polling sweep across fourteen more providers, leaving only SSH-observer delegates, schedule-selected retry delays, and lock acquisitions hand-rolled by design.
 - Adopted shared lifecycle polling in nine more providers (Apple Container, Asciibox, Blaxel, Daytona, Hostinger, Nomad, NVIDIA Brev, OpenSandbox, and Tart), preserving event-driven waits, jittered backoff, and provider-specific deadline diagnostics adapter-side.
 - Adopted shared lifecycle polling in the Agent Sandbox, XCP-ng, GitHub Codespaces, Lume, Hyper-V, Proxmox, and Sealos Devbox providers, unifying timeout, cadence, and cancellation semantics while keeping event-driven and multi-clock waits adapter-owned.

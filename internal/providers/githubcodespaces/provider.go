@@ -6,6 +6,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func init() {
@@ -106,13 +107,5 @@ func (p Provider) Configure(cfg Config, rt Runtime) (Backend, error) {
 }
 
 func (p Provider) ConfigureDoctor(cfg Config, rt Runtime) (core.DoctorBackend, error) {
-	backend, err := p.Configure(cfg, rt)
-	if err != nil {
-		return nil, err
-	}
-	doctor, ok := backend.(core.DoctorBackend)
-	if !ok {
-		return nil, exit(2, "github-codespaces doctor backend unavailable")
-	}
-	return doctor, nil
+	return shared.ConfigureDoctor("github-codespaces", func() (core.Backend, error) { return p.Configure(cfg, rt) })
 }
