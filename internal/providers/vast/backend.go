@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -183,26 +184,40 @@ func (b *backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	now := b.now()
 	label := encodeVastOwnershipLabel(leaseID, slug, "provisioning")
 	var (
-		instanceID int
-		keyID      string
-		committed  bool
+		instanceID      int
+		keyID           string
+		committed       bool
+		ambiguousCreate bool
 	)
 	defer func() {
 		if err == nil || committed {
+			return
+		}
+		if ambiguousCreate {
+			if claimErr := b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, 0, "", accountID, apiURL, "ambiguous-create", req.Keep, now); claimErr != nil {
+				err = errors.Join(err, fmt.Errorf("persist vast ambiguous-create recovery claim for lease=%s: %w", leaseID, claimErr))
+			}
 			return
 		}
 		if instanceID == 0 {
 			core.RemoveStoredTestboxKey(leaseID)
 			return
 		}
-		_ = b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, instanceID, keyID, accountID, apiURL, "rollback-cleanup", req.Keep, now)
+		claimErr := b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, instanceID, keyID, accountID, apiURL, "rollback-cleanup", req.Keep, now)
+		if claimErr != nil {
+			recoveryErr := fmt.Errorf("persist vast rollback recovery claim for instance %d: %w", instanceID, claimErr)
+			fmt.Fprintf(b.stderr(), "warning: %v\n", recoveryErr)
+			err = errors.Join(err, recoveryErr)
+		}
 		if !req.Keep {
 			cleanupErr := rollbackVastAcquire(client, instanceID, keyID)
 			if cleanupErr != nil {
-				err = fmt.Errorf("%v; vast cleanup failed: %w", err, cleanupErr)
+				err = errors.Join(err, fmt.Errorf("vast cleanup failed for instance %d: %w", instanceID, cleanupErr))
 				return
 			}
-			core.RemoveLeaseClaim(leaseID)
+			if claimErr == nil {
+				core.RemoveLeaseClaim(leaseID)
+			}
 			core.RemoveStoredTestboxKey(leaseID)
 		}
 	}()
@@ -223,10 +238,12 @@ func (b *backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 		Environment: map[string]string{"CRABBOX": "1"},
 	})
 	if err != nil {
+		ambiguousCreate = !isDefiniteVastCreateError(err)
 		return core.LeaseTarget{}, err
 	}
 	instanceID = firstNonZero(created.Instance.ID, created.NewContract)
 	if instanceID == 0 {
+		ambiguousCreate = true
 		err = exit(5, "vast create returned no instance id")
 		return core.LeaseTarget{}, err
 	}
@@ -400,6 +417,15 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	if req.ReleaseOnly {
+		claim, ok, claimErr := core.ResolveLeaseClaimForProvider(req.ID, providerName)
+		if claimErr != nil {
+			return core.LeaseTarget{}, claimErr
+		}
+		if ok && claim.CloudID == "" && claim.Labels["recovery"] == "ambiguous-create" {
+			return b.resolveAmbiguousVastCreate(ctx, client, instances, claim, req)
+		}
+	}
 	byID := map[int]vastInstance{}
 	for _, item := range instances {
 		byID[item.ID] = item
@@ -442,6 +468,40 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		return b.targetFromInstance(ctx, client, item, req)
 	}
 	return core.LeaseTarget{}, exit(4, "lease/instance not found: %s", req.ID)
+}
+
+func (b *backend) resolveAmbiguousVastCreate(ctx context.Context, client vastAPI, instances []vastInstance, claim core.LeaseClaim, req core.ResolveRequest) (core.LeaseTarget, error) {
+	if err := validateVastClaimIdentity(claim, claim.LeaseID, claim.Slug, ""); err != nil {
+		return core.LeaseTarget{}, err
+	}
+	if err := b.validateVastClaimProviderIdentity(ctx, client, claim, "recovery"); err != nil {
+		return core.LeaseTarget{}, err
+	}
+	var recovered vastInstance
+	matches := 0
+	for _, instance := range instances {
+		owner, ok := decodeVastOwnershipLabel(instance.Label)
+		if !ok || instance.ID == 0 || owner.LeaseID != claim.LeaseID || owner.Slug != claim.Slug {
+			continue
+		}
+		recovered = instance
+		matches++
+	}
+	if matches > 1 {
+		return core.LeaseTarget{}, exit(2, "refusing to recover ambiguous Vast create for lease=%s slug=%s: matched %d instances", claim.LeaseID, claim.Slug, matches)
+	}
+	if matches == 0 {
+		return core.LeaseTarget{}, exit(4, "vast ambiguous instance create remains indeterminate for lease=%s; credentials and recovery claim retained", claim.LeaseID)
+	}
+	if req.NoLocalStateMutations {
+		return core.LeaseTarget{}, exit(2, "vast ambiguous-create recovery for lease=%s requires a durable instance claim", claim.LeaseID)
+	}
+	replacement := claim
+	replacement.CloudID = strconv.Itoa(recovered.ID)
+	if _, err := core.ReplaceLeaseClaimIfUnchangedDurableReturning(claim.LeaseID, claim, replacement); err != nil {
+		return core.LeaseTarget{}, fmt.Errorf("bind vast recovery claim to instance %d: %w", recovered.ID, err)
+	}
+	return b.targetFromInstance(ctx, client, recovered, req)
 }
 
 func (b *backend) releaseTargetFromClaim(id string, cause error, releaseOnly bool) (core.LeaseTarget, error) {
@@ -897,8 +957,11 @@ func claimTarget(claim core.LeaseClaim) core.LeaseTarget {
 }
 
 func (b *backend) persistRecoveryClaim(leaseID, slug string, cfg core.Config, repoRoot string, instanceID int, keyID, accountID, apiURL, reason string, keep bool, now time.Time) error {
-	label := encodeVastOwnershipLabel(leaseID, slug, reason)
-	server := serverFromInstance(vastInstance{ID: instanceID, Label: label, Status: reason}, cfg)
+	server := core.Server{Provider: providerName, Name: slug, Status: reason}
+	if instanceID != 0 {
+		label := encodeVastOwnershipLabel(leaseID, slug, reason)
+		server = serverFromInstance(vastInstance{ID: instanceID, Label: label, Status: reason}, cfg)
+	}
 	server.Labels = vastLeaseLabels(cfg, leaseID, slug, reason, keep, now)
 	server.Labels["recovery"] = reason
 	server.Labels[vastAccountIDLabel] = accountID
@@ -906,6 +969,9 @@ func (b *backend) persistRecoveryClaim(leaseID, slug string, cfg core.Config, re
 	if keyID != "" {
 		server.Labels[vastKeyIDLabel] = keyID
 		server.Labels[vastKeyOwnedLabel] = "true"
+	}
+	if repoRoot == "" {
+		return core.ClaimLeaseTargetForConfig(leaseID, slug, cfg, server, core.SSHTarget{}, cfg.IdleTimeout)
 	}
 	return core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{}, repoRoot, cfg.IdleTimeout, true)
 }
@@ -970,4 +1036,17 @@ func rollbackVastAcquire(client vastAPI, instanceID int, keyID string) error {
 func isVastNotFound(err error) bool {
 	var apiErr *vastAPIError
 	return errors.Is(err, errVastInstanceNotFound) || (errors.As(err, &apiErr) && apiErr.StatusCode == 404)
+}
+
+func isDefiniteVastCreateError(err error) bool {
+	var apiErr *vastAPIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	switch apiErr.StatusCode {
+	case http.StatusRequestTimeout, http.StatusConflict, http.StatusTooEarly, http.StatusTooManyRequests:
+		return false
+	default:
+		return apiErr.StatusCode >= 400 && apiErr.StatusCode < 500
+	}
 }
