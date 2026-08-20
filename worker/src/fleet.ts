@@ -39,7 +39,49 @@ import {
   type AWSPrivateWorkspaceConfig,
 } from "./aws";
 import { InvalidAWSRegionError, sanitizeAWSRegion } from "./aws-region";
-import { AzureClient, azureRegionCandidates, type AzureDeferredCleanupRequest } from "./azure";
+import {
+  AzureClient,
+  azureRegionCandidates,
+  azureSnapshotNotFound,
+  type AzureDeferredCleanupRequest,
+} from "./azure";
+import {
+  CheckpointError,
+  abortCheckpointProvisioningForLease,
+  acquireCheckpointUse,
+  bindCheckpointUseProvisioning,
+  cancelFailedCheckpointCreate,
+  checkpointDuePrefix,
+  checkpointEventKey,
+  checkpointKey,
+  checkpointVisibleTo,
+  claimCheckpointDeletion,
+  expireCheckpointClaims,
+  failCheckpointCreateDefinitively,
+  finalizeCheckpointDeletion,
+  findManagedCheckpointImage,
+  finishCheckpointUse,
+  markCheckpointProviderDeleted,
+  pinCheckpointPromotion,
+  publicCheckpointRecord,
+  publishCreatedCheckpoint,
+  publishRecoveredCheckpoint,
+  pruneCheckpointTombstone,
+  recoverCheckpointDeletion,
+  recordCheckpointCreateFailure,
+  recordCheckpointCreateRecoveryFailure,
+  recordCheckpointDeletionFailure,
+  recordCheckpointExpiryDue,
+  renewCheckpointUse,
+  repairCheckpointDueMarker,
+  reserveCheckpointCreate,
+  unpinCheckpointPromotion,
+  updateCheckpointRetention,
+  validCheckpointID,
+  validCheckpointRetention,
+  validateCheckpointUse,
+  type CheckpointPrincipal,
+} from "./checkpoints";
 import {
   codeOriginForLease,
   codeProxyRequestBodyBytes,
@@ -77,7 +119,12 @@ import {
   isDaytonaNotFound,
   type DaytonaSSHEndpoint,
 } from "./daytona";
-import { GCPClient, gcpProviderLabelValue } from "./gcp";
+import {
+  GCPClient,
+  gcpMachineImageNotFound,
+  gcpProviderLabelValue,
+  gcpSnapshotNotFound,
+} from "./gcp";
 import {
   githubMembershipPolicy,
   requireFreshGitHubMembership,
@@ -251,6 +298,12 @@ import {
 import { timingSafeEqual } from "./timing-safe";
 import type {
   CapacityHint,
+  CoordinatorCheckpointDueIndex,
+  CoordinatorCheckpointEvent,
+  CoordinatorCheckpointProvider,
+  CoordinatorCheckpointRecord,
+  CoordinatorCheckpointRetention,
+  CoordinatorCheckpointScope,
   Env,
   ExternalRunnerInput,
   ExternalRunnerRecord,
@@ -266,6 +319,7 @@ import type {
   ImageVariantSelectors,
   Provider,
   ProviderFastSnapshotRestore,
+  ProviderCheckpointOwnership,
   LeaseImageIdentity,
   LeaseProvisioningTiming,
   ProviderImage,
@@ -1218,6 +1272,9 @@ export class FleetCoordinator {
       if (parts[0] === "v1" && parts[1] === "runs" && parts[2]) {
         return await this.runRoute(request, parts[2], parts[3]);
       }
+      if (parts[0] === "v1" && parts[1] === "checkpoints") {
+        return await this.checkpointRoute(request, parts);
+      }
       if (method === "POST" && parts.join("/") === "v1/images") {
         return await this.createImage(request);
       }
@@ -1232,6 +1289,9 @@ export class FleetCoordinator {
       }
       if (method === "POST" && parts.join("/") === "v1/leases/capability-aware") {
         return await this.createLease(request);
+      }
+      if (method === "POST" && parts.join("/") === "v1/leases/from-checkpoint") {
+        return await this.createCheckpointLease(request);
       }
       if (
         method === "POST" &&
@@ -2993,6 +3053,7 @@ export class FleetCoordinator {
     await this.maintainWorkspacePrewarm();
     await this.pruneTerminalWorkspaces();
     await this.pruneTerminalRuns();
+    await this.maintainCheckpoints();
     await this.runAzureDeferredCleanups();
     await this.runAWSOrphanSweepIfDue("alarm");
     await this.runAzureOrphanSweepIfDue("alarm");
@@ -3294,6 +3355,14 @@ export class FleetCoordinator {
             : await cleanup();
       }
     }
+    if (!released?.provisioningResourceMayExist && !released?.cleanupStartedAt) {
+      await abortCheckpointProvisioningForLease(this.state.storage, requestedLeaseID, token, {
+        owner,
+        org,
+        admin,
+      });
+      await this.state.runExclusive(async () => await this.scheduleAlarm());
+    }
     return json({
       canceledCreate: {
         version: 1,
@@ -3311,6 +3380,7 @@ export class FleetCoordinator {
     workspaceID?: string,
     workspaceCapability?: ProviderWorkspaceCapability,
     fixedLeaseID?: string,
+    checkpointAuthorization?: CoordinatorCheckpointRecord,
   ): Promise<Response> {
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
@@ -3448,7 +3518,14 @@ export class FleetCoordinator {
       providerProjectForConfig(config),
     );
     if (!workspaceID && !isAdminRequest(request)) {
-      const restrictedFields = configProvider.restrictedLeaseRequestFields?.(input) ?? [];
+      const restrictedFields = (configProvider.restrictedLeaseRequestFields?.(input) ?? []).filter(
+        (field) =>
+          !checkpointAuthorization ||
+          !(
+            field === "awsAMI" ||
+            (field === "gcpProject" && input.gcpProject === checkpointAuthorization.scope.project)
+          ),
+      );
       if (restrictedFields.length > 0) {
         return json(
           {
@@ -3460,7 +3537,7 @@ export class FleetCoordinator {
         );
       }
     }
-    if (!isAdminRequest(request) && hasNativeLeaseSource(config)) {
+    if (!isAdminRequest(request) && hasNativeLeaseSource(config) && !checkpointAuthorization) {
       return json(
         {
           error: "admin_required",
@@ -3480,7 +3557,12 @@ export class FleetCoordinator {
           )
         : undefined;
     const reusesOwnedReleasedMacHost = Boolean(retainedMacHostLease);
-    if (!isAdminRequest(request) && requestedHostID && !reusesOwnedReleasedMacHost) {
+    if (
+      !isAdminRequest(request) &&
+      requestedHostID &&
+      !reusesOwnedReleasedMacHost &&
+      requestedHostID !== checkpointAuthorization?.hostID
+    ) {
       return json(
         {
           error: "admin_required",
@@ -3675,6 +3757,7 @@ export class FleetCoordinator {
           : undefined;
         let reactivated: LeaseRecord = {
           ...current,
+          ...(checkpointAuthorization ? { checkpointID: checkpointAuthorization.id } : {}),
           createAttemptGeneration,
           ...(boundAttempt
             ? {
@@ -3898,6 +3981,7 @@ export class FleetCoordinator {
       let record: LeaseRecord = {
         id: leaseID,
         slug,
+        ...(checkpointAuthorization ? { checkpointID: checkpointAuthorization.id } : {}),
         ...(currentAttempt
           ? {
               createAttemptID: currentAttempt.token,
@@ -13668,6 +13752,752 @@ export class FleetCoordinator {
     });
   }
 
+  private checkpointPrincipal(request: Request): CheckpointPrincipal {
+    return {
+      owner: requestOwner(request),
+      org: requestOrg(request, this.env),
+      admin: isAdminRequest(request),
+    };
+  }
+
+  private async scheduleCheckpointAlarm(): Promise<void> {
+    await this.state.runExclusive(() => this.scheduleAlarm());
+  }
+
+  private async checkpointRoute(request: Request, parts: string[]): Promise<Response> {
+    try {
+      if (isDeviceTokenRequest(request)) {
+        return json(
+          { error: "checkpoint_forbidden", message: "device tokens cannot manage checkpoints" },
+          { status: 403 },
+        );
+      }
+      const method = request.method.toUpperCase();
+      const principal = this.checkpointPrincipal(request);
+      if (parts.length === 2 && method === "GET") {
+        const records = await this.state.storage.list<CoordinatorCheckpointRecord>({
+          prefix: "checkpoint:",
+        });
+        return json({
+          checkpoints: [...records.values()]
+            .filter(
+              (record) => record.state !== "deleted" && checkpointVisibleTo(record, principal),
+            )
+            .toSorted((left, right) => right.createdAt.localeCompare(left.createdAt))
+            .map(publicCheckpointRecord),
+        });
+      }
+      if (parts.length === 2 && method === "POST") {
+        return await this.createCheckpoint(request, principal);
+      }
+      const checkpointID = parts[2];
+      if (!validCheckpointID(checkpointID)) {
+        return json(
+          { error: "invalid_checkpoint_id", message: "invalid checkpoint identifier" },
+          { status: 400 },
+        );
+      }
+      const current = await this.state.storage.get<CoordinatorCheckpointRecord>(
+        checkpointKey(checkpointID),
+      );
+      if (!current || !checkpointVisibleTo(current, principal)) return notFound();
+      if (parts.length === 3 && method === "GET") {
+        if (current.state === "deleted") return notFound();
+        if (new URL(request.url).searchParams.get("verify") === "true") {
+          if (current.state !== "ready" || !current.image) {
+            throw new CheckpointError(
+              "checkpoint_pending",
+              "checkpoint provider resource is not ready",
+            );
+          }
+          const provider = this.provider(
+            current.provider,
+            current.scope.region,
+            current.scope.project,
+          );
+          const image = await provider.getImage(current.image.id, current.image.kind);
+          if (
+            image.id !== current.image.id ||
+            image.resourceID !== current.image.resourceID ||
+            image.immutableID !== current.image.immutableID ||
+            image.region !== current.scope.region ||
+            (current.provider === "gcp" && image.project !== current.scope.project) ||
+            (current.provider === "aws" &&
+              image.accountID &&
+              image.accountID !== current.scope.accountID)
+          ) {
+            throw new CheckpointError(
+              "checkpoint_source_mismatch",
+              "provider resource no longer matches checkpoint ownership",
+            );
+          }
+          return json({ checkpoint: publicCheckpointRecord(current), image });
+        }
+        return json({ checkpoint: publicCheckpointRecord(current) });
+      }
+      if (parts.length === 4 && parts[3] === "events" && method === "GET") {
+        const limit = clampLimit(new URL(request.url).searchParams.get("limit"), 100);
+        const events = await this.state.storage.list<CoordinatorCheckpointEvent>({
+          prefix: checkpointEventKey(checkpointID, 0).replace(/0{12}$/, ""),
+          limit,
+        });
+        return json({ events: [...events.values()] });
+      }
+      if (
+        parts.length === 4 &&
+        (parts[3] === "retention" || parts[3] === "policy") &&
+        method === "PATCH"
+      ) {
+        const body = await readJson<{
+          retention?: unknown;
+          mode?: unknown;
+          unusedForSeconds?: unknown;
+        }>(request);
+        const retention = body.retention ?? body;
+        if (!validCheckpointRetention(retention)) {
+          return json(
+            {
+              error: "invalid_checkpoint_retention",
+              message: "retention must be manual or a bounded positive unused duration",
+            },
+            { status: 400 },
+          );
+        }
+        const checkpoint = await updateCheckpointRetention(
+          this.state.storage,
+          checkpointID,
+          principal,
+          retention,
+        );
+        await this.scheduleCheckpointAlarm();
+        return json({ checkpoint: publicCheckpointRecord(checkpoint) });
+      }
+      if (parts.length === 4 && parts[3] === "use" && method === "POST") {
+        const body = await readJson<{ action?: unknown; claim?: unknown }>(request);
+        if (body.action === "begin") {
+          const claim = await acquireCheckpointUse(this.state.storage, checkpointID, principal);
+          await this.scheduleCheckpointAlarm();
+          return json(
+            {
+              checkpoint: publicCheckpointRecord(claim.checkpoint),
+              claim: claim.token,
+              expiresAt: claim.expiresAt,
+            },
+            { status: 201 },
+          );
+        }
+        if (typeof body.claim !== "string" || !body.claim) {
+          return json(
+            { error: "checkpoint_claim_invalid", message: "checkpoint use claim is required" },
+            { status: 400 },
+          );
+        }
+        if (body.action === "renew") {
+          const renewed = await renewCheckpointUse(
+            this.state.storage,
+            checkpointID,
+            body.claim,
+            principal,
+          );
+          await this.scheduleCheckpointAlarm();
+          return json({
+            checkpoint: publicCheckpointRecord(renewed.checkpoint),
+            expiresAt: renewed.expiresAt,
+          });
+        }
+        if (body.action === "complete" || body.action === "abort") {
+          const checkpoint = await finishCheckpointUse(
+            this.state.storage,
+            checkpointID,
+            body.claim,
+            principal,
+            body.action === "complete",
+          );
+          await this.scheduleCheckpointAlarm();
+          return json({ checkpoint: publicCheckpointRecord(checkpoint) });
+        }
+        return json(
+          { error: "invalid_checkpoint_use", message: "unknown checkpoint use action" },
+          { status: 400 },
+        );
+      }
+      if (parts.length === 3 && method === "DELETE") {
+        if (current.state === "deleted") return json({ checkpointID, deleted: true });
+        if (current.state === "failed" && current.createClaim && !current.image) {
+          if (current.createClaim.definitiveRefusal) {
+            await cancelFailedCheckpointCreate(this.state.storage, checkpointID, principal);
+            await this.scheduleCheckpointAlarm();
+            return json({ checkpointID, deleted: true });
+          }
+          const provider = this.provider(
+            current.provider,
+            current.scope.region,
+            current.scope.project,
+          );
+          if (!provider.recoverCheckpointImage) {
+            throw new CheckpointError(
+              "checkpoint_pending",
+              "checkpoint provider cannot prove its exact creation resource is absent",
+            );
+          }
+          const recovered = await provider.recoverCheckpointImage(current);
+          if (recovered) {
+            await publishRecoveredCheckpoint(this.state.storage, checkpointID, recovered);
+            return await this.deleteManagedCheckpoint(checkpointID, principal, "create-recovery");
+          }
+          await cancelFailedCheckpointCreate(this.state.storage, checkpointID, principal);
+          await this.scheduleCheckpointAlarm();
+          return json({ checkpointID, deleted: true });
+        }
+        return await this.deleteManagedCheckpoint(checkpointID, principal, "manual");
+      }
+      return notFound();
+    } catch (error) {
+      if (error instanceof CheckpointError) {
+        return json(
+          { error: error.code, message: coordinatorErrorMessage(this.env, error) },
+          { status: error.status },
+        );
+      }
+      return json(
+        { error: "checkpoint_failure", message: coordinatorErrorMessage(this.env, error) },
+        { status: 500 },
+      );
+    }
+  }
+
+  private async createCheckpoint(
+    request: Request,
+    principal: CheckpointPrincipal,
+  ): Promise<Response> {
+    const input = await readJson<{
+      id?: unknown;
+      leaseID?: unknown;
+      name?: unknown;
+      strategy?: unknown;
+      noReboot?: unknown;
+      retention?: unknown;
+      workdir?: unknown;
+      repo?: { name?: unknown; head?: unknown; baseRef?: unknown };
+    }>(request);
+    if (!validCheckpointID(input.id)) {
+      return json(
+        { error: "invalid_checkpoint_id", message: "invalid checkpoint identifier" },
+        { status: 400 },
+      );
+    }
+    if (typeof input.leaseID !== "string" || !validLeaseID(input.leaseID)) {
+      return json(
+        { error: "invalid_lease_id", message: "invalid source lease identifier" },
+        { status: 400 },
+      );
+    }
+    const name = typeof input.name === "string" ? input.name.trim() : "";
+    if (!validImageName(name)) {
+      return json(
+        { error: "invalid_image_name", message: "invalid checkpoint name" },
+        { status: 400 },
+      );
+    }
+    const retention: CoordinatorCheckpointRetention =
+      input.retention === undefined
+        ? { mode: "manual" }
+        : (input.retention as CoordinatorCheckpointRetention);
+    if (!validCheckpointRetention(retention)) {
+      return json(
+        { error: "invalid_checkpoint_retention", message: "invalid checkpoint retention" },
+        { status: 400 },
+      );
+    }
+    const lease = await this.resolveLease(input.leaseID, request, true);
+    if (
+      !lease ||
+      (!principal.admin &&
+        (lease.owner !== principal.owner || !sameOrgIdentityKey(lease.org, principal.org)))
+    ) {
+      return notFound();
+    }
+    const managed = managedLeaseProvider(lease);
+    if (!managed || !["aws", "azure", "gcp"].includes(managed) || !lease.cloudID) {
+      return json(
+        {
+          error: "checkpoint_source_mismatch",
+          message: "managed checkpoints require a brokered AWS, Azure, or GCP source lease",
+        },
+        { status: 400 },
+      );
+    }
+    const providerName = managed as CoordinatorCheckpointProvider;
+    const provider = this.provider(providerName, lease.region, lease.providerProject);
+    if (!provider.checkpointScope || !provider.createCheckpointImage) {
+      return json(
+        {
+          error: "checkpoint_source_mismatch",
+          message: "provider does not support coordinator-owned checkpoints",
+        },
+        { status: 409 },
+      );
+    }
+    const strategy = checkpointStrategy(
+      typeof input.strategy === "string" ? input.strategy : provider.defaultImageStrategy(lease),
+    );
+    if (!strategy) {
+      return json(
+        {
+          error: "invalid_strategy",
+          message: "checkpoint strategy must be image or disk-snapshot",
+        },
+        { status: 400 },
+      );
+    }
+    const unsupported = provider.validateLeaseImageStrategy(lease, strategy);
+    if (unsupported) {
+      return json({ error: "unsupported_strategy", message: unsupported }, { status: 400 });
+    }
+    const scope = await provider.checkpointScope(lease);
+    const ownershipToken = crypto.randomUUID() + crypto.randomUUID();
+    const createdAt = new Date().toISOString();
+    const resourceName = await checkpointProviderResourceName(
+      providerName,
+      name,
+      input.id,
+      lease.id,
+    );
+    const repoName = boundedCheckpointString(input.repo?.name, 128);
+    const repoHead = boundedCheckpointString(input.repo?.head, 128);
+    const repoBaseRef = boundedCheckpointString(input.repo?.baseRef, 128);
+    const workdir = boundedCheckpointString(input.workdir, 1024);
+    const hostID = lease.hostId ?? lease.hostID;
+    const repo = {
+      ...(repoName ? { name: repoName } : {}),
+      ...(repoHead ? { head: repoHead } : {}),
+      ...(repoBaseRef ? { baseRef: repoBaseRef } : {}),
+    };
+    const reservation = await reserveCheckpointCreate(this.state.storage, {
+      record: {
+        id: input.id,
+        owner: lease.owner,
+        org: lease.org,
+        leaseID: lease.id,
+        provider: providerName,
+        scope,
+        name,
+        strategy,
+        noReboot: input.noReboot !== false,
+        retention,
+        createdAt,
+        lastUsedAt: createdAt,
+        target: lease.target,
+        ...(lease.windowsMode ? { windowsMode: lease.windowsMode } : {}),
+        ...(lease.desktop ? { desktop: lease.desktop } : {}),
+        ...(lease.serverType ? { serverType: lease.serverType } : {}),
+        ...(hostID ? { hostID } : {}),
+        ...(lease.slug ? { slug: lease.slug } : {}),
+        ...(workdir ? { workdir } : {}),
+        ...(Object.keys(repo).length ? { repo } : {}),
+      },
+      ownershipToken,
+      resourceName,
+      coordinatorGeneration: this.coordinatorGeneration,
+    });
+    await this.scheduleCheckpointAlarm();
+    try {
+      const ownership: ProviderCheckpointOwnership = {
+        checkpointID: reservation.id,
+        tokenHash: reservation.createClaim!.tokenHash,
+        sourceLeaseID: lease.id,
+      };
+      const image = await provider.createCheckpointImage(
+        lease,
+        resourceName,
+        input.noReboot !== false,
+        strategy,
+        ownership,
+        scope,
+      );
+      const checkpoint = await publishCreatedCheckpoint(
+        this.state.storage,
+        reservation.id,
+        ownershipToken,
+        image,
+      );
+      await this.scheduleCheckpointAlarm();
+      return json({ checkpoint: publicCheckpointRecord(checkpoint), image }, { status: 201 });
+    } catch (error) {
+      const message = coordinatorErrorMessage(this.env, error);
+      if (checkpointProviderMutationDefinitivelyRefused(error)) {
+        await failCheckpointCreateDefinitively(
+          this.state.storage,
+          reservation.id,
+          ownershipToken,
+          message,
+        );
+      } else {
+        await recordCheckpointCreateFailure(
+          this.state.storage,
+          reservation.id,
+          ownershipToken,
+          message,
+        );
+      }
+      await this.scheduleCheckpointAlarm();
+      return json(
+        {
+          error: "checkpoint_pending",
+          message:
+            "checkpoint creation did not complete; durable ownership is retained for recovery",
+          checkpointID: reservation.id,
+        },
+        { status: 503 },
+      );
+    }
+  }
+
+  private async createCheckpointLease(request: Request): Promise<Response> {
+    try {
+      const input = await readJson<LeaseRequest>(request);
+      const checkpointID = input.checkpointID;
+      const token = input.checkpointUseClaim;
+      if (!validCheckpointID(checkpointID) || typeof token !== "string" || !token) {
+        return json(
+          {
+            error: "checkpoint_claim_invalid",
+            message: "a checkpoint identifier and use claim are required",
+          },
+          { status: 400 },
+        );
+      }
+      const principal = this.checkpointPrincipal(request);
+      const authorizedCheckpoint = await this.state.storage.get<CoordinatorCheckpointRecord>(
+        checkpointKey(checkpointID),
+      );
+      if (!authorizedCheckpoint || !checkpointVisibleTo(authorizedCheckpoint, principal)) {
+        return notFound();
+      }
+      await expireCheckpointClaims(this.state.storage, checkpointID);
+      let checkpoint: CoordinatorCheckpointRecord;
+      let completedReplay: Response | undefined;
+      try {
+        checkpoint = await validateCheckpointUse(
+          this.state.storage,
+          checkpointID,
+          token,
+          principal,
+        );
+      } catch (error) {
+        if (
+          !(error instanceof CheckpointError) ||
+          error.code !== "checkpoint_claim_invalid" ||
+          !validCreateAttemptID(input.createAttemptID) ||
+          !validLeaseID(input.leaseID)
+        ) {
+          throw error;
+        }
+        const [existingCheckpoint, lease, attempt] = await Promise.all([
+          this.state.storage.get<CoordinatorCheckpointRecord>(checkpointKey(checkpointID)),
+          this.getLease(input.leaseID),
+          this.getCreateAttempt(input.leaseID),
+        ]);
+        if (
+          !existingCheckpoint ||
+          !checkpointVisibleTo(existingCheckpoint, principal) ||
+          !lease ||
+          lease.checkpointID !== checkpointID ||
+          !attempt ||
+          attempt.token !== input.createAttemptID ||
+          !createAttemptMatchesLease(attempt, lease)
+        ) {
+          throw error;
+        }
+        completedReplay = await this.replayCreateAttempt(
+          input.leaseID,
+          input.createAttemptID,
+          principal.owner,
+          principal.org,
+        );
+        if (!completedReplay?.ok) throw error;
+        checkpoint = existingCheckpoint;
+      }
+      const image = checkpoint.image!;
+      const expectedSelector =
+        image.kind === "aws-ami"
+          ? input.awsAMI
+          : image.kind === "aws-ebs-snapshot"
+            ? input.awsSnapshot
+            : image.kind === "azure-os-disk-snapshot"
+              ? input.azureSnapshot
+              : image.kind === "gcp-machine-image"
+                ? input.gcpMachineImage
+                : input.gcpSnapshot;
+      const selectors = [
+        input.awsAMI,
+        input.awsSnapshot,
+        input.azureSnapshot,
+        input.gcpMachineImage,
+        input.gcpSnapshot,
+      ].filter(Boolean);
+      const foreignScope =
+        checkpoint.provider === "aws"
+          ? Boolean(input.azureLocation || input.gcpZone || input.gcpProject)
+          : checkpoint.provider === "azure"
+            ? Boolean(input.awsRegion || input.gcpZone || input.gcpProject)
+            : Boolean(input.awsRegion || input.azureLocation);
+      const region =
+        checkpoint.provider === "aws"
+          ? input.awsRegion
+          : checkpoint.provider === "azure"
+            ? input.azureLocation
+            : input.gcpZone;
+      if (
+        input.provider !== checkpoint.provider ||
+        foreignScope ||
+        (input.target && input.target !== checkpoint.target) ||
+        selectors.length !== 1 ||
+        (expectedSelector !== image.id && expectedSelector !== image.resourceID) ||
+        (region && region !== checkpoint.scope.region) ||
+        (input.gcpProject && input.gcpProject !== checkpoint.scope.project) ||
+        (input.architecture &&
+          image.architecture &&
+          normalizeArchitecture(input.architecture) !== normalizeArchitecture(image.architecture))
+      ) {
+        return json(
+          {
+            error: "checkpoint_source_mismatch",
+            message: "lease source does not match the exact owned checkpoint resource",
+          },
+          { status: 409 },
+        );
+      }
+      if (!validCreateAttemptID(input.createAttemptID) || !validLeaseID(input.leaseID)) {
+        return json(
+          {
+            error: "checkpoint_claim_invalid",
+            message: "checkpoint-backed provisioning requires an exact lease and create attempt",
+          },
+          { status: 400 },
+        );
+      }
+      if (completedReplay) return completedReplay;
+      const checkpointProvider = this.provider(
+        checkpoint.provider,
+        checkpoint.scope.region,
+        checkpoint.scope.project,
+      );
+      await checkpointProvider.validateCheckpointLeaseScope?.(checkpoint);
+      const {
+        checkpointID: _checkpointID,
+        checkpointUseClaim: _checkpointUseClaim,
+        ...leaseInput
+      } = input;
+      void _checkpointID;
+      void _checkpointUseClaim;
+      if (checkpoint.provider === "aws") {
+        leaseInput.awsRegion = checkpoint.scope.region;
+      } else if (checkpoint.provider === "azure") {
+        leaseInput.azureLocation = checkpoint.scope.region;
+      } else {
+        leaseInput.gcpZone = checkpoint.scope.region;
+        leaseInput.gcpProject = checkpoint.scope.project!;
+      }
+      await bindCheckpointUseProvisioning(
+        this.state.storage,
+        checkpointID,
+        token,
+        principal,
+        input.createAttemptID,
+        input.leaseID,
+      );
+      await this.scheduleCheckpointAlarm();
+      const leaseRequest = new Request(request.url, {
+        method: "POST",
+        headers: request.headers,
+        body: JSON.stringify(leaseInput),
+      });
+      const response = await this.createLease(
+        leaseRequest,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        checkpoint,
+      );
+      if (response.ok) {
+        await finishCheckpointUse(
+          this.state.storage,
+          checkpointID,
+          token,
+          principal,
+          true,
+          input.createAttemptID,
+        );
+        await this.scheduleCheckpointAlarm();
+      } else {
+        const lease = await this.getLease(input.leaseID);
+        const attempt = await this.getCreateAttempt(input.leaseID);
+        if (
+          (!lease && (!attempt || attempt.state === "canceled")) ||
+          (lease && !["provisioning", "active"].includes(lease.state))
+        ) {
+          await finishCheckpointUse(
+            this.state.storage,
+            checkpointID,
+            token,
+            principal,
+            false,
+            input.createAttemptID,
+          );
+          await this.scheduleCheckpointAlarm();
+        }
+      }
+      return response;
+    } catch (error) {
+      if (error instanceof CheckpointError) {
+        return json(
+          { error: error.code, message: coordinatorErrorMessage(this.env, error) },
+          { status: error.status },
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async deleteManagedCheckpoint(
+    checkpointID: string,
+    principal: CheckpointPrincipal | undefined,
+    reason: "manual" | "unused-expiry" | "create-recovery",
+  ): Promise<Response> {
+    const claimed = await claimCheckpointDeletion(
+      this.state.storage,
+      checkpointID,
+      principal,
+      reason,
+    );
+    if (claimed.checkpoint.state === "deleted") return json({ checkpointID, deleted: true });
+    await this.scheduleCheckpointAlarm();
+    const provider = this.provider(
+      claimed.checkpoint.provider,
+      claimed.checkpoint.scope.region,
+      claimed.checkpoint.scope.project,
+    );
+    try {
+      if (!provider.deleteCheckpointImage) {
+        throw new CheckpointError(
+          "checkpoint_delete_failed",
+          "provider does not support exact checkpoint deletion",
+        );
+      }
+      await provider.deleteCheckpointImage(claimed.checkpoint);
+      await markCheckpointProviderDeleted(this.state.storage, checkpointID, claimed.token);
+      await finalizeCheckpointDeletion(this.state.storage, checkpointID, claimed.token);
+      await this.scheduleCheckpointAlarm();
+      return json({ checkpointID, deleted: true });
+    } catch (error) {
+      const message = coordinatorErrorMessage(this.env, error);
+      const current = await this.state.storage.get<CoordinatorCheckpointRecord>(
+        checkpointKey(checkpointID),
+      );
+      if (current?.state === "deleting" && current.deleteClaim?.phase === "provider-deleted") {
+        await this.scheduleCheckpointAlarm();
+        return json(
+          {
+            error: "checkpoint_delete_failed",
+            message: "checkpoint provider deletion succeeded; coordinator finalization will retry",
+            checkpoint: publicCheckpointRecord(current),
+          },
+          { status: 503 },
+        );
+      }
+      const checkpoint = await recordCheckpointDeletionFailure(
+        this.state.storage,
+        checkpointID,
+        claimed.token,
+        message,
+      );
+      await this.scheduleCheckpointAlarm();
+      return json(
+        {
+          error: "checkpoint_delete_failed",
+          message: "checkpoint deletion failed; coordinator will retry",
+          checkpoint: publicCheckpointRecord(checkpoint),
+        },
+        { status: 503 },
+      );
+    }
+  }
+
+  private async maintainCheckpoints(): Promise<void> {
+    const due = await this.state.storage.list<CoordinatorCheckpointDueIndex>({
+      prefix: checkpointDuePrefix,
+      limit: 32,
+    });
+    const now = Date.now();
+    await Promise.all(
+      [...due]
+        .filter(([, marker]) => Date.parse(marker.nextSweepAt) <= now)
+        .map(async ([key, marker]) => await this.maintainCheckpointDueMarker(key, marker, now)),
+    );
+  }
+
+  private async maintainCheckpointDueMarker(
+    key: string,
+    marker: CoordinatorCheckpointDueIndex,
+    now: number,
+  ): Promise<void> {
+    let checkpoint = await repairCheckpointDueMarker(this.state.storage, key, marker);
+    if (!checkpoint) return;
+    if (checkpoint.state === "deleted") {
+      await pruneCheckpointTombstone(this.state.storage, checkpoint.id);
+      return;
+    }
+    if (checkpoint.state === "creating") {
+      const provider = this.provider(
+        checkpoint.provider,
+        checkpoint.scope.region,
+        checkpoint.scope.project,
+      );
+      try {
+        if (!provider.recoverCheckpointImage || !checkpoint.createClaim) {
+          throw new Error("provider cannot recover the exact checkpoint creation reservation");
+        }
+        const image = await provider.recoverCheckpointImage(checkpoint);
+        if (!image)
+          throw new Error("the exact checkpoint-owned provider resource is not visible yet");
+        await publishRecoveredCheckpoint(this.state.storage, checkpoint.id, image);
+      } catch (error) {
+        await recordCheckpointCreateRecoveryFailure(
+          this.state.storage,
+          checkpoint.id,
+          coordinatorErrorMessage(this.env, error),
+        );
+      }
+      return;
+    }
+    if (checkpoint.state === "ready") {
+      checkpoint = await expireCheckpointClaims(this.state.storage, checkpoint.id);
+      if (
+        checkpoint &&
+        checkpoint.retention.mode === "expire-unused" &&
+        checkpoint.pinCount === 0 &&
+        checkpoint.activeUseCount === 0 &&
+        Date.parse(checkpoint.lastUsedAt) + checkpoint.retention.unusedForSeconds * 1000 <= now
+      ) {
+        await recordCheckpointExpiryDue(this.state.storage, checkpoint.id);
+        await this.deleteManagedCheckpoint(checkpoint.id, undefined, "unused-expiry");
+      }
+      return;
+    }
+    if (checkpoint.state === "delete-pending" && Date.parse(checkpoint.retryAt ?? "") <= now) {
+      await this.deleteManagedCheckpoint(checkpoint.id, undefined, "manual");
+      return;
+    }
+    if (checkpoint.state === "deleting") {
+      const recovered = await recoverCheckpointDeletion(this.state.storage, checkpoint.id);
+      if (recovered.state === "delete-pending") {
+        await this.deleteManagedCheckpoint(recovered.id, undefined, "manual");
+      }
+    }
+  }
+
   private async marketplaceQuote(request: Request): Promise<Response> {
     const status = marketplaceStatus(this.env);
     if (!status.enabled) {
@@ -13783,6 +14613,58 @@ export class FleetCoordinator {
     const providerRegion = region || knownRegion;
     const providerForRegion =
       providerRegion === region ? imageProvider : this.provider(provider, providerRegion, project);
+    const providerMutation =
+      (method === "DELETE" && action === undefined) ||
+      (method === "POST" && (action === "promote" || action === "promote-catalog"));
+    let managedCheckpoint: CoordinatorCheckpointRecord | undefined;
+    if (providerMutation) {
+      managedCheckpoint = await findManagedCheckpointImage(
+        this.state.storage,
+        provider as CoordinatorCheckpointProvider,
+        {
+          id: decodedImageID,
+          ...(metadata?.resourceID ? { resourceID: metadata.resourceID } : {}),
+          ...(metadata?.kind ? { kind: metadata.kind } : kind ? { kind } : {}),
+          ...(metadata?.immutableID ? { immutableID: metadata.immutableID } : {}),
+          ...(metadata?.snapshots ? { snapshots: metadata.snapshots } : {}),
+        },
+      );
+      if (!managedCheckpoint && provider === "aws" && /^ami-[a-z0-9-]+$/i.test(decodedImageID)) {
+        const pending = await this.state.storage.list({
+          prefix: "checkpoint-intent:aws:",
+          limit: 1,
+        });
+        if (pending.size > 0) {
+          const observed = await providerForRegion.getImage(decodedImageID, kind);
+          managedCheckpoint = await findManagedCheckpointImage(this.state.storage, "aws", observed);
+        }
+      }
+      if (managedCheckpoint) {
+        const conflictingRegion =
+          region !== undefined &&
+          region.toLowerCase() !== managedCheckpoint.scope.region.toLowerCase();
+        const conflictingProject =
+          project !== undefined && project !== managedCheckpoint.scope.project;
+        if (conflictingRegion || conflictingProject) {
+          return json(
+            {
+              error: "checkpoint_source_mismatch",
+              message: "requested provider scope conflicts with durable checkpoint ownership",
+            },
+            { status: 409 },
+          );
+        }
+        if (managedCheckpoint.state === "creating" || managedCheckpoint.state === "failed") {
+          return json(
+            {
+              error: "checkpoint_pending",
+              message: "provider resource is reserved by a pending checkpoint creation",
+            },
+            { status: 409 },
+          );
+        }
+      }
+    }
     if (method === "GET" && action === undefined) {
       let image: ProviderImage;
       try {
@@ -13815,6 +14697,15 @@ export class FleetCoordinator {
       return result instanceof Response ? result : json(result);
     }
     if (method === "DELETE" && action === undefined) {
+      if (managedCheckpoint) {
+        return json(
+          {
+            error: "checkpoint_managed",
+            message: `image belongs to checkpoint ${managedCheckpoint.id}; delete the checkpoint instead`,
+          },
+          { status: 409 },
+        );
+      }
       const ownershipMetadata = providerForRegion.storedImageDeleteMetadata
         ? await providerForRegion.storedImageDeleteMetadata(decodedImageID)
         : metadata;
@@ -13836,7 +14727,21 @@ export class FleetCoordinator {
       await providerForRegion.deleteImage(decodedImageID, kind, metadata);
       return json({ imageID: decodedImageID, deleted: true });
     }
-    if (method === "DELETE" && action === "promote-catalog") {
+    if (method === "DELETE" && (action === "promote-catalog" || action === "promote")) {
+      if (action === "promote") {
+        if (!providerForRegion.retirePromotedImage) {
+          return json(
+            {
+              error: "unsupported_provider",
+              message: "image promotion retirement is supported for AWS and Azure",
+            },
+            { status: 400 },
+          );
+        }
+        const retired = await providerForRegion.retirePromotedImage(decodedImageID, region);
+        await this.scheduleAlarm();
+        return json({ imageID: decodedImageID, retired });
+      }
       const retirementRegion = region === undefined ? undefined : sanitizeAWSRegion(region);
       if (region !== undefined && !retirementRegion) {
         return json(
@@ -13854,6 +14759,7 @@ export class FleetCoordinator {
         );
       }
       const retired = await providerForRegion.retireCatalogImage(decodedImageID, retirementRegion);
+      await this.scheduleAlarm();
       return json({ imageID: decodedImageID, catalogOnly: true, retired });
     }
     if (method === "POST" && (action === "promote" || action === "promote-catalog")) {
@@ -13868,6 +14774,7 @@ export class FleetCoordinator {
         );
       }
       const result = await providerForRegion.promoteImage(decodedImageID, metadata, request, url);
+      await this.scheduleAlarm();
       return result instanceof Response ? result : json(result);
     }
     return json({ error: "not_found" }, { status: 404 });
@@ -14266,6 +15173,12 @@ export class FleetCoordinator {
     retainAlarm(azureCleanupAlarm);
     const awsIngressAlarm = await this.nextAWSIngressReconcileAlarmTime();
     retainAlarm(awsIngressAlarm);
+    const nextCheckpoint = await this.state.storage.list<CoordinatorCheckpointDueIndex>({
+      prefix: checkpointDuePrefix,
+      limit: 1,
+    });
+    const checkpointDeadline = [...nextCheckpoint.values()][0]?.nextSweepAt;
+    if (checkpointDeadline) retainAlarm(Math.max(now + 1, Date.parse(checkpointDeadline)));
     if ((await this.state.storage.get<string>(runPruneCursorKey)) !== undefined) {
       retainAlarm(now + 1000);
     }
@@ -19528,6 +20441,10 @@ function validImageName(value: string): boolean {
   return /^[A-Za-z0-9()[\]./_ -]{3,128}$/.test(value);
 }
 
+function boundedCheckpointString(value: unknown, max: number): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim().slice(0, max) : undefined;
+}
+
 function hasNativeLeaseSource(config: LeaseConfig): boolean {
   return Boolean(
     config.awsSnapshot || config.azureSnapshot || config.gcpMachineImage || config.gcpSnapshot,
@@ -19665,6 +20582,28 @@ function providerImageResourceName(provider: Provider, name: string, leaseID: st
   return provider === "gcp"
     ? truncated.replaceAll(/-+$/g, "")
     : truncated.replaceAll(/[-.]+$/g, "");
+}
+
+async function checkpointProviderResourceName(
+  provider: CoordinatorCheckpointProvider,
+  name: string,
+  checkpointID: string,
+  leaseID: string,
+): Promise<string> {
+  const suffix = `-${(await sha256Hex(checkpointID)).slice(0, 20)}`;
+  const maxLength = provider === "gcp" ? 63 : provider === "azure" ? 80 : 128;
+  const normalized = providerImageResourceName(provider, name, leaseID);
+  const prefix = normalized.slice(0, maxLength - suffix.length).replace(/[-.]+$/g, "");
+  return `${prefix || "checkpoint"}${suffix}`;
+}
+
+function checkpointProviderMutationDefinitivelyRefused(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "checkpointResourceMayExist" in error &&
+    error.checkpointResourceMayExist === false
+  );
 }
 
 function unsupportedProviderImageLifecycle(provider: Provider) {
@@ -22397,9 +23336,24 @@ interface CloudProvider {
     noReboot: boolean,
     strategy: "image" | "disk-snapshot",
   ): Promise<ProviderImage>;
+  checkpointScope?(lease: LeaseRecord): Promise<CoordinatorCheckpointScope>;
+  validateCheckpointLeaseScope?(checkpoint: CoordinatorCheckpointRecord): Promise<void>;
+  createCheckpointImage?(
+    lease: LeaseRecord,
+    name: string,
+    noReboot: boolean,
+    strategy: "image" | "disk-snapshot",
+    ownership: ProviderCheckpointOwnership,
+    scope: CoordinatorCheckpointScope,
+  ): Promise<ProviderImage>;
+  recoverCheckpointImage?(
+    checkpoint: CoordinatorCheckpointRecord,
+  ): Promise<ProviderImage | undefined>;
+  deleteCheckpointImage?(checkpoint: CoordinatorCheckpointRecord): Promise<void>;
   getImage(imageID: string, kind?: string): Promise<ProviderImage>;
   deleteImage(imageID: string, kind?: string, metadata?: ProviderImage): Promise<void>;
   retireCatalogImage?(imageID: string, region?: string): Promise<number>;
+  retirePromotedImage?(imageID: string, region?: string): Promise<number>;
   storedImageMetadata(imageID: string): Promise<ProviderImage | undefined>;
   storedImageDeleteMetadata?(imageID: string): Promise<ProviderImage | undefined>;
   decorateImage(image: ProviderImage, metadata?: Partial<ProviderImage>): ProviderImage;
@@ -22895,6 +23849,116 @@ export class AzureProvider implements CloudProvider {
     return enriched;
   }
 
+  async checkpointScope(lease: LeaseRecord): Promise<CoordinatorCheckpointScope> {
+    const scope = azureProviderScope(lease.providerScope);
+    const region = lease.region?.trim().toLowerCase();
+    if (
+      !scope ||
+      !region ||
+      this.client.providerScope().toLowerCase() !== lease.providerScope?.toLowerCase()
+    ) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "Azure source lease has no exact subscription, resource group, and location",
+      );
+    }
+    return { region, subscriptionID: scope.subscription, resourceGroup: scope.resourceGroup };
+  }
+
+  async validateCheckpointLeaseScope(checkpoint: CoordinatorCheckpointRecord): Promise<void> {
+    const expected = `/subscriptions/${checkpoint.scope.subscriptionID}/resourceGroups/${checkpoint.scope.resourceGroup}`;
+    if (this.client.providerScope().toLowerCase() !== expected.toLowerCase()) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "Azure checkpoint lease subscription or resource group does not match durable ownership",
+      );
+    }
+  }
+
+  async createCheckpointImage(
+    lease: LeaseRecord,
+    name: string,
+    _noReboot: boolean,
+    _strategy: "image" | "disk-snapshot",
+    ownership: ProviderCheckpointOwnership,
+    _scope: CoordinatorCheckpointScope,
+  ): Promise<ProviderImage> {
+    await this.client.createDiskSnapshot(lease.cloudID, name, ownership);
+    const image = await this.client.getImage(name, "azure-os-disk-snapshot");
+    const enriched: ProviderImage = {
+      ...image,
+      provider: "azure",
+      ...(image.region ? { region: image.region.toLowerCase() } : {}),
+      serverType: lease.serverType,
+    };
+    return enriched;
+  }
+
+  async recoverCheckpointImage(
+    checkpoint: CoordinatorCheckpointRecord,
+  ): Promise<ProviderImage | undefined> {
+    if (!checkpoint.createClaim) return undefined;
+    try {
+      const image = await this.client.getImage(
+        checkpoint.createClaim.resourceName,
+        "azure-os-disk-snapshot",
+      );
+      if (
+        image.checkpointOwnershipHash !== checkpoint.createClaim.tokenHash ||
+        image.checkpointSourceLeaseID !== checkpoint.leaseID
+      ) {
+        throw new CheckpointError(
+          "checkpoint_source_mismatch",
+          "existing Azure snapshot does not match the exact checkpoint ownership claim",
+        );
+      }
+      return image;
+    } catch (error) {
+      const expected = `/subscriptions/${checkpoint.scope.subscriptionID}/resourceGroups/${checkpoint.scope.resourceGroup}/providers/Microsoft.Compute/snapshots/${checkpoint.createClaim.resourceName}`;
+      if (azureSnapshotNotFound(error, expected)) return undefined;
+      throw error;
+    }
+  }
+
+  async deleteCheckpointImage(checkpoint: CoordinatorCheckpointRecord): Promise<void> {
+    const image = checkpoint.image;
+    const expectedScope = `/subscriptions/${checkpoint.scope.subscriptionID}/resourceGroups/${checkpoint.scope.resourceGroup}`;
+    if (!image || this.client.providerScope().toLowerCase() !== expectedScope.toLowerCase()) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "Azure checkpoint subscription or resource group does not match its durable ownership",
+      );
+    }
+    let current: ProviderImage | undefined;
+    try {
+      current = await this.client.getImage(image.id, image.kind);
+    } catch (error) {
+      if (!azureSnapshotNotFound(error, image.resourceID)) throw error;
+    }
+    if (current) {
+      if (
+        current.resourceID?.toLowerCase() !== image.resourceID.toLowerCase() ||
+        current.immutableID !== image.immutableID ||
+        current.region?.toLowerCase() !== checkpoint.scope.region.toLowerCase()
+      ) {
+        throw new CheckpointError(
+          "checkpoint_source_mismatch",
+          "Azure checkpoint snapshot immutable identity or location has changed",
+        );
+      }
+      await this.client.deleteImage(image.resourceID, image.kind);
+      try {
+        await this.client.getImage(image.id, image.kind);
+        throw new CheckpointError(
+          "checkpoint_delete_failed",
+          "Azure checkpoint snapshot remains present after deletion",
+        );
+      } catch (error) {
+        if (!azureSnapshotNotFound(error, image.resourceID)) throw error;
+      }
+    }
+  }
+
   getImage(imageID: string, kind?: string): Promise<ProviderImage> {
     return this.client.getImage(imageID, kind);
   }
@@ -23092,8 +24156,39 @@ export class AzureProvider implements CloudProvider {
       serverType,
       promotedAt: new Date().toISOString(),
     };
-    await this.storage.put(promotedAzureImageKey(promoted), promoted);
+    await imageCatalogTransaction(this.storage, async (transaction) => {
+      const key = promotedAzureImageKey(promoted);
+      const previous = await transaction.get<PromotedImageRecord>(key);
+      if (
+        previous &&
+        (previous.id !== promoted.id || previous.resourceID !== promoted.resourceID)
+      ) {
+        await unpinCheckpointPromotion(transaction, "azure", previous, key);
+      }
+      await transaction.put(key, promoted);
+      await pinCheckpointPromotion(transaction, "azure", promoted, key);
+    });
     return { image: promoted };
+  }
+
+  async retirePromotedImage(imageID: string, region?: string): Promise<number> {
+    if (!this.storage) throw new Error("Azure image catalog storage is unavailable");
+    return await imageCatalogTransaction(this.storage, async (transaction) => {
+      const records = await transaction.list<PromotedImageRecord>({
+        prefix: "image:azure:promoted:",
+      });
+      const matching = [...records].filter(
+        ([, image]) =>
+          (image.id === imageID || image.resourceID === imageID) &&
+          (!region || image.region?.toLowerCase() === region.toLowerCase()),
+      );
+      await matching.reduce(async (previous, [key, image]) => {
+        await previous;
+        await unpinCheckpointPromotion(transaction, "azure", image, key);
+        await transaction.delete(key);
+      }, Promise.resolve());
+      return matching.length;
+    });
   }
 
   async deleteSSHKey(): Promise<void> {
@@ -23267,6 +24362,131 @@ export class GCPProvider implements CloudProvider {
       await storeCreatedProviderImage(this.storage, "gcp", enriched);
     }
     return enriched;
+  }
+
+  async checkpointScope(lease: LeaseRecord): Promise<CoordinatorCheckpointScope> {
+    const project = lease.providerProject?.trim();
+    const region = lease.region?.trim();
+    if (!project || !region || this.client.project !== project || this.client.zone !== region) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "GCP source lease has no exact project and source zone",
+      );
+    }
+    return { region, project };
+  }
+
+  async validateCheckpointLeaseScope(checkpoint: CoordinatorCheckpointRecord): Promise<void> {
+    if (
+      this.client.project !== checkpoint.scope.project ||
+      this.client.zone !== checkpoint.scope.region
+    ) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "GCP checkpoint lease project or zone does not match durable ownership",
+      );
+    }
+  }
+
+  async createCheckpointImage(
+    lease: LeaseRecord,
+    name: string,
+    _noReboot: boolean,
+    strategy: "image" | "disk-snapshot",
+    ownership: ProviderCheckpointOwnership,
+    _scope: CoordinatorCheckpointScope,
+  ): Promise<ProviderImage> {
+    const created =
+      strategy === "image"
+        ? await this.client.createImage(lease.cloudID, name, ownership)
+        : await this.client.createDiskSnapshot(lease.cloudID, name, ownership);
+    const image = await this.client.getImage(created.id, created.kind);
+    const enriched: ProviderImage = {
+      ...image,
+      provider: "gcp",
+    };
+    return enriched;
+  }
+
+  async recoverCheckpointImage(
+    checkpoint: CoordinatorCheckpointRecord,
+  ): Promise<ProviderImage | undefined> {
+    if (!checkpoint.createClaim) return undefined;
+    const kind = checkpoint.strategy === "image" ? "gcp-machine-image" : "gcp-disk-snapshot";
+    try {
+      const image = await this.client.getImage(checkpoint.createClaim.resourceName, kind);
+      if (
+        image.checkpointOwnershipHash !== checkpoint.createClaim.tokenHash ||
+        image.checkpointSourceLeaseID !== checkpoint.leaseID
+      ) {
+        throw new CheckpointError(
+          "checkpoint_source_mismatch",
+          "existing GCP resource does not match the exact checkpoint ownership claim",
+        );
+      }
+      return image;
+    } catch (error) {
+      const missing =
+        kind === "gcp-machine-image"
+          ? gcpMachineImageNotFound(
+              error,
+              checkpoint.scope.project!,
+              checkpoint.createClaim.resourceName,
+            )
+          : gcpSnapshotNotFound(
+              error,
+              checkpoint.scope.project!,
+              checkpoint.createClaim.resourceName,
+            );
+      if (missing) return undefined;
+      throw error;
+    }
+  }
+
+  async deleteCheckpointImage(checkpoint: CoordinatorCheckpointRecord): Promise<void> {
+    const image = checkpoint.image;
+    if (
+      !image ||
+      this.client.project !== checkpoint.scope.project ||
+      this.client.zone !== checkpoint.scope.region
+    ) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "GCP checkpoint project or source zone does not match its durable ownership",
+      );
+    }
+    const missing = (error: unknown): boolean =>
+      image.kind === "gcp-machine-image"
+        ? gcpMachineImageNotFound(error, checkpoint.scope.project!, image.id)
+        : gcpSnapshotNotFound(error, checkpoint.scope.project!, image.id);
+    let current: ProviderImage | undefined;
+    try {
+      current = await this.client.getImage(image.id, image.kind);
+    } catch (error) {
+      if (!missing(error)) throw error;
+    }
+    if (current) {
+      if (
+        current.project !== checkpoint.scope.project ||
+        current.resourceID !== image.resourceID ||
+        current.immutableID !== image.immutableID
+      ) {
+        throw new CheckpointError(
+          "checkpoint_source_mismatch",
+          "GCP checkpoint resource numeric identity or project has changed",
+        );
+      }
+      await this.client.deleteImage(image.id, image.kind);
+      try {
+        await this.client.getImage(image.id, image.kind);
+        throw new CheckpointError(
+          "checkpoint_delete_failed",
+          "GCP checkpoint resource remains present after deletion",
+        );
+      } catch (error) {
+        if (!missing(error)) throw error;
+      }
+    }
   }
 
   getImage(imageID: string, kind?: string): Promise<ProviderImage> {
@@ -24201,6 +25421,257 @@ export class AWSProvider implements CloudProvider {
     return enriched;
   }
 
+  async checkpointScope(lease: LeaseRecord): Promise<CoordinatorCheckpointScope> {
+    const region = lease.region?.trim();
+    if (!region || region !== this.region) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "AWS source lease has no exact provider region",
+      );
+    }
+    const identity = await this.client.verifiedIdentity();
+    if (!/^\d{12}$/.test(identity.account) || identity.region !== region) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "AWS source lease account could not be verified",
+      );
+    }
+    return { region, accountID: identity.account };
+  }
+
+  async validateCheckpointLeaseScope(checkpoint: CoordinatorCheckpointRecord): Promise<void> {
+    const identity = await this.client.verifiedIdentity();
+    if (
+      identity.account !== checkpoint.scope.accountID ||
+      identity.region !== checkpoint.scope.region
+    ) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "AWS checkpoint lease account or region does not match durable ownership",
+      );
+    }
+  }
+
+  async createCheckpointImage(
+    lease: LeaseRecord,
+    name: string,
+    noReboot: boolean,
+    strategy: "image" | "disk-snapshot",
+    ownership: ProviderCheckpointOwnership,
+    scope: CoordinatorCheckpointScope,
+  ): Promise<ProviderImage> {
+    const created =
+      strategy === "image"
+        ? await this.client.createImage(lease.cloudID, name, noReboot, ownership)
+        : await this.client.createDiskSnapshot(lease.cloudID, name, ownership);
+    const image = await this.client.getImage(created.id);
+    if (image.kind === "aws-ami") {
+      const described = image;
+      if (
+        described.id !== created.id ||
+        described.accountID !== scope.accountID ||
+        described.checkpointOwnershipHash !== ownership.tokenHash ||
+        described.checkpointSourceLeaseID !== ownership.sourceLeaseID ||
+        !(described.snapshots ?? []).length
+      ) {
+        throw new CheckpointError(
+          "checkpoint_source_mismatch",
+          "AWS checkpoint AMI or its exact backing snapshots could not be verified",
+        );
+      }
+      await Promise.all(
+        described.snapshots!.map(async (snapshotID) => {
+          const snapshot = await this.client.getImage(snapshotID);
+          if (
+            snapshot.id !== snapshotID ||
+            snapshot.accountID !== scope.accountID ||
+            snapshot.checkpointOwnershipHash !== ownership.tokenHash ||
+            snapshot.checkpointSourceLeaseID !== ownership.sourceLeaseID
+          ) {
+            throw new CheckpointError(
+              "checkpoint_source_mismatch",
+              "AWS checkpoint AMI backing snapshot ownership could not be verified",
+            );
+          }
+        }),
+      );
+    }
+    if (
+      image.id !== created.id ||
+      image.accountID !== scope.accountID ||
+      image.checkpointOwnershipHash !== ownership.tokenHash ||
+      image.checkpointSourceLeaseID !== ownership.sourceLeaseID
+    ) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "AWS checkpoint provider ownership could not be verified from a fresh read",
+      );
+    }
+    const enriched = {
+      ...enrichAWSImage(image, lease),
+      immutableID: image.id,
+      accountID: scope.accountID!,
+    };
+    return enriched;
+  }
+
+  async recoverCheckpointImage(
+    checkpoint: CoordinatorCheckpointRecord,
+  ): Promise<ProviderImage | undefined> {
+    if (!checkpoint.createClaim) return undefined;
+    const identity = await this.client.verifiedIdentity();
+    if (
+      identity.account !== checkpoint.scope.accountID ||
+      identity.region !== checkpoint.scope.region
+    ) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "AWS checkpoint recovery account or region has changed",
+      );
+    }
+    const image = await this.client.findCheckpointImage(
+      checkpoint.createClaim.resourceName,
+      checkpoint.strategy,
+      {
+        checkpointID: checkpoint.id,
+        tokenHash: checkpoint.createClaim.tokenHash,
+        sourceLeaseID: checkpoint.leaseID,
+      },
+    );
+    if (!image) return undefined;
+    if (image.accountID && image.accountID !== identity.account) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "AWS checkpoint recovery returned an image from another account",
+      );
+    }
+    if (image.kind === "aws-ami") {
+      if (!(image.snapshots ?? []).length) {
+        throw new CheckpointError(
+          "checkpoint_source_mismatch",
+          "recovered AWS checkpoint AMI has no verified backing snapshots",
+        );
+      }
+      await Promise.all(
+        image.snapshots!.map(async (snapshotID) => {
+          const snapshot = await this.client.getImage(snapshotID);
+          if (
+            snapshot.accountID !== identity.account ||
+            snapshot.checkpointOwnershipHash !== checkpoint.createClaim!.tokenHash ||
+            snapshot.checkpointSourceLeaseID !== checkpoint.leaseID
+          ) {
+            throw new CheckpointError(
+              "checkpoint_source_mismatch",
+              "recovered AWS checkpoint backing snapshot ownership does not match",
+            );
+          }
+        }),
+      );
+    }
+    return { ...image, accountID: identity.account };
+  }
+
+  async deleteCheckpointImage(checkpoint: CoordinatorCheckpointRecord): Promise<void> {
+    const image = checkpoint.image;
+    if (!image)
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "AWS checkpoint resource identity is missing",
+      );
+    const identity = await this.client.verifiedIdentity();
+    if (
+      identity.account !== checkpoint.scope.accountID ||
+      identity.region !== checkpoint.scope.region
+    ) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "AWS checkpoint deletion account or region has changed",
+      );
+    }
+    let claim = await this.imageDeletionClaim(image.id);
+    if (!claim) {
+      let described: ProviderImage;
+      try {
+        described = await this.client.getImage(image.id);
+      } catch (error) {
+        const message = coordinatorErrorMessage(this.env, error);
+        if (
+          (image.kind === "aws-ami" && message.includes("InvalidAMIID.NotFound")) ||
+          (image.kind === "aws-ebs-snapshot" && message.includes("InvalidSnapshot.NotFound"))
+        ) {
+          if (image.kind === "aws-ami" && image.snapshotIDs.length === 0) {
+            throw new CheckpointError(
+              "checkpoint_delete_failed",
+              "AWS AMI is absent but its backing snapshot identities were never recorded",
+            );
+          }
+          described = {
+            id: image.id,
+            name: checkpoint.name,
+            state: "missing",
+            provider: "aws",
+            kind: image.kind,
+            region: checkpoint.scope.region,
+            resourceID: image.resourceID,
+            immutableID: image.immutableID,
+            accountID: checkpoint.scope.accountID,
+            snapshots: image.snapshotIDs,
+          };
+        } else {
+          throw error;
+        }
+      }
+      if (
+        described.id !== image.id ||
+        described.immutableID !== image.immutableID ||
+        (described.accountID && described.accountID !== checkpoint.scope.accountID)
+      ) {
+        throw new CheckpointError(
+          "checkpoint_source_mismatch",
+          "AWS checkpoint provider resource identity has changed",
+        );
+      }
+      claim = {
+        version: awsImageDeletionClaimVersion,
+        imageID: image.id,
+        metadata: awsImageDeletionMetadata(image.id, described, {
+          ...described,
+          snapshots: [...new Set([...image.snapshotIDs, ...(described.snapshots ?? [])])],
+        }),
+        snapshotIDs: [...new Set([...image.snapshotIDs, ...(described.snapshots ?? [])])],
+        phase: "claimed",
+        claimedAt: new Date().toISOString(),
+      };
+      await this.storage.put(awsImageDeletionClaimKey(image.id), claim);
+    }
+    if (claim.phase !== "provider-deleted") {
+      await this.client.deleteImage(image.id, claim.snapshotIDs);
+      const resourceIDs = [...new Set([image.id, ...claim.snapshotIDs])];
+      await Promise.all(
+        resourceIDs.map(async (resourceID) => {
+          try {
+            await this.client.getImage(resourceID);
+            throw new CheckpointError(
+              "checkpoint_delete_failed",
+              `AWS checkpoint resource ${resourceID} remains present after deletion`,
+            );
+          } catch (error) {
+            const message = coordinatorErrorMessage(this.env, error);
+            const expected = resourceID.startsWith("snap-")
+              ? "InvalidSnapshot.NotFound"
+              : "InvalidAMIID.NotFound";
+            if (!message.includes(expected)) throw error;
+          }
+        }),
+      );
+      await this.storage.put(awsImageDeletionClaimKey(image.id), {
+        ...claim,
+        phase: "provider-deleted",
+        providerDeletedAt: new Date().toISOString(),
+      } satisfies AWSImageDeletionClaim);
+    }
+  }
+
   getImage(imageID: string): Promise<ProviderImage> {
     return this.client.getImage(imageID);
   }
@@ -24263,6 +25734,19 @@ export class AWSProvider implements CloudProvider {
           transaction,
           imageID,
           ["image:aws:variant:"],
+          region ? { region } : {},
+        ),
+    );
+  }
+
+  retirePromotedImage(imageID: string, region?: string): Promise<number> {
+    return imageCatalogTransaction(
+      this.storage,
+      async (transaction) =>
+        await deletePromotedAWSImageRecords(
+          transaction,
+          imageID,
+          ["image:aws:catalog:", "image:aws:variant:", "image:aws:promoted"],
           region ? { region } : {},
         ),
     );
@@ -24656,22 +26140,30 @@ export class AWSProvider implements CloudProvider {
         await deletePromotedAWSImageRecords(transaction, imageID, ["image:aws:variant:"], {
           region: effectiveRegion,
         });
+        const publish = async (key: string): Promise<void> => {
+          const previous = await transaction.get<PromotedImageRecord>(key);
+          if (previous && (previous.id !== next.id || previous.region !== next.region)) {
+            await unpinCheckpointPromotion(transaction, "aws", previous, key);
+          }
+          await transaction.put(key, next);
+          await pinCheckpointPromotion(transaction, "aws", next, key);
+        };
         if (catalogOnly) {
-          await transaction.put(promotedAWSImageVariantKey(next), next);
+          await publish(promotedAWSImageVariantKey(next));
           return next;
         }
-        await transaction.put(promotedAWSImageCatalogKey(next), next);
+        await publish(promotedAWSImageCatalogKey(next));
         if (target === "linux" && next.os) {
-          await transaction.put(promotedAWSLinuxOSImageKey(next), next);
+          await publish(promotedAWSLinuxOSImageKey(next));
         }
         if (
           target === "linux" &&
           (!next.os || next.os === "ubuntu:24.04") &&
           legacyPromotedAWSImageCompatible(next)
         ) {
-          await transaction.put(legacyPromotedAWSImageKey(), next);
+          await publish(legacyPromotedAWSImageKey());
         }
-        await transaction.put(promotedAWSImageKey(next), next);
+        await publish(promotedAWSImageKey(next));
         return next;
       });
       return { image: promoted };
@@ -24879,16 +26371,18 @@ async function deletePromotedAWSImageRecords(
   const catalogs = await Promise.all(
     prefixes.map(async (prefix) => await storage.list<PromotedImageRecord>({ prefix })),
   );
-  const keys = catalogs.flatMap((catalog) =>
-    [...catalog.entries()]
-      .filter(
-        ([, image]) =>
-          image.id === imageID && (options.region === undefined || image.region === options.region),
-      )
-      .map(([key]) => key),
+  const entries = catalogs.flatMap((catalog) =>
+    [...catalog.entries()].filter(
+      ([, image]) =>
+        image.id === imageID && (options.region === undefined || image.region === options.region),
+    ),
   );
-  await Promise.all(keys.map(async (key) => await storage.delete(key)));
-  return keys.length;
+  await entries.reduce(async (pending, [key, image]) => {
+    await pending;
+    await unpinCheckpointPromotion(storage, "aws", image, key);
+    await storage.delete(key);
+  }, Promise.resolve());
+  return entries.length;
 }
 
 async function imageCatalogTransaction<T>(

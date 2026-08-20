@@ -32,6 +32,14 @@ fresh context so cleanup survives cancellation. A shard that fails to
 provision does not orphan its siblings; the others run to completion and
 release normally. Pass `--keep` to retain all forked leases instead.
 
+For a coordinator-managed brokered native checkpoint, each shard acquires its
+own short-lived, generation-bound use claim before provisioning. Claims renew
+while provider readiness is pending, complete independently after successful
+lease creation, and abort on cancellation or failure. Active claims block
+checkpoint expiry/deletion; only successful completion advances its
+coordinator-owned last-use time. Shards can hydrate the checkpoint directly
+from the coordinator if the local metadata cache is absent.
+
 ## Streaming
 
 All shards stream live. Every line is prefixed with a stable shard marker so
@@ -94,6 +102,8 @@ verdict; the canceled siblings are tallied separately.
 --quiet                  Suppress shard output streams; keep per-shard status lines.
 --json                   Print the merged verdict as JSON.
 --dry-run                Show the shard plan without provisioning.
+--admin                  Use the configured coordinator admin credential for
+                         checkpoint inventory, claims, and every forked lease.
 --fail-on-test-failures  Exit non-zero when the merged JUnit results contain
                          failures or errors.
 ```

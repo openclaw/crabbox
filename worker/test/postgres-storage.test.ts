@@ -2,6 +2,9 @@ import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 import { describe, expect, it, vi } from "vitest";
 
 import { PostgresCoordinatorStorage } from "../node/postgres-storage";
+import { acquireCheckpointUse, checkpointKey } from "../src/checkpoints";
+import { orgKeyForLabel } from "../src/org-identity";
+import type { CoordinatorCheckpointRecord } from "../src/types";
 
 describe("PostgresCoordinatorStorage", () => {
   it("initializes its schema and compatibility table", async () => {
@@ -178,7 +181,7 @@ describe("PostgresCoordinatorStorage", () => {
     expect(clients[1]?.release).toHaveBeenCalledWith();
   });
 
-  it("stops after three serialization failures and rethrows the database error", async () => {
+  it("stops after twelve bounded serialization failures and rethrows the database error", async () => {
     const { pool, clients, connect } = fakeRetryTransactionalPool();
     const storage = new PostgresCoordinatorStorage("postgres://unused", pool);
     const serializationError = postgresError("40001", "serialization failed");
@@ -191,9 +194,9 @@ describe("PostgresCoordinatorStorage", () => {
       }),
     ).rejects.toBe(serializationError);
 
-    expect(callbackInvocations).toBe(3);
-    expect(connect).toHaveBeenCalledTimes(3);
-    expect(clients).toHaveLength(3);
+    expect(callbackInvocations).toBe(12);
+    expect(connect).toHaveBeenCalledTimes(12);
+    expect(clients).toHaveLength(12);
     for (const client of clients) {
       expect(client.query.mock.calls.map(([sql]) => String(sql).trim())).toEqual([
         "begin isolation level serializable",
@@ -201,6 +204,77 @@ describe("PostgresCoordinatorStorage", () => {
       ]);
       expect(client.release).toHaveBeenCalledWith();
     }
+  });
+
+  it("retries parallel checkpoint-style record contention without losing any claim", async () => {
+    const { pool } = fakeRetryTransactionalPool();
+    const storage = new PostgresCoordinatorStorage("postgres://unused", pool);
+    let activeUses = 0;
+    const fanout = 12;
+    await Promise.all(
+      Array.from({ length: fanout }, async () =>
+        storage.transaction(async () => {
+          const observed = activeUses;
+          await new Promise<void>((resolve) => setTimeout(resolve, 1));
+          if (observed !== activeUses) {
+            throw postgresError("40001", "checkpoint claim serialization conflict");
+          }
+          activeUses = observed + 1;
+        }),
+      ),
+    );
+    expect(activeUses).toBe(fanout);
+  });
+
+  it("preserves every concurrent checkpoint shard use claim across PostgreSQL serialization", async () => {
+    const pool = fakeContendedCheckpointPool();
+    const storage = new PostgresCoordinatorStorage("postgres://unused", pool);
+    const id = "chk_postgres_fanout";
+    const now = new Date().toISOString();
+    const org = orgKeyForLabel("example-org");
+    await storage.put(checkpointKey(id), {
+      version: 1,
+      id,
+      owner: "alice@example.com",
+      org,
+      leaseID: "cbx_000000000001",
+      provider: "aws",
+      scope: { region: "eu-west-1", accountID: "123456789012" },
+      name: "parallel-checkpoint",
+      strategy: "disk-snapshot",
+      noReboot: true,
+      image: {
+        id: "snap-owned",
+        resourceID: "snap-owned",
+        kind: "aws-ebs-snapshot",
+        immutableID: "snap-owned",
+        snapshotIDs: ["snap-owned"],
+        state: "available",
+      },
+      state: "ready",
+      retention: { mode: "manual" },
+      generation: 1,
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+      lastUsedAt: now,
+      attempts: 0,
+      pinCount: 0,
+      activeUseCount: 0,
+      eventSequence: 0,
+      target: "linux",
+    } satisfies CoordinatorCheckpointRecord);
+    const claims = await Promise.all(
+      Array.from({ length: 12 }, async () =>
+        acquireCheckpointUse(storage, id, { owner: "alice@example.com", org }),
+      ),
+    );
+    expect(new Set(claims.map((claim) => claim.token)).size).toBe(12);
+    expect(await storage.get<CoordinatorCheckpointRecord>(checkpointKey(id))).toMatchObject({
+      activeUseCount: 12,
+      eventSequence: 12,
+    });
+    expect(await storage.list({ prefix: `checkpoint-use:${id}:` })).toHaveLength(12);
   });
 
   it("preserves transaction and rollback failures and evicts the uncertain client", async () => {
@@ -276,6 +350,70 @@ function fakeRetryTransactionalPool() {
   const end = vi.fn<() => Promise<void>>(async () => undefined);
   const pool = { query, connect, end } as unknown as Pool & { query: typeof query };
   return { pool, clients, connect };
+}
+
+function fakeContendedCheckpointPool(): Pool {
+  let committed = new Map<string, string>();
+  let revision = 0;
+  const execute = (
+    values: Map<string, string>,
+    text: string,
+    parameters: unknown[] = [],
+  ): QueryResult<QueryResultRow> => {
+    const sql = text.trim().toLowerCase();
+    if (sql.startsWith("insert")) {
+      values.set(String(parameters[0]), String(parameters[2]));
+      return queryResult([]);
+    }
+    if (sql.startsWith("delete")) {
+      values.delete(String(parameters[0]));
+      return queryResult([]);
+    }
+    if (sql.includes("where key like")) {
+      const prefix = String(parameters[0])
+        .slice(0, -1)
+        .replaceAll(/\\([\\%_])/g, "$1");
+      return queryResult(
+        [...values]
+          .filter(([key]) => key.startsWith(prefix))
+          .toSorted(([left], [right]) => left.localeCompare(right))
+          .map(([key, encoded_value]) => ({ key, encoded_value })),
+      );
+    }
+    const encoded_value = values.get(String(parameters[0]));
+    return queryResult(encoded_value === undefined ? [] : [{ encoded_value }]);
+  };
+  const query = vi.fn<
+    (text: string, parameters?: unknown[]) => Promise<QueryResult<QueryResultRow>>
+  >(async (text, parameters) => {
+    const result = execute(committed, text, parameters);
+    if (/^\s*(insert|delete)/i.test(text)) revision++;
+    return result;
+  });
+  const connect = vi.fn<() => Promise<PoolClient>>(async () => {
+    let snapshot = new Map<string, string>();
+    let startedAt = 0;
+    const clientQuery = vi.fn<
+      (text: string, parameters?: unknown[]) => Promise<QueryResult<QueryResultRow>>
+    >(async (text, parameters) => {
+      const sql = text.trim().toLowerCase();
+      if (sql.startsWith("begin")) {
+        snapshot = new Map(committed);
+        startedAt = revision;
+        return queryResult([]);
+      }
+      if (sql === "rollback") return queryResult([]);
+      if (sql === "commit") {
+        if (revision !== startedAt) throw postgresError("40001", "checkpoint claim contention");
+        committed = snapshot;
+        revision++;
+        return queryResult([]);
+      }
+      return execute(snapshot, text, parameters);
+    });
+    return { query: clientQuery, release: vi.fn<() => void>() } as unknown as PoolClient;
+  });
+  return { query, connect, end: vi.fn<() => Promise<void>>() } as unknown as Pool;
 }
 
 function transactionClientQuery() {

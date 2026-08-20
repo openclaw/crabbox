@@ -229,6 +229,16 @@ AWS supports provider-native checkpoints in addition to workspace archives:
 - Linux disk-snapshot strategy → EBS snapshot (`aws-ebs-snapshot`).
 - Native Windows targets do not support native checkpoints.
 
+New brokered native checkpoints are coordinator-owned and manually retained by
+default. Opt into inactivity expiry with
+`checkpoint create --expire-unused-after 7d` or `checkpoint policy`. Ownership
+binds the exact AWS account, region, AMI/EBS snapshot identity, and source
+lease. AMI deletion durably retains every owned backing snapshot ID before
+deregistration and is complete only after the exact AMI and all backing
+snapshots are gone. Promoted defaults, scoped catalog roles, and catalog-only
+variants pin managed AMIs against expiry/deletion. Direct AWS checkpoints and
+historical images remain local/operator-managed.
+
 In brokered mode you can promote and warm AMIs:
 
 - `crabbox image promote` promotes a brokered AMI for a target/region.

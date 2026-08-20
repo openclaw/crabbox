@@ -2,6 +2,10 @@
 
 ## 0.46.1 - Unreleased
 
+### Added
+
+- Added coordinator-owned brokered native checkpoints with opt-in unused-checkpoint expiry and promotion-safe cleanup.
+
 ### Fixed
 
 - Fenced Linode heartbeats and Tailscale metadata updates with exact account-, scope-, and instance-bound claims, preserving legacy instance claims, idle-timeout intent, and safe release continuity.

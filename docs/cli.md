@@ -140,7 +140,7 @@ See [cache](commands/cache.md).
 ### Checkpoints, capsules, images, Actions
 
 ```text
-crabbox checkpoint create|list|inspect|restore|fork|delete|prune
+crabbox checkpoint create|list|inspect|policy|restore|fork|delete|prune
 crabbox capsule from-actions|replay|inspect|promote
 crabbox image create|promote|fsr-status|delete
 crabbox actions hydrate|register|dispatch
@@ -148,6 +148,10 @@ crabbox actions hydrate|register|dispatch
 
 See [checkpoint](commands/checkpoint.md), [capsule](commands/capsule.md),
 [image](commands/image.md), [actions](commands/actions.md).
+
+Brokered native checkpoints support `checkpoint create --expire-unused-after
+<duration>`, `checkpoint policy <id> --manual|--expire-unused-after <duration>`,
+and `checkpoint list --local-only` for explicit offline inspection.
 
 ### Pond (peer discovery / SSH-mesh)
 

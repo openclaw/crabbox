@@ -39,6 +39,33 @@ afterEach(() => {
 });
 
 describe("aws provider", () => {
+  it("tags every checkpoint AMI backing snapshot with its exact ownership claim", async () => {
+    let submitted: URLSearchParams | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        submitted = new URLSearchParams(await request.clone().text());
+        return ec2XMLResponse(
+          "<CreateImageResponse><imageId>ami-owned</imageId></CreateImageResponse>",
+        );
+      }),
+    );
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+      "eu-west-1",
+    );
+    await client.createImage("i-owned", "checkpoint-image", true, {
+      checkpointID: "chk_owned_snapshots",
+      tokenHash: "a".repeat(64),
+      sourceLeaseID: "cbx_abcdef123456",
+    });
+    expect(submitted?.get("TagSpecification.2.ResourceType")).toBe("snapshot");
+    expect(submitted?.get("TagSpecification.2.Tag.3.Value")).toBe("chk_owned_snapshots");
+    expect(submitted?.get("TagSpecification.2.Tag.4.Value")).toBe("a".repeat(64));
+    expect(submitted?.get("TagSpecification.2.Tag.5.Value")).toBe("cbx_abcdef123456");
+  });
+
   it("uses the launched fallback AMI for provider image labels", () => {
     const config = leaseConfig({
       provider: "aws",

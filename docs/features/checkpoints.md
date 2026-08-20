@@ -16,6 +16,18 @@ Read when:
 change the *default* base image for all future leases on a provider, use
 `crabbox image promote` instead (see [prebaked images](prebaked-images.md)).
 
+Coordinator-managed AWS, Azure, and GCP checkpoints reserve exact provider
+ownership before cloud mutation. A failed or ambiguous creation remains visible
+in inventory alongside healthy checkpoints; recovery is bounded, and a terminal
+failed reservation can be canceled only after exact provider verification.
+Each fork binds one claim to one lease attempt until provisioning completes or
+verified cancellation proves it is safe to release; claim expiry cannot open a
+deletion race while provisioning is still active. Coordinator maintenance
+reconciles interrupted attempts against the exact durable lease and creation
+attempt, completing recovered successful forks and releasing claims only after
+terminal failure or provider cleanup is confirmed. A caller cannot fabricate
+last-use activity by completing an unbound claim.
+
 ## Two kinds
 
 Each checkpoint has a `kind`. Crabbox picks one automatically (`--mode auto`,
@@ -154,14 +166,15 @@ temporary credentials.
 build outputs, caches, and generated files. Crabbox excludes `.crabbox/env` and
 `.crabbox/scripts` but does not scan arbitrary files for credentials.
 
-**Local metadata is authoritative.** Every checkpoint stores metadata locally
-under the Crabbox state directory: `$XDG_STATE_HOME/crabbox/checkpoints/` when
-`XDG_STATE_HOME` is set, otherwise `<user-config>/crabbox/state/checkpoints/`
-(for example `~/Library/Application Support/crabbox/state/checkpoints/` on
-macOS). Each entry holds a `checkpoint.json` record plus, for archives, a
-`workspace.tar.gz`. Losing the local record means you can no longer fork or
-delete by checkpoint ID; deleting the provider resource leaves the local record
-unable to fork.
+**Ownership depends on how the checkpoint was created.** Newly created brokered
+native AWS, Azure, and GCP checkpoints have authoritative, owner/org-scoped
+coordinator records; local `checkpoint.json` files are recoverable compatibility
+caches. Losing that cache does not prevent listing, inspection, policy changes,
+forks, sharding, or deletion. Direct-provider, archive, recipe, and historical
+checkpoints remain authoritative local records under
+`$XDG_STATE_HOME/crabbox/checkpoints/` or
+`<user-config>/crabbox/state/checkpoints/`. Archives also require their local
+`workspace.tar.gz`; losing local/operator-managed metadata still loses access.
 
 ## Lifecycle and expiry
 
@@ -172,20 +185,28 @@ consumption attempts do not count as use. For records written by older Crabbox
 versions without `lastUsedAt`, reads treat `createdAt` as the last-use time.
 This fallback does not eagerly rewrite or migrate the record.
 
-Crabbox does not run an automatic checkpoint reaper yet. Use `checkpoint prune`
-manually or schedule it in the environment that owns the local checkpoint
-records. Native provider snapshots and images can keep incurring provider
-storage charges even when no lease uses them, while archive checkpoints consume
-disk in the local state directory. Choose an unused interval that reflects the
-cost of rebuilding the checkpoint and preview it with `--dry-run` before making
-the scheduled job destructive.
+Managed brokered native checkpoints retain their provider resources indefinitely
+by default. Opt into coordinator-owned unused expiry per checkpoint with
+`checkpoint create --expire-unused-after 7d` or
+`checkpoint policy <id> --expire-unused-after 7d`; restore indefinite retention
+with `checkpoint policy <id> --manual`. Independent, renewable use claims fence
+every fork/shard, and only a completed fork advances `lastUsedAt`. Durable
+promotion pins protect AWS and Azure catalog/default images until their exact
+catalog entries are retired or replaced. Provider failures retain ownership,
+redacted retry diagnostics, and the exact resource identity for safe recovery.
+
+Direct, archive, recipe, and all preexisting checkpoints never enter this
+coordinator reaper. Use `checkpoint prune` manually or schedule it in the
+environment that owns those local records. Native provider artifacts can keep
+incurring storage charges while archive checkpoints consume local disk.
 
 ## Commands
 
 ```
-crabbox checkpoint create  --id <lease> [--name <name>] [--mode auto|native|archive] [--strategy auto|disk-snapshot|image]
-crabbox checkpoint list    [--json] [--verify]
+crabbox checkpoint create  --id <lease> [--name <name>] [--mode auto|native|archive] [--strategy auto|disk-snapshot|image] [--expire-unused-after 7d]
+crabbox checkpoint list    [--json] [--verify] [--local-only]
 crabbox checkpoint inspect <checkpoint-id> [--json] [--verify]
+crabbox checkpoint policy  <checkpoint-id> --manual|--expire-unused-after <duration>
 crabbox checkpoint restore <checkpoint-id> --id <lease> [--clear=false]
 crabbox checkpoint fork    <checkpoint-id> [--class <class>] [--keep] [--count <n>]
 crabbox checkpoint delete  <checkpoint-id> [--local-only]
@@ -324,10 +345,10 @@ CRABBOX_CONFIG=/home/alice/.config/crabbox/config.yaml
 15 3 * * * crabbox checkpoint prune --unused-for 30d --kind native >> /home/alice/.local/state/crabbox/checkpoint-prune.log 2>&1
 ```
 
-The scheduler invokes the CLI; Crabbox itself does not run an automatic
-checkpoint reaper yet. The scheduled environment must point at the same state
-directory and config as the checkpoint owner and provide whatever provider
-credentials or local runtime access deletion requires.
+This scheduled CLI recipe is for legacy/direct/operator-managed checkpoints.
+Opted-in brokered native checkpoints are instead reaped by their coordinator;
+they do not require an operator machine, local state directory, provider
+credentials, or a separate cron job.
 
 ## When to use which
 

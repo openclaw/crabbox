@@ -5,11 +5,15 @@ fresh lease later. A checkpoint turns expensive one-time setup — installed
 dependencies, warmed caches, generated fixtures, a paused bug — into something
 you can reproduce on demand without repeating the work.
 
-Each checkpoint has an ID of the form `chk_<hex>` and is recorded locally under
-the Crabbox state directory (`$XDG_STATE_HOME/crabbox/checkpoints`, or
-`<user-config-dir>/crabbox/state/checkpoints` when `XDG_STATE_HOME` is unset).
+Each checkpoint has an ID of the form `chk_<hex>`. Newly created brokered native
+AWS, Azure, and GCP checkpoints are owned durably by the coordinator; their
+local records are recoverable caches. Direct-provider, archive, recipe, and
+historical checkpoints remain owned by local records under
+`$XDG_STATE_HOME/crabbox/checkpoints`, or
+`<user-config-dir>/crabbox/state/checkpoints` when `XDG_STATE_HOME` is unset.
 
-Subcommands: `create`, `list`, `inspect`, `restore`, `fork`, `delete`, `prune`.
+Subcommands: `create`, `list`, `inspect`, `policy`, `restore`, `fork`, `delete`,
+`prune`.
 
 ## Two checkpoint kinds
 
@@ -65,6 +69,9 @@ crabbox checkpoint create --id swift-crab --name after-install
 # Force a native checkpoint (fails if the lease does not support one)
 crabbox checkpoint create --id swift-crab --mode native --wait
 
+# Automatically delete a brokered native checkpoint after seven unused days
+crabbox checkpoint create --id swift-crab --expire-unused-after 7d
+
 # Force a portable workspace archive
 crabbox checkpoint create --id swift-crab --mode archive
 
@@ -107,6 +114,9 @@ crabbox checkpoint create --id swift-crab --workdir /work/cbx_123/my-app
 --workdir <path>            Remote workdir to archive (default: the lease's repo
                             workdir).
 --recipe-only               Record metadata only; create no artifact.
+--expire-unused-after <duration>
+                            Opt into coordinator-managed unused expiry; only
+                            supported for brokered native AWS/Azure/GCP checkpoints.
 --reclaim                   Claim this lease for the current repo.
 ```
 
@@ -114,6 +124,9 @@ crabbox checkpoint create --id swift-crab --workdir /work/cbx_123/my-app
 `ami`/`image` (image), `snapshot`/`disk`/`disk-snapshot` (disk snapshot),
 `workspace`/`workspace-archive` (archive), and `recipe`. `--strategy auto`
 resolves to a disk snapshot where the provider supports one.
+Retention defaults to manual. Explicit expiry rejects direct, archive, recipe,
+and unsupported checkpoints before any resource mutation; an older coordinator
+returns an upgrade diagnostic instead of silently creating an unmanaged image.
 
 **Strategy details**
 
@@ -155,20 +168,36 @@ Before a native snapshot, Crabbox cleans the source: on Linux it runs
 crabbox checkpoint list
 crabbox checkpoint list --json
 crabbox checkpoint list --verify
+crabbox checkpoint list --local-only
 
 crabbox checkpoint inspect chk_abc123
 crabbox checkpoint inspect chk_abc123 --json
 crabbox checkpoint inspect chk_abc123 --verify
 ```
 
-`list` and `inspect` read the local checkpoint records. Each record holds the
+`list` merges owner-scoped coordinator checkpoints with local records and
+deduplicates checkpoint IDs; `--json` remains a bare JSON array. Use
+`list --local-only` for an explicitly offline local-cache view. `inspect`,
+`fork`, `shard`, `policy`, and `delete` recover a managed checkpoint from the
+coordinator when its local cache is missing, corrupt, or unwritable; cache
+repair is best effort and never prevents confirmed remote deletion. An
+operator-owned local checkpoint with the same identifier is an ownership
+collision and is never overwritten. Add `--admin` to managed checkpoint
+operations when an explicitly configured administrator needs to inspect or
+operate on another owner's checkpoint; mixed user/admin configuration otherwise
+keeps the ordinary owner credential. Each record holds the
 checkpoint id/name/kind, source lease/provider/region, repo name and git head,
 workdir, creation and last-use times, and — for native checkpoints — the
 provider resource id; for archives, the tarball path and size.
 
-> A native checkpoint needs **both** halves to fork: the local metadata and the
-> provider resource. An archive checkpoint needs the local metadata and the
-> tarball. Lose either side and the checkpoint is unusable.
+Managed cache ownership includes the coordinator's complete normalized base
+URL, including its deployment path: coordinators served from `/team-a` and
+`/team-b` on the same host remain separate authorities.
+
+> A managed brokered native checkpoint needs its coordinator record and exact
+> provider resource; its local metadata can be recovered. Legacy/direct native
+> checkpoints still require both local metadata and their provider resource.
+> Archive checkpoints require the local metadata and tarball.
 
 `--verify` audits the other half. For archives it confirms the local tarball
 still exists; for native checkpoints it asks the provider (directly for AWS and
@@ -190,6 +219,23 @@ crabbox checkpoint list --provider parallels --parallels-template tahoe-latest -
 Filters: `--tree` (default true; use `--tree=false` for flat output),
 `--forkable-only`, `--current`, and `--name <substring>`. Passing
 `--parallels-template` implies `provider=parallels`.
+
+## policy
+
+Set retention for a coordinator-managed brokered native checkpoint:
+
+```sh
+crabbox checkpoint policy chk_abc123 --expire-unused-after 7d
+crabbox checkpoint policy chk_abc123 --manual
+crabbox checkpoint policy chk_abc123 --manual --json
+```
+
+Exactly one policy flag is required. Expiry starts from the last successfully
+completed fork; failed, canceled, or still-provisioning forks never advance
+that timestamp. Active forks and durable image-promotion pins block deletion.
+Direct, archive, recipe, legacy, and unsupported coordinator checkpoints reject
+policy changes. Local `checkpoint prune` never deletes coordinator-managed
+checkpoints; their lifecycle belongs exclusively to coordinator retention.
 
 ## restore
 
@@ -264,6 +310,7 @@ crabbox checkpoint fork --provider parallels --parallels-template ubuntu-fast --
 --workdir <path>  Remote workdir for the forked lease.
 --dry-run         Print the fork target without acquiring a lease.
 --reclaim         Claim the new lease for the current repo.
+--admin           Use the explicitly configured coordinator admin credential.
 ```
 
 **What happens**
@@ -271,6 +318,12 @@ crabbox checkpoint fork --provider parallels --parallels-template ubuntu-fast --
 - *Native:* acquire a new lease from the checkpoint snapshot/image, wait for
   boot, relocate the workdir from the old lease path to the new one, then print
   the lease id and slug.
+- *Managed native:* each fork first acquires its own generation-bound use
+  claim and renews it during provisioning/readiness. The coordinator binds it
+  durably to one lease attempt, completes it only after irreversible lease
+  creation, and aborts it only after verified failure or cancellation. External
+  completion/abort and claim expiry cannot release an in-flight provisioning
+  fence. Completion alone advances the coordinator-owned last-use timestamp.
 - *Azure Windows native:* preserve the snapshotted filesystem in place and
   print `workdir=-`; these desktop leases do not use the POSIX workdir
   relocation flow.
@@ -317,6 +370,12 @@ For native checkpoints, delete removes the provider resource first (AMIs are
 deregistered along with their backing EBS snapshots; disk snapshots are
 deleted), then removes the local record. Archive checkpoints just lose their
 tarball and record.
+
+Coordinator-managed checkpoints delete through the checkpoint endpoint, never
+the generic image endpoint. Active use claims, promoted-image catalog pins,
+pending deletion, provider errors, and ambiguous deletion retain coordinator
+ownership and the local recovery cache. Only confirmed provider deletion and
+durable finalization permit local-cache removal.
 
 Machine0 whole-image deletion is additionally fenced against later versions.
 Even when the checkpoint originally created the image name, Crabbox refuses
@@ -368,10 +427,11 @@ present, a checkpoint must satisfy both. Durations accept Go syntax such as
 the same provider-first deletion path as `checkpoint delete`, so a provider
 failure keeps the local record. Preview the exact match set with `--dry-run`.
 
-Crabbox does not run an automatic checkpoint reaper. Any scheduler must invoke
-this CLI as the user and in the environment that owns the local checkpoint
-records. See [Checkpoints](../features/checkpoints.md#lifecycle-and-expiry) for
-the detailed lifecycle behavior and scheduled-job recipe.
+The coordinator automatically expires only managed brokered native checkpoints
+explicitly opted in through `--expire-unused-after` or `checkpoint policy`.
+Direct, archive, recipe, and legacy checkpoints remain manual/operator-managed;
+scheduled cleanup for those records must invoke this CLI as their owning user.
+See [Checkpoints](../features/checkpoints.md#lifecycle-and-expiry).
 
 > Provider snapshots and images keep accruing storage cost while they exist.
 > Prune stale checkpoints periodically, and name checkpoints after the scenario

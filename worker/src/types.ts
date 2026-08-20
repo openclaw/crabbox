@@ -255,6 +255,8 @@ export interface LeaseRequest {
   sshPublicKey?: string;
   pond?: string;
   exposedPorts?: string[];
+  checkpointID?: string;
+  checkpointUseClaim?: string;
 }
 
 export interface ImageCapabilities {
@@ -400,6 +402,7 @@ export interface LeaseRecord {
   fixedCreateIntentHash?: string;
   createAttemptID?: string;
   createAttemptGeneration?: string;
+  checkpointID?: string;
   workspaceID?: string;
   provider: string;
   lifecycle?: LeaseLifecycle;
@@ -707,9 +710,160 @@ export interface ProviderImage {
   architecture?: string;
   project?: string;
   resourceID?: string;
+  immutableID?: string;
+  accountID?: string;
+  checkpointOwnershipHash?: string;
+  checkpointSourceLeaseID?: string;
   snapshots?: string[];
   fastSnapshotRestores?: ProviderFastSnapshotRestore[];
   capabilities?: ImageCapabilities;
+}
+
+export interface ProviderCheckpointOwnership {
+  checkpointID: string;
+  tokenHash: string;
+  sourceLeaseID: string;
+}
+
+export type CoordinatorCheckpointProvider = "aws" | "azure" | "gcp";
+
+export type CoordinatorCheckpointRetention =
+  | { mode: "manual" }
+  | { mode: "expire-unused"; unusedForSeconds: number };
+
+export interface CoordinatorCheckpointScope {
+  region: string;
+  accountID?: string;
+  subscriptionID?: string;
+  resourceGroup?: string;
+  project?: string;
+}
+
+export interface CoordinatorCheckpointImage {
+  id: string;
+  resourceID: string;
+  kind: string;
+  immutableID: string;
+  snapshotIDs: string[];
+  state: string;
+  architecture?: string;
+}
+
+export interface CoordinatorCheckpointCreateClaim {
+  tokenHash: string;
+  resourceName: string;
+  expiresAt: string;
+  coordinatorGeneration: string;
+  definitiveRefusal?: boolean;
+}
+
+export interface CoordinatorCheckpointDeleteClaim {
+  tokenHash: string;
+  generation: number;
+  expiresAt: string;
+  reason: "manual" | "unused-expiry" | "create-recovery";
+  phase: "claimed" | "provider-deleted";
+}
+
+export interface CoordinatorCheckpointRecord {
+  version: 1;
+  id: string;
+  owner: string;
+  org: string;
+  leaseID: string;
+  provider: CoordinatorCheckpointProvider;
+  scope: CoordinatorCheckpointScope;
+  name: string;
+  strategy: "image" | "disk-snapshot";
+  noReboot: boolean;
+  image?: CoordinatorCheckpointImage;
+  state: "creating" | "ready" | "delete-pending" | "deleting" | "deleted" | "failed";
+  retention: CoordinatorCheckpointRetention;
+  generation: number;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+  lastUsedAt: string;
+  nextSweepAt?: string;
+  createClaim?: CoordinatorCheckpointCreateClaim;
+  deleteClaim?: CoordinatorCheckpointDeleteClaim;
+  deleteRequestedAt?: string;
+  deletedAt?: string;
+  attempts: number;
+  retryAt?: string;
+  lastError?: string;
+  pinCount: number;
+  activeUseCount: number;
+  eventSequence: number;
+  target: TargetOS;
+  windowsMode?: WindowsMode;
+  desktop?: boolean;
+  serverType?: string;
+  hostID?: string;
+  workdir?: string;
+  slug?: string;
+  repo?: { name?: string; head?: string; baseRef?: string; remoteURL?: string };
+}
+
+export interface CoordinatorCheckpointUseClaim {
+  checkpointID: string;
+  tokenHash: string;
+  owner: string;
+  org: string;
+  generation: number;
+  createdAt: string;
+  expiresAt: string;
+  state: "available" | "provisioning";
+  attemptID?: string;
+  leaseID?: string;
+}
+
+export interface CoordinatorCheckpointResourceIntent {
+  checkpointID: string;
+  provider: CoordinatorCheckpointProvider;
+  scope: CoordinatorCheckpointScope;
+  kind: string;
+  resourceName: string;
+  resourceID?: string;
+  generation: number;
+}
+
+export interface CoordinatorCheckpointDueIndex {
+  checkpointID: string;
+  generation: number;
+  revision: number;
+  nextSweepAt: string;
+}
+
+export interface CoordinatorCheckpointResourceClaim {
+  checkpointID: string;
+  provider: CoordinatorCheckpointProvider;
+  scope: CoordinatorCheckpointScope;
+  kind: string;
+  resourceID: string;
+  immutableID: string;
+  generation: number;
+}
+
+export interface CoordinatorCheckpointPin {
+  checkpointID: string;
+  generation: number;
+  catalogKey: string;
+  createdAt: string;
+}
+
+export interface CoordinatorCheckpointEvent {
+  checkpointID: string;
+  sequence: number;
+  type: string;
+  createdAt: string;
+  actor: string;
+  provider: CoordinatorCheckpointProvider;
+  scope: CoordinatorCheckpointScope;
+  generation: number;
+  reason?: string;
+  error?: string;
+  retryAt?: string;
 }
 
 export interface ProviderFastSnapshotRestore {

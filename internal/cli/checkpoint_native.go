@@ -11,18 +11,19 @@ import (
 )
 
 type checkpointNativeCreateRequest struct {
-	Cfg         Config
-	Server      Server
-	Target      SSHTarget
-	LeaseID     string
-	Name        string
-	RepoName    string
-	Workdir     string
-	Strategy    string
-	NoReboot    bool
-	Wait        bool
-	WaitTimeout time.Duration
-	Stderr      io.Writer
+	Cfg          Config
+	Server       Server
+	Target       SSHTarget
+	CheckpointID string
+	LeaseID      string
+	Name         string
+	RepoName     string
+	Workdir      string
+	Strategy     string
+	NoReboot     bool
+	Wait         bool
+	WaitTimeout  time.Duration
+	Stderr       io.Writer
 }
 
 type checkpointNativeCreateDriver interface {
@@ -131,27 +132,111 @@ func (coordinatorCheckpointDriver) Create(ctx context.Context, req checkpointNat
 	if name == "" {
 		name = defaultNativeImageName(req.LeaseID, req.RepoName)
 	}
-	coord, err := configuredAdminCoordinator()
+	var coord *CoordinatorClient
+	var err error
+	if req.CheckpointID == "" {
+		coord, err = configuredAdminCoordinator()
+	} else {
+		coord, err = configuredCheckpointCoordinatorFor(ctx)
+	}
 	if err != nil {
 		return CoordinatorImage{}, err
+	}
+	if req.CheckpointID != "" {
+		createContext, ok := checkpointCreateContextFrom(ctx)
+		if !ok || createContext.Record.ID != req.CheckpointID {
+			return CoordinatorImage{}, exit(2, "checkpoint creation metadata is unavailable")
+		}
+		if createContext.Retention.Mode != "manual" {
+			if _, probeErr := coord.Checkpoints(ctx); probeErr != nil {
+				if checkpointRouteUnsupported(probeErr) {
+					return CoordinatorImage{}, checkpointUpgradeRequired(probeErr)
+				}
+				return CoordinatorImage{}, probeErr
+			}
+		}
 	}
 	if !isWindowsNativeTarget(req.Target) {
 		if err := prepareNativeImageSource(ctx, req.Target); err != nil {
 			return CoordinatorImage{}, err
 		}
 	}
-	image, err := coord.CreateImage(ctx, req.LeaseID, name, req.NoReboot, strategy)
+	var image CoordinatorImage
+	var managed *coordinatorCheckpoint
+	if req.CheckpointID != "" {
+		createContext, ok := checkpointCreateContextFrom(ctx)
+		if !ok || createContext.Record.ID != req.CheckpointID {
+			return CoordinatorImage{}, exit(2, "checkpoint creation metadata is unavailable")
+		}
+		checkpoint, created, createErr := coord.CreateCheckpoint(ctx, createContext.Record, name, strategy, req.NoReboot, createContext.Retention)
+		if createErr != nil {
+			if checkpointRouteUnsupported(createErr) {
+				_, probeErr := coord.Checkpoints(ctx)
+				if checkpointRouteUnsupported(probeErr) && createContext.Retention.Mode == "manual" {
+					legacy, adminErr := configuredAdminCoordinator()
+					if adminErr != nil {
+						return CoordinatorImage{}, adminErr
+					}
+					coord = legacy
+					image, err = coord.CreateImage(ctx, req.LeaseID, name, req.NoReboot, strategy)
+				} else if checkpointRouteUnsupported(probeErr) {
+					return CoordinatorImage{}, checkpointUpgradeRequired(createErr)
+				} else {
+					return CoordinatorImage{}, createErr
+				}
+			} else {
+				return CoordinatorImage{}, createErr
+			}
+		} else {
+			image = created
+			managed = &checkpoint
+			image.managedCheckpoint = managed
+		}
+	} else {
+		image, err = coord.CreateImage(ctx, req.LeaseID, name, req.NoReboot, strategy)
+	}
 	if err != nil {
 		return CoordinatorImage{}, err
 	}
 	if req.Wait {
-		waited, err := waitForImage(ctx, coord, image.ID, imageRefFromCoordinatorImage(image), req.WaitTimeout, req.Stderr)
+		var waited CoordinatorImage
+		if managed != nil {
+			waited, err = waitForCheckpointImage(ctx, coord, managed.ID, image.ID, req.WaitTimeout, req.Stderr)
+			waited.managedCheckpoint = managed
+		} else {
+			waited, err = waitForImage(ctx, coord, image.ID, imageRefFromCoordinatorImage(image), req.WaitTimeout, req.Stderr)
+		}
 		if err != nil {
 			return image, err
 		}
 		return waited, nil
 	}
 	return image, nil
+}
+
+func waitForCheckpointImage(ctx context.Context, coord *CoordinatorClient, checkpointID, imageID string, timeout time.Duration, stderr io.Writer) (CoordinatorImage, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		image, err := coord.CheckpointImage(ctx, checkpointID)
+		if err != nil {
+			return CoordinatorImage{}, err
+		}
+		switch strings.ToLower(image.State) {
+		case "available", "ready", "succeeded", "completed":
+			return image, nil
+		case "failed", "invalid":
+			return CoordinatorImage{}, exit(5, "image %s failed", imageID)
+		}
+		if time.Now().After(deadline) {
+			return CoordinatorImage{}, exit(5, "timed out waiting for image %s; last state=%s", imageID, image.State)
+		}
+		_, _ = fmt.Fprintf(stderr, "waiting image=%s state=%s\n", imageID, blank(image.State, "pending"))
+		select {
+		case <-ctx.Done():
+			return CoordinatorImage{}, ctx.Err()
+		case <-time.After(15 * time.Second):
+		}
+	}
 }
 
 type directParallelsCheckpointDriver struct {
@@ -264,18 +349,19 @@ func (a App) createNativeCheckpoint(ctx context.Context, cfg Config, server Serv
 		return CoordinatorImage{}, nil, exit(2, "native checkpoints support brokered AWS Linux/macOS leases and brokered Azure/GCP Linux leases only")
 	}
 	image, err := driver.Create(ctx, checkpointNativeCreateRequest{
-		Cfg:         cfg,
-		Server:      server,
-		Target:      target,
-		LeaseID:     leaseID,
-		Name:        name,
-		RepoName:    repoName,
-		Workdir:     workdir,
-		Strategy:    strategy,
-		NoReboot:    noReboot,
-		Wait:        wait,
-		WaitTimeout: waitTimeout,
-		Stderr:      a.Stderr,
+		Cfg:          cfg,
+		Server:       server,
+		Target:       target,
+		CheckpointID: checkpointID,
+		LeaseID:      leaseID,
+		Name:         name,
+		RepoName:     repoName,
+		Workdir:      workdir,
+		Strategy:     strategy,
+		NoReboot:     noReboot,
+		Wait:         wait,
+		WaitTimeout:  waitTimeout,
+		Stderr:       a.Stderr,
 	})
 	return image, nil, err
 }
@@ -711,7 +797,7 @@ func applyNativeCheckpointForkConfig(cfg *Config, fs *flag.FlagSet, record check
 		cfg.Coordinator = ""
 		cfg.CoordToken = ""
 		cfg.CoordTokenCommand = nil
-	} else if cfg.CoordAdminToken != "" {
+	} else if !record.coordinatorManaged() && cfg.CoordAdminToken != "" {
 		cfg.CoordToken = cfg.CoordAdminToken
 		cfg.CoordTokenCommand = nil
 	}

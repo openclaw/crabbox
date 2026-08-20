@@ -82,6 +82,25 @@ delete is retried automatically. On success the cleanup metadata is cleared and
 the state becomes `expired`. You can inspect stuck cleanups with `crabbox admin
 lease-audit`.
 
+### Brokered native checkpoint retention
+
+New brokered native AWS, Azure, and GCP checkpoints have their own durable
+lifecycle, independent of the source lease. Retention is manual unless the
+owner explicitly requests `checkpoint create --expire-unused-after <duration>`
+or changes `checkpoint policy`. Coordinator alarms read a bounded, sorted due
+index and expire only those explicitly opted-in records; generic provider
+inventory, old image records, local files, and checkpoint-like names never
+grant cleanup ownership.
+
+Active renewable fork/shard use claims and AWS/Azure promotion pins prevent
+deletion. Manual and automatic deletion share the same generation-fenced
+provider cleanup: AWS confirms the exact AMI and every owned EBS snapshot are
+gone, Azure confirms its exact canonical managed snapshot, and GCP confirms
+its exact project-scoped machine image or disk snapshot. Ambiguous or failed
+provider calls retain ownership and retry with capped backoff; a durable
+provider-deleted phase makes final metadata cleanup restart-safe. Direct,
+archive, recipe, and historical checkpoints remain operator-managed.
+
 ### AWS orphan sweep
 
 Independent of per-lease expiry, the Worker can report AWS resources that no

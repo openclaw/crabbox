@@ -18,7 +18,13 @@ import {
   providerProvisioningCleanupClaim,
 } from "./provider-provisioning";
 import { leaseProviderName } from "./slug";
-import type { Env, ProviderImage, ProviderMachine, ProvisioningAttempt } from "./types";
+import type {
+  Env,
+  ProviderCheckpointOwnership,
+  ProviderImage,
+  ProviderMachine,
+  ProvisioningAttempt,
+} from "./types";
 
 const computeBaseURL = "https://compute.googleapis.com/compute/v1";
 const tokenURL = "https://oauth2.googleapis.com/token";
@@ -84,6 +90,7 @@ interface GCPMachineImage {
   name?: string;
   selfLink?: string;
   status?: string;
+  labels?: Record<string, string>;
 }
 
 interface GCPSnapshot {
@@ -91,6 +98,7 @@ interface GCPSnapshot {
   name?: string;
   selfLink?: string;
   status?: string;
+  labels?: Record<string, string>;
 }
 
 export class GCPClient {
@@ -456,17 +464,26 @@ export class GCPClient {
     // GCP stores per-instance SSH metadata; nothing global to clean up.
   }
 
-  async createImage(instanceName: string, name: string): Promise<ProviderImage> {
+  async createImage(
+    instanceName: string,
+    name: string,
+    ownership?: ProviderCheckpointOwnership,
+  ): Promise<ProviderImage> {
     const op = await this.gcp<GCPOperation>("POST", "/global/machineImages", {
       name,
       sourceInstance: `zones/${this.zone}/instances/${instanceName}`,
       description: `Crabbox checkpoint from ${instanceName}`,
+      ...(ownership ? { labels: gcpCheckpointOwnershipLabels(ownership) } : {}),
     });
     await this.waitGlobalOperation(op);
     return await this.getImage(name);
   }
 
-  async createDiskSnapshot(instanceName: string, name: string): Promise<ProviderImage> {
+  async createDiskSnapshot(
+    instanceName: string,
+    name: string,
+    ownership?: ProviderCheckpointOwnership,
+  ): Promise<ProviderImage> {
     const instance = await this.gcp<GCPInstance>(
       "GET",
       `/zones/${this.zone}/instances/${instanceName}`,
@@ -482,7 +499,11 @@ export class GCPClient {
       {
         name,
         description: `Crabbox checkpoint from ${instanceName}`,
-        labels: { crabbox: "true", managed_by: "crabbox" },
+        labels: {
+          crabbox: "true",
+          managed_by: "crabbox",
+          ...(ownership ? gcpCheckpointOwnershipLabels(ownership) : {}),
+        },
       },
     );
     await this.waitZoneOperation(op);
@@ -517,7 +538,7 @@ export class GCPClient {
     }
     const op = await this.gcp<GCPOperation>("DELETE", `/global/machineImages/${imageName}`).catch(
       (error) => {
-        if (isNotFound(error)) return undefined;
+        if (gcpMachineImageNotFound(error, this.project, imageName)) return undefined;
         throw error;
       },
     );
@@ -534,7 +555,7 @@ export class GCPClient {
       "DELETE",
       `/global/snapshots/${lastPathPart(name)}`,
     ).catch((error) => {
-      if (isNotFound(error)) return undefined;
+      if (gcpSnapshotNotFound(error, this.project, lastPathPart(name))) return undefined;
       throw error;
     });
     if (snapshotOp) await this.waitGlobalOperation(snapshotOp);
@@ -552,6 +573,13 @@ export class GCPClient {
       region: this.zone,
       project: this.project,
       resourceID: snapshot.selfLink ?? gcpSnapshotRef(snapshotName, this.project),
+      ...(snapshot.id ? { immutableID: String(snapshot.id) } : {}),
+      ...(gcpCheckpointTokenHash(snapshot.labels)
+        ? { checkpointOwnershipHash: gcpCheckpointTokenHash(snapshot.labels)! }
+        : {}),
+      ...(snapshot.labels?.["crabbox_checkpoint_lease"]
+        ? { checkpointSourceLeaseID: snapshot.labels["crabbox_checkpoint_lease"] }
+        : {}),
       snapshots: [snapshot.selfLink ?? gcpSnapshotRef(snapshotName, this.project)],
     };
   }
@@ -1050,6 +1078,45 @@ function gcpInstanceNotFound(error: unknown, project: string, zone: string, name
   return error.body.toLowerCase().includes(resource);
 }
 
+export function gcpSnapshotNotFound(error: unknown, project: string, name: string): boolean {
+  return gcpGlobalResourceNotFound(error, project, "snapshots", name);
+}
+
+export function gcpMachineImageNotFound(error: unknown, project: string, name: string): boolean {
+  return gcpGlobalResourceNotFound(error, project, "machineImages", name);
+}
+
+function gcpGlobalResourceNotFound(
+  error: unknown,
+  project: string,
+  collection: "snapshots" | "machineImages",
+  name: string,
+): boolean {
+  if (!(error instanceof GCPHTTPError) || error.status !== 404) return false;
+  const expected = `projects/${project}/global/${collection}/${name}`.toLowerCase();
+  return error.body.toLowerCase().includes(expected);
+}
+
+function gcpCheckpointOwnershipLabels(
+  ownership: ProviderCheckpointOwnership,
+): Record<string, string> {
+  return {
+    crabbox_checkpoint_id:
+      ownership.checkpointID.length <= 63
+        ? ownership.checkpointID.toLowerCase()
+        : ownership.tokenHash.slice(0, 63),
+    crabbox_checkpoint_token_a: ownership.tokenHash.slice(0, 32),
+    crabbox_checkpoint_token_b: ownership.tokenHash.slice(32),
+    crabbox_checkpoint_lease: ownership.sourceLeaseID.toLowerCase(),
+  };
+}
+
+function gcpCheckpointTokenHash(labels: Record<string, string> | undefined): string | undefined {
+  const first = labels?.["crabbox_checkpoint_token_a"];
+  const second = labels?.["crabbox_checkpoint_token_b"];
+  return first && second ? first + second : undefined;
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -1081,6 +1148,13 @@ function gcpMachineProviderImage(
     region: zone,
     project,
     resourceID: image.selfLink ?? gcpMachineImageRef(fallbackName, project),
+    ...(image.id ? { immutableID: String(image.id) } : {}),
+    ...(gcpCheckpointTokenHash(image.labels)
+      ? { checkpointOwnershipHash: gcpCheckpointTokenHash(image.labels)! }
+      : {}),
+    ...(image.labels?.["crabbox_checkpoint_lease"]
+      ? { checkpointSourceLeaseID: image.labels["crabbox_checkpoint_lease"] }
+      : {}),
   };
 }
 
