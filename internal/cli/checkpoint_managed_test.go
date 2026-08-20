@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -729,6 +730,202 @@ func TestCheckpointManagedLeaseSuccessStopsClaimRenewalImmediately(t *testing.T)
 	}
 	if renewalCtx.Err() == nil || readinessCtx.Err() != nil {
 		t.Fatalf("renewal must stop while SSH readiness remains active: renewal=%v readiness=%v", renewalCtx.Err(), readinessCtx.Err())
+	}
+}
+
+type checkpointRenewalRaceBackend struct {
+	*watchTestBackend
+	coordinator *CoordinatorClient
+	config      Config
+	createCtx   chan context.Context
+}
+
+func (backend *checkpointRenewalRaceBackend) Acquire(ctx context.Context, _ AcquireRequest) (LeaseTarget, error) {
+	backend.createCtx <- ctx
+	lease, err := backend.coordinator.CreateLease(ctx, backend.config, "ssh-ed25519 public", false, "cbx_000000000002", "fork")
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	return LeaseTarget{
+		Server:  Server{Provider: "aws", CloudID: "i-000000000002", Labels: map[string]string{"lease": lease.ID}},
+		SSH:     SSHTarget{Host: "checkpoint.example.test", TargetOS: targetWindows},
+		LeaseID: lease.ID,
+	}, nil
+}
+
+func TestCheckpointManagedRenewalCompletionRace(t *testing.T) {
+	tests := []struct {
+		name          string
+		renewalStatus int
+		renewalBody   string
+		createFails   bool
+		wantSuccess   bool
+		wantRenewal   bool
+	}{
+		{
+			name:          "consumed claim waits for successful create response",
+			renewalStatus: http.StatusConflict,
+			renewalBody:   `{"error":"checkpoint_claim_invalid","message":"checkpoint use claim is invalid or expired"}`,
+			wantSuccess:   true,
+		},
+		{
+			name:          "different renewal conflict cancels in-flight create",
+			renewalStatus: http.StatusConflict,
+			renewalBody:   `{"error":"checkpoint_source_mismatch","message":"checkpoint_claim_invalid is not the structured error"}`,
+			wantRenewal:   true,
+		},
+		{
+			name:          "consumed claim does not turn failed create into success",
+			renewalStatus: http.StatusConflict,
+			renewalBody:   `{"error":"checkpoint_claim_invalid"}`,
+			createFails:   true,
+		},
+		{
+			name:          "claim-invalid body without conflict remains fatal",
+			renewalStatus: http.StatusServiceUnavailable,
+			renewalBody:   `{"error":"checkpoint_claim_invalid"}`,
+			wantRenewal:   true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			checkpoint := managedCheckpointFixture("chk_renewal_completion_race")
+			checkpoint.Target = targetWindows
+			createStarted := make(chan struct{})
+			renewalResponded := make(chan struct{})
+			allowCreateResponse := make(chan struct{})
+			var renewals atomic.Int32
+			var aborts atomic.Int32
+			server, _ := configureManagedCheckpointTest(t, func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/checkpoints/" + checkpoint.ID + "/use":
+					var action struct {
+						Action string `json:"action"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&action); err != nil {
+						t.Error(err)
+						return
+					}
+					switch action.Action {
+					case "begin":
+						_ = json.NewEncoder(w).Encode(map[string]any{
+							"checkpoint": checkpoint,
+							"claim":      "request-local-checkpoint-claim",
+							"expiresAt":  time.Now().Add(2 * time.Second).Format(time.RFC3339Nano),
+						})
+					case "renew":
+						if renewals.Add(1) != 1 {
+							t.Error("checkpoint renewal continued after its terminal response")
+							return
+						}
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(test.renewalStatus)
+						_, _ = io.WriteString(w, test.renewalBody)
+						if flusher, ok := w.(http.Flusher); ok {
+							flusher.Flush()
+						}
+						close(renewalResponded)
+					case "abort":
+						aborts.Add(1)
+						_ = json.NewEncoder(w).Encode(map[string]any{"checkpoint": checkpoint})
+					default:
+						t.Errorf("unexpected checkpoint claim action: %s", action.Action)
+					}
+				case "/v1/leases/from-checkpoint":
+					close(createStarted)
+					select {
+					case <-r.Context().Done():
+						return
+					case <-allowCreateResponse:
+					}
+					if test.createFails {
+						w.WriteHeader(http.StatusBadGateway)
+						_, _ = io.WriteString(w, `{"error":"checkpoint_create_failed"}`)
+						return
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"lease": CoordinatorLease{ID: "cbx_000000000002", Provider: "aws"},
+					})
+				case "/v1/checkpoints/" + checkpoint.ID:
+					_ = json.NewEncoder(w).Encode(map[string]any{"checkpoint": checkpoint})
+				default:
+					http.NotFound(w, r)
+				}
+			})
+			record, err := checkpointRecordFromCoordinator(checkpoint, checkpointCoordinatorOrigin(server.URL))
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := defaultConfig()
+			cfg.Provider = "aws"
+			cfg.TargetOS = targetWindows
+			cfg.AWSSnapshot = checkpoint.Image.ID
+			backend := &checkpointRenewalRaceBackend{
+				watchTestBackend: newWatchTestBackend(),
+				coordinator:      &CoordinatorClient{BaseURL: server.URL, Client: server.Client()},
+				config:           cfg,
+				createCtx:        make(chan context.Context, 1),
+			}
+			type result struct {
+				provision checkpointForkProvision
+				err       error
+			}
+			finished := make(chan result, 1)
+			repo := Repo{Root: t.TempDir(), Name: "my-app"}
+			go func() {
+				provision, provisionErr := (App{Stdout: io.Discard, Stderr: io.Discard}).provisionManagedCheckpointFork(
+					context.Background(), cfg, backend, backend, repo,
+					record, checkpointPaths{}, false, false, "fork", "", true,
+				)
+				finished <- result{provision: provision, err: provisionErr}
+			}()
+			await := func(channel <-chan struct{}, description string) {
+				t.Helper()
+				select {
+				case <-channel:
+				case <-time.After(5 * time.Second):
+					t.Fatalf("timed out waiting for %s", description)
+				}
+			}
+			await(createStarted, "checkpoint-backed create to start")
+			createCtx := <-backend.createCtx
+			await(renewalResponded, "coordinator renewal response")
+			if test.wantRenewal {
+				await(createCtx.Done(), "fatal renewal error to cancel the in-flight create")
+			} else {
+				select {
+				case <-createCtx.Done():
+					t.Fatalf("consumed claim canceled the in-flight create: %v", createCtx.Err())
+				case <-time.After(50 * time.Millisecond):
+				}
+			}
+			close(allowCreateResponse)
+			var got result
+			select {
+			case got = <-finished:
+			case <-time.After(5 * time.Second):
+				t.Fatal("checkpoint provisioning did not finish")
+			}
+			_, _, releases := backend.counts()
+			if renewals.Load() != 1 || releases != 0 {
+				t.Fatalf("renewals=%d releases=%d; want one stopped renewal and no release", renewals.Load(), releases)
+			}
+			if test.wantSuccess {
+				if got.err != nil || got.provision.Lease.LeaseID != "cbx_000000000002" || aborts.Load() != 0 {
+					t.Fatalf("successful create: provision=%#v err=%v aborts=%d", got.provision, got.err, aborts.Load())
+				}
+				return
+			}
+			if got.err == nil || aborts.Load() != 1 {
+				t.Fatalf("failed create: provision=%#v err=%v aborts=%d", got.provision, got.err, aborts.Load())
+			}
+			if test.wantRenewal != strings.Contains(got.err.Error(), "renew checkpoint use claim:") {
+				t.Fatalf("renewal classification: error=%v wantRenewal=%t", got.err, test.wantRenewal)
+			}
+			if test.createFails && !strings.Contains(got.err.Error(), "checkpoint_create_failed") {
+				t.Fatalf("actual create failure was not preserved: %v", got.err)
+			}
+		})
 	}
 }
 

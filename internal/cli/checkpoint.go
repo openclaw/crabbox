@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -1182,6 +1183,16 @@ func (a App) provisionManagedCheckpointFork(ctx context.Context, cfg Config, bac
 			case <-ticker.C:
 				if _, _, renewErr := coord.checkpointUseAction(renewalCtx, record.ID, claim.Claim, "renew"); renewErr != nil {
 					if leaseCreated.Load() || renewalCtx.Err() != nil {
+						return
+					}
+					var httpErr CoordinatorHTTPError
+					var response struct {
+						Error string `json:"error"`
+					}
+					if errors.As(renewErr, &httpErr) &&
+						httpErr.StatusCode == http.StatusConflict &&
+						json.Unmarshal([]byte(httpErr.Message), &response) == nil &&
+						response.Error == "checkpoint_claim_invalid" {
 						return
 					}
 					select {

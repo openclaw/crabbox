@@ -14284,6 +14284,13 @@ export class FleetCoordinator {
         checkpoint.scope.project,
       );
       await checkpointProvider.validateCheckpointLeaseScope?.(checkpoint);
+      if (!checkpointProvider.validateCheckpointImage) {
+        throw new CheckpointError(
+          "checkpoint_source_mismatch",
+          "checkpoint provider cannot verify its exact owned source resource",
+        );
+      }
+      await checkpointProvider.validateCheckpointImage(checkpoint);
       const {
         checkpointID: _checkpointID,
         checkpointUseClaim: _checkpointUseClaim,
@@ -17939,6 +17946,33 @@ function awsImageDeletionMetadata(
 
 function createdProviderImageKey(provider: Provider, imageID: string): string {
   return `image:${provider}:created:${encodeURIComponent(imageID)}`;
+}
+
+async function checkpointCreatedImageMetadata(
+  storage: ProviderStateStorage | undefined,
+  checkpoint: CoordinatorCheckpointRecord,
+): Promise<ProviderImage> {
+  const image = checkpoint.image;
+  const metadata = image
+    ? await storage?.get<ProviderImage>(createdProviderImageKey(checkpoint.provider, image.id))
+    : undefined;
+  if (
+    !image ||
+    !metadata ||
+    metadata.provider !== checkpoint.provider ||
+    metadata.id !== image.id ||
+    metadata.kind !== image.kind ||
+    metadata.immutableID !== image.immutableID ||
+    metadata.region !== checkpoint.scope.region ||
+    !/^[a-f0-9]{64}$/.test(metadata.checkpointOwnershipHash ?? "") ||
+    metadata.checkpointSourceLeaseID !== checkpoint.leaseID
+  ) {
+    throw new CheckpointError(
+      "checkpoint_source_mismatch",
+      "checkpoint trusted provider creation identity or ownership evidence is missing or changed",
+    );
+  }
+  return metadata;
 }
 
 function promotedAzureImageKey(
@@ -23356,6 +23390,7 @@ interface CloudProvider {
   ): Promise<ProviderImage>;
   checkpointScope?(lease: LeaseRecord): Promise<CoordinatorCheckpointScope>;
   validateCheckpointLeaseScope?(checkpoint: CoordinatorCheckpointRecord): Promise<void>;
+  validateCheckpointImage?(checkpoint: CoordinatorCheckpointRecord): Promise<void>;
   createCheckpointImage?(
     lease: LeaseRecord,
     name: string,
@@ -23893,6 +23928,45 @@ export class AzureProvider implements CloudProvider {
     }
   }
 
+  async validateCheckpointImage(checkpoint: CoordinatorCheckpointRecord): Promise<void> {
+    const metadata = await checkpointCreatedImageMetadata(this.storage, checkpoint);
+    const image = checkpoint.image!;
+    const expected = `/subscriptions/${checkpoint.scope.subscriptionID}/resourceGroups/${checkpoint.scope.resourceGroup}/providers/Microsoft.Compute/snapshots/${image.id}`;
+    if (
+      metadata.resourceID?.toLowerCase() !== image.resourceID.toLowerCase() ||
+      image.resourceID.toLowerCase() !== expected.toLowerCase()
+    ) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "Azure checkpoint snapshot durable resource scope does not match its source lease",
+      );
+    }
+    let current: ProviderImage;
+    try {
+      current = await this.client.getImage(image.id, image.kind);
+    } catch (error) {
+      if (!azureSnapshotNotFound(error, image.resourceID)) throw error;
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "Azure checkpoint snapshot no longer exists",
+      );
+    }
+    if (
+      current.provider !== "azure" ||
+      current.kind !== image.kind ||
+      current.resourceID?.toLowerCase() !== image.resourceID.toLowerCase() ||
+      current.immutableID !== image.immutableID ||
+      current.region !== checkpoint.scope.region ||
+      current.checkpointOwnershipHash !== metadata.checkpointOwnershipHash ||
+      current.checkpointSourceLeaseID !== checkpoint.leaseID
+    ) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "Azure checkpoint snapshot identity, location, or ownership evidence has changed",
+      );
+    }
+  }
+
   async createCheckpointImage(
     lease: LeaseRecord,
     name: string,
@@ -24402,6 +24476,59 @@ export class GCPProvider implements CloudProvider {
       throw new CheckpointError(
         "checkpoint_source_mismatch",
         "GCP checkpoint lease project or zone does not match durable ownership",
+      );
+    }
+  }
+
+  async validateCheckpointImage(checkpoint: CoordinatorCheckpointRecord): Promise<void> {
+    const metadata = await checkpointCreatedImageMetadata(this.storage, checkpoint);
+    const image = checkpoint.image!;
+    const collection =
+      image.kind === "gcp-disk-snapshot"
+        ? "snapshots"
+        : image.kind === "gcp-machine-image"
+          ? "machineImages"
+          : "";
+    const expected = `projects/${checkpoint.scope.project}/global/${collection}/${image.id}`;
+    if (
+      !collection ||
+      metadata.project !== checkpoint.scope.project ||
+      metadata.resourceID !== image.resourceID ||
+      (image.resourceID !== expected && !image.resourceID.endsWith(`/${expected}`))
+    ) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "GCP checkpoint durable resource kind or project does not match its source lease",
+      );
+    }
+    let current: ProviderImage;
+    try {
+      current = await this.client.getImage(image.id, image.kind);
+    } catch (error) {
+      const missing =
+        image.kind === "gcp-machine-image"
+          ? gcpMachineImageNotFound(error, checkpoint.scope.project!, image.id)
+          : gcpSnapshotNotFound(error, checkpoint.scope.project!, image.id);
+      if (!missing) throw error;
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "GCP checkpoint source resource no longer exists",
+      );
+    }
+    if (
+      current.provider !== "gcp" ||
+      current.id !== image.id ||
+      current.kind !== image.kind ||
+      current.project !== checkpoint.scope.project ||
+      current.region !== checkpoint.scope.region ||
+      current.resourceID !== image.resourceID ||
+      current.immutableID !== image.immutableID ||
+      current.checkpointOwnershipHash !== metadata.checkpointOwnershipHash ||
+      current.checkpointSourceLeaseID !== checkpoint.leaseID
+    ) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "GCP checkpoint resource identity, project, zone, or ownership evidence has changed",
       );
     }
   }
@@ -25468,6 +25595,86 @@ export class AWSProvider implements CloudProvider {
         "AWS checkpoint lease account or region does not match durable ownership",
       );
     }
+  }
+
+  async validateCheckpointImage(checkpoint: CoordinatorCheckpointRecord): Promise<void> {
+    const metadata = await checkpointCreatedImageMetadata(this.storage, checkpoint);
+    const image = checkpoint.image!;
+    if (
+      metadata.resourceID !== image.resourceID ||
+      metadata.accountID !== checkpoint.scope.accountID ||
+      (image.kind !== "aws-ami" && image.kind !== "aws-ebs-snapshot")
+    ) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "AWS checkpoint durable resource identity or account does not match its source lease",
+      );
+    }
+    const describe = async (imageID: string): Promise<ProviderImage> => {
+      try {
+        return await this.client.getImage(imageID);
+      } catch (error) {
+        const message = coordinatorErrorMessage(this.env, error);
+        if (
+          !message.includes(
+            imageID.startsWith("snap-") ? "InvalidSnapshot.NotFound" : "InvalidAMIID.NotFound",
+          ) &&
+          !message.includes(
+            `aws ${imageID.startsWith("snap-") ? "snapshot" : "image"} not found: ${imageID}`,
+          )
+        ) {
+          throw error;
+        }
+        throw new CheckpointError(
+          "checkpoint_source_mismatch",
+          "AWS checkpoint source image or backing snapshot no longer exists",
+        );
+      }
+    };
+    const current = await describe(image.id);
+    const snapshots = [...new Set(current.snapshots ?? [])].toSorted();
+    const expectedSnapshots = [...new Set(image.snapshotIDs)].toSorted();
+    if (
+      current.provider !== "aws" ||
+      current.id !== image.id ||
+      current.kind !== image.kind ||
+      current.resourceID !== image.resourceID ||
+      current.immutableID !== image.immutableID ||
+      current.accountID !== checkpoint.scope.accountID ||
+      current.region !== checkpoint.scope.region ||
+      current.checkpointOwnershipHash !== metadata.checkpointOwnershipHash ||
+      current.checkpointSourceLeaseID !== checkpoint.leaseID ||
+      snapshots.length !== expectedSnapshots.length ||
+      snapshots.some((snapshot, index) => snapshot !== expectedSnapshots[index]) ||
+      (image.kind === "aws-ami" && snapshots.length === 0)
+    ) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "AWS checkpoint image identity, account, backing snapshots, or ownership evidence has changed",
+      );
+    }
+    if (image.kind !== "aws-ami") return;
+    await Promise.all(
+      snapshots.map(async (snapshotID) => {
+        const snapshot = await describe(snapshotID);
+        if (
+          snapshot.provider !== "aws" ||
+          snapshot.id !== snapshotID ||
+          snapshot.kind !== "aws-ebs-snapshot" ||
+          snapshot.resourceID !== snapshotID ||
+          snapshot.immutableID !== snapshotID ||
+          snapshot.accountID !== checkpoint.scope.accountID ||
+          snapshot.region !== checkpoint.scope.region ||
+          snapshot.checkpointOwnershipHash !== metadata.checkpointOwnershipHash ||
+          snapshot.checkpointSourceLeaseID !== checkpoint.leaseID
+        ) {
+          throw new CheckpointError(
+            "checkpoint_source_mismatch",
+            "AWS checkpoint AMI backing snapshot identity or ownership evidence has changed",
+          );
+        }
+      }),
+    );
   }
 
   async createCheckpointImage(

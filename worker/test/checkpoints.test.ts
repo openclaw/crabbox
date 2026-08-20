@@ -281,6 +281,7 @@ async function checkpointFixture(providerName: CoordinatorCheckpointProvider = "
   const provider = new AWSProvider(env, "eu-west-1", storage);
   vi.spyOn(provider, "checkpointScope").mockResolvedValue(providerScope(providerName));
   vi.spyOn(provider, "validateCheckpointLeaseScope").mockResolvedValue(undefined);
+  vi.spyOn(provider, "validateCheckpointImage").mockResolvedValue(undefined);
   vi.spyOn(provider, "createCheckpointImage").mockImplementation(
     async (_lease, name, _noReboot, strategy, ownership) =>
       providerImage(providerName, name, strategy, ownership),
@@ -1360,6 +1361,230 @@ describe("coordinator-managed checkpoints", () => {
       );
       expect(response.status).toBe(201);
       expect(createLease).toHaveBeenCalledOnce();
+      expect(await storage.get(checkpointKey(checkpointID))).toMatchObject({ activeUseCount: 0 });
+    },
+  );
+
+  it.each([
+    ["azure", "disk-snapshot"],
+    ["gcp", "disk-snapshot"],
+    ["gcp", "image"],
+    ["aws", "disk-snapshot"],
+    ["aws", "image"],
+  ] as const)(
+    "freshly verifies the exact owned %s %s checkpoint before binding provisioning",
+    async (providerName, strategy) => {
+      const { coordinator, storage, provider } = await checkpointFixture(providerName);
+      const checkpointID = `chk_verified_${providerName}_${strategy.replace("-", "_")}`;
+      expect(
+        (await createCheckpoint(coordinator, checkpointID, { mode: "manual" }, strategy)).status,
+      ).toBe(201);
+      const record = (await storage.get<CoordinatorCheckpointRecord>(checkpointKey(checkpointID)))!;
+      const metadata = (await storage.get<ProviderImage>(
+        `image:${providerName}:created:${encodeURIComponent(record.image!.id)}`,
+      ))!;
+      const backing =
+        providerName === "aws" && strategy === "image"
+          ? {
+              ...metadata,
+              id: record.image!.snapshotIDs[0]!,
+              name: record.image!.snapshotIDs[0]!,
+              kind: "aws-ebs-snapshot",
+              resourceID: record.image!.snapshotIDs[0]!,
+              immutableID: record.image!.snapshotIDs[0]!,
+              snapshots: [record.image!.snapshotIDs[0]!],
+            }
+          : undefined;
+      const current = {
+        ...metadata,
+        ...(providerName === "azure" ? { resourceID: metadata.resourceID!.toUpperCase() } : {}),
+      };
+      const getImage = vi.fn<(imageID: string, kind?: string) => Promise<ProviderImage>>(
+        async (imageID) => (backing && imageID === backing.id ? backing : current),
+      );
+      const env = { FLEET: {} as DurableObjectNamespace, HETZNER_TOKEN: "" } satisfies Env;
+      const validator =
+        providerName === "azure"
+          ? new AzureProvider(env, undefined, storage)
+          : providerName === "gcp"
+            ? new GCPProvider(env, storage)
+            : new AWSProvider(env, record.scope.region, storage);
+      Object.assign(validator, { clientValue: { getImage } });
+      vi.mocked(provider.validateCheckpointImage).mockImplementation(
+        async (checkpoint) => await validator.validateCheckpointImage(checkpoint),
+      );
+      const acquired = (await (
+        await coordinator.fetch(
+          checkpointRequest("POST", `/v1/checkpoints/${checkpointID}/use`, { action: "begin" }),
+        )
+      ).json()) as { claim: string };
+      const createLease = vi
+        .spyOn(coordinator as never, "createLease" as never)
+        .mockResolvedValue(Response.json({ lease: { id: "cbx_000000000002" } }, { status: 201 }));
+      const selector =
+        providerName === "azure"
+          ? { azureSnapshot: record.image!.id }
+          : providerName === "gcp"
+            ? strategy === "image"
+              ? { gcpMachineImage: record.image!.id }
+              : { gcpSnapshot: record.image!.id }
+            : strategy === "image"
+              ? { awsAMI: record.image!.id }
+              : { awsSnapshot: record.image!.id };
+      const response = await coordinator.fetch(
+        checkpointRequest("POST", "/v1/leases/from-checkpoint", {
+          provider: providerName,
+          checkpointID,
+          checkpointUseClaim: acquired.claim,
+          leaseID: "cbx_000000000002",
+          createAttemptID: `cat_${"c".repeat(32)}`,
+          ...selector,
+        }),
+      );
+      expect(response.status).toBe(201);
+      expect(createLease).toHaveBeenCalledOnce();
+      expect(
+        vi.mocked(provider.validateCheckpointLeaseScope).mock.invocationCallOrder[0],
+      ).toBeLessThan(vi.mocked(provider.validateCheckpointImage).mock.invocationCallOrder[0]!);
+      expect(getImage).toHaveBeenCalledWith(
+        record.image!.id,
+        ...(providerName === "aws" ? [] : [record.image!.kind]),
+      );
+      expect(getImage).toHaveBeenCalledTimes(backing ? 2 : 1);
+    },
+  );
+
+  it.each([
+    ["azure", "disk-snapshot", "immutable"],
+    ["azure", "disk-snapshot", "ownership-hash"],
+    ["azure", "disk-snapshot", "source-lease"],
+    ["azure", "disk-snapshot", "missing-tag"],
+    ["azure", "disk-snapshot", "location"],
+    ["azure", "disk-snapshot", "resource"],
+    ["azure", "disk-snapshot", "missing-metadata"],
+    ["gcp", "disk-snapshot", "immutable"],
+    ["gcp", "disk-snapshot", "ownership-hash"],
+    ["gcp", "disk-snapshot", "source-lease"],
+    ["gcp", "disk-snapshot", "missing-tag"],
+    ["gcp", "disk-snapshot", "project"],
+    ["gcp", "disk-snapshot", "kind"],
+    ["gcp", "disk-snapshot", "missing-metadata"],
+    ["gcp", "image", "immutable"],
+    ["gcp", "image", "ownership-hash"],
+    ["gcp", "image", "source-lease"],
+    ["gcp", "image", "missing-tag"],
+    ["gcp", "image", "project"],
+    ["gcp", "image", "kind"],
+    ["gcp", "image", "missing-metadata"],
+    ["aws", "disk-snapshot", "ownership-hash"],
+    ["aws", "disk-snapshot", "account"],
+    ["aws", "disk-snapshot", "not-found"],
+    ["aws", "image", "backing-ownership"],
+    ["aws", "image", "backing-set"],
+    ["aws", "image", "missing-metadata"],
+  ] as const)(
+    "rejects %s %s checkpoint %s drift before a lease or attempt exists",
+    async (providerName, strategy, drift) => {
+      const { coordinator, storage, provider } = await checkpointFixture(providerName);
+      const checkpointID = `chk_drift_${providerName}_${strategy.replace("-", "_")}_${drift.replace("-", "_")}`;
+      expect(
+        (await createCheckpoint(coordinator, checkpointID, { mode: "manual" }, strategy)).status,
+      ).toBe(201);
+      const record = (await storage.get<CoordinatorCheckpointRecord>(checkpointKey(checkpointID)))!;
+      const metadataKey = `image:${providerName}:created:${encodeURIComponent(record.image!.id)}`;
+      const metadata = (await storage.get<ProviderImage>(metadataKey))!;
+      const current: ProviderImage = { ...metadata };
+      if (drift === "immutable") current.immutableID = "replacement-immutable-identity";
+      if (drift === "ownership-hash") current.checkpointOwnershipHash = "f".repeat(64);
+      if (drift === "source-lease") current.checkpointSourceLeaseID = "cbx_foreign_lease";
+      if (drift === "missing-tag") delete current.checkpointOwnershipHash;
+      if (drift === "location") current.region = "eastus";
+      if (drift === "resource")
+        current.resourceID = current.resourceID!.replace("sub-123", "sub-foreign");
+      if (drift === "project") current.project = "foreign-project";
+      if (drift === "kind")
+        current.kind = strategy === "image" ? "gcp-disk-snapshot" : "gcp-machine-image";
+      if (drift === "account") current.accountID = "999999999999";
+      if (drift === "backing-set") current.snapshots = ["snap-replacement-0001"];
+      if (drift === "missing-metadata") await storage.delete(metadataKey);
+      const getImage = vi.fn<(imageID: string, kind?: string) => Promise<ProviderImage>>(
+        async (imageID) => {
+          if (drift === "not-found") throw new Error(`aws snapshot not found: ${imageID}`);
+          if (providerName === "aws" && strategy === "image" && imageID !== record.image!.id) {
+            return {
+              ...metadata,
+              id: imageID,
+              name: imageID,
+              kind: "aws-ebs-snapshot",
+              resourceID: imageID,
+              immutableID: imageID,
+              checkpointOwnershipHash:
+                drift === "backing-ownership" ? "f".repeat(64) : metadata.checkpointOwnershipHash,
+              snapshots: [imageID],
+            };
+          }
+          return current;
+        },
+      );
+      const env = { FLEET: {} as DurableObjectNamespace, HETZNER_TOKEN: "" } satisfies Env;
+      const validator =
+        providerName === "azure"
+          ? new AzureProvider(env, undefined, storage)
+          : providerName === "gcp"
+            ? new GCPProvider(env, storage)
+            : new AWSProvider(env, record.scope.region, storage);
+      Object.assign(validator, { clientValue: { getImage } });
+      vi.mocked(provider.validateCheckpointImage).mockImplementation(
+        async (checkpoint) => await validator.validateCheckpointImage(checkpoint),
+      );
+      const acquired = (await (
+        await coordinator.fetch(
+          checkpointRequest("POST", `/v1/checkpoints/${checkpointID}/use`, { action: "begin" }),
+        )
+      ).json()) as { claim: string };
+      const createLease = vi.spyOn(coordinator as never, "createLease" as never);
+      const selector =
+        providerName === "azure"
+          ? { azureSnapshot: record.image!.id }
+          : providerName === "gcp"
+            ? strategy === "image"
+              ? { gcpMachineImage: record.image!.id }
+              : { gcpSnapshot: record.image!.id }
+            : strategy === "image"
+              ? { awsAMI: record.image!.id }
+              : { awsSnapshot: record.image!.id };
+      const response = await coordinator.fetch(
+        checkpointRequest("POST", "/v1/leases/from-checkpoint", {
+          provider: providerName,
+          checkpointID,
+          checkpointUseClaim: acquired.claim,
+          leaseID: "cbx_000000000002",
+          createAttemptID: `cat_${"c".repeat(32)}`,
+          ...selector,
+        }),
+      );
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({ error: "checkpoint_source_mismatch" });
+      expect(createLease).not.toHaveBeenCalled();
+      expect(await storage.get("lease:cbx_000000000002")).toBeUndefined();
+      expect(await storage.get("create-attempt:cbx_000000000002")).toBeUndefined();
+      const claims = [
+        ...(
+          await storage.list<{ state: string; attemptID?: string; leaseID?: string }>({
+            prefix: `checkpoint-use:${checkpointID}:`,
+          })
+        ).values(),
+      ];
+      expect(claims).toEqual([expect.objectContaining({ state: "available" })]);
+      expect(claims[0]?.attemptID).toBeUndefined();
+      expect(claims[0]?.leaseID).toBeUndefined();
+      const aborted = await coordinator.fetch(
+        checkpointRequest("POST", `/v1/checkpoints/${checkpointID}/use`, {
+          action: "abort",
+          claim: acquired.claim,
+        }),
+      );
+      expect(aborted.status).toBe(200);
       expect(await storage.get(checkpointKey(checkpointID))).toMatchObject({ activeUseCount: 0 });
     },
   );
