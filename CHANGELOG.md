@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Shared the fixed idempotent lease-ID mechanism (durable create intent, claim locking, terminal tombstones) between the AWS and Machine0 providers while keeping launch attempts, adoption validation, and provider bindings adapter-owned.
 - Shared the cross-origin redirect refusal policy and origin comparison across seventeen HTTP-API providers while keeping provider-specific refusal errors and deliberately divergent redirect architectures adapter-owned.
 - Shared cross-process lease operation locking across nine sandbox providers while keeping lease-ID validation, slug-allocation locks, and claim-namespace preparation adapter-owned, preserving every existing on-disk lock path.
 - Bounded strict single-request provider JSON subprocess exchanges through a shared transport while keeping provider validation and diagnostics adapter-owned.
