@@ -7,6 +7,56 @@ import (
 	"time"
 )
 
+func TestFixedMachine0CreateIntentFingerprintGolden(t *testing.T) {
+	// This literal pins durable on-disk state and must never be "updated" to match new behavior.
+	cfg := BaseConfig()
+	cfg.Provider = "machine0-golden"
+	cfg.Profile = "profile-golden"
+	cfg.TargetOS = TargetLinux
+	cfg.Architecture = "amd64"
+	cfg.OSImage = "ubuntu:24.04"
+	cfg.Class = "class-golden"
+	cfg.ServerType = "machine0-golden-type"
+	cfg.ServerTypeExplicit = true
+	cfg.Machine0 = Machine0Config{
+		Image: "machine0-golden-image", ImageVersion: 17, DesktopImage: "machine0-golden-desktop",
+		Size: "machine0-golden-size", Region: "machine0-golden-region", Key: "machine0-golden-key",
+		WorkRoot: "/srv/machine0-golden-machine", ReleasePolicy: "suspend",
+	}
+	cfg.Desktop = true
+	cfg.DesktopEnv = "gnome"
+	cfg.Browser = true
+	cfg.Code = true
+	cfg.imageRequirements = imageRequirements{
+		MinOS: "24.04", SDKs: map[string]string{"go": "1.26.4"}, Runtimes: map[string]string{"node": "24.2"},
+		Browser: true, WebView2: true, Desktop: true,
+	}
+	cfg.Network = NetworkPublic
+	cfg.SSHUser = "machine0-golden-user"
+	cfg.SSHPort = "3022"
+	cfg.SSHFallbackPorts = []string{"3023", "3024"}
+	cfg.TTL = 9*time.Hour + 31*time.Minute
+	cfg.IdleTimeout = 47*time.Minute + 13*time.Second
+	cfg.Pond = "machine0-golden-pond"
+	cfg.ExposedPorts = []string{"7443", "9191"}
+	cfg.WorkRoot = "/srv/machine0-golden-work"
+	cfg.Cache = CacheConfig{
+		Pnpm: true, Npm: true, Docker: true, Git: true, MaxGB: 83, PurgeOnRelease: true,
+		Volumes: []CacheVolumeConfig{{Name: "machine0-golden-volume", Key: "machine0-golden-cache-key", Path: "/var/cache/machine0-golden", SizeGB: 43, Required: true}},
+	}
+
+	got, err := FixedMachine0CreateIntentFingerprint(cfg, FixedMachine0CreateIntentRequest{
+		RequestedSlug: "machine0-golden-lease", Keep: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "148d7069482c7c45350053ae0557a517fb03598d9879935518aa8f42a3e9edf6"
+	if got != want {
+		t.Fatalf("fingerprint=%s want=%s", got, want)
+	}
+}
+
 func TestFixedMachine0CreateIntentFingerprintStabilityAndCoverage(t *testing.T) {
 	cfg := BaseConfig()
 	cfg.Provider = "machine0"

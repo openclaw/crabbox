@@ -5,7 +5,75 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestFixedAWSCreateIntentFingerprintGolden(t *testing.T) {
+	// This literal pins durable on-disk state and must never be "updated" to match new behavior.
+	cfg := BaseConfig()
+	cfg.Provider = "aws-golden"
+	cfg.Profile = "profile-golden"
+	cfg.TargetOS = TargetLinux
+	cfg.Architecture = "arm64"
+	cfg.OSImage = "ubuntu:24.04"
+	cfg.WindowsMode = "normal"
+	cfg.Class = "class-golden"
+	cfg.ServerType = "m7g.2xlarge"
+	cfg.ServerTypeExplicit = true
+	cfg.HostID = "h-aws-golden"
+	cfg.AWSMacHostID = "h-aws-fallback-golden"
+	cfg.AWSRegion = "eu-west-2"
+	cfg.AWSAMI = "ami-aws-golden"
+	cfg.AWSSnapshot = "snap-aws-golden"
+	cfg.AWSSGID = "sg-aws-golden"
+	cfg.AWSSubnetID = "subnet-aws-golden"
+	cfg.AWSProfile = "instance-profile-golden"
+	cfg.AWSRootGB = 317
+	cfg.AWSSSHCIDRsPinned = true
+	cfg.AWSSSHCIDRs = []string{"203.0.113.17/32", "198.51.100.29/32"}
+	cfg.Desktop = true
+	cfg.DesktopEnv = "gnome"
+	cfg.Browser = true
+	cfg.Code = true
+	cfg.imageRequirements = imageRequirements{
+		MinOS: "24.04", SDKs: map[string]string{"go": "1.26.3"}, Runtimes: map[string]string{"node": "24.1"},
+		Browser: true, WebView2: true, Desktop: true,
+	}
+	cfg.Network = NetworkPublic
+	cfg.SSHUser = "aws-golden-user"
+	cfg.SSHPort = "2022"
+	cfg.SSHFallbackPorts = []string{"2023", "2024"}
+	cfg.ProviderKey = "aws-golden-provider-key"
+	cfg.Tailscale = TailscaleConfig{
+		Enabled: true, Tags: []string{"tag:golden-b", "tag:golden-a"},
+		HostnameTemplate: "golden-{{.Slug}}", Hostname: "aws-golden-host",
+		ExitNode: "aws-golden-exit", ExitNodeAllowLANAccess: true,
+	}
+	cfg.Capacity = CapacityConfig{
+		Market: "spot", Strategy: "capacity-optimized", Fallback: "on-demand",
+		Regions: []string{"eu-west-2", "eu-central-1"}, AvailabilityZones: []string{"eu-west-2b", "eu-west-2a"}, Hints: true,
+	}
+	cfg.TTL = 7*time.Hour + 23*time.Minute
+	cfg.IdleTimeout = 41*time.Minute + 19*time.Second
+	cfg.Pond = "aws-golden-pond"
+	cfg.ExposedPorts = []string{"8443", "9090"}
+	cfg.WorkRoot = "/srv/aws-golden-work"
+	cfg.Cache = CacheConfig{
+		Pnpm: true, Npm: true, Docker: true, Git: true, MaxGB: 73, PurgeOnRelease: true,
+		Volumes: []CacheVolumeConfig{{Name: "aws-golden-volume", Key: "aws-golden-key", Path: "/var/cache/aws-golden", SizeGB: 37, Required: true}},
+	}
+
+	got, err := FixedAWSCreateIntentFingerprint(cfg, FixedAWSCreateIntentRequest{
+		AccountID: "123456789017", RequestedSlug: "aws-golden-lease", SSHPublicKey: "ssh-ed25519 AAAAawsGolden", Keep: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "b9da70cdeb1422676ab434ac324571652e617fc5a533226b02f7e34b737c7d00"
+	if got != want {
+		t.Fatalf("fingerprint=%s want=%s", got, want)
+	}
+}
 
 func TestFixedAWSCreateIntentEquivalentNormalizedConfig(t *testing.T) {
 	left := BaseConfig()
@@ -172,7 +240,8 @@ func collectFixedAWSConfigFields(value reflect.Type, fields map[string]bool) {
 				fields[name] = true
 			}
 		}
-		if field.Type.Kind() == reflect.Struct && strings.HasPrefix(field.Type.Name(), "fixedAWSCreateIntent") {
+		if field.Type.Kind() == reflect.Struct &&
+			(strings.HasPrefix(field.Type.Name(), "fixedAWSCreateIntent") || strings.HasPrefix(field.Type.Name(), "fixedCreateIntent")) {
 			collectFixedAWSConfigFields(field.Type, fields)
 		}
 	}

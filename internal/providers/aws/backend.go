@@ -6,10 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"os"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -153,227 +151,190 @@ const (
 	fixedAWSIntentReleased      = "released"
 )
 
+var fixedAWSLeaseKind = core.FixedLeaseKind{
+	ClaimProvider: core.FixedAWSClaimProvider,
+	IntentVersion: fixedAWSCreateIntentVersion,
+	Label:         "AWS",
+}
+
 func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
 	leaseID := strings.TrimSpace(req.RequestedLeaseID)
-	var acquired LeaseTarget
-	err := core.WithDurableLeaseClaimLock(leaseID, func(claim *core.LeaseClaim, exists bool, persist func() error) error {
-		if b.Cfg.Tailscale.Enabled && b.Cfg.Tailscale.AuthKey == "" {
-			return exit(2, "direct --tailscale requires %s to contain a Tailscale auth key; brokered mode uses coordinator OAuth secrets", b.Cfg.Tailscale.AuthKeyEnv)
-		}
-		if exists && isFixedAWSClaim(*claim) && claim.FixedCreateIntent.State == fixedAWSIntentReleased {
-			return exit(4, "lease_id_conflict: fixed lease %s is terminal and cannot be replayed", leaseID)
-		}
-		cfg := b.Cfg
-		client, err := newAWSClient(ctx, cfg)
+	if b.Cfg.Tailscale.Enabled && b.Cfg.Tailscale.AuthKey == "" {
+		return LeaseTarget{}, exit(2, "direct --tailscale requires %s to contain a Tailscale auth key; brokered mode uses coordinator OAuth secrets", b.Cfg.Tailscale.AuthKeyEnv)
+	}
+	cfg := b.Cfg
+	var client awsClient
+	var accountID, providerScope, publicKey, fingerprint string
+	acquired, err := core.AcquireFixedLease(core.FixedAcquireOptions{
+		Kind:        fixedAWSLeaseKind,
+		LeaseID:     leaseID,
+		RepoRoot:    req.Repo.Root,
+		Reclaim:     req.Reclaim,
+		TargetOS:    cfg.TargetOS,
+		WindowsMode: cfg.WindowsMode,
+		TTL:         cfg.TTL,
+		IdleTimeout: cfg.IdleTimeout,
+	}, func(ctx context.Context, _ *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
+		var err error
+		client, err = newAWSClient(ctx, cfg)
 		if err != nil {
-			return err
+			return core.FixedLeaseBinding{}, err
 		}
-		accountID, err := client.CallerAccountID(ctx)
+		accountID, err = client.CallerAccountID(ctx)
 		if err != nil {
-			return fmt.Errorf("bind fixed AWS lease account: %w", err)
+			return core.FixedLeaseBinding{}, fmt.Errorf("bind fixed AWS lease account: %w", err)
 		}
-		providerScope := "account:" + accountID
-		keyPath, publicKey, err := ensureTestboxKeyForConfig(cfg, leaseID)
+		providerScope = "account:" + accountID
+		keyPath, key, err := ensureTestboxKeyForConfig(cfg, leaseID)
 		if err != nil {
-			return err
+			return core.FixedLeaseBinding{}, err
 		}
+		publicKey = key
 		cfg.SSHKey = keyPath
 		cfg.ProviderKey = providerKeyForLease(leaseID)
 		cfg.AWSSSHCIDRsPinned = len(cfg.AWSSSHCIDRs) > 0
 		ensureAWSSSHCIDRs(ctx, &cfg)
 		requestedSlug := core.NormalizeLeaseSlug(req.RequestedSlug)
-		fingerprint, err := core.FixedAWSCreateIntentFingerprint(cfg, core.FixedAWSCreateIntentRequest{
+		fingerprint, err = core.FixedAWSCreateIntentFingerprint(cfg, core.FixedAWSCreateIntentRequest{
 			AccountID: accountID, RequestedSlug: requestedSlug, SSHPublicKey: publicKey, Keep: req.Keep,
 		})
 		if err != nil {
-			return err
+			return core.FixedLeaseBinding{}, err
 		}
-
-		if exists {
-			if claim.FixedCreateIntent == nil ||
-				claim.FixedCreateIntent.Version != fixedAWSCreateIntentVersion ||
-				claim.FixedCreateIntent.Fingerprint != fingerprint ||
-				claim.FixedCreateIntent.ProviderScope != providerScope {
-				return exit(4, "lease_id_conflict: lease %s is bound to another create intent", leaseID)
+		binding := core.FixedLeaseBinding{ProviderScope: providerScope, Fingerprint: fingerprint}
+		if !exists {
+			servers, err := b.listAcrossRegions(ctx)
+			if err != nil {
+				return core.FixedLeaseBinding{}, err
 			}
-			if claim.Provider != core.FixedAWSClaimProvider {
-				return exit(4, "lease_id_conflict: lease %s is bound to provider=%s", leaseID, claim.Provider)
+			slug, err := allocateDirectLeaseSlug(leaseID, requestedSlug, servers)
+			if err != nil {
+				return core.FixedLeaseBinding{}, err
 			}
-			if claim.RepoRoot != "" && claim.RepoRoot != req.Repo.Root && !req.Reclaim {
-				return exit(4, "lease_id_conflict: lease %s is bound to another repository", leaseID)
-			}
-		} else {
+			binding.Slug = slug
+		}
+		return binding, nil
+	}, func(ctx context.Context, claim *core.LeaseClaim, intent *core.FixedCreateIntent, persist func() error) (LeaseTarget, error) {
+		createdAt, _ := time.Parse(time.RFC3339Nano, intent.CreatedAt)
+		var lease LeaseTarget
+		err := func() error {
 			servers, err := b.listAcrossRegions(ctx)
 			if err != nil {
 				return err
 			}
-			slug, err := allocateDirectLeaseSlug(leaseID, requestedSlug, servers)
+			matching := fixedAWSLeaseMatches(servers, leaseID)
+			if len(matching) > 1 {
+				return exit(4, "lease_id_conflict: multiple AWS resources match fixed lease %s", leaseID)
+			}
+			pinned, err := fixedAWSAttemptFromIntent(intent)
+			if err != nil {
+				return exit(4, "lease_id_conflict: invalid fixed AWS attempt for lease %s: %v", leaseID, err)
+			}
+			var server Server
+			resolvedCfg := cfg
+			if len(matching) == 1 {
+				server = matching[0]
+				if intent.State == fixedAWSIntentAcquired || claim.CloudID != "" {
+					if claim.CloudID == "" || server.CloudID != claim.CloudID {
+						return exit(4, "lease_id_conflict: fixed lease %s resource %s does not match acquired CloudID %s", leaseID, blank(server.CloudID, "<empty>"), blank(claim.CloudID, "<empty>"))
+					}
+				}
+				if err := validateFixedAWSServer(server, leaseID, intent.Slug, fingerprint, accountID); err != nil {
+					return err
+				}
+				if pinned == nil {
+					return exit(4, "lease_id_conflict: fixed AWS resource for lease %s has no durable launch attempt", leaseID)
+				}
+				if err := validateFixedAWSAttemptServer(server, leaseID, *pinned); err != nil {
+					return err
+				}
+				resolvedCfg = awsConfigForServer(cfg, server)
+			} else {
+				if intent.State == fixedAWSIntentAcquired || claim.CloudID != "" {
+					return exit(4, "lease_id_conflict: acquired fixed lease %s is missing its bound AWS instance", leaseID)
+				}
+				if pinned != nil {
+					return exit(4, "lease_id_conflict: fixed AWS lease %s has an unresolved launch attempt; retry after provider inventory converges", leaseID)
+				}
+				failed := make(map[string]bool, len(intent.FailedAttempts))
+				for _, token := range intent.FailedAttempts {
+					failed[token] = true
+				}
+				control := &core.AWSFixedCreateControl{
+					CreatedAt:         createdAt,
+					IntentFingerprint: fingerprint,
+					AccountID:         accountID,
+					FailedTokens:      failed,
+				}
+				control.BeforeAttempt = func(attempt core.AWSLaunchAttempt) error {
+					data, err := json.Marshal(attempt)
+					if err != nil {
+						return err
+					}
+					intent.Attempt = map[string]string{"aws": string(data)}
+					return persist()
+				}
+				control.DefiniteFailure = func(attempt core.AWSLaunchAttempt) error {
+					if control.TerminalRejection {
+						*claim = fixedAWSLeaseKind.TerminalClaim(*claim, time.Now().UTC())
+						if err := persist(); err != nil {
+							return err
+						}
+						core.RemoveStoredTestboxKey(leaseID)
+						return nil
+					}
+					if !failed[attempt.ClientToken] {
+						intent.FailedAttempts = append(intent.FailedAttempts, attempt.ClientToken)
+						failed[attempt.ClientToken] = true
+					}
+					intent.Attempt = nil
+					return persist()
+				}
+				fmt.Fprintf(b.RT.Stderr, "provisioning provider=aws lease=%s slug=%s class=%s preferred_type=%s region=%s keep=%v market=%s strategy=%s fixed=true\n", leaseID, intent.Slug, cfg.Class, cfg.ServerType, cfg.AWSRegion, req.Keep, cfg.Capacity.Market, cfg.Capacity.Strategy)
+				server, resolvedCfg, err = client.CreateServerWithFallbackControl(ctx, cfg, publicKey, leaseID, intent.Slug, req.Keep, func(format string, args ...any) {
+					fmt.Fprintf(b.RT.Stderr, format, args...)
+				}, control)
+				if err != nil {
+					if control.TerminalRejection && control.PinnedAttempt == nil {
+						return exit(4, "lease_id_conflict: fixed AWS lease %s terminated after %v", leaseID, err)
+					}
+					return err
+				}
+			}
+
+			serverClient, err := newAWSClient(ctx, resolvedCfg)
 			if err != nil {
 				return err
 			}
-			now := time.Now().UTC()
-			claim.LeaseID = leaseID
-			claim.Slug = slug
-			claim.Provider = core.FixedAWSClaimProvider
-			claim.ProviderScope = providerScope
-			claim.TargetOS = cfg.TargetOS
-			claim.WindowsMode = cfg.WindowsMode
-			claim.RepoRoot = req.Repo.Root
-			claim.ClaimedAt = now.Format(time.RFC3339)
-			claim.LastUsedAt = claim.ClaimedAt
-			claim.IdleTimeoutSeconds = int(cfg.IdleTimeout.Seconds())
-			claim.FixedCreateIntent = &core.FixedCreateIntent{
-				Version:       fixedAWSCreateIntentVersion,
-				Fingerprint:   fingerprint,
-				ProviderScope: providerScope,
-				Slug:          slug,
-				CreatedAt:     now.Format(time.RFC3339Nano),
-				State:         fixedAWSIntentPrepared,
-			}
-			if err := persist(); err != nil {
+			server, err = serverClient.WaitForServerIP(ctx, server.CloudID)
+			if err != nil {
 				return err
 			}
-		}
-
-		intent := claim.FixedCreateIntent
-		if intent.State != fixedAWSIntentPrepared && intent.State != fixedAWSIntentAcquired {
-			return exit(4, "lease_id_conflict: fixed lease %s has invalid create state %q", leaseID, intent.State)
-		}
-		createdAt, err := time.Parse(time.RFC3339Nano, intent.CreatedAt)
-		if err != nil {
-			return exit(4, "lease_id_conflict: lease %s has invalid fixed create timestamp", leaseID)
-		}
-		if cfg.TTL > 0 && time.Now().UTC().After(createdAt.Add(cfg.TTL)) {
-			return exit(4, "lease_id_conflict: fixed create intent for lease %s has expired", leaseID)
-		}
-		servers, err := b.listAcrossRegions(ctx)
-		if err != nil {
-			return err
-		}
-		matching := fixedAWSLeaseMatches(servers, leaseID)
-		if len(matching) > 1 {
-			return exit(4, "lease_id_conflict: multiple AWS resources match fixed lease %s", leaseID)
-		}
-		pinned, err := fixedAWSAttemptFromIntent(intent)
-		if err != nil {
-			return exit(4, "lease_id_conflict: invalid fixed AWS attempt for lease %s: %v", leaseID, err)
-		}
-		var server Server
-		resolvedCfg := cfg
-		if len(matching) == 1 {
-			server = matching[0]
-			if intent.State == fixedAWSIntentAcquired || claim.CloudID != "" {
-				if claim.CloudID == "" || server.CloudID != claim.CloudID {
-					return exit(4, "lease_id_conflict: fixed lease %s resource %s does not match acquired CloudID %s", leaseID, blank(server.CloudID, "<empty>"), blank(claim.CloudID, "<empty>"))
-				}
-			}
+			server = annotateAWSServerRegion(server, resolvedCfg.AWSRegion)
 			if err := validateFixedAWSServer(server, leaseID, intent.Slug, fingerprint, accountID); err != nil {
 				return err
 			}
-			if pinned == nil {
-				return exit(4, "lease_id_conflict: fixed AWS resource for lease %s has no durable launch attempt", leaseID)
+			pinned, err = fixedAWSAttemptFromIntent(intent)
+			if err != nil || pinned == nil {
+				return exit(4, "lease_id_conflict: fixed AWS lease %s has no valid durable launch attempt after provisioning", leaseID)
 			}
 			if err := validateFixedAWSAttemptServer(server, leaseID, *pinned); err != nil {
 				return err
 			}
-			resolvedCfg = awsConfigForServer(cfg, server)
-		} else {
-			if intent.State == fixedAWSIntentAcquired || claim.CloudID != "" {
-				return exit(4, "lease_id_conflict: acquired fixed lease %s is missing its bound AWS instance", leaseID)
-			}
-			if pinned != nil {
-				return exit(4, "lease_id_conflict: fixed AWS lease %s has an unresolved launch attempt; retry after provider inventory converges", leaseID)
-			}
-			failed := make(map[string]bool, len(intent.FailedAttempts))
-			for _, token := range intent.FailedAttempts {
-				failed[token] = true
-			}
-			control := &core.AWSFixedCreateControl{
-				CreatedAt:         createdAt,
-				IntentFingerprint: fingerprint,
-				AccountID:         accountID,
-				FailedTokens:      failed,
-			}
-			control.BeforeAttempt = func(attempt core.AWSLaunchAttempt) error {
-				data, err := json.Marshal(attempt)
-				if err != nil {
-					return err
-				}
-				intent.Attempt = map[string]string{"aws": string(data)}
-				return persist()
-			}
-			control.DefiniteFailure = func(attempt core.AWSLaunchAttempt) error {
-				if control.TerminalRejection {
-					*claim = fixedAWSTerminalClaim(*claim, time.Now().UTC())
-					if err := persist(); err != nil {
-						return err
-					}
-					core.RemoveStoredTestboxKey(leaseID)
-					return nil
-				}
-				if !failed[attempt.ClientToken] {
-					intent.FailedAttempts = append(intent.FailedAttempts, attempt.ClientToken)
-					failed[attempt.ClientToken] = true
-				}
-				intent.Attempt = nil
-				return persist()
-			}
-			fmt.Fprintf(b.RT.Stderr, "provisioning provider=aws lease=%s slug=%s class=%s preferred_type=%s region=%s keep=%v market=%s strategy=%s fixed=true\n", leaseID, intent.Slug, cfg.Class, cfg.ServerType, cfg.AWSRegion, req.Keep, cfg.Capacity.Market, cfg.Capacity.Strategy)
-			server, resolvedCfg, err = client.CreateServerWithFallbackControl(ctx, cfg, publicKey, leaseID, intent.Slug, req.Keep, func(format string, args ...any) {
-				fmt.Fprintf(b.RT.Stderr, format, args...)
-			}, control)
-			if err != nil {
-				if control.TerminalRejection && control.PinnedAttempt == nil {
-					return exit(4, "lease_id_conflict: fixed AWS lease %s terminated after %v", leaseID, err)
-				}
+			target := sshTargetForBootstrap(resolvedCfg, server.PublicNet.IPv4.IP, leaseID, intent.Slug)
+			if err := bootstrapAWSWindowsDesktop(ctx, resolvedCfg, &target, publicKey, b.RT.Stderr); err != nil {
 				return err
 			}
-		}
-
-		serverClient, err := newAWSClient(ctx, resolvedCfg)
-		if err != nil {
-			return err
-		}
-		server, err = serverClient.WaitForServerIP(ctx, server.CloudID)
-		if err != nil {
-			return err
-		}
-		server = annotateAWSServerRegion(server, resolvedCfg.AWSRegion)
-		if err := validateFixedAWSServer(server, leaseID, intent.Slug, fingerprint, accountID); err != nil {
-			return err
-		}
-		pinned, err = fixedAWSAttemptFromIntent(intent)
-		if err != nil || pinned == nil {
-			return exit(4, "lease_id_conflict: fixed AWS lease %s has no valid durable launch attempt after provisioning", leaseID)
-		}
-		if err := validateFixedAWSAttemptServer(server, leaseID, *pinned); err != nil {
-			return err
-		}
-		target := sshTargetForBootstrap(resolvedCfg, server.PublicNet.IPv4.IP, leaseID, intent.Slug)
-		if err := bootstrapAWSWindowsDesktop(ctx, resolvedCfg, &target, publicKey, b.RT.Stderr); err != nil {
-			return err
-		}
-		server.Labels["state"] = "ready"
-		if err := serverClient.SetTags(ctx, server.CloudID, server.Labels); err != nil {
-			return fmt.Errorf("persist AWS fixed lease identity tags: %w", err)
-		}
-		claim.CloudID = server.CloudID
-		claim.Slug = intent.Slug
-		claim.Provider = core.FixedAWSClaimProvider
-		claim.ProviderScope = providerScope
-		claim.Labels = maps.Clone(server.Labels)
-		claim.SSHHost = target.Host
-		claim.LastUsedAt = time.Now().UTC().Format(time.RFC3339)
-		if port, parseErr := strconv.Atoi(strings.TrimSpace(target.Port)); parseErr == nil {
-			claim.SSHPort = port
-		}
-		intent.State = fixedAWSIntentAcquired
-		if err := persist(); err != nil {
-			return err
-		}
-		acquired = LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
-		return nil
-	})
+			server.Labels["state"] = "ready"
+			if err := serverClient.SetTags(ctx, server.CloudID, server.Labels); err != nil {
+				return fmt.Errorf("persist AWS fixed lease identity tags: %w", err)
+			}
+			claim.ProviderScope = providerScope
+			lease = LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
+			return nil
+		}()
+		return lease, err
+	}, ctx)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
@@ -565,15 +526,15 @@ func (b *awsLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequ
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(req.Lease.Server.Labels["fixed_intent_sha256"]) != "" && (!exists || !isFixedAWSClaim(claim)) {
+	if strings.TrimSpace(req.Lease.Server.Labels["fixed_intent_sha256"]) != "" && (!exists || !fixedAWSLeaseKind.IsFixedClaim(claim)) {
 		return exit(4, "refusing to release fixed AWS lease %s without its durable create intent", req.Lease.LeaseID)
 	}
-	if exists && isFixedAWSClaim(claim) {
+	if exists && fixedAWSLeaseKind.IsFixedClaim(claim) {
 		exact, err := requireExactAWSClaim(req.Lease.Server, req.Lease.LeaseID)
 		if err != nil {
 			return err
 		}
-		return finalizeAWSClaimAfterCleanup(exact, func() error {
+		return fixedAWSLeaseKind.FinalizeAfterCleanup(exact, func() error {
 			return deleteServer(ctx, awsConfigForServer(b.Cfg, req.Lease.Server), req.Lease.Server)
 		})
 	}
@@ -602,25 +563,13 @@ func (b *awsLeaseBackend) RetainLeaseClaimAfterReleaseWithClaim(lease LeaseTarge
 }
 
 func (b *awsLeaseBackend) retainLeaseClaimAfterRelease(lease LeaseTarget, previous core.LeaseClaim) (bool, error) {
-	claim, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
-	if err != nil {
-		return false, fmt.Errorf("re-attest released AWS claim %s: %w", lease.LeaseID, err)
-	}
 	serverFingerprint := strings.TrimSpace(lease.Server.Labels["fixed_intent_sha256"])
-	previousFixed := isFixedAWSClaim(previous)
-	if !exists || !isFixedAWSClaim(claim) {
-		if previousFixed || serverFingerprint != "" {
-			return false, exit(4, "lease_id_conflict: fixed AWS lease %s has no valid terminal tombstone after release", lease.LeaseID)
+	return fixedAWSLeaseKind.RetainClaimAfterRelease(lease.LeaseID, previous, serverFingerprint != "", nil, func(claim core.LeaseClaim) error {
+		if serverFingerprint != "" && serverFingerprint != claim.FixedCreateIntent.Fingerprint {
+			return exit(4, "lease_id_conflict: fixed AWS lease %s server tag differs from its terminal tombstone", lease.LeaseID)
 		}
-		return false, nil
-	}
-	if err := validateFixedAWSTerminalClaim(claim, previous, lease.LeaseID); err != nil {
-		return false, err
-	}
-	if serverFingerprint != "" && serverFingerprint != claim.FixedCreateIntent.Fingerprint {
-		return false, exit(4, "lease_id_conflict: fixed AWS lease %s server tag differs from its terminal tombstone", lease.LeaseID)
-	}
-	return true, nil
+		return nil
+	})
 }
 
 func (b *awsLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
@@ -888,7 +837,7 @@ func requireExactAWSClaim(server Server, expectedLeaseID string) (core.LeaseClai
 
 func deleteClaimedAWSServerWithClient(ctx context.Context, client awsClient, server Server, claim core.LeaseClaim, cleanupKeyID string) error {
 	var cleanupErr error
-	err := finalizeAWSClaimAfterCleanup(claim, func() error {
+	err := fixedAWSLeaseKind.FinalizeAfterCleanup(claim, func() error {
 		cleanupErr = deleteAWSCleanupServerWithClient(ctx, client, server, cleanupKeyID)
 		return cleanupErr
 	})
@@ -991,68 +940,13 @@ func (b *awsLeaseBackend) cleanupOrphanedAWSClaims(ctx context.Context, dryRun b
 }
 
 func deleteMissingClaimedAWSResourcesWithClient(ctx context.Context, client awsClient, claim core.LeaseClaim, cleanupKeyID string) error {
-	return finalizeAWSClaimAfterCleanup(claim, func() error {
+	return fixedAWSLeaseKind.FinalizeAfterCleanup(claim, func() error {
 		return client.DeleteCleanupSSHKeyID(ctx, cleanupKeyID)
 	})
 }
 
-func isFixedAWSClaim(claim core.LeaseClaim) bool {
-	return claim.Provider == core.FixedAWSClaimProvider && claim.FixedCreateIntent != nil
-}
-
 func isAWSClaimProvider(provider string) bool {
 	return provider == "aws" || provider == core.FixedAWSClaimProvider
-}
-
-func finalizeAWSClaimAfterCleanup(claim core.LeaseClaim, action func() error) error {
-	if !isFixedAWSClaim(claim) {
-		return core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, action)
-	}
-	tombstone := fixedAWSTerminalClaim(claim, time.Now().UTC())
-	_, err := core.ReplaceLeaseClaimIfUnchangedDurableAfter(claim.LeaseID, claim, tombstone, action)
-	return err
-}
-
-func fixedAWSTerminalClaim(claim core.LeaseClaim, now time.Time) core.LeaseClaim {
-	intent := *claim.FixedCreateIntent
-	intent.State = fixedAWSIntentReleased
-	intent.Attempt = nil
-	intent.FailedAttempts = nil
-	return core.LeaseClaim{
-		LeaseID:           claim.LeaseID,
-		Slug:              intent.Slug,
-		Provider:          core.FixedAWSClaimProvider,
-		ProviderScope:     intent.ProviderScope,
-		ClaimedAt:         claim.ClaimedAt,
-		LastUsedAt:        now.Format(time.RFC3339),
-		FixedCreateIntent: &intent,
-	}
-}
-
-func validateFixedAWSTerminalClaim(claim, previous core.LeaseClaim, leaseID string) error {
-	intent := claim.FixedCreateIntent
-	if claim.LeaseID != leaseID || !isFixedAWSClaim(claim) ||
-		intent.Version != fixedAWSCreateIntentVersion ||
-		strings.TrimSpace(intent.Fingerprint) == "" ||
-		strings.TrimSpace(intent.ProviderScope) == "" ||
-		claim.ProviderScope != intent.ProviderScope ||
-		claim.Slug != intent.Slug ||
-		intent.State != fixedAWSIntentReleased ||
-		claim.CloudID != "" || len(claim.Labels) != 0 || claim.SSHHost != "" || claim.SSHPort != 0 ||
-		len(intent.Attempt) != 0 || len(intent.FailedAttempts) != 0 {
-		return exit(4, "lease_id_conflict: fixed AWS lease %s has an invalid terminal tombstone", leaseID)
-	}
-	if isFixedAWSClaim(previous) {
-		previousIntent := previous.FixedCreateIntent
-		if previous.LeaseID != leaseID ||
-			previousIntent.Version != intent.Version ||
-			previousIntent.Fingerprint != intent.Fingerprint ||
-			previousIntent.ProviderScope != intent.ProviderScope ||
-			previousIntent.Slug != intent.Slug {
-			return exit(4, "lease_id_conflict: fixed AWS lease %s terminal tombstone changed identity", leaseID)
-		}
-	}
-	return nil
 }
 
 func deleteAWSCleanupServerWithClient(ctx context.Context, client awsClient, server Server, cleanupKeyID string) error {

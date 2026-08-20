@@ -16,16 +16,16 @@ type FixedMachine0CreateIntentRequest struct {
 }
 
 type fixedMachine0CreateIntent struct {
-	Version       int                                `json:"version"`
-	RequestedSlug string                             `json:"requestedSlug"`
-	Provider      string                             `json:"provider"`
-	Profile       string                             `json:"profile"`
-	Machine       fixedMachine0CreateIntentMachine   `json:"machine"`
-	Capabilities  fixedMachine0CreateIntentFeatures  `json:"capabilities"`
-	Networking    fixedMachine0CreateIntentNetwork   `json:"networking"`
-	Lifecycle     fixedMachine0CreateIntentLifecycle `json:"lifecycle"`
-	Workload      fixedMachine0CreateIntentWorkload  `json:"workload"`
-	Cache         fixedAWSCreateIntentCache          `json:"cache"`
+	Version       int                              `json:"version"`
+	RequestedSlug string                           `json:"requestedSlug"`
+	Provider      string                           `json:"provider"`
+	Profile       string                           `json:"profile"`
+	Machine       fixedMachine0CreateIntentMachine `json:"machine"`
+	Capabilities  fixedCreateIntentFeatures        `json:"capabilities"`
+	Networking    fixedMachine0CreateIntentNetwork `json:"networking"`
+	Lifecycle     fixedCreateIntentLifecycle       `json:"lifecycle"`
+	Workload      fixedCreateIntentWorkload        `json:"workload"`
+	Cache         fixedCreateIntentCache           `json:"cache"`
 }
 
 type fixedMachine0CreateIntentMachine struct {
@@ -45,35 +45,16 @@ type fixedMachine0CreateIntentMachine struct {
 	ReleasePolicy      string `json:"releasePolicy"`
 }
 
-type fixedMachine0CreateIntentFeatures struct {
-	Desktop           bool              `json:"desktop"`
-	DesktopEnv        string            `json:"desktopEnv"`
-	Browser           bool              `json:"browser"`
-	Code              bool              `json:"code"`
-	ImageRequirements imageRequirements `json:"imageRequirements"`
-}
-
 type fixedMachine0CreateIntentNetwork struct {
 	Mode NetworkMode                  `json:"mode"`
 	SSH  fixedMachine0CreateIntentSSH `json:"ssh"`
 }
 
+// fixedMachine0CreateIntentSSH stays separate because adding AWS identity fields would change its durable JSON.
 type fixedMachine0CreateIntentSSH struct {
 	User          string   `json:"user"`
 	Port          string   `json:"port"`
 	FallbackPorts []string `json:"fallbackPorts,omitempty"`
-}
-
-type fixedMachine0CreateIntentLifecycle struct {
-	Keep            bool  `json:"keep"`
-	TTLNanoseconds  int64 `json:"ttlNanoseconds"`
-	IdleNanoseconds int64 `json:"idleNanoseconds"`
-}
-
-type fixedMachine0CreateIntentWorkload struct {
-	Pond         string   `json:"pond,omitempty"`
-	ExposedPorts []string `json:"exposedPorts,omitempty"`
-	WorkRoot     string   `json:"workRoot"`
 }
 
 func FixedMachine0CreateIntentFingerprint(cfg Config, req FixedMachine0CreateIntentRequest) (string, error) {
@@ -102,7 +83,7 @@ func fixedMachine0CreateIntentForConfig(cfg Config, req FixedMachine0CreateInten
 	if err != nil {
 		return fixedMachine0CreateIntent{}, err
 	}
-	cacheVolumes, err := fixedAWSCreateIntentCacheVolumes(cfg.Cache.Volumes)
+	cacheVolumes, err := fixedCreateIntentCacheVolumes(cfg.Cache.Volumes)
 	if err != nil {
 		return fixedMachine0CreateIntent{}, err
 	}
@@ -127,7 +108,7 @@ func fixedMachine0CreateIntentForConfig(cfg Config, req FixedMachine0CreateInten
 			WorkRoot:           strings.TrimSpace(cfg.Machine0.WorkRoot),
 			ReleasePolicy:      fixedMachine0ReleasePolicy(cfg.Machine0.ReleasePolicy),
 		},
-		Capabilities: fixedMachine0CreateIntentFeatures{
+		Capabilities: fixedCreateIntentFeatures{
 			Desktop:           cfg.Desktop,
 			DesktopEnv:        normalizedDesktopEnv(cfg.DesktopEnv),
 			Browser:           cfg.Browser,
@@ -139,20 +120,20 @@ func fixedMachine0CreateIntentForConfig(cfg Config, req FixedMachine0CreateInten
 			SSH: fixedMachine0CreateIntentSSH{
 				User:          strings.TrimSpace(cfg.SSHUser),
 				Port:          strings.TrimSpace(cfg.SSHPort),
-				FallbackPorts: fixedAWSCanonicalOrderedStrings(cfg.SSHFallbackPorts),
+				FallbackPorts: fixedCanonicalOrderedStrings(cfg.SSHFallbackPorts),
 			},
 		},
-		Lifecycle: fixedMachine0CreateIntentLifecycle{
+		Lifecycle: fixedCreateIntentLifecycle{
 			Keep:            req.Keep,
-			TTLNanoseconds:  fixedAWSCanonicalDuration(cfg.TTL),
-			IdleNanoseconds: fixedAWSCanonicalDuration(cfg.IdleTimeout),
+			TTLNanoseconds:  fixedCanonicalDuration(cfg.TTL),
+			IdleNanoseconds: fixedCanonicalDuration(cfg.IdleTimeout),
 		},
-		Workload: fixedMachine0CreateIntentWorkload{
+		Workload: fixedCreateIntentWorkload{
 			Pond:         normalizePondName(cfg.Pond),
 			ExposedPorts: exposedPorts,
 			WorkRoot:     strings.TrimSpace(cfg.WorkRoot),
 		},
-		Cache: fixedAWSCreateIntentCache{
+		Cache: fixedCreateIntentCache{
 			Pnpm:           cfg.Cache.Pnpm,
 			Npm:            cfg.Cache.Npm,
 			Docker:         cfg.Cache.Docker,

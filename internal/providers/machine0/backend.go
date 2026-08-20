@@ -307,7 +307,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 	if normalizeReleasePolicy(b.configForRun().Machine0.ReleasePolicy) == "suspend" {
 		return b.suspendClaimedMachine(ctx, claim, item)
 	}
-	return finalizeMachine0ClaimAfterCleanup(claim, func() error { return b.api.Remove(ctx, item.Name) })
+	return fixedMachine0LeaseKind.FinalizeAfterCleanup(claim, func() error { return b.api.Remove(ctx, item.Name) })
 }
 
 func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
@@ -350,7 +350,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			if err := b.suspendClaimedMachine(ctx, claim, item); err != nil {
 				return err
 			}
-		} else if err := finalizeMachine0ClaimAfterCleanup(claim, func() error { return b.api.Remove(ctx, item.Name) }); err != nil {
+		} else if err := fixedMachine0LeaseKind.FinalizeAfterCleanup(claim, func() error { return b.api.Remove(ctx, item.Name) }); err != nil {
 			return err
 		}
 		removed++
@@ -360,7 +360,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 		if claim.LeaseID == "" || liveClaims[claim.LeaseID] {
 			continue
 		}
-		if isFixedMachine0Claim(claim) && claim.FixedCreateIntent.State == fixedMachine0IntentReleased {
+		if fixedMachine0LeaseKind.IsFixedClaim(claim) && claim.FixedCreateIntent.State == fixedMachine0IntentReleased {
 			continue
 		}
 		if claim.CloudID == "" || claim.ProviderScope != machineScope(claim.CloudID) {
@@ -371,7 +371,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s reason=missing machine\n", claim.LeaseID)
 			continue
 		}
-		if err := finalizeMachine0ClaimAfterCleanup(claim, nil); err != nil {
+		if err := fixedMachine0LeaseKind.FinalizeAfterCleanup(claim, nil); err != nil {
 			return err
 		}
 		claimsRemoved++
@@ -796,7 +796,7 @@ func machine0Claims() (map[string]LeaseClaim, error) {
 		id := firstNonBlank(claim.CloudID, claim.Labels["machine0_id"])
 		if id != "" {
 			out[id] = claim
-		} else if isFixedMachine0Claim(claim) && claim.ProviderScope != "" {
+		} else if fixedMachine0LeaseKind.IsFixedClaim(claim) && claim.ProviderScope != "" {
 			out[claim.ProviderScope] = claim
 		}
 	}

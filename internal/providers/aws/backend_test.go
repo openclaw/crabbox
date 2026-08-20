@@ -698,7 +698,7 @@ func TestAWSFixedAcquireTerminalizesDefinitiveProviderRejection(t *testing.T) {
 	if err != nil || !exists || claim.FixedCreateIntent == nil {
 		t.Fatalf("claim=%#v exists=%t err=%v", claim, exists, err)
 	}
-	if err := validateFixedAWSTerminalClaim(claim, core.LeaseClaim{}, req.RequestedLeaseID); err != nil {
+	if err := fixedAWSLeaseKind.ValidateTerminalClaim(claim, core.LeaseClaim{}, req.RequestedLeaseID, nil); err != nil {
 		t.Fatalf("terminal claim: %v", err)
 	}
 	keyPath, err := core.TestboxKeyPath(req.RequestedLeaseID)
