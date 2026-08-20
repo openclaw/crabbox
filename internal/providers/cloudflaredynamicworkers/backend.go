@@ -389,22 +389,21 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
+	if !claimed {
+		return exit(2, "%s refusing to delete run %s without an exact local claim for the configured loader endpoint", providerName, leaseID)
+	}
 	if err := client.Delete(ctx, leaseID); err != nil {
 		if notFoundError(err) {
-			if claimed {
-				if err := removeLeaseClaimIfUnchanged(leaseID, claim); err != nil {
-					return err
-				}
-				fmt.Fprintf(b.rt.Stdout, "removed stale %s claim %s reason=not-found\n", providerName, leaseID)
+			if err := removeLeaseClaimIfUnchanged(leaseID, claim); err != nil {
+				return err
 			}
+			fmt.Fprintf(b.rt.Stdout, "removed stale %s claim %s reason=not-found\n", providerName, leaseID)
 			return nil
 		}
 		return providerError("delete metadata", err)
 	}
-	if claimed {
-		if err := removeLeaseClaimIfUnchanged(leaseID, claim); err != nil {
-			return err
-		}
+	if err := removeLeaseClaimIfUnchanged(leaseID, claim); err != nil {
+		return err
 	}
 	fmt.Fprintf(b.rt.Stdout, "stopped %s provider=%s loader_metadata=%s\n", leaseID, providerName, leaseID)
 	return nil

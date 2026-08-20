@@ -1633,12 +1633,14 @@ func TestStopMissingRemoteRemovesStaleLocalClaim(t *testing.T) {
 	}
 }
 
-func TestStopMissingRemotePreservesUnrelatedExactClaim(t *testing.T) {
+func TestStopRefusesUnrelatedExactClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	deleteRequests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete || r.URL.Path != "/v1/runs/shared-id" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
+		deleteRequests++
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 	}))
 	defer server.Close()
@@ -1647,12 +1649,116 @@ func TestStopMissingRemotePreservesUnrelatedExactClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := backend.Stop(context.Background(), StopRequest{ID: "shared-id"}); err != nil {
-		t.Fatal(err)
+	err := backend.Stop(context.Background(), StopRequest{ID: "shared-id"})
+	var exitErr ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(err.Error(), "refusing to delete") || !strings.Contains(err.Error(), "exact local claim") {
+		t.Fatalf("err=%v, want exit(2) ownership refusal", err)
+	}
+	if deleteRequests != 0 {
+		t.Fatalf("DELETE requests=%d, want none", deleteRequests)
 	}
 	claim, ok, err := core.ResolveLeaseClaim("shared-id")
 	if err != nil || !ok || claim.Provider != "hetzner" {
 		t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, err)
+	}
+}
+
+func TestStopRefusesUnclaimedRun(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	deleteRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		deleteRequests++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	backend := newTestBackend(server.URL, &bytes.Buffer{}, &bytes.Buffer{})
+
+	err := backend.Stop(context.Background(), StopRequest{ID: "cfdw_unclaimed"})
+	var exitErr ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(err.Error(), "refusing to delete") || !strings.Contains(err.Error(), "exact local claim") {
+		t.Fatalf("err=%v, want exit(2) ownership refusal", err)
+	}
+	if deleteRequests != 0 {
+		t.Fatalf("DELETE requests=%d, want none", deleteRequests)
+	}
+}
+
+func TestStopRefusesClaimFromDifferentLoaderEndpoint(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	deleteRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		deleteRequests++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	backend := newTestBackend(server.URL, &bytes.Buffer{}, &bytes.Buffer{})
+	otherConfig := testConfig("https://other-loader.example.test")
+	if err := claimLease("cfdw_other_loader", "other-loader", otherConfig, t.TempDir(), time.Minute, false, runServer("cfdw_other_loader", "other-loader", runStatus{ID: "cfdw_other_loader", Status: "ready"}, nil)); err != nil {
+		t.Fatal(err)
+	}
+
+	err := backend.Stop(context.Background(), StopRequest{ID: "cfdw_other_loader"})
+	var exitErr ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(err.Error(), "different loader endpoint") {
+		t.Fatalf("err=%v, want exit(2) loader-scope refusal", err)
+	}
+	if deleteRequests != 0 {
+		t.Fatalf("DELETE requests=%d, want none", deleteRequests)
+	}
+	claim, ok, err := core.ResolveLeaseClaim("cfdw_other_loader")
+	if err != nil || !ok || claim.Provider != providerName {
+		t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, err)
+	}
+}
+
+func TestStopDeletesOwnedRunAndRemovesClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	deleteRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/v1/runs/cfdw_owned" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		deleteRequests++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	var stdout bytes.Buffer
+	backend := newTestBackend(server.URL, &stdout, &bytes.Buffer{})
+	if err := claimLease("cfdw_owned", "owned-run", backend.cfg, t.TempDir(), time.Minute, false, runServer("cfdw_owned", "owned-run", runStatus{ID: "cfdw_owned", Status: "ready"}, nil)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := backend.Stop(context.Background(), StopRequest{ID: "owned-run"}); err != nil {
+		t.Fatal(err)
+	}
+	if deleteRequests != 1 {
+		t.Fatalf("DELETE requests=%d, want one", deleteRequests)
+	}
+	if !strings.Contains(stdout.String(), "stopped cfdw_owned provider=cloudflare-dynamic-workers") {
+		t.Fatalf("stdout=%q", stdout.String())
+	}
+	if _, ok, err := resolveLeaseClaim("owned-run", backend.cfg); err != nil || ok {
+		t.Fatalf("claim after stop ok=%t err=%v", ok, err)
+	}
+}
+
+func TestStatusAllowsUnclaimedRunID(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/runs/cfdw_unclaimed" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(runStatus{ID: "cfdw_unclaimed", Status: "succeeded"})
+	}))
+	defer server.Close()
+	backend := newTestBackend(server.URL, &bytes.Buffer{}, &bytes.Buffer{})
+
+	view, err := backend.Status(context.Background(), StatusRequest{ID: "cfdw_unclaimed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.ID != "cfdw_unclaimed" || view.State != "succeeded" {
+		t.Fatalf("status=%#v", view)
 	}
 }
 
