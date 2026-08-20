@@ -1291,39 +1291,181 @@ async function finalizeCheckpointDeletionWithHash(
   });
 }
 
+type ManagedCheckpointImage = Pick<
+  ProviderImage,
+  "id" | "resourceID" | "kind" | "region" | "project" | "snapshots" | "immutableID"
+> &
+  Partial<
+    Pick<
+      ProviderImage,
+      "name" | "accountID" | "checkpointOwnershipHash" | "checkpointSourceLeaseID"
+    >
+  >;
+
+function checkpointResourceIdentity(
+  provider: CoordinatorCheckpointProvider,
+  scope: CoordinatorCheckpointScope,
+  kind: string,
+  value: string,
+): string | undefined {
+  const resource = value.trim();
+  if (!resource) return undefined;
+  if (provider === "aws") return resource;
+
+  if (provider === "azure") {
+    if (kind !== "azure-os-disk-snapshot") return undefined;
+    if (!resource.includes("/")) return resource.toLowerCase();
+    const match =
+      /^\/subscriptions\/([^/]+)\/resourceGroups\/([^/]+)\/providers\/Microsoft\.Compute\/snapshots\/([^/]+)$/i.exec(
+        resource,
+      );
+    const subscriptionID = match?.[1];
+    const resourceGroup = match?.[2];
+    const resourceName = match?.[3];
+    if (
+      !subscriptionID ||
+      !resourceGroup ||
+      !resourceName ||
+      subscriptionID.toLowerCase() !== scope.subscriptionID?.toLowerCase() ||
+      resourceGroup.toLowerCase() !== scope.resourceGroup?.toLowerCase()
+    ) {
+      return undefined;
+    }
+    return resourceName.toLowerCase();
+  }
+
+  const collection =
+    kind === "gcp-disk-snapshot"
+      ? "snapshots"
+      : kind === "gcp-machine-image"
+        ? "machineImages"
+        : undefined;
+  if (!collection) return undefined;
+  if (!resource.includes("/")) return resource;
+  let path = resource;
+  if (resource.includes("://")) {
+    let url: URL;
+    try {
+      url = new URL(resource);
+    } catch {
+      return undefined;
+    }
+    if (
+      url.protocol !== "https:" ||
+      !["compute.googleapis.com", "www.googleapis.com"].includes(url.hostname) ||
+      url.port ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash
+    ) {
+      return undefined;
+    }
+    path = url.pathname;
+  }
+  const parts = path.replace(/^\//, "").split("/");
+  if (parts[0] === "compute" && parts[1] === "v1") parts.splice(0, 2);
+  if (
+    parts.length !== 5 ||
+    parts[0] !== "projects" ||
+    parts[1] !== scope.project ||
+    parts[2] !== "global" ||
+    parts[3] !== collection ||
+    !parts[4]
+  ) {
+    return undefined;
+  }
+  return parts[4];
+}
+
+function checkpointImageScopeMatches(
+  provider: CoordinatorCheckpointProvider,
+  scope: CoordinatorCheckpointScope,
+  image: ManagedCheckpointImage,
+): boolean {
+  if (
+    image.region &&
+    (provider === "azure"
+      ? image.region.toLowerCase() !== scope.region.toLowerCase()
+      : image.region !== scope.region)
+  ) {
+    return false;
+  }
+  if (provider === "aws" && image.accountID && image.accountID !== scope.accountID) return false;
+  if (provider === "gcp" && image.project && image.project !== scope.project) return false;
+  return true;
+}
+
+function checkpointImageMatchesResource(
+  provider: CoordinatorCheckpointProvider,
+  scope: CoordinatorCheckpointScope,
+  kind: string,
+  resourceID: string,
+  image: ManagedCheckpointImage,
+): boolean {
+  if (!checkpointImageScopeMatches(provider, scope, image)) return false;
+  const expected = checkpointResourceIdentity(provider, scope, kind, resourceID);
+  if (!expected) return false;
+  const primary = [image.id, image.resourceID].filter((value): value is string => Boolean(value));
+  if (provider !== "aws") {
+    return (
+      (!image.kind || image.kind === kind) &&
+      primary.length > 0 &&
+      primary.every(
+        (value) => checkpointResourceIdentity(provider, scope, kind, value) === expected,
+      )
+    );
+  }
+  const primaryMatches =
+    (!image.kind || image.kind === kind) &&
+    primary.some((value) => checkpointResourceIdentity(provider, scope, kind, value) === expected);
+  return (
+    primaryMatches ||
+    (kind === "aws-ebs-snapshot" &&
+      (image.snapshots ?? []).some(
+        (value) => checkpointResourceIdentity(provider, scope, kind, value) === expected,
+      ))
+  );
+}
+
+function pendingAWSCheckpointOwnershipMatches(
+  intent: CoordinatorCheckpointResourceIntent,
+  image: ManagedCheckpointImage,
+): boolean {
+  if (
+    !image.checkpointOwnershipHash ||
+    !image.checkpointSourceLeaseID ||
+    image.accountID !== intent.scope.accountID ||
+    image.region !== intent.scope.region
+  ) {
+    return false;
+  }
+  if (image.kind === intent.kind) return image.name === intent.resourceName;
+  return (
+    intent.kind === "aws-ami" &&
+    image.kind === "aws-ebs-snapshot" &&
+    /^snap-[a-z0-9-]+$/i.test(image.id)
+  );
+}
+
 export async function findManagedCheckpointImage(
   storage: CoordinatorStorageView,
   provider: CoordinatorCheckpointProvider,
-  image: Pick<
-    ProviderImage,
-    "id" | "resourceID" | "kind" | "region" | "project" | "snapshots" | "immutableID"
-  > &
-    Partial<
-      Pick<
-        ProviderImage,
-        "name" | "accountID" | "checkpointOwnershipHash" | "checkpointSourceLeaseID"
-      >
-    >,
+  image: ManagedCheckpointImage,
 ): Promise<CoordinatorCheckpointRecord | undefined> {
-  const candidates = new Set(
-    [image.id, image.resourceID, ...(image.snapshots ?? [])].filter(Boolean),
-  );
-  if (candidates.size === 0) return undefined;
+  if (![image.id, image.resourceID, ...(image.snapshots ?? [])].some(Boolean)) return undefined;
   const claims = await storage.list<CoordinatorCheckpointResourceClaim>({
     prefix: `checkpoint-resource:${provider}:`,
   });
-  const canonicalResource = image.resourceID?.trim();
   const matchingClaims = [...claims.values()].filter((claim) => {
-    if (!candidates.has(claim.resourceID)) return false;
     if (image.immutableID && claim.immutableID !== image.immutableID) return false;
-    if (
-      canonicalResource &&
-      (provider === "azure" || provider === "gcp") &&
-      claim.resourceID.toLowerCase() !== canonicalResource.toLowerCase()
-    ) {
-      return false;
-    }
-    return true;
+    return checkpointImageMatchesResource(
+      provider,
+      claim.scope,
+      claim.kind,
+      claim.resourceID,
+      image,
+    );
   });
   const records = await Promise.all(
     matchingClaims.map(async (claim) => ({
@@ -1348,34 +1490,40 @@ export async function findManagedCheckpointImage(
   const intents = await storage.list<CoordinatorCheckpointResourceIntent>({
     prefix: `checkpoint-intent:${provider}:`,
   });
-  const matchingIntents = [...intents.values()].filter(
-    (intent) =>
-      candidates.has(intent.resourceName) ||
-      Boolean(intent.resourceID && candidates.has(intent.resourceID)) ||
-      Boolean(
-        provider === "aws" &&
-        image.name === intent.resourceName &&
-        image.accountID === intent.scope.accountID &&
-        image.region === intent.scope.region &&
-        image.checkpointOwnershipHash &&
-        image.checkpointSourceLeaseID,
-      ),
-  );
+  const matchingIntents = [...intents.values()].filter((intent) => {
+    if (!checkpointImageScopeMatches(provider, intent.scope, image)) return false;
+    if (
+      checkpointImageMatchesResource(
+        provider,
+        intent.scope,
+        intent.kind,
+        intent.resourceID ?? intent.resourceName,
+        image,
+      )
+    ) {
+      return true;
+    }
+    return provider === "aws" && pendingAWSCheckpointOwnershipMatches(intent, image);
+  });
   const pending = await Promise.all(
-    matchingIntents.map(
-      async (intent) =>
-        await storage.get<CoordinatorCheckpointRecord>(checkpointKey(intent.checkpointID)),
-    ),
+    matchingIntents.map(async (intent) => ({
+      intent,
+      record: await storage.get<CoordinatorCheckpointRecord>(checkpointKey(intent.checkpointID)),
+    })),
   );
-  const exact = pending.filter((record): record is CoordinatorCheckpointRecord =>
-    Boolean(
-      record &&
-      record.state !== "deleted" &&
-      (!image.checkpointOwnershipHash ||
-        (record.createClaim?.tokenHash === image.checkpointOwnershipHash &&
-          record.leaseID === image.checkpointSourceLeaseID)),
-    ),
-  );
+  const exact = pending
+    .filter(
+      ({ intent, record }) =>
+        record &&
+        (record.state === "creating" || record.state === "failed") &&
+        record.provider === provider &&
+        record.generation === intent.generation &&
+        checkpointScopeKey(provider, record.scope) === checkpointScopeKey(provider, intent.scope) &&
+        (!image.checkpointOwnershipHash ||
+          (record.createClaim?.tokenHash === image.checkpointOwnershipHash &&
+            record.leaseID === image.checkpointSourceLeaseID)),
+    )
+    .map(({ record }) => record!);
   if (exact.length > 1) {
     throw new CheckpointError(
       "checkpoint_source_mismatch",

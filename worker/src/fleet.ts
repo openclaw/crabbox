@@ -14616,6 +14616,10 @@ export class FleetCoordinator {
     const providerMutation =
       (method === "DELETE" && action === undefined) ||
       (method === "POST" && (action === "promote" || action === "promote-catalog"));
+    const checkpointMetadata =
+      provider === "gcp" && project && metadata?.project && metadata.project !== project
+        ? undefined
+        : metadata;
     let managedCheckpoint: CoordinatorCheckpointRecord | undefined;
     if (providerMutation) {
       managedCheckpoint = await findManagedCheckpointImage(
@@ -14623,13 +14627,24 @@ export class FleetCoordinator {
         provider as CoordinatorCheckpointProvider,
         {
           id: decodedImageID,
-          ...(metadata?.resourceID ? { resourceID: metadata.resourceID } : {}),
-          ...(metadata?.kind ? { kind: metadata.kind } : kind ? { kind } : {}),
-          ...(metadata?.immutableID ? { immutableID: metadata.immutableID } : {}),
-          ...(metadata?.snapshots ? { snapshots: metadata.snapshots } : {}),
+          ...(checkpointMetadata?.resourceID ? { resourceID: checkpointMetadata.resourceID } : {}),
+          ...(checkpointMetadata?.kind ? { kind: checkpointMetadata.kind } : kind ? { kind } : {}),
+          ...(checkpointMetadata?.immutableID
+            ? { immutableID: checkpointMetadata.immutableID }
+            : {}),
+          ...(checkpointMetadata?.snapshots ? { snapshots: checkpointMetadata.snapshots } : {}),
+          ...(provider === "gcp" && project && !decodedImageID.includes("/")
+            ? { project }
+            : checkpointMetadata?.project
+              ? { project: checkpointMetadata.project }
+              : {}),
         },
       );
-      if (!managedCheckpoint && provider === "aws" && /^ami-[a-z0-9-]+$/i.test(decodedImageID)) {
+      if (
+        !managedCheckpoint &&
+        provider === "aws" &&
+        /^(?:ami|snap)-[a-z0-9-]+$/i.test(decodedImageID)
+      ) {
         const pending = await this.state.storage.list({
           prefix: "checkpoint-intent:aws:",
           limit: 1,

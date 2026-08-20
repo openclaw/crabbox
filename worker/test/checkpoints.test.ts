@@ -1015,6 +1015,188 @@ describe("coordinator-managed checkpoints", () => {
     },
   );
 
+  it("fences case-equivalent Azure names and ARM identifiers without matching foreign scopes", async () => {
+    const { coordinator, provider, storage } = await checkpointFixture("azure");
+    await createCheckpoint(coordinator, "chk_azure_case_fence");
+    const record = (await storage.get<CoordinatorCheckpointRecord>(
+      checkpointKey("chk_azure_case_fence"),
+    ))!;
+    const deleteImage = vi.spyOn(provider, "deleteImage");
+    const query = "provider=azure&region=westeurope";
+
+    await Promise.all(
+      [record.image!.id.toUpperCase(), record.image!.resourceID.toUpperCase()].map(
+        async (resource) => {
+          const blocked = await coordinator.fetch(
+            checkpointRequest(
+              "DELETE",
+              `/v1/images/${encodeURIComponent(resource)}?${query}`,
+              undefined,
+              { admin: true },
+            ),
+          );
+          expect(blocked.status).toBe(409);
+          await expect(blocked.json()).resolves.toMatchObject({ error: "checkpoint_managed" });
+        },
+      ),
+    );
+
+    await Promise.all(
+      [
+        record.image!.resourceID.replace("sub-123", "foreign-subscription"),
+        record.image!.resourceID.replace("checkpoint-rg", "foreign-group"),
+        record.image!.resourceID.replace("/snapshots/", "/images/"),
+      ].map(async (resource) => {
+        const foreign = await coordinator.fetch(
+          checkpointRequest(
+            "DELETE",
+            `/v1/images/${encodeURIComponent(resource)}?${query}`,
+            undefined,
+            { admin: true },
+          ),
+        );
+        expect(foreign.status).toBe(409);
+        await expect(foreign.json()).resolves.toMatchObject({ error: "image_not_owned" });
+      }),
+    );
+    expect(deleteImage).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["disk-snapshot", "snapshots", "gcp-disk-snapshot"],
+    ["image", "machineImages", "gcp-machine-image"],
+  ] as const)(
+    "fences every scoped GCP %s identifier alias while rejecting foreign projects and resource kinds",
+    async (strategy, collection, kind) => {
+      const { coordinator, provider, storage } = await checkpointFixture("gcp");
+      const checkpointID = `chk_gcp_alias_${strategy.replace("-", "_")}`;
+      await createCheckpoint(coordinator, checkpointID, { mode: "manual" }, strategy);
+      const record = (await storage.get<CoordinatorCheckpointRecord>(checkpointKey(checkpointID)))!;
+      const deleteImage = vi.spyOn(provider, "deleteImage");
+      const relative = `projects/example-project/global/${collection}/${record.image!.id}`;
+      const query = "provider=gcp&region=us-central1-a&project=example-project";
+
+      await Promise.all(
+        [
+          record.image!.id,
+          relative,
+          `/${relative}`,
+          `/compute/v1/${relative}`,
+          `https://compute.googleapis.com/compute/v1/${relative}`,
+          `https://www.googleapis.com/compute/v1/${relative}`,
+        ].map(async (resource) => {
+          const blocked = await coordinator.fetch(
+            checkpointRequest(
+              "DELETE",
+              `/v1/images/${encodeURIComponent(resource)}?${query}`,
+              undefined,
+              { admin: true },
+            ),
+          );
+          expect(blocked.status).toBe(409);
+          await expect(blocked.json()).resolves.toMatchObject({ error: "checkpoint_managed" });
+        }),
+      );
+
+      const wrongCollection = collection === "snapshots" ? "machineImages" : "snapshots";
+      const wrongKind = kind === "gcp-disk-snapshot" ? "gcp-machine-image" : "gcp-disk-snapshot";
+      const foreignRequests = [
+        `${encodeURIComponent(relative.replace("example-project", "foreign-project"))}?${query}`,
+        `${encodeURIComponent(relative.replace(`/${collection}/`, `/${wrongCollection}/`))}?${query}`,
+        `${encodeURIComponent(`https://foreign.example/compute/v1/${relative}`)}?${query}`,
+        `${encodeURIComponent(record.image!.id)}?${query}&kind=${wrongKind}`,
+        `${encodeURIComponent(record.image!.id)}?provider=gcp&region=us-central1-a&project=foreign-project`,
+      ];
+      await Promise.all(
+        foreignRequests.map(async (resource) => {
+          const foreign = await coordinator.fetch(
+            checkpointRequest("DELETE", `/v1/images/${resource}`, undefined, { admin: true }),
+          );
+          expect(foreign.status).toBe(409);
+          await expect(foreign.json()).resolves.toMatchObject({ error: "image_not_owned" });
+        }),
+      );
+      expect(deleteImage).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not apply another GCP project's stored same-name image metadata to checkpoint matching", async () => {
+    const { coordinator, provider, storage } = await checkpointFixture("gcp");
+    await createCheckpoint(coordinator, "chk_gcp_foreign_metadata");
+    const record = (await storage.get<CoordinatorCheckpointRecord>(
+      checkpointKey("chk_gcp_foreign_metadata"),
+    ))!;
+    vi.spyOn(provider, "storedImageMetadata").mockResolvedValue({
+      id: record.image!.id,
+      name: record.image!.id,
+      state: "ready",
+      provider: "gcp",
+      kind: record.image!.kind,
+      region: record.scope.region,
+      project: record.scope.project,
+      resourceID: record.image!.resourceID,
+      immutableID: record.image!.immutableID,
+    });
+    const deleteImage = vi.spyOn(provider, "deleteImage");
+
+    const foreign = await coordinator.fetch(
+      checkpointRequest(
+        "DELETE",
+        `/v1/images/${encodeURIComponent(record.image!.id)}?provider=gcp&region=us-central1-a&project=foreign-project`,
+        undefined,
+        { admin: true },
+      ),
+    );
+    expect(foreign.status).toBe(409);
+    await expect(foreign.json()).resolves.toMatchObject({ error: "image_not_owned" });
+    expect(deleteImage).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when an unscoped GCP name matches checkpoints in multiple projects", async () => {
+    const { coordinator, provider, storage } = await checkpointFixture("gcp");
+    await createCheckpoint(coordinator, "chk_gcp_ambiguous_original");
+    const original = (await storage.get<CoordinatorCheckpointRecord>(
+      checkpointKey("chk_gcp_ambiguous_original"),
+    ))!;
+    const foreign: CoordinatorCheckpointRecord = {
+      ...original,
+      id: "chk_gcp_ambiguous_foreign",
+      scope: { ...original.scope, project: "foreign-project" },
+      image: {
+        ...original.image!,
+        resourceID: `projects/foreign-project/global/snapshots/${original.image!.id}`,
+        immutableID: "foreign-immutable-id",
+      },
+    };
+    await storage.put(checkpointKey(foreign.id), foreign);
+    await storage.put(
+      checkpointResourceKey("gcp", foreign.scope, foreign.image!.kind, foreign.image!.resourceID),
+      {
+        checkpointID: foreign.id,
+        provider: "gcp",
+        scope: foreign.scope,
+        kind: foreign.image!.kind,
+        resourceID: foreign.image!.resourceID,
+        immutableID: foreign.image!.immutableID,
+      },
+    );
+    const deleteImage = vi.spyOn(provider, "deleteImage");
+
+    await expect(
+      findManagedCheckpointImage(storage, "gcp", { id: original.image!.id }),
+    ).rejects.toMatchObject({ code: "checkpoint_source_mismatch" });
+    const blocked = await coordinator.fetch(
+      checkpointRequest(
+        "DELETE",
+        `/v1/images/${encodeURIComponent(original.image!.id)}?provider=gcp&region=us-central1-a`,
+        undefined,
+        { admin: true },
+      ),
+    );
+    expect(blocked.status).toBe(500);
+    expect(deleteImage).not.toHaveBeenCalled();
+  });
+
   it.each(["azure", "gcp"] as const)(
     "rejects spoofed %s deletion scope without bypassing canonical ownership",
     async (providerName) => {
@@ -1079,23 +1261,40 @@ describe("coordinator-managed checkpoints", () => {
       ))!;
       expect(await storage.list({ prefix: `checkpoint-intent:${providerName}:` })).toHaveLength(1);
       expect(await storage.list({ prefix: `image:${providerName}:created:` })).toHaveLength(0);
-      const query = new URLSearchParams({ provider: providerName, region: pending.scope.region });
-      const path = `/v1/images/${encodeURIComponent(pending.createClaim!.resourceName)}`;
+      const query = new URLSearchParams({
+        provider: providerName,
+        region: pending.scope.region,
+        ...(pending.scope.project ? { project: pending.scope.project } : {}),
+      });
+      const name = pending.createClaim!.resourceName;
+      const resources =
+        providerName === "azure"
+          ? [
+              name,
+              name.toUpperCase(),
+              `/subscriptions/${pending.scope.subscriptionID}/resourceGroups/${pending.scope.resourceGroup}/providers/Microsoft.Compute/snapshots/${name}`.toUpperCase(),
+            ]
+          : [
+              name,
+              `projects/${pending.scope.project}/global/snapshots/${name}`,
+              `https://compute.googleapis.com/compute/v1/projects/${pending.scope.project}/global/snapshots/${name}`,
+            ];
       await Promise.all(
-        [
-          checkpointRequest("DELETE", `${path}?${query}`, undefined, { admin: true }),
-          checkpointRequest(
-            "POST",
-            `${path}/promote?${query}`,
-            { target: "linux" },
-            {
-              admin: true,
-            },
-          ),
-        ].map(async (request) => {
-          const blocked = await coordinator.fetch(request);
-          expect(blocked.status).toBe(409);
-          await expect(blocked.json()).resolves.toMatchObject({ error: "checkpoint_pending" });
+        resources.flatMap((resource) => {
+          const path = `/v1/images/${encodeURIComponent(resource)}`;
+          return [
+            checkpointRequest("DELETE", `${path}?${query}`, undefined, { admin: true }),
+            checkpointRequest(
+              "POST",
+              `${path}/promote?${query}`,
+              { target: "linux" },
+              { admin: true },
+            ),
+          ].map(async (request) => {
+            const blocked = await coordinator.fetch(request);
+            expect(blocked.status).toBe(409);
+            await expect(blocked.json()).resolves.toMatchObject({ error: "checkpoint_pending" });
+          });
         }),
       );
       finish({} as ProviderImage);
@@ -1939,6 +2138,156 @@ describe("coordinator-managed checkpoints", () => {
     finish();
     expect((await creating).status).toBe(201);
   });
+
+  it.each([
+    ["disk-snapshot", "snap-000000000001"],
+    ["image", "snap-backing-0001"],
+  ] as const)(
+    "fences generic AWS snapshot deletion during pending %s creation using fresh ownership tags",
+    async (strategy, snapshotID) => {
+      const { coordinator, provider, storage } = await checkpointFixture("aws");
+      const deleteImage = vi.spyOn(provider, "deleteImage");
+      let finish!: () => void;
+      let started!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      vi.mocked(provider.createCheckpointImage).mockImplementationOnce(
+        async (_lease, name, _noReboot, requestedStrategy, ownership) => {
+          const image = providerImage("aws", name, requestedStrategy, ownership);
+          vi.spyOn(provider, "getImage").mockResolvedValue(
+            strategy === "image"
+              ? {
+                  id: snapshotID,
+                  name: snapshotID,
+                  state: "pending",
+                  provider: "aws",
+                  kind: "aws-ebs-snapshot",
+                  region: "eu-west-1",
+                  accountID: "123456789012",
+                  resourceID: snapshotID,
+                  immutableID: snapshotID,
+                  checkpointOwnershipHash: ownership.tokenHash,
+                  checkpointSourceLeaseID: ownership.sourceLeaseID,
+                  snapshots: [snapshotID],
+                }
+              : image,
+          );
+          started();
+          return await new Promise<ProviderImage>((resolve) => {
+            finish = () => resolve(image);
+          });
+        },
+      );
+      const checkpointID = `chk_pending_aws_${strategy.replace("-", "_")}_snapshot`;
+      const creating = createCheckpoint(coordinator, checkpointID, { mode: "manual" }, strategy);
+      await entered;
+
+      const blocked = await coordinator.fetch(
+        checkpointRequest(
+          "DELETE",
+          `/v1/images/${snapshotID}?provider=aws&region=eu-west-1`,
+          undefined,
+          { admin: true },
+        ),
+      );
+      expect(blocked.status).toBe(409);
+      await expect(blocked.json()).resolves.toMatchObject({ error: "checkpoint_pending" });
+      expect(provider.getImage).toHaveBeenCalledWith(snapshotID, undefined);
+      expect(deleteImage).not.toHaveBeenCalled();
+      expect(await storage.get(checkpointKey(checkpointID))).toMatchObject({ state: "creating" });
+
+      finish();
+      expect((await creating).status).toBe(201);
+    },
+  );
+
+  it.each(["disk-snapshot", "image"] as const)(
+    "does not fence unrelated AWS snapshots with missing or mismatched pending %s ownership evidence",
+    async (strategy) => {
+      const { coordinator, provider, storage } = await checkpointFixture("aws");
+      const deleteImage = vi.spyOn(provider, "deleteImage").mockResolvedValue(undefined);
+      let finish!: () => void;
+      let started!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      let ownership!: ProviderCheckpointOwnership;
+      let resourceName!: string;
+      vi.mocked(provider.createCheckpointImage).mockImplementationOnce(
+        async (_lease, name, _noReboot, requestedStrategy, checkpointOwnership) => {
+          ownership = checkpointOwnership;
+          resourceName = name;
+          started();
+          return await new Promise<ProviderImage>((resolve) => {
+            finish = () =>
+              resolve(providerImage("aws", name, requestedStrategy, checkpointOwnership));
+          });
+        },
+      );
+      const creating = createCheckpoint(
+        coordinator,
+        `chk_pending_aws_${strategy.replace("-", "_")}_foreign`,
+        { mode: "manual" },
+        strategy,
+      );
+      await entered;
+
+      const foreignEvidence: Array<Partial<ProviderImage>> = [
+        { checkpointOwnershipHash: "f".repeat(64) },
+        { checkpointSourceLeaseID: "cbx_foreign_lease" },
+        { accountID: "999999999999" },
+        { region: "us-east-1" },
+        { checkpointOwnershipHash: undefined },
+        { checkpointSourceLeaseID: undefined },
+        ...(strategy === "disk-snapshot" ? [{ name: "foreign-snapshot-name" }] : []),
+      ];
+      const observed = new Map<string, ProviderImage>();
+      vi.spyOn(provider, "getImage").mockImplementation(async (imageID) => observed.get(imageID)!);
+      await Promise.all(
+        foreignEvidence.map(async (evidence, index) => {
+          const snapshotID = `snap-foreign-${index}`;
+          const metadata: ProviderImage = {
+            id: snapshotID,
+            name: "independent-image",
+            state: "available",
+            provider: "aws",
+            kind: "aws-ebs-snapshot",
+            region: "eu-west-1",
+            resourceID: snapshotID,
+            immutableID: snapshotID,
+          };
+          await storage.put(`image:aws:created:${encodeURIComponent(snapshotID)}`, metadata);
+          observed.set(snapshotID, {
+            ...metadata,
+            name: strategy === "disk-snapshot" ? resourceName : snapshotID,
+            accountID: "123456789012",
+            checkpointOwnershipHash: ownership.tokenHash,
+            checkpointSourceLeaseID: ownership.sourceLeaseID,
+            snapshots: [snapshotID],
+            ...evidence,
+          });
+          const unrelated = await coordinator.fetch(
+            checkpointRequest(
+              "DELETE",
+              `/v1/images/${snapshotID}?provider=aws&region=eu-west-1`,
+              undefined,
+              { admin: true },
+            ),
+          );
+          expect(unrelated.status).toBe(200);
+          await expect(unrelated.json()).resolves.toMatchObject({
+            imageID: snapshotID,
+            deleted: true,
+          });
+        }),
+      );
+      expect(deleteImage).toHaveBeenCalledTimes(foreignEvidence.length);
+
+      finish();
+      expect((await creating).status).toBe(201);
+    },
+  );
 
   it("reconciles an existing exact AWS promotion into a durable pin before publication", async () => {
     const { coordinator, provider, storage } = await checkpointFixture("aws");
