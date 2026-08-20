@@ -450,87 +450,103 @@ func (c *sdkOpenSandboxClient) readinessContext(ctx context.Context, expiresAt *
 func (c *sdkOpenSandboxClient) waitForRunning(ctx context.Context, sandboxID string) (*sdk.SandboxInfo, error) {
 	start := time.Now()
 	var expiresAt *time.Time
-	for {
-		if err := ctx.Err(); err != nil {
-			if errors.Is(err, context.DeadlineExceeded) {
-				return nil, fmt.Errorf("sandbox %s did not reach Running state within %s", sandboxID, time.Since(start).Round(time.Millisecond))
+	expiredErr := fmt.Errorf("sandbox %s expired before reaching Running state", sandboxID)
+	result, err := shared.Poll(ctx, 0, 2*time.Second,
+		func(ctx context.Context, delay time.Duration) error {
+			if expiresAt != nil {
+				if remaining := time.Until(*expiresAt); remaining < delay {
+					delay = remaining
+				}
 			}
-			return nil, fmt.Errorf("sandbox %s did not reach Running state: %w", sandboxID, err)
-		}
-		if expiresAt != nil && !expiresAt.After(time.Now()) {
-			return nil, fmt.Errorf("sandbox %s expired before reaching Running state", sandboxID)
-		}
-
-		requestCtx := ctx
-		cancel := func() {}
-		if expiresAt != nil {
-			requestCtx, cancel = context.WithDeadline(ctx, *expiresAt)
-		}
-		info, err := c.lifecycle().GetSandbox(requestCtx, sandboxID)
-		requestContextErr := requestCtx.Err()
-		cancel()
-		if err != nil {
-			if expiresAt != nil && requestContextErr != nil && ctx.Err() == nil {
-				return nil, fmt.Errorf("sandbox %s expired before reaching Running state", sandboxID)
+			if delay <= 0 {
+				return expiredErr
 			}
-			return nil, fmt.Errorf("get sandbox status: %w", c.redactProviderError(err))
-		}
-		if info.ExpiresAt != nil && !info.ExpiresAt.IsZero() {
-			expiresAt = info.ExpiresAt
-		}
-		if info.Status.State == sdk.StateRunning {
+			return shared.SleepContext(ctx, delay)
+		},
+		func(context.Context) (*sdk.SandboxInfo, error) {
+			if expiresAt != nil && !expiresAt.After(time.Now()) {
+				return nil, expiredErr
+			}
+			requestCtx := ctx
+			cancel := func() {}
+			if expiresAt != nil {
+				requestCtx, cancel = context.WithDeadline(ctx, *expiresAt)
+			}
+			info, err := c.lifecycle().GetSandbox(requestCtx, sandboxID)
+			requestContextErr := requestCtx.Err()
+			cancel()
+			if err != nil {
+				if expiresAt != nil && requestContextErr != nil && ctx.Err() == nil {
+					return nil, expiredErr
+				}
+				return nil, fmt.Errorf("get sandbox status: %w", c.redactProviderError(err))
+			}
+			if info.ExpiresAt != nil && !info.ExpiresAt.IsZero() {
+				expiresAt = info.ExpiresAt
+			}
 			return info, nil
-		}
-		if info.Status.State == sdk.StateFailed || info.Status.State == sdk.StateTerminated {
-			return nil, fmt.Errorf("sandbox %s entered terminal state: %s (%s)", sandboxID, info.Status.State, info.Status.Reason)
-		}
-		pollDelay := 2 * time.Second
-		if expiresAt != nil {
-			if remaining := time.Until(*expiresAt); remaining < pollDelay {
-				pollDelay = remaining
+		},
+		func(_ context.Context, info *sdk.SandboxInfo, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
 			}
-		}
-		if pollDelay <= 0 {
-			return nil, fmt.Errorf("sandbox %s expired before reaching Running state", sandboxID)
-		}
-		select {
-		case <-ctx.Done():
-		case <-time.After(pollDelay):
-		}
+			if info.Status.State == sdk.StateRunning {
+				return true, nil
+			}
+			if info.Status.State == sdk.StateFailed || info.Status.State == sdk.StateTerminated {
+				return false, fmt.Errorf("sandbox %s entered terminal state: %s (%s)", sandboxID, info.Status.State, info.Status.Reason)
+			}
+			return false, nil
+		}, nil)
+	if err == nil {
+		return result.Value, nil
 	}
+	if errors.Is(err, expiredErr) {
+		return nil, expiredErr
+	}
+	if result.Err == nil && errors.Is(context.Cause(ctx), context.DeadlineExceeded) && errors.Is(err, context.DeadlineExceeded) {
+		return nil, fmt.Errorf("sandbox %s did not reach Running state within %s", sandboxID, time.Since(start).Round(time.Millisecond))
+	}
+	if result.Err == nil && context.Cause(ctx) != nil && errors.Is(err, context.Cause(ctx)) {
+		return nil, fmt.Errorf("sandbox %s did not reach Running state: %w", sandboxID, ctx.Err())
+	}
+	return nil, err
 }
 
 func (c *sdkOpenSandboxClient) waitUntilReady(ctx context.Context, sandboxID string) error {
 	interval := sdk.DefaultHealthCheckPollingInterval
 	start := time.Now()
-	var lastErr error
-	for {
-		conn, err := c.resolveExecd(ctx, sandboxID)
-		if err == nil {
-			err = c.execdForConnection(conn).Ping(ctx)
-			if err != nil {
-				err = c.redactProviderError(err, openSandboxExecdSecrets(conn)...)
+	result, err := shared.Poll(context.WithoutCancel(ctx), 0, interval,
+		func(context.Context, time.Duration) error { return shared.SleepContext(ctx, interval) },
+		func(context.Context) (struct{}, error) {
+			conn, err := c.resolveExecd(ctx, sandboxID)
+			if err == nil {
+				err = c.execdForConnection(conn).Ping(ctx)
+				if err != nil {
+					err = c.redactProviderError(err, openSandboxExecdSecrets(conn)...)
+				}
 			}
-		}
-		if err == nil {
-			return nil
-		}
-		err = c.redactProviderError(err)
-		if !isOpenSandboxReadinessPending(err) {
-			return fmt.Errorf("sandbox %s readiness failed: %w", sandboxID, err)
-		}
-		lastErr = err
-		if ctx.Err() != nil {
-			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				return fmt.Errorf("sandbox %s did not become ready within %s: %w", sandboxID, time.Since(start).Round(time.Millisecond), lastErr)
+			return struct{}{}, c.redactProviderError(err)
+		},
+		func(_ context.Context, _ struct{}, fetchErr error) (bool, error) {
+			if fetchErr == nil {
+				return true, nil
 			}
-			return fmt.Errorf("sandbox %s did not become ready: %w", sandboxID, ctx.Err())
-		}
-		select {
-		case <-ctx.Done():
-		case <-time.After(interval):
-		}
+			if !isOpenSandboxReadinessPending(fetchErr) {
+				return false, fmt.Errorf("sandbox %s readiness failed: %w", sandboxID, fetchErr)
+			}
+			return false, nil
+		}, nil)
+	if err == nil {
+		return nil
 	}
+	if context.Cause(ctx) != nil && errors.Is(err, context.Cause(ctx)) {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("sandbox %s did not become ready within %s: %w", sandboxID, time.Since(start).Round(time.Millisecond), result.Err)
+		}
+		return fmt.Errorf("sandbox %s did not become ready: %w", sandboxID, ctx.Err())
+	}
+	return err
 }
 
 func (c *sdkOpenSandboxClient) ListSandboxes(ctx context.Context, metadata map[string]string) ([]sandboxInfo, error) {

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type backend struct {
@@ -612,25 +613,41 @@ func (b *backend) waitForNetworkAddress(ctx context.Context, id string, c inspec
 	defer deadline.Stop()
 	tick := time.NewTicker(500 * time.Millisecond)
 	defer tick.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return inspectContainer{}, ctx.Err()
-		case <-deadline.C:
-			return inspectContainer{}, exit(5, "apple-container %s has no network address yet", id)
-		case <-tick.C:
-			next, err := b.inspectContainer(ctx, id)
-			if err != nil {
-				return inspectContainer{}, err
+	initial := true
+	result, err := shared.Poll(context.WithoutCancel(ctx), 0, 500*time.Millisecond,
+		func(context.Context, time.Duration) error {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-deadline.C:
+				return exit(5, "apple-container %s has no network address yet", id)
+			case <-tick.C:
+				return nil
+			}
+		},
+		func(context.Context) (inspectContainer, error) {
+			if initial {
+				initial = false
+				return c, nil
+			}
+			return b.inspectContainer(ctx, id)
+		},
+		func(_ context.Context, next inspectContainer, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
 			}
 			if next.ip() != "" {
-				return next, nil
+				return true, nil
 			}
 			if appleContainerTerminalStatus(next.status()) {
-				return inspectContainer{}, exit(5, "apple-container %s stopped before a network address was assigned", id)
+				return false, exit(5, "apple-container %s stopped before a network address was assigned", id)
 			}
-		}
+			return false, nil
+		}, nil)
+	if err != nil {
+		return inspectContainer{}, err
 	}
+	return result.Value, nil
 }
 
 func appleContainerTerminalStatus(status string) bool {

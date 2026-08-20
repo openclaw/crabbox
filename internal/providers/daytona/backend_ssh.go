@@ -8,6 +8,7 @@ import (
 	"time"
 
 	daytona "github.com/daytonaio/daytona/libs/api-client-go"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const (
@@ -289,27 +290,34 @@ func (b *daytonaLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Serv
 
 func waitForDaytonaReady(ctx context.Context, client daytonaAPI, id string, timeout time.Duration) (*daytona.Sandbox, error) {
 	deadline := time.Now().Add(timeout)
-	for {
-		sandbox, err := client.GetSandbox(ctx, id)
-		if err != nil {
-			return nil, daytonaError("get sandbox", err)
-		}
-		state := daytonaSandboxState(sandbox)
-		if daytonaStateReady(state) {
-			return sandbox, nil
-		}
-		if daytonaStateFailed(state) {
-			return nil, exit(5, "daytona sandbox %s entered terminal state=%s", id, state)
-		}
-		if time.Now().After(deadline) {
-			return nil, exit(5, "timed out waiting for daytona sandbox %s (state=%s)", id, state)
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(3 * time.Second):
-		}
+	result, err := shared.Poll(context.WithoutCancel(ctx), 0, 3*time.Second,
+		func(context.Context, time.Duration) error {
+			if err := shared.SleepContext(ctx, 3*time.Second); err != nil {
+				return ctx.Err()
+			}
+			return nil
+		},
+		func(context.Context) (*daytona.Sandbox, error) { return client.GetSandbox(ctx, id) },
+		func(_ context.Context, sandbox *daytona.Sandbox, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, daytonaError("get sandbox", fetchErr)
+			}
+			state := daytonaSandboxState(sandbox)
+			if daytonaStateReady(state) {
+				return true, nil
+			}
+			if daytonaStateFailed(state) {
+				return false, exit(5, "daytona sandbox %s entered terminal state=%s", id, state)
+			}
+			if time.Now().After(deadline) {
+				return false, exit(5, "timed out waiting for daytona sandbox %s (state=%s)", id, state)
+			}
+			return false, nil
+		}, nil)
+	if err != nil {
+		return nil, err
 	}
+	return result.Value, nil
 }
 
 func resolveDaytonaSandbox(ctx context.Context, client daytonaAPI, cfg Config, id string) (*daytona.Sandbox, string, error) {

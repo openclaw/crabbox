@@ -9,6 +9,7 @@ import (
 	"time"
 
 	nomadapi "github.com/hashicorp/nomad/api"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const statusPollInterval = 2 * time.Second
@@ -701,54 +702,65 @@ func (b *backend) waitForEvaluation(ctx context.Context, client Client, evalID s
 	timeout := b.evalTimeout()
 	pollCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	for {
-		eval, err := client.EvaluationInfo(pollCtx, evalID)
-		if err != nil {
-			return err
-		}
-		if eval == nil {
-			return exit(5, "nomad evaluation %s returned no data", evalID)
-		}
-		switch strings.TrimSpace(eval.Status) {
-		case nomadapi.EvalStatusComplete:
-			return nil
-		case nomadapi.EvalStatusFailed, nomadapi.EvalStatusCancelled:
-			return exit(5, "nomad evaluation %s ended with status=%s description=%s", evalID, eval.Status, eval.StatusDescription)
-		}
-		select {
-		case <-pollCtx.Done():
-			if errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-				return exit(5, "timed out waiting for nomad evaluation %s", evalID)
+	result, err := shared.Poll(context.WithoutCancel(pollCtx), 0, statusPollInterval,
+		func(context.Context, time.Duration) error {
+			if err := shared.SleepContext(pollCtx, statusPollInterval); err != nil {
+				return pollCtx.Err()
 			}
-			return pollCtx.Err()
-		case <-time.After(statusPollInterval):
-		}
+			return nil
+		},
+		func(context.Context) (*nomadapi.Evaluation, error) { return client.EvaluationInfo(pollCtx, evalID) },
+		func(_ context.Context, eval *nomadapi.Evaluation, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
+			}
+			if eval == nil {
+				return false, exit(5, "nomad evaluation %s returned no data", evalID)
+			}
+			switch strings.TrimSpace(eval.Status) {
+			case nomadapi.EvalStatusComplete:
+				return true, nil
+			case nomadapi.EvalStatusFailed, nomadapi.EvalStatusCancelled:
+				return false, exit(5, "nomad evaluation %s ended with status=%s description=%s", evalID, eval.Status, eval.StatusDescription)
+			}
+			return false, nil
+		}, nil)
+	if err != nil && result.Err == nil && errors.Is(context.Cause(pollCtx), context.DeadlineExceeded) && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+		return exit(5, "timed out waiting for nomad evaluation %s", evalID)
 	}
+	return err
 }
 
 func (b *backend) waitForAllocation(ctx context.Context, client Client, jobID string, timeout time.Duration) (allocationReadiness, error) {
 	pollCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	for {
-		ready, err := b.currentAllocation(pollCtx, client, jobID)
-		if err != nil {
-			return allocationReadiness{}, err
-		}
-		if ready.State() == "running" {
-			return ready, nil
-		}
-		if ready.State() == "terminal" {
-			return allocationReadiness{}, exit(5, "nomad job %s allocation %s reached terminal status client=%s desired=%s", jobID, ready.AllocationID, ready.ClientStatus, ready.DesiredStatus)
-		}
-		select {
-		case <-pollCtx.Done():
-			if errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-				return allocationReadiness{}, exit(5, "timed out waiting for nomad job %s allocation readiness", jobID)
+	result, err := shared.Poll(context.WithoutCancel(pollCtx), 0, statusPollInterval,
+		func(context.Context, time.Duration) error {
+			if err := shared.SleepContext(pollCtx, statusPollInterval); err != nil {
+				return pollCtx.Err()
 			}
-			return allocationReadiness{}, pollCtx.Err()
-		case <-time.After(statusPollInterval):
+			return nil
+		},
+		func(context.Context) (allocationReadiness, error) { return b.currentAllocation(pollCtx, client, jobID) },
+		func(_ context.Context, ready allocationReadiness, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
+			}
+			if ready.State() == "running" {
+				return true, nil
+			}
+			if ready.State() == "terminal" {
+				return false, exit(5, "nomad job %s allocation %s reached terminal status client=%s desired=%s", jobID, ready.AllocationID, ready.ClientStatus, ready.DesiredStatus)
+			}
+			return false, nil
+		}, nil)
+	if err != nil {
+		if result.Err == nil && errors.Is(context.Cause(pollCtx), context.DeadlineExceeded) && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+			return allocationReadiness{}, exit(5, "timed out waiting for nomad job %s allocation readiness", jobID)
 		}
+		return allocationReadiness{}, err
 	}
+	return result.Value, nil
 }
 
 func (b *backend) currentAllocation(ctx context.Context, client Client, jobID string) (allocationReadiness, error) {

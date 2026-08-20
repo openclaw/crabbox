@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type api interface {
@@ -473,30 +475,34 @@ func (c *client) waitForBoxReady(ctx context.Context, box boxData) (boxData, err
 	defer deadline.Stop()
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
-	var lastErr error
-	for {
-		if boxReadyForSSH(latest) {
-			return latest, nil
-		}
-		if refreshed, err := c.GetBox(ctx, latest.ID); err == nil {
-			latest = mergeBox(latest, refreshed)
-			if boxReadyForSSH(latest) {
-				return latest, nil
-			}
-		} else {
-			lastErr = err
-		}
-		select {
-		case <-ctx.Done():
-			return latest, ctx.Err()
-		case <-deadline.C:
-			if lastErr != nil {
-				return latest, fmt.Errorf("timed out waiting for ascii-box %s to become ready: %w", latest.ID, lastErr)
-			}
-			return latest, fmt.Errorf("timed out waiting for ascii-box %s to become ready", latest.ID)
-		case <-ticker.C:
-		}
+	if boxReadyForSSH(latest) {
+		return latest, nil
 	}
+	var lastErr error
+	_, err := shared.Poll(context.WithoutCancel(ctx), 0, 2*time.Second,
+		func(context.Context, time.Duration) error {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-deadline.C:
+				if lastErr != nil {
+					return fmt.Errorf("timed out waiting for ascii-box %s to become ready: %w", latest.ID, lastErr)
+				}
+				return fmt.Errorf("timed out waiting for ascii-box %s to become ready", latest.ID)
+			case <-ticker.C:
+				return nil
+			}
+		},
+		func(context.Context) (boxData, error) { return c.GetBox(ctx, latest.ID) },
+		func(_ context.Context, refreshed boxData, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				lastErr = fetchErr
+				return false, nil
+			}
+			latest = mergeBox(latest, refreshed)
+			return boxReadyForSSH(latest), nil
+		}, nil)
+	return latest, err
 }
 
 func (c *client) env() []string {

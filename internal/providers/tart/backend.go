@@ -15,6 +15,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type backend struct {
@@ -519,28 +520,48 @@ func (b *backend) waitForIP(ctx context.Context, name string) (string, error) {
 	deadline := time.After(5 * time.Minute)
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return "", exit(2, "tart ip %s: context cancelled", name)
-		case <-deadline:
-			return "", exit(5, "tart ip %s: timed out waiting for IP address", name)
-		case <-ticker.C:
-			result, err := b.tart(ctx, []string{"ip", name}, nil, nil)
-			if err != nil {
-				stderr := strings.ToLower(strings.TrimSpace(result.Stderr))
-				if strings.Contains(stderr, "is your vm running") || strings.Contains(stderr, "not running") {
-					return "", exit(2, "tart ip %s: %s", name, strings.TrimSpace(result.Stderr))
-				}
-				continue
-			}
-			ip := strings.TrimSpace(result.Stdout)
-			if ip != "" && ip != "--" {
-				return ip, nil
-			}
-		}
+	type observation struct {
+		result LocalCommandResult
+		err    error
 	}
+	initial := true
+	result, err := shared.Poll(context.WithoutCancel(ctx), 0, 3*time.Second,
+		func(context.Context, time.Duration) error {
+			select {
+			case <-ctx.Done():
+				return exit(2, "tart ip %s: context cancelled", name)
+			case <-deadline:
+				return exit(5, "tart ip %s: timed out waiting for IP address", name)
+			case <-ticker.C:
+				return nil
+			}
+		},
+		func(context.Context) (observation, error) {
+			if initial {
+				initial = false
+				return observation{}, nil
+			}
+			commandResult, commandErr := b.tart(ctx, []string{"ip", name}, nil, nil)
+			return observation{result: commandResult, err: commandErr}, nil
+		},
+		func(_ context.Context, current observation, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
+			}
+			if current.err != nil {
+				stderr := strings.ToLower(strings.TrimSpace(current.result.Stderr))
+				if strings.Contains(stderr, "is your vm running") || strings.Contains(stderr, "not running") {
+					return false, exit(2, "tart ip %s: %s", name, strings.TrimSpace(current.result.Stderr))
+				}
+				return false, nil
+			}
+			ip := strings.TrimSpace(current.result.Stdout)
+			return ip != "" && ip != "--", nil
+		}, nil)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(result.Value.result.Stdout), nil
 }
 
 var validPOSIXUser = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9._-]*$`)

@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type leaseBackend struct {
@@ -1215,25 +1217,42 @@ func hostingerAdoptionPending(claim LeaseClaim) bool {
 
 func (b *leaseBackend) waitForVM(ctx context.Context, client hostingerAPI, id string) (hostingerVM, error) {
 	deadline := time.Now().Add(10 * time.Minute)
-	for {
-		if ctx.Err() != nil {
-			return hostingerVM{}, context.Cause(ctx)
-		}
-		vm, err := client.GetVM(ctx, id)
-		if err != nil {
-			return hostingerVM{}, exit(1, "hostinger get vps %s failed: %v", id, err)
-		}
-		if vm.Host() != "" && vm.Ready() {
-			return vm, nil
-		}
-		if vm.Terminal() {
-			return hostingerVM{}, exit(5, "hostinger vps %s entered terminal state=%s", id, firstNonBlank(vm.State, vm.Status, "unknown"))
-		}
-		if time.Now().After(deadline) {
-			return hostingerVM{}, exit(5, "timed out waiting for hostinger vps %s to expose a public IP; last_state=%s", id, firstNonBlank(vm.State, vm.Status))
-		}
-		hostingerSleep(5 * time.Second)
+	contextDoneBeforeFetch := false
+	result, err := shared.Poll(context.WithoutCancel(ctx), 0, 5*time.Second,
+		func(context.Context, time.Duration) error {
+			hostingerSleep(5 * time.Second)
+			return nil
+		},
+		func(context.Context) (hostingerVM, error) {
+			contextDoneBeforeFetch = false
+			if cause := context.Cause(ctx); cause != nil {
+				contextDoneBeforeFetch = true
+				return hostingerVM{}, cause
+			}
+			return client.GetVM(ctx, id)
+		},
+		func(_ context.Context, vm hostingerVM, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				if contextDoneBeforeFetch {
+					return false, fetchErr
+				}
+				return false, exit(1, "hostinger get vps %s failed: %v", id, fetchErr)
+			}
+			if vm.Host() != "" && vm.Ready() {
+				return true, nil
+			}
+			if vm.Terminal() {
+				return false, exit(5, "hostinger vps %s entered terminal state=%s", id, firstNonBlank(vm.State, vm.Status, "unknown"))
+			}
+			if time.Now().After(deadline) {
+				return false, exit(5, "timed out waiting for hostinger vps %s to expose a public IP; last_state=%s", id, firstNonBlank(vm.State, vm.Status))
+			}
+			return false, nil
+		}, nil)
+	if err != nil {
+		return hostingerVM{}, err
 	}
+	return result.Value, nil
 }
 
 func (b *leaseBackend) stopVMAndWait(ctx context.Context, client hostingerAPI, id string) error {
@@ -1243,23 +1262,29 @@ func (b *leaseBackend) stopVMAndWait(ctx context.Context, client hostingerAPI, i
 		return exit(1, "hostinger stop vps %s failed: %v", id, err)
 	}
 	lastState := "unknown"
-	for {
-		vm, err := client.GetVM(stopCtx, id)
-		if err != nil {
-			if errors.Is(stopCtx.Err(), context.DeadlineExceeded) {
-				return exit(5, "timed out waiting for hostinger vps %s to stop; last_state=%s", id, lastState)
-			}
-			return exit(1, "hostinger confirm stopped vps %s failed: %v", id, err)
-		}
-		lastState = firstNonBlank(vm.State, vm.Status, "unknown")
-		if vm.Stopped() {
+	_, err := shared.Poll(context.WithoutCancel(stopCtx), 0, 2*time.Second,
+		func(context.Context, time.Duration) error {
+			hostingerSleep(2 * time.Second)
 			return nil
-		}
-		if stopCtx.Err() != nil {
-			return exit(5, "timed out waiting for hostinger vps %s to stop; last_state=%s", id, lastState)
-		}
-		hostingerSleep(2 * time.Second)
-	}
+		},
+		func(context.Context) (hostingerVM, error) { return client.GetVM(stopCtx, id) },
+		func(_ context.Context, vm hostingerVM, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				if errors.Is(stopCtx.Err(), context.DeadlineExceeded) {
+					return false, exit(5, "timed out waiting for hostinger vps %s to stop; last_state=%s", id, lastState)
+				}
+				return false, exit(1, "hostinger confirm stopped vps %s failed: %v", id, fetchErr)
+			}
+			lastState = firstNonBlank(vm.State, vm.Status, "unknown")
+			if vm.Stopped() {
+				return true, nil
+			}
+			if stopCtx.Err() != nil {
+				return false, exit(5, "timed out waiting for hostinger vps %s to stop; last_state=%s", id, lastState)
+			}
+			return false, nil
+		}, nil)
+	return err
 }
 
 func (b *leaseBackend) updateClaimState(leaseID string, cfg Config, state string, resetLifetime bool) (LeaseClaim, error) {

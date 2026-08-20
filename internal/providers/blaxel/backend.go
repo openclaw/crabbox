@@ -9,6 +9,8 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type processPoller interface {
@@ -574,30 +576,34 @@ func (b *backend) waitSandboxReady(ctx context.Context, client Client, sandboxID
 	timeout := blaxelReadyTimeout
 	pollCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	for {
-		sb, err := client.GetSandbox(pollCtx, sandboxID)
-		if err != nil {
-			if errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-				return Sandbox{}, exit(5, "timed out waiting for blaxel sandbox %s to become ready", sandboxID)
+	result, err := shared.Poll(context.WithoutCancel(pollCtx), 0, blaxelStatusPoll,
+		func(context.Context, time.Duration) error {
+			if err := shared.SleepContext(pollCtx, blaxelStatusPoll); err != nil {
+				return pollCtx.Err()
 			}
-			return Sandbox{}, err
-		}
-		state := strings.ToLower(strings.TrimSpace(sb.Status))
-		if isReadyState(state) || state == "" {
-			return sb, nil
-		}
-		if isTerminalState(state) {
-			return Sandbox{}, exit(5, "blaxel sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
-		}
-		select {
-		case <-pollCtx.Done():
-			if errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-				return Sandbox{}, exit(5, "timed out waiting for blaxel sandbox %s to become ready", sandboxID)
+			return nil
+		},
+		func(context.Context) (Sandbox, error) { return client.GetSandbox(pollCtx, sandboxID) },
+		func(_ context.Context, sb Sandbox, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
 			}
-			return Sandbox{}, pollCtx.Err()
-		case <-time.After(blaxelStatusPoll):
+			state := strings.ToLower(strings.TrimSpace(sb.Status))
+			if isReadyState(state) || state == "" {
+				return true, nil
+			}
+			if isTerminalState(state) {
+				return false, exit(5, "blaxel sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
+			}
+			return false, nil
+		}, nil)
+	if err != nil {
+		if errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil && (result.Err != nil || errors.Is(err, context.DeadlineExceeded)) {
+			return Sandbox{}, exit(5, "timed out waiting for blaxel sandbox %s to become ready", sandboxID)
 		}
+		return Sandbox{}, err
 	}
+	return result.Value, nil
 }
 
 func (b *backend) execCommand(ctx context.Context, client Client, sandboxID, workdir string, command []string, env map[string]string) (int, error) {
@@ -641,27 +647,25 @@ func (b *backend) waitProcess(ctx context.Context, client Client, sandboxID stri
 	if strings.TrimSpace(process.ID) == "" {
 		return Process{}, errors.New("blaxel process response omitted process id")
 	}
-	for {
-		if isProcessTerminal(process.Status) {
-			return process, nil
-		}
-		next, err := client.GetProcess(ctx, sandboxID, process.ID)
-		if err != nil {
-			return Process{}, err
-		}
-		process = next
-		if isProcessTerminal(process.Status) {
-			return process, nil
-		}
-		select {
-		case <-ctx.Done():
-			cleanupCtx, cancel := b.cleanupContext(ctx)
-			_ = client.StopProcess(cleanupCtx, sandboxID, process.ID)
-			cancel()
-			return Process{}, ctx.Err()
-		case <-time.After(time.Second):
-		}
+	if isProcessTerminal(process.Status) {
+		return process, nil
 	}
+	result, err := shared.Poll(context.WithoutCancel(ctx), 0, time.Second,
+		func(context.Context, time.Duration) error { return shared.SleepContext(ctx, time.Second) },
+		func(context.Context) (Process, error) { return client.GetProcess(ctx, sandboxID, process.ID) },
+		func(_ context.Context, next Process, fetchErr error) (bool, error) {
+			return isProcessTerminal(next.Status), fetchErr
+		}, nil)
+	if err == nil {
+		return result.Value, nil
+	}
+	if result.Err == nil && context.Cause(ctx) != nil && errors.Is(err, context.Cause(ctx)) {
+		cleanupCtx, cancel := b.cleanupContext(ctx)
+		_ = client.StopProcess(cleanupCtx, sandboxID, process.ID)
+		cancel()
+		return Process{}, ctx.Err()
+	}
+	return Process{}, err
 }
 
 func (b *backend) cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {

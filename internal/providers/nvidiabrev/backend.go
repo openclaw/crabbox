@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const (
@@ -730,32 +732,34 @@ func (b *nvidiaBrevBackend) waitForWorkspaceDeleted(ctx context.Context, client 
 	if err := requireActiveBrevOrg(ctx, client, orgID); err != nil {
 		return err
 	}
-	for {
-		workspaces, err := client.list(ctx, true)
-		if err != nil {
-			return err
-		}
-		_, found, err := findBrevWorkspace(workspaces, id)
-		if err != nil {
-			return err
-		}
-		if !found {
-			if err := requireActiveBrevOrg(ctx, client, orgID); err != nil {
-				return err
+	_, err := shared.Poll(context.WithoutCancel(ctx), 0, brevDeletePollInterval,
+		func(context.Context, time.Duration) error {
+			if err := shared.SleepContext(ctx, brevDeletePollInterval); err != nil {
+				return ctx.Err()
 			}
 			return nil
-		}
-		if time.Now().After(deadline) {
-			return exit(5, "timed out waiting for nvidia-brev workspace %s deletion; local claim retained", safeWorkspaceRef(workspace))
-		}
-		timer := time.NewTimer(brevDeletePollInterval)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
-	}
+		},
+		func(context.Context) ([]brevWorkspace, error) { return client.list(ctx, true) },
+		func(_ context.Context, workspaces []brevWorkspace, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
+			}
+			_, found, err := findBrevWorkspace(workspaces, id)
+			if err != nil {
+				return false, err
+			}
+			if !found {
+				if err := requireActiveBrevOrg(ctx, client, orgID); err != nil {
+					return false, err
+				}
+				return true, nil
+			}
+			if time.Now().After(deadline) {
+				return false, exit(5, "timed out waiting for nvidia-brev workspace %s deletion; local claim retained", safeWorkspaceRef(workspace))
+			}
+			return false, nil
+		}, nil)
+	return err
 }
 
 func (b *nvidiaBrevBackend) persistStoppedClaim(workspace brevWorkspace, claim LeaseClaim, action func() error) error {
@@ -833,59 +837,85 @@ func (b *nvidiaBrevBackend) waitForWorkspaceReady(ctx context.Context, client *b
 	}
 	var observed brevWorkspace
 	observedOrgID := ""
-	for {
-		workspaces, err := client.list(ctx, true)
-		if err != nil {
-			return brevWorkspace{}, "", err
-		}
-		workspace, found, err := findBrevWorkspace(workspaces, name)
-		if err != nil {
-			return brevWorkspace{}, "", err
-		}
-		if found {
-			observed = workspace
-		}
-		if found && observedOrgID == "" {
-			activeAfter, err := client.activeOrg(ctx)
-			if err != nil {
-				return brevWorkspace{}, "", err
-			}
-			if activeBefore.ID != activeAfter.ID {
-				return workspace, activeBefore.ID, &brevOrgChangedError{beforeID: activeBefore.ID, afterID: activeAfter.ID}
-			}
-			observedOrgID = activeAfter.ID
-		}
-		if found && brevWorkspaceReady(workspace) {
-			activeAfter, err := client.activeOrg(ctx)
-			if err != nil {
-				return brevWorkspace{}, "", err
-			}
-			if observedOrgID != activeAfter.ID {
-				return workspace, observedOrgID, &brevOrgChangedError{beforeID: observedOrgID, afterID: activeAfter.ID}
-			}
-			return workspace, activeAfter.ID, nil
-		}
-		if time.Now().After(deadline) {
-			if found {
-				activeAfter, orgErr := client.activeOrg(ctx)
-				if orgErr != nil {
-					return brevWorkspace{}, "", orgErr
-				}
-				if observedOrgID != "" && observedOrgID != activeAfter.ID {
-					return workspace, observedOrgID, &brevOrgChangedError{beforeID: observedOrgID, afterID: activeAfter.ID}
-				}
-				return workspace, observedOrgID, exit(5, "timed out waiting for nvidia-brev workspace %s to become ready (status=%s build=%s shell=%s health=%s)", safeWorkspaceRef(workspace), workspace.Status, workspace.BuildStatus, workspace.ShellStatus, workspace.HealthStatus)
-			}
-			return observed, observedOrgID, exit(5, "timed out waiting for nvidia-brev workspace %q to appear", name)
-		}
-		timer := time.NewTimer(brevAcquirePollInterval)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return brevWorkspace{}, "", ctx.Err()
-		case <-timer.C:
-		}
+	var errorWorkspace brevWorkspace
+	errorOrgID := ""
+	type observation struct {
+		workspace brevWorkspace
+		found     bool
 	}
+	result, err := shared.Poll(context.WithoutCancel(ctx), 0, brevAcquirePollInterval,
+		func(context.Context, time.Duration) error {
+			if err := shared.SleepContext(ctx, brevAcquirePollInterval); err != nil {
+				return ctx.Err()
+			}
+			return nil
+		},
+		func(context.Context) (observation, error) {
+			workspaces, err := client.list(ctx, true)
+			if err != nil {
+				return observation{}, err
+			}
+			workspace, found, err := findBrevWorkspace(workspaces, name)
+			return observation{workspace: workspace, found: found}, err
+		},
+		func(_ context.Context, current observation, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
+			}
+			workspace, found := current.workspace, current.found
+			if found {
+				observed = workspace
+			}
+			if found && observedOrgID == "" {
+				activeAfter, err := client.activeOrg(ctx)
+				if err != nil {
+					return false, err
+				}
+				if activeBefore.ID != activeAfter.ID {
+					errorWorkspace = workspace
+					errorOrgID = activeBefore.ID
+					return false, &brevOrgChangedError{beforeID: activeBefore.ID, afterID: activeAfter.ID}
+				}
+				observedOrgID = activeAfter.ID
+			}
+			if found && brevWorkspaceReady(workspace) {
+				activeAfter, err := client.activeOrg(ctx)
+				if err != nil {
+					return false, err
+				}
+				if observedOrgID != activeAfter.ID {
+					errorWorkspace = workspace
+					errorOrgID = observedOrgID
+					return false, &brevOrgChangedError{beforeID: observedOrgID, afterID: activeAfter.ID}
+				}
+				observedOrgID = activeAfter.ID
+				return true, nil
+			}
+			if time.Now().After(deadline) {
+				if found {
+					activeAfter, orgErr := client.activeOrg(ctx)
+					if orgErr != nil {
+						return false, orgErr
+					}
+					if observedOrgID != "" && observedOrgID != activeAfter.ID {
+						errorWorkspace = workspace
+						errorOrgID = observedOrgID
+						return false, &brevOrgChangedError{beforeID: observedOrgID, afterID: activeAfter.ID}
+					}
+					errorWorkspace = workspace
+					errorOrgID = observedOrgID
+					return false, exit(5, "timed out waiting for nvidia-brev workspace %s to become ready (status=%s build=%s shell=%s health=%s)", safeWorkspaceRef(workspace), workspace.Status, workspace.BuildStatus, workspace.ShellStatus, workspace.HealthStatus)
+				}
+				errorWorkspace = observed
+				errorOrgID = observedOrgID
+				return false, exit(5, "timed out waiting for nvidia-brev workspace %q to appear", name)
+			}
+			return false, nil
+		}, nil)
+	if err != nil {
+		return errorWorkspace, errorOrgID, err
+	}
+	return result.Value.workspace, observedOrgID, nil
 }
 
 func (b *nvidiaBrevBackend) prepareLease(ctx context.Context, client *brevClient, cfg Config, workspace brevWorkspace, orgID, leaseID, slug string, keep, probeSSH bool) (LeaseTarget, error) {
