@@ -139,6 +139,144 @@ func TestCleanupServersSkipsIneligibleAndContinues(t *testing.T) {
 	}
 }
 
+func TestCleanupServersPassesPreparedServerToDelete(t *testing.T) {
+	clock := &testCleanupClock{now: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)}
+	backend := DirectSSHBackend{
+		RT: core.Runtime{Stderr: io.Discard, Clock: clock},
+		PrepareCleanup: func(_ context.Context, server core.Server) (core.Server, bool, CleanupSkipReason, error) {
+			server.Labels = CloneLabels(server.Labels)
+			server.Labels["prepared"] = "true"
+			return server, true, "", nil
+		},
+		Delete: func(_ context.Context, _ core.Config, server core.Server) error {
+			if server.Labels["prepared"] != "true" {
+				t.Fatalf("Delete server=%#v, want prepared server", server)
+			}
+			return nil
+		},
+	}
+	if err := backend.CleanupServers(context.Background(), core.CleanupRequest{}, []core.Server{testCleanupServer("prepared", clock.now.Add(-time.Hour))}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCleanupServersEmitsPrepareSkipReason(t *testing.T) {
+	clock := &testCleanupClock{now: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)}
+	var stderr bytes.Buffer
+	backend := DirectSSHBackend{
+		RT: core.Runtime{Stderr: &stderr, Clock: clock},
+		PrepareCleanup: func(_ context.Context, server core.Server) (core.Server, bool, CleanupSkipReason, error) {
+			return server, false, CleanupSkipReason("provider-scope-mismatch"), nil
+		},
+		Delete: func(context.Context, core.Config, core.Server) error {
+			t.Fatal("Delete called for skipped server")
+			return nil
+		},
+	}
+	if err := backend.CleanupServers(context.Background(), core.CleanupRequest{}, []core.Server{testCleanupServer("skipped", clock.now.Add(-time.Hour))}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr.String(), "reason=provider-scope-mismatch") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+func TestCleanupServersDryRunPreparesWithoutDelete(t *testing.T) {
+	clock := &testCleanupClock{now: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)}
+	prepared := 0
+	backend := DirectSSHBackend{
+		RT: core.Runtime{Stderr: io.Discard, Clock: clock},
+		PrepareCleanup: func(_ context.Context, server core.Server) (core.Server, bool, CleanupSkipReason, error) {
+			prepared++
+			return server, true, "", nil
+		},
+		Delete: func(context.Context, core.Config, core.Server) error {
+			t.Fatal("Delete called during dry-run")
+			return nil
+		},
+	}
+	if err := backend.CleanupServers(context.Background(), core.CleanupRequest{DryRun: true}, []core.Server{testCleanupServer("dry", clock.now.Add(-time.Hour))}); err != nil {
+		t.Fatal(err)
+	}
+	if prepared != 1 {
+		t.Fatalf("prepared=%d, want 1", prepared)
+	}
+}
+
+func TestCleanupServersRechecksPreparedServerAndClaimEligibility(t *testing.T) {
+	clock := &testCleanupClock{now: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)}
+	for _, test := range []struct {
+		name    string
+		prepare func(core.Server) core.Server
+		reason  string
+	}{
+		{
+			name: "refreshed server is kept",
+			prepare: func(server core.Server) core.Server {
+				server.Labels = CloneLabels(server.Labels)
+				server.Labels["keep"] = "true"
+				return server
+			},
+			reason: "keep=true",
+		},
+		{
+			name: "prepared claim was renewed",
+			prepare: func(server core.Server) core.Server {
+				claim := core.LeaseClaim{
+					LeaseID:  "cbx_aaaaaaaaaaaa",
+					Provider: "example",
+					Revision: "renewed",
+					Labels: map[string]string{
+						"lease":      "cbx_aaaaaaaaaaaa",
+						"keep":       "false",
+						"expires_at": clock.now.Add(time.Hour).Format(time.RFC3339Nano),
+					},
+				}
+				server.Labels = CloneLabels(server.Labels)
+				server.Labels["lease"] = claim.LeaseID
+				core.SetServerLeaseClaimSnapshot(&server, claim, true)
+				return server
+			},
+			reason: "not expired",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			backend := DirectSSHBackend{
+				RT: core.Runtime{Stderr: &stderr, Clock: clock},
+				PrepareCleanup: func(_ context.Context, server core.Server) (core.Server, bool, CleanupSkipReason, error) {
+					return test.prepare(server), true, "", nil
+				},
+				Delete: func(context.Context, core.Config, core.Server) error {
+					t.Fatal("Delete called after prepared cleanup eligibility changed")
+					return nil
+				},
+			}
+			if err := backend.CleanupServers(context.Background(), core.CleanupRequest{}, []core.Server{testCleanupServer("renewed", clock.now.Add(-time.Hour))}); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(stderr.String(), "reason="+test.reason) {
+				t.Fatalf("stderr=%q, want reason=%s", stderr.String(), test.reason)
+			}
+		})
+	}
+}
+
+func TestCleanupServersRejectsSimultaneousPreparationHooks(t *testing.T) {
+	backend := DirectSSHBackend{
+		SpecValue: core.ProviderSpec{Name: "test-provider"},
+		RT:        core.Runtime{Stderr: io.Discard},
+		PrepareCleanup: func(_ context.Context, server core.Server) (core.Server, bool, CleanupSkipReason, error) {
+			return server, true, "", nil
+		},
+		CleanupEligible: func(context.Context, core.Server) (bool, error) { return true, nil },
+	}
+	err := backend.CleanupServers(context.Background(), core.CleanupRequest{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "cannot configure both PrepareCleanup and CleanupEligible") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestCleanupClaimEligible(t *testing.T) {
 	if eligible, err := CleanupClaimEligible(nil); err != nil || !eligible {
 		t.Fatalf("nil error eligible=%v err=%v", eligible, err)

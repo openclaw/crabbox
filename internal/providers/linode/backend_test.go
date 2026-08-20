@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -30,6 +32,7 @@ type fakeLinodeAPI struct {
 	getErr             error
 	getFn              func(context.Context, int64) (linodeInstance, error)
 	deleteErr          error
+	deleteFn           func(context.Context, int64) error
 	created            []linodeInstance
 	deleted            []int64
 	updated            []int64
@@ -99,8 +102,13 @@ func (f *fakeLinodeAPI) CreateLinode(_ context.Context, req createLinodeRequest)
 	return item, nil
 }
 
-func (f *fakeLinodeAPI) DeleteLinode(_ context.Context, id int64) error {
+func (f *fakeLinodeAPI) DeleteLinode(ctx context.Context, id int64) error {
 	f.deleted = append(f.deleted, id)
+	if f.deleteFn != nil {
+		if err := f.deleteFn(ctx, id); err != nil {
+			return err
+		}
+	}
 	if f.deleteErr != nil {
 		return f.deleteErr
 	}
@@ -405,6 +413,10 @@ func TestResolveBySlugAndReleaseDeleteOwnedLinode(t *testing.T) {
 	if resolved.LeaseID != lease.LeaseID || resolved.Server.ID != lease.Server.ID {
 		t.Fatalf("resolved=%#v lease=%#v", resolved, lease)
 	}
+	resolvedClaim, exists, set := core.ServerLeaseClaimSnapshot(resolved.Server)
+	if !set || !exists || resolvedClaim.Revision == "" || resolvedClaim.LeaseID != lease.LeaseID {
+		t.Fatalf("resolved claim=%#v exists=%v set=%v", resolvedClaim, exists, set)
+	}
 	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: resolved}); err != nil {
 		t.Fatal(err)
 	}
@@ -622,7 +634,14 @@ func TestReleaseMissingLiveLinodeFinalizesLocalClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
+	resolved, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim, exists, set := core.ServerLeaseClaimSnapshot(resolved.Server); !set || !exists || claim.Revision == "" {
+		t.Fatalf("resolved claim=%#v exists=%v set=%v", claim, exists, set)
+	}
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: resolved}); err != nil {
 		t.Fatal(err)
 	}
 	if len(api.deleted) != 0 {
@@ -698,6 +717,256 @@ func TestCleanupDryRunSkipsKeepAndDeletesExpiredWhenLive(t *testing.T) {
 	if _, ok, err := core.ResolveLeaseClaimForProvider("cbx_222222222222", providerName); err != nil || !ok {
 		t.Fatalf("stale-account claim after cleanup ok=%v err=%v", ok, err)
 	}
+}
+
+func TestPrepareCleanupCarriesExactClaimSnapshot(t *testing.T) {
+	api := &fakeLinodeAPI{}
+	backend := newTestBackend(t, api)
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "prepared"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := backend.prepareCleanupServer(context.Background(), lease.Server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, exists, set := core.ServerLeaseClaimSnapshot(prepared)
+	current, currentExists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !set || !exists || !currentExists || snapshot.Revision == "" || !reflect.DeepEqual(snapshot, current) {
+		t.Fatalf("snapshot=%#v exists=%v set=%v current=%#v currentExists=%v", snapshot, exists, set, current, currentExists)
+	}
+}
+
+func TestDeleteRefusesClaimsChangedAfterPreparation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*core.LeaseClaim)
+	}{
+		{"renewed", func(claim *core.LeaseClaim) { claim.LastUsedAt = "2030-01-02T03:04:05Z" }},
+		{"repo", func(claim *core.LeaseClaim) { claim.RepoRoot = "/different/repo" }},
+		{"labels", func(claim *core.LeaseClaim) {
+			claim.Labels = maps.Clone(claim.Labels)
+			claim.Labels["state"] = "running"
+		}},
+		{"revision", func(*core.LeaseClaim) {}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			api := &fakeLinodeAPI{}
+			backend := newTestBackend(t, api)
+			lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "changed-" + test.name})
+			if err != nil {
+				t.Fatal(err)
+			}
+			prepared, err := backend.prepareCleanupServer(context.Background(), lease.Server)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected, exists, set := core.ServerLeaseClaimSnapshot(prepared)
+			if !set || !exists {
+				t.Fatalf("expected=%#v exists=%v set=%v", expected, exists, set)
+			}
+			replacement := expected
+			test.mutate(&replacement)
+			if err := core.ReplaceLeaseClaimIfUnchanged(lease.LeaseID, expected, replacement); err != nil {
+				t.Fatal(err)
+			}
+			changed, changedExists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+			if err != nil || !changedExists || changed.Revision == expected.Revision {
+				t.Fatalf("changed=%#v exists=%v err=%v", changed, changedExists, err)
+			}
+			err = backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: lease.LeaseID, Server: prepared}})
+			if err == nil || !strings.Contains(err.Error(), "claim changed") {
+				t.Fatalf("ReleaseLease err=%v", err)
+			}
+			if len(api.deleted) != 0 {
+				t.Fatalf("deleted=%v", api.deleted)
+			}
+			preserved, preservedExists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+			if err != nil || !preservedExists || !reflect.DeepEqual(preserved, changed) {
+				t.Fatalf("preserved=%#v exists=%v err=%v changed=%#v", preserved, preservedExists, err, changed)
+			}
+		})
+	}
+}
+
+func TestClaimUpdateBlocksDuringDeleteThenFailsSafely(t *testing.T) {
+	api := &fakeLinodeAPI{}
+	backend := newTestBackend(t, api)
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "locked-delete"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := backend.prepareCleanupServer(context.Background(), lease.Server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, _, _ := core.ServerLeaseClaimSnapshot(prepared)
+	deleteStarted := make(chan struct{})
+	allowDelete := make(chan struct{})
+	api.deleteFn = func(context.Context, int64) error {
+		close(deleteStarted)
+		<-allowDelete
+		return nil
+	}
+	releaseDone := make(chan error, 1)
+	go func() {
+		releaseDone <- backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: lease.LeaseID, Server: prepared}})
+	}()
+	<-deleteStarted
+	updateDone := make(chan error, 1)
+	go func() {
+		replacement := expected
+		replacement.LastUsedAt = "2030-01-02T03:04:05Z"
+		updateDone <- core.ReplaceLeaseClaimIfUnchanged(lease.LeaseID, expected, replacement)
+	}()
+	select {
+	case err := <-updateDone:
+		t.Fatalf("claim update completed while provider delete held claim lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(allowDelete)
+	if err := <-releaseDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-updateDone; err == nil {
+		t.Fatal("claim update succeeded after locked deletion removed the claim")
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID); err != nil || exists {
+		t.Fatalf("claim exists=%v err=%v", exists, err)
+	}
+}
+
+func TestDeleteErrorPreservesClaimAndStoredKey(t *testing.T) {
+	api := &fakeLinodeAPI{deleteErr: errors.New("linode delete failed")}
+	backend := newTestBackend(t, api)
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "delete-error"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := backend.prepareCleanupServer(context.Background(), lease.Server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, _, _ := core.ServerLeaseClaimSnapshot(prepared)
+	keyPath, err := core.TestboxKeyPath(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: lease.LeaseID, Server: prepared}}); err == nil || !strings.Contains(err.Error(), "linode delete failed") {
+		t.Fatalf("ReleaseLease err=%v", err)
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+	if err != nil || !exists || !reflect.DeepEqual(claim, expected) {
+		t.Fatalf("claim=%#v exists=%v err=%v expected=%#v", claim, exists, err, expected)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("stored key missing after failed delete: %v", err)
+	}
+}
+
+func TestReleaseWithoutClaimSnapshotFailsClosed(t *testing.T) {
+	api := &fakeLinodeAPI{}
+	backend := newTestBackend(t, api)
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "missing-snapshot"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := serverFromLinode(api.created[0], backend.Cfg)
+	server.Labels[linodeAccountLabel] = lease.Server.Labels[linodeAccountLabel]
+	err = backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: lease.LeaseID, Server: server}})
+	if err == nil || !strings.Contains(err.Error(), "claim snapshot is missing") {
+		t.Fatalf("ReleaseLease err=%v", err)
+	}
+	if len(api.deleted) != 0 {
+		t.Fatalf("deleted=%v", api.deleted)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID); err != nil || !exists {
+		t.Fatalf("claim exists=%v err=%v", exists, err)
+	}
+}
+
+func TestPendingRecoveryPublishesUpdatedClaimBeforeLockedDelete(t *testing.T) {
+	backend, api, leaseID, server, original, keyPath := setupPendingLinodeRecovery(t, "pending-delete")
+	prepared, err := backend.prepareCleanupServer(context.Background(), server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, exists, set := core.ServerLeaseClaimSnapshot(prepared)
+	if !set || !exists || snapshot.Revision != original.Revision || snapshot.CloudID != "" {
+		t.Fatalf("snapshot=%#v exists=%v set=%v original=%#v", snapshot, exists, set, original)
+	}
+	api.deleteErr = errors.New("delete after recovery bind failed")
+	err = backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: prepared}})
+	if err == nil || !strings.Contains(err.Error(), "delete after recovery bind failed") {
+		t.Fatalf("ReleaseLease err=%v", err)
+	}
+	updated, updatedExists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || !updatedExists || updated.CloudID != server.CloudID || updated.Revision == original.Revision {
+		t.Fatalf("updated=%#v exists=%v err=%v original=%#v", updated, updatedExists, err, original)
+	}
+	if len(api.deleted) != 1 || api.deleted[0] != server.ID {
+		t.Fatalf("deleted=%v", api.deleted)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("stored key missing after failed recovered delete: %v", err)
+	}
+}
+
+func TestPendingRecoveryCleanupDryRunDoesNotMutate(t *testing.T) {
+	backend, api, leaseID, _, original, keyPath := setupPendingLinodeRecovery(t, "pending-dry-run")
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	after, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists || !reflect.DeepEqual(after, original) {
+		t.Fatalf("after=%#v exists=%v err=%v original=%#v", after, exists, err, original)
+	}
+	if len(api.deleted) != 0 {
+		t.Fatalf("dry-run deleted=%v", api.deleted)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("stored key missing after dry-run: %v", err)
+	}
+}
+
+func setupPendingLinodeRecovery(t *testing.T, slug string) (*linodeLeaseBackend, *fakeLinodeAPI, string, core.Server, core.LeaseClaim, string) {
+	t.Helper()
+	api := &fakeLinodeAPI{}
+	backend := newTestBackend(t, api)
+	leaseID := "cbx_" + strings.Repeat("a", 12)
+	labels := core.DirectLeaseLabels(backend.Cfg, leaseID, slug, providerName, "", false, time.Unix(1, 0))
+	labels["state"] = "provisioning"
+	labels["expires_at"] = "1"
+	labels["recovery"] = "ambiguous-create"
+	labels[linodeAccountLabel] = "euuid:A1BC2DEF-34GH-567I-J890KLMN12O34P56"
+	claimServer := core.Server{Provider: providerName, Name: core.LeaseProviderName(leaseID, slug), Labels: maps.Clone(labels)}
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, backend.Cfg, claimServer, core.SSHTarget{}, t.TempDir(), backend.Cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	original, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists || original.Revision == "" {
+		t.Fatalf("original=%#v exists=%v err=%v", original, exists, err)
+	}
+	item := linodeInstance{
+		ID:     700,
+		Label:  core.LeaseProviderName(leaseID, slug),
+		Status: "running",
+		Type:   defaultType,
+		IPv4:   []string{"203.0.113.70"},
+		Tags:   tagsFromLabels(labels),
+	}
+	api.linodes = []linodeInstance{item}
+	server := serverFromLinode(item, backend.Cfg)
+	server.Labels[linodeAccountLabel] = labels[linodeAccountLabel]
+	keyPath, _, err := core.EnsureTestboxKeyForConfig(backend.Cfg, leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return backend, api, leaseID, server, original, keyPath
 }
 
 func TestTouchPreservesLiveTailscaleTagsAndIdleTimeoutOverride(t *testing.T) {
@@ -804,5 +1073,46 @@ func TestAmbiguousCreatePersistsRecoveryClaimAndRetainsKey(t *testing.T) {
 	backend.recoveryReconcilePolls = 1
 	if _, resolveErr := backend.Resolve(context.Background(), core.ResolveRequest{ID: "ambiguous", ReleaseOnly: true}); resolveErr == nil || !strings.Contains(resolveErr.Error(), "remains indeterminate") {
 		t.Fatalf("empty recovery resolve err=%v", resolveErr)
+	}
+}
+
+func TestRollbackCleanupClaimResolvesWithSnapshotAndReleases(t *testing.T) {
+	api := &fakeLinodeAPI{deleteErr: errors.New("rollback delete failed")}
+	backend := newTestBackend(t, api)
+	backend.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error {
+		return errors.New("bootstrap failed")
+	}
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "rollback"})
+	if err == nil || !strings.Contains(err.Error(), "rollback delete failed") {
+		t.Fatalf("Acquire err=%v", err)
+	}
+	claim, exists, err := core.ResolveLeaseClaimForProvider("rollback", providerName)
+	if err != nil || !exists || claim.Labels["recovery"] != "rollback-cleanup" || claim.Revision == "" {
+		t.Fatalf("claim=%#v exists=%v err=%v", claim, exists, err)
+	}
+	keyPath, err := core.TestboxKeyPath(claim.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.deleteErr = nil
+	resolved, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: claim.LeaseID, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, snapshotExists, set := core.ServerLeaseClaimSnapshot(resolved.Server)
+	if !set || !snapshotExists || snapshot.Revision != claim.Revision {
+		t.Fatalf("snapshot=%#v exists=%v set=%v claim=%#v", snapshot, snapshotExists, set, claim)
+	}
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: resolved}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.deleted) != 2 || api.deleted[0] != 100 || api.deleted[1] != 100 {
+		t.Fatalf("deleted=%v", api.deleted)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(claim.LeaseID); err != nil || exists {
+		t.Fatalf("claim exists=%v err=%v", exists, err)
+	}
+	if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stored key retained after rollback cleanup: %v", err)
 	}
 }

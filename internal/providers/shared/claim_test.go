@@ -135,3 +135,39 @@ func TestResolveProviderClaimStrictRejectsMalformedExactClaim(t *testing.T) {
 		t.Fatalf("malformed exact ok=%v err=%v", ok, err)
 	}
 }
+
+func TestRequireClaimSnapshot(t *testing.T) {
+	claim := core.LeaseClaim{LeaseID: "cbx_aaaaaaaaaaaa", Provider: "example", Revision: "revision-1"}
+	server := core.Server{Labels: map[string]string{"lease": claim.LeaseID}}
+	if _, err := RequireClaimSnapshot(server, claim.Provider); err == nil || !strings.Contains(err.Error(), "snapshot is missing") {
+		t.Fatalf("missing snapshot err=%v", err)
+	}
+	core.SetServerLeaseClaimSnapshot(&server, core.LeaseClaim{}, false)
+	if _, err := RequireClaimSnapshot(server, claim.Provider); err == nil || !strings.Contains(err.Error(), "no exact claim") {
+		t.Fatalf("absent snapshot err=%v", err)
+	}
+	core.SetServerLeaseClaimSnapshot(&server, claim, true)
+	got, err := RequireClaimSnapshot(server, claim.Provider)
+	if err != nil || got.Revision != claim.Revision {
+		t.Fatalf("claim=%#v err=%v", got, err)
+	}
+	for _, test := range []struct {
+		name string
+		edit func(*core.Server, *core.LeaseClaim)
+		want string
+	}{
+		{"provider", func(_ *core.Server, claim *core.LeaseClaim) { claim.Provider = "other" }, "provider mismatch"},
+		{"lease", func(server *core.Server, _ *core.LeaseClaim) { server.Labels["lease"] = "cbx_bbbbbbbbbbbb" }, "lease mismatch"},
+		{"revision", func(_ *core.Server, claim *core.LeaseClaim) { claim.Revision = "" }, "no revision"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidateServer := core.Server{Labels: CloneLabels(server.Labels)}
+			candidateClaim := claim
+			test.edit(&candidateServer, &candidateClaim)
+			core.SetServerLeaseClaimSnapshot(&candidateServer, candidateClaim, true)
+			if _, err := RequireClaimSnapshot(candidateServer, claim.Provider); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("err=%v, want %q", err, test.want)
+			}
+		})
+	}
+}

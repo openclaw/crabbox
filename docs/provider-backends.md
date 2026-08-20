@@ -716,6 +716,27 @@ If cleanup is meaningful, implement `CleanupBackend`. Cleanup should honor
 `DryRun`, log skip/delete decisions to stderr, and use provider labels to avoid
 deleting unrelated machines.
 
+Direct providers that authorize cleanup from an exact local claim should set
+`DirectSSHBackend.PrepareCleanup`. Core expiration and `keep` filtering runs
+first; the preparation hook then performs read-only provider/account/claim
+validation, attaches the exact revisioned claim snapshot to its returned
+`Server`, and returns a typed skip reason when the candidate is ineligible.
+Shared cleanup then reapplies the expiration/keep gate to both the refreshed
+server and its carried claim, so a renewal observed during preparation wins.
+Dry-run still calls this read-only preparation but never calls `Delete`.
+`CleanupEligible` remains available for unmigrated adapters, but a backend must
+not configure both hooks.
+
+The matching delete path must require the carried snapshot and pass it to
+`RemoveLeaseClaimIfUnchangedAfter`. Put only the provider delete (or a no-op for
+a confirmed-absent resource) in that action: do not read, update, or remove
+claims while the claim lock is held. If recovery must first bind a discovered
+resource, durably CAS that update before the final lock and use the returned
+claim as the new expected snapshot. Remove stored keys only after the locked
+provider action and durable claim removal both succeed. This closes the unsafe
+validate-then-delete window where a lease can be renewed or reclaimed between
+authorization and provider mutation.
+
 ## Implementing a delegated run backend
 
 A delegated backend should preserve Crabbox ergonomics while letting the provider

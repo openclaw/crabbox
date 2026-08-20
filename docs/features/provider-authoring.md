@@ -440,6 +440,26 @@ Cleanup must honor `CleanupRequest.DryRun`, log every skip/delete decision to
 machines. When a broker is configured, core refuses to call provider cleanup at
 all — brokered cleanup belongs to the coordinator scheduler.
 
+For claim-authorized providers built on `shared.DirectSSHBackend`, use its
+opt-in `PrepareCleanup` hook after the shared expiration/keep gate. Preparation
+may read the account, live resource, and exact local claim even during dry-run,
+but it must not mutate claims or provider resources. Return a prepared `Server`
+carrying the full revisioned claim snapshot and a typed skip reason when it is
+not eligible. Shared cleanup conservatively reapplies the same expiration/keep
+gate to the refreshed server and the carried claim before delete or dry-run
+output. The transitional `CleanupEligible` hook is only for unmigrated providers
+and cannot be configured alongside `PrepareCleanup`.
+
+Deletion must fail closed without that snapshot. Revalidate adapter-owned live
+identity and recovery rules, durably CAS any required pre-delete recovery bind,
+then call `RemoveLeaseClaimIfUnchangedAfter` with the updated exact claim and a
+provider-delete action. Never call a claim API from inside that action: the
+claim lock intentionally spans the provider mutation so renewal, reclaim, and
+other claim updates wait until deletion and durable claim removal finish.
+Provider failures must retain the claim and local key for retry. Avoid a
+validate-then-act sequence with an unlocked provider delete followed by claim
+removal; that sequence can delete a lease whose claim changed after validation.
+
 ### Delegated Run Backend
 
 ```go

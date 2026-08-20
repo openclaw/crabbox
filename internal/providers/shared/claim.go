@@ -52,6 +52,29 @@ func ResolveProviderClaimStrict(identifier, provider, providerScope string) (cor
 	return claim, ok, nil
 }
 
+// RequireClaimSnapshot returns the exact revisioned claim carried by a provider result.
+// It validates transport invariants only; provider cleanup policy remains adapter-owned.
+func RequireClaimSnapshot(server core.Server, provider string) (core.LeaseClaim, error) {
+	claim, exists, set := core.ServerLeaseClaimSnapshot(server)
+	if !set {
+		return core.LeaseClaim{}, core.Exit(2, "%s cleanup claim snapshot is missing", provider)
+	}
+	if !exists {
+		return core.LeaseClaim{}, core.Exit(2, "%s cleanup claim snapshot records no exact claim", provider)
+	}
+	if claim.Provider != provider {
+		return core.LeaseClaim{}, core.Exit(2, "%s cleanup claim provider mismatch: got %q", provider, claim.Provider)
+	}
+	leaseID := server.Labels["lease"]
+	if leaseID == "" || claim.LeaseID != leaseID {
+		return core.LeaseClaim{}, core.Exit(2, "%s cleanup claim lease mismatch: server=%q claim=%q", provider, leaseID, claim.LeaseID)
+	}
+	if claim.Revision == "" {
+		return core.LeaseClaim{}, core.Exit(2, "%s cleanup claim snapshot has no revision for lease=%s", provider, leaseID)
+	}
+	return claim, nil
+}
+
 // CloneLabels returns a writable, non-nil copy, including for a nil input.
 func CloneLabels(labels map[string]string) map[string]string {
 	clone := maps.Clone(labels)

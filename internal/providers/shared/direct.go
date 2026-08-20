@@ -13,9 +13,14 @@ type DirectSSHBackend struct {
 	Cfg             core.Config
 	RT              core.Runtime
 	Delete          func(context.Context, core.Config, core.Server) error
+	PrepareCleanup  func(context.Context, core.Server) (core.Server, bool, CleanupSkipReason, error)
 	CleanupEligible func(context.Context, core.Server) (bool, error)
 	StoredLeaseKeys bool
 }
+
+type CleanupSkipReason string
+
+const CleanupSkipNoExactLocalClaim CleanupSkipReason = "no-exact-local-claim"
 
 func (b *DirectSSHBackend) Spec() core.ProviderSpec { return b.SpecValue }
 
@@ -27,6 +32,9 @@ func (b *DirectSSHBackend) RebindResolvedLeaseTarget(target *core.LeaseTarget, l
 }
 
 func (b *DirectSSHBackend) CleanupServers(ctx context.Context, req core.CleanupRequest, servers []core.Server) error {
+	if b.PrepareCleanup != nil && b.CleanupEligible != nil {
+		return core.Exit(2, "provider=%s cleanup backend cannot configure both PrepareCleanup and CleanupEligible", b.SpecValue.Name)
+	}
 	now := time.Now().UTC()
 	if b.RT.Clock != nil {
 		now = b.RT.Clock.Now().UTC()
@@ -37,13 +45,35 @@ func (b *DirectSSHBackend) CleanupServers(ctx context.Context, req core.CleanupR
 			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%s\n", s.DisplayID(), s.Name, reason)
 			continue
 		}
-		if b.CleanupEligible != nil {
+		if b.PrepareCleanup != nil {
+			prepared, eligible, reason, err := b.PrepareCleanup(ctx, s)
+			if err != nil {
+				return err
+			}
+			if !eligible {
+				fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%s\n", s.DisplayID(), s.Name, reason)
+				continue
+			}
+			s = prepared
+			if shouldDelete, reason := core.ShouldCleanupServer(s, now); !shouldDelete {
+				fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%s\n", s.DisplayID(), s.Name, reason)
+				continue
+			}
+			if claim, exists, set := core.ServerLeaseClaimSnapshot(s); set && exists {
+				claimServer := s
+				claimServer.Labels = claim.Labels
+				if shouldDelete, reason := core.ShouldCleanupServer(claimServer, now); !shouldDelete {
+					fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%s\n", s.DisplayID(), s.Name, reason)
+					continue
+				}
+			}
+		} else if b.CleanupEligible != nil {
 			eligible, err := b.CleanupEligible(ctx, s)
 			if err != nil {
 				return err
 			}
 			if !eligible {
-				fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=no-exact-local-claim\n", s.DisplayID(), s.Name)
+				fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%s\n", s.DisplayID(), s.Name, CleanupSkipNoExactLocalClaim)
 				continue
 			}
 		}

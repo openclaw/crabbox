@@ -17,6 +17,7 @@
 - Shared strict provider claim matching and writable label-copy mechanics across direct providers while keeping recovery and deletion authorization adapter-owned.
 - Enforced coordinator-provided SSH host keys before first transport and removed per-lease local SSH credentials after confirmed brokered release.
 - Shared lifecycle observation across Machine0, Tenki, DigitalOcean, Linode, Vultr, and Morph while keeping provider state handling adapter-owned, and made canceled Tenki readiness waits report cancellation instead of timeout.
+- Closed Linode cleanup and release claim races by carrying exact revisioned claims into claim-locked provider deletion while preserving retryable claims and SSH keys on failure.
 
 ## 0.45.0 - 2026-08-19
 
