@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -18,10 +20,13 @@ import (
 type fakeVultrAPI struct {
 	accountID    string
 	accountErr   error
+	accountFn    func(context.Context) (string, error)
 	instances    []vultrInstance
 	createErr    error
 	getErr       error
 	getFn        func(context.Context, string) (vultrInstance, error)
+	deleteFn     func(context.Context, string) error
+	keyDeleteFn  func(context.Context, string) error
 	deleteErr    error
 	keyDeleteErr error
 	updateErr    error
@@ -42,7 +47,14 @@ type fakeVultrAPI struct {
 	}
 }
 
-func (f *fakeVultrAPI) AccountID(context.Context) (string, error) {
+type vultrTestClock struct{ now time.Time }
+
+func (c vultrTestClock) Now() time.Time { return c.now }
+
+func (f *fakeVultrAPI) AccountID(ctx context.Context) (string, error) {
+	if f.accountFn != nil {
+		return f.accountFn(ctx)
+	}
 	if f.accountErr != nil {
 		return "", f.accountErr
 	}
@@ -108,8 +120,13 @@ func (f *fakeVultrAPI) CreateInstance(_ context.Context, cfg core.Config, public
 	return item, nil
 }
 
-func (f *fakeVultrAPI) DeleteInstance(_ context.Context, id string) error {
+func (f *fakeVultrAPI) DeleteInstance(ctx context.Context, id string) error {
 	f.deleted = append(f.deleted, id)
+	if f.deleteFn != nil {
+		if err := f.deleteFn(ctx, id); err != nil {
+			return err
+		}
+	}
 	if f.deleteErr != nil {
 		return f.deleteErr
 	}
@@ -131,8 +148,13 @@ func (f *fakeVultrAPI) FindSSHKeyByID(_ context.Context, id string) (vultrSSHKey
 	return vultrSSHKey{}, false, nil
 }
 
-func (f *fakeVultrAPI) DeleteSSHKey(_ context.Context, id string) error {
+func (f *fakeVultrAPI) DeleteSSHKey(ctx context.Context, id string) error {
 	f.deletedKeys = append(f.deletedKeys, id)
+	if f.keyDeleteFn != nil {
+		if err := f.keyDeleteFn(ctx, id); err != nil {
+			return err
+		}
+	}
 	if f.keyDeleteErr == nil {
 		for i, key := range f.sshKeys {
 			if key.ID == id {
@@ -326,6 +348,10 @@ func TestReleaseRefusesAccountMismatchAndForeignTags(t *testing.T) {
 		Tags:         labels,
 	}, b.Cfg)
 	server.Labels[vultrAccountLabel] = "account:other"
+	if err := core.ClaimLeaseTargetForRepoConfig("cbx_111111111111", "blue", b.Cfg, server, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	attachCurrentVultrClaim(t, &server, "cbx_111111111111")
 	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "cbx_111111111111", Server: server}}); err == nil || !strings.Contains(err.Error(), "account mismatch") {
 		t.Fatalf("err=%v", err)
 	}
@@ -394,6 +420,363 @@ func TestReleaseDeletesOwnedRenamedSSHKeyByImmutableID(t *testing.T) {
 	}
 	if len(api.deletedKeys) != 1 || api.deletedKeys[0] != "key-123" {
 		t.Fatalf("deletedKeys=%v", api.deletedKeys)
+	}
+}
+
+func TestPrepareCleanupCarriesOnlyExactClaimSnapshot(t *testing.T) {
+	api := &fakeVultrAPI{}
+	b := newTestBackend(t, api)
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "prepared"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := b.prepareCleanupServer(context.Background(), lease.Server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, exists, set := core.ServerLeaseClaimSnapshot(prepared)
+	current, currentExists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !set || !exists || !currentExists || snapshot.Revision == "" || !reflect.DeepEqual(snapshot, current) {
+		t.Fatalf("snapshot=%#v exists=%v set=%v current=%#v currentExists=%v", snapshot, exists, set, current, currentExists)
+	}
+	if prepared.ProviderMetadata != nil {
+		t.Fatalf("ProviderMetadata=%#v, want no redundant cleanup authorization", prepared.ProviderMetadata)
+	}
+}
+
+func TestDeleteRefusesClaimChangedAfterPreparationBeforeProviderMutation(t *testing.T) {
+	api := &fakeVultrAPI{}
+	b := newTestBackend(t, api)
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "stale"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := b.prepareCleanupServer(context.Background(), lease.Server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, _, _ := core.ServerLeaseClaimSnapshot(prepared)
+	replacement := expected
+	replacement.Labels = maps.Clone(expected.Labels)
+	replacement.Labels["state"] = "running"
+	if err := core.ReplaceLeaseClaimIfUnchanged(lease.LeaseID, expected, replacement); err != nil {
+		t.Fatal(err)
+	}
+	err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: lease.LeaseID, Server: prepared}})
+	if err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("ReleaseLease err=%v", err)
+	}
+	if len(api.deleted) != 0 || len(api.deletedKeys) != 0 {
+		t.Fatalf("provider mutations instance=%v key=%v", api.deleted, api.deletedKeys)
+	}
+}
+
+func TestClaimUpdateBlocksDuringVultrProviderAction(t *testing.T) {
+	api := &fakeVultrAPI{}
+	b := newTestBackend(t, api)
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "locked"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := b.prepareCleanupServer(context.Background(), lease.Server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, _, _ := core.ServerLeaseClaimSnapshot(prepared)
+	deleteStarted := make(chan struct{})
+	allowDelete := make(chan struct{})
+	api.deleteFn = func(context.Context, string) error {
+		close(deleteStarted)
+		<-allowDelete
+		return nil
+	}
+	releaseDone := make(chan error, 1)
+	go func() {
+		releaseDone <- b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: lease.LeaseID, Server: prepared}})
+	}()
+	<-deleteStarted
+	updateDone := make(chan error, 1)
+	go func() {
+		replacement := expected
+		replacement.LastUsedAt = "2030-01-02T03:04:05Z"
+		updateDone <- core.ReplaceLeaseClaimIfUnchanged(lease.LeaseID, expected, replacement)
+	}()
+	select {
+	case err := <-updateDone:
+		t.Fatalf("claim update completed while provider action held claim lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(allowDelete)
+	if err := <-releaseDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-updateDone; err == nil {
+		t.Fatal("claim update succeeded after locked provider action removed the claim")
+	}
+}
+
+func TestInstanceDeleteErrorPreservesClaimKeyAndOrdering(t *testing.T) {
+	api := &fakeVultrAPI{deleteErr: errors.New("instance delete failed")}
+	b := newTestBackend(t, api)
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "instance-error"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := b.prepareCleanupServer(context.Background(), lease.Server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, _, _ := core.ServerLeaseClaimSnapshot(prepared)
+	keyPath, err := core.TestboxKeyPath(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: lease.LeaseID, Server: prepared}})
+	if err == nil || !strings.Contains(err.Error(), "instance delete failed") {
+		t.Fatalf("ReleaseLease err=%v", err)
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+	if err != nil || !exists || !reflect.DeepEqual(claim, expected) {
+		t.Fatalf("claim=%#v exists=%v err=%v expected=%#v", claim, exists, err, expected)
+	}
+	if len(api.deleted) != 1 || len(api.deletedKeys) != 0 {
+		t.Fatalf("provider calls instance=%v key=%v", api.deleted, api.deletedKeys)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("stored key missing after failed instance delete: %v", err)
+	}
+}
+
+func TestKeyDeleteFailureRetainsRecoveryThenRetrySkipsAbsentInstance(t *testing.T) {
+	api := &fakeVultrAPI{keyDeleteErr: errors.New("key delete failed")}
+	b := newTestBackend(t, api)
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "partial"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := b.prepareCleanupServer(context.Background(), lease.Server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, _, _ := core.ServerLeaseClaimSnapshot(prepared)
+	keyPath, err := core.TestboxKeyPath(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: lease.LeaseID, Server: prepared}})
+	if err == nil || !strings.Contains(err.Error(), "key delete failed") {
+		t.Fatalf("first ReleaseLease err=%v", err)
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+	if err != nil || !exists || !reflect.DeepEqual(claim, expected) || claim.CloudID != lease.Server.CloudID || claim.Labels[vultrKeyIDLabel] != "key-123" {
+		t.Fatalf("claim=%#v exists=%v err=%v expected=%#v", claim, exists, err, expected)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("stored key missing after partial delete: %v", err)
+	}
+	api.keyDeleteErr = nil
+	retry, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "partial", ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: retry}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.deleted) != 1 {
+		t.Fatalf("retry called instance delete after confirmed absence: %v", api.deleted)
+	}
+	if len(api.deletedKeys) != 2 || api.deletedKeys[1] != "key-123" {
+		t.Fatalf("key deletes=%v", api.deletedKeys)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID); err != nil || exists {
+		t.Fatalf("claim exists=%v err=%v", exists, err)
+	}
+	if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stored key still present after retry: %v", err)
+	}
+}
+
+func TestPreparedDeleteRefusesChangedRetainedPublicKey(t *testing.T) {
+	api := &fakeVultrAPI{}
+	b := newTestBackend(t, api)
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "changed-public-key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := b.prepareCleanupServer(context.Background(), lease.Server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath, err := core.TestboxKeyPath(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath+".pub", []byte("ssh-ed25519 changed-key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: lease.LeaseID, Server: prepared}})
+	if err == nil || !strings.Contains(err.Error(), "public key does not match retained ownership") {
+		t.Fatalf("ReleaseLease err=%v", err)
+	}
+	if len(api.deleted) != 0 || len(api.deletedKeys) != 0 {
+		t.Fatalf("provider mutations instance=%v key=%v", api.deleted, api.deletedKeys)
+	}
+}
+
+func TestPreparedDeleteRefusesChangedProviderPublicKey(t *testing.T) {
+	api := &fakeVultrAPI{}
+	b := newTestBackend(t, api)
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "changed-provider-key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := b.prepareCleanupServer(context.Background(), lease.Server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.sshKeys[0].SSHKey = "ssh-ed25519 changed-provider-key"
+	err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: lease.LeaseID, Server: prepared}})
+	if err == nil || !strings.Contains(err.Error(), "public key does not match retained ownership") {
+		t.Fatalf("ReleaseLease err=%v", err)
+	}
+	if len(api.deleted) != 0 || len(api.deletedKeys) != 0 {
+		t.Fatalf("provider mutations instance=%v key=%v", api.deleted, api.deletedKeys)
+	}
+}
+
+func TestDeleteRevalidatesAccountInsideClaimLock(t *testing.T) {
+	api := &fakeVultrAPI{}
+	b := newTestBackend(t, api)
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "changed-account"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := b.prepareCleanupServer(context.Background(), lease.Server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	api.accountFn = func(context.Context) (string, error) {
+		calls++
+		if calls == 1 {
+			return "account:test-account", nil
+		}
+		return "account:changed", nil
+	}
+	err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: lease.LeaseID, Server: prepared}})
+	if err == nil || !strings.Contains(err.Error(), "account mismatch") {
+		t.Fatalf("ReleaseLease err=%v", err)
+	}
+	if calls != 2 || len(api.deleted) != 0 || len(api.deletedKeys) != 0 {
+		t.Fatalf("account calls=%d instance deletes=%v key deletes=%v", calls, api.deleted, api.deletedKeys)
+	}
+}
+
+func TestDeleteRevalidatesLiveInstanceIdentityInsideClaimLock(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*vultrInstance)
+	}{
+		{"name", func(item *vultrInstance) { item.Label = "replaced" }},
+		{"lease-tag", func(item *vultrInstance) {
+			labels := labelsFromTags(item.Tags)
+			labels["lease"] = "cbx_ffffffffffff"
+			item.Tags = tagsFromLabels(labels)
+		}},
+		{"provider-key", func(item *vultrInstance) {
+			labels := labelsFromTags(item.Tags)
+			labels["provider_key"] = "changed"
+			item.Tags = tagsFromLabels(labels)
+		}},
+		{"owned-key-id", func(item *vultrInstance) {
+			labels := labelsFromTags(item.Tags)
+			labels[vultrKeyIDLabel] = "changed"
+			item.Tags = tagsFromLabels(labels)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			api := &fakeVultrAPI{}
+			b := newTestBackend(t, api)
+			lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "changed-instance"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			prepared, err := b.prepareCleanupServer(context.Background(), lease.Server)
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(&api.created[0])
+			err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: lease.LeaseID, Server: prepared}})
+			if err == nil || !strings.Contains(err.Error(), "refusing") {
+				t.Fatalf("ReleaseLease err=%v", err)
+			}
+			if len(api.deleted) != 0 || len(api.deletedKeys) != 0 {
+				t.Fatalf("provider mutations instance=%v key=%v", api.deleted, api.deletedKeys)
+			}
+		})
+	}
+}
+
+func TestDeleteRequiresRetainedPublicKeyBeforeProviderMutation(t *testing.T) {
+	api := &fakeVultrAPI{}
+	b := newTestBackend(t, api)
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "missing-key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath, err := core.TestboxKeyPath(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(keyPath + ".pub"); err != nil {
+		t.Fatal(err)
+	}
+	err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease})
+	if err == nil || !strings.Contains(err.Error(), "requires retained local public key") {
+		t.Fatalf("ReleaseLease err=%v", err)
+	}
+	if len(api.deleted) != 0 || len(api.deletedKeys) != 0 {
+		t.Fatalf("provider mutations instance=%v key=%v", api.deleted, api.deletedKeys)
+	}
+}
+
+func TestUnownedProviderKeyIsNeverDeleted(t *testing.T) {
+	api := &fakeVultrAPI{reuseSSHKey: true}
+	b := newTestBackend(t, api)
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "reused-key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.sshKeys = append(api.sshKeys, vultrSSHKey{ID: "key-123", Name: "shared-key", SSHKey: "ssh-ed25519 shared"})
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.deleted) != 1 || len(api.deletedKeys) != 0 || len(api.sshKeys) != 1 {
+		t.Fatalf("instance deletes=%v key deletes=%v keys=%#v", api.deleted, api.deletedKeys, api.sshKeys)
+	}
+}
+
+func TestConfirmedAbsentInstanceSkipsInstanceCallAndFinalizesExactKey(t *testing.T) {
+	api := &fakeVultrAPI{}
+	b := newTestBackend(t, api)
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "absent-instance"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.created = nil
+	prepared, err := b.prepareCleanupServer(context.Background(), lease.Server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: lease.LeaseID, Server: prepared}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.deleted) != 0 || len(api.deletedKeys) != 1 {
+		t.Fatalf("instance deletes=%v key deletes=%v", api.deleted, api.deletedKeys)
 	}
 }
 
@@ -577,6 +960,7 @@ func TestReleaseRefusesUnknownKeyOwnershipBeforeDeleting(t *testing.T) {
 	if err := core.ClaimLeaseTargetForRepoConfig("cbx_333333333333", "blue", b.Cfg, server, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
 		t.Fatal(err)
 	}
+	attachCurrentVultrClaim(t, &server, "cbx_333333333333")
 	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "cbx_333333333333", Server: server}})
 	if err == nil || !strings.Contains(err.Error(), "SSH key ownership remains indeterminate") {
 		t.Fatalf("err=%v", err)
@@ -609,7 +993,7 @@ func TestReleaseFromCloudTagsWithoutLocalClaimFailsClosed(t *testing.T) {
 	}}
 	server := serverFromInstance(api.instances[0], b.Cfg)
 	server.Labels[vultrAccountLabel] = "account:test-account"
-	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "cbx_444444444444", Server: server}}); err == nil || !strings.Contains(err.Error(), "no exact local claim") {
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "cbx_444444444444", Server: server}}); err == nil || !strings.Contains(err.Error(), "claim snapshot is missing") {
 		t.Fatalf("ReleaseLease err=%v", err)
 	}
 	if len(api.deleted) != 0 {
@@ -645,6 +1029,7 @@ func TestReleaseRefusesTamperedProviderKeyIDBeforeDeleting(t *testing.T) {
 	if err := core.ClaimLeaseTargetForRepoConfig("cbx_555555555555", "blue", b.Cfg, server, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
 		t.Fatal(err)
 	}
+	attachCurrentVultrClaim(t, &server, "cbx_555555555555")
 	err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "cbx_555555555555", Server: server}})
 	if err == nil || !strings.Contains(err.Error(), "refusing to delete Vultr SSH key") {
 		t.Fatalf("err=%v", err)
@@ -670,12 +1055,15 @@ func TestReleaseOnlyResolveFallsBackToLocalClaimBySlug(t *testing.T) {
 	if err := core.ClaimLeaseTargetForRepoConfig("cbx_666666666666", "stale-slug", b.Cfg, server, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
 		t.Fatal(err)
 	}
-	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "stale-slug", ReleaseOnly: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if lease.LeaseID != "cbx_666666666666" || lease.Server.CloudID != server.CloudID {
-		t.Fatalf("lease=%#v", lease)
+	for _, id := range []string{"stale-slug", server.CloudID} {
+		lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: id, ReleaseOnly: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		claim, exists, set := core.ServerLeaseClaimSnapshot(lease.Server)
+		if lease.LeaseID != "cbx_666666666666" || lease.Server.CloudID != server.CloudID || !set || !exists || claim.Revision == "" {
+			t.Fatalf("id=%s lease=%#v claim=%#v exists=%v set=%v", id, lease, claim, exists, set)
+		}
 	}
 }
 
@@ -891,6 +1279,30 @@ func TestCleanupDryRunDoesNotDelete(t *testing.T) {
 	}
 }
 
+func TestCleanupDryRunWithExactClaimDoesNotMutate(t *testing.T) {
+	api := &fakeVultrAPI{}
+	b := newTestBackend(t, api)
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "dry-run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+	if err != nil || !exists {
+		t.Fatalf("before=%#v exists=%v err=%v", before, exists, err)
+	}
+	b.RT.Clock = vultrTestClock{now: time.Now().Add(24 * time.Hour)}
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	after, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+	if err != nil || !exists || !reflect.DeepEqual(after, before) {
+		t.Fatalf("after=%#v exists=%v err=%v before=%#v", after, exists, err, before)
+	}
+	if len(api.deleted) != 0 || len(api.deletedKeys) != 0 {
+		t.Fatalf("dry-run provider mutations instance=%v key=%v", api.deleted, api.deletedKeys)
+	}
+}
+
 func TestCleanupSkipsClaimlessBeforeClaimedInstance(t *testing.T) {
 	var stderr bytes.Buffer
 	api := &fakeVultrAPI{}
@@ -973,6 +1385,7 @@ func TestAmbiguousCreateRecoveryWithoutCloudIDDoesNotDropClaimOrKey(t *testing.T
 	if err := core.ClaimLeaseTargetForRepoConfig("cbx_dddddddddddd", "recover", b.Cfg, server, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
 		t.Fatal(err)
 	}
+	attachCurrentVultrClaim(t, &server, "cbx_dddddddddddd")
 	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "cbx_dddddddddddd", Server: server}})
 	if err == nil || !strings.Contains(err.Error(), "ambiguous create recovery is still indeterminate") {
 		t.Fatalf("err=%v", err)
@@ -1015,7 +1428,16 @@ func TestAmbiguousCreateRecoveryDeletesAfterLiveInstanceIsFound(t *testing.T) {
 	api.instances = []vultrInstance{live}
 	server := serverFromInstance(live, b.Cfg)
 	preserveVultrIdentity(server.Labels, labels)
-	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "cbx_eeeeeeeeeeee", Server: server}}); err != nil {
+	prepared, err := b.prepareCleanupServer(context.Background(), server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, exists, set := core.ServerLeaseClaimSnapshot(prepared)
+	current, currentExists, err := core.ReadLeaseClaimWithPresence("cbx_eeeeeeeeeeee")
+	if err != nil || !set || !exists || !currentExists || snapshot.CloudID != live.ID || !reflect.DeepEqual(snapshot, current) {
+		t.Fatalf("snapshot=%#v exists=%v set=%v current=%#v currentExists=%v err=%v", snapshot, exists, set, current, currentExists, err)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "cbx_eeeeeeeeeeee", Server: prepared}}); err != nil {
 		t.Fatal(err)
 	}
 	if len(api.deleted) != 1 || api.deleted[0] != live.ID {
@@ -1044,12 +1466,114 @@ func TestAmbiguousSSHKeyCreateRecoveryKeepsOwnershipIndeterminate(t *testing.T) 
 		t.Fatalf("claims=%#v", claims)
 	}
 	server := core.Server{Provider: providerName, Name: claims[0].Slug, Labels: claims[0].Labels}
+	core.SetServerLeaseClaimSnapshot(&server, claims[0], true)
 	err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: claims[0].LeaseID, Server: server}})
-	if err == nil || !strings.Contains(err.Error(), "SSH key ownership remains indeterminate") {
+	if err == nil || !strings.Contains(err.Error(), "SSH key creation remains indeterminate") {
 		t.Fatalf("release err=%v", err)
 	}
 	if _, ok, err := core.ReadLeaseClaimWithPresence(claims[0].LeaseID); err != nil || !ok {
 		t.Fatalf("claim retained ok=%v err=%v", ok, err)
+	}
+}
+
+func TestAmbiguousSSHKeyCreateRecoveryDeletesExactDiscoveredKeyUnderFence(t *testing.T) {
+	api := &fakeVultrAPI{createErr: &ambiguousSSHKeyCreateError{err: os.ErrDeadlineExceeded}}
+	b := newTestBackend(t, api)
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "found-key"})
+	if err == nil {
+		t.Fatal("Acquire unexpectedly succeeded")
+	}
+	claims, err := core.ListLeaseClaims()
+	if err != nil || len(claims) != 1 {
+		t.Fatalf("claims=%#v err=%v", claims, err)
+	}
+	_, publicKey, err := core.EnsureTestboxKeyForConfig(b.Cfg, claims[0].LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.sshKeys = append(api.sshKeys, vultrSSHKey{ID: "late-key", Name: providerKeyForLease(claims[0].LeaseID), SSHKey: publicKey})
+	target, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "found-key", ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists, set := core.ServerLeaseClaimSnapshot(target.Server); !set || !exists {
+		t.Fatalf("release target missing exact claim snapshot: %#v", target)
+	}
+	prepared, err := b.prepareCleanupServer(context.Background(), target.Server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, exists, set := core.ServerLeaseClaimSnapshot(prepared)
+	current, currentExists, err := core.ReadLeaseClaimWithPresence(claims[0].LeaseID)
+	if err != nil || !set || !exists || !currentExists || snapshot.Labels[vultrKeyOwnedLabel] != "true" || snapshot.Labels[vultrKeyIDLabel] != "late-key" || !reflect.DeepEqual(snapshot, current) {
+		t.Fatalf("snapshot=%#v exists=%v set=%v current=%#v currentExists=%v err=%v", snapshot, exists, set, current, currentExists, err)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: target.LeaseID, Server: prepared}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.deleted) != 0 || len(api.deletedKeys) != 1 || api.deletedKeys[0] != "late-key" {
+		t.Fatalf("instance deletes=%v key deletes=%v", api.deleted, api.deletedKeys)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(claims[0].LeaseID); err != nil || exists {
+		t.Fatalf("claim exists=%v err=%v", exists, err)
+	}
+}
+
+func TestAmbiguousCreateRecoveryRefusesMultipleExactMatches(t *testing.T) {
+	api := &fakeVultrAPI{}
+	b := newTestBackend(t, api)
+	const leaseID = "cbx_edededededed"
+	const slug = "multiple"
+	labels := core.DirectLeaseLabels(b.Cfg, leaseID, slug, providerName, "", false, time.Now())
+	labels["state"] = "provisioning"
+	labels["recovery"] = "ambiguous-create"
+	labels[vultrAccountLabel] = "account:test-account"
+	setVultrKeyIdentity(labels, "key-multiple", true)
+	claimServer := core.Server{Provider: providerName, Name: core.LeaseProviderName(leaseID, slug), Labels: labels}
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, b.Cfg, claimServer, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"edededed-eded-4ded-8ded-edededededed", "dededede-dede-4ded-8ded-dededededede"} {
+		api.instances = append(api.instances, vultrInstance{ID: id, Label: claimServer.Name, Tags: tagsFromLabels(labels)})
+	}
+	attachCurrentVultrClaim(t, &claimServer, leaseID)
+	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: claimServer}})
+	if err == nil || !strings.Contains(err.Error(), "multiple instances") {
+		t.Fatalf("ReleaseLease err=%v", err)
+	}
+	if len(api.deleted) != 0 || len(api.deletedKeys) != 0 {
+		t.Fatalf("provider mutations instance=%v key=%v", api.deleted, api.deletedKeys)
+	}
+}
+
+func TestKeyOnlyRollbackRecoveryDeletesExactKeyWithoutInstanceCall(t *testing.T) {
+	api := &fakeVultrAPI{}
+	b := newTestBackend(t, api)
+	const leaseID = "cbx_abababababab"
+	const slug = "key-only-cleanup"
+	_, publicKey, err := core.EnsureTestboxKeyForConfig(b.Cfg, leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := core.DirectLeaseLabels(b.Cfg, leaseID, slug, providerName, "", false, time.Now())
+	labels["state"] = "provisioning"
+	labels["recovery"] = "rollback-cleanup"
+	labels[vultrAccountLabel] = "account:test-account"
+	setVultrKeyIdentity(labels, "rollback-key", true)
+	server := core.Server{Provider: providerName, Name: core.LeaseProviderName(leaseID, slug), Labels: labels}
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, b.Cfg, server, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	api.sshKeys = append(api.sshKeys, vultrSSHKey{ID: "rollback-key", Name: providerKeyForLease(leaseID), SSHKey: publicKey})
+	target, err := b.Resolve(context.Background(), core.ResolveRequest{ID: slug, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: target}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.deleted) != 0 || len(api.deletedKeys) != 1 || api.deletedKeys[0] != "rollback-key" {
+		t.Fatalf("instance deletes=%v key deletes=%v", api.deleted, api.deletedKeys)
 	}
 }
 
@@ -1098,11 +1622,15 @@ func TestKeyOnlyRollbackRecoveryCannotDeleteLiveInstance(t *testing.T) {
 		Plan:         b.Cfg.ServerType,
 		Tags:         tagsFromLabels(labels),
 	}
+	liveLabels := labelsFromTags(live.Tags)
+	liveLabels["provider_key"] = "changed-provider-key"
+	live.Tags = tagsFromLabels(liveLabels)
 	api.instances = []vultrInstance{live}
-	server := serverFromInstance(live, b.Cfg)
-	server.Labels[vultrAccountLabel] = "account:test-account"
-
-	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}})
+	target, err := b.releaseTargetFromClaim(slug, "account:test-account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: target})
 	if err == nil || !strings.Contains(err.Error(), "key-only recovery claim cannot authorize instance cleanup") {
 		t.Fatalf("err=%v", err)
 	}
@@ -1132,4 +1660,14 @@ func leaseTagsWithExpiry(cfg core.Config, leaseID, slug string, expiresAt time.T
 	labels["state"] = "ready"
 	labels["expires_at"] = core.LeaseLabelTime(expiresAt)
 	return tagsFromLabels(labels)
+}
+
+func attachCurrentVultrClaim(t *testing.T, server *core.Server, leaseID string) core.LeaseClaim {
+	t.Helper()
+	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists {
+		t.Fatalf("read current claim lease=%s exists=%v err=%v", leaseID, exists, err)
+	}
+	core.SetServerLeaseClaimSnapshot(server, claim, true)
+	return claim
 }

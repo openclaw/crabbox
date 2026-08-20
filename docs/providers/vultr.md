@@ -123,7 +123,10 @@ scripts.
 6. Run normal Crabbox sync/run/ssh workflows over SSH.
 7. Delete the instance and managed SSH key on `stop`; `cleanup` deletes only
    resources with complete Crabbox Vultr ownership tags and an exact account-
-   and instance-bound local claim.
+   and instance-bound local claim. Cleanup locks that exact claim revision
+   across provider deletion, deletes the instance before its managed SSH key,
+   and removes the local key only after both provider cleanup and durable claim
+   removal succeed.
 
 If instance or SSH-key creation returns an indeterminate transport or server
 failure, Crabbox retains the SSH credentials and records a pending local
@@ -132,7 +135,10 @@ claim and deletes a late-created instance or key when Vultr exposes it. Empty
 inventory is not treated as proof that creation failed while the outcome
 remains indeterminate: Crabbox retains the claim and credentials and asks the
 operator to retry rather than risk orphaning a billed instance without its SSH
-key.
+key. If instance deletion succeeds but managed-key deletion fails, the same
+claim and immutable key identity remain available for retry; the retry confirms
+the instance is absent, deletes only the exact authorized key, and then
+finalizes the claim and local credentials.
 
 ## Ownership And Cleanup
 

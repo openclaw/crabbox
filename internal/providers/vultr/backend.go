@@ -37,7 +37,7 @@ func NewBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.B
 		return core.WaitForSSHReady(ctx, target, b.RT.Stderr, phase, timeout)
 	}
 	b.Delete = b.deleteServer
-	b.CleanupEligible = b.cleanupEligible
+	b.PrepareCleanup = b.prepareCleanup
 	return b
 }
 
@@ -160,9 +160,22 @@ func (b *backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	server.Labels = readyLabels
 	server.Labels[vultrAccountLabel] = accountID
 	server.Status = "ready"
-	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, ssh, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+	claim, err := core.ClaimLeaseTargetForRepoConfigIfUnchanged(
+		leaseID,
+		slug,
+		cfg,
+		server,
+		ssh,
+		req.Repo.Root,
+		cfg.IdleTimeout,
+		req.Reclaim,
+		core.LeaseClaim{},
+		false,
+	)
+	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	core.SetServerLeaseClaimSnapshot(&server, claim, true)
 	committed = true
 	fmt.Fprintf(b.RT.Stderr, "provisioned lease=%s instance=%s type=%s\n", leaseID, server.DisplayID(), cfg.ServerType)
 	return core.LeaseTarget{Server: server, SSH: ssh, LeaseID: leaseID}, nil
@@ -292,18 +305,167 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	return b.CleanupServers(ctx, req, servers)
 }
 
-func (b *backend) cleanupEligible(ctx context.Context, server core.Server) (bool, error) {
+func (b *backend) prepareCleanup(ctx context.Context, server core.Server) (core.Server, bool, shared.CleanupSkipReason, error) {
+	prepared, err := b.prepareCleanupServer(ctx, server)
+	if err == nil {
+		return prepared, true, "", nil
+	}
+	eligible, err := shared.CleanupClaimEligible(err)
+	if err != nil {
+		return core.Server{}, false, "", err
+	}
+	return core.Server{}, eligible, shared.CleanupSkipNoExactLocalClaim, nil
+}
+
+func (b *backend) prepareCleanupServer(ctx context.Context, server core.Server) (core.Server, error) {
+	if err := validateInstanceLabels(server.Labels); err != nil {
+		return core.Server{}, err
+	}
 	client, err := b.clientFactory(b.RT)
 	if err != nil {
-		return false, err
+		return core.Server{}, err
 	}
 	accountID, err := client.AccountID(ctx)
 	if err != nil {
-		return false, err
+		return core.Server{}, err
 	}
-	server = shared.ServerWithDefaultLabel(server, vultrAccountLabel, accountID)
-	_, err = b.ensureCleanupClaim(server)
-	return shared.CleanupClaimEligible(err)
+	leaseID := server.Labels["lease"]
+	claim, claimExists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		return core.Server{}, fmt.Errorf("read vultr cleanup claim: %w", err)
+	}
+	if !claimExists {
+		return core.Server{}, core.Exit(2, "vultr lease=%s has no exact local claim; refusing cleanup", leaseID)
+	}
+	prepared, claim, err := b.recoverCleanupClaim(ctx, client, server, claim, accountID)
+	if err != nil {
+		return core.Server{}, err
+	}
+	core.SetServerLeaseClaimSnapshot(&prepared, claim, true)
+	return prepared, nil
+}
+
+func (b *backend) recoverCleanupClaim(ctx context.Context, client vultrAPI, server core.Server, claim core.LeaseClaim, accountID string) (core.Server, core.LeaseClaim, error) {
+	if err := validateVultrCleanupClaim(server, claim, accountID); err != nil {
+		return core.Server{}, core.LeaseClaim{}, err
+	}
+	leaseID := claim.LeaseID
+	prepared := server
+	prepared.Labels = shared.CloneLabels(server.Labels)
+	prepared.Labels[vultrAccountLabel] = accountID
+	replacement := claim
+	replacement.Labels = shared.CloneLabels(claim.Labels)
+	changed := false
+	if claim.CloudID == "" && claim.Labels["recovery"] == "ambiguous-create" {
+		instances, err := client.ListCrabboxInstances(ctx)
+		if err != nil {
+			return core.Server{}, core.LeaseClaim{}, err
+		}
+		matches := pendingVultrRecoveryMatches(instances, claim)
+		if len(matches) == 0 {
+			return core.Server{}, core.LeaseClaim{}, core.Exit(4, "vultr ambiguous create recovery is still indeterminate for lease=%s; local claim and credentials retained", leaseID)
+		}
+		if len(matches) > 1 {
+			return core.Server{}, core.LeaseClaim{}, core.Exit(2, "vultr ambiguous create recovery found multiple instances for lease=%s", leaseID)
+		}
+		if server.CloudID != "" && server.CloudID != matches[0].ID {
+			return core.Server{}, core.LeaseClaim{}, core.Exit(2, "refusing to bind vultr ambiguous create recovery to mismatched instance=%s lease=%s", server.CloudID, leaseID)
+		}
+		prepared = serverFromInstance(matches[0], b.Cfg)
+		prepared.Labels[vultrAccountLabel] = accountID
+		preserveVultrIdentity(prepared.Labels, claim.Labels)
+		replacement.CloudID = matches[0].ID
+		changed = true
+	}
+	keyOwned := strings.TrimSpace(claim.Labels[vultrKeyOwnedLabel])
+	if keyOwned == "" && claim.Labels["recovery"] == "ambiguous-key-create" {
+		publicKey, err := retainedVultrPublicKey(leaseID)
+		if err != nil {
+			return core.Server{}, core.LeaseClaim{}, err
+		}
+		key, found, err := client.FindSSHKey(ctx, providerKeyForLease(leaseID), publicKey)
+		if err != nil {
+			return core.Server{}, core.LeaseClaim{}, err
+		}
+		if !found {
+			return core.Server{}, core.LeaseClaim{}, core.Exit(4, "vultr SSH key creation remains indeterminate for lease=%s; local claim and credentials retained", leaseID)
+		}
+		if key.ID == "" {
+			return core.Server{}, core.LeaseClaim{}, core.Exit(2, "vultr SSH key recovery returned no immutable key id for lease=%s", leaseID)
+		}
+		setVultrKeyIdentity(replacement.Labels, key.ID, true)
+		changed = true
+	}
+	if changed {
+		var err error
+		claim, err = core.ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, claim, replacement)
+		if err != nil {
+			return core.Server{}, core.LeaseClaim{}, fmt.Errorf("persist recovered vultr cleanup identity: %w", err)
+		}
+	}
+	preserveVultrIdentity(prepared.Labels, claim.Labels)
+	return prepared, claim, nil
+}
+
+func validateVultrCleanupClaim(server core.Server, claim core.LeaseClaim, accountID string) error {
+	leaseID := server.Labels["lease"]
+	if claim.LeaseID != leaseID || claim.Provider == "" {
+		return core.Exit(2, "vultr lease claim is incomplete for lease=%s", leaseID)
+	}
+	if claim.Provider != providerName {
+		return core.Exit(2, "lease=%s is claimed by provider=%s; refusing vultr cleanup", leaseID, claim.Provider)
+	}
+	if err := validateVultrClaimIdentity(claim, leaseID, server.Labels["slug"]); err != nil {
+		return err
+	}
+	if claim.CloudID != "" {
+		if server.CloudID == "" || claim.CloudID != server.CloudID {
+			return core.Exit(2, "refusing to release Vultr instance %s from stale local claim", server.CloudID)
+		}
+	} else {
+		switch claim.Labels["recovery"] {
+		case "ambiguous-create":
+		case "ambiguous-key-create", "rollback-cleanup":
+			if server.CloudID != "" {
+				return core.Exit(2, "vultr key-only recovery claim cannot authorize instance cleanup for lease=%s", leaseID)
+			}
+		default:
+			return core.Exit(2, "vultr lease claim has no instance identity or valid recovery state for lease=%s", leaseID)
+		}
+	}
+	expectedAccount := strings.TrimSpace(claim.Labels[vultrAccountLabel])
+	if expectedAccount == "" {
+		return core.Exit(3, "vultr lease claim has no account identity; refusing cleanup")
+	}
+	if expectedAccount != accountID {
+		return core.Exit(3, "vultr account mismatch: current account %s does not match lease account %s", accountID, expectedAccount)
+	}
+	if currentAccount := strings.TrimSpace(server.Labels[vultrAccountLabel]); currentAccount != "" && currentAccount != accountID {
+		return core.Exit(3, "vultr account mismatch: current account %s does not match lease account %s", accountID, currentAccount)
+	}
+	for _, key := range []string{vultrKeyIDLabel, vultrKeyOwnedLabel} {
+		if liveValue := strings.TrimSpace(server.Labels[key]); liveValue != "" && liveValue != strings.TrimSpace(claim.Labels[key]) {
+			return core.Exit(2, "refusing vultr cleanup because live %s does not match the exact claim for lease=%s", key, leaseID)
+		}
+	}
+	return nil
+}
+
+func pendingVultrRecoveryMatches(instances []vultrInstance, claim core.LeaseClaim) []vultrInstance {
+	name := core.LeaseProviderName(claim.LeaseID, claim.Slug)
+	matches := make([]vultrInstance, 0, 1)
+	for _, item := range instances {
+		labels := normalizedInstanceLabels(item.Tags)
+		if isOwnedInstance(item) &&
+			item.Label == name &&
+			labels["lease"] == claim.LeaseID &&
+			labels["slug"] == claim.Slug &&
+			labels["provider_key"] != "" &&
+			labels["provider_key"] == claim.Labels["provider_key"] {
+			matches = append(matches, item)
+		}
+	}
+	return matches
 }
 
 func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
@@ -327,6 +489,10 @@ func (b *backend) deleteServer(ctx context.Context, _ core.Config, server core.S
 	if err := validateInstanceLabels(server.Labels); err != nil {
 		return err
 	}
+	expectedClaim, err := shared.RequireClaimSnapshot(server, providerName)
+	if err != nil {
+		return err
+	}
 	client, err := b.clientFactory(b.RT)
 	if err != nil {
 		return err
@@ -335,65 +501,78 @@ func (b *backend) deleteServer(ctx context.Context, _ core.Config, server core.S
 	if err != nil {
 		return err
 	}
-	if expected := strings.TrimSpace(server.Labels[vultrAccountLabel]); expected != "" && expected != accountID {
-		return core.Exit(3, "vultr account mismatch: current account %s does not match lease account %s", accountID, expected)
-	}
-	cleanupServer := server
-	cleanupServer.Labels = shared.CloneLabels(server.Labels)
-	cleanupServer.Labels[vultrAccountLabel] = accountID
-	if cleanupServer.CloudID != "" {
-		item, err := client.GetInstance(ctx, cleanupServer.CloudID)
-		if err == nil {
-			if err := validateLiveInstance(item, cleanupServer); err != nil {
-				return err
-			}
-			cleanupServer = serverFromInstance(item, b.Cfg)
-			cleanupServer.Labels[vultrAccountLabel] = accountID
-			preserveVultrIdentity(cleanupServer.Labels, server.Labels)
-		} else if !isVultrNotFound(err) {
-			return err
-		}
-	}
-	leaseID := cleanupServer.Labels["lease"]
-	claim, err := b.ensureCleanupClaim(cleanupServer)
+	server, expectedClaim, err = b.recoverCleanupClaim(ctx, client, server, expectedClaim, accountID)
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(claim.CloudID) == "" && claim.Labels["recovery"] == "ambiguous-create" {
-		if strings.TrimSpace(cleanupServer.CloudID) == "" {
-			return core.Exit(4, "vultr ambiguous create recovery is still indeterminate for lease=%s; local claim and credentials retained", leaseID)
-		}
-		claim, err = core.UpdateLeaseClaimEndpointIfUnchangedWithProviderMetadata(claim.LeaseID, claim, cleanupServer, core.SSHTarget{})
-		if err != nil {
-			return fmt.Errorf("persist recovered vultr instance: %w", err)
-		}
-	}
-	keyOwned := strings.TrimSpace(claim.Labels[vultrKeyOwnedLabel])
-	keyID := strings.TrimSpace(claim.Labels[vultrKeyIDLabel])
-	if keyOwned == "true" && keyID == "" {
-		return core.Exit(2, "vultr lease=%s owns an SSH key but its immutable key id is missing", leaseID)
-	}
-	if keyOwned != "true" && keyOwned != "false" {
-		return core.Exit(4, "vultr SSH key ownership remains indeterminate for lease=%s; local claim and credentials retained", leaseID)
-	}
-	keyPresent := false
-	if keyOwned == "true" {
-		keyPresent, err = authorizeVultrSSHKeyDelete(ctx, client, leaseID, keyID)
+	leaseID := expectedClaim.LeaseID
+	action := func() error {
+		currentAccount, err := client.AccountID(ctx)
 		if err != nil {
 			return err
 		}
-	}
-	if cleanupServer.CloudID != "" {
-		if err := client.DeleteInstance(ctx, cleanupServer.CloudID); err != nil {
+		if err := validateVultrCleanupClaim(server, expectedClaim, currentAccount); err != nil {
 			return err
 		}
-	}
-	if keyPresent {
-		if err := client.DeleteSSHKey(ctx, keyID); err != nil {
-			return err
+		instancePresent := false
+		if expectedClaim.CloudID != "" {
+			item, getErr := client.GetInstance(ctx, expectedClaim.CloudID)
+			switch {
+			case getErr == nil:
+				expected := core.Server{Provider: providerName, CloudID: expectedClaim.CloudID, Name: core.LeaseProviderName(leaseID, expectedClaim.Slug), Labels: expectedClaim.Labels}
+				if err := validateLiveInstance(item, expected); err != nil {
+					return err
+				}
+				live := serverFromInstance(item, b.Cfg)
+				live.Labels[vultrAccountLabel] = currentAccount
+				if err := validateVultrCleanupClaim(live, expectedClaim, currentAccount); err != nil {
+					return err
+				}
+				instancePresent = true
+			case !isVultrNotFound(getErr):
+				return getErr
+			}
+		} else {
+			instances, err := client.ListCrabboxInstances(ctx)
+			if err != nil {
+				return err
+			}
+			for _, item := range instances {
+				labels := normalizedInstanceLabels(item.Tags)
+				if item.Label == core.LeaseProviderName(leaseID, expectedClaim.Slug) ||
+					(labels["lease"] == leaseID && labels["slug"] == expectedClaim.Slug) {
+					return core.Exit(2, "vultr key-only recovery claim cannot authorize instance cleanup for lease=%s", leaseID)
+				}
+			}
 		}
+		keyID := strings.TrimSpace(expectedClaim.Labels[vultrKeyIDLabel])
+		keyPresent := false
+		switch strings.TrimSpace(expectedClaim.Labels[vultrKeyOwnedLabel]) {
+		case "true":
+			if keyID == "" {
+				return core.Exit(2, "vultr lease=%s owns an SSH key but its immutable key id is missing", leaseID)
+			}
+			keyPresent, err = authorizeVultrSSHKeyDelete(ctx, client, leaseID, keyID)
+			if err != nil {
+				return err
+			}
+		case "false":
+		default:
+			return core.Exit(4, "vultr SSH key ownership remains indeterminate for lease=%s; local claim and credentials retained", leaseID)
+		}
+		if instancePresent {
+			if err := client.DeleteInstance(ctx, expectedClaim.CloudID); err != nil && !isVultrNotFound(err) {
+				return err
+			}
+		}
+		if keyPresent {
+			if err := client.DeleteSSHKey(ctx, keyID); err != nil && !isVultrNotFound(err) {
+				return err
+			}
+		}
+		return nil
 	}
-	if err := core.RemoveLeaseClaimIfUnchanged(leaseID, claim); err != nil {
+	if err := core.RemoveLeaseClaimIfUnchangedAfter(leaseID, expectedClaim, action); err != nil {
 		return fmt.Errorf("finalize vultr cleanup claim: %w", err)
 	}
 	core.RemoveStoredTestboxKey(leaseID)
@@ -439,14 +618,21 @@ func (b *backend) targetFromInstance(item vultrInstance, req core.ResolveRequest
 		}
 	}
 	if req.ReleaseOnly {
+		core.SetServerLeaseClaimSnapshot(&server, claim, true)
 		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
 	ssh := core.SSHTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP)
 	core.UseStoredTestboxKey(&ssh, leaseID)
 	if req.Repo.Root != "" && !req.NoLocalStateMutations {
-		if _, err := core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, server.Labels["slug"], b.Cfg, server, ssh, req.Repo.Root, b.Cfg.IdleTimeout, req.Reclaim, claim, claimExists); err != nil {
+		updatedClaim, err := core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, server.Labels["slug"], b.Cfg, server, ssh, req.Repo.Root, b.Cfg.IdleTimeout, req.Reclaim, claim, claimExists)
+		if err != nil {
 			return core.LeaseTarget{}, err
 		}
+		claim = updatedClaim
+		claimExists = true
+	}
+	if claimExists && !req.IsReadOnlyStatus() {
+		core.SetServerLeaseClaimSnapshot(&server, claim, true)
 	}
 	return core.LeaseTarget{Server: server, SSH: ssh, LeaseID: leaseID}, nil
 }
@@ -478,14 +664,16 @@ func (b *backend) releaseTargetFromClaim(id, accountID string) (core.LeaseTarget
 	if expected := strings.TrimSpace(claim.Labels[vultrAccountLabel]); expected == "" || expected != accountID {
 		return core.LeaseTarget{}, core.Exit(3, "vultr account mismatch: current account %s does not match lease account %s", accountID, expected)
 	}
+	server := core.Server{
+		Provider: providerName,
+		CloudID:  claim.CloudID,
+		Name:     core.LeaseProviderName(claim.LeaseID, claim.Slug),
+		Labels:   claim.Labels,
+	}
+	core.SetServerLeaseClaimSnapshot(&server, claim, true)
 	return core.LeaseTarget{
 		LeaseID: claim.LeaseID,
-		Server: core.Server{
-			Provider: providerName,
-			CloudID:  claim.CloudID,
-			Name:     core.LeaseProviderName(claim.LeaseID, claim.Slug),
-			Labels:   claim.Labels,
-		},
+		Server:  server,
 	}, nil
 }
 
@@ -518,44 +706,6 @@ func isPendingVultrRecoveryClaim(claim core.LeaseClaim, leaseID string) bool {
 		claim.Provider == providerName &&
 		strings.TrimSpace(claim.CloudID) == "" &&
 		claim.Labels["recovery"] == "ambiguous-create"
-}
-
-func (b *backend) ensureCleanupClaim(server core.Server) (core.LeaseClaim, error) {
-	leaseID := server.Labels["lease"]
-	claim, claimExists, err := core.ReadLeaseClaimWithPresence(leaseID)
-	if err != nil {
-		return core.LeaseClaim{}, fmt.Errorf("read vultr cleanup claim: %w", err)
-	}
-	if !claimExists {
-		return core.LeaseClaim{}, core.Exit(2, "vultr lease=%s has no exact local claim; refusing cleanup", leaseID)
-	}
-	if err := validateVultrClaimIdentity(claim, leaseID, server.Labels["slug"]); err != nil {
-		return core.LeaseClaim{}, err
-	}
-	if claim.CloudID != "" {
-		if server.CloudID == "" || claim.CloudID != server.CloudID {
-			return core.LeaseClaim{}, core.Exit(2, "refusing to release Vultr instance %s from stale local claim", server.CloudID)
-		}
-	} else {
-		switch claim.Labels["recovery"] {
-		case "ambiguous-create":
-		case "ambiguous-key-create", "rollback-cleanup":
-			if server.CloudID != "" {
-				return core.LeaseClaim{}, core.Exit(2, "vultr key-only recovery claim cannot authorize instance cleanup for lease=%s", leaseID)
-			}
-		default:
-			return core.LeaseClaim{}, core.Exit(2, "vultr lease claim has no instance identity or valid recovery state for lease=%s", leaseID)
-		}
-	}
-	expectedAccount := strings.TrimSpace(claim.Labels[vultrAccountLabel])
-	currentAccount := strings.TrimSpace(server.Labels[vultrAccountLabel])
-	if expectedAccount == "" {
-		return core.LeaseClaim{}, core.Exit(3, "vultr lease claim has no account identity; refusing cleanup")
-	}
-	if currentAccount != "" && expectedAccount != currentAccount {
-		return core.LeaseClaim{}, core.Exit(3, "vultr account mismatch: current account %s does not match lease account %s", currentAccount, expectedAccount)
-	}
-	return claim, nil
 }
 
 func validateVultrClaimIdentity(claim core.LeaseClaim, leaseID, slug string) error {
@@ -676,21 +826,29 @@ func preserveVultrIdentity(labels, stored map[string]string) {
 	}
 }
 
-func authorizeVultrSSHKeyDelete(ctx context.Context, client vultrAPI, leaseID, keyID string) (bool, error) {
+func retainedVultrPublicKey(leaseID string) (string, error) {
 	keyPath, err := core.TestboxKeyPath(leaseID)
 	if err != nil {
-		return false, err
+		return "", err
 	}
 	publicKeyBytes, err := os.ReadFile(keyPath + ".pub")
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return false, core.Exit(4, "vultr SSH key deletion for lease=%s requires retained local public key; local claim and credentials retained", leaseID)
+			return "", core.Exit(4, "vultr SSH key deletion for lease=%s requires retained local public key; local claim and credentials retained", leaseID)
 		}
-		return false, fmt.Errorf("read retained vultr SSH public key: %w", err)
+		return "", fmt.Errorf("read retained vultr SSH public key: %w", err)
 	}
 	publicKey := strings.TrimSpace(string(publicKeyBytes))
 	if publicKey == "" {
-		return false, core.Exit(2, "retained vultr SSH public key is empty for lease=%s", leaseID)
+		return "", core.Exit(2, "retained vultr SSH public key is empty for lease=%s", leaseID)
+	}
+	return publicKey, nil
+}
+
+func authorizeVultrSSHKeyDelete(ctx context.Context, client vultrAPI, leaseID, keyID string) (bool, error) {
+	publicKey, err := retainedVultrPublicKey(leaseID)
+	if err != nil {
+		return false, err
 	}
 	key, found, err := client.FindSSHKeyByID(ctx, keyID)
 	if err != nil {
