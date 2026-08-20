@@ -125,7 +125,7 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
-	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim); err != nil {
+	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, &server, target, repo.Root, *reclaim); err != nil {
 		return err
 	}
 	workdir := strings.TrimSpace(*workdirOverride)
@@ -660,7 +660,7 @@ func (a App) checkpointRestore(ctx context.Context, args []string) error {
 		return err
 	}
 	workdir := checkpointRestoreWorkdir(cfg, leaseID, repo.Name, record.Workdir, workdirOverrideValue)
-	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim); err != nil {
+	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, &server, target, repo.Root, *reclaim); err != nil {
 		return err
 	}
 	if err := restoreCheckpointArchive(ctx, target, checkpointArchivePath(paths, record), record.ID, workdir, *clear); err != nil {
@@ -858,7 +858,7 @@ func (a App) provisionCheckpointFork(ctx context.Context, cfg Config, backend Ba
 		})
 	}
 	applyResolvedServerConfig(&cfg, server)
-	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, reclaim); err != nil {
+	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, &server, target, repo.Root, reclaim); err != nil {
 		release(context.Background())
 		return checkpointForkProvision{}, err
 	}
@@ -1059,7 +1059,7 @@ func (a App) checkpointForkParallelsSnapshotOnce(ctx context.Context, cfg Config
 		}
 	}()
 	applyResolvedServerConfig(&cfg, server)
-	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, reclaim); err != nil {
+	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, &server, target, repo.Root, reclaim); err != nil {
 		release(ctx)
 		return err
 	}

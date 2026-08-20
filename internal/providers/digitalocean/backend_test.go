@@ -2932,13 +2932,16 @@ func TestUpdateTailscaleMetadataPersistsDigitalOceanTags(t *testing.T) {
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
 	cfg.Tailscale.Enabled = true
-	item := droplet{ID: 105, Name: "metadata", Status: "active", Tags: leaseTags(cfg, "cbx_abcdef123456", "metadata", "ready", false, time.Now())}
+	item := droplet{ID: 105, Name: core.LeaseProviderName("cbx_abcdef123456", "metadata"), Status: "active", Tags: leaseTags(cfg, "cbx_abcdef123456", "metadata", "ready", false, time.Now())}
 	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
 	backend := newTestBackend(t, api)
 	server := serverFromDroplet(item, backend.Cfg)
 	server.Labels[digitalOceanAccountLabel] = "team:test-account"
 	server.Labels[digitalOceanRecoveryKeyIDLabel] = "704"
 	server.Labels[digitalOceanKeyOwnedLabel] = "true"
+	claimDigitalOceanServer(t, backend, server)
+	lease := claimedDigitalOceanTarget(t, server)
+	initial, _, _ := core.ServerLeaseClaimSnapshot(lease.Server)
 	meta := core.TailscaleMetadata{
 		Enabled:  true,
 		Hostname: "metadata",
@@ -2950,10 +2953,7 @@ func TestUpdateTailscaleMetadataPersistsDigitalOceanTags(t *testing.T) {
 		ExitNode: "exit.example.ts.net",
 	}
 
-	updated, err := backend.UpdateTailscaleMetadata(context.Background(), core.LeaseTarget{
-		Server:  server,
-		LeaseID: "cbx_abcdef123456",
-	}, meta)
+	updated, err := backend.UpdateTailscaleMetadata(context.Background(), lease, meta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2966,6 +2966,11 @@ func TestUpdateTailscaleMetadataPersistsDigitalOceanTags(t *testing.T) {
 	if updated.Labels[digitalOceanRecoveryKeyIDLabel] != "704" || updated.Labels[digitalOceanKeyOwnedLabel] != "true" {
 		t.Fatalf("key identity labels=%v", updated.Labels)
 	}
+	snapshot, exists, set := core.ServerLeaseClaimSnapshot(updated)
+	current, err := core.ReadLeaseClaim(lease.LeaseID)
+	if err != nil || !set || !exists || snapshot.Revision == initial.Revision || !reflect.DeepEqual(snapshot, current) || current.TailscaleIPv4 != meta.IPv4 {
+		t.Fatalf("snapshot=%#v current=%#v exists=%t set=%t err=%v", snapshot, current, exists, set, err)
+	}
 	for _, labels := range []map[string]string{labelsFromTags(api.replacedTo[0]), updated.Labels} {
 		if labels["tailscale_ipv4"] != meta.IPv4 ||
 			labels["tailscale_fqdn"] != meta.FQDN ||
@@ -2975,6 +2980,184 @@ func TestUpdateTailscaleMetadataPersistsDigitalOceanTags(t *testing.T) {
 			labels["tailscale_exit_node"] != meta.ExitNode {
 			t.Fatalf("persisted labels=%v tags=%v", labels, api.replacedTo[0])
 		}
+	}
+}
+
+func TestUpdateTailscaleMetadataPreservesExactSnapshotThroughRelease(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		resolve bool
+	}{{name: "acquired"}, {name: "resolved", resolve: true}} {
+		t.Run(test.name, func(t *testing.T) {
+			api := &fakeDigitalOceanAPI{}
+			backend := newTestBackend(t, api)
+			repo := core.Repo{Root: t.TempDir()}
+			lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: repo, RequestedSlug: "metadata-release"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			keyPath, err := core.TestboxKeyPath(lease.LeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.resolve {
+				api.droplets = append(api.droplets, api.created...)
+				lease, err = backend.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, Repo: repo})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			initial, _, _ := core.ServerLeaseClaimSnapshot(lease.Server)
+			lease.Server, err = backend.UpdateTailscaleMetadata(context.Background(), lease, core.TailscaleMetadata{
+				Enabled: true, State: "ready", IPv4: "100.64.1.9", FQDN: "metadata.example.ts.net",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			metadata, exists, set := core.ServerLeaseClaimSnapshot(lease.Server)
+			if !set || !exists || metadata.Revision == initial.Revision || metadata.TailscaleIPv4 != "100.64.1.9" {
+				t.Fatalf("metadata snapshot=%#v exists=%t set=%t", metadata, exists, set)
+			}
+			lease.SSH.Host = "100.64.1.9"
+			refreshed, err := core.UpdateLeaseClaimEndpointIfUnchanged(lease.LeaseID, metadata, lease.Server, lease.SSH)
+			if err != nil {
+				t.Fatal(err)
+			}
+			core.SetServerLeaseClaimSnapshot(&lease.Server, refreshed, true)
+			if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(api.deleted, []int64{100}) || !reflect.DeepEqual(api.deletedKeyIDs, []int64{700}) {
+				t.Fatalf("deleted=%v deletedKeyIDs=%v", api.deleted, api.deletedKeyIDs)
+			}
+			if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("local key remains: %v", err)
+			}
+		})
+	}
+}
+
+func TestUpdateTailscaleMetadataRejectsConcurrentClaimReplacement(t *testing.T) {
+	api := &fakeDigitalOceanAPI{}
+	backend := newTestBackend(t, api)
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "metadata-race"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, _, _ := core.ServerLeaseClaimSnapshot(lease.Server)
+	labels := maps.Clone(initial.Labels)
+	labels["owner"] = "concurrent-claimant"
+	replacement, err := core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, initial, labels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tagWrites := len(api.replaced)
+	if _, err := backend.UpdateTailscaleMetadata(context.Background(), lease, core.TailscaleMetadata{Enabled: true, IPv4: "100.64.1.9"}); err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("metadata error=%v", err)
+	}
+	current, err := core.ReadLeaseClaim(lease.LeaseID)
+	if err != nil || !reflect.DeepEqual(current, replacement) || len(api.replaced) != tagWrites {
+		t.Fatalf("claim=%#v replacement=%#v tagWrites=%d want=%d err=%v", current, replacement, len(api.replaced), tagWrites, err)
+	}
+}
+
+func TestUpdateTailscaleMetadataProviderFailureRetainsClaimSnapshotAndKey(t *testing.T) {
+	api := &fakeDigitalOceanAPI{}
+	backend := newTestBackend(t, api)
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "metadata-failure"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, _, _ := core.ServerLeaseClaimSnapshot(lease.Server)
+	keyPath, err := core.TestboxKeyPath(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.replaceErr = errors.New("provider tag replacement failed")
+	if _, err := backend.UpdateTailscaleMetadata(context.Background(), lease, core.TailscaleMetadata{Enabled: true, IPv4: "100.64.1.9"}); err == nil || !strings.Contains(err.Error(), "tag replacement failed") {
+		t.Fatalf("metadata error=%v", err)
+	}
+	current, err := core.ReadLeaseClaim(lease.LeaseID)
+	snapshot, _, _ := core.ServerLeaseClaimSnapshot(lease.Server)
+	if err != nil || !reflect.DeepEqual(current, initial) || !reflect.DeepEqual(snapshot, initial) || len(api.deletedKeyIDs) != 0 {
+		t.Fatalf("current=%#v snapshot=%#v initial=%#v deletedKeys=%v err=%v", current, snapshot, initial, api.deletedKeyIDs, err)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("local key was removed: %v", err)
+	}
+}
+
+func TestUpdateTailscaleMetadataRevalidatesAccountInsideClaimLock(t *testing.T) {
+	api := &fakeDigitalOceanAPI{}
+	backend := newTestBackend(t, api)
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "metadata-account"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	api.accountFn = func() (string, error) {
+		calls++
+		if calls == 1 {
+			return "team:test-account", nil
+		}
+		return "team:other-account", nil
+	}
+	tagWrites := len(api.replaced)
+	if _, err := backend.UpdateTailscaleMetadata(context.Background(), lease, core.TailscaleMetadata{Enabled: true, IPv4: "100.64.1.9"}); err == nil || !strings.Contains(err.Error(), "account mismatch") {
+		t.Fatalf("metadata error=%v", err)
+	}
+	if calls != 2 || len(api.replaced) != tagWrites {
+		t.Fatalf("account calls=%d tagWrites=%d want=%d", calls, len(api.replaced), tagWrites)
+	}
+}
+
+func TestUpdateTailscaleMetadataRejectsMismatchedOwnershipBeforeMutation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*fakeDigitalOceanAPI, *core.LeaseTarget)
+	}{
+		{name: "missing snapshot", mutate: func(_ *fakeDigitalOceanAPI, lease *core.LeaseTarget) {
+			lease.Server = core.Server{Provider: lease.Server.Provider, CloudID: lease.Server.CloudID, ID: lease.Server.ID, Name: lease.Server.Name, Labels: lease.Server.Labels}
+		}},
+		{name: "account", mutate: func(api *fakeDigitalOceanAPI, _ *core.LeaseTarget) { api.accountID = "team:other-account" }},
+		{name: "lease", mutate: func(_ *fakeDigitalOceanAPI, lease *core.LeaseTarget) { lease.LeaseID = "cbx_other_lease" }},
+		{name: "resource", mutate: func(_ *fakeDigitalOceanAPI, lease *core.LeaseTarget) { lease.Server.CloudID = "999" }},
+		{name: "name", mutate: func(_ *fakeDigitalOceanAPI, lease *core.LeaseTarget) { lease.Server.Name = "another-droplet" }},
+		{name: "provider key", mutate: func(_ *fakeDigitalOceanAPI, lease *core.LeaseTarget) {
+			lease.Server.Labels = maps.Clone(lease.Server.Labels)
+			lease.Server.Labels["provider_key"] = "crabbox-cbx-other"
+		}},
+		{name: "owned key", mutate: func(_ *fakeDigitalOceanAPI, lease *core.LeaseTarget) {
+			lease.Server.Labels = maps.Clone(lease.Server.Labels)
+			lease.Server.Labels[digitalOceanKeyOwnedLabel] = "false"
+		}},
+		{name: "key identity", mutate: func(_ *fakeDigitalOceanAPI, lease *core.LeaseTarget) {
+			lease.Server.Labels = maps.Clone(lease.Server.Labels)
+			lease.Server.Labels[digitalOceanRecoveryKeyIDLabel] = "999"
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			api := &fakeDigitalOceanAPI{}
+			backend := newTestBackend(t, api)
+			lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "metadata-mismatch"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			initial, err := core.ReadLeaseClaim(lease.LeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tagWrites := len(api.replaced)
+			test.mutate(api, &lease)
+			if _, err := backend.UpdateTailscaleMetadata(context.Background(), lease, core.TailscaleMetadata{Enabled: true, IPv4: "100.64.1.9"}); err == nil {
+				t.Fatal("metadata update accepted mismatched ownership")
+			}
+			current, err := core.ReadLeaseClaim(initial.LeaseID)
+			if err != nil || !reflect.DeepEqual(current, initial) || len(api.replaced) != tagWrites || len(api.deletedKeyIDs) != 0 {
+				t.Fatalf("claim=%#v initial=%#v writes=%d want=%d deletedKeys=%v err=%v", current, initial, len(api.replaced), tagWrites, api.deletedKeyIDs, err)
+			}
+		})
 	}
 }
 

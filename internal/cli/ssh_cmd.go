@@ -78,7 +78,7 @@ func (a App) resolveSSHCommandTargetWithOptions(ctx context.Context, command str
 	if err != nil {
 		return resolvedSSHCommandTarget{}, err
 	}
-	if err := a.claimAndTouchLeaseTarget(ctx, cfg, lease.Server, lease.SSH, lease.LeaseID, *reclaim); err != nil {
+	if err := a.claimAndTouchLeaseTarget(ctx, cfg, &lease.Server, lease.SSH, lease.LeaseID, *reclaim); err != nil {
 		return resolvedSSHCommandTarget{}, err
 	}
 	resolved := resolvedSSHCommandTarget{

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -968,6 +969,7 @@ func TestCheckpointForkMetadataWriteFailureReleasesProvisionedLease(t *testing.T
 		t.Fatal(err)
 	}
 	backend := newWatchTestBackend()
+	backend.resolveErr = errors.New("release refresher unavailable")
 	var stdout bytes.Buffer
 	app := App{Stdout: &stdout, Stderr: io.Discard}
 	cfg := Config{Provider: "watch-test"}
@@ -983,6 +985,11 @@ func TestCheckpointForkMetadataWriteFailureReleasesProvisionedLease(t *testing.T
 	_, _, releases := backend.counts()
 	if releases != 1 {
 		t.Fatalf("metadata write failure releases=%d, want 1", releases)
+	}
+	snapshot, exists, set := ServerLeaseClaimSnapshot(backend.releaseLease.Server)
+	current, claimErr := readLeaseClaim(backend.releaseLease.LeaseID)
+	if claimErr != nil || !set || !exists || !reflect.DeepEqual(snapshot, current) {
+		t.Fatalf("rollback snapshot=%#v current=%#v exists=%t set=%t err=%v", snapshot, current, exists, set, claimErr)
 	}
 	if stdout.Len() != 0 {
 		t.Fatalf("metadata write failure printed an untracked fork: %q", stdout.String())

@@ -54,7 +54,7 @@ func (a App) copyCommand(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := a.claimAndTouchLeaseTarget(ctx, cfg, lease.Server, lease.SSH, lease.LeaseID, false); err != nil {
+	if err := a.claimAndTouchLeaseTarget(ctx, cfg, &lease.Server, lease.SSH, lease.LeaseID, false); err != nil {
 		return err
 	}
 	if err := a.probeSSHTransportLeaseAfterClaim(ctx, cfg, &lease, false); err != nil {

@@ -202,7 +202,7 @@ func (a App) watchWithBackend(ctx context.Context, opts watchOptions, repo Repo,
 		}()
 	}
 	applyResolvedServerConfig(&cfg, lease.Server)
-	if err := a.claimLeaseTargetForRepoAndRegister(ctx, lease.LeaseID, serverSlug(lease.Server), cfg, lease.Server, lease.SSH, repo.Root, opts.Reclaim); err != nil {
+	if err := a.claimLeaseTargetForRepoAndRegister(ctx, lease.LeaseID, serverSlug(lease.Server), cfg, &lease.Server, lease.SSH, repo.Root, opts.Reclaim); err != nil {
 		return err
 	}
 	fmt.Fprintf(a.Stdout, "leased %s slug=%s provider=%s idle_timeout=%s idle_exit=%s\n", lease.LeaseID, blank(serverSlug(lease.Server), "-"), cfg.Provider, cfg.IdleTimeout, idleExit)

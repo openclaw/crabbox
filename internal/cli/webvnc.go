@@ -297,7 +297,7 @@ func (a App) webvnc(ctx context.Context, args []string) error {
 		return err
 	}
 	if !*noProviderSideEffects {
-		if err := a.claimAndTouchLeaseTarget(ctx, cfg, server, target, leaseID, *reclaim); err != nil {
+		if err := a.claimAndTouchLeaseTarget(ctx, cfg, &server, target, leaseID, *reclaim); err != nil {
 			return err
 		}
 	}
@@ -729,7 +729,7 @@ func (a App) webVNCDaemonStart(ctx context.Context, args []string) error {
 			return err
 		}
 		if !*controllerOwned {
-			if err := a.claimAndTouchLeaseTarget(ctx, cfg, server, resolvedTarget, leaseID, *reclaim); err != nil {
+			if err := a.claimAndTouchLeaseTarget(ctx, cfg, &server, resolvedTarget, leaseID, *reclaim); err != nil {
 				return err
 			}
 		}
@@ -769,7 +769,7 @@ func (a App) webVNCDaemonStart(ctx context.Context, args []string) error {
 				return err
 			}
 			if !*controllerOwned {
-				if err := a.claimAndTouchLeaseTarget(ctx, cfg, server, resolvedTarget, leaseID, *reclaim); err != nil {
+				if err := a.claimAndTouchLeaseTarget(ctx, cfg, &server, resolvedTarget, leaseID, *reclaim); err != nil {
 					return err
 				}
 			}
@@ -1188,7 +1188,7 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 		return err
 	}
 	if automaticMacOSPortal {
-		if err := a.claimAndTouchLeaseTarget(ctx, cfg, server, target, leaseID, false); err != nil {
+		if err := a.claimAndTouchLeaseTarget(ctx, cfg, &server, target, leaseID, false); err != nil {
 			return err
 		}
 	}
@@ -3311,7 +3311,7 @@ func (a App) directSSHWebVNC(ctx context.Context, cfg Config, id, localPort stri
 		return err
 	}
 	if !noProviderSideEffects {
-		if err := a.claimAndTouchLeaseTarget(ctx, cfg, server, target, leaseID, reclaim); err != nil {
+		if err := a.claimAndTouchLeaseTarget(ctx, cfg, &server, target, leaseID, reclaim); err != nil {
 			return err
 		}
 	}

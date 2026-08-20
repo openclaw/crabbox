@@ -80,7 +80,7 @@ func (a App) vnc(ctx context.Context, args []string) error {
 	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 		return err
 	}
-	if err := a.claimAndTouchLeaseTarget(ctx, cfg, server, target, leaseID, *reclaim); err != nil {
+	if err := a.claimAndTouchLeaseTarget(ctx, cfg, &server, target, leaseID, *reclaim); err != nil {
 		return err
 	}
 	cfg = desktopConfigForResolvedLease(cfg, server, target)

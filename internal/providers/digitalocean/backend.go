@@ -827,9 +827,26 @@ func (b *digitalOceanLeaseBackend) UpdateTailscaleMetadata(ctx context.Context, 
 	if err := validateDropletLabels(server.Labels); err != nil {
 		return core.Server{}, err
 	}
+	expected, err := shared.RequireClaimSnapshot(server, providerName)
+	if err != nil {
+		return core.Server{}, err
+	}
+	if lease.LeaseID != expected.LeaseID {
+		return core.Server{}, core.Exit(2, "digitalocean metadata lease does not match its exact local claim")
+	}
 	client, err := b.clientFactory(b.RT)
 	if err != nil {
 		return core.Server{}, err
+	}
+	accountID, err := client.AccountID(ctx)
+	if err != nil {
+		return core.Server{}, err
+	}
+	if err := validateDigitalOceanCleanupClaim(server, expected, accountID); err != nil {
+		return core.Server{}, err
+	}
+	if expected.CloudNumericID != 0 && expected.CloudNumericID != server.ID {
+		return core.Server{}, core.Exit(2, "digitalocean metadata Droplet identity does not match its exact local claim")
 	}
 	item, err := client.GetDroplet(ctx, server.ID)
 	if err != nil {
@@ -838,17 +855,35 @@ func (b *digitalOceanLeaseBackend) UpdateTailscaleMetadata(ctx context.Context, 
 	if err := validateLiveDroplet(item, server); err != nil {
 		return core.Server{}, err
 	}
-	labels := normalizedDropletLabels(item.Tags)
-	preserveDigitalOceanKeyIdentity(labels, server.Labels)
-	if accountID := strings.TrimSpace(server.Labels[digitalOceanAccountLabel]); accountID != "" {
-		labels[digitalOceanAccountLabel] = accountID
-	}
-	applyTailscaleMetadata(labels, meta)
-	if err := client.ReplaceDropletTags(ctx, server.ID, item.Tags, tagsFromLabels(labels)); err != nil {
+	claimServer := server
+	claimServer.Name = core.LeaseProviderName(expected.LeaseID, expected.Slug)
+	claimServer.Labels = expected.Labels
+	if err := validateLiveDroplet(item, claimServer); err != nil {
 		return core.Server{}, err
 	}
-	server = serverFromDroplet(item, b.Cfg)
-	server.Labels = labels
+	labels := normalizedDropletLabels(item.Tags)
+	preserveDigitalOceanKeyIdentity(labels, expected.Labels)
+	labels[digitalOceanAccountLabel] = accountID
+	applyTailscaleMetadata(labels, meta)
+	updatedClaim, server, _, err := core.UpdateLeaseClaimEndpointIfUnchangedAction(lease.LeaseID, expected, func() (core.Server, core.SSHTarget, bool, error) {
+		currentAccountID, err := client.AccountID(ctx)
+		if err != nil {
+			return core.Server{}, core.SSHTarget{}, false, err
+		}
+		if err := validateDigitalOceanCleanupClaim(server, expected, currentAccountID); err != nil {
+			return core.Server{}, core.SSHTarget{}, false, err
+		}
+		if err := client.ReplaceDropletTags(ctx, server.ID, item.Tags, tagsFromLabels(labels)); err != nil {
+			return core.Server{}, core.SSHTarget{}, false, err
+		}
+		updated := serverFromDroplet(item, b.Cfg)
+		updated.Labels = labels
+		return updated, lease.SSH, true, nil
+	})
+	if err != nil {
+		return core.Server{}, err
+	}
+	core.SetServerLeaseClaimSnapshot(&server, updatedClaim, true)
 	return server, nil
 }
 

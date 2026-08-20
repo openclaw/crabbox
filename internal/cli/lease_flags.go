@@ -644,14 +644,14 @@ func updateResolvedLeaseClaimEndpoint(leaseID string, server Server, target SSHT
 	return updated, true, err
 }
 
-func (a App) claimAndTouchLeaseTarget(ctx context.Context, cfg Config, server Server, target SSHTarget, leaseID string, reclaim bool) error {
+func (a App) claimAndTouchLeaseTarget(ctx context.Context, cfg Config, server *Server, target SSHTarget, leaseID string, reclaim bool) error {
 	repo, err := findRepo()
 	if err != nil {
 		return err
 	}
-	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, reclaim); err != nil {
+	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(*server), cfg, server, target, repo.Root, reclaim); err != nil {
 		return err
 	}
-	a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")
+	*server = a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: *server, SSH: target, LeaseID: leaseID}, "")
 	return nil
 }

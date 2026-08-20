@@ -902,7 +902,9 @@ func TestMacOSWebVNCPortalConfigUsesStoredMultiTargetLease(t *testing.T) {
 	if !automatic || got.TargetOS != targetMacOS || got.BrokerMode != BrokerModeRegistered {
 		t.Fatalf("stored target config=%#v automatic=%t", got, automatic)
 	}
-	if err := persistAutomaticCoordinatorRegistrationBinding(leaseID, got, "https://broker.example.test"); err != nil {
+	registrationServer := Server{}
+	SetServerLeaseClaimSnapshot(&registrationServer, stored, true)
+	if err := persistAutomaticCoordinatorRegistrationBinding(leaseID, &registrationServer, got, "https://broker.example.test"); err != nil {
 		t.Fatal(err)
 	}
 	stored, exists, err = readLeaseClaimWithPresence(leaseID)

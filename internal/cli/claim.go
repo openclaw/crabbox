@@ -705,6 +705,9 @@ func updateLeaseClaimEndpointIfUnchangedActionMode(
 				claim.SSHPort = 0
 			}
 		}
+		if err := refreshLeaseClaimRevision(&claim); err != nil {
+			return err
+		}
 		updated = cloneLeaseClaim(claim)
 		return writeLeaseClaimAtomic(path, claim)
 	})

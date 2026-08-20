@@ -177,7 +177,7 @@ func TestResolveSSHLeaseTargetMarksDeletedClaimRequired(t *testing.T) {
 	if !lease.Server.claimSnapshotSet || !lease.Server.claimSnapshotExists {
 		t.Fatal("deleted pre-existing claim was treated as adoptable")
 	}
-	if err := (App{}).claimResolvedLeaseTargetForRepoAndRegister(context.Background(), leaseID, "deleted", cfg, lease.Server, target, "/repo", true); err == nil {
+	if err := (App{}).claimResolvedLeaseTargetForRepoAndRegister(context.Background(), leaseID, "deleted", cfg, &lease.Server, target, "/repo", true); err == nil {
 		t.Fatal("deleted pre-existing claim was recreated")
 	}
 }
@@ -204,7 +204,7 @@ func TestResolveSSHLeaseTargetRejectsUnattestedClaimChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := (App{}).claimResolvedLeaseTargetForRepoAndRegister(context.Background(), leaseID, "changed", cfg, lease.Server, target, "/repo", true); err == nil {
+	if err := (App{}).claimResolvedLeaseTargetForRepoAndRegister(context.Background(), leaseID, "changed", cfg, &lease.Server, target, "/repo", true); err == nil {
 		t.Fatal("unattested stopped claim was overwritten")
 	}
 	claim, err := readLeaseClaim(leaseID)
@@ -244,7 +244,7 @@ func TestClaimAcquiredLeaseRejectsChangeAfterProviderSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = (App{}).claimLeaseTargetForRepoAndRegister(context.Background(), leaseID, "acquired", cfg, server, target, "/repo", true)
+	err = (App{}).claimLeaseTargetForRepoAndRegister(context.Background(), leaseID, "acquired", cfg, &server, target, "/repo", true)
 	if err == nil || !strings.Contains(err.Error(), "claim changed") {
 		t.Fatalf("err=%v, want acquisition-snapshot conflict", err)
 	}
@@ -328,7 +328,7 @@ func TestResolveSSHLeaseTargetFindsExistingClaimByCloudID(t *testing.T) {
 	if lease.Server.Labels["lease"] != leaseID || lease.Server.Labels["slug"] != "cloudlookup" {
 		t.Fatalf("labels=%#v", lease.Server.Labels)
 	}
-	if err := (App{}).claimResolvedLeaseTargetForRepoAndRegister(context.Background(), leaseID, "cloudlookup", cfg, lease.Server, target, "/repo-b", true); err != nil {
+	if err := (App{}).claimResolvedLeaseTargetForRepoAndRegister(context.Background(), leaseID, "cloudlookup", cfg, &lease.Server, target, "/repo-b", true); err != nil {
 		t.Fatal(err)
 	}
 	claim, err := readLeaseClaim(leaseID)
@@ -576,7 +576,7 @@ func TestResolveSSHLeaseTargetRejectsRecreatedPreexistingClaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := (App{}).claimResolvedLeaseTargetForRepoAndRegister(context.Background(), leaseID, "recreated", cfg, lease.Server, target, "/repo-b", true); err == nil {
+	if err := (App{}).claimResolvedLeaseTargetForRepoAndRegister(context.Background(), leaseID, "recreated", cfg, &lease.Server, target, "/repo-b", true); err == nil {
 		t.Fatal("recreated claim replaced the pre-resolve claim generation")
 	}
 }
@@ -609,7 +609,7 @@ func TestResolveSSHLeaseTargetAcceptsReadyClaimForLeasedProviderState(t *testing
 	if !lease.Server.claimSnapshotExists || lease.Server.claimSnapshot.RepoRoot != "/repo-b" {
 		t.Fatalf("snapshot=%#v", lease.Server.claimSnapshot)
 	}
-	if err := (App{}).claimResolvedLeaseTargetForRepoAndRegister(context.Background(), leaseID, "state-lag", cfg, lease.Server, target, "/repo-b", true); err != nil {
+	if err := (App{}).claimResolvedLeaseTargetForRepoAndRegister(context.Background(), leaseID, "state-lag", cfg, &lease.Server, target, "/repo-b", true); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -650,7 +650,7 @@ func TestResolveSSHLeaseTargetReclaimsProviderlessLegacyClaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := (App{}).claimResolvedLeaseTargetForRepoAndRegister(context.Background(), leaseID, "legacy", cfg, lease.Server, target, "/repo-b", true); err != nil {
+	if err := (App{}).claimResolvedLeaseTargetForRepoAndRegister(context.Background(), leaseID, "legacy", cfg, &lease.Server, target, "/repo-b", true); err != nil {
 		t.Fatal(err)
 	}
 	claim, err := readLeaseClaim(leaseID)
@@ -687,7 +687,7 @@ func TestResolveSSHLeaseTargetFindsExistingClaimByReturnedLeaseID(t *testing.T) 
 	if !lease.Server.claimSnapshotExists {
 		t.Fatal("returned lease ID did not recover the pre-resolve claim")
 	}
-	if err := (App{}).claimResolvedLeaseTargetForRepoAndRegister(context.Background(), leaseID, "aliaslookup", cfg, lease.Server, target, "/repo-b", true); err != nil {
+	if err := (App{}).claimResolvedLeaseTargetForRepoAndRegister(context.Background(), leaseID, "aliaslookup", cfg, &lease.Server, target, "/repo-b", true); err != nil {
 		t.Fatal(err)
 	}
 	claim, err := readLeaseClaim(leaseID)
@@ -767,7 +767,7 @@ func TestResolvedLeaseClaimUpdatesRejectStoppedClaim(t *testing.T) {
 	if _, _, err := updateResolvedLeaseClaimEndpoint(leaseID, running, target); err == nil {
 		t.Fatal("stale endpoint update replaced stopped claim")
 	}
-	if err := (App{}).claimResolvedLeaseTargetForRepoAndRegister(context.Background(), leaseID, "guarded", cfg, running, target, "/repo/b", true); err == nil {
+	if err := (App{}).claimResolvedLeaseTargetForRepoAndRegister(context.Background(), leaseID, "guarded", cfg, &running, target, "/repo/b", true); err == nil {
 		t.Fatal("stale claim update replaced stopped claim")
 	}
 	claim, ok, err := resolveLeaseClaimForProvider(leaseID, "aws")
@@ -779,7 +779,7 @@ func TestResolvedLeaseClaimUpdatesRejectStoppedClaim(t *testing.T) {
 	}
 
 	removeLeaseClaim(leaseID)
-	if err := (App{}).claimResolvedLeaseTargetForRepoAndRegister(context.Background(), leaseID, "guarded", cfg, running, target, "/repo/b", true); err == nil {
+	if err := (App{}).claimResolvedLeaseTargetForRepoAndRegister(context.Background(), leaseID, "guarded", cfg, &running, target, "/repo/b", true); err == nil {
 		t.Fatal("stale claim update recreated deleted claim")
 	}
 	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists {
@@ -800,7 +800,7 @@ func TestResolvedLeaseClaimAllowsUnclaimedResourceAdoption(t *testing.T) {
 	}
 	server.claimSnapshotSet = true
 	target := SSHTarget{Host: "192.0.2.30", Port: "22"}
-	if err := (App{}).claimResolvedLeaseTargetForRepoAndRegister(context.Background(), leaseID, "adopt", cfg, server, target, "/repo", true); err != nil {
+	if err := (App{}).claimResolvedLeaseTargetForRepoAndRegister(context.Background(), leaseID, "adopt", cfg, &server, target, "/repo", true); err != nil {
 		t.Fatal(err)
 	}
 	claim, ok, err := resolveLeaseClaimForProvider(leaseID, "aws")
@@ -990,7 +990,12 @@ func TestRegisterCoordinatorLeaseBestEffortMapsDirectLease(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	app.registerCoordinatorLeaseBestEffort(context.Background(), cfg, lease)
+	initial, err := readLeaseClaim(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	SetServerLeaseClaimSnapshot(&lease.Server, initial, true)
+	app.registerCoordinatorLeaseBestEffort(context.Background(), cfg, &lease)
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr=%q", stderr.String())
 	}
@@ -1003,6 +1008,10 @@ func TestRegisterCoordinatorLeaseBestEffortMapsDirectLease(t *testing.T) {
 	}
 	if claim.RuntimeAdapterRegistrationID != got.RuntimeRegistrationID {
 		t.Fatalf("claim registration id=%q request=%q", claim.RuntimeAdapterRegistrationID, got.RuntimeRegistrationID)
+	}
+	snapshot, exists, set := ServerLeaseClaimSnapshot(lease.Server)
+	if !set || !exists || !reflect.DeepEqual(snapshot, claim) || snapshot.Revision == initial.Revision {
+		t.Fatalf("registration snapshot=%#v claim=%#v exists=%t set=%t", snapshot, claim, exists, set)
 	}
 }
 
@@ -1058,10 +1067,15 @@ func TestAdapterRegistrationRotatesRejectedTerminalGeneration(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	initial, err := readLeaseClaim(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	SetServerLeaseClaimSnapshot(&lease.Server, initial, true)
 	var stderr bytes.Buffer
 	app := App{Stderr: &stderr}
 	if err := app.registerCoordinatorLeaseBestEffort(
-		context.Background(), cfg, lease,
+		context.Background(), cfg, &lease,
 	); err == nil {
 		t.Fatal("replacement registration unexpectedly succeeded through a transport failure")
 	}
@@ -1079,8 +1093,12 @@ func TestAdapterRegistrationRotatesRejectedTerminalGeneration(t *testing.T) {
 		claim.RuntimeAdapterPendingRegistrationID != registrationIDs[1] {
 		t.Fatalf("failed replacement claim=%#v requests=%q", claim, registrationIDs)
 	}
+	failedSnapshot, exists, set := ServerLeaseClaimSnapshot(lease.Server)
+	if !set || !exists || !reflect.DeepEqual(failedSnapshot, claim) {
+		t.Fatalf("failed registration snapshot=%#v claim=%#v exists=%t set=%t", failedSnapshot, claim, exists, set)
+	}
 	stderr.Reset()
-	if err := app.registerCoordinatorLeaseBestEffort(context.Background(), cfg, lease); err != nil {
+	if err := app.registerCoordinatorLeaseBestEffort(context.Background(), cfg, &lease); err != nil {
 		t.Fatal(err)
 	}
 	if stderr.Len() != 0 {
@@ -1096,6 +1114,66 @@ func TestAdapterRegistrationRotatesRejectedTerminalGeneration(t *testing.T) {
 	if claim.RuntimeAdapterRegistrationID != registrationIDs[1] ||
 		claim.RuntimeAdapterPendingRegistrationID != "" {
 		t.Fatalf("claim registration id=%q requests=%q", claim.RuntimeAdapterRegistrationID, registrationIDs)
+	}
+	acknowledgedSnapshot, exists, set := ServerLeaseClaimSnapshot(lease.Server)
+	if !set || !exists || !reflect.DeepEqual(acknowledgedSnapshot, claim) || acknowledgedSnapshot.Revision == failedSnapshot.Revision {
+		t.Fatalf("acknowledged snapshot=%#v claim=%#v exists=%t set=%t", acknowledgedSnapshot, claim, exists, set)
+	}
+}
+
+func TestAdapterRegistrationRejectsConcurrentReclaimWithoutAdoptingSnapshot(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_ADAPTER_ID", "mac-lab")
+	t.Setenv(controllerWorkspaceIDEnv, "fleet-a-is-123")
+	const leaseID = "cbx_adapter_race"
+	var replacement leaseClaim
+	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var registration CoordinatorLeaseRegistration
+		if err := json.NewDecoder(r.Body).Decode(&registration); err != nil {
+			t.Error(err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := mutateLeaseClaim(leaseID, func(claim *leaseClaim) error {
+			claim.RepoRoot = "/concurrent-repository"
+			claim.Labels["owner"] = "concurrent-claimant"
+			return nil
+		}); err != nil {
+			t.Error(err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		var err error
+		replacement, err = readLeaseClaim(leaseID)
+		if err != nil {
+			t.Error(err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease": map[string]any{
+			"id": leaseID, "provider": "external", "lifecycle": "registered", "state": "active",
+			"runtimeAdapterID": "mac-lab", "runtimeAdapterWorkspaceID": "fleet-a-is-123",
+			"runtimeAdapterRegistrationID": registration.RuntimeRegistrationID,
+		}})
+	}))
+	defer coordinator.Close()
+	cfg := baseConfig()
+	cfg.Provider = "external"
+	cfg.Coordinator = coordinator.URL
+	cfg.CoordToken = "token"
+	cfg.BrokerMode = BrokerModeRegistered
+	cfg.IdleTimeout = time.Hour
+	server := Server{Provider: cfg.Provider, CloudID: "external-owned", Labels: map[string]string{"provider": cfg.Provider, "slug": "adapter-race", "state": "ready"}}
+	target := SSHTarget{Host: "192.0.2.20", Port: "22", TargetOS: targetLinux}
+	err := (App{Stderr: &bytes.Buffer{}}).claimLeaseTargetForRepoAndRegister(context.Background(), leaseID, "adapter-race", cfg, &server, target, "/repo", true)
+	if err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("registration error=%v", err)
+	}
+	snapshot, exists, set := ServerLeaseClaimSnapshot(server)
+	current, readErr := readLeaseClaim(leaseID)
+	if readErr != nil || !set || !exists || snapshot.RepoRoot != "/repo" || snapshot.Revision == replacement.Revision || !reflect.DeepEqual(current, replacement) {
+		t.Fatalf("snapshot=%#v replacement=%#v current=%#v exists=%t set=%t err=%v", snapshot, replacement, current, exists, set, readErr)
 	}
 }
 
@@ -1127,7 +1205,7 @@ func TestAdapterClaimRequiresExactCoordinatorRuntimeBinding(t *testing.T) {
 		leaseID,
 		"adapter",
 		cfg,
-		leaseServer,
+		&leaseServer,
 		SSHTarget{Host: "192.0.2.42", User: "runner", Port: "22"},
 		"/repo",
 		true,
@@ -1151,7 +1229,7 @@ func TestControllerClaimWithoutAdapterIDDoesNotRequireCoordinatorBinding(t *test
 		Labels:   map[string]string{"provider": "aws", "slug": "local-adapter", "state": "running"},
 	}
 	if err := (App{}).claimLeaseTargetForRepoAndRegister(
-		context.Background(), leaseID, "local-adapter", cfg, server, SSHTarget{}, "/repo", true,
+		context.Background(), leaseID, "local-adapter", cfg, &server, SSHTarget{}, "/repo", true,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1171,7 +1249,7 @@ func TestAmbientAdapterIDDoesNotRequireControllerCoordinatorBinding(t *testing.T
 		Labels:   map[string]string{"provider": "aws", "slug": "ambient-adapter", "state": "running"},
 	}
 	if err := (App{}).claimLeaseTargetForRepoAndRegister(
-		context.Background(), leaseID, "ambient-adapter", cfg, server, SSHTarget{}, "/repo", true,
+		context.Background(), leaseID, "ambient-adapter", cfg, &server, SSHTarget{}, "/repo", true,
 	); err != nil {
 		t.Fatal(err)
 	}

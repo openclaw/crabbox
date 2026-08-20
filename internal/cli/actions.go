@@ -161,7 +161,9 @@ func (a App) actionsHydrate(ctx context.Context, args []string) (err error) {
 		return err
 	}
 	SetServerLeaseClaimSnapshot(&server, updatedClaim, true)
-	a.registerCoordinatorLeaseBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID})
+	registrationLease := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
+	a.registerCoordinatorLeaseBestEffort(ctx, cfg, &registrationLease)
+	server = registrationLease.Server
 	backend, err := loadBackend(cfg, runtimeForApp(a))
 	if err != nil {
 		return err
@@ -364,7 +366,7 @@ func (a App) actionsRegister(ctx context.Context, args []string) error {
 	}
 	applyResolvedServerConfig(&cfg, server)
 	target = targetWithConfigDefaults(target, cfg)
-	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, slug, cfg, server, target, repo.Root, *reclaim); err != nil {
+	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, slug, cfg, &server, target, repo.Root, *reclaim); err != nil {
 		return err
 	}
 	a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")

@@ -53,7 +53,7 @@ func (a App) tunnel(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := a.claimAndTouchLeaseTarget(ctx, cfg, lease.Server, lease.SSH, lease.LeaseID, *reclaim); err != nil {
+	if err := a.claimAndTouchLeaseTarget(ctx, cfg, &lease.Server, lease.SSH, lease.LeaseID, *reclaim); err != nil {
 		return err
 	}
 	if err := a.probeSSHTransportLeaseAfterClaim(ctx, cfg, &lease, *reclaim); err != nil {

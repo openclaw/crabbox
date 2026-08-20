@@ -1062,14 +1062,10 @@ func (a App) probeSSHTransportLeaseAfterClaim(ctx context.Context, cfg Config, l
 	if err != nil {
 		return err
 	}
-	server := lease.Server
-	server.claimSnapshot = leaseClaim{}
-	server.claimSnapshotExists = false
-	server.claimSnapshotSet = false
-	if err := a.claimLeaseTargetForRepoAndRegister(ctx, lease.LeaseID, serverSlug(server), cfg, server, lease.SSH, repo.Root, reclaim); err != nil {
+	if err := a.claimLeaseTargetForRepoAndRegister(ctx, lease.LeaseID, serverSlug(lease.Server), cfg, &lease.Server, lease.SSH, repo.Root, reclaim); err != nil {
 		return err
 	}
-	a.touchLeaseTargetBestEffort(ctx, cfg, *lease, "")
+	lease.Server = a.touchLeaseTargetBestEffort(ctx, cfg, *lease, "")
 	return nil
 }
 

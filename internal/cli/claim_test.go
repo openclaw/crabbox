@@ -1370,14 +1370,14 @@ func TestConditionalClaimEndpointActionBuildsResultUnderLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !actionCalled || gotServer.CloudID != ready.CloudID || gotTarget.Host != target.Host || updated.Labels["state"] != "ready" || updated.SSHHost != target.Host {
+	if !actionCalled || gotServer.CloudID != ready.CloudID || gotTarget.Host != target.Host || updated.Labels["state"] != "ready" || updated.SSHHost != target.Host || updated.Revision == expected.Revision {
 		t.Fatalf("called=%t server=%#v target=%#v claim=%#v", actionCalled, gotServer, gotTarget, updated)
 	}
 	guarded, _, _, err := updateLeaseClaimEndpointIfUnchangedAction(leaseID, updated, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if guarded.LeaseID != updated.LeaseID || guarded.CloudID != updated.CloudID || guarded.SSHHost != updated.SSHHost {
+	if !reflect.DeepEqual(guarded, updated) {
 		t.Fatalf("nil-action claim=%#v want=%#v", guarded, updated)
 	}
 	stopped := ready
@@ -1388,7 +1388,7 @@ func TestConditionalClaimEndpointActionBuildsResultUnderLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotServer.Labels["state"] != "stopped" || gotTarget.Host != "" || replaced.SSHHost != "" || replaced.SSHPort != 0 || replaced.Labels["state"] != "stopped" {
+	if gotServer.Labels["state"] != "stopped" || gotTarget.Host != "" || replaced.SSHHost != "" || replaced.SSHPort != 0 || replaced.Labels["state"] != "stopped" || replaced.Revision == updated.Revision {
 		t.Fatalf("replaced server=%#v target=%#v claim=%#v", gotServer, gotTarget, replaced)
 	}
 	updated = replaced
@@ -1405,6 +1405,71 @@ func TestConditionalClaimEndpointActionBuildsResultUnderLock(t *testing.T) {
 	}
 	if actionCalled {
 		t.Fatal("action ran for a changed claim")
+	}
+}
+
+func TestConditionalClaimEndpointActionRevisionRejectsABA(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_endpoint_aba"
+	server := Server{Provider: "aws", CloudID: "i-123", Labels: map[string]string{"provider": "aws", "slug": "endpoint", "state": "ready"}}
+	targetA := SSHTarget{Host: "203.0.113.10", Port: "22"}
+	if err := claimLeaseTargetForRepoConfig(leaseID, "endpoint", Config{Provider: "aws"}, server, targetA, "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	original, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, action := range map[string]func() (Server, SSHTarget, bool, error){
+		"no-op":   func() (Server, SSHTarget, bool, error) { return server, targetA, false, nil },
+		"failure": func() (Server, SSHTarget, bool, error) { return server, targetA, true, errors.New("provider failed") },
+	} {
+		_, _, _, actionErr := updateLeaseClaimEndpointIfUnchangedAction(leaseID, original, action)
+		if name == "no-op" && actionErr != nil || name != "no-op" && actionErr == nil {
+			t.Fatalf("%s error=%v", name, actionErr)
+		}
+		current, err := readLeaseClaim(leaseID)
+		if err != nil || !reflect.DeepEqual(current, original) {
+			t.Fatalf("%s changed claim: current=%#v original=%#v err=%v", name, current, original, err)
+		}
+	}
+	targetB := SSHTarget{Host: "203.0.113.20", Port: "22"}
+	middle, _, _, err := updateLeaseClaimEndpointIfUnchangedAction(leaseID, original, func() (Server, SSHTarget, bool, error) {
+		return server, targetB, true, nil
+	})
+	if err != nil || middle.Revision == original.Revision {
+		t.Fatalf("A->B claim=%#v err=%v", middle, err)
+	}
+	final, _, _, err := updateLeaseClaimEndpointIfUnchangedAction(leaseID, middle, func() (Server, SSHTarget, bool, error) {
+		return server, targetA, true, nil
+	})
+	if err != nil || final.Revision == middle.Revision || final.SSHHost != original.SSHHost {
+		t.Fatalf("B->A claim=%#v err=%v", final, err)
+	}
+	called := false
+	_, _, _, err = updateLeaseClaimEndpointIfUnchangedAction(leaseID, original, func() (Server, SSHTarget, bool, error) {
+		called = true
+		return server, targetB, true, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "claim changed") || called {
+		t.Fatalf("stale A snapshot error=%v actionCalled=%t", err, called)
+	}
+	if err := mutateLeaseClaim(leaseID, func(claim *leaseClaim) error {
+		claim.Provider = "unavailable-provider"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	invalid, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, err = updateLeaseClaimEndpointIfUnchangedAction(leaseID, invalid, func() (Server, SSHTarget, bool, error) {
+		return server, targetA, true, nil
+	})
+	unchanged, readErr := readLeaseClaim(leaseID)
+	if err == nil || readErr != nil || !reflect.DeepEqual(unchanged, invalid) {
+		t.Fatalf("validation failure err=%v current=%#v expected=%#v readErr=%v", err, unchanged, invalid, readErr)
 	}
 }
 

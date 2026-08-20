@@ -37,6 +37,26 @@ type watchTestBackend struct {
 	features     FeatureSet
 }
 
+type watchExactClaimReleaseBackend struct {
+	SSHLeaseBackend
+	testing *testing.T
+}
+
+func (b watchExactClaimReleaseBackend) ReleaseLeaseConnectionCleanupSafe() bool { return true }
+
+func (b watchExactClaimReleaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+	b.testing.Helper()
+	snapshot, exists, set := ServerLeaseClaimSnapshot(req.Lease.Server)
+	current, err := readLeaseClaim(req.Lease.LeaseID)
+	if err != nil || !set || !exists || !reflect.DeepEqual(snapshot, current) {
+		return fmt.Errorf("release did not carry the exact registered claim: snapshot=%#v current=%#v exists=%t set=%t err=%v", snapshot, current, exists, set, err)
+	}
+	if err := removeLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, snapshot, nil); err != nil {
+		return err
+	}
+	return b.SSHLeaseBackend.ReleaseLease(ctx, req)
+}
+
 func newWatchTestBackend() *watchTestBackend {
 	return &watchTestBackend{features: FeatureSet{FeatureSSH, FeatureCrabboxSync}}
 }
@@ -1136,6 +1156,24 @@ func TestWatchAcquiresLeaseWhenNoID(t *testing.T) {
 	}
 	if got := executor.call(0); !strings.Contains(strings.Join(got, " "), "--id "+watchTestLeaseID) {
 		t.Fatalf("iteration args=%v, want injected --id", got)
+	}
+}
+
+func TestWatchFreshLeaseReleaseCarriesRegisteredSnapshotWithoutRefresh(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	root := newWatchGitRepo(t)
+	inner := newWatchTestBackend()
+	backend := watchExactClaimReleaseBackend{SSHLeaseBackend: inner, testing: t}
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	opts := watchOptions{Debounce: 25 * time.Millisecond, IdleExit: 100 * time.Millisecond, IdleExitSet: true, Command: []string{"echo", "ok"}}
+	cfg := Config{Provider: "watch-test", IdleTimeout: time.Minute, TTL: time.Hour}
+	if err := app.watchWithBackend(context.Background(), opts, Repo{Root: root, Name: "my-app"}, cfg, backend, newWatchTestExecutor().run); err != nil {
+		t.Fatal(err)
+	}
+	acquires, resolves, releases := inner.counts()
+	if acquires != 1 || resolves != 0 || releases != 1 {
+		t.Fatalf("acquires=%d resolves=%d releases=%d, want 1/0/1", acquires, resolves, releases)
 	}
 }
 

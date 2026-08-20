@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strings"
@@ -788,6 +789,52 @@ func TestRunCommandOneShotCleanupUsesUpdatedClaimSnapshot(t *testing.T) {
 	}
 	if _, exists, err := readLeaseClaimWithPresence(lease.LeaseID); err != nil || exists {
 		t.Fatalf("claim exists=%v err=%v after successful cleanup", exists, err)
+	}
+}
+
+func TestWarmupFailureAfterRegistrationReleasesNewestClaimSnapshot(t *testing.T) {
+	lease, initial := setupRunClaimSnapshotTest(t)
+	releases := 0
+	runEnvProfileTestReleaseRequestHook = func(req ReleaseLeaseRequest) error {
+		releases++
+		snapshot, exists, set := ServerLeaseClaimSnapshot(req.Lease.Server)
+		if !set || !exists || snapshot.Revision == initial.Revision {
+			return fmt.Errorf("release received stale claim snapshot: %#v", snapshot)
+		}
+		return removeLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, snapshot, nil)
+	}
+	err := (App{Stdout: io.Discard, Stderr: io.Discard}).warmup(context.Background(), []string{
+		"--provider", runEnvProfileTestProvider{}.Name(), "--network", "tailscale",
+	})
+	if err == nil || !strings.Contains(err.Error(), "no tailnet address") || releases != 1 {
+		t.Fatalf("warmup error=%v releases=%d", err, releases)
+	}
+	if _, exists, err := readLeaseClaimWithPresence(lease.LeaseID); err != nil || exists {
+		t.Fatalf("claim exists=%t err=%v", exists, err)
+	}
+}
+
+func TestResolvedRegistrationTouchReceivesNewestClaimSnapshot(t *testing.T) {
+	lease, initial := setupRunClaimSnapshotTest(t)
+	cfg := baseConfig()
+	setProviderSelection(&cfg, runEnvProfileTestProvider{}.Name(), providerSelectionFlag)
+	touches := 0
+	runEnvProfileTestTouchHook = func(req TouchRequest) error {
+		touches++
+		snapshot, exists, set := ServerLeaseClaimSnapshot(req.Lease.Server)
+		current, err := readLeaseClaim(req.Lease.LeaseID)
+		if err != nil || !set || !exists || snapshot.Revision == initial.Revision || !reflect.DeepEqual(snapshot, current) {
+			return fmt.Errorf("touch received stale snapshot: snapshot=%#v current=%#v exists=%t set=%t err=%v", snapshot, current, exists, set, err)
+		}
+		return nil
+	}
+	t.Cleanup(func() { runEnvProfileTestTouchHook = nil })
+	var stderr bytes.Buffer
+	if err := (App{Stderr: &stderr}).claimAndTouchLeaseTarget(context.Background(), cfg, &lease.Server, lease.SSH, lease.LeaseID, false); err != nil {
+		t.Fatal(err)
+	}
+	if touches != 1 {
+		t.Fatalf("touches=%d stderr=%q", touches, stderr.String())
 	}
 }
 

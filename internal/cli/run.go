@@ -120,7 +120,7 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 	}
 	server, target, leaseID := lease.Server, lease.SSH, lease.LeaseID
 	applyResolvedServerConfig(&cfg, server)
-	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, server, target, repo.Root, *reclaim); err != nil {
+	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, &server, target, repo.Root, *reclaim); err != nil {
 		a.releaseWarmupLeaseAfterFailure(ctx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator}, controllerOwnsCleanup.Load())
 		return err
 	}
@@ -131,7 +131,7 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 		target = bootstrapNetworkTarget(cfg, server, target)
 		if err := waitForSSHReady(ctx, &target, a.Stderr, "tailscale metadata", 2*time.Minute); err == nil {
 			a.refreshTailscaleMetadata(ctx, cfg, sshBackend, lease.Coordinator, lease.Coordinator != nil, &server, target, leaseID)
-			_ = updateLeaseClaimEndpoint(leaseID, server, target)
+			refreshRunLeaseClaimEndpoint(leaseID, &server, target)
 		} else {
 			fmt.Fprintf(a.Stderr, "warning: tailscale metadata wait failed: %v\n", err)
 		}
@@ -141,7 +141,7 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 		return err
 	} else {
 		target = resolved.Target
-		_ = updateLeaseClaimEndpoint(leaseID, server, target)
+		refreshRunLeaseClaimEndpoint(leaseID, &server, target)
 		if resolved.FallbackReason != "" {
 			fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
 		}

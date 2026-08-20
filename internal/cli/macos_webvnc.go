@@ -110,7 +110,7 @@ func (a App) resolveMacOSWebVNCBridgeTarget(ctx context.Context, cfg Config, id 
 		return macOSWebVNCBridgeTarget{}, err
 	}
 	if !noProviderSideEffects {
-		if err := a.claimAndTouchLeaseTarget(ctx, cfg, server, target, leaseID, reclaim); err != nil {
+		if err := a.claimAndTouchLeaseTarget(ctx, cfg, &server, target, leaseID, reclaim); err != nil {
 			return macOSWebVNCBridgeTarget{}, err
 		}
 	}

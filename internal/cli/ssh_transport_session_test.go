@@ -926,3 +926,49 @@ exit 0
 		t.Fatalf("probe attempts=%q", data)
 	}
 }
+
+func TestProbeSSHTransportLeaseAfterClaimRetainsExactFallbackGeneration(t *testing.T) {
+	lease, initial := setupRunClaimSnapshotTest(t)
+	lease.SSH.Port = "2201"
+	lease.SSH.FallbackPorts = []string{"2202"}
+	lease.SSH.SSHConfigProxy = false
+	sshPath := filepath.Join(os.Getenv("PATH"), "ssh")
+	script := `#!/bin/sh
+config=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-F" ]; then config="$2"; shift 2; else shift; fi
+done
+port=$(/usr/bin/awk '$1 == "Port" {gsub(/"/, "", $2); print $2; exit}' "$config")
+if [ "$port" = "2201" ]; then exit 255; fi
+exit 0
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	setProviderSelection(&cfg, runEnvProfileTestProvider{}.Name(), providerSelectionFlag)
+	touches := 0
+	runEnvProfileTestTouchHook = func(req TouchRequest) error {
+		touches++
+		snapshot, exists, set := ServerLeaseClaimSnapshot(req.Lease.Server)
+		current, err := readLeaseClaim(req.Lease.LeaseID)
+		if err != nil || !set || !exists || !reflect.DeepEqual(snapshot, current) {
+			return fmt.Errorf("touch received stale snapshot: snapshot=%#v current=%#v err=%v", snapshot, current, err)
+		}
+		return nil
+	}
+	t.Cleanup(func() { runEnvProfileTestTouchHook = nil })
+	app := App{Stderr: &bytes.Buffer{}}
+	if err := app.claimAndTouchLeaseTarget(t.Context(), cfg, &lease.Server, lease.SSH, lease.LeaseID, false); err != nil {
+		t.Fatal(err)
+	}
+	first, _, _ := ServerLeaseClaimSnapshot(lease.Server)
+	if err := app.probeSSHTransportLeaseAfterClaim(t.Context(), cfg, &lease, false); err != nil {
+		t.Fatal(err)
+	}
+	final, exists, set := ServerLeaseClaimSnapshot(lease.Server)
+	current, err := readLeaseClaim(lease.LeaseID)
+	if err != nil || !set || !exists || lease.SSH.Port != "2202" || touches != 2 || first.Revision == initial.Revision || final.Revision == first.Revision || !reflect.DeepEqual(final, current) {
+		t.Fatalf("port=%q touches=%d initial=%#v first=%#v final=%#v current=%#v err=%v", lease.SSH.Port, touches, initial, first, final, current, err)
+	}
+}
