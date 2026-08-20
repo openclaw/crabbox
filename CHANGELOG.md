@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Shared cross-process lease operation locking across nine sandbox providers while keeping lease-ID validation, slug-allocation locks, and claim-namespace preparation adapter-owned, preserving every existing on-disk lock path.
 - Bounded strict single-request provider JSON subprocess exchanges through a shared transport while keeping provider validation and diagnostics adapter-owned.
 - Shared strict provider claim matching and writable label-copy mechanics across direct providers while keeping recovery and deletion authorization adapter-owned.
 - Enforced coordinator-provided SSH host keys before first transport and removed per-lease local SSH credentials after confirmed brokered release.

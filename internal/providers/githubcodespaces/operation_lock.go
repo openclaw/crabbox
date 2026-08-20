@@ -4,27 +4,13 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"sync"
-	"time"
 
-	"github.com/gofrs/flock"
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
-
-var githubCodespacesOperationLocks sync.Map
 
 var ensureGitHubCodespacesClaimNamespace = func(string) error {
 	return core.EnsureCrabboxClaimNamespaceDurable()
-}
-
-type githubCodespacesOperationSemaphore struct {
-	token chan struct{}
-}
-
-func newGitHubCodespacesOperationSemaphore() *githubCodespacesOperationSemaphore {
-	semaphore := &githubCodespacesOperationSemaphore{token: make(chan struct{}, 1)}
-	semaphore.token <- struct{}{}
-	return semaphore
 }
 
 func lockGitHubCodespacesLeaseOperation(ctx context.Context, leaseID string) (func(), error) {
@@ -66,36 +52,5 @@ func lockGitHubCodespacesOperation(ctx context.Context, lockName, description st
 		return nil, exit(2, "create github-codespaces lock directory: %v", err)
 	}
 	lockPath := filepath.Join(lockDir, lockName)
-	value, _ := githubCodespacesOperationLocks.LoadOrStore(lockPath, newGitHubCodespacesOperationSemaphore())
-	semaphore := value.(*githubCodespacesOperationSemaphore)
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-semaphore.token:
-	}
-
-	fileLock := flock.New(lockPath, flock.SetPermissions(0o600))
-	locked, err := fileLock.TryLockContext(ctx, 50*time.Millisecond)
-	if err != nil {
-		semaphore.token <- struct{}{}
-		if contextErr := ctx.Err(); contextErr != nil {
-			return nil, contextErr
-		}
-		return nil, err
-	}
-	if !locked {
-		semaphore.token <- struct{}{}
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		return nil, exit(2, "lock %s was not acquired", description)
-	}
-
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			_ = fileLock.Unlock()
-			semaphore.token <- struct{}{}
-		})
-	}, nil
+	return shared.LockOperationFile(ctx, lockPath, description)
 }

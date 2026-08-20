@@ -255,7 +255,7 @@ populated by side-effect `init()` registration, gathered in
 
 ```text
 internal/providers/all                  # side-effect imports of every provider
-internal/providers/shared               # shared lifecycle observation and direct SSH helpers
+internal/providers/shared               # shared lifecycle observation, operation locks, and direct SSH helpers
 internal/providers/aws                  # AWS EC2 SSH lease backend (coordinator)
 internal/providers/azure                # Azure VM SSH lease backend (coordinator)
 internal/providers/azuredynamicsessions # Azure Container Apps delegated runner
@@ -339,6 +339,12 @@ detached context and maps its cause. It also keeps native state semantics,
 retryability, identity and ownership validation, side effects, diagnostics,
 and exact error text; the helper does not normalize states, mutate claims,
 detach contexts, call provider actions, or log.
+
+Cross-process provider lease serialization also belongs in
+`internal/providers/shared`. `shared.LockLeaseOperation` owns the in-process
+semaphore, advisory file lock, retry cadence, and idempotent release. Adapters
+retain provider-specific lease ID validation, namespace preparation, and
+diagnostics; the provider name selects the existing on-disk lock filename.
 
 Strict one-request/one-response JSON subprocesses may use
 `internal/providers/shared/procjson`. It owns bounded capture, cancellation

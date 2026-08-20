@@ -401,6 +401,11 @@ If authorization requires hydrating a recorded context or endpoint, validate
 that captured route and its live immutable identity before returning `nil`.
 This hook must not adopt, rewrite, or otherwise repair a claim.
 
+Provider lease operations that must serialize across processes should use
+`shared.LockLeaseOperation`. Keep provider-specific lease ID validation and
+any claim-namespace preparation in the adapter; the shared helper preserves the
+`claim-locks/<leaseID>.<provider>-operation.lock` location and locking mechanics.
+
 `ReleaseLease` is called when a lease ends or expires. Make it idempotent; treat
 "not found" as success. Remove local claims and the per-lease key directory
 after the provider release succeeds.
