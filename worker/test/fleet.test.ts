@@ -29987,7 +29987,15 @@ describe("fleet lease identity and idle", () => {
         requestMs: 200,
         networkReadyMs: 300,
         totalMs: 600,
+        phases: [
+          { name: "request", ms: 200 },
+          { name: "network_ready", ms: 300 },
+          { name: "unattributed", ms: 100 },
+        ],
       });
+      expect(result.provisioningTiming?.phases?.reduce((sum, phase) => sum + phase.ms, 0)).toBe(
+        result.provisioningTiming?.totalMs,
+      );
     } finally {
       now.mockRestore();
     }
@@ -30053,6 +30061,36 @@ describe("fleet lease identity and idle", () => {
         region: "westeurope",
         sourceID: snapshot.resourceID,
       },
+    });
+    (
+      provider as unknown as {
+        clientValue: {
+          createServerWithFallback: () => Promise<{
+            server: ProviderMachine;
+            serverType: string;
+          }>;
+        };
+      }
+    ).clientValue = {
+      createServerWithFallback: async () => ({
+        server: { ...ownedTestMachine("azure", "vm-promoted"), region: "westeurope" },
+        serverType: prepared.serverType,
+      }),
+    };
+    const promotedLease = await provider.createServerWithFallback(
+      prepared,
+      "cbx_abcdef123456",
+      "azure-promoted",
+      "alice@example.com",
+    );
+    expect(promotedLease.image).toEqual({
+      id: "snapshot-devtools",
+      source: "promoted",
+      provider: "azure",
+      kind: "azure-os-disk-snapshot",
+      region: "westeurope",
+      promotedAt: expect.any(String),
+      sourceID: snapshot.resourceID,
     });
 
     const ephemeral = await provider.prepareLeaseConfig({

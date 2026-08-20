@@ -699,6 +699,12 @@ export interface LeaseProvisioningTiming {
   networkReadyMs?: number;
   bootstrapMs?: number;
   totalMs: number;
+  phases?: LeaseProvisioningPhase[];
+}
+
+export interface LeaseProvisioningPhase {
+  name: "request" | "network_ready" | "bootstrap" | "unattributed";
+  ms: number;
 }
 
 export interface CapacityHint {

@@ -415,12 +415,15 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	var timingRecordCommand []string
 	var timingRecordColdRun *bool
 	var delegatedTimingCapture *capturedTimingReportWriter
+	var runnerObservedStartedAt time.Time
 	defer func() {
 		if finalTimingReport == nil {
 			return
 		}
 		report := *finalTimingReport
 		cleanup.apply(&report)
+		includeObservedRunnerTail(&report, runnerObservedStartedAt, time.Now())
+		report = finalizeTimingReport(report)
 		if timingRecordEnabled {
 			recordColdRun := timingRecordColdRun
 			if benchmarkCtx.ColdRun != nil {
@@ -741,7 +744,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 	}
 	backendRuntime := runtimeForApp(a)
-	if timingRecordEnabled {
+	if timingRecordEnabled || *timingJSON {
 		delegatedTimingCapture = &capturedTimingReportWriter{writer: a.Stderr}
 		backendRuntime.Stderr = delegatedTimingCapture
 	}
@@ -762,6 +765,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if lifecycleOwner == nil {
 			return
 		}
+		cleanupStartedAt := time.Now()
+		defer func() {
+			cleanup.Duration += time.Since(cleanupStartedAt)
+		}()
 		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), 30*time.Second)
 		closeErr := lifecycleOwner.Close(releaseCtx)
 		cancel()
@@ -777,6 +784,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if borrowedPool == nil {
 			return
 		}
+		cleanupStartedAt := time.Now()
+		defer func() {
+			cleanup.Duration += time.Since(cleanupStartedAt)
+		}()
 		defer func() {
 			if stopReadyPoolHeartbeat != nil {
 				stopReadyPoolHeartbeat()
@@ -895,6 +906,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if runReq.Preflight {
 			printDelegatedPreflightUnsupported(a.Stderr, backend.Spec().Name)
 		}
+		runnerObservedStartedAt = time.Now()
 		result, runErr := delegated.Run(ctx, runReq)
 		if runErr == nil || result.Command > 0 || result.Total > 0 {
 			a.syncExternalRunnersBestEffort(ctx, cfg, backend)
@@ -932,7 +944,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			coldRun := !result.Session.Reused
 			timingRecordColdRun = &coldRun
 		}
-		if timingRecordEnabled {
+		if timingRecordEnabled || *timingJSON {
 			report := timingReportFromDelegatedRunResult(runReq, result, backend.Spec().Name, runErr)
 			if delegatedTimingCapture != nil && delegatedTimingCapture.report != nil {
 				report = *delegatedTimingCapture.report
@@ -967,6 +979,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		runReq.Script = script
 	}
+	runnerObservedStartedAt = time.Now()
+	var runnerBorrowDuration time.Duration
 	if strings.TrimSpace(*readyPool) != "" {
 		if coord == nil {
 			return exit(2, "--pool requires a coordinator-backed SSH lease provider")
@@ -981,13 +995,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		addStringInput(borrowInput, "compatibilityKey", *readyPoolCompatibilityKey)
 		var res CoordinatorReadyPoolResponse
-		if readyPoolIdentity != nil {
-			delete(borrowInput, "allowMissingCommit")
-			borrowInput["identity"] = *readyPoolIdentity
-			res, err = borrowValidatedTypedReadyPoolLease(ctx, coord, strings.TrimSpace(*readyPool), borrowInput, *readyPoolIdentity)
-		} else {
-			res, err = coord.BorrowReadyPoolLease(ctx, strings.TrimSpace(*readyPool), borrowInput)
-		}
+		res, runnerBorrowDuration, err = borrowReadyPoolLeaseForRun(
+			ctx, coord, strings.TrimSpace(*readyPool), borrowInput, readyPoolIdentity,
+		)
 		if err != nil {
 			return err
 		}
@@ -1018,7 +1028,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	endToEndStartedAt := time.Now()
 	leaseStartedAt := endToEndStartedAt
+	var runnerEvidence *runnerProviderEvidence
+	leasePhase := "provider.acquire"
 	if *leaseIDFlag != "" {
+		leasePhase = "provider.resolve"
 		var lease LeaseTarget
 		lease, err = resolveSSHLeaseTarget(ctx, sshBackend, ResolveRequest{Repo: repo, Options: options, ID: *leaseIDFlag, Reclaim: *reclaim, Prepare: true})
 		if err == nil {
@@ -1057,6 +1070,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		lease, err = sshBackend.Acquire(ctx, AcquireRequest{Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim, RequestedSlug: requestedSlug})
 		if err == nil {
 			server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
+			runnerEvidence = lease.RunnerEvidence
 		}
 		acquired = true
 	}
@@ -1071,6 +1085,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if !releaseUnreportedLease && !shouldReleaseRunLease(acquired, *keep, keepFailedLease, *stopAfter, runFailure) {
 			return
 		}
+		cleanupStartedAt := time.Now()
+		defer func() {
+			cleanup.Duration += time.Since(cleanupStartedAt)
+		}()
 		if lifecycleOwner != nil {
 			inspectCtx, cancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), 15*time.Second)
 			ownerErr := lifecycleOwner.QuiesceForLeaseRelease(inspectCtx)
@@ -1221,9 +1239,13 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return recordFailure(err)
 		}
 	}
+	var runnerConnectDuration time.Duration
 	if shouldAcquireWorkspaceOwner(acquired, acquiredRunMayRetainLease(*keep, *keepOnFailure, *stopAfter), sshBackend) {
 		target = bootstrapNetworkTarget(cfg, server, target)
-		if waitErr := waitForSSHReady(ctx, &target, a.Stderr, "workspace owner", 2*time.Minute); waitErr != nil {
+		connectStartedAt := time.Now()
+		waitErr := waitForSSHReady(ctx, &target, a.Stderr, "workspace owner", 2*time.Minute)
+		runnerConnectDuration += time.Since(connectStartedAt)
+		if waitErr != nil {
 			return recordFailure(waitErr)
 		}
 		a.refreshTailscaleMetadata(ctx, cfg, sshBackend, coord, useCoordinator, &server, target, leaseID)
@@ -1254,7 +1276,11 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	timings := runTimings{
 		started:           time.Now(),
 		endToEndStartedAt: endToEndStartedAt,
+		borrow:            runnerBorrowDuration,
 		lease:             leaseDuration,
+		leasePhase:        leasePhase,
+		connect:           runnerConnectDuration,
+		providerEvidence:  runnerEvidence,
 	}
 	exitNodeEgressChecked := false
 	workdir = remoteJoin(cfg, leaseID, repo.Name)
@@ -1419,6 +1445,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		oldLease := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord}
 		oldLeaseID := leaseID
 		oldSlug := serverSlug(server)
+		oldMachineType := server.ServerType.Name
 		fmt.Fprintf(a.Stderr, "warning: SSH became unavailable after sync on lease=%s slug=%s; replacing lease once and retrying sync\n", oldLeaseID, blank(oldSlug, "-"))
 		recorder.Event("lease.replace.started", "leasing", fmt.Sprintf("old_lease=%s old_slug=%s reason=ssh_before_command", oldLeaseID, blank(oldSlug, "-")))
 
@@ -1428,21 +1455,33 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if *timingJSON {
 			releaseApp.Stderr = io.Discard
 		}
-		if err := releaseApp.releaseBackendLeaseBestEffort(context.Background(), sshBackend, cfg, oldLease); err != nil {
-			recorder.Event("lease.replace.failed", "leasing", err.Error())
-			return true, exit(7, "replace stale lease %s: release failed: %v", oldLeaseID, err)
+		oldLeaseCleanupStartedAt := time.Now()
+		oldLeaseCleanupErr := releaseApp.releaseBackendLeaseBestEffort(context.Background(), sshBackend, cfg, oldLease)
+		oldLeaseCleanupDuration := time.Since(oldLeaseCleanupStartedAt)
+		if oldLeaseCleanupErr != nil {
+			recorder.Event("lease.replace.failed", "leasing", oldLeaseCleanupErr.Error())
+			return true, exit(7, "replace stale lease %s: release failed: %v", oldLeaseID, oldLeaseCleanupErr)
 		}
 		acquired = false
 
 		replacementLeaseStartedAt := time.Now()
 		newLease, err := sshBackend.Acquire(ctx, AcquireRequest{Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim})
-		timings.lease += time.Since(replacementLeaseStartedAt)
+		replacementLeaseDuration := time.Since(replacementLeaseStartedAt)
 		if err != nil {
+			recordFailedReplacementLeaseDuration(&timings, replacementLeaseDuration)
 			recorder.Event("lease.replace.failed", "leasing", err.Error())
 			return true, err
 		}
 
+		oldAttemptReport := TimingReport{
+			Provider:    cfg.Provider,
+			LeaseID:     oldLeaseID,
+			Slug:        oldSlug,
+			MachineType: oldMachineType,
+		}
+
 		server, target, leaseID = newLease.Server, newLease.SSH, newLease.LeaseID
+		resetRunnerTimingsForReplacement(&timings, oldAttemptReport, oldLeaseCleanupDuration, replacementLeaseDuration, newLease.RunnerEvidence)
 		acquired = true
 		coord = newLease.Coordinator
 		useCoordinator = coord != nil
@@ -1525,7 +1564,10 @@ retrySync:
 		recorder.Event("bootstrap.waiting", "bootstrap", "waiting for SSH before sync")
 		target = bootstrapNetworkTarget(cfg, server, target)
 		bootstrapErr := waitForSSHReady(ctx, &target, a.Stderr, "before sync", 2*time.Minute)
-		timings.bootstrap += time.Since(stepStart)
+		connectDuration := time.Since(stepStart)
+		timings.bootstrap += connectDuration
+		timings.connect += connectDuration
+		timings.syncConnect += connectDuration
 		if bootstrapErr != nil {
 			return recordFailure(bootstrapErr)
 		}
@@ -1563,7 +1605,12 @@ retrySync:
 				target.Port = cfg.SSHPort
 				target.FallbackPorts = cfg.SSHFallbackPorts
 				target = bootstrapNetworkTarget(cfg, server, target)
-				if waitErr := waitForSSHReady(ctx, &target, a.Stderr, "before sync", 2*time.Minute); waitErr != nil {
+				connectStartedAt := time.Now()
+				waitErr := waitForSSHReady(ctx, &target, a.Stderr, "before sync", 2*time.Minute)
+				connectDuration := time.Since(connectStartedAt)
+				timings.connect += connectDuration
+				timings.syncConnect += connectDuration
+				if waitErr != nil {
 					return recordFailure(waitErr)
 				}
 				if resolved, resolveErr := resolveNetworkTarget(ctx, cfg, server, target); resolveErr != nil {
@@ -1905,7 +1952,9 @@ afterSync:
 	target = bootstrapNetworkTarget(cfg, server, target)
 	bootstrapStartedAt := time.Now()
 	bootstrapErr := waitForSSHReady(ctx, &target, a.Stderr, "before command", 2*time.Minute)
-	timings.bootstrap += time.Since(bootstrapStartedAt)
+	connectDuration := time.Since(bootstrapStartedAt)
+	timings.bootstrap += connectDuration
+	timings.connect += connectDuration
 	if bootstrapErr != nil {
 		replaced, replaceErr := replaceLeaseAfterBeforeCommandSSHFailure(bootstrapErr)
 		if replaceErr != nil {
@@ -2248,6 +2297,15 @@ afterSync:
 	if err := waitWorkspaceOwnerNoChild(ctx, lifecycleOwner, 10*time.Second); err != nil {
 		return recordFailure(exit(7, "remote command child ownership remains active; refusing collection and cleanup: %v", err))
 	}
+	artifactStartedAt := time.Now()
+	artifactTimingDone := false
+	finishArtifactTiming := func() {
+		if artifactTimingDone {
+			return
+		}
+		timings.artifacts = time.Since(artifactStartedAt)
+		artifactTimingDone = true
+	}
 	if cfg.Results.Auto || len(cfg.Results.JUnit) > 0 {
 		results, err = collectRemoteJUnitResults(ctx, target, workdir, cfg.Results, resultsMarker)
 		if err != nil {
@@ -2284,8 +2342,11 @@ afterSync:
 		for _, spec := range downloads {
 			bytes, local, err := downloadRemoteFile(ctx, target, workdir, spec)
 			if err != nil {
+				finishArtifactTiming()
 				return recordFailure(err)
 			}
+			timings.artifactTransferCount++
+			timings.artifactTransferBytes += int64(bytes)
 			fmt.Fprintf(a.Stderr, "downloaded %s bytes=%d\n", local, bytes)
 		}
 	}
@@ -2293,16 +2354,20 @@ afterSync:
 	if code == 0 && len(runArtifactGlobs) > 0 {
 		collected, artifactOutput, err := collectRunArtifactGlobs(ctx, target, workdir, repo.Root, executionRunID, leaseID, runArtifactGlobs)
 		if err != nil {
+			finishArtifactTiming()
 			return recordFailure(err)
 		}
 		if strings.TrimSpace(artifactOutput) != "" {
 			fmt.Fprintln(a.Stderr, strings.TrimSpace(artifactOutput))
 		}
 		runArtifacts = append(runArtifacts, collected...)
+		timings.artifactTransferCount += len(collected)
+		timings.artifactTransferBytes += runArtifactBytes(collected)
 		for _, artifact := range collected {
 			fmt.Fprintf(a.Stderr, "artifact kind=%s path=%s bytes=%d\n", artifact.Kind, artifact.Path, artifact.Bytes)
 		}
 	}
+	finishArtifactTiming()
 	var testResultsFailure error
 	if failRunForTestResults(code, cfg.Results, results) {
 		code = 1
@@ -2908,22 +2973,49 @@ func routingSafeURL(value string) string {
 }
 
 type runTimings struct {
-	started            time.Time
-	endToEndStartedAt  time.Time
-	lease              time.Duration
-	bootstrap          time.Duration
-	sync               time.Duration
-	command            time.Duration
-	syncSteps          syncStepTimings
-	commandPhases      []timingPhase
-	syncSkipped        bool
-	syncMode           string
-	syncTransferFiles  int
-	syncTransferBytes  int64
-	syncFallbackReason string
-	blockedStage       string
-	resourceExhaustion ResourceExhaustionReason
-	retryLikely        string
+	started               time.Time
+	endToEndStartedAt     time.Time
+	borrow                time.Duration
+	lease                 time.Duration
+	legacyLease           time.Duration
+	leasePhase            string
+	connect               time.Duration
+	syncConnect           time.Duration
+	bootstrap             time.Duration
+	legacyBootstrap       time.Duration
+	sync                  time.Duration
+	command               time.Duration
+	artifacts             time.Duration
+	artifactTransferCount int
+	artifactTransferBytes int64
+	providerEvidence      *runnerProviderEvidence
+	priorRunnerPhases     []RunnerPhase
+	syncSteps             syncStepTimings
+	commandPhases         []timingPhase
+	syncSkipped           bool
+	syncMode              string
+	syncTransferFiles     int
+	syncTransferBytes     int64
+	syncFallbackReason    string
+	blockedStage          string
+	resourceExhaustion    ResourceExhaustionReason
+	retryLikely           string
+}
+
+func borrowReadyPoolLeaseForRun(ctx context.Context, coord *CoordinatorClient, key string, input map[string]any, identity *CoordinatorReadyPoolIdentityV1) (CoordinatorReadyPoolResponse, time.Duration, error) {
+	startedAt := time.Now()
+	var (
+		response CoordinatorReadyPoolResponse
+		err      error
+	)
+	if identity != nil {
+		delete(input, "allowMissingCommit")
+		input["identity"] = *identity
+		response, err = borrowValidatedTypedReadyPoolLease(ctx, coord, key, input, *identity)
+	} else {
+		response, err = coord.BorrowReadyPoolLease(ctx, key, input)
+	}
+	return response, time.Since(startedAt), err
 }
 
 type syncStepTimings struct {
@@ -2949,8 +3041,8 @@ type syncStepTimings struct {
 
 func formatRunSummary(timings runTimings, total time.Duration, exitCode int) string {
 	summary := fmt.Sprintf("run summary lease=%s bootstrap=%s sync=%s command=%s total=%s end_to_end=%s sync_skipped=%t exit=%d",
-		timings.lease.Round(time.Millisecond),
-		timings.bootstrap.Round(time.Millisecond),
+		legacyLeaseDuration(timings).Round(time.Millisecond),
+		legacyBootstrapDuration(timings).Round(time.Millisecond),
 		timings.sync.Round(time.Millisecond),
 		timings.command.Round(time.Millisecond),
 		total.Round(time.Millisecond),
@@ -3744,16 +3836,29 @@ type leaseCleanupResult struct {
 	Attempted bool
 	Stopped   bool
 	Err       error
+	Duration  time.Duration
 }
 
 func (result leaseCleanupResult) apply(report *timingReport) {
-	if !result.Attempted || report == nil {
+	if report == nil {
 		return
 	}
-	stopped := result.Stopped
-	report.LeaseStopped = &stopped
-	if result.Err != nil {
-		report.LeaseStopErr = result.Err.Error()
+	if result.Duration > 0 {
+		report.RunnerPhases = append(report.RunnerPhases, RunnerPhase{
+			Name:     "cleanup",
+			Ms:       result.Duration.Milliseconds(),
+			Provider: report.Provider,
+			LeaseID:  report.LeaseID,
+			Slug:     report.Slug,
+		})
+		report.RunnerTotalMs += result.Duration.Milliseconds()
+	}
+	if result.Attempted {
+		stopped := result.Stopped
+		report.LeaseStopped = &stopped
+		if result.Err != nil {
+			report.LeaseStopErr = result.Err.Error()
+		}
 	}
 }
 

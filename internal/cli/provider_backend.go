@@ -1145,10 +1145,11 @@ func ValidateRunSessionForSpec(spec ProviderSpec, result RunResult) error {
 }
 
 type LeaseTarget struct {
-	Server      Server
-	SSH         SSHTarget
-	LeaseID     string
-	Coordinator *CoordinatorClient
+	Server         Server
+	SSH            SSHTarget
+	LeaseID        string
+	Coordinator    *CoordinatorClient
+	RunnerEvidence *runnerProviderEvidence
 }
 
 type LeaseView = Server

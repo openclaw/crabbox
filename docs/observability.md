@@ -147,6 +147,16 @@ phases. Failed runs add `blockedStage` and `retryLikely` when Crabbox can
 classify the likely blocker; the human-readable run summary prints the same
 values as `blocked_stage` and `retry_likely`.
 
+`runnerPhases` is the sum-safe lifecycle view. Its positive-duration entries
+are mutually exclusive and add up to `runnerTotalMs`; any observed time that
+cannot be assigned from an existing measurement is named `unattributed`.
+Provider acquire or pool borrow, provider/SSH readiness, workspace seed and
+overlay, command, artifacts, and cleanup appear when Crabbox observes them.
+Provider-owned delegated setup is named `delegated.opaque` rather than split
+into invented timings. The older `leaseMs`, `bootstrapMs`, `syncMs`,
+`syncPhases`, `commandMs`, and `commandPhases` fields remain unchanged for
+compatibility.
+
 Commands can define their own phases by printing marker lines to stdout or
 stderr:
 

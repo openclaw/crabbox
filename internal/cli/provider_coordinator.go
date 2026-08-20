@@ -138,7 +138,13 @@ func (b *coordinatorLeaseBackend) coordinatorLeaseTargetForConfig(lease Coordina
 	if err := prepareLeaseSSHTrust(&target, leaseID); err != nil {
 		return LeaseTarget{}, err
 	}
-	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord}, nil
+	return LeaseTarget{
+		Server:         server,
+		SSH:            target,
+		LeaseID:        leaseID,
+		Coordinator:    coord,
+		RunnerEvidence: coordinatorRunnerEvidence(lease),
+	}, nil
 }
 
 func (b *coordinatorLeaseBackend) RebindResolvedLeaseTarget(target *LeaseTarget, leaseID string) error {
@@ -272,7 +278,13 @@ func (b *coordinatorLeaseBackend) acquireOnceWithLeaseID(ctx context.Context, ke
 		return LeaseTarget{}, err
 	}
 	target = bootstrapTarget
-	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: b.coord}, nil
+	return LeaseTarget{
+		Server:         server,
+		SSH:            target,
+		LeaseID:        leaseID,
+		Coordinator:    b.coord,
+		RunnerEvidence: coordinatorRunnerEvidence(lease),
+	}, nil
 }
 
 func reportCoordinatorAcquisitionRollback(stderr io.Writer, leaseID, reason string, released CoordinatorLease, releaseErr error) {
@@ -325,6 +337,50 @@ func formatMilliseconds(value int64) string {
 		return "-"
 	}
 	return (time.Duration(value) * time.Millisecond).Round(time.Millisecond).String()
+}
+
+func coordinatorRunnerEvidence(lease CoordinatorLease) *runnerProviderEvidence {
+	timing := lease.ProvisioningTiming
+	if timing == nil || timing.TotalMs <= 0 {
+		return nil
+	}
+	evidence := &runnerProviderEvidence{
+		TotalMs: timing.TotalMs,
+	}
+	if lease.Image != nil {
+		evidence.ImageID = providerSafeImageID(lease.Provider, lease.Image.ID)
+	}
+	remaining := timing.TotalMs
+	appendPhase := func(name string, ms int64) {
+		if ms <= 0 || remaining <= 0 {
+			return
+		}
+		if ms > remaining {
+			ms = remaining
+		}
+		evidence.Phases = append(evidence.Phases, RunnerPhase{Name: name, Ms: ms})
+		remaining -= ms
+	}
+	if len(timing.Phases) > 0 {
+		for _, phase := range timing.Phases {
+			switch strings.TrimSpace(phase.Name) {
+			case "request":
+				appendPhase("provider.request", phase.Ms)
+			case "network_ready":
+				appendPhase("connect.provider", phase.Ms)
+			case "bootstrap":
+				appendPhase("bootstrap.readiness", phase.Ms)
+			case "unattributed":
+				appendPhase("provider.unattributed", phase.Ms)
+			}
+		}
+	} else {
+		appendPhase("provider.request", timing.RequestMs)
+		appendPhase("connect.provider", timing.NetworkReadyMs)
+		appendPhase("bootstrap.readiness", timing.BootstrapMs)
+	}
+	appendPhase("provider.unattributed", remaining)
+	return evidence
 }
 
 type coordinatorCreateLeaseResult struct {
