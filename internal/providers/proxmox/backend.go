@@ -143,20 +143,26 @@ func (b *leaseBackend) waitForServerIP(ctx context.Context, client proxmoxClient
 	defer cancel()
 	ticker := time.NewTicker(proxmoxIPPollInterval)
 	defer ticker.Stop()
-	for {
-		server, err := client.GetServer(deadlineCtx, cloudID)
-		if err != nil {
-			return Server{}, err
-		}
-		if server.PublicNet.IPv4.IP != "" {
-			return server, nil
-		}
-		select {
-		case <-deadlineCtx.Done():
+	result, err := shared.Poll(deadlineCtx, 0, proxmoxIPPollInterval,
+		func(ctx context.Context, _ time.Duration) error {
+			select {
+			case <-ctx.Done():
+				return context.Cause(ctx)
+			case <-ticker.C:
+				return nil
+			}
+		},
+		func(ctx context.Context) (Server, error) { return client.GetServer(ctx, cloudID) },
+		func(_ context.Context, server Server, fetchErr error) (bool, error) {
+			return server.PublicNet.IPv4.IP != "", fetchErr
+		}, nil)
+	if err != nil {
+		if result.Err == nil && context.Cause(deadlineCtx) != nil && errors.Is(err, context.Cause(deadlineCtx)) {
 			return Server{}, deadlineCtx.Err()
-		case <-ticker.C:
 		}
+		return Server{}, err
 	}
+	return result.Value, nil
 }
 
 func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
@@ -511,23 +517,41 @@ func waitForProxmoxDeleteReconciliation(ctx context.Context, client proxmoxClien
 	defer cancel()
 	ticker := time.NewTicker(proxmoxDeleteVerifyPollInterval)
 	defer ticker.Stop()
-	for {
-		if _, err := client.GetServer(verifyCtx, cloudID); err == nil {
-			// The task may still be completing after its status poll failed.
-		} else if core.IsProxmoxNotFound(err) {
-			return true, nil
-		} else {
-			return false, err
-		}
-		select {
-		case <-verifyCtx.Done():
-			if errors.Is(verifyCtx.Err(), context.DeadlineExceeded) {
-				return false, nil
+	disappeared := false
+	result, err := shared.Poll(verifyCtx, 0, proxmoxDeleteVerifyPollInterval,
+		func(ctx context.Context, _ time.Duration) error {
+			select {
+			case <-ctx.Done():
+				return context.Cause(ctx)
+			case <-ticker.C:
+				return nil
 			}
-			return false, verifyCtx.Err()
-		case <-ticker.C:
-		}
+		},
+		func(ctx context.Context) (struct{}, error) {
+			_, err := client.GetServer(ctx, cloudID)
+			return struct{}{}, err
+		},
+		func(_ context.Context, _ struct{}, fetchErr error) (bool, error) {
+			if core.IsProxmoxNotFound(fetchErr) {
+				disappeared = true
+				return true, nil
+			}
+			if fetchErr != nil {
+				return false, fetchErr
+			}
+			// The task may still be completing after its status poll failed.
+			return false, nil
+		}, nil)
+	if err == nil {
+		return disappeared, nil
 	}
+	if result.Err == nil && errors.Is(context.Cause(verifyCtx), context.DeadlineExceeded) && errors.Is(err, context.DeadlineExceeded) {
+		return false, nil
+	}
+	if result.Err == nil && context.Cause(verifyCtx) != nil && errors.Is(err, context.Cause(verifyCtx)) {
+		return false, verifyCtx.Err()
+	}
+	return false, err
 }
 
 func removeProxmoxServerByCloudID(servers []Server, cloudID string) []Server {

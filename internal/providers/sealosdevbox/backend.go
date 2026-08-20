@@ -10,6 +10,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type backend struct {
@@ -573,35 +574,33 @@ func (b *backend) statusSSHKey(leaseID string) string {
 
 func (b *backend) waitForDevboxPrepared(ctx context.Context, name string, timeout time.Duration) (devboxItem, error) {
 	deadline := b.now().Add(timeout)
-	var last devboxItem
 	var lastErr error
-	for {
-		item, err := b.getDevbox(ctx, name)
-		if err == nil {
-			last = item
-			if b.devboxPrepared(item) {
-				return item, nil
+	result, err := shared.Poll(ctx, 0, b.pollInterval(5*time.Second), shared.SleepContext,
+		func(ctx context.Context) (devboxItem, error) { return b.getDevbox(ctx, name) },
+		func(ctx context.Context, item devboxItem, fetchErr error) (bool, error) {
+			if fetchErr == nil {
+				if b.devboxPrepared(item) {
+					return true, nil
+				}
+				if devboxReady(item) {
+					lastErr = core.Exit(5, "Sealos DevBox %s is running but has no SSH NodePort in status.network", name)
+				}
+				if devboxTerminalFailure(item) {
+					events, _ := b.listEvents(ctx, name)
+					return false, core.Exit(5, "Sealos DevBox %s reached terminal state before readiness: %s", name, devboxDiagnostics(item, events, nil))
+				}
+			} else if kubectlNotFound(fetchErr) {
+				lastErr = fetchErr
+			} else {
+				return false, fetchErr
 			}
-			if devboxReady(item) {
-				lastErr = core.Exit(5, "Sealos DevBox %s is running but has no SSH NodePort in status.network", name)
-			}
-			if devboxTerminalFailure(item) {
+			if !b.now().Before(deadline) {
 				events, _ := b.listEvents(ctx, name)
-				return item, core.Exit(5, "Sealos DevBox %s reached terminal state before readiness: %s", name, devboxDiagnostics(item, events, nil))
+				return false, core.Exit(5, "timed out waiting for Sealos DevBox %s readiness: %s", name, devboxDiagnostics(item, events, lastErr))
 			}
-		} else if kubectlNotFound(err) {
-			lastErr = err
-		} else {
-			return devboxItem{}, err
-		}
-		if !b.now().Before(deadline) {
-			events, _ := b.listEvents(ctx, name)
-			return last, core.Exit(5, "timed out waiting for Sealos DevBox %s readiness: %s", name, devboxDiagnostics(last, events, lastErr))
-		}
-		if err := sleepContext(ctx, b.pollInterval(5*time.Second)); err != nil {
-			return last, err
-		}
-	}
+			return false, nil
+		}, nil)
+	return result.Value, err
 }
 
 func (b *backend) waitForDevboxSecret(ctx context.Context, item devboxItem, timeout time.Duration) (devboxSecret, error) {
@@ -609,41 +608,55 @@ func (b *backend) waitForDevboxSecret(ctx context.Context, item devboxItem, time
 	devboxName := strings.TrimSpace(item.Metadata.Name)
 	deadline := b.now().Add(timeout)
 	var lastErr error
-	for {
-		secret, err := b.getSecret(ctx, name)
-		if err == nil {
-			if ownerErr := validateDevboxSecretOwner(secret, item); ownerErr == nil {
-				return secret, nil
-			} else {
-				lastErr = ownerErr
+	var selected devboxSecret
+	skipSleep := false
+	_, err := shared.Poll(ctx, 0, b.pollInterval(5*time.Second),
+		func(ctx context.Context, delay time.Duration) error {
+			if skipSleep {
+				skipSleep = false
+				return nil
 			}
-		} else if !kubectlNotFound(err) {
-			return devboxSecret{}, err
-		} else {
-			lastErr = err
-		}
-		if devboxName != "" {
-			refreshed, refreshErr := b.getDevbox(ctx, devboxName)
-			if refreshErr == nil {
-				item = refreshed
-				previousName := name
-				name = devboxSecretName(item)
-				if name != previousName {
-					continue
+			return shared.SleepContext(ctx, delay)
+		},
+		func(ctx context.Context) (devboxSecret, error) { return b.getSecret(ctx, name) },
+		func(ctx context.Context, secret devboxSecret, fetchErr error) (bool, error) {
+			if fetchErr == nil {
+				if ownerErr := validateDevboxSecretOwner(secret, item); ownerErr == nil {
+					selected = secret
+					return true, nil
+				} else {
+					lastErr = ownerErr
 				}
-			} else if !kubectlNotFound(refreshErr) {
-				return devboxSecret{}, refreshErr
+			} else if !kubectlNotFound(fetchErr) {
+				return false, fetchErr
 			} else {
-				lastErr = refreshErr
+				lastErr = fetchErr
 			}
-		}
-		if !b.now().Before(deadline) {
-			return devboxSecret{}, core.Exit(5, "timed out waiting for Sealos DevBox Secret %s: %s", name, redactSensitive(lastErr.Error()))
-		}
-		if err := sleepContext(ctx, b.pollInterval(5*time.Second)); err != nil {
-			return devboxSecret{}, err
-		}
+			if devboxName != "" {
+				refreshed, refreshErr := b.getDevbox(ctx, devboxName)
+				if refreshErr == nil {
+					item = refreshed
+					previousName := name
+					name = devboxSecretName(item)
+					if name != previousName {
+						skipSleep = true
+						return false, nil
+					}
+				} else if !kubectlNotFound(refreshErr) {
+					return false, refreshErr
+				} else {
+					lastErr = refreshErr
+				}
+			}
+			if !b.now().Before(deadline) {
+				return false, core.Exit(5, "timed out waiting for Sealos DevBox Secret %s: %s", name, redactSensitive(lastErr.Error()))
+			}
+			return false, nil
+		}, nil)
+	if err != nil {
+		return devboxSecret{}, err
 	}
+	return selected, nil
 }
 
 func (b *backend) devboxPrepared(item devboxItem) bool {

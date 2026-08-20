@@ -15,6 +15,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type backend struct {
@@ -634,27 +635,41 @@ func (b *backend) waitGuestReady(ctx context.Context, vmName, user string) error
 	// Include attempts and backoff in the overall boot budget.
 	budgetCtx, cancel := context.WithTimeout(ctx, b.guestReadyBudget)
 	defer cancel()
-	var lastErr error
-	for attempt := 0; ; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-budgetCtx.Done():
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				return fmt.Errorf("guest %s did not accept PowerShell Direct within %s: %w", vmName, b.guestReadyBudget, lastErr)
-			case <-time.After(b.guestRetryBackoff):
+	// Preserve the legacy first probe on an already-canceled context; the probe
+	// and inter-attempt delay still observe the original budget context.
+	pollCtx := context.WithoutCancel(budgetCtx)
+	result, err := shared.Poll(pollCtx, 0, b.guestRetryBackoff,
+		func(_ context.Context, delay time.Duration) error { return shared.SleepContext(budgetCtx, delay) },
+		func(context.Context) (struct{}, error) {
+			result, err := b.invokeGuestScript(budgetCtx, script, env, b.guestReadyProbeTimeout)
+			if err != nil {
+				return struct{}{}, commandError("guest readiness probe", result, err)
 			}
-		}
-		result, err := b.invokeGuestScript(budgetCtx, script, env, b.guestReadyProbeTimeout)
-		if err == nil {
-			return nil
-		}
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		lastErr = commandError("guest readiness probe", result, err)
+			return struct{}{}, nil
+		},
+		func(_ context.Context, _ struct{}, fetchErr error) (bool, error) {
+			if fetchErr == nil {
+				return true, nil
+			}
+			if ctx.Err() != nil {
+				return false, ctx.Err()
+			}
+			return false, nil
+		}, nil)
+	if err == nil {
+		return nil
 	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if errors.Is(context.Cause(budgetCtx), context.DeadlineExceeded) && errors.Is(err, context.DeadlineExceeded) {
+		lastErr := result.Err
+		if lastErr == nil {
+			lastErr = budgetCtx.Err()
+		}
+		return fmt.Errorf("guest %s did not accept PowerShell Direct within %s: %w", vmName, b.guestReadyBudget, lastErr)
+	}
+	return err
 }
 
 // invokeInGuest runs a PowerShell script block inside the guest over PowerShell
@@ -882,23 +897,29 @@ func (b *backend) waitForIP(ctx context.Context, name string, timeout time.Durat
 		`Get-VMNetworkAdapter -VMName '%s' | Select-Object -ExpandProperty IPAddresses | ConvertTo-Json`,
 		escapePSString(name),
 	)
-	for {
-		if time.Now().After(deadline) {
-			return "", exit(5, "hyperv VM %s did not acquire an IP within %s", name, timeout)
-		}
-		result, err := b.powershell(ctx, script)
-		if err == nil && strings.TrimSpace(result.Stdout) != "" && strings.TrimSpace(result.Stdout) != "null" {
-			ip := parseFirstIPv4(result.Stdout)
-			if ip != "" {
-				return ip, nil
+	// The legacy observer always made its first read, even when the caller had
+	// already been canceled. Keep cancellation on the read and sleep operations
+	// while preventing Poll's preflight check from skipping that observation.
+	pollCtx := context.WithoutCancel(ctx)
+	result, err := shared.Poll(pollCtx, 0, 3*time.Second,
+		func(_ context.Context, delay time.Duration) error { return shared.SleepContext(ctx, delay) },
+		func(context.Context) (string, error) {
+			if time.Now().After(deadline) {
+				return "", exit(5, "hyperv VM %s did not acquire an IP within %s", name, timeout)
 			}
-		}
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-time.After(3 * time.Second):
-		}
+			result, err := b.powershell(ctx, script)
+			if err != nil || strings.TrimSpace(result.Stdout) == "" || strings.TrimSpace(result.Stdout) == "null" {
+				return "", nil
+			}
+			return parseFirstIPv4(result.Stdout), nil
+		},
+		func(_ context.Context, ip string, fetchErr error) (bool, error) {
+			return ip != "", fetchErr
+		}, nil)
+	if err != nil && result.Err == nil && context.Cause(ctx) != nil && errors.Is(err, context.Cause(ctx)) {
+		return "", ctx.Err()
 	}
+	return result.Value, err
 }
 
 var errNotWindows = fmt.Errorf("hyper-v inventory unavailable: host OS is %s (not windows)", hypervHostOS)

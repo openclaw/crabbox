@@ -286,38 +286,44 @@ func (b *leaseBackend) waitForGuestIPv4(ctx context.Context, client lifecycleCli
 	deadline := currentTime(b.RT).Add(timeout)
 	var lastErr error
 	nextDiscover := time.Time{}
-	for {
-		ip, err := client.GuestIPv4(ctx, vmRef)
-		if err == nil && ip != "" {
-			return ip, nil
-		}
-		lastErr = err
-		if discoverer, ok := client.(guestIPv4Discoverer); ok && currentTime(b.RT).After(nextDiscover) {
-			nextDiscover = currentTime(b.RT).Add(guestIPDiscoverInterval)
-			discovered, discoverErr := discoverer.DiscoverGuestIPv4(ctx, vmRef)
-			if discoverErr == nil && discovered != "" {
-				return discovered, nil
+	var discoveredIP string
+	result, err := shared.Poll(ctx, 0, guestIPPollInterval, shared.SleepContext,
+		func(ctx context.Context) (string, error) { return client.GuestIPv4(ctx, vmRef) },
+		func(ctx context.Context, ip string, fetchErr error) (bool, error) {
+			if fetchErr == nil && ip != "" {
+				return true, nil
 			}
-			var configErr guestProbeConfigError
-			if errors.As(discoverErr, &configErr) {
-				return "", discoverErr
+			lastErr = fetchErr
+			if discoverer, ok := client.(guestIPv4Discoverer); ok && currentTime(b.RT).After(nextDiscover) {
+				nextDiscover = currentTime(b.RT).Add(guestIPDiscoverInterval)
+				discovered, discoverErr := discoverer.DiscoverGuestIPv4(ctx, vmRef)
+				if discoverErr == nil && discovered != "" {
+					discoveredIP = discovered
+					return true, nil
+				}
+				var configErr guestProbeConfigError
+				if errors.As(discoverErr, &configErr) {
+					return false, discoverErr
+				}
+				if lastErr == nil && discoverErr != nil {
+					lastErr = discoverErr
+				}
 			}
-			if lastErr == nil && discoverErr != nil {
-				lastErr = discoverErr
+			if currentTime(b.RT).After(deadline) {
+				if lastErr != nil {
+					return false, exit(5, "timed out waiting for XCP-ng guest IPv4: %v", lastErr)
+				}
+				return false, exit(5, "timed out waiting for XCP-ng guest IPv4")
 			}
-		}
-		if currentTime(b.RT).After(deadline) {
-			if lastErr != nil {
-				return "", exit(5, "timed out waiting for XCP-ng guest IPv4: %v", lastErr)
-			}
-			return "", exit(5, "timed out waiting for XCP-ng guest IPv4")
-		}
-		select {
-		case <-ctx.Done():
-			return "", context.Cause(ctx)
-		case <-time.After(guestIPPollInterval):
-		}
+			return false, nil
+		}, nil)
+	if err != nil {
+		return "", err
 	}
+	if discoveredIP != "" {
+		return discoveredIP, nil
+	}
+	return result.Value, nil
 }
 
 func (b *leaseBackend) cleanupFailedLease(ctx context.Context, client lifecycleClient, vmID string, drive xcpNgConfigDrive) (bool, error) {

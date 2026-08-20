@@ -22,6 +22,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 	xssh "golang.org/x/crypto/ssh"
 )
 
@@ -1084,34 +1085,65 @@ func (b *backend) waitForRunningVM(ctx context.Context, cfg Config, name string,
 	ticker := time.NewTicker(2 * time.Second)
 	defer deadline.Stop()
 	defer ticker.Stop()
-	for {
-		if owner.PID > 0 && !ownerProcessMatches(owner) {
-			detail := ""
-			if file, err := os.Open(owner.LogPath); err == nil {
-				data, _ := io.ReadAll(io.LimitReader(file, 64<<10))
-				_ = file.Close()
-				detail = strings.TrimSpace(string(data))
-			}
-			if detail != "" {
-				return lumeVM{}, exit(2, "Lume VM %s owner exited during startup: %s", name, detail)
-			}
-			return lumeVM{}, exit(2, "Lume VM %s owner exited during startup", name)
-		}
-		inst, err := b.getInstance(ctx, cfg, name)
-		if err == nil && strings.EqualFold(strings.TrimSpace(inst.OS), targetMacOS) && normalizedState(inst.Status) != "stopped" && normalizedState(inst.Status) != "missing" {
-			onVisible()
-		}
-		if err == nil && instanceRunning(inst.Status) && inst.IPAddress != "" {
-			return inst, nil
-		}
-		select {
-		case <-ctx.Done():
-			return lumeVM{}, exit(2, "wait for Lume VM %s: context cancelled", name)
-		case <-deadline.C:
-			return lumeVM{}, exit(5, "timed out waiting for Lume VM %s running state and IP address", name)
-		case <-ticker.C:
-		}
+	timeoutErr := errors.New("Lume VM readiness deadline reached")
+	type runningObservation struct {
+		instance lumeVM
+		ownerErr error
+		getErr   error
 	}
+	result, err := shared.Poll(ctx, 0, 2*time.Second,
+		func(ctx context.Context, _ time.Duration) error {
+			select {
+			case <-ctx.Done():
+				return context.Cause(ctx)
+			case <-deadline.C:
+				return timeoutErr
+			case <-ticker.C:
+				return nil
+			}
+		},
+		func(ctx context.Context) (runningObservation, error) {
+			if owner.PID > 0 && !ownerProcessMatches(owner) {
+				detail := ""
+				if file, err := os.Open(owner.LogPath); err == nil {
+					data, _ := io.ReadAll(io.LimitReader(file, 64<<10))
+					_ = file.Close()
+					detail = strings.TrimSpace(string(data))
+				}
+				if detail != "" {
+					return runningObservation{ownerErr: exit(2, "Lume VM %s owner exited during startup: %s", name, detail)}, nil
+				}
+				return runningObservation{ownerErr: exit(2, "Lume VM %s owner exited during startup", name)}, nil
+			}
+			inst, err := b.getInstance(ctx, cfg, name)
+			return runningObservation{instance: inst, getErr: err}, nil
+		},
+		func(_ context.Context, observation runningObservation, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
+			}
+			if observation.ownerErr != nil {
+				return false, observation.ownerErr
+			}
+			if observation.getErr != nil {
+				return false, nil
+			}
+			inst := observation.instance
+			if strings.EqualFold(strings.TrimSpace(inst.OS), targetMacOS) && normalizedState(inst.Status) != "stopped" && normalizedState(inst.Status) != "missing" {
+				onVisible()
+			}
+			return instanceRunning(inst.Status) && inst.IPAddress != "", nil
+		}, nil)
+	if err == nil {
+		return result.Value.instance, nil
+	}
+	if errors.Is(err, timeoutErr) {
+		return lumeVM{}, exit(5, "timed out waiting for Lume VM %s running state and IP address", name)
+	}
+	if cause := context.Cause(ctx); cause != nil && errors.Is(err, cause) {
+		return lumeVM{}, exit(2, "wait for Lume VM %s: context cancelled", name)
+	}
+	return lumeVM{}, err
 }
 
 func (b *backend) waitForGuestIdentity(ctx context.Context, name, host string, trust bootstrapTrust, knownHostsFile string) (string, error) {
@@ -1119,21 +1151,34 @@ func (b *backend) waitForGuestIdentity(ctx context.Context, name, host string, t
 	ticker := time.NewTicker(time.Second)
 	defer deadline.Stop()
 	defer ticker.Stop()
-	var lastErr error
-	for {
-		platformUUID, pinErr := pinBootstrapHostKey(host, lumeHostKeyAlias(name), trust, knownHostsFile)
-		lastErr = pinErr
-		if lastErr == nil {
-			return platformUUID, nil
-		}
-		select {
-		case <-ctx.Done():
-			return "", exit(2, "wait for Lume VM %s first-boot identity: context cancelled", name)
-		case <-deadline.C:
-			return "", exit(2, "wait for Lume VM %s authenticated first-boot identity: %v", name, lastErr)
-		case <-ticker.C:
-		}
+	timeoutErr := errors.New("Lume VM guest identity deadline reached")
+	result, err := shared.Poll(ctx, 0, time.Second,
+		func(ctx context.Context, _ time.Duration) error {
+			select {
+			case <-ctx.Done():
+				return context.Cause(ctx)
+			case <-deadline.C:
+				return timeoutErr
+			case <-ticker.C:
+				return nil
+			}
+		},
+		func(context.Context) (string, error) {
+			return pinBootstrapHostKey(host, lumeHostKeyAlias(name), trust, knownHostsFile)
+		},
+		func(_ context.Context, _ string, fetchErr error) (bool, error) {
+			return fetchErr == nil, nil
+		}, nil)
+	if err == nil {
+		return result.Value, nil
 	}
+	if errors.Is(err, timeoutErr) {
+		return "", exit(2, "wait for Lume VM %s authenticated first-boot identity: %v", name, result.Err)
+	}
+	if cause := context.Cause(ctx); cause != nil && errors.Is(err, cause) {
+		return "", exit(2, "wait for Lume VM %s first-boot identity: context cancelled", name)
+	}
+	return "", err
 }
 
 func (b *backend) stopVM(ctx context.Context, cfg Config, name string, owner lumeRunOwner) error {

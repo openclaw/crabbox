@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 var (
@@ -836,25 +838,38 @@ func waitForSandboxResourceReadiness(ctx context.Context, client kubernetesClien
 	}
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
-	var lastErr error
-	for {
-		ready, err := sandboxResourceReadinessOnce(ctx, client, namespace, claimName, identity)
-		if err == nil {
-			return ready, nil
-		}
-		if errors.Is(err, errSandboxClaimNotFound) {
-			return sandboxResourceReadiness{}, err
-		}
-		if isResourceIdentityError(err) || isResourceTerminalError(err) {
-			return sandboxResourceReadiness{}, err
-		}
-		lastErr = err
-		select {
-		case <-ctx.Done():
-			return sandboxResourceReadiness{}, fmt.Errorf("agent-sandbox readiness timed out for claim %s: %w", claimName, lastErr)
-		case <-ticker.C:
-		}
+	result, err := shared.Poll(ctx, 0, poll,
+		func(ctx context.Context, _ time.Duration) error {
+			select {
+			case <-ctx.Done():
+				return context.Cause(ctx)
+			case <-ticker.C:
+				return nil
+			}
+		},
+		func(ctx context.Context) (sandboxResourceReadiness, error) {
+			return sandboxResourceReadinessOnce(ctx, client, namespace, claimName, identity)
+		},
+		func(_ context.Context, _ sandboxResourceReadiness, fetchErr error) (bool, error) {
+			if fetchErr == nil {
+				return true, nil
+			}
+			if errors.Is(fetchErr, errSandboxClaimNotFound) || isResourceIdentityError(fetchErr) || isResourceTerminalError(fetchErr) {
+				return false, fetchErr
+			}
+			return false, nil
+		}, nil)
+	if err == nil {
+		return result.Value, nil
 	}
+	if cause := context.Cause(ctx); cause != nil && errors.Is(err, cause) {
+		lastErr := result.Err
+		if lastErr == nil {
+			lastErr = cause
+		}
+		return sandboxResourceReadiness{}, fmt.Errorf("agent-sandbox readiness timed out for claim %s: %w", claimName, lastErr)
+	}
+	return sandboxResourceReadiness{}, err
 }
 
 func waitForSandboxPodReadiness(ctx context.Context, client kubernetesClient, namespace, claimName string, sandbox *kubernetesObject, identity claimIdentity, poll time.Duration) (podState, error) {
@@ -863,48 +878,72 @@ func waitForSandboxPodReadiness(ctx context.Context, client kubernetesClient, na
 	}
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
-	var lastErr error
-	for {
-		currentSandbox, err := client.Get(ctx, sandboxGVR(), namespace, sandbox.Metadata.Name)
-		if err == nil {
-			err = validateSandboxClaimBinding(currentSandbox, claimName, identity)
-		}
-		if err == nil && currentSandbox.Metadata.UID != sandbox.Metadata.UID {
-			err = resourceIdentityError{err: exit(
-				4,
-				"agent-sandbox Sandbox identity changed from %s UID %s to %s UID %s",
-				sandbox.Metadata.Name,
-				sandbox.Metadata.UID,
-				currentSandbox.Metadata.Name,
-				currentSandbox.Metadata.UID,
-			)}
-		}
-		if err == nil {
-			err = sandboxReady(currentSandbox)
-		}
-		var pod podState
-		if err == nil {
-			pod, err = resolveSandboxPod(ctx, client, namespace, currentSandbox)
-		}
-		if err == nil {
-			if err := validatePodSandboxBinding(pod, currentSandbox, identity); err != nil {
-				return podState{}, err
+	result, err := shared.Poll(ctx, 0, poll,
+		func(ctx context.Context, _ time.Duration) error {
+			select {
+			case <-ctx.Done():
+				return context.Cause(ctx)
+			case <-ticker.C:
+				return nil
 			}
-			err = podReady(pod)
-			if err == nil {
-				return pod, nil
+		},
+		func(ctx context.Context) (podState, error) {
+			return sandboxPodReadinessOnce(ctx, client, namespace, claimName, sandbox, identity)
+		},
+		func(_ context.Context, _ podState, fetchErr error) (bool, error) {
+			if fetchErr == nil {
+				return true, nil
 			}
-		}
-		if isResourceIdentityError(err) || isResourceTerminalError(err) {
-			return podState{}, err
-		}
-		lastErr = err
-		select {
-		case <-ctx.Done():
-			return podState{}, fmt.Errorf("agent-sandbox pod readiness timed out for sandbox %s: %w", sandbox.Metadata.Name, lastErr)
-		case <-ticker.C:
-		}
+			if isResourceIdentityError(fetchErr) || isResourceTerminalError(fetchErr) {
+				return false, fetchErr
+			}
+			return false, nil
+		}, nil)
+	if err == nil {
+		return result.Value, nil
 	}
+	if cause := context.Cause(ctx); cause != nil && errors.Is(err, cause) {
+		lastErr := result.Err
+		if lastErr == nil {
+			lastErr = cause
+		}
+		return podState{}, fmt.Errorf("agent-sandbox pod readiness timed out for sandbox %s: %w", sandbox.Metadata.Name, lastErr)
+	}
+	return podState{}, err
+}
+
+func sandboxPodReadinessOnce(ctx context.Context, client kubernetesClient, namespace, claimName string, sandbox *kubernetesObject, identity claimIdentity) (podState, error) {
+	currentSandbox, err := client.Get(ctx, sandboxGVR(), namespace, sandbox.Metadata.Name)
+	if err == nil {
+		err = validateSandboxClaimBinding(currentSandbox, claimName, identity)
+	}
+	if err == nil && currentSandbox.Metadata.UID != sandbox.Metadata.UID {
+		err = resourceIdentityError{err: exit(
+			4,
+			"agent-sandbox Sandbox identity changed from %s UID %s to %s UID %s",
+			sandbox.Metadata.Name,
+			sandbox.Metadata.UID,
+			currentSandbox.Metadata.Name,
+			currentSandbox.Metadata.UID,
+		)}
+	}
+	if err == nil {
+		err = sandboxReady(currentSandbox)
+	}
+	var pod podState
+	if err == nil {
+		pod, err = resolveSandboxPod(ctx, client, namespace, currentSandbox)
+	}
+	if err != nil {
+		return podState{}, err
+	}
+	if err := validatePodSandboxBinding(pod, currentSandbox, identity); err != nil {
+		return podState{}, err
+	}
+	if err := podReady(pod); err != nil {
+		return podState{}, err
+	}
+	return pod, nil
 }
 
 func sandboxResourceReadinessOnce(ctx context.Context, client kubernetesClient, namespace, claimName string, identity claimIdentity) (sandboxResourceReadiness, error) {

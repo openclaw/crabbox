@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type codespacesAPI interface {
@@ -1171,68 +1173,77 @@ func (b *backend) waitForAvailable(ctx context.Context, api codespacesAPI, name 
 	}
 	defer cancel()
 
-	for {
-		item, err := api.getCodespace(waitCtx, name)
-		if err != nil {
-			return codespace{}, err
-		}
-		if codespaceAvailable(item.State) {
-			return item, nil
-		}
-		if codespaceTerminal(item.State) {
-			return codespace{}, exit(5, "github-codespaces codespace %s entered terminal state=%s", name, item.State)
-		}
-		select {
-		case <-waitCtx.Done():
+	result, err := shared.Poll(waitCtx, 0, b.pollInterval, shared.SleepContext,
+		func(ctx context.Context) (codespace, error) { return api.getCodespace(ctx, name) },
+		func(_ context.Context, item codespace, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
+			}
+			if codespaceAvailable(item.State) {
+				return true, nil
+			}
+			if codespaceTerminal(item.State) {
+				return false, exit(5, "github-codespaces codespace %s entered terminal state=%s", name, item.State)
+			}
+			return false, nil
+		}, nil)
+	if err != nil {
+		if result.Err == nil && context.Cause(waitCtx) != nil && errors.Is(err, context.Cause(waitCtx)) {
 			return codespace{}, waitCtx.Err()
-		case <-time.After(b.pollInterval):
 		}
+		return codespace{}, err
 	}
+	return result.Value, nil
 }
 
 func (b *backend) waitForStopped(ctx context.Context, api codespacesAPI, name string) (codespace, error) {
-	for {
-		item, err := api.getCodespace(ctx, name)
-		if err != nil {
-			return codespace{}, err
-		}
-		if codespaceStopped(item.State) {
-			return item, nil
-		}
-		if codespaceTerminal(item.State) {
-			return codespace{}, exit(5, "github-codespaces codespace %s entered terminal state=%s while stopping", name, item.State)
-		}
-		select {
-		case <-ctx.Done():
+	result, err := shared.Poll(ctx, 0, b.pollInterval, shared.SleepContext,
+		func(ctx context.Context) (codespace, error) { return api.getCodespace(ctx, name) },
+		func(_ context.Context, item codespace, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
+			}
+			if codespaceStopped(item.State) {
+				return true, nil
+			}
+			if codespaceTerminal(item.State) {
+				return false, exit(5, "github-codespaces codespace %s entered terminal state=%s while stopping", name, item.State)
+			}
+			return false, nil
+		}, nil)
+	if err != nil {
+		if result.Err == nil && context.Cause(ctx) != nil && errors.Is(err, context.Cause(ctx)) {
 			return codespace{}, ctx.Err()
-		case <-time.After(b.pollInterval):
 		}
+		return codespace{}, err
 	}
+	return result.Value, nil
 }
 
 func waitForCodespaceDeleted(ctx context.Context, api codespacesAPI, name string, pollInterval time.Duration, validate func(codespace) error) error {
 	if pollInterval <= 0 {
 		pollInterval = defaultPollInterval
 	}
-	for {
-		item, err := api.getCodespace(ctx, name)
-		if isGitHubNotFound(err) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if validate != nil {
-			if err := validate(item); err != nil {
-				return err
+	result, err := shared.Poll(ctx, 0, pollInterval, shared.SleepContext,
+		func(ctx context.Context) (codespace, error) { return api.getCodespace(ctx, name) },
+		func(_ context.Context, item codespace, fetchErr error) (bool, error) {
+			if isGitHubNotFound(fetchErr) {
+				return true, nil
 			}
-		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("confirm github-codespaces deletion codespace=%s: %w", name, ctx.Err())
-		case <-time.After(pollInterval):
-		}
+			if fetchErr != nil {
+				return false, fetchErr
+			}
+			if validate != nil {
+				if err := validate(item); err != nil {
+					return false, err
+				}
+			}
+			return false, nil
+		}, nil)
+	if err != nil && result.Err == nil && context.Cause(ctx) != nil && errors.Is(err, context.Cause(ctx)) {
+		return fmt.Errorf("confirm github-codespaces deletion codespace=%s: %w", name, ctx.Err())
 	}
+	return err
 }
 
 func (b *backend) sshTargetWithConfig(ctx context.Context, gh githubCLI, codespaceName, repo string) (SSHTarget, string, error) {

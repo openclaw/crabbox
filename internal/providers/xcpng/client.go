@@ -23,6 +23,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type xapiClient struct {
@@ -1257,45 +1258,45 @@ func (c *xapiClient) shutdownVM(ctx context.Context, ref string) error {
 
 func (c *xapiClient) waitForPowerState(ctx context.Context, ref, want string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	for {
-		state, err := c.callString(ctx, "VM.get_power_state", c.session, ref)
-		if err != nil {
-			return err
-		}
-		if strings.EqualFold(state, want) {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return exit(5, "timed out waiting for xcp-ng VM %s power_state=%s", ref, want)
-		}
-		select {
-		case <-ctx.Done():
-			return context.Cause(ctx)
-		case <-time.After(xcpNgShutdownPollInterval):
-		}
-	}
+	_, err := shared.Poll(ctx, 0, xcpNgShutdownPollInterval, shared.SleepContext,
+		func(ctx context.Context) (string, error) {
+			return c.callString(ctx, "VM.get_power_state", c.session, ref)
+		},
+		func(_ context.Context, state string, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
+			}
+			if strings.EqualFold(state, want) {
+				return true, nil
+			}
+			if time.Now().After(deadline) {
+				return false, exit(5, "timed out waiting for xcp-ng VM %s power_state=%s", ref, want)
+			}
+			return false, nil
+		}, nil)
+	return err
 }
 
 func (c *xapiClient) waitForDomID(ctx context.Context, ref string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	for {
-		domid, err := c.callString(ctx, "VM.get_domid", c.session, ref)
-		if err != nil {
-			return err
-		}
-		domid = strings.TrimSpace(domid)
-		if domid != "" && domid != "-1" {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return exit(5, "timed out waiting for xcp-ng VM %s domid assignment", ref)
-		}
-		select {
-		case <-ctx.Done():
-			return context.Cause(ctx)
-		case <-time.After(xcpNgStartPollInterval):
-		}
-	}
+	_, err := shared.Poll(ctx, 0, xcpNgStartPollInterval, shared.SleepContext,
+		func(ctx context.Context) (string, error) {
+			return c.callString(ctx, "VM.get_domid", c.session, ref)
+		},
+		func(_ context.Context, domid string, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
+			}
+			domid = strings.TrimSpace(domid)
+			if domid != "" && domid != "-1" {
+				return true, nil
+			}
+			if time.Now().After(deadline) {
+				return false, exit(5, "timed out waiting for xcp-ng VM %s domid assignment", ref)
+			}
+			return false, nil
+		}, nil)
+	return err
 }
 
 func (c *xapiClient) DeleteConfigDrive(ctx context.Context, drive xcpNgConfigDrive) error {
@@ -1582,35 +1583,35 @@ func (c *xapiClient) importReaderVDI(ctx context.Context, vdiRef string, reader 
 
 func (c *xapiClient) waitForTaskSuccess(ctx context.Context, taskRef string) error {
 	deadline := time.Now().Add(xcpNgTaskTimeout)
-	for {
-		status, err := c.callString(ctx, "task.get_status", c.session, taskRef)
-		if err != nil {
-			return err
-		}
-		switch status {
-		case "success":
-			return nil
-		case "failure", "cancelled":
-			value, err := c.call(ctx, "task.get_error_info", c.session, taskRef)
-			if err != nil {
-				return fmt.Errorf("xcp-ng upload task %s: %s", taskRef, status)
+	_, err := shared.Poll(ctx, 0, xcpNgTaskPollInterval, shared.SleepContext,
+		func(ctx context.Context) (string, error) {
+			return c.callString(ctx, "task.get_status", c.session, taskRef)
+		},
+		func(ctx context.Context, status string, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
 			}
-			info := strings.Join(xmlValueToStrings(value), ": ")
-			if info == "" {
-				info = xmlValueToString(value)
+			switch status {
+			case "success":
+				return true, nil
+			case "failure", "cancelled":
+				value, err := c.call(ctx, "task.get_error_info", c.session, taskRef)
+				if err != nil {
+					return false, fmt.Errorf("xcp-ng upload task %s: %s", taskRef, status)
+				}
+				info := strings.Join(xmlValueToStrings(value), ": ")
+				if info == "" {
+					info = xmlValueToString(value)
+				}
+				info = redactXAPISensitiveText(info, c.xapiSecrets("task.get_error_info", c.session, taskRef)...)
+				return false, fmt.Errorf("xcp-ng upload task %s: %s %s", taskRef, status, info)
 			}
-			info = redactXAPISensitiveText(info, c.xapiSecrets("task.get_error_info", c.session, taskRef)...)
-			return fmt.Errorf("xcp-ng upload task %s: %s %s", taskRef, status, info)
-		}
-		if time.Now().After(deadline) {
-			return exit(5, "timed out waiting for xcp-ng upload task %s", taskRef)
-		}
-		select {
-		case <-ctx.Done():
-			return context.Cause(ctx)
-		case <-time.After(xcpNgTaskPollInterval):
-		}
-	}
+			if time.Now().After(deadline) {
+				return false, exit(5, "timed out waiting for xcp-ng upload task %s", taskRef)
+			}
+			return false, nil
+		}, nil)
+	return err
 }
 
 func (c *xapiClient) getByUUID(ctx context.Context, class, uuid string) (xapiRef, error) {
