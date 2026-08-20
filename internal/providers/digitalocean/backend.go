@@ -931,7 +931,8 @@ func (b *digitalOceanLeaseBackend) recoverCleanupClaim(ctx context.Context, clie
 		replacement.CloudID = strconv.FormatInt(matches[0].ID, 10)
 		changed = true
 	}
-	if strings.TrimSpace(claim.Labels[digitalOceanKeyOwnedLabel]) == "" && claim.Labels["recovery"] == "ambiguous-key-create" {
+	keyOwnership := strings.TrimSpace(claim.Labels[digitalOceanKeyOwnedLabel])
+	if keyOwnership == "" && claim.Labels["recovery"] == "ambiguous-key-create" {
 		publicKey, err := retainedDigitalOceanPublicKey(claim.LeaseID)
 		if err != nil {
 			return core.Server{}, core.LeaseClaim{}, err
@@ -948,6 +949,14 @@ func (b *digitalOceanLeaseBackend) recoverCleanupClaim(ctx context.Context, clie
 		}
 		setDigitalOceanKeyIdentity(replacement.Labels, key.ID, true, true)
 		changed = true
+	} else if keyOwnership == "" || keyOwnership == "unknown" {
+		keyID, err := recoverLegacyDigitalOceanKeyIdentity(ctx, client, claim.LeaseID)
+		if err != nil {
+			return core.Server{}, core.LeaseClaim{}, err
+		}
+		delete(replacement.Labels, digitalOceanRecoveryKeyIDLabel)
+		setDigitalOceanKeyIdentity(replacement.Labels, keyID, false, true)
+		changed = true
 	}
 	if changed && persist {
 		var err error
@@ -955,6 +964,7 @@ func (b *digitalOceanLeaseBackend) recoverCleanupClaim(ctx context.Context, clie
 		if err != nil {
 			return core.Server{}, core.LeaseClaim{}, fmt.Errorf("persist recovered digitalocean cleanup identity: %w", err)
 		}
+		delete(prepared.Labels, digitalOceanRecoveryKeyIDLabel)
 	}
 	preserveDigitalOceanKeyIdentity(prepared.Labels, claim.Labels)
 	return prepared, claim, nil
@@ -1126,6 +1136,47 @@ func preserveDigitalOceanKeyIdentity(labels, stored map[string]string) {
 			labels[key] = value
 		}
 	}
+}
+
+func recoverLegacyDigitalOceanKeyIdentity(ctx context.Context, client digitalOceanAPI, leaseID string) (int64, error) {
+	keyName := providerKeyForLease(leaseID)
+	keyPath, err := core.TestboxKeyPath(leaseID)
+	if err != nil {
+		return 0, err
+	}
+	publicKeyBytes, err := os.ReadFile(keyPath + ".pub")
+	if errors.Is(err, os.ErrNotExist) {
+		_, found, lookupErr := client.FindSSHKey(ctx, keyName, "")
+		if lookupErr != nil {
+			return 0, lookupErr
+		}
+		if found {
+			return 0, core.Exit(4, "digitalocean legacy SSH key migration for lease=%s requires retained local public key while the canonical provider key exists; local claim and credentials retained", leaseID)
+		}
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read retained digitalocean SSH public key: %w", err)
+	}
+	publicKey := strings.TrimSpace(string(publicKeyBytes))
+	if publicKey == "" {
+		return 0, core.Exit(2, "retained digitalocean SSH public key is empty for lease=%s", leaseID)
+	}
+	key, found, err := client.FindSSHKey(ctx, keyName, publicKey)
+	if err != nil {
+		var conflict *sshKeyConflictError
+		if errors.As(err, &conflict) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	if !found {
+		return 0, nil
+	}
+	if key.ID <= 0 || key.Name != keyName || strings.TrimSpace(key.PublicKey) != publicKey {
+		return 0, core.Exit(2, "digitalocean legacy SSH key recovery returned an invalid exact key identity for lease=%s", leaseID)
+	}
+	return key.ID, nil
 }
 
 func retainedDigitalOceanPublicKey(leaseID string) (string, error) {

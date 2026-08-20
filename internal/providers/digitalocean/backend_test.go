@@ -1,7 +1,9 @@
 package digitalocean
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"maps"
@@ -3025,23 +3027,277 @@ func TestTouchRefusesDropletWhoseProviderKeyChanged(t *testing.T) {
 	}
 }
 
-func TestReleaseWithoutKeyOwnershipFailsClosed(t *testing.T) {
+func TestReleaseMigratesLegacyKeyOwnershipWithoutDeletingAccountKey(t *testing.T) {
+	tests := []struct {
+		name             string
+		ownership        string
+		providerKey      string
+		retainPublicKey  bool
+		wantRecoveryKey  string
+		wantProviderKeys int
+	}{
+		{name: "exact matching key", providerKey: "ssh-ed25519 test-key", retainPublicKey: true, wantRecoveryKey: "708", wantProviderKeys: 1},
+		{name: "explicit unknown matching key", ownership: "unknown", providerKey: "ssh-ed25519 test-key", retainPublicKey: true, wantRecoveryKey: "708", wantProviderKeys: 1},
+		{name: "no provider key", retainPublicKey: true},
+		{name: "same-name different-key conflict", providerKey: "ssh-ed25519 different-key", retainPublicKey: true, wantProviderKeys: 1},
+		{name: "missing local public key and no provider key"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const leaseID = "cbx_abcdef123451"
+			cfg := core.BaseConfig()
+			cfg.Provider = providerName
+			cfg.TargetOS = core.TargetLinux
+			item := droplet{ID: 113, Name: core.LeaseProviderName(leaseID, "legacy-key"), Status: "active", Tags: leaseTags(cfg, leaseID, "legacy-key", "ready", false, time.Now())}
+			api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
+			backend := newTestBackend(t, api)
+			keyPath := writeStoredTestboxKey(t, leaseID)
+			if !tt.retainPublicKey {
+				if err := os.Remove(keyPath + ".pub"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.providerKey != "" {
+				api.sshKeys = []sshKey{{ID: 708, Name: providerKeyForLease(leaseID), PublicKey: tt.providerKey}}
+			}
+			server := serverFromDroplet(item, backend.Cfg)
+			if tt.ownership != "" {
+				server.Labels[digitalOceanKeyOwnedLabel] = tt.ownership
+			}
+			claimDigitalOceanServer(t, backend, server)
+			original, err := core.ReadLeaseClaim(leaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stateDir, err := core.CrabboxStateDir()
+			if err != nil {
+				t.Fatal(err)
+			}
+			claimPath := filepath.Join(stateDir, "claims", leaseID+".json")
+			api.deleteFn = func(context.Context, int64) error {
+				data, err := os.ReadFile(claimPath)
+				var migrated core.LeaseClaim
+				if err == nil {
+					err = json.Unmarshal(data, &migrated)
+				}
+				if err != nil || migrated.Revision == original.Revision ||
+					migrated.Labels[digitalOceanKeyOwnedLabel] != "false" ||
+					migrated.Labels[digitalOceanRecoveryKeyIDLabel] != tt.wantRecoveryKey {
+					t.Errorf("claim during Droplet deletion=%#v err=%v original=%#v", migrated, err, original)
+				}
+				if _, err := os.Stat(keyPath); err != nil {
+					t.Errorf("local key removed before Droplet deletion succeeded: %v", err)
+				}
+				return nil
+			}
+
+			if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: claimedDigitalOceanTarget(t, server)}); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(api.deleted, []int64{item.ID}) || len(api.deletedKeyIDs) != 0 || len(api.deletedKeys) != 0 || len(api.sshKeys) != tt.wantProviderKeys {
+				t.Fatalf("deleted=%v deletedKeyIDs=%v deletedKeys=%v sshKeys=%v", api.deleted, api.deletedKeyIDs, api.deletedKeys, api.sshKeys)
+			}
+			if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
+				t.Fatalf("claim after successful cleanup exists=%v err=%v", exists, err)
+			}
+			if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("local key after successful cleanup: %v", err)
+			}
+		})
+	}
+}
+
+func TestLegacyKeyMigrationRefusesIndeterminateIdentityBeforeDropletMutation(t *testing.T) {
+	tests := []struct {
+		name            string
+		removePublicKey bool
+		providerKey     bool
+		lookupError     bool
+		unreadableKey   bool
+		wantError       string
+	}{
+		{name: "missing local public key with canonical provider key", removePublicKey: true, providerKey: true, wantError: "requires retained local public key"},
+		{name: "provider lookup error with retained public key", lookupError: true, wantError: "legacy key lookup failed"},
+		{name: "provider lookup error with missing public key", removePublicKey: true, lookupError: true, wantError: "legacy key lookup failed"},
+		{name: "local public key read error", unreadableKey: true, wantError: "read retained digitalocean SSH public key"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const leaseID = "cbx_abcdef123453"
+			cfg := core.BaseConfig()
+			cfg.Provider = providerName
+			cfg.TargetOS = core.TargetLinux
+			item := droplet{ID: 116, Name: core.LeaseProviderName(leaseID, "legacy-refused"), Status: "active", Tags: leaseTags(cfg, leaseID, "legacy-refused", "ready", false, time.Now())}
+			api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
+			backend := newTestBackend(t, api)
+			keyPath := writeStoredTestboxKey(t, leaseID)
+			if tt.removePublicKey || tt.unreadableKey {
+				if err := os.Remove(keyPath + ".pub"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.unreadableKey {
+				if err := os.Mkdir(keyPath+".pub", 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.providerKey {
+				api.sshKeys = []sshKey{{ID: 709, Name: providerKeyForLease(leaseID), PublicKey: "ssh-ed25519 existing-key"}}
+			}
+			if tt.lookupError {
+				api.findKeyFn = func(string, string) (sshKey, bool, error) {
+					return sshKey{}, false, errors.New("legacy key lookup failed")
+				}
+			}
+			server := serverFromDroplet(item, backend.Cfg)
+			claimDigitalOceanServer(t, backend, server)
+			original, err := core.ReadLeaseClaim(leaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			err = backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: claimedDigitalOceanTarget(t, server)})
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("ReleaseLease err=%v, want %q", err, tt.wantError)
+			}
+			if len(api.deleted) != 0 || len(api.deletedKeyIDs) != 0 {
+				t.Fatalf("provider mutations droplet=%v key=%v", api.deleted, api.deletedKeyIDs)
+			}
+			claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+			if err != nil || !exists || !reflect.DeepEqual(claim, original) {
+				t.Fatalf("claim=%#v exists=%v err=%v original=%#v", claim, exists, err, original)
+			}
+			if _, err := os.Stat(keyPath); err != nil {
+				t.Fatalf("local key removed after refused cleanup: %v", err)
+			}
+		})
+	}
+}
+
+func TestLegacyKeyMigrationCASFencesConcurrentClaimChange(t *testing.T) {
+	const leaseID = "cbx_abcdef123454"
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
-	leaseID := "cbx_abcdef123456"
-	cfg.ProviderKey = "crabbox-cbx-deadbeef1234"
-	item := droplet{ID: 104, Name: core.LeaseProviderName(leaseID, "changed-key"), Status: "active", Tags: leaseTags(cfg, leaseID, "changed-key", "ready", false, time.Now())}
+	item := droplet{ID: 117, Name: core.LeaseProviderName(leaseID, "legacy-cas"), Status: "active", Tags: leaseTags(cfg, leaseID, "legacy-cas", "ready", false, time.Now())}
 	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
 	backend := newTestBackend(t, api)
+	writeStoredTestboxKey(t, leaseID)
+	server := serverFromDroplet(item, backend.Cfg)
+	claimDigitalOceanServer(t, backend, server)
+	expected, err := core.ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mutationErr error
+	api.findKeyFn = func(string, string) (sshKey, bool, error) {
+		replacement := expected
+		replacement.Labels = maps.Clone(expected.Labels)
+		replacement.Labels["state"] = "running"
+		mutationErr = core.ReplaceLeaseClaimIfUnchanged(leaseID, expected, replacement)
+		return sshKey{}, false, nil
+	}
+
+	err = backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: claimedDigitalOceanTarget(t, server)})
+	if mutationErr != nil || err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("ReleaseLease err=%v concurrent claim mutation=%v", err, mutationErr)
+	}
+	if len(api.deleted) != 0 || len(api.deletedKeyIDs) != 0 {
+		t.Fatalf("provider mutations droplet=%v key=%v", api.deleted, api.deletedKeyIDs)
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists || claim.Labels["state"] != "running" || claim.Labels[digitalOceanKeyOwnedLabel] != "" {
+		t.Fatalf("claim after rejected migration=%#v exists=%v err=%v", claim, exists, err)
+	}
+}
+
+func TestLegacyKeyMigrationRetainsClaimAndCredentialsUntilDropletDeleteSucceeds(t *testing.T) {
+	const leaseID = "cbx_abcdef123455"
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	item := droplet{ID: 118, Name: core.LeaseProviderName(leaseID, "legacy-delete-failure"), Status: "active", Tags: leaseTags(cfg, leaseID, "legacy-delete-failure", "ready", false, time.Now())}
+	api := &fakeDigitalOceanAPI{droplets: []droplet{item}, deleteErr: errors.New("Droplet delete failed")}
+	backend := newTestBackend(t, api)
+	keyPath := writeStoredTestboxKey(t, leaseID)
 	server := serverFromDroplet(item, backend.Cfg)
 	claimDigitalOceanServer(t, backend, server)
 
-	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: claimedDigitalOceanTarget(t, server)}); err == nil || !strings.Contains(err.Error(), "ownership remains indeterminate") {
+	err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: claimedDigitalOceanTarget(t, server)})
+	if err == nil || !strings.Contains(err.Error(), "Droplet delete failed") {
 		t.Fatalf("ReleaseLease err=%v", err)
 	}
-	if len(api.deleted) != 0 || len(api.deletedKeyIDs) != 0 || len(api.deletedKeys) != 0 {
-		t.Fatalf("deleted=%v deletedKeyIDs=%v deletedKeys=%v", api.deleted, api.deletedKeyIDs, api.deletedKeys)
+	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists || claim.Labels[digitalOceanKeyOwnedLabel] != "false" {
+		t.Fatalf("claim after failed Droplet deletion=%#v exists=%v err=%v", claim, exists, err)
+	}
+	if len(api.deletedKeyIDs) != 0 || len(api.droplets) != 1 {
+		t.Fatalf("key deletes=%v remaining droplets=%v", api.deletedKeyIDs, api.droplets)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("local key removed after failed Droplet deletion: %v", err)
+	}
+}
+
+func TestCleanupDryRunLegacyKeyMigrationIsObservational(t *testing.T) {
+	for _, ownership := range []string{"", "unknown"} {
+		t.Run("ownership="+ownership, func(t *testing.T) {
+			const leaseID = "cbx_abcdef123457"
+			now := time.Now().UTC()
+			cfg := core.BaseConfig()
+			cfg.Provider = providerName
+			cfg.TargetOS = core.TargetLinux
+			cfg.TTL = time.Hour
+			item := droplet{ID: 119, Name: core.LeaseProviderName(leaseID, "legacy-dry-run"), Status: "active", Tags: leaseTags(cfg, leaseID, "legacy-dry-run", "ready", false, now.Add(-48*time.Hour))}
+			api := &fakeDigitalOceanAPI{droplets: []droplet{item}, sshKeys: []sshKey{{ID: 710, Name: providerKeyForLease(leaseID), PublicKey: "ssh-ed25519 test-key"}}}
+			backend := newTestBackend(t, api)
+			backend.Cfg.TTL = time.Hour
+			backend.RT.Clock = fixedClock{t: now}
+			keyPath := writeStoredTestboxKey(t, leaseID)
+			server := serverFromDroplet(item, backend.Cfg)
+			if ownership != "" {
+				server.Labels[digitalOceanKeyOwnedLabel] = ownership
+			}
+			claimDigitalOceanServer(t, backend, server)
+			stateDir, err := core.CrabboxStateDir()
+			if err != nil {
+				t.Fatal(err)
+			}
+			claimPath := filepath.Join(stateDir, "claims", leaseID+".json")
+			before, err := os.ReadFile(claimPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			original, err := core.ReadLeaseClaim(leaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			prepared, err := backend.prepareCleanupServer(context.Background(), server)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if prepared.Labels[digitalOceanRecoveryKeyIDLabel] != "" || prepared.Labels[digitalOceanKeyOwnedLabel] != ownership {
+				t.Fatalf("read-only preparation exposed unpersisted key identity: %#v", prepared.Labels)
+			}
+			snapshot, exists, set := core.ServerLeaseClaimSnapshot(prepared)
+			if !set || !exists || !reflect.DeepEqual(snapshot, original) {
+				t.Fatalf("prepared snapshot=%#v exists=%v set=%v original=%#v", snapshot, exists, set, original)
+			}
+			if err := backend.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
+				t.Fatal(err)
+			}
+			after, err := os.ReadFile(claimPath)
+			if err != nil || !bytes.Equal(after, before) {
+				t.Fatalf("claim bytes changed during dry-run: before=%q after=%q err=%v", before, after, err)
+			}
+			if len(api.deleted) != 0 || len(api.deletedKeyIDs) != 0 || len(api.sshKeys) != 1 {
+				t.Fatalf("dry-run provider mutations droplet=%v key=%v sshKeys=%v", api.deleted, api.deletedKeyIDs, api.sshKeys)
+			}
+			if _, err := os.Stat(keyPath); err != nil {
+				t.Fatalf("stored key changed during dry-run: %v", err)
+			}
+		})
 	}
 }
 
@@ -3074,36 +3330,6 @@ func TestReleaseValidatesKeyBeforeDropletMutation(t *testing.T) {
 	}
 	if len(api.deletedKeyIDs) != 0 {
 		t.Fatalf("deletedKeyIDs=%v", api.deletedKeyIDs)
-	}
-	if _, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName); err != nil || !ok {
-		t.Fatalf("retained claim ok=%v err=%v", ok, err)
-	}
-}
-
-func TestReleaseRefusesIndeterminateMatchingKey(t *testing.T) {
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
-	cfg.TargetOS = core.TargetLinux
-	leaseID := "cbx_abcdef123451"
-	item := droplet{ID: 113, Name: core.LeaseProviderName(leaseID, "legacy-key"), Status: "active", Tags: leaseTags(cfg, leaseID, "legacy-key", "ready", false, time.Now())}
-	api := &fakeDigitalOceanAPI{
-		droplets: []droplet{item},
-		sshKeys: []sshKey{{
-			ID:        708,
-			Name:      providerKeyForLease(leaseID),
-			PublicKey: "ssh-ed25519 test-key",
-		}},
-	}
-	backend := newTestBackend(t, api)
-	writeStoredTestboxKey(t, leaseID)
-	server := serverFromDroplet(item, backend.Cfg)
-	claimDigitalOceanServer(t, backend, server)
-
-	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: claimedDigitalOceanTarget(t, server)}); err == nil || !strings.Contains(err.Error(), "ownership remains indeterminate") {
-		t.Fatalf("ReleaseLease err=%v", err)
-	}
-	if len(api.deleted) != 0 || len(api.deletedKeyIDs) != 0 || len(api.sshKeys) != 1 {
-		t.Fatalf("deleted=%v deletedKeyIDs=%v sshKeys=%v", api.deleted, api.deletedKeyIDs, api.sshKeys)
 	}
 	if _, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName); err != nil || !ok {
 		t.Fatalf("retained claim ok=%v err=%v", ok, err)

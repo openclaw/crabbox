@@ -167,6 +167,15 @@ retained local public key. A renamed key remains identifiable by immutable id;
 a replaced key, changed public key, missing local public key, stale claim, or
 account switch is refused before either resource is mutated.
 
+Claims created before SSH-key ownership was recorded are migrated before
+cleanup under an exact durable claim update. Crabbox treats their account keys
+as unowned even when the canonical name and retained public key identify an
+immutable key id, so cleanup deletes the verified Droplet but never the account
+key. A missing retained public key is allowed only when DigitalOcean confirms
+that no canonical lease key exists; provider lookup failures or an existing
+canonical key without local proof retain the claim and Droplet. Preparation and
+dry-run cleanup validate this migration without changing local state.
+
 DigitalOcean account keys and Droplets are scoped to the token's current team
 (or user account for a personal token). Crabbox does not configure DigitalOcean
 Projects, so project membership is not a separate cleanup authority; region and
