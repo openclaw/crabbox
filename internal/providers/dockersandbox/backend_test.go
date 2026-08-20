@@ -180,6 +180,12 @@ func TestRunCreatesExecsAndRemovesEphemeralSandbox(t *testing.T) {
 		"exec":   {stdout: "ok\n"},
 		"rm":     {stdout: ""},
 	}, nil)
+	cleanupDeadlineSet := false
+	runner.onRequest = func(ctx context.Context, req core.LocalCommandRequest) {
+		if scriptKey(req.Args) == "rm" {
+			_, cleanupDeadlineSet = ctx.Deadline()
+		}
+	}
 	repoRoot := t.TempDir()
 	var stdout, stderr bytes.Buffer
 	backend := newTestBackend(newTestConfig(), runner, &stdout, &stderr)
@@ -231,6 +237,51 @@ func TestRunCreatesExecsAndRemovesEphemeralSandbox(t *testing.T) {
 	}
 	if claim, ok, err := resolveLeaseClaimForProvider(result.LeaseID, providerName); err != nil || ok || claim.LeaseID != "" {
 		t.Fatalf("ephemeral claim still resolved claim=%#v ok=%t err=%v", claim, ok, err)
+	}
+	if !cleanupDeadlineSet {
+		t.Fatal("ephemeral sandbox cleanup did not receive a deadline")
+	}
+}
+
+func TestRunCleanupPreservesReplacedClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	replacementRepo := t.TempDir()
+	var stderr bytes.Buffer
+	runner := newRunner(map[string]scriptedReply{
+		"create": {stdout: ""},
+		"exec":   {stdout: "ok\n"},
+		"rm":     {stdout: ""},
+	}, nil)
+	runner.onRequest = func(_ context.Context, req core.LocalCommandRequest) {
+		if scriptKey(req.Args) != "exec" {
+			return
+		}
+		claims, err := listLeaseClaims()
+		if err != nil || len(claims) != 1 {
+			t.Fatalf("claims=%#v err=%v", claims, err)
+		}
+		claim := claims[0]
+		if err := claimLeaseForRepoProviderPond(claim.LeaseID, claim.Slug, providerName, claim.Pond, replacementRepo, time.Hour, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	backend := newTestBackend(newTestConfig(), runner, io.Discard, &stderr)
+	result, err := backend.Run(t.Context(), RunRequest{
+		Repo:    Repo{Name: "my-app", Root: t.TempDir()},
+		Command: []string{"echo", "ok"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findCall(runner, "rm") != nil {
+		t.Fatal("cleanup removed a sandbox after its local claim was replaced")
+	}
+	claim, ok, err := resolveLeaseClaimForProvider(result.LeaseID, providerName)
+	if err != nil || !ok || claim.RepoRoot != replacementRepo {
+		t.Fatalf("replacement claim=%#v ok=%t err=%v", claim, ok, err)
+	}
+	if !strings.Contains(stderr.String(), "claim changed; retry") {
+		t.Fatalf("cleanup warning=%q", stderr.String())
 	}
 }
 
@@ -1383,10 +1434,11 @@ func (errWriter) Write([]byte) (int, error) {
 }
 
 type recordingCommandRunner struct {
-	mu       sync.Mutex
-	calls    []core.LocalCommandRequest
-	defaults map[string]scriptedReply
-	scripts  map[string][]scriptedReply
+	mu        sync.Mutex
+	calls     []core.LocalCommandRequest
+	defaults  map[string]scriptedReply
+	scripts   map[string][]scriptedReply
+	onRequest func(context.Context, core.LocalCommandRequest)
 }
 
 type scriptedReply struct {
@@ -1396,7 +1448,7 @@ type scriptedReply struct {
 	err      error
 }
 
-func (r *recordingCommandRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+func (r *recordingCommandRunner) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.mu.Lock()
 	r.calls = append(r.calls, req)
 	key := scriptKey(req.Args)
@@ -1408,6 +1460,9 @@ func (r *recordingCommandRunner) Run(_ context.Context, req core.LocalCommandReq
 		reply = def
 	}
 	r.mu.Unlock()
+	if r.onRequest != nil {
+		r.onRequest(ctx, req)
+	}
 	if req.Stdout != nil && reply.stdout != "" {
 		_, _ = io.WriteString(req.Stdout, reply.stdout)
 	}

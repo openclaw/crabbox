@@ -101,12 +101,12 @@ func readLeaseClaim(leaseID string) (LeaseClaim, error) {
 	return core.ReadLeaseClaim(leaseID)
 }
 
-func removeLeaseClaim(leaseID string) {
-	core.RemoveLeaseClaim(leaseID)
-}
-
 func removeLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
 	return core.RemoveLeaseClaimIfUnchanged(leaseID, expected)
+}
+
+func removeLeaseClaimIfUnchangedAfter(leaseID string, expected LeaseClaim, action func() error) error {
+	return core.RemoveLeaseClaimIfUnchangedAfter(leaseID, expected, action)
 }
 
 func listBlaxelLeaseClaims() ([]LeaseClaim, error) {

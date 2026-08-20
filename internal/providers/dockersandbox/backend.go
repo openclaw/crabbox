@@ -20,6 +20,8 @@ import (
 var randomBytes = rand.Read
 var statusPollInterval = 2 * time.Second
 
+const dockerSandboxCleanupTimeout = 30 * time.Second
+
 type backend struct {
 	spec ProviderSpec
 	cfg  Config
@@ -94,15 +96,23 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	}
 	shouldStop := acquired && !req.Keep
 	if shouldStop {
+		claim, err := dockerSandboxClaimForDeletion(leaseID)
+		if err != nil {
+			return RunResult{}, err
+		}
 		defer func() {
 			if !shouldStop {
 				return
 			}
-			if removeErr := cli.remove(context.Background(), sandboxName); removeErr != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), dockerSandboxCleanupTimeout)
+			defer cancel()
+			removeErr := core.RemoveLeaseClaimIfUnchangedAfter(leaseID, claim, func() error {
+				return cli.remove(cleanupCtx, sandboxName)
+			})
+			if removeErr != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: docker-sandbox rm failed for %s: %v\n", sandboxName, removeErr)
 				return
 			}
-			removeLeaseClaim(leaseID)
 		}()
 	}
 	command, err := buildCommand(req.Command, req.ShellMode)
@@ -325,14 +335,31 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
-	if err := cli.remove(ctx, sandboxName); err != nil {
-		if !dockerSandboxRemoveNotFoundError(err) {
+	claim, err := dockerSandboxClaimForDeletion(leaseID)
+	if err != nil {
+		return err
+	}
+	if err := core.RemoveLeaseClaimIfUnchangedAfter(leaseID, claim, func() error {
+		if err := cli.remove(ctx, sandboxName); err != nil && !dockerSandboxRemoveNotFoundError(err) {
 			return err
 		}
+		return nil
+	}); err != nil {
+		return err
 	}
-	removeLeaseClaim(leaseID)
 	fmt.Fprintf(b.rt.Stderr, "released lease=%s sandbox=%s\n", leaseID, sandboxName)
 	return nil
+}
+
+func dockerSandboxClaimForDeletion(leaseID string) (core.LeaseClaim, error) {
+	claim, ok, err := resolveLeaseClaimForProvider(leaseID, providerName)
+	if err != nil {
+		return core.LeaseClaim{}, err
+	}
+	if !ok || claim.LeaseID != leaseID {
+		return core.LeaseClaim{}, exit(4, "docker-sandbox sandbox %q is not claimed by Crabbox", leaseID)
+	}
+	return claim, nil
 }
 
 func (b *backend) Ports(ctx context.Context, req PortsRequest) (string, error) {
@@ -434,7 +461,9 @@ func (b *backend) createSandbox(ctx context.Context, cli *sbxCLI, repo Repo, rec
 }
 
 func (b *backend) removeCreatedSandboxAfterClaimFailure(cli *sbxCLI, sandboxName string, primaryErr error) error {
-	if cleanupErr := cli.remove(context.Background(), sandboxName); cleanupErr != nil {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), dockerSandboxCleanupTimeout)
+	defer cancel()
+	if cleanupErr := cli.remove(cleanupCtx, sandboxName); cleanupErr != nil {
 		leakErr := fmt.Errorf("cleanup docker-sandbox sandbox %s after claim setup failure: %w; run `sbx rm --force %s` to retry cleanup", sandboxName, cleanupErr, sandboxName)
 		fmt.Fprintf(b.rt.Stderr, "warning: %v\n", leakErr)
 		return errors.Join(primaryErr, leakErr)

@@ -177,6 +177,38 @@ func TestAppendBridgeExecOutputBoundsCapturedResult(t *testing.T) {
 	}
 }
 
+func TestRunBridgeJSONRejectsOversizedResponse(t *testing.T) {
+	spec := commandSpec{
+		Name: "sh",
+		Args: []string{"-c", "printf '%*s' 4194305 ''"},
+		Env:  os.Environ(),
+	}
+	var result sandboxSummary
+	err := runBridgeJSONWithPayload(t.Context(), spec, bridgeRequest{Action: "get"}, nil, &result)
+	if err == nil || !strings.Contains(err.Error(), "stdout exceeded 4194304-byte output limit") ||
+		!strings.Contains(err.Error(), "[crabbox: vercel-sandbox bridge stdout truncated after 4194304 bytes]") {
+		t.Fatalf("oversized bridge response err=%v", err)
+	}
+}
+
+func TestRunBridgeExecBoundsBridgeStderr(t *testing.T) {
+	spec := commandSpec{
+		Name: "sh",
+		Args: []string{"-c", "printf '%*s' 4194305 '' >&2; exit 9"},
+		Env:  os.Environ(),
+	}
+	_, err := runBridgeExec(t.Context(), spec, bridgeRequest{Action: "exec"}, io.Discard, io.Discard)
+	if err == nil {
+		t.Fatal("oversized bridge stderr unexpectedly succeeded")
+	}
+	if !strings.Contains(err.Error(), "[crabbox: vercel-sandbox bridge stderr truncated after 4194304 bytes]") {
+		t.Fatalf("oversized bridge stderr error omitted truncation marker; captured %d bytes", len(err.Error()))
+	}
+	if len(err.Error()) > bridgeExecCaptureLimit+256 {
+		t.Fatalf("bridge stderr error captured %d bytes", len(err.Error()))
+	}
+}
+
 func TestRedactSecretsRemovesTokenValues(t *testing.T) {
 	t.Setenv("CRABBOX_VERCEL_SANDBOX_AUTH_TOKEN", "secret-auth-token")
 	got := redactSecrets("request failed with secret-auth-token")

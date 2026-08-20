@@ -328,9 +328,15 @@ func (c *bridgeClient) sandboxListCommand() commandSpec {
 func runBridgeCommand(ctx context.Context, spec commandSpec) error {
 	cmd := exec.CommandContext(ctx, spec.Name, spec.Args...)
 	cmd.Env = spec.Env
-	out, err := cmd.CombinedOutput()
+	out := bridgeCaptureBuffer{limit: bridgeExecCaptureLimit, stream: "output"}
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	err := cmd.Run()
+	if out.exceeded && err == nil {
+		return fmt.Errorf("sandbox command output exceeded %d-byte limit: %s", out.limit, out.truncationMarker())
+	}
 	if err != nil {
-		return fmt.Errorf("%s: %s", err, redactSecrets(string(out)))
+		return fmt.Errorf("%s: %s", err, redactSecrets(out.String()))
 	}
 	return nil
 }
@@ -360,16 +366,21 @@ func runBridgeJSONWithPayload(ctx context.Context, spec commandSpec, req bridgeR
 	cmd := exec.CommandContext(ctx, spec.Name, spec.Args...)
 	cmd.Env = spec.Env
 	cmd.Stdin = bytes.NewReader(buf)
-	var stdout, stderr bytes.Buffer
+	stdout := bridgeCaptureBuffer{limit: bridgeExecCaptureLimit, stream: "stdout"}
+	stderr := bridgeCaptureBuffer{limit: bridgeExecCaptureLimit, stream: "stderr"}
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("vercel-sandbox bridge %s failed: %s: %s", req.Action, err, redactSecrets(stderr.String()))
+	runErr := cmd.Run()
+	if stdout.exceeded {
+		return fmt.Errorf("vercel-sandbox bridge %s stdout exceeded %d-byte output limit: %s", req.Action, stdout.limit, stdout.truncationMarker())
+	}
+	if runErr != nil {
+		return fmt.Errorf("vercel-sandbox bridge %s failed: %s: %s", req.Action, runErr, redactSecrets(stderr.String()))
 	}
 	if out == nil {
 		return nil
 	}
-	if err := json.NewDecoder(&stdout).Decode(out); err != nil {
+	if err := json.NewDecoder(bytes.NewReader(stdout.Bytes())).Decode(out); err != nil {
 		return fmt.Errorf("decode vercel-sandbox bridge %s response: %w", req.Action, err)
 	}
 	return nil
@@ -384,6 +395,42 @@ type bridgeExecFrame struct {
 }
 
 const bridgeExecCaptureLimit = 4 * 1024 * 1024
+
+type bridgeCaptureBuffer struct {
+	buffer   bytes.Buffer
+	limit    int
+	stream   string
+	exceeded bool
+}
+
+func (b *bridgeCaptureBuffer) Write(p []byte) (int, error) {
+	remaining := b.limit - b.buffer.Len()
+	if remaining <= 0 {
+		b.exceeded = b.exceeded || len(p) > 0
+		return len(p), nil
+	}
+	if len(p) > remaining {
+		_, _ = b.buffer.Write(p[:remaining])
+		b.exceeded = true
+		return len(p), nil
+	}
+	return b.buffer.Write(p)
+}
+
+func (b *bridgeCaptureBuffer) Bytes() []byte {
+	return b.buffer.Bytes()
+}
+
+func (b *bridgeCaptureBuffer) String() string {
+	if !b.exceeded {
+		return b.buffer.String()
+	}
+	return b.buffer.String() + "\n" + b.truncationMarker() + "\n"
+}
+
+func (b *bridgeCaptureBuffer) truncationMarker() string {
+	return fmt.Sprintf("[crabbox: vercel-sandbox bridge %s truncated after %d bytes]", b.stream, b.limit)
+}
 
 func appendBridgeExecOutput(dst *string, value string) {
 	remaining := bridgeExecCaptureLimit - len(*dst)
@@ -408,7 +455,7 @@ func runBridgeExec(ctx context.Context, spec commandSpec, req bridgeRequest, std
 	if err != nil {
 		return execResult{}, fmt.Errorf("open vercel-sandbox bridge stdout: %w", err)
 	}
-	var bridgeStderr bytes.Buffer
+	bridgeStderr := bridgeCaptureBuffer{limit: bridgeExecCaptureLimit, stream: "stderr"}
 	cmd.Stderr = &bridgeStderr
 	if err := cmd.Start(); err != nil {
 		return execResult{}, fmt.Errorf("start vercel-sandbox bridge exec: %w", err)

@@ -25,12 +25,16 @@ type testClock struct{}
 func (testClock) Now() time.Time { return time.Now() }
 
 type blacksmithFuncRunner struct {
-	calls [][]string
-	fn    func(LocalCommandRequest) (LocalCommandResult, error)
+	calls     [][]string
+	fn        func(LocalCommandRequest) (LocalCommandResult, error)
+	onRequest func(context.Context, LocalCommandRequest)
 }
 
-func (r *blacksmithFuncRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (r *blacksmithFuncRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
 	r.calls = append(r.calls, append([]string(nil), req.Args...))
+	if r.onRequest != nil {
+		r.onRequest(ctx, req)
+	}
 	if r.fn != nil {
 		return r.fn(req)
 	}
@@ -426,11 +430,18 @@ func TestBlacksmithOneShotRunRemovesClaimAfterStop(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
 	var stderr bytes.Buffer
+	cleanupDeadlineSet := false
 	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
 		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "warmup" {
+			if req.MaxCapturedOutputBytes != blacksmithCommandCaptureBytes || req.DisableOutputCapture {
+				t.Fatalf("warmup capture settings: limit=%d disabled=%t", req.MaxCapturedOutputBytes, req.DisableOutputCapture)
+			}
 			return LocalCommandResult{Stdout: "ready tbx_abc123\n"}, nil
 		}
 		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "run" {
+			if !req.DisableOutputCapture || req.MaxCapturedOutputBytes != 0 {
+				t.Fatalf("streamed run capture settings: limit=%d disabled=%t", req.MaxCapturedOutputBytes, req.DisableOutputCapture)
+			}
 			if req.Stdout != nil {
 				_, _ = req.Stdout.Write([]byte("https://github.com/example-org/my-app/actions/runs/123456789\n"))
 			}
@@ -438,6 +449,11 @@ func TestBlacksmithOneShotRunRemovesClaimAfterStop(t *testing.T) {
 		}
 		return LocalCommandResult{}, nil
 	}}
+	runner.onRequest = func(ctx context.Context, req LocalCommandRequest) {
+		if len(req.Args) >= 2 && req.Args[0] == "testbox" && req.Args[1] == "stop" {
+			_, cleanupDeadlineSet = ctx.Deadline()
+		}
+	}
 
 	cfg := baseConfig()
 	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
@@ -455,6 +471,9 @@ func TestBlacksmithOneShotRunRemovesClaimAfterStop(t *testing.T) {
 	}
 	if len(runner.calls) != 3 {
 		t.Fatalf("blacksmith calls=%d, want warmup/run/stop", len(runner.calls))
+	}
+	if !cleanupDeadlineSet {
+		t.Fatal("one-shot Testbox cleanup did not receive a deadline")
 	}
 	if claim, err := readLeaseClaim("tbx_abc123"); err != nil {
 		t.Fatal(err)
@@ -474,6 +493,56 @@ func TestBlacksmithOneShotRunRemovesClaimAfterStop(t *testing.T) {
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("stderr missing %q in:\n%s", want, stderr.String())
 		}
+	}
+}
+
+func TestBlacksmithOneShotCleanupPreservesReplacedClaim(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	var stderr bytes.Buffer
+	replacementRepo := t.TempDir()
+	stopped := false
+	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+		if len(req.Args) < 2 || req.Args[0] != "testbox" {
+			return LocalCommandResult{}, nil
+		}
+		switch req.Args[1] {
+		case "warmup":
+			return LocalCommandResult{Stdout: "ready tbx_replaced123\n"}, nil
+		case "run":
+			claim, err := readLeaseClaim("tbx_replaced123")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := claimLeaseForRepoProvider(claim.LeaseID, claim.Slug, blacksmithTestboxProvider, replacementRepo, time.Minute, true); err != nil {
+				t.Fatal(err)
+			}
+		case "stop":
+			stopped = true
+		}
+		return LocalCommandResult{}, nil
+	}}
+	cfg := baseConfig()
+	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
+	backend := &blacksmithBackend{
+		spec: Provider{}.Spec(),
+		cfg:  cfg,
+		rt:   Runtime{Stdout: io.Discard, Stderr: &stderr, Clock: testClock{}, Exec: runner},
+	}
+	if _, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir()}, Command: []string{"true"}}); err != nil {
+		t.Fatal(err)
+	}
+	if stopped {
+		t.Fatal("cleanup stopped a Testbox after its local claim was replaced")
+	}
+	claim, err := readLeaseClaim("tbx_replaced123")
+	if err != nil || claim.RepoRoot != replacementRepo {
+		t.Fatalf("replacement claim=%#v err=%v", claim, err)
+	}
+	if !strings.Contains(stderr.String(), "claim changed; retry") {
+		t.Fatalf("cleanup warning=%q", stderr.String())
 	}
 }
 
@@ -724,6 +793,9 @@ func TestBlacksmithRunProofArtifactsPersistSuccessStreams(t *testing.T) {
 	}
 	if strings.Contains(string(stdoutData), "https://github.com/example-org/my-app/actions/runs/123456789") {
 		t.Fatalf("stdout artifact should be tail-limited, got early URL:\n%s", stdoutData)
+	}
+	if !strings.Contains(string(stdoutData), "[crabbox: proof stream kept last 1048576 bytes]") {
+		t.Fatalf("stdout artifact omitted the proof-stream truncation marker")
 	}
 }
 

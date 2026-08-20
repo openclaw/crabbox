@@ -42,6 +42,7 @@ type lifecycleFakeClient struct {
 	stopDeadline   bool
 	stopContextErr error
 	getProcess     func(context.Context) (Process, error)
+	onGetSandbox   func()
 }
 
 func newLifecycleFakeClient() *lifecycleFakeClient {
@@ -74,6 +75,11 @@ func (f *lifecycleFakeClient) CreateSandbox(_ context.Context, req CreateSandbox
 func (f *lifecycleFakeClient) GetSandbox(_ context.Context, id string) (Sandbox, error) {
 	if f.getErr != nil {
 		return Sandbox{}, f.getErr
+	}
+	if f.onGetSandbox != nil {
+		callback := f.onGetSandbox
+		f.onGetSandbox = nil
+		callback()
 	}
 	sb, ok := f.sandboxes[id]
 	if !ok {
@@ -483,6 +489,34 @@ func TestStopPreservesMissingClaimUnlessForgetMissing(t *testing.T) {
 	}
 	if claim, err := readLeaseClaim(leasePrefix + "sbx_1"); err != nil || claim.LeaseID != "" {
 		t.Fatalf("claim=%#v err=%v, want removed", claim, err)
+	}
+}
+
+func TestStopPreservesReplacedClaimBeforeSandboxDeletion(t *testing.T) {
+	backend, fake, _, _, _ := newLifecycleBackend(t)
+	if err := backend.Warmup(t.Context(), WarmupRequest{Repo: testRepo(t), RequestedSlug: "replaced"}); err != nil {
+		t.Fatal(err)
+	}
+	replacementRepo := t.TempDir()
+	fake.onGetSandbox = func() {
+		claim, err := readLeaseClaim(leasePrefix + "sbx_1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := claimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, claim.ProviderScope, claim.Pond, replacementRepo, time.Minute, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := backend.Stop(t.Context(), StopRequest{ID: "replaced"})
+	if err == nil || !strings.Contains(err.Error(), "claim changed; retry") {
+		t.Fatalf("stop err=%v, want replaced-claim refusal", err)
+	}
+	if len(fake.deleted) != 0 {
+		t.Fatalf("deleted=%#v, want replaced sandbox claim protected", fake.deleted)
+	}
+	claim, err := readLeaseClaim(leasePrefix + "sbx_1")
+	if err != nil || claim.RepoRoot != replacementRepo {
+		t.Fatalf("replacement claim=%#v err=%v", claim, err)
 	}
 }
 

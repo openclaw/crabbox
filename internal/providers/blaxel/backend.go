@@ -80,17 +80,25 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	}
 	shouldStop := acquired && !req.Keep
 	if shouldStop {
+		claim, err := readLeaseClaim(leaseID)
+		if err != nil {
+			return RunResult{}, err
+		}
 		defer func() {
 			if !shouldStop {
 				return
 			}
 			cleanupCtx, cancel := b.cleanupContext(ctx)
 			defer cancel()
-			if err := client.DeleteSandbox(cleanupCtx, sandboxID); err != nil && !isBlaxelNotFound(err) {
+			if err := removeLeaseClaimIfUnchangedAfter(leaseID, claim, func() error {
+				if err := client.DeleteSandbox(cleanupCtx, sandboxID); err != nil && !isBlaxelNotFound(err) {
+					return err
+				}
+				return nil
+			}); err != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: blaxel delete failed for %s: %v\n", sandboxID, err)
 				return
 			}
-			removeLeaseClaim(leaseID)
 		}()
 	}
 	fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s\n", providerName, leaseID, sandboxID, workdir)
@@ -336,21 +344,35 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil {
+		return err
+	}
 	if _, err := verifyBlaxelClaim(ctx, client, leaseID, sandboxID, b.cfg.Blaxel.Workspace); err != nil {
 		if !isBlaxelNotFound(err) || !b.cfg.Blaxel.ForgetMissing {
 			return err
 		}
-		fmt.Fprintf(b.rt.Stderr, "warning: forgetting missing blaxel sandbox=%s after explicit request\n", sandboxID)
-		removeLeaseClaim(leaseID)
-		return nil
-	}
-	if err := client.DeleteSandbox(ctx, sandboxID); err != nil {
-		if !isBlaxelNotFound(err) || !b.cfg.Blaxel.ForgetMissing {
+		if err := removeLeaseClaimIfUnchangedAfter(leaseID, claim, nil); err != nil {
 			return err
 		}
 		fmt.Fprintf(b.rt.Stderr, "warning: forgetting missing blaxel sandbox=%s after explicit request\n", sandboxID)
+		return nil
 	}
-	removeLeaseClaim(leaseID)
+	missing := false
+	if err := removeLeaseClaimIfUnchangedAfter(leaseID, claim, func() error {
+		if err := client.DeleteSandbox(ctx, sandboxID); err != nil {
+			if !isBlaxelNotFound(err) || !b.cfg.Blaxel.ForgetMissing {
+				return err
+			}
+			missing = true
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	if missing {
+		fmt.Fprintf(b.rt.Stderr, "warning: forgetting missing blaxel sandbox=%s after explicit request\n", sandboxID)
+	}
 	fmt.Fprintf(b.rt.Stderr, "released lease=%s sandbox=%s\n", leaseID, sandboxID)
 	return nil
 }
@@ -417,10 +439,12 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			fmt.Fprintf(b.rt.Stdout, "would delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
 			continue
 		}
-		if err := client.DeleteSandbox(ctx, sandboxID); err != nil && !isBlaxelNotFound(err) {
-			return err
-		}
-		if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+		if err := removeLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
+			if err := client.DeleteSandbox(ctx, sandboxID); err != nil && !isBlaxelNotFound(err) {
+				return err
+			}
+			return nil
+		}); err != nil {
 			return err
 		}
 		fmt.Fprintf(b.rt.Stdout, "delete sandbox=%s lease=%s reason=%s\n", sandboxID, claim.LeaseID, reason)
@@ -485,12 +509,14 @@ func (b *backend) cleanupBlaxelRecovery(ctx context.Context, client Client, clai
 		}
 		return false, false, nil
 	}
-	for _, sb := range matches {
-		if err := client.DeleteSandbox(ctx, sb.ID); err != nil && !isBlaxelNotFound(err) {
-			return false, false, err
+	if err := removeLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
+		for _, sb := range matches {
+			if err := client.DeleteSandbox(ctx, sb.ID); err != nil && !isBlaxelNotFound(err) {
+				return err
+			}
 		}
-	}
-	if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+		return nil
+	}); err != nil {
 		return false, false, err
 	}
 	for _, sb := range matches {
@@ -679,18 +705,32 @@ func (b *backend) cleanupCreateFailure(ctx context.Context, client Client, sandb
 	}
 	cleanupCtx, cancel := b.cleanupContext(ctx)
 	defer cancel()
-	if err := client.DeleteSandbox(cleanupCtx, sandboxID); err != nil && !isBlaxelNotFound(err) {
+	deleteSandbox := func() error {
+		if err := client.DeleteSandbox(cleanupCtx, sandboxID); err != nil && !isBlaxelNotFound(err) {
+			return err
+		}
+		return nil
+	}
+	var cleanupErr error
+	if strings.TrimSpace(localLeaseID) != "" {
+		claim, err := readLeaseClaim(localLeaseID)
+		if err != nil {
+			cleanupErr = err
+		} else {
+			cleanupErr = removeLeaseClaimIfUnchangedAfter(localLeaseID, claim, deleteSandbox)
+		}
+	} else {
+		cleanupErr = deleteSandbox()
+	}
+	if cleanupErr != nil {
 		if strings.TrimSpace(localLeaseID) != "" {
-			return errors.Join(cause, fmt.Errorf("blaxel cleanup failed for sandbox %s; local claim %s remains for cleanup: %w", sandboxID, localLeaseID, err))
+			return errors.Join(cause, fmt.Errorf("blaxel cleanup failed for sandbox %s; local claim %s remains for cleanup: %w", sandboxID, localLeaseID, cleanupErr))
 		}
 		recoveryID := recoveryPrefix + randomSuffix()
 		if claimErr := claimLeaseForRepoProviderScopePond(recoveryID, "", providerName, claimScope, "", repo.Root, blaxelRecoveryLifetime(b.cfg), true); claimErr != nil {
-			return errors.Join(cause, fmt.Errorf("blaxel cleanup failed for sandbox %s and recovery claim failed: %v; delete it in the Blaxel console: %w", sandboxID, claimErr, err))
+			return errors.Join(cause, fmt.Errorf("blaxel cleanup failed for sandbox %s and recovery claim failed: %v; delete it in the Blaxel console: %w", sandboxID, claimErr, cleanupErr))
 		}
-		return errors.Join(cause, fmt.Errorf("blaxel cleanup failed for sandbox %s; recovery claim %s recorded for cleanup: %w", sandboxID, recoveryID, err))
-	}
-	if strings.TrimSpace(localLeaseID) != "" {
-		removeLeaseClaim(localLeaseID)
+		return errors.Join(cause, fmt.Errorf("blaxel cleanup failed for sandbox %s; recovery claim %s recorded for cleanup: %w", sandboxID, recoveryID, cleanupErr))
 	}
 	return cause
 }

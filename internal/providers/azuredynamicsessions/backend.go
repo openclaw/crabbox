@@ -38,10 +38,15 @@ func (b *azureDynamicSessionsBackend) Warmup(ctx context.Context, req WarmupRequ
 	}
 	fmt.Fprintf(b.rt.Stdout, "leased %s slug=%s provider=%s session=%s\n", leaseID, slug, providerName, leaseID)
 	if !req.Keep {
-		if err := client.DeleteSession(ctx, leaseID); err != nil {
+		claim, err := b.sessionClaimForDeletion(leaseID)
+		if err != nil {
+			return err
+		}
+		if err := removeLeaseClaimIfUnchangedAfter(leaseID, claim, func() error {
+			return client.DeleteSession(ctx, leaseID)
+		}); err != nil {
 			return providerError("delete session", err)
 		}
-		removeLeaseClaim(leaseID)
 		fmt.Fprintf(b.rt.Stderr, "released lease=%s session=%s\n", leaseID, leaseID)
 	}
 	total := b.now().Sub(started)
@@ -87,6 +92,13 @@ func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req RunRequest) (
 	}
 
 	shouldStop := acquired && !req.Keep
+	var cleanupClaim LeaseClaim
+	if shouldStop {
+		cleanupClaim, err = b.sessionClaimForDeletion(leaseID)
+		if err != nil {
+			return RunResult{}, err
+		}
+	}
 	cleanedUp := false
 	session := &RunSessionHandle{
 		Provider:       providerName,
@@ -117,11 +129,10 @@ func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req RunRequest) (
 		if !shouldStop {
 			return nil
 		}
-		if err := b.deleteSessionBounded(client, leaseID); err != nil {
+		if err := b.deleteClaimedSessionBounded(client, leaseID, cleanupClaim); err != nil {
 			shouldStop = false
 			return err
 		}
-		removeLeaseClaim(leaseID)
 		cleanedUp = true
 		shouldStop = false
 		return nil
@@ -354,15 +365,27 @@ func (b *azureDynamicSessionsBackend) Stop(ctx context.Context, req StopRequest)
 	if err != nil {
 		return err
 	}
-	if err := client.DeleteSession(ctx, leaseID); err != nil {
-		if isNotFoundError(err) {
-			removeLeaseClaim(leaseID)
-			fmt.Fprintf(b.rt.Stderr, "removed stale claim for missing session=%s\n", leaseID)
-			return nil
-		}
-		return providerError("delete session", err)
+	claim, err := b.sessionClaimForDeletion(leaseID)
+	if err != nil {
+		return err
 	}
-	removeLeaseClaim(leaseID)
+	missing := false
+	if err := removeLeaseClaimIfUnchangedAfter(leaseID, claim, func() error {
+		if err := client.DeleteSession(ctx, leaseID); err != nil {
+			if isNotFoundError(err) {
+				missing = true
+				return nil
+			}
+			return providerError("delete session", err)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	if missing {
+		fmt.Fprintf(b.rt.Stderr, "removed stale claim for missing session=%s\n", leaseID)
+		return nil
+	}
 	fmt.Fprintf(b.rt.Stderr, "released lease=%s session=%s\n", leaseID, leaseID)
 	return nil
 }
@@ -398,6 +421,29 @@ func (b *azureDynamicSessionsBackend) deleteSessionBounded(client azureDynamicSe
 	ctx, cancel := context.WithTimeout(context.Background(), azureDynamicSessionsDeleteTimeout)
 	defer cancel()
 	return client.DeleteSession(ctx, leaseID)
+}
+
+func (b *azureDynamicSessionsBackend) deleteClaimedSessionBounded(client azureDynamicSessionsAPI, leaseID string, claim LeaseClaim) error {
+	ctx, cancel := context.WithTimeout(context.Background(), azureDynamicSessionsDeleteTimeout)
+	defer cancel()
+	return removeLeaseClaimIfUnchangedAfter(leaseID, claim, func() error {
+		return client.DeleteSession(ctx, leaseID)
+	})
+}
+
+func (b *azureDynamicSessionsBackend) sessionClaimForDeletion(leaseID string) (LeaseClaim, error) {
+	scope, err := b.claimScope()
+	if err != nil {
+		return LeaseClaim{}, err
+	}
+	claim, ok, err := resolveAzureDynamicSessionsClaim(leaseID, scope)
+	if err != nil {
+		return LeaseClaim{}, err
+	}
+	if !ok || claim.LeaseID != leaseID {
+		return LeaseClaim{}, exit(4, "%s session %q is not claimed by Crabbox", providerName, leaseID)
+	}
+	return claim, nil
 }
 
 func (b *azureDynamicSessionsBackend) resolveSessionID(_ context.Context, _ azureDynamicSessionsAPI, id, repoRoot string, reclaim bool) (string, string, error) {

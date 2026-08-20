@@ -97,10 +97,6 @@ func listLeaseClaims() ([]core.LeaseClaim, error) {
 	return core.ListLeaseClaims()
 }
 
-func removeLeaseClaim(leaseID string) {
-	core.RemoveLeaseClaim(leaseID)
-}
-
 func shouldUseShell(command []string) bool {
 	return core.ShouldUseShell(command)
 }

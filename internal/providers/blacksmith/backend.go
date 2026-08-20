@@ -153,16 +153,20 @@ func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (RunResult,
 	finalExitCode := -1
 	finalActionsURL := ""
 	if shouldStop {
+		claim, err := readLeaseClaim(leaseID)
+		if err != nil {
+			return RunResult{}, err
+		}
 		defer func() {
 			if !shouldStop {
 				return
 			}
-			if err := b.Stop(context.Background(), StopRequest{ID: leaseID}); err != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), blacksmithCleanupTimeout)
+			defer cancel()
+			if err := b.stopClaimedTestbox(cleanupCtx, leaseID, claim); err != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: blacksmith cleanup failed stage=cleanup lease=%s retry_likely=true: %v\n", leaseID, err)
 				return
 			}
-			removeLeaseClaim(leaseID)
-			removeStoredTestboxKey(leaseID)
 			if finalExitCode == 0 {
 				printBlacksmithOneShotActionsWarning(b.rt.Stderr, finalActionsURL)
 			}
@@ -460,8 +464,12 @@ func blacksmithEnvForwardingRequested(req RunRequest) bool {
 	return req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != ""
 }
 
-const blacksmithProofStreamCaptureBytes = 1024 * 1024
-const blacksmithArtifactDiagnosticCaptureBytes int64 = 64 * 1024
+const (
+	blacksmithProofStreamCaptureBytes              = 1024 * 1024
+	blacksmithCommandCaptureBytes                  = 16 * 1024 * 1024
+	blacksmithCleanupTimeout                       = 30 * time.Second
+	blacksmithArtifactDiagnosticCaptureBytes int64 = 64 * 1024
+)
 
 type blacksmithLimitedBuffer struct {
 	bytes.Buffer
@@ -790,10 +798,25 @@ func (b *blacksmithBackend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
-	if _, err := b.runCommand(ctx, blacksmithStopArgs(b.cfg, leaseID), b.rt.Stdout, b.rt.Stderr); err != nil {
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil {
 		return err
 	}
-	removeLeaseClaim(leaseID)
+	return b.stopClaimedTestbox(ctx, leaseID, claim)
+}
+
+func (b *blacksmithBackend) stopClaimedTestbox(ctx context.Context, leaseID string, claim core.LeaseClaim) error {
+	stop := func() error {
+		_, err := b.runCommand(ctx, blacksmithStopArgs(b.cfg, leaseID), b.rt.Stdout, b.rt.Stderr)
+		return err
+	}
+	if claim.LeaseID == leaseID {
+		if err := core.RemoveLeaseClaimIfUnchangedAfter(leaseID, claim, stop); err != nil {
+			return err
+		}
+	} else if err := stop(); err != nil {
+		return err
+	}
 	removeStoredTestboxKey(leaseID)
 	return nil
 }
@@ -925,7 +948,11 @@ func (b *blacksmithBackend) runCommand(ctx context.Context, args []string, stdou
 }
 
 func (b *blacksmithBackend) runCommandCapture(ctx context.Context, args []string, stdout, stderr io.Writer, disableOutputCapture bool) (LocalCommandResult, error) {
-	result, err := b.rt.Exec.Run(ctx, LocalCommandRequest{Name: "blacksmith", Args: args, Stdout: stdout, Stderr: stderr, DisableOutputCapture: disableOutputCapture})
+	request := LocalCommandRequest{Name: "blacksmith", Args: args, Stdout: stdout, Stderr: stderr, DisableOutputCapture: disableOutputCapture}
+	if !disableOutputCapture {
+		request.MaxCapturedOutputBytes = blacksmithCommandCaptureBytes
+	}
+	result, err := b.rt.Exec.Run(ctx, request)
 	if err != nil {
 		return result, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("blacksmith failed: %v", err)}
 	}
@@ -933,7 +960,7 @@ func (b *blacksmithBackend) runCommandCapture(ctx context.Context, args []string
 }
 
 func (b *blacksmithBackend) runCommandWithSyncGuard(ctx context.Context, args []string, stdout, stderr io.Writer) (LocalCommandResult, bool, error) {
-	return b.runCommandWithSyncGuardCapture(ctx, args, stdout, stderr, false)
+	return b.runCommandWithSyncGuardCapture(ctx, args, stdout, stderr, true)
 }
 
 func (b *blacksmithBackend) runCommandWithSyncGuardCapture(ctx context.Context, args []string, stdout, stderr io.Writer, disableOutputCapture bool) (LocalCommandResult, bool, error) {
@@ -1120,10 +1147,6 @@ func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
 
 func claimLeaseForRepoProvider(leaseID, slug, provider, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
 	return core.ClaimLeaseForRepoProvider(leaseID, slug, provider, repoRoot, idleTimeout, reclaim)
-}
-
-func removeLeaseClaim(leaseID string) {
-	core.RemoveLeaseClaim(leaseID)
 }
 
 func ensureTestboxKey(leaseID string) (string, string, error) {

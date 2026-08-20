@@ -104,6 +104,48 @@ func TestRunCleanupUsesBoundedContext(t *testing.T) {
 	}
 }
 
+func TestRunCleanupPreservesReplacedSessionClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	replacementRepo := t.TempDir()
+	fake := &recordingAzureDynamicSessionsAPI{}
+	fake.onExec = func(req azureDynamicSessionsExecRequest) {
+		if strings.HasPrefix(req.Command, "mkdir -p ") {
+			return
+		}
+		claims, err := listLeaseClaims()
+		if err != nil || len(claims) != 1 {
+			t.Fatalf("claims=%#v err=%v", claims, err)
+		}
+		claim := claims[0]
+		if err := claimLeaseForRepoProviderScope(claim.LeaseID, claim.Slug, providerName, claim.ProviderScope, replacementRepo, time.Minute, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	restoreAzureDynamicSessionsClient(t, fake)
+	backend := testAzureDynamicSessionsBackend()
+	result, err := backend.Run(t.Context(), RunRequest{
+		Repo:    Repo{Root: t.TempDir(), Name: "repo"},
+		NoSync:  true,
+		Command: []string{"printf", "ok"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deleted) != 0 {
+		t.Fatalf("deleted=%#v, want replaced session claim protected", fake.deleted)
+	}
+	claim, ok, err := resolveLeaseClaimForProvider(result.LeaseID, providerName)
+	if err != nil || !ok || claim.RepoRoot != replacementRepo {
+		t.Fatalf("replacement claim=%#v ok=%t err=%v", claim, ok, err)
+	}
+	if result.Session == nil || !result.Session.Kept {
+		t.Fatalf("session=%#v, want replacement retained after cleanup refusal", result.Session)
+	}
+	if !strings.Contains(backend.rt.Stderr.(*bytes.Buffer).String(), "claim changed; retry") {
+		t.Fatalf("cleanup warning=%q", backend.rt.Stderr)
+	}
+}
+
 func TestCreateSessionRollbackReportsDeleteFailure(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := &recordingAzureDynamicSessionsAPI{deleteErr: errors.New("delete failed")}
@@ -438,6 +480,7 @@ type recordingAzureDynamicSessionsAPI struct {
 	failExtract         bool
 	executeShell        bool
 	getWaitForCancel    bool
+	onExec              func(azureDynamicSessionsExecRequest)
 }
 
 func (r *recordingAzureDynamicSessionsAPI) CheckRunner(context.Context, string) error {
@@ -461,6 +504,9 @@ func (r *recordingAzureDynamicSessionsAPI) UploadFile(_ context.Context, _ strin
 
 func (r *recordingAzureDynamicSessionsAPI) ExecStream(ctx context.Context, _ string, req azureDynamicSessionsExecRequest, _ io.Writer, _ io.Writer) (int, error) {
 	r.execs = append(r.execs, req)
+	if r.onExec != nil {
+		r.onExec(req)
+	}
 	if r.failWorkspace && strings.HasPrefix(req.Command, "mkdir -p ") {
 		return 7, nil
 	}

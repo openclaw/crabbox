@@ -97,8 +97,8 @@ func resolveLeaseClaimForProvider(identifier, provider string) (core.LeaseClaim,
 	return core.ResolveLeaseClaimForProvider(identifier, provider)
 }
 
-func removeLeaseClaim(leaseID string) {
-	core.RemoveLeaseClaim(leaseID)
+func removeLeaseClaimIfUnchangedAfter(leaseID string, claim LeaseClaim, action func() error) error {
+	return core.RemoveLeaseClaimIfUnchangedAfter(leaseID, claim, action)
 }
 
 func listLeaseClaims() ([]core.LeaseClaim, error) {
