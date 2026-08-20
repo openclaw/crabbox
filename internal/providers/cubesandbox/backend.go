@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type cubesandboxFlagValues struct {
@@ -134,6 +136,17 @@ func (b *cubesandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 	if err != nil {
 		return RunResult{}, err
 	}
+	var prepared *core.PreparedArchive
+	if req.ID == "" && !req.NoSync {
+		prepared, err = core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
+			Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
+			TempPattern: "crabbox-cubesandbox-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
+		})
+		if err != nil {
+			return RunResult{}, err
+		}
+		defer prepared.Close()
+	}
 	leaseID, sandboxID, slug := "", "", ""
 	acquired := false
 	if req.ID == "" {
@@ -189,7 +202,7 @@ func (b *cubesandboxBackend) Run(ctx context.Context, req RunRequest) (RunResult
 	syncDuration := time.Duration(0)
 	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
 	if !req.NoSync {
-		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, session, req, workspace)
+		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, session, req, workspace, prepared)
 		if err != nil {
 			return finishResult(), err
 		}

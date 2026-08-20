@@ -8,7 +8,7 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func (b *backend) syncWorkspace(ctx context.Context, client Client, ready allocationReadiness, req RunRequest, workdir string) ([]timingPhase, time.Duration, error) {
+func (b *backend) syncWorkspace(ctx context.Context, client Client, ready allocationReadiness, req RunRequest, workdir string, prepared ...*core.PreparedArchive) ([]timingPhase, time.Duration, error) {
 	syncReq := core.DelegatedArchiveSyncRequest{
 		Config:              b.cfg,
 		Repo:                req.Repo,
@@ -29,7 +29,7 @@ func (b *backend) syncWorkspace(ctx context.Context, client Client, ready alloca
 			return b.execShell(execCtx, client, ready, command)
 		},
 	}
-	return core.RunDelegatedArchiveSync(ctx, syncReq)
+	return core.RunDelegatedArchiveSync(ctx, syncReq, prepared...)
 }
 
 func (b *backend) uploadArchive(ctx context.Context, client Client, ready allocationReadiness, remoteArchive string, body io.Reader) error {

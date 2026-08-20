@@ -8,6 +8,8 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type e2bFlagValues struct {
@@ -120,6 +122,17 @@ func (b *e2bBackend) Run(ctx context.Context, req RunRequest) (RunResult, error)
 	if err != nil {
 		return RunResult{}, err
 	}
+	var prepared *core.PreparedArchive
+	if req.ID == "" && !req.NoSync {
+		prepared, err = core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
+			Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
+			TempPattern: "crabbox-e2b-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
+		})
+		if err != nil {
+			return RunResult{}, err
+		}
+		defer prepared.Close()
+	}
 	leaseID, sandboxID, slug := "", "", ""
 	acquired := false
 	if req.ID == "" {
@@ -174,7 +187,7 @@ func (b *e2bBackend) Run(ctx context.Context, req RunRequest) (RunResult, error)
 	syncDuration := time.Duration(0)
 	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
 	if !req.NoSync {
-		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, session, req, workspace)
+		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, session, req, workspace, prepared)
 		if err != nil {
 			handleDelegatedRunFailure(b.rt.Stderr, req, e2bProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 			return finishResult(), err

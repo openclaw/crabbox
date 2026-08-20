@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func NewAzureDynamicSessionsBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
@@ -74,6 +76,17 @@ func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req RunRequest) (
 	client, err := newAzureDynamicSessionsClient(ctx, b.cfg, b.rt)
 	if err != nil {
 		return RunResult{}, err
+	}
+	var prepared *core.PreparedArchive
+	if req.ID == "" && !req.NoSync {
+		prepared, err = core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
+			Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
+			TempPattern: "crabbox-azds-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
+		})
+		if err != nil {
+			return RunResult{}, err
+		}
+		defer prepared.Close()
 	}
 	leaseID, slug := "", ""
 	acquired := false
@@ -153,7 +166,7 @@ func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req RunRequest) (
 	syncDuration := time.Duration(0)
 	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
 	if !req.NoSync {
-		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, leaseID, req, workspace)
+		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, leaseID, req, workspace, prepared)
 		if err != nil {
 			handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 			return RunResult{Total: b.now().Sub(started), SyncDelegated: true, Provider: providerName, LeaseID: leaseID, Slug: slug}, err

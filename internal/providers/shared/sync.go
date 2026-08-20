@@ -24,7 +24,7 @@ type SandboxArchiveSyncRequest struct {
 	Exec                func(context.Context, string) error
 }
 
-func RunSandboxArchiveSync(ctx context.Context, req SandboxArchiveSyncRequest) ([]core.TimingPhase, time.Duration, error) {
+func RunSandboxArchiveSync(ctx context.Context, req SandboxArchiveSyncRequest, prepared ...*core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
 	return core.RunDelegatedArchiveSync(ctx, core.DelegatedArchiveSyncRequest{
 		Config:              req.Config,
 		Repo:                req.Repo,
@@ -40,5 +40,5 @@ func RunSandboxArchiveSync(ctx context.Context, req SandboxArchiveSyncRequest) (
 		CleanupContext:      req.CleanupContext,
 		Upload:              req.Upload,
 		Exec:                req.Exec,
-	})
+	}, prepared...)
 }

@@ -6,10 +6,11 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-func (b *backend) syncWorkspace(ctx context.Context, api bridgeClient, sandboxID string, req RunRequest, workdir string) ([]timingPhase, time.Duration, error) {
+func (b *backend) syncWorkspace(ctx context.Context, api bridgeClient, sandboxID string, req RunRequest, workdir string, prepared ...*core.PreparedArchive) ([]timingPhase, time.Duration, error) {
 	return shared.RunSandboxArchiveSync(ctx, shared.SandboxArchiveSyncRequest{
 		Config:              b.cfg,
 		Repo:                req.Repo,
@@ -28,7 +29,7 @@ func (b *backend) syncWorkspace(ctx context.Context, api bridgeClient, sandboxID
 		Exec: func(execCtx context.Context, command string) error {
 			return b.execShell(execCtx, api, sandboxID, command)
 		},
-	})
+	}, prepared...)
 }
 
 func (b *backend) execShell(ctx context.Context, api bridgeClient, sandboxID, command string) error {

@@ -144,6 +144,47 @@ func TestRunSyncsExecutesAndTerminatesOneShot(t *testing.T) {
 	}
 }
 
+func TestRunRejectsOversizedWorkspaceBeforeProviderCalls(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	control := &fakeControlPlane{}
+	runner := &fakeRunner{}
+	b := testBackend(control, runner, io.Discard)
+	b.cfg.Sync.FailBytes = 1
+
+	_, err := b.Run(context.Background(), RunRequest{
+		Repo: Repo{Root: testRepo(t), Name: "my-app"}, Command: []string{"true"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "sync candidate too large:") || !strings.Contains(err.Error(), "limit 1 B") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(control.calls) != 0 || len(runner.uploads) != 0 || len(runner.commands) != 0 {
+		t.Fatalf("provider calls=%v uploads=%v commands=%v", control.calls, runner.uploads, runner.commands)
+	}
+}
+
+func TestRunCleansPreparedArchiveWhenResourceCreationFails(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	repo := testRepo(t)
+	tempDir := t.TempDir()
+	t.Setenv("TMPDIR", tempDir)
+	control := &fakeControlPlane{runErr: errors.New("creation denied")}
+	b := testBackend(control, &fakeRunner{}, io.Discard)
+
+	_, err := b.Run(context.Background(), RunRequest{
+		Repo: Repo{Root: repo, Name: "my-app"}, Command: []string{"true"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "creation denied") {
+		t.Fatalf("err=%v", err)
+	}
+	if !slices.Equal(control.calls, []string{"run"}) {
+		t.Fatalf("provider calls=%v", control.calls)
+	}
+	archives, globErr := filepath.Glob(filepath.Join(tempDir, "crabbox-aws-lambda-microvm-sync-*.tgz"))
+	if globErr != nil || len(archives) != 0 {
+		t.Fatalf("leaked prepared archives=%v err=%v", archives, globErr)
+	}
+}
+
 func TestRetainedLifecyclePauseResumeStop(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	control := &fakeControlPlane{}

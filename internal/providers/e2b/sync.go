@@ -8,10 +8,11 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-func (b *e2bBackend) syncWorkspace(ctx context.Context, client e2bAPI, session e2bSession, req RunRequest, workspace string) ([]timingPhase, time.Duration, error) {
+func (b *e2bBackend) syncWorkspace(ctx context.Context, client e2bAPI, session e2bSession, req RunRequest, workspace string, prepared ...*core.PreparedArchive) ([]timingPhase, time.Duration, error) {
 	workspace, err := cleanE2BWorkspacePath(workspace)
 	if err != nil {
 		return nil, 0, err
@@ -33,7 +34,7 @@ func (b *e2bBackend) syncWorkspace(ctx context.Context, client e2bAPI, session e
 		Exec: func(execCtx context.Context, command string) error {
 			return b.execShell(execCtx, client, session, command, io.Discard)
 		},
-	})
+	}, prepared...)
 }
 
 func (b *e2bBackend) prepareWorkspace(ctx context.Context, client e2bAPI, session e2bSession, workspace string) error {

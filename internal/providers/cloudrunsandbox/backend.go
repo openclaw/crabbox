@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func NewBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
@@ -91,6 +93,17 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (finalResult RunResul
 	transport, err := newTransport(b.cfg, b.rt)
 	if err != nil {
 		return RunResult{}, err
+	}
+	var prepared *core.PreparedArchive
+	if req.ID == "" && !req.NoSync {
+		prepared, err = core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
+			Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
+			TempPattern: "crabbox-cloud-run-sandbox-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
+		})
+		if err != nil {
+			return RunResult{}, err
+		}
+		defer prepared.Close()
 	}
 	leaseID, sandboxID, slug := "", "", ""
 	var claim LeaseClaim
@@ -179,7 +192,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (finalResult RunResul
 				pendingTiming.SyncPhases = syncPhases
 			}
 			if !req.NoSync {
-				syncPhases, syncDuration, err = b.syncWorkspace(ctx, transport, sandboxID, req, workdir)
+				syncPhases, syncDuration, err = b.syncWorkspace(ctx, transport, sandboxID, req, workdir, prepared)
 				if req.TimingJSON {
 					pendingTiming.SyncMs = syncDuration.Milliseconds()
 					pendingTiming.SyncPhases = syncPhases

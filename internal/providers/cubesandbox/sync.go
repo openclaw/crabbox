@@ -11,7 +11,7 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func (b *cubesandboxBackend) syncWorkspace(ctx context.Context, client cubesandboxAPI, session cubesandboxSession, req RunRequest, workspace string) ([]timingPhase, time.Duration, error) {
+func (b *cubesandboxBackend) syncWorkspace(ctx context.Context, client cubesandboxAPI, session cubesandboxSession, req RunRequest, workspace string, prepared ...*core.PreparedArchive) ([]timingPhase, time.Duration, error) {
 	workspace, err := cleanCubeSandboxWorkspacePath(workspace)
 	if err != nil {
 		return nil, 0, err
@@ -37,7 +37,7 @@ func (b *cubesandboxBackend) syncWorkspace(ctx context.Context, client cubesandb
 		Exec: func(execCtx context.Context, command string) error {
 			return b.execShell(execCtx, client, session, command, io.Discard)
 		},
-	})
+	}, prepared...)
 }
 
 func (b *cubesandboxBackend) prepareWorkspace(ctx context.Context, client cubesandboxAPI, session cubesandboxSession, workspace string) error {

@@ -10,10 +10,11 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-func (b *azureDynamicSessionsBackend) syncWorkspace(ctx context.Context, client azureDynamicSessionsAPI, sessionID string, req RunRequest, workspace string) ([]timingPhase, time.Duration, error) {
+func (b *azureDynamicSessionsBackend) syncWorkspace(ctx context.Context, client azureDynamicSessionsAPI, sessionID string, req RunRequest, workspace string, prepared ...*core.PreparedArchive) ([]timingPhase, time.Duration, error) {
 	workspace, err := cleanAzureDynamicSessionsWorkspacePath(workspace)
 	if err != nil {
 		return nil, 0, err
@@ -39,7 +40,7 @@ func (b *azureDynamicSessionsBackend) syncWorkspace(ctx context.Context, client 
 		Exec: func(execCtx context.Context, command string) error {
 			return b.execShell(execCtx, client, sessionID, command, io.Discard)
 		},
-	})
+	}, prepared...)
 }
 
 func (b *azureDynamicSessionsBackend) prepareWorkspace(ctx context.Context, client azureDynamicSessionsAPI, sessionID, workspace string) error {

@@ -8,7 +8,7 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func (b *backend) syncWorkspace(ctx context.Context, runner runnerAPI, vm microVM, req RunRequest) ([]timingPhase, time.Duration, error) {
+func (b *backend) syncWorkspace(ctx context.Context, runner runnerAPI, vm microVM, req RunRequest, prepared ...*core.PreparedArchive) ([]timingPhase, time.Duration, error) {
 	return core.RunDelegatedArchiveSync(ctx, core.DelegatedArchiveSyncRequest{
 		Config:              b.cfg,
 		Repo:                req.Repo,
@@ -34,5 +34,5 @@ func (b *backend) syncWorkspace(ctx context.Context, runner runnerAPI, vm microV
 			}
 			return nil
 		},
-	})
+	}, prepared...)
 }

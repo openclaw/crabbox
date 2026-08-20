@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -77,6 +78,18 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	control, runner, err := b.clients(ctx)
 	if err != nil {
 		return RunResult{}, err
+	}
+	var prepared *core.PreparedArchive
+	if req.ID == "" && !req.NoSync {
+		prepared, err = core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
+			Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
+			TempPattern: "crabbox-aws-lambda-microvm-sync-*.tgz", Stderr: b.rt.Stderr,
+			Now: func() time.Time { return now(b.rt) },
+		})
+		if err != nil {
+			return RunResult{}, err
+		}
+		defer prepared.Close()
 	}
 	leaseID, slug := "", ""
 	var vm microVM
@@ -148,7 +161,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 	syncDuration := time.Duration(0)
 	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
 	if !req.NoSync {
-		syncPhases, syncDuration, err = b.syncWorkspace(ctx, runner, vm, req)
+		syncPhases, syncDuration, err = b.syncWorkspace(ctx, runner, vm, req, prepared)
 	} else {
 		var exitCode int
 		exitCode, err = runner.Exec(ctx, vm, "mkdir -p "+shellQuote(b.cfg.AWSLambdaMicroVM.Workdir), "/", nil, io.Discard, b.rt.Stderr)

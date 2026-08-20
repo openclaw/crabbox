@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"io"
@@ -12,6 +14,204 @@ import (
 	"testing"
 	"time"
 )
+
+func TestPrepareDelegatedArchiveRejectsExistingGuardrailBeforeCreatingTempFile(t *testing.T) {
+	root := newDelegatedArchiveSyncRepo(t)
+	tempDir := t.TempDir()
+	t.Setenv("TMPDIR", tempDir)
+	cfg := baseConfig()
+	cfg.Sync.FailFiles = 2
+	cfg.Sync.FailBytes = 0
+
+	archive, err := PrepareDelegatedArchive(context.Background(), DelegatedArchivePreparationRequest{
+		Config: cfg,
+		Repo:   Repo{Root: root},
+		Stderr: io.Discard,
+	})
+	if archive != nil || err == nil || !strings.Contains(err.Error(), "sync candidate too large: 2 files >= limit 2; use --force-sync-large or CRABBOX_SYNC_ALLOW_LARGE=1") {
+		t.Fatalf("archive=%#v err=%v", archive, err)
+	}
+	entries, readErr := os.ReadDir(tempDir)
+	if readErr != nil || len(entries) != 0 {
+		t.Fatalf("temporary archives=%v err=%v", entries, readErr)
+	}
+}
+
+func TestPrepareDelegatedArchiveCleansPartialArchiveOnFailure(t *testing.T) {
+	root := newDelegatedArchiveSyncRepo(t)
+	tempDir := t.TempDir()
+	t.Setenv("TMPDIR", tempDir)
+	calls := 0
+	now := func() time.Time {
+		calls++
+		if calls == 5 {
+			if err := os.Remove(filepath.Join(root, "one.txt")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return time.Unix(0, int64(calls)*int64(time.Millisecond))
+	}
+
+	archive, err := PrepareDelegatedArchive(context.Background(), DelegatedArchivePreparationRequest{
+		Config: baseConfig(), Repo: Repo{Root: root}, Stderr: io.Discard, Now: now,
+	})
+	if archive != nil || err == nil || !strings.Contains(err.Error(), "stat sync path one.txt") {
+		t.Fatalf("archive=%#v err=%v", archive, err)
+	}
+	entries, readErr := os.ReadDir(tempDir)
+	if readErr != nil || len(entries) != 0 {
+		t.Fatalf("temporary archives=%v err=%v", entries, readErr)
+	}
+}
+
+func TestRunDelegatedArchiveSyncConsumesPreparedSnapshotAndPreservesTiming(t *testing.T) {
+	root := newDelegatedArchiveSyncRepo(t)
+	cfg := baseConfig()
+	var stderr bytes.Buffer
+	calls := 0
+	now := func() time.Time {
+		calls++
+		return time.Unix(0, int64(calls)*int64(7*time.Millisecond))
+	}
+	prepared, err := PrepareDelegatedArchive(context.Background(), DelegatedArchivePreparationRequest{
+		Config: cfg, Repo: Repo{Root: root}, Stderr: &stderr, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	archivePath := prepared.File.Name()
+	if prepared.Size <= 0 || len(prepared.Manifest.Files) != 2 {
+		t.Fatalf("archive size=%d manifest=%#v", prepared.Size, prepared.Manifest)
+	}
+	if err := os.WriteFile(filepath.Join(root, "one.txt"), []byte("changed after preparation\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Sync.FailFiles = 1
+	uploads := 0
+	var archivedOne string
+
+	phases, total, err := RunDelegatedArchiveSync(context.Background(), DelegatedArchiveSyncRequest{
+		Config: cfg, Repo: Repo{Root: root}, Workdir: "/workspace", Stderr: &stderr, Now: now,
+		Upload: func(_ context.Context, _ string, body io.Reader) error {
+			uploads++
+			gz, err := gzip.NewReader(body)
+			if err != nil {
+				return err
+			}
+			defer gz.Close()
+			entries := tar.NewReader(gz)
+			for {
+				header, err := entries.Next()
+				if errors.Is(err, io.EOF) {
+					return nil
+				}
+				if err != nil {
+					return err
+				}
+				if header.Name == "one.txt" {
+					content, err := io.ReadAll(entries)
+					archivedOne = string(content)
+					if err != nil {
+						return err
+					}
+				}
+			}
+		},
+		Exec: func(context.Context, string) error { return nil },
+	}, prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uploads != 1 || archivedOne != "one\n" {
+		t.Fatalf("uploads=%d archived one.txt=%q", uploads, archivedOne)
+	}
+	if got := strings.Count(stderr.String(), "sync candidate:"); got != 1 {
+		t.Fatalf("preflight count=%d stderr=%q", got, stderr.String())
+	}
+	for _, name := range []string{"manifest", "preflight", "archive"} {
+		found := false
+		for _, phase := range phases {
+			if phase.Name == name {
+				found = true
+				if phase.Ms != 7 {
+					t.Fatalf("phase %s=%dms, want 7ms", name, phase.Ms)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("missing %s phase: %#v", name, phases)
+		}
+	}
+	if total < 21*time.Millisecond {
+		t.Fatalf("total=%s, want prepared archive phases included", total)
+	}
+	if _, err := os.Stat(archivePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("prepared archive remains at %q: %v", archivePath, err)
+	}
+	if err := prepared.Close(); err != nil {
+		t.Fatalf("idempotent second close: %v", err)
+	}
+}
+
+func TestRunDelegatedArchiveSyncClosesPreparedArchiveOnEveryFailurePath(t *testing.T) {
+	root := newDelegatedArchiveSyncRepo(t)
+	tests := []struct {
+		name      string
+		configure func(*DelegatedArchiveSyncRequest)
+	}{
+		{name: "missing callbacks", configure: func(req *DelegatedArchiveSyncRequest) { req.Upload = nil }},
+		{name: "missing workdir", configure: func(req *DelegatedArchiveSyncRequest) { req.Workdir = "" }},
+		{name: "upload", configure: func(req *DelegatedArchiveSyncRequest) {
+			req.Upload = func(context.Context, string, io.Reader) error { return errors.New("upload failed") }
+		}},
+		{name: "prepare", configure: func(req *DelegatedArchiveSyncRequest) {
+			req.Exec = func(_ context.Context, command string) error {
+				if strings.Contains(command, "mkdir -p ") {
+					return errors.New("prepare failed")
+				}
+				return nil
+			}
+		}},
+		{name: "extract", configure: func(req *DelegatedArchiveSyncRequest) {
+			req.Exec = func(_ context.Context, command string) error {
+				if strings.HasPrefix(command, "tar -xzf ") {
+					return errors.New("extract failed")
+				}
+				return nil
+			}
+		}},
+		{name: "replace", configure: func(req *DelegatedArchiveSyncRequest) {
+			req.Config.Sync.Delete = true
+			req.Replace = func(context.Context, string, string) error { return errors.New("replace failed") }
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			prepared, err := PrepareDelegatedArchive(context.Background(), DelegatedArchivePreparationRequest{
+				Config: baseConfig(), Repo: Repo{Root: root}, Stderr: io.Discard,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			archivePath := prepared.File.Name()
+			req := DelegatedArchiveSyncRequest{
+				Config: baseConfig(), Repo: Repo{Root: root}, Workdir: "/workspace", Stderr: io.Discard,
+				Upload: func(context.Context, string, io.Reader) error { return nil },
+				Exec:   func(context.Context, string) error { return nil },
+			}
+			test.configure(&req)
+			if _, _, err := RunDelegatedArchiveSync(context.Background(), req, prepared); err == nil {
+				t.Fatal("sync unexpectedly succeeded")
+			}
+			if _, err := os.Stat(archivePath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("prepared archive remains at %q: %v", archivePath, err)
+			}
+			if err := prepared.Close(); err != nil {
+				t.Fatalf("idempotent second close: %v", err)
+			}
+		})
+	}
+}
 
 func TestRunDelegatedArchiveSyncOwnsArchiveReplaceLifecycle(t *testing.T) {
 	root := newDelegatedArchiveSyncRepo(t)

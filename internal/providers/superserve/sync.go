@@ -9,7 +9,7 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func (b *backend) syncWorkspace(ctx context.Context, api superserveClient, access *sandboxAccess, req RunRequest, workdir string) ([]timingPhase, time.Duration, error) {
+func (b *backend) syncWorkspace(ctx context.Context, api superserveClient, access *sandboxAccess, req RunRequest, workdir string, prepared ...*core.PreparedArchive) ([]timingPhase, time.Duration, error) {
 	return core.RunDelegatedArchiveSync(ctx, core.DelegatedArchiveSyncRequest{
 		Config:              b.cfg,
 		Repo:                req.Repo,
@@ -29,7 +29,7 @@ func (b *backend) syncWorkspace(ctx context.Context, api superserveClient, acces
 		Exec: func(execCtx context.Context, command string) error {
 			return b.execShell(execCtx, api, access, command)
 		},
-	})
+	}, prepared...)
 }
 
 func (b *backend) execShell(ctx context.Context, api superserveClient, access *sandboxAccess, command string) error {

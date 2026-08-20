@@ -219,6 +219,24 @@ func TestRunOneShotSyncsExecutesAndDeletes(t *testing.T) {
 	}
 }
 
+func TestRunRejectsOversizedWorkspaceBeforeProviderCalls(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newLifecycleFakeClient()
+	backend := testBackend(fake, io.Discard, io.Discard)
+	backend.cfg.Sync.FailFiles = 2
+	backend.cfg.Sync.FailBytes = 0
+
+	_, err := backend.Run(context.Background(), RunRequest{
+		Repo: Repo{Name: "my-app", Root: tempRepo(t)}, Command: []string{"true"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "sync candidate too large: 2 files >= limit 2") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(fake.calls) != 0 || len(fake.creates) != 0 || len(fake.sandboxes) != 0 {
+		t.Fatalf("provider calls=%v creates=%v sandboxes=%v", fake.calls, fake.creates, fake.sandboxes)
+	}
+}
+
 func TestRetainedRunByIDVerifiesOwnershipAndKeepsClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	repo := tempRepo(t)

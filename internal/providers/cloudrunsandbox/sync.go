@@ -14,7 +14,7 @@ import (
 
 const archiveUploadChunkSize = 3 << 20
 
-func (b *backend) syncWorkspace(ctx context.Context, transport sandboxTransport, sandboxID string, req RunRequest, workdir string) ([]timingPhase, time.Duration, error) {
+func (b *backend) syncWorkspace(ctx context.Context, transport sandboxTransport, sandboxID string, req RunRequest, workdir string, prepared ...*core.PreparedArchive) ([]timingPhase, time.Duration, error) {
 	return core.RunDelegatedArchiveSync(ctx, core.DelegatedArchiveSyncRequest{
 		Config:              b.cfg,
 		Repo:                req.Repo,
@@ -34,7 +34,7 @@ func (b *backend) syncWorkspace(ctx context.Context, transport sandboxTransport,
 		Exec: func(execCtx context.Context, command string) error {
 			return b.execShell(execCtx, transport, sandboxID, command)
 		},
-	})
+	}, prepared...)
 }
 
 func (b *backend) uploadArchive(ctx context.Context, transport sandboxTransport, sandboxID, remoteArchive string, body io.Reader) error {
