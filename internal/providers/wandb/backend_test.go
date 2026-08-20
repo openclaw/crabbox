@@ -207,6 +207,8 @@ type fakeWandbAPI struct {
 	statusID         string
 	statusValue      wandbSandbox
 	statusErr        error
+	statusValues     []wandbSandbox
+	statusCalls      int
 }
 
 type closeableFakeWandbAPI struct {
@@ -249,6 +251,12 @@ func (f *fakeWandbAPI) List(_ context.Context, tags []string, statusFilter strin
 
 func (f *fakeWandbAPI) Status(_ context.Context, id string) (wandbSandbox, error) {
 	f.statusID = id
+	f.statusCalls++
+	if len(f.statusValues) > 0 {
+		value := f.statusValues[0]
+		f.statusValues = f.statusValues[1:]
+		return value, f.statusErr
+	}
 	return f.statusValue, f.statusErr
 }
 
@@ -469,6 +477,82 @@ func TestWandbStatusReturnsView(t *testing.T) {
 	}
 	if api.statusID != "sb-abc" || !contains(api.listTags, "crabbox") || api.listStatusFilter != "all" {
 		t.Fatalf("status id=%q list tags=%#v filter=%q", api.statusID, api.listTags, api.listStatusFilter)
+	}
+}
+
+func TestWandbStatusWaitPollsUntilRunning(t *testing.T) {
+	api := &fakeWandbAPI{
+		listValue: []wandbSandbox{{ID: "sb-abc"}},
+		statusValues: []wandbSandbox{
+			{ID: "sb-abc", Status: "CREATING"},
+			{ID: "sb-abc", Status: "RUNNING", CreatedAt: "2026-05-18T00:00:00Z"},
+		},
+	}
+	backend := newWandbBackendForTest(t, api)
+	seedWandbClaim(t, backend, "sb-abc")
+
+	view, err := backend.Status(context.Background(), StatusRequest{ID: "sb-abc", Wait: true, WaitTimeout: time.Second})
+	if err != nil {
+		t.Fatalf("Status err: %v", err)
+	}
+	if !view.Ready || view.State != "running" || view.Labels["created_at"] != "2026-05-18T00:00:00Z" {
+		t.Fatalf("view=%#v, want final running status", view)
+	}
+	if api.statusCalls != 2 {
+		t.Fatalf("status calls=%d, want creating then running", api.statusCalls)
+	}
+}
+
+func TestWandbStatusWaitReturnsTerminalState(t *testing.T) {
+	for _, state := range []string{"stopped", "failed", "terminated"} {
+		t.Run(state, func(t *testing.T) {
+			api := &fakeWandbAPI{
+				listValue:   []wandbSandbox{{ID: "sb-abc"}},
+				statusValue: wandbSandbox{ID: "sb-abc", Status: state},
+			}
+			backend := newWandbBackendForTest(t, api)
+			seedWandbClaim(t, backend, "sb-abc")
+
+			view, err := backend.Status(context.Background(), StatusRequest{ID: "sb-abc", Wait: true, WaitTimeout: time.Second})
+			if err != nil {
+				t.Fatalf("Status err: %v", err)
+			}
+			if view.Ready || view.State != state || api.statusCalls != 1 {
+				t.Fatalf("view=%#v calls=%d, want immediate terminal state", view, api.statusCalls)
+			}
+		})
+	}
+}
+
+func TestWandbStatusWaitHonorsTimeout(t *testing.T) {
+	api := &fakeWandbAPI{
+		listValue:   []wandbSandbox{{ID: "sb-abc"}},
+		statusValue: wandbSandbox{ID: "sb-abc", Status: "CREATING"},
+	}
+	backend := newWandbBackendForTest(t, api)
+	seedWandbClaim(t, backend, "sb-abc")
+
+	_, err := backend.Status(context.Background(), StatusRequest{ID: "sb-abc", Wait: true, WaitTimeout: 10 * time.Millisecond})
+	var exitErr ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 5 || !strings.Contains(err.Error(), "sb-abc") {
+		t.Fatalf("Status err=%v, want sandbox-specific timeout exit", err)
+	}
+	if api.statusCalls != 1 {
+		t.Fatalf("status calls=%d, want one bounded probe", api.statusCalls)
+	}
+}
+
+func TestWandbStatusWithoutWaitReturnsImmediately(t *testing.T) {
+	api := &fakeWandbAPI{
+		listValue:   []wandbSandbox{{ID: "sb-abc"}},
+		statusValue: wandbSandbox{ID: "sb-abc", Status: "CREATING"},
+	}
+	backend := newWandbBackendForTest(t, api)
+	seedWandbClaim(t, backend, "sb-abc")
+
+	view, err := backend.Status(context.Background(), StatusRequest{ID: "sb-abc"})
+	if err != nil || view.State != "creating" || view.Ready || api.statusCalls != 1 {
+		t.Fatalf("view=%#v err=%v calls=%d, want immediate creating status", view, err, api.statusCalls)
 	}
 }
 

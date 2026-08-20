@@ -7,10 +7,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/openclaw/crabbox/internal/providers/shared"
 	"google.golang.org/grpc/codes"
 )
 
-const wandbStopTimeout = 15 * time.Second
+const (
+	wandbStopTimeout        = 15 * time.Second
+	wandbStatusPollInterval = 200 * time.Millisecond
+	wandbStatusWaitTimeout  = 5 * time.Minute
+)
 
 func NewWandbBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	cfg.Provider = providerName
@@ -292,10 +297,38 @@ func (b *wandbBackend) Status(ctx context.Context, req StatusRequest) (StatusVie
 	if err != nil {
 		return StatusView{}, err
 	}
-	sb, err := client.Status(ctx, sandboxID)
+	pollCtx := ctx
+	cancel := func() {}
+	maxAttempts := 1
+	if req.Wait {
+		waitTimeout := req.WaitTimeout
+		if waitTimeout <= 0 {
+			waitTimeout = wandbStatusWaitTimeout
+		}
+		pollCtx, cancel = context.WithTimeout(ctx, waitTimeout)
+		maxAttempts = 0
+	}
+	defer cancel()
+	result, err := shared.Poll(pollCtx, maxAttempts, wandbStatusPollInterval, shared.SleepContext,
+		func(ctx context.Context) (wandbSandbox, error) { return client.Status(ctx, sandboxID) },
+		func(_ context.Context, sandbox wandbSandbox, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
+			}
+			switch strings.ToLower(strings.TrimSpace(sandbox.Status)) {
+			case "running", "stopped", "failed", "terminated":
+				return true, nil
+			default:
+				return false, nil
+			}
+		}, nil)
 	if err != nil {
+		if req.Wait && errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+			return StatusView{}, exit(5, "timed out waiting for wandb sandbox %s to become ready", sandboxID)
+		}
 		return StatusView{}, err
 	}
+	sb := result.Value
 	state := strings.ToLower(strings.TrimSpace(sb.Status))
 	ready := state == "running"
 	return StatusView{

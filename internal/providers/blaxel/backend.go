@@ -659,7 +659,7 @@ func (b *backend) waitProcess(ctx context.Context, client Client, sandboxID stri
 	if err == nil {
 		return result.Value, nil
 	}
-	if result.Err == nil && context.Cause(ctx) != nil && errors.Is(err, context.Cause(ctx)) {
+	if ctx.Err() != nil && (errors.Is(err, ctx.Err()) || errors.Is(err, context.Cause(ctx))) {
 		cleanupCtx, cancel := b.cleanupContext(ctx)
 		_ = client.StopProcess(cleanupCtx, sandboxID, process.ID)
 		cancel()

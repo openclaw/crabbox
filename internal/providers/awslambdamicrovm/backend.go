@@ -376,24 +376,37 @@ func (b *backend) clients(ctx context.Context) (controlPlane, runnerAPI, error) 
 	return control, runner, nil
 }
 
-func (b *backend) create(ctx context.Context, control controlPlane, runner runnerAPI, repo Repo, requestedSlug string, keep, reclaim bool) (string, string, microVM, error) {
-	leaseID := newLeaseID()
+func (b *backend) create(ctx context.Context, control controlPlane, runner runnerAPI, repo Repo, requestedSlug string, keep, reclaim bool) (leaseID, slug string, vm microVM, retErr error) {
+	leaseID = newLeaseID()
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
 		return "", "", microVM{}, err
 	}
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s region=%s image=%s keep=%t\n", providerName, leaseID, slug, b.cfg.AWSRegion, b.cfg.AWSLambdaMicroVM.Image, keep)
-	vm, err := control.Run(ctx, b.runRequest(leaseID))
+	vm, err = control.Run(ctx, b.runRequest(leaseID))
 	if err != nil {
 		return "", "", microVM{}, err
 	}
-	createdID := vm.ID
+	createdVM := vm
+	createdLeaseID, createdSlug := leaseID, slug
 	rollback := true
 	defer func() {
-		if rollback {
-			cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			_ = control.Terminate(cleanupCtx, createdID)
+		if !rollback {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		if cleanupErr := control.Terminate(cleanupCtx, createdVM.ID); cleanupErr != nil && !isNotFound(cleanupErr) {
+			recoveryServer := b.server(createdVM, createdLeaseID, createdSlug, false, nil)
+			if claimErr := claimLease(createdLeaseID, createdSlug, b.scope(), b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim, recoveryServer); claimErr != nil {
+				rollbackErr := fmt.Errorf("rollback termination failed for AWS Lambda MicroVM %s and recovery claim %s could not be persisted: %w", createdVM.ID, createdLeaseID, errors.Join(cleanupErr, claimErr))
+				fmt.Fprintf(b.rt.Stderr, "warning: %v; terminate the MicroVM manually\n", rollbackErr)
+				retErr = errors.Join(retErr, rollbackErr)
+				return
+			}
+			rollbackErr := fmt.Errorf("rollback termination failed for AWS Lambda MicroVM %s; recovery claim %s remains for cleanup: %w", createdVM.ID, createdLeaseID, cleanupErr)
+			fmt.Fprintf(b.rt.Stderr, "warning: %v; retry with crabbox stop --provider %s %s\n", rollbackErr, providerName, createdLeaseID)
+			retErr = errors.Join(retErr, rollbackErr)
 		}
 	}()
 	vm, err = b.waitReady(ctx, control, runner, vm)

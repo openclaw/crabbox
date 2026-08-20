@@ -18,28 +18,30 @@ import (
 )
 
 type lifecycleFakeClient struct {
-	baseURL       string
-	sandboxes     map[string]Sandbox
-	createReqs    []CreateSandboxRequest
-	updateLabels  []map[string]string
-	deleted       []string
-	execReqs      []ExecuteProcessRequest
-	uploads       []string
-	logs          ProcessLogs
-	exitCode      int
-	omitExitCode  bool
-	processStatus string
-	getErr        error
-	deleteErr     error
-	updateErr     error
-	updateEmptyID bool
-	processErr    error
-	nextSandboxID string
-	createStatus  string
-	listPages     map[string]ListSandboxesResult
-	listReqs      []ListSandboxesRequest
-	stopped       []string
-	stopDeadline  bool
+	baseURL        string
+	sandboxes      map[string]Sandbox
+	createReqs     []CreateSandboxRequest
+	updateLabels   []map[string]string
+	deleted        []string
+	execReqs       []ExecuteProcessRequest
+	uploads        []string
+	logs           ProcessLogs
+	exitCode       int
+	omitExitCode   bool
+	processStatus  string
+	getErr         error
+	deleteErr      error
+	updateErr      error
+	updateEmptyID  bool
+	processErr     error
+	nextSandboxID  string
+	createStatus   string
+	listPages      map[string]ListSandboxesResult
+	listReqs       []ListSandboxesRequest
+	stopped        []string
+	stopDeadline   bool
+	stopContextErr error
+	getProcess     func(context.Context) (Process, error)
 }
 
 func newLifecycleFakeClient() *lifecycleFakeClient {
@@ -118,7 +120,10 @@ func (f *lifecycleFakeClient) ExecuteProcess(_ context.Context, _ string, req Ex
 	f.execReqs = append(f.execReqs, req)
 	return Process{ID: "proc_1", Status: f.effectiveProcessStatus(), ExitCode: f.processExitCode()}, nil
 }
-func (f *lifecycleFakeClient) GetProcess(context.Context, string, string) (Process, error) {
+func (f *lifecycleFakeClient) GetProcess(ctx context.Context, _ string, _ string) (Process, error) {
+	if f.getProcess != nil {
+		return f.getProcess(ctx)
+	}
 	return Process{ID: "proc_1", Status: f.effectiveProcessStatus(), ExitCode: f.processExitCode()}, nil
 }
 func (f *lifecycleFakeClient) GetProcessLogs(context.Context, string, string) (ProcessLogs, error) {
@@ -126,6 +131,7 @@ func (f *lifecycleFakeClient) GetProcessLogs(context.Context, string, string) (P
 }
 func (f *lifecycleFakeClient) StopProcess(ctx context.Context, _ string, process string) error {
 	_, f.stopDeadline = ctx.Deadline()
+	f.stopContextErr = ctx.Err()
 	f.stopped = append(f.stopped, process)
 	return nil
 }
@@ -330,6 +336,44 @@ func TestExecCommandEnforcesLocalProcessWaitTimeout(t *testing.T) {
 	}
 	if !fake.stopDeadline {
 		t.Fatal("StopProcess context had no deadline")
+	}
+}
+
+func TestWaitProcessStopsRemoteWhenGetProcessReturnsCancellation(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		newContext      func() (context.Context, context.CancelFunc)
+		cancelDuringGet bool
+		want            error
+	}{
+		{name: "canceled", newContext: func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) }, cancelDuringGet: true, want: context.Canceled},
+		{name: "deadline", newContext: func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), 10*time.Millisecond)
+		}, want: context.DeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend, fake, _, _, _ := newLifecycleBackend(t)
+			ctx, cancel := tc.newContext()
+			defer cancel()
+			fake.getProcess = func(ctx context.Context) (Process, error) {
+				if tc.cancelDuringGet {
+					cancel()
+				}
+				<-ctx.Done()
+				return Process{}, ctx.Err()
+			}
+
+			_, err := backend.waitProcess(ctx, fake, "sbx_1", Process{ID: "proc_1", Status: "running"})
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("waitProcess err=%v, want %v", err, tc.want)
+			}
+			if len(fake.stopped) != 1 || fake.stopped[0] != "proc_1" {
+				t.Fatalf("stopped=%#v, want remote cancellation", fake.stopped)
+			}
+			if !fake.stopDeadline || fake.stopContextErr != nil {
+				t.Fatalf("StopProcess context deadline=%t err=%v", fake.stopDeadline, fake.stopContextErr)
+			}
+		})
 	}
 }
 

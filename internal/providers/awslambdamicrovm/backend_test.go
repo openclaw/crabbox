@@ -28,10 +28,13 @@ import (
 const testImageARN = "arn:aws:lambda:eu-west-1:123456789012:microvm-image:crabbox-runner"
 
 type fakeControlPlane struct {
-	vm         microVM
-	calls      []string
-	runRequest runMicroVMRequest
-	runErr     error
+	vm                  microVM
+	calls               []string
+	runRequest          runMicroVMRequest
+	runErr              error
+	terminateErr        error
+	terminateDeadline   bool
+	terminateContextErr error
 }
 
 func (f *fakeControlPlane) Run(_ context.Context, req runMicroVMRequest) (microVM, error) {
@@ -57,8 +60,13 @@ func (f *fakeControlPlane) Probe(context.Context, string, string) error {
 	return nil
 }
 
-func (f *fakeControlPlane) Terminate(_ context.Context, id string) error {
+func (f *fakeControlPlane) Terminate(ctx context.Context, id string) error {
 	f.calls = append(f.calls, "terminate:"+id)
+	_, f.terminateDeadline = ctx.Deadline()
+	f.terminateContextErr = ctx.Err()
+	if f.terminateErr != nil {
+		return f.terminateErr
+	}
 	f.vm.State = "TERMINATED"
 	return nil
 }
@@ -219,6 +227,71 @@ func TestCreateRollsBackWhenRunnerIsUnhealthy(t *testing.T) {
 	cancel()
 	if err := b.Warmup(ctx, WarmupRequest{Repo: Repo{Root: "/repo", Name: "my-app"}, Keep: true}); err == nil {
 		t.Fatal("unhealthy runner unexpectedly became ready")
+	}
+	if !slices.Contains(control.calls, "terminate:mvm-test") {
+		t.Fatalf("rollback missing: %v", control.calls)
+	}
+}
+
+func TestCreateRollbackFailurePersistsExactRecoveryClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	terminateErr := errors.New("termination denied")
+	control := &fakeControlPlane{terminateErr: terminateErr}
+	runner := &fakeRunner{healthErr: errors.New("runner unavailable")}
+	b := testBackend(control, runner, io.Discard)
+	var stderr bytes.Buffer
+	b.rt.Stderr = &stderr
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := b.Warmup(ctx, WarmupRequest{Repo: Repo{Root: "/repo", Name: "my-app"}, Keep: true})
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, terminateErr) {
+		t.Fatalf("Warmup err=%v, want joined cancellation and termination failure", err)
+	}
+	if !strings.Contains(err.Error(), "mvm-test") || !strings.Contains(err.Error(), "recovery claim") {
+		t.Fatalf("Warmup err=%v, want exact MicroVM and recovery claim", err)
+	}
+	if !strings.Contains(stderr.String(), "mvm-test") || !strings.Contains(stderr.String(), "crabbox stop --provider aws-lambda-microvm") {
+		t.Fatalf("stderr=%q, want exact MicroVM and cleanup command", stderr.String())
+	}
+	if !control.terminateDeadline || control.terminateContextErr != nil {
+		t.Fatalf("rollback context deadline=%t err=%v", control.terminateDeadline, control.terminateContextErr)
+	}
+	claims, err := listLeaseClaims()
+	if err != nil || len(claims) != 1 {
+		t.Fatalf("claims=%#v err=%v, want one recovery claim", claims, err)
+	}
+	claim := claims[0]
+	if claim.Provider != providerName || claim.ProviderScope != "eu-west-1" || claim.CloudID != "mvm-test" || claim.Labels["keep"] != "false" {
+		t.Fatalf("recovery claim=%#v", claim)
+	}
+	control.terminateErr = nil
+	if err := b.Stop(context.Background(), StopRequest{ID: claim.LeaseID}); err != nil {
+		t.Fatalf("recovery stop: %v", err)
+	}
+	if _, ok, err := resolveLeaseClaim(claim.LeaseID); err != nil || ok {
+		t.Fatalf("recovery claim remains ok=%t err=%v", ok, err)
+	}
+}
+
+func TestCreateRollbackFailureReportsRecoveryClaimPersistenceFailure(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateDir)
+	terminateErr := errors.New("termination denied")
+	control := &fakeControlPlane{terminateErr: terminateErr}
+	runner := &fakeRunner{healthCheck: func(context.Context, microVM) error {
+		return os.WriteFile(filepath.Join(stateDir, "crabbox"), []byte("blocked"), 0o600)
+	}}
+	b := testBackend(control, runner, io.Discard)
+	var stderr bytes.Buffer
+	b.rt.Stderr = &stderr
+
+	err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: "/repo", Name: "my-app"}, Keep: true})
+	if !errors.Is(err, terminateErr) || !strings.Contains(err.Error(), "mvm-test") || !strings.Contains(err.Error(), "could not be persisted") {
+		t.Fatalf("Warmup err=%v, want termination and recovery persistence failures", err)
+	}
+	if !strings.Contains(stderr.String(), "mvm-test") || !strings.Contains(stderr.String(), "terminate the MicroVM manually") {
+		t.Fatalf("stderr=%q, want actionable exact-resource warning", stderr.String())
 	}
 	if !slices.Contains(control.calls, "terminate:mvm-test") {
 		t.Fatalf("rollback missing: %v", control.calls)
