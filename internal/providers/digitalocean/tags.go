@@ -3,11 +3,11 @@ package digitalocean
 import (
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const (
@@ -109,47 +109,11 @@ func legacyEncodedExactTagValueKey(key string) bool {
 }
 
 func encodeExactTagValue(value string, maxLen int) string {
-	value = strings.TrimSpace(value)
-	const hex = "0123456789abcdef"
-	var out strings.Builder
-	for i := 0; i < len(value); i++ {
-		ch := value[i]
-		if (ch >= 'a' && ch <= 'z') ||
-			(ch >= '0' && ch <= '9') ||
-			ch == '-' || ch == ':' {
-			if out.Len()+1 > maxLen {
-				break
-			}
-			out.WriteByte(ch)
-			continue
-		}
-		if out.Len()+3 > maxLen {
-			break
-		}
-		out.WriteByte('_')
-		out.WriteByte(hex[ch>>4])
-		out.WriteByte(hex[ch&0x0f])
-	}
-	if out.Len() == 0 {
-		return "unknown"
-	}
-	return out.String()
+	return shared.EncodeExactTagValue(value, maxLen)
 }
 
 func decodeExactTagValue(value string) string {
-	var out strings.Builder
-	for i := 0; i < len(value); i++ {
-		if value[i] == '_' && i+2 < len(value) {
-			decoded, err := strconv.ParseUint(value[i+1:i+3], 16, 8)
-			if err == nil {
-				out.WriteByte(byte(decoded))
-				i += 2
-				continue
-			}
-		}
-		out.WriteByte(value[i])
-	}
-	return out.String()
+	return shared.DecodeExactTagValue(value)
 }
 
 func normalizeTags(tags []string) []string {

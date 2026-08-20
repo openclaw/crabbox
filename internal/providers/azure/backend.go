@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"os"
 	"strings"
 	"time"
 
@@ -523,11 +522,7 @@ func isAzureCleanupNotFound(err error) bool {
 }
 
 func useStoredTestboxKey(target *SSHTarget, leaseID string) {
-	if keyPath, err := core.TestboxKeyPath(leaseID); err == nil {
-		if _, statErr := os.Stat(keyPath); statErr == nil {
-			target.Key = keyPath
-		}
-	}
+	shared.UseStoredTestboxKey(target, leaseID)
 }
 func findServerByAlias(servers []Server, id string) (Server, string, error) {
 	return core.FindServerByAlias(servers, id)

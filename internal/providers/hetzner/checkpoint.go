@@ -430,12 +430,7 @@ func cloneMetadata(values map[string]string) map[string]string {
 }
 
 func firstNonBlank(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
+	return shared.FirstNonBlank(values...)
 }
 
 var (

@@ -16,6 +16,7 @@ import (
 
 	"github.com/openclaw/crabbox/internal/applevmhelper"
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const (
@@ -1089,12 +1090,7 @@ func localCommandDetail(result core.LocalCommandResult, err error) string {
 }
 
 func firstNonBlank(values ...string) string {
-	for _, value := range values {
-		if trimmed := strings.TrimSpace(value); trimmed != "" {
-			return trimmed
-		}
-	}
-	return ""
+	return shared.FirstNonBlankTrimmed(values...)
 }
 
 func exit(code int, format string, args ...any) core.ExitError {

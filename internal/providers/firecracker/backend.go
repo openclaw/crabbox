@@ -762,12 +762,7 @@ func exit(code int, format string, args ...any) core.ExitError {
 }
 
 func firstNonBlank(values ...string) string {
-	for _, value := range values {
-		if trimmed := strings.TrimSpace(value); trimmed != "" {
-			return trimmed
-		}
-	}
-	return ""
+	return shared.FirstNonBlankTrimmed(values...)
 }
 
 func removeIfExists(path string) error {

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"time"
 
@@ -760,12 +759,7 @@ func closeClient(ctx context.Context, client lifecycleClient, stderr io.Writer) 
 }
 
 func firstNonBlank(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
+	return shared.FirstNonBlank(values...)
 }
 
 func currentTime(rt Runtime) time.Time {
@@ -804,9 +798,5 @@ var removeStoredTestboxKey = func(leaseID string) { core.RemoveStoredTestboxKey(
 var exit = func(code int, format string, args ...any) core.ExitError { return core.Exit(code, format, args...) }
 
 func useStoredTestboxKey(target *SSHTarget, leaseID string) {
-	if keyPath, err := core.TestboxKeyPath(leaseID); err == nil {
-		if _, statErr := os.Stat(keyPath); statErr == nil {
-			target.Key = keyPath
-		}
-	}
+	shared.UseStoredTestboxKey(target, leaseID)
 }

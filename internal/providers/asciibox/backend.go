@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type backend struct {
@@ -574,12 +576,7 @@ func cleanWorkdir(workdir string) (string, error) {
 }
 
 func firstNonBlank(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
+	return shared.FirstNonBlankTrimmed(values...)
 }
 
 var waitForSSHReadyFunc = waitForSSHReady

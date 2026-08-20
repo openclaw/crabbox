@@ -201,11 +201,7 @@ func customSmolvmBaseURLAllowed() bool {
 }
 
 func isLoopbackHTTPURL(parsed *url.URL) bool {
-	if parsed.Scheme != "http" {
-		return false
-	}
-	host := strings.ToLower(parsed.Hostname())
-	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+	return shared.IsLoopbackHTTPURL(parsed)
 }
 
 func (c *client) CreateMachine(ctx context.Context, req createRequest) (machineData, error) {

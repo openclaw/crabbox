@@ -2,7 +2,6 @@ package multipass
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type backend struct {
@@ -516,31 +516,7 @@ func multipassCacheRoot() (string, error) {
 }
 
 func multipassCacheVolumeName(key string) string {
-	key = strings.TrimSpace(key)
-	sum := sha256.Sum256([]byte(key))
-	var safe strings.Builder
-	for _, r := range key {
-		switch {
-		case r >= 'a' && r <= 'z':
-			safe.WriteRune(r)
-		case r >= 'A' && r <= 'Z':
-			safe.WriteRune(r + ('a' - 'A'))
-		case r >= '0' && r <= '9':
-			safe.WriteRune(r)
-		case r == '.' || r == '_' || r == '-':
-			safe.WriteRune(r)
-		default:
-			safe.WriteByte('-')
-		}
-		if safe.Len() >= 80 {
-			break
-		}
-	}
-	name := strings.Trim(safe.String(), ".-_")
-	if name == "" {
-		name = "volume"
-	}
-	return fmt.Sprintf("crabbox-cache-%s-%x", name, sum[:6])
+	return shared.CacheVolumeName(key)
 }
 
 func (b *backend) listInstances(ctx context.Context) ([]multipassInstance, error) {
@@ -874,10 +850,5 @@ func firstLine(value string) string {
 }
 
 func firstNonBlank(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
+	return shared.FirstNonBlank(values...)
 }

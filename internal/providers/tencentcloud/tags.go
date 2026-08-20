@@ -6,6 +6,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const (
@@ -182,33 +183,5 @@ func ownedLabels(labels map[string]string) bool {
 }
 
 func applyTailscaleMetadata(labels map[string]string, meta core.TailscaleMetadata) {
-	if meta.Enabled {
-		labels["tailscale"] = "true"
-	}
-	if meta.Hostname != "" {
-		labels["tailscale_hostname"] = meta.Hostname
-	}
-	if meta.FQDN != "" {
-		labels["tailscale_fqdn"] = meta.FQDN
-	}
-	if meta.IPv4 != "" {
-		labels["tailscale_ipv4"] = meta.IPv4
-	}
-	if len(meta.Tags) > 0 {
-		labels["tailscale_tags"] = strings.Join(meta.Tags, ",")
-	}
-	if meta.State != "" {
-		labels["tailscale_state"] = meta.State
-	}
-	if meta.Error != "" {
-		labels["tailscale_error"] = meta.Error
-	} else {
-		delete(labels, "tailscale_error")
-	}
-	if meta.ExitNode != "" {
-		labels["tailscale_exit_node"] = meta.ExitNode
-	}
-	if meta.ExitNodeAllowLANAccess {
-		labels["tailscale_exit_node_allow_lan_access"] = "true"
-	}
+	shared.ApplyTailscaleMetadata(labels, meta)
 }

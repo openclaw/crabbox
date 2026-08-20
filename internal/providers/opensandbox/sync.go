@@ -5,17 +5,16 @@ import (
 	"io"
 	"time"
 
-	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func (b *openSandboxBackend) syncWorkspace(ctx context.Context, api openSandboxClient, sandboxID string, req RunRequest, workdir string) ([]timingPhase, time.Duration, error) {
-	return core.RunDelegatedArchiveSync(ctx, core.DelegatedArchiveSyncRequest{
+	return shared.RunSandboxArchiveSync(ctx, shared.SandboxArchiveSyncRequest{
 		Config:              b.cfg,
 		Repo:                req.Repo,
 		ForceSyncLarge:      req.ForceSyncLarge,
 		Workdir:             workdir,
 		TempPattern:         "crabbox-opensandbox-sync-*.tgz",
-		RemoteArchiveDir:    "/tmp",
 		RemoteArchivePrefix: "crabbox-sync-",
 		PhaseName:           "opensandbox_sync",
 		Provider:            providerName,

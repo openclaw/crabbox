@@ -11,6 +11,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const (
@@ -968,11 +970,7 @@ func repoScope(repo Repo) string {
 }
 
 func randomSuffix() string {
-	var b [3]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return fmt.Sprintf("%x", time.Now().UnixNano())[:6]
-	}
-	return hex.EncodeToString(b[:])
+	return shared.RandomSuffix()
 }
 
 func timeoutOrDefault(primary, fallback time.Duration) time.Duration {

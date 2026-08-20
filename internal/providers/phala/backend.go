@@ -14,6 +14,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const providerName = "phala"
@@ -1703,12 +1704,7 @@ func commandError(action string, result core.LocalCommandResult, err error) erro
 }
 
 func firstNonBlank(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
+	return shared.FirstNonBlankTrimmed(values...)
 }
 
 // jsonObjectPrefix returns the first top-level JSON object/array embedded in a

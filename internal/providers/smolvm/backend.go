@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type backend struct {
@@ -249,44 +251,35 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 	if err != nil {
 		return StatusView{}, err
 	}
-	leaseID, machineID, slug, err := b.resolveMachineID(ctx, client, req.ID, "", false)
-	if err != nil {
-		return StatusView{}, err
-	}
-	deadline := b.now().Add(req.WaitTimeout)
-	if req.WaitTimeout <= 0 {
-		deadline = b.now().Add(5 * time.Minute)
-	}
-	for {
-		machine, err := client.GetMachine(ctx, machineID)
-		if err != nil {
-			return StatusView{}, err
-		}
-		server := machineToServer(b.cfg, machine)
-		view := StatusView{
-			ID:         leaseID,
-			Slug:       blank(slug, server.Labels["slug"]),
-			Provider:   providerName,
-			TargetOS:   targetLinux,
-			State:      machine.State,
-			ServerID:   machine.ID,
-			ServerType: server.ServerType.Name,
-			Network:    networkPublic,
-			Ready:      statusReady(machine.State),
-			Labels:     server.Labels,
-		}
-		if !req.Wait || view.Ready {
-			return view, nil
-		}
-		if b.now().After(deadline) {
-			return StatusView{}, exit(5, "timed out waiting for smolvm %s to become ready", machineID)
-		}
-		select {
-		case <-ctx.Done():
-			return StatusView{}, ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-	}
+	return shared.PollDelegatedStatus(ctx, shared.DelegatedStatusRequest{
+		ID:          req.ID,
+		Provider:    providerName,
+		TargetOS:    targetLinux,
+		Network:     networkPublic,
+		Wait:        req.Wait,
+		WaitTimeout: req.WaitTimeout,
+		Now:         b.now,
+		Resolve: func(id string) (string, string, string, error) {
+			return b.resolveMachineID(ctx, client, id, "", false)
+		},
+		Get: func(getCtx context.Context, machineID string) (shared.DelegatedStatusResource, error) {
+			machine, err := client.GetMachine(getCtx, machineID)
+			if err != nil {
+				return shared.DelegatedStatusResource{}, err
+			}
+			server := machineToServer(b.cfg, machine)
+			return shared.DelegatedStatusResource{
+				State:      machine.State,
+				ServerID:   machine.ID,
+				ServerType: server.ServerType.Name,
+				Ready:      statusReady(machine.State),
+				Labels:     server.Labels,
+			}, nil
+		},
+		TimeoutError: func(machineID string) error {
+			return exit(5, "timed out waiting for smolvm %s to become ready", machineID)
+		},
+	})
 }
 
 func (b *backend) Stop(ctx context.Context, req StopRequest) error {

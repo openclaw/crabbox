@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type backend struct {
@@ -309,44 +311,35 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 	if err != nil {
 		return StatusView{}, err
 	}
-	leaseID, boxID, slug, err := b.resolveBoxID(ctx, client, req.ID, "", false)
-	if err != nil {
-		return StatusView{}, err
-	}
-	deadline := b.now().Add(req.WaitTimeout)
-	if req.WaitTimeout <= 0 {
-		deadline = b.now().Add(5 * time.Minute)
-	}
-	for {
-		box, err := client.GetBox(ctx, boxID)
-		if err != nil {
-			return StatusView{}, err
-		}
-		server := boxToServer(b.cfg, box)
-		view := StatusView{
-			ID:         leaseID,
-			Slug:       blank(slug, server.Labels["slug"]),
-			Provider:   providerName,
-			TargetOS:   targetLinux,
-			State:      box.Status,
-			ServerID:   box.ID,
-			ServerType: server.ServerType.Name,
-			Network:    networkPublic,
-			Ready:      statusReady(box.Status),
-			Labels:     server.Labels,
-		}
-		if !req.Wait || view.Ready {
-			return view, nil
-		}
-		if b.now().After(deadline) {
-			return StatusView{}, exit(5, "timed out waiting for upstash-box %s to become ready", boxID)
-		}
-		select {
-		case <-ctx.Done():
-			return StatusView{}, ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-	}
+	return shared.PollDelegatedStatus(ctx, shared.DelegatedStatusRequest{
+		ID:          req.ID,
+		Provider:    providerName,
+		TargetOS:    targetLinux,
+		Network:     networkPublic,
+		Wait:        req.Wait,
+		WaitTimeout: req.WaitTimeout,
+		Now:         b.now,
+		Resolve: func(id string) (string, string, string, error) {
+			return b.resolveBoxID(ctx, client, id, "", false)
+		},
+		Get: func(getCtx context.Context, boxID string) (shared.DelegatedStatusResource, error) {
+			box, err := client.GetBox(getCtx, boxID)
+			if err != nil {
+				return shared.DelegatedStatusResource{}, err
+			}
+			server := boxToServer(b.cfg, box)
+			return shared.DelegatedStatusResource{
+				State:      box.Status,
+				ServerID:   box.ID,
+				ServerType: server.ServerType.Name,
+				Ready:      statusReady(box.Status),
+				Labels:     server.Labels,
+			}, nil
+		},
+		TimeoutError: func(boxID string) error {
+			return exit(5, "timed out waiting for upstash-box %s to become ready", boxID)
+		},
+	})
 }
 
 func (b *backend) Stop(ctx context.Context, req StopRequest) error {

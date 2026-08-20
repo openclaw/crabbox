@@ -5,9 +5,10 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func blaxelEndpointWorkspaceScope(baseURL, workspace string) string {
@@ -214,9 +215,5 @@ func timeoutOrDefault(primary, fallback time.Duration) time.Duration {
 }
 
 func randomSuffix() string {
-	var b [3]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return fmt.Sprintf("%x", time.Now().UnixNano())[:6]
-	}
-	return hex.EncodeToString(b[:])
+	return shared.RandomSuffix()
 }

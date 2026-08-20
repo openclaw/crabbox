@@ -15,6 +15,8 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type Client interface {
@@ -251,11 +253,7 @@ func validateBlaxelConfig(cfg Config) error {
 }
 
 func isLoopbackHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return shared.IsLoopbackHost(host)
 }
 
 func canonicalHostname(host string) string {

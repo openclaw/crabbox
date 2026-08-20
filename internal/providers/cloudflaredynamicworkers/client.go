@@ -13,6 +13,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type loaderAPI interface {
@@ -288,11 +289,7 @@ func asciiUpperHex(value byte) byte {
 }
 
 func isLoopbackHTTPURL(parsed *url.URL) bool {
-	if parsed.Scheme != "http" {
-		return false
-	}
-	host := strings.ToLower(parsed.Hostname())
-	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+	return shared.IsLoopbackHTTPURL(parsed)
 }
 
 func defaultHTTPClient(cfg Config) (*http.Client, error) {

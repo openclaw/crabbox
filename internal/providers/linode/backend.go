@@ -900,35 +900,7 @@ func appendLinodeIfMissing(linodes []linodeInstance, item linodeInstance) []lino
 }
 
 func applyTailscaleMetadata(labels map[string]string, meta core.TailscaleMetadata) {
-	if meta.Enabled {
-		labels["tailscale"] = "true"
-	}
-	if meta.Hostname != "" {
-		labels["tailscale_hostname"] = meta.Hostname
-	}
-	if meta.FQDN != "" {
-		labels["tailscale_fqdn"] = meta.FQDN
-	}
-	if meta.IPv4 != "" {
-		labels["tailscale_ipv4"] = meta.IPv4
-	}
-	if len(meta.Tags) > 0 {
-		labels["tailscale_tags"] = strings.Join(meta.Tags, ",")
-	}
-	if meta.State != "" {
-		labels["tailscale_state"] = meta.State
-	}
-	if meta.Error != "" {
-		labels["tailscale_error"] = meta.Error
-	} else {
-		delete(labels, "tailscale_error")
-	}
-	if meta.ExitNode != "" {
-		labels["tailscale_exit_node"] = meta.ExitNode
-	}
-	if meta.ExitNodeAllowLANAccess {
-		labels["tailscale_exit_node_allow_lan_access"] = "true"
-	}
+	shared.ApplyTailscaleMetadata(labels, meta)
 }
 
 func (b *linodeLeaseBackend) waitForLinodeIP(ctx context.Context, client linodeAPI, id int64, timeout time.Duration) (linodeInstance, error) {
@@ -1103,12 +1075,7 @@ func applyLinodeDefaults(cfg *core.Config) {
 }
 
 func firstNonBlank(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
+	return shared.FirstNonBlank(values...)
 }
 
 func isLinodeNotFound(err error) bool {

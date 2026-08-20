@@ -66,10 +66,6 @@ func inventoryDoctorResult(provider string, leases int) DoctorResult {
 	return core.InventoryDoctorResult(provider, leases)
 }
 
-func newLeaseSlug(leaseID string) string {
-	return core.NewLeaseSlug(leaseID)
-}
-
 func normalizeLeaseSlug(value string) string {
 	return core.NormalizeLeaseSlug(value)
 }

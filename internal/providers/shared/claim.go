@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"strings"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -13,6 +15,23 @@ var ErrStrictClaimMismatch = errors.New("strict claim identifier mismatch")
 type ClaimBinding struct {
 	Provider, ProviderScope, LeaseID, Slug, CloudID string
 	RequiredLabels                                  map[string]string
+}
+
+type ScopedLeaseResolver struct {
+	Provider, LeasePrefix    string
+	ReadClaim                func(string) (core.LeaseClaim, error)
+	ListClaims               func() ([]core.LeaseClaim, error)
+	ValidateClaim            func(core.LeaseClaim) error
+	FinishClaim              func(core.LeaseClaim) (string, string, string, error)
+	EmptyIdentifierError     func() error
+	UnclaimedIdentifierError func(string) error
+}
+
+type ScopedLeaseFinishOptions struct {
+	Provider, LeasePrefix, RepoRoot string
+	Reclaim                         bool
+	IdleTimeout                     time.Duration
+	ValidateClaim                   func(core.LeaseClaim) error
 }
 
 // ValidateClaimBinding checks non-empty structural fields and exact required labels, including empty label values.
@@ -50,6 +69,77 @@ func ResolveProviderClaimStrict(identifier, provider, providerScope string) (cor
 		return core.LeaseClaim{}, false, ErrStrictClaimMismatch
 	}
 	return claim, ok, nil
+}
+
+func ResolveScopedLeaseID(identifier string, resolver ScopedLeaseResolver) (string, string, string, error) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return "", "", "", resolver.EmptyIdentifierError()
+	}
+	exactLeaseID := identifier
+	if !strings.HasPrefix(exactLeaseID, resolver.LeasePrefix) {
+		exactLeaseID = resolver.LeasePrefix + exactLeaseID
+	}
+	if claim, err := resolver.ReadClaim(exactLeaseID); err != nil {
+		return "", "", "", err
+	} else if claim.LeaseID == exactLeaseID && claim.Provider == resolver.Provider {
+		return resolver.FinishClaim(claim)
+	}
+	claim, ok, err := ResolveScopedLeaseClaim(identifier, resolver.Provider, resolver.ListClaims, resolver.ValidateClaim)
+	if err != nil {
+		return "", "", "", err
+	}
+	if ok {
+		return resolver.FinishClaim(claim)
+	}
+	return "", "", "", resolver.UnclaimedIdentifierError(identifier)
+}
+
+func ResolveScopedLeaseClaim(identifier, provider string, listClaims func() ([]core.LeaseClaim, error), validate func(core.LeaseClaim) error) (core.LeaseClaim, bool, error) {
+	claims, err := listClaims()
+	if err != nil {
+		return core.LeaseClaim{}, false, err
+	}
+	for _, claim := range claims {
+		if claim.Provider == provider && claim.LeaseID == identifier {
+			if err := validate(claim); err != nil {
+				return core.LeaseClaim{}, false, err
+			}
+			return claim, true, nil
+		}
+	}
+	slug := core.NormalizeLeaseSlug(identifier)
+	if slug != "" {
+		for _, claim := range claims {
+			if claim.Provider == provider && core.NormalizeLeaseSlug(claim.Slug) == slug {
+				if err := validate(claim); err != nil {
+					return core.LeaseClaim{}, false, err
+				}
+				return claim, true, nil
+			}
+		}
+	}
+	return core.LeaseClaim{}, false, nil
+}
+
+func FinishScopedLease(claim core.LeaseClaim, opts ScopedLeaseFinishOptions) (string, string, string, error) {
+	if err := opts.ValidateClaim(claim); err != nil {
+		return "", "", "", err
+	}
+	if opts.RepoRoot != "" {
+		idleTimeout := opts.IdleTimeout
+		if idleTimeout <= 0 {
+			idleTimeout = time.Duration(claim.IdleTimeoutSeconds) * time.Second
+		}
+		if err := core.ClaimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, opts.Provider, claim.ProviderScope, claim.Pond, opts.RepoRoot, idleTimeout, opts.Reclaim); err != nil {
+			return "", "", "", err
+		}
+	}
+	slug := claim.Slug
+	if strings.TrimSpace(slug) == "" {
+		slug = core.NewLeaseSlug(claim.LeaseID)
+	}
+	return claim.LeaseID, strings.TrimPrefix(claim.LeaseID, opts.LeasePrefix), slug, nil
 }
 
 // RequireClaimSnapshot returns the exact revisioned claim carried by a provider result.

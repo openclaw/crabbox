@@ -2,7 +2,6 @@ package localcontainer
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1759,31 +1758,7 @@ func localContainerCacheVolumeMounts(volumes []core.CacheVolumeConfig) ([]string
 }
 
 func localContainerCacheVolumeName(key string) string {
-	key = strings.TrimSpace(key)
-	sum := sha256.Sum256([]byte(key))
-	var safe strings.Builder
-	for _, r := range key {
-		switch {
-		case r >= 'a' && r <= 'z':
-			safe.WriteRune(r)
-		case r >= 'A' && r <= 'Z':
-			safe.WriteRune(r + ('a' - 'A'))
-		case r >= '0' && r <= '9':
-			safe.WriteRune(r)
-		case r == '.' || r == '_' || r == '-':
-			safe.WriteRune(r)
-		default:
-			safe.WriteByte('-')
-		}
-		if safe.Len() >= 80 {
-			break
-		}
-	}
-	name := strings.Trim(safe.String(), ".-_")
-	if name == "" {
-		name = "volume"
-	}
-	return fmt.Sprintf("crabbox-cache-%s-%x", name, sum[:6])
+	return shared.CacheVolumeName(key)
 }
 
 func (b *backend) dockerSocketMountPath(ctx context.Context) (string, error) {
@@ -2516,12 +2491,7 @@ func blank(value, fallback string) string {
 }
 
 func firstNonBlank(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
+	return shared.FirstNonBlank(values...)
 }
 
 func hostLeaseWorkRoot(lease core.LeaseTarget) string {

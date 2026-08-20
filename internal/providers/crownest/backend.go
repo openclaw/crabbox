@@ -2,7 +2,6 @@ package crownest
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -12,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const cleanupTimeout = 15 * time.Second
@@ -991,11 +992,7 @@ func repoName(repo Repo) string {
 }
 
 func randomSuffix() string {
-	var b [3]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return fmt.Sprintf("%x", time.Now().UnixNano())[:6]
-	}
-	return hex.EncodeToString(b[:])
+	return shared.RandomSuffix()
 }
 
 func (b *backend) now() time.Time {

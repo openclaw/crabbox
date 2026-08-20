@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Consolidated nine small cross-provider helper clusters (Tailscale metadata, exact tag codecs, gateway URL validation, cache-volume naming, scoped claim resolution, envd transport scaffolding, delegated status polling, workspace archive sync, and exact-duplicate micro-utilities) into shared helpers while keeping divergent variants adapter-owned.
 - Shared the doctor-capability configuration boilerplate across sixty-six providers while keeping direct-construction variants, provider-specific validation, and divergent failure semantics adapter-owned.
 - Completed the shared lifecycle polling sweep across fourteen more providers, leaving only SSH-observer delegates, schedule-selected retry delays, and lock acquisitions hand-rolled by design.
 - Adopted shared lifecycle polling in nine more providers (Apple Container, Asciibox, Blaxel, Daytona, Hostinger, Nomad, NVIDIA Brev, OpenSandbox, and Tart), preserving event-driven waits, jittered backoff, and provider-specific deadline diagnostics adapter-side.

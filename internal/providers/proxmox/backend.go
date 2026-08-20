@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -718,9 +717,5 @@ func exit(code int, format string, args ...any) core.ExitError {
 }
 
 func useStoredTestboxKey(target *SSHTarget, leaseID string) {
-	if keyPath, err := core.TestboxKeyPath(leaseID); err == nil {
-		if _, statErr := os.Stat(keyPath); statErr == nil {
-			target.Key = keyPath
-		}
-	}
+	shared.UseStoredTestboxKey(target, leaseID)
 }

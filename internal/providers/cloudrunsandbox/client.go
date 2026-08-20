@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -102,40 +101,15 @@ func firstNonEmpty(values ...string) string {
 }
 
 func validateGatewayURL(raw string) (string, error) {
-	parsed, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" {
-		return "", exit(2, "provider=cloud-run-sandbox gateway URL must be an absolute HTTPS URL")
-	}
-	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return "", exit(2, "provider=cloud-run-sandbox gateway URL must not contain userinfo, query parameters, or a fragment")
-	}
-	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname())) {
-		return "", exit(2, "provider=cloud-run-sandbox gateway URL must use HTTPS except for loopback development endpoints")
-	}
-	host := strings.ToLower(parsed.Hostname())
-	port := parsed.Port()
-	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
-		port = ""
-	}
-	if port != "" {
-		parsed.Host = net.JoinHostPort(host, port)
-	} else if strings.Contains(host, ":") {
-		parsed.Host = "[" + host + "]"
-	} else {
-		parsed.Host = host
-	}
-	parsed.Path = strings.TrimRight(parsed.Path, "/")
-	parsed.RawPath = ""
-	return strings.TrimRight(parsed.String(), "/"), nil
+	return shared.NormalizeHTTPSURL(raw, shared.EndpointURLErrors{
+		Invalid:    exit(2, "provider=cloud-run-sandbox gateway URL must be an absolute HTTPS URL"),
+		Components: exit(2, "provider=cloud-run-sandbox gateway URL must not contain userinfo, query parameters, or a fragment"),
+		Insecure:   exit(2, "provider=cloud-run-sandbox gateway URL must use HTTPS except for loopback development endpoints"),
+	})
 }
 
 func isLoopbackHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return shared.IsLoopbackHost(host)
 }
 
 func cloudRunSandboxRedirectError(destination *url.URL) error {

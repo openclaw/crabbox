@@ -6,17 +6,16 @@ import (
 	"strings"
 	"time"
 
-	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func (b *backend) syncWorkspace(ctx context.Context, api bridgeClient, sandboxID string, req RunRequest, workdir string) ([]timingPhase, time.Duration, error) {
-	return core.RunDelegatedArchiveSync(ctx, core.DelegatedArchiveSyncRequest{
+	return shared.RunSandboxArchiveSync(ctx, shared.SandboxArchiveSyncRequest{
 		Config:              b.cfg,
 		Repo:                req.Repo,
 		ForceSyncLarge:      req.ForceSyncLarge,
 		Workdir:             workdir,
 		TempPattern:         "crabbox-cloudflare-sandbox-sync-*.tgz",
-		RemoteArchiveDir:    "/tmp",
 		RemoteArchivePrefix: "crabbox-cloudflare-sandbox-sync-",
 		PhaseName:           "cloudflare_sandbox_sync",
 		Provider:            providerName,

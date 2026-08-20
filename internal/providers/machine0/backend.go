@@ -949,12 +949,7 @@ func sleepContext(ctx context.Context, delay time.Duration) error {
 	}
 }
 func firstNonBlank(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
+	return shared.FirstNonBlankTrimmed(values...)
 }
 func firstLine(value string) string {
 	if line, _, ok := strings.Cut(strings.TrimSpace(value), "\n"); ok {

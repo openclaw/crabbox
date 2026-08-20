@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"path"
 	"strings"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type flagValues struct {
@@ -196,11 +198,7 @@ func cuaAPIURL(cfg Config) (string, error) {
 }
 
 func isLoopbackHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return shared.IsLoopbackHost(host)
 }
 
 func canonicalHostname(host string) string {

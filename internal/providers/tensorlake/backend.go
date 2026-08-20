@@ -2,14 +2,14 @@ package tensorlake
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"path"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func NewTensorlakeBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
@@ -439,11 +439,7 @@ func isReadyState(state string) bool {
 }
 
 func randomSuffix() string {
-	var b [3]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return fmt.Sprintf("%x", time.Now().UnixNano())[:6]
-	}
-	return hex.EncodeToString(b[:])
+	return shared.RandomSuffix()
 }
 
 func buildCommand(command []string, shellMode bool) ([]string, error) {

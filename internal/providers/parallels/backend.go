@@ -448,11 +448,7 @@ func blank(value, fallback string) string {
 }
 
 func useStoredTestboxKey(target *SSHTarget, leaseID string) {
-	if keyPath, err := core.TestboxKeyPath(leaseID); err == nil {
-		if _, statErr := os.Stat(keyPath); statErr == nil {
-			target.Key = keyPath
-		}
-	}
+	shared.UseStoredTestboxKey(target, leaseID)
 }
 
 func parallelsLeaseFromVMName(name string) (string, string) {

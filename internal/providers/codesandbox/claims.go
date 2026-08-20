@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const (
@@ -248,11 +250,7 @@ func leadingEnvAssignment(command []string) bool {
 }
 
 func randomSuffix() string {
-	var b [3]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return fmt.Sprintf("%x", time.Now().UnixNano())[:6]
-	}
-	return hex.EncodeToString(b[:])
+	return shared.RandomSuffix()
 }
 
 func (b *codeSandboxBackend) now() time.Time {

@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net"
 	"net/http"
 	"net/url"
@@ -306,106 +305,43 @@ func (c *cubesandboxClient) DeleteSandbox(ctx context.Context, sandboxID string)
 }
 
 func (c *cubesandboxClient) UploadFile(ctx context.Context, session cubesandboxSession, targetPath string, r io.Reader) error {
-	endpoint, err := url.Parse(c.envdURL(session, "/files"))
-	if err != nil {
-		return err
-	}
-	query := endpoint.Query()
-	query.Set("path", targetPath)
-	if strings.TrimSpace(c.user) != "" {
-		query.Set("username", c.user)
-	}
-	endpoint.RawQuery = query.Encode()
-	pr, pw := io.Pipe()
-	writer := multipart.NewWriter(pw)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), pr)
-	if err != nil {
-		_ = pr.CloseWithError(err)
-		_ = pw.CloseWithError(err)
-		return err
-	}
-	c.setEnvdHeaders(req, session)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	go func() {
-		part, err := writer.CreateFormFile("file", targetPath)
-		if err != nil {
-			_ = pw.CloseWithError(err)
-			return
-		}
-		if _, err := io.Copy(part, r); err != nil {
-			_ = pw.CloseWithError(err)
-			return
-		}
-		if err := writer.Close(); err != nil {
-			_ = pw.CloseWithError(err)
-			return
-		}
-		_ = pw.Close()
-	}()
-	resp, err := shared.SecureHTTPClient(c.dataPlaneHTTPClient(), req.URL, cubeSandboxRedirectError).Do(req)
-	if err != nil {
-		_ = pr.CloseWithError(err)
-		_ = pw.CloseWithError(err)
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return &cubesandboxAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: shared.RedactErrorSecrets(summarizeJSON(data), session.EnvdAccessToken)}
-	}
-	_, _ = io.Copy(io.Discard, resp.Body)
-	return nil
+	return shared.UploadEnvdFile(ctx, shared.EnvdUploadFileRequest{
+		Endpoint:       c.envdURL(session, "/files"),
+		TargetPath:     targetPath,
+		User:           c.user,
+		AccessToken:    session.EnvdAccessToken,
+		Content:        r,
+		HTTPClient:     c.dataPlaneHTTPClient(),
+		SetHeaders:     func(req *http.Request) { c.setEnvdHeaders(req, session) },
+		RedirectError:  cubeSandboxRedirectError,
+		SummarizeError: summarizeJSON,
+		APIError: func(statusCode int, status, body string) error {
+			return &cubesandboxAPIError{StatusCode: statusCode, Status: status, Body: body}
+		},
+	})
 }
 
 func (c *cubesandboxClient) StartProcess(ctx context.Context, session cubesandboxSession, req cubesandboxProcessRequest) (int, error) {
-	if req.Stdout == nil {
-		req.Stdout = io.Discard
-	}
-	if req.Stderr == nil {
-		req.Stderr = io.Discard
-	}
-	env := req.Env
-	if env == nil {
-		env = map[string]string{}
-	}
-	start := map[string]any{
-		"process": map[string]any{
-			"cmd":  "/bin/bash",
-			"args": []string{"-l", "-c", req.Command},
-			"envs": env,
-			"cwd":  req.CWD,
+	return shared.StartEnvdProcess(ctx, shared.EnvdProcessRequest{
+		Endpoint:       c.envdURL(session, "/process.Process/Start"),
+		Command:        req.Command,
+		CWD:            req.CWD,
+		Env:            req.Env,
+		User:           req.User,
+		Timeout:        req.Timeout,
+		Stdout:         req.Stdout,
+		Stderr:         req.Stderr,
+		AccessToken:    session.EnvdAccessToken,
+		HTTPClient:     c.dataPlaneHTTPClient(),
+		SetHeaders:     func(httpReq *http.Request) { c.setEnvdHeaders(httpReq, session) },
+		RedirectError:  cubeSandboxRedirectError,
+		EncodeEnvelope: encodeConnectJSONEnvelope,
+		ParseStream:    parseCubeSandboxProcessStream,
+		SummarizeError: summarizeJSON,
+		APIError: func(statusCode int, status, body string) error {
+			return &cubesandboxAPIError{StatusCode: statusCode, Status: status, Body: body}
 		},
-		"stdin": false,
-	}
-	body, err := encodeConnectJSONEnvelope(start)
-	if err != nil {
-		return 1, err
-	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.envdURL(session, "/process.Process/Start"), bytes.NewReader(body))
-	if err != nil {
-		return 1, err
-	}
-	c.setEnvdHeaders(httpReq, session)
-	httpReq.Header.Set("Connect-Protocol-Version", "1")
-	httpReq.Header.Set("Connect-Content-Encoding", "identity")
-	httpReq.Header.Set("Content-Type", "application/connect+json")
-	httpReq.Header.Set("Keepalive-Ping-Interval", "50")
-	if req.User != "" {
-		httpReq.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(req.User+":")))
-	}
-	if timeoutMs := durationMillisCeil(req.Timeout); timeoutMs > 0 {
-		httpReq.Header.Set("Connect-Timeout-Ms", fmt.Sprint(timeoutMs))
-	}
-	resp, err := shared.SecureHTTPClient(c.dataPlaneHTTPClient(), httpReq.URL, cubeSandboxRedirectError).Do(httpReq)
-	if err != nil {
-		return 1, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return 1, &cubesandboxAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: shared.RedactErrorSecrets(summarizeJSON(data), session.EnvdAccessToken)}
-	}
-	return parseCubeSandboxProcessStream(resp.Body, req.Stdout, req.Stderr, session.EnvdAccessToken)
+	})
 }
 
 func (c *cubesandboxClient) doJSON(ctx context.Context, method, path string, query url.Values, body any, out any) error {
@@ -617,11 +553,4 @@ func writeBase64(value string, w io.Writer) error {
 	}
 	_, err = w.Write(data)
 	return err
-}
-
-func durationMillisCeil(duration time.Duration) int64 {
-	if duration <= 0 {
-		return 0
-	}
-	return int64((duration + time.Millisecond - 1) / time.Millisecond)
 }

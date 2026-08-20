@@ -2,7 +2,6 @@ package applecontainer
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"io"
 	"net/netip"
@@ -538,31 +537,7 @@ func appleContainerCacheRoot() (string, error) {
 }
 
 func appleContainerCacheVolumeName(key string) string {
-	key = strings.TrimSpace(key)
-	sum := sha256.Sum256([]byte(key))
-	var safe strings.Builder
-	for _, r := range key {
-		switch {
-		case r >= 'a' && r <= 'z':
-			safe.WriteRune(r)
-		case r >= 'A' && r <= 'Z':
-			safe.WriteRune(r + ('a' - 'A'))
-		case r >= '0' && r <= '9':
-			safe.WriteRune(r)
-		case r == '.' || r == '_' || r == '-':
-			safe.WriteRune(r)
-		default:
-			safe.WriteByte('-')
-		}
-		if safe.Len() >= 80 {
-			break
-		}
-	}
-	name := strings.Trim(safe.String(), ".-_")
-	if name == "" {
-		name = "volume"
-	}
-	return fmt.Sprintf("crabbox-cache-%s-%x", name, sum[:6])
+	return shared.CacheVolumeName(key)
 }
 
 func (b *backend) listContainers(ctx context.Context) ([]inspectContainer, error) {
@@ -1029,12 +1004,7 @@ func uniqueAppleContainerDNSServers(servers []string, limit int) []string {
 }
 
 func firstNonBlank(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
+	return shared.FirstNonBlank(values...)
 }
 
 // bootstrapScript provisions sshd, the Crabbox SSH user and work root inside a

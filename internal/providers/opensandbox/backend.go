@@ -18,6 +18,7 @@ import (
 	"time"
 
 	sdk "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type openSandboxBackend struct {
@@ -1009,71 +1010,39 @@ func removeOpenSandboxRecoveryClaim(leaseID, providerScope string) error {
 }
 
 func resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration, baseURL string) (string, string, string, error) {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return "", "", "", exit(2, "provider=opensandbox requires a Crabbox-created sandbox slug or lease id")
-	}
-	exactLeaseID := id
-	if !strings.HasPrefix(exactLeaseID, leasePrefix) {
-		exactLeaseID = leasePrefix + exactLeaseID
-	}
-	if claim, err := readLeaseClaim(exactLeaseID); err != nil {
-		return "", "", "", err
-	} else if claim.LeaseID == exactLeaseID && claim.Provider == providerName {
-		return finishResolvedLease(claim, repoRoot, reclaim, idleTimeout, baseURL)
-	}
-	claim, ok, err := resolveOpenSandboxLeaseClaim(id, baseURL)
-	if err != nil {
-		return "", "", "", err
-	}
-	if ok {
-		return finishResolvedLease(claim, repoRoot, reclaim, idleTimeout, baseURL)
-	}
-	return "", "", "", exit(4, "opensandbox sandbox %q is not claimed by Crabbox; use a Crabbox slug or %s<sandbox-id>", id, leasePrefix)
+	return shared.ResolveScopedLeaseID(id, shared.ScopedLeaseResolver{
+		Provider:      providerName,
+		LeasePrefix:   leasePrefix,
+		ReadClaim:     readLeaseClaim,
+		ListClaims:    listOpenSandboxLeaseClaims,
+		ValidateClaim: func(claim LeaseClaim) error { return validateOpenSandboxClaimScope(claim, baseURL) },
+		FinishClaim: func(claim LeaseClaim) (string, string, string, error) {
+			return finishResolvedLease(claim, repoRoot, reclaim, idleTimeout, baseURL)
+		},
+		EmptyIdentifierError: func() error {
+			return exit(2, "provider=opensandbox requires a Crabbox-created sandbox slug or lease id")
+		},
+		UnclaimedIdentifierError: func(identifier string) error {
+			return exit(4, "opensandbox sandbox %q is not claimed by Crabbox; use a Crabbox slug or %s<sandbox-id>", identifier, leasePrefix)
+		},
+	})
 }
 
 func resolveOpenSandboxLeaseClaim(identifier, baseURL string) (LeaseClaim, bool, error) {
-	claims, err := listOpenSandboxLeaseClaims()
-	if err != nil {
-		return LeaseClaim{}, false, err
-	}
-	for _, claim := range claims {
-		if claim.Provider == providerName && claim.LeaseID == identifier {
-			if err := validateOpenSandboxClaimScope(claim, baseURL); err != nil {
-				return LeaseClaim{}, false, err
-			}
-			return claim, true, nil
-		}
-	}
-	slug := normalizeLeaseSlug(identifier)
-	if slug != "" {
-		for _, claim := range claims {
-			if claim.Provider == providerName && normalizeLeaseSlug(claim.Slug) == slug {
-				if err := validateOpenSandboxClaimScope(claim, baseURL); err != nil {
-					return LeaseClaim{}, false, err
-				}
-				return claim, true, nil
-			}
-		}
-	}
-	return LeaseClaim{}, false, nil
+	return shared.ResolveScopedLeaseClaim(identifier, providerName, listOpenSandboxLeaseClaims, func(claim LeaseClaim) error {
+		return validateOpenSandboxClaimScope(claim, baseURL)
+	})
 }
 
 func finishResolvedLease(claim LeaseClaim, repoRoot string, reclaim bool, idleTimeout time.Duration, baseURL string) (string, string, string, error) {
-	if err := validateOpenSandboxClaimScope(claim, baseURL); err != nil {
-		return "", "", "", err
-	}
-	if repoRoot != "" {
-		if err := claimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, claim.ProviderScope, claim.Pond, repoRoot,
-			timeoutOrDefault(idleTimeout, time.Duration(claim.IdleTimeoutSeconds)*time.Second), reclaim); err != nil {
-			return "", "", "", err
-		}
-	}
-	slug := claim.Slug
-	if strings.TrimSpace(slug) == "" {
-		slug = newLeaseSlug(claim.LeaseID)
-	}
-	return claim.LeaseID, strings.TrimPrefix(claim.LeaseID, leasePrefix), slug, nil
+	return shared.FinishScopedLease(claim, shared.ScopedLeaseFinishOptions{
+		Provider:      providerName,
+		LeasePrefix:   leasePrefix,
+		RepoRoot:      repoRoot,
+		Reclaim:       reclaim,
+		IdleTimeout:   idleTimeout,
+		ValidateClaim: func(claim LeaseClaim) error { return validateOpenSandboxClaimScope(claim, baseURL) },
+	})
 }
 
 func authorizeOpenSandboxRepoClaim(claim LeaseClaim, repoRoot string, reclaim bool) error {
@@ -1248,11 +1217,7 @@ func newSandboxName(repo Repo) string {
 }
 
 func randomSuffix() string {
-	var b [3]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return fmt.Sprintf("%x", time.Now().UnixNano())[:6]
-	}
-	return hex.EncodeToString(b[:])
+	return shared.RandomSuffix()
 }
 
 func (b *openSandboxBackend) now() time.Time {

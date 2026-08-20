@@ -327,12 +327,7 @@ func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (co
 }
 
 func firstNonBlank(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
+	return shared.FirstNonEmpty(values...)
 }
 
 func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkRequest) error {

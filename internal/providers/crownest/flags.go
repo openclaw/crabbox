@@ -2,9 +2,10 @@ package crownest
 
 import (
 	"flag"
-	"net"
 	"net/url"
 	"strings"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type flagValues struct {
@@ -91,11 +92,7 @@ func validateBaseURL(raw string) (string, error) {
 }
 
 func isLoopbackHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return shared.IsLoopbackHost(host)
 }
 
 func canonicalHostPort(parsed *url.URL) string {
