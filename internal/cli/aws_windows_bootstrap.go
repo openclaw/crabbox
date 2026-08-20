@@ -166,7 +166,11 @@ func bootstrapManagedWindowsWSL2(ctx context.Context, cfg Config, target *SSHTar
 			return err
 		}
 		target.Port = bootstrapTarget.Port
-		if probeWindowsWSL2BootstrapComplete(ctx, bootstrapTarget, target, 20*time.Second) {
+		ready, err := probeWindowsWSL2BootstrapComplete(ctx, bootstrapTarget, target, stderr, 20*time.Second)
+		if err != nil {
+			return err
+		}
+		if ready {
 			return nil
 		}
 		fmt.Fprintln(stderr, "Windows WSL2 setup marker is not ready after bootstrap; retrying bootstrap")
@@ -202,9 +206,13 @@ func writeWindowsBootstrapSSHWarning(stderr io.Writer, phase string, err error, 
 	fmt.Fprintf(stderr, "warning: %s SSH command ended before completion; waiting for reboot/ready state: %v\n%s\n", phase, err, detail)
 }
 
-func probeWindowsWSL2BootstrapComplete(ctx context.Context, bootstrapTarget SSHTarget, target *SSHTarget, timeout time.Duration) bool {
+const windowsWSL2ReadinessDiagnosticBytes = 4096
+
+type windowsWSL2SSHRunner func(context.Context, SSHTarget, string) (string, error)
+
+func probeWindowsWSL2BootstrapComplete(ctx context.Context, bootstrapTarget SSHTarget, target *SSHTarget, stderr io.Writer, timeout time.Duration) (bool, error) {
 	if target.Host == "" {
-		return false
+		return false, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -217,11 +225,60 @@ if (-not (Test-Path -LiteralPath "C:\ProgramData\crabbox\setup-complete")) {
 		probe.Port = port
 		probe.FallbackPorts = []string{}
 		if runSSHQuietWithOptions(ctx, probe, remote, "2", "1") == nil {
+			if !recoverWindowsWSL2Readiness(ctx, probe, stderr, runSSHCombinedOutput) {
+				return false, exit(5, "Windows WSL2 work root remained unhealthy after one targeted distro restart")
+			}
 			target.Port = probe.Port
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
+}
+
+func recoverWindowsWSL2Readiness(ctx context.Context, target SSHTarget, stderr io.Writer, run windowsWSL2SSHRunner) bool {
+	readyCommand := powershellCommand(`$ErrorActionPreference = "Stop"
+& wsl.exe -d Crabbox --user root --exec /usr/local/bin/crabbox-ready
+if ($LASTEXITCODE -ne 0) { throw "crabbox-ready failed with exit $LASTEXITCODE" }`)
+	output, err := run(ctx, target, readyCommand)
+	if err == nil {
+		return true
+	}
+	writeWindowsWSL2ReadinessWarning(stderr, target, "failed; terminating the Crabbox distro once before retry", output, err)
+
+	terminateCommand := powershellCommand(`$ErrorActionPreference = "Stop"
+wsl.exe --terminate Crabbox | Out-Host
+if ($LASTEXITCODE -ne 0) { throw "wsl --terminate Crabbox failed with exit $LASTEXITCODE" }`)
+	output, err = run(ctx, target, terminateCommand)
+	if err != nil {
+		writeWindowsWSL2ReadinessWarning(stderr, target, "terminate failed; recovery stopped", output, err)
+		return false
+	}
+
+	output, err = run(ctx, target, readyCommand)
+	if err != nil {
+		writeWindowsWSL2ReadinessWarning(stderr, target, "failed after one targeted restart", output, err)
+		return false
+	}
+	return true
+}
+
+func writeWindowsWSL2ReadinessWarning(stderr io.Writer, target SSHTarget, message, output string, err error) {
+	detail := strings.TrimSpace(output + "\n" + err.Error())
+	detail = boundedWindowsWSL2Diagnostic(redactSSHTransportDiagnostic(target, detail))
+	fmt.Fprintf(stderr, "warning: Windows WSL2 readiness %s", message)
+	if detail != "" {
+		fmt.Fprintf(stderr, ":\n%s", detail)
+	}
+	fmt.Fprintln(stderr)
+}
+
+func boundedWindowsWSL2Diagnostic(detail string) string {
+	const suffix = "\n[crabbox: WSL2 readiness diagnostic truncated]"
+	if len(detail) <= windowsWSL2ReadinessDiagnosticBytes {
+		return detail
+	}
+	limit := windowsWSL2ReadinessDiagnosticBytes - len(suffix)
+	return strings.ToValidUTF8(detail[:limit], "") + suffix
 }
 
 func runWindowsWSL2BootstrapAttempt(ctx context.Context, cfg Config, bootstrapTarget SSHTarget, publicKey string, stderr io.Writer) error {

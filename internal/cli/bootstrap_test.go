@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -775,6 +776,13 @@ func TestAWSUserDataWindowsWSL2Profile(t *testing.T) {
 		"cat >/usr/local/bin/crabbox-ready",
 		`wslpath -w '/work/crabbox'`,
 		`test -w '/work/crabbox'`,
+		`trap cleanup EXIT HUP INT TERM`,
+		`mktemp -d '/work/crabbox'/.crabbox-ready.XXXXXX`,
+		`os.fsync(fd)`,
+		`if handle.read() != payload: raise OSError("work-root write comparison failed")`,
+		`os.rename(write_path, renamed_path)`,
+		`os.unlink(renamed_path)`,
+		`sync -f '/work/crabbox'`,
 		"PubkeyAuthentication yes",
 		"PasswordAuthentication no",
 	} {
@@ -839,7 +847,135 @@ exit 0
 	}
 }
 
-func TestWindowsWSL2BootstrapCompleteProbeUsesWindowsMarker(t *testing.T) {
+func TestWindowsWSLReadyScriptDurabilityContract(t *testing.T) {
+	got := windowsWSLReadyScript("/work/crabbox")
+	for _, want := range []string{
+		"python3 --version >/dev/null",
+		"trap cleanup EXIT HUP INT TERM",
+		`rm -rf -- "$probe_dir"`,
+		`mktemp -d '/work/crabbox'/.crabbox-ready.XXXXXX`,
+		`python3 - "$probe_dir" "$payload"`,
+		`handle.flush()`,
+		`os.fsync(handle.fileno())`,
+		`if handle.read() != payload: raise OSError("work-root write comparison failed")`,
+		`os.rename(write_path, renamed_path)`,
+		`os.O_RDONLY | os.O_DIRECTORY`,
+		`os.unlink(renamed_path)`,
+		`sync -f '/work/crabbox'`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("WSL readiness script missing %q:\n%s", want, got)
+		}
+	}
+	if gotCount := strings.Count(got, "fsync_dir()"); gotCount != 3 {
+		t.Fatalf("WSL readiness directory fsync definition/calls=%d want 3", gotCount)
+	}
+}
+
+func TestWindowsWSLReadyScriptCleansProbeDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("generated readiness script requires bash")
+	}
+	for _, failTransaction := range []bool{false, true} {
+		t.Run(map[bool]string{false: "success", true: "failure"}[failTransaction], func(t *testing.T) {
+			root := t.TempDir()
+			bin := t.TempDir()
+			for _, name := range []string{"git", "rsync", "curl", "jq", "trufflehog", "wslpath", "sync"} {
+				path := filepath.Join(bin, name)
+				if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if failTransaction {
+				python := filepath.Join(bin, "python3")
+				script := "#!/bin/sh\nif [ \"$1\" = --version ]; then exit 0; fi\ncat >/dev/null\nexit 9\n"
+				if err := os.WriteFile(python, []byte(script), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			scriptPath := filepath.Join(t.TempDir(), "crabbox-ready")
+			if err := os.WriteFile(scriptPath, []byte(windowsWSLReadyScript(root)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("bash", scriptPath)
+			cmd.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			err := cmd.Run()
+			if failTransaction == (err == nil) {
+				t.Fatalf("failTransaction=%t error=%v", failTransaction, err)
+			}
+			matches, globErr := filepath.Glob(filepath.Join(root, ".crabbox-ready.*"))
+			if globErr != nil {
+				t.Fatal(globErr)
+			}
+			if len(matches) != 0 {
+				t.Fatalf("readiness probe left cleanup paths: %v", matches)
+			}
+		})
+	}
+}
+
+func TestRecoverWindowsWSL2Readiness(t *testing.T) {
+	tests := []struct {
+		name           string
+		errors         []error
+		wantReady      bool
+		wantCalls      int
+		wantTerminates int
+	}{
+		{name: "success", errors: []error{nil}, wantReady: true, wantCalls: 1},
+		{name: "failure then recovery", errors: []error{errors.New("readiness failed"), nil, nil}, wantReady: true, wantCalls: 3, wantTerminates: 1},
+		{name: "terminate failure", errors: []error{errors.New("readiness failed"), errors.New("terminate failed")}, wantCalls: 2, wantTerminates: 1},
+		{name: "second failure", errors: []error{errors.New("readiness failed"), nil, errors.New("readiness failed again")}, wantReady: false, wantCalls: 3, wantTerminates: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var commands []string
+			runner := func(_ context.Context, _ SSHTarget, command string) (string, error) {
+				commands = append(commands, decodePowerShellCommand(t, command))
+				return "probe output", tt.errors[len(commands)-1]
+			}
+			var stderr bytes.Buffer
+			got := recoverWindowsWSL2Readiness(context.Background(), SSHTarget{}, &stderr, runner)
+			if got != tt.wantReady {
+				t.Fatalf("ready=%t want %t; stderr=%s", got, tt.wantReady, stderr.String())
+			}
+			if len(commands) != tt.wantCalls {
+				t.Fatalf("calls=%d want %d; commands=%v", len(commands), tt.wantCalls, commands)
+			}
+			terminates := 0
+			for _, command := range commands {
+				if strings.Contains(command, "wsl.exe --terminate Crabbox") {
+					terminates++
+				}
+				for _, forbidden := range []string{"--unregister", "Restart-Computer", "shutdown.exe", "reboot", "actions hydrate"} {
+					if strings.Contains(command, forbidden) {
+						t.Fatalf("recovery command contains forbidden operation %q:\n%s", forbidden, command)
+					}
+				}
+			}
+			if terminates != tt.wantTerminates {
+				t.Fatalf("terminate calls=%d want %d; commands=%v", terminates, tt.wantTerminates, commands)
+			}
+		})
+	}
+}
+
+func TestWindowsWSL2ReadinessDiagnosticIsRedactedAndCapped(t *testing.T) {
+	secret := "super-secret-token"
+	detail := "Authorization: Bearer " + secret + "\n" + strings.Repeat("x", windowsWSL2ReadinessDiagnosticBytes*2)
+	got := boundedWindowsWSL2Diagnostic(RedactDiagnosticSecrets(detail))
+	if strings.Contains(got, secret) || !strings.Contains(got, diagnosticRedaction) {
+		t.Fatalf("diagnostic was not redacted: %q", got)
+	}
+	if len(got) > windowsWSL2ReadinessDiagnosticBytes {
+		t.Fatalf("diagnostic bytes=%d want <=%d", len(got), windowsWSL2ReadinessDiagnosticBytes)
+	}
+	if !strings.Contains(got, "diagnostic truncated") {
+		t.Fatalf("diagnostic missing truncation marker: %q", got)
+	}
+}
+
+func TestWindowsWSL2BootstrapCompleteProbeUsesMarkerAndReadiness(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
 	}
@@ -855,28 +991,39 @@ func TestWindowsWSL2BootstrapCompleteProbeUsesWindowsMarker(t *testing.T) {
 	target := bootstrapTarget
 	target.WindowsMode = windowsModeWSL2
 
-	if !probeWindowsWSL2BootstrapComplete(context.Background(), bootstrapTarget, &target, 30*time.Second) {
-		t.Fatal("setup marker probe should pass with fake ssh")
+	var stderr bytes.Buffer
+	ready, err := probeWindowsWSL2BootstrapComplete(context.Background(), bootstrapTarget, &target, &stderr, 30*time.Second)
+	if err != nil || !ready {
+		t.Fatalf("setup and readiness probes should pass with fake ssh: %s", stderr.String())
 	}
 	data, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	commands := recordedSSHCommands(string(data))
-	if len(commands) != 1 {
-		t.Fatalf("ssh commands=%d want 1:\n%s", len(commands), data)
+	if len(commands) != 2 {
+		t.Fatalf("ssh commands=%d want 2:\n%s", len(commands), data)
 	}
-	decoded := decodePowerShellCommand(t, commands[0])
+	marker := decodePowerShellCommand(t, commands[0])
 	for _, want := range []string{
 		`Test-Path -LiteralPath "C:\ProgramData\crabbox\setup-complete"`,
 		`setup-complete marker missing`,
 	} {
-		if !strings.Contains(decoded, want) {
-			t.Fatalf("setup marker probe missing %q in %q", want, decoded)
+		if !strings.Contains(marker, want) {
+			t.Fatalf("setup marker probe missing %q in %q", want, marker)
 		}
 	}
-	if strings.Contains(decoded, "wsl.exe") {
-		t.Fatalf("setup marker probe should not invoke WSL: %q", decoded)
+	if strings.Contains(marker, "wsl.exe") {
+		t.Fatalf("setup marker probe should not invoke WSL: %q", marker)
+	}
+	readiness := decodePowerShellCommand(t, commands[1])
+	for _, want := range []string{
+		`wsl.exe -d Crabbox --user root --exec /usr/local/bin/crabbox-ready`,
+		`crabbox-ready failed with exit $LASTEXITCODE`,
+	} {
+		if !strings.Contains(readiness, want) {
+			t.Fatalf("readiness probe missing %q in %q", want, readiness)
+		}
 	}
 }
 

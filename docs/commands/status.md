@@ -71,6 +71,11 @@ from idling out only when an exact local claim matches the configured provider
 scope and live resource identity. Claimless or mismatched resources remain
 strictly read-only while status waits.
 
+For SSH-backed leases, `ready` means the configured SSH ready-check succeeds.
+It does not mean repository Actions hydration has completed; use
+`crabbox actions hydrate` or the configured `crabbox run` hydration flow for
+that separate workspace state.
+
 ## Flags
 
 ```text

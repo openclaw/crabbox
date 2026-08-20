@@ -407,6 +407,54 @@ function windowsWSLWorkRoot(config: LeaseConfig): string {
   return config.workRoot || "/work/crabbox";
 }
 
+function windowsWSLReadyScript(workRoot: string): string {
+  return `#!/usr/bin/env bash
+set -euo pipefail
+git --version >/dev/null
+python3 --version >/dev/null
+rsync --version >/dev/null
+curl --version >/dev/null
+jq --version >/dev/null
+trufflehog --no-update --version >/dev/null
+test -e /proc/sys/fs/binfmt_misc/WSLInterop
+wslpath -w ${shellQuote(workRoot)} >/dev/null
+test -w ${shellQuote(workRoot)}
+probe_dir=
+cleanup() {
+  if [ -n "$probe_dir" ]; then
+    rm -rf -- "$probe_dir"
+  fi
+}
+trap cleanup EXIT HUP INT TERM
+probe_dir="$(mktemp -d ${shellQuote(workRoot)}/.crabbox-ready.XXXXXX)"
+payload="crabbox-ready:$BASHPID"
+python3 - "$probe_dir" "$payload" <<'PY'
+import os
+import sys
+root, payload = sys.argv[1:]
+write_path = os.path.join(root, "write")
+renamed_path = os.path.join(root, "renamed")
+with open(write_path, "w", encoding="utf-8") as handle:
+    handle.write(payload)
+    handle.flush()
+    os.fsync(handle.fileno())
+with open(write_path, encoding="utf-8") as handle:
+    if handle.read() != payload: raise OSError("work-root write comparison failed")
+os.rename(write_path, renamed_path)
+def fsync_dir():
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try: os.fsync(fd)
+    finally: os.close(fd)
+fsync_dir()
+with open(renamed_path, encoding="utf-8") as handle:
+    if handle.read() != payload: raise OSError("work-root rename comparison failed")
+os.unlink(renamed_path)
+fsync_dir()
+PY
+sync -f ${shellQuote(workRoot)}
+`;
+}
+
 function windowsManagedCorePreludePowerShell(config: LeaseConfig): string {
   if (config.windowsMode === "normal" && config.desktop) {
     return `
@@ -515,7 +563,7 @@ Acquire::https::Timeout "30";
 APT
 rm -rf /var/lib/apt/lists/*
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl git rsync jq tmux
+apt-get install -y --no-install-recommends ca-certificates curl git jq python3-minimal rsync tmux
 trufflehog_version=${wslTruffleHogVersion}
 trufflehog_sha256=${wslTruffleHogAMD64SHA256}
 if ! command -v trufflehog >/dev/null 2>&1 || ! trufflehog --no-update --version | grep -Eq '(^|[[:space:]])${wslTruffleHogVersion.replaceAll(".", "[.]")}($|[[:space:]])'; then
@@ -552,15 +600,7 @@ if [ -d /proc/sys/fs/binfmt_misc ]; then
   fi
 fi
 cat >/usr/local/bin/crabbox-ready <<'READY'
-#!/usr/bin/env bash
-set -euo pipefail
-git --version >/dev/null
-rsync --version >/dev/null
-curl --version >/dev/null
-jq --version >/dev/null
-trufflehog --no-update --version >/dev/null
-test -e /proc/sys/fs/binfmt_misc/WSLInterop
-test -w ${shellQuote(workRoot)}
+${windowsWSLReadyScript(workRoot)}
 READY
 chmod 0755 /usr/local/bin/crabbox-ready
 touch /var/lib/crabbox/bootstrapped

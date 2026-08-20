@@ -40,6 +40,10 @@ the box. Pass `--reclaim` to intentionally move a lease to the current repo.
 When local defaults point at another backend, repeat the same provider/target
 routing flags used to create the lease.
 
+`crabbox status --wait` only waits for the lease's SSH/bootstrap ready-check.
+It can return before Actions hydration has created or validated the workspace
+marker; use `actions hydrate` or the configured `run` flow for that state.
+
 ### hydrate
 
 Populates a lease's workspace from the configured workflow. Requires `--id` and

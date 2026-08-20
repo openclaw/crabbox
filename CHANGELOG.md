@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Rejected managed WSL2 leases whose work root fails a durable filesystem probe, with one targeted distro restart before normal VM rollback.
 - Preserved exact recovery claims and visible rollback failures for AWS Lambda MicroVMs, canceled Blaxel processes when polling is interrupted, and honored W&B sandbox status wait and terminal-state handling.
 - Required an exact local Cloudflare Dynamic Workers claim for the configured loader endpoint before deleting run metadata, while preserving raw run IDs for read-only status.
 - Made E2B and Azure Dynamic Sessions workspace sync transactional, retained newly created resources after requested sync/setup failures, and enforced sync, status-wait, and cleanup deadlines.

@@ -62,6 +62,11 @@ Linux script checks:
 - the marker file `/var/lib/crabbox/bootstrapped` exists;
 - the work root is writable.
 
+Managed WSL2 bootstrap also performs a small durable create/write/fsync/read/
+rename/delete cycle under the work root. Bootstrap retries one targeted
+`wsl.exe --terminate Crabbox` recovery when that probe fails, then rejects the
+lease so normal provider rollback can replace an unhealthy VM.
+
 Optional lease capabilities (below) and Tailscale extend `crabbox-ready` with
 additional checks, so readiness always reflects the full requested capability
 set.

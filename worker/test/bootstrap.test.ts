@@ -696,7 +696,24 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain('mv -f "$trufflehog_candidate" /usr/local/bin/trufflehog');
     expect(got).toContain("trufflehog --no-update --version >/dev/null");
     expect(got).toContain("test -e /proc/sys/fs/binfmt_misc/WSLInterop");
+    expect(got).toContain(
+      "apt-get install -y --no-install-recommends ca-certificates curl git jq python3-minimal rsync tmux",
+    );
+    expect(got).toContain("python3 --version >/dev/null");
     expect(got).toContain("test -w '/work/crabbox'");
+    expect(got).toContain("trap cleanup EXIT HUP INT TERM");
+    expect(got).toContain("mktemp -d '/work/crabbox'/.crabbox-ready.XXXXXX");
+    expect(got).toContain('python3 - "$probe_dir" "$payload"');
+    expect(got).toContain("handle.flush()");
+    expect(got).toContain("os.fsync(handle.fileno())");
+    expect(got).toContain(
+      'if handle.read() != payload: raise OSError("work-root write comparison failed")',
+    );
+    expect(got).toContain("os.rename(write_path, renamed_path)");
+    expect(got).toContain("os.O_RDONLY | os.O_DIRECTORY");
+    expect(got).toContain("os.unlink(renamed_path)");
+    expect(got).toContain("sync -f '/work/crabbox'");
+    expect(got.match(/fsync_dir\(\)/g)).toHaveLength(3);
     expect(got).toContain("PubkeyAuthentication yes");
     expect(got).toContain("PasswordAuthentication no");
     expect(got.lastIndexOf("Assert-CrabboxFileSHA256 $wslRootfs")).toBeLessThan(
