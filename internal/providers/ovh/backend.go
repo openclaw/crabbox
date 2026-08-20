@@ -1020,28 +1020,33 @@ func (b *Backend) waitForInstanceIP(ctx context.Context, client API, projectID, 
 	if b.ipWaitInterval > 0 {
 		interval = b.ipWaitInterval
 	}
-	for {
-		instance, err := client.GetInstance(ctx, projectID, instanceID)
-		if err == nil && publicIPv4(instance) != "" {
-			return instance, nil
-		}
-		if err != nil && !isTransientOVHControlPlaneError(err) {
-			return Instance{}, err
-		}
-		if b.now().After(deadline) {
-			if err != nil {
-				return Instance{}, core.Exit(5, "timed out waiting for OVH instance IP after transient error: %v", err)
+	result, err := shared.Poll(context.WithoutCancel(ctx), 0, interval,
+		func(context.Context, time.Duration) error {
+			if err := shared.SleepContext(ctx, interval); err != nil {
+				return ctx.Err()
 			}
-			return Instance{}, core.Exit(5, "timed out waiting for OVH instance IP")
-		}
-		timer := time.NewTimer(interval)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return Instance{}, ctx.Err()
-		case <-timer.C:
-		}
+			return nil
+		},
+		func(context.Context) (Instance, error) { return client.GetInstance(ctx, projectID, instanceID) },
+		func(_ context.Context, instance Instance, fetchErr error) (bool, error) {
+			if fetchErr == nil && publicIPv4(instance) != "" {
+				return true, nil
+			}
+			if fetchErr != nil && !isTransientOVHControlPlaneError(fetchErr) {
+				return false, fetchErr
+			}
+			if b.now().After(deadline) {
+				if fetchErr != nil {
+					return false, core.Exit(5, "timed out waiting for OVH instance IP after transient error: %v", fetchErr)
+				}
+				return false, core.Exit(5, "timed out waiting for OVH instance IP")
+			}
+			return false, nil
+		}, nil)
+	if err != nil {
+		return Instance{}, err
 	}
+	return result.Value, nil
 }
 
 func (b *Backend) now() time.Time {

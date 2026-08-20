@@ -7,6 +7,8 @@ import (
 	"io"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const (
@@ -423,30 +425,34 @@ func (b *backend) resolve(ctx context.Context, control controlPlane, identifier 
 
 func (b *backend) waitReady(ctx context.Context, control controlPlane, runner runnerAPI, vm microVM) (microVM, error) {
 	deadline := now(b.rt).Add(lifecycleWaitTimeout)
-	for {
-		current, err := control.Get(ctx, vm.ID)
-		if err != nil {
-			return microVM{}, err
-		}
-		vm = current
-		if microVMTerminal(vm.State) {
-			return microVM{}, exit(5, "AWS Lambda MicroVM %s entered %s: %s", vm.ID, vm.State, vm.StateReason)
-		}
-		if strings.EqualFold(vm.State, "RUNNING") {
-			healthCtx, cancel := context.WithTimeout(ctx, runnerHealthProbeTimeout)
-			err := runner.Health(healthCtx, vm)
-			cancel()
-			if err == nil {
-				return vm, nil
+	result, err := shared.Poll(context.WithoutCancel(ctx), 0, 2*time.Second,
+		func(context.Context, time.Duration) error { return sleepContext(ctx, 2*time.Second) },
+		func(context.Context) (microVM, error) { return control.Get(ctx, vm.ID) },
+		func(_ context.Context, current microVM, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
 			}
-		}
-		if now(b.rt).After(deadline) {
-			return microVM{}, exit(5, "timed out waiting for AWS Lambda MicroVM %s runner readiness", vm.ID)
-		}
-		if err := sleepContext(ctx, 2*time.Second); err != nil {
-			return microVM{}, err
-		}
+			vm = current
+			if microVMTerminal(vm.State) {
+				return false, exit(5, "AWS Lambda MicroVM %s entered %s: %s", vm.ID, vm.State, vm.StateReason)
+			}
+			if strings.EqualFold(vm.State, "RUNNING") {
+				healthCtx, cancel := context.WithTimeout(ctx, runnerHealthProbeTimeout)
+				err := runner.Health(healthCtx, vm)
+				cancel()
+				if err == nil {
+					return true, nil
+				}
+			}
+			if now(b.rt).After(deadline) {
+				return false, exit(5, "timed out waiting for AWS Lambda MicroVM %s runner readiness", vm.ID)
+			}
+			return false, nil
+		}, nil)
+	if err != nil {
+		return microVM{}, err
 	}
+	return result.Value, nil
 }
 
 func (b *backend) changeState(ctx context.Context, identifier, target string) error {

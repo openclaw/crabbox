@@ -7,6 +7,7 @@ import (
 
 	gosdk "github.com/islo-labs/go-sdk"
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const isloSSHDomain = "islo"
@@ -78,28 +79,52 @@ func waitForIsloSandboxRunning(ctx context.Context, client isloAPI, name string,
 	defer deadline.Stop()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-deadline.C:
-			return nil, exit(5, "timed out waiting for islo sandbox %s to become running", name)
-		case <-ticker.C:
-			sandbox, err := client.GetSandbox(ctx, name)
-			if err != nil {
-				return nil, isloError("get sandbox", err)
-			}
-			if sandbox == nil {
-				return nil, exit(4, "islo sandbox %s not found", name)
-			}
-			if isloStatusReady(sandbox.GetStatus()) {
-				return sandbox, nil
-			}
-			if isloStatusTerminal(sandbox.GetStatus()) {
-				return nil, exit(5, "islo sandbox %s entered terminal state=%s", name, sandbox.GetStatus())
-			}
-		}
+	type observation struct {
+		sandbox *gosdk.SandboxResponse
+		active  bool
 	}
+	initial := true
+	result, err := shared.Poll(context.WithoutCancel(ctx), 0, time.Second,
+		func(context.Context, time.Duration) error {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-deadline.C:
+				return exit(5, "timed out waiting for islo sandbox %s to become running", name)
+			case <-ticker.C:
+				return nil
+			}
+		},
+		func(context.Context) (observation, error) {
+			if initial {
+				initial = false
+				return observation{}, nil
+			}
+			sandbox, err := client.GetSandbox(ctx, name)
+			return observation{sandbox: sandbox, active: true}, err
+		},
+		func(_ context.Context, current observation, fetchErr error) (bool, error) {
+			if !current.active {
+				return false, nil
+			}
+			if fetchErr != nil {
+				return false, isloError("get sandbox", fetchErr)
+			}
+			if current.sandbox == nil {
+				return false, exit(4, "islo sandbox %s not found", name)
+			}
+			if isloStatusReady(current.sandbox.GetStatus()) {
+				return true, nil
+			}
+			if isloStatusTerminal(current.sandbox.GetStatus()) {
+				return false, exit(5, "islo sandbox %s entered terminal state=%s", name, current.sandbox.GetStatus())
+			}
+			return false, nil
+		}, nil)
+	if err != nil {
+		return nil, err
+	}
+	return result.Value.sandbox, nil
 }
 
 func (b *isloBackend) sshTargetForSandbox(name string) core.SSHTarget {

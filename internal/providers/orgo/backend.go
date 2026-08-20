@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const (
@@ -392,40 +394,58 @@ func (b *orgoBackend) ensureComputerRunning(ctx context.Context, client orgoAPI,
 func (b *orgoBackend) waitForComputerRunning(ctx context.Context, client orgoAPI, computer orgoComputer, startStopped bool) (orgoComputer, error) {
 	deadline := b.now().Add(orgoReadyTimeout)
 	startRequested := false
-	for {
-		state := normalizeOrgoStatus(computer.Status)
-		switch state {
-		case "running":
-			return computer, nil
-		case "error", "failed", "deleted":
-			return computer, exit(5, "orgo computer %s entered %s state while starting", computer.ID, state)
-		case "stopped", "suspended":
-			if startStopped && !startRequested {
-				if err := client.StartComputer(ctx, computer.ID); err != nil {
-					return computer, err
-				}
-				startRequested = true
-				computer.Status = "starting"
-				continue
+	initial := true
+	_, err := shared.Poll(context.WithoutCancel(ctx), 0, orgoReadyPollInterval,
+		func(context.Context, time.Duration) error {
+			if err := shared.SleepContext(ctx, orgoReadyPollInterval); err != nil {
+				return ctx.Err()
 			}
-		}
-		if !b.now().Before(deadline) {
-			return computer, exit(5, "timed out waiting for orgo computer %s to become running (last state=%s)", computer.ID, state)
-		}
-		select {
-		case <-ctx.Done():
-			return computer, ctx.Err()
-		case <-time.After(orgoReadyPollInterval):
-		}
-		refreshed, err := client.GetComputer(ctx, computer.ID)
-		if err != nil {
-			return computer, err
-		}
-		if refreshed.WorkspaceID == "" {
-			refreshed.WorkspaceID = computer.WorkspaceID
-		}
-		computer = refreshed
+			return nil
+		},
+		func(context.Context) (orgoComputer, error) {
+			if initial {
+				initial = false
+				return computer, nil
+			}
+			refreshed, err := client.GetComputer(ctx, computer.ID)
+			if err != nil {
+				return orgoComputer{}, err
+			}
+			if refreshed.WorkspaceID == "" {
+				refreshed.WorkspaceID = computer.WorkspaceID
+			}
+			return refreshed, nil
+		},
+		func(_ context.Context, current orgoComputer, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
+			}
+			computer = current
+			state := normalizeOrgoStatus(computer.Status)
+			switch state {
+			case "running":
+				return true, nil
+			case "error", "failed", "deleted":
+				return false, exit(5, "orgo computer %s entered %s state while starting", computer.ID, state)
+			case "stopped", "suspended":
+				if startStopped && !startRequested {
+					if err := client.StartComputer(ctx, computer.ID); err != nil {
+						return false, err
+					}
+					startRequested = true
+					computer.Status = "starting"
+					state = "starting"
+				}
+			}
+			if !b.now().Before(deadline) {
+				return false, exit(5, "timed out waiting for orgo computer %s to become running (last state=%s)", computer.ID, state)
+			}
+			return false, nil
+		}, nil)
+	if err != nil {
+		return computer, err
 	}
+	return computer, nil
 }
 
 func (b *orgoBackend) createComputerRequest(workspaceID, leaseID string) orgoCreateComputerRequest {

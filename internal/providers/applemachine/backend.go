@@ -11,6 +11,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type backend struct {
@@ -287,22 +288,37 @@ func (b *backend) waitMachineReady(ctx context.Context, name string) error {
 	defer deadline.Stop()
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
-	for {
-		result, err := b.rt.Exec.Run(ctx, LocalCommandRequest{
-			Name: blank(strings.TrimSpace(b.cfg.AppleContainer.CLIPath), "container"),
-			Args: []string{"machine", "run", "--name", name, ":"},
-		})
-		if err == nil {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-deadline.C:
-			return exit(5, "Apple container machine %q did not become ready: %s", name, failureDetail(result, err))
-		case <-ticker.C:
-		}
+	type observation struct {
+		result LocalCommandResult
+		err    error
 	}
+	var last observation
+	_, err := shared.Poll(context.WithoutCancel(ctx), 0, 500*time.Millisecond,
+		func(context.Context, time.Duration) error {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-deadline.C:
+				return exit(5, "Apple container machine %q did not become ready: %s", name, failureDetail(last.result, last.err))
+			case <-ticker.C:
+				return nil
+			}
+		},
+		func(context.Context) (observation, error) {
+			result, err := b.rt.Exec.Run(ctx, LocalCommandRequest{
+				Name: blank(strings.TrimSpace(b.cfg.AppleContainer.CLIPath), "container"),
+				Args: []string{"machine", "run", "--name", name, ":"},
+			})
+			last = observation{result: result, err: err}
+			return last, nil
+		},
+		func(_ context.Context, current observation, _ error) (bool, error) {
+			return current.err == nil, nil
+		}, nil)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (b *backend) resolveLease(identifier, repoRoot string, reclaim bool) (string, string, string, error) {

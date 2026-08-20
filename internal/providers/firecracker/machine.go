@@ -8,6 +8,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const (
@@ -130,11 +131,20 @@ func (p localProcessManager) Signal(identity processIdentity, sig syscall.Signal
 
 func waitForProcessExit(manager processManager, identity processIdentity, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	for manager.Matches(identity) {
-		if time.Now().After(deadline) {
-			return fmt.Errorf("timed out waiting for firecracker process %d to exit", identity.PID)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return nil
+	_, err := shared.Poll(context.Background(), 0, 100*time.Millisecond,
+		func(_ context.Context, delay time.Duration) error {
+			time.Sleep(delay)
+			return nil
+		},
+		func(context.Context) (bool, error) { return manager.Matches(identity), nil },
+		func(_ context.Context, running bool, _ error) (bool, error) {
+			if !running {
+				return true, nil
+			}
+			if time.Now().After(deadline) {
+				return false, fmt.Errorf("timed out waiting for firecracker process %d to exit", identity.PID)
+			}
+			return false, nil
+		}, nil)
+	return err
 }

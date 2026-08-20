@@ -1024,25 +1024,36 @@ func (b *Backend) deleteIdentitylessRecoveryKey(ctx context.Context, client Clie
 
 func (b *Backend) waitForPublicIPv4(ctx context.Context, client Client, serverID string) (*instance.Server, error) {
 	deadline := b.clockNow().Add(5 * time.Minute)
-	for {
-		resp, err := client.Instance().GetServer(&instance.GetServerRequest{Zone: scw.Zone(client.Zone()), ServerID: serverID}, scw.WithContext(ctx))
-		if err != nil {
-			return nil, err
-		}
-		if resp != nil && resp.Server != nil && publicIPv4(resp.Server) != "" {
+	result, err := shared.Poll(context.WithoutCancel(ctx), 0, 3*time.Second,
+		func(context.Context, time.Duration) error {
+			if err := shared.SleepContext(ctx, 3*time.Second); err != nil {
+				return ctx.Err()
+			}
+			return nil
+		},
+		func(context.Context) (*instance.Server, error) {
+			resp, err := client.Instance().GetServer(&instance.GetServerRequest{Zone: scw.Zone(client.Zone()), ServerID: serverID}, scw.WithContext(ctx))
+			if err != nil || resp == nil {
+				return nil, err
+			}
 			return resp.Server, nil
-		}
-		if b.clockNow().After(deadline) {
-			return nil, core.Exit(5, "timed out waiting for Scaleway Instance public IPv4")
-		}
-		timer := time.NewTimer(3 * time.Second)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, ctx.Err()
-		case <-timer.C:
-		}
+		},
+		func(_ context.Context, server *instance.Server, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
+			}
+			if server != nil && publicIPv4(server) != "" {
+				return true, nil
+			}
+			if b.clockNow().After(deadline) {
+				return false, core.Exit(5, "timed out waiting for Scaleway Instance public IPv4")
+			}
+			return false, nil
+		}, nil)
+	if err != nil {
+		return nil, err
 	}
+	return result.Value, nil
 }
 
 func (b *Backend) persistRecoveryClaim(leaseID, slug string, cfg core.Config, repoRoot string, client Client, serverID, host, keyID, keyName, recovery string, keep bool, now time.Time) error {

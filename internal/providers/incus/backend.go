@@ -12,6 +12,7 @@ import (
 
 	"github.com/lxc/incus/v7/shared/api"
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type ProviderSpec = core.ProviderSpec
@@ -685,32 +686,48 @@ func (b *backend) waitForAddress(ctx context.Context, client instanceClient, nam
 		timeout = 10 * time.Minute
 	}
 	deadline := time.Now().Add(timeout)
-	for {
-		inst, etag, err := client.GetInstance(name)
-		if err != nil {
-			return nil, "", err
-		}
-		state, _, stateErr := client.GetInstanceState(name)
-		if stateErr != nil {
-			return nil, "", stateErr
-		}
-		if inst.Config == nil {
-			inst.Config = map[string]string{}
-		}
-		delete(inst.Config, labelKey("host"))
-		if host := instanceHost(*inst, state, cfg); host != "" {
-			inst.Config[labelKey("host")] = host
-			return inst, etag, nil
-		}
-		if time.Now().After(deadline) {
-			return nil, "", core.Exit(5, "timed out waiting for Incus address for %s", name)
-		}
-		select {
-		case <-ctx.Done():
-			return nil, "", context.Cause(ctx)
-		case <-time.After(2 * time.Second):
-		}
+	type observation struct {
+		instance *api.Instance
+		etag     string
+		host     string
 	}
+	result, err := shared.Poll(context.WithoutCancel(ctx), 0, 2*time.Second,
+		func(context.Context, time.Duration) error { return shared.SleepContext(ctx, 2*time.Second) },
+		func(context.Context) (observation, error) {
+			inst, etag, err := client.GetInstance(name)
+			if err != nil {
+				return observation{}, err
+			}
+			state, _, err := client.GetInstanceState(name)
+			if err != nil {
+				return observation{}, err
+			}
+			if inst.Config == nil {
+				inst.Config = map[string]string{}
+			}
+			delete(inst.Config, labelKey("host"))
+			host := instanceHost(*inst, state, cfg)
+			if host != "" {
+				inst.Config[labelKey("host")] = host
+			}
+			return observation{instance: inst, etag: etag, host: host}, nil
+		},
+		func(_ context.Context, current observation, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
+			}
+			if current.host != "" {
+				return true, nil
+			}
+			if time.Now().After(deadline) {
+				return false, core.Exit(5, "timed out waiting for Incus address for %s", name)
+			}
+			return false, nil
+		}, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	return result.Value.instance, result.Value.etag, nil
 }
 
 func (b *backend) resolveInstance(ctx context.Context, client instanceClient, identifier string) (api.Instance, core.Server, string, error) {

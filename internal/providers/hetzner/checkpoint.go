@@ -10,6 +10,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const (
@@ -279,55 +280,79 @@ func waitForHetznerSnapshot(ctx context.Context, client hetznerSnapshotClient, i
 		}
 		return err
 	}
-	for {
-		state := strings.ToLower(strings.TrimSpace(last.Status))
-		if state == "available" {
+	initialObservation := true
+	var delay time.Duration
+	result, err := shared.Poll(context.WithoutCancel(waitCtx), 0, time.Nanosecond,
+		func(context.Context, time.Duration) error {
+			if err := checkpointSleep(waitCtx, delay); err != nil {
+				return waitError(err)
+			}
+			if parentErr := ctx.Err(); parentErr != nil {
+				return parentErr
+			}
+			if !checkpointNow().Before(deadline) {
+				return timeoutError()
+			}
+			if err := waitCtx.Err(); err != nil {
+				return waitError(err)
+			}
+			return nil
+		},
+		func(context.Context) (core.HetznerImage, error) {
+			if initialObservation {
+				initialObservation = false
+				return last, nil
+			}
+			next, err := client.GetImage(waitCtx, last.ID)
+			if err != nil {
+				return core.HetznerImage{}, err
+			}
+			if next.Description == "" {
+				next.Description = last.Description
+			}
+			if next.Name == "" {
+				next.Name = last.Name
+			}
+			if next.Architecture == "" {
+				next.Architecture = last.Architecture
+			}
+			last = next
 			return last, nil
-		}
-		if failedHetznerSnapshotState(state) {
-			return last, core.Exit(5, "Hetzner snapshot %d failed; last state=%s", last.ID, blank(last.Status, "unknown"))
-		}
-		if parentErr := ctx.Err(); parentErr != nil {
-			return last, parentErr
-		}
-		now := checkpointNow()
-		if timeout <= 0 || !now.Before(deadline) {
-			return last, timeoutError()
-		}
-		if err := waitCtx.Err(); err != nil {
-			return last, waitError(err)
-		}
-		if stderr != nil {
-			fmt.Fprintf(stderr, "waiting image=%d state=%s\n", last.ID, blank(last.Status, "creating"))
-		}
-		delay := min(checkpointPollInterval, deadline.Sub(now))
-		if err := checkpointSleep(waitCtx, delay); err != nil {
-			return last, waitError(err)
-		}
-		if parentErr := ctx.Err(); parentErr != nil {
-			return last, parentErr
-		}
-		if !checkpointNow().Before(deadline) {
-			return last, timeoutError()
-		}
-		if err := waitCtx.Err(); err != nil {
-			return last, waitError(err)
-		}
-		next, err := client.GetImage(waitCtx, last.ID)
-		if err != nil {
-			return last, waitError(err)
-		}
-		if next.Description == "" {
-			next.Description = last.Description
-		}
-		if next.Name == "" {
-			next.Name = last.Name
-		}
-		if next.Architecture == "" {
-			next.Architecture = last.Architecture
-		}
-		last = next
+		},
+		func(_ context.Context, current core.HetznerImage, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, waitError(fetchErr)
+			}
+			last = current
+			state := strings.ToLower(strings.TrimSpace(last.Status))
+			if state == "available" {
+				return true, nil
+			}
+			if failedHetznerSnapshotState(state) {
+				return false, core.Exit(5, "Hetzner snapshot %d failed; last state=%s", last.ID, blank(last.Status, "unknown"))
+			}
+			if parentErr := ctx.Err(); parentErr != nil {
+				return false, parentErr
+			}
+			now := checkpointNow()
+			if timeout <= 0 || !now.Before(deadline) {
+				return false, timeoutError()
+			}
+			if err := waitCtx.Err(); err != nil {
+				return false, waitError(err)
+			}
+			delay = min(checkpointPollInterval, deadline.Sub(now))
+			return false, nil
+		},
+		func(shared.PollResult[core.HetznerImage]) {
+			if stderr != nil {
+				fmt.Fprintf(stderr, "waiting image=%d state=%s\n", last.ID, blank(last.Status, "creating"))
+			}
+		})
+	if err != nil {
+		return last, err
 	}
+	return result.Value, nil
 }
 
 func validateCreatedHetznerSnapshot(snapshot core.HetznerImage, expectedArchitecture string) error {

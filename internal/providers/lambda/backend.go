@@ -296,28 +296,33 @@ func (b *backend) ensureSSHKey(ctx context.Context, client lambdaAPI, name, publ
 
 func (b *backend) waitForInstanceReady(ctx context.Context, client lambdaAPI, id string) (Instance, error) {
 	deadline := b.now().Add(5 * time.Minute)
-	for {
-		item, err := client.GetInstance(ctx, id)
-		if err != nil {
-			return Instance{}, err
-		}
-		if strings.EqualFold(item.Status, "active") && strings.TrimSpace(item.IP) != "" {
-			return item, nil
-		}
-		if isTerminalInstanceStatus(item.Status) {
-			return Instance{}, core.Exit(5, "lambda instance %s reached terminal status %s", id, item.Status)
-		}
-		if b.now().After(deadline) {
-			return Instance{}, core.Exit(5, "timed out waiting for Lambda instance %s to become active with public IP", id)
-		}
-		timer := time.NewTimer(3 * time.Second)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return Instance{}, ctx.Err()
-		case <-timer.C:
-		}
+	result, err := shared.Poll(context.WithoutCancel(ctx), 0, 3*time.Second,
+		func(context.Context, time.Duration) error {
+			if err := shared.SleepContext(ctx, 3*time.Second); err != nil {
+				return ctx.Err()
+			}
+			return nil
+		},
+		func(context.Context) (Instance, error) { return client.GetInstance(ctx, id) },
+		func(_ context.Context, item Instance, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
+			}
+			if strings.EqualFold(item.Status, "active") && strings.TrimSpace(item.IP) != "" {
+				return true, nil
+			}
+			if isTerminalInstanceStatus(item.Status) {
+				return false, core.Exit(5, "lambda instance %s reached terminal status %s", id, item.Status)
+			}
+			if b.now().After(deadline) {
+				return false, core.Exit(5, "timed out waiting for Lambda instance %s to become active with public IP", id)
+			}
+			return false, nil
+		}, nil)
+	if err != nil {
+		return Instance{}, err
 	}
+	return result.Value, nil
 }
 
 func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {

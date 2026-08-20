@@ -18,6 +18,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const (
@@ -416,31 +417,28 @@ func (b *backend) pendingLease(cfg core.Config, container inspectContainer, leas
 func (b *backend) waitForContainerEndpoint(ctx context.Context, cfg core.Config, containerID, leaseID, slug string) (core.LeaseTarget, error) {
 	deadline := time.Now().Add(30 * time.Second)
 	var lastErr error
-	for {
-		if err := context.Cause(ctx); err != nil {
-			return core.LeaseTarget{LeaseID: leaseID, Server: core.Server{CloudID: containerID}}, err
-		}
-		container, err := b.inspectContainer(ctx, containerID)
-		if err == nil {
-			lease, prepareErr := b.prepareLease(ctx, cfg, container, leaseID, slug, false)
-			if prepareErr == nil {
-				return lease, nil
+	result, err := shared.Poll(ctx, 0, 100*time.Millisecond, shared.SleepContext,
+		func(observeCtx context.Context) (core.LeaseTarget, error) {
+			container, err := b.inspectContainer(observeCtx, containerID)
+			if err != nil {
+				return core.LeaseTarget{}, err
 			}
-			lastErr = prepareErr
-		} else {
-			lastErr = err
-		}
-		if time.Now().After(deadline) {
-			return core.LeaseTarget{LeaseID: leaseID, Server: core.Server{CloudID: containerID}}, core.Exit(5, "timed out waiting for SSH port on local-container %s: %v", shortID(containerID), lastErr)
-		}
-		timer := time.NewTimer(100 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return core.LeaseTarget{LeaseID: leaseID, Server: core.Server{CloudID: containerID}}, context.Cause(ctx)
-		case <-timer.C:
-		}
+			return b.prepareLease(observeCtx, cfg, container, leaseID, slug, false)
+		},
+		func(_ context.Context, _ core.LeaseTarget, fetchErr error) (bool, error) {
+			if fetchErr == nil {
+				return true, nil
+			}
+			lastErr = fetchErr
+			if time.Now().After(deadline) {
+				return false, core.Exit(5, "timed out waiting for SSH port on local-container %s: %v", shortID(containerID), lastErr)
+			}
+			return false, nil
+		}, nil)
+	if err != nil {
+		return core.LeaseTarget{LeaseID: leaseID, Server: core.Server{CloudID: containerID}}, err
 	}
+	return result.Value, nil
 }
 
 func markPendingLease(server *core.Server) {

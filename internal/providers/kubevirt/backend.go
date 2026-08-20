@@ -11,6 +11,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type leaseBackend struct {
@@ -402,44 +403,37 @@ func (b *leaseBackend) waitForVMIReadyForSSH(ctx context.Context, name string, t
 	deadline := start.Add(timeout)
 	var last kubeVirtVMIStatus
 	var lastErr error
-	for {
-		if ctx.Err() != nil {
-			return last, context.Cause(ctx)
-		}
-		item, err := b.getVMI(ctx, name)
-		if err == nil {
-			lastErr = nil
-			last = item.Status
-			if vmiAllowsSSHProbe(last) {
-				return last, nil
-			}
-			if vmiTerminalPhase(last.Phase) {
-				return last, core.Exit(5, "KubeVirt VMI %s reached terminal phase before SSH: %s", name, b.vmiDiagnostics(ctx, name, last, nil))
-			}
-		} else if kubeVirtNotFound(err) {
-			lastErr = err
-		} else {
-			return last, err
-		}
-		if time.Now().After(deadline) {
-			return last, core.Exit(5, "timed out waiting for KubeVirt VMI %s to be scheduled for SSH probing: %s", name, b.vmiDiagnostics(ctx, name, last, lastErr))
-		}
-		if b.rt.Stderr != nil {
-			fmt.Fprintf(b.rt.Stderr, "waiting for KubeVirt VMI %s to be scheduled... elapsed=%s remaining=%s %s\n", name, time.Since(start).Round(time.Second), time.Until(deadline).Round(time.Second), vmiStatusSummary(last, lastErr))
-		}
-		timer := time.NewTimer(5 * time.Second)
-		select {
-		case <-ctx.Done():
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
+	_, err := shared.Poll(ctx, 0, 5*time.Second, shared.SleepContext,
+		func(observeCtx context.Context) (kubeVirtVMI, error) { return b.getVMI(observeCtx, name) },
+		func(_ context.Context, item kubeVirtVMI, fetchErr error) (bool, error) {
+			if fetchErr == nil {
+				lastErr = nil
+				last = item.Status
+				if vmiAllowsSSHProbe(last) {
+					return true, nil
 				}
+				if vmiTerminalPhase(last.Phase) {
+					return false, core.Exit(5, "KubeVirt VMI %s reached terminal phase before SSH: %s", name, b.vmiDiagnostics(ctx, name, last, nil))
+				}
+			} else if kubeVirtNotFound(fetchErr) {
+				lastErr = fetchErr
+			} else {
+				return false, fetchErr
 			}
-			return last, context.Cause(ctx)
-		case <-timer.C:
-		}
+			if time.Now().After(deadline) {
+				return false, core.Exit(5, "timed out waiting for KubeVirt VMI %s to be scheduled for SSH probing: %s", name, b.vmiDiagnostics(ctx, name, last, lastErr))
+			}
+			return false, nil
+		},
+		func(shared.PollResult[kubeVirtVMI]) {
+			if b.rt.Stderr != nil {
+				fmt.Fprintf(b.rt.Stderr, "waiting for KubeVirt VMI %s to be scheduled... elapsed=%s remaining=%s %s\n", name, time.Since(start).Round(time.Second), time.Until(deadline).Round(time.Second), vmiStatusSummary(last, lastErr))
+			}
+		})
+	if err != nil {
+		return last, err
 	}
+	return last, nil
 }
 
 func (b *leaseBackend) vmiDiagnostics(ctx context.Context, name string, status kubeVirtVMIStatus, lastErr error) string {

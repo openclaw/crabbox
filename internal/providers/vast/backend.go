@@ -367,24 +367,28 @@ func vastMatchingSSHKeyID(keys []vastInstanceSSHKey, publicKey string) string {
 
 func (b *backend) waitForInstanceReady(ctx context.Context, client vastAPI, id int) (vastInstance, error) {
 	deadline := b.now().Add(b.pollTimeout)
-	for {
-		instance, err := client.GetInstance(ctx, id)
-		if err != nil {
-			return vastInstance{}, err
-		}
-		if isVastInstanceRunning(instance) && strings.TrimSpace(instance.SSHHost) != "" && instance.SSHPort > 0 {
-			return instance, nil
-		}
-		if isTerminalVastStatus(instance.Status) {
-			return vastInstance{}, exit(5, "vast instance %d reached terminal status %s", id, instance.Status)
-		}
-		if b.now().After(deadline) {
-			return vastInstance{}, exit(5, "timed out waiting for Vast instance %d to expose SSH", id)
-		}
-		if err := b.sleep(ctx, vastPollInterval); err != nil {
-			return vastInstance{}, err
-		}
+	result, err := shared.Poll(context.WithoutCancel(ctx), 0, vastPollInterval,
+		func(context.Context, time.Duration) error { return b.sleep(ctx, vastPollInterval) },
+		func(context.Context) (vastInstance, error) { return client.GetInstance(ctx, id) },
+		func(_ context.Context, instance vastInstance, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
+			}
+			if isVastInstanceRunning(instance) && strings.TrimSpace(instance.SSHHost) != "" && instance.SSHPort > 0 {
+				return true, nil
+			}
+			if isTerminalVastStatus(instance.Status) {
+				return false, exit(5, "vast instance %d reached terminal status %s", id, instance.Status)
+			}
+			if b.now().After(deadline) {
+				return false, exit(5, "timed out waiting for Vast instance %d to expose SSH", id)
+			}
+			return false, nil
+		}, nil)
+	if err != nil {
+		return vastInstance{}, err
 	}
+	return result.Value, nil
 }
 
 func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
