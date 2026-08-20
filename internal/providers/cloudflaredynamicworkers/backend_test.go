@@ -1167,6 +1167,137 @@ func TestRunKeepsLifecycleUncertainClaimFromLiveStatus(t *testing.T) {
 	}
 }
 
+func TestRunKeepsLifecycleUncertainWithoutRetentionRequest(t *testing.T) {
+	for _, cacheMode := range []string{"stable", "one-shot"} {
+		t.Run(cacheMode, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			var runID string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodPost && r.URL.Path == "/v1/runs":
+					var request runRequest
+					if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+						t.Fatal(err)
+					}
+					if request.RetainMetadata || request.RetainOnFailure {
+						t.Fatalf("unexpected retention request=%#v", request)
+					}
+					runID = request.ID
+					if runID == "" {
+						runID = "cfdw_generated_uncertain"
+					}
+					w.Header().Set("X-Crabbox-Lifecycle-Uncertain", "true")
+					_ = json.NewEncoder(w).Encode(runResponse{
+						ID:       runID,
+						WorkerID: request.WorkerID,
+						Status:   "succeeded",
+					})
+				case r.Method == http.MethodGet && r.URL.Path == "/v1/runs/"+runID:
+					_ = json.NewEncoder(w).Encode(runStatus{
+						ID:       runID,
+						WorkerID: "worker-reconciling",
+						Status:   "running",
+						Metadata: map[string]string{"phase": "reconciling"},
+					})
+				default:
+					t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+				}
+			}))
+			defer server.Close()
+
+			var stderr bytes.Buffer
+			backend := newTestBackend(server.URL, &bytes.Buffer{}, &stderr)
+			backend.cfg.CloudflareDynamicWorkers.CacheMode = cacheMode
+			result, err := backend.Run(context.Background(), RunRequest{
+				Repo:            Repo{Root: t.TempDir()},
+				ScriptRequested: true,
+				Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.LeaseID != runID || result.Session == nil || !result.Session.Kept {
+				t.Fatalf("result=%#v runID=%q", result, runID)
+			}
+			claim, ok, resolveErr := resolveLeaseClaim(result.Slug, backend.cfg)
+			if resolveErr != nil || !ok || claim.LeaseID != runID {
+				t.Fatalf("claim=%#v ok=%t err=%v", claim, ok, resolveErr)
+			}
+			if claim.Labels["recovery"] != "uncertain-lifecycle" || claim.Labels["uncertain"] != "true" ||
+				claim.Labels["state"] != "running" || claim.Labels["worker_id"] != "worker-reconciling" {
+				t.Fatalf("claim labels=%#v", claim.Labels)
+			}
+			for _, want := range []string{"kept", "uncertain-lifecycle", runID} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("stderr=%q, want %q", stderr.String(), want)
+				}
+			}
+		})
+	}
+}
+
+func TestRunLifecycleUncertainSurfacesRecoveryClaimPersistenceFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		state    string
+		exitCode int
+	}{
+		{name: "successful run", state: "succeeded"},
+		{name: "failed run", state: "failed", exitCode: 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stateHome := t.TempDir()
+			t.Setenv("XDG_STATE_HOME", stateHome)
+			if err := os.WriteFile(filepath.Join(stateHome, "crabbox"), []byte("not a directory"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			var runID string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodPost && r.URL.Path == "/v1/runs":
+					var request runRequest
+					if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+						t.Fatal(err)
+					}
+					runID = request.ID
+					w.Header().Set("X-Crabbox-Lifecycle-Uncertain", "true")
+					_ = json.NewEncoder(w).Encode(runResponse{
+						ID:       runID,
+						WorkerID: request.WorkerID,
+						Status:   tc.state,
+						ExitCode: tc.exitCode,
+					})
+				case r.Method == http.MethodGet && r.URL.Path == "/v1/runs/"+runID:
+					_ = json.NewEncoder(w).Encode(runStatus{ID: runID, Status: "running"})
+				default:
+					t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+				}
+			}))
+			defer server.Close()
+
+			backend := newTestBackend(server.URL, &bytes.Buffer{}, &bytes.Buffer{})
+			result, err := backend.Run(context.Background(), RunRequest{
+				Repo:            Repo{Root: t.TempDir()},
+				ScriptRequested: true,
+				Script:          &RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")},
+			})
+			if err == nil || !strings.Contains(err.Error(), "persist cloudflare-dynamic-workers uncertain-lifecycle recovery claim") {
+				t.Fatalf("result=%#v err=%v", result, err)
+			}
+			if result.LeaseID != runID || result.Session == nil || !result.Session.Kept {
+				t.Fatalf("result=%#v runID=%q", result, runID)
+			}
+			if tc.exitCode != 0 {
+				var exitErr ExitError
+				if !errors.As(err, &exitErr) || exitErr.Code != tc.exitCode {
+					t.Fatalf("joined run error=%v, want exit code %d", err, tc.exitCode)
+				}
+			}
+		})
+	}
+}
+
 func TestRunServerProtectsStructuralLabels(t *testing.T) {
 	server := runServer(
 		"lease-real",

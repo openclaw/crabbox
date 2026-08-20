@@ -235,15 +235,22 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			}
 			claimStatus = status
 		}
-		claimLabels = mergeRunLabels(claimLabels, map[string]string{"uncertain": "true"})
-		fmt.Fprintf(b.rt.Stderr, "warning: %s lifecycle reconciliation pending for run %s\n", providerName, leaseID)
+		claimLabels = mergeRunLabels(claimLabels, map[string]string{
+			"recovery":  "uncertain-lifecycle",
+			"uncertain": "true",
+		})
+		fmt.Fprintf(b.rt.Stderr, "warning: %s lifecycle reconciliation pending for kept run %s slug=%s reason=uncertain-lifecycle\n", providerName, leaseID, slug)
 	}
 	exitCode := run.ExitCode
 	if exitCode == 0 && !runSucceeded(run.Status) {
 		exitCode = 1
 	}
+	var runErr error
+	if exitCode != 0 {
+		runErr = ExitError{Code: exitCode, Message: fmt.Sprintf("%s run exited %d", providerName, exitCode)}
+	}
 	total := now(b.rt).Sub(started)
-	keepRun := req.Keep || cacheMode == "explicit" || (req.KeepOnFailure && exitCode != 0)
+	keepRun := req.Keep || cacheMode == "explicit" || (req.KeepOnFailure && exitCode != 0) || run.LifecycleUncertain
 	result := RunResult{
 		ExitCode:    exitCode,
 		Command:     commandDuration,
@@ -270,6 +277,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			mergeRunLabels(run.Metadata, mergeRunLabels(claimStatus.Metadata, claimLabels)),
 		)
 		if err := claimLease(leaseID, slug, b.cfg, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim, server); err != nil {
+			if run.LifecycleUncertain {
+				return result, errors.Join(runErr, fmt.Errorf("persist %s uncertain-lifecycle recovery claim for run %s: %w", providerName, leaseID, err))
+			}
 			return result, err
 		}
 	}
@@ -284,10 +294,6 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		}
 	}
 	if req.TimingJSON {
-		var runErr error
-		if exitCode != 0 {
-			runErr = ExitError{Code: exitCode, Message: fmt.Sprintf("%s run exited %d", providerName, exitCode)}
-		}
 		if err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
 			Provider:  providerName,
 			LeaseID:   leaseID,
@@ -306,7 +312,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			fmt.Fprintf(b.rt.Stderr, "inspect: crabbox status --provider %s --id %s\n", providerName, slug)
 			fmt.Fprintf(b.rt.Stderr, "stop: crabbox stop --provider %s --id %s\n", providerName, slug)
 		}
-		return result, ExitError{Code: exitCode, Message: fmt.Sprintf("%s run exited %d", providerName, exitCode)}
+		return result, runErr
 	}
 	return result, nil
 }

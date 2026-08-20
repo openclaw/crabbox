@@ -211,10 +211,21 @@ runtime limits for a module invocation, not VM sizing knobs; `--class` and
 
 Completed non-kept runs remove their loader metadata automatically. Use `--keep`,
 `--keep-on-failure`, or `cacheMode: explicit` when lifecycle inspection must
-remain available after the invocation.
+remain available after the invocation. If the loader reports an uncertain
+lifecycle, Crabbox always keeps a local recovery claim marked
+`recovery=uncertain-lifecycle`, even without retention flags, so `list` and
+`cleanup` can reconcile the run later.
 
 Cleanup is local-claim cleanup. It is not a global Cloudflare account inventory
 sweeper.
+
+### Stop is not cancellation
+
+`crabbox stop` removes retained run metadata and its exact local claim; it does
+not terminate or cancel a running Dynamic Worker invocation. While execution is
+active, the Durable Object rejects the request with HTTP 409 and leaves both the
+workload and claim intact. Wait for the run to finish, then retry `stop` or use
+`cleanup` to reconcile its terminal metadata.
 
 ## Live smoke
 
