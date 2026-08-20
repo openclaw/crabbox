@@ -10,6 +10,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const (
@@ -484,32 +485,29 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	// it counts as provably gone; an interrupted wait keeps the claim so a
 	// retry can finish the release.
 	start := b.now()
-	for {
-		summary, found, err := b.getMachine(ctx, cfg, name)
-		if err != nil {
+	result, err := shared.Poll(ctx, 0, b.readyPollInterval, shared.SleepContext,
+		b.observeMachine(cfg, name),
+		func(_ context.Context, obs machineObservation, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
+			}
+			return obs.found || b.now().Sub(start) >= b.releaseNotFoundGrace, nil
+		}, nil)
+	if err != nil {
+		return err
+	}
+	if result.Value.found {
+		summary := result.Value.summary
+		if boundID == "" || strings.TrimSpace(summary.ID) == "" {
+			return core.Exit(4, "refusing to destroy boxd machine %s: cannot verify identity (claimed vm_id=%q, current=%q); remove it via the boxd CLI if intended", name, boundID, summary.ID)
+		}
+		if strings.TrimSpace(summary.ID) != boundID {
+			return releaseReplaced(summary.ID)
+		}
+		// Address the destroy by the immutable id: name reuse between the
+		// read above and this remove cannot redirect it to a replacement.
+		if err := b.destroyMachine(ctx, cfg, boundID); err != nil {
 			return err
-		}
-		if found {
-			if boundID == "" || strings.TrimSpace(summary.ID) == "" {
-				return core.Exit(4, "refusing to destroy boxd machine %s: cannot verify identity (claimed vm_id=%q, current=%q); remove it via the boxd CLI if intended", name, boundID, summary.ID)
-			}
-			if strings.TrimSpace(summary.ID) != boundID {
-				return releaseReplaced(summary.ID)
-			}
-			// Address the destroy by the immutable id: name reuse between the
-			// read above and this remove cannot redirect it to a replacement.
-			if err := b.destroyMachine(ctx, cfg, boundID); err != nil {
-				return err
-			}
-			break
-		}
-		if b.now().Sub(start) >= b.releaseNotFoundGrace {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(b.readyPollInterval):
 		}
 	}
 	core.RemoveLeaseClaim(leaseID)
@@ -748,28 +746,36 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 // gap never counts as proof of absence.
 func (b *backend) machineAbsentThroughGrace(ctx context.Context, cfg core.Config, name string) (bool, error) {
 	start := b.now()
-	for {
-		_, found, err := b.getMachine(ctx, cfg, name)
-		if err != nil {
-			return false, err
-		}
-		if found {
-			return false, nil
-		}
-		if b.now().Sub(start) >= b.releaseNotFoundGrace {
-			return true, nil
-		}
-		select {
-		case <-ctx.Done():
-			return false, ctx.Err()
-		case <-time.After(b.readyPollInterval):
-		}
+	result, err := shared.Poll(ctx, 0, b.readyPollInterval, shared.SleepContext,
+		b.observeMachine(cfg, name),
+		func(_ context.Context, obs machineObservation, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
+			}
+			return obs.found || b.now().Sub(start) >= b.releaseNotFoundGrace, nil
+		}, nil)
+	if err != nil {
+		return false, err
 	}
+	return !result.Value.found, nil
 }
 
 // waitMachineReady polls `machine get` until the machine is SSH-reachable
 // (running, or idle-suspended/hibernated — those wake on SSH ingress).
 // Not-found within the grace window is eventual consistency, not loss.
+// machineObservation is one name-based read of a machine for shared.Poll.
+type machineObservation struct {
+	summary machineSummary
+	found   bool
+}
+
+func (b *backend) observeMachine(cfg core.Config, name string) func(context.Context) (machineObservation, error) {
+	return func(ctx context.Context) (machineObservation, error) {
+		summary, found, err := b.getMachine(ctx, cfg, name)
+		return machineObservation{summary: summary, found: found}, err
+	}
+}
+
 func (b *backend) waitMachineReady(ctx context.Context, cfg core.Config, name string) (machineSummary, error) {
 	waitCtx := ctx
 	cancel := func() {}
@@ -778,30 +784,33 @@ func (b *backend) waitMachineReady(ctx context.Context, cfg core.Config, name st
 	}
 	defer cancel()
 	start := b.now()
-	for {
-		summary, found, err := b.getMachine(waitCtx, cfg, name)
-		if err != nil {
-			return machineSummary{}, err
-		}
-		if found {
-			if machineReachable(summary.Status) {
-				return summary, nil
+	result, err := shared.Poll(waitCtx, 0, b.readyPollInterval, shared.SleepContext,
+		b.observeMachine(cfg, name),
+		func(_ context.Context, obs machineObservation, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
 			}
-			if machineTerminal(summary.Status) {
-				return machineSummary{}, core.Exit(1, "boxd machine %s entered terminal state %q", name, summary.Status)
+			if obs.found {
+				if machineReachable(obs.summary.Status) {
+					return true, nil
+				}
+				if machineTerminal(obs.summary.Status) {
+					return false, core.Exit(1, "boxd machine %s entered terminal state %q", name, obs.summary.Status)
+				}
+				return false, nil
 			}
-		} else if b.now().Sub(start) > boxdNotFoundGrace {
-			return machineSummary{}, core.Exit(4, "boxd machine %s not visible after %s; giving up", name, boxdNotFoundGrace)
-		}
-		select {
-		case <-waitCtx.Done():
-			if waitCtx.Err() == context.DeadlineExceeded {
-				return machineSummary{}, core.Exit(5, "timed out waiting for boxd machine %s to become ready", name)
+			if b.now().Sub(start) > boxdNotFoundGrace {
+				return false, core.Exit(4, "boxd machine %s not visible after %s; giving up", name, boxdNotFoundGrace)
 			}
-			return machineSummary{}, waitCtx.Err()
-		case <-time.After(b.readyPollInterval):
+			return false, nil
+		}, nil)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			return machineSummary{}, core.Exit(5, "timed out waiting for boxd machine %s to become ready", name)
 		}
+		return machineSummary{}, err
 	}
+	return result.Value.summary, nil
 }
 
 // resolveSSHTarget reads the boxd-CLI-managed ssh-config entry for the machine
@@ -816,45 +825,59 @@ func (b *backend) resolveSSHTarget(ctx context.Context, cfg core.Config, name, z
 		waitCtx, cancel = context.WithTimeout(ctx, b.readyTimeout)
 	}
 	defer cancel()
-	for {
-		// The list command's side effect is the point: it refreshes the managed
-		// ssh-config block and known_hosts for every machine.
-		if _, err := b.listMachines(waitCtx, cfg); err != nil {
-			return core.SSHTarget{}, err
-		}
-		data, err := os.ReadFile(b.sshConfigPath)
-		if err != nil && !os.IsNotExist(err) {
-			return core.SSHTarget{}, core.Exit(1, "read ssh config %s: %v", b.sshConfigPath, err)
-		}
-		entry, found, selErr := selectBoxdSSHEntry(string(data), host)
-		if selErr != nil {
-			return core.SSHTarget{}, selErr
-		}
-		var pinErr error
-		if found && strings.TrimSpace(entry.Port) != "" {
-			target, err := sshTargetFromEntry(entry, host, b.knownHostsPath)
-			if err == nil {
-				return target, nil
-			}
-			// A missing host-key pin is retryable: the next `machine list`
-			// re-sync rewrites the vendor known_hosts. Anything else is fatal.
-			if !errors.Is(err, errHostKeyPinMissing) {
+	var entryFound bool
+	var pinErr error
+	result, err := shared.Poll(waitCtx, 0, b.readyPollInterval, shared.SleepContext,
+		func(ctx context.Context) (core.SSHTarget, error) {
+			// The list command's side effect is the point: it refreshes the
+			// managed ssh-config block and known_hosts for every machine.
+			if _, err := b.listMachines(ctx, cfg); err != nil {
 				return core.SSHTarget{}, err
 			}
-			pinErr = err
-		}
-		select {
-		case <-waitCtx.Done():
-			if !found {
+			data, err := os.ReadFile(b.sshConfigPath)
+			if err != nil && !os.IsNotExist(err) {
+				return core.SSHTarget{}, core.Exit(1, "read ssh config %s: %v", b.sshConfigPath, err)
+			}
+			entry, found, selErr := selectBoxdSSHEntry(string(data), host)
+			if selErr != nil {
+				return core.SSHTarget{}, selErr
+			}
+			entryFound = found
+			if !found || strings.TrimSpace(entry.Port) == "" {
+				return core.SSHTarget{}, nil // incomplete entry: retry behind the next re-sync
+			}
+			target, err := sshTargetFromEntry(entry, host, b.knownHostsPath)
+			if err != nil {
+				// A missing host-key pin is retryable: the next `machine list`
+				// re-sync rewrites the vendor known_hosts. Anything else is fatal.
+				if errors.Is(err, errHostKeyPinMissing) {
+					pinErr = err
+					return core.SSHTarget{}, nil
+				}
+				return core.SSHTarget{}, err
+			}
+			pinErr = nil
+			return target, nil
+		},
+		func(_ context.Context, target core.SSHTarget, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
+			}
+			return target.Host != "", nil
+		}, nil)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			if !entryFound {
 				return core.SSHTarget{}, core.Exit(5, "timed out waiting for the boxd CLI to write an ssh-config entry for %s", host)
 			}
 			if pinErr != nil {
 				return core.SSHTarget{}, core.Exit(5, "timed out waiting for the boxd host-key pin: %v", pinErr)
 			}
 			return core.SSHTarget{}, core.Exit(5, "timed out waiting for boxd to allocate an SSH port for %s", host)
-		case <-time.After(b.readyPollInterval):
 		}
+		return core.SSHTarget{}, err
 	}
+	return result.Value, nil
 }
 
 // resolveMachineIdentity maps a crabbox identifier (lease id, slug, machine

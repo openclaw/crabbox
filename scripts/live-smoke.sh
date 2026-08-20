@@ -1420,11 +1420,13 @@ morph_smoke() {
 boxd_smoke() {
   need_tool jq
 
-  # The CLI selection is executed with the operator's boxd credentials, so it
-  # must never come from the repository config a malicious checkout controls:
-  # environment override or TRUSTED config only (same gate as the Go adapter).
-  local boxd_cli="${CRABBOX_BOXD_CLI:-$(trusted_config_value boxd.cli || true)}"
-  boxd_cli="${boxd_cli:-boxd}"
+  # The CLI selection is executed with the operator's stored boxd login or
+  # BOXD_TOKEN, so it is ENVIRONMENT-ONLY: no config file — trusted or not —
+  # may choose it. The shell cannot reproduce the Go classifier's
+  # repository-root and symlink resolution (an explicit CRABBOX_CONFIG can
+  # point or symlink into the checkout), so config-based selection is not
+  # offered here at all.
+  local boxd_cli="${CRABBOX_BOXD_CLI:-boxd}"
   if ! command -v "$boxd_cli" >/dev/null 2>&1; then
     echo "install the boxd CLI (or set CRABBOX_BOXD_CLI) to run boxd live smoke" >&2
     return 2
