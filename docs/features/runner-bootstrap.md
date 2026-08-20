@@ -42,15 +42,40 @@ Bootstrap installs only a small base set with `--no-install-recommends`:
 - `git`
 - `rsync`
 - `jq`
+- `tmux`
+- `util-linux` (for `flock`)
 
 `apt-get` runs are wrapped in a retry loop (8 attempts, increasing backoff) so a
 transient mirror failure does not fail the whole boot.
 
-Images produced by the bundled Linux developer-image workflow carry
-`/var/lib/crabbox/image-ready`. When that marker and every base binary are
-present, bootstrap skips the repeated base-package APT transaction. It still
-applies all per-lease identity, SSH, work-root, optional capability, and
-readiness steps. A marker on an incomplete image does not bypass installation.
+The versioned source of truth for this package and probe set is
+`recipes/linux/v1/linux-minimal.json`. Image builders may also consume
+`linux-builder.json`, which extends the base inventory with compiler, Python,
+Git LFS, and the Go and Node versions used by this repository. The builder
+profile describes image contents; normal lease bootstrap installs only the
+minimal profile.
+
+Prepared images write `/var/lib/crabbox/readiness/linux.json`. Bootstrap trusts
+that manifest only when it is a root-owned, non-symlink `0644` file whose schema,
+profile, canonical recipe digest, inventory-digest shape, and runnable probes
+match the generated contract. Exact current `linux-minimal` manifests qualify,
+as do exact current `linux-builder` manifests because that recipe explicitly
+satisfies the minimal package and probe set. The latter stays attested as
+`linux-builder`; bootstrap does not rewrite it to the smaller profile. A
+verified manifest skips all APT and package-inventory commands while retaining
+per-lease identity, SSH, work-root, optional capability, and readiness steps.
+
+Missing, malformed, stale, incorrectly owned, or probe-incomplete manifests
+fall back to the normal package installation. The legacy
+`/var/lib/crabbox/image-ready` marker never authorizes the fast path by itself:
+when the complete minimal probe set also passes, bootstrap migrates it to the v1
+manifest using a binary inventory digest and no package-manager command.
+Otherwise it installs the minimal profile. Both migration and fallback install
+write the manifest with an atomic rename.
+
+Run `node scripts/generate-linux-readiness.mjs` after changing a recipe. The
+generator canonicalizes the profile JSON and updates the shared Go and
+TypeScript bootstrap constants. CI can use the non-mutating `--check` mode.
 
 ### Readiness: `crabbox-ready`
 
@@ -58,7 +83,7 @@ Bootstrap writes `/usr/local/bin/crabbox-ready` and runs it at the end of boot.
 A box does not count as ready until this script exits `0` over SSH. The base
 Linux script checks:
 
-- `git`, `rsync`, `curl`, and `jq` are present and runnable;
+- `git`, `rsync`, `curl`, `jq`, `tmux`, and `flock` are present and runnable;
 - the marker file `/var/lib/crabbox/bootstrapped` exists;
 - the work root is writable.
 

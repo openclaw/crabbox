@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added versioned `linux-minimal` and `linux-builder` readiness recipes with canonical digests, shared Go/Worker bootstrap generation, and a verified manifest fast path that avoids repeated package-manager work.
 - Added mutually exclusive `runnerPhases` timing telemetry for provider acquire/borrow, connectivity and readiness, workspace seed/overlay, command, artifact collection, cleanup, delegated opaque work, and unattributed time while preserving the existing timing fields.
 
 ### Fixed
