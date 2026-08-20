@@ -25,6 +25,11 @@ type fakeWorkspaceOwnerRemote struct {
 	expires          time.Time
 	childAlive       bool
 	failRenew        bool
+	failRenewCount   int
+	terminalRenewErr bool
+	loseAcquireCount int
+	legacyAcquire    bool
+	acquireCalls     int
 	ambiguousRelease bool
 	blockBusyAcquire bool
 	changed          chan struct{}
@@ -44,10 +49,30 @@ func (f *fakeWorkspaceOwnerRemote) Do(ctx context.Context, req workspaceOwnerRem
 		f.mu.Lock()
 		switch req.Action {
 		case workspaceOwnerAcquire:
+			f.acquireCalls++
+			if f.legacyAcquire {
+				f.mu.Unlock()
+				return "LEGACY", nil
+			}
 			if f.token == "" {
 				f.token = req.Token
 				f.expires = time.Now().Add(req.TTL)
 				f.signalLocked()
+				if f.loseAcquireCount > 0 {
+					f.loseAcquireCount--
+					f.mu.Unlock()
+					return "", errors.New("acquire response lost")
+				}
+				f.mu.Unlock()
+				return "ACQUIRED", nil
+			}
+			if f.token == req.Token && time.Now().Before(f.expires) {
+				f.expires = time.Now().Add(req.TTL)
+				if f.loseAcquireCount > 0 {
+					f.loseAcquireCount--
+					f.mu.Unlock()
+					return "", errors.New("acquire response lost")
+				}
 				f.mu.Unlock()
 				return "ACQUIRED", nil
 			}
@@ -75,13 +100,30 @@ func (f *fakeWorkspaceOwnerRemote) Do(ctx context.Context, req workspaceOwnerRem
 				continue
 			}
 		case workspaceOwnerRenew:
+			if f.failRenewCount > 0 {
+				f.failRenewCount--
+				f.mu.Unlock()
+				return "", errors.New("renew response lost")
+			}
 			if f.failRenew {
 				f.mu.Unlock()
 				return "", errors.New("renew transport lost")
 			}
 			if f.token != req.Token {
+				err := error(nil)
+				if f.terminalRenewErr {
+					err = errors.New("remote exit 75")
+				}
 				f.mu.Unlock()
-				return "MISMATCH", nil
+				return "MISMATCH", err
+			}
+			if !time.Now().Before(f.expires) {
+				err := error(nil)
+				if f.terminalRenewErr {
+					err = errors.New("remote exit 75")
+				}
+				f.mu.Unlock()
+				return "EXPIRED", err
 			}
 			f.expires = time.Now().Add(req.TTL)
 			f.mu.Unlock()
@@ -289,6 +331,114 @@ func TestWorkspaceOwnerTokenAndTransportFailuresFailClosed(t *testing.T) {
 	})
 }
 
+func TestWorkspaceOwnerReconcilesAmbiguousAcquireAndRenewal(t *testing.T) {
+	t.Run("response-loss acquire", func(t *testing.T) {
+		remote := newFakeWorkspaceOwnerRemote()
+		remote.loseAcquireCount = 1
+		owner, err := acquireWorkspaceOwnerWithTransport(context.Background(), SSHTarget{}, "cbx_acquire_reconcile", &bytes.Buffer{}, remote, 2*time.Second, time.Second, 100*time.Millisecond)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := owner.Close(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("legacy acquire fails once with recovery", func(t *testing.T) {
+		remote := newFakeWorkspaceOwnerRemote()
+		remote.legacyAcquire = true
+		leaseID := "cbx_legacy_recovery"
+		_, err := acquireWorkspaceOwnerWithTransport(context.Background(), SSHTarget{}, leaseID, &bytes.Buffer{}, remote, 2*time.Second, time.Second, 100*time.Millisecond)
+		var exitErr ExitError
+		if err == nil || !errors.As(err, &exitErr) || exitErr.Code != 7 {
+			t.Fatalf("legacy acquire err=%v", err)
+		}
+		key := workspaceOwnerKey(leaseID)
+		for _, want := range []string{leaseID, key, "~/.crabbox/workspace-owners/" + key + ".child", "quiesce or reboot", "PID/start identity", "remove only that child file"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("legacy acquire error missing %q: %v", want, err)
+			}
+		}
+		if remote.acquireCalls != 1 {
+			t.Fatalf("legacy acquire calls=%d want 1", remote.acquireCalls)
+		}
+	})
+
+	t.Run("transient renewal", func(t *testing.T) {
+		remote := newFakeWorkspaceOwnerRemote()
+		owner, err := acquireWorkspaceOwnerWithTransport(context.Background(), SSHTarget{}, "cbx_renew_reconcile", &bytes.Buffer{}, remote, time.Second, 700*time.Millisecond, 50*time.Millisecond)
+		if err != nil {
+			t.Fatal(err)
+		}
+		remote.mu.Lock()
+		remote.failRenewCount = 1
+		remote.mu.Unlock()
+		select {
+		case <-owner.Context().Done():
+			t.Fatalf("transient renewal canceled owner: %v", owner.Err())
+		case <-time.After(450 * time.Millisecond):
+		}
+		if err := owner.Close(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("deadline exhaustion", func(t *testing.T) {
+		remote := newFakeWorkspaceOwnerRemote()
+		owner, err := acquireWorkspaceOwnerWithTransport(context.Background(), SSHTarget{}, "cbx_renew_deadline", &bytes.Buffer{}, remote, time.Second, 120*time.Millisecond, 20*time.Millisecond)
+		if err != nil {
+			t.Fatal(err)
+		}
+		remote.mu.Lock()
+		remote.failRenew = true
+		remote.mu.Unlock()
+		select {
+		case <-owner.Context().Done():
+		case <-time.After(time.Second):
+			t.Fatal("renewal ambiguity outlived the confirmed deadline")
+		}
+		if err := owner.Err(); err == nil || !strings.Contains(err.Error(), "deadline exhausted") {
+			t.Fatalf("renewal err=%v, want deadline exhaustion", err)
+		}
+		_ = owner.Close(context.Background())
+	})
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*fakeWorkspaceOwnerRemote)
+		want   string
+	}{
+		{name: "mismatch cancels immediately", mutate: func(remote *fakeWorkspaceOwnerRemote) {
+			remote.token = strings.Repeat("f", 64)
+			remote.terminalRenewErr = true
+		}, want: "mismatch"},
+		{name: "expiry cancels immediately", mutate: func(remote *fakeWorkspaceOwnerRemote) {
+			remote.expires = time.Now().Add(-time.Second)
+			remote.terminalRenewErr = true
+		}, want: "expired"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			remote := newFakeWorkspaceOwnerRemote()
+			owner, err := acquireWorkspaceOwnerWithTransport(context.Background(), SSHTarget{}, "cbx_renew_"+test.want, &bytes.Buffer{}, remote, time.Second, time.Second, 20*time.Millisecond)
+			if err != nil {
+				t.Fatal(err)
+			}
+			remote.mu.Lock()
+			test.mutate(remote)
+			remote.mu.Unlock()
+			select {
+			case <-owner.Context().Done():
+			case <-time.After(200 * time.Millisecond):
+				t.Fatalf("renewal %s did not cancel immediately", test.want)
+			}
+			if err := owner.Err(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("renewal err=%v, want %s", err, test.want)
+			}
+			_ = owner.Close(context.Background())
+		})
+	}
+}
+
 func TestWorkspaceOwnerAcquisitionBoundary(t *testing.T) {
 	nonExclusive := newWatchTestBackend()
 	if !shouldAcquireWorkspaceOwner(true, false, nonExclusive) {
@@ -350,7 +500,7 @@ func TestWorkspaceOwnerContextWrapsEverySSHChild(t *testing.T) {
 	if got, want := prepared.command, remoteWorkspaceOwnerPOSIXWitness(owner.key, owner.token, "printf ok"); got != want {
 		t.Fatalf("ordinary SSH child was not witnessed:\n%s", got)
 	}
-	if script := remoteWorkspaceOwnerPOSIXWitnessScript(owner.key, owner.token, "printf ok"); !strings.Contains(script, "child_identity=$(ps -o lstart=") {
+	if script := remoteWorkspaceOwnerPOSIXWitnessScript(owner.key, owner.token, "printf ok"); !strings.Contains(script, "sentinel_identity=$(ps -o lstart=") {
 		t.Fatalf("ordinary SSH child witness lost identity fencing:\n%s", script)
 	}
 	inputSize := int64(0)
@@ -451,7 +601,7 @@ func TestWorkspaceOwnerProtocolGeneration(t *testing.T) {
 		t.Fatalf("POSIX owner protocol must use the portable launcher: %q", posixTransport[:min(len(posixTransport), 80)])
 	}
 	posix := remoteWorkspaceOwnerPOSIX(req)
-	for _, want := range []string{".crabbox/workspace-owners", key + ".gate", "$key.owner", "$key.child", "flock -x -w 0", "lockf -t 0", "ps -o lstart=", "RECOVERED", "MISMATCH", "EXPIRED", "AMBIGUOUS", `[ "$state_expiry" -gt "$(date +%s)" ]`} {
+	for _, want := range []string{".crabbox/workspace-owners", key + ".gate", "$key.owner", "$key.child", "flock -x -w 0", "lockf -t 0", "ps -o lstart=", "RECOVERED", "MISMATCH", "EXPIRED", "LEGACY", "AMBIGUOUS", `[ "$state_expiry" -gt "$(date +%s)" ]`} {
 		if !strings.Contains(posix, want) {
 			t.Fatalf("POSIX protocol missing %q:\n%s", want, posix)
 		}
@@ -474,16 +624,40 @@ func TestWorkspaceOwnerProtocolGeneration(t *testing.T) {
 		t.Fatalf("POSIX child witness must use the portable launcher: %q", posixWitnessTransport[:min(len(posixWitnessTransport), 80)])
 	}
 	posixWitness := remoteWorkspaceOwnerPOSIXWitnessScript(key, token, "printf ok")
-	for _, want := range []string{"child_identity=$(ps -o lstart=", "owner_expiry=$(sed -n", "owner_expiry", "date +%s", "mv \"$child_tmp\" \"$child\"", "touch \"$start\"", "wait \"$child_pid\"", "rm -f \"$child\""} {
+	for _, want := range []string{"exec setsid /bin/sh", "exec perl -MPOSIX", "supervisor_setsid=setsid", "child_pgid=$(ps -o pgid=", "sentinel_identity=$(ps -o lstart=", "owner_expiry=$(sed -n", "owner_expiry", "date +%s", `v2\n%s\n%s\n%s\n`, "mv \"$child_tmp\" \"$child\"", `trap "" HUP TERM`, "exec 3<>", "kill -TERM 0", "kill -KILL 0", "expire() {", "|| expire", `done\n`, "ps -eo pid=,pgid=,stat=", "$3 !~ /Z/", "install_body=", `flock -x -w 5 "$gate" /bin/sh -c "$install_body"`, "supervisor-ready", "touch \"$start\"", "wait \"$child_pid\"", "rm -f \"$child\""} {
 		if !strings.Contains(posixWitness, want) {
 			t.Fatalf("POSIX child witness missing %q:\n%s", want, posixWitness)
 		}
 	}
+	if strings.Contains(posixWitness, `kill -TERM -"$child_pid"`) || strings.Contains(posixWitness, `kill -KILL -"$child_pid"`) {
+		t.Fatal("POSIX supervisor still signals the workload group externally")
+	}
+	if strings.Contains(posixWitness, `kill "$child_pid" "$sentinel_pid"`) || !strings.Contains(posixWitness, `[ "$sentinel_pid" -gt 1 ]`) {
+		t.Fatal("POSIX startup cleanup can signal an invalid sentinel PID")
+	}
+	if strings.Index(posixWitness, `mv "$child_tmp" "$child"`) > strings.Index(posixWitness, `touch "$start"`) {
+		t.Fatal("POSIX payload barrier opens before the child record is published")
+	}
+	if strings.Index(posixWitness, "nohup /bin/sh") > strings.Index(posixWitness, `touch "$start"`) {
+		t.Fatal("POSIX payload barrier opens before the durable supervisor starts")
+	}
 	windowsWitness := remoteWorkspaceOwnerWindowsWitness(key, token, "Write-Output ok", nil)
-	for _, want := range []string{"Start-Process", "$null = $process.Handle", "StartTime.ToUniversalTime().Ticks", "Read-Expiry", "(Read-Expiry) -le [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()", "Move-Item -LiteralPath $tmp -Destination $child", "$payloadExitCode = $global:LASTEXITCODE", "if (-not $payloadSucceeded) { exit 1 }", "$process.WaitForExit()", "Remove-Item -LiteralPath $child"} {
+	for _, want := range []string{"Start-Process", "$null = $process.Handle", "StartTime.ToUniversalTime().Ticks", "Read-Expiry", "(Read-Expiry) -le [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()", "Move-Item -LiteralPath $tmp -Destination $child", "$payloadExitCode = $global:LASTEXITCODE", "if (-not $payloadSucceeded) { exit 1 }", "$process.WaitForExit()", "$supervisor.WaitForExit()", "Stop-NewWitness 74", "LimitFlags=0x2000", "OpenProcess(0x1101", "GetProcessTimes", "AssignProcessToJobObject", "[CrabboxJob]::Attach($pidValue, [Int64]$identity); if ($job -eq [IntPtr]::Zero)", "[CrabboxJob]::Active($job)", "supervisor.ready", "[CrabboxJob]::CloseHandle($job)", "Remove-Item -LiteralPath $child", "Remove-Item -LiteralPath $runDir -Recurse"} {
 		if !strings.Contains(windowsWitness, want) {
 			t.Fatalf("Windows child witness missing %q:\n%s", want, windowsWitness)
 		}
+	}
+	if strings.Index(windowsWitness, "GetProcessTimes") > strings.Index(windowsWitness, "AssignProcessToJobObject") {
+		t.Fatal("Windows supervisor assigns a PID before validating its start identity")
+	}
+	if strings.Contains(windowsWitness, "taskkill.exe") {
+		t.Fatal("Windows supervisor bypasses its identity-bound job object")
+	}
+	if !strings.Contains(windowsWitness, `@([string]$supervisor.Id, $supervisorIdentity)`) || strings.Contains(windowsWitness, `@([string]$process.Id, $identity)`) {
+		t.Fatal("Windows child record does not retain the live supervisor identity")
+	}
+	if strings.Index(windowsWitness, `$supervisor = Start-Process`) > strings.Index(windowsWitness, "Move-Item -LiteralPath $tmp -Destination $child") {
+		t.Fatal("Windows child record is published before the durable supervisor starts")
 	}
 	windowsInputSize := int64(len("input"))
 	windowsInputWitness := remoteWorkspaceOwnerWindowsWitness(key, token, "Write-Output ok", &windowsInputSize)
@@ -1042,6 +1216,109 @@ func runPOSIXWorkspaceOwnerScript(t *testing.T, home, script string) (string, er
 	return strings.TrimSpace(string(out)), err
 }
 
+type posixChildRecord struct {
+	pgid          int
+	sentinelPID   int
+	startIdentity string
+}
+
+func readPOSIXChildRecord(t *testing.T, path string) posixChildRecord {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+			if len(lines) == 4 && lines[0] == "v2" {
+				pgid, pgidErr := strconv.Atoi(lines[1])
+				sentinelPID, pidErr := strconv.Atoi(lines[2])
+				if pgidErr == nil && pidErr == nil && pgid > 1 && sentinelPID > 1 && lines[3] != "" {
+					return posixChildRecord{pgid: pgid, sentinelPID: sentinelPID, startIdentity: lines[3]}
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("POSIX child record was not published at %s: %v", path, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func processIsLive(pid int) bool {
+	out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+	return err == nil && strings.TrimSpace(string(out)) != "" && !strings.Contains(strings.TrimSpace(string(out)), "Z")
+}
+
+func killPOSIXProcessGroup(pgid int) error {
+	if pgid <= 1 {
+		return fmt.Errorf("refusing to signal process group %d", pgid)
+	}
+	return exec.Command("kill", "-KILL", "--", "-"+strconv.Itoa(pgid)).Run()
+}
+
+func killPOSIXGroupIfProcessMatches(pgid, processPID int, startIdentity string) {
+	// Cleanup must re-fence a live member; the runner may reuse a dead group's PGID.
+	if pgid <= 1 || processPID <= 1 || startIdentity == "" {
+		return
+	}
+	pid := strconv.Itoa(processPID)
+	pgidOutput, pgidErr := exec.Command("ps", "-o", "pgid=", "-p", pid).Output()
+	stat, statErr := exec.Command("ps", "-o", "stat=", "-p", pid).Output()
+	identity, identityErr := exec.Command("ps", "-o", "lstart=", "-p", pid).Output()
+	livePGID, _ := strconv.Atoi(strings.TrimSpace(string(pgidOutput)))
+	liveIdentity := strings.TrimSpace(strings.Join(strings.Fields(string(identity)), " "))
+	if pgidErr != nil || statErr != nil || identityErr != nil ||
+		livePGID != pgid || strings.Contains(string(stat), "Z") ||
+		liveIdentity != startIdentity {
+		return
+	}
+	_ = killPOSIXProcessGroup(pgid)
+}
+
+func killPOSIXGroupIfWitnessMatches(record posixChildRecord) {
+	killPOSIXGroupIfProcessMatches(record.pgid, record.sentinelPID, record.startIdentity)
+}
+
+func posixToolsWithoutSessionHelpers(t *testing.T, home string) string {
+	t.Helper()
+	tools := filepath.Join(home, "tools-no-session-helpers")
+	if err := os.Mkdir(tools, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	names := []string{"awk", "base64", "chmod", "cut", "date", "mkdir", "mkfifo", "mv", "nohup", "ps", "rm", "rmdir", "sed", "sh", "sleep", "touch", "tr", "wc"}
+	lockFound := false
+	for _, name := range append(names, "flock", "lockf") {
+		source, err := exec.LookPath(name)
+		if err != nil {
+			if name == "flock" || name == "lockf" {
+				continue
+			}
+			t.Skipf("required POSIX test tool %s is unavailable", name)
+		}
+		if name == "flock" || name == "lockf" {
+			lockFound = true
+		}
+		if err := os.Symlink(source, filepath.Join(tools, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !lockFound {
+		t.Skip("flock or lockf is required")
+	}
+	return tools
+}
+
+func waitForProcessExit(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for processIsLive(pid) {
+		if time.Now().After(deadline) {
+			t.Fatalf("process %d remained live", pid)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func TestWorkspaceOwnerPOSIXProtocolBehavior(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX protocol execution requires sh")
@@ -1055,6 +1332,9 @@ func TestWorkspaceOwnerPOSIXProtocolBehavior(t *testing.T) {
 	}
 	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerAcquire, tokenA))); err != nil || out != "ACQUIRED" {
 		t.Fatalf("acquire out=%q err=%v", out, err)
+	}
+	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerAcquire, tokenA))); err != nil || out != "ACQUIRED" {
+		t.Fatalf("same-token acquire replay out=%q err=%v", out, err)
 	}
 	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerRenew, tokenB))); err == nil || out != "MISMATCH" {
 		t.Fatalf("mismatched renew out=%q err=%v", out, err)
@@ -1113,10 +1393,11 @@ func TestWorkspaceOwnerPOSIXProtocolBehavior(t *testing.T) {
 	} else if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != childExitCode {
 		t.Fatalf("nonzero witnessed command out=%q err=%v, want exit code %d", out, err, childExitCode)
 	}
-	for _, path := range []string{childPath, filepath.Join(home, ".crabbox", "workspace-owners", key+".run."+tokenA)} {
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Fatalf("nonzero witnessed command left run state %q: %v", path, err)
-		}
+	if _, err := os.Stat(childPath); !os.IsNotExist(err) {
+		t.Fatalf("nonzero witnessed command left child state: %v", err)
+	}
+	if matches, err := filepath.Glob(filepath.Join(home, ".crabbox", "workspace-owners", key+".run."+tokenA+".*")); err != nil || len(matches) != 0 {
+		t.Fatalf("nonzero witnessed command left run state %q: %v", matches, err)
 	}
 	laterResultPath := filepath.Join(home, "after-nonzero.txt")
 	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIXWitness(key, tokenA, "touch "+shellQuote(laterResultPath))); err != nil {
@@ -1177,13 +1458,62 @@ func TestWorkspaceOwnerPOSIXProtocolBehavior(t *testing.T) {
 	if err := os.WriteFile(statePath, []byte("v1\n"+tokenA+"\n1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(childPath, []byte(strconv.Itoa(os.Getpid())+"\n"+identity+"\n"), 0o600); err != nil {
+	legacyLive := strconv.Itoa(os.Getpid()) + "\n" + identity + "\n"
+	if err := os.WriteFile(statePath, []byte(fmt.Sprintf("v1\n%s\n%d\n", tokenA, time.Now().Add(30*time.Second).Unix())), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerAcquire, tokenB))); err != nil || out != "CHILD" {
-		t.Fatalf("live child acquire out=%q err=%v", out, err)
+	if err := os.WriteFile(childPath, []byte(legacyLive), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if err := os.WriteFile(childPath, []byte("999999999\nold identity\n"), 0o600); err != nil {
+	for _, action := range []workspaceOwnerAction{workspaceOwnerInspect, workspaceOwnerRelease} {
+		if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(action, tokenA))); err != nil || out != "LEGACY" {
+			t.Fatalf("unexpired legacy %s out=%q err=%v", action, out, err)
+		}
+		if data, err := os.ReadFile(childPath); err != nil || string(data) != legacyLive {
+			t.Fatalf("unexpired legacy %s changed record: data=%q err=%v", action, data, err)
+		}
+	}
+	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerAcquire, tokenB))); err != nil || out != "BUSY" {
+		t.Fatalf("unexpired legacy owner acquire out=%q err=%v", out, err)
+	}
+	if data, err := os.ReadFile(childPath); err != nil || string(data) != legacyLive {
+		t.Fatalf("unexpired legacy record changed: data=%q err=%v", data, err)
+	}
+	if err := os.WriteFile(statePath, []byte("v1\n"+tokenA+"\n1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacyRecords := []struct {
+		name     string
+		contents string
+	}{
+		{name: "live", contents: legacyLive},
+		{name: "dead", contents: "999999999\ndead identity\n"},
+		{name: "identity mismatch", contents: strconv.Itoa(os.Getpid()) + "\nmismatched identity\n"},
+	}
+	for _, test := range legacyRecords {
+		t.Run("legacy "+test.name, func(t *testing.T) {
+			if err := os.WriteFile(childPath, []byte(test.contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerAcquire, tokenB))); err != nil || out != "LEGACY" {
+				t.Fatalf("legacy acquire out=%q err=%v", out, err)
+			}
+			if data, err := os.ReadFile(childPath); err != nil || string(data) != test.contents {
+				t.Fatalf("legacy record changed: data=%q err=%v", data, err)
+			}
+		})
+	}
+	malformedLegacy := "not-a-pid\nidentity\n"
+	if err := os.WriteFile(childPath, []byte(malformedLegacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerAcquire, tokenB))); err == nil || out != "AMBIGUOUS" {
+		t.Fatalf("malformed legacy acquire out=%q err=%v", out, err)
+	}
+	if data, err := os.ReadFile(childPath); err != nil || string(data) != malformedLegacy {
+		t.Fatalf("malformed legacy record changed: data=%q err=%v", data, err)
+	}
+	if err := os.WriteFile(childPath, []byte("v2\n999999998\n999999999\nold identity\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerAcquire, tokenB))); err != nil || out != "RECOVERED" {
@@ -1191,6 +1521,646 @@ func TestWorkspaceOwnerPOSIXProtocolBehavior(t *testing.T) {
 	}
 	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerRelease, tokenB))); err != nil || out != "RELEASED" {
 		t.Fatalf("release out=%q err=%v", out, err)
+	}
+}
+
+func TestWorkspaceOwnerPOSIXSupervisorSurvivesTransportLoss(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX supervisor execution requires sh")
+	}
+	home := t.TempDir()
+	key := workspaceOwnerKey("cbx_supervisor_transport_loss")
+	tokenA := strings.Repeat("a", 64)
+	tokenB := strings.Repeat("b", 64)
+	request := func(action workspaceOwnerAction, token string) workspaceOwnerRemoteRequest {
+		return workspaceOwnerRemoteRequest{Action: action, Key: key, Token: token, TTL: 30 * time.Second}
+	}
+	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerAcquire, tokenA))); err != nil || out != "ACQUIRED" {
+		t.Fatalf("acquire out=%q err=%v", out, err)
+	}
+	tools := filepath.Join(home, "tools")
+	if err := os.Mkdir(tools, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	realPS, err := exec.LookPath("ps")
+	if err != nil {
+		t.Fatal(err)
+	}
+	failPS := filepath.Join(home, "fail-supervisor-ps")
+	psShim := `#!/bin/sh
+if [ -f "$CRABBOX_FAIL_PS" ] && [ "$1:$2" = "-o:stat=" ]; then exit 1; fi
+exec ` + shellQuote(realPS) + ` "$@"
+`
+	if err := os.WriteFile(filepath.Join(tools, "ps"), []byte(psShim), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	sentinel := exec.Command("sleep", "30")
+	if err := sentinel.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = sentinel.Process.Kill()
+		_ = sentinel.Wait()
+	})
+
+	pidsPath := filepath.Join(home, "workload-pids")
+	payload := `sleep 30 & descendant=$!; printf '%s\n%s\n' "$$" "$descendant" > ` + shellQuote(pidsPath) + `; wait`
+	witnessCommand := []string{"sh", "-c", remoteWorkspaceOwnerPOSIXWitness(key, tokenA, payload)}
+	killWitness := func(cmd *exec.Cmd) error { return cmd.Process.Kill() }
+	if setsid, err := exec.LookPath("setsid"); err == nil {
+		witnessCommand = append([]string{setsid}, witnessCommand...)
+		killWitness = func(cmd *exec.Cmd) error {
+			return killPOSIXProcessGroup(cmd.Process.Pid)
+		}
+	}
+	witness := exec.Command(witnessCommand[0], witnessCommand[1:]...)
+	witness.Env = append(os.Environ(), "HOME="+home, "PATH="+tools+string(os.PathListSeparator)+os.Getenv("PATH"), "CRABBOX_FAIL_PS="+failPS)
+	if err := witness.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = witness.Process.Kill()
+		_ = witness.Wait()
+	})
+
+	var workloadPID, descendantPID int
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		data, err := os.ReadFile(pidsPath)
+		if err == nil {
+			fields := strings.Fields(string(data))
+			if len(fields) == 2 {
+				workloadPID, _ = strconv.Atoi(fields[0])
+				descendantPID, _ = strconv.Atoi(fields[1])
+				if workloadPID > 0 && descendantPID > 0 {
+					break
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("workload did not publish descendant PIDs: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := killWitness(witness); err != nil {
+		t.Fatal(err)
+	}
+	_ = witness.Wait()
+	if err := os.WriteFile(failPS, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, pid := range []int{workloadPID, descendantPID} {
+		deadline := time.Now().Add(5 * time.Second)
+		for exec.Command("kill", "-0", strconv.Itoa(pid)).Run() == nil {
+			if time.Now().After(deadline) {
+				t.Fatalf("fenced workload process %d survived supervisor termination", pid)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	statePath := filepath.Join(home, ".crabbox", "workspace-owners", key+".owner")
+	if err := os.WriteFile(statePath, []byte("v1\n"+tokenA+"\n1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command("kill", "-0", strconv.Itoa(sentinel.Process.Pid)).Run(); err != nil {
+		t.Fatalf("unrelated sentinel was terminated: %v", err)
+	}
+
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerAcquire, tokenB)))
+		if err == nil && out == "RECOVERED" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("reacquire after supervisor cleanup out=%q err=%v", out, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerRelease, tokenB))); err != nil || out != "RELEASED" {
+		t.Fatalf("release after supervisor cleanup out=%q err=%v", out, err)
+	}
+}
+
+func TestWorkspaceOwnerPOSIXOverlappingWitnessKeepsActiveSupervisor(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX supervisor execution requires sh")
+	}
+	home := t.TempDir()
+	key := workspaceOwnerKey("cbx_overlapping_witness")
+	token := strings.Repeat("a", 64)
+	request := func(action workspaceOwnerAction) workspaceOwnerRemoteRequest {
+		return workspaceOwnerRemoteRequest{Action: action, Key: key, Token: token, TTL: 30 * time.Second}
+	}
+	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerAcquire))); err != nil || out != "ACQUIRED" {
+		t.Fatalf("acquire out=%q err=%v", out, err)
+	}
+	activePath := filepath.Join(home, "active-witness")
+	rejectedPath := filepath.Join(home, "rejected-witness")
+	first := exec.Command("sh", "-c", remoteWorkspaceOwnerPOSIXWitness(key, token, "touch "+shellQuote(activePath)+"; sleep 30"))
+	first.Env = append(os.Environ(), "HOME="+home)
+	if err := first.Start(); err != nil {
+		t.Fatal(err)
+	}
+	childPath := filepath.Join(home, ".crabbox", "workspace-owners", key+".child")
+	record := readPOSIXChildRecord(t, childPath)
+	t.Cleanup(func() {
+		killPOSIXGroupIfWitnessMatches(record)
+		_ = first.Process.Kill()
+		_ = first.Wait()
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(activePath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("active witness payload did not start")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIXWitness(key, token, "touch "+shellQuote(rejectedPath))); err == nil || exitCode(err) != 74 {
+		t.Fatalf("overlapping witness out=%q err=%v", out, err)
+	}
+	if _, err := os.Stat(rejectedPath); !os.IsNotExist(err) {
+		t.Fatalf("overlapping witness executed: %v", err)
+	}
+	after := readPOSIXChildRecord(t, childPath)
+	if after != record || !processIsLive(record.pgid) || !processIsLive(record.sentinelPID) {
+		t.Fatalf("overlapping witness disturbed active supervisor: before=%+v after=%+v", record, after)
+	}
+	statePath := filepath.Join(home, ".crabbox", "workspace-owners", key+".owner")
+	if err := os.WriteFile(statePath, []byte("v1\n"+token+"\n1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Wait(); err == nil {
+		t.Fatal("expired active witness succeeded")
+	}
+	waitForProcessExit(t, record.sentinelPID)
+}
+
+func TestWorkspaceOwnerPOSIXSentinelRetainsAndExpiresLeaderlessGroup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX supervisor execution requires sh")
+	}
+	home := t.TempDir()
+	key := workspaceOwnerKey("cbx_sentinel_leader_exit")
+	tokenA := strings.Repeat("a", 64)
+	tokenB := strings.Repeat("b", 64)
+	request := func(action workspaceOwnerAction, token string) workspaceOwnerRemoteRequest {
+		return workspaceOwnerRemoteRequest{Action: action, Key: key, Token: token, TTL: 30 * time.Second}
+	}
+	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerAcquire, tokenA))); err != nil || out != "ACQUIRED" {
+		t.Fatalf("acquire out=%q err=%v", out, err)
+	}
+
+	unrelated := exec.Command("sleep", "30")
+	if err := unrelated.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = unrelated.Process.Kill()
+		_ = unrelated.Wait()
+	})
+
+	pidsPath := filepath.Join(home, "leader-exit-pids")
+	payload := `sleep 30 </dev/null >/dev/null 2>&1 & descendant=$!; printf '%s\n%s\n' "$$" "$descendant" > ` + shellQuote(pidsPath) + `; wait`
+	var witnessOutput bytes.Buffer
+	witness := exec.Command("sh", "-c", remoteWorkspaceOwnerPOSIXWitness(key, tokenA, payload))
+	witness.Env = append(os.Environ(), "HOME="+home)
+	witness.Stdout = &witnessOutput
+	witness.Stderr = &witnessOutput
+	if err := witness.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = witness.Process.Kill()
+		_ = witness.Wait()
+	})
+
+	var data []byte
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		data, _ = os.ReadFile(pidsPath)
+		if len(strings.Fields(string(data))) == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("leader exit workload did not publish PIDs: %q", data)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	fields := strings.Fields(string(data))
+	workloadPID, _ := strconv.Atoi(fields[0])
+	descendantPID, _ := strconv.Atoi(fields[1])
+	childPath := filepath.Join(home, ".crabbox", "workspace-owners", key+".child")
+	record := readPOSIXChildRecord(t, childPath)
+	t.Cleanup(func() { killPOSIXGroupIfWitnessMatches(record) })
+	if err := exec.Command("kill", "-KILL", strconv.Itoa(record.pgid)).Run(); err != nil {
+		t.Fatal(err)
+	}
+	waitForProcessExit(t, record.pgid)
+	for _, pid := range []int{record.sentinelPID, workloadPID, descendantPID} {
+		if !processIsLive(pid) {
+			t.Fatalf("leader exit unexpectedly terminated process %d", pid)
+		}
+	}
+	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerInspect, tokenA))); err != nil || out != "CHILD" {
+		t.Fatalf("leaderless child inspect out=%q err=%v", out, err)
+	}
+
+	statePath := filepath.Join(home, ".crabbox", "workspace-owners", key+".owner")
+	if err := os.WriteFile(statePath, []byte("v1\n"+tokenA+"\n1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := witness.Wait(); err == nil {
+		t.Fatal("expired leader-exit witness succeeded")
+	} else if _, ok := err.(*exec.ExitError); !ok {
+		t.Fatalf("leader-exit witness err=%v output=%q", err, witnessOutput.String())
+	}
+	for _, pid := range []int{record.sentinelPID, workloadPID, descendantPID} {
+		waitForProcessExit(t, pid)
+	}
+	if err := exec.Command("kill", "-0", strconv.Itoa(unrelated.Process.Pid)).Run(); err != nil {
+		t.Fatalf("unrelated sentinel was terminated: %v", err)
+	}
+	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerAcquire, tokenB))); err != nil || out != "RECOVERED" {
+		t.Fatalf("reacquire after leader-exit cleanup out=%q err=%v", out, err)
+	}
+	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerRelease, tokenB))); err != nil || out != "RELEASED" {
+		t.Fatalf("release after leader-exit cleanup out=%q err=%v", out, err)
+	}
+}
+
+func TestWorkspaceOwnerPOSIXSentinelDeathFailsClosed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX supervisor execution requires sh")
+	}
+	home := t.TempDir()
+	key := workspaceOwnerKey("cbx_sentinel_death")
+	tokenA := strings.Repeat("a", 64)
+	tokenB := strings.Repeat("b", 64)
+	request := func(action workspaceOwnerAction, token string) workspaceOwnerRemoteRequest {
+		return workspaceOwnerRemoteRequest{Action: action, Key: key, Token: token, TTL: 30 * time.Second}
+	}
+	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerAcquire, tokenA))); err != nil || out != "ACQUIRED" {
+		t.Fatalf("acquire out=%q err=%v", out, err)
+	}
+	pidsPath := filepath.Join(home, "sentinel-death-pids")
+	payload := `sleep 30 & descendant=$!; printf '%s\n%s\n' "$$" "$descendant" > ` + shellQuote(pidsPath) + `; wait`
+	witness := exec.Command("sh", "-c", remoteWorkspaceOwnerPOSIXWitness(key, tokenA, payload))
+	witness.Env = append(os.Environ(), "HOME="+home)
+	if err := witness.Start(); err != nil {
+		t.Fatal(err)
+	}
+	childPath := filepath.Join(home, ".crabbox", "workspace-owners", key+".child")
+	record := readPOSIXChildRecord(t, childPath)
+	leaderIdentity, err := exec.Command("ps", "-o", "lstart=", "-p", strconv.Itoa(record.pgid)).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		killPOSIXGroupIfProcessMatches(record.pgid, record.pgid, strings.TrimSpace(strings.Join(strings.Fields(string(leaderIdentity)), " ")))
+		_ = witness.Wait()
+	})
+	var descendantPID int
+	deadline := time.Now().Add(5 * time.Second)
+	for descendantPID == 0 {
+		data, _ := os.ReadFile(pidsPath)
+		fields := strings.Fields(string(data))
+		if len(fields) == 2 {
+			descendantPID, _ = strconv.Atoi(fields[1])
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("sentinel-death payload did not start")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := exec.Command("kill", "-KILL", strconv.Itoa(record.sentinelPID)).Run(); err != nil {
+		t.Fatal(err)
+	}
+	waitForProcessExit(t, record.sentinelPID)
+	statePath := filepath.Join(home, ".crabbox", "workspace-owners", key+".owner")
+	if err := os.WriteFile(statePath, []byte("v1\n"+tokenA+"\n1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerAcquire, tokenB))); err == nil || out != "AMBIGUOUS" {
+		t.Fatalf("sentinel-death acquire out=%q err=%v", out, err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	for _, pid := range []int{record.pgid, descendantPID} {
+		if !processIsLive(pid) {
+			t.Fatalf("invalid sentinel caused group signal to process %d", pid)
+		}
+	}
+}
+
+func TestWorkspaceOwnerPOSIXAmbientTransportGroupFallbackFailsClosed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX supervisor execution requires sh")
+	}
+	home := t.TempDir()
+	tools := posixToolsWithoutSessionHelpers(t, home)
+	key := workspaceOwnerKey("cbx_ambient_transport_group")
+	token := strings.Repeat("a", 64)
+	request := workspaceOwnerRemoteRequest{Action: workspaceOwnerAcquire, Key: key, Token: token, TTL: 30 * time.Second}
+	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request)); err != nil || out != "ACQUIRED" {
+		t.Fatalf("acquire out=%q err=%v", out, err)
+	}
+	marker := filepath.Join(home, "ambient-payload")
+	cmd := exec.Command(filepath.Join(tools, "sh"), "-c", remoteWorkspaceOwnerPOSIXWitness(key, token, "touch "+shellQuote(marker)))
+	cmd.Env = append(os.Environ(), "HOME="+home, "PATH="+tools)
+	if out, err := cmd.CombinedOutput(); err == nil || exitCode(err) != 74 {
+		t.Fatalf("ambient fallback out=%q err=%v", out, err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("ambient fallback executed payload: %v", err)
+	}
+	childPath := filepath.Join(home, ".crabbox", "workspace-owners", key+".child")
+	if _, err := os.Stat(childPath); !os.IsNotExist(err) {
+		t.Fatalf("ambient fallback published child state: %v", err)
+	}
+}
+
+func TestWorkspaceOwnerPOSIXIsolatedTransportGroupFallback(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX supervisor execution requires sh")
+	}
+	home := t.TempDir()
+	tools := posixToolsWithoutSessionHelpers(t, home)
+	sshMode := os.Getenv("CRABBOX_TEST_SSH_LOCALHOST") == "1"
+	runWithTools := func(script string) (string, error) {
+		var cmd *exec.Cmd
+		if sshMode {
+			remote := "export HOME=" + shellQuote(home) + "; export PATH=" + shellQuote(tools) + "; " + script
+			cmd = exec.Command("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR", "localhost", remote)
+		} else {
+			cmd = exec.Command(filepath.Join(tools, "sh"), "-c", script)
+			cmd.Env = append(os.Environ(), "HOME="+home, "PATH="+tools)
+		}
+		out, err := cmd.CombinedOutput()
+		return strings.TrimSpace(string(out)), err
+	}
+	if out, err := runWithTools("command -v setsid || command -v perl"); err == nil {
+		t.Fatalf("session helper unexpectedly available: %q", out)
+	}
+
+	key := workspaceOwnerKey("cbx_isolated_transport_group")
+	tokenA := strings.Repeat("a", 64)
+	tokenB := strings.Repeat("b", 64)
+	request := func(action workspaceOwnerAction, token string) workspaceOwnerRemoteRequest {
+		return workspaceOwnerRemoteRequest{Action: action, Key: key, Token: token, TTL: 30 * time.Second}
+	}
+	if out, err := runWithTools(remoteWorkspaceOwnerPOSIX(request(workspaceOwnerAcquire, tokenA))); err != nil || out != "ACQUIRED" {
+		t.Fatalf("acquire out=%q err=%v", out, err)
+	}
+
+	unrelated := exec.Command("sleep", "30")
+	if err := unrelated.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = unrelated.Process.Kill()
+		_ = unrelated.Wait()
+	})
+
+	pidsPath := filepath.Join(home, "fallback-pids")
+	payload := `sleep 30 & descendant=$!; printf '%s\n%s\n' "$$" "$descendant" > ` + shellQuote(pidsPath) + `; wait`
+	transport := remoteWorkspaceOwnerPOSIXWitness(key, tokenA, payload)
+	var command []string
+	if sshMode {
+		remote := "export HOME=" + shellQuote(home) + "; export PATH=" + shellQuote(tools) + "; " + transport
+		command = []string{"ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR", "localhost", remote}
+	} else if setsid, err := exec.LookPath("setsid"); err == nil {
+		command = []string{setsid, "/bin/sh", "-c", transport}
+	} else if perl, err := exec.LookPath("perl"); err == nil {
+		command = []string{perl, "-MPOSIX", "-e", "POSIX::setsid() >= 0 or exit 74; exec @ARGV", "/bin/sh", "-c", transport}
+	} else {
+		t.Skip("test transport cannot create an isolated process group")
+	}
+	var witnessOutput bytes.Buffer
+	witness := exec.Command(command[0], command[1:]...)
+	witness.Env = append(os.Environ(), "HOME="+home, "PATH="+tools)
+	witness.Stdout = &witnessOutput
+	witness.Stderr = &witnessOutput
+	if err := witness.Start(); err != nil {
+		t.Fatal(err)
+	}
+	childPath := filepath.Join(home, ".crabbox", "workspace-owners", key+".child")
+	record := readPOSIXChildRecord(t, childPath)
+	t.Cleanup(func() {
+		killPOSIXGroupIfWitnessMatches(record)
+		_ = witness.Process.Kill()
+		_ = witness.Wait()
+	})
+	if !sshMode && record.pgid != witness.Process.Pid {
+		t.Fatalf("fallback group=%d transport=%d", record.pgid, witness.Process.Pid)
+	}
+
+	var workloadPID, descendantPID int
+	deadline := time.Now().Add(5 * time.Second)
+	for workloadPID == 0 || descendantPID == 0 {
+		data, _ := os.ReadFile(pidsPath)
+		fields := strings.Fields(string(data))
+		if len(fields) == 2 {
+			workloadPID, _ = strconv.Atoi(fields[0])
+			descendantPID, _ = strconv.Atoi(fields[1])
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("fallback payload did not publish PIDs: %q", data)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	statePath := filepath.Join(home, ".crabbox", "workspace-owners", key+".owner")
+	if err := os.WriteFile(statePath, []byte("v1\n"+tokenA+"\n1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := witness.Wait(); err == nil {
+		t.Fatalf("expired fallback witness succeeded: %q", witnessOutput.String())
+	}
+	for _, pid := range []int{record.sentinelPID, workloadPID, descendantPID} {
+		waitForProcessExit(t, pid)
+	}
+	if err := exec.Command("kill", "-0", strconv.Itoa(unrelated.Process.Pid)).Run(); err != nil {
+		t.Fatalf("unrelated sentinel was terminated: %v", err)
+	}
+	if out, err := runWithTools(remoteWorkspaceOwnerPOSIX(request(workspaceOwnerAcquire, tokenB))); err != nil || out != "RECOVERED" {
+		t.Fatalf("fallback reacquire out=%q err=%v", out, err)
+	}
+	if matches, err := filepath.Glob(filepath.Join(home, ".crabbox", "workspace-owners", key+".launcher."+tokenA+".*")); err != nil || len(matches) != 0 {
+		t.Fatalf("fallback recovery left launcher state %q: %v", matches, err)
+	}
+	if out, err := runWithTools(remoteWorkspaceOwnerPOSIX(request(workspaceOwnerRelease, tokenB))); err != nil || out != "RELEASED" {
+		t.Fatalf("fallback release out=%q err=%v", out, err)
+	}
+}
+
+func TestWorkspaceOwnerPOSIXTamperedSentinelRecordsFailClosed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX protocol execution requires sh")
+	}
+	home := t.TempDir()
+	key := workspaceOwnerKey("cbx_sentinel_tamper")
+	tokenA := strings.Repeat("a", 64)
+	request := func(action workspaceOwnerAction, token string) workspaceOwnerRemoteRequest {
+		return workspaceOwnerRemoteRequest{Action: action, Key: key, Token: token, TTL: 30 * time.Second}
+	}
+	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerAcquire, tokenA))); err != nil || out != "ACQUIRED" {
+		t.Fatalf("acquire out=%q err=%v", out, err)
+	}
+	startedPath := filepath.Join(home, "tamper-started")
+	witness := exec.Command("sh", "-c", remoteWorkspaceOwnerPOSIXWitness(key, tokenA, "touch "+shellQuote(startedPath)+"; sleep 30"))
+	witness.Env = append(os.Environ(), "HOME="+home)
+	if err := witness.Start(); err != nil {
+		t.Fatal(err)
+	}
+	childPath := filepath.Join(home, ".crabbox", "workspace-owners", key+".child")
+	record := readPOSIXChildRecord(t, childPath)
+	t.Cleanup(func() {
+		killPOSIXGroupIfWitnessMatches(record)
+		_ = witness.Process.Kill()
+		_ = witness.Wait()
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(startedPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("tamper workload did not start")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	records := []struct {
+		name     string
+		contents string
+	}{
+		{name: "identity", contents: fmt.Sprintf("v2\n%d\n%d\ntampered identity\n", record.pgid, record.sentinelPID)},
+		{name: "pgid", contents: fmt.Sprintf("v2\n%d\n%d\n%s\n", record.pgid+100000000, record.sentinelPID, record.startIdentity)},
+		{name: "id one", contents: "v2\n1\n1\nidentity\n"},
+	}
+	for _, tt := range records {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := os.WriteFile(childPath, []byte(tt.contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerInspect, tokenA))); err == nil || out != "AMBIGUOUS" {
+				t.Fatalf("tampered inspect out=%q err=%v", out, err)
+			}
+			if !processIsLive(record.pgid) || !processIsLive(record.sentinelPID) {
+				t.Fatal("tampered record signaled the live workload group")
+			}
+		})
+	}
+	if err := killPOSIXProcessGroup(record.pgid); err != nil {
+		t.Fatal(err)
+	}
+	_ = witness.Process.Kill()
+	_ = witness.Wait()
+
+	zombie := exec.Command("sh", "-c", "exit 0")
+	if err := zombie.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer zombie.Wait()
+	deadline = time.Now().Add(2 * time.Second)
+	var zombiePGID int
+	var zombieIdentity string
+	for {
+		stat, _ := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(zombie.Process.Pid)).Output()
+		pgid, _ := exec.Command("ps", "-o", "pgid=", "-p", strconv.Itoa(zombie.Process.Pid)).Output()
+		identity, _ := exec.Command("ps", "-o", "lstart=", "-p", strconv.Itoa(zombie.Process.Pid)).Output()
+		zombiePGID, _ = strconv.Atoi(strings.TrimSpace(string(pgid)))
+		zombieIdentity = strings.TrimSpace(strings.Join(strings.Fields(string(identity)), " "))
+		if strings.Contains(string(stat), "Z") && zombiePGID > 1 && zombieIdentity != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("failed to retain zombie child for protocol test")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := os.WriteFile(childPath, []byte(fmt.Sprintf("v2\n%d\n%d\n%s\n", zombiePGID, zombie.Process.Pid, zombieIdentity)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerInspect, tokenA))); err == nil || out != "AMBIGUOUS" {
+		t.Fatalf("zombie sentinel inspect out=%q err=%v", out, err)
+	}
+}
+
+func TestWorkspaceOwnerPOSIXNormalCompletionReapsSentinel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX supervisor execution requires sh")
+	}
+	home := t.TempDir()
+	key := workspaceOwnerKey("cbx_sentinel_normal")
+	token := strings.Repeat("a", 64)
+	request := func(action workspaceOwnerAction) workspaceOwnerRemoteRequest {
+		return workspaceOwnerRemoteRequest{Action: action, Key: key, Token: token, TTL: 30 * time.Second}
+	}
+	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerAcquire))); err != nil || out != "ACQUIRED" {
+		t.Fatalf("acquire out=%q err=%v", out, err)
+	}
+	root := filepath.Join(home, ".crabbox", "workspace-owners")
+	childPath := filepath.Join(root, key+".child")
+	tools := filepath.Join(home, "tools")
+	if err := os.Mkdir(tools, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	realPS, err := exec.LookPath("ps")
+	if err != nil {
+		t.Fatal(err)
+	}
+	psShim := `#!/bin/sh
+` + shellQuote(realPS) + ` "$@"
+status=$?
+if [ "$1:$2" = "-eo:pid=,pgid=,stat=" ] && [ -f "$CRABBOX_TEST_CHILD_RECORD" ]; then
+	pgid=$(sed -n '2p' "$CRABBOX_TEST_CHILD_RECORD")
+	printf '999999 %s Z\n' "$pgid"
+fi
+exit "$status"
+`
+	if err := os.WriteFile(filepath.Join(tools, "ps"), []byte(psShim), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	publishedPath := filepath.Join(home, "published-child")
+	descendantPath := filepath.Join(home, "normal-descendant")
+	payload := `test -f ` + shellQuote(childPath) + ` || exit 70; cp ` + shellQuote(childPath) + ` ` + shellQuote(publishedPath) + `; sleep 0.3 & printf '%s\n' "$!" > ` + shellQuote(descendantPath) + `; exit 42`
+	witness := exec.Command("sh", "-c", remoteWorkspaceOwnerPOSIXWitness(key, token, payload))
+	witness.Env = append(os.Environ(), "HOME="+home, "PATH="+tools+string(os.PathListSeparator)+os.Getenv("PATH"), "CRABBOX_TEST_CHILD_RECORD="+childPath)
+	started := time.Now()
+	if err := witness.Start(); err != nil {
+		t.Fatal(err)
+	}
+	record := readPOSIXChildRecord(t, childPath)
+	err = witness.Wait()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 42 {
+		t.Fatalf("normal witness err=%v, want exit 42", err)
+	}
+	if time.Since(started) < 250*time.Millisecond {
+		t.Fatal("normal completion did not wait for its in-group descendant")
+	}
+	published, err := os.ReadFile(publishedPath)
+	if err != nil || !strings.HasPrefix(string(published), "v2\n") {
+		t.Fatalf("payload started before v2 record publication: data=%q err=%v", published, err)
+	}
+	descendantData, err := os.ReadFile(descendantPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	descendantPID, _ := strconv.Atoi(strings.TrimSpace(string(descendantData)))
+	waitForProcessExit(t, descendantPID)
+	waitForProcessExit(t, record.sentinelPID)
+	if _, err := os.Stat(childPath); !os.IsNotExist(err) {
+		t.Fatalf("normal completion left child state: %v", err)
+	}
+	if matches, err := filepath.Glob(filepath.Join(root, key+".run."+token+".*")); err != nil || len(matches) != 0 {
+		t.Fatalf("normal completion left run state %q: %v", matches, err)
+	}
+	if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(request(workspaceOwnerRelease))); err != nil || out != "RELEASED" {
+		t.Fatalf("release after normal completion out=%q err=%v", out, err)
 	}
 }
 
@@ -1235,6 +2205,9 @@ Set-Content -LiteralPath (Join-Path $root (` + psQuote(key) + ` + ".gate")) -Val
 	if out, err := runWindowsPowerShellScript(t, remoteWorkspaceOwnerWindows(req)); err != nil || !strings.Contains(string(out), "ACQUIRED") {
 		t.Fatalf("Windows acquire out=%q err=%v", out, err)
 	}
+	if out, err := runWindowsPowerShellScript(t, remoteWorkspaceOwnerWindows(req)); err != nil || !strings.Contains(string(out), "ACQUIRED") {
+		t.Fatalf("Windows same-token acquire replay out=%q err=%v", out, err)
+	}
 	expire := `$root = Join-Path $HOME ".crabbox\workspace-owners"
 $state = Join-Path $root (` + psQuote(key) + ` + ".owner")
 Set-Content -LiteralPath $state -Value @("v1", ` + psQuote(token) + `, "1") -Encoding ASCII
@@ -1272,6 +2245,67 @@ if (Test-Path -LiteralPath $child) { throw "late witness published child" }
 	}
 	if out, err := runWindowsPowerShellScript(t, remoteWorkspaceOwnerWindowsWitness(key, token, "exit 23", nil)); err == nil || exitCode(err) != 23 {
 		t.Fatalf("Windows nonzero witnessed child out=%q err=%v", out, err)
+	}
+	descendantState := filepath.Join(t.TempDir(), "descendant-state")
+	rejectedPath := filepath.Join(t.TempDir(), "rejected-overlap")
+	descendantPayload := `$descendant = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Milliseconds 1500") -WindowStyle Hidden -PassThru
+[IO.File]::WriteAllText(` + psQuote(descendantState) + `, ([string]$PID + [Environment]::NewLine + [string]$descendant.Id))
+exit 42`
+	powerShell, err := exec.LookPath("powershell.exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	witnessScript := filepath.Join(t.TempDir(), "descendant-witness.ps1")
+	if err := os.WriteFile(witnessScript, []byte(remoteWorkspaceOwnerWindowsWitness(key, token, descendantPayload, nil)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var descendantOutput bytes.Buffer
+	descendantWitness := exec.Command(powerShell, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", witnessScript)
+	descendantWitness.Stdout = &descendantOutput
+	descendantWitness.Stderr = &descendantOutput
+	started := time.Now()
+	if err := descendantWitness.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = descendantWitness.Process.Kill() })
+	var leaderPID int
+	deadline := time.Now().Add(5 * time.Second)
+	for leaderPID == 0 {
+		data, _ := os.ReadFile(descendantState)
+		fields := strings.Fields(string(data))
+		if len(fields) == 2 {
+			leaderPID, _ = strconv.Atoi(fields[0])
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Windows descendant payload did not publish PIDs: %q", data)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	for {
+		checkLeader := `if (Get-Process -Id ` + strconv.Itoa(leaderPID) + ` -ErrorAction SilentlyContinue) { exit 1 }`
+		if _, err := runWindowsPowerShellScript(t, checkLeader); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Windows workload leader %d remained live", leaderPID)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	req.Action = workspaceOwnerInspect
+	if out, err := runWindowsPowerShellScript(t, remoteWorkspaceOwnerWindows(req)); err != nil || !strings.Contains(string(out), "CHILD") {
+		t.Fatalf("Windows descendant-only inspect out=%q err=%v", out, err)
+	}
+	if out, err := runWindowsPowerShellScript(t, remoteWorkspaceOwnerWindowsWitness(key, token, `[IO.File]::WriteAllText(`+psQuote(rejectedPath)+`, "bad")`, nil)); err == nil || exitCode(err) != 75 {
+		t.Fatalf("Windows overlapping descendant witness out=%q err=%v", out, err)
+	}
+	if err := descendantWitness.Wait(); err == nil || exitCode(err) != 42 {
+		t.Fatalf("Windows descendant witness out=%q err=%v", descendantOutput.String(), err)
+	}
+	if time.Since(started) < time.Second {
+		t.Fatal("Windows normal completion did not wait for its job descendants")
+	}
+	if _, err := os.Stat(rejectedPath); !os.IsNotExist(err) {
+		t.Fatalf("Windows overlapping descendant witness executed: %v", err)
 	}
 	req.Action = workspaceOwnerRelease
 	if out, err := runWindowsPowerShellScript(t, remoteWorkspaceOwnerWindows(req)); err != nil || !strings.Contains(string(out), "RELEASED") {
