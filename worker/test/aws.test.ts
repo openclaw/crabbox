@@ -1583,6 +1583,46 @@ describe("aws provider", () => {
     ).toContain("t4g.small");
   });
 
+  it("rejects mixed cache-volume launch candidates before volume or instance creation", async () => {
+    const actions: string[] = [];
+    let describeParams: URLSearchParams | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        const params = new URLSearchParams(await request.clone().text());
+        const action = params.get("Action") ?? "";
+        actions.push(action);
+        if (action !== "DescribeInstanceTypes") {
+          throw new Error(`unexpected AWS mutation: ${action}`);
+        }
+        describeParams = params;
+        return ec2XMLResponse(`<DescribeInstanceTypesResponse><instanceTypeSet>
+          <item><instanceType>c7i.large</instanceType><hypervisor>nitro</hypervisor></item>
+          <item><instanceType>m3.large</instanceType><hypervisor>xen</hypervisor></item>
+        </instanceTypeSet></DescribeInstanceTypesResponse>`);
+      }),
+    );
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+      "eu-west-1",
+    );
+    const config = leaseConfig({
+      provider: "aws",
+      sshPublicKey: "ssh-ed25519 test",
+      awsInstanceTypes: ["c7i.large", "m3.large"],
+    });
+
+    await expect(client.validateCacheVolumeInstanceType(config)).rejects.toThrow(
+      "rejected: m3.large",
+    );
+    expect(describeParams?.get("InstanceType.1")).toBe("c7i.large");
+    expect(describeParams?.get("InstanceType.2")).toBe("m3.large");
+    expect(actions).toEqual(["DescribeInstanceTypes"]);
+    expect(actions).not.toContain("CreateVolume");
+    expect(actions).not.toContain("RunInstances");
+  });
+
   it("builds ordered AWS region and availability-zone candidates", () => {
     expect(
       awsRegionCandidates(

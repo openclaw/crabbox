@@ -698,10 +698,27 @@ export class EC2SpotClient {
   }
 
   async validateCacheVolumeInstanceType(config: LeaseConfig): Promise<void> {
-    const root = await this.ec2("DescribeInstanceTypes", { "InstanceType.1": config.serverType });
-    const item = items(record(root["instanceTypeSet"])["item"]).map(record)[0];
-    if (!item || asString(item["hypervisor"]) !== "nitro") {
-      throw new Error(`AWS cache volumes require a Nitro/NVMe instance type: ${config.serverType}`);
+    const candidates = awsLaunchCandidates(config);
+    if (candidates.length === 0) {
+      throw new Error("AWS cache volumes require at least one launch candidate");
+    }
+    const params: Record<string, string> = {};
+    candidates.forEach((instanceType, index) => {
+      params[`InstanceType.${index + 1}`] = instanceType;
+    });
+    const root = await this.ec2("DescribeInstanceTypes", params);
+    const described = new Map(
+      items(record(root["instanceTypeSet"])["item"])
+        .map(record)
+        .map((item) => [asString(item["instanceType"]), item] as const),
+    );
+    const rejected = candidates.filter(
+      (instanceType) => asString(described.get(instanceType)?.["hypervisor"]) !== "nitro",
+    );
+    if (rejected.length > 0) {
+      throw new Error(
+        `AWS cache volumes require every launch candidate to support Nitro/NVMe; rejected: ${rejected.join(", ")}`,
+      );
     }
   }
 
