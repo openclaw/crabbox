@@ -54,6 +54,7 @@ import {
   checkpointDuePrefix,
   checkpointEventKey,
   checkpointKey,
+  checkpointLimits,
   checkpointVisibleTo,
   claimCheckpointDeletion,
   expireCheckpointClaims,
@@ -13875,7 +13876,12 @@ export class FleetCoordinator {
       if (parts.length === 4 && parts[3] === "use" && method === "POST") {
         const body = await readJson<{ action?: unknown; claim?: unknown }>(request);
         if (body.action === "begin") {
-          const claim = await acquireCheckpointUse(this.state.storage, checkpointID, principal);
+          const claim = await acquireCheckpointUse(
+            this.state.storage,
+            checkpointID,
+            principal,
+            checkpointLimits(this.env),
+          );
           await this.scheduleCheckpointAlarm();
           return json(
             {
@@ -14073,33 +14079,37 @@ export class FleetCoordinator {
       ...(repoHead ? { head: repoHead } : {}),
       ...(repoBaseRef ? { baseRef: repoBaseRef } : {}),
     };
-    const reservation = await reserveCheckpointCreate(this.state.storage, {
-      record: {
-        id: input.id,
-        owner: lease.owner,
-        org: lease.org,
-        leaseID: lease.id,
-        provider: providerName,
-        scope,
-        name,
-        strategy,
-        noReboot: input.noReboot !== false,
-        retention,
-        createdAt,
-        lastUsedAt: createdAt,
-        target: lease.target,
-        ...(lease.windowsMode ? { windowsMode: lease.windowsMode } : {}),
-        ...(lease.desktop ? { desktop: lease.desktop } : {}),
-        ...(lease.serverType ? { serverType: lease.serverType } : {}),
-        ...(hostID ? { hostID } : {}),
-        ...(lease.slug ? { slug: lease.slug } : {}),
-        ...(workdir ? { workdir } : {}),
-        ...(Object.keys(repo).length ? { repo } : {}),
+    const reservation = await reserveCheckpointCreate(
+      this.state.storage,
+      {
+        record: {
+          id: input.id,
+          owner: lease.owner,
+          org: lease.org,
+          leaseID: lease.id,
+          provider: providerName,
+          scope,
+          name,
+          strategy,
+          noReboot: input.noReboot !== false,
+          retention,
+          createdAt,
+          lastUsedAt: createdAt,
+          target: lease.target,
+          ...(lease.windowsMode ? { windowsMode: lease.windowsMode } : {}),
+          ...(lease.desktop ? { desktop: lease.desktop } : {}),
+          ...(lease.serverType ? { serverType: lease.serverType } : {}),
+          ...(hostID ? { hostID } : {}),
+          ...(lease.slug ? { slug: lease.slug } : {}),
+          ...(workdir ? { workdir } : {}),
+          ...(Object.keys(repo).length ? { repo } : {}),
+        },
+        ownershipToken,
+        resourceName,
+        coordinatorGeneration: this.coordinatorGeneration,
       },
-      ownershipToken,
-      resourceName,
-      coordinatorGeneration: this.coordinatorGeneration,
-    });
+      checkpointLimits(this.env),
+    );
     await this.scheduleCheckpointAlarm();
     try {
       const ownership: ProviderCheckpointOwnership = {

@@ -66,7 +66,8 @@ The fleet coordinator owns:
 - provider credentials and provider operations (provision, release, images,
   identity, Mac hosts, capacity fallback, orphan sweep);
 - owner/org-scoped brokered native checkpoint records, opt-in unused expiry,
-  generation-fenced fork claims, promotion pins, and exact provider cleanup;
+  bounded checkpoint/fork-claim admission, generation-fenced fork claims,
+  recent checkpoint audit events, promotion pins, and exact provider cleanup;
 - cost and active-lease guardrails enforced at create time;
 - usage aggregation by owner, org, provider, and instance type;
 - run records, run events, run logs, and per-run telemetry;
@@ -194,13 +195,17 @@ tombstones. A newer CLI against an older coordinator fails cancellation closed
 rather than falling back to an unsafe ID-only release.
 
 Checkpoint creation derives owner, canonical organization, provider, and exact
-provider scope from the authoritative source lease. A durable `creating`
-reservation precedes provider mutation; only an exactly owned AWS, Azure, or
-GCP resource can publish the checkpoint. Forks use renewable generation-bound
-claims and the narrowly validated `/v1/leases/from-checkpoint` route instead
-of relaxing ordinary lease image overrides. Manual retention is the default;
-explicit unused expiry, use claims, deletion retries, and bounded audit
-tombstones share the coordinator's sorted checkpoint due index and scheduler.
+provider scope from the authoritative source lease. Global/owner/org admission
+and the durable `creating` reservation share one serializable transaction
+before provider mutation; only an exactly owned AWS, Azure, or GCP resource
+can publish the checkpoint. Forks use transactionally bounded, renewable,
+generation-bound claims and the narrowly validated
+`/v1/leases/from-checkpoint` route instead of relaxing ordinary lease image
+overrides. Manual retention is the default; explicit unused expiry, use claims,
+deletion retries, and audit tombstones share the coordinator's sorted
+checkpoint due index and scheduler. `/v1/checkpoints/{id}/events` exposes only
+the retained recent audit suffix: at most 256 ordered events per checkpoint,
+not complete lifetime history.
 
 The fixed-ID `PUT` route is fail-closed and does not replace legacy `POST`.
 It atomically reserves a versioned normalized immutable request hash before

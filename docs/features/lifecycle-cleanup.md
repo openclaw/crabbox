@@ -98,8 +98,14 @@ provider cleanup: AWS confirms the exact AMI and every owned EBS snapshot are
 gone, Azure confirms its exact canonical managed snapshot, and GCP confirms
 its exact project-scoped machine image or disk snapshot. Ambiguous or failed
 provider calls retain ownership and retry with capped backoff; a durable
-provider-deleted phase makes final metadata cleanup restart-safe. Direct,
-archive, recipe, and historical checkpoints remain operator-managed.
+provider-deleted phase makes final metadata cleanup restart-safe. Checkpoint
+admission charges creating, ready, failed, and deletion-pending records until
+deletion is confirmed; deleted audit tombstones no longer consume capacity.
+Expired available fork claims can be replaced, but provisioning claims remain
+charged until exact lifecycle reconciliation. Each checkpoint retains only its
+256 most recent ordered audit events, and eventual tombstone pruning removes
+that entire retained suffix. Direct, archive, recipe, and historical checkpoints
+remain operator-managed.
 
 ### AWS orphan sweep
 

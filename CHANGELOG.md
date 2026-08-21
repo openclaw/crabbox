@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added coordinator-owned brokered native checkpoints with opt-in unused-checkpoint expiry and promotion-safe cleanup.
+- Added coordinator-owned brokered native checkpoints with transactional checkpoint and fork-claim admission limits, bounded recent audit events, opt-in unused-checkpoint expiry, and promotion-safe cleanup.
 
 ### Fixed
 

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -337,6 +338,77 @@ func TestCheckpointManagedUseClaimsAndLeaseRouteStayRequestScoped(t *testing.T) 
 	defer mu.Unlock()
 	if strings.Join(actions, ",") != "begin,renew,complete" {
 		t.Fatalf("actions = %v", actions)
+	}
+}
+
+func TestCheckpointManagedAdmissionLimitErrorsPreserveCoordinatorDiagnostics(t *testing.T) {
+	tests := []struct {
+		name    string
+		path    string
+		code    string
+		message string
+		invoke  func(*CoordinatorClient) error
+	}{
+		{
+			name:    "checkpoint creation",
+			path:    "/v1/checkpoints",
+			code:    "checkpoint_limit_exceeded",
+			message: "checkpoint admission limit exceeded: scope=org observed=20 limit=20",
+			invoke: func(client *CoordinatorClient) error {
+				_, _, err := client.CreateCheckpoint(
+					context.Background(),
+					checkpointRecord{ID: "chk_limited", LeaseID: "cbx_000000000001"},
+					"prepared-workspace",
+					checkpointStrategyDiskSnapshot,
+					true,
+					coordinatorCheckpointRetention{Mode: "manual"},
+				)
+				return err
+			},
+		},
+		{
+			name:    "checkpoint use claim",
+			path:    "/v1/checkpoints/chk_limited/use",
+			code:    "checkpoint_claim_limit_exceeded",
+			message: "checkpoint use claim limit exceeded: scope=checkpoint observed=16 limit=16",
+			invoke: func(client *CoordinatorClient) error {
+				_, err := client.BeginCheckpointUse(context.Background(), "chk_limited")
+				return err
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			server, _ := configureManagedCheckpointTest(t, func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.Method != http.MethodPost || r.URL.Path != test.path {
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"error":   test.code,
+					"message": test.message,
+				})
+			})
+			client := &CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+
+			err := test.invoke(client)
+
+			var coordinatorErr CoordinatorHTTPError
+			if !errors.As(err, &coordinatorErr) || coordinatorErr.StatusCode != http.StatusTooManyRequests {
+				t.Fatalf("coordinator admission error = %v", err)
+			}
+			if !strings.Contains(err.Error(), test.message) {
+				t.Fatalf("coordinator admission diagnostics = %q, want %q", err, test.message)
+			}
+			if calls != 1 {
+				t.Fatalf("coordinator admission requests = %d, want 1", calls)
+			}
+		})
 	}
 }
 

@@ -2,9 +2,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   CheckpointError,
+  checkpointAuditRetentionMS,
   checkpointDueKey,
+  checkpointEventKey,
   checkpointDeleteClaimTTLMS,
   checkpointKey,
+  checkpointLimits,
+  checkpointMaxAuditEvents,
   checkpointMaxCreateRecoveryAttempts,
   checkpointPinKey,
   checkpointResourceKey,
@@ -14,6 +18,7 @@ import {
   findManagedCheckpointImage,
   markCheckpointProviderDeleted,
   pinCheckpointPromotion,
+  pruneCheckpointTombstone,
   recordCheckpointCreateRecoveryFailure,
   unpinCheckpointPromotion,
 } from "../src/checkpoints";
@@ -270,13 +275,17 @@ function providerImage(
   };
 }
 
-async function checkpointFixture(providerName: CoordinatorCheckpointProvider = "aws") {
+async function checkpointFixture(
+  providerName: CoordinatorCheckpointProvider = "aws",
+  overrides: Partial<Env> = {},
+) {
   const storage = new CheckpointMemoryStorage();
   const runtime = new CheckpointRuntime(storage);
   const env = {
     FLEET: {} as DurableObjectNamespace,
     HETZNER_TOKEN: "",
     CRABBOX_DEFAULT_ORG: "example-org",
+    ...overrides,
   } satisfies Env;
   const provider = new AWSProvider(env, "eu-west-1", storage);
   vi.spyOn(provider, "checkpointScope").mockResolvedValue(providerScope(providerName));
@@ -332,6 +341,44 @@ async function createCheckpoint(
 }
 
 describe("coordinator-managed checkpoints", () => {
+  it("parses finite positive checkpoint limits and falls back for invalid or unlimited values", () => {
+    expect(checkpointLimits()).toEqual({
+      checkpoints: 64,
+      checkpointsPerOwner: 16,
+      checkpointsPerOrg: 32,
+      useClaimsPerCheckpoint: 16,
+      useClaimsPerOwner: 64,
+      useClaimsTotal: 256,
+    });
+    expect(
+      checkpointLimits({
+        CRABBOX_MAX_CHECKPOINTS: "0",
+        CRABBOX_MAX_CHECKPOINTS_PER_OWNER: "-1",
+        CRABBOX_MAX_CHECKPOINTS_PER_ORG: "1.5",
+        CRABBOX_MAX_CHECKPOINT_USE_CLAIMS: "Infinity",
+        CRABBOX_MAX_CHECKPOINT_USE_CLAIMS_PER_OWNER: "9007199254740992",
+        CRABBOX_MAX_CHECKPOINT_USE_CLAIMS_TOTAL: "",
+      }),
+    ).toEqual(checkpointLimits());
+    expect(
+      checkpointLimits({
+        CRABBOX_MAX_CHECKPOINTS: "3",
+        CRABBOX_MAX_CHECKPOINTS_PER_OWNER: "2",
+        CRABBOX_MAX_CHECKPOINTS_PER_ORG: "1",
+        CRABBOX_MAX_CHECKPOINT_USE_CLAIMS: "4",
+        CRABBOX_MAX_CHECKPOINT_USE_CLAIMS_PER_OWNER: "5",
+        CRABBOX_MAX_CHECKPOINT_USE_CLAIMS_TOTAL: "6",
+      }),
+    ).toEqual({
+      checkpoints: 3,
+      checkpointsPerOwner: 2,
+      checkpointsPerOrg: 1,
+      useClaimsPerCheckpoint: 4,
+      useClaimsPerOwner: 5,
+      useClaimsTotal: 6,
+    });
+  });
+
   it.each(["aws", "azure", "gcp"] as const)(
     "reserves and publishes exact %s ownership with manual retention by default",
     async (providerName) => {
@@ -488,6 +535,174 @@ describe("coordinator-managed checkpoints", () => {
     );
     expect(response.status).toBe(201);
     expect(storage.snapshot()).not.toContain("signed-query-value");
+  });
+
+  it.each([
+    {
+      scope: "global",
+      limits: { CRABBOX_MAX_CHECKPOINTS: "1" },
+      observed: "observed=1 limit=1",
+    },
+    {
+      scope: "owner",
+      limits: { CRABBOX_MAX_CHECKPOINTS_PER_OWNER: "1" },
+      observed: "observed=1 limit=1",
+    },
+    {
+      scope: "org",
+      limits: { CRABBOX_MAX_CHECKPOINTS_PER_ORG: "1" },
+      observed: "observed=1 limit=1",
+    },
+  ])(
+    "rejects checkpoint creation at the exact $scope cap before provider mutation",
+    async (test) => {
+      const { coordinator, provider, storage } = await checkpointFixture("aws", test.limits);
+      expect((await createCheckpoint(coordinator, "chk_admitted")).status).toBe(201);
+      vi.mocked(provider.createCheckpointImage).mockClear();
+
+      const rejected = await createCheckpoint(coordinator, "chk_one_over");
+
+      expect(rejected.status).toBe(429);
+      await expect(rejected.json()).resolves.toMatchObject({
+        error: "checkpoint_limit_exceeded",
+        message: expect.stringContaining(`scope=${test.scope} ${test.observed}`),
+      });
+      expect(provider.createCheckpointImage).not.toHaveBeenCalled();
+      expect(await storage.get(checkpointKey("chk_one_over"))).toBeUndefined();
+      expect(await storage.list({ prefix: "checkpoint-event:chk_one_over:" })).toHaveLength(0);
+    },
+  );
+
+  it("preserves duplicate-checkpoint identifier precedence when admission is full", async () => {
+    const { coordinator, provider } = await checkpointFixture("aws", {
+      CRABBOX_MAX_CHECKPOINTS: "1",
+    });
+    expect((await createCheckpoint(coordinator, "chk_duplicate_full")).status).toBe(201);
+    vi.mocked(provider.createCheckpointImage).mockClear();
+
+    const duplicate = await createCheckpoint(coordinator, "chk_duplicate_full");
+
+    expect(duplicate.status).toBe(409);
+    await expect(duplicate.json()).resolves.toMatchObject({
+      error: "checkpoint_pending",
+      message: "checkpoint identifier is already reserved",
+    });
+    expect(provider.createCheckpointImage).not.toHaveBeenCalled();
+  });
+
+  it.each(["creating", "ready", "failed", "delete-pending", "deleting"] as const)(
+    "counts %s checkpoint reservations toward admission",
+    async (state) => {
+      const { coordinator, provider, storage } = await checkpointFixture("aws", {
+        CRABBOX_MAX_CHECKPOINTS: "1",
+      });
+      await createCheckpoint(coordinator, "chk_counted_state");
+      const existing = (await storage.get<CoordinatorCheckpointRecord>(
+        checkpointKey("chk_counted_state"),
+      ))!;
+      await storage.put(checkpointKey(existing.id), { ...existing, state });
+      vi.mocked(provider.createCheckpointImage).mockClear();
+
+      const rejected = await createCheckpoint(
+        coordinator,
+        `chk_counted_${state.replace("-", "_")}`,
+      );
+
+      expect(rejected.status).toBe(429);
+      await expect(rejected.json()).resolves.toMatchObject({ error: "checkpoint_limit_exceeded" });
+      expect(provider.createCheckpointImage).not.toHaveBeenCalled();
+    },
+  );
+
+  it("skips deleted audit tombstones across bounded checkpoint scan pages", async () => {
+    const { coordinator, provider, storage } = await checkpointFixture("aws", {
+      CRABBOX_MAX_CHECKPOINTS: "1",
+    });
+    await createCheckpoint(coordinator, "chk_000_deleted");
+    expect(
+      (await coordinator.fetch(checkpointRequest("DELETE", "/v1/checkpoints/chk_000_deleted")))
+        .status,
+    ).toBe(200);
+    const tombstone = (await storage.get<CoordinatorCheckpointRecord>(
+      checkpointKey("chk_000_deleted"),
+    ))!;
+    await storage.put(checkpointKey("chk_001_deleted"), { ...tombstone, id: "chk_001_deleted" });
+    await storage.put(checkpointKey("chk_002_deleted"), { ...tombstone, id: "chk_002_deleted" });
+    storage.lists.length = 0;
+    vi.mocked(provider.createCheckpointImage).mockClear();
+
+    const admitted = await createCheckpoint(coordinator, "chk_zzz_after_tombstones");
+
+    expect(admitted.status).toBe(201);
+    expect(provider.createCheckpointImage).toHaveBeenCalledOnce();
+    const scanPages = storage.lists.filter((options) => options.prefix === "checkpoint:");
+    expect(scanPages).toHaveLength(4);
+    expect(scanPages.every((options) => options.limit === 1)).toBe(true);
+  });
+
+  it("accounts ambiguous legacy organization buckets against their canonical organization", async () => {
+    const { coordinator, provider, storage } = await checkpointFixture("aws", {
+      CRABBOX_MAX_CHECKPOINTS_PER_ORG: "1",
+    });
+    await createCheckpoint(coordinator, "chk_legacy_org");
+    const existing = (await storage.get<CoordinatorCheckpointRecord>(
+      checkpointKey("chk_legacy_org"),
+    ))!;
+    await storage.put(checkpointKey(existing.id), {
+      ...existing,
+      owner: "bob@example.com",
+      org: "example_org",
+    });
+    await storage.put(`lease:${leaseID}`, {
+      ...checkpointLease("aws"),
+      org: orgKeyForLabel("example/org"),
+    });
+    vi.mocked(provider.createCheckpointImage).mockClear();
+
+    const rejected = await coordinator.fetch(
+      checkpointRequest(
+        "POST",
+        "/v1/checkpoints",
+        { id: "chk_canonical_org", leaseID, name: "prepared-workspace" },
+        { org: "example/org" },
+      ),
+    );
+
+    expect(rejected.status).toBe(429);
+    await expect(rejected.json()).resolves.toMatchObject({
+      error: "checkpoint_limit_exceeded",
+      message: expect.stringContaining("scope=org observed=1 limit=1"),
+    });
+    expect(provider.createCheckpointImage).not.toHaveBeenCalled();
+  });
+
+  it("never over-admits concurrent checkpoint reservations in Durable Object-style storage", async () => {
+    const { coordinator, provider, storage } = await checkpointFixture("aws", {
+      CRABBOX_MAX_CHECKPOINTS: "3",
+    });
+    vi.mocked(provider.createCheckpointImage).mockImplementation(
+      async (_lease, name, _noReboot, strategy, ownership) => {
+        const id = `snap-${ownership.checkpointID}`;
+        return {
+          ...providerImage("aws", name, strategy, ownership),
+          id,
+          resourceID: id,
+          immutableID: id,
+          snapshots: [id],
+        };
+      },
+    );
+
+    const responses = await Promise.all(
+      Array.from({ length: 8 }, async (_, index) =>
+        createCheckpoint(coordinator, `chk_parallel_${index}`),
+      ),
+    );
+
+    expect(responses.filter((response) => response.status === 201)).toHaveLength(3);
+    expect(responses.filter((response) => response.status === 429)).toHaveLength(5);
+    expect(provider.createCheckpointImage).toHaveBeenCalledTimes(3);
+    expect(await storage.list({ prefix: "checkpoint:" })).toHaveLength(3);
   });
 
   it("verifies and persists exact AWS AMI backing snapshots before publishing ownership", async () => {
@@ -752,6 +967,210 @@ describe("coordinator-managed checkpoints", () => {
       lastUsedAt: "2026-08-20T12:00:20.000Z",
       nextSweepAt: "2026-08-20T12:05:20.000Z",
     });
+  });
+
+  it.each([
+    {
+      scope: "checkpoint",
+      limits: { CRABBOX_MAX_CHECKPOINT_USE_CLAIMS: "1" },
+    },
+    {
+      scope: "owner",
+      limits: { CRABBOX_MAX_CHECKPOINT_USE_CLAIMS_PER_OWNER: "1" },
+    },
+    {
+      scope: "global",
+      limits: { CRABBOX_MAX_CHECKPOINT_USE_CLAIMS_TOTAL: "1" },
+    },
+  ])("rejects the one-over $scope use claim without writing a claim or event", async (test) => {
+    const { coordinator, storage } = await checkpointFixture("aws", test.limits);
+    await createCheckpoint(coordinator, "chk_claim_limit");
+    const first = await coordinator.fetch(
+      checkpointRequest("POST", "/v1/checkpoints/chk_claim_limit/use", { action: "begin" }),
+    );
+    expect(first.status).toBe(201);
+    const before = storage.snapshot();
+
+    const rejected = await coordinator.fetch(
+      checkpointRequest("POST", "/v1/checkpoints/chk_claim_limit/use", { action: "begin" }),
+    );
+
+    expect(rejected.status).toBe(429);
+    await expect(rejected.json()).resolves.toMatchObject({
+      error: "checkpoint_claim_limit_exceeded",
+      message: expect.stringContaining(`scope=${test.scope} observed=1 limit=1`),
+    });
+    expect(storage.snapshot()).toBe(before);
+    expect(await storage.list({ prefix: "checkpoint-use:chk_claim_limit:" })).toHaveLength(1);
+  });
+
+  it("counts claims across the same owner while excluding deleted checkpoints", async () => {
+    const { coordinator, storage } = await checkpointFixture("aws", {
+      CRABBOX_MAX_CHECKPOINT_USE_CLAIMS_PER_OWNER: "2",
+    });
+    await createCheckpoint(coordinator, "chk_claim_owner_target");
+    const target = (await storage.get<CoordinatorCheckpointRecord>(
+      checkpointKey("chk_claim_owner_target"),
+    ))!;
+    await storage.put(checkpointKey("chk_claim_owner_other"), {
+      ...target,
+      id: "chk_claim_owner_other",
+      activeUseCount: 1,
+    });
+    await storage.put(checkpointKey("chk_claim_owner_deleted"), {
+      ...target,
+      id: "chk_claim_owner_deleted",
+      state: "deleted",
+      activeUseCount: 12,
+    });
+
+    const admitted = await coordinator.fetch(
+      checkpointRequest("POST", "/v1/checkpoints/chk_claim_owner_target/use", {
+        action: "begin",
+      }),
+    );
+    const rejected = await coordinator.fetch(
+      checkpointRequest("POST", "/v1/checkpoints/chk_claim_owner_target/use", {
+        action: "begin",
+      }),
+    );
+
+    expect(admitted.status).toBe(201);
+    expect(rejected.status).toBe(429);
+    await expect(rejected.json()).resolves.toMatchObject({
+      message: expect.stringContaining("scope=owner observed=2 limit=2"),
+    });
+  });
+
+  it("counts global claims across other checkpoint owners", async () => {
+    const { coordinator, storage } = await checkpointFixture("aws", {
+      CRABBOX_MAX_CHECKPOINT_USE_CLAIMS_TOTAL: "2",
+    });
+    await createCheckpoint(coordinator, "chk_claim_global_target");
+    const target = (await storage.get<CoordinatorCheckpointRecord>(
+      checkpointKey("chk_claim_global_target"),
+    ))!;
+    await storage.put(checkpointKey("chk_claim_global_other"), {
+      ...target,
+      id: "chk_claim_global_other",
+      owner: "bob@example.com",
+      activeUseCount: 1,
+    });
+
+    const admitted = await coordinator.fetch(
+      checkpointRequest("POST", "/v1/checkpoints/chk_claim_global_target/use", {
+        action: "begin",
+      }),
+    );
+    const rejected = await coordinator.fetch(
+      checkpointRequest("POST", "/v1/checkpoints/chk_claim_global_target/use", {
+        action: "begin",
+      }),
+    );
+
+    expect(admitted.status).toBe(201);
+    expect(rejected.status).toBe(429);
+    await expect(rejected.json()).resolves.toMatchObject({
+      message: expect.stringContaining("scope=global observed=2 limit=2"),
+    });
+  });
+
+  it("expires stale available claims before admitting their replacement", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T12:00:00.000Z"));
+    const { coordinator, storage } = await checkpointFixture("aws", {
+      CRABBOX_MAX_CHECKPOINT_USE_CLAIMS: "1",
+      CRABBOX_MAX_CHECKPOINT_USE_CLAIMS_PER_OWNER: "1",
+      CRABBOX_MAX_CHECKPOINT_USE_CLAIMS_TOTAL: "1",
+    });
+    await createCheckpoint(coordinator, "chk_claim_replacement");
+    const first = await coordinator.fetch(
+      checkpointRequest("POST", "/v1/checkpoints/chk_claim_replacement/use", { action: "begin" }),
+    );
+    expect(first.status).toBe(201);
+    vi.setSystemTime(Date.now() + checkpointUseClaimTTLMS + 1);
+
+    const replacement = await coordinator.fetch(
+      checkpointRequest("POST", "/v1/checkpoints/chk_claim_replacement/use", { action: "begin" }),
+    );
+
+    expect(replacement.status).toBe(201);
+    expect(await storage.get(checkpointKey("chk_claim_replacement"))).toMatchObject({
+      activeUseCount: 1,
+    });
+    expect(await storage.list({ prefix: "checkpoint-use:chk_claim_replacement:" })).toHaveLength(1);
+    const events = await storage.list<{ type: string }>({
+      prefix: "checkpoint-event:chk_claim_replacement:",
+    });
+    expect([...events.values()].map((event) => event.type).slice(-2)).toEqual([
+      "checkpoint.use.expired",
+      "checkpoint.use.claimed",
+    ]);
+  });
+
+  it("retains expired provisioning claims until exact lifecycle reconciliation", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T12:00:00.000Z"));
+    const { coordinator, storage } = await checkpointFixture("aws", {
+      CRABBOX_MAX_CHECKPOINT_USE_CLAIMS: "1",
+    });
+    await createCheckpoint(coordinator, "chk_claim_provisioning_limit");
+    const first = (await (
+      await coordinator.fetch(
+        checkpointRequest("POST", "/v1/checkpoints/chk_claim_provisioning_limit/use", {
+          action: "begin",
+        }),
+      )
+    ).json()) as { claim: string };
+    await bindCheckpointUseProvisioning(
+      storage,
+      "chk_claim_provisioning_limit",
+      first.claim,
+      { owner: "alice@example.com", org },
+      `cat_${"7".repeat(32)}`,
+      "cbx_000000000002",
+    );
+    vi.setSystemTime(Date.now() + checkpointUseClaimTTLMS + 1);
+    const before = storage.snapshot();
+
+    const rejected = await coordinator.fetch(
+      checkpointRequest("POST", "/v1/checkpoints/chk_claim_provisioning_limit/use", {
+        action: "begin",
+      }),
+    );
+
+    expect(rejected.status).toBe(429);
+    await expect(rejected.json()).resolves.toMatchObject({
+      error: "checkpoint_claim_limit_exceeded",
+      message: expect.stringContaining("scope=checkpoint observed=1 limit=1"),
+    });
+    expect(storage.snapshot()).toBe(before);
+    expect(
+      await storage.list({ prefix: "checkpoint-use:chk_claim_provisioning_limit:" }),
+    ).toHaveLength(1);
+  });
+
+  it("supports concurrent checkpoint shard fanout exactly up to the configured limit", async () => {
+    const { coordinator, storage } = await checkpointFixture("aws", {
+      CRABBOX_MAX_CHECKPOINT_USE_CLAIMS: "6",
+    });
+    await createCheckpoint(coordinator, "chk_claim_parallel");
+
+    const responses = await Promise.all(
+      Array.from({ length: 9 }, async () =>
+        coordinator.fetch(
+          checkpointRequest("POST", "/v1/checkpoints/chk_claim_parallel/use", { action: "begin" }),
+        ),
+      ),
+    );
+
+    expect(responses.filter((response) => response.status === 201)).toHaveLength(6);
+    expect(responses.filter((response) => response.status === 429)).toHaveLength(3);
+    expect(await storage.get(checkpointKey("chk_claim_parallel"))).toMatchObject({
+      activeUseCount: 6,
+      eventSequence: 8,
+    });
+    expect(await storage.list({ prefix: "checkpoint-use:chk_claim_parallel:" })).toHaveLength(6);
   });
 
   it("rejects stale and cross-owner use claims without exposing or consuming them", async () => {
@@ -2126,6 +2545,116 @@ describe("coordinator-managed checkpoints", () => {
     expect(await storage.get(checkpointKey("chk_atomic"))).toBeUndefined();
     expect(await storage.list({ prefix: "checkpoint-due:" })).toHaveLength(0);
     expect(provider.createCheckpointImage).not.toHaveBeenCalled();
+  });
+
+  it("retains only the latest 256 ordered checkpoint audit events and still prunes tombstones", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T12:00:00.000Z"));
+    const { coordinator, storage } = await checkpointFixture();
+    const checkpointID = "chk_bounded_audit";
+    await createCheckpoint(coordinator, checkpointID);
+
+    await Array.from({ length: 101 }).reduce(async (pending) => {
+      await pending;
+      const begun = (await (
+        await coordinator.fetch(
+          checkpointRequest("POST", `/v1/checkpoints/${checkpointID}/use`, { action: "begin" }),
+        )
+      ).json()) as { claim: string };
+      const renewed = await coordinator.fetch(
+        checkpointRequest("POST", `/v1/checkpoints/${checkpointID}/use`, {
+          action: "renew",
+          claim: begun.claim,
+        }),
+      );
+      const aborted = await coordinator.fetch(
+        checkpointRequest("POST", `/v1/checkpoints/${checkpointID}/use`, {
+          action: "abort",
+          claim: begun.claim,
+        }),
+      );
+      expect(renewed.status).toBe(200);
+      expect(aborted.status).toBe(200);
+    }, Promise.resolve());
+
+    const record = (await storage.get<CoordinatorCheckpointRecord>(checkpointKey(checkpointID)))!;
+    const retained = await storage.list<{ sequence: number }>({
+      prefix: `checkpoint-event:${checkpointID}:`,
+    });
+    expect(record.eventSequence).toBe(305);
+    expect(retained).toHaveLength(checkpointMaxAuditEvents);
+    expect([...retained.values()].map((event) => event.sequence)).toEqual(
+      Array.from(
+        { length: checkpointMaxAuditEvents },
+        (_, index) => record.eventSequence - checkpointMaxAuditEvents + 1 + index,
+      ),
+    );
+    expect(await storage.get(checkpointEventKey(checkpointID, 1))).toBeUndefined();
+    const auditResponse = await coordinator.fetch(
+      checkpointRequest("GET", `/v1/checkpoints/${checkpointID}/events?limit=500`),
+    );
+    const publicAudit = (await auditResponse.json()) as { events: Array<{ sequence: number }> };
+    expect(auditResponse.status).toBe(200);
+    expect(Object.keys(publicAudit)).toEqual(["events"]);
+    expect(publicAudit.events).toHaveLength(checkpointMaxAuditEvents);
+    expect(publicAudit.events.at(0)?.sequence).toBe(50);
+    expect(publicAudit.events.at(-1)?.sequence).toBe(record.eventSequence);
+
+    const deleted = await coordinator.fetch(
+      checkpointRequest("DELETE", `/v1/checkpoints/${checkpointID}`),
+    );
+    expect(deleted.status).toBe(200);
+    expect(await storage.list({ prefix: `checkpoint-event:${checkpointID}:` })).toHaveLength(
+      checkpointMaxAuditEvents,
+    );
+    vi.setSystemTime(Date.now() + checkpointAuditRetentionMS + 1);
+    const pruned = await Array.from({ length: 6 }).reduce(async (pending) => {
+      const removed = await pending;
+      return removed || (await pruneCheckpointTombstone(storage, checkpointID));
+    }, Promise.resolve(false));
+
+    expect(pruned).toBe(true);
+    expect(await storage.get(checkpointKey(checkpointID))).toBeUndefined();
+    expect(await storage.list({ prefix: `checkpoint-event:${checkpointID}:` })).toHaveLength(0);
+  }, 20_000);
+
+  it("converges historical excess checkpoint audit events in bounded prune batches", async () => {
+    const { coordinator, storage } = await checkpointFixture();
+    const checkpointID = "chk_audit_converges";
+    await createCheckpoint(coordinator, checkpointID);
+    const record = (await storage.get<CoordinatorCheckpointRecord>(checkpointKey(checkpointID)))!;
+    await Promise.all(
+      Array.from({ length: 338 }, async (_, index) => {
+        const sequence = index + 3;
+        await storage.put(checkpointEventKey(checkpointID, sequence), {
+          checkpointID,
+          sequence,
+          type: "checkpoint.use.renewed",
+        });
+      }),
+    );
+    await storage.put(checkpointKey(checkpointID), { ...record, eventSequence: 340 });
+
+    const begun = (await (
+      await coordinator.fetch(
+        checkpointRequest("POST", `/v1/checkpoints/${checkpointID}/use`, { action: "begin" }),
+      )
+    ).json()) as { claim: string };
+    expect(await storage.list({ prefix: `checkpoint-event:${checkpointID}:` })).toHaveLength(277);
+    const renewed = await coordinator.fetch(
+      checkpointRequest("POST", `/v1/checkpoints/${checkpointID}/use`, {
+        action: "renew",
+        claim: begun.claim,
+      }),
+    );
+
+    expect(renewed.status).toBe(200);
+    const retained = await storage.list<{ sequence: number }>({
+      prefix: `checkpoint-event:${checkpointID}:`,
+    });
+    expect(retained).toHaveLength(checkpointMaxAuditEvents);
+    expect([...retained.values()].at(0)?.sequence).toBe(87);
+    expect([...retained.values()].at(-1)?.sequence).toBe(342);
   });
 
   it("keeps concurrent deletion and use mutually fenced", async () => {

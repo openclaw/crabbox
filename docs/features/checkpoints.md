@@ -28,6 +28,24 @@ attempt, completing recovered successful forks and releasing claims only after
 terminal failure or provider cleanup is confirmed. A caller cannot fabricate
 last-use activity by completing an unbound claim.
 
+Coordinator-managed checkpoints are admitted transactionally before provider
+mutation. `CRABBOX_MAX_CHECKPOINTS` defaults to 64,
+`CRABBOX_MAX_CHECKPOINTS_PER_OWNER` to 16, and
+`CRABBOX_MAX_CHECKPOINTS_PER_ORG` to 32; creating, ready, failed, and
+deletion-in-progress checkpoints all count, while deleted audit tombstones do
+not. Fork/shard claims have separate defaults of 16 per checkpoint
+(`CRABBOX_MAX_CHECKPOINT_USE_CLAIMS`), 64 per owner
+(`CRABBOX_MAX_CHECKPOINT_USE_CLAIMS_PER_OWNER`), and 256 globally
+(`CRABBOX_MAX_CHECKPOINT_USE_CLAIMS_TOTAL`). Expired available claims can be
+replaced, but provisioning claims remain charged until their exact lease
+lifecycle is reconciled. Exceeding either bound returns HTTP 429 with
+`checkpoint_limit_exceeded` or `checkpoint_claim_limit_exceeded`.
+
+Each managed checkpoint retains at most its latest 256 durable lifecycle events.
+Event sequence numbers remain monotonic, but this is a bounded recent audit
+suffix, not full-history retention: creation and older fork/use events can age
+out on long-lived, high-churn checkpoints.
+
 ## Two kinds
 
 Each checkpoint has a `kind`. Crabbox picks one automatically (`--mode auto`,

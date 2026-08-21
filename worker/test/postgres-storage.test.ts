@@ -2,7 +2,13 @@ import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 import { describe, expect, it, vi } from "vitest";
 
 import { PostgresCoordinatorStorage } from "../node/postgres-storage";
-import { acquireCheckpointUse, checkpointKey } from "../src/checkpoints";
+import {
+  CheckpointError,
+  acquireCheckpointUse,
+  checkpointKey,
+  checkpointLimits,
+  reserveCheckpointCreate,
+} from "../src/checkpoints";
 import { orgKeyForLabel } from "../src/org-identity";
 import type { CoordinatorCheckpointRecord } from "../src/types";
 
@@ -277,6 +283,113 @@ describe("PostgresCoordinatorStorage", () => {
     expect(await storage.list({ prefix: `checkpoint-use:${id}:` })).toHaveLength(12);
   });
 
+  it("never over-admits concurrent checkpoint reservations across PostgreSQL serialization", async () => {
+    const pool = fakeContendedCheckpointPool();
+    const storage = new PostgresCoordinatorStorage("postgres://unused", pool);
+    const org = orgKeyForLabel("example-org");
+    const limits = checkpointLimits({ CRABBOX_MAX_CHECKPOINTS: "3" });
+    const createdAt = new Date().toISOString();
+
+    const results = await Promise.allSettled(
+      Array.from({ length: 8 }, async (_, index) =>
+        reserveCheckpointCreate(
+          storage,
+          {
+            record: {
+              id: `chk_postgres_reservation_${index}`,
+              owner: "alice@example.com",
+              org,
+              leaseID: "cbx_000000000001",
+              provider: "aws",
+              scope: { region: "eu-west-1", accountID: "123456789012" },
+              name: "parallel-checkpoint",
+              strategy: "disk-snapshot",
+              noReboot: true,
+              retention: { mode: "manual" },
+              createdAt,
+              lastUsedAt: createdAt,
+              target: "linux",
+            },
+            ownershipToken: `ownership-${index}`,
+            resourceName: `parallel-resource-${index}`,
+            coordinatorGeneration: "generation-1",
+          },
+          limits,
+        ),
+      ),
+    );
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(3);
+    const rejected = results.filter((result) => result.status === "rejected");
+    expect(rejected).toHaveLength(5);
+    expect(
+      rejected.every(
+        (result) =>
+          result.reason instanceof CheckpointError &&
+          result.reason.code === "checkpoint_limit_exceeded" &&
+          result.reason.status === 429,
+      ),
+    ).toBe(true);
+    expect(await storage.list({ prefix: "checkpoint:" })).toHaveLength(3);
+    expect(await storage.list({ prefix: "checkpoint-event:" })).toHaveLength(3);
+  });
+
+  it("rejects one-over concurrent checkpoint claims without duplicate PostgreSQL events", async () => {
+    const pool = fakeContendedCheckpointPool();
+    const storage = new PostgresCoordinatorStorage("postgres://unused", pool);
+    const id = "chk_postgres_claim_cap";
+    const now = new Date().toISOString();
+    const org = orgKeyForLabel("example-org");
+    await storage.put(checkpointKey(id), {
+      version: 1,
+      id,
+      owner: "alice@example.com",
+      org,
+      leaseID: "cbx_000000000001",
+      provider: "aws",
+      scope: { region: "eu-west-1", accountID: "123456789012" },
+      name: "parallel-checkpoint",
+      strategy: "disk-snapshot",
+      noReboot: true,
+      image: {
+        id: "snap-owned",
+        resourceID: "snap-owned",
+        kind: "aws-ebs-snapshot",
+        immutableID: "snap-owned",
+        snapshotIDs: ["snap-owned"],
+        state: "available",
+      },
+      state: "ready",
+      retention: { mode: "manual" },
+      generation: 1,
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+      lastUsedAt: now,
+      attempts: 0,
+      pinCount: 0,
+      activeUseCount: 0,
+      eventSequence: 0,
+      target: "linux",
+    } satisfies CoordinatorCheckpointRecord);
+    const limits = checkpointLimits({ CRABBOX_MAX_CHECKPOINT_USE_CLAIMS: "5" });
+
+    const results = await Promise.allSettled(
+      Array.from({ length: 9 }, async () =>
+        acquireCheckpointUse(storage, id, { owner: "alice@example.com", org }, limits),
+      ),
+    );
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(5);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(4);
+    expect(await storage.get<CoordinatorCheckpointRecord>(checkpointKey(id))).toMatchObject({
+      activeUseCount: 5,
+      eventSequence: 5,
+    });
+    expect(await storage.list({ prefix: `checkpoint-use:${id}:` })).toHaveLength(5);
+    expect(await storage.list({ prefix: `checkpoint-event:${id}:` })).toHaveLength(5);
+  });
+
   it("preserves transaction and rollback failures and evicts the uncertain client", async () => {
     const rollbackError = new Error("rollback failed");
     const originalError = postgresError("40001", "publish failed");
@@ -373,11 +486,16 @@ function fakeContendedCheckpointPool(): Pool {
       const prefix = String(parameters[0])
         .slice(0, -1)
         .replaceAll(/\\([\\%_])/g, "$1");
+      const startAfter = sql.includes("and key >") ? String(parameters[1]) : undefined;
+      const limit = sql.includes("limit $") ? Number(parameters.at(-1)) : undefined;
+      const matching = [...values]
+        .filter(([key]) => key.startsWith(prefix) && (!startAfter || key > startAfter))
+        .toSorted(([left], [right]) => left.localeCompare(right));
       return queryResult(
-        [...values]
-          .filter(([key]) => key.startsWith(prefix))
-          .toSorted(([left], [right]) => left.localeCompare(right))
-          .map(([key, encoded_value]) => ({ key, encoded_value })),
+        (limit === undefined ? matching : matching.slice(0, limit)).map(([key, encoded_value]) => ({
+          key,
+          encoded_value,
+        })),
       );
     }
     const encoded_value = values.get(String(parameters[0]));

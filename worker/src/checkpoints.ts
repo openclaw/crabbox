@@ -1,6 +1,6 @@
 import { sha256Hex } from "./auth";
 import type { CoordinatorStorage, CoordinatorStorageView } from "./coordinator-runtime";
-import { sameOrgIdentityKey } from "./org-identity";
+import { orgMatchesForAccounting, sameOrgIdentityKey } from "./org-identity";
 import type {
   CoordinatorCheckpointDeleteClaim,
   CoordinatorCheckpointDueIndex,
@@ -14,6 +14,7 @@ import type {
   CoordinatorCheckpointRetention,
   CoordinatorCheckpointScope,
   CoordinatorCheckpointUseClaim,
+  Env,
   LeaseRecord,
   ProviderImage,
 } from "./types";
@@ -22,10 +23,47 @@ export const checkpointUseClaimTTLMS = 120_000;
 export const checkpointCreateClaimTTLMS = 15 * 60_000;
 export const checkpointDeleteClaimTTLMS = 5 * 60_000;
 export const checkpointAuditRetentionMS = 90 * 24 * 60 * 60_000;
+export const checkpointMaxAuditEvents = 256;
 export const checkpointDuePrefix = "checkpoint-due:";
 const maxRetentionSeconds = 10 * 366 * 24 * 60 * 60;
 const maxAuditPruneBatch = 64;
 export const checkpointMaxCreateRecoveryAttempts = 8;
+
+export interface CheckpointLimits {
+  checkpoints: number;
+  checkpointsPerOwner: number;
+  checkpointsPerOrg: number;
+  useClaimsPerCheckpoint: number;
+  useClaimsPerOwner: number;
+  useClaimsTotal: number;
+}
+
+type CheckpointLimitEnvironment = Pick<
+  Env,
+  | "CRABBOX_MAX_CHECKPOINTS"
+  | "CRABBOX_MAX_CHECKPOINTS_PER_OWNER"
+  | "CRABBOX_MAX_CHECKPOINTS_PER_ORG"
+  | "CRABBOX_MAX_CHECKPOINT_USE_CLAIMS"
+  | "CRABBOX_MAX_CHECKPOINT_USE_CLAIMS_PER_OWNER"
+  | "CRABBOX_MAX_CHECKPOINT_USE_CLAIMS_TOTAL"
+>;
+
+function positiveCheckpointLimit(value: string | undefined, fallback: number): number {
+  if (!value || !/^\d+$/.test(value)) return fallback;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+export function checkpointLimits(env: CheckpointLimitEnvironment = {}): CheckpointLimits {
+  return {
+    checkpoints: positiveCheckpointLimit(env.CRABBOX_MAX_CHECKPOINTS, 64),
+    checkpointsPerOwner: positiveCheckpointLimit(env.CRABBOX_MAX_CHECKPOINTS_PER_OWNER, 16),
+    checkpointsPerOrg: positiveCheckpointLimit(env.CRABBOX_MAX_CHECKPOINTS_PER_ORG, 32),
+    useClaimsPerCheckpoint: positiveCheckpointLimit(env.CRABBOX_MAX_CHECKPOINT_USE_CLAIMS, 16),
+    useClaimsPerOwner: positiveCheckpointLimit(env.CRABBOX_MAX_CHECKPOINT_USE_CLAIMS_PER_OWNER, 64),
+    useClaimsTotal: positiveCheckpointLimit(env.CRABBOX_MAX_CHECKPOINT_USE_CLAIMS_TOTAL, 256),
+  };
+}
 
 export interface CheckpointPrincipal {
   owner: string;
@@ -251,6 +289,21 @@ async function writeCheckpointTransition(
   };
   await transaction.put(checkpointKey(updated.id), updated);
   await transaction.put(checkpointEventKey(updated.id, updated.eventSequence), event);
+  if (updated.eventSequence > checkpointMaxAuditEvents) {
+    const staleThrough = checkpointEventKey(
+      updated.id,
+      updated.eventSequence - checkpointMaxAuditEvents,
+    );
+    const oldest = await transaction.list<CoordinatorCheckpointEvent>({
+      prefix: `checkpoint-event:${updated.id}:`,
+      limit: maxAuditPruneBatch,
+    });
+    await Promise.all(
+      [...oldest.keys()]
+        .filter((key) => key <= staleThrough)
+        .map(async (key) => await transaction.delete(key)),
+    );
+  }
   if (nextSweepAt) {
     const marker: CoordinatorCheckpointDueIndex = {
       checkpointID: updated.id,
@@ -285,6 +338,7 @@ export interface CheckpointCreateReservation {
 export async function reserveCheckpointCreate(
   storage: CoordinatorStorage,
   input: CheckpointCreateReservation,
+  limits: CheckpointLimits = checkpointLimits(),
 ): Promise<CoordinatorCheckpointRecord> {
   if (!validCheckpointID(input.record.id)) {
     throw new CheckpointError("invalid_checkpoint_id", "invalid checkpoint identifier", 400);
@@ -304,6 +358,29 @@ export async function reserveCheckpointCreate(
   return storage.transaction(async (transaction) => {
     if (await transaction.get(checkpointKey(input.record.id))) {
       throw new CheckpointError("checkpoint_pending", "checkpoint identifier is already reserved");
+    }
+    const counts = { global: 0, owner: 0, org: 0 };
+    await scanCheckpointRecords(transaction, limits.checkpoints, (existing) => {
+      if (existing.state === "deleted") return false;
+      counts.global++;
+      if (existing.owner === input.record.owner) counts.owner++;
+      if (orgMatchesForAccounting(existing.org, input.record.org)) counts.org++;
+      return counts.global >= limits.checkpoints;
+    });
+    const exceeded =
+      counts.global >= limits.checkpoints
+        ? { scope: "global", observed: counts.global, limit: limits.checkpoints }
+        : counts.owner >= limits.checkpointsPerOwner
+          ? { scope: "owner", observed: counts.owner, limit: limits.checkpointsPerOwner }
+          : counts.org >= limits.checkpointsPerOrg
+            ? { scope: "org", observed: counts.org, limit: limits.checkpointsPerOrg }
+            : undefined;
+    if (exceeded) {
+      throw new CheckpointError(
+        "checkpoint_limit_exceeded",
+        `checkpoint admission limit exceeded: scope=${exceeded.scope} observed=${exceeded.observed} limit=${exceeded.limit}`,
+        429,
+      );
     }
     const record: CoordinatorCheckpointRecord = {
       ...input.record,
@@ -346,6 +423,27 @@ export async function reserveCheckpointCreate(
       record.owner,
     );
   });
+}
+
+async function scanCheckpointRecords(
+  transaction: CoordinatorStorageView,
+  batchSize: number,
+  visit: (record: CoordinatorCheckpointRecord) => boolean,
+): Promise<void> {
+  const scan = async (startAfter?: string): Promise<void> => {
+    const records = await transaction.list<CoordinatorCheckpointRecord>({
+      prefix: "checkpoint:",
+      limit: batchSize,
+      ...(startAfter ? { startAfter } : {}),
+    });
+    let lastKey: string | undefined;
+    for (const [key, record] of records) {
+      if (visit(record)) return;
+      lastKey = key;
+    }
+    if (records.size === batchSize && lastKey) await scan(lastKey);
+  };
+  await scan();
 }
 
 function validatedCheckpointImage(
@@ -745,13 +843,14 @@ export async function acquireCheckpointUse(
   storage: CoordinatorStorage,
   checkpointID: string,
   principal: CheckpointPrincipal,
+  limits: CheckpointLimits = checkpointLimits(),
 ): Promise<{ checkpoint: CoordinatorCheckpointRecord; token: string; expiresAt: string }> {
   const token = crypto.randomUUID() + crypto.randomUUID();
   const tokenHash = await sha256Hex(token);
   const now = new Date();
   const expiresAt = new Date(now.getTime() + checkpointUseClaimTTLMS).toISOString();
   const checkpoint = await storage.transaction(async (transaction) => {
-    const previous = requireVisible(
+    let previous = requireVisible(
       await transaction.get<CoordinatorCheckpointRecord>(checkpointKey(checkpointID)),
       principal,
     );
@@ -761,6 +860,7 @@ export async function acquireCheckpointUse(
         "checkpoint is not available for use",
       );
     }
+    previous = await expireAvailableCheckpointClaims(transaction, previous, now.getTime(), limits);
     if (
       previous.retention.mode === "expire-unused" &&
       previous.pinCount === 0 &&
@@ -768,6 +868,32 @@ export async function acquireCheckpointUse(
       Date.parse(previous.lastUsedAt) + previous.retention.unusedForSeconds * 1000 <= now.getTime()
     ) {
       throw new CheckpointError("checkpoint_pending", "checkpoint unused retention has expired");
+    }
+    const counts = { global: 0, owner: 0, checkpoint: previous.activeUseCount };
+    await scanCheckpointRecords(transaction, limits.checkpoints, (record) => {
+      if (record.state === "deleted") return false;
+      counts.global += record.activeUseCount;
+      if (record.owner === previous.owner) counts.owner += record.activeUseCount;
+      return false;
+    });
+    const exceeded =
+      counts.checkpoint >= limits.useClaimsPerCheckpoint
+        ? {
+            scope: "checkpoint",
+            observed: counts.checkpoint,
+            limit: limits.useClaimsPerCheckpoint,
+          }
+        : counts.owner >= limits.useClaimsPerOwner
+          ? { scope: "owner", observed: counts.owner, limit: limits.useClaimsPerOwner }
+          : counts.global >= limits.useClaimsTotal
+            ? { scope: "global", observed: counts.global, limit: limits.useClaimsTotal }
+            : undefined;
+    if (exceeded) {
+      throw new CheckpointError(
+        "checkpoint_claim_limit_exceeded",
+        `checkpoint use claim limit exceeded: scope=${exceeded.scope} observed=${exceeded.observed} limit=${exceeded.limit}`,
+        429,
+      );
     }
     const claim: CoordinatorCheckpointUseClaim = {
       checkpointID,
@@ -789,6 +915,40 @@ export async function acquireCheckpointUse(
     );
   });
   return { checkpoint, token, expiresAt };
+}
+
+async function expireAvailableCheckpointClaims(
+  transaction: CoordinatorStorageView,
+  checkpoint: CoordinatorCheckpointRecord,
+  now: number,
+  limits: CheckpointLimits,
+): Promise<CoordinatorCheckpointRecord> {
+  const batchSize = Math.min(limits.useClaimsPerCheckpoint, limits.useClaimsTotal);
+  const expirePage = async (
+    current: CoordinatorCheckpointRecord,
+    startAfter?: string,
+  ): Promise<CoordinatorCheckpointRecord> => {
+    const claims = await transaction.list<CoordinatorCheckpointUseClaim>({
+      prefix: `checkpoint-use:${checkpoint.id}:`,
+      limit: batchSize,
+      ...(startAfter ? { startAfter } : {}),
+    });
+    const updated = await [...claims].reduce(async (pending, [key, claim]) => {
+      const record = await pending;
+      if (claim.state === "provisioning" || Date.parse(claim.expiresAt) > now) return record;
+      await transaction.delete(key);
+      return await writeCheckpointTransition(
+        transaction,
+        record,
+        { ...record, activeUseCount: Math.max(0, record.activeUseCount - 1) },
+        "checkpoint.use.expired",
+        "system",
+      );
+    }, Promise.resolve(current));
+    const lastKey = [...claims.keys()].at(-1);
+    return claims.size === batchSize && lastKey ? await expirePage(updated, lastKey) : updated;
+  };
+  return await expirePage(checkpoint);
 }
 
 async function validatedUseClaim(

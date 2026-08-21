@@ -579,6 +579,12 @@ CRABBOX_EUR_TO_USD
 CRABBOX_MAX_ACTIVE_LEASES
 CRABBOX_MAX_ACTIVE_LEASES_PER_OWNER
 CRABBOX_MAX_ACTIVE_LEASES_PER_ORG
+CRABBOX_MAX_CHECKPOINTS                       default 64
+CRABBOX_MAX_CHECKPOINTS_PER_OWNER             default 16
+CRABBOX_MAX_CHECKPOINTS_PER_ORG               default 32
+CRABBOX_MAX_CHECKPOINT_USE_CLAIMS             default 16 per checkpoint
+CRABBOX_MAX_CHECKPOINT_USE_CLAIMS_PER_OWNER   default 64
+CRABBOX_MAX_CHECKPOINT_USE_CLAIMS_TOTAL       default 256
 CRABBOX_MAX_MONTHLY_USD
 CRABBOX_MAX_MONTHLY_USD_PER_OWNER
 CRABBOX_MAX_MONTHLY_USD_PER_ORG
@@ -590,6 +596,14 @@ prewarmed leases, and failed provisioning attempts can therefore consume budget
 headroom faster than the provider bill. Keep active-lease and per-owner limits
 as the primary safety rails, and size fleet/org monthly caps with enough room
 for TTL-based reservations during busy test bursts.
+
+Managed checkpoint limits are independent of lease cost accounting. The
+shipped Cloudflare production and preview configuration sets checkpoint caps
+to 20 globally, 10 per owner, and 20 per organization; claim caps retain their
+16/64/256 defaults. Creation and use reject excess work transactionally with
+HTTP 429 `checkpoint_limit_exceeded` or `checkpoint_claim_limit_exceeded`.
+Checkpoint events retain only the most recent 256 transitions, so operators
+must not interpret the event endpoint as complete checkpoint lifetime history.
 
 ## Routes And Access
 
