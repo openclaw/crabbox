@@ -2,15 +2,29 @@ import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 import { describe, expect, it, vi } from "vitest";
 
 import { PostgresCoordinatorStorage } from "../node/postgres-storage";
+import { sha256Hex } from "../src/auth";
 import {
   CheckpointError,
   acquireCheckpointUse,
+  backfillFailedCheckpointCreateRecovery,
+  bindCheckpointUseProvisioning,
+  checkpointDueKey,
   checkpointKey,
   checkpointLimits,
+  checkpointMaxCreateRecoveryAttempts,
+  checkpointProviderAbsenceConfirmationIntervalMS,
+  checkpointProviderAbsenceHorizonMS,
+  markCheckpointProviderMutationStarted,
+  recordCheckpointProviderAbsence,
   reserveCheckpointCreate,
 } from "../src/checkpoints";
+import { backfillCheckpointCreateAttempt } from "../src/fleet";
 import { orgKeyForLabel } from "../src/org-identity";
-import type { CoordinatorCheckpointRecord } from "../src/types";
+import type {
+  CoordinatorCheckpointRecord,
+  CoordinatorCheckpointUseClaim,
+  CreateAttemptRecord,
+} from "../src/types";
 
 describe("PostgresCoordinatorStorage", () => {
   it("initializes its schema and compatibility table", async () => {
@@ -332,6 +346,375 @@ describe("PostgresCoordinatorStorage", () => {
     ).toBe(true);
     expect(await storage.list({ prefix: "checkpoint:" })).toHaveLength(3);
     expect(await storage.list({ prefix: "checkpoint-event:" })).toHaveLength(3);
+  });
+
+  it("persists checkpoint mutation and absence phases transactionally without schema changes", async () => {
+    vi.useFakeTimers();
+    const startedAt = Date.parse("2026-08-20T12:00:00.000Z");
+    vi.setSystemTime(startedAt);
+    try {
+      const storage = new PostgresCoordinatorStorage(
+        "postgres://unused",
+        fakeContendedCheckpointPool(),
+      );
+      const id = "chk_postgres_absence_phases";
+      const ownershipToken = "postgres-checkpoint-ownership";
+      const createdAt = new Date().toISOString();
+      await reserveCheckpointCreate(storage, {
+        record: {
+          id,
+          owner: "alice@example.com",
+          org: orgKeyForLabel("example-org"),
+          leaseID: "cbx_000000000001",
+          provider: "aws",
+          scope: { region: "eu-west-1", accountID: "123456789012" },
+          name: "durable-checkpoint",
+          strategy: "disk-snapshot",
+          noReboot: true,
+          retention: { mode: "manual" },
+          createdAt,
+          lastUsedAt: createdAt,
+          target: "linux",
+        },
+        ownershipToken,
+        resourceName: "durable-checkpoint-resource",
+        coordinatorGeneration: "generation-1",
+      });
+      expect(await storage.get<CoordinatorCheckpointRecord>(checkpointKey(id))).toMatchObject({
+        createClaim: { providerMutationPhase: "reserved" },
+      });
+      await markCheckpointProviderMutationStarted(storage, id, ownershipToken);
+      expect(await storage.get<CoordinatorCheckpointRecord>(checkpointKey(id))).toMatchObject({
+        createClaim: {
+          providerMutationPhase: "started",
+          providerMutationStartedAt: "2026-08-20T12:00:00.000Z",
+        },
+      });
+
+      vi.setSystemTime(startedAt + checkpointProviderAbsenceHorizonMS);
+      const first = await recordCheckpointProviderAbsence(storage, id);
+      expect(first).toMatchObject({
+        createClaim: { providerAbsenceFirstObservedAt: "2026-08-20T13:00:00.000Z" },
+        retryAt: "2026-08-20T13:05:00.000Z",
+        nextSweepAt: "2026-08-20T13:05:00.000Z",
+      });
+      expect(await storage.list({ prefix: "checkpoint-due:" })).toHaveLength(1);
+
+      vi.setSystemTime(
+        startedAt +
+          checkpointProviderAbsenceHorizonMS +
+          checkpointProviderAbsenceConfirmationIntervalMS,
+      );
+      const verified = await recordCheckpointProviderAbsence(storage, id);
+
+      expect(verified).toMatchObject({
+        state: "failed",
+        createClaim: { providerAbsenceVerifiedAt: "2026-08-20T13:05:00.000Z" },
+      });
+      expect(verified.retryAt).toBeUndefined();
+      expect(await storage.list({ prefix: "checkpoint-due:" })).toHaveLength(0);
+      expect(await storage.list({ prefix: "checkpoint-intent:" })).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("transactionally fences one create attempt to one PostgreSQL checkpoint use claim", async () => {
+    const storage = new PostgresCoordinatorStorage(
+      "postgres://unused",
+      fakeContendedCheckpointPool(),
+    );
+    const checkpointIDs = ["chk_postgres_attempt_first", "chk_postgres_attempt_second"];
+    const principal = { owner: "alice@example.com", org: orgKeyForLabel("example-org") };
+    const requestedLeaseID = "cbx_000000000002";
+    const attemptID = `cat_${"a".repeat(32)}`;
+    const now = new Date().toISOString();
+    await Promise.all(
+      checkpointIDs.map(async (id) => {
+        await storage.put(checkpointKey(id), {
+          version: 1,
+          id,
+          owner: principal.owner,
+          org: principal.org,
+          leaseID: "cbx_000000000001",
+          provider: "aws",
+          scope: { region: "eu-west-1", accountID: "123456789012" },
+          name: id,
+          strategy: "disk-snapshot",
+          noReboot: true,
+          image: {
+            id,
+            resourceID: id,
+            kind: "aws-ebs-snapshot",
+            immutableID: id,
+            snapshotIDs: [id],
+            state: "available",
+          },
+          state: "ready",
+          retention: { mode: "manual" },
+          generation: 1,
+          revision: 1,
+          createdAt: now,
+          updatedAt: now,
+          lastUsedAt: now,
+          attempts: 0,
+          pinCount: 0,
+          activeUseCount: 0,
+          eventSequence: 0,
+          target: "linux",
+        } satisfies CoordinatorCheckpointRecord);
+      }),
+    );
+    const claims = await Promise.all(
+      checkpointIDs.map(async (id) => await acquireCheckpointUse(storage, id, principal)),
+    );
+    const ordinaryAttempt = {
+      version: 1,
+      requestedLeaseID,
+      token: attemptID,
+      owner: principal.owner,
+      org: principal.org,
+      state: "pending",
+      createdAt: now,
+      updatedAt: now,
+    } satisfies CreateAttemptRecord;
+    await storage.put(`create-attempt:${requestedLeaseID}`, ordinaryAttempt);
+    await expect(
+      bindCheckpointUseProvisioning(
+        storage,
+        checkpointIDs[0]!,
+        claims[0]!.token,
+        principal,
+        attemptID,
+        requestedLeaseID,
+      ),
+    ).rejects.toMatchObject({ code: "create_attempt_binding_conflict" });
+    expect(await storage.get(`create-attempt:${requestedLeaseID}`)).toEqual(ordinaryAttempt);
+    await storage.put(`create-attempt:${requestedLeaseID}`, {
+      ...ordinaryAttempt,
+      checkpointID: checkpointIDs[0],
+      checkpointUseClaimHash: await sha256Hex(claims[0]!.token),
+    } satisfies CreateAttemptRecord);
+
+    const results = await Promise.allSettled(
+      checkpointIDs.map(
+        async (checkpointID, index) =>
+          await bindCheckpointUseProvisioning(
+            storage,
+            checkpointID,
+            claims[index]!.token,
+            principal,
+            attemptID,
+            requestedLeaseID,
+          ),
+      ),
+    );
+
+    const winnerIndex = results.findIndex((result) => result.status === "fulfilled");
+    const loserIndex = winnerIndex === 0 ? 1 : 0;
+    expect(winnerIndex).toBe(0);
+    expect(results[loserIndex]).toMatchObject({
+      status: "rejected",
+      reason: { code: "create_attempt_binding_conflict" },
+    });
+    const winnerID = checkpointIDs[winnerIndex]!;
+    const loserID = checkpointIDs[loserIndex]!;
+    const winningClaim = [...(await storage.list({ prefix: `checkpoint-use:${winnerID}:` }))][0]!;
+    expect(
+      await storage.get<CreateAttemptRecord>(`create-attempt:${requestedLeaseID}`),
+    ).toMatchObject({
+      checkpointID: winnerID,
+      checkpointUseClaimHash: winningClaim[0].split(":").at(-1),
+    });
+    expect(winningClaim[1]).toMatchObject({ state: "provisioning" });
+    expect([...(await storage.list({ prefix: `checkpoint-use:${loserID}:` })).values()]).toEqual([
+      expect.objectContaining({ state: "available" }),
+    ]);
+  });
+
+  it("backfills an exhausted PostgreSQL checkpoint exactly once beyond deleted record pages", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T12:00:00.000Z"));
+    try {
+      const storage = new PostgresCoordinatorStorage(
+        "postgres://unused",
+        fakeContendedCheckpointPool(),
+      );
+      const id = "chk_zz_postgres_exhausted";
+      const createdAt = new Date().toISOString();
+      const reserved = await reserveCheckpointCreate(storage, {
+        record: {
+          id,
+          owner: "alice@example.com",
+          org: orgKeyForLabel("example-org"),
+          leaseID: "cbx_000000000001",
+          provider: "aws",
+          scope: { region: "eu-west-1", accountID: "123456789012" },
+          name: "durable-checkpoint",
+          strategy: "disk-snapshot",
+          noReboot: true,
+          retention: { mode: "manual" },
+          createdAt,
+          lastUsedAt: createdAt,
+          target: "linux",
+        },
+        ownershipToken: "postgres-exhausted-ownership",
+        resourceName: "postgres-exhausted-resource",
+        coordinatorGeneration: "generation-1",
+      });
+      await storage.delete(checkpointDueKey(id, reserved.nextSweepAt!));
+      const { nextSweepAt: _due, ...withoutDue } = reserved;
+      void _due;
+      const { providerMutationPhase: _phase, ...legacyClaim } = reserved.createClaim!;
+      void _phase;
+      const failed = {
+        ...withoutDue,
+        state: "failed",
+        attempts: checkpointMaxCreateRecoveryAttempts,
+        createClaim: legacyClaim,
+      } satisfies CoordinatorCheckpointRecord;
+      await storage.put(checkpointKey(id), failed);
+      await Promise.all(
+        Array.from({ length: 11 }, async (_, index) => {
+          const tombstoneID = `chk_${String(index).padStart(2, "0")}_postgres_deleted`;
+          await storage.put(checkpointKey(tombstoneID), {
+            ...failed,
+            id: tombstoneID,
+            state: "deleted",
+            deletedAt: createdAt,
+          } satisfies CoordinatorCheckpointRecord);
+        }),
+      );
+      const limits = checkpointLimits({ CRABBOX_MAX_CHECKPOINTS: "3" });
+
+      expect(await backfillFailedCheckpointCreateRecovery(storage, limits)).toBe(1);
+      expect(await storage.get(checkpointKey(id))).toMatchObject({
+        state: "failed",
+        retryAt: createdAt,
+        nextSweepAt: createdAt,
+        createClaim: {
+          providerMutationPhase: "started",
+          providerMutationStartedAt: createdAt,
+        },
+      });
+      const events = await storage.list({ prefix: `checkpoint-event:${id}:` });
+      const due = await storage.list({ prefix: "checkpoint-due:" });
+
+      expect(await backfillFailedCheckpointCreateRecovery(storage, limits)).toBe(0);
+      expect(await storage.list({ prefix: `checkpoint-event:${id}:` })).toEqual(events);
+      expect(await storage.list({ prefix: "checkpoint-due:" })).toEqual(due);
+      expect(due).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("serializes competing PostgreSQL legacy-attempt backfills to one exact checkpoint winner", async () => {
+    const storage = new PostgresCoordinatorStorage(
+      "postgres://unused",
+      fakeContendedCheckpointPool(),
+    );
+    const checkpointIDs = ["chk_postgres_legacy_first", "chk_postgres_legacy_second"];
+    const principal = { owner: "alice@example.com", org: orgKeyForLabel("example-org") };
+    const requestedLeaseID = "cbx_000000000002";
+    const attemptID = `cat_${"f".repeat(32)}`;
+    const now = new Date().toISOString();
+    await Promise.all(
+      checkpointIDs.map(async (id) => {
+        await storage.put(checkpointKey(id), {
+          version: 1,
+          id,
+          owner: principal.owner,
+          org: principal.org,
+          leaseID: "cbx_000000000001",
+          provider: "aws",
+          scope: { region: "eu-west-1", accountID: "123456789012" },
+          name: id,
+          strategy: "disk-snapshot",
+          noReboot: true,
+          image: {
+            id,
+            resourceID: id,
+            kind: "aws-ebs-snapshot",
+            immutableID: id,
+            snapshotIDs: [id],
+            state: "available",
+          },
+          state: "ready",
+          retention: { mode: "manual" },
+          generation: 1,
+          revision: 1,
+          createdAt: now,
+          updatedAt: now,
+          lastUsedAt: now,
+          attempts: 0,
+          pinCount: 0,
+          activeUseCount: 0,
+          eventSequence: 0,
+          target: "linux",
+        } satisfies CoordinatorCheckpointRecord);
+      }),
+    );
+    const claims = await Promise.all(
+      checkpointIDs.map(async (id) => await acquireCheckpointUse(storage, id, principal)),
+    );
+    const claimHashes = await Promise.all(
+      claims.map(async (claim) => await sha256Hex(claim.token)),
+    );
+    await Promise.all(
+      checkpointIDs.map(async (checkpointID, index) => {
+        const key = `checkpoint-use:${checkpointID}:${claimHashes[index]}`;
+        const claim = (await storage.get<CoordinatorCheckpointUseClaim>(key))!;
+        await storage.put(key, {
+          ...claim,
+          state: "provisioning",
+          attemptID,
+          leaseID: requestedLeaseID,
+        } satisfies CoordinatorCheckpointUseClaim);
+      }),
+    );
+    await storage.put(`create-attempt:${requestedLeaseID}`, {
+      version: 1,
+      requestedLeaseID,
+      token: attemptID,
+      owner: principal.owner,
+      org: principal.org,
+      state: "pending",
+      createdAt: now,
+      updatedAt: now,
+    } satisfies CreateAttemptRecord);
+    const eventsBefore = await storage.list({ prefix: "checkpoint-event:" });
+
+    const results = await Promise.allSettled(
+      checkpointIDs.map(
+        async (checkpointID, index) =>
+          await backfillCheckpointCreateAttempt(storage, {
+            requestedLeaseID,
+            token: attemptID,
+            ...principal,
+            checkpointID,
+            checkpointUseClaimHash: claimHashes[index]!,
+          }),
+      ),
+    );
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.find((result) => result.status === "rejected")).toMatchObject({
+      reason: { code: "create_attempt_binding_conflict" },
+    });
+    const winnerIndex = results.findIndex((result) => result.status === "fulfilled");
+    expect(await storage.get(`create-attempt:${requestedLeaseID}`)).toMatchObject({
+      checkpointID: checkpointIDs[winnerIndex],
+      checkpointUseClaimHash: claimHashes[winnerIndex],
+    });
+    await Promise.all(
+      checkpointIDs.map(async (checkpointID) => {
+        expect([
+          ...(await storage.list({ prefix: `checkpoint-use:${checkpointID}:` })).values(),
+        ]).toEqual([expect.objectContaining({ state: "provisioning", attemptID })]);
+      }),
+    );
+    expect(await storage.list({ prefix: "checkpoint-event:" })).toEqual(eventsBefore);
   });
 
   it("rejects one-over concurrent checkpoint claims without duplicate PostgreSQL events", async () => {

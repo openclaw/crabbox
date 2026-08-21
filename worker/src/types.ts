@@ -265,6 +265,22 @@ export interface LeaseRequest {
   checkpointUseClaim?: string;
 }
 
+export interface CreateAttemptRecord {
+  version: 1;
+  requestedLeaseID: string;
+  token: string;
+  owner: string;
+  org: string;
+  state: "pending" | "canceled";
+  canonicalLeaseID?: string;
+  cloudID?: string;
+  generation?: string;
+  checkpointID?: string;
+  checkpointUseClaimHash?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ImageCapabilities {
   osVersion?: string;
   sdks?: Record<string, string>;
@@ -761,6 +777,11 @@ export interface CoordinatorCheckpointCreateClaim {
   expiresAt: string;
   coordinatorGeneration: string;
   definitiveRefusal?: boolean;
+  providerMutationPhase?: "reserved" | "started";
+  providerMutationStartedAt?: string;
+  providerAbsenceFirstObservedAt?: string;
+  providerAbsenceLastObservedAt?: string;
+  providerAbsenceVerifiedAt?: string;
 }
 
 export interface CoordinatorCheckpointDeleteClaim {

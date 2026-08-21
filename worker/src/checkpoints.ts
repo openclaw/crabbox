@@ -2,6 +2,7 @@ import { sha256Hex } from "./auth";
 import type { CoordinatorStorage, CoordinatorStorageView } from "./coordinator-runtime";
 import { orgMatchesForAccounting, sameOrgIdentityKey } from "./org-identity";
 import type {
+  CoordinatorCheckpointCreateClaim,
   CoordinatorCheckpointDeleteClaim,
   CoordinatorCheckpointDueIndex,
   CoordinatorCheckpointEvent,
@@ -14,6 +15,7 @@ import type {
   CoordinatorCheckpointRetention,
   CoordinatorCheckpointScope,
   CoordinatorCheckpointUseClaim,
+  CreateAttemptRecord,
   Env,
   LeaseRecord,
   ProviderImage,
@@ -25,6 +27,8 @@ export const checkpointDeleteClaimTTLMS = 5 * 60_000;
 export const checkpointAuditRetentionMS = 90 * 24 * 60 * 60_000;
 export const checkpointMaxAuditEvents = 256;
 export const checkpointDuePrefix = "checkpoint-due:";
+export const checkpointProviderAbsenceHorizonMS = 60 * 60_000;
+export const checkpointProviderAbsenceConfirmationIntervalMS = 5 * 60_000;
 const maxRetentionSeconds = 10 * 366 * 24 * 60 * 60;
 const maxAuditPruneBatch = 64;
 export const checkpointMaxCreateRecoveryAttempts = 8;
@@ -234,6 +238,14 @@ async function nextCheckpointDeadline(
   } else if (record.state === "creating") {
     retain(record.createClaim?.expiresAt);
     retain(record.retryAt);
+  } else if (
+    record.state === "failed" &&
+    record.createClaim &&
+    record.createClaim.providerMutationPhase !== "reserved" &&
+    !record.createClaim.definitiveRefusal &&
+    !record.createClaim.providerAbsenceVerifiedAt
+  ) {
+    retain(record.retryAt);
   } else if (record.state === "delete-pending" || record.state === "deleting") {
     retain(record.retryAt);
     retain(record.deleteClaim?.expiresAt);
@@ -398,6 +410,7 @@ export async function reserveCheckpointCreate(
         resourceName: input.resourceName,
         expiresAt,
         coordinatorGeneration: input.coordinatorGeneration,
+        providerMutationPhase: "reserved",
       },
     };
     const intent = checkpointResourceIntent(record);
@@ -444,6 +457,49 @@ async function scanCheckpointRecords(
     if (records.size === batchSize && lastKey) await scan(lastKey);
   };
   await scan();
+}
+
+export async function backfillFailedCheckpointCreateRecovery(
+  storage: CoordinatorStorage,
+  limits: CheckpointLimits = checkpointLimits(),
+): Promise<number> {
+  return storage.transaction(async (transaction) => {
+    const unresolved: CoordinatorCheckpointRecord[] = [];
+    let active = 0;
+    await scanCheckpointRecords(transaction, limits.checkpoints, (checkpoint) => {
+      if (checkpoint.state === "deleted") return false;
+      active++;
+      if (
+        checkpoint.state === "failed" &&
+        !checkpoint.image &&
+        !checkpoint.retryAt &&
+        checkpoint.createClaim &&
+        checkpoint.createClaim.providerMutationPhase !== "reserved" &&
+        !checkpoint.createClaim.definitiveRefusal &&
+        !checkpoint.createClaim.providerAbsenceVerifiedAt
+      ) {
+        unresolved.push(checkpoint);
+      }
+      return active >= limits.checkpoints;
+    });
+    await unresolved.reduce(async (previous, checkpoint) => {
+      await previous;
+      const retryAt = new Date().toISOString();
+      await writeCheckpointTransition(
+        transaction,
+        checkpoint,
+        {
+          ...checkpoint,
+          createClaim: { ...startedCheckpointCreateClaim(checkpoint), expiresAt: retryAt },
+          retryAt,
+        },
+        "checkpoint.create.recovery.backfilled",
+        "system",
+        { retryAt },
+      );
+    }, Promise.resolve());
+    return unresolved.length;
+  });
 }
 
 function validatedCheckpointImage(
@@ -549,6 +605,50 @@ export async function publishCreatedCheckpoint(
 ): Promise<CoordinatorCheckpointRecord> {
   const tokenHash = await sha256Hex(ownershipToken);
   return publishCheckpointWithHash(storage, checkpointID, tokenHash, image);
+}
+
+export async function markCheckpointProviderMutationStarted(
+  storage: CoordinatorStorage,
+  checkpointID: string,
+  ownershipToken: string,
+): Promise<CoordinatorCheckpointRecord> {
+  const tokenHash = await sha256Hex(ownershipToken);
+  return storage.transaction(async (transaction) => {
+    const previous = requireVisible(
+      await transaction.get<CoordinatorCheckpointRecord>(checkpointKey(checkpointID)),
+    );
+    if (
+      previous.state !== "creating" ||
+      previous.createClaim?.tokenHash !== tokenHash ||
+      previous.createClaim.definitiveRefusal ||
+      previous.createClaim.providerAbsenceVerifiedAt
+    ) {
+      throw new CheckpointError("checkpoint_claim_invalid", "checkpoint creation claim is invalid");
+    }
+    if (
+      previous.createClaim.providerMutationPhase === "started" &&
+      previous.createClaim.providerMutationStartedAt
+    ) {
+      return previous;
+    }
+    if (previous.createClaim.providerMutationPhase !== "reserved") {
+      throw new CheckpointError("checkpoint_claim_invalid", "checkpoint creation claim is invalid");
+    }
+    return writeCheckpointTransition(
+      transaction,
+      previous,
+      {
+        ...previous,
+        createClaim: {
+          ...previous.createClaim,
+          providerMutationPhase: "started",
+          providerMutationStartedAt: new Date().toISOString(),
+        },
+      },
+      "checkpoint.create.provider_mutation_started",
+      "system",
+    );
+  });
 }
 
 export async function publishRecoveredCheckpoint(
@@ -714,30 +814,145 @@ async function recordCheckpointCreateFailureWithHash(
     const previous = requireVisible(
       await transaction.get<CoordinatorCheckpointRecord>(checkpointKey(checkpointID)),
     );
-    if (previous.state !== "creating" || previous.createClaim?.tokenHash !== tokenHash)
+    if (
+      (previous.state !== "creating" && previous.state !== "failed") ||
+      previous.createClaim?.tokenHash !== tokenHash ||
+      previous.createClaim.definitiveRefusal ||
+      previous.createClaim.providerAbsenceVerifiedAt
+    )
       return previous;
-    const attempts = previous.attempts + 1;
+    const attempts = Math.min(previous.attempts + 1, Number.MAX_SAFE_INTEGER);
     const exhausted = attempts >= checkpointMaxCreateRecoveryAttempts;
-    const retryAt = exhausted
-      ? undefined
-      : new Date(Date.now() + checkpointRetryDelayMS(attempts)).toISOString();
+    const unresolvedMutation = previous.createClaim.providerMutationPhase !== "reserved";
+    const createClaim = unresolvedMutation
+      ? startedCheckpointCreateClaim(previous)
+      : previous.createClaim;
+    const retryAt =
+      exhausted && !unresolvedMutation
+        ? undefined
+        : new Date(Date.now() + checkpointRetryDelayMS(attempts)).toISOString();
     const next: CoordinatorCheckpointRecord = {
       ...previous,
       state: exhausted ? "failed" : "creating",
       attempts,
+      createClaim,
       lastError: message.slice(0, 512),
-      ...(retryAt
-        ? { retryAt, createClaim: { ...previous.createClaim!, expiresAt: retryAt } }
-        : {}),
+      ...(retryAt ? { retryAt, createClaim: { ...createClaim, expiresAt: retryAt } } : {}),
     };
     if (!retryAt) delete next.retryAt;
     return writeCheckpointTransition(
       transaction,
       previous,
       next,
-      exhausted ? "checkpoint.create.recovery_exhausted" : "checkpoint.create.failed",
+      exhausted && previous.state !== "failed"
+        ? "checkpoint.create.recovery_exhausted"
+        : "checkpoint.create.failed",
       "system",
       { error: message.slice(0, 512), ...(retryAt ? { retryAt } : {}) },
+    );
+  });
+}
+
+function startedCheckpointCreateClaim(
+  checkpoint: CoordinatorCheckpointRecord,
+): CoordinatorCheckpointCreateClaim {
+  const claim = checkpoint.createClaim;
+  if (!claim || claim.providerMutationPhase === "reserved") {
+    throw new CheckpointError("checkpoint_claim_invalid", "checkpoint creation claim is invalid");
+  }
+  if (claim.providerMutationPhase === "started" && claim.providerMutationStartedAt) return claim;
+  const createdAt = Date.parse(checkpoint.createdAt);
+  const existingStartedAt = Date.parse(claim.providerMutationStartedAt ?? "");
+  if (!Number.isFinite(createdAt)) {
+    throw new CheckpointError(
+      "checkpoint_claim_invalid",
+      "checkpoint provider mutation phase is invalid",
+    );
+  }
+  return {
+    ...claim,
+    providerMutationPhase: "started",
+    providerMutationStartedAt: new Date(
+      Number.isFinite(existingStartedAt) ? Math.min(existingStartedAt, createdAt) : createdAt,
+    ).toISOString(),
+  };
+}
+
+export async function recordCheckpointProviderAbsence(
+  storage: CoordinatorStorage,
+  checkpointID: string,
+): Promise<CoordinatorCheckpointRecord> {
+  return storage.transaction(async (transaction) => {
+    const previous = requireVisible(
+      await transaction.get<CoordinatorCheckpointRecord>(checkpointKey(checkpointID)),
+    );
+    if (
+      (previous.state !== "creating" && previous.state !== "failed") ||
+      !previous.createClaim ||
+      previous.createClaim.providerMutationPhase === "reserved" ||
+      previous.createClaim.definitiveRefusal
+    ) {
+      throw new CheckpointError("checkpoint_claim_invalid", "checkpoint creation claim is invalid");
+    }
+    if (previous.createClaim.providerAbsenceVerifiedAt) return previous;
+    const now = Date.now();
+    const observedAt = new Date(now).toISOString();
+    const createClaim = startedCheckpointCreateClaim(previous);
+    const mutationStartedAt = Date.parse(createClaim.providerMutationStartedAt!);
+    if (!Number.isFinite(mutationStartedAt)) {
+      throw new CheckpointError(
+        "checkpoint_claim_invalid",
+        "checkpoint provider mutation phase is invalid",
+      );
+    }
+    const horizon = mutationStartedAt + checkpointProviderAbsenceHorizonMS;
+    const priorFirst = Date.parse(previous.createClaim.providerAbsenceFirstObservedAt ?? "");
+    const hasQualifyingFirst = Number.isFinite(priorFirst) && priorFirst >= horizon;
+    const firstObservedAt =
+      now >= horizon && !hasQualifyingFirst
+        ? observedAt
+        : (previous.createClaim.providerAbsenceFirstObservedAt ?? observedAt);
+    const firstObservedMS = Date.parse(firstObservedAt);
+    const verified =
+      now >= horizon &&
+      firstObservedMS >= horizon &&
+      now - firstObservedMS >= checkpointProviderAbsenceConfirmationIntervalMS;
+    const attempts = Math.min(previous.attempts + 1, Number.MAX_SAFE_INTEGER);
+    const exhausted = attempts >= checkpointMaxCreateRecoveryAttempts;
+    const retryAt = verified
+      ? undefined
+      : new Date(
+          now < horizon
+            ? Math.min(
+                horizon,
+                now +
+                  Math.max(
+                    checkpointRetryDelayMS(attempts),
+                    checkpointProviderAbsenceConfirmationIntervalMS,
+                  ),
+              )
+            : firstObservedMS + checkpointProviderAbsenceConfirmationIntervalMS,
+        ).toISOString();
+    const next: CoordinatorCheckpointRecord = {
+      ...previous,
+      state: exhausted || verified ? "failed" : previous.state,
+      attempts,
+      createClaim: {
+        ...createClaim,
+        providerAbsenceFirstObservedAt: firstObservedAt,
+        providerAbsenceLastObservedAt: observedAt,
+        ...(verified ? { providerAbsenceVerifiedAt: observedAt } : { expiresAt: retryAt! }),
+      },
+      ...(retryAt ? { retryAt } : {}),
+    };
+    if (!retryAt) delete next.retryAt;
+    return writeCheckpointTransition(
+      transaction,
+      previous,
+      next,
+      verified ? "checkpoint.create.absence_verified" : "checkpoint.create.absence_observed",
+      "system",
+      retryAt ? { retryAt } : {},
     );
   });
 }
@@ -785,7 +1000,14 @@ export async function cancelFailedCheckpointCreate(
       await transaction.get<CoordinatorCheckpointRecord>(checkpointKey(checkpointID)),
       principal,
     );
-    if (previous.state !== "failed" || !previous.createClaim || previous.image) {
+    if (
+      (previous.state !== "creating" && previous.state !== "failed") ||
+      !previous.createClaim ||
+      previous.image ||
+      (!previous.createClaim.definitiveRefusal &&
+        previous.createClaim.providerMutationPhase !== "reserved" &&
+        !previous.createClaim.providerAbsenceVerifiedAt)
+    ) {
       throw new CheckpointError(
         "checkpoint_pending",
         "checkpoint creation is not safely cancelable",
@@ -1009,6 +1231,30 @@ export async function bindCheckpointUseProvisioning(
       tokenHash,
       principal,
     );
+    const attemptKey = `create-attempt:${leaseID}`;
+    const attempt = await transaction.get<CreateAttemptRecord>(attemptKey);
+    if (
+      !attempt ||
+      attempt.version !== 1 ||
+      attempt.requestedLeaseID !== leaseID ||
+      attempt.token !== attemptID ||
+      attempt.owner !== principal.owner ||
+      attempt.org !== principal.org
+    ) {
+      throw new CheckpointError("create_attempt_conflict", "checkpoint lease attempt is invalid");
+    }
+    if (attempt.state === "canceled") {
+      throw new CheckpointError("create_canceled", "checkpoint lease attempt was canceled");
+    }
+    if (attempt.state !== "pending") {
+      throw new CheckpointError("create_attempt_conflict", "checkpoint lease attempt is invalid");
+    }
+    if (attempt.checkpointID !== checkpointID || attempt.checkpointUseClaimHash !== tokenHash) {
+      throw new CheckpointError(
+        "create_attempt_binding_conflict",
+        "create attempt is not bound to the exact checkpoint claim",
+      );
+    }
     if (claim.state === "provisioning") {
       throw new CheckpointError(
         "checkpoint_in_use",
@@ -1040,6 +1286,7 @@ export async function abortCheckpointProvisioningForLease(
   principal: CheckpointPrincipal,
 ): Promise<CoordinatorCheckpointRecord | undefined> {
   return storage.transaction(async (transaction) => {
+    const attempt = await transaction.get<CreateAttemptRecord>(`create-attempt:${leaseID}`);
     const claims = await transaction.list<CoordinatorCheckpointUseClaim>({
       prefix: "checkpoint-use:",
     });
@@ -1048,6 +1295,10 @@ export async function abortCheckpointProvisioningForLease(
         claim.state === "provisioning" &&
         claim.leaseID === leaseID &&
         claim.attemptID === attemptID &&
+        (!attempt ||
+          (attempt.checkpointID === undefined && attempt.checkpointUseClaimHash === undefined) ||
+          (attempt.checkpointID === claim.checkpointID &&
+            attempt.checkpointUseClaimHash === claim.tokenHash)) &&
         (principal.admin ||
           (claim.owner === principal.owner && sameOrgIdentityKey(claim.org, principal.org))),
     );
@@ -1120,13 +1371,7 @@ export async function finishCheckpointUse(
     }
     if (complete && !attemptID) {
       const lease = await transaction.get<LeaseRecord>(`lease:${claim.leaseID}`);
-      const attempt = await transaction.get<{
-        token?: string;
-        canonicalLeaseID?: string;
-        owner?: string;
-        org?: string;
-        state?: string;
-      }>(`create-attempt:${claim.leaseID}`);
+      const attempt = await transaction.get<CreateAttemptRecord>(`create-attempt:${claim.leaseID}`);
       if (
         !lease ||
         lease.state !== "active" ||
@@ -1137,7 +1382,9 @@ export async function finishCheckpointUse(
         attempt.state === "canceled" ||
         attempt.canonicalLeaseID !== lease.id ||
         attempt.owner !== claim.owner ||
-        !sameOrgIdentityKey(attempt.org ?? "", claim.org)
+        !sameOrgIdentityKey(attempt.org ?? "", claim.org) ||
+        ((attempt.checkpointID !== undefined || attempt.checkpointUseClaimHash !== undefined) &&
+          (attempt.checkpointID !== checkpointID || attempt.checkpointUseClaimHash !== tokenHash))
       ) {
         throw new CheckpointError(
           "checkpoint_in_use",
@@ -1764,15 +2011,7 @@ export async function expireCheckpointClaims(
           ? await transaction.get<LeaseRecord>(`lease:${claim.leaseID}`)
           : undefined;
         const attempt = claim.leaseID
-          ? await transaction.get<{
-              requestedLeaseID?: string;
-              token?: string;
-              state?: string;
-              canonicalLeaseID?: string;
-              owner?: string;
-              org?: string;
-              cloudID?: string;
-            }>(`create-attempt:${claim.leaseID}`)
+          ? await transaction.get<CreateAttemptRecord>(`create-attempt:${claim.leaseID}`)
           : undefined;
         const exactLease = Boolean(
           lease &&
@@ -1788,7 +2027,10 @@ export async function expireCheckpointClaims(
           attempt.token === claim.attemptID &&
           (!attempt.canonicalLeaseID || attempt.canonicalLeaseID === claim.leaseID) &&
           attempt.owner === claim.owner &&
-          sameOrgIdentityKey(attempt.org ?? "", claim.org),
+          sameOrgIdentityKey(attempt.org ?? "", claim.org) &&
+          ((attempt.checkpointID === undefined && attempt.checkpointUseClaimHash === undefined) ||
+            (attempt.checkpointID === current.id &&
+              attempt.checkpointUseClaimHash === claim.tokenHash)),
         );
         const successful = Boolean(
           exactLease &&

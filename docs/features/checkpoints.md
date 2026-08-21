@@ -17,16 +17,31 @@ change the *default* base image for all future leases on a provider, use
 `crabbox image promote` instead (see [prebaked images](prebaked-images.md)).
 
 Coordinator-managed AWS, Azure, and GCP checkpoints reserve exact provider
-ownership before cloud mutation. A failed or ambiguous creation remains visible
-in inventory alongside healthy checkpoints; recovery is bounded, and a terminal
-failed reservation can be canceled only after exact provider verification.
-Each fork binds one claim to one lease attempt until provisioning completes or
-verified cancellation proves it is safe to release; claim expiry cannot open a
-deletion race while provisioning is still active. Coordinator maintenance
-reconciles interrupted attempts against the exact durable lease and creation
-attempt, completing recovered successful forks and releasing claims only after
-terminal failure or provider cleanup is confirmed. A caller cannot fabricate
-last-use activity by completing an unbound claim.
+ownership before cloud mutation and durably transition an explicit reserved
+phase to started immediately before the provider call. Only an explicitly
+reserved pre-mutation interruption, or a definitive provider refusal, can be
+canceled immediately; older records without a phase are conservatively treated
+as already started from their creation time. Once mutation has started,
+ambiguous creation keeps its exact ownership reservation and remains visible in
+inventory while maintenance continues recovery, including after the diagnostic
+failure threshold. Bounded scheduled scans also re-index older exhausted failed
+creations that predate durable retry markers. Cancellation becomes safe only
+after at least 60 minutes and two exact, post-horizon provider-absence
+confirmations separated by at least five minutes; verified absence still
+requires an explicit delete. If the resource appears instead, Crabbox publishes
+its verified ownership before managed deletion. Each fork atomically reserves
+its exact lease creation attempt
+with its checkpoint and hashed use-claim identity before that claim enters
+provisioning, then retains the claim until provisioning completes or verified
+cancellation proves it is safe to release. Pre-upgrade attempts without that
+binding can be repaired only from their exact provisioning claim or completed
+checkpoint-backed lease. An ordinary lease attempt cannot be adopted by a
+checkpoint fork. Claim expiry cannot open a deletion race while provisioning is
+still active. Coordinator maintenance reconciles interrupted attempts against
+the exact durable lease and creation attempt,
+completing recovered successful forks and releasing claims only after terminal
+failure or provider cleanup is confirmed. A caller cannot fabricate last-use
+activity by completing an unbound claim.
 
 Coordinator-managed checkpoints are admitted transactionally before provider
 mutation. `CRABBOX_MAX_CHECKPOINTS` defaults to 64,
