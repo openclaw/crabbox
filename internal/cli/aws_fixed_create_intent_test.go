@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func TestFixedAWSCreateIntentFingerprintGolden(t *testing.T) {
+func TestFixedAWSCreateIntentCacheV3FingerprintGolden(t *testing.T) {
 	// This literal pins durable on-disk state and must never be "updated" to match new behavior.
 	cfg := BaseConfig()
 	cfg.Provider = "aws-golden"
@@ -62,6 +62,7 @@ func TestFixedAWSCreateIntentFingerprintGolden(t *testing.T) {
 		Pnpm: true, Npm: true, Docker: true, Git: true, MaxGB: 73, PurgeOnRelease: true,
 		Volumes: []CacheVolumeConfig{{Name: "aws-golden-volume", Key: "aws-golden-key", Path: "/var/cache/aws-golden", SizeGB: 37, Required: true}},
 	}
+	cfg.AWSCacheVolumeRepoScope = "opaque-repo-scope-golden"
 
 	got, err := FixedAWSCreateIntentFingerprint(cfg, FixedAWSCreateIntentRequest{
 		AccountID: "123456789017", RequestedSlug: "aws-golden-lease", SSHPublicKey: "ssh-ed25519 AAAAawsGolden", Keep: true,
@@ -69,9 +70,63 @@ func TestFixedAWSCreateIntentFingerprintGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = "b9da70cdeb1422676ab434ac324571652e617fc5a533226b02f7e34b737c7d00"
+	const want = "4622e91ed4311bdb1c5c525cf6b7d66ed8a61f6161191681f2eee6af4decf75d"
 	if got != want {
 		t.Fatalf("fingerprint=%s want=%s", got, want)
+	}
+	intent, err := fixedAWSCreateIntentForConfig(cfg, FixedAWSCreateIntentRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if intent.Version != fixedAWSCacheCreateIntentVersion || intent.Cache.RepoScope != cfg.AWSCacheVolumeRepoScope {
+		t.Fatalf("cache intent version/scope=%d/%q", intent.Version, intent.Cache.RepoScope)
+	}
+	cfg.AWSCacheVolumeRepoScope = "different-opaque-repo-scope"
+	other, err := FixedAWSCreateIntentFingerprint(cfg, FixedAWSCreateIntentRequest{
+		AccountID: "123456789017", RequestedSlug: "aws-golden-lease", SSHPublicKey: "ssh-ed25519 AAAAawsGolden", Keep: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other == got {
+		t.Fatal("cache v3 fingerprint ignored opaque repository scope")
+	}
+}
+
+func TestFixedAWSCreateIntentNoCacheV2FingerprintGolden(t *testing.T) {
+	cfg := BaseConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = TargetLinux
+	cfg.ServerType = "m7g.large"
+	cfg.AWSRegion = "eu-west-2"
+	cfg.AWSAMI = "ami-no-cache-golden"
+	cfg.AWSCacheVolumeRepoScope = "ignored-without-cache-volumes"
+	got, err := FixedAWSCreateIntentFingerprint(cfg, FixedAWSCreateIntentRequest{
+		AccountID: "123456789017", RequestedSlug: "aws-no-cache-golden", SSHPublicKey: "ssh-ed25519 AAAAnoCacheGolden", Keep: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "b4f97f5b25671720329a723855f4f24773370d7f2fa1c185eeefd499402b9e56"
+	if got != want {
+		t.Fatalf("fingerprint=%s want=%s", got, want)
+	}
+	intent, err := fixedAWSCreateIntentForConfig(cfg, FixedAWSCreateIntentRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if intent.Version != FixedAWSCreateIntentVersion || intent.Cache.RepoScope != "" {
+		t.Fatalf("no-cache intent version/scope=%d/%q", intent.Version, intent.Cache.RepoScope)
+	}
+	cfg.AWSCacheVolumeRepoScope = "different-ignored-scope"
+	other, err := FixedAWSCreateIntentFingerprint(cfg, FixedAWSCreateIntentRequest{
+		AccountID: "123456789017", RequestedSlug: "aws-no-cache-golden", SSHPublicKey: "ssh-ed25519 AAAAnoCacheGolden", Keep: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other != got {
+		t.Fatal("no-cache v2 fingerprint changed with runtime-only repository scope")
 	}
 }
 
@@ -170,7 +225,7 @@ func TestFixedAWSCreateIntentExcludesSecrets(t *testing.T) {
 	}
 }
 
-func TestFixedAWSCreateIntentClassifiesEveryExportedConfigField(t *testing.T) {
+func TestAWSProviderConfigFixedCreateFieldsClassified(t *testing.T) {
 	included := map[string]bool{}
 	collectFixedAWSConfigFields(reflect.TypeOf(fixedAWSCreateIntent{}), included)
 	excluded := map[string]string{}
@@ -204,6 +259,9 @@ func TestFixedAWSCreateIntentClassifiesEveryExportedConfigField(t *testing.T) {
 	`)
 	classify("post-acquisition command, transport, or reporting behavior", `
 		Sync Run EnvAllow Actions Results Shard Profiles Presets ProofTemplates Jobs
+	`)
+	classify("runtime-only AWS cache adapter and resolved plan", `
+		AWSCacheVolumeLifecycle AWSCacheVolumePlan
 	`)
 
 	configType := reflect.TypeOf(Config{})

@@ -55,13 +55,25 @@ func (Provider) Spec() core.ProviderSpec {
 			{OS: core.TargetWindows, WindowsMode: "wsl2"},
 			{OS: core.TargetMacOS},
 		},
-		Features:         core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureDesktop, core.FeatureBrowser, core.FeatureCode},
+		Features:         core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureDesktop, core.FeatureBrowser, core.FeatureCode, core.FeatureCacheVolume},
 		Coordinator:      core.CoordinatorSupported,
 		ClassDisposition: core.ProviderClassDispositionMapped,
 	}
 }
 func (Provider) RegisterFlags(*flag.FlagSet, core.Config) any { return core.NoProviderFlags() }
 func (Provider) ApplyFlags(*core.Config, *flag.FlagSet, any) error {
+	return nil
+}
+
+func (Provider) ValidateConfig(cfg core.Config) error {
+	if len(cfg.Cache.Volumes) == 0 || cfg.TargetOS == core.TargetLinux {
+		return nil
+	}
+	for _, volume := range cfg.Cache.Volumes {
+		if volume.Required {
+			return core.Exit(2, "provider=aws supports required cache volume %q only for Linux SSH leases", firstNonBlank(volume.Name, volume.Key))
+		}
+	}
 	return nil
 }
 

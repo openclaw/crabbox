@@ -146,10 +146,12 @@ const awsProviderPolicyJSON = `{
       "Action": [
         "ec2:DescribeImages",
         "ec2:DescribeInstances",
+        "ec2:DescribeInstanceTypes",
         "ec2:DescribeKeyPairs",
         "ec2:DescribeSecurityGroups",
         "ec2:DescribeFastSnapshotRestores",
         "ec2:DescribeSnapshots",
+        "ec2:DescribeVolumes",
         "ec2:DescribeSubnets",
         "ec2:DescribeVpcs",
         "ec2:DescribeHosts"
@@ -171,10 +173,94 @@ const awsProviderPolicyJSON = `{
         "ec2:DeregisterImage",
         "ec2:CreateSnapshot",
         "ec2:DeleteSnapshot",
-        "ec2:EnableFastSnapshotRestores",
-        "ec2:CreateTags"
+        "ec2:EnableFastSnapshotRestores"
       ],
       "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": "*"
+    },
+    {
+      "Effect": "Deny",
+      "Action": "ec2:CreateTags",
+      "Resource": "arn:aws:ec2:*:*:volume/*",
+      "Condition": {
+        "ForAnyValue:StringEquals": {
+          "aws:TagKeys": [
+            "crabbox_cache_set",
+            "crabbox_cache_member",
+            "crabbox_cache_generation",
+            "crabbox_cache_abi"
+          ]
+        },
+        "StringNotEqualsIfExists": {
+          "ec2:CreateAction": "CreateVolume"
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": "ec2:CreateVolume",
+      "Resource": "arn:aws:ec2:*:*:volume/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/crabbox": "true",
+          "aws:RequestTag/created_by": "crabbox"
+        },
+        "Null": {
+          "aws:RequestTag/crabbox_cache_set": "false",
+          "aws:RequestTag/crabbox_cache_member": "false",
+          "aws:RequestTag/crabbox_cache_generation": "false",
+          "aws:RequestTag/crabbox_cache_abi": "false"
+        },
+        "ForAllValues:StringEquals": {
+          "aws:TagKeys": [
+            "crabbox",
+            "created_by",
+            "crabbox_cache_set",
+            "crabbox_cache_member",
+            "crabbox_cache_generation",
+            "crabbox_cache_abi"
+          ]
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ec2:AttachVolume",
+        "ec2:DetachVolume",
+        "ec2:DeleteVolume"
+      ],
+      "Resource": "arn:aws:ec2:*:*:volume/*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:ResourceTag/crabbox": "true",
+          "ec2:ResourceTag/created_by": "crabbox"
+        },
+        "Null": {
+          "ec2:ResourceTag/crabbox_cache_set": "false",
+          "ec2:ResourceTag/crabbox_cache_member": "false",
+          "ec2:ResourceTag/crabbox_cache_generation": "false",
+          "ec2:ResourceTag/crabbox_cache_abi": "false"
+        }
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ec2:AttachVolume",
+        "ec2:DetachVolume"
+      ],
+      "Resource": "arn:aws:ec2:*:*:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:ResourceTag/crabbox": "true",
+          "ec2:ResourceTag/created_by": "crabbox"
+        }
+      }
     },
     {
       "Effect": "Allow",

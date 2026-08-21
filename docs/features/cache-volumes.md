@@ -88,9 +88,61 @@ Docker volume name is derived from the cache key. Apple Container implements it
 with host cache directories under the local user cache directory mounted with
 Apple's `--volume` flag.
 
+AWS implements cache volumes for public Linux SSH leases in both direct and
+brokered mode. Each logical cache gets one encrypted gp3 EBS member per
+availability zone; concurrent leases reserve distinct members and sequential
+leases reuse an available member. Required caches reject Windows, macOS,
+private/SSM-only AWS workspaces, and coordinators that do not acknowledge cache
+volume protocol v1. Optional caches may be ignored only with an explicit CLI
+warning.
+
 Providers that do not advertise `cache-volume` ignore non-required configured
 volumes. Required volumes fail early when the selected provider cannot honor
 them.
+
+### AWS safety model
+
+AWS cache identity binds the authenticated account/tenant, an opaque repository
+scope, the cache key, and the cache ABI. EBS tags contain only random cache-set
+and member IDs, generation, and an ABI digest; repository names, keys, paths,
+users, and credentials are never tags.
+
+Crabbox durably reserves the exact availability zone before `RunInstances`,
+creates an ext4 volume with `DeleteOnTermination=false`, and attaches it only to
+the selected instance. Bootstrap resolves the exact EBS NVMe serial, rejects
+root devices and mount paths that hide the SSH home, work root, cloud-init, or
+Crabbox runtime state. Descendants of the SSH `.ssh` directory,
+`/var/lib/cloud`, and `/var/lib/crabbox` are also forbidden. It rechecks the
+created path for indirect symlinks, mounts with `nodev,nosuid`, and gates
+readiness on the ABI sentinel. Explicit cache subdirectories such as
+`/var/cache/crabbox/pnpm`,
+`/home/crabbox/.cache/build`, or a cache directory below the work root remain
+valid. ABI changes quarantine the old member and allocate a new generation. An
+exclusive same-ABI member may be repaired with `e2fsck` and reformatted when the
+cache is corrupt.
+
+Every adoption and reuse re-attests the live EBS member: encrypted, `gp3`, exact
+recorded size, multi-attach disabled, exact availability zone, opaque ownership
+tags, state, and attachments. Exact-tag clones with different storage
+properties are quarantined. Failed creates and indeterminate
+`DescribeVolumes`/discovery calls become non-capacity-counting durable cleanup
+records with retry evidence, and stale records with no provider match are
+removed without discovering or deleting tag-only resources.
+
+Fixed create identity remains v2 when no cache volumes are requested. Cache
+volumes use semantic identity v3 and bind the opaque repository scope; runtime
+lifecycle adapters and resolved volume plans are deliberately excluded.
+
+Release marks a member available only after `DescribeVolumes` proves zero
+attachments. `cache.purgeOnRelease` deletes it after that proof. Direct state is
+kept in a locked XDG registry; brokered state is durable coordinator state.
+The generated AWS policy grants cache volume mutation only on volume ARNs with
+the exact Crabbox cache resource tags; the companion instance ARN grant covers
+only attach and detach and requires the existing Crabbox instance ownership
+tags.
+Aged available or quarantined members are garbage-collected after seven days
+only when their durable account, region, availability zone, generation, ABI,
+and opaque tags still match. Tag-only discoveries remain report-only.
 
 ## Existing Leases
 

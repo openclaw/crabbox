@@ -38,6 +38,7 @@ import {
   type AWSMacHost,
   type AWSPrivateWorkspaceConfig,
 } from "./aws";
+import { AWSCacheVolumeLifecycle, type AWSCacheVolumePlan } from "./aws-cache-volumes";
 import { InvalidAWSRegionError, sanitizeAWSRegion } from "./aws-region";
 import { AzureClient, azureRegionCandidates, type AzureDeferredCleanupRequest } from "./azure";
 import {
@@ -1236,6 +1237,9 @@ export class FleetCoordinator {
       if (method === "POST" && parts.join("/") === "v1/leases/capability-aware") {
         return await this.createLease(request);
       }
+      if (method === "POST" && parts.join("/") === "v1/leases/cache-volume-aware") {
+        return await this.createLease(request);
+      }
       if (
         method === "POST" &&
         parts[0] === "v1" &&
@@ -1254,6 +1258,16 @@ export class FleetCoordinator {
         parts.length === 3
       ) {
         return await this.createLease(request, undefined, undefined, undefined, parts[2]);
+      }
+      if (
+        method === "PUT" &&
+        parts[0] === "v1" &&
+        parts[1] === "leases" &&
+        parts[2] === "cache-volume-aware" &&
+        parts[3] &&
+        parts.length === 4
+      ) {
+        return await this.createLease(request, undefined, undefined, undefined, parts[3]);
       }
       if (method === "POST" && parts.join("/") === "v1/workspaces") {
         return await this.createWorkspace(request);
@@ -2998,6 +3012,15 @@ export class FleetCoordinator {
     await this.pruneTerminalRuns();
     await this.runAzureDeferredCleanups();
     await this.runAWSOrphanSweepIfDue("alarm");
+    try {
+      await new AWSCacheVolumeLifecycle(this.state.storage).garbageCollectIfDue(
+        (region) => new EC2SpotClient(this.env, region),
+      );
+    } catch (error) {
+      console.warn(
+        `AWS cache volume garbage collection failed: ${coordinatorErrorMessage(this.env, error)}`,
+      );
+    }
     await this.runAzureOrphanSweepIfDue("alarm");
     await this.reconcileAWSIngressIfIdle();
     await this.state.runExclusive(() => this.scheduleAlarm());
@@ -3392,6 +3415,9 @@ export class FleetCoordinator {
         { status: 409 },
       );
     }
+    if (config.cacheVolumes.length > 0) {
+      config = { ...config, cacheTenantScope: `${org}\0${owner}` };
+    }
     if (workspaceID) {
       config = { ...config, awsUseStockImage: config.provider === "aws" };
       if (!workspaceCapability) {
@@ -3422,10 +3448,12 @@ export class FleetCoordinator {
       );
     }
     let fixedCreateIntentHash: string | undefined;
+    let fixedCreateIntentVersion: number | undefined;
     if (fixedLeaseID) {
       if (!config.providerKey) {
         config = { ...config, providerKey: providerKeyForLease(fixedLeaseID) };
       }
+      fixedCreateIntentVersion = fixedLeaseCreateIntentVersionForConfig(config);
       fixedCreateIntentHash = await fixedLeaseCreateIntentHash(config, requestedSlug);
       const replay = await this.state.runExclusive(async () => {
         if (createAttemptBlocksLeaseID(await this.getCreateAttempt(fixedLeaseID))) {
@@ -3435,6 +3463,7 @@ export class FleetCoordinator {
           await this.getLease(fixedLeaseID),
           owner,
           org,
+          fixedCreateIntentVersion!,
           fixedCreateIntentHash!,
         );
       });
@@ -3869,7 +3898,13 @@ export class FleetCoordinator {
       }
       const existingLease = await this.getLease(leaseID);
       if (existingLease && fixedLeaseID) {
-        return this.fixedLeaseReplayResponse(existingLease, owner, org, fixedCreateIntentHash!)!;
+        return this.fixedLeaseReplayResponse(
+          existingLease,
+          owner,
+          org,
+          fixedCreateIntentVersion!,
+          fixedCreateIntentHash!,
+        )!;
       }
       if (
         existingLease &&
@@ -3909,7 +3944,7 @@ export class FleetCoordinator {
           : {}),
         ...(fixedCreateIntentHash
           ? {
-              fixedCreateIntentVersion: fixedLeaseCreateIntentVersion,
+              fixedCreateIntentVersion: fixedCreateIntentVersion!,
               fixedCreateIntentHash,
             }
           : {}),
@@ -3938,6 +3973,12 @@ export class FleetCoordinator {
         sshPort: config.sshPort,
         sshFallbackPorts: config.sshFallbackPorts,
         ...(injectsSSHHostKey ? { sshHostKey: sshPublicKeyIdentity(config.sshHostPublicKey) } : {}),
+        ...(config.cacheVolumeProtocol === 1
+          ? {
+              cacheVolumeProtocol: 1,
+              purgeOnRelease: config.purgeOnRelease,
+            }
+          : {}),
         workRoot: config.workRoot,
         keep: config.keep,
         ttlSeconds: config.ttlSeconds,
@@ -4243,7 +4284,7 @@ export class FleetCoordinator {
               });
             })
           : this.withAWSIngressOperationLock(provision);
-    const { server, serverType, market, attempts, image, provisioningTiming } =
+    const { server, serverType, market, attempts, image, provisioningTiming, cacheVolumePlan } =
       await provisioned.catch(async (error: unknown) => {
         const cleanupClaim = validatedProviderProvisioningCleanupClaim(error, config.provider);
         await this.state.runExclusive(async () => {
@@ -4323,6 +4364,11 @@ export class FleetCoordinator {
     if (provisioningTiming) {
       record.provisioningTiming = provisioningTiming;
     }
+    if (cacheVolumePlan) {
+      record.cacheVolumeProtocol = cacheVolumePlan.protocol;
+      record.cacheVolumeBindings = cacheVolumePlan.bindings;
+      record.purgeOnRelease = config.purgeOnRelease;
+    }
     record.serverID = server.id;
     record.serverName = server.name;
     record.host = server.host;
@@ -4391,12 +4437,13 @@ export class FleetCoordinator {
     existing: LeaseRecord | undefined,
     owner: string,
     org: string,
+    intentVersion: number,
     intentHash: string,
   ): Response | undefined {
     if (!existing) return undefined;
     const sameOwner = existing.owner === owner && existing.org === org;
     const sameIntent =
-      existing.fixedCreateIntentVersion === fixedLeaseCreateIntentVersion &&
+      existing.fixedCreateIntentVersion === intentVersion &&
       existing.fixedCreateIntentHash === intentHash;
     if (!sameOwner || !sameIntent || !leaseIsLive(existing)) {
       return json(
@@ -21717,7 +21764,9 @@ function boundedTelemetrySamples(samples: LeaseTelemetry[], max: number): LeaseT
     .slice(-max);
 }
 
-const fixedLeaseCreateIntentVersion = 2;
+function fixedLeaseCreateIntentVersionForConfig(config: LeaseConfig): number {
+  return config.cacheVolumes.length > 0 ? 3 : 2;
+}
 
 export async function fixedLeaseCreateIntentHash(
   config: LeaseConfig,
@@ -21729,12 +21778,22 @@ export async function fixedLeaseCreateIntentHash(
   delete semanticConfig["sshHostPrivateKey"];
   delete semanticConfig["sshHostPublicKey"];
   delete semanticConfig["sshPublicKey"];
+  delete semanticConfig["cacheVolumeBootstrap"];
+  delete semanticConfig["cacheVolumeReadyChecks"];
+  delete semanticConfig["cacheTenantScope"];
+  const intentVersion = fixedLeaseCreateIntentVersionForConfig(config);
+  if (intentVersion === 2) {
+    delete semanticConfig["cacheVolumeProtocol"];
+    delete semanticConfig["cacheVolumes"];
+    delete semanticConfig["purgeOnRelease"];
+    delete semanticConfig["repoScope"];
+  }
   if (!config.awsSSHCIDRsPinned) {
     semanticConfig["awsSSHCIDRs"] = [];
   }
   semanticConfig["sshPublicKeyHash"] = await sha256Hex(config.sshPublicKey);
   return await sha256Hex(
-    `crabbox-fixed-lease-create-v${fixedLeaseCreateIntentVersion}\0${canonicalJSONStringify({
+    `crabbox-fixed-lease-create-v${intentVersion}\0${canonicalJSONStringify({
       requestedSlug,
       lifecycle: { keep },
       config: semanticConfig,
@@ -21845,6 +21904,7 @@ function leaseNeedsCleanup(lease: LeaseRecord, now: number): boolean {
   return Boolean(
     !leaseIsLive(lease) &&
     ((lease.cloudID && (lease.cleanupError || lease.cleanupStartedAt)) ||
+      (lease.cacheVolumeProtocol === 1 && (lease.cleanupError || lease.cleanupStartedAt)) ||
       lease.providerKeyCleanupPending),
   );
 }
@@ -22012,9 +22072,14 @@ function retainProvisioningCleanupClaim(
   failedAt: string,
 ): void {
   const retainResource = lease.state === "released" && lease.releaseDeletesServer === false;
-  lease.cloudID = claim.cloudID;
-  lease.serverName = claim.cloudID;
+  if (claim.cloudID) {
+    lease.cloudID = claim.cloudID;
+    lease.serverName = claim.cloudID;
+  }
   lease.serverID = claim.serverID ?? 0;
+  if (claim.cacheVolumeProtocol === 1) {
+    lease.cacheVolumeProtocol = 1;
+  }
   lease.updatedAt = failedAt;
   if (claim.region) lease.region = claim.region;
   if (claim.providerProject) lease.providerProject = claim.providerProject;
@@ -22841,6 +22906,7 @@ interface CloudProvider {
     attempts?: ProvisioningAttempt[];
     image?: LeaseImageIdentity;
     provisioningTiming?: LeaseProvisioningTiming;
+    cacheVolumePlan?: AWSCacheVolumePlan;
   }>;
   finalizeLeaseCreate?(
     config: ReturnType<typeof leaseConfig>,
@@ -24517,8 +24583,10 @@ export class AWSProvider implements CloudProvider {
     attempts?: ProvisioningAttempt[];
     image?: LeaseImageIdentity;
     provisioningTiming?: LeaseProvisioningTiming;
+    cacheVolumePlan?: AWSCacheVolumePlan;
   }> {
     const regions = awsRegionCandidates(config, this.env, this.region);
+    const cacheLifecycle = new AWSCacheVolumeLifecycle(this.storage);
     const totalStartedAt = Date.now();
     const failures: string[] = [];
     const regionAttempts: ProvisioningAttempt[] = [];
@@ -24533,15 +24601,31 @@ export class AWSProvider implements CloudProvider {
           };
     for (const region of regions) {
       const client = region === this.region ? this.client : new EC2SpotClient(this.env, region);
+      let cacheVolumePlan: AWSCacheVolumePlan | undefined;
       try {
         // Record only regions whose provisioning path is about to mutate provider state.
         // oxlint-disable-next-line eslint/no-await-in-loop -- region fallback is intentionally ordered.
         await provisioning?.onTargetAttempt?.({ region });
         const requestStartedAt = Date.now();
+        const regionalConfig = { ...config, awsRegion: region };
+        // oxlint-disable-next-line eslint/no-await-in-loop -- cache reservations follow ordered region fallback.
+        cacheVolumePlan = await cacheLifecycle.prepare(
+          client,
+          regionalConfig,
+          leaseID,
+          config.cacheTenantScope ?? owner,
+        );
+        const provisionConfig = cacheVolumePlan
+          ? {
+              ...regionalConfig,
+              cacheVolumeBootstrap: cacheVolumePlan.bootstrap,
+              cacheVolumeReadyChecks: cacheVolumePlan.readyChecks,
+            }
+          : regionalConfig;
         const { server, serverType, market, attempts, imageID } =
           // oxlint-disable-next-line eslint/no-await-in-loop -- region fallback must preserve ordered capacity preference.
           await client.createServerWithFallback(
-            { ...config, awsRegion: region },
+            provisionConfig,
             leaseID,
             slug,
             owner,
@@ -24552,6 +24636,10 @@ export class AWSProvider implements CloudProvider {
         let bootstrapMs = 0;
         let readyServer: ProviderMachine;
         try {
+          if (cacheVolumePlan) {
+            // oxlint-disable-next-line eslint/no-await-in-loop -- attachments belong to the selected region.
+            await cacheLifecycle.attach(client, cacheVolumePlan, server.cloudID);
+          }
           // oxlint-disable-next-line eslint/no-await-in-loop -- wait on the region that created the instance.
           readyServer = await client.waitForServerIP(server.cloudID, config.awsPrivate);
           if (config.awsRequireSSM) {
@@ -24599,6 +24687,22 @@ export class AWSProvider implements CloudProvider {
               );
             }
           }
+          if (cacheVolumePlan) {
+            try {
+              // oxlint-disable-next-line eslint/no-await-in-loop -- release follows exact instance cleanup.
+              await cacheLifecycle.release(client, leaseID, config.purgeOnRelease);
+            } catch (cacheError) {
+              throw new ProviderProvisioningCleanupError(
+                `${waitMessage}; AWS cache volume cleanup failed: ${coordinatorErrorMessage(this.env, cacheError)}`,
+                {
+                  provider: "aws",
+                  region,
+                  cacheVolumeProtocol: 1,
+                },
+                cacheError,
+              );
+            }
+          }
           throw new Error(
             `${waitMessage}; crabbox_aws_stale_instance_cleaned; deleted AWS instance ${server.cloudID} after readiness failure`,
             { cause: error },
@@ -24621,6 +24725,7 @@ export class AWSProvider implements CloudProvider {
             ...(bootstrapMs > 0 ? { bootstrapMs } : {}),
             totalMs: Date.now() - totalStartedAt,
           }),
+          ...(cacheVolumePlan ? { cacheVolumePlan } : {}),
         };
         if (market) {
           result.market = market;
@@ -24632,6 +24737,22 @@ export class AWSProvider implements CloudProvider {
         return result;
       } catch (error) {
         if (providerProvisioningCleanupClaim(error)) throw error;
+        if (cacheVolumePlan) {
+          try {
+            // oxlint-disable-next-line eslint/no-await-in-loop -- failed region reservations must settle before fallback.
+            await cacheLifecycle.release(client, leaseID, config.purgeOnRelease);
+          } catch (cacheError) {
+            throw new ProviderProvisioningCleanupError(
+              `${coordinatorErrorMessage(this.env, error)}; AWS cache volume rollback failed: ${coordinatorErrorMessage(this.env, cacheError)}`,
+              {
+                provider: "aws",
+                region,
+                cacheVolumeProtocol: 1,
+              },
+              cacheError,
+            );
+          }
+        }
         const message = error instanceof Error ? error.message : String(error);
         regionAttempts.push({
           region,
@@ -24676,7 +24797,9 @@ export class AWSProvider implements CloudProvider {
   }
 
   async releaseLease(lease: LeaseRecord): Promise<void> {
-    const server = await ownedProviderMachineForRelease("aws", lease, (id) => this.findServer(id));
+    const server = lease.cloudID
+      ? await ownedProviderMachineForRelease("aws", lease, (id) => this.findServer(id))
+      : undefined;
     try {
       if (server) {
         if (lease.network?.awsPrivate) {
@@ -24700,6 +24823,13 @@ export class AWSProvider implements CloudProvider {
         cloud_id: lease.cloudID,
         region: lease.region,
       });
+    }
+    if (lease.cacheVolumeProtocol === 1) {
+      await new AWSCacheVolumeLifecycle(this.storage).release(
+        this.client,
+        lease.id,
+        lease.purgeOnRelease ?? false,
+      );
     }
     if (leaseUsesCanonicalProviderKey(lease)) {
       await this.deleteSSHKey(lease.providerKey, lease.id);

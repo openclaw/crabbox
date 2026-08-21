@@ -90,6 +90,14 @@ Mac dedicated hosts only when retained coordinator state binds the exact
 resource; tag-only and legacy candidates stay report-only. It runs from the same
 alarm/cron, gated by `CRABBOX_AWS_ORPHAN_SWEEP_*` environment variables.
 
+AWS cache volumes use a separate exact-record lifecycle. Pre-instance
+reservations are durable, so failed or interrupted provisioning can detach or
+delete them without an EC2 instance ID. Release requires a fresh zero-attachment
+read before reuse or deletion. Daily garbage collection considers only durable
+members older than seven days and revalidates account, region, availability
+zone, generation, ABI, opaque tags, and zero attachments; tag-only volumes are
+never deleted.
+
 ### Azure orphan sweep
 
 The coordinator's Azure sweep uses a reconciliation-specific inventory of the

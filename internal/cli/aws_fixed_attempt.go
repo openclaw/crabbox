@@ -19,24 +19,29 @@ const (
 	awsFixedAttemptTagHost        = "fixed_attempt_host"
 	awsFixedAttemptTagKeyPair     = "fixed_attempt_key_pair"
 	awsFixedAttemptTagTokenSHA256 = "fixed_attempt_token_sha256"
+	awsFixedAttemptTagCacheSHA256 = "fixed_attempt_cache_sha256"
 )
 
 type awsFixedAttemptAttestation struct {
-	Region            string `json:"region"`
-	AvailabilityZone  string `json:"availabilityZone"`
-	SubnetID          string `json:"subnetID"`
-	ServerType        string `json:"serverType"`
-	Market            string `json:"market"`
-	ImageID           string `json:"imageID"`
-	SecurityGroupID   string `json:"securityGroupID"`
-	HostID            string `json:"hostID"`
-	KeyPairID         string `json:"keyPairID"`
-	ClientTokenSHA256 string `json:"clientTokenSHA256"`
+	Region                string   `json:"region"`
+	AvailabilityZone      string   `json:"availabilityZone"`
+	SubnetID              string   `json:"subnetID"`
+	ServerType            string   `json:"serverType"`
+	Market                string   `json:"market"`
+	ImageID               string   `json:"imageID"`
+	SecurityGroupID       string   `json:"securityGroupID"`
+	HostID                string   `json:"hostID"`
+	KeyPairID             string   `json:"keyPairID"`
+	ClientTokenSHA256     string   `json:"clientTokenSHA256"`
+	CacheAvailabilityZone string   `json:"cacheAvailabilityZone,omitempty"`
+	CacheABI              string   `json:"cacheABI,omitempty"`
+	CacheGenerations      []string `json:"cacheGenerations,omitempty"`
+	CacheVolumeIDs        []string `json:"cacheVolumeIDs,omitempty"`
 }
 
 func AWSFixedAttemptAttestationLabels(attempt AWSLaunchAttempt) map[string]string {
 	attestation := awsFixedAttemptAttestationFor(attempt)
-	digest := sha256.Sum256([]byte(strings.Join([]string{
+	material := []string{
 		"crabbox-fixed-aws-attempt-attestation-v1",
 		attestation.Region,
 		attestation.AvailabilityZone,
@@ -48,8 +53,19 @@ func AWSFixedAttemptAttestationLabels(attempt AWSLaunchAttempt) map[string]strin
 		attestation.HostID,
 		attestation.KeyPairID,
 		attestation.ClientTokenSHA256,
-	}, "\x00")))
-	return map[string]string{
+	}
+	cacheMaterial := []string{
+		attestation.CacheAvailabilityZone,
+		attestation.CacheABI,
+		strings.Join(attestation.CacheGenerations, ","),
+		strings.Join(attestation.CacheVolumeIDs, ","),
+	}
+	hasCache := strings.Join(cacheMaterial, "") != ""
+	if hasCache {
+		material = append(material, cacheMaterial...)
+	}
+	digest := sha256.Sum256([]byte(strings.Join(material, "\x00")))
+	labels := map[string]string{
 		awsFixedAttemptTagSHA256:      hex.EncodeToString(digest[:]),
 		awsFixedAttemptTagRegion:      attestation.Region,
 		awsFixedAttemptTagAZ:          attestation.AvailabilityZone,
@@ -62,6 +78,11 @@ func AWSFixedAttemptAttestationLabels(attempt AWSLaunchAttempt) map[string]strin
 		awsFixedAttemptTagKeyPair:     attestation.KeyPairID,
 		awsFixedAttemptTagTokenSHA256: attestation.ClientTokenSHA256,
 	}
+	if hasCache {
+		cacheDigest := sha256.Sum256([]byte(strings.Join(cacheMaterial, "\x00")))
+		labels[awsFixedAttemptTagCacheSHA256] = hex.EncodeToString(cacheDigest[:])
+	}
+	return labels
 }
 
 func ValidateAWSFixedAttemptAttestation(labels map[string]string, attempt AWSLaunchAttempt) error {
@@ -81,15 +102,19 @@ func ValidateAWSFixedAttemptAttestation(labels map[string]string, attempt AWSLau
 func awsFixedAttemptAttestationFor(attempt AWSLaunchAttempt) awsFixedAttemptAttestation {
 	clientTokenDigest := sha256.Sum256([]byte(strings.TrimSpace(attempt.ClientToken)))
 	return awsFixedAttemptAttestation{
-		Region:            strings.TrimSpace(attempt.Region),
-		AvailabilityZone:  strings.TrimSpace(attempt.AvailabilityZone),
-		SubnetID:          strings.TrimSpace(attempt.SubnetID),
-		ServerType:        strings.TrimSpace(attempt.ServerType),
-		Market:            strings.TrimSpace(attempt.Market),
-		ImageID:           strings.TrimSpace(attempt.ImageID),
-		SecurityGroupID:   strings.TrimSpace(attempt.SecurityGroupID),
-		HostID:            strings.TrimSpace(attempt.HostID),
-		KeyPairID:         strings.TrimSpace(attempt.KeyPairID),
-		ClientTokenSHA256: hex.EncodeToString(clientTokenDigest[:]),
+		Region:                strings.TrimSpace(attempt.Region),
+		AvailabilityZone:      strings.TrimSpace(attempt.AvailabilityZone),
+		SubnetID:              strings.TrimSpace(attempt.SubnetID),
+		ServerType:            strings.TrimSpace(attempt.ServerType),
+		Market:                strings.TrimSpace(attempt.Market),
+		ImageID:               strings.TrimSpace(attempt.ImageID),
+		SecurityGroupID:       strings.TrimSpace(attempt.SecurityGroupID),
+		HostID:                strings.TrimSpace(attempt.HostID),
+		KeyPairID:             strings.TrimSpace(attempt.KeyPairID),
+		ClientTokenSHA256:     hex.EncodeToString(clientTokenDigest[:]),
+		CacheAvailabilityZone: strings.TrimSpace(attempt.CacheAvailabilityZone),
+		CacheABI:              strings.TrimSpace(attempt.CacheABI),
+		CacheGenerations:      append([]string(nil), attempt.CacheGenerations...),
+		CacheVolumeIDs:        append([]string(nil), attempt.CacheVolumeIDs...),
 	}
 }

@@ -58,12 +58,41 @@ func NewAWSLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 func (b *awsLeaseBackend) SupportsRequestedLeaseID() bool { return true }
 
 func (b *awsLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
-	if strings.TrimSpace(req.RequestedLeaseID) != "" {
-		return b.acquireFixed(ctx, req)
+	cfg, err := b.cacheVolumeConfig(req.Repo)
+	if err != nil {
+		return LeaseTarget{}, err
 	}
-	return acquireAttemptsRetry(b.RT, req.Keep, func() (LeaseTarget, error) {
-		return b.acquireOnce(ctx, req.Keep, req.RequestedSlug)
+	next := *b
+	next.DirectSSHBackend.Cfg = cfg
+	if strings.TrimSpace(req.RequestedLeaseID) != "" {
+		return next.acquireFixed(ctx, req)
+	}
+	return acquireAttemptsRetry(next.RT, req.Keep, func() (LeaseTarget, error) {
+		return next.acquireOnce(ctx, req.Keep, req.RequestedSlug)
 	})
+}
+
+func (b *awsLeaseBackend) cacheVolumeConfig(repo core.Repo) (Config, error) {
+	cfg := b.Cfg
+	if len(cfg.Cache.Volumes) == 0 {
+		return cfg, nil
+	}
+	if cfg.TargetOS != core.TargetLinux {
+		for _, volume := range cfg.Cache.Volumes {
+			if volume.Required {
+				return Config{}, exit(2, "provider=aws supports required cache volume %q only for Linux SSH leases", firstNonBlank(volume.Name, volume.Key))
+			}
+		}
+		fmt.Fprintln(b.RT.Stderr, "notice: optional AWS cache volumes ignored for non-Linux lease")
+		cfg.Cache.Volumes = nil
+		return cfg, nil
+	}
+	cfg.AWSCacheVolumeRepoScope = core.OpaqueCacheRepoScope(repo)
+	if cfg.AWSCacheVolumeRepoScope == "" {
+		return Config{}, exit(2, "AWS cache volumes require repository identity")
+	}
+	cfg.AWSCacheVolumeLifecycle = newAWSCacheVolumeLifecycle()
+	return cfg, nil
 }
 
 func (b *awsLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug string) (LeaseTarget, error) {
@@ -641,6 +670,9 @@ func (b *awsLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error
 				if err := deleteMissingClaimedAWSResourcesWithClient(ctx, client, claim, cleanupKeyID); err != nil {
 					return err
 				}
+				if err := releaseClaimedAWSCacheVolumes(ctx, client, claim.LeaseID); err != nil {
+					return err
+				}
 				fmt.Fprintf(b.RT.Stderr, "delete missing server recovery id=%s name=%s\n", server.DisplayID(), server.Name)
 				continue
 			}
@@ -666,8 +698,41 @@ func (b *awsLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error
 		if err := deleteClaimedAWSServerWithClient(ctx, client, live, claim, cleanupKeyID); err != nil {
 			return err
 		}
+		if err := releaseClaimedAWSCacheVolumes(ctx, client, claim.LeaseID); err != nil {
+			return err
+		}
 	}
-	return b.cleanupOrphanedAWSClaims(ctx, req.DryRun)
+	if err := b.cleanupOrphanedAWSClaims(ctx, req.DryRun); err != nil {
+		return err
+	}
+	for _, cfg := range awsRegionConfigs(b.Cfg) {
+		client, err := newAWSClient(ctx, cfg)
+		if err != nil {
+			return err
+		}
+		cloud, ok := client.(core.AWSCacheVolumeCloud)
+		if !ok {
+			continue
+		}
+		deleted, err := (&awsCacheVolumeLifecycle{}).GarbageCollect(
+			ctx,
+			cloud,
+			cfg.AWSRegion,
+			now.Add(-awsCacheVolumeGCMinAge),
+			req.DryRun,
+		)
+		if err != nil {
+			return fmt.Errorf("garbage collect AWS cache volumes in %s: %w", cfg.AWSRegion, err)
+		}
+		for _, volumeID := range deleted {
+			action := "delete"
+			if req.DryRun {
+				action = "delete dry-run"
+			}
+			fmt.Fprintf(b.RT.Stderr, "%s cache volume id=%s region=%s\n", action, volumeID, cfg.AWSRegion)
+		}
+	}
+	return nil
 }
 
 func (b *awsLeaseBackend) listAcrossRegions(ctx context.Context) ([]LeaseView, error) {
@@ -781,11 +846,23 @@ func deleteServer(ctx context.Context, cfg Config, server Server) error {
 	if !isCrabboxAWSLease(server) {
 		return exit(4, "refusing to delete AWS instance %s without canonical Crabbox ownership tags", server.DisplayID())
 	}
+	leaseID := strings.TrimSpace(server.Labels["lease"])
+	if leaseID == "" {
+		return exit(4, "refusing to delete AWS instance %s without an exact lease tag for cache cleanup", server.DisplayID())
+	}
 	client, err := newAWSClient(ctx, cfg)
 	if err != nil {
 		return err
 	}
-	return deleteAWSServerWithClient(ctx, client, server)
+	if err := deleteAWSServerWithClient(ctx, client, server); err != nil {
+		return err
+	}
+	if cacheCloud, ok := client.(core.AWSCacheVolumeCloud); ok {
+		if err := newAWSCacheVolumeLifecycle().Release(ctx, cacheCloud, leaseID, cfg.Cache.PurgeOnRelease); err != nil {
+			return fmt.Errorf("release AWS cache volumes: %w", err)
+		}
+	}
+	return nil
 }
 
 func deleteAWSServerWithClient(ctx context.Context, client awsClient, server Server) error {
@@ -929,6 +1006,9 @@ func (b *awsLeaseBackend) cleanupOrphanedAWSClaims(ctx context.Context, dryRun b
 		if err := deleteMissingClaimedAWSResourcesWithClient(ctx, client, claim, cleanupKeyID); err != nil {
 			return err
 		}
+		if err := releaseClaimedAWSCacheVolumes(ctx, client, claim.LeaseID); err != nil {
+			return err
+		}
 		fmt.Fprintf(b.RT.Stderr, "delete orphaned AWS key recovery lease=%s key=%s\n", claim.LeaseID, core.ServerProviderKey(server))
 	}
 	return nil
@@ -938,6 +1018,17 @@ func deleteMissingClaimedAWSResourcesWithClient(ctx context.Context, client awsC
 	return fixedAWSLeaseKind.FinalizeAfterCleanup(claim, func() error {
 		return client.DeleteCleanupSSHKeyID(ctx, cleanupKeyID)
 	})
+}
+
+func releaseClaimedAWSCacheVolumes(ctx context.Context, client awsClient, leaseID string) error {
+	cloud, ok := client.(core.AWSCacheVolumeCloud)
+	if !ok {
+		return nil
+	}
+	if err := newAWSCacheVolumeLifecycle().Release(ctx, cloud, leaseID, false); err != nil {
+		return fmt.Errorf("release AWS cache volumes for %s: %w", leaseID, err)
+	}
+	return nil
 }
 
 func isAWSClaimProvider(provider string) bool {

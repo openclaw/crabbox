@@ -9,6 +9,7 @@ import (
 )
 
 const FixedAWSCreateIntentVersion = 2
+const fixedAWSCacheCreateIntentVersion = 3
 
 type FixedAWSCreateIntentRequest struct {
 	AccountID     string
@@ -94,7 +95,8 @@ func FixedAWSCreateIntentFingerprint(cfg Config, req FixedAWSCreateIntentRequest
 	if err != nil {
 		return "", fmt.Errorf("encode fixed AWS create intent: %w", err)
 	}
-	digest := sha256.Sum256(append([]byte("crabbox-fixed-aws-create-intent-v2\x00"), data...))
+	domain := fmt.Sprintf("crabbox-fixed-aws-create-intent-v%d\x00", intent.Version)
+	digest := sha256.Sum256(append([]byte(domain), data...))
 	return hex.EncodeToString(digest[:]), nil
 }
 
@@ -115,6 +117,12 @@ func fixedAWSCreateIntentForConfig(cfg Config, req FixedAWSCreateIntentRequest) 
 	if err != nil {
 		return fixedAWSCreateIntent{}, err
 	}
+	intentVersion := FixedAWSCreateIntentVersion
+	cacheRepoScope := ""
+	if len(cacheVolumes) > 0 {
+		intentVersion = fixedAWSCacheCreateIntentVersion
+		cacheRepoScope = strings.TrimSpace(cfg.AWSCacheVolumeRepoScope)
+	}
 	publicKeyHash := sha256.Sum256([]byte(strings.TrimSpace(req.SSHPublicKey)))
 	rootGB := cfg.AWSRootGB
 	if rootGB <= 0 {
@@ -129,7 +137,7 @@ func fixedAWSCreateIntentForConfig(cfg Config, req FixedAWSCreateIntentRequest) 
 		sshCIDRs = fixedCanonicalStringSet(cfg.AWSSSHCIDRs)
 	}
 	return fixedAWSCreateIntent{
-		Version:       FixedAWSCreateIntentVersion,
+		Version:       intentVersion,
 		AccountID:     strings.TrimSpace(req.AccountID),
 		RequestedSlug: normalizeLeaseSlug(req.RequestedSlug),
 		Provider:      strings.TrimSpace(cfg.Provider),
@@ -204,6 +212,7 @@ func fixedAWSCreateIntentForConfig(cfg Config, req FixedAWSCreateIntentRequest) 
 			MaxGB:          cfg.Cache.MaxGB,
 			PurgeOnRelease: cfg.Cache.PurgeOnRelease,
 			Volumes:        cacheVolumes,
+			RepoScope:      cacheRepoScope,
 		},
 	}, nil
 }

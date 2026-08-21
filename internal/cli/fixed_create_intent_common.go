@@ -34,6 +34,7 @@ type fixedCreateIntentCache struct {
 	MaxGB          int                            `json:"maxGB"`
 	PurgeOnRelease bool                           `json:"purgeOnRelease"`
 	Volumes        []fixedCreateIntentCacheVolume `json:"volumes,omitempty"`
+	RepoScope      string                         `json:"repoScope,omitempty" configFields:"AWSCacheVolumeRepoScope"`
 }
 
 type fixedCreateIntentCacheVolume struct {

@@ -155,6 +155,16 @@ func (b *coordinatorLeaseBackend) RebindResolvedLeaseTarget(target *LeaseTarget,
 }
 
 func (b *coordinatorLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
+	if len(b.cfg.Cache.Volumes) > 0 {
+		scope := OpaqueCacheRepoScope(req.Repo)
+		if scope == "" {
+			return LeaseTarget{}, exit(2, "provider cache volumes require repository identity")
+		}
+		next := *b
+		next.cfg = b.cfg
+		next.cfg.AWSCacheVolumeRepoScope = scope
+		b = &next
+	}
 	if strings.TrimSpace(req.RequestedLeaseID) != "" {
 		acquired, err := b.acquireOnceWithLeaseID(ctx, req.Keep, strings.TrimSpace(req.RequestedLeaseID), req.RequestedSlug)
 		if err != nil {
@@ -241,6 +251,14 @@ func (b *coordinatorLeaseBackend) acquireOnceWithLeaseID(ctx context.Context, ke
 			reportCoordinatorAcquisitionRollback(b.rt.Stderr, cleanupLeaseID, "capability mismatch", released, releaseErr)
 		}
 		return LeaseTarget{}, err
+	}
+	if len(cfg.Cache.Volumes) > 0 && lease.CacheVolumeProtocol != AWSCacheVolumeProtocolVersion {
+		fmt.Fprintf(
+			b.rt.Stderr,
+			"warning: coordinator ignored optional cache volumes for lease %s; cache volume protocol v%d was not acknowledged\n",
+			blank(lease.ID, leaseID),
+			AWSCacheVolumeProtocolVersion,
+		)
 	}
 	resolvedLease, err := b.coordinatorLeaseTargetForConfig(lease, cfg, b.coord)
 	if err != nil {

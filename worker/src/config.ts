@@ -2,6 +2,7 @@ import { requireAWSRegion } from "./aws-region";
 import { normalizeImageRequirements } from "./image-capabilities";
 import { normalizeOSImage, osImageSpec } from "./os-image";
 import type {
+  CacheVolumeConfig,
   ImageRequirements,
   LeaseImageIdentity,
   LeaseRequest,
@@ -112,6 +113,13 @@ export interface LeaseConfig {
   sshHostPublicKey: string;
   pond: string;
   exposedPorts: string[];
+  cacheVolumeProtocol: number;
+  cacheVolumes: CacheVolumeConfig[];
+  purgeOnRelease: boolean;
+  repoScope: string;
+  cacheVolumeBootstrap?: string;
+  cacheVolumeReadyChecks?: string;
+  cacheTenantScope?: string;
 }
 
 export type AzureOSDiskMode = "managed" | "ephemeral" | "ephemeral-preview";
@@ -312,6 +320,32 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
             .map((region) => requireAWSRegion(region, "capacity.regions entry")),
         )
       : (input.capacity?.regions ?? []);
+  const workRoot =
+    input.workRoot ??
+    (provider === "daytona"
+      ? "/home/daytona/crabbox"
+      : defaultWorkRoot(target, windowsMode, sshUser));
+  const cacheVolumes = normalizeCacheVolumes(input.cacheVolumes ?? [], sshUser, workRoot);
+  const cacheVolumeSupported = provider === "aws" && target === "linux" && !awsPrivate;
+  if (provider === "aws" && cacheVolumes.length > 11) {
+    throw new Error("AWS cache volumes support at most 11 bindings per lease");
+  }
+  if (cacheVolumes.length > 0) {
+    if (!cacheVolumeSupported) {
+      const required = cacheVolumes.find((volume) => volume.required);
+      if (required) {
+        throw new Error(
+          `required cache volume ${required.name} requires a public AWS Linux SSH lease`,
+        );
+      }
+    }
+    if (input.cacheVolumeProtocol !== 1) {
+      throw new Error("cache volumes require cacheVolumeProtocol=1");
+    }
+    if (!input.repoScope?.trim()) {
+      throw new Error("cache volumes require an opaque repoScope");
+    }
+  }
   return {
     provider,
     target,
@@ -383,11 +417,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     sshPort: provider === "daytona" ? "22" : (input.sshPort ?? "2222"),
     sshFallbackPorts: provider === "daytona" ? [] : validPorts(input.sshFallbackPorts ?? ["22"]),
     providerKey: input.providerKey?.trim() ?? "",
-    workRoot:
-      input.workRoot ??
-      (provider === "daytona"
-        ? "/home/daytona/crabbox"
-        : defaultWorkRoot(target, windowsMode, sshUser)),
+    workRoot,
     ttlSeconds,
     idleTimeoutSeconds,
     keep: input.keep ?? false,
@@ -396,7 +426,63 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     sshHostPublicKey: "",
     pond: requestedPondName(input.pond ?? ""),
     exposedPorts: normalizeExposedPorts(input.exposedPorts ?? []),
+    cacheVolumeProtocol: cacheVolumeSupported && cacheVolumes.length > 0 ? 1 : 0,
+    cacheVolumes: cacheVolumeSupported ? cacheVolumes : [],
+    purgeOnRelease: input.purgeOnRelease ?? false,
+    repoScope: input.repoScope?.trim() ?? "",
   };
+}
+
+function normalizeCacheVolumes(
+  volumes: CacheVolumeConfig[],
+  sshUser: string,
+  workRoot: string,
+): CacheVolumeConfig[] {
+  const normalized = volumes.map((volume) => {
+    const key = volume.key?.trim();
+    const name = volume.name?.trim() || key;
+    const path = volume.path?.trim();
+    const sizeGB = Math.max(1, Math.trunc(volume.sizeGB ?? 20));
+    const pathParts = path?.split("/").slice(1) ?? [];
+    const cleanPath =
+      path?.startsWith("/") &&
+      path !== "/" &&
+      pathParts.every((part) => part !== "" && part !== "." && part !== "..");
+    if (!key || !name || !cleanPath) {
+      throw new Error("cache volumes require a stable name, key, and safe absolute path");
+    }
+    if (
+      ["/boot", "/dev", "/etc", "/proc", "/run", "/sys", "/usr"].some(
+        (unsafe) => path === unsafe || path.startsWith(`${unsafe}/`),
+      )
+    ) {
+      throw new Error(`cache volume ${name} uses unsafe mount path ${path}`);
+    }
+    const sshHome = sshUser === "root" ? "/root" : `/home/${sshUser}`;
+    for (const root of ["/root", sshHome, workRoot]) {
+      if (path === root || root.startsWith(`${path}/`)) {
+        throw new Error(`cache volume ${name} mount path ${path} would hide runtime root ${root}`);
+      }
+    }
+    for (const root of [`${sshHome}/.ssh`, "/var/lib/crabbox", "/var/lib/cloud"]) {
+      if (path === root || path.startsWith(`${root}/`) || root.startsWith(`${path}/`)) {
+        throw new Error(
+          `cache volume ${name} mount path ${path} overlaps sensitive runtime tree ${root}`,
+        );
+      }
+    }
+    return { name, key, path, sizeGB, required: volume.required ?? false };
+  });
+  const names = new Set<string>();
+  const paths = new Set<string>();
+  for (const volume of normalized) {
+    if (names.has(volume.name!) || paths.has(volume.path)) {
+      throw new Error("cache volumes require unique names and mount paths");
+    }
+    names.add(volume.name!);
+    paths.add(volume.path);
+  }
+  return normalized.toSorted((left, right) => left.name!.localeCompare(right.name!));
 }
 
 // normalizePondName mirrors the Go-side helper in internal/cli/pond.go. The

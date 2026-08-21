@@ -366,6 +366,20 @@ key as an EC2 key pair, creates or reuses a `crabbox-runners` security group,
 launches one-time instances, tags instances and volumes with lease metadata, and
 terminates non-kept instances after the command.
 
+Public Linux SSH leases can also use encrypted gp3 cache volumes. The Worker
+needs `ec2:CreateVolume`, `ec2:DescribeVolumes`, `ec2:AttachVolume`,
+`ec2:DetachVolume`, and `ec2:DeleteVolume` in every enabled fallback region.
+Cache members set `DeleteOnTermination=false`; coordinator durable state owns
+their reservation, detach, purge, and seven-day exact-record GC lifecycle.
+Private SSM-only workspaces intentionally reject this v1 cache path.
+Use the generated policy instead of granting these actions on `Resource: "*"`.
+It conditions create on the exact request-tag set, scopes volume mutation to
+volume ARNs carrying all Crabbox cache ownership tags, and grants the required
+instance ARN side of attach/detach only for instances carrying the existing
+`crabbox=true` and `created_by=crabbox` ownership tags. A deny guard prevents
+generic `CreateTags` access from minting cache ownership tags on an existing
+volume.
+
 SSH ingress is source-scoped. If `CRABBOX_AWS_SSH_CIDRS` is set, those CIDRs are
 added; otherwise the CLI sends its detected outbound IPv4 `/32`, and the Worker
 falls back to `CF-Connecting-IP` (`/32` or `/128`). Crabbox revokes any legacy

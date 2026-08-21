@@ -665,7 +665,9 @@ Checkpoint-related features are reserved for versioned workspaces:
 - `FeatureSnapshot`: provider can expose a native snapshot id for Crabbox
   metadata.
 - `FeatureCacheVolume`: provider can mount keyed rebuildable cache volumes on
-  warmup/run.
+  warmup/run. Provider adapters own storage identity, placement, attachment,
+  filesystem preparation, opaque labels, release proof, and garbage collection;
+  core carries only provider-neutral cache requests and resolved bindings.
 - `FeatureRunProof`: delegated provider can return bounded stream/timing metadata
   for core `crabbox run --emit-proof` rendering.
 - `FeatureRunSession`: exposes a provider-neutral run-session handle. Delegated

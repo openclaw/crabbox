@@ -2,11 +2,12 @@ import type { Provider } from "./types";
 
 export interface ProviderProvisioningCleanupClaim {
   provider: Extract<Provider, "aws" | "azure" | "gcp" | "daytona">;
-  cloudID: string;
+  cloudID?: string;
   region?: string;
   providerProject?: string;
   providerScope?: string;
   serverID?: number;
+  cacheVolumeProtocol?: 1;
 }
 
 export class ProviderProvisioningCleanupError extends Error {
@@ -39,8 +40,8 @@ export function validatedProviderProvisioningCleanupClaim(
   if (
     !claim ||
     claim.provider !== provider ||
-    claim.cloudID !== claim.cloudID.trim() ||
-    !claim.cloudID
+    (claim.cloudID !== undefined && claim.cloudID !== claim.cloudID.trim()) ||
+    (!claim.cloudID && claim.cacheVolumeProtocol !== 1)
   ) {
     return undefined;
   }
@@ -48,15 +49,19 @@ export function validatedProviderProvisioningCleanupClaim(
     case "aws":
       return nonEmptyClaimValue(claim.region) ? claim : undefined;
     case "azure":
-      return nonEmptyClaimValue(claim.region) && validAzureProviderScope(claim.providerScope)
+      return nonEmptyClaimValue(claim.cloudID) &&
+        nonEmptyClaimValue(claim.region) &&
+        validAzureProviderScope(claim.providerScope)
         ? claim
         : undefined;
     case "gcp":
-      return nonEmptyClaimValue(claim.region) && nonEmptyClaimValue(claim.providerProject)
+      return nonEmptyClaimValue(claim.cloudID) &&
+        nonEmptyClaimValue(claim.region) &&
+        nonEmptyClaimValue(claim.providerProject)
         ? claim
         : undefined;
     case "daytona":
-      return claim;
+      return nonEmptyClaimValue(claim.cloudID) ? claim : undefined;
   }
 }
 
