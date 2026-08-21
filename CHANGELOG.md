@@ -2,6 +2,10 @@
 
 ## 0.46.1 - Unreleased
 
+### Fixed
+
+- Made two timing-sensitive tests robust on loaded CI runners.
+
 ## 0.46.0 - 2026-08-20
 
 ### Added

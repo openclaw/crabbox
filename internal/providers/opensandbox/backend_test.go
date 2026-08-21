@@ -270,8 +270,8 @@ func TestRunReconcilesAmbiguousCreateAfterDelayedVisibility(t *testing.T) {
 	fake.createErr = &ambiguousOpenSandboxCreateError{cause: context.DeadlineExceeded}
 	fake.listEmptyCount = 1
 	backend := newTestBackend(fake)
-	backend.cleanupTimeoutOverride = 200 * time.Millisecond
-	backend.reconcilePollOverride = time.Millisecond
+	backend.cleanupTimeoutOverride = openSandboxCleanupTimeout
+	backend.reconcilePollOverride = time.Nanosecond
 
 	_, err := backend.Run(context.Background(), RunRequest{
 		Repo: Repo{Name: "my-app", Root: tempGitRepo(t)}, NoSync: true, Command: []string{"true"},

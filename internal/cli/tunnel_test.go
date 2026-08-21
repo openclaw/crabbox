@@ -54,17 +54,23 @@ func TestReserveSSHLocalForwardPort(t *testing.T) {
 
 func TestReserveSSHLocalForwardPortIgnoresUDPUse(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatal(err)
+	var lastPort string
+	var lastErr error
+	for attempt := 0; attempt < 32; attempt++ {
+		udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		port := strconv.Itoa(udp.LocalAddr().(*net.UDPAddr).Port)
+		reservation, err := reserveSSHLocalForwardPort(port)
+		_ = udp.Close()
+		if err == nil {
+			reservation.release()
+			return
+		}
+		lastPort, lastErr = port, err
 	}
-	defer udp.Close()
-	port := strconv.Itoa(udp.LocalAddr().(*net.UDPAddr).Port)
-	reservation, err := reserveSSHLocalForwardPort(port)
-	if err != nil {
-		t.Fatalf("UDP use should not reserve TCP port %s: %v", port, err)
-	}
-	reservation.release()
+	t.Fatalf("UDP use should not reserve TCP port after 32 attempts; last port %s: %v", lastPort, lastErr)
 }
 
 func TestSynchronizedTunnelTailBufferIsBounded(t *testing.T) {
