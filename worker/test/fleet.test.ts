@@ -29537,9 +29537,16 @@ describe("fleet lease identity and idle", () => {
         region: "westeurope",
       },
     });
-    expect(
-      storage.value("image:azure:promoted:linux:amd64:standard_d192ds_v6:ubuntu26.04:westeurope"),
-    ).toEqual(expect.objectContaining({ id: "snapshot-devtools", region: "westeurope" }));
+    const promotedDefault = storage.value<ProviderImage>(
+      "image:azure:promoted:linux:amd64:standard_d192ds_v6:ubuntu26.04:westeurope",
+    );
+    expect(promotedDefault).toEqual(
+      expect.objectContaining({
+        id: "snapshot-devtools",
+        region: "westeurope",
+        revision: expect.any(String),
+      }),
+    );
 
     const prepared = await provider.prepareLeaseConfig({
       ...leaseConfig({
@@ -29558,6 +29565,7 @@ describe("fleet lease identity and idle", () => {
         provider: "azure",
         kind: "azure-os-disk-snapshot",
         region: "westeurope",
+        revision: promotedDefault?.revision,
         sourceID: snapshot.resourceID,
       },
     });
@@ -29588,6 +29596,7 @@ describe("fleet lease identity and idle", () => {
       provider: "azure",
       kind: "azure-os-disk-snapshot",
       region: "westeurope",
+      revision: promotedDefault?.revision,
       promotedAt: expect.any(String),
       sourceID: snapshot.resourceID,
     });
@@ -32253,6 +32262,187 @@ describe("fleet lease identity and idle", () => {
     expect(response.status).toBe(400);
     expect(body.error).toBe("artifact_upload_unavailable");
     expect(body.message).toContain("5368709120 bytes");
+  });
+});
+
+describe("image promotion CAS", () => {
+  const awsImage = (id: string): ProviderImage => ({
+    id,
+    name: id,
+    state: "available",
+    provider: "aws",
+    kind: "aws-ami",
+    target: "linux",
+    os: "ubuntu:26.04",
+    region: "eu-west-1",
+    architecture: "x86_64",
+    snapshots: [`snap-${id.slice(4)}`],
+  });
+
+  const promoteAWS = async (
+    provider: AWSProvider,
+    imageID: string,
+    expectedCurrent?: Record<string, string>,
+  ): Promise<Response | { image: ProviderImage }> => {
+    const url = new URL(
+      `https://crabbox.test/v1/images/${imageID}/promote?provider=aws&target=linux&os=ubuntu%3A26.04&region=eu-west-1`,
+    );
+    return provider.promoteImage(
+      imageID,
+      undefined,
+      new Request(url, {
+        method: "POST",
+        body: JSON.stringify(expectedCurrent ? { expectedCurrent } : {}),
+      }),
+      url,
+    );
+  };
+
+  it("atomically CASes AWS defaults and rejects stale, absent, and ABA expectations", async () => {
+    const storage = new MemoryStorage();
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockImplementation(async (imageID) => awsImage(imageID));
+
+    const initial = (await promoteAWS(provider, "ami-a", { state: "absent" })) as {
+      image: PromotedImageRecord;
+    };
+    expect(initial.image.revision).toEqual(expect.any(String));
+    const revisionA = initial.image.revision!;
+
+    const staleAbsent = await promoteAWS(provider, "ami-b", { state: "absent" });
+    expect(staleAbsent).toBeInstanceOf(Response);
+    expect((staleAbsent as Response).status).toBe(409);
+
+    const promotedB = (await promoteAWS(provider, "ami-b", {
+      state: "present",
+      imageId: "ami-a",
+      revision: revisionA,
+    })) as { image: PromotedImageRecord };
+    expect(promotedB.image.revision).not.toBe(revisionA);
+
+    const promotedAAgain = (await promoteAWS(provider, "ami-a", {
+      state: "present",
+      imageId: "ami-b",
+      revision: promotedB.image.revision!,
+    })) as { image: PromotedImageRecord };
+    expect(promotedAAgain.image.revision).not.toBe(revisionA);
+
+    const aba = await promoteAWS(provider, "ami-c", {
+      state: "present",
+      imageId: "ami-a",
+      revision: revisionA,
+    });
+    expect(aba).toBeInstanceOf(Response);
+    await expect((aba as Response).json()).resolves.toMatchObject({
+      error: "image_promotion_precondition_failed",
+      expected: { imageId: "ami-a", revision: revisionA },
+      current: { imageId: "ami-a", revision: promotedAAgain.image.revision },
+      scope: { provider: "aws", region: "eu-west-1" },
+    });
+  });
+
+  it("allows exactly one concurrent AWS CAS and updates aliases in one transaction", async () => {
+    const storage = new MemoryStorage();
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockImplementation(async (imageID) => awsImage(imageID));
+    const initial = (await promoteAWS(provider, "ami-a", { state: "absent" })) as {
+      image: PromotedImageRecord;
+    };
+    const expected = {
+      state: "present",
+      imageId: "ami-a",
+      revision: initial.image.revision!,
+    };
+
+    const results = await Promise.all([
+      promoteAWS(provider, "ami-b", expected),
+      promoteAWS(provider, "ami-c", expected),
+    ]);
+    expect(results.filter((result) => !(result instanceof Response))).toHaveLength(1);
+    expect(
+      results.filter((result) => result instanceof Response && result.status === 409),
+    ).toHaveLength(1);
+    const scoped = storage.value<PromotedImageRecord>(
+      "image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1",
+    );
+    expect(scoped?.id).toMatch(/^ami-[bc]$/);
+    expect(
+      storage.value<PromotedImageRecord>("image:aws:promoted:linux:x86_64:ubuntu26.04"),
+    ).toMatchObject({ id: scoped?.id, revision: scoped?.revision });
+  });
+
+  it("rolls back all AWS aliases when a transactional write fails", async () => {
+    const storage = new MemoryStorage();
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockImplementation(async (imageID) => awsImage(imageID));
+    const initial = (await promoteAWS(provider, "ami-a", { state: "absent" })) as {
+      image: PromotedImageRecord;
+    };
+    const before = storage.value<PromotedImageRecord>(
+      "image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1",
+    );
+    storage.beforePut = async (key) => {
+      if (key === "image:aws:promoted:linux:x86_64:ubuntu26.04") {
+        throw new Error("injected alias write failure");
+      }
+    };
+
+    await expect(
+      promoteAWS(provider, "ami-b", {
+        state: "present",
+        imageId: "ami-a",
+        revision: initial.image.revision!,
+      }),
+    ).rejects.toThrow("injected alias write failure");
+    expect(storage.value("image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1")).toEqual(before);
+    expect(
+      storage.value("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-b"),
+    ).toBeUndefined();
+  });
+
+  it("CASes Azure defaults transactionally and blocks legacy writes after protection", async () => {
+    const storage = new MemoryStorage();
+    const provider = new AzureProvider({} as Env, undefined, storage, "westeurope");
+    const snapshot = (id: string): ProviderImage => ({
+      id,
+      name: id,
+      state: "succeeded",
+      provider: "azure",
+      kind: "azure-os-disk-snapshot",
+      resourceID: `/subscriptions/test/resourceGroups/crabbox/providers/Microsoft.Compute/snapshots/${id}`,
+      target: "linux",
+      os: "ubuntu:26.04",
+      region: "westeurope",
+      architecture: "amd64",
+      serverType: "Standard_D192ds_v6",
+    });
+    const promote = async (image: ProviderImage, body: Record<string, unknown>) => {
+      const url = new URL(
+        `https://crabbox.test/v1/images/${image.id}/promote?provider=azure&target=linux&region=westeurope`,
+      );
+      return provider.promoteImage(
+        image.id,
+        image,
+        new Request(url, { method: "POST", body: JSON.stringify(body) }),
+        url,
+      );
+    };
+
+    const first = (await promote(snapshot("snapshot-a"), {
+      expectedCurrent: { state: "absent" },
+    })) as { image: PromotedImageRecord };
+    expect(first.image.revision).toEqual(expect.any(String));
+    const stale = await promote(snapshot("snapshot-b"), {
+      expectedCurrent: { state: "present", imageId: "snapshot-a", revision: "stale" },
+    });
+    expect(stale).toBeInstanceOf(Response);
+    expect((stale as Response).status).toBe(409);
+
+    const legacy = await promote(snapshot("snapshot-b"), {});
+    expect(legacy).toBeInstanceOf(Response);
+    await expect((legacy as Response).json()).resolves.toMatchObject({
+      error: "protected_image_default",
+    });
   });
 });
 
