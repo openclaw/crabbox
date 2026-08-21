@@ -207,15 +207,21 @@ worktrees send no tracked file payload. Reset removes stale tracked, untracked,
 and ignored workload state while preserving ignored `node_modules`,
 `.pnpm-store`, `.yarn/cache`, and `.yarn/unplugged` directories that pass the
 same real-directory and workspace-containment checks as ready-pool scrub.
-Clone and fetch retain credential and SSH transport configuration while
-overriding hooks with an inert path. Checkout/reset additionally disable info
-attributes, filter configuration, and ambient global/system Git configuration.
-Unsupported local state, including
-sparse checkouts, submodules, filtered trees, include whitelists, or a changed
-manifest, checkout-transforming Git configuration or attributes, falls back to
-the normal full-manifest sync in the same run. Missing advertised branches or
-planned commits also fall back. SSH, Git clone/fetch/auth, manifest upload, and
-rsync failures remain errors instead of being hidden by fallback.
+Clone and fetch retain credential and transport configuration while overriding
+hooks with an inert path. Checkout/reset additionally disable info attributes,
+filter configuration, and ambient global/system Git configuration. The overlay
+fast path allowlists normalized local paths plus `file`, `http`, and `https`
+origins. Other transports, including SSH, SCP-like, Git, ext, and unknown
+schemes, use the normal full-manifest sync instead.
+
+Unsupported local state, including sparse checkouts, submodules, filtered
+trees, include whitelists, or a changed manifest, checkout-transforming Git
+configuration or attributes, falls back to the normal full-manifest sync in the
+same run. Missing advertised branches or planned commits also fall back. On
+that full-manifest path, remote Git seeding remains best-effort: failures print
+a warning and sync continues, so an unsupported overlay transport is not fatal.
+Manifest upload, rsync, and non-fallback overlay preparation failures remain
+errors.
 
 The overlay path is disabled by default and currently applies only to Linux SSH
 targets with `sync.delete` and `sync.gitSeed` enabled. `--full-resync` and

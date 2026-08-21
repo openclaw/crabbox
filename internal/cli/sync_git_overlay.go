@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -52,6 +53,8 @@ func decideGitOverlay(cfg Config, repo Repo, target SSHTarget, manifest SyncMani
 		decision.Reason = "include_whitelist"
 	case credentialBlocked || gitRemoteURLHasCredentials(repo.RemoteURL):
 		decision.Reason = "credential_origin"
+	case coherence.RemoteURL != "" && !gitOverlayOriginTransportSupported(coherence.RemoteURL):
+		decision.Reason = "unsupported_origin_transport"
 	default:
 		if err := validateGitOverlayManifest(repo, manifest); err != nil {
 			decision.Reason = gitOverlayLocalFallbackReason(err)
@@ -62,6 +65,26 @@ func decideGitOverlay(cfg Config, repo Repo, target SSHTarget, manifest SyncMani
 		}
 	}
 	return decision
+}
+
+func gitOverlayOriginTransportSupported(remoteURL string) bool {
+	raw := strings.TrimSpace(remoteURL)
+	if raw == "" {
+		return false
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	if parsed.Scheme != "" {
+		switch strings.ToLower(parsed.Scheme) {
+		case "file", "http", "https":
+			return true
+		default:
+			return false
+		}
+	}
+	return !strings.Contains(raw, ":")
 }
 
 func validateGitOverlayManifest(repo Repo, manifest SyncManifest) error {

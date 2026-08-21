@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -124,6 +126,144 @@ func TestGitOverlayDecisionFallsBackWithoutChangingLegacyDefault(t *testing.T) {
 	runGit(t, root, "sparse-checkout", "set", "--no-cone", "/*")
 	if decision := decideGitOverlay(cfg, repo, SSHTarget{TargetOS: targetLinux}, manifest, coherence, false, false, false); decision.Enabled || decision.Reason != "sparse_checkout" {
 		t.Fatalf("sparse decision=%#v", decision)
+	}
+}
+
+func TestGitOverlayDecisionAllowsSupportedOriginTransports(t *testing.T) {
+	root, repo, cfg, coherence := newGitOverlayTestRepo(t)
+	manifest, err := syncManifest(root, configuredExcludes(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, remoteURL := range []string{
+		coherence.RemoteURL,
+		"file:///tmp/example.git",
+		"http://example.test/repo.git",
+		"https://example.test/repo.git",
+	} {
+		t.Run(remoteURL, func(t *testing.T) {
+			plan := coherence
+			plan.RemoteURL = remoteURL
+			decision := decideGitOverlay(cfg, repo, SSHTarget{TargetOS: targetLinux}, manifest, plan, false, false, false)
+			if !decision.Enabled || decision.Reason != "" {
+				t.Fatalf("decision=%#v", decision)
+			}
+		})
+	}
+
+	githubRepo := repo
+	githubRepo.RemoteURL = "git@github.com:example-org/repo.git"
+	githubPlan, blocked := syncGitCoherencePlan(cfg, githubRepo)
+	if blocked || githubPlan.RemoteURL != "https://github.com/example-org/repo.git" {
+		t.Fatalf("GitHub scp normalization plan=%#v blocked=%t", githubPlan, blocked)
+	}
+	if decision := decideGitOverlay(cfg, githubRepo, SSHTarget{TargetOS: targetLinux}, manifest, githubPlan, false, false, false); !decision.Enabled || decision.Reason != "" {
+		t.Fatalf("normalized GitHub scp decision=%#v", decision)
+	}
+}
+
+func TestGitOverlayDecisionRejectsUnsupportedOriginTransports(t *testing.T) {
+	root, repo, cfg, coherence := newGitOverlayTestRepo(t)
+	manifest, err := syncManifest(root, configuredExcludes(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, remoteURL := range []string{
+		"ssh://git@example.test/repo.git",
+		"git@example.test:repo.git",
+		"git://example.test/repo.git",
+		"ext::git-upload-pack /tmp/repo.git",
+		"ftp://example.test/repo.git",
+	} {
+		t.Run(remoteURL, func(t *testing.T) {
+			plan := coherence
+			plan.RemoteURL = remoteURL
+			decision := decideGitOverlay(cfg, repo, SSHTarget{TargetOS: targetLinux}, manifest, plan, false, false, false)
+			if !decision.Requested || decision.Enabled || decision.Reason != "unsupported_origin_transport" {
+				t.Fatalf("decision=%#v", decision)
+			}
+		})
+	}
+}
+
+func TestRunGitOverlayUnsupportedOriginFallsBackToFullManifest(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX sync command regression")
+	}
+	clearConfigEnv(t)
+	root := t.TempDir()
+	isolateRunTestUserDirs(t, root)
+	t.Chdir(root)
+	runGit(t, root, "init")
+	runGit(t, root, "config", "user.email", "test@example.com")
+	runGit(t, root, "config", "user.name", "Test")
+	runGit(t, root, "branch", "-M", "main")
+	writeFile(t, filepath.Join(root, "tracked.txt"), "tracked\n")
+	runGit(t, root, "add", ".")
+	runGit(t, root, "commit", "-m", "base")
+	runGit(t, root, "remote", "add", "origin", "ssh://git@example.test/repo.git")
+	runGit(t, root, "update-ref", "refs/remotes/origin/main", "HEAD")
+	runGit(t, root, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+	runGit(t, root, "branch", "--set-upstream-to=origin/main", "main")
+
+	configPath := filepath.Join(root, ".crabbox.yaml")
+	writeFile(t, configPath, "sync:\n  gitOverlay: true\n  fingerprint: false\n")
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sshLog := filepath.Join(root, "ssh.log")
+	sshPath := filepath.Join(binDir, "ssh")
+	installWorkspaceOwnerAwareSSH(t, sshPath, `#!/bin/sh
+cmd="$1"
+printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
+case "$cmd" in
+  *".seed.XXXXXX"*) exit 42 ;;
+esac
+/bin/cat >/dev/null || true
+exit 0
+`)
+	rsyncLog := filepath.Join(root, "rsync.log")
+	rsyncPath := filepath.Join(binDir, "rsync")
+	if err := os.WriteFile(rsyncPath, []byte("#!/bin/sh\n/bin/cat > \"$CRABBOX_FAKE_RSYNC_LOG\"\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_FAKE_SSH_LOG", sshLog)
+	t.Setenv("CRABBOX_FAKE_RSYNC_LOG", rsyncLog)
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
+	t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
+
+	var stdout, stderr bytes.Buffer
+	runErr := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", runEnvProfileTestProvider{}.Name(),
+		"--sync-only",
+	})
+	if runErr != nil {
+		t.Fatalf("unsupported overlay transport became fatal: %v\nstdout=%s\nstderr=%s", runErr, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{
+		"git overlay fallback reason=unsupported_origin_transport; using full manifest sync",
+		"warning: remote git seed failed:",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr missing %q:\n%s", want, stderr.String())
+		}
+	}
+	manifest, err := os.ReadFile(rsyncLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(manifest, []byte("tracked.txt\x00")) {
+		t.Fatalf("full manifest did not reach rsync: %q", manifest)
+	}
+	commands, err := os.ReadFile(sshLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(commands, []byte(gitOverlayFallbackMarker)) || bytes.Contains(commands, []byte(".overlay-git.")) {
+		t.Fatalf("hermetic overlay command ran for unsupported transport:\n%s", commands)
 	}
 }
 
