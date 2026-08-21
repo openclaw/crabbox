@@ -194,7 +194,7 @@ function validateCheckpoint(record, options) {
   }
   assertIdentifier(native.imageId, /^ami-[0-9a-z]+$/, "AMI id");
   if (native.region !== options.region) fail("checkpoint region does not match candidate region");
-  if (native.architecture && native.architecture !== options.architecture) {
+  if (native.architecture !== options.architecture) {
     fail("checkpoint architecture does not match candidate architecture");
   }
   const snapshots = native.snapshotIds ?? [];

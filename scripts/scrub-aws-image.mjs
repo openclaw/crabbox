@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import {
   lstat,
   mkdir,
+  readlink,
   readdir,
   rename,
   rm,
@@ -104,6 +105,19 @@ async function removePrefixedEntries(root, parts, prefix) {
   return removed;
 }
 
+async function removeUserSSHState(root, parts) {
+  const directory = inside(root, parts);
+  const stat = await exists(directory);
+  if (!stat) return { authorizedKeys: 0, credentials: 0 };
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    await rm(directory, { force: true });
+    return { authorizedKeys: 0, credentials: 1 };
+  }
+  const authorizedKeys = await removeEntry(root, [...parts, "authorized_keys"]);
+  await rm(directory, { recursive: true, force: true });
+  return { authorizedKeys, credentials: 1 };
+}
+
 async function childDirectories(root, parts) {
   const directory = inside(root, parts);
   const stat = await exists(directory);
@@ -114,6 +128,40 @@ async function childDirectories(root, parts) {
     if (child?.isDirectory() && !child.isSymbolicLink()) children.push(name);
   }
   return children;
+}
+
+async function trustedDirectoryPath(root, parts) {
+  for (let length = 1; length <= parts.length; length += 1) {
+    const stat = await exists(inside(root, parts.slice(0, length)));
+    if (!stat?.isDirectory() || stat.isSymbolicLink()) return false;
+  }
+  return true;
+}
+
+async function unsafeChildDirectoryLinks(root, parts, allowedTargets = {}) {
+  const directory = inside(root, parts);
+  const stat = await exists(directory);
+  if (!stat) return [];
+  if (!stat.isDirectory() || stat.isSymbolicLink()) return ["."];
+  const links = [];
+  for (const name of await readdir(directory)) {
+    const childPath = inside(root, [...parts, name]);
+    const child = await exists(childPath);
+    if (!child?.isSymbolicLink()) continue;
+    const expectedParts = Object.hasOwn(allowedTargets, name) ? allowedTargets[name] : null;
+    if (expectedParts) {
+      const target = await readlink(childPath);
+      const resolved = path.resolve(path.dirname(childPath), target);
+      if (
+        resolved === inside(root, expectedParts) &&
+        (await trustedDirectoryPath(root, expectedParts))
+      ) {
+        continue;
+      }
+    }
+    links.push(name);
+  }
+  return links;
 }
 
 async function hasEntry(root, parts) {
@@ -140,14 +188,13 @@ async function scrubLinux(root) {
   };
   const homes = await childDirectories(root, ["home"]);
 
-  removed.authorizedKeys += await removeEntry(root, ["root", ".ssh", "authorized_keys"]);
+  const rootSSH = await removeUserSSHState(root, ["root", ".ssh"]);
+  removed.authorizedKeys += rootSSH.authorizedKeys;
+  removed.credentials += rootSSH.credentials;
   for (const user of homes) {
-    removed.authorizedKeys += await removeEntry(root, [
-      "home",
-      user,
-      ".ssh",
-      "authorized_keys",
-    ]);
+    const userSSH = await removeUserSSHState(root, ["home", user, ".ssh"]);
+    removed.authorizedKeys += userSSH.authorizedKeys;
+    removed.credentials += userSSH.credentials;
   }
   removed.sshHostKeys += await removePrefixedEntries(root, ["etc", "ssh"], "ssh_host_");
 
@@ -243,12 +290,9 @@ async function scrubWindows(root, registry) {
     "administrators_authorized_keys",
   ]);
   for (const user of users) {
-    removed.authorizedKeys += await removeEntry(root, [
-      "Users",
-      user,
-      ".ssh",
-      "authorized_keys",
-    ]);
+    const userSSH = await removeUserSSHState(root, ["Users", user, ".ssh"]);
+    removed.authorizedKeys += userSSH.authorizedKeys;
+    removed.credentials += userSSH.credentials;
   }
   removed.sshHostKeys += await removePrefixedEntries(
     root,
@@ -337,7 +381,8 @@ async function residualFindings(target, root, windowsRegistry) {
   };
   if (target === "linux") {
     const homes = await childDirectories(root, ["home"]);
-    add(await hasEntry(root, ["root", ".ssh", "authorized_keys"]), "authorizedKeys");
+    add((await unsafeChildDirectoryLinks(root, ["home"])).length > 0, "credentials");
+    add(await hasEntry(root, ["root", ".ssh"]), "credentials");
     add(await hasPrefixedEntry(root, ["etc", "ssh"], "ssh_host_"), "sshHostKeys");
     add(await hasEntry(root, ["root", ".aws"]), "credentials");
     add(await hasEntry(root, ["root", ".config", "gh"]), "credentials");
@@ -362,10 +407,7 @@ async function residualFindings(target, root, windowsRegistry) {
       add(await hasEntry(root, ["root", history]), "shellHistory");
     }
     for (const user of homes) {
-      add(
-        await hasEntry(root, ["home", user, ".ssh", "authorized_keys"]),
-        "authorizedKeys",
-      );
+      add(await hasEntry(root, ["home", user, ".ssh"]), "credentials");
       add(await hasEntry(root, ["home", user, ".aws"]), "credentials");
       add(await hasEntry(root, ["home", user, ".config", "gh"]), "credentials");
       add(
@@ -378,6 +420,15 @@ async function residualFindings(target, root, windowsRegistry) {
     }
   } else {
     const users = await childDirectories(root, ["Users"]);
+    add(
+      (
+        await unsafeChildDirectoryLinks(root, ["Users"], {
+          "All Users": ["ProgramData"],
+          "Default User": ["Users", "Default"],
+        })
+      ).length > 0,
+      "credentials",
+    );
     add(
       await hasEntry(root, [
         "ProgramData",
@@ -457,10 +508,7 @@ async function residualFindings(target, root, windowsRegistry) {
       "prepArtifacts",
     );
     for (const user of users) {
-      add(
-        await hasEntry(root, ["Users", user, ".ssh", "authorized_keys"]),
-        "authorizedKeys",
-      );
+      add(await hasEntry(root, ["Users", user, ".ssh"]), "credentials");
       add(await hasEntry(root, ["Users", user, ".aws"]), "credentials");
       add(await hasEntry(root, ["Users", user, ".config", "gh"]), "credentials");
       add(

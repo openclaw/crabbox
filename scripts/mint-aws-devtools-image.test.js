@@ -138,11 +138,13 @@ case "$1" in
         printf '{not-json\\n'
         exit 0
       fi
+      architecture='"architecture":"x86_64",'
+      [[ "\${CRABBOX_FAKE_MISSING_ARCHITECTURE:-0}" == "1" ]] && architecture=""
       snapshots='"snapshotIds":["snap-root123"]'
       [[ "\${CRABBOX_FAKE_MISSING_SNAPSHOTS:-0}" == "1" ]] && snapshots='"snapshotIds":[]'
       target=linux
       [[ "$*" == *"--target windows"* ]] && target=windows
-      printf '{"id":"chk_devtools","kind":"aws-ami","provider":"aws","targetOS":"%s","serverType":"m7i.large","native":{"provider":"aws","kind":"aws-ami","imageId":"ami-devtools","region":"%s","architecture":"x86_64",%s}}\\n' "$target" "\${CRABBOX_FAKE_CHECKPOINT_REGION:-\${CRABBOX_AWS_REGION:-us-west-2}}" "$snapshots"
+      printf '{"id":"chk_devtools","kind":"aws-ami","provider":"aws","targetOS":"%s","serverType":"m7i.large","native":{"provider":"aws","kind":"aws-ami","imageId":"ami-devtools","region":"%s",%s%s}}\\n' "$target" "\${CRABBOX_FAKE_CHECKPOINT_REGION:-\${CRABBOX_AWS_REGION:-us-west-2}}" "$architecture" "$snapshots"
     fi
     ;;
   image)
@@ -220,7 +222,16 @@ test("AWS developer image smoke executes package managers and requires TruffleHo
     path.join(scriptDir, "smoke-aws-windows-devtools-image.ps1"),
     "utf8",
   );
-  assert.match(windows, /pnpm --version\ntrufflehog --no-update --version\ndocker --version/);
+  assert.match(windows, /function Invoke-NativeChecked/);
+  assert.match(windows, /\$LASTEXITCODE -ne 0/);
+  assert.match(windows, /OsName -notmatch "Windows Server 2022"/);
+  assert.match(windows, /OsBuildNumber -ne "20348"/);
+  assert.match(windows, /InstallationType -ne "Server"/);
+  assert.match(windows, /Invoke-NativeChecked "pnpm" @\("--version"\)/);
+  assert.match(windows, /Invoke-NativeChecked "docker" @\("version"\)/);
+  assert.match(windows, /\$GhVersion = Invoke-NativeChecked "gh" @\("--version"\)/);
+  assert.match(windows, /\$RgVersion = Invoke-NativeChecked "rg" @\("--version"\)/);
+  assert.doesNotMatch(windows, /Invoke-NativeChecked "(?:gh|rg)".*\|\s*Select-Object/);
   assert.match(
     linux,
     /command -v pnpm\ncommand -v trufflehog\ntrufflehog --no-update --version\ncommand -v docker\nnode --version\nnode -e .*\ncorepack --version\npnpm --version\n/,
@@ -252,6 +263,14 @@ test("candidate-only mint runs the exact gated lifecycle and writes evidence las
   const index = (pattern) => lines.findIndex((line) => pattern.test(line));
   const sourceWarmup = index(/args warmup .*--target linux/);
   const prep = index(new RegExp(`args run .*--id cbx_source .*--script ${fake.linuxPrep}`));
+  const sourceSmoke = index(
+    /args run .*--id cbx_source .*--script .*smoke-aws-linux-devtools-image\.sh/,
+  );
+  const sourcePrepare = lines.findIndex(
+    (line, position) =>
+      /args run .*--id cbx_source .*--shell -- set -euo pipefail/.test(line) &&
+      /command -v cloud-init/.test(lines[position + 1] ?? ""),
+  );
   const scrub = index(/args run .*--id cbx_source .*scrub-aws-image\.mjs/);
   const create = index(/args checkpoint create .*--id cbx_source .*--json/);
   const sourceStop = index(/args stop .*cbx_source$/);
@@ -266,7 +285,9 @@ test("candidate-only mint runs the exact gated lifecycle and writes evidence las
   const candidateStop = index(/args stop .*cbx_candidate$/);
   assert.ok(
     sourceWarmup < prep &&
-      prep < scrub &&
+      prep < sourceSmoke &&
+      sourceSmoke < sourcePrepare &&
+      sourcePrepare < scrub &&
       scrub < create &&
       create < sourceStop &&
       sourceStop < candidateWarmup &&
@@ -276,6 +297,7 @@ test("candidate-only mint runs the exact gated lifecycle and writes evidence las
   );
   assert.equal(lines.filter((line) => /args warmup /.test(line)).length, 2);
   assert.match(lines[scrub], /--require-root/);
+  assert.match(lines[create], /--source-prepared/);
   assert.doesNotMatch(lines.join("\n"), /image promote|fast-snapshot-restore|fsr-az/);
   const candidate = JSON.parse(
     await readFile(path.join(fake.dir, "candidate", "candidate.json"), "utf8"),
@@ -301,6 +323,7 @@ test("candidate-only mint leaves no record after malformed checkpoint JSON", asy
 test("candidate-only mint rejects checkpoint mismatch and missing snapshots before boot", async () => {
   for (const failureEnv of [
     { CRABBOX_FAKE_CHECKPOINT_REGION: "us-east-1" },
+    { CRABBOX_FAKE_MISSING_ARCHITECTURE: "1" },
     { CRABBOX_FAKE_MISSING_SNAPSHOTS: "1" },
   ]) {
     const fake = await setupFakeCrabbox();
@@ -393,7 +416,7 @@ test("AWS devtools mint wrapper runs linux source candidate and promoted proof",
   assert.equal((log.match(/pnpm --version/g) ?? []).length, 3);
   assert.match(log, /docker image inspect hello-world ubuntu:24\.04 node:24-bookworm/);
   assert.match(log, /env CRABBOX_AWS_REGION=us-west-2 AWS_REGION=us-west-2 CRABBOX_AWS_AMI= args checkpoint create --provider aws --target linux --id cbx_source --name crabbox-linux-devtools-/);
-  assert.match(log, /--mode native --strategy image --no-reboot=false --wait --wait-timeout 60m/);
+  assert.match(log, /--mode native --strategy image --no-reboot=false --source-prepared --wait --wait-timeout 60m/);
   assert.match(log, /image promote --target linux --json --region us-west-2 --fast-snapshot-restore --fsr-az us-west-2a ami-devtools/);
 });
 

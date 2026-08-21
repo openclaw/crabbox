@@ -299,6 +299,26 @@ test("candidate creator rejects missing snapshot evidence", async () => {
   assert.match(result.stderr, /must contain unique AWS snapshot ids/);
 });
 
+test("candidate creator requires exact architecture evidence", async () => {
+  for (const architecture of [undefined, "arm64"]) {
+    const value = await fixture();
+    const checkpointIndex = value.args.indexOf("--checkpoint") + 1;
+    const checkpoint = JSON.parse(await readFile(value.args[checkpointIndex], "utf8"));
+    if (architecture === undefined) {
+      delete checkpoint.native.architecture;
+    } else {
+      checkpoint.native.architecture = architecture;
+    }
+    await writeFile(value.args[checkpointIndex], JSON.stringify(checkpoint));
+    const result = await run(value.args);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /checkpoint architecture does not match/);
+    await assert.rejects(readFile(path.join(value.output, "candidate.json"), "utf8"), {
+      code: "ENOENT",
+    });
+  }
+});
+
 test("candidate creator rejects a failed candidate smoke", async () => {
   const value = await fixture();
   const checksIndex = value.args.indexOf("--checks") + 1;

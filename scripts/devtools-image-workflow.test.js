@@ -64,8 +64,17 @@ test("workflow keeps cloud credentials environment-scoped and retains proof", ()
   );
   assert.doesNotMatch(workflow, /AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY/);
   assert.doesNotMatch(workflow, /openclaw/i);
-  assert.match(workflow, /CRABBOX_OWNER: image-publisher@example\.invalid/);
-  assert.match(workflow, /CRABBOX_ORG: example-org/);
+  assert.match(
+    workflow,
+    /CRABBOX_OWNER: \$\{\{ vars\.CRABBOX_IMAGE_PUBLISHER_OWNER \}\}/,
+  );
+  assert.match(
+    workflow,
+    /CRABBOX_ORG: \$\{\{ vars\.CRABBOX_IMAGE_PUBLISHER_ORG \}\}/,
+  );
+  assert.match(workflow, /Set CRABBOX_IMAGE_PUBLISHER_OWNER to a valid email/);
+  assert.match(workflow, /Set CRABBOX_IMAGE_PUBLISHER_ORG to a valid tenant/);
+  assert.doesNotMatch(workflow, /image-publisher@example\.invalid|CRABBOX_ORG: example-org/);
   assert.match(workflow, /name: Upload candidate proof[\s\S]*if: always\(\)/);
   assert.match(workflow, /if-no-files-found: error/);
   assert.match(workflow, /retention-days: 30/);

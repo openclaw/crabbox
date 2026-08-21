@@ -79,6 +79,182 @@ func TestCheckpointCreateAppliesAzureSnapshotSKUFlag(t *testing.T) {
 	}
 }
 
+func TestResolvePreparedCheckpointSourceUsesDurableTailscaleClaimWithoutSSH(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("POSIX fake SSH helper")
+	}
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	tools := t.TempDir()
+	probeLog := filepath.Join(t.TempDir(), "ssh.log")
+	writeExecutable(t, filepath.Join(tools, "ssh"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$PROBE_LOG\"\nexit 99\n")
+	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PROBE_LOG", probeLog)
+
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.Network = NetworkTailscale
+	cfg.TargetOS = targetLinux
+	const leaseID = "cbx_prepared_source"
+	const cloudID = "i-0123456789abcdef0"
+	server := Server{
+		Provider: "aws",
+		CloudID:  cloudID,
+		Labels: map[string]string{
+			"provider":       "aws",
+			"slug":           "prepared-source",
+			"target":         targetLinux,
+			"tailscale":      "true",
+			"tailscale_fqdn": "prepared-source.example.ts.net",
+		},
+	}
+	if err := claimLeaseTargetForRepoConfig(
+		leaseID,
+		"prepared-source",
+		cfg,
+		server,
+		SSHTarget{Host: "203.0.113.10", Port: "22", NetworkKind: NetworkTailscale},
+		t.TempDir(),
+		time.Minute,
+		false,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	gotServer, gotTarget, gotLeaseID, err := resolvePreparedCheckpointSource(&cfg, leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotLeaseID != leaseID || gotServer.CloudID != cloudID {
+		t.Fatalf("lease=%q cloud=%q, want %q %q", gotLeaseID, gotServer.CloudID, leaseID, cloudID)
+	}
+	if gotTarget.NetworkKind != NetworkTailscale {
+		t.Fatalf("network=%q, want %q", gotTarget.NetworkKind, NetworkTailscale)
+	}
+	if _, err := os.Stat(probeLog); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("SSH probe executed after source preparation: %v", err)
+	}
+}
+
+func TestCheckpointCreateSourcePreparedCapturesDurableAWSIdentityWithoutSSH(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("POSIX fake SSH helper")
+	}
+	state := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", state)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(state, "config"))
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(state, "missing.yaml"))
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	t.Setenv("AWS_REGION", "us-east-1")
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	tools := t.TempDir()
+	probeLog := filepath.Join(t.TempDir(), "ssh.log")
+	writeExecutable(t, filepath.Join(tools, "ssh"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$PROBE_LOG\"\nexit 99\n")
+	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PROBE_LOG", probeLog)
+
+	const leaseID = "cbx_prepared_capture"
+	const cloudID = "i-0123456789abcdef0"
+	var createImageInstanceID string
+	awsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		switch action := r.Form.Get("Action"); action {
+		case "GetCallerIdentity":
+			writeSTSXML(w, `<GetCallerIdentityResponse><GetCallerIdentityResult><Account>123456789012</Account><Arn>arn:aws:iam::123456789012:user/test</Arn><UserId>AIDAEXAMPLE</UserId></GetCallerIdentityResult></GetCallerIdentityResponse>`)
+		case "DescribeInstances":
+			if got := r.Form.Get("InstanceId.1"); got != cloudID {
+				t.Fatalf("DescribeInstances id=%q, want %q", got, cloudID)
+			}
+			writeEC2XML(w, `<DescribeInstancesResponse><reservationSet><item><instancesSet><item><instanceId>`+cloudID+`</instanceId><instanceType>t3.micro</instanceType><instanceState><name>running</name></instanceState></item></instancesSet></item></reservationSet></DescribeInstancesResponse>`)
+		case "CreateImage":
+			createImageInstanceID = r.Form.Get("InstanceId")
+			writeEC2XML(w, `<CreateImageResponse><imageId>ami-12345678</imageId></CreateImageResponse>`)
+		default:
+			writeEC2Error(w, "Unexpected", action, http.StatusBadRequest)
+		}
+	}))
+	defer awsServer.Close()
+	t.Setenv("AWS_ENDPOINT_URL", awsServer.URL)
+
+	repo, err := findRepo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.Network = NetworkTailscale
+	cfg.TargetOS = targetLinux
+	if err := claimLeaseTargetForRepoConfig(
+		leaseID,
+		"prepared-capture",
+		cfg,
+		Server{
+			Provider: "aws",
+			CloudID:  cloudID,
+			Labels: map[string]string{
+				"provider":       "aws",
+				"slug":           "prepared-capture",
+				"target":         targetLinux,
+				"tailscale":      "true",
+				"tailscale_fqdn": "prepared-capture.example.ts.net",
+			},
+		},
+		SSHTarget{Host: "203.0.113.10", Port: "22", NetworkKind: NetworkTailscale},
+		repo.Root,
+		time.Minute,
+		false,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	err = (App{Stdout: io.Discard, Stderr: io.Discard}).checkpointCreate(context.Background(), []string{
+		"--provider", "aws",
+		"--target", targetLinux,
+		"--network", string(NetworkTailscale),
+		"--id", leaseID,
+		"--name", "prepared-capture",
+		"--mode", "native",
+		"--strategy", "image",
+		"--source-prepared",
+		"--wait=false",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if createImageInstanceID != cloudID {
+		t.Fatalf("CreateImage id=%q, want durable claim cloud id %q", createImageInstanceID, cloudID)
+	}
+	if _, err := os.Stat(probeLog); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("SSH probe executed after source preparation: %v", err)
+	}
+}
+
+func TestResolvePreparedCheckpointSourceRequiresDurableAWSInstanceID(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	if err := claimLeaseTargetForRepoConfig(
+		"cbx_prepared_missing_cloud",
+		"prepared-missing-cloud",
+		cfg,
+		Server{Provider: "aws"},
+		SSHTarget{},
+		t.TempDir(),
+		time.Minute,
+		false,
+	); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, err := resolvePreparedCheckpointSource(&cfg, "cbx_prepared_missing_cloud")
+	if err == nil || !strings.Contains(err.Error(), "missing its AWS instance id") {
+		t.Fatalf("err=%v, want missing AWS instance id", err)
+	}
+}
+
 func TestPrintCheckpointCreatedJSONIncludesNativeImageEvidence(t *testing.T) {
 	record := checkpointRecord{
 		ID:       "chk_candidate",
@@ -1556,6 +1732,7 @@ func TestCreateNativeCheckpointRejectsAzureImageBeforeAdminAndCloudInit(t *testi
 		checkpointStrategyImage,
 		true,
 		false,
+		false,
 		0,
 	)
 	if err == nil {
@@ -1563,6 +1740,31 @@ func TestCreateNativeCheckpointRejectsAzureImageBeforeAdminAndCloudInit(t *testi
 	}
 	if !strings.Contains(err.Error(), "Azure managed images require") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestNativeCheckpointSourcePreparationGate(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name           string
+		target         SSHTarget
+		sourcePrepared bool
+		want           bool
+	}{
+		{name: "linux default", target: SSHTarget{TargetOS: targetLinux}, want: true},
+		{name: "linux prepared", target: SSHTarget{TargetOS: targetLinux}, sourcePrepared: true},
+		{name: "windows native", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := nativeCheckpointNeedsSourcePreparation(checkpointNativeCreateRequest{
+				Target:         tc.target,
+				SourcePrepared: tc.sourcePrepared,
+			})
+			if got != tc.want {
+				t.Fatalf("nativeCheckpointNeedsSourcePreparation()=%v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

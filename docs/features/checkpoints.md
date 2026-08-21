@@ -90,6 +90,12 @@ Images are slower to create but preserve complete launch configuration. Direct
 AWS Linux/macOS leases use the AMI path for native checkpoints because AMIs fork
 directly without a coordinator.
 
+Image automation that has already completed its final source preparation may
+pass `--source-prepared` to prevent Crabbox from reconnecting after credentials
+have been scrubbed. The caller must first flush filesystem state and clean
+provider initialization state such as cloud-init, then run the final credential
+scrub. Interactive checkpoint creation should leave this flag unset.
+
 **Hetzner notes.** Direct Hetzner Linux leases with a numeric server ID support
 `--mode native` and create a project snapshot. `--strategy image` is not
 supported. Crabbox re-reads the source server, requires its canonical ownership

@@ -269,6 +269,8 @@ third lease.
 Configure the `image-publisher` GitHub environment with:
 
 - the `CRABBOX_COORDINATOR` environment variable;
+- `CRABBOX_IMAGE_PUBLISHER_OWNER` and `CRABBOX_IMAGE_PUBLISHER_ORG`
+  environment variables matching the coordinator tenant;
 - the `CRABBOX_COORDINATOR_ADMIN_TOKEN` environment secret;
 - `CRABBOX_ACCESS_CLIENT_ID` and `CRABBOX_ACCESS_CLIENT_SECRET` environment
   secrets when the coordinator is behind Cloudflare Access.
@@ -345,6 +347,11 @@ publication workflow still passes `--no-promote` explicitly. The wrapper's
 legacy `--promote` mode and FSR flags are operator-only paths; the protected
 candidate workflow cannot invoke either.
 
+The wrapper cleans Linux cloud-init state and flushes filesystem state before
+the destructive credential scrub, then captures with
+`checkpoint create --source-prepared` so capture does not reconnect with
+credentials that the scrub intentionally removed.
+
 Before AMI capture, the wrapper scrubs SSH keys and host identity, shell
 history, cloud-init or EC2Launch state, credentials, workspaces, and prep
 artifacts. The redacted report contains category counts, residual finding
@@ -366,7 +373,9 @@ candidate boot, and candidate smoke all pass.
   Chrome and tries the distro Chromium package.
 - **Windows** (`scripts/install-windows-developer-tools.ps1`): common CLI/build
   tooling, GitHub CLI, Node 24, corepack/pnpm, TruffleHog 3.95.9, and Windows
-  Server container support with Docker Engine. It deliberately avoids Docker
+  Server container support with Docker Engine. Candidate smoke requires Windows
+  Server 2022 build 20348 with Desktop Experience, matching the Full Base
+  recipe. It deliberately avoids Docker
   Desktop because headless image bakes should not depend on a user-session
   desktop app or Docker Desktop licensing. The Chocolatey package, Node MSI,
   TruffleHog archive, and Docker Engine archive are pinned to reviewed SHA-256

@@ -57,17 +57,96 @@ function Test-ScrubPrefix {
   } | Select-Object -First 1)
 }
 
+function Remove-UserSSHState {
+  param([string]$Relative)
+  $Directory = Join-Path $Root $Relative
+  if (-not (Test-Path -LiteralPath $Directory)) {
+    return
+  }
+  $Entry = Get-Item -LiteralPath $Directory -Force
+  if (($Entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    Remove-Item -LiteralPath $Directory -Force
+    $Removed.credentials++
+    return
+  }
+  $AuthorizedKeys = Join-Path $Directory "authorized_keys"
+  if (Test-Path -LiteralPath $AuthorizedKeys) {
+    Remove-Item -LiteralPath $AuthorizedKeys -Force
+    $Removed.authorizedKeys++
+  }
+  Remove-Item -LiteralPath $Directory -Recurse -Force
+  $Removed.credentials++
+}
+
+function Get-ScrubChildEntry {
+  param(
+    [string]$Parent,
+    [string]$Name
+  )
+  return Get-ChildItem -LiteralPath $Parent -Force | Where-Object {
+    [string]::Equals($_.Name, $Name, [StringComparison]::OrdinalIgnoreCase)
+  } | Select-Object -First 1
+}
+
+function Test-TrustedScrubDirectory {
+  param([string]$Relative)
+  $Current = $Root
+  foreach ($Part in $Relative.Split("\")) {
+    $Entry = Get-ScrubChildEntry $Current $Part
+    if ($null -eq $Entry -or
+      ($Entry.Attributes -band [IO.FileAttributes]::Directory) -eq 0 -or
+      ($Entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+      return $false
+    }
+    $Current = $Entry.FullName
+  }
+  return $true
+}
+
+function Test-CompatibilityProfileLink {
+  param([IO.FileSystemInfo]$Entry)
+  $ExpectedRelative = switch ($Entry.Name) {
+    "All Users" { "ProgramData" }
+    "Default User" { "Users\Default" }
+    default { return $false }
+  }
+  if (-not (Test-TrustedScrubDirectory $ExpectedRelative)) {
+    return $false
+  }
+  $Targets = @($Entry.Target)
+  if ($Targets.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$Targets[0])) {
+    return $false
+  }
+  $Target = [string]$Targets[0]
+  if (-not [IO.Path]::IsPathRooted($Target)) {
+    $Target = Join-Path $Entry.Parent.FullName $Target
+  }
+  $Actual = [IO.Path]::GetFullPath($Target).TrimEnd("\")
+  $Expected = [IO.Path]::GetFullPath((Join-Path $Root $ExpectedRelative)).TrimEnd("\")
+  return [string]::Equals($Actual, $Expected, [StringComparison]::OrdinalIgnoreCase)
+}
+
 $UsersRoot = Join-Path $Root "Users"
-$Users = if (Test-Path -LiteralPath $UsersRoot -PathType Container) {
+$UsersRootEntry = Get-ScrubChildEntry $Root "Users"
+$LinkedUsersRoot = $null -ne $UsersRootEntry -and
+  (($UsersRootEntry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+$UserEntries = if ($null -ne $UsersRootEntry -and -not $LinkedUsersRoot) {
   @(Get-ChildItem -LiteralPath $UsersRoot -Directory -Force)
 } else {
   @()
 }
+$Users = @($UserEntries | Where-Object {
+    ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0
+})
+$ReparseProfiles = @($UserEntries | Where-Object {
+  ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -and
+  -not (Test-CompatibilityProfileLink $_)
+})
 
 Remove-ScrubPath "ProgramData\ssh\administrators_authorized_keys" "authorizedKeys"
 Remove-ScrubPrefix "ProgramData\ssh" "ssh_host_" "sshHostKeys"
 foreach ($User in $Users) {
-  Remove-ScrubPath "Users\$($User.Name)\.ssh\authorized_keys" "authorizedKeys"
+  Remove-UserSSHState "Users\$($User.Name)\.ssh"
   Remove-ScrubPath "Users\$($User.Name)\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt" "shellHistory"
   Remove-ScrubPath "Users\$($User.Name)\.aws" "credentials"
   Remove-ScrubPath "Users\$($User.Name)\.config\gh" "credentials"
@@ -163,8 +242,9 @@ Add-ScrubFinding (Test-Path -LiteralPath (Join-Path $Root "crabbox")) "workspace
 Add-ScrubFinding (Test-Path -LiteralPath (Join-Path $Root "ProgramData\crabbox\workspaces")) "workspaces"
 Add-ScrubFinding (Test-ScrubPrefix "ProgramData\crabbox" "image-prep") "prepArtifacts"
 Add-ScrubFinding ($null -ne (Get-ScheduledTask -TaskName "CrabboxImagePrep" -ErrorAction SilentlyContinue)) "prepArtifacts"
+Add-ScrubFinding ($LinkedUsersRoot -or $ReparseProfiles.Count -gt 0) "credentials"
 foreach ($User in $Users) {
-  Add-ScrubFinding (Test-Path -LiteralPath (Join-Path $Root "Users\$($User.Name)\.ssh\authorized_keys")) "authorizedKeys"
+  Add-ScrubFinding (Test-Path -LiteralPath (Join-Path $Root "Users\$($User.Name)\.ssh")) "credentials"
   Add-ScrubFinding (Test-Path -LiteralPath (Join-Path $Root "Users\$($User.Name)\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt")) "shellHistory"
   Add-ScrubFinding (Test-Path -LiteralPath (Join-Path $Root "Users\$($User.Name)\.aws")) "credentials"
   Add-ScrubFinding (Test-Path -LiteralPath (Join-Path $Root "Users\$($User.Name)\.config\gh")) "credentials"

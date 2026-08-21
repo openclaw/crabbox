@@ -604,6 +604,17 @@ if (
   mv -f "$report_tmp" "$scrub_report"
 }
 
+prepare_source_for_capture() {
+  local lease="$1"
+  [[ "$target" == "linux" ]] || return 0
+  run_cmd "$CRABBOX_BIN" run --provider aws --target linux --id "$lease" --no-sync --shell -- \
+    "set -euo pipefail
+if command -v cloud-init >/dev/null 2>&1; then
+  sudo cloud-init clean --logs
+fi
+sync"
+}
+
 mark_linux_image_ready() {
   local lease="$1"
   [[ "$target" == "linux" ]] || return 0
@@ -751,13 +762,15 @@ run_prep "$source_lease"
 reboot_windows_source_if_needed "$source_lease"
 mark_linux_image_ready "$source_lease"
 smoke "$source_lease"
+prepare_source_for_capture "$source_lease"
 run_image_scrub "$source_lease"
 
 image_env=(env)
 [[ -n "$region" ]] && image_env+=(CRABBOX_AWS_REGION="$region" AWS_REGION="$region")
 image_output="$("${image_env[@]}" "$CRABBOX_BIN" checkpoint create \
   --provider aws --target "$target" --id "$source_lease" --name "$image_name" \
-  --mode native --strategy image --no-reboot=false --wait --wait-timeout "$wait_timeout" --json)"
+  --mode native --strategy image --no-reboot=false --source-prepared \
+  --wait --wait-timeout "$wait_timeout" --json)"
 printf '%s\n' "$image_output"
 checkpoint_record="$(printf '%s\n' "$image_output" | node -e '
 const fs = require("fs");
@@ -769,7 +782,7 @@ if (
   value.native?.provider !== "aws" ||
   value.native?.kind !== "aws-ami" ||
   value.native?.region !== process.argv[2] ||
-  (value.native?.architecture && value.native.architecture !== process.argv[3]) ||
+  value.native?.architecture !== process.argv[3] ||
   !/^ami-[0-9a-z]+$/.test(value.native?.imageId ?? "") ||
   !Array.isArray(value.native?.snapshotIds) ||
   value.native.snapshotIds.length === 0 ||

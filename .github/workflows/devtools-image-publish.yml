@@ -105,8 +105,8 @@ jobs:
       CRABBOX_COORDINATOR: ${{ vars.CRABBOX_COORDINATOR }}
       CRABBOX_COORDINATOR_TOKEN: ${{ secrets.CRABBOX_COORDINATOR_ADMIN_TOKEN }}
       CRABBOX_COORDINATOR_ADMIN_TOKEN: ${{ secrets.CRABBOX_COORDINATOR_ADMIN_TOKEN }}
-      CRABBOX_OWNER: image-publisher@example.invalid
-      CRABBOX_ORG: example-org
+      CRABBOX_OWNER: ${{ vars.CRABBOX_IMAGE_PUBLISHER_OWNER }}
+      CRABBOX_ORG: ${{ vars.CRABBOX_IMAGE_PUBLISHER_ORG }}
       CRABBOX_ACCESS_CLIENT_ID: ${{ secrets.CRABBOX_ACCESS_CLIENT_ID }}
       CRABBOX_ACCESS_CLIENT_SECRET: ${{ secrets.CRABBOX_ACCESS_CLIENT_SECRET }}
       TARGET: ${{ inputs.target }}
@@ -127,6 +127,17 @@ jobs:
           fi
           if [[ -z "$CRABBOX_COORDINATOR_ADMIN_TOKEN" ]]; then
             echo "::error::Set the CRABBOX_COORDINATOR_ADMIN_TOKEN secret on the image-publisher environment."
+            exit 1
+          fi
+          if (( ${#CRABBOX_OWNER} > 254 )) ||
+            [[ ! "$CRABBOX_OWNER" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+[.][A-Za-z]+$ ]] ||
+            [[ "$CRABBOX_OWNER" =~ [.](invalid|example|test|localhost)$ ]]; then
+            echo "::error::Set CRABBOX_IMAGE_PUBLISHER_OWNER to a valid email on the image-publisher environment."
+            exit 1
+          fi
+          if (( ${#CRABBOX_ORG} > 63 )) ||
+            [[ ! "$CRABBOX_ORG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "::error::Set CRABBOX_IMAGE_PUBLISHER_ORG to a valid tenant on the image-publisher environment."
             exit 1
           fi
 
@@ -234,6 +245,8 @@ jobs:
             echo "- Region: \`$REGION\`"
             echo "- Source commit: \`$GITHUB_SHA\`"
             if [[ -f "$RUNNER_TEMP/devtools-image-proof/publication.json" ]]; then
+              # JavaScript template expressions are evaluated by Node.
+              # shellcheck disable=SC2016
               node -e '
                 const fs = require("fs");
                 const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
