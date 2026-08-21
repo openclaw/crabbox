@@ -96,7 +96,9 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	wait := fs.Bool("wait", true, "wait for native provider snapshot availability")
 	waitTimeout := fs.Duration("wait-timeout", 45*time.Minute, "maximum native snapshot wait duration")
 	noReboot := fs.Bool("no-reboot", true, "avoid rebooting the source instance while creating a native snapshot")
+	sourcePrepared := fs.Bool("source-prepared", false, "skip native source preparation because the caller already completed it")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
+	jsonOut := fs.Bool("json", false, "print JSON")
 	targetFlags := registerTargetFlags(fs, defaults)
 	networkFlags := registerNetworkModeFlag(fs, defaults)
 	providerFlags := registerProviderFlags(fs, defaults)
@@ -121,9 +123,20 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
-	server, target, leaseID, err := a.resolveNetworkLeaseTargetForRepoWithConfig(ctx, &cfg, *id, true, *reclaim)
+	var server Server
+	var target SSHTarget
+	var leaseID string
+	if *sourcePrepared {
+		server, target, leaseID, err = resolvePreparedCheckpointSource(&cfg, *id)
+	} else {
+		server, target, leaseID, err = a.resolveNetworkLeaseTargetForRepoWithConfig(ctx, &cfg, *id, true, *reclaim)
+	}
 	if err != nil {
 		return err
+	}
+	createKind := checkpointCreateMode(*mode, *strategy, cfg, server, target, *recipeOnly)
+	if *sourcePrepared && createKind != checkpointKindAWSAMI {
+		return exit(2, "--source-prepared is supported only for native AWS AMI capture")
 	}
 	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, &server, target, repo.Root, *reclaim); err != nil {
 		return err
@@ -149,7 +162,6 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
-	createKind := checkpointCreateMode(*mode, *strategy, cfg, server, target, *recipeOnly)
 	switch createKind {
 	case checkpointKindRecipe, checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindMachine0, checkpointKindParallels, checkpointKindDockerCommit, checkpointKindArchive:
 		record.Kind = createKind
@@ -170,7 +182,7 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	case checkpointKindRecipe:
 	case checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindMachine0, checkpointKindParallels, checkpointKindDockerCommit:
 		createStrategy := checkpointCreateStrategy(*mode, *strategy, createKind)
-		image, metadata, err := a.createNativeCheckpoint(ctx, cfg, server, target, record.ID, leaseID, record.Name, repo.Name, workdir, createStrategy, *noReboot, *wait, *waitTimeout)
+		image, metadata, err := a.createNativeCheckpoint(ctx, cfg, server, target, record.ID, leaseID, record.Name, repo.Name, workdir, createStrategy, *noReboot, *sourcePrepared, *wait, *waitTimeout)
 		if image.ID != "" {
 			applyNativeImageCheckpointRecord(&record, image, *noReboot)
 			record.Native.Metadata = metadata
@@ -199,11 +211,94 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 		return err
 	}
 	recordWritten = true
+	return printCheckpointCreated(a.Stdout, record, *jsonOut)
+}
+
+func resolvePreparedCheckpointSource(cfg *Config, identifier string) (Server, SSHTarget, string, error) {
+	if cfg == nil {
+		return Server{}, SSHTarget{}, "", exit(2, "lease target config is required")
+	}
+	provider := canonicalClaimProvider(cfg.Provider)
+	if provider != "aws" {
+		return Server{}, SSHTarget{}, "", exit(2, "--source-prepared requires an AWS lease claim")
+	}
+	claim, exact, err := readLeaseClaimWithPresence(identifier)
+	if err != nil {
+		return Server{}, SSHTarget{}, "", err
+	}
+	ok := exact && claim.LeaseID != "" && canonicalClaimProvider(claim.Provider) == provider
+	if !exact {
+		claim, ok, err = findUniqueLeaseClaim(identifier, func(candidate leaseClaim) bool {
+			return canonicalClaimProvider(candidate.Provider) == provider
+		})
+		if err != nil {
+			return Server{}, SSHTarget{}, "", err
+		}
+	}
+	if !ok {
+		if exact {
+			return Server{}, SSHTarget{}, "", exit(2, "lease %s is not an AWS lease claim", identifier)
+		}
+		return Server{}, SSHTarget{}, "", exit(2, "lease %s has no durable AWS lease claim", identifier)
+	}
+	leaseID := strings.TrimSpace(claim.LeaseID)
+	if leaseID == "" {
+		return Server{}, SSHTarget{}, "", exit(2, "lease %s durable claim is missing its lease id", identifier)
+	}
+	cloudID := strings.TrimSpace(claim.CloudID)
+	if cloudID == "" {
+		return Server{}, SSHTarget{}, "", exit(2, "lease %s durable claim is missing its AWS instance id", leaseID)
+	}
+
+	applyStoredLeaseClaimConfig(cfg, claim)
+	labels := cloneStringMap(claim.Labels)
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	if labels["provider"] == "" {
+		labels["provider"] = provider
+	}
+	if labels["lease"] == "" {
+		labels["lease"] = leaseID
+	}
+	if labels["slug"] == "" {
+		labels["slug"] = claim.Slug
+	}
+	server := Server{
+		CloudID:       cloudID,
+		Provider:      provider,
+		ImmutableID:   strings.TrimSpace(claim.CloudImmutableID),
+		ID:            claim.CloudNumericID,
+		Name:          strings.TrimSpace(claim.Slug),
+		Status:        strings.TrimSpace(labels["state"]),
+		Labels:        labels,
+		claimSnapshot: cloneLeaseClaim(claim),
+	}
+	server.claimSnapshotSet = true
+	server.claimSnapshotExists = true
+	target := SSHTarget{
+		User:        cfg.SSHUser,
+		Host:        strings.TrimSpace(claim.SSHHost),
+		TargetOS:    firstNonBlank(claim.TargetOS, labels["target"], cfg.TargetOS),
+		WindowsMode: firstNonBlank(claim.WindowsMode, labels["windows_mode"], cfg.WindowsMode),
+		NetworkKind: cfg.Network,
+	}
+	if claim.SSHPort > 0 {
+		target.Port = strconv.Itoa(claim.SSHPort)
+	}
+	applyResolvedLeaseConfig(cfg, server, &target)
+	return server, target, leaseID, nil
+}
+
+func printCheckpointCreated(stdout io.Writer, record checkpointRecord, jsonOut bool) error {
+	if jsonOut {
+		return json.NewEncoder(stdout).Encode(record)
+	}
 	if isNativeCheckpointKind(record.Kind) {
-		fmt.Fprintf(a.Stdout, "checkpoint created id=%s kind=%s resource=%s state=%s region=%s workdir=%s\n", record.ID, record.Kind, record.Native.ImageID, record.Native.State, blank(record.Native.Region, "-"), record.Workdir)
+		fmt.Fprintf(stdout, "checkpoint created id=%s kind=%s resource=%s state=%s region=%s workdir=%s\n", record.ID, record.Kind, record.Native.ImageID, record.Native.State, blank(record.Native.Region, "-"), record.Workdir)
 		return nil
 	}
-	fmt.Fprintf(a.Stdout, "checkpoint created id=%s kind=%s bytes=%s workdir=%s\n", record.ID, record.Kind, humanBytes(record.ArchiveBytes), record.Workdir)
+	fmt.Fprintf(stdout, "checkpoint created id=%s kind=%s bytes=%s workdir=%s\n", record.ID, record.Kind, humanBytes(record.ArchiveBytes), record.Workdir)
 	return nil
 }
 

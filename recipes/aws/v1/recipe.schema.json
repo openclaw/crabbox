@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:crabbox:schema:aws-image-recipe:v1",
+  "title": "Crabbox AWS runner image recipe",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "target",
+    "profile",
+    "readinessRecipe",
+    "inputs",
+    "components"
+  ],
+  "properties": {
+    "schema": {
+      "const": "crabbox-aws-image-recipe/v1"
+    },
+    "target": {
+      "enum": [
+        "linux",
+        "windows"
+      ]
+    },
+    "profile": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "readinessRecipe": {
+      "type": "string",
+      "pattern": "^recipes/[A-Za-z0-9._/-]+[.]json$"
+    },
+    "inputs": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^(recipes|scripts)/[A-Za-z0-9._/-]+$"
+      }
+    },
+    "components": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "version",
+          "source"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9+._-]*$"
+          },
+          "version": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}

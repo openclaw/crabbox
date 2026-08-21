@@ -146,6 +146,12 @@ func TestCheckpointCreateHelpListsAzureSnapshotSKU(t *testing.T) {
 	if !strings.Contains(stderr.String(), "-azure-snapshot-sku string") {
 		t.Fatalf("checkpoint create help omitted Azure snapshot SKU:\n%s", stderr.String())
 	}
+	if !strings.Contains(stderr.String(), "-json") {
+		t.Fatalf("checkpoint create help omitted JSON output:\n%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "-source-prepared") {
+		t.Fatalf("checkpoint create help omitted source-prepared flag:\n%s", stderr.String())
+	}
 }
 
 func helpLineContaining(text, want string) string {

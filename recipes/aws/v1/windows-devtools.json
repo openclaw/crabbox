@@ -1,0 +1,37 @@
+{
+  "schema": "crabbox-aws-image-recipe/v1",
+  "target": "windows",
+  "profile": "windows-builder",
+  "readinessRecipe": "recipes/windows/v1/windows-builder.json",
+  "inputs": [
+    "recipes/windows/v1/windows-builder.json",
+    "scripts/aws-image-windows-prep-start.ps1",
+    "scripts/aws-image-windows-prep-status.ps1",
+    "scripts/install-windows-developer-tools.ps1",
+    "scripts/smoke-aws-windows-devtools-image.ps1",
+    "scripts/scrub-aws-image.mjs",
+    "scripts/scrub-aws-windows-image.ps1"
+  ],
+  "components": [
+    {
+      "name": "windows-server",
+      "version": "2022",
+      "source": "AWS Windows Server 2022 English Full Base AMI"
+    },
+    {
+      "name": "node",
+      "version": "24",
+      "source": "scripts/install-windows-developer-tools.ps1"
+    },
+    {
+      "name": "pnpm",
+      "version": "11.1.0",
+      "source": "scripts/install-windows-developer-tools.ps1"
+    },
+    {
+      "name": "trufflehog",
+      "version": "3.95.9",
+      "source": "scripts/install-windows-developer-tools.ps1"
+    }
+  ]
+}

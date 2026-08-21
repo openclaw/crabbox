@@ -8,6 +8,7 @@
 - Added versioned typed ready-pool identities with exact readiness recipe, inventory, immutable image, architecture, byte-stable broker-verified repository seed, and cache ABI matching, isolated from legacy pools and revalidated before registration and reusable return, including project-scoped GCP numeric resource identities kept separate from launch selectors.
 - Added versioned `linux-minimal` and `linux-builder` readiness recipes with canonical digests, shared Go/Worker bootstrap generation, and a verified manifest fast path that avoids repeated package-manager work.
 - Added mutually exclusive `runnerPhases` timing telemetry for provider acquire/borrow, connectivity and readiness, workspace seed/overlay, command, artifact collection, cleanup, delegated opaque work, and unattributed time while preserving the existing timing fields.
+- Added protected AWS Linux and Windows image-candidate publication with versioned recipes, destructive-state scrubbing, strict source/architecture/OS proof, immutable OCI evidence bundles, keyless signing, and explicit candidate-only smoke proof.
 
 ### Fixed
 

@@ -367,19 +367,20 @@ type NativeCheckpointImage struct {
 }
 
 type NativeCheckpointCreateRequest struct {
-	Config       Config
-	Server       Server
-	Target       SSHTarget
-	CheckpointID string
-	LeaseID      string
-	Name         string
-	RepoName     string
-	Workdir      string
-	Strategy     string
-	NoReboot     bool
-	Wait         bool
-	WaitTimeout  time.Duration
-	Stderr       io.Writer
+	Config         Config
+	Server         Server
+	Target         SSHTarget
+	CheckpointID   string
+	LeaseID        string
+	Name           string
+	RepoName       string
+	Workdir        string
+	Strategy       string
+	NoReboot       bool
+	SourcePrepared bool
+	Wait           bool
+	WaitTimeout    time.Duration
+	Stderr         io.Writer
 }
 
 type NativeCheckpointCreateResult struct {

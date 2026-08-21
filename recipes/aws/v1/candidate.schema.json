@@ -1,0 +1,263 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:crabbox:schema:aws-image-candidate:v1",
+  "title": "CandidateRecordV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "createdAt",
+    "source",
+    "readiness",
+    "target",
+    "image",
+    "previousDefault",
+    "checks"
+  ],
+  "properties": {
+    "schema": {
+      "const": "crabbox-aws-image-candidate/v1"
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "commit",
+        "workflow"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "workflow": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ref",
+            "runId",
+            "runAttempt"
+          ],
+          "properties": {
+            "ref": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\\.github/workflows/[A-Za-z0-9._/-]+\\.ya?ml@refs/heads/[A-Za-z0-9._/-]+$"
+            },
+            "runId": {
+              "type": "string",
+              "pattern": "^(local|[1-9][0-9]*)$"
+            },
+            "runAttempt": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$"
+            }
+          }
+        }
+      }
+    },
+    "readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile",
+        "recipeDigest"
+      ],
+      "properties": {
+        "profile": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$"
+        },
+        "recipeDigest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "platform",
+        "region",
+        "instanceType",
+        "architecture",
+        "baseImage"
+      ],
+      "properties": {
+        "platform": {
+          "enum": [
+            "linux",
+            "windows"
+          ]
+        },
+        "region": {
+          "type": "string",
+          "pattern": "^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$"
+        },
+        "instanceType": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9.-]+$"
+        },
+        "architecture": {
+          "enum": [
+            "x86_64",
+            "arm64"
+          ]
+        },
+        "baseImage": {
+          "$ref": "#/$defs/ami"
+        }
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "amiId",
+        "snapshotIds"
+      ],
+      "properties": {
+        "amiId": {
+          "$ref": "#/$defs/ami"
+        },
+        "snapshotIds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^snap-[0-9a-z]+$"
+          }
+        }
+      }
+    },
+    "previousDefault": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "imageId",
+            "source"
+          ],
+          "properties": {
+            "imageId": {
+              "$ref": "#/$defs/ami"
+            },
+            "source": {
+              "const": "operator-input"
+            }
+          }
+        }
+      ]
+    },
+    "checks": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "status"
+        ],
+        "properties": {
+          "name": {
+            "enum": [
+              "candidate-boot",
+              "candidate-smoke",
+              "scrub",
+              "source-smoke"
+            ]
+          },
+          "status": {
+            "const": "passed"
+          },
+          "evidenceDigest": {
+            "$ref": "#/$defs/digest"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "contains": {
+            "properties": {
+              "name": {
+                "const": "candidate-boot"
+              }
+            },
+            "required": [
+              "name"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "name": {
+                "const": "candidate-smoke"
+              }
+            },
+            "required": [
+              "name"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "name": {
+                "const": "scrub"
+              }
+            },
+            "required": [
+              "name"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "name": {
+                "const": "source-smoke"
+              }
+            },
+            "required": [
+              "name"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "ami": {
+      "type": "string",
+      "pattern": "^ami-[0-9a-z]+$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}
