@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"flag"
 	"io"
 	"net/http"
@@ -16,8 +17,46 @@ import (
 	"time"
 
 	apidaytona "github.com/daytonaio/daytona/libs/api-client-go"
+	sdkdaytona "github.com/daytonaio/daytona/libs/sdk-go/pkg/daytona"
+	sdktypes "github.com/daytonaio/daytona/libs/sdk-go/pkg/types"
+	toolbox "github.com/daytonaio/daytona/libs/toolbox-api-client-go"
 	"github.com/openclaw/crabbox/internal/testutil"
 )
+
+func TestDaytonaCommandRunnerUsesLongRemoteAndHTTPTimeouts(t *testing.T) {
+	var request map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"result":"done","exitCode":0}`)
+	}))
+	defer server.Close()
+
+	toolboxConfig := toolbox.NewConfiguration()
+	toolboxConfig.Servers = toolbox.ServerConfigurations{{URL: server.URL}}
+	toolboxConfig.HTTPClient = server.Client()
+	toolboxClient := toolbox.NewAPIClient(toolboxConfig)
+	sandbox := &sdkdaytona.Sandbox{
+		ToolboxClient: toolboxClient,
+		Process:       sdkdaytona.NewProcessService(toolboxClient, nil, sdktypes.CodeLanguage("")),
+	}
+
+	runner := newDaytonaCommandRunner(sandbox)
+	if _, err := runner.ExecuteCommand(t.Context(), "sleep 65"); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := toolboxConfig.HTTPClient.Timeout, 61*time.Minute; got != want {
+		t.Fatalf("HTTP timeout=%s, want %s", got, want)
+	}
+	if got, want := request["timeout"], float64(3600); got != want {
+		t.Fatalf("remote timeout=%v, want %v", got, want)
+	}
+}
 
 func TestCreateDaytonaSyncArchiveWritesTempFile(t *testing.T) {
 	root := t.TempDir()
