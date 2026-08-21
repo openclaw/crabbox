@@ -35,3 +35,6 @@ vmd/.build/
 internal/applevmhelper/embedded/
 /crabbox-apple-vm-helper
 /crabbox-apple-vm-vmd
+.DS_Store
+**/.DS_Store
+.claude/

@@ -16,6 +16,14 @@ boundaries.
 > Do not move the tag or weaken the verifier. The runtime fix requires a new
 > signed release tag.
 
+> **Signer registration:** GitHub evaluates SSH tag-signature verification at
+> push time only. Register the tagging machine's SSH key as a GitHub account
+> signing key *before* creating the tag, and confirm the pushed tag reports
+> `verification.verified == true` before producing any candidate. A tag pushed
+> under an unregistered key is permanently unverified; recovering requires
+> replacing the tag under temporarily lifted tag-ruleset enforcement and
+> rebinding the release record's `tagObject`.
+
 A release begins with an annotated signed `vMAJOR.MINOR.PATCH` tag and two
 captured immutable Git identities:
 
@@ -493,7 +501,7 @@ lower-level `codesign-macos.sh`, `extract-release-notes.sh`,
 operator commands above and must not be reordered or invoked as substitute
 gates.
 
-The hosted `Verify Homebrew Release` workflow preserves the same anonymous
+The hosted `Verify Homebrew Release` workflow (`verify-homebrew.yml`; dispatch inputs `tag`, `tag_object`, `source_commit`, `verifier_commit`, `release_id`, `public_verifier_run_id`) preserves the same anonymous
 public-record boundary without depending on a rate-limited native-runner IP. A
 credential-free Linux preflight freezes the public release, verifier run,
 workflow, and artifact metadata before either native job starts. Each native

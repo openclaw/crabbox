@@ -42,6 +42,7 @@ History uses Conventional Commit prefixes such as `feat:`, `fix:`, `docs:`, and 
 
 Follow `docs/RELEASING.md` exactly; the flow is gated and mostly irreversible. Pitfalls that have broken past releases:
 
+- Before tagging on any maintainer Mac, that machine's SSH signing key must BOTH be in `.github/release-allowed-signers` AND be registered on the maintainer's GitHub account as a signing key. GitHub evaluates SSH tag-signature verification at push time only; a tag pushed before its key is registered is permanently `unknown_key` and can never pass `scripts/publish-release.sh`'s `verification.verified` gate. Check `gh api repos/openclaw/crabbox/git/tags/<tag-object> --jq .verification` immediately after pushing the tag, before building anything.
 - The signed tag annotation must be exactly the bare version (`git tag -s v0.39.0 -m "v0.39.0"`), never a descriptive message. `scripts/verify-release-source.sh` requires the tag subject to equal the version, and the protected tag ruleset blocks deleting or recreating a wrong tag.
 - Bump every version-carrying file, not just the changelog: the `CHANGELOG.md` section heading plus `worker/package.json` and both root entries in `worker/package-lock.json`. See the Release Checklist in `docs/operations.md`.
 - The producer requires a merged authorize-source record at `release/records/vX.Y.Z.json` (binding the tag object and source commit) on `main` before `scripts/build-release-candidate.sh` will build; if the tag is recreated, update the record's `tagObject`.
