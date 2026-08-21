@@ -3,6 +3,8 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -351,6 +353,37 @@ func TestRemotePrepareGitOverlayResetsExactRequestedTree(t *testing.T) {
 	}
 }
 
+func TestRemotePrepareGitOverlayIsHermeticBeforeWorkspaceInspection(t *testing.T) {
+	command := remotePrepareGitOverlay("/tmp/crabbox-overlay/workdir", gitCoherencePlan{
+		RemoteURL: "/tmp/crabbox-overlay/origin.git",
+		Target:    strings.Repeat("a", 40),
+		Tree:      strings.Repeat("b", 40),
+		Branch:    "main",
+	})
+	for _, required := range []string{
+		"/usr/bin/env -i PATH=/usr/bin:/bin",
+		"/bin/bash --noprofile --norc",
+		"/usr/bin/git",
+		"-c credential.helper=",
+		"-c protocol.allow=never",
+		"-c protocol.ext.allow=never",
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_ASKPASS=/bin/false",
+	} {
+		if !strings.Contains(command, required) {
+			t.Fatalf("hermetic overlay command missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"bash -lc", "command git", `PATH="$PATH"`} {
+		if strings.Contains(command, forbidden) {
+			t.Fatalf("hermetic overlay command contains %q", forbidden)
+		}
+	}
+	if wrapper, workspace := strings.Index(command, "git() {"), strings.Index(command, "usable_git_workspace"); wrapper < 0 || workspace < 0 || wrapper > workspace {
+		t.Fatalf("trusted Git wrapper is not established before workspace inspection")
+	}
+}
+
 func TestRemotePrepareGitOverlayIgnoresAmbientGitTransformsAndHooks(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX Git overlay integration")
@@ -499,9 +532,10 @@ func TestRemotePrepareGitOverlayDisablesReferenceTransactionHooks(t *testing.T) 
 		reuse      bool
 		globalHook bool
 		template   bool
+		reject     bool
 	}{
 		{name: "reused repository hook", reuse: true},
-		{name: "global hooks path", globalHook: true},
+		{name: "global hooks path and ext transport", globalHook: true, reject: true},
 		{name: "clone template hook", template: true},
 	}
 	for _, test := range tests {
@@ -547,7 +581,7 @@ func TestRemotePrepareGitOverlayDisablesReferenceTransactionHooks(t *testing.T) 
 			}
 			commandEnv = append(commandEnv, "GIT_CONFIG_SYSTEM=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
 
-			command := exec.Command("bash", "-lc", remotePrepareGitOverlay(workdir, coherence))
+			command := exec.Command("/bin/bash", "--noprofile", "--norc", "-c", remotePrepareGitOverlay(workdir, coherence))
 			command.Env = childEnvironmentWithout(
 				os.Environ(),
 				"GIT_CONFIG_GLOBAL",
@@ -555,11 +589,19 @@ func TestRemotePrepareGitOverlayDisablesReferenceTransactionHooks(t *testing.T) 
 				"GIT_CONFIG_NOSYSTEM",
 			)
 			command.Env = append(command.Env, commandEnv...)
-			if out, err := command.CombinedOutput(); err != nil {
+			out, err := command.CombinedOutput()
+			if test.reject {
+				if err == nil || !strings.Contains(string(out), "transport 'ext' not allowed") {
+					t.Fatalf("dangerous transport was not rejected: err=%v out=%q", err, out)
+				}
+			} else if err != nil {
 				t.Fatalf("prepare overlay: %v\n%s", err, out)
 			}
 			if _, err := os.Stat(marker); !os.IsNotExist(err) {
 				t.Fatalf("reference-transaction hook executed: %v", err)
+			}
+			if test.reject {
+				return
 			}
 			if got := gitOutput(workdir, "rev-parse", "HEAD"); got != repo.Head {
 				t.Fatalf("remote HEAD=%q want %q", got, repo.Head)
@@ -570,11 +612,164 @@ func TestRemotePrepareGitOverlayDisablesReferenceTransactionHooks(t *testing.T) 
 				}
 			}
 			if test.template {
-				if _, err := os.Stat(filepath.Join(workdir, ".git", "hooks", "reference-transaction")); err != nil {
-					t.Fatalf("clone template hook was not installed for the regression: %v", err)
+				if _, err := os.Stat(filepath.Join(workdir, ".git", "hooks", "reference-transaction")); !os.IsNotExist(err) {
+					t.Fatalf("ambient clone template hook was installed: %v", err)
 				}
 			}
 		})
+	}
+}
+
+func TestRemotePrepareGitOverlayIgnoresHostilePathAndGlobalRewrites(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX Git overlay integration")
+	}
+	_, repo, _, coherence := newGitOverlayTestRepo(t)
+	workdir := filepath.Join(t.TempDir(), "workdir")
+	attackRoot := t.TempDir()
+	pathMarker := filepath.Join(attackRoot, "path-git-ran")
+	rewriteMarker := filepath.Join(attackRoot, "rewrite-ran")
+	hookMarker := filepath.Join(attackRoot, "hook-ran")
+	attackBin := filepath.Join(attackRoot, "bin")
+	if err := os.MkdirAll(attackBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(attackBin, "git"), "#!/bin/sh\nprintf path >"+shellQuote(pathMarker)+"\nexit 97\n")
+	rewrite := filepath.Join(attackRoot, "rewrite.sh")
+	writeExecutable(t, rewrite, "#!/bin/sh\nprintf rewrite >"+shellQuote(rewriteMarker)+"\nexit 98\n")
+	hooks := filepath.Join(attackRoot, "hooks")
+	if err := os.MkdirAll(hooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(hooks, "reference-transaction"), "#!/bin/sh\nprintf hook >"+shellQuote(hookMarker)+"\n")
+	config := filepath.Join(attackRoot, "gitconfig")
+	configureGitFile(t, config, "core.hooksPath", hooks)
+	configureGitFile(t, config, "protocol.ext.allow", "always")
+	configureGitFile(t, config, "url.ext::"+rewrite+".insteadof", repo.RemoteURL)
+
+	activateRewrite := exec.Command("/usr/bin/git", "ls-remote", repo.RemoteURL)
+	activateRewrite.Env = append(childEnvironmentWithout(os.Environ(), "GIT_CONFIG_GLOBAL"), "GIT_CONFIG_GLOBAL="+config)
+	_, _ = activateRewrite.CombinedOutput()
+	if _, err := os.Stat(rewriteMarker); err != nil {
+		t.Fatalf("hostile global rewrite fixture did not activate: %v", err)
+	}
+	if err := os.Remove(rewriteMarker); err != nil {
+		t.Fatal(err)
+	}
+
+	command := exec.Command("/bin/bash", "--noprofile", "--norc", "-c", remotePrepareGitOverlay(workdir, coherence))
+	command.Env = append(
+		childEnvironmentWithout(os.Environ(), "PATH", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM"),
+		"PATH="+attackBin+":/usr/bin:/bin",
+		"GIT_CONFIG_GLOBAL="+config,
+		"GIT_CONFIG_SYSTEM=/dev/null",
+		"GIT_CONFIG_NOSYSTEM=1",
+	)
+	if out, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("prepare overlay: %v\n%s", err, out)
+	}
+	for _, marker := range []string{pathMarker, rewriteMarker, hookMarker} {
+		if _, err := os.Stat(marker); !os.IsNotExist(err) {
+			t.Fatalf("ambient Git attack executed via %q: %v", marker, err)
+		}
+	}
+	if got := gitOutput(workdir, "rev-parse", "HEAD"); got != repo.Head {
+		t.Fatalf("remote HEAD=%q want %q", got, repo.Head)
+	}
+}
+
+func TestRemotePrepareGitOverlayReplacesLocalURLRewriteBeforeFetch(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX Git overlay integration")
+	}
+	_, repo, _, coherence := newGitOverlayTestRepo(t)
+	workdir := filepath.Join(t.TempDir(), "workdir")
+	if out, err := exec.Command("/usr/bin/git", "clone", repo.RemoteURL, workdir).CombinedOutput(); err != nil {
+		t.Fatalf("clone remote workspace: %v\n%s", err, out)
+	}
+	attackRoot := t.TempDir()
+	marker := filepath.Join(attackRoot, "rewrite-ran")
+	rewrite := filepath.Join(attackRoot, "rewrite.sh")
+	writeExecutable(t, rewrite, "#!/bin/sh\nprintf rewrite >"+shellQuote(marker)+"\nexit 98\n")
+	runGit(t, workdir, "config", "protocol.ext.allow", "always")
+	runGit(t, workdir, "config", "url.ext::"+rewrite+".insteadof", repo.RemoteURL)
+	reuseMarker := filepath.Join(workdir, ".git", "reuse-marker")
+	writeFile(t, reuseMarker, "unsafe workspace\n")
+
+	activateRewrite := exec.Command("/usr/bin/git", "-C", workdir, "ls-remote", repo.RemoteURL)
+	_, _ = activateRewrite.CombinedOutput()
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("hostile local rewrite fixture did not activate: %v", err)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+
+	command := exec.Command("/bin/bash", "--noprofile", "--norc", "-c", remotePrepareGitOverlay(workdir, coherence))
+	if out, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("prepare overlay: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("local URL rewrite executed: %v", err)
+	}
+	if _, err := os.Stat(reuseMarker); !os.IsNotExist(err) {
+		t.Fatalf("unsafe workspace was reused: %v", err)
+	}
+	if got := gitOutput(workdir, "rev-parse", "HEAD"); got != repo.Head {
+		t.Fatalf("remote HEAD=%q want %q", got, repo.Head)
+	}
+}
+
+func TestRemotePrepareGitOverlayDoesNotInvokeAmbientCredentialHelper(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX Git overlay integration")
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Basic realm="test"`)
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	attackRoot := t.TempDir()
+	marker := filepath.Join(attackRoot, "credential-helper-ran")
+	helper := filepath.Join(attackRoot, "credential-helper.sh")
+	writeExecutable(t, helper, "#!/bin/sh\nprintf helper >"+shellQuote(marker)+"\nprintf 'username=test\\npassword=test\\n'\n")
+	config := filepath.Join(attackRoot, "gitconfig")
+	configureGitFile(t, config, "credential.helper", helper)
+	remoteURL := server.URL + "/repo.git"
+
+	activateHelper := exec.Command("/usr/bin/git", "ls-remote", remoteURL)
+	activateHelper.Env = append(
+		childEnvironmentWithout(os.Environ(), "GIT_CONFIG_GLOBAL", "GIT_TERMINAL_PROMPT"),
+		"GIT_CONFIG_GLOBAL="+config,
+		"GIT_TERMINAL_PROMPT=0",
+	)
+	_, _ = activateHelper.CombinedOutput()
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("credential helper fixture did not activate: %v", err)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+
+	plan := gitCoherencePlan{
+		RemoteURL: remoteURL,
+		Target:    strings.Repeat("a", 40),
+		Tree:      strings.Repeat("b", 40),
+		Branch:    "main",
+	}
+	command := exec.Command("/bin/bash", "--noprofile", "--norc", "-c", remotePrepareGitOverlay(filepath.Join(t.TempDir(), "workdir"), plan))
+	command.Env = append(
+		childEnvironmentWithout(os.Environ(), "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM"),
+		"GIT_CONFIG_GLOBAL="+config,
+		"GIT_CONFIG_SYSTEM=/dev/null",
+		"GIT_CONFIG_NOSYSTEM=1",
+	)
+	if out, err := command.CombinedOutput(); err == nil {
+		t.Fatalf("unauthenticated origin unexpectedly succeeded: %q", out)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("ambient credential helper executed: %v", err)
 	}
 }
 

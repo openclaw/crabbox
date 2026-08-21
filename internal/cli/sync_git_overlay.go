@@ -318,12 +318,65 @@ expected_origin=` + shellQuote(plan.RemoteURL) + `
 expected_target=` + shellQuote(plan.Target) + `
 expected_tree=` + shellQuote(plan.Tree) + `
 advertised_branch=` + shellQuote(plan.Branch) + `
-git() {
-  command git -c core.hooksPath=/dev/null "$@"
-}
 overlay_fallback() {
   printf '%s%s\n' ` + shellQuote(gitOverlayFallbackMarker) + ` "$1" >&2
   exit ` + fmt.Sprintf("%d", gitOverlayFallbackExitCode) + `
+}
+case "$workdir" in "$parent"/*) ;; *) overlay_fallback unsafe_remote_root ;; esac
+if [ -L "$workdir" ]; then overlay_fallback symlink_remote_root; fi
+/bin/mkdir -p "$parent"
+test -x /bin/bash
+test -x /usr/bin/env
+test -x /usr/bin/git
+git_runtime_root="$(/usr/bin/mktemp -d "$parent/.overlay-git.XXXXXX")"
+git_home="$git_runtime_root/home"
+git_xdg="$git_runtime_root/xdg"
+git_hooks="$git_runtime_root/hooks"
+seed_tmp=""
+/bin/mkdir -p "$git_home" "$git_xdg" "$git_hooks"
+cleanup_git_overlay() {
+  if [ -n "$seed_tmp" ]; then /bin/rm -rf -- "$seed_tmp"; fi
+  /bin/rm -rf -- "$git_runtime_root"
+}
+trap cleanup_git_overlay EXIT
+git() {
+  /usr/bin/env -i \
+    HOME="$git_home" \
+    XDG_CONFIG_HOME="$git_xdg" \
+    PATH="/usr/bin:/bin" \
+    LANG=C \
+    LC_ALL=C \
+    GIT_CONFIG_NOSYSTEM=1 \
+    GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_CONFIG_SYSTEM=/dev/null \
+    GIT_ATTR_NOSYSTEM=1 \
+    GIT_TERMINAL_PROMPT=0 \
+    GIT_ASKPASS=/bin/false \
+    SSH_ASKPASS=/bin/false \
+    GCM_INTERACTIVE=Never \
+    GIT_SSH_COMMAND=/bin/false \
+    /usr/bin/git \
+      -c credential.helper= \
+      -c core.hooksPath="$git_hooks" \
+      -c core.attributesFile=/dev/null \
+      -c core.fsmonitor=false \
+      -c protocol.allow=never \
+      -c protocol.file.allow=always \
+      -c protocol.http.allow=always \
+      -c protocol.https.allow=always \
+      -c protocol.ext.allow=never \
+      -c protocol.git.allow=never \
+      -c protocol.ssh.allow=never \
+      -c fetch.recurseSubmodules=false \
+      -c submodule.recurse=false \
+      "$@"
+}
+git_overlay_local_config_safe() {
+  checkout_root="$1"
+  unsafe_keys="$(git -C "$checkout_root" config --local --name-only --get-regexp \
+    '^(include|includeif[.]|url[.].*[.](insteadof|pushinsteadof)|protocol[.]|http[.]|core[.](gitproxy|sshcommand)|remote[.].*[.](uploadpack|receivepack|proxy))' \
+    2>/dev/null || true)"
+  [ -z "$unsafe_keys" ]
 }
 classify_missing_advertised_branch() {
   failed_status="$1"
@@ -343,89 +396,62 @@ materialize_target_objects() {
 prepare_hermetic_checkout() {
   checkout_root="$1"
   checkout_git_dir="$(git -C "$checkout_root" rev-parse --absolute-git-dir)" || return 1
-  rm -f -- "$checkout_git_dir/info/attributes" || return 1
+  /bin/rm -f -- "$checkout_git_dir/info/attributes" || return 1
   filter_keys="$(git -C "$checkout_root" config --local --name-only --get-regexp '^filter\.' 2>/dev/null || true)"
   if [ -n "$filter_keys" ]; then
     while IFS= read -r filter_key; do
       [ -z "$filter_key" ] || git -C "$checkout_root" config --local --unset-all "$filter_key" || return 1
     done <<<"$filter_keys"
   fi
-  hermetic_root="$checkout_git_dir/crabbox-overlay-hermetic"
-  hermetic_home="$hermetic_root/home"
-  hermetic_hooks="$hermetic_root/hooks"
-  rm -rf -- "$hermetic_root" || return 1
-  mkdir -p "$hermetic_home" "$hermetic_hooks" || return 1
   git -C "$checkout_root" config --local core.autocrlf false &&
   git -C "$checkout_root" config --local core.eol lf &&
   git -C "$checkout_root" config --local core.symlinks true &&
   git -C "$checkout_root" config --local core.filemode true &&
   git -C "$checkout_root" config --local core.fsmonitor false &&
   git -C "$checkout_root" config --local core.attributesFile /dev/null &&
-  git -C "$checkout_root" config --local core.hooksPath "$hermetic_hooks"
+  git -C "$checkout_root" config --local core.hooksPath "$git_hooks"
 }
 hermetic_git() {
-  /usr/bin/env -i \
-    HOME="$hermetic_home" \
-    XDG_CONFIG_HOME="$hermetic_home" \
-    PATH="$PATH" \
-    LANG=C \
-    GIT_CONFIG_NOSYSTEM=1 \
-    GIT_CONFIG_GLOBAL=/dev/null \
-    GIT_CONFIG_SYSTEM=/dev/null \
-    GIT_ATTR_NOSYSTEM=1 \
-    GIT_TERMINAL_PROMPT=0 \
-    git \
-      -c core.autocrlf=false \
-      -c core.eol=lf \
-      -c core.symlinks=true \
-      -c core.filemode=true \
-      -c core.fsmonitor=false \
-      -c core.attributesFile=/dev/null \
-      -c core.hooksPath="$hermetic_hooks" \
-      "$@"
-}
-cleanup_hermetic_checkout() {
-  rm -rf -- "${hermetic_root:-}"
+  git \
+    -c core.autocrlf=false \
+    -c core.eol=lf \
+    -c core.symlinks=true \
+    -c core.filemode=true \
+    "$@"
 }
 ` + remoteGitWorkspaceFunctions() + `
-case "$workdir" in "$parent"/*) ;; *) overlay_fallback unsafe_remote_root ;; esac
-if [ -L "$workdir" ]; then overlay_fallback symlink_remote_root; fi
-mkdir -p "$parent"
 if [ -d "$workdir" ]; then
   cd "$workdir"
-  if ! usable_git_workspace || ! origin_matches; then
+  if ! usable_git_workspace || ! git_overlay_local_config_safe "$workdir" || ! origin_matches; then
     cd /
-    tmp="$(mktemp -d "$parent/.overlay-seed.XXXXXX")"
-    cleanup_overlay_seed() { rm -rf -- "$tmp"; }
-    trap cleanup_overlay_seed EXIT
+    seed_tmp="$(/usr/bin/mktemp -d "$parent/.overlay-seed.XXXXXX")"
     set +e
-    git clone --quiet --filter=blob:none --no-checkout --single-branch --branch "$advertised_branch" "$expected_origin" "$tmp"
+    git clone --quiet --filter=blob:none --no-checkout --single-branch --branch "$advertised_branch" "$expected_origin" "$seed_tmp"
     clone_status=$?
     set -e
     [ "$clone_status" -eq 0 ] || classify_missing_advertised_branch "$clone_status"
-    git -C "$tmp" cat-file -e "$expected_target^{commit}" 2>/dev/null || overlay_fallback target_missing
-    [ "$(git -C "$tmp" rev-parse --verify "$expected_target^{tree}")" = "$expected_tree" ] || overlay_fallback tree_mismatch
-    rm -rf -- "$workdir"
-    mv -- "$tmp" "$workdir"
-    trap - EXIT
+    git -C "$seed_tmp" cat-file -e "$expected_target^{commit}" 2>/dev/null || overlay_fallback target_missing
+    [ "$(git -C "$seed_tmp" rev-parse --verify "$expected_target^{tree}")" = "$expected_tree" ] || overlay_fallback tree_mismatch
+    /bin/rm -rf -- "$workdir"
+    /bin/mv -- "$seed_tmp" "$workdir"
+    seed_tmp=""
   fi
 else
-  tmp="$(mktemp -d "$parent/.overlay-seed.XXXXXX")"
-  cleanup_overlay_seed() { rm -rf -- "$tmp"; }
-  trap cleanup_overlay_seed EXIT
+  seed_tmp="$(/usr/bin/mktemp -d "$parent/.overlay-seed.XXXXXX")"
   set +e
-  git clone --quiet --filter=blob:none --no-checkout --single-branch --branch "$advertised_branch" "$expected_origin" "$tmp"
+  git clone --quiet --filter=blob:none --no-checkout --single-branch --branch "$advertised_branch" "$expected_origin" "$seed_tmp"
   clone_status=$?
   set -e
   [ "$clone_status" -eq 0 ] || classify_missing_advertised_branch "$clone_status"
-  git -C "$tmp" cat-file -e "$expected_target^{commit}" 2>/dev/null || overlay_fallback target_missing
-  [ "$(git -C "$tmp" rev-parse --verify "$expected_target^{tree}")" = "$expected_tree" ] || overlay_fallback tree_mismatch
-  mv -- "$tmp" "$workdir"
-  trap - EXIT
+  git -C "$seed_tmp" cat-file -e "$expected_target^{commit}" 2>/dev/null || overlay_fallback target_missing
+  [ "$(git -C "$seed_tmp" rev-parse --verify "$expected_target^{tree}")" = "$expected_tree" ] || overlay_fallback tree_mismatch
+  /bin/mv -- "$seed_tmp" "$workdir"
+  seed_tmp=""
 fi
 cd "$workdir"
 workdir="$(pwd -P)"
 exact_git_root || overlay_fallback invalid_git_root
+git_overlay_local_config_safe "$workdir" || overlay_fallback unsafe_git_config
 repair_origin || overlay_fallback origin_repair_failed
 if [ "$(git config --bool core.sparseCheckout 2>/dev/null || true)" = true ] ||
    [ "$(git config --bool core.sparseCheckoutCone 2>/dev/null || true)" = true ]; then
@@ -443,7 +469,6 @@ git merge-base --is-ancestor "$expected_target" "$fetched_head" >/dev/null 2>&1 
 [ "$(git rev-parse --verify "$expected_target^{tree}")" = "$expected_tree" ] || overlay_fallback tree_mismatch
 materialize_target_objects "$workdir"
 prepare_hermetic_checkout "$workdir" || overlay_fallback checkout_config_failed
-trap cleanup_hermetic_checkout EXIT
 hermetic_git -C "$workdir" checkout --quiet --detach "$expected_target" || overlay_fallback checkout_failed
 hermetic_git -C "$workdir" reset --hard --quiet "$expected_target" || overlay_fallback reset_failed
 ` + remoteIgnoredWarmCacheCleanScript("hermetic_git", "git overlay") + `
@@ -453,8 +478,6 @@ crabbox_clean_ignored_warm_caches || overlay_fallback clean_failed
 status="$(hermetic_git -C "$workdir" status --porcelain --untracked-files=normal)" || overlay_fallback status_failed
 [ -z "$status" ] || overlay_fallback dirty_after_reset
 hermetic_git -C "$workdir" update-ref -d "$tmp_ref" "$fetched_head" >/dev/null 2>&1 || true
-cleanup_hermetic_checkout
-trap - EXIT
 `
-	return "bash -lc " + shellQuote(script)
+	return "/usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /bin/bash --noprofile --norc -c " + shellQuote(script)
 }
