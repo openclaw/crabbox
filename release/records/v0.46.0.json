@@ -4,5 +4,6 @@
   "tag": "v0.46.0",
   "tagObject": "c51ac5a19a82eb3b2791c1fdbe2c6e3847dd9d6e",
   "sourceCommit": "8ba71f913bbe57285ae29af45ef0d8ec6712477d",
-  "publicationStatus": "ready"
+  "publicationStatus": "blocked",
+  "blocker": "The signed tag predates registration of its SSH signing key on the maintainer's GitHub account, so GitHub's tag verification is permanently unverified and publication can never pass its trust gate. Preserve this tag and release from a new signed tag."
 }
