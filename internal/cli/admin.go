@@ -738,3 +738,23 @@ func configuredAdminCoordinator() (*CoordinatorClient, error) {
 	}
 	return coord, nil
 }
+
+func configuredPromotionCoordinator() (*CoordinatorClient, error) {
+	cfg, err := loadConfig()
+	if err != nil {
+		return nil, err
+	}
+	if cfg.CoordPromotionToken == "" {
+		return nil, exit(2, "protected image promotion requires CRABBOX_COORDINATOR_PROMOTION_TOKEN")
+	}
+	cfg.CoordToken = cfg.CoordPromotionToken
+	cfg.CoordTokenCommand = nil
+	coord, ok, err := newCoordinatorClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, exit(2, "protected image promotion requires a configured coordinator")
+	}
+	return coord, nil
+}

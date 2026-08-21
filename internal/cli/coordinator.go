@@ -293,10 +293,36 @@ type CoordinatorImage struct {
 	ServerType           string                           `json:"serverType,omitempty"`
 	Architecture         string                           `json:"architecture,omitempty"`
 	PromotedAt           string                           `json:"promotedAt,omitempty"`
+	Revision             string                           `json:"revision,omitempty"`
 	FastSnapshotRestores []CoordinatorFastSnapshotRestore `json:"fastSnapshotRestores,omitempty"`
 	Capabilities         *imageCapabilities               `json:"capabilities,omitempty"`
 	CatalogOnly          bool                             `json:"catalogOnly,omitempty"`
 	VariantSelectors     *imageVariantSelectors           `json:"variantSelectors,omitempty"`
+}
+
+type CoordinatorImageDefaultState struct {
+	State    string `json:"state"`
+	ImageID  string `json:"imageId,omitempty"`
+	Revision string `json:"revision,omitempty"`
+}
+
+type CoordinatorImagePromotionEvidence struct {
+	QualificationRef string `json:"qualificationRef"`
+}
+
+type CoordinatorImagePromotionRequest struct {
+	Schema             string                            `json:"schema"`
+	Operation          string                            `json:"operation"`
+	Expected           CoordinatorImageDefaultState      `json:"expected"`
+	Evidence           CoordinatorImagePromotionEvidence `json:"evidence"`
+	IdempotencyKey     string                            `json:"idempotencyKey"`
+	WorkflowRunID      string                            `json:"workflowRunId"`
+	WorkflowRunAttempt string                            `json:"workflowRunAttempt"`
+}
+
+type CoordinatorImagePromotionResult struct {
+	Image   CoordinatorImage `json:"image"`
+	Attempt map[string]any   `json:"attempt,omitempty"`
 }
 
 type CoordinatorFastSnapshotRestore struct {
@@ -1952,6 +1978,15 @@ func (c *CoordinatorClient) PromoteImage(ctx context.Context, imageID string, re
 		}
 	}
 	return res.Image, nil
+}
+
+func (c *CoordinatorClient) PromoteQualifiedImage(
+	ctx context.Context,
+	req CoordinatorImagePromotionRequest,
+) (CoordinatorImagePromotionResult, error) {
+	var res CoordinatorImagePromotionResult
+	err := c.do(ctx, http.MethodPost, "/v1/image-promotions", req, &res)
+	return res, err
 }
 
 func (c *CoordinatorClient) FastSnapshotRestoreStatus(ctx context.Context, imageID string, refs ...CoordinatorImageRef) (CoordinatorImage, error) {

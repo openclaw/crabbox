@@ -126,6 +126,7 @@ func TestFixedAWSCreateIntentExcludesSecrets(t *testing.T) {
 	cfg.Provider = "aws"
 	cfg.CoordToken = firstSecret
 	cfg.CoordAdminToken = firstSecret
+	cfg.CoordPromotionToken = firstSecret
 	cfg.Access.ClientID = firstSecret
 	cfg.Access.ClientSecret = firstSecret
 	cfg.Access.Token = firstSecret
@@ -154,6 +155,7 @@ func TestFixedAWSCreateIntentExcludesSecrets(t *testing.T) {
 	}
 	cfg.CoordToken = secondSecret
 	cfg.CoordAdminToken = secondSecret
+	cfg.CoordPromotionToken = secondSecret
 	cfg.Access.ClientID = secondSecret
 	cfg.Access.ClientSecret = secondSecret
 	cfg.Access.Token = secondSecret
@@ -184,7 +186,7 @@ func TestFixedAWSCreateIntentClassifiesEveryExportedConfigField(t *testing.T) {
 	}
 	classify("coordinator transport or credential", `
 		Coordinator BrokerMode BrokerLoginRedirectOrigins BrokerAutoWebVNC
-		CoordToken CoordTokenCommand CoordAdminToken Access SSHKey
+		CoordToken CoordTokenCommand CoordAdminToken CoordPromotionToken Access SSHKey
 	`)
 	classify("non-AWS provider selection", `
 		Location Image AWSLambdaMicroVM
