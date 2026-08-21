@@ -16,6 +16,7 @@ import {
   checkpointProviderAbsenceHorizonMS,
   markCheckpointProviderMutationStarted,
   recordCheckpointProviderAbsence,
+  resolveRejectedCheckpointProvisioning,
   reserveCheckpointCreate,
 } from "../src/checkpoints";
 import { backfillCheckpointCreateAttempt } from "../src/fleet";
@@ -530,6 +531,130 @@ describe("PostgresCoordinatorStorage", () => {
     expect([...(await storage.list({ prefix: `checkpoint-use:${loserID}:` })).values()]).toEqual([
       expect.objectContaining({ state: "available" }),
     ]);
+  });
+
+  it.each([
+    { label: "pending attempt without a lease", attemptState: "pending" },
+    { label: "canceled attempt without a lease", attemptState: "canceled" },
+    { label: "clean failed lease", attemptState: "pending", leaseState: "failed" },
+    { label: "clean released lease", attemptState: "pending", leaseState: "released" },
+    { label: "clean expired lease", attemptState: "pending", leaseState: "expired" },
+  ] as const)("atomically resolves a rejected PostgreSQL $label exactly once", async (scenario) => {
+    const storage = new PostgresCoordinatorStorage(
+      "postgres://unused",
+      fakeContendedCheckpointPool(),
+    );
+    const checkpointID = "chk_postgres_rejected_attempt";
+    const principal = { owner: "alice@example.com", org: orgKeyForLabel("example-org") };
+    const requestedLeaseID = "cbx_000000000002";
+    const attemptID = `cat_${"b".repeat(32)}`;
+    const now = new Date().toISOString();
+    await storage.put(checkpointKey(checkpointID), {
+      version: 1,
+      id: checkpointID,
+      owner: principal.owner,
+      org: principal.org,
+      leaseID: "cbx_000000000001",
+      provider: "aws",
+      scope: { region: "eu-west-1", accountID: "123456789012" },
+      name: checkpointID,
+      strategy: "disk-snapshot",
+      noReboot: true,
+      image: {
+        id: "snap-owned",
+        resourceID: "snap-owned",
+        kind: "aws-ebs-snapshot",
+        immutableID: "snap-owned",
+        snapshotIDs: ["snap-owned"],
+        state: "available",
+      },
+      state: "ready",
+      retention: { mode: "manual" },
+      generation: 1,
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+      lastUsedAt: now,
+      attempts: 0,
+      pinCount: 0,
+      activeUseCount: 0,
+      eventSequence: 0,
+      target: "linux",
+    } satisfies CoordinatorCheckpointRecord);
+    const claim = await acquireCheckpointUse(storage, checkpointID, principal);
+    await storage.put(`create-attempt:${requestedLeaseID}`, {
+      version: 1,
+      requestedLeaseID,
+      token: attemptID,
+      owner: principal.owner,
+      org: principal.org,
+      state: "pending",
+      checkpointID,
+      checkpointUseClaimHash: await sha256Hex(claim.token),
+      createdAt: now,
+      updatedAt: now,
+    } satisfies CreateAttemptRecord);
+    await bindCheckpointUseProvisioning(
+      storage,
+      checkpointID,
+      claim.token,
+      principal,
+      attemptID,
+      requestedLeaseID,
+    );
+    if (scenario.attemptState === "canceled") {
+      const attempt = (await storage.get<CreateAttemptRecord>(
+        `create-attempt:${requestedLeaseID}`,
+      ))!;
+      await storage.put(`create-attempt:${requestedLeaseID}`, {
+        ...attempt,
+        state: "canceled",
+      } satisfies CreateAttemptRecord);
+    }
+    if ("leaseState" in scenario) {
+      await storage.put(`lease:${requestedLeaseID}`, {
+        id: requestedLeaseID,
+        checkpointID,
+        createAttemptID: attemptID,
+        owner: principal.owner,
+        org: principal.org,
+        state: scenario.leaseState,
+        cloudID: "i-provider-resource",
+      });
+    }
+
+    const resolved = await Promise.all(
+      Array.from(
+        { length: 2 },
+        async () =>
+          await resolveRejectedCheckpointProvisioning(
+            storage,
+            checkpointID,
+            claim.token,
+            principal,
+            attemptID,
+            requestedLeaseID,
+          ),
+      ),
+    );
+
+    expect(resolved.filter(Boolean)).toHaveLength(1);
+    expect(await storage.get(checkpointKey(checkpointID))).toMatchObject({ activeUseCount: 0 });
+    expect(await storage.get(`create-attempt:${requestedLeaseID}`)).toMatchObject({
+      token: attemptID,
+      state: "leaseState" in scenario ? "pending" : "canceled",
+      checkpointID,
+      checkpointUseClaimHash: await sha256Hex(claim.token),
+    });
+    expect(await storage.list({ prefix: `checkpoint-use:${checkpointID}:` })).toHaveLength(0);
+    const events = [
+      ...(
+        await storage.list<{ type: string }>({
+          prefix: `checkpoint-event:${checkpointID}:`,
+        })
+      ).values(),
+    ];
+    expect(events.filter((event) => event.type === "checkpoint.use.aborted")).toHaveLength(1);
   });
 
   it("backfills an exhausted PostgreSQL checkpoint exactly once beyond deleted record pages", async () => {

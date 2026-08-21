@@ -77,6 +77,7 @@ import {
   recordCheckpointDeletionFailure,
   recordCheckpointExpiryDue,
   recordCheckpointProviderAbsence,
+  resolveRejectedCheckpointProvisioning,
   renewCheckpointUse,
   repairCheckpointDueMarker,
   reserveCheckpointCreate,
@@ -14522,22 +14523,17 @@ export class FleetCoordinator {
         );
         await this.scheduleCheckpointAlarm();
       } else {
-        const lease = await this.getLease(input.leaseID);
-        const attempt = await this.getCreateAttempt(input.leaseID);
-        if (
-          (!lease && (!attempt || attempt.state === "canceled")) ||
-          (lease && !["provisioning", "active"].includes(lease.state))
-        ) {
-          await finishCheckpointUse(
+        const resolved = await this.state.runExclusive(() =>
+          resolveRejectedCheckpointProvisioning(
             this.state.storage,
             checkpointID,
             token,
             principal,
-            false,
-            input.createAttemptID,
-          );
-          await this.scheduleCheckpointAlarm();
-        }
+            createAttemptID,
+            requestedLeaseID,
+          ),
+        );
+        if (resolved) await this.scheduleCheckpointAlarm();
       }
       return response;
     } catch (error) {

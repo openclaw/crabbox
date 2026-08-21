@@ -1320,6 +1320,106 @@ export async function abortCheckpointProvisioningForLease(
   });
 }
 
+export async function resolveRejectedCheckpointProvisioning(
+  storage: CoordinatorStorage,
+  checkpointID: string,
+  token: string,
+  principal: CheckpointPrincipal,
+  attemptID: string,
+  leaseID: string,
+): Promise<CoordinatorCheckpointRecord | undefined> {
+  const tokenHash = await sha256Hex(token);
+  return storage.transaction(async (transaction) => {
+    const claimKey = checkpointUseKey(checkpointID, tokenHash);
+    const attemptKey = `create-attempt:${leaseID}`;
+    const [checkpoint, claim, attempt, lease, workspaceReservation, providerResourceOwnership] =
+      await Promise.all([
+        transaction.get<CoordinatorCheckpointRecord>(checkpointKey(checkpointID)),
+        transaction.get<CoordinatorCheckpointUseClaim>(claimKey),
+        transaction.get<CreateAttemptRecord>(attemptKey),
+        transaction.get<LeaseRecord>(`lease:${leaseID}`),
+        transaction.get(`workspace-lease:${leaseID}`),
+        transaction.get(`provider-access:${leaseID}`),
+      ]);
+    if (
+      !checkpoint ||
+      checkpoint.id !== checkpointID ||
+      checkpoint.state !== "ready" ||
+      checkpoint.owner !== principal.owner ||
+      !sameOrgIdentityKey(checkpoint.org, principal.org) ||
+      !claim ||
+      claim.checkpointID !== checkpointID ||
+      claim.tokenHash !== tokenHash ||
+      claim.generation !== checkpoint.generation ||
+      claim.state !== "provisioning" ||
+      claim.leaseID !== leaseID ||
+      claim.attemptID !== attemptID ||
+      claim.owner !== principal.owner ||
+      !sameOrgIdentityKey(claim.org, principal.org) ||
+      !attempt ||
+      attempt.version !== 1 ||
+      attempt.requestedLeaseID !== leaseID ||
+      attempt.token !== attemptID ||
+      attempt.owner !== principal.owner ||
+      attempt.org !== principal.org ||
+      (attempt.state !== "pending" && attempt.state !== "canceled") ||
+      attempt.checkpointID !== checkpointID ||
+      attempt.checkpointUseClaimHash !== tokenHash ||
+      workspaceReservation !== undefined ||
+      providerResourceOwnership !== undefined
+    ) {
+      return undefined;
+    }
+    if (!lease) {
+      if (attempt.canonicalLeaseID || attempt.cloudID || attempt.generation) return undefined;
+      if (attempt.state === "pending") {
+        await transaction.put(attemptKey, {
+          ...attempt,
+          state: "canceled",
+          updatedAt: new Date().toISOString(),
+        } satisfies CreateAttemptRecord);
+      }
+    } else if (
+      lease.id !== leaseID ||
+      lease.checkpointID !== checkpointID ||
+      lease.createAttemptID !== attemptID ||
+      lease.owner !== principal.owner ||
+      !sameOrgIdentityKey(lease.org, principal.org) ||
+      (attempt.canonicalLeaseID !== undefined && attempt.canonicalLeaseID !== leaseID) ||
+      attempt.generation !== lease.createAttemptGeneration ||
+      (attempt.cloudID !== undefined && attempt.cloudID !== lease.cloudID) ||
+      !["failed", "released", "expired"].includes(lease.state) ||
+      lease.provisioningResourceMayExist ||
+      lease.provisioningFailureRetryable ||
+      lease.cleanupStartedAt ||
+      lease.cleanupClaimExpiresAt ||
+      lease.cleanupRetryAt ||
+      lease.cleanupFailedAt ||
+      lease.cleanupError ||
+      lease.cleanupAttempts ||
+      lease.providerKeyCleanupPending ||
+      lease.releaseDeletesServer === true ||
+      lease.runtimeAdapterDeleteRequestedAt ||
+      lease.runtimeAdapterDeleteClaimID ||
+      lease.runtimeAdapterDeleteRetryAt ||
+      lease.runtimeAdapterDeleteDispatchUntil ||
+      lease.runtimeAdapterDeleteAttempts ||
+      lease.runtimeAdapterDeleteError
+    ) {
+      return undefined;
+    }
+    await transaction.delete(claimKey);
+    return writeCheckpointTransition(
+      transaction,
+      checkpoint,
+      { ...checkpoint, activeUseCount: Math.max(0, checkpoint.activeUseCount - 1) },
+      "checkpoint.use.aborted",
+      principal.owner,
+      { reason: "lease-create-rejected" },
+    );
+  });
+}
+
 export async function renewCheckpointUse(
   storage: CoordinatorStorage,
   checkpointID: string,

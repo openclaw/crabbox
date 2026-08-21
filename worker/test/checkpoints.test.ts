@@ -2110,6 +2110,611 @@ describe("coordinator-managed checkpoints", () => {
     expect(storage.snapshot()).not.toContain(acquired.claim);
   });
 
+  it.each([
+    { label: "admission", error: "cost_limit_exceeded", status: 429 },
+    { label: "provider readiness", error: "provider_not_configured", status: 424 },
+  ] as const)(
+    "cancels the exact checkpoint attempt and releases its claim after $label rejection",
+    async ({ label, error, status }) => {
+      const { coordinator, storage, provider } = await checkpointFixture("aws", {
+        CRABBOX_MAX_CHECKPOINT_USE_CLAIMS: "1",
+        ...(label === "admission" ? { CRABBOX_MAX_ACTIVE_LEASES: "1" } : {}),
+      });
+      const checkpointID = `chk_preprovision_${label.replaceAll(" ", "_")}`;
+      const requestedLeaseID = "cbx_000000000002";
+      const attemptID = `cat_${"a".repeat(32)}`;
+      await createCheckpoint(coordinator, checkpointID);
+      const acquired = (await (
+        await coordinator.fetch(
+          checkpointRequest("POST", `/v1/checkpoints/${checkpointID}/use`, { action: "begin" }),
+        )
+      ).json()) as { claim: string };
+      vi.spyOn(provider, "hourlyPriceUSD").mockResolvedValue(1);
+      const providerCalls = vi.spyOn(provider, "createServerWithFallback");
+      if (label === "provider readiness") {
+        const readinessCoordinator = coordinator as unknown as {
+          providerConfigurationReadiness(provider: string): {
+            provider: string;
+            configured: boolean;
+            missing: string[];
+            message: string;
+          };
+        };
+        vi.spyOn(readinessCoordinator, "providerConfigurationReadiness").mockReturnValue({
+          provider: "aws",
+          configured: false,
+          missing: ["credentials"],
+          message: "AWS provider is not configured",
+        });
+      }
+      const body = {
+        provider: "aws",
+        awsSnapshot: "snap-000000000001",
+        checkpointID,
+        checkpointUseClaim: acquired.claim,
+        leaseID: requestedLeaseID,
+        createAttemptID: attemptID,
+        sshPublicKey: "ssh-ed25519 checkpoint-test",
+      };
+
+      const rejected = await coordinator.fetch(
+        checkpointRequest("POST", "/v1/leases/from-checkpoint", body),
+      );
+
+      expect(await rejected.json()).toMatchObject({ error });
+      expect(rejected.status).toBe(status);
+      expect(await storage.get(`lease:${requestedLeaseID}`)).toBeUndefined();
+      expect(await storage.get(`create-attempt:${requestedLeaseID}`)).toMatchObject({
+        requestedLeaseID,
+        token: attemptID,
+        owner: "alice@example.com",
+        org,
+        state: "canceled",
+        checkpointID,
+        checkpointUseClaimHash: await sha256Hex(acquired.claim),
+      });
+      expect(await storage.get(checkpointKey(checkpointID))).toMatchObject({ activeUseCount: 0 });
+      expect(await storage.list({ prefix: `checkpoint-use:${checkpointID}:` })).toHaveLength(0);
+      expect(providerCalls).not.toHaveBeenCalled();
+
+      const replay = await coordinator.fetch(
+        checkpointRequest("POST", "/v1/leases/from-checkpoint", body),
+      );
+      expect(replay.status).toBe(409);
+      await expect(replay.json()).resolves.toMatchObject({ error: "create_canceled" });
+      expect(providerCalls).not.toHaveBeenCalled();
+      expect(
+        (
+          await coordinator.fetch(
+            checkpointRequest("POST", `/v1/checkpoints/${checkpointID}/use`, { action: "begin" }),
+          )
+        ).status,
+      ).toBe(201);
+    },
+  );
+
+  it.each([
+    { label: "provisioning lease", lease: { state: "provisioning", cloudID: "" } },
+    { label: "active lease", lease: { state: "active" } },
+    {
+      label: "uncertain failed lease",
+      lease: { state: "failed", provisioningResourceMayExist: true },
+    },
+    {
+      label: "uncertain released lease",
+      lease: { state: "released", cleanupRetryAt: "2026-08-20T13:00:00.000Z" },
+    },
+    {
+      label: "started provider cleanup",
+      lease: { state: "failed", cleanupStartedAt: "2026-08-20T12:00:00.000Z" },
+    },
+    {
+      label: "failed provider cleanup",
+      lease: { state: "failed", cleanupError: "provider cleanup remains uncertain" },
+    },
+    {
+      label: "recorded provider cleanup failure",
+      lease: { state: "failed", cleanupFailedAt: "2026-08-20T12:00:00.000Z" },
+    },
+    {
+      label: "pending provider cleanup claim",
+      lease: { state: "released", cleanupClaimExpiresAt: "2026-08-20T13:00:00.000Z" },
+    },
+    {
+      label: "incomplete provider cleanup attempts",
+      lease: { state: "expired", cleanupAttempts: 1 },
+    },
+    {
+      label: "retryable provisioning failure",
+      lease: { state: "failed", provisioningFailureRetryable: true },
+    },
+    {
+      label: "pending provider key cleanup",
+      lease: { state: "released", providerKeyCleanupPending: true },
+    },
+    {
+      label: "pending server deletion",
+      lease: { state: "released", releaseDeletesServer: true },
+    },
+    {
+      label: "pending runtime adapter deletion",
+      lease: {
+        state: "released",
+        runtimeAdapterDeleteRequestedAt: "2026-08-20T12:00:00.000Z",
+      },
+    },
+    {
+      label: "retrying runtime adapter deletion",
+      lease: { state: "failed", runtimeAdapterDeleteRetryAt: "2026-08-20T13:00:00.000Z" },
+    },
+    {
+      label: "claimed runtime adapter deletion",
+      lease: { state: "released", runtimeAdapterDeleteClaimID: "runtime-delete-claim" },
+    },
+    {
+      label: "dispatched runtime adapter deletion",
+      lease: {
+        state: "released",
+        runtimeAdapterDeleteDispatchUntil: "2026-08-20T13:00:00.000Z",
+      },
+    },
+    {
+      label: "incomplete runtime adapter deletion attempts",
+      lease: { state: "expired", runtimeAdapterDeleteAttempts: 1 },
+    },
+    {
+      label: "failed runtime adapter deletion",
+      lease: { state: "expired", runtimeAdapterDeleteError: "adapter cleanup remains uncertain" },
+    },
+    { label: "workspace reservation", ownershipKey: "workspace-lease" },
+    { label: "provider resource ownership", ownershipKey: "provider-access" },
+    { label: "missing attempt", missingAttempt: true },
+    { label: "mismatched checkpoint owner", checkpoint: { owner: "other@example.com" } },
+    { label: "mismatched checkpoint organization", checkpoint: { org: "other-org" } },
+    { label: "mismatched checkpoint generation", checkpoint: { generation: 99 } },
+    { label: "mismatched claim owner", claim: { owner: "other@example.com" } },
+    { label: "mismatched claim organization", claim: { org: "other-org" } },
+    { label: "mismatched claim generation", claim: { generation: 99 } },
+    { label: "mismatched claim token hash", claim: { tokenHash: "f".repeat(64) } },
+    { label: "mismatched claim lease", claim: { leaseID: "cbx_000000000099" } },
+    { label: "mismatched claim attempt", claim: { attemptID: `cat_${"9".repeat(32)}` } },
+    { label: "canonical lease ownership", attempt: { canonicalLeaseID: "cbx_000000000002" } },
+    { label: "cloud resource ownership", attempt: { cloudID: "i-potentially-surviving" } },
+    { label: "provisioning generation", attempt: { generation: "provider-generation" } },
+    { label: "mismatched attempt token", attempt: { token: `cat_${"f".repeat(32)}` } },
+    { label: "mismatched attempt owner", attempt: { owner: "other@example.com" } },
+    { label: "mismatched attempt organization", attempt: { org: "other-org" } },
+    { label: "mismatched attempt checkpoint", attempt: { checkpointID: "chk_other_checkpoint" } },
+    {
+      label: "mismatched attempt claim",
+      attempt: { checkpointUseClaimHash: "f".repeat(64) },
+    },
+    {
+      label: "canceled attempt with cloud ownership",
+      attempt: { state: "canceled", cloudID: "i-potentially-surviving" },
+    },
+    {
+      label: "canceled attempt with canonical ownership",
+      attempt: { state: "canceled", canonicalLeaseID: "cbx_000000000002" },
+    },
+    {
+      label: "canceled attempt with provisioning generation",
+      attempt: { state: "canceled", generation: "provider-generation" },
+    },
+    {
+      label: "terminal lease with mismatched generation",
+      lease: { state: "failed", createAttemptGeneration: "other-generation" },
+    },
+    {
+      label: "terminal lease with mismatched canonical ownership",
+      lease: { state: "released" },
+      attempt: { canonicalLeaseID: "cbx_000000000099" },
+    },
+    {
+      label: "terminal lease with mismatched cloud ownership",
+      lease: { state: "released" },
+      attempt: { cloudID: "i-other-provider-resource" },
+    },
+    {
+      label: "terminal lease with workspace reservation",
+      lease: { state: "failed" },
+      ownershipKey: "workspace-lease",
+    },
+    {
+      label: "terminal lease with provider resource ownership",
+      lease: { state: "released" },
+      ownershipKey: "provider-access",
+    },
+    {
+      label: "foreign terminal lease",
+      lease: { state: "released", checkpointID: "chk_other_checkpoint" },
+    },
+    {
+      label: "terminal lease with mismatched owner",
+      lease: { state: "released", owner: "other@example.com" },
+    },
+    {
+      label: "terminal lease with mismatched organization",
+      lease: { state: "released", org: "other-org" },
+    },
+    {
+      label: "terminal lease with mismatched attempt",
+      lease: { state: "released", createAttemptID: `cat_${"9".repeat(32)}` },
+    },
+  ] as const)("retains the checkpoint fence when rejection finds $label", async (test) => {
+    const { coordinator, storage, provider } = await checkpointFixture();
+    const checkpointID = `chk_retain_${test.label.replaceAll(" ", "_")}`;
+    const requestedLeaseID = "cbx_000000000002";
+    const attemptID = `cat_${"b".repeat(32)}`;
+    await createCheckpoint(coordinator, checkpointID);
+    const acquired = (await (
+      await coordinator.fetch(
+        checkpointRequest("POST", `/v1/checkpoints/${checkpointID}/use`, { action: "begin" }),
+      )
+    ).json()) as { claim: string };
+    const providerCalls = vi.spyOn(provider, "createServerWithFallback");
+    vi.spyOn(coordinator as never, "createLease" as never).mockImplementation(async () => {
+      if ("lease" in test) {
+        await storage.put(`lease:${requestedLeaseID}`, {
+          ...checkpointLease("aws"),
+          id: requestedLeaseID,
+          checkpointID,
+          createAttemptID: attemptID,
+          ...test.lease,
+        });
+      }
+      if ("ownershipKey" in test) {
+        await storage.put(`${test.ownershipKey}:${requestedLeaseID}`, true);
+      }
+      if ("attempt" in test) {
+        const attempt = (await storage.get<CreateAttemptRecord>(
+          `create-attempt:${requestedLeaseID}`,
+        ))!;
+        await storage.put(`create-attempt:${requestedLeaseID}`, { ...attempt, ...test.attempt });
+      }
+      if ("checkpoint" in test) {
+        const checkpoint = (await storage.get<CoordinatorCheckpointRecord>(
+          checkpointKey(checkpointID),
+        ))!;
+        await storage.put(checkpointKey(checkpointID), { ...checkpoint, ...test.checkpoint });
+      }
+      if ("claim" in test) {
+        const claimKey = `checkpoint-use:${checkpointID}:${await sha256Hex(acquired.claim)}`;
+        const claim = (await storage.get<CoordinatorCheckpointUseClaim>(claimKey))!;
+        await storage.put(claimKey, { ...claim, ...test.claim });
+      }
+      if ("missingAttempt" in test) {
+        await storage.delete(`create-attempt:${requestedLeaseID}`);
+      }
+      return Response.json({ error: "provider_pending" }, { status: 503 });
+    });
+
+    const rejected = await coordinator.fetch(
+      checkpointRequest("POST", "/v1/leases/from-checkpoint", {
+        provider: "aws",
+        awsSnapshot: "snap-000000000001",
+        checkpointID,
+        checkpointUseClaim: acquired.claim,
+        leaseID: requestedLeaseID,
+        createAttemptID: attemptID,
+      }),
+    );
+
+    expect(rejected.status).toBe(503);
+    expect(await storage.get(checkpointKey(checkpointID))).toMatchObject({ activeUseCount: 1 });
+    const retainedAttempt = await storage.get(`create-attempt:${requestedLeaseID}`);
+    expect(retainedAttempt === undefined).toBe("missingAttempt" in test);
+    expect(retainedAttempt ?? { state: "pending" }).toMatchObject({
+      state: "pending",
+      ...("attempt" in test ? test.attempt : {}),
+    });
+    expect([
+      ...(await storage.list({ prefix: `checkpoint-use:${checkpointID}:` })).values(),
+    ]).toEqual([
+      expect.objectContaining({
+        state: "provisioning",
+        leaseID: requestedLeaseID,
+        attemptID,
+        ...("claim" in test ? test.claim : {}),
+      }),
+    ]);
+    expect(providerCalls).not.toHaveBeenCalled();
+  });
+
+  it("releases an exact already-canceled checkpoint attempt without a lease", async () => {
+    const { coordinator, storage } = await checkpointFixture();
+    const checkpointID = "chk_rejected_already_canceled";
+    const requestedLeaseID = "cbx_000000000002";
+    const attemptID = `cat_${"e".repeat(32)}`;
+    await createCheckpoint(coordinator, checkpointID);
+    const acquired = (await (
+      await coordinator.fetch(
+        checkpointRequest("POST", `/v1/checkpoints/${checkpointID}/use`, { action: "begin" }),
+      )
+    ).json()) as { claim: string };
+    vi.spyOn(coordinator as never, "createLease" as never).mockImplementation(async () => {
+      const attempt = (await storage.get<CreateAttemptRecord>(
+        `create-attempt:${requestedLeaseID}`,
+      ))!;
+      await storage.put(`create-attempt:${requestedLeaseID}`, {
+        ...attempt,
+        state: "canceled",
+      } satisfies CreateAttemptRecord);
+      return Response.json({ error: "create_canceled" }, { status: 409 });
+    });
+
+    const rejected = await coordinator.fetch(
+      checkpointRequest("POST", "/v1/leases/from-checkpoint", {
+        provider: "aws",
+        awsSnapshot: "snap-000000000001",
+        checkpointID,
+        checkpointUseClaim: acquired.claim,
+        leaseID: requestedLeaseID,
+        createAttemptID: attemptID,
+      }),
+    );
+
+    expect(rejected.status).toBe(409);
+    expect(await storage.get(`lease:${requestedLeaseID}`)).toBeUndefined();
+    expect(await storage.get(`create-attempt:${requestedLeaseID}`)).toMatchObject({
+      token: attemptID,
+      state: "canceled",
+    });
+    expect(await storage.get(checkpointKey(checkpointID))).toMatchObject({ activeUseCount: 0 });
+    expect(await storage.list({ prefix: `checkpoint-use:${checkpointID}:` })).toHaveLength(0);
+    const events = [
+      ...(
+        await storage.list<{ type: string }>({ prefix: `checkpoint-event:${checkpointID}:` })
+      ).values(),
+    ];
+    expect(events.filter((event) => event.type === "checkpoint.use.aborted")).toHaveLength(1);
+  });
+
+  it.each(["failed", "released", "expired"] as const)(
+    "releases a checkpoint claim after an exact clean terminal %s lease rejection",
+    async (state) => {
+      const { coordinator, storage } = await checkpointFixture();
+      const checkpointID = `chk_rejected_terminal_${state}`;
+      const requestedLeaseID = "cbx_000000000002";
+      const attemptID = `cat_${"d".repeat(32)}`;
+      await createCheckpoint(coordinator, checkpointID);
+      const acquired = (await (
+        await coordinator.fetch(
+          checkpointRequest("POST", `/v1/checkpoints/${checkpointID}/use`, { action: "begin" }),
+        )
+      ).json()) as { claim: string };
+      vi.spyOn(coordinator as never, "createLease" as never).mockImplementation(async () => {
+        await storage.put(`lease:${requestedLeaseID}`, {
+          ...checkpointLease("aws"),
+          id: requestedLeaseID,
+          checkpointID,
+          createAttemptID: attemptID,
+          state,
+        });
+        return Response.json({ error: "lease_create_failed" }, { status: 503 });
+      });
+
+      const rejected = await coordinator.fetch(
+        checkpointRequest("POST", "/v1/leases/from-checkpoint", {
+          provider: "aws",
+          awsSnapshot: "snap-000000000001",
+          checkpointID,
+          checkpointUseClaim: acquired.claim,
+          leaseID: requestedLeaseID,
+          createAttemptID: attemptID,
+        }),
+      );
+
+      expect(rejected.status).toBe(503);
+      expect(await storage.get(checkpointKey(checkpointID))).toMatchObject({ activeUseCount: 0 });
+      expect(await storage.list({ prefix: `checkpoint-use:${checkpointID}:` })).toHaveLength(0);
+      expect(await storage.get(`create-attempt:${requestedLeaseID}`)).toMatchObject({
+        token: attemptID,
+        state: "pending",
+      });
+      const events = [
+        ...(
+          await storage.list<{ type: string }>({ prefix: `checkpoint-event:${checkpointID}:` })
+        ).values(),
+      ];
+      expect(events.filter((event) => event.type === "checkpoint.use.aborted")).toHaveLength(1);
+    },
+  );
+
+  it("releases an exact terminal lease with matching canonical, cloud, and generation ownership", async () => {
+    const { coordinator, storage } = await checkpointFixture();
+    const checkpointID = "chk_rejected_fully_bound_terminal";
+    const requestedLeaseID = "cbx_000000000002";
+    const attemptID = `cat_${"d".repeat(32)}`;
+    const generation = "exact-provider-generation";
+    await createCheckpoint(coordinator, checkpointID);
+    const acquired = (await (
+      await coordinator.fetch(
+        checkpointRequest("POST", `/v1/checkpoints/${checkpointID}/use`, { action: "begin" }),
+      )
+    ).json()) as { claim: string };
+    vi.spyOn(coordinator as never, "createLease" as never).mockImplementation(async () => {
+      const lease = {
+        ...checkpointLease("aws"),
+        id: requestedLeaseID,
+        checkpointID,
+        createAttemptID: attemptID,
+        createAttemptGeneration: generation,
+        state: "released",
+      } satisfies LeaseRecord;
+      const attempt = (await storage.get<CreateAttemptRecord>(
+        `create-attempt:${requestedLeaseID}`,
+      ))!;
+      await storage.put(`lease:${requestedLeaseID}`, lease);
+      await storage.put(`create-attempt:${requestedLeaseID}`, {
+        ...attempt,
+        canonicalLeaseID: requestedLeaseID,
+        cloudID: lease.cloudID,
+        generation,
+      } satisfies CreateAttemptRecord);
+      return Response.json({ error: "lease_create_failed" }, { status: 503 });
+    });
+
+    const rejected = await coordinator.fetch(
+      checkpointRequest("POST", "/v1/leases/from-checkpoint", {
+        provider: "aws",
+        awsSnapshot: "snap-000000000001",
+        checkpointID,
+        checkpointUseClaim: acquired.claim,
+        leaseID: requestedLeaseID,
+        createAttemptID: attemptID,
+      }),
+    );
+
+    expect(rejected.status).toBe(503);
+    expect(await storage.get(checkpointKey(checkpointID))).toMatchObject({ activeUseCount: 0 });
+    expect(await storage.list({ prefix: `checkpoint-use:${checkpointID}:` })).toHaveLength(0);
+    expect(await storage.get(`create-attempt:${requestedLeaseID}`)).toMatchObject({
+      token: attemptID,
+      state: "pending",
+      canonicalLeaseID: requestedLeaseID,
+      generation,
+    });
+  });
+
+  it.each([
+    { label: "reactivated", lease: { state: "active" } },
+    {
+      label: "uncertain provider cleanup",
+      lease: { state: "failed", provisioningResourceMayExist: true },
+    },
+    {
+      label: "pending runtime adapter cleanup",
+      lease: {
+        state: "released",
+        runtimeAdapterDeleteRequestedAt: "2026-08-20T12:00:00.000Z",
+      },
+    },
+  ] as const)(
+    "retains the checkpoint claim when a terminal lease becomes $label before resolution",
+    async ({ label, lease }) => {
+      const { coordinator, storage } = await checkpointFixture();
+      const checkpointID = `chk_terminal_race_${label.replaceAll(" ", "_")}`;
+      const requestedLeaseID = "cbx_000000000002";
+      const attemptID = `cat_${"f".repeat(32)}`;
+      await createCheckpoint(coordinator, checkpointID);
+      const acquired = (await (
+        await coordinator.fetch(
+          checkpointRequest("POST", `/v1/checkpoints/${checkpointID}/use`, { action: "begin" }),
+        )
+      ).json()) as { claim: string };
+      let resolutionPending = false;
+      const transaction = storage.transaction.bind(storage);
+      vi.spyOn(storage, "transaction").mockImplementation(async (callback) => {
+        if (resolutionPending) {
+          resolutionPending = false;
+          const previous = (await storage.get<LeaseRecord>(`lease:${requestedLeaseID}`))!;
+          await storage.put(`lease:${requestedLeaseID}`, { ...previous, ...lease });
+        }
+        return await transaction(callback);
+      });
+      const schedule = vi.spyOn(coordinator as never, "scheduleCheckpointAlarm" as never);
+      vi.spyOn(coordinator as never, "createLease" as never).mockImplementation(async () => {
+        await storage.put(`lease:${requestedLeaseID}`, {
+          ...checkpointLease("aws"),
+          id: requestedLeaseID,
+          checkpointID,
+          createAttemptID: attemptID,
+          state: "failed",
+        });
+        resolutionPending = true;
+        return Response.json({ error: "lease_create_failed" }, { status: 503 });
+      });
+
+      const rejected = await coordinator.fetch(
+        checkpointRequest("POST", "/v1/leases/from-checkpoint", {
+          provider: "aws",
+          awsSnapshot: "snap-000000000001",
+          checkpointID,
+          checkpointUseClaim: acquired.claim,
+          leaseID: requestedLeaseID,
+          createAttemptID: attemptID,
+        }),
+      );
+
+      expect(rejected.status).toBe(503);
+      expect(await storage.get(`lease:${requestedLeaseID}`)).toMatchObject(lease);
+      expect(await storage.get(checkpointKey(checkpointID))).toMatchObject({ activeUseCount: 1 });
+      expect([
+        ...(await storage.list({ prefix: `checkpoint-use:${checkpointID}:` })).values(),
+      ]).toEqual([
+        expect.objectContaining({ state: "provisioning", leaseID: requestedLeaseID, attemptID }),
+      ]);
+      const events = [
+        ...(
+          await storage.list<{ type: string }>({ prefix: `checkpoint-event:${checkpointID}:` })
+        ).values(),
+      ];
+      expect(events.filter((event) => event.type === "checkpoint.use.aborted")).toHaveLength(0);
+      expect(schedule).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("cancels one rejected checkpoint attempt despite concurrent exact retries", async () => {
+    const { coordinator, storage, provider } = await checkpointFixture();
+    const checkpointID = "chk_concurrent_rejected_attempt";
+    const requestedLeaseID = "cbx_000000000002";
+    const attemptID = `cat_${"c".repeat(32)}`;
+    await createCheckpoint(coordinator, checkpointID);
+    const acquired = (await (
+      await coordinator.fetch(
+        checkpointRequest("POST", `/v1/checkpoints/${checkpointID}/use`, { action: "begin" }),
+      )
+    ).json()) as { claim: string };
+    let entered!: () => void;
+    let reject!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const providerCalls = vi.spyOn(provider, "createServerWithFallback");
+    const createLease = vi
+      .spyOn(coordinator as never, "createLease" as never)
+      .mockImplementation(async () => {
+        entered();
+        return await new Promise<Response>((resolve) => {
+          reject = () => resolve(Response.json({ error: "capacity_exhausted" }, { status: 429 }));
+        });
+      });
+    const body = {
+      provider: "aws",
+      awsSnapshot: "snap-000000000001",
+      checkpointID,
+      checkpointUseClaim: acquired.claim,
+      leaseID: requestedLeaseID,
+      createAttemptID: attemptID,
+    };
+    const original = coordinator.fetch(
+      checkpointRequest("POST", "/v1/leases/from-checkpoint", body),
+    );
+    await started;
+
+    const concurrent = await coordinator.fetch(
+      checkpointRequest("POST", "/v1/leases/from-checkpoint", body),
+    );
+    expect(concurrent.status).toBe(409);
+    expect(createLease).toHaveBeenCalledOnce();
+    reject();
+    expect((await original).status).toBe(429);
+
+    const replay = await coordinator.fetch(
+      checkpointRequest("POST", "/v1/leases/from-checkpoint", body),
+    );
+    expect(replay.status).toBe(409);
+    await expect(replay.json()).resolves.toMatchObject({ error: "create_canceled" });
+    expect(createLease).toHaveBeenCalledOnce();
+    expect(providerCalls).not.toHaveBeenCalled();
+    expect(await storage.get(`create-attempt:${requestedLeaseID}`)).toMatchObject({
+      token: attemptID,
+      state: "canceled",
+    });
+    expect(await storage.get(checkpointKey(checkpointID))).toMatchObject({ activeUseCount: 0 });
+  });
+
   it("durably reserves the exact lease attempt before a use claim enters provisioning", async () => {
     const { coordinator, storage } = await checkpointFixture();
     const checkpointID = "chk_attempt_before_claim";
@@ -2255,7 +2860,16 @@ describe("coordinator-managed checkpoints", () => {
     ).json()) as { claim: string };
     const provision = vi
       .spyOn(coordinator as never, "createLease" as never)
-      .mockResolvedValue(Response.json({ error: "retry_later" }, { status: 503 }));
+      .mockImplementation(async () => {
+        const attempt = (await storage.get<CreateAttemptRecord>(
+          `create-attempt:${requestedLeaseID}`,
+        ))!;
+        await storage.put(`create-attempt:${requestedLeaseID}`, {
+          ...attempt,
+          cloudID: "i-potentially-surviving",
+        });
+        return Response.json({ error: "retry_later" }, { status: 503 });
+      });
     const body = {
       provider: "aws",
       awsSnapshot: "snap-000000000001",
@@ -2662,7 +3276,16 @@ describe("coordinator-managed checkpoints", () => {
     );
     const provision = vi
       .spyOn(coordinator as never, "createLease" as never)
-      .mockResolvedValue(Response.json({ error: "retry_later" }, { status: 503 }));
+      .mockImplementation(async () => {
+        const attempt = (await storage.get<CreateAttemptRecord>(
+          `create-attempt:${requestedLeaseID}`,
+        ))!;
+        await storage.put(`create-attempt:${requestedLeaseID}`, {
+          ...attempt,
+          cloudID: "i-potentially-surviving",
+        });
+        return Response.json({ error: "retry_later" }, { status: 503 });
+      });
     const body = {
       provider: "aws",
       awsSnapshot: "snap-000000000001",
@@ -3969,6 +4592,7 @@ describe("coordinator-managed checkpoints", () => {
       owner: "alice@example.com",
       org,
       state: "pending",
+      cloudID: "i-potentially-surviving",
       checkpointID: "chk_cancel_provision",
       checkpointUseClaimHash: await sha256Hex(acquired.claim),
       createdAt: new Date().toISOString(),
