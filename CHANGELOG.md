@@ -4,36 +4,23 @@
 
 ### Added
 
-- Added fixed idempotent `--lease-id` replay to the Machine0 provider, binding each caller-supplied lease identity to a durable create intent and the exact Machine0 resource ID.
+- Added fixed idempotent `--lease-id` replay to the Machine0 provider: an identical warmup adopts the existing VM instead of creating a second one, a drifted request fails with `lease_id_conflict`, and a released ID is single-use.
 
 ### Fixed
 
-- Rejected oversized delegated-run workspaces before creating paid or stateful provider resources.
-- Bounded delegated-provider subprocess captures and automatic cleanup deadlines while fencing sandbox, session, and Testbox deletion against replaced local lease claims.
-- Preserved exact recovery claims and visible rollback failures for AWS Lambda MicroVMs, canceled Blaxel processes when polling is interrupted, and honored W&B sandbox status wait and terminal-state handling.
-- Required an exact local Cloudflare Dynamic Workers claim for the configured loader endpoint before deleting run metadata, while preserving raw run IDs for read-only status.
-- Retained marked Cloudflare Dynamic Workers recovery claims when execution lifecycle reconciliation is uncertain, surfaced claim-persistence failures, and clarified that stop cannot cancel active runs.
-- Made E2B and Azure Dynamic Sessions workspace sync transactional, retained newly created resources after requested sync/setup failures, and enforced sync, status-wait, and cleanup deadlines.
-- Documented which acquisition responsibilities deliberately remain provider-owned and why centralizing them was rejected.
-- Documented which delegated-run lifecycle responsibilities deliberately remain provider-owned and why centralizing them was rejected.
-- Made doctor configuration fail with a clear provider error instead of panicking when a backend lacks doctor capability.
-- Consolidated nine small cross-provider helper clusters (Tailscale metadata, exact tag codecs, gateway URL validation, cache-volume naming, scoped claim resolution, envd transport scaffolding, delegated status polling, workspace archive sync, and exact-duplicate micro-utilities) into shared helpers while keeping divergent variants adapter-owned.
-- Shared the doctor-capability configuration boilerplate across sixty-six providers while keeping direct-construction variants, provider-specific validation, and divergent failure semantics adapter-owned.
-- Completed the shared lifecycle polling sweep across fourteen more providers, leaving only SSH-observer delegates, schedule-selected retry delays, and lock acquisitions hand-rolled by design.
-- Adopted shared lifecycle polling in nine more providers (Apple Container, Asciibox, Blaxel, Daytona, Hostinger, Nomad, NVIDIA Brev, OpenSandbox, and Tart), preserving event-driven waits, jittered backoff, and provider-specific deadline diagnostics adapter-side.
-- Adopted shared lifecycle polling in the Agent Sandbox, XCP-ng, GitHub Codespaces, Lume, Hyper-V, Proxmox, and Sealos Devbox providers, unifying timeout, cadence, and cancellation semantics while keeping event-driven and multi-clock waits adapter-owned.
-- Shared the fixed idempotent lease-ID mechanism (durable create intent, claim locking, terminal tombstones) between the AWS and Machine0 providers while keeping launch attempts, adoption validation, and provider bindings adapter-owned.
-- Shared the cross-origin redirect refusal policy and origin comparison across seventeen HTTP-API providers while keeping provider-specific refusal errors and deliberately divergent redirect architectures adapter-owned.
-- Shared cross-process lease operation locking across nine sandbox providers while keeping lease-ID validation, slug-allocation locks, and claim-namespace preparation adapter-owned, preserving every existing on-disk lock path.
-- Bounded strict single-request provider JSON subprocess exchanges through a shared transport while keeping provider validation and diagnostics adapter-owned.
-- Shared strict provider claim matching and writable label-copy mechanics across direct providers while keeping recovery and deletion authorization adapter-owned.
+- Rejected oversized delegated-run workspaces before any paid or stateful provider resource is created, so size-limit failures no longer leave billable resources behind.
+- Made E2B and Azure Dynamic Sessions workspace sync transactional so a failed upload no longer destroys the previous remote workspace, and honored `--keep-on-failure` for sync and setup failures.
+- Stopped losing track of possibly-created billable resources: ambiguous Vast instance creation and failed AWS Lambda MicroVM rollbacks now persist recovery claims and surface errors naming the exact resource instead of failing silently.
 - Enforced coordinator-provided SSH host keys before first transport and removed per-lease local SSH credentials after confirmed brokered release.
-- Shared lifecycle observation across Machine0, Tenki, DigitalOcean, Linode, Vultr, and Morph while keeping provider state handling adapter-owned, and made canceled Tenki readiness waits report cancellation instead of timeout.
-- Closed Linode cleanup and release claim races by carrying exact revisioned claims into claim-locked provider deletion while preserving retryable claims and SSH keys on failure.
-- Fenced Vultr instance and managed SSH-key cleanup with exact revisioned claims, preserving ownership metadata and local credentials for safe retries after partial deletion.
-- Fenced DigitalOcean Droplet and managed SSH-key cleanup with exact revisioned claims, live account and immutable-resource revalidation, instance-first deletion, and retry-safe retention after partial cleanup.
-- Preserved exact lease claim revisions across coordinator registration, endpoint refresh, and DigitalOcean Tailscale metadata so lifecycle cleanup cannot fail with stale authorization and leak provider resources.
-- Preserved account-bound Vast recovery claims and SSH keys after ambiguous instance creation, and surfaced claim-persistence failures during rollback cleanup.
+- Required exact local ownership before destructive cleanup across Cloudflare Dynamic Workers, DigitalOcean, Linode, and Vultr, fencing deletions with revisioned claims so concurrent sessions or stale state can no longer remove the wrong resource.
+- Retained evidence for uncertain Cloudflare Dynamic Workers completions - runs are kept with recovery claims instead of reporting not-kept over unreconciled provider state - and documented that stop removes metadata only and cannot cancel active runs.
+- Honored documented waiting and cancellation behavior: W&B `status --wait` now actually waits, Blaxel stops its remote process when polling is interrupted, and status waits bound each in-flight provider call by the requested timeout.
+- Made doctor configuration fail with a clear provider error instead of panicking when a backend lacks doctor capability.
+- Bounded delegated-provider subprocess captures and background cleanup with explicit limits, deadlines, and visible truncation instead of unbounded growth.
+- Preserved exact lease claim revisions across coordinator registration, endpoint refresh, and Tailscale metadata updates so lifecycle cleanup cannot fail with stale authorization and leak provider resources.
+- Made canceled Tenki readiness waits report cancellation instead of timeout.
+- Consolidated cross-provider infrastructure into shared engines - lifecycle polling (30 providers), cross-origin redirect security (17), cross-process operation locking (9), doctor configuration (66), the AWS/Machine0 fixed-lease mechanism, JSON subprocess exchanges, strict claim matching, and nine smaller helper clusters - preserving every provider-specific behavior, error message, and on-disk path.
+- Documented which acquisition and delegated-run lifecycle responsibilities deliberately remain provider-owned and why centralizing them was rejected.
 
 ## 0.45.0 - 2026-08-19
 
