@@ -696,54 +696,6 @@ func runSSHInputQuiet(ctx context.Context, target SSHTarget, remote, input strin
 	return runSSHInput(ctx, target, remote, strings.NewReader(input), io.Discard, io.Discard)
 }
 
-func runSSHInputCombinedOutput(ctx context.Context, target SSHTarget, remote string, input io.Reader) (output string, err error) {
-	if input == nil {
-		input = strings.NewReader("")
-	}
-	data, err := io.ReadAll(input)
-	if err != nil {
-		return "", err
-	}
-	inputSize := int64(len(data))
-	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, &inputSize)
-	if err != nil {
-		return "", err
-	}
-	defer func() {
-		if err != nil {
-			err = errors.Join(err, prepared.close(ctx, target))
-		}
-	}()
-	remote = wrapRemoteForTarget(target, prepared.command)
-	replayableInput, err := newReplayableSSHInput(data)
-	if err != nil {
-		return "", err
-	}
-	defer func() { err = errors.Join(err, replayableInput.close()) }()
-	var lastOutput string
-	var lastErr error
-	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
-		probe := target
-		probe.Port = port
-		cmd := sshCommandContext(ctx, probe, sshArgs(probe, remote)...)
-		cmd.Stdin, err = replayableInput.reset()
-		if err != nil {
-			return "", err
-		}
-		var attempt synchronizedBuffer
-		err = runSSHCommand(cmd, &attempt, &attempt)
-		lastOutput = strings.TrimSpace(attempt.String())
-		if err == nil {
-			return lastOutput, nil
-		}
-		lastErr = err
-		if !shouldRetrySSHPort(err) {
-			return lastOutput, err
-		}
-	}
-	return lastOutput, lastErr
-}
-
 func runSSHInput(ctx context.Context, target SSHTarget, remote string, input io.Reader, stdout, stderr io.Writer) (err error) {
 	if input == nil {
 		input = strings.NewReader("")
