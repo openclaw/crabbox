@@ -1092,6 +1092,73 @@ describe("azure provider", () => {
     ]);
   });
 
+  it("claims, deletes, and clears an exact VM-less Azure NIC and public IP set", async () => {
+    const { records, storage } = memoryAzureDeleteClaimStorage();
+    const writtenClaims: unknown[] = [];
+    const put = storage.put;
+    storage.put = async (key, value) => {
+      writtenClaims.push(value);
+      await put(key, value);
+    };
+    const client = new AzureClient(baseEnv, { ownedDeleteClaimStorage: storage });
+    seedAzureAuthCache(client);
+    const deleted = new Set<string>();
+    const deletes: string[] = [];
+    const resourcePrefix = "/subscriptions/sub/resourceGroups/crabbox-leases/providers";
+    const nicID = `${resourcePrefix}/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic`;
+    const pipID = `${resourcePrefix}/Microsoft.Network/publicIPAddresses/crabbox-blue-lobster-pip`;
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      if (init?.method === "DELETE") {
+        deletes.push(url.pathname);
+        deleted.add(url.pathname);
+        return new Response(null, { status: 204 });
+      }
+      if (deleted.has(url.pathname)) return azureResourceNotFoundResponse(url);
+      if (url.pathname === nicID) {
+        return Response.json({
+          id: nicID,
+          name: "crabbox-blue-lobster-nic",
+          location: "eastus",
+          tags: ownedAzureTags(),
+          properties: {
+            resourceGuid: "nic-immutable-id",
+            ipConfigurations: [
+              {
+                id: `${nicID}/ipConfigurations/ipconfig`,
+                properties: { publicIPAddress: { id: pipID } },
+              },
+            ],
+          },
+        });
+      }
+      if (url.pathname === pipID) {
+        return Response.json({
+          id: pipID,
+          name: "crabbox-blue-lobster-pip",
+          location: "eastus",
+          tags: ownedAzureTags(),
+          properties: {
+            resourceGuid: "pip-immutable-id",
+            ipConfiguration: { id: `${nicID}/ipConfigurations/ipconfig` },
+          },
+        });
+      }
+      return azureResourceNotFoundResponse(url);
+    };
+
+    await expect(client.deleteOwnedServer(ownedAzureLease())).resolves.toBeUndefined();
+    expect(deletes).toEqual([nicID, pipID]);
+    expect(writtenClaims).toContainEqual(
+      expect.objectContaining({
+        version: 2,
+        stableResourceIdentity: expect.stringContaining("nic-immutable-id"),
+      }),
+    );
+    expect(JSON.stringify(writtenClaims)).toContain("pip-immutable-id");
+    expect(records.size).toBe(0);
+  });
+
   it("releases a VM with an ephemeral OS disk and no managed disk resource", async () => {
     const client = new AzureClient(baseEnv);
     seedAzureAuthCache(client);
@@ -3948,6 +4015,104 @@ describe("azure provider", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("rolls back an immediate Azure SKU failure before trying the next SKU", async () => {
+    const { records, storage } = memoryAzureDeleteClaimStorage();
+    const client = new AzureClient(baseEnv, { ownedDeleteClaimStorage: storage });
+    seedAzureAuthCache(client);
+    const resources = new Map<string, Record<string, unknown>>();
+    const deleted: string[] = [];
+    const vmSizes: string[] = [];
+    const vmNames: string[] = [];
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      const path = url.pathname;
+      if (path.endsWith("/resourceGroups/crabbox-leases")) {
+        return Response.json({ tags: { managed_by: "crabbox" } });
+      }
+      if (path.endsWith("/virtualNetworks/crabbox-vnet")) {
+        return Response.json({ tags: { managed_by: "crabbox" } });
+      }
+      if (path.endsWith("/networkSecurityGroups/crabbox-nsg") && init?.method === "GET") {
+        return Response.json({
+          tags: { managed_by: "crabbox" },
+          properties: { securityRules: [] },
+        });
+      }
+      if (init?.method === "DELETE") {
+        deleted.push(path);
+        resources.delete(path);
+        return new Response(null, { status: 204 });
+      }
+      if (init?.method === "PUT") {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        const name = path.split("/").pop() ?? "";
+        if (path.includes("/virtualMachines/")) {
+          const properties = body["properties"] as {
+            hardwareProfile?: { vmSize?: string };
+          };
+          vmSizes.push(properties.hardwareProfile?.vmSize ?? "");
+          vmNames.push(name);
+          if (vmSizes.length === 1) {
+            return Response.json(
+              { error: { code: "SkuNotAvailable", message: "requested size unavailable" } },
+              { status: 409 },
+            );
+          }
+        }
+        resources.set(path, {
+          ...body,
+          id: path,
+          name,
+          properties: {
+            ...(body["properties"] as object),
+            ...(path.includes("/networkInterfaces/") ? { resourceGuid: `${name}-guid` } : {}),
+            ...(path.includes("/publicIPAddresses/")
+              ? { resourceGuid: `${name}-guid`, ipAddress: "192.0.2.10" }
+              : {}),
+            ...(path.includes("/virtualMachines/")
+              ? { provisioningState: "Succeeded", hardwareProfile: { vmSize: vmSizes.at(-1) } }
+              : {}),
+          },
+        });
+        return Response.json(resources.get(path));
+      }
+      if (init?.method === "PATCH") return Response.json({});
+      const resource = resources.get(path);
+      return resource ? Response.json(resource) : azureResourceNotFoundResponse(url);
+    };
+
+    const result = await client.createServerWithFallback(
+      testLeaseConfig({
+        capacityMarket: "on-demand",
+        serverType: "Standard_D32ads_v6",
+        serverTypeExplicit: false,
+      }),
+      "cbx_123456789abc",
+      "blue-lobster",
+      "owner",
+    );
+
+    expect(vmSizes.slice(0, 2)).toEqual(["Standard_D32ads_v6", "Standard_D32ds_v6"]);
+    expect(result.serverType).toBe("Standard_D32ds_v6");
+    const [firstName, secondName] = vmNames as [string, string];
+    const prefix = "/subscriptions/sub/resourceGroups/crabbox-leases/providers";
+    const firstNIC = `${prefix}/Microsoft.Network/networkInterfaces/${firstName}-nic`;
+    const firstPIP = `${prefix}/Microsoft.Network/publicIPAddresses/${firstName}-pip`;
+    const secondNIC = `${prefix}/Microsoft.Network/networkInterfaces/${secondName}-nic`;
+    const secondPIP = `${prefix}/Microsoft.Network/publicIPAddresses/${secondName}-pip`;
+    const secondVM = `${prefix}/Microsoft.Compute/virtualMachines/${secondName}`;
+    expect(deleted).toEqual([firstNIC, firstPIP]);
+    expect(resources.has(firstNIC)).toBe(false);
+    expect(resources.has(firstPIP)).toBe(false);
+    expect(resources.has(`${prefix}/Microsoft.Compute/virtualMachines/${firstName}`)).toBe(false);
+    expect(resources.has(`${prefix}/Microsoft.Compute/disks/${firstName}-osdisk`)).toBe(false);
+    expect(resources.has(secondNIC)).toBe(true);
+    expect(resources.has(secondPIP)).toBe(true);
+    expect(resources.has(secondVM)).toBe(true);
+    expect(result.server.cloudID).toBe(secondName);
+    expect(records.size).toBe(0);
   });
 
   it("drops crabbox-ssh-* rules and preserves operator rules", () => {

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Restored Azure SKU fallback when VM creation fails before the managed OS disk exists by rolling back the exact owned NIC and public IP set.
+
 ## 0.46.0 - 2026-08-20
 
 ### Added

@@ -1178,7 +1178,7 @@ export class AzureClient {
       options.prepareClaim &&
       !options.claim &&
       Boolean(vm || nic || pip || initialDisk) &&
-      (!nic || !pip || (!initialDisk && !azureVMUsesEphemeralOSDisk(vm)));
+      (!nic || !pip || Boolean(vm && !initialDisk && !azureVMUsesEphemeralOSDisk(vm)));
 
     const expectedNICID = this.resourceID(nicResourcePath);
     const expectedPIPID = this.resourceID(pipResourcePath);
