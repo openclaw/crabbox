@@ -2166,7 +2166,7 @@ describe("coordinator-managed checkpoints", () => {
     expect(response.status).toBe(201);
   });
 
-  it("bounds failed creation recovery and permits exact no-resource cancellation", async () => {
+  it("retains failed creation ownership across repeated inconclusive deletion attempts", async () => {
     const { coordinator, provider, storage } = await checkpointFixture("azure");
     vi.mocked(provider.createCheckpointImage).mockRejectedValueOnce(new Error("uncertain create"));
     expect((await createCheckpoint(coordinator, "chk_failed_creation")).status).toBe(503);
@@ -2178,15 +2178,23 @@ describe("coordinator-managed checkpoints", () => {
       state: "failed",
     });
     expect(await storage.list({ prefix: "checkpoint-due:" })).toHaveLength(0);
-    vi.spyOn(provider, "recoverCheckpointImage").mockResolvedValue(undefined);
-    const canceled = await coordinator.fetch(
-      checkpointRequest("DELETE", "/v1/checkpoints/chk_failed_creation"),
-    );
-    expect(canceled.status).toBe(200);
-    expect(await storage.get(checkpointKey("chk_failed_creation"))).toMatchObject({
-      state: "deleted",
-    });
-    expect(await storage.list({ prefix: "checkpoint-intent:azure:" })).toHaveLength(0);
+    const failed = (await storage.get<CoordinatorCheckpointRecord>(
+      checkpointKey("chk_failed_creation"),
+    ))!;
+    const recovery = vi.spyOn(provider, "recoverCheckpointImage").mockResolvedValue(undefined);
+
+    await Array.from({ length: 2 }).reduce(async (previous) => {
+      await previous;
+      const blocked = await coordinator.fetch(
+        checkpointRequest("DELETE", "/v1/checkpoints/chk_failed_creation"),
+      );
+      expect(blocked.status).toBe(409);
+      await expect(blocked.json()).resolves.toMatchObject({ error: "checkpoint_pending" });
+      expect(await storage.get(checkpointKey("chk_failed_creation"))).toEqual(failed);
+      expect(await storage.list({ prefix: "checkpoint-intent:azure:" })).toHaveLength(1);
+    }, Promise.resolve());
+
+    expect(recovery).toHaveBeenCalledTimes(2);
   });
 
   it.each(["azure", "gcp"] as const)(
@@ -2302,13 +2310,17 @@ describe("coordinator-managed checkpoints", () => {
     expect(await storage.get(checkpointKey("chk_definitive_refusal"))).toMatchObject({
       state: "deleted",
     });
+    expect(await storage.list({ prefix: "checkpoint-intent:azure:" })).toHaveLength(0);
   });
 
-  it("releases an expired provisioning claim when its exact lease never existed", async () => {
+  it("renews expired pending provisioning claims and fences checkpoint deletion and expiry", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-20T12:00:00.000Z"));
-    const { coordinator, storage } = await checkpointFixture();
-    await createCheckpoint(coordinator, "chk_cancel_provision");
+    const { coordinator, storage, runtime, deleteImage } = await checkpointFixture();
+    await createCheckpoint(coordinator, "chk_cancel_provision", {
+      mode: "expire-unused",
+      unusedForSeconds: 60,
+    });
     const acquired = (await (
       await coordinator.fetch(
         checkpointRequest("POST", "/v1/checkpoints/chk_cancel_provision/use", {
@@ -2346,10 +2358,130 @@ describe("coordinator-managed checkpoints", () => {
     vi.setSystemTime(Date.now() + checkpointUseClaimTTLMS + 1);
     await coordinator.alarm();
     expect(await storage.get(checkpointKey("chk_cancel_provision"))).toMatchObject({
-      activeUseCount: 0,
+      state: "ready",
+      activeUseCount: 1,
     });
+    const claims = await storage.list<{ state: string; expiresAt: string }>({
+      prefix: "checkpoint-use:chk_cancel_provision:",
+    });
+    expect(claims).toHaveLength(1);
+    const renewed = [...claims.values()][0]!;
+    expect(renewed.state).toBe("provisioning");
+    expect(Date.parse(renewed.expiresAt)).toBeGreaterThan(Date.now());
+    expect(runtime.alarmTime).toBe(Date.parse(renewed.expiresAt));
+
+    const blocked = await coordinator.fetch(
+      checkpointRequest("DELETE", "/v1/checkpoints/chk_cancel_provision"),
+    );
+    expect(blocked.status).toBe(409);
+    await expect(blocked.json()).resolves.toMatchObject({ error: "checkpoint_in_use" });
+    expect(deleteImage).not.toHaveBeenCalled();
+
+    vi.setSystemTime(Date.parse(renewed.expiresAt) + 1);
+    await coordinator.alarm();
+    expect(await storage.get(checkpointKey("chk_cancel_provision"))).toMatchObject({
+      state: "ready",
+      activeUseCount: 1,
+    });
+    expect(deleteImage).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing", "mismatched-canceled", "canceled-resource-uncertain"] as const)(
+    "renews expired provisioning claims when the lease attempt is %s",
+    async (attemptState) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-08-20T12:00:00.000Z"));
+      const { coordinator, storage } = await checkpointFixture();
+      const checkpointID = `chk_provision_${attemptState.replaceAll("-", "_")}`;
+      const requestedLeaseID = "cbx_000000000002";
+      const attemptID = `cat_${"c".repeat(32)}`;
+      await createCheckpoint(coordinator, checkpointID);
+      const acquired = (await (
+        await coordinator.fetch(
+          checkpointRequest("POST", `/v1/checkpoints/${checkpointID}/use`, { action: "begin" }),
+        )
+      ).json()) as { claim: string };
+      await bindCheckpointUseProvisioning(
+        storage,
+        checkpointID,
+        acquired.claim,
+        { owner: "alice@example.com", org },
+        attemptID,
+        requestedLeaseID,
+      );
+      if (attemptState !== "missing") {
+        await storage.put(`create-attempt:${requestedLeaseID}`, {
+          version: 1,
+          requestedLeaseID,
+          token: attemptState === "mismatched-canceled" ? `cat_${"d".repeat(32)}` : attemptID,
+          owner: "alice@example.com",
+          org,
+          state: "canceled",
+          canonicalLeaseID: requestedLeaseID,
+          ...(attemptState === "canceled-resource-uncertain"
+            ? { cloudID: "i-potentially-surviving" }
+            : {}),
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+      }
+
+      vi.setSystemTime(Date.now() + checkpointUseClaimTTLMS + 1);
+      await coordinator.alarm();
+
+      expect(await storage.get(checkpointKey(checkpointID))).toMatchObject({
+        state: "ready",
+        activeUseCount: 1,
+      });
+      const claims = await storage.list<{ state: string; expiresAt: string }>({
+        prefix: `checkpoint-use:${checkpointID}:`,
+      });
+      expect(claims).toHaveLength(1);
+      expect([...claims.values()][0]).toMatchObject({ state: "provisioning" });
+      expect(Date.parse([...claims.values()][0]!.expiresAt)).toBeGreaterThan(Date.now());
+    },
+  );
+
+  it("releases an expired provisioning claim only after its exact attempt is safely canceled", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T12:00:00.000Z"));
+    const { coordinator, storage } = await checkpointFixture();
+    const checkpointID = "chk_canceled_provision";
+    const requestedLeaseID = "cbx_000000000002";
+    const attemptID = `cat_${"e".repeat(32)}`;
+    await createCheckpoint(coordinator, checkpointID);
+    const acquired = (await (
+      await coordinator.fetch(
+        checkpointRequest("POST", `/v1/checkpoints/${checkpointID}/use`, { action: "begin" }),
+      )
+    ).json()) as { claim: string };
+    await bindCheckpointUseProvisioning(
+      storage,
+      checkpointID,
+      acquired.claim,
+      { owner: "alice@example.com", org },
+      attemptID,
+      requestedLeaseID,
+    );
+    await storage.put(`create-attempt:${requestedLeaseID}`, {
+      version: 1,
+      requestedLeaseID,
+      token: attemptID,
+      owner: "alice@example.com",
+      org,
+      state: "canceled",
+      canonicalLeaseID: requestedLeaseID,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    vi.setSystemTime(Date.now() + checkpointUseClaimTTLMS + 1);
+    await coordinator.alarm();
+
+    expect(await storage.get(checkpointKey(checkpointID))).toMatchObject({ activeUseCount: 0 });
+    expect(await storage.list({ prefix: `checkpoint-use:${checkpointID}:` })).toHaveLength(0);
     expect(
-      (await coordinator.fetch(checkpointRequest("DELETE", "/v1/checkpoints/chk_cancel_provision")))
+      (await coordinator.fetch(checkpointRequest("DELETE", `/v1/checkpoints/${checkpointID}`)))
         .status,
     ).toBe(200);
   });
@@ -2787,7 +2919,43 @@ describe("coordinator-managed checkpoints", () => {
     },
   );
 
-  it("recovers an exact owned resource from terminal creation failure and deletes it", async () => {
+  it("retains a provisioning claim when a terminal lease does not match its exact lifecycle", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T12:00:00.000Z"));
+    const { coordinator, storage } = await checkpointFixture();
+    const checkpointID = "chk_foreign_terminal_lease";
+    const requestedLeaseID = "cbx_000000000002";
+    const attemptID = `cat_${"f".repeat(32)}`;
+    await createCheckpoint(coordinator, checkpointID);
+    const acquired = (await (
+      await coordinator.fetch(
+        checkpointRequest("POST", `/v1/checkpoints/${checkpointID}/use`, { action: "begin" }),
+      )
+    ).json()) as { claim: string };
+    await bindCheckpointUseProvisioning(
+      storage,
+      checkpointID,
+      acquired.claim,
+      { owner: "alice@example.com", org },
+      attemptID,
+      requestedLeaseID,
+    );
+    await storage.put(`lease:${requestedLeaseID}`, {
+      ...checkpointLease("aws"),
+      id: requestedLeaseID,
+      checkpointID: "chk_different_lifecycle",
+      createAttemptID: attemptID,
+      state: "released",
+    });
+
+    vi.setSystemTime(Date.now() + checkpointUseClaimTTLMS + 1);
+    await coordinator.alarm();
+
+    expect(await storage.get(checkpointKey(checkpointID))).toMatchObject({ activeUseCount: 1 });
+    expect(await storage.list({ prefix: `checkpoint-use:${checkpointID}:` })).toHaveLength(1);
+  });
+
+  it("retains ownership through transient absence, then recovers and deletes the exact resource", async () => {
     const { coordinator, provider, storage, deleteImage } = await checkpointFixture("azure");
     vi.mocked(provider.createCheckpointImage).mockRejectedValueOnce(new Error("ambiguous"));
     const checkpointID = "chk_failed_owned_recovery";
@@ -2796,19 +2964,37 @@ describe("coordinator-managed checkpoints", () => {
       await previous;
       await recordCheckpointCreateRecoveryFailure(storage, checkpointID, "ambiguous");
     }, Promise.resolve());
-    vi.spyOn(provider, "recoverCheckpointImage").mockImplementationOnce(async (checkpoint) =>
-      providerImage("azure", checkpoint.createClaim!.resourceName, "disk-snapshot", {
-        checkpointID,
-        tokenHash: checkpoint.createClaim!.tokenHash,
-        sourceLeaseID: leaseID,
-      }),
+    const recovery = vi
+      .spyOn(provider, "recoverCheckpointImage")
+      .mockResolvedValueOnce(undefined)
+      .mockImplementationOnce(async (checkpoint) =>
+        providerImage("azure", checkpoint.createClaim!.resourceName, "disk-snapshot", {
+          checkpointID,
+          tokenHash: checkpoint.createClaim!.tokenHash,
+          sourceLeaseID: leaseID,
+        }),
+      );
+
+    const pending = await coordinator.fetch(
+      checkpointRequest("DELETE", `/v1/checkpoints/${checkpointID}`),
     );
+    expect(pending.status).toBe(409);
+    await expect(pending.json()).resolves.toMatchObject({ error: "checkpoint_pending" });
+    expect(await storage.get(checkpointKey(checkpointID))).toMatchObject({
+      state: "failed",
+      createClaim: { tokenHash: expect.any(String) },
+    });
+    expect(await storage.list({ prefix: "checkpoint-intent:azure:" })).toHaveLength(1);
+    expect(deleteImage).not.toHaveBeenCalled();
+
     const deleted = await coordinator.fetch(
       checkpointRequest("DELETE", `/v1/checkpoints/${checkpointID}`),
     );
     expect(deleted.status).toBe(200);
+    expect(recovery).toHaveBeenCalledTimes(2);
     expect(deleteImage).toHaveBeenCalledOnce();
     expect(await storage.get(checkpointKey(checkpointID))).toMatchObject({ state: "deleted" });
+    expect(await storage.list({ prefix: "checkpoint-intent:azure:" })).toHaveLength(0);
   });
 
   it("retains failed durable ownership when provider recovery detects a foreign resource", async () => {
@@ -2830,7 +3016,11 @@ describe("coordinator-managed checkpoints", () => {
       checkpointRequest("DELETE", `/v1/checkpoints/${checkpointID}`),
     );
     expect(deleted.status).toBe(409);
-    expect(await storage.get(checkpointKey(checkpointID))).toMatchObject({ state: "failed" });
+    await expect(deleted.json()).resolves.toMatchObject({ error: "checkpoint_source_mismatch" });
+    expect(await storage.get(checkpointKey(checkpointID))).toMatchObject({
+      state: "failed",
+      createClaim: { tokenHash: expect.any(String) },
+    });
     expect(await storage.list({ prefix: "checkpoint-intent:gcp:" })).toHaveLength(1);
     expect(deleteImage).not.toHaveBeenCalled();
   });

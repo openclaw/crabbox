@@ -1765,29 +1765,37 @@ export async function expireCheckpointClaims(
           : undefined;
         const attempt = claim.leaseID
           ? await transaction.get<{
+              requestedLeaseID?: string;
               token?: string;
               state?: string;
               canonicalLeaseID?: string;
               owner?: string;
               org?: string;
+              cloudID?: string;
             }>(`create-attempt:${claim.leaseID}`)
           : undefined;
         const exactLease = Boolean(
           lease &&
+          lease.id === claim.leaseID &&
           lease.checkpointID === current.id &&
           lease.createAttemptID === claim.attemptID &&
           lease.owner === claim.owner &&
           sameOrgIdentityKey(lease.org, claim.org),
         );
+        const exactAttempt = Boolean(
+          attempt &&
+          attempt.requestedLeaseID === claim.leaseID &&
+          attempt.token === claim.attemptID &&
+          (!attempt.canonicalLeaseID || attempt.canonicalLeaseID === claim.leaseID) &&
+          attempt.owner === claim.owner &&
+          sameOrgIdentityKey(attempt.org ?? "", claim.org),
+        );
         const successful = Boolean(
           exactLease &&
           lease!.state === "active" &&
-          attempt &&
-          attempt.token === claim.attemptID &&
-          attempt.state !== "canceled" &&
-          attempt.canonicalLeaseID === lease!.id &&
-          attempt.owner === claim.owner &&
-          sameOrgIdentityKey(attempt.org ?? "", claim.org),
+          exactAttempt &&
+          attempt!.state !== "canceled" &&
+          attempt!.canonicalLeaseID === lease!.id,
         );
         const uncertain = Boolean(
           lease?.provisioningResourceMayExist ||
@@ -1796,8 +1804,8 @@ export async function expireCheckpointClaims(
           lease?.providerKeyCleanupPending,
         );
         const terminal = Boolean(
-          (lease && !uncertain && ["failed", "released", "expired"].includes(lease.state)) ||
-          (!lease && (attempt?.state === "canceled" || expired)),
+          (exactLease && !uncertain && ["failed", "released", "expired"].includes(lease!.state)) ||
+          (!lease && exactAttempt && attempt!.state === "canceled" && !attempt!.cloudID),
         );
         if (successful || terminal) {
           await transaction.delete(key);

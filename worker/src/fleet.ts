@@ -13951,9 +13951,10 @@ export class FleetCoordinator {
             await publishRecoveredCheckpoint(this.state.storage, checkpointID, recovered);
             return await this.deleteManagedCheckpoint(checkpointID, principal, "create-recovery");
           }
-          await cancelFailedCheckpointCreate(this.state.storage, checkpointID, principal);
-          await this.scheduleCheckpointAlarm();
-          return json({ checkpointID, deleted: true });
+          throw new CheckpointError(
+            "checkpoint_pending",
+            "checkpoint creation resource may still appear; its ownership reservation remains active",
+          );
         }
         return await this.deleteManagedCheckpoint(checkpointID, principal, "manual");
       }
