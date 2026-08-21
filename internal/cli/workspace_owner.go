@@ -19,6 +19,7 @@ const (
 	workspaceOwnerWaitTimeout   = 2 * time.Minute
 	workspaceOwnerPollInterval  = time.Second
 	workspaceOwnerProgressEvery = 10 * time.Second
+	workspaceOwnerReconcileWait = 250 * time.Millisecond
 )
 
 type workspaceOwnerAction string
@@ -67,8 +68,9 @@ type workspaceOwner struct {
 	done      chan struct{}
 	closeOnce sync.Once
 
-	mu       sync.Mutex
-	renewErr error
+	mu             sync.Mutex
+	renewErr       error
+	confirmedUntil time.Time
 }
 
 type workspaceOwnerContextKey struct{}
@@ -236,33 +238,46 @@ func acquireWorkspaceOwnerWithTransport(ctx context.Context, target SSHTarget, l
 	defer cancel()
 	started := time.Now()
 	nextProgress := workspaceOwnerProgressEvery
+	var lastCallErr error
 	for {
+		requestStarted := time.Now()
 		response, callErr := transport.Do(waitCtx, workspaceOwnerRemoteRequest{Action: workspaceOwnerAcquire, Key: owner.key, Token: owner.token, TTL: ttl})
+		retryDelay := workspaceOwnerPollInterval
 		if callErr != nil {
-			return nil, exit(7, "acquire remote workspace owner: ambiguous remote state: %v", callErr)
-		}
-		switch response {
-		case "ACQUIRED", "RECOVERED":
-			owner.ctx, owner.cancel = context.WithCancel(ctx)
-			go owner.renewLoop(renewInterval)
-			fmt.Fprintf(stderr, "workspace owner acquired wait=%s recovered=%t\n", time.Since(started).Round(time.Millisecond), response == "RECOVERED")
-			return owner, nil
-		case "BUSY", "CHILD":
-			elapsed := time.Since(started)
-			if elapsed >= nextProgress {
-				fmt.Fprintf(stderr, "waiting for reusable workspace owner elapsed=%s state=%s\n", elapsed.Round(time.Second), strings.ToLower(response))
-				nextProgress += workspaceOwnerProgressEvery
+			lastCallErr = callErr
+			retryDelay = workspaceOwnerReconcileWait
+		} else {
+			lastCallErr = nil
+			switch response {
+			case "ACQUIRED", "RECOVERED":
+				owner.ctx, owner.cancel = context.WithCancel(ctx)
+				owner.confirmedAt(requestStarted)
+				go owner.renewLoop(renewInterval)
+				fmt.Fprintf(stderr, "workspace owner acquired wait=%s recovered=%t\n", time.Since(started).Round(time.Millisecond), response == "RECOVERED")
+				return owner, nil
+			case "BUSY", "CHILD":
+				elapsed := time.Since(started)
+				if elapsed >= nextProgress {
+					fmt.Fprintf(stderr, "waiting for reusable workspace owner elapsed=%s state=%s\n", elapsed.Round(time.Second), strings.ToLower(response))
+					nextProgress += workspaceOwnerProgressEvery
+				}
+			case "AMBIGUOUS":
+				lastCallErr = errors.New("ambiguous protocol state")
+				retryDelay = workspaceOwnerReconcileWait
+			case "LEGACY":
+				return nil, exit(7, "legacy workspace owner blocks lease %s: child=~/.crabbox/workspace-owners/%s.child key=%s; quiesce or reboot the remote host, verify the PID/start identity is no longer authoritative, then remove only that child file and retry", leaseID, owner.key, owner.key)
+			default:
+				return nil, exit(7, "acquire remote workspace owner: unexpected protocol response %q", response)
 			}
-		case "AMBIGUOUS":
-			return nil, exit(7, "acquire remote workspace owner: ambiguous protocol state")
-		default:
-			return nil, exit(7, "acquire remote workspace owner: unexpected protocol response %q", response)
 		}
-		timer := time.NewTimer(workspaceOwnerPollInterval)
+		timer := time.NewTimer(retryDelay)
 		select {
 		case <-waitCtx.Done():
 			timer.Stop()
 			if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+				if lastCallErr != nil {
+					return nil, exit(7, "acquire remote workspace owner: ambiguous remote state after reconciliation: %v", lastCallErr)
+				}
 				return nil, exit(7, "timed out after %s waiting for reusable workspace owner", waitTimeout)
 			}
 			return nil, waitCtx.Err()
@@ -293,20 +308,64 @@ func (o *workspaceOwner) renewLoopWithTicks(ticks <-chan time.Time, callTimeout 
 		case <-o.ctx.Done():
 			return
 		case <-ticks:
-			callCtx, cancel := context.WithTimeout(context.WithoutCancel(o.ctx), callTimeout)
-			response, err := o.transport.Do(callCtx, workspaceOwnerRemoteRequest{Action: workspaceOwnerRenew, Key: o.key, Token: o.token, TTL: o.ttl})
-			cancel()
-			if err == nil && response == "RENEWED" {
-				continue
-			}
+			err := o.reconcileRenewal(callTimeout)
 			if err == nil {
-				err = fmt.Errorf("unexpected protocol response %q", response)
+				continue
 			}
 			o.mu.Lock()
 			o.renewErr = exit(7, "remote workspace owner renewal failed closed: %v", err)
 			o.mu.Unlock()
 			o.cancel()
 			return
+		}
+	}
+}
+
+func (o *workspaceOwner) confirmedAt(requestStarted time.Time) {
+	o.mu.Lock()
+	o.confirmedUntil = requestStarted.Add(o.ttl)
+	o.mu.Unlock()
+}
+
+func (o *workspaceOwner) reconcileRenewal(callTimeout time.Duration) error {
+	for {
+		o.mu.Lock()
+		deadline := o.confirmedUntil
+		o.mu.Unlock()
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return errors.New("confirmed renewal deadline exhausted")
+		}
+		requestStarted := time.Now()
+		callCtx, cancel := context.WithTimeout(context.WithoutCancel(o.ctx), min(callTimeout, remaining))
+		response, err := o.transport.Do(callCtx, workspaceOwnerRemoteRequest{Action: workspaceOwnerRenew, Key: o.key, Token: o.token, TTL: o.ttl})
+		cancel()
+		switch response {
+		case "RENEWED":
+			if err == nil {
+				o.confirmedAt(requestStarted)
+				return nil
+			}
+		case "MISMATCH", "EXPIRED":
+			return fmt.Errorf("owner %s", strings.ToLower(response))
+		default:
+			if err == nil {
+				return fmt.Errorf("unexpected protocol response %q", response)
+			}
+		}
+		remaining = time.Until(deadline)
+		if remaining <= 0 {
+			return fmt.Errorf("confirmed renewal deadline exhausted: %w", err)
+		}
+		timer := time.NewTimer(min(workspaceOwnerReconcileWait, remaining))
+		select {
+		case <-o.stop:
+			timer.Stop()
+			return nil
+		case <-o.ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
 		}
 	}
 }
@@ -478,9 +537,7 @@ mkdir -p "$root"
 chmod 700 "$HOME/.crabbox" "$root" 2>/dev/null || true
 read_state() {
   [ -f "$state" ] || return 1
-  state_version=$(sed -n '1p' "$state" 2>/dev/null || true)
-  state_token=$(sed -n '2p' "$state" 2>/dev/null || true)
-  state_expiry=$(sed -n '3p' "$state" 2>/dev/null || true)
+  state_version=$(sed -n '1p' "$state" 2>/dev/null || true); state_token=$(sed -n '2p' "$state" 2>/dev/null || true); state_expiry=$(sed -n '3p' "$state" 2>/dev/null || true)
   [ "$state_version" = v1 ] || return 2
   case "$state_token" in ''|*[!0-9a-f]*) return 2 ;; esac
   [ "${#state_token}" -eq 64 ] || return 2
@@ -495,24 +552,34 @@ write_state() {
 }
 child_status() {
   [ -f "$child" ] || return 1
-  child_pid=$(sed -n '1p' "$child" 2>/dev/null || true)
-  child_identity=$(sed -n '2p' "$child" 2>/dev/null || true)
-  case "$child_pid" in ''|*[!0-9]*) return 2 ;; esac
-  [ -n "$child_identity" ] && [ "${#child_identity}" -le 96 ] || return 2
-  if kill -0 "$child_pid" 2>/dev/null; then
-    live_identity=$(ps -o lstart= -p "$child_pid" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' | cut -c1-96)
-    [ -n "$live_identity" ] || return 2
-    [ "$live_identity" = "$child_identity" ] && return 0
+  child_lines=$(wc -l <"$child" 2>/dev/null | tr -d ' ')
+  if [ "$child_lines" = 2 ]; then legacy_pid=$(sed -n '1p' "$child" 2>/dev/null || true); legacy_identity=$(sed -n '2p' "$child" 2>/dev/null || true); case "$legacy_pid" in ''|*[!0-9]*) return 2 ;; esac; [ "$legacy_pid" -gt 1 ] && [ -n "$legacy_identity" ] && [ "${#legacy_identity}" -le 96 ] || return 2; return 3; fi
+  [ "$child_lines" = 4 ] || return 2
+  [ "$(sed -n '1p' "$child" 2>/dev/null || true)" = v2 ] || return 2
+  child_pgid=$(sed -n '2p' "$child" 2>/dev/null || true); sentinel_pid=$(sed -n '3p' "$child" 2>/dev/null || true); sentinel_identity=$(sed -n '4p' "$child" 2>/dev/null || true)
+  case "$child_pgid:$sentinel_pid" in *[!0-9:]*|:*|*:) return 2 ;; esac
+  [ "$child_pgid" -gt 1 ] && [ "$sentinel_pid" -gt 1 ] && [ -n "$sentinel_identity" ] && [ "${#sentinel_identity}" -le 96 ] || return 2
+  live_pgid=$(ps -o pgid= -p "$sentinel_pid" 2>/dev/null | tr -d ' ' || true)
+  if [ -n "$live_pgid" ]; then
+    live_stat=$(ps -o stat= -p "$sentinel_pid" 2>/dev/null | tr -d ' ') || return 2; live_identity=$(ps -o lstart= -p "$sentinel_pid" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' | cut -c1-96) || return 2
+    [ -n "$live_stat" ] && [ -n "$live_identity" ] || return 2
+    case "$live_stat" in *Z*) return 2 ;; esac; [ "$live_pgid" = "$child_pgid" ] && [ "$live_identity" = "$sentinel_identity" ] && return 0; return 2
   fi
+  group_pgids=$(ps -eo pgid= 2>/dev/null) || return 2
+  printf '%s\n' "$group_pgids" | awk -v pgid="$child_pgid" '$1 == pgid { found=1 } END { exit !found }' && return 2
   return 1
 }
 case "$action" in
   acquire)
     if read_state; then
       now=$(date +%s)
-      if [ "$state_expiry" -gt "$now" ]; then printf BUSY; exit 0; fi
-      if child_status; then printf CHILD; exit 0; else child_rc=$?; fi
+      if [ "$state_expiry" -gt "$now" ]; then
+        if [ "$state_token" = "$token" ]; then write_state; printf ACQUIRED; else printf BUSY; fi
+        exit 0
+      fi
+      if child_status; then printf CHILD; exit 0; else child_rc=$?; [ "$child_rc" -ne 3 ] || { printf LEGACY; exit 0; }; fi
       if [ "$child_rc" -eq 2 ]; then printf AMBIGUOUS; exit 74; fi
+      rm -rf "$root/$key.run.$state_token".* "$root/$key.launcher.$state_token".*
       rm -f "$child"
       write_state
       printf RECOVERED
@@ -534,7 +601,7 @@ case "$action" in
     read_state || { printf AMBIGUOUS; exit 74; }
     [ "$state_token" = "$token" ] || { printf MISMATCH; exit 75; }
     [ "$state_expiry" -gt "$(date +%s)" ] || { printf EXPIRED; exit 75; }
-    if child_status; then printf CHILD; exit 0; else child_rc=$?; fi
+    if child_status; then printf CHILD; exit 0; else child_rc=$?; [ "$child_rc" -ne 3 ] || { printf LEGACY; exit 0; }; fi
     [ "$child_rc" -ne 2 ] || { printf AMBIGUOUS; exit 74; }
     rm -f "$child"
     printf OWNED
@@ -542,7 +609,7 @@ case "$action" in
   release)
     read_state || { printf AMBIGUOUS; exit 74; }
     [ "$state_token" = "$token" ] || { printf MISMATCH; exit 75; }
-    if child_status; then printf CHILD; exit 75; else child_rc=$?; fi
+    if child_status; then printf CHILD; exit 75; else child_rc=$?; [ "$child_rc" -ne 3 ] || { printf LEGACY; exit 0; }; fi
     [ "$child_rc" -ne 2 ] || { printf AMBIGUOUS; exit 74; }
     rm -f "$child" "$state"
     [ ! -e "$state" ] || { printf AMBIGUOUS; exit 74; }
@@ -656,10 +723,14 @@ try {
   switch ($action) {
     "acquire" {
       if ($null -eq $current) { Write-State; Write-Output "ACQUIRED"; break }
-      if ($current.Expiry -gt [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) { Write-Output "BUSY"; break }
+      if ($current.Expiry -gt [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) {
+        if ($current.Token -eq $token) { Write-State; Write-Output "ACQUIRED" } else { Write-Output "BUSY" }
+        break
+      }
       $childStatus = Get-ChildStatus
       if ($childStatus -eq "live") { Write-Output "CHILD"; break }
       if ($childStatus -eq "ambiguous") { throw "workspace owner child state is ambiguous" }
+      Get-ChildItem -Path (Join-Path $root ($key + ".run." + $current.Token + ".*")) -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
       Remove-Item -LiteralPath $child -Force -ErrorAction SilentlyContinue
       Write-State
       Write-Output "RECOVERED"
@@ -726,32 +797,59 @@ func remoteWorkspaceOwnerPOSIXWitnessScript(key, token, remote string, preserveI
 `
 		inputRedirect = ` <"$run_dir/input"`
 	}
+	childBody := `/bin/sh -c 'trap "" HUP TERM; exec 3<>"$1" || exit 74; : >"$2" || exit 74; while IFS= read -r command <&3; do case "$command" in expire) kill -TERM 0 2>/dev/null || true; sleep 0.2; kill -KILL 0 2>/dev/null || true ;; done) exit 0 ;; *) exit 74 ;; esac; done' crabbox-sentinel "$4" "$6" & sentinel_pid=$!; printf "%s\n" "$sentinel_pid" >"$5" || exit 74; while [ ! -f "$1" ]; do kill -0 "$sentinel_pid" 2>/dev/null || exit 74; sleep 0.05; done; sh -c "$2"; code=$?; touch "$3" || exit 74; wait "$sentinel_pid"; exit "$code"`
 	installBody := `set -eu
 [ "$(sed -n '2p' "$state" 2>/dev/null || true)" = "$token" ] || exit 75
 owner_expiry=$(sed -n '3p' "$state" 2>/dev/null || true)
 case "$owner_expiry" in ''|*[!0-9]*) exit 74 ;; esac
 [ "$owner_expiry" -gt "$(date +%s)" ] || exit 75
-if [ -f "$child" ]; then
-	existing_pid=$(sed -n '1p' "$child" 2>/dev/null || true)
-	existing_identity=$(sed -n '2p' "$child" 2>/dev/null || true)
-	case "$existing_pid" in ''|*[!0-9]*) exit 74 ;; esac
-	[ -n "$existing_identity" ] && [ "${#existing_identity}" -le 96 ] || exit 74
-	if kill -0 "$existing_pid" 2>/dev/null; then
-		live_existing_identity=$(ps -o lstart= -p "$existing_pid" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' | cut -c1-96)
-		[ -n "$live_existing_identity" ] || exit 74
-		[ "$live_existing_identity" != "$existing_identity" ] || exit 75
-	fi
-	rm -f "$child"
-fi
+[ ! -e "$child" ] && [ ! -e "$start" ] && [ -p "$control" ] || exit 74
+[ "$(sed -n '1p' "$sentinel_pid_path" 2>/dev/null || true)" = "$sentinel_pid" ] && [ -f "$sentinel_ready" ] || exit 74
+live_pgid=$(ps -o pgid= -p "$sentinel_pid" 2>/dev/null | tr -d ' '); live_stat=$(ps -o stat= -p "$sentinel_pid" 2>/dev/null | tr -d ' ')
+live_identity=$(ps -o lstart= -p "$sentinel_pid" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' | cut -c1-96)
+[ "$live_pgid" = "$child_pgid" ] && [ "$live_identity" = "$sentinel_identity" ] || exit 74
+case "$live_stat" in ''|*Z*) exit 74 ;; esac
 child_tmp="$child.tmp.$$"
-(umask 077; printf '%s\n%s\n' "$child_pid" "$child_identity" >"$child_tmp")
+(umask 077; printf 'v2\n%s\n%s\n%s\n' "$child_pgid" "$sentinel_pid" "$sentinel_identity" >"$child_tmp")
 mv "$child_tmp" "$child"`
 	clearBody := `set -eu
 [ "$(sed -n '2p' "$state" 2>/dev/null || true)" = "$token" ] || exit 75
-recorded_pid=$(sed -n '1p' "$child" 2>/dev/null || true)
-recorded_identity=$(sed -n '2p' "$child" 2>/dev/null || true)
-[ "$recorded_pid" = "$child_pid" ] && [ "$recorded_identity" = "$child_identity" ] || exit 74
+[ "$(sed -n '1p' "$child" 2>/dev/null || true)" = v2 ] || exit 74
+[ "$(sed -n '2p' "$child" 2>/dev/null || true)" = "$child_pgid" ] && [ "$(sed -n '3p' "$child" 2>/dev/null || true)" = "$sentinel_pid" ] && [ "$(sed -n '4p' "$child" 2>/dev/null || true)" = "$sentinel_identity" ] || exit 74
+group_members=$(ps -eo pid=,pgid=,stat= 2>/dev/null) || exit 74
+printf '%s\n' "$group_members" | awk -v pgid="$child_pgid" -v owner="$owner_pid" -v launcher="${launcher_pid:-0}" '$2 == pgid && $1 != owner && $1 != launcher && $3 !~ /Z/ { found=1 } END { exit !found }' && exit 74
 rm -f "$child"`
+	supervisorBody := `set -u
+exec 3>"$control" || exit 0
+if command -v flock >/dev/null 2>&1; then flock -x -w 5 "$gate" /bin/sh -c "$install_body"
+elif command -v lockf >/dev/null 2>&1; then lockf -t 5 "$gate" /bin/sh -c "$install_body"
+else exit 74
+fi
+gate_status=$?; if [ "$gate_status" -ne 0 ]; then printf 'expire\n' >&3; exit "$gate_status"; fi
+: >"$run_dir/supervisor-ready" || { printf 'expire\n' >&3; exit 74; }
+expire() { printf 'expire\n' >&3; exit 0; }
+while :; do
+	[ "$(sed -n '1p' "$child" 2>/dev/null || true)" = v2 ] && [ "$(sed -n '2p' "$child" 2>/dev/null || true)" = "$child_pgid" ] || exit 0
+	[ "$(sed -n '3p' "$child" 2>/dev/null || true)" = "$sentinel_pid" ] && [ "$(sed -n '4p' "$child" 2>/dev/null || true)" = "$sentinel_identity" ] || exit 0
+	kill -0 "$sentinel_pid" 2>/dev/null || expire
+	live_pgid=$(ps -o pgid= -p "$sentinel_pid" 2>/dev/null | tr -d ' ') || expire
+	live_stat=$(ps -o stat= -p "$sentinel_pid" 2>/dev/null | tr -d ' ') || expire
+	live_identity=$(ps -o lstart= -p "$sentinel_pid" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' | cut -c1-96) || expire
+	[ "$live_pgid" = "$child_pgid" ] && [ "$live_identity" = "$sentinel_identity" ] || expire
+	case "$live_stat" in ''|*Z*) expire ;; esac
+	if [ -f "$run_dir/payload-done" ]; then
+		members=$(ps -eo pid=,pgid=,stat= 2>/dev/null) || expire
+		if ! printf '%s\n' "$members" | awk -v pgid="$child_pgid" -v leader="$child_pid" -v sentinel="$sentinel_pid" -v owner="$owner_pid" -v launcher="${launcher_pid:-0}" -v supervisor="$$" '$2 == pgid && $1 != leader && $1 != sentinel && $1 != owner && $1 != launcher && $1 != supervisor && $3 !~ /Z/ { found=1 } END { exit !found }'; then printf 'done\n' >&3; exit 0; fi
+	fi
+	state_token=$(sed -n '2p' "$state" 2>/dev/null || true)
+	state_expiry=$(sed -n '3p' "$state" 2>/dev/null || true)
+	case "$state_expiry" in ''|*[!0-9]*) state_expiry=0 ;; esac
+	if [ "$state_token" != "$token" ] || [ "$(date +%s)" -ge "$state_expiry" ]; then
+		printf 'expire\n' >&3
+		exit 0
+	fi
+	sleep 0.2
+done`
 	return `set -u
 root="$HOME/.crabbox/workspace-owners"
 key=` + shellQuote(key) + `
@@ -760,8 +858,8 @@ payload=` + shellQuote(remote) + `
 state="$root/$key.owner"
 child="$root/$key.child"
 gate="$root/$key.gate"
-run_dir="$root/$key.run.$token"
-start="$run_dir/start"
+run_dir="$root/$key.run.$token.$$"
+	start="$run_dir/start"; control="$run_dir/control"; sentinel_pid_path="$run_dir/sentinel-pid"; sentinel_ready="$run_dir/sentinel-ready"; owner_pid=$$; launcher_pid=
 run_owner_gate() {
 	if command -v flock >/dev/null 2>&1; then
 		flock -x -w 5 "$gate" /bin/sh -c "$1"
@@ -771,22 +869,46 @@ run_owner_gate() {
 		return 74
 	fi
 }
-rm -rf "$run_dir"
 mkdir -m 700 "$run_dir" || exit 74
-` + inputSetup + `(trap '' HUP; while [ ! -f "$start" ]; do sleep 0.05; done; exec sh -c "$payload"` + inputRedirect + `) &
-child_pid=$!
-child_identity=$(ps -o lstart= -p "$child_pid" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' | cut -c1-96)
-if [ -z "$child_identity" ] || ! kill -0 "$child_pid" 2>/dev/null; then kill "$child_pid" 2>/dev/null || true; rm -rf "$run_dir"; exit 74; fi
-export state child token child_pid child_identity
-set +e
-run_owner_gate ` + shellQuote(installBody) + `
-gate_status=$?
-set -e
-if [ "$gate_status" -ne 0 ]; then kill "$child_pid" 2>/dev/null || true; rm -rf "$run_dir"; exit "$gate_status"; fi
+mkfifo "$control" || exit 74; child_body=` + shellQuote(childBody) + `
+` + inputSetup + `if command -v setsid >/dev/null 2>&1; then
+	(trap '' HUP; exec setsid /bin/sh -c "$child_body" "crabbox-workspace-$token" "$start" "$payload" "$run_dir/payload-done" "$control" "$sentinel_pid_path" "$sentinel_ready"` + inputRedirect + `) &
+elif command -v perl >/dev/null 2>&1; then
+	(trap '' HUP; exec perl -MPOSIX -e 'POSIX::setsid() >= 0 or exit 74; exec @ARGV' /bin/sh -c "$child_body" "crabbox-workspace-$token" "$start" "$payload" "$run_dir/payload-done" "$control" "$sentinel_pid_path" "$sentinel_ready"` + inputRedirect + `) &
+else
+	launcher_pid=$(ps -o ppid= -p "$owner_pid" 2>/dev/null | tr -d ' '); launcher_pgid=$(ps -o pgid= -p "$launcher_pid" 2>/dev/null | tr -d ' '); [ "$launcher_pid" -gt 1 ] && [ "$launcher_pgid" = "$launcher_pid" ] || exit 74; (trap '' HUP; exec /bin/sh -c "$child_body" "crabbox-workspace-$token" "$start" "$payload" "$run_dir/payload-done" "$control" "$sentinel_pid_path" "$sentinel_ready"` + inputRedirect + `) &
+fi
+child_pid=$!; expected_pgid=${launcher_pid:-$child_pid}
+child_pgid=$(ps -o pgid= -p "$child_pid" 2>/dev/null | tr -d ' ')
+attempt=0
+while [ "$child_pgid" != "$expected_pgid" ] && kill -0 "$child_pid" 2>/dev/null && [ "$attempt" -lt 20 ]; do sleep 0.01; attempt=$((attempt + 1)); child_pgid=$(ps -o pgid= -p "$child_pid" 2>/dev/null | tr -d ' '); done
+attempt=0
+while { [ ! -s "$sentinel_pid_path" ] || [ ! -f "$sentinel_ready" ]; } && kill -0 "$child_pid" 2>/dev/null && [ "$attempt" -lt 100 ]; do sleep 0.01; attempt=$((attempt + 1)); done
+sentinel_pid=$(sed -n '1p' "$sentinel_pid_path" 2>/dev/null || true)
+case "$sentinel_pid" in ''|*[!0-9]*) sentinel_pid=0 ;; esac
+sentinel_identity=$(ps -o lstart= -p "$sentinel_pid" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' | cut -c1-96)
+if [ "$child_pgid" != "$expected_pgid" ] || [ "$sentinel_pid" -le 1 ] || [ -z "$sentinel_identity" ]; then kill "$child_pid" 2>/dev/null || true; if [ "$sentinel_pid" -gt 1 ]; then kill "$sentinel_pid" 2>/dev/null || true; kill -KILL "$sentinel_pid" 2>/dev/null || true; fi; rm -rf "$run_dir"; exit 74; fi
+install_body=` + shellQuote(installBody) + `
+export state child gate token child_pid child_pgid sentinel_pid sentinel_identity owner_pid launcher_pid run_dir start control sentinel_pid_path sentinel_ready install_body
+# Reuse only a private transport PGID; the validated sentinel remains its sole group signaler.
+if command -v setsid >/dev/null 2>&1; then supervisor_setsid=setsid; else supervisor_setsid=; fi; nohup $supervisor_setsid /bin/sh -c ` + shellQuote(supervisorBody) + ` >/dev/null 2>&1 </dev/null &
+supervisor_pid=$!
+attempt=0; while [ ! -f "$run_dir/supervisor-ready" ] && kill -0 "$supervisor_pid" 2>/dev/null && [ "$attempt" -lt 600 ]; do sleep 0.01; attempt=$((attempt + 1)); done
+if [ ! -f "$run_dir/supervisor-ready" ]; then
+	kill "$supervisor_pid" "$child_pid" 2>/dev/null || true
+	live_pgid=$(ps -o pgid= -p "$sentinel_pid" 2>/dev/null | tr -d ' '); live_identity=$(ps -o lstart= -p "$sentinel_pid" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' | cut -c1-96); if [ "$live_pgid" = "$child_pgid" ] && [ "$live_identity" = "$sentinel_identity" ]; then kill -KILL "$sentinel_pid" 2>/dev/null || true; fi
+	wait "$child_pid" 2>/dev/null || true
+	set +e; wait "$supervisor_pid"; gate_status=$?; set -e
+	set +e; run_owner_gate ` + shellQuote(clearBody) + `; set -e
+	rm -rf "$run_dir"
+	[ "$gate_status" -ne 0 ] || gate_status=74
+	exit "$gate_status"
+fi
 touch "$start"
 set +e
 wait "$child_pid"
 code=$?
+wait "$supervisor_pid"
 set -e
 set +e
 run_owner_gate ` + shellQuote(clearBody) + `
@@ -893,7 +1015,7 @@ $token = ` + psQuote(token) + `
 $state = Join-Path $root ($key + ".owner")
 $child = Join-Path $root ($key + ".child")
 $gate = Join-Path $root ($key + ".gate")
-$runDir = Join-Path $root ($key + ".run." + $token)
+$runDir = Join-Path $root ($key + ".run." + $token + "." + [Guid]::NewGuid().ToString("N"))
 $start = Join-Path $runDir "start"
 function Enter-Gate {
 	for ($i = 0; $i -lt 50; $i++) {
@@ -940,7 +1062,6 @@ function Get-ExistingChildStatus {
 		catch { return "ambiguous" }
 	}
 }
-Remove-Item -LiteralPath $runDir -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $runDir -ErrorAction Stop | Out-Null
 ` + inputSetup + `
 $childSource = @'
@@ -962,28 +1083,67 @@ $childFileArg = '"' + $childScript + '"'
 $process = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", $childFileArg) -NoNewWindow -PassThru` + inputArgument + `
 $null = $process.Handle
 $identity = [string]$process.StartTime.ToUniversalTime().Ticks
+$supervisorSource = @'
+$ErrorActionPreference = "Stop"
+$state = '__STATE__'
+$ready = '__READY__'; $token = '__TOKEN__'
+$pidValue = [int]'__PID__'
+$identity = '__IDENTITY__'
+$jobType = 'using System; using System.Runtime.InteropServices; [StructLayout(LayoutKind.Sequential)] public struct CrabboxJobBasic { public long PerProcessUserTimeLimit, PerJobUserTimeLimit; public uint LimitFlags; public UIntPtr MinimumWorkingSetSize, MaximumWorkingSetSize; public uint ActiveProcessLimit; public UIntPtr Affinity; public uint PriorityClass, SchedulingClass; } [StructLayout(LayoutKind.Sequential)] public struct CrabboxJobIO { public ulong ReadOperationCount, WriteOperationCount, OtherOperationCount, ReadTransferCount, WriteTransferCount, OtherTransferCount; } [StructLayout(LayoutKind.Sequential)] public struct CrabboxJobLimits { public CrabboxJobBasic BasicLimitInformation; public CrabboxJobIO IoInfo; public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed; } [StructLayout(LayoutKind.Sequential)] public struct CrabboxJobTime { public uint Low, High; } [StructLayout(LayoutKind.Sequential)] public struct CrabboxJobAccounting { public long TotalUserTime, TotalKernelTime, PeriodUserTime, PeriodKernelTime; public uint TotalPageFaultCount, TotalProcesses, ActiveProcesses, TotalTerminatedProcesses; } public static class CrabboxJob { [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr CreateJobObject(IntPtr a, string n); [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetInformationJobObject(IntPtr j, int c, ref CrabboxJobLimits i, uint l); [DllImport("kernel32.dll", SetLastError=true)] static extern bool QueryInformationJobObject(IntPtr j, int c, out CrabboxJobAccounting i, uint l, IntPtr r); [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint a, bool i, int p); [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetProcessTimes(IntPtr p, out CrabboxJobTime c, out CrabboxJobTime e, out CrabboxJobTime k, out CrabboxJobTime u); [DllImport("kernel32.dll", SetLastError=true)] static extern bool AssignProcessToJobObject(IntPtr j, IntPtr p); [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h); public static IntPtr Attach(int pid,long identity) { IntPtr j=CreateJobObject(IntPtr.Zero,null); if(j==IntPtr.Zero) throw new System.ComponentModel.Win32Exception(); CrabboxJobLimits l=new CrabboxJobLimits(); l.BasicLimitInformation.LimitFlags=0x2000; if(!SetInformationJobObject(j,9,ref l,(uint)Marshal.SizeOf(l))) { CloseHandle(j); throw new System.ComponentModel.Win32Exception(); } IntPtr p=OpenProcess(0x1101,false,pid); if(p==IntPtr.Zero) { CloseHandle(j); throw new System.ComponentModel.Win32Exception(); } try { CrabboxJobTime c,e,k,u; if(!GetProcessTimes(p,out c,out e,out k,out u)) throw new System.ComponentModel.Win32Exception(); long created=((long)c.High<<32)|c.Low; if(created+504911232000000000L!=identity) throw new InvalidOperationException("process identity changed"); if(!AssignProcessToJobObject(j,p)) throw new System.ComponentModel.Win32Exception(); } catch { CloseHandle(j); throw; } finally { CloseHandle(p); } return j; } public static uint Active(IntPtr j) { CrabboxJobAccounting i; if(!QueryInformationJobObject(j,1,out i,(uint)Marshal.SizeOf(typeof(CrabboxJobAccounting)),IntPtr.Zero)) throw new System.ComponentModel.Win32Exception(); return i.ActiveProcesses; } }'
+Add-Type -TypeDefinition $jobType
+$job = [CrabboxJob]::Attach($pidValue, [Int64]$identity); if ($job -eq [IntPtr]::Zero) { throw "job attachment failed" }
+New-Item -ItemType File -Path $ready -Force | Out-Null; $ErrorActionPreference = "SilentlyContinue"
+try { while ($true) {
+	$leaderLive = $false
+	try {
+		$process = [Diagnostics.Process]::GetProcessById($pidValue)
+		$leaderLive = [string]$process.StartTime.ToUniversalTime().Ticks -eq $identity
+	} catch {}
+	$current = @(Get-Content -LiteralPath $state -ErrorAction SilentlyContinue)
+	$expired = $current.Count -ne 3 -or $current[0] -ne "v1" -or $current[1] -ne $token -or $current[2] -notmatch "^[0-9]+$"
+	if (-not $expired) { $expired = [Int64]$current[2] -le [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() }
+	if ($expired) {
+		if ($job -ne [IntPtr]::Zero) { $null = [CrabboxJob]::CloseHandle($job); $job = [IntPtr]::Zero }
+		exit 0
+	}
+	if (-not $leaderLive -and [CrabboxJob]::Active($job) -eq 0) { exit 0 }
+	Start-Sleep -Milliseconds 200
+} } finally { if ($job -ne [IntPtr]::Zero) { $null = [CrabboxJob]::CloseHandle($job) } }
+'@
+$ready = Join-Path $runDir "supervisor.ready"
+$supervisorSource = $supervisorSource.Replace('__STATE__', $state.Replace("'", "''")).Replace('__CHILD__', $child.Replace("'", "''")).Replace('__RUN_DIR__', $runDir.Replace("'", "''")).Replace('__READY__', $ready.Replace("'", "''")).Replace('__TOKEN__', $token).Replace('__PID__', [string]$process.Id).Replace('__IDENTITY__', $identity)
+$supervisorScript = Join-Path $runDir "supervisor.ps1"
+[IO.File]::WriteAllText($supervisorScript, $supervisorSource, [Text.UTF8Encoding]::new($true))
+# The detached supervisor owns the exact process handle before publication.
+$supervisorFileArg = '"' + $supervisorScript + '"'; $supervisor = $null
+function Stop-NewWitness([int]$code) { if ($null -ne $supervisor -and -not $supervisor.HasExited) { $supervisor.Kill() }; if ($null -ne $supervisor) { $supervisor.WaitForExit() }; if (-not $process.HasExited) { $process.Kill() }; $process.WaitForExit(); Remove-Item -LiteralPath $runDir -Recurse -Force -ErrorAction SilentlyContinue; exit $code }
+try { $supervisor = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", $supervisorFileArg) -WindowStyle Hidden -PassThru; $null = $supervisor.Handle; $supervisorIdentity = [string]$supervisor.StartTime.ToUniversalTime().Ticks } catch { Stop-NewWitness 74 }
+$supervisorDeadline = [DateTime]::UtcNow.AddSeconds(10)
+while (-not (Test-Path -LiteralPath $ready) -and -not $supervisor.HasExited -and [DateTime]::UtcNow -lt $supervisorDeadline) { Start-Sleep -Milliseconds 20 }
+if (-not (Test-Path -LiteralPath $ready)) { Stop-NewWitness 74 }
 $gateStream = Enter-Gate
-if ($null -eq $gateStream) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue; throw "ambiguous owner gate" }
+if ($null -eq $gateStream) { Stop-NewWitness 74 }
 try {
-	if ((Read-Token) -ne $token) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue; exit 75 }
-	if ((Read-Expiry) -le [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue; exit 75 }
+	if ((Read-Token) -ne $token) { Stop-NewWitness 75 }
+	if ((Read-Expiry) -le [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) { Stop-NewWitness 75 }
 	$existingStatus = Get-ExistingChildStatus
-	if ($existingStatus -eq "live") { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue; exit 75 }
-	if ($existingStatus -eq "ambiguous") { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue; exit 74 }
+	if ($existingStatus -eq "live") { Stop-NewWitness 75 }
+	if ($existingStatus -eq "ambiguous") { Stop-NewWitness 74 }
 	Remove-Item -LiteralPath $child -Force -ErrorAction SilentlyContinue
 	$tmp = $child + ".tmp." + [Guid]::NewGuid().ToString("N")
-	[IO.File]::WriteAllLines($tmp, @([string]$process.Id, $identity), [Text.UTF8Encoding]::new($false))
+	[IO.File]::WriteAllLines($tmp, @([string]$supervisor.Id, $supervisorIdentity), [Text.UTF8Encoding]::new($false))
 	Move-Item -LiteralPath $tmp -Destination $child -Force
-} finally { $gateStream.Dispose(); Remove-Item -LiteralPath $gate -Force -ErrorAction SilentlyContinue }
+} catch { Stop-NewWitness 74 } finally { $gateStream.Dispose(); Remove-Item -LiteralPath $gate -Force -ErrorAction SilentlyContinue }
 New-Item -ItemType File -Path $start -Force | Out-Null
 $process.WaitForExit()
 $code = $process.ExitCode
+$supervisor.WaitForExit()
 $clear = $false
 $gateStream = Enter-Gate
 if ($null -ne $gateStream) {
 	try {
 		$recorded = @(Get-Content -LiteralPath $child -ErrorAction Stop)
-    if ((Read-Token) -eq $token -and $recorded.Count -eq 2 -and $recorded[0] -eq [string]$process.Id -and $recorded[1] -eq $identity) {
+    if ((Read-Token) -eq $token -and $recorded.Count -eq 2 -and $recorded[0] -eq [string]$supervisor.Id -and $recorded[1] -eq $supervisorIdentity) {
       Remove-Item -LiteralPath $child -Force -ErrorAction Stop
       $clear = $true
     }

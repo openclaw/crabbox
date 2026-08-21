@@ -57,6 +57,12 @@ On Linux, macOS, and WSL2 targets, Crabbox's workspace-owner protocol invokes
 `/bin/sh` explicitly and does not require the SSH account to use a POSIX login
 shell; zsh, Bash, and Fish login shells are supported.
 
+After upgrading from 0.45.0, a reused POSIX host can report `LEGACY` for an old
+two-line workspace-owner child record. Crabbox leaves that record untouched
+and refuses reuse. Quiesce or reboot the host, verify the recorded PID/start
+identity is no longer authoritative, and remove only the exact child path shown
+in the error. See [Legacy workspace-owner recovery](../commands/run.md#legacy-workspace-owner-recovery).
+
 ## Configuration
 
 The static target lives under the `static:` block. SSH credentials fall back to

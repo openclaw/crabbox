@@ -225,6 +225,33 @@ renewal, release, token, or child state fails closed instead of risking a
 concurrent checkout. POSIX, WSL2, and native Windows targets implement the same
 protocol; the small sync-finalization lock remains nested inside it.
 
+### Legacy Workspace-Owner Recovery
+
+Crabbox 0.45.1 does not automatically clear a valid two-line POSIX child record
+left by 0.45.0. It reports `LEGACY`, refuses workspace reuse, and prints the
+lease id, workspace-owner key, and exact remote child-record path. This avoids
+guessing whether a departed leader left descendants behind.
+
+First quiesce every user of the lease or reboot the remote host. Then read the
+two-line file and verify that its recorded PID is absent or no longer has the
+recorded start identity:
+
+```sh
+record="$HOME/.crabbox/workspace-owners/<key>.child"
+pid=$(sed -n '1p' "$record")
+sed -n '2p' "$record"
+ps -o lstart= -p "$pid"
+```
+
+Only after the host is quiescent and that identity is no longer authoritative,
+remove the exact file printed by Crabbox and retry:
+
+```sh
+rm -- "$HOME/.crabbox/workspace-owners/<key>.child"
+```
+
+Do not delete the record while the PID/start pair may still own work.
+
 Use `--full-resync` (alias `--fresh-sync`) when a warm lease smells stale:
 Crabbox deletes the remote workdir, skips the fingerprint fast path, reseeds Git
 when possible, and uploads the checkout from scratch. Use `--checksum` for a

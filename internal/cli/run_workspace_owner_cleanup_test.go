@@ -110,6 +110,7 @@ func (r *runCleanupWorkspaceOwnerTransport) acquire(ctx context.Context, target 
 		stop:      make(chan struct{}),
 		done:      make(chan struct{}),
 	}
+	owner.confirmedAt(time.Now())
 	ticks := make(chan time.Time, 1)
 	go owner.renewLoopWithTicks(ticks, time.Minute)
 	ticks <- time.Now()
@@ -232,7 +233,7 @@ func TestRunCommandDestructiveCleanupQuiescesWorkspaceOwner(t *testing.T) {
 		wantOwnerRelease bool
 	}{
 		{name: "successful evidence-backed run", command: "renewal-cleanup-success", download: true, wantStop: true},
-		{name: "renewal fails before stop", command: "renewal-cleanup-success", renewErr: errors.New("renew response lost"), wantExit: 7, wantOwnerRelease: true},
+		{name: "ambiguous renewal resolves through confirmed stop", command: "renewal-cleanup-success", renewErr: errors.New("renew response lost"), wantStop: true},
 		{name: "stop is not confirmed", command: "renewal-cleanup-success", stopErr: errors.New("stop not confirmed"), wantExit: 7, wantStop: true, wantOwnerRelease: true},
 		{name: "remote command remains nonzero", command: "renewal-cleanup-exit-23", wantExit: 23, wantStop: true},
 	}
@@ -341,7 +342,7 @@ func TestRunCommandDestructiveCleanupQuiescesWorkspaceOwner(t *testing.T) {
 	}
 }
 
-func TestRunCommandRetainedLeaseRetainsFailClosedRenewal(t *testing.T) {
+func TestRunCommandRetainedLeaseResolvesAmbiguousRenewalOnRelease(t *testing.T) {
 	tests := []struct {
 		name string
 		args []string
@@ -375,7 +376,7 @@ func TestRunCommandRetainedLeaseRetainsFailClosedRenewal(t *testing.T) {
 			remote.unblockInspect()
 			remote.unblockRenewal()
 			runErr := result.wait(t)
-			assertRunCleanupExitCode(t, runErr, 7, stdout.String(), stderr.String())
+			assertRunCleanupExitCode(t, runErr, 0, stdout.String(), stderr.String())
 			select {
 			case <-releaseStarted:
 				t.Fatal("retained lease was destructively stopped")
