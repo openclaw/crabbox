@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:crabbox:schema:aws-image-evidence-bundle:v1",
+  "title": "AWSImageEvidenceBundleV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "artifactType",
+    "candidate",
+    "files",
+    "oci"
+  ],
+  "properties": {
+    "schema": {
+      "const": "crabbox-aws-image-evidence-bundle/v1"
+    },
+    "artifactType": {
+      "const": "application/vnd.crabbox.aws-image-evidence.v1"
+    },
+    "candidate": {
+      "$ref": "#/$defs/descriptor"
+    },
+    "files": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "mediaType",
+          "digest",
+          "size"
+        ],
+        "properties": {
+          "name": {
+            "enum": [
+              "candidate.json",
+              "provenance.intoto.jsonl",
+              "recipe.json",
+              "sbom.spdx.json",
+              "scrub-report.json"
+            ]
+          },
+          "mediaType": {
+            "type": "string",
+            "minLength": 1
+          },
+          "digest": {
+            "$ref": "#/$defs/digest"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    },
+    "oci": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "immutableTag",
+        "signature"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "pattern": "^ghcr\\.io/[a-z0-9_.-]+(/[a-z0-9_.-]+)+$"
+        },
+        "immutableTag": {
+          "type": "string",
+          "pattern": "^sha256-[0-9a-f]{64}$"
+        },
+        "signature": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "oidcIssuer",
+            "certificateIdentity"
+          ],
+          "properties": {
+            "mode": {
+              "const": "keyless"
+            },
+            "oidcIssuer": {
+              "const": "https://token.actions.githubusercontent.com"
+            },
+            "certificateIdentity": {
+              "type": "string",
+              "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\\.github/workflows/[A-Za-z0-9._/-]+\\.ya?ml@refs/heads/[A-Za-z0-9._/-]+$"
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "descriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mediaType",
+        "digest",
+        "size"
+      ],
+      "properties": {
+        "mediaType": {
+          "const": "application/vnd.crabbox.aws-image-candidate.v1+json"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}

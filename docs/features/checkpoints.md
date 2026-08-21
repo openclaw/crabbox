@@ -183,7 +183,7 @@ the scheduled job destructive.
 ## Commands
 
 ```
-crabbox checkpoint create  --id <lease> [--name <name>] [--mode auto|native|archive] [--strategy auto|disk-snapshot|image]
+crabbox checkpoint create  --id <lease> [--name <name>] [--mode auto|native|archive] [--strategy auto|disk-snapshot|image] [--json]
 crabbox checkpoint list    [--json] [--verify]
 crabbox checkpoint inspect <checkpoint-id> [--json] [--verify]
 crabbox checkpoint restore <checkpoint-id> --id <lease> [--clear=false]
@@ -214,6 +214,8 @@ Useful flags:
   become available.
 - `--no-reboot` (default on) — avoid rebooting the source instance during a
   native snapshot.
+- `--json` — print the complete stored checkpoint record, including native
+  image and snapshot identifiers, for automation.
 
 On create, native checkpoints flush filesystem writes, reset Linux cloud-init
 state when present (so forks boot with fresh SSH keys), call the provider

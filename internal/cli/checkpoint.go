@@ -97,6 +97,7 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	waitTimeout := fs.Duration("wait-timeout", 45*time.Minute, "maximum native snapshot wait duration")
 	noReboot := fs.Bool("no-reboot", true, "avoid rebooting the source instance while creating a native snapshot")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
+	jsonOut := fs.Bool("json", false, "print JSON")
 	targetFlags := registerTargetFlags(fs, defaults)
 	networkFlags := registerNetworkModeFlag(fs, defaults)
 	providerFlags := registerProviderFlags(fs, defaults)
@@ -199,11 +200,18 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 		return err
 	}
 	recordWritten = true
+	return printCheckpointCreated(a.Stdout, record, *jsonOut)
+}
+
+func printCheckpointCreated(stdout io.Writer, record checkpointRecord, jsonOut bool) error {
+	if jsonOut {
+		return json.NewEncoder(stdout).Encode(record)
+	}
 	if isNativeCheckpointKind(record.Kind) {
-		fmt.Fprintf(a.Stdout, "checkpoint created id=%s kind=%s resource=%s state=%s region=%s workdir=%s\n", record.ID, record.Kind, record.Native.ImageID, record.Native.State, blank(record.Native.Region, "-"), record.Workdir)
+		fmt.Fprintf(stdout, "checkpoint created id=%s kind=%s resource=%s state=%s region=%s workdir=%s\n", record.ID, record.Kind, record.Native.ImageID, record.Native.State, blank(record.Native.Region, "-"), record.Workdir)
 		return nil
 	}
-	fmt.Fprintf(a.Stdout, "checkpoint created id=%s kind=%s bytes=%s workdir=%s\n", record.ID, record.Kind, humanBytes(record.ArchiveBytes), record.Workdir)
+	fmt.Fprintf(stdout, "checkpoint created id=%s kind=%s bytes=%s workdir=%s\n", record.ID, record.Kind, humanBytes(record.ArchiveBytes), record.Workdir)
 	return nil
 }
 

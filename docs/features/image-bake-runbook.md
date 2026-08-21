@@ -260,9 +260,11 @@ not enable it casually for every candidate.
 ## GitHub Actions publication
 
 Merging an installer or image-wrapper change updates the source recipe only. It
-does not create or promote an AWS image. Actual publication is a successful
-`Publish Developer Image` workflow run, which executes the same source smoke,
-candidate smoke, promotion, and promoted-image smoke described below.
+does not create or promote an AWS image. The manually dispatched
+`Publish AWS Image Candidate` workflow creates and proves one Linux or Windows
+candidate, then publishes its evidence bundle to GHCR. It never promotes an
+AMI, changes a coordinator default, enables Fast Snapshot Restore, or boots a
+third lease.
 
 Configure the `image-publisher` GitHub environment with:
 
@@ -272,31 +274,36 @@ Configure the `image-publisher` GitHub environment with:
   secrets when the coordinator is behind Cloudflare Access.
 
 Add required reviewers to that environment so paid image creation and
-fleet-wide promotion need explicit administrator approval. Dispatch one
-platform at a time from the protected default branch:
+evidence publication need explicit administrator approval. Dispatch one
+platform at a time from the protected default branch with an exact source AMI:
 
 ```bash
 gh workflow run devtools-image-publish.yml \
   --ref main \
   -f target=linux \
-  -f region=eu-west-1
+  -f region=eu-west-1 \
+  -f base_image=ami-0123456789abcdef0 \
+  -f architecture=x86_64
 
 gh workflow run devtools-image-publish.yml \
   --ref main \
   -f target=windows \
-  -f region=eu-west-1
-
-gh workflow run devtools-image-publish.yml \
-  --ref main \
-  -f target=macos \
   -f region=eu-west-1 \
-  -f macos_host=use-existing
+  -f base_image=ami-0123456789abcdef0 \
+  -f architecture=x86_64
 ```
 
-Use `macos_host=allocate` only when no suitable EC2 Mac Dedicated Host is
-available. The workflow uploads its complete mint logs and macOS lifecycle
-evidence as a 30-day Actions artifact. A failed candidate or promoted-image
-smoke fails the workflow and leaves the previous promoted image selected.
+Pass `previous_default=ami-...` when the immutable candidate record should bind
+the current rollback target. The workflow uploads complete mint logs and the
+candidate bundle as a 30-day Actions artifact. It also publishes only the
+bundle's record, recipe, SBOM, provenance, and redacted scrub report to GHCR
+under a digest-derived immutable tag, then signs that OCI artifact with GitHub
+OIDC. AMI and EBS snapshot bytes remain in AWS, and GHCR is never a boot
+dependency.
+
+Promotion remains a separate operator decision after the candidate evidence is
+reviewed. Use `crabbox image promote` directly and run the normal brokered smoke
+described in [Promote](#promote).
 
 ## Developer-image wrappers
 
@@ -318,6 +325,7 @@ scripts/mint-aws-devtools-image.sh \
   --region us-west-2 \
   --class standard \
   --type m7i.large \
+  --base-image ami-0123456789abcdef0 \
   --run
 
 scripts/mint-aws-devtools-image.sh \
@@ -325,28 +333,24 @@ scripts/mint-aws-devtools-image.sh \
   --region us-west-2 \
   --class standard \
   --type m7i.large \
+  --base-image ami-0123456789abcdef0 \
   --windows-mode normal \
   --run
 ```
 
 The wrapper captures its candidate through `crabbox checkpoint create`, so the
 same source/candidate proof works with direct AWS credentials and with an
-admin-authenticated broker. Promotion updates broker-managed image defaults;
-use `--no-promote` when validating a direct-only AWS configuration.
+admin-authenticated broker. Candidate-only mode is the default and the
+publication workflow still passes `--no-promote` explicitly. The wrapper's
+legacy `--promote` mode and FSR flags are operator-only paths; the protected
+candidate workflow cannot invoke either.
 
-Enable FSR for hot lanes that need lower first-boot variance, in the AZs you
-actually launch from:
-
-```bash
-scripts/mint-aws-devtools-image.sh \
-  --target windows \
-  --region us-west-2 \
-  --type m7i.large \
-  --fast-snapshot-restore \
-  --fsr-az us-west-2a \
-  --fsr-az us-west-2b \
-  --run
-```
+Before AMI capture, the wrapper scrubs SSH keys and host identity, shell
+history, cloud-init or EC2Launch state, credentials, workspaces, and prep
+artifacts. The redacted report contains category counts, residual finding
+names, and a digest, never removed paths or secret values. The bundle is
+written atomically only after source smoke, scrub verification, explicit
+candidate boot, and candidate smoke all pass.
 
 ### What the prep scripts install
 
@@ -400,18 +404,38 @@ overrides fail before the artifact is downloaded.
 ### Wrapper behavior
 
 The wrapper defaults to `--class standard` even when an explicit instance type
-is given, so bakes do not consume the high-pressure beast class. It proves the
-source lease, candidate AMI, and promoted AMI before declaring success unless
-`--no-promote` is set, and writes warmup timing logs under
+is given, so bakes do not consume the high-pressure beast class. Candidate mode
+proves exactly the source lease and explicit candidate AMI, then writes warmup
+timing logs under
 `.crabbox/image-mint-<image-name>-*.log.*` with a per-invocation suffix. Each
-warmup prints its exact `log=` path. Candidate proof requires
-`source=explicit`; final proof requires `source=promoted` with the exact AMI ID
-created by the run. The Linux prep currently writes the compatibility
-`/var/lib/crabbox/image-ready` marker. That marker does not authorize an APT
-skip by itself: later bootstrap first proves the complete `linux-minimal`
-contract, then migrates it to the root-owned v1 readiness manifest without a
-package-manager call. Use the timing logs to compare provider request, network
-readiness, bootstrap, and end-to-end time before and after each bake.
+warmup prints its exact `log=` path. Both source and candidate selection must
+report the exact expected AMI ID; candidate proof also requires
+`source=explicit`. The Linux prep writes a root-owned v1 `linux-builder`
+readiness manifest with exact recipe and inventory digests, plus the legacy
+marker for compatibility. Use the timing logs to compare provider request,
+network readiness, bootstrap, and end-to-end time before and after each bake.
+
+### Candidate evidence contract
+
+`recipes/aws/v1/candidate.schema.json` defines `CandidateRecordV1`. Each record
+binds the source repository, commit, workflow run, readiness profile and recipe
+digest, target, region, instance type, architecture, exact base AMI, candidate
+AMI and snapshots, optional previous default, and the four required checks.
+
+The OCI evidence bundle contains:
+
+- `candidate.json`;
+- the exact versioned image recipe;
+- an SPDX SBOM;
+- SLSA-shaped provenance;
+- the redacted scrub report;
+- `bundle.json`, which binds every file digest, the immutable OCI tag, and the
+  keyless signing identity.
+
+`scripts/aws-image-candidate.mjs verify` rejects missing, extra, or modified
+files. `scripts/publish-aws-image-candidate.sh` refuses an existing tag before
+push and verifies the keyless signature against the workflow identity and
+GitHub Actions OIDC issuer.
 
 ## macOS images
 

@@ -79,6 +79,33 @@ func TestCheckpointCreateAppliesAzureSnapshotSKUFlag(t *testing.T) {
 	}
 }
 
+func TestPrintCheckpointCreatedJSONIncludesNativeImageEvidence(t *testing.T) {
+	record := checkpointRecord{
+		ID:       "chk_candidate",
+		Kind:     checkpointKindAWSAMI,
+		Provider: "aws",
+		TargetOS: targetLinux,
+	}
+	record.Native.Provider = "aws"
+	record.Native.Kind = checkpointKindAWSAMI
+	record.Native.ImageID = "ami-123abc"
+	record.Native.Region = "us-west-2"
+	record.Native.Architecture = "x86_64"
+	record.Native.SnapshotIDs = []string{"snap-123abc"}
+
+	var stdout bytes.Buffer
+	if err := printCheckpointCreated(&stdout, record, true); err != nil {
+		t.Fatal(err)
+	}
+	var got checkpointRecord
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decode JSON output: %v\n%s", err, stdout.String())
+	}
+	if !reflect.DeepEqual(got, record) {
+		t.Fatalf("JSON checkpoint record mismatch:\ngot:  %#v\nwant: %#v", got, record)
+	}
+}
+
 func TestCheckpointRecordRoundTripAndListOrder(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	store, err := defaultCheckpointStore()

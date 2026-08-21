@@ -12,5 +12,15 @@
 /scripts/verify-go-install.sh @openclaw/openclaw-secops
 /scripts/verify-macos-* @openclaw/openclaw-secops
 
+# Protected image-candidate publication and evidence contracts.
+/.github/workflows/devtools-image-publish.yml @openclaw/openclaw-secops
+/recipes/aws/ @openclaw/openclaw-secops
+/recipes/windows/ @openclaw/openclaw-secops
+/scripts/aws-image-candidate.mjs @openclaw/openclaw-secops
+/scripts/aws-image-windows-prep-* @openclaw/openclaw-secops
+/scripts/mint-aws-devtools-image.sh @openclaw/openclaw-secops
+/scripts/scrub-aws-* @openclaw/openclaw-secops
+/scripts/smoke-aws-* @openclaw/openclaw-secops
+
 # Every eventually executed Apple VM Mach-O shares this boundary.
 /internal/applevmhelper/ @openclaw/openclaw-secops

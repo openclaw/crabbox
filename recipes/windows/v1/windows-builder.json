@@ -1,0 +1,33 @@
+{
+  "schema": "crabbox-windows-readiness/v1",
+  "profile": "windows-builder",
+  "description": "Reusable Windows Server build image prerequisites for Crabbox development",
+  "probes": [
+    "sshd",
+    "git",
+    "gh",
+    "jq",
+    "ripgrep",
+    "fd",
+    "python",
+    "node",
+    "corepack",
+    "pnpm",
+    "trufflehog",
+    "docker"
+  ],
+  "toolchains": [
+    {
+      "name": "node",
+      "version": "24"
+    },
+    {
+      "name": "pnpm",
+      "version": "11.1.0"
+    },
+    {
+      "name": "trufflehog",
+      "version": "3.95.9"
+    }
+  ]
+}

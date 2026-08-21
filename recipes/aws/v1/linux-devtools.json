@@ -1,0 +1,35 @@
+{
+  "schema": "crabbox-aws-image-recipe/v1",
+  "target": "linux",
+  "profile": "linux-builder",
+  "readinessRecipe": "recipes/linux/v1/linux-builder.json",
+  "inputs": [
+    "recipes/linux/v1/linux-builder.json",
+    "scripts/install-linux-developer-tools.sh",
+    "scripts/smoke-aws-linux-devtools-image.sh",
+    "scripts/scrub-aws-image.mjs",
+    "scripts/scrub-aws-linux-image.sh"
+  ],
+  "components": [
+    {
+      "name": "crabbox-linux-builder",
+      "version": "v1",
+      "source": "recipes/linux/v1/linux-builder.json"
+    },
+    {
+      "name": "node",
+      "version": "24",
+      "source": ".node-version"
+    },
+    {
+      "name": "pnpm",
+      "version": "11.1.0",
+      "source": "scripts/install-linux-developer-tools.sh"
+    },
+    {
+      "name": "trufflehog",
+      "version": "3.95.9",
+      "source": "scripts/install-linux-developer-tools.sh"
+    }
+  ]
+}

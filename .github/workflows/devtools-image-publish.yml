@@ -1,22 +1,37 @@
-name: Publish Developer Image
-run-name: Publish ${{ inputs.target }} developer image in ${{ inputs.region }}
+name: Publish AWS Image Candidate
+run-name: Publish ${{ inputs.target }} AWS image candidate in ${{ inputs.region }}
 
 on:
   workflow_dispatch:
     inputs:
       target:
-        description: Developer image platform
+        description: Candidate image platform
         required: true
         type: choice
         options:
           - linux
           - windows
-          - macos
       region:
         description: AWS region
         required: true
         default: eu-west-1
         type: string
+      base_image:
+        description: Exact source AMI id
+        required: true
+        type: string
+      previous_default:
+        description: Previous default AMI id recorded for rollback evidence
+        required: false
+        type: string
+      architecture:
+        description: Source and candidate architecture
+        required: true
+        default: x86_64
+        type: choice
+        options:
+          - x86_64
+          - arm64
       linux_type:
         description: Linux source instance type
         required: true
@@ -27,30 +42,19 @@ on:
         required: true
         default: m7i.large
         type: string
-      macos_type:
-        description: macOS source instance type
-        required: true
-        default: mac-m4.metal
-        type: string
-      macos_host:
-        description: Use an available EC2 Mac host or allocate one
-        required: true
-        default: use-existing
-        type: choice
-        options:
-          - use-existing
-          - allocate
 
 permissions:
   contents: read
+  packages: write
+  id-token: write
 
 concurrency:
-  group: devtools-image-publish-${{ inputs.target }}
+  group: devtools-image-candidate-${{ inputs.target }}-${{ inputs.region }}
   cancel-in-progress: false
 
 jobs:
   guard:
-    name: Guard protected publication
+    name: Guard protected candidate publication
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -71,26 +75,28 @@ jobs:
           [[ "$REF_PROTECTED" == true ]]
           [[ "$WORKFLOW_SHA" == "$RUN_SHA" ]]
 
-      - name: Validate publication inputs
+      - name: Validate candidate inputs
         shell: bash
         env:
           TARGET: ${{ inputs.target }}
           REGION: ${{ inputs.region }}
+          BASE_IMAGE: ${{ inputs.base_image }}
+          PREVIOUS_DEFAULT: ${{ inputs.previous_default }}
+          ARCHITECTURE: ${{ inputs.architecture }}
           LINUX_TYPE: ${{ inputs.linux_type }}
           WINDOWS_TYPE: ${{ inputs.windows_type }}
-          MACOS_TYPE: ${{ inputs.macos_type }}
-          MACOS_HOST: ${{ inputs.macos_host }}
         run: |
           set -euo pipefail
-          [[ "$TARGET" =~ ^(linux|windows|macos)$ ]]
+          [[ "$TARGET" =~ ^(linux|windows)$ ]]
           [[ "$REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$ ]]
+          [[ "$BASE_IMAGE" =~ ^ami-[0-9a-z]+$ ]]
+          [[ -z "$PREVIOUS_DEFAULT" || "$PREVIOUS_DEFAULT" =~ ^ami-[0-9a-z]+$ ]]
+          [[ "$ARCHITECTURE" =~ ^(x86_64|arm64)$ ]]
           [[ "$LINUX_TYPE" =~ ^[A-Za-z0-9.-]+$ ]]
           [[ "$WINDOWS_TYPE" =~ ^[A-Za-z0-9.-]+$ ]]
-          [[ "$MACOS_TYPE" =~ ^[A-Za-z0-9.-]+$ ]]
-          [[ "$MACOS_HOST" =~ ^(use-existing|allocate)$ ]]
 
   publish:
-    name: Build, smoke, and promote
+    name: Build, smoke, and publish candidate evidence
     needs: guard
     runs-on: ubuntu-latest
     timeout-minutes: 360
@@ -99,16 +105,17 @@ jobs:
       CRABBOX_COORDINATOR: ${{ vars.CRABBOX_COORDINATOR }}
       CRABBOX_COORDINATOR_TOKEN: ${{ secrets.CRABBOX_COORDINATOR_ADMIN_TOKEN }}
       CRABBOX_COORDINATOR_ADMIN_TOKEN: ${{ secrets.CRABBOX_COORDINATOR_ADMIN_TOKEN }}
-      CRABBOX_OWNER: image-publisher@openclaw.invalid
-      CRABBOX_ORG: openclaw
+      CRABBOX_OWNER: image-publisher@example.invalid
+      CRABBOX_ORG: example-org
       CRABBOX_ACCESS_CLIENT_ID: ${{ secrets.CRABBOX_ACCESS_CLIENT_ID }}
       CRABBOX_ACCESS_CLIENT_SECRET: ${{ secrets.CRABBOX_ACCESS_CLIENT_SECRET }}
       TARGET: ${{ inputs.target }}
       REGION: ${{ inputs.region }}
+      BASE_IMAGE: ${{ inputs.base_image }}
+      PREVIOUS_DEFAULT: ${{ inputs.previous_default }}
+      ARCHITECTURE: ${{ inputs.architecture }}
       LINUX_TYPE: ${{ inputs.linux_type }}
       WINDOWS_TYPE: ${{ inputs.windows_type }}
-      MACOS_TYPE: ${{ inputs.macos_type }}
-      MACOS_HOST: ${{ inputs.macos_host }}
     steps:
       - name: Verify publisher configuration
         shell: bash
@@ -135,78 +142,112 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      - name: Build trusted Crabbox CLI
-        run: go build -trimpath -o bin/crabbox ./cmd/crabbox
+      - name: Build trusted tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          go build -trimpath -o bin/crabbox ./cmd/crabbox
+          GOBIN="$RUNNER_TEMP/image-tools" go install oras.land/oras/cmd/oras@v1.3.3
+          GOBIN="$RUNNER_TEMP/image-tools" go install github.com/sigstore/cosign/v2/cmd/cosign@v2.6.5
+          echo "$RUNNER_TEMP/image-tools" >>"$GITHUB_PATH"
 
-      - name: Publish and prove image
+      - name: Authenticate to GHCR
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" |
+            "$RUNNER_TEMP/image-tools/oras" login ghcr.io \
+              --username "$GITHUB_ACTOR" \
+              --password-stdin
+
+      - name: Build and prove candidate
         shell: bash
         env:
           CRABBOX_IMAGE_LOG_DIR: ${{ runner.temp }}/devtools-image-proof/aws
-          CRABBOX_MACOS_ARTIFACT_DIR: ${{ runner.temp }}/devtools-image-proof/macos
+          CRABBOX_IMAGE_CANDIDATE_OUTPUT: ${{ runner.temp }}/devtools-image-proof/candidate
+          CRABBOX_IMAGE_BASE_IMAGE: ${{ inputs.base_image }}
+          CRABBOX_IMAGE_ARCHITECTURE: ${{ inputs.architecture }}
+          CRABBOX_IMAGE_SOURCE_REPOSITORY: ${{ github.repository }}
+          CRABBOX_IMAGE_SOURCE_COMMIT: ${{ github.sha }}
+          CRABBOX_IMAGE_WORKFLOW_REF: ${{ github.workflow_ref }}
+          CRABBOX_IMAGE_WORKFLOW_RUN_ID: ${{ github.run_id }}
+          CRABBOX_IMAGE_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
           proof_dir="$RUNNER_TEMP/devtools-image-proof"
           mkdir -p "$proof_dir"
-          case "$TARGET" in
-            linux)
-              command=(
-                scripts/mint-aws-devtools-image.sh
-                --target linux
-                --region "$REGION"
-                --class standard
-                --type "$LINUX_TYPE"
-                --run
-              )
-              ;;
-            windows)
-              command=(
-                scripts/mint-aws-devtools-image.sh
-                --target windows
-                --region "$REGION"
-                --class standard
-                --type "$WINDOWS_TYPE"
-                --windows-mode normal
-                --run
-              )
-              ;;
-            macos)
-              command=(
-                scripts/mint-macos-devtools-image.sh
-                --region "$REGION"
-                --type "$MACOS_TYPE"
-                "--$MACOS_HOST"
-              )
-              ;;
-          esac
-          printf 'Publishing from protected commit %s\n' "$GITHUB_SHA"
+          if [[ "$TARGET" == linux ]]; then
+            instance_type="$LINUX_TYPE"
+          else
+            instance_type="$WINDOWS_TYPE"
+          fi
+          command=(
+            scripts/mint-aws-devtools-image.sh
+            --target "$TARGET"
+            --region "$REGION"
+            --class standard
+            --type "$instance_type"
+            --architecture "$ARCHITECTURE"
+            --base-image "$BASE_IMAGE"
+            --candidate-output "$CRABBOX_IMAGE_CANDIDATE_OUTPUT"
+            --recipe "recipes/aws/v1/$TARGET-devtools.json"
+            --run
+            --no-promote
+          )
+          if [[ "$TARGET" == windows ]]; then
+            command+=(--windows-mode normal)
+          fi
+          if [[ -n "$PREVIOUS_DEFAULT" ]]; then
+            command+=(--previous-default "$PREVIOUS_DEFAULT")
+          fi
+          printf 'Candidate source commit: %s\n' "$GITHUB_SHA"
           printf 'Command:'
           printf ' %q' "${command[@]}"
           printf '\n'
-          "${command[@]}" 2>&1 | tee "$proof_dir/publish.log"
+          "${command[@]}" 2>&1 | tee "$proof_dir/candidate.log"
+          node scripts/aws-image-candidate.mjs verify \
+            --dir "$CRABBOX_IMAGE_CANDIDATE_OUTPUT" |
+            tee "$proof_dir/verification.json"
 
-      - name: Summarize publication
+      - name: Publish and sign immutable OCI evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof_dir="$RUNNER_TEMP/devtools-image-proof"
+          repository="ghcr.io/${GITHUB_REPOSITORY,,}-aws-image-candidates"
+          scripts/publish-aws-image-candidate.sh \
+            --bundle "$proof_dir/candidate" \
+            --repository "$repository" \
+            --certificate-identity "https://github.com/$GITHUB_WORKFLOW_REF" |
+            tee "$proof_dir/publication.json"
+
+      - name: Summarize candidate publication
         if: always()
         shell: bash
         run: |
           {
-            echo "## Developer image publication"
+            echo "## AWS image candidate"
             echo
             echo "- Target: \`$TARGET\`"
             echo "- Region: \`$REGION\`"
             echo "- Source commit: \`$GITHUB_SHA\`"
-            if [[ -f "$RUNNER_TEMP/devtools-image-proof/publish.log" ]]; then
-              echo
-              echo "### Result"
-              grep -E 'candidate AMI smoke passed|promoted image selection proved|promoted (linux|windows) developer image passed|promoted macOS image lifecycle passed' \
-                "$RUNNER_TEMP/devtools-image-proof/publish.log" || true
+            if [[ -f "$RUNNER_TEMP/devtools-image-proof/publication.json" ]]; then
+              node -e '
+                const fs = require("fs");
+                const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+                console.log(`- OCI evidence: \`${value.immutableRef}\``);
+                console.log(`- Candidate digest: \`${value.candidateDigest}\``);
+              ' "$RUNNER_TEMP/devtools-image-proof/publication.json"
             fi
           } >>"$GITHUB_STEP_SUMMARY"
 
-      - name: Upload publication proof
+      - name: Upload candidate proof
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: devtools-image-${{ inputs.target }}-${{ github.run_id }}
+          name: aws-image-candidate-${{ inputs.target }}-${{ github.run_id }}
           path: ${{ runner.temp }}/devtools-image-proof
           if-no-files-found: error
           retention-days: 30
