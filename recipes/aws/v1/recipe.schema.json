@@ -6,6 +6,7 @@
   "additionalProperties": false,
   "required": [
     "schema",
+    "path",
     "target",
     "profile",
     "readinessRecipe",
@@ -15,6 +16,10 @@
   "properties": {
     "schema": {
       "const": "crabbox-aws-image-recipe/v1"
+    },
+    "path": {
+      "type": "string",
+      "pattern": "^recipes/aws/v1/[A-Za-z0-9._-]+[.]json$"
     },
     "target": {
       "enum": [

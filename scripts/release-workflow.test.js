@@ -384,7 +384,7 @@ test("script CI fetches signed release tags for publication fixtures", () => {
   const ci = read(".github/workflows/ci.yml");
   const scriptsJob = ci.slice(ci.indexOf("  scripts:"), ci.indexOf("  docs:"));
   assert.match(scriptsJob, /uses: actions\/checkout@[^\n]+\n\s+with:\n\s+fetch-depth: 0/);
-  assert.match(scriptsJob, /timeout-minutes: 10/);
+  assert.match(scriptsJob, /timeout-minutes: 20/);
 });
 
 test("Crabbox CI cannot redefine the organization-required release check", () => {

@@ -4,10 +4,28 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import test from "node:test";
-import { canonicalJSON, digestJSON } from "./aws-image-candidate.mjs";
+import {
+  canonicalJSON,
+  canonicalJSONLine,
+  digestJSON,
+  digestJSONLine,
+} from "./aws-image-candidate.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const script = path.join(repoRoot, "scripts", "aws-image-candidate.mjs");
+
+test("canonical JSON recipe digest codec matches its checked-in vectors", async () => {
+  const fixture = JSON.parse(
+    await readFile(path.join(repoRoot, "recipes", "aws", "v1", "digest-codec-vectors.json"), "utf8"),
+  );
+  assert.equal(fixture.schema, "crabbox-canonical-json-digest-v1");
+  for (const vector of fixture.vectors) {
+    assert.equal(canonicalJSON(vector.value), vector.canonicalJSON, vector.name);
+    assert.equal(canonicalJSONLine(vector.value), vector.canonicalJSONLine, vector.name);
+    assert.equal(digestJSON(vector.value), vector.canonicalJSONDigest, vector.name);
+    assert.equal(digestJSONLine(vector.value), vector.canonicalJSONLineDigest, vector.name);
+  }
+});
 
 function run(args) {
   return new Promise((resolve, reject) => {
@@ -138,6 +156,10 @@ test("candidate creator writes a complete immutable evidence bundle", async () =
   assert.equal(candidate.previousDefault.imageId, "ami-old123");
   assert.equal(candidate.readiness.profile, "linux-builder");
   assert.match(candidate.readiness.recipeDigest, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(
+    JSON.parse(await readFile(path.join(value.output, "recipe.json"), "utf8")).path,
+    "recipes/aws/v1/linux-devtools.json",
+  );
 
   for (const file of [
     "bundle.json",

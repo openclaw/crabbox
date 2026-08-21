@@ -434,7 +434,7 @@ AMI and snapshots, optional previous default, and the four required checks.
 The OCI evidence bundle contains:
 
 - `candidate.json`;
-- the exact versioned image recipe;
+- the exact versioned image recipe, including its repository-relative self-path;
 - an SPDX SBOM;
 - SLSA-shaped provenance;
 - the redacted scrub report;
@@ -443,8 +443,77 @@ The OCI evidence bundle contains:
 
 `scripts/aws-image-candidate.mjs verify` rejects missing, extra, or modified
 files. `scripts/publish-aws-image-candidate.sh` refuses an existing tag before
-push and verifies the keyless signature against the workflow identity and
-GitHub Actions OIDC issuer.
+push, stores the keyless signature as a Sigstore v0.3 bundle OCI 1.1 referrer,
+and verifies it against the workflow identity and GitHub Actions OIDC issuer.
+
+### Consume a candidate for qualification
+
+Qualification starts from the immutable GHCR artifact digest, never from its
+publication tag. Record the expected source, workflow run, AWS target, image
+recipe, and readiness identities independently, then consume the candidate:
+
+```bash
+scripts/consume-aws-image-candidate.sh \
+  --candidate-ref 'ghcr.io/example-org/crabbox-aws-image-candidates@sha256:<64hex>' \
+  --repository 'ghcr.io/example-org/crabbox-aws-image-candidates' \
+  --source-repository 'example-org/crabbox' \
+  --source-commit '<40hex>' \
+  --workflow-ref 'example-org/crabbox/.github/workflows/devtools-image-publish.yml@refs/heads/main' \
+  --workflow-run-id '12345' \
+  --workflow-run-attempt '1' \
+  --target linux \
+  --region us-west-2 \
+  --instance-type m7i.large \
+  --architecture x86_64 \
+  --base-image ami-0123456789abcdef0 \
+  --ami-id ami-0fedcba9876543210 \
+  --profile linux-builder \
+  --image-recipe recipes/aws/v1/linux-devtools.json \
+  --readiness-recipe recipes/linux/v1/linux-builder.json \
+  --output qualification-input.json
+```
+
+The consumer resolves the digest again, verifies the raw OCI manifest and its
+unique evidence descriptors, requires exactly one Cosign Sigstore v0.3 bundle
+referrer, fetches that referrer manifest and its single bundle layer by digest,
+and verifies that exact local bundle against the candidate digest with the
+GitHub Actions certificate identity and issuer policy. It then verifies every
+downloaded evidence file and cross-binds `CandidateRecordV1`, the signed image
+recipe path and digest, readiness identity, scrub report, SBOM, and provenance
+to expectations derived independently from regular recipe blobs at the exact
+source commit. Missing commits, non-blob entries, symlinks, submodules, trees,
+and mutable working-tree recipe bytes are never accepted as trust inputs.
+
+Recipe identities use a pinned codec: parse JSON, recursively sort object keys,
+emit compact UTF-8 JSON, and add no insignificant whitespace. Readiness recipe
+digests hash those canonical bytes. The signed `recipe.json` artifact adds
+exactly one trailing LF before hashing, matching the bytes stored in the OCI
+bundle. `recipes/aws/v1/digest-codec-vectors.json` contains executable vectors
+for both forms. Recipe paths must remain under `recipes/`, use safe non-dot path
+segments, and end in `.json`; absolute paths and traversal are rejected.
+
+`recipes/aws/v1/qualification-input.schema.json` defines the emitted
+`crabbox-aws-image-qualification-input/v1` record. The record is deterministic,
+redacted, and atomically written only after every gate passes. This Q1 step is
+an offline/control-plane evidence consume: it does not boot an instance,
+promote or publish an image, enable FSR, mutate a coordinator default, or run a
+ready-pool canary.
+
+The cryptographic integration test requires the pinned ORAS 1.3.3 and Cosign
+2.6.5 binaries:
+
+```bash
+CRABBOX_ORAS=/path/to/oras \
+CRABBOX_COSIGN=/path/to/cosign \
+node --test scripts/consume-aws-image-candidate.integration.test.js
+```
+
+It starts an ephemeral OCI Distribution service on `127.0.0.1`, generates a
+throwaway test CA and Fulcio-shaped signing certificate in a temporary
+directory, pushes and signs evidence with the real CLIs, and verifies success
+plus digest, bundle, signature, certificate identity, and issuer failures. It
+does not contact GHCR, Sigstore, AWS, or the Crabbox coordinator. Production
+registry and GitHub Actions issuer policy remain unchanged.
 
 ## macOS images
 

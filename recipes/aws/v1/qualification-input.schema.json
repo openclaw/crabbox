@@ -1,0 +1,372 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:crabbox:schema:aws-image-qualification-input:v1",
+  "title": "AWSImageQualificationInputV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "artifact",
+    "source",
+    "target",
+    "readiness",
+    "imageRecipe",
+    "evidence",
+    "signature"
+  ],
+  "properties": {
+    "schema": {
+      "const": "crabbox-aws-image-qualification-input/v1"
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reference",
+        "repository",
+        "digest",
+        "mediaType",
+        "artifactType",
+        "signatureDigest",
+        "signatureType"
+      ],
+      "properties": {
+        "reference": {
+          "type": "string",
+          "pattern": "^ghcr\\.io/[a-z0-9_.-]+(/[a-z0-9_.-]+)+@sha256:[0-9a-f]{64}$"
+        },
+        "repository": {
+          "type": "string",
+          "pattern": "^ghcr\\.io/[a-z0-9_.-]+(/[a-z0-9_.-]+)+$"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "mediaType": {
+          "const": "application/vnd.oci.image.manifest.v1+json"
+        },
+        "artifactType": {
+          "const": "application/vnd.crabbox.aws-image-evidence.v1"
+        },
+        "signatureDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "signatureType": {
+          "const": "application/vnd.dev.sigstore.bundle.v0.3+json"
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "commit",
+        "workflow"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "workflow": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ref",
+            "runId",
+            "runAttempt"
+          ],
+          "properties": {
+            "ref": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\\.github/workflows/[A-Za-z0-9._/-]+\\.ya?ml@refs/heads/[A-Za-z0-9._/-]+$"
+            },
+            "runId": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "runAttempt": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$"
+            }
+          }
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "platform",
+        "region",
+        "instanceType",
+        "architecture",
+        "baseImage",
+        "amiId",
+        "snapshotIds"
+      ],
+      "properties": {
+        "platform": {
+          "enum": [
+            "linux",
+            "windows"
+          ]
+        },
+        "region": {
+          "type": "string",
+          "pattern": "^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$"
+        },
+        "instanceType": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9.-]+$"
+        },
+        "architecture": {
+          "enum": [
+            "x86_64",
+            "arm64"
+          ]
+        },
+        "baseImage": {
+          "$ref": "#/$defs/ami"
+        },
+        "amiId": {
+          "$ref": "#/$defs/ami"
+        },
+        "snapshotIds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^snap-[0-9a-z]+$"
+          }
+        }
+      }
+    },
+    "readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile",
+        "recipe",
+        "recipeDigest"
+      ],
+      "properties": {
+        "profile": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$"
+        },
+        "recipe": {
+          "$ref": "#/$defs/recipePath"
+        },
+        "recipeDigest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "imageRecipe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "digest"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/recipePath"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "allOf": [
+        {
+          "contains": {
+            "properties": {
+              "name": {
+                "const": "bundle.json"
+              },
+              "mediaType": {
+                "const": "application/vnd.crabbox.aws-image-evidence-manifest.v1+json"
+              }
+            },
+            "required": [
+              "name",
+              "mediaType"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "name": {
+                "const": "candidate.json"
+              },
+              "mediaType": {
+                "const": "application/vnd.crabbox.aws-image-candidate.v1+json"
+              }
+            },
+            "required": [
+              "name",
+              "mediaType"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "name": {
+                "const": "provenance.intoto.jsonl"
+              },
+              "mediaType": {
+                "const": "application/vnd.in-toto+json"
+              }
+            },
+            "required": [
+              "name",
+              "mediaType"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "name": {
+                "const": "recipe.json"
+              },
+              "mediaType": {
+                "const": "application/json"
+              }
+            },
+            "required": [
+              "name",
+              "mediaType"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "name": {
+                "const": "sbom.spdx.json"
+              },
+              "mediaType": {
+                "const": "application/spdx+json"
+              }
+            },
+            "required": [
+              "name",
+              "mediaType"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "name": {
+                "const": "scrub-report.json"
+              },
+              "mediaType": {
+                "const": "application/json"
+              }
+            },
+            "required": [
+              "name",
+              "mediaType"
+            ]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        }
+      ],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "mediaType",
+          "digest",
+          "size"
+        ],
+        "properties": {
+          "name": {
+            "enum": [
+              "bundle.json",
+              "candidate.json",
+              "provenance.intoto.jsonl",
+              "recipe.json",
+              "sbom.spdx.json",
+              "scrub-report.json"
+            ]
+          },
+          "mediaType": {
+            "type": "string",
+            "minLength": 1
+          },
+          "digest": {
+            "$ref": "#/$defs/digest"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "issuer",
+        "workflowIdentity"
+      ],
+      "properties": {
+        "mode": {
+          "const": "keyless"
+        },
+        "issuer": {
+          "const": "github-actions"
+        },
+        "workflowIdentity": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\\.github/workflows/[A-Za-z0-9._/-]+\\.ya?ml@refs/heads/[A-Za-z0-9._/-]+$"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "ami": {
+      "type": "string",
+      "pattern": "^ami-[0-9a-z]+$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "recipePath": {
+      "type": "string",
+      "pattern": "^recipes/([A-Za-z0-9][A-Za-z0-9._-]*/)*[A-Za-z0-9][A-Za-z0-9._-]*\\.json$"
+    }
+  }
+}
