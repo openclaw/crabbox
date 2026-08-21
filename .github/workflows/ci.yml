@@ -268,7 +268,9 @@ jobs:
         env:
           CRABBOX_ORAS: ${{ runner.temp }}/image-tools/oras
           CRABBOX_COSIGN: ${{ runner.temp }}/image-tools/cosign
-        run: node --test scripts/consume-aws-image-candidate.integration.test.js
+        run: |
+          node --test scripts/consume-aws-image-candidate.integration.test.js
+          node --test scripts/publish-aws-image-qualification.integration.test.js
 
   docs:
     name: Docs

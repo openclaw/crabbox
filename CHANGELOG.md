@@ -10,6 +10,7 @@
 - Added mutually exclusive `runnerPhases` timing telemetry for provider acquire/borrow, connectivity and readiness, workspace seed/overlay, command, artifact collection, cleanup, delegated opaque work, and unattributed time while preserving the existing timing fields.
 - Added protected AWS Linux and Windows image-candidate publication with versioned recipes, destructive-state scrubbing, strict source/architecture/OS proof, immutable OCI evidence bundles, OCI 1.1 keyless signature referrers, and explicit candidate-only smoke proof.
 - Added fail-closed AWS image qualification input consumption that fetches the discovered Sigstore bundle by immutable manifest and layer digests, verifies its keyless workflow identity against the candidate digest, derives recipe identities from regular blobs at the exact source commit using canonical JSON, and checks evidence-file hashes, provenance, SBOM, candidate, signed recipe, and readiness identities before atomically emitting a schema-constrained redacted offline qualification record.
+- Added protected AWS Linux candidate qualification with exact OS-selector-bound typed ready-pool negative and positive gates, clean and dirty Git-overlay transfer proof, capability-aware cache evidence, cleanup-before-receipt enforcement, and immutable OCI 1.1 Sigstore-signed qualification receipts.
 
 ### Fixed
 

@@ -515,6 +515,40 @@ plus digest, bundle, signature, certificate identity, and issuer failures. It
 does not contact GHCR, Sigstore, AWS, or the Crabbox coordinator. Production
 registry and GitHub Actions issuer policy remain unchanged.
 
+### Qualify a Linux candidate
+
+Run `Qualify AWS Image Candidate` manually from the protected default branch.
+The `image-qualifier` environment must approve the run and provide the
+coordinator configuration. The workflow accepts only a candidate digest whose
+record was produced from the exact workflow commit, then:
+
+1. consumes and verifies the immutable Q1 candidate;
+2. boots its exact AMI, region, instance type, architecture, normalized Linux
+   OS selector, and on-demand market;
+3. emits a typed identity from the live lease and root-owned readiness manifest;
+4. proves wrong AMI, architecture, recipe, and type requests cannot borrow it;
+5. proves an exact typed borrow, a zero-transfer clean overlay, and a one-file
+   dirty overlay with exact byte accounting and no fallback;
+6. verifies cache mounting only when AWS advertises `cache-volume`, otherwise
+   records `provider_capability_not_advertised`;
+7. stops the lease before emitting and publishing the public receipt.
+
+The Actions proof artifact contains exactly `qualification-input.json`,
+`qualification.json`, and `publication.json`. The signed OCI artifact contains
+exactly `qualification-input.json` and `qualification.json` as typed layers;
+`publication.json` is post-push metadata that records the resulting OCI digest.
+The publisher validates the input against
+`recipes/aws/v1/qualification-input.schema.json` and the Q1 privacy contract,
+then verifies the exact bytes against the receipt's `qualificationInputDigest`
+before pushing either layer. Lease IDs, endpoints, SSH material, borrow tokens,
+remote work roots, raw command output, and timing logs remain private runner
+state and are included in neither artifact.
+
+`recipes/aws/v1/qualification.schema.json` defines the public
+`crabbox-aws-image-qualification/v1` receipt. Its immutable tag is derived from
+the receipt byte digest, and its OCI digest is signed by the protected
+`devtools-image-qualify.yml` workflow with a Sigstore v0.3 bundle.
+
 ## macOS images
 
 macOS images use the same `crabbox image create` command, but the source lease
