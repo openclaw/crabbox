@@ -1417,6 +1417,62 @@ morph_smoke() {
   lease=""
 }
 
+boxd_smoke() {
+  need_tool jq
+
+  # The CLI selection is executed with the operator's stored boxd login or
+  # BOXD_TOKEN, so it is ENVIRONMENT-ONLY: no config file — trusted or not —
+  # may choose it. The shell cannot reproduce the Go classifier's
+  # repository-root and symlink resolution (an explicit CRABBOX_CONFIG can
+  # point or symlink into the checkout), so config-based selection is not
+  # offered here at all.
+  local boxd_cli="${CRABBOX_BOXD_CLI:-boxd}"
+  if ! command -v "$boxd_cli" >/dev/null 2>&1; then
+    echo "install the boxd CLI (or set CRABBOX_BOXD_CLI) to run boxd live smoke" >&2
+    return 2
+  fi
+  if ! "$boxd_cli" machine list --json >/dev/null 2>&1; then
+    echo "boxd CLI is not authenticated; run '$boxd_cli auth login' or set BOXD_TOKEN" >&2
+    return 2
+  fi
+  local slug="${CRABBOX_LIVE_BOXD_SLUG:-boxd-smoke-$$}"
+  local ttl="${CRABBOX_LIVE_BOXD_TTL:-15m}"
+  local idle="${CRABBOX_LIVE_BOXD_IDLE_TIMEOUT:-5m}"
+
+  local boxd_env=(CRABBOX_PROVIDER=boxd "CRABBOX_BOXD_CLI=$boxd_cli" CRABBOX_BOXD_DELETE_ON_RELEASE=1)
+  boxd_run() {
+    run_in_repo env "${boxd_env[@]}" "$cb" "$@"
+  }
+
+  local lease=""
+  cleanup() {
+    trap - RETURN ERR
+    if [[ -n "$lease" ]]; then
+      boxd_run stop "$slug" || boxd_run stop "$lease" || true
+      lease=""
+      slug=""
+    fi
+  }
+  trap cleanup RETURN ERR
+
+  boxd_run doctor
+  boxd_run cleanup --dry-run
+  local out
+  capture_run out boxd_run warmup --keep=false --slug "$slug" --ttl "$ttl" --idle-timeout "$idle"
+  printf '%s\n' "$out"
+  lease="$(printf '%s\n' "$out" | extract_lease)"
+  slug="$(printf '%s\n' "$out" | extract_slug)"
+  test -n "$lease"
+  test -n "$slug"
+
+  boxd_run status --id "$slug" --wait --wait-timeout 120s
+  boxd_run inspect --id "$slug" --json | jq '{id,slug,provider,state,serverType,host,ready,lastTouchedAt,expiresAt}'
+  boxd_run run --id "$slug" --shell -- "$live_command"
+  boxd_run list --json | jq 'map({id:.id,slug:.slug,provider:.provider,state:.state})'
+  boxd_run stop "$slug" || boxd_run stop "$lease"
+  lease=""
+}
+
 orgo_smoke() {
   need_tool curl
   need_tool jq
@@ -1809,6 +1865,10 @@ fi
 
 if has_provider morph; then
   morph_smoke
+fi
+
+if has_provider boxd; then
+  boxd_smoke
 fi
 
 if has_provider orgo; then

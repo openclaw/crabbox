@@ -2829,6 +2829,95 @@ test("RunPod live smoke dispatches to the provider-specific script", () => {
   );
 });
 
+test("boxd live smoke ignores repository config for executable selection", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-boxd-repocfg-"));
+  const repo = path.join(dir, "repo");
+  const bin = path.join(dir, "bin");
+  fs.mkdirSync(repo);
+  fs.mkdirSync(bin);
+  const evilMarker = path.join(dir, "evil-ran");
+  const evilBoxd = path.join(repo, "evil-boxd");
+  writeExecutable(
+    evilBoxd,
+    `#!/usr/bin/env bash\ntouch ${evilMarker}\necho '[]'\n`,
+  );
+  // A malicious checkout nominates its own binary for the credentialed CLI.
+  fs.writeFileSync(path.join(repo, "crabbox.yaml"), `boxd:\n  cli: ${evilBoxd}\n`);
+  const boxdLog = path.join(dir, "boxd.log");
+  writeExecutable(
+    path.join(bin, "boxd"),
+    `#!/usr/bin/env bash\necho "$@" >> ${boxdLog}\nexit 1\n`,
+  );
+
+  const result = spawnSync("bash", [path.join(repoRoot, "scripts", "live-smoke.sh")], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH}`,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "boxd",
+      CRABBOX_LIVE_REPO: repo,
+      CRABBOX_BOXD_CLI: "",
+    },
+    encoding: "utf8",
+  });
+
+  assert.notEqual(result.status, 0, "expected non-zero exit when the default boxd CLI is unauthenticated");
+  assert.match(result.stderr, /boxd CLI is not authenticated/);
+  assert.equal(fs.existsSync(evilMarker), false, "repository config must never select the executed boxd CLI");
+  const calls = fs.existsSync(boxdLog) ? fs.readFileSync(boxdLog, "utf8") : "";
+  assert.match(calls, /machine list --json/, "the PATH default boxd must be the probed executable");
+});
+
+test("boxd live smoke ignores an explicit config symlinked into the repo", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-boxd-symcfg-"));
+  const repo = path.join(dir, "repo");
+  const outside = path.join(dir, "outside");
+  const bin = path.join(dir, "bin");
+  fs.mkdirSync(repo);
+  fs.mkdirSync(outside);
+  fs.mkdirSync(bin);
+  const evilMarker = path.join(dir, "evil-ran");
+  const evilBoxd = path.join(repo, "evil-boxd");
+  writeExecutable(
+    evilBoxd,
+    `#!/usr/bin/env bash\ntouch ${evilMarker}\necho '[]'\n`,
+  );
+  // The repo carries the malicious selection; an "explicit" config outside the
+  // checkout is only a symlink back into it.
+  const inner = path.join(repo, "inner-config.yaml");
+  fs.writeFileSync(inner, `boxd:\n  cli: ${evilBoxd}\n`);
+  const symlinked = path.join(outside, "config.yaml");
+  fs.symlinkSync(inner, symlinked);
+  const boxdLog = path.join(dir, "boxd.log");
+  writeExecutable(
+    path.join(bin, "boxd"),
+    `#!/usr/bin/env bash\necho "$@" >> ${boxdLog}\nexit 1\n`,
+  );
+
+  const result = spawnSync("bash", [path.join(repoRoot, "scripts", "live-smoke.sh")], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH}`,
+      CRABBOX_CONFIG: symlinked,
+      CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "boxd",
+      CRABBOX_LIVE_REPO: repo,
+      CRABBOX_BOXD_CLI: "",
+    },
+    encoding: "utf8",
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /boxd CLI is not authenticated/);
+  assert.equal(fs.existsSync(evilMarker), false, "a symlinked explicit config must never select the executed boxd CLI");
+  const calls = fs.existsSync(boxdLog) ? fs.readFileSync(boxdLog, "utf8") : "";
+  assert.match(calls, /machine list --json/);
+});
+
 test("vultr live smoke dispatches to the provider-specific smoke", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-vultr-dispatch-"));
   const bin = path.join(dir, "bin");

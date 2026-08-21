@@ -119,6 +119,9 @@ SSH-lease providers:
   lives in `vmd/` and is embedded into the helper by `scripts/build-vmd.sh`
   plus `-tags vmdembed`; release packaging is in `.goreleaser.yaml` and the
   macOS CI/release jobs
+- boxd KVM microVMs driven through the external `boxd` CLI, with the SSH
+  endpoint read from the CLI-maintained ssh-config entries and config glue in
+  `internal/cli/config.go`: `internal/providers/boxd`
 - Canonical Multipass local Ubuntu VM: `internal/providers/multipass`
 - Cirrus Labs tart local macOS VM: `internal/providers/tart`
 - Lume local macOS VM cloned from a stopped golden image: `internal/providers/lume`
