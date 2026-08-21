@@ -69,6 +69,7 @@ type RunnerPhase struct {
 	ImageID       string `json:"imageId,omitempty"`
 	TransferCount int    `json:"transferCount,omitempty"`
 	TransferBytes int64  `json:"transferBytes,omitempty"`
+	Fallback      bool   `json:"fallback,omitempty"`
 }
 
 type runnerProviderEvidence struct {
@@ -267,17 +268,24 @@ func runnerPhasesFromRun(report TimingReport, timings runTimings) []RunnerPhase 
 		phase := identity
 		phase.Name = "workspace.seed"
 		phase.Ms = seedMs
+		if timings.workspaceMode == "overlay" {
+			phase.Reason = "git_overlay"
+		}
 		appendPhase(phase)
 		workspaceMs -= seedMs
 	}
 	if workspaceMs > 0 {
 		phase := identity
-		if seedMs > 0 {
+		if timings.workspaceMode == "overlay" || timings.workspaceMode == "" && seedMs > 0 {
 			phase.Name = "workspace.overlay"
 		} else {
 			phase.Name = "workspace.sync"
 		}
 		phase.Ms = workspaceMs
+		phase.TransferCount = timings.workspaceTransferCount
+		phase.TransferBytes = timings.workspaceTransferBytes
+		phase.Fallback = timings.workspaceFallback
+		phase.Reason = timings.workspaceFallbackReason
 		appendPhase(phase)
 	}
 	if timings.command > 0 {

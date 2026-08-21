@@ -196,8 +196,33 @@ carries that fingerprint, the sync is skipped entirely. `--full-resync` ignores
 the remote fingerprint and forces a clean transfer.
 
 Git seeding (`sync.gitSeed`, default on) clones or fetches the base tree on the
-runner before rsync, so only your diff travels over the wire. It activates only
-when the local `HEAD` commit is reachable from a remote ref.
+runner before rsync. The normal sync still sends the authoritative full file
+manifest.
+
+Opt-in Git overlay sync (`sync.gitOverlay: true`) resets a Linux SSH runner to
+the exact advertised `HEAD` tree, then uploads only changed, added, renamed, or
+mode-changed paths and applies tracked deletions. The full `Files` and `Deleted`
+manifests remain authoritative for pruning and final verification. Clean
+worktrees send no tracked file payload. Reset removes stale tracked, untracked,
+and ignored workload state while preserving ignored `node_modules`,
+`.pnpm-store`, `.yarn/cache`, and `.yarn/unplugged` directories that pass the
+same real-directory and workspace-containment checks as ready-pool scrub.
+Clone and fetch retain credential and SSH transport configuration while
+overriding hooks with an inert path. Checkout/reset additionally disable info
+attributes, filter configuration, and ambient global/system Git configuration.
+Unsupported local state, including
+sparse checkouts, submodules, filtered trees, include whitelists, or a changed
+manifest, checkout-transforming Git configuration or attributes, falls back to
+the normal full-manifest sync in the same run. Missing advertised branches or
+planned commits also fall back. SSH, Git clone/fetch/auth, manifest upload, and
+rsync failures remain errors instead of being hidden by fallback.
+
+The overlay path is disabled by default and currently applies only to Linux SSH
+targets with `sync.delete` and `sync.gitSeed` enabled. `--full-resync` and
+Actions-owned workspaces use the normal sync path.
+
+Both Git seed modes activate only when the local `HEAD` commit is reachable
+from a remote branch.
 Crabbox disables Git seeding when the origin is an HTTP(S) URL with embedded
 userinfo, warns without printing the URL, and uses the normal file sync instead.
 This prevents credentials stored in local Git remotes from reaching lease
@@ -260,6 +285,7 @@ sync:
   delete: true
   checksum: false
   gitSeed: true
+  gitOverlay: false
   fingerprint: true
   baseRef: "" # defaults to the repo's origin HEAD / current branch
   timeout: 15m
@@ -277,6 +303,7 @@ Environment overrides:
 CRABBOX_SYNC_CHECKSUM
 CRABBOX_SYNC_DELETE
 CRABBOX_SYNC_GIT_SEED
+CRABBOX_SYNC_GIT_OVERLAY
 CRABBOX_SYNC_FINGERPRINT
 CRABBOX_SYNC_BASE_REF
 CRABBOX_SYNC_TIMEOUT

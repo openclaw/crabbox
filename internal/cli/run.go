@@ -1675,6 +1675,24 @@ retrySync:
 		if credentialBlocked {
 			warnCredentialBearingGitSeed(a.Stderr)
 		}
+		overlayDecision := decideGitOverlay(cfg, repo, target, manifest, coherence, credentialBlocked, fullResyncRequested, hydratedByActions)
+		if overlayDecision.Requested && overlayDecision.Enabled {
+			refreshedManifest, refreshErr := syncManifestFilteredRules(repo.Root, excludes, syncIncludes(cfg))
+			if refreshErr != nil {
+				return recordFailure(exit(6, "rebuild git overlay sync file list: %v", refreshErr))
+			}
+			if !sameSyncManifest(manifest, refreshedManifest) {
+				manifest = refreshedManifest
+				overlayDecision.Enabled = false
+				overlayDecision.Reason = "local_manifest_changed"
+				if err := checkSyncPreflight(manifest, cfg, *forceSyncLarge, a.Stderr); err != nil {
+					return recordFailure(err)
+				}
+			}
+		}
+		if overlayDecision.Requested && !overlayDecision.Enabled {
+			fmt.Fprintf(a.Stderr, "git overlay fallback reason=%s; using full manifest sync\n", overlayDecision.Reason)
+		}
 		fingerprint := ""
 		if cfg.Sync.Fingerprint && !isWindowsNativeTarget(target) {
 			stepStart = time.Now()
@@ -1725,6 +1743,13 @@ retrySync:
 			timings.syncSteps.mkdir = time.Since(stepStart)
 		}
 		if isWindowsNativeTarget(target) {
+			timings.workspaceMode = "sync"
+			timings.workspaceTransferCount = len(manifest.Files)
+			timings.workspaceTransferBytes = manifest.Bytes
+			if overlayDecision.Requested {
+				timings.workspaceFallback = true
+				timings.workspaceFallbackReason = overlayDecision.Reason
+			}
 			stepStart = time.Now()
 			if err := syncWindowsNative(ctx, target, repo, cfg, coherence, workdir, manifest, a.Stdout, a.Stderr, rsyncOptions{Debug: *debugSync, Delete: cfg.Sync.Delete, Checksum: cfg.Sync.Checksum, FullResync: fullResyncRequested, Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
 				return recordFailure(err)
@@ -1735,15 +1760,42 @@ retrySync:
 			recorder.Event("sync.finished", "synced", fmt.Sprintf("duration=%s mode=archive", timings.sync.Round(time.Millisecond)))
 			goto afterSync
 		}
-		if coherence.seedEnabled() {
+		if overlayDecision.Enabled {
+			stepStart = time.Now()
+			out, overlayErr := runIdempotentSSHCombinedOutput(ctx, target, remotePrepareGitOverlay(workdir, coherence), idempotentSSHRetryDelay)
+			timings.syncSteps.gitSeed += time.Since(stepStart)
+			if overlayErr != nil {
+				if reason, fallback := gitOverlayFallbackResult(out, overlayErr); fallback {
+					overlayDecision.Enabled = false
+					overlayDecision.Reason = reason
+					fmt.Fprintf(a.Stderr, "git overlay fallback reason=%s; using full manifest sync\n", reason)
+				} else {
+					return recordFailure(exit(6, "remote git overlay seed failed: %v", overlayErr))
+				}
+			}
+		}
+		if !overlayDecision.Enabled && coherence.seedEnabled() {
 			stepStart = time.Now()
 			if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay); err != nil {
 				fmt.Fprintf(a.Stderr, "warning: remote git seed failed: %v\n", err)
 			}
-			timings.syncSteps.gitSeed = time.Since(stepStart)
+			timings.syncSteps.gitSeed += time.Since(stepStart)
 		}
 		manifestData := manifest.NUL()
 		deletedData := manifest.DeletedNUL()
+		transferData := manifestData
+		timings.workspaceMode = "sync"
+		timings.workspaceTransferCount = len(manifest.Files)
+		timings.workspaceTransferBytes = manifest.Bytes
+		if overlayDecision.Enabled {
+			transferData = manifest.OverlayNUL()
+			timings.workspaceMode = "overlay"
+			timings.workspaceTransferCount = len(manifest.OverlayFiles)
+			timings.workspaceTransferBytes = manifest.OverlayBytes
+		} else if overlayDecision.Requested {
+			timings.workspaceFallback = true
+			timings.workspaceFallbackReason = overlayDecision.Reason
+		}
 		finalizeToken, err := randomHex(16)
 		if err != nil {
 			return recordFailure(exit(6, "create sync finalize token: %v", err))
@@ -1771,7 +1823,7 @@ retrySync:
 		if shouldPruneRemoteSync(cfg.Sync.Delete, fullResyncRequested) {
 			// Full resync can git-seed files that are absent from the local manifest.
 			// Seed the old manifest from git so prune removes those resurrected paths.
-			if shouldSeedRemotePruneManifest(hydratedByActions, fullResyncRequested) {
+			if overlayDecision.Enabled || shouldSeedRemotePruneManifest(hydratedByActions, fullResyncRequested) {
 				if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteSeedSyncManifestFromGit(workdir), idempotentSSHRetryDelay); err != nil {
 					return recordFailure(exit(6, "remote sync seed manifest failed: %v", err))
 				}
@@ -1782,11 +1834,13 @@ retrySync:
 			}
 			timings.syncSteps.prune = time.Since(stepStart)
 		}
-		stepStart = time.Now()
-		if err := rsync(ctx, target, repo.Root, workdir, excludes.patterns(), a.Stdout, a.Stderr, rsyncOptions{Debug: *debugSync, Delete: cfg.Sync.Delete, Checksum: cfg.Sync.Checksum, UseFilesFrom: true, FilesFrom: manifestData, NoTimes: localContainerDockerSocketSync(cfg, server), Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
-			return recordFailure(exit(6, "rsync failed: %v", err))
+		if !overlayDecision.Enabled || len(transferData) > 0 {
+			stepStart = time.Now()
+			if err := rsync(ctx, target, repo.Root, workdir, excludes.patterns(), a.Stdout, a.Stderr, rsyncOptions{Debug: *debugSync, Delete: cfg.Sync.Delete, Checksum: cfg.Sync.Checksum, UseFilesFrom: true, FilesFrom: transferData, NoTimes: localContainerDockerSocketSync(cfg, server), Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
+				return recordFailure(exit(6, "rsync failed: %v", err))
+			}
+			timings.syncSteps.rsync = time.Since(stepStart)
 		}
-		timings.syncSteps.rsync = time.Since(stepStart)
 		baseSHA := gitHydrateBaseSHA(repo, cfg.Sync.BaseRef)
 		hydrateGit := true
 		if hydratedByActions {
@@ -1817,7 +1871,11 @@ retrySync:
 		timings.syncSteps.finalize = time.Since(stepStart)
 		timings.sync = time.Since(syncStart)
 		fmt.Fprintf(a.Stderr, "sync complete in %s\n", timings.sync.Round(time.Millisecond))
-		recorder.Event("sync.finished", "synced", fmt.Sprintf("duration=%s skipped=false", timings.sync.Round(time.Millisecond)))
+		syncEvent := fmt.Sprintf("duration=%s skipped=false mode=%s files=%d bytes=%d", timings.sync.Round(time.Millisecond), timings.workspaceMode, timings.workspaceTransferCount, timings.workspaceTransferBytes)
+		if timings.workspaceFallback {
+			syncEvent += " fallback=true reason=" + timings.workspaceFallbackReason
+		}
+		recorder.Event("sync.finished", "synced", syncEvent)
 	} else {
 		timings.syncSkipped = true
 		recorder.Event("sync.finished", "synced", "skipped by --no-sync")
@@ -2759,29 +2817,34 @@ func routingSafeURL(value string) string {
 }
 
 type runTimings struct {
-	started               time.Time
-	endToEndStartedAt     time.Time
-	borrow                time.Duration
-	lease                 time.Duration
-	legacyLease           time.Duration
-	leasePhase            string
-	connect               time.Duration
-	syncConnect           time.Duration
-	bootstrap             time.Duration
-	legacyBootstrap       time.Duration
-	sync                  time.Duration
-	command               time.Duration
-	artifacts             time.Duration
-	artifactTransferCount int
-	artifactTransferBytes int64
-	providerEvidence      *runnerProviderEvidence
-	priorRunnerPhases     []RunnerPhase
-	syncSteps             syncStepTimings
-	commandPhases         []timingPhase
-	syncSkipped           bool
-	blockedStage          string
-	resourceExhaustion    ResourceExhaustionReason
-	retryLikely           string
+	started                 time.Time
+	endToEndStartedAt       time.Time
+	borrow                  time.Duration
+	lease                   time.Duration
+	legacyLease             time.Duration
+	leasePhase              string
+	connect                 time.Duration
+	syncConnect             time.Duration
+	bootstrap               time.Duration
+	legacyBootstrap         time.Duration
+	sync                    time.Duration
+	command                 time.Duration
+	artifacts               time.Duration
+	artifactTransferCount   int
+	artifactTransferBytes   int64
+	providerEvidence        *runnerProviderEvidence
+	priorRunnerPhases       []RunnerPhase
+	syncSteps               syncStepTimings
+	commandPhases           []timingPhase
+	syncSkipped             bool
+	workspaceMode           string
+	workspaceTransferCount  int
+	workspaceTransferBytes  int64
+	workspaceFallback       bool
+	workspaceFallbackReason string
+	blockedStage            string
+	resourceExhaustion      ResourceExhaustionReason
+	retryLikely             string
 }
 
 type syncStepTimings struct {

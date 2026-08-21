@@ -110,11 +110,11 @@ func TestRemoteReadyPoolScrubResetsLatestBranchAndPreservesIgnoredCaches(t *test
 	if got := gitOutput(workdir, "rev-parse", "--is-shallow-repository"); got != "false" {
 		t.Fatalf("is-shallow-repository=%q, want false", got)
 	}
-	if got := gitOutput(workdir, "rev-parse", "refs/remotes/origin/maintenance"); got != baseCommit {
-		t.Fatalf("maintenance ref=%q, want %q", got, baseCommit)
+	if got := gitOutput(workdir, "rev-parse", "--verify", "refs/remotes/origin/maintenance"); got != "" {
+		t.Fatalf("unrequested maintenance ref was fetched: %q", got)
 	}
-	if got := gitOutput(workdir, "rev-parse", "refs/tags/v-test"); got != baseCommit {
-		t.Fatalf("tag=%q, want %q", got, baseCommit)
+	if got := gitOutput(workdir, "rev-parse", "--verify", "refs/tags/v-test"); got != "" {
+		t.Fatalf("unrequested tag was fetched: %q", got)
 	}
 	if got := gitOutput(workdir, "config", "--get", "branch.main.remote"); got != "origin" {
 		t.Fatalf("branch remote=%q, want origin", got)
@@ -182,7 +182,8 @@ func TestWindowsRemoteReadyPoolScrubBuildsVerifiedReset(t *testing.T) {
 		"$env:PATH = ((Split-Path -Parent $git), $systemDirectory) -join ';'",
 		"$env:XDG_CONFIG_HOME = $safeHome",
 		"$env:GCM_INTERACTIVE = 'Never'",
-		"& $git -C $tmp fetch --quiet --prune --tags origin",
+		"& $git -C $tmp fetch --quiet --no-tags origin",
+		"(\"+refs/heads/\" + $ref + \":\" + $remoteRef)",
 		"& $git -C $tmp read-tree $targetCommit",
 		"& $git -C $tmp ls-files -- ':(top)**' ':(top,exclude,attr:!filter)**' ':(top,exclude,attr:-filter)**'",
 		"ready-pool scrub does not reuse Git filter-managed worktrees",
@@ -236,6 +237,7 @@ func TestRemoteReadyPoolScrubUsesIsolatedTrustedGitMetadata(t *testing.T) {
 		"if [ -L \"$workdir\" ]",
 		"HOME=\"$safe_home\"",
 		"safe_git -C \"$tmp\" fetch",
+		"--no-tags origin \"+refs/heads/$ref:$remote_ref\"",
 		"safe_git -C \"$tmp\" read-tree",
 		"safe_git -C \"$tmp\" ls-files -z --",
 		":(top,exclude,attr:!filter)**",
@@ -259,6 +261,11 @@ func TestRemoteReadyPoolScrubUsesIsolatedTrustedGitMetadata(t *testing.T) {
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("POSIX scrub missing %q in %q", want, got)
+		}
+	}
+	for _, forbidden := range []string{"--tags", "refs/heads/*"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("POSIX scrub fetched unrequested refs via %q: %q", forbidden, got)
 		}
 	}
 }
