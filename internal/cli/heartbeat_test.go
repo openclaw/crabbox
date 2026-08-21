@@ -220,7 +220,9 @@ func TestHeartbeatCoordinatorFailsClosed(t *testing.T) {
 }
 
 func TestHeartbeatRegisteredModeUsesCoordinator(t *testing.T) {
+	var coordinatorRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		coordinatorRequests.Add(1)
 		if r.URL.Path != "/v1/leases/cbx_registered/heartbeat" {
 			t.Fatalf("registered heartbeat path=%q", r.URL.Path)
 		}
@@ -264,6 +266,62 @@ func TestHeartbeatRegisteredModeUsesCoordinator(t *testing.T) {
 	}
 	if len(backend.touches) != 1 || backend.touches[0].IdleTimeout != time.Hour || backend.touches[0].IdleTimeoutOverride == nil || *backend.touches[0].IdleTimeoutOverride != time.Hour {
 		t.Fatalf("registered heartbeat direct touches=%#v", backend.touches)
+	}
+	snapshot, exists, set := ServerLeaseClaimSnapshot(backend.touches[0].Lease.Server)
+	if coordinatorRequests.Load() != 1 || !set || !exists || snapshot.LeaseID != backend.lease.LeaseID {
+		t.Fatalf("coordinator requests=%d snapshot=%#v exists=%t set=%t", coordinatorRequests.Load(), snapshot, exists, set)
+	}
+}
+
+func TestHeartbeatRegisteredClaimReplacementPreventsProviderMutation(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	backend := &heartbeatDirectBackend{lease: heartbeatDirectTestLease("cbx_registered_race", "registered-race")}
+	heartbeatDirectBackendForTest = backend
+	t.Cleanup(func() { heartbeatDirectBackendForTest = nil })
+	cfg := defaultConfig()
+	cfg.Provider = heartbeatDirectProviderName
+	if err := claimLeaseTargetForRepoConfig(backend.lease.LeaseID, serverSlug(backend.lease.Server), cfg, backend.lease.Server, SSHTarget{}, "/repo", 30*time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := readLeaseClaim(backend.lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var coordinatorRequests, providerWrites atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		coordinatorRequests.Add(1)
+		labels := cloneStringMap(initial.Labels)
+		labels["owner"] = "replacement-owner"
+		if _, err := updateLeaseClaimLabelsIfUnchanged(backend.lease.LeaseID, initial, labels); err != nil {
+			t.Errorf("replace claim during coordinator heartbeat: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+			ID: backend.lease.LeaseID, Slug: "registered-race", Provider: heartbeatDirectProviderName, State: "active",
+		}})
+	}))
+	defer server.Close()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	config := fmt.Sprintf("provider: %s\nbroker:\n  url: %s\n  mode: registered\n", heartbeatDirectProviderName, server.URL)
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "user-token")
+	backend.touchFn = func(req TouchRequest) (Server, error) {
+		snapshot, exists, set := ServerLeaseClaimSnapshot(req.Lease.Server)
+		if !set || !exists {
+			return Server{}, errors.New("exact claim snapshot missing")
+		}
+		_, server, _, err := UpdateLeaseClaimTouchIfUnchangedAction(req.Lease.LeaseID, snapshot, time.Now(), req.IdleTimeoutOverride, func() (Server, SSHTarget, bool, error) {
+			providerWrites.Add(1)
+			return req.Lease.Server, req.Lease.SSH, true, nil
+		})
+		return server, err
+	}
+	err = (App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}).heartbeat(context.Background(), []string{"--id", "registered-race"})
+	if err == nil || !strings.Contains(err.Error(), "claim changed") || coordinatorRequests.Load() != 1 || providerWrites.Load() != 0 {
+		t.Fatalf("heartbeat error=%v coordinator requests=%d successful provider writes=%d", err, coordinatorRequests.Load(), providerWrites.Load())
 	}
 }
 
@@ -324,6 +382,7 @@ type heartbeatDirectBackend struct {
 	configures int
 	resolves   int
 	touches    []TouchRequest
+	touchFn    func(TouchRequest) (Server, error)
 }
 
 func (*heartbeatDirectBackend) Spec() ProviderSpec { return heartbeatDirectProvider{}.Spec() }
@@ -342,6 +401,9 @@ func (*heartbeatDirectBackend) List(context.Context, ListRequest) ([]LeaseView, 
 }
 func (b *heartbeatDirectBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {
 	b.touches = append(b.touches, req)
+	if b.touchFn != nil {
+		return b.touchFn(req)
+	}
 	server := req.Lease.Server
 	server.Labels = cloneStringMap(server.Labels)
 	server.Labels["last_touched_at"] = "2026-08-16T20:00:00Z"
@@ -382,6 +444,11 @@ func TestHeartbeatDirectProviderOmitsIdleTimeoutOverrideIntent(t *testing.T) {
 	}
 	if len(backend.touches) != 1 || backend.touches[0].IdleTimeoutOverride != nil {
 		t.Fatalf("omitted timeout carried replacement intent: %#v", backend.touches)
+	}
+	snapshot, exists, set := ServerLeaseClaimSnapshot(backend.touches[0].Lease.Server)
+	persisted, err := readLeaseClaim(backend.lease.LeaseID)
+	if err != nil || !set || !exists || snapshot.Revision != persisted.Revision || backend.configures < 2 {
+		t.Fatalf("snapshot=%#v exists=%t set=%t persisted=%#v configures=%d err=%v", snapshot, exists, set, persisted, backend.configures, err)
 	}
 }
 

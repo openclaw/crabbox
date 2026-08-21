@@ -97,13 +97,14 @@ func (a App) heartbeat(ctx context.Context, args []string) error {
 	if statusTerminalState(state) {
 		return exit(5, "lease %s is in terminal state %s", *id, state)
 	}
-	claimed, err := statusLeaseHasExactClaim(ctx, backend, lease, backend.Spec().Name, leaseOptionsFromConfig(cfg).ProviderScope)
+	claim, claimed, err := statusLeaseExactClaim(ctx, backend, lease, backend.Spec().Name, leaseOptionsFromConfig(cfg).ProviderScope)
 	if err != nil {
 		return err
 	}
 	if !claimed {
 		return exit(4, "lease %s is not claimed for provider=%s; refusing heartbeat", *id, backend.Spec().Name)
 	}
+	SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
 
 	if !idleTimeoutSet {
 		if current, ok := directLeaseIdleTimeout(lease.Server.Labels); ok {

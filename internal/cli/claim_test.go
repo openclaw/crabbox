@@ -1308,6 +1308,230 @@ func TestUpdateLeaseClaimTouchIfUnchangedCommitsOptionalTimeoutAtomically(t *tes
 	}
 }
 
+func TestUpdateLeaseClaimTouchIfUnchangedActionCommitsAtomically(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_touch_action"
+	initial := Server{Provider: "aws", CloudID: "i-touch", Labels: map[string]string{"provider": "aws", "slug": "touch", "state": "ready"}}
+	if err := claimLeaseTargetForRepoConfig(leaseID, "touch", Config{Provider: "aws"}, initial, SSHTarget{Host: "203.0.113.10", Port: "22"}, "/repo", 30*time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.August, 20, 12, 0, 0, 0, time.FixedZone("test", -7*60*60))
+	server := initial
+	server.Labels = map[string]string{"provider": "aws", "slug": "touch", "state": "running", "idle_timeout_secs": "1800"}
+	target := SSHTarget{Host: "203.0.113.20", Port: "2222"}
+	updated, gotServer, gotTarget, err := UpdateLeaseClaimTouchIfUnchangedAction(leaseID, expected, now, nil, func() (Server, SSHTarget, bool, error) {
+		return server, target, true, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := readLeaseClaim(leaseID)
+	if err != nil || !reflect.DeepEqual(updated, persisted) || updated.Revision == expected.Revision ||
+		updated.LastUsedAt != "2026-08-20T19:00:00Z" || updated.IdleTimeoutSeconds != 1800 ||
+		updated.SSHHost != target.Host || updated.SSHPort != 2222 || updated.Labels["state"] != "running" ||
+		!reflect.DeepEqual(gotServer, server) || !reflect.DeepEqual(gotTarget, target) {
+		t.Fatalf("updated=%#v persisted=%#v server=%#v target=%#v err=%v", updated, persisted, gotServer, gotTarget, err)
+	}
+	override := 45 * time.Minute
+	server.Labels["idle_timeout_secs"] = "2700"
+	replaced, _, _, err := UpdateLeaseClaimTouchIfUnchangedAction(leaseID, updated, now.Add(time.Minute), &override, func() (Server, SSHTarget, bool, error) {
+		return server, target, true, nil
+	})
+	persisted, readErr := readLeaseClaim(leaseID)
+	if err != nil || readErr != nil || !reflect.DeepEqual(replaced, persisted) || replaced.IdleTimeoutSeconds != 2700 ||
+		replaced.Labels["idle_timeout_secs"] != "2700" || replaced.LastUsedAt != "2026-08-20T19:01:00Z" || replaced.Revision == updated.Revision {
+		t.Fatalf("replaced=%#v persisted=%#v err=%v readErr=%v", replaced, persisted, err, readErr)
+	}
+	endpoint, _, _, err := UpdateLeaseClaimEndpointIfUnchangedAction(leaseID, replaced, func() (Server, SSHTarget, bool, error) {
+		return server, SSHTarget{Host: "203.0.113.30", Port: "22"}, true, nil
+	})
+	if err != nil || endpoint.LastUsedAt != replaced.LastUsedAt || endpoint.IdleTimeoutSeconds != replaced.IdleTimeoutSeconds {
+		t.Fatalf("endpoint compatibility claim=%#v err=%v", endpoint, err)
+	}
+}
+
+func TestUpdateLeaseClaimTouchIfUnchangedActionFailsClosed(t *testing.T) {
+	tests := []struct {
+		name     string
+		override *time.Duration
+		prepare  func(string, leaseClaim) leaseClaim
+		action   func(Server, SSHTarget) (Server, SSHTarget, bool, error)
+		wantCall bool
+		wantErr  bool
+	}{
+		{name: "nil action"},
+		{name: "no-op", action: func(server Server, target SSHTarget) (Server, SSHTarget, bool, error) {
+			return server, target, false, nil
+		}, wantCall: true},
+		{name: "provider failure", action: func(server Server, target SSHTarget) (Server, SSHTarget, bool, error) {
+			return server, target, true, errors.New("provider failed")
+		}, wantCall: true, wantErr: true},
+		{name: "zero override", override: durationPointer(0), wantErr: true},
+		{name: "negative override", override: durationPointer(-time.Second), wantErr: true},
+		{name: "rounds to zero", override: durationPointer(time.Millisecond), wantErr: true},
+		{name: "stale revision", prepare: func(_ string, claim leaseClaim) leaseClaim { claim.Revision = "stale"; return claim }, wantErr: true},
+		{name: "removed claim", prepare: func(id string, claim leaseClaim) leaseClaim { removeLeaseClaim(id); return claim }, wantErr: true},
+		{name: "ABA replacement", prepare: func(id string, claim leaseClaim) leaseClaim {
+			middle, err := updateLeaseClaimLabelsIfUnchanged(id, claim, map[string]string{"provider": "aws", "state": "other"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := updateLeaseClaimLabelsIfUnchanged(id, middle, claim.Labels); err != nil {
+				t.Fatal(err)
+			}
+			return claim
+		}, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			const leaseID = "cbx_touch_failure"
+			server := Server{Provider: "aws", CloudID: "i-touch", Labels: map[string]string{"provider": "aws", "slug": "touch", "state": "ready"}}
+			if err := claimLeaseTargetForRepoConfig(leaseID, "touch", Config{Provider: "aws"}, server, SSHTarget{}, "/repo", time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+			expected, err := readLeaseClaim(leaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.prepare != nil {
+				expected = test.prepare(leaseID, expected)
+			}
+			before, existed, err := readLeaseClaimWithPresence(leaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			called := false
+			var action func() (Server, SSHTarget, bool, error)
+			if test.name != "nil action" {
+				action = func() (Server, SSHTarget, bool, error) {
+					called = true
+					if test.action != nil {
+						return test.action(server, SSHTarget{})
+					}
+					return server, SSHTarget{}, true, nil
+				}
+			}
+			_, _, _, err = UpdateLeaseClaimTouchIfUnchangedAction(leaseID, expected, time.Now(), test.override, action)
+			if (err != nil) != test.wantErr || called != test.wantCall {
+				t.Fatalf("err=%v called=%t wantErr=%t wantCall=%t", err, called, test.wantErr, test.wantCall)
+			}
+			after, exists, readErr := readLeaseClaimWithPresence(leaseID)
+			if readErr != nil || exists != existed || exists && !reflect.DeepEqual(after, before) {
+				t.Fatalf("before=%#v after=%#v existed=%t exists=%t err=%v", before, after, existed, exists, readErr)
+			}
+		})
+	}
+}
+
+func TestConditionalClaimActionsRejectMisfiledClaimBeforeProviderMutation(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(string, leaseClaim, func() (Server, SSHTarget, bool, error)) error
+	}{
+		{name: "endpoint", run: func(leaseID string, expected leaseClaim, action func() (Server, SSHTarget, bool, error)) error {
+			_, _, _, err := UpdateLeaseClaimEndpointIfUnchangedAction(leaseID, expected, action)
+			return err
+		}},
+		{name: "touch", run: func(leaseID string, expected leaseClaim, action func() (Server, SSHTarget, bool, error)) error {
+			_, _, _, err := UpdateLeaseClaimTouchIfUnchangedAction(leaseID, expected, time.Now(), nil, action)
+			return err
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			const storedLeaseID = "cbx_touch_stored"
+			const requestedLeaseID = "cbx_touch_requested"
+			server := Server{Provider: "aws", CloudID: "i-touch", Labels: map[string]string{
+				"lease": storedLeaseID, "slug": "touch", "provider": "aws",
+			}}
+			if err := claimLeaseTargetForRepoConfig(storedLeaseID, "touch", Config{Provider: "aws"}, server, SSHTarget{}, "/repo", time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+			expected, err := readLeaseClaim(storedLeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			storedPath, err := leaseClaimPath(storedLeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			requestedPath, err := leaseClaimPath(requestedLeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			original, err := os.ReadFile(storedPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(requestedPath, original, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			called := false
+			err = test.run(requestedLeaseID, expected, func() (Server, SSHTarget, bool, error) {
+				called = true
+				return server, SSHTarget{}, true, nil
+			})
+			if err == nil || !strings.Contains(err.Error(), "refusing misfiled claim") || called {
+				t.Fatalf("misfiled claim error=%v provider callback called=%t", err, called)
+			}
+			current, err := os.ReadFile(requestedPath)
+			if err != nil || string(current) != string(original) {
+				t.Fatalf("misfiled claim changed: current=%q original=%q err=%v", current, original, err)
+			}
+		})
+	}
+}
+
+func TestUpdateLeaseClaimTouchIfUnchangedActionHoldsFenceDuringCallback(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_touch_fence"
+	server := Server{Provider: "aws", CloudID: "i-touch", Labels: map[string]string{"provider": "aws", "slug": "touch", "state": "ready"}}
+	if err := claimLeaseTargetForRepoConfig(leaseID, "touch", Config{Provider: "aws"}, server, SSHTarget{}, "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	proceed := make(chan struct{})
+	touchDone := make(chan error, 1)
+	go func() {
+		_, _, _, err := UpdateLeaseClaimTouchIfUnchangedAction(leaseID, expected, time.Now(), nil, func() (Server, SSHTarget, bool, error) {
+			close(entered)
+			<-proceed
+			return server, SSHTarget{}, true, nil
+		})
+		touchDone <- err
+	}()
+	<-entered
+	mutationDone := make(chan error, 1)
+	go func() {
+		_, err := updateLeaseClaimLabelsIfUnchanged(leaseID, expected, map[string]string{"provider": "aws", "state": "stale"})
+		mutationDone <- err
+	}()
+	select {
+	case err := <-mutationDone:
+		t.Fatalf("old snapshot mutated while provider callback held lock: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(proceed)
+	if err := <-touchDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-mutationDone; err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("concurrent old snapshot mutation err=%v", err)
+	}
+}
+
+func durationPointer(value time.Duration) *time.Duration { return &value }
+
 func TestConditionalClaimEndpointActionUpdatesAtomically(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_conditionalendpoint123"

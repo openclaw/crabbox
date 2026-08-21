@@ -146,7 +146,10 @@ instance id. Linodes with partial, foreign, malformed, claimless, or mismatched
 ownership are skipped or refused; a claimless Linode must first be adopted
 through explicit supported `--reclaim` reuse.
 
-Tag updates replace only Crabbox's namespaced tags and preserve unrelated
+Heartbeat and Tailscale metadata updates require the same exact account- and
+instance-bound local claim. Crabbox holds the claim lock while updating Linode
+tags, rejects replaced or stale claim snapshots, preserves the existing idle
+timeout unless an override was explicitly requested, and keeps unrelated
 operator tags already attached to the instance. Direct mode has no coordinator
 alarm. Use:
 

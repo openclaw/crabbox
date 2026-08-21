@@ -571,74 +571,104 @@ func (b *linodeLeaseBackend) StatusTouchClaimMatches(lease core.LeaseTarget, cla
 }
 
 func (b *linodeLeaseBackend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
-	server := req.Lease.Server
-	if err := validateLinodeLabels(server.Labels); err != nil {
-		return core.Server{}, err
-	}
-	client, err := b.clientFactory(b.RT)
-	if err != nil {
-		return core.Server{}, err
-	}
-	item, err := client.GetLinode(ctx, server.ID)
-	if err != nil {
-		return core.Server{}, err
-	}
-	if err := validateLiveLinode(item, server); err != nil {
-		return core.Server{}, err
-	}
-	cfg := b.Cfg
-	labels := normalizedLinodeLabels(item.Tags)
-	liveTailscale := map[string]string{}
-	for _, key := range tagLabelKeys() {
-		if value, ok := labels[key]; ok && exactTagValueKey(key) {
-			liveTailscale[key] = value
-		}
-	}
-	if req.IdleTimeout > 0 {
-		cfg.IdleTimeout = req.IdleTimeout
-		labels = shared.CloneLabels(labels)
-		delete(labels, "idle_timeout")
-		delete(labels, "idle_timeout_secs")
-	}
-	labels = core.TouchDirectLeaseLabels(labels, cfg, req.State, b.now())
-	for key, value := range liveTailscale {
-		labels[key] = value
-	}
-	if accountID := strings.TrimSpace(server.Labels[linodeAccountLabel]); accountID != "" {
-		labels[linodeAccountLabel] = accountID
-	}
-	if err := client.UpdateLinodeTags(ctx, server.ID, replaceCrabboxTags(item.Tags, tagsFromLabels(labels))); err != nil {
-		return core.Server{}, err
-	}
-	server.Labels = labels
-	return server, nil
+	return b.updateFencedLinodeMetadata(ctx, req.Lease, &req, nil)
 }
 
 func (b *linodeLeaseBackend) UpdateTailscaleMetadata(ctx context.Context, lease core.LeaseTarget, meta core.TailscaleMetadata) (core.Server, error) {
+	return b.updateFencedLinodeMetadata(ctx, lease, nil, &meta)
+}
+
+func (b *linodeLeaseBackend) updateFencedLinodeMetadata(ctx context.Context, lease core.LeaseTarget, touch *core.TouchRequest, meta *core.TailscaleMetadata) (core.Server, error) {
 	server := lease.Server
 	if err := validateLinodeLabels(server.Labels); err != nil {
 		return core.Server{}, err
 	}
+	expected, err := shared.RequireClaimSnapshot(server, providerName)
+	if err != nil {
+		return core.Server{}, err
+	}
+	if lease.LeaseID != expected.LeaseID || server.Provider != providerName || server.ID <= 0 ||
+		expected.ProviderScope != core.ProviderClaimScope(providerName, b.Cfg) ||
+		server.CloudID != strconv.FormatInt(server.ID, 10) || expected.CloudID != server.CloudID ||
+		(expected.CloudNumericID != 0 && expected.CloudNumericID != server.ID) || expected.Labels["recovery"] != "" ||
+		strings.TrimSpace(server.Labels[linodeAccountLabel]) != strings.TrimSpace(expected.Labels[linodeAccountLabel]) {
+		return core.Server{}, core.Exit(2, "linode lease or instance identity does not match its exact active local claim")
+	}
+	if err := validateCleanupClaim(server, expected, false); err != nil {
+		return core.Server{}, err
+	}
 	client, err := b.clientFactory(b.RT)
 	if err != nil {
 		return core.Server{}, err
 	}
-	item, err := client.GetLinode(ctx, server.ID)
+	providerCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	now := b.now()
+	action := func() (core.Server, core.SSHTarget, bool, error) {
+		if err := providerCtx.Err(); err != nil {
+			return core.Server{}, core.SSHTarget{}, false, err
+		}
+		accountID, err := client.AccountID(providerCtx)
+		if err != nil {
+			return core.Server{}, core.SSHTarget{}, false, err
+		}
+		current := server
+		current.Labels = shared.CloneLabels(server.Labels)
+		current.Labels[linodeAccountLabel] = accountID
+		if err := validateCleanupClaim(current, expected, false); err != nil {
+			return core.Server{}, core.SSHTarget{}, false, err
+		}
+		item, err := client.GetLinode(providerCtx, server.ID)
+		if err != nil {
+			return core.Server{}, core.SSHTarget{}, false, err
+		}
+		if err := validateLiveLinode(item, server); err != nil {
+			return core.Server{}, core.SSHTarget{}, false, err
+		}
+		current.Name = core.LeaseProviderName(expected.LeaseID, expected.Slug)
+		current.Labels = expected.Labels
+		if err := validateLiveLinode(item, current); err != nil {
+			return core.Server{}, core.SSHTarget{}, false, err
+		}
+		labels := normalizedLinodeLabels(item.Tags)
+		if touch != nil {
+			exactLabels := map[string]string{}
+			for _, key := range tagLabelKeys() {
+				if value, ok := labels[key]; ok && exactTagValueKey(key) {
+					exactLabels[key] = value
+				}
+			}
+			cfg := b.Cfg
+			if expected.IdleTimeoutSeconds > 0 {
+				cfg.IdleTimeout = time.Duration(expected.IdleTimeoutSeconds) * time.Second
+				delete(labels, "idle_timeout")
+				delete(labels, "idle_timeout_secs")
+			}
+			labels = core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(labels, cfg, touch.State, now, touch.IdleTimeoutOverride)
+			for key, value := range exactLabels {
+				labels[key] = value
+			}
+		} else {
+			applyTailscaleMetadata(labels, *meta)
+		}
+		labels[linodeAccountLabel] = accountID
+		if err := client.UpdateLinodeTags(providerCtx, server.ID, replaceCrabboxTags(item.Tags, tagsFromLabels(labels))); err != nil {
+			return core.Server{}, core.SSHTarget{}, false, err
+		}
+		updated := serverFromLinode(item, b.Cfg)
+		updated.Labels = labels
+		return updated, lease.SSH, true, nil
+	}
+	var updated core.LeaseClaim
+	if touch != nil {
+		updated, server, _, err = core.UpdateLeaseClaimTouchIfUnchangedAction(lease.LeaseID, expected, now, touch.IdleTimeoutOverride, action)
+	} else {
+		updated, server, _, err = core.UpdateLeaseClaimEndpointIfUnchangedAction(lease.LeaseID, expected, action)
+	}
 	if err != nil {
 		return core.Server{}, err
 	}
-	if err := validateLiveLinode(item, server); err != nil {
-		return core.Server{}, err
-	}
-	labels := normalizedLinodeLabels(item.Tags)
-	if accountID := strings.TrimSpace(server.Labels[linodeAccountLabel]); accountID != "" {
-		labels[linodeAccountLabel] = accountID
-	}
-	applyTailscaleMetadata(labels, meta)
-	if err := client.UpdateLinodeTags(ctx, server.ID, replaceCrabboxTags(item.Tags, tagsFromLabels(labels))); err != nil {
-		return core.Server{}, err
-	}
-	server.Labels = labels
+	core.SetServerLeaseClaimSnapshot(&server, updated, true)
 	return server, nil
 }
 

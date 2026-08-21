@@ -68,10 +68,11 @@ func (a App) status(ctx context.Context, args []string) error {
 			if err == nil {
 				state, err = statusViewFromLeaseTarget(statusCtx, cfg, lease)
 				if err == nil && *wait {
-					claimed, claimErr := statusLeaseHasExactClaim(statusCtx, backend, lease, backend.Spec().Name, leaseOptionsFromConfig(cfg).ProviderScope)
+					claim, claimed, claimErr := statusLeaseExactClaim(statusCtx, backend, lease, backend.Spec().Name, leaseOptionsFromConfig(cfg).ProviderScope)
 					if claimErr != nil {
 						fmt.Fprintf(a.Stderr, "warning: touch skipped for %s: %v\n", lease.LeaseID, claimErr)
 					} else if claimed {
+						SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
 						_, touchErr := sshBackend.Touch(statusCtx, TouchRequest{Lease: lease, State: state.State, IdleTimeout: cfg.IdleTimeout})
 						if touchErr != nil {
 							fmt.Fprintf(a.Stderr, "warning: touch failed for %s: %v\n", lease.LeaseID, touchErr)
@@ -136,34 +137,34 @@ func statusWaitDone(state statusView) bool {
 	return state.Ready || statusTerminalState(state.State)
 }
 
-func statusLeaseHasExactClaim(ctx context.Context, backend Backend, lease LeaseTarget, fallbackProvider, providerScope string) (bool, error) {
+func statusLeaseExactClaim(ctx context.Context, backend Backend, lease LeaseTarget, fallbackProvider, providerScope string) (leaseClaim, bool, error) {
 	provider := canonicalClaimProvider(blank(lease.Server.Provider, fallbackProvider))
 	if lease.LeaseID == "" || provider == "" {
-		return false, nil
+		return leaseClaim{}, false, nil
 	}
 	claim, claimed, exact, err := resolveLeaseClaimForProviderWithExact(lease.LeaseID, provider)
 	if err != nil {
-		return false, fmt.Errorf("read exact %s lease claim: %w", provider, err)
+		return leaseClaim{}, false, fmt.Errorf("read exact %s lease claim: %w", provider, err)
 	}
 	if !claimed || !exact {
-		return false, nil
+		return leaseClaim{}, false, nil
 	}
 	if authorizer, ok := backend.(StatusTouchClaimAuthorizer); ok {
 		if err := authorizer.AuthorizeStatusTouchClaim(ctx, lease, claim); err != nil {
-			return false, err
+			return leaseClaim{}, false, err
 		}
-		return true, nil
+		return claim, true, nil
 	}
 	resourceID := strings.TrimSpace(lease.Server.CloudID)
 	matched := claim.ProviderScope == providerScope &&
 		resourceID != "" && claim.CloudID == resourceID
 	if !matched {
-		return false, nil
+		return leaseClaim{}, false, nil
 	}
 	if validator, ok := backend.(StatusTouchClaimValidator); ok && !validator.StatusTouchClaimMatches(lease, claim) {
-		return false, nil
+		return leaseClaim{}, false, nil
 	}
-	return true, nil
+	return claim, true, nil
 }
 
 func statusWaitTerminalError(id string, state statusView) error {

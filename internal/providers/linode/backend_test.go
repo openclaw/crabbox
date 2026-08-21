@@ -33,6 +33,8 @@ type fakeLinodeAPI struct {
 	getFn              func(context.Context, int64) (linodeInstance, error)
 	deleteErr          error
 	deleteFn           func(context.Context, int64) error
+	updateErr          error
+	updateCalls        int
 	created            []linodeInstance
 	deleted            []int64
 	updated            []int64
@@ -118,6 +120,10 @@ func (f *fakeLinodeAPI) DeleteLinode(ctx context.Context, id int64) error {
 }
 
 func (f *fakeLinodeAPI) UpdateLinodeTags(_ context.Context, id int64, tags []string) error {
+	f.updateCalls++
+	if f.updateErr != nil {
+		return f.updateErr
+	}
 	f.updated = append(f.updated, id)
 	f.updatedTags = append(f.updatedTags, append([]string(nil), tags...))
 	for i := range f.linodes {
@@ -992,14 +998,24 @@ func TestTouchPreservesLiveTailscaleTagsAndIdleTimeoutOverride(t *testing.T) {
 	liveLabels["tailscale_tags"] = "tag:ci,tag:crabbox"
 	liveLabels["tailscale_exit_node"] = "exit.example.ts.net"
 	item.Tags = append(tagsFromLabels(liveLabels), "customer:production")
-	api := &fakeLinodeAPI{linodes: []linodeInstance{item}}
+	api := &fakeLinodeAPI{linodes: []linodeInstance{item}, accountID: "team:test-account"}
 	backend := newTestBackend(t, api)
 	backend.RT.Clock = fakeClock{t: time.Date(2026, 6, 10, 12, 10, 0, 0, time.UTC)}
+	if err := core.ClaimLeaseTargetForRepoConfig("cbx_abcdef123456", "touch-me", backend.Cfg, server, core.SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim("cbx_abcdef123456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	core.SetServerLeaseClaimSnapshot(&server, claim, true)
+	override := 20 * time.Minute
 
 	touched, err := backend.Touch(context.Background(), core.TouchRequest{
-		Lease:       core.LeaseTarget{Server: server, LeaseID: "cbx_abcdef123456"},
-		State:       "running",
-		IdleTimeout: 20 * time.Minute,
+		Lease:               core.LeaseTarget{Server: server, LeaseID: "cbx_abcdef123456"},
+		State:               "running",
+		IdleTimeout:         45 * time.Minute,
+		IdleTimeoutOverride: &override,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1027,6 +1043,415 @@ func TestTouchPreservesLiveTailscaleTagsAndIdleTimeoutOverride(t *testing.T) {
 		decoded["tailscale_exit_node"] != "exit.example.ts.net" {
 		t.Fatalf("persisted labels=%v tags=%v", decoded, api.updatedTags[0])
 	}
+	snapshot, exists, set := core.ServerLeaseClaimSnapshot(touched)
+	persisted, err := core.ReadLeaseClaim("cbx_abcdef123456")
+	if err != nil || !set || !exists || !reflect.DeepEqual(snapshot, persisted) || persisted.Revision == claim.Revision || persisted.IdleTimeoutSeconds != 1200 {
+		t.Fatalf("snapshot=%#v persisted=%#v exists=%t set=%t err=%v", snapshot, persisted, exists, set, err)
+	}
+}
+
+func TestFencedLinodeMetadataRejectsInvalidOwnershipBeforeMutation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, *fakeLinodeAPI, *core.LeaseTarget, core.LeaseClaim)
+	}{
+		{name: "missing snapshot", mutate: func(_ *testing.T, _ *fakeLinodeAPI, lease *core.LeaseTarget, _ core.LeaseClaim) {
+			lease.Server = core.Server{Provider: lease.Server.Provider, CloudID: lease.Server.CloudID, ID: lease.Server.ID, Name: lease.Server.Name, Labels: lease.Server.Labels}
+		}},
+		{name: "false snapshot", mutate: func(_ *testing.T, _ *fakeLinodeAPI, lease *core.LeaseTarget, claim core.LeaseClaim) {
+			core.SetServerLeaseClaimSnapshot(&lease.Server, claim, false)
+		}},
+		{name: "stale snapshot", mutate: func(_ *testing.T, _ *fakeLinodeAPI, lease *core.LeaseTarget, claim core.LeaseClaim) {
+			claim.Revision = "stale"
+			core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
+		}},
+		{name: "removed claim", mutate: func(_ *testing.T, _ *fakeLinodeAPI, lease *core.LeaseTarget, _ core.LeaseClaim) {
+			core.RemoveLeaseClaim(lease.LeaseID)
+		}},
+		{name: "wrong lease", mutate: func(_ *testing.T, _ *fakeLinodeAPI, lease *core.LeaseTarget, _ core.LeaseClaim) {
+			lease.LeaseID = "cbx_other_lease"
+		}},
+		{name: "wrong provider", mutate: func(_ *testing.T, _ *fakeLinodeAPI, lease *core.LeaseTarget, _ core.LeaseClaim) {
+			lease.Server.Provider = "vultr"
+		}},
+		{name: "wrong claim provider", mutate: func(_ *testing.T, _ *fakeLinodeAPI, lease *core.LeaseTarget, claim core.LeaseClaim) {
+			claim.Provider = "vultr"
+			core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
+		}},
+		{name: "wrong claim scope", mutate: func(t *testing.T, _ *fakeLinodeAPI, lease *core.LeaseTarget, claim core.LeaseClaim) {
+			claim.ProviderScope = "account:another-scope"
+			replaceFencedLinodeClaim(t, lease, claim)
+		}},
+		{name: "wrong claim numeric identity", mutate: func(t *testing.T, _ *fakeLinodeAPI, lease *core.LeaseTarget, claim core.LeaseClaim) {
+			claim.CloudNumericID = 999
+			replaceFencedLinodeClaim(t, lease, claim)
+		}},
+		{name: "claim has no revision", mutate: func(_ *testing.T, _ *fakeLinodeAPI, lease *core.LeaseTarget, claim core.LeaseClaim) {
+			claim.Revision = ""
+			core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
+		}},
+		{name: "wrong cloud identity", mutate: func(_ *testing.T, _ *fakeLinodeAPI, lease *core.LeaseTarget, _ core.LeaseClaim) {
+			lease.Server.CloudID = "999"
+		}},
+		{name: "wrong numeric identity", mutate: func(_ *testing.T, _ *fakeLinodeAPI, lease *core.LeaseTarget, _ core.LeaseClaim) {
+			lease.Server.ID = 999
+		}},
+		{name: "missing cloud identity", mutate: func(_ *testing.T, _ *fakeLinodeAPI, lease *core.LeaseTarget, _ core.LeaseClaim) {
+			lease.Server.CloudID = ""
+		}},
+		{name: "wrong server account", mutate: func(_ *testing.T, _ *fakeLinodeAPI, lease *core.LeaseTarget, _ core.LeaseClaim) {
+			lease.Server.Labels = maps.Clone(lease.Server.Labels)
+			lease.Server.Labels[linodeAccountLabel] = "team:another-account"
+		}},
+		{name: "missing server account", mutate: func(_ *testing.T, _ *fakeLinodeAPI, lease *core.LeaseTarget, _ core.LeaseClaim) {
+			lease.Server.Labels = maps.Clone(lease.Server.Labels)
+			delete(lease.Server.Labels, linodeAccountLabel)
+		}},
+		{name: "current account drift", mutate: func(_ *testing.T, api *fakeLinodeAPI, _ *core.LeaseTarget, _ core.LeaseClaim) {
+			api.accountID = "team:another-account"
+		}},
+		{name: "live instance drift", mutate: func(_ *testing.T, api *fakeLinodeAPI, _ *core.LeaseTarget, _ core.LeaseClaim) {
+			api.created[0].Label = "different-linode"
+		}},
+		{name: "live provider key drift", mutate: func(_ *testing.T, api *fakeLinodeAPI, _ *core.LeaseTarget, _ core.LeaseClaim) {
+			labels := normalizedLinodeLabels(api.created[0].Tags)
+			labels["provider_key"] = "different-provider-key"
+			api.created[0].Tags = tagsFromLabels(labels)
+		}},
+		{name: "cleanup recovery", mutate: func(t *testing.T, _ *fakeLinodeAPI, lease *core.LeaseTarget, claim core.LeaseClaim) {
+			labels := maps.Clone(claim.Labels)
+			labels["recovery"] = "rollback-cleanup"
+			updated, err := core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, claim, labels)
+			if err != nil {
+				t.Fatal(err)
+			}
+			core.SetServerLeaseClaimSnapshot(&lease.Server, updated, true)
+		}},
+	}
+	for _, mode := range []string{"touch", "metadata"} {
+		for _, test := range tests {
+			t.Run(mode+"/"+test.name, func(t *testing.T) {
+				backend, api, lease := setupFencedLinodeLease(t)
+				original, _, _ := core.ServerLeaseClaimSnapshot(lease.Server)
+				originalLeaseID := lease.LeaseID
+				test.mutate(t, api, &lease, original)
+				before, existed, err := core.ReadLeaseClaimWithPresence(originalLeaseID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if mode == "touch" {
+					_, err = backend.Touch(context.Background(), core.TouchRequest{Lease: lease, State: "running"})
+				} else {
+					_, err = backend.UpdateTailscaleMetadata(context.Background(), lease, core.TailscaleMetadata{Enabled: true, IPv4: "100.64.1.9"})
+				}
+				if err == nil || api.updateCalls != 0 || len(api.updated) != 0 {
+					t.Fatalf("mutation error=%v attempted provider writes=%d successful provider writes=%v", err, api.updateCalls, api.updated)
+				}
+				after, exists, readErr := core.ReadLeaseClaimWithPresence(originalLeaseID)
+				if readErr != nil || exists != existed || exists && !reflect.DeepEqual(after, before) {
+					t.Fatalf("before=%#v after=%#v existed=%t exists=%t err=%v", before, after, existed, exists, readErr)
+				}
+			})
+		}
+	}
+}
+
+func TestFencedLinodeMetadataRejectsClaimReplacementAfterClientCreation(t *testing.T) {
+	for _, mode := range []string{"touch", "metadata"} {
+		t.Run(mode, func(t *testing.T) {
+			backend, api, lease := setupFencedLinodeLease(t)
+			initial, _, _ := core.ServerLeaseClaimSnapshot(lease.Server)
+			var replacement core.LeaseClaim
+			backend.clientFactory = func(core.Runtime) (linodeAPI, error) {
+				labels := maps.Clone(initial.Labels)
+				labels["owner"] = "replacement-owner"
+				var err error
+				replacement, err = core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, initial, labels)
+				return api, err
+			}
+			var err error
+			if mode == "touch" {
+				_, err = backend.Touch(context.Background(), core.TouchRequest{Lease: lease, State: "running"})
+			} else {
+				_, err = backend.UpdateTailscaleMetadata(context.Background(), lease, core.TailscaleMetadata{Enabled: true, IPv4: "100.64.1.9"})
+			}
+			current, readErr := core.ReadLeaseClaim(lease.LeaseID)
+			if err == nil || !strings.Contains(err.Error(), "claim changed") || readErr != nil ||
+				!reflect.DeepEqual(current, replacement) || api.updateCalls != 0 {
+				t.Fatalf("error=%v current=%#v replacement=%#v attempted provider writes=%d readErr=%v", err, current, replacement, api.updateCalls, readErr)
+			}
+		})
+	}
+}
+
+func TestFencedLinodeMetadataHoldsClaimLockThroughProviderMutation(t *testing.T) {
+	for _, mode := range []string{"touch", "metadata"} {
+		t.Run(mode, func(t *testing.T) {
+			backend, api, lease := setupFencedLinodeLease(t)
+			initial, _, _ := core.ServerLeaseClaimSnapshot(lease.Server)
+			item := api.created[0]
+			entered := make(chan struct{})
+			proceed := make(chan struct{})
+			api.getFn = func(ctx context.Context, _ int64) (linodeInstance, error) {
+				close(entered)
+				select {
+				case <-ctx.Done():
+					return linodeInstance{}, ctx.Err()
+				case <-proceed:
+					return item, nil
+				}
+			}
+			operationDone := make(chan error, 1)
+			go func() {
+				var err error
+				if mode == "touch" {
+					_, err = backend.Touch(context.Background(), core.TouchRequest{Lease: lease, State: "running"})
+				} else {
+					_, err = backend.UpdateTailscaleMetadata(context.Background(), lease, core.TailscaleMetadata{Enabled: true, IPv4: "100.64.1.9"})
+				}
+				operationDone <- err
+			}()
+			<-entered
+			mutationStarted := make(chan struct{})
+			mutationDone := make(chan error, 1)
+			go func() {
+				close(mutationStarted)
+				labels := maps.Clone(initial.Labels)
+				labels["owner"] = "concurrent-owner"
+				_, err := core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, initial, labels)
+				mutationDone <- err
+			}()
+			<-mutationStarted
+			select {
+			case err := <-mutationDone:
+				close(proceed)
+				<-operationDone
+				t.Fatalf("claim changed while Linode provider mutation was in progress: %v", err)
+			case <-time.After(30 * time.Millisecond):
+			}
+			close(proceed)
+			if err := <-operationDone; err != nil {
+				t.Fatal(err)
+			}
+			if err := <-mutationDone; err == nil || !strings.Contains(err.Error(), "claim changed") {
+				t.Fatalf("concurrent claim replacement error=%v", err)
+			}
+			if api.updateCalls != 1 || len(api.updated) != 1 {
+				t.Fatalf("attempted provider writes=%d successful provider writes=%v", api.updateCalls, api.updated)
+			}
+		})
+	}
+}
+
+func TestFencedLinodeMetadataAcceptsLegacyExactCloudIdentity(t *testing.T) {
+	for _, mode := range []string{"touch", "metadata"} {
+		t.Run(mode, func(t *testing.T) {
+			backend, api, lease := setupFencedLinodeLease(t)
+			claim, _, _ := core.ServerLeaseClaimSnapshot(lease.Server)
+			claim.CloudNumericID = 0
+			replaceFencedLinodeClaim(t, &lease, claim)
+			var updated core.Server
+			var err error
+			if mode == "touch" {
+				updated, err = backend.Touch(context.Background(), core.TouchRequest{Lease: lease, State: "running"})
+			} else {
+				updated, err = backend.UpdateTailscaleMetadata(context.Background(), lease, core.TailscaleMetadata{Enabled: true, IPv4: "100.64.1.9"})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			persisted, err := core.ReadLeaseClaim(lease.LeaseID)
+			snapshot, exists, set := core.ServerLeaseClaimSnapshot(updated)
+			if err != nil || !set || !exists || !reflect.DeepEqual(snapshot, persisted) ||
+				persisted.CloudID != lease.Server.CloudID || persisted.CloudNumericID != lease.Server.ID || api.updateCalls != 1 {
+				t.Fatalf("persisted=%#v snapshot=%#v exists=%t set=%t attempted provider writes=%d err=%v", persisted, snapshot, exists, set, api.updateCalls, err)
+			}
+		})
+	}
+}
+
+func TestFencedLinodeTouchPreservesStoredTimeoutAndRejectsInvalidOverrides(t *testing.T) {
+	backend, api, lease := setupFencedLinodeLease(t)
+	initial, _, _ := core.ServerLeaseClaimSnapshot(lease.Server)
+	backend.Cfg.IdleTimeout = 2 * time.Hour
+	server, err := backend.Touch(context.Background(), core.TouchRequest{Lease: lease, State: "running", IdleTimeout: 90 * time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim(lease.LeaseID)
+	if err != nil || claim.IdleTimeoutSeconds != initial.IdleTimeoutSeconds || server.Labels["idle_timeout_secs"] != "1800" ||
+		!containsString(api.updatedTags[0], "customer:production") || server.Labels[linodeAccountLabel] != initial.Labels[linodeAccountLabel] {
+		t.Fatalf("claim=%#v server=%#v provider tags=%v err=%v", claim, server, api.updatedTags, err)
+	}
+	lease.Server = server
+	for _, invalid := range []time.Duration{0, -time.Second, time.Millisecond} {
+		before, err := core.ReadLeaseClaim(lease.LeaseID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writes := len(api.updated)
+		if _, err := backend.Touch(context.Background(), core.TouchRequest{Lease: lease, IdleTimeoutOverride: &invalid}); err == nil {
+			t.Fatalf("accepted invalid override %s", invalid)
+		}
+		after, err := core.ReadLeaseClaim(lease.LeaseID)
+		if err != nil || !reflect.DeepEqual(after, before) || len(api.updated) != writes {
+			t.Fatalf("override=%s before=%#v after=%#v writes=%d want=%d err=%v", invalid, before, after, len(api.updated), writes, err)
+		}
+	}
+}
+
+func TestFencedLinodeTouchReconcilesLiveTimeoutWithClaim(t *testing.T) {
+	backend, api, lease := setupFencedLinodeLease(t)
+	claim, _, _ := core.ServerLeaseClaimSnapshot(lease.Server)
+	labels := normalizedLinodeLabels(api.created[0].Tags)
+	labels["idle_timeout"] = "7200"
+	labels["idle_timeout_secs"] = "7200"
+	api.created[0].Tags = replaceCrabboxTags(api.created[0].Tags, tagsFromLabels(labels))
+	backend.Cfg.IdleTimeout = 3 * time.Hour
+
+	updated, err := backend.Touch(context.Background(), core.TouchRequest{
+		Lease:       lease,
+		State:       "running",
+		IdleTimeout: 90 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := core.ReadLeaseClaim(lease.LeaseID)
+	providerLabels := normalizedLinodeLabels(api.created[0].Tags)
+	if err != nil || persisted.IdleTimeoutSeconds != claim.IdleTimeoutSeconds ||
+		updated.Labels["idle_timeout_secs"] != "1800" || providerLabels["idle_timeout_secs"] != "1800" ||
+		persisted.Labels["idle_timeout_secs"] != "1800" || api.updateCalls != 1 {
+		t.Fatalf("claim=%#v initial=%#v updated=%v provider=%v attempted provider writes=%d err=%v", persisted, claim, updated.Labels, providerLabels, api.updateCalls, err)
+	}
+}
+
+func TestFencedLinodeProviderFailureAndCancellationRetainClaim(t *testing.T) {
+	for _, mode := range []string{"touch", "metadata", "cancellation"} {
+		t.Run(mode, func(t *testing.T) {
+			backend, api, lease := setupFencedLinodeLease(t)
+			before, _, _ := core.ServerLeaseClaimSnapshot(lease.Server)
+			keyPath, err := core.TestboxKeyPath(lease.LeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			if mode == "cancellation" {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, 20*time.Millisecond)
+				defer cancel()
+				api.getFn = func(ctx context.Context, _ int64) (linodeInstance, error) {
+					<-ctx.Done()
+					return linodeInstance{}, ctx.Err()
+				}
+			} else {
+				api.updateErr = errors.New("linode provider tag update failed")
+			}
+			if mode == "metadata" {
+				_, err = backend.UpdateTailscaleMetadata(ctx, lease, core.TailscaleMetadata{Enabled: true, IPv4: "100.64.1.9"})
+			} else {
+				override := time.Hour
+				_, err = backend.Touch(ctx, core.TouchRequest{Lease: lease, IdleTimeoutOverride: &override})
+			}
+			after, readErr := core.ReadLeaseClaim(lease.LeaseID)
+			wantUpdateCalls := 1
+			if mode == "cancellation" {
+				wantUpdateCalls = 0
+			}
+			if err == nil || readErr != nil || !reflect.DeepEqual(after, before) || api.updateCalls != wantUpdateCalls || len(api.updated) != 0 {
+				t.Fatalf("error=%v before=%#v after=%#v attempted provider writes=%d successful writes=%v readErr=%v", err, before, after, api.updateCalls, api.updated, readErr)
+			}
+			if _, err := os.Stat(keyPath); err != nil {
+				t.Fatalf("lease SSH key was not retained: %v", err)
+			}
+			if mode == "cancellation" && !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("cancellation error=%v", err)
+			}
+		})
+	}
+}
+
+func TestFencedLinodeMetadataAndTouchPreserveReleaseContinuity(t *testing.T) {
+	for _, mode := range []string{"touch-touch", "metadata-touch"} {
+		t.Run(mode, func(t *testing.T) {
+			backend, api, lease := setupFencedLinodeLease(t)
+			initial, _, _ := core.ServerLeaseClaimSnapshot(lease.Server)
+			if mode == "metadata-touch" {
+				meta := core.TailscaleMetadata{Enabled: true, Hostname: "fenced", FQDN: "fenced.example.ts.net", IPv4: "100.64.1.9", Tags: []string{"tag:ci", "tag:crabbox"}, State: "ready", Error: "last probe failed: retrying"}
+				updated, err := backend.UpdateTailscaleMetadata(context.Background(), lease, meta)
+				if err != nil {
+					t.Fatal(err)
+				}
+				claim, err := core.ReadLeaseClaim(lease.LeaseID)
+				snapshot, exists, set := core.ServerLeaseClaimSnapshot(updated)
+				if err != nil || !set || !exists || !reflect.DeepEqual(snapshot, claim) || claim.Revision == initial.Revision ||
+					claim.LastUsedAt != initial.LastUsedAt || claim.IdleTimeoutSeconds != initial.IdleTimeoutSeconds ||
+					claim.Labels["expires_at"] != initial.Labels["expires_at"] || claim.TailscaleIPv4 != meta.IPv4 ||
+					updated.Labels["tailscale_tags"] != "tag:ci,tag:crabbox" || !containsString(api.updatedTags[0], "customer:production") {
+					t.Fatalf("metadata snapshot=%#v claim=%#v initial=%#v labels=%v err=%v", snapshot, claim, initial, updated.Labels, err)
+				}
+				lease.Server = updated
+			} else {
+				updated, err := backend.Touch(context.Background(), core.TouchRequest{Lease: lease, State: "running"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				lease.Server = updated
+			}
+			override := 45 * time.Minute
+			updated, err := backend.Touch(context.Background(), core.TouchRequest{Lease: lease, State: "running", IdleTimeoutOverride: &override})
+			if err != nil {
+				t.Fatal(err)
+			}
+			lease.Server = updated
+			claim, err := core.ReadLeaseClaim(lease.LeaseID)
+			if err != nil || claim.IdleTimeoutSeconds != 2700 || claim.Labels["idle_timeout_secs"] != "2700" {
+				t.Fatalf("touch claim=%#v err=%v", claim, err)
+			}
+			if mode == "metadata-touch" && updated.Labels["tailscale_tags"] != "tag:ci,tag:crabbox" {
+				t.Fatalf("touch damaged metadata: %v", updated.Labels)
+			}
+			if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+				t.Fatal(err)
+			}
+			if len(api.deleted) != 1 || api.deleted[0] != 100 {
+				t.Fatalf("released instances=%v", api.deleted)
+			}
+			if _, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID); err != nil || exists {
+				t.Fatalf("claim retained after release: exists=%t err=%v", exists, err)
+			}
+		})
+	}
+}
+
+func setupFencedLinodeLease(t *testing.T) (*linodeLeaseBackend, *fakeLinodeAPI, core.LeaseTarget) {
+	t.Helper()
+	api := &fakeLinodeAPI{}
+	backend := newTestBackend(t, api)
+	backend.Cfg.IdleTimeout = 30 * time.Minute
+	backend.Cfg.TTL = time.Hour
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "fenced"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.created[0].Tags = append(api.created[0].Tags, "customer:production")
+	api.updated = nil
+	api.updatedTags = nil
+	api.updateCalls = 0
+	return backend, api, lease
+}
+
+func replaceFencedLinodeClaim(t *testing.T, lease *core.LeaseTarget, replacement core.LeaseClaim) {
+	t.Helper()
+	current, exists, set := core.ServerLeaseClaimSnapshot(lease.Server)
+	if !set || !exists {
+		t.Fatal("lease has no exact claim snapshot")
+	}
+	updated, err := core.ReplaceLeaseClaimIfUnchangedDurableReturning(lease.LeaseID, current, replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	core.SetServerLeaseClaimSnapshot(&lease.Server, updated, true)
 }
 
 func containsString(values []string, wanted string) bool {

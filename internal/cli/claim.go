@@ -645,7 +645,7 @@ func updateLeaseClaimEndpointIfUnchangedAction(
 	expected leaseClaim,
 	action func() (Server, SSHTarget, bool, error),
 ) (leaseClaim, Server, SSHTarget, error) {
-	return updateLeaseClaimEndpointIfUnchangedActionMode(leaseID, expected, action, false)
+	return updateLeaseClaimEndpointIfUnchangedActionMode(leaseID, expected, action, false, nil)
 }
 
 func replaceLeaseClaimEndpointIfUnchangedAction(
@@ -653,7 +653,12 @@ func replaceLeaseClaimEndpointIfUnchangedAction(
 	expected leaseClaim,
 	action func() (Server, SSHTarget, bool, error),
 ) (leaseClaim, Server, SSHTarget, error) {
-	return updateLeaseClaimEndpointIfUnchangedActionMode(leaseID, expected, action, true)
+	return updateLeaseClaimEndpointIfUnchangedActionMode(leaseID, expected, action, true, nil)
+}
+
+type leaseClaimTouchPayload struct {
+	lastUsed            time.Time
+	idleTimeoutOverride *time.Duration
 }
 
 func updateLeaseClaimEndpointIfUnchangedActionMode(
@@ -661,7 +666,16 @@ func updateLeaseClaimEndpointIfUnchangedActionMode(
 	expected leaseClaim,
 	action func() (Server, SSHTarget, bool, error),
 	replaceEndpoint bool,
+	touch *leaseClaimTouchPayload,
 ) (leaseClaim, Server, SSHTarget, error) {
+	if touch != nil && touch.idleTimeoutOverride != nil {
+		if *touch.idleTimeoutOverride <= 0 {
+			return leaseClaim{}, Server{}, SSHTarget{}, exit(2, "lease %s idle timeout override must be positive", leaseID)
+		}
+		if touch.idleTimeoutOverride.Round(time.Second)/time.Second <= 0 {
+			return leaseClaim{}, Server{}, SSHTarget{}, exit(2, "lease %s idle timeout override must be at least one second", leaseID)
+		}
+	}
 	path, err := leaseClaimPath(leaseID)
 	if err != nil {
 		return leaseClaim{}, Server{}, SSHTarget{}, err
@@ -672,6 +686,9 @@ func updateLeaseClaimEndpointIfUnchangedActionMode(
 	err = withLeaseClaimLock(path, func() error {
 		claim, exists, err := readLeaseClaimPathWithPresence(path)
 		if err != nil {
+			return err
+		}
+		if err := validateLeaseClaimFileIdentity(leaseID, claim, exists); err != nil {
 			return err
 		}
 		if err := endpointClaimGuard(leaseID, unchangedLeaseClaimGuard(leaseID, expected, true))(claim, exists); err != nil {
@@ -697,6 +714,12 @@ func updateLeaseClaimEndpointIfUnchangedActionMode(
 			claim.BridgeURL = ""
 		}
 		applyLeaseClaimEndpoint(&claim, prepared, target)
+		if touch != nil {
+			claim.LastUsedAt = touch.lastUsed.UTC().Format(time.RFC3339)
+			if touch.idleTimeoutOverride != nil {
+				claim.IdleTimeoutSeconds = int(touch.idleTimeoutOverride.Round(time.Second) / time.Second)
+			}
+		}
 		if replaceEndpoint {
 			claim.SSHHost = target.Host
 			if port, err := strconv.Atoi(strings.TrimSpace(target.Port)); err == nil && port > 0 {
