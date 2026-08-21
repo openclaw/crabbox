@@ -7,9 +7,20 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
+
+func writePromotionEvidence(t *testing.T, qualificationRef string) string {
+	t.Helper()
+	file := t.TempDir() + "/promotion-evidence.json"
+	data := []byte(`{"schema":"crabbox-image-promotion-evidence/v1","qualification":{"reference":"` + qualificationRef + `"}}`)
+	if err := os.WriteFile(file, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return file
+}
 
 func TestImagePromoteProtectedContract(t *testing.T) {
 	clearConfigEnv(t)
@@ -35,8 +46,10 @@ func TestImagePromoteProtectedContract(t *testing.T) {
 	t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "wrong-admin-token")
 
 	var out bytes.Buffer
+	qualificationRef := "ghcr.io/example-org/crabbox-aws-image-qualifications@sha256:" + strings.Repeat("a", 64)
 	err := (App{Stdout: &out, Stderr: io.Discard}).imagePromote(context.Background(), []string{
-		"--qualification-ref", "ghcr.io/example-org/crabbox-aws-image-qualifications@sha256:" + strings.Repeat("a", 64),
+		"--qualification-ref", qualificationRef,
+		"--promotion-evidence", writePromotionEvidence(t, qualificationRef),
 		"--expected-current-image", "ami-current",
 		"--expected-current-revision", "rev-current",
 		"--idempotency-key", "run-123-attempt-1",
@@ -73,8 +86,10 @@ func TestImagePromoteProtectedAbsentAndRollbackContract(t *testing.T) {
 	t.Setenv("CRABBOX_COORDINATOR", server.URL)
 	t.Setenv("CRABBOX_COORDINATOR_PROMOTION_TOKEN", "promotion-token")
 
+	qualificationRef := "ghcr.io/example-org/proof@sha256:" + strings.Repeat("b", 64)
 	err := (App{Stdout: io.Discard, Stderr: io.Discard}).imagePromote(context.Background(), []string{
-		"--qualification-ref", "ghcr.io/example-org/proof@sha256:" + strings.Repeat("b", 64),
+		"--qualification-ref", qualificationRef,
+		"--promotion-evidence", writePromotionEvidence(t, qualificationRef),
 		"--expected-current-image", "none",
 		"--idempotency-key", "rollback-123",
 		"--workflow-run-id", "123",
@@ -101,8 +116,10 @@ func TestImagePromoteProtectedRejectsUnsafeOptionsBeforeRequest(t *testing.T) {
 	t.Setenv("CRABBOX_COORDINATOR", server.URL)
 	t.Setenv("CRABBOX_COORDINATOR_PROMOTION_TOKEN", "promotion-token")
 
+	qualificationRef := "ghcr.io/example-org/proof@sha256:" + strings.Repeat("c", 64)
 	base := []string{
-		"--qualification-ref", "ghcr.io/example-org/proof@sha256:" + strings.Repeat("c", 64),
+		"--qualification-ref", qualificationRef,
+		"--promotion-evidence", writePromotionEvidence(t, qualificationRef),
 		"--expected-current-image", "none",
 		"--idempotency-key", "key",
 		"--workflow-run-id", "123",
@@ -131,8 +148,10 @@ func TestImagePromoteProtectedRequiresRevisionForPresentState(t *testing.T) {
 	clearConfigEnv(t)
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	qualificationRef := "ghcr.io/example-org/proof@sha256:" + strings.Repeat("d", 64)
 	err := (App{Stdout: io.Discard, Stderr: io.Discard}).imagePromote(context.Background(), []string{
-		"--qualification-ref", "ghcr.io/example-org/proof@sha256:" + strings.Repeat("d", 64),
+		"--qualification-ref", qualificationRef,
+		"--promotion-evidence", writePromotionEvidence(t, qualificationRef),
 		"--expected-current-image", "ami-current",
 		"--idempotency-key", "key",
 		"--workflow-run-id", "123",

@@ -306,18 +306,14 @@ type CoordinatorImageDefaultState struct {
 	Revision string `json:"revision,omitempty"`
 }
 
-type CoordinatorImagePromotionEvidence struct {
-	QualificationRef string `json:"qualificationRef"`
-}
-
 type CoordinatorImagePromotionRequest struct {
-	Schema             string                            `json:"schema"`
-	Operation          string                            `json:"operation"`
-	Expected           CoordinatorImageDefaultState      `json:"expected"`
-	Evidence           CoordinatorImagePromotionEvidence `json:"evidence"`
-	IdempotencyKey     string                            `json:"idempotencyKey"`
-	WorkflowRunID      string                            `json:"workflowRunId"`
-	WorkflowRunAttempt string                            `json:"workflowRunAttempt"`
+	Schema             string                       `json:"schema"`
+	Operation          string                       `json:"operation"`
+	Expected           CoordinatorImageDefaultState `json:"expected"`
+	Evidence           json.RawMessage              `json:"evidence"`
+	IdempotencyKey     string                       `json:"idempotencyKey"`
+	WorkflowRunID      string                       `json:"workflowRunId"`
+	WorkflowRunAttempt string                       `json:"workflowRunAttempt"`
 }
 
 type CoordinatorImagePromotionResult struct {

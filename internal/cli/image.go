@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 )
@@ -70,6 +71,7 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 	var fastSnapshotRestoreAZs stringListFlag
 	fs.Var(&fastSnapshotRestoreAZs, "fsr-az", "availability zone for Fast Snapshot Restore; repeatable")
 	qualificationRef := fs.String("qualification-ref", "", "immutable signed AWS qualification OCI digest reference")
+	promotionEvidence := fs.String("promotion-evidence", "", "verified promotion evidence JSON file")
 	expectedCurrentImage := fs.String("expected-current-image", "", "expected current image id, or none for an absent default")
 	expectedCurrentRevision := fs.String("expected-current-revision", "", "expected current default revision when an image is present")
 	idempotencyKey := fs.String("idempotency-key", "", "stable protected promotion attempt key")
@@ -82,11 +84,15 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 	}
 	protectedPromotion := flagWasSet(fs, "expected-current-image")
 	if (!protectedPromotion && fs.NArg() != 1) || (protectedPromotion && fs.NArg() != 0) {
-		return exit(2, "usage: crabbox image promote <image-id> [legacy options] | crabbox image promote --qualification-ref <oci@sha256:...> --expected-current-image <id|none> [--expected-current-revision <revision>] --idempotency-key <key> --workflow-run-id <id> --workflow-run-attempt <attempt>")
+		return exit(2, "usage: crabbox image promote <image-id> [legacy options] | crabbox image promote --qualification-ref <oci@sha256:...> --promotion-evidence <file> --expected-current-image <id|none> [--expected-current-revision <revision>] --idempotency-key <key> --workflow-run-id <id> --workflow-run-attempt <attempt>")
 	}
 	if protectedPromotion {
 		if strings.TrimSpace(*qualificationRef) == "" {
 			return exit(2, "--qualification-ref is required with --expected-current-image")
+		}
+		evidence, err := loadImagePromotionEvidence(*promotionEvidence, strings.TrimSpace(*qualificationRef))
+		if err != nil {
+			return err
 		}
 		if strings.TrimSpace(*idempotencyKey) == "" {
 			return exit(2, "--idempotency-key is required with --expected-current-image")
@@ -134,7 +140,7 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 			Schema:             "crabbox-image-promotion-request/v1",
 			Operation:          operation,
 			Expected:           expected,
-			Evidence:           CoordinatorImagePromotionEvidence{QualificationRef: strings.TrimSpace(*qualificationRef)},
+			Evidence:           evidence,
 			IdempotencyKey:     strings.TrimSpace(*idempotencyKey),
 			WorkflowRunID:      strings.TrimSpace(*workflowRunID),
 			WorkflowRunAttempt: strings.TrimSpace(*workflowRunAttempt),
@@ -148,7 +154,8 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 		fmt.Fprintf(a.Stdout, "%s image=%s state=%s region=%s revision=%s\n", operation, result.Image.ID, result.Image.State, blank(result.Image.Region, "-"), blank(result.Image.Revision, "-"))
 		return nil
 	}
-	if strings.TrimSpace(*qualificationRef) != "" || flagWasSet(fs, "expected-current-revision") ||
+	if strings.TrimSpace(*qualificationRef) != "" || strings.TrimSpace(*promotionEvidence) != "" ||
+		flagWasSet(fs, "expected-current-revision") ||
 		flagWasSet(fs, "idempotency-key") || flagWasSet(fs, "workflow-run-id") ||
 		flagWasSet(fs, "workflow-run-attempt") || *rollback {
 		return exit(2, "protected promotion flags require --expected-current-image")
@@ -252,6 +259,39 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintln(a.Stdout)
 	return nil
+}
+
+func loadImagePromotionEvidence(file, qualificationRef string) (json.RawMessage, error) {
+	if strings.TrimSpace(file) == "" {
+		return nil, exit(2, "--promotion-evidence is required with --expected-current-image")
+	}
+	info, err := os.Stat(file)
+	if err != nil {
+		return nil, exit(2, "read promotion evidence: %v", err)
+	}
+	if !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > 1024*1024 {
+		return nil, exit(2, "promotion evidence must be a non-empty regular file no larger than 1 MiB")
+	}
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return nil, exit(2, "read promotion evidence: %v", err)
+	}
+	var record struct {
+		Schema        string `json:"schema"`
+		Qualification struct {
+			Reference string `json:"reference"`
+		} `json:"qualification"`
+	}
+	if err := json.Unmarshal(data, &record); err != nil {
+		return nil, exit(2, "promotion evidence is not valid JSON: %v", err)
+	}
+	if record.Schema != "crabbox-image-promotion-evidence/v1" {
+		return nil, exit(2, "unsupported promotion evidence schema")
+	}
+	if record.Qualification.Reference != qualificationRef {
+		return nil, exit(2, "promotion evidence qualification reference does not match --qualification-ref")
+	}
+	return json.RawMessage(data), nil
 }
 
 func (a App) imageFSRStatus(ctx context.Context, args []string) error {
