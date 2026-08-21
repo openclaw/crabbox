@@ -93,13 +93,9 @@ func readReadyPoolReadinessEvidence(ctx context.Context, target SSHTarget) (Coor
 	if target.TargetOS != targetLinux {
 		return CoordinatorReadyPoolReadinessEvidence{}, exit(2, "typed ready pools currently require a native Linux target")
 	}
-	command := "test -f " + shellQuote(linuxReadinessManifestPath) +
-		" && test ! -L " + shellQuote(linuxReadinessManifestPath) +
-		" && test \"$(stat -c '%u:%a' " + shellQuote(linuxReadinessManifestPath) + " 2>/dev/null)\" = '0:644'" +
-		" && cat -- " + shellQuote(linuxReadinessManifestPath)
-	out, err := runSSHOutput(ctx, target, command)
+	out, err := runSSHOutput(ctx, target, linuxReadinessEvidenceCommand)
 	if err != nil {
-		return CoordinatorReadyPoolReadinessEvidence{}, exit(7, "read fresh Linux readiness manifest: %v", err)
+		return CoordinatorReadyPoolReadinessEvidence{}, exit(7, "verify fresh Linux readiness evidence: %v", err)
 	}
 	var evidence CoordinatorReadyPoolReadinessEvidence
 	decoder := json.NewDecoder(strings.NewReader(out))

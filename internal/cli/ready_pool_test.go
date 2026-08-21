@@ -150,6 +150,28 @@ func TestReadyPoolIdentityIsExactAndSeedBound(t *testing.T) {
 	}
 }
 
+func TestReadyPoolReadinessRejectsChangedRuntimeInventory(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	identity := CoordinatorReadyPoolIdentityV1{
+		Profile:         "linux-builder",
+		RecipeDigest:    digest,
+		InventoryDigest: digest,
+	}
+	evidence := CoordinatorReadyPoolReadinessEvidence{
+		Schema:          linuxReadinessSchemaV1,
+		Profile:         identity.Profile,
+		RecipeDigest:    identity.RecipeDigest,
+		InventoryDigest: identity.InventoryDigest,
+	}
+	if err := validateReadyPoolReadinessIdentity(identity, evidence); err != nil {
+		t.Fatalf("matching fresh runtime inventory rejected: %v", err)
+	}
+	evidence.InventoryDigest = "sha256:" + strings.Repeat("b", 64)
+	if err := validateReadyPoolReadinessIdentity(identity, evidence); err == nil {
+		t.Fatal("replaced runtime inventory retained the typed ready-pool identity")
+	}
+}
+
 func TestReadyPoolSeedDigestGoldenVectors(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
