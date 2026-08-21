@@ -120,7 +120,7 @@ case "$1" in
       sleep "$FAKE_RAW_VALIDATE_SLEEP"
     fi
     if [[ -n "\${FAKE_RAW_NOISY_PID_FILE:-}" ]]; then
-      yes noisy-output &
+      { sleep 0.2; exec yes noisy-output; } &
       printf '%s' "$!" >"$FAKE_RAW_NOISY_PID_FILE"
       wait
     fi
