@@ -48,11 +48,44 @@ type sshWorkspaceOwnerTransport struct {
 func (t sshWorkspaceOwnerTransport) Do(ctx context.Context, req workspaceOwnerRemoteRequest) (string, error) {
 	ctx = contextWithoutWorkspaceOwner(ctx)
 	if !isWindowsNativeTarget(t.target) {
-		out, err := runSSHCombinedOutput(ctx, t.target, remoteWorkspaceOwnerCommand(t.target, req))
-		return strings.TrimSpace(out), err
+		return runWorkspaceOwnerSSHProtocol(ctx, t.target, remoteWorkspaceOwnerCommand(t.target, req), nil)
 	}
 	script := remoteWorkspaceOwnerWindows(req)
-	return runSSHInputCombinedOutput(ctx, t.target, windowsPowerShellStdinScriptCommand(len([]byte(script))), strings.NewReader(script))
+	return runWorkspaceOwnerSSHProtocol(ctx, t.target, windowsPowerShellStdinScriptCommand(len([]byte(script))), &script)
+}
+
+func runWorkspaceOwnerSSHProtocol(ctx context.Context, target SSHTarget, remote string, input *string) (string, error) {
+	remote = wrapRemoteForTarget(target, remote)
+	var lastOutput string
+	var lastErr error
+	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
+		probe := target
+		probe.Port = port
+		probe.FallbackPorts = []string{}
+		args := sshArgsNoInput(probe, remote)
+		if input != nil {
+			args = sshArgs(probe, remote)
+		}
+		cmd := sshCommandContext(ctx, probe, args...)
+		if input != nil {
+			cmd.Stdin = strings.NewReader(*input)
+		}
+		var stdout, stderr synchronizedBuffer
+		err := runSSHCommand(cmd, &stdout, &stderr)
+		output := strings.TrimSpace(stdout.String())
+		if err == nil {
+			return output, nil
+		}
+		detail := trimFailureDetail(RedactDiagnosticSecrets(stderr.String()))
+		if detail != "" {
+			err = fmt.Errorf("%w: %s", err, detail)
+		}
+		lastOutput, lastErr = output, err
+		if !shouldRetrySSHPort(err) {
+			return output, err
+		}
+	}
+	return lastOutput, lastErr
 }
 
 type workspaceOwner struct {
