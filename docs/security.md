@@ -449,7 +449,13 @@ not redact the contents of accepted regular files.
 Inject these as Cloudflare Worker secrets or Node service secrets, never in the
 repo:
 
-- `CRABBOX_ADMIN_TOKEN` — admin and image-lifecycle routes.
+- `CRABBOX_ADMIN_TOKEN` — admin and legacy image-lifecycle routes. It cannot
+  authorize the protected image-promotion route.
+- `CRABBOX_IMAGE_PROMOTION_TOKEN` — dedicated image-default state discovery,
+  protected signed AWS promotion and verification-finalization, and authorized
+  provider-neutral versioned CAS for unprotected defaults (currently Azure).
+  It must be independently generated and must differ from the admin, shared,
+  and runtime-adapter tokens. It does not authorize legacy admin image mutation.
 - `CRABBOX_RUNTIME_ADAPTER_TOKEN` — route-scoped service access to workspace
   lifecycle and desktop-connection APIs only; it cannot attach terminals.
 - `CRABBOX_SHARED_TOKEN` — trusted operator automation only.

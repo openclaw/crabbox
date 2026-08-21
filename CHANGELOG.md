@@ -11,6 +11,7 @@
 - Added protected AWS Linux and Windows image-candidate publication with versioned recipes, destructive-state scrubbing, strict source/architecture/OS proof, immutable OCI evidence bundles, OCI 1.1 keyless signature referrers, and explicit candidate-only smoke proof.
 - Added fail-closed AWS image qualification input consumption that fetches the discovered Sigstore bundle by immutable manifest and layer digests, verifies its keyless workflow identity against the candidate digest, derives recipe identities from regular blobs at the exact source commit using canonical JSON, and checks evidence-file hashes, provenance, SBOM, candidate, signed recipe, and readiness identities before atomically emitting a schema-constrained redacted offline qualification record.
 - Added protected AWS Linux candidate qualification with exact OS-selector-bound typed ready-pool negative and positive gates, clean and dirty Git-overlay transfer proof, capability-aware cache evidence, cleanup-before-receipt enforcement, and immutable OCI 1.1 Sigstore-signed qualification receipts.
+- Added protected AWS Linux image-default promotion with versioned compare-and-swap revisions, actual AMI owner and snapshot verification, reclaimable durable idempotent promotion and rollback attempts including failed post-mutation probes, bounded pending recovery through a minimal protected client, fresh non-pool selection proof, signed OCI receipts, read-only version discovery, and promotion-token-scoped provider-neutral CAS for unprotected defaults, currently Azure.
 
 ### Fixed
 

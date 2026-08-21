@@ -700,7 +700,8 @@ DAYTONA_CRABBOX_KEY / CRABBOX_DAYTONA_* (Daytona)
 
 # Auth
 CRABBOX_SHARED_TOKEN, CRABBOX_SHARED_OWNER
-CRABBOX_ADMIN_TOKEN                       # admin routes + image promotion
+CRABBOX_ADMIN_TOKEN                       # admin routes + legacy unprotected image promotion
+CRABBOX_IMAGE_PROMOTION_TOKEN             # AWS protected signed promotion + authorized unprotected provider-neutral CAS (currently Azure); distinct from every other bearer token
 CRABBOX_GITHUB_CLIENT_ID, CRABBOX_GITHUB_CLIENT_SECRET
 CRABBOX_GITHUB_ALLOWED_ORG[S], CRABBOX_GITHUB_ALLOWED_TEAMS (optional)
 CRABBOX_GITHUB_REVOKED_USERS, CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS (optional)
