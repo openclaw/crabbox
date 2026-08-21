@@ -1,0 +1,378 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:crabbox:schema:aws-image-promotion-receipt:v1",
+  "title": "AWSImagePromotionReceiptV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "createdAt",
+    "attemptDigest",
+    "idempotencyKey",
+    "operation",
+    "outcome",
+    "scope",
+    "expected",
+    "before",
+    "desired",
+    "evidence",
+    "workflow",
+    "mutation"
+  ],
+  "properties": {
+    "schema": {
+      "const": "crabbox-aws-image-promotion-receipt/v1"
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "attemptDigest": {
+      "$ref": "#/$defs/digest"
+    },
+    "idempotencyKey": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+    },
+    "operation": {
+      "enum": ["promote", "rollback"]
+    },
+    "outcome": {
+      "enum": [
+        "evidence_rejected",
+        "precondition_failed",
+        "promoted_verified",
+        "verification_failed",
+        "rolled_back",
+        "rollback_precondition_failed",
+        "outcome_unknown"
+      ]
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "target",
+        "region",
+        "instanceType",
+        "architecture",
+        "os",
+        "profile",
+        "recipeDigest"
+      ],
+      "properties": {
+        "provider": {
+          "const": "aws"
+        },
+        "target": {
+          "const": "linux"
+        },
+        "region": {
+          "type": "string",
+          "pattern": "^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$"
+        },
+        "instanceType": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9.-]+$"
+        },
+        "architecture": {
+          "enum": ["x86_64", "arm64"]
+        },
+        "os": {
+          "enum": ["ubuntu:26.04", "ubuntu:24.04"]
+        },
+        "profile": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "recipeDigest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "expected": {
+      "$ref": "#/$defs/defaultState"
+    },
+    "before": {
+      "$ref": "#/$defs/defaultState"
+    },
+    "after": {
+      "$ref": "#/$defs/defaultState"
+    },
+    "desired": {
+      "$ref": "#/$defs/desired"
+    },
+    "rollbackTarget": {
+      "$ref": "#/$defs/desired"
+    },
+    "evidence": {
+      "$ref": "#/$defs/evidence"
+    },
+    "workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runId", "runAttempt"],
+      "properties": {
+        "runId": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$"
+        },
+        "runAttempt": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$"
+        }
+      }
+    },
+    "mutation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "applied"],
+      "properties": {
+        "status": {
+          "enum": ["pending", "succeeded", "rejected", "unknown"]
+        },
+        "applied": {
+          "type": "boolean"
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z0-9_]{1,64}$"
+        }
+      }
+    },
+    "verification": {
+      "$ref": "#/$defs/verification"
+    },
+    "cleanup": {
+      "$ref": "#/$defs/cleanup"
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "outcome": { "enum": ["promoted_verified", "rolled_back"] } } },
+      "then": {
+        "required": ["after", "verification", "cleanup"],
+        "properties": {
+          "mutation": {
+            "properties": { "status": { "const": "succeeded" }, "applied": { "const": true } }
+          },
+          "verification": { "properties": { "status": { "const": "passed" } } },
+          "cleanup": { "properties": { "status": { "const": "passed" } } }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "verification_failed" } } },
+      "then": {
+        "required": ["after", "verification", "cleanup"],
+        "properties": {
+          "mutation": {
+            "properties": { "status": { "const": "succeeded" }, "applied": { "const": true } }
+          },
+          "verification": { "properties": { "status": { "const": "failed" } } }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "enum": ["evidence_rejected", "precondition_failed", "rollback_precondition_failed"]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "mutation": {
+            "properties": { "status": { "const": "rejected" }, "applied": { "const": false } }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "outcome_unknown" } } },
+      "then": {
+        "required": ["after"],
+        "properties": {
+          "mutation": {
+            "properties": { "status": { "const": "unknown" }, "applied": { "const": false } }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "defaultState": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state"],
+          "properties": {
+            "state": {
+              "const": "absent"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "imageId", "revision"],
+          "properties": {
+            "state": {
+              "const": "present"
+            },
+            "imageId": {
+              "type": "string",
+              "pattern": "^ami-[0-9a-z]+$"
+            },
+            "revision": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        }
+      ]
+    },
+    "desired": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state"],
+          "properties": { "state": { "const": "absent" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "imageId", "accountId", "snapshotIds"],
+          "properties": {
+            "state": { "const": "present" },
+            "imageId": {
+              "type": "string",
+              "pattern": "^ami-[0-9a-z]+$"
+            },
+            "accountId": {
+              "type": "string",
+              "pattern": "^[0-9]{12}$"
+            },
+            "snapshotIds": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^snap-[0-9a-z]+$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "qualification", "candidate", "source", "workflow", "scope", "desired"],
+      "properties": {
+        "schema": { "const": "crabbox-image-promotion-evidence/v1" },
+        "qualification": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["reference", "digest", "receiptDigest", "inputDigest", "signatureDigest"],
+          "properties": {
+            "reference": { "type": "string" },
+            "digest": { "$ref": "#/$defs/digest" },
+            "receiptDigest": { "$ref": "#/$defs/digest" },
+            "inputDigest": { "$ref": "#/$defs/digest" },
+            "signatureDigest": { "$ref": "#/$defs/digest" }
+          }
+        },
+        "candidate": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["reference", "digest", "recordDigest"],
+          "properties": {
+            "reference": { "type": "string" },
+            "digest": { "$ref": "#/$defs/digest" },
+            "recordDigest": { "$ref": "#/$defs/digest" }
+          }
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repository", "commit"],
+          "properties": {
+            "repository": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+            "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+          }
+        },
+        "workflow": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["identity", "runId", "runAttempt"],
+          "properties": {
+            "identity": { "type": "string" },
+            "runId": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+            "runAttempt": { "type": "string", "pattern": "^[1-9][0-9]*$" }
+          }
+        },
+        "scope": { "$ref": "#/properties/scope" },
+        "desired": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["imageId", "accountId", "snapshotIds"],
+          "properties": {
+            "imageId": { "type": "string", "pattern": "^ami-[0-9a-z]+$" },
+            "accountId": { "type": "string", "pattern": "^[0-9]{12}$" },
+            "snapshotIds": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "type": "string", "pattern": "^snap-[0-9a-z]+$" }
+            }
+          }
+        }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "codes"],
+      "properties": {
+        "status": { "enum": ["passed", "failed"] },
+        "codes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z0-9_]{1,64}$" }
+        },
+        "image": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "provider", "source", "region", "revision"],
+          "properties": {
+            "id": { "type": "string", "pattern": "^ami-[0-9a-z]+$" },
+            "provider": { "const": "aws" },
+            "source": { "const": "promoted" },
+            "region": { "type": "string" },
+            "revision": { "type": "string", "minLength": 1, "maxLength": 128 }
+          }
+        }
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": { "enum": ["passed", "failed"] },
+        "code": { "type": "string", "pattern": "^[a-z0-9_]{1,64}$" }
+      }
+    }
+  }
+}

@@ -843,6 +843,66 @@ describe("coordinator auth", () => {
     expect(accepted).toMatchObject({ authenticated: true });
   });
 
+  it("accepts only a distinct promotion token on protected image routes", async () => {
+    const env = {
+      CRABBOX_IMAGE_PROMOTION_TOKEN: "promoter",
+      CRABBOX_ADMIN_TOKEN: "admin",
+      CRABBOX_SHARED_TOKEN: "shared",
+    } as Env;
+    const rejectedRequests = await Promise.all(
+      ["admin", "shared", "wrong"].map((token) =>
+        prepareCoordinatorRequest(
+          new Request("https://example.test/v1/image-promotions", {
+            method: "POST",
+            headers: { authorization: `Bearer ${token}` },
+          }),
+          env,
+        ),
+      ),
+    );
+    for (const rejected of rejectedRequests) {
+      expect(rejected).toMatchObject({ authenticated: false, response: { status: 401 } });
+    }
+    const spoofed = await prepareCoordinatorRequest(
+      new Request("https://example.test/v1/image-promotions", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer admin",
+          "x-crabbox-image-promoter": "true",
+        },
+      }),
+      env,
+    );
+    expect(spoofed).toMatchObject({ authenticated: false, response: { status: 401 } });
+    const accepted = await prepareCoordinatorRequest(
+      new Request("https://example.test/v1/image-promotions", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer promoter",
+          "x-crabbox-admin": "true",
+          "x-crabbox-owner": "attacker@example.com",
+        },
+      }),
+      env,
+    );
+    if ("response" in accepted) throw new Error("promotion request was rejected");
+    expect(accepted.request.headers.get("x-crabbox-image-promoter")).toBe("true");
+    expect(accepted.request.headers.get("x-crabbox-admin")).toBe("false");
+    expect(accepted.request.headers.get("x-crabbox-owner")).toBe("image-promoter");
+
+    const aliased = await prepareCoordinatorRequest(
+      new Request("https://example.test/v1/image-promotions", {
+        method: "POST",
+        headers: { authorization: "Bearer duplicate" },
+      }),
+      {
+        CRABBOX_IMAGE_PROMOTION_TOKEN: "duplicate",
+        CRABBOX_ADMIN_TOKEN: "duplicate",
+      } as Env,
+    );
+    expect(aliased).toMatchObject({ authenticated: false, response: { status: 503 } });
+  });
+
   it("keeps shared bearer token non-admin and ignores caller-supplied identity headers", async () => {
     const env = {
       CRABBOX_SHARED_TOKEN: "shared",

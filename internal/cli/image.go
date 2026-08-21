@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -151,7 +152,7 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 		if *jsonOut {
 			return json.NewEncoder(a.Stdout).Encode(result)
 		}
-		fmt.Fprintf(a.Stdout, "%s image=%s state=%s region=%s revision=%s\n", operation, result.Image.ID, result.Image.State, blank(result.Image.Region, "-"), blank(result.Image.Revision, "-"))
+		fmt.Fprintf(a.Stdout, "%s phase=%s outcome=%s image=%s state=%s region=%s revision=%s\n", operation, result.Attempt.Phase, blank(result.Attempt.Outcome, "-"), blank(result.Image.ID, "none"), blank(result.Image.State, "-"), blank(result.Image.Region, "-"), blank(result.Image.Revision, "-"))
 		return nil
 	}
 	if strings.TrimSpace(*qualificationRef) != "" || strings.TrimSpace(*promotionEvidence) != "" ||
@@ -258,6 +259,101 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 		fmt.Fprint(a.Stdout, " catalogOnly=true")
 	}
 	fmt.Fprintln(a.Stdout)
+	return nil
+}
+
+func imageDefaultScopeFlags(fs *flag.FlagSet) (*string, *string, *string, *string, *string, *string) {
+	provider := fs.String("provider", "azure", "image provider: aws or azure")
+	target := fs.String("target", "linux", "image target: linux, macos, or windows")
+	osImage := fs.String("os", defaultOSImage, "portable Linux OS selector")
+	region := fs.String("region", "", "provider region or Azure location")
+	architecture := fs.String("architecture", "", "provider image architecture")
+	serverType := fs.String("type", "", "provider instance type or Azure VM size")
+	return provider, target, osImage, region, architecture, serverType
+}
+
+func coordinatorImageDefaultScope(
+	provider, target, osImage, region, architecture, serverType string,
+) (CoordinatorImageDefaultScope, error) {
+	provider = normalizeProviderName(provider)
+	if provider != "aws" && provider != "azure" {
+		return CoordinatorImageDefaultScope{}, exit(2, "--provider must be aws or azure")
+	}
+	if region == "" || architecture == "" || serverType == "" {
+		return CoordinatorImageDefaultScope{}, exit(2, "--region, --architecture, and --type are required")
+	}
+	return CoordinatorImageDefaultScope{
+		Provider: provider, Target: target, OSImage: osImage, Region: region,
+		Architecture: architecture, ServerType: serverType,
+	}, nil
+}
+
+func (a App) imageDefaultState(ctx context.Context, args []string) error {
+	fs := newFlagSet("image default-state", a.Stderr)
+	provider, target, osImage, region, architecture, serverType := imageDefaultScopeFlags(fs)
+	jsonOut := fs.Bool("json", false, "print JSON")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	scope, err := coordinatorImageDefaultScope(*provider, *target, *osImage, *region, *architecture, *serverType)
+	if err != nil {
+		return err
+	}
+	coord, err := configuredPromotionCoordinator()
+	if err != nil {
+		return err
+	}
+	current, err := coord.ImageDefaultState(ctx, scope)
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		return json.NewEncoder(a.Stdout).Encode(current)
+	}
+	fmt.Fprintf(a.Stdout, "state=%s image=%s revision=%s\n", current.State.State, blank(current.State.ImageID, "none"), blank(current.State.Revision, "-"))
+	return nil
+}
+
+func (a App) imageCAS(ctx context.Context, args []string) error {
+	fs := newFlagSet("image cas", a.Stderr)
+	provider, target, osImage, region, architecture, serverType := imageDefaultScopeFlags(fs)
+	expectedImage := fs.String("expected-current-image", "", "expected current image id, or none")
+	expectedRevision := fs.String("expected-current-revision", "", "expected current default revision")
+	jsonOut := fs.Bool("json", false, "print JSON")
+	if err := parseInterspersedFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return exit(2, "usage: crabbox image cas <image-id> --provider azure --region <location> --architecture <arch> --type <vm-size> --expected-current-image <id|none> [--expected-current-revision <revision>]")
+	}
+	scope, err := coordinatorImageDefaultScope(*provider, *target, *osImage, *region, *architecture, *serverType)
+	if err != nil {
+		return err
+	}
+	if scope.Provider != "azure" {
+		return exit(2, "image cas currently supports unprotected Azure defaults only; signed protected promotion remains AWS-only")
+	}
+	expected := CoordinatorImageDefaultState{State: "absent"}
+	if *expectedImage != "none" {
+		if *expectedImage == "" || *expectedRevision == "" {
+			return exit(2, "present expected state requires --expected-current-image and --expected-current-revision")
+		}
+		expected = CoordinatorImageDefaultState{State: "present", ImageID: *expectedImage, Revision: *expectedRevision}
+	} else if *expectedRevision != "" {
+		return exit(2, "--expected-current-revision is invalid with --expected-current-image=none")
+	}
+	coord, err := configuredPromotionCoordinator()
+	if err != nil {
+		return err
+	}
+	image, err := coord.CASImageDefault(ctx, fs.Arg(0), scope, expected)
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		return json.NewEncoder(a.Stdout).Encode(image)
+	}
+	fmt.Fprintf(a.Stdout, "promoted image=%s region=%s revision=%s\n", image.ID, image.Region, image.Revision)
 	return nil
 }
 

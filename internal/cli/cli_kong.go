@@ -406,15 +406,23 @@ type cacheVolumesKongCmd struct {
 }
 
 type imageKongCmd struct {
-	Create    imageCreateKongCmd    `cmd:"" passthrough:"" help:"Create a provider image from a brokered lease."`
-	Promote   imagePromoteKongCmd   `cmd:"" passthrough:"" help:"Promote an AMI for brokered AWS runners."`
-	FSRStatus imageFSRStatusKongCmd `cmd:"" name:"fsr-status" passthrough:"" help:"Show AWS Fast Snapshot Restore status for an image."`
-	Delete    imageDeleteKongCmd    `cmd:"" passthrough:"" help:"Delete a provider image."`
+	Create       imageCreateKongCmd       `cmd:"" passthrough:"" help:"Create a provider image from a brokered lease."`
+	Promote      imagePromoteKongCmd      `cmd:"" passthrough:"" help:"Promote an AMI for brokered AWS runners."`
+	DefaultState imageDefaultStateKongCmd `cmd:"" name:"default-state" passthrough:"" help:"Show a versioned provider image default."`
+	CAS          imageCASKongCmd          `cmd:"" name:"cas" passthrough:"" help:"Compare and swap an unprotected provider image default."`
+	FSRStatus    imageFSRStatusKongCmd    `cmd:"" name:"fsr-status" passthrough:"" help:"Show AWS Fast Snapshot Restore status for an image."`
+	Delete       imageDeleteKongCmd       `cmd:"" passthrough:"" help:"Delete a provider image."`
 }
 type imageCreateKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type imagePromoteKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type imageDefaultStateKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type imageCASKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type imageFSRStatusKongCmd struct {
@@ -782,6 +790,12 @@ func (c *imageCreateKongCmd) Run(ctx context.Context, app App) error {
 }
 func (c *imagePromoteKongCmd) Run(ctx context.Context, app App) error {
 	return app.imagePromote(ctx, c.Args)
+}
+func (c *imageDefaultStateKongCmd) Run(ctx context.Context, app App) error {
+	return app.imageDefaultState(ctx, c.Args)
+}
+func (c *imageCASKongCmd) Run(ctx context.Context, app App) error {
+	return app.imageCAS(ctx, c.Args)
 }
 func (c *imageFSRStatusKongCmd) Run(ctx context.Context, app App) error {
 	return app.imageFSRStatus(ctx, c.Args)

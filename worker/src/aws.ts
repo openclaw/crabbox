@@ -1410,6 +1410,7 @@ export class EC2SpotClient {
       kind: "aws-ami",
       region: this.region,
       resourceID: id,
+      ownerId: asString(image["imageOwnerId"] ?? image["ownerId"]),
       architecture: asString(image["architecture"]),
       snapshots: imageSnapshotIDs(image),
     };

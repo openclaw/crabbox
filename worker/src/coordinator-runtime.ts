@@ -77,6 +77,9 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
   if (path[0] === "v1" && path[1] === "ready-pools") {
     return "direct";
   }
+  if (path[0] === "v1" && path[1] === "image-promotions") {
+    return "lifecycle";
+  }
   if (
     path[0] === "v1" &&
     path[1] === "images" &&

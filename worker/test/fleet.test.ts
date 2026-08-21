@@ -32265,8 +32265,8 @@ describe("fleet lease identity and idle", () => {
   });
 });
 
-describe("image promotion CAS", () => {
-  const awsImage = (id: string): ProviderImage => ({
+function imagePromotionAWSImage(id: string): ProviderImage {
+  return {
     id,
     name: id,
     state: "available",
@@ -32276,58 +32276,282 @@ describe("image promotion CAS", () => {
     os: "ubuntu:26.04",
     region: "eu-west-1",
     architecture: "x86_64",
+    ownerId: "123456789012",
     snapshots: [`snap-${id.slice(4)}`],
+  };
+}
+
+async function promoteAWSForTest(
+  provider: AWSProvider,
+  imageID: string,
+  expectedCurrent?: Record<string, string>,
+): Promise<Response | { image: ProviderImage }> {
+  const url = new URL(
+    `https://crabbox.test/v1/images/${imageID}/promote?provider=aws&target=linux&os=ubuntu%3A26.04&region=eu-west-1`,
+  );
+  return provider.promoteImage(
+    imageID,
+    undefined,
+    new Request(url, {
+      method: "POST",
+      body: JSON.stringify(expectedCurrent ? { expectedCurrent } : {}),
+    }),
+    url,
+    expectedCurrent ? { mode: "versioned" } : undefined,
+  );
+}
+
+function promoteAWSInRegionForTest(
+  provider: AWSProvider,
+  imageID: string,
+  region: string,
+): Promise<Response | { image: ProviderImage }> {
+  const url = new URL(
+    `https://crabbox.test/v1/images/${imageID}/promote?provider=aws&target=linux&os=ubuntu%3A26.04&region=${region}`,
+  );
+  return provider.promoteImage(
+    imageID,
+    undefined,
+    new Request(url, {
+      method: "POST",
+      body: JSON.stringify({ expectedCurrent: { state: "absent" } }),
+    }),
+    url,
+    { mode: "versioned" },
+  );
+}
+
+function azurePromotionSnapshot(id: string): ProviderImage {
+  return {
+    id,
+    name: id,
+    state: "succeeded",
+    provider: "azure",
+    kind: "azure-os-disk-snapshot",
+    resourceID: `/subscriptions/test/resourceGroups/crabbox/providers/Microsoft.Compute/snapshots/${id}`,
+    target: "linux",
+    os: "ubuntu:26.04",
+    region: "westeurope",
+    architecture: "amd64",
+    serverType: "Standard_D192ds_v6",
+  };
+}
+
+function protectedPromotionEvidence(imageID = "ami-b") {
+  const digest = `sha256:${"a".repeat(64)}`;
+  return {
+    schema: "crabbox-image-promotion-evidence/v1",
+    qualification: {
+      reference: `ghcr.io/example-org/crabbox-qualification@${digest}`,
+      digest,
+      receiptDigest: digest,
+      inputDigest: digest,
+      signatureDigest: digest,
+    },
+    candidate: {
+      reference: `ghcr.io/example-org/crabbox-candidate@${digest}`,
+      digest,
+      recordDigest: digest,
+    },
+    source: { repository: "example-org/crabbox", commit: "b".repeat(40) },
+    workflow: {
+      identity: "example-org/crabbox/.github/workflows/devtools-image-qualify.yml@refs/heads/main",
+      runId: "100",
+      runAttempt: "1",
+    },
+    scope: {
+      provider: "aws",
+      target: "linux",
+      region: "eu-west-1",
+      instanceType: "c7i.4xlarge",
+      architecture: "x86_64",
+      os: "ubuntu:26.04",
+      profile: "default",
+      recipeDigest: digest,
+    },
+    desired: {
+      imageId: imageID,
+      accountId: "123456789012",
+      snapshotIds: [`snap-${imageID.slice(4)}`],
+    },
+  };
+}
+
+function protectedPromotionRequest(
+  idempotencyKey: string,
+  expected: Record<string, string>,
+  options: { operation?: "promote" | "rollback"; imageID?: string; runAttempt?: string } = {},
+): Request {
+  return request("POST", "/v1/image-promotions", {
+    headers: { "x-crabbox-image-promoter": "true" },
+    body: {
+      schema: "crabbox-image-promotion-request/v1",
+      operation: options.operation ?? "promote",
+      expected,
+      evidence: protectedPromotionEvidence(options.imageID),
+      idempotencyKey,
+      workflowRunId: "200",
+      workflowRunAttempt: options.runAttempt ?? "1",
+    },
+  });
+}
+
+function promotionRecoveryRequest(idempotencyKey: string): Request {
+  return request("POST", `/v1/image-promotions/${idempotencyKey}/recover`, {
+    headers: { "x-crabbox-image-promoter": "true" },
+  });
+}
+
+function claimedPromotionAttempt(
+  attempt: Record<string, unknown>,
+  phase: "mutating" | "verifying",
+  options: {
+    active?: boolean;
+    plannedAfter?: Record<string, unknown>;
+    pendingVerification?: Record<string, unknown>;
+  } = {},
+): Record<string, unknown> {
+  const claimVersion = Number(attempt.claimVersion ?? 0) + 1;
+  return {
+    ...attempt,
+    phase,
+    version: Number(attempt.version ?? 0) + 1,
+    claimVersion,
+    claim: {
+      id: `${phase}-claim-${claimVersion}`,
+      version: claimVersion,
+      claimedAt: "2026-08-21T00:00:00.000Z",
+      expiresAt: options.active ? "2099-08-21T00:00:00.000Z" : "2026-08-21T00:00:01.000Z",
+    },
+    ...(options.plannedAfter ? { plannedAfter: options.plannedAfter } : {}),
+    ...(options.pendingVerification ? { pendingVerification: options.pendingVerification } : {}),
+    mutation: phase === "mutating" ? { status: "pending", applied: false } : attempt.mutation,
+    updatedAt: "2026-08-21T00:00:00.000Z",
+  };
+}
+
+describe("image promotion CAS", () => {
+  it("rejects protected promotion fields on the legacy admin route before provider lookup", async () => {
+    const storage = new MemoryStorage();
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    const getImage = vi.spyOn(provider, "getImage");
+    const fleet = testFleet(storage, { aws: provider });
+
+    const responses = await Promise.all(
+      [
+        { expectedCurrent: { state: "absent" } },
+        { expectedCurrentRevision: "revision-a" },
+        { expected: { state: "absent" }, scope: { provider: "aws", target: "linux" } },
+        {
+          evidence: protectedPromotionEvidence(),
+          idempotencyKey: "legacy-bypass",
+          protectedScope: { provider: "aws", target: "linux" },
+        },
+      ].map((body) =>
+        fleet.fetch(
+          request("POST", "/v1/images/ami-b/promote?provider=aws", {
+            headers: { "x-crabbox-admin": "true" },
+            body,
+          }),
+        ),
+      ),
+    );
+    await Promise.all(
+      responses.map(async (response) => {
+        expect(response.status).toBe(400);
+        await expect(response.json()).resolves.toMatchObject({
+          error: "protected_image_promotion_fields_forbidden",
+        });
+      }),
+    );
+    expect(getImage).not.toHaveBeenCalled();
+    await expect(storage.list({ prefix: "image:aws:promoted:" })).resolves.toHaveLength(0);
   });
 
-  const promoteAWS = async (
-    provider: AWSProvider,
-    imageID: string,
-    expectedCurrent?: Record<string, string>,
-  ): Promise<Response | { image: ProviderImage }> => {
-    const url = new URL(
-      `https://crabbox.test/v1/images/${imageID}/promote?provider=aws&target=linux&os=ubuntu%3A26.04&region=eu-west-1`,
+  it("rejects legacy update and delete for a protected slot before provider side effects", async () => {
+    const storage = new MemoryStorage();
+    const protectedImage = {
+      ...imagePromotionAWSImage("ami-protected"),
+      serverType: "c7i.4xlarge",
+      promotedAt: "2026-08-21T00:00:00.000Z",
+      revision: "protected-revision",
+      protected: true,
+    } satisfies PromotedImageRecord;
+    storage.seed("image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1", protectedImage);
+    storage.seed("image:aws:created:ami-protected", protectedImage);
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    const getImage = vi.spyOn(provider, "getImage");
+    const enableFSR = vi.spyOn(provider, "enableFastSnapshotRestore");
+    const deleteImage = vi.spyOn(provider, "deleteImage").mockResolvedValue();
+    const fleet = testFleet(storage, { aws: provider });
+
+    const update = await fleet.fetch(
+      request(
+        "POST",
+        "/v1/images/ami-next/promote?provider=aws&target=linux&os=ubuntu%3A26.04&region=eu-west-1&architecture=x86_64&serverType=c7i.4xlarge",
+        { headers: { "x-crabbox-admin": "true" }, body: {} },
+      ),
     );
-    return provider.promoteImage(
-      imageID,
-      undefined,
-      new Request(url, {
-        method: "POST",
-        body: JSON.stringify(expectedCurrent ? { expectedCurrent } : {}),
+    expect(update.status).toBe(409);
+    await expect(update.json()).resolves.toMatchObject({ error: "protected_image_default" });
+    expect(getImage).not.toHaveBeenCalled();
+
+    const mismatchedType = await fleet.fetch(
+      request(
+        "POST",
+        "/v1/images/ami-next/promote?provider=aws&target=linux&os=ubuntu%3A26.04&region=eu-west-1&architecture=x86_64&serverType=m7i.4xlarge&fastSnapshotRestore=true&fsrAz=eu-west-1a",
+        { headers: { "x-crabbox-admin": "true" }, body: {} },
+      ),
+    );
+    expect(mismatchedType.status).toBe(409);
+    await expect(mismatchedType.json()).resolves.toMatchObject({
+      error: "protected_image_default",
+    });
+    expect(getImage).not.toHaveBeenCalled();
+    expect(enableFSR).not.toHaveBeenCalled();
+
+    const deletion = await fleet.fetch(
+      request("DELETE", "/v1/images/ami-protected?provider=aws&region=eu-west-1", {
+        headers: { "x-crabbox-admin": "true" },
       }),
-      url,
     );
-  };
+    expect(deletion.status).toBe(409);
+    await expect(deletion.json()).resolves.toMatchObject({ error: "protected_image_default" });
+    expect(deleteImage).not.toHaveBeenCalled();
+  });
 
   it("atomically CASes AWS defaults and rejects stale, absent, and ABA expectations", async () => {
     const storage = new MemoryStorage();
     const provider = new AWSProvider({} as Env, "eu-west-1", storage);
-    vi.spyOn(provider, "getImage").mockImplementation(async (imageID) => awsImage(imageID));
+    vi.spyOn(provider, "getImage").mockImplementation(async (imageID) =>
+      imagePromotionAWSImage(imageID),
+    );
 
-    const initial = (await promoteAWS(provider, "ami-a", { state: "absent" })) as {
+    const initial = (await promoteAWSForTest(provider, "ami-a", { state: "absent" })) as {
       image: PromotedImageRecord;
     };
     expect(initial.image.revision).toEqual(expect.any(String));
     const revisionA = initial.image.revision!;
 
-    const staleAbsent = await promoteAWS(provider, "ami-b", { state: "absent" });
+    const staleAbsent = await promoteAWSForTest(provider, "ami-b", { state: "absent" });
     expect(staleAbsent).toBeInstanceOf(Response);
     expect((staleAbsent as Response).status).toBe(409);
 
-    const promotedB = (await promoteAWS(provider, "ami-b", {
+    const promotedB = (await promoteAWSForTest(provider, "ami-b", {
       state: "present",
       imageId: "ami-a",
       revision: revisionA,
     })) as { image: PromotedImageRecord };
     expect(promotedB.image.revision).not.toBe(revisionA);
 
-    const promotedAAgain = (await promoteAWS(provider, "ami-a", {
+    const promotedAAgain = (await promoteAWSForTest(provider, "ami-a", {
       state: "present",
       imageId: "ami-b",
       revision: promotedB.image.revision!,
     })) as { image: PromotedImageRecord };
     expect(promotedAAgain.image.revision).not.toBe(revisionA);
 
-    const aba = await promoteAWS(provider, "ami-c", {
+    const aba = await promoteAWSForTest(provider, "ami-c", {
       state: "present",
       imageId: "ami-a",
       revision: revisionA,
@@ -32344,8 +32568,10 @@ describe("image promotion CAS", () => {
   it("allows exactly one concurrent AWS CAS and updates aliases in one transaction", async () => {
     const storage = new MemoryStorage();
     const provider = new AWSProvider({} as Env, "eu-west-1", storage);
-    vi.spyOn(provider, "getImage").mockImplementation(async (imageID) => awsImage(imageID));
-    const initial = (await promoteAWS(provider, "ami-a", { state: "absent" })) as {
+    vi.spyOn(provider, "getImage").mockImplementation(async (imageID) =>
+      imagePromotionAWSImage(imageID),
+    );
+    const initial = (await promoteAWSForTest(provider, "ami-a", { state: "absent" })) as {
       image: PromotedImageRecord;
     };
     const expected = {
@@ -32355,8 +32581,8 @@ describe("image promotion CAS", () => {
     };
 
     const results = await Promise.all([
-      promoteAWS(provider, "ami-b", expected),
-      promoteAWS(provider, "ami-c", expected),
+      promoteAWSForTest(provider, "ami-b", expected),
+      promoteAWSForTest(provider, "ami-c", expected),
     ]);
     expect(results.filter((result) => !(result instanceof Response))).toHaveLength(1);
     expect(
@@ -32374,8 +32600,10 @@ describe("image promotion CAS", () => {
   it("rolls back all AWS aliases when a transactional write fails", async () => {
     const storage = new MemoryStorage();
     const provider = new AWSProvider({} as Env, "eu-west-1", storage);
-    vi.spyOn(provider, "getImage").mockImplementation(async (imageID) => awsImage(imageID));
-    const initial = (await promoteAWS(provider, "ami-a", { state: "absent" })) as {
+    vi.spyOn(provider, "getImage").mockImplementation(async (imageID) =>
+      imagePromotionAWSImage(imageID),
+    );
+    const initial = (await promoteAWSForTest(provider, "ami-a", { state: "absent" })) as {
       image: PromotedImageRecord;
     };
     const before = storage.value<PromotedImageRecord>(
@@ -32388,7 +32616,7 @@ describe("image promotion CAS", () => {
     };
 
     await expect(
-      promoteAWS(provider, "ami-b", {
+      promoteAWSForTest(provider, "ami-b", {
         state: "present",
         imageId: "ami-a",
         revision: initial.image.revision!,
@@ -32400,22 +32628,36 @@ describe("image promotion CAS", () => {
     ).toBeUndefined();
   });
 
+  it("keeps regional AWS defaults isolated from regionless legacy aliases", async () => {
+    const storage = new MemoryStorage();
+    const west = new AWSProvider({} as Env, "eu-west-1", storage);
+    const east = new AWSProvider({} as Env, "us-east-1", storage);
+    vi.spyOn(west, "getImage").mockResolvedValue(imagePromotionAWSImage("ami-west"));
+    vi.spyOn(east, "getImage").mockResolvedValue({
+      ...imagePromotionAWSImage("ami-east"),
+      region: "us-east-1",
+    });
+    await promoteAWSInRegionForTest(west, "ami-west", "eu-west-1");
+    await promoteAWSInRegionForTest(east, "ami-east", "us-east-1");
+
+    expect(
+      storage.value<PromotedImageRecord>("image:aws:promoted:linux:x86_64:ubuntu26.04"),
+    ).toMatchObject({ id: "ami-west", region: "eu-west-1" });
+    await expect(
+      east.currentImageDefault({
+        provider: "aws",
+        target: "linux",
+        os: "ubuntu:26.04",
+        region: "us-east-1",
+        architecture: "x86_64",
+        serverType: "",
+      }),
+    ).resolves.toMatchObject({ state: "present", imageId: "ami-east" });
+  });
+
   it("CASes Azure defaults transactionally and blocks legacy writes after protection", async () => {
     const storage = new MemoryStorage();
     const provider = new AzureProvider({} as Env, undefined, storage, "westeurope");
-    const snapshot = (id: string): ProviderImage => ({
-      id,
-      name: id,
-      state: "succeeded",
-      provider: "azure",
-      kind: "azure-os-disk-snapshot",
-      resourceID: `/subscriptions/test/resourceGroups/crabbox/providers/Microsoft.Compute/snapshots/${id}`,
-      target: "linux",
-      os: "ubuntu:26.04",
-      region: "westeurope",
-      architecture: "amd64",
-      serverType: "Standard_D192ds_v6",
-    });
     const promote = async (image: ProviderImage, body: Record<string, unknown>) => {
       const url = new URL(
         `https://crabbox.test/v1/images/${image.id}/promote?provider=azure&target=linux&region=westeurope`,
@@ -32425,23 +32667,974 @@ describe("image promotion CAS", () => {
         image,
         new Request(url, { method: "POST", body: JSON.stringify(body) }),
         url,
+        body.expectedCurrent ? { mode: "protected" } : undefined,
       );
     };
 
-    const first = (await promote(snapshot("snapshot-a"), {
+    const first = (await promote(azurePromotionSnapshot("snapshot-a"), {
       expectedCurrent: { state: "absent" },
     })) as { image: PromotedImageRecord };
     expect(first.image.revision).toEqual(expect.any(String));
-    const stale = await promote(snapshot("snapshot-b"), {
+    const stale = await promote(azurePromotionSnapshot("snapshot-b"), {
       expectedCurrent: { state: "present", imageId: "snapshot-a", revision: "stale" },
     });
     expect(stale).toBeInstanceOf(Response);
     expect((stale as Response).status).toBe(409);
 
-    const legacy = await promote(snapshot("snapshot-b"), {});
+    const legacy = await promote(azurePromotionSnapshot("snapshot-b"), {});
     expect(legacy).toBeInstanceOf(Response);
     await expect((legacy as Response).json()).resolves.toMatchObject({
       error: "protected_image_default",
+    });
+
+    const url = new URL(
+      "https://crabbox.test/v1/images/snapshot-b/promote?provider=azure&target=linux&region=westeurope",
+    );
+    const versioned = await provider.promoteImage(
+      "snapshot-b",
+      azurePromotionSnapshot("snapshot-b"),
+      new Request(url, {
+        method: "POST",
+        body: JSON.stringify({
+          expectedCurrent: {
+            state: "present",
+            imageId: "snapshot-a",
+            revision: first.image.revision,
+          },
+        }),
+      }),
+      url,
+      { mode: "versioned" },
+    );
+    expect(versioned).toBeInstanceOf(Response);
+    await expect((versioned as Response).json()).resolves.toMatchObject({
+      error: "protected_image_default",
+    });
+  });
+
+  it("exposes promotion-auth state discovery and unprotected Azure CAS", async () => {
+    const storage = new MemoryStorage();
+    const image = azurePromotionSnapshot("snapshot-supported-cas");
+    storage.seed("image:azure:created:snapshot-supported-cas", image);
+    const azure = new AzureProvider({} as Env, undefined, storage, "westeurope");
+    const fleet = testFleet(storage, { azure });
+    const scope = {
+      target: "linux",
+      os: "ubuntu:26.04",
+      region: "westeurope",
+      architecture: "amd64",
+      serverType: "Standard_D192ds_v6",
+    };
+
+    const promoted = await fleet.fetch(
+      request("POST", "/v1/image-promotions/provider-defaults", {
+        headers: { "x-crabbox-image-promoter": "true" },
+        body: {
+          schema: "crabbox-provider-image-default-cas/v1",
+          provider: "azure",
+          imageId: image.id,
+          scope,
+          expected: { state: "absent" },
+        },
+      }),
+    );
+    expect(promoted.status).toBe(200);
+    const revision = ((await promoted.json()) as { image: PromotedImageRecord }).image.revision;
+
+    const query = new URLSearchParams({ provider: "azure", ...scope });
+    const current = await fleet.fetch(
+      request("GET", `/v1/image-promotions/default-state?${query}`, {
+        headers: { "x-crabbox-image-promoter": "true" },
+      }),
+    );
+    await expect(current.json()).resolves.toMatchObject({
+      provider: "azure",
+      state: { state: "present", imageId: image.id, revision },
+    });
+    const forbidden = await fleet.fetch(
+      request("GET", `/v1/image-promotions/default-state?${query}`),
+    );
+    expect(forbidden.status).toBe(403);
+  });
+});
+
+describe("protected image promotion attempts", () => {
+  it("rejects extra request and evidence fields before reserving an attempt", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const evidence = { ...protectedPromotionEvidence(), authorization: "Bearer secret" };
+    const response = await fleet.fetch(
+      request("POST", "/v1/image-promotions", {
+        headers: { "x-crabbox-image-promoter": "true" },
+        body: {
+          schema: "crabbox-image-promotion-request/v1",
+          operation: "promote",
+          expected: { state: "absent" },
+          evidence,
+          idempotencyKey: "extra-evidence",
+          workflowRunId: "200",
+          workflowRunAttempt: "1",
+        },
+      }),
+    );
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "image_promotion_evidence_rejected",
+    });
+    await expect(storage.list({ prefix: "image-promotion-attempt:" })).resolves.toHaveLength(0);
+  });
+
+  it("claims one same-key mutation and one same-key finalization winner", async () => {
+    const storage = new MemoryStorage();
+    const env = { CRABBOX_AWS_EXPECTED_ACCOUNT_ID: "123456789012" };
+    const provider = new AWSProvider(env as Env, "eu-west-1", storage);
+    const getImage = vi
+      .spyOn(provider, "getImage")
+      .mockImplementation(async (imageID) => imagePromotionAWSImage(imageID));
+    const fleet = testFleet(storage, { aws: provider }, env);
+
+    const mutations = await Promise.all([
+      fleet.fetch(protectedPromotionRequest("concurrent-same-key", { state: "absent" })),
+      fleet.fetch(protectedPromotionRequest("concurrent-same-key", { state: "absent" })),
+    ]);
+    expect(getImage).toHaveBeenCalledTimes(1);
+    expect(mutations.some((response) => response.status === 200)).toBe(true);
+    const stored = storage.value<{
+      after?: { state: string; revision?: string };
+    }>("image-promotion-attempt:concurrent-same-key")!;
+    const lease = testLease({
+      id: "cbx_0000000000c1",
+      provider: "aws",
+      target: "linux",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      os: "ubuntu:26.04",
+      serverType: "c7i.4xlarge",
+      state: "released",
+      image: {
+        id: "ami-b",
+        source: "promoted",
+        provider: "aws",
+        region: "eu-west-1",
+        revision: (stored.after as { revision: string }).revision,
+      },
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const verification = () =>
+      fleet.fetch(
+        request("POST", "/v1/image-promotions/concurrent-same-key/verify", {
+          headers: { "x-crabbox-image-promoter": "true" },
+          body: { schema: "crabbox-image-promotion-verification/v1", leaseId: lease.id },
+        }),
+      );
+    await Promise.all([verification(), verification()]);
+    expect(storage.value("image-promotion-attempt:concurrent-same-key")).toMatchObject({
+      phase: "completed",
+      outcome: "promoted_verified",
+      mutation: { applied: true },
+    });
+  });
+
+  it.each([
+    {
+      name: "mismatched AWS owner",
+      image: { ...imagePromotionAWSImage("ami-b"), ownerId: "999999999999" },
+    },
+    {
+      name: "missing AWS owner",
+      image: { ...imagePromotionAWSImage("ami-b"), ownerId: undefined },
+    },
+    {
+      name: "mismatched backing snapshots",
+      image: { ...imagePromotionAWSImage("ami-b"), snapshots: ["snap-other"] },
+    },
+  ])("rejects $name before mutating the protected default", async ({ image }) => {
+    const storage = new MemoryStorage();
+    const env = { CRABBOX_AWS_EXPECTED_ACCOUNT_ID: "123456789012" };
+    const provider = new AWSProvider(env as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockResolvedValue(image);
+    const fleet = testFleet(storage, { aws: provider }, env);
+
+    const response = await fleet.fetch(
+      protectedPromotionRequest(`binding-${image.ownerId ?? "missing"}-${image.snapshots?.[0]}`, {
+        state: "absent",
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      attempt: {
+        phase: "completed",
+        outcome: "evidence_rejected",
+        mutation: { status: "rejected", code: "image_qualification_binding_failed" },
+      },
+    });
+    await expect(storage.list({ prefix: "image:aws:promoted:" })).resolves.toHaveLength(0);
+  });
+
+  it("fails closed when AWS image metadata is unavailable before mutation", async () => {
+    const storage = new MemoryStorage();
+    const env = { CRABBOX_AWS_EXPECTED_ACCOUNT_ID: "123456789012" };
+    const provider = new AWSProvider(env as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockRejectedValue(new Error("private provider endpoint"));
+    const fleet = testFleet(storage, { aws: provider }, env);
+
+    const response = await fleet.fetch(
+      protectedPromotionRequest("binding-unavailable", { state: "absent" }),
+    );
+
+    expect(response.status).toBe(409);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body).toMatchObject({
+      attempt: {
+        phase: "completed",
+        outcome: "evidence_rejected",
+        mutation: { status: "rejected", code: "image_qualification_binding_failed" },
+      },
+    });
+    expect(JSON.stringify(body)).not.toContain("private provider endpoint");
+    await expect(storage.list({ prefix: "image:aws:promoted:" })).resolves.toHaveLength(0);
+  });
+
+  it("persists before mutation and makes same-key retries idempotent", async () => {
+    const storage = new MemoryStorage();
+    const env = { CRABBOX_AWS_EXPECTED_ACCOUNT_ID: "123456789012" };
+    const provider = new AWSProvider(env as Env, "eu-west-1", storage);
+    const getImage = vi
+      .spyOn(provider, "getImage")
+      .mockImplementation(async (imageID) => imagePromotionAWSImage(imageID));
+    const fleet = testFleet(storage, { aws: provider }, env);
+
+    const first = await fleet.fetch(
+      protectedPromotionRequest("promotion-200-1", { state: "absent" }),
+    );
+    expect(first.status).toBe(200);
+    const firstBody = (await first.json()) as {
+      image: PromotedImageRecord;
+      attempt: { phase: string; before: unknown; after: unknown };
+    };
+    expect(firstBody.attempt).toMatchObject({
+      phase: "awaiting_verification",
+      before: { state: "absent" },
+      after: { state: "present", imageId: "ami-b" },
+    });
+    expect(storage.value("image-promotion-attempt:promotion-200-1")).toBeDefined();
+
+    const retry = await fleet.fetch(
+      protectedPromotionRequest("promotion-200-1", { state: "absent" }),
+    );
+    expect(retry.status).toBe(200);
+    expect(getImage).toHaveBeenCalledTimes(1);
+
+    const mismatch = await fleet.fetch(
+      protectedPromotionRequest("promotion-200-1", { state: "absent" }, { runAttempt: "2" }),
+    );
+    expect(mismatch.status).toBe(200);
+    await expect(mismatch.json()).resolves.toMatchObject({
+      attempt: { idempotencyKey: "promotion-200-1", phase: "awaiting_verification" },
+    });
+
+    const serialized = JSON.stringify(storage.value("image-promotion-attempt:promotion-200-1"));
+    expect(serialized).not.toMatch(/token|endpoint|hostname|leaseId|privatePath|rawError/i);
+  });
+
+  it("reclaims an expired crash-before-mutation claim and safely retries exact before state", async () => {
+    const storage = new MemoryStorage();
+    const env = { CRABBOX_AWS_EXPECTED_ACCOUNT_ID: "123456789012" };
+    const provider = new AWSProvider(env as Env, "eu-west-1", storage);
+    const getImage = vi
+      .spyOn(provider, "getImage")
+      .mockImplementation(async (imageID) => imagePromotionAWSImage(imageID));
+    const fleet = testFleet(storage, { aws: provider }, env);
+    const initial = await fleet.fetch(
+      protectedPromotionRequest("crash-before-mutation-seed", { state: "absent" }),
+    );
+    const initialBody = (await initial.json()) as {
+      attempt: Record<string, unknown>;
+      image: PromotedImageRecord;
+    };
+    const attempt = claimedPromotionAttempt(initialBody.attempt, "mutating", {
+      plannedAfter: {
+        state: "present",
+        imageId: "ami-b",
+        revision: initialBody.image.revision,
+        accountId: "123456789012",
+        snapshotIds: ["snap-b"],
+      },
+    });
+    const recoveredStorage = new MemoryStorage();
+    recoveredStorage.seed("image-promotion-attempt:crash-before-mutation-seed", attempt);
+    const recoveredProvider = new AWSProvider(env as Env, "eu-west-1", recoveredStorage);
+    const recoveredGetImage = vi
+      .spyOn(recoveredProvider, "getImage")
+      .mockImplementation(async (imageID) => imagePromotionAWSImage(imageID));
+    const recoveredFleet = testFleet(recoveredStorage, { aws: recoveredProvider }, env);
+
+    const retry = await recoveredFleet.fetch(
+      promotionRecoveryRequest("crash-before-mutation-seed"),
+    );
+    expect(retry.status).toBe(200);
+    await expect(retry.json()).resolves.toMatchObject({
+      attempt: {
+        phase: "awaiting_verification",
+        claimVersion: Number(attempt.claimVersion) + 1,
+        after: { imageId: "ami-b", revision: initialBody.image.revision },
+      },
+    });
+    expect(getImage).toHaveBeenCalledTimes(1);
+    expect(recoveredGetImage).toHaveBeenCalledTimes(1);
+  });
+
+  it("reconciles an expired takeover when the original promotion write wins the CAS race", async () => {
+    const storage = new MemoryStorage();
+    const env = { CRABBOX_AWS_EXPECTED_ACCOUNT_ID: "123456789012" };
+    const provider = new AWSProvider(env as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockImplementation(async (imageID) =>
+      imagePromotionAWSImage(imageID),
+    );
+    const promoteImage = provider.promoteImage.bind(provider);
+    let releaseOriginal!: () => void;
+    let originalEntered!: () => void;
+    let takeoverEntered!: () => void;
+    let originalFinished!: () => void;
+    const releaseOriginalPromise = new Promise<void>((resolve) => {
+      releaseOriginal = resolve;
+    });
+    const originalEnteredPromise = new Promise<void>((resolve) => {
+      originalEntered = resolve;
+    });
+    const takeoverEnteredPromise = new Promise<void>((resolve) => {
+      takeoverEntered = resolve;
+    });
+    const originalFinishedPromise = new Promise<void>((resolve) => {
+      originalFinished = resolve;
+    });
+    let calls = 0;
+    vi.spyOn(provider, "promoteImage").mockImplementation(async (...args) => {
+      calls += 1;
+      if (calls === 1) {
+        originalEntered();
+        await releaseOriginalPromise;
+        try {
+          return await promoteImage(...args);
+        } finally {
+          originalFinished();
+        }
+      }
+      takeoverEntered();
+      await originalFinishedPromise;
+      return promoteImage(...args);
+    });
+    const fleet = testCoordinator(storage, { aws: provider }, env);
+    const attemptKey = "image-promotion-attempt:overlapping-promotion";
+
+    const original = fleet.fetch(
+      protectedPromotionRequest("overlapping-promotion", { state: "absent" }),
+    );
+    await originalEnteredPromise;
+    const claimed = storage.value<Record<string, unknown>>(attemptKey)!;
+    storage.seed(attemptKey, {
+      ...claimed,
+      claim: {
+        ...(claimed.claim as Record<string, unknown>),
+        expiresAt: "2000-01-01T00:00:00.000Z",
+      },
+    });
+    const takeover = fleet.fetch(promotionRecoveryRequest("overlapping-promotion"));
+    await takeoverEnteredPromise;
+    releaseOriginal();
+
+    await original;
+    const recovered = await takeover;
+
+    expect(recovered.status).toBe(200);
+    await expect(recovered.json()).resolves.toMatchObject({
+      attempt: {
+        phase: "awaiting_verification",
+        claimVersion: 2,
+        after: { state: "present", imageId: "ami-b" },
+        mutation: { status: "succeeded", applied: true },
+      },
+    });
+    expect(calls).toBe(2);
+  });
+
+  it("reconciles an expired crash-after-mutation claim without replaying the provider write", async () => {
+    const storage = new MemoryStorage();
+    const env = { CRABBOX_AWS_EXPECTED_ACCOUNT_ID: "123456789012" };
+    const provider = new AWSProvider(env as Env, "eu-west-1", storage);
+    const getImage = vi
+      .spyOn(provider, "getImage")
+      .mockImplementation(async (imageID) => imagePromotionAWSImage(imageID));
+    const fleet = testFleet(storage, { aws: provider }, env);
+    const initial = await fleet.fetch(
+      protectedPromotionRequest("crash-after-mutation", { state: "absent" }),
+    );
+    const body = (await initial.json()) as {
+      attempt: Record<string, unknown>;
+      image: PromotedImageRecord;
+    };
+    const crashed = claimedPromotionAttempt(body.attempt, "mutating", {
+      plannedAfter: {
+        state: "present",
+        imageId: "ami-b",
+        revision: body.image.revision,
+        accountId: "123456789012",
+        snapshotIds: ["snap-b"],
+      },
+    });
+    storage.seed("image-promotion-attempt:crash-after-mutation", crashed);
+
+    const recovered = await fleet.fetch(promotionRecoveryRequest("crash-after-mutation"));
+
+    expect(recovered.status).toBe(200);
+    await expect(recovered.json()).resolves.toMatchObject({
+      attempt: {
+        phase: "awaiting_verification",
+        after: { imageId: "ami-b", revision: body.image.revision },
+        mutation: { status: "succeeded", applied: true },
+      },
+    });
+    expect(getImage).toHaveBeenCalledTimes(1);
+  });
+
+  it("marks an expired same-image claim unknown when the visible revision changed", async () => {
+    const storage = new MemoryStorage();
+    const env = { CRABBOX_AWS_EXPECTED_ACCOUNT_ID: "123456789012" };
+    const provider = new AWSProvider(env as Env, "eu-west-1", storage);
+    const getImage = vi
+      .spyOn(provider, "getImage")
+      .mockImplementation(async (imageID) => imagePromotionAWSImage(imageID));
+    const fleet = testFleet(storage, { aws: provider }, env);
+    const initial = await fleet.fetch(
+      protectedPromotionRequest("same-image-new-revision", { state: "absent" }),
+    );
+    const body = (await initial.json()) as {
+      attempt: Record<string, unknown>;
+      image: PromotedImageRecord;
+    };
+    storage.seed(
+      "image-promotion-attempt:same-image-new-revision",
+      claimedPromotionAttempt(body.attempt, "mutating", {
+        plannedAfter: {
+          state: "present",
+          imageId: "ami-b",
+          revision: body.image.revision,
+          accountId: "123456789012",
+          snapshotIds: ["snap-b"],
+        },
+      }),
+    );
+    storage.seed("image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1", {
+      ...imagePromotionAWSImage("ami-b"),
+      promotedAt: "2026-08-21T00:00:02.000Z",
+      revision: "revision-concurrent",
+      protected: true,
+    } satisfies PromotedImageRecord);
+
+    const recovered = await fleet.fetch(promotionRecoveryRequest("same-image-new-revision"));
+
+    expect(recovered.status).toBe(503);
+    await expect(recovered.json()).resolves.toMatchObject({
+      attempt: {
+        phase: "completed",
+        outcome: "outcome_unknown",
+        after: { imageId: "ami-b", revision: "revision-concurrent" },
+      },
+    });
+    expect(getImage).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns pending for an active mutation claim without touching the provider", async () => {
+    const storage = new MemoryStorage();
+    const env = { CRABBOX_AWS_EXPECTED_ACCOUNT_ID: "123456789012" };
+    const provider = new AWSProvider(env as Env, "eu-west-1", storage);
+    const getImage = vi.spyOn(provider, "getImage");
+    const fleet = testFleet(storage, { aws: provider }, env);
+    const evidence = protectedPromotionEvidence();
+    storage.seed("image-promotion-attempt:active-mutation-claim", {
+      schema: "crabbox-image-promotion-attempt/v1",
+      idempotencyKey: "active-mutation-claim",
+      inputDigest: "c".repeat(64),
+      operation: "promote",
+      phase: "mutating",
+      version: 2,
+      claimVersion: 1,
+      claim: {
+        id: "active-claim",
+        version: 1,
+        claimedAt: "2026-08-21T00:00:00.000Z",
+        expiresAt: "2099-08-21T00:00:00.000Z",
+      },
+      expected: { state: "absent" },
+      before: { state: "absent" },
+      beforeBinding: { state: "absent" },
+      plannedAfter: {
+        state: "present",
+        imageId: "ami-b",
+        revision: "revision-planned",
+        accountId: "123456789012",
+        snapshotIds: ["snap-b"],
+      },
+      desired: { state: "present", ...evidence.desired },
+      rollbackTarget: { state: "absent" },
+      evidence,
+      workflow: { runId: "200", runAttempt: "1" },
+      mutation: { status: "pending", applied: false },
+      createdAt: "2026-08-21T00:00:00.000Z",
+      updatedAt: "2026-08-21T00:00:00.000Z",
+    });
+
+    const response = await fleet.fetch(promotionRecoveryRequest("active-mutation-claim"));
+
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toMatchObject({
+      attempt: { phase: "mutating", claim: { id: "active-claim" } },
+    });
+    expect(getImage).not.toHaveBeenCalled();
+  });
+
+  it("reclaims an expired verification claim with the same sanitized result", async () => {
+    const storage = new MemoryStorage();
+    const env = { CRABBOX_AWS_EXPECTED_ACCOUNT_ID: "123456789012" };
+    const provider = new AWSProvider(env as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockImplementation(async (imageID) =>
+      imagePromotionAWSImage(imageID),
+    );
+    const fleet = testFleet(storage, { aws: provider }, env);
+    const initial = await fleet.fetch(
+      protectedPromotionRequest("crash-after-verification-claim", { state: "absent" }),
+    );
+    const body = (await initial.json()) as { attempt: Record<string, unknown> };
+    const pendingVerification = {
+      outcome: "verification_failed",
+      status: 409,
+      verification: { status: "failed", codes: ["lease_start_failed"] },
+      cleanup: { status: "failed", code: "cleanup_unverified" },
+    };
+    storage.seed(
+      "image-promotion-attempt:crash-after-verification-claim",
+      claimedPromotionAttempt(body.attempt, "verifying", { pendingVerification }),
+    );
+
+    const recovered = await fleet.fetch(promotionRecoveryRequest("crash-after-verification-claim"));
+
+    expect(recovered.status).toBe(409);
+    await expect(recovered.json()).resolves.toMatchObject({
+      attempt: {
+        phase: "completed",
+        outcome: "verification_failed",
+        verification: pendingVerification.verification,
+        cleanup: pendingVerification.cleanup,
+      },
+    });
+  });
+
+  it("fails closed before provider or FSR work when the current default lacks rollback metadata", async () => {
+    const storage = new MemoryStorage();
+    storage.seed("image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1", {
+      ...imagePromotionAWSImage("ami-a"),
+      snapshots: undefined,
+      promotedAt: "2026-08-20T00:00:00.000Z",
+      revision: "revision-a",
+      protected: true,
+    } satisfies PromotedImageRecord);
+    const env = { CRABBOX_AWS_EXPECTED_ACCOUNT_ID: "123456789012" };
+    const provider = new AWSProvider(env as Env, "eu-west-1", storage);
+    const getImage = vi.spyOn(provider, "getImage");
+    const enableFSR = vi.spyOn(provider, "enableFastSnapshotRestore");
+    const fleet = testFleet(storage, { aws: provider }, env);
+
+    const response = await fleet.fetch(
+      protectedPromotionRequest("missing-rollback-metadata", {
+        state: "present",
+        imageId: "ami-a",
+        revision: "revision-a",
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "image_promotion_rollback_metadata_missing",
+    });
+    expect(getImage).not.toHaveBeenCalled();
+    expect(enableFSR).not.toHaveBeenCalled();
+    await expect(storage.list({ prefix: "image-promotion-attempt:" })).resolves.toHaveLength(0);
+  });
+
+  it("derives rollback from the previous successful attempt and CASes the candidate revision", async () => {
+    const storage = new MemoryStorage();
+    storage.seed("image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1", {
+      ...imagePromotionAWSImage("ami-a"),
+      promotedAt: "2026-08-20T00:00:00.000Z",
+      revision: "revision-a",
+      protected: true,
+    });
+    const env = { CRABBOX_AWS_EXPECTED_ACCOUNT_ID: "123456789012" };
+    const provider = new AWSProvider(env as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockImplementation(async (imageID) =>
+      imagePromotionAWSImage(imageID),
+    );
+    const fleet = testFleet(storage, { aws: provider }, env);
+    const promoted = await fleet.fetch(
+      protectedPromotionRequest("promote-b", {
+        state: "present",
+        imageId: "ami-a",
+        revision: "revision-a",
+      }),
+    );
+    const promotedBody = (await promoted.json()) as { image: PromotedImageRecord };
+    const revisionB = promotedBody.image.revision!;
+    const lease = testLease({
+      id: "cbx_0000000000b1",
+      provider: "aws",
+      target: "linux",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      os: "ubuntu:26.04",
+      serverType: "c7i.4xlarge",
+      state: "released",
+      image: {
+        id: "ami-b",
+        source: "promoted",
+        provider: "aws",
+        region: "eu-west-1",
+        revision: revisionB,
+      },
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const verified = await fleet.fetch(
+      request("POST", "/v1/image-promotions/promote-b/verify", {
+        headers: { "x-crabbox-image-promoter": "true" },
+        body: { schema: "crabbox-image-promotion-verification/v1", leaseId: lease.id },
+      }),
+    );
+    expect(verified.status).toBe(200);
+
+    const rollback = await fleet.fetch(
+      protectedPromotionRequest(
+        "rollback-b",
+        { state: "present", imageId: "ami-b", revision: revisionB },
+        { operation: "rollback" },
+      ),
+    );
+    expect(rollback.status).toBe(200);
+    await expect(rollback.json()).resolves.toMatchObject({
+      image: { id: "ami-a" },
+      attempt: {
+        operation: "rollback",
+        desired: { imageId: "ami-a" },
+        before: { imageId: "ami-b", revision: revisionB },
+      },
+    });
+  });
+
+  it("rolls the first protected promotion back to an absent default", async () => {
+    const storage = new MemoryStorage();
+    const env = { CRABBOX_AWS_EXPECTED_ACCOUNT_ID: "123456789012" };
+    const provider = new AWSProvider(env as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockImplementation(async (imageID) =>
+      imagePromotionAWSImage(imageID),
+    );
+    const fleet = testFleet(storage, { aws: provider }, env);
+    const promoted = await fleet.fetch(
+      protectedPromotionRequest("first-promotion", { state: "absent" }),
+    );
+    const promotedBody = (await promoted.json()) as {
+      image: PromotedImageRecord;
+      attempt: { after: { state: string; revision?: string } };
+    };
+    const lease = testLease({
+      id: "cbx_0000000000c2",
+      provider: "aws",
+      target: "linux",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      os: "ubuntu:26.04",
+      serverType: "c7i.4xlarge",
+      state: "released",
+      image: {
+        id: "ami-b",
+        source: "promoted",
+        provider: "aws",
+        region: "eu-west-1",
+        revision: promotedBody.image.revision,
+      },
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    await fleet.fetch(
+      request("POST", "/v1/image-promotions/first-promotion/verify", {
+        headers: { "x-crabbox-image-promoter": "true" },
+        body: { schema: "crabbox-image-promotion-verification/v1", leaseId: lease.id },
+      }),
+    );
+
+    const rollback = await fleet.fetch(
+      protectedPromotionRequest(
+        "first-promotion-rollback",
+        { state: "present", imageId: "ami-b", revision: promotedBody.image.revision! },
+        { operation: "rollback" },
+      ),
+    );
+    expect(rollback.status).toBe(200);
+    await expect(rollback.json()).resolves.toMatchObject({
+      attempt: {
+        outcome: "rolled_back",
+        desired: { state: "absent" },
+        after: { state: "absent" },
+      },
+    });
+  });
+
+  it("reconciles an expired rollback takeover when the original clear wins the CAS race", async () => {
+    const storage = new MemoryStorage();
+    const env = { CRABBOX_AWS_EXPECTED_ACCOUNT_ID: "123456789012" };
+    const provider = new AWSProvider(env as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockImplementation(async (imageID) =>
+      imagePromotionAWSImage(imageID),
+    );
+    const fleet = testCoordinator(storage, { aws: provider }, env);
+    const promoted = await fleet.fetch(
+      protectedPromotionRequest("overlap-rollback-source", { state: "absent" }),
+    );
+    const promotedBody = (await promoted.json()) as { image: PromotedImageRecord };
+    const lease = testLease({
+      id: "cbx_0000000000c3",
+      provider: "aws",
+      target: "linux",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      os: "ubuntu:26.04",
+      serverType: "c7i.4xlarge",
+      state: "released",
+      image: {
+        id: "ami-b",
+        source: "promoted",
+        provider: "aws",
+        region: "eu-west-1",
+        revision: promotedBody.image.revision,
+      },
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const verified = await fleet.fetch(
+      request("POST", "/v1/image-promotions/overlap-rollback-source/verify", {
+        headers: { "x-crabbox-image-promoter": "true" },
+        body: { schema: "crabbox-image-promotion-verification/v1", leaseId: lease.id },
+      }),
+    );
+    expect(verified.status).toBe(200);
+
+    const clearImageDefault = provider.clearImageDefault.bind(provider);
+    let releaseOriginal!: () => void;
+    let originalEntered!: () => void;
+    let takeoverEntered!: () => void;
+    let originalFinished!: () => void;
+    const releaseOriginalPromise = new Promise<void>((resolve) => {
+      releaseOriginal = resolve;
+    });
+    const originalEnteredPromise = new Promise<void>((resolve) => {
+      originalEntered = resolve;
+    });
+    const takeoverEnteredPromise = new Promise<void>((resolve) => {
+      takeoverEntered = resolve;
+    });
+    const originalFinishedPromise = new Promise<void>((resolve) => {
+      originalFinished = resolve;
+    });
+    let calls = 0;
+    vi.spyOn(provider, "clearImageDefault").mockImplementation(async (...args) => {
+      calls += 1;
+      if (calls === 1) {
+        originalEntered();
+        await releaseOriginalPromise;
+        try {
+          return await clearImageDefault(...args);
+        } finally {
+          originalFinished();
+        }
+      }
+      takeoverEntered();
+      await originalFinishedPromise;
+      return clearImageDefault(...args);
+    });
+    const attemptKey = "image-promotion-attempt:overlapping-rollback";
+    const original = fleet.fetch(
+      protectedPromotionRequest(
+        "overlapping-rollback",
+        {
+          state: "present",
+          imageId: "ami-b",
+          revision: promotedBody.image.revision!,
+        },
+        { operation: "rollback" },
+      ),
+    );
+    await originalEnteredPromise;
+    const claimed = storage.value<Record<string, unknown>>(attemptKey)!;
+    storage.seed(attemptKey, {
+      ...claimed,
+      claim: {
+        ...(claimed.claim as Record<string, unknown>),
+        expiresAt: "2000-01-01T00:00:00.000Z",
+      },
+    });
+    const takeover = fleet.fetch(promotionRecoveryRequest("overlapping-rollback"));
+    await takeoverEnteredPromise;
+    releaseOriginal();
+
+    await original;
+    const recovered = await takeover;
+
+    expect(recovered.status).toBe(200);
+    await expect(recovered.json()).resolves.toMatchObject({
+      attempt: {
+        phase: "completed",
+        outcome: "rolled_back",
+        claimVersion: 2,
+        after: { state: "absent" },
+        mutation: { status: "succeeded", applied: true },
+      },
+    });
+    expect(calls).toBe(2);
+  });
+
+  it("finalizes a probe start failure without a lease and permits a CAS rollback", async () => {
+    const storage = new MemoryStorage();
+    storage.seed("image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1", {
+      ...imagePromotionAWSImage("ami-a"),
+      promotedAt: "2026-08-20T00:00:00.000Z",
+      revision: "revision-a",
+      protected: true,
+    });
+    const env = { CRABBOX_AWS_EXPECTED_ACCOUNT_ID: "123456789012" };
+    const provider = new AWSProvider(env as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockImplementation(async (imageID) =>
+      imagePromotionAWSImage(imageID),
+    );
+    const fleet = testFleet(storage, { aws: provider }, env);
+    const promoted = await fleet.fetch(
+      protectedPromotionRequest("probe-start-failed", {
+        state: "present",
+        imageId: "ami-a",
+        revision: "revision-a",
+      }),
+    );
+    const revisionB = ((await promoted.json()) as { image: PromotedImageRecord }).image.revision!;
+
+    const finalized = await fleet.fetch(
+      request("POST", "/v1/image-promotions/probe-start-failed/verify", {
+        headers: { "x-crabbox-image-promoter": "true" },
+        body: {
+          schema: "crabbox-image-promotion-verification/v1",
+          probeStatus: "failed",
+          failureCode: "lease_start_failed",
+        },
+      }),
+    );
+
+    expect(finalized.status).toBe(409);
+    await expect(finalized.json()).resolves.toMatchObject({
+      attempt: {
+        phase: "completed",
+        outcome: "verification_failed",
+        mutation: { status: "succeeded", applied: true },
+        verification: { status: "failed", codes: ["lease_start_failed"] },
+        cleanup: { status: "failed", code: "cleanup_unverified" },
+      },
+    });
+    expect(JSON.stringify(storage.value("image-promotion-attempt:probe-start-failed"))).not.toMatch(
+      /leaseId|private provider endpoint/i,
+    );
+
+    const rollback = await fleet.fetch(
+      protectedPromotionRequest(
+        "rollback-after-probe-failure",
+        { state: "present", imageId: "ami-b", revision: revisionB },
+        { operation: "rollback" },
+      ),
+    );
+    expect(rollback.status).toBe(200);
+    await expect(rollback.json()).resolves.toMatchObject({
+      image: { id: "ami-a" },
+      attempt: {
+        operation: "rollback",
+        desired: { imageId: "ami-a" },
+        before: { imageId: "ami-b", revision: revisionB },
+      },
+    });
+
+    const conflicted = await fleet.fetch(
+      protectedPromotionRequest(
+        "rollback-after-concurrent-change",
+        { state: "present", imageId: "ami-b", revision: revisionB },
+        { operation: "rollback" },
+      ),
+    );
+    expect(conflicted.status).toBe(409);
+    await expect(conflicted.json()).resolves.toMatchObject({
+      error: "image_promotion_precondition_failed",
+      attempt: {
+        outcome: "rollback_precondition_failed",
+        mutation: { status: "rejected", applied: false },
+      },
+    });
+  });
+
+  it("fails fresh selection proof for pooled or explicit-image leases", async () => {
+    const storage = new MemoryStorage();
+    const env = { CRABBOX_AWS_EXPECTED_ACCOUNT_ID: "123456789012" };
+    const provider = new AWSProvider(env as Env, "eu-west-1", storage);
+    vi.spyOn(provider, "getImage").mockImplementation(async (imageID) =>
+      imagePromotionAWSImage(imageID),
+    );
+    const fleet = testFleet(storage, { aws: provider }, env);
+    const promoted = await fleet.fetch(
+      protectedPromotionRequest("proof-failure", { state: "absent" }),
+    );
+    const revision = ((await promoted.json()) as { image: PromotedImageRecord }).image.revision!;
+    const lease = testLease({
+      id: "cbx_0000000000b2",
+      provider: "aws",
+      target: "linux",
+      region: "eu-west-1",
+      architecture: "x86_64",
+      os: "ubuntu:26.04",
+      serverType: "c7i.4xlarge",
+      state: "released",
+      image: {
+        id: "ami-b",
+        source: "explicit",
+        provider: "aws",
+        region: "eu-west-1",
+        revision,
+      },
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    storage.seed("ready-pool:test", {
+      key: "test",
+      leaseID: lease.id,
+      state: "ready",
+      owner: "pool@example.com",
+      org: "example-org",
+      serverType: lease.serverType,
+      createdAt: lease.createdAt,
+      updatedAt: lease.updatedAt,
+      expiresAt: lease.expiresAt,
+    } satisfies ReadyPoolEntry);
+    const response = await fleet.fetch(
+      request("POST", "/v1/image-promotions/proof-failure/verify", {
+        headers: { "x-crabbox-image-promoter": "true" },
+        body: { schema: "crabbox-image-promotion-verification/v1", leaseId: lease.id },
+      }),
+    );
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      attempt: {
+        outcome: "verification_failed",
+        verification: {
+          codes: expect.arrayContaining(["pooled_lease_forbidden", "image_source_mismatch"]),
+        },
+      },
     });
   });
 });

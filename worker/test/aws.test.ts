@@ -39,6 +39,40 @@ afterEach(() => {
 });
 
 describe("aws provider", () => {
+  it("returns the actual AMI owner and exact backing snapshots from DescribeImages", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+<DescribeImagesResponse>
+  <imagesSet>
+    <item>
+      <imageId>ami-qualified</imageId>
+      <imageOwnerId>123456789012</imageOwnerId>
+      <name>qualified</name>
+      <imageState>available</imageState>
+      <architecture>x86_64</architecture>
+      <blockDeviceMapping>
+        <item><ebs><snapshotId>snap-root</snapshotId></ebs></item>
+        <item><ebs><snapshotId>snap-tools</snapshotId></ebs></item>
+      </blockDeviceMapping>
+    </item>
+  </imagesSet>
+</DescribeImagesResponse>`),
+      ),
+    );
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+      "eu-west-1",
+    );
+
+    await expect(client.getImage("ami-qualified")).resolves.toMatchObject({
+      id: "ami-qualified",
+      ownerId: "123456789012",
+      snapshots: ["snap-root", "snap-tools"],
+    });
+  });
+
   it("uses the launched fallback AMI for provider image labels", () => {
     const config = leaseConfig({
       provider: "aws",
