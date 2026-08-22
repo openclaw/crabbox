@@ -95,6 +95,7 @@ esac
     path.join(bin, "cosign"),
     `#!/usr/bin/env bash
 set -euo pipefail
+[[ "\${COSIGN_EXPERIMENTAL:-}" == "1" ]]
 printf 'cosign %s\\n' "$*" >>"\${CRABBOX_FAKE_LOG:?}"
 `,
   );
@@ -162,8 +163,14 @@ test("publisher pushes once, resolves the digest, then keylessly signs and verif
     /candidate\.json:application\/vnd\.crabbox\.aws-image-candidate/,
   );
   assert.match(commands[2], /^oras resolve /);
-  assert.match(commands[3], /^cosign sign --yes .*@sha256:/);
-  assert.match(commands[4], /^cosign verify --certificate-identity /);
+  assert.match(
+    commands[3],
+    /^cosign sign --new-bundle-format --registry-referrers-mode oci-1-1 --yes .*@sha256:/,
+  );
+  assert.match(
+    commands[4],
+    /^cosign verify --new-bundle-format --experimental-oci11 --certificate-identity /,
+  );
 });
 
 test("publisher refuses an existing immutable tag before push or signing", async () => {

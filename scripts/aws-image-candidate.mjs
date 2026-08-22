@@ -37,12 +37,20 @@ export function canonicalJSON(value) {
   return JSON.stringify(value);
 }
 
+export function canonicalJSONLine(value) {
+  return `${canonicalJSON(value)}\n`;
+}
+
 export function digestBytes(bytes) {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
 export function digestJSON(value) {
   return digestBytes(canonicalJSON(value));
+}
+
+export function digestJSONLine(value) {
+  return digestBytes(canonicalJSONLine(value));
 }
 
 function fail(message) {
@@ -90,13 +98,25 @@ function required(options, name) {
   return options[name];
 }
 
-function validateRecipe(recipe, target) {
+function validateRecipe(recipe, target, expectedPath) {
   assertExactKeys(
     recipe,
-    ["schema", "target", "profile", "readinessRecipe", "inputs", "components"],
+    ["schema", "path", "target", "profile", "readinessRecipe", "inputs", "components"],
     "recipe",
   );
-  if (recipe.schema !== recipeSchema || recipe.target !== target) fail("recipe schema or target mismatch");
+  if (
+    recipe.schema !== recipeSchema ||
+    recipe.path !== expectedPath ||
+    recipe.target !== target
+  ) {
+    fail("recipe schema, path, or target mismatch");
+  }
+  if (
+    !/^recipes\/aws\/v1\/[A-Za-z0-9._-]+[.]json$/.test(recipe.path) ||
+    recipe.path.includes("..")
+  ) {
+    fail("recipe path must identify a versioned AWS recipe");
+  }
   assertIdentifier(recipe.profile, /^[a-z0-9][a-z0-9-]*$/, "recipe profile");
   if (
     !/^recipes\/[A-Za-z0-9._/-]+[.]json$/.test(recipe.readinessRecipe) ||
@@ -343,8 +363,13 @@ async function writeBundle(options) {
   assertIdentifier(workflowRunAttempt, /^[1-9][0-9]*$/, "workflow run attempt");
   if (Number.isNaN(Date.parse(createdAt))) fail("invalid candidate creation time");
 
-  const recipe = await readJSON(required(options, "recipe"), "recipe");
-  validateRecipe(recipe, target);
+  const recipeFile = path.resolve(required(options, "recipe"));
+  const recipePath = path.relative(repoRoot, recipeFile).split(path.sep).join("/");
+  if (recipePath.startsWith("../") || path.isAbsolute(recipePath)) {
+    fail("recipe path escaped repository root");
+  }
+  const recipe = await readJSON(recipeFile, "recipe");
+  validateRecipe(recipe, target, recipePath);
   const scrubReport = await readJSON(required(options, "scrub-report"), "scrub report");
   validateScrubReport(scrubReport, target);
   const checks = await readJSON(required(options, "checks"), "checks");
@@ -428,7 +453,7 @@ async function writeBundle(options) {
 
   const artifacts = {
     "candidate.json": candidateText,
-    "recipe.json": `${canonicalJSON(recipe)}\n`,
+    "recipe.json": canonicalJSONLine(recipe),
     "scrub-report.json": `${canonicalJSON(scrubReport)}\n`,
     "sbom.spdx.json": `${canonicalJSON(sbom(recipe, candidate, createdAt))}\n`,
     "provenance.intoto.jsonl": `${canonicalJSON(provenance)}\n`,
@@ -532,7 +557,7 @@ async function verifyBundle(options) {
   const candidate = await readJSON(path.join(directory, "candidate.json"), "candidate record");
   validateCandidateRecord(candidate);
   const recipe = await readJSON(path.join(directory, "recipe.json"), "recipe");
-  validateRecipe(recipe, candidate.target.platform);
+  validateRecipe(recipe, candidate.target.platform, recipe.path);
   const scrubReport = await readJSON(path.join(directory, "scrub-report.json"), "scrub report");
   validateScrubReport(scrubReport, candidate.target.platform);
   validateScrubCheck({ schema: checksSchema, checks: candidate.checks }, scrubReport);

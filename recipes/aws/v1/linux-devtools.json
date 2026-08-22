@@ -1,5 +1,6 @@
 {
   "schema": "crabbox-aws-image-recipe/v1",
+  "path": "recipes/aws/v1/linux-devtools.json",
   "target": "linux",
   "profile": "linux-builder",
   "readinessRecipe": "recipes/linux/v1/linux-builder.json",

@@ -1,5 +1,6 @@
 {
   "schema": "crabbox-aws-image-recipe/v1",
+  "path": "recipes/aws/v1/windows-devtools.json",
   "target": "windows",
   "profile": "windows-builder",
   "readinessRecipe": "recipes/windows/v1/windows-builder.json",

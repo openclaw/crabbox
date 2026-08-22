@@ -44,6 +44,20 @@ test("candidate workflow has OCI and keyless-signing permissions and tools", () 
   );
 });
 
+test("script CI exercises pinned ORAS and Cosign against only localhost", () => {
+  const ci = fs.readFileSync(path.join(repoRoot, ".github", "workflows", "ci.yml"), "utf8");
+  assert.match(ci, /oras\.land\/oras\/cmd\/oras@v1\.3\.3/);
+  assert.match(ci, /github\.com\/sigstore\/cosign\/v2\/cmd\/cosign@v2\.6\.5/);
+  assert.match(
+    ci,
+    /CRABBOX_ORAS: \$\{\{ runner\.temp \}\}\/image-tools\/oras[\s\S]*CRABBOX_COSIGN: \$\{\{ runner\.temp \}\}\/image-tools\/cosign/,
+  );
+  assert.match(
+    ci,
+    /node --test scripts\/consume-aws-image-candidate\.integration\.test\.js/,
+  );
+});
+
 test("workflow explicitly disables promotion, FSR, and promoted warmup", () => {
   assert.match(
     workflow,

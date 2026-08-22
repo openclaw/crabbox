@@ -1,0 +1,22 @@
+{
+  "schema": "crabbox-canonical-json-digest-v1",
+  "vectors": [
+    {
+      "name": "nested-object-and-array",
+      "value": {
+        "z": [
+          3,
+          {
+            "b": true,
+            "a": null
+          }
+        ],
+        "a": "crabbox"
+      },
+      "canonicalJSON": "{\"a\":\"crabbox\",\"z\":[3,{\"a\":null,\"b\":true}]}",
+      "canonicalJSONDigest": "sha256:5db4efdb4b17404943f534200463909203a72a80fee47a99683db05c63d861ab",
+      "canonicalJSONLine": "{\"a\":\"crabbox\",\"z\":[3,{\"a\":null,\"b\":true}]}\n",
+      "canonicalJSONLineDigest": "sha256:1cefcdab1d903cae845f0924642e498e05b15e2f7d89c5197a5caee820c16b46"
+    }
+  ]
+}
