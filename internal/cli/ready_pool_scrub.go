@@ -116,6 +116,52 @@ func readyPoolScrubBranch(ref string) (string, error) {
 	return ref, nil
 }
 
+func remoteIgnoredWarmCacheCleanScript(gitCommand, label string) string {
+	return `crabbox_clean_ignored_warm_caches() {
+clean_args=(-ffdx --quiet)
+cache_paths=".git/crabbox-cache-paths.$$"
+trap 'rm -f -- "$cache_paths"' EXIT
+if ! /usr/bin/find -P . \( -ipath './.git' -o -ipath './.crabbox' \) -prune -o \( -type d -o -type l \) \( -iname node_modules -o -iname .pnpm-store -o -ipath '*/.yarn/cache' -o -ipath '*/.yarn/unplugged' \) -print0 -prune > "$cache_paths"; then
+  echo "` + label + ` cache discovery failed" >&2
+  return 1
+fi
+while IFS= read -r -d '' cache_path; do
+  cache_path="${cache_path#./}"
+  if ` + gitCommand + ` check-ignore -q -- "$cache_path"; then
+    if [ -L "$cache_path" ] || [ ! -d "$cache_path" ]; then
+      echo "` + label + ` cache root must be a real directory" >&2
+      return 1
+    fi
+    resolved_cache="$(cd -P -- "$cache_path" && pwd -P)"
+    case "$resolved_cache/" in
+      "$workdir"/*) ;;
+      *)
+        echo "` + label + ` cache root escapes the workspace" >&2
+        return 1
+        ;;
+    esac
+    cache_pattern="${cache_path//\\/\\\\}"
+    cache_pattern="${cache_pattern//\*/\\*}"
+    cache_pattern="${cache_pattern//\?/\\?}"
+    cache_pattern="${cache_pattern//\[/\\[}"
+    cache_pattern="${cache_pattern//\]/\\]}"
+    cache_pattern="${cache_pattern//!/\\!}"
+    cache_pattern="${cache_pattern//#/\\#}"
+    clean_args+=(-e "$cache_pattern/")
+  elif [ "$?" -ne 1 ]; then
+    echo "` + label + ` cache ignore check failed" >&2
+    return 1
+  fi
+done < "$cache_paths"
+rm -f -- "$cache_paths"
+trap - EXIT
+if ! ` + gitCommand + ` clean "${clean_args[@]}"; then
+  echo "` + label + ` clean failed" >&2
+  return 1
+fi
+}`
+}
+
 func remoteReadyPoolScrub(workdir, ref, trustedRemoteURL string) string {
 	script := `set -euo pipefail
 workdir=` + shellQuote(workdir) + `
@@ -141,8 +187,8 @@ test -x /usr/bin/git
 safe_git check-ref-format --branch "$ref" >/dev/null
 safe_git init --quiet "$tmp"
 safe_git -C "$tmp" remote add origin "$trusted_remote"
-safe_git -C "$tmp" fetch --quiet --prune --tags origin '+refs/heads/*:refs/remotes/origin/*'
 remote_ref="refs/remotes/origin/$ref"
+safe_git -C "$tmp" fetch --quiet --no-tags origin "+refs/heads/$ref:$remote_ref"
 remote_commit="$(safe_git -C "$tmp" rev-parse --verify "$remote_ref^{commit}")"
 target_commit="$remote_commit"
 safe_git -C "$tmp" read-tree "$target_commit"
@@ -167,44 +213,8 @@ if safe_git ls-files --stage | awk '$1 == "160000" { found=1 } END { exit !found
   echo "ready-pool scrub does not reuse submodule worktrees" >&2
   exit 1
 fi
-clean_args=(-ffdx --quiet)
-cache_paths=".git/crabbox-cache-paths.$$"
-trap 'rm -f -- "$cache_paths"' EXIT
-if ! /usr/bin/find -P . \( -ipath './.git' -o -ipath './.crabbox' \) -prune -o \( -type d -o -type l \) \( -iname node_modules -o -iname .pnpm-store -o -ipath '*/.yarn/cache' -o -ipath '*/.yarn/unplugged' \) -print0 -prune > "$cache_paths"; then
-  echo "ready-pool cache discovery failed" >&2
-  exit 1
-fi
-while IFS= read -r -d '' cache_path; do
-  cache_path="${cache_path#./}"
-  if safe_git check-ignore -q -- "$cache_path"; then
-    if [ -L "$cache_path" ] || [ ! -d "$cache_path" ]; then
-      echo "ready-pool cache root must be a real directory" >&2
-      exit 1
-    fi
-    resolved_cache="$(cd -P -- "$cache_path" && pwd -P)"
-    case "$resolved_cache/" in
-      "$workdir"/*) ;;
-      *)
-        echo "ready-pool cache root escapes the workspace" >&2
-        exit 1
-        ;;
-    esac
-    cache_pattern="${cache_path//\\/\\\\}"
-    cache_pattern="${cache_pattern//\*/\\*}"
-    cache_pattern="${cache_pattern//\?/\\?}"
-    cache_pattern="${cache_pattern//\[/\\[}"
-    cache_pattern="${cache_pattern//\]/\\]}"
-    cache_pattern="${cache_pattern//!/\\!}"
-    cache_pattern="${cache_pattern//#/\\#}"
-    clean_args+=(-e "$cache_pattern/")
-  elif [ "$?" -ne 1 ]; then
-    echo "ready-pool cache ignore check failed" >&2
-    exit 1
-  fi
-done < "$cache_paths"
-rm -f -- "$cache_paths"
-trap - EXIT
-safe_git clean "${clean_args[@]}"
+` + remoteIgnoredWarmCacheCleanScript("safe_git", "ready-pool") + `
+crabbox_clean_ignored_warm_caches
 if [ -L .crabbox ]; then
   echo "ready-pool .crabbox root must not be a symlink" >&2
   exit 1
@@ -292,9 +302,9 @@ if ($LASTEXITCODE -ne 0) { throw "invalid ready-pool branch ref" }
 if ($LASTEXITCODE -ne 0) { throw "ready-pool temporary Git init failed" }
 & $git -C $tmp remote add origin $trustedRemote
 if ($LASTEXITCODE -ne 0) { throw "ready-pool trusted origin setup failed" }
-& $git -C $tmp fetch --quiet --prune --tags origin '+refs/heads/*:refs/remotes/origin/*'
-if ($LASTEXITCODE -ne 0) { throw "ready-pool branch fetch failed" }
 $remoteRef = "refs/remotes/origin/$ref"
+& $git -C $tmp fetch --quiet --no-tags origin ("+refs/heads/" + $ref + ":" + $remoteRef)
+if ($LASTEXITCODE -ne 0) { throw "ready-pool branch fetch failed" }
 $remoteCommit = (& $git -C $tmp rev-parse --verify "${remoteRef}^{commit}").Trim()
 if ($LASTEXITCODE -ne 0 -or -not $remoteCommit) { throw "ready-pool remote branch is missing" }
 $targetCommit = $remoteCommit

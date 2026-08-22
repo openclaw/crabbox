@@ -5623,6 +5623,7 @@ aws:
 sync:
   checksum: true
   gitSeed: false
+  gitOverlay: true
   baseRef: trunk
   timeout: 30m
   warnFiles: 100
@@ -5957,7 +5958,7 @@ ssh:
 	if len(cfg.SSHFallbackPorts) != 2 || cfg.SSHFallbackPorts[0] != "22" || cfg.SSHFallbackPorts[1] != "2022" {
 		t.Fatalf("SSHFallbackPorts=%v", cfg.SSHFallbackPorts)
 	}
-	if !cfg.Sync.Checksum || cfg.Sync.GitSeed || cfg.Sync.BaseRef != "trunk" {
+	if !cfg.Sync.Checksum || cfg.Sync.GitSeed || !cfg.Sync.GitOverlay || cfg.Sync.BaseRef != "trunk" {
 		t.Fatalf("sync config not loaded: %#v", cfg.Sync)
 	}
 	if cfg.Sync.Timeout.String() != "30m0s" || cfg.Sync.WarnFiles != 100 || cfg.Sync.WarnBytes != 200 || cfg.Sync.FailFiles != 300 || cfg.Sync.FailBytes != 400 || !cfg.Sync.AllowLarge {
@@ -6548,6 +6549,7 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_SYNC_CHECKSUM", "true")
 	t.Setenv("CRABBOX_SYNC_DELETE", "false")
 	t.Setenv("CRABBOX_SYNC_GIT_SEED", "false")
+	t.Setenv("CRABBOX_SYNC_GIT_OVERLAY", "true")
 	t.Setenv("CRABBOX_SYNC_FINGERPRINT", "false")
 	t.Setenv("CRABBOX_SYNC_TIMEOUT", "45m")
 	t.Setenv("CRABBOX_SYNC_ALLOW_LARGE", "true")
@@ -6706,7 +6708,7 @@ func TestEnvOverridesConfig(t *testing.T) {
 	if len(cfg.Cache.Volumes) != 2 || cfg.Cache.Volumes[0].Name != "pnpm" || cfg.Cache.Volumes[0].Key != "env-pnpm" || cfg.Cache.Volumes[1].Key != "npm-cache" {
 		t.Fatalf("unexpected cache volume env: %#v", cfg.Cache.Volumes)
 	}
-	if !cfg.Sync.Checksum || cfg.Sync.Delete || cfg.Sync.GitSeed || cfg.Sync.Fingerprint || cfg.Sync.Timeout != 45*time.Minute || !cfg.Sync.AllowLarge {
+	if !cfg.Sync.Checksum || cfg.Sync.Delete || cfg.Sync.GitSeed || !cfg.Sync.GitOverlay || cfg.Sync.Fingerprint || cfg.Sync.Timeout != 45*time.Minute || !cfg.Sync.AllowLarge {
 		t.Fatalf("unexpected sync env: %#v", cfg.Sync)
 	}
 	if len(cfg.EnvAllow) != 3 || cfg.EnvAllow[2] != "CUSTOM_*" {

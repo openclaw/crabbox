@@ -329,6 +329,7 @@ sync:
   delete: true
   checksum: false
   gitSeed: true
+  gitOverlay: false
   fingerprint: true
   baseRef: main
   timeout: 15m
@@ -545,6 +546,7 @@ CRABBOX_RESULTS_FAIL_ON_FAILURES
 CRABBOX_SYNC_CHECKSUM
 CRABBOX_SYNC_DELETE
 CRABBOX_SYNC_GIT_SEED
+CRABBOX_SYNC_GIT_OVERLAY
 CRABBOX_SYNC_FINGERPRINT
 CRABBOX_SYNC_BASE_REF
 CRABBOX_SYNC_TIMEOUT

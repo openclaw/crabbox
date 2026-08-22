@@ -316,6 +316,7 @@ type SyncConfig struct {
 	Delete      bool
 	Checksum    bool
 	GitSeed     bool
+	GitOverlay  bool
 	Fingerprint bool
 	BaseRef     string
 	Timeout     time.Duration
@@ -3857,6 +3858,7 @@ type fileSyncConfig struct {
 	Delete      *bool    `yaml:"delete,omitempty"`
 	Checksum    *bool    `yaml:"checksum,omitempty"`
 	GitSeed     *bool    `yaml:"gitSeed,omitempty"`
+	GitOverlay  *bool    `yaml:"gitOverlay,omitempty"`
 	Fingerprint *bool    `yaml:"fingerprint,omitempty"`
 	BaseRef     string   `yaml:"baseRef,omitempty"`
 	Timeout     string   `yaml:"timeout,omitempty"`
@@ -6049,6 +6051,9 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		}
 		if file.Sync.GitSeed != nil {
 			cfg.Sync.GitSeed = *file.Sync.GitSeed
+		}
+		if file.Sync.GitOverlay != nil {
+			cfg.Sync.GitOverlay = *file.Sync.GitOverlay
 		}
 		if file.Sync.Fingerprint != nil {
 			cfg.Sync.Fingerprint = *file.Sync.Fingerprint
@@ -9867,6 +9872,9 @@ func applyEnv(cfg *Config) error {
 	}
 	if value, ok := getenvBool("CRABBOX_SYNC_GIT_SEED"); ok {
 		cfg.Sync.GitSeed = value
+	}
+	if value, ok := getenvBool("CRABBOX_SYNC_GIT_OVERLAY"); ok {
+		cfg.Sync.GitOverlay = value
 	}
 	if value, ok := getenvBool("CRABBOX_SYNC_FINGERPRINT"); ok {
 		cfg.Sync.Fingerprint = value

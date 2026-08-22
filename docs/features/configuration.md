@@ -956,6 +956,7 @@ sync:
   delete: true
   checksum: false
   gitSeed: true
+  gitOverlay: false
   fingerprint: true
   baseRef: main
   timeout: 15m

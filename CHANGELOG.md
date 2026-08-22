@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added opt-in Linux Git overlay sync that resets runners to an exact remote-backed tree with hooks disabled and checkout transforms isolated, preserves vetted ignored dependency caches while scrubbing stale state, uploads only the canonical dirty file set, allowlists normalized local, `file`, and HTTP(S) origins, uses full-manifest sync for SSH, SCP-like, Git, ext, and unknown transports, keeps ordinary remote Git seeding best-effort with warning-only failures, falls back for checkout transforms or moved refs, and reports transfer and fallback telemetry; ready-pool scrub now fetches only its requested branch without tags.
 - Added versioned typed ready-pool identities with exact readiness recipe, inventory, immutable image, architecture, byte-stable broker-verified repository seed, and cache ABI matching, isolated from legacy pools and revalidated before registration and reusable return, including project-scoped GCP numeric resource identities kept separate from launch selectors.
 - Added versioned `linux-minimal` and `linux-builder` readiness recipes with canonical digests, shared Go/Worker bootstrap generation, and a verified manifest fast path that avoids repeated package-manager work.
 - Added mutually exclusive `runnerPhases` timing telemetry for provider acquire/borrow, connectivity and readiness, workspace seed/overlay, command, artifact collection, cleanup, delegated opaque work, and unattributed time while preserving the existing timing fields.
