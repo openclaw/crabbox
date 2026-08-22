@@ -594,6 +594,11 @@ func TestCoordinatorAcquireReportsSelectedImageAndProviderStartupTiming(t *testi
 			NetworkReadyMs: 3400,
 			BootstrapMs:    500,
 			TotalMs:        5100,
+			Phases: []CoordinatorProvisioningPhase{
+				{Name: "request", Ms: 1200},
+				{Name: "network_ready", Ms: 3400},
+				{Name: "bootstrap", Ms: 500},
+			},
 		},
 	}
 	var stderr bytes.Buffer
@@ -605,6 +610,38 @@ func TestCoordinatorAcquireReportsSelectedImageAndProviderStartupTiming(t *testi
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("stderr=%q missing %q", stderr.String(), want)
 		}
+	}
+	evidence := coordinatorRunnerEvidence(lease)
+	if evidence == nil || evidence.TotalMs != 5100 || evidence.ImageID != "ami-devtools" || len(evidence.Phases) != 3 {
+		t.Fatalf("runner evidence=%#v", evidence)
+	}
+	var total int64
+	for _, phase := range evidence.Phases {
+		total += phase.Ms
+	}
+	if total != evidence.TotalMs {
+		t.Fatalf("provider phase total=%d want %d: %#v", total, evidence.TotalMs, evidence.Phases)
+	}
+}
+
+func TestCoordinatorRunnerEvidenceHashesAzureResourceImageID(t *testing.T) {
+	const resourceID = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/example/providers/Microsoft.Compute/snapshots/devtools"
+	evidence := coordinatorRunnerEvidence(CoordinatorLease{
+		Provider: "azure",
+		Image:    &CoordinatorLeaseImage{ID: resourceID},
+		ProvisioningTiming: &CoordinatorProvisioningTiming{
+			RequestMs: 10,
+			TotalMs:   10,
+		},
+	})
+	if evidence == nil {
+		t.Fatal("runner evidence is nil")
+	}
+	if evidence.ImageID == resourceID || strings.Contains(strings.ToLower(evidence.ImageID), "subscriptions/") {
+		t.Fatalf("unsafe image identity=%q", evidence.ImageID)
+	}
+	if !strings.HasPrefix(evidence.ImageID, "azure-resource-sha256:") {
+		t.Fatalf("image identity=%q", evidence.ImageID)
 	}
 }
 

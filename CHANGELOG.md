@@ -2,6 +2,10 @@
 
 ## 0.46.1 - Unreleased
 
+### Added
+
+- Added mutually exclusive `runnerPhases` timing telemetry for provider acquire/borrow, connectivity and readiness, workspace seed/overlay, command, artifact collection, cleanup, delegated opaque work, and unattributed time while preserving the existing timing fields.
+
 ### Fixed
 
 - Fenced Linode heartbeats and Tailscale metadata updates with exact account-, scope-, and instance-bound claims, preserving legacy instance claims, idle-timeout intent, and safe release continuity.

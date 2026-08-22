@@ -1532,6 +1532,7 @@ func TestTimingJSONShape(t *testing.T) {
 		started:           endToEndStartedAt.Add(2600 * time.Millisecond),
 		endToEndStartedAt: endToEndStartedAt,
 		lease:             2300 * time.Millisecond,
+		connect:           700 * time.Millisecond,
 		bootstrap:         700 * time.Millisecond,
 		sync:              1200 * time.Millisecond,
 		command:           3400 * time.Millisecond,
@@ -1548,6 +1549,7 @@ func TestTimingJSONShape(t *testing.T) {
 	var got struct {
 		Provider    string `json:"provider"`
 		LeaseID     string `json:"leaseId"`
+		RunnerTotal int64  `json:"runnerTotalMs"`
 		LeaseMs     int64  `json:"leaseMs"`
 		BootstrapMs int64  `json:"bootstrapMs"`
 		SyncMs      int64  `json:"syncMs"`
@@ -1564,11 +1566,12 @@ func TestTimingJSONShape(t *testing.T) {
 			Skipped bool   `json:"skipped"`
 			Reason  string `json:"reason"`
 		} `json:"syncPhases"`
+		RunnerPhases []RunnerPhase `json:"runnerPhases"`
 	}
 	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Provider != "aws" || got.LeaseID != "cbx_123" || got.LeaseMs != 2300 || got.BootstrapMs != 700 || got.SyncMs != 1200 || got.CommandMs != 3400 || got.TotalMs != 5000 || got.EndToEndMs != 7600 || got.ExitCode != 7 || !got.SyncSkipped {
+	if got.Provider != "aws" || got.LeaseID != "cbx_123" || got.RunnerTotal != 7600 || got.LeaseMs != 2300 || got.BootstrapMs != 700 || got.SyncMs != 1200 || got.CommandMs != 3400 || got.TotalMs != 5000 || got.EndToEndMs != 7600 || got.ExitCode != 7 || !got.SyncSkipped {
 		t.Fatalf("unexpected report: %#v", got)
 	}
 	if got.RunStatus != "failed" || got.ErrorKind != "command-exit" {
@@ -1576,6 +1579,286 @@ func TestTimingJSONShape(t *testing.T) {
 	}
 	if len(got.SyncPhases) != 2 || got.SyncPhases[1].Name != "git_hydrate" || !got.SyncPhases[1].Skipped || got.SyncPhases[1].Reason != "marker base current" {
 		t.Fatalf("unexpected phases: %#v", got.SyncPhases)
+	}
+	var runnerTotal int64
+	for _, phase := range got.RunnerPhases {
+		runnerTotal += phase.Ms
+	}
+	if runnerTotal != got.RunnerTotal {
+		t.Fatalf("runner phase total=%d want %d: %#v", runnerTotal, got.RunnerTotal, got.RunnerPhases)
+	}
+}
+
+func TestRunnerPhasesPartitionProviderWorkspaceArtifactsAndCleanup(t *testing.T) {
+	endToEndStartedAt := time.Unix(0, 0)
+	report := timingReportFromRun("aws", "cbx_123", "blue-crab", runTimings{
+		started:           endToEndStartedAt.Add(600 * time.Millisecond),
+		endToEndStartedAt: endToEndStartedAt,
+		borrow:            100 * time.Millisecond,
+		lease:             600 * time.Millisecond,
+		connect:           100 * time.Millisecond,
+		sync:              300 * time.Millisecond,
+		syncConnect:       100 * time.Millisecond,
+		syncSteps: syncStepTimings{
+			sshReady: 100 * time.Millisecond,
+			gitSeed:  50 * time.Millisecond,
+		},
+		command:               200 * time.Millisecond,
+		artifacts:             100 * time.Millisecond,
+		artifactTransferCount: 2,
+		artifactTransferBytes: 4096,
+		providerEvidence: &runnerProviderEvidence{
+			ImageID: "ami-devtools",
+			TotalMs: 500,
+			Phases: []RunnerPhase{
+				{Name: "provider.request", Ms: 200},
+				{Name: "connect.provider", Ms: 200},
+				{Name: "bootstrap.readiness", Ms: 100},
+			},
+		},
+	}, 700*time.Millisecond, 0)
+	report.RunID = "run_123"
+	report.MachineType = "m7i.large"
+	cleanup := leaseCleanupResult{Attempted: true, Stopped: true, Duration: 50 * time.Millisecond}
+	cleanup.apply(&report)
+	report = finalizeTimingReport(report)
+
+	wantNames := []string{
+		"provider.borrow",
+		"provider.request",
+		"connect.provider",
+		"bootstrap.readiness",
+		"provider.acquire",
+		"connect.ssh",
+		"workspace.seed",
+		"workspace.overlay",
+		"command",
+		"artifacts",
+		"cleanup",
+		"unattributed",
+	}
+	wantMs := map[string]int64{
+		"provider.borrow":     100,
+		"provider.request":    200,
+		"connect.provider":    200,
+		"bootstrap.readiness": 100,
+		"provider.acquire":    100,
+		"connect.ssh":         100,
+		"workspace.seed":      50,
+		"workspace.overlay":   150,
+		"command":             200,
+		"artifacts":           100,
+		"cleanup":             50,
+		"unattributed":        100,
+	}
+	var total int64
+	for i, phase := range report.RunnerPhases {
+		total += phase.Ms
+		if i < len(wantNames) && phase.Name != wantNames[i] {
+			t.Fatalf("phase[%d]=%q want %q: %#v", i, phase.Name, wantNames[i], report.RunnerPhases)
+		}
+		if phase.Ms != wantMs[phase.Name] {
+			t.Fatalf("phase %q ms=%d want %d: %#v", phase.Name, phase.Ms, wantMs[phase.Name], report.RunnerPhases)
+		}
+		if strings.HasPrefix(phase.Name, "provider.") && phase.Name != "provider.borrow" && phase.ImageID != "ami-devtools" {
+			t.Fatalf("provider phase image=%q: %#v", phase.ImageID, phase)
+		}
+		if phase.Name == "artifacts" && (phase.TransferCount != 2 || phase.TransferBytes != 4096) {
+			t.Fatalf("artifact transfer metadata=%#v", phase)
+		}
+		if (phase.Name == "command" || phase.Name == "artifacts") && phase.RunID != "run_123" {
+			t.Fatalf("run-scoped phase identity=%#v", phase)
+		}
+	}
+	if len(report.RunnerPhases) != len(wantNames) {
+		t.Fatalf("runner phases=%#v", report.RunnerPhases)
+	}
+	if total != report.RunnerTotalMs || report.RunnerTotalMs != 1450 {
+		t.Fatalf("runner total=%d phase total=%d phases=%#v", report.RunnerTotalMs, total, report.RunnerPhases)
+	}
+}
+
+func TestRunnerPhasesMarkDelegatedProviderWorkOpaque(t *testing.T) {
+	report := TimingReport{
+		Provider:      "blacksmith-testbox",
+		LeaseID:       "tbx_123",
+		SyncDelegated: true,
+		CommandMs:     400,
+		TotalMs:       1000,
+	}
+	report = finalizeTimingReport(report)
+	cleanup := leaseCleanupResult{Attempted: true, Stopped: true, Duration: 50 * time.Millisecond}
+	cleanup.apply(&report)
+	report = finalizeTimingReport(report)
+	if len(report.RunnerPhases) != 3 {
+		t.Fatalf("runner phases=%#v", report.RunnerPhases)
+	}
+	if report.RunnerPhases[0].Name != "command" || report.RunnerPhases[0].Ms != 400 {
+		t.Fatalf("command phase=%#v", report.RunnerPhases[0])
+	}
+	opaque := report.RunnerPhases[1]
+	if opaque.Name != "delegated.opaque" || opaque.Ms != 600 || !opaque.Opaque {
+		t.Fatalf("opaque phase=%#v", opaque)
+	}
+	if cleanupPhase := report.RunnerPhases[2]; cleanupPhase.Name != "cleanup" || cleanupPhase.Ms != 50 || report.RunnerTotalMs != 1050 {
+		t.Fatalf("cleanup phase=%#v runner total=%d", cleanupPhase, report.RunnerTotalMs)
+	}
+}
+
+func TestRunnerPhasesWithoutExplicitMeasurementsStayUnattributed(t *testing.T) {
+	report := finalizeTimingReport(TimingReport{
+		Provider:    "aws",
+		LeaseMs:     100,
+		BootstrapMs: 200,
+		SyncMs:      300,
+		CommandMs:   400,
+		TotalMs:     1000,
+		EndToEndMs:  1000,
+	})
+	if len(report.RunnerPhases) != 1 || report.RunnerPhases[0].Name != "unattributed" || report.RunnerPhases[0].Ms != 1000 {
+		t.Fatalf("runner phases=%#v", report.RunnerPhases)
+	}
+}
+
+func TestRunnerPhasesUseOnlyKnownDisjointDelegatedMeasurements(t *testing.T) {
+	report := finalizeTimingReport(TimingReport{
+		Provider:      "blacksmith-testbox",
+		SyncDelegated: true,
+		SyncMs:        200,
+		CommandMs:     400,
+		TotalMs:       1000,
+	})
+	want := []RunnerPhase{
+		{Name: "workspace.sync", Ms: 200},
+		{Name: "command", Ms: 400},
+		{Name: "delegated.opaque", Ms: 400, Opaque: true},
+	}
+	if len(report.RunnerPhases) != len(want) {
+		t.Fatalf("runner phases=%#v", report.RunnerPhases)
+	}
+	for index, phase := range report.RunnerPhases {
+		if phase.Name != want[index].Name || phase.Ms != want[index].Ms || phase.Opaque != want[index].Opaque {
+			t.Fatalf("phase[%d]=%#v want %#v", index, phase, want[index])
+		}
+	}
+}
+
+func TestDelegatedRunnerTailExtendsOpaquePhase(t *testing.T) {
+	startedAt := time.Unix(100, 0)
+	report := finalizeTimingReport(TimingReport{
+		Provider:      "blacksmith-testbox",
+		SyncDelegated: true,
+		SyncMs:        200,
+		CommandMs:     400,
+		TotalMs:       1000,
+	})
+	includeObservedRunnerTail(&report, startedAt, startedAt.Add(1300*time.Millisecond))
+	report = finalizeTimingReport(report)
+
+	var opaque *RunnerPhase
+	for index := range report.RunnerPhases {
+		phase := &report.RunnerPhases[index]
+		if phase.Name == "unattributed" {
+			t.Fatalf("delegated tail was generic unattributed: %#v", report.RunnerPhases)
+		}
+		if phase.Name == "delegated.opaque" {
+			opaque = phase
+		}
+	}
+	if opaque == nil || opaque.Ms != 700 || !opaque.Opaque {
+		t.Fatalf("delegated opaque phase=%#v phases=%#v", opaque, report.RunnerPhases)
+	}
+}
+
+func TestRunnerPhasesKeepReplacementLeaseAttemptsSeparate(t *testing.T) {
+	timings := runTimings{
+		lease:       600 * time.Millisecond,
+		leasePhase:  "provider.acquire",
+		connect:     100 * time.Millisecond,
+		syncConnect: 25 * time.Millisecond,
+		bootstrap:   100 * time.Millisecond,
+		sync:        300 * time.Millisecond,
+		providerEvidence: &runnerProviderEvidence{
+			ImageID: "ami-old",
+			Phases:  []RunnerPhase{{Name: "provider.request", Ms: 500}},
+		},
+	}
+	resetRunnerTimingsForReplacement(
+		&timings,
+		TimingReport{Provider: "aws", LeaseID: "cbx_old", Slug: "old-crab", MachineType: "m7i.large"},
+		75*time.Millisecond,
+		200*time.Millisecond,
+		&runnerProviderEvidence{
+			ImageID: "ami-new",
+			Phases:  []RunnerPhase{{Name: "provider.request", Ms: 150}},
+		},
+	)
+	timings.connect = 50 * time.Millisecond
+	timings.sync = 100 * time.Millisecond
+	timings.command = 200 * time.Millisecond
+
+	report := timingReportFromRun("aws", "cbx_new", "new-crab", timings, 2*time.Second, 0)
+	report.MachineType = "m8i.large"
+	report = finalizeTimingReport(report)
+
+	if report.LeaseMs != 800 || report.BootstrapMs != 100 || report.SyncMs != 100 {
+		t.Fatalf("replacement aggregates lease=%d bootstrap=%d sync=%d", report.LeaseMs, report.BootstrapMs, report.SyncMs)
+	}
+	var oldProvider, newProvider, oldCleanup *RunnerPhase
+	for index := range report.RunnerPhases {
+		phase := &report.RunnerPhases[index]
+		if phase.Name == "cleanup" && phase.LeaseID == "cbx_old" {
+			oldCleanup = phase
+		}
+		if phase.Name != "provider.request" {
+			continue
+		}
+		switch phase.LeaseID {
+		case "cbx_old":
+			oldProvider = phase
+		case "cbx_new":
+			newProvider = phase
+		}
+	}
+	if oldProvider == nil || oldProvider.Slug != "old-crab" || oldProvider.MachineType != "m7i.large" || oldProvider.ImageID != "ami-old" {
+		t.Fatalf("old provider phase=%#v phases=%#v", oldProvider, report.RunnerPhases)
+	}
+	if newProvider == nil || newProvider.Slug != "new-crab" || newProvider.MachineType != "m8i.large" || newProvider.ImageID != "ami-new" {
+		t.Fatalf("new provider phase=%#v phases=%#v", newProvider, report.RunnerPhases)
+	}
+	if oldCleanup == nil || oldCleanup.Ms != 75 || oldCleanup.Slug != "old-crab" || oldCleanup.MachineType != "m7i.large" {
+		t.Fatalf("old cleanup phase=%#v phases=%#v", oldCleanup, report.RunnerPhases)
+	}
+}
+
+func TestRunnerTotalIncludesPostCommandTailAsUnattributed(t *testing.T) {
+	startedAt := time.Unix(100, 0)
+	report := TimingReport{
+		Provider:      "aws",
+		RunnerTotalMs: 500,
+		RunnerPhases:  []RunnerPhase{{Name: "command", Ms: 400}},
+	}
+	includeObservedRunnerTail(&report, startedAt, startedAt.Add(700*time.Millisecond))
+	report = finalizeTimingReport(report)
+	if report.RunnerTotalMs != 700 {
+		t.Fatalf("runner total=%d", report.RunnerTotalMs)
+	}
+	if len(report.RunnerPhases) != 2 || report.RunnerPhases[1].Name != "unattributed" || report.RunnerPhases[1].Ms != 300 {
+		t.Fatalf("runner phases=%#v", report.RunnerPhases)
+	}
+}
+
+func TestFailedReplacementAcquirePreservesLegacyLeaseDuration(t *testing.T) {
+	timings := runTimings{
+		lease: 600 * time.Millisecond,
+		sync:  300 * time.Millisecond,
+	}
+	recordFailedReplacementLeaseDuration(&timings, 200*time.Millisecond)
+	if got := legacyLeaseDuration(timings); got != 800*time.Millisecond {
+		t.Fatalf("legacy lease duration=%s", got)
+	}
+	if timings.sync != 300*time.Millisecond {
+		t.Fatalf("legacy sync duration=%s", timings.sync)
 	}
 }
 
