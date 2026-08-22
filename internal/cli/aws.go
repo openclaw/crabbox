@@ -52,17 +52,48 @@ type AWSClient struct {
 }
 
 type AWSLaunchAttempt struct {
-	Region           string `json:"region"`
-	AvailabilityZone string `json:"availabilityZone,omitempty"`
-	SubnetID         string `json:"subnetID,omitempty"`
-	ServerType       string `json:"serverType"`
-	Market           string `json:"market"`
-	ImageID          string `json:"imageID"`
-	SecurityGroupID  string `json:"securityGroupID"`
-	HostID           string `json:"hostID,omitempty"`
-	KeyPairID        string `json:"keyPairID,omitempty"`
-	ClientToken      string `json:"clientToken"`
-	ParametersSHA256 string `json:"parametersSHA256"`
+	Region                string   `json:"region"`
+	AvailabilityZone      string   `json:"availabilityZone,omitempty"`
+	SubnetID              string   `json:"subnetID,omitempty"`
+	ServerType            string   `json:"serverType"`
+	Market                string   `json:"market"`
+	ImageID               string   `json:"imageID"`
+	SecurityGroupID       string   `json:"securityGroupID"`
+	HostID                string   `json:"hostID,omitempty"`
+	KeyPairID             string   `json:"keyPairID,omitempty"`
+	ClientToken           string   `json:"clientToken"`
+	ParametersSHA256      string   `json:"parametersSHA256"`
+	CacheAvailabilityZone string   `json:"cacheAvailabilityZone,omitempty"`
+	CacheABI              string   `json:"cacheABI,omitempty"`
+	CacheGenerations      []string `json:"cacheGenerations,omitempty"`
+	CacheVolumeIDs        []string `json:"cacheVolumeIDs,omitempty"`
+}
+
+func awsCacheVolumeAttemptABI(bindings []AWSCacheVolumeBinding) string {
+	values := make([]string, 0, len(bindings))
+	for _, binding := range bindings {
+		values = append(values, binding.ABI)
+	}
+	sort.Strings(values)
+	return strings.Join(values, ",")
+}
+
+func awsCacheVolumeAttemptGenerations(bindings []AWSCacheVolumeBinding) []string {
+	values := make([]string, 0, len(bindings))
+	for _, binding := range bindings {
+		values = append(values, fmt.Sprintf("%s=%d", binding.Name, binding.Generation))
+	}
+	sort.Strings(values)
+	return values
+}
+
+func awsCacheVolumeAttemptIDs(bindings []AWSCacheVolumeBinding) []string {
+	values := make([]string, 0, len(bindings))
+	for _, binding := range bindings {
+		values = append(values, binding.VolumeID)
+	}
+	sort.Strings(values)
+	return values
 }
 
 type AWSFixedCreateControl struct {
@@ -649,6 +680,27 @@ func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 			labels["aws_key_pair_id"] = control.KeyPairID
 		}
 	}
+	if cfg.AWSCacheVolumeLifecycle != nil && len(cfg.Cache.Volumes) > 0 {
+		availabilityZone, err := c.cacheVolumeAvailabilityZone(ctx, cfg)
+		if err != nil {
+			return Server{}, err
+		}
+		plan, err := cfg.AWSCacheVolumeLifecycle.Prepare(ctx, c, AWSCacheVolumePrepareRequest{
+			LeaseID:          leaseID,
+			RepoScope:        cfg.AWSCacheVolumeRepoScope,
+			Region:           cfg.AWSRegion,
+			AvailabilityZone: availabilityZone,
+			ServerType:       cfg.ServerType,
+			SSHUser:          cfg.SSHUser,
+			WorkRoot:         cfg.WorkRoot,
+			Volumes:          cfg.Cache.Volumes,
+			PurgeOnRelease:   cfg.Cache.PurgeOnRelease,
+		})
+		if err != nil {
+			return Server{}, err
+		}
+		cfg.AWSCacheVolumePlan = &plan
+	}
 	userData := base64.StdEncoding.EncodeToString([]byte(awsUserData(cfg, publicKey)))
 	rootGB := cfg.AWSRootGB
 	if rootGB <= 0 {
@@ -727,6 +779,12 @@ func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 		HostID:          cfg.HostID,
 		ClientToken:     clientToken,
 	}
+	if cfg.AWSCacheVolumePlan != nil {
+		attempt.CacheAvailabilityZone = cfg.AWSCacheVolumePlan.AvailabilityZone
+		attempt.CacheABI = awsCacheVolumeAttemptABI(cfg.AWSCacheVolumePlan.Bindings)
+		attempt.CacheGenerations = awsCacheVolumeAttemptGenerations(cfg.AWSCacheVolumePlan.Bindings)
+		attempt.CacheVolumeIDs = awsCacheVolumeAttemptIDs(cfg.AWSCacheVolumePlan.Bindings)
+	}
 	if input.Placement != nil {
 		attempt.AvailabilityZone = aws.ToString(input.Placement.AvailabilityZone)
 		if attempt.HostID == "" {
@@ -767,6 +825,9 @@ func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 	}
 	out, err := c.ec2.RunInstances(ctx, input)
 	if err != nil {
+		if cfg.AWSCacheVolumeLifecycle != nil && cfg.AWSCacheVolumePlan != nil {
+			_ = cfg.AWSCacheVolumeLifecycle.Release(context.WithoutCancel(ctx), c, leaseID, cfg.Cache.PurgeOnRelease)
+		}
 		code := awsAPIErrorCode(err)
 		switch code {
 		case "AuthFailure", "Blocked", "InvalidClientTokenId", "OptInRequired", "PendingVerification", "UnauthorizedOperation":
@@ -784,9 +845,22 @@ func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 		return Server{}, err
 	}
 	if len(out.Instances) == 0 {
+		if cfg.AWSCacheVolumeLifecycle != nil && cfg.AWSCacheVolumePlan != nil {
+			_ = cfg.AWSCacheVolumeLifecycle.Release(context.WithoutCancel(ctx), c, leaseID, cfg.Cache.PurgeOnRelease)
+		}
 		return Server{}, exit(5, "aws returned no instances")
 	}
-	return awsInstanceToServer(out.Instances[0]), nil
+	server := awsInstanceToServer(out.Instances[0])
+	if cfg.AWSCacheVolumeLifecycle != nil && cfg.AWSCacheVolumePlan != nil {
+		if err := cfg.AWSCacheVolumeLifecycle.Attach(ctx, c, *cfg.AWSCacheVolumePlan, server.CloudID); err != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+			defer cancel()
+			_ = c.DeleteServer(cleanupCtx, server.CloudID)
+			_ = cfg.AWSCacheVolumeLifecycle.Release(cleanupCtx, c, leaseID, cfg.Cache.PurgeOnRelease)
+			return Server{}, fmt.Errorf("attach AWS cache volumes: %w", err)
+		}
+	}
+	return server, nil
 }
 
 func awsAPIErrorCode(err error) string {
@@ -877,6 +951,171 @@ func (c *AWSClient) DeleteServer(ctx context.Context, id string) error {
 		InstanceIds: []string{id},
 	})
 	return err
+}
+
+func (c *AWSClient) CreateCacheVolume(ctx context.Context, availabilityZone string, sizeGB int32, labels map[string]string, clientToken string) (string, error) {
+	tags := make([]types.Tag, 0, len(labels))
+	for key, value := range labels {
+		tags = append(tags, types.Tag{Key: aws.String(key), Value: aws.String(value)})
+	}
+	sort.Slice(tags, func(i, j int) bool {
+		return aws.ToString(tags[i].Key) < aws.ToString(tags[j].Key)
+	})
+	out, err := c.ec2.CreateVolume(ctx, &ec2.CreateVolumeInput{
+		AvailabilityZone: aws.String(availabilityZone),
+		ClientToken:      aws.String(clientToken),
+		Encrypted:        aws.Bool(true),
+		Size:             aws.Int32(max(sizeGB, 1)),
+		VolumeType:       types.VolumeTypeGp3,
+		TagSpecifications: []types.TagSpecification{{
+			ResourceType: types.ResourceTypeVolume,
+			Tags:         tags,
+		}},
+	})
+	if err != nil {
+		return "", err
+	}
+	volumeID := strings.TrimSpace(aws.ToString(out.VolumeId))
+	if volumeID == "" {
+		return "", exit(5, "aws returned no cache volume id")
+	}
+	return volumeID, nil
+}
+
+func (c *AWSClient) ValidateCacheVolumeInstanceType(ctx context.Context, instanceType string) error {
+	out, err := c.ec2.DescribeInstanceTypes(ctx, &ec2.DescribeInstanceTypesInput{
+		InstanceTypes: []types.InstanceType{types.InstanceType(instanceType)},
+	})
+	if err != nil {
+		return err
+	}
+	if len(out.InstanceTypes) != 1 || out.InstanceTypes[0].Hypervisor != types.InstanceTypeHypervisorNitro {
+		return exit(2, "AWS cache volumes require a Nitro/NVMe instance type: %s", instanceType)
+	}
+	return nil
+}
+
+func (c *AWSClient) FindCacheVolumes(ctx context.Context, availabilityZone string, labels map[string]string) ([]AWSCacheVolume, error) {
+	filters := []types.Filter{{
+		Name:   aws.String("availability-zone"),
+		Values: []string{availabilityZone},
+	}}
+	keys := make([]string, 0, len(labels))
+	for key := range labels {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		filters = append(filters, types.Filter{
+			Name:   aws.String("tag:" + key),
+			Values: []string{labels[key]},
+		})
+	}
+	out, err := c.ec2.DescribeVolumes(ctx, &ec2.DescribeVolumesInput{Filters: filters})
+	if err != nil {
+		return nil, err
+	}
+	volumes := make([]AWSCacheVolume, 0, len(out.Volumes))
+	for _, volume := range out.Volumes {
+		attachments := make([]string, 0, len(volume.Attachments))
+		for _, attachment := range volume.Attachments {
+			if instanceID := strings.TrimSpace(aws.ToString(attachment.InstanceId)); instanceID != "" {
+				attachments = append(attachments, instanceID)
+			}
+		}
+		tags := make(map[string]string, len(volume.Tags))
+		for _, tag := range volume.Tags {
+			tags[aws.ToString(tag.Key)] = aws.ToString(tag.Value)
+		}
+		volumes = append(volumes, AWSCacheVolume{
+			ID:               strings.TrimSpace(aws.ToString(volume.VolumeId)),
+			State:            AWSCacheVolumeState(volume.State),
+			AvailabilityZone: strings.TrimSpace(aws.ToString(volume.AvailabilityZone)),
+			Encrypted:        aws.ToBool(volume.Encrypted),
+			VolumeType:       string(volume.VolumeType),
+			SizeGB:           aws.ToInt32(volume.Size),
+			MultiAttach:      aws.ToBool(volume.MultiAttachEnabled),
+			Attachments:      attachments,
+			Tags:             tags,
+		})
+	}
+	return volumes, nil
+}
+
+func (c *AWSClient) DescribeCacheVolume(ctx context.Context, volumeID string) (AWSCacheVolume, error) {
+	out, err := c.ec2.DescribeVolumes(ctx, &ec2.DescribeVolumesInput{VolumeIds: []string{volumeID}})
+	if err != nil {
+		return AWSCacheVolume{}, err
+	}
+	if len(out.Volumes) != 1 {
+		return AWSCacheVolume{}, exit(4, "aws cache volume not found: %s", volumeID)
+	}
+	volume := out.Volumes[0]
+	attachments := make([]string, 0, len(volume.Attachments))
+	for _, attachment := range volume.Attachments {
+		if instanceID := strings.TrimSpace(aws.ToString(attachment.InstanceId)); instanceID != "" {
+			attachments = append(attachments, instanceID)
+		}
+	}
+	labels := make(map[string]string, len(volume.Tags))
+	for _, tag := range volume.Tags {
+		labels[aws.ToString(tag.Key)] = aws.ToString(tag.Value)
+	}
+	return AWSCacheVolume{
+		ID:               strings.TrimSpace(aws.ToString(volume.VolumeId)),
+		State:            AWSCacheVolumeState(volume.State),
+		AvailabilityZone: strings.TrimSpace(aws.ToString(volume.AvailabilityZone)),
+		Encrypted:        aws.ToBool(volume.Encrypted),
+		VolumeType:       string(volume.VolumeType),
+		SizeGB:           aws.ToInt32(volume.Size),
+		MultiAttach:      aws.ToBool(volume.MultiAttachEnabled),
+		Attachments:      attachments,
+		Tags:             labels,
+	}, nil
+}
+
+func (c *AWSClient) AttachCacheVolume(ctx context.Context, volumeID, instanceID, device string) error {
+	_, err := c.ec2.AttachVolume(ctx, &ec2.AttachVolumeInput{
+		Device:     aws.String(device),
+		InstanceId: aws.String(instanceID),
+		VolumeId:   aws.String(volumeID),
+	})
+	return err
+}
+
+func (c *AWSClient) DetachCacheVolume(ctx context.Context, volumeID, instanceID string) error {
+	_, err := c.ec2.DetachVolume(ctx, &ec2.DetachVolumeInput{
+		InstanceId: aws.String(instanceID),
+		VolumeId:   aws.String(volumeID),
+	})
+	return err
+}
+
+func (c *AWSClient) DeleteCacheVolume(ctx context.Context, volumeID string) error {
+	_, err := c.ec2.DeleteVolume(ctx, &ec2.DeleteVolumeInput{VolumeId: aws.String(volumeID)})
+	return err
+}
+
+func (c *AWSClient) cacheVolumeAvailabilityZone(ctx context.Context, cfg Config) (string, error) {
+	if strings.TrimSpace(cfg.AWSSubnetID) == "" {
+		zone := awsAvailabilityZoneForRegion(cfg, cfg.AWSRegion)
+		if zone == "" {
+			return "", exit(2, "AWS cache volumes require an explicit availability zone or subnet")
+		}
+		return zone, nil
+	}
+	out, err := c.ec2.DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{SubnetIds: []string{cfg.AWSSubnetID}})
+	if err != nil {
+		return "", err
+	}
+	if len(out.Subnets) != 1 {
+		return "", exit(3, "AWS subnet not found: %s", cfg.AWSSubnetID)
+	}
+	zone := strings.TrimSpace(aws.ToString(out.Subnets[0].AvailabilityZone))
+	if zone == "" {
+		return "", exit(3, "AWS subnet %s has no availability zone", cfg.AWSSubnetID)
+	}
+	return zone, nil
 }
 
 func (c *AWSClient) CreateImageCheckpoint(ctx context.Context, instanceID, name string, noReboot bool) (CoordinatorImage, error) {

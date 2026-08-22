@@ -216,6 +216,21 @@ readiness preflight, API, AWS-GO gate, and live canary are in
 6. Hand off to core for sync and command execution over SSH.
 7. Terminate on release, cleanup, or broker expiry.
 
+For public Linux SSH leases, configured
+[cache volumes](../features/cache-volumes.md) are reserved in the exact launch
+availability zone before instance creation, attached after `RunInstances`, and
+mounted by exact EBS NVMe serial before readiness. The broker uses cache volume
+protocol v1 and fixed create intent v3 when caches are present; no-cache fixed
+leases keep the existing v2 identity. Windows, macOS, and private SSM-only
+workspaces do not support AWS cache volumes.
+
+Cache adoption fails closed unless the live member is encrypted `gp3`, has
+multi-attach disabled, matches the exact durable size/AZ/opaque tags, and has
+the expected state and attachments. Mounts cannot hide the SSH home or
+configured work root, and cannot enter the SSH `.ssh`, cloud-init, or
+`/var/lib/crabbox` control trees. `$HOME/.cache` and cache subdirectories below
+the work root remain supported.
+
 Brokered cleanup is owned by the Worker (lease expiry plus an AWS orphan
 sweep). Direct cleanup is best-effort via provider labels and
 `crabbox cleanup --provider aws`.
@@ -242,6 +257,7 @@ In brokered mode you can promote and warm AMIs:
 - Tailscale: Linux managed leases.
 - Actions hydration: Linux SSH leases only.
 - Coordinator (broker): supported.
+- Cache volumes: public Linux SSH leases, direct and brokered.
 
 ## Gotchas
 

@@ -62,10 +62,14 @@ export function cloudInit(config: LeaseConfig, additionalBootstrap = ""): string
   const portLines = sshPorts(config)
     .map((port) => `      Port ${port}`)
     .join("\n");
-  const readyChecks = optionalReadyChecks(config);
+  const readyChecks = [optionalReadyChecks(config), config.cacheVolumeReadyChecks]
+    .filter(Boolean)
+    .join("\n");
   const sshHostKeys = optionalSSHHostKeys(config);
   const writeFiles = optionalWriteFiles(config);
-  const bootstrap = [optionalBootstrap(config), additionalBootstrap].filter(Boolean).join("\n");
+  const bootstrap = [optionalBootstrap(config), config.cacheVolumeBootstrap, additionalBootstrap]
+    .filter(Boolean)
+    .join("\n");
   const readinessBootstrap = indentRuncmdScript(linuxMinimalReadinessBootstrap);
   return `#cloud-config
 package_update: false

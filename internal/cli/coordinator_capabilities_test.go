@@ -1,6 +1,10 @@
 package cli
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -55,6 +59,81 @@ func TestValidateCoordinatorLeaseCapabilitiesAcceptsRequestedCapabilities(t *tes
 	})
 	if err != nil {
 		t.Fatalf("validateCoordinatorLeaseCapabilities error: %v", err)
+	}
+}
+
+func TestValidateCoordinatorLeaseCapabilitiesRejectsOldCoordinatorForRequiredCache(t *testing.T) {
+	err := validateCoordinatorLeaseCapabilities(
+		Config{Cache: CacheConfig{Volumes: []CacheVolumeConfig{{
+			Name: "build", Key: "repo-build", Path: "/var/cache/build", Required: true,
+		}}}},
+		CoordinatorLease{ID: "cbx_test"},
+	)
+	if err == nil || !strings.Contains(err.Error(), "cache volume protocol v1") {
+		t.Fatalf("expected required cache protocol failure, got %v", err)
+	}
+}
+
+func TestValidateCoordinatorLeaseCapabilitiesAllowsExplicitOptionalCacheIgnore(t *testing.T) {
+	err := validateCoordinatorLeaseCapabilities(
+		Config{Cache: CacheConfig{Volumes: []CacheVolumeConfig{{
+			Name: "build", Key: "repo-build", Path: "/var/cache/build",
+		}}}},
+		CoordinatorLease{ID: "cbx_test"},
+	)
+	if err != nil {
+		t.Fatalf("optional cache should allow an explicit ignored result: %v", err)
+	}
+}
+
+func TestValidateCoordinatorLeaseCapabilitiesRequiresResolvedCacheBindings(t *testing.T) {
+	cfg := Config{Cache: CacheConfig{Volumes: []CacheVolumeConfig{{
+		Name: "build", Key: "repo-build", Path: "/var/cache/build", Required: true,
+	}}}}
+	if err := validateCoordinatorLeaseCapabilities(cfg, CoordinatorLease{
+		ID:                  "cbx_test",
+		CacheVolumeProtocol: AWSCacheVolumeProtocolVersion,
+	}); err == nil || !strings.Contains(err.Error(), "incomplete cache volume bindings") {
+		t.Fatalf("expected incomplete bindings failure, got %v", err)
+	}
+	if err := validateCoordinatorLeaseCapabilities(cfg, CoordinatorLease{
+		ID:                  "cbx_test",
+		CacheVolumeProtocol: AWSCacheVolumeProtocolVersion,
+		CacheVolumeBindings: []AWSCacheVolumeBinding{{
+			Name: "build", Path: "/var/cache/build", VolumeID: "vol-1", Generation: 1, ABI: "ext4-v1",
+		}},
+	}); err != nil {
+		t.Fatalf("expected cache protocol echo to pass: %v", err)
+	}
+}
+
+func TestCoordinatorFixedCacheLeaseUsesFailClosedRoute(t *testing.T) {
+	const leaseID = "cbx_abcdef123456"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/v1/leases/cache-volume-aware/"+leaseID {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		var request map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if request["cacheVolumeProtocol"] != float64(AWSCacheVolumeProtocolVersion) {
+			t.Fatalf("cacheVolumeProtocol=%v", request["cacheVolumeProtocol"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"lease":{"id":"` + leaseID + `","provider":"aws","state":"active","cacheVolumeProtocol":1,"cacheVolumeBindings":[{"name":"build","path":"/var/cache/build","volumeID":"vol-1","generation":1,"abi":"ext4-v1"}]}}`))
+	}))
+	defer server.Close()
+
+	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	_, err := client.EnsureLease(context.Background(), Config{
+		Provider: "aws",
+		Cache: CacheConfig{Volumes: []CacheVolumeConfig{{
+			Name: "build", Key: "repo-build", Path: "/var/cache/build", Required: true,
+		}}},
+	}, "ssh-ed25519 test", false, leaseID, "fixed-cache")
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -16288,6 +16288,44 @@ describe("fleet lease identity and idle", () => {
     expect(create).not.toHaveBeenCalled();
   });
 
+  it("keeps no-cache fixed intent v2 stable and binds cache v3 repository scope", async () => {
+    const noCache = leaseConfig({
+      provider: "aws",
+      awsRegion: "us-west-2",
+      sshPublicKey: "ssh-ed25519 fixed-intent-cache-version",
+    });
+    const noCacheHash = await fixedLeaseCreateIntentHash(noCache, "fixed-intent-cache-version");
+    expect(
+      await fixedLeaseCreateIntentHash(
+        { ...noCache, repoScope: "ignored-without-cache-volumes" },
+        "fixed-intent-cache-version",
+      ),
+    ).toBe(noCacheHash);
+
+    const cache = {
+      ...noCache,
+      cacheVolumeProtocol: 1,
+      cacheVolumes: [
+        {
+          name: "build",
+          key: "fixed-intent-cache-key",
+          path: "/var/cache/fixed-intent",
+          sizeGB: 20,
+          required: true,
+        },
+      ],
+      repoScope: "opaque-repo-scope-a",
+    };
+    const cacheHash = await fixedLeaseCreateIntentHash(cache, "fixed-intent-cache-version");
+    expect(cacheHash).not.toBe(noCacheHash);
+    expect(
+      await fixedLeaseCreateIntentHash(
+        { ...cache, repoScope: "opaque-repo-scope-b" },
+        "fixed-intent-cache-version",
+      ),
+    ).not.toBe(cacheHash);
+  });
+
   it("rejects fixed lease keep drift without another provider create", async () => {
     const storage = new MemoryStorage();
     let creates = 0;

@@ -255,6 +255,26 @@ export interface LeaseRequest {
   sshPublicKey?: string;
   pond?: string;
   exposedPorts?: string[];
+  cacheVolumeProtocol?: number;
+  cacheVolumes?: CacheVolumeConfig[];
+  purgeOnRelease?: boolean;
+  repoScope?: string;
+}
+
+export interface CacheVolumeConfig {
+  name?: string;
+  key: string;
+  path: string;
+  sizeGB?: number;
+  required?: boolean;
+}
+
+export interface CacheVolumeBinding {
+  name: string;
+  path: string;
+  volumeID: string;
+  generation: number;
+  abi: string;
 }
 
 export interface ImageCapabilities {
@@ -452,6 +472,9 @@ export interface LeaseRecord {
   providerKeyCleanupOwned?: boolean;
   providerKeyCleanupPending?: boolean;
   providerKeyCleanupID?: string;
+  cacheVolumeProtocol?: number;
+  cacheVolumeBindings?: CacheVolumeBinding[];
+  purgeOnRelease?: boolean;
   host: string;
   sshUser: string;
   sshPort: string;

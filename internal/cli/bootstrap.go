@@ -51,6 +51,20 @@ func cloudInitWithAdditionalBootstrap(cfg Config, publicKey, additionalBootstrap
 	readyChecks := cloudInitOptionalReadyChecks(cfg)
 	writeFiles := cloudInitOptionalWriteFiles(cfg)
 	bootstrap := cloudInitOptionalBootstrap(cfg)
+	if cfg.AWSCacheVolumePlan != nil {
+		if cfg.AWSCacheVolumePlan.ReadyChecks != "" {
+			if readyChecks != "" {
+				readyChecks += "\n"
+			}
+			readyChecks += cfg.AWSCacheVolumePlan.ReadyChecks
+		}
+		if cfg.AWSCacheVolumePlan.Bootstrap != "" {
+			if additionalBootstrap != "" {
+				additionalBootstrap += "\n"
+			}
+			additionalBootstrap += cfg.AWSCacheVolumePlan.Bootstrap
+		}
+	}
 	readinessBootstrap := indentCloudInitRuncmd(linuxMinimalReadinessBootstrap)
 	if additionalBootstrap != "" {
 		if bootstrap != "" {

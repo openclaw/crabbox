@@ -1,6 +1,7 @@
 import { AwsClient } from "aws4fetch";
 import { XMLParser } from "fast-xml-parser";
 
+import type { AWSCacheVolumeDescription } from "./aws-cache-volumes";
 import { requireAWSRegion, sanitizeAWSRegion } from "./aws-region";
 import { awsRunInstancesUserData } from "./bootstrap";
 import {
@@ -675,6 +676,137 @@ export class EC2SpotClient {
       }
       throw error;
     }
+  }
+
+  async callerAccountID(): Promise<string> {
+    return (await this.verifiedIdentity()).account;
+  }
+
+  async cacheVolumeAvailabilityZone(config: LeaseConfig): Promise<string> {
+    const subnetID = config.awsSubnetID || this.env.CRABBOX_AWS_SUBNET_ID || "";
+    if (!subnetID) {
+      const zone = awsAvailabilityZoneForRegion(config, this.env, this.region);
+      if (!zone)
+        throw new Error("AWS cache volumes require an explicit availability zone or subnet");
+      return zone;
+    }
+    const root = await this.ec2("DescribeSubnets", { "SubnetId.1": subnetID });
+    const subnet = items(record(root["subnetSet"])["item"]).map(record)[0];
+    const zone = asString(subnet?.["availabilityZone"]);
+    if (!zone) throw new Error(`AWS subnet ${subnetID} has no availability zone`);
+    return zone;
+  }
+
+  async validateCacheVolumeInstanceType(config: LeaseConfig): Promise<void> {
+    const candidates = awsLaunchCandidates(config);
+    if (candidates.length === 0) {
+      throw new Error("AWS cache volumes require at least one launch candidate");
+    }
+    const params: Record<string, string> = {};
+    candidates.forEach((instanceType, index) => {
+      params[`InstanceType.${index + 1}`] = instanceType;
+    });
+    const root = await this.ec2("DescribeInstanceTypes", params);
+    const described = new Map(
+      items(record(root["instanceTypeSet"])["item"])
+        .map(record)
+        .map((item) => [asString(item["instanceType"]), item] as const),
+    );
+    const rejected = candidates.filter(
+      (instanceType) => asString(described.get(instanceType)?.["hypervisor"]) !== "nitro",
+    );
+    if (rejected.length > 0) {
+      throw new Error(
+        `AWS cache volumes require every launch candidate to support Nitro/NVMe; rejected: ${rejected.join(", ")}`,
+      );
+    }
+  }
+
+  async createCacheVolume(
+    availabilityZone: string,
+    sizeGB: number,
+    tags: Record<string, string>,
+    clientToken: string,
+  ): Promise<string> {
+    const params: Record<string, string> = {
+      AvailabilityZone: availabilityZone,
+      ClientToken: clientToken,
+      Encrypted: "true",
+      Size: String(Math.max(1, Math.trunc(sizeGB))),
+      VolumeType: "gp3",
+      "TagSpecification.1.ResourceType": "volume",
+    };
+    addTags(params, "TagSpecification.1.Tag", tags);
+    const root = await this.ec2("CreateVolume", params);
+    const volumeID = asString(root["volumeId"]);
+    if (!volumeID) throw new Error("AWS returned no cache volume id");
+    return volumeID;
+  }
+
+  async findCacheVolumes(
+    availabilityZone: string,
+    tags: Record<string, string>,
+  ): Promise<AWSCacheVolumeDescription[]> {
+    const params: Record<string, string> = {
+      "Filter.1.Name": "availability-zone",
+      "Filter.1.Value.1": availabilityZone,
+    };
+    Object.entries(tags)
+      .toSorted(([left], [right]) => left.localeCompare(right))
+      .forEach(([key, value], index) => {
+        const filter = index + 2;
+        params[`Filter.${filter}.Name`] = `tag:${key}`;
+        params[`Filter.${filter}.Value.1`] = value;
+      });
+    const root = await this.ec2("DescribeVolumes", params);
+    return items(record(root["volumeSet"])["item"]).map((item) => {
+      const volume = record(item);
+      return {
+        id: asString(volume["volumeId"]),
+        state: asString(volume["status"]),
+        availabilityZone: asString(volume["availabilityZone"]),
+        encrypted: asString(volume["encrypted"]) === "true",
+        volumeType: asString(volume["volumeType"]),
+        sizeGB: finiteNumber(volume["size"]) ?? 0,
+        multiAttachEnabled: asString(volume["multiAttachEnabled"]) === "true",
+        attachments: items(record(volume["attachmentSet"])["item"])
+          .map((attachment) => asString(record(attachment)["instanceId"]))
+          .filter(Boolean),
+        tags: tagMap(record(volume["tagSet"])),
+      };
+    });
+  }
+
+  async describeCacheVolume(volumeID: string): Promise<AWSCacheVolumeDescription> {
+    const root = await this.ec2("DescribeVolumes", { "VolumeId.1": volumeID });
+    const volume = items(record(root["volumeSet"])["item"]).map(record)[0];
+    if (!volume) throw new Error(`AWS cache volume not found: ${volumeID}`);
+    const attachments = items(record(volume["attachmentSet"])["item"])
+      .map((attachment) => asString(record(attachment)["instanceId"]))
+      .filter(Boolean);
+    return {
+      id: asString(volume["volumeId"]),
+      state: asString(volume["status"]),
+      availabilityZone: asString(volume["availabilityZone"]),
+      encrypted: asString(volume["encrypted"]) === "true",
+      volumeType: asString(volume["volumeType"]),
+      sizeGB: finiteNumber(volume["size"]) ?? 0,
+      multiAttachEnabled: asString(volume["multiAttachEnabled"]) === "true",
+      attachments,
+      tags: tagMap(record(volume["tagSet"])),
+    };
+  }
+
+  async attachCacheVolume(volumeID: string, instanceID: string, device: string): Promise<void> {
+    await this.ec2("AttachVolume", { Device: device, InstanceId: instanceID, VolumeId: volumeID });
+  }
+
+  async detachCacheVolume(volumeID: string, instanceID: string): Promise<void> {
+    await this.ec2("DetachVolume", { InstanceId: instanceID, VolumeId: volumeID });
+  }
+
+  async deleteCacheVolume(volumeID: string): Promise<void> {
+    await this.ec2("DeleteVolume", { VolumeId: volumeID });
   }
 
   async privateWorkspacePreflight(

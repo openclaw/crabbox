@@ -107,6 +107,8 @@ type CoordinatorLease struct {
 	ReleaseDeletesServer  *bool                          `json:"releaseDeletesServer,omitempty"`
 	FailureError          string                         `json:"failureError,omitempty"`
 	ProviderMetadata      map[string]any                 `json:"providerMetadata,omitempty"`
+	CacheVolumeProtocol   int                            `json:"cacheVolumeProtocol,omitempty"`
+	CacheVolumeBindings   []AWSCacheVolumeBinding        `json:"cacheVolumeBindings,omitempty"`
 }
 
 type CoordinatorCanceledCreateAttestation struct {
@@ -1043,6 +1045,12 @@ func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicK
 		"pond":                            cfg.Pond,
 		"exposedPorts":                    cfg.ExposedPorts,
 	}
+	if len(cfg.Cache.Volumes) > 0 {
+		req["cacheVolumeProtocol"] = AWSCacheVolumeProtocolVersion
+		req["cacheVolumes"] = cfg.Cache.Volumes
+		req["purgeOnRelease"] = cfg.Cache.PurgeOnRelease
+		req["repoScope"] = cfg.AWSCacheVolumeRepoScope
+	}
 	if !fixed {
 		req["createAttemptID"] = createAttemptID
 	}
@@ -1069,7 +1077,16 @@ func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicK
 	path := "/v1/leases"
 	if fixed {
 		method = http.MethodPut
-		path = "/v1/leases/" + url.PathEscape(leaseID)
+		if len(cfg.Cache.Volumes) > 0 {
+			// The dedicated route makes old coordinators reject the request
+			// before they can provision while silently dropping cache intent.
+			path = "/v1/leases/cache-volume-aware/" + url.PathEscape(leaseID)
+		} else {
+			path = "/v1/leases/" + url.PathEscape(leaseID)
+		}
+	} else if len(requiredCacheVolumes(cfg.Cache.Volumes)) > 0 {
+		// Older coordinators do not have this route, so required cache volumes fail closed.
+		path = "/v1/leases/cache-volume-aware"
 	} else if !imageRequirementsEmpty(cfg.imageRequirements) {
 		// Older coordinators do not have this route, so mixed-version use fails closed.
 		path = "/v1/leases/capability-aware"

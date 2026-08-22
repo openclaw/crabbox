@@ -76,6 +76,9 @@ type Config struct {
 	AWSSSHCIDRs                   []string
 	AWSSSHCIDRsPinned             bool
 	AWSMacHostID                  string
+	AWSCacheVolumeLifecycle       AWSCacheVolumeLifecycle
+	AWSCacheVolumeRepoScope       string
+	AWSCacheVolumePlan            *AWSCacheVolumePlan
 	AWSLambdaMicroVM              AWSLambdaMicroVMConfig
 	AzureSubscription             string
 	AzureTenant                   string

@@ -3401,6 +3401,34 @@ func validateCoordinatorLeaseCapabilities(cfg Config, lease CoordinatorLease) er
 	if cfg.Tailscale.Enabled && (lease.Tailscale == nil || !lease.Tailscale.Enabled) {
 		return exit(5, "coordinator did not provision tailscale=true for lease %s; deploy the coordinator with Tailscale support", blank(lease.ID, "-"))
 	}
+	if len(cfg.Cache.Volumes) > 0 {
+		if lease.CacheVolumeProtocol != AWSCacheVolumeProtocolVersion {
+			if len(requiredCacheVolumes(cfg.Cache.Volumes)) > 0 {
+				return exit(5, "coordinator does not support required cache volumes for lease %s; deploy cache volume protocol v%d", blank(lease.ID, "-"), AWSCacheVolumeProtocolVersion)
+			}
+			return nil
+		}
+		if len(lease.CacheVolumeBindings) != len(cfg.Cache.Volumes) {
+			return exit(5, "coordinator returned incomplete cache volume bindings for lease %s", blank(lease.ID, "-"))
+		}
+		bindings := make(map[string]AWSCacheVolumeBinding, len(lease.CacheVolumeBindings))
+		for _, binding := range lease.CacheVolumeBindings {
+			if binding.Name == "" || binding.Path == "" || binding.VolumeID == "" || binding.Generation <= 0 || binding.ABI == "" {
+				return exit(5, "coordinator returned invalid cache volume binding for lease %s", blank(lease.ID, "-"))
+			}
+			if _, exists := bindings[binding.Name]; exists {
+				return exit(5, "coordinator returned duplicate cache volume binding %q for lease %s", binding.Name, blank(lease.ID, "-"))
+			}
+			bindings[binding.Name] = binding
+		}
+		for _, volume := range cfg.Cache.Volumes {
+			name := firstNonBlank(volume.Name, volume.Key)
+			binding, ok := bindings[name]
+			if !ok || binding.Path != volume.Path {
+				return exit(5, "coordinator returned mismatched cache volume binding %q for lease %s", name, blank(lease.ID, "-"))
+			}
+		}
+	}
 	return nil
 }
 

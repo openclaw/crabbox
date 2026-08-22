@@ -562,6 +562,8 @@ describe("coordinator runtimes", () => {
       ["GET", "/v1/native-vnc/handoff"],
       ["GET", "/v1/leases/cbx_abcdef123456"],
       ["PUT", "/v1/leases/cbx_abcdef123456"],
+      ["POST", "/v1/leases/cache-volume-aware"],
+      ["PUT", "/v1/leases/cache-volume-aware/cbx_abcdef123456"],
       ["POST", "/v1/leases/cbx_abcdef123456/tailscale"],
       ["GET", "/v1/adapters/applied-alice"],
       ["POST", "/v1/adapters/applied-alice/proxy/v1/workspaces"],
