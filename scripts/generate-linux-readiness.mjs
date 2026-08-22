@@ -162,6 +162,129 @@ function effectiveProbeCommands(profile, options) {
   });
 }
 
+function runtimeInventoryTargets(profile, options) {
+  const targets = [];
+  for (const probe of profile.probes) {
+    if (probe.name === "sshd") {
+      targets.push({ kind: "file", name: probe.name, value: options.sshdPath });
+      continue;
+    }
+    if (probe.name === "ca-certificates") {
+      targets.push({ kind: "file", name: probe.name, value: options.caPath });
+      continue;
+    }
+    const command = probe.command.match(/^([a-z0-9][a-z0-9+.-]*)\b/u)?.[1];
+    if (!command) {
+      throw new Error(`${profile.profile}.${probe.name} cannot derive runtime inventory command`);
+    }
+    targets.push({ kind: "command", name: probe.name, value: command });
+    if (probe.name === "git-lfs") {
+      targets.push({ kind: "command", name: "git-lfs-binary", value: "git-lfs" });
+    }
+  }
+  return targets;
+}
+
+function runtimeProfileVerifier(profile, recipeDigest, options) {
+  const functionName = profile.profile.replaceAll("-", "_");
+  const probes = effectiveProbeCommands(profile, options)
+    .map((command) => `  ${command}`)
+    .join(" &&\n");
+  const probeEvidence = profile.probes
+    .map(
+      (probe) =>
+        `    printf '%s\\0%s\\0' ${shellSingleQuote(probe.name)} ${shellSingleQuote(probe.command)}`,
+    )
+    .join("\n");
+  const inventoryEvidence = runtimeInventoryTargets(profile, options)
+    .map((target) => {
+      if (target.kind === "file") {
+        return `    printf '%s\\0%s\\0' ${shellSingleQuote(`file:${target.name}`)} ${shellSingleQuote(target.value)}
+    ${shellSingleQuote(options.sha256sumPath)} -- ${shellSingleQuote(target.value)}`;
+      }
+      return `    command_path="$(type -P ${shellSingleQuote(target.value)})"
+    test -n "$command_path"
+    printf '%s\\0%s\\0' ${shellSingleQuote(`command:${target.name}`)} "$command_path"
+    ${shellSingleQuote(options.sha256sumPath)} -- "$command_path"`;
+    })
+    .join("\n");
+  return `crabbox_${functionName}_readiness_probes() {
+${probes}
+}
+crabbox_${functionName}_runtime_inventory_digest() {
+  local command_path
+  {
+    printf '%s\\0%s\\0' 'schema' 'crabbox-linux-runtime-inventory/v1'
+    printf '%s\\0%s\\0' 'profile' ${shellSingleQuote(profile.profile)}
+    printf '%s\\0%s\\0' 'recipeDigest' ${shellSingleQuote(recipeDigest)}
+${probeEvidence}
+${inventoryEvidence}
+  } | ${shellSingleQuote(options.sha256sumPath)} | ${shellSingleQuote(options.awkPath)} '{print "sha256:" $1}'
+}`;
+}
+
+export function readinessEvidenceCommand(
+  minimal,
+  builder,
+  minimalDigest,
+  builderDigest,
+  overrides = {},
+) {
+  const options = {
+    manifestPath: defaultManifestPath,
+    sshdPath: "/usr/sbin/sshd",
+    caPath: "/etc/ssl/certs/ca-certificates.crt",
+    manifestOwnerUID: "0",
+    bashPath: "/bin/bash",
+    statPath: "/usr/bin/stat",
+    catPath: "/usr/bin/cat",
+    jqPath: "/usr/bin/jq",
+    sha256sumPath: "/usr/bin/sha256sum",
+    awkPath: "/usr/bin/awk",
+    ...overrides,
+  };
+  const script = `set -euo pipefail
+crabbox_readiness_manifest_path=${shellSingleQuote(options.manifestPath)}
+crabbox_readiness_schema='crabbox-linux-readiness/v1'
+crabbox_minimal_profile='linux-minimal'
+crabbox_minimal_recipe_digest=${shellSingleQuote(minimalDigest)}
+crabbox_builder_profile='linux-builder'
+crabbox_builder_recipe_digest=${shellSingleQuote(builderDigest)}
+${runtimeProfileVerifier(minimal, minimalDigest, options)}
+${runtimeProfileVerifier(builder, builderDigest, options)}
+test -f "$crabbox_readiness_manifest_path"
+test ! -L "$crabbox_readiness_manifest_path"
+test "$(${shellSingleQuote(options.statPath)} -c '%u:%a' "$crabbox_readiness_manifest_path" 2>/dev/null)" = "${options.manifestOwnerUID}:644"
+manifest_json="$(${shellSingleQuote(options.catPath)} -- "$crabbox_readiness_manifest_path")"
+printf '%s' "$manifest_json" | ${shellSingleQuote(options.jqPath)} -e \
+  --arg schema "$crabbox_readiness_schema" \
+  'type == "object" and
+    .schema == $schema and
+    (.profile | type == "string") and
+    (.recipeDigest | type == "string" and test("^sha256:[0-9a-f]{64}$")) and
+    (.inventoryDigest | type == "string" and test("^sha256:[0-9a-f]{64}$")) and
+    (keys | sort) == ["inventoryDigest", "profile", "recipeDigest", "schema"]' >/dev/null
+profile="$(printf '%s' "$manifest_json" | ${shellSingleQuote(options.jqPath)} -r '.profile')"
+recipe_digest="$(printf '%s' "$manifest_json" | ${shellSingleQuote(options.jqPath)} -r '.recipeDigest')"
+case "$profile:$recipe_digest" in
+  "$crabbox_minimal_profile:$crabbox_minimal_recipe_digest")
+    crabbox_linux_minimal_readiness_probes
+    inventory_digest="$(crabbox_linux_minimal_runtime_inventory_digest)"
+    ;;
+  "$crabbox_builder_profile:$crabbox_builder_recipe_digest")
+    crabbox_linux_builder_readiness_probes
+    inventory_digest="$(crabbox_linux_builder_runtime_inventory_digest)"
+    ;;
+  *)
+    printf '%s\\n' 'readiness manifest profile or recipe digest is unsupported' >&2
+    exit 1
+    ;;
+esac
+printf '{"inventoryDigest":"%s","profile":"%s","recipeDigest":"%s","schema":"%s"}\\n' \
+  "$inventory_digest" "$profile" "$recipe_digest" "$crabbox_readiness_schema"`;
+  return `${shellSingleQuote(options.bashPath)} --noprofile --norc -c ${shellSingleQuote(script)}`;
+}
+
 export function minimalBootstrap(minimal, minimalDigest, builderDigest, overrides = {}) {
   const options = {
     manifestPath: defaultManifestPath,
@@ -278,7 +401,7 @@ APT
 fi`;
 }
 
-function goSource(profiles, bootstrap) {
+function goSource(profiles, bootstrap, evidenceCommand) {
   return `// Code generated by scripts/generate-linux-readiness.mjs; DO NOT EDIT.
 
 package cli
@@ -286,6 +409,7 @@ package cli
 const linuxReadinessManifestPath = ${JSON.stringify(defaultManifestPath)}
 const linuxMinimalRecipeDigest = ${JSON.stringify(profiles.minimal.digest)}
 const linuxBuilderRecipeDigest = ${JSON.stringify(profiles.builder.digest)}
+const linuxReadinessEvidenceCommand = ${JSON.stringify(evidenceCommand)}
 const linuxMinimalReadinessBootstrap = \`${bootstrap}\`
 `;
 }
@@ -378,10 +502,16 @@ async function main() {
     profiles.minimal.digest,
     profiles.builder.digest,
   );
+  const evidenceCommand = readinessEvidenceCommand(
+    minimal,
+    builder,
+    profiles.minimal.digest,
+    profiles.builder.digest,
+  );
 
   await update(
     resolve(repoRoot, "internal/cli/linux_readiness_generated.go"),
-    goSource(profiles, bootstrap),
+    goSource(profiles, bootstrap, evidenceCommand),
     check,
   );
   await update(

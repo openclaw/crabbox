@@ -30,6 +30,13 @@ function metadataJSON(body: unknown, init: ResponseInit = {}): Response {
   return metadataResponse(JSON.stringify(body), { ...init, headers });
 }
 
+function primeAccessToken(client: GCPClient): void {
+  (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
+    token: "test-token",
+    expiresAt: Math.trunc(Date.now() / 1000) + 3600,
+  };
+}
+
 describe("gcp provider", () => {
   const env: Env = {
     FLEET: {} as DurableObjectNamespace,
@@ -50,6 +57,196 @@ describe("gcp provider", () => {
   it("prefers per-request project over Worker defaults", () => {
     expect(new GCPClient(env).project).toBe("default-project");
     expect(new GCPClient(env, undefined, "request-project").project).toBe("request-project");
+  });
+
+  it("resolves bare custom images in the per-request project", async () => {
+    const client = new GCPClient(env);
+    primeAccessToken(client);
+    const calls: string[] = [];
+    client.fetcher = async (input) => {
+      calls.push(String(input));
+      return Response.json({
+        id: "8123456789012345678",
+        name: "custom-builder-v3",
+        selfLink:
+          "https://www.googleapis.com/compute/v1/projects/request-project/global/images/custom-builder-v3",
+        status: "READY",
+      });
+    };
+
+    await expect(
+      client.forScope(undefined, "request-project").resolveBootImage("custom-builder-v3"),
+    ).resolves.toMatchObject({
+      identity: {
+        id: "8123456789012345678",
+        sourceID:
+          "https://www.googleapis.com/compute/v1/projects/request-project/global/images/custom-builder-v3",
+      },
+      launchSource:
+        "https://www.googleapis.com/compute/v1/projects/request-project/global/images/custom-builder-v3",
+    });
+    expect(calls).toEqual([
+      "https://compute.googleapis.com/compute/v1/projects/request-project/global/images/custom-builder-v3",
+    ]);
+  });
+
+  it("resolves image families to an immutable boot image identity", async () => {
+    const client = new GCPClient(env);
+    primeAccessToken(client);
+    const calls: string[] = [];
+    client.fetcher = async (input) => {
+      calls.push(String(input));
+      return Response.json({
+        id: "9123456789012345678",
+        name: "ubuntu-2604-amd64-v20260801",
+        selfLink:
+          "https://www.googleapis.com/compute/v1/projects/ubuntu-os-cloud/global/images/ubuntu-2604-amd64-v20260801",
+        status: "READY",
+      });
+    };
+
+    await expect(
+      client.resolveBootImage(
+        "projects/ubuntu-os-cloud/global/images/family/ubuntu-2604-lts-amd64",
+      ),
+    ).resolves.toEqual({
+      identity: {
+        id: "9123456789012345678",
+        source: "explicit",
+        provider: "gcp",
+        kind: "gcp-image",
+        region: "us-central1-a",
+        sourceID:
+          "https://www.googleapis.com/compute/v1/projects/ubuntu-os-cloud/global/images/ubuntu-2604-amd64-v20260801",
+      },
+      launchSource:
+        "https://www.googleapis.com/compute/v1/projects/ubuntu-os-cloud/global/images/ubuntu-2604-amd64-v20260801",
+    });
+    expect(calls).toEqual([
+      "https://compute.googleapis.com/compute/v1/projects/ubuntu-os-cloud/global/images/family/ubuntu-2604-lts-amd64",
+    ]);
+  });
+
+  it("distinguishes same-name GCP image resources by immutable id in the request project", async () => {
+    const fixtures = [
+      {
+        collection: "images",
+        name: "warm-boot-image",
+        resolve: (client: GCPClient, name: string) => client.resolveBootImage(name),
+      },
+      {
+        collection: "machineImages",
+        name: "warm-machine-image",
+        resolve: (client: GCPClient, name: string) => client.resolveMachineImage(name),
+      },
+      {
+        collection: "snapshots",
+        name: "warm-disk-snapshot",
+        resolve: (client: GCPClient, name: string) => client.resolveDiskSnapshot(name),
+      },
+    ] as const;
+
+    for (const [fixtureIndex, fixture] of fixtures.entries()) {
+      const client = new GCPClient(env);
+      primeAccessToken(client);
+      const calls: string[] = [];
+      let request = 0;
+      const launchSource = `https://www.googleapis.com/compute/v1/projects/request-project/global/${fixture.collection}/${fixture.name}`;
+      client.fetcher = async (input) => {
+        calls.push(String(input));
+        request += 1;
+        return Response.json({
+          id: `${fixtureIndex + 1}00000000000000000${request}`,
+          name: fixture.name,
+          selfLink: launchSource,
+          status: "READY",
+        });
+      };
+      const scoped = client.forScope("us-west1-b", "request-project");
+
+      // oxlint-disable-next-line eslint/no-await-in-loop -- the second response models a later resource incarnation.
+      const first = await fixture.resolve(scoped, fixture.name);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- preserve response order for the recreated resource.
+      const second = await fixture.resolve(scoped, fixture.name);
+
+      expect(first.launchSource).toBe(launchSource);
+      expect(second.launchSource).toBe(launchSource);
+      expect(first.identity.sourceID).toBe(launchSource);
+      expect(second.identity.sourceID).toBe(launchSource);
+      expect(first.identity.id).not.toBe(second.identity.id);
+      expect(calls).toEqual([
+        `https://compute.googleapis.com/compute/v1/projects/request-project/global/${fixture.collection}/${fixture.name}`,
+        `https://compute.googleapis.com/compute/v1/projects/request-project/global/${fixture.collection}/${fixture.name}`,
+      ]);
+    }
+  });
+
+  it("fails closed when a GCP image resource omits its immutable numeric id", async () => {
+    const fixtures = [
+      {
+        collection: "images",
+        name: "boot-image",
+        resolve: (client: GCPClient, name: string) => client.resolveBootImage(name),
+      },
+      {
+        collection: "machineImages",
+        name: "machine-image",
+        resolve: (client: GCPClient, name: string) => client.resolveMachineImage(name),
+      },
+      {
+        collection: "snapshots",
+        name: "disk-snapshot",
+        resolve: (client: GCPClient, name: string) => client.resolveDiskSnapshot(name),
+      },
+    ] as const;
+
+    for (const fixture of fixtures) {
+      const client = new GCPClient(env);
+      primeAccessToken(client);
+      client.fetcher = async () =>
+        Response.json({
+          name: fixture.name,
+          selfLink: `https://www.googleapis.com/compute/v1/projects/default-project/global/${fixture.collection}/${fixture.name}`,
+          status: "READY",
+        });
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each source must reject before its fetcher is replaced.
+      await expect(fixture.resolve(client, fixture.name)).rejects.toThrow(
+        "missing an immutable numeric id",
+      );
+      client.fetcher = async () =>
+        Response.json({
+          id: "not-numeric",
+          name: fixture.name,
+          status: "READY",
+        });
+      // oxlint-disable-next-line eslint/no-await-in-loop -- validate the replacement response on the same source.
+      await expect(fixture.resolve(client, fixture.name)).rejects.toThrow(
+        "missing an immutable numeric id",
+      );
+    }
+  });
+
+  it("keeps a canonical launch selector when GCP omits selfLink", async () => {
+    const client = new GCPClient(env, undefined, "request-project");
+    primeAccessToken(client);
+    client.fetcher = async () =>
+      Response.json({
+        id: "5123456789012345678",
+        name: "warm-machine-image",
+        status: "READY",
+      });
+
+    await expect(client.resolveMachineImage("warm-machine-image")).resolves.toEqual({
+      identity: {
+        id: "5123456789012345678",
+        source: "snapshot",
+        provider: "gcp",
+        kind: "gcp-machine-image",
+        region: "us-central1-a",
+        sourceID: "projects/request-project/global/machineImages/warm-machine-image",
+      },
+      launchSource: "projects/request-project/global/machineImages/warm-machine-image",
+    });
   });
 
   it("uses the metadata server when service account key credentials are omitted", async () => {

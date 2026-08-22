@@ -11,6 +11,7 @@ import {
   assertProfile,
   digest,
   minimalBootstrap,
+  readinessEvidenceCommand,
 } from "./generate-linux-readiness.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -20,7 +21,7 @@ function shellQuote(value) {
 }
 
 async function writeExecutable(path, body) {
-  await writeFile(path, `#!/usr/bin/env bash\n${body}\n`);
+  await writeFile(path, `#!/bin/bash\n${body}\n`);
   await chmod(path, 0o755);
 }
 
@@ -59,20 +60,41 @@ async function createShellFixture(t) {
   await writeExecutable(sshdPath, "exit 0");
   await writeFile(caPath, "test-ca\n");
 
-  for (const command of ["curl", "git", "rsync", "tmux", "flock"]) {
+  for (const command of [
+    "curl",
+    "git",
+    "git-lfs",
+    "rsync",
+    "tmux",
+    "flock",
+    "cc",
+    "make",
+    "pkg-config",
+    "python3",
+    "go",
+    "node",
+  ]) {
     await writeExecutable(join(bin, command), `printf '%s test\\n' ${shellQuote(command)}`);
   }
   const jqPath = spawnSync("sh", ["-c", "command -v jq"], { encoding: "utf8" }).stdout.trim();
+  const catPath = spawnSync("sh", ["-c", "command -v cat"], { encoding: "utf8" }).stdout.trim();
+  const sha256sumPath = spawnSync("sh", ["-c", "command -v sha256sum"], {
+    encoding: "utf8",
+  }).stdout.trim();
+  const awkPath = spawnSync("sh", ["-c", "command -v awk"], { encoding: "utf8" }).stdout.trim();
   assert.ok(jqPath, "jq is required for readiness shell tests");
+  assert.ok(catPath, "cat is required for readiness shell tests");
+  assert.ok(sha256sumPath, "sha256sum is required for readiness shell tests");
+  assert.ok(awkPath, "awk is required for readiness shell tests");
   await writeExecutable(join(bin, "jq"), `exec ${shellQuote(jqPath)} "$@"`);
+  const statCommand =
+    process.platform === "darwin"
+      ? `exec /usr/bin/stat -f '%u:%Lp' "$3"`
+      : `exec /usr/bin/stat -c '%u:%a' "$3"`;
   await writeExecutable(
     join(bin, "stat"),
     `if [ "$1" != "-c" ]; then exec /usr/bin/stat "$@"; fi
-file="$3"
-if [ "$(uname -s)" = "Darwin" ]; then
-  exec /usr/bin/stat -f '%u:%Lp' "$file"
-fi
-exec /usr/bin/stat -c '%u:%a' "$file"`,
+${statCommand}`,
   );
   for (const command of ["apt", "apt-get", "apt-cache", "dpkg", "dpkg-query"]) {
     await writeExecutable(
@@ -107,7 +129,7 @@ exit 97`,
     await writeFile(
       manifestPath,
       `${JSON.stringify({
-        inventoryDigest: `sha256:${"0".repeat(64)}`,
+        inventoryDigest: options.inventoryDigest ?? `sha256:${"0".repeat(64)}`,
         profile,
         recipeDigest,
         schema: "crabbox-linux-readiness/v1",
@@ -131,6 +153,28 @@ exit 97`,
     );
   }
 
+  function runEvidence() {
+    const command = readinessEvidenceCommand(minimal, builder, minimalDigest, builderDigest, {
+      manifestPath,
+      sshdPath,
+      caPath,
+      manifestOwnerUID: ownerUID,
+      bashPath: "/bin/bash",
+      statPath: join(bin, "stat"),
+      catPath,
+      jqPath,
+      sha256sumPath,
+      awkPath,
+    });
+    return spawnSync("/bin/bash", ["-c", command], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: bin,
+      },
+    });
+  }
+
   async function packageCalls() {
     try {
       return (await readFile(packageLog, "utf8")).trim().split("\n").filter(Boolean);
@@ -142,12 +186,14 @@ exit 97`,
 
   return {
     builderDigest,
+    bin,
     legacyMarkerPath,
     manifestPath,
     minimalDigest,
     ownerUID,
     packageCalls,
     run,
+    runEvidence,
     writeManifest,
   };
 }
@@ -229,6 +275,46 @@ test("legacy marker plus minimal probes migrates without package-manager command
   assert.equal(manifest.profile, "linux-minimal");
   assert.equal(manifest.recipeDigest, fixture.minimalDigest);
   assert.match(manifest.inventoryDigest, /^sha256:[0-9a-f]{64}$/u);
+});
+
+test("fresh evidence reruns exact probes and replaces the opaque manifest inventory", async (t) => {
+  const fixture = await createShellFixture(t);
+  await fixture.writeManifest("linux-minimal", fixture.minimalDigest, {
+    inventoryDigest: `sha256:${"f".repeat(64)}`,
+  });
+
+  const first = fixture.runEvidence();
+  assert.equal(first.status, 0, first.stderr || first.stdout);
+  const firstEvidence = JSON.parse(first.stdout);
+  assert.equal(firstEvidence.profile, "linux-minimal");
+  assert.equal(firstEvidence.recipeDigest, fixture.minimalDigest);
+  assert.match(firstEvidence.inventoryDigest, /^sha256:[0-9a-f]{64}$/u);
+  assert.notEqual(firstEvidence.inventoryDigest, `sha256:${"0".repeat(64)}`);
+
+  await fixture.writeManifest("linux-minimal", fixture.minimalDigest);
+  const second = fixture.runEvidence();
+  assert.equal(second.status, 0, second.stderr || second.stdout);
+  assert.equal(JSON.parse(second.stdout).inventoryDigest, firstEvidence.inventoryDigest);
+
+  await writeExecutable(join(fixture.bin, "git"), "printf 'git replacement\\n'");
+  const replaced = fixture.runEvidence();
+  assert.equal(replaced.status, 0, replaced.stderr || replaced.stdout);
+  assert.notEqual(JSON.parse(replaced.stdout).inventoryDigest, firstEvidence.inventoryDigest);
+
+  await rm(join(fixture.bin, "git"));
+  const removed = fixture.runEvidence();
+  assert.notEqual(removed.status, 0);
+});
+
+test("fresh builder evidence executes the full builder probe set", async (t) => {
+  const fixture = await createShellFixture(t);
+  await fixture.writeManifest("linux-builder", fixture.builderDigest);
+  const ready = fixture.runEvidence();
+  assert.equal(ready.status, 0, ready.stderr || ready.stdout);
+
+  await rm(join(fixture.bin, "node"));
+  const missingBuilderTool = fixture.runEvidence();
+  assert.notEqual(missingBuilderTool.status, 0);
 });
 
 test("untrusted or stale manifests fall back instead of authorizing readiness", async (t) => {

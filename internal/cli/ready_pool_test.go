@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -110,6 +111,293 @@ func TestReadyPoolBorrowInputIncludesCompatibilityKey(t *testing.T) {
 	}
 	if _, ok := input["provider"]; ok {
 		t.Fatalf("empty provider unexpectedly constrained compatible pool: %#v", input)
+	}
+}
+
+func TestReadyPoolIdentityIsExactAndSeedBound(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	seedDigest, err := readyPoolSeedDigest("example-org/my-app", "main", "abc123", "setup-v2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := CoordinatorReadyPoolIdentityV1{
+		Schema:          readyPoolIdentitySchemaV1,
+		Profile:         "linux-builder",
+		RecipeDigest:    digest,
+		InventoryDigest: digest,
+		ImageID:         "ami-0123456789abcdef0",
+		Architecture:    "amd64",
+		SeedDigest:      seedDigest,
+		CacheABIDigest:  digest,
+	}
+	if err := validateReadyPoolIdentity(identity); err != nil {
+		t.Fatalf("valid identity rejected: %v", err)
+	}
+	if err := validateReadyPoolSeedIdentity(identity, "example-org/my-app", "main", "abc123", "setup-v2"); err != nil {
+		t.Fatalf("matching seed rejected: %v", err)
+	}
+	if identity.SeedDigest != "sha256:8b76ec429b7e084f6af6c6a2de4be7faf09f872c892513d4ce97d2f055e44e20" {
+		t.Fatalf("canonical seed digest=%q", identity.SeedDigest)
+	}
+	if err := validateReadyPoolSeedIdentity(identity, "example-org/my-app", "main", "different", "setup-v2"); err == nil {
+		t.Fatal("changed seed inputs retained the same identity")
+	}
+
+	changed := identity
+	changed.CacheABIDigest = "sha256:" + strings.Repeat("b", 64)
+	if readyPoolIdentitiesEqual(identity, changed) {
+		t.Fatal("different cache ABI identities compared equal")
+	}
+}
+
+func TestReadyPoolReadinessRejectsChangedRuntimeInventory(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	identity := CoordinatorReadyPoolIdentityV1{
+		Profile:         "linux-builder",
+		RecipeDigest:    digest,
+		InventoryDigest: digest,
+	}
+	evidence := CoordinatorReadyPoolReadinessEvidence{
+		Schema:          linuxReadinessSchemaV1,
+		Profile:         identity.Profile,
+		RecipeDigest:    identity.RecipeDigest,
+		InventoryDigest: identity.InventoryDigest,
+	}
+	if err := validateReadyPoolReadinessIdentity(identity, evidence); err != nil {
+		t.Fatalf("matching fresh runtime inventory rejected: %v", err)
+	}
+	evidence.InventoryDigest = "sha256:" + strings.Repeat("b", 64)
+	if err := validateReadyPoolReadinessIdentity(identity, evidence); err == nil {
+		t.Fatal("replaced runtime inventory retained the typed ready-pool identity")
+	}
+}
+
+func TestReadyPoolSeedDigestGoldenVectors(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		repo        string
+		ref         string
+		commit      string
+		fingerprint string
+		want        string
+	}{
+		{
+			name:        "basic",
+			repo:        "example-org/my-app",
+			ref:         "main",
+			commit:      "abc123",
+			fingerprint: "setup-v2",
+			want:        "sha256:8b76ec429b7e084f6af6c6a2de4be7faf09f872c892513d4ce97d2f055e44e20",
+		},
+		{
+			name:        "html and unicode separators",
+			repo:        "example<org>&/my-app",
+			ref:         "refs/heads/line\u2028sep\u2029end",
+			commit:      "café-東京",
+			fingerprint: "finger<&>λ",
+			want:        "sha256:b6cf4e2e23e212fa08223dfd085f0acc58b989ab9f343d0ba6a845def25ffc70",
+		},
+		{
+			name: "empty",
+			want: "sha256:ca20f3f91bdd0a8643698abb508aa749da01297641101331aab950efd75705c8",
+		},
+		{
+			name:        "long ref and fingerprint",
+			repo:        "example-org/my-app",
+			ref:         "refs/heads/" + strings.Repeat("r", 500),
+			commit:      strings.Repeat("c", 40),
+			fingerprint: strings.Repeat("f", 700),
+			want:        "sha256:9b2ffeb6f40c6883520444f395c7ebe7979a7899a98027d8371abafe132cf159",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := readyPoolSeedDigest(tc.repo, tc.ref, tc.commit, tc.fingerprint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("digest=%q, want %q", got, tc.want)
+			}
+		})
+	}
+	if _, err := readyPoolSeedDigest("", strings.Repeat("r", readyPoolSeedFieldMaxBytes+1), "", ""); err == nil {
+		t.Fatal("oversized seed ref was accepted")
+	}
+}
+
+func TestReadyPoolManualTypedBorrowInputUsesRepositoryDefaults(t *testing.T) {
+	head := strings.Repeat("a", 40)
+	input := readyPoolManualTypedBorrowInput(
+		Config{Actions: ActionsConfig{Repo: "example-org/my-app", Ref: head}},
+		Repo{Head: head, BaseRef: "main"},
+		"",
+		"",
+		"",
+		"setup-v2",
+		"linux-16-vcpu",
+		"",
+		"linux",
+	)
+	for key, want := range map[string]string{
+		"repo":             "example-org/my-app",
+		"ref":              head,
+		"commit":           head,
+		"fingerprint":      "setup-v2",
+		"compatibilityKey": "linux-16-vcpu",
+		"target":           "linux",
+	} {
+		if got := readyPoolInputString(input, key); got != want {
+			t.Fatalf("%s=%q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestTypedReadyPoolReturnDrainsWhenEvidenceFails(t *testing.T) {
+	var received CoordinatorReadyPoolReturnIdentityRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/ready-pools/shared-linux/return-identity" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	identity := CoordinatorReadyPoolIdentityV1{Schema: readyPoolIdentitySchemaV1}
+	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	_, err := returnTypedReadyPoolLeaseWithEvidence(
+		context.Background(),
+		&client,
+		"shared-linux",
+		CoordinatorReadyPoolReturnIdentityRequest{
+			LeaseID:     "cbx_123",
+			Result:      "ready",
+			BorrowToken: "borrow-token",
+			Identity:    &identity,
+		},
+		func() (CoordinatorReadyPoolReadinessEvidence, error) {
+			return CoordinatorReadyPoolReadinessEvidence{}, errors.New("readiness manifest missing")
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "readiness manifest missing") {
+		t.Fatalf("return error=%v", err)
+	}
+	if received.Result != "drain" || received.ReadinessEvidence != nil {
+		t.Fatalf("typed return request=%+v", received)
+	}
+	if received.Reason != "typed ready-pool readiness evidence unavailable or mismatched" {
+		t.Fatalf("typed return reason=%q", received.Reason)
+	}
+}
+
+func TestTypedReadyPoolBorrowDrainsMismatchedResponseBeforeReturning(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	expected := CoordinatorReadyPoolIdentityV1{
+		Schema:          readyPoolIdentitySchemaV1,
+		Profile:         "linux-builder",
+		RecipeDigest:    digest,
+		InventoryDigest: digest,
+		ImageID:         "image-immutable-1",
+		Architecture:    "amd64",
+		SeedDigest:      digest,
+		CacheABIDigest:  digest,
+	}
+	mismatched := expected
+	mismatched.CacheABIDigest = "sha256:" + strings.Repeat("b", 64)
+
+	for _, tc := range []struct {
+		name      string
+		heartbeat bool
+	}{
+		{name: "manual no heartbeat", heartbeat: false},
+		{name: "run heartbeat", heartbeat: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var events []string
+			var returned CoordinatorReadyPoolReturnIdentityRequest
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/v1/ready-pools/shared-linux/borrow-identity":
+					events = append(events, "borrow")
+					var request CoordinatorReadyPoolBorrowIdentityRequest
+					if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+						t.Fatal(err)
+					}
+					if request.Heartbeat != tc.heartbeat {
+						t.Fatalf("borrow heartbeat=%t, want %t", request.Heartbeat, tc.heartbeat)
+					}
+					_ = json.NewEncoder(w).Encode(CoordinatorReadyPoolResponse{
+						Entry: CoordinatorReadyPoolEntry{
+							Key:         "shared-linux",
+							LeaseID:     "cbx_000000000123",
+							BorrowToken: "borrow-token",
+							Identity:    &mismatched,
+						},
+					})
+				case "/v1/ready-pools/shared-linux/return-identity":
+					events = append(events, "drain")
+					if err := json.NewDecoder(r.Body).Decode(&returned); err != nil {
+						t.Fatal(err)
+					}
+					if returned.Identity == nil || !readyPoolIdentitiesEqual(*returned.Identity, mismatched) {
+						http.Error(w, "return identity mismatch", http.StatusConflict)
+						return
+					}
+					_, _ = w.Write([]byte(`{}`))
+				default:
+					t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+				}
+			}))
+			defer server.Close()
+
+			client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+			_, err := borrowValidatedTypedReadyPoolLease(
+				context.Background(),
+				&client,
+				"shared-linux",
+				CoordinatorReadyPoolBorrowIdentityRequest{
+					Heartbeat: tc.heartbeat,
+					Identity:  expected,
+				},
+				expected,
+			)
+			if err == nil || !strings.Contains(err.Error(), "mismatched typed ready-pool identity") {
+				t.Fatalf("borrow error=%v", err)
+			}
+			if got := strings.Join(events, ","); got != "borrow,drain" {
+				t.Fatalf("events=%q, want borrow,drain", got)
+			}
+			if returned.LeaseID != "cbx_000000000123" ||
+				returned.BorrowToken != "borrow-token" ||
+				returned.Result != "drain" ||
+				returned.Identity == nil ||
+				!readyPoolIdentitiesEqual(*returned.Identity, mismatched) {
+				t.Fatalf("drain request=%+v", returned)
+			}
+			if returned.Reason != "coordinator returned a mismatched typed ready-pool identity" {
+				t.Fatalf("drain reason=%q", returned.Reason)
+			}
+		})
+	}
+}
+
+func TestReadyPoolLegacyMatchingRejectsTypedEntries(t *testing.T) {
+	entry := CoordinatorReadyPoolEntry{
+		Repo: "example-org/my-app",
+		Ref:  "main",
+		Identity: &CoordinatorReadyPoolIdentityV1{
+			Schema: readyPoolIdentitySchemaV1,
+		},
+	}
+	if readyPoolEntryMatchesLegacyBorrowInput(entry, map[string]any{
+		"repo": "example-org/my-app",
+		"ref":  "main",
+	}) {
+		t.Fatal("legacy matching admitted a typed ready-pool entry")
 	}
 }
 

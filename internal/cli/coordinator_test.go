@@ -1123,6 +1123,49 @@ func TestCoordinatorReadyPoolReconcileAndReleaseClaim(t *testing.T) {
 	}
 }
 
+func TestCoordinatorTypedReadyPoolUsesDedicatedBorrowRoute(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	identity := CoordinatorReadyPoolIdentityV1{
+		Schema:          readyPoolIdentitySchemaV1,
+		Profile:         "linux-builder",
+		RecipeDigest:    digest,
+		InventoryDigest: digest,
+		ImageID:         "image-immutable-1",
+		Architecture:    "amd64",
+		SeedDigest:      digest,
+		CacheABIDigest:  digest,
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/ready-pools/shared-linux/borrow-identity" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		var body CoordinatorReadyPoolBorrowIdentityRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Identity != identity || body.CompatibilityKey != "linux-16-vcpu" {
+			t.Fatalf("typed borrow body=%+v", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(CoordinatorReadyPoolResponse{
+			Entry: CoordinatorReadyPoolEntry{Key: "shared-linux", LeaseID: "cbx_123", Identity: &identity},
+		})
+	}))
+	defer server.Close()
+
+	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	res, err := client.BorrowTypedReadyPoolLease(context.Background(), "shared-linux", CoordinatorReadyPoolBorrowIdentityRequest{
+		CompatibilityKey: "linux-16-vcpu",
+		Identity:         identity,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Entry.Identity == nil || !readyPoolIdentitiesEqual(*res.Entry.Identity, identity) {
+		t.Fatalf("typed borrow response=%+v", res)
+	}
+}
+
 func TestCoordinatorHeartbeatIncludesTelemetry(t *testing.T) {
 	bodies := make(chan string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

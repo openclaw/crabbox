@@ -4,11 +4,14 @@
 
 ### Added
 
+- Added versioned typed ready-pool identities with exact readiness recipe, inventory, immutable image, architecture, byte-stable broker-verified repository seed, and cache ABI matching, isolated from legacy pools and revalidated before registration and reusable return, including project-scoped GCP numeric resource identities kept separate from launch selectors.
 - Added versioned `linux-minimal` and `linux-builder` readiness recipes with canonical digests, shared Go/Worker bootstrap generation, and a verified manifest fast path that avoids repeated package-manager work.
 - Added mutually exclusive `runnerPhases` timing telemetry for provider acquire/borrow, connectivity and readiness, workspace seed/overlay, command, artifact collection, cleanup, delegated opaque work, and unattributed time while preserving the existing timing fields.
 
 ### Fixed
 
+- Counted structurally identical typed ready-pool fill claims regardless of JSON key order, preventing duplicate paid capacity above `maxReady`.
+- Drained typed ready-pool borrows before reporting a mismatched coordinator identity, including manual borrows without heartbeats and run borrows before heartbeat startup.
 - Fenced Linode heartbeats and Tailscale metadata updates with exact account-, scope-, and instance-bound claims, preserving legacy instance claims, idle-timeout intent, and safe release continuity.
 - Made two timing-sensitive tests robust on loaded CI runners.
 

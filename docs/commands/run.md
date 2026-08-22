@@ -27,6 +27,7 @@ crabbox run --provider ssh --target macos --static-host mac-studio.local -- xcod
 crabbox run --provider ssh --target windows --windows-mode normal --static-host win-dev.local -- dotnet test
 crabbox run --profile live-qa --preset qa-live --scenario login-regression --emit-proof /tmp/proof.md --stop-after success
 crabbox run --pool example/app/main/linux --pool-compatibility-key linux-16-vcpu -- pnpm test
+crabbox run --pool example/app/main/linux --pool-identity-file ./ready-pool-identity.json -- pnpm test
 ```
 
 The trailing command after `--` is sent to the box verbatim as argv. Use
@@ -94,6 +95,10 @@ Reusable pooled runs also reject `--fresh-pr`; use a forced drain or release
 for one-shot PR work.
 Pooled runs also reject `--keep` and
 `--keep-on-failure`; use `--pool-return ready|drain|release` for lifecycle.
+For image-backed pools, `--pool-identity-file` requires an exact typed match
+and uses dedicated coordinator routes with no legacy fallback. Before returning
+the lease to `ready`, Crabbox reads fresh readiness evidence; a changed recipe
+or inventory drains the entry instead of reusing it.
 
 On coordinator-backed one-shot runs, if SSH becomes unavailable after a
 successful sync but before the command starts, Crabbox stops that stale lease,

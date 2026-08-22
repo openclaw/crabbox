@@ -41,6 +41,39 @@ same logical pool. Entries also record repo, ref, commit, fingerprint, image,
 provider, target, server type, SSH endpoint, work root, owner, org, state, and
 expiry.
 
+For image-backed pools, use a versioned typed identity:
+
+```json
+{
+  "schema": "crabbox-ready-pool-identity/v1",
+  "profile": "linux-builder",
+  "recipeDigest": "sha256:<digest>",
+  "inventoryDigest": "sha256:<digest>",
+  "imageID": "<immutable-provider-image-id>",
+  "architecture": "amd64",
+  "seedDigest": "sha256:<digest>",
+  "cacheABIDigest": "sha256:<digest>"
+}
+```
+
+Every field matches exactly; there are no wildcards. `seedDigest` binds the
+repo, ref, commit, and setup fingerprint. `compatibilityKey` remains an
+independent provider-neutral selector. Identity records contain only digests
+and opaque image IDs, never raw inventory or tenant-sensitive values.
+The broker recomputes the canonical seed digest from request metadata on typed
+register, reconcile, and borrow rather than trusting the supplied digest.
+The v1 seed preimage is byte-defined rather than JSON-defined: the UTF-8 domain
+`crabbox-ready-pool-seed/v1\0`, followed in repo/ref/commit/fingerprint order by
+a one-byte field tag, a four-byte big-endian UTF-8 byte length, and the exact
+field bytes. Empty fields have length zero. Each field must be valid UTF-8 and
+at most 1024 bytes; clients and the broker reject larger values before hashing.
+Typed metadata is stored and compared exactly, without truncation.
+
+Typed and legacy entries never cross-match, and legacy records are not
+backfilled. An unknown stored schema remains visible and can be drained or
+released, but is never borrowable. Requests with unknown required schemas fail
+closed.
+
 ## States
 
 ```text
@@ -62,13 +95,29 @@ Ready-pool APIs live beside normal lease APIs:
 GET  /v1/ready-pools
 GET  /v1/ready-pools/:key
 POST /v1/ready-pools/:key/register
+POST /v1/ready-pools/:key/register-identity
 POST /v1/ready-pools/:key/borrow
+POST /v1/ready-pools/:key/borrow-identity
 POST /v1/ready-pools/:key/heartbeat
 POST /v1/ready-pools/:key/return
+POST /v1/ready-pools/:key/return-identity
 POST /v1/ready-pools/:key/reconcile
+POST /v1/ready-pools/:key/reconcile-identity
 POST /v1/ready-pools/:key/release-fill-claim
 GET  /v1/ready-pools/:key/metrics
 ```
+
+The typed routes are explicit protocol negotiation, so an older coordinator
+cannot silently ignore identity fields. Typed registration reads a fresh
+root-owned Linux readiness manifest and the broker cross-checks its profile and
+digests with the recorded immutable image and architecture. Reusable typed
+returns repeat that proof; changed or missing evidence drains the entry.
+Provider adapters must persist the concrete selected image identity. For GCP,
+boot images, disk snapshots, and machine images are resolved before
+provisioning. The typed identity uses Google's server-defined numeric resource
+ID, while the resolved self-link or canonical resource name remains the launch
+selector. Bare resource resolution and instance provisioning use the
+per-request project. A missing or nonnumeric resource ID fails closed.
 
 The broker stores pool entries in coordinator storage. The CLI owns SSH
 keys, source sync, and Actions hydration, so it registers a lease only after it
@@ -85,6 +134,7 @@ Prewarm and register:
 ```sh
 crabbox prewarm --pool example/app/main/linux \
   --pool-compatibility-key linux-16-vcpu \
+  --pool-identity-file ./ready-pool-identity.json \
   --provider azure \
   --type Standard_D2ads_v6 \
   --market on-demand \
@@ -95,19 +145,21 @@ Borrow for a run:
 
 ```sh
 crabbox run --pool example/app/main/linux \
-  --pool-compatibility-key linux-16-vcpu -- pnpm test
+  --pool-compatibility-key linux-16-vcpu \
+  --pool-identity-file ./ready-pool-identity.json -- pnpm test
 ```
 
 Manual operations:
 
 ```sh
 crabbox pool ready
-crabbox pool register example/app/main/linux --id cbx_... --compatibility-key linux-16-vcpu
-crabbox pool borrow example/app/main/linux --compatibility-key linux-16-vcpu
+crabbox pool register example/app/main/linux --id cbx_... --identity-file ./ready-pool-identity.json
+crabbox pool borrow example/app/main/linux --identity-file ./ready-pool-identity.json
 crabbox pool heartbeat example/app/main/linux --id cbx_... --borrow-token <token>
-crabbox pool return example/app/main/linux --id cbx_... --result ready --borrow-token <token>
+crabbox pool return example/app/main/linux --id cbx_... --result ready \
+  --borrow-token <token> --identity-file ./ready-pool-identity.json
 crabbox pool ensure example/app/main/linux --min-ready 2 --max-ready 4 \
-  --compatibility-key linux-16-vcpu --create -- \
+  --compatibility-key linux-16-vcpu --identity-file ./ready-pool-identity.json --create -- \
   --provider aws --type c6i.4xlarge
 ```
 

@@ -18,7 +18,13 @@ import {
   providerProvisioningCleanupClaim,
 } from "./provider-provisioning";
 import { leaseProviderName } from "./slug";
-import type { Env, ProviderImage, ProviderMachine, ProvisioningAttempt } from "./types";
+import type {
+  Env,
+  LeaseImageIdentity,
+  ProviderImage,
+  ProviderMachine,
+  ProvisioningAttempt,
+} from "./types";
 
 const computeBaseURL = "https://compute.googleapis.com/compute/v1";
 const tokenURL = "https://oauth2.googleapis.com/token";
@@ -86,11 +92,23 @@ interface GCPMachineImage {
   status?: string;
 }
 
+interface GCPBootImage {
+  id?: string;
+  name?: string;
+  selfLink?: string;
+  status?: string;
+}
+
 interface GCPSnapshot {
   id?: string;
   name?: string;
   selfLink?: string;
   status?: string;
+}
+
+export interface GCPResolvedLeaseImage {
+  identity: LeaseImageIdentity;
+  launchSource: string;
 }
 
 export class GCPClient {
@@ -153,6 +171,78 @@ export class GCPClient {
         );
       })
       .filter(canonicalGCPMachine);
+  }
+
+  resolveBootImage(reference: string): Promise<GCPResolvedLeaseImage> {
+    return this.resolveLeaseImage(reference.trim() || this.image, "images", "gcp-image");
+  }
+
+  resolveMachineImage(reference: string): Promise<GCPResolvedLeaseImage> {
+    return this.resolveLeaseImage(reference, "machineImages", "gcp-machine-image");
+  }
+
+  resolveDiskSnapshot(reference: string): Promise<GCPResolvedLeaseImage> {
+    return this.resolveLeaseImage(reference, "snapshots", "gcp-disk-snapshot");
+  }
+
+  private async resolveLeaseImage(
+    reference: string,
+    collection: "images" | "machineImages" | "snapshots",
+    kind: "gcp-image" | "gcp-machine-image" | "gcp-disk-snapshot",
+  ): Promise<GCPResolvedLeaseImage> {
+    const requested = reference.trim();
+    if (!requested) {
+      throw new Error(`gcp ${kind} reference is required`);
+    }
+    const token = await this.accessToken();
+    const response = await this.fetcher(gcpGlobalResourceURL(requested, this.project, collection), {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      throw new GCPHTTPError("GET", requested, response.status, text);
+    }
+    const image = (text ? JSON.parse(text) : {}) as GCPBootImage | GCPMachineImage | GCPSnapshot;
+    const immutableID = image.id?.trim() ?? "";
+    if (!/^[0-9]+$/.test(immutableID)) {
+      throw new Error(`gcp ${kind} ${requested} is missing an immutable numeric id`);
+    }
+    if (image.status && image.status !== "READY") {
+      throw new Error(`gcp ${kind} ${requested} did not resolve to a ready resource`);
+    }
+    const resourceProject = gcpResourceProject(requested) || this.project;
+    const launchSource =
+      image.selfLink?.trim() ||
+      (image.name ? `projects/${resourceProject}/global/${collection}/${image.name}` : requested);
+    return {
+      identity: {
+        id: immutableID,
+        source: kind === "gcp-image" ? "explicit" : "snapshot",
+        provider: "gcp",
+        kind,
+        region: this.zone,
+        sourceID: launchSource,
+      },
+      launchSource,
+    };
+  }
+
+  forScope(zone?: string, project?: string): GCPClient {
+    const scopedZone = zone?.trim() || this.zone;
+    const scopedProject = project?.trim() || this.project;
+    if (scopedZone === this.zone && scopedProject === this.project) {
+      return this;
+    }
+    const client = new GCPClient(this.env, scopedZone, scopedProject);
+    client.fetcher = this.fetcher;
+    if (this.cache !== undefined) {
+      client.cache = this.cache;
+    }
+    return client;
   }
 
   async recoverServerForLease(
@@ -1159,6 +1249,41 @@ function gcpSnapshotRef(value: string, project: string): string {
     return value;
   }
   return `projects/${project}/global/snapshots/${value}`;
+}
+
+function gcpGlobalResourceURL(
+  value: string,
+  project: string,
+  collection: "images" | "machineImages" | "snapshots",
+): string {
+  const reference = value.trim();
+  if (reference.startsWith("https://")) {
+    const url = new URL(reference);
+    if (
+      !["compute.googleapis.com", "www.googleapis.com"].includes(url.hostname) ||
+      !url.pathname.startsWith("/compute/v1/projects/") ||
+      !url.pathname.includes(`/global/${collection}/`)
+    ) {
+      throw new Error(`gcp ${collection} URL must be a Google Compute Engine resource`);
+    }
+    return url.toString();
+  }
+  if (reference.startsWith("projects/")) {
+    if (!reference.includes(`/global/${collection}/`)) {
+      throw new Error(`gcp ${collection} reference must identify a global ${collection} resource`);
+    }
+    return `${computeBaseURL}/${reference}`;
+  }
+  const path = reference.includes("/") ? reference : `global/${collection}/${reference}`;
+  if (!path.startsWith(`global/${collection}/`)) {
+    throw new Error(`gcp ${collection} reference must identify a global ${collection} resource`);
+  }
+  return `${computeBaseURL}/projects/${project}/${path}`;
+}
+
+function gcpResourceProject(reference: string): string | undefined {
+  const match = reference.match(/(?:^|\/)projects\/([^/]+)/);
+  return match?.[1];
 }
 
 function numberFromEnv(value: string | undefined, fallback: number): number {

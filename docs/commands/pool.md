@@ -7,11 +7,11 @@ that can be borrowed by `crabbox run --pool`.
 ```sh
 crabbox pool ready
 crabbox pool ready example/app/main/linux
-crabbox pool register example/app/main/linux --id cbx_... --compatibility-key linux-16-vcpu
-crabbox pool borrow example/app/main/linux --compatibility-key linux-16-vcpu
+crabbox pool register example/app/main/linux --id cbx_... --identity-file ./ready-pool-identity.json
+crabbox pool borrow example/app/main/linux --identity-file ./ready-pool-identity.json
 crabbox pool heartbeat example/app/main/linux --id cbx_... --borrow-token <token>
-crabbox pool return example/app/main/linux --id cbx_... --result ready --borrow-token <token>
-crabbox pool ensure example/app/main/linux --min-ready 2 --max-ready 4 --compatibility-key linux-16-vcpu --create -- --provider aws --type c6i.4xlarge
+crabbox pool return example/app/main/linux --id cbx_... --result ready --borrow-token <token> --identity-file ./ready-pool-identity.json
+crabbox pool ensure example/app/main/linux --min-ready 2 --max-ready 4 --identity-file ./ready-pool-identity.json --create -- --provider aws --type c6i.4xlarge
 ```
 
 ## Ready Pools
@@ -25,6 +25,18 @@ automatically. Manual and older-client borrows remain deadline-free unless
 they send `pool heartbeat`; the first successful heartbeat opts that borrow in.
 An opted-in abandoned borrow is quarantined and cannot become ready again
 without being drained.
+
+Use `--identity-file` for image-backed pools that require exact readiness
+recipe, inventory, immutable image, architecture, repository seed, and cache
+ABI matching. Typed operations use dedicated coordinator routes and never fall
+back to legacy matching. Registration and reusable return read fresh readiness
+evidence from the lease. Drain and release remain available for stored identity
+schemas a newer client does not understand.
+Typed `pool borrow` derives omitted repo, ref, and commit seed fields from the
+same local repository and Actions configuration used by register, run, and
+ensure; explicit flags override those defaults. If a manual typed `ready`
+return cannot read matching readiness evidence, Crabbox sends a drain return
+before reporting the evidence error so the busy slot is not stranded.
 
 ## Subcommands
 
@@ -57,6 +69,9 @@ the older `--min-ready` behavior but cannot enforce atomic claims, `--max-ready`
 or compatibility keys until the coordinator is upgraded. A new CLI also stops
 sending borrow heartbeats after the first unsupported-route response from an
 older coordinator.
+
+Typed `pool ensure --identity-file` does not use the legacy fallback because an
+older coordinator could otherwise ignore the required identity.
 
 `--compatibility-key` names a provider-neutral capability and size class. For
 example, compatible AWS and Azure 16-vCPU shapes can share `linux-16-vcpu`
