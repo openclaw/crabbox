@@ -1197,6 +1197,160 @@ exit 0
 	}
 }
 
+func TestSSHReadinessProfileForTarget(t *testing.T) {
+	tests := []struct {
+		name               string
+		target             SSHTarget
+		connectTimeout     string
+		connectionAttempts string
+		probeTimeout       time.Duration
+	}{
+		{
+			name:               "linux",
+			target:             SSHTarget{TargetOS: targetLinux},
+			connectTimeout:     "5",
+			connectionAttempts: "1",
+			probeTimeout:       4 * time.Second,
+		},
+		{
+			name:               "macos",
+			target:             SSHTarget{TargetOS: targetMacOS},
+			connectTimeout:     "5",
+			connectionAttempts: "1",
+			probeTimeout:       4 * time.Second,
+		},
+		{
+			name:               "windows normal",
+			target:             SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal},
+			connectTimeout:     "10",
+			connectionAttempts: "3",
+			probeTimeout:       30 * time.Second,
+		},
+		{
+			name:               "windows wsl2",
+			target:             SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2},
+			connectTimeout:     "10",
+			connectionAttempts: "3",
+			probeTimeout:       30 * time.Second,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			profile := sshReadinessProfileForTarget(test.target)
+			if profile.connectTimeout != test.connectTimeout || profile.connectionAttempts != test.connectionAttempts {
+				t.Fatalf("profile=%+v want ConnectTimeout=%s ConnectionAttempts=%s", profile, test.connectTimeout, test.connectionAttempts)
+			}
+			if got := profile.probeTimeout(4 * time.Second); got != test.probeTimeout {
+				t.Fatalf("probe timeout=%s want %s", got, test.probeTimeout)
+			}
+		})
+	}
+}
+
+func TestSSHReadinessCallsUseTargetProfile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
+	}
+	tests := []struct {
+		name               string
+		target             SSHTarget
+		connectTimeout     string
+		connectionAttempts string
+	}{
+		{name: "linux", target: SSHTarget{TargetOS: targetLinux}, connectTimeout: "5", connectionAttempts: "1"},
+		{name: "macos", target: SSHTarget{TargetOS: targetMacOS}, connectTimeout: "5", connectionAttempts: "1"},
+		{name: "windows normal", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, connectTimeout: "10", connectionAttempts: "3"},
+		{name: "windows wsl2", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, connectTimeout: "10", connectionAttempts: "3"},
+	}
+	for _, test := range tests {
+		for _, call := range []struct {
+			name string
+			run  func(context.Context, *SSHTarget) bool
+		}{
+			{
+				name: "wait",
+				run: func(ctx context.Context, target *SSHTarget) bool {
+					return waitForSSHReady(ctx, target, io.Discard, "test", time.Second) == nil
+				},
+			},
+			{
+				name: "probe",
+				run: func(ctx context.Context, target *SSHTarget) bool {
+					return probeSSHReady(ctx, target, 4*time.Second)
+				},
+			},
+		} {
+			t.Run(test.name+"/"+call.name, func(t *testing.T) {
+				logPath := installSSHArgsRecorder(t)
+				target := test.target
+				target.User = "crabbox"
+				target.Host = "private.example"
+				target.Port = "22"
+				target.SSHConfigProxy = true
+				target.ProxyCommand = "provider proxy %h %p"
+				target.ReadyCheck = "true"
+				if !call.run(context.Background(), &target) {
+					t.Fatal("readiness call failed with fake ssh")
+				}
+				args := readSSHArgsRecorder(t, logPath)
+				assertSSHOption(t, args, "ConnectTimeout", test.connectTimeout)
+				assertSSHOption(t, args, "ConnectionAttempts", test.connectionAttempts)
+			})
+		}
+	}
+}
+
+func TestWindowsSSHReadyProbeExpandsOuterBudget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
+	}
+	installSSHArgsRecorder(t)
+	t.Setenv("CRABBOX_FAKE_SSH_DELAY", "0.1")
+	target := SSHTarget{
+		User:           "crabbox",
+		Host:           "private.example",
+		Port:           "22",
+		TargetOS:       targetWindows,
+		WindowsMode:    windowsModeNormal,
+		SSHConfigProxy: true,
+		ProxyCommand:   "provider proxy %h %p",
+		ReadyCheck:     "true",
+	}
+	start := time.Now()
+	if !probeSSHReady(context.Background(), &target, 20*time.Millisecond) {
+		t.Fatal("Windows readiness probe was cut off by the caller's short budget")
+	}
+	if elapsed := time.Since(start); elapsed < 80*time.Millisecond {
+		t.Fatalf("probe returned after %s, want fake handshake delay to complete", elapsed)
+	}
+}
+
+func TestWaitForSSHReadyHonorsDeadlineDuringWindowsProbe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
+	}
+	installSSHArgsRecorder(t)
+	t.Setenv("CRABBOX_FAKE_SSH_DELAY", "0.2")
+	target := SSHTarget{
+		User:           "crabbox",
+		Host:           "private.example",
+		Port:           "22",
+		TargetOS:       targetWindows,
+		WindowsMode:    windowsModeNormal,
+		SSHConfigProxy: true,
+		ProxyCommand:   "provider proxy %h %p",
+		ReadyCheck:     "true",
+	}
+	start := time.Now()
+	err := waitForSSHReady(context.Background(), &target, io.Discard, "test", 30*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "timed out waiting for SSH") {
+		t.Fatalf("waitForSSHReady error=%v, want readiness timeout", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Windows readiness attempt exceeded overall deadline by too much: %s", elapsed)
+	}
+}
+
 type sshWaitProgressSignal struct {
 	once  sync.Once
 	ready chan struct{}
@@ -1205,6 +1359,45 @@ type sshWaitProgressSignal struct {
 func (w *sshWaitProgressSignal) Write(p []byte) (int, error) {
 	w.once.Do(func() { close(w.ready) })
 	return len(p), nil
+}
+
+func installSSHArgsRecorder(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "ssh-args")
+	script := `#!/bin/sh
+printf '%s\n' "$@" > "$CRABBOX_FAKE_SSH_ARGS"
+if [ -n "${CRABBOX_FAKE_SSH_DELAY:-}" ]; then
+  sleep "$CRABBOX_FAKE_SSH_DELAY"
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_ARGS", logPath)
+	return logPath
+}
+
+func readSSHArgsRecorder(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSpace(string(data)), "\n")
+}
+
+func assertSSHOption(t *testing.T, args []string, name, value string) {
+	t.Helper()
+	want := name + "=" + value
+	for _, arg := range args {
+		if arg == want {
+			return
+		}
+	}
+	t.Fatalf("SSH args missing %q: %q", want, args)
 }
 
 func TestWaitForSSHReadyPreservesCancellationCauseDuringBackoff(t *testing.T) {

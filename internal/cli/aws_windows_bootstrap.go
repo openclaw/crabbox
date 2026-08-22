@@ -98,7 +98,7 @@ func waitForWindowsBootstrapSSHReady(ctx context.Context, target *SSHTarget, std
 		if remaining <= 0 {
 			return exit(5, "timed out waiting for stable Windows SSH on %s during bootstrap; %s", target.Host, sshWaitNextAction("bootstrap"))
 		}
-		if probeSSHReady(ctx, target, minDuration(10*time.Second, remaining)) {
+		if probeWindowsSSHStable(ctx, target, deadline) {
 			stable++
 			continue
 		}
@@ -115,6 +115,16 @@ func waitForWindowsBootstrapSSHReady(ctx context.Context, target *SSHTarget, std
 	}
 	fmt.Fprintln(stderr, "Windows bootstrap SSH stable")
 	return nil
+}
+
+func probeWindowsSSHStable(ctx context.Context, target *SSHTarget, deadline time.Time) bool {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return false
+	}
+	probeCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	return probeSSHReady(probeCtx, target, minDuration(10*time.Second, remaining))
 }
 
 func waitForManagedWindowsLoopbackVNC(ctx context.Context, target *SSHTarget, stderr io.Writer, timeout time.Duration) error {
@@ -206,6 +216,8 @@ func probeWindowsWSL2BootstrapComplete(ctx context.Context, bootstrapTarget SSHT
 	if target.Host == "" {
 		return false
 	}
+	profile := sshReadinessProfileForTarget(bootstrapTarget)
+	timeout = profile.probeTimeout(timeout)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	remote := powershellCommand(`$ErrorActionPreference = "Stop"
@@ -216,7 +228,7 @@ if (-not (Test-Path -LiteralPath "C:\ProgramData\crabbox\setup-complete")) {
 		probe := bootstrapTarget
 		probe.Port = port
 		probe.FallbackPorts = []string{}
-		if runSSHQuietWithOptions(ctx, probe, remote, "2", "1") == nil {
+		if runSSHQuietWithOptions(ctx, probe, remote, profile.connectTimeout, profile.connectionAttempts) == nil {
 			target.Port = probe.Port
 			return true
 		}

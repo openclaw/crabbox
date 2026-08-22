@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -124,6 +126,53 @@ func TestStatusViewIncludesProviderMetadata(t *testing.T) {
 	if view.ProviderMetadata != nil {
 		t.Fatalf("providerMetadata=%v, want omitted invalid metadata", view.ProviderMetadata)
 	}
+}
+
+func TestStatusViewUsesWindowsSSHReadinessProfile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
+	}
+	logPath := installSSHArgsRecorder(t)
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	host, port, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetWindows
+	cfg.WindowsMode = windowsModeNormal
+	cfg.Network = NetworkPublic
+	view, err := statusViewFromLeaseTarget(context.Background(), cfg, LeaseTarget{
+		LeaseID: "cbx_status_windows",
+		Server: Server{
+			Provider: "aws",
+			Status:   "active",
+			Labels:   map[string]string{"target": targetWindows, "windows_mode": windowsModeNormal},
+		},
+		SSH: SSHTarget{
+			User:        "crabbox",
+			Host:        host,
+			Port:        port,
+			TargetOS:    targetWindows,
+			WindowsMode: windowsModeNormal,
+			NetworkKind: NetworkPublic,
+			ReadyCheck:  "true",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !view.Ready {
+		t.Fatal("status Ready=false, want true with reachable fake Windows SSH")
+	}
+	args := readSSHArgsRecorder(t, logPath)
+	assertSSHOption(t, args, "ConnectTimeout", "10")
+	assertSSHOption(t, args, "ConnectionAttempts", "3")
 }
 
 func TestStatusWaitRequestsReadyProbe(t *testing.T) {
