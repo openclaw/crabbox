@@ -1,0 +1,482 @@
+name: Promote Qualified AWS Image
+run-name: ${{ inputs.operation }} qualified AWS image for ${{ inputs.normalized_scope }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Protected default mutation
+        required: true
+        default: promote
+        type: choice
+        options:
+          - promote
+          - rollback
+      qualification_ref:
+        description: Immutable signed qualification OCI digest reference
+        required: true
+        type: string
+      source_commit:
+        description: Exact protected Q2 source commit
+        required: true
+        type: string
+      qualification_run_id:
+        description: Qualification workflow run id
+        required: true
+        type: string
+      qualification_run_attempt:
+        description: Qualification workflow run attempt
+        required: true
+        default: "1"
+        type: string
+      expected_current_image:
+        description: Expected current AMI id, or none
+        required: true
+        type: string
+      expected_current_revision:
+        description: Expected current default revision; empty only with none
+        required: false
+        type: string
+      normalized_scope:
+        description: Concurrency hint matching signed evidence (aws/linux/region/arch/os/type)
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: devtools-image-promote-${{ inputs.normalized_scope }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Guard protected promotion request
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Require protected default-branch dispatch
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REF_PROTECTED: ${{ github.ref_protected }}
+          RUN_SHA: ${{ github.sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          QUALIFICATION_REF: ${{ inputs.qualification_ref }}
+          QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+          QUALIFICATION_RUN_ATTEMPT: ${{ inputs.qualification_run_attempt }}
+          EXPECTED_CURRENT_IMAGE: ${{ inputs.expected_current_image }}
+          EXPECTED_CURRENT_REVISION: ${{ inputs.expected_current_revision }}
+          NORMALIZED_SCOPE: ${{ inputs.normalized_scope }}
+          OPERATION: ${{ inputs.operation }}
+        run: |
+          set -euo pipefail
+          expected_ref="refs/heads/$DEFAULT_BRANCH"
+          expected_workflow_ref="$GITHUB_REPOSITORY/.github/workflows/devtools-image-promote.yml@$expected_ref"
+          qualification_repository="ghcr.io/${GITHUB_REPOSITORY,,}-aws-image-qualifications"
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]
+          [[ "$GITHUB_REF" == "$expected_ref" ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$expected_workflow_ref" ]]
+          [[ "$REF_PROTECTED" == true ]]
+          [[ "$WORKFLOW_SHA" == "$RUN_SHA" ]]
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$OPERATION" =~ ^(promote|rollback)$ ]]
+          [[ "${QUALIFICATION_REF%@*}" == "$qualification_repository" ]]
+          [[ "${QUALIFICATION_REF#*@}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$QUALIFICATION_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$QUALIFICATION_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          [[ "$NORMALIZED_SCOPE" =~ ^aws/linux/[a-z0-9.-]+/(x86_64|arm64)/ubuntu:(26[.]04|24[.]04)/[A-Za-z0-9.-]+$ ]]
+          if [[ "$EXPECTED_CURRENT_IMAGE" == none ]]; then
+            [[ -z "$EXPECTED_CURRENT_REVISION" ]]
+          else
+            [[ "$EXPECTED_CURRENT_IMAGE" =~ ^ami-[0-9a-z]+$ ]]
+            [[ "$EXPECTED_CURRENT_REVISION" =~ ^[A-Za-z0-9._:-]{1,128}$ ]]
+          fi
+
+  verify:
+    name: Verify immutable qualification evidence
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Check out protected verification tools
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Build pinned verification tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          GOBIN="$RUNNER_TEMP/image-tools" go install oras.land/oras/cmd/oras@v1.3.3
+          GOBIN="$RUNNER_TEMP/image-tools" go install github.com/sigstore/cosign/v2/cmd/cosign@v2.6.5
+          echo "$RUNNER_TEMP/image-tools" >>"$GITHUB_PATH"
+
+      - name: Authenticate to GHCR
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" |
+            "$RUNNER_TEMP/image-tools/oras" login ghcr.io \
+              --username "$GITHUB_ACTOR" \
+              --password-stdin
+
+      - name: Verify and normalize signed Q2 evidence
+        shell: bash
+        env:
+          QUALIFICATION_REF: ${{ inputs.qualification_ref }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+          QUALIFICATION_RUN_ATTEMPT: ${{ inputs.qualification_run_attempt }}
+          NORMALIZED_SCOPE: ${{ inputs.normalized_scope }}
+          AWS_ACCOUNT_ID: ${{ vars.CRABBOX_AWS_EXPECTED_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          [[ "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]
+          handoff="$RUNNER_TEMP/aws-image-promotion/verified"
+          mkdir -p "$handoff"
+          repository="ghcr.io/${GITHUB_REPOSITORY,,}-aws-image-qualifications"
+          workflow_ref="$GITHUB_REPOSITORY/.github/workflows/devtools-image-qualify.yml@$GITHUB_REF"
+          scripts/verify-aws-image-promotion.sh \
+            --qualification-ref "$QUALIFICATION_REF" \
+            --repository "$repository" \
+            --source-repository "$GITHUB_REPOSITORY" \
+            --source-commit "$SOURCE_COMMIT" \
+            --workflow-ref "$workflow_ref" \
+            --workflow-run-id "$QUALIFICATION_RUN_ID" \
+            --workflow-run-attempt "$QUALIFICATION_RUN_ATTEMPT" \
+            --aws-account-id "$AWS_ACCOUNT_ID" \
+            --output "$handoff/promotion-evidence.json" >/dev/null
+          derived_scope="$(node -e '
+          const fs = require("fs");
+          const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+          process.stdout.write([
+            value.scope.provider, value.scope.target, value.scope.region,
+            value.scope.architecture, value.scope.os, value.scope.instanceType
+          ].join("/"));
+          ' "$handoff/promotion-evidence.json")"
+          [[ "$derived_scope" == "$NORMALIZED_SCOPE" ]]
+
+      - name: Upload verified promotion evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: aws-image-promotion-evidence-${{ github.run_id }}
+          overwrite: true
+          path: ${{ runner.temp }}/aws-image-promotion/verified/promotion-evidence.json
+          if-no-files-found: error
+          retention-days: 30
+
+  mutate:
+    name: Persist attempt and CAS default
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: image-promoter
+    permissions:
+      contents: read
+    outputs:
+      idempotency_key: ${{ steps.key.outputs.idempotency_key }}
+      phase: ${{ steps.promote.outputs.phase }}
+    steps:
+      - name: Derive stable logical attempt key
+        id: key
+        shell: bash
+        env:
+          OPERATION: ${{ inputs.operation }}
+        run: printf 'idempotency_key=promotion-%s-%s\n' "$GITHUB_RUN_ID" "$OPERATION" >>"$GITHUB_OUTPUT"
+
+      - name: Check out protected mutation client
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Download verified promotion evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: aws-image-promotion-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/aws-image-promotion/verified
+
+      - name: Persist and apply protected mutation
+        id: promote
+        shell: bash
+        env:
+          CRABBOX_COORDINATOR: ${{ vars.CRABBOX_COORDINATOR }}
+          CRABBOX_COORDINATOR_PROMOTION_TOKEN: ${{ secrets.CRABBOX_COORDINATOR_PROMOTION_TOKEN }}
+          QUALIFICATION_REF: ${{ inputs.qualification_ref }}
+          EXPECTED_CURRENT_IMAGE: ${{ inputs.expected_current_image }}
+          EXPECTED_CURRENT_REVISION: ${{ inputs.expected_current_revision }}
+          OPERATION: ${{ inputs.operation }}
+        run: |
+          set -euo pipefail
+          [[ -n "$CRABBOX_COORDINATOR" ]]
+          [[ -n "$CRABBOX_COORDINATOR_PROMOTION_TOKEN" ]]
+          handoff="$RUNNER_TEMP/aws-image-promotion/mutation"
+          mkdir -p "$handoff"
+          idempotency_key="promotion-${GITHUB_RUN_ID}-${OPERATION}"
+          command=(
+            node scripts/aws-image-promotion-client.mjs mutate
+            --evidence "$RUNNER_TEMP/aws-image-promotion/verified/promotion-evidence.json"
+            --qualification-ref "$QUALIFICATION_REF"
+            --expected-current-image "$EXPECTED_CURRENT_IMAGE"
+            --expected-current-revision "$EXPECTED_CURRENT_REVISION"
+            --idempotency-key "$idempotency_key"
+            --workflow-run-id "$GITHUB_RUN_ID"
+            --workflow-run-attempt "$GITHUB_RUN_ATTEMPT"
+            --operation "$OPERATION"
+          )
+          "${command[@]}" >"$handoff/mutation.json"
+          phase="$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1])).attempt.phase' "$handoff/mutation.json")"
+          [[ "$phase" == awaiting_verification || "$phase" == completed ]]
+          printf 'phase=%s\n' "$phase" >>"$GITHUB_OUTPUT"
+
+      - name: Upload authoritative mutation response
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: aws-image-promotion-mutation-${{ github.run_id }}
+          overwrite: true
+          path: ${{ runner.temp }}/aws-image-promotion/mutation/mutation.json
+          if-no-files-found: error
+          retention-days: 30
+
+  probe:
+    name: Prove fresh promoted selection and cleanup
+    needs: mutate
+    if: ${{ needs.mutate.result == 'success' && needs.mutate.outputs.phase == 'awaiting_verification' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: image-prober
+    permissions:
+      contents: read
+    outputs:
+      lease_id: ${{ steps.probe.outputs.lease_id }}
+      failure_code: ${{ steps.probe.outputs.failure_code }}
+    steps:
+      - name: Check out protected probe client
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Download verified promotion evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: aws-image-promotion-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/aws-image-promotion/verified
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Build lease-only probe client
+        shell: bash
+        run: go build -trimpath -o bin/crabbox ./cmd/crabbox
+
+      - name: Run one fresh non-pool lease and clean it up
+        id: probe
+        shell: bash
+        env:
+          CRABBOX_COORDINATOR: ${{ vars.CRABBOX_COORDINATOR }}
+          CRABBOX_COORDINATOR_TOKEN: ${{ secrets.CRABBOX_IMAGE_PROBER_TOKEN }}
+          CRABBOX_CONFIG: ${{ runner.temp }}/aws-image-promotion/empty-config.yaml
+          CRABBOX_AWS_AMI: ""
+        run: |
+          set -euo pipefail
+          [[ -n "$CRABBOX_COORDINATOR" ]]
+          [[ -n "$CRABBOX_COORDINATOR_TOKEN" ]]
+          mkdir -p "$(dirname "$CRABBOX_CONFIG")"
+          : >"$CRABBOX_CONFIG"
+          evidence="$RUNNER_TEMP/aws-image-promotion/verified/promotion-evidence.json"
+          region="$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1])).scope.region' "$evidence")"
+          instance_type="$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1])).scope.instanceType' "$evidence")"
+          architecture="$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1])).scope.architecture' "$evidence")"
+          os_selector="$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1])).scope.os' "$evidence")"
+          [[ "$architecture" == x86_64 ]] && architecture=amd64
+          log="$RUNNER_TEMP/aws-image-promotion/probe.log"
+          set +e
+          bin/crabbox run \
+            --provider aws \
+            --target linux \
+            --region "$region" \
+            --type "$instance_type" \
+            --arch "$architecture" \
+            --os "$os_selector" \
+            --market on-demand \
+            --no-sync \
+            --stop-after always \
+            -- true 2>&1 | tee "$log"
+          status="${PIPESTATUS[0]}"
+          set -e
+          lease_id="$(grep -Eo 'lease=cbx_[a-z0-9]+' "$log" | tail -1 | cut -d= -f2 || true)"
+          if [[ "$lease_id" =~ ^cbx_[a-z0-9]+$ ]]; then
+            printf 'lease_id=%s\n' "$lease_id" >>"$GITHUB_OUTPUT"
+            printf 'failure_code=\n' >>"$GITHUB_OUTPUT"
+          else
+            printf 'lease_id=\n' >>"$GITHUB_OUTPUT"
+            printf 'failure_code=lease_start_failed\n' >>"$GITHUB_OUTPUT"
+            [[ "$status" -ne 0 ]] || status=1
+          fi
+          exit "$status"
+
+  finalize:
+    name: Finalize authoritative verification outcome
+    needs:
+      - mutate
+      - probe
+    if: ${{ always() && needs.mutate.outputs.idempotency_key != '' && needs.mutate.result != 'cancelled' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: image-promoter
+    permissions:
+      contents: read
+    steps:
+      - name: Check out protected promotion client
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Fetch and persist final attempt without replay
+        shell: bash
+        env:
+          CRABBOX_COORDINATOR: ${{ vars.CRABBOX_COORDINATOR }}
+          CRABBOX_COORDINATOR_PROMOTION_TOKEN: ${{ secrets.CRABBOX_COORDINATOR_PROMOTION_TOKEN }}
+          IDEMPOTENCY_KEY: ${{ needs.mutate.outputs.idempotency_key }}
+          LEASE_ID: ${{ needs.probe.outputs.lease_id }}
+          PROBE_FAILURE_CODE: ${{ needs.probe.outputs.failure_code }}
+          PROBE_RESULT: ${{ needs.probe.result }}
+        run: |
+          set -euo pipefail
+          handoff="$RUNNER_TEMP/aws-image-promotion/final"
+          mkdir -p "$handoff"
+          recovered="$handoff/recovered.json"
+          node scripts/aws-image-promotion-client.mjs recover \
+            --idempotency-key "$IDEMPOTENCY_KEY" >"$recovered"
+          phase="$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1])).attempt.phase' "$recovered")"
+          if [[ "$phase" == completed ]]; then
+            node -e '
+            const fs = require("fs");
+            const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            fs.writeFileSync(process.argv[2], JSON.stringify(value.attempt) + "\n", { mode: 0o600 });
+            ' "$recovered" "$handoff/authoritative-attempt.json"
+            exit 0
+          fi
+          [[ "$phase" == awaiting_verification ]]
+          verify=(
+            node scripts/aws-image-promotion-client.mjs verify
+            --idempotency-key "$IDEMPOTENCY_KEY"
+          )
+          if [[ "$PROBE_RESULT" == success && "$LEASE_ID" =~ ^cbx_[a-z0-9]+$ ]]; then
+            verify+=(--lease-id "$LEASE_ID")
+          else
+            failure_code="$PROBE_FAILURE_CODE"
+            if [[ ! "$failure_code" =~ ^(lease_start_failed|lease_id_unavailable)$ ]]; then
+              if [[ "$PROBE_RESULT" == skipped ]]; then
+                failure_code=probe_not_run
+              else
+                failure_code=probe_command_failed
+              fi
+            fi
+            verify+=(--failure-code "$failure_code")
+          fi
+          "${verify[@]}" >"$handoff/verified.json"
+          node -e '
+          const fs = require("fs");
+          const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+          if (value.attempt.phase !== "completed") throw new Error("verification did not complete");
+          fs.writeFileSync(process.argv[2], JSON.stringify(value.attempt) + "\n", { mode: 0o600 });
+          ' "$handoff/verified.json" "$handoff/authoritative-attempt.json"
+
+      - name: Upload authoritative persisted attempt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: aws-image-promotion-attempt-${{ github.run_id }}
+          overwrite: true
+          path: ${{ runner.temp }}/aws-image-promotion/final/authoritative-attempt.json
+          if-no-files-found: error
+          retention-days: 30
+
+  sign:
+    name: Publish signed authoritative receipt
+    needs: finalize
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Check out protected receipt publisher
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Build pinned publication tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          GOBIN="$RUNNER_TEMP/image-tools" go install oras.land/oras/cmd/oras@v1.3.3
+          GOBIN="$RUNNER_TEMP/image-tools" go install github.com/sigstore/cosign/v2/cmd/cosign@v2.6.5
+          echo "$RUNNER_TEMP/image-tools" >>"$GITHUB_PATH"
+
+      - name: Authenticate to GHCR
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" |
+            "$RUNNER_TEMP/image-tools/oras" login ghcr.io \
+              --username "$GITHUB_ACTOR" \
+              --password-stdin
+
+      - name: Download authoritative persisted attempt
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: aws-image-promotion-attempt-${{ github.run_id }}
+          path: ${{ runner.temp }}/aws-image-promotion/final
+
+      - name: Publish immutable signed receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          public="$RUNNER_TEMP/aws-image-promotion/public"
+          mkdir -p "$public"
+          repository="ghcr.io/${GITHUB_REPOSITORY,,}-aws-image-promotions"
+          scripts/publish-aws-image-promotion-receipt.sh \
+            --attempt "$RUNNER_TEMP/aws-image-promotion/final/authoritative-attempt.json" \
+            --repository "$repository" \
+            --certificate-identity "https://github.com/$GITHUB_WORKFLOW_REF" |
+            tee "$public/publication.json"
+
+      - name: Upload public receipt reference
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: aws-image-promotion-receipt-${{ github.run_id }}
+          overwrite: true
+          path: ${{ runner.temp }}/aws-image-promotion/public/publication.json
+          if-no-files-found: error
+          retention-days: 30

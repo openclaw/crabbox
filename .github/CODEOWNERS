@@ -15,10 +15,18 @@
 # Protected image-candidate publication and evidence contracts.
 /.github/workflows/devtools-image-publish.yml @openclaw/openclaw-secops
 /.github/workflows/devtools-image-qualify.yml @openclaw/openclaw-secops
+/.github/workflows/devtools-image-promote.yml @openclaw/openclaw-secops
+/internal/cli/config.go @openclaw/openclaw-secops
+/internal/cli/coordinator.go @openclaw/openclaw-secops
+/internal/cli/image.go @openclaw/openclaw-secops
 /recipes/aws/ @openclaw/openclaw-secops
 /recipes/linux/ @openclaw/openclaw-secops
 /recipes/windows/ @openclaw/openclaw-secops
 /scripts/aws-image-candidate.mjs @openclaw/openclaw-secops
+/scripts/aws-image-promotion-evidence.mjs @openclaw/openclaw-secops
+/scripts/aws-image-promotion-client.mjs @openclaw/openclaw-secops
+/scripts/aws-image-promotion-client.test.js @openclaw/openclaw-secops
+/scripts/aws-image-promotion-* @openclaw/openclaw-secops
 /scripts/aws-image-qualification.mjs @openclaw/openclaw-secops
 /scripts/aws-image-windows-prep-* @openclaw/openclaw-secops
 /scripts/consume-aws-image-candidate.mjs @openclaw/openclaw-secops
@@ -26,10 +34,17 @@
 /scripts/fixtures/aws-image-qualification-overlay.txt @openclaw/openclaw-secops
 /scripts/mint-aws-devtools-image.sh @openclaw/openclaw-secops
 /scripts/publish-aws-image-qualification.sh @openclaw/openclaw-secops
+/scripts/publish-aws-image-promotion-receipt.sh @openclaw/openclaw-secops
 /scripts/qualify-aws-image-candidate.sh @openclaw/openclaw-secops
+/scripts/verify-aws-image-promotion.sh @openclaw/openclaw-secops
 /scripts/scrub-aws-* @openclaw/openclaw-secops
 /scripts/smoke-aws-* @openclaw/openclaw-secops
 /scripts/validate-json-schema/ @openclaw/openclaw-secops
+/worker/src/coordinator-entry.ts @openclaw/openclaw-secops
+/worker/src/coordinator-runtime.ts @openclaw/openclaw-secops
+/worker/src/aws.ts @openclaw/openclaw-secops
+/worker/src/fleet.ts @openclaw/openclaw-secops
+/worker/src/types.ts @openclaw/openclaw-secops
 
 # Every eventually executed Apple VM Mach-O shares this boundary.
 /internal/applevmhelper/ @openclaw/openclaw-secops

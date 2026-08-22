@@ -293,10 +293,52 @@ type CoordinatorImage struct {
 	ServerType           string                           `json:"serverType,omitempty"`
 	Architecture         string                           `json:"architecture,omitempty"`
 	PromotedAt           string                           `json:"promotedAt,omitempty"`
+	Revision             string                           `json:"revision,omitempty"`
 	FastSnapshotRestores []CoordinatorFastSnapshotRestore `json:"fastSnapshotRestores,omitempty"`
 	Capabilities         *imageCapabilities               `json:"capabilities,omitempty"`
 	CatalogOnly          bool                             `json:"catalogOnly,omitempty"`
 	VariantSelectors     *imageVariantSelectors           `json:"variantSelectors,omitempty"`
+}
+
+type CoordinatorImageDefaultState struct {
+	State    string `json:"state"`
+	ImageID  string `json:"imageId,omitempty"`
+	Revision string `json:"revision,omitempty"`
+}
+
+type CoordinatorImageDefaultScope struct {
+	Provider     string `json:"provider"`
+	Target       string `json:"target"`
+	OSImage      string `json:"os,omitempty"`
+	Region       string `json:"region"`
+	Architecture string `json:"architecture"`
+	ServerType   string `json:"serverType"`
+}
+
+type CoordinatorImageDefault struct {
+	Provider string                       `json:"provider"`
+	Scope    CoordinatorImageDefaultScope `json:"scope"`
+	State    CoordinatorImageDefaultState `json:"state"`
+}
+
+type CoordinatorImagePromotionRequest struct {
+	Schema             string                       `json:"schema"`
+	Operation          string                       `json:"operation"`
+	Expected           CoordinatorImageDefaultState `json:"expected"`
+	Evidence           json.RawMessage              `json:"evidence"`
+	IdempotencyKey     string                       `json:"idempotencyKey"`
+	WorkflowRunID      string                       `json:"workflowRunId"`
+	WorkflowRunAttempt string                       `json:"workflowRunAttempt"`
+}
+
+type CoordinatorImagePromotionResult struct {
+	Image   CoordinatorImage                 `json:"image"`
+	Attempt CoordinatorImagePromotionAttempt `json:"attempt"`
+}
+
+type CoordinatorImagePromotionAttempt struct {
+	Phase   string `json:"phase"`
+	Outcome string `json:"outcome,omitempty"`
 }
 
 type CoordinatorFastSnapshotRestore struct {
@@ -1952,6 +1994,74 @@ func (c *CoordinatorClient) PromoteImage(ctx context.Context, imageID string, re
 		}
 	}
 	return res.Image, nil
+}
+
+func (c *CoordinatorClient) PromoteQualifiedImage(
+	ctx context.Context,
+	req CoordinatorImagePromotionRequest,
+) (CoordinatorImagePromotionResult, error) {
+	var res CoordinatorImagePromotionResult
+	err := c.do(ctx, http.MethodPost, "/v1/image-promotions", req, &res)
+	if err != nil {
+		return res, err
+	}
+	switch res.Attempt.Phase {
+	case "awaiting_verification":
+		return res, nil
+	case "completed":
+		if res.Attempt.Outcome == "promoted_verified" || res.Attempt.Outcome == "rolled_back" {
+			return res, nil
+		}
+		return res, fmt.Errorf("image promotion completed with outcome %s", blank(res.Attempt.Outcome, "unknown"))
+	case "pending", "mutating", "verifying":
+		return res, fmt.Errorf("image promotion attempt is still pending in phase %s", res.Attempt.Phase)
+	default:
+		return res, fmt.Errorf("coordinator returned an invalid image promotion phase %q", res.Attempt.Phase)
+	}
+}
+
+func (c *CoordinatorClient) ImageDefaultState(
+	ctx context.Context,
+	scope CoordinatorImageDefaultScope,
+) (CoordinatorImageDefault, error) {
+	var res CoordinatorImageDefault
+	values := url.Values{
+		"provider":     {scope.Provider},
+		"target":       {scope.Target},
+		"region":       {scope.Region},
+		"architecture": {scope.Architecture},
+		"serverType":   {scope.ServerType},
+	}
+	if scope.OSImage != "" {
+		values.Set("os", scope.OSImage)
+	}
+	err := c.do(ctx, http.MethodGet, "/v1/image-promotions/default-state?"+values.Encode(), nil, &res)
+	return res, err
+}
+
+func (c *CoordinatorClient) CASImageDefault(
+	ctx context.Context,
+	imageID string,
+	scope CoordinatorImageDefaultScope,
+	expected CoordinatorImageDefaultState,
+) (CoordinatorImage, error) {
+	var res struct {
+		Image CoordinatorImage `json:"image"`
+	}
+	err := c.do(ctx, http.MethodPost, "/v1/image-promotions/provider-defaults", map[string]any{
+		"schema":   "crabbox-provider-image-default-cas/v1",
+		"provider": scope.Provider,
+		"imageId":  imageID,
+		"scope": map[string]string{
+			"target":       scope.Target,
+			"os":           scope.OSImage,
+			"region":       scope.Region,
+			"architecture": scope.Architecture,
+			"serverType":   scope.ServerType,
+		},
+		"expected": expected,
+	}, &res)
+	return res.Image, err
 }
 
 func (c *CoordinatorClient) FastSnapshotRestoreStatus(ctx context.Context, imageID string, refs ...CoordinatorImageRef) (CoordinatorImage, error) {

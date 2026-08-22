@@ -96,6 +96,7 @@ export interface Env {
   CRABBOX_SHARED_TOKEN?: string;
   CRABBOX_SHARED_OWNER?: string;
   CRABBOX_ADMIN_TOKEN?: string;
+  CRABBOX_IMAGE_PROMOTION_TOKEN?: string;
   CRABBOX_SESSION_SECRET?: string;
   CRABBOX_USER_TOKEN_TTL_SECONDS?: string;
   CRABBOX_RUN_RETENTION_DAYS?: string;
@@ -698,6 +699,7 @@ export interface LeaseImageIdentity {
   region?: string;
   sourceID?: string;
   promotedAt?: string;
+  revision?: string;
 }
 
 export interface LeaseProvisioningTiming {
@@ -738,6 +740,7 @@ export interface ProviderImage {
   architecture?: string;
   project?: string;
   resourceID?: string;
+  ownerId?: string;
   snapshots?: string[];
   fastSnapshotRestores?: ProviderFastSnapshotRestore[];
   capabilities?: ImageCapabilities;
@@ -752,6 +755,8 @@ export interface ProviderFastSnapshotRestore {
 
 export interface PromotedImageRecord extends ProviderImage {
   promotedAt: string;
+  revision?: string;
+  protected?: boolean;
   catalogOnly?: boolean;
   variantSelectors?: ImageVariantSelectors;
 }

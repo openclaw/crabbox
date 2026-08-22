@@ -435,7 +435,8 @@ AWS_SESSION_TOKEN                  optional
 CRABBOX_HOST_ID                    optional; admin-only except owner reactivation of a retained Mac instance
 CRABBOX_AWS_MAC_HOST_ID            optional legacy AWS alias for CRABBOX_HOST_ID
 CRABBOX_SHARED_OWNER              optional fixed owner identity for shared-token automation
-CRABBOX_ADMIN_TOKEN               required for admin routes and image promotion
+CRABBOX_ADMIN_TOKEN               required for admin routes and legacy unprotected image promotion
+CRABBOX_IMAGE_PROMOTION_TOKEN     required for AWS protected signed promotion and authorized unprotected provider-neutral CAS (currently Azure); must differ from admin/shared/runtime tokens
 CRABBOX_WORKSPACE_SSH_PUBLIC_KEY  required for SSH-based /v1/workspaces provisioning; unused by private AWS mode
 CRABBOX_WORKSPACE_SSH_PRIVATE_KEY required for SSH-based terminal attachment; unused by private AWS mode
 CRABBOX_WORKSPACE_PROVIDER        optional workspace provider; hetzner, aws, azure, or gcp
@@ -488,6 +489,47 @@ CRABBOX_AZURE_ORPHAN_SWEEP_DELETE   optional; set 1 to release coordinator-owned
 CRABBOX_AZURE_ORPHAN_SWEEP_INTERVAL_SECONDS optional; default 3600
 CRABBOX_AZURE_ORPHAN_SWEEP_GRACE_SECONDS    optional; default 900
 ```
+
+Protected AWS/Linux default promotion also requires external GitHub and
+coordinator configuration:
+
+- Set the same independently generated promotion-only secret as
+  `CRABBOX_IMAGE_PROMOTION_TOKEN` on the coordinator and
+  `CRABBOX_COORDINATOR_PROMOTION_TOKEN` on the `image-promoter` GitHub
+  environment. Do not reuse the admin, shared, or runtime-adapter token.
+- Set `CRABBOX_COORDINATOR` on both `image-promoter` and `image-prober`.
+- Give `image-prober` only `CRABBOX_IMAGE_PROBER_TOKEN`, a non-admin
+  lease-capable credential. It must not contain the promotion token or provider
+  cloud credentials.
+- Set repository variable `CRABBOX_AWS_EXPECTED_ACCOUNT_ID` to the exact
+  12-digit AWS owner account used by qualification and coordinator runtime.
+- Require reviewers on `image-promoter`. Keep the signing job outside that
+  environment; it receives only GitHub package and OIDC permissions and the
+  persisted sanitized attempt artifact.
+
+Authorized operators can inspect the current versioned default without an
+admin token:
+
+```sh
+crabbox image default-state --provider azure --target linux \
+  --os ubuntu:26.04 --region westeurope --architecture amd64 \
+  --type Standard_D4s_v5
+```
+
+The promotion-only credential also authorizes the provider-neutral versioned
+CAS route for **unprotected** defaults. Azure OS-disk snapshots are the
+currently supported non-AWS implementation:
+
+```sh
+crabbox image cas snapshot-next --provider azure --target linux \
+  --os ubuntu:26.04 --region westeurope --architecture amd64 \
+  --type Standard_D4s_v5 --expected-current-image snapshot-current \
+  --expected-current-revision revision-current
+```
+
+This supported Azure CAS contract does not consume AWS qualification evidence,
+does not mark the Azure slot protected, and is not covered by the signed
+AWS/Linux promotion workflow.
 
 Normal SSH-based AWS workspace bridges use a dedicated `crabbox-workspaces`
 security group, separate from ordinary runner ingress. Workers TCP egress has

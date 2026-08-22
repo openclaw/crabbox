@@ -271,6 +271,7 @@ jobs:
         run: |
           node --test scripts/consume-aws-image-candidate.integration.test.js
           node --test scripts/publish-aws-image-qualification.integration.test.js
+          node --test scripts/publish-aws-image-promotion-receipt.integration.test.js
 
   docs:
     name: Docs

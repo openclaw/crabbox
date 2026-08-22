@@ -139,6 +139,12 @@ coordinator injects `x-crabbox-auth`, `-admin`, `-owner`, `-org`, and `-github-l
 headers. The portal converts one unique `__Host-crabbox_session` host-only
 cookie into a Bearer token and rejects duplicate session cookies.
 
+`/v1/image-promotions` is deliberately outside that broad auth chain. The
+coordinator entrypoint accepts only the independent
+`CRABBOX_IMAGE_PROMOTION_TOKEN`, injects a non-admin promotion marker, and
+rejects deployments that alias it to the admin, shared, or runtime-adapter
+token.
+
 ## Fleet Coordinator And Runtime Adapters
 
 One logical `FleetCoordinator` (`worker/src/fleet.ts`) owns:

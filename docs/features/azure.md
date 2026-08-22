@@ -22,10 +22,13 @@ keeping Windows classes smaller than the large Linux-focused classes.
 Linux VMs install checksum-pinned TruffleHog 3.95.9 once during cloud-init.
 Windows WSL2 VMs install the matching Linux binary once while the managed WSL
 distro is created.
-Azure uses Marketplace images rather than Crabbox-promoted developer images, so
-there is no separate Azure image publication step. Brokered environments pick
-up bootstrap changes when the coordinator Worker is deployed; direct mode picks
-them up with the updated Crabbox CLI.
+Azure normally uses Marketplace images. The promotion-only credential also
+authorizes provider-neutral `image default-state` and `image cas` operations
+for unprotected defaults; Azure OS-disk snapshots are the currently supported
+non-AWS implementation. This is not the signed AWS/Linux qualification workflow
+and does not claim Azure qualification. Brokered environments pick up bootstrap
+changes when the coordinator Worker is deployed; direct mode picks them up with
+the updated Crabbox CLI.
 
 This page covers the `azure` VM backend. Azure Container Apps dynamic sessions
 are a separate, delegated-run backend selected with `--azure-backend

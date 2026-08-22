@@ -84,6 +84,9 @@ export async function prepareCoordinatorRequest(
       authenticated: false,
     };
   }
+  if (route[0] === "v1" && route[1] === "image-promotions") {
+    return imagePromotionCoordinatorRequest(request, env);
+  }
   const deviceTokenRequest =
     isDeviceTokenRequest(request) && !configuredCoordinatorBearer(request, env);
   if (isPairingExchangeRequest(request) || deviceTokenRequest) {
@@ -230,6 +233,42 @@ async function authenticatedCoordinatorRequest(
     request: await requestWithAdminGrantVersion(requestWithAuthContext(request, auth), env),
     authenticated: true,
   };
+}
+
+async function imagePromotionCoordinatorRequest(
+  request: Request,
+  env: Env,
+): Promise<PreparedCoordinatorRequest> {
+  const expected = env.CRABBOX_IMAGE_PROMOTION_TOKEN?.trim();
+  const aliases = [
+    env.CRABBOX_ADMIN_TOKEN,
+    env.CRABBOX_SHARED_TOKEN,
+    env.CRABBOX_RUNTIME_ADAPTER_TOKEN,
+  ]
+    .map((value) => value?.trim())
+    .filter((value): value is string => Boolean(value));
+  if (!expected || aliases.some((value) => timingSafeEqual(expected, value))) {
+    return {
+      response: json({ error: "image_promotion_auth_unavailable" }, { status: 503 }),
+      authenticated: false,
+    };
+  }
+  if (!timingSafeEqual(bearerToken(request) ?? "", expected)) {
+    return {
+      response: json({ error: "unauthorized" }, { status: 401 }),
+      authenticated: false,
+    };
+  }
+  const authorized = requestWithAuthContext(requestWithoutTrustedHeaders(request), {
+    authorized: true,
+    admin: false,
+    auth: "bearer",
+    owner: "image-promoter",
+    org: "",
+  });
+  const headers = new Headers(authorized.headers);
+  headers.set("x-crabbox-image-promoter", "true");
+  return { request: new Request(authorized, { headers }), authenticated: true };
 }
 
 function portalCookieRequestIntentAllowed(request: Request, env: Env, url: URL): boolean {

@@ -3,8 +3,10 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 )
@@ -69,12 +71,95 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 	fastSnapshotRestore := fs.Bool("fast-snapshot-restore", false, "enable AWS Fast Snapshot Restore for the promoted AMI snapshots")
 	var fastSnapshotRestoreAZs stringListFlag
 	fs.Var(&fastSnapshotRestoreAZs, "fsr-az", "availability zone for Fast Snapshot Restore; repeatable")
+	qualificationRef := fs.String("qualification-ref", "", "immutable signed AWS qualification OCI digest reference")
+	promotionEvidence := fs.String("promotion-evidence", "", "verified promotion evidence JSON file")
+	expectedCurrentImage := fs.String("expected-current-image", "", "expected current image id, or none for an absent default")
+	expectedCurrentRevision := fs.String("expected-current-revision", "", "expected current default revision when an image is present")
+	idempotencyKey := fs.String("idempotency-key", "", "stable protected promotion attempt key")
+	workflowRunID := fs.String("workflow-run-id", "", "calling workflow run id")
+	workflowRunAttempt := fs.String("workflow-run-attempt", "", "calling workflow run attempt")
+	rollback := fs.Bool("rollback", false, "roll back to the prior successful protected default")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
-		return exit(2, "usage: crabbox image promote <image-id> [--provider aws|azure] [--target linux|macos|windows] [--os ubuntu:26.04|ubuntu:24.04] [--region <region>] [--type <instance-type>] [--architecture <arch>] [--os-version <version>] [--sdk <name=version>] [--runtime <name=version>] [--variant-sdk <name=version>] [--variant-runtime <name=version>] [--browser] [--webview2] [--desktop] [--catalog-only] [--fast-snapshot-restore --fsr-az <az>]")
+	protectedPromotion := flagWasSet(fs, "expected-current-image")
+	if (!protectedPromotion && fs.NArg() != 1) || (protectedPromotion && fs.NArg() != 0) {
+		return exit(2, "usage: crabbox image promote <image-id> [legacy options] | crabbox image promote --qualification-ref <oci@sha256:...> --promotion-evidence <file> --expected-current-image <id|none> [--expected-current-revision <revision>] --idempotency-key <key> --workflow-run-id <id> --workflow-run-attempt <attempt>")
+	}
+	if protectedPromotion {
+		if strings.TrimSpace(*qualificationRef) == "" {
+			return exit(2, "--qualification-ref is required with --expected-current-image")
+		}
+		evidence, err := loadImagePromotionEvidence(*promotionEvidence, strings.TrimSpace(*qualificationRef))
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(*idempotencyKey) == "" {
+			return exit(2, "--idempotency-key is required with --expected-current-image")
+		}
+		if strings.TrimSpace(*workflowRunID) == "" || strings.TrimSpace(*workflowRunAttempt) == "" {
+			return exit(2, "--workflow-run-id and --workflow-run-attempt are required with --expected-current-image")
+		}
+		expectedImage := strings.TrimSpace(*expectedCurrentImage)
+		expectedRevision := strings.TrimSpace(*expectedCurrentRevision)
+		if expectedImage == "" {
+			return exit(2, "--expected-current-image must be an image id or none")
+		}
+		if expectedImage == "none" {
+			if expectedRevision != "" {
+				return exit(2, "--expected-current-revision is invalid when --expected-current-image=none")
+			}
+		} else if expectedRevision == "" {
+			return exit(2, "--expected-current-revision is required when the expected current image is present")
+		}
+		if *catalogOnly || *fastSnapshotRestore || len(fastSnapshotRestoreAZs) > 0 {
+			return exit(2, "protected image promotion does not support catalog-only or Fast Snapshot Restore options")
+		}
+		for _, name := range []string{
+			"provider", "target", "os", "region", "type", "server-type", "architecture",
+			"os-version", "sdk", "runtime", "variant-sdk", "variant-runtime", "browser",
+			"webview2", "desktop",
+		} {
+			if flagWasSet(fs, name) {
+				return exit(2, "protected image promotion derives provider and scope from signed qualification evidence; --%s is not allowed", name)
+			}
+		}
+		expected := CoordinatorImageDefaultState{State: "present", ImageID: expectedImage, Revision: expectedRevision}
+		if expectedImage == "none" {
+			expected = CoordinatorImageDefaultState{State: "absent"}
+		}
+		coord, err := configuredPromotionCoordinator()
+		if err != nil {
+			return err
+		}
+		operation := "promote"
+		if *rollback {
+			operation = "rollback"
+		}
+		result, err := coord.PromoteQualifiedImage(ctx, CoordinatorImagePromotionRequest{
+			Schema:             "crabbox-image-promotion-request/v1",
+			Operation:          operation,
+			Expected:           expected,
+			Evidence:           evidence,
+			IdempotencyKey:     strings.TrimSpace(*idempotencyKey),
+			WorkflowRunID:      strings.TrimSpace(*workflowRunID),
+			WorkflowRunAttempt: strings.TrimSpace(*workflowRunAttempt),
+		})
+		if err != nil {
+			return err
+		}
+		if *jsonOut {
+			return json.NewEncoder(a.Stdout).Encode(result)
+		}
+		fmt.Fprintf(a.Stdout, "%s phase=%s outcome=%s image=%s state=%s region=%s revision=%s\n", operation, result.Attempt.Phase, blank(result.Attempt.Outcome, "-"), blank(result.Image.ID, "none"), blank(result.Image.State, "-"), blank(result.Image.Region, "-"), blank(result.Image.Revision, "-"))
+		return nil
+	}
+	if strings.TrimSpace(*qualificationRef) != "" || strings.TrimSpace(*promotionEvidence) != "" ||
+		flagWasSet(fs, "expected-current-revision") ||
+		flagWasSet(fs, "idempotency-key") || flagWasSet(fs, "workflow-run-id") ||
+		flagWasSet(fs, "workflow-run-attempt") || *rollback {
+		return exit(2, "protected promotion flags require --expected-current-image")
 	}
 	normalizedProvider := normalizeProviderName(*provider)
 	if normalizedProvider != "aws" && normalizedProvider != "azure" {
@@ -175,6 +260,134 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintln(a.Stdout)
 	return nil
+}
+
+func imageDefaultScopeFlags(fs *flag.FlagSet) (*string, *string, *string, *string, *string, *string) {
+	provider := fs.String("provider", "azure", "image provider: aws or azure")
+	target := fs.String("target", "linux", "image target: linux, macos, or windows")
+	osImage := fs.String("os", defaultOSImage, "portable Linux OS selector")
+	region := fs.String("region", "", "provider region or Azure location")
+	architecture := fs.String("architecture", "", "provider image architecture")
+	serverType := fs.String("type", "", "provider instance type or Azure VM size")
+	return provider, target, osImage, region, architecture, serverType
+}
+
+func coordinatorImageDefaultScope(
+	provider, target, osImage, region, architecture, serverType string,
+) (CoordinatorImageDefaultScope, error) {
+	provider = normalizeProviderName(provider)
+	if provider != "aws" && provider != "azure" {
+		return CoordinatorImageDefaultScope{}, exit(2, "--provider must be aws or azure")
+	}
+	if region == "" || architecture == "" || serverType == "" {
+		return CoordinatorImageDefaultScope{}, exit(2, "--region, --architecture, and --type are required")
+	}
+	return CoordinatorImageDefaultScope{
+		Provider: provider, Target: target, OSImage: osImage, Region: region,
+		Architecture: architecture, ServerType: serverType,
+	}, nil
+}
+
+func (a App) imageDefaultState(ctx context.Context, args []string) error {
+	fs := newFlagSet("image default-state", a.Stderr)
+	provider, target, osImage, region, architecture, serverType := imageDefaultScopeFlags(fs)
+	jsonOut := fs.Bool("json", false, "print JSON")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	scope, err := coordinatorImageDefaultScope(*provider, *target, *osImage, *region, *architecture, *serverType)
+	if err != nil {
+		return err
+	}
+	coord, err := configuredPromotionCoordinator()
+	if err != nil {
+		return err
+	}
+	current, err := coord.ImageDefaultState(ctx, scope)
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		return json.NewEncoder(a.Stdout).Encode(current)
+	}
+	fmt.Fprintf(a.Stdout, "state=%s image=%s revision=%s\n", current.State.State, blank(current.State.ImageID, "none"), blank(current.State.Revision, "-"))
+	return nil
+}
+
+func (a App) imageCAS(ctx context.Context, args []string) error {
+	fs := newFlagSet("image cas", a.Stderr)
+	provider, target, osImage, region, architecture, serverType := imageDefaultScopeFlags(fs)
+	expectedImage := fs.String("expected-current-image", "", "expected current image id, or none")
+	expectedRevision := fs.String("expected-current-revision", "", "expected current default revision")
+	jsonOut := fs.Bool("json", false, "print JSON")
+	if err := parseInterspersedFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return exit(2, "usage: crabbox image cas <image-id> --provider azure --region <location> --architecture <arch> --type <vm-size> --expected-current-image <id|none> [--expected-current-revision <revision>]")
+	}
+	scope, err := coordinatorImageDefaultScope(*provider, *target, *osImage, *region, *architecture, *serverType)
+	if err != nil {
+		return err
+	}
+	if scope.Provider != "azure" {
+		return exit(2, "image cas currently supports unprotected Azure defaults only; signed protected promotion remains AWS-only")
+	}
+	expected := CoordinatorImageDefaultState{State: "absent"}
+	if *expectedImage != "none" {
+		if *expectedImage == "" || *expectedRevision == "" {
+			return exit(2, "present expected state requires --expected-current-image and --expected-current-revision")
+		}
+		expected = CoordinatorImageDefaultState{State: "present", ImageID: *expectedImage, Revision: *expectedRevision}
+	} else if *expectedRevision != "" {
+		return exit(2, "--expected-current-revision is invalid with --expected-current-image=none")
+	}
+	coord, err := configuredPromotionCoordinator()
+	if err != nil {
+		return err
+	}
+	image, err := coord.CASImageDefault(ctx, fs.Arg(0), scope, expected)
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		return json.NewEncoder(a.Stdout).Encode(image)
+	}
+	fmt.Fprintf(a.Stdout, "promoted image=%s region=%s revision=%s\n", image.ID, image.Region, image.Revision)
+	return nil
+}
+
+func loadImagePromotionEvidence(file, qualificationRef string) (json.RawMessage, error) {
+	if strings.TrimSpace(file) == "" {
+		return nil, exit(2, "--promotion-evidence is required with --expected-current-image")
+	}
+	info, err := os.Stat(file)
+	if err != nil {
+		return nil, exit(2, "read promotion evidence: %v", err)
+	}
+	if !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > 1024*1024 {
+		return nil, exit(2, "promotion evidence must be a non-empty regular file no larger than 1 MiB")
+	}
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return nil, exit(2, "read promotion evidence: %v", err)
+	}
+	var record struct {
+		Schema        string `json:"schema"`
+		Qualification struct {
+			Reference string `json:"reference"`
+		} `json:"qualification"`
+	}
+	if err := json.Unmarshal(data, &record); err != nil {
+		return nil, exit(2, "promotion evidence is not valid JSON: %v", err)
+	}
+	if record.Schema != "crabbox-image-promotion-evidence/v1" {
+		return nil, exit(2, "unsupported promotion evidence schema")
+	}
+	if record.Qualification.Reference != qualificationRef {
+		return nil, exit(2, "promotion evidence qualification reference does not match --qualification-ref")
+	}
+	return json.RawMessage(data), nil
 }
 
 func (a App) imageFSRStatus(ctx context.Context, args []string) error {
