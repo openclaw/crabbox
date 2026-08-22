@@ -1,0 +1,99 @@
+{
+  "schema": "crabbox-linux-readiness/v1",
+  "profile": "linux-builder",
+  "description": "Reusable Linux build image prerequisites for Crabbox development",
+  "satisfies": [
+    "linux-minimal",
+    "linux-builder"
+  ],
+  "aptPackages": [
+    "build-essential",
+    "ca-certificates",
+    "curl",
+    "git",
+    "git-lfs",
+    "jq",
+    "libssl-dev",
+    "openssh-server",
+    "pkg-config",
+    "python3",
+    "python3-venv",
+    "rsync",
+    "tmux",
+    "util-linux"
+  ],
+  "probes": [
+    {
+      "name": "sshd",
+      "command": "test -x /usr/sbin/sshd"
+    },
+    {
+      "name": "ca-certificates",
+      "command": "test -s /etc/ssl/certs/ca-certificates.crt"
+    },
+    {
+      "name": "curl",
+      "command": "curl --version >/dev/null"
+    },
+    {
+      "name": "git",
+      "command": "git --version >/dev/null"
+    },
+    {
+      "name": "git-lfs",
+      "command": "git lfs version >/dev/null"
+    },
+    {
+      "name": "rsync",
+      "command": "rsync --version >/dev/null"
+    },
+    {
+      "name": "jq",
+      "command": "jq --version >/dev/null"
+    },
+    {
+      "name": "tmux",
+      "command": "tmux -V >/dev/null"
+    },
+    {
+      "name": "flock",
+      "command": "flock --version >/dev/null"
+    },
+    {
+      "name": "compiler",
+      "command": "cc --version >/dev/null"
+    },
+    {
+      "name": "make",
+      "command": "make --version >/dev/null"
+    },
+    {
+      "name": "pkg-config",
+      "command": "pkg-config --version >/dev/null"
+    },
+    {
+      "name": "python3",
+      "command": "python3 --version >/dev/null"
+    },
+    {
+      "name": "go",
+      "command": "go version >/dev/null"
+    },
+    {
+      "name": "node",
+      "command": "node --version >/dev/null"
+    }
+  ],
+  "toolchains": [
+    {
+      "name": "go",
+      "version": "1.26.5",
+      "source": "go.mod toolchain"
+    },
+    {
+      "name": "node",
+      "version": "24",
+      "source": ".node-version"
+    }
+  ]
+}

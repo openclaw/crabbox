@@ -406,10 +406,12 @@ source lease, candidate AMI, and promoted AMI before declaring success unless
 `.crabbox/image-mint-<image-name>-*.log.*` with a per-invocation suffix. Each
 warmup prints its exact `log=` path. Candidate proof requires
 `source=explicit`; final proof requires `source=promoted` with the exact AMI ID
-created by the run. The Linux prep also writes the verified
-`/var/lib/crabbox/image-ready` marker that lets later boots skip redundant base
-APT setup. Use the timing logs to compare provider request, network readiness,
-bootstrap, and end-to-end time before and after each bake.
+created by the run. The Linux prep currently writes the compatibility
+`/var/lib/crabbox/image-ready` marker. That marker does not authorize an APT
+skip by itself: later bootstrap first proves the complete `linux-minimal`
+contract, then migrates it to the root-owned v1 readiness manifest without a
+package-manager call. Use the timing logs to compare provider request, network
+readiness, bootstrap, and end-to-end time before and after each bake.
 
 ## macOS images
 

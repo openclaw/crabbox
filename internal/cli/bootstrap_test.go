@@ -32,12 +32,22 @@ func TestCloudInitUsesRetryingBootstrap(t *testing.T) {
 		"package_update: false",
 		"bash -euxo pipefail <<'BOOT'",
 		"Acquire::Retries \"8\";",
-		"test -f /var/lib/crabbox/image-ready",
-		"test -s /etc/ssl/certs/ca-certificates.crt",
-		"crabbox prebaked base packages ready; skipping apt bootstrap",
+		"crabbox_readiness_manifest_path='/var/lib/crabbox/readiness/linux.json'",
+		"crabbox_minimal_profile='linux-minimal'",
+		"crabbox_minimal_recipe_digest='" + linuxMinimalRecipeDigest + "'",
+		"crabbox_builder_profile='linux-builder'",
+		"crabbox_builder_recipe_digest='" + linuxBuilderRecipeDigest + "'",
+		`test "$(stat -c '%u:%a' "$crabbox_readiness_manifest_path" 2>/dev/null)" = "0:644"`,
+		"test -s '/etc/ssl/certs/ca-certificates.crt'",
+		"crabbox Linux readiness manifest verified; skipping apt bootstrap",
+		"crabbox legacy image readiness migrated without package-manager work",
 		"retry apt-get update",
-		"retry apt-get install -y --no-install-recommends openssh-server ca-certificates curl git rsync jq",
+		"retry apt-get install -y --no-install-recommends $crabbox_readiness_packages",
+		"crabbox_readiness_packages='ca-certificates curl git jq openssh-server rsync tmux util-linux'",
+		"dpkg-query -W -f='${binary:Package}=${Version}\\n'",
 		"curl --version >/dev/null",
+		"tmux -V >/dev/null",
+		"flock --version >/dev/null",
 		"test -f /var/lib/crabbox/bootstrapped",
 		"test -w '/work/crabbox'",
 		"      Port 2222\n      Port 22",
@@ -55,10 +65,46 @@ func TestCloudInitUsesRetryingBootstrap(t *testing.T) {
 	if strings.Contains(got, "systemctl enable --now ssh") {
 		t.Fatal("cloudInit() must not use blocking systemctl enable --now ssh")
 	}
+	if !strings.Contains(got, `test -f "$crabbox_legacy_image_marker_path"`) {
+		t.Fatal("legacy image migration must require the marker and minimal probes")
+	}
 	for _, notWant := range []string{"go version", "golang-go", "go.dev/dl/go", "/usr/local/go", "node --version", "pnpm --version", "docker --version", "build-essential", "docker.io", "corepack"} {
 		if strings.Contains(got, notWant) {
 			t.Fatalf("cloudInit() should not install project language runtime %q", notWant)
 		}
+	}
+}
+
+func TestLinuxMinimalReadinessFastPathAvoidsPackageManager(t *testing.T) {
+	matchStart := strings.Index(linuxMinimalReadinessBootstrap, "crabbox_readiness_manifest_matches() {")
+	if matchStart < 0 {
+		t.Fatal("generated readiness bootstrap is missing manifest matcher")
+	}
+	matchEnd := strings.Index(linuxMinimalReadinessBootstrap[matchStart:], "\n}")
+	if matchEnd < 0 {
+		t.Fatal("generated readiness bootstrap has an unterminated manifest matcher")
+	}
+	matchBody := linuxMinimalReadinessBootstrap[matchStart : matchStart+matchEnd]
+
+	fastStart := strings.Index(linuxMinimalReadinessBootstrap, "if crabbox_readiness_manifest_matches; then")
+	if fastStart < 0 {
+		t.Fatal("generated readiness bootstrap is missing fast path")
+	}
+	fastEnd := strings.Index(linuxMinimalReadinessBootstrap[fastStart:], "\nelse")
+	if fastEnd < 0 {
+		t.Fatal("generated readiness bootstrap has an unterminated fast path")
+	}
+	fastBody := linuxMinimalReadinessBootstrap[fastStart : fastStart+fastEnd]
+
+	for _, body := range []string{matchBody, fastBody} {
+		for _, forbidden := range []string{"apt-get", "apt-cache", "dpkg-query"} {
+			if strings.Contains(body, forbidden) {
+				t.Fatalf("verified manifest fast path must not execute %s:\n%s", forbidden, body)
+			}
+		}
+	}
+	if !strings.Contains(linuxMinimalReadinessBootstrap, "crabbox_write_readiness_manifest") {
+		t.Fatal("fallback must write a fresh readiness manifest")
 	}
 }
 

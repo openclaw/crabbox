@@ -65,11 +65,14 @@ Bake stable machine capabilities:
 - Docker Engine and supporting plugins where the platform runs headless Docker;
 - empty shared cache directories such as `/var/cache/crabbox/pnpm`.
 
-The bundled Linux developer-image prep writes
-`/var/lib/crabbox/image-ready` only after the stable tool contract is present.
-On later boots Crabbox verifies the marker plus the base binaries and skips the
-otherwise redundant base-package APT transaction. Per-lease users, SSH keys,
-work roots, optional services, and readiness checks still run normally.
+The versioned `linux-minimal` and `linux-builder` recipes define the reusable
+image contract. Current images should carry the matching root-owned
+`/var/lib/crabbox/readiness/linux.json` manifest. The bundled developer-image
+prep still writes `/var/lib/crabbox/image-ready` for compatibility; on the next
+boot that marker skips no work by itself. Crabbox first proves every minimal
+tool, then migrates the marker to the v1 manifest without running a package
+manager. Missing probes fall back to the normal install. Per-lease users, SSH
+keys, work roots, optional services, and readiness checks still run normally.
 
 Do not bake scenario state:
 

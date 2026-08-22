@@ -1,3 +1,8 @@
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -81,18 +86,34 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("package_update: false");
     expect(got).toContain("bash -euxo pipefail <<'BOOT'");
     expect(got).toContain('Acquire::Retries "8";');
-    expect(got).toContain("test -f /var/lib/crabbox/image-ready");
-    expect(got).toContain("test -s /etc/ssl/certs/ca-certificates.crt");
-    expect(got).toContain("crabbox prebaked base packages ready; skipping apt bootstrap");
+    expect(got).toContain(
+      "crabbox_readiness_manifest_path='/var/lib/crabbox/readiness/linux.json'",
+    );
+    expect(got).toContain("crabbox_minimal_profile='linux-minimal'");
+    expect(got).toContain("crabbox_minimal_recipe_digest='sha256:");
+    expect(got).toContain("crabbox_builder_profile='linux-builder'");
+    expect(got).toContain("crabbox_builder_recipe_digest='sha256:");
+    expect(got).toContain(
+      `test "$(stat -c '%u:%a' "$crabbox_readiness_manifest_path" 2>/dev/null)" = "0:644"`,
+    );
+    expect(got).toContain("test -s '/etc/ssl/certs/ca-certificates.crt'");
+    expect(got).toContain("crabbox Linux readiness manifest verified; skipping apt bootstrap");
+    expect(got).toContain("crabbox legacy image readiness migrated without package-manager work");
     expect(got).toContain("retry apt-get update");
     expect(got).toContain(
-      "retry apt-get install -y --no-install-recommends openssh-server ca-certificates curl git rsync jq",
+      "retry apt-get install -y --no-install-recommends $crabbox_readiness_packages",
     );
+    expect(got).toContain(
+      "crabbox_readiness_packages='ca-certificates curl git jq openssh-server rsync tmux util-linux'",
+    );
+    expect(got).toContain("dpkg-query -W -f='${binary:Package}=${Version}\\n'");
     expect(got.indexOf("systemctl restart ssh")).toBeLessThan(got.indexOf("retry apt-get update"));
     expect(got.indexOf("retry apt-get update")).toBeLessThan(
       got.indexOf("touch /var/lib/crabbox/bootstrapped"),
     );
     expect(got).toContain("curl --version >/dev/null");
+    expect(got).toContain("tmux -V >/dev/null");
+    expect(got).toContain("flock --version >/dev/null");
     expect(got).toContain("test -f /var/lib/crabbox/bootstrapped");
     expect(got).toContain("test -w /work/crabbox");
     expect(got).toContain("      Port 2222\n      Port 22");
@@ -121,6 +142,84 @@ describe("cloud-init bootstrap", () => {
     expect(got).not.toContain("build-essential");
     expect(got).not.toContain("docker.io");
     expect(got).not.toContain("corepack");
+    expect(got).toContain('test -f "$crabbox_legacy_image_marker_path"');
+  });
+
+  it("executes package-manager commands only on the slow path", () => {
+    const got = cloudInit(config);
+    const lines = got.split("\n").map((line) => (line.startsWith("    ") ? line.slice(4) : line));
+    const start = lines.indexOf("if crabbox_readiness_manifest_matches; then");
+    const end = lines.indexOf("fi", start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+
+    const root = mkdtempSync(join(tmpdir(), "crabbox-worker-readiness-"));
+    const markerPath = join(root, "image-ready");
+    const packageLog = join(root, "package-manager.log");
+    const aptConfigPath = join(root, "80-crabbox-retries");
+    const conditional = lines
+      .slice(start, end + 1)
+      .join("\n")
+      .replace(
+        "'/etc/apt/apt.conf.d/80-crabbox-retries'",
+        `'${aptConfigPath.replaceAll("'", "'\\''")}'`,
+      );
+
+    const run = (manifestMatches: boolean, legacyMarker: boolean) => {
+      if (legacyMarker) {
+        writeFileSync(markerPath, "crabbox-devtools-v1\n");
+      } else {
+        rmSync(markerPath, { force: true });
+      }
+      writeFileSync(packageLog, "");
+      const result = spawnSync(
+        "bash",
+        [
+          "-c",
+          `set -euo pipefail
+crabbox_legacy_image_marker_path='${markerPath.replaceAll("'", "'\\''")}'
+crabbox_minimal_profile='linux-minimal'
+crabbox_minimal_recipe_digest='sha256:${"0".repeat(64)}'
+crabbox_readiness_packages='ca-certificates'
+crabbox_readiness_manifest_matches() { return ${manifestMatches ? 0 : 1}; }
+crabbox_minimal_readiness_probes() { return 0; }
+crabbox_probe_inventory_digest() { printf 'sha256:${"1".repeat(64)}\\n'; }
+crabbox_package_inventory_digest() { dpkg-query --version; }
+crabbox_write_readiness_manifest() { return 0; }
+package_manager_called() { printf '%s\\n' "$1" >>'${packageLog.replaceAll("'", "'\\''")}'; return 97; }
+apt() { package_manager_called apt; }
+apt-get() { package_manager_called apt-get; }
+apt-cache() { package_manager_called apt-cache; }
+dpkg() { package_manager_called dpkg; }
+dpkg-query() { package_manager_called dpkg-query; }
+retry() { "$@"; }
+${conditional}`,
+        ],
+        { encoding: "utf8" },
+      );
+      return {
+        calls: readFileSync(packageLog, "utf8").trim().split("\n").filter(Boolean),
+        result,
+      };
+    };
+
+    try {
+      const verified = run(true, false);
+      expect(verified.result.status).toBe(0);
+      expect(verified.result.stdout).toContain("readiness manifest verified");
+      expect(verified.calls).toEqual([]);
+
+      const migrated = run(false, true);
+      expect(migrated.result.status).toBe(0);
+      expect(migrated.result.stdout).toContain("legacy image readiness migrated");
+      expect(migrated.calls).toEqual([]);
+
+      const missing = run(false, false);
+      expect(missing.result.status).not.toBe(0);
+      expect(missing.calls).toEqual(["apt-get"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("adds desktop services only when requested", () => {

@@ -1,0 +1,53 @@
+{
+  "schema": "crabbox-linux-readiness/v1",
+  "profile": "linux-minimal",
+  "description": "Provider-neutral Linux SSH runner prerequisites",
+  "satisfies": [
+    "linux-minimal"
+  ],
+  "aptPackages": [
+    "ca-certificates",
+    "curl",
+    "git",
+    "jq",
+    "openssh-server",
+    "rsync",
+    "tmux",
+    "util-linux"
+  ],
+  "probes": [
+    {
+      "name": "sshd",
+      "command": "test -x /usr/sbin/sshd"
+    },
+    {
+      "name": "ca-certificates",
+      "command": "test -s /etc/ssl/certs/ca-certificates.crt"
+    },
+    {
+      "name": "curl",
+      "command": "curl --version >/dev/null"
+    },
+    {
+      "name": "git",
+      "command": "git --version >/dev/null"
+    },
+    {
+      "name": "rsync",
+      "command": "rsync --version >/dev/null"
+    },
+    {
+      "name": "jq",
+      "command": "jq --version >/dev/null"
+    },
+    {
+      "name": "tmux",
+      "command": "tmux -V >/dev/null"
+    },
+    {
+      "name": "flock",
+      "command": "flock --version >/dev/null"
+    }
+  ],
+  "toolchains": []
+}
