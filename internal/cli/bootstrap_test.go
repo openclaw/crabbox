@@ -843,8 +843,7 @@ func TestWindowsWSL2BootstrapCompleteProbeUsesWindowsMarker(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
 	}
-	dir := t.TempDir()
-	logPath := installRecordingSSH(t, dir)
+	logPath := installSSHArgsRecorder(t)
 	bootstrapTarget := SSHTarget{
 		User:        "crabbox",
 		Host:        "127.0.0.1",
@@ -862,11 +861,10 @@ func TestWindowsWSL2BootstrapCompleteProbeUsesWindowsMarker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	commands := recordedSSHCommands(string(data))
-	if len(commands) != 1 {
-		t.Fatalf("ssh commands=%d want 1:\n%s", len(commands), data)
-	}
-	decoded := decodePowerShellCommand(t, commands[0])
+	args := strings.Split(strings.TrimSpace(string(data)), "\n")
+	assertSSHOption(t, args, "ConnectTimeout", "10")
+	assertSSHOption(t, args, "ConnectionAttempts", "3")
+	decoded := decodePowerShellCommand(t, args[len(args)-1])
 	for _, want := range []string{
 		`Test-Path -LiteralPath "C:\ProgramData\crabbox\setup-complete"`,
 		`setup-complete marker missing`,
@@ -877,6 +875,54 @@ func TestWindowsWSL2BootstrapCompleteProbeUsesWindowsMarker(t *testing.T) {
 	}
 	if strings.Contains(decoded, "wsl.exe") {
 		t.Fatalf("setup marker probe should not invoke WSL: %q", decoded)
+	}
+}
+
+func TestWindowsStableSSHProbeUsesWindowsReadinessProfile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
+	}
+	logPath := installSSHArgsRecorder(t)
+	target := SSHTarget{
+		User:           "crabbox",
+		Host:           "private.example",
+		Port:           "22",
+		TargetOS:       targetWindows,
+		WindowsMode:    windowsModeNormal,
+		SSHConfigProxy: true,
+		ProxyCommand:   "provider proxy %h %p",
+		ReadyCheck:     "true",
+	}
+	if !probeWindowsSSHStable(context.Background(), &target, time.Now().Add(time.Second)) {
+		t.Fatal("stable Windows SSH probe failed with fake ssh")
+	}
+	args := readSSHArgsRecorder(t, logPath)
+	assertSSHOption(t, args, "ConnectTimeout", "10")
+	assertSSHOption(t, args, "ConnectionAttempts", "3")
+}
+
+func TestWindowsStableSSHProbeHonorsBootstrapDeadline(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
+	}
+	installSSHArgsRecorder(t)
+	t.Setenv("CRABBOX_FAKE_SSH_DELAY", "0.2")
+	target := SSHTarget{
+		User:           "crabbox",
+		Host:           "private.example",
+		Port:           "22",
+		TargetOS:       targetWindows,
+		WindowsMode:    windowsModeNormal,
+		SSHConfigProxy: true,
+		ProxyCommand:   "provider proxy %h %p",
+		ReadyCheck:     "true",
+	}
+	start := time.Now()
+	if probeWindowsSSHStable(context.Background(), &target, time.Now().Add(30*time.Millisecond)) {
+		t.Fatal("stable Windows SSH probe ignored the bootstrap deadline")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("stable probe exceeded its bootstrap deadline by too much: %s", elapsed)
 	}
 }
 
