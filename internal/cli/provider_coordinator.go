@@ -143,7 +143,7 @@ func (b *coordinatorLeaseBackend) coordinatorLeaseTargetForConfig(lease Coordina
 		SSH:            target,
 		LeaseID:        leaseID,
 		Coordinator:    coord,
-		RunnerEvidence: coordinatorRunnerEvidence(lease),
+		RunnerEvidence: coordinatorRunnerEvidence(providerEvidenceSanitizerFor(b.direct), lease),
 	}, nil
 }
 
@@ -283,7 +283,7 @@ func (b *coordinatorLeaseBackend) acquireOnceWithLeaseID(ctx context.Context, ke
 		SSH:            target,
 		LeaseID:        leaseID,
 		Coordinator:    b.coord,
-		RunnerEvidence: coordinatorRunnerEvidence(lease),
+		RunnerEvidence: coordinatorRunnerEvidence(providerEvidenceSanitizerFor(b.direct), lease),
 	}, nil
 }
 
@@ -339,7 +339,7 @@ func formatMilliseconds(value int64) string {
 	return (time.Duration(value) * time.Millisecond).Round(time.Millisecond).String()
 }
 
-func coordinatorRunnerEvidence(lease CoordinatorLease) *runnerProviderEvidence {
+func coordinatorRunnerEvidence(sanitizer ProviderEvidenceSanitizer, lease CoordinatorLease) *runnerProviderEvidence {
 	timing := lease.ProvisioningTiming
 	if timing == nil || timing.TotalMs <= 0 {
 		return nil
@@ -348,7 +348,9 @@ func coordinatorRunnerEvidence(lease CoordinatorLease) *runnerProviderEvidence {
 		TotalMs: timing.TotalMs,
 	}
 	if lease.Image != nil {
-		evidence.ImageID = providerSafeImageID(lease.Provider, lease.Image.ID)
+		if sanitizer != nil {
+			evidence.ImageID = strings.TrimSpace(sanitizer.SanitizeImageIDEvidence(lease.Image.ID))
+		}
 	}
 	remaining := timing.TotalMs
 	appendPhase := func(name string, ms int64) {
@@ -381,6 +383,11 @@ func coordinatorRunnerEvidence(lease CoordinatorLease) *runnerProviderEvidence {
 	}
 	appendPhase("provider.unattributed", remaining)
 	return evidence
+}
+
+func providerEvidenceSanitizerFor(backend any) ProviderEvidenceSanitizer {
+	sanitizer, _ := backend.(ProviderEvidenceSanitizer)
+	return sanitizer
 }
 
 type coordinatorCreateLeaseResult struct {

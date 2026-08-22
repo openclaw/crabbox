@@ -1,11 +1,8 @@
 package cli
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"io"
-	"strings"
 	"time"
 )
 
@@ -500,21 +497,4 @@ func includeObservedRunnerTail(report *TimingReport, startedAt, endedAt time.Tim
 		return
 	}
 	report.RunnerTotalMs = max(report.RunnerTotalMs, endedAt.Sub(startedAt).Milliseconds())
-}
-
-func providerSafeImageID(provider, imageID string) string {
-	imageID = strings.TrimSpace(imageID)
-	if imageID == "" {
-		return ""
-	}
-	canonicalProvider := strings.ToLower(strings.TrimSpace(provider))
-	if resolved, err := canonicalProviderName(provider); err == nil {
-		canonicalProvider = resolved
-	}
-	if canonicalProvider != "azure" ||
-		!strings.HasPrefix(strings.ToLower(imageID), "/subscriptions/") {
-		return imageID
-	}
-	sum := sha256.Sum256([]byte(strings.ToLower(imageID)))
-	return "azure-resource-sha256:" + hex.EncodeToString(sum[:])
 }

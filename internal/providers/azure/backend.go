@@ -2,6 +2,8 @@ package azure
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
@@ -49,6 +51,18 @@ type azureClient interface {
 func NewAzureLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 	cfg.Provider = "azure"
 	return &azureLeaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt, Delete: deleteServer, StoredLeaseKeys: true}}
+}
+
+func (b *azureLeaseBackend) SanitizeImageIDEvidence(imageID string) string {
+	imageID = strings.TrimSpace(imageID)
+	if imageID == "" {
+		return ""
+	}
+	if !strings.HasPrefix(strings.ToLower(imageID), "/subscriptions/") {
+		return imageID
+	}
+	sum := sha256.Sum256([]byte(strings.ToLower(imageID)))
+	return "azure-resource-sha256:" + hex.EncodeToString(sum[:])
 }
 
 func (b *azureLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {

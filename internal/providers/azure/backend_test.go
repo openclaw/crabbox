@@ -39,6 +39,24 @@ type fakeAzureClient struct {
 	setTagsFunc       func()
 }
 
+func TestSanitizeImageIDEvidence(t *testing.T) {
+	backend := &azureLeaseBackend{}
+	const resourceID = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/example/providers/Microsoft.Compute/snapshots/devtools"
+	got := backend.SanitizeImageIDEvidence(resourceID)
+	if got == resourceID || strings.Contains(strings.ToLower(got), "subscriptions/") {
+		t.Fatalf("unsafe image identity=%q", got)
+	}
+	if !strings.HasPrefix(got, "azure-resource-sha256:") {
+		t.Fatalf("image identity=%q", got)
+	}
+	if got != backend.SanitizeImageIDEvidence(strings.ToUpper(resourceID)) {
+		t.Fatalf("hash must be stable across Azure resource ID casing")
+	}
+	if got := backend.SanitizeImageIDEvidence("Canonical:ubuntu-26_04-lts:server:latest"); got != "Canonical:ubuntu-26_04-lts:server:latest" {
+		t.Fatalf("marketplace image=%q", got)
+	}
+}
+
 const azureTestClaimScope = "subscription:test-sub|resource-group:rg"
 
 func (c *fakeAzureClient) LeaseClaimScope() string {

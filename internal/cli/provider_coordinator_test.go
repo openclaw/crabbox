@@ -22,6 +22,12 @@ import (
 	"time"
 )
 
+type providerEvidenceSanitizerFunc func(string) string
+
+func (fn providerEvidenceSanitizerFunc) SanitizeImageIDEvidence(imageID string) string {
+	return fn(imageID)
+}
+
 func TestCoordinatorListUsesUserLeasesWithoutAdminProbe(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -851,7 +857,9 @@ func TestCoordinatorAcquireReportsSelectedImageAndProviderStartupTiming(t *testi
 			t.Fatalf("stderr=%q missing %q", stderr.String(), want)
 		}
 	}
-	evidence := coordinatorRunnerEvidence(lease)
+	evidence := coordinatorRunnerEvidence(providerEvidenceSanitizerFunc(func(imageID string) string {
+		return imageID
+	}), lease)
 	if evidence == nil || evidence.TotalMs != 5100 || evidence.ImageID != "ami-devtools" || len(evidence.Phases) != 3 {
 		t.Fatalf("runner evidence=%#v", evidence)
 	}
@@ -864,9 +872,9 @@ func TestCoordinatorAcquireReportsSelectedImageAndProviderStartupTiming(t *testi
 	}
 }
 
-func TestCoordinatorRunnerEvidenceHashesAzureResourceImageID(t *testing.T) {
+func TestCoordinatorRunnerEvidenceOmitsUnsanitizedImageID(t *testing.T) {
 	const resourceID = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/example/providers/Microsoft.Compute/snapshots/devtools"
-	evidence := coordinatorRunnerEvidence(CoordinatorLease{
+	evidence := coordinatorRunnerEvidence(nil, CoordinatorLease{
 		Provider: "azure",
 		Image:    &CoordinatorLeaseImage{ID: resourceID},
 		ProvisioningTiming: &CoordinatorProvisioningTiming{
@@ -877,11 +885,8 @@ func TestCoordinatorRunnerEvidenceHashesAzureResourceImageID(t *testing.T) {
 	if evidence == nil {
 		t.Fatal("runner evidence is nil")
 	}
-	if evidence.ImageID == resourceID || strings.Contains(strings.ToLower(evidence.ImageID), "subscriptions/") {
-		t.Fatalf("unsafe image identity=%q", evidence.ImageID)
-	}
-	if !strings.HasPrefix(evidence.ImageID, "azure-resource-sha256:") {
-		t.Fatalf("image identity=%q", evidence.ImageID)
+	if evidence.ImageID != "" {
+		t.Fatalf("unsanitized image identity=%q", evidence.ImageID)
 	}
 }
 

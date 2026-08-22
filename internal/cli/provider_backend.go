@@ -193,6 +193,12 @@ type SSHRunFailureEvidenceBackend interface {
 	BeginRunFailureEvidence(ctx context.Context, req RunFailureEvidenceRequest) (RunFailureEvidenceCollector, error)
 }
 
+// ProviderEvidenceSanitizer optionally converts provider-owned identifiers into
+// values that are safe to expose through generic timing and coordinator output.
+type ProviderEvidenceSanitizer interface {
+	SanitizeImageIDEvidence(imageID string) string
+}
+
 type RunFailureEvidenceRequest struct {
 	Lease LeaseTarget
 }
