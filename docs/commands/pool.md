@@ -7,6 +7,7 @@ that can be borrowed by `crabbox run --pool`.
 ```sh
 crabbox pool ready
 crabbox pool ready example/app/main/linux
+crabbox pool identity create --id cbx_... --repo example/app --ref main --commit <sha> --fingerprint setup-v2 --expected-image ami-... --expected-type m7i.large --expected-architecture x86_64 --expected-profile linux-builder --expected-recipe-digest sha256:... --cache-abi-digest sha256:... --output ./ready-pool-identity.json
 crabbox pool register example/app/main/linux --id cbx_... --identity-file ./ready-pool-identity.json
 crabbox pool borrow example/app/main/linux --identity-file ./ready-pool-identity.json
 crabbox pool heartbeat example/app/main/linux --id cbx_... --borrow-token <token>
@@ -32,6 +33,11 @@ ABI matching. Typed operations use dedicated coordinator routes and never fall
 back to legacy matching. Registration and reusable return read fresh readiness
 evidence from the lease. Drain and release remain available for stored identity
 schemas a newer client does not understand.
+`pool identity create` obtains the live coordinator lease, requires an exact AWS
+Linux AMI, instance type, and architecture, then reads the root-owned readiness
+manifest over the lease's verified SSH transport. It derives the repository
+seed with the same byte-stable codec used by typed register and borrow, and
+atomically creates the output file without overwriting an existing identity.
 Typed `pool borrow` derives omitted repo, ref, and commit seed fields from the
 same local repository and Actions configuration used by register, run, and
 ensure; explicit flags override those defaults. If a manual typed `ready`
@@ -43,6 +49,7 @@ before reporting the evidence error so the busy slot is not stranded.
 ```text
 pool list                 list provider machine inventory
 pool ready [key]          list ready-pool entries
+pool identity create      emit a verified typed ready-pool identity
 pool register <key>       register a hydrated lease
 pool borrow <key>         borrow one ready lease
 pool heartbeat <key>      refresh a borrowed lease deadline

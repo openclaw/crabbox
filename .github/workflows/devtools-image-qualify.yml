@@ -1,0 +1,325 @@
+name: Qualify AWS Image Candidate
+run-name: Qualify AWS image candidate in ${{ inputs.region }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_ref:
+        description: Immutable candidate OCI digest reference
+        required: true
+        type: string
+      source_commit:
+        description: Exact protected source commit used to publish the candidate
+        required: true
+        type: string
+      publisher_run_id:
+        description: Candidate publisher workflow run id
+        required: true
+        type: string
+      publisher_run_attempt:
+        description: Candidate publisher workflow run attempt
+        required: true
+        default: "1"
+        type: string
+      region:
+        description: Exact candidate AWS region
+        required: true
+        default: eu-west-1
+        type: string
+      instance_type:
+        description: Exact candidate AWS instance type
+        required: true
+        default: m7i.large
+        type: string
+      architecture:
+        description: Exact candidate architecture
+        required: true
+        default: x86_64
+        type: choice
+        options:
+          - x86_64
+          - arm64
+      os_selector:
+        description: Normalized Linux catalog OS selector
+        required: true
+        default: ubuntu:26.04
+        type: choice
+        options:
+          - ubuntu:26.04
+          - ubuntu:24.04
+      base_image:
+        description: Exact source AMI id
+        required: true
+        type: string
+      ami_id:
+        description: Exact candidate AMI id
+        required: true
+        type: string
+      fingerprint:
+        description: Repository setup fingerprint for typed pool identity
+        required: true
+        type: string
+      cache_abi_digest:
+        description: Cache ABI digest (sha256)
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: devtools-image-qualify-${{ inputs.candidate_ref }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Guard protected candidate qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Require the protected default-branch workflow
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REF_PROTECTED: ${{ github.ref_protected }}
+          RUN_SHA: ${{ github.sha }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          CANDIDATE_REF: ${{ inputs.candidate_ref }}
+          REGION: ${{ inputs.region }}
+          INSTANCE_TYPE: ${{ inputs.instance_type }}
+          ARCHITECTURE: ${{ inputs.architecture }}
+          OS_SELECTOR: ${{ inputs.os_selector }}
+          BASE_IMAGE: ${{ inputs.base_image }}
+          AMI_ID: ${{ inputs.ami_id }}
+          CACHE_ABI_DIGEST: ${{ inputs.cache_abi_digest }}
+          PUBLISHER_RUN_ID: ${{ inputs.publisher_run_id }}
+          PUBLISHER_RUN_ATTEMPT: ${{ inputs.publisher_run_attempt }}
+        run: |
+          set -euo pipefail
+          expected_ref="refs/heads/$DEFAULT_BRANCH"
+          expected_workflow_ref="$GITHUB_REPOSITORY/.github/workflows/devtools-image-qualify.yml@$expected_ref"
+          candidate_repository="ghcr.io/${GITHUB_REPOSITORY,,}-aws-image-candidates"
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]
+          [[ "$GITHUB_REF" == "$expected_ref" ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$expected_workflow_ref" ]]
+          [[ "$REF_PROTECTED" == true ]]
+          [[ "$WORKFLOW_SHA" == "$RUN_SHA" ]]
+          [[ "$SOURCE_COMMIT" == "$RUN_SHA" ]]
+          [[ "${CANDIDATE_REF%@*}" == "$candidate_repository" ]]
+          [[ "${CANDIDATE_REF#*@}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$REGION" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$ ]]
+          [[ "$INSTANCE_TYPE" =~ ^[A-Za-z0-9.-]+$ ]]
+          [[ "$ARCHITECTURE" =~ ^(x86_64|arm64)$ ]]
+          [[ "$OS_SELECTOR" =~ ^ubuntu:(26[.]04|24[.]04)$ ]]
+          [[ "$BASE_IMAGE" =~ ^ami-[0-9a-z]+$ ]]
+          [[ "$AMI_ID" =~ ^ami-[0-9a-z]+$ ]]
+          [[ "$CACHE_ABI_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$PUBLISHER_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$PUBLISHER_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+
+  qualify:
+    name: Qualify candidate and freeze public receipt
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment: image-qualifier
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Verify qualifier configuration
+        shell: bash
+        env:
+          CRABBOX_COORDINATOR: ${{ vars.CRABBOX_COORDINATOR }}
+          CRABBOX_COORDINATOR_ADMIN_TOKEN: ${{ secrets.CRABBOX_COORDINATOR_ADMIN_TOKEN }}
+          CRABBOX_OWNER: ${{ vars.CRABBOX_IMAGE_QUALIFIER_OWNER }}
+          CRABBOX_ORG: ${{ vars.CRABBOX_IMAGE_QUALIFIER_ORG }}
+        run: |
+          set -euo pipefail
+          [[ -n "$CRABBOX_COORDINATOR" ]]
+          [[ -n "$CRABBOX_COORDINATOR_ADMIN_TOKEN" ]]
+          [[ "$CRABBOX_OWNER" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+[.][A-Za-z]+$ ]]
+          [[ "$CRABBOX_ORG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+
+      - name: Check out protected source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Build trusted tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          go build -trimpath -o bin/crabbox ./cmd/crabbox
+          GOBIN="$RUNNER_TEMP/image-tools" go install oras.land/oras/cmd/oras@v1.3.3
+          echo "$RUNNER_TEMP/image-tools" >>"$GITHUB_PATH"
+
+      - name: Authenticate to GHCR
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" |
+            "$RUNNER_TEMP/image-tools/oras" login ghcr.io \
+              --username "$GITHUB_ACTOR" \
+              --password-stdin
+
+      - name: Consume immutable candidate
+        shell: bash
+        env:
+          CANDIDATE_REF: ${{ inputs.candidate_ref }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          PUBLISHER_RUN_ID: ${{ inputs.publisher_run_id }}
+          PUBLISHER_RUN_ATTEMPT: ${{ inputs.publisher_run_attempt }}
+          REGION: ${{ inputs.region }}
+          INSTANCE_TYPE: ${{ inputs.instance_type }}
+          ARCHITECTURE: ${{ inputs.architecture }}
+          BASE_IMAGE: ${{ inputs.base_image }}
+          AMI_ID: ${{ inputs.ami_id }}
+        run: |
+          set -euo pipefail
+          proof_dir="$RUNNER_TEMP/devtools-image-qualification"
+          mkdir -p "$proof_dir/input"
+          candidate_repository="ghcr.io/${GITHUB_REPOSITORY,,}-aws-image-candidates"
+          scripts/consume-aws-image-candidate.sh \
+            --candidate-ref "$CANDIDATE_REF" \
+            --repository "$candidate_repository" \
+            --source-repository "$GITHUB_REPOSITORY" \
+            --source-commit "$SOURCE_COMMIT" \
+            --workflow-ref "$GITHUB_REPOSITORY/.github/workflows/devtools-image-publish.yml@$GITHUB_REF" \
+            --workflow-run-id "$PUBLISHER_RUN_ID" \
+            --workflow-run-attempt "$PUBLISHER_RUN_ATTEMPT" \
+            --target linux \
+            --region "$REGION" \
+            --instance-type "$INSTANCE_TYPE" \
+            --architecture "$ARCHITECTURE" \
+            --base-image "$BASE_IMAGE" \
+            --ami-id "$AMI_ID" \
+            --profile linux-builder \
+            --image-recipe recipes/aws/v1/linux-devtools.json \
+            --readiness-recipe recipes/linux/v1/linux-builder.json \
+            --output "$proof_dir/input/qualification-input.json"
+
+      - name: Run exact qualification gates
+        shell: bash
+        env:
+          FINGERPRINT: ${{ inputs.fingerprint }}
+          CACHE_ABI_DIGEST: ${{ inputs.cache_abi_digest }}
+          OS_SELECTOR: ${{ inputs.os_selector }}
+          CRABBOX_COORDINATOR: ${{ vars.CRABBOX_COORDINATOR }}
+          CRABBOX_COORDINATOR_TOKEN: ${{ secrets.CRABBOX_COORDINATOR_ADMIN_TOKEN }}
+          CRABBOX_COORDINATOR_ADMIN_TOKEN: ${{ secrets.CRABBOX_COORDINATOR_ADMIN_TOKEN }}
+          CRABBOX_OWNER: ${{ vars.CRABBOX_IMAGE_QUALIFIER_OWNER }}
+          CRABBOX_ORG: ${{ vars.CRABBOX_IMAGE_QUALIFIER_ORG }}
+          CRABBOX_ACCESS_CLIENT_ID: ${{ secrets.CRABBOX_ACCESS_CLIENT_ID }}
+          CRABBOX_ACCESS_CLIENT_SECRET: ${{ secrets.CRABBOX_ACCESS_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          proof_dir="$RUNNER_TEMP/devtools-image-qualification"
+          scripts/qualify-aws-image-candidate.sh \
+            --input "$proof_dir/input/qualification-input.json" \
+            --output-dir "$proof_dir/work" \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$GITHUB_REF" \
+            --commit "$GITHUB_SHA" \
+            --fingerprint "$FINGERPRINT" \
+            --cache-abi-digest "$CACHE_ABI_DIGEST" \
+            --os-selector "$OS_SELECTOR" \
+            --workflow-ref "$GITHUB_WORKFLOW_REF" \
+            --workflow-run-id "$GITHUB_RUN_ID" \
+            --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --created-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          mkdir -m 700 "$proof_dir/handoff"
+          cp "$proof_dir/work/qualification.json" "$proof_dir/handoff/qualification.json"
+          cp "$proof_dir/input/qualification-input.json" "$proof_dir/handoff/qualification-input.json"
+
+      - name: Upload privacy-safe qualification evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: aws-image-qualification-receipt-${{ github.run_id }}
+          path: ${{ runner.temp }}/devtools-image-qualification/handoff
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish signed qualification receipt
+    needs: qualify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Check out protected publication tools
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Build publication tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          GOBIN="$RUNNER_TEMP/image-tools" go install oras.land/oras/cmd/oras@v1.3.3
+          GOBIN="$RUNNER_TEMP/image-tools" go install github.com/sigstore/cosign/v2/cmd/cosign@v2.6.5
+          echo "$RUNNER_TEMP/image-tools" >>"$GITHUB_PATH"
+
+      - name: Authenticate to GHCR
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" |
+            "$RUNNER_TEMP/image-tools/oras" login ghcr.io \
+              --username "$GITHUB_ACTOR" \
+              --password-stdin
+
+      - name: Download privacy-safe qualification evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: aws-image-qualification-receipt-${{ github.run_id }}
+          path: ${{ runner.temp }}/devtools-image-qualification/handoff
+
+      - name: Publish and sign immutable qualification receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof_dir="$RUNNER_TEMP/devtools-image-qualification"
+          mkdir -m 700 "$proof_dir/public"
+          cp "$proof_dir/handoff/qualification.json" "$proof_dir/public/qualification.json"
+          cp "$proof_dir/handoff/qualification-input.json" "$proof_dir/public/qualification-input.json"
+          repository="ghcr.io/${GITHUB_REPOSITORY,,}-aws-image-qualifications"
+          scripts/publish-aws-image-qualification.sh \
+            --receipt "$proof_dir/public/qualification.json" \
+            --qualification-input "$proof_dir/public/qualification-input.json" \
+            --repository "$repository" \
+            --certificate-identity "https://github.com/$GITHUB_WORKFLOW_REF" |
+            tee "$proof_dir/public/publication.json"
+
+      - name: Upload public qualification proof
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: aws-image-qualification-${{ github.run_id }}
+          path: ${{ runner.temp }}/devtools-image-qualification/public
+          if-no-files-found: error
+          retention-days: 30

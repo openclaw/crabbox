@@ -1,0 +1,382 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:crabbox:schema:aws-image-qualification:v1",
+  "title": "AWSImageQualificationV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "createdAt",
+    "candidate",
+    "target",
+    "pool",
+    "gates",
+    "cache",
+    "cleanup",
+    "workflow"
+  ],
+  "properties": {
+    "schema": {
+      "const": "crabbox-aws-image-qualification/v1"
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifactDigest",
+        "candidateRecordDigest",
+        "qualificationInputDigest"
+      ],
+      "properties": {
+        "artifactDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "candidateRecordDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "qualificationInputDigest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "amiId",
+        "region",
+        "instanceType",
+        "architecture",
+        "osSelector",
+        "market",
+        "profile",
+        "recipeDigest"
+      ],
+      "properties": {
+        "amiId": {
+          "$ref": "#/$defs/ami"
+        },
+        "region": {
+          "type": "string",
+          "pattern": "^[a-z]{2}(-gov)?-[a-z]+-[0-9]+$"
+        },
+        "instanceType": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9.-]+$"
+        },
+        "architecture": {
+          "enum": [
+            "x86_64",
+            "arm64"
+          ]
+        },
+        "osSelector": {
+          "enum": [
+            "ubuntu:26.04",
+            "ubuntu:24.04"
+          ]
+        },
+        "market": {
+          "const": "on-demand"
+        },
+        "profile": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$"
+        },
+        "recipeDigest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "pool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity",
+        "identityDigest"
+      ],
+      "properties": {
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "identityDigest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "gates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "negative",
+        "positive",
+        "osSelector",
+        "cleanOverlay",
+        "dirtyOverlay"
+      ],
+      "properties": {
+        "negative": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "dimension",
+              "status"
+            ],
+            "properties": {
+              "dimension": {
+                "enum": [
+                  "ami",
+                  "architecture",
+                  "recipe",
+                  "type"
+                ]
+              },
+              "status": {
+                "const": "passed"
+              }
+            }
+          }
+        },
+        "positive": {
+          "$ref": "#/$defs/passed"
+        },
+        "osSelector": {
+          "$ref": "#/$defs/passed"
+        },
+        "cleanOverlay": {
+          "$ref": "#/$defs/cleanOverlay"
+        },
+        "dirtyOverlay": {
+          "$ref": "#/$defs/dirtyOverlay"
+        }
+      }
+    },
+    "cache": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "advertised",
+            "status",
+            "reason"
+          ],
+          "properties": {
+            "advertised": {
+              "const": true
+            },
+            "status": {
+              "const": "passed"
+            },
+            "reason": {
+              "const": "verified"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "advertised",
+            "status",
+            "reason"
+          ],
+          "properties": {
+            "advertised": {
+              "const": false
+            },
+            "status": {
+              "const": "skipped"
+            },
+            "reason": {
+              "const": "provider_capability_not_advertised"
+            }
+          }
+        }
+      ]
+    },
+    "cleanup": {
+      "$ref": "#/$defs/passed"
+    },
+    "workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity",
+        "runId",
+        "runAttempt"
+      ],
+      "properties": {
+        "identity": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\\.github/workflows/devtools-image-qualify\\.yml@refs/heads/[A-Za-z0-9._/-]+$"
+        },
+        "runId": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$"
+        },
+        "runAttempt": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "ami": {
+      "type": "string",
+      "pattern": "^ami-[0-9a-z]+$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "passed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "const": "passed"
+        }
+      }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "profile",
+        "recipeDigest",
+        "inventoryDigest",
+        "imageID",
+        "architecture",
+        "seedDigest",
+        "cacheABIDigest"
+      ],
+      "properties": {
+        "schema": {
+          "const": "crabbox-ready-pool-identity/v1"
+        },
+        "profile": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._/-]*$"
+        },
+        "recipeDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "inventoryDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "imageID": {
+          "$ref": "#/$defs/ami"
+        },
+        "architecture": {
+          "enum": [
+            "amd64",
+            "arm64"
+          ]
+        },
+        "seedDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "cacheABIDigest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "cleanOverlay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "mode",
+        "fallback",
+        "trackedTransfer"
+      ],
+      "properties": {
+        "status": {
+          "const": "passed"
+        },
+        "mode": {
+          "const": "overlay"
+        },
+        "fallback": {
+          "const": false
+        },
+        "trackedTransfer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "files",
+            "bytes"
+          ],
+          "properties": {
+            "files": {
+              "type": "integer",
+              "const": 0
+            },
+            "bytes": {
+              "type": "integer",
+              "const": 0
+            }
+          }
+        }
+      }
+    },
+    "dirtyOverlay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "mode",
+        "fallback",
+        "trackedTransfer",
+        "fixtureDigest"
+      ],
+      "properties": {
+        "status": {
+          "const": "passed"
+        },
+        "mode": {
+          "const": "overlay"
+        },
+        "fallback": {
+          "const": false
+        },
+        "trackedTransfer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "files",
+            "bytes"
+          ],
+          "properties": {
+            "files": {
+              "type": "integer",
+              "const": 1
+            },
+            "bytes": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "fixtureDigest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    }
+  }
+}

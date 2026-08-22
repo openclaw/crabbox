@@ -823,6 +823,11 @@ async function writeAtomic(file, value) {
   await rm(temporary, { force: true });
 }
 
+async function validateQualificationInputFile(options) {
+  const value = await readJSON(required(options, "file"), "qualification input");
+  assertSafeOutput(value);
+}
+
 async function verify(options) {
   const candidateRef = required(options, "candidate-ref");
   const referenceMatch = candidateRef.match(
@@ -918,8 +923,12 @@ async function main() {
     await verify(options);
     return;
   }
+  if (command === "validate-qualification-input") {
+    await validateQualificationInputFile(options);
+    return;
+  }
   fail(
-    "usage: consume-aws-image-candidate.mjs preflight|inspect-signature|inspect-signature-manifest|verify-signature-evidence|verify [options]",
+    "usage: consume-aws-image-candidate.mjs preflight|inspect-signature|inspect-signature-manifest|verify-signature-evidence|verify|validate-qualification-input [options]",
   );
 }
 

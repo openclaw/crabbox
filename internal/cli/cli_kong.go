@@ -573,6 +573,7 @@ type controllerStateValidateKongCmd struct {
 type poolKongCmd struct {
 	List      poolListKongCmd      `cmd:"" passthrough:"" help:"List machine inventory."`
 	Ready     poolReadyKongCmd     `cmd:"" passthrough:"" help:"List ready-pool leases."`
+	Identity  poolIdentityKongCmd  `cmd:"" help:"Create verified typed ready-pool identities."`
 	Register  poolRegisterKongCmd  `cmd:"" passthrough:"" help:"Register a hydrated lease in a ready pool."`
 	Borrow    poolBorrowKongCmd    `cmd:"" passthrough:"" help:"Borrow a ready-pool lease."`
 	Heartbeat poolHeartbeatKongCmd `cmd:"" passthrough:"" help:"Refresh a ready-pool borrow deadline."`
@@ -583,6 +584,12 @@ type poolListKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type poolReadyKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type poolIdentityKongCmd struct {
+	Create poolIdentityCreateKongCmd `cmd:"" passthrough:"" help:"Create an identity from a live lease and readiness manifest."`
+}
+type poolIdentityCreateKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type poolRegisterKongCmd struct {
@@ -895,6 +902,9 @@ func (c *poolListKongCmd) Run(ctx context.Context, app App) error {
 }
 func (c *poolReadyKongCmd) Run(ctx context.Context, app App) error {
 	return app.readyPoolList(ctx, stripKongCommandPath(c.Args, "pool", "ready"))
+}
+func (c *poolIdentityCreateKongCmd) Run(ctx context.Context, app App) error {
+	return app.readyPoolIdentityCreate(ctx, stripKongCommandPath(c.Args, "pool", "identity", "create"))
 }
 func (c *poolRegisterKongCmd) Run(ctx context.Context, app App) error {
 	return app.readyPoolRegister(ctx, stripKongCommandPath(c.Args, "pool", "register"))
