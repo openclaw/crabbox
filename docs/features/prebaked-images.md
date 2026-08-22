@@ -51,6 +51,11 @@ The coordinator stores scoped provider image identifiers, promotion capability
 metadata, and enough tags to explain provenance. Do not store image bytes in
 git, release artifacts, or coordinator durable state.
 
+AWS candidate evidence may be mirrored to GHCR as an immutable OCI artifact.
+That artifact contains only the candidate record, versioned recipe, SBOM,
+provenance, and redacted scrub report. AMI and EBS snapshot bytes remain in
+AWS, and lease boot never depends on GHCR.
+
 ## What to bake
 
 Bake stable machine capabilities:
@@ -130,7 +135,12 @@ guard scripts. At a high level, an AWS bake is:
      --ttl 30m --idle-timeout 10m
    ```
 
-5. Promote the candidate once the smoke passes:
+5. Preserve the candidate evidence before promotion. The protected candidate
+   workflow binds the exact source/base/candidate image data, scrub proof, SBOM,
+   provenance, and checks in a keyless-signed immutable OCI artifact. It does
+   not mutate the promoted default.
+
+6. Promote the candidate once the evidence is reviewed:
 
    ```bash
    crabbox image promote ami-1234567890abcdef0 --json
@@ -139,10 +149,10 @@ guard scripts. At a high level, an AWS bake is:
    Add declarations such as `--os-version 26.04 --runtime node=24.2
    --browser --desktop` when future leases must select by baked capabilities.
 
-6. Run a normal brokered lease (no override) plus the relevant QA lane. The CLI
+7. Run a normal brokered lease (no override) plus the relevant QA lane. The CLI
    prints `image selected id=... source=promoted`; require the exact promoted
    ID in publication proof.
-7. Keep the previous known-good AMI until the new image has real QA proof.
+8. Keep the previous known-good AMI until the new image has real QA proof.
 
 A successful bake is not just "the browser exists." A useful image measurably
 reduces `crabbox warmup` and `crabbox run` time in your timing evidence while
