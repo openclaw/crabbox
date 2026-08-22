@@ -124,7 +124,7 @@ func probeWindowsSSHStable(ctx context.Context, target *SSHTarget, deadline time
 	}
 	probeCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	return probeSSHReady(probeCtx, target, minDuration(10*time.Second, remaining))
+	return probeSSHReady(probeCtx, target, minDuration(30*time.Second, remaining))
 }
 
 func waitForManagedWindowsLoopbackVNC(ctx context.Context, target *SSHTarget, stderr io.Writer, timeout time.Duration) error {
@@ -176,7 +176,7 @@ func bootstrapManagedWindowsWSL2(ctx context.Context, cfg Config, target *SSHTar
 			return err
 		}
 		target.Port = bootstrapTarget.Port
-		if probeWindowsWSL2BootstrapComplete(ctx, bootstrapTarget, target, 20*time.Second) {
+		if probeWindowsWSL2BootstrapComplete(ctx, bootstrapTarget, target, 30*time.Second) {
 			return nil
 		}
 		fmt.Fprintln(stderr, "Windows WSL2 setup marker is not ready after bootstrap; retrying bootstrap")
@@ -217,7 +217,6 @@ func probeWindowsWSL2BootstrapComplete(ctx context.Context, bootstrapTarget SSHT
 		return false
 	}
 	profile := sshReadinessProfileForTarget(bootstrapTarget)
-	timeout = profile.probeTimeout(timeout)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	remote := powershellCommand(`$ErrorActionPreference = "Stop"

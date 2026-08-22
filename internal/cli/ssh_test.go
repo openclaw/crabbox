@@ -1203,35 +1203,30 @@ func TestSSHReadinessProfileForTarget(t *testing.T) {
 		target             SSHTarget
 		connectTimeout     string
 		connectionAttempts string
-		probeTimeout       time.Duration
 	}{
 		{
 			name:               "linux",
 			target:             SSHTarget{TargetOS: targetLinux},
 			connectTimeout:     "5",
 			connectionAttempts: "1",
-			probeTimeout:       4 * time.Second,
 		},
 		{
 			name:               "macos",
 			target:             SSHTarget{TargetOS: targetMacOS},
 			connectTimeout:     "5",
 			connectionAttempts: "1",
-			probeTimeout:       4 * time.Second,
 		},
 		{
 			name:               "windows normal",
 			target:             SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal},
 			connectTimeout:     "10",
 			connectionAttempts: "3",
-			probeTimeout:       30 * time.Second,
 		},
 		{
 			name:               "windows wsl2",
 			target:             SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2},
 			connectTimeout:     "10",
 			connectionAttempts: "3",
-			probeTimeout:       30 * time.Second,
 		},
 	}
 	for _, test := range tests {
@@ -1239,9 +1234,6 @@ func TestSSHReadinessProfileForTarget(t *testing.T) {
 			profile := sshReadinessProfileForTarget(test.target)
 			if profile.connectTimeout != test.connectTimeout || profile.connectionAttempts != test.connectionAttempts {
 				t.Fatalf("profile=%+v want ConnectTimeout=%s ConnectionAttempts=%s", profile, test.connectTimeout, test.connectionAttempts)
-			}
-			if got := profile.probeTimeout(4 * time.Second); got != test.probeTimeout {
-				t.Fatalf("probe timeout=%s want %s", got, test.probeTimeout)
 			}
 		})
 	}
@@ -1300,7 +1292,7 @@ func TestSSHReadinessCallsUseTargetProfile(t *testing.T) {
 	}
 }
 
-func TestWindowsSSHReadyProbeExpandsOuterBudget(t *testing.T) {
+func TestWindowsSSHReadyProbeHonorsCallerBudget(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
 	}
@@ -1317,11 +1309,11 @@ func TestWindowsSSHReadyProbeExpandsOuterBudget(t *testing.T) {
 		ReadyCheck:     "true",
 	}
 	start := time.Now()
-	if !probeSSHReady(context.Background(), &target, 20*time.Millisecond) {
-		t.Fatal("Windows readiness probe was cut off by the caller's short budget")
+	if probeSSHReady(context.Background(), &target, 20*time.Millisecond) {
+		t.Fatal("Windows readiness probe ignored the caller's short budget")
 	}
-	if elapsed := time.Since(start); elapsed < 80*time.Millisecond {
-		t.Fatalf("probe returned after %s, want fake handshake delay to complete", elapsed)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("probe exceeded the caller's short budget by too much: %s", elapsed)
 	}
 }
 

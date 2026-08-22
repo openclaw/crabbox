@@ -258,7 +258,6 @@ func BootstrapWaitTimeout(cfg Config) time.Duration {
 type sshReadinessProfile struct {
 	connectTimeout     string
 	connectionAttempts string
-	minProbeTimeout    time.Duration
 }
 
 func sshReadinessProfileForTarget(target SSHTarget) sshReadinessProfile {
@@ -266,20 +265,12 @@ func sshReadinessProfileForTarget(target SSHTarget) sshReadinessProfile {
 		return sshReadinessProfile{
 			connectTimeout:     "10",
 			connectionAttempts: "3",
-			minProbeTimeout:    30 * time.Second,
 		}
 	}
 	return sshReadinessProfile{
 		connectTimeout:     "5",
 		connectionAttempts: "1",
 	}
-}
-
-func (p sshReadinessProfile) probeTimeout(timeout time.Duration) time.Duration {
-	if timeout < p.minProbeTimeout {
-		return p.minProbeTimeout
-	}
-	return timeout
 }
 
 func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
@@ -389,7 +380,6 @@ func probeSSHReady(ctx context.Context, target *SSHTarget, timeout time.Duration
 		return false
 	}
 	profile := sshReadinessProfileForTarget(*target)
-	timeout = profile.probeTimeout(timeout)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if target.SSHConfigProxy {

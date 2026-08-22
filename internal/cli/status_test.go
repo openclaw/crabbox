@@ -128,11 +128,12 @@ func TestStatusViewIncludesProviderMetadata(t *testing.T) {
 	}
 }
 
-func TestStatusViewUsesWindowsSSHReadinessProfile(t *testing.T) {
+func TestStatusViewKeepsFourSecondWindowsSSHProbe(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
 	}
 	logPath := installSSHArgsRecorder(t)
+	t.Setenv("CRABBOX_FAKE_SSH_DELAY", "4.2")
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -147,6 +148,7 @@ func TestStatusViewUsesWindowsSSHReadinessProfile(t *testing.T) {
 	cfg.TargetOS = targetWindows
 	cfg.WindowsMode = windowsModeNormal
 	cfg.Network = NetworkPublic
+	start := time.Now()
 	view, err := statusViewFromLeaseTarget(context.Background(), cfg, LeaseTarget{
 		LeaseID: "cbx_status_windows",
 		Server: Server{
@@ -167,8 +169,11 @@ func TestStatusViewUsesWindowsSSHReadinessProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !view.Ready {
-		t.Fatal("status Ready=false, want true with reachable fake Windows SSH")
+	if view.Ready {
+		t.Fatal("status Ready=true, want false when Windows SSH exceeds the 4s status budget")
+	}
+	if elapsed := time.Since(start); elapsed < 3500*time.Millisecond || elapsed > 6*time.Second {
+		t.Fatalf("status probe elapsed=%s, want approximately 4s", elapsed)
 	}
 	args := readSSHArgsRecorder(t, logPath)
 	assertSSHOption(t, args, "ConnectTimeout", "10")
