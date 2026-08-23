@@ -1733,6 +1733,10 @@ func TestRemoteRunArtifactCommandsUseTargetTools(t *testing.T) {
 					t.Fatalf("command=%q, want %q", command, wantCommands[i])
 				}
 			}
+			inputCommand := remoteRunArtifactShellInputCommand(tt.target)
+			if want := tt.wantBash + " -lc " + shellQuote(tt.wantBash+" -s"); inputCommand != want {
+				t.Fatalf("input command=%q, want %q", inputCommand, want)
+			}
 
 			remove := remoteRemoveRunArtifactCommand(tt.target, "/work", ".crabbox/artifacts.tgz")
 			removeScript := "set -eu\ncd '/work'\n" + tt.wantRM + " -f -- '.crabbox/artifacts.tgz'"

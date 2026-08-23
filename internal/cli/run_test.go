@@ -3081,9 +3081,10 @@ func TestRunCommandSSHArtifactE2E(t *testing.T) {
 			script := `#!/bin/sh
 cmd=""
 for arg do cmd="$arg"; done
-printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
+input="$(cat)"
+printf '%s\n%s\n---\n' "$cmd" "$input" >> "$CRABBOX_FAKE_SSH_LOG"
 case "$cmd" in
-  mkdir\ -p*|cd\ *|bash\ -lc*|/bin/bash\ -lc*) exec sh -c "$cmd" ;;
+  mkdir\ -p*|cd\ *|bash\ -lc*|/bin/bash\ -lc*) printf '%s' "$input" | sh -c "$cmd"; exit $? ;;
 esac
 exit 0
 `
@@ -3181,6 +3182,56 @@ exit 0
 				previous = index
 			}
 		})
+	}
+}
+
+func TestCollectRunArtifactGlobsStreamsScriptOutsideSSHArguments(t *testing.T) {
+	dir := t.TempDir()
+	workdir := filepath.Join(dir, "remote")
+	if err := os.MkdirAll(filepath.Join(workdir, "reports"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"first.txt", "second.txt"} {
+		if err := os.WriteFile(filepath.Join(workdir, "reports", name), []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logPath := filepath.Join(dir, "ssh.log")
+	sshPath := filepath.Join(dir, "ssh")
+	sshScript := `#!/bin/sh
+cmd=""
+for arg do cmd="$arg"; done
+if [ ${#cmd} -gt 1024 ]; then
+  printf 'mux_client_request_session: send fds failed\n' >&2
+  exit 255
+fi
+printf 'argv:%s\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
+exec sh -c "$cmd"
+`
+	if err := os.WriteFile(sshPath, []byte(sshScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_LOG", logPath)
+	target := SSHTarget{User: "runner", Host: "example.test", Port: "2222", TargetOS: targetLinux}
+	artifacts, _, err := collectRunArtifactGlobs(t.Context(), target, workdir, dir, "run_artifacts", "cbx_artifacts", []string{"reports/first.txt", "reports/second.txt"})
+	if err != nil {
+		t.Fatalf("collect multiple artifact globs: %v", err)
+	}
+	if len(artifacts) != 1 {
+		t.Fatalf("artifacts=%#v, want one archive", artifacts)
+	}
+	for _, name := range []string{"reports/first.txt", "reports/second.txt"} {
+		if !stringSliceContains(tarGzNames(t, artifacts[0].Path), name) {
+			t.Fatalf("artifact archive missing %q", name)
+		}
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(log), "artifact_safe_search_root") {
+		t.Fatalf("artifact script leaked into SSH arguments:\n%s", log)
 	}
 }
 

@@ -61,8 +61,10 @@ func collectRunArtifactGlobs(ctx context.Context, target SSHTarget, workdir, rep
 	}
 	name := safeCaptureName(firstNonBlank(runID, leaseID, "run")) + "-artifacts.tgz"
 	remotePath := ".crabbox/" + name
-	remote := remoteCollectArtifactGlobsCommand(target, workdir, remotePath, globs)
-	out, err := runSSHCombinedOutput(ctx, target, remote)
+	script := runArtifactCollectScript(workdir, remotePath, globs)
+	var output synchronizedBuffer
+	err := runSSHInput(ctx, target, remoteRunArtifactShellInputCommand(target), strings.NewReader(script), &output, &output)
+	out := output.String()
 	if err != nil {
 		return nil, "", exit(7, "collect artifacts: %v: %s", err, strings.TrimSpace(out))
 	}
@@ -164,6 +166,14 @@ func remoteRunArtifactShellCommand(target SSHTarget, script string) string {
 		bash = "/bin/bash"
 	}
 	return bash + " -lc " + shellQuote(script)
+}
+
+func remoteRunArtifactShellInputCommand(target SSHTarget) string {
+	bash := "bash"
+	if target.TargetOS == targetMacOS {
+		bash = "/bin/bash"
+	}
+	return remoteRunArtifactShellCommand(target, bash+" -s")
 }
 
 func writeArtifactGlobMatcher(b *strings.Builder) {
