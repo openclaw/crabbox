@@ -2404,8 +2404,12 @@ func localCoordinatorOwnerWithEnvironment(denied []string) string {
 
 func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget, string) {
 	hostID := coordinatorLeaseHostID(lease)
+	provider := strings.TrimSpace(lease.Provider)
+	if provider == "" {
+		provider = strings.TrimSpace(cfg.Provider)
+	}
 	server := Server{
-		Provider: lease.Provider,
+		Provider: provider,
 		CloudID:  lease.CloudID,
 		HostID:   hostID,
 		ID:       lease.ServerID,
@@ -2416,6 +2420,8 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 			"slug":              lease.Slug,
 			"keep":              fmt.Sprint(lease.Keep),
 			"target":            blank(lease.TargetOS, cfg.TargetOS),
+			"provider":          provider,
+			"server_type":       lease.ServerType,
 			"host_id":           hostID,
 			"windows_mode":      blank(lease.WindowsMode, cfg.WindowsMode),
 			"desktop":           fmt.Sprint(lease.Desktop),
@@ -2428,6 +2434,9 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 			"idle_timeout_secs": fmt.Sprint(lease.IdleTimeoutSeconds),
 		},
 	}
+	if market := strings.TrimSpace(lease.Market); market != "" {
+		server.Labels["market"] = market
+	}
 	if pond := normalizePondName(lease.Pond); pond != "" {
 		server.Labels[pondLabelKey] = pond
 	}
@@ -2436,9 +2445,6 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 	}
 	if lease.Tailscale != nil {
 		applyTailscaleMetadataToServer(&server, *lease.Tailscale)
-	}
-	if server.Provider == "" {
-		server.Provider = cfg.Provider
 	}
 	server.PublicNet.IPv4.IP = lease.Host
 	server.ServerType.Name = lease.ServerType
