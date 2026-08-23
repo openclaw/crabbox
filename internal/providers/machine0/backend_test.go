@@ -251,7 +251,7 @@ func TestNewBackendConfiguresClientReadRetryCadenceAndContextSleep(t *testing.T)
 		configured time.Duration
 		want       time.Duration
 	}{
-		{name: "canonical default", want: 15 * time.Second},
+		{name: "canonical default", want: 60 * time.Second},
 		{name: "explicit override", configured: 7 * time.Second, want: 7 * time.Second},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -266,6 +266,20 @@ func TestNewBackendConfiguresClientReadRetryCadenceAndContextSleep(t *testing.T)
 			cancel()
 			if err := c.sleep(ctx, time.Hour); !errors.Is(err, context.Canceled) {
 				t.Fatalf("context sleep err=%v", err)
+			}
+
+			pending := readyMachine("")
+			pending.Status = "CREATING"
+			ready := readyMachine("203.0.113.10")
+			b.api = &fakeAPI{getSequence: []machine{pending, ready}}
+			var pollSleeps []time.Duration
+			b.sleep = func(_ context.Context, delay time.Duration) error {
+				pollSleeps = append(pollSleeps, delay)
+				return nil
+			}
+			got, err := b.waitForRunning(context.Background(), pending.Name, time.Minute)
+			if err != nil || got.ID != ready.ID || len(pollSleeps) != 1 || pollSleeps[0] != tc.want {
+				t.Fatalf("machine=%#v err=%v poll sleeps=%v want=%s", got, err, pollSleeps, tc.want)
 			}
 		})
 	}

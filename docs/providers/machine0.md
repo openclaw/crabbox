@@ -59,7 +59,7 @@ machine0:
   workRoot: ""          # dynamic: /home/<resolved-ssh-user>/crabbox
   releasePolicy: destroy
   createTimeout: 15m
-  pollInterval: 15s
+  pollInterval: 60s
 ```
 
 The equivalent flags are:
@@ -293,16 +293,17 @@ integer microcurrency.
 
 Machine0 accounts have finite hourly API read quotas, and one CLI status or
 inventory invocation can perform multiple API requests. The default
-`machine0.pollInterval` of `15s` reduces polling volume by about two-thirds
-compared with `5s`, leaving headroom for long VM creation followed by final
-inspection and cleanup. At most 10 seconds of additional readiness-observation
-latency is negligible compared with creation windows of 20 minutes or longer.
+`machine0.pollInterval` of `60s` reduces polling volume about twelvefold
+compared with `5s`; a 20-minute boot needs roughly 20 polls instead of roughly
+240, leaving headroom for final inspection and cleanup. At most 55 seconds of
+additional readiness-observation latency is negligible beside the documented
+15-minute timeout and observed 10–21-minute creation windows.
 
 When the CLI returns the exact `Rate limited. Please wait a moment and try
 again.` response, Crabbox quietly retries read-only inventory and status calls
 (`get`, `ls`, sizes, and image reads) until the current command's context
 expires or is canceled. The retry cadence follows `machine0.pollInterval`
-(default `15s`, with a one-second minimum) and prints only one concise warning.
+(default `60s`, with a one-second minimum) and prints only one concise warning.
 A cached-credentials warning preceding the rate-limit response does not prevent
 recognition.
 

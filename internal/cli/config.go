@@ -3381,7 +3381,7 @@ func baseConfig() Config {
 			Region:        "eu",
 			ReleasePolicy: "destroy",
 			CreateTimeout: 15 * time.Minute,
-			PollInterval:  15 * time.Second,
+			PollInterval:  60 * time.Second,
 		},
 		Tart: TartConfig{
 			Image:    "ghcr.io/cirruslabs/macos-sequoia-base:latest",
