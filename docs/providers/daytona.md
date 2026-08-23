@@ -135,7 +135,8 @@ The non-auth settings can also be set through environment variables:
 2. Store Crabbox labels and a local repo claim for the lease.
 3. For `run`, build the Crabbox sync manifest, stream a gzipped tar archive to
    the Daytona toolbox upload endpoint, extract it in the sandbox, and execute
-   the command through the Daytona process APIs.
+   the command through the Daytona process APIs. Command and toolbox HTTP
+   lifetimes follow the caller's context rather than a fixed one-hour cutoff.
 4. For `ssh`, request short-lived SSH access (TTL `daytona.sshAccessMinutes`),
    parse Daytona's `sshCommand`, and redact the token in normal output.
 5. Delete the sandbox on release unless the lease is kept.

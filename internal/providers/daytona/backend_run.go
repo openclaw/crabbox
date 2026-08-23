@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path"
@@ -18,11 +19,6 @@ import (
 
 var daytonaCleanupTimeout = 30 * time.Second
 
-const (
-	daytonaCommandTimeout = 60 * time.Minute
-	daytonaHTTPTimeout    = 61 * time.Minute
-)
-
 type daytonaCommandRunner struct {
 	process *sdkdaytona.ProcessService
 }
@@ -32,12 +28,25 @@ func newDaytonaCommandRunner(sandbox *sdkdaytona.Sandbox) *daytonaCommandRunner 
 	if toolboxConfig.HTTPClient == nil {
 		toolboxConfig.HTTPClient = &http.Client{}
 	}
-	toolboxConfig.HTTPClient.Timeout = daytonaHTTPTimeout
+	toolboxConfig.HTTPClient.Timeout = 0
 	return &daytonaCommandRunner{process: sandbox.Process}
 }
 
 func (r *daytonaCommandRunner) ExecuteCommand(ctx context.Context, command string, opts ...func(*sdkoptions.ExecuteCommand)) (*sdktypes.ExecuteResponse, error) {
-	opts = append(opts, sdkoptions.WithExecuteTimeout(daytonaCommandTimeout))
+	timeout := time.Duration(math.MaxInt32) * time.Second
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining < timeout {
+			timeout = remaining.Truncate(time.Second)
+			if remaining > timeout {
+				timeout += time.Second
+			}
+			if timeout < time.Second {
+				timeout = time.Second
+			}
+		}
+	}
+	opts = append(opts, sdkoptions.WithExecuteTimeout(timeout))
 	return r.process.ExecuteCommand(ctx, command, opts...)
 }
 

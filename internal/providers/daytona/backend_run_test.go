@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"flag"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -23,14 +24,16 @@ import (
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
-func TestDaytonaCommandRunnerUsesLongRemoteAndHTTPTimeouts(t *testing.T) {
-	var request map[string]any
+func TestDaytonaCommandRunnerPreservesCallerExecutionBudget(t *testing.T) {
+	var requests []map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Errorf("decode request: %v", err)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
+		requests = append(requests, request)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"result":"done","exitCode":0}`)
 	}))
@@ -39,6 +42,7 @@ func TestDaytonaCommandRunnerUsesLongRemoteAndHTTPTimeouts(t *testing.T) {
 	toolboxConfig := toolbox.NewConfiguration()
 	toolboxConfig.Servers = toolbox.ServerConfigurations{{URL: server.URL}}
 	toolboxConfig.HTTPClient = server.Client()
+	toolboxConfig.HTTPClient.Timeout = time.Minute
 	toolboxClient := toolbox.NewAPIClient(toolboxConfig)
 	sandbox := &sdkdaytona.Sandbox{
 		ToolboxClient: toolboxClient,
@@ -50,11 +54,29 @@ func TestDaytonaCommandRunnerUsesLongRemoteAndHTTPTimeouts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got, want := toolboxConfig.HTTPClient.Timeout, 61*time.Minute; got != want {
+	if got, want := toolboxConfig.HTTPClient.Timeout, time.Duration(0); got != want {
 		t.Fatalf("HTTP timeout=%s, want %s", got, want)
 	}
-	if got, want := request["timeout"], float64(3600); got != want {
+	if got, want := requests[0]["timeout"], float64(math.MaxInt32); got != want {
 		t.Fatalf("remote timeout=%v, want %v", got, want)
+	}
+
+	longContext, cancelLong := context.WithTimeout(t.Context(), 90*time.Minute)
+	defer cancelLong()
+	if _, err := runner.ExecuteCommand(longContext, "sleep 4500"); err != nil {
+		t.Fatal(err)
+	}
+	if got := requests[1]["timeout"].(float64); got < 5399 || got > 5400 {
+		t.Fatalf("90-minute context remote timeout=%v, want approximately 5400 seconds", got)
+	}
+
+	shortContext, cancelShort := context.WithTimeout(t.Context(), 1500*time.Millisecond)
+	defer cancelShort()
+	if _, err := runner.ExecuteCommand(shortContext, "sleep 1"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := requests[2]["timeout"], float64(2); got != want {
+		t.Fatalf("rounded context remote timeout=%v, want %v", got, want)
 	}
 }
 
