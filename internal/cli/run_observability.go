@@ -139,14 +139,14 @@ func runPortalURL(coord *CoordinatorClient, runID string) string {
 	if coord == nil || coord.BaseURL == "" || runID == "" {
 		return "-"
 	}
-	return strings.TrimRight(coord.BaseURL, "/") + "/portal/runs/" + url.PathEscape(runID)
+	return strings.TrimRight(redactedConfigURL(coord.BaseURL), "/") + "/portal/runs/" + url.PathEscape(runID)
 }
 
 func runLogsURL(coord *CoordinatorClient, runID string) string {
 	if coord == nil || coord.BaseURL == "" || runID == "" {
 		return "-"
 	}
-	return strings.TrimRight(coord.BaseURL, "/") + "/v1/runs/" + url.PathEscape(runID) + "/logs"
+	return strings.TrimRight(redactedConfigURL(coord.BaseURL), "/") + "/v1/runs/" + url.PathEscape(runID) + "/logs"
 }
 
 func printRemoteCapabilityPreflight(ctx context.Context, w io.Writer, cfg Config, server Server, target SSHTarget, leaseID, workdir string, envFiles []string, hydrated bool, actionsURL string, hydrateSupported bool, env map[string]string) {
