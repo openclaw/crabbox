@@ -17,12 +17,30 @@ const fixedMachine0TestLeaseID = "cbx_abcdef123456"
 
 func TestMachine0FixedAcquireReplayAdoptsExactMachine(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		fileName string
-		wantFile string
+		name             string
+		fileName         string
+		omitKey          bool
+		emptyKey         bool
+		inventoryKeyType string
+		noSelectedKey    bool
+		detailKey        *machineKey
+		missingDetailKey bool
+		mismatchedID     bool
+		wantFile         string
+		wantGetDetail    int
+		wantError        string
 	}{
-		{name: "provider filename remains authoritative", fileName: "selected-provider-key", wantFile: "selected-provider-key"},
+		{name: "provider filename remains authoritative without key name", fileName: "selected-provider-key", wantFile: "selected-provider-key"},
 		{name: "sparse inventory retains managed key ownership", wantFile: "machine0__ci-managed"},
+		{name: "inventory omits managed key entirely", omitKey: true, wantFile: "machine0__ci-managed", wantGetDetail: 1},
+		{name: "inventory key has no usable identity", emptyKey: true, wantFile: "machine0__ci-managed", wantGetDetail: 1},
+		{name: "detail key mismatches durable selection", omitKey: true, detailKey: &machineKey{Name: "another-key", Type: "MANAGED", FileName: "machine0__another-key"}, wantGetDetail: 1, wantError: "durable selected SSH key"},
+		{name: "detail omits durable selected key", omitKey: true, missingDetailKey: true, wantGetDetail: 1, wantError: "durable selected SSH key"},
+		{name: "detail machine mismatches inventory identity", omitKey: true, mismatchedID: true, wantGetDetail: 1, wantError: "inventory resource identity"},
+		{name: "public detail retains generic key fallback", omitKey: true, detailKey: &machineKey{Name: "ci-managed", Type: "PUBLIC"}, wantGetDetail: 1},
+		{name: "public inventory rejects mismatched detail type", emptyKey: true, inventoryKeyType: "PUBLIC", wantGetDetail: 1, wantError: "inventory SSH key type"},
+		{name: "public inventory retains type omitted by detail", emptyKey: true, inventoryKeyType: "PUBLIC", detailKey: &machineKey{Name: "ci-managed"}, wantGetDetail: 1},
+		{name: "no selected provider key skips detail read", omitKey: true, noSelectedKey: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b, api, req := fixedMachine0TestFixture(t)
@@ -34,6 +52,9 @@ func TestMachine0FixedAcquireReplayAdoptsExactMachine(t *testing.T) {
 				}
 			}
 			b.cfg.SSHKey = filepath.Join(keyRoot, "unrelated-global-key")
+			if !tc.noSelectedKey {
+				b.cfg.Machine0.Key = "ci-managed"
+			}
 			create := api.createFn
 			api.createFn = func(ctx context.Context, createReq createMachineRequest) error {
 				if err := create(ctx, createReq); err != nil {
@@ -48,14 +69,51 @@ func TestMachine0FixedAcquireReplayAdoptsExactMachine(t *testing.T) {
 				t.Fatal(err)
 			}
 			replayed := api.machine
-			replayed.Key = &machineKey{Name: "ci-managed", Type: "MANAGED", FileName: tc.fileName}
+			if tc.omitKey {
+				replayed.Key = nil
+			} else if tc.emptyKey {
+				replayed.Key = &machineKey{Type: tc.inventoryKeyType}
+			} else {
+				replayed.Key = &machineKey{Name: "ci-managed", Type: "MANAGED", FileName: tc.fileName}
+				if tc.fileName != "" {
+					replayed.Key.Name = ""
+				}
+			}
 			api.machines = []machine{replayed}
+			if tc.detailKey != nil || tc.missingDetailKey {
+				api.machine.Key = tc.detailKey
+			}
+			if tc.mismatchedID {
+				api.machine.ID = "vm-impostor"
+			}
+			getDetail := 0
+			api.getFn = func(_ context.Context, name string) (machine, error) {
+				getDetail++
+				if name != replayed.Name {
+					t.Fatalf("machine detail lookup=%q want=%q", name, replayed.Name)
+				}
+				return api.machine, nil
+			}
 			second, err := b.Acquire(context.Background(), req)
+			if tc.wantError != "" {
+				assertMachine0Exit(t, err, 4, tc.wantError)
+				if getDetail != tc.wantGetDetail {
+					t.Fatalf("fixed replay machine detail reads=%d want=%d", getDetail, tc.wantGetDetail)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
-			if want := filepath.Join(keyRoot, tc.wantFile); second.SSH.Key != want {
+			want := b.cfg.SSHKey
+			if tc.wantFile != "" {
+				want = filepath.Join(keyRoot, tc.wantFile)
+			}
+			if second.SSH.Key != want {
 				t.Fatalf("fixed replay selected SSH key %q, want provider-owned key %q", second.SSH.Key, want)
+			}
+			if getDetail != tc.wantGetDetail {
+				t.Fatalf("fixed replay machine detail reads=%d want=%d", getDetail, tc.wantGetDetail)
 			}
 			if len(api.created) != 1 {
 				t.Fatalf("Create calls=%d want=1", len(api.created))

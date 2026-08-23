@@ -182,6 +182,14 @@ inventory for a bounded 60-second reconciliation window. A machine that appears
 is retained and adopted; a definite no-machine result clears the attempt so an
 ordinary capacity failure remains retryable.
 
+The `machine0 ls --json` summary can omit a VM's entire SSH-key object. When a
+fixed replay has a durable selected key but its exactly owned inventory entry
+has no usable key identity, Crabbox performs one `machine0 get <vm> --json`
+detail read. The detail must identify the same VM and selected key; missing or
+mismatched identity or conflicting key types fail closed. Explicitly public keys
+retain public-key semantics, and replay without a selected provider key keeps
+generic SSH-key fallback without an additional detail read.
+
 Once creation may have succeeded, later readiness or SSH failures never roll the
 VM back: the caller's fixed lease identity remains bound to it, and a matching
 replay can finish adoption. Repository binding is also durable; `--reclaim` is
