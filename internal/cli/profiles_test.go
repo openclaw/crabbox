@@ -1733,6 +1733,10 @@ func TestRemoteRunArtifactCommandsUseTargetTools(t *testing.T) {
 					t.Fatalf("command=%q, want %q", command, wantCommands[i])
 				}
 			}
+			inputCommand := remoteRunArtifactShellInputCommand(tt.target)
+			if want := tt.wantBash + " -lc " + shellQuote(tt.wantBash+" -s"); inputCommand != want {
+				t.Fatalf("input command=%q, want %q", inputCommand, want)
+			}
 
 			remove := remoteRemoveRunArtifactCommand(tt.target, "/work", ".crabbox/artifacts.tgz")
 			removeScript := "set -eu\ncd '/work'\n" + tt.wantRM + " -f -- '.crabbox/artifacts.tgz'"
@@ -1996,8 +2000,10 @@ profiles:
 	script := `#!/bin/sh
 cmd=""
 for arg do cmd="$arg"; done
-printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
-case "$cmd" in
+input="$(cat)"
+printf '%s\n%s\n---\n' "$cmd" "$input" >> "$CRABBOX_FAKE_SSH_LOG"
+case "$cmd
+$input" in
   *"base64 <"*) printf 'YXJ0aWZhY3RzCg=='; exit 0 ;;
   *"base64 -d >"*) printf 'ok      node             v22.1.0\nok      pnpm             9.0.0\nok      docker-compose   Docker Compose version v2.27.0\n'; exit 0 ;;
   *"artifacts.tgz"*) printf 'warning: no artifact matches\n'; exit 0 ;;

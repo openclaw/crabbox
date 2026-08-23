@@ -5,6 +5,8 @@
 ### Fixed
 
 - Redacted coordinator URL credentials, query parameters, and fragments from run-context portal and logs links.
+- Required an exact, locked local ownership claim before releasing ordinary AWS instances, preventing tag-matched resources from being terminated without durable lease authority.
+- Streamed artifact-collection scripts through SSH stdin so multiple artifact globs no longer overflow macOS OpenSSH multiplexed session requests.
 - Kept WSL2 workspace-owner commands below the Windows command-line limit by streaming their POSIX scripts over SSH stdin.
 - Fenced Linode heartbeats and Tailscale metadata updates with exact account-, scope-, and instance-bound claims, preserving legacy instance claims, idle-timeout intent, and safe release continuity.
 - Made two timing-sensitive tests robust on loaded CI runners.

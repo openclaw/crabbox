@@ -528,24 +528,30 @@ func (b *awsLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequ
 	if strings.TrimSpace(req.Lease.Server.Labels["fixed_intent_sha256"]) != "" && (!exists || !fixedAWSLeaseKind.IsFixedClaim(claim)) {
 		return exit(4, "refusing to release fixed AWS lease %s without its durable create intent", req.Lease.LeaseID)
 	}
-	if exists && fixedAWSLeaseKind.IsFixedClaim(claim) {
-		exact, err := requireExactAWSClaim(req.Lease.Server, req.Lease.LeaseID)
-		if err != nil {
-			return err
-		}
+	exact, err := requireExactAWSClaim(req.Lease.Server, req.Lease.LeaseID)
+	if err != nil {
+		return err
+	}
+	if fixedAWSLeaseKind.IsFixedClaim(exact) {
 		return fixedAWSLeaseKind.FinalizeAfterCleanup(exact, func() error {
 			return deleteServer(ctx, awsConfigForServer(b.Cfg, req.Lease.Server), req.Lease.Server)
 		})
 	}
-	if err := deleteServer(ctx, awsConfigForServer(b.Cfg, req.Lease.Server), req.Lease.Server); err != nil {
-		var keyErr *awsProviderKeyCleanupError
-		if errors.As(err, &keyErr) {
-			removeLeaseClaim(req.Lease.LeaseID)
+	var providerKeyErr error
+	if err := core.RemoveLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, exact, func() error {
+		if err := deleteServer(ctx, awsConfigForServer(b.Cfg, req.Lease.Server), req.Lease.Server); err != nil {
+			var keyErr *awsProviderKeyCleanupError
+			if errors.As(err, &keyErr) {
+				providerKeyErr = err
+				return nil
+			}
+			return err
 		}
+		return nil
+	}); err != nil {
 		return err
 	}
-	removeLeaseClaim(req.Lease.LeaseID)
-	return nil
+	return providerKeyErr
 }
 
 func (b *awsLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
@@ -985,8 +991,6 @@ func (e *awsProviderKeyCleanupError) Error() string {
 }
 
 func (e *awsProviderKeyCleanupError) Unwrap() error { return e.err }
-
-func removeLeaseClaim(leaseID string) { core.RemoveLeaseClaim(leaseID) }
 
 func cleanupAWSCreatedResources(ctx context.Context, stderr io.Writer, cfg Config, cloudID, keyPairID string) {
 	client, err := newAWSClient(ctx, cfg)
