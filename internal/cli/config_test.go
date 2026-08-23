@@ -3378,7 +3378,7 @@ func TestMultipassConfigDefaultsFileAndEnv(t *testing.T) {
 func TestMachine0ConfigDefaultsFileAndEnvPrecedence(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
-	if cfg.Machine0.CLIPath != "machine0" || cfg.Machine0.Image != "ubuntu-24-04-loaded" || cfg.Machine0.Size != "large" || cfg.Machine0.SizeExplicit || cfg.Machine0.Region != "eu" || cfg.Machine0.WorkRoot != "" || cfg.Machine0.ReleasePolicy != "destroy" || cfg.Machine0.PollInterval != 5*time.Second {
+	if cfg.Machine0.CLIPath != "machine0" || cfg.Machine0.Image != "ubuntu-24-04-loaded" || cfg.Machine0.Size != "large" || cfg.Machine0.SizeExplicit || cfg.Machine0.Region != "eu" || cfg.Machine0.WorkRoot != "" || cfg.Machine0.ReleasePolicy != "destroy" || cfg.Machine0.PollInterval != 15*time.Second {
 		t.Fatalf("machine0 defaults not applied: %#v", cfg.Machine0)
 	}
 	imageVersion := 2

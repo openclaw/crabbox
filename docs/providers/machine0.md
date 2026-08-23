@@ -59,7 +59,7 @@ machine0:
   workRoot: ""          # dynamic: /home/<resolved-ssh-user>/crabbox
   releasePolicy: destroy
   createTimeout: 15m
-  pollInterval: 5s
+  pollInterval: 15s
 ```
 
 The equivalent flags are:
@@ -171,6 +171,8 @@ partially created VM unless `--keep` was explicit.
 `machine0 new` returns before a VM is usable. Crabbox polls `get --json` through
 `CREATING` and `STARTING`, requires a `RUNNING` VM with an IP, and treats
 `ERRORED` and `UNAVAILABLE` as terminal failures with the Machine0 diagnostic.
+Provisioning can take 20 minutes or longer, so set `machine0.createTimeout`
+to cover the expected creation window when necessary.
 
 The Machine0 resource ID—not its IP—is the stable lease identity. Every
 resolve refreshes the VM JSON and SSH endpoint. This matters after suspend:
@@ -289,13 +291,20 @@ integer microcurrency.
 
 ## Rate limits and troubleshooting
 
-Machine0 accounts have finite API rate limits. When the CLI returns the exact
-`Rate limited. Please wait a moment and try again.` response, Crabbox quietly
-retries read-only inventory and status calls (`get`, `ls`, sizes, and image
-reads) until the current command's context expires or is canceled. The retry
-cadence follows `machine0.pollInterval` (default `5s`, with a one-second minimum)
-and prints only one concise warning. A cached-credentials warning preceding the
-rate-limit response does not prevent recognition.
+Machine0 accounts have finite hourly API read quotas, and one CLI status or
+inventory invocation can perform multiple API requests. The default
+`machine0.pollInterval` of `15s` reduces polling volume by about two-thirds
+compared with `5s`, leaving headroom for long VM creation followed by final
+inspection and cleanup. At most 10 seconds of additional readiness-observation
+latency is negligible compared with creation windows of 20 minutes or longer.
+
+When the CLI returns the exact `Rate limited. Please wait a moment and try
+again.` response, Crabbox quietly retries read-only inventory and status calls
+(`get`, `ls`, sizes, and image reads) until the current command's context
+expires or is canceled. The retry cadence follows `machine0.pollInterval`
+(default `15s`, with a one-second minimum) and prints only one concise warning.
+A cached-credentials warning preceding the rate-limit response does not prevent
+recognition.
 
 Crabbox never automatically retries Machine0 mutations such as create, start,
 stop, suspend, remove, image save/delete, or SSH key priming. A failed mutation

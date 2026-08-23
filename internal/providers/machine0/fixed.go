@@ -39,6 +39,8 @@ func (b *backend) acquireFixed(ctx context.Context, req AcquireRequest) (LeaseTa
 	leaseID := strings.TrimSpace(req.RequestedLeaseID)
 	cfg := b.configForRun()
 	var fingerprint string
+	var initialInventory []machine
+	var initialInventoryRead bool
 	acquired, err := core.AcquireFixedLease(core.FixedAcquireOptions{
 		Kind:        fixedMachine0LeaseKind,
 		LeaseID:     leaseID,
@@ -71,6 +73,7 @@ func (b *backend) acquireFixed(ctx context.Context, req AcquireRequest) (LeaseTa
 			if err != nil {
 				return core.FixedLeaseBinding{}, err
 			}
+			initialInventory, initialInventoryRead = machines, true
 			claims, err := machine0Claims()
 			if err != nil {
 				return core.FixedLeaseBinding{}, err
@@ -96,9 +99,13 @@ func (b *backend) acquireFixed(ctx context.Context, req AcquireRequest) (LeaseTa
 				return exit(4, "lease_id_conflict: lease %s is bound to another create intent", leaseID)
 			}
 
-			machines, err := b.api.List(ctx)
-			if err != nil {
-				return err
+			machines := initialInventory
+			if !initialInventoryRead {
+				var err error
+				machines, err = b.api.List(ctx)
+				if err != nil {
+					return err
+				}
 			}
 			if duplicateID := duplicateMachine0ID(machines); duplicateID != "" {
 				return exit(4, "lease_id_conflict: Machine0 inventory contains duplicate resource ID %s", duplicateID)

@@ -33,6 +33,7 @@ func TestMachine0FixedAcquireReplayAdoptsExactMachine(t *testing.T) {
 		{name: "provider filename remains authoritative without key name", fileName: "selected-provider-key", wantFile: "selected-provider-key"},
 		{name: "sparse inventory retains managed key ownership", wantFile: "machine0__ci-managed"},
 		{name: "inventory omits managed key entirely", omitKey: true, wantFile: "machine0__ci-managed", wantGetDetail: 1},
+		{name: "machine detail omits managed key filename", omitKey: true, detailKey: &machineKey{Name: "ci-managed", Type: "MANAGED"}, wantFile: "machine0__ci-managed", wantGetDetail: 1},
 		{name: "inventory key has no usable identity", emptyKey: true, wantFile: "machine0__ci-managed", wantGetDetail: 1},
 		{name: "detail key mismatches durable selection", omitKey: true, detailKey: &machineKey{Name: "another-key", Type: "MANAGED", FileName: "machine0__another-key"}, wantGetDetail: 1, wantError: "durable selected SSH key"},
 		{name: "detail omits durable selected key", omitKey: true, missingDetailKey: true, wantGetDetail: 1, wantError: "durable selected SSH key"},
@@ -94,6 +95,11 @@ func TestMachine0FixedAcquireReplayAdoptsExactMachine(t *testing.T) {
 				}
 				return api.machine, nil
 			}
+			var readinessKey string
+			b.waitSSH = func(_ context.Context, target *SSHTarget, _ time.Duration) error {
+				readinessKey = target.Key
+				return nil
+			}
 			second, err := b.Acquire(context.Background(), req)
 			if tc.wantError != "" {
 				assertMachine0Exit(t, err, 4, tc.wantError)
@@ -109,8 +115,8 @@ func TestMachine0FixedAcquireReplayAdoptsExactMachine(t *testing.T) {
 			if tc.wantFile != "" {
 				want = filepath.Join(keyRoot, tc.wantFile)
 			}
-			if second.SSH.Key != want {
-				t.Fatalf("fixed replay selected SSH key %q, want provider-owned key %q", second.SSH.Key, want)
+			if second.SSH.Key != want || readinessKey != want {
+				t.Fatalf("fixed replay selected SSH key %q and readiness key %q, want provider-owned key %q", second.SSH.Key, readinessKey, want)
 			}
 			if getDetail != tc.wantGetDetail {
 				t.Fatalf("fixed replay machine detail reads=%d want=%d", getDetail, tc.wantGetDetail)
@@ -126,6 +132,27 @@ func TestMachine0FixedAcquireReplayAdoptsExactMachine(t *testing.T) {
 				t.Fatalf("claim=%#v", claim)
 			}
 		})
+	}
+}
+
+func TestMachine0FixedAcquireReusesInitialInventory(t *testing.T) {
+	b, api, req := fixedMachine0TestFixture(t)
+	if _, err := b.Acquire(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if api.listCalls != 1 {
+		t.Fatalf("initial fixed acquisition listed Machine0 inventory %d times, want 1", api.listCalls)
+	}
+	api.machines[0].IP = "203.0.113.11"
+	replayed, err := b.Acquire(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if api.listCalls != 2 {
+		t.Fatalf("fixed replay listed Machine0 inventory %d times in total, want 2", api.listCalls)
+	}
+	if replayed.SSH.Host != api.machines[0].IP {
+		t.Fatalf("fixed replay reused stale inventory IP %q, want %q", replayed.SSH.Host, api.machines[0].IP)
 	}
 }
 

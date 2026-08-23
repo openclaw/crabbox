@@ -20,6 +20,7 @@ import (
 type fakeAPI struct {
 	machine                machine
 	machines               []machine
+	listCalls              int
 	getSequence            []machine
 	getFn                  func(context.Context, string) (machine, error)
 	createFn               func(context.Context, createMachineRequest) error
@@ -66,6 +67,7 @@ func (f *fakeAPI) List(ctx context.Context) ([]machine, error) {
 	if err := f.waitDoctorProbe(ctx); err != nil {
 		return nil, err
 	}
+	f.listCalls++
 	if f.machines != nil {
 		return append([]machine(nil), f.machines...), nil
 	}
@@ -240,17 +242,28 @@ func testSize() machineSize {
 }
 
 func TestNewBackendConfiguresClientReadRetryCadenceAndContextSleep(t *testing.T) {
-	cfg := core.BaseConfig()
-	cfg.Machine0.PollInterval = 7 * time.Second
-	b := newBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
-	c, ok := b.api.(*client)
-	if !ok || c.cfg.PollInterval != 7*time.Second || c.sleep == nil {
-		t.Fatalf("client=%#v ok=%v", c, ok)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := c.sleep(ctx, time.Hour); !errors.Is(err, context.Canceled) {
-		t.Fatalf("context sleep err=%v", err)
+	for _, tc := range []struct {
+		name       string
+		configured time.Duration
+		want       time.Duration
+	}{
+		{name: "canonical default", want: 15 * time.Second},
+		{name: "explicit override", configured: 7 * time.Second, want: 7 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.Machine0.PollInterval = tc.configured
+			b := newBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+			c, ok := b.api.(*client)
+			if !ok || b.cfg.Machine0.PollInterval != tc.want || c.cfg.PollInterval != tc.want || c.sleep == nil {
+				t.Fatalf("backend interval=%s client=%#v ok=%v want=%s", b.cfg.Machine0.PollInterval, c, ok, tc.want)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			if err := c.sleep(ctx, time.Hour); !errors.Is(err, context.Canceled) {
+				t.Fatalf("context sleep err=%v", err)
+			}
+		})
 	}
 }
 
@@ -1196,14 +1209,14 @@ func TestProviderFlagsAndValidation(t *testing.T) {
 	cfg := core.BaseConfig()
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	values := registerFlags(fs, cfg)
-	if err := fs.Parse([]string{"--machine0-cli", "/opt/m0", "--machine0-size", "gpu-h100-1", "--machine0-region", "us-east", "--machine0-release-policy", "suspend", "--machine0-image-version", "4"}); err != nil {
+	if err := fs.Parse([]string{"--machine0-cli", "/opt/m0", "--machine0-size", "gpu-h100-1", "--machine0-region", "us-east", "--machine0-release-policy", "suspend", "--machine0-image-version", "4", "--machine0-poll-interval", "9s"}); err != nil {
 		t.Fatal(err)
 	}
 	cfg.Provider = providerName
 	if err := applyFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Machine0.CLIPath != "/opt/m0" || cfg.Machine0.Size != "gpu-h100-1" || !cfg.Machine0.SizeExplicit || cfg.Machine0.Region != "us-east" || cfg.Machine0.ReleasePolicy != "suspend" || cfg.Machine0.ImageVersion != 4 {
+	if cfg.Machine0.CLIPath != "/opt/m0" || cfg.Machine0.Size != "gpu-h100-1" || !cfg.Machine0.SizeExplicit || cfg.Machine0.Region != "us-east" || cfg.Machine0.ReleasePolicy != "suspend" || cfg.Machine0.ImageVersion != 4 || cfg.Machine0.PollInterval != 9*time.Second {
 		t.Fatalf("cfg=%#v", cfg.Machine0)
 	}
 	cfg.Machine0.ReleasePolicy = "stop"

@@ -100,31 +100,41 @@ func TestClientReadRetriesRateLimitThenSucceeds(t *testing.T) {
 		result: core.LocalCommandResult{Stderr: "Warning: using cached credentials\nRate limited. Please wait a moment and try again."},
 		err:    errors.New("exit status 1"),
 	}
-	runner := &recordingRunner{sequence: []runnerResponse{
-		rateLimited,
-		rateLimited,
-		{result: core.LocalCommandResult{Stdout: `{"id":"vm-1","name":"box","status":"RUNNING","ip":"203.0.113.10"}`}},
-	}}
-	var stderr bytes.Buffer
-	c := &client{cfg: Machine0Config{CLIPath: "/opt/bin/machine0", PollInterval: 3 * time.Second}, rt: Runtime{Exec: runner, Stdout: io.Discard, Stderr: &stderr}}
-	var sleeps []time.Duration
-	c.sleep = func(_ context.Context, delay time.Duration) error {
-		sleeps = append(sleeps, delay)
-		return nil
-	}
+	for _, tc := range []struct {
+		name         string
+		pollInterval time.Duration
+	}{
+		{name: "canonical default", pollInterval: core.BaseConfig().Machine0.PollInterval},
+		{name: "explicit override", pollInterval: 3 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &recordingRunner{sequence: []runnerResponse{
+				rateLimited,
+				rateLimited,
+				{result: core.LocalCommandResult{Stdout: `{"id":"vm-1","name":"box","status":"RUNNING","ip":"203.0.113.10"}`}},
+			}}
+			var stderr bytes.Buffer
+			c := &client{cfg: Machine0Config{CLIPath: "/opt/bin/machine0", PollInterval: tc.pollInterval}, rt: Runtime{Exec: runner, Stdout: io.Discard, Stderr: &stderr}}
+			var sleeps []time.Duration
+			c.sleep = func(_ context.Context, delay time.Duration) error {
+				sleeps = append(sleeps, delay)
+				return nil
+			}
 
-	item, err := c.Get(context.Background(), "box")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if item.ID != "vm-1" || len(runner.calls) != 3 {
-		t.Fatalf("item=%#v calls=%d", item, len(runner.calls))
-	}
-	if len(sleeps) != 2 || sleeps[0] != 3*time.Second || sleeps[1] != 3*time.Second {
-		t.Fatalf("sleeps=%v", sleeps)
-	}
-	if strings.Count(stderr.String(), "machine0 read rate limited") != 1 || strings.Contains(stderr.String(), "cached credentials") {
-		t.Fatalf("stderr=%q", stderr.String())
+			item, err := c.Get(context.Background(), "box")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if item.ID != "vm-1" || len(runner.calls) != 3 {
+				t.Fatalf("item=%#v calls=%d", item, len(runner.calls))
+			}
+			if len(sleeps) != 2 || sleeps[0] != tc.pollInterval || sleeps[1] != tc.pollInterval {
+				t.Fatalf("sleeps=%v want=%s", sleeps, tc.pollInterval)
+			}
+			if strings.Count(stderr.String(), "machine0 read rate limited") != 1 || strings.Contains(stderr.String(), "cached credentials") {
+				t.Fatalf("stderr=%q", stderr.String())
+			}
+		})
 	}
 }
 
