@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Redacted coordinator URL credentials, query parameters, and fragments from run-context portal and logs links.
 - Fenced Linode heartbeats and Tailscale metadata updates with exact account-, scope-, and instance-bound claims, preserving legacy instance claims, idle-timeout intent, and safe release continuity.
 - Made two timing-sensitive tests robust on loaded CI runners.
 
