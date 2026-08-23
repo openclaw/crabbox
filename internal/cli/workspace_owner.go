@@ -136,9 +136,10 @@ func workspaceOwnerFromContext(ctx context.Context) *workspaceOwner {
 }
 
 type workspaceOwnerRemotePreparation struct {
-	command string
-	cleanup string
-	name    string
+	command       string
+	cleanup       string
+	name          string
+	ownerExpanded bool
 }
 
 const (
@@ -154,7 +155,10 @@ func prepareWorkspaceOwnerRemote(ctx context.Context, target SSHTarget, remote s
 		return workspaceOwnerRemotePreparation{command: remote}, nil
 	}
 	if !isWindowsNativeTarget(target) {
-		return workspaceOwnerRemotePreparation{command: owner.wrapPOSIXCommand(remote, inputSize != nil)}, nil
+		return workspaceOwnerRemotePreparation{
+			command:       owner.wrapPOSIXCommand(remote, inputSize != nil),
+			ownerExpanded: true,
+		}, nil
 	}
 	return stageWorkspaceOwnerWindowsWitness(contextWithoutWorkspaceOwner(ctx), target, owner, remote, inputSize, false)
 }
@@ -214,7 +218,10 @@ func runWorkspaceOwnerBackgroundOutput(ctx context.Context, target SSHTarget, ow
 		return runSSHOutput(ctx, target, remote)
 	}
 	if !isWindowsNativeTarget(target) {
-		return runSSHOutput(ctx, target, owner.wrapPOSIXBackgroundCommand(remote))
+		return runSSHOutputPrepared(ctx, target, workspaceOwnerRemotePreparation{
+			command:       owner.wrapPOSIXBackgroundCommand(remote),
+			ownerExpanded: true,
+		})
 	}
 	prepared, err := stageWorkspaceOwnerWindowsWitness(ctx, target, owner, remote, nil, true)
 	if err != nil {

@@ -86,7 +86,7 @@ func runFakeWSLTransport(args []string) int {
 		return filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(path, "/tmp/")))
 	}
 	switch {
-	case args[1] == "sh" && args[2] == "-c" && len(args) == 8:
+	case args[1] == "sh" && args[2] == "-c" && len(args) == 9:
 		dir := hostPath(args[5])
 		if mode == "stage-timeout" {
 			time.Sleep(30 * time.Second)
@@ -99,14 +99,19 @@ func runFakeWSLTransport(args []string) int {
 		if mode == "stage-fail" {
 			return 92
 		}
-		expected, err := strconv.Atoi(args[6])
+		scriptExpected, err := strconv.Atoi(args[6])
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "invalid expected frame length %q: %v\n", args[6], err)
+			fmt.Fprintf(os.Stderr, "invalid expected script length %q: %v\n", args[6], err)
 			return 91
 		}
-		preamble, err := strconv.Atoi(args[7])
+		payloadExpected, err := strconv.Atoi(args[7])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "invalid expected payload length %q: %v\n", args[7], err)
+			return 91
+		}
+		preamble, err := strconv.Atoi(args[8])
 		if err != nil || preamble < 0 {
-			fmt.Fprintf(os.Stderr, "invalid stdin preamble length %q: %v\n", args[7], err)
+			fmt.Fprintf(os.Stderr, "invalid stdin preamble length %q: %v\n", args[8], err)
 			return 91
 		}
 		if os.Mkdir(dir, 0o700) != nil ||
@@ -119,17 +124,20 @@ func runFakeWSLTransport(args []string) int {
 		if len(framed) < preamble {
 			actual = -1
 		}
+		expected := scriptExpected + payloadExpected
 		if readErr != nil || actual != expected {
 			fmt.Fprintf(os.Stderr, "frame mismatch: expected=%d actual=%d read_error=%v\n", expected, actual, readErr)
 			_ = os.RemoveAll(dir)
 			return 91
 		}
-		script := framed[preamble:]
-		if os.WriteFile(filepath.Join(dir, "script.sh"), script, 0o600) != nil {
+		script := framed[preamble : preamble+scriptExpected]
+		payload := framed[preamble+scriptExpected:]
+		if os.WriteFile(filepath.Join(dir, "script.sh"), script, 0o600) != nil ||
+			os.WriteFile(filepath.Join(dir, "payload"), payload, 0o600) != nil {
 			_ = os.RemoveAll(dir)
 			return 94
 		}
-		fmt.Printf("script=%x input=%x\n", sha256.Sum256(script), sha256.Sum256(nil))
+		fmt.Printf("script=%x input=%x\n", sha256.Sum256(script), sha256.Sum256(payload))
 		fmt.Fprintln(os.Stderr, "wsl-stderr-marker")
 		if bytes.Contains(script, []byte("sleep-for-timeout")) {
 			time.Sleep(30 * time.Second)
@@ -245,6 +253,15 @@ func TestWSL2TransportStagesWithoutWindowsAutomount(t *testing.T) {
 	stdout, stderr, err := run(wsl2StdinScriptCommandWithWaitTimeout(len(control), 5*time.Second), control)
 	requireFakeWSL(t, err == nil && strings.Contains(stderr, "wsl-stderr-marker"), "control transport err=%v stdout=%q stderr=%q", err, stdout, stderr)
 	for _, want := range []string{fmt.Sprintf("script=%x", sha256.Sum256(control)), fmt.Sprintf("input=%x", sha256.Sum256(nil))} {
+		requireFakeWSL(t, strings.Contains(stdout, want), "stdout=%q missing %q", stdout, want)
+	}
+	assertEmpty()
+
+	script, payload := []byte("cat"), []byte{0, 1, '\n', 0xff, 0}
+	frame := append(append([]byte{}, script...), payload...)
+	stdout, stderr, err = run(wsl2StdinScriptCommandWithPayload(len(script), len(payload), 5*time.Second), frame)
+	requireFakeWSL(t, err == nil && strings.Contains(stderr, "wsl-stderr-marker"), "payload transport err=%v stdout=%q stderr=%q", err, stdout, stderr)
+	for _, want := range []string{fmt.Sprintf("script=%x", sha256.Sum256(script)), fmt.Sprintf("input=%x", sha256.Sum256(payload))} {
 		requireFakeWSL(t, strings.Contains(stdout, want), "stdout=%q missing %q", stdout, want)
 	}
 	assertEmpty()

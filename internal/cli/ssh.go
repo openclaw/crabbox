@@ -473,6 +473,81 @@ func uniqueSSHPorts(ports []string) []string {
 	return out
 }
 
+type sshTransportPreparation struct {
+	command string
+	input   *replayableSSHInput
+	direct  io.ReadSeeker
+}
+
+func prepareSSHTransport(target SSHTarget, remote workspaceOwnerRemotePreparation, payload []byte, direct io.ReadSeeker, payloadSize int64, hasInput bool, waitTimeout time.Duration) (sshTransportPreparation, error) {
+	// Only owner-expanded WSL2 commands need stdin staging; every other target
+	// keeps its established argv and input transport.
+	if isWindowsWSL2Target(target) && remote.ownerExpanded {
+		var replay *replayableSSHInput
+		var err error
+		if direct != nil {
+			replay, err = newReplayableSSHInputStream([]byte(remote.command), direct, payloadSize)
+		} else {
+			replay, err = newReplayableSSHInput(append([]byte(remote.command), payload...))
+		}
+		if err != nil {
+			return sshTransportPreparation{}, err
+		}
+		return sshTransportPreparation{
+			command: wsl2StdinScriptCommandWithPayload(len(remote.command), int(payloadSize), waitTimeout),
+			input:   replay,
+		}, nil
+	}
+
+	prepared := sshTransportPreparation{
+		command: wrapRemoteForTargetWithWaitTimeout(target, remote.command, waitTimeout),
+	}
+	if !hasInput {
+		return prepared, nil
+	}
+	if direct != nil {
+		prepared.direct = direct
+		return prepared, nil
+	}
+	var err error
+	prepared.input, err = newReplayableSSHInput(payload)
+	return prepared, err
+}
+
+func (p *sshTransportPreparation) run(ctx context.Context, target SSHTarget, connectTimeout, connectionAttempts string, stdout, stderr io.Writer) error {
+	args := sshArgsNoInputWithOptions(target, p.command, connectTimeout, connectionAttempts)
+	if p.input != nil || p.direct != nil {
+		args = sshArgsWithOptions(target, p.command, connectTimeout, connectionAttempts)
+	}
+	cmd := sshCommandContext(ctx, target, args...)
+	input, err := p.reset()
+	if err != nil {
+		return err
+	}
+	cmd.Stdin = input
+	return runSSHCommand(cmd, stdout, stderr)
+}
+
+func (p *sshTransportPreparation) reset() (io.Reader, error) {
+	if p.input != nil {
+		return p.input.reset()
+	}
+	if p.direct != nil {
+		if _, err := p.direct.Seek(0, io.SeekStart); err != nil {
+			return nil, err
+		}
+		return p.direct, nil
+	}
+	return nil, nil
+}
+
+func (p *sshTransportPreparation) close() error {
+	if p.input == nil {
+		return nil
+	}
+	return p.input.close()
+}
+
 func runSSHQuiet(ctx context.Context, target SSHTarget, remote string) error {
 	return runSSHQuietWithOptions(ctx, target, remote, "10", "3")
 }
@@ -503,15 +578,17 @@ func runSSHQuietWithOptionsResolvePort(ctx context.Context, target *SSHTarget, r
 			err = errors.Join(err, prepared.close(ctx, *target))
 		}
 	}()
-	remote = prepared.command
-	remote = wrapRemoteForTarget(*target, remote)
+	transport, err := prepareSSHTransport(*target, prepared, nil, nil, 0, false, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, transport.close()) }()
 	var lastErr error
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 		probe := *target
 		probe.Port = port
 		probe.FallbackPorts = []string{}
-		cmd := sshCommandContext(ctx, probe, sshArgsNoInputWithOptions(probe, remote, connectTimeout, connectionAttempts)...)
-		err := runSSHCommand(cmd, io.Discard, io.Discard)
+		err := transport.run(ctx, probe, connectTimeout, connectionAttempts, io.Discard, io.Discard)
 		if err == nil {
 			target.Port = probe.Port
 			return nil
@@ -534,15 +611,17 @@ func runSSHQuietWithRemoteWaitTimeout(ctx context.Context, target SSHTarget, rem
 			err = errors.Join(err, prepared.close(ctx, target))
 		}
 	}()
-	remote = prepared.command
-	remote = wrapRemoteForTargetWithWaitTimeout(target, remote, waitTimeout)
+	transport, err := prepareSSHTransport(target, prepared, nil, nil, 0, false, waitTimeout)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, transport.close()) }()
 	var lastErr error
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 		probe := target
 		probe.Port = port
 		probe.FallbackPorts = []string{}
-		cmd := sshCommandContext(ctx, probe, sshArgsNoInputWithOptions(probe, remote, connectTimeout, connectionAttempts)...)
-		err := runSSHCommand(cmd, io.Discard, io.Discard)
+		err := transport.run(ctx, probe, connectTimeout, connectionAttempts, io.Discard, io.Discard)
 		if err == nil {
 			return nil
 		}
@@ -564,16 +643,22 @@ func runSSHOutput(ctx context.Context, target SSHTarget, remote string) (output 
 			err = errors.Join(err, prepared.close(ctx, target))
 		}
 	}()
-	remote = prepared.command
-	remote = wrapRemoteForTarget(target, remote)
+	return runSSHOutputPrepared(ctx, target, prepared)
+}
+
+func runSSHOutputPrepared(ctx context.Context, target SSHTarget, prepared workspaceOwnerRemotePreparation) (output string, err error) {
+	transport, err := prepareSSHTransport(target, prepared, nil, nil, 0, false, 0)
+	if err != nil {
+		return "", err
+	}
+	defer func() { err = errors.Join(err, transport.close()) }()
 	var lastOut []byte
 	var lastErr error
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 		probe := target
 		probe.Port = port
-		cmd := sshCommandContext(ctx, probe, sshArgsNoInput(probe, remote)...)
 		var out bytes.Buffer
-		err := runSSHCommand(cmd, &out, io.Discard)
+		err := transport.run(ctx, probe, "10", "3", &out, io.Discard)
 		if err == nil {
 			return strings.TrimSpace(out.String()), nil
 		}
@@ -596,17 +681,19 @@ func runSSHOutputWithRemoteWaitTimeout(ctx context.Context, target SSHTarget, re
 			err = errors.Join(err, prepared.close(ctx, target))
 		}
 	}()
-	remote = prepared.command
-	remote = wrapRemoteForTargetWithWaitTimeout(target, remote, waitTimeout)
+	transport, err := prepareSSHTransport(target, prepared, nil, nil, 0, false, waitTimeout)
+	if err != nil {
+		return "", err
+	}
+	defer func() { err = errors.Join(err, transport.close()) }()
 	var lastOut []byte
 	var lastErr error
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 		probe := target
 		probe.Port = port
 		probe.FallbackPorts = []string{}
-		cmd := sshCommandContext(ctx, probe, sshArgsNoInputWithOptions(probe, remote, connectTimeout, connectionAttempts)...)
 		var out bytes.Buffer
-		err := runSSHCommand(cmd, &out, io.Discard)
+		err := transport.run(ctx, probe, connectTimeout, connectionAttempts, &out, io.Discard)
 		if err == nil {
 			return strings.TrimSpace(out.String()), nil
 		}
@@ -629,8 +716,11 @@ func runSSHCombinedOutput(ctx context.Context, target SSHTarget, remote string) 
 			err = errors.Join(err, prepared.close(ctx, target))
 		}
 	}()
-	remote = prepared.command
-	remote = wrapRemoteForTarget(target, remote)
+	transport, err := prepareSSHTransport(target, prepared, nil, nil, 0, false, 0)
+	if err != nil {
+		return "", err
+	}
+	defer func() { err = errors.Join(err, transport.close()) }()
 	var lastOut []byte
 	var lastErr error
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
@@ -639,9 +729,8 @@ func runSSHCombinedOutput(ctx context.Context, target SSHTarget, remote string) 
 		// Crabbox's SSH helpers intentionally execute commands assembled by
 		// typed remote-command builders. Callers must shell-quote user data
 		// before it reaches this boundary; see remoteCommand/shellQuote tests.
-		cmd := sshCommandContext(ctx, probe, sshArgsNoInput(probe, remote)...)
 		var out synchronizedBuffer
-		err := runSSHCommand(cmd, &out, &out)
+		err := transport.run(ctx, probe, "10", "3", &out, &out)
 		if err == nil {
 			return strings.TrimSpace(out.String()), nil
 		}
@@ -739,24 +828,16 @@ func runSSHInput(ctx context.Context, target SSHTarget, remote string, input io.
 			err = errors.Join(err, prepared.close(ctx, target))
 		}
 	}()
-	remote = wrapRemoteForTarget(target, prepared.command)
-	replayableInput, err := newReplayableSSHInput(data)
+	transport, err := prepareSSHTransport(target, prepared, data, nil, inputSize, true, 0)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		err = errors.Join(err, replayableInput.close())
-	}()
+	defer func() { err = errors.Join(err, transport.close()) }()
 	var lastErr error
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 		probe := target
 		probe.Port = port
-		cmd := sshCommandContext(ctx, probe, sshArgs(probe, remote)...)
-		cmd.Stdin, err = replayableInput.reset()
-		if err != nil {
-			return err
-		}
-		err = runSSHCommand(cmd, stdout, stderr)
+		err = transport.run(ctx, probe, "10", "3", stdout, stderr)
 		if err == nil {
 			return nil
 		}
@@ -788,17 +869,16 @@ func runSSHInputStream(ctx context.Context, target SSHTarget, remote string, inp
 			err = errors.Join(err, prepared.close(ctx, target))
 		}
 	}()
-	remote = wrapRemoteForTarget(target, prepared.command)
+	transport, err := prepareSSHTransport(target, prepared, nil, input, inputSize, true, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, transport.close()) }()
 	var lastErr error
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
-		if _, err := input.Seek(0, io.SeekStart); err != nil {
-			return err
-		}
 		probe := target
 		probe.Port = port
-		cmd := sshCommandContext(ctx, probe, sshArgs(probe, remote)...)
-		cmd.Stdin = input
-		err := runSSHCommand(cmd, stdout, stderr)
+		err := transport.run(ctx, probe, "10", "3", stdout, stderr)
 		if err == nil {
 			return nil
 		}
@@ -815,27 +895,29 @@ func runSSHStream(ctx context.Context, target SSHTarget, remote string, stdout, 
 	return code
 }
 
-func runSSHStreamResult(ctx context.Context, target SSHTarget, remote string, stdout, stderr io.Writer) (int, error) {
+func runSSHStreamResult(ctx context.Context, target SSHTarget, remote string, stdout, stderr io.Writer) (code int, err error) {
 	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, nil)
 	if err != nil {
 		return 7, err
 	}
-	remote = prepared.command
-	remote = wrapRemoteForTarget(target, remote)
+	transport, err := prepareSSHTransport(target, prepared, nil, nil, 0, false, 0)
+	if err != nil {
+		return 7, err
+	}
+	defer func() { err = errors.Join(err, transport.close()) }()
 	lastCode := 7
 	var lastErr error
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 		probe := target
 		probe.Port = port
-		cmd := sshCommandContext(ctx, probe, sshArgsNoInput(probe, remote)...)
-		err := runSSHCommand(cmd, stdout, stderr)
-		if err == nil {
+		runErr := transport.run(ctx, probe, "10", "3", stdout, stderr)
+		if runErr == nil {
 			return 0, nil
 		}
-		lastErr = err
-		lastCode = exitCode(err)
-		if !shouldRetrySSHPort(err) {
-			return lastCode, errors.Join(err, prepared.close(ctx, target))
+		lastErr = runErr
+		lastCode = exitCode(runErr)
+		if !shouldRetrySSHPort(runErr) {
+			return lastCode, errors.Join(runErr, prepared.close(ctx, target))
 		}
 	}
 	return lastCode, errors.Join(lastErr, prepared.close(ctx, target))
@@ -1111,7 +1193,7 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 		if err := runSSHQuiet(rawCtx, target, owner.rsyncPrepareCommand()); err != nil {
 			return exit(7, "prepare rsync workspace witness: %v", err)
 		}
-		if _, err := runSSHOutput(rawCtx, target, owner.wrapPOSIXBackgroundCommand(owner.rsyncGuardPayload(dst))); err != nil {
+		if _, err := runWorkspaceOwnerBackgroundOutput(rawCtx, target, owner, owner.rsyncGuardPayload(dst)); err != nil {
 			return exit(7, "start rsync workspace witness: %v", err)
 		}
 		if err := owner.WaitForChild(rawCtx, 10*time.Second); err != nil {
@@ -1212,6 +1294,10 @@ exit $code`)
 }
 
 func wsl2StdinScriptCommandWithWaitTimeout(inputSize int, waitTimeout time.Duration) string {
+	return wsl2StdinScriptCommandWithPayload(inputSize, 0, waitTimeout)
+}
+
+func wsl2StdinScriptCommandWithPayload(scriptSize, payloadSize int, waitTimeout time.Duration) string {
 	// Keep staging, execution, and cleanup in one WSL process so the timeout
 	// covers the lifecycle. The frame accounts for .NET's stdin preamble, and
 	// the marker lets post-exit cleanup preserve collisions.
@@ -1249,14 +1335,13 @@ func wsl2StdinScriptCommandWithWaitTimeout(inputSize int, waitTimeout time.Durat
 	return powershellCommand(`$ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $dir = "/tmp/crabbox-command-" + [Guid]::NewGuid().ToString("N")
-$expected = ` + strconv.Itoa(inputSize) + `
 $failure = $null
 $cleanupAllowed = $true
 ` + watch + `$preamble = [Console]::InputEncoding.GetPreamble().Length
 $psi = [System.Diagnostics.ProcessStartInfo]::new("wsl.exe")
 $psi.UseShellExecute = $false
 $psi.RedirectStandardInput = $true
-$psi.Arguments = '--exec sh -c "set -u;umask 077;dir=$1;expected=$2;preamble=$3;mkdir -m 700 -- $dir||exit;: >$dir/.crabbox-owned;trap ''rm -rf -- $dir'' EXIT;cat >$dir/framed||exit;actual=$(wc -c <$dir/framed);test $actual = $((expected+preamble))||exit;dd if=$dir/framed of=$dir/script.sh bs=1 skip=$preamble 2>/dev/null||exit;rm -f -- $dir/framed;test $(wc -c <$dir/script.sh) = $expected||exit;code=0;bash $dir/script.sh||code=$?;rm -rf -- $dir;cleanup=$?;trap - EXIT;if [ $cleanup -ne 0 ];then echo ''WSL2 command cleanup failed: exit ''$cleanup >&2;[ $code -ne 0 ]||code=$cleanup;fi;exit $code" sh ' + $dir + ' ' + $expected + ' ' + $preamble
+$psi.Arguments = '--exec sh -c "set -u;umask 077;dir=$1;script_expected=$2;payload_expected=$3;preamble=$4;mkdir -m 700 -- $dir||exit;: >$dir/.crabbox-owned;trap ''rm -rf -- $dir'' EXIT;cat >$dir/framed||exit;test $(wc -c <$dir/framed) = $((script_expected+payload_expected+preamble))||exit;dd if=$dir/framed of=$dir/script.sh bs=1 skip=$preamble count=$script_expected 2>/dev/null||exit;dd if=$dir/framed of=$dir/payload bs=1 skip=$((preamble+script_expected)) count=$payload_expected 2>/dev/null||exit;rm -f -- $dir/framed;code=0;bash $dir/script.sh <$dir/payload||code=$?;rm -rf -- $dir;cleanup=$?;trap - EXIT;if [ $cleanup -ne 0 ];then echo ''WSL2 command cleanup failed: exit ''$cleanup >&2;[ $code -ne 0 ]||code=$cleanup;fi;exit $code" sh ' + $dir + ' ` + strconv.Itoa(scriptSize) + ` ` + strconv.Itoa(payloadSize) + ` ' + $preamble
 $process = [System.Diagnostics.Process]::Start($psi)
 try {
   try {

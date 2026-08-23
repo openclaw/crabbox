@@ -797,13 +797,13 @@ func TestWSL2WrapRemoteCommandWithWaitTimeout(t *testing.T) {
 }
 
 func TestWSL2StdinScriptCommandWithWaitTimeoutReadsPayloadFromStdin(t *testing.T) {
-	got := wsl2StdinScriptCommandWithWaitTimeout(12_345, 15*time.Second)
+	got := wsl2StdinScriptCommandWithPayload(12_345, 678, 15*time.Second)
 	if len(got) >= 8191 {
 		t.Fatalf("stdin-backed WSL2 command length=%d exceeds cmd.exe limit", len(got))
 	}
 	decoded := decodePowerShellCommand(t, got)
 	for _, want := range []string{
-		`$expected = 12345`,
+		`sh ' + $dir + ' 12345 678 ' + $preamble`,
 		`/tmp/crabbox-command-`,
 		`$preamble = [Console]::InputEncoding.GetPreamble().Length`,
 		`[Console]::OpenStandardInput().CopyToAsync($process.StandardInput.BaseStream)`,
@@ -813,10 +813,11 @@ func TestWSL2StdinScriptCommandWithWaitTimeoutReadsPayloadFromStdin(t *testing.T
 		`: >$dir/.crabbox-owned`,
 		`trap ''rm -rf -- $dir'' EXIT`,
 		`cat >$dir/framed`,
-		`test $actual = $((expected+preamble))`,
-		`dd if=$dir/framed of=$dir/script.sh bs=1 skip=$preamble`,
-		`test $(wc -c <$dir/script.sh) = $expected`,
-		`bash $dir/script.sh||code=$?`,
+		`test $(wc -c <$dir/framed) = $((script_expected+payload_expected+preamble))`,
+		`dd if=$dir/framed of=$dir/script.sh bs=1 skip=$preamble count=$script_expected`,
+		`dd if=$dir/framed of=$dir/payload bs=1 skip=$((preamble+script_expected)) count=$payload_expected`,
+		`rm -f -- $dir/framed`,
+		`bash $dir/script.sh <$dir/payload||code=$?`,
 		`trap - EXIT`,
 		`WSL2 command cleanup failed: exit `,
 		`$process.WaitForExit($left)`,
@@ -843,6 +844,9 @@ func TestWSL2StdinScriptCommandWithWaitTimeoutReadsPayloadFromStdin(t *testing.T
 	}
 	if strings.Index(decoded, `trap - EXIT`) < strings.Index(decoded, `bash $dir/script.sh`) {
 		t.Fatalf("stdin-backed WSL2 command disables cleanup before execution: %q", decoded)
+	}
+	if strings.Index(decoded, `rm -f -- $dir/framed`) > strings.Index(decoded, `bash $dir/script.sh`) {
+		t.Fatalf("stdin-backed WSL2 command retains the duplicate frame during execution: %q", decoded)
 	}
 	copyWait := strings.Index(decoded, `$copy.Wait($left)`)
 	if copyWait < 0 {
