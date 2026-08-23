@@ -126,10 +126,6 @@ func withCheckpointAdmin(ctx context.Context, admin bool) context.Context {
 	return context.WithValue(ctx, checkpointAdminContextKey{}, true)
 }
 
-func configuredCheckpointCoordinator() (*CoordinatorClient, error) {
-	return configuredCheckpointCoordinatorFor(context.Background())
-}
-
 func configuredCheckpointCoordinatorFor(ctx context.Context) (*CoordinatorClient, error) {
 	cfg, err := loadConfig()
 	if err != nil {
