@@ -648,8 +648,14 @@ func (b *backend) prepareLeaseWithOptions(ctx context.Context, item machine, ser
 	user := machine0SSHUser(item)
 	keyPath := cfg.SSHKey
 	keyRoot := strings.TrimSpace(os.Getenv("SSH_KEY_PATH"))
-	if item.Key != nil && strings.TrimSpace(item.Key.FileName) != "" {
-		keyFileName := strings.TrimSpace(item.Key.FileName)
+	var keyFileName string
+	if item.Key != nil {
+		keyFileName = strings.TrimSpace(item.Key.FileName)
+		if keyName := strings.TrimSpace(item.Key.Name); keyFileName == "" && keyName != "" && !strings.EqualFold(strings.TrimSpace(item.Key.Type), "PUBLIC") {
+			keyFileName = "machine0__" + keyName
+		}
+	}
+	if keyFileName != "" {
 		if filepath.IsAbs(keyFileName) || keyFileName == "." || keyFileName == ".." || strings.ContainsAny(keyFileName, `/\`) || filepath.Base(keyFileName) != keyFileName {
 			return LeaseTarget{}, exit(2, "Machine0 returned invalid SSH key filename %q; key filename must be a single basename", keyFileName)
 		}

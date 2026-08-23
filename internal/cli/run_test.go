@@ -2423,6 +2423,27 @@ func TestPrintRunContextSummarySeparatesExecutionAndHistoryRunIDs(t *testing.T) 
 	}
 }
 
+func TestPrintRunContextSummaryRedactsCoordinatorURLCredentials(t *testing.T) {
+	username, userinfo := "fixture-user", "fixture-value"
+	coord := &CoordinatorClient{BaseURL: fmt.Sprintf("https://%s:%s@coordinator.example.test/team?key=fixture-query#fixture-fragment", username, userinfo)}
+	var output bytes.Buffer
+	printRunContextSummary(&output, coord, Config{Provider: "aws", TargetOS: targetLinux}, Server{}, SSHTarget{}, "cbx_123", "run_execution", "run_history", "/work/repo", false, "")
+
+	for _, want := range []string{
+		"portal=https://<redacted>@coordinator.example.test/team/portal/runs/run_history",
+		"logs=https://<redacted>@coordinator.example.test/team/v1/runs/run_history/logs",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("redacted run context missing %q:\n%s", want, output.String())
+		}
+	}
+	for _, forbidden := range []string{username, userinfo, "fixture-query", "fixture-fragment"} {
+		if strings.Contains(output.String(), forbidden) {
+			t.Fatalf("run context exposed %q:\n%s", forbidden, output.String())
+		}
+	}
+}
+
 func TestRunCommandInjectsReservedMetadataIntoStaticSSH(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()
@@ -4634,8 +4655,12 @@ func TestWindowsWSL2RemoteCapabilityPreflightUsesBoundedWrapper(t *testing.T) {
 	}
 	decoded := decodePowerShellCommand(t, commands[0])
 	for _, want := range []string{
-		`[Console]::OpenStandardInput().CopyTo($script)`,
-		`$process.WaitForExit(15000)`,
+		`[Console]::OpenStandardInput().CopyToAsync($process.StandardInput.BaseStream)`,
+		`$left = 15000 - [int]$watch.ElapsedMilliseconds`,
+		`$copy.Wait($left)`,
+		`$process.WaitForExit($left)`,
+		`$cleanupAllowed = $process.WaitForExit(5000)`,
+		`if (-not $cleanupAllowed)`,
 		`throw "WSL2 command timed out after 15s"`,
 	} {
 		if !strings.Contains(decoded, want) {

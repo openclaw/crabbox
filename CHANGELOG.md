@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Redacted coordinator URL credentials, query parameters, and fragments from run-context portal and logs links.
 - Streamed artifact-collection scripts through SSH stdin so multiple artifact globs no longer overflow macOS OpenSSH multiplexed session requests.
 - Fenced Linode heartbeats and Tailscale metadata updates with exact account-, scope-, and instance-bound claims, preserving legacy instance claims, idle-timeout intent, and safe release continuity.
 - Made two timing-sensitive tests robust on loaded CI runners.
