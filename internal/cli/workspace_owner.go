@@ -61,9 +61,17 @@ func (t sshWorkspaceOwnerTransport) Do(ctx context.Context, req workspaceOwnerRe
 	return runWorkspaceOwnerSSHProtocol(ctx, t.target, remote, input, req.Token)
 }
 
-func runWorkspaceOwnerSSHProtocol(ctx context.Context, target SSHTarget, remote string, input *string, requestToken string) (string, error) {
-	var lastOutput string
-	var lastErr error
+func runWorkspaceOwnerSSHProtocol(ctx context.Context, target SSHTarget, remote string, input *string, requestToken string) (output string, err error) {
+	var replayableInput *replayableSSHInput
+	if input != nil {
+		// Finite owner scripts may retry ports. File-backed input gives Windows
+		// inbox OpenSSH a reliable EOF while preserving exact replay bytes.
+		replayableInput, err = newReplayableSSHInput([]byte(*input))
+		if err != nil {
+			return "", err
+		}
+		defer func() { err = errors.Join(err, replayableInput.close()) }()
+	}
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 		probe := target
 		probe.Port = port
@@ -73,12 +81,15 @@ func runWorkspaceOwnerSSHProtocol(ctx context.Context, target SSHTarget, remote 
 			args = sshArgs(probe, remote)
 		}
 		cmd := sshCommandContext(ctx, probe, args...)
-		if input != nil {
-			cmd.Stdin = strings.NewReader(*input)
+		if replayableInput != nil {
+			cmd.Stdin, err = replayableInput.reset()
+			if err != nil {
+				return "", err
+			}
 		}
 		var stdout, stderr synchronizedBuffer
-		err := runSSHCommand(cmd, &stdout, &stderr)
-		output := strings.TrimSpace(stdout.String())
+		err = runSSHCommand(cmd, &stdout, &stderr)
+		output = strings.TrimSpace(stdout.String())
 		if err == nil {
 			return output, nil
 		}
@@ -86,12 +97,11 @@ func runWorkspaceOwnerSSHProtocol(ctx context.Context, target SSHTarget, remote 
 		if detail != "" {
 			err = fmt.Errorf("%w: %s", err, detail)
 		}
-		lastOutput, lastErr = output, err
 		if !shouldRetrySSHPort(err) {
 			return output, err
 		}
 	}
-	return lastOutput, lastErr
+	return output, err
 }
 
 type workspaceOwner struct {
