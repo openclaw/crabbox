@@ -44,6 +44,22 @@ type fakeAWSClient struct {
 	controlCreate    func(*core.AWSFixedCreateControl, Config, string, string) (Server, Config, error)
 }
 
+func TestProviderEvidenceSanitizerPreservesAMI(t *testing.T) {
+	backend := NewAWSLeaseBackend(
+		ProviderSpec{Name: "aws"},
+		Config{Provider: "aws"},
+		Runtime{Stderr: io.Discard},
+	)
+	sanitizer, ok := backend.(core.ProviderEvidenceSanitizer)
+	if !ok {
+		t.Fatal("AWS backend does not expose provider evidence sanitization")
+	}
+	const imageID = "ami-0123456789abcdef0"
+	if got := sanitizer.SanitizeImageIDEvidence(imageID); got != imageID {
+		t.Fatalf("sanitized image id=%q, want %q", got, imageID)
+	}
+}
+
 func (c *fakeAWSClient) ListCrabboxServers(context.Context) ([]Server, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
