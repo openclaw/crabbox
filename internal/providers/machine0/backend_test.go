@@ -169,7 +169,14 @@ func setupState(t *testing.T) string {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", home+"/.config")
 	t.Setenv("XDG_STATE_HOME", home+"/.state")
-	t.Setenv("SSH_KEY_PATH", filepath.Join(home, ".ssh"))
+	keyRoot := filepath.Join(home, ".ssh")
+	t.Setenv("SSH_KEY_PATH", keyRoot)
+	if err := os.MkdirAll(keyRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(keyRoot, "machine0__ci"), []byte("fixture private key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	return t.TempDir()
 }
 
@@ -445,22 +452,43 @@ func TestPrepareLeaseRejectsPrimeWithoutExpectedMachine0Key(t *testing.T) {
 	}
 }
 
-func TestPrepareLeaseFallsBackToGenericSSHKeyWithoutMachine0Filename(t *testing.T) {
-	t.Setenv("SSH_KEY_PATH", t.TempDir())
-	item := readyMachine("203.0.113.10")
-	item.Key = &machineKey{Name: "mac-studio-sf"}
-	api := &fakeAPI{machine: item}
-	b := testBackendWithAPI(api)
-	b.cfg.SSHKey = "/tmp/fallback-crabbox-key"
-	lease, err := b.prepareLease(context.Background(), item, Server{CloudID: item.ID}, "cbx_keyfallback", true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if lease.SSH.Key != "/tmp/fallback-crabbox-key" {
-		t.Fatalf("fallback key=%q", lease.SSH.Key)
-	}
-	if len(api.primed) != 0 {
-		t.Fatalf("PrimeSSH should not run without a Machine0 filename: %v", api.primed)
+func TestPrepareLeaseSelectsMachine0KeyOwnershipWithoutFilename(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		key      *machineKey
+		wantFile string
+	}{
+		{name: "managed key name", key: &machineKey{Name: "ci-managed", Type: "MANAGED"}, wantFile: "machine0__ci-managed"},
+		{name: "sparse managed key name", key: &machineKey{Name: "ci-managed"}, wantFile: "machine0__ci-managed"},
+		{name: "public key cannot derive managed filename", key: &machineKey{Name: "ci-public", Type: "PUBLIC"}},
+		{name: "missing provider key", key: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			keyRoot := t.TempDir()
+			t.Setenv("SSH_KEY_PATH", keyRoot)
+			item := readyMachine("203.0.113.10")
+			item.Key = tc.key
+			api := &fakeAPI{machine: item}
+			b := testBackendWithAPI(api)
+			want := "/tmp/fallback-crabbox-key"
+			b.cfg.SSHKey = want
+			if tc.wantFile != "" {
+				want = filepath.Join(keyRoot, tc.wantFile)
+				if err := os.WriteFile(want, []byte("fixture private key"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			lease, err := b.prepareLease(context.Background(), item, Server{CloudID: item.ID}, "cbx_keyfallback", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lease.SSH.Key != want {
+				t.Fatalf("SSH key=%q want=%q", lease.SSH.Key, want)
+			}
+			if len(api.primed) != 0 {
+				t.Fatalf("existing key must skip PrimeSSH: %v", api.primed)
+			}
+		})
 	}
 }
 

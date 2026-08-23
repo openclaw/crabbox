@@ -97,15 +97,18 @@ home-root behavior.
 Machine0's `key` is the registered public or managed key name supplied to
 `machine0 new --key`. When the VM details return `key.fileName`, that filename
 is authoritative because it identifies the key actually injected into the VM.
-Crabbox resolves that filename under `SSH_KEY_PATH` or the default `~/.ssh`
-directory before readiness checks. It runs `machine0 ssh <vm> true` only when
-the resolved private-key file is absent, then verifies that the CLI actually
-materialized the file. Existing key files skip the Machine0 CLI entirely, so
-ordinary resume and checkpoint restart do not depend on the CLI's global
-`known_hosts`; Crabbox continues to perform its own direct SSH host-key
-handling. The provider-returned path overrides a generic `--ssh-key`, which is
-used only when Machine0 returns no filename. Set `SSH_KEY_PATH` when Machine0
-uses a custom key directory.
+When inventory omits the filename but retains a managed key name, Crabbox
+derives Machine0's canonical `machine0__<key-name>` filename instead. It
+resolves the provider-owned filename under `SSH_KEY_PATH` or the default
+`~/.ssh` directory before readiness checks. Crabbox runs
+`machine0 ssh <vm> true` only when the resolved private-key file is absent, then
+verifies that the CLI actually materialized the file. Existing key files skip
+the Machine0 CLI entirely, so ordinary resume and checkpoint restart do not
+depend on the CLI's global `known_hosts`; Crabbox continues to perform its own
+direct SSH host-key handling. The provider-owned path overrides a generic
+`--ssh-key`, which remains available only when Machine0 provides no usable
+provider-owned key identity. Set `SSH_KEY_PATH` when Machine0 uses a custom key
+directory.
 
 Machine0 SSH targets use a provider-isolated host-trust file under
 `<key-directory>/crabbox/machine0/known_hosts.d/`, keyed by a hash of the
@@ -178,6 +181,14 @@ the request. When `machine0 new` returns an error, the original invocation polls
 inventory for a bounded 60-second reconciliation window. A machine that appears
 is retained and adopted; a definite no-machine result clears the attempt so an
 ordinary capacity failure remains retryable.
+
+The `machine0 ls --json` summary can omit a VM's entire SSH-key object. When a
+fixed replay has a durable selected key but its exactly owned inventory entry
+has no usable key identity, Crabbox performs one `machine0 get <vm> --json`
+detail read. The detail must identify the same VM and selected key; missing or
+mismatched identity or conflicting key types fail closed. Explicitly public keys
+retain public-key semantics, and replay without a selected provider key keeps
+generic SSH-key fallback without an additional detail read.
 
 Once creation may have succeeded, later readiness or SSH failures never roll the
 VM back: the caller's fixed lease identity remains bound to it, and a matching
