@@ -16,24 +16,58 @@ import (
 const fixedMachine0TestLeaseID = "cbx_abcdef123456"
 
 func TestMachine0FixedAcquireReplayAdoptsExactMachine(t *testing.T) {
-	b, api, req := fixedMachine0TestFixture(t)
-	first, err := b.Acquire(context.Background(), req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := b.Acquire(context.Background(), req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(api.created) != 1 {
-		t.Fatalf("Create calls=%d want=1", len(api.created))
-	}
-	if first.LeaseID != fixedMachine0TestLeaseID || second.LeaseID != first.LeaseID || second.Server.CloudID != first.Server.CloudID {
-		t.Fatalf("first=%#v second=%#v", first, second)
-	}
-	claim := readFixedMachine0Claim(t, fixedMachine0TestLeaseID)
-	if claim.Provider != core.FixedMachine0ClaimProvider || claim.CloudID != first.Server.CloudID || claim.CloudImmutableID != first.Server.CloudID || claim.ProviderScope != machineScope(first.Server.CloudID) || claim.FixedCreateIntent.State != fixedMachine0IntentAcquired {
-		t.Fatalf("claim=%#v", claim)
+	for _, tc := range []struct {
+		name     string
+		fileName string
+		wantFile string
+	}{
+		{name: "provider filename remains authoritative", fileName: "selected-provider-key", wantFile: "selected-provider-key"},
+		{name: "sparse inventory retains managed key ownership", wantFile: "machine0__ci-managed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, api, req := fixedMachine0TestFixture(t)
+			keyRoot := t.TempDir()
+			t.Setenv("SSH_KEY_PATH", keyRoot)
+			for _, fileName := range []string{"machine0__ci-managed", "selected-provider-key"} {
+				if err := os.WriteFile(filepath.Join(keyRoot, fileName), []byte("fixture private key"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			b.cfg.SSHKey = filepath.Join(keyRoot, "unrelated-global-key")
+			create := api.createFn
+			api.createFn = func(ctx context.Context, createReq createMachineRequest) error {
+				if err := create(ctx, createReq); err != nil {
+					return err
+				}
+				api.machine.Key = &machineKey{Name: "ci-managed", Type: "MANAGED", FileName: "machine0__ci-managed"}
+				api.machines = []machine{api.machine}
+				return nil
+			}
+			first, err := b.Acquire(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			replayed := api.machine
+			replayed.Key = &machineKey{Name: "ci-managed", Type: "MANAGED", FileName: tc.fileName}
+			api.machines = []machine{replayed}
+			second, err := b.Acquire(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := filepath.Join(keyRoot, tc.wantFile); second.SSH.Key != want {
+				t.Fatalf("fixed replay selected SSH key %q, want provider-owned key %q", second.SSH.Key, want)
+			}
+			if len(api.created) != 1 {
+				t.Fatalf("Create calls=%d want=1", len(api.created))
+			}
+			if first.LeaseID != fixedMachine0TestLeaseID || second.LeaseID != first.LeaseID || second.Server.CloudID != first.Server.CloudID {
+				t.Fatalf("first=%#v second=%#v", first, second)
+			}
+			claim := readFixedMachine0Claim(t, fixedMachine0TestLeaseID)
+			if claim.Provider != core.FixedMachine0ClaimProvider || claim.CloudID != first.Server.CloudID || claim.CloudImmutableID != first.Server.CloudID || claim.ProviderScope != machineScope(first.Server.CloudID) || claim.FixedCreateIntent.State != fixedMachine0IntentAcquired {
+				t.Fatalf("claim=%#v", claim)
+			}
+		})
 	}
 }
 
