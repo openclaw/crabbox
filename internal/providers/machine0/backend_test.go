@@ -21,6 +21,7 @@ type fakeAPI struct {
 	machine                machine
 	machines               []machine
 	listCalls              int
+	listFn                 func(context.Context, int) ([]machine, error)
 	getSequence            []machine
 	getFn                  func(context.Context, string) (machine, error)
 	createFn               func(context.Context, createMachineRequest) error
@@ -68,6 +69,9 @@ func (f *fakeAPI) List(ctx context.Context) ([]machine, error) {
 		return nil, err
 	}
 	f.listCalls++
+	if f.listFn != nil {
+		return f.listFn(ctx, f.listCalls)
+	}
 	if f.machines != nil {
 		return append([]machine(nil), f.machines...), nil
 	}

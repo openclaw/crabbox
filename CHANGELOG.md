@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Reduced Machine0 provisioning reads by polling every 15 seconds by default and avoiding a duplicate inventory request during fixed-lease acquisition.
+- Reduced Machine0 provisioning reads by polling every 15 seconds by default while preserving fresh fixed-lease ownership checks.
 - Failed local-container acquisition and status waits promptly when the exact claimed container exits, while preserving fenced recovery and cleanup for retained leases.
 - Redacted coordinator URL credentials, query parameters, and fragments from run-context portal and logs links.
 - Preserved Machine0 command deadline, cancellation, and signal failures with partial output and ran independent doctor probes concurrently.

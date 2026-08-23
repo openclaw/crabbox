@@ -135,24 +135,54 @@ func TestMachine0FixedAcquireReplayAdoptsExactMachine(t *testing.T) {
 	}
 }
 
-func TestMachine0FixedAcquireReusesInitialInventory(t *testing.T) {
+func TestMachine0FixedAcquireUsesFreshInventoryAtOwnershipBoundary(t *testing.T) {
 	b, api, req := fixedMachine0TestFixture(t)
 	if _, err := b.Acquire(context.Background(), req); err != nil {
 		t.Fatal(err)
 	}
-	if api.listCalls != 1 {
-		t.Fatalf("initial fixed acquisition listed Machine0 inventory %d times, want 1", api.listCalls)
+	if api.listCalls != 2 {
+		t.Fatalf("initial fixed acquisition listed Machine0 inventory %d times, want 2 authoritative reads", api.listCalls)
 	}
 	api.machines[0].IP = "203.0.113.11"
 	replayed, err := b.Acquire(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if api.listCalls != 2 {
-		t.Fatalf("fixed replay listed Machine0 inventory %d times in total, want 2", api.listCalls)
+	if api.listCalls != 3 {
+		t.Fatalf("fixed replay listed Machine0 inventory %d times in total, want 3", api.listCalls)
 	}
 	if replayed.SSH.Host != api.machines[0].IP {
 		t.Fatalf("fixed replay reused stale inventory IP %q, want %q", replayed.SSH.Host, api.machines[0].IP)
+	}
+}
+
+func TestMachine0FixedAcquireRejectsMachineAppearingAfterSlugBinding(t *testing.T) {
+	b, api, req := fixedMachine0TestFixture(t)
+	cfg := b.configForRun()
+	unowned := fixedMachine0TestMachine(createMachineRequest{
+		Name: machine0MachineName(req.RequestedLeaseID, req.RequestedSlug),
+		Size: cfg.Machine0.Size, Region: cfg.Machine0.Region, Image: cfg.Machine0.Image,
+	})
+	unowned.ID = "vm-unowned"
+	api.listFn = func(_ context.Context, call int) ([]machine, error) {
+		if call == 1 {
+			return nil, nil
+		}
+		return []machine{unowned}, nil
+	}
+	api.createFn = func(context.Context, createMachineRequest) error {
+		api.machine = unowned
+		return errors.New("machine name already exists")
+	}
+
+	_, err := b.Acquire(context.Background(), req)
+	assertMachine0Exit(t, err, 4, "has no durable create attempt")
+	if len(api.created) != 0 {
+		t.Fatalf("attempted to create or adopt an unowned machine: create calls=%d", len(api.created))
+	}
+	claim := readFixedMachine0Claim(t, req.RequestedLeaseID)
+	if claim.CloudID != "" || len(claim.FixedCreateIntent.Attempt) != 0 {
+		t.Fatalf("bound an unowned machine or create attempt: claim=%#v", claim)
 	}
 }
 
