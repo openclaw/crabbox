@@ -779,6 +779,14 @@ func TestWSL2CommandWithWaitTimeoutBoundsRemoteProcess(t *testing.T) {
 	}
 }
 
+func TestWSL2WrapsLargeRemoteBelowWindowsCommandLimit(t *testing.T) {
+	target := SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}
+	command := wrapRemoteForTarget(target, remoteEnsureLocalActionsRunEnv("cbx_example", ""))
+	if len(command) >= 8191 {
+		t.Fatalf("WSL2 command length=%d exceeds cmd.exe limit", len(command))
+	}
+}
+
 func TestWSL2WrapRemoteCommandWithWaitTimeout(t *testing.T) {
 	target := SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}
 	got := wrapRemoteForTargetWithWaitTimeout(target, `printf "ok\n"`, 15*time.Second)
@@ -789,11 +797,28 @@ func TestWSL2WrapRemoteCommandWithWaitTimeout(t *testing.T) {
 }
 
 func TestWSL2StdinScriptCommandWithWaitTimeoutReadsPayloadFromStdin(t *testing.T) {
-	got := wsl2StdinScriptCommandWithWaitTimeout(15 * time.Second)
+	got := wsl2StdinScriptCommandWithWaitTimeout(12_345, 15*time.Second)
+	if len(got) >= 8191 {
+		t.Fatalf("stdin-backed WSL2 command length=%d exceeds cmd.exe limit", len(got))
+	}
 	decoded := decodePowerShellCommand(t, got)
 	for _, want := range []string{
-		`[Console]::OpenStandardInput().CopyTo($script)`,
-		`$process.WaitForExit(15000)`,
+		`$expected = 12345`,
+		`/tmp/crabbox-command-`,
+		`[Console]::OpenStandardInput().CopyToAsync($process.StandardInput.BaseStream)`,
+		`$left = 15000 - [int]$watch.ElapsedMilliseconds`,
+		`$copy.Wait($left)`,
+		`$process.StandardInput.BaseStream.Close()`,
+		`: >$dir/.crabbox-owned`,
+		`trap ''rm -rf -- $dir'' EXIT`,
+		`actual=$(wc -c <$dir/script.sh)`,
+		`bash $dir/script.sh||code=$?`,
+		`trap - EXIT`,
+		`WSL2 command cleanup failed: exit `,
+		`$process.WaitForExit($left)`,
+		`test ! -f $1/.crabbox-owned||rm -rf -- $1`,
+		`$cleanup.WaitForExit(5000)`,
+		`WSL2 command cleanup failed: timed out`,
 		`throw "WSL2 command timed out after 15s"`,
 		`$process.Kill($true)`,
 		`$code = $process.ExitCode`,
@@ -804,6 +829,14 @@ func TestWSL2StdinScriptCommandWithWaitTimeoutReadsPayloadFromStdin(t *testing.T
 	}
 	if strings.Contains(decoded, `[Convert]::FromBase64String("`) {
 		t.Fatalf("stdin-backed WSL2 command should not embed script payload: %q", decoded)
+	}
+	for _, stale := range []string{`/mnt/`, `C:\ProgramData`} {
+		if strings.Contains(decoded, stale) {
+			t.Fatalf("stdin-backed WSL2 command depends on host automount %q: %q", stale, decoded)
+		}
+	}
+	if strings.Index(decoded, `trap - EXIT`) < strings.Index(decoded, `bash $dir/script.sh`) {
+		t.Fatalf("stdin-backed WSL2 command disables cleanup before execution: %q", decoded)
 	}
 }
 
