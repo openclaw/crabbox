@@ -4847,6 +4847,7 @@ describe("coordinator-managed checkpoints", () => {
       AZURE_CLIENT_ID: "client",
       AZURE_CLIENT_SECRET: "test-value",
       AZURE_SUBSCRIPTION_ID: "sub-123",
+      CRABBOX_AZURE_ORPHAN_SWEEP_ENABLED: "0",
     } satisfies Env;
     const provider = new AzureProvider(env, undefined, storage, "westeurope");
     vi.spyOn(provider, "checkpointScope").mockResolvedValue(providerScope("azure"));
