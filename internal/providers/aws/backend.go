@@ -992,8 +992,6 @@ func (e *awsProviderKeyCleanupError) Error() string {
 
 func (e *awsProviderKeyCleanupError) Unwrap() error { return e.err }
 
-func removeLeaseClaim(leaseID string) { core.RemoveLeaseClaim(leaseID) }
-
 func cleanupAWSCreatedResources(ctx context.Context, stderr io.Writer, cfg Config, cloudID, keyPairID string) {
 	client, err := newAWSClient(ctx, cfg)
 	if err != nil {
