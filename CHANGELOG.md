@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Kept WSL2 workspace-owner commands below the Windows command-line limit by streaming their POSIX scripts over SSH stdin.
 - Fenced Linode heartbeats and Tailscale metadata updates with exact account-, scope-, and instance-bound claims, preserving legacy instance claims, idle-timeout intent, and safe release continuity.
 - Made two timing-sensitive tests robust on loaded CI runners.
 
@@ -15,7 +16,6 @@
 
 ### Fixed
 
-- Kept WSL2 workspace-owner commands below the Windows command-line limit by streaming their POSIX scripts over SSH stdin.
 - Rejected oversized delegated-run workspaces before any paid or stateful provider resource is created, so size-limit failures no longer leave billable resources behind.
 - Made E2B and Azure Dynamic Sessions workspace sync transactional so a failed upload no longer destroys the previous remote workspace, and honored `--keep-on-failure` for sync and setup failures.
 - Stopped losing track of possibly-created billable resources: ambiguous Vast instance creation and failed AWS Lambda MicroVM rollbacks now persist recovery claims and surface errors naming the exact resource instead of failing silently.
