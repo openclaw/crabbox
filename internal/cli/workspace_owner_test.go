@@ -576,6 +576,7 @@ func TestWorkspaceOwnerSSHProtocolIgnoresSuccessfulWarnings(t *testing.T) {
 		target SSHTarget
 	}{
 		{name: "POSIX", target: SSHTarget{TargetOS: targetLinux}},
+		{name: "WSL2", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}},
 		{name: "native Windows", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}},
 	}
 	for _, test := range tests {
@@ -603,6 +604,7 @@ func TestWorkspaceOwnerSSHProtocolFailurePreservesResponseAndSafeDiagnostic(t *t
 		target SSHTarget
 	}{
 		{name: "POSIX", target: SSHTarget{TargetOS: targetLinux}},
+		{name: "WSL2", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}},
 		{name: "native Windows", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}},
 	}
 	for _, test := range tests {
@@ -663,6 +665,7 @@ func TestWorkspaceOwnerSSHProtocolFallbackDoesNotContaminateSuccess(t *testing.T
 		target SSHTarget
 	}{
 		{name: "POSIX", target: SSHTarget{TargetOS: targetLinux}},
+		{name: "WSL2", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}},
 		{name: "native Windows", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}},
 	}
 	for _, test := range tests {
@@ -725,6 +728,70 @@ func TestWorkspaceOwnerNativeWindowsProtocolStreamsScriptsOverStdin(t *testing.T
 		}
 		if strings.Contains(command, "$action") || strings.Contains(command, key) || strings.Contains(command, token) {
 			t.Fatalf("%s script leaked into SSH command argv", test.action)
+		}
+	}
+}
+
+func TestWorkspaceOwnerWSL2ProtocolStreamsScriptsOverStdin(t *testing.T) {
+	dir := installWorkspaceOwnerRecordingSSH(t)
+	target := SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22", TargetOS: targetWindows, WindowsMode: windowsModeWSL2}
+	transport := sshWorkspaceOwnerTransport{target: target}
+	key := workspaceOwnerKey("cbx_wsl2_protocol_transport")
+	token := strings.Repeat("6", 64)
+	actions := []struct {
+		action workspaceOwnerAction
+		want   string
+	}{
+		{workspaceOwnerAcquire, "ACQUIRED"},
+		{workspaceOwnerRenew, "RENEWED"},
+		{workspaceOwnerInspect, "OWNED"},
+		{workspaceOwnerRelease, "RELEASED"},
+	}
+	for i, test := range actions {
+		req := workspaceOwnerRemoteRequest{Action: test.action, Key: key, Token: token, TTL: time.Minute}
+		t.Setenv("CRABBOX_OWNER_SSH_SUCCESS_STDOUT", test.want)
+		got, err := transport.Do(context.Background(), req)
+		if err != nil || got != test.want {
+			t.Fatalf("%s response=%q err=%v", test.action, got, err)
+		}
+		command, input := readWorkspaceOwnerSSHCall(t, dir, i+1)
+		wantInput := remoteWorkspaceOwnerCommand(target, req)
+		if input != wantInput {
+			t.Fatalf("%s stdin did not preserve the owner script", test.action)
+		}
+		if command != wsl2StdinScriptCommandWithWaitTimeout(len(wantInput), 0) {
+			t.Fatalf("%s command=%q", test.action, command)
+		}
+		if len(command) >= 8191 {
+			t.Fatalf("%s command length=%d exceeds cmd.exe limit", test.action, len(command))
+		}
+		if strings.Contains(command, wantInput) || strings.Contains(command, key) || strings.Contains(command, token) {
+			t.Fatalf("%s script or secret leaked into SSH command argv", test.action)
+		}
+	}
+}
+
+func TestWorkspaceOwnerWSL2ProtocolReplaysIdenticalFallbackInput(t *testing.T) {
+	dir := installWorkspaceOwnerRecordingSSH(t)
+	t.Setenv("CRABBOX_OWNER_SSH_RETRY_CALL", "1")
+	t.Setenv("CRABBOX_OWNER_SSH_SUCCESS_STDOUT", "ACQUIRED")
+	target := SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "2222", FallbackPorts: []string{"22"}, TargetOS: targetWindows, WindowsMode: windowsModeWSL2}
+	req := workspaceOwnerRemoteRequest{
+		Action: workspaceOwnerAcquire,
+		Key:    workspaceOwnerKey("cbx_wsl2_protocol_fallback"),
+		Token:  strings.Repeat("7", 64),
+		TTL:    time.Minute,
+	}
+	got, err := (sshWorkspaceOwnerTransport{target: target}).Do(context.Background(), req)
+	if err != nil || got != "ACQUIRED" {
+		t.Fatalf("fallback response=%q err=%v", got, err)
+	}
+	wantInput := remoteWorkspaceOwnerCommand(target, req)
+	wantCommand := wsl2StdinScriptCommandWithWaitTimeout(len(wantInput), 0)
+	for _, index := range []int{1, 2} {
+		command, input := readWorkspaceOwnerSSHCall(t, dir, index)
+		if command != wantCommand || input != wantInput {
+			t.Fatalf("fallback attempt %d command_match=%t input_match=%t", index, command == wantCommand, input == wantInput)
 		}
 	}
 }

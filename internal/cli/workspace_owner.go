@@ -47,15 +47,21 @@ type sshWorkspaceOwnerTransport struct {
 
 func (t sshWorkspaceOwnerTransport) Do(ctx context.Context, req workspaceOwnerRemoteRequest) (string, error) {
 	ctx = contextWithoutWorkspaceOwner(ctx)
-	if !isWindowsNativeTarget(t.target) {
-		return runWorkspaceOwnerSSHProtocol(ctx, t.target, remoteWorkspaceOwnerCommand(t.target, req), nil, req.Token)
+	remote := remoteWorkspaceOwnerCommand(t.target, req)
+	var input *string
+	if isWindowsWSL2Target(t.target) {
+		script := remote
+		input = &script
+		remote = wsl2StdinScriptCommandWithWaitTimeout(len(script), 0)
+	} else if isWindowsNativeTarget(t.target) {
+		script := remoteWorkspaceOwnerWindows(req)
+		input = &script
+		remote = windowsPowerShellStdinScriptCommand(len([]byte(script)))
 	}
-	script := remoteWorkspaceOwnerWindows(req)
-	return runWorkspaceOwnerSSHProtocol(ctx, t.target, windowsPowerShellStdinScriptCommand(len([]byte(script))), &script, req.Token)
+	return runWorkspaceOwnerSSHProtocol(ctx, t.target, remote, input, req.Token)
 }
 
 func runWorkspaceOwnerSSHProtocol(ctx context.Context, target SSHTarget, remote string, input *string, requestToken string) (string, error) {
-	remote = wrapRemoteForTarget(target, remote)
 	var lastOutput string
 	var lastErr error
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
