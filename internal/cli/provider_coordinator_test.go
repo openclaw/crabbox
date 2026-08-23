@@ -232,6 +232,67 @@ func TestCoordinatorStatusRedactsDaytonaSSHAccessToken(t *testing.T) {
 	}
 }
 
+func TestCoordinatorStatusKeepsFourSecondWindowsSSHProbe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
+	}
+	isolateTestUserDirs(t)
+	logPath := installSSHArgsRecorder(t)
+	t.Setenv("CRABBOX_FAKE_SSH_DELAY", "4.2")
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	host, port, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/leases/cbx_windows_status" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+			ID:          "cbx_windows_status",
+			Provider:    "aws",
+			TargetOS:    targetWindows,
+			WindowsMode: windowsModeNormal,
+			Host:        host,
+			SSHUser:     "crabbox",
+			SSHPort:     port,
+			State:       "active",
+		}})
+	}))
+	defer server.Close()
+
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetWindows
+	cfg.WindowsMode = windowsModeNormal
+	cfg.Network = NetworkPublic
+	cfg.Coordinator = server.URL
+	cfg.CoordToken = "user-token"
+	coord, _, err := newCoordinatorClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord}
+	start := time.Now()
+	status, err := backend.Status(context.Background(), StatusRequest{ID: "cbx_windows_status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Ready {
+		t.Fatal("status Ready=true, want false when Windows SSH exceeds the 4s status budget")
+	}
+	if elapsed := time.Since(start); elapsed < 3500*time.Millisecond || elapsed > 6*time.Second {
+		t.Fatalf("coordinator status probe elapsed=%s, want approximately 4s", elapsed)
+	}
+	args := readSSHArgsRecorder(t, logPath)
+	assertSSHOption(t, args, "ConnectTimeout", "10")
+	assertSSHOption(t, args, "ConnectionAttempts", "3")
+}
+
 func TestCoordinatorInspectJSONIncludesOptionalSSHHostKey(t *testing.T) {
 	isolateTestUserDirs(t)
 	sshHostKey := testOpenSSHPublicKey("ssh-ed25519", testBytes(32, 47))

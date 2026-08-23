@@ -255,22 +255,43 @@ func BootstrapWaitTimeout(cfg Config) time.Duration {
 	return bootstrapWaitTimeout(cfg)
 }
 
+type sshReadinessProfile struct {
+	connectTimeout     string
+	connectionAttempts string
+}
+
+func sshReadinessProfileForTarget(target SSHTarget) sshReadinessProfile {
+	if target.TargetOS == targetWindows {
+		return sshReadinessProfile{
+			connectTimeout:     "10",
+			connectionAttempts: "3",
+		}
+	}
+	return sshReadinessProfile{
+		connectTimeout:     "5",
+		connectionAttempts: "1",
+	}
+}
+
 func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
 	start := time.Now()
 	deadline := time.Now().Add(timeout)
+	profile := sshReadinessProfileForTarget(*target)
+	probeCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
 	lastPorts := ""
 	for {
 		if ctx.Err() != nil {
 			return context.Cause(ctx)
 		}
-		if time.Now().After(deadline) {
+		if time.Until(deadline) <= 0 {
 			if lastPorts != "" {
 				return exit(5, "timed out waiting for SSH on %s during %s ports=%s; %s", target.Host, phase, lastPorts, sshWaitNextAction(phase))
 			}
 			return exit(5, "timed out waiting for SSH on %s during %s; %s", target.Host, phase, sshWaitNextAction(phase))
 		}
 		if target.SSHConfigProxy {
-			if runSSHQuietWithOptionsResolvePort(ctx, target, sshReadyCommand(*target), "5", "1") == nil {
+			if runSSHQuietWithOptionsResolvePort(probeCtx, target, sshReadyCommand(*target), profile.connectTimeout, profile.connectionAttempts) == nil {
 				return nil
 			}
 			lastPorts = "proxy"
@@ -292,14 +313,14 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 				if reachablePort == "" {
 					reachablePort = probe.Port
 				}
-				if runSSHQuietWithOptions(ctx, probe, sshTransportProbeCommand(probe), "5", "1") != nil {
+				if runSSHQuietWithOptions(probeCtx, probe, sshTransportProbeCommand(probe), profile.connectTimeout, profile.connectionAttempts) != nil {
 					probes = append(probes, port+":tcp")
 					continue
 				}
 				if transportPort == "" {
 					transportPort = probe.Port
 				}
-				if runSSHQuietWithOptions(ctx, probe, sshReadyCommand(probe), "5", "1") == nil {
+				if runSSHQuietWithOptions(probeCtx, probe, sshReadyCommand(probe), profile.connectTimeout, profile.connectionAttempts) == nil {
 					if target.Port != probe.Port {
 						fmt.Fprintf(stderr, "using ssh port %s for %s (configured %s not ready)\n", probe.Port, target.Host, target.Port)
 						target.Port = probe.Port
@@ -310,6 +331,9 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 			}
 			lastPorts = strings.Join(probes, ",")
 			fmt.Fprintln(stderr, sshWaitProgressMessage(target, phase, reachablePort, transportPort, lastPorts, time.Since(start), time.Until(deadline)))
+		}
+		if time.Until(deadline) <= 0 {
+			continue
 		}
 		if err := sleepContext(ctx, 10*time.Second); err != nil {
 			return context.Cause(ctx)
@@ -355,10 +379,11 @@ func probeSSHReady(ctx context.Context, target *SSHTarget, timeout time.Duration
 	if target.Host == "" {
 		return false
 	}
+	profile := sshReadinessProfileForTarget(*target)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if target.SSHConfigProxy {
-		return runSSHQuietWithOptionsResolvePort(ctx, target, sshReadyCommand(*target), "2", "1") == nil
+		return runSSHQuietWithOptionsResolvePort(ctx, target, sshReadyCommand(*target), profile.connectTimeout, profile.connectionAttempts) == nil
 	}
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 		probe := *target
@@ -370,7 +395,7 @@ func probeSSHReady(ctx context.Context, target *SSHTarget, timeout time.Duration
 			continue
 		}
 		_ = conn.Close()
-		if runSSHQuietWithOptions(ctx, probe, sshReadyCommand(probe), "2", "1") == nil {
+		if runSSHQuietWithOptions(ctx, probe, sshReadyCommand(probe), profile.connectTimeout, profile.connectionAttempts) == nil {
 			target.Port = probe.Port
 			return true
 		}
