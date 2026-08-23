@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -24,6 +25,14 @@ import (
 )
 
 const attestReceiptSchemaVersion = 1
+const (
+	terminalReceiptSchemaVersion    = 2
+	terminalReceiptType             = "terminal"
+	maxTerminalReceiptBytes         = 16 * 1024
+	maxTerminalReceiptFieldBytes    = 4 * 1024
+	maxTerminalReceiptIdentityBytes = 256
+	maxTerminalReceiptClockSkew     = 30 * time.Second
+)
 
 var errDuplicateReceiptKey = errors.New("duplicate key")
 
@@ -37,6 +46,46 @@ type runReceiptInput struct {
 	CommandMs  int64
 	ActionsURL string
 	LogSHA256  string
+}
+
+type terminalRunReceipt struct {
+	SchemaVersion     int    `json:"schema_version"`
+	ReceiptType       string `json:"receipt_type"`
+	StartedAt         string `json:"started_at"`
+	EndedAt           string `json:"ended_at"`
+	Provider          string `json:"provider"`
+	LeaseID           string `json:"lease_id,omitempty"`
+	Slug              string `json:"slug,omitempty"`
+	RunID             string `json:"run_id"`
+	Command           string `json:"command"`
+	CommandSHA256     string `json:"command_sha256"`
+	ExitCode          int    `json:"exit_code"`
+	SyncMs            int64  `json:"sync_ms"`
+	CommandMs         int64  `json:"command_ms"`
+	DurationMs        int64  `json:"duration_ms"`
+	LogSHA256         string `json:"log_sha256"`
+	RetainedLogSHA256 string `json:"retained_log_sha256"`
+	LogTruncated      bool   `json:"log_truncated"`
+	PublicKey         string `json:"public_key"`
+	Signer            string `json:"signer"`
+	Signature         string `json:"signature"`
+}
+
+type terminalRunReceiptInput struct {
+	Provider          string
+	LeaseID           string
+	Slug              string
+	RunID             string
+	Command           []string
+	CommandDisplay    string
+	ExitCode          int
+	SyncMs            int64
+	CommandMs         int64
+	StartedAt         time.Time
+	EndedAt           time.Time
+	LogSHA256         string
+	RetainedLogSHA256 string
+	LogTruncated      bool
 }
 
 func attestKeyPath() (string, error) {
@@ -212,8 +261,248 @@ func resolveAttestKey(override string) (ed25519.PrivateKey, error) {
 }
 
 func attestFingerprint(pub ed25519.PublicKey) string {
-	digest := sha256.Sum256(pub)
+	return sha256Digest(pub)
+}
+
+func sha256Digest(data []byte) string {
+	digest := sha256.Sum256(data)
 	return "sha256:" + hex.EncodeToString(digest[:])
+}
+
+func commandSHA256(command []string) string {
+	return sha256Digest(lengthPrefixedBytes("crabbox-command-v1\x00", command))
+}
+
+func terminalReceiptCommandDisplay(display, digest string) string {
+	if len(display) <= maxTerminalReceiptFieldBytes {
+		return display
+	}
+	return "[command display omitted; exact argv bound by " + digest + "]"
+}
+
+func terminalReceiptSigningBytes(receipt terminalRunReceipt) []byte {
+	return lengthPrefixedBytes("crabbox-terminal-receipt-v2\x00", []string{
+		strconv.Itoa(receipt.SchemaVersion),
+		receipt.ReceiptType,
+		receipt.StartedAt,
+		receipt.EndedAt,
+		receipt.Provider,
+		receipt.LeaseID,
+		receipt.Slug,
+		receipt.RunID,
+		receipt.Command,
+		receipt.CommandSHA256,
+		strconv.Itoa(receipt.ExitCode),
+		strconv.FormatInt(receipt.SyncMs, 10),
+		strconv.FormatInt(receipt.CommandMs, 10),
+		strconv.FormatInt(receipt.DurationMs, 10),
+		receipt.LogSHA256,
+		receipt.RetainedLogSHA256,
+		strconv.FormatBool(receipt.LogTruncated),
+		receipt.PublicKey,
+		receipt.Signer,
+	})
+}
+
+func lengthPrefixedBytes(prefix string, values []string) []byte {
+	var payload bytes.Buffer
+	payload.WriteString(prefix)
+	var length [4]byte
+	for _, value := range values {
+		binary.BigEndian.PutUint32(length[:], uint32(len(value)))
+		payload.Write(length[:])
+		payload.WriteString(value)
+	}
+	return payload.Bytes()
+}
+
+func buildTerminalRunReceipt(keyPath string, in terminalRunReceiptInput) (terminalRunReceipt, error) {
+	key, err := resolveAttestKey(keyPath)
+	if err != nil {
+		return terminalRunReceipt{}, exit(2, "attest key: %v", err)
+	}
+	return buildTerminalRunReceiptWithKey(key, in)
+}
+
+func buildTerminalRunReceiptWithKey(key ed25519.PrivateKey, in terminalRunReceiptInput) (terminalRunReceipt, error) {
+	pub := key.Public().(ed25519.PublicKey)
+	commandDigest := commandSHA256(in.Command)
+	receipt := terminalRunReceipt{
+		SchemaVersion:     terminalReceiptSchemaVersion,
+		ReceiptType:       terminalReceiptType,
+		StartedAt:         in.StartedAt.UTC().Format(time.RFC3339Nano),
+		EndedAt:           in.EndedAt.UTC().Format(time.RFC3339Nano),
+		Provider:          in.Provider,
+		LeaseID:           in.LeaseID,
+		Slug:              in.Slug,
+		RunID:             in.RunID,
+		Command:           terminalReceiptCommandDisplay(in.CommandDisplay, commandDigest),
+		CommandSHA256:     commandDigest,
+		ExitCode:          in.ExitCode,
+		SyncMs:            in.SyncMs,
+		CommandMs:         in.CommandMs,
+		DurationMs:        in.EndedAt.Sub(in.StartedAt).Milliseconds(),
+		LogSHA256:         in.LogSHA256,
+		RetainedLogSHA256: in.RetainedLogSHA256,
+		LogTruncated:      in.LogTruncated,
+		PublicKey:         base64.StdEncoding.EncodeToString(pub),
+		Signer:            attestFingerprint(pub),
+	}
+	if err := validateTerminalRunReceipt(receipt); err != nil {
+		return terminalRunReceipt{}, err
+	}
+	receipt.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(key, terminalReceiptSigningBytes(receipt)))
+	if encoded, err := json.Marshal(receipt); err != nil {
+		return terminalRunReceipt{}, err
+	} else if len(encoded) > maxTerminalReceiptBytes {
+		return terminalRunReceipt{}, fmt.Errorf("terminal receipt exceeds %d bytes", maxTerminalReceiptBytes)
+	}
+	return receipt, nil
+}
+
+func validateTerminalRunReceipt(receipt terminalRunReceipt) error {
+	if receipt.SchemaVersion != terminalReceiptSchemaVersion || receipt.ReceiptType != terminalReceiptType {
+		return fmt.Errorf("unsupported terminal receipt")
+	}
+	for name, value := range map[string]string{
+		"started_at":          receipt.StartedAt,
+		"ended_at":            receipt.EndedAt,
+		"provider":            receipt.Provider,
+		"run_id":              receipt.RunID,
+		"command":             receipt.Command,
+		"command_sha256":      receipt.CommandSHA256,
+		"log_sha256":          receipt.LogSHA256,
+		"retained_log_sha256": receipt.RetainedLogSHA256,
+		"public_key":          receipt.PublicKey,
+		"signer":              receipt.Signer,
+	} {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("invalid %s", name)
+		}
+		if len(value) > maxTerminalReceiptFieldBytes {
+			return fmt.Errorf("%s exceeds %d bytes", name, maxTerminalReceiptFieldBytes)
+		}
+	}
+	for name, value := range map[string]string{
+		"lease_id": receipt.LeaseID,
+		"slug":     receipt.Slug,
+	} {
+		if len(value) > maxTerminalReceiptIdentityBytes {
+			return fmt.Errorf("%s exceeds %d bytes", name, maxTerminalReceiptIdentityBytes)
+		}
+	}
+	startedAt, err := time.Parse(time.RFC3339Nano, receipt.StartedAt)
+	if err != nil {
+		return fmt.Errorf("invalid started_at")
+	}
+	endedAt, err := time.Parse(time.RFC3339Nano, receipt.EndedAt)
+	if err != nil || endedAt.Before(startedAt) {
+		return fmt.Errorf("invalid ended_at")
+	}
+	if receipt.ExitCode < 0 || receipt.SyncMs < 0 || receipt.CommandMs < 0 || receipt.DurationMs < 0 {
+		return fmt.Errorf("invalid terminal timing or exit code")
+	}
+	if receipt.DurationMs != endedAt.Sub(startedAt).Milliseconds() {
+		return fmt.Errorf("duration_ms does not match timestamps")
+	}
+	for name, digest := range map[string]string{
+		"command_sha256":      receipt.CommandSHA256,
+		"log_sha256":          receipt.LogSHA256,
+		"retained_log_sha256": receipt.RetainedLogSHA256,
+		"signer":              receipt.Signer,
+	} {
+		if !validSHA256Digest(digest) {
+			return fmt.Errorf("invalid %s", name)
+		}
+	}
+	pub, err := base64.StdEncoding.DecodeString(receipt.PublicKey)
+	if err != nil || len(pub) != ed25519.PublicKeySize {
+		return fmt.Errorf("invalid public_key")
+	}
+	if receipt.Signer != attestFingerprint(ed25519.PublicKey(pub)) {
+		return fmt.Errorf("signer does not match public_key")
+	}
+	if receipt.Signature != "" {
+		signature, err := base64.StdEncoding.DecodeString(receipt.Signature)
+		if err != nil || len(signature) != ed25519.SignatureSize {
+			return fmt.Errorf("invalid signature")
+		}
+	}
+	return nil
+}
+
+func verifyTerminalRunReceiptSignature(receipt terminalRunReceipt) error {
+	if err := validateTerminalRunReceipt(receipt); err != nil {
+		return err
+	}
+	if receipt.Signature == "" {
+		return fmt.Errorf("missing signature")
+	}
+	pub, _ := base64.StdEncoding.DecodeString(receipt.PublicKey)
+	signature, _ := base64.StdEncoding.DecodeString(receipt.Signature)
+	if !ed25519.Verify(ed25519.PublicKey(pub), terminalReceiptSigningBytes(receipt), signature) {
+		return fmt.Errorf("signature mismatch")
+	}
+	return nil
+}
+
+func verifyTerminalRunReceipt(receipt terminalRunReceipt, binding terminalRunReceiptInput) error {
+	if err := verifyTerminalRunReceiptSignature(receipt); err != nil {
+		return err
+	}
+	startedAt, _ := time.Parse(time.RFC3339Nano, receipt.StartedAt)
+	endedAt, _ := time.Parse(time.RFC3339Nano, receipt.EndedAt)
+	if receipt.Provider != binding.Provider ||
+		receipt.LeaseID != binding.LeaseID ||
+		receipt.Slug != binding.Slug ||
+		receipt.RunID != binding.RunID ||
+		receipt.CommandSHA256 != commandSHA256(binding.Command) ||
+		receipt.ExitCode != binding.ExitCode ||
+		receipt.SyncMs != binding.SyncMs ||
+		receipt.CommandMs != binding.CommandMs ||
+		!startedAt.Equal(binding.StartedAt) ||
+		!binding.EndedAt.IsZero() && endedAt.After(binding.EndedAt.Add(maxTerminalReceiptClockSkew)) ||
+		receipt.DurationMs < binding.SyncMs+binding.CommandMs ||
+		binding.LogSHA256 != "" && receipt.LogSHA256 != binding.LogSHA256 ||
+		binding.RetainedLogSHA256 != "" && receipt.RetainedLogSHA256 != binding.RetainedLogSHA256 ||
+		receipt.LogTruncated != binding.LogTruncated {
+		return fmt.Errorf("terminal receipt binding mismatch")
+	}
+	return nil
+}
+
+func decodeTerminalRunReceipt(data []byte) (terminalRunReceipt, error) {
+	if len(data) > maxTerminalReceiptBytes {
+		return terminalRunReceipt{}, fmt.Errorf("terminal receipt exceeds %d bytes", maxTerminalReceiptBytes)
+	}
+	duplicate, err := jsonHasDuplicateKeys(json.NewDecoder(bytes.NewReader(data)))
+	if err != nil {
+		return terminalRunReceipt{}, err
+	}
+	if duplicate {
+		return terminalRunReceipt{}, errDuplicateReceiptKey
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var receipt terminalRunReceipt
+	if err := dec.Decode(&receipt); err != nil {
+		return terminalRunReceipt{}, err
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return terminalRunReceipt{}, fmt.Errorf("multiple JSON values")
+		}
+		return terminalRunReceipt{}, err
+	}
+	if err := verifyTerminalRunReceiptSignature(receipt); err != nil {
+		return terminalRunReceipt{}, err
+	}
+	return receipt, nil
+}
+
+func writeTerminalRunReceipt(path string, receipt terminalRunReceipt) (runArtifact, error) {
+	return writeReceiptFile(path, receipt, maxTerminalReceiptBytes)
 }
 
 type attestDigestWriter struct {
@@ -476,11 +765,18 @@ func writeRunReceipt(path, keyPath string, in runReceiptInput) (runArtifact, err
 		return runArtifact{}, err
 	}
 	receipt["signature"] = base64.StdEncoding.EncodeToString(ed25519.Sign(key, canonical))
+	return writeReceiptFile(path, receipt, 0)
+}
+
+func writeReceiptFile(path string, receipt any, maxBytes int) (runArtifact, error) {
 	encoded, err := json.MarshalIndent(receipt, "", "  ")
 	if err != nil {
 		return runArtifact{}, err
 	}
 	encoded = append(encoded, '\n')
+	if maxBytes > 0 && len(encoded) > maxBytes {
+		return runArtifact{}, fmt.Errorf("terminal receipt exceeds %d bytes", maxBytes)
+	}
 	if dir := filepath.Dir(path); dir != "." && dir != "" {
 		if err := createPrivateRunOutputDir(dir); err != nil {
 			return runArtifact{}, exit(2, "create receipt directory: %v", err)
@@ -504,6 +800,23 @@ func (a App) verify(ctx context.Context, args []string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return exit(2, "read receipt: %v", err)
+	}
+	var envelope struct {
+		SchemaVersion int `json:"schema_version"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return exit(2, "malformed receipt: %v", err)
+	}
+	if envelope.SchemaVersion == terminalReceiptSchemaVersion {
+		receipt, err := decodeTerminalRunReceipt(data)
+		if errors.Is(err, errDuplicateReceiptKey) {
+			return exit(2, "malformed receipt: duplicate key")
+		}
+		if err != nil {
+			return exit(2, "malformed receipt: %v", err)
+		}
+		fmt.Fprintf(a.Stdout, "PASS %s signer=%s trust=self-signed exit=%d\n", path, receipt.Signer, receipt.ExitCode)
+		return nil
 	}
 	receipt, err := decodeRunReceipt(data)
 	if errors.Is(err, errDuplicateReceiptKey) {

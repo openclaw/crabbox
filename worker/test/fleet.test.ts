@@ -76,6 +76,96 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+async function testSHA256Digest(value: Uint8Array): Promise<string> {
+  const hashed = new Uint8Array(await crypto.subtle.digest("SHA-256", value));
+  return `sha256:${Buffer.from(hashed).toString("hex")}`;
+}
+
+async function testTerminalReceipt(input: {
+  run: RunRecord;
+  exitCode: number;
+  syncMs: number;
+  commandMs: number;
+  log: string;
+  mutate?: (receipt: Record<string, unknown>) => void;
+}): Promise<Record<string, unknown>> {
+  const commandBytes: number[] = [...new TextEncoder().encode("crabbox-command-v1\0")];
+  for (const argument of input.run.command) {
+    const encoded = new TextEncoder().encode(argument);
+    commandBytes.push(
+      (encoded.byteLength >>> 24) & 0xff,
+      (encoded.byteLength >>> 16) & 0xff,
+      (encoded.byteLength >>> 8) & 0xff,
+      encoded.byteLength & 0xff,
+      ...encoded,
+    );
+  }
+  const started = new Date(input.run.startedAt);
+  const ended = new Date(started.getTime() + input.syncMs + input.commandMs);
+  const key = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]);
+  const publicKey = new Uint8Array(await crypto.subtle.exportKey("raw", key.publicKey));
+  const receipt: Record<string, unknown> = {
+    schema_version: 2,
+    receipt_type: "terminal",
+    started_at: started.toISOString(),
+    ended_at: ended.toISOString(),
+    provider: input.run.provider,
+    run_id: input.run.id,
+    command: input.run.command.join(" "),
+    command_sha256: await testSHA256Digest(Uint8Array.from(commandBytes)),
+    exit_code: input.exitCode,
+    sync_ms: input.syncMs,
+    command_ms: input.commandMs,
+    duration_ms: input.syncMs + input.commandMs,
+    log_sha256: await testSHA256Digest(new TextEncoder().encode(input.log)),
+    retained_log_sha256: await testSHA256Digest(new TextEncoder().encode(input.log)),
+    log_truncated: false,
+    public_key: Buffer.from(publicKey).toString("base64"),
+    signer: await testSHA256Digest(publicKey),
+  };
+  if (input.run.leaseID) receipt.lease_id = input.run.leaseID;
+  if (input.run.slug) receipt.slug = input.run.slug;
+  input.mutate?.(receipt);
+  const fields = [
+    "schema_version",
+    "receipt_type",
+    "started_at",
+    "ended_at",
+    "provider",
+    "lease_id",
+    "slug",
+    "run_id",
+    "command",
+    "command_sha256",
+    "exit_code",
+    "sync_ms",
+    "command_ms",
+    "duration_ms",
+    "log_sha256",
+    "retained_log_sha256",
+    "log_truncated",
+    "public_key",
+    "signer",
+  ];
+  const parts = [new TextEncoder().encode("crabbox-terminal-receipt-v2\0")];
+  for (const field of fields) {
+    const value = new TextEncoder().encode(String(receipt[field] ?? ""));
+    const length = new Uint8Array(4);
+    new DataView(length.buffer).setUint32(0, value.byteLength);
+    parts.push(length, value);
+  }
+  const payload = new Uint8Array(parts.reduce((total, part) => total + part.byteLength, 0));
+  let offset = 0;
+  for (const part of parts) {
+    payload.set(part, offset);
+    offset += part.byteLength;
+  }
+  receipt.signature = Buffer.from(
+    await crypto.subtle.sign("Ed25519", key.privateKey, payload),
+  ).toString("base64");
+  return receipt;
+}
+
 function currentOrgFixture<T>(value: T): T {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
   const record = value as Record<string, unknown>;
@@ -113,6 +203,7 @@ class MemoryStorage {
   afterGet?: (key: string, value: unknown) => Promise<void> | void;
   beforePut?: (key: string, value: unknown) => Promise<void>;
   beforeDelete?: (key: string) => Promise<void>;
+  transactionPutCounts: number[] = [];
 
   constructor(values = new Map<string, unknown>()) {
     this.values = values;
@@ -151,11 +242,19 @@ class MemoryStorage {
     const transaction = new MemoryStorage(new Map(this.values));
     transaction.beforeGet = this.beforeGet;
     transaction.afterGet = this.afterGet;
-    transaction.beforePut = this.beforePut;
+    let putCount = 0;
+    transaction.beforePut = async (key, value) => {
+      putCount += 1;
+      await this.beforePut?.(key, value);
+    };
     transaction.beforeDelete = this.beforeDelete;
-    const result = await callback(transaction);
-    this.values = new Map(transaction.values);
-    return result;
+    try {
+      const result = await callback(transaction);
+      this.values = new Map(transaction.values);
+      return result;
+    } finally {
+      this.transactionPutCounts.push(putCount);
+    }
   }
 
   async list<T>({
@@ -32811,6 +32910,318 @@ describe("fleet run history", () => {
       request("GET", `/v1/runs/${run.id}/logs`, { headers: ownerHeaders }),
     );
     expect(await logs.text()).toBe("ok\n");
+    const receipt = await fleet.fetch(
+      request("GET", `/v1/runs/${run.id}/receipt`, { headers: ownerHeaders }),
+    );
+    expect(receipt.status).toBe(404);
+  });
+
+  it("persists signed terminal receipts and rejects conflicting finishes", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const ownerHeaders = {
+      "x-crabbox-owner": "peter@example.com",
+      "x-crabbox-org": "openclaw",
+    };
+    const create = await fleet.fetch(
+      request("POST", "/v1/runs", {
+        headers: ownerHeaders,
+        body: {
+          leaseID: "cbx_000000000001",
+          provider: "aws",
+          command: ["sh", "-c", "printf 'failed\\n'; exit 17"],
+        },
+      }),
+    );
+    expect(create.status).toBe(201);
+    const { run } = (await create.json()) as { run: RunRecord };
+    expect(run.state).toBe("running");
+
+    const log = "failed\n";
+    const receipt = await testTerminalReceipt({
+      run,
+      exitCode: 17,
+      syncMs: 10,
+      commandMs: 20,
+      log,
+    });
+    const finishBody = {
+      exitCode: 17,
+      syncMs: 10,
+      commandMs: 20,
+      log,
+      receipt,
+    };
+    const finish = await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/finish`, {
+        headers: ownerHeaders,
+        body: finishBody,
+      }),
+    );
+    expect(finish.status).toBe(200);
+
+    const recovered = await fleet.fetch(
+      request("GET", `/v1/runs/${run.id}/receipt`, { headers: ownerHeaders }),
+    );
+    expect(recovered.status).toBe(200);
+    await expect(recovered.json()).resolves.toEqual({ receipt });
+
+    const duplicate = await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/finish`, {
+        headers: ownerHeaders,
+        body: finishBody,
+      }),
+    );
+    expect(duplicate.status).toBe(200);
+
+    const sameSignatureDifferentReceipt = await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/finish`, {
+        headers: ownerHeaders,
+        body: {
+          ...finishBody,
+          receipt: { ...receipt, command: "different display" },
+        },
+      }),
+    );
+    expect(sameSignatureDifferentReceipt.status).toBe(409);
+
+    const conflict = await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/finish`, {
+        headers: ownerHeaders,
+        body: { ...finishBody, exitCode: 0 },
+      }),
+    );
+    expect(conflict.status).toBe(409);
+    const original = await fleet.fetch(
+      request("GET", `/v1/runs/${run.id}/receipt`, { headers: ownerHeaders }),
+    );
+    expect(original.status).toBe(200);
+    await expect(original.json()).resolves.toEqual({ receipt });
+    expect(storage.value<RunRecord>(`run:${run.id}`)?.exitCode).toBe(17);
+  });
+
+  it("keeps committed logs under concurrent identical terminal finishes", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const create = await fleet.fetch(
+      request("POST", "/v1/runs", {
+        body: { provider: "aws", command: ["false"] },
+      }),
+    );
+    const { run } = (await create.json()) as { run: RunRecord };
+    const log = "failed concurrently\n";
+    const receipt = await testTerminalReceipt({
+      run,
+      exitCode: 1,
+      syncMs: 0,
+      commandMs: 1,
+      log,
+    });
+    const body = { exitCode: 1, commandMs: 1, log, receipt };
+
+    const responses = await Promise.all([
+      fleet.fetch(request("POST", `/v1/runs/${run.id}/finish`, { body })),
+      fleet.fetch(request("POST", `/v1/runs/${run.id}/finish`, { body })),
+    ]);
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+
+    const committed = storage.value<RunRecord>(`run:${run.id}`);
+    expect(committed?.terminalLogPrefix).toMatch(
+      new RegExp(`^runlog:${run.id}:finish:[0-9a-f]{64}:[0-9a-f-]+:$`, "u"),
+    );
+    const staged = await storage.list({ prefix: `runlog:${run.id}:finish:` });
+    expect(
+      [...staged.keys()].every((key) => key.startsWith(committed?.terminalLogPrefix ?? "")),
+    ).toBe(true);
+    const logs = await fleet.fetch(request("GET", `/v1/runs/${run.id}/logs`));
+    expect(await logs.text()).toBe(log);
+  });
+
+  it("rejects a finish if its run binding changes before the terminal transaction", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const create = await fleet.fetch(
+      request("POST", "/v1/runs", {
+        body: { provider: "aws", command: ["false"] },
+      }),
+    );
+    const { run } = (await create.json()) as { run: RunRecord };
+    const receipt = await testTerminalReceipt({
+      run,
+      exitCode: 1,
+      syncMs: 0,
+      commandMs: 1,
+      log: "",
+    });
+    let runReads = 0;
+    storage.afterGet = async (key) => {
+      if (key !== `run:${run.id}` || ++runReads !== 1) return;
+      storage.seed(`run:${run.id}`, { ...run, slug: "replacement-host" });
+    };
+    const response = await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/finish`, {
+        body: { exitCode: 1, commandMs: 1, log: "", receipt },
+      }),
+    );
+    expect(response.status).toBe(409);
+    expect(storage.value<RunRecord>(`run:${run.id}`)).toMatchObject({
+      state: "running",
+      slug: "replacement-host",
+    });
+  });
+
+  it("atomically rolls back terminal evidence when the run record write fails", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const create = await fleet.fetch(
+      request("POST", "/v1/runs", {
+        body: { provider: "aws", command: ["false"] },
+      }),
+    );
+    const { run } = (await create.json()) as { run: RunRecord };
+    const receipt = await testTerminalReceipt({
+      run,
+      exitCode: 1,
+      syncMs: 0,
+      commandMs: 1,
+      log: "failed\n",
+    });
+    storage.beforePut = async (key, value) => {
+      if (key === `run:${run.id}` && (value as RunRecord).state === "failed") {
+        throw new Error("injected terminal write failure");
+      }
+    };
+    const response = await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/finish`, {
+        body: { exitCode: 1, commandMs: 1, log: "failed\n", receipt },
+      }),
+    );
+    expect(response.status).toBe(500);
+    storage.beforePut = undefined;
+    expect(storage.value<RunRecord>(`run:${run.id}`)).toMatchObject({
+      state: "running",
+      eventCount: 1,
+    });
+    expect((await storage.list({ prefix: `runlog:${run.id}:finish:` })).size).toBe(0);
+    expect(storage.value(`runevent:${run.id}:000000000002`)).toBeUndefined();
+  });
+
+  it("keeps missing terminal receipts ambiguous and rejects unverifiable evidence", async () => {
+    const fleet = testFleet();
+    const create = await fleet.fetch(
+      request("POST", "/v1/runs", {
+        body: { provider: "aws", command: ["false"] },
+      }),
+    );
+    const { run } = (await create.json()) as { run: RunRecord };
+
+    const missing = await fleet.fetch(request("GET", `/v1/runs/${run.id}/receipt`));
+    expect(missing.status).toBe(404);
+
+    const receipt = await testTerminalReceipt({
+      run,
+      exitCode: 1,
+      syncMs: 0,
+      commandMs: 1,
+      log: "",
+    });
+    receipt.signature = Buffer.alloc(64).toString("base64");
+    const rejected = await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/finish`, {
+        body: { exitCode: 1, commandMs: 1, log: "", receipt },
+      }),
+    );
+    expect(rejected.status).toBe(400);
+    expect((await fleet.fetch(request("GET", `/v1/runs/${run.id}`))).status).toBe(200);
+    const read = (await (await fleet.fetch(request("GET", `/v1/runs/${run.id}`))).json()) as {
+      run: RunRecord;
+    };
+    expect(read.run.state).toBe("running");
+  });
+
+  it.each([
+    ["provider", (receipt: Record<string, unknown>) => (receipt.provider = "gcp")],
+    ["lease", (receipt: Record<string, unknown>) => (receipt.lease_id = "cbx_other")],
+    ["slug", (receipt: Record<string, unknown>) => (receipt.slug = "other-host")],
+    ["run", (receipt: Record<string, unknown>) => (receipt.run_id = "run_other")],
+    [
+      "command",
+      (receipt: Record<string, unknown>) => (receipt.command_sha256 = `sha256:${"0".repeat(64)}`),
+    ],
+    ["exit code", (receipt: Record<string, unknown>) => (receipt.exit_code = 0)],
+    ["duration", (receipt: Record<string, unknown>) => (receipt.command_ms = 2)],
+    [
+      "log",
+      (receipt: Record<string, unknown>) =>
+        (receipt.retained_log_sha256 = `sha256:${"0".repeat(64)}`),
+    ],
+  ])("rejects signed terminal receipts with mismatched %s bindings", async (_name, mutate) => {
+    const fleet = testFleet();
+    const create = await fleet.fetch(
+      request("POST", "/v1/runs", {
+        body: { provider: "aws", command: ["false"] },
+      }),
+    );
+    const { run } = (await create.json()) as { run: RunRecord };
+    const receipt = await testTerminalReceipt({
+      run,
+      exitCode: 1,
+      syncMs: 0,
+      commandMs: 1,
+      log: "failed\n",
+      mutate,
+    });
+    const response = await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/finish`, {
+        body: { exitCode: 1, commandMs: 1, log: "failed\n", receipt },
+      }),
+    );
+    expect(response.status).toBe(400);
+    const read = (await (await fleet.fetch(request("GET", `/v1/runs/${run.id}`))).json()) as {
+      run: RunRecord;
+    };
+    expect(read.run.state).toBe("running");
+  });
+
+  it("rejects unknown and oversized terminal receipt fields", async () => {
+    const fleet = testFleet();
+    const create = await fleet.fetch(
+      request("POST", "/v1/runs", {
+        body: { provider: "aws", command: ["false"] },
+      }),
+    );
+    const { run } = (await create.json()) as { run: RunRecord };
+    const base = {
+      run,
+      exitCode: 1,
+      syncMs: 0,
+      commandMs: 1,
+      log: "",
+    };
+    const unknown = await testTerminalReceipt({
+      ...base,
+      mutate: (receipt) => {
+        receipt.review_note = "not part of the receipt contract";
+      },
+    });
+    const oversized = await testTerminalReceipt({
+      ...base,
+      mutate: (receipt) => {
+        receipt.command = "x".repeat(17 * 1024);
+      },
+    });
+    const responses = await Promise.all(
+      [unknown, oversized].map((receipt) =>
+        fleet.fetch(
+          request("POST", `/v1/runs/${run.id}/finish`, {
+            body: { exitCode: 1, commandMs: 1, log: "", receipt },
+          }),
+        ),
+      ),
+    );
+    for (const response of responses) {
+      expect(response.status).toBe(400);
+    }
   });
 
   it("appends live run telemetry samples and preserves them on finish", async () => {
@@ -32969,7 +33380,19 @@ describe("fleet run history", () => {
     expect(finished.run.state).toBe("failed");
     expect(finished.run.logBytes).toBe(chunkA.length + chunkB.length);
     expect(finished.run.logTruncated).toBe(false);
-    expect(storage.value<string>(`runlog:${run.id}`)).toBe("");
+    expect(finished.run).not.toHaveProperty("terminalLogPrefix");
+    const storedRun = storage.value<RunRecord>(`run:${run.id}`);
+    expect(storedRun?.terminalLogPrefix).toMatch(
+      new RegExp(`^runlog:${run.id}:finish:[0-9a-f]{64}:[0-9a-f-]+:$`, "u"),
+    );
+    expect(
+      (
+        await storage.list({
+          prefix: `${storedRun?.terminalLogPrefix}chunk:`,
+        })
+      ).size,
+    ).toBe(3);
+    expect(storage.transactionPutCounts.at(-1)).toBe(2);
 
     const logs = await fleet.fetch(request("GET", `/v1/runs/${run.id}/logs`));
     const logText = await logs.text();

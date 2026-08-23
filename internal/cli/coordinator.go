@@ -1966,7 +1966,7 @@ func (c *CoordinatorClient) CreateRun(ctx context.Context, leaseID string, cfg C
 	return res.Run, err
 }
 
-func (c *CoordinatorClient) FinishRun(ctx context.Context, runID string, exitCode int, sync, command time.Duration, log string, truncated bool, results *TestResultSummary, telemetry *RunTelemetrySummary, classification FailureClassification) (CoordinatorRun, error) {
+func (c *CoordinatorClient) FinishRun(ctx context.Context, runID string, exitCode int, sync, command time.Duration, log string, truncated bool, results *TestResultSummary, telemetry *RunTelemetrySummary, classification FailureClassification, receipt *terminalRunReceipt) (CoordinatorRun, error) {
 	var res CoordinatorRunResponse
 	logChunks := splitRunLogChunks(log)
 	body := map[string]any{
@@ -1986,6 +1986,9 @@ func (c *CoordinatorClient) FinishRun(ctx context.Context, runID string, exitCod
 	}
 	if classification.RetryLikely != "" {
 		body["retryLikely"] = classification.RetryLikely
+	}
+	if receipt != nil {
+		body["receipt"] = receipt
 	}
 	err := c.do(ctx, http.MethodPost, "/v1/runs/"+url.PathEscape(runID)+"/finish", body, &res)
 	return res.Run, err
@@ -2073,6 +2076,20 @@ func (c *CoordinatorClient) RunLogs(ctx context.Context, runID string) (string, 
 	var buf bytes.Buffer
 	err := c.do(ctx, http.MethodGet, "/v1/runs/"+url.PathEscape(runID)+"/logs", nil, &buf)
 	return buf.String(), err
+}
+
+func (c *CoordinatorClient) RunReceipt(ctx context.Context, runID string) (terminalRunReceipt, error) {
+	var res struct {
+		Receipt json.RawMessage `json:"receipt"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/runs/"+url.PathEscape(runID)+"/receipt", nil, &res); err != nil {
+		return terminalRunReceipt{}, err
+	}
+	receipt, err := decodeTerminalRunReceipt(res.Receipt)
+	if err != nil {
+		return terminalRunReceipt{}, fmt.Errorf("invalid terminal receipt: %w", err)
+	}
+	return receipt, nil
 }
 
 func (c *CoordinatorClient) Health(ctx context.Context) error {

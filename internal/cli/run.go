@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"flag"
 	"fmt"
@@ -279,7 +280,7 @@ func registerRunFlags(fs *flag.FlagSet, defaults Config, options leaseCreateFlag
 		Scenario:               fs.String("scenario", "", "preset variable shorthand for --preset-var scenario=<value>"),
 		EmitProof:              fs.String("emit-proof", "", "write a generated proof block after a successful run"),
 		ProofTemplate:          fs.String("proof-template", "", "proof template name from the selected profile"),
-		AttestOut:              fs.String("attest", "", "write a signed run receipt after a successful run"),
+		AttestOut:              fs.String("attest", "", "write a signed receipt after a completed run"),
 		AttestKeyOverride:      fs.String("attest-key", "", "path to an existing PKCS8 PEM ed25519 private key for --attest"),
 		StopAfter:              fs.String("stop-after", "", "stop policy for the lease: success, always, failure, or never"),
 		LeaseOutput:            fs.String("lease-output", "", "write a retained JSON lease handle for orchestrators on supported providers"),
@@ -384,6 +385,17 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		return err
 	}
 	var cleanup leaseCleanupResult
+	var runFailure error
+	recorder := &runRecorder{}
+	var finalizeTerminalRun func()
+	defer func() {
+		recorder.Failed(runFailure)
+	}()
+	defer func() {
+		if finalizeTerminalRun != nil {
+			finalizeTerminalRun()
+		}
+	}()
 	var finalTimingReport *timingReport
 	var timingRecordRepo Repo
 	var timingRecordCommand []string
@@ -728,7 +740,6 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	var leaseID string
 	var borrowedPool *CoordinatorReadyPoolResponse
 	var stopReadyPoolHeartbeat func()
-	var runFailure error
 	var workdir string
 	var hydratedByActions bool
 	var lifecycleOwner *workspaceOwner
@@ -887,7 +898,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			result.Artifacts = append(result.Artifacts, proof)
 			fmt.Fprintf(a.Stderr, "artifact kind=proof path=%s bytes=%d template=%s\n", proof.Path, proof.Bytes, blank(proof.Template, "default"))
 		}
-		if runErr == nil && strings.TrimSpace(*attestOut) != "" {
+		if strings.TrimSpace(*attestOut) != "" && (runErr == nil || RunErrorKindForResult(result, runErr) == RunErrorCommandExit) {
 			receipt, err := writeDelegatedRunReceipt(strings.TrimSpace(*attestOut), strings.TrimSpace(*attestKeyOverride), cfg, result, runReq)
 			if err != nil {
 				return err
@@ -959,7 +970,6 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 
 	acquired := false
 	useCoordinator := coord != nil
-	recorder := &runRecorder{}
 	failureClassificationPrinted := false
 	recordFailure := func(failure error) error {
 		if failure != nil && !failureClassificationPrinted {
@@ -975,9 +985,6 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	timingRecordCommand = recordCommand
 	if useCoordinator {
 		recorder = newRunRecorder(ctx, coord, cfg, recordCommand, runLabelValue, a.Stderr, strings.TrimSpace(*leaseIDFlag) != "")
-		defer func() {
-			recorder.Failed(runFailure)
-		}()
 		recorder.Event("leasing.started", "leasing", "")
 	}
 	endToEndStartedAt := time.Now()
@@ -1097,6 +1104,11 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	if recorder.runID != "" {
 		executionRunID = recorder.runID
+	}
+	if !*syncOnly {
+		if err := recorder.requireHandle(); err != nil {
+			return recordFailure(err)
+		}
 	}
 	applyRunExecutionMetadata(&envSelection, leaseID, executionRunID, serverSlug(server))
 	runReq.RunID = executionRunID
@@ -1742,10 +1754,11 @@ afterSync:
 			report.Label = runLabelValue
 			finalTimingReport = &report
 		}
-		recorder.Finish(ctx, target, 0, timings.sync, 0, "", false, nil, FailureClassification{})
+		if finishErr := recorder.Finish(ctx, target, 0, timings.sync, 0, "", false, nil, FailureClassification{}, nil); finishErr != nil {
+			return recordFailure(finishErr)
+		}
 		return nil
 	}
-
 	recorder.Event("bootstrap.waiting", "bootstrap", "waiting for SSH before command")
 	target = bootstrapNetworkTarget(cfg, server, target)
 	bootstrapStartedAt := time.Now()
@@ -1933,8 +1946,15 @@ afterSync:
 	if stderrCaptured {
 		stderrEvents = nil
 	}
+	var terminalReceiptKey ed25519.PrivateKey
+	if recorder.runID != "" || strings.TrimSpace(*attestOut) != "" {
+		terminalReceiptKey, err = resolveAttestKey(strings.TrimSpace(*attestKeyOverride))
+		if err != nil {
+			return recordFailure(exit(2, "attest key: %v", err))
+		}
+	}
 	attestDigest := newAttestDigestWriter()
-	if strings.TrimSpace(*attestOut) != "" {
+	if strings.TrimSpace(*attestOut) != "" || recorder.runID != "" {
 		stdout = io.MultiWriter(stdout, attestDigest)
 		stderr = io.MultiWriter(stderr, attestDigest)
 	}
@@ -1953,6 +1973,119 @@ afterSync:
 	failureEvidenceCollector := beginRunFailureEvidence(ctx, sshBackend, leaseForEvidence, a.Stderr)
 	code, streamErr := runSSHStreamResult(ctx, target, remote, stdout, stderr)
 	failureEvidence := RunFailureEvidence{}
+	var results *TestResultSummary
+	classification := FailureClassification{}
+	attestPath := strings.TrimSpace(*attestOut)
+	var writtenAttestReceipt terminalRunReceipt
+	attestReceiptWritten := false
+	buildTerminalReceipt := func(finalCode int) (terminalRunReceipt, error) {
+		retainedLog := logBuffer.String()
+		logTruncated := logBuffer.Truncated()
+		retainedLogDigest := sha256Digest([]byte(retainedLog))
+		fullLogDigest := attestDigest.sum()
+		if !logTruncated {
+			// The retained buffer owns stdout/stderr ordering. For complete logs its
+			// digest is also the independently verifiable full-stream digest.
+			fullLogDigest = retainedLogDigest
+		}
+		startedAt := recorder.startedAt
+		endedAt := time.Time{}
+		if !startedAt.IsZero() && !recorder.attachedAt.IsZero() {
+			endedAt = startedAt.Add(time.Since(recorder.attachedAt))
+		}
+		if startedAt.IsZero() {
+			startedAt = commandStart
+		}
+		if endedAt.IsZero() {
+			endedAt = startedAt.Add(time.Since(startedAt))
+		}
+		return buildTerminalRunReceiptWithKey(terminalReceiptKey, terminalRunReceiptInput{
+			Provider:          cfg.Provider,
+			LeaseID:           leaseID,
+			Slug:              serverSlug(server),
+			RunID:             executionRunID,
+			Command:           recordCommand,
+			CommandDisplay:    commandDisplay,
+			ExitCode:          finalCode,
+			SyncMs:            timings.sync.Milliseconds(),
+			CommandMs:         timings.command.Milliseconds(),
+			StartedAt:         startedAt,
+			EndedAt:           endedAt,
+			LogSHA256:         fullLogDigest,
+			RetainedLogSHA256: retainedLogDigest,
+			LogTruncated:      logTruncated,
+		})
+	}
+	finalizeTerminalRun = func() {
+		if timings.command == 0 {
+			timings.command = time.Since(commandStart)
+		}
+		finalCode := code
+		finalFailure := runFailure
+		if finalFailure == nil {
+			finalFailure = err
+		}
+		if finalCode == 0 && finalFailure != nil {
+			finalCode = exitCodeForError(finalFailure, 7)
+		}
+		if recorder.runID == "" && attestPath == "" {
+			return
+		}
+		if finalCode != 0 && classification.BlockedStage == "" {
+			classificationLog := logBuffer.String()
+			if finalFailure != nil {
+				classificationLog = strings.TrimSpace(classificationLog + "\n" + finalFailure.Error())
+			}
+			classification = classifyRunOutcomeFailure(finalCode, classificationLog, timings.commandPhases, failureEvidence, false)
+		}
+
+		retainedLog := logBuffer.String()
+		logTruncated := logBuffer.Truncated()
+		receipt := writtenAttestReceipt
+		var receiptErr error
+		if !attestReceiptWritten || receipt.ExitCode != finalCode {
+			receipt, receiptErr = buildTerminalReceipt(finalCode)
+		}
+		if receiptErr != nil {
+			err = errors.Join(err, receiptErr)
+			recordRunFailure(&runFailure, receiptErr)
+			return
+		}
+		if attestPath != "" && (!attestReceiptWritten || writtenAttestReceipt.ExitCode != finalCode) {
+			artifact, writeErr := writeTerminalRunReceipt(attestPath, receipt)
+			if writeErr != nil {
+				err = errors.Join(err, writeErr)
+				recordRunFailure(&runFailure, writeErr)
+			} else {
+				writtenAttestReceipt = receipt
+				attestReceiptWritten = true
+				fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", artifact.Path, artifact.Bytes)
+			}
+		}
+		if finishErr := recorder.Finish(ctx, target, finalCode, timings.sync, timings.command, retainedLog, logTruncated, results, classification, &receipt); finishErr != nil {
+			err = errors.Join(err, finishErr)
+			recordRunFailure(&runFailure, finishErr)
+			if attestPath != "" && receipt.ExitCode == 0 {
+				// The coordinator commit is now ambiguous. Preserve the exact receipt
+				// sent remotely, but make the local CLI failure impossible to miss.
+				failedReceipt, receiptErr := buildTerminalReceipt(exitCodeForError(finishErr, 7))
+				if receiptErr != nil {
+					err = errors.Join(err, receiptErr)
+					recordRunFailure(&runFailure, receiptErr)
+				} else if artifact, writeErr := writeTerminalRunReceipt(attestPath, failedReceipt); writeErr != nil {
+					err = errors.Join(err, writeErr)
+					recordRunFailure(&runFailure, writeErr)
+				} else {
+					writtenAttestReceipt = failedReceipt
+					attestReceiptWritten = true
+					fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", artifact.Path, artifact.Bytes)
+				}
+			}
+			if a.runOutcome != nil {
+				a.runOutcome.Recorded = false
+			}
+		}
+	}
 	if code != 0 || streamErr != nil {
 		failureEvidence = collectRunFailureEvidence(ctx, failureEvidenceCollector, a.Stderr)
 	}
@@ -1973,7 +2106,6 @@ afterSync:
 	if err := waitWorkspaceOwnerNoChild(ctx, lifecycleOwner, 10*time.Second); err != nil {
 		return recordFailure(exit(7, "remote command child ownership remains active; refusing collection and cleanup: %v", err))
 	}
-	var results *TestResultSummary
 	if cfg.Results.Auto || len(cfg.Results.JUnit) > 0 {
 		results, err = collectRemoteJUnitResults(ctx, target, workdir, cfg.Results, resultsMarker)
 		if err != nil {
@@ -2036,7 +2168,6 @@ afterSync:
 		fmt.Fprintf(a.Stderr, "test results policy: failing run because collected JUnit reports contain failures=%d errors=%d\n", results.Failures, results.Errors)
 	}
 	total := time.Since(timings.started)
-	classification := FailureClassification{}
 	if code != 0 {
 		classificationLog := logBuffer.String()
 		if artifactFailure != nil {
@@ -2077,26 +2208,22 @@ afterSync:
 		report.Artifacts = runArtifacts
 		fmt.Fprintf(a.Stderr, "artifact kind=proof path=%s bytes=%d template=%s\n", proof.Path, proof.Bytes, blank(proof.Template, "default"))
 	}
-	if strings.TrimSpace(*attestOut) != "" && code == 0 {
-		receipt, err := writeRunReceipt(strings.TrimSpace(*attestOut), strings.TrimSpace(*attestKeyOverride), runReceiptInput{
-			Provider:   cfg.Provider,
-			LeaseID:    leaseID,
-			Slug:       serverSlug(server),
-			RunID:      executionRunID,
-			Command:    commandDisplay,
-			ExitCode:   code,
-			CommandMs:  report.CommandMs,
-			ActionsURL: actionsURL,
-			LogSHA256:  attestDigest.sum(),
-		})
+	if attestPath != "" && code == 0 {
+		receipt, err := buildTerminalReceipt(code)
 		if err != nil {
 			return recordFailure(err)
 		}
-		runArtifacts = append(runArtifacts, receipt)
-		report.Artifacts = runArtifacts
-		fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", receipt.Path, receipt.Bytes)
+		artifact, err := writeTerminalRunReceipt(attestPath, receipt)
+		if err != nil {
+			return recordFailure(err)
+		} else {
+			writtenAttestReceipt = receipt
+			attestReceiptWritten = true
+			runArtifacts = append(runArtifacts, artifact)
+			report.Artifacts = runArtifacts
+			fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", artifact.Path, artifact.Bytes)
+		}
 	}
-	recorder.Finish(ctx, target, code, timings.sync, timings.command, logBuffer.String(), logBuffer.Truncated(), results, classification)
 	if a.runOutcome != nil {
 		a.runOutcome.Recorded = true
 		a.runOutcome.ExitCode = code
@@ -2205,7 +2332,7 @@ func writeRunLeaseOutput(path string, session *RunSessionHandle) error {
 	if session == nil {
 		return exit(2, "--lease-output was requested but provider did not return a session handle")
 	}
-	return writeJSONFile(path, session)
+	return writePrivateArtifactJSONFile(path, session)
 }
 
 type countingWriteCloser struct {

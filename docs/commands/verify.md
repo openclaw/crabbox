@@ -32,7 +32,8 @@ show one value to a reader while the signature still verifies against another.
 
 ## Receipt format
 
-The receipt is a flat JSON object. `schema_version`, `generated_at`,
+Schema v1 is the existing successful-run format. It is a flat JSON object.
+`schema_version`, `generated_at`,
 `provider`, `command`, `exit_code`, `command_ms`, and `public_key` are always
 present; `lease_id`, `slug`, `run_id`, `actions_url`, and `log_sha256` appear
 when the run produced them. `log_sha256` is the SHA-256 of the combined
@@ -43,6 +44,15 @@ itself: the object is re-marshaled as compact JSON with lexicographically
 sorted keys, and the Ed25519 signature is computed over those bytes. Because
 `public_key` is inside the signed payload, swapping in a different key also
 fails verification.
+
+Schema v2 terminal receipts are emitted for non-zero local runs and stored by
+the coordinator for brokered terminal runs. They additionally bind the run,
+lease, slug, raw command digest, final exit code, sync/command/total timing,
+timestamps, retained log hash, truncation state, full observed stream hash, and
+signer fingerprint. Their signature input is a fixed length-prefixed field
+sequence shared by the Go CLI and Worker verifier. Command display text is
+bounded; unusually long displays are replaced by a marker containing the exact
+raw-argument digest.
 
 ## Keys
 

@@ -90,12 +90,14 @@ crabbox logs <run-id>                         print run logs
 crabbox events <run-id>                       print run events
 crabbox attach <run-id>                       follow events for an active run
 crabbox results <run-id>                      show test-result summaries
+crabbox receipt <run-id>                      retrieve and verify terminal evidence
 crabbox bench report [--json]                 aggregate local benchmark timing observations
 ```
 
 See [history](commands/history.md), [logs](commands/logs.md),
 [events](commands/events.md), [attach](commands/attach.md),
-[results](commands/results.md), [bench](commands/bench.md).
+[results](commands/results.md), [receipt](commands/receipt.md),
+[bench](commands/bench.md).
 
 ### Access and desktop
 

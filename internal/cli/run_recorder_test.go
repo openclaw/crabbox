@@ -483,6 +483,9 @@ func TestRunRecorderSuppressesMissingEventEndpoint(t *testing.T) {
 		Class:      "standard",
 		ServerType: "t3.small",
 	}, []string{"pnpm", "test"}, "", &stderr, false)
+	if rec.runID != "run_123" || rec.finished {
+		t.Fatalf("run handle must exist before lease attach or finish: %#v", rec)
+	}
 	rec.AttachLease("cbx_abcdef123456", "blue-lobster", Config{
 		Provider:   "aws",
 		Class:      "standard",
@@ -494,7 +497,7 @@ func TestRunRecorderSuppressesMissingEventEndpoint(t *testing.T) {
 	}
 	stdout.Flush()
 	rec.waitForOutputEvents(time.Second)
-	rec.Finish(context.Background(), SSHTarget{TargetOS: targetWindows}, 0, time.Second, time.Second, "ok", false, nil, FailureClassification{})
+	rec.Finish(context.Background(), SSHTarget{TargetOS: targetWindows}, 0, time.Second, time.Second, "ok", false, nil, FailureClassification{}, nil)
 
 	if eventRequests != 1 {
 		t.Fatalf("event requests=%d, want 1", eventRequests)
@@ -504,6 +507,19 @@ func TestRunRecorderSuppressesMissingEventEndpoint(t *testing.T) {
 	}
 	if text := stderr.String(); strings.Contains(text, "warning:") || !strings.Contains(text, "recording run run_123") {
 		t.Fatalf("stderr=%q", text)
+	}
+}
+
+func TestRunRecorderRequiresCoordinatorHandleBeforeExecution(t *testing.T) {
+	rec := &runRecorder{coord: &CoordinatorClient{}}
+	err := rec.requireHandle()
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 7 || !strings.Contains(exitErr.Message, "coordinator run handle") {
+		t.Fatalf("requireHandle error=%v", err)
+	}
+	rec.runID = "run_123"
+	if err := rec.requireHandle(); err != nil {
+		t.Fatalf("coordinator handle rejected: %v", err)
 	}
 }
 
@@ -530,9 +546,160 @@ func TestRunRecorderFinishUsesExtendedTimeout(t *testing.T) {
 		})},
 	}
 	rec := &runRecorder{coord: client, runID: "run_123", stderr: io.Discard}
-	rec.Finish(context.Background(), SSHTarget{}, 0, time.Second, time.Second, strings.Repeat("x", 2*runLogFallbackPreviewBytes), true, nil, FailureClassification{})
+	rec.Finish(context.Background(), SSHTarget{}, 0, time.Second, time.Second, strings.Repeat("x", 2*runLogFallbackPreviewBytes), true, nil, FailureClassification{}, nil)
 	if deadlineRemaining < runRecorderFinishTimeout-5*time.Second {
 		t.Fatalf("deadline remaining=%s, want near %s", deadlineRemaining, runRecorderFinishTimeout)
+	}
+}
+
+func TestRunRecorderFinishRetriesIdenticalCommit(t *testing.T) {
+	var attempts int
+	var bodies [][]byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/runs/run_123/finish" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		attempts++
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bodies = append(bodies, body)
+		if attempts == 1 {
+			http.Error(w, "retry", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte(`{"run":{"id":"run_123"}}`))
+	}))
+	defer server.Close()
+
+	rec := &runRecorder{
+		coord:  &CoordinatorClient{BaseURL: server.URL, Client: server.Client()},
+		runID:  "run_123",
+		stderr: io.Discard,
+	}
+	if err := rec.Finish(context.Background(), SSHTarget{}, 7, time.Second, 2*time.Second, "failed\n", false, nil, FailureClassification{}, nil); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	if attempts != 2 || !rec.finished {
+		t.Fatalf("attempts=%d finished=%v", attempts, rec.finished)
+	}
+	if len(bodies) != 2 || !bytes.Equal(bodies[0], bodies[1]) {
+		t.Fatalf("finish retries changed payload: %q %q", bodies[0], bodies[1])
+	}
+}
+
+func runRecorderTestReceipt(t *testing.T) terminalRunReceipt {
+	t.Helper()
+	setAttestTestHome(t)
+	startedAt := time.Date(2026, 8, 23, 10, 0, 0, 0, time.UTC)
+	receipt, err := buildTerminalRunReceipt("", terminalRunReceiptInput{
+		Provider:          "aws",
+		RunID:             "run_123",
+		Command:           []string{"false"},
+		CommandDisplay:    "false",
+		ExitCode:          1,
+		CommandMs:         100,
+		StartedAt:         startedAt,
+		EndedAt:           startedAt.Add(100 * time.Millisecond),
+		LogSHA256:         sha256Digest(nil),
+		RetainedLogSHA256: sha256Digest(nil),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return receipt
+}
+
+func TestRunRecorderFinishVerifiesPersistedReceiptAfterSuccess(t *testing.T) {
+	receipt := runRecorderTestReceipt(t)
+	var finishRequests, receiptRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/run_123/finish":
+			finishRequests++
+			_, _ = w.Write([]byte(`{"run":{"id":"run_123"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runs/run_123/receipt":
+			receiptRequests++
+			_ = json.NewEncoder(w).Encode(map[string]any{"receipt": receipt})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	rec := &runRecorder{
+		coord:  &CoordinatorClient{BaseURL: server.URL, Client: server.Client()},
+		runID:  "run_123",
+		stderr: io.Discard,
+	}
+	if err := rec.Finish(context.Background(), SSHTarget{}, 1, 0, 100*time.Millisecond, "", false, nil, FailureClassification{}, &receipt); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	if finishRequests != 1 || receiptRequests != 1 || !rec.finished {
+		t.Fatalf("finish=%d receipt=%d finished=%v", finishRequests, receiptRequests, rec.finished)
+	}
+}
+
+func TestRunRecorderFinishRejectsLegacySuccessWithoutReceiptPersistence(t *testing.T) {
+	receipt := runRecorderTestReceipt(t)
+	var finishRequests, receiptRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/run_123/finish":
+			finishRequests++
+			_, _ = w.Write([]byte(`{"run":{"id":"run_123"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runs/run_123/receipt":
+			receiptRequests++
+			http.NotFound(w, r)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	rec := &runRecorder{
+		coord:  &CoordinatorClient{BaseURL: server.URL, Client: server.Client()},
+		runID:  "run_123",
+		stderr: io.Discard,
+	}
+	err := rec.Finish(context.Background(), SSHTarget{}, 1, 0, 100*time.Millisecond, "", false, nil, FailureClassification{}, &receipt)
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 7 || !strings.Contains(exitErr.Message, "verify persisted terminal receipt") {
+		t.Fatalf("Finish error=%v, want fail-closed receipt verification", err)
+	}
+	if finishRequests != 1 || receiptRequests != 1 || rec.finished {
+		t.Fatalf("finish=%d receipt=%d finished=%v", finishRequests, receiptRequests, rec.finished)
+	}
+}
+
+func TestRunRecorderFinishRecoversCommittedReceiptAfterLostResponse(t *testing.T) {
+	receipt := runRecorderTestReceipt(t)
+	var finishRequests, receiptRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/run_123/finish":
+			finishRequests++
+			_, _ = w.Write([]byte(`{`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runs/run_123/receipt":
+			receiptRequests++
+			_ = json.NewEncoder(w).Encode(map[string]any{"receipt": receipt})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	rec := &runRecorder{
+		coord:  &CoordinatorClient{BaseURL: server.URL, Client: server.Client()},
+		runID:  "run_123",
+		stderr: io.Discard,
+	}
+	if err := rec.Finish(context.Background(), SSHTarget{}, 1, 0, 100*time.Millisecond, "", false, nil, FailureClassification{}, &receipt); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	if finishRequests != 1 || receiptRequests != 1 || !rec.finished {
+		t.Fatalf("finish=%d receipt=%d finished=%v", finishRequests, receiptRequests, rec.finished)
 	}
 }
 

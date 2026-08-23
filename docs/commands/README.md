@@ -30,6 +30,7 @@ same order as the CLI help.
 - [events](events.md)
 - [attach](attach.md)
 - [results](results.md)
+- [receipt](receipt.md)
 - [verify](verify.md)
 - [cache](cache.md)
 - [status](status.md)

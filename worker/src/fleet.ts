@@ -215,6 +215,7 @@ import {
   type ProviderReconciliationObservation,
   type ProviderReconciliationQuarantine,
 } from "./provider-reconciliation";
+import { sameTerminalRunBinding, terminalFinishSHA256, verifyTerminalReceipt } from "./run-receipt";
 import {
   readRuntimeAdapterRelayBody,
   runtimeAdapterProxyPath,
@@ -290,6 +291,7 @@ import type {
   RunTelemetryRequest,
   RunTelemetrySummary,
   TargetOS,
+  TerminalRunReceipt,
   TestFailure,
   TestResultSummary,
   TailscaleMetadata,
@@ -13342,6 +13344,16 @@ export class FleetCoordinator {
         headers: { "content-type": "text/plain; charset=utf-8" },
       });
     }
+    if (method === "GET" && action === "receipt") {
+      const run = await this.getRun(runID);
+      const lease = run ? await this.ensureRunLeaseAttribution(run) : undefined;
+      if (!run || !this.runReadableToRequest(run, request, lease)) {
+        return notFound();
+      }
+      return run.terminalReceipt
+        ? json({ receipt: run.terminalReceipt })
+        : json({ error: "receipt_unavailable" }, { status: 404 });
+    }
     if (method === "GET" && action === "events") {
       const run = await this.getRun(runID);
       const lease = run ? await this.ensureRunLeaseAttribution(run) : undefined;
@@ -13399,51 +13411,151 @@ export class FleetCoordinator {
     }
     const input = await readJson<RunFinishRequest>(request);
     const now = new Date();
-    const started = Date.parse(run.startedAt);
-    run.exitCode = Number.isFinite(input.exitCode) ? input.exitCode : 1;
+    const exitCode = Number.isFinite(input.exitCode) ? input.exitCode : 1;
     const syncMs = finiteNumber(input.syncMs);
     const commandMs = finiteNumber(input.commandMs);
-    if (syncMs !== undefined) {
-      run.syncMs = syncMs;
-    }
-    if (commandMs !== undefined) {
-      run.commandMs = commandMs;
-    }
-    if (Number.isFinite(started)) {
-      run.durationMs = now.getTime() - started;
-    }
+    const normalizedSyncMs = syncMs ?? 0;
+    const normalizedCommandMs = commandMs ?? 0;
     const blockedStage = sanitizeRunClassification(input.blockedStage);
     const retryLikely = sanitizeRunClassification(input.retryLikely);
-    if (blockedStage) {
-      run.blockedStage = blockedStage;
-    }
-    if (retryLikely) {
-      run.retryLikely = retryLikely;
-    }
-    run.state = run.exitCode === 0 ? "succeeded" : "failed";
-    run.phase = run.state;
-    run.endedAt = now.toISOString();
     const logInput = normalizeRunLogInput(input);
-    run.logBytes = logInput.bytes;
-    run.logTruncated = logInput.truncated;
-    if (input.results) {
-      run.results = boundedTestResults(input.results);
-    }
     const telemetry = sanitizeRunTelemetry(input.telemetry, now);
-    if (telemetry) {
-      run.telemetry = mergeRunTelemetry(run.telemetry, telemetry);
-    }
-    await this.writeRunLog(runID, logInput.log);
-    await this.putRun(run);
-    await this.appendRunEventRecord(run, {
-      type: "command.finished",
-      phase: run.state,
-      exitCode: run.exitCode,
+    const requestedFingerprint = await terminalFinishSHA256({
+      exitCode,
+      syncMs: normalizedSyncMs,
+      commandMs: normalizedCommandMs,
+      log: logInput.source,
+      logTruncated: logInput.truncated,
+      blockedStage,
+      retryLikely,
+      results: input.results,
+      telemetry: input.telemetry,
+      receipt: input.receipt,
     });
-    return json({ run: publicRunRecord(run) });
+    if (run.state !== "running") {
+      return run.terminalFinishSHA256 === requestedFingerprint
+        ? json({ run: publicRunRecord(run) })
+        : json({ error: "terminal_run_conflict" }, { status: 409 });
+    }
+    let receipt: TerminalRunReceipt | undefined;
+    if (input.receipt !== undefined) {
+      try {
+        receipt = await verifyTerminalReceipt(input.receipt, {
+          run,
+          exitCode,
+          syncMs: normalizedSyncMs,
+          commandMs: normalizedCommandMs,
+          log: logInput.log,
+          logTruncated: logInput.truncated,
+          observedAt: now,
+        });
+      } catch (error) {
+        return json(
+          {
+            error: "invalid_terminal_receipt",
+            message: error instanceof Error ? error.message : "invalid terminal receipt",
+          },
+          { status: 400 },
+        );
+      }
+    }
+    const terminalLogPrefix = runTerminalLogPrefix(
+      runID,
+      requestedFingerprint,
+      crypto.randomUUID(),
+    );
+    let committed:
+      | { kind: "missing" }
+      | { kind: "duplicate"; run: RunRecord }
+      | { kind: "conflict"; run: RunRecord }
+      | { kind: "committed"; run: RunRecord; event: RunEventRecord };
+    try {
+      await writeTerminalRunLog(this.state.storage, terminalLogPrefix, logInput.log);
+      committed = await this.state.storage.transaction(async (storage) => {
+        const current = await storage.get<RunRecord>(runKey(runID));
+        if (!current) return { kind: "missing" as const };
+        if (current.state !== "running") {
+          return current.terminalFinishSHA256 === requestedFingerprint
+            ? { kind: "duplicate" as const, run: current }
+            : { kind: "conflict" as const, run: current };
+        }
+        if (!sameTerminalRunBinding(current, run)) {
+          return { kind: "conflict" as const, run: current };
+        }
+        const next = { ...current };
+        next.exitCode = exitCode;
+        next.syncMs = normalizedSyncMs;
+        next.commandMs = normalizedCommandMs;
+        next.state = exitCode === 0 ? "succeeded" : "failed";
+        next.phase = next.state;
+        const endedAt = now.toISOString();
+        next.endedAt = endedAt;
+        const started = Date.parse(next.startedAt);
+        const ended = Date.parse(endedAt);
+        if (Number.isFinite(started) && Number.isFinite(ended)) {
+          next.durationMs = ended - started;
+        }
+        next.logBytes = logInput.bytes;
+        next.logTruncated = logInput.truncated;
+        if (blockedStage) next.blockedStage = blockedStage;
+        if (retryLikely) next.retryLikely = retryLikely;
+        if (input.results) next.results = boundedTestResults(input.results);
+        if (telemetry) next.telemetry = mergeRunTelemetry(next.telemetry, telemetry);
+        if (receipt) next.terminalReceipt = receipt;
+        next.terminalFinishSHA256 = requestedFingerprint;
+        next.terminalLogPrefix = terminalLogPrefix;
+        const seq = (next.eventCount ?? 0) + 1;
+        const event = boundedRunEvent(next.id, seq, endedAt, {
+          type: "command.finished",
+          phase: next.state,
+          exitCode: next.exitCode,
+        });
+        next.eventCount = seq;
+        next.lastEventAt = endedAt;
+        await storage.put(runEventKey(next.id, seq), event);
+        await storage.put(runKey(next.id), next);
+        return { kind: "committed" as const, run: next, event };
+      });
+    } catch (error) {
+      await this.deleteStoragePrefix(terminalLogPrefix).catch(() => undefined);
+      throw error;
+    }
+    if (
+      committed.kind !== "committed" &&
+      (committed.kind === "missing" || committed.run.terminalLogPrefix !== terminalLogPrefix)
+    ) {
+      await this.deleteStoragePrefix(terminalLogPrefix).catch(() => undefined);
+    }
+    if (committed.kind === "missing") return notFound();
+    if (committed.kind === "conflict") {
+      return json({ error: "terminal_run_conflict" }, { status: 409 });
+    }
+    if (committed.kind === "committed") {
+      await this.broadcastRunEvent(committed.run, committed.event);
+    }
+    return json({ run: publicRunRecord(committed.run) });
   }
 
   private async readRunLog(runID: string): Promise<string> {
+    const run = await this.getRun(runID);
+    const terminalLogPrefix =
+      run?.terminalLogPrefix?.startsWith(runTerminalLogRoot(runID)) === true
+        ? run.terminalLogPrefix
+        : undefined;
+    if (terminalLogPrefix) {
+      const chunks = await this.state.storage.list<string>({
+        prefix: terminalRunLogChunkPrefix(terminalLogPrefix),
+      });
+      if (chunks.size > 0) {
+        return [...chunks.entries()]
+          .toSorted(([left], [right]) => left.localeCompare(right))
+          .map(([, chunk]) => chunk)
+          .join("");
+      }
+      return (
+        (await this.state.storage.get<string>(terminalRunLogValueKey(terminalLogPrefix))) ?? ""
+      );
+    }
     const chunks = await this.state.storage.list<string>({ prefix: runLogChunkPrefix(runID) });
     if (chunks.size > 0) {
       return [...chunks.entries()]
@@ -13452,24 +13564,6 @@ export class FleetCoordinator {
         .join("");
     }
     return (await this.state.storage.get<string>(runLogKey(runID))) ?? "";
-  }
-
-  private async writeRunLog(runID: string, log: string): Promise<void> {
-    await this.deleteRunLogChunks(runID);
-    if (textEncoder.encode(log).byteLength <= runLogChunkBytes) {
-      await this.state.storage.put(runLogKey(runID), log);
-      return;
-    }
-    await this.state.storage.put(runLogKey(runID), "");
-    const chunks = splitRunLogByBytes(log, runLogChunkBytes);
-    await Promise.all(
-      chunks.map((chunk, index) => this.state.storage.put(runLogChunkKey(runID, index), chunk)),
-    );
-  }
-
-  private async deleteRunLogChunks(runID: string): Promise<void> {
-    const chunks = await this.state.storage.list<string>({ prefix: runLogChunkPrefix(runID) });
-    await Promise.all([...chunks.keys()].map((key) => this.state.storage.delete(key)));
   }
 
   private async listRuns(request: Request): Promise<Response> {
@@ -15569,6 +15663,9 @@ export class FleetCoordinator {
         return;
       }
       await this.deleteStoragePrefix(runEventPrefix(runID));
+      if (current.terminalLogPrefix?.startsWith(runTerminalLogRoot(runID))) {
+        await this.deleteStoragePrefix(current.terminalLogPrefix);
+      }
       await this.deleteStoragePrefix(runLogChunkPrefix(runID));
       await this.state.storage.delete(runLogKey(runID));
       await this.state.storage.delete(runKey(runID));
@@ -15576,18 +15673,7 @@ export class FleetCoordinator {
   }
 
   private async deleteStoragePrefix(prefix: string): Promise<void> {
-    for (;;) {
-      // oxlint-disable-next-line eslint/no-await-in-loop -- deletion advances by removing each bounded first page.
-      const page = await this.state.storage.list({ prefix, limit: storageRecordScanBatchSize });
-      if (page.size === 0) {
-        return;
-      }
-      // oxlint-disable-next-line eslint/no-await-in-loop -- finish each bounded delete batch before loading the next one.
-      await Promise.all([...page.keys()].map((key) => this.state.storage.delete(key)));
-      if (page.size < storageRecordScanBatchSize) {
-        return;
-      }
-    }
+    await deleteStoragePrefix(this.state.storage, prefix);
   }
 
   private async externalRunnerRecords(): Promise<ExternalRunnerRecord[]> {
@@ -16923,8 +17009,24 @@ function runLogChunkPrefix(runID: string): string {
   return `runlog:${runID}:chunk:`;
 }
 
-function runLogChunkKey(runID: string, index: number): string {
-  return `${runLogChunkPrefix(runID)}${String(index).padStart(6, "0")}`;
+function runTerminalLogRoot(runID: string): string {
+  return `runlog:${runID}:finish:`;
+}
+
+function runTerminalLogPrefix(runID: string, fingerprint: string, attemptID: string): string {
+  return `${runTerminalLogRoot(runID)}${fingerprint.replace(/^sha256:/u, "")}:${attemptID}:`;
+}
+
+function terminalRunLogValueKey(prefix: string): string {
+  return `${prefix}value`;
+}
+
+function terminalRunLogChunkPrefix(prefix: string): string {
+  return `${prefix}chunk:`;
+}
+
+function terminalRunLogChunkKey(prefix: string, index: number): string {
+  return `${terminalRunLogChunkPrefix(prefix)}${String(index).padStart(6, "0")}`;
 }
 
 function runEventPrefix(runID: string): string {
@@ -20810,6 +20912,7 @@ function boundedEgressAllowlist(values: string[] | undefined): string[] {
 
 function normalizeRunLogInput(input: RunFinishRequest): {
   log: string;
+  source: string;
   bytes: number;
   truncated: boolean;
 } {
@@ -20821,9 +20924,40 @@ function normalizeRunLogInput(input: RunFinishRequest): {
   const rawBytes = textEncoder.encode(rawLog).byteLength;
   return {
     log: bounded,
+    source: rawLog,
     bytes: Math.min(rawBytes, maxStoredRunLogBytes),
     truncated: Boolean(input.logTruncated) || rawBytes > maxStoredRunLogBytes,
   };
+}
+
+async function writeTerminalRunLog(
+  storage: ProviderStateStorageView,
+  prefix: string,
+  log: string,
+): Promise<void> {
+  if (textEncoder.encode(log).byteLength <= runLogChunkBytes) {
+    await storage.put(terminalRunLogValueKey(prefix), log);
+    return;
+  }
+  await Promise.all(
+    splitRunLogByBytes(log, runLogChunkBytes).map((chunk, index) =>
+      storage.put(terminalRunLogChunkKey(prefix, index), chunk),
+    ),
+  );
+}
+
+async function deleteStoragePrefix(
+  storage: ProviderStateStorageView,
+  prefix: string,
+): Promise<void> {
+  for (;;) {
+    // oxlint-disable-next-line eslint/no-await-in-loop -- deletion advances by removing each bounded first page.
+    const page = await storage.list({ prefix, limit: storageRecordScanBatchSize });
+    if (page.size === 0) return;
+    // oxlint-disable-next-line eslint/no-await-in-loop -- finish each bounded delete batch before loading the next one.
+    await Promise.all([...page.keys()].map((key) => storage.delete(key)));
+    if (page.size < storageRecordScanBatchSize) return;
+  }
 }
 
 function splitRunLogByBytes(log: string, maxBytes: number): string[] {

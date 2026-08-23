@@ -756,6 +756,32 @@ export interface RunRecord {
   lastEventAt?: string;
   eventCount?: number;
   endedAt?: string;
+  terminalReceipt?: TerminalRunReceipt;
+  terminalFinishSHA256?: string;
+  terminalLogPrefix?: string;
+}
+
+export interface TerminalRunReceipt {
+  schema_version: 2;
+  receipt_type: "terminal";
+  started_at: string;
+  ended_at: string;
+  provider: string;
+  lease_id?: string;
+  slug?: string;
+  run_id: string;
+  command: string;
+  command_sha256: string;
+  exit_code: number;
+  sync_ms: number;
+  command_ms: number;
+  duration_ms: number;
+  log_sha256: string;
+  retained_log_sha256: string;
+  log_truncated: boolean;
+  public_key: string;
+  signer: string;
+  signature: string;
 }
 
 export interface RunCreateRequest {
@@ -780,6 +806,7 @@ export interface RunFinishRequest {
   retryLikely?: string;
   results?: TestResultSummary;
   telemetry?: RunTelemetrySummary;
+  receipt?: TerminalRunReceipt;
 }
 
 export interface RunTelemetryRequest {

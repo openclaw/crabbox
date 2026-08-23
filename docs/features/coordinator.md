@@ -179,6 +179,14 @@ begin, do not roll the coordinator back to a version that ignores their
 tombstones. A newer CLI against an older coordinator fails cancellation closed
 rather than falling back to an unsafe ID-only release.
 
+Receipt-bearing run finishes use the same fail-closed rollout rule. After every
+successful finish response, the CLI retrieves the stored receipt and requires
+an exact signed match before marking the run recorded. A coordinator that
+predates receipt persistence may accept the unknown finish field, but its
+missing receipt endpoint makes the new CLI fail visibly. Legacy CLIs may still
+finish without receipts. Roll out the coordinator before distributing a
+receipt-bearing CLI.
+
 The fixed-ID `PUT` route is fail-closed and does not replace legacy `POST`.
 It atomically reserves a versioned normalized immutable request hash before
 provider work. An identical owner-scoped replay returns an active lease or the

@@ -15,7 +15,8 @@ captures you ask for.
 
 ## What a recorded run contains
 
-The CLI creates a run handle (`run_<hex>`) before leasing starts, then appends
+The CLI creates a run handle (`run_<hex>`) before remote command execution,
+after lease resolution when the coordinator requires a lease ID, then appends
 ordered events as it advances:
 
 - `run.started`
@@ -46,6 +47,10 @@ When the command exits, the CLI finishes the run with:
 - a failure classification (`blockedStage`, `retryLikely`) on non-zero exits;
 - optional Linux telemetry: a start sample, bounded mid-run samples (every 15s,
   up to 60 retained), and an end sample covering load, memory, disk, and uptime.
+- a signed schema v2 terminal receipt from current clients, atomically committed
+  with the terminal run record. Current clients verify the exact stored receipt
+  before reporting the finish as recorded; legacy clients may finish without
+  one.
 
 ## Reading history
 
@@ -58,12 +63,22 @@ crabbox logs run_a1b2c3d4 --tail 80  # last 80 lines only
 crabbox events run_a1b2c3d4          # ordered run events
 crabbox events run_a1b2c3d4 --type stderr  # filter events by type
 crabbox attach run_a1b2c3d4          # follow an in-progress run live
+crabbox receipt run_a1b2c3d4         # retrieve and verify terminal evidence
 ```
 
 `crabbox attach` follows a still-running run, preferring the broker's live
 control WebSocket and falling back to polling. Use `attach` for active runs and
 `logs` for the retained output of a finished run. All four commands accept
 `--json`.
+
+The run record is created in coordinator storage before remote command
+execution. If the finish response or local receipt write is lost, use its run ID
+with `crabbox receipt`. The CLI prints that ID. Automation that must recover it
+after losing client output should also use `run --lease-output <file>` on a
+supported retained run; the handle is written before SSH wait, sync, or command
+execution and includes `runID`. A missing receipt is not reconstructed from logs
+or events. A receipt-bearing CLI fails closed against a coordinator that accepts
+the finish but cannot return the exact stored receipt.
 
 Run records keep the initiating actor in `owner`/`org` and retain every backing
 lease identity used by a replacement flow. Each backing lease owner has
@@ -131,4 +146,5 @@ browser-side inspection.
 - [events command](../commands/events.md)
 - [attach command](../commands/attach.md)
 - [results command](../commands/results.md)
+- [receipt command](../commands/receipt.md)
 - [Observability](../observability.md)

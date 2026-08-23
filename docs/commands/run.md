@@ -465,13 +465,28 @@ parser-sensitive PR wording stays project-owned. Default headings are
 context-neutral; put patch- or fix-specific claims in repository-owned template
 fields only when the run actually proves them.
 
-Use `--attest <path>` to write a signed run receipt after a successful run: a
-flat JSON record of the provider, lease, command, exit code, timing, and the
-SHA-256 of the combined live output stream, signed with a per-user Ed25519 key
-minted on first use under the user config dir. Check receipts later with
-[`crabbox verify`](verify.md), then compare the reported signer fingerprint
-through a trusted channel. Pass `--attest-key <path>` to sign with an existing
-PKCS8 PEM Ed25519 key instead of the default one.
+Use `--attest <path>` to write a signed receipt after a command completes,
+including non-zero exits. SSH terminal receipts use schema v2 and bind the final
+run outcome, raw command digest, timing, retained-log digest, and full observed
+stream digest. Delegated providers retain schema v1 when they report a
+definitive command exit. Check local receipts with [`crabbox verify`](verify.md).
+
+Brokered runs submit a schema v2 terminal receipt with the finish request even
+when `--attest` is omitted. The CLI verifies that the coordinator returns the
+exact persisted receipt before treating the finish as recorded, so a
+coordinator that predates receipt storage fails closed instead of silently
+discarding the evidence. Deploy the coordinator before distributing a
+receipt-bearing CLI. Retrieve and verify committed evidence later with
+[`crabbox receipt <run-id>`](receipt.md). Signing uses a per-user Ed25519 key
+minted on first use under the user config dir. Pass `--attest-key <path>` to
+use an existing PKCS8 PEM Ed25519 key instead.
+
+The coordinator creates the run record before remote command execution and the
+CLI prints its ID. An orchestrator that must recover the ID after losing the
+client output should also use `--lease-output <file>` on a supported retained
+run. That file is written before SSH wait, sync, or command execution and
+includes `runID`; its existing retention and stop-policy requirements still
+apply.
 
 ## Artifacts and downloads
 

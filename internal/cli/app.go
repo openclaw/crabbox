@@ -104,6 +104,8 @@ func (a App) directCommandHelp(ctx context.Context, args []string) (error, bool)
 		return a.attach(ctx, helpArgs), true
 	case "results":
 		return a.results(ctx, helpArgs), true
+	case "receipt":
+		return a.receipt(ctx, helpArgs), true
 	case "verify":
 		return a.verify(ctx, helpArgs), true
 	case "status":
@@ -207,6 +209,7 @@ Commands:
   events      Print recorded run events
   attach      Follow recorded events for an active run
   results     Show recorded test result summaries
+  receipt     Retrieve and verify a signed terminal run receipt
   verify      Verify a signed run receipt
   cache       Inspect, purge, warm, or list remote cache volumes
   status      Show lease state; add --wait to block until ready
