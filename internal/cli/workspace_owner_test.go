@@ -20,7 +20,7 @@ import (
 )
 
 type boundedReadSeeker struct {
-	*bytes.Reader
+	reader     *bytes.Reader
 	maxAllowed int
 	maxRead    int
 	total      int64
@@ -33,9 +33,13 @@ func (r *boundedReadSeeker) Read(data []byte) (int, error) {
 	if len(data) > r.maxRead {
 		r.maxRead = len(data)
 	}
-	n, err := r.Reader.Read(data)
+	n, err := r.reader.Read(data)
 	r.total += int64(n)
 	return n, err
+}
+
+func (r *boundedReadSeeker) Seek(offset int64, whence int) (int64, error) {
+	return r.reader.Seek(offset, whence)
 }
 
 type fakeWorkspaceOwnerRemote struct {
@@ -930,7 +934,7 @@ func TestWorkspaceOwnerWSL2InputStreamPreparationIsBoundedAndReplayable(t *testi
 	target := SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}
 	remote := workspaceOwnerRemotePreparation{command: strings.Repeat("printf stream\n", 512), ownerExpanded: true}
 	payload := bytes.Repeat([]byte{0, 1, 2, 3, 0xff}, 400_000)
-	source := &boundedReadSeeker{Reader: bytes.NewReader(payload), maxAllowed: 64 * 1024}
+	source := &boundedReadSeeker{reader: bytes.NewReader(payload), maxAllowed: 64 * 1024}
 	transport, err := prepareSSHTransport(target, remote, nil, source, int64(len(payload)), true, 0)
 	if err != nil {
 		t.Fatal(err)
