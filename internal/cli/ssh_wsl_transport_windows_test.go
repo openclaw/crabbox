@@ -5,6 +5,7 @@ package cli
 import (
 	"bytes"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/windows"
 )
 
 const fakeWSLTransportHelper = "CRABBOX_FAKE_WSL_TRANSPORT_HELPER"
@@ -44,6 +47,19 @@ func requireFakeWSL(t *testing.T, ok bool, format string, args ...any) {
 	}
 }
 
+func fakeWSLProcessExited(pid int) bool {
+	handle, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid))
+	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(handle)
+	result, err := windows.WaitForSingleObject(handle, 0)
+	return err == nil && result == windows.WAIT_OBJECT_0
+}
+
 func runFakeWSLTransportSSH(args []string) int {
 	port := ""
 	for index := range args {
@@ -70,7 +86,7 @@ func runFakeWSLTransport(args []string) int {
 		return filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(path, "/tmp/")))
 	}
 	switch {
-	case args[1] == "sh" && args[2] == "-c" && len(args) == 7:
+	case args[1] == "sh" && args[2] == "-c" && len(args) == 8:
 		dir := hostPath(args[5])
 		if mode == "stage-timeout" {
 			time.Sleep(30 * time.Second)
@@ -84,13 +100,33 @@ func runFakeWSLTransport(args []string) int {
 			return 92
 		}
 		expected, err := strconv.Atoi(args[6])
-		script, readErr := io.ReadAll(os.Stdin)
-		if err != nil || readErr != nil || len(script) != expected {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "invalid expected frame length %q: %v\n", args[6], err)
+			return 91
+		}
+		preamble, err := strconv.Atoi(args[7])
+		if err != nil || preamble < 0 {
+			fmt.Fprintf(os.Stderr, "invalid stdin preamble length %q: %v\n", args[7], err)
 			return 91
 		}
 		if os.Mkdir(dir, 0o700) != nil ||
 			os.WriteFile(filepath.Join(dir, ".crabbox-owned"), nil, 0o600) != nil ||
-			os.WriteFile(filepath.Join(dir, "script.sh"), script, 0o600) != nil {
+			os.WriteFile(filepath.Join(dir, ".crabbox-main-pid"), []byte(strconv.Itoa(os.Getpid())), 0o600) != nil {
+			return 94
+		}
+		framed, readErr := io.ReadAll(os.Stdin)
+		actual := len(framed) - preamble
+		if len(framed) < preamble {
+			actual = -1
+		}
+		if readErr != nil || actual != expected {
+			fmt.Fprintf(os.Stderr, "frame mismatch: expected=%d actual=%d read_error=%v\n", expected, actual, readErr)
+			_ = os.RemoveAll(dir)
+			return 91
+		}
+		script := framed[preamble:]
+		if os.WriteFile(filepath.Join(dir, "script.sh"), script, 0o600) != nil {
+			_ = os.RemoveAll(dir)
 			return 94
 		}
 		fmt.Printf("script=%x input=%x\n", sha256.Sum256(script), sha256.Sum256(nil))
@@ -120,6 +156,18 @@ func runFakeWSLTransport(args []string) int {
 		dir := hostPath(args[5])
 		if _, err := os.Stat(filepath.Join(dir, ".crabbox-owned")); err != nil {
 			return 0
+		}
+		pidData, readErr := os.ReadFile(filepath.Join(dir, ".crabbox-main-pid"))
+		pid, parseErr := strconv.Atoi(string(pidData))
+		if readErr != nil || parseErr != nil {
+			fmt.Fprintf(os.Stderr, "fallback cleanup pid read_error=%v parse_error=%v\n", readErr, parseErr)
+			return 97
+		}
+		exited := fakeWSLProcessExited(pid)
+		appendFakeWSLLog(fmt.Sprintf("fallback-main-exited:%t", exited))
+		if !exited {
+			fmt.Fprintln(os.Stderr, "fallback cleanup started before main process exited")
+			return 97
 		}
 		if mode == "fallback-cleanup-fail" {
 			return 42
@@ -155,7 +203,7 @@ func TestWSL2TransportStagesWithoutWindowsAutomount(t *testing.T) {
 	t.Setenv("CRABBOX_FAKE_WSL_ROOT", root)
 	t.Setenv("CRABBOX_FAKE_WSL_LOG", logPath)
 
-	run := func(command string, input []byte) (string, string, error) {
+	runReader := func(command string, input io.Reader) (string, string, error) {
 		script := decodePowerShellCommand(t, command)
 		fakeWSLQuote := psQuote(fakeWSL)
 		script = strings.ReplaceAll(
@@ -173,11 +221,14 @@ func TestWSL2TransportStagesWithoutWindowsAutomount(t *testing.T) {
 		scriptPath := filepath.Join(t.TempDir(), "transport.ps1")
 		mustWriteTestFile(t, scriptPath, script)
 		cmd := exec.Command(powerShell, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath)
-		cmd.Stdin = bytes.NewReader(input)
+		cmd.Stdin = input
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
 		err := cmd.Run()
 		return stdout.String(), stderr.String(), err
+	}
+	run := func(command string, input []byte) (string, string, error) {
+		return runReader(command, bytes.NewReader(input))
 	}
 	clearRoot := func() {
 		entries, _ := filepath.Glob(filepath.Join(root, "*"))
@@ -204,8 +255,24 @@ func TestWSL2TransportStagesWithoutWindowsAutomount(t *testing.T) {
 	requireFakeWSL(t, err != nil && strings.Contains(stderr, "timed out"), "timeout err=%v stderr=%q", err, stderr)
 	assertEmpty()
 
-	_, _, err = run(wsl2StdinScriptCommandWithWaitTimeout(len(control)+1, 5*time.Second), control)
-	requireFakeWSL(t, err != nil, "short framed control script succeeded")
+	if err := os.WriteFile(logPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	blockedInput, keepOpen, err := os.Pipe()
+	requireFakeWSL(t, err == nil, "create blocking stdin pipe: %v", err)
+	_, stderr, runErr := runReader(wsl2StdinScriptCommandWithWaitTimeout(len(control), 250*time.Millisecond), blockedInput)
+	_ = keepOpen.Close()
+	_ = blockedInput.Close()
+	requireFakeWSL(t, runErr != nil && strings.Contains(stderr, "timed out"), "copy timeout err=%v stderr=%q", runErr, stderr)
+	logData, err := os.ReadFile(logPath)
+	requireFakeWSL(t, err == nil && strings.Contains(string(logData), "fallback-main-exited:true"),
+		"copy timeout cleanup order log=%q err=%v", logData, err)
+	assertEmpty()
+
+	_, stderr, err = run(wsl2StdinScriptCommandWithWaitTimeout(len(control)+1, 5*time.Second), control)
+	frameDiagnostic := fmt.Sprintf("frame mismatch: expected=%d actual=%d read_error=<nil>", len(control)+1, len(control))
+	requireFakeWSL(t, err != nil && strings.Contains(stderr, frameDiagnostic),
+		"short frame err=%v stderr=%q want %q", err, stderr, frameDiagnostic)
 	assertEmpty()
 
 	t.Setenv("CRABBOX_FAKE_WSL_MODE", "stage-fail")
@@ -256,7 +323,7 @@ func TestWSL2TransportStagesWithoutWindowsAutomount(t *testing.T) {
 		TargetOS: targetWindows, WindowsMode: windowsModeWSL2, NoControlMaster: true,
 	}, "control", 0, "1", "1")
 	requireFakeWSL(t, err == nil && out == "second-attempt-ok", "fallback output=%q err=%v", out, err)
-	logData, err := os.ReadFile(logPath)
+	logData, err = os.ReadFile(logPath)
 	requireFakeWSL(t, err == nil, "read fallback log: %v", err)
 	lines := strings.Split(strings.TrimSpace(string(logData)), "\n")
 	requireFakeWSL(t, len(lines) == 2 && !strings.Contains(out, "first-attempt") &&

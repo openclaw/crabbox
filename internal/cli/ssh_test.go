@@ -805,17 +805,23 @@ func TestWSL2StdinScriptCommandWithWaitTimeoutReadsPayloadFromStdin(t *testing.T
 	for _, want := range []string{
 		`$expected = 12345`,
 		`/tmp/crabbox-command-`,
+		`$preamble = [Console]::InputEncoding.GetPreamble().Length`,
 		`[Console]::OpenStandardInput().CopyToAsync($process.StandardInput.BaseStream)`,
 		`$left = 15000 - [int]$watch.ElapsedMilliseconds`,
 		`$copy.Wait($left)`,
 		`$process.StandardInput.BaseStream.Close()`,
 		`: >$dir/.crabbox-owned`,
 		`trap ''rm -rf -- $dir'' EXIT`,
-		`actual=$(wc -c <$dir/script.sh)`,
+		`cat >$dir/framed`,
+		`test $actual = $((expected+preamble))`,
+		`dd if=$dir/framed of=$dir/script.sh bs=1 skip=$preamble`,
+		`test $(wc -c <$dir/script.sh) = $expected`,
 		`bash $dir/script.sh||code=$?`,
 		`trap - EXIT`,
 		`WSL2 command cleanup failed: exit `,
 		`$process.WaitForExit($left)`,
+		`$cleanupAllowed = $process.WaitForExit(5000)`,
+		`WSL2 command cleanup skipped: process still running`,
 		`test ! -f $1/.crabbox-owned||rm -rf -- $1`,
 		`$cleanup.WaitForExit(5000)`,
 		`WSL2 command cleanup failed: timed out`,
@@ -837,6 +843,22 @@ func TestWSL2StdinScriptCommandWithWaitTimeoutReadsPayloadFromStdin(t *testing.T
 	}
 	if strings.Index(decoded, `trap - EXIT`) < strings.Index(decoded, `bash $dir/script.sh`) {
 		t.Fatalf("stdin-backed WSL2 command disables cleanup before execution: %q", decoded)
+	}
+	copyWait := strings.Index(decoded, `$copy.Wait($left)`)
+	if copyWait < 0 {
+		t.Fatalf("stdin-backed WSL2 command missing copy wait: %q", decoded)
+	}
+	copyTimeout := decoded[copyWait:]
+	copyKill := strings.Index(copyTimeout, `$process.Kill($true)`)
+	copyExit := strings.Index(copyTimeout, `$cleanupAllowed = $process.WaitForExit(5000)`)
+	copyThrow := strings.Index(copyTimeout, `throw "WSL2 command timed out after 15s"`)
+	if copyKill < 0 || copyExit < copyKill || copyThrow < copyExit {
+		t.Fatalf("stdin-backed WSL2 command does not wait for copy process exit before cleanup: %q", decoded)
+	}
+	cleanupGate := strings.Index(decoded, `if (-not $cleanupAllowed)`)
+	fallbackCleanup := strings.Index(decoded, `$cleanupInfo = [System.Diagnostics.ProcessStartInfo]::new("wsl.exe")`)
+	if cleanupGate < copyThrow || fallbackCleanup < cleanupGate {
+		t.Fatalf("stdin-backed WSL2 command does not gate fallback cleanup on process exit: %q", decoded)
 	}
 }
 

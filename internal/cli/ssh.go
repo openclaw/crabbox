@@ -1188,7 +1188,8 @@ exit $code`)
 
 func wsl2StdinScriptCommandWithWaitTimeout(inputSize int, waitTimeout time.Duration) string {
 	// Keep staging, execution, and cleanup in one WSL process so the timeout
-	// covers the lifecycle; the marker lets timeout cleanup preserve collisions.
+	// covers the lifecycle. The frame accounts for .NET's stdin preamble, and
+	// the marker lets post-exit cleanup preserve collisions.
 	wait := `$process.WaitForExit()
   $code = $process.ExitCode`
 	copyScript := `[Console]::OpenStandardInput().CopyTo($process.StandardInput.BaseStream)`
@@ -1204,7 +1205,7 @@ func wsl2StdinScriptCommandWithWaitTimeout(inputSize int, waitTimeout time.Durat
     } catch {
       $process.Kill()
     }
-    $process.WaitForExit(5000) | Out-Null
+    $cleanupAllowed = $process.WaitForExit(5000)
     throw "WSL2 command timed out after %s"
   }
   $code = $process.ExitCode`, waitMS, waitTimeout.Round(time.Second))
@@ -1216,6 +1217,7 @@ func wsl2StdinScriptCommandWithWaitTimeout(inputSize int, waitTimeout time.Durat
       } catch {
         $process.Kill()
       }
+      $cleanupAllowed = $process.WaitForExit(5000)
       throw "WSL2 command timed out after %s"
     }`, waitMS, waitTimeout.Round(time.Second))
 	}
@@ -1224,10 +1226,12 @@ $ProgressPreference = "SilentlyContinue"
 $dir = "/tmp/crabbox-command-" + [Guid]::NewGuid().ToString("N")
 $expected = ` + strconv.Itoa(inputSize) + `
 $failure = $null
-` + watch + `$psi = [System.Diagnostics.ProcessStartInfo]::new("wsl.exe")
+$cleanupAllowed = $true
+` + watch + `$preamble = [Console]::InputEncoding.GetPreamble().Length
+$psi = [System.Diagnostics.ProcessStartInfo]::new("wsl.exe")
 $psi.UseShellExecute = $false
 $psi.RedirectStandardInput = $true
-$psi.Arguments = '--exec sh -c "set -u;umask 077;dir=$1;expected=$2;mkdir -m 700 -- $dir||exit;: >$dir/.crabbox-owned;trap ''rm -rf -- $dir'' EXIT;cat >$dir/script.sh||exit;actual=$(wc -c <$dir/script.sh);test $actual = $expected||exit;code=0;bash $dir/script.sh||code=$?;rm -rf -- $dir;cleanup=$?;trap - EXIT;if [ $cleanup -ne 0 ];then echo ''WSL2 command cleanup failed: exit ''$cleanup >&2;[ $code -ne 0 ]||code=$cleanup;fi;exit $code" sh ' + $dir + ' ' + $expected
+$psi.Arguments = '--exec sh -c "set -u;umask 077;dir=$1;expected=$2;preamble=$3;mkdir -m 700 -- $dir||exit;: >$dir/.crabbox-owned;trap ''rm -rf -- $dir'' EXIT;cat >$dir/framed||exit;actual=$(wc -c <$dir/framed);test $actual = $((expected+preamble))||exit;dd if=$dir/framed of=$dir/script.sh bs=1 skip=$preamble 2>/dev/null||exit;rm -f -- $dir/framed;test $(wc -c <$dir/script.sh) = $expected||exit;code=0;bash $dir/script.sh||code=$?;rm -rf -- $dir;cleanup=$?;trap - EXIT;if [ $cleanup -ne 0 ];then echo ''WSL2 command cleanup failed: exit ''$cleanup >&2;[ $code -ne 0 ]||code=$cleanup;fi;exit $code" sh ' + $dir + ' ' + $expected + ' ' + $preamble
 $process = [System.Diagnostics.Process]::Start($psi)
 try {
   try {
@@ -1240,6 +1244,10 @@ try {
   $failure = $_
 }
 if ($null -ne $failure) {
+  if (-not $cleanupAllowed) {
+    [Console]::Error.WriteLine("WSL2 command cleanup skipped: process still running")
+    throw $failure
+  }
   try {
     $cleanupInfo = [System.Diagnostics.ProcessStartInfo]::new("wsl.exe")
     $cleanupInfo.UseShellExecute = $false
