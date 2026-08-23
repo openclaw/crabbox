@@ -4583,8 +4583,12 @@ func TestWindowsWSL2RemoteCapabilityPreflightUsesBoundedWrapper(t *testing.T) {
 	}
 	decoded := decodePowerShellCommand(t, commands[0])
 	for _, want := range []string{
-		`[Console]::OpenStandardInput().CopyTo($script)`,
-		`$process.WaitForExit(15000)`,
+		`[Console]::OpenStandardInput().CopyToAsync($process.StandardInput.BaseStream)`,
+		`$left = 15000 - [int]$watch.ElapsedMilliseconds`,
+		`$copy.Wait($left)`,
+		`$process.WaitForExit($left)`,
+		`$cleanupAllowed = $process.WaitForExit(5000)`,
+		`if (-not $cleanupAllowed)`,
 		`throw "WSL2 command timed out after 15s"`,
 	} {
 		if !strings.Contains(decoded, want) {
