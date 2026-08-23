@@ -600,6 +600,43 @@ func TestAWSReleaseRejectsFixedTagWithoutDurableClaim(t *testing.T) {
 	}
 }
 
+func TestAWSOrdinaryReleaseRejectsMissingOrStaleExactClaim(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*Server)
+		seed   bool
+	}{
+		{name: "missing claim"},
+		{name: "different instance", seed: true, mutate: func(server *Server) { server.CloudID = "i-replacement" }},
+		{name: "different region", seed: true, mutate: func(server *Server) { server.Labels["aws_region"] = "us-west-2" }},
+		{name: "different provider key", seed: true, mutate: func(server *Server) { server.Labels["provider_key"] = "crabbox-cbx-000000000000" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			testutil.IsolateUserDirs(t)
+			server := awsTestServer("i-ordinary-owned", "cbx_abcdef1234aa", "ordinary-owned", "us-east-1")
+			server.Labels["provider_key"] = core.ProviderKeyForLease(server.Labels["lease"])
+			fake := &fakeAWSClient{servers: []Server{server}}
+			restore := installFixedAWSTestClient(t, fake)
+			defer restore()
+			cfg := fixedAWSTestConfig()
+			if test.seed {
+				if err := core.ClaimLeaseTargetForConfig(server.Labels["lease"], server.Labels["slug"], cfg, server, SSHTarget{}, time.Hour); err != nil {
+					t.Fatal(err)
+				}
+				test.mutate(&server)
+			}
+			backend := NewAWSLeaseBackend(ProviderSpec{}, cfg, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+			err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: server.Labels["lease"], Server: server}})
+			if err == nil || !strings.Contains(err.Error(), "exact local claim") {
+				t.Fatalf("release err=%v, want exact-claim rejection", err)
+			}
+			if len(fake.deletedInstances) != 0 || len(fake.deletedKeys) != 0 {
+				t.Fatalf("destructive calls escaped claim fence: instances=%v keys=%v", fake.deletedInstances, fake.deletedKeys)
+			}
+		})
+	}
+}
+
 func mustListAWSClaims(t *testing.T) []core.LeaseClaim {
 	t.Helper()
 	claims, err := core.ListLeaseClaims()
@@ -1078,6 +1115,7 @@ func TestAWSAcquireDoesNotDeleteProviderKeyByNameOnCreateFailure(t *testing.T) {
 }
 
 func TestAWSResolveAndReleaseUseFallbackRegion(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	east := &fakeAWSClient{}
 	west := &fakeAWSClient{servers: []Server{awsTestServer("i-west", "cbx_fedcba654321", "west", "us-west-2")}}
 	west.servers[0].Labels["provider_key"] = "crabbox-cbx-fedcba654321"
@@ -1104,6 +1142,9 @@ func TestAWSResolveAndReleaseUseFallbackRegion(t *testing.T) {
 	}
 	if lease.Server.CloudID != "i-west" || lease.Server.Labels["aws_region"] != "us-west-2" {
 		t.Fatalf("lease=%#v, want west-region server", lease.Server)
+	}
+	if err := core.ClaimLeaseTargetForConfig(lease.LeaseID, lease.Server.Labels["slug"], cfg, lease.Server, SSHTarget{}, time.Hour); err != nil {
+		t.Fatal(err)
 	}
 	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
 		t.Fatal(err)
@@ -1254,7 +1295,10 @@ func TestAWSReleaseRemovesClaimWhenProviderKeyDeletionFails(t *testing.T) {
 	testutil.IsolateUserDirs(t)
 	leaseID := "cbx_abcdef123456"
 	keyName := "crabbox-cbx-abcdef123456"
-	if err := core.ClaimLeaseForRepoProvider(leaseID, "partial-release", "aws", t.TempDir(), time.Minute, false); err != nil {
+	server := awsTestServer("i-partial", leaseID, "partial-release", "us-west-2")
+	server.Labels["provider_key"] = keyName
+	cfg := Config{Provider: "aws", AWSRegion: "us-west-2"}
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "partial-release", cfg, server, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
 		t.Fatalf("seed claim: %v", err)
 	}
 	keyErr := errors.New("iam denied key deletion")
@@ -1265,9 +1309,7 @@ func TestAWSReleaseRemovesClaimWhenProviderKeyDeletionFails(t *testing.T) {
 	}
 	t.Cleanup(func() { newAWSClient = oldClient })
 
-	server := awsTestServer("i-partial", leaseID, "partial-release", "us-west-2")
-	server.Labels["provider_key"] = keyName
-	backend := NewAWSLeaseBackend(ProviderSpec{}, Config{Provider: "aws", AWSRegion: "us-west-2"}, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+	backend := NewAWSLeaseBackend(ProviderSpec{}, cfg, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
 	err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{Server: server, LeaseID: leaseID}})
 	if !errors.Is(err, keyErr) {
 		t.Fatalf("err=%v, want wrapped key deletion error", err)
