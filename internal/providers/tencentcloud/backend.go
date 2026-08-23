@@ -35,6 +35,7 @@ func NewBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.B
 		b.now = func() time.Time { return rt.Clock.Now().UTC() }
 	}
 	b.Delete = b.deleteServer
+	b.PrepareCleanup = b.prepareCleanupServer
 	return b
 }
 
@@ -420,59 +421,73 @@ func (b *Backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	return b.CleanupServers(ctx, req, servers)
 }
 
+func (b *Backend) cleanupClaimBinding(server core.Server) shared.ClaimBinding {
+	requiredLabels := map[string]string{}
+	if accountID := strings.TrimSpace(server.Labels[accountLabel]); accountID != "" {
+		requiredLabels[accountLabel] = accountID
+	}
+	if providerKey := strings.TrimSpace(server.Labels["provider_key"]); providerKey != "" {
+		requiredLabels["provider_key"] = providerKey
+	}
+	return shared.ClaimBinding{
+		Provider:       providerName,
+		ProviderScope:  core.ProviderClaimScope(providerName, b.Cfg),
+		LeaseID:        strings.TrimSpace(server.Labels["lease"]),
+		Slug:           strings.TrimSpace(server.Labels["slug"]),
+		CloudID:        strings.TrimSpace(server.CloudID),
+		RequiredLabels: requiredLabels,
+	}
+}
+
+func (b *Backend) prepareCleanupServer(_ context.Context, server core.Server) (core.Server, bool, shared.CleanupSkipReason, error) {
+	claim, err := shared.RequireExactClaim(b.cleanupClaimBinding(server))
+	if err != nil {
+		eligible, cleanupErr := shared.CleanupClaimEligible(err)
+		return server, eligible, shared.CleanupSkipNoExactLocalClaim, cleanupErr
+	}
+	core.SetServerLeaseClaimSnapshot(&server, claim, true)
+	return server, true, "", nil
+}
+
 func (b *Backend) deleteServer(ctx context.Context, _ core.Config, server core.Server) error {
 	if !ownedLabels(server.Labels) {
 		return core.Exit(2, "refusing to delete non-crabbox Tencent Cloud instance %s", server.DisplayID())
 	}
-	client, err := b.clientFactory(b.Cfg, b.RT)
+	binding := b.cleanupClaimBinding(server)
+	claim, err := shared.RequireExactClaim(binding)
 	if err != nil {
 		return err
 	}
-	accountID, err := client.AccountID(ctx)
-	if err != nil {
-		return err
+	if snapshot, _, set := core.ServerLeaseClaimSnapshot(server); set {
+		claim = snapshot
 	}
-	if expected := strings.TrimSpace(server.Labels[accountLabel]); expected != "" && expected != accountID {
-		return core.Exit(3, "tencentcloud account mismatch: current account %s does not match lease account %s", accountID, expected)
-	}
-	live := false
-	if server.CloudID != "" {
+	if err := shared.RemoveExactClaimAfter(claim, binding, func() error {
+		client, err := b.clientFactory(b.Cfg, b.RT)
+		if err != nil {
+			return err
+		}
+		accountID, err := client.AccountID(ctx)
+		if err != nil {
+			return err
+		}
+		if expected := strings.TrimSpace(claim.Labels[accountLabel]); expected == "" || expected != accountID {
+			return core.Exit(3, "tencentcloud account mismatch: current account %s does not match lease account %s", accountID, expected)
+		}
 		item, err := client.GetInstance(ctx, server.CloudID)
-		if err == nil {
-			if err := validateLiveInstance(item, server); err != nil {
-				return err
+		if err != nil {
+			if isNotFound(err) {
+				return nil
 			}
-			live = true
-		} else if !isNotFound(err) {
 			return err
 		}
-	}
-	leaseID := server.Labels["lease"]
-	claim, claimExists, err := core.ReadLeaseClaimWithPresence(leaseID)
-	if err != nil {
-		return fmt.Errorf("read tencentcloud cleanup claim: %w", err)
-	}
-	if claimExists {
-		if claim.Provider == providerName {
-			if err := validateClaimIdentity(claim, leaseID, server.Labels["slug"]); err != nil {
-				return err
-			}
-			if claim.CloudID != "" && claim.CloudID != server.CloudID {
-				return core.Exit(2, "refusing to release Tencent Cloud instance %s from stale local claim", server.CloudID)
-			}
-		}
-	}
-	if live {
-		if err := client.TerminateInstance(ctx, server.CloudID); err != nil {
+		if err := validateLiveInstance(item, server); err != nil {
 			return err
 		}
+		return client.TerminateInstance(ctx, server.CloudID)
+	}); err != nil {
+		return fmt.Errorf("finalize tencentcloud cleanup claim: %w", err)
 	}
-	if claimExists && claim.Provider == providerName {
-		if err := core.RemoveLeaseClaimIfUnchanged(leaseID, claim); err != nil {
-			return fmt.Errorf("finalize tencentcloud cleanup claim: %w", err)
-		}
-	}
-	core.RemoveStoredTestboxKey(leaseID)
+	core.RemoveStoredTestboxKey(binding.LeaseID)
 	return nil
 }
 

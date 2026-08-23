@@ -30,6 +30,7 @@ func NewBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 		return core.WaitForSSHReady(ctx, target, b.RT.Stderr, phase, timeout)
 	}
 	b.Delete = b.deleteServer
+	b.PrepareCleanup = b.prepareCleanupServer
 	return b
 }
 
@@ -320,26 +321,47 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	return b.CleanupServers(ctx, req, servers)
 }
 
+func (b *backend) cleanupClaimBinding(server Server) shared.ClaimBinding {
+	return shared.ClaimBinding{
+		Provider:      providerName,
+		ProviderScope: core.ProviderClaimScope(providerName, b.Cfg),
+		LeaseID:       strings.TrimSpace(server.Labels["lease"]),
+		Slug:          strings.TrimSpace(server.Labels["slug"]),
+		CloudID:       strings.TrimSpace(server.CloudID),
+		RequiredLabels: map[string]string{
+			nebiusScopeLabel: server.Labels[nebiusScopeLabel],
+		},
+	}
+}
+
+func (b *backend) prepareCleanupServer(_ context.Context, server Server) (Server, bool, shared.CleanupSkipReason, error) {
+	claim, err := shared.RequireExactClaim(b.cleanupClaimBinding(server))
+	if err != nil {
+		eligible, cleanupErr := shared.CleanupClaimEligible(err)
+		return server, eligible, shared.CleanupSkipNoExactLocalClaim, cleanupErr
+	}
+	core.SetServerLeaseClaimSnapshot(&server, claim, true)
+	return server, true, "", nil
+}
+
 func (b *backend) deleteServer(ctx context.Context, _ Config, server Server) error {
 	if err := validateNebiusOwnership(server.Labels, b.Cfg); err != nil {
 		return err
 	}
-	leaseID := strings.TrimSpace(server.Labels["lease"])
-	claim, claimExists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if strings.TrimSpace(server.CloudID) == "" {
+		return core.Exit(4, "nebius recovery claim for lease=%s has no instance identity; key and claim retained", strings.TrimSpace(server.Labels["lease"]))
+	}
+	binding := b.cleanupClaimBinding(server)
+	claim, err := shared.RequireExactClaim(binding)
 	if err != nil {
 		return err
 	}
-	if claimExists {
-		if claim.Provider != providerName || claim.LeaseID != leaseID || (claim.CloudID != "" && server.CloudID != "" && claim.CloudID != server.CloudID) || (claim.Slug != "" && claim.Slug != server.Labels["slug"]) {
-			return core.Exit(3, "nebius local claim changed for instance %s; refusing release", server.DisplayID())
-		}
+	if snapshot, _, set := core.ServerLeaseClaimSnapshot(server); set {
+		claim = snapshot
 	}
-	if strings.TrimSpace(server.CloudID) == "" {
-		return core.Exit(4, "nebius recovery claim for lease=%s has no instance identity; key and claim retained", leaseID)
-	}
-	client := b.clientFactory(b.RT)
 	confirmedAbsent := false
-	if server.CloudID != "" {
+	if err := shared.RemoveExactClaimAfter(claim, binding, func() error {
+		client := b.clientFactory(b.RT)
 		live, err := client.GetInstance(ctx, server.CloudID)
 		if err == nil {
 			liveServer := serverFromInstance(live, b.Cfg)
@@ -354,25 +376,23 @@ func (b *backend) deleteServer(ctx context.Context, _ Config, server Server) err
 		} else {
 			confirmedAbsent = true
 		}
-	}
-	if !confirmedAbsent {
-		if err := client.DeleteInstance(ctx, server.CloudID); err != nil {
-			if isNebiusInstanceNotFound(err, server.CloudID) {
-				confirmedAbsent = true
-			} else {
-				return err
+		if !confirmedAbsent {
+			if err := client.DeleteInstance(ctx, server.CloudID); err != nil {
+				if isNebiusInstanceNotFound(err, server.CloudID) {
+					confirmedAbsent = true
+				} else {
+					return err
+				}
 			}
 		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("finalize nebius cleanup claim: %w", err)
 	}
 	if confirmedAbsent {
 		fmt.Fprintf(b.RT.Stderr, "nebius instance id=%s already absent; cleaning local lease state\n", server.DisplayID())
 	}
-	if claimExists {
-		if err := core.RemoveLeaseClaimIfUnchanged(leaseID, claim); err != nil {
-			return fmt.Errorf("finalize nebius cleanup claim: %w", err)
-		}
-	}
-	core.RemoveStoredTestboxKey(leaseID)
+	core.RemoveStoredTestboxKey(binding.LeaseID)
 	return nil
 }
 

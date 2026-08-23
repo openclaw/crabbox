@@ -329,6 +329,10 @@ func TestReleaseAndCleanupRefuseForeignOrAmbiguousResources(t *testing.T) {
 		{ID: "vm-partial", Name: "partial", Status: "RUNNING", Labels: map[string]string{"crabbox": "true", "provider": providerName}, PublicIP: "203.0.113.12"},
 	}}
 	b := newTestBackend(t, api)
+	ownedServer := serverFromInstance(api.items[0], b.Cfg)
+	if err := core.ClaimLeaseTargetForRepoConfig(ownedServer.Labels["lease"], ownedServer.Labels["slug"], b.Cfg, ownedServer, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
 	if err := b.Cleanup(context.Background(), CleanupRequest{DryRun: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -343,6 +347,50 @@ func TestReleaseAndCleanupRefuseForeignOrAmbiguousResources(t *testing.T) {
 	}
 	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: "cbx_deadbeef1234", Server: Server{CloudID: "vm-foreign", Labels: foreign}}}); err == nil {
 		t.Fatal("ReleaseLease accepted foreign ownership")
+	}
+}
+
+func TestNebiusReleaseRejectsMissingOrStaleExactOwnership(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		seedClaim bool
+		staleID   bool
+	}{
+		{name: "missing claim"},
+		{name: "stale resource claim", seedClaim: true, staleID: true},
+		{name: "exact resource claim", seedClaim: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := testConfig()
+			leaseID := "cbx_abcdef123459"
+			labels := nebiusLeaseLabels(cfg, leaseID, "ownership", "ready", false, time.Unix(1000, 0))
+			item := nebiusInstance{ID: "vm-owned", Name: "ownership", Status: "RUNNING", Labels: labels, PublicIP: "203.0.113.20"}
+			api := &fakeNebiusAPI{items: []nebiusInstance{item}}
+			b := newTestBackend(t, api)
+			server := serverFromInstance(item, b.Cfg)
+			if test.seedClaim {
+				claimed := server
+				if test.staleID {
+					claimed.CloudID = "vm-original"
+				}
+				if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "ownership", b.Cfg, claimed, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}})
+			if test.seedClaim && !test.staleID {
+				if err != nil || strings.Join(api.deletedIDs, ",") != item.ID {
+					t.Fatalf("owned release err=%v deleted=%v", err, api.deletedIDs)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "exact local ownership claim") {
+				t.Fatalf("unowned release err=%v", err)
+			}
+			if len(api.deletedIDs) != 0 {
+				t.Fatalf("unowned instance was deleted: %v", api.deletedIDs)
+			}
+		})
 	}
 }
 
@@ -535,7 +583,7 @@ func TestReleaseCleansLocalClaimWhenInstanceAlreadyAbsent(t *testing.T) {
 	}
 }
 
-func TestReleaseRetainsClaimChangedDuringDelete(t *testing.T) {
+func TestReleaseFencesClaimMutationDuringDelete(t *testing.T) {
 	cfg := testConfig()
 	leaseID := "cbx_changed12345"
 	slug := "changed-release"
@@ -551,20 +599,32 @@ func TestReleaseRetainsClaimChangedDuringDelete(t *testing.T) {
 	if err != nil || !exists {
 		t.Fatalf("claim exists=%v err=%v", exists, err)
 	}
+	updateStarted := make(chan struct{})
+	updateDone := make(chan error, 1)
 	api.deleteFn = func(context.Context, string) {
 		changed := shared.CloneLabels(original.Labels)
 		changed["state"] = "renewed"
-		if _, updateErr := core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, original, changed); updateErr != nil {
-			t.Errorf("update claim during delete: %v", updateErr)
+		go func() {
+			close(updateStarted)
+			_, updateErr := core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, original, changed)
+			updateDone <- updateErr
+		}()
+		<-updateStarted
+		select {
+		case updateErr := <-updateDone:
+			t.Errorf("claim mutation escaped the destructive-operation fence: %v", updateErr)
+		default:
 		}
 	}
 	err = b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}})
-	if err == nil || !strings.Contains(err.Error(), "claim changed") {
+	if err != nil {
 		t.Fatalf("ReleaseLease err=%v", err)
 	}
-	claim, exists, readErr := core.ReadLeaseClaimWithPresence(leaseID)
-	if readErr != nil || !exists || claim.Labels["state"] != "renewed" {
-		t.Fatalf("changed claim exists=%v err=%v claim=%#v", exists, readErr, claim)
+	if updateErr := <-updateDone; updateErr == nil || !strings.Contains(updateErr.Error(), "claim changed") {
+		t.Fatalf("claim mutation after deletion err=%v", updateErr)
+	}
+	if claim, exists, readErr := core.ReadLeaseClaimWithPresence(leaseID); readErr != nil || exists {
+		t.Fatalf("deleted claim exists=%v err=%v claim=%#v", exists, readErr, claim)
 	}
 }
 

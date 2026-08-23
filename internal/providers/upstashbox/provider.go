@@ -19,6 +19,8 @@ func (Provider) Aliases() []string {
 	return []string{"upstash", "box", "upstashbox"}
 }
 
+func (Provider) ClaimScope(cfg core.Config) string { return upstashBoxClaimScope(cfg) }
+
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Name:             providerName,

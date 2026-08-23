@@ -161,7 +161,9 @@ STS and `DescribeInstances`; it does not create resources.
 5. Run normal Crabbox sync/run/ssh workflows over SSH.
 6. Update timeout/Tailscale tags on touch.
 7. Terminate the CVM instance on `stop`; `cleanup` deletes only expired
-   resources whose live tags still prove Crabbox ownership.
+   resources with an exact local lease, instance, provider-key, and account
+   claim. The claim remains locked across live-tag verification and termination;
+   matching provider tags without that local claim are never deletion authority.
 
 ## Network And Security Groups
 

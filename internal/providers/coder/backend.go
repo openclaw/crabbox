@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const (
@@ -18,6 +20,8 @@ const (
 	coderReleaseActionStop   = "stop"
 	coderReleaseActionDelete = "delete"
 )
+
+var coderWorkspaceUUID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 type coderLeaseBackend struct {
 	spec ProviderSpec
@@ -192,6 +196,9 @@ func (b *coderLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Le
 		return LeaseTarget{}, err
 	}
 	claim, hasClaim := coderClaimForWorkspaceInInventory(claims, workspace, nameCounts)
+	if req.ReleaseOnly && (!hasClaim || claim.LeaseID != leaseID) {
+		return LeaseTarget{}, exit(2, "provider=coder refuses to release workspace %s without an exact local ownership claim", coderWorkspaceCommandName(workspace))
+	}
 	server := coderWorkspaceToServerWithClaim(workspace, b.cfg, leaseID, slug, keep, claim, hasClaim)
 	workspaceRef := coderWorkspaceCommandName(workspace)
 	if req.ReleaseOnly || req.StatusOnly {
@@ -327,10 +334,6 @@ func (b *coderLeaseBackend) Doctor(ctx context.Context, _ DoctorRequest) (Doctor
 }
 
 func (b *coderLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
-	client, err := newCoderClient(b.cfg, b.rt)
-	if err != nil {
-		return err
-	}
 	name := strings.TrimSpace(req.Lease.Server.Labels["coder_workspace_ref"])
 	if name == "" {
 		name = strings.TrimSpace(req.Lease.Server.Labels["coder_workspace"])
@@ -344,16 +347,55 @@ func (b *coderLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRe
 	if name == "" {
 		return exit(2, "coder release requires a workspace name")
 	}
-	err = b.releaseWorkspace(ctx, client, name)
+	requiredLabels := map[string]string{"coder_workspace_ref": name}
+	if workspaceID := strings.TrimSpace(req.Lease.Server.Labels["coder_workspace_id"]); workspaceID != "" {
+		requiredLabels["coder_workspace_id"] = workspaceID
+	}
+	binding := shared.ClaimBinding{
+		Provider:       coderProvider,
+		LeaseID:        strings.TrimSpace(req.Lease.LeaseID),
+		Slug:           strings.TrimSpace(req.Lease.Server.Labels["slug"]),
+		CloudID:        name,
+		RequiredLabels: requiredLabels,
+	}
+	claim, err := shared.RequireExactClaim(binding)
 	if err != nil {
-		if coderWorkspaceMissingError(err) && req.Lease.LeaseID != "" {
-			removeLeaseClaim(req.Lease.LeaseID)
-			return nil
-		}
 		return err
 	}
-	removeLeaseClaim(req.Lease.LeaseID)
-	return nil
+	return shared.RemoveExactClaimAfter(claim, binding, func() error {
+		expected := strings.TrimSpace(claim.Labels["coder_workspace_id"])
+		if !coderWorkspaceUUID.MatchString(expected) {
+			return exit(2, "coder workspace %s has no canonical immutable workspace ID in its exact local ownership claim", name)
+		}
+		client, err := newCoderClient(b.cfg, b.rt)
+		if err != nil {
+			return err
+		}
+		list := client.list
+		if strings.Contains(name, "/") {
+			list = client.listAll
+		}
+		workspaces, err := list(ctx)
+		if err != nil {
+			return err
+		}
+		var found bool
+		for _, workspace := range workspaces {
+			if workspace.ID == expected {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil
+		}
+		// Dashed UUIDs cannot be valid Coder workspace names, so its CLI cannot
+		// fall back to a reused name if this immutable workspace disappears.
+		if err := b.releaseWorkspace(ctx, client, expected); err != nil && !coderWorkspaceMissingError(err) {
+			return err
+		}
+		return nil
+	})
 }
 
 func (b *coderLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
@@ -398,10 +440,10 @@ func (b *coderLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) err
 		if !owned && !hasClaim {
 			continue
 		}
-		if leaseID == "" && hasClaim {
+		if hasClaim {
 			leaseID = claim.LeaseID
 		}
-		if slug == "" && hasClaim {
+		if hasClaim && claim.Slug != "" {
 			slug = claim.Slug
 		}
 		server := coderWorkspaceToServerWithClaim(workspace, b.cfg, leaseID, slug, false, claim, hasClaim)
@@ -410,20 +452,23 @@ func (b *coderLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) err
 			fmt.Fprintf(b.rt.Stderr, "skip coder workspace=%s reason=%s\n", workspace.Name, reason)
 			continue
 		}
+		if !hasClaim || claim.CloudID != coderWorkspaceCommandName(workspace) ||
+			!coderWorkspaceUUID.MatchString(claim.Labels["coder_workspace_id"]) ||
+			claim.Labels["coder_workspace_id"] != workspace.ID {
+			fmt.Fprintf(b.rt.Stderr, "skip coder workspace=%s reason=missing or stale exact immutable ownership claim\n", workspace.Name)
+			continue
+		}
 		action := coderCleanupReleaseAction(claim, hasClaim)
 		fmt.Fprintf(b.rt.Stdout, "coder cleanup %s workspace=%s lease=%s reason=%s dry_run=%t\n", action, workspace.Name, blank(leaseID, "-"), reason, req.DryRun)
 		if req.DryRun {
 			continue
 		}
-		if action == coderReleaseActionDelete {
-			if err := client.delete(ctx, coderWorkspaceCommandName(workspace)); err != nil {
-				return err
-			}
-		} else if err := client.stop(ctx, coderWorkspaceCommandName(workspace)); err != nil {
+		releaseBackend := *b
+		releaseBackend.cfg.Coder.DeleteOnRelease = action == coderReleaseActionDelete
+		if err := releaseBackend.ReleaseLease(ctx, ReleaseLeaseRequest{
+			Lease: LeaseTarget{LeaseID: leaseID, Server: server},
+		}); err != nil {
 			return err
-		}
-		if leaseID != "" {
-			removeLeaseClaim(leaseID)
 		}
 	}
 	return nil
@@ -782,6 +827,9 @@ func coderWorkspaceToServerWithClaim(workspace coderWorkspace, cfg Config, lease
 	}
 	labels["coder_workspace"] = workspace.Name
 	labels["coder_workspace_ref"] = coderWorkspaceCommandName(workspace)
+	if workspace.ID != "" {
+		labels["coder_workspace_id"] = workspace.ID
+	}
 	labels["work_root"] = coderWorkRoot(cfg)
 	labels["state"] = coderWorkspaceState(workspace)
 	server := Server{CloudID: coderWorkspaceCommandName(workspace), Provider: coderProvider, Name: workspace.Name, Status: labels["state"], Labels: labels}

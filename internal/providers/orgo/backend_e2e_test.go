@@ -67,6 +67,11 @@ func TestOrgoBackendEndToEndCreateRunDelete(t *testing.T) {
 			}
 			zero := 0
 			_ = json.NewEncoder(w).Encode(orgoBashResponse{Stdout: "crabbox-orgo-ok\n", ExitCodeCamel: &zero})
+		case r.Method == http.MethodGet && r.URL.Path == "/computers/"+computerID:
+			mark("verify_computer")
+			_ = json.NewEncoder(w).Encode(orgoComputer{
+				ID: computerID, InstanceID: "instance_e2e", WorkspaceID: workspaceID, Status: "running",
+			})
 		case r.Method == http.MethodDelete && r.URL.Path == "/computers/"+computerID:
 			mark("delete_computer")
 			w.WriteHeader(http.StatusNoContent)
@@ -105,7 +110,7 @@ func TestOrgoBackendEndToEndCreateRunDelete(t *testing.T) {
 	if !strings.Contains(out.String(), "crabbox-orgo-ok") {
 		t.Fatalf("stdout=%q, want it to contain crabbox-orgo-ok", out.String())
 	}
-	for _, k := range []string{"create_workspace", "create_computer", "run_bash", "delete_computer", "delete_workspace"} {
+	for _, k := range []string{"create_workspace", "create_computer", "run_bash", "verify_computer", "delete_computer", "delete_workspace"} {
 		if !hit[k] {
 			t.Fatalf("missing expected Orgo API call %q (hits=%v)", k, hit)
 		}

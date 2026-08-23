@@ -422,6 +422,15 @@ can resume without trusting reused names. Cleanup skips weakly labeled,
 unclaimed, and stale-claim servers instead of turning provider inventory into
 ownership proof.
 
+Tencent Cloud, Nebius, Vast, Orgo, Upstash Box, and Coder follow the same
+provider-neutral destructive ownership contract: a durable local claim must
+bind the provider, lease, exact resource identity, slug, and any applicable
+endpoint, account, workspace, or provider-key namespace. Crabbox holds the
+per-lease claim lock across final provider identity checks, the destructive
+operation, and claim removal or retained-state update. Names, provider tags,
+and inventory matches remain discovery hints; missing, stale, or concurrently
+replaced claims never authorize deletion or stopping.
+
 Artifact publishing rejects symlinks, directories at reserved generated-output
 paths, and other non-regular bundle entries before upload side effects.
 Publishing copies validated file objects into a private snapshot before broker,
@@ -706,7 +715,12 @@ Brokered cloud orphan sweeps treat coordinator lease state as the authority.
 Provider tags discover candidates and explain why they look stale, but do not
 authorize a destructive action. Automatic AWS or Azure deletion requires an
 exact retained coordinator lease binding for the same provider resource and
-region; EC2 Mac host release likewise requires an exact retained host binding.
+region; both automatic and administrator-requested EC2 Mac host release
+likewise require an exact retained host binding plus freshly verified Crabbox
+provider tags. Administrative release also checks the account namespace
+recorded before Mac host provisioning against the current authenticated STS
+identity and clears its retained host binding only after AWS confirms release.
+Administrative confirmation cannot substitute for ownership.
 Azure's canonical-set, topology, stable-identity, quarantine, and fresh-preflight
 rules are maintained in [Lifecycle and cleanup](features/lifecycle-cleanup.md);
 shared VNets, subnets, NSGs, and resource groups are never sweep candidates.

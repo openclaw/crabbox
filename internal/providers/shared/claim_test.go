@@ -117,6 +117,40 @@ func TestResolveProviderClaimStrict(t *testing.T) {
 	}
 }
 
+func TestExactClaimOwnershipRejectsMissingAndStaleBindings(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	want := ClaimBinding{
+		Provider:      "example",
+		ProviderScope: "account:one",
+		LeaseID:       "cbx_aaaaaaaaaaaa",
+		Slug:          "alpha",
+		CloudID:       "resource-1",
+	}
+	if _, err := RequireExactClaim(want); err == nil || !strings.Contains(err.Error(), "no exact local ownership claim") {
+		t.Fatalf("missing claim err=%v", err)
+	}
+	labels := map[string]string{"lease": want.LeaseID, "slug": want.Slug, "provider": want.Provider}
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(want.LeaseID, want.Slug, want.Provider, want.ProviderScope, "", t.TempDir(), time.Minute, false, core.Server{Provider: want.Provider, CloudID: want.CloudID, Labels: labels}, core.SSHTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := RequireExactClaim(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := want
+	stale.CloudID = "resource-2"
+	if _, err := RequireExactClaim(stale); err == nil || !strings.Contains(err.Error(), "stale exact local ownership claim") {
+		t.Fatalf("stale claim err=%v", err)
+	}
+	called := false
+	if err := RemoveExactClaimAfter(claim, want, func() error { called = true; return nil }); err != nil || !called {
+		t.Fatalf("fenced deletion called=%v err=%v", called, err)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(want.LeaseID); err != nil || exists {
+		t.Fatalf("claim exists=%v err=%v", exists, err)
+	}
+}
+
 func TestResolveProviderClaimStrictRejectsMalformedExactClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	stateDir, err := core.CrabboxStateDir()

@@ -73,6 +73,11 @@ If `workspaceID` is omitted, Crabbox creates a temporary workspace for each new
 computer and deletes that workspace during cleanup. For workspace-scoped Orgo
 keys, set `workspaceID` because scoped keys cannot create workspaces.
 
+Local ownership claims bind the computer ID to the normalized Orgo API endpoint
+and its workspace namespace. Changing endpoints or configured workspaces cannot
+turn a colliding computer or workspace ID into a deletion target; restore the
+original namespace before stopping a retained lease.
+
 Provider flags, each overriding the matching `orgo.*` config key:
 
 ```text

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -32,6 +33,8 @@ type fakeOrgoAPI struct {
 	omitWorkspaceID         bool
 	computerStatuses        []string
 	getComputerCalls        int
+	disappearOnGet          int
+	replaceInstanceOnGet    int
 	bashStatuses            []string
 }
 
@@ -104,11 +107,18 @@ func (f *fakeOrgoAPI) CreateComputer(_ context.Context, req orgoCreateComputerRe
 }
 
 func (f *fakeOrgoAPI) GetComputer(_ context.Context, id string) (orgoComputer, error) {
+	f.getComputerCalls++
+	if f.disappearOnGet == f.getComputerCalls {
+		delete(f.computers, id)
+	}
 	computer, ok := f.computers[id]
 	if !ok {
 		return orgoComputer{}, exit(4, "missing computer %s", id)
 	}
-	f.getComputerCalls++
+	if f.replaceInstanceOnGet == f.getComputerCalls {
+		computer.InstanceID = "instance_replaced"
+		f.computers[id] = computer
+	}
 	if len(f.computerStatuses) > 0 {
 		computer.Status = f.computerStatuses[0]
 		f.computerStatuses = f.computerStatuses[1:]
@@ -390,7 +400,7 @@ func TestStopByComputerIDDeletesTemporaryWorkspaceAndClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	otherLeaseID := "cbx_slug_collision_1234567890"
-	if err := claimLeaseForRepoProviderEndpoint(otherLeaseID, lease.Computer.ID, t.TempDir(), time.Minute, false, Server{
+	if err := claimLeaseForRepoProviderEndpoint(otherLeaseID, lease.Computer.ID, orgoClaimScope(backend.cfg, lease.Computer.WorkspaceID), t.TempDir(), time.Minute, false, Server{
 		CloudID:  "other-computer",
 		Provider: providerName,
 		Name:     "other-computer",
@@ -428,6 +438,60 @@ func TestStopRefusesUnclaimedComputerID(t *testing.T) {
 	}
 }
 
+func TestStopRequiresExactOrgoEndpointWorkspaceAndComputerIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		endpoint         string
+		workspace        string
+		instanceID       string
+		wantProviderGets bool
+	}{
+		{name: "different API endpoint", endpoint: "https://other.example.test/api"},
+		{name: "different workspace namespace", workspace: "ws_other"},
+		{name: "stale computer identity", instanceID: "instance_other", wantProviderGets: true},
+		{name: "exact ownership", instanceID: "instance_test", wantProviderGets: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			originalAPI := newFakeOrgoAPI()
+			original := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key", APIBase: "https://one.example.test/api"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+			original.client = originalAPI
+			lease, err := original.createComputer(context.Background(), originalAPI, Repo{Root: t.TempDir()}, "owned", false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			currentAPI := newFakeOrgoAPI()
+			computer := lease.Computer
+			if test.instanceID != "" {
+				computer.InstanceID = test.instanceID
+			}
+			currentAPI.computers[computer.ID] = computer
+			current := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{
+				APIKey:      "test-key",
+				APIBase:     blank(test.endpoint, "https://one.example.test/api"),
+				WorkspaceID: test.workspace,
+			}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+			current.client = currentAPI
+			err = current.Stop(context.Background(), StopRequest{ID: lease.Computer.ID})
+			if test.name == "exact ownership" {
+				if err != nil || len(currentAPI.deletedComputers) != 1 || len(currentAPI.deletedWorkspaces) != 1 {
+					t.Fatalf("owned stop err=%v computers=%v workspaces=%v", err, currentAPI.deletedComputers, currentAPI.deletedWorkspaces)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("unowned Orgo computer was accepted")
+			}
+			if len(currentAPI.deletedComputers) != 0 || len(currentAPI.deletedWorkspaces) != 0 {
+				t.Fatalf("unowned resources were deleted: computers=%v workspaces=%v", currentAPI.deletedComputers, currentAPI.deletedWorkspaces)
+			}
+			if !test.wantProviderGets && currentAPI.getComputerCalls != 0 {
+				t.Fatalf("namespace mismatch reached provider: get calls=%d", currentAPI.getComputerCalls)
+			}
+		})
+	}
+}
+
 func TestStopRetriesWorkspaceCleanupAfterComputerWasDeleted(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeOrgoAPI()
@@ -457,6 +521,48 @@ func TestStopRetriesWorkspaceCleanupAfterComputerWasDeleted(t *testing.T) {
 	}
 }
 
+func TestStopFinishesWorkspaceCleanupWhenComputerDisappearsDuringLockedPreflight(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeOrgoAPI()
+	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+	backend.client = fake
+	lease, err := backend.createComputer(context.Background(), fake, Repo{Root: t.TempDir()}, "preflight-disappearance", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.disappearOnGet = 2
+	if err := backend.Stop(context.Background(), StopRequest{ID: lease.LeaseID}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deletedComputers) != 0 || strings.Join(fake.deletedWorkspaces, ",") != "ws_created" {
+		t.Fatalf("deleted computers=%v workspaces=%v", fake.deletedComputers, fake.deletedWorkspaces)
+	}
+	if _, ok, err := resolveLeaseClaimForProvider(lease.LeaseID); err != nil || ok {
+		t.Fatalf("claim retained ok=%v err=%v", ok, err)
+	}
+}
+
+func TestStopRefusesInstanceReplacementDuringLockedPreflight(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeOrgoAPI()
+	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+	backend.client = fake
+	lease, err := backend.createComputer(context.Background(), fake, Repo{Root: t.TempDir()}, "preflight-replacement", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.replaceInstanceOnGet = 2
+	if err := backend.Stop(context.Background(), StopRequest{ID: lease.LeaseID}); err == nil {
+		t.Fatal("stop unexpectedly accepted an instance replacement")
+	}
+	if len(fake.deletedComputers) != 0 || len(fake.deletedWorkspaces) != 0 {
+		t.Fatalf("replacement triggered deletion: computers=%v workspaces=%v", fake.deletedComputers, fake.deletedWorkspaces)
+	}
+	if _, ok, err := resolveLeaseClaimForProvider(lease.LeaseID); err != nil || !ok {
+		t.Fatalf("claim missing ok=%v err=%v", ok, err)
+	}
+}
+
 func TestStopRetainsClaimWhenNotFoundCouldBeAuthorizationFailure(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeOrgoAPI()
@@ -476,6 +582,28 @@ func TestStopRetainsClaimWhenNotFoundCouldBeAuthorizationFailure(t *testing.T) {
 	}
 	if _, ok, err := resolveLeaseClaimForProvider(lease.LeaseID); err != nil || !ok {
 		t.Fatalf("claim missing ok=%t err=%v", ok, err)
+	}
+}
+
+func TestStopFinalizesClaimWhenComputerAndWorkspaceAreConfirmedAbsent(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newFakeOrgoAPI()
+	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+	backend.client = fake
+	lease, err := backend.createComputer(context.Background(), fake, Repo{Root: t.TempDir()}, "confirmed-absence", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delete(fake.computers, lease.Computer.ID)
+	fake.getWorkspaceErr = &orgoHTTPError{StatusCode: http.StatusNotFound, Body: "workspace not found"}
+	if err := backend.Stop(context.Background(), StopRequest{ID: lease.LeaseID}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deletedComputers) != 0 || len(fake.deletedWorkspaces) != 0 {
+		t.Fatalf("absent resources triggered deletion: computers=%v workspaces=%v", fake.deletedComputers, fake.deletedWorkspaces)
+	}
+	if _, ok, err := resolveLeaseClaimForProvider(lease.LeaseID); err != nil || ok {
+		t.Fatalf("claim retained ok=%t err=%v", ok, err)
 	}
 }
 

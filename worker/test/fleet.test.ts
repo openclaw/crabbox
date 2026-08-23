@@ -17518,6 +17518,46 @@ describe("fleet lease identity and idle", () => {
     expect(otherPrepared.lease.network?.awsSecurityGroupName).not.toBe(managedGroupName);
   });
 
+  it("records the authenticated AWS account before creating a Mac host lease", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const params = new URLSearchParams(await requestBodyForTest(input, init));
+        expect(params.get("Action")).toBe("GetCallerIdentity");
+        return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+        <GetCallerIdentityResponse><GetCallerIdentityResult>
+          <Arn>arn:aws:iam::123456789012:user/crabbox</Arn>
+          <UserId>AIDAEXAMPLE</UserId><Account>123456789012</Account>
+        </GetCallerIdentityResult></GetCallerIdentityResponse>`);
+      }),
+    );
+    const provider = new AWSProvider(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "test" } as Env,
+      "eu-west-1",
+      new MemoryStorage(),
+    );
+    const config = leaseConfig({
+      provider: "aws",
+      target: "macos",
+      serverType: "mac2.metal",
+      capacity: { market: "on-demand" },
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    const lease = testLease({
+      id: "cbx_abcdef123456",
+      provider: "aws",
+      target: "macos",
+      state: "provisioning",
+    });
+
+    const prepared = await provider.prepareLeaseCreate(config, lease, {
+      requestSourceCIDRs: [],
+      activeLeases: [],
+    });
+
+    expect(prepared.lease.providerScope).toBe("aws:account:123456789012");
+  });
+
   it("preserves configured AWS SSH CIDRs when refreshing lease access", async () => {
     const provider = new AWSProvider({} as Env, "eu-west-1", new MemoryStorage());
     vi.spyOn(provider, "reconcileLeaseAccess").mockResolvedValue();
@@ -27829,6 +27869,26 @@ describe("fleet lease identity and idle", () => {
         const action = params.get("Action") ?? "";
         actions.push(action);
         seenParams.push(Object.fromEntries(params));
+        if (action === "GetCallerIdentity") {
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+          <GetCallerIdentityResponse><GetCallerIdentityResult>
+            <Arn>arn:aws:iam::123456789012:user/crabbox</Arn>
+            <UserId>AIDAEXAMPLE</UserId><Account>123456789012</Account>
+          </GetCallerIdentityResult></GetCallerIdentityResponse>`);
+        }
+        if (action === "DescribeHosts") {
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+          <DescribeHostsResponse><hostSet><item>
+            <hostId>h-000000000001</hostId>
+            <hostState>available</hostState>
+            <availabilityZone>eu-west-1a</availabilityZone>
+            <hostProperties><instanceType>mac2.metal</instanceType></hostProperties>
+            <tagSet>
+              <item><key>crabbox</key><value>true</value></item>
+              <item><key>created_by</key><value>crabbox</value></item>
+            </tagSet>
+          </item></hostSet></DescribeHostsResponse>`);
+        }
         if (action === "ReleaseHosts") {
           return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
           <ReleaseHostsResponse>
@@ -27840,8 +27900,19 @@ describe("fleet lease identity and idle", () => {
       },
     );
     vi.stubGlobal("fetch", fetchMock);
+    const storage = new MemoryStorage();
+    storage.seed(
+      "lease:cbx_000000000776",
+      testLease({
+        id: "cbx_000000000776",
+        provider: "aws",
+        region: "eu-west-1",
+        providerScope: "aws:account:123456789012",
+        hostID: "h-000000000001",
+      }),
+    );
     const fleet = testFleet(
-      new MemoryStorage(),
+      storage,
       {},
       {
         AWS_ACCESS_KEY_ID: "test",
@@ -27857,8 +27928,8 @@ describe("fleet lease identity and idle", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(actions).toEqual(["ReleaseHosts"]);
-    expect(seenParams[0]).toMatchObject({
+    expect(actions).toEqual(["GetCallerIdentity", "DescribeHosts", "ReleaseHosts"]);
+    expect(seenParams[2]).toMatchObject({
       Action: "ReleaseHosts",
       "HostId.1": "h-000000000001",
     });
@@ -27866,12 +27937,220 @@ describe("fleet lease identity and idle", () => {
       hostId: "h-000000000001",
       released: ["h-000000000001"],
     });
+    expect(storage.value<LeaseRecord>("lease:cbx_000000000776")).not.toHaveProperty("hostID");
+    expect(storage.value<LeaseRecord>("lease:cbx_000000000776")).not.toHaveProperty("hostId");
   });
+
+  it("finalizes an AWS Mac host claim after provider release outlives a storage failure", async () => {
+    let released = false;
+    let failedWrite = false;
+    const actions: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const action = new URLSearchParams(await requestBodyForTest(input, init)).get("Action");
+        actions.push(action ?? "");
+        if (action === "GetCallerIdentity") {
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+          <GetCallerIdentityResponse><GetCallerIdentityResult>
+            <Arn>arn:aws:iam::123456789012:user/crabbox</Arn>
+            <UserId>AIDAEXAMPLE</UserId><Account>123456789012</Account>
+          </GetCallerIdentityResult></GetCallerIdentityResponse>`);
+        }
+        if (action === "DescribeHosts") {
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+          <DescribeHostsResponse><hostSet>${
+            released
+              ? ""
+              : `<item><hostId>h-000000000001</hostId>
+                 <hostProperties><instanceType>mac2.metal</instanceType></hostProperties>
+                 <tagSet><item><key>crabbox</key><value>true</value></item>
+                 <item><key>created_by</key><value>crabbox</value></item></tagSet></item>`
+          }</hostSet></DescribeHostsResponse>`);
+        }
+        released = true;
+        return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+        <ReleaseHostsResponse><unsuccessful/>
+          <successful><item>h-000000000001</item></successful>
+        </ReleaseHostsResponse>`);
+      }),
+    );
+    const storage = new MemoryStorage();
+    storage.seed(
+      "lease:cbx_000000000779",
+      testLease({
+        id: "cbx_000000000779",
+        provider: "aws",
+        region: "eu-west-1",
+        providerScope: "aws:account:123456789012",
+        hostID: "h-000000000001",
+      }),
+    );
+    storage.beforePut = async (key) => {
+      if (key === "lease:cbx_000000000779" && !failedWrite) {
+        failedWrite = true;
+        throw new Error("temporary durable storage failure");
+      }
+    };
+    const fleet = testFleet(
+      storage,
+      {},
+      {
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "test",
+        CRABBOX_AWS_REGION: "eu-west-1",
+      },
+    );
+    const releaseRequest = () =>
+      request("DELETE", "/v1/admin/mac-hosts/h-000000000001?region=eu-west-1", {
+        headers: { "x-crabbox-admin": "true" },
+      });
+
+    expect((await fleet.fetch(releaseRequest())).status).toBe(500);
+    expect(storage.value<LeaseRecord>("lease:cbx_000000000779")).toHaveProperty("hostID");
+    const retry = await fleet.fetch(releaseRequest());
+
+    expect(retry.status).toBe(200);
+    await expect(retry.json()).resolves.toMatchObject({
+      hostId: "h-000000000001",
+      released: [],
+    });
+    expect(actions.filter((action) => action === "ReleaseHosts")).toHaveLength(1);
+    expect(storage.value<LeaseRecord>("lease:cbx_000000000779")).not.toHaveProperty("hostID");
+  });
+
+  it.each([
+    {
+      name: "missing claim",
+      claimHost: "",
+      claimRegion: "eu-west-1",
+      claimAccount: "123456789012",
+      tagged: true,
+    },
+    {
+      name: "wrong-region claim",
+      claimHost: "h-000000000001",
+      claimRegion: "us-east-1",
+      claimAccount: "123456789012",
+      tagged: true,
+    },
+    {
+      name: "different-host claim",
+      claimHost: "h-000000000002",
+      claimRegion: "eu-west-1",
+      claimAccount: "123456789012",
+      tagged: true,
+    },
+    {
+      name: "missing AWS account namespace",
+      claimHost: "h-000000000001",
+      claimRegion: "eu-west-1",
+      claimAccount: "",
+      tagged: true,
+    },
+    {
+      name: "different AWS account namespace",
+      claimHost: "h-000000000001",
+      claimRegion: "eu-west-1",
+      claimAccount: "999999999999",
+      tagged: true,
+    },
+    {
+      name: "stale provider ownership",
+      claimHost: "h-000000000001",
+      claimRegion: "eu-west-1",
+      claimAccount: "123456789012",
+      tagged: false,
+    },
+  ])(
+    "refuses admin EC2 Mac host release with $name",
+    async ({ claimHost, claimRegion, claimAccount, tagged }) => {
+      const storage = new MemoryStorage();
+      if (claimHost) {
+        storage.seed(
+          "lease:cbx_000000000777",
+          testLease({
+            id: "cbx_000000000777",
+            provider: "aws",
+            region: claimRegion,
+            hostID: claimHost,
+            ...(claimAccount ? { providerScope: `aws:account:${claimAccount}` } : {}),
+          }),
+        );
+      }
+      const actions: string[] = [];
+      const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
+        async (input, init) => {
+          const params = new URLSearchParams(await requestBodyForTest(input, init));
+          const action = params.get("Action") ?? "";
+          actions.push(action);
+          if (action === "GetCallerIdentity") {
+            return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+            <GetCallerIdentityResponse><GetCallerIdentityResult>
+              <Arn>arn:aws:iam::123456789012:user/crabbox</Arn>
+              <UserId>AIDAEXAMPLE</UserId><Account>123456789012</Account>
+            </GetCallerIdentityResult></GetCallerIdentityResponse>`);
+          }
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+          <DescribeHostsResponse><hostSet><item>
+            <hostId>h-000000000001</hostId>
+            <hostState>available</hostState>
+            <hostProperties><instanceType>mac2.metal</instanceType></hostProperties>
+            <tagSet>${tagged ? "<item><key>crabbox</key><value>true</value></item><item><key>created_by</key><value>crabbox</value></item>" : ""}</tagSet>
+          </item></hostSet></DescribeHostsResponse>`);
+        },
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const fleet = testFleet(
+        storage,
+        {},
+        {
+          AWS_ACCESS_KEY_ID: "test",
+          AWS_SECRET_ACCESS_KEY: "test",
+          CRABBOX_AWS_REGION: "eu-west-1",
+        },
+      );
+
+      const response = await fleet.fetch(
+        request("DELETE", "/v1/admin/mac-hosts/h-000000000001?region=eu-west-1", {
+          headers: { "x-crabbox-admin": "true" },
+        }),
+      );
+
+      expect(response.status).toBe(409);
+      expect(actions).not.toContain("ReleaseHosts");
+      await expect(response.json()).resolves.toMatchObject({
+        error:
+          !tagged || (claimAccount && claimAccount !== "123456789012")
+            ? "mac_host_ownership_mismatch"
+            : "mac_host_ownership_required",
+      });
+    },
+  );
 
   it("rejects AWS EC2 Mac host release when AWS reports an unsuccessful release", async () => {
     const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
-      async () =>
-        ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+      async (input, init) => {
+        const params = new URLSearchParams(await requestBodyForTest(input, init));
+        if (params.get("Action") === "GetCallerIdentity") {
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+          <GetCallerIdentityResponse><GetCallerIdentityResult>
+            <Arn>arn:aws:iam::123456789012:user/crabbox</Arn>
+            <UserId>AIDAEXAMPLE</UserId><Account>123456789012</Account>
+          </GetCallerIdentityResult></GetCallerIdentityResponse>`);
+        }
+        if (params.get("Action") === "DescribeHosts") {
+          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+          <DescribeHostsResponse><hostSet><item>
+            <hostId>h-000000000001</hostId>
+            <hostProperties><instanceType>mac2.metal</instanceType></hostProperties>
+            <tagSet>
+              <item><key>crabbox</key><value>true</value></item>
+              <item><key>created_by</key><value>crabbox</value></item>
+            </tagSet>
+          </item></hostSet></DescribeHostsResponse>`);
+        }
+        return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
         <ReleaseHostsResponse>
           <unsuccessful>
             <item>
@@ -27883,11 +28162,23 @@ describe("fleet lease identity and idle", () => {
             </item>
           </unsuccessful>
           <successful/>
-        </ReleaseHostsResponse>`),
+        </ReleaseHostsResponse>`);
+      },
     );
     vi.stubGlobal("fetch", fetchMock);
+    const storage = new MemoryStorage();
+    storage.seed(
+      "lease:cbx_000000000778",
+      testLease({
+        id: "cbx_000000000778",
+        provider: "aws",
+        region: "eu-west-1",
+        providerScope: "aws:account:123456789012",
+        hostID: "h-000000000001",
+      }),
+    );
     const fleet = testFleet(
-      new MemoryStorage(),
+      storage,
       {},
       {
         AWS_ACCESS_KEY_ID: "test",
@@ -27905,6 +28196,10 @@ describe("fleet lease identity and idle", () => {
     expect(response.status).toBe(500);
     await expect(response.json()).resolves.toMatchObject({
       error: expect.stringContaining("Client.InvalidHost.Occupied"),
+    });
+    expect(storage.value<LeaseRecord>("lease:cbx_000000000778")).toMatchObject({
+      hostID: "h-000000000001",
+      providerScope: "aws:account:123456789012",
     });
   });
 

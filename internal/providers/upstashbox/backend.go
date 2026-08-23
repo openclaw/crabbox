@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -122,11 +123,10 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (result RunResult, re
 		}
 		cleanupCtx, cancel := upstashBoxCleanupContext()
 		defer cancel()
-		if err := client.DeleteBoxes(cleanupCtx, []string{boxID}); err != nil {
+		if err := b.deleteClaimedBox(cleanupCtx, client, leaseID, boxID, slug); err != nil {
 			shouldStop = false
 			return err
 		}
-		removeLeaseClaim(leaseID)
 		cleanedUp = true
 		shouldStop = false
 		return nil
@@ -347,16 +347,43 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
-	leaseID, boxID, _, err := b.resolveBoxID(ctx, client, req.ID, "", false)
+	leaseID, boxID, slug, err := b.resolveBoxID(ctx, client, req.ID, "", false)
 	if err != nil {
 		return err
 	}
-	if err := client.DeleteBoxes(ctx, []string{boxID}); err != nil {
+	if err := b.deleteClaimedBox(ctx, client, leaseID, boxID, slug); err != nil {
 		return err
 	}
-	removeLeaseClaim(leaseID)
 	fmt.Fprintf(b.rt.Stderr, "released lease=%s box=%s\n", leaseID, boxID)
 	return nil
+}
+
+func (b *backend) deleteClaimedBox(ctx context.Context, client api, leaseID, boxID, slug string) error {
+	binding := shared.ClaimBinding{
+		Provider:       providerName,
+		ProviderScope:  upstashBoxClaimScope(b.cfg),
+		LeaseID:        leaseID,
+		Slug:           slug,
+		CloudID:        boxID,
+		RequiredLabels: map[string]string{"box_id": boxID},
+	}
+	claim, err := shared.RequireExactClaim(binding)
+	if err != nil {
+		return err
+	}
+	return shared.RemoveExactClaimAfter(claim, binding, func() error {
+		box, err := client.GetBox(ctx, boxID)
+		if err != nil {
+			if isNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		if box.ID != boxID || !isCrabboxBox(box) || boxLeaseID(box) != leaseID || boxSlug(leaseID, box) != slug {
+			return exit(2, "provider=%s box %s no longer matches its exact local ownership claim", providerName, boxID)
+		}
+		return client.DeleteBoxes(ctx, []string{boxID})
+	})
 }
 
 func (b *backend) createBox(ctx context.Context, client api, repo Repo, keep, reclaim bool, requestedSlug string) (string, boxData, string, error) {
@@ -376,7 +403,7 @@ func (b *backend) createBox(ctx context.Context, client api, repo Repo, keep, re
 	if err != nil {
 		return "", boxData{}, "", err
 	}
-	if err := claimLeaseForRepoProvider(leaseID, slug, providerName, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, upstashBoxClaimScope(b.cfg), "", repo.Root, b.cfg.IdleTimeout, reclaim, boxToServer(b.cfg, box), core.SSHTarget{}); err != nil {
 		cleanupCtx, cancel := upstashBoxCleanupContext()
 		cleanupErr := client.DeleteBoxes(cleanupCtx, []string{box.ID})
 		cancel()
@@ -396,14 +423,20 @@ func (b *backend) resolveBoxID(ctx context.Context, client api, id, repoRoot str
 	if claim, ok, err := resolveLeaseClaim(id); err != nil {
 		return "", "", "", err
 	} else if ok && claim.Provider == providerName {
-		if repoRoot != "" {
-			if err := claimLeaseForRepoProvider(claim.LeaseID, claim.Slug, providerName, repoRoot, time.Duration(claim.IdleTimeoutSeconds)*time.Second, reclaim); err != nil {
-				return "", "", "", err
+		if repoRoot == "" {
+			if strings.TrimSpace(claim.CloudID) == "" {
+				return "", "", "", exit(2, "provider=%s lease=%s has no exact local ownership claim for an immutable box ID", providerName, claim.LeaseID)
 			}
+			return claim.LeaseID, claim.CloudID, claim.Slug, nil
 		}
 		box, err := resolveBoxByLease(ctx, client, claim.LeaseID)
 		if err != nil {
 			return "", "", "", err
+		}
+		if repoRoot != "" {
+			if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(claim.LeaseID, claim.Slug, providerName, upstashBoxClaimScope(b.cfg), "", repoRoot, time.Duration(claim.IdleTimeoutSeconds)*time.Second, reclaim, boxToServer(b.cfg, box), core.SSHTarget{}); err != nil {
+				return "", "", "", err
+			}
 		}
 		return claim.LeaseID, box.ID, claim.Slug, nil
 	}
@@ -485,6 +518,18 @@ func boxBaseHost(cfg Config) string {
 		return raw
 	}
 	return parsed.Host
+}
+
+func upstashBoxClaimScope(cfg Config) string {
+	raw := blank(strings.TrimSpace(cfg.UpstashBox.BaseURL), "https://us-east-1.box.upstash.com")
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return "endpoint:" + strings.TrimRight(raw, "/")
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	parsed.Host = strings.ToLower(parsed.Host)
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	return "endpoint:" + parsed.String()
 }
 
 var boxNamePattern = regexp.MustCompile(`^crabbox-(.+)-([0-9a-f]{12})$`)

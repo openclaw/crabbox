@@ -12991,8 +12991,74 @@ export class FleetCoordinator {
       return json({ hosts }, { status: 201 });
     }
     if (method === "DELETE" && hostID) {
-      const released = await client.releaseMacHost(hostID);
-      return json({ hostId: hostID, released });
+      return await this.state.runExclusive(async () => {
+        let ownershipLease: LeaseRecord | undefined;
+        await this.visitLeaseRecords((lease) => {
+          if (
+            lease.provider === "aws" &&
+            !isRegisteredLease(lease) &&
+            lease.region === region &&
+            leaseHostID(lease) === hostID
+          ) {
+            ownershipLease = lease;
+            return false;
+          }
+          return true;
+        });
+        if (!ownershipLease) {
+          return json(
+            {
+              error: "mac_host_ownership_required",
+              message: `EC2 Mac host ${hostID} has no exact retained Crabbox ownership claim in ${region}`,
+            },
+            { status: 409 },
+          );
+        }
+        const claimedAccount = /^aws:account:(\d{12})$/.exec(
+          ownershipLease.providerScope ?? "",
+        )?.[1];
+        if (!claimedAccount) {
+          return json(
+            {
+              error: "mac_host_ownership_required",
+              message: `EC2 Mac host ${hostID} has no exact retained AWS account ownership claim`,
+            },
+            { status: 409 },
+          );
+        }
+        const identity = await client.verifiedIdentity();
+        if (identity.account !== claimedAccount) {
+          return json(
+            {
+              error: "mac_host_ownership_mismatch",
+              message: `EC2 Mac host ${hostID} belongs to a different retained AWS account`,
+            },
+            { status: 409 },
+          );
+        }
+        const hosts = await client.listMacHosts();
+        const host = hosts.find((candidate) => candidate.id === hostID);
+        if (
+          host &&
+          (host.region !== region ||
+            host.tags["crabbox"] !== "true" ||
+            host.tags["created_by"] !== "crabbox")
+        ) {
+          return json(
+            {
+              error: "mac_host_ownership_mismatch",
+              message: `EC2 Mac host ${hostID} no longer matches its retained Crabbox ownership claim`,
+            },
+            { status: 409 },
+          );
+        }
+        const released = host ? await client.releaseMacHost(hostID) : [];
+        const releasedLease = { ...ownershipLease, updatedAt: new Date().toISOString() };
+        delete releasedLease.hostId;
+        delete releasedLease.hostID;
+        await this.putLease(releasedLease);
+        return json({ hostId: hostID, released });
+      });
     }
     return json({ error: "not_found" }, { status: 404 });
   }
@@ -23763,6 +23829,13 @@ export class AWSProvider implements CloudProvider {
     lease: LeaseRecord,
     context: ProviderAccessContext,
   ): Promise<ProviderLeaseCreatePreparation> {
+    if (config.target === "macos") {
+      const identity = await this.client.verifiedIdentity();
+      if (!/^\d{12}$/.test(identity.account)) {
+        throw new Error("AWS Mac host ownership requires an authenticated 12-digit account ID");
+      }
+      lease = { ...lease, providerScope: `aws:account:${identity.account}` };
+    }
     if (config.awsPrivate) {
       const policy = awsPrivateWorkspaceConfig(this.env);
       if (

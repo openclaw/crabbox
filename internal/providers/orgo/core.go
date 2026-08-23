@@ -55,8 +55,8 @@ func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
 	return core.AllocateClaimLeaseSlug(leaseID, requested)
 }
 
-func claimLeaseForRepoProviderEndpoint(leaseID, slug, repoRoot string, idleTimeout time.Duration, reclaim bool, server Server) error {
-	return core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, "", "", repoRoot, idleTimeout, reclaim, server, core.SSHTarget{TargetOS: targetLinux})
+func claimLeaseForRepoProviderEndpoint(leaseID, slug, providerScope, repoRoot string, idleTimeout time.Duration, reclaim bool, server Server) error {
+	return core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, providerScope, "", repoRoot, idleTimeout, reclaim, server, core.SSHTarget{TargetOS: targetLinux})
 }
 
 func resolveLeaseClaimForProvider(identifier string) (core.LeaseClaim, bool, error) {

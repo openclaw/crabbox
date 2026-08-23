@@ -54,6 +54,102 @@ func TestProviderSpecAndAliases(t *testing.T) {
 	}
 }
 
+func TestStopRequiresExactScopedUpstashBoxOwnership(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		identifier    string
+		seedClaim     bool
+		staleIdentity bool
+		changedScope  bool
+	}{
+		{name: "unclaimed raw provider ID", identifier: "box_foreign"},
+		{name: "unclaimed lease ID", identifier: "cbx_0123456789ab"},
+		{name: "unclaimed slug", identifier: "foreign"},
+		{name: "stale provider resource", identifier: "box_foreign", seedClaim: true, staleIdentity: true},
+		{name: "different provider endpoint", identifier: "box_foreign", seedClaim: true, changedScope: true},
+		{name: "exact claim", identifier: "box_foreign", seedClaim: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			box := boxData{ID: "box_foreign", Name: "crabbox-foreign-0123456789ab", Status: "running"}
+			fake := &fakeAPI{box: box}
+			withFakeAPI(t, fake)
+			cfg := Config{UpstashBox: UpstashBoxConfig{APIKey: "test-key", BaseURL: "https://one.example.test"}}
+			backend := NewBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+			leaseID := "cbx_0123456789ab"
+			if test.seedClaim {
+				server := boxToServer(backend.cfg, box)
+				if test.staleIdentity {
+					server.CloudID = "box_original"
+				}
+				if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "foreign", providerName, upstashBoxClaimScope(backend.cfg), "", t.TempDir(), time.Hour, false, server, core.SSHTarget{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.changedScope {
+				backend.cfg.UpstashBox.BaseURL = "https://two.example.test"
+			}
+			err := backend.Stop(context.Background(), StopRequest{ID: test.identifier})
+			if test.seedClaim && !test.staleIdentity && !test.changedScope {
+				if err != nil || strings.Join(fake.deletedIDs, ",") != box.ID {
+					t.Fatalf("owned stop err=%v deleted=%v", err, fake.deletedIDs)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "exact local ownership claim") {
+				t.Fatalf("unowned stop err=%v", err)
+			}
+			if len(fake.deletedIDs) != 0 {
+				t.Fatalf("unowned box was deleted: %v", fake.deletedIDs)
+			}
+		})
+	}
+}
+
+func TestStopFinalizesClaimWhenUpstashBoxVanishesDuringLockedPreflight(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	box := boxData{ID: "box_vanished", Name: "crabbox-vanished-0123456789ab", Status: "running"}
+	fake := &fakeAPI{box: box, notFoundOnGet: 2}
+	withFakeAPI(t, fake)
+	cfg := Config{UpstashBox: UpstashBoxConfig{APIKey: "test-key", BaseURL: "https://one.example.test"}}
+	backend := NewBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	leaseID := "cbx_0123456789ab"
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "vanished", providerName, upstashBoxClaimScope(backend.cfg), "", t.TempDir(), time.Hour, false, boxToServer(backend.cfg, box), core.SSHTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.Stop(context.Background(), StopRequest{ID: box.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deletedIDs) != 0 {
+		t.Fatalf("missing box reached deletion: %v", fake.deletedIDs)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
+		t.Fatalf("claim retained exists=%t err=%v", exists, err)
+	}
+}
+
+func TestStopFinalizesRetainedClaimAfterUpstashBoxWasAlreadyDeleted(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	box := boxData{ID: "box_deleted", Name: "crabbox-deleted-0123456789ab", Status: "running"}
+	fake := &fakeAPI{box: box, notFoundOnGet: 1}
+	withFakeAPI(t, fake)
+	cfg := Config{UpstashBox: UpstashBoxConfig{APIKey: "test-key", BaseURL: "https://one.example.test"}}
+	backend := NewBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+	leaseID := "cbx_0123456789ab"
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "deleted", providerName, upstashBoxClaimScope(backend.cfg), "", t.TempDir(), time.Hour, false, boxToServer(backend.cfg, box), core.SSHTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.Stop(context.Background(), StopRequest{ID: leaseID}); err != nil {
+		t.Fatal(err)
+	}
+	if fake.getBoxCalls != 1 || len(fake.deletedIDs) != 0 {
+		t.Fatalf("deleted box was rediscovered or deleted again: gets=%d deleted=%v", fake.getBoxCalls, fake.deletedIDs)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
+		t.Fatalf("claim retained exists=%t err=%v", exists, err)
+	}
+}
+
 func TestClientUsesUpstashBoxRESTShape(t *testing.T) {
 	var createBody map[string]any
 	var deleteBody map[string]any
@@ -871,6 +967,8 @@ type fakeAPI struct {
 	streamFolders   []string
 	execResults     []execResult
 	deletedIDs      []string
+	getBoxCalls     int
+	notFoundOnGet   int
 	blockDelete     bool
 	blockEnvCleanup bool
 }
@@ -883,6 +981,10 @@ func (f *fakeAPI) CreateBox(_ context.Context, createRequest createRequest) (box
 }
 
 func (f *fakeAPI) GetBox(context.Context, string) (boxData, error) {
+	f.getBoxCalls++
+	if f.notFoundOnGet == f.getBoxCalls {
+		return boxData{}, errors.New("box not found")
+	}
 	if f.box.ID == "" {
 		f.box = boxData{ID: "box_1", Name: "crabbox-blue-123456789abc", Status: "running"}
 	}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"strconv"
@@ -26,6 +27,7 @@ type fakeVastAPI struct {
 	getErr                  error
 	manageErr               error
 	destroyErr              error
+	destroyFn               func()
 	attachErr               error
 	detachErr               error
 	listKeysErr             error
@@ -148,6 +150,9 @@ func (f *fakeVastAPI) ManageInstance(_ context.Context, id int, input vastManage
 func (f *fakeVastAPI) DestroyInstance(_ context.Context, id int) error {
 	f.destroyed = append(f.destroyed, id)
 	f.events = append(f.events, "destroy:"+strconv.Itoa(id))
+	if f.destroyFn != nil {
+		f.destroyFn()
+	}
 	if f.destroyErr != nil {
 		return f.destroyErr
 	}
@@ -885,6 +890,42 @@ func TestReleaseRejectsMismatchedVastCleanupIdentity(t *testing.T) {
 	}
 }
 
+func TestVastDestructionFencesConcurrentClaimMutation(t *testing.T) {
+	api := &fakeVastAPI{offers: []vastOffer{{ID: 42, Rentable: true}}}
+	b := newTestBackend(t, api)
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "fenced-destroy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, _, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	updated := make(chan error, 1)
+	api.destroyFn = func() {
+		go func() {
+			close(started)
+			labels := maps.Clone(claim.Labels)
+			labels["state"] = "renewed"
+			_, updateErr := core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, claim, labels)
+			updated <- updateErr
+		}()
+		<-started
+		select {
+		case err := <-updated:
+			t.Errorf("claim mutation escaped Vast destruction fence: %v", err)
+		default:
+		}
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-updated; err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("claim mutation after Vast destruction err=%v", err)
+	}
+}
+
 func TestReleaseHonorsExplicitReleaseActionOverride(t *testing.T) {
 	api := &fakeVastAPI{offers: []vastOffer{{ID: 42, Rentable: true}}}
 	b := newTestBackend(t, api)
@@ -1005,14 +1046,13 @@ func TestCleanupReportsMissingClaimForOwnedInstance(t *testing.T) {
 	b.rt.Stderr = &stderr
 	b.DirectSSHBackend.RT = b.rt
 
-	err := b.Cleanup(context.Background(), core.CleanupRequest{})
-	if err == nil || !strings.Contains(err.Error(), "lease=cbx_orphan has no local Vast claim") {
-		t.Fatalf("err=%v", err)
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatalf("cleanup err=%v", err)
 	}
 	if len(api.destroyed) != 0 {
 		t.Fatalf("destroyed=%v", api.destroyed)
 	}
-	if !strings.Contains(stderr.String(), "delete server id=9") {
+	if !strings.Contains(stderr.String(), "reason=no-exact-local-claim") {
 		t.Fatalf("stderr=%q", stderr.String())
 	}
 }

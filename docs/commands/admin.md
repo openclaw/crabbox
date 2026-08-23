@@ -161,7 +161,13 @@ Print copy-pasteable IAM JSON for host lifecycle permissions.
 --json              print JSON
 ```
 
-Requires `--force`. The host id may be given positionally (for example, `crabbox admin hosts release h-0123456789abcdef0 --force`) or via `--id`.
+Requires `--force` and an exact retained Crabbox lease binding for the selected
+host, AWS account, and region. Crabbox verifies the current AWS account through
+STS, rechecks the host's Crabbox ownership tags, and clears the durable host
+binding after successful release; administrative confirmation does not
+authorize releasing an unclaimed or externally adopted host. The host id may be given positionally
+(for example, `crabbox admin hosts release h-0123456789abcdef0 --force`) or via
+`--id`.
 
 ## release
 

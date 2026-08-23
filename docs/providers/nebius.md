@@ -226,9 +226,11 @@ crabbox cleanup --provider nebius
 
 The ownership predicate includes the Crabbox marker, provider, target, lease,
 slug, expiration, normalized Nebius parent/project id, optional profile, and a
-scope hash derived from provider, profile, parent/project, and subnet. Foreign,
-partial, malformed, or differently scoped Crabbox-looking VMs are skipped or
-refused rather than deleted.
+scope hash derived from provider, profile, parent/project, and subnet, plus an
+exact local claim bound to the same VM. Crabbox holds that claim's lock across
+fresh ownership verification, deletion, and local-state finalization. Foreign,
+unclaimed, stale, partial, malformed, or differently scoped Crabbox-looking VMs
+are skipped or refused rather than deleted.
 
 If create returns an indeterminate Nebius CLI error, Crabbox retains a recovery
 claim when possible. Retry `crabbox stop --provider nebius <lease-or-slug>` after
