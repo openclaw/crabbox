@@ -140,6 +140,26 @@ func (b *backend) acquireFixed(ctx context.Context, req AcquireRequest) (LeaseTa
 						return err
 					}
 				}
+				if pinned != nil && strings.TrimSpace(pinned.Key) != "" &&
+					(item.Key == nil || strings.TrimSpace(item.Key.Name) == "" && strings.TrimSpace(item.Key.FileName) == "") {
+					detail, err := b.api.Get(ctx, item.Name)
+					if err != nil {
+						return err
+					}
+					if detail.ID != item.ID || detail.Name != item.Name {
+						return exit(4, "lease_id_conflict: Machine0 machine detail for fixed lease %s does not match its inventory resource identity", leaseID)
+					}
+					if detail.Key == nil || strings.TrimSpace(detail.Key.Name) != strings.TrimSpace(pinned.Key) {
+						return exit(4, "lease_id_conflict: Machine0 machine detail for fixed lease %s does not match its durable selected SSH key %q", leaseID, pinned.Key)
+					}
+					if item.Key != nil && strings.TrimSpace(item.Key.Type) != "" {
+						if strings.TrimSpace(detail.Key.Type) != "" && !strings.EqualFold(strings.TrimSpace(detail.Key.Type), strings.TrimSpace(item.Key.Type)) {
+							return exit(4, "lease_id_conflict: Machine0 machine detail for fixed lease %s does not match its inventory SSH key type", leaseID)
+						}
+						detail.Key.Type = item.Key.Type
+					}
+					item.Key = detail.Key
+				}
 			} else {
 				if intent.State == fixedMachine0IntentAcquired || claim.CloudID != "" {
 					return exit(4, "lease_id_conflict: acquired fixed lease %s is missing its bound Machine0 machine", leaseID)

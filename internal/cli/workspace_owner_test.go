@@ -532,8 +532,18 @@ command=
 for arg do command=$arg; done
 printf '%s' "$command" > "$log_dir/$count.command"
 /bin/cat > "$log_dir/$count.stdin"
-if [ "${CRABBOX_OWNER_SSH_RETRY_CALL:-}" = "$count" ]; then printf 'failed port diagnostic\n' >&2; exit 255; fi
-if [ "${CRABBOX_OWNER_SSH_FAIL_CALL:-}" = "$count" ]; then exit 7; fi
+if [ "${CRABBOX_OWNER_SSH_RETRY_CALL:-}" = "$count" ]; then
+  printf '%s' "${CRABBOX_OWNER_SSH_RETRY_STDOUT:-}"
+  printf '%s' "${CRABBOX_OWNER_SSH_RETRY_STDERR:-failed port diagnostic}" >&2
+  exit 255
+fi
+if [ "${CRABBOX_OWNER_SSH_FAIL_CALL:-}" = "$count" ]; then
+  printf '%s' "${CRABBOX_OWNER_SSH_FAIL_STDOUT:-}"
+  printf '%s' "${CRABBOX_OWNER_SSH_FAIL_STDERR:-}" >&2
+  exit "${CRABBOX_OWNER_SSH_FAIL_CODE:-7}"
+fi
+printf '%s' "${CRABBOX_OWNER_SSH_SUCCESS_STDERR:-}" >&2
+if [ -n "${CRABBOX_OWNER_SSH_SUCCESS_STDOUT:-}" ]; then printf '%s' "$CRABBOX_OWNER_SSH_SUCCESS_STDOUT"; exit 0; fi
 if /usr/bin/grep -Fq "\$action = 'acquire'" "$log_dir/$count.stdin"; then printf ACQUIRED; fi
 if /usr/bin/grep -Fq "\$action = 'renew'" "$log_dir/$count.stdin"; then printf RENEWED; fi
 if /usr/bin/grep -Fq "\$action = 'inspect'" "$log_dir/$count.stdin"; then printf OWNED; fi
@@ -558,6 +568,127 @@ func readWorkspaceOwnerSSHCall(t *testing.T, dir string, index int) (string, str
 		t.Fatal(err)
 	}
 	return string(command), string(input)
+}
+
+func TestWorkspaceOwnerSSHProtocolIgnoresSuccessfulWarnings(t *testing.T) {
+	tests := []struct {
+		name   string
+		target SSHTarget
+	}{
+		{name: "POSIX", target: SSHTarget{TargetOS: targetLinux}},
+		{name: "native Windows", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			installWorkspaceOwnerRecordingSSH(t)
+			t.Setenv("CRABBOX_OWNER_SSH_SUCCESS_STDOUT", "ACQUIRED")
+			t.Setenv("CRABBOX_OWNER_SSH_SUCCESS_STDERR", "** WARNING: connection is not using a post-quantum key exchange algorithm.\n")
+			test.target.User, test.target.Host, test.target.Port = "crabbox", "127.0.0.1", "22"
+			got, err := (sshWorkspaceOwnerTransport{target: test.target}).Do(context.Background(), workspaceOwnerRemoteRequest{
+				Action: workspaceOwnerAcquire,
+				Key:    workspaceOwnerKey("cbx_warning_" + test.name),
+				Token:  strings.Repeat("a", 64),
+				TTL:    time.Minute,
+			})
+			if err != nil || got != "ACQUIRED" {
+				t.Fatalf("response=%q err=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestWorkspaceOwnerSSHProtocolFailurePreservesResponseAndSafeDiagnostic(t *testing.T) {
+	tests := []struct {
+		name   string
+		target SSHTarget
+	}{
+		{name: "POSIX", target: SSHTarget{TargetOS: targetLinux}},
+		{name: "native Windows", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			installWorkspaceOwnerRecordingSSH(t)
+			secret := strings.Repeat("s", 80)
+			requestToken := strings.Repeat("b", 64)
+			t.Setenv("CRABBOX_OWNER_SSH_FAIL_CALL", "1")
+			t.Setenv("CRABBOX_OWNER_SSH_FAIL_CODE", "23")
+			t.Setenv("CRABBOX_OWNER_SSH_FAIL_STDOUT", "MISMATCH")
+			t.Setenv("CRABBOX_OWNER_SSH_FAIL_STDERR", strings.Repeat("x", 190)+" owner-token="+requestToken+" Authorization: Bearer "+secret+" "+strings.Repeat("z", 300)+"\n")
+			test.target.User, test.target.Host, test.target.Port = "crabbox", "127.0.0.1", "22"
+			got, err := (sshWorkspaceOwnerTransport{target: test.target}).Do(context.Background(), workspaceOwnerRemoteRequest{
+				Action: workspaceOwnerRenew,
+				Key:    workspaceOwnerKey("cbx_failure_" + test.name),
+				Token:  requestToken,
+				TTL:    time.Minute,
+			})
+			if got != "MISMATCH" || err == nil || exitCode(err) != 23 {
+				t.Fatalf("response=%q err=%v exit=%d", got, err, exitCode(err))
+			}
+			if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), requestToken) || !strings.Contains(err.Error(), diagnosticRedaction) {
+				t.Fatalf("failure diagnostic was not redacted: %q", err)
+			}
+			if detail := strings.TrimPrefix(err.Error(), "exit status 23: "); len(detail) > 243 {
+				t.Fatalf("failure detail length=%d want <=243: %q", len(detail), detail)
+			}
+		})
+	}
+}
+
+func TestWorkspaceOwnerSSHProtocolFailureRedactsAuthSecretUser(t *testing.T) {
+	installWorkspaceOwnerRecordingSSH(t)
+	secret := "token-as-username-must-not-leak"
+	t.Setenv("CRABBOX_OWNER_SSH_FAIL_CALL", "1")
+	t.Setenv("CRABBOX_OWNER_SSH_FAIL_STDERR", secret+"@example.test: Permission denied\n")
+	target := SSHTarget{
+		User:       secret,
+		Host:       "127.0.0.1",
+		Port:       "22",
+		TargetOS:   targetLinux,
+		AuthSecret: true,
+	}
+	_, err := (sshWorkspaceOwnerTransport{target: target}).Do(context.Background(), workspaceOwnerRemoteRequest{
+		Action: workspaceOwnerRenew,
+		Key:    workspaceOwnerKey("cbx_failure_auth_secret"),
+		Token:  strings.Repeat("b", 64),
+		TTL:    time.Minute,
+	})
+	if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), diagnosticRedaction) {
+		t.Fatalf("AuthSecret username was not redacted: %q", err)
+	}
+}
+
+func TestWorkspaceOwnerSSHProtocolFallbackDoesNotContaminateSuccess(t *testing.T) {
+	tests := []struct {
+		name   string
+		target SSHTarget
+	}{
+		{name: "POSIX", target: SSHTarget{TargetOS: targetLinux}},
+		{name: "native Windows", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := installWorkspaceOwnerRecordingSSH(t)
+			t.Setenv("CRABBOX_OWNER_SSH_RETRY_CALL", "1")
+			t.Setenv("CRABBOX_OWNER_SSH_RETRY_STDOUT", "MISMATCH")
+			t.Setenv("CRABBOX_OWNER_SSH_RETRY_STDERR", "first port failed")
+			t.Setenv("CRABBOX_OWNER_SSH_SUCCESS_STDOUT", "ACQUIRED")
+			t.Setenv("CRABBOX_OWNER_SSH_SUCCESS_STDERR", "second port warning")
+			test.target.User, test.target.Host, test.target.Port = "crabbox", "127.0.0.1", "2222"
+			test.target.FallbackPorts = []string{"22"}
+			got, err := (sshWorkspaceOwnerTransport{target: test.target}).Do(context.Background(), workspaceOwnerRemoteRequest{
+				Action: workspaceOwnerAcquire,
+				Key:    workspaceOwnerKey("cbx_fallback_" + test.name),
+				Token:  strings.Repeat("c", 64),
+				TTL:    time.Minute,
+			})
+			if err != nil || got != "ACQUIRED" {
+				t.Fatalf("fallback response=%q err=%v", got, err)
+			}
+			if count, readErr := os.ReadFile(filepath.Join(dir, "count")); readErr != nil || string(count) != "2" {
+				t.Fatalf("SSH call count=%q err=%v", count, readErr)
+			}
+		})
+	}
 }
 
 func TestWorkspaceOwnerNativeWindowsProtocolStreamsScriptsOverStdin(t *testing.T) {

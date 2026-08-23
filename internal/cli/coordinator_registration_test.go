@@ -540,6 +540,46 @@ func TestCoordinatorLeaseBackendForwardsResolvedTargetRebinding(t *testing.T) {
 	}
 }
 
+func TestCoordinatorLeaseProjectionPersistsInLocalClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetLinux
+	cfg.Pond = "evaluation"
+
+	leaseID := "cbx_projection123"
+	server, target, _ := leaseToServerTarget(CoordinatorLease{
+		ID:         leaseID,
+		Slug:       "blue-lobster",
+		Pond:       "evaluation",
+		ServerType: "c7a.large",
+		Market:     "on-demand",
+		Keep:       true,
+	}, cfg)
+	if err := claimLeaseTargetForRepoConfig(leaseID, "blue-lobster", cfg, server, target, "/repo", time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{
+		"lease":       leaseID,
+		"slug":        "blue-lobster",
+		"keep":        "true",
+		"target":      targetLinux,
+		"pond":        "evaluation",
+		"provider":    "aws",
+		"server_type": "c7a.large",
+		"market":      "on-demand",
+	} {
+		if claim.Labels[key] != want {
+			t.Fatalf("claim labels[%q]=%q, want %q; labels=%#v", key, claim.Labels[key], want, claim.Labels)
+		}
+	}
+}
+
 func TestResolvedLeaseClaimBeforeDoesNotMatchProviderlessClaimByReturnedCloudID(t *testing.T) {
 	legacy := leaseClaim{LeaseID: "cbx_legacy123456", CloudID: "123", Slug: "legacy"}
 	claim, ok, err := resolvedLeaseClaimBefore(

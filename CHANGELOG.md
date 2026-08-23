@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Redacted coordinator URL credentials, query parameters, and fragments from run-context portal and logs links.
 - Allowed Windows and WSL2 SSH readiness checks enough time for delayed native OpenSSH handshakes without slowing Linux or macOS readiness.
 - Fenced Linode heartbeats and Tailscale metadata updates with exact account-, scope-, and instance-bound claims, preserving legacy instance claims, idle-timeout intent, and safe release continuity.
 - Made two timing-sensitive tests robust on loaded CI runners.

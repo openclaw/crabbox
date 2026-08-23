@@ -791,7 +791,7 @@ func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest)
 		IdleFor:          idleForString(lease.LastTouchedAt, time.Now()),
 		IdleTimeout:      formatSecondsDuration(lease.IdleTimeoutSeconds),
 		ExpiresAt:        lease.ExpiresAt,
-		Labels:           map[string]string{"keep": fmt.Sprint(lease.Keep)},
+		Labels:           cloneStringMap(server.Labels),
 		HasHost:          hasHost,
 		Ready:            ready,
 		Telemetry:        lease.Telemetry,

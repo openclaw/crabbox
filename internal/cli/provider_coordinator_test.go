@@ -305,8 +305,13 @@ func TestCoordinatorInspectJSONIncludesOptionalSSHHostKey(t *testing.T) {
 		}
 		lease := CoordinatorLease{
 			ID:               strings.TrimPrefix(r.URL.Path, "/v1/leases/"),
+			Slug:             "blue-lobster",
 			Provider:         "aws",
 			TargetOS:         targetLinux,
+			Pond:             "evaluation",
+			ServerType:       "c7a.large",
+			Market:           "on-demand",
+			Keep:             false,
 			State:            "provisioning",
 			ProviderMetadata: map[string]any{"instanceProfileAttached": false},
 		}
@@ -358,6 +363,24 @@ func TestCoordinatorInspectJSONIncludesOptionalSSHHostKey(t *testing.T) {
 			}
 			if _, err := os.Stat(filepath.Dir(keyPath)); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("metadata-only inspect created SSH trust state: %v", err)
+			}
+			labels, ok := got["labels"].(map[string]any)
+			if !ok {
+				t.Fatalf("labels=%#v, want object", got["labels"])
+			}
+			for key, want := range map[string]any{
+				"lease":       test.id,
+				"slug":        "blue-lobster",
+				"keep":        "false",
+				"target":      targetLinux,
+				"pond":        "evaluation",
+				"provider":    "aws",
+				"server_type": "c7a.large",
+				"market":      "on-demand",
+			} {
+				if labels[key] != want {
+					t.Fatalf("labels[%q]=%#v, want %#v; labels=%#v", key, labels[key], want, labels)
+				}
 			}
 		})
 	}
@@ -1500,6 +1523,56 @@ func TestCoordinatorFixedCreateCommitThenTimeoutRepeatsPutAndCreatesOnce(t *test
 	}
 	if lease.ID != "cbx_abcdef123463" || lease.CloudID != "i-fixed" || puts != 2 || gets == 0 || creates != 1 {
 		t.Fatalf("lease=%#v puts=%d gets=%d creates=%d", lease, puts, gets, creates)
+	}
+}
+
+func TestLeaseToServerTargetProjectsCanonicalLeaseLabels(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetLinux
+
+	server, _, _ := leaseToServerTarget(CoordinatorLease{
+		ID:                 "cbx_123",
+		Slug:               "blue-lobster",
+		Pond:               "evaluation",
+		ServerType:         "c7a.large",
+		Market:             "on-demand",
+		Keep:               true,
+		ExpiresAt:          "2026-08-23T07:00:00Z",
+		LastTouchedAt:      "2026-08-23T06:30:00Z",
+		IdleTimeoutSeconds: 1800,
+		Desktop:            true,
+		Browser:            true,
+		Code:               true,
+	}, cfg)
+
+	for key, want := range map[string]string{
+		"lease":             "cbx_123",
+		"slug":              "blue-lobster",
+		"keep":              "true",
+		"target":            targetLinux,
+		"pond":              "evaluation",
+		"provider":          "aws",
+		"server_type":       "c7a.large",
+		"market":            "on-demand",
+		"expires_at":        "2026-08-23T07:00:00Z",
+		"last_touched_at":   "2026-08-23T06:30:00Z",
+		"idle_timeout_secs": "1800",
+		"desktop":           "true",
+		"browser":           "true",
+		"code":              "true",
+	} {
+		if server.Labels[key] != want {
+			t.Fatalf("labels[%q]=%q, want %q; labels=%#v", key, server.Labels[key], want, server.Labels)
+		}
+	}
+	if server.Provider != "aws" {
+		t.Fatalf("provider=%q, want resolved fallback aws", server.Provider)
+	}
+
+	withoutMarket, _, _ := leaseToServerTarget(CoordinatorLease{ID: "cbx_456"}, cfg)
+	if _, ok := withoutMarket.Labels["market"]; ok {
+		t.Fatalf("market label=%q, want omitted", withoutMarket.Labels["market"])
 	}
 }
 

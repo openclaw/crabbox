@@ -684,7 +684,7 @@ func runWSL2ControlScriptCombinedOutput(ctx context.Context, target SSHTarget, r
 		}
 	}()
 	remote = prepared.command
-	command := wsl2StdinScriptCommandWithWaitTimeout(waitTimeout)
+	command := wsl2StdinScriptCommandWithWaitTimeout(len(remote), waitTimeout)
 	input, err := newReplayableSSHInput([]byte(remote))
 	if err != nil {
 		return "", err
@@ -719,54 +719,6 @@ func runWSL2ControlScriptCombinedOutput(ctx context.Context, target SSHTarget, r
 
 func runSSHInputQuiet(ctx context.Context, target SSHTarget, remote, input string) error {
 	return runSSHInput(ctx, target, remote, strings.NewReader(input), io.Discard, io.Discard)
-}
-
-func runSSHInputCombinedOutput(ctx context.Context, target SSHTarget, remote string, input io.Reader) (output string, err error) {
-	if input == nil {
-		input = strings.NewReader("")
-	}
-	data, err := io.ReadAll(input)
-	if err != nil {
-		return "", err
-	}
-	inputSize := int64(len(data))
-	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, &inputSize)
-	if err != nil {
-		return "", err
-	}
-	defer func() {
-		if err != nil {
-			err = errors.Join(err, prepared.close(ctx, target))
-		}
-	}()
-	remote = wrapRemoteForTarget(target, prepared.command)
-	replayableInput, err := newReplayableSSHInput(data)
-	if err != nil {
-		return "", err
-	}
-	defer func() { err = errors.Join(err, replayableInput.close()) }()
-	var lastOutput string
-	var lastErr error
-	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
-		probe := target
-		probe.Port = port
-		cmd := sshCommandContext(ctx, probe, sshArgs(probe, remote)...)
-		cmd.Stdin, err = replayableInput.reset()
-		if err != nil {
-			return "", err
-		}
-		var attempt synchronizedBuffer
-		err = runSSHCommand(cmd, &attempt, &attempt)
-		lastOutput = strings.TrimSpace(attempt.String())
-		if err == nil {
-			return lastOutput, nil
-		}
-		lastErr = err
-		if !shouldRetrySSHPort(err) {
-			return lastOutput, err
-		}
-	}
-	return lastOutput, lastErr
 }
 
 func runSSHInput(ctx context.Context, target SSHTarget, remote string, input io.Reader, stdout, stderr io.Writer) (err error) {
@@ -1259,43 +1211,84 @@ try {
 exit $code`)
 }
 
-func wsl2StdinScriptCommandWithWaitTimeout(waitTimeout time.Duration) string {
+func wsl2StdinScriptCommandWithWaitTimeout(inputSize int, waitTimeout time.Duration) string {
+	// Keep staging, execution, and cleanup in one WSL process so the timeout
+	// covers the lifecycle. The frame accounts for .NET's stdin preamble, and
+	// the marker lets post-exit cleanup preserve collisions.
 	wait := `$process.WaitForExit()
   $code = $process.ExitCode`
+	copyScript := `[Console]::OpenStandardInput().CopyTo($process.StandardInput.BaseStream)`
+	watch := ""
 	if waitTimeout > 0 {
 		waitMS := int(waitTimeout / time.Millisecond)
-		wait = fmt.Sprintf(`if (-not $process.WaitForExit(%d)) {
+		watch = `$watch = [System.Diagnostics.Stopwatch]::StartNew()
+`
+		wait = fmt.Sprintf(`$left = %d - [int]$watch.ElapsedMilliseconds
+  if ($left -le 0 -or -not $process.WaitForExit($left)) {
     try {
       $process.Kill($true)
     } catch {
       $process.Kill()
     }
-    $process.WaitForExit(5000) | Out-Null
+    $cleanupAllowed = $process.WaitForExit(5000)
     throw "WSL2 command timed out after %s"
   }
   $code = $process.ExitCode`, waitMS, waitTimeout.Round(time.Second))
+		copyScript = fmt.Sprintf(`$copy = [Console]::OpenStandardInput().CopyToAsync($process.StandardInput.BaseStream)
+    $left = %d - [int]$watch.ElapsedMilliseconds
+    if ($left -le 0 -or -not $copy.Wait($left)) {
+      try {
+        $process.Kill($true)
+      } catch {
+        $process.Kill()
+      }
+      $cleanupAllowed = $process.WaitForExit(5000)
+      throw "WSL2 command timed out after %s"
+    }`, waitMS, waitTimeout.Round(time.Second))
 	}
 	return powershellCommand(`$ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
-$dir = "C:\ProgramData\crabbox\commands"
-New-Item -ItemType Directory -Force -Path $dir | Out-Null
-$name = "cmd-" + [Guid]::NewGuid().ToString("N") + ".sh"
-$path = Join-Path $dir $name
+$dir = "/tmp/crabbox-command-" + [Guid]::NewGuid().ToString("N")
+$expected = ` + strconv.Itoa(inputSize) + `
+$failure = $null
+$cleanupAllowed = $true
+` + watch + `$preamble = [Console]::InputEncoding.GetPreamble().Length
+$psi = [System.Diagnostics.ProcessStartInfo]::new("wsl.exe")
+$psi.UseShellExecute = $false
+$psi.RedirectStandardInput = $true
+$psi.Arguments = '--exec sh -c "set -u;umask 077;dir=$1;expected=$2;preamble=$3;mkdir -m 700 -- $dir||exit;: >$dir/.crabbox-owned;trap ''rm -rf -- $dir'' EXIT;cat >$dir/framed||exit;actual=$(wc -c <$dir/framed);test $actual = $((expected+preamble))||exit;dd if=$dir/framed of=$dir/script.sh bs=1 skip=$preamble 2>/dev/null||exit;rm -f -- $dir/framed;test $(wc -c <$dir/script.sh) = $expected||exit;code=0;bash $dir/script.sh||code=$?;rm -rf -- $dir;cleanup=$?;trap - EXIT;if [ $cleanup -ne 0 ];then echo ''WSL2 command cleanup failed: exit ''$cleanup >&2;[ $code -ne 0 ]||code=$cleanup;fi;exit $code" sh ' + $dir + ' ' + $expected + ' ' + $preamble
+$process = [System.Diagnostics.Process]::Start($psi)
 try {
-  $script = [System.IO.File]::Open($path, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
   try {
-    [Console]::OpenStandardInput().CopyTo($script)
+    ` + copyScript + `
   } finally {
-    $script.Close()
+    $process.StandardInput.BaseStream.Close()
   }
-  $wslPath = "/mnt/c/ProgramData/crabbox/commands/" + $name
-  $psi = [System.Diagnostics.ProcessStartInfo]::new("wsl.exe")
-  $psi.UseShellExecute = $false
-  $psi.Arguments = "--exec bash " + $wslPath
-  $process = [System.Diagnostics.Process]::Start($psi)
   ` + wait + `
-} finally {
-  Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+} catch {
+  $failure = $_
+}
+if ($null -ne $failure) {
+  if (-not $cleanupAllowed) {
+    [Console]::Error.WriteLine("WSL2 command cleanup skipped: process still running")
+    throw $failure
+  }
+  try {
+    $cleanupInfo = [System.Diagnostics.ProcessStartInfo]::new("wsl.exe")
+    $cleanupInfo.UseShellExecute = $false
+    $cleanupInfo.Arguments = '--exec sh -c "test ! -f $1/.crabbox-owned||rm -rf -- $1" sh ' + $dir
+    $cleanup = [System.Diagnostics.Process]::Start($cleanupInfo)
+    if (-not $cleanup.WaitForExit(5000)) {
+      $cleanup.Kill()
+      $cleanup.WaitForExit(5000) | Out-Null
+      [Console]::Error.WriteLine("WSL2 command cleanup failed: timed out")
+    } elseif ($cleanup.ExitCode -ne 0) {
+      [Console]::Error.WriteLine("WSL2 command cleanup failed: exit " + $cleanup.ExitCode)
+    }
+  } catch {
+    [Console]::Error.WriteLine("WSL2 command cleanup failed: " + $_.Exception.Message)
+  }
+  throw $failure
 }
 exit $code`)
 }

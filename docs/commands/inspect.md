@@ -65,6 +65,12 @@ key path, port, user, and host). Empty fields render as `-`.
 label map. Secrets such as broker tokens, provider keys, and VNC passwords are
 never included in either output mode.
 
+For brokered leases, labels describe the current coordinator lease record,
+including allocation identity, target, capacity, timing, and capability facts.
+They are not a fresh read of provider tags. Only the documented
+`providerMetadata` fields below are refreshed from the provider during
+coordinator inspection.
+
 For coordinator leases whose provider can inject an SSH host key before first
 boot, JSON also includes `sshHostKey`. Its value is exactly the public host-key
 algorithm and base64 payload, without a hostname or comment:
