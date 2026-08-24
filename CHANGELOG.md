@@ -9,6 +9,7 @@
 ### Fixed
 
 - Removed idle gaps throughout media previews while preserving every moving interval, so long recordings produce short GIFs without hiding late changes.
+- Exposed coordinator cleanup state in brokered `inspect --json`, preserving pending, error, and retry signals plus the distinction between omitted and explicit `releaseDeletesServer: false`.
 - Reduced Machine0 provisioning reads about twelvefold by polling every 60 seconds by default while preserving fresh fixed-lease ownership checks.
 - Failed local-container acquisition and status waits promptly when the exact claimed container exits, while preserving fenced recovery and cleanup for retained leases.
 - Redacted coordinator URL credentials, query parameters, and fragments from run-context portal and logs links.

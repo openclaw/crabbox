@@ -71,6 +71,24 @@ They are not a fresh read of provider tags. Only the documented
 `providerMetadata` fields below are refreshed from the provider during
 coordinator inspection.
 
+Brokered JSON records also expose the coordinator's provider-cleanup state:
+
+- `cleanupStartedAt`: cleanup has started but is not yet terminal.
+- `cleanupError`: the coordinator observed a provider-cleanup failure.
+- `cleanupRetryAt`: the coordinator scheduled another cleanup attempt.
+- `releaseDeletesServer`: whether release is intended to delete the provider
+  resource.
+
+Cleanup is terminal under Crabbox's coordinator predicate only when `state` is
+`released`, `cleanupStartedAt`, `cleanupError`, and `cleanupRetryAt` are all
+absent, and `releaseDeletesServer` is either omitted or `true`. An explicit
+`releaseDeletesServer: false` means the provider resource was intentionally
+retained and must not be treated as deletion-confirmed. Omitted and `false` are
+therefore distinct states.
+
+These fields report the coordinator's lifecycle observation. They are not an
+independent provider inventory check.
+
 For coordinator leases whose provider can inject an SSH host key before first
 boot, JSON also includes `sshHostKey`. Its value is exactly the public host-key
 algorithm and base64 payload, without a hostname or comment:

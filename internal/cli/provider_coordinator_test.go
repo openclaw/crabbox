@@ -386,6 +386,83 @@ func TestCoordinatorInspectJSONIncludesOptionalSSHHostKey(t *testing.T) {
 	}
 }
 
+func TestCoordinatorInspectJSONPreservesCleanupState(t *testing.T) {
+	isolateTestUserDirs(t)
+	retained := false
+	deleting := true
+	releaseDeletesServerByID := map[string]*bool{
+		"cbx_unspecified": nil,
+		"cbx_retained":    &retained,
+		"cbx_deleting":    &deleting,
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, "/v1/leases/") {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		leaseID := strings.TrimPrefix(r.URL.Path, "/v1/leases/")
+		releaseDeletesServer, ok := releaseDeletesServerByID[leaseID]
+		if !ok {
+			t.Fatalf("unexpected lease %q", leaseID)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+			ID:                   leaseID,
+			Provider:             "aws",
+			TargetOS:             targetLinux,
+			State:                "released",
+			CleanupStartedAt:     "2026-08-24T08:00:00Z",
+			CleanupError:         "cleanup failed",
+			CleanupRetryAt:       "2026-08-24T08:05:00Z",
+			ReleaseDeletesServer: releaseDeletesServer,
+		}})
+	}))
+	defer server.Close()
+
+	clearConfigEnv(t)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "user-token")
+
+	for _, test := range []struct {
+		id                       string
+		wantReleaseDeletesServer *bool
+	}{
+		{id: "cbx_unspecified"},
+		{id: "cbx_retained", wantReleaseDeletesServer: &retained},
+		{id: "cbx_deleting", wantReleaseDeletesServer: &deleting},
+	} {
+		t.Run(test.id, func(t *testing.T) {
+			var stdout bytes.Buffer
+			app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
+			if err := app.inspect(context.Background(), []string{"--provider", "aws", "--id", test.id, "--json"}); err != nil {
+				t.Fatal(err)
+			}
+			var got map[string]any
+			if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			for field, want := range map[string]any{
+				"cleanupStartedAt": "2026-08-24T08:00:00Z",
+				"cleanupError":     "cleanup failed",
+				"cleanupRetryAt":   "2026-08-24T08:05:00Z",
+			} {
+				if got[field] != want {
+					t.Fatalf("%s=%#v, want %#v", field, got[field], want)
+				}
+			}
+			releaseDeletesServer, present := got["releaseDeletesServer"]
+			if test.wantReleaseDeletesServer == nil {
+				if present {
+					t.Fatalf("releaseDeletesServer=%#v, want omitted", releaseDeletesServer)
+				}
+				return
+			}
+			if !present || releaseDeletesServer != *test.wantReleaseDeletesServer {
+				t.Fatalf("releaseDeletesServer=%#v present=%t, want %t", releaseDeletesServer, present, *test.wantReleaseDeletesServer)
+			}
+		})
+	}
+}
+
 func TestCoordinatorAcquireSendsTailscaleHostnameTemplate(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
