@@ -1675,7 +1675,7 @@ retrySync:
 			timings.syncSteps.gitSeed += time.Since(stepStart)
 			if overlayErr != nil {
 				if reason, fallback, mutated := gitOverlayFallbackOutcome(output, overlayErr); fallback {
-					if reason == "unsafe_overlay_metadata" || reason == "unsafe_runtime_state" {
+					if gitOverlayBoundaryViolation(reason) {
 						return recordFailure(exit(6, "remote git overlay preparation rejected unsafe workspace state: %s", reason))
 					}
 					overlayDecision.Enabled = false
@@ -1686,7 +1686,6 @@ retrySync:
 					timings.syncTransferBytes = manifest.Bytes
 					timings.syncFallbackReason = reason
 					if mutated {
-						coherence = gitCoherencePlan{}
 						fingerprint = ""
 					} else if cfg.Sync.Fingerprint {
 						fingerprintConfig := cfg
@@ -1727,7 +1726,6 @@ retrySync:
 				overlayDecision.Enabled = false
 				overlayDecision.Reason = "local_checkout_changed"
 				plainManifestFallback = true
-				coherence = gitCoherencePlan{}
 				fingerprint = ""
 				fmt.Fprintf(a.Stderr, "git overlay fallback reason=%s; using full manifest sync\n", overlayDecision.Reason)
 				if err := checkSyncPreflight(manifest, cfg, *forceSyncLarge, a.Stderr); err != nil {

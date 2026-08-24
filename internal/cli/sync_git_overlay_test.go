@@ -302,6 +302,23 @@ func TestGitOverlayOriginAcceptsOnlyAnonymousSupportedTransports(t *testing.T) {
 	}
 }
 
+func TestGitOverlayBoundaryViolationsFailClosedWithoutRejectingLegacyFallback(t *testing.T) {
+	for _, reason := range []string{
+		"unsafe_remote_root", "symlink_remote_root", "symlink_git_directory", "symlink_git_config", "symlink_git_objects", "unsafe_overlay_metadata", "unsafe_runtime_state",
+	} {
+		if !gitOverlayBoundaryViolation(reason) {
+			t.Errorf("boundary violation %q remained eligible for legacy sync", reason)
+		}
+	}
+	for _, reason := range []string{
+		"unsafe_git_workspace", "origin_mismatch", "non_git_workspace", "filtered_history_unsupported", "git_attribute_filter", "checkout_failed", "unsafe_cache_root",
+	} {
+		if gitOverlayBoundaryViolation(reason) {
+			t.Errorf("conservative overlay fallback %q incorrectly failed closed", reason)
+		}
+	}
+}
+
 func TestRemoteGitOverlayPreparePruneTransferAndFinalize(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX overlay integration")
@@ -424,7 +441,7 @@ func TestRemoteGitOverlayRejectsLinkedAndUnsafeSharedWorkspaces(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX overlay integration")
 	}
-	for _, kind := range []string{"linked", "rewrite", "filter", "alternates", "attributes", "symlinked git"} {
+	for _, kind := range []string{"linked", "rewrite", "filter", "alternates", "attributes", "symlinked git", "symlinked config", "symlinked objects"} {
 		t.Run(kind, func(t *testing.T) {
 			fixture := newGitOverlayFixture(t)
 			base := filepath.Join(t.TempDir(), "base")
@@ -452,6 +469,19 @@ func TestRemoteGitOverlayRejectsLinkedAndUnsafeSharedWorkspaces(t *testing.T) {
 				if err := os.Symlink(gitDir, filepath.Join(workdir, ".git")); err != nil {
 					t.Fatal(err)
 				}
+			case "symlinked config", "symlinked objects":
+				name := "config"
+				if kind == "symlinked objects" {
+					name = "objects"
+				}
+				path := filepath.Join(workdir, ".git", name)
+				external := filepath.Join(filepath.Dir(base), "external-"+name)
+				if err := os.Rename(path, external); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(external, path); err != nil {
+					t.Fatal(err)
+				}
 			}
 			before, err := os.ReadFile(filepath.Join(base, ".git", "config"))
 			if kind == "symlinked git" {
@@ -461,7 +491,16 @@ func TestRemoteGitOverlayRejectsLinkedAndUnsafeSharedWorkspaces(t *testing.T) {
 				t.Fatal(err)
 			}
 			output, prepareErr := runOverlayCommand(t, remotePrepareGitOverlay(workdir, fixture.plan), nil)
-			if reason, ok := gitOverlayFallbackResult(string(output), prepareErr); !ok || reason != "unsafe_git_workspace" {
+			wantReason := "unsafe_git_workspace"
+			switch kind {
+			case "symlinked git":
+				wantReason = "symlink_git_directory"
+			case "symlinked config":
+				wantReason = "symlink_git_config"
+			case "symlinked objects":
+				wantReason = "symlink_git_objects"
+			}
+			if reason, ok := gitOverlayFallbackResult(string(output), prepareErr); !ok || reason != wantReason {
 				t.Fatalf("reason=%q fallback=%t err=%v output=%q", reason, ok, prepareErr, output)
 			}
 			afterPath := filepath.Join(base, ".git", "config")
@@ -801,6 +840,84 @@ func TestRemoteGitOverlayRetainsFilteredFeatureAndBaseHistory(t *testing.T) {
 	}
 }
 
+func TestRemoteGitOverlayRecoveryRollsBackInterruptedCoherenceInstall(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX overlay recovery integration")
+	}
+	fixture := newGitCoherenceFixture(t)
+	workdir := fixture.workspace(t, fixture.a, true)
+	plan := fixture.plan(t, fixture.b)
+	mustWriteTestFile(t, filepath.Join(workdir, "tracked.txt"), "B\n")
+	const token = "86753098675309867530986753098675"
+	stageCoherenceFinalize(t, workdir, token)
+	meta := filepath.Join(workdir, ".git", "crabbox")
+	mustWriteTestFile(t, filepath.Join(meta, "sync-fingerprint"), "stale overlay fingerprint")
+	beforeIndex := coherenceIndexBytes(t, workdir)
+	headLock := filepath.Join(workdir, ".git", "HEAD.lock")
+	mustWriteTestFile(t, headLock, "active competing HEAD writer\n")
+
+	hostileRoot := t.TempDir()
+	hostileHome := filepath.Join(hostileRoot, "home")
+	hostileBin := filepath.Join(hostileRoot, "bin")
+	marker := filepath.Join(hostileRoot, "hostile-executed")
+	mustWriteTestFile(t, filepath.Join(hostileHome, ".bash_profile"), "printf profile >"+shellQuote(marker)+"\n")
+	if err := os.MkdirAll(hostileBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"git", "mv", "cp", "awk"} {
+		if err := os.WriteFile(filepath.Join(hostileBin, name), []byte("#!/bin/sh\nprintf hostile >"+shellQuote(marker)+"\nexit 99\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hook := filepath.Join(workdir, ".git", "hooks", "reference-transaction")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\nprintf hook >"+shellQuote(marker)+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	finalize := remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
+		Token:         token,
+		Fingerprint:   "must-not-publish",
+		Coherence:     plan,
+		PlainManifest: true,
+		BaseRef:       "main",
+		BaseSHA:       fixture.c,
+	})
+	output, err := runOverlayCommand(t, finalize, nil, "HOME="+hostileHome, "PATH="+hostileBin)
+	if err == nil {
+		t.Fatalf("occupied HEAD lock unexpectedly allowed recovery finalization: %s", output)
+	}
+	requireGitOutput(t, workdir, fixture.a, "rev-parse", "HEAD")
+	requireGitOutput(t, workdir, "refs/heads/workspace", "symbolic-ref", "-q", "HEAD")
+	if afterIndex := coherenceIndexBytes(t, workdir); !bytes.Equal(afterIndex, beforeIndex) {
+		t.Fatal("failed hermetic recovery did not restore the original Git index")
+	}
+	if _, err := os.Stat(filepath.Join(meta, "sync-finalize-complete-token")); !os.IsNotExist(err) {
+		t.Fatalf("failed recovery published completion: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(meta, "sync-finalize-lock")); !os.IsNotExist(err) {
+		t.Fatalf("failed recovery stranded its finalization lock: %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("failed recovery executed an ambient helper, hook, or profile: %v", err)
+	}
+	if err := os.Remove(headLock); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := runOverlayCommand(t, finalize, nil, "HOME="+hostileHome, "PATH="+hostileBin); err != nil {
+		t.Fatalf("retry hermetic recovery finalization: %v\n%s", err, output)
+	}
+	requireGitOutput(t, workdir, fixture.b, "rev-parse", "HEAD")
+	requireGitOutput(t, workdir, plan.Tree, "write-tree")
+	if base, err := os.ReadFile(filepath.Join(meta, "git-hydrate-base")); err != nil || string(base) != "main "+fixture.c+"\n" {
+		t.Fatalf("recovered base hydration marker=%q err=%v", base, err)
+	}
+	if _, err := os.Stat(filepath.Join(meta, "sync-fingerprint")); !os.IsNotExist(err) {
+		t.Fatalf("recovery retained its stale overlay fingerprint: %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("recovery retry executed an ambient helper, hook, or profile: %v", err)
+	}
+}
+
 func TestRemoteGitOverlayRejectsSymlinkedMetadataAndRuntimeState(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX symlink integration")
@@ -1033,11 +1150,46 @@ func TestGitOverlayTimingFieldsAreAdditiveAndDefaultOff(t *testing.T) {
 	}
 }
 
+func assertGitOverlayRecoveryCoherent(t *testing.T, workdir string, repo Repo) {
+	t.Helper()
+	if got := gitOutput(workdir, "rev-parse", "--verify", "HEAD^{commit}"); got != repo.Head {
+		t.Fatalf("recovered remote HEAD=%q want=%q", got, repo.Head)
+	}
+	wantTree := gitOutput(repo.Root, "rev-parse", "--verify", repo.Head+"^{tree}")
+	if got := gitOutput(workdir, "write-tree"); got != wantTree {
+		t.Fatalf("recovered remote index tree=%q want=%q", got, wantTree)
+	}
+	baseSHA := gitHydrateBaseSHA(repo, repo.BaseRef)
+	if got := gitOutput(workdir, "rev-parse", "--verify", "refs/remotes/origin/"+repo.BaseRef+"^{commit}"); got != baseSHA {
+		t.Fatalf("recovered remote base=%q want=%q", got, baseSHA)
+	}
+	for _, args := range [][]string{
+		{"rev-parse", "--verify", "HEAD^"},
+		{"merge-base", "origin/" + repo.BaseRef, "HEAD"},
+		{"diff", "origin/" + repo.BaseRef + "...HEAD"},
+	} {
+		if output, err := exec.Command("git", append([]string{"-C", workdir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("recovered history git %v: %v\n%s", args, err, output)
+		}
+	}
+	markerPath := filepath.Join(workdir, ".git", "crabbox", "git-hydrate-base")
+	if marker, err := os.ReadFile(markerPath); err != nil || string(marker) != repo.BaseRef+" "+baseSHA+"\n" {
+		t.Fatalf("recovered hydration marker=%q err=%v", marker, err)
+	}
+	if _, err := os.Stat(filepath.Join(workdir, ".git", "crabbox", "sync-fingerprint")); !os.IsNotExist(err) {
+		t.Fatalf("recovered workspace retained a stale overlay fingerprint: %v", err)
+	}
+}
+
 func TestRunGitOverlaySuccessFallbackAndLateLocalEdit(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX SSH runtime integration")
 	}
-	for _, mode := range []string{"success", "runtime-state", "classified-fallback", "private-origin", "local-ineligible", "local-fingerprint-reuse", "remote-fingerprint-reuse", "unsafe-metadata", "checkout-file-obstruction", "post-reset-cache", "post-reset-mass-deletion", "late-local-edit"} {
+	for _, mode := range []string{
+		"success", "runtime-state", "classified-fallback", "private-origin", "local-ineligible", "local-fingerprint-reuse", "remote-fingerprint-reuse", "unsafe-metadata",
+		"symlinked-workdir", "symlinked-git", "symlinked-git-config", "symlinked-git-objects", "linked-worktree",
+		"checkout-file-obstruction", "post-reset-cache", "post-reset-mass-deletion", "late-local-edit",
+	} {
 		t.Run(mode, func(t *testing.T) {
 			clearConfigEnv(t)
 			fixture := newGitOverlayFixture(t)
@@ -1110,12 +1262,50 @@ func TestRunGitOverlaySuccessFallbackAndLateLocalEdit(t *testing.T) {
 				}
 			}
 			workdir := filepath.Join(remoteRoot, "cbx_overlay_runtime", repo.Name)
-			if mode == "runtime-state" || mode == "checkout-file-obstruction" || mode == "post-reset-cache" || mode == "post-reset-mass-deletion" || mode == "classified-fallback" || mode == "local-fingerprint-reuse" || mode == "remote-fingerprint-reuse" || mode == "unsafe-metadata" {
+			if mode == "runtime-state" || mode == "checkout-file-obstruction" || mode == "post-reset-cache" || mode == "post-reset-mass-deletion" || mode == "classified-fallback" || mode == "local-fingerprint-reuse" || mode == "remote-fingerprint-reuse" || mode == "unsafe-metadata" || mode == "symlinked-workdir" || mode == "symlinked-git" || mode == "symlinked-git-config" || mode == "symlinked-git-objects" || mode == "linked-worktree" {
 				if err := os.MkdirAll(filepath.Dir(workdir), 0o755); err != nil {
 					t.Fatal(err)
 				}
-				if output, err := exec.Command("git", "clone", "--quiet", fixture.origin, workdir).CombinedOutput(); err != nil {
+				clonePath := workdir
+				if mode == "symlinked-workdir" {
+					clonePath = filepath.Join(testRoot, "outside-workspace")
+				} else if mode == "linked-worktree" {
+					clonePath = filepath.Join(testRoot, "linked-worktree-base")
+				}
+				if output, err := exec.Command("git", "clone", "--quiet", fixture.origin, clonePath).CombinedOutput(); err != nil {
 					t.Fatalf("clone existing runtime workspace: %v\n%s", err, output)
+				}
+				if mode == "symlinked-workdir" {
+					mustWriteTestFile(t, filepath.Join(clonePath, "outside-sentinel"), "outside workspace remains untouched\n")
+					if err := os.Symlink(clonePath, workdir); err != nil {
+						t.Fatal(err)
+					}
+				} else if mode == "linked-worktree" {
+					runGit(t, clonePath, "worktree", "add", "--detach", workdir, repo.Head)
+					metadata := gitOutput(workdir, "rev-parse", "--git-path", "crabbox")
+					if !filepath.IsAbs(metadata) {
+						metadata = filepath.Join(workdir, metadata)
+					}
+					mustWriteTestFile(t, filepath.Join(metadata, "sync-manifest"), "clean.txt\x00excluded.txt\x00")
+				} else if mode == "symlinked-git" || mode == "symlinked-git-config" || mode == "symlinked-git-objects" {
+					gitPath := filepath.Join(workdir, ".git")
+					if mode == "symlinked-git-config" {
+						gitPath = filepath.Join(gitPath, "config")
+					} else if mode == "symlinked-git-objects" {
+						gitPath = filepath.Join(gitPath, "objects")
+					}
+					external := filepath.Join(testRoot, "outside-git-boundary")
+					if err := os.Rename(gitPath, external); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(external, gitPath); err != nil {
+						t.Fatal(err)
+					}
+					sentinel := filepath.Join(testRoot, "outside-sentinel")
+					if mode == "symlinked-git" || mode == "symlinked-git-objects" {
+						sentinel = filepath.Join(external, "outside-sentinel")
+					}
+					mustWriteTestFile(t, sentinel, "outside Git boundary remains untouched\n")
 				}
 				if mode == "runtime-state" || mode == "post-reset-cache" || mode == "post-reset-mass-deletion" {
 					mustWriteTestFile(t, filepath.Join(workdir, ".crabbox", "env", "persisted-helper"), "runtime helper survives\n")
@@ -1171,6 +1361,12 @@ func TestRunGitOverlaySuccessFallbackAndLateLocalEdit(t *testing.T) {
 					outside := filepath.Join(testRoot, "outside-cache")
 					mustWriteTestFile(t, filepath.Join(outside, "sentinel"), "outside cache remains untouched\n")
 					if err := os.Symlink(outside, filepath.Join(workdir, "node_modules")); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if mode == "checkout-file-obstruction" || mode == "post-reset-cache" {
+					hook := filepath.Join(workdir, ".git", "hooks", "reference-transaction")
+					if err := os.WriteFile(hook, []byte("#!/bin/sh\nprintf hostile >"+shellQuote(attackMarker)+"\n"), 0o755); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -1250,6 +1446,36 @@ done < "$tmp"
 				}
 				return
 			}
+			if mode == "symlinked-workdir" || mode == "symlinked-git" || mode == "symlinked-git-config" || mode == "symlinked-git-objects" {
+				wantReason := map[string]string{
+					"symlinked-workdir":     "symlink_remote_root",
+					"symlinked-git":         "symlink_git_directory",
+					"symlinked-git-config":  "symlink_git_config",
+					"symlinked-git-objects": "symlink_git_objects",
+				}[mode]
+				if runErr == nil || !strings.Contains(runErr.Error(), wantReason) {
+					t.Fatalf("unsafe Git boundary %q did not fail closed: err=%v stderr=%s", mode, runErr, stderr.String())
+				}
+				if _, err := os.Stat(rsyncLog); !os.IsNotExist(err) {
+					t.Fatalf("unsafe Git boundary continued into rsync: %v", err)
+				}
+				sshCommands, err := os.ReadFile(sshLog)
+				if err != nil || bytes.Contains(sshCommands, []byte("invalid sync manifest length")) {
+					t.Fatalf("unsafe Git boundary wrote a remote sync manifest: commands=%q err=%v", sshCommands, err)
+				}
+				sentinel := filepath.Join(testRoot, "outside-sentinel")
+				wantSentinel := "outside Git boundary remains untouched\n"
+				if mode == "symlinked-workdir" {
+					sentinel = filepath.Join(testRoot, "outside-workspace", "outside-sentinel")
+					wantSentinel = "outside workspace remains untouched\n"
+				} else if mode == "symlinked-git" || mode == "symlinked-git-objects" {
+					sentinel = filepath.Join(testRoot, "outside-git-boundary", "outside-sentinel")
+				}
+				if content, err := os.ReadFile(sentinel); err != nil || string(content) != wantSentinel {
+					t.Fatalf("unsafe Git boundary mutated outside sentinel=%q err=%v", content, err)
+				}
+				return
+			}
 			if mode == "post-reset-mass-deletion" {
 				if runErr == nil || !strings.Contains(runErr.Error(), "remote sync prune failed") {
 					t.Fatalf("post-reset mass deletion did not fail closed: err=%v stderr=%s", runErr, stderr.String())
@@ -1280,7 +1506,7 @@ done < "$tmp"
 				if (mode == "local-fingerprint-reuse" || mode == "remote-fingerprint-reuse") && !strings.Contains(stderr.String(), "No changes detected, skipping sync") {
 					t.Fatalf("unmodified fallback discarded the legacy fingerprint: %s", stderr.String())
 				}
-			case "classified-fallback", "private-origin", "local-ineligible", "checkout-file-obstruction", "post-reset-cache", "late-local-edit":
+			case "classified-fallback", "private-origin", "local-ineligible", "linked-worktree", "checkout-file-obstruction", "post-reset-cache", "late-local-edit":
 				transfer, err := os.ReadFile(rsyncLog)
 				if err != nil || !bytes.Contains(transfer, []byte("clean.txt\x00")) {
 					t.Fatalf("fallback omitted full manifest: data=%q err=%v", transfer, err)
@@ -1290,6 +1516,8 @@ done < "$tmp"
 					wantReason = "origin_auth_required"
 				} else if mode == "local-ineligible" {
 					wantReason = "include_whitelist"
+				} else if mode == "linked-worktree" {
+					wantReason = "unsafe_git_workspace"
 				} else if mode == "post-reset-cache" {
 					wantReason = "unsafe_cache_root"
 				} else if mode == "late-local-edit" {
@@ -1302,17 +1530,24 @@ done < "$tmp"
 					t.Fatalf("fallback reason missing: %s", stderr.String())
 				}
 				meta := filepath.Join(workdir, ".crabbox")
-				if _, err := os.Stat(filepath.Join(workdir, ".git")); err == nil {
-					meta = filepath.Join(workdir, ".git", "crabbox")
+				if gitMetadata := gitOutput(workdir, "rev-parse", "--git-path", "crabbox"); gitMetadata != "" {
+					meta = gitMetadata
+					if !filepath.IsAbs(meta) {
+						meta = filepath.Join(workdir, meta)
+					}
 				}
 				if mode == "late-local-edit" || mode == "checkout-file-obstruction" || mode == "post-reset-cache" {
-					for _, stale := range []string{"sync-fingerprint", "git-hydrate-base"} {
-						if _, err := os.Stat(filepath.Join(meta, stale)); !os.IsNotExist(err) {
-							t.Fatalf("mutated-workspace recovery retained %s: %v", stale, err)
-						}
-					}
+					assertGitOverlayRecoveryCoherent(t, workdir, repo)
 				} else if _, err := os.Stat(filepath.Join(meta, "git-hydrate-base")); err != nil {
 					t.Fatalf("unmodified fallback lost ordinary Git hydration metadata: %v", err)
+				}
+				if mode == "linked-worktree" {
+					if _, err := os.Stat(filepath.Join(workdir, ".crabbox", "sync-manifest")); !os.IsNotExist(err) {
+						t.Fatalf("linked fallback relocated its established metadata: %v", err)
+					}
+					if _, err := os.Stat(filepath.Join(meta, "sync-manifest")); err != nil {
+						t.Fatalf("linked fallback did not preserve legacy metadata authority: %v", err)
+					}
 				}
 			}
 			if _, err := os.Stat(filepath.Join(workdir, "excluded.txt")); !os.IsNotExist(err) {

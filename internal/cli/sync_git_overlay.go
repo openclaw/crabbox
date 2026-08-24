@@ -367,13 +367,24 @@ func gitOverlayFallbackOutcome(output string, err error) (string, bool, bool) {
 	return reason, true, mutated
 }
 
+func gitOverlayBoundaryViolation(reason string) bool {
+	switch reason {
+	case "unsafe_remote_root", "symlink_remote_root", "symlink_git_directory", "symlink_git_config", "symlink_git_objects", "unsafe_overlay_metadata", "unsafe_runtime_state":
+		return true
+	default:
+		return false
+	}
+}
+
 func gitOverlayHermeticFunctions() string {
 	return `git() {
+	local overlay_git_environment=()
+	if [ -n "${GIT_INDEX_FILE:-}" ]; then overlay_git_environment+=("GIT_INDEX_FILE=$GIT_INDEX_FILE"); fi
   /usr/bin/env -i HOME=/dev/null XDG_CONFIG_HOME=/dev/null PATH=/usr/bin:/bin LANG=C LC_ALL=C \
     GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
     GIT_ATTR_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false \
     GCM_INTERACTIVE=Never GIT_SSH_COMMAND=/bin/false GIT_LFS_SKIP_SMUDGE=1 \
-    GIT_TRACE_PACKET="${overlay_packet_trace:-0}" \
+    GIT_TRACE_PACKET="${overlay_packet_trace:-0}" "${overlay_git_environment[@]}" \
     /usr/bin/git -c credential.helper= -c credential.interactive=never \
       -c core.hooksPath=/dev/null -c core.attributesFile=/dev/null -c core.excludesFile=/dev/null \
       -c core.fsmonitor=false -c core.autocrlf=false -c core.eol=lf \
@@ -511,6 +522,9 @@ if [ -n "$base_ref" ]; then
   [ "$advertised_base" = "$expected_base" ] || overlay_fallback base_ref_mismatch
 fi
 if [ -e "$workdir/.git" ] || [ -L "$workdir/.git" ]; then
+	if [ -L "$workdir/.git" ]; then overlay_fallback symlink_git_directory; fi
+	if [ -L "$workdir/.git/config" ]; then overlay_fallback symlink_git_config; fi
+	if [ -L "$workdir/.git/objects" ]; then overlay_fallback symlink_git_objects; fi
   overlay_workspace_safe "$workdir" || overlay_fallback unsafe_git_workspace
   overlay_metadata_safe "$workdir" || overlay_fallback unsafe_overlay_metadata
   overlay_runtime_state_safe "$workdir" || overlay_fallback unsafe_runtime_state
