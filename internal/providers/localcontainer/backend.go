@@ -1059,7 +1059,8 @@ func localContainerClaimByIDOrSlug(identifier string) (core.LeaseClaim, bool, er
 	}
 	var matches []core.LeaseClaim
 	for _, claim := range claims {
-		if isLocalContainerClaimProvider(claim.Provider) && core.NormalizeLeaseSlug(claim.Slug) == normalized {
+		if isLocalContainerClaimProvider(claim.Provider) && !isReleasedFixedLocalContainerClaim(claim) &&
+			core.NormalizeLeaseSlug(claim.Slug) == normalized {
 			matches = append(matches, claim)
 		}
 	}
@@ -2059,7 +2060,7 @@ func (b *backend) resolveContainer(ctx context.Context, identifier string) (insp
 	slugClaims := make([]core.LeaseClaim, 0, 1)
 	for i := range claims {
 		claim := claims[i]
-		if !isLocalContainerClaimProvider(claim.Provider) {
+		if !isLocalContainerClaimProvider(claim.Provider) || isReleasedFixedLocalContainerClaim(claim) {
 			continue
 		}
 		if normalized != "" && core.NormalizeLeaseSlug(claim.Slug) == normalized {

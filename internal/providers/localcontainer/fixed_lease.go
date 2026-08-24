@@ -22,6 +22,10 @@ func isLocalContainerClaimProvider(provider string) bool {
 	return provider == providerName || provider == core.FixedLocalContainerClaimProvider
 }
 
+func isReleasedFixedLocalContainerClaim(claim core.LeaseClaim) bool {
+	return fixedLocalContainerLeaseKind.IsFixedClaim(claim) && claim.FixedCreateIntent.State == "released"
+}
+
 type fixedLocalContainerCreateIntent struct {
 	Runtime       string          `json:"runtime"`
 	RuntimeScope  checkpointScope `json:"runtimeScope"`
