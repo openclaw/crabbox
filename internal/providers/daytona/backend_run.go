@@ -25,10 +25,12 @@ type daytonaCommandRunner struct {
 
 func newDaytonaCommandRunner(sandbox *sdkdaytona.Sandbox) *daytonaCommandRunner {
 	toolboxConfig := sandbox.ToolboxClient.GetConfig()
-	if toolboxConfig.HTTPClient == nil {
-		toolboxConfig.HTTPClient = &http.Client{}
+	commandHTTPClient := &http.Client{}
+	if toolboxConfig.HTTPClient != nil {
+		*commandHTTPClient = *toolboxConfig.HTTPClient
 	}
-	toolboxConfig.HTTPClient.Timeout = 0
+	commandHTTPClient.Timeout = 0
+	toolboxConfig.HTTPClient = commandHTTPClient
 	return &daytonaCommandRunner{process: sandbox.Process}
 }
 

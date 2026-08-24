@@ -41,8 +41,9 @@ func TestDaytonaCommandRunnerPreservesCallerExecutionBudget(t *testing.T) {
 
 	toolboxConfig := toolbox.NewConfiguration()
 	toolboxConfig.Servers = toolbox.ServerConfigurations{{URL: server.URL}}
-	toolboxConfig.HTTPClient = server.Client()
-	toolboxConfig.HTTPClient.Timeout = time.Minute
+	sharedHTTPClient := server.Client()
+	sharedHTTPClient.Timeout = time.Minute
+	toolboxConfig.HTTPClient = sharedHTTPClient
 	toolboxClient := toolbox.NewAPIClient(toolboxConfig)
 	sandbox := &sdkdaytona.Sandbox{
 		ToolboxClient: toolboxClient,
@@ -50,6 +51,12 @@ func TestDaytonaCommandRunnerPreservesCallerExecutionBudget(t *testing.T) {
 	}
 
 	runner := newDaytonaCommandRunner(sandbox)
+	if toolboxConfig.HTTPClient == sharedHTTPClient {
+		t.Fatal("process commands reused the shared Daytona control-plane HTTP client")
+	}
+	if got, want := sharedHTTPClient.Timeout, time.Minute; got != want {
+		t.Fatalf("shared Daytona control-plane HTTP timeout=%s, want %s", got, want)
+	}
 	if _, err := runner.ExecuteCommand(t.Context(), "sleep 65"); err != nil {
 		t.Fatal(err)
 	}
@@ -60,6 +67,7 @@ func TestDaytonaCommandRunnerPreservesCallerExecutionBudget(t *testing.T) {
 	if got, want := requests[0]["timeout"], float64(math.MaxInt32); got != want {
 		t.Fatalf("remote timeout=%v, want %v", got, want)
 	}
+	t.Logf("caller deadline=none remote timeout=%.0fs HTTP client timeout=%s", requests[0]["timeout"], toolboxConfig.HTTPClient.Timeout)
 
 	longContext, cancelLong := context.WithTimeout(t.Context(), 90*time.Minute)
 	defer cancelLong()
@@ -69,6 +77,7 @@ func TestDaytonaCommandRunnerPreservesCallerExecutionBudget(t *testing.T) {
 	if got := requests[1]["timeout"].(float64); got < 5399 || got > 5400 {
 		t.Fatalf("90-minute context remote timeout=%v, want approximately 5400 seconds", got)
 	}
+	t.Logf("caller deadline=90m remote timeout=%.0fs HTTP client timeout=%s", requests[1]["timeout"], toolboxConfig.HTTPClient.Timeout)
 
 	shortContext, cancelShort := context.WithTimeout(t.Context(), 1500*time.Millisecond)
 	defer cancelShort()
@@ -77,6 +86,94 @@ func TestDaytonaCommandRunnerPreservesCallerExecutionBudget(t *testing.T) {
 	}
 	if got, want := requests[2]["timeout"], float64(2); got != want {
 		t.Fatalf("rounded context remote timeout=%v, want %v", got, want)
+	}
+	t.Logf("caller deadline=1.5s remote timeout=%.0fs", requests[2]["timeout"])
+
+	subsecondContext, cancelSubsecond := context.WithTimeout(t.Context(), 900*time.Millisecond)
+	defer cancelSubsecond()
+	if _, err := runner.ExecuteCommand(subsecondContext, "true"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := requests[3]["timeout"], float64(1); got != want {
+		t.Fatalf("subsecond context remote timeout=%v, want %v", got, want)
+	}
+	t.Logf("caller deadline=900ms remote timeout=%.0fs", requests[3]["timeout"])
+
+	overflowContext, cancelOverflow := context.WithTimeout(t.Context(), (time.Duration(math.MaxInt32)+1)*time.Second)
+	defer cancelOverflow()
+	if _, err := runner.ExecuteCommand(overflowContext, "true"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := requests[4]["timeout"], float64(math.MaxInt32); got != want {
+		t.Fatalf("overflow context remote timeout=%v, want capped %v", got, want)
+	}
+	t.Logf("caller deadline exceeds int32 remote timeout=%.0fs", requests[4]["timeout"])
+
+	expiredContext, cancelExpired := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+	if _, err := runner.ExecuteCommand(expiredContext, "should-not-run"); err == nil || !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+		t.Fatalf("expired context error=%v, want deadline exceeded", err)
+	}
+	if got, want := len(requests), 5; got != want {
+		t.Fatalf("expired context sent a remote request: requests=%d, want %d", got, want)
+	}
+	t.Log("expired caller deadline rejected before a remote request was sent")
+}
+
+func TestDaytonaCommandRunnerCancelsHTTPWithCallerContext(t *testing.T) {
+	requestStarted := make(chan struct{})
+	requestCanceled := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		if _, err := io.Copy(io.Discard, r.Body); err != nil {
+			t.Errorf("read Daytona process request: %v", err)
+			return
+		}
+		close(requestStarted)
+		<-r.Context().Done()
+		close(requestCanceled)
+	}))
+	defer server.Close()
+
+	toolboxConfig := toolbox.NewConfiguration()
+	toolboxConfig.Servers = toolbox.ServerConfigurations{{URL: server.URL}}
+	toolboxConfig.HTTPClient = server.Client()
+	toolboxConfig.HTTPClient.Timeout = time.Minute
+	toolboxClient := toolbox.NewAPIClient(toolboxConfig)
+	sandbox := &sdkdaytona.Sandbox{
+		ToolboxClient: toolboxClient,
+		Process:       sdkdaytona.NewProcessService(toolboxClient, nil, sdktypes.CodeLanguage("")),
+	}
+	runner := newDaytonaCommandRunner(sandbox)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := runner.ExecuteCommand(ctx, "sleep 4500")
+		errCh <- err
+	}()
+
+	select {
+	case <-requestStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Daytona process request never started")
+	}
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err == nil || !strings.Contains(err.Error(), context.Canceled.Error()) {
+			t.Fatalf("canceled request error=%v, want context canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("caller cancellation did not stop the Daytona HTTP request")
+	}
+
+	select {
+	case <-requestCanceled:
+		t.Logf("caller cancellation stopped in-flight Daytona HTTP request; HTTP client timeout=%s", toolboxConfig.HTTPClient.Timeout)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Daytona HTTP server did not observe request cancellation")
 	}
 }
 

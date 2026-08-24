@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Made direct Daytona SDK commands honor caller deadlines without the default one-minute HTTP cutoff or a separate one-hour execution cap. Thanks @arisylafeta.
 - Removed coordinator URL credentials from Code and WebVNC browser links, opener arguments, and viewer bootstrap form actions. Thanks @coygeek.
 - Redacted configured and runtime-only credentials from coordinator-stored run failure diagnostics while preserving raw command output. Thanks @coygeek.
 - Retried temporary Machine0 read outages within the existing operation deadline while keeping provider mutations single-attempt.
