@@ -1,6 +1,6 @@
 {
   "name": "@openclaw/crabbox-worker",
-  "version": "0.46.0",
+  "version": "0.46.1",
   "private": true,
   "type": "module",
   "scripts": {

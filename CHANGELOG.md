@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.46.1 - Unreleased
+## 0.46.1 - 2026-08-24
 
 ### Added
 
@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Removed idle gaps throughout media previews while preserving every moving interval, so long recordings produce short GIFs without hiding late changes.
 - Reduced Machine0 provisioning reads about twelvefold by polling every 60 seconds by default while preserving fresh fixed-lease ownership checks.
 - Failed local-container acquisition and status waits promptly when the exact claimed container exits, while preserving fenced recovery and cleanup for retained leases.
 - Redacted coordinator URL credentials, query parameters, and fragments from run-context portal and logs links.
