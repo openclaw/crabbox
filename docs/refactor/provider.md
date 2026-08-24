@@ -343,8 +343,8 @@ const (
 `FeatureRunSession` is provider-neutral and explicitly opt-in. A delegated
 backend may return a validated handle in `RunResult`; an SSH-lease provider may
 instead have core emit the handle after exact claim recording only when its
-spec also advertises `FeatureSSH` and `FeatureCleanup`. Only `local-container`
-currently opts into that SSH-lease contract.
+spec also advertises `FeatureSSH` and `FeatureCleanup`. AWS and
+`local-container` currently opt into that SSH-lease contract.
 
 Actions-runner hydration is **not** modeled as a provider feature. That workflow
 is core-over-SSH after a Linux or Windows lease exists, so `--actions-runner`
@@ -357,7 +357,7 @@ representative slice:
 ```text
 provider                kind           coordinator  features
 hetzner                 ssh-lease      supported    ssh, crabbox-sync, cleanup, desktop, browser, code, tailscale
-aws                     ssh-lease      supported    ssh, crabbox-sync, cleanup, desktop, browser, code
+aws                     ssh-lease      supported    ssh, crabbox-sync, cleanup, desktop, browser, code, run-session
 azure                   ssh-lease      supported    ssh, crabbox-sync, cleanup, desktop, browser, code, tailscale
 gcp                     ssh-lease      supported    ssh, crabbox-sync, cleanup, tailscale
 ssh                     ssh-lease      never        ssh, crabbox-sync, desktop, browser, code
