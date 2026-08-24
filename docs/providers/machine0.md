@@ -299,12 +299,13 @@ compared with `5s`; a 20-minute boot needs roughly 20 polls instead of roughly
 additional readiness-observation latency is negligible beside the documented
 15-minute timeout and observed 10–21-minute creation windows.
 
-When the CLI returns the exact `Rate limited. Please wait a moment and try
-again.` response, Crabbox quietly retries read-only inventory and status calls
-(`get`, `ls`, sizes, and image reads) until the current command's context
+When the CLI returns either exact `Rate limited. Please wait a moment and try
+again.` or `The cloud provider is temporarily unavailable. Please try again
+shortly.` response, Crabbox quietly retries read-only inventory and status
+calls (`get`, `ls`, sizes, and image reads) until the current command's context
 expires or is canceled. The retry cadence follows `machine0.pollInterval`
 (default `60s`, with a one-second minimum) and prints only one concise warning.
-A cached-credentials warning preceding the rate-limit response does not prevent
+A cached-credentials warning preceding either response does not prevent
 recognition.
 
 Crabbox never automatically retries Machine0 mutations such as create, start,

@@ -95,22 +95,25 @@ func TestClientStopCommandConstruction(t *testing.T) {
 	}
 }
 
-func TestClientReadRetriesRateLimitThenSucceeds(t *testing.T) {
-	rateLimited := runnerResponse{
-		result: core.LocalCommandResult{Stderr: "Warning: using cached credentials\nRate limited. Please wait a moment and try again."},
-		err:    errors.New("exit status 1"),
-	}
+func TestClientReadRetriesUnavailableThenSucceeds(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
+		message      string
 		pollInterval time.Duration
 	}{
-		{name: "canonical default", pollInterval: core.BaseConfig().Machine0.PollInterval},
-		{name: "explicit override", pollInterval: 3 * time.Second},
+		{name: "rate limited canonical default", message: "Rate limited. Please wait a moment and try again.", pollInterval: core.BaseConfig().Machine0.PollInterval},
+		{name: "rate limited explicit override", message: "Rate limited. Please wait a moment and try again.", pollInterval: 3 * time.Second},
+		{name: "cloud unavailable canonical default", message: "The cloud provider is temporarily unavailable. Please try again shortly.", pollInterval: core.BaseConfig().Machine0.PollInterval},
+		{name: "cloud unavailable explicit override", message: "The cloud provider is temporarily unavailable. Please try again shortly.", pollInterval: 3 * time.Second},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			unavailable := runnerResponse{
+				result: core.LocalCommandResult{Stderr: "Warning: using cached credentials\n" + tc.message},
+				err:    errors.New("exit status 1"),
+			}
 			runner := &recordingRunner{sequence: []runnerResponse{
-				rateLimited,
-				rateLimited,
+				unavailable,
+				unavailable,
 				{result: core.LocalCommandResult{Stdout: `{"id":"vm-1","name":"box","status":"RUNNING","ip":"203.0.113.10"}`}},
 			}}
 			var stderr bytes.Buffer
@@ -131,67 +134,99 @@ func TestClientReadRetriesRateLimitThenSucceeds(t *testing.T) {
 			if len(sleeps) != 2 || sleeps[0] != tc.pollInterval || sleeps[1] != tc.pollInterval {
 				t.Fatalf("sleeps=%v want=%s", sleeps, tc.pollInterval)
 			}
-			if strings.Count(stderr.String(), "machine0 read rate limited") != 1 || strings.Contains(stderr.String(), "cached credentials") {
+			if strings.Count(stderr.String(), "machine0 read unavailable; retrying every") != 1 || strings.Contains(stderr.String(), "cached credentials") {
 				t.Fatalf("stderr=%q", stderr.String())
 			}
 		})
 	}
 }
 
-func TestClientReadRateLimitCancellationReturnsContextCause(t *testing.T) {
-	runner := &recordingRunner{sequence: []runnerResponse{{
-		result: core.LocalCommandResult{Stderr: "Rate limited. Please wait a moment and try again."},
-		err:    errors.New("exit status 1"),
-	}}}
-	c := testClient(runner)
-	c.cfg.PollInterval = 5 * time.Second
-	ctx, cancel := context.WithCancelCause(context.Background())
-	wantErr := errors.New("operator canceled throttled read")
-	c.sleep = func(sleepCtx context.Context, delay time.Duration) error {
-		if delay != 5*time.Second {
-			t.Fatalf("delay=%s", delay)
-		}
-		cancel(wantErr)
-		return context.Cause(sleepCtx)
-	}
+func TestClientReadUnavailableCancellationReturnsContextCause(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		message string
+	}{
+		{name: "rate limited", message: "Rate limited. Please wait a moment and try again."},
+		{name: "cloud unavailable", message: "The cloud provider is temporarily unavailable. Please try again shortly."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &recordingRunner{sequence: []runnerResponse{{
+				result: core.LocalCommandResult{Stderr: tc.message},
+				err:    errors.New("exit status 1"),
+			}}}
+			c := testClient(runner)
+			c.cfg.PollInterval = 5 * time.Second
+			ctx, cancel := context.WithCancelCause(context.Background())
+			wantErr := errors.New("operator canceled unavailable read")
+			c.sleep = func(sleepCtx context.Context, delay time.Duration) error {
+				if delay != 5*time.Second {
+					t.Fatalf("delay=%s", delay)
+				}
+				cancel(wantErr)
+				return context.Cause(sleepCtx)
+			}
 
-	_, err := c.Get(ctx, "box")
-	if !errors.Is(err, wantErr) || len(runner.calls) != 1 {
-		t.Fatalf("err=%v calls=%d", err, len(runner.calls))
+			_, err := c.Get(ctx, "box")
+			if !errors.Is(err, wantErr) || len(runner.calls) != 1 {
+				t.Fatalf("err=%v calls=%d", err, len(runner.calls))
+			}
+		})
 	}
 }
 
 func TestClientReadDoesNotRetryUnrelatedFailure(t *testing.T) {
-	runner := &recordingRunner{sequence: []runnerResponse{{
-		result: core.LocalCommandResult{Stderr: "request was rate limited by an unrelated proxy"},
-		err:    errors.New("exit status 1"),
-	}}}
-	c := testClient(runner)
-	c.sleep = func(context.Context, time.Duration) error {
-		t.Fatal("unrelated failure must not sleep or retry")
-		return nil
-	}
+	for _, tc := range []struct {
+		name    string
+		message string
+	}{
+		{name: "proxy rate limit", message: "request was rate limited by an unrelated proxy"},
+		{name: "proxy unavailable", message: "proxy temporarily unavailable. Please try again shortly."},
+		{name: "incomplete cloud failure", message: "The cloud provider is temporarily unavailable."},
+		{name: "other upstream failure", message: "unexpected upstream HTTP 500"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &recordingRunner{sequence: []runnerResponse{{
+				result: core.LocalCommandResult{Stderr: tc.message},
+				err:    errors.New("exit status 1"),
+			}}}
+			c := testClient(runner)
+			c.sleep = func(context.Context, time.Duration) error {
+				t.Fatal("unrelated failure must not sleep or retry")
+				return nil
+			}
 
-	_, err := c.Get(context.Background(), "box")
-	if err == nil || len(runner.calls) != 1 || !strings.Contains(err.Error(), "unrelated proxy") {
-		t.Fatalf("err=%v calls=%d", err, len(runner.calls))
+			_, err := c.Get(context.Background(), "box")
+			if err == nil || len(runner.calls) != 1 || !strings.Contains(err.Error(), tc.message) {
+				t.Fatalf("err=%v calls=%d", err, len(runner.calls))
+			}
+		})
 	}
 }
 
-func TestClientMutationDoesNotRetryRateLimit(t *testing.T) {
-	runner := &recordingRunner{sequence: []runnerResponse{{
-		result: core.LocalCommandResult{Stderr: "Rate limited. Please wait a moment and try again."},
-		err:    errors.New("exit status 1"),
-	}}}
-	c := testClient(runner)
-	c.sleep = func(context.Context, time.Duration) error {
-		t.Fatal("mutation must not sleep or retry")
-		return nil
-	}
+func TestClientMutationDoesNotRetryUnavailable(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		message string
+	}{
+		{name: "rate limited", message: "Rate limited. Please wait a moment and try again."},
+		{name: "cloud unavailable", message: "The cloud provider is temporarily unavailable. Please try again shortly."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &recordingRunner{sequence: []runnerResponse{{
+				result: core.LocalCommandResult{Stderr: tc.message},
+				err:    errors.New("exit status 1"),
+			}}}
+			c := testClient(runner)
+			c.sleep = func(context.Context, time.Duration) error {
+				t.Fatal("mutation must not sleep or retry")
+				return nil
+			}
 
-	err := c.Start(context.Background(), "box")
-	if err == nil || len(runner.calls) != 1 || !strings.Contains(err.Error(), "Rate limited") {
-		t.Fatalf("err=%v calls=%d", err, len(runner.calls))
+			err := c.Start(context.Background(), "box")
+			if err == nil || len(runner.calls) != 1 || !strings.Contains(err.Error(), tc.message) {
+				t.Fatalf("err=%v calls=%d", err, len(runner.calls))
+			}
+		})
 	}
 }
 

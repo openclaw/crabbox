@@ -15,6 +15,7 @@ import (
 const (
 	maxCLIOutput                    = 16 << 20
 	machine0RateLimitMessage        = "rate limited. please wait a moment and try again."
+	machine0UnavailableMessage      = "the cloud provider is temporarily unavailable. please try again shortly."
 	machine0ReadRetryFallback       = 5 * time.Second
 	machine0ReadRetryMinimumCadence = time.Second
 )
@@ -184,12 +185,12 @@ func (c *client) runRead(ctx context.Context, args ...string) (LocalCommandResul
 		if ctxErr := context.Cause(ctx); ctxErr != nil {
 			return result, ctxErr
 		}
-		if !machine0ReadRateLimited(result, err) {
+		if !machine0ReadUnavailable(result, err) {
 			return result, err
 		}
 		if !warned {
 			if c.rt.Stderr != nil {
-				_, _ = fmt.Fprintf(c.rt.Stderr, "machine0 read rate limited; retrying every %s until the current operation ends\n", delay)
+				_, _ = fmt.Fprintf(c.rt.Stderr, "machine0 read unavailable; retrying every %s until the current operation ends\n", delay)
 			}
 			warned = true
 		}
@@ -212,9 +213,9 @@ func machine0ReadRetryDelay(configured time.Duration) time.Duration {
 	return configured
 }
 
-func machine0ReadRateLimited(result LocalCommandResult, err error) bool {
+func machine0ReadUnavailable(result LocalCommandResult, err error) bool {
 	detail := strings.ToLower(strings.Join([]string{result.Stdout, result.Stderr, fmt.Sprint(err)}, "\n"))
-	return strings.Contains(detail, machine0RateLimitMessage)
+	return strings.Contains(detail, machine0RateLimitMessage) || strings.Contains(detail, machine0UnavailableMessage)
 }
 
 func decodeJSON(output string, target any) error {
