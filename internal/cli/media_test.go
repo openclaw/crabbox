@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -178,6 +179,28 @@ func TestMediaPreviewStitchesMotionAcrossInternalFreeze(t *testing.T) {
 	}
 	if result.PreviewDurationSeconds < 4.5 || result.PreviewDurationSeconds > 5.5 {
 		t.Fatalf("preview duration=%v, want stitched motion near 5s", result.PreviewDurationSeconds)
+	}
+	wantSegments := []mediaPreviewSegment{
+		{StartSeconds: 1.25, EndSeconds: 3.75},
+		{StartSeconds: 7.25, EndSeconds: 9.75},
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata struct {
+		PreviewSegments []mediaPreviewSegment `json:"previewSegments"`
+	}
+	if err := json.Unmarshal(encoded, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if len(metadata.PreviewSegments) != len(wantSegments) {
+		t.Fatalf("preview segments=%#v, want %#v", metadata.PreviewSegments, wantSegments)
+	}
+	for i := range wantSegments {
+		if metadata.PreviewSegments[i] != wantSegments[i] {
+			t.Fatalf("preview segment[%d]=%#v, want %#v", i, metadata.PreviewSegments[i], wantSegments[i])
+		}
 	}
 	trimmedDuration, err := probeMediaDuration(context.Background(), opts.TrimmedVideoOutput, nil)
 	if err != nil {

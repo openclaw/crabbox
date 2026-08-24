@@ -87,6 +87,10 @@ With `--json` it prints structured metadata instead, including the source and
 preview durations, the number of freeze intervals found, and whether the
 gifsicle pass ran:
 
+`previewStartSeconds` is the first retained source timestamp, while
+`previewDurationSeconds` is the stitched output duration. `previewSegments`
+lists every retained source interval as `startSeconds` and `endSeconds`.
+
 ```sh
 crabbox media preview --input desktop.mp4 --output desktop-preview.gif --json
 ```

@@ -17,16 +17,17 @@ import (
 )
 
 type mediaPreviewResult struct {
-	Input                    string  `json:"input"`
-	Output                   string  `json:"output"`
-	TrimmedVideoOutput       string  `json:"trimmedVideoOutput,omitempty"`
-	SourceDurationSeconds    float64 `json:"sourceDurationSeconds"`
-	PreviewStartSeconds      float64 `json:"previewStartSeconds"`
-	PreviewDurationSeconds   float64 `json:"previewDurationSeconds"`
-	TrimmedStaticEdges       bool    `json:"trimmedStaticEdges"`
-	DetectedFreezeIntervals  int     `json:"detectedFreezeIntervals"`
-	DetectedMotionWindowNote string  `json:"detectedMotionWindowNote,omitempty"`
-	GifsicleOptimized        bool    `json:"gifsicleOptimized"`
+	Input                    string                `json:"input"`
+	Output                   string                `json:"output"`
+	TrimmedVideoOutput       string                `json:"trimmedVideoOutput,omitempty"`
+	SourceDurationSeconds    float64               `json:"sourceDurationSeconds"`
+	PreviewStartSeconds      float64               `json:"previewStartSeconds"`
+	PreviewDurationSeconds   float64               `json:"previewDurationSeconds"`
+	PreviewSegments          []mediaPreviewSegment `json:"previewSegments"`
+	TrimmedStaticEdges       bool                  `json:"trimmedStaticEdges"`
+	DetectedFreezeIntervals  int                   `json:"detectedFreezeIntervals"`
+	DetectedMotionWindowNote string                `json:"detectedMotionWindowNote,omitempty"`
+	GifsicleOptimized        bool                  `json:"gifsicleOptimized"`
 }
 
 type mediaContactSheetResult struct {
@@ -69,6 +70,11 @@ type mediaContactSheetOptions struct {
 type mediaInterval struct {
 	Start float64
 	End   float64
+}
+
+type mediaPreviewSegment struct {
+	StartSeconds float64 `json:"startSeconds"`
+	EndSeconds   float64 `json:"endSeconds"`
 }
 
 const (
@@ -267,6 +273,7 @@ func createMediaPreview(ctx context.Context, opts mediaPreviewOptions) (mediaPre
 		SourceDurationSeconds:    roundMillis(duration),
 		PreviewStartSeconds:      roundMillis(segments[0].Start),
 		PreviewDurationSeconds:   roundMillis(previewDuration),
+		PreviewSegments:          previewResultSegments(segments),
 		TrimmedStaticEdges:       trimmed,
 		DetectedFreezeIntervals:  freezeCount,
 		DetectedMotionWindowNote: note,
@@ -609,6 +616,17 @@ func intervalsDuration(intervals []mediaInterval) float64 {
 		total += interval.End - interval.Start
 	}
 	return total
+}
+
+func previewResultSegments(intervals []mediaInterval) []mediaPreviewSegment {
+	segments := make([]mediaPreviewSegment, len(intervals))
+	for i, interval := range intervals {
+		segments[i] = mediaPreviewSegment{
+			StartSeconds: roundMillis(interval.Start),
+			EndSeconds:   roundMillis(interval.End),
+		}
+	}
+	return segments
 }
 
 func nonFrozenIntervals(duration float64, freezes []mediaInterval) []mediaInterval {
