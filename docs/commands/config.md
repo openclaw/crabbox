@@ -146,6 +146,7 @@ actions:
 sync:
   checksum: false
   gitSeed: true
+  gitOverlay: false
   fingerprint: true
   timeout: 15m
   warnFiles: 50000

@@ -2075,6 +2075,8 @@ rm -f "$meta_dir/sync-fingerprint"`
 type remoteSyncFinalizeOptions struct {
 	AllowMassDeletions bool
 	HydrateGit         bool
+	GitOverlay         bool
+	PlainManifest      bool
 	BaseRef            string
 	BaseSHA            string
 	Fingerprint        string
@@ -2111,9 +2113,20 @@ func remoteSyncInterpreterCommand(python, perl, args string) string {
 }
 
 func remoteWriteSyncManifestsNew(workdir, finalizeToken string) string {
+	return remoteWriteSyncManifestsNewWithMetadataMode(workdir, finalizeToken, remoteSyncMetaDirScript(), false)
+}
+
+func remoteWriteSyncManifestsNewWithMetadata(workdir, finalizeToken, metadataScript string) string {
+	return remoteWriteSyncManifestsNewWithMetadataMode(workdir, finalizeToken, metadataScript, true)
+}
+
+func remoteWriteSyncManifestsNewWithMetadataMode(workdir, finalizeToken, metadataScript string, hermetic bool) string {
 	manifestName := remoteSyncPendingManifestName(finalizeToken)
 	deletedName := remoteSyncPendingDeletedName(finalizeToken)
-	script := "set -e\nmkdir -p " + shellQuote(workdir) + "\ncd " + shellQuote(workdir) + "\n" + remoteSyncMetaDirScript() + `mkdir -p "$meta_dir"
+	if hermetic {
+		metadataScript = gitOverlayHermeticFunctions() + metadataScript
+	}
+	script := "set -e\nmkdir -p " + shellQuote(workdir) + "\ncd " + shellQuote(workdir) + "\n" + metadataScript + `mkdir -p "$meta_dir"
 ` + remoteSyncAbandonedMetadataCleanup() + `
 if ! IFS= read -r manifest_len; then
   echo "invalid sync manifest length" >&2
@@ -2145,6 +2158,9 @@ if [ "$deleted_size" != "$deleted_len" ]; then
   exit 1
 fi
 `
+	if hermetic {
+		return remoteGitOverlayShellCommand(script)
+	}
 	return "bash -lc " + shellQuote(script)
 }
 
@@ -2331,10 +2347,16 @@ func remoteFinalizeSync(workdir string, opts remoteSyncFinalizeOptions) string {
 	}
 	manifestName := remoteSyncPendingManifestName(opts.Token)
 	deletedName := remoteSyncPendingDeletedName(opts.Token)
+	gitFunctions := remoteGitWorkspaceFunctions()
+	metadataScript := remoteSyncMetaDirScript()
+	if opts.GitOverlay || opts.PlainManifest {
+		gitFunctions = gitOverlayHermeticFunctions() + gitFunctions
+		metadataScript = remotePlainSyncMetaDirScript()
+	}
 	script := `set -e
 cd ` + shellQuote(workdir) + `
-` + remoteGitWorkspaceFunctions() + `
-` + remoteSyncMetaDirScript() + `
+` + gitFunctions + `
+` + metadataScript + `
 mkdir -p "$meta_dir"
 new="$meta_dir/` + manifestName + `"
 deleted="$meta_dir/` + deletedName + `"
@@ -2366,7 +2388,26 @@ elif [ ! -f "$manifest" ] || [ ! -f "$committed_token" ] || [ "$(cat "$committed
   exit 67
 fi
 `
-	if opts.Coherence.enabled() {
+	if opts.GitOverlay {
+		script += remoteGitOverlayFinalizeScript(opts.Coherence, allowValue)
+	} else if opts.PlainManifest {
+		script += `publish_fingerprint=
+if ! overlay_workspace_safe "$PWD" || ! exact_git_root; then
+  echo "plain manifest recovery requires an isolated safe Git workspace" >&2
+  exit 67
+fi
+if ! git status --short >"$git_status" 2>/dev/null; then
+  echo "plain manifest recovery requires successful Git deletion inspection" >&2
+  exit 67
+fi
+deletions=$(awk '/^ D|^D / { n++ } END { print n+0 }' "$git_status")
+if [ ` + shellQuote(allowValue) + ` != '1' ] && [ "$deletions" -ge 200 ]; then
+  echo "remote sync sanity failed: $deletions tracked deletions" >&2
+  exit 66
+fi
+rm -f "$meta_dir/git-hydrate-base"
+`
+	} else if opts.Coherence.enabled() {
 		script += remoteGitCoherenceFinalizeScript(opts.Coherence, allowValue)
 	} else {
 		script += `publish_fingerprint=
@@ -2380,7 +2421,7 @@ if exact_git_root && git status --short >"$git_status" 2>/dev/null; then
 fi
 `
 	}
-	if opts.HydrateGit && opts.BaseRef != "" {
+	if !opts.GitOverlay && !opts.PlainManifest && opts.HydrateGit && opts.BaseRef != "" {
 		refspec := "+refs/heads/" + opts.BaseRef + ":refs/remotes/origin/" + opts.BaseRef
 		script += `if exact_git_root && git remote get-url origin >/dev/null 2>&1; then
   if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
@@ -2391,7 +2432,7 @@ fi
 fi
 `
 	}
-	if opts.BaseRef != "" && opts.BaseSHA != "" {
+	if !opts.PlainManifest && opts.BaseRef != "" && opts.BaseSHA != "" {
 		script += `base_tmp="$meta_dir/git-hydrate-base.tmp.$$"
 printf %s ` + shellQuote(opts.BaseRef+" "+opts.BaseSHA+"\n") + ` > "$base_tmp"
 mv "$base_tmp" "$meta_dir/git-hydrate-base"
@@ -2409,7 +2450,34 @@ printf %s "$expected_token" > "$complete_tmp"
 mv "$complete_tmp" "$complete_token"
 coherence_committed=1
 `
+	if opts.GitOverlay || opts.PlainManifest {
+		return remoteGitOverlayShellCommand(script)
+	}
 	return "bash -lc " + shellQuote(script)
+}
+
+func remoteGitOverlayFinalizeScript(plan gitCoherencePlan, allowMassDeletions string) string {
+	return `
+if ! overlay_workspace_safe "$PWD" || ! exact_git_root; then
+  echo "remote overlay finalize failed: unsafe Git workspace" >&2
+  exit 67
+fi
+if [ "$(git remote get-url origin 2>/dev/null || true)" != ` + shellQuote(plan.RemoteURL) + ` ] ||
+   [ "$(git rev-parse --verify HEAD^{commit} 2>/dev/null || true)" != ` + shellQuote(plan.Target) + ` ] ||
+   [ "$(git write-tree 2>/dev/null || true)" != ` + shellQuote(plan.Tree) + ` ]; then
+  echo "remote overlay finalize failed: Git identity changed" >&2
+  exit 67
+fi
+git diff-files --name-status >"$git_status" 2>/dev/null || {
+  echo "remote overlay finalize failed: Git status inspection failed" >&2
+  exit 67
+}
+deletions=$(awk '$1 == "D" { n++ } END { print n+0 }' "$git_status")
+if [ ` + shellQuote(allowMassDeletions) + ` != '1' ] && [ "$deletions" -ge 200 ]; then
+  echo "remote sync sanity failed: $deletions tracked deletions" >&2
+  exit 66
+fi
+`
 }
 
 func remoteGitCoherenceFinalizeScript(plan gitCoherencePlan, allowMassDeletions string) string {
@@ -2532,6 +2600,15 @@ func remoteSyncMetaDirScript() string {
   git_root="$(cd -P -- "$git_root" 2>/dev/null && pwd -P)" &&
   [ "$git_root" = "$(pwd -P)" ]; then git rev-parse --git-path crabbox; else printf %s .crabbox; fi)
 case "$meta_dir" in /*) ;; *) meta_dir="$PWD/$meta_dir" ;; esac
+`
+}
+
+func remotePlainSyncMetaDirScript() string {
+	return `if ! overlay_workspace_safe "$PWD" || ! overlay_metadata_safe "$PWD"; then
+  echo "Git overlay requires isolated, nonsymlink workspace metadata" >&2
+  exit 67
+fi
+meta_dir="$PWD/.git/crabbox"
 `
 }
 

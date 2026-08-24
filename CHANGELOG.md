@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.46.2 - Unreleased
+
+### Added
+
+- Added opt-in, credential-free Git overlay sync for Linux SSH workspaces, transferring only local changes while preserving authoritative sync manifests. Thanks @vincentkoc.
+
 ## 0.46.1 - 2026-08-24
 
 ### Added

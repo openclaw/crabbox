@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -1461,6 +1462,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		timings.sync = 0
 		timings.syncSteps = syncStepTimings{}
 		timings.syncSkipped = false
+		timings.syncMode = ""
+		timings.syncTransferFiles = 0
+		timings.syncTransferBytes = 0
+		timings.syncFallbackReason = ""
 		fmt.Fprintf(a.Stderr, "retrying sync on replacement lease=%s slug=%s\n", leaseID, blank(serverSlug(server), "-"))
 		recorder.Event("lease.replace.finished", "leasing", fmt.Sprintf("lease=%s slug=%s", leaseID, blank(serverSlug(server), "-")))
 		return true, nil
@@ -1585,14 +1590,33 @@ retrySync:
 		if credentialBlocked {
 			warnCredentialBearingGitSeed(a.Stderr)
 		}
+		overlayDecision := decideGitOverlay(cfg, repo, target, manifest, coherence, credentialBlocked, fullResyncRequested, hydratedByActions)
+		plainManifestFallback := false
+		overlaySnapshot := ""
+		if overlayDecision.Enabled {
+			overlaySnapshot, err = gitOverlayLocalSnapshot(repo, manifest)
+			if err != nil {
+				overlayDecision.Enabled = false
+				overlayDecision.Reason = gitOverlayLocalFallbackReason(err)
+			}
+		}
+		if overlayDecision.Requested && !overlayDecision.Enabled {
+			fmt.Fprintf(a.Stderr, "git overlay fallback reason=%s; using full manifest sync\n", overlayDecision.Reason)
+			timings.syncMode = "manifest"
+			timings.syncTransferFiles = len(manifest.Files)
+			timings.syncTransferBytes = manifest.Bytes
+			timings.syncFallbackReason = overlayDecision.Reason
+		}
 		fingerprint := ""
-		if cfg.Sync.Fingerprint && !isWindowsNativeTarget(target) {
+		if cfg.Sync.Fingerprint && !isWindowsNativeTarget(target) && !plainManifestFallback {
 			stepStart = time.Now()
-			fingerprint, err = syncFingerprintForManifest(repo, cfg, manifest, excludes, coherence)
+			fingerprintConfig := cfg
+			fingerprintConfig.Sync.GitOverlay = overlayDecision.Enabled
+			fingerprint, err = syncFingerprintForManifest(repo, fingerprintConfig, manifest, excludes, coherence)
 			timings.syncSteps.fingerprintLocal = time.Since(stepStart)
 			if err != nil {
 				fmt.Fprintf(a.Stderr, "warning: sync fingerprint failed: %v\n", err)
-			} else if !fullResyncRequested && fingerprint != "" {
+			} else if !overlayDecision.Enabled && !fullResyncRequested && fingerprint != "" {
 				stepStart = time.Now()
 				remoteFingerprint, err := runSSHOutput(ctx, target, remoteReadSyncFingerprint(workdir, coherence))
 				timings.syncSteps.fingerprintRemote = time.Since(stepStart)
@@ -1645,15 +1669,93 @@ retrySync:
 			recorder.Event("sync.finished", "synced", fmt.Sprintf("duration=%s mode=archive", timings.sync.Round(time.Millisecond)))
 			goto afterSync
 		}
-		if coherence.seedEnabled() {
+		if overlayDecision.Enabled {
+			stepStart = time.Now()
+			output, overlayErr := runIdempotentSSHCombinedOutput(ctx, target, remotePrepareGitOverlayWithBase(workdir, coherence, cfg.Sync.BaseRef, gitHydrateBaseSHA(repo, cfg.Sync.BaseRef)), idempotentSSHRetryDelay)
+			timings.syncSteps.gitSeed += time.Since(stepStart)
+			if overlayErr != nil {
+				if reason, fallback, mutated := gitOverlayFallbackOutcome(output, overlayErr); fallback {
+					if reason == "unsafe_overlay_metadata" || reason == "unsafe_runtime_state" {
+						return recordFailure(exit(6, "remote git overlay preparation rejected unsafe workspace state: %s", reason))
+					}
+					overlayDecision.Enabled = false
+					overlayDecision.Reason = reason
+					plainManifestFallback = mutated
+					timings.syncMode = "manifest"
+					timings.syncTransferFiles = len(manifest.Files)
+					timings.syncTransferBytes = manifest.Bytes
+					timings.syncFallbackReason = reason
+					if mutated {
+						coherence = gitCoherencePlan{}
+						fingerprint = ""
+					} else if cfg.Sync.Fingerprint {
+						fingerprintConfig := cfg
+						fingerprintConfig.Sync.GitOverlay = false
+						fingerprint, err = syncFingerprintForManifest(repo, fingerprintConfig, manifest, excludes, coherence)
+						if err != nil {
+							fmt.Fprintf(a.Stderr, "warning: sync fingerprint failed: %v\n", err)
+						} else if fingerprint != "" {
+							remoteFingerprint, readErr := runSSHOutput(ctx, target, remoteReadSyncFingerprint(workdir, coherence))
+							if readErr == nil && remoteFingerprint == fingerprint {
+								timings.sync = time.Since(syncStart)
+								timings.syncSkipped = true
+								fmt.Fprintf(a.Stderr, "No changes detected, skipping sync (%s)\n", timings.sync.Round(time.Millisecond))
+								recorder.Event("sync.finished", "synced", fmt.Sprintf("duration=%s skipped=true", timings.sync.Round(time.Millisecond)))
+								goto afterSync
+							}
+						}
+					}
+					fmt.Fprintf(a.Stderr, "git overlay fallback reason=%s; using full manifest sync\n", reason)
+				} else {
+					return recordFailure(exit(6, "remote git overlay preparation failed: %v", overlayErr))
+				}
+			}
+		}
+		if overlayDecision.Enabled {
+			refreshedExcludes, refreshErr := syncExcludes(repo.Root, cfg)
+			if refreshErr != nil {
+				return recordFailure(refreshErr)
+			}
+			refreshedManifest, refreshErr := syncManifestFilteredRules(repo.Root, refreshedExcludes, syncIncludes(cfg))
+			if refreshErr != nil {
+				return recordFailure(exit(6, "rebuild git overlay sync file list: %v", refreshErr))
+			}
+			refreshedSnapshot, snapshotErr := gitOverlayLocalSnapshot(repo, refreshedManifest)
+			if snapshotErr != nil || overlaySnapshot != refreshedSnapshot || !sameSyncManifest(manifest, refreshedManifest) || !slices.Equal(excludes.rules, refreshedExcludes.rules) {
+				manifest = refreshedManifest
+				excludes = refreshedExcludes
+				overlayDecision.Enabled = false
+				overlayDecision.Reason = "local_checkout_changed"
+				plainManifestFallback = true
+				coherence = gitCoherencePlan{}
+				fingerprint = ""
+				fmt.Fprintf(a.Stderr, "git overlay fallback reason=%s; using full manifest sync\n", overlayDecision.Reason)
+				if err := checkSyncPreflight(manifest, cfg, *forceSyncLarge, a.Stderr); err != nil {
+					return recordFailure(err)
+				}
+			}
+		}
+		if !overlayDecision.Enabled && !plainManifestFallback && coherence.seedEnabled() {
 			stepStart = time.Now()
 			if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay); err != nil {
 				fmt.Fprintf(a.Stderr, "warning: remote git seed failed: %v\n", err)
 			}
-			timings.syncSteps.gitSeed = time.Since(stepStart)
+			timings.syncSteps.gitSeed += time.Since(stepStart)
 		}
 		manifestData := manifest.NUL()
 		deletedData := manifest.DeletedNUL()
+		transferData := manifestData
+		if overlayDecision.Enabled {
+			transferData = manifest.OverlayNUL()
+			timings.syncMode = "git-overlay"
+			timings.syncTransferFiles = len(manifest.OverlayFiles)
+			timings.syncTransferBytes = manifest.OverlayBytes
+		} else if overlayDecision.Requested {
+			timings.syncMode = "manifest"
+			timings.syncTransferFiles = len(manifest.Files)
+			timings.syncTransferBytes = manifest.Bytes
+			timings.syncFallbackReason = overlayDecision.Reason
+		}
 		finalizeToken, err := randomHex(16)
 		if err != nil {
 			return recordFailure(exit(6, "create sync finalize token: %v", err))
@@ -1666,7 +1768,11 @@ retrySync:
 			manifestCtx, cancelManifest = context.WithTimeout(ctx, cfg.Sync.Timeout)
 		}
 		stopManifestHeartbeat := startSyncHeartbeat(a.Stderr, stepStart, 15*time.Second)
-		manifestErr := runSSHInput(manifestCtx, target, remoteWriteSyncManifestsNewForTarget(target, workdir, finalizeToken), strings.NewReader(manifestInput), io.Discard, a.Stderr)
+		manifestCommand := remoteWriteSyncManifestsNewForTarget(target, workdir, finalizeToken)
+		if overlayDecision.Enabled || plainManifestFallback {
+			manifestCommand = remoteWriteSyncManifestsNewWithMetadata(workdir, finalizeToken, remotePlainSyncMetaDirScript())
+		}
+		manifestErr := runSSHInput(manifestCtx, target, manifestCommand, strings.NewReader(manifestInput), io.Discard, a.Stderr)
 		stopManifestHeartbeat()
 		if cancelManifest != nil {
 			cancelManifest()
@@ -1681,22 +1787,30 @@ retrySync:
 		if shouldPruneRemoteSync(cfg.Sync.Delete, fullResyncRequested) {
 			// Full resync can git-seed files that are absent from the local manifest.
 			// Seed the old manifest from git so prune removes those resurrected paths.
-			if shouldSeedRemotePruneManifest(hydratedByActions, fullResyncRequested) {
+			if !overlayDecision.Enabled && !plainManifestFallback && shouldSeedRemotePruneManifest(hydratedByActions, fullResyncRequested) {
 				if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteSeedSyncManifestFromGit(workdir), idempotentSSHRetryDelay); err != nil {
 					return recordFailure(exit(6, "remote sync seed manifest failed: %v", err))
 				}
 			}
 			stepStart = time.Now()
-			if _, err := runIdempotentSSHCombinedOutput(ctx, target, remotePruneSyncManifestForTarget(target, workdir, finalizeToken), idempotentSSHRetryDelay); err != nil {
+			pruneCommand := remotePruneSyncManifestForTarget(target, workdir, finalizeToken)
+			if overlayDecision.Enabled {
+				pruneCommand = remotePruneGitOverlaySyncManifest(workdir, finalizeToken, allowRemoteSyncMassDeletions(cfg, hydratedByActions))
+			} else if plainManifestFallback {
+				pruneCommand = remotePruneSafeSyncManifest(workdir, finalizeToken, remotePlainSyncMetaDirScript(), allowRemoteSyncMassDeletions(cfg, hydratedByActions))
+			}
+			if _, err := runIdempotentSSHCombinedOutput(ctx, target, pruneCommand, idempotentSSHRetryDelay); err != nil {
 				return recordFailure(exit(6, "remote sync prune failed: %v", err))
 			}
 			timings.syncSteps.prune = time.Since(stepStart)
 		}
-		stepStart = time.Now()
-		if err := rsync(ctx, target, repo.Root, workdir, excludes.patterns(), a.Stdout, a.Stderr, rsyncOptions{Debug: *debugSync, Delete: cfg.Sync.Delete, Checksum: cfg.Sync.Checksum, UseFilesFrom: true, FilesFrom: manifestData, NoTimes: localContainerDockerSocketSync(cfg, server), Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
-			return recordFailure(exit(6, "rsync failed: %v", err))
+		if !overlayDecision.Enabled || len(transferData) != 0 {
+			stepStart = time.Now()
+			if err := rsync(ctx, target, repo.Root, workdir, excludes.patterns(), a.Stdout, a.Stderr, rsyncOptions{Debug: *debugSync, Delete: cfg.Sync.Delete, Checksum: cfg.Sync.Checksum, UseFilesFrom: true, FilesFrom: transferData, NoTimes: localContainerDockerSocketSync(cfg, server), Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
+				return recordFailure(exit(6, "rsync failed: %v", err))
+			}
+			timings.syncSteps.rsync = time.Since(stepStart)
 		}
-		timings.syncSteps.rsync = time.Since(stepStart)
 		baseSHA := gitHydrateBaseSHA(repo, cfg.Sync.BaseRef)
 		hydrateGit := true
 		if hydratedByActions {
@@ -1711,7 +1825,9 @@ retrySync:
 		stepStart = time.Now()
 		finalizeCommand := remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
 			AllowMassDeletions: allowRemoteSyncMassDeletions(cfg, hydratedByActions),
-			HydrateGit:         hydrateGit,
+			HydrateGit:         hydrateGit && !overlayDecision.Enabled && !plainManifestFallback,
+			GitOverlay:         overlayDecision.Enabled,
+			PlainManifest:      plainManifestFallback,
 			BaseRef:            cfg.Sync.BaseRef,
 			BaseSHA:            baseSHA,
 			Fingerprint:        fingerprint,
@@ -2775,6 +2891,10 @@ type runTimings struct {
 	syncSteps          syncStepTimings
 	commandPhases      []timingPhase
 	syncSkipped        bool
+	syncMode           string
+	syncTransferFiles  int
+	syncTransferBytes  int64
+	syncFallbackReason string
 	blockedStage       string
 	resourceExhaustion ResourceExhaustionReason
 	retryLikely        string
