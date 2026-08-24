@@ -9,38 +9,34 @@ const workflow = fs.readFileSync(
   "utf8",
 );
 
-test("coordinator deploy syncs a configured Daytona snapshot", () => {
-  assert.match(
-    workflow,
-    /CRABBOX_DAYTONA_SNAPSHOT: \$\{\{ secrets\.CRABBOX_DAYTONA_SNAPSHOT \}\}/,
-  );
+test("coordinator deploy publishes a configured Daytona snapshot with the Worker version", () => {
+  assert.match(workflow, /CRABBOX_DAYTONA_SNAPSHOT: \$\{\{ secrets\.CRABBOX_DAYTONA_SNAPSHOT \}\}/);
   assert.match(workflow, /\[ -n "\$\{CRABBOX_DAYTONA_SNAPSHOT\}" \]/);
   assert.match(
     workflow,
-    /printf '%s' "\$\{CRABBOX_DAYTONA_SNAPSHOT\}" \|\s+npx wrangler secret put CRABBOX_DAYTONA_SNAPSHOT/,
+    /elif \[ -n "\$\{CRABBOX_DAYTONA_SNAPSHOT\}" \]; then[^]*?JSON\.stringify\(\{\s+CRABBOX_DAYTONA_SNAPSHOT: process\.env\.CRABBOX_DAYTONA_SNAPSHOT,[^]*?npm run deploy -- --secrets-file "\$\{SECRETS_FILE\}"[^]*?else/,
   );
+  assert.doesNotMatch(workflow, /wrangler secret put/);
 });
 
-test("coordinator deploy preserves account-default mode when no snapshot is configured", () => {
+test("coordinator deploy preserves secret bindings when no snapshot is configured", () => {
   assert.match(
     workflow,
-    /CRABBOX_DAYTONA_SNAPSHOT is not set; keeping the Daytona account-default mode/,
+    /else\s+echo "::notice::CRABBOX_DAYTONA_SNAPSHOT is not set; deploying without changing existing secret bindings\."\s+npm run deploy\s+fi/,
   );
-  assert.doesNotMatch(
-    workflow,
-    /CRABBOX_DAYTONA_SNAPSHOT is not set[^]*?exit 1/,
-  );
+  assert.doesNotMatch(workflow, /CRABBOX_DAYTONA_SNAPSHOT is not set[^]*?exit 1/);
 });
 
 test("manual deploy can explicitly clear a stale Daytona snapshot binding", () => {
   assert.match(workflow, /^      clearDaytonaSnapshot:$/m);
-  assert.match(workflow, /type: boolean/);
   assert.match(
     workflow,
-    /CLEAR_DAYTONA_SNAPSHOT: \$\{\{ inputs\.clearDaytonaSnapshot \}\}/,
+    /description: Clear the Worker snapshot binding after removing the coordinator environment secret/,
   );
+  assert.match(workflow, /type: boolean/);
+  assert.match(workflow, /CLEAR_DAYTONA_SNAPSHOT: \$\{\{ inputs\.clearDaytonaSnapshot \}\}/);
   assert.match(
     workflow,
-    /printf '\{"CRABBOX_DAYTONA_SNAPSHOT":null\}\\n' \|\s+npx wrangler secret bulk/,
+    /if \[ "\$\{CLEAR_DAYTONA_SNAPSHOT\}" = "true" \]; then\s+if \[ -n "\$\{CRABBOX_DAYTONA_SNAPSHOT\}" \]; then[^]*?Remove CRABBOX_DAYTONA_SNAPSHOT from the coordinator GitHub environment[^]*?exit 1\s+fi\s+npm run deploy\s+printf '\{"CRABBOX_DAYTONA_SNAPSHOT":null\}\\n' \|\s+npx wrangler secret bulk\s+elif/,
   );
 });
