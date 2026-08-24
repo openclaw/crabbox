@@ -1181,7 +1181,7 @@ func TestProviderFlagsAndValidation(t *testing.T) {
 	if err := applyFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Machine0.CLIPath != "/opt/m0" || cfg.Machine0.Size != "gpu-h100-1" || cfg.Machine0.Region != "us-east" || cfg.Machine0.ReleasePolicy != "suspend" || cfg.Machine0.ImageVersion != 4 {
+	if cfg.Machine0.CLIPath != "/opt/m0" || cfg.Machine0.Size != "gpu-h100-1" || !cfg.Machine0.SizeExplicit || cfg.Machine0.Region != "us-east" || cfg.Machine0.ReleasePolicy != "suspend" || cfg.Machine0.ImageVersion != 4 {
 		t.Fatalf("cfg=%#v", cfg.Machine0)
 	}
 	cfg.Machine0.ReleasePolicy = "stop"
@@ -1207,9 +1207,12 @@ func TestProviderClassCatalogAndSizeSelection(t *testing.T) {
 	provider := Provider{}
 	wantSizes := []string{"large", "xl", "xxl", "xxxl", "4xl", "5xl"}
 	classes := core.CanonicalProviderClasses()
-	profiles, specs := provider.ClassProfiles(), provider.ClassSpecs()
-	if provider.Spec().ClassDisposition != core.ProviderClassDispositionMapped || len(profiles) != len(classes) || len(specs) != len(classes) {
-		t.Fatalf("disposition=%s profiles=%#v specs=%#v", provider.Spec().ClassDisposition, profiles, specs)
+	profiles := provider.ClassProfiles()
+	if provider.Spec().ClassDisposition != core.ProviderClassDispositionMapped || len(profiles) != len(classes) {
+		t.Fatalf("disposition=%s profiles=%#v", provider.Spec().ClassDisposition, profiles)
+	}
+	if _, ok := any(provider).(core.ProviderClassSpecProvider); ok {
+		t.Fatal("Machine0 unexpectedly exposes the historical compatibility class summary")
 	}
 	for index, class := range classes {
 		t.Run(class, func(t *testing.T) {
@@ -1223,27 +1226,83 @@ func TestProviderClassCatalogAndSizeSelection(t *testing.T) {
 			if err := provider.ApplyConfigDefaults(&cfg); err != nil || cfg.Machine0.Size != wantSizes[index] || cfg.ServerType != wantSizes[index] {
 				t.Fatalf("size=%q serverType=%q err=%v want=%q", cfg.Machine0.Size, cfg.ServerType, err, wantSizes[index])
 			}
-			if specs[index].Class != class || specs[index].Type != wantSizes[index] || specs[index].VCPUs <= 0 || specs[index].MemoryGB <= 0 {
-				t.Fatalf("class spec=%#v", specs[index])
+			profile := profiles[index]
+			if profile.Class != class || profile.Primary.Type != wantSizes[index] || profile.Primary.VCPU == nil || *profile.Primary.VCPU <= 0 || profile.Primary.Memory == nil || profile.Primary.Memory.Value <= 0 {
+				t.Fatalf("class profile=%#v", profile)
 			}
 		})
 	}
 
-	t.Run("explicit native size overrides class", func(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		nativeSize     string
+		nativeExplicit bool
+		serverType     string
+		wantSize       string
+	}{
+		{name: "legacy default without provenance maps the class", nativeSize: "large", wantSize: "5xl"},
+		{name: "legacy stored size without provenance maps the class", nativeSize: "xxxl", wantSize: "5xl"},
+		{name: "explicit default-valued native size overrides class", nativeSize: "large", nativeExplicit: true, wantSize: "large"},
+		{name: "explicit arbitrary native size overrides class", nativeSize: "gpu-h100-1", nativeExplicit: true, wantSize: "gpu-h100-1"},
+		{name: "explicit generic type overrides native selection", nativeSize: "large", nativeExplicit: true, serverType: "gpu-h200-1", wantSize: "gpu-h200-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.Provider = providerName
+			cfg.Class = "beast"
+			core.MarkClassExplicit(&cfg)
+			cfg.Machine0.Size = tc.nativeSize
+			cfg.Machine0.SizeExplicit = tc.nativeExplicit
+			if tc.serverType != "" {
+				cfg.ServerType = tc.serverType
+				cfg.ServerTypeExplicit = true
+			}
+			if got := provider.ServerTypeForConfig(cfg); got != tc.wantSize {
+				t.Fatalf("resolved size=%q want=%q", got, tc.wantSize)
+			}
+			if got, selected := provider.ServerTypeOverrideForConfig(cfg); selected != tc.nativeExplicit || selected && got != tc.nativeSize {
+				t.Fatalf("native override=%q selected=%t want=%q selected=%t", got, selected, tc.nativeSize, tc.nativeExplicit)
+			}
+			if err := provider.ApplyConfigDefaults(&cfg); err != nil || cfg.Machine0.Size != tc.wantSize || cfg.ServerType != tc.wantSize {
+				t.Fatalf("native size=%q serverType=%q err=%v want=%q", cfg.Machine0.Size, cfg.ServerType, err, tc.wantSize)
+			}
+		})
+	}
+
+	for _, size := range []string{"large", "gpu-h100-1"} {
+		t.Run("CLI native size overrides inherited selection "+size, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.Provider = providerName
+			cfg.Class = "beast"
+			core.MarkClassExplicit(&cfg)
+			cfg.Machine0.Size = "xl-nvme"
+			cfg.Machine0.SizeExplicit = true
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			values := registerFlags(fs, cfg)
+			if err := fs.Parse([]string{"--machine0-size", size}); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Machine0.Size != size || !cfg.Machine0.SizeExplicit || provider.ServerTypeForConfig(cfg) != size {
+				t.Fatalf("native size=%q explicit=%t resolved=%q", cfg.Machine0.Size, cfg.Machine0.SizeExplicit, provider.ServerTypeForConfig(cfg))
+			}
+		})
+	}
+
+	t.Run("changing an implicit class remaps a previously resolved size", func(t *testing.T) {
 		cfg := core.BaseConfig()
 		cfg.Provider = providerName
+		cfg.Class = "fast"
+		core.MarkClassExplicit(&cfg)
+		if err := provider.ApplyConfigDefaults(&cfg); err != nil || cfg.Machine0.Size != "xxxl" {
+			t.Fatalf("first size=%q err=%v", cfg.Machine0.Size, err)
+		}
 		cfg.Class = "beast"
 		core.MarkClassExplicit(&cfg)
-		fs := flag.NewFlagSet("test", flag.ContinueOnError)
-		values := registerFlags(fs, cfg)
-		if err := fs.Parse([]string{"--machine0-size", "large"}); err != nil {
-			t.Fatal(err)
-		}
-		if err := applyFlags(&cfg, fs, values); err != nil {
-			t.Fatal(err)
-		}
-		if cfg.Machine0.Size != "large" || provider.ServerTypeForConfig(cfg) != "large" {
-			t.Fatalf("native size=%q resolved=%q", cfg.Machine0.Size, provider.ServerTypeForConfig(cfg))
+		if err := provider.ApplyConfigDefaults(&cfg); err != nil || cfg.Machine0.Size != "5xl" {
+			t.Fatalf("updated size=%q err=%v", cfg.Machine0.Size, err)
 		}
 	})
 

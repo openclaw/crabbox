@@ -1964,17 +1964,30 @@ func TestProvidersJSONIncludesBuiltIns(t *testing.T) {
 		t.Fatalf("invalid providers json: %v\n%s", err, output)
 	}
 
-	var firecracker *providerMatrixEntry
+	var firecracker, machine0 *providerMatrixEntry
 	classProviders := map[string]*providerMatrixEntry{}
+	wantLegacyClassProviders := map[string]struct{}{
+		"aws": {}, "azure": {}, "gcp": {}, "hetzner": {}, "namespace-instance": {},
+	}
 	for i := range entries {
-		switch entries[i].Provider {
+		entry := &entries[i]
+		switch entry.Provider {
 		case "firecracker":
-			firecracker = &entries[i]
-		case "aws", "azure", "gcp", "hetzner", "machine0", "namespace-instance":
-			classProviders[entries[i].Provider] = &entries[i]
+			firecracker = entry
+		case "machine0":
+			machine0 = entry
+		}
+		if len(entry.Classes) != 0 {
+			if _, ok := wantLegacyClassProviders[entry.Provider]; !ok {
+				t.Fatalf("provider=%s unexpectedly expanded the legacy classes compatibility boundary", entry.Provider)
+			}
+			classProviders[entry.Provider] = entry
 		}
 	}
-	for _, provider := range []string{"aws", "azure", "gcp", "hetzner", "machine0", "namespace-instance"} {
+	if len(classProviders) != len(wantLegacyClassProviders) {
+		t.Fatalf("legacy class providers=%d want exactly %d", len(classProviders), len(wantLegacyClassProviders))
+	}
+	for _, provider := range []string{"aws", "azure", "gcp", "hetzner", "namespace-instance"} {
 		entry := classProviders[provider]
 		if entry == nil {
 			t.Fatalf("built binary providers json missing %s", provider)
@@ -1991,6 +2004,22 @@ func TestProvidersJSONIncludesBuiltIns(t *testing.T) {
 		if entry.ClassCatalog.Disposition != ProviderClassDispositionMapped || len(entry.ClassCatalog.Profiles) < 4 {
 			t.Fatalf("%s classCatalog=%#v want mapped profiles", provider, entry.ClassCatalog)
 		}
+	}
+	if machine0 == nil {
+		t.Fatal("built binary providers json missing machine0")
+	}
+	if len(machine0.Classes) != 0 {
+		t.Fatalf("machine0 compatibility classes=%#v want omitted", machine0.Classes)
+	}
+	if machine0.ClassCatalog.Disposition != ProviderClassDispositionMapped || len(machine0.ClassCatalog.Profiles) != len(CanonicalProviderClasses()) {
+		t.Fatalf("machine0 classCatalog=%#v want mapped canonical profiles", machine0.ClassCatalog)
+	}
+	encodedMachine0, err := json.Marshal(machine0)
+	if err != nil {
+		t.Fatalf("marshal machine0 matrix entry: %v", err)
+	}
+	if bytes.Contains(encodedMachine0, []byte(`"classes"`)) || !bytes.Contains(encodedMachine0, []byte(`"classCatalog"`)) {
+		t.Fatalf("machine0 discovery changed the compatibility JSON shape: %s", encodedMachine0)
 	}
 	if firecracker == nil {
 		t.Fatal("built binary providers json missing firecracker")
@@ -2016,7 +2045,7 @@ func TestProvidersJSONIncludesBuiltIns(t *testing.T) {
 	for _, smoke := range []struct {
 		requested string
 		canonical string
-	}{{requested: "aws", canonical: "aws"}, {requested: "google", canonical: "gcp"}} {
+	}{{requested: "aws", canonical: "aws"}, {requested: "google", canonical: "gcp"}, {requested: "machine0", canonical: "machine0"}} {
 		var matrix *providerMatrixEntry
 		for index := range entries {
 			if entries[index].Provider == smoke.canonical {

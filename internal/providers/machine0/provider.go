@@ -100,16 +100,24 @@ func (Provider) ValidateConfig(cfg core.Config) error {
 	return nil
 }
 
-func (Provider) ServerTypeForConfig(cfg core.Config) string {
+func (p Provider) ServerTypeForConfig(cfg core.Config) string {
 	if cfg.ServerTypeExplicit && strings.TrimSpace(cfg.ServerType) != "" {
 		return cfg.ServerType
 	}
-	if core.ClassWasExplicit(cfg) && cfg.Machine0.Size == core.BaseConfig().Machine0.Size {
+	if size, selected := p.ServerTypeOverrideForConfig(cfg); selected {
+		return size
+	}
+	if core.ClassWasExplicit(cfg) {
 		if candidates, matched := core.ProviderClassCandidatesForProfiles(machine0ClassProfiles, cfg); matched {
 			return candidates[0]
 		}
 	}
 	return cfg.Machine0.Size
+}
+
+func (Provider) ServerTypeOverrideForConfig(cfg core.Config) (string, bool) {
+	size := strings.TrimSpace(cfg.Machine0.Size)
+	return size, cfg.Machine0.SizeExplicit && size != ""
 }
 
 func (Provider) ServerTypeForClass(class string) string {
@@ -122,10 +130,6 @@ func (Provider) ServerTypeForClass(class string) string {
 }
 
 func (Provider) ClassProfiles() []core.ProviderClassProfile { return machine0ClassProfiles }
-
-func (Provider) ClassSpecs() []core.ClassSpec {
-	return core.ProviderClassSpecsFromProfiles(machine0ClassProfiles)
-}
 
 func buildClassProfiles() []core.ProviderClassProfile {
 	shapes := []struct {

@@ -3378,14 +3378,14 @@ func TestMultipassConfigDefaultsFileAndEnv(t *testing.T) {
 func TestMachine0ConfigDefaultsFileAndEnvPrecedence(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
-	if cfg.Machine0.CLIPath != "machine0" || cfg.Machine0.Image != "ubuntu-24-04-loaded" || cfg.Machine0.Size != "large" || cfg.Machine0.Region != "eu" || cfg.Machine0.WorkRoot != "" || cfg.Machine0.ReleasePolicy != "destroy" || cfg.Machine0.PollInterval != 5*time.Second {
+	if cfg.Machine0.CLIPath != "machine0" || cfg.Machine0.Image != "ubuntu-24-04-loaded" || cfg.Machine0.Size != "large" || cfg.Machine0.SizeExplicit || cfg.Machine0.Region != "eu" || cfg.Machine0.WorkRoot != "" || cfg.Machine0.ReleasePolicy != "destroy" || cfg.Machine0.PollInterval != 5*time.Second {
 		t.Fatalf("machine0 defaults not applied: %#v", cfg.Machine0)
 	}
 	imageVersion := 2
 	applyFileConfig(&cfg, fileConfig{Provider: "machine0", Machine0: &fileMachine0Config{
 		CLIPath: "/opt/bin/machine0", Image: "ubuntu-ci", ImageVersion: &imageVersion, DesktopImage: "ubuntu-desktop", Size: "xl-nvme", Region: "us-west", Key: "ci-key", WorkRoot: "/work/example", ReleasePolicy: "suspend", CreateTimeout: "9m", PollInterval: "3s",
 	}})
-	if cfg.Machine0.CLIPath != "/opt/bin/machine0" || cfg.Machine0.Image != "ubuntu-ci" || cfg.Machine0.ImageVersion != 2 || cfg.Machine0.DesktopImage != "ubuntu-desktop" || cfg.Machine0.Size != "xl-nvme" || cfg.Machine0.Region != "us-west" || cfg.Machine0.Key != "ci-key" || cfg.Machine0.WorkRoot != "/work/example" || cfg.Machine0.ReleasePolicy != "suspend" || cfg.Machine0.CreateTimeout != 9*time.Minute || cfg.Machine0.PollInterval != 3*time.Second {
+	if cfg.Machine0.CLIPath != "/opt/bin/machine0" || cfg.Machine0.Image != "ubuntu-ci" || cfg.Machine0.ImageVersion != 2 || cfg.Machine0.DesktopImage != "ubuntu-desktop" || cfg.Machine0.Size != "xl-nvme" || !cfg.Machine0.SizeExplicit || cfg.Machine0.Region != "us-west" || cfg.Machine0.Key != "ci-key" || cfg.Machine0.WorkRoot != "/work/example" || cfg.Machine0.ReleasePolicy != "suspend" || cfg.Machine0.CreateTimeout != 9*time.Minute || cfg.Machine0.PollInterval != 3*time.Second {
 		t.Fatalf("file machine0 config not applied: %#v", cfg.Machine0)
 	}
 	activeVersion := 0
@@ -3407,8 +3407,49 @@ func TestMachine0ConfigDefaultsFileAndEnvPrecedence(t *testing.T) {
 	if err := applyEnv(&cfg); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Machine0.CLIPath != "/usr/local/bin/machine0" || cfg.Machine0.Image != "ubuntu-env" || cfg.Machine0.ImageVersion != 4 || cfg.Machine0.DesktopImage != "desktop-env" || cfg.Machine0.Size != "gpu-h100-1" || cfg.Machine0.Region != "us-east" || cfg.Machine0.Key != "env-key" || cfg.Machine0.WorkRoot != "/work/env" || cfg.Machine0.ReleasePolicy != "destroy" || cfg.Machine0.CreateTimeout != 12*time.Minute || cfg.Machine0.PollInterval != 5*time.Second {
+	if cfg.Machine0.CLIPath != "/usr/local/bin/machine0" || cfg.Machine0.Image != "ubuntu-env" || cfg.Machine0.ImageVersion != 4 || cfg.Machine0.DesktopImage != "desktop-env" || cfg.Machine0.Size != "gpu-h100-1" || !cfg.Machine0.SizeExplicit || cfg.Machine0.Region != "us-east" || cfg.Machine0.Key != "env-key" || cfg.Machine0.WorkRoot != "/work/env" || cfg.Machine0.ReleasePolicy != "destroy" || cfg.Machine0.CreateTimeout != 12*time.Minute || cfg.Machine0.PollInterval != 5*time.Second {
 		t.Fatalf("environment did not override machine0 file config: %#v", cfg.Machine0)
+	}
+}
+
+func TestMachine0NativeSizeConfigProvenanceAndPrecedence(t *testing.T) {
+	clearConfigEnv(t)
+	tests := []struct {
+		name         string
+		yaml         string
+		envSize      string
+		wantSize     string
+		wantExplicit bool
+	}{
+		{name: "legacy config without native size keeps implicit default", yaml: "class: fast\nmachine0:\n  image: ubuntu-ci\n", wantSize: "large"},
+		{name: "yaml default-valued size remains explicit", yaml: "class: fast\nmachine0:\n  size: large\n", wantSize: "large", wantExplicit: true},
+		{name: "yaml arbitrary native size remains explicit", yaml: "class: fast\nmachine0:\n  size: gpu-h100-1\n", wantSize: "gpu-h100-1", wantExplicit: true},
+		{name: "environment default-valued size remains explicit", yaml: "class: fast\n", envSize: "large", wantSize: "large", wantExplicit: true},
+		{name: "environment arbitrary native size remains explicit", yaml: "class: fast\n", envSize: "gpu-h100-1", wantSize: "gpu-h100-1", wantExplicit: true},
+		{name: "environment native size overrides yaml native size", yaml: "class: fast\nmachine0:\n  size: gpu-h100-1\n", envSize: "large", wantSize: "large", wantExplicit: true},
+		{name: "empty environment preserves explicit yaml size", yaml: "class: fast\nmachine0:\n  size: large\n", wantSize: "large", wantExplicit: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CRABBOX_MACHINE0_SIZE", tc.envSize)
+			cfg := baseConfig()
+			var file fileConfig
+			if err := yaml.Unmarshal([]byte(tc.yaml), &file); err != nil {
+				t.Fatalf("parse YAML: %v", err)
+			}
+			if err := applyFileConfig(&cfg, file); err != nil {
+				t.Fatalf("apply YAML: %v", err)
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatalf("apply environment: %v", err)
+			}
+			if cfg.Machine0.Size != tc.wantSize || cfg.Machine0.SizeExplicit != tc.wantExplicit {
+				t.Fatalf("native size=%q explicit=%t, want size=%q explicit=%t", cfg.Machine0.Size, cfg.Machine0.SizeExplicit, tc.wantSize, tc.wantExplicit)
+			}
+			if !ClassWasExplicit(cfg) {
+				t.Fatal("portable class provenance was lost")
+			}
+		})
 	}
 }
 

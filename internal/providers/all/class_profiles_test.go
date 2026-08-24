@@ -17,7 +17,7 @@ func TestProductionProviderClassCatalogCompleteness(t *testing.T) {
 	}
 	counts := map[core.ProviderClassDisposition]int{}
 	compatibilityProviders := map[string]struct{}{
-		"aws": {}, "azure": {}, "gcp": {}, "hetzner": {}, "machine0": {}, "namespace-instance": {},
+		"aws": {}, "azure": {}, "gcp": {}, "hetzner": {}, "namespace-instance": {},
 	}
 	for _, name := range core.RegisteredProviderNames() {
 		provider, err := core.ProviderFor(name)

@@ -1382,6 +1382,7 @@ type Machine0Config struct {
 	ImageVersion  int
 	DesktopImage  string
 	Size          string
+	SizeExplicit  bool
 	Region        string
 	Key           string
 	WorkRoot      string
@@ -7727,6 +7728,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		}
 		if file.Machine0.Size != "" {
 			cfg.Machine0.Size = file.Machine0.Size
+			cfg.Machine0.SizeExplicit = true
 		}
 		if file.Machine0.Region != "" {
 			cfg.Machine0.Region = file.Machine0.Region
@@ -9730,7 +9732,10 @@ func applyEnv(cfg *Config) error {
 	cfg.Machine0.Image = getenv("CRABBOX_MACHINE0_IMAGE", cfg.Machine0.Image)
 	cfg.Machine0.ImageVersion = getenvInt("CRABBOX_MACHINE0_IMAGE_VERSION", cfg.Machine0.ImageVersion)
 	cfg.Machine0.DesktopImage = getenv("CRABBOX_MACHINE0_DESKTOP_IMAGE", cfg.Machine0.DesktopImage)
-	cfg.Machine0.Size = getenv("CRABBOX_MACHINE0_SIZE", cfg.Machine0.Size)
+	if size := os.Getenv("CRABBOX_MACHINE0_SIZE"); size != "" {
+		cfg.Machine0.Size = size
+		cfg.Machine0.SizeExplicit = true
+	}
 	cfg.Machine0.Region = getenv("CRABBOX_MACHINE0_REGION", cfg.Machine0.Region)
 	cfg.Machine0.Key = getenv("CRABBOX_MACHINE0_KEY", cfg.Machine0.Key)
 	cfg.Machine0.WorkRoot = getenv("CRABBOX_MACHINE0_WORK_ROOT", cfg.Machine0.WorkRoot)

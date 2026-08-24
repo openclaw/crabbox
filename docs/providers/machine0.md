@@ -135,12 +135,20 @@ classes, using shapes from the Machine0 size catalog:
 | `large` | `4xl` | 32 | 128 GB |
 | `beast` | `5xl` | 48 | 192 GB |
 
-An explicit `--machine0-size` always wins over `--class` and accepts any live
-Machine0 size, including GPU, NVMe, premium, and larger CPU shapes outside this
-convenience catalog. Omitting `--class` preserves the existing `large` default.
-Crabbox never hardcodes a reduced allowed-size enum or price table: before
-creation it reads `machine0 sizes --all --json` and verifies that the selected
-size exists and is currently offered in the requested region.
+The authoritative `classCatalog` in `crabbox providers --json` and
+`crabbox providers describe machine0 --json` reports these mappings. Machine0
+does not appear in the legacy top-level `classes` compatibility projection.
+
+An explicitly configured `machine0.size`, `CRABBOX_MACHINE0_SIZE`, or
+`--machine0-size` always wins over a portable class, even when the selected size
+is the normal `large` default. Native sizes follow the usual configuration
+precedence: YAML, then environment, then CLI. They may name any live Machine0
+size, including GPU, NVMe, premium, and larger CPU shapes outside this
+convenience catalog. An explicitly selected class supplies its mapped size only
+when no native size was configured; omitting both preserves the existing
+`large` default. Crabbox never hardcodes a reduced allowed-size enum or price
+table: before creation it reads `machine0 sizes --all --json` and verifies that
+the selected size exists and is currently offered in the requested region.
 
 ```sh
 crabbox providers sizes machine0 --json
