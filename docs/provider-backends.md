@@ -138,6 +138,22 @@ remote commands itself, use `DelegatedRunBackend`.
 
 Add optional capabilities as small interfaces instead of widening every backend.
 
+Requested fixed lease IDs are optional:
+
+```go
+type IdempotentLeaseIDBackend interface {
+	SupportsRequestedLeaseID() bool
+}
+```
+
+Direct AWS, Machine0, and local-container backends implement this capability;
+coordinator-backed leases support it through the coordinator wrapper. External
+backends support it only when their configured protocol explicitly advertises
+idempotent lease IDs. `crabbox warmup --lease-id` rejects other backends before
+provisioning. Built-in direct adapters reuse `core.AcquireFixedLease` for
+durable intent and replay mechanics while keeping resource creation,
+reconciliation, and identity validation provider-owned.
+
 Cleanup is optional:
 
 ```go
@@ -386,8 +402,9 @@ Acquisition already shares the mechanics that have provider-neutral contracts:
 - `core.AcquireFixedLease`, `core.FixedAcquireOptions`,
   `core.FixedLeaseBinding`, and `core.FixedLeaseKind` already share durable
   fixed-ID intent locking, replay validation, acquired-state commit, and
-  terminal tombstones for AWS and Machine0. Their adapters still own exact
-  create attempts, provider reconciliation, and immutable resource identity.
+  terminal tombstones for AWS, Machine0, and local-container. Their adapters
+  still own exact create attempts, provider reconciliation, and immutable
+  resource identity.
 
 The transaction boundary deliberately remains inside each adapter:
 
@@ -415,9 +432,9 @@ The transaction boundary deliberately remains inside each adapter:
   back failed creation even with `Keep`, so retention cannot be a global rule.
 - **`OnAcquired` placement:** Lume acknowledges an early provisional identity,
   Vast acknowledges after readiness but before its final claim, and fixed-ID
-  Machine0 acknowledges only after durable commit and lock release. Moving the
-  callback changes when controller ownership transfers and which transaction
-  must clean up if acknowledgment fails.
+  Machine0 and local-container acknowledge only after durable commit and lock
+  release. Moving the callback changes when controller ownership transfers and
+  which transaction must clean up if acknowledgment fails.
 - **Security-critical bootstrap ordering:** Hyper-V locks down guest SSH before
   attaching networking; Lume pins authenticated guest identity before accepting
   SSH; Vast probes initial access, installs required tools, and only then proves

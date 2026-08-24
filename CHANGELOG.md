@@ -2,6 +2,10 @@
 
 ## 0.46.1 - Unreleased
 
+### Added
+
+- Added fixed idempotent `--lease-id` replay to local-container warmups, with exact container-intent matching and single-use released IDs.
+
 ### Fixed
 
 - Redacted coordinator URL credentials, query parameters, and fragments from run-context portal and logs links.

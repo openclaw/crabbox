@@ -15,6 +15,7 @@ crabbox warmup --browser
 crabbox warmup --tailscale
 crabbox warmup --slug update-flow-smoke
 crabbox warmup --provider aws --lease-id cbx_abcdef123456 --slug update-flow-smoke
+crabbox warmup --provider local-container --lease-id cbx_abcdef123456 --slug update-flow-smoke
 crabbox warmup --pond alpha --slug db
 crabbox warmup --provider aws --target windows --desktop
 crabbox warmup --provider azure --target windows
@@ -50,13 +51,14 @@ Warmup requires an explicit provider selection from `--provider`,
 recorded lease route. With no selection it exits before provider initialization
 and points to `crabbox providers recommend`.
 
-For `local-container`, the default `--keep=true` also covers SSH readiness
-failure: once Docker has returned an exact container identity, Crabbox persists
-a scoped `provisioning` claim before inspecting the container or waiting for
-SSH. Cancellation or timeout retains that pending lease and prints exact
-inspect, reclaim, and cleanup commands.
-`warmup --keep=false` rolls the container and all per-lease local state back
-instead.
+For ordinary `local-container` warmups without `--lease-id`, the default
+`--keep=true` also covers SSH readiness failure: once Docker has returned an
+exact container identity, Crabbox persists a scoped `provisioning` claim before
+inspecting the container or waiting for SSH. Cancellation or timeout retains
+that pending lease and prints exact inspect, reclaim, and cleanup commands.
+`warmup --keep=false` rolls an ordinary container and all per-lease local state
+back instead. Fixed-ID local-container warmups retain their durable create
+attempt so an interrupted operation can be safely replayed.
 
 ## Lifetime: TTL and idle timeout
 
@@ -70,13 +72,14 @@ instead.
 it and may append a short suffix if an active lease already uses that slug.
 
 `--lease-id cbx_<12 lowercase hex>` is the automation idempotency contract for
-providers that explicitly support fixed identities. Direct AWS and managed
-coordinator leases accept it. Replaying the same normalized create intent
+providers that explicitly support fixed identities. Direct AWS, Machine0, and
+local-container leases, managed coordinator leases, and explicitly capable
+external providers accept it. Replaying the same normalized create intent
 returns or joins the same lease, including after the creating process loses its
 response. Reusing the ID with a different provider, slug request, SSH key,
-machine shape, capabilities, lifetime, or other immutable create input fails
-with `lease_id_conflict` before another provider create. Slugs remain display
-aliases and are never used as the idempotency key.
+machine or container shape, capabilities, lifetime, or other immutable create
+input fails with `lease_id_conflict` before another provider create. Slugs
+remain display aliases and are never used as the idempotency key.
 
 Coordinator-backed fixed-ID creation uses a versioned `PUT /v1/leases/<id>`
 route. An older coordinator therefore rejects the request before provisioning;
@@ -84,14 +87,14 @@ the CLI never falls back to slug lookup or legacy create behavior. After an
 ambiguous fixed create response, the CLI repeats that exact PUT to atomically
 confirm the same intent before it may poll lease status with GET.
 
-A fixed lease ID is single-use. If direct AWS acquisition completed and its
-bound instance later disappears, replay fails closed instead of relying on EC2
-client-token retention. Successful stop and missing-resource cleanup replace
-the live local claim with a compact terminal tombstone, so the ID remains
-rejected after release. Use a new operation ID for every later lease.
-If an AWS launch attempt was durably recorded but its instance is not yet
-visible, replay fails closed without resubmitting it; retry later to adopt the
-resource after provider inventory converges.
+A fixed lease ID is single-use. Direct AWS, Machine0, and local-container
+acquisitions fail closed if their bound resource later disappears. Successful
+stop and missing-resource cleanup replace the live local claim with a compact
+terminal tombstone, so the ID remains rejected after release. Use a new
+operation ID for every later lease. If an AWS launch or local-container create
+attempt was durably recorded but its resource is not yet visible, replay fails
+closed without resubmitting it; retry later to adopt the resource after
+provider inventory converges.
 
 `--pond <name>` tags a new lease into a named pond (stored as a reserved
 provider label); `crabbox list --pond <name>` filters by it. When combined with
