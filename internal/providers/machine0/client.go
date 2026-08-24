@@ -125,6 +125,7 @@ func (s *machineSize) UnmarshalJSON(data []byte) error {
 }
 
 func (c *client) run(ctx context.Context, args ...string) (LocalCommandResult, error) {
+	started := time.Now()
 	result, err := c.rt.Exec.Run(ctx, LocalCommandRequest{
 		Name:                   c.cfg.CLIPath,
 		Args:                   args,
@@ -142,6 +143,19 @@ func (c *client) run(ctx context.Context, args ...string) (LocalCommandResult, e
 	}
 	if detail == "" {
 		detail = strings.TrimSpace(fmt.Sprint(err))
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		if output := strings.TrimSpace(strings.Join([]string{result.Stderr, result.Stdout}, "\n")); output != "" {
+			detail = fmt.Sprintf("%v after %s; partial output: %s", cause, time.Since(started).Round(time.Millisecond), output)
+		} else {
+			detail = fmt.Sprintf("%v after %s", cause, time.Since(started).Round(time.Millisecond))
+		}
+	} else if err != nil && result.ExitCode < 0 {
+		if output := strings.TrimSpace(strings.Join([]string{result.Stderr, result.Stdout}, "\n")); output != "" {
+			detail = fmt.Sprintf("%v; partial output: %s", err, output)
+		} else {
+			detail = err.Error()
+		}
 	}
 	lower := strings.ToLower(detail)
 	if strings.Contains(lower, "not logged in") || strings.Contains(lower, "not authenticated") || strings.Contains(lower, "unauthorized") {

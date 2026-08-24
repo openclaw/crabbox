@@ -263,3 +263,43 @@ func TestClientActionableInstallAndAuthErrors(t *testing.T) {
 		t.Fatalf("auth err=%v", err)
 	}
 }
+
+func TestClientCommandFailurePreservesDeadlineAndSignalCause(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		context   func() (context.Context, context.CancelFunc)
+		err       error
+		wantCause string
+	}{
+		{
+			name: "deadline with printed version",
+			context: func() (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+				return ctx, cancel
+			},
+			err:       errors.New("signal: killed"),
+			wantCause: "context deadline exceeded",
+		},
+		{
+			name: "signal with printed version",
+			context: func() (context.Context, context.CancelFunc) {
+				return context.WithCancel(context.Background())
+			},
+			err:       errors.New("signal: killed"),
+			wantCause: "signal: killed",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := tc.context()
+			defer cancel()
+			runner := &recordingRunner{sequence: []runnerResponse{{
+				result: core.LocalCommandResult{ExitCode: -1, Stdout: "1.0.164\n"},
+				err:    tc.err,
+			}}}
+			_, err := testClient(runner).Version(ctx)
+			if err == nil || !strings.Contains(err.Error(), tc.wantCause) || !strings.Contains(err.Error(), "partial output: 1.0.164") {
+				t.Fatalf("err=%v, want cause %q and partial version output", err, tc.wantCause)
+			}
+		})
+	}
+}

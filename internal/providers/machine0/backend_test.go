@@ -43,13 +43,22 @@ type fakeAPI struct {
 	saveErr                error
 	actions                []string
 	primeSSH               func(string) error
+	doctorDelay            time.Duration
 	imageSnapshotReady     bool
 	rejectStartBeforeReady bool
 }
 
-func (f *fakeAPI) Version(context.Context) (string, error) { return "machine0 1.0.155", nil }
+func (f *fakeAPI) Version(ctx context.Context) (string, error) {
+	if err := f.waitDoctorProbe(ctx); err != nil {
+		return "", err
+	}
+	return "machine0 1.0.155", nil
+}
 
-func (f *fakeAPI) List(context.Context) ([]machine, error) {
+func (f *fakeAPI) List(ctx context.Context) ([]machine, error) {
+	if err := f.waitDoctorProbe(ctx); err != nil {
+		return nil, err
+	}
 	if f.machines != nil {
 		return append([]machine(nil), f.machines...), nil
 	}
@@ -115,7 +124,27 @@ func (f *fakeAPI) PrimeSSH(_ context.Context, name string) error {
 	}
 	return nil
 }
-func (f *fakeAPI) Sizes(context.Context) ([]machineSize, error)       { return f.sizes, nil }
+func (f *fakeAPI) Sizes(ctx context.Context) ([]machineSize, error) {
+	if err := f.waitDoctorProbe(ctx); err != nil {
+		return nil, err
+	}
+	return f.sizes, nil
+}
+
+func (f *fakeAPI) waitDoctorProbe(ctx context.Context) error {
+	if f.doctorDelay == 0 {
+		return nil
+	}
+	timer := time.NewTimer(f.doctorDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 func (f *fakeAPI) ListImages(context.Context) ([]machineImage, error) { return f.images, nil }
 func (f *fakeAPI) GetImage(ctx context.Context, name string) (machineImageDetail, error) {
 	if f.imageFn != nil {
@@ -862,6 +891,27 @@ func TestDoctorChecksCLIAuthInventoryAndCatalogWithoutMutation(t *testing.T) {
 	}
 	if len(api.created) != 0 || len(api.removed) != 0 || len(api.suspended) != 0 {
 		t.Fatalf("doctor mutated provider: %#v", api)
+	}
+}
+
+func TestDoctorRunsSlowProviderProbesWithinSharedBudget(t *testing.T) {
+	api := &fakeAPI{
+		machine:     readyMachine("203.0.113.10"),
+		sizes:       []machineSize{testSize()},
+		doctorDelay: 4 * time.Second,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	started := time.Now()
+	result, err := testBackendWithAPI(api).Doctor(ctx, DoctorRequest{})
+	if err != nil {
+		t.Fatalf("doctor failed within shared budget: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 8*time.Second {
+		t.Fatalf("doctor probes ran sequentially: elapsed=%s", elapsed)
+	}
+	if !strings.Contains(result.Message, "leases=1") || !strings.Contains(result.Message, "sizes=1") {
+		t.Fatalf("doctor result=%#v", result)
 	}
 }
 

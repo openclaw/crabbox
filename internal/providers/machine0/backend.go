@@ -429,17 +429,52 @@ func (b *backend) Resume(ctx context.Context, req ResumeRequest) error {
 }
 
 func (b *backend) Doctor(ctx context.Context, req DoctorRequest) (DoctorResult, error) {
-	version, err := b.api.Version(ctx)
-	if err != nil {
-		return DoctorResult{}, err
+	type probeResult struct {
+		version  string
+		sizes    []machineSize
+		machines []machine
+		err      error
 	}
-	sizes, err := b.api.Sizes(ctx)
-	if err != nil {
-		return DoctorResult{}, err
+	probeCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make(chan probeResult, 3)
+	go func() {
+		version, err := b.api.Version(probeCtx)
+		results <- probeResult{version: version, err: err}
+	}()
+	go func() {
+		sizes, err := b.api.Sizes(probeCtx)
+		results <- probeResult{sizes: sizes, err: err}
+	}()
+	go func() {
+		machines, err := b.api.List(probeCtx)
+		results <- probeResult{machines: machines, err: err}
+	}()
+	var version string
+	var sizes []machineSize
+	var machines []machine
+	var probeErr error
+	for range 3 {
+		result := <-results
+		if result.err != nil {
+			if probeErr == nil {
+				probeErr = result.err
+				cancel()
+			}
+			continue
+		}
+		if result.version != "" {
+			version = result.version
+		}
+		if result.sizes != nil {
+			sizes = result.sizes
+		}
+		if result.machines != nil {
+			machines = result.machines
+		}
 	}
-	machines, err := b.api.List(ctx)
-	if err != nil {
-		return DoctorResult{}, err
+	if probeErr != nil {
+		return DoctorResult{}, probeErr
 	}
 	probe := "unchecked"
 	if req.ProbeSSH {
