@@ -81,6 +81,25 @@ Docker Desktop-specific APIs. Crabbox detects an installed `docker` or `podman`
 CLI and uses that runtime. Set `localContainer.runtime` when you need a specific
 CLI.
 
+### Fixed-ID replay
+
+```sh
+crabbox warmup --provider local-container \
+  --lease-id cbx_abcdef123456 --slug my-app-operation
+```
+
+A fixed lease ID makes warmup replay-safe across process restarts. Crabbox
+persists the runtime identity and normalized container-create intent before
+starting the container, then reuses an existing container only when its lease,
+slug, runtime scope, and intent fingerprint match. Changing the image or other
+container-shaping configuration returns `lease_id_conflict` instead of silently
+reusing the lease. An unresolved create attempt or a missing previously
+acquired container also fails closed without starting a second container.
+
+Stopping a fixed lease preserves a terminal local tombstone, so the same
+operation ID cannot create another container after release. Use a new fixed
+lease ID for each later operation.
+
 ## Configuration
 
 ```yaml
