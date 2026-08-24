@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://crabbox.sh/schemas/linux-readiness-manifest-v1.json",
+  "title": "Linux image readiness manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profile", "recipeDigest", "schema"],
+  "properties": {
+    "profile": { "enum": ["linux-minimal", "linux-builder"] },
+    "recipeDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "schema": { "const": "crabbox-linux-readiness/v1" }
+  }
+}

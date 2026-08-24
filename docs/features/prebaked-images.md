@@ -56,7 +56,8 @@ git, release artifacts, or coordinator durable state.
 Bake stable machine capabilities:
 
 - current OS security updates and base packages;
-- core access tooling: SSH, Git, rsync, curl, jq, and the readiness helpers;
+- core access tooling: SSH, Git, rsync, curl, jq, tmux, `flock`, and the
+  system CA bundle;
 - desktop and browser capabilities for `--desktop --browser` leases
   (resize-capable TigerVNC, slim XFCE, Chrome or Chromium);
 - capture tools such as `ffmpeg`, `ffprobe`, `scrot`, and `xdotool`;
@@ -65,10 +66,28 @@ Bake stable machine capabilities:
 - Docker Engine and supporting plugins where the platform runs headless Docker;
 - empty shared cache directories such as `/var/cache/crabbox/pnpm`.
 
-The bundled Linux developer-image prep writes
-`/var/lib/crabbox/image-ready` only after the stable tool contract is present.
-On later boots Crabbox verifies the marker plus the base binaries and skips the
-otherwise redundant base-package APT transaction. Per-lease users, SSH keys,
+The bundled Linux developer-image prep runs the standalone generated readiness
+producer only after installing and proving the complete managed Debian/Ubuntu
+baseline. It atomically writes the strict root-owned
+`/var/lib/crabbox-readiness/linux.json` capability manifest and a compatibility
+`/var/lib/crabbox/image-ready` marker. `linux-minimal` covers the eight baseline
+packages and their functional probes; `linux-builder` additionally proves
+generic native-build, Git LFS, package-config, and Python virtual-environment
+capabilities. The Python probe creates a disposable pip-enabled virtual
+environment and runs its pip before cleaning up. Images missing a builder
+capability are truthfully downgraded to `linux-minimal`, while images missing a
+baseline capability cannot be marked.
+
+Later boots verify exact canonical manifest bytes, its trusted non-symlink path,
+root ownership/group, file mode and bounded size, and every declared profile
+probe under a sanitized system PATH before skipping the baseline APT transaction.
+The readiness directory and its entire parent chain are root-controlled; the
+separate legacy marker directory may belong to the runtime user, so the marker
+is only a compatibility hint. Its exact root-owned bytes permit migration only
+when no manifest exists and every baseline probe independently passes, without
+APT or dpkg work. Invalid existing manifests cannot be rescued by a marker. This
+is local capability evidence, not package-version attestation, signed
+provenance, tenant isolation, or typed-pool identity. Per-lease users, SSH keys,
 work roots, optional services, and readiness checks still run normally.
 
 Do not bake scenario state:

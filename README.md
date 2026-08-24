@@ -628,7 +628,8 @@ npm run check:node --prefix worker
 npm run build:node --prefix worker
 
 # Repository scripts
-node --test scripts/*.test.js
+node scripts/generate-linux-readiness.mjs --check
+node --test scripts/*.test.js scripts/*.test.mjs
 
 # Docs
 scripts/check-docs.sh

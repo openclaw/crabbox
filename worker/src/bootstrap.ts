@@ -1,4 +1,5 @@
 import { sshPorts, type LeaseConfig } from "./config";
+import { linuxMinimalReadinessBootstrap } from "./linux-readiness.generated";
 
 const tightVNCMSIURL =
   "https://www.tightvnc.com/download/2.8.85/tightvnc-2.8.85-gpl-setup-64bit.msi";
@@ -65,6 +66,7 @@ export function cloudInit(config: LeaseConfig, additionalBootstrap = ""): string
   const sshHostKeys = optionalSSHHostKeys(config);
   const writeFiles = optionalWriteFiles(config);
   const bootstrap = [optionalBootstrap(config), additionalBootstrap].filter(Boolean).join("\n");
+  const readinessBootstrap = indentRuncmdScript(linuxMinimalReadinessBootstrap);
   return `#cloud-config
 package_update: false
 package_upgrade: false
@@ -107,6 +109,7 @@ ${portLines}
       rsync --version >/dev/null
       curl --version >/dev/null
       jq --version >/dev/null
+      tmux -V >/dev/null
       flock --version >/dev/null
       test -f /var/lib/crabbox/bootstrapped
       test -w ${config.workRoot}
@@ -117,11 +120,6 @@ runcmd:
     bash -euxo pipefail <<'BOOT'
     export DEBIAN_FRONTEND=noninteractive
     timeout 30s systemctl restart ssh || timeout 30s systemctl restart ssh.socket || true
-    cat >/etc/apt/apt.conf.d/80-crabbox-retries <<'APT'
-    Acquire::Retries "8";
-    Acquire::http::Timeout "30";
-    Acquire::https::Timeout "30";
-    APT
     retry() {
       n=1
       until "$@"; do
@@ -132,19 +130,7 @@ runcmd:
         n=$((n + 1))
       done
     }
-    if test -f /var/lib/crabbox/image-ready &&
-      test -x /usr/sbin/sshd &&
-      test -s /etc/ssl/certs/ca-certificates.crt &&
-      command -v curl >/dev/null &&
-      command -v git >/dev/null &&
-      command -v rsync >/dev/null &&
-      command -v jq >/dev/null &&
-      command -v tmux >/dev/null; then
-      echo 'crabbox prebaked base packages ready; skipping apt bootstrap'
-    else
-      retry apt-get update
-      retry apt-get install -y --no-install-recommends openssh-server ca-certificates curl git rsync jq tmux
-    fi
+${readinessBootstrap}
     mkdir -p ${config.workRoot} /var/cache/crabbox/pnpm /var/cache/crabbox/npm
     chown -R ${config.sshUser}:${config.sshUser} ${config.workRoot} /var/cache/crabbox
     install -d /var/lib/crabbox

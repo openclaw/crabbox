@@ -61,6 +61,7 @@ func cloudInitWithAdditionalBootstrap(cfg Config, publicKey, additionalBootstrap
 	yamlPublicKey := yamlInlineString(publicKey)
 	shellSSHUser := shellQuote(cfg.SSHUser)
 	shellWorkRoot := shellQuote(cfg.WorkRoot)
+	readinessBootstrap := indentCloudInitRuncmd(linuxMinimalReadinessBootstrap)
 	return fmt.Sprintf(`#cloud-config
 package_update: false
 package_upgrade: false
@@ -86,6 +87,8 @@ write_files:
       rsync --version >/dev/null
       curl --version >/dev/null
       jq --version >/dev/null
+      tmux -V >/dev/null
+      flock --version >/dev/null
       test -f /var/lib/crabbox/bootstrapped
       test -w %[3]s
 %[5]s
@@ -94,11 +97,6 @@ runcmd:
   - |
     bash -euxo pipefail <<'BOOT'
     export DEBIAN_FRONTEND=noninteractive
-    cat >/etc/apt/apt.conf.d/80-crabbox-retries <<'APT'
-    Acquire::Retries "8";
-    Acquire::http::Timeout "30";
-    Acquire::https::Timeout "30";
-    APT
     retry() {
       n=1
       until "$@"; do
@@ -109,18 +107,7 @@ runcmd:
         n=$((n + 1))
       done
     }
-    if test -f /var/lib/crabbox/image-ready &&
-      test -x /usr/sbin/sshd &&
-      test -s /etc/ssl/certs/ca-certificates.crt &&
-      command -v curl >/dev/null &&
-      command -v git >/dev/null &&
-      command -v rsync >/dev/null &&
-      command -v jq >/dev/null; then
-      echo 'crabbox prebaked base packages ready; skipping apt bootstrap'
-    else
-      retry apt-get update
-      retry apt-get install -y --no-install-recommends openssh-server ca-certificates curl git rsync jq
-    fi
+%[9]s
     mkdir -p %[3]s /var/cache/crabbox/pnpm /var/cache/crabbox/npm
     chown -R %[7]s:%[7]s %[3]s /var/cache/crabbox
     install -d /var/lib/crabbox
@@ -130,7 +117,7 @@ runcmd:
     touch /var/lib/crabbox/bootstrapped
     crabbox-ready
     BOOT
-`, yamlSSHUser, yamlPublicKey, shellWorkRoot, portLines, readyChecks, writeFiles, shellSSHUser, bootstrap)
+`, yamlSSHUser, yamlPublicKey, shellWorkRoot, portLines, readyChecks, writeFiles, shellSSHUser, bootstrap, readinessBootstrap)
 }
 
 func CloudInitUserData(cfg Config, publicKey string) string {

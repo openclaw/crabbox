@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/md5"
 	"crypto/rsa"
@@ -33,6 +34,7 @@ const (
 	awsSSHIngressDescription = "Crabbox SSH"
 	awsSpotQuotaCode         = "L-34B43A08"
 	awsOnDemandQuotaCode     = "L-1216C47A"
+	awsEC2UserDataLimit      = 16 * 1024
 )
 
 var awsSnapshotDeleteBackoff = []time.Duration{
@@ -630,6 +632,25 @@ func (c *AWSClient) resolveLaunchAMI(ctx context.Context, cfg Config, staticImag
 	return c.resolveAMI(ctx, cfg)
 }
 
+func awsRunInstancesUserData(cfg Config, publicKey string) (string, error) {
+	userData := []byte(awsUserData(cfg, publicKey))
+	if cfg.TargetOS != targetWindows && cfg.TargetOS != targetMacOS {
+		var compressed bytes.Buffer
+		writer := gzip.NewWriter(&compressed)
+		if _, err := writer.Write(userData); err != nil {
+			return "", fmt.Errorf("gzip AWS Linux cloud-init user data: %w", err)
+		}
+		if err := writer.Close(); err != nil {
+			return "", fmt.Errorf("finish gzip AWS Linux cloud-init user data: %w", err)
+		}
+		userData = compressed.Bytes()
+		if len(userData) > awsEC2UserDataLimit {
+			return "", fmt.Errorf("EC2 user-data limit is 16 KiB (%d raw bytes); compressed Linux cloud-init is %d bytes", awsEC2UserDataLimit, len(userData))
+		}
+	}
+	return base64.StdEncoding.EncodeToString(userData), nil
+}
+
 func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, imageID, securityGroupID string, spot bool, control *AWSFixedCreateControl) (Server, error) {
 	_ = publicKey
 	name := leaseProviderName(leaseID, slug)
@@ -649,7 +670,10 @@ func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 			labels["aws_key_pair_id"] = control.KeyPairID
 		}
 	}
-	userData := base64.StdEncoding.EncodeToString([]byte(awsUserData(cfg, publicKey)))
+	userData, err := awsRunInstancesUserData(cfg, publicKey)
+	if err != nil {
+		return Server{}, err
+	}
 	rootGB := cfg.AWSRootGB
 	if rootGB <= 0 {
 		rootGB = 400

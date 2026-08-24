@@ -32,12 +32,18 @@ func TestCloudInitUsesRetryingBootstrap(t *testing.T) {
 		"package_update: false",
 		"bash -euxo pipefail <<'BOOT'",
 		"Acquire::Retries \"8\";",
-		"test -f /var/lib/crabbox/image-ready",
-		"test -s /etc/ssl/certs/ca-certificates.crt",
-		"crabbox prebaked base packages ready; skipping apt bootstrap",
+		"crabbox_readiness_manifest_path='/var/lib/crabbox-readiness/linux.json'",
+		"crabbox_legacy_image_marker_path='/var/lib/crabbox/image-ready'",
+		"crabbox_readiness_system_path='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'",
+		"test -s '/etc/ssl/certs/ca-certificates.crt'",
+		"crabbox Linux readiness manifest verified; skipping apt bootstrap",
+		"crabbox legacy image readiness migrated without package-manager work",
 		"retry apt-get update",
-		"retry apt-get install -y --no-install-recommends openssh-server ca-certificates curl git rsync jq",
+		"retry apt-get install -y --no-install-recommends $crabbox_readiness_packages",
+		"crabbox_readiness_packages='ca-certificates curl git jq openssh-server rsync tmux util-linux'",
 		"curl --version >/dev/null",
+		"tmux -V >/dev/null",
+		"flock --version >/dev/null",
 		"test -f /var/lib/crabbox/bootstrapped",
 		"test -w '/work/crabbox'",
 		"      Port 2222\n      Port 22",
@@ -59,6 +65,24 @@ func TestCloudInitUsesRetryingBootstrap(t *testing.T) {
 		if strings.Contains(got, notWant) {
 			t.Fatalf("cloudInit() should not install project language runtime %q", notWant)
 		}
+	}
+}
+
+func TestLinuxReadinessGeneratedContract(t *testing.T) {
+	got := cloudInit(baseConfig(), "ssh-ed25519 test")
+	embedded := indentCloudInitRuncmd(linuxMinimalReadinessBootstrap)
+	if !strings.Contains(got, embedded) {
+		t.Fatal("cloudInit() must embed the complete generated Linux readiness fragment")
+	}
+	if strings.Index(got, embedded) >= strings.Index(got, "touch /var/lib/crabbox/bootstrapped") {
+		t.Fatal("cloudInit() must verify Linux readiness before declaring bootstrap complete")
+	}
+	legacyParentCreation := "crabbox_ensure_legacy_image_marker_parent || return 1"
+	if !strings.Contains(embedded, legacyParentCreation) {
+		t.Fatal("generated readiness writer must ensure its own legacy marker parent")
+	}
+	if strings.Index(got, legacyParentCreation) >= strings.Index(got, "install -d /var/lib/crabbox") {
+		t.Fatal("generated readiness writer must safely create its marker parent before runtime-directory setup")
 	}
 }
 

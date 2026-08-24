@@ -1,0 +1,38 @@
+{
+  "schema": "crabbox-linux-readiness/v1",
+  "profile": "linux-builder",
+  "description": "Portable Debian and Ubuntu native-build prerequisites",
+  "shell": "posix",
+  "inherits": ["linux-minimal"],
+  "aptPackages": [
+    "build-essential",
+    "ca-certificates",
+    "curl",
+    "git",
+    "git-lfs",
+    "jq",
+    "openssh-server",
+    "pkg-config",
+    "python3",
+    "python3-venv",
+    "rsync",
+    "tmux",
+    "util-linux"
+  ],
+  "probes": [
+    { "name": "ca-certificates", "command": "test -s /etc/ssl/certs/ca-certificates.crt" },
+    { "name": "compiler", "command": "cc --version" },
+    { "name": "curl", "command": "curl --version" },
+    { "name": "flock", "command": "flock --version" },
+    { "name": "git", "command": "git --version" },
+    { "name": "git-lfs", "command": "git lfs version" },
+    { "name": "jq", "command": "jq --version" },
+    { "name": "make", "command": "make --version" },
+    { "name": "pkg-config", "command": "pkg-config --version" },
+    { "name": "python3", "command": "python3 --version" },
+    { "name": "python3-venv", "command": "python3 -c 'with __import__(\"tempfile\").TemporaryDirectory() as directory: __import__(\"venv\").EnvBuilder(with_pip=True).create(directory + \"/venv\"); __import__(\"subprocess\").run([directory + \"/venv/bin/python\", \"-m\", \"pip\", \"--version\"], check=True)'" },
+    { "name": "rsync", "command": "rsync --version" },
+    { "name": "sshd", "command": "test -x /usr/sbin/sshd" },
+    { "name": "tmux", "command": "tmux -V" }
+  ]
+}

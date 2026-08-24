@@ -7,6 +7,7 @@
 - Added explicitly opt-in, image-pinned typed ready pools with exact repository/cache identities and rollback-isolated coordinator storage. Thanks @vincentkoc.
 - Added targeted `stop --force` recovery through verified provider adoption or exact coordinator lease inspection without weakening ownership checks.
 - Added replay-safe fixed lease IDs to checkpoint forks and machine-readable JSON output to checkpoint creation and forking.
+- Added strict, provider-neutral Linux image readiness manifests with shared CLI/coordinator capability verification and safe legacy-image migration. Thanks @vincentkoc.
 
 ### Fixed
 

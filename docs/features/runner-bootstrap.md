@@ -36,21 +36,65 @@ Bootstrap creates:
 
 Bootstrap installs only a small base set with `--no-install-recommends`:
 
-- `openssh-server`
 - `ca-certificates`
 - `curl`
 - `git`
-- `rsync`
 - `jq`
+- `openssh-server`
+- `rsync`
+- `tmux`
+- `util-linux`
 
 `apt-get` runs are wrapped in a retry loop (8 attempts, increasing backoff) so a
 transient mirror failure does not fail the whole boot.
 
-Images produced by the bundled Linux developer-image workflow carry
-`/var/lib/crabbox/image-ready`. When that marker and every base binary are
-present, bootstrap skips the repeated base-package APT transaction. It still
-applies all per-lease identity, SSH, work-root, optional capability, and
-readiness steps. A marker on an incomplete image does not bypass installation.
+Managed Debian and Ubuntu images describe this baseline in the canonical
+`/var/lib/crabbox-readiness/linux.json` manifest. The dedicated readiness
+directory is root-owned and mode `0755`, independent of the runtime-user-owned
+`/var/lib/crabbox` state directory. The strict
+`crabbox-linux-readiness/v1` object contains exactly `profile`, `recipeDigest`,
+and `schema`; its SHA-256 recipe digest covers executable package, probe, and
+inheritance requirements, not cosmetic recipe descriptions. The shared recipes
+in `recipes/linux/v1/` generate identical CLI and coordinator bootstrap
+fragments plus the standalone `scripts/linux-readiness.generated.sh` producer.
+
+The `linux-minimal` profile proves the executable SSH daemon, nonempty system CA
+bundle, and working `curl`, `git`, `rsync`, `jq`, `tmux`, and `flock` commands.
+The optional `linux-builder` profile inherits every minimal requirement and
+additionally proves the generic `build-essential`, `git-lfs`, `pkg-config`,
+`python3`, and `python3-venv` capabilities. The virtual-environment probe creates
+a disposable, pip-enabled environment, runs its Python and pip, and cleans the
+temporary directory on success or failure. Cold bootstrap installs and claims
+only `linux-minimal`; an image producer claims `linux-builder` only after every
+minimal and builder probe passes.
+
+Bootstrap skips baseline APT only when the exact canonical manifest bytes,
+root-owned non-symlink path, root group, `0644` file mode, bounded file size,
+non-writable parent directories, and every declared profile probe are verified.
+Named probe commands use only the sanitized system PATH
+`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin` and bypass shell
+functions, so workspace or user-provided commands cannot satisfy the contract.
+Strict canonical-byte comparison uses `sha256sum` from Debian/Ubuntu's essential
+`coreutils` package, so validation does not require Python or permissive JSON
+stream parsing. An existing invalid manifest always takes the normal install
+path. The root-owned `/var/lib/crabbox/image-ready` file remains a
+non-authoritative compatibility hint in a directory the runtime user may own;
+its exact bytes, owner, group, and mode are checked, but its parent is not the
+manifest trust boundary. Migration is permitted only when no manifest exists
+and every minimal probe independently succeeds, with zero APT or dpkg calls.
+The compatibility marker is prepared inside the root-owned readiness directory
+and renamed into the legacy directory without following the destination. If the
+legacy directory does not exist yet, the marker writer first verifies its
+ancestors and creates it root-owned with mode `0755`; existing safe directories
+owned by the runtime user remain valid.
+Missing tools are installed normally or fail visibly if installation is
+unavailable. Optional browser, desktop, and Tailscale installation remains
+independent.
+
+The manifest is local image capability evidence. It is not package-version
+attestation, signed provenance, tenant isolation, or a ready-pool identity.
+Per-lease identity, SSH, work-root, optional capability, and readiness steps
+still run for every lease.
 
 ### Readiness: `crabbox-ready`
 
@@ -58,7 +102,7 @@ Bootstrap writes `/usr/local/bin/crabbox-ready` and runs it at the end of boot.
 A box does not count as ready until this script exits `0` over SSH. The base
 Linux script checks:
 
-- `git`, `rsync`, `curl`, and `jq` are present and runnable;
+- `git`, `rsync`, `curl`, `jq`, `tmux`, and `flock` are present and runnable;
 - the marker file `/var/lib/crabbox/bootstrapped` exists;
 - the work root is writable.
 

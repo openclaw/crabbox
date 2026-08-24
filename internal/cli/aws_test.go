@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/md5"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -13,6 +16,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -357,6 +361,118 @@ func TestAWSOrdinaryRunInstancesOmitsFixedAttemptTags(t *testing.T) {
 	client := testAWSClient(server.URL)
 	if _, err := client.createServer(context.Background(), cfg, publicKey, "cbx_abcdef123483", "ordinary", true, "ami-ordinary", "sg-ordinary", false, nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAWSRunInstancesUserDataPreservesOSTransportBoundary(t *testing.T) {
+	for _, target := range []string{targetLinux, targetWindows, targetMacOS} {
+		t.Run(target, func(t *testing.T) {
+			publicKey := "ssh-rsa " + strings.Repeat("a", 724)
+			var encodedUserData string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				params, err := url.ParseQuery(string(body))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := params.Get("Action"); got != "RunInstances" {
+					t.Fatalf("action=%q, want RunInstances", got)
+				}
+				encodedUserData = params.Get("UserData")
+				writeEC2XML(w, `<RunInstancesResponse><instancesSet><item><instanceId>i-user-data</instanceId><instanceType>m7i.large</instanceType><ipAddress>203.0.113.45</ipAddress><instanceState><name>pending</name></instanceState></item></instancesSet></RunInstancesResponse>`)
+			}))
+			defer server.Close()
+
+			cfg := baseConfig()
+			cfg.Provider = "aws"
+			cfg.TargetOS = target
+			cfg.ServerType = "m7i.large"
+			cfg.ProviderKey = "crabbox-cbx-abcdef123484"
+			if target == targetLinux {
+				cfg.Desktop = true
+				cfg.Browser = true
+				cfg.Code = true
+				cfg.Tailscale.Enabled = true
+				cfg.Tailscale.AuthKey = "test-auth-key"
+				cfg.Tailscale.Hostname = "crabbox-user-data-test"
+			}
+			rawUserData := []byte(awsUserData(cfg, publicKey))
+			if _, err := testAWSClient(server.URL).createServer(context.Background(), cfg, publicKey, "cbx_abcdef123484", "user-data", true, "ami-test", "sg-test", false, nil); err != nil {
+				t.Fatal(err)
+			}
+			transportBytes, err := base64.StdEncoding.DecodeString(encodedUserData)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if target != targetLinux {
+				if !bytes.Equal(transportBytes, rawUserData) {
+					t.Fatalf("%s user data changed before base64 encoding", target)
+				}
+				if len(transportBytes) >= 2 && transportBytes[0] == 0x1f && transportBytes[1] == 0x8b {
+					t.Fatalf("%s user data must not be gzip-compressed", target)
+				}
+				return
+			}
+			if len(rawUserData) <= awsEC2UserDataLimit {
+				t.Fatalf("Linux cloud-init is %d bytes, want more than the %d-byte EC2 limit", len(rawUserData), awsEC2UserDataLimit)
+			}
+			if len(transportBytes) > awsEC2UserDataLimit {
+				t.Fatalf("compressed user data is %d bytes, exceeds the %d-byte EC2 limit", len(transportBytes), awsEC2UserDataLimit)
+			}
+			reader, err := gzip.NewReader(bytes.NewReader(transportBytes))
+			if err != nil {
+				t.Fatalf("RunInstances user data is not valid gzip: %v", err)
+			}
+			if !reader.ModTime.IsZero() {
+				t.Fatalf("gzip header includes a nondeterministic modification time: %s", reader.ModTime)
+			}
+			decoded, err := io.ReadAll(reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := reader.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(decoded, rawUserData) {
+				t.Fatal("decompressed RunInstances user data does not match exact Linux cloud-init")
+			}
+			again, err := awsRunInstancesUserData(cfg, publicKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if again != encodedUserData {
+				t.Fatal("gzip user data is not deterministic")
+			}
+		})
+	}
+}
+
+func TestAWSRunInstancesRejectsOversizedCompressedLinuxUserData(t *testing.T) {
+	var entropy bytes.Buffer
+	for index := 0; index < 1024; index++ {
+		digest := sha256.Sum256([]byte("crabbox-oversized-user-data-" + strconv.Itoa(index)))
+		entropy.Write(digest[:])
+	}
+	publicKey := "ssh-rsa " + base64.StdEncoding.EncodeToString(entropy.Bytes())
+	requested := false
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		requested = true
+	}))
+	defer server.Close()
+
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.ServerType = "m7i.large"
+	cfg.ProviderKey = "crabbox-cbx-abcdef123485"
+	_, err := testAWSClient(server.URL).createServer(context.Background(), cfg, publicKey, "cbx_abcdef123485", "oversized", true, "ami-test", "sg-test", false, nil)
+	if err == nil || !strings.Contains(err.Error(), "EC2 user-data limit") || !strings.Contains(err.Error(), "16384 raw bytes") {
+		t.Fatalf("oversized user data error=%v, want clear EC2 raw user-data limit", err)
+	}
+	if requested {
+		t.Fatal("oversized Linux user data reached RunInstances")
 	}
 }
 
