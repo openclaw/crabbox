@@ -2618,6 +2618,7 @@ func pendingAcquireBackend(t *testing.T) (*backend, *recordingRunner, *strings.B
 	var slug string
 	var fixedFingerprint string
 	var containerImage string
+	var containerRuntimeImage string
 	var containerDaemonID string
 	var containerContext string
 	containerPresent := false
@@ -2635,6 +2636,7 @@ func pendingAcquireBackend(t *testing.T) (*backend, *recordingRunner, *strings.B
 		case "run":
 			leaseID = labelFromRunArgs(t, req.Args, "lease")
 			slug = labelFromRunArgs(t, req.Args, "slug")
+			containerRuntimeImage = req.Args[len(req.Args)-3]
 			for i := 0; i+1 < len(req.Args); i++ {
 				if req.Args[i] == "--name" {
 					containerName = req.Args[i+1]
@@ -2676,7 +2678,7 @@ func pendingAcquireBackend(t *testing.T) (*backend, *recordingRunner, *strings.B
 				labels["fixed_intent_sha256"] = fixedFingerprint
 			}
 			data, err := json.Marshal([]inspectContainer{{
-				ID: "container-pending", Name: "/" + containerName, Config: inspectConfig{Image: "ubuntu:24.04", Labels: labels},
+				ID: "container-pending", Name: "/" + containerName, Config: inspectConfig{Image: containerRuntimeImage, Labels: labels},
 				State:           inspectState{Status: "running", Running: true},
 				NetworkSettings: inspectNetworking{Ports: map[string][]inspectPort{"2222/tcp": {{HostIP: "127.0.0.1", HostPort: "49170"}}}},
 			}})
@@ -2858,6 +2860,114 @@ esac
 	}
 	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
 		t.Fatalf("release checkpoint fork: %v", err)
+	}
+}
+
+func TestFixedAcquireCheckpointForkUsesImageIDAndReplays(t *testing.T) {
+	const (
+		checkpointImageID  = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+		checkpointImage    = "crabbox-checkpoint-fixed"
+		checkpointUser     = "checkpoint-user"
+		checkpointWorkRoot = "/checkpoint/work"
+	)
+	binDir := t.TempDir()
+	dockerScript := `#!/bin/sh
+if [ "$1" = "--context" ]; then
+  shift 2
+fi
+case "$1" in
+  context) printf '%s\n' 'unix:///pinned.sock' ;;
+  info) printf '%s\n' 'daemon-pinned' ;;
+  image) printf '%s\n' 'sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "docker"), []byte(dockerScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	b, runner, _, _, _, _ := pendingAcquireBackend(t)
+	originalRun := runner.run
+	var dockerRunArgs []string
+	creates := 0
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		if len(req.Args) < 3 || req.Args[0] != "--context" || req.Args[1] != "pinned-context" {
+			t.Fatalf("Docker lifecycle command was not pinned: %v", req.Args)
+		}
+		req.Args = req.Args[2:]
+		if firstArg(req.Args) == "run" {
+			creates++
+			dockerRunArgs = append([]string(nil), req.Args...)
+		}
+		return originalRun(req)
+	}
+	if err := (Provider{}).ApplyNativeCheckpointForkConfig(core.NativeCheckpointForkRequest{
+		Config: &b.cfg,
+		Record: core.NativeCheckpointForkRecord{
+			Kind:    core.CheckpointKindDockerCommit,
+			ImageID: checkpointImageID,
+			Name:    checkpointImage,
+			Metadata: map[string]string{
+				checkpointMetadataRuntime:  "docker",
+				checkpointMetadataContext:  "pinned-context",
+				checkpointMetadataDaemonID: "daemon-pinned",
+				checkpointMetadataUser:     checkpointUser,
+				checkpointMetadataWorkRoot: checkpointWorkRoot,
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	applyDefaults(&b.cfg)
+	b.captureRuntimeScope = func(context.Context, core.Config) (checkpointScope, error) {
+		return checkpointScope{
+			Runtime: "docker", Context: "pinned-context", Endpoint: "unix:///pinned.sock", DaemonID: "daemon-pinned",
+		}, nil
+	}
+	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	req := core.AcquireRequest{
+		Repo: core.Repo{Root: t.TempDir()}, Keep: true,
+		RequestedLeaseID: "cbx_abcdef123465", RequestedSlug: "fixed-checkpoint-fork",
+	}
+	lease, err := b.Acquire(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if image := dockerRunArgs[len(dockerRunArgs)-3]; image != checkpointImageID {
+		t.Fatalf("Docker run image=%q, want captured image id %q", image, checkpointImageID)
+	}
+	if image := labelFromRunArgs(t, dockerRunArgs, "image"); image != checkpointImage {
+		t.Fatalf("Docker run image label=%q, want checkpoint name %q", image, checkpointImage)
+	}
+	claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil || claim.Provider != core.FixedLocalContainerClaimProvider ||
+		claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != "acquired" ||
+		claim.FixedCreateIntent.Fingerprint == "" ||
+		claim.FixedCreateIntent.Fingerprint != labelFromRunArgs(t, dockerRunArgs, "fixed_intent_sha256") {
+		t.Fatalf("fixed checkpoint fork claim=%#v err=%v", claim, err)
+	}
+	container, err := b.inspectContainer(context.Background(), lease.Server.CloudID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateFixedLocalContainer(container, b.configForRun(), req.RequestedLeaseID,
+		req.RequestedSlug, claim.FixedCreateIntent.Fingerprint); err != nil {
+		t.Fatalf("validate fixed checkpoint fork: %v", err)
+	}
+	replayed, err := b.Acquire(context.Background(), req)
+	if err != nil || replayed.LeaseID != lease.LeaseID || replayed.Server.CloudID != lease.Server.CloudID {
+		t.Fatalf("fixed checkpoint replay=%#v err=%v", replayed, err)
+	}
+	if creates != 1 {
+		t.Fatalf("checkpoint container creates=%d, want 1", creates)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: replayed}); err != nil {
+		t.Fatalf("release fixed checkpoint fork: %v", err)
+	}
+	tombstone, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
+	if err != nil || !exists || tombstone.Provider != core.FixedLocalContainerClaimProvider ||
+		tombstone.FixedCreateIntent == nil || tombstone.FixedCreateIntent.State != "released" ||
+		tombstone.FixedCreateIntent.Fingerprint != claim.FixedCreateIntent.Fingerprint {
+		t.Fatalf("fixed checkpoint fork tombstone=%#v exists=%t err=%v", tombstone, exists, err)
 	}
 }
 
