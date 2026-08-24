@@ -664,6 +664,157 @@ func TestFixedAcquireRefusesUnresolvedCreateAttempt(t *testing.T) {
 	}
 }
 
+func TestFixedAcquireBindsStoppedRecoveredContainerForExplicitRelease(t *testing.T) {
+	b, runner, containerPresent := stoppedFixedAcquireBackend(t, nil)
+	req := core.AcquireRequest{
+		Repo: core.Repo{Root: t.TempDir()}, Keep: true,
+		RequestedLeaseID: "cbx_abcdef123468", RequestedSlug: "stopped-recovery",
+	}
+	if _, err := b.Acquire(context.Background(), req); err == nil {
+		t.Fatal("ambiguous stopped-container creation unexpectedly succeeded")
+	}
+	initial, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil || initial.Provider != core.FixedLocalContainerClaimProvider ||
+		initial.FixedCreateIntent == nil || initial.FixedCreateIntent.State != "prepared" ||
+		initial.FixedCreateIntent.Attempt["container_name"] != core.LeaseProviderName(req.RequestedLeaseID, req.RequestedSlug) ||
+		initial.FixedCreateIntent.Attempt["container_id"] != "" || initial.CloudID != "" {
+		t.Fatalf("unresolved stopped-container claim=%#v err=%v", initial, err)
+	}
+	if !*containerPresent {
+		t.Fatal("ambiguous creation did not retain its stopped container")
+	}
+	_, err = b.Acquire(context.Background(), req)
+	requireFixedLocalContainerConflict(t, err)
+	if !strings.Contains(err.Error(), "non-running container") {
+		t.Fatalf("stopped-container replay error=%v", err)
+	}
+	bound, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil || bound.Provider != core.FixedLocalContainerClaimProvider ||
+		bound.FixedCreateIntent == nil || bound.FixedCreateIntent.State != "prepared" ||
+		bound.CloudID != "container-pending" || bound.FixedCreateIntent.Attempt["container_id"] != bound.CloudID ||
+		bound.Labels["fixed_intent_sha256"] != bound.FixedCreateIntent.Fingerprint ||
+		!isPendingLocalContainerClaim(bound) {
+		t.Fatalf("recovered stopped-container claim=%#v err=%v", bound, err)
+	}
+	if !*containerPresent {
+		t.Fatal("replay unexpectedly removed the stopped container")
+	}
+	if creates := localContainerCreateCalls(runner); creates != 1 {
+		t.Fatalf("container creates after stopped recovery=%d, want 1", creates)
+	}
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: req.RequestedLeaseID, ReleaseOnly: true})
+	if err != nil || lease.LeaseID != req.RequestedLeaseID || lease.Server.CloudID != bound.CloudID {
+		t.Fatalf("exact stopped-container release target=%#v err=%v", lease, err)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatalf("release stopped fixed container: %v", err)
+	}
+	if *containerPresent {
+		t.Fatal("explicit release did not remove stopped container")
+	}
+	tombstone, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
+	if err != nil || !exists || fixedLocalContainerLeaseKind.ValidateTerminalClaim(tombstone, bound, req.RequestedLeaseID, nil) != nil {
+		t.Fatalf("stopped-container terminal claim=%#v exists=%t err=%v", tombstone, exists, err)
+	}
+	_, err = b.Acquire(context.Background(), req)
+	requireFixedLocalContainerConflict(t, err)
+	if !strings.Contains(err.Error(), "terminal") {
+		t.Fatalf("terminal stopped-container replay error=%v", err)
+	}
+	if creates := localContainerCreateCalls(runner); creates != 1 {
+		t.Fatalf("container creates after terminal replay=%d, want 1", creates)
+	}
+}
+
+func TestFixedAcquireStoppedContainerNeverBindsMismatchedIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		mutateContainer func(*inspectContainer)
+		mutateAttempt   bool
+	}{
+		{name: "fingerprint", mutateContainer: func(container *inspectContainer) {
+			container.Config.Labels["fixed_intent_sha256"] = "different-fingerprint"
+		}},
+		{name: "durable attempt identity", mutateAttempt: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			b, runner, containerPresent := stoppedFixedAcquireBackend(t, test.mutateContainer)
+			req := core.AcquireRequest{
+				Repo: core.Repo{Root: t.TempDir()}, Keep: true,
+				RequestedLeaseID: "cbx_abcdef123469", RequestedSlug: "stopped-mismatch",
+			}
+			if _, err := b.Acquire(context.Background(), req); err == nil {
+				t.Fatal("ambiguous stopped-container creation unexpectedly succeeded")
+			}
+			if test.mutateAttempt {
+				if err := core.WithDurableLeaseClaimLock(req.RequestedLeaseID, func(claim *core.LeaseClaim, exists bool, persist func() error) error {
+					if !exists {
+						return errors.New("fixed claim disappeared")
+					}
+					claim.FixedCreateIntent.Attempt["container_id"] = "different-container"
+					return persist()
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err := b.Acquire(context.Background(), req)
+			requireFixedLocalContainerConflict(t, err)
+			claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+			if err != nil || claim.CloudID != "" || len(claim.Labels) != 0 ||
+				(test.mutateAttempt && claim.FixedCreateIntent.Attempt["container_id"] != "different-container") {
+				t.Fatalf("mismatched stopped container was bound: claim=%#v err=%v", claim, err)
+			}
+			if !*containerPresent {
+				t.Fatal("mismatched container was unexpectedly removed")
+			}
+			if creates := localContainerCreateCalls(runner); creates != 1 {
+				t.Fatalf("container creates after mismatched recovery=%d, want 1", creates)
+			}
+		})
+	}
+}
+
+func stoppedFixedAcquireBackend(t *testing.T, mutateContainer func(*inspectContainer)) (*backend, *recordingRunner, *bool) {
+	t.Helper()
+	b, runner, _, _, bootstrapDir, containerPresent := pendingAcquireBackend(t)
+	t.Cleanup(func() {
+		if *bootstrapDir != "" {
+			_ = os.RemoveAll(*bootstrapDir)
+		}
+	})
+	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
+		t.Fatal("stopped container was incorrectly adopted as ready")
+		return nil
+	}
+	originalRun := runner.run
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		result, err := originalRun(req)
+		if err != nil {
+			return result, err
+		}
+		switch firstArg(req.Args) {
+		case "run":
+			return core.LocalCommandResult{Stderr: "daemon transport lost", ExitCode: 1}, errors.New("daemon transport lost")
+		case "inspect":
+			var containers []inspectContainer
+			if err := json.Unmarshal([]byte(result.Stdout), &containers); err != nil {
+				t.Fatal(err)
+			}
+			containers[0].State = inspectState{Status: "exited", Running: false}
+			if mutateContainer != nil {
+				mutateContainer(&containers[0])
+			}
+			data, marshalErr := json.Marshal(containers)
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			result.Stdout = string(data)
+		}
+		return result, nil
+	}
+	return b, runner, containerPresent
+}
+
 func TestFixedAcquireUnresolvedAttemptReservesRequestedSlug(t *testing.T) {
 	b, runner, _, _, _, _ := pendingAcquireBackend(t)
 	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }

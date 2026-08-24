@@ -198,9 +198,6 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 				return core.LeaseTarget{}, err
 			}
 		}
-		if !container.State.Running {
-			return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: fixed local-container lease %s is bound to a non-running container", leaseID)
-		}
 		if containerID := intent.Attempt["container_id"]; containerID != "" && containerID != container.ID {
 			return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: fixed local-container lease %s does not match its durable container identity", leaseID)
 		}
@@ -213,6 +210,9 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 			if err := persist(); err != nil {
 				return core.LeaseTarget{}, err
 			}
+		}
+		if !container.State.Running {
+			return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: fixed local-container lease %s is bound to a non-running container", leaseID)
 		}
 		lease, err := b.waitForContainerEndpoint(ctx, cfg, container.ID, leaseID, intent.Slug)
 		if err != nil {
