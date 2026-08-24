@@ -27,27 +27,27 @@ func isReleasedFixedLocalContainerClaim(claim core.LeaseClaim) bool {
 }
 
 type fixedLocalContainerCreateIntent struct {
-	Runtime       string          `json:"runtime"`
-	RuntimeScope  checkpointScope `json:"runtimeScope"`
-	Image         string          `json:"image"`
-	ForkImageID   string          `json:"forkImageID,omitempty"`
-	User          string          `json:"user"`
-	WorkRoot      string          `json:"workRoot"`
-	CPUs          int             `json:"cpus"`
-	Memory        string          `json:"memory"`
-	Network       string          `json:"network"`
-	DockerSocket  bool            `json:"dockerSocket"`
-	HostVolumes   []string        `json:"hostVolumes,omitempty"`
-	CacheVolumes  []string        `json:"cacheVolumes,omitempty"`
-	Desktop       bool            `json:"desktop"`
-	DesktopEnv    string          `json:"desktopEnv"`
-	Browser       bool            `json:"browser"`
-	Architecture  string          `json:"architecture,omitempty"`
-	RequestedSlug string          `json:"requestedSlug,omitempty"`
-	Keep          bool            `json:"keep"`
-	TTLSeconds    int64           `json:"ttlSeconds"`
-	IdleSeconds   int64           `json:"idleSeconds"`
-	SSHPublicKey  string          `json:"sshPublicKey"`
+	Runtime         string          `json:"runtime"`
+	RuntimeScope    checkpointScope `json:"runtimeScope"`
+	Image           string          `json:"image"`
+	ForkImageID     string          `json:"forkImageID,omitempty"`
+	User            string          `json:"user"`
+	WorkRoot        string          `json:"workRoot"`
+	CPUs            int             `json:"cpus"`
+	Memory          string          `json:"memory"`
+	Network         string          `json:"network"`
+	DockerSocket    bool            `json:"dockerSocket"`
+	HostVolumes     []string        `json:"hostVolumes,omitempty"`
+	CacheVolumes    []string        `json:"cacheVolumes,omitempty"`
+	Desktop         bool            `json:"desktop"`
+	DesktopEnv      string          `json:"desktopEnv"`
+	Browser         bool            `json:"browser"`
+	Architecture    string          `json:"architecture,omitempty"`
+	RequestedSlug   string          `json:"requestedSlug,omitempty"`
+	Keep            bool            `json:"keep"`
+	TTLNanoseconds  int64           `json:"ttlNanoseconds"`
+	IdleNanoseconds int64           `json:"idleNanoseconds"`
+	SSHPublicKey    string          `json:"sshPublicKey"`
 }
 
 func fixedLocalContainerFingerprint(cfg core.Config, req core.AcquireRequest, publicKey string) (string, error) {
@@ -60,26 +60,26 @@ func fixedLocalContainerFingerprint(cfg core.Config, req core.AcquireRequest, pu
 		volumes[i] = strings.TrimSpace(volume)
 	}
 	intent := fixedLocalContainerCreateIntent{
-		Runtime:       strings.TrimSpace(cfg.LocalContainer.Runtime),
-		RuntimeScope:  checkpointScopeFromMetadata(cfg.LocalContainer.CheckpointMetadata, cfg.LocalContainer.Runtime),
-		Image:         strings.TrimSpace(cfg.LocalContainer.Image),
-		ForkImageID:   strings.TrimSpace(cfg.LocalContainer.CheckpointMetadata[checkpointMetadataForkID]),
-		User:          strings.TrimSpace(cfg.LocalContainer.User),
-		WorkRoot:      strings.TrimSpace(cfg.LocalContainer.WorkRoot),
-		CPUs:          cfg.LocalContainer.CPUs,
-		Memory:        strings.TrimSpace(cfg.LocalContainer.Memory),
-		Network:       strings.TrimSpace(cfg.LocalContainer.Network),
-		DockerSocket:  cfg.LocalContainer.DockerSocket,
-		HostVolumes:   volumes,
-		CacheVolumes:  cacheVolumes,
-		Desktop:       cfg.Desktop,
-		DesktopEnv:    core.NormalizedDesktopEnv(cfg.DesktopEnv),
-		Browser:       cfg.Browser,
-		RequestedSlug: core.NormalizeLeaseSlug(req.RequestedSlug),
-		Keep:          req.Keep,
-		TTLSeconds:    int64(cfg.TTL.Seconds()),
-		IdleSeconds:   int64(cfg.IdleTimeout.Seconds()),
-		SSHPublicKey:  strings.TrimSpace(publicKey),
+		Runtime:         strings.TrimSpace(cfg.LocalContainer.Runtime),
+		RuntimeScope:    checkpointScopeFromMetadata(cfg.LocalContainer.CheckpointMetadata, cfg.LocalContainer.Runtime),
+		Image:           strings.TrimSpace(cfg.LocalContainer.Image),
+		ForkImageID:     strings.TrimSpace(cfg.LocalContainer.CheckpointMetadata[checkpointMetadataForkID]),
+		User:            strings.TrimSpace(cfg.LocalContainer.User),
+		WorkRoot:        strings.TrimSpace(cfg.LocalContainer.WorkRoot),
+		CPUs:            cfg.LocalContainer.CPUs,
+		Memory:          strings.TrimSpace(cfg.LocalContainer.Memory),
+		Network:         strings.TrimSpace(cfg.LocalContainer.Network),
+		DockerSocket:    cfg.LocalContainer.DockerSocket,
+		HostVolumes:     volumes,
+		CacheVolumes:    cacheVolumes,
+		Desktop:         cfg.Desktop,
+		DesktopEnv:      core.NormalizedDesktopEnv(cfg.DesktopEnv),
+		Browser:         cfg.Browser,
+		RequestedSlug:   core.NormalizeLeaseSlug(req.RequestedSlug),
+		Keep:            req.Keep,
+		TTLNanoseconds:  cfg.TTL.Nanoseconds(),
+		IdleNanoseconds: cfg.IdleTimeout.Nanoseconds(),
+		SSHPublicKey:    strings.TrimSpace(publicKey),
 	}
 	if core.IsArchitectureExplicit(cfg) {
 		intent.Architecture = cfg.Architecture

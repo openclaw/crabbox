@@ -110,6 +110,35 @@ func TestBackendAdvertisesAcquireCapabilities(t *testing.T) {
 	}
 }
 
+func TestFixedLocalContainerFingerprintPreservesSubsecondLifecycleDurations(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*core.Config)
+	}{
+		{name: "ttl", mutate: func(cfg *core.Config) { cfg.TTL += time.Nanosecond }},
+		{name: "idle timeout", mutate: func(cfg *core.Config) { cfg.IdleTimeout += time.Nanosecond }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := testBackend(&recordingRunner{}).cfg
+			cfg.TTL = 90*time.Second + 100*time.Millisecond
+			cfg.IdleTimeout = 30*time.Second + 100*time.Millisecond
+			req := core.AcquireRequest{Keep: true, RequestedSlug: "precise-duration"}
+			original, err := fixedLocalContainerFingerprint(cfg, req, "ssh-ed25519 precise-duration")
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(&cfg)
+			changed, err := fixedLocalContainerFingerprint(cfg, req, "ssh-ed25519 precise-duration")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if changed == original {
+				t.Fatalf("%s nanosecond drift did not change fixed fingerprint %q", test.name, original)
+			}
+		})
+	}
+}
+
 func TestFixedAcquireCreatesRequestedIDAndReplays(t *testing.T) {
 	b, runner, _, createdLeaseID, _, _ := pendingAcquireBackend(t)
 	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
@@ -221,6 +250,44 @@ func TestFixedAcquireRejectsChangedImage(t *testing.T) {
 	}
 	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestFixedAcquireRejectsSubsecondLifecycleDrift(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*core.Config)
+	}{
+		{name: "ttl", mutate: func(cfg *core.Config) { cfg.TTL += time.Nanosecond }},
+		{name: "idle timeout", mutate: func(cfg *core.Config) { cfg.IdleTimeout += time.Nanosecond }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			b, runner, _, _, _, _ := pendingAcquireBackend(t)
+			b.cfg.TTL = 90*time.Second + 100*time.Millisecond
+			b.cfg.IdleTimeout = 30*time.Second + 100*time.Millisecond
+			b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+			req := core.AcquireRequest{
+				Repo: core.Repo{Root: t.TempDir()}, Keep: true,
+				RequestedLeaseID: "cbx_abcdef123462", RequestedSlug: "precise-duration",
+			}
+			lease, err := b.Acquire(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			drifted := testBackend(runner)
+			drifted.cfg.TTL = b.cfg.TTL
+			drifted.cfg.IdleTimeout = b.cfg.IdleTimeout
+			test.mutate(&drifted.cfg)
+			drifted.waitForSSHReady = b.waitForSSHReady
+			_, err = drifted.Acquire(context.Background(), req)
+			requireFixedLocalContainerConflict(t, err)
+			if creates := localContainerCreateCalls(runner); creates != 1 {
+				t.Fatalf("container creates after %s drift=%d, want 1", test.name, creates)
+			}
+			if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
@@ -486,6 +553,56 @@ func TestFixedAcquireRefusesUnresolvedCreateAttempt(t *testing.T) {
 	}
 	if creates := localContainerCreateCalls(runner); creates != 1 {
 		t.Fatalf("container creates after ambiguous failure=%d, want 1", creates)
+	}
+}
+
+func TestFixedAcquireUnresolvedAttemptReservesRequestedSlug(t *testing.T) {
+	b, runner, _, _, _, _ := pendingAcquireBackend(t)
+	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	originalRun := runner.run
+	firstAttempt := true
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		if firstArg(req.Args) == "run" && firstAttempt {
+			firstAttempt = false
+			return core.LocalCommandResult{Stderr: "daemon transport lost", ExitCode: 1}, errors.New("daemon transport lost")
+		}
+		return originalRun(req)
+	}
+	first := core.AcquireRequest{
+		Repo: core.Repo{Root: t.TempDir()}, Keep: true,
+		RequestedLeaseID: "cbx_abcdef123463", RequestedSlug: "reserved-local-slug",
+	}
+	if _, err := b.Acquire(context.Background(), first); err == nil {
+		t.Fatal("ambiguous fixed create unexpectedly succeeded")
+	}
+	reserved, err := core.ReadLeaseClaim(first.RequestedLeaseID)
+	if err != nil || reserved.FixedCreateIntent == nil || reserved.FixedCreateIntent.State != "prepared" ||
+		reserved.FixedCreateIntent.Attempt["container_name"] == "" || reserved.CloudID != "" {
+		t.Fatalf("unresolved fixed claim=%#v err=%v", reserved, err)
+	}
+	second := first
+	second.RequestedLeaseID = "cbx_abcdef123464"
+	lease, err := b.Acquire(context.Background(), second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slug := lease.Server.Labels["slug"]
+	if slug == first.RequestedSlug || !strings.HasPrefix(slug, first.RequestedSlug+"-") {
+		t.Fatalf("second lease slug=%q, want collision suffix for reserved %q", slug, first.RequestedSlug)
+	}
+	if claim, found, lookupErr := localContainerClaimByIDOrSlug(first.RequestedSlug); lookupErr != nil ||
+		!found || claim.LeaseID != first.RequestedLeaseID {
+		t.Fatalf("reserved slug claim=%#v found=%t err=%v", claim, found, lookupErr)
+	}
+	if resolved, resolveErr := b.Resolve(context.Background(), core.ResolveRequest{ID: slug, StatusOnly: true}); resolveErr != nil ||
+		resolved.LeaseID != second.RequestedLeaseID {
+		t.Fatalf("suffixed slug resolved=%#v err=%v", resolved, resolveErr)
+	}
+	if creates := localContainerCreateCalls(runner); creates != 2 {
+		t.Fatalf("container create attempts=%d, want 2", creates)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
 	}
 }
 
