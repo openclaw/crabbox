@@ -44,6 +44,7 @@ type fixedLocalContainerCreateIntent struct {
 	Browser         bool            `json:"browser"`
 	Architecture    string          `json:"architecture,omitempty"`
 	RequestedSlug   string          `json:"requestedSlug,omitempty"`
+	Pond            string          `json:"pond,omitempty"`
 	Keep            bool            `json:"keep"`
 	TTLNanoseconds  int64           `json:"ttlNanoseconds"`
 	IdleNanoseconds int64           `json:"idleNanoseconds"`
@@ -76,6 +77,7 @@ func fixedLocalContainerFingerprint(cfg core.Config, req core.AcquireRequest, pu
 		DesktopEnv:      core.NormalizedDesktopEnv(cfg.DesktopEnv),
 		Browser:         cfg.Browser,
 		RequestedSlug:   core.NormalizeLeaseSlug(req.RequestedSlug),
+		Pond:            core.NormalizePondName(cfg.Pond),
 		Keep:            req.Keep,
 		TTLNanoseconds:  cfg.TTL.Nanoseconds(),
 		IdleNanoseconds: cfg.IdleTimeout.Nanoseconds(),
@@ -252,6 +254,7 @@ func validateFixedLocalContainer(container inspectContainer, cfg core.Config, le
 	labels := container.Config.Labels
 	if labels["crabbox"] != "true" || labels["provider"] != providerName ||
 		labels["lease"] != leaseID || core.NormalizeLeaseSlug(labels["slug"]) != slug ||
+		labels["pond"] != core.NormalizePondName(cfg.Pond) ||
 		labels["fixed_intent_sha256"] != fingerprint ||
 		labels["runtime"] != cfg.LocalContainer.Runtime ||
 		labels["image"] != localContainerDisplayImage(cfg) ||

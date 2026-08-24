@@ -139,6 +139,36 @@ func TestFixedLocalContainerFingerprintPreservesSubsecondLifecycleDurations(t *t
 	}
 }
 
+func TestFixedLocalContainerFingerprintNormalizesPond(t *testing.T) {
+	cfg := testBackend(&recordingRunner{}).cfg
+	cfg.Pond = "  Alpha__Pond  "
+	req := core.AcquireRequest{Keep: true, RequestedSlug: "pond-fingerprint"}
+	original, err := fixedLocalContainerFingerprint(cfg, req, "ssh-ed25519 pond-fingerprint")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name string
+		pond string
+		same bool
+	}{
+		{name: "equivalent spelling", pond: "alpha-pond", same: true},
+		{name: "different pond", pond: "beta", same: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := cfg
+			changed.Pond = test.pond
+			fingerprint, fingerprintErr := fixedLocalContainerFingerprint(changed, req, "ssh-ed25519 pond-fingerprint")
+			if fingerprintErr != nil {
+				t.Fatal(fingerprintErr)
+			}
+			if (fingerprint == original) != test.same {
+				t.Fatalf("pond %q fingerprint=%q original=%q same=%t", test.pond, fingerprint, original, test.same)
+			}
+		})
+	}
+}
+
 func TestFixedAcquireCreatesRequestedIDAndReplays(t *testing.T) {
 	b, runner, _, createdLeaseID, _, _ := pendingAcquireBackend(t)
 	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
@@ -247,6 +277,84 @@ func TestFixedAcquireRejectsChangedImage(t *testing.T) {
 	requireFixedLocalContainerConflict(t, err)
 	if creates := localContainerCreateCalls(runner); creates != 1 {
 		t.Fatalf("container creates after image drift=%d, want 1", creates)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFixedAcquirePondReplayAndDrift(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		original string
+		replayed string
+		conflict bool
+	}{
+		{name: "equivalent spelling", original: "  Alpha__Pond  ", replayed: "alpha-pond"},
+		{name: "different pond", original: "alpha", replayed: "beta", conflict: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			b, runner, _, _, _, _ := pendingAcquireBackend(t)
+			b.cfg.Pond = test.original
+			b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+			req := core.AcquireRequest{
+				Repo: core.Repo{Root: t.TempDir()}, Keep: true,
+				RequestedLeaseID: "cbx_abcdef123466", RequestedSlug: "fixed-pond",
+			}
+			lease, err := b.Acquire(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pond := lease.Server.Labels["pond"]; pond != core.NormalizePondName(test.original) {
+				t.Fatalf("acquired pond=%q, want %q", pond, core.NormalizePondName(test.original))
+			}
+			restarted := testBackend(runner)
+			restarted.cfg.Pond = test.replayed
+			restarted.waitForSSHReady = b.waitForSSHReady
+			replayed, err := restarted.Acquire(context.Background(), req)
+			releaseLease := lease
+			if test.conflict {
+				requireFixedLocalContainerConflict(t, err)
+			} else if err != nil || replayed.LeaseID != lease.LeaseID || replayed.Server.CloudID != lease.Server.CloudID {
+				t.Fatalf("equivalent pond replay=%#v err=%v", replayed, err)
+			} else {
+				releaseLease = replayed
+			}
+			if creates := localContainerCreateCalls(runner); creates != 1 {
+				t.Fatalf("container creates after pond replay=%d, want 1", creates)
+			}
+			if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: releaseLease}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestValidateFixedLocalContainerRejectsMismatchedPond(t *testing.T) {
+	b, _, _, _, _, _ := pendingAcquireBackend(t)
+	b.cfg.Pond = " Alpha "
+	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	req := core.AcquireRequest{
+		Repo: core.Repo{Root: t.TempDir()}, Keep: true,
+		RequestedLeaseID: "cbx_abcdef123467", RequestedSlug: "fixed-pond-validation",
+	}
+	lease, err := b.Acquire(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	container, err := b.inspectContainer(context.Background(), lease.Server.CloudID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pond := range []string{"beta", ""} {
+		container.Config.Labels["pond"] = pond
+		err = validateFixedLocalContainer(container, b.configForRun(), req.RequestedLeaseID,
+			req.RequestedSlug, claim.FixedCreateIntent.Fingerprint)
+		requireFixedLocalContainerConflict(t, err)
 	}
 	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
 		t.Fatal(err)
@@ -2619,6 +2727,7 @@ func pendingAcquireBackend(t *testing.T) (*backend, *recordingRunner, *strings.B
 	var fixedFingerprint string
 	var containerImage string
 	var containerRuntimeImage string
+	var containerPond string
 	var containerDaemonID string
 	var containerContext string
 	containerPresent := false
@@ -2648,6 +2757,8 @@ func pendingAcquireBackend(t *testing.T) (*backend, *recordingRunner, *strings.B
 						fixedFingerprint = value
 					case "image":
 						containerImage = value
+					case "pond":
+						containerPond = value
 					case checkpointMetadataDaemonID:
 						containerDaemonID = value
 					case checkpointMetadataContext:
@@ -2673,6 +2784,9 @@ func pendingAcquireBackend(t *testing.T) (*backend, *recordingRunner, *strings.B
 			}
 			if containerContext != "" {
 				labels[checkpointMetadataContext] = containerContext
+			}
+			if containerPond != "" {
+				labels["pond"] = containerPond
 			}
 			if fixedFingerprint != "" {
 				labels["fixed_intent_sha256"] = fixedFingerprint

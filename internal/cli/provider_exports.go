@@ -580,6 +580,10 @@ func NormalizeLeaseSlug(value string) string {
 	return normalizeLeaseSlug(value)
 }
 
+func NormalizePondName(value string) string {
+	return normalizePondName(value)
+}
+
 func RenderTailscaleHostname(template, leaseID, slug, provider string) string {
 	return renderTailscaleHostname(template, leaseID, slug, provider)
 }
