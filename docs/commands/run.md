@@ -27,6 +27,7 @@ crabbox run --provider ssh --target macos --static-host mac-studio.local -- xcod
 crabbox run --provider ssh --target windows --windows-mode normal --static-host win-dev.local -- dotnet test
 crabbox run --profile live-qa --preset qa-live --scenario login-regression --emit-proof /tmp/proof.md --stop-after success
 crabbox run --pool example/app/main/linux --pool-compatibility-key linux-16-vcpu -- pnpm test
+crabbox run --pool example/app/main/linux --pool-identity-file pool-identity.json -- pnpm test
 ```
 
 The trailing command after `--` is sent to the box verbatim as argv. Use
@@ -94,6 +95,14 @@ Reusable pooled runs also reject `--fresh-pr`; use a forced drain or release
 for one-shot PR work.
 Pooled runs also reject `--keep` and
 `--keep-on-failure`; use `--pool-return ready|drain|release` for lifecycle.
+
+Use `--pool-identity-file` to explicitly opt into a provider-scoped,
+image-pinned typed pool. Create the file with `crabbox pool identity <key> --id
+<lease-id> --cache-compatibility <value>`. The repository seed, immutable AWS
+AMI and region, canonical architecture, and operator-declared cache value must
+match exactly; unexpected identity or lease evidence drains the entry. Older
+coordinators fail explicitly instead of borrowing from a legacy pool. Existing
+`--pool` calls without this flag retain their provider-neutral legacy behavior.
 
 On coordinator-backed one-shot runs, if SSH becomes unavailable after a
 successful sync but before the command starts, Crabbox stops that stale lease,

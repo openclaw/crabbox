@@ -9,6 +9,7 @@ Blacksmith Testbox, hydration stays provider-owned.
 crabbox prewarm
 crabbox prewarm --provider azure --probe-command 'node -v && pnpm -v'
 crabbox prewarm --pool example/app/main/linux --pool-compatibility-key linux-16-vcpu
+crabbox prewarm --provider aws --pool example/app/main/linux --pool-cache-compatibility node-22-pnpm-10
 crabbox prewarm --dry-run
 ```
 
@@ -63,9 +64,19 @@ same way they do on `warmup`.
 --keep-alive-minutes <n>     GitHub-runner keep-alive window
 --probe-command <command>    shell probe to run after hydration
 --pool <key>                 register the hydrated lease in a broker ready pool
+--pool-identity-file <file>  opt into an exact generated, image-pinned pool identity
+--pool-cache-compatibility <value>  derive an image-pinned identity after leasing
 --dry-run                    print planned commands
 --timing-json                print machine-readable timing
 ```
+
+Typed registration is optional and currently supports only AWS Linux leases
+with a coordinator-recorded immutable AMI, region, and canonical architecture.
+Generate a reusable identity with `crabbox pool identity`, or pass
+`--pool-cache-compatibility` to derive it automatically from the new lease and
+current repository. The cache value is operator-declared compatibility
+metadata, not an attestation. Crabbox checks typed coordinator support before
+provisioning and releases a newly created lease if typed registration fails.
 
 ## See Also
 

@@ -279,6 +279,8 @@ import type {
   ReadyPoolDesiredCapacity,
   ReadyPoolEntry,
   ReadyPoolFillClaim,
+  ReadyPoolIdentityV1,
+  ReadyPoolImageIdentity,
   ReadyPoolReconcileRequest,
   ReadyPoolRegisterRequest,
   ReadyPoolReturnRequest,
@@ -379,6 +381,12 @@ const readyPoolPrefix = "ready-pool:";
 const readyPoolDesiredPrefix = "ready-pool-desired:";
 const readyPoolFillClaimPrefix = "ready-pool-fill-claim:";
 const readyPoolCountersPrefix = "ready-pool-counters:";
+const typedReadyPoolPrefix = "typed-ready-pool-v1:";
+const typedReadyPoolDesiredPrefix = "typed-ready-pool-v1-desired:";
+const typedReadyPoolFillClaimPrefix = "typed-ready-pool-v1-fill-claim:";
+const typedReadyPoolCountersPrefix = "typed-ready-pool-v1-counters:";
+const readyPoolIdentitySchemaV1 = "crabbox-ready-pool-identity/v1";
+const readyPoolSeedFieldMaxBytes = 1024;
 const readyPoolBorrowTimeoutMs = 2 * 60_000;
 const readyPoolFillClaimTimeoutMs = 15 * 60_000;
 const readyPoolTerminalRetentionMs = 24 * 60 * 60_000;
@@ -3915,6 +3923,7 @@ export class FleetCoordinator {
         ...(workspaceID ? { workspaceID } : {}),
         provider: config.provider,
         target: config.target,
+        architecture: config.architecture,
         os: config.os,
         desktop: config.desktop,
         desktopEnv: config.desktopEnv,
@@ -11902,23 +11911,52 @@ export class FleetCoordinator {
     if (method === "GET" && !action) {
       return json({ pool: (await this.readyPoolStatus(key, request)).map(publicReadyPoolEntry) });
     }
+    if (method === "GET" && action === "identity") {
+      return json({ schema: readyPoolIdentitySchemaV1 });
+    }
+    if (method === "POST" && action === "identity") {
+      return await this.generateReadyPoolIdentity(request);
+    }
+    if (method === "GET" && action === "entries-identity") {
+      return json({
+        pool: (await this.readyPoolStatus(key, request, true)).map(publicReadyPoolEntry),
+      });
+    }
     if (method === "POST" && action === "register") {
       return await this.registerReadyPoolLease(request, key);
+    }
+    if (method === "POST" && action === "register-identity") {
+      return await this.registerReadyPoolLease(request, key, true);
     }
     if (method === "POST" && action === "borrow") {
       return await this.borrowReadyPoolLease(request, key);
     }
+    if (method === "POST" && action === "borrow-identity") {
+      return await this.borrowReadyPoolLease(request, key, true);
+    }
     if (method === "POST" && action === "heartbeat") {
       return await this.heartbeatReadyPoolBorrow(request, key);
+    }
+    if (method === "POST" && action === "heartbeat-identity") {
+      return await this.heartbeatReadyPoolBorrow(request, key, true);
     }
     if (method === "POST" && action === "return") {
       return await this.returnReadyPoolLease(request, key);
     }
+    if (method === "POST" && action === "return-identity") {
+      return await this.returnReadyPoolLease(request, key, true);
+    }
     if (method === "POST" && action === "reconcile") {
       return await this.reconcileReadyPoolCapacity(request, key);
     }
+    if (method === "POST" && action === "reconcile-identity") {
+      return await this.reconcileReadyPoolCapacity(request, key, true);
+    }
     if (method === "POST" && action === "release-fill-claim") {
       return await this.releaseReadyPoolFillClaim(request, key);
+    }
+    if (method === "POST" && action === "release-fill-claim-identity") {
+      return await this.releaseReadyPoolFillClaim(request, key, true);
     }
     if (method === "GET" && action === "metrics") {
       return await this.readyPoolMetrics(request, key);
@@ -11926,9 +11964,13 @@ export class FleetCoordinator {
     return notFound();
   }
 
-  private async readyPoolStatus(key: string, request: Request): Promise<ReadyPoolEntry[]> {
+  private async readyPoolStatus(
+    key: string,
+    request: Request,
+    typed = false,
+  ): Promise<ReadyPoolEntry[]> {
     return await this.withReadyPoolBorrowLock(() =>
-      this.state.runExclusive(() => this.readyPoolStatusSnapshot(request, key)),
+      this.state.runExclusive(() => this.readyPoolStatusSnapshot(request, key, typed)),
     );
   }
 
@@ -11938,11 +11980,15 @@ export class FleetCoordinator {
     );
   }
 
-  private async readyPoolStatusSnapshot(request: Request, key?: string): Promise<ReadyPoolEntry[]> {
-    const entries = await this.readyPoolEntries();
+  private async readyPoolStatusSnapshot(
+    request: Request,
+    key?: string,
+    typed = false,
+  ): Promise<ReadyPoolEntry[]> {
+    const entries = await this.readyPoolEntries(typed);
     const leases = new Map((await this.leaseRecords()).map((lease) => [lease.id, lease]));
-    await this.maintainReadyPoolEntries(entries, leases, Date.now());
-    return (await this.readyPoolEntries())
+    await this.maintainReadyPoolEntries(entries, leases, Date.now(), typed);
+    return (await this.readyPoolEntries(typed))
       .filter(
         (entry) =>
           (!key || entry.key === key) &&
@@ -11952,8 +11998,74 @@ export class FleetCoordinator {
       .toSorted((a, b) => a.key.localeCompare(b.key) || a.leaseID.localeCompare(b.leaseID));
   }
 
-  private async registerReadyPoolLease(request: Request, key: string): Promise<Response> {
+  private async generateReadyPoolIdentity(request: Request): Promise<Response> {
+    const input = await readJson<ReadyPoolRegisterRequest & { cacheCompatibility?: string }>(
+      request,
+    );
+    const leaseID = input.leaseID ?? "";
+    if (!validLeaseID(leaseID)) return json({ error: "invalid_lease_id" }, { status: 400 });
+    const lease = await this.resolveLease(leaseID, request, isAdminRequest(request));
+    if (!lease) return notFound();
+    if (!this.leaseManageableByRequest(lease, request, isAdminRequest(request))) {
+      return json({ error: "forbidden", message: "lease manage access required" }, { status: 403 });
+    }
+    if (lease.state !== "active" || Date.parse(lease.expiresAt) <= Date.now()) {
+      return json({ error: "lease_not_active" }, { status: 409 });
+    }
+    const image = this.readyPoolLeaseImageIdentity(lease);
+    if (!image || lease.target !== "linux" || !canonicalReadyPoolArchitecture(lease.architecture)) {
+      return json(
+        {
+          error: "unsupported_ready_pool_lease_identity",
+          message:
+            "lease lacks provider-owned immutable image, scope, or canonical architecture evidence",
+        },
+        { status: 409 },
+      );
+    }
+    const cacheCompatibility = input.cacheCompatibility;
+    if (!validReadyPoolIdentityValue(cacheCompatibility)) {
+      return json({ error: "invalid_cache_compatibility" }, { status: 400 });
+    }
+    let seedDigest: string;
+    try {
+      seedDigest = await readyPoolSeedDigestV1(input);
+    } catch (error) {
+      return json(
+        { error: "invalid_ready_pool_seed_metadata", message: errorMessage(error) },
+        { status: 400 },
+      );
+    }
+    const identity: ReadyPoolIdentityV1 = {
+      schema: readyPoolIdentitySchemaV1,
+      image,
+      architecture: lease.architecture!,
+      seedDigest,
+      cacheCompatibility,
+    };
+    return json({ identity });
+  }
+
+  private readyPoolLeaseImageIdentity(lease: LeaseRecord): ReadyPoolImageIdentity | undefined {
+    const providerName = managedLeaseProvider(lease);
+    if (!providerName) return undefined;
+    return this.provider(
+      providerName,
+      lease.region,
+      lease.providerProject,
+    ).readyPoolImageIdentity?.(lease);
+  }
+
+  private async registerReadyPoolLease(
+    request: Request,
+    key: string,
+    typed = false,
+  ): Promise<Response> {
     const input = await readJson<ReadyPoolRegisterRequest>(request);
+    const identityError = readyPoolIdentityRequestError(input.identity, typed);
+    if (identityError) return identityError;
+    const seedError = await readyPoolSeedIdentityRequestError(input.identity, input);
+    if (seedError) return seedError;
     const leaseID = input.leaseID ?? "";
     const compatibilityKey = normalizeReadyPoolCompatibilityKey(input.compatibilityKey);
     if (input.compatibilityKey !== undefined && !compatibilityKey) {
@@ -11990,6 +12102,15 @@ export class FleetCoordinator {
     if (resolvedLease.state !== "active" || Date.parse(resolvedLease.expiresAt) <= Date.now()) {
       return json({ error: "lease_not_active" }, { status: 409 });
     }
+    if (typed && !this.readyPoolIdentityMatchesLease(input.identity!, resolvedLease)) {
+      return json(
+        {
+          error: "ready_pool_lease_identity_mismatch",
+          message: "lease lacks matching immutable provider image, scope, or architecture evidence",
+        },
+        { status: 409 },
+      );
+    }
     return await this.withReadyPoolBorrowLock(() =>
       this.state.runExclusive(async () => {
         const lease = (await this.getLease(leaseID)) ?? resolvedLease;
@@ -12002,9 +12123,14 @@ export class FleetCoordinator {
         if (lease.state !== "active" || Date.parse(lease.expiresAt) <= Date.now()) {
           return json({ error: "lease_not_active" }, { status: 409 });
         }
+        if (typed && !this.readyPoolIdentityMatchesLease(input.identity!, lease)) {
+          return json({ error: "ready_pool_lease_identity_mismatch" }, { status: 409 });
+        }
         const fillClaimToken = nonSecretString(input.fillClaimToken);
         const fillClaim = fillClaimToken
-          ? await this.state.storage.get<ReadyPoolFillClaim>(readyPoolFillClaimKey(fillClaimToken))
+          ? await this.state.storage.get<ReadyPoolFillClaim>(
+              readyPoolFillClaimKey(fillClaimToken, typed),
+            )
           : undefined;
         if (fillClaimToken && !fillClaim) {
           return json({ error: "fill_claim_not_found" }, { status: 409 });
@@ -12018,7 +12144,7 @@ export class FleetCoordinator {
           return json({ error: "fill_claim_mismatch" }, { status: 409 });
         }
         if (fillClaim && Date.parse(fillClaim.expiresAt) <= Date.now()) {
-          await this.state.storage.delete(readyPoolFillClaimKey(fillClaim.token));
+          await this.state.storage.delete(readyPoolFillClaimKey(fillClaim.token, typed));
           return json({ error: "fill_claim_expired" }, { status: 409 });
         }
         if (
@@ -12028,9 +12154,10 @@ export class FleetCoordinator {
         ) {
           return json({ error: "fill_claim_compatibility_mismatch" }, { status: 409 });
         }
-        const existingPoolEntries = (await this.readyPoolEntries()).filter(
-          (entry) => entry.leaseID === leaseID,
-        );
+        const existingPoolEntries = [
+          ...(await this.readyPoolEntries()),
+          ...(typed ? await this.readyPoolEntries(true) : []),
+        ].filter((entry) => entry.leaseID === leaseID);
         if (existingPoolEntries.some((entry) => entry.state === "busy")) {
           return json(
             {
@@ -12056,10 +12183,17 @@ export class FleetCoordinator {
           updatedAt: now,
           expiresAt: lease.expiresAt,
         };
-        addReadyPoolEntryString(entry, "repo", input.repo);
-        addReadyPoolEntryString(entry, "ref", input.ref);
-        addReadyPoolEntryString(entry, "commit", input.commit);
-        addReadyPoolEntryString(entry, "fingerprint", input.fingerprint);
+        if (typed) {
+          for (const field of ["repo", "ref", "commit", "fingerprint"] as const) {
+            const value = input[field];
+            if (typeof value === "string" && value !== "") entry[field] = value;
+          }
+        } else {
+          addReadyPoolEntryString(entry, "repo", input.repo);
+          addReadyPoolEntryString(entry, "ref", input.ref);
+          addReadyPoolEntryString(entry, "commit", input.commit);
+          addReadyPoolEntryString(entry, "fingerprint", input.fingerprint);
+        }
         addReadyPoolEntryString(
           entry,
           "compatibilityKey",
@@ -12070,6 +12204,7 @@ export class FleetCoordinator {
         addReadyPoolEntryString(entry, "sshUser", readyPoolLeaseSSHUser(lease, input.sshUser));
         addReadyPoolEntryString(entry, "sshPort", readyPoolLeaseSSHPort(lease, input.sshPort));
         addReadyPoolEntryString(entry, "workRoot", readyPoolLeaseWorkRoot(lease, input.workRoot));
+        if (typed) entry.identity = input.identity!;
         if (lease.windowsMode) {
           entry.windowsMode = lease.windowsMode;
         }
@@ -12084,13 +12219,13 @@ export class FleetCoordinator {
         }
         await Promise.all(
           existingPoolEntries
-            .filter((existing) => existing.key !== key)
-            .map((existing) => this.deleteReadyPoolEntry(existing)),
+            .filter((existing) => existing.key !== key || Boolean(existing.identity) !== typed)
+            .map((existing) => this.deleteReadyPoolEntry(existing, Boolean(existing.identity))),
         );
-        await this.putReadyPoolEntry(entry);
+        await this.putReadyPoolEntry(entry, typed);
         if (fillClaim) {
-          await this.state.storage.delete(readyPoolFillClaimKey(fillClaim.token));
-          await this.incrementReadyPoolCounters(request, key, { fillClaimsCompleted: 1 });
+          await this.state.storage.delete(readyPoolFillClaimKey(fillClaim.token, typed));
+          await this.incrementReadyPoolCounters(request, key, { fillClaimsCompleted: 1 }, typed);
         }
         await this.scheduleAlarm();
         return json({ entry: publicReadyPoolEntry(entry), lease: publicLeaseRecord(lease) });
@@ -12098,8 +12233,16 @@ export class FleetCoordinator {
     );
   }
 
-  private async borrowReadyPoolLease(request: Request, key: string): Promise<Response> {
+  private async borrowReadyPoolLease(
+    request: Request,
+    key: string,
+    typed = false,
+  ): Promise<Response> {
     const input = await readJson<ReadyPoolBorrowRequest>(request);
+    const identityError = readyPoolIdentityRequestError(input.identity, typed);
+    if (identityError) return identityError;
+    const seedError = await readyPoolSeedIdentityRequestError(input.identity, input);
+    if (seedError) return seedError;
     const compatibilityKey = normalizeReadyPoolCompatibilityKey(input.compatibilityKey);
     if (input.compatibilityKey !== undefined && !compatibilityKey) {
       return json({ error: "invalid_compatibility_key" }, { status: 400 });
@@ -12111,8 +12254,8 @@ export class FleetCoordinator {
     }
     return await this.withReadyPoolBorrowLock(async () => {
       return await this.state.runExclusive(async () => {
-        await this.incrementReadyPoolCounters(request, key, { borrowRequests: 1 });
-        const entries = (await this.readyPoolStatusSnapshot(request, key)).filter((entry) =>
+        await this.incrementReadyPoolCounters(request, key, { borrowRequests: 1 }, typed);
+        const entries = (await this.readyPoolStatusSnapshot(request, key, typed)).filter((entry) =>
           readyPoolEntryMatches(entry, input),
         );
         const leases = new Map((await this.leaseRecords()).map((lease) => [lease.id, lease]));
@@ -12127,6 +12270,11 @@ export class FleetCoordinator {
             lease.state === "active" &&
             Date.parse(lease.expiresAt) > nowMs
           ) {
+            if (typed && !this.readyPoolIdentityMatchesLease(entry.identity!, lease)) {
+              // oxlint-disable-next-line eslint/no-await-in-loop -- mismatch must be durably drained before another candidate can be borrowed.
+              await this.drainMismatchedReadyPoolEntry(entry, typed);
+              continue;
+            }
             if (!this.leaseManageableByRequest(lease, request, isAdminRequest(request))) {
               blockedByManageAccess = true;
               continue;
@@ -12141,7 +12289,7 @@ export class FleetCoordinator {
         );
         const first = ready[0];
         if (!first) {
-          await this.incrementReadyPoolCounters(request, key, { warmMisses: 1 });
+          await this.incrementReadyPoolCounters(request, key, { warmMisses: 1 }, typed);
           if (blockedByManageAccess) {
             return json(
               { error: "forbidden", message: "lease manage access required" },
@@ -12174,8 +12322,8 @@ export class FleetCoordinator {
           delete borrowed.borrowHeartbeatAt;
           delete borrowed.borrowExpiresAt;
         }
-        await this.putReadyPoolEntry(borrowed);
-        await this.incrementReadyPoolCounters(request, key, { warmHits: 1 });
+        await this.putReadyPoolEntry(borrowed, typed);
+        await this.incrementReadyPoolCounters(request, key, { warmHits: 1 }, typed);
         await this.scheduleAlarm();
         return json({
           entry: publicReadyPoolEntry(borrowed),
@@ -12185,7 +12333,11 @@ export class FleetCoordinator {
     });
   }
 
-  private async heartbeatReadyPoolBorrow(request: Request, key: string): Promise<Response> {
+  private async heartbeatReadyPoolBorrow(
+    request: Request,
+    key: string,
+    typed = false,
+  ): Promise<Response> {
     const input = await readJson<ReadyPoolBorrowHeartbeatRequest>(request);
     const leaseID = input.leaseID ?? "";
     const borrowToken = nonSecretString(input.borrowToken);
@@ -12197,10 +12349,20 @@ export class FleetCoordinator {
     }
     return await this.withReadyPoolBorrowLock(() =>
       this.state.runExclusive(async () => {
-        const current = await this.getReadyPoolEntry(key, leaseID);
+        const current = await this.getReadyPoolEntry(key, leaseID, typed);
         const lease = await this.getLease(leaseID);
         if (!current || !this.readyPoolEntryVisibleToRequest(current, request, lease)) {
           return notFound();
+        }
+        if (
+          typed &&
+          lease &&
+          (!validReadyPoolIdentityV1(current.identity) ||
+            !this.readyPoolIdentityMatchesLease(current.identity, lease))
+        ) {
+          await this.drainMismatchedReadyPoolEntry(current, true);
+          await this.scheduleAlarm();
+          return json({ error: "ready_pool_lease_identity_mismatch" }, { status: 409 });
         }
         if (current.state !== "busy") {
           return json(
@@ -12226,7 +12388,7 @@ export class FleetCoordinator {
         const nowMs = Date.now();
         const deadline = readyPoolBorrowDeadline(current);
         if (deadline !== undefined && deadline <= nowMs) {
-          await this.quarantineReadyPoolEntry(current, "borrow heartbeat expired", nowMs);
+          await this.quarantineReadyPoolEntry(current, "borrow heartbeat expired", nowMs, typed);
           await this.scheduleAlarm();
           return json(
             { error: "borrow_expired", message: "pool borrow heartbeat expired" },
@@ -12242,16 +12404,33 @@ export class FleetCoordinator {
           updatedAt: now,
           expiresAt: lease?.expiresAt ?? current.expiresAt,
         };
-        await this.putReadyPoolEntry(updated);
-        await this.incrementReadyPoolCounters(request, key, { borrowHeartbeats: 1 });
+        await this.putReadyPoolEntry(updated, typed);
+        await this.incrementReadyPoolCounters(request, key, { borrowHeartbeats: 1 }, typed);
         await this.scheduleAlarm();
         return json({ entry: publicReadyPoolEntry(redactReadyPoolEntry(updated)) });
       }),
     );
   }
 
-  private async reconcileReadyPoolCapacity(request: Request, key: string): Promise<Response> {
+  private async reconcileReadyPoolCapacity(
+    request: Request,
+    key: string,
+    typed = false,
+  ): Promise<Response> {
     const input = await readJson<ReadyPoolReconcileRequest>(request);
+    const identityError = readyPoolIdentityRequestError(input.identity, typed);
+    if (identityError) return identityError;
+    const seedError = await readyPoolSeedIdentityRequestError(input.identity, input);
+    if (seedError) return seedError;
+    if (typed && !this.readyPoolImageIdentitySupported(input.identity!.image)) {
+      return json(
+        {
+          error: "unsupported_ready_pool_image_identity",
+          message: "provider cannot confirm this immutable image identity",
+        },
+        { status: 409 },
+      );
+    }
     const minReady = nonNegativeReadyPoolCapacity(input.minReady, 1);
     if (minReady === undefined) {
       return json(
@@ -12286,7 +12465,7 @@ export class FleetCoordinator {
         await this.maintainReadyPools(nowMs);
         const owner = requestOwner(request);
         const org = requestOrg(request, this.env);
-        const policyKey = readyPoolDesiredKey(owner, org, key, compatibilityKey);
+        const policyKey = readyPoolDesiredKey(owner, org, key, compatibilityKey, input.identity);
         const previous = await this.state.storage.get<ReadyPoolDesiredCapacity>(policyKey);
         const now = new Date(nowMs).toISOString();
         const desired: ReadyPoolDesiredCapacity = {
@@ -12303,7 +12482,7 @@ export class FleetCoordinator {
         await this.state.storage.put(policyKey, desired);
 
         const leases = new Map((await this.leaseRecords()).map((lease) => [lease.id, lease]));
-        const entries = (await this.readyPoolEntries()).filter((entry) => {
+        const entries = (await this.readyPoolEntries(typed)).filter((entry) => {
           const lease = leases.get(entry.leaseID);
           return (
             entry.key === key &&
@@ -12313,7 +12492,7 @@ export class FleetCoordinator {
             readyPoolEntryMatches(entry, criteria)
           );
         });
-        const claims = (await this.readyPoolFillClaims()).filter(
+        const claims = (await this.readyPoolFillClaims(typed)).filter(
           (claim) =>
             claim.key === key &&
             claim.owner === owner &&
@@ -12335,12 +12514,12 @@ export class FleetCoordinator {
             expiresAt: new Date(nowMs + readyPoolFillClaimTimeoutMs).toISOString(),
             ...(compatibilityKey ? { compatibilityKey } : {}),
           };
-          await this.state.storage.put(readyPoolFillClaimKey(claim.token), claim);
+          await this.state.storage.put(readyPoolFillClaimKey(claim.token, typed), claim);
           counts.inFlight++;
-          await this.incrementReadyPoolCounters(request, key, { fillClaimsCreated: 1 });
+          await this.incrementReadyPoolCounters(request, key, { fillClaimsCreated: 1 }, typed);
         }
         await this.scheduleAlarm();
-        const counters = await this.readyPoolCounters(request, key);
+        const counters = await this.readyPoolCounters(request, key, typed);
         return json({
           desired: {
             key: desired.key,
@@ -12372,7 +12551,11 @@ export class FleetCoordinator {
     );
   }
 
-  private async releaseReadyPoolFillClaim(request: Request, key: string): Promise<Response> {
+  private async releaseReadyPoolFillClaim(
+    request: Request,
+    key: string,
+    typed = false,
+  ): Promise<Response> {
     const input = await readJson<{ claimToken?: string }>(request);
     const token = nonSecretString(input.claimToken);
     if (!token) {
@@ -12381,7 +12564,7 @@ export class FleetCoordinator {
     return await this.withReadyPoolBorrowLock(() =>
       this.state.runExclusive(async () => {
         const claim = await this.state.storage.get<ReadyPoolFillClaim>(
-          readyPoolFillClaimKey(token),
+          readyPoolFillClaimKey(token, typed),
         );
         if (
           !claim ||
@@ -12391,7 +12574,7 @@ export class FleetCoordinator {
         ) {
           return notFound();
         }
-        await this.state.storage.delete(readyPoolFillClaimKey(token));
+        await this.state.storage.delete(readyPoolFillClaimKey(token, typed));
         await this.scheduleAlarm();
         return json({ released: true });
       }),
@@ -12422,14 +12605,21 @@ export class FleetCoordinator {
     );
   }
 
-  private async returnReadyPoolLease(request: Request, key: string): Promise<Response> {
+  private async returnReadyPoolLease(
+    request: Request,
+    key: string,
+    typed = false,
+  ): Promise<Response> {
     const input = await readJson<ReadyPoolReturnRequest>(request);
+    if (!typed && input.identity !== undefined) {
+      return readyPoolIdentityRequestError(input.identity, false)!;
+    }
     const leaseID = input.leaseID ?? "";
     if (!validLeaseID(leaseID)) {
       return json({ error: "invalid_lease_id" }, { status: 400 });
     }
     return await this.withReadyPoolBorrowLock(async () => {
-      const current = await this.getReadyPoolEntry(key, leaseID);
+      const current = await this.getReadyPoolEntry(key, leaseID, typed);
       if (!current) {
         return notFound();
       }
@@ -12462,7 +12652,7 @@ export class FleetCoordinator {
           { status: 409 },
         );
       }
-      const result = String(input.result ?? "ready");
+      let result = String(input.result ?? "ready");
       if (result !== "ready" && result !== "drain" && result !== "release") {
         return json(
           { error: "invalid_result", message: "result must be ready, drain, or release" },
@@ -12478,6 +12668,17 @@ export class FleetCoordinator {
           { status: 409 },
         );
       }
+      if (
+        typed &&
+        result === "ready" &&
+        (!validReadyPoolIdentityV1(input.identity) ||
+          !readyPoolIdentityEqual(current.identity, input.identity) ||
+          !lease ||
+          !this.readyPoolIdentityMatchesLease(input.identity, lease))
+      ) {
+        result = "drain";
+        input.reason = "typed ready-pool identity evidence changed on return";
+      }
       if (result === "release" || result === "drain") {
         if (!canManage) {
           return json(
@@ -12486,7 +12687,7 @@ export class FleetCoordinator {
           );
         }
         const drained = this.nextReturnedReadyPoolEntry(current, lease, "draining", input.reason);
-        await this.putReadyPoolEntry(drained);
+        await this.putReadyPoolEntry(drained, typed);
         if (lease && lease.state === "active") {
           return json({
             entry: publicReadyPoolEntry(drained),
@@ -12502,7 +12703,7 @@ export class FleetCoordinator {
       }
       if (!lease || lease.state !== "active" || Date.parse(lease.expiresAt) <= Date.now()) {
         const stale = this.nextReturnedReadyPoolEntry(current, lease, "stale", input.reason);
-        await this.putReadyPoolEntry(stale);
+        await this.putReadyPoolEntry(stale, typed);
         await this.state.runExclusive(() => this.scheduleAlarm());
         return json({
           entry: publicReadyPoolEntry(stale),
@@ -12510,7 +12711,7 @@ export class FleetCoordinator {
         });
       }
       const returned = this.nextReturnedReadyPoolEntry(current, lease, "ready", input.reason);
-      await this.putReadyPoolEntry(returned);
+      await this.putReadyPoolEntry(returned, typed);
       await this.state.runExclusive(() => this.scheduleAlarm());
       return json({
         entry: publicReadyPoolEntry(returned),
@@ -12560,27 +12761,41 @@ export class FleetCoordinator {
 
   private async maintainReadyPools(nowMs: number): Promise<void> {
     const entries: ReadyPoolEntry[] = [];
+    const typedEntries: ReadyPoolEntry[] = [];
     const leases = new Map<string, LeaseRecord>();
     await Promise.all([
       this.visitStorageRecords<ReadyPoolEntry>(readyPoolPrefix, async (entry) => {
         entries.push(entry);
+      }),
+      this.visitStorageRecords<ReadyPoolEntry>(typedReadyPoolPrefix, async (entry) => {
+        typedEntries.push(entry);
       }),
       this.visitLeaseRecords(async (lease) => {
         leases.set(lease.id, lease);
       }),
     ]);
     await this.maintainReadyPoolEntries(entries, leases, nowMs);
+    await this.maintainReadyPoolEntries(typedEntries, leases, nowMs, true);
     await this.visitStorageRecords<ReadyPoolFillClaim>(readyPoolFillClaimPrefix, async (claim) => {
       if (Date.parse(claim.expiresAt) <= nowMs) {
         await this.state.storage.delete(readyPoolFillClaimKey(claim.token));
       }
     });
+    await this.visitStorageRecords<ReadyPoolFillClaim>(
+      typedReadyPoolFillClaimPrefix,
+      async (claim) => {
+        if (Date.parse(claim.expiresAt) <= nowMs) {
+          await this.state.storage.delete(readyPoolFillClaimKey(claim.token, true));
+        }
+      },
+    );
   }
 
   private async maintainReadyPoolEntries(
     entries: ReadyPoolEntry[],
     leases: Map<string, LeaseRecord>,
     nowMs: number,
+    typed = false,
   ): Promise<void> {
     for (const entry of entries) {
       const lease = leases.get(entry.leaseID);
@@ -12599,7 +12814,19 @@ export class FleetCoordinator {
             updatedAt: new Date(nowMs).toISOString(),
             lastResult: "lease expired or missing",
           }),
+          typed,
         );
+        continue;
+      }
+      if (
+        typed &&
+        (entry.state === "ready" || entry.state === "busy") &&
+        lease &&
+        (!validReadyPoolIdentityV1(entry.identity) ||
+          !this.readyPoolIdentityMatchesLease(entry.identity, lease))
+      ) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- typed lifecycle transitions share the ordered maintenance lock.
+        await this.drainMismatchedReadyPoolEntry(entry, typed);
         continue;
       }
       const borrowDeadline = readyPoolBorrowDeadline(entry);
@@ -12610,7 +12837,7 @@ export class FleetCoordinator {
         borrowDeadline <= nowMs
       ) {
         // oxlint-disable-next-line eslint/no-await-in-loop -- quarantine and its counter update are one serialized transition.
-        await this.quarantineReadyPoolEntry(entry, "borrow heartbeat expired", nowMs);
+        await this.quarantineReadyPoolEntry(entry, "borrow heartbeat expired", nowMs, typed);
         continue;
       }
       if (
@@ -12618,11 +12845,17 @@ export class FleetCoordinator {
         Date.parse(entry.updatedAt) + readyPoolTerminalRetentionMs <= nowMs
       ) {
         // oxlint-disable-next-line eslint/no-await-in-loop -- pruning is serialized with counter persistence for this entry.
-        await this.deleteReadyPoolEntry(entry);
+        await this.deleteReadyPoolEntry(entry, typed);
         // oxlint-disable-next-line eslint/no-await-in-loop -- counters sharing a scope must not lose concurrent increments.
-        await this.incrementReadyPoolCountersForScope(entry.owner, entry.org, entry.key, {
-          stalePruned: 1,
-        });
+        await this.incrementReadyPoolCountersForScope(
+          entry.owner,
+          entry.org,
+          entry.key,
+          {
+            stalePruned: 1,
+          },
+          typed,
+        );
       }
     }
   }
@@ -12631,6 +12864,7 @@ export class FleetCoordinator {
     entry: ReadyPoolEntry,
     reason: string,
     nowMs: number,
+    typed = false,
   ): Promise<void> {
     await this.putReadyPoolEntry(
       withoutReadyPoolBorrow({
@@ -12640,10 +12874,57 @@ export class FleetCoordinator {
         lastResult: reason,
         failureCount: (entry.failureCount ?? 0) + 1,
       }),
+      typed,
     );
-    await this.incrementReadyPoolCountersForScope(entry.owner, entry.org, entry.key, {
-      quarantined: 1,
-    });
+    await this.incrementReadyPoolCountersForScope(
+      entry.owner,
+      entry.org,
+      entry.key,
+      {
+        quarantined: 1,
+      },
+      typed,
+    );
+  }
+
+  private readyPoolIdentityMatchesLease(
+    identity: ReadyPoolIdentityV1,
+    lease: LeaseRecord,
+  ): boolean {
+    const image = this.readyPoolLeaseImageIdentity(lease);
+    return (
+      lease.target === "linux" &&
+      canonicalReadyPoolArchitecture(lease.architecture) &&
+      identity.architecture === lease.architecture &&
+      image !== undefined &&
+      identity.image.provider === image.provider &&
+      identity.image.scope === image.scope &&
+      identity.image.id === image.id
+    );
+  }
+
+  private readyPoolImageIdentitySupported(image: ReadyPoolImageIdentity): boolean {
+    if (!isCoordinatorProvider(image.provider)) return false;
+    return (
+      this.provider(image.provider, image.scope).supportsReadyPoolImageIdentity?.(image) === true
+    );
+  }
+
+  private async drainMismatchedReadyPoolEntry(
+    entry: ReadyPoolEntry,
+    typed: boolean,
+  ): Promise<void> {
+    if (entry.state === "draining") return;
+    await this.putReadyPoolEntry(
+      withoutReadyPoolBorrow({
+        ...entry,
+        state: "draining",
+        updatedAt: new Date().toISOString(),
+        lastResult: "typed ready-pool lease image or architecture changed",
+        failureCount: (entry.failureCount ?? 0) + 1,
+      }),
+      typed,
+    );
   }
 
   private async listLeases(request: Request): Promise<Response> {
@@ -14418,6 +14699,23 @@ export class FleetCoordinator {
         retainAlarm(Math.max(now + 1, expiresAt));
       }
     });
+    await this.visitStorageRecords<ReadyPoolEntry>(typedReadyPoolPrefix, async (entry) => {
+      if (entry.state === "busy") {
+        const deadline = readyPoolBorrowDeadline(entry);
+        if (deadline !== undefined) retainAlarm(Math.max(now + 1, deadline));
+      }
+      if (entry.state === "stale" || entry.state === "quarantined" || entry.state === "draining") {
+        const pruneAt = Date.parse(entry.updatedAt) + readyPoolTerminalRetentionMs;
+        if (Number.isFinite(pruneAt)) retainAlarm(Math.max(now + 1, pruneAt));
+      }
+    });
+    await this.visitStorageRecords<ReadyPoolFillClaim>(
+      typedReadyPoolFillClaimPrefix,
+      async (claim) => {
+        const expiresAt = Date.parse(claim.expiresAt);
+        if (Number.isFinite(expiresAt)) retainAlarm(Math.max(now + 1, expiresAt));
+      },
+    );
     const orphanSweepAlarm = await this.nextAWSOrphanSweepAlarmTime();
     retainAlarm(orphanSweepAlarm);
     const azureOrphanSweepAlarm = await this.nextAzureOrphanSweepAlarmTime();
@@ -15486,23 +15784,30 @@ export class FleetCoordinator {
     return active;
   }
 
-  private async readyPoolEntries(): Promise<ReadyPoolEntry[]> {
-    const entries = await this.state.storage.list<ReadyPoolEntry>({ prefix: readyPoolPrefix });
+  private async readyPoolEntries(typed = false): Promise<ReadyPoolEntry[]> {
+    const entries = await this.state.storage.list<ReadyPoolEntry>({
+      prefix: typed ? typedReadyPoolPrefix : readyPoolPrefix,
+    });
     return [...entries.values()];
   }
 
-  private async readyPoolFillClaims(): Promise<ReadyPoolFillClaim[]> {
+  private async readyPoolFillClaims(typed = false): Promise<ReadyPoolFillClaim[]> {
     const claims = await this.state.storage.list<ReadyPoolFillClaim>({
-      prefix: readyPoolFillClaimPrefix,
+      prefix: typed ? typedReadyPoolFillClaimPrefix : readyPoolFillClaimPrefix,
     });
     return [...claims.values()];
   }
 
-  private async readyPoolCounters(request: Request, key: string): Promise<ReadyPoolCounters> {
+  private async readyPoolCounters(
+    request: Request,
+    key: string,
+    typed = false,
+  ): Promise<ReadyPoolCounters> {
     return await this.readyPoolCountersForScope(
       requestOwner(request),
       requestOrg(request, this.env),
       key,
+      typed,
     );
   }
 
@@ -15510,10 +15815,12 @@ export class FleetCoordinator {
     owner: string,
     org: string,
     key: string,
+    typed = false,
   ): Promise<ReadyPoolCounters> {
     return (
-      (await this.state.storage.get<ReadyPoolCounters>(readyPoolCountersKey(owner, org, key))) ??
-      emptyReadyPoolCounters()
+      (await this.state.storage.get<ReadyPoolCounters>(
+        readyPoolCountersKey(owner, org, key, typed),
+      )) ?? emptyReadyPoolCounters()
     );
   }
 
@@ -15521,12 +15828,14 @@ export class FleetCoordinator {
     request: Request,
     key: string,
     delta: Partial<Record<keyof Omit<ReadyPoolCounters, "updatedAt">, number>>,
+    typed = false,
   ): Promise<void> {
     await this.incrementReadyPoolCountersForScope(
       requestOwner(request),
       requestOrg(request, this.env),
       key,
       delta,
+      typed,
     );
   }
 
@@ -15535,30 +15844,32 @@ export class FleetCoordinator {
     org: string,
     key: string,
     delta: Partial<Record<keyof Omit<ReadyPoolCounters, "updatedAt">, number>>,
+    typed = false,
   ): Promise<void> {
-    const counters = await this.readyPoolCountersForScope(owner, org, key);
+    const counters = await this.readyPoolCountersForScope(owner, org, key, typed);
     for (const [name, amount] of Object.entries(delta) as Array<
       [keyof Omit<ReadyPoolCounters, "updatedAt">, number]
     >) {
       counters[name] += amount;
     }
     counters.updatedAt = new Date().toISOString();
-    await this.state.storage.put(readyPoolCountersKey(owner, org, key), counters);
+    await this.state.storage.put(readyPoolCountersKey(owner, org, key, typed), counters);
   }
 
   private async getReadyPoolEntry(
     key: string,
     leaseID: string,
+    typed = false,
   ): Promise<ReadyPoolEntry | undefined> {
-    return this.state.storage.get<ReadyPoolEntry>(readyPoolKey(key, leaseID));
+    return this.state.storage.get<ReadyPoolEntry>(readyPoolKey(key, leaseID, typed));
   }
 
-  private async putReadyPoolEntry(entry: ReadyPoolEntry): Promise<void> {
-    await this.state.storage.put(readyPoolKey(entry.key, entry.leaseID), entry);
+  private async putReadyPoolEntry(entry: ReadyPoolEntry, typed = false): Promise<void> {
+    await this.state.storage.put(readyPoolKey(entry.key, entry.leaseID, typed), entry);
   }
 
-  private async deleteReadyPoolEntry(entry: ReadyPoolEntry): Promise<void> {
-    await this.state.storage.delete(readyPoolKey(entry.key, entry.leaseID));
+  private async deleteReadyPoolEntry(entry: ReadyPoolEntry, typed = false): Promise<void> {
+    await this.state.storage.delete(readyPoolKey(entry.key, entry.leaseID, typed));
   }
 
   private async withReadyPoolBorrowLock<T>(operation: () => Promise<T>): Promise<T> {
@@ -16857,6 +17168,164 @@ function normalizeReadyPoolCompatibilityKey(value: unknown): string | undefined 
   return normalized || undefined;
 }
 
+function readyPoolIdentityRequestError(value: unknown, required: boolean): Response | undefined {
+  if (!required && value === undefined) return undefined;
+  if (!required) {
+    return json(
+      {
+        error: "typed_identity_route_required",
+        message: "ready-pool identity requires its dedicated typed route",
+      },
+      { status: 400 },
+    );
+  }
+  if (!validReadyPoolIdentityV1(value)) {
+    return json(
+      {
+        error: "invalid_ready_pool_identity",
+        message: `identity must be a complete ${readyPoolIdentitySchemaV1} object`,
+      },
+      { status: 400 },
+    );
+  }
+  return undefined;
+}
+
+async function readyPoolSeedIdentityRequestError(
+  identity: ReadyPoolIdentityV1 | undefined,
+  metadata: Pick<ReadyPoolBorrowRequest, "repo" | "ref" | "commit" | "fingerprint">,
+): Promise<Response | undefined> {
+  if (!identity || !validReadyPoolIdentityV1(identity)) return undefined;
+  let digest: string;
+  try {
+    digest = await readyPoolSeedDigestV1(metadata);
+  } catch (error) {
+    return json(
+      { error: "invalid_ready_pool_seed_metadata", message: errorMessage(error) },
+      { status: 400 },
+    );
+  }
+  if (identity.seedDigest === digest) return undefined;
+  return json(
+    {
+      error: "ready_pool_seed_mismatch",
+      message: "identity seedDigest does not match repo, ref, commit, and fingerprint",
+    },
+    { status: 409 },
+  );
+}
+
+export async function readyPoolSeedDigestV1(
+  metadata: Pick<ReadyPoolBorrowRequest, "repo" | "ref" | "commit" | "fingerprint">,
+): Promise<string> {
+  const fields = (
+    [
+      ["repo", metadata.repo],
+      ["ref", metadata.ref],
+      ["commit", metadata.commit],
+      ["fingerprint", metadata.fingerprint],
+    ] as const
+  ).map(([name, value], index) => {
+    const text = value ?? "";
+    if (typeof text !== "string" || !validUnicodeScalarString(text)) {
+      throw new Error(`ready-pool seed ${name} must be valid UTF-8`);
+    }
+    const encoded = textEncoder.encode(text);
+    if (encoded.byteLength > readyPoolSeedFieldMaxBytes) {
+      throw new Error(`ready-pool seed ${name} exceeds ${readyPoolSeedFieldMaxBytes} UTF-8 bytes`);
+    }
+    return { tag: index + 1, encoded };
+  });
+  const domain = textEncoder.encode("crabbox-ready-pool-seed/v1\0");
+  const payload = new Uint8Array(
+    domain.byteLength + fields.reduce((size, field) => size + 5 + field.encoded.byteLength, 0),
+  );
+  payload.set(domain);
+  const view = new DataView(payload.buffer);
+  let offset = domain.byteLength;
+  for (const field of fields) {
+    payload[offset] = field.tag;
+    view.setUint32(offset + 1, field.encoded.byteLength, false);
+    offset += 5;
+    payload.set(field.encoded, offset);
+    offset += field.encoded.byteLength;
+  }
+  const digest = await crypto.subtle.digest("SHA-256", payload);
+  return `sha256:${[...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("")}`;
+}
+
+function validUnicodeScalarString(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff || Number.isNaN(next)) return false;
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function validReadyPoolIdentityValue(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    textEncoder.encode(value).byteLength <= 1024 &&
+    value.trim() === value &&
+    validUnicodeScalarString(value)
+  );
+}
+
+function canonicalReadyPoolArchitecture(value: unknown): value is "amd64" | "arm64" {
+  return value === "amd64" || value === "arm64";
+}
+
+function validReadyPoolIdentityV1(value: unknown): value is ReadyPoolIdentityV1 {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const identity = value as Record<string, unknown>;
+  if (
+    Object.keys(identity).toSorted().join(",") !==
+    ["architecture", "cacheCompatibility", "image", "schema", "seedDigest"].join(",")
+  ) {
+    return false;
+  }
+  const image = identity["image"];
+  if (!image || typeof image !== "object" || Array.isArray(image)) return false;
+  const imageIdentity = image as Record<string, unknown>;
+  return (
+    Object.keys(imageIdentity).toSorted().join(",") === ["id", "provider", "scope"].join(",") &&
+    identity["schema"] === readyPoolIdentitySchemaV1 &&
+    canonicalReadyPoolArchitecture(identity["architecture"]) &&
+    validReadyPoolIdentityValue(identity["cacheCompatibility"]) &&
+    validReadyPoolIdentityValue(imageIdentity["provider"]) &&
+    validReadyPoolIdentityValue(imageIdentity["scope"]) &&
+    validReadyPoolIdentityValue(imageIdentity["id"]) &&
+    typeof identity["seedDigest"] === "string" &&
+    /^sha256:[0-9a-f]{64}$/.test(identity["seedDigest"])
+  );
+}
+
+function readyPoolIdentityEqual(
+  stored: ReadyPoolIdentityV1 | undefined,
+  requested: ReadyPoolIdentityV1 | undefined,
+): boolean {
+  if (requested === undefined) return stored === undefined;
+  return (
+    validReadyPoolIdentityV1(stored) &&
+    stored.schema === requested.schema &&
+    stored.image.provider === requested.image.provider &&
+    stored.image.scope === requested.image.scope &&
+    stored.image.id === requested.image.id &&
+    stored.architecture === requested.architecture &&
+    stored.seedDigest === requested.seedDigest &&
+    stored.cacheCompatibility === requested.cacheCompatibility
+  );
+}
+
 function decodeReadyPoolRouteKey(value: string): string | undefined {
   try {
     return decodeURIComponent(value);
@@ -16866,11 +17335,18 @@ function decodeReadyPoolRouteKey(value: string): string | undefined {
 }
 
 function readyPoolEntryMatches(entry: ReadyPoolEntry, input: ReadyPoolBorrowRequest): boolean {
+  const exactSeed = input.identity !== undefined;
   return (
-    readyPoolFieldMatches(entry.repo, input.repo) &&
-    readyPoolFieldMatches(entry.ref, input.ref) &&
-    readyPoolFieldMatches(entry.commit, input.commit, input.allowMissingCommit === true) &&
-    readyPoolFieldMatches(entry.fingerprint, input.fingerprint) &&
+    readyPoolIdentityEqual(entry.identity, input.identity) &&
+    readyPoolFieldMatches(entry.repo, input.repo, false, exactSeed) &&
+    readyPoolFieldMatches(entry.ref, input.ref, false, exactSeed) &&
+    readyPoolFieldMatches(
+      entry.commit,
+      input.commit,
+      input.allowMissingCommit === true && !exactSeed,
+      exactSeed,
+    ) &&
+    readyPoolFieldMatches(entry.fingerprint, input.fingerprint, false, exactSeed) &&
     readyPoolFieldMatches(entry.compatibilityKey, input.compatibilityKey) &&
     readyPoolFieldMatches(entry.provider, input.provider) &&
     readyPoolFieldMatches(entry.target, input.target)
@@ -16880,7 +17356,12 @@ function readyPoolEntryMatches(entry: ReadyPoolEntry, input: ReadyPoolBorrowRequ
 function readyPoolCriteria(input: ReadyPoolBorrowRequest): ReadyPoolBorrowRequest {
   const criteria: ReadyPoolBorrowRequest = {};
   for (const key of ["repo", "ref", "commit", "fingerprint", "provider", "target"] as const) {
-    const value = nonSecretString(input[key]);
+    const value =
+      input.identity && key !== "provider" && key !== "target"
+        ? typeof input[key] === "string"
+          ? input[key]
+          : ""
+        : nonSecretString(input[key]);
     if (value) {
       (criteria as Record<string, unknown>)[key] = value;
     }
@@ -16892,6 +17373,7 @@ function readyPoolCriteria(input: ReadyPoolBorrowRequest): ReadyPoolBorrowReques
   if (input.allowMissingCommit === true) {
     criteria.allowMissingCommit = true;
   }
+  if (input.identity) criteria.identity = input.identity;
   return criteria;
 }
 
@@ -16899,7 +17381,23 @@ function readyPoolCriteriaEqual(
   left: ReadyPoolBorrowRequest,
   right: ReadyPoolBorrowRequest,
 ): boolean {
-  return JSON.stringify(readyPoolCriteria(left)) === JSON.stringify(readyPoolCriteria(right));
+  const normalizedLeft = readyPoolCriteria(left);
+  const normalizedRight = readyPoolCriteria(right);
+  for (const key of [
+    "repo",
+    "ref",
+    "commit",
+    "fingerprint",
+    "compatibilityKey",
+    "provider",
+    "target",
+  ] as const) {
+    if (normalizedLeft[key] !== normalizedRight[key]) return false;
+  }
+  return (
+    normalizedLeft.allowMissingCommit === normalizedRight.allowMissingCommit &&
+    readyPoolIdentityEqual(normalizedLeft.identity, normalizedRight.identity)
+  );
 }
 
 function readyPoolCapacityCounts(
@@ -17019,17 +17517,18 @@ function readyPoolFieldMatches(
   stored: string | undefined,
   requested: string | undefined,
   allowMissing = false,
+  exact = false,
 ): boolean {
-  const want = nonSecretString(requested);
+  const want = exact ? (requested ?? "") : nonSecretString(requested);
   if (!want) {
-    return true;
+    return !exact || (stored ?? "") === "";
   }
-  const got = nonSecretString(stored);
+  const got = exact ? (stored ?? "") : nonSecretString(stored);
   return got === want || (allowMissing && got === "");
 }
 
-function readyPoolKey(key: string, leaseID: string): string {
-  return `${readyPoolPrefix}${key}:${leaseID}`;
+function readyPoolKey(key: string, leaseID: string, typed = false): string {
+  return `${typed ? typedReadyPoolPrefix : readyPoolPrefix}${key}:${leaseID}`;
 }
 
 function readyPoolDesiredKey(
@@ -17037,18 +17536,30 @@ function readyPoolDesiredKey(
   org: string,
   key: string,
   compatibilityKey?: string,
+  identity?: ReadyPoolIdentityV1,
 ): string {
-  return `${readyPoolDesiredPrefix}${[org, owner, key, compatibilityKey ?? ""]
+  const parts = [org, owner, key, compatibilityKey ?? ""];
+  if (identity) {
+    parts.push(
+      identity.image.provider,
+      identity.image.scope,
+      identity.image.id,
+      identity.architecture,
+      identity.seedDigest,
+      identity.cacheCompatibility,
+    );
+  }
+  return `${identity ? typedReadyPoolDesiredPrefix : readyPoolDesiredPrefix}${parts
     .map((part) => encodeURIComponent(part))
     .join(":")}`;
 }
 
-function readyPoolFillClaimKey(token: string): string {
-  return `${readyPoolFillClaimPrefix}${token}`;
+function readyPoolFillClaimKey(token: string, typed = false): string {
+  return `${typed ? typedReadyPoolFillClaimPrefix : readyPoolFillClaimPrefix}${token}`;
 }
 
-function readyPoolCountersKey(owner: string, org: string, key: string): string {
-  return `${readyPoolCountersPrefix}${[org, owner, key]
+function readyPoolCountersKey(owner: string, org: string, key: string, typed = false): string {
+  return `${typed ? typedReadyPoolCountersPrefix : readyPoolCountersPrefix}${[org, owner, key]
     .map((part) => encodeURIComponent(part))
     .join(":")}`;
 }
@@ -22530,6 +23041,8 @@ function parseProviderLabelTime(value: string | undefined): number {
 }
 
 interface CloudProvider {
+  readyPoolImageIdentity?(lease: LeaseRecord): ReadyPoolImageIdentity | undefined;
+  supportsReadyPoolImageIdentity?(identity: ReadyPoolImageIdentity): boolean;
   listCrabboxServers(): Promise<ProviderMachine[]>;
   listReconciliationResources?(): Promise<ProviderMachine[]>;
   workspaceCapability?(
@@ -23758,6 +24271,32 @@ export class AWSProvider implements CloudProvider {
   private get client(): EC2SpotClient {
     this.clientValue ??= new EC2SpotClient(this.env, this.region);
     return this.clientValue;
+  }
+
+  readyPoolImageIdentity(lease: LeaseRecord): ReadyPoolImageIdentity | undefined {
+    const image = lease.image;
+    const region = lease.region;
+    if (
+      lease.provider !== "aws" ||
+      !image ||
+      image.provider !== "aws" ||
+      image.kind !== "aws-ami" ||
+      !region ||
+      image.region !== region
+    ) {
+      return undefined;
+    }
+    const identity = { provider: "aws", scope: region, id: image.id };
+    return this.supportsReadyPoolImageIdentity(identity) ? identity : undefined;
+  }
+
+  supportsReadyPoolImageIdentity(identity: ReadyPoolImageIdentity): boolean {
+    if (identity.provider !== "aws" || !/^ami-[0-9a-f]{8,17}$/.test(identity.id)) return false;
+    try {
+      return sanitizeAWSRegion(identity.scope) === identity.scope;
+    } catch {
+      return false;
+    }
   }
 
   workspaceCapability(

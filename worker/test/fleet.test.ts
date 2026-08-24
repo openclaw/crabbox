@@ -39,6 +39,7 @@ import {
   forwardOrBufferWebVNC,
   resetWebVNCBridge,
   recordAzureDeferredCleanup,
+  readyPoolSeedDigestV1,
   replacedEgressSessionsPerLease,
   shouldActivateEgressSession,
   workspaceTerminalOriginAllowed,
@@ -69,6 +70,7 @@ import type {
   ProviderMachine,
   ProvisioningAttempt,
   ReadyPoolEntry,
+  ReadyPoolIdentityV1,
   RunRecord,
 } from "../src/types";
 
@@ -13263,6 +13265,515 @@ describe("fleet lease identity and idle", () => {
       }),
     );
     expect(cleanReturn.status).toBe(200);
+  });
+
+  it("generates provider-owned typed identities and rejects unsupported or incomplete evidence", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const headers = typedReadyPoolHeaders();
+    const lease = typedReadyPoolLease();
+    storage.seed(`lease:${lease.id}`, lease);
+
+    const supported = await fleet.fetch(
+      request("GET", "/v1/ready-pools/builders/identity", { headers }),
+    );
+    expect(await supported.json()).toEqual({ schema: "crabbox-ready-pool-identity/v1" });
+
+    const generated = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/identity", {
+        headers,
+        body: { leaseID: lease.id, ...typedReadyPoolMetadata(), cacheCompatibility: "node-22" },
+      }),
+    );
+    expect(generated.status).toBe(200);
+    expect(await generated.json()).toEqual({ identity: await typedReadyPoolIdentity("node-22") });
+
+    for (const [, override] of [
+      ["azure snapshot", { provider: "azure", providerScope: "/subscriptions/a/resourceGroups/b" }],
+      ["gcp image", { provider: "gcp", providerProject: "example-project" }],
+      ["missing architecture", { architecture: undefined }],
+      ["noncanonical architecture", { architecture: "x86_64" }],
+      ["missing immutable image", { image: undefined }],
+      ["ambiguous image", { image: { ...lease.image!, id: "ubuntu-latest" } }],
+      ["scope mismatch", { image: { ...lease.image!, region: "eu-west-1" } }],
+    ] as const) {
+      storage.seed(`lease:${lease.id}`, { ...lease, ...override });
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each request observes a different version of the same persisted lease.
+      const response = await fleet.fetch(
+        request("POST", "/v1/ready-pools/builders/identity", {
+          headers,
+          body: { leaseID: lease.id, ...typedReadyPoolMetadata(), cacheCompatibility: "node-22" },
+        }),
+      );
+      expect(response.status).toBe(409);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- consume the current response before replacing its backing lease.
+      const responseBody = await response.json();
+      expect(responseBody).toMatchObject({
+        error: "unsupported_ready_pool_lease_identity",
+      });
+    }
+  });
+
+  it("persists canonical architecture on newly provisioned leases", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, { hetzner: fakeProvider() });
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: typedReadyPoolHeaders(),
+        body: {
+          leaseID: "cbx_000000000088",
+          provider: "hetzner",
+          architecture: "amd64",
+          class: "standard",
+          serverType: "cpx62",
+          ttlSeconds: 1200,
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({ lease: { architecture: "amd64" } });
+    expect(storage.value<LeaseRecord>("lease:cbx_000000000088")?.architecture).toBe("amd64");
+  });
+
+  it("rejects unsupported typed provider cohorts before persisting desired capacity", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const identity = await typedReadyPoolIdentity();
+    const response = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/reconcile-identity", {
+        headers: typedReadyPoolHeaders(),
+        body: {
+          ...typedReadyPoolMetadata(),
+          identity: {
+            ...identity,
+            image: { provider: "azure", scope: "eastus", id: "snapshot-example" },
+          },
+          minReady: 1,
+          maxReady: 1,
+          claim: true,
+        },
+      }),
+    );
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: "unsupported_ready_pool_image_identity" });
+    expect((await storage.list({ prefix: "typed-ready-pool-v1-desired:" })).size).toBe(0);
+    expect((await storage.list({ prefix: "typed-ready-pool-v1-fill-claim:" })).size).toBe(0);
+  });
+
+  it("requires manage ownership for typed generation, registration, and borrowing", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const lease = {
+      ...typedReadyPoolLease(),
+      share: { users: { "viewer@example.com": "use" as const } },
+    };
+    storage.seed(`lease:${lease.id}`, lease);
+    const metadata = typedReadyPoolMetadata();
+    const identity = await typedReadyPoolIdentity();
+    const viewerHeaders = {
+      "x-crabbox-owner": "viewer@example.com",
+      "x-crabbox-org": "example-org",
+    };
+
+    for (const [action, body] of [
+      ["identity", { leaseID: lease.id, ...metadata, cacheCompatibility: "node-22" }],
+      ["register-identity", { leaseID: lease.id, ...metadata, identity }],
+    ] as const) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- prove each independent mutation is forbidden before installing the valid owner entry.
+      const response = await fleet.fetch(
+        request("POST", `/v1/ready-pools/builders/${action}`, {
+          headers: viewerHeaders,
+          body,
+        }),
+      );
+      expect(response.status).toBe(403);
+    }
+
+    const register = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/register-identity", {
+        headers: typedReadyPoolHeaders(),
+        body: { leaseID: lease.id, ...metadata, identity },
+      }),
+    );
+    expect(register.status).toBe(200);
+    const borrowed = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/borrow-identity", {
+        headers: viewerHeaders,
+        body: { ...metadata, identity },
+      }),
+    );
+    expect(borrowed.status).toBe(403);
+    expect(storage.value<ReadyPoolEntry>(`typed-ready-pool-v1:builders:${lease.id}`)?.state).toBe(
+      "ready",
+    );
+  });
+
+  it("recomputes exact typed seed metadata and rejects mismatches on every mutation route", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const lease = typedReadyPoolLease();
+    storage.seed(`lease:${lease.id}`, lease);
+    const identity = await typedReadyPoolIdentity();
+    const mismatch = {
+      ...typedReadyPoolMetadata(),
+      repo: "example-org/different",
+      identity,
+    };
+    const results = await Promise.all(
+      ["register-identity", "borrow-identity", "reconcile-identity"].map(async (action) => {
+        const response = await fleet.fetch(
+          request("POST", `/v1/ready-pools/builders/${action}`, {
+            headers: typedReadyPoolHeaders(),
+            body: { ...mismatch, leaseID: lease.id, minReady: 1, maxReady: 1 },
+          }),
+        );
+        return { status: response.status, body: await response.json() };
+      }),
+    );
+    expect(results).toEqual([
+      { status: 409, body: { error: "ready_pool_seed_mismatch", message: expect.any(String) } },
+      { status: 409, body: { error: "ready_pool_seed_mismatch", message: expect.any(String) } },
+      { status: 409, body: { error: "ready_pool_seed_mismatch", message: expect.any(String) } },
+    ]);
+    expect((await storage.list({ prefix: "typed-ready-pool-v1:" })).size).toBe(0);
+  });
+
+  it("keeps typed register, borrow, heartbeat, and return exact and separate from legacy pools", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const headers = typedReadyPoolHeaders();
+    const lease = typedReadyPoolLease();
+    const metadata = typedReadyPoolMetadata();
+    const identity = await typedReadyPoolIdentity();
+    storage.seed(`lease:${lease.id}`, lease);
+
+    const register = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/register-identity", {
+        headers,
+        body: { leaseID: lease.id, ...metadata, identity },
+      }),
+    );
+    expect(register.status).toBe(200);
+    expect(await register.json()).toMatchObject({ entry: { state: "ready", identity } });
+    expect(storage.value(`ready-pool:builders:${lease.id}`)).toBeUndefined();
+    expect(storage.value(`typed-ready-pool-v1:builders:${lease.id}`)).toMatchObject({ identity });
+
+    const legacyStatus = await fleet.fetch(request("GET", "/v1/ready-pools/builders", { headers }));
+    expect(await legacyStatus.json()).toEqual({ pool: [] });
+    const legacyBorrow = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/borrow", { headers, body: metadata }),
+    );
+    expect(legacyBorrow.status).toBe(409);
+
+    const missingIdentity = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/borrow-identity", { headers, body: metadata }),
+    );
+    expect(missingIdentity.status).toBe(400);
+    const unknownSchema = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/borrow-identity", {
+        headers,
+        body: { ...metadata, identity: { ...identity, schema: "crabbox-ready-pool-identity/v2" } },
+      }),
+    );
+    expect(unknownSchema.status).toBe(400);
+    const mismatch = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/borrow-identity", {
+        headers,
+        body: { ...metadata, identity: { ...identity, cacheCompatibility: "different-cache" } },
+      }),
+    );
+    expect(mismatch.status).toBe(409);
+
+    const borrowed = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/borrow-identity", {
+        headers,
+        body: { ...metadata, identity, heartbeat: true },
+      }),
+    );
+    expect(borrowed.status).toBe(200);
+    const borrowedBody = (await borrowed.json()) as { entry: ReadyPoolEntry };
+    expect(borrowedBody.entry.identity).toEqual(identity);
+    expect(borrowedBody.entry.borrowToken).toBeTruthy();
+
+    const heartbeat = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/heartbeat-identity", {
+        headers,
+        body: { leaseID: lease.id, borrowToken: borrowedBody.entry.borrowToken },
+      }),
+    );
+    expect(heartbeat.status).toBe(200);
+    const legacyReturn = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/return", {
+        headers,
+        body: { leaseID: lease.id, result: "ready", borrowToken: borrowedBody.entry.borrowToken },
+      }),
+    );
+    expect(legacyReturn.status).toBe(404);
+    const returned = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/return-identity", {
+        headers,
+        body: {
+          leaseID: lease.id,
+          result: "ready",
+          borrowToken: borrowedBody.entry.borrowToken,
+          identity,
+        },
+      }),
+    );
+    expect(returned.status).toBe(200);
+    expect(await returned.json()).toMatchObject({ entry: { state: "ready", identity } });
+  });
+
+  it("isolates typed desired capacity and structurally matches reordered fill-claim identities", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const headers = typedReadyPoolHeaders();
+    const lease = typedReadyPoolLease();
+    const metadata = typedReadyPoolMetadata();
+    const identity = await typedReadyPoolIdentity();
+    storage.seed(`lease:${lease.id}`, lease);
+
+    const first = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/reconcile-identity", {
+        headers,
+        body: { ...metadata, identity, minReady: 1, maxReady: 1, claim: true },
+      }),
+    );
+    expect(first.status).toBe(200);
+    const firstBody = (await first.json()) as {
+      claim: { token: string; criteria: { identity: ReadyPoolIdentityV1 } };
+      counts: { inFlight: number };
+    };
+    expect(firstBody.counts.inFlight).toBe(1);
+    expect(storage.value(`ready-pool-fill-claim:${firstBody.claim.token}`)).toBeUndefined();
+    expect(storage.value(`typed-ready-pool-v1-fill-claim:${firstBody.claim.token}`)).toBeTruthy();
+    expect([...(await storage.list({ prefix: "ready-pool-desired:" })).keys()]).toEqual([]);
+    expect([
+      ...(await storage.list({ prefix: "typed-ready-pool-v1-desired:" })).keys(),
+    ]).toHaveLength(1);
+
+    const reorderedIdentity = {
+      cacheCompatibility: identity.cacheCompatibility,
+      seedDigest: identity.seedDigest,
+      image: {
+        id: identity.image.id,
+        scope: identity.image.scope,
+        provider: identity.image.provider,
+      },
+      architecture: identity.architecture,
+      schema: identity.schema,
+    };
+    const second = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/reconcile-identity", {
+        headers,
+        body: { ...metadata, identity: reorderedIdentity, minReady: 1, maxReady: 1, claim: true },
+      }),
+    );
+    expect(second.status).toBe(200);
+    expect(await second.json()).toMatchObject({ counts: { ready: 0, inFlight: 1 }, capped: true });
+
+    const separateCohort = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/reconcile-identity", {
+        headers,
+        body: {
+          ...metadata,
+          identity: { ...identity, cacheCompatibility: "another-cache" },
+          minReady: 1,
+          maxReady: 1,
+          claim: true,
+        },
+      }),
+    );
+    expect(separateCohort.status).toBe(200);
+    expect(await separateCohort.json()).toMatchObject({
+      counts: { ready: 0, inFlight: 1 },
+      claim: { token: expect.any(String) },
+    });
+    expect((await storage.list({ prefix: "typed-ready-pool-v1-desired:" })).size).toBe(2);
+
+    const mismatchedClaim = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/register-identity", {
+        headers,
+        body: {
+          leaseID: lease.id,
+          ...metadata,
+          identity: { ...identity, cacheCompatibility: "other-cache" },
+          fillClaimToken: firstBody.claim.token,
+        },
+      }),
+    );
+    expect(mismatchedClaim.status).toBe(409);
+
+    const register = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/register-identity", {
+        headers,
+        body: {
+          leaseID: lease.id,
+          ...metadata,
+          identity: reorderedIdentity,
+          fillClaimToken: firstBody.claim.token,
+        },
+      }),
+    );
+    expect(register.status).toBe(200);
+    expect(
+      storage.value(`typed-ready-pool-v1-fill-claim:${firstBody.claim.token}`),
+    ).toBeUndefined();
+    const settled = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/reconcile-identity", {
+        headers,
+        body: { ...metadata, identity, minReady: 1, maxReady: 1, claim: true },
+      }),
+    );
+    expect(await settled.json()).toMatchObject({
+      counts: { ready: 1, inFlight: 0 },
+      satisfied: true,
+    });
+  });
+
+  it("drains typed entries immediately when their authoritative lease image or return identity changes", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(undefined, { provider: "aws" }),
+    });
+    const headers = typedReadyPoolHeaders();
+    const lease = typedReadyPoolLease();
+    const metadata = typedReadyPoolMetadata();
+    const identity = await typedReadyPoolIdentity();
+    storage.seed(`lease:${lease.id}`, lease);
+    await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/register-identity", {
+        headers,
+        body: { leaseID: lease.id, ...metadata, identity },
+      }),
+    );
+    storage.seed(`lease:${lease.id}`, { ...lease, architecture: "arm64" });
+    const rejected = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/borrow-identity", {
+        headers,
+        body: { ...metadata, identity },
+      }),
+    );
+    expect(rejected.status).toBe(409);
+    expect(storage.value<ReadyPoolEntry>(`typed-ready-pool-v1:builders:${lease.id}`)?.state).toBe(
+      "draining",
+    );
+
+    storage.seed(`lease:${lease.id}`, lease);
+    await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/register-identity", {
+        headers,
+        body: { leaseID: lease.id, ...metadata, identity },
+      }),
+    );
+    const borrowed = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/borrow-identity", {
+        headers,
+        body: { ...metadata, identity },
+      }),
+    );
+    const borrowedBody = (await borrowed.json()) as { entry: ReadyPoolEntry };
+    const returned = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/return-identity", {
+        headers,
+        body: {
+          leaseID: lease.id,
+          borrowToken: borrowedBody.entry.borrowToken,
+          result: "ready",
+          identity: { ...identity, cacheCompatibility: "changed-cache" },
+        },
+      }),
+    );
+    expect(returned.status).toBe(200);
+    expect(await returned.json()).toMatchObject({ entry: { state: "draining" } });
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.state).toBe("released");
+  });
+
+  it("keeps new typed Durable Object state invisible to shipped legacy enumeration after rollback", async () => {
+    const storage = new MemoryStorage();
+    const newWorker = testFleet(storage);
+    const headers = typedReadyPoolHeaders();
+    const lease = typedReadyPoolLease();
+    const metadata = typedReadyPoolMetadata();
+    const identity = await typedReadyPoolIdentity();
+    storage.seed(`lease:${lease.id}`, lease);
+
+    const reconcile = await newWorker.fetch(
+      request("POST", "/v1/ready-pools/builders/reconcile-identity", {
+        headers,
+        body: { ...metadata, identity, minReady: 2, maxReady: 2, claim: true },
+      }),
+    );
+    expect(reconcile.status).toBe(200);
+    const claim = (await reconcile.json()) as { claim: { token: string } };
+    const register = await newWorker.fetch(
+      request("POST", "/v1/ready-pools/builders/register-identity", {
+        headers,
+        body: { leaseID: lease.id, ...metadata, identity },
+      }),
+    );
+    expect(register.status).toBe(200);
+
+    const shippedLegacyEntries = await storage.list<ReadyPoolEntry>({ prefix: "ready-pool:" });
+    const shippedLegacyClaims = await storage.list({ prefix: "ready-pool-fill-claim:" });
+    const shippedLegacyDesired = await storage.list({ prefix: "ready-pool-desired:" });
+    expect([...shippedLegacyEntries.values()]).toEqual([]);
+    expect([...shippedLegacyClaims.values()]).toEqual([]);
+    expect([...shippedLegacyDesired.values()]).toEqual([]);
+    expect(storage.value(`typed-ready-pool-v1:builders:${lease.id}`)).toBeTruthy();
+    expect(storage.value(`typed-ready-pool-v1-fill-claim:${claim.claim.token}`)).toBeTruthy();
+    expect((await storage.list({ prefix: "typed-ready-pool-v1-desired:" })).size).toBe(1);
+
+    const rolledBackWorker = testFleet(storage);
+    const legacyStatus = await rolledBackWorker.fetch(
+      request("GET", "/v1/ready-pools/builders", { headers }),
+    );
+    expect(await legacyStatus.json()).toEqual({ pool: [] });
+    const legacyBorrow = await rolledBackWorker.fetch(
+      request("POST", "/v1/ready-pools/builders/borrow", {
+        headers,
+        body: metadata,
+      }),
+    );
+    expect(legacyBorrow.status).toBe(409);
+    expect(storage.value<ReadyPoolEntry>(`typed-ready-pool-v1:builders:${lease.id}`)?.state).toBe(
+      "ready",
+    );
+  });
+
+  it("shares exact UTF-8 length-framed seed vectors with the Go client", async () => {
+    const vectors = [
+      {
+        metadata: {
+          repo: "example-org/my-app",
+          ref: "main",
+          commit: "abc123",
+          fingerprint: "setup-v2",
+        },
+        digest: "sha256:8b76ec429b7e084f6af6c6a2de4be7faf09f872c892513d4ce97d2f055e44e20",
+      },
+      {
+        metadata: {
+          repo: "example<org>&/my-app",
+          ref: "refs/heads/line\u2028sep\u2029end",
+          commit: "café-東京",
+          fingerprint: "finger<&>λ",
+        },
+        digest: "sha256:b6cf4e2e23e212fa08223dfd085f0acc58b989ab9f343d0ba6a845def25ffc70",
+      },
+      {
+        metadata: {},
+        digest: "sha256:ca20f3f91bdd0a8643698abb508aa749da01297641101331aab950efd75705c8",
+      },
+    ];
+    await Promise.all(
+      vectors.map(async (vector) => {
+        expect(await readyPoolSeedDigestV1(vector.metadata)).toBe(vector.digest);
+      }),
+    );
+    await expect(readyPoolSeedDigestV1({ ref: "r".repeat(1025) })).rejects.toThrow("exceeds 1024");
+    await expect(readyPoolSeedDigestV1({ ref: "\ud800" })).rejects.toThrow("valid UTF-8");
   });
 
   it("atomically caps concurrent ready-pool fill claims and accepts compatible providers", async () => {
@@ -35922,6 +36433,22 @@ function fakeProvider(
     restrictedLeaseRequestFields(input: LeaseRequest) {
       return result.onRestrictedLeaseRequestFields?.(input) ?? [];
     },
+    ...(result.provider === "aws"
+      ? {
+          readyPoolImageIdentity(lease: LeaseRecord) {
+            return new AWSProvider({} as Env, lease.region ?? "", storage!).readyPoolImageIdentity(
+              lease,
+            );
+          },
+          supportsReadyPoolImageIdentity(identity: ReadyPoolIdentityV1["image"]) {
+            return new AWSProvider(
+              {} as Env,
+              identity.scope,
+              storage!,
+            ).supportsReadyPoolImageIdentity(identity);
+          },
+        }
+      : {}),
     ...(result.provider === "gcp"
       ? {
           ownershipLabelValue(value: string) {
@@ -36653,6 +37180,47 @@ function workerCloudReleaseCases() {
       provider: new GCPProvider({} as Env),
     },
   ];
+}
+
+function typedReadyPoolHeaders(): Record<string, string> {
+  return { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+}
+
+function typedReadyPoolMetadata() {
+  return { repo: "example-org/my-app", ref: "main", commit: "abc123", fingerprint: "setup-v2" };
+}
+
+function typedReadyPoolLease(): LeaseRecord {
+  return testLease({
+    id: "cbx_000000000099",
+    provider: "aws",
+    target: "linux",
+    architecture: "amd64",
+    owner: "alice@example.com",
+    org: "example-org",
+    cloudID: "i-0123456789abcdef0",
+    region: "us-east-1",
+    image: {
+      id: "ami-0123456789abcdef0",
+      source: "promoted",
+      provider: "aws",
+      kind: "aws-ami",
+      region: "us-east-1",
+    },
+    expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+  });
+}
+
+async function typedReadyPoolIdentity(
+  cacheCompatibility = "node-22",
+): Promise<ReadyPoolIdentityV1> {
+  return {
+    schema: "crabbox-ready-pool-identity/v1",
+    image: { provider: "aws", scope: "us-east-1", id: "ami-0123456789abcdef0" },
+    architecture: "amd64",
+    seedDigest: await readyPoolSeedDigestV1(typedReadyPoolMetadata()),
+    cacheCompatibility,
+  };
 }
 
 function testLease(overrides: Partial<LeaseRecord>): LeaseRecord {

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Added explicitly opt-in, image-pinned typed ready pools with exact repository/cache identities and rollback-isolated coordinator storage. Thanks @vincentkoc.
+
 ## 0.46.1 - 2026-08-24
 
 ### Added

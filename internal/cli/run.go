@@ -234,6 +234,7 @@ type runFlagValues struct {
 	LeaseOutput            *string
 	ReadyPool              *string
 	ReadyPoolCompatibility *string
+	ReadyPoolIdentity      *string
 	ReadyPoolReturn        *string
 	Downloads              *stringListFlag
 	AllowEnv               *stringListFlag
@@ -287,6 +288,7 @@ func registerRunFlags(fs *flag.FlagSet, defaults Config, options leaseCreateFlag
 		LeaseOutput:            fs.String("lease-output", "", "write a retained JSON lease handle for orchestrators on supported providers"),
 		ReadyPool:              fs.String("pool", "", "borrow a broker ready-pool lease"),
 		ReadyPoolCompatibility: fs.String("pool-compatibility-key", "", "provider-neutral ready-pool capability and size key"),
+		ReadyPoolIdentity:      fs.String("pool-identity-file", "", "generated typed ready-pool identity JSON"),
 		ReadyPoolReturn:        fs.String("pool-return", "auto", "ready-pool return policy: auto, ready, drain, release"),
 		Downloads:              &stringListFlag{},
 		AllowEnv:               &stringListFlag{},
@@ -319,6 +321,17 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	runFlags := registerRunFlags(fs, defaults, ordinaryLeaseCreateFlagRegistrationOptions())
 	if err := parseFlags(fs, args); err != nil {
 		return err
+	}
+	var readyPoolIdentity *CoordinatorReadyPoolIdentityV1
+	if flagWasSet(fs, "pool-identity-file") {
+		if strings.TrimSpace(*runFlags.ReadyPool) == "" {
+			return exit(2, "--pool-identity-file requires --pool")
+		}
+		identity, identityErr := loadReadyPoolIdentity(*runFlags.ReadyPoolIdentity)
+		if identityErr != nil {
+			return identityErr
+		}
+		readyPoolIdentity = &identity
 	}
 	leaseFlags := runFlags.Lease
 	leaseIDFlag := runFlags.LeaseID
@@ -829,7 +842,15 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		returnCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		returnErr := returnReadyPoolAfterWorkspaceOwner(returnCtx, &lifecycleOwner, func() error {
-			_, err := coord.ReturnReadyPoolLease(returnCtx, borrowedPool.Entry.Key, borrowedPool.Entry.LeaseID, result, reason, borrowedPool.Entry.BorrowToken)
+			var err error
+			if borrowedPool.Entry.Identity != nil {
+				_, err = coord.ReturnTypedReadyPoolLease(returnCtx, borrowedPool.Entry.Key, map[string]any{
+					"leaseID": borrowedPool.Entry.LeaseID, "result": result, "reason": reason,
+					"borrowToken": borrowedPool.Entry.BorrowToken, "identity": *borrowedPool.Entry.Identity,
+				})
+			} else {
+				_, err = coord.ReturnReadyPoolLease(returnCtx, borrowedPool.Entry.Key, borrowedPool.Entry.LeaseID, result, reason, borrowedPool.Entry.BorrowToken)
+			}
 			return err
 		})
 		cancel()
@@ -959,7 +980,14 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return err
 		}
 		addStringInput(borrowInput, "compatibilityKey", *readyPoolCompatibilityKey)
-		res, err := coord.BorrowReadyPoolLease(ctx, strings.TrimSpace(*readyPool), borrowInput)
+		var res CoordinatorReadyPoolResponse
+		if readyPoolIdentity != nil {
+			delete(borrowInput, "allowMissingCommit")
+			borrowInput["identity"] = *readyPoolIdentity
+			res, err = borrowValidatedTypedReadyPoolLease(ctx, coord, strings.TrimSpace(*readyPool), borrowInput, *readyPoolIdentity)
+		} else {
+			res, err = coord.BorrowReadyPoolLease(ctx, strings.TrimSpace(*readyPool), borrowInput)
+		}
 		if err != nil {
 			return err
 		}
@@ -3877,7 +3905,12 @@ func startReadyPoolBorrowHeartbeat(ctx context.Context, coord *CoordinatorClient
 		defer ticker.Stop()
 		for {
 			callCtx, heartbeatCancel := context.WithTimeout(rootCtx, 20*time.Second)
-			_, err := coord.HeartbeatReadyPoolBorrow(callCtx, entry.Key, entry.LeaseID, entry.BorrowToken)
+			var err error
+			if entry.Identity != nil {
+				_, err = coord.HeartbeatTypedReadyPoolBorrow(callCtx, entry.Key, entry.LeaseID, entry.BorrowToken)
+			} else {
+				_, err = coord.HeartbeatReadyPoolBorrow(callCtx, entry.Key, entry.LeaseID, entry.BorrowToken)
+			}
 			heartbeatCancel()
 			if err != nil && rootCtx.Err() == nil {
 				if readyPoolCoordinatorRouteUnsupported(err) {

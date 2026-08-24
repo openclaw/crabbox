@@ -41,6 +41,44 @@ same logical pool. Entries also record repo, ref, commit, fingerprint, image,
 provider, target, server type, SSH endpoint, work root, owner, org, state, and
 expiry.
 
+### Opt-in typed identity v1
+
+The optional `crabbox-ready-pool-identity/v1` protocol creates a separate,
+provider-scoped, image-pinned cohort. It does not migrate or redefine legacy
+cross-provider pools. Its canonical identity contains:
+
+```json
+{
+  "schema": "crabbox-ready-pool-identity/v1",
+  "image": {
+    "provider": "aws",
+    "scope": "us-east-1",
+    "id": "ami-0123456789abcdef0"
+  },
+  "architecture": "amd64",
+  "seedDigest": "sha256:8b76ec429b7e084f6af6c6a2de4be7faf09f872c892513d4ce97d2f055e44e20",
+  "cacheCompatibility": "node-22-pnpm-10"
+}
+```
+
+The provider adapter derives immutable image identity and meaningful scope
+from existing authoritative lease evidence; no ordinary lease performs an
+additional provider image lookup. Newly created leases persist canonical
+architecture. The coordinator recomputes `seedDigest` from repo, ref, commit,
+and fingerprint using the domain `crabbox-ready-pool-seed/v1` followed by a NUL
+and four ordered fields, each framed as a one-byte field index, four-byte
+big-endian UTF-8 byte length, and exact UTF-8 bytes. Each field is limited to
+1,024 UTF-8 bytes. Cache compatibility is explicitly caller-declared trusted
+operator metadata and is compared exactly; it is not independently verified,
+cryptographically attested, or a tenant-isolation boundary.
+
+Version 1 supports only AWS Linux leases whose provider adapter can confirm an
+immutable AMI, the lease's matching region, and canonical `amd64` or `arm64`
+architecture. Existing leases without persisted evidence, Azure snapshot
+leases, GCP leases, and other providers fail closed. Unknown schemas and
+structural mismatches fail closed; changed image/architecture evidence drains
+the entry before reuse or return.
+
 ## States
 
 ```text
@@ -70,13 +108,39 @@ POST /v1/ready-pools/:key/release-fill-claim
 GET  /v1/ready-pools/:key/metrics
 ```
 
+Typed operations use separate, explicit routes:
+
+```text
+GET  /v1/ready-pools/:key/identity
+POST /v1/ready-pools/:key/identity
+GET  /v1/ready-pools/:key/entries-identity
+POST /v1/ready-pools/:key/register-identity
+POST /v1/ready-pools/:key/borrow-identity
+POST /v1/ready-pools/:key/heartbeat-identity
+POST /v1/ready-pools/:key/return-identity
+POST /v1/ready-pools/:key/reconcile-identity
+POST /v1/ready-pools/:key/release-fill-claim-identity
+```
+
+Routes alone are not the rollback boundary. Typed entries, fill claims,
+desired-capacity policies, and counters use independent
+`typed-ready-pool-v1:`, `typed-ready-pool-v1-fill-claim:`,
+`typed-ready-pool-v1-desired:`, and `typed-ready-pool-v1-counters:` storage
+namespaces. Neither Durable Object prefix scans nor PostgreSQL prefix scans
+used by deployed legacy coordinators can enumerate or borrow typed capacity
+after a rollback. Legacy clients continue using unchanged legacy records;
+typed clients fail explicitly against old coordinators and never retry legacy
+routes.
+
 The broker stores pool entries in coordinator storage. The CLI owns SSH
 keys, source sync, and Actions hydration, so it registers a lease only after it
 has proved the remote endpoint and setup. The broker is the arbiter for
 exclusive borrow/return, desired-capacity fill claims, and borrow deadlines. It
 uses the recorded SSH endpoint so provider-specific port fallback does not
 repeat on every hot run. The coordinator does not issue SSH credentials; fill
-keepers and borrowers retain the existing client-owned access contract.
+keepers and borrowers retain the existing client-owned access contract. Typed
+pool identity does not provide portable cross-client SSH access or per-borrow
+credential grants.
 
 ## CLI flow
 
