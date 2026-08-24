@@ -66,6 +66,13 @@ func applyDefaults(cfg *Config) {
 	if strings.TrimSpace(cfg.Machine0.Size) == "" {
 		cfg.Machine0.Size = base.Size
 	}
+	if cfg.ServerTypeExplicit && strings.TrimSpace(cfg.ServerType) != "" {
+		cfg.Machine0.Size = cfg.ServerType
+	} else if core.ClassWasExplicit(*cfg) && cfg.Machine0.Size == base.Size {
+		if candidates, matched := core.ProviderClassCandidatesForProfiles(machine0ClassProfiles, *cfg); matched {
+			cfg.Machine0.Size = candidates[0]
+		}
+	}
 	if strings.TrimSpace(cfg.Machine0.Region) == "" {
 		cfg.Machine0.Region = base.Region
 	}

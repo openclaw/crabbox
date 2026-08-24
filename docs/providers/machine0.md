@@ -34,6 +34,7 @@ machine0 sizes --json
 
 crabbox providers sizes machine0
 crabbox warmup --provider machine0 --slug linux-ci
+crabbox warmup --provider machine0 --class fast --slug larger-ci
 crabbox run --provider machine0 --id linux-ci -- go test ./...
 crabbox ssh --provider machine0 --id linux-ci
 crabbox stop --provider machine0 linux-ci
@@ -122,7 +123,22 @@ accepted even when Machine0 reuses the same IP.
 
 ## Live sizes, GPUs, and cost
 
-Crabbox never hardcodes a reduced Machine0 size enum or price table. Before
+Crabbox publishes the following convenience mappings for its standard machine
+classes, using shapes from the Machine0 size catalog:
+
+| Class | Machine0 size | vCPUs | RAM |
+| --- | --- | ---: | ---: |
+| `tiny` | `large` | 2 | 4 GB |
+| `small` | `xl` | 4 | 8 GB |
+| `standard` | `xxl` | 8 | 16 GB |
+| `fast` | `xxxl` | 16 | 64 GB |
+| `large` | `4xl` | 32 | 128 GB |
+| `beast` | `5xl` | 48 | 192 GB |
+
+An explicit `--machine0-size` always wins over `--class` and accepts any live
+Machine0 size, including GPU, NVMe, premium, and larger CPU shapes outside this
+convenience catalog. Omitting `--class` preserves the existing `large` default.
+Crabbox never hardcodes a reduced allowed-size enum or price table: before
 creation it reads `machine0 sizes --all --json` and verifies that the selected
 size exists and is currently offered in the requested region.
 

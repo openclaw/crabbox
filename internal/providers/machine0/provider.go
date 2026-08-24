@@ -12,6 +12,8 @@ func init() { core.RegisterProvider(Provider{}) }
 
 type Provider struct{}
 
+var machine0ClassProfiles = buildClassProfiles()
+
 func (Provider) Name() string      { return providerName }
 func (Provider) Aliases() []string { return nil }
 
@@ -20,7 +22,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Name:             providerName,
 		Family:           providerName,
 		Kind:             core.ProviderKindSSHLease,
-		ClassDisposition: core.ProviderClassDispositionUnmapped,
+		ClassDisposition: core.ProviderClassDispositionMapped,
 		Targets:          []core.TargetSpec{{OS: core.TargetLinux}},
 		Features: core.FeatureSet{
 			core.FeatureSSH,
@@ -98,5 +100,57 @@ func (Provider) ValidateConfig(cfg core.Config) error {
 	return nil
 }
 
-func (Provider) ServerTypeForConfig(cfg core.Config) string { return cfg.Machine0.Size }
-func (Provider) ServerTypeForClass(string) string           { return "large" }
+func (Provider) ServerTypeForConfig(cfg core.Config) string {
+	if cfg.ServerTypeExplicit && strings.TrimSpace(cfg.ServerType) != "" {
+		return cfg.ServerType
+	}
+	if core.ClassWasExplicit(cfg) && cfg.Machine0.Size == core.BaseConfig().Machine0.Size {
+		if candidates, matched := core.ProviderClassCandidatesForProfiles(machine0ClassProfiles, cfg); matched {
+			return candidates[0]
+		}
+	}
+	return cfg.Machine0.Size
+}
+
+func (Provider) ServerTypeForClass(class string) string {
+	for _, profile := range machine0ClassProfiles {
+		if profile.Class == class {
+			return profile.Primary.Type
+		}
+	}
+	return core.BaseConfig().Machine0.Size
+}
+
+func (Provider) ClassProfiles() []core.ProviderClassProfile { return machine0ClassProfiles }
+
+func (Provider) ClassSpecs() []core.ClassSpec {
+	return core.ProviderClassSpecsFromProfiles(machine0ClassProfiles)
+}
+
+func buildClassProfiles() []core.ProviderClassProfile {
+	shapes := []struct {
+		size   string
+		vcpus  int
+		memory int
+	}{
+		{size: "large", vcpus: 2, memory: 4},
+		{size: "xl", vcpus: 4, memory: 8},
+		{size: "xxl", vcpus: 8, memory: 16},
+		{size: "xxxl", vcpus: 16, memory: 64},
+		{size: "4xl", vcpus: 32, memory: 128},
+		{size: "5xl", vcpus: 48, memory: 192},
+	}
+	classes := core.CanonicalProviderClasses()
+	profiles := make([]core.ProviderClassProfile, 0, len(classes))
+	for index, class := range classes {
+		shape := shapes[index]
+		profiles = append(profiles, core.ProviderClassProfileFromMachines(
+			class, core.TargetLinux, "", core.ProviderClassArchitectureAMD64,
+			[]core.ProviderClassMachine{{
+				Type: shape.size, Architecture: core.ProviderClassArchitectureAMD64,
+				VCPU: &shape.vcpus, Memory: &core.ProviderMemory{Value: float64(shape.memory), Unit: core.ProviderMemoryUnitGB},
+			}},
+		))
+	}
+	return profiles
+}

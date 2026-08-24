@@ -57,6 +57,8 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if flagWasSet(fs, "machine0-size") {
 		cfg.Machine0.Size = *v.Size
+		cfg.ServerType = *v.Size
+		cfg.ServerTypeExplicit = true
 	}
 	if flagWasSet(fs, "machine0-region") {
 		cfg.Machine0.Region = *v.Region

@@ -958,6 +958,59 @@ func TestProviderCapabilities(t *testing.T) {
 	}
 }
 
+func TestProviderClassCatalogAndSizeSelection(t *testing.T) {
+	provider := Provider{}
+	wantSizes := []string{"large", "xl", "xxl", "xxxl", "4xl", "5xl"}
+	classes := core.CanonicalProviderClasses()
+	profiles, specs := provider.ClassProfiles(), provider.ClassSpecs()
+	if provider.Spec().ClassDisposition != core.ProviderClassDispositionMapped || len(profiles) != len(classes) || len(specs) != len(classes) {
+		t.Fatalf("disposition=%s profiles=%#v specs=%#v", provider.Spec().ClassDisposition, profiles, specs)
+	}
+	for index, class := range classes {
+		t.Run(class, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.Provider = providerName
+			cfg.Class = class
+			core.MarkClassExplicit(&cfg)
+			if got := provider.ServerTypeForClass(class); got != wantSizes[index] {
+				t.Fatalf("class size=%q want=%q", got, wantSizes[index])
+			}
+			if err := provider.ApplyConfigDefaults(&cfg); err != nil || cfg.Machine0.Size != wantSizes[index] || cfg.ServerType != wantSizes[index] {
+				t.Fatalf("size=%q serverType=%q err=%v want=%q", cfg.Machine0.Size, cfg.ServerType, err, wantSizes[index])
+			}
+			if specs[index].Class != class || specs[index].Type != wantSizes[index] || specs[index].VCPUs <= 0 || specs[index].MemoryGB <= 0 {
+				t.Fatalf("class spec=%#v", specs[index])
+			}
+		})
+	}
+
+	t.Run("explicit native size overrides class", func(t *testing.T) {
+		cfg := core.BaseConfig()
+		cfg.Provider = providerName
+		cfg.Class = "beast"
+		core.MarkClassExplicit(&cfg)
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		values := registerFlags(fs, cfg)
+		if err := fs.Parse([]string{"--machine0-size", "large"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := applyFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Machine0.Size != "large" || provider.ServerTypeForConfig(cfg) != "large" {
+			t.Fatalf("native size=%q resolved=%q", cfg.Machine0.Size, provider.ServerTypeForConfig(cfg))
+		}
+	})
+
+	t.Run("implicit class preserves existing default", func(t *testing.T) {
+		cfg := core.BaseConfig()
+		cfg.Provider = providerName
+		if err := provider.ApplyConfigDefaults(&cfg); err != nil || cfg.Machine0.Size != "large" {
+			t.Fatalf("default size=%q err=%v", cfg.Machine0.Size, err)
+		}
+	})
+}
+
 func TestNativeCheckpointWorkdirUsesResolvedMachine0Root(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName

@@ -1970,11 +1970,11 @@ func TestProvidersJSONIncludesBuiltIns(t *testing.T) {
 		switch entries[i].Provider {
 		case "firecracker":
 			firecracker = &entries[i]
-		case "aws", "azure", "gcp", "hetzner", "namespace-instance":
+		case "aws", "azure", "gcp", "hetzner", "machine0", "namespace-instance":
 			classProviders[entries[i].Provider] = &entries[i]
 		}
 	}
-	for _, provider := range []string{"aws", "azure", "gcp", "hetzner", "namespace-instance"} {
+	for _, provider := range []string{"aws", "azure", "gcp", "hetzner", "machine0", "namespace-instance"} {
 		entry := classProviders[provider]
 		if entry == nil {
 			t.Fatalf("built binary providers json missing %s", provider)
