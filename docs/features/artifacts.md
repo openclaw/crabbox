@@ -154,8 +154,9 @@ Video capture is desktop-session scoped:
 
 MP4 capture also writes a contact sheet by default: one PNG grid sampled across
 the video for quick review. GIF generation reuses the motion-trimming logic from
-`crabbox media preview` — leading/trailing static regions are removed, and an
-optional trimmed MP4 is emitted beside the GIF.
+`crabbox media preview` — static regions across the recording are removed, the
+moving segments are stitched together, and an optional trimmed MP4 is emitted
+beside the GIF.
 
 `crabbox artifacts video` records an MP4 (with a contact sheet) from a desktop
 lease as a standalone step, and `crabbox artifacts gif` is an alias for
