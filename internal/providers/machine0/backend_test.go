@@ -24,6 +24,9 @@ type fakeAPI struct {
 	getFn                  func(context.Context, string) (machine, error)
 	createFn               func(context.Context, createMachineRequest) error
 	createErr              error
+	selectedKey            *machineKey
+	selectedKeyErr         error
+	removeErr              error
 	sizes                  []machineSize
 	created                []createMachineRequest
 	stopped                []string
@@ -70,6 +73,9 @@ func (f *fakeAPI) Get(ctx context.Context, name string) (machine, error) {
 	}
 	return f.machine, nil
 }
+func (f *fakeAPI) SelectedKey(context.Context, string) (*machineKey, error) {
+	return f.selectedKey, f.selectedKeyErr
+}
 func (f *fakeAPI) Create(ctx context.Context, req createMachineRequest) error {
 	f.created = append(f.created, req)
 	for index := range f.getSequence {
@@ -106,7 +112,7 @@ func (f *fakeAPI) Suspend(_ context.Context, name string) error {
 }
 func (f *fakeAPI) Remove(_ context.Context, name string) error {
 	f.removed = append(f.removed, name)
-	return nil
+	return f.removeErr
 }
 func (f *fakeAPI) PrimeSSH(_ context.Context, name string) error {
 	f.primed = append(f.primed, name)
@@ -531,6 +537,195 @@ func TestAcquireTerminalStateRollsBackWithDiagnostic(t *testing.T) {
 	}
 	if len(api.removed) != 1 {
 		t.Fatalf("rollback removals=%v", api.removed)
+	}
+}
+
+func TestAcquireRecoveryClaimTracksCreatedMachines(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		keep          bool
+		removeErr     error
+		ready         bool
+		bindingFails  bool
+		claimChanged  bool
+		sshErr        error
+		wantClaim     bool
+		wantRecovery  bool
+		wantRemovals  int
+		stopRecovery  bool
+		wantCloudID   string
+		wantErrorPart string
+	}{
+		{name: "kept readiness failure remains discoverable and stoppable", keep: true, wantClaim: true, wantRecovery: true, stopRecovery: true},
+		{name: "rollback failure retains claim", removeErr: errors.New("provider unavailable"), wantClaim: true, wantRecovery: true, wantRemovals: 1, wantErrorPart: "recovery claim"},
+		{name: "changed pending claim prevents stale rollback", claimChanged: true, wantClaim: true, wantRecovery: true, wantErrorPart: "recovery claim"},
+		{name: "successful rollback removes claim", wantRemovals: 1},
+		{name: "failed ID binding rolls back pending claim", ready: true, bindingFails: true, wantRemovals: 1},
+		{name: "success upgrades claim", keep: true, ready: true, wantClaim: true, wantCloudID: "vm-123"},
+		{name: "SSH failure retains ID-scoped recovery claim", keep: true, ready: true, sshErr: errors.New("SSH authentication failed"), wantClaim: true, wantRecovery: true, wantCloudID: "vm-123"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := setupState(t)
+			api := &fakeAPI{sizes: []machineSize{testSize()}, removeErr: tc.removeErr}
+			var observed LeaseClaim
+			api.getFn = func(_ context.Context, name string) (machine, error) {
+				claims, err := core.ListLeaseClaims()
+				if err != nil || len(claims) != 1 {
+					t.Fatalf("claim was not durable before first readiness poll: claims=%#v err=%v", claims, err)
+				}
+				observed = claims[0]
+				if observed.Labels["machine0_name"] != name || observed.ProviderScope != machine0NameScope(name) || observed.Labels["recovery"] != "create-pending" {
+					t.Fatalf("pending recovery claim=%#v", observed)
+				}
+				if tc.claimChanged {
+					replacement := observed
+					replacement.Labels = make(map[string]string, len(observed.Labels)+1)
+					for key, value := range observed.Labels {
+						replacement.Labels[key] = value
+					}
+					replacement.Labels["replacement"] = "true"
+					if err := core.ReplaceLeaseClaimIfUnchanged(observed.LeaseID, observed, replacement); err != nil {
+						t.Fatal(err)
+					}
+				}
+				item := readyMachine("203.0.113.10")
+				item.Name = name
+				if tc.bindingFails {
+					item.ID = ""
+				}
+				api.machine = item
+				if tc.ready {
+					return item, nil
+				}
+				return machine{}, context.Canceled
+			}
+			b := testBackendWithAPI(api)
+			if tc.ready && !tc.bindingFails {
+				b.waitSSH = func(context.Context, *SSHTarget, time.Duration) error {
+					bound, ok, err := resolveClaim(observed.LeaseID)
+					if err != nil || !ok || bound.CloudID != "vm-123" || bound.ProviderScope != machineScope("vm-123") {
+						t.Fatalf("claim was not ID-scoped before SSH readiness: claim=%#v ok=%v err=%v", bound, ok, err)
+					}
+					return tc.sshErr
+				}
+			}
+			lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}, RequestedSlug: "recovery", Keep: tc.keep})
+			if tc.ready && !tc.bindingFails && tc.sshErr == nil {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || tc.wantErrorPart != "" && !strings.Contains(err.Error(), tc.wantErrorPart) {
+				t.Fatalf("err=%v", err)
+			}
+			if len(api.removed) != tc.wantRemovals {
+				t.Fatalf("rollback removals=%v", api.removed)
+			}
+			claim, ok, claimErr := resolveClaim(observed.LeaseID)
+			if claimErr != nil || ok != tc.wantClaim {
+				t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, claimErr)
+			}
+			if !ok {
+				return
+			}
+			if (claim.Labels["recovery"] == "create-pending") != tc.wantRecovery || claim.CloudID != tc.wantCloudID {
+				t.Fatalf("final claim=%#v lease=%#v", claim, lease)
+			}
+			if tc.stopRecovery {
+				views, listErr := b.List(context.Background(), ListRequest{})
+				if listErr != nil || len(views) != 1 {
+					t.Fatalf("recovery list=%#v err=%v", views, listErr)
+				}
+				api.getFn = func(context.Context, string) (machine, error) {
+					t.Fatal("pending recovery stop must remove the exact name without adopting an inventory machine")
+					return machine{}, nil
+				}
+				if releaseErr := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: claim.LeaseID}}); releaseErr != nil {
+					t.Fatalf("recovery stop: %v", releaseErr)
+				}
+				if _, remains, resolveErr := resolveClaim(claim.LeaseID); resolveErr != nil || remains {
+					t.Fatalf("released recovery claim remains=%v err=%v", remains, resolveErr)
+				}
+			}
+		})
+	}
+}
+
+func TestAcquirePreflightsPublicSSHKeyBeforeCreate(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		key        machineKey
+		createFile bool
+		wantError  bool
+	}{
+		{name: "public key without local private key", key: machineKey{Name: "remote-only", Type: "PUBLIC", FileName: "remote-only"}, wantError: true},
+		{name: "public key with local private key", key: machineKey{Name: "local-key", Type: "PUBLIC", FileName: "local-key"}, createFile: true},
+		{name: "managed key can materialize later", key: machineKey{Name: "managed-key", Type: "MANAGED", FileName: "machine0__managed-key"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := setupState(t)
+			if tc.createFile {
+				if err := os.WriteFile(filepath.Join(os.Getenv("SSH_KEY_PATH"), tc.key.FileName), []byte("fixture private key"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			api := &fakeAPI{sizes: []machineSize{testSize()}, selectedKey: &tc.key, getSequence: []machine{readyMachine("203.0.113.10")}}
+			_, err := testBackendWithAPI(api).Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
+			if tc.wantError {
+				if err == nil || !strings.Contains(err.Error(), tc.key.Name) || !strings.Contains(err.Error(), "--machine0-key <managed-key-name>") || len(api.created) != 0 {
+					t.Fatalf("err=%v created=%#v", err, api.created)
+				}
+				return
+			}
+			if err != nil || len(api.created) != 1 {
+				t.Fatalf("err=%v created=%#v", err, api.created)
+			}
+		})
+	}
+}
+
+func TestPendingRecoveryReleaseRejectsInvalidOwnershipAndSuspend(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*backend, *LeaseClaim)
+	}{
+		{name: "mismatched name scope", mutate: func(_ *backend, claim *LeaseClaim) { claim.ProviderScope = machine0NameScope("another-machine") }},
+		{name: "mismatched machine name", mutate: func(_ *backend, claim *LeaseClaim) { claim.Labels["machine0_name"] = "another-machine" }},
+		{name: "pending claim cannot suspend", mutate: func(b *backend, _ *LeaseClaim) { b.cfg.Machine0.ReleasePolicy = "suspend" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := setupState(t)
+			api := &fakeAPI{sizes: []machineSize{testSize()}}
+			api.getFn = func(_ context.Context, name string) (machine, error) {
+				item := readyMachine("203.0.113.10")
+				item.Name = name
+				api.machine = item
+				return machine{}, context.Canceled
+			}
+			b := testBackendWithAPI(api)
+			if _, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}, RequestedSlug: "pending", Keep: true}); err == nil {
+				t.Fatal("expected interrupted acquisition")
+			}
+			claims, err := core.ListLeaseClaims()
+			if err != nil || len(claims) != 1 {
+				t.Fatalf("claims=%#v err=%v", claims, err)
+			}
+			claim, replacement := claims[0], claims[0]
+			replacement.Labels = make(map[string]string, len(claim.Labels))
+			for key, value := range claim.Labels {
+				replacement.Labels[key] = value
+			}
+			tc.mutate(b, &replacement)
+			if err := core.ReplaceLeaseClaimIfUnchanged(claim.LeaseID, claim, replacement); err != nil {
+				t.Fatal(err)
+			}
+			err = b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: claim.LeaseID}})
+			if err == nil || len(api.removed) != 0 {
+				t.Fatalf("pending release err=%v removals=%v", err, api.removed)
+			}
+			if _, ok, resolveErr := resolveClaim(claim.LeaseID); resolveErr != nil || !ok {
+				t.Fatalf("recovery claim not retained: ok=%v err=%v", ok, resolveErr)
+			}
+		})
 	}
 }
 

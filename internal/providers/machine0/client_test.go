@@ -54,6 +54,35 @@ func TestClientCreateCommandConstruction(t *testing.T) {
 	}
 }
 
+func TestClientSelectedKeyReadsExplicitOrDefaultKey(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		selected string
+		command  string
+		output   string
+		wantName string
+	}{
+		{name: "explicit key", selected: "remote-key", command: "keys\x00get\x00remote-key\x00--json", output: `{"name":"remote-key","type":"PUBLIC","fileName":"id_ed25519"}`, wantName: "remote-key"},
+		{name: "account default", command: "keys\x00ls\x00--json", output: `[{"name":"other","type":"MANAGED"},{"name":"default-key","type":"PUBLIC","fileName":"id_rsa","isDefault":true}]`, wantName: "default-key"},
+		{name: "no default preserves CLI behavior", command: "keys\x00ls\x00--json", output: `[]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &recordingRunner{responses: map[string]core.LocalCommandResult{tc.command: {Stdout: tc.output}}, errors: map[string]error{}}
+			key, err := testClient(runner).SelectedKey(context.Background(), tc.selected)
+			if err != nil || len(runner.calls) != 1 {
+				t.Fatalf("key=%#v err=%v calls=%#v", key, err, runner.calls)
+			}
+			if tc.wantName == "" {
+				if key != nil {
+					t.Fatalf("unexpected key=%#v", key)
+				}
+			} else if key == nil || key.Name != tc.wantName {
+				t.Fatalf("key=%#v want name=%q", key, tc.wantName)
+			}
+		})
+	}
+}
+
 func TestClientStopCommandConstruction(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}, errors: map[string]error{}}
 	c := testClient(runner)

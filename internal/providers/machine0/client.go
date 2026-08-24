@@ -23,6 +23,7 @@ type machine0API interface {
 	Version(context.Context) (string, error)
 	List(context.Context) ([]machine, error)
 	Get(context.Context, string) (machine, error)
+	SelectedKey(context.Context, string) (*machineKey, error)
 	Create(context.Context, createMachineRequest) error
 	Start(context.Context, string) error
 	Stop(context.Context, string) error
@@ -73,6 +74,7 @@ type machineKey struct {
 	Type      string `json:"type"`
 	FileName  string `json:"fileName"`
 	PublicKey string `json:"publicKey"`
+	IsDefault bool   `json:"isDefault"`
 }
 
 type createMachineRequest struct {
@@ -255,6 +257,37 @@ func (c *client) Get(ctx context.Context, name string) (machine, error) {
 		return machine{}, exit(5, "invalid machine0 get %s --json: %v", name, err)
 	}
 	return item, nil
+}
+
+func (c *client) SelectedKey(ctx context.Context, name string) (*machineKey, error) {
+	if name = strings.TrimSpace(name); name != "" {
+		result, err := c.runRead(ctx, "keys", "get", name, "--json")
+		if err != nil {
+			return nil, err
+		}
+		var key machineKey
+		if err := decodeJSON(result.Stdout, &key); err != nil {
+			return nil, exit(5, "parse machine0 keys get %s --json: %v", name, err)
+		}
+		if strings.TrimSpace(key.Name) != name {
+			return nil, exit(5, "machine0 key lookup returned mismatched key name: expected %s, found %s", name, blank(key.Name, "<empty>"))
+		}
+		return &key, nil
+	}
+	result, err := c.runRead(ctx, "keys", "ls", "--json")
+	if err != nil {
+		return nil, err
+	}
+	var keys []machineKey
+	if err := decodeJSON(result.Stdout, &keys); err != nil {
+		return nil, exit(5, "parse machine0 keys ls --json: %v", err)
+	}
+	for index := range keys {
+		if keys[index].IsDefault {
+			return &keys[index], nil
+		}
+	}
+	return nil, nil
 }
 
 func validateMachine(item machine, requireID bool) error {

@@ -167,6 +167,9 @@ func (b *backend) acquireFixed(ctx context.Context, req AcquireRequest) (LeaseTa
 				if pinned != nil {
 					return exit(4, "lease_id_conflict: fixed Machine0 lease %s has an unresolved create attempt; retry after provider inventory converges", leaseID)
 				}
+				if err := b.preflightSSHKey(ctx, cfg.Machine0.Key); err != nil {
+					return err
+				}
 				image := cfg.Machine0.Image
 				if req.Options.Desktop && strings.TrimSpace(cfg.Machine0.DesktopImage) != "" {
 					image = cfg.Machine0.DesktopImage
