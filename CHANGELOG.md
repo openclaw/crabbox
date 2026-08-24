@@ -5,6 +5,7 @@
 ### Added
 
 - Added fixed idempotent `--lease-id` replay to local-container warmups, with exact container-intent matching and single-use released IDs.
+- Added retained AWS `run --lease-output` handles, including coordinator run IDs for brokered receipt recovery and exact cleanup commands written before command execution.
 
 ### Fixed
 

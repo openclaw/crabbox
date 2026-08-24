@@ -38,6 +38,7 @@ crabbox warmup --provider aws --class standard
 crabbox warmup --provider aws --arch arm64 --class fast
 crabbox run --provider aws --class fast -- pnpm test
 crabbox run --provider aws --market on-demand -- pnpm check
+crabbox run --provider aws --id cbx_abcdef123456 --lease-output run.json -- pnpm test
 crabbox warmup --provider aws --target windows --desktop
 crabbox warmup --provider aws --target windows --windows-mode wsl2
 crabbox warmup --provider aws --target macos --desktop --market on-demand
@@ -220,6 +221,14 @@ Brokered cleanup is owned by the Worker (lease expiry plus an AWS orphan
 sweep). Direct cleanup is best-effort via provider labels and
 `crabbox cleanup --provider aws`.
 
+AWS also supports the provider-neutral retained run handle. Add
+`--lease-output <file>` to a retained run to record the exact lease ID, slug,
+coordinator run ID when brokered, and cleanup command before sync or command
+execution begins. A reused `--id` lease is retained by default; a newly created
+lease also requires `--keep`. The handle remains useful after a later command
+failure, but only a coordinator-backed run ID can be used to retrieve a signed
+terminal receipt.
+
 ## Checkpoints
 
 AWS supports provider-native checkpoints in addition to workspace archives:
@@ -241,6 +250,7 @@ In brokered mode you can promote and warm AMIs:
 - Desktop / browser / code: yes, target-dependent.
 - Tailscale: Linux managed leases.
 - Actions hydration: Linux SSH leases only.
+- Retained run-session handle: yes.
 - Coordinator (broker): supported.
 
 ## Gotchas

@@ -1920,6 +1920,185 @@ func TestRunCommandWritesReusedLocalContainerLeaseOutput(t *testing.T) {
 	}
 }
 
+func TestRunCommandWritesBrokeredReusedAWSLeaseOutputBeforeCommand(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		createRunFail bool
+	}{
+		{name: "success"},
+		{name: "create run failure", createRunFail: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			dir := t.TempDir()
+			isolateRunTestUserDirs(t, dir)
+			t.Chdir(dir)
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+			runGit(t, dir, "init")
+			runGit(t, dir, "config", "user.email", "test@example.com")
+			runGit(t, dir, "config", "user.name", "Test")
+			writeFile(t, filepath.Join(dir, "README.md"), "fixture\n")
+			runGit(t, dir, "add", ".")
+			runGit(t, dir, "commit", "-m", "fixture")
+
+			const (
+				leaseID = "cbx_aws_session"
+				runID   = "run_aws_session"
+				slug    = "aws-session"
+			)
+			sessionPath := filepath.Join(dir, "session.json")
+			commandMarker := filepath.Join(dir, "command-ran")
+			sshPath := filepath.Join(dir, "ssh")
+			installWorkspaceOwnerAwareSSH(t, sshPath, `#!/bin/sh
+case "$1" in
+  *session-command-sentinel*)
+    test -s "$CRABBOX_TEST_LEASE_OUTPUT" || exit 91
+    : > "$CRABBOX_TEST_COMMAND_MARKER"
+    ;;
+esac
+/bin/cat >/dev/null || true
+exit 0
+`)
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("CRABBOX_TEST_LEASE_OUTPUT", sessionPath)
+			t.Setenv("CRABBOX_TEST_COMMAND_MARKER", commandMarker)
+
+			lease := CoordinatorLease{
+				ID:                 leaseID,
+				Slug:               slug,
+				Provider:           "aws",
+				TargetOS:           targetLinux,
+				State:              "active",
+				Host:               "127.0.0.1",
+				SSHUser:            "crabbox",
+				SSHPort:            "22",
+				SSHHostKey:         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICFNHmH+uXzuQadD4Pg9JhPQvl5fkM4L9spUDQ/mI+pc",
+				WorkRoot:           "/work/crabbox",
+				IdleTimeoutSeconds: 1800,
+			}
+			var (
+				mu             sync.Mutex
+				createRunCalls atomic.Int32
+				storedReceipt  terminalRunReceipt
+			)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/v1/control":
+					http.NotFound(w, r)
+				case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/"+leaseID:
+					_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+				case r.Method == http.MethodPost && r.URL.Path == "/v1/runs":
+					createRunCalls.Add(1)
+					if tc.createRunFail {
+						http.Error(w, "run store unavailable", http.StatusServiceUnavailable)
+						return
+					}
+					var body map[string]any
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+					if body["leaseID"] != leaseID {
+						http.Error(w, "wrong lease", http.StatusBadRequest)
+						return
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"run": CoordinatorRun{
+						ID: runID, LeaseID: leaseID, Provider: "aws", State: "running",
+						StartedAt: "2026-08-24T00:00:00Z",
+					}})
+				case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/"+runID+"/events":
+					_ = json.NewEncoder(w).Encode(map[string]any{"event": CoordinatorRunEvent{
+						RunID: runID, Seq: 1, Type: "run.event", CreatedAt: "2026-08-24T00:00:00Z",
+					}})
+				case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/"+leaseID+"/heartbeat":
+					_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+				case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/"+runID+"/finish":
+					var body struct {
+						Receipt terminalRunReceipt `json:"receipt"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+					mu.Lock()
+					storedReceipt = body.Receipt
+					mu.Unlock()
+					_ = json.NewEncoder(w).Encode(map[string]any{"run": CoordinatorRun{
+						ID: runID, LeaseID: leaseID, Provider: "aws", State: "succeeded",
+						StartedAt: "2026-08-24T00:00:00Z",
+					}})
+				case r.Method == http.MethodGet && r.URL.Path == "/v1/runs/"+runID+"/receipt":
+					mu.Lock()
+					receipt := storedReceipt
+					mu.Unlock()
+					_ = json.NewEncoder(w).Encode(map[string]any{"receipt": receipt})
+				default:
+					http.Error(w, r.Method+" "+r.URL.Path, http.StatusNotFound)
+				}
+			}))
+			t.Cleanup(server.Close)
+			t.Setenv("CRABBOX_COORDINATOR", server.URL)
+			t.Setenv("CRABBOX_COORDINATOR_TOKEN", "test-token")
+			testAWSBackendOverride = testSSHBackend{spec: testAWSProvider{}.Spec()}
+			t.Cleanup(func() {
+				testAWSBackendOverride = nil
+				removeLeaseClaim(leaseID)
+			})
+
+			var stdout, stderr bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(t.Context(), []string{
+				"--provider", "aws",
+				"--id", leaseID,
+				"--no-sync",
+				"--no-hydrate",
+				"--lease-output", sessionPath,
+				"--", "session-command-sentinel",
+			})
+			if calls := createRunCalls.Load(); calls != 1 {
+				t.Fatalf("create run calls=%d, want 1; error=%v\nstdout=%s\nstderr=%s", calls, err, stdout.String(), stderr.String())
+			}
+			if tc.createRunFail {
+				var exitErr ExitError
+				if !AsExitError(err, &exitErr) || exitErr.Code != 7 || !strings.Contains(exitErr.Message, "coordinator run handle") {
+					t.Fatalf("error=%v, want exit 7 coordinator handle failure\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+				}
+				assertRunSessionValidationStoppedBeforeWork(t, sessionPath, commandMarker, filepath.Join(dir, "unused-sync-marker"))
+				return
+			}
+			if err != nil {
+				t.Fatalf("runCommand: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+			}
+			if _, err := os.Stat(commandMarker); err != nil {
+				t.Fatalf("command marker: %v", err)
+			}
+			session, _, _ := readRunSessionHandleTest(t, sessionPath)
+			if session.Provider != "aws" || session.LeaseID != leaseID || session.Slug != slug || !session.Reused || !session.Kept {
+				t.Fatalf("session=%#v", session)
+			}
+			if session.RunID != runID {
+				t.Fatalf("runId=%q want %q", session.RunID, runID)
+			}
+			if want := "crabbox stop --provider aws --target linux --id " + leaseID; session.CleanupCommand != want {
+				t.Fatalf("cleanupCommand=%q want %q", session.CleanupCommand, want)
+			}
+			client := CoordinatorClient{BaseURL: server.URL, Token: "test-token", Client: server.Client()}
+			receipt, err := client.RunReceipt(t.Context(), runID)
+			if err != nil {
+				t.Fatalf("retrieve persisted receipt: %v", err)
+			}
+			if receipt.SchemaVersion != terminalReceiptSchemaVersion || receipt.ReceiptType != terminalReceiptType {
+				t.Fatalf("receipt schema=%d type=%q", receipt.SchemaVersion, receipt.ReceiptType)
+			}
+			if receipt.Provider != "aws" || receipt.LeaseID != leaseID || receipt.RunID != runID {
+				t.Fatalf("receipt identity=%#v", receipt)
+			}
+			if strings.TrimSpace(receipt.Signer) == "" || strings.TrimSpace(receipt.Signature) == "" {
+				t.Fatalf("receipt missing signer or signature: %#v", receipt)
+			}
+		})
+	}
+}
+
 func TestRunCommandLocalContainerLeaseOutputValidationFailureReleasesFreshLease(t *testing.T) {
 	for _, tc := range []struct {
 		name        string

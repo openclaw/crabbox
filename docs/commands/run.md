@@ -114,14 +114,16 @@ for debugging when the remote command exits non-zero; Crabbox then prints
 inspect/SSH/stop commands for the exact failed box. Add `--lease-output <file>`
 with `--keep` to write a small JSON lease handle for orchestrators on providers
 that advertise `run-session`. Delegated providers return their own handle.
-`local-container` opts into the same schema through the core SSH path: a fresh
-run requires `--keep`, while a reused `--id` run requires the default or
+AWS and `local-container` opt into the same schema through the core SSH path: a
+fresh run requires `--keep`, while a reused `--id` run requires the default or
 `--stop-after never` policy so the lease cannot be released after the handle is
 reported. Conflicting policies are rejected before acquisition. Core writes the
 handle after recording the exact lease claim and before sync or command
 execution, so later run failures leave the cleanup handle available. The handle
 contains only the provider, exact lease ID, optional slug, reused/kept state,
-optional run ID, and the exact `crabbox stop` cleanup command.
+optional run ID, and the exact `crabbox stop` cleanup command. On brokered AWS,
+the run ID is the coordinator run that can later resolve to a signed terminal
+receipt; direct AWS run IDs are local correlation identifiers only.
 
 ## Delegated providers
 

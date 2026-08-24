@@ -688,7 +688,10 @@ Checkpoint-related features are reserved for versioned workspaces:
 - `FeatureRunSession`: exposes a provider-neutral run-session handle. Delegated
   adapters may return it in `RunResult`; an explicitly opted-in SSH-lease
   provider may have core emit it after claim recording. SSH participants must
-  also advertise `FeatureSSH` and `FeatureCleanup`.
+  also advertise `FeatureSSH` and `FeatureCleanup`. AWS and `local-container`
+  use this core-owned SSH contract; providers do not construct the handle
+  themselves. A brokered run ID identifies coordinator history, while a direct
+  run ID is only local correlation metadata.
 - `FeatureRunArtifacts`: delegated provider can validate and collect bounded run
   artifact globs after a successful command, including required artifacts.
 - `FeatureRunDownloads`: delegated provider can materialize bounded single-file

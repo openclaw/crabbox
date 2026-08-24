@@ -220,6 +220,11 @@ type JSONListBackend interface {
 }
 ```
 
+`FeatureRunSession` is also an explicit capability contract. Delegated
+providers return their handle in `RunResult`; opted-in SSH providers such as AWS
+and `local-container` rely on core to write the handle after exact claim and
+coordinator run recording. Do not add provider-specific handle construction.
+
 Provider-native checkpoints/images are also expressed through optional hooks
 (`NativeCheckpointProvider`, `NativeCheckpointForkProvider`) rather than core
 provider-name checks, and config routing/server-type defaults through

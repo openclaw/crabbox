@@ -6,6 +6,18 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
+func TestProviderAdvertisesRunSessionContract(t *testing.T) {
+	spec := (Provider{}).Spec()
+	for _, feature := range []core.Feature{core.FeatureSSH, core.FeatureCleanup, core.FeatureRunSession} {
+		if !spec.Features.Has(feature) {
+			t.Fatalf("features=%v missing %s", spec.Features, feature)
+		}
+	}
+	if err := core.ValidateRunSessionFeatureSpec(spec); err != nil {
+		t.Fatalf("run-session contract: %v", err)
+	}
+}
+
 func TestNativeCheckpointCapabilitySupportsWindowsImages(t *testing.T) {
 	req := core.NativeCheckpointRequest{
 		Server:           core.Server{CloudID: "i-123"},
