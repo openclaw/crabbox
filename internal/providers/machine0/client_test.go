@@ -310,6 +310,16 @@ func TestClientCommandFailurePreservesDeadlineAndSignalCause(t *testing.T) {
 			wantCause: "context deadline exceeded",
 		},
 		{
+			name: "cancellation with printed version",
+			context: func() (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx, cancel
+			},
+			err:       errors.New("signal: killed"),
+			wantCause: "context canceled",
+		},
+		{
 			name: "signal with printed version",
 			context: func() (context.Context, context.CancelFunc) {
 				return context.WithCancel(context.Background())

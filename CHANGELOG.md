@@ -5,6 +5,7 @@
 ### Fixed
 
 - Redacted coordinator URL credentials, query parameters, and fragments from run-context portal and logs links.
+- Preserved Machine0 command deadline, cancellation, and signal failures with partial output and ran independent doctor probes concurrently.
 - Required an exact, locked local ownership claim before releasing ordinary AWS instances, preventing tag-matched resources from being terminated without durable lease authority.
 - Streamed artifact-collection scripts through SSH stdin so multiple artifact globs no longer overflow macOS OpenSSH multiplexed session requests.
 - Allowed Windows and WSL2 SSH readiness checks enough time for delayed native OpenSSH handshakes without slowing Linux or macOS readiness.

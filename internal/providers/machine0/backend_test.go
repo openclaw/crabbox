@@ -44,6 +44,7 @@ type fakeAPI struct {
 	stopErr                error
 	startErr               error
 	saveErr                error
+	versionErr             error
 	actions                []string
 	primeSSH               func(string) error
 	doctorDelay            time.Duration
@@ -52,6 +53,9 @@ type fakeAPI struct {
 }
 
 func (f *fakeAPI) Version(ctx context.Context) (string, error) {
+	if f.versionErr != nil {
+		return "", f.versionErr
+	}
 	if err := f.waitDoctorProbe(ctx); err != nil {
 		return "", err
 	}
@@ -1107,6 +1111,24 @@ func TestDoctorRunsSlowProviderProbesWithinSharedBudget(t *testing.T) {
 	}
 	if !strings.Contains(result.Message, "leases=1") || !strings.Contains(result.Message, "sizes=1") {
 		t.Fatalf("doctor result=%#v", result)
+	}
+}
+
+func TestDoctorProbeFailureCancelsSiblingProbes(t *testing.T) {
+	wantErr := errors.New("machine0 version probe failed")
+	api := &fakeAPI{
+		versionErr:  wantErr,
+		doctorDelay: time.Hour,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := testBackendWithAPI(api).Doctor(ctx, DoctorRequest{})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("doctor error=%v, want original probe error %v", err, wantErr)
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("sibling probes were not canceled before the parent context expired: %v", ctx.Err())
 	}
 }
 
