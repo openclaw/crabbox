@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -96,6 +98,22 @@ func fixedLocalContainerFingerprint(cfg core.Config, req core.AcquireRequest, pu
 func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg core.Config) (core.LeaseTarget, error) {
 	leaseID := strings.TrimSpace(req.RequestedLeaseID)
 	var fingerprint, publicKey string
+	var pendingClaim core.LeaseClaim
+	var pendingLease core.LeaseTarget
+	rememberPending := func(claim *core.LeaseClaim, lease core.LeaseTarget) {
+		if !isPendingLocalContainerClaim(*claim) || claim.CloudID != lease.Server.CloudID {
+			return
+		}
+		pendingClaim = *claim
+		pendingClaim.Labels = cloneLabels(claim.Labels)
+		if claim.FixedCreateIntent != nil {
+			intent := *claim.FixedCreateIntent
+			intent.Attempt = cloneLabels(claim.FixedCreateIntent.Attempt)
+			intent.FailedAttempts = append([]string(nil), claim.FixedCreateIntent.FailedAttempts...)
+			pendingClaim.FixedCreateIntent = &intent
+		}
+		pendingLease = lease
+	}
 	acquired, err := core.AcquireFixedLease(core.FixedAcquireOptions{
 		Kind:        fixedLocalContainerLeaseKind,
 		LeaseID:     leaseID,
@@ -147,6 +165,7 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 		if len(matches) > 1 {
 			return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: multiple local containers match fixed lease %s", leaseID)
 		}
+		recoveringUnboundAttempt := len(matches) == 1 && claim.CloudID == ""
 		name := core.LeaseProviderName(leaseID, intent.Slug)
 		if intent.Attempt != nil && intent.Attempt["container_name"] != name {
 			return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: fixed local-container lease %s has an invalid durable create attempt", leaseID)
@@ -187,6 +206,7 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 			if err := persist(); err != nil {
 				return core.LeaseTarget{}, err
 			}
+			rememberPending(claim, pending)
 			if createErr != nil {
 				return core.LeaseTarget{}, createErr
 			}
@@ -199,7 +219,8 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 			}
 		}
 		if containerID := intent.Attempt["container_id"]; containerID != "" && containerID != container.ID {
-			return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: fixed local-container lease %s does not match its durable container identity", leaseID)
+			return core.LeaseTarget{}, fmt.Errorf("%w: %w", errContainerIdentityMismatch,
+				core.Exit(4, "lease_id_conflict: fixed local-container lease %s does not match its durable container identity", leaseID))
 		}
 		if claim.CloudID == "" {
 			pending := createdPendingLease(cfg, container.ID, leaseID, intent.Slug, container.Config.Labels["bootstrap_dir"], req.Keep)
@@ -211,14 +232,35 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 				return core.LeaseTarget{}, err
 			}
 		}
-		if !container.State.Running {
-			return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: fixed local-container lease %s is bound to a non-running container", leaseID)
+		if isPendingLocalContainerClaim(*claim) {
+			rememberPending(claim, b.pendingLease(cfg, container, leaseID, intent.Slug))
 		}
-		lease, err := b.waitForContainerEndpoint(ctx, cfg, container.ID, leaseID, intent.Slug)
+		containerID := strings.TrimSpace(claim.CloudID)
+		if !container.State.Running {
+			notRunning := core.Exit(4, "lease_id_conflict: fixed local-container lease %s is bound to a non-running container", leaseID)
+			if observedErr := validateObservedContainer(container, containerID, leaseID); observedErr != nil {
+				if recoveringUnboundAttempt {
+					return core.LeaseTarget{}, errors.Join(notRunning, observedErr)
+				}
+				return core.LeaseTarget{}, observedErr
+			}
+			return core.LeaseTarget{}, notRunning
+		}
+		lease, err := b.waitForContainerEndpoint(ctx, cfg, containerID, leaseID, intent.Slug)
 		if err != nil {
 			return core.LeaseTarget{}, err
 		}
-		if err := b.waitForSSHReady(ctx, &lease.SSH, b.rt.Stderr, "local container ssh", core.BootstrapWaitTimeout(cfg)); err != nil {
+		if isPendingLocalContainerClaim(*claim) {
+			claim.SSHHost = lease.SSH.Host
+			if port, parseErr := strconv.Atoi(strings.TrimSpace(lease.SSH.Port)); parseErr == nil && port > 0 {
+				claim.SSHPort = port
+			}
+			if err := persist(); err != nil {
+				return core.LeaseTarget{}, err
+			}
+			rememberPending(claim, lease)
+		}
+		if err := b.waitForExactContainerSSHReady(ctx, &lease, core.BootstrapWaitTimeout(cfg)); err != nil {
 			return core.LeaseTarget{}, err
 		}
 		lease.Server.Status = "ready"
@@ -233,6 +275,14 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 		return lease, nil
 	}, ctx)
 	if err != nil {
+		if pendingClaim.LeaseID == leaseID && pendingLease.Server.CloudID == pendingClaim.CloudID {
+			bootstrapDir := strings.TrimSpace(pendingClaim.Labels["bootstrap_dir"])
+			retained, reconcileErr := b.reconcileReadinessFailure(req.Keep, pendingClaim, pendingLease, bootstrapDir, err)
+			if retained {
+				b.printPendingRecovery(leaseID, pendingClaim.Slug, pendingClaim, err)
+			}
+			return core.LeaseTarget{}, errors.Join(err, reconcileErr)
+		}
 		return core.LeaseTarget{}, err
 	}
 	claim, err := core.ReadLeaseClaim(leaseID)

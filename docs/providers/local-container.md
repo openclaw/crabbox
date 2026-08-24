@@ -95,6 +95,9 @@ slug, runtime scope, and intent fingerprint match. Changing the image or other
 container-shaping configuration returns `lease_id_conflict` instead of silently
 reusing the lease. An unresolved create attempt or a missing previously
 acquired container also fails closed without starting a second container.
+If the exact container exits, stops, or becomes dead before SSH is ready,
+fixed-ID warmup fails promptly while retaining its original fixed claim and
+recovery metadata when kept.
 
 Stopping a fixed lease preserves a terminal local tombstone, so the same
 operation ID cannot create another container after release. Use a new fixed
@@ -271,17 +274,30 @@ metadata updates.
 
 When `warmup` or `run --keep` creates the container but SSH readiness is
 canceled, fails, or times out, Crabbox keeps the exact pending claim, container,
-key, and bootstrap directory. The failed command prints copyable, runtime-scoped
-`inspect`, `run --reclaim --sync-only`, and `stop` commands. Pending claims stay
-visible in inventory as `provisioning` (or `missing` with a provisioning label
-if the container disappeared) and never report ready. `stop` accepts the exact
-pending claim without requiring a successful intervening run and fences the
-container deletion against concurrent claim changes. The provider cleanup sweep
-leaves a missing keep-enabled pending claim for explicit recovery or `stop`
-instead of discarding its ownership evidence; a missing non-keep pending claim
-is fenced and removed with its key and bootstrap state. Fresh one-shot runs and
-`warmup --keep=false` still remove the container, key, bootstrap directory, and
-claim when readiness does not complete.
+key, and bootstrap directory. If that exact container exits, stops, or becomes
+dead, acquisition and `status --wait` fail promptly instead of waiting out the
+SSH timeout. `status` and inventory report the observed terminal runtime state
+even when the retained ownership claim is still `provisioning` or previously
+reached `ready`; checking terminal status never rewrites recovery metadata.
+
+The failed command prints copyable, runtime-scoped `inspect` and `stop`
+commands, plus `run --reclaim --sync-only` when recovery remains possible.
+Terminal bootstrap failures also report the runtime state and, when the
+container is restartable and its runtime route can be reproduced safely, an
+exact-container `docker start` or `podman start` command; restart that container
+before reclaiming it. A `dead` container cannot be restarted or reclaimed and
+must be cleaned up. Running pending claims stay visible as `provisioning`, while
+a disappeared container is reported as `missing` with its provisioning label
+intact. `stop` accepts the exact pending claim without requiring a successful
+intervening run and fences the container deletion against concurrent claim
+changes. The provider cleanup sweep leaves a missing keep-enabled pending claim
+for explicit recovery or `stop` instead of discarding its ownership evidence; a
+missing non-keep pending claim is fenced and removed with its key and bootstrap
+state. Fresh one-shot runs and `warmup --keep=false` still remove the container,
+key, bootstrap directory, and active claim when readiness does not complete;
+fixed IDs retain only their terminal single-use tombstone.
+If an exact inspect returns a replacement container, Crabbox refuses all
+destructive cleanup and retains the original ownership evidence.
 
 Named Docker contexts and Podman connections are included in those recovery
 commands. Custom runtime endpoints remain private in the local claim rather

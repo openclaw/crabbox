@@ -1437,29 +1437,52 @@ func TestServerFromContainerDropsEmptyInheritedLabels(t *testing.T) {
 	}
 }
 
-func TestMergeReadyClaimPreservesObservedExitedStatus(t *testing.T) {
-	server := core.Server{
-		CloudID: "stopped-container",
-		Status:  "exited",
-		Labels:  map[string]string{"state": "provisioning"},
-	}
-	claim := core.LeaseClaim{
-		CloudID: "stopped-container",
-		Labels: map[string]string{
-			"state": "ready", checkpointMetadataHost: "tcp://user:password@example.invalid", checkpointMetadataEndpoint: "tcp://user:password@example.invalid", checkpointMetadataConfig: "/private/docker-config",
-		},
-	}
-	merged := mergeLocalContainerClaim(server, claim)
-	if merged.Status != "exited" {
-		t.Fatalf("merged status=%q, want observed exited", merged.Status)
-	}
-	if merged.Labels["state"] != "ready" {
-		t.Fatalf("claim readiness label lost: %#v", merged.Labels)
-	}
-	for _, key := range []string{checkpointMetadataHost, checkpointMetadataEndpoint, checkpointMetadataConfig} {
-		if merged.Labels[key] != "" {
-			t.Fatalf("private claim label %s projected: %#v", key, merged.Labels)
-		}
+func TestTerminalContainerStateOverridesStaleLabels(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		runtimeState string
+		claimState   string
+	}{
+		{name: "exited provisioning", runtimeState: "exited", claimState: pendingClaimState},
+		{name: "dead provisioning", runtimeState: "dead", claimState: pendingClaimState},
+		{name: "podman stopped provisioning", runtimeState: "stopped", claimState: pendingClaimState},
+		{name: "previously ready exited", runtimeState: "exited", claimState: "ready"},
+		{name: "previously ready dead", runtimeState: "dead", claimState: "ready"},
+		{name: "previously ready podman stopped", runtimeState: "stopped", claimState: "ready"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := testBackend(&recordingRunner{})
+			container := inspectContainer{
+				ID: "stopped-container",
+				Config: inspectConfig{Labels: map[string]string{
+					"state": tc.claimState, "recovery": pendingRecoveryKind,
+				}},
+				State: inspectState{Status: tc.runtimeState},
+			}
+			server := b.serverFromContainer(container, b.cfg)
+			if server.Status != tc.runtimeState || server.Labels["state"] != tc.runtimeState {
+				t.Fatalf("observed server=%#v, want runtime state %q", server, tc.runtimeState)
+			}
+			claim := core.LeaseClaim{
+				CloudID: container.ID,
+				Labels: map[string]string{
+					"state": tc.claimState, "recovery": pendingRecoveryKind,
+					checkpointMetadataHost: "tcp://user:password@example.invalid", checkpointMetadataEndpoint: "tcp://user:password@example.invalid", checkpointMetadataConfig: "/private/docker-config",
+				},
+			}
+			merged := mergeLocalContainerClaim(server, claim)
+			if merged.Status != tc.runtimeState || merged.Labels["state"] != tc.runtimeState {
+				t.Fatalf("merged server=%#v, want runtime state %q", merged, tc.runtimeState)
+			}
+			if merged.Labels["recovery"] != pendingRecoveryKind || claim.Labels["state"] != tc.claimState {
+				t.Fatalf("recovery claim changed: merged=%#v claim=%#v", merged.Labels, claim.Labels)
+			}
+			for _, key := range []string{checkpointMetadataHost, checkpointMetadataEndpoint, checkpointMetadataConfig} {
+				if merged.Labels[key] != "" {
+					t.Fatalf("private claim label %s projected: %#v", key, merged.Labels)
+				}
+			}
+		})
 	}
 }
 
@@ -2543,18 +2566,382 @@ func TestAcquireSSHReadinessFailurePolicy(t *testing.T) {
 	}
 }
 
+func TestAcquireTerminalContainerFailsPromptlyAndPreservesRecoveryPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		runtimeState      string
+		terminalAtInspect int
+		keep              bool
+		fixed             bool
+		hostWorkRoot      bool
+		restart           bool
+		ready             bool
+		sshFailure        bool
+	}{
+		{name: "exited before endpoint retained", runtimeState: "exited", terminalAtInspect: 1, keep: true},
+		{name: "dead before SSH retained", runtimeState: "dead", terminalAtInspect: 3, keep: true},
+		{name: "podman stopped before SSH retained", runtimeState: "stopped", terminalAtInspect: 3, keep: true},
+		{name: "exited during SSH retained and restarted", runtimeState: "exited", terminalAtInspect: 4, keep: true, restart: true},
+		{name: "dead immediately after SSH readiness retained", runtimeState: "dead", terminalAtInspect: 4, keep: true, ready: true},
+		{name: "exited SSH failure observes terminal state", runtimeState: "exited", terminalAtInspect: 4, keep: true, sshFailure: true},
+		{name: "dead during SSH rolled back", runtimeState: "dead", terminalAtInspect: 4},
+		{name: "exited before endpoint rolled back", runtimeState: "exited", terminalAtInspect: 1},
+		{name: "exited before endpoint rolls back owned host work root", runtimeState: "exited", terminalAtInspect: 1, hostWorkRoot: true},
+		{name: "fixed exited before endpoint retained", runtimeState: "exited", terminalAtInspect: 1, keep: true, fixed: true},
+		{name: "fixed dead before SSH retained", runtimeState: "dead", terminalAtInspect: 3, keep: true, fixed: true},
+		{name: "fixed podman stopped before SSH retained", runtimeState: "stopped", terminalAtInspect: 3, keep: true, fixed: true},
+		{name: "fixed exited during SSH retained and restarted", runtimeState: "exited", terminalAtInspect: 4, keep: true, fixed: true, restart: true},
+		{name: "fixed dead immediately after SSH readiness retained", runtimeState: "dead", terminalAtInspect: 4, keep: true, fixed: true, ready: true},
+		{name: "fixed dead SSH failure observes terminal state", runtimeState: "dead", terminalAtInspect: 4, keep: true, fixed: true, sshFailure: true},
+		{name: "fixed dead during SSH rolls back to terminal tombstone", runtimeState: "dead", terminalAtInspect: 4, fixed: true},
+		{name: "fixed exited before endpoint rolls back owned host work root", runtimeState: "exited", terminalAtInspect: 1, fixed: true, hostWorkRoot: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, runner, stderr, leaseID, bootstrapDir, containerPresent := pendingAcquireBackend(t)
+			var hostWorkRoot string
+			if tc.hostWorkRoot {
+				socketRoot, err := os.MkdirTemp("", "cbx-socket-")
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.RemoveAll(socketRoot) })
+				socketPath := filepath.Join(socketRoot, "docker.sock")
+				listener := listenUnixSocketOrSkip(t, socketPath)
+				defer listener.Close()
+				t.Setenv("DOCKER_HOST", "unix://"+socketPath)
+				hostWorkRoot = t.TempDir()
+				b.cfg.LocalContainer.DockerSocket = true
+				b.cfg.LocalContainer.WorkRoot = hostWorkRoot
+				b.cfg.WorkRoot = hostWorkRoot
+			}
+			originalRun := runner.run
+			inspectCount := 0
+			terminal := true
+			runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				result, err := originalRun(req)
+				if err != nil || firstArg(req.Args) != "inspect" {
+					return result, err
+				}
+				inspectCount++
+				if !terminal || inspectCount < tc.terminalAtInspect {
+					return result, nil
+				}
+				var containers []inspectContainer
+				if err := json.Unmarshal([]byte(result.Stdout), &containers); err != nil {
+					return core.LocalCommandResult{}, err
+				}
+				containers[0].State = inspectState{Status: tc.runtimeState}
+				if tc.terminalAtInspect == 1 {
+					containers[0].NetworkSettings.Ports = nil
+				}
+				data, err := json.Marshal(containers)
+				result.Stdout = string(data)
+				return result, err
+			}
+			waitCalled := false
+			b.waitForSSHReady = func(ctx context.Context, _ *core.SSHTarget, _ io.Writer, _ string, _ time.Duration) error {
+				waitCalled = true
+				if tc.ready {
+					return nil
+				}
+				if tc.sshFailure {
+					return errors.New("SSH transport closed")
+				}
+				<-ctx.Done()
+				return context.Cause(ctx)
+			}
+
+			request := core.AcquireRequest{
+				Keep: tc.keep,
+				Repo: core.Repo{Root: t.TempDir()},
+			}
+			if tc.fixed {
+				request.RequestedLeaseID = "cbx_abcdef123470"
+				request.RequestedSlug = "pending-test"
+			}
+			started := time.Now()
+			_, err := b.Acquire(context.Background(), request)
+			if elapsed := time.Since(started); elapsed > 5*time.Second {
+				t.Fatalf("terminal acquisition took %s", elapsed)
+			}
+			if err == nil || !strings.Contains(err.Error(), "terminal runtime state "+tc.runtimeState) || !strings.Contains(err.Error(), shortID("container-pending")) {
+				t.Fatalf("Acquire error=%v, want exact terminal container state %q", err, tc.runtimeState)
+			}
+			if !isExitCode(err, 5) {
+				t.Fatalf("terminal acquisition returned the wrong exit classification: %v", err)
+			}
+			if got, want := waitCalled, tc.terminalAtInspect >= 4; got != want {
+				t.Fatalf("SSH waiter called=%t, want %t", got, want)
+			}
+			claim, claimErr := core.ReadLeaseClaim(*leaseID)
+			if claimErr != nil {
+				t.Fatal(claimErr)
+			}
+			keyPath, keyErr := core.TestboxKeyPath(*leaseID)
+			if keyErr != nil {
+				t.Fatal(keyErr)
+			}
+			if !tc.keep {
+				if *containerPresent {
+					t.Fatalf("terminal rollback retained claim=%#v container=%t", claim, *containerPresent)
+				}
+				if tc.fixed {
+					if err := fixedLocalContainerLeaseKind.ValidateTerminalClaim(claim, core.LeaseClaim{}, *leaseID, nil); err != nil {
+						t.Fatalf("fixed rollback did not preserve a single-use terminal tombstone: claim=%#v err=%v", claim, err)
+					}
+					if _, err := b.Acquire(context.Background(), request); err == nil || !strings.Contains(err.Error(), "terminal") {
+						t.Fatalf("rolled-back fixed operation was replayed: %v", err)
+					}
+					if creates := localContainerCreateCalls(runner); creates != 1 {
+						t.Fatalf("terminal fixed tombstone permitted %d container creates", creates)
+					}
+				} else if claim.LeaseID != "" {
+					t.Fatalf("ordinary terminal rollback retained claim=%#v", claim)
+				}
+				if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+					t.Fatalf("terminal rollback retained SSH key: %v", err)
+				}
+				if _, err := os.Stat(*bootstrapDir); !os.IsNotExist(err) {
+					t.Fatalf("terminal rollback retained bootstrap directory: %v", err)
+				}
+				if args := recordedArgsForCommand(t, runner, "rm"); !strings.Contains(args, "container-pending") {
+					t.Fatalf("terminal rollback did not remove exact container:\n%s", args)
+				}
+				if hostWorkRoot != "" {
+					if _, err := os.Stat(filepath.Join(hostWorkRoot, *leaseID)); !os.IsNotExist(err) {
+						t.Fatalf("terminal rollback retained owned host work root: %v", err)
+					}
+				}
+				return
+			}
+
+			if claim.CloudID != "container-pending" || claim.Labels["state"] != pendingClaimState || claim.Labels["recovery"] != pendingRecoveryKind {
+				t.Fatalf("retained terminal claim=%#v", claim)
+			}
+			if tc.fixed && (claim.Provider != core.FixedLocalContainerClaimProvider ||
+				claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != "prepared" ||
+				claim.FixedCreateIntent.Attempt["container_id"] != claim.CloudID ||
+				claim.FixedCreateIntent.Fingerprint != claim.Labels["fixed_intent_sha256"]) {
+				t.Fatalf("retained fixed claim lost its downgrade-safe marker or exact create intent: %#v", claim)
+			}
+			if tc.fixed && tc.terminalAtInspect >= 3 && (claim.SSHHost != "127.0.0.1" || claim.SSHPort != 49170) {
+				t.Fatalf("retained fixed claim lost its discovered SSH recovery endpoint: %#v", claim)
+			}
+			if _, err := os.Stat(keyPath); err != nil {
+				t.Fatalf("retained terminal SSH key missing: %v", err)
+			}
+			if _, err := os.Stat(*bootstrapDir); err != nil {
+				t.Fatalf("retained terminal bootstrap directory missing: %v", err)
+			}
+			for _, want := range []string{
+				"runtime_state=" + tc.runtimeState,
+				"inspect:",
+				"cleanup:",
+			} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("terminal recovery output missing %q:\n%s", want, stderr.String())
+				}
+			}
+			if tc.runtimeState == "dead" {
+				for _, command := range []string{"restart:", "reclaim:"} {
+					if strings.Contains(stderr.String(), command) {
+						t.Fatalf("dead container advertised impossible %s recovery:\n%s", command, stderr.String())
+					}
+				}
+			} else {
+				for _, want := range []string{
+					"restart: CRABBOX_LOCAL_CONTAINER_RUNTIME='docker' DOCKER_CONTEXT='default' 'docker' start 'container-pending'",
+					"reclaim:",
+				} {
+					if !strings.Contains(stderr.String(), want) {
+						t.Fatalf("restartable terminal recovery output missing %q:\n%s", want, stderr.String())
+					}
+				}
+			}
+			views, err := b.List(context.Background(), core.ListRequest{})
+			if err != nil || len(views) != 1 || views[0].Status != tc.runtimeState || views[0].Labels["state"] != tc.runtimeState {
+				t.Fatalf("terminal inventory=%#v err=%v", views, err)
+			}
+			statusLease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: *leaseID, StatusOnly: true})
+			if err != nil || statusLease.Server.Status != tc.runtimeState || statusLease.Server.Labels["state"] != tc.runtimeState {
+				t.Fatalf("terminal status lease=%#v err=%v", statusLease, err)
+			}
+			if tc.fixed {
+				bySlug, slugErr := b.Resolve(context.Background(), core.ResolveRequest{ID: request.RequestedSlug, StatusOnly: true})
+				if slugErr != nil || bySlug.LeaseID != *leaseID || bySlug.Server.Status != tc.runtimeState {
+					t.Fatalf("terminal fixed slug no longer routed to its exact claim: lease=%#v err=%v", bySlug, slugErr)
+				}
+			}
+			if current, err := core.ReadLeaseClaim(*leaseID); err != nil || current.Revision != claim.Revision || current.Labels["state"] != pendingClaimState {
+				t.Fatalf("terminal inventory/status changed recovery claim=%#v err=%v", current, err)
+			}
+			if tc.restart {
+				if _, err := b.Resolve(context.Background(), core.ResolveRequest{
+					ID: *leaseID, Repo: request.Repo, Reclaim: true, Prepare: true,
+				}); err == nil || !strings.Contains(err.Error(), "terminal runtime state "+tc.runtimeState) {
+					t.Fatalf("reclaim before exact-container restart error=%v", err)
+				}
+				if current, err := core.ReadLeaseClaim(*leaseID); err != nil || current.CloudID != claim.CloudID || current.Labels["state"] != pendingClaimState {
+					t.Fatalf("failed terminal reclaim changed exact recovery claim=%#v err=%v", current, err)
+				}
+				terminal = false
+				b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+				lease, err := b.Resolve(context.Background(), core.ResolveRequest{
+					ID: *leaseID, Repo: request.Repo, Reclaim: true, Prepare: true,
+				})
+				if err != nil || lease.Server.Status != "ready" {
+					t.Fatalf("restarted terminal recovery lease=%#v err=%v", lease, err)
+				}
+				if tc.fixed {
+					if recovered, readErr := core.ReadLeaseClaim(*leaseID); readErr != nil ||
+						recovered.Provider != core.FixedLocalContainerClaimProvider ||
+						recovered.FixedCreateIntent.Fingerprint != claim.FixedCreateIntent.Fingerprint {
+						t.Fatalf("fixed reclaim changed its protected identity: claim=%#v err=%v", recovered, readErr)
+					}
+				}
+				if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+					t.Fatal(err)
+				}
+				if tc.fixed {
+					tombstone, readErr := core.ReadLeaseClaim(*leaseID)
+					if readErr != nil || fixedLocalContainerLeaseKind.ValidateTerminalClaim(tombstone, claim, *leaseID, nil) != nil {
+						t.Fatalf("restarted fixed lease lost its single-use tombstone: claim=%#v err=%v", tombstone, readErr)
+					}
+				}
+				return
+			}
+			lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: *leaseID, ReleaseOnly: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestExactContainerReadinessRejectsReplacementIdentity(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		commandKey([]string{"inspect", "claimed-container"}): {
+			Stdout: `[{"Id":"replacement-container","State":{"Status":"running","Running":true}}]`,
+		},
+	}}
+	b := testBackend(runner)
+	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
+		t.Fatal("SSH waiter accepted a different container identity")
+		return nil
+	}
+	lease := core.LeaseTarget{LeaseID: "cbx_exact_container", Server: core.Server{CloudID: "claimed-container"}}
+	if err := b.waitForExactContainerSSHReady(context.Background(), &lease, time.Minute); err == nil ||
+		!strings.Contains(err.Error(), "refusing readiness for container replacement-") {
+		t.Fatalf("replacement readiness error=%v", err)
+	}
+	if _, err := b.waitForContainerEndpoint(context.Background(), b.configForRun(), lease.Server.CloudID, lease.LeaseID, "exact"); err == nil ||
+		!strings.Contains(err.Error(), "refusing readiness for container replacement-") {
+		t.Fatalf("replacement endpoint error=%v", err)
+	}
+}
+
+func TestAcquireReadinessRejectsReplacementContainerIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		fixed                bool
+		keep                 bool
+		replacementAtInspect int
+		wantError            string
+	}{
+		{name: "ordinary kept", keep: true, replacementAtInspect: 3, wantError: "refusing readiness for container replacement-"},
+		{name: "ordinary non-kept fails closed", replacementAtInspect: 3, wantError: "refusing readiness for container replacement-"},
+		{name: "ordinary first inspection fails closed", replacementAtInspect: 1, wantError: "refusing readiness for container replacement-"},
+		{name: "fixed kept", fixed: true, keep: true, replacementAtInspect: 3, wantError: "refusing readiness for container replacement-"},
+		{name: "fixed non-kept fails closed", fixed: true, replacementAtInspect: 3, wantError: "refusing readiness for container replacement-"},
+		{name: "fixed first inspection fails closed", fixed: true, replacementAtInspect: 1, wantError: "does not match its durable container identity"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, runner, _, leaseID, bootstrapDir, containerPresent := pendingAcquireBackend(t)
+			originalRun := runner.run
+			inspectCount := 0
+			replacement := true
+			runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				result, err := originalRun(req)
+				if err != nil || firstArg(req.Args) != "inspect" {
+					return result, err
+				}
+				inspectCount++
+				if !replacement || inspectCount < tc.replacementAtInspect {
+					return result, nil
+				}
+				var containers []inspectContainer
+				if err := json.Unmarshal([]byte(result.Stdout), &containers); err != nil {
+					return core.LocalCommandResult{}, err
+				}
+				containers[0].ID = "replacement-container"
+				data, err := json.Marshal(containers)
+				result.Stdout = string(data)
+				return result, err
+			}
+			b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
+				t.Fatal("SSH waiter accepted a replacement container")
+				return nil
+			}
+			request := core.AcquireRequest{Keep: tc.keep, Repo: core.Repo{Root: t.TempDir()}}
+			if tc.fixed {
+				request.RequestedLeaseID = "cbx_abcdef123471"
+				request.RequestedSlug = "pending-test"
+			}
+			if _, err := b.Acquire(context.Background(), request); err == nil ||
+				!strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("replacement acquisition error=%v", err)
+			}
+			claim, err := core.ReadLeaseClaim(*leaseID)
+			if err != nil || claim.CloudID != "container-pending" || !*containerPresent {
+				t.Fatalf("replacement changed exact ownership: claim=%#v container=%t err=%v", claim, *containerPresent, err)
+			}
+			if tc.fixed && claim.Provider != core.FixedLocalContainerClaimProvider {
+				t.Fatalf("replacement rewrote fixed provider marker: %#v", claim)
+			}
+			for _, call := range runner.calls {
+				if firstArg(call.Args) == "rm" {
+					t.Fatalf("replacement identity triggered destructive cleanup: %v", call.Args)
+				}
+			}
+			keyPath, err := core.TestboxKeyPath(*leaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(keyPath); err != nil {
+				t.Fatalf("replacement identity removed the original SSH key: %v", err)
+			}
+			if _, err := os.Stat(*bootstrapDir); err != nil {
+				t.Fatalf("replacement identity removed the original bootstrap directory: %v", err)
+			}
+			replacement = false
+			lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: *leaseID, ReleaseOnly: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestPendingRecoveryCommandsUseSafeExactRoute(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
 		runtime        string
 		context        string
 		host           string
+		config         string
 		forbidden      []string
 		wantAssignment string
 	}{
 		{name: "default docker", runtime: "docker", context: "default", wantAssignment: "DOCKER_CONTEXT='default'"},
 		{name: "named docker context quoting", runtime: "docker", context: "team's context", wantAssignment: "DOCKER_CONTEXT=" + core.ShellQuote("team's context")},
 		{name: "custom docker endpoint hidden", runtime: "docker", host: "tcp://user:password@example.invalid:2376", forbidden: []string{"password", "example.invalid", "DOCKER_HOST="}},
+		{name: "custom docker config hidden", runtime: "docker", context: "private-context", config: "/private/docker/config", forbidden: []string{"/private/docker/config", "DOCKER_CONFIG="}, wantAssignment: "DOCKER_CONTEXT='private-context'"},
 		{name: "named podman connection", runtime: "podman", context: "remote podman", wantAssignment: "CONTAINER_CONNECTION='remote podman'"},
 		{name: "custom podman endpoint hidden", runtime: "podman", host: "ssh://user:secret@example.invalid/run/podman.sock", forbidden: []string{"secret", "example.invalid", "CONTAINER_HOST="}},
 		{name: "runtime path quoting", runtime: "/opt/My Runtime/docker", context: "default", wantAssignment: "CRABBOX_LOCAL_CONTAINER_RUNTIME='/opt/My Runtime/docker'"},
@@ -2564,7 +2951,7 @@ func TestPendingRecoveryCommandsUseSafeExactRoute(t *testing.T) {
 			var stderr strings.Builder
 			b.rt.Stderr = &stderr
 			labels := checkpointScopeMetadata(checkpointScope{
-				Runtime: tc.runtime, Context: tc.context, Host: tc.host, Endpoint: firstNonBlank(tc.host, "local"), DaemonID: "daemon-test",
+				Runtime: tc.runtime, Context: tc.context, Host: tc.host, Config: tc.config, Endpoint: firstNonBlank(tc.host, "local"), DaemonID: "daemon-test",
 			})
 			labels["runtime"] = tc.runtime
 			claim := core.LeaseClaim{LeaseID: "cbx_recovery_route", Provider: providerName, CloudID: "container-route", Labels: labels}
@@ -2584,6 +2971,35 @@ func TestPendingRecoveryCommandsUseSafeExactRoute(t *testing.T) {
 			for _, command := range []string{"inspect:", "reclaim:", "cleanup:"} {
 				if !strings.Contains(output, command) {
 					t.Fatalf("%s command missing:\n%s", command, output)
+				}
+			}
+			if strings.Contains(output, "restart:") {
+				t.Fatalf("nonterminal failure unexpectedly suggested container restart:\n%s", output)
+			}
+
+			for _, state := range []string{"exited", "stopped", "dead"} {
+				stderr.Reset()
+				b.printPendingRecovery(claim.LeaseID, "recovery-route", claim, &terminalContainerError{
+					err: core.Exit(5, "terminal runtime state %s", state), state: state,
+				})
+				output = stderr.String()
+				if !strings.Contains(output, "runtime_state="+state) || !strings.Contains(output, "cleanup:") {
+					t.Fatalf("terminal state or cleanup command missing:\n%s", output)
+				}
+				wantRestart := state != "dead" && tc.host == "" && tc.config == ""
+				if gotRestart := strings.Contains(output, "restart:"); gotRestart != wantRestart {
+					t.Fatalf("state=%s restart=%t, want %t:\n%s", state, gotRestart, wantRestart, output)
+				}
+				if wantRestart && !strings.Contains(output, core.ShellQuote(tc.runtime)+" start 'container-route'") {
+					t.Fatalf("exact terminal restart command missing:\n%s", output)
+				}
+				if gotReclaim := strings.Contains(output, "reclaim:"); gotReclaim != (state != "dead") {
+					t.Fatalf("state=%s reclaim=%t, want %t:\n%s", state, gotReclaim, state != "dead", output)
+				}
+				for _, forbidden := range append(tc.forbidden, "password", "example.invalid", "/private/docker/config") {
+					if strings.Contains(output, forbidden) {
+						t.Fatalf("terminal restart output disclosed %q:\n%s", forbidden, output)
+					}
 				}
 			}
 		})
@@ -4632,6 +5048,40 @@ func TestResolvePendingClaimDoesNotRequirePublishedSSHPort(t *testing.T) {
 	}
 	if lease.Server.Status != pendingClaimState || lease.Server.Labels["recovery"] != pendingRecoveryKind || lease.SSH.Host != "" || lease.SSH.Port != "" {
 		t.Fatalf("pending lease=%#v", lease)
+	}
+}
+
+func TestResolvePreviouslyReadyTerminalContainerWithoutSSHPort(t *testing.T) {
+	for _, state := range []string{"exited", "dead", "stopped"} {
+		t.Run(state, func(t *testing.T) {
+			leaseID := "cbx_previously_ready_" + state
+			containerID := "previously-ready-" + state
+			writeLocalContainerReleaseClaim(t, leaseID, containerID)
+			claim, err := core.ReadLeaseClaim(leaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			labels := cloneLabels(claim.Labels)
+			labels["state"] = "ready"
+			claim, err = core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, claim, labels)
+			if err != nil {
+				t.Fatal(err)
+			}
+			inspectJSON := fmt.Sprintf(`[{"Id":%q,"Name":"/previously-ready","Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":%q,"slug":"previously-ready","state":"ready","ssh_user":"runner","work_root":"/workspace/crabbox"}},"State":{"Status":%q,"Running":false},"NetworkSettings":{"Ports":{}}}]`, containerID, leaseID, state)
+			runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+				commandKey([]string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=local-container", "--format", "{{.ID}}"}): {Stdout: containerID + "\n"},
+				commandKey([]string{"inspect", containerID}): {Stdout: inspectJSON},
+			}}
+			addDefaultLocalContainerScopeResponses(runner)
+			b := testBackend(runner)
+			lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, StatusOnly: true})
+			if err != nil || lease.Server.Status != state || lease.Server.Labels["state"] != state || lease.SSH.Port != "" {
+				t.Fatalf("previously ready terminal status lease=%#v err=%v", lease, err)
+			}
+			if current, err := core.ReadLeaseClaim(leaseID); err != nil || current.Revision != claim.Revision || current.Labels["state"] != "ready" {
+				t.Fatalf("terminal status changed previously ready claim=%#v err=%v", current, err)
+			}
+		})
 	}
 }
 

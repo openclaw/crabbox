@@ -30,12 +30,15 @@ const (
 	pendingClaimState     = "provisioning"
 	pendingRecoveryKind   = "ssh-readiness-pending"
 	pendingRecoveryReason = "post-create failure; exact claim retained"
+	readinessPollInterval = 250 * time.Millisecond
 )
 
 var cgroupOOMCounterPaths = []string{
 	"/sys/fs/cgroup/memory.events",
 	"/sys/fs/cgroup/memory/memory.oom_control",
 }
+
+var errContainerIdentityMismatch = errors.New("local-container exact container identity changed")
 
 type backend struct {
 	spec                   core.ProviderSpec
@@ -83,6 +86,15 @@ type inspectPort struct {
 	HostIP   string `json:"HostIp"`
 	HostPort string `json:"HostPort"`
 }
+
+type terminalContainerError struct {
+	err   error
+	state string
+}
+
+func (e *terminalContainerError) Error() string { return e.err.Error() }
+
+func (e *terminalContainerError) Unwrap() error { return e.err }
 
 func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	applyDefaults(&cfg)
@@ -286,6 +298,13 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		}
 		return core.LeaseTarget{}, errors.Join(err, rollbackErr)
 	}
+	if err := validateObservedContainer(container, containerID, leaseID); err != nil {
+		retained, reconcileErr := b.reconcileReadinessFailure(req.Keep, pendingClaim, lease, bootstrapDir, err)
+		if retained {
+			b.printPendingRecovery(leaseID, slug, pendingClaim, err)
+		}
+		return core.LeaseTarget{}, errors.Join(err, reconcileErr)
+	}
 	lease = b.pendingLease(cfg, container, leaseID, slug)
 	markPendingLease(&lease.Server)
 	updatedPendingClaim, err := core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, pendingClaim, lease.Server, lease.SSH)
@@ -299,7 +318,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	pendingClaim = updatedPendingClaim
 	lease, err = b.waitForContainerEndpoint(ctx, cfg, containerID, leaseID, slug)
 	if err != nil {
-		retained, reconcileErr := b.reconcileReadinessFailure(req.Keep, pendingClaim, lease, bootstrapDir)
+		retained, reconcileErr := b.reconcileReadinessFailure(req.Keep, pendingClaim, lease, bootstrapDir, err)
 		if retained {
 			b.printPendingRecovery(leaseID, slug, pendingClaim, err)
 		}
@@ -316,8 +335,8 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		return core.LeaseTarget{}, errors.Join(err, reconcileErr)
 	}
 	pendingClaim = updatedPendingClaim
-	if err := b.waitForSSHReady(ctx, &lease.SSH, b.rt.Stderr, "local container ssh", core.BootstrapWaitTimeout(cfg)); err != nil {
-		retained, reconcileErr := b.reconcileReadinessFailure(req.Keep, pendingClaim, lease, bootstrapDir)
+	if err := b.waitForExactContainerSSHReady(ctx, &lease, core.BootstrapWaitTimeout(cfg)); err != nil {
+		retained, reconcileErr := b.reconcileReadinessFailure(req.Keep, pendingClaim, lease, bootstrapDir, err)
 		if retained {
 			b.printPendingRecovery(leaseID, slug, pendingClaim, err)
 		}
@@ -430,10 +449,15 @@ func (b *backend) pendingLease(cfg core.Config, container inspectContainer, leas
 func (b *backend) waitForContainerEndpoint(ctx context.Context, cfg core.Config, containerID, leaseID, slug string) (core.LeaseTarget, error) {
 	deadline := time.Now().Add(30 * time.Second)
 	var lastErr error
+	var observedContainerErr error
 	result, err := shared.Poll(ctx, 0, 100*time.Millisecond, shared.SleepContext,
 		func(observeCtx context.Context) (core.LeaseTarget, error) {
 			container, err := b.inspectContainer(observeCtx, containerID)
 			if err != nil {
+				return core.LeaseTarget{}, err
+			}
+			if err := validateObservedContainer(container, containerID, leaseID); err != nil {
+				observedContainerErr = err
 				return core.LeaseTarget{}, err
 			}
 			return b.prepareLease(observeCtx, cfg, container, leaseID, slug, false)
@@ -441,6 +465,9 @@ func (b *backend) waitForContainerEndpoint(ctx context.Context, cfg core.Config,
 		func(_ context.Context, _ core.LeaseTarget, fetchErr error) (bool, error) {
 			if fetchErr == nil {
 				return true, nil
+			}
+			if observedContainerErr != nil {
+				return false, fetchErr
 			}
 			lastErr = fetchErr
 			if time.Now().After(deadline) {
@@ -452,6 +479,76 @@ func (b *backend) waitForContainerEndpoint(ctx context.Context, cfg core.Config,
 		return core.LeaseTarget{LeaseID: leaseID, Server: core.Server{CloudID: containerID}}, err
 	}
 	return result.Value, nil
+}
+
+func (b *backend) waitForExactContainerSSHReady(ctx context.Context, lease *core.LeaseTarget, timeout time.Duration) error {
+	inspectExact := func(observeCtx context.Context) error {
+		container, err := b.inspectContainer(observeCtx, lease.Server.CloudID)
+		if err != nil {
+			return err
+		}
+		return validateObservedContainer(container, lease.Server.CloudID, lease.LeaseID)
+	}
+	if err := inspectExact(ctx); err != nil {
+		return err
+	}
+
+	waitCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- b.waitForSSHReady(waitCtx, &lease.SSH, b.rt.Stderr, "local container ssh", timeout)
+	}()
+	ticker := time.NewTicker(readinessPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-waitDone:
+			if err != nil {
+				if observedErr := inspectExact(ctx); observedErr != nil {
+					var terminalErr *terminalContainerError
+					if errors.As(observedErr, &terminalErr) || errors.Is(observedErr, errContainerIdentityMismatch) {
+						return observedErr
+					}
+				}
+				return err
+			}
+			return inspectExact(ctx)
+		case <-ticker.C:
+			if err := inspectExact(ctx); err != nil {
+				cancel(err)
+				<-waitDone
+				return err
+			}
+		case <-ctx.Done():
+			cancel(context.Cause(ctx))
+			<-waitDone
+			return context.Cause(ctx)
+		}
+	}
+}
+
+func validateObservedContainer(container inspectContainer, containerID, leaseID string) error {
+	if strings.TrimSpace(container.ID) != strings.TrimSpace(containerID) {
+		return fmt.Errorf("%w: %w", errContainerIdentityMismatch,
+			core.Exit(2, "local-container lease %s is bound to container %s; refusing readiness for container %s", leaseID, shortID(containerID), shortID(container.ID)))
+	}
+	if state := terminalContainerState(container.State.Status); state != "" {
+		return &terminalContainerError{
+			err:   core.Exit(5, "local-container lease %s container %s reached terminal runtime state %s before SSH readiness", leaseID, shortID(containerID), state),
+			state: state,
+		}
+	}
+	return nil
+}
+
+func terminalContainerState(state string) string {
+	switch state = strings.ToLower(strings.TrimSpace(state)); state {
+	case "dead", "exited", "stopped":
+		return state
+	default:
+		return ""
+	}
 }
 
 func markPendingLease(server *core.Server) {
@@ -523,7 +620,13 @@ func (b *backend) reconcileChangedClaim(lease core.LeaseTarget, bootstrapDir str
 	return retained, err
 }
 
-func (b *backend) reconcileReadinessFailure(keep bool, expected core.LeaseClaim, lease core.LeaseTarget, bootstrapDir string) (bool, error) {
+func (b *backend) reconcileReadinessFailure(keep bool, expected core.LeaseClaim, lease core.LeaseTarget, bootstrapDir string, failure error) (bool, error) {
+	if errors.Is(failure, errContainerIdentityMismatch) {
+		if err := core.VerifyLeaseClaimUnchanged(expected.LeaseID, expected); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
 	lease.Server = mergeLocalContainerClaim(lease.Server, expected)
 	if lease.Server.CloudID == "" {
 		lease.Server.CloudID = expected.CloudID
@@ -546,7 +649,7 @@ func (b *backend) rollbackPendingLease(expected core.LeaseClaim, lease core.Leas
 	}
 	rollbackCtx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
 	defer cancel()
-	err := core.RemoveLeaseClaimIfUnchangedAfter(lease.LeaseID, expected, func() error {
+	err := fixedLocalContainerLeaseKind.FinalizeAfterCleanup(expected, func() error {
 		if err := b.removeContainer(rollbackCtx, lease.Server.CloudID); err != nil {
 			return err
 		}
@@ -570,7 +673,7 @@ func (b *backend) rollbackPendingLease(expected core.LeaseClaim, lease core.Leas
 	return err
 }
 
-func (b *backend) printPendingRecovery(leaseID, slug string, claim core.LeaseClaim, _ error) {
+func (b *backend) printPendingRecovery(leaseID, slug string, claim core.LeaseClaim, reason error) {
 	runtimeName := firstNonBlank(claim.Labels[checkpointMetadataRuntime], claim.Labels["runtime"], b.cfg.LocalContainer.Runtime, "docker")
 	envPrefix := []string{"CRABBOX_LOCAL_CONTAINER_RUNTIME=" + core.ShellQuote(runtimeName)}
 	scope := checkpointScopeFromMetadata(checkpointScopeMetadataFromLabels(claim.Labels), runtimeName)
@@ -582,10 +685,31 @@ func (b *backend) printPendingRecovery(leaseID, slug string, claim core.LeaseCla
 	}
 	routeEnv := strings.Join(envPrefix, " ")
 	idArg := core.ShellQuote(leaseID)
-	fmt.Fprintf(b.rt.Stderr, "retained provider=%s lease=%s slug=%s state=%s reason=%q\n", providerName, leaseID, blank(slug, "-"), pendingClaimState, pendingRecoveryReason)
+	runtimeState := ""
+	var terminalErr *terminalContainerError
+	if errors.As(reason, &terminalErr) {
+		runtimeState = " runtime_state=" + terminalErr.state
+	}
+	fmt.Fprintf(b.rt.Stderr, "retained provider=%s lease=%s slug=%s state=%s%s reason=%q\n", providerName, leaseID, blank(slug, "-"), pendingClaimState, runtimeState, pendingRecoveryReason)
 	fmt.Fprintf(b.rt.Stderr, "inspect: %s crabbox inspect --provider %s --id %s --json\n", routeEnv, providerName, idArg)
-	fmt.Fprintf(b.rt.Stderr, "reclaim: %s crabbox run --provider %s --id %s --reclaim --keep --sync-only\n", routeEnv, providerName, idArg)
+	if terminalErr != nil && localContainerRestartIsActionable(scope, terminalErr.state) {
+		fmt.Fprintf(b.rt.Stderr, "restart: %s %s start %s\n", routeEnv, core.ShellQuote(runtimeName), core.ShellQuote(claim.CloudID))
+	}
+	if terminalErr == nil || terminalErr.state != "dead" {
+		fmt.Fprintf(b.rt.Stderr, "reclaim: %s crabbox run --provider %s --id %s --reclaim --keep --sync-only\n", routeEnv, providerName, idArg)
+	}
 	fmt.Fprintf(b.rt.Stderr, "cleanup: %s crabbox stop --provider %s --id %s\n", routeEnv, providerName, idArg)
+}
+
+func localContainerRestartIsActionable(scope checkpointScope, state string) bool {
+	if state == "dead" || scope.Host != "" {
+		return false
+	}
+	if scope.Config == "" {
+		return true
+	}
+	homeDir, err := os.UserHomeDir()
+	return err == nil && filepath.Clean(scope.Config) == filepath.Join(homeDir, ".docker")
 }
 
 func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
@@ -650,7 +774,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 			bootstrapDir := strings.TrimSpace(exactClaim.Labels["bootstrap_dir"])
 			lease, err = b.waitForContainerEndpoint(ctx, cfg, container.ID, leaseID, slug)
 			if err != nil {
-				retained, reconcileErr := b.reconcileReadinessFailure(keep, exactClaim, lease, bootstrapDir)
+				retained, reconcileErr := b.reconcileReadinessFailure(keep, exactClaim, lease, bootstrapDir, err)
 				if retained {
 					b.printPendingRecovery(leaseID, slug, exactClaim, err)
 				}
@@ -667,8 +791,8 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 				return core.LeaseTarget{}, errors.Join(err, reconcileErr)
 			}
 			exactClaim = updatedClaim
-			if err := b.waitForSSHReady(ctx, &lease.SSH, b.rt.Stderr, "local container ssh", core.BootstrapWaitTimeout(cfg)); err != nil {
-				retained, reconcileErr := b.reconcileReadinessFailure(keep, exactClaim, lease, bootstrapDir)
+			if err := b.waitForExactContainerSSHReady(ctx, &lease, core.BootstrapWaitTimeout(cfg)); err != nil {
+				retained, reconcileErr := b.reconcileReadinessFailure(keep, exactClaim, lease, bootstrapDir, err)
 				if retained {
 					b.printPendingRecovery(leaseID, slug, exactClaim, err)
 				}
@@ -689,6 +813,8 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 			}
 			exactClaim = updatedClaim
 		}
+	} else if terminalContainerState(container.State.Status) != "" && req.StatusOnly {
+		lease = b.pendingLease(cfg, container, leaseID, slug)
 	} else {
 		lease, err = b.prepareLease(ctx, cfg, container, leaseID, slug, false)
 		if err != nil {
@@ -2391,7 +2517,9 @@ func (b *backend) serverFromContainer(container inspectContainer, cfg core.Confi
 	if labels["server_type"] == "" {
 		labels["server_type"] = container.Config.Image
 	}
-	if labels["state"] == "" {
+	if terminalState := terminalContainerState(container.State.Status); terminalState != "" {
+		labels["state"] = terminalState
+	} else if labels["state"] == "" {
 		labels["state"] = container.State.Status
 	}
 	host, port, _ := containerSSHHostPort(container)
@@ -2414,6 +2542,7 @@ func (b *backend) serverFromContainer(container inspectContainer, cfg core.Confi
 }
 
 func mergeLocalContainerClaim(server core.Server, claim core.LeaseClaim) core.Server {
+	terminalState := terminalContainerState(server.Status)
 	labels := publicLocalContainerClaimLabels(server.Labels)
 	for key, value := range claim.Labels {
 		if strings.TrimSpace(value) != "" && !privateLocalContainerScopeLabel(key) {
@@ -2422,6 +2551,9 @@ func mergeLocalContainerClaim(server core.Server, claim core.LeaseClaim) core.Se
 	}
 	if _, ok := claim.Labels["recovery"]; !ok {
 		delete(labels, "recovery")
+	}
+	if terminalState != "" {
+		labels["state"] = terminalState
 	}
 	server.Labels = labels
 	state := strings.TrimSpace(labels["state"])

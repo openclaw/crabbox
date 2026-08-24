@@ -67,7 +67,7 @@ func (a App) status(ctx context.Context, args []string) error {
 			lease, err = sshBackend.Resolve(statusCtx, ResolveRequest{Options: leaseOptionsFromConfig(cfg), ID: *id, StatusOnly: true, ReadyProbe: *wait, NoLocalStateMutations: true})
 			if err == nil {
 				state, err = statusViewFromLeaseTarget(statusCtx, cfg, lease)
-				if err == nil && *wait {
+				if err == nil && *wait && !statusTerminalState(state.State) {
 					claim, claimed, claimErr := statusLeaseExactClaim(statusCtx, backend, lease, backend.Spec().Name, leaseOptionsFromConfig(cfg).ProviderScope)
 					if claimErr != nil {
 						fmt.Fprintf(a.Stderr, "warning: touch skipped for %s: %v\n", lease.LeaseID, claimErr)
@@ -176,7 +176,7 @@ func statusWaitTerminalError(id string, state statusView) error {
 
 func statusTerminalState(state string) bool {
 	switch strings.ToLower(strings.TrimSpace(state)) {
-	case "deleting", "expired", "failed", "missing", "released", "stopped", "stopped_with_code", "terminated":
+	case "dead", "deleting", "exited", "expired", "failed", "missing", "released", "stopped", "stopped_with_code", "terminated":
 		return true
 	default:
 		return false

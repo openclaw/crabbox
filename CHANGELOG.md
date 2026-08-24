@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Failed local-container acquisition and status waits promptly when the exact claimed container exits, while preserving fenced recovery and cleanup for retained leases.
 - Redacted coordinator URL credentials, query parameters, and fragments from run-context portal and logs links.
 - Preserved Machine0 command deadline, cancellation, and signal failures with partial output and ran independent doctor probes concurrently.
 - Required an exact, locked local ownership claim before releasing ordinary AWS instances, preventing tag-matched resources from being terminated without durable lease authority.
