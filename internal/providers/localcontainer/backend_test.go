@@ -126,15 +126,61 @@ func TestFixedAcquireCreatesRequestedIDAndReplays(t *testing.T) {
 		t.Fatalf("fixed lease=%q created=%q, want %q", first.LeaseID, *createdLeaseID, req.RequestedLeaseID)
 	}
 	claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
-	if err != nil || claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != "acquired" {
+	if err != nil || claim.Provider != core.FixedLocalContainerClaimProvider ||
+		claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != "acquired" {
 		t.Fatalf("fixed claim=%#v err=%v", claim, err)
 	}
 	if claim.FixedCreateIntent.Fingerprint != first.Server.Labels["fixed_intent_sha256"] {
 		t.Fatalf("fixed claim fingerprint does not match container: %#v", claim.FixedCreateIntent)
 	}
+	if first.Server.Provider != providerName || first.Server.Labels["provider"] != providerName {
+		t.Fatalf("fixed lease exposed persisted provider marker: %#v", first.Server)
+	}
+	resolvedClaim, ok, err := core.ResolveLeaseClaimForProvider(req.RequestedLeaseID, providerName)
+	if err != nil || !ok || resolvedClaim.Provider != core.FixedLocalContainerClaimProvider {
+		t.Fatalf("canonical fixed claim=%#v ok=%t err=%v", resolvedClaim, ok, err)
+	}
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range claims {
+		if candidate.Provider == providerName {
+			t.Fatalf("legacy-style local-container cleanup can see fixed claim: %#v", candidate)
+		}
+	}
 
 	restarted := testBackend(runner)
 	restarted.waitForSSHReady = b.waitForSSHReady
+	views, err := restarted.List(context.Background(), core.ListRequest{})
+	if err != nil || len(views) != 1 || views[0].Provider != providerName || views[0].CloudID != first.Server.CloudID {
+		t.Fatalf("fixed lease views=%#v err=%v", views, err)
+	}
+	for _, identifier := range []string{req.RequestedLeaseID, req.RequestedSlug} {
+		resolved, resolveErr := restarted.Resolve(context.Background(), core.ResolveRequest{
+			ID: identifier, StatusOnly: true, NoLocalStateMutations: true,
+		})
+		if resolveErr != nil || resolved.LeaseID != first.LeaseID || resolved.Server.Provider != providerName {
+			t.Fatalf("resolved fixed lease %q=%#v err=%v", identifier, resolved, resolveErr)
+		}
+		if err := restarted.AuthorizeStatusTouchClaim(context.Background(), resolved, claim); err != nil {
+			t.Fatalf("authorize fixed lease %q: %v", identifier, err)
+		}
+		if identifier == req.RequestedLeaseID {
+			touched, touchErr := restarted.Touch(context.Background(), core.TouchRequest{Lease: resolved, State: "busy"})
+			updated, readErr := core.ReadLeaseClaim(req.RequestedLeaseID)
+			if touchErr != nil || readErr != nil || touched.Provider != providerName || updated.Provider != core.FixedLocalContainerClaimProvider {
+				t.Fatalf("fixed touch server=%#v claim=%#v touchErr=%v readErr=%v", touched, updated, touchErr, readErr)
+			}
+			claim = updated
+		}
+	}
+	if err := restarted.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if current, readErr := core.ReadLeaseClaim(req.RequestedLeaseID); readErr != nil || current.Provider != core.FixedLocalContainerClaimProvider {
+		t.Fatalf("cleanup altered live fixed claim: claim=%#v err=%v", current, readErr)
+	}
 	replayed, err := restarted.Acquire(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
@@ -189,7 +235,8 @@ func TestFixedAcquireReleasedClaimRemainsTerminal(t *testing.T) {
 		t.Fatal(err)
 	}
 	claim, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
-	if err != nil || !exists || claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != "released" {
+	if err != nil || !exists || claim.Provider != core.FixedLocalContainerClaimProvider ||
+		claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != "released" {
 		t.Fatalf("terminal fixed claim=%#v exists=%t err=%v", claim, exists, err)
 	}
 	if claim.CloudID != "" || len(claim.Labels) != 0 || claim.SSHHost != "" {
@@ -198,8 +245,9 @@ func TestFixedAcquireReleasedClaimRemainsTerminal(t *testing.T) {
 	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID); err != nil || !exists {
-		t.Fatalf("cleanup removed terminal fixed claim: exists=%t err=%v", exists, err)
+	if retained, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID); err != nil ||
+		!exists || retained.Provider != core.FixedLocalContainerClaimProvider {
+		t.Fatalf("cleanup altered terminal fixed claim: claim=%#v exists=%t err=%v", retained, exists, err)
 	}
 	_, err = b.Acquire(context.Background(), req)
 	requireFixedLocalContainerConflict(t, err)
@@ -224,7 +272,9 @@ func TestFixedAcquireRecoversPreparedLiveContainer(t *testing.T) {
 		t.Fatal("initial fixed acquisition unexpectedly succeeded")
 	}
 	claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
-	if err != nil || claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != "prepared" || claim.CloudID == "" {
+	if err != nil || claim.Provider != core.FixedLocalContainerClaimProvider ||
+		claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != "prepared" || claim.CloudID == "" ||
+		!isPendingLocalContainerClaim(claim) {
 		t.Fatalf("prepared fixed claim=%#v err=%v", claim, err)
 	}
 	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
@@ -281,7 +331,8 @@ func TestFixedAcquireMissingContainerReleasePreservesTerminalClaim(t *testing.T)
 		t.Fatal(err)
 	}
 	claim, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
-	if err != nil || !exists || claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != "released" {
+	if err != nil || !exists || claim.Provider != core.FixedLocalContainerClaimProvider ||
+		claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != "released" {
 		t.Fatalf("missing-container terminal claim=%#v exists=%t err=%v", claim, exists, err)
 	}
 	_, err = b.Acquire(context.Background(), req)
@@ -395,7 +446,8 @@ func TestNonFixedAcquireStillCreatesDistinctLeases(t *testing.T) {
 		t.Fatal(err)
 	}
 	claim, err := core.ReadLeaseClaim(lease.LeaseID)
-	if err != nil || claim.FixedCreateIntent != nil || lease.Server.Labels["fixed_intent_sha256"] != "" {
+	if err != nil || claim.Provider != providerName || claim.FixedCreateIntent != nil ||
+		lease.Server.Labels["fixed_intent_sha256"] != "" {
 		t.Fatalf("non-fixed acquisition changed: lease=%#v claim=%#v err=%v", lease, claim, err)
 	}
 	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {

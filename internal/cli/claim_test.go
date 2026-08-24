@@ -56,6 +56,44 @@ func TestFixedMachine0ClaimProviderCanonicalizes(t *testing.T) {
 	}
 }
 
+func TestFixedLocalContainerClaimProviderCanonicalizesWithoutOverwritingMarker(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_abcdef123465"
+	err := withDurableLeaseClaimLock(leaseID, func(claim *leaseClaim, _ bool, persist func() error) error {
+		claim.LeaseID = leaseID
+		claim.Slug = "fixed-local-container"
+		claim.Provider = FixedLocalContainerClaimProvider
+		claim.ProviderScope = "runtime:docker/context:default"
+		claim.RepoRoot = "/repo"
+		claim.FixedCreateIntent = &FixedCreateIntent{
+			Version: 1, Fingerprint: strings.Repeat("a", 64), ProviderScope: claim.ProviderScope,
+			Slug: claim.Slug, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), State: "acquired",
+		}
+		return persist()
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := canonicalClaimProvider(FixedLocalContainerClaimProvider); got != "local-container" {
+		t.Fatalf("fixed local-container marker canonicalized to %q", got)
+	}
+	resolved, ok, exact, err := resolveLeaseClaimForProviderWithExact(leaseID, "local-container")
+	if err != nil || !ok || !exact || resolved.Provider != FixedLocalContainerClaimProvider {
+		t.Fatalf("resolved=%#v ok=%t exact=%t err=%v", resolved, ok, exact, err)
+	}
+	if err := claimLeaseForRepoProvider(leaseID, "fixed-local-container", "local-container", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	after, exists, err := readLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists || after.Provider != FixedLocalContainerClaimProvider {
+		t.Fatalf("runtime local-container claim update overwrote marker: claim=%#v exists=%t err=%v", after, exists, err)
+	}
+	peer := bridgePeerFromClaim(after, TransportNone)
+	if peer.Provider != "local-container" {
+		t.Fatalf("fixed marker displayed as provider %q", peer.Provider)
+	}
+}
+
 func TestClaimEndpointReservationDeadlineStartsAfterClaimLockAcquired(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	const leaseID = "cbx_reservation_lock"

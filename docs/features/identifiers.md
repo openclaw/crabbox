@@ -78,6 +78,8 @@ normalized container configuration, and deterministic container name before
 creation. Replay adopts only the exact recorded container when its lease, name,
 runtime identity, and intent fingerprint still match; an unresolved attempt or
 missing acquired container fails closed instead of starting another container.
+Its fixed claims use the downgrade-safe `local-container-fixed-v1` marker, so
+older clients cannot mistake them for ordinary local-container claims.
 
 After the direct AWS launch attempt is durable, Crabbox never submits that
 attempt again. An ambiguous replay with no visible tagged instance fails closed;

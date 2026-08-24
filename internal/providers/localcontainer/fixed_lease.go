@@ -13,9 +13,13 @@ import (
 const fixedLocalContainerIntentVersion = 1
 
 var fixedLocalContainerLeaseKind = core.FixedLeaseKind{
-	ClaimProvider: providerName,
+	ClaimProvider: core.FixedLocalContainerClaimProvider,
 	IntentVersion: fixedLocalContainerIntentVersion,
 	Label:         "local-container",
+}
+
+func isLocalContainerClaimProvider(provider string) bool {
+	return provider == providerName || provider == core.FixedLocalContainerClaimProvider
 }
 
 type fixedLocalContainerCreateIntent struct {
