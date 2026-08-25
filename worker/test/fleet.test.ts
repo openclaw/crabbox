@@ -10562,6 +10562,62 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value<LeaseRecord>("lease:cbx_000000000098")?.state).toBe("expired");
   });
 
+  it("keeps a retained registered bridge alive past its original deadline after heartbeat", async () => {
+    vi.useFakeTimers();
+    try {
+      const startedAt = new Date("2026-08-25T12:00:00.000Z");
+      vi.setSystemTime(startedAt);
+      const storage = new MemoryStorage();
+      const fleet = testFleet(storage);
+      const lease = testLease({
+        id: "cbx_000000000097",
+        provider: "machine0",
+        lifecycle: "registered",
+        cloudID: "vm-retained",
+        owner: "alice@example.com",
+        org: "example-org",
+        keep: true,
+        ttlSeconds: 4 * 60 * 60,
+        idleTimeoutSeconds: 45 * 60,
+        createdAt: startedAt.toISOString(),
+        updatedAt: startedAt.toISOString(),
+        lastTouchedAt: startedAt.toISOString(),
+        expiresAt: new Date(startedAt.getTime() + 45 * 60_000).toISOString(),
+      });
+      storage.seed(`lease:${lease.id}`, lease);
+      const bridge = new FakeWebSocket({ kind: "code-agent", leaseID: lease.id });
+      const relay = fleet as unknown as { codeAgents: Map<string, WebSocket> };
+      relay.codeAgents.set(lease.id, bridge as unknown as WebSocket);
+
+      vi.setSystemTime(new Date(startedAt.getTime() + 40 * 60_000));
+      const heartbeat = await fleet.fetch(
+        request("POST", `/v1/leases/${lease.id}/heartbeat`, {
+          headers: {
+            "x-crabbox-owner": "alice@example.com",
+            "x-crabbox-org": "example-org",
+          },
+          body: { expectedProvider: "machine0" },
+        }),
+      );
+      expect(heartbeat.status).toBe(200);
+      const renewed = storage.value<LeaseRecord>(`lease:${lease.id}`)!;
+      expect(Date.parse(renewed.expiresAt)).toBe(startedAt.getTime() + 85 * 60_000);
+
+      vi.setSystemTime(new Date(startedAt.getTime() + 46 * 60_000));
+      await fleet.alarm();
+
+      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)).toMatchObject({
+        state: "active",
+        lifecycle: "registered",
+        cloudID: "vm-retained",
+      });
+      expect(bridge.closeCode).toBeUndefined();
+      expect(storage.alarm()).toBe(Date.parse(renewed.expiresAt));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("fails interrupted deployment provisioning when no provider resource exists", async () => {
     const storage = new MemoryStorage();
     let providerLookups = 0;
