@@ -169,6 +169,12 @@ failures never fall back to releasing an unverified ID. Providers without a
 verified recovery contract reject `--force` and direct the operator to their
 native provider CLI. `cleanup` does not support `--force`.
 
+`--reclaim` remains the existing provider-specific adoption interface where
+supported. `--force` is the consistent cross-provider recovery interface for
+one exact resource: it reuses verified adoption for supported direct providers
+and adds fresh, exact-lease inspection for coordinator-backed providers. Neither
+flag bypasses provider ownership, scope, or claim-fencing requirements.
+
 Each provider also registers its own flags; the ones relevant to `stop` include:
 
 ```text
