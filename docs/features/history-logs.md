@@ -30,6 +30,13 @@ ordered events as it advances:
 - `lease.released`
 - `run.failed` (if the run errors before the command finishes)
 
+Crabbox-generated event messages are redacted before they enter coordinator
+storage. The recorder removes configured and provider-discovered runtime
+credentials, authorization headers, credential-bearing URLs, and other known
+secret encodings while preserving useful diagnostic context. Raw `stdout` and
+`stderr` event data and retained command logs remain caller-owned output and are
+not automatically redacted.
+
 Each event carries a sequence number, type, phase, and stream. Streamed output
 events are capped at **64 KiB total per run**; once the cap is hit the CLI emits
 a single `output.truncated` marker pointing you at `crabbox logs` for the full

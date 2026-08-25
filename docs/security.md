@@ -377,8 +377,9 @@ session.
 Configured provider credentials are redacted from documented HTTP or streamed
 error diagnostics, including Azure Dynamic Sessions, Cloudflare runner, Daytona,
 DigitalOcean, E2B, FastAPI Cloud, Freestyle, Islo, Morph, OpenComputer, Orgo,
-Railway, RunPod, Semaphore, SmolVM, Sprites, and Upstash Box. The same final redaction covers `doctor` text and JSON
-messages/details. It removes exact configured secrets, authorization and API-key
+Railway, RunPod, Semaphore, SmolVM, Sprites, and Upstash Box. The same final
+redaction covers `doctor` text and JSON messages/details, plus coordinator-bound
+run-event diagnostic messages. It removes exact configured secrets, authorization and API-key
 headers, credential-bearing URL query/userinfo components, common secret JSON
 fields, bearer values, and PEM private keys while retaining non-secret routing
 context. Providers contribute runtime-only environment and local CLI-store

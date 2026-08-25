@@ -27,6 +27,8 @@ type runRecorder struct {
 	startedAt          time.Time
 	attachedAt         time.Time
 	stderr             io.Writer
+	diagnosticConfig   Config
+	diagnosticSecrets  []string
 	createPending      bool
 	historyUnavailable bool
 	eventsMu           sync.Mutex
@@ -43,10 +45,11 @@ type runRecorder struct {
 }
 
 func newRunRecorder(ctx context.Context, coord *CoordinatorClient, cfg Config, command []string, label string, stderr io.Writer, createAfterLease bool) *runRecorder {
-	rec := &runRecorder{coord: coord, command: command, label: strings.TrimSpace(label), stderr: stderr}
+	rec := &runRecorder{coord: coord, command: command, label: strings.TrimSpace(label), stderr: stderr, diagnosticConfig: cfg}
 	if coord == nil {
 		return rec
 	}
+	rec.diagnosticSecrets = configuredDiagnosticSecrets(cfg)
 	if createAfterLease {
 		rec.createPending = true
 		return rec
@@ -96,6 +99,11 @@ func (r *runRecorder) Event(kind, phase, message string) {
 func (r *runRecorder) appendEvent(kind string, input CoordinatorRunEventInput) {
 	if r == nil || r.coord == nil || r.runID == "" || !r.runEventsEnabled() {
 		return
+	}
+	if input.Message != "" {
+		secrets := append([]string(nil), r.diagnosticSecrets...)
+		secrets = append(secrets, configuredDiagnosticSecrets(r.diagnosticConfig)...)
+		input.Message = RedactDiagnosticSecrets(input.Message, secrets...)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), runRecorderRequestTimeout)
 	defer cancel()

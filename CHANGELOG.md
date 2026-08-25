@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Redacted configured and runtime-only credentials from coordinator-stored run failure diagnostics while preserving raw command output. Thanks @coygeek.
 - Retried temporary Machine0 read outages within the existing operation deadline while keeping provider mutations single-attempt.
 
 ## 0.46.1 - 2026-08-24
