@@ -2571,6 +2571,7 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 	if lease.WindowsMode != "" {
 		cfg.WindowsMode = lease.WindowsMode
 	}
+	cfg.Provider = provider
 	target := sshTargetForLease(cfg, lease.Host, lease.SSHUser, lease.SSHPort)
 	target.SSHHostKey = lease.SSHHostKey
 	if server.Provider == "daytona" {

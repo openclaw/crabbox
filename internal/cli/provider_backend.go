@@ -38,6 +38,10 @@ type ProviderConfigDefaulter interface {
 	ApplyConfigDefaults(cfg *Config) error
 }
 
+type ProviderSSHTargetConfigurer interface {
+	ConfigureSSHTarget(target *SSHTarget, readyCommand string)
+}
+
 // ProviderArchitectureCapability lets a provider admit architecture requests
 // whose runtime feasibility is validated inside the provider adapter.
 type ProviderArchitectureCapability interface {

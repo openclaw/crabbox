@@ -3719,21 +3719,16 @@ export class FleetCoordinator {
         );
         reactivated = withLeaseSSHSourceCIDRs(
           reactivated,
-          uniqueNonEmpty([...(current.network?.sshSourceCIDRs ?? []), ...sourceCIDRs]),
-          Boolean(
-            current.network?.sshSourceCIDRsComplete ||
-            sourceCIDRs.length > 0 ||
-            awsGlobalSSHSourceCIDRs(this.env).length > 0,
-          ),
+          sourceCIDRs,
+          sourceCIDRs.length > 0 || awsGlobalSSHSourceCIDRs(this.env).length > 0,
         );
         if (config.awsSSHCIDRsPinned) {
           reactivated.network = {
             ...reactivated.network,
-            sshPinnedSourceCIDRs: uniqueNonEmpty([
-              ...(current.network?.sshPinnedSourceCIDRs ?? []),
-              ...config.awsSSHCIDRs,
-            ]),
+            sshPinnedSourceCIDRs: sourceCIDRs,
           };
+        } else if (reactivated.network) {
+          delete reactivated.network.sshPinnedSourceCIDRs;
         }
         delete reactivated.releasedAt;
         delete reactivated.endedAt;
@@ -22702,10 +22697,14 @@ function uniqueNonEmpty(values: Array<string | undefined>): string[] {
 }
 
 function awsLeaseSSHSourceCIDRs(
-  config: Pick<ReturnType<typeof leaseConfig>, "awsSSHCIDRs">,
+  config: Pick<ReturnType<typeof leaseConfig>, "awsSSHCIDRs" | "awsSSHCIDRsPinned">,
   context: ProviderAccessContext,
 ): string[] {
-  return config.awsSSHCIDRs.length > 0 ? config.awsSSHCIDRs : context.requestSourceCIDRs;
+  const configuredCIDRs = uniqueNonEmpty(validCIDRs(config.awsSSHCIDRs));
+  if (config.awsSSHCIDRsPinned) {
+    return configuredCIDRs;
+  }
+  return uniqueNonEmpty([...configuredCIDRs, ...validCIDRs(context.requestSourceCIDRs)]);
 }
 
 function awsGlobalSSHSourceCIDRs(env: Env): string[] {
@@ -22715,15 +22714,15 @@ function awsGlobalSSHSourceCIDRs(env: Env): string[] {
 // A refresh owns only dynamic CIDRs from address families represented by the incoming request.
 function refreshedAWSSSHSourceCIDRs(lease: LeaseRecord, incomingCIDRs: string[]): string[] {
   const pinnedCIDRs = uniqueNonEmpty(validCIDRs(lease.network?.sshPinnedSourceCIDRs ?? []));
-  const pinned = new Set(pinnedCIDRs);
+  if (pinnedCIDRs.length > 0) {
+    return pinnedCIDRs;
+  }
   const incoming = uniqueNonEmpty(validCIDRs(incomingCIDRs));
   const refreshedFamilies = new Set(incoming.map((cidr) => (cidr.includes(":") ? "ipv6" : "ipv4")));
   const retainedDynamicCIDRs = uniqueNonEmpty(
     validCIDRs(lease.network?.sshSourceCIDRs ?? []),
-  ).filter(
-    (cidr) => !pinned.has(cidr) && !refreshedFamilies.has(cidr.includes(":") ? "ipv6" : "ipv4"),
-  );
-  return uniqueNonEmpty([...pinnedCIDRs, ...retainedDynamicCIDRs, ...incoming]);
+  ).filter((cidr) => !refreshedFamilies.has(cidr.includes(":") ? "ipv6" : "ipv4"));
+  return uniqueNonEmpty([...retainedDynamicCIDRs, ...incoming]);
 }
 
 function withLeaseSSHSourceCIDRs(

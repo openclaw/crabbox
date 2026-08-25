@@ -692,6 +692,11 @@ func (testAWSProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProvi
 func (testAWSProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
+func (testAWSProvider) ConfigureSSHTarget(target *SSHTarget, readyCommand string) {
+	if target.TargetOS == targetLinux {
+		target.ReadyCheck = "timeout 20m cloud-init status --wait >/tmp/crabbox-cloud-init.log 2>&1 && " + readyCommand
+	}
+}
 func (testAWSProvider) ServerTypeForConfig(cfg Config) string {
 	candidates := awsInstanceTypeCandidatesForConfig(cfg)
 	if len(candidates) == 0 {

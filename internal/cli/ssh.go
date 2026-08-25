@@ -84,7 +84,7 @@ func sshTargetForLease(cfg Config, host, user, port string) SSHTarget {
 	if port == "" {
 		port = cfg.SSHPort
 	}
-	return SSHTarget{
+	target := SSHTarget{
 		User:             user,
 		Host:             host,
 		Key:              cfg.SSHKey,
@@ -94,6 +94,12 @@ func sshTargetForLease(cfg Config, host, user, port string) SSHTarget {
 		WindowsMode:      cfg.WindowsMode,
 		ChildEnvDenylist: externalDesktopChildEnvDenylist(cfg, cfg.TargetOS),
 	}
+	if provider, err := ProviderFor(cfg.Provider); err == nil {
+		if configurer, ok := provider.(ProviderSSHTargetConfigurer); ok {
+			configurer.ConfigureSSHTarget(&target, sshReadyCommand(target))
+		}
+	}
+	return target
 }
 
 // PreserveExternalDesktopChildEnvironmentBoundary records a valid, trusted or

@@ -222,6 +222,13 @@ func TestAWSFixedAcquireReplaysSameLeaseAndRejectsIntentDrift(t *testing.T) {
 	if lease.LeaseID != req.RequestedLeaseID || replayed.Server.CloudID != lease.Server.CloudID || fake.createCalls != 1 {
 		t.Fatalf("lease=%#v replay=%#v creates=%d", lease, replayed, fake.createCalls)
 	}
+	for _, acquired := range []LeaseTarget{lease, replayed} {
+		for _, want := range []string{"timeout 20m cloud-init status --wait", "/usr/local/bin/crabbox-ready"} {
+			if !strings.Contains(acquired.SSH.ReadyCheck, want) {
+				t.Fatalf("fixed AWS acquisition/replay ready check=%q, missing %q", acquired.SSH.ReadyCheck, want)
+			}
+		}
+	}
 
 	drifted := req
 	drifted.RequestedSlug = "different-slug"
@@ -1036,10 +1043,19 @@ func TestAWSAcquireBindsImmutableProviderKeyID(t *testing.T) {
 	fake := &fakeAWSClient{}
 	oldClient := newAWSClient
 	newAWSClient = func(context.Context, Config) (awsClient, error) { return fake, nil }
+	oldEnsure := ensureAWSSSHCIDRs
+	detections := 0
+	ensureAWSSSHCIDRs = func(_ context.Context, cfg *Config) {
+		detections++
+		if len(cfg.AWSSSHCIDRs) == 0 {
+			cfg.AWSSSHCIDRs = []string{"198.51.100.7/32"}
+		}
+	}
 	oldBootstrap := bootstrapAWSWindowsDesktop
 	bootstrapAWSWindowsDesktop = func(context.Context, Config, *SSHTarget, string, io.Writer) error { return nil }
 	t.Cleanup(func() {
 		newAWSClient = oldClient
+		ensureAWSSSHCIDRs = oldEnsure
 		bootstrapAWSWindowsDesktop = oldBootstrap
 	})
 
@@ -1047,6 +1063,14 @@ func TestAWSAcquireBindsImmutableProviderKeyID(t *testing.T) {
 	lease, err := backend.acquireOnce(context.Background(), false, "bound-key")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if detections != 1 || len(fake.createCfg.AWSSSHCIDRs) != 1 || fake.createCfg.AWSSSHCIDRs[0] != "198.51.100.7/32" {
+		t.Fatalf("direct AWS outbound CIDR detections=%d provisioned CIDRs=%v, want one detection and [198.51.100.7/32]", detections, fake.createCfg.AWSSSHCIDRs)
+	}
+	for _, want := range []string{"timeout 20m cloud-init status --wait", "/usr/local/bin/crabbox-ready"} {
+		if !strings.Contains(lease.SSH.ReadyCheck, want) {
+			t.Fatalf("direct AWS acquisition ready check=%q, missing %q", lease.SSH.ReadyCheck, want)
+		}
 	}
 	keyName := core.ServerProviderKey(lease.Server)
 	if got, want := lease.Server.Labels["aws_key_pair_id"], "key-id-for-"+keyName; got != want {

@@ -131,7 +131,7 @@ func TestOpenLocalURLScrubsExternalDesktopPassword(t *testing.T) {
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if data, err := os.ReadFile(result); err == nil {
+		if data, err := os.ReadFile(result); err == nil && len(data) > 0 {
 			if string(data) != "scrubbed" {
 				t.Fatalf("opener environment=%q", data)
 			}

@@ -643,10 +643,13 @@ never proxies SSH traffic. The posture:
 - SSH listens on the configured primary port (default `2222`) plus configured
   fallback ports (default `22`), because port 22 is not reliably reachable from
   every operator network.
-- AWS security groups use `CRABBOX_AWS_SSH_CIDRS` when set. Brokered leases
-  otherwise scope ingress to the CLI-detected outbound IPv4 CIDR, falling back
-  to the Cloudflare request source IP for the lease. Hetzner direct mode relies
-  on provider firewall defaults unless a profile tightens them.
+- AWS security groups keep explicitly configured SSH CIDRs pinned and never add
+  detected or request-source CIDRs to that policy. Without pinned CIDRs, brokered
+  leases admit both the CLI-detected outbound IPv4 `/32`, when available, and the
+  coordinator-authenticated request source (`/32` or `/128`); an IPv6 heartbeat
+  does not remove working IPv4 ingress. Direct AWS leases detect the client's
+  outbound IPv4 CIDR. Hetzner direct mode relies on provider firewall defaults
+  unless a profile tightens them.
 - Machines are disposable and cleanable; boot-time cleanup clears stale
   work-root directories.
 

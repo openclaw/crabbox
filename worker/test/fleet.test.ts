@@ -18046,17 +18046,17 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value("lease:cbx_abcdef123456")).toBeUndefined();
   });
 
-  it("passes the Cloudflare request source IP as AWS SSH ingress CIDR", async () => {
+  it("combines detected AWS outbound IPv4 with the authenticated IPv6 request source", async () => {
     let awsCIDRs: string[] = [];
-    const fleet = testFleet(new MemoryStorage(), {
+    const storage = new MemoryStorage();
+    const aws = new AWSProvider({} as Env, "eu-west-1", storage);
+    const fleet = testFleet(storage, {
       aws: fakeProvider(undefined, {
         provider: "aws",
-        onPrepareLeaseCreate(config, lease, context) {
-          awsCIDRs = context.requestSourceCIDRs;
-          return {
-            config: { ...config, awsSSHCIDRs: awsCIDRs },
-            lease: { ...lease, network: { sshSourceCIDRs: awsCIDRs } },
-          };
+        async onPrepareLeaseCreate(config, lease, context) {
+          const prepared = await aws.prepareLeaseCreate(config, lease, context);
+          awsCIDRs = prepared.lease.network?.sshSourceCIDRs ?? [];
+          return prepared;
         },
       }),
     });
@@ -18064,7 +18064,7 @@ describe("fleet lease identity and idle", () => {
       request("POST", "/v1/leases", {
         headers: {
           "x-crabbox-owner": "alice@example.com",
-          "cf-connecting-ip": "203.0.113.7",
+          "cf-connecting-ip": "2001:db8::7",
           "x-crabbox-org": "example-org",
         },
         body: {
@@ -18072,6 +18072,8 @@ describe("fleet lease identity and idle", () => {
           provider: "aws",
           class: "standard",
           serverType: "c7a.8xlarge",
+          awsSSHCIDRs: ["198.51.100.44/32"],
+          awsSSHCIDRsPinned: false,
           ttlSeconds: 1200,
           idleTimeoutSeconds: 360,
           sshPublicKey: "ssh-ed25519 test",
@@ -18079,7 +18081,7 @@ describe("fleet lease identity and idle", () => {
       }),
     );
     expect(create.status).toBe(201);
-    expect(awsCIDRs).toEqual(["203.0.113.7/32"]);
+    expect(awsCIDRs).toEqual(["198.51.100.44/32", "2001:db8::7/128"]);
   });
 
   it("uses additive AWS ingress reconciliation while creates can overlap", async () => {
@@ -18168,7 +18170,7 @@ describe("fleet lease identity and idle", () => {
     expect(prepared.lease.providerScope).toBe("aws:account:123456789012");
   });
 
-  it("preserves configured AWS SSH CIDRs when refreshing lease access", async () => {
+  it("keeps explicitly pinned AWS SSH CIDRs authoritative when refreshing lease access", async () => {
     const provider = new AWSProvider({} as Env, "eu-west-1", new MemoryStorage());
     vi.spyOn(provider, "reconcileLeaseAccess").mockResolvedValue();
     expect(
@@ -18189,18 +18191,18 @@ describe("fleet lease identity and idle", () => {
     const lease = testLease({
       provider: "aws",
       network: {
-        sshSourceCIDRs: ["0.0.0.0/0"],
-        sshPinnedSourceCIDRs: ["0.0.0.0/0"],
+        sshSourceCIDRs: ["192.0.2.0/24", "2001:db8:1::/64"],
+        sshPinnedSourceCIDRs: ["192.0.2.0/24", "2001:db8:1::/64"],
         sshSourceCIDRsComplete: true,
       },
     });
 
     const refreshed = await provider.refreshLeaseAccess(lease, {
-      requestSourceCIDRs: ["203.0.113.7/32"],
+      requestSourceCIDRs: ["203.0.113.7/32", "2001:db8::7/128"],
       activeLeases: [lease],
     });
 
-    expect(refreshed?.network?.sshSourceCIDRs).toEqual(["0.0.0.0/0", "203.0.113.7/32"]);
+    expect(refreshed?.network?.sshSourceCIDRs).toEqual(["192.0.2.0/24", "2001:db8:1::/64"]);
   });
 
   it.each([
@@ -18229,11 +18231,11 @@ describe("fleet lease identity and idle", () => {
       expected: ["2001:db8::7/128", "203.0.113.8/32"],
     },
     {
-      name: "retains pinned CIDRs from both families",
+      name: "keeps pinned CIDRs authoritative across both families",
       existing: ["192.0.2.0/24", "2001:db8:1::/64", "198.51.100.7/32", "2001:db8::7/128"],
       pinned: ["192.0.2.0/24", "2001:db8:1::/64"],
       incoming: ["203.0.113.8/32", "2001:db8::8/128"],
-      expected: ["192.0.2.0/24", "2001:db8:1::/64", "203.0.113.8/32", "2001:db8::8/128"],
+      expected: ["192.0.2.0/24", "2001:db8:1::/64"],
     },
     {
       name: "retains multiple incoming CIDRs from one family",
@@ -18284,7 +18286,7 @@ describe("fleet lease identity and idle", () => {
         });
         if (action === "DescribeSecurityGroups") {
           return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
-<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-shared</groupId><ipPermissions><item><ipProtocol>tcp</ipProtocol><fromPort>22</fromPort><toPort>22</toPort><ipRanges><item><cidrIp>198.51.100.7/32</cidrIp><description>Crabbox SSH</description></item></ipRanges></item></ipPermissions></item></securityGroupInfo></DescribeSecurityGroupsResponse>`);
+<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-shared</groupId><ipPermissions><item><ipProtocol>tcp</ipProtocol><fromPort>22</fromPort><toPort>22</toPort><ipRanges><item><cidrIp>198.51.100.7/32</cidrIp><description>Crabbox SSH</description></item></ipRanges><ipv6Ranges><item><cidrIpv6>2001:db8::7/128</cidrIpv6><description>Crabbox SSH</description></item></ipv6Ranges></item></ipPermissions></item></securityGroupInfo></DescribeSecurityGroupsResponse>`);
         }
         return ec2XMLResponse("<Response />");
       }),
@@ -18305,7 +18307,7 @@ describe("fleet lease identity and idle", () => {
       sshFallbackPorts: [],
       network: {
         awsSecurityGroupID: "sg-shared",
-        sshSourceCIDRs: ["198.51.100.7/32"],
+        sshSourceCIDRs: ["198.51.100.7/32", "2001:db8::7/128"],
         sshSourceCIDRsComplete: true,
       },
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
@@ -18328,13 +18330,21 @@ describe("fleet lease identity and idle", () => {
     // The refresh may add IPv6 access, but it must not revoke the working SSH IPv4.
     expect(
       ingressRequests.filter(
-        (entry) => entry.action === "RevokeSecurityGroupIngress" && entry.ipv4 !== "0.0.0.0/0",
+        (entry) =>
+          entry.action === "RevokeSecurityGroupIngress" &&
+          entry.ipv4 !== "" &&
+          entry.ipv4 !== "0.0.0.0/0",
       ),
     ).toEqual([]);
     expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.network?.sshSourceCIDRs).toEqual([
       "198.51.100.7/32",
       "2001:db8::8/128",
     ]);
+    expect(ingressRequests).toContainEqual({
+      action: "RevokeSecurityGroupIngress",
+      ipv4: "",
+      ipv6: "2001:db8::7/128",
+    });
     expect(ingressRequests).toContainEqual({
       action: "AuthorizeSecurityGroupIngress",
       ipv4: "",
@@ -21679,56 +21689,89 @@ describe("fleet lease identity and idle", () => {
     await expect(workspace.json()).resolves.toMatchObject({ providerResourceId: freeID });
   });
 
-  it("reactivates a retained pinned Mac host family when the request type was defaulted", async () => {
-    const storage = new MemoryStorage();
-    storage.seed(
-      "lease:cbx_000000000100",
-      testLease({
-        id: "cbx_000000000100",
-        provider: "aws",
-        target: "macos",
-        state: "released",
-        owner: "alice@example.com",
-        org: "example-org",
-        hostId: "h-m4",
-        serverType: "mac-m4.metal",
-        providerKey: "crabbox-steipete",
-        releaseDeletesServer: false,
-      }),
-    );
-    const fleet = testFleet(storage, {
-      aws: fakeProvider(
-        () => {
-          throw new Error("retained instance must not launch a replacement");
-        },
-        { provider: "aws" },
-      ),
-    });
-
-    const response = await fleet.fetch(
-      request("POST", "/v1/leases", {
-        headers: {
-          "x-crabbox-owner": "alice@example.com",
-          "x-crabbox-org": "example-org",
-        },
-        body: {
-          createAttemptID: undefined,
+  it.each([
+    {
+      name: "replaces the previous policy with pinned CIDRs",
+      previousNetwork: {
+        sshSourceCIDRs: ["198.51.100.7/32", "2001:db8::7/128"],
+        sshSourceCIDRsComplete: true,
+      },
+      requestedCIDRs: ["192.0.2.0/24", "2001:db8:1::/64"],
+      pinned: true,
+      expectedCIDRs: ["192.0.2.0/24", "2001:db8:1::/64"],
+      expectedPinnedCIDRs: ["192.0.2.0/24", "2001:db8:1::/64"],
+    },
+    {
+      name: "clears stale pins for an unpinned claimant",
+      previousNetwork: {
+        sshSourceCIDRs: ["192.0.2.0/24", "2001:db8:1::/64"],
+        sshPinnedSourceCIDRs: ["192.0.2.0/24", "2001:db8:1::/64"],
+        sshSourceCIDRsComplete: true,
+      },
+      requestedCIDRs: ["198.51.100.44/32"],
+      pinned: false,
+      expectedCIDRs: ["198.51.100.44/32", "2001:db8::9/128"],
+      expectedPinnedCIDRs: undefined,
+    },
+  ])(
+    "reactivates a retained Mac host and $name",
+    async ({ previousNetwork, requestedCIDRs, pinned, expectedCIDRs, expectedPinnedCIDRs }) => {
+      const storage = new MemoryStorage();
+      storage.seed(
+        "lease:cbx_000000000100",
+        testLease({
+          id: "cbx_000000000100",
           provider: "aws",
           target: "macos",
+          state: "released",
+          owner: "alice@example.com",
+          org: "example-org",
           hostId: "h-m4",
-          capacity: { market: "on-demand" },
-          keep: true,
-          sshPublicKey: "ssh-ed25519 test",
-        },
-      }),
-    );
+          serverType: "mac-m4.metal",
+          providerKey: "crabbox-steipete",
+          releaseDeletesServer: false,
+          network: previousNetwork,
+        }),
+      );
+      const fleet = testFleet(storage, {
+        aws: fakeProvider(
+          () => {
+            throw new Error("retained instance must not launch a replacement");
+          },
+          { provider: "aws" },
+        ),
+      });
 
-    expect(response.status).toBe(201);
-    const { lease } = (await response.json()) as { lease: LeaseRecord };
-    expect(lease.id).toBe("cbx_000000000100");
-    expect(lease.serverType).toBe("mac-m4.metal");
-    expect(lease.requestedServerType).toBe("mac-m4.metal");
-  });
+      const response = await fleet.fetch(
+        request("POST", "/v1/leases", {
+          headers: {
+            "x-crabbox-owner": "alice@example.com",
+            "cf-connecting-ip": "2001:db8::9",
+            "x-crabbox-org": "example-org",
+          },
+          body: {
+            createAttemptID: undefined,
+            provider: "aws",
+            target: "macos",
+            hostId: "h-m4",
+            awsSSHCIDRs: requestedCIDRs,
+            awsSSHCIDRsPinned: pinned,
+            capacity: { market: "on-demand" },
+            keep: true,
+            sshPublicKey: "ssh-ed25519 test",
+          },
+        }),
+      );
+
+      expect(response.status).toBe(201);
+      const { lease } = (await response.json()) as { lease: LeaseRecord };
+      expect(lease.id).toBe("cbx_000000000100");
+      expect(lease.serverType).toBe("mac-m4.metal");
+      expect(lease.requestedServerType).toBe("mac-m4.metal");
+      expect(lease.network?.sshSourceCIDRs).toEqual(expectedCIDRs);
+      expect(lease.network?.sshPinnedSourceCIDRs).toEqual(expectedPinnedCIDRs);
+    },
+  );
 
   it("does not launch a replacement when a retained Mac is claimed concurrently", async () => {
     const storage = new MemoryStorage();
@@ -21959,26 +22002,26 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
-  it("honors requested AWS SSH ingress CIDRs over request source IP", async () => {
+  it("honors explicitly pinned AWS SSH ingress CIDRs without adding the request source", async () => {
     let awsCIDRs: string[] = [];
-    const fleet = testFleet(new MemoryStorage(), {
+    const storage = new MemoryStorage();
+    const aws = new AWSProvider({} as Env, "eu-west-1", storage);
+    const fleet = testFleet(storage, {
       aws: fakeProvider(undefined, {
         provider: "aws",
-        onPrepareLeaseCreate(config, lease) {
-          awsCIDRs = config.awsSSHCIDRs;
-          return {
-            config,
-            lease: { ...lease, network: { sshSourceCIDRs: config.awsSSHCIDRs } },
-          };
+        async onPrepareLeaseCreate(config, lease, context) {
+          const prepared = await aws.prepareLeaseCreate(config, lease, context);
+          awsCIDRs = prepared.lease.network?.sshSourceCIDRs ?? [];
+          return prepared;
         },
       }),
     });
     const create = await fleet.fetch(
       request("POST", "/v1/leases", {
         headers: {
-          "x-crabbox-owner": "peter@example.com",
+          "x-crabbox-owner": "alice@example.com",
           "cf-connecting-ip": "203.0.113.7",
-          "x-crabbox-org": "openclaw",
+          "x-crabbox-org": "example-org",
         },
         body: {
           leaseID: "cbx_abcdef123456",
@@ -21986,6 +22029,7 @@ describe("fleet lease identity and idle", () => {
           class: "standard",
           serverType: "c7a.8xlarge",
           awsSSHCIDRs: ["198.51.100.0/24"],
+          awsSSHCIDRsPinned: true,
           ttlSeconds: 1200,
           idleTimeoutSeconds: 360,
           sshPublicKey: "ssh-ed25519 test",
