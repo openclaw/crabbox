@@ -782,8 +782,9 @@ func webCodeAgentURL(base, leaseID string) string {
 func webCodePortalURL(base, leaseID string, folder ...string) string {
 	u, err := url.Parse(base)
 	if err != nil {
-		return base
+		return redactedConfigURL(base)
 	}
+	u.User = nil
 	u.Path = strings.TrimRight(u.Path, "/") + "/portal/leases/" + url.PathEscape(leaseID) + "/code/"
 	values := url.Values{}
 	if len(folder) > 0 && folder[0] != "" {

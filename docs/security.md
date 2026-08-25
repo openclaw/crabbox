@@ -388,7 +388,9 @@ provider that owns it. Header and bearer fallbacks treat whitespace or an
 unescaped JSON quote as the credential boundary, so punctuation inside an
 otherwise unknown credential cannot expose a suffix. Generated stop and
 failure-routing commands retain provider endpoint routing but remove URL userinfo
-before they are printed or stored.
+before they are printed or stored. Code and WebVNC portal links, browser opener
+arguments, and WebVNC bootstrap form actions also remove coordinator URL
+userinfo while preserving authenticated coordinator and agent transport.
 GitHub Actions registration metadata and its short-lived runner token travel
 over SSH stdin rather than the remote command line. These guarantees apply to
 Crabbox-generated diagnostics and process arguments, not to arbitrary command

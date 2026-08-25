@@ -4724,8 +4724,9 @@ func validWebVNCCredentialHandoffTicket(value string) bool {
 func webVNCPortalBootstrapURL(base, leaseID string) string {
 	u, err := url.Parse(base)
 	if err != nil {
-		return base
+		return redactedConfigURL(base)
 	}
+	u.User = nil
 	u.Path = strings.TrimRight(u.Path, "/") + "/portal/leases/" + url.PathEscape(leaseID) + "/vnc/bootstrap"
 	u.RawQuery = ""
 	u.Fragment = ""
@@ -4823,8 +4824,9 @@ func (l *webVNCPortalBootstrapHandoff) Close() {
 func webVNCPortalURL(base, leaseID, handoff string, opts ...webVNCPortalOptions) string {
 	u, err := url.Parse(base)
 	if err != nil {
-		return base
+		return redactedConfigURL(base)
 	}
+	u.User = nil
 	u.Path = strings.TrimRight(u.Path, "/") + "/portal/leases/" + url.PathEscape(leaseID) + "/vnc"
 	u.RawQuery = ""
 	u.Fragment = ""

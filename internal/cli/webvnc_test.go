@@ -76,6 +76,46 @@ func TestWebVNCURLs(t *testing.T) {
 	}
 }
 
+func TestWebVNCPortalURLsRemoveCoordinatorCredentials(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		user *url.Userinfo
+	}{
+		{name: "username and password", user: url.UserPassword("fixture-user", "fixture-password")},
+		{name: "username only", user: url.User("fixture-user")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			coordinator := &url.URL{
+				Scheme:   "https",
+				User:     test.user,
+				Host:     "broker.example.test",
+				Path:     "/team",
+				RawQuery: "token=fixture-query-value",
+				Fragment: "fixture-fragment-value",
+			}
+			portal := webVNCPortalURL(coordinator.String(), "cbx_abcdef123456", "vnc_handoff_fixture", webVNCPortalOptions{TakeControl: true})
+			wantPortal := "https://broker.example.test/team/portal/leases/cbx_abcdef123456/vnc#control=take&handoff=vnc_handoff_fixture"
+			if portal != wantPortal {
+				t.Fatalf("portal URL=%q, want %q", portal, wantPortal)
+			}
+			bootstrap := webVNCPortalBootstrapURL(coordinator.String(), "cbx_abcdef123456")
+			wantBootstrap := "https://broker.example.test/team/portal/leases/cbx_abcdef123456/vnc/bootstrap"
+			if bootstrap != wantBootstrap {
+				t.Fatalf("bootstrap URL=%q, want %q", bootstrap, wantBootstrap)
+			}
+			_, openerArgs := openURLCommand(portal)
+			for _, forbidden := range []string{"fixture-user", "fixture-password", "fixture-query-value", "fixture-fragment-value"} {
+				if strings.Contains(portal, forbidden) || strings.Contains(bootstrap, forbidden) || strings.Contains(strings.Join(openerArgs, " "), forbidden) {
+					t.Fatalf("presentation URL or opener arguments exposed %q: portal=%q bootstrap=%q argv=%#v", forbidden, portal, bootstrap, openerArgs)
+				}
+			}
+			if agent := webVNCAgentURL(coordinator.String(), "cbx_abcdef123456"); !strings.Contains(agent, "fixture-user@") && !strings.Contains(agent, "fixture-user:fixture-password@") {
+				t.Fatalf("authenticated agent transport lost coordinator userinfo: %s", agent)
+			}
+		})
+	}
+}
+
 func TestCreateWebVNCPortalURLUsesCredentialHandoff(t *testing.T) {
 	var received map[string]string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -67,6 +67,12 @@ the bearer, viewer ticket, coordinator viewer URL, or VNC credential in the
 browser URL or process arguments. GitHub-authenticated human sessions continue
 to open the existing Portal path.
 
+Displayed viewer URLs, opened portal links, and browser bootstrap form actions
+never include coordinator URL usernames, passwords, original query parameters,
+or fragments. Coordinator HTTP and agent WebSocket authentication retain their
+configured credentials; browsers use their existing session or normal browser
+authentication.
+
 Deployments that expose the browser portal and bridge agent through different
 origins can set `CRABBOX_WEBVNC_AGENT_BASE_URL` to the agent's exact HTTPS
 origin. Ticket creation, status, and portal URLs continue using the configured
