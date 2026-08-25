@@ -4,15 +4,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -245,16 +249,6 @@ func TestMachine0FixedHeartbeatCommandRenewsRegisteredLease(t *testing.T) {
 		t.Fatalf("fixed Machine0 claim was not durably bound: %#v", initial)
 	}
 
-	machineJSON, err := json.Marshal(api.machine)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cliPath := filepath.Join(t.TempDir(), "machine0")
-	script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" != \"get\" ] || [ \"$2\" != %q ] || [ \"$3\" != \"--json\" ]; then exit 2; fi\nprintf '%%s\\n' '%s'\n", api.machine.Name, machineJSON)
-	if err := os.WriteFile(cliPath, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
-
 	var renewals atomic.Int32
 	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		renewals.Add(1)
@@ -268,12 +262,7 @@ func TestMachine0FixedHeartbeatCommandRenewsRegisteredLease(t *testing.T) {
 	}))
 	defer coordinator.Close()
 
-	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	config := fmt.Sprintf("provider: machine0\nlease:\n  idleTimeout: 15m\nbroker:\n  url: %s\n  mode: registered\nmachine0:\n  cliPath: %q\n", coordinator.URL, cliPath)
-	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("CRABBOX_CONFIG", configPath)
+	configureMachine0CommandFixture(t, api.machine, coordinator.URL, "15m")
 	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "fixture-coordinator-token")
 
 	for invocation := 1; invocation <= 2; invocation++ {
@@ -293,4 +282,162 @@ func TestMachine0FixedHeartbeatCommandRenewsRegisteredLease(t *testing.T) {
 	if updated.LastUsedAt == initial.LastUsedAt || updated.IdleTimeoutSeconds != initial.IdleTimeoutSeconds || updated.Labels["idle_timeout_secs"] != "2700" {
 		t.Fatalf("fresh heartbeat invocations did not preserve and renew durable lifecycle: initial=%#v updated=%#v", initial, updated)
 	}
+}
+
+func TestMachine0DirectCommandsRenewLifecycle(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Machine0 fixes SSH port 22, which macOS cannot bind unprivileged")
+	}
+
+	for _, tc := range []struct {
+		name string
+		args func(string) []string
+	}{
+		{name: "run", args: func(id string) []string {
+			return []string{"run", "--provider", providerName, "--id", id, "--no-sync", "--", "true"}
+		}},
+		{name: "connect", args: func(id string) []string {
+			return []string{"connect", "--provider", providerName, "--id", id}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, api, req := fixedMachine0TestFixture(t)
+			repoRoot, err := filepath.Abs("../../..")
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Repo.Root = repoRoot
+			b.cfg.IdleTimeout = 45 * time.Minute
+			b.rt.Clock = machine0HeartbeatClock(time.Now().Add(-2 * time.Minute))
+			req.Keep = true
+			lease, err := b.Acquire(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			initial := readFixedMachine0Claim(t, lease.LeaseID)
+			if initial.Provider != core.FixedMachine0ClaimProvider || initial.CloudID != api.machine.ID ||
+				initial.CloudImmutableID != api.machine.ID || initial.ProviderScope != machineScope(api.machine.ID) {
+				t.Fatalf("fixed Machine0 claim was not immutably bound: %#v", initial)
+			}
+			initialUsedAt, err := time.Parse(time.RFC3339, initial.LastUsedAt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			api.machine.IP = "127.0.0.1"
+
+			listener, err := net.Listen("tcp", "127.0.0.1:22")
+			if err != nil {
+				if errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EADDRINUSE) {
+					t.Skipf("Machine0 requires an available privileged SSH port 22: %v", err)
+				}
+				t.Fatalf("bind Machine0 SSH readiness listener: %v", err)
+			}
+			listenerDone := make(chan struct{})
+			go func() {
+				defer close(listenerDone)
+				for {
+					conn, err := listener.Accept()
+					if err != nil {
+						return
+					}
+					_ = conn.Close()
+				}
+			}()
+			t.Cleanup(func() {
+				_ = listener.Close()
+				<-listenerDone
+			})
+
+			binDir := configureMachine0CommandFixture(t, api.machine, "", "45m")
+			stateDir, err := core.CrabboxStateDir()
+			if err != nil {
+				t.Fatal(err)
+			}
+			claimLog := filepath.Join(binDir, "ssh-claims.json")
+			t.Setenv("CRABBOX_MACHINE0_CLAIM_PATH", filepath.Join(stateDir, "claims", lease.LeaseID+".json"))
+			t.Setenv("CRABBOX_MACHINE0_CLAIM_LOG", claimLog)
+			ssh := `#!/bin/sh
+/bin/cat "$CRABBOX_MACHINE0_CLAIM_PATH" >> "$CRABBOX_MACHINE0_CLAIM_LOG" || exit 1
+current=
+for arg do current="$arg"; done
+case "$current" in
+  *'payload_b64="'*'"; decoded=; if command -v base64'*)
+    payload=${current#*'payload_b64="'}
+    payload=${payload%%'"; decoded=; if command -v base64'*}
+    current=$(printf %s "$payload" | /usr/bin/base64 --decode) || exit 1
+    ;;
+esac
+case "$current" in
+  *"protocol_action='acquire'"*) printf ACQUIRED ;;
+  *"protocol_action='renew'"*) printf RENEWED ;;
+  *"protocol_action='inspect'"*) printf OWNED ;;
+  *"protocol_action='release'"*) printf RELEASED ;;
+esac
+exit 0
+`
+			if err := os.WriteFile(filepath.Join(binDir, "ssh"), []byte(ssh), 0o700); err != nil {
+				t.Fatal(err)
+			}
+
+			var stdout, stderr bytes.Buffer
+			if err := (core.App{Stdout: &stdout, Stderr: &stderr}).Run(context.Background(), tc.args(lease.LeaseID)); err != nil {
+				t.Fatalf("direct %s failed: %v\nstdout=%s\nstderr=%s", tc.name, err, stdout.String(), stderr.String())
+			}
+			for _, warning := range []string{"direct touch", "no exact claim snapshot", "refusing touch"} {
+				if strings.Contains(stderr.String(), warning) {
+					t.Fatalf("direct %s reported %q: %s", tc.name, warning, stderr.String())
+				}
+			}
+			observedClaims, err := os.ReadFile(claimLog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(observedClaims, []byte(`"state": "running"`)) {
+				t.Fatalf("direct %s never durably entered running during SSH execution: %s", tc.name, observedClaims)
+			}
+
+			updated := readFixedMachine0Claim(t, lease.LeaseID)
+			updatedUsedAt, err := time.Parse(time.RFC3339, updated.LastUsedAt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if updated.Revision == initial.Revision || !updatedUsedAt.After(initialUsedAt) ||
+				updated.Labels["state"] != "ready" || updated.IdleTimeoutSeconds != initial.IdleTimeoutSeconds ||
+				updated.Labels["idle_timeout_secs"] != strconv.Itoa(initial.IdleTimeoutSeconds) ||
+				updated.Provider != initial.Provider || updated.CloudID != initial.CloudID ||
+				updated.CloudImmutableID != initial.CloudImmutableID || updated.ProviderScope != initial.ProviderScope {
+				t.Fatalf("direct %s lost durable lifecycle or immutable Machine0 ownership: initial=%#v updated=%#v", tc.name, initial, updated)
+			}
+		})
+	}
+}
+
+func configureMachine0CommandFixture(t *testing.T, item machine, coordinatorURL, idleTimeout string) string {
+	t.Helper()
+	machineJSON, err := json.Marshal(item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	cliPath := filepath.Join(binDir, "machine0")
+	script := fmt.Sprintf("#!/bin/sh\nif [ \"$#\" -ne 3 ] || [ \"$1\" != \"get\" ] || [ \"$2\" != %q ] || [ \"$3\" != \"--json\" ]; then exit 2; fi\nprintf '%%s\\n' '%s'\n", item.Name, machineJSON)
+	if err := os.WriteFile(cliPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_MODE", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+
+	mode := "managed"
+	if coordinatorURL != "" {
+		mode = "registered"
+	}
+	configPath := filepath.Join(binDir, "config.yaml")
+	config := fmt.Sprintf("provider: machine0\nlease:\n  idleTimeout: %s\nbroker:\n  url: %q\n  mode: %s\nmachine0:\n  cliPath: %q\n", idleTimeout, coordinatorURL, mode, cliPath)
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	return binDir
 }
