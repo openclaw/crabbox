@@ -32,11 +32,32 @@ func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFi
 	probeCommand := fs.String("probe-command", "", "optional shell command to prove the hydrated box is test-ready")
 	poolKey := fs.String("pool", "", "register the hydrated lease in a broker ready pool")
 	poolCompatibilityKey := fs.String("pool-compatibility-key", "", "provider-neutral ready-pool capability and size key")
+	poolIdentityFile := fs.String("pool-identity-file", "", "generated typed ready-pool identity JSON")
+	poolCacheCompatibility := fs.String("pool-cache-compatibility", "", "derive typed identity using this operator-declared cache compatibility")
 	dryRun := fs.Bool("dry-run", false, "print the planned Crabbox commands without running them")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	timingJSON := fs.Bool("timing-json", false, "print final timing as JSON")
 	if err := parseFlags(fs, args); err != nil {
 		return err
+	}
+	typedIdentityFile := flagWasSet(fs, "pool-identity-file")
+	typedCacheCompatibility := flagWasSet(fs, "pool-cache-compatibility")
+	if (typedIdentityFile || typedCacheCompatibility) && strings.TrimSpace(*poolKey) == "" {
+		return exit(2, "typed ready-pool identity flags require --pool")
+	}
+	if typedIdentityFile && typedCacheCompatibility {
+		return exit(2, "--pool-identity-file and --pool-cache-compatibility are mutually exclusive")
+	}
+	if typedCacheCompatibility && strings.TrimSpace(*poolCacheCompatibility) == "" {
+		return exit(2, "--pool-cache-compatibility must not be empty")
+	}
+	var poolIdentity *CoordinatorReadyPoolIdentityV1
+	if typedIdentityFile {
+		identity, identityErr := loadReadyPoolIdentity(*poolIdentityFile)
+		if identityErr != nil {
+			return identityErr
+		}
+		poolIdentity = &identity
 	}
 	_ = reclaim
 	requestedSlug, err := requestedLeaseSlug(*leaseFlags.Slug)
@@ -79,6 +100,15 @@ func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFi
 	}
 	if readyPoolKey != "" && backendCoordinator(backend) == nil {
 		return exit(2, "--pool requires a coordinator-backed SSH lease provider")
+	}
+	if typedIdentityFile || typedCacheCompatibility {
+		coord, coordinatorErr := readyPoolCoordinatorFromConfig(cfg)
+		if coordinatorErr != nil {
+			return coordinatorErr
+		}
+		if supportErr := coord.CheckTypedReadyPoolSupport(ctx, readyPoolKey); supportErr != nil {
+			return supportErr
+		}
 	}
 	leaseArgs := prewarmWarmupArgs(args)
 	if backend.Spec().Kind == ProviderKindDelegatedRun && isBlacksmithProvider(cfg.Provider) {
@@ -142,7 +172,7 @@ func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFi
 	}
 	if readyPoolKey != "" {
 		if err := a.runPrewarmPostWarmupStep(ctx, backend, cfg, acquiredLease, "pool registration", func() error {
-			return a.registerPrewarmedLeaseInReadyPool(ctx, cfg, leaseID, readyPoolKey, *poolCompatibilityKey, poolFillClaim, *githubRunner)
+			return a.registerPrewarmedLeaseInReadyPool(ctx, cfg, leaseID, readyPoolKey, *poolCompatibilityKey, poolFillClaim, *githubRunner, poolIdentity, *poolCacheCompatibility)
 		}); err != nil {
 			return err
 		}
@@ -200,7 +230,7 @@ func prewarmWarmupArgs(args []string) []string {
 	valueFlags := map[string]struct{}{
 		"repo": {}, "workflow": {}, "job": {}, "ref": {},
 		"wait-timeout": {}, "keep-alive-minutes": {}, "probe-command": {}, "pool": {},
-		"pool-compatibility-key": {},
+		"pool-compatibility-key": {}, "pool-identity-file": {}, "pool-cache-compatibility": {},
 	}
 	boolFlags := map[string]struct{}{
 		"no-hydrate": {}, "github-runner": {}, "dry-run": {}, "timing-json": {},
@@ -230,7 +260,7 @@ func prewarmWarmupArgs(args []string) []string {
 	return out
 }
 
-func (a App) registerPrewarmedLeaseInReadyPool(ctx context.Context, cfg Config, leaseID, poolKey, compatibilityKey, fillClaim string, githubRunner bool) error {
+func (a App) registerPrewarmedLeaseInReadyPool(ctx context.Context, cfg Config, leaseID, poolKey, compatibilityKey, fillClaim string, githubRunner bool, identity *CoordinatorReadyPoolIdentityV1, cacheCompatibility string) error {
 	repo, _ := findRepo()
 	input := map[string]any{"leaseID": leaseID}
 	if repoValue := firstNonBlank(cfg.Actions.Repo, bestEffortGitHubRepoSlug(repo, cfg)); repoValue != "" {
@@ -251,7 +281,28 @@ func (a App) registerPrewarmedLeaseInReadyPool(ctx context.Context, cfg Config, 
 	if err != nil {
 		return err
 	}
-	res, err := coord.RegisterReadyPoolLease(ctx, poolKey, input)
+	var res CoordinatorReadyPoolResponse
+	if strings.TrimSpace(cacheCompatibility) != "" {
+		generationInput := mapsCloneAny(input)
+		generationInput["cacheCompatibility"] = strings.TrimSpace(cacheCompatibility)
+		generated, generationErr := coord.GenerateReadyPoolIdentity(ctx, poolKey, generationInput)
+		if generationErr != nil {
+			return generationErr
+		}
+		identity = &generated
+	}
+	if identity != nil {
+		if err := validateReadyPoolSeedIdentity(*identity, input); err != nil {
+			return err
+		}
+		input["identity"] = *identity
+		res, err = coord.RegisterTypedReadyPoolLease(ctx, poolKey, input)
+		if err == nil {
+			err = validateTypedReadyPoolResponseIdentity(res, *identity)
+		}
+	} else {
+		res, err = coord.RegisterReadyPoolLease(ctx, poolKey, input)
+	}
 	if err != nil {
 		return err
 	}

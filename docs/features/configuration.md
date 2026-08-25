@@ -956,6 +956,7 @@ sync:
   delete: true
   checksum: false
   gitSeed: true
+  gitOverlay: false
   fingerprint: true
   baseRef: main
   timeout: 15m
@@ -970,8 +971,10 @@ sync:
     - dist
 ```
 
-A `.crabboxignore` file at the repo root appends to `sync.exclude`. See
-[Sync](sync.md) for the matcher rules.
+A `.crabboxignore` file at the repo root appends to `sync.exclude`.
+`sync.gitOverlay` is an opt-in, credential-free Git transfer optimization for
+eligible Linux SSH workspaces; `CRABBOX_SYNC_GIT_OVERLAY` overrides it. See
+[Sync](sync.md) for the matcher rules and overlay eligibility.
 
 ### Env forwarding
 

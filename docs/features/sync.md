@@ -203,6 +203,45 @@ userinfo, warns without printing the URL, and uses the normal file sync instead.
 This prevents credentials stored in local Git remotes from reaching lease
 command arguments or the seeded worktree's Git configuration.
 
+### Opt-in Git overlay
+
+Set `sync.gitOverlay: true` or `CRABBOX_SYNC_GIT_OVERLAY=true` to let eligible
+Linux SSH-backed runners fetch the exact advertised local commit and transfer
+only the files that differ from that commit. A clean checkout sends no source
+file payload. Staged, unstaged, and untracked changes, removals, renames,
+executable bits, and symlink identities remain governed by the complete normal
+sync and deletion manifests; excluded tracked files are pruned after the reset.
+The selected remote branch may contain newer commits than the chosen checkout.
+Overlay fetches complete filtered commit/tree ancestry for that branch and the
+configured base ref, so `HEAD^`, `git merge-base`, and
+`git diff origin/main...HEAD` continue to work without downloading unrelated
+historical blobs. Origins that cannot support filtered history use ordinary
+sync instead.
+
+The optimization is off by default and requires `sync.gitSeed: true`,
+`sync.delete: true`, an unrestricted, complete, conflict-free Git checkout
+without submodules, and an anonymous HTTP(S) or remotely readable filesystem
+origin. Actions-owned workspaces, full resyncs, fresh PR checkouts, delegated
+providers, Windows/WSL2, macOS, `sync.include`, embedded credentials, SSH
+origins, private origins, unsafe Git configuration, and unavailable runner
+prerequisites fall back to the complete ordinary file manifest. Git commands
+never receive forwarded credentials, credential helpers, hooks, global Git
+configuration, external transports, or repository-defined filters.
+Anonymous HTTP authentication failures safely fall back; genuine DNS, TLS,
+firewall, and other eligible-origin transport failures remain fatal.
+
+Only dependency caches ignored by verified `.gitignore` files from the exact
+target tree may survive overlay preparation: `node_modules`, `.pnpm-store`,
+`.yarn/cache`, and `.yarn/unplugged`. Local `.git/info/exclude` cannot grant
+cache preservation. Existing workspace ownership and ready-pool preparation
+remain unchanged. A real, contained `.crabbox` directory and its reserved
+`env`, `scripts`, `logs`, `captures`, and `runs` runtime state survive overlay
+cleanup; symlinked runtime or Git metadata roots are rejected.
+
+When overlay mode is requested, timing JSON may additionally report `syncMode`,
+`syncTransferFiles`, `syncTransferBytes`, and `syncFallbackReason`; ordinary
+default-off timing output retains its existing shape.
+
 ## Large-sync guardrails
 
 `crabbox run` prints a one-line size estimate before transferring. When the
@@ -260,6 +299,7 @@ sync:
   delete: true
   checksum: false
   gitSeed: true
+  gitOverlay: false
   fingerprint: true
   baseRef: "" # defaults to the repo's origin HEAD / current branch
   timeout: 15m
@@ -277,6 +317,7 @@ Environment overrides:
 CRABBOX_SYNC_CHECKSUM
 CRABBOX_SYNC_DELETE
 CRABBOX_SYNC_GIT_SEED
+CRABBOX_SYNC_GIT_OVERLAY
 CRABBOX_SYNC_FINGERPRINT
 CRABBOX_SYNC_BASE_REF
 CRABBOX_SYNC_TIMEOUT
