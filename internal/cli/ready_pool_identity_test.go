@@ -323,3 +323,115 @@ func TestLegacyReadyPoolMatchingRejectsTypedEntries(t *testing.T) {
 		t.Fatalf("unchanged legacy entry count=%d", count)
 	}
 }
+
+func TestReadyPoolIdentityProviderBinding(t *testing.T) {
+	identity := testReadyPoolIdentity(t, "", "", "", "")
+
+	t.Run("omitted selects identity provider", func(t *testing.T) {
+		fs := newFlagSet("test", &bytes.Buffer{})
+		provider := fs.String("provider", "", "")
+		if err := parseFlags(fs, nil); err != nil {
+			t.Fatal(err)
+		}
+		cfg := Config{}
+		if err := bindReadyPoolIdentityProviderConfig(&cfg, fs, provider, identity); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Provider != "aws" || cfg.providerSelectionSource != providerSelectionLeaseContext || *provider != "aws" {
+			t.Fatalf("provider binding cfg=%+v flag=%q", cfg, *provider)
+		}
+	})
+
+	t.Run("explicit mismatch", func(t *testing.T) {
+		fs := newFlagSet("test", &bytes.Buffer{})
+		provider := fs.String("provider", "", "")
+		if err := parseFlags(fs, []string{"--provider", "gcp"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := bindReadyPoolIdentityProviderConfig(&Config{}, fs, provider, identity); err == nil {
+			t.Fatal("explicit provider mismatch succeeded")
+		}
+	})
+
+	t.Run("configured mismatch", func(t *testing.T) {
+		cfg := Config{}
+		setProviderSelection(&cfg, "gcp", providerSelectionUserConfig)
+		if err := bindReadyPoolIdentityConfiguredProvider(&cfg, identity); err == nil {
+			t.Fatal("configured provider mismatch succeeded")
+		}
+	})
+
+	t.Run("request derives provider", func(t *testing.T) {
+		input := map[string]any{}
+		if err := bindReadyPoolIdentityProvider(input, identity); err != nil {
+			t.Fatal(err)
+		}
+		if got := readyPoolInputString(input, "provider"); got != "aws" {
+			t.Fatalf("provider=%q, want aws", got)
+		}
+	})
+}
+
+func TestReadyPoolReturnDrainsUnavailableIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		result     string
+		identity   string
+		missing    bool
+		status     int
+		wantErr    string
+		wantResult string
+	}{
+		{name: "malformed ready drains", result: "ready", identity: `{`, wantErr: "decode ready-pool identity", wantResult: "drain"},
+		{name: "missing ready drains", result: "ready", missing: true, wantErr: "read ready-pool identity", wantResult: "drain"},
+		{name: "explicit drain skips identity", result: "drain", identity: `{`, wantResult: "drain"},
+		{name: "explicit release skips identity", result: "release", identity: `{`, wantResult: "release"},
+		{name: "cleanup failure joins original error", result: "ready", identity: `{`, status: http.StatusInternalServerError, wantErr: "decode ready-pool identity", wantResult: "drain"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			var received map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+					t.Fatal(err)
+				}
+				if tc.status != 0 {
+					http.Error(w, "cleanup failed", tc.status)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"entry":{"key":"builders","leaseID":"cbx_123","state":"draining"}}`))
+			}))
+			defer server.Close()
+			t.Setenv("CRABBOX_COORDINATOR", server.URL)
+			t.Setenv("CRABBOX_COORDINATOR_TOKEN", "local-test-token")
+
+			identityPath := filepath.Join(t.TempDir(), "identity.json")
+			if tc.missing {
+				identityPath = filepath.Join(t.TempDir(), "missing.json")
+			} else if err := os.WriteFile(identityPath, []byte(tc.identity), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err := (App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}).readyPoolReturn(
+				context.Background(),
+				[]string{"builders", "--id", "cbx_123", "--result", tc.result, "--reason", "caller cleanup", "--identity-file", identityPath},
+			)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error=%v, want %q", err, tc.wantErr)
+			}
+			if tc.status != 0 && (err == nil || !strings.Contains(err.Error(), "cleanup failed")) {
+				t.Fatalf("joined error=%v", err)
+			}
+			if received["result"] != tc.wantResult {
+				t.Fatalf("result=%v, want %q", received["result"], tc.wantResult)
+			}
+			if tc.result == "ready" && received["identity"] != nil {
+				t.Fatalf("invalid identity was sent: %#v", received["identity"])
+			}
+		})
+	}
+}

@@ -4,6 +4,7 @@
 
 ### Changes
 
+- Bound typed ready-pool capacity to canonical provider identities, migrated desired state to fixed-size v2 keys without legacy-reader exposure, and routed returns to fail-closed drain cleanup when provider or lease identity evidence changes.
 - Kept sync working when runners cannot authenticate to or reach Git origins by falling back to a full manifest, preserving internal Git-control exit codes, and recognizing disconnected sockets without mistaking URL digits for authentication failures. [PR 1622](https://github.com/openclaw/crabbox/pull/1622), [PR 1744](https://github.com/openclaw/crabbox/pull/1744). Thanks @vincentkoc.
 - Hardened reused Git-overlay workspaces against hidden index changes and incomplete fingerprints while preserving verified ignored caches. [PR 1623](https://github.com/openclaw/crabbox/pull/1623). Thanks @vincentkoc.
 - Made Git-overlay transfers use accepted immutable snapshots for payloads, manifests, fingerprints, and index validation, leaving later edits for the next sync and preserving primary errors through cleanup and fallback. [PR 1624](https://github.com/openclaw/crabbox/pull/1624). Thanks @vincentkoc.

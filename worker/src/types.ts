@@ -661,6 +661,7 @@ export interface ReadyPoolDesiredCapacity {
   owner: string;
   org: string;
   criteria: ReadyPoolBorrowRequest;
+  identity?: ReadyPoolIdentityV1;
   compatibilityKey?: string;
   minReady: number;
   maxReady: number;

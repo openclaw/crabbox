@@ -654,3 +654,30 @@ actions:
 		t.Fatalf("dry-run touched pond ACL API: gets=%d puts=%d", stub.gets, stub.puts)
 	}
 }
+
+func TestPrewarmPoolIdentityRejectsProviderBeforeBackendAcquisition(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, ".crabbox.yaml")
+	if err := os.WriteFile(configPath, []byte("provider: gcp\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	identityPath := filepath.Join(dir, "identity.json")
+	identity, err := json.Marshal(testReadyPoolIdentity(t, "", "", "", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(identityPath, identity, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, ".config"))
+	t.Setenv("CRABBOX_CONFIG", configPath)
+
+	err = (App{Stdout: io.Discard, Stderr: io.Discard}).Run(context.Background(), []string{
+		"prewarm", "--pool", "builders", "--pool-identity-file", identityPath,
+	})
+	if err == nil || !strings.Contains(err.Error(), "configured typed ready-pool provider") {
+		t.Fatalf("error=%v", err)
+	}
+}
