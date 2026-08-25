@@ -492,6 +492,92 @@ func TestStopDispatchesExplicitReclaimContract(t *testing.T) {
 	}
 }
 
+func TestStopForceRequiresExplicitProviderAndResourceID(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "provider", args: []string{"--id", "service-123", "--force"}, want: "requires an explicit --provider"},
+		{name: "resource", args: []string{"--provider", "stop-reclaim-test", "--force", "service-123"}, want: "requires an exact --id"},
+		{name: "reclaim conflict", args: []string{"--provider", "stop-reclaim-test", "--id", "service-123", "--force", "--reclaim"}, want: "cannot be combined with --reclaim"},
+		{name: "expected identity conflict", args: []string{"--provider", "stop-reclaim-test", "--id", "service-123", "--force", "--expected-provider-resource-id", "replacement-resource"}, want: "cannot be combined with controller-owned release identity"},
+		{name: "confirmed absence conflict", args: []string{"--provider", "stop-reclaim-test", "--id", "service-123", "--force", "--confirmed-absent-local-cleanup"}, want: "cannot be combined with controller-owned release identity"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := (App{Stdout: io.Discard, Stderr: io.Discard}).stop(context.Background(), test.args)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("stop --force err=%v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestStopForceDispatchesVerifiedReclaimContract(t *testing.T) {
+	called := false
+	testStopReclaimHook = func(req StopRequest) error {
+		called = true
+		if req.ID != "service-123" {
+			t.Fatalf("forced recovery id=%q", req.ID)
+		}
+		return nil
+	}
+	t.Cleanup(func() { testStopReclaimHook = nil })
+
+	err := (App{Stdout: io.Discard, Stderr: io.Discard}).stop(context.Background(), []string{
+		"--provider", "stop-reclaim-test", "--id", "service-123", "--force",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("stop --force did not dispatch the verified reclaim contract")
+	}
+}
+
+func TestStopForceRejectsControllerIdentityBeforeVerifiedAdoption(t *testing.T) {
+	called := false
+	testStopReclaimHook = func(StopRequest) error {
+		called = true
+		return nil
+	}
+	t.Cleanup(func() { testStopReclaimHook = nil })
+
+	err := (App{Stdout: io.Discard, Stderr: io.Discard}).stop(context.Background(), []string{
+		"--provider", "stop-reclaim-test", "--id", "service-123", "--force",
+		"--expected-provider-lease-id", "cbx_abcdef123456",
+		"--expected-provider-attempt-lease-id", "cbx_abcdef123456",
+		"--expected-provider-slug", "original-resource",
+		"--expected-provider-resource-id", "original-resource",
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot be combined with controller-owned release identity") {
+		t.Fatalf("stop --force err=%v, want expected-identity rejection", err)
+	}
+	if called {
+		t.Fatal("stop --force dispatched adoption before rejecting controller identity")
+	}
+}
+
+func TestStopForceRejectsProviderWithoutVerifiedRecovery(t *testing.T) {
+	err := (App{Stdout: io.Discard, Stderr: io.Discard}).stop(context.Background(), []string{
+		"--provider", "e2b", "--id", "box_123", "--force",
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not support verified forced recovery") {
+		t.Fatalf("stop --force err=%v, want unsupported-provider rejection", err)
+	}
+}
+
+func TestStopForceRejectsSSHProviderWithoutVerifiedRecovery(t *testing.T) {
+	isolateTestUserDirs(t)
+	err := (App{Stdout: io.Discard, Stderr: io.Discard}).stop(context.Background(), []string{
+		"--provider", "ssh", "--static-host", "host.example.test", "--id", "static_host-example-test", "--force",
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not support verified forced recovery") {
+		t.Fatalf("stop --force err=%v, want SSH-provider rejection", err)
+	}
+}
+
 func TestStopRejectsReclaimForSSHLeaseProvider(t *testing.T) {
 	isolateTestUserDirs(t)
 	err := (App{Stdout: io.Discard, Stderr: io.Discard}).stop(context.Background(), []string{

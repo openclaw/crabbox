@@ -2090,6 +2090,64 @@ func TestStopCoordinatorInspectFailureKeepsProviderBinding(t *testing.T) {
 	}
 }
 
+func TestStopForceCoordinatorRequiresLiveExactLease(t *testing.T) {
+	tests := []struct {
+		name        string
+		id          string
+		leaseStatus int
+		provider    string
+		wantErr     string
+		wantRelease int
+	}{
+		{name: "reject slug", id: "friendly-slug", wantErr: "requires an exact coordinator lease id"},
+		{name: "reject failed inspection", id: "cbx_abcdef123456", leaseStatus: http.StatusInternalServerError, wantErr: "inspect_failed"},
+		{name: "reject wrong provider", id: "cbx_abcdef123456", provider: "external", wantErr: "provider"},
+		{name: "release verified lease", id: "cbx_abcdef123456", provider: "aws", wantRelease: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			isolateTestUserDirs(t)
+			releases := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/"+test.id:
+					if test.leaseStatus != 0 {
+						http.Error(w, `{"error":"inspect_failed"}`, test.leaseStatus)
+						return
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+						ID: test.id, Provider: test.provider, State: "active",
+					}})
+				case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/"+test.id+"/release":
+					releases++
+					_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+						ID: test.id, Provider: "aws", State: "released",
+					}})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			t.Setenv("CRABBOX_COORDINATOR", server.URL)
+			t.Setenv("CRABBOX_COORDINATOR_TOKEN", "user-token")
+
+			err := (App{Stdout: io.Discard, Stderr: io.Discard}).stop(context.Background(), []string{
+				"--provider", "aws", "--id", test.id, "--force",
+			})
+			if test.wantErr != "" && (err == nil || !strings.Contains(err.Error(), test.wantErr)) {
+				t.Fatalf("stop --force err=%v, want %q", err, test.wantErr)
+			}
+			if test.wantErr == "" && err != nil {
+				t.Fatal(err)
+			}
+			if releases != test.wantRelease {
+				t.Fatalf("release requests=%d want %d", releases, test.wantRelease)
+			}
+		})
+	}
+}
+
 func TestCoordinatorAcquireProviderMismatchCleanupPolicy(t *testing.T) {
 	for _, test := range []struct {
 		name        string

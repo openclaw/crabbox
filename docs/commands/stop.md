@@ -148,6 +148,7 @@ client are cleaned up before the provider release runs.
 --provider <name>          provider to act against (see crabbox providers)
 --id <lease-or-slug>        lease ID or slug (equivalent to the positional arg)
 --reclaim                   explicitly adopt a provider resource when that provider supports safe stop adoption
+--force                     recover one exact resource through verified provider adoption or an inspected coordinator lease
 --target linux|macos|windows
 --windows-mode normal|wsl2
 --static-host <host>        static SSH host (provider=ssh)
@@ -155,6 +156,18 @@ client are cleaned up before the provider release runs.
 --static-port <port>        static SSH port (provider=ssh)
 --static-work-root <path>   static target work root (provider=ssh)
 ```
+
+`--force` is a targeted recovery operation, not an ownership bypass. It always
+requires both an explicit `--provider` and an exact `--id`; positional IDs,
+coordinator slugs, `--reclaim`, and internal controller release-identity flags
+cannot be combined with it. Providers with a
+verified stop-adoption contract inspect the exact remote resource, validate its
+provider scope and ownership metadata, persist a conflict-safe local claim,
+and then perform their ordinary claim-fenced stop. Brokered providers inspect
+the exact coordinator lease and verify its provider before release; inspection
+failures never fall back to releasing an unverified ID. Providers without a
+verified recovery contract reject `--force` and direct the operator to their
+native provider CLI. `cleanup` does not support `--force`.
 
 Each provider also registers its own flags; the ones relevant to `stop` include:
 

@@ -4071,6 +4071,7 @@ func (a App) stop(ctx context.Context, args []string) error {
 	provider := registerProviderSelectionFlag(fs, defaults, providerHelpAll())
 	id := fs.String("id", "", "lease id or slug")
 	reclaim := fs.Bool("reclaim", false, "adopt an unclaimed provider resource before stopping it")
+	forceRecovery := fs.Bool("force", false, "recover and stop one exactly identified provider resource")
 	expectedLeaseID := fs.String("expected-provider-lease-id", "", "internal: immutable provider lease identity")
 	expectedAttemptLeaseID := fs.String("expected-provider-attempt-lease-id", "", "internal: immutable provider attempt identity")
 	expectedSlug := fs.String("expected-provider-slug", "", "internal: immutable provider slug identity")
@@ -4088,6 +4089,17 @@ func (a App) stop(ctx context.Context, args []string) error {
 	if strings.TrimSpace(*id) == "" || fs.NArg() > 1 || (idFlagSet && fs.NArg() > 0) {
 		return exit(2, "usage: crabbox stop --id <lease-or-server-id>")
 	}
+	if *forceRecovery {
+		if !flagWasSet(fs, "provider") {
+			return exit(2, "stop --force requires an explicit --provider")
+		}
+		if !idFlagSet {
+			return exit(2, "stop --force requires an exact --id")
+		}
+		if *reclaim {
+			return exit(2, "stop --force cannot be combined with --reclaim")
+		}
+	}
 	expectedFlagNames := []string{
 		"expected-provider-lease-id",
 		"expected-provider-attempt-lease-id",
@@ -4099,6 +4111,9 @@ func (a App) stop(ctx context.Context, args []string) error {
 		if flagWasSet(fs, name) {
 			expectedFlagCount++
 		}
+	}
+	if *forceRecovery && (expectedFlagCount != 0 || *confirmedAbsentLocalCleanup || flagWasSet(fs, "expected-provider-scope") || flagWasSet(fs, "expected-coordinator-registration-url")) {
+		return exit(2, "stop --force cannot be combined with controller-owned release identity")
 	}
 	if expectedFlagCount != 0 && expectedFlagCount != len(expectedFlagNames) {
 		return exit(2, "internal provider release requires the complete expected identity set")
@@ -4212,6 +4227,17 @@ func (a App) stop(ctx context.Context, args []string) error {
 		}
 		return nil
 	}
+	if *forceRecovery {
+		if reclaimer, ok := backend.(StopReclaimBackend); ok {
+			return reclaimer.ReclaimAndStop(ctx, StopRequest{Options: leaseOptionsFromConfig(cfg), ID: *id})
+		}
+		if backendCoordinator(backend) == nil {
+			return exit(2, "provider=%s does not support verified forced recovery; inspect the resource and use its provider CLI", backend.Spec().Name)
+		}
+		if !isCanonicalLeaseID(*id) {
+			return exit(2, "provider=%s stop --force requires an exact coordinator lease id", backend.Spec().Name)
+		}
+	}
 	if delegated, ok := backend.(DelegatedRunBackend); ok {
 		if !expectedIdentity.empty() {
 			return exit(2, "provider=%s cannot validate an expected release identity", backend.Spec().Name)
@@ -4239,7 +4265,7 @@ func (a App) stop(ctx context.Context, args []string) error {
 		ExpectedProviderIdentity: expectedIdentity,
 	})
 	if err != nil {
-		if backendCoordinator(backend) != nil {
+		if backendCoordinator(backend) != nil && !*forceRecovery {
 			if isCoordinatorProviderIdentityError(err) {
 				return err
 			}

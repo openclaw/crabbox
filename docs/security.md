@@ -434,6 +434,15 @@ operation, and claim removal or retained-state update. Names, provider tags,
 and inventory matches remain discovery hints; missing, stale, or concurrently
 replaced claims never authorize deletion or stopping.
 
+`stop --force` is an explicit, single-resource recovery path rather than an
+authorization bypass. It requires an explicit provider and exact resource ID.
+Adapters that support safe adoption must first inspect provider identity and
+scope, create a conflict-safe exact claim, and retain that claim through the
+normal fenced operation. Brokered recovery instead requires a successful fresh
+inspection of the exact coordinator lease and its provider. Unsupported
+providers, ambiguous identifiers, and failed ownership inspections fail closed;
+there is no force-enabled cleanup sweep.
+
 Artifact publishing rejects symlinks, directories at reserved generated-output
 paths, and other non-regular bundle entries before upload side effects.
 Publishing copies validated file objects into a private snapshot before broker,

@@ -242,8 +242,9 @@ type DelegatedRunBackend interface {
 	Stop(ctx context.Context, req StopRequest) error
 }
 
-// StopReclaimBackend supports an explicit one-shot adoption before a delegated
-// provider stop. Providers without a strong adoption contract do not implement it.
+// StopReclaimBackend supports an explicit one-shot adoption before stopping an
+// exactly identified resource. Providers without a strong adoption contract do
+// not implement it.
 type StopReclaimBackend interface {
 	Backend
 	ReclaimAndStop(ctx context.Context, req StopRequest) error
