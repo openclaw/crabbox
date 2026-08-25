@@ -78,6 +78,18 @@ func TestValidateClaimBindingFields(t *testing.T) {
 	}
 }
 
+func TestValidateClaimBindingCanRequireEmptyProviderScope(t *testing.T) {
+	claim := core.LeaseClaim{Provider: "example", ProviderScope: "region:other", Labels: map[string]string{"provider": "example"}}
+	want := ClaimBinding{Provider: "example", ExactProviderScope: true}
+	if err := ValidateClaimBinding(claim, want); err == nil || !strings.Contains(err.Error(), "provider scope") {
+		t.Fatalf("nonempty provider scope accepted for an explicitly empty scope: %v", err)
+	}
+	claim.ProviderScope = ""
+	if err := ValidateClaimBinding(claim, want); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestResolveProviderClaimStrict(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	const (

@@ -622,6 +622,7 @@ func TestTouchPersistsUpdatedLabelsToClaim(t *testing.T) {
 }
 
 func TestReleaseRejectsForeignInstance(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	runner := &fakeRunner{results: []core.LocalCommandResult{{Stdout: `[
 		{"cluster_id":"foreign","labels":{"provider":"other"}}
 	]`}}}
@@ -629,10 +630,16 @@ func TestReleaseRejectsForeignInstance(t *testing.T) {
 	cfg.Provider = providerName
 	applyDefaults(&cfg)
 	cfg.NamespaceInstance.TenantID = "tenant-test"
+	server := core.Server{CloudID: "foreign", Provider: providerName, Labels: map[string]string{
+		"provider": providerName, "lease": "cbx_abcdef123456", "slug": "foreign", "namespace_tenant": "tenant-test",
+	}}
+	if err := core.ClaimLeaseTargetForConfig("cbx_abcdef123456", "foreign", cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
 	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
 	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
 		LeaseID: "cbx_abcdef123456",
-		Server:  core.Server{CloudID: "foreign"},
+		Server:  server,
 	}})
 	if err == nil || !strings.Contains(err.Error(), "without Crabbox ownership labels") {
 		t.Fatalf("err=%v", err)
@@ -643,6 +650,7 @@ func TestReleaseRejectsForeignInstance(t *testing.T) {
 }
 
 func TestReleaseRejectsMismatchedLeaseLabel(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	runner := &fakeRunner{results: []core.LocalCommandResult{{Stdout: `[
 		{"cluster_id":"owned","labels":{"crabbox":"true","created-by":"crabbox","provider":"namespace-instance","lease":"cbx_other","namespace-tenant":"tenant-test"}}
 	]`}}}
@@ -650,16 +658,149 @@ func TestReleaseRejectsMismatchedLeaseLabel(t *testing.T) {
 	cfg.Provider = providerName
 	applyDefaults(&cfg)
 	cfg.NamespaceInstance.TenantID = "tenant-test"
+	server := core.Server{CloudID: "owned", Provider: providerName, Labels: map[string]string{
+		"provider": providerName, "lease": "cbx_abcdef123456", "slug": "owned", "namespace_tenant": "tenant-test",
+	}}
+	if err := core.ClaimLeaseTargetForConfig("cbx_abcdef123456", "owned", cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
 	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
 	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
 		LeaseID: "cbx_abcdef123456",
-		Server:  core.Server{CloudID: "owned"},
+		Server:  server,
 	}})
 	if err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("err=%v", err)
 	}
 	if len(runner.calls) != 1 {
 		t.Fatalf("calls=%#v", runner.calls)
+	}
+}
+
+func TestReleaseRequiresExactNamespaceInstanceClaim(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		claimID     string
+		claimTenant string
+		claimRegion string
+	}{
+		{name: "missing claim"},
+		{name: "wrong instance", claimID: "another-instance", claimTenant: "tenant-test"},
+		{name: "wrong tenant", claimID: "owned-instance", claimTenant: "tenant-other"},
+		{name: "wrong scope", claimID: "owned-instance", claimTenant: "tenant-test", claimRegion: "other-region"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			cfg := core.BaseConfig()
+			cfg.Provider = providerName
+			applyDefaults(&cfg)
+			cfg.NamespaceInstance.TenantID = "tenant-test"
+			const leaseID = "cbx_abcdef123456"
+			server := core.Server{CloudID: "owned-instance", Provider: providerName, Labels: map[string]string{
+				"provider": providerName, "lease": leaseID, "slug": "owned", "namespace_tenant": "tenant-test",
+			}}
+			if test.claimID != "" {
+				claimCfg := cfg
+				claimCfg.NamespaceInstance.Region = test.claimRegion
+				claimedServer := server
+				claimedServer.CloudID = test.claimID
+				claimedServer.Labels = map[string]string{
+					"provider": providerName, "lease": leaseID, "slug": "owned", "namespace_tenant": test.claimTenant,
+				}
+				if err := core.ClaimLeaseTargetForConfig(leaseID, "owned", claimCfg, claimedServer, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+					t.Fatal(err)
+				}
+			}
+			runner := &fakeRunner{}
+			b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+			err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}})
+			if err == nil || !strings.Contains(err.Error(), "local ownership claim") {
+				t.Fatalf("err=%v", err)
+			}
+			if len(runner.calls) != 0 {
+				t.Fatalf("provider should not be called: %#v", runner.calls)
+			}
+		})
+	}
+}
+
+func TestReleaseRetainsExactClaimWhenDestroyFails(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	cfg.NamespaceInstance.TenantID = "tenant-test"
+	const leaseID = "cbx_abcdef123456"
+	server := core.Server{CloudID: "owned-instance", Provider: providerName, Labels: map[string]string{
+		"provider": providerName, "lease": leaseID, "slug": "owned", "namespace_tenant": "tenant-test",
+	}}
+	if err := core.ClaimLeaseTargetForConfig(leaseID, "owned", cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{
+		results: []core.LocalCommandResult{
+			{Stdout: `[{"cluster_id":"owned-instance","labels":{"crabbox":"true","created-by":"crabbox","provider":"namespace-instance","lease":"cbx_abcdef123456","namespace-tenant":"tenant-test","slug":"owned"}}]`},
+			{Stderr: "temporary failure"},
+		},
+		errs: []error{nil, errors.New("exit status 1")},
+	}
+	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err == nil {
+		t.Fatal("expected destroy failure")
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists || claim.CloudID != server.CloudID {
+		t.Fatalf("claim=%#v exists=%v err=%v", claim, exists, err)
+	}
+}
+
+func TestReclaimAndStopAdoptsExactOwnedNamespaceInstance(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	applyDefaults(&cfg)
+	cfg.NamespaceInstance.TenantID = "tenant-test"
+	const inventory = `[{"cluster_id":"owned-instance","labels":{"crabbox":"true","created-by":"crabbox","provider":"namespace-instance","lease":"cbx_abcdef123456","namespace-tenant":"tenant-test","slug":"owned"}}]`
+	runner := &fakeRunner{results: []core.LocalCommandResult{{Stdout: inventory}, {Stdout: inventory}, {}}}
+	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+	if err := b.ReclaimAndStop(context.Background(), core.StopRequest{ID: "owned-instance"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 3 || strings.Join(runner.calls[2].args, " ") != "destroy owned-instance --force" {
+		t.Fatalf("calls=%#v", runner.calls)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence("cbx_abcdef123456"); err != nil || exists {
+		t.Fatalf("claim exists=%v err=%v", exists, err)
+	}
+}
+
+func TestReclaimAndStopRejectsUnsafeNamespaceInstanceTargets(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		id        string
+		inventory string
+		wantCalls int
+	}{
+		{name: "lease identifier", id: "cbx_abcdef123456"},
+		{name: "foreign ownership", id: "foreign", inventory: `[{"cluster_id":"foreign","labels":{"provider":"other"}}]`, wantCalls: 1},
+		{name: "missing slug", id: "owned", inventory: `[{"cluster_id":"owned","labels":{"crabbox":"true","created-by":"crabbox","provider":"namespace-instance","lease":"cbx_abcdef123456","namespace-tenant":"tenant-test"}}]`, wantCalls: 1},
+		{name: "noncanonical lease", id: "owned", inventory: `[{"cluster_id":"owned","labels":{"crabbox":"true","created-by":"crabbox","provider":"namespace-instance","lease":"not-a-lease","namespace-tenant":"tenant-test","slug":"owned"}}]`, wantCalls: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			cfg := core.BaseConfig()
+			cfg.Provider = providerName
+			applyDefaults(&cfg)
+			cfg.NamespaceInstance.TenantID = "tenant-test"
+			runner := &fakeRunner{results: []core.LocalCommandResult{{Stdout: test.inventory}}}
+			b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+			if err := b.ReclaimAndStop(context.Background(), core.StopRequest{ID: test.id}); err == nil {
+				t.Fatal("expected unsafe recovery to fail")
+			}
+			if len(runner.calls) != test.wantCalls {
+				t.Fatalf("calls=%#v want %d", runner.calls, test.wantCalls)
+			}
+		})
 	}
 }
 
@@ -680,6 +821,7 @@ func TestReleaseSkipsDestroyWhenInstanceMissingFromInventory(t *testing.T) {
 			"lease":            leaseID,
 			"namespace_tenant": "tenant-test",
 			"provider":         providerName,
+			"slug":             "missing",
 		},
 	}
 	if err := core.ClaimLeaseTargetForConfig(leaseID, "missing", cfg, server, core.SSHTarget{}, cfg.IdleTimeout); err != nil {
@@ -800,6 +942,9 @@ func TestCleanupTransitionsAndRemovesClaim(t *testing.T) {
 		{Stdout: `[
 			{"cluster_id":"expired-instance","labels":{"crabbox":"true","created-by":"crabbox","expires-at":"1","lease":"cbx_abcdef123456","namespace-tenant":"tenant-test","provider":"namespace-instance","slug":"expired"}}
 		]`},
+		{Stdout: `[
+			{"cluster_id":"expired-instance","labels":{"crabbox":"true","created-by":"crabbox","expires-at":"1","lease":"cbx_abcdef123456","namespace-tenant":"tenant-test","provider":"namespace-instance","slug":"expired"}}
+		]`},
 		{},
 	}}
 	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
@@ -813,12 +958,12 @@ func TestCleanupTransitionsAndRemovesClaim(t *testing.T) {
 	if len(claims) != 0 {
 		t.Fatalf("claims=%#v", claims)
 	}
-	if len(runner.calls) != 2 || strings.Join(runner.calls[1].args, " ") != "destroy expired-instance --force" {
+	if len(runner.calls) != 3 || strings.Join(runner.calls[2].args, " ") != "destroy expired-instance --force" {
 		t.Fatalf("calls=%#v", runner.calls)
 	}
 }
 
-func TestCleanupDestroysOwnedExpiredInstanceWithoutLocalClaim(t *testing.T) {
+func TestCleanupSkipsOwnedExpiredInstanceWithoutLocalClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
@@ -834,7 +979,7 @@ func TestCleanupDestroysOwnedExpiredInstanceWithoutLocalClaim(t *testing.T) {
 	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.calls) != 2 || strings.Join(runner.calls[1].args, " ") != "destroy expired-instance --force" {
+	if len(runner.calls) != 1 {
 		t.Fatalf("calls=%#v", runner.calls)
 	}
 }
@@ -888,14 +1033,14 @@ func TestCleanupAppliesRecoveryPolicyToLiveInstances(t *testing.T) {
 			name:       "ambiguous grace expired",
 			recovery:   "ambiguous-create",
 			createdAt:  now.Add(-namespaceAmbiguousCreateRecoveryGrace - time.Second),
-			wantCalls:  2,
+			wantCalls:  3,
 			wantClaims: 0,
 		},
 		{
 			name:       "rollback cleanup",
 			recovery:   "rollback-cleanup",
 			createdAt:  now,
-			wantCalls:  2,
+			wantCalls:  3,
 			wantClaims: 0,
 		},
 		{
@@ -922,6 +1067,9 @@ func TestCleanupAppliesRecoveryPolicyToLiveInstances(t *testing.T) {
 				t.Fatal(err)
 			}
 			runner := &fakeRunner{results: []core.LocalCommandResult{
+				{Stdout: `[
+					{"cluster_id":"recovery-instance","labels":{"crabbox":"true","created-by":"crabbox","lease":"cbx_abcdef123456","namespace-tenant":"tenant-test","provider":"namespace-instance","slug":"recovery"}}
+				]`},
 				{Stdout: `[
 					{"cluster_id":"recovery-instance","labels":{"crabbox":"true","created-by":"crabbox","lease":"cbx_abcdef123456","namespace-tenant":"tenant-test","provider":"namespace-instance","slug":"recovery"}}
 				]`},

@@ -15,6 +15,7 @@ var ErrStrictClaimMismatch = errors.New("strict claim identifier mismatch")
 type ClaimBinding struct {
 	Provider, ProviderScope, LeaseID, Slug, CloudID string
 	RequiredLabels                                  map[string]string
+	ExactProviderScope                              bool
 }
 
 type ScopedLeaseResolver struct {
@@ -47,7 +48,7 @@ func ValidateClaimBinding(claim core.LeaseClaim, want ClaimBinding) error {
 		{"label slug", claim.Labels["slug"], claim.Slug},
 	}
 	for _, field := range fields {
-		if field.want != "" && field.got != field.want {
+		if (field.want != "" || field.name == "provider scope" && want.ExactProviderScope) && field.got != field.want {
 			return fmt.Errorf("claim %s mismatch: got %q, want %q", field.name, field.got, field.want)
 		}
 	}

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/openclaw/crabbox/internal/providers/shared"
 	"gopkg.in/yaml.v3"
 )
 
@@ -231,19 +232,25 @@ func (b *namespaceLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLea
 	if name == "" {
 		return exit(2, "namespace devbox release requires a devbox name")
 	}
-	claim, claimOK, err := resolveLeaseClaim(req.Lease.LeaseID)
+	binding := shared.ClaimBinding{
+		Provider:           namespaceProvider,
+		LeaseID:            req.Lease.LeaseID,
+		Slug:               req.Lease.Server.Labels["slug"],
+		CloudID:            name,
+		RequiredLabels:     map[string]string{"name": name},
+		ExactProviderScope: true,
+	}
+	claim, err := shared.RequireExactClaim(binding)
 	if err != nil {
 		return err
 	}
-	if claimOK && claim.Provider != "" && claim.Provider != namespaceProvider {
-		return exit(4, "%q is claimed by provider %s", req.Lease.LeaseID, claim.Provider)
-	}
 	deleteDevbox := namespaceDeleteOnRelease(req.Lease, b.namespaceConfigForRun())
 	if deleteDevbox {
-		if err := b.deleteDevbox(ctx, name); err != nil {
+		if err := shared.RemoveExactClaimAfter(claim, binding, func() error {
+			return b.deleteDevbox(ctx, name)
+		}); err != nil {
 			return err
 		}
-		removeLeaseClaim(req.Lease.LeaseID)
 		if err := cleanupNamespaceSSHFiles(name, false, b.rt.Stdout); err != nil {
 			return err
 		}
@@ -259,13 +266,10 @@ func (b *namespaceLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLea
 	server.Status = "stopped"
 	server.Labels["state"] = "stopped"
 	server.Labels["release"] = "stop"
-	if claimOK {
-		_, err = updateLeaseClaimEndpointIfUnchangedAfter(req.Lease.LeaseID, claim, server, SSHTarget{}, func() error {
-			return b.shutdownDevbox(ctx, name)
-		})
-		return err
-	}
-	return b.shutdownDevbox(ctx, name)
+	_, err = updateLeaseClaimEndpointIfUnchangedAfter(req.Lease.LeaseID, claim, server, SSHTarget{}, func() error {
+		return b.shutdownDevbox(ctx, name)
+	})
+	return err
 }
 
 func (b *namespaceLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {

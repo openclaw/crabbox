@@ -331,19 +331,70 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if leaseID == "" {
 		return core.Exit(4, "refusing to destroy Namespace instance %s without a Crabbox lease id", id)
 	}
-	present, err := b.validateDestroyTarget(ctx, cfg, id, leaseID)
+	binding := namespaceInstanceClaimBinding(cfg, leaseID, req.Lease.Server.Labels["slug"], id)
+	claim, err := shared.RequireExactClaim(binding)
 	if err != nil {
 		return err
 	}
-	if present {
-		if err := b.destroy(ctx, id); err != nil {
+	if err := shared.RemoveExactClaimAfter(claim, binding, func() error {
+		present, err := b.validateDestroyTarget(ctx, cfg, id, leaseID, claim.Slug)
+		if err != nil {
 			return err
 		}
+		if present {
+			return b.destroy(ctx, id)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
-	if leaseID != "" {
-		core.RemoveLeaseClaim(leaseID)
-		core.RemoveStoredTestboxKey(leaseID)
+	core.RemoveStoredTestboxKey(leaseID)
+	return nil
+}
+
+func (b *backend) ReclaimAndStop(ctx context.Context, req core.StopRequest) error {
+	id := strings.TrimSpace(req.ID)
+	if id == "" || core.IsCanonicalLeaseID(id) {
+		return core.Exit(2, "provider=%s stop --force requires an exact Namespace instance id", providerName)
 	}
+	cfg, err := b.scopedConfig(ctx)
+	if err != nil {
+		return err
+	}
+	item, err := b.findInstance(ctx, id)
+	if err != nil {
+		return err
+	}
+	if item.ClusterID != id || !owned(item, cfg) {
+		return core.Exit(4, "refusing to reclaim Namespace instance %s without exact Crabbox ownership labels", id)
+	}
+	leaseID := strings.TrimSpace(item.Labels["lease"])
+	slug := strings.TrimSpace(item.Labels["slug"])
+	if !core.IsCanonicalLeaseID(leaseID) || slug == "" {
+		return core.Exit(4, "refusing to reclaim Namespace instance %s without a canonical Crabbox lease and slug", id)
+	}
+	binding := namespaceInstanceClaimBinding(cfg, leaseID, slug, id)
+	if existing, ok, err := core.ResolveLeaseClaimForProviderCloudIDScope(id, providerName, binding.ProviderScope); err != nil {
+		return err
+	} else if ok && existing.LeaseID != leaseID {
+		return core.Exit(4, "Namespace instance %s is already bound to lease %s", id, existing.LeaseID)
+	}
+	previous, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		return err
+	}
+	if exists {
+		if err := shared.ValidateClaimBinding(previous, binding); err != nil {
+			return core.Exit(4, "refusing to reclaim Namespace instance %s over a conflicting local claim: %v", id, err)
+		}
+	} else if _, err := core.ClaimLeaseTargetForConfigIfUnchanged(leaseID, slug, cfg, b.server(item, cfg), core.SSHTarget{}, cfg.IdleTimeout, previous, false); err != nil {
+		return err
+	}
+	lease := core.LeaseTarget{LeaseID: leaseID, Server: b.server(item, cfg)}
+	if err := b.ReleaseLease(ctx, core.ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
+		return err
+	}
+	fmt.Fprintln(b.rt.Stderr, b.ReleaseLeaseMessage(lease))
 	return nil
 }
 
@@ -431,29 +482,28 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			fmt.Fprintf(b.rt.Stderr, "skip namespace_instance=%s reason=%s\n", item.ClusterID, reason)
 			continue
 		}
+		binding := namespaceInstanceClaimBinding(cfg, leaseID, item.Labels["slug"], item.ClusterID)
+		exactClaim, err := shared.RequireExactClaim(binding)
+		if err != nil {
+			fmt.Fprintf(b.rt.Stderr, "skip namespace_instance=%s reason=no exact local ownership claim: %v\n", item.ClusterID, err)
+			continue
+		}
 		if req.DryRun {
 			fmt.Fprintf(b.rt.Stdout, "would destroy namespace_instance=%s lease=%s reason=%s\n", item.ClusterID, item.Labels["lease"], reason)
 			continue
 		}
-		if claim.LeaseID != "" {
-			labels := make(map[string]string, len(claim.Labels)+1)
-			for key, value := range claim.Labels {
-				labels[key] = value
-			}
-			labels["state"] = "releasing"
-			claim, err = core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels)
+		if err := shared.RemoveExactClaimAfter(exactClaim, binding, func() error {
+			present, err := b.validateDestroyTarget(ctx, cfg, item.ClusterID, leaseID, exactClaim.Slug)
 			if err != nil {
-				return fmt.Errorf("claim Namespace instance %s for cleanup: %w", item.ClusterID, err)
+				return err
 			}
-		}
-		fmt.Fprintf(b.rt.Stdout, "destroy namespace_instance=%s lease=%s reason=%s\n", item.ClusterID, item.Labels["lease"], reason)
-		if err := b.destroy(ctx, item.ClusterID); err != nil {
-			return err
-		}
-		if claim.LeaseID != "" {
-			if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
-				return fmt.Errorf("finalize Namespace instance cleanup claim: %w", err)
+			if !present {
+				return nil
 			}
+			fmt.Fprintf(b.rt.Stdout, "destroy namespace_instance=%s lease=%s reason=%s\n", item.ClusterID, leaseID, reason)
+			return b.destroy(ctx, item.ClusterID)
+		}); err != nil {
+			return fmt.Errorf("destroy claimed Namespace instance %s: %w", item.ClusterID, err)
 		}
 		core.RemoveStoredTestboxKey(leaseID)
 	}
@@ -981,7 +1031,19 @@ func (b *backend) destroy(ctx context.Context, id string) error {
 	return commandError("nsc destroy", result, err)
 }
 
-func (b *backend) validateDestroyTarget(ctx context.Context, cfg core.Config, id, leaseID string) (bool, error) {
+func namespaceInstanceClaimBinding(cfg core.Config, leaseID, slug, id string) shared.ClaimBinding {
+	return shared.ClaimBinding{
+		Provider:           providerName,
+		ProviderScope:      core.ProviderClaimScope(providerName, cfg),
+		LeaseID:            leaseID,
+		Slug:               slug,
+		CloudID:            id,
+		RequiredLabels:     map[string]string{"namespace_tenant": cfg.NamespaceInstance.TenantID},
+		ExactProviderScope: true,
+	}
+}
+
+func (b *backend) validateDestroyTarget(ctx context.Context, cfg core.Config, id, leaseID, slug string) (bool, error) {
 	instances, err := b.listInstances(ctx)
 	if err != nil {
 		return false, err
@@ -995,6 +1057,9 @@ func (b *backend) validateDestroyTarget(ctx context.Context, cfg core.Config, id
 		}
 		if leaseID != "" && item.Labels["lease"] != leaseID {
 			return false, core.Exit(4, "refusing to destroy Namespace instance %s: lease label %q does not match %q", id, item.Labels["lease"], leaseID)
+		}
+		if slug != "" && item.Labels["slug"] != slug {
+			return false, core.Exit(4, "refusing to destroy Namespace instance %s: slug label %q does not match %q", id, item.Labels["slug"], slug)
 		}
 		return true, nil
 	}

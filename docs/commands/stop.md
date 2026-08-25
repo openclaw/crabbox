@@ -33,11 +33,15 @@ Crabbox lease ID and local slug:
   labels match. Missing sandboxes keep the local claim unless
   `--blaxel-forget-missing` is set.
 - `namespace-devbox` — shuts down the Namespace Devbox by default and retains
-  its local claim and SSH files for reuse. Set `namespace.deleteOnRelease` (or
-  pass `--namespace-delete-on-release`) to delete the Devbox and local SSH
-  files instead.
+  its exact local claim and SSH files for reuse. Set
+  `namespace.deleteOnRelease` (or pass `--namespace-delete-on-release`) to
+  delete the Devbox and local SSH files instead. Both operations reject
+  missing or mismatched claims; `--force` is unsupported because Devbox
+  inventory cannot independently prove lost-claim ownership.
 - `namespace-instance` — accepts a lease ID, local slug, or Namespace instance
-  ID and destroys the Compute instance with `nsc destroy --force`.
+  ID and destroys the Compute instance only with an exact scoped local claim.
+  `--force --id <exact-instance-id>` can recover a lost claim after verifying
+  the instance's live Crabbox ownership labels and Namespace tenant.
 - `morph` — pauses the instance by default and retains its local claim and SSH
   key for reuse. Set `morph.deleteOnRelease` (or pass
   `--morph-delete-on-release`) to delete the instance and key instead.

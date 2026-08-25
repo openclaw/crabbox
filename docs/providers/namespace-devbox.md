@@ -121,6 +121,13 @@ CRABBOX_NAMESPACE_DELETE_ON_RELEASE
    `namespace.deleteOnRelease: true` (or `--namespace-delete-on-release`) to
    delete the Devbox and those local SSH files instead (`devbox delete --force`).
 
+Both shutdown and deletion require an unchanged local Crabbox claim bound to
+the exact Devbox name and lease. A missing or mismatched claim never authorizes
+a provider mutation; failed shutdowns or deletions preserve the claim for a
+retry. Namespace Devbox inventory exposes names but no independently verifiable
+lease ownership labels, so `crabbox stop --force` cannot safely adopt a lost
+claim. Inspect and remove an unclaimed Devbox directly with the `devbox` CLI.
+
 ## Capabilities
 
 - **SSH**: yes.
