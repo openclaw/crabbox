@@ -1012,8 +1012,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	recordCommand := runScriptRecordCommand(script, command)
 	timingRecordCommand = recordCommand
+	recorder = newRunRecorder(ctx, coord, cfg, recordCommand, runLabelValue, a.Stderr, strings.TrimSpace(*leaseIDFlag) != "")
 	if useCoordinator {
-		recorder = newRunRecorder(ctx, coord, cfg, recordCommand, runLabelValue, a.Stderr, strings.TrimSpace(*leaseIDFlag) != "")
 		recorder.Event("leasing.started", "leasing", "")
 	}
 	endToEndStartedAt := time.Now()

@@ -45,11 +45,17 @@ type runRecorder struct {
 }
 
 func newRunRecorder(ctx context.Context, coord *CoordinatorClient, cfg Config, command []string, label string, stderr io.Writer, createAfterLease bool) *runRecorder {
-	rec := &runRecorder{coord: coord, command: command, label: strings.TrimSpace(label), stderr: stderr, diagnosticConfig: cfg}
+	rec := &runRecorder{
+		coord:             coord,
+		command:           command,
+		label:             strings.TrimSpace(label),
+		stderr:            stderr,
+		diagnosticConfig:  cfg,
+		diagnosticSecrets: configuredDiagnosticSecrets(cfg),
+	}
 	if coord == nil {
 		return rec
 	}
-	rec.diagnosticSecrets = configuredDiagnosticSecrets(cfg)
 	if createAfterLease {
 		rec.createPending = true
 		return rec

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -161,6 +162,105 @@ func TestRunRecorderRedactsRefreshedRuntimeDiagnosticSecrets(t *testing.T) {
 	if !strings.Contains(events[0].Message, "region=eu") {
 		t.Fatalf("runtime diagnostic lost routing context: %s", events[0].Message)
 	}
+}
+
+func TestRunRecorderRedactsDiagnosticSecretsAfterLateCoordinatorAttachment(t *testing.T) {
+	const (
+		configuredSecret = "late-configured-provider-fixture-value"
+		originalSecret   = "late-original-runtime-fixture-value"
+		refreshedSecret  = "late-refreshed-runtime-fixture-value"
+	)
+	t.Setenv("AWS_SESSION_TOKEN", originalSecret)
+
+	rec := newRunRecorder(context.Background(), nil, Config{
+		Morph: MorphConfig{APIKey: configuredSecret},
+	}, []string{"go", "test"}, "", io.Discard, true)
+	t.Setenv("AWS_SESSION_TOKEN", refreshedSecret)
+
+	var events []CoordinatorRunEventInput
+	rec.UseCoordinator(&CoordinatorClient{
+		BaseURL: "https://example.test",
+		Client:  &http.Client{Transport: runEventRecordingRoundTripper{events: &events}},
+	})
+	rec.runID = "run_123"
+	rec.Event("actions.hydrate.failed", "hydrate", strings.Join([]string{
+		"configured=" + configuredSecret,
+		"original=" + originalSecret,
+		"refreshed=" + refreshedSecret,
+		"region=eu",
+	}, " "))
+
+	if len(events) != 1 {
+		t.Fatalf("events=%#v, want one posted diagnostic", events)
+	}
+	for _, leaked := range []string{configuredSecret, originalSecret, refreshedSecret} {
+		if strings.Contains(events[0].Message, leaked) {
+			t.Fatalf("late-attached coordinator diagnostic leaked %q: %s", leaked, events[0].Message)
+		}
+	}
+	if !strings.Contains(events[0].Message, "region=eu") {
+		t.Fatalf("late-attached coordinator diagnostic lost routing context: %s", events[0].Message)
+	}
+}
+
+func TestRunRecorderRedactsPersistedCoordinatorDiagnosticEvents(t *testing.T) {
+	coordinatorURL := strings.TrimSpace(os.Getenv("CRABBOX_RUN_RECORDER_PROOF_URL"))
+	if coordinatorURL == "" {
+		t.Skip("set CRABBOX_RUN_RECORDER_PROOF_URL to verify a running coordinator")
+	}
+
+	const (
+		configuredSecret = "persisted-configured-provider-fixture-value"
+		originalSecret   = "persisted-original-runtime-fixture-value"
+		refreshedSecret  = "persisted-refreshed-runtime-fixture-value"
+	)
+	t.Setenv("AWS_SESSION_TOKEN", originalSecret)
+	cfg := Config{
+		Provider:   "aws",
+		Class:      "standard",
+		ServerType: "t3.small",
+		Morph:      MorphConfig{APIKey: configuredSecret},
+	}
+	client := &CoordinatorClient{
+		BaseURL: coordinatorURL,
+		Token:   os.Getenv("CRABBOX_RUN_RECORDER_PROOF_TOKEN"),
+		Client:  &http.Client{Timeout: 10 * time.Second},
+	}
+	rec := newRunRecorder(context.Background(), nil, cfg, []string{"go", "test"}, "security-redaction-proof", io.Discard, true)
+	t.Setenv("AWS_SESSION_TOKEN", refreshedSecret)
+	rec.UseCoordinator(client)
+	run, err := client.CreateRun(context.Background(), "", cfg, rec.command, rec.label)
+	if err != nil {
+		t.Fatalf("create coordinator run: %v", err)
+	}
+	rec.attachRun(run)
+	rec.Event("actions.hydrate.failed", "hydrate", strings.Join([]string{
+		"configured=" + configuredSecret,
+		"original=" + originalSecret,
+		"refreshed=" + refreshedSecret,
+		"region=eu",
+	}, " "))
+
+	events, err := client.RunEvents(context.Background(), run.ID, 0, 20)
+	if err != nil {
+		t.Fatalf("read persisted coordinator events: %v", err)
+	}
+	for _, event := range events {
+		if event.Type != "actions.hydrate.failed" {
+			continue
+		}
+		for _, leaked := range []string{configuredSecret, originalSecret, refreshedSecret} {
+			if strings.Contains(event.Message, leaked) {
+				t.Fatalf("persisted coordinator event leaked %q: %s", leaked, event.Message)
+			}
+		}
+		if !strings.Contains(event.Message, "region=eu") || !strings.Contains(event.Message, diagnosticRedaction) {
+			t.Fatalf("persisted coordinator event lost diagnostic context: %s", event.Message)
+		}
+		t.Logf("persisted coordinator run=%s event=%s message=%q", run.ID, event.Type, event.Message)
+		return
+	}
+	t.Fatalf("persisted coordinator events missing diagnostic: %#v", events)
 }
 
 func TestRunEventStreamWriterCapsOutputEvents(t *testing.T) {
