@@ -3,7 +3,11 @@ import { describe, expect, it, vi } from "vitest";
 
 import { PostgresCoordinatorStorage } from "../node/postgres-storage";
 import type { CoordinatorRuntime } from "../src/coordinator-runtime";
-import { FleetCoordinator, readyPoolSeedDigestV1 } from "../src/fleet";
+import {
+  FleetCoordinator,
+  readyPoolDesiredCapacityKeyV2,
+  readyPoolSeedDigestV1,
+} from "../src/fleet";
 import { orgKeyForLabel } from "../src/org-identity";
 import type { Env, LeaseRecord, ReadyPoolEntry, ReadyPoolIdentityV1 } from "../src/types";
 
@@ -316,10 +320,18 @@ describe("PostgresCoordinatorStorage", () => {
 
     expect([...(await storage.list({ prefix: "ready-pool:" })).values()]).toEqual([]);
     expect([...(await storage.list({ prefix: "ready-pool-fill-claim:" })).values()]).toEqual([]);
-    expect([...(await storage.list({ prefix: "ready-pool-desired:" })).values()]).toEqual([]);
+    const desiredKey = await readyPoolDesiredCapacityKeyV2({
+      org: orgKeyForLabel("example-org"),
+      owner: "alice@example.com",
+      key: "builders",
+      compatibilityKey: undefined,
+      identity,
+    });
+    expect([...(await storage.list({ prefix: "ready-pool-desired:" })).keys()]).toEqual([]);
+    expect(await storage.get(desiredKey)).toBeTruthy();
     expect(await storage.get(`typed-ready-pool-v1:builders:${leaseID}`)).toBeTruthy();
     expect(await storage.get(`typed-ready-pool-v1-fill-claim:${claim.claim.token}`)).toBeTruthy();
-    expect((await storage.list({ prefix: "typed-ready-pool-v1-desired:" })).size).toBe(1);
+    expect((await storage.list({ prefix: "typed-ready-pool-v1-desired:" })).size).toBe(0);
 
     const rolledBackWorker = new FleetCoordinator(postgresTestRuntime(storage), env);
     const legacyStatus = await rolledBackWorker.fetch(

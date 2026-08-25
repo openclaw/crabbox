@@ -42,6 +42,23 @@ func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFi
 	}
 	typedIdentityFile := flagWasSet(fs, "pool-identity-file")
 	typedCacheCompatibility := flagWasSet(fs, "pool-cache-compatibility")
+	if (typedIdentityFile || typedCacheCompatibility) && strings.TrimSpace(*poolKey) == "" {
+		return exit(2, "typed ready-pool identity flags require --pool")
+	}
+	if typedIdentityFile && typedCacheCompatibility {
+		return exit(2, "--pool-identity-file and --pool-cache-compatibility are mutually exclusive")
+	}
+	if typedCacheCompatibility && strings.TrimSpace(*poolCacheCompatibility) == "" {
+		return exit(2, "--pool-cache-compatibility must not be empty")
+	}
+	var poolIdentity *CoordinatorReadyPoolIdentityV1
+	if typedIdentityFile {
+		identity, identityErr := loadReadyPoolIdentity(*poolIdentityFile)
+		if identityErr != nil {
+			return identityErr
+		}
+		poolIdentity = &identity
+	}
 	_ = reclaim
 	requestedSlug, err := requestedLeaseSlug(*leaseFlags.Slug)
 	if err != nil {
@@ -54,8 +71,18 @@ func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFi
 	if err != nil {
 		return err
 	}
+	if poolIdentity != nil {
+		if providerErr := bindReadyPoolIdentityProviderConfig(&cfg, fs, leaseFlags.Provider, *poolIdentity); providerErr != nil {
+			return providerErr
+		}
+	}
 	if err := applyLeaseCreateFlagsForLeaseMode(&cfg, fs, leaseFlags, "", false); err != nil {
 		return err
+	}
+	if poolIdentity != nil {
+		if providerErr := validateReadyPoolIdentityProviderConfig(cfg, *poolIdentity); providerErr != nil {
+			return providerErr
+		}
 	}
 	if *repoFlag != "" {
 		cfg.Actions.Repo = *repoFlag
@@ -84,23 +111,6 @@ func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFi
 		if err := admitPrewarmHydration(cfg, followupArgs); err != nil {
 			return err
 		}
-	}
-	if (typedIdentityFile || typedCacheCompatibility) && strings.TrimSpace(*poolKey) == "" {
-		return exit(2, "typed ready-pool identity flags require --pool")
-	}
-	if typedIdentityFile && typedCacheCompatibility {
-		return exit(2, "--pool-identity-file and --pool-cache-compatibility are mutually exclusive")
-	}
-	if typedCacheCompatibility && strings.TrimSpace(*poolCacheCompatibility) == "" {
-		return exit(2, "--pool-cache-compatibility must not be empty")
-	}
-	var poolIdentity *CoordinatorReadyPoolIdentityV1
-	if typedIdentityFile {
-		identity, identityErr := loadReadyPoolIdentity(*poolIdentityFile)
-		if identityErr != nil {
-			return identityErr
-		}
-		poolIdentity = &identity
 	}
 	backend, err := loadBackend(cfg, runtimeForApp(a))
 	if err != nil {
@@ -435,7 +445,7 @@ func admitPrewarmProbe(args []string) error {
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	cfg, err := loadRunConfig(fs, flags, leaseFlagTarget{Reuse: true}, false)
+	cfg, err := loadRunConfig(fs, flags, leaseFlagTarget{Reuse: true}, false, nil)
 	if err != nil {
 		return err
 	}
