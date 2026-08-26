@@ -42,9 +42,11 @@ Crabbox lease ID and local slug:
   ID and destroys the Compute instance only with an exact scoped local claim.
   `--force --id <exact-instance-id>` can recover a lost claim after verifying
   the instance's live Crabbox ownership labels and Namespace tenant.
-- `morph` — pauses the instance by default and retains its local claim and SSH
-  key for reuse. Set `morph.deleteOnRelease` (or pass
-  `--morph-delete-on-release`) to delete the instance and key instead.
+- `morph` — requires an exact API-scoped local ownership claim and fresh
+  matching instance metadata before pausing or deleting an instance. It pauses
+  by default and retains the claim and SSH key for reuse; set
+  `morph.deleteOnRelease` (or pass `--morph-delete-on-release`) to delete the
+  instance and key instead. Failed provider operations preserve the claim.
 - `exe-dev` — accepts a Crabbox lease ID, local slug, or exe.dev VM name only
   when an unchanged local claim binds the exact deterministic VM name,
   complete remote ownership tags, and current control route. Claimless or
