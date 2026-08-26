@@ -40,15 +40,16 @@ func (b *backend) acquireFixed(ctx context.Context, req AcquireRequest) (LeaseTa
 	cfg := b.configForRun()
 	var fingerprint string
 	acquired, err := core.AcquireFixedLease(core.FixedAcquireOptions{
-		Kind:        fixedMachine0LeaseKind,
-		LeaseID:     leaseID,
-		RepoRoot:    req.Repo.Root,
-		Reclaim:     req.Reclaim,
-		TargetOS:    cfg.TargetOS,
-		WindowsMode: cfg.WindowsMode,
-		TTL:         cfg.TTL,
-		IdleTimeout: cfg.IdleTimeout,
-		Now:         b.now,
+		Kind:         fixedMachine0LeaseKind,
+		LeaseID:      leaseID,
+		CheckpointID: req.RequestedCheckpointID,
+		RepoRoot:     req.Repo.Root,
+		Reclaim:      req.Reclaim,
+		TargetOS:     cfg.TargetOS,
+		WindowsMode:  cfg.WindowsMode,
+		TTL:          cfg.TTL,
+		IdleTimeout:  cfg.IdleTimeout,
+		Now:          b.now,
 	}, func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
 		if err := b.validateCatalogSelection(ctx, cfg.Machine0.Size, cfg.Machine0.Region); err != nil {
 			return core.FixedLeaseBinding{}, err

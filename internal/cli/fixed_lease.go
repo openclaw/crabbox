@@ -15,15 +15,16 @@ type FixedLeaseBinding struct {
 }
 
 type FixedAcquireOptions struct {
-	Kind        FixedLeaseKind
-	LeaseID     string
-	RepoRoot    string
-	Reclaim     bool
-	TargetOS    string
-	WindowsMode string
-	TTL         time.Duration
-	IdleTimeout time.Duration
-	Now         func() time.Time
+	Kind         FixedLeaseKind
+	LeaseID      string
+	CheckpointID string
+	RepoRoot     string
+	Reclaim      bool
+	TargetOS     string
+	WindowsMode  string
+	TTL          time.Duration
+	IdleTimeout  time.Duration
+	Now          func() time.Time
 }
 
 func AcquireFixedLease(
@@ -40,6 +41,9 @@ func AcquireFixedLease(
 	err := WithDurableLeaseClaimLock(opts.LeaseID, func(claim *LeaseClaim, exists bool, persist func() error) error {
 		if exists && opts.Kind.IsFixedClaim(*claim) && claim.FixedCreateIntent.State == "released" {
 			return exit(4, "lease_id_conflict: fixed lease %s is terminal and cannot be replayed", opts.LeaseID)
+		}
+		if exists && claim.FixedCreateIntent != nil && claim.FixedCreateIntent.CheckpointID != opts.CheckpointID {
+			return exit(4, "lease_id_conflict: lease %s is bound to checkpoint %s, not checkpoint %s", opts.LeaseID, blank(claim.FixedCreateIntent.CheckpointID, "<none>"), blank(opts.CheckpointID, "<none>"))
 		}
 		binding, err := prepare(ctx, claim, exists)
 		if err != nil {
@@ -74,6 +78,7 @@ func AcquireFixedLease(
 				Version:       opts.Kind.IntentVersion,
 				Fingerprint:   binding.Fingerprint,
 				ProviderScope: binding.ProviderScope,
+				CheckpointID:  opts.CheckpointID,
 				Slug:          binding.Slug,
 				CreatedAt:     current.Format(time.RFC3339Nano),
 				State:         "prepared",

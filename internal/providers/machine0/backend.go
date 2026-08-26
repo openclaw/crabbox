@@ -90,6 +90,8 @@ func (b *backend) Spec() ProviderSpec { return b.spec }
 
 func (b *backend) SupportsRequestedLeaseID() bool { return true }
 
+func (b *backend) SupportsRequestedCheckpointID() bool { return true }
+
 func (b *backend) now() time.Time {
 	if b.rt.Clock != nil {
 		return b.rt.Clock.Now().UTC()
@@ -343,18 +345,50 @@ func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error
 	return views, nil
 }
 
-func (b *backend) Touch(_ context.Context, req TouchRequest) (Server, error) {
-	server := req.Lease.Server
-	if server.Labels == nil {
-		server.Labels = map[string]string{}
+func (b *backend) AuthorizeStatusTouchClaim(_ context.Context, lease LeaseTarget, claim LeaseClaim) error {
+	resourceID := strings.TrimSpace(lease.Server.CloudID)
+	if !core.IsCanonicalLeaseID(lease.LeaseID) || claim.LeaseID != lease.LeaseID ||
+		lease.Server.Provider != providerName || !isMachine0ClaimProvider(claim.Provider) ||
+		resourceID == "" || lease.Server.ImmutableID != resourceID || claim.CloudImmutableID != resourceID {
+		return exit(4, "refusing machine0 lifecycle touch for lease=%s resource=%s: claim does not match the canonical lease, provider, or immutable Machine0 identity", lease.LeaseID, blank(resourceID, "<empty>"))
 	}
-	original := server.Labels
-	server.Labels = touchDirectLeaseLabels(original, b.configForRun(), req.State, b.now())
+	if err := validateMachineClaimOwnership(claim, machine{ID: resourceID}); err != nil {
+		return exit(4, "refusing machine0 lifecycle touch for lease=%s resource=%s: %v", lease.LeaseID, resourceID, err)
+	}
+	return nil
+}
+
+func (b *backend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
+	expected, exists, set := core.ServerLeaseClaimSnapshot(req.Lease.Server)
+	if !set || !exists {
+		return Server{}, exit(4, "machine0 lease %s has no exact claim snapshot; refusing touch", req.Lease.LeaseID)
+	}
+	if err := b.AuthorizeStatusTouchClaim(ctx, req.Lease, expected); err != nil {
+		return Server{}, err
+	}
+	if req.IdleTimeoutOverride != nil && *req.IdleTimeoutOverride <= 0 {
+		return Server{}, exit(2, "machine0 lease %s idle timeout override must be positive", req.Lease.LeaseID)
+	}
+
+	cfg := b.configForRun()
+	if expected.IdleTimeoutSeconds > 0 {
+		cfg.IdleTimeout = time.Duration(expected.IdleTimeoutSeconds) * time.Second
+	}
+	labels := shared.CloneLabels(expected.Labels)
 	for _, key := range machineLabelKeys {
-		if value := original[key]; value != "" {
-			server.Labels[key] = value
+		if value := req.Lease.Server.Labels[key]; value != "" {
+			labels[key] = value
 		}
 	}
+	now := b.now()
+	labels = core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(labels, cfg, req.State, now, req.IdleTimeoutOverride)
+	updated, err := core.UpdateLeaseClaimTouchIfUnchanged(req.Lease.LeaseID, expected, labels, now, req.IdleTimeoutOverride)
+	if err != nil {
+		return Server{}, err
+	}
+	server := req.Lease.Server
+	server.Labels = updated.Labels
+	core.SetServerLeaseClaimSnapshot(&server, updated, true)
 	return server, nil
 }
 

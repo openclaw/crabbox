@@ -6,10 +6,12 @@
 
 - Added explicitly opt-in, image-pinned typed ready pools with exact repository/cache identities and rollback-isolated coordinator storage. Thanks @vincentkoc.
 - Added targeted `stop --force` recovery through verified provider adoption or exact coordinator lease inspection without weakening ownership checks.
+- Added replay-safe fixed lease IDs to checkpoint forks and machine-readable JSON output to checkpoint creation and forking.
 
 ### Fixed
 
 - Required exact API-scoped Morph instance ownership claims and fresh provider verification before pause or deletion.
+- Returned machine-readable missing checkpoint verdicts and made checkpoint deletion idempotent when local records or coordinator-owned resources are already absent.
 - Required exact pool-scoped VM ownership claims and fresh provider verification before XCP-ng release or cleanup deletion.
 - Required exact, scope-bound ownership claims and fresh provider verification before Sprites deletion or Tenki session termination.
 - Required exact, scope-bound local ownership claims before Namespace Devbox and Compute Instance lifecycle mutations, with ownership-verified forced recovery for exact Compute Instance IDs.

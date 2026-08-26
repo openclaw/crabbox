@@ -67,6 +67,7 @@ type FixedCreateIntent struct {
 	Version        int               `json:"version"`
 	Fingerprint    string            `json:"fingerprint"`
 	ProviderScope  string            `json:"providerScope"`
+	CheckpointID   string            `json:"checkpointId,omitempty"`
 	Slug           string            `json:"slug"`
 	CreatedAt      string            `json:"createdAt"`
 	State          string            `json:"state"`

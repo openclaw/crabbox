@@ -13,6 +13,19 @@ type checkpointStore struct {
 	root string
 }
 
+type checkpointNotFoundError struct {
+	ExitError
+}
+
+func (e checkpointNotFoundError) Unwrap() error {
+	return e.ExitError
+}
+
+func isCheckpointNotFound(err error) bool {
+	var missing checkpointNotFoundError
+	return errors.As(err, &missing)
+}
+
 type checkpointPaths struct {
 	Dir     string
 	Meta    string
@@ -146,7 +159,7 @@ func (s checkpointStore) Read(id string) (checkpointRecord, checkpointPaths, err
 	data, err := os.ReadFile(paths.Meta)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return checkpointRecord{}, checkpointPaths{}, exit(2, "checkpoint %s not found", id)
+			return checkpointRecord{}, checkpointPaths{}, checkpointNotFoundError{exit(2, "checkpoint %s not found", id)}
 		}
 		return checkpointRecord{}, checkpointPaths{}, exit(2, "read checkpoint %s: %v", id, err)
 	}

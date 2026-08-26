@@ -57,6 +57,8 @@ func NewAWSLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 
 func (b *awsLeaseBackend) SupportsRequestedLeaseID() bool { return true }
 
+func (b *awsLeaseBackend) SupportsRequestedCheckpointID() bool { return true }
+
 func (b *awsLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
 	if strings.TrimSpace(req.RequestedLeaseID) != "" {
 		return b.acquireFixed(ctx, req)
@@ -165,14 +167,15 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req AcquireRequest) 
 	var client awsClient
 	var accountID, providerScope, publicKey, fingerprint string
 	acquired, err := core.AcquireFixedLease(core.FixedAcquireOptions{
-		Kind:        fixedAWSLeaseKind,
-		LeaseID:     leaseID,
-		RepoRoot:    req.Repo.Root,
-		Reclaim:     req.Reclaim,
-		TargetOS:    cfg.TargetOS,
-		WindowsMode: cfg.WindowsMode,
-		TTL:         cfg.TTL,
-		IdleTimeout: cfg.IdleTimeout,
+		Kind:         fixedAWSLeaseKind,
+		LeaseID:      leaseID,
+		CheckpointID: req.RequestedCheckpointID,
+		RepoRoot:     req.Repo.Root,
+		Reclaim:      req.Reclaim,
+		TargetOS:     cfg.TargetOS,
+		WindowsMode:  cfg.WindowsMode,
+		TTL:          cfg.TTL,
+		IdleTimeout:  cfg.IdleTimeout,
 	}, func(ctx context.Context, _ *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
 		var err error
 		client, err = newAWSClient(ctx, cfg)

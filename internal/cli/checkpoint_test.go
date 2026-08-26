@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -76,6 +77,44 @@ func TestCheckpointCreateAppliesAzureSnapshotSKUFlag(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "azure.snapshotSKU") {
 		t.Fatalf("checkpoint create error=%v, want Azure snapshot SKU validation", err)
+	}
+}
+
+func TestCheckpointCreateJSONPrintsCheckpointRecord(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+	backend := &checkpointForkReleaseBackend{leaseID: "cbx_abcdef123456"}
+	testAWSBackendOverride = backend
+	t.Cleanup(func() { testAWSBackendOverride = nil })
+
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: io.Discard}
+	if err := app.checkpointCreate(context.Background(), []string{
+		"--provider", "aws", "--id", backend.leaseID, "--recipe-only", "--json",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var record map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &record); err != nil {
+		t.Fatalf("invalid checkpoint JSON %q: %v", stdout.String(), err)
+	}
+	if id, ok := record["id"].(string); !ok || !strings.HasPrefix(id, checkpointIDPrefix) {
+		t.Fatalf("checkpoint id=%#v", record["id"])
+	}
+	if record["kind"] != checkpointKindRecipe || record["leaseId"] != backend.leaseID || record["provider"] != "aws" {
+		t.Fatalf("checkpoint record=%#v", record)
+	}
+	if workdir, ok := record["workdir"].(string); !ok || !strings.Contains(workdir, backend.leaseID) {
+		t.Fatalf("checkpoint workdir=%#v", record["workdir"])
+	}
+	if _, ok := record["native"].(map[string]any); !ok {
+		t.Fatalf("checkpoint native record=%#v", record["native"])
+	}
+	if strings.Contains(stdout.String(), "checkpoint created") {
+		t.Fatalf("JSON output contains human progress: %q", stdout.String())
 	}
 }
 
@@ -146,15 +185,109 @@ func TestCreateCheckpointArchiveCleansCreatedDirOnFailure(t *testing.T) {
 	}
 }
 
-func TestCheckpointDeleteReturnsMetadataReadError(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	var stdout bytes.Buffer
-	app := App{Stdout: &stdout, Stderr: io.Discard}
-	if err := app.checkpointDelete(context.Background(), []string{"chk_missing"}); err == nil {
-		t.Fatal("expected missing checkpoint delete to fail")
+func TestCheckpointInspectMissingRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		wantJSON bool
+	}{
+		{name: "verified JSON", args: []string{"chk_missing", "--verify", "--json"}, wantJSON: true},
+		{name: "JSON", args: []string{"chk_missing", "--json"}, wantJSON: true},
+		{name: "human", args: []string{"chk_missing"}},
+		{name: "verified human", args: []string{"chk_missing", "--verify"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			var stdout bytes.Buffer
+			app := App{Stdout: &stdout, Stderr: io.Discard}
+			err := app.checkpointInspect(context.Background(), tc.args)
+			if !tc.wantJSON {
+				var exitErr ExitError
+				if !AsExitError(err, &exitErr) || exitErr.Code != 2 || exitErr.Message != "checkpoint chk_missing not found" {
+					t.Fatalf("err=%v, want unchanged exit-2 missing checkpoint error", err)
+				}
+				if stdout.Len() != 0 {
+					t.Fatalf("stdout=%q, want empty", stdout.String())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var audit map[string]string
+			if err := json.Unmarshal(stdout.Bytes(), &audit); err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]string{
+				"id":            "chk_missing",
+				"localState":    "missing",
+				"providerState": "missing",
+				"nextAction":    "forget",
+			}
+			if !reflect.DeepEqual(audit, want) {
+				t.Fatalf("audit=%#v, want %#v", audit, want)
+			}
+		})
 	}
-	if stdout.String() != "" {
-		t.Fatalf("stdout=%q, want empty", stdout.String())
+}
+
+func TestCheckpointInspectJSONPreservesRecordErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		id       string
+		metadata string
+		want     string
+	}{
+		{name: "invalid checkpoint ID", id: "missing", want: "checkpoint id must start with chk_"},
+		{name: "corrupt metadata", id: "chk_corrupt", metadata: "{", want: "parse checkpoint chk_corrupt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			if tc.metadata != "" {
+				dir, err := checkpointDir(tc.id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, checkpointMetaFile), []byte(tc.metadata), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			var stdout bytes.Buffer
+			app := App{Stdout: &stdout, Stderr: io.Discard}
+			if err := app.checkpointInspect(context.Background(), []string{tc.id, "--verify", "--json"}); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v, want %q", err, tc.want)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout=%q, want empty", stdout.String())
+			}
+		})
+	}
+}
+
+func TestCheckpointDeleteMissingRecordIsIdempotent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "delete", args: []string{"chk_missing"}},
+		{name: "local only", args: []string{"chk_missing", "--local-only"}},
+		{name: "dry run", args: []string{"chk_missing", "--dry-run"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			var stdout bytes.Buffer
+			app := App{Stdout: &stdout, Stderr: io.Discard}
+			if err := app.checkpointDelete(context.Background(), tc.args); err != nil {
+				t.Fatal(err)
+			}
+			if got, want := stdout.String(), "checkpoint absent id=chk_missing\n"; got != want {
+				t.Fatalf("stdout=%q, want %q", got, want)
+			}
+		})
 	}
 }
 
@@ -509,6 +642,551 @@ func TestCheckpointForkRejectsInvalidCount(t *testing.T) {
 	err := app.checkpointFork(context.Background(), []string{"chk_missing", "--count", "0"})
 	if err == nil || !strings.Contains(err.Error(), "--count must be at least 1") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestCheckpointForkRejectsInvalidFlagCombinations(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "fixed lease cannot fan out",
+			args: []string{"chk_missing", "--lease-id", "cbx_abcdef123456", "--count", "2"},
+			want: "--lease-id cannot be combined with --count greater than 1",
+		},
+		{
+			name: "fixed lease must remain retained",
+			args: []string{"chk_missing", "--lease-id", "cbx_abcdef123456", "--keep=false"},
+			want: "--lease-id cannot be combined with --keep=false",
+		},
+		{
+			name: "fixed lease must be canonical",
+			args: []string{"chk_missing", "--lease-id", "cbx_NOT_CANONICAL"},
+			want: "--lease-id must match cbx_<12 lowercase hex characters>",
+		},
+		{
+			name: "explicitly empty fixed lease fails closed",
+			args: []string{"chk_missing", "--lease-id="},
+			want: "--lease-id must match cbx_<12 lowercase hex characters>",
+		},
+		{
+			name: "whitespace-only fixed lease fails closed",
+			args: []string{"chk_missing", "--lease-id", "   "},
+			want: "--lease-id must match cbx_<12 lowercase hex characters>",
+		},
+		{
+			name: "direct parallels snapshots reject fixed leases",
+			args: []string{"--provider", "parallels", "--id", "source-vm", "--snapshot", "baseline", "--lease-id", "cbx_abcdef123456"},
+			want: "provider=parallels does not support --lease-id fork with a direct snapshot",
+		},
+		{
+			name: "fixed leases reject side-effecting fork commands",
+			args: []string{"chk_missing", "--lease-id", "cbx_abcdef123456", "--", "npm", "test"},
+			want: "--lease-id cannot be combined with checkpoint fork commands",
+		},
+		{
+			name: "fixed leases reject unbound workdir overrides",
+			args: []string{"chk_missing", "--lease-id", "cbx_abcdef123456", "--workdir", "/tmp/another-workdir"},
+			want: "--lease-id cannot be combined with --workdir",
+		},
+		{
+			name: "JSON dry runs have no resulting lease",
+			args: []string{"chk_missing", "--json", "--dry-run"},
+			want: "--json cannot be combined with --dry-run",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			app := App{Stdout: &stdout, Stderr: io.Discard}
+			err := app.checkpointFork(context.Background(), tc.args)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error=%v, want %q", err, tc.want)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("usage failure wrote stdout: %q", stdout.String())
+			}
+		})
+	}
+}
+
+func TestCheckpointForkFixedLeaseRejectsUnsupportedBackend(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+	backend := &checkpointForkReleaseBackend{leaseID: "cbx_abcdef123456"}
+	testAWSBackendOverride = backend
+	t.Cleanup(func() { testAWSBackendOverride = nil })
+	record := createCheckpointForkTestRecord(t, "chk_unsupported_fixed", backend.leaseID)
+
+	var stdout bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: io.Discard}).checkpointFork(context.Background(), []string{
+		record.ID, "--lease-id", backend.leaseID, "--json",
+	})
+	if err == nil || !strings.Contains(err.Error(), "provider=aws does not support --lease-id fork") {
+		t.Fatalf("error=%v", err)
+	}
+	if backend.acquireCalls != 0 {
+		t.Fatalf("unsupported provider acquired %d leases", backend.acquireCalls)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("unsupported provider wrote stdout: %q", stdout.String())
+	}
+}
+
+func TestCheckpointForkFixedLeaseRejectsNonNativeCheckpoints(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		kind string
+		want string
+	}{
+		{name: "archive", kind: checkpointKindArchive, want: "archive checkpoints do not support --lease-id"},
+		{name: "recipe", kind: checkpointKindRecipe, want: "checkpoint kind=recipe does not support --lease-id"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			store, err := defaultCheckpointStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			record, err := store.Create(checkpointRecord{ID: "chk_fixed_" + tc.name, Kind: tc.kind})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stdout bytes.Buffer
+			err = (App{Stdout: &stdout, Stderr: io.Discard}).checkpointFork(context.Background(), []string{
+				record.ID, "--lease-id", "cbx_abcdef123456", "--json",
+			})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error=%v", err)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("non-native rejection wrote stdout: %q", stdout.String())
+			}
+		})
+	}
+}
+
+func TestCheckpointForkJSONAndFixedLeaseReplay(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		count       int
+		fixedID     string
+		replay      bool
+		wantCreates int
+	}{
+		{name: "single fixed lease adopts on replay", count: 1, fixedID: "cbx_abcdef123456", replay: true, wantCreates: 1},
+		{name: "fanout returns JSON array", count: 2, wantCreates: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+			t.Setenv("CRABBOX_COORDINATOR", "")
+			t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+			backend := &checkpointFixedForkBackend{checkpointForkReleaseBackend: &checkpointForkReleaseBackend{}}
+			testAWSBackendOverride = backend
+			t.Cleanup(func() { testAWSBackendOverride = nil })
+			record := createCheckpointForkTestRecord(t, "chk_json_fork", "")
+
+			args := []string{record.ID, "--json", "--slug", "fork-smoke"}
+			if tc.count > 1 {
+				args = append(args, "--count", strconv.Itoa(tc.count))
+			}
+			if tc.fixedID != "" {
+				args = append(args, "--lease-id", tc.fixedID)
+			}
+			var stdout bytes.Buffer
+			app := App{Stdout: &stdout, Stderr: io.Discard}
+			if err := app.checkpointFork(context.Background(), args); err != nil {
+				t.Fatal(err)
+			}
+			first := append([]byte(nil), stdout.Bytes()...)
+			assertCheckpointForkJSON(t, first, record.ID, tc.count, tc.fixedID)
+			if tc.replay {
+				stdout.Reset()
+				if err := app.checkpointFork(context.Background(), args); err != nil {
+					t.Fatalf("fixed lease replay failed: %v", err)
+				}
+				assertCheckpointForkJSON(t, stdout.Bytes(), record.ID, tc.count, tc.fixedID)
+				if !bytes.Equal(first, stdout.Bytes()) {
+					t.Fatalf("fixed replay changed output:\nfirst: %sreplay: %s", first, stdout.Bytes())
+				}
+			}
+			if backend.creates != tc.wantCreates {
+				t.Fatalf("created %d provider resources, want %d", backend.creates, tc.wantCreates)
+			}
+			if strings.Contains(stdout.String(), "checkpoint forked") {
+				t.Fatalf("JSON output contains human progress: %q", stdout.String())
+			}
+		})
+	}
+}
+
+func TestCheckpointForkNativeWindowsJSONHasNoManagedWorkdir(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+	backend := &checkpointFixedForkBackend{checkpointForkReleaseBackend: &checkpointForkReleaseBackend{}}
+	testAWSBackendOverride = backend
+	t.Cleanup(func() { testAWSBackendOverride = nil })
+	record := createCheckpointForkTestRecord(t, "chk_windows_json", "")
+	record.TargetOS = targetWindows
+	record.WindowsMode = windowsModeNormal
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Write(record); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	if err := (App{Stdout: &stdout, Stderr: io.Discard}).checkpointFork(context.Background(), []string{
+		record.ID, "--lease-id", "cbx_abcdef123456", "--json",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var result checkpointForkResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("invalid native Windows JSON %q: %v", stdout.String(), err)
+	}
+	if result.CheckpointID != record.ID || result.Workdir != "" {
+		t.Fatalf("native Windows fork result=%#v", result)
+	}
+}
+
+func TestCheckpointForkFixedLeaseRejectsDifferentCheckpoint(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+	backend := &checkpointFixedForkBackend{checkpointForkReleaseBackend: &checkpointForkReleaseBackend{}}
+	testAWSBackendOverride = backend
+	t.Cleanup(func() { testAWSBackendOverride = nil })
+	first := createCheckpointForkTestRecord(t, "chk_fixed_first", "")
+	second := createCheckpointForkTestRecord(t, "chk_fixed_second", "")
+	const leaseID = "cbx_abcdef123456"
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	if err := app.checkpointFork(context.Background(), []string{first.ID, "--lease-id", leaseID, "--slug", "fixed-fork"}); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: io.Discard}).checkpointFork(context.Background(), []string{
+		second.ID, "--lease-id", leaseID, "--slug", "fixed-fork", "--json",
+	})
+	if err == nil || !strings.Contains(err.Error(), first.ID) || !strings.Contains(err.Error(), second.ID) {
+		t.Fatalf("checkpoint mismatch error=%v", err)
+	}
+	if backend.creates != 1 || backend.releaseCount != 0 {
+		t.Fatalf("mismatched fork creates=%d releases=%d, want 1/0", backend.creates, backend.releaseCount)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("checkpoint mismatch wrote stdout: %q", stdout.String())
+	}
+}
+
+func TestCheckpointForkFixedLeaseReplayPreservesRelocatedWorkdir(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("POSIX fake SSH helper")
+	}
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+	workRoot := filepath.Join(t.TempDir(), "work")
+	t.Setenv("CRABBOX_WORK_ROOT", workRoot)
+	tools := t.TempDir()
+	writeExecutable(t, filepath.Join(tools, "ssh"), "#!/bin/sh\nfor arg; do remote=\"$arg\"; done\nexec /bin/sh -c \"$remote\"\n")
+	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+	backend := &checkpointFixedForkBackend{checkpointForkReleaseBackend: &checkpointForkReleaseBackend{}}
+	testAWSBackendOverride = backend
+	t.Cleanup(func() { testAWSBackendOverride = nil })
+	record := createCheckpointForkTestRecord(t, "chk_relocated_replay", "")
+	repo, err := findRepo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(workRoot, "cbx_source", repo.Name)
+	if err := os.MkdirAll(source, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "state.txt"), []byte("checkpoint state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record.Workdir = source
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Write(record); err != nil {
+		t.Fatal(err)
+	}
+	const leaseID = "cbx_abcdef123456"
+	args := []string{record.ID, "--lease-id", leaseID, "--slug", "relocated", "--json"}
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: io.Discard}
+	if err := app.checkpointFork(context.Background(), args); err != nil {
+		t.Fatalf("initial native fork failed: %v", err)
+	}
+	destination := filepath.Join(workRoot, leaseID, repo.Name)
+	payloadPath := filepath.Join(destination, "state.txt")
+	if err := os.WriteFile(payloadPath, []byte("work completed after initial fork"), 0o600); err != nil {
+		t.Fatalf("initial fork did not relocate workdir: %v", err)
+	}
+	stdout.Reset()
+	if err := app.checkpointFork(context.Background(), args); err != nil {
+		t.Fatalf("native fork replay failed after source relocation: %v", err)
+	}
+	data, err := os.ReadFile(payloadPath)
+	if err != nil || string(data) != "work completed after initial fork" {
+		t.Fatalf("replay changed existing work: data=%q err=%v", data, err)
+	}
+	if backend.creates != 1 {
+		t.Fatalf("provider resources created=%d, want 1", backend.creates)
+	}
+	var result checkpointForkResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || result.Workdir != destination {
+		t.Fatalf("replay JSON result=%#v err=%v", result, err)
+	}
+}
+
+func TestFixedLeaseCreateIntentBindsCheckpointIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		firstCheckpoint  string
+		replayCheckpoint string
+		wantError        bool
+	}{
+		{name: "same checkpoint adopts", firstCheckpoint: "chk_first", replayCheckpoint: "chk_first"},
+		{name: "different checkpoint fails closed", firstCheckpoint: "chk_first", replayCheckpoint: "chk_second", wantError: true},
+		{name: "ordinary warmup cannot adopt checkpoint fork", firstCheckpoint: "chk_first", wantError: true},
+		{name: "checkpoint fork cannot adopt ordinary warmup", replayCheckpoint: "chk_second", wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			const leaseID = "cbx_abcdef123456"
+			kind := FixedLeaseKind{ClaimProvider: "checkpoint-test-fixed", IntentVersion: 1, Label: "checkpoint test"}
+			opts := FixedAcquireOptions{
+				Kind: kind, LeaseID: leaseID, CheckpointID: tc.firstCheckpoint,
+				RepoRoot: t.TempDir(), TargetOS: targetLinux,
+			}
+			creates := 0
+			prepare := func(context.Context, *LeaseClaim, bool) (FixedLeaseBinding, error) {
+				return FixedLeaseBinding{ProviderScope: "checkpoint-test-scope", Fingerprint: "fixed-test-fingerprint", Slug: "fixed-test"}, nil
+			}
+			acquire := func(_ context.Context, _ *LeaseClaim, intent *FixedCreateIntent, _ func() error) (LeaseTarget, error) {
+				if intent.State == "prepared" {
+					creates++
+				}
+				return LeaseTarget{
+					LeaseID: leaseID,
+					Server:  Server{Provider: "checkpoint-test", CloudID: "server-fixed", Labels: map[string]string{"slug": "fixed-test"}},
+					SSH:     SSHTarget{Host: "checkpoint.example.test", Port: "22"},
+				}, nil
+			}
+			first, err := AcquireFixedLease(opts, prepare, acquire, context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			claim, err := ReadLeaseClaim(leaseID)
+			if err != nil || claim.FixedCreateIntent == nil || claim.FixedCreateIntent.CheckpointID != tc.firstCheckpoint {
+				t.Fatalf("durable checkpoint intent=%#v err=%v", claim.FixedCreateIntent, err)
+			}
+			opts.CheckpointID = tc.replayCheckpoint
+			replayed, err := AcquireFixedLease(opts, prepare, acquire, context.Background())
+			if tc.wantError {
+				if err == nil || !strings.Contains(err.Error(), blank(tc.firstCheckpoint, "<none>")) || !strings.Contains(err.Error(), blank(tc.replayCheckpoint, "<none>")) {
+					t.Fatalf("checkpoint mismatch error=%v", err)
+				}
+			} else if err != nil || replayed.Server.CloudID != first.Server.CloudID {
+				t.Fatalf("replayed=%#v err=%v", replayed, err)
+			}
+			if creates != 1 {
+				t.Fatalf("provider resources created=%d, want 1", creates)
+			}
+		})
+	}
+}
+
+func TestCheckpointForkJSONReportsAcquiredLeasesWhenFanoutFails(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+	backend := &checkpointFixedForkBackend{
+		checkpointForkReleaseBackend: &checkpointForkReleaseBackend{},
+		failOnAcquire:                2,
+	}
+	testAWSBackendOverride = backend
+	t.Cleanup(func() { testAWSBackendOverride = nil })
+	record := createCheckpointForkTestRecord(t, "chk_partial_json_fork", "")
+
+	var stdout bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: io.Discard}).checkpointFork(context.Background(), []string{
+		record.ID, "--json", "--count", "2", "--slug", "fork-smoke",
+	})
+	if err == nil || !strings.Contains(err.Error(), "second provider acquisition failed") {
+		t.Fatalf("fanout error=%v", err)
+	}
+	var records []map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &records); err != nil {
+		t.Fatalf("invalid partial fork JSON %q: %v", stdout.String(), err)
+	}
+	if len(records) != 1 || records[0]["checkpointId"] != record.ID || records[0]["leaseId"] != "cbx_000000000001" {
+		t.Fatalf("partial fork records=%#v", records)
+	}
+	if backend.creates != 1 {
+		t.Fatalf("created %d provider resources, want 1", backend.creates)
+	}
+}
+
+func TestCheckpointForkJSONReportsLeaseWhenArchiveRestoreFails(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+	backend := &checkpointFixedForkBackend{checkpointForkReleaseBackend: &checkpointForkReleaseBackend{}}
+	testAWSBackendOverride = backend
+	t.Cleanup(func() { testAWSBackendOverride = nil })
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Create(checkpointRecord{ID: "chk_missing_archive", Kind: checkpointKindArchive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	err = (App{Stdout: &stdout, Stderr: io.Discard}).checkpointFork(context.Background(), []string{
+		record.ID, "--provider", "aws", "--json", "--slug", "archive-fork",
+	})
+	if err == nil || !strings.Contains(err.Error(), "read checkpoint archive") {
+		t.Fatalf("archive restore error=%v", err)
+	}
+	var result checkpointForkResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("invalid recoverable fork JSON %q: %v", stdout.String(), err)
+	}
+	if result.CheckpointID != record.ID || result.LeaseID != "cbx_000000000001" || result.Provider != "aws" {
+		t.Fatalf("recoverable fork result=%#v", result)
+	}
+	if backend.releaseCount != 1 {
+		t.Fatalf("archive rollback releases=%d, want 1", backend.releaseCount)
+	}
+}
+
+func TestCheckpointForkFailedFixedLeaseReplayPreservesAdoptedLease(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+	backend := &checkpointFixedForkBackend{checkpointForkReleaseBackend: &checkpointForkReleaseBackend{}}
+	testAWSBackendOverride = backend
+	t.Cleanup(func() { testAWSBackendOverride = nil })
+	const leaseID = "cbx_abcdef123456"
+	record := createCheckpointForkTestRecord(t, "chk_preserve_fixed_replay", "")
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	if err := app.checkpointFork(context.Background(), []string{
+		record.ID, "--lease-id", leaseID, "--slug", "preserve-replay",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, paths, err := store.Read(record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := findRepo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	failingRoot := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(failingRoot, []byte("block checkpoint metadata writes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaultConfig()
+	cfg.Provider = "aws"
+	results := []checkpointForkResult{}
+	err = app.checkpointForkRecordOnce(
+		context.Background(), cfg, backend, backend, repo, checkpointStore{root: failingRoot},
+		&record, paths, true, false, leaseID, "preserve-replay", "", true, checkpointForkRunOptions{JSON: true, Results: &results},
+	)
+	if err == nil {
+		t.Fatal("fixed lease replay succeeded despite checkpoint metadata failure")
+	}
+	if backend.creates != 1 || backend.releaseCount != 0 {
+		t.Fatalf("fixed lease creates=%d releases=%d, want 1/0", backend.creates, backend.releaseCount)
+	}
+	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || !exists {
+		t.Fatalf("adopted fixed lease claim exists=%t err=%v", exists, err)
+	}
+	if len(results) != 1 || results[0].LeaseID != leaseID || results[0].CheckpointID != record.ID {
+		t.Fatalf("retained fixed lease was not reported for recovery: %#v", results)
+	}
+}
+
+func createCheckpointForkTestRecord(t *testing.T, checkpointID, workdirLeaseID string) checkpointRecord {
+	t.Helper()
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := findRepo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := checkpointRecord{
+		ID:          checkpointID,
+		Kind:        checkpointKindAWSAMI,
+		TargetOS:    targetLinux,
+		WindowsMode: windowsModeNormal,
+	}
+	if workdirLeaseID != "" {
+		record.Workdir = remoteJoin(defaultConfig(), workdirLeaseID, repo.Name)
+	}
+	record.Native.ImageID = "ami-12345678"
+	record, err = store.Create(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return record
+}
+
+func assertCheckpointForkJSON(t *testing.T, data []byte, checkpointID string, count int, fixedID string) {
+	t.Helper()
+	var records []map[string]any
+	if count == 1 {
+		var record map[string]any
+		if err := json.Unmarshal(data, &record); err != nil {
+			t.Fatalf("invalid single-fork JSON %q: %v", data, err)
+		}
+		records = []map[string]any{record}
+	} else if err := json.Unmarshal(data, &records); err != nil {
+		t.Fatalf("invalid fork-array JSON %q: %v", data, err)
+	}
+	if len(records) != count {
+		t.Fatalf("fork records=%d, want %d", len(records), count)
+	}
+	for i, record := range records {
+		if record["checkpointId"] != checkpointID || record["provider"] != "aws" {
+			t.Fatalf("fork record=%#v", record)
+		}
+		leaseID, ok := record["leaseId"].(string)
+		if !ok || !canonicalLeaseIDPattern.MatchString(leaseID) || fixedID != "" && leaseID != fixedID {
+			t.Fatalf("fork lease id=%#v, fixed id=%q", record["leaseId"], fixedID)
+		}
+		wantSlug := checkpointForkFanoutSlug("fork-smoke", i+1, count)
+		if record["slug"] != wantSlug {
+			t.Fatalf("fork slug=%#v, want %q", record["slug"], wantSlug)
+		}
+		if workdir, ok := record["workdir"].(string); !ok || !strings.Contains(workdir, leaseID) {
+			t.Fatalf("fork workdir=%#v", record["workdir"])
+		}
 	}
 }
 
@@ -922,7 +1600,7 @@ func TestCheckpointForkUseTimestampChangesOnlyAfterConsumption(t *testing.T) {
 	app := App{Stdout: io.Discard, Stderr: io.Discard}
 	cfg := Config{Provider: "watch-test"}
 	repo := Repo{Root: t.TempDir(), Name: "my-app"}
-	if err := app.checkpointForkRecordOnce(context.Background(), cfg, backend, backend, repo, store, &record, paths, true, false, "", "", true, checkpointForkRunOptions{}); err == nil {
+	if err := app.checkpointForkRecordOnce(context.Background(), cfg, backend, backend, repo, store, &record, paths, true, false, "", "", "", true, checkpointForkRunOptions{}); err == nil {
 		t.Fatal("failed checkpoint consumption succeeded")
 	}
 	stored, _, err := store.Read(record.ID)
@@ -934,7 +1612,7 @@ func TestCheckpointForkUseTimestampChangesOnlyAfterConsumption(t *testing.T) {
 	}
 
 	backend.acquireErr = nil
-	if err := app.checkpointForkRecordOnce(context.Background(), cfg, backend, backend, repo, store, &record, paths, true, false, "", "", true, checkpointForkRunOptions{}); err != nil {
+	if err := app.checkpointForkRecordOnce(context.Background(), cfg, backend, backend, repo, store, &record, paths, true, false, "", "", "", true, checkpointForkRunOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	stored, _, err = store.Read(record.ID)
@@ -979,7 +1657,7 @@ func TestCheckpointForkMetadataWriteFailureReleasesProvisionedLease(t *testing.T
 		t.Fatal(err)
 	}
 	failingStore := checkpointStore{root: failingRoot}
-	if err := app.checkpointForkRecordOnce(context.Background(), cfg, backend, backend, repo, failingStore, &record, paths, true, false, "", "", true, checkpointForkRunOptions{}); err == nil {
+	if err := app.checkpointForkRecordOnce(context.Background(), cfg, backend, backend, repo, failingStore, &record, paths, true, false, "", "", "", true, checkpointForkRunOptions{}); err == nil {
 		t.Fatal("checkpoint fork succeeded despite metadata write failure")
 	}
 	_, _, releases := backend.counts()
@@ -1845,6 +2523,133 @@ func TestCheckpointDeleteResourceOnlyNativeDeletesProviderResource(t *testing.T)
 	}
 }
 
+func TestCheckpointDeleteCoordinatorProviderAbsence(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		deleteStatus int
+		deleteBody   string
+		verifyStatus int
+		verifyBody   string
+		wantError    bool
+		wantRequests int
+	}{
+		{
+			name:         "missing provider resource confirmed by deletion",
+			deleteStatus: http.StatusNotFound,
+			deleteBody:   `{"error":"not_found","message":"image snapshot-missing not found"}`,
+			wantRequests: 1,
+		},
+		{
+			name:         "missing provider resource confirmed by verification",
+			deleteStatus: http.StatusNotFound,
+			deleteBody:   "Not Found",
+			verifyStatus: http.StatusNotFound,
+			verifyBody:   `{"error":"not_found","message":"image snapshot-missing not found"}`,
+			wantRequests: 2,
+		},
+		{
+			name:         "ambiguous coordinator route",
+			deleteStatus: http.StatusNotFound,
+			deleteBody:   "Not Found",
+			verifyStatus: http.StatusNotFound,
+			verifyBody:   `{"error":"not_found"}`,
+			wantError:    true,
+			wantRequests: 2,
+		},
+		{
+			name:         "different missing provider resource",
+			deleteStatus: http.StatusNotFound,
+			deleteBody:   `{"error":"not_found","message":"image snapshot-other not found"}`,
+			verifyStatus: http.StatusNotFound,
+			verifyBody:   `{"error":"not_found","message":"image snapshot-other not found"}`,
+			wantError:    true,
+			wantRequests: 2,
+		},
+		{
+			name:         "provider resource still exists",
+			deleteStatus: http.StatusNotFound,
+			deleteBody:   "Not Found",
+			verifyStatus: http.StatusOK,
+			verifyBody:   `{"image":{"id":"snapshot-missing"}}`,
+			wantError:    true,
+			wantRequests: 2,
+		},
+		{name: "provider failure", deleteStatus: http.StatusInternalServerError, wantError: true, wantRequests: 1},
+		{name: "authorization failure", deleteStatus: http.StatusForbidden, wantError: true, wantRequests: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+
+			var requests int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				var statusCode int
+				var body string
+				switch r.Method {
+				case http.MethodDelete:
+					statusCode, body = tc.deleteStatus, tc.deleteBody
+				case http.MethodGet:
+					statusCode, body = tc.verifyStatus, tc.verifyBody
+				default:
+					t.Errorf("unexpected method=%q", r.Method)
+					return
+				}
+				w.WriteHeader(statusCode)
+				if _, err := io.WriteString(w, firstNonBlank(body, http.StatusText(statusCode))); err != nil {
+					t.Errorf("write coordinator response: %v", err)
+				}
+			}))
+			defer server.Close()
+			t.Setenv("CRABBOX_COORDINATOR", server.URL)
+			t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "admin")
+
+			store, err := defaultCheckpointStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			record := checkpointRecord{
+				ID:        "chk_provider_missing",
+				Kind:      checkpointKindGCPDisk,
+				CreatedAt: time.Now().UTC().Format(time.RFC3339),
+				TargetOS:  targetLinux,
+			}
+			record.Native.ImageID = "snapshot-missing"
+			if _, err := store.Create(record); err != nil {
+				t.Fatal(err)
+			}
+
+			var stdout bytes.Buffer
+			app := App{Stdout: &stdout, Stderr: io.Discard}
+			err = app.checkpointDelete(context.Background(), []string{record.ID})
+			if tc.wantError {
+				if err == nil || coordinatorStatusCode(err) != tc.deleteStatus {
+					t.Fatalf("err=%v, want coordinator HTTP %d", err, tc.deleteStatus)
+				}
+				if _, _, err := store.Read(record.ID); err != nil {
+					t.Fatalf("provider failure removed local checkpoint: %v", err)
+				}
+				if stdout.Len() != 0 {
+					t.Fatalf("stdout=%q, want empty", stdout.String())
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got, want := stdout.String(), "checkpoint deleted id="+record.ID+"\n"; got != want {
+					t.Fatalf("stdout=%q, want %q", got, want)
+				}
+				if _, _, err := store.Read(record.ID); !isCheckpointNotFound(err) {
+					t.Fatalf("local checkpoint remains after confirmed provider absence: %v", err)
+				}
+			}
+			if requests != tc.wantRequests {
+				t.Fatalf("coordinator requests=%d, want %d", requests, tc.wantRequests)
+			}
+		})
+	}
+}
+
 func TestNativeCheckpointResourceIDAllowsAzureGCPResourceOnlyRecords(t *testing.T) {
 	aws := checkpointRecord{Kind: checkpointKindAWSAMI}
 	aws.Native.Resource = "ami-resource-only"
@@ -1871,6 +2676,7 @@ func TestNativeCheckpointResourceIDAllowsAzureGCPResourceOnlyRecords(t *testing.
 
 type checkpointForkReleaseBackend struct {
 	leaseID      string
+	acquireCalls int
 	acquireKeep  bool
 	acquireSlug  string
 	releaseCount int
@@ -1881,6 +2687,7 @@ func (b *checkpointForkReleaseBackend) Spec() ProviderSpec {
 }
 
 func (b *checkpointForkReleaseBackend) Acquire(_ context.Context, req AcquireRequest) (LeaseTarget, error) {
+	b.acquireCalls++
 	b.acquireKeep = req.Keep
 	b.acquireSlug = req.RequestedSlug
 	return LeaseTarget{
@@ -1905,6 +2712,54 @@ func (b *checkpointForkReleaseBackend) ReleaseLease(context.Context, ReleaseLeas
 
 func (b *checkpointForkReleaseBackend) Touch(context.Context, TouchRequest) (Server, error) {
 	return Server{Provider: "aws", Labels: map[string]string{}}, nil
+}
+
+type checkpointFixedForkBackend struct {
+	*checkpointForkReleaseBackend
+	creates       int
+	failOnAcquire int
+	leases        map[string]string
+	checkpoints   map[string]string
+}
+
+func (b *checkpointFixedForkBackend) SupportsRequestedLeaseID() bool { return true }
+
+func (b *checkpointFixedForkBackend) SupportsRequestedCheckpointID() bool { return true }
+
+func (b *checkpointFixedForkBackend) Acquire(_ context.Context, req AcquireRequest) (LeaseTarget, error) {
+	b.acquireCalls++
+	if b.acquireCalls == b.failOnAcquire {
+		return LeaseTarget{}, errors.New("second provider acquisition failed")
+	}
+	b.acquireKeep = req.Keep
+	b.acquireSlug = req.RequestedSlug
+	leaseID := req.RequestedLeaseID
+	if leaseID == "" {
+		leaseID = fmt.Sprintf("cbx_%012x", b.acquireCalls)
+	}
+	if b.leases == nil {
+		b.leases = make(map[string]string)
+		b.checkpoints = make(map[string]string)
+	}
+	cloudID, exists := b.leases[leaseID]
+	if exists && b.checkpoints[leaseID] != req.RequestedCheckpointID {
+		return LeaseTarget{}, exit(4, "lease_id_conflict: lease %s is bound to checkpoint %s, not checkpoint %s", leaseID, b.checkpoints[leaseID], req.RequestedCheckpointID)
+	}
+	if !exists {
+		b.creates++
+		cloudID = fmt.Sprintf("i-fixed-%d", b.creates)
+		b.leases[leaseID] = cloudID
+		b.checkpoints[leaseID] = req.RequestedCheckpointID
+	}
+	return LeaseTarget{
+		Server: Server{
+			Provider: "aws",
+			CloudID:  cloudID,
+			Labels:   map[string]string{"lease": leaseID, "slug": req.RequestedSlug},
+		},
+		SSH:     SSHTarget{User: "crabbox", Host: "checkpoint.example.test", Port: "22", TargetOS: targetLinux},
+		LeaseID: leaseID,
+	}, nil
 }
 
 func TestApplyAWSAMICheckpointForkConfigRecomputesServerType(t *testing.T) {
@@ -2445,6 +3300,7 @@ func TestRemoteRelocateNativeCheckpointWorkdirCommand(t *testing.T) {
 		"test -d",
 		"mkdir -p",
 		"mv",
+		"elif ! test -e \"$src\" && test -d \"$dst\"",
 	} {
 		if !strings.Contains(cmd, want) {
 			t.Fatalf("command missing %q: %s", want, cmd)

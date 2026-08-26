@@ -65,6 +65,7 @@ func (k FixedLeaseKind) ValidateTerminalClaim(claim, previous LeaseClaim, leaseI
 			previousIntent.Version != intent.Version ||
 			previousIntent.Fingerprint != intent.Fingerprint ||
 			previousIntent.ProviderScope != intent.ProviderScope ||
+			previousIntent.CheckpointID != intent.CheckpointID ||
 			previousIntent.Slug != intent.Slug {
 			return exit(4, "lease_id_conflict: fixed %s lease %s terminal tombstone changed identity", k.Label, leaseID)
 		}

@@ -115,14 +115,15 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 		pendingLease = lease
 	}
 	acquired, err := core.AcquireFixedLease(core.FixedAcquireOptions{
-		Kind:        fixedLocalContainerLeaseKind,
-		LeaseID:     leaseID,
-		RepoRoot:    req.Repo.Root,
-		Reclaim:     req.Reclaim,
-		TargetOS:    cfg.TargetOS,
-		WindowsMode: cfg.WindowsMode,
-		TTL:         cfg.TTL,
-		IdleTimeout: cfg.IdleTimeout,
+		Kind:         fixedLocalContainerLeaseKind,
+		LeaseID:      leaseID,
+		CheckpointID: req.RequestedCheckpointID,
+		RepoRoot:     req.Repo.Root,
+		Reclaim:      req.Reclaim,
+		TargetOS:     cfg.TargetOS,
+		WindowsMode:  cfg.WindowsMode,
+		TTL:          cfg.TTL,
+		IdleTimeout:  cfg.IdleTimeout,
 	}, func(ctx context.Context, _ *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
 		providerScope := strings.TrimSpace(b.claimScope(ctx))
 		if providerScope == "" {

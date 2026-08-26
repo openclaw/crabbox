@@ -87,6 +87,10 @@ crabbox checkpoint create --provider azure --target windows --id swift-crab \
 
 # Archive a custom workdir
 crabbox checkpoint create --id swift-crab --workdir /work/cbx_123/my-app
+
+# Return the complete checkpoint record for orchestration
+crabbox checkpoint create --id swift-crab --mode native --json
+# {"id":"chk_abc123","kind":"aws-ebs-snapshot","leaseId":"cbx_abcdef123456","workdir":"/work/cbx_abcdef123456/my-app","native":{"imageId":"snap-0123456789abcdef0","state":"available"}}
 ```
 
 **Flags**
@@ -107,6 +111,8 @@ crabbox checkpoint create --id swift-crab --workdir /work/cbx_123/my-app
 --workdir <path>            Remote workdir to archive (default: the lease's repo
                             workdir).
 --recipe-only               Record metadata only; create no artifact.
+--json                      Print the complete checkpoint record as one JSON
+                            object instead of the human-readable summary.
 --reclaim                   Claim this lease for the current repo.
 ```
 
@@ -159,6 +165,7 @@ crabbox checkpoint list --verify
 crabbox checkpoint inspect chk_abc123
 crabbox checkpoint inspect chk_abc123 --json
 crabbox checkpoint inspect chk_abc123 --verify
+crabbox checkpoint inspect chk_abc123 --verify --json
 ```
 
 `list` and `inspect` read the local checkpoint records. Each record holds the
@@ -174,6 +181,18 @@ provider resource id; for archives, the tarball path and size.
 still exists; for native checkpoints it asks the provider (directly for AWS and
 Hetzner, or via the coordinator) whether the snapshot or image is still present. JSON output
 includes `localState`, `providerState`, and `nextAction`.
+
+An existing native record with a missing provider resource reports
+`localState: "metadata_available"`, `providerState: "missing"`, and
+`nextAction: "delete_local"`. If the local checkpoint record itself is missing,
+JSON inspection succeeds and instead returns a terminal verdict that callers
+can use to remove their own reference:
+
+```json
+{"id":"chk_abc123","localState":"missing","providerState":"missing","nextAction":"forget"}
+```
+
+Human-readable inspection still reports a missing checkpoint as an error.
 
 ### Parallels: live VM snapshots
 
@@ -236,11 +255,22 @@ crabbox checkpoint fork chk_abc123 --class beast
 # Request a friendly slug for the forked lease
 crabbox checkpoint fork chk_abc123 --slug update-flow-smoke
 
+# Request a deterministic lease ID; replay adopts the same existing lease
+crabbox checkpoint fork chk_abc123 --lease-id cbx_abcdef123456 --slug update-flow
+
+# Return machine-readable lease details for one fork
+crabbox checkpoint fork chk_abc123 --lease-id cbx_abcdef123456 --json
+# {"checkpointId":"chk_abc123","leaseId":"cbx_abcdef123456","slug":"purple-whale","provider":"aws","workdir":"/work/cbx_abcdef123456/my-app"}
+
 # Fan out one checkpoint into several forked leases for parallel attempts
 crabbox checkpoint fork chk_abc123 --count 3 --slug update-flow
 # checkpoint forked id=chk_abc123 lease=cbx_... slug=update-flow-1 ...
 # checkpoint forked id=chk_abc123 lease=cbx_... slug=update-flow-2 ...
 # checkpoint forked id=chk_abc123 lease=cbx_... slug=update-flow-3 ...
+
+# Return machine-readable details for several forked leases as a JSON array
+crabbox checkpoint fork chk_abc123 --count 2 --slug update-flow --json
+# [{"checkpointId":"chk_abc123","leaseId":"cbx_abcdef123456","slug":"update-flow-1","provider":"aws","workdir":"/work/cbx_abcdef123456/my-app"},{"checkpointId":"chk_abc123","leaseId":"cbx_abcdef123457","slug":"update-flow-2","provider":"aws","workdir":"/work/cbx_abcdef123457/my-app"}]
 
 # Fan out one checkpoint and run the same command on each fork
 crabbox checkpoint fork chk_abc123 --count 3 --slug update-flow -- pnpm test -- --shard '{{index}}/{{total}}'
@@ -258,6 +288,12 @@ crabbox checkpoint fork --provider parallels --parallels-template ubuntu-fast --
 ```
 --keep            Keep the forked lease running (default true).
 --count <n>       Create multiple forked leases (default 1).
+--lease-id <id>   Fixed cbx_<12 lowercase hex characters> lease ID for
+                  idempotent external-provider orchestration; native checkpoints
+                  only; incompatible with --keep=false, fan-out, --workdir,
+                  and commands after --.
+--json            Print one fork as a JSON object or multiple forks as a JSON
+                  array; incompatible with --dry-run.
 --id <vm>         Parallels source VM when forking from --snapshot.
 --snapshot <name> Parallels snapshot name or id for a direct fork.
 --clear           Clear the workdir before restoring an archive (default true).
@@ -279,6 +315,26 @@ crabbox checkpoint fork --provider parallels --parallels-template ubuntu-fast --
 - *Fan-out:* `--count <n>` repeats the same provider-neutral fork flow. When
   combined with `--slug`, Crabbox appends a stable numeric suffix such as
   `update-flow-1`, `update-flow-2`, and `update-flow-3`.
+- *Fixed lease IDs:* `--lease-id` reuses the provider's existing fixed-ID
+  acquisition and binds the exact native checkpoint ID to its durable create
+  intent. Replaying the same checkpoint adopts the existing lease; a different
+  checkpoint, changed create intent, ambiguous resources, or a released lease
+  ID fails without allocating a replacement. A later fork failure preserves the
+  known fixed-ID lease for recovery instead of deleting adopted work. Direct
+  AWS, Machine0, and local-container backends support this checkpoint-bound
+  contract. Archive checkpoints, direct Hetzner, direct Parallels snapshots,
+  coordinator-backed leases, and external providers reject fixed checkpoint
+  forks. Fixed IDs must remain retained and cannot fan out, override the
+  deterministic workdir, or run commands following `--`.
+- *JSON output:* one fork prints one JSON object; `--count` greater than one
+  prints one JSON array. Every object contains `checkpointId`, `leaseId`,
+  `slug`, `provider`, and `workdir`. Native Windows desktop forks preserve their
+  filesystem in place and report an empty `workdir`. Direct Parallels snapshot
+  forks have no local checkpoint record, so both their `checkpointId` and
+  `workdir` are empty.
+  If a later fork or command fails, JSON still reports every lease already
+  acquired before the nonzero exit so orchestrators can recover or clean up.
+  Provider progress and commands following `--` write to stderr in JSON mode.
 - *Command fan-out:* arguments after `--` run through `crabbox run --id <lease>`
   on each fork, so normal sync, command wrapping, history, and proof behavior are
   preserved. Use `{{index}}`, `{{total}}`, `{{lease}}`, and `{{slug}}` in command
@@ -318,6 +374,12 @@ deregistered along with their backing EBS snapshots; disk snapshots are
 deleted), then removes the local record. Archive checkpoints just lose their
 tarball and record.
 
+Deletion is idempotent: if the local checkpoint is already absent, the command
+succeeds and prints `checkpoint absent id=chk_abc123`. If the coordinator
+confirms that a recorded provider resource is already gone, Crabbox removes the
+remaining local record and succeeds. Other provider or authorization failures
+still preserve the local record.
+
 Machine0 whole-image deletion is additionally fenced against later versions.
 Even when the checkpoint originally created the image name, Crabbox refuses
 `images rm` unless the exact metadata-bound version is still the image's only
@@ -336,8 +398,8 @@ unrelated work.
                   prefixed with `crabbox-`.
 ```
 
-Use `--local-only` only when the provider resource was already removed outside
-Crabbox (manual cleanup, account migration, and so on).
+Use `--local-only` when provider access cannot confirm safe resource deletion,
+such as after account migration or an ownership ambiguity.
 
 ## prune
 
