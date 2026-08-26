@@ -90,6 +90,8 @@ func (b *backend) Spec() ProviderSpec { return b.spec }
 
 func (b *backend) SupportsRequestedLeaseID() bool { return true }
 
+func (b *backend) SupportsRequestedCheckpointID() bool { return true }
+
 func (b *backend) now() time.Time {
 	if b.rt.Clock != nil {
 		return b.rt.Clock.Now().UTC()

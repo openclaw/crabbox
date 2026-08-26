@@ -116,6 +116,8 @@ func (b *backend) AcquireIsExclusiveOneShot() bool { return true }
 
 func (b *backend) SupportsRequestedLeaseID() bool { return true }
 
+func (b *backend) SupportsRequestedCheckpointID() bool { return true }
+
 func (b *backend) BeginRunFailureEvidence(ctx context.Context, req core.RunFailureEvidenceRequest) (core.RunFailureEvidenceCollector, error) {
 	containerID := strings.TrimSpace(req.Lease.Server.CloudID)
 	if containerID == "" {

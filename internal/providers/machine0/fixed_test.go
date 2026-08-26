@@ -15,6 +15,38 @@ import (
 
 const fixedMachine0TestLeaseID = "cbx_abcdef123456"
 
+func TestMachine0FixedAcquireBindsCheckpointIdentity(t *testing.T) {
+	b, api, req := fixedMachine0TestFixture(t)
+	req.RequestedCheckpointID = "chk_fixed_machine0"
+	creates := 0
+	create := api.createFn
+	api.createFn = func(ctx context.Context, request createMachineRequest) error {
+		creates++
+		return create(ctx, request)
+	}
+	first, err := b.Acquire(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim := readFixedMachine0Claim(t, req.RequestedLeaseID)
+	if claim.FixedCreateIntent == nil || claim.FixedCreateIntent.CheckpointID != req.RequestedCheckpointID {
+		t.Fatalf("fixed Machine0 checkpoint intent=%#v", claim.FixedCreateIntent)
+	}
+	replayed, err := b.Acquire(context.Background(), req)
+	if err != nil || replayed.Server.CloudID != first.Server.CloudID || creates != 1 {
+		t.Fatalf("replayed=%#v err=%v creates=%d", replayed, err, creates)
+	}
+	drifted := req
+	drifted.RequestedCheckpointID = "chk_other_machine0"
+	_, err = b.Acquire(context.Background(), drifted)
+	if err == nil || !strings.Contains(err.Error(), req.RequestedCheckpointID) || !strings.Contains(err.Error(), drifted.RequestedCheckpointID) {
+		t.Fatalf("checkpoint mismatch err=%v", err)
+	}
+	if creates != 1 {
+		t.Fatalf("creates=%d after checkpoint mismatch, want 1", creates)
+	}
+}
+
 func TestMachine0FixedAcquireReplayAdoptsExactMachine(t *testing.T) {
 	for _, tc := range []struct {
 		name             string

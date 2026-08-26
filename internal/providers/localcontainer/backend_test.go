@@ -3607,7 +3607,7 @@ esac
 	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
 	req := core.AcquireRequest{
 		Repo: core.Repo{Root: t.TempDir()}, Keep: true,
-		RequestedLeaseID: "cbx_abcdef123465", RequestedSlug: "fixed-checkpoint-fork",
+		RequestedLeaseID: "cbx_abcdef123465", RequestedCheckpointID: "chk_fixed_container", RequestedSlug: "fixed-checkpoint-fork",
 	}
 	lease, err := b.Acquire(context.Background(), req)
 	if err != nil {
@@ -3622,6 +3622,7 @@ esac
 	claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
 	if err != nil || claim.Provider != core.FixedLocalContainerClaimProvider ||
 		claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != "acquired" ||
+		claim.FixedCreateIntent.CheckpointID != req.RequestedCheckpointID ||
 		claim.FixedCreateIntent.Fingerprint == "" ||
 		claim.FixedCreateIntent.Fingerprint != labelFromRunArgs(t, dockerRunArgs, "fixed_intent_sha256") {
 		t.Fatalf("fixed checkpoint fork claim=%#v err=%v", claim, err)
@@ -3640,6 +3641,16 @@ esac
 	}
 	if creates != 1 {
 		t.Fatalf("checkpoint container creates=%d, want 1", creates)
+	}
+	drifted := req
+	drifted.RequestedCheckpointID = "chk_other_container"
+	if _, err := b.Acquire(context.Background(), drifted); err == nil ||
+		!strings.Contains(err.Error(), req.RequestedCheckpointID) ||
+		!strings.Contains(err.Error(), drifted.RequestedCheckpointID) {
+		t.Fatalf("checkpoint container mismatch err=%v", err)
+	}
+	if creates != 1 {
+		t.Fatalf("checkpoint container creates=%d after mismatch, want 1", creates)
 	}
 	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: replayed}); err != nil {
 		t.Fatalf("release fixed checkpoint fork: %v", err)

@@ -461,6 +461,10 @@ type IdempotentLeaseIDBackend interface {
 	SupportsRequestedLeaseID() bool
 }
 
+type CheckpointLeaseIDBackend interface {
+	SupportsRequestedCheckpointID() bool
+}
+
 type ProviderSpec struct {
 	Name             string
 	Family           string
@@ -774,12 +778,13 @@ type LeaseOptions struct {
 }
 
 type AcquireRequest struct {
-	Repo             Repo
-	Options          LeaseOptions
-	Keep             bool
-	Reclaim          bool
-	RequestedLeaseID string
-	RequestedSlug    string
+	Repo                  Repo
+	Options               LeaseOptions
+	Keep                  bool
+	Reclaim               bool
+	RequestedLeaseID      string
+	RequestedCheckpointID string
+	RequestedSlug         string
 	// OnAcquired observes a fully validated raw provider identity before local
 	// routing, readiness, or claim side effects. Returning an error requires the
 	// provider adapter to roll back the acquired resource.

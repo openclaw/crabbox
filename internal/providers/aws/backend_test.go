@@ -207,7 +207,10 @@ func TestAWSFixedAcquireReplaysSameLeaseAndRejectsIntentDrift(t *testing.T) {
 	defer restore()
 	cfg := fixedAWSTestConfig()
 	repo := t.TempDir()
-	req := AcquireRequest{Repo: core.Repo{Root: repo}, Keep: true, RequestedLeaseID: "cbx_abcdef123456", RequestedSlug: "fixed-aws"}
+	req := AcquireRequest{
+		Repo: core.Repo{Root: repo}, Keep: true, RequestedLeaseID: "cbx_abcdef123456",
+		RequestedCheckpointID: "chk_fixed_aws", RequestedSlug: "fixed-aws",
+	}
 
 	first := NewAWSLeaseBackend(ProviderSpec{}, cfg, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
 	lease, err := first.Acquire(context.Background(), req)
@@ -221,6 +224,21 @@ func TestAWSFixedAcquireReplaysSameLeaseAndRejectsIntentDrift(t *testing.T) {
 	}
 	if lease.LeaseID != req.RequestedLeaseID || replayed.Server.CloudID != lease.Server.CloudID || fake.createCalls != 1 {
 		t.Fatalf("lease=%#v replay=%#v creates=%d", lease, replayed, fake.createCalls)
+	}
+	claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil || claim.FixedCreateIntent == nil || claim.FixedCreateIntent.CheckpointID != req.RequestedCheckpointID {
+		t.Fatalf("fixed AWS checkpoint intent=%#v err=%v", claim.FixedCreateIntent, err)
+	}
+	for _, checkpointID := range []string{"chk_other_aws", ""} {
+		drifted := req
+		drifted.RequestedCheckpointID = checkpointID
+		_, err := second.Acquire(context.Background(), drifted)
+		if err == nil || !strings.Contains(err.Error(), req.RequestedCheckpointID) || !strings.Contains(err.Error(), blank(checkpointID, "<none>")) {
+			t.Fatalf("checkpoint drift=%q err=%v", checkpointID, err)
+		}
+		if fake.createCalls != 1 {
+			t.Fatalf("creates=%d after checkpoint drift, want 1", fake.createCalls)
+		}
 	}
 	for _, acquired := range []LeaseTarget{lease, replayed} {
 		for _, want := range []string{"timeout 20m cloud-init status --wait", "/usr/local/bin/crabbox-ready"} {
