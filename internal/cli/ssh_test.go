@@ -1207,6 +1207,251 @@ exit 0
 	}
 }
 
+func TestRunSSHStreamRetriesOnlyMultiplexDescriptorFailures(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows OpenSSH does not multiplex connections")
+	}
+
+	tests := []struct {
+		name            string
+		mode            string
+		noControlMaster bool
+		authSecret      bool
+		failStderr      bool
+		wantCalls       int
+		wantCode        int
+		wantDirect      bool
+	}{
+		{name: "first multiplex retry succeeds", mode: "retry", wantCalls: 2},
+		{name: "repeated multiplex failure disables control master", mode: "fallback", wantCalls: 3, wantDirect: true},
+		{name: "generic transport failure is not replayed", mode: "generic", wantCalls: 1, wantCode: 255},
+		{name: "remote failure is not replayed", mode: "remote", wantCalls: 1, wantCode: 7},
+		{name: "diagnostic without transport exit is not replayed", mode: "remote-diagnostic", wantCalls: 1, wantCode: 7},
+		{name: "nested remote SSH failure is not replayed", mode: "nested-ssh", wantCalls: 1, wantCode: 255},
+		{name: "server disconnect log injection is not replayed", mode: "server-disconnect", wantCalls: 1, wantCode: 255},
+		{name: "diagnostic writer failure is not replayed", mode: "retry", failStderr: true, wantCalls: 1, wantCode: 255},
+		{name: "embedded diagnostic is not replayed", mode: "embedded-diagnostic", wantCalls: 1, wantCode: 255},
+		{name: "disabled control master is not replayed", mode: "fallback", noControlMaster: true, wantCalls: 1, wantCode: 255, wantDirect: true},
+		{name: "secret authentication is not replayed", mode: "fallback", authSecret: true, wantCalls: 1, wantCode: 255, wantDirect: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			sshPath := filepath.Join(dir, "ssh")
+			callsPath := filepath.Join(dir, "calls")
+			script := `#!/bin/sh
+printf '%s\n' "$*" >> "$CRABBOX_FAKE_SSH_CALLS"
+diagnostics=/dev/stderr
+if [ "$1" = -E ]; then diagnostics=$2; shift 2; fi
+attempt=$(wc -l < "$CRABBOX_FAKE_SSH_CALLS" | tr -d ' ')
+case "$CRABBOX_FAKE_SSH_MODE:$attempt" in
+  retry:1|fallback:1|fallback:2)
+    printf 'mm_send_fd: sendmsg(0): Message too long\n' >> "$diagnostics"
+    printf 'mux_client_request_session: send fds failed\n' >> "$diagnostics"
+    exit 255
+    ;;
+  generic:*)
+    printf 'connection closed\n' >&2
+    exit 255
+    ;;
+  remote:*)
+    printf 'remote command failed\n' >&2
+    exit 7
+    ;;
+  remote-diagnostic:*)
+    printf 'mux_client_request_session: send fds failed\n' >&2
+    exit 7
+    ;;
+  nested-ssh:*)
+    printf 'executed once\n'
+    printf 'mm_send_fd: sendmsg(0): Message too long\n' >&2
+    printf 'mux_client_request_session: send fds failed\n' >&2
+    exit 255
+    ;;
+  server-disconnect:*)
+    printf 'executed once\n'
+    printf 'Received disconnect from 203.0.113.10 port 2222:11: \n' >> "$diagnostics"
+    printf 'mm_send_fd: sendmsg(0): Message too long\n' >> "$diagnostics"
+    printf 'mux_client_request_session: send fds failed\n' >> "$diagnostics"
+    exit 255
+    ;;
+  embedded-diagnostic:*)
+    printf 'remote output: mux_client_request_session: send fds failed\n' >&2
+    exit 255
+    ;;
+esac
+printf 'executed once\n'
+`
+			if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("CRABBOX_FAKE_SSH_CALLS", callsPath)
+			t.Setenv("CRABBOX_FAKE_SSH_MODE", test.mode)
+
+			var stdout, stderr bytes.Buffer
+			stderrWriter := io.Writer(&stderr)
+			if test.failStderr {
+				stderrWriter = failingWriter{}
+			}
+			code, err := runSSHStreamResult(t.Context(), SSHTarget{
+				User:            "crabbox",
+				Host:            "203.0.113.10",
+				Port:            "2222",
+				FallbackPorts:   []string{},
+				NoControlMaster: test.noControlMaster,
+				AuthSecret:      test.authSecret,
+			}, "true", &stdout, stderrWriter)
+			if code != test.wantCode {
+				t.Fatalf("exit=%d err=%v stderr=%q, want exit %d", code, err, stderr.String(), test.wantCode)
+			}
+			calls, readErr := os.ReadFile(callsPath)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			lines := strings.Split(strings.TrimSpace(string(calls)), "\n")
+			if len(lines) != test.wantCalls {
+				t.Fatalf("ssh calls=%d, want %d:\n%s", len(lines), test.wantCalls, calls)
+			}
+			if got := strings.Contains(lines[len(lines)-1], "ControlMaster=no"); got != test.wantDirect {
+				t.Fatalf("last SSH invocation disables multiplexing=%t, want %t:\n%s", got, test.wantDirect, calls)
+			}
+			if (test.wantCode == 0 || test.mode == "nested-ssh" || test.mode == "server-disconnect") && stdout.String() != "executed once\n" {
+				t.Fatalf("remote command output=%q, want exactly one execution", stdout.String())
+			}
+			for _, line := range lines {
+				args := strings.Fields(line)
+				if args[0] == "-E" {
+					if _, err := os.Stat(args[1]); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("local diagnostics file not removed: %v", err)
+					}
+				}
+			}
+			if !test.failStderr && (test.mode == "retry" || test.mode == "fallback") {
+				if !strings.Contains(stderr.String(), sshMuxDescriptorFailure) {
+					t.Fatalf("local SSH diagnostics were not forwarded: %q", stderr.String())
+				}
+			}
+		})
+	}
+}
+
+func TestRunSSHInputReplaysAfterMultiplexDescriptorFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows OpenSSH does not multiplex connections")
+	}
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "ssh")
+	callsPath := filepath.Join(dir, "calls")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$CRABBOX_FAKE_SSH_CALLS"
+diagnostics=/dev/stderr
+if [ "$1" = -E ]; then diagnostics=$2; shift 2; fi
+attempt=$(wc -l < "$CRABBOX_FAKE_SSH_CALLS" | tr -d ' ')
+if [ "$attempt" -lt 3 ]; then
+  dd bs=1 count=3 of=/dev/null 2>/dev/null
+  printf 'mm_send_fd: sendmsg(0): Message too long\n' >> "$diagnostics"
+  printf 'mux_client_request_session: send fds failed\n' >> "$diagnostics"
+  exit 255
+fi
+exec /bin/cat
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_CALLS", callsPath)
+
+	var stdout, stderr bytes.Buffer
+	err := runSSHInput(t.Context(), SSHTarget{
+		User:          "crabbox",
+		Host:          "203.0.113.10",
+		Port:          "2222",
+		FallbackPorts: []string{},
+	}, "cat", strings.NewReader("complete replayed input"), &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("SSH input failed: %v; stderr=%q", err, stderr.String())
+	}
+	if stdout.String() != "complete replayed input" {
+		t.Fatalf("replayed stdin=%q", stdout.String())
+	}
+	calls, err := os.ReadFile(callsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(calls)), "\n")
+	if len(lines) != 3 || !strings.Contains(lines[2], "ControlMaster=no") {
+		t.Fatalf("SSH retry/fallback calls:\n%s", calls)
+	}
+}
+
+func TestRunSSHStreamSerializesSharedOutputWriter(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows OpenSSH uses native shared stream spooling")
+	}
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "ssh")
+	script := `#!/bin/sh
+i=0
+while [ "$i" -lt 200 ]; do
+  printf 'stdout-%s\n' "$i"
+  printf 'stderr-%s\n' "$i" >&2
+  i=$((i + 1))
+done
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var output bytes.Buffer
+	code, err := runSSHStreamResult(t.Context(), SSHTarget{
+		User: "crabbox",
+		Host: "203.0.113.10",
+		Port: "22",
+	}, "true", &output, &output)
+	if code != 0 || err != nil {
+		t.Fatalf("exit=%d err=%v", code, err)
+	}
+	if stdout, stderr := strings.Count(output.String(), "stdout-"), strings.Count(output.String(), "stderr-"); stdout != 200 || stderr != 200 {
+		t.Fatalf("combined stream lines: stdout=%d stderr=%d, want 200 each", stdout, stderr)
+	}
+}
+
+func TestSSHMuxFailureDetectorRequiresExactDiagnosticAcrossWrites(t *testing.T) {
+	prefix := "mm_send_fd: sendmsg(0): Message too long\n"
+	tests := []struct {
+		name   string
+		chunks []string
+		want   bool
+	}{
+		{name: "complete record", chunks: []string{prefix + sshMuxDescriptorFailure + "\n"}, want: true},
+		{name: "split record", chunks: []string{prefix + "mux_client_request_", "session: send fds failed\n"}, want: true},
+		{name: "unterminated record", chunks: []string{prefix + sshMuxDescriptorFailure}, want: true},
+		{name: "windows line endings", chunks: []string{strings.ReplaceAll(prefix, "\n", "\r\n") + sshMuxDescriptorFailure + "\r\n"}, want: true},
+		{name: "stdout descriptor failure", chunks: []string{"mm_send_fd: sendmsg(1): Broken pipe\n" + sshMuxDescriptorFailure + "\n"}, want: true},
+		{name: "bare diagnostic", chunks: []string{sshMuxDescriptorFailure + "\n"}},
+		{name: "embedded line", chunks: []string{"remote output: " + sshMuxDescriptorFailure + "\n"}},
+		{name: "diagnostic suffix", chunks: []string{prefix + sshMuxDescriptorFailure + " unexpectedly\n"}},
+		{name: "server disconnect injection", chunks: []string{"Received disconnect from server:11: \n" + prefix + sshMuxDescriptorFailure + "\n"}},
+		{name: "trailing unrelated record", chunks: []string{prefix + sshMuxDescriptorFailure + "\nother failure\n"}},
+		{name: "oversized log", chunks: []string{strings.Repeat("x", 513), prefix + sshMuxDescriptorFailure + "\n"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var detector sshMuxFailureDetector
+			for _, chunk := range test.chunks {
+				if _, err := detector.Write([]byte(chunk)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := detector.failed(); got != test.want {
+				t.Fatalf("matched=%t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestWaitForSSHReadyRecordsProxyFallbackPort(t *testing.T) {
 	dir := t.TempDir()
 	sshPath := filepath.Join(dir, "ssh")

@@ -11,6 +11,7 @@
 
 ### Fixed
 
+- Recovered overloaded SSH multiplexed sessions with one exact-diagnostic retry and a direct-connection fallback while preserving the original lease and command. Thanks @excelsier.
 - Required exact host/project-scoped Semaphore job ownership claims and fresh provider verification before stopping jobs.
 - Required exact API-scoped Morph instance ownership claims and fresh provider verification before pause or deletion.
 - Returned machine-readable missing checkpoint verdicts and made checkpoint deletion idempotent when local records or coordinator-owned resources are already absent.

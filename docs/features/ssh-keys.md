@@ -100,6 +100,16 @@ key path, so reused IPs do not share a control socket between leases. Windows
 OpenSSH and secret-authenticated targets disable multiplexing
 (`ControlMaster=no`).
 
+If a multiplexed OpenSSH session cannot pass its file descriptors because the
+local control socket is full, Crabbox retries that same session once. A second
+exact `mux_client_request_session: send fds failed` transport failure switches
+that invocation to `ControlMaster=no`. This recovery preserves the original
+lease, SSH identity, host-key checks, proxy, port, and staged stdin. Only the
+complete two-line local OpenSSH file-descriptor failure record authorizes this
+retry; matching remote stderr, server-supplied log messages, and logs containing
+unrelated records do not. Local diagnostics are kept in a
+private temporary file, forwarded to stderr after each attempt, and removed.
+
 ## What the broker sees
 
 In brokered mode the CLI sends only the public key to the coordinator; the

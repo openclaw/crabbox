@@ -485,6 +485,41 @@ type sshTransportPreparation struct {
 	direct  io.ReadSeeker
 }
 
+const sshMuxDescriptorFailure = "mux_client_request_session: send fds failed"
+
+type sshMuxFailureDetector struct {
+	log      []byte
+	overflow bool
+}
+
+func (d *sshMuxFailureDetector) Write(data []byte) (int, error) {
+	if len(d.log)+len(data) > 512 {
+		d.overflow = true
+	} else if !d.overflow {
+		d.log = append(d.log, data...)
+	}
+	return len(data), nil
+}
+
+func (d *sshMuxFailureDetector) failed() bool {
+	if d.overflow {
+		return false
+	}
+	lines := strings.Split(strings.TrimSuffix(strings.ReplaceAll(string(d.log), "\r\n", "\n"), "\n"), "\n")
+	// Even a local OpenSSH log can embed server-supplied disconnect text.
+	// Require the complete two-line failure, with no surrounding log records.
+	if len(lines) != 2 || lines[1] != sshMuxDescriptorFailure {
+		return false
+	}
+	for fd := 0; fd < 3; fd++ {
+		prefix := fmt.Sprintf("mm_send_fd: sendmsg(%d): ", fd)
+		if strings.HasPrefix(lines[0], prefix) && len(lines[0]) > len(prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func prepareSSHTransport(target SSHTarget, remote workspaceOwnerRemotePreparation, payload []byte, direct io.ReadSeeker, payloadSize int64, hasInput bool, waitTimeout time.Duration) (sshTransportPreparation, error) {
 	// Only owner-expanded WSL2 commands need stdin staging; every other target
 	// keeps its established argv and input transport.
@@ -521,17 +556,63 @@ func prepareSSHTransport(target SSHTarget, remote workspaceOwnerRemotePreparatio
 }
 
 func (p *sshTransportPreparation) run(ctx context.Context, target SSHTarget, connectTimeout, connectionAttempts string, stdout, stderr io.Writer) error {
+	multiplexed := runtime.GOOS != "windows" && !target.AuthSecret && !target.NoControlMaster
+	for attempt := 0; ; attempt++ {
+		probe := target
+		if attempt == 2 {
+			probe.NoControlMaster = true
+		}
+		muxFailure, err := p.runOnce(ctx, probe, connectTimeout, connectionAttempts, stdout, stderr, multiplexed && attempt < 2)
+		if err == nil || ctx.Err() != nil || exitCode(err) != 255 || !muxFailure || attempt == 2 {
+			return err
+		}
+	}
+}
+
+func (p *sshTransportPreparation) runOnce(ctx context.Context, target SSHTarget, connectTimeout, connectionAttempts string, stdout, stderr io.Writer, captureLocalDiagnostics bool) (muxFailure bool, err error) {
 	args := sshArgsNoInputWithOptions(target, p.command, connectTimeout, connectionAttempts)
 	if p.input != nil || p.direct != nil {
 		args = sshArgsWithOptions(target, p.command, connectTimeout, connectionAttempts)
 	}
+	var diagnostics *os.File
+	if captureLocalDiagnostics {
+		diagnostics, err = os.CreateTemp("", "crabbox-ssh-diagnostics-*")
+		if err != nil {
+			return false, fmt.Errorf("prepare local SSH diagnostics: %w", err)
+		}
+		defer func() {
+			cleanupErr := errors.Join(diagnostics.Close(), os.Remove(diagnostics.Name()))
+			if cleanupErr != nil {
+				muxFailure = false
+				err = errors.Join(err, cleanupErr)
+			}
+		}()
+		// OpenSSH's own log is separate from remote stderr: a nested remote SSH
+		// failure must never authorize replay of a command that already ran.
+		args = append([]string{"-E", diagnostics.Name()}, args...)
+	}
 	cmd := sshCommandContext(ctx, target, args...)
 	input, err := p.reset()
 	if err != nil {
-		return err
+		return false, err
 	}
 	cmd.Stdin = input
-	return runSSHCommand(cmd, stdout, stderr)
+	runErr := runSSHCommand(cmd, stdout, stderr)
+	if diagnostics == nil {
+		return false, runErr
+	}
+	info, statErr := diagnostics.Stat()
+	if statErr != nil {
+		return false, errors.Join(runErr, statErr)
+	}
+	var detector sshMuxFailureDetector
+	output := io.Writer(&detector)
+	if stderr != nil {
+		output = io.MultiWriter(stderr, &detector)
+	}
+	// Snapshot the log so a persistent master cannot prolong command completion.
+	_, copyErr := io.Copy(output, io.NewSectionReader(diagnostics, 0, info.Size()))
+	return copyErr == nil && detector.failed(), errors.Join(runErr, copyErr)
 }
 
 func (p *sshTransportPreparation) reset() (io.Reader, error) {
