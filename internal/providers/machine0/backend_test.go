@@ -808,6 +808,78 @@ func TestAcquireDoesNotStartUnexpectedStoppedMachine(t *testing.T) {
 	}
 }
 
+func TestResolveUnclaimedIdentifier(t *testing.T) {
+	const leaseID = "cbx_abcdef123456"
+	matched := readyMachine("203.0.113.10")
+	matched.Name = "crabbox-unknown-slug-c80c2195"
+	other := readyMachine("203.0.113.11")
+	other.ID, other.Name = "vm-other", "crabbox-other-00000000"
+	ambiguous := other
+	ambiguous.Name = "crabbox-another-slug-c80c2195"
+	for _, tc := range []struct {
+		name      string
+		id        string
+		machines  []machine
+		listErr   error
+		wantGet   string
+		wantLists int
+		wantErr   string
+	}{
+		{name: "canonical lease ID", id: leaseID, machines: []machine{other, matched}, wantLists: 1},
+		{name: "trimmed canonical lease ID", id: " " + leaseID + " ", machines: []machine{matched}, wantLists: 1},
+		{name: "missing lease", id: leaseID, machines: []machine{other}, wantLists: 1, wantErr: "lease/server not found: " + leaseID},
+		{name: "empty inventory", id: leaseID, machines: []machine{}, wantLists: 1, wantErr: "lease/server not found: " + leaseID},
+		{name: "name must have Crabbox prefix and exact suffix", id: leaseID, machines: []machine{
+			{ID: "vm-unmanaged", Name: "other-blue-c80c2195", Status: "RUNNING"},
+			{ID: "vm-no-separator", Name: "crabbox-bluec80c2195", Status: "RUNNING"},
+			{ID: "vm-extra-suffix", Name: "crabbox-blue-c80c2195-extra", Status: "RUNNING"},
+		}, wantLists: 1, wantErr: "lease/server not found: " + leaseID},
+		{name: "slug", id: "blue-lobster", wantGet: "blue-lobster"},
+		{name: "machine name", id: matched.Name, wantGet: matched.Name},
+		{name: "noncanonical ID", id: "cbx_notcanonical", wantGet: "cbx_notcanonical"},
+		{name: "ambiguous lease", id: leaseID, machines: []machine{matched, ambiguous}, wantLists: 1, wantErr: "multiple Machine0 machines match lease " + leaseID},
+		{name: "list failure", id: leaseID, listErr: context.Canceled, wantLists: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupState(t)
+			getCalls := 0
+			api := &fakeAPI{machines: tc.machines, getFn: func(_ context.Context, name string) (machine, error) {
+				getCalls++
+				if tc.wantGet == "" || name != tc.wantGet {
+					t.Fatalf("unexpected Get(%q), want %q", name, tc.wantGet)
+				}
+				return matched, nil
+			}}
+			if tc.listErr != nil {
+				api.listFn = func(context.Context, int) ([]machine, error) { return nil, tc.listErr }
+			}
+			lease, err := testBackendWithAPI(api).Resolve(context.Background(), ResolveRequest{ID: tc.id, StatusOnly: true})
+			switch {
+			case tc.listErr != nil:
+				if !errors.Is(err, tc.listErr) {
+					t.Fatalf("err=%v, want %v", err, tc.listErr)
+				}
+			case tc.wantErr != "":
+				var exitErr core.ExitError
+				if !errors.As(err, &exitErr) || exitErr.Code != 4 || err.Error() != tc.wantErr {
+					t.Fatalf("err=%v, want exit 4: %s", err, tc.wantErr)
+				}
+			default:
+				if err != nil || lease.Server.CloudID != matched.ID || lease.Server.Name != matched.Name {
+					t.Fatalf("server=%#v err=%v", lease.Server, err)
+				}
+			}
+			wantGets := 0
+			if tc.wantGet != "" {
+				wantGets = 1
+			}
+			if getCalls != wantGets || api.listCalls != tc.wantLists {
+				t.Fatalf("Get calls=%d List calls=%d, want %d and %d", getCalls, api.listCalls, wantGets, tc.wantLists)
+			}
+		})
+	}
+}
+
 func TestResolveRefreshesChangedIPAndPrefersReturnedUsername(t *testing.T) {
 	repo := setupState(t)
 	api := &fakeAPI{sizes: []machineSize{testSize()}, getSequence: []machine{readyMachine("203.0.113.10")}}
@@ -819,9 +891,19 @@ func TestResolveRefreshesChangedIPAndPrefersReturnedUsername(t *testing.T) {
 	api.machine.IP = "203.0.113.99"
 	api.machine.DefaultSSHUsername = "nix"
 	api.machine.Distribution = "nixos"
+	api.listCalls = 0
+	api.getFn = func(_ context.Context, name string) (machine, error) {
+		if name != lease.Server.Name {
+			t.Fatalf("claimed Get(%q), want %q", name, lease.Server.Name)
+		}
+		return api.machine, nil
+	}
 	resolved, err := b.Resolve(context.Background(), ResolveRequest{Repo: core.Repo{Root: repo}, ID: lease.LeaseID})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if api.listCalls != 0 {
+		t.Fatalf("claimed resolve called List %d times", api.listCalls)
 	}
 	if resolved.SSH.Host != "203.0.113.99" || resolved.SSH.User != "nix" || resolved.Server.CloudID != "vm-123" {
 		t.Fatalf("resolved=%#v", resolved)
