@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -221,6 +222,13 @@ type checkpointAudit struct {
 	ProviderState string           `json:"providerState,omitempty"`
 	NextAction    string           `json:"nextAction"`
 	Error         string           `json:"error,omitempty"`
+}
+
+type missingCheckpointAudit struct {
+	ID            string `json:"id"`
+	LocalState    string `json:"localState"`
+	ProviderState string `json:"providerState"`
+	NextAction    string `json:"nextAction"`
 }
 
 type checkpointProviderSnapshotView struct {
@@ -493,6 +501,14 @@ func (a App) checkpointInspect(ctx context.Context, args []string) error {
 	}
 	record, _, err := store.Read(fs.Arg(0))
 	if err != nil {
+		if *jsonOut && isCheckpointNotFound(err) {
+			return json.NewEncoder(a.Stdout).Encode(missingCheckpointAudit{
+				ID:            fs.Arg(0),
+				LocalState:    "missing",
+				ProviderState: "missing",
+				NextAction:    "forget",
+			})
+		}
 		return err
 	}
 	if *verify {
@@ -1321,12 +1337,20 @@ func (a App) checkpointDelete(ctx context.Context, args []string) error {
 	if *dryRun {
 		record, _, err := store.Read(id)
 		if err != nil {
+			if isCheckpointNotFound(err) {
+				fmt.Fprintf(a.Stdout, "checkpoint absent id=%s\n", id)
+				return nil
+			}
 			return err
 		}
 		fmt.Fprintf(a.Stdout, "would delete checkpoint id=%s kind=%s provider=%s resource=%s local_only=%t\n", record.ID, record.Kind, blank(record.Provider, "-"), blank(nativeCheckpointDeleteID(record), "-"), *localOnly)
 		return nil
 	}
 	if err := deleteCheckpoint(ctx, store, id, *localOnly); err != nil {
+		if isCheckpointNotFound(err) {
+			fmt.Fprintf(a.Stdout, "checkpoint absent id=%s\n", id)
+			return nil
+		}
 		return err
 	}
 	fmt.Fprintf(a.Stdout, "checkpoint deleted id=%s\n", id)
@@ -1392,11 +1416,35 @@ func deleteCheckpoint(ctx context.Context, store checkpointStore, id string, loc
 		if err != nil {
 			return err
 		}
-		if err := coord.DeleteImage(ctx, providerID, nativeCoordinatorImageRef(record)); err != nil {
-			return err
+		ref := nativeCoordinatorImageRef(record)
+		if err := coord.DeleteImage(ctx, providerID, ref); err != nil && !isCoordinatorImageNotFound(err, providerID) {
+			if !isCoordinatorNotFound(err) {
+				return err
+			}
+			if _, verifyErr := coord.Image(ctx, providerID, ref); !isCoordinatorImageNotFound(verifyErr, providerID) {
+				if verifyErr != nil {
+					return verifyErr
+				}
+				return err
+			}
 		}
 	}
 	return store.Delete(id)
+}
+
+func isCoordinatorImageNotFound(err error, imageID string) bool {
+	var coordinatorErr CoordinatorHTTPError
+	if !errors.As(err, &coordinatorErr) || coordinatorErr.StatusCode != 404 {
+		return false
+	}
+	var response struct {
+		Error   string `json:"error"`
+		Message string `json:"message"`
+	}
+	if json.Unmarshal([]byte(coordinatorErr.Message), &response) != nil {
+		return false
+	}
+	return response.Error == "not_found" && response.Message == "image "+imageID+" not found"
 }
 
 func (a App) checkpointPrune(ctx context.Context, args []string) error {

@@ -165,6 +165,7 @@ crabbox checkpoint list --verify
 crabbox checkpoint inspect chk_abc123
 crabbox checkpoint inspect chk_abc123 --json
 crabbox checkpoint inspect chk_abc123 --verify
+crabbox checkpoint inspect chk_abc123 --verify --json
 ```
 
 `list` and `inspect` read the local checkpoint records. Each record holds the
@@ -180,6 +181,18 @@ provider resource id; for archives, the tarball path and size.
 still exists; for native checkpoints it asks the provider (directly for AWS and
 Hetzner, or via the coordinator) whether the snapshot or image is still present. JSON output
 includes `localState`, `providerState`, and `nextAction`.
+
+An existing native record with a missing provider resource reports
+`localState: "metadata_available"`, `providerState: "missing"`, and
+`nextAction: "delete_local"`. If the local checkpoint record itself is missing,
+JSON inspection succeeds and instead returns a terminal verdict that callers
+can use to remove their own reference:
+
+```json
+{"id":"chk_abc123","localState":"missing","providerState":"missing","nextAction":"forget"}
+```
+
+Human-readable inspection still reports a missing checkpoint as an error.
 
 ### Parallels: live VM snapshots
 
@@ -361,6 +374,12 @@ deregistered along with their backing EBS snapshots; disk snapshots are
 deleted), then removes the local record. Archive checkpoints just lose their
 tarball and record.
 
+Deletion is idempotent: if the local checkpoint is already absent, the command
+succeeds and prints `checkpoint absent id=chk_abc123`. If the coordinator
+confirms that a recorded provider resource is already gone, Crabbox removes the
+remaining local record and succeeds. Other provider or authorization failures
+still preserve the local record.
+
 Machine0 whole-image deletion is additionally fenced against later versions.
 Even when the checkpoint originally created the image name, Crabbox refuses
 `images rm` unless the exact metadata-bound version is still the image's only
@@ -379,8 +398,8 @@ unrelated work.
                   prefixed with `crabbox-`.
 ```
 
-Use `--local-only` only when the provider resource was already removed outside
-Crabbox (manual cleanup, account migration, and so on).
+Use `--local-only` when provider access cannot confirm safe resource deletion,
+such as after account migration or an ownership ambiguity.
 
 ## prune
 

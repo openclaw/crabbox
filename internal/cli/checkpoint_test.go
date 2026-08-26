@@ -185,15 +185,109 @@ func TestCreateCheckpointArchiveCleansCreatedDirOnFailure(t *testing.T) {
 	}
 }
 
-func TestCheckpointDeleteReturnsMetadataReadError(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	var stdout bytes.Buffer
-	app := App{Stdout: &stdout, Stderr: io.Discard}
-	if err := app.checkpointDelete(context.Background(), []string{"chk_missing"}); err == nil {
-		t.Fatal("expected missing checkpoint delete to fail")
+func TestCheckpointInspectMissingRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		wantJSON bool
+	}{
+		{name: "verified JSON", args: []string{"chk_missing", "--verify", "--json"}, wantJSON: true},
+		{name: "JSON", args: []string{"chk_missing", "--json"}, wantJSON: true},
+		{name: "human", args: []string{"chk_missing"}},
+		{name: "verified human", args: []string{"chk_missing", "--verify"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			var stdout bytes.Buffer
+			app := App{Stdout: &stdout, Stderr: io.Discard}
+			err := app.checkpointInspect(context.Background(), tc.args)
+			if !tc.wantJSON {
+				var exitErr ExitError
+				if !AsExitError(err, &exitErr) || exitErr.Code != 2 || exitErr.Message != "checkpoint chk_missing not found" {
+					t.Fatalf("err=%v, want unchanged exit-2 missing checkpoint error", err)
+				}
+				if stdout.Len() != 0 {
+					t.Fatalf("stdout=%q, want empty", stdout.String())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var audit map[string]string
+			if err := json.Unmarshal(stdout.Bytes(), &audit); err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]string{
+				"id":            "chk_missing",
+				"localState":    "missing",
+				"providerState": "missing",
+				"nextAction":    "forget",
+			}
+			if !reflect.DeepEqual(audit, want) {
+				t.Fatalf("audit=%#v, want %#v", audit, want)
+			}
+		})
 	}
-	if stdout.String() != "" {
-		t.Fatalf("stdout=%q, want empty", stdout.String())
+}
+
+func TestCheckpointInspectJSONPreservesRecordErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		id       string
+		metadata string
+		want     string
+	}{
+		{name: "invalid checkpoint ID", id: "missing", want: "checkpoint id must start with chk_"},
+		{name: "corrupt metadata", id: "chk_corrupt", metadata: "{", want: "parse checkpoint chk_corrupt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			if tc.metadata != "" {
+				dir, err := checkpointDir(tc.id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, checkpointMetaFile), []byte(tc.metadata), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			var stdout bytes.Buffer
+			app := App{Stdout: &stdout, Stderr: io.Discard}
+			if err := app.checkpointInspect(context.Background(), []string{tc.id, "--verify", "--json"}); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v, want %q", err, tc.want)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout=%q, want empty", stdout.String())
+			}
+		})
+	}
+}
+
+func TestCheckpointDeleteMissingRecordIsIdempotent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "delete", args: []string{"chk_missing"}},
+		{name: "local only", args: []string{"chk_missing", "--local-only"}},
+		{name: "dry run", args: []string{"chk_missing", "--dry-run"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			var stdout bytes.Buffer
+			app := App{Stdout: &stdout, Stderr: io.Discard}
+			if err := app.checkpointDelete(context.Background(), tc.args); err != nil {
+				t.Fatal(err)
+			}
+			if got, want := stdout.String(), "checkpoint absent id=chk_missing\n"; got != want {
+				t.Fatalf("stdout=%q, want %q", got, want)
+			}
+		})
 	}
 }
 
@@ -2426,6 +2520,133 @@ func TestCheckpointDeleteResourceOnlyNativeDeletesProviderResource(t *testing.T)
 	}
 	if _, _, err := store.Read(record.ID); err == nil {
 		t.Fatal("delete kept checkpoint")
+	}
+}
+
+func TestCheckpointDeleteCoordinatorProviderAbsence(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		deleteStatus int
+		deleteBody   string
+		verifyStatus int
+		verifyBody   string
+		wantError    bool
+		wantRequests int
+	}{
+		{
+			name:         "missing provider resource confirmed by deletion",
+			deleteStatus: http.StatusNotFound,
+			deleteBody:   `{"error":"not_found","message":"image snapshot-missing not found"}`,
+			wantRequests: 1,
+		},
+		{
+			name:         "missing provider resource confirmed by verification",
+			deleteStatus: http.StatusNotFound,
+			deleteBody:   "Not Found",
+			verifyStatus: http.StatusNotFound,
+			verifyBody:   `{"error":"not_found","message":"image snapshot-missing not found"}`,
+			wantRequests: 2,
+		},
+		{
+			name:         "ambiguous coordinator route",
+			deleteStatus: http.StatusNotFound,
+			deleteBody:   "Not Found",
+			verifyStatus: http.StatusNotFound,
+			verifyBody:   `{"error":"not_found"}`,
+			wantError:    true,
+			wantRequests: 2,
+		},
+		{
+			name:         "different missing provider resource",
+			deleteStatus: http.StatusNotFound,
+			deleteBody:   `{"error":"not_found","message":"image snapshot-other not found"}`,
+			verifyStatus: http.StatusNotFound,
+			verifyBody:   `{"error":"not_found","message":"image snapshot-other not found"}`,
+			wantError:    true,
+			wantRequests: 2,
+		},
+		{
+			name:         "provider resource still exists",
+			deleteStatus: http.StatusNotFound,
+			deleteBody:   "Not Found",
+			verifyStatus: http.StatusOK,
+			verifyBody:   `{"image":{"id":"snapshot-missing"}}`,
+			wantError:    true,
+			wantRequests: 2,
+		},
+		{name: "provider failure", deleteStatus: http.StatusInternalServerError, wantError: true, wantRequests: 1},
+		{name: "authorization failure", deleteStatus: http.StatusForbidden, wantError: true, wantRequests: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+
+			var requests int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				var statusCode int
+				var body string
+				switch r.Method {
+				case http.MethodDelete:
+					statusCode, body = tc.deleteStatus, tc.deleteBody
+				case http.MethodGet:
+					statusCode, body = tc.verifyStatus, tc.verifyBody
+				default:
+					t.Errorf("unexpected method=%q", r.Method)
+					return
+				}
+				w.WriteHeader(statusCode)
+				if _, err := io.WriteString(w, firstNonBlank(body, http.StatusText(statusCode))); err != nil {
+					t.Errorf("write coordinator response: %v", err)
+				}
+			}))
+			defer server.Close()
+			t.Setenv("CRABBOX_COORDINATOR", server.URL)
+			t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "admin")
+
+			store, err := defaultCheckpointStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			record := checkpointRecord{
+				ID:        "chk_provider_missing",
+				Kind:      checkpointKindGCPDisk,
+				CreatedAt: time.Now().UTC().Format(time.RFC3339),
+				TargetOS:  targetLinux,
+			}
+			record.Native.ImageID = "snapshot-missing"
+			if _, err := store.Create(record); err != nil {
+				t.Fatal(err)
+			}
+
+			var stdout bytes.Buffer
+			app := App{Stdout: &stdout, Stderr: io.Discard}
+			err = app.checkpointDelete(context.Background(), []string{record.ID})
+			if tc.wantError {
+				if err == nil || coordinatorStatusCode(err) != tc.deleteStatus {
+					t.Fatalf("err=%v, want coordinator HTTP %d", err, tc.deleteStatus)
+				}
+				if _, _, err := store.Read(record.ID); err != nil {
+					t.Fatalf("provider failure removed local checkpoint: %v", err)
+				}
+				if stdout.Len() != 0 {
+					t.Fatalf("stdout=%q, want empty", stdout.String())
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got, want := stdout.String(), "checkpoint deleted id="+record.ID+"\n"; got != want {
+					t.Fatalf("stdout=%q, want %q", got, want)
+				}
+				if _, _, err := store.Read(record.ID); !isCheckpointNotFound(err) {
+					t.Fatalf("local checkpoint remains after confirmed provider absence: %v", err)
+				}
+			}
+			if requests != tc.wantRequests {
+				t.Fatalf("coordinator requests=%d, want %d", requests, tc.wantRequests)
+			}
+		})
 	}
 }
 
