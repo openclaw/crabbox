@@ -143,13 +143,18 @@ func TestResolveReleaseOnlySkipsSpriteCLIAndBootstrap(t *testing.T) {
 	stateDir := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", stateDir)
 	repoRoot := t.TempDir()
-	if err := claimLeaseForRepoProvider("spr_unhealthy-sprite", "unhealthy", spritesProvider, repoRoot, 0, true); err != nil {
+	cfg := Config{Provider: spritesProvider, Sprites: SpritesConfig{WorkRoot: "/home/sprite/crabbox"}}
+	server := Server{Provider: spritesProvider, CloudID: "unhealthy-sprite", Name: "unhealthy-sprite", Labels: map[string]string{
+		"provider": spritesProvider, "lease": "spr_unhealthy-sprite", "slug": "unhealthy", "name": "unhealthy-sprite",
+		"sprites_ownership": "adopted", "sprites_resource_id": "sprite-immutable-1",
+	}}
+	if err := core.ClaimLeaseTargetForRepoConfig("spr_unhealthy-sprite", "unhealthy", cfg, server, SSHTarget{}, repoRoot, 0, true); err != nil {
 		t.Fatal(err)
 	}
-	api := &fakeSpritesAPI{}
+	api := &fakeSpritesAPI{get: spritesInfo{ID: "sprite-immutable-1", Name: "unhealthy-sprite"}}
 	runner := &recordingRunner{}
 	backend := &spritesBackend{
-		cfg:    Config{Sprites: SpritesConfig{WorkRoot: "/home/sprite/crabbox"}},
+		cfg:    cfg,
 		rt:     Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
 		client: api,
 	}
@@ -185,11 +190,101 @@ func TestReleaseLeaseRejectsUnclaimedPrefixOnlySprite(t *testing.T) {
 		},
 		Force: true,
 	})
-	if err == nil || !strings.Contains(err.Error(), "not Crabbox-managed") {
-		t.Fatalf("ReleaseLease err=%v, want unmanaged sprite error", err)
+	if err == nil || !strings.Contains(err.Error(), "no exact local ownership claim") {
+		t.Fatalf("ReleaseLease err=%v, want missing exact ownership claim", err)
 	}
 	if api.deleted != "" {
 		t.Fatalf("deleted prefix-only sprite %q", api.deleted)
+	}
+}
+
+func TestSpritesReleaseRequiresExactScopedClaimAndLiveOwnership(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		claimedName   string
+		claimedAPIURL string
+		live          spritesInfo
+		deleteErr     error
+		wantErr       string
+		wantDeleted   bool
+	}{
+		{name: "exact claim", claimedName: "sprite-owned", live: spritesInfo{Name: "sprite-owned", Labels: spritesAPILabels("cbx_abcdef123456", "owned")}, wantDeleted: true},
+		{name: "wrong resource", claimedName: "sprite-other", live: spritesInfo{Name: "sprite-owned"}, wantErr: "cloud ID mismatch"},
+		{name: "wrong endpoint", claimedName: "sprite-owned", claimedAPIURL: "https://other.sprites.test", live: spritesInfo{Name: "sprite-owned"}, wantErr: "provider scope mismatch"},
+		{name: "live identity mismatch", claimedName: "sprite-owned", live: spritesInfo{Name: "sprite-other"}, wantErr: "live sprite identity"},
+		{name: "live lease mismatch", claimedName: "sprite-owned", live: spritesInfo{Name: "sprite-owned", Labels: spritesAPILabels("cbx_999999999999", "other")}, wantErr: "live lease"},
+		{name: "missing live ownership", claimedName: "sprite-owned", live: spritesInfo{Name: "sprite-owned"}, wantErr: "without exact Crabbox ownership labels"},
+		{name: "failed deletion retains claim", claimedName: "sprite-owned", live: spritesInfo{Name: "sprite-owned", Labels: spritesAPILabels("cbx_abcdef123456", "owned")}, deleteErr: errors.New("provider unavailable"), wantErr: "provider unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			cfg := Config{Provider: spritesProvider, Sprites: SpritesConfig{WorkRoot: "/home/sprite/crabbox"}}
+			claimCfg := cfg
+			claimCfg.Sprites.APIURL = tc.claimedAPIURL
+			claimedServer := Server{Provider: spritesProvider, CloudID: tc.claimedName, Name: tc.claimedName, Labels: map[string]string{
+				"provider": spritesProvider, "lease": "cbx_abcdef123456", "slug": "owned", "name": tc.claimedName,
+			}}
+			if err := core.ClaimLeaseTargetForRepoConfig("cbx_abcdef123456", "owned", claimCfg, claimedServer, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+			api := &fakeSpritesAPI{get: tc.live, deleteErr: tc.deleteErr}
+			backend := &spritesBackend{cfg: cfg, client: api, rt: Runtime{Stderr: io.Discard}}
+			err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{
+				LeaseID: "cbx_abcdef123456", Server: Server{Name: "sprite-owned", Labels: map[string]string{"slug": "owned"}},
+			}})
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err=%v, want %q", err, tc.wantErr)
+				}
+				if _, exists, claimErr := core.ReadLeaseClaimWithPresence("cbx_abcdef123456"); claimErr != nil || !exists {
+					t.Fatalf("claim exists=%t err=%v", exists, claimErr)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if got := api.deleted != ""; got != tc.wantDeleted {
+				t.Fatalf("deleted=%q wantDeleted=%t", api.deleted, tc.wantDeleted)
+			}
+		})
+	}
+}
+
+func TestSpritesLegacyReleaseRequiresExplicitImmutableAdoption(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		adopted    bool
+		claimID    string
+		liveID     string
+		wantDelete bool
+	}{
+		{name: "legacy claim without adoption", claimID: "sprite-id-1", liveID: "sprite-id-1"},
+		{name: "adopted without immutable identity", adopted: true},
+		{name: "adopted identity changed", adopted: true, claimID: "sprite-id-1", liveID: "sprite-id-2"},
+		{name: "explicit immutable adoption", adopted: true, claimID: "sprite-id-1", liveID: "sprite-id-1", wantDelete: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			cfg := Config{Provider: spritesProvider}
+			labels := map[string]string{"provider": spritesProvider, "lease": "spr_legacy", "slug": "legacy", "name": "legacy"}
+			if tc.adopted {
+				labels["sprites_ownership"] = "adopted"
+			}
+			if tc.claimID != "" {
+				labels["sprites_resource_id"] = tc.claimID
+			}
+			server := Server{Provider: spritesProvider, CloudID: "legacy", Name: "legacy", Labels: labels}
+			if err := core.ClaimLeaseTargetForRepoConfig("spr_legacy", "legacy", cfg, server, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+			api := &fakeSpritesAPI{get: spritesInfo{ID: tc.liveID, Name: "legacy"}}
+			backend := &spritesBackend{cfg: cfg, client: api, rt: Runtime{Stderr: io.Discard}}
+			err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{
+				LeaseID: "spr_legacy", Server: Server{Name: "legacy", Labels: map[string]string{"slug": "legacy"}},
+			}})
+			if tc.wantDelete != (err == nil) || tc.wantDelete != (api.deleted == "legacy") {
+				t.Fatalf("err=%v deleted=%q wantDelete=%t", err, api.deleted, tc.wantDelete)
+			}
+		})
 	}
 }
 
@@ -646,6 +741,7 @@ type fakeSpritesAPI struct {
 	createdName   string
 	createdLabels []string
 	deleted       string
+	deleteErr     error
 }
 
 func (f *fakeSpritesAPI) CreateSprite(_ context.Context, name string, labels []string) (spritesInfo, error) {
@@ -670,6 +766,9 @@ func (f *fakeSpritesAPI) ListSprites(context.Context, string) ([]spritesInfo, er
 }
 
 func (f *fakeSpritesAPI) DeleteSprite(_ context.Context, name string) error {
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
 	f.deleted = name
 	return nil
 }

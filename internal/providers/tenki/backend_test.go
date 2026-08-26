@@ -5,12 +5,15 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestTenkiProviderSpec(t *testing.T) {
@@ -20,6 +23,117 @@ func TestTenkiProviderSpec(t *testing.T) {
 	}
 	if !spec.Features.Has("ssh") || !spec.Features.Has("crabbox-sync") {
 		t.Fatalf("missing SSH lease features: %#v", spec.Features)
+	}
+}
+
+func TestTenkiReleaseRequiresExactScopedClaimAndLiveOwnership(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		claimedSessionID string
+		claimedWorkspace string
+		liveSessionID    string
+		liveLeaseID      string
+		terminateErr     error
+		wantErr          string
+		wantTerminated   bool
+	}{
+		{name: "missing claim", wantErr: "no exact local ownership claim"},
+		{name: "exact claim", claimedSessionID: "session-owned", liveSessionID: "session-owned", liveLeaseID: "cbx_abcdef123456", wantTerminated: true},
+		{name: "wrong session", claimedSessionID: "session-other", wantErr: "cloud ID mismatch"},
+		{name: "wrong workspace", claimedSessionID: "session-owned", claimedWorkspace: "workspace-other", wantErr: "provider scope mismatch"},
+		{name: "live identity mismatch", claimedSessionID: "session-owned", liveSessionID: "session-other", liveLeaseID: "cbx_abcdef123456", wantErr: "live session identity"},
+		{name: "live lease mismatch", claimedSessionID: "session-owned", liveSessionID: "session-owned", liveLeaseID: "cbx_999999999999", wantErr: "live lease"},
+		{name: "missing live ownership", claimedSessionID: "session-owned", liveSessionID: "session-owned", wantErr: "without exact Crabbox ownership metadata"},
+		{name: "failed termination retains claim", claimedSessionID: "session-owned", liveSessionID: "session-owned", liveLeaseID: "cbx_abcdef123456", terminateErr: errors.New("provider unavailable"), wantErr: "provider unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			cfg := Config{Provider: tenkiProvider, Tenki: TenkiConfig{CLIPath: "tenki", Workspace: "workspace-owned"}}
+			if tc.claimedSessionID != "" {
+				claimCfg := cfg
+				if tc.claimedWorkspace != "" {
+					claimCfg.Tenki.Workspace = tc.claimedWorkspace
+				}
+				server := Server{Provider: tenkiProvider, CloudID: tc.claimedSessionID, Name: "owned", Labels: map[string]string{
+					"provider": tenkiProvider, "lease": "cbx_abcdef123456", "slug": "owned", "tenki_session_id": tc.claimedSessionID,
+				}}
+				if err := core.ClaimLeaseTargetForRepoConfig("cbx_abcdef123456", "owned", claimCfg, server, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			terminated := false
+			runner := &fakeRunner{run: func(req LocalCommandRequest) (LocalCommandResult, error) {
+				command := strings.Join(req.Args, " ")
+				switch {
+				case strings.HasPrefix(command, "sandbox get "):
+					metadata := "{}"
+					if tc.liveLeaseID != "" {
+						metadata = fmt.Sprintf(`{"crabbox_provider":"tenki","crabbox_lease_id":"%s","crabbox_slug":"owned"}`, tc.liveLeaseID)
+					}
+					return LocalCommandResult{Stdout: fmt.Sprintf(`{"id":"%s","name":"owned","state":"RUNNING","metadata":%s}`, tc.liveSessionID, metadata)}, nil
+				case strings.HasPrefix(command, "sandbox terminate "):
+					if tc.terminateErr != nil {
+						return LocalCommandResult{ExitCode: 1}, tc.terminateErr
+					}
+					terminated = true
+					return LocalCommandResult{}, nil
+				default:
+					t.Fatalf("unexpected command: %s", command)
+					return LocalCommandResult{}, nil
+				}
+			}}
+			backend := &tenkiBackend{cfg: cfg, rt: Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+			err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{
+				LeaseID: "cbx_abcdef123456", Server: Server{CloudID: "session-owned", Labels: map[string]string{"slug": "owned"}},
+			}})
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err=%v, want %q", err, tc.wantErr)
+				}
+				if tc.claimedSessionID != "" {
+					if _, exists, claimErr := core.ReadLeaseClaimWithPresence("cbx_abcdef123456"); claimErr != nil || !exists {
+						t.Fatalf("claim exists=%t err=%v", exists, claimErr)
+					}
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if terminated != tc.wantTerminated {
+				t.Fatalf("terminated=%t want=%t", terminated, tc.wantTerminated)
+			}
+		})
+	}
+}
+
+func TestTenkiLegacyReleaseRequiresExplicitAdoption(t *testing.T) {
+	for _, adopted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("adopted=%t", adopted), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			cfg := Config{Provider: tenkiProvider, Tenki: TenkiConfig{CLIPath: "tenki"}}
+			labels := map[string]string{"provider": tenkiProvider, "lease": "tenki_session-1", "slug": "legacy", "tenki_session_id": "session-1"}
+			if adopted {
+				labels["tenki_ownership"] = "adopted"
+			}
+			server := Server{Provider: tenkiProvider, CloudID: "session-1", Name: "legacy", Labels: labels}
+			if err := core.ClaimLeaseTargetForRepoConfig("tenki_session-1", "legacy", cfg, server, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+			terminated := false
+			runner := &fakeRunner{run: func(req LocalCommandRequest) (LocalCommandResult, error) {
+				if strings.HasPrefix(strings.Join(req.Args, " "), "sandbox get ") {
+					return LocalCommandResult{Stdout: `{"id":"session-1","name":"legacy","state":"RUNNING"}`}, nil
+				}
+				terminated = true
+				return LocalCommandResult{}, nil
+			}}
+			backend := &tenkiBackend{cfg: cfg, rt: Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+			err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{
+				LeaseID: "tenki_session-1", Server: Server{CloudID: "session-1", Labels: map[string]string{"slug": "legacy"}},
+			}})
+			if adopted != (err == nil) || adopted != terminated {
+				t.Fatalf("err=%v terminated=%t adopted=%t", err, terminated, adopted)
+			}
+		})
 	}
 }
 
@@ -362,6 +476,9 @@ func TestTenkiResolveReclaimPersistsSessionEndpoint(t *testing.T) {
 	}
 	if claim.Labels["tenki_session_id"] != "session-1" {
 		t.Fatalf("claim labels=%v, want stored tenki session id", claim.Labels)
+	}
+	if claim.Labels["tenki_ownership"] != "adopted" || claim.CloudID != "session-1" {
+		t.Fatalf("claim=%#v, want explicitly adopted exact session", claim)
 	}
 	commands = nil
 	lease, err = backend.Resolve(context.Background(), ResolveRequest{ID: "unmanaged", StatusOnly: true})

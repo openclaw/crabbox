@@ -16,6 +16,14 @@ type Provider struct{}
 func (Provider) Name() string      { return spritesProvider }
 func (Provider) Aliases() []string { return nil }
 
+func (Provider) ClaimScope(cfg core.Config) string {
+	endpoint, _, err := validateSpritesAPIURL(blank(cfg.Sprites.APIURL, "https://api.sprites.dev"))
+	if err != nil {
+		return ""
+	}
+	return "endpoint:" + endpoint
+}
+
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Name:             spritesProvider,

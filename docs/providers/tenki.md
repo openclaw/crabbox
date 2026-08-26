@@ -130,7 +130,15 @@ These map to Tenki create flags as `--cpu`, `--memory-mb`, and
 3. Return an SSH target using `ProxyCommand tenki sandbox ssh-proxy --session
    <session-id>` plus OpenSSH `CertificateFile=<cert-path>`.
 4. Let core Crabbox perform rsync, command execution, `ssh`, and artifacts.
-5. Run `tenki sandbox terminate <session-id>` on release.
+5. On release, verify the exact local claim, Tenki endpoint/workspace/project,
+   session ID, and fresh provider-side lease metadata, then run
+   `tenki sandbox terminate <session-id>` under the claim lock. Failed
+   termination preserves the claim for a safe retry.
+
+Session IDs and inventory metadata only discover sandboxes; they never
+authorize termination. Explicit `--reclaim` can adopt a session through a normal
+reuse command before stop. `stop --force` is unsupported because arbitrary
+Tenki sessions cannot independently prove lost-claim ownership.
 
 The provider does not expose Tenki's internal node-agent, mesh IPs, or guest IPs.
 All SSH traffic goes through Tenki's supported cert-backed `ssh-proxy` path.

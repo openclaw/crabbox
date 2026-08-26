@@ -52,7 +52,13 @@ Crabbox lease ID and local slug:
   reuse command before stop; untagged VMs remain read-only inventory. Failed
   deletion keeps the claim.
 - `semaphore` — stops the Semaphore CI job and removes the local claim.
-- `sprites` — deletes the Sprites sprite and removes the local claim.
+- `sprites` — requires an exact API-scoped local claim plus fresh matching
+  provider ownership labels before deleting the sprite. Failed deletion keeps
+  the claim; claimless sprites require explicit `--reclaim` reuse.
+- `tenki` — requires an exact endpoint/workspace/project-scoped local claim plus
+  fresh matching session ownership metadata before terminating the sandbox.
+  Failed termination keeps the claim; claimless sessions require explicit
+  `--reclaim` reuse.
 - `daytona` — deletes the Daytona sandbox.
 - `coder` — stops the Coder workspace by default and removes the local claim.
   Set `coder.deleteOnRelease` or pass `--coder-delete-on-release` to delete the
