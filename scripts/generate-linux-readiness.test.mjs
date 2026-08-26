@@ -314,7 +314,7 @@ test("three generated artifacts are deterministic and --check rejects every stal
   const source = await readFile(resolve(repoRoot, "scripts/generate-linux-readiness.mjs"), "utf8");
   assert.doesNotMatch(source, /readFile\([^\n]*(?:go\.mod|\.node-version)/u);
   for (const [artifact] of generated) {
-    assert.match(source, new RegExp(artifact.replaceAll(".", "\\.").replaceAll("/", "\\/"), "u"));
+    assert.ok(source.includes(artifact), `generator source does not reference ${artifact}`);
     await t.test(`stale ${artifact}`, async (subtest) => {
       const copy = await mkdtemp(join(tmpdir(), "crabbox-readiness-generated-"));
       subtest.after(async () => rm(copy, { recursive: true, force: true }));
