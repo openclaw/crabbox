@@ -58,6 +58,8 @@ async function createFixture(t) {
     await executable(
       join(bin, command),
       `probe=${quote(command)}
+if [[ -n "\${CRABBOX_FIXTURE_EXPECT_LC_ALL:-}" && "\${LC_ALL:-}" != "$CRABBOX_FIXTURE_EXPECT_LC_ALL" ]]; then exit 92; fi
+if [[ -n "\${CRABBOX_FIXTURE_EXPECT_LANG:-}" && "\${LANG:-}" != "$CRABBOX_FIXTURE_EXPECT_LANG" ]]; then exit 93; fi
 if [[ "$probe" == git && "\${1:-}" == lfs ]]; then probe=git-lfs; fi
 if [[ "$probe" == python3 && "\${1:-}" == -c ]]; then
   probe=python3-venv
@@ -142,6 +144,11 @@ stat() {
     return
   fi
   ${nativeStat}
+  if [[ "\${CRABBOX_STAT_TRANSLATE_LOCALE:-0}" == 1 && "\${2:-}" == '%F:%u:%g:%a:%s' && "\${LC_ALL:-}" != C ]]; then
+    output="\${output/directory:/Verzeichnis:}"
+    output="\${output/regular empty file:/leere regulaere Datei:}"
+    output="\${output/regular file:/regulaere Datei:}"
+  fi
   if [[ "$file" == "\${CRABBOX_STAT_OVERRIDE_PATH:-}" ]]; then
     IFS=: read -r kind owner group mode size <<<"$output"
     owner="\${CRABBOX_STAT_OWNER:-$owner}"
@@ -350,6 +357,36 @@ test("valid minimal and builder manifests rerun their complete probes without pa
       const result = fixture.run();
       assert.equal(result.status, 0, result.stderr || result.stdout);
       assert.match(result.stdout, /readiness manifest verified/u);
+      assert.deepEqual(await fixture.packageCalls(), []);
+    });
+  }
+});
+
+test("bootstrap and producer parse metadata in the C locale without changing probe locales", async (t) => {
+  const locale = { LC_ALL: "fr_FR.UTF-8", LANG: "de_DE.UTF-8" };
+  const environment = {
+    ...locale,
+    CRABBOX_STAT_TRANSLATE_LOCALE: "1",
+    CRABBOX_FIXTURE_EXPECT_LC_ALL: locale.LC_ALL,
+    CRABBOX_FIXTURE_EXPECT_LANG: locale.LANG,
+  };
+  for (const scenario of ["bootstrap", "producer"]) {
+    await t.test(scenario, async (subtest) => {
+      const fixture = await createFixture(subtest);
+      if (scenario === "bootstrap") await fixture.writeManifest();
+      const result = scenario === "bootstrap"
+        ? fixture.run(fixture.shell, environment)
+        : fixture.runProducer(environment);
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      const profile = scenario === "bootstrap" ? "linux-minimal" : "linux-builder";
+      const recipe = scenario === "bootstrap" ? fixture.minimal : fixture.builder;
+      assert.equal(
+        await readFile(fixture.manifest, "utf8"),
+        `${canonicalJSON(manifestFor(profile, digest(recipe)))}\n`,
+      );
+      if (scenario === "producer") {
+        assert.equal(await readFile(fixture.marker, "utf8"), "crabbox-devtools-v1\n");
+      }
       assert.deepEqual(await fixture.packageCalls(), []);
     });
   }

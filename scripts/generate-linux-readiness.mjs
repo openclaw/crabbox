@@ -367,7 +367,7 @@ crabbox_builder_readiness_probes() {
 
 crabbox_readiness_stat() {
   command -v stat >/dev/null 2>&1 || return 1
-  crabbox_stat_result="$(stat -c '%F:%u:%g:%a:%s' -- "$1" 2>/dev/null)" || return 1
+  crabbox_stat_result="$(LC_ALL=C LANG=C stat -c '%F:%u:%g:%a:%s' -- "$1" 2>/dev/null)" || return 1
   IFS=: read -r crabbox_stat_type crabbox_stat_uid crabbox_stat_gid crabbox_stat_mode crabbox_stat_size crabbox_stat_extra <<CRABBOX_READINESS_STAT
 $crabbox_stat_result
 CRABBOX_READINESS_STAT
