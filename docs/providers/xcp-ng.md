@@ -247,15 +247,19 @@ classification for CI and local setup probes: `environment_blocked`.
    address.
 9. Wait for SSH, then run the Crabbox Linux bootstrap.
 10. Sync the checkout and run commands over SSH.
-11. Touch lease labels during runs; on release, delete the config drive and VM
-    unless the lease is kept.
+11. Persist an exact ownership claim bound to the normalized pool API endpoint,
+    account, lease, slug, and VM UUID. On release, recheck the live VM's exact
+    Crabbox ownership metadata under the claim lock before deleting it.
+    Failed deletion preserves the claim for a safe retry.
 
 This is full-copy provisioning, not a cheap CoW clone path, so SR throughput
 and template disk size are part of the user-visible provisioning contract.
 
-Cleanup lists XCP-ng inventory and only acts on resources labeled as
-Crabbox-managed leases. Use `crabbox cleanup --provider xcp-ng --dry-run`
-before an actual cleanup sweep.
+Cleanup lists XCP-ng inventory and only deletes expired or otherwise eligible
+VMs when an unchanged local claim matches the same pool, account, lease, slug,
+and VM UUID. Unclaimed and wrong-pool VMs are reported and skipped even when
+their provider labels look like Crabbox leases. Use
+`crabbox cleanup --provider xcp-ng --dry-run` before an actual cleanup sweep.
 
 ## Guarded live smoke
 

@@ -2,6 +2,9 @@ package xcpng
 
 import (
 	"flag"
+	"net"
+	"net/url"
+	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
@@ -15,6 +18,35 @@ type Provider struct{}
 
 func (Provider) Name() string      { return "xcp-ng" }
 func (Provider) Aliases() []string { return nil }
+
+func (Provider) ClaimScope(cfg core.Config) string {
+	endpoint, err := xapiEndpoint(cfg.XCPNg.APIURL)
+	if err != nil {
+		return ""
+	}
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return ""
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	host := strings.ToLower(parsed.Hostname())
+	port := parsed.Port()
+	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
+		port = ""
+	}
+	if port != "" {
+		parsed.Host = net.JoinHostPort(host, port)
+	} else if strings.Contains(host, ":") {
+		parsed.Host = "[" + host + "]"
+	} else {
+		parsed.Host = host
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return "endpoint:" + parsed.String() + "|username:" + strings.TrimSpace(cfg.XCPNg.Username)
+}
+
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Name:             "xcp-ng",

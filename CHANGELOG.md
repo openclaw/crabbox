@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Required exact pool-scoped VM ownership claims and fresh provider verification before XCP-ng release or cleanup deletion.
 - Required exact, scope-bound ownership claims and fresh provider verification before Sprites deletion or Tenki session termination.
 - Required exact, scope-bound local ownership claims before Namespace Devbox and Compute Instance lifecycle mutations, with ownership-verified forced recovery for exact Compute Instance IDs.
 - Made direct Daytona SDK commands honor caller deadlines without the default one-minute HTTP cutoff or a separate one-hour execution cap. Thanks @arisylafeta.

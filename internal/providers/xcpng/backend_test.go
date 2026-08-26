@@ -44,6 +44,7 @@ type fakeLifecycleClient struct {
 	closeCanceled   bool
 	setLabels       map[string]map[string]string
 	afterGuestIP    func()
+	afterSetLabels  func()
 	diskReq         xcpNgDiskAttachRequest
 }
 
@@ -296,6 +297,9 @@ func (f *fakeLifecycleClient) SetLabels(_ context.Context, id string, labels map
 		f.setLabels = map[string]map[string]string{}
 	}
 	f.setLabels[id] = labels
+	if f.afterSetLabels != nil {
+		f.afterSetLabels()
+	}
 	return f.fail("set-labels")
 }
 
@@ -443,6 +447,33 @@ func TestAcquireLifecycleCallOrderAndTarget(t *testing.T) {
 	}
 	if labels := fake.setLabels[xcpNgTestVMUUID]; labels["state"] != "ready" || labels["lease"] != "cbx_testlease" || labels["provider"] != "xcp-ng" {
 		t.Fatalf("labels=%#v", labels)
+	}
+}
+
+func TestAcquireRollsBackVMWhenExactClaimCannotBePersisted(t *testing.T) {
+	fake := &fakeLifecycleClient{
+		templateRef: "OpaqueRef:tpl",
+		srRef:       "OpaqueRef:sr",
+		networkRef:  "OpaqueRef:net",
+		hostRef:     "OpaqueRef:host",
+		guestIP:     "192.0.2.44",
+	}
+	backend := newTestBackend(t, fake)
+	stateFile := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(stateFile, []byte("occupied"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake.afterSetLabels = func() {
+		if err := os.Setenv("XDG_STATE_HOME", stateFile); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "blue"})
+	if err == nil || !strings.Contains(err.Error(), "persist exact xcp-ng VM ownership claim") {
+		t.Fatalf("err=%v, want exact claim persistence failure", err)
+	}
+	if !reflect.DeepEqual(fake.deleted, []string{xcpNgTestVMUUID}) {
+		t.Fatalf("deleted=%v, want rollback of exactly the newly created VM", fake.deleted)
 	}
 }
 
@@ -804,10 +835,12 @@ func TestListResolveTouchReleaseUseOnlyCrabboxMetadata(t *testing.T) {
 	fake := &fakeLifecycleClient{
 		servers: []Server{managed, unmanaged},
 		getServer: map[string]Server{
-			"cbx_lease": managed,
+			"cbx_lease":     managed,
+			xcpNgTestVMUUID: managed,
 		},
 	}
 	backend := newTestBackend(t, fake)
+	claimXCPNgServer(t, backend, managed)
 	backend.Cfg.XCPNg.Template = ""
 	backend.Cfg.XCPNg.TemplateUUID = ""
 	backend.Cfg.XCPNg.SR = ""
@@ -846,8 +879,9 @@ func TestReleaseRemovesStoredKey(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", home)
 	managed := crabboxServer(xcpNgTestVMUUID, "cbx_release", "ready", time.Now().Add(time.Hour))
-	fake := &fakeLifecycleClient{getServer: map[string]Server{"cbx_release": managed}}
+	fake := &fakeLifecycleClient{getServer: map[string]Server{"cbx_release": managed, xcpNgTestVMUUID: managed}}
 	backend := newTestBackend(t, fake)
+	claimXCPNgServer(t, backend, managed)
 	removeStoredTestboxKey = func(leaseID string) { core.RemoveStoredTestboxKey(leaseID) }
 	keyPath, err := core.TestboxKeyPath("cbx_release")
 	if err != nil {
@@ -867,22 +901,105 @@ func TestReleaseRemovesStoredKey(t *testing.T) {
 	}
 }
 
+func TestReleaseRequiresExactScopedClaimAndLiveOwnership(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		claimVM     string
+		claimURL    string
+		liveVM      string
+		liveLease   string
+		deleteErr   error
+		wantErr     string
+		wantAttempt bool
+	}{
+		{name: "missing claim", liveVM: xcpNgTestVMUUID, liveLease: "cbx_owned", wantErr: "no exact local ownership claim"},
+		{name: "exact claim", claimVM: xcpNgTestVMUUID, liveVM: xcpNgTestVMUUID, liveLease: "cbx_owned", wantAttempt: true},
+		{name: "wrong vm", claimVM: "22222222-2222-2222-2222-222222222222", liveVM: xcpNgTestVMUUID, liveLease: "cbx_owned", wantErr: "cloud ID mismatch"},
+		{name: "wrong endpoint", claimVM: xcpNgTestVMUUID, claimURL: "https://another-pool.example.test", liveVM: xcpNgTestVMUUID, liveLease: "cbx_owned", wantErr: "provider scope mismatch"},
+		{name: "live identity changed", claimVM: xcpNgTestVMUUID, liveVM: "22222222-2222-2222-2222-222222222222", liveLease: "cbx_owned", wantErr: "without exact live Crabbox ownership metadata"},
+		{name: "live lease changed", claimVM: xcpNgTestVMUUID, liveVM: xcpNgTestVMUUID, liveLease: "cbx_other", wantErr: "without exact live Crabbox ownership metadata"},
+		{name: "delete failure preserves claim", claimVM: xcpNgTestVMUUID, liveVM: xcpNgTestVMUUID, liveLease: "cbx_owned", deleteErr: errors.New("xapi unavailable"), wantErr: "xapi unavailable", wantAttempt: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := crabboxServer(xcpNgTestVMUUID, "cbx_owned", "ready", time.Now().Add(time.Hour))
+			live := crabboxServer(tc.liveVM, tc.liveLease, "ready", time.Now().Add(time.Hour))
+			fake := &fakeLifecycleClient{getServer: map[string]Server{xcpNgTestVMUUID: live}}
+			if tc.deleteErr != nil {
+				fake.errOn = map[string]error{"delete": tc.deleteErr}
+			}
+			backend := newTestBackend(t, fake)
+			if tc.claimVM != "" {
+				claimCfg := backend.Cfg
+				if tc.claimURL != "" {
+					claimCfg.XCPNg.APIURL = tc.claimURL
+				}
+				claimed := server
+				claimed.CloudID = tc.claimVM
+				if err := core.ClaimLeaseTargetForRepoConfig("cbx_owned", "owned", claimCfg, claimed, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{Server: server, LeaseID: "cbx_owned"}})
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err=%v want=%q", err, tc.wantErr)
+				}
+				if tc.claimVM != "" {
+					if _, exists, claimErr := core.ReadLeaseClaimWithPresence("cbx_owned"); claimErr != nil || !exists {
+						t.Fatalf("claim exists=%t err=%v", exists, claimErr)
+					}
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if got := len(fake.deleted) > 0; got != tc.wantAttempt {
+				t.Fatalf("delete attempts=%v wantAttempt=%t", fake.deleted, tc.wantAttempt)
+			}
+		})
+	}
+}
+
+func TestCleanupSkipsUnclaimedAndWrongScopedVMs(t *testing.T) {
+	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
+	unclaimed := crabboxServer("vm-unclaimed", "cbx_unclaimed", "ready", now.Add(-time.Minute))
+	wrongScope := crabboxServer("vm-wrong-scope", "cbx_wrong", "ready", now.Add(-time.Minute))
+	owned := crabboxServer("vm-owned", "cbx_owned", "ready", now.Add(-time.Minute))
+	fake := &fakeLifecycleClient{servers: []Server{unclaimed, wrongScope, owned}, getServer: map[string]Server{"vm-owned": owned}}
+	backend := newTestBackend(t, fake)
+	backend.RT.Clock = fixedClock{t: now}
+	wrongCfg := backend.Cfg
+	wrongCfg.XCPNg.APIURL = "https://another-pool.example.test"
+	if err := core.ClaimLeaseTargetForRepoConfig("cbx_wrong", "wrong", wrongCfg, wrongScope, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	claimXCPNgServer(t, backend, owned)
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(fake.deleted, []string{"vm-owned"}) {
+		t.Fatalf("deleted=%v, want only exactly claimed VM", fake.deleted)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence("cbx_wrong"); err != nil || !exists {
+		t.Fatalf("wrong-scope claim exists=%t err=%v", exists, err)
+	}
+}
+
 func TestCleanupIsMetadataAndExpiryGated(t *testing.T) {
 	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
+	expired := crabboxServer("OpaqueRef:expired", "cbx_expired", "ready", now.Add(-time.Minute))
 	fake := &fakeLifecycleClient{servers: []Server{
-		crabboxServer("OpaqueRef:expired", "cbx_expired", "ready", now.Add(-time.Minute)),
+		expired,
 		crabboxServer("OpaqueRef:fresh", "cbx_fresh", "ready", now.Add(time.Hour)),
 		{CloudID: "OpaqueRef:prefix", Name: "crabbox-prefix-only", Labels: map[string]string{"provider": "xcp-ng"}},
-	}}
+	}, getServer: map[string]Server{"OpaqueRef:expired": expired}}
 	backend := newTestBackend(t, fake)
+	claimXCPNgServer(t, backend, expired)
 	backend.Cfg.XCPNg.Template = ""
 	backend.Cfg.XCPNg.TemplateUUID = ""
 	backend.Cfg.XCPNg.SR = ""
 	backend.Cfg.XCPNg.SRUUID = ""
 	backend.RT.Clock = fixedClock{t: now}
-	var removedClaims []string
 	var removedKeys []string
-	removeLeaseClaim = func(leaseID string) { removedClaims = append(removedClaims, leaseID) }
 	removeStoredTestboxKey = func(leaseID string) { removedKeys = append(removedKeys, leaseID) }
 	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
@@ -890,8 +1007,11 @@ func TestCleanupIsMetadataAndExpiryGated(t *testing.T) {
 	if !reflect.DeepEqual(fake.deleted, []string{"OpaqueRef:expired"}) {
 		t.Fatalf("deleted=%v", fake.deleted)
 	}
-	if !reflect.DeepEqual(removedClaims, []string{"cbx_expired"}) || !reflect.DeepEqual(removedKeys, []string{"cbx_expired"}) {
-		t.Fatalf("removed claims=%v keys=%v", removedClaims, removedKeys)
+	if _, exists, err := core.ReadLeaseClaimWithPresence("cbx_expired"); err != nil || exists {
+		t.Fatalf("claim exists=%t err=%v", exists, err)
+	}
+	if !reflect.DeepEqual(removedKeys, []string{"cbx_expired"}) {
+		t.Fatalf("removed keys=%v", removedKeys)
 	}
 }
 
@@ -1809,13 +1929,13 @@ func TestValidationSplitsConnectionFromProvisioningPlacement(t *testing.T) {
 
 func newTestBackend(t *testing.T, fake *fakeLifecycleClient) *leaseBackend {
 	t.Helper()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	oldClient := newLifecycleClient
 	oldLeaseID := newLeaseID
 	oldKey := ensureTestboxKeyForConfig
 	oldWait := waitForSSHReady
 	oldBootstrapTimeout := bootstrapWaitTimeout
 	oldPollInterval := guestIPPollInterval
-	oldRemove := removeLeaseClaim
 	oldRemoveStoredKey := removeStoredTestboxKey
 	newLifecycleClient = func(context.Context, Config) (lifecycleClient, error) { return fake, nil }
 	newLeaseID = func() string { return "cbx_testlease" }
@@ -1825,7 +1945,6 @@ func newTestBackend(t *testing.T, fake *fakeLifecycleClient) *leaseBackend {
 	waitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error { return nil }
 	bootstrapWaitTimeout = func(Config) time.Duration { return 10 * time.Millisecond }
 	guestIPPollInterval = time.Millisecond
-	removeLeaseClaim = func(string) {}
 	removeStoredTestboxKey = func(string) {}
 	t.Cleanup(func() {
 		newLifecycleClient = oldClient
@@ -1834,12 +1953,18 @@ func newTestBackend(t *testing.T, fake *fakeLifecycleClient) *leaseBackend {
 		waitForSSHReady = oldWait
 		bootstrapWaitTimeout = oldBootstrapTimeout
 		guestIPPollInterval = oldPollInterval
-		removeLeaseClaim = oldRemove
 		removeStoredTestboxKey = oldRemoveStoredKey
 	})
 	cfg := testConfig()
 	backend := NewLeaseBackend(Provider{}.Spec(), cfg, Runtime{Stderr: &bytes.Buffer{}}).(*leaseBackend)
 	return backend
+}
+
+func claimXCPNgServer(t *testing.T, backend *leaseBackend, server Server) {
+	t.Helper()
+	if err := core.ClaimLeaseTargetForRepoConfig(server.Labels["lease"], server.Labels["slug"], backend.Cfg, server, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func testConfig() Config {

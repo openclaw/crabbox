@@ -109,9 +109,10 @@ Crabbox lease ID and local slug:
   reuse. Hostinger still owns the subscription and may continue billing it.
 - `ssh` (static hosts) — removes the local claim for the configured static
   target; it never deletes the host.
-- `xcp-ng` — accepts a Crabbox lease ID or local slug for a Crabbox-managed VM,
-  deletes the attached config drive when present, and refuses to touch VMs that
-  are not labeled as Crabbox-managed XCP-ng leases.
+- `xcp-ng` — requires an exact pool/account-scoped local claim for the same
+  Crabbox lease, slug, and VM UUID, then verifies fresh live ownership metadata
+  before deleting the VM. Missing or mismatched claims never authorize
+  deletion, and provider failures preserve the claim for a safe retry.
 
 ## Behavior by provider mode
 
