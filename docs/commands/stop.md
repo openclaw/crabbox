@@ -53,7 +53,10 @@ Crabbox lease ID and local slug:
   legacy unscoped tagged VMs require explicit `--reclaim` through a normal
   reuse command before stop; untagged VMs remain read-only inventory. Failed
   deletion keeps the claim.
-- `semaphore` — stops the Semaphore CI job and removes the local claim.
+- `semaphore` — requires an exact organization-host/project-scoped local claim
+  and fresh live job ownership before stopping the Semaphore CI job. Failed
+  stops preserve the claim and SSH key; verified legacy claims are safely
+  upgraded before the fenced stop.
 - `sprites` — requires an exact API-scoped local claim plus fresh matching
   provider ownership labels before deleting the sprite. Failed deletion keeps
   the claim; claimless sprites require explicit `--reclaim` reuse.

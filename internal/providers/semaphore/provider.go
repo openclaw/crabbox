@@ -4,6 +4,7 @@ package semaphore
 
 import (
 	"flag"
+	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
@@ -17,6 +18,16 @@ type Provider struct{}
 
 func (Provider) Name() string      { return "semaphore" }
 func (Provider) Aliases() []string { return []string{"sem"} }
+
+func (Provider) ClaimScope(cfg core.Config) string {
+	host, err := normalizeSemaphoreHost(cfg.Semaphore.Host)
+	project := strings.TrimSpace(cfg.Semaphore.Project)
+	if err != nil || host == "" || project == "" {
+		return ""
+	}
+	return "host:" + strings.ToLower(host) + "|project:" + project
+}
+
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Name:             "semaphore",

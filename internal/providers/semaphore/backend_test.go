@@ -73,6 +73,17 @@ func TestProviderAliases(t *testing.T) {
 	}
 }
 
+func TestProviderClaimScopeBindsNormalizedHostAndProject(t *testing.T) {
+	cfg := testConfig("Example.SemaphoreCI.com")
+	if got, want := (Provider{}).ClaimScope(cfg), "host:example.semaphoreci.com|project:my-project"; got != want {
+		t.Fatalf("scope=%q want=%q", got, want)
+	}
+	cfg.Semaphore.Project = ""
+	if got := (Provider{}).ClaimScope(cfg); got != "" {
+		t.Fatalf("scope=%q, want no incomplete provider scope", got)
+	}
+}
+
 func TestProviderSpecIsSSHLease(t *testing.T) {
 	p := Provider{}
 	spec := p.Spec()
@@ -359,6 +370,107 @@ func TestCreateJob(t *testing.T) {
 	}
 	if machine["os_image"] != "ubuntu2204" {
 		t.Errorf("os_image = %v", machine["os_image"])
+	}
+}
+
+func TestAcquirePersistsExactScopedClaimOrRollsBack(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		repository       bool
+		claimFailure     bool
+		rollbackStopFail bool
+	}{
+		{name: "repository scoped claim", repository: true},
+		{name: "repository independent claim"},
+		{name: "claim persistence failure rolls back", claimFailure: true},
+		{name: "failed rollback preserves recovery details", claimFailure: true, rollbackStopFail: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+			t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+			withWaitForRunningPollInterval(t, 0)
+			blockedState := filepath.Join(t.TempDir(), "not-a-directory")
+			if err := os.WriteFile(blockedState, []byte("blocked"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			stops := 0
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				switch {
+				case req.Method == http.MethodGet && req.URL.Path == "/api/v1alpha/projects/my-project":
+					json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]string{"id": "project-1"}})
+				case req.Method == http.MethodPost && req.URL.Path == "/api/v1alpha/jobs":
+					json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]string{"id": "job-created"}})
+				case req.Method == http.MethodGet && req.URL.Path == "/api/v1alpha/jobs/job-created":
+					json.NewEncoder(w).Encode(map[string]any{
+						"metadata": map[string]string{"name": "crabbox testbox"},
+						"status": map[string]any{
+							"state": "RUNNING",
+							"agent": map[string]any{
+								"ip": "192.0.2.25", "ports": []map[string]any{{"name": "ssh", "number": 22}},
+							},
+						},
+					})
+				case req.Method == http.MethodGet && req.URL.Path == "/api/v1alpha/jobs/job-created/debug_ssh_key":
+					if tc.claimFailure {
+						if err := os.Setenv("XDG_STATE_HOME", blockedState); err != nil {
+							t.Error(err)
+						}
+					}
+					json.NewEncoder(w).Encode(map[string]string{"key": "test-private-key"})
+				case req.Method == http.MethodPost && req.URL.Path == "/api/v1alpha/jobs/job-created/stop":
+					stops++
+					if tc.rollbackStopFail {
+						w.WriteHeader(http.StatusServiceUnavailable)
+						return
+					}
+					w.Write([]byte("{}"))
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+			host := strings.TrimPrefix(server.URL, "https://")
+			cfg := testConfig(host)
+			backend := &semaphoreBackend{
+				spec: Provider{}.Spec(), cfg: cfg, rt: testRuntime(server.Client()),
+				client: &apiClient{host: host, token: "tok", http: server.Client()},
+			}
+			req := core.AcquireRequest{}
+			if tc.repository {
+				req.Repo.Root = t.TempDir()
+			}
+			lease, err := backend.Acquire(context.Background(), req)
+			if tc.claimFailure {
+				if err == nil || !strings.Contains(err.Error(), "persist exact semaphore job ownership claim") || stops != 1 {
+					t.Fatalf("err=%v stops=%d, want one rollback after claim failure", err, stops)
+				}
+				keyPath, keyErr := core.TestboxKeyPath("sem_job-created")
+				if keyErr != nil {
+					t.Fatal(keyErr)
+				}
+				_, keyErr = os.Stat(keyPath)
+				if tc.rollbackStopFail {
+					if keyErr != nil || !strings.Contains(err.Error(), "job-created") || !strings.Contains(err.Error(), "SSH key retained") {
+						t.Fatalf("rollback failure err=%v keyErr=%v, want retained recovery details", err, keyErr)
+					}
+				} else if !os.IsNotExist(keyErr) {
+					t.Fatalf("rollback key err=%v, want removed key", keyErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			claim, exists, claimErr := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+			if claimErr != nil || !exists || claim.ProviderScope != (Provider{}).ClaimScope(cfg) || claim.CloudID != "job-created" || claim.Labels["job_id"] != "job-created" {
+				t.Fatalf("claim=%#v exists=%v err=%v", claim, exists, claimErr)
+			}
+			if stops != 0 {
+				t.Fatalf("unexpected successful-acquisition rollback calls=%d", stops)
+			}
+		})
 	}
 }
 
@@ -1104,6 +1216,16 @@ func TestReleaseRemovesClaimAndStoredKey(t *testing.T) {
 	if err := core.ClaimLeaseForRepoProvider(leaseID, "blue-lobster", providerName, "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
+	legacyServer := core.Server{
+		CloudID: "job-release", Provider: providerName,
+		Labels: map[string]string{
+			"provider": providerName, "lease": leaseID, "slug": "blue-lobster",
+			"project": "my-project", "job_id": "job-release",
+		},
+	}
+	if err := core.UpdateLeaseClaimEndpoint(leaseID, legacyServer, core.SSHTarget{}); err != nil {
+		t.Fatal(err)
+	}
 	keyPath, err := storeSSHKey(leaseID, "test-key")
 	if err != nil {
 		t.Fatal(err)
@@ -1111,6 +1233,13 @@ func TestReleaseRemovesClaimAndStoredKey(t *testing.T) {
 
 	stopped := false
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && r.URL.Path == "/api/v1alpha/jobs/job-release" {
+			json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]string{"name": "crabbox testbox blue-lobster"},
+				"status":   map[string]any{"state": "RUNNING"},
+			})
+			return
+		}
 		if r.Method == "POST" && r.URL.Path == "/api/v1alpha/jobs/job-release/stop" {
 			stopped = true
 			w.Write([]byte("{}"))
@@ -1144,5 +1273,140 @@ func TestReleaseRemovesClaimAndStoredKey(t *testing.T) {
 		t.Fatal(err)
 	} else if found {
 		t.Fatal("lease claim still resolves after release")
+	}
+}
+
+func TestReleaseRequiresExactScopedClaimAndLiveOwnership(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		claim         bool
+		legacy        bool
+		legacyProject bool
+		wrongHost     bool
+		wrongProject  bool
+		wrongJob      bool
+		changedOwner  bool
+		notRunning    bool
+		finished      bool
+		stopFails     bool
+		wantStop      bool
+		wantClaimLeft bool
+	}{
+		{name: "missing claim"},
+		{name: "wrong organization", claim: true, wrongHost: true, wantClaimLeft: true},
+		{name: "wrong project", claim: true, wrongProject: true, wantClaimLeft: true},
+		{name: "wrong job", claim: true, wrongJob: true, wantClaimLeft: true},
+		{name: "changed ownership", claim: true, changedOwner: true, wantClaimLeft: true},
+		{name: "job no longer running", claim: true, notRunning: true, wantClaimLeft: true},
+		{name: "failed stop preserves ownership", claim: true, stopFails: true, wantStop: true, wantClaimLeft: true},
+		{name: "exact claim", claim: true, wantStop: true},
+		{name: "verified legacy claim", claim: true, legacy: true, legacyProject: true, wantStop: true},
+		{name: "legacy claim without project fails closed", claim: true, legacy: true, wantClaimLeft: true},
+		{name: "legacy claim rejects changed ownership", claim: true, legacy: true, legacyProject: true, changedOwner: true, wantClaimLeft: true},
+		{name: "finished job safely clears exact claim", claim: true, finished: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+			t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+			const leaseID, jobID, slug = "sem_job-owned", "job-owned", "blue-lobster"
+			stopCalls := 0
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				switch {
+				case req.Method == http.MethodGet && req.URL.Path == "/api/v1alpha/jobs/"+jobID:
+					name, state := "crabbox testbox blue-lobster", "RUNNING"
+					if tc.changedOwner {
+						name = "deployment"
+					}
+					if tc.notRunning {
+						state = "PENDING"
+					}
+					if tc.finished {
+						state = "FINISHED"
+					}
+					json.NewEncoder(w).Encode(map[string]any{
+						"metadata": map[string]string{"name": name},
+						"status":   map[string]any{"state": state},
+					})
+				case req.Method == http.MethodPost && req.URL.Path == "/api/v1alpha/jobs/"+jobID+"/stop":
+					stopCalls++
+					if tc.stopFails {
+						w.WriteHeader(http.StatusServiceUnavailable)
+						return
+					}
+					w.Write([]byte("{}"))
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+			host := strings.TrimPrefix(server.URL, "https://")
+			cfg := testConfig(host)
+			job := core.Server{
+				CloudID: jobID, Provider: providerName,
+				Labels: map[string]string{
+					"provider": providerName, "lease": leaseID, "slug": slug,
+					"project": cfg.Semaphore.Project, "job_id": jobID,
+				},
+			}
+			if tc.claim {
+				claimCfg := cfg
+				claimJob := job
+				if tc.wrongHost {
+					claimCfg.Semaphore.Host = "another.semaphoreci.com"
+				}
+				if tc.wrongProject {
+					claimCfg.Semaphore.Project = "another-project"
+					claimJob.Labels = map[string]string{
+						"provider": providerName, "lease": leaseID, "slug": slug,
+						"project": "another-project", "job_id": jobID,
+					}
+				}
+				if tc.wrongJob {
+					claimJob.CloudID = "job-another"
+					claimJob.Labels = map[string]string{
+						"provider": providerName, "lease": leaseID, "slug": slug,
+						"project": cfg.Semaphore.Project, "job_id": "job-another",
+					}
+				}
+				var claimErr error
+				if tc.legacy {
+					claimErr = core.ClaimLeaseForRepoProvider(leaseID, slug, providerName, t.TempDir(), time.Minute, false)
+					if claimErr == nil && tc.legacyProject {
+						claimErr = core.UpdateLeaseClaimEndpoint(leaseID, claimJob, core.SSHTarget{})
+					}
+				} else {
+					claimErr = core.ClaimLeaseTargetForRepoConfig(leaseID, slug, claimCfg, claimJob, core.SSHTarget{}, t.TempDir(), time.Minute, false)
+				}
+				if claimErr != nil {
+					t.Fatal(claimErr)
+				}
+			}
+			keyPath, err := storeSSHKey(leaseID, "test-key")
+			if err != nil {
+				t.Fatal(err)
+			}
+			backend := &semaphoreBackend{
+				spec: Provider{}.Spec(), cfg: cfg, rt: testRuntime(server.Client()),
+				client: &apiClient{host: host, token: "tok", http: server.Client()},
+			}
+			err = backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: job}})
+			wantSuccess := tc.claim && (!tc.legacy || tc.legacyProject) && !tc.wrongHost && !tc.wrongProject && !tc.wrongJob && !tc.changedOwner && !tc.notRunning && !tc.stopFails
+			if (err == nil) != wantSuccess {
+				t.Fatalf("err=%v wantSuccess=%v", err, wantSuccess)
+			}
+			if (stopCalls > 0) != tc.wantStop {
+				t.Fatalf("stopCalls=%d wantStop=%v", stopCalls, tc.wantStop)
+			}
+			_, claimExists, claimErr := core.ReadLeaseClaimWithPresence(leaseID)
+			if claimErr != nil || claimExists != tc.wantClaimLeft {
+				t.Fatalf("claim exists=%v err=%v want=%v", claimExists, claimErr, tc.wantClaimLeft)
+			}
+			_, keyErr := os.Stat(keyPath)
+			if wantSuccess && !os.IsNotExist(keyErr) || !wantSuccess && keyErr != nil {
+				t.Fatalf("key error=%v wantSuccess=%v", keyErr, wantSuccess)
+			}
+		})
 	}
 }

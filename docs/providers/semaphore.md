@@ -124,9 +124,13 @@ machine types see the [Semaphore machine types reference](https://docs.semaphore
    and exposes an agent IP plus an `ssh` port.
 4. `GET /api/v1alpha/jobs/:id/debug_ssh_key`: fetch the SSH key and store it
    under the lease's per-box key path.
-5. Crabbox syncs and runs commands over SSH.
-6. `POST /api/v1alpha/jobs/:id/stop`: release the job; the local claim and stored
-   key are removed.
+5. Persist an exact ownership claim binding the Semaphore organization host,
+   project, immutable job ID, Crabbox lease, and local slug.
+6. Crabbox syncs and runs commands over SSH.
+7. Before release, recheck the exact local claim and fresh running Crabbox job
+   identity while holding the claim fence, then
+   `POST /api/v1alpha/jobs/:id/stop`. Remove the claim and stored key only
+   after the provider stop succeeds.
 
 ## Capabilities
 
@@ -160,6 +164,16 @@ machine types see the [Semaphore machine types reference](https://docs.semaphore
 - Local claims are provider-scoped: a slug claimed by another provider does not
   resolve as a Semaphore job. Resolve a lease by its full `sem_<job-id>` ID or by
   a slug from a recent warmup.
+- Stop refuses missing claims, a different organization host or project, the
+  wrong job ID, and jobs whose current provider identity is no longer a running
+  Crabbox testbox. Failed stops preserve both the claim and SSH key for retry;
+  an already-finished verified job clears its remaining local claim safely.
+- Claims from older Crabbox versions are upgraded only after their encoded job
+  identity, original project, and fresh provider-side ownership have been
+  verified. Legacy claims without project provenance and claimless jobs are
+  never adopted implicitly.
+- If a newly created job cannot be claimed and the rollback stop also fails,
+  Crabbox reports the exact job ID and retains its SSH key for manual recovery.
 
 ## Related Docs
 
