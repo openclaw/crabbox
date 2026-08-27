@@ -603,18 +603,18 @@ func (b *backend) reconcileChangedClaim(lease core.LeaseTarget, bootstrapDir str
 				}
 			}
 		}
-		if bootstrapDir != "" && trustedBootstrapDir(bootstrapDir) {
+		if bootstrapDir != "" {
 			winningBootstrapDir := ""
 			if exists {
 				winningBootstrapDir = strings.TrimSpace(claim.Labels["bootstrap_dir"])
 			}
 			if bootstrapDir != winningBootstrapDir {
-				if err := b.removeAll(bootstrapDir); err != nil {
-					cleanupErrs = append(cleanupErrs, fmt.Errorf("remove local-container bootstrap directory %s: %w", bootstrapDir, err))
+				if err := b.removeBootstrapDir(bootstrapDir); err != nil {
+					cleanupErrs = append(cleanupErrs, err)
 				}
 			}
 		}
-		if !exists {
+		if !exists && len(cleanupErrs) == 0 {
 			core.RemoveStoredTestboxKey(lease.LeaseID)
 		}
 		return errors.Join(cleanupErrs...)
@@ -655,19 +655,9 @@ func (b *backend) rollbackPendingLease(expected core.LeaseClaim, lease core.Leas
 		if err := b.removeContainer(rollbackCtx, lease.Server.CloudID); err != nil {
 			return err
 		}
-		var cleanupErrs []error
-		if hostRoot := hostLeaseWorkRoot(lease); hostRoot != "" {
-			if err := b.removeAll(hostRoot); err != nil {
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove local-container host work root %s: %w", hostRoot, err))
-			}
-		}
-		if bootstrapDir != "" && trustedBootstrapDir(bootstrapDir) {
-			if err := b.removeAll(bootstrapDir); err != nil {
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove local-container bootstrap directory %s: %w", bootstrapDir, err))
-			}
-		}
-		core.RemoveStoredTestboxKey(lease.LeaseID)
-		return errors.Join(cleanupErrs...)
+		labels := cloneLabels(lease.Server.Labels)
+		labels["bootstrap_dir"] = bootstrapDir
+		return b.cleanupContainerSidecars(lease.LeaseID, labels, true)
 	})
 	if b.afterClaimCleanup != nil {
 		b.afterClaimCleanup(lease.LeaseID)
@@ -985,25 +975,11 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if strings.TrimSpace(lease.Server.Labels["fixed_intent_sha256"]) != "" && !fixedLocalContainerLeaseKind.IsFixedClaim(claim) {
 		return core.Exit(4, "lease_id_conflict: refusing to release fixed local-container lease %s without its durable create intent", lease.LeaseID)
 	}
-	hostLeaseRoot := hostLeaseWorkRoot(lease)
-	bootstrapDir := strings.TrimSpace(lease.Server.Labels["bootstrap_dir"])
 	err = fixedLocalContainerLeaseKind.FinalizeAfterCleanup(claim, func() error {
 		if err := b.removeContainer(ctx, id); err != nil {
 			return err
 		}
-		var cleanupErrs []error
-		if hostLeaseRoot != "" {
-			if err := b.removeAll(hostLeaseRoot); err != nil {
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove local-container host work root %s: %w", hostLeaseRoot, err))
-			}
-		}
-		if bootstrapDir != "" && trustedBootstrapDir(bootstrapDir) {
-			if err := b.removeAll(bootstrapDir); err != nil {
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove local-container bootstrap directory %s: %w", bootstrapDir, err))
-			}
-		}
-		core.RemoveStoredTestboxKey(lease.LeaseID)
-		return errors.Join(cleanupErrs...)
+		return b.cleanupContainerSidecars(lease.LeaseID, lease.Server.Labels, true)
 	})
 	if b.afterClaimCleanup != nil {
 		b.afterClaimCleanup(lease.LeaseID)
@@ -1107,19 +1083,7 @@ func (b *backend) releaseMissingClaim(ctx context.Context, lease core.LeaseTarge
 		if !absent {
 			return core.Exit(4, "local-container %s still exists; refusing to remove its claim", shortID(claim.CloudID))
 		}
-		var cleanupErrs []error
-		if hostRoot := hostLeaseWorkRoot(core.LeaseTarget{LeaseID: leaseID, Server: core.Server{Labels: claim.Labels}}); hostRoot != "" {
-			if err := b.removeAll(hostRoot); err != nil {
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove local-container host work root %s: %w", hostRoot, err))
-			}
-		}
-		if bootstrapDir := strings.TrimSpace(claim.Labels["bootstrap_dir"]); bootstrapDir != "" && trustedBootstrapDir(bootstrapDir) {
-			if err := b.removeAll(bootstrapDir); err != nil {
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("remove local-container bootstrap directory %s: %w", bootstrapDir, err))
-			}
-		}
-		core.RemoveStoredTestboxKey(leaseID)
-		return errors.Join(cleanupErrs...)
+		return b.cleanupContainerSidecars(leaseID, claim.Labels, true)
 	})
 	if b.afterClaimCleanup != nil {
 		b.afterClaimCleanup(leaseID)
@@ -1399,6 +1363,12 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		// Remove the orphan claim only if it is unchanged since our pre-container
 		// snapshot; a concurrent Acquire/Touch that (re)bound this lease makes it no
 		// longer an orphan, so the guard declines and the live lease survives.
+		if dir := strings.TrimSpace(claim.Labels["bootstrap_dir"]); dir != "" {
+			if _, err := os.Lstat(dir); !os.IsNotExist(err) {
+				fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s slug=%s reason=bootstrap-cleanup-pending path=%s; retry stop with the original cache settings\n", claim.LeaseID, blank(claim.Slug, "-"), dir)
+				continue
+			}
+		}
 		if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s slug=%s reason=changed-during-cleanup err=%v\n", claim.LeaseID, blank(claim.Slug, "-"), err)
 			continue
@@ -1555,10 +1525,8 @@ func (b *backend) cleanupContainerSidecars(leaseID string, labels map[string]str
 			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove local-container host work root %s: %w", hostRoot, err))
 		}
 	}
-	if bootstrapDir := strings.TrimSpace(labels["bootstrap_dir"]); bootstrapDir != "" && trustedBootstrapDir(bootstrapDir) {
-		if err := b.removeAll(bootstrapDir); err != nil {
-			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove local-container bootstrap directory %s: %w", bootstrapDir, err))
-		}
+	if err := b.removeBootstrapDir(strings.TrimSpace(labels["bootstrap_dir"])); err != nil {
+		cleanupErrs = append(cleanupErrs, err)
 	}
 	if len(cleanupErrs) != 0 {
 		return errors.Join(cleanupErrs...)
@@ -2701,6 +2669,22 @@ func safeLocalContainerLeaseID(leaseID string) bool {
 	return true
 }
 
+func (b *backend) removeBootstrapDir(dir string) error {
+	if dir == "" {
+		return nil
+	}
+	if !trustedBootstrapDir(dir) {
+		if _, err := os.Lstat(dir); os.IsNotExist(err) {
+			return nil
+		}
+		return core.Exit(2, "local-container bootstrap directory %s is outside the current cache/temp roots; restore the original cache settings or remove the verified residue explicitly, then retry stop", dir)
+	}
+	if err := b.removeAll(dir); err != nil {
+		return fmt.Errorf("remove local-container bootstrap directory %s: %w", dir, err)
+	}
+	return nil
+}
+
 func trustedBootstrapDir(dir string) bool {
 	dir = filepath.Clean(dir)
 	if !filepath.IsAbs(dir) {
@@ -2716,8 +2700,7 @@ func trustedBootstrapDir(dir string) bool {
 
 func localContainerBootstrapRoot() string {
 	if cache, err := os.UserCacheDir(); err == nil && strings.TrimSpace(cache) != "" {
-		// Desktop Docker runtimes share the user directory, but not necessarily
-		// the host's system temp directory, into their Linux VM.
+		// Default user caches are normally VM-shared; custom caches must be mounted.
 		return filepath.Join(cache, "crabbox", "local-container-bootstrap")
 	}
 	return os.TempDir()

@@ -3712,12 +3712,12 @@ func TestUnclaimedRollbackContinuesSidecarCleanupAfterError(t *testing.T) {
 	if _, err := os.Stat(bootstrapDir); !os.IsNotExist(err) {
 		t.Fatalf("bootstrap cleanup did not continue: %v", err)
 	}
-	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
-		t.Fatalf("key cleanup did not continue: %v", err)
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("key should remain after incomplete sidecar cleanup: %v", err)
 	}
 }
 
-func TestPendingRollbackContinuesSidecarAndKeyCleanupAfterError(t *testing.T) {
+func TestPendingRollbackContinuesSidecarCleanupAndRetainsKeyAfterError(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_pending_sidecars"
@@ -3784,8 +3784,8 @@ func TestPendingRollbackContinuesSidecarAndKeyCleanupAfterError(t *testing.T) {
 	if _, err := os.Stat(bootstrapDir); !os.IsNotExist(err) {
 		t.Fatalf("bootstrap cleanup did not continue: %v", err)
 	}
-	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
-		t.Fatalf("key cleanup did not continue: %v", err)
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("key should remain after incomplete sidecar cleanup: %v", err)
 	}
 	if current, err := core.ReadLeaseClaim(leaseID); err != nil || current.LeaseID != leaseID {
 		t.Fatalf("claim should remain for sidecar retry: %#v err=%v", current, err)
@@ -5357,7 +5357,7 @@ func TestReleaseLeaseRemovesStoredKey(t *testing.T) {
 	}
 }
 
-func TestReleaseLeaseContinuesSidecarAndKeyCleanupAfterError(t *testing.T) {
+func TestReleaseLeaseContinuesSidecarCleanupAndRetainsKeyAfterError(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_release_sidecars"
@@ -5421,8 +5421,8 @@ func TestReleaseLeaseContinuesSidecarAndKeyCleanupAfterError(t *testing.T) {
 	if _, err := os.Stat(bootstrapDir); !os.IsNotExist(err) {
 		t.Fatalf("bootstrap cleanup did not continue: %v", err)
 	}
-	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
-		t.Fatalf("key cleanup did not continue: %v", err)
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("key should remain after incomplete sidecar cleanup: %v", err)
 	}
 	if claim, err := core.ReadLeaseClaim(leaseID); err != nil || claim.LeaseID != leaseID {
 		t.Fatalf("claim should remain for sidecar retry: %#v err=%v", claim, err)
@@ -6022,11 +6022,116 @@ func TestReleaseLeaseDoesNotRemoveUntrustedBootstrapDir(t *testing.T) {
 		},
 	}
 
-	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
-		t.Fatal(err)
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "outside the current cache/temp roots") {
+		t.Fatalf("expected actionable bootstrap cleanup error, got %v", err)
 	}
 	if _, err := os.Stat(bootstrapDir); err != nil {
 		t.Fatalf("untrusted bootstrap directory removed: %v", err)
+	}
+}
+
+func TestBootstrapCleanupAfterCacheChangeRetainsRecoveryState(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("XDG_CACHE_HOME controls the user cache on Linux")
+	}
+	for _, action := range []string{"release", "rollback"} {
+		t.Run(action, func(t *testing.T) {
+			cache := t.TempDir()
+			t.Setenv("XDG_CACHE_HOME", cache)
+			f := newCleanupClaimFixture(t, "cbx_cache_change", "cache-change-container", "running", false)
+			if err := os.MkdirAll(localContainerBootstrapRoot(), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			dir, err := os.MkdirTemp(localContainerBootstrapRoot(), "crabbox-bootstrap-*")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := core.WithDurableLeaseClaimLock(f.leaseID, func(claim *core.LeaseClaim, exists bool, save func() error) error {
+				if !exists {
+					t.Fatal("missing fixture claim")
+				}
+				claim.Labels["bootstrap_dir"] = dir
+				return save()
+			}); err != nil {
+				t.Fatal(err)
+			}
+			f.claim, err = core.ReadLeaseClaim(f.leaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lease := core.LeaseTarget{LeaseID: f.leaseID, Server: core.Server{CloudID: f.containerID, Labels: f.claim.Labels}}
+			cleanup := func() error {
+				if action == "rollback" {
+					return f.b.rollbackPendingLease(f.claim, lease, dir)
+				}
+				return f.b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease})
+			}
+			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			if err := cleanup(); err == nil || !strings.Contains(err.Error(), "outside the current cache/temp roots") {
+				t.Fatalf("cleanup error=%v", err)
+			}
+			for _, path := range []string{dir, f.keyPath} {
+				if _, err := os.Lstat(path); err != nil {
+					t.Fatalf("recovery path %s missing: %v", path, err)
+				}
+			}
+			if claim, err := core.ReadLeaseClaim(f.leaseID); err != nil || claim.LeaseID != f.leaseID {
+				t.Fatalf("claim lost: %#v %v", claim, err)
+			}
+			t.Setenv("XDG_CACHE_HOME", cache)
+			if err := cleanup(); err != nil {
+				t.Fatal(err)
+			}
+			for _, path := range []string{dir, f.keyPath} {
+				if _, err := os.Lstat(path); !os.IsNotExist(err) {
+					t.Fatalf("recovery path %s remains: %v", path, err)
+				}
+			}
+		})
+	}
+}
+
+func TestRemoveBootstrapDirHandlesAbsentAndDanglingUntrustedPaths(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "crabbox-bootstrap-old-cache")
+	b := testBackend(&recordingRunner{})
+	if err := b.removeBootstrapDir(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(t.TempDir(), "missing-target"), path); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := b.removeBootstrapDir(path); err == nil {
+		t.Fatal("dangling untrusted symlink was treated as absent")
+	}
+	if _, err := os.Lstat(path); err != nil {
+		t.Fatalf("symlink removed: %v", err)
+	}
+}
+
+func TestCleanupRetainsOrphanClaimWithBootstrapResidue(t *testing.T) {
+	f := newCleanupClaimFixture(t, "cbx_orphan_bootstrap", "missing-bootstrap-container", "running", false)
+	f.runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		if result, ok := defaultLocalContainerScopeResponse(req); ok {
+			return result, nil
+		}
+		if firstArg(req.Args) == "inspect" {
+			return core.LocalCommandResult{Stderr: "Error: No such object: missing-bootstrap-container", ExitCode: 1}, errors.New("exit status 1")
+		}
+		return core.LocalCommandResult{}, nil
+	}
+	if err := f.b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if claim, err := core.ReadLeaseClaim(f.leaseID); err != nil || claim.LeaseID != f.leaseID {
+		t.Fatalf("orphan recovery claim lost: %#v %v", claim, err)
+	}
+	for _, path := range []string{f.bootstrapDir, f.keyPath} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("recovery path missing: %v", err)
+		}
+	}
+	if !strings.Contains(f.output.String(), "bootstrap-cleanup-pending") {
+		t.Fatalf("missing recovery diagnostic: %s", f.output.String())
 	}
 }
 

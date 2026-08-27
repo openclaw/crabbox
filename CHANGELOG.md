@@ -11,11 +11,11 @@
 
 ### Fixed
 
-- Kept local-container bootstrap mounts under the user cache directory so Colima and other desktop Docker VMs can read the script and publish the SSH port.
 - Required exact host/project-scoped Semaphore job ownership claims and fresh provider verification before stopping jobs.
 - Required exact API-scoped Morph instance ownership claims and fresh provider verification before pause or deletion.
 - Returned machine-readable missing checkpoint verdicts and made checkpoint deletion idempotent when local records or coordinator-owned resources are already absent.
 - Required exact pool-scoped VM ownership claims and fresh provider verification before XCP-ng release or cleanup deletion.
+- Kept local-container bootstrap mounts under the user cache directory for desktop Docker VMs and retained cleanup recovery state when cache settings change. Thanks @johan-eilertsen.
 - Required exact, scope-bound ownership claims and fresh provider verification before Sprites deletion or Tenki session termination.
 - Required exact, scope-bound local ownership claims before Namespace Devbox and Compute Instance lifecycle mutations, with ownership-verified forced recovery for exact Compute Instance IDs.
 - Made direct Daytona SDK commands honor caller deadlines without the default one-minute HTTP cutoff or a separate one-hour execution cap. Thanks @arisylafeta.
