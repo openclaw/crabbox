@@ -866,7 +866,7 @@ func (c *checkpointPruneKongCmd) Run(ctx context.Context, app App) error {
 }
 
 func (c *configPathKongCmd) Run(ctx context.Context, app App) error {
-	path := userConfigPath()
+	path := writableConfigPath()
 	if path == "" {
 		return exit(2, "user config directory is unavailable")
 	}

@@ -11,7 +11,7 @@ crabbox config set-broker --url <url> [--provider <provider>] [--mode managed|re
 
 ## config path
 
-Prints the absolute path of the user config file:
+Prints the selected user config path:
 
 ```sh
 crabbox config path
@@ -21,7 +21,10 @@ The file lives at `<os-user-config-dir>/crabbox/config.yaml` (for example
 `~/.config/crabbox/config.yaml` on Linux or
 `~/Library/Application Support/crabbox/config.yaml` on macOS). Set
 `CRABBOX_CONFIG` to point at a different file; that override is used for both
-reads and writes.
+reads and writes. `config path` and the `config=` header from `config show`
+report that override exactly as supplied, including a relative or symlink path.
+Without an override, they report the absolute OS user-config path. Reporting a
+path does not create the file or change its trust classification.
 
 ## config show
 
