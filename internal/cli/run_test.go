@@ -3739,6 +3739,7 @@ func TestRunCommandTerminalReceiptIncludesLateTimingRecordFailure(t *testing.T) 
 		"--provider", "run-env-profile-test",
 		"--no-sync",
 		"--timing-record", timingRecordPath,
+		"--timing-json",
 		"--attest", receiptPath,
 		"--", "true",
 	})
@@ -3759,6 +3760,24 @@ func TestRunCommandTerminalReceiptIncludesLateTimingRecordFailure(t *testing.T) 
 	}
 	if !strings.Contains(exitErr.Message, "open benchmark timing store") {
 		t.Fatalf("missing timing-record failure: %v", exitErr)
+	}
+	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+	var report TimingReport
+	jsonLine := ""
+	jsonCount := 0
+	for _, line := range lines {
+		var candidate TimingReport
+		if json.Unmarshal([]byte(line), &candidate) == nil && candidate.Provider != "" {
+			report = candidate
+			jsonLine = line
+			jsonCount++
+		}
+	}
+	if jsonCount != 1 || jsonLine != lines[len(lines)-1] || report.ExitCode != 2 {
+		t.Fatalf("timing JSON count=%d final=%t exit=%d, want one final exit 2 report\nstderr:\n%s", jsonCount, jsonLine == lines[len(lines)-1], report.ExitCode, stderr.String())
+	}
+	if receiptIndex, jsonIndex := strings.LastIndex(stderr.String(), "artifact kind=receipt"), strings.LastIndex(stderr.String(), jsonLine); receiptIndex < 0 || jsonIndex <= receiptIndex {
+		t.Fatalf("receipt was not written before final timing JSON:\n%s", stderr.String())
 	}
 }
 

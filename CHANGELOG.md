@@ -8,11 +8,9 @@
 - Added targeted `stop --force` recovery through verified provider adoption or exact coordinator lease inspection without weakening ownership checks.
 - Added replay-safe fixed lease IDs to checkpoint forks and machine-readable JSON output to checkpoint creation and forking.
 - Added strict, provider-neutral Linux image readiness manifests with shared CLI/coordinator capability verification and safe legacy-image migration. Thanks @vincentkoc.
-- Added mutually exclusive `runnerPhases` timing telemetry for provider acquire/borrow, connectivity and readiness, workspace seed/overlay, command, artifact collection, cleanup, delegated opaque work, and unattributed time while preserving the existing timing fields.
 
 ### Fixed
 
-- Preserved final timing reports and delegated/client phase ownership when post-command artifact downloads or glob collection fail.
 - Required exact host/project-scoped Semaphore job ownership claims and fresh provider verification before stopping jobs.
 - Required exact API-scoped Morph instance ownership claims and fresh provider verification before pause or deletion.
 - Returned machine-readable missing checkpoint verdicts and made checkpoint deletion idempotent when local records or coordinator-owned resources are already absent.

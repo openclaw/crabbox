@@ -402,18 +402,15 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	var runFailure error
 	recorder := &runRecorder{}
 	var finalizeTerminalRun func()
-	defer func() {
-		recorder.Failed(runFailure)
-	}()
 	var finalTimingReport *timingReport
 	var timingRecordRepo Repo
 	var timingRecordCommand []string
 	var timingRecordColdRun *bool
 	var delegatedTimingCapture *capturedTimingReportWriter
 	var runnerObservedStartedAt time.Time
-	defer func() {
+	snapshotFinalTimingReport := func() (timingReport, bool) {
 		if finalTimingReport == nil {
-			return
+			return timingReport{}, false
 		}
 		report := *finalTimingReport
 		cleanup.apply(&report)
@@ -425,27 +422,18 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		} else {
 			includeObservedRunnerTail(&report, runnerObservedStartedAt, time.Now())
 		}
-		report = finalizeTimingReport(report)
-		if timingRecordEnabled {
-			recordColdRun := timingRecordColdRun
-			if benchmarkCtx.ColdRun != nil {
-				recordColdRun = benchmarkCtx.ColdRun
-			}
-			record := newBenchmarkTimingRecord(time.Now().UTC(), firstNonBlank(strings.TrimSpace(benchmarkCtx.Source), "run"), report, timingRecordRepo, timingRecordCommand, recordColdRun, benchmarkCtx.RepeatIndex)
-			if writeErr := appendBenchmarkTimingRecord(timingRecordPath, record); writeErr != nil {
-				if err == nil {
-					err = writeErr
-				} else {
-					fmt.Fprintf(a.Stderr, "warning: benchmark timing record skipped: %v\n", writeErr)
-				}
-			} else {
-				if benchmarkCtx.OnRecord != nil {
-					benchmarkCtx.OnRecord()
-				}
-				fmt.Fprintf(a.Stderr, "benchmark timing record appended path=%s observations=1\n", timingRecordPath)
-			}
+		if err != nil && report.ExitCode == 0 {
+			report.ExitCode = exitCodeForError(err, 7)
+			report.RunStatus, report.ErrorKind = "", ""
 		}
+		return finalizeTimingReport(report), true
+	}
+	defer func() {
 		if !*timingJSON {
+			return
+		}
+		report, ok := snapshotFinalTimingReport()
+		if !ok {
 			return
 		}
 		if writeErr := writeTimingJSON(a.Stderr, report); writeErr != nil && err == nil {
@@ -453,8 +441,34 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 	}()
 	defer func() {
+		recorder.Failed(runFailure)
+	}()
+	defer func() {
 		if finalizeTerminalRun != nil {
 			finalizeTerminalRun()
+		}
+	}()
+	defer func() {
+		report, ok := snapshotFinalTimingReport()
+		if !ok || !timingRecordEnabled {
+			return
+		}
+		recordColdRun := timingRecordColdRun
+		if benchmarkCtx.ColdRun != nil {
+			recordColdRun = benchmarkCtx.ColdRun
+		}
+		record := newBenchmarkTimingRecord(time.Now().UTC(), firstNonBlank(strings.TrimSpace(benchmarkCtx.Source), "run"), report, timingRecordRepo, timingRecordCommand, recordColdRun, benchmarkCtx.RepeatIndex)
+		if writeErr := appendBenchmarkTimingRecord(timingRecordPath, record); writeErr != nil {
+			if err == nil {
+				err = writeErr
+			} else {
+				fmt.Fprintf(a.Stderr, "warning: benchmark timing record skipped: %v\n", writeErr)
+			}
+		} else {
+			if benchmarkCtx.OnRecord != nil {
+				benchmarkCtx.OnRecord()
+			}
+			fmt.Fprintf(a.Stderr, "benchmark timing record appended path=%s observations=1\n", timingRecordPath)
 		}
 	}()
 	command := fs.Args()
