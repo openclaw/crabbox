@@ -135,9 +135,12 @@ classes, using shapes from the Machine0 size catalog:
 | `large` | `4xl` | 32 | 128 GB |
 | `beast` | `5xl` | 48 | 192 GB |
 
-The authoritative `classCatalog` in `crabbox providers --json` and
+The static `classCatalog` in `crabbox providers --json` and
 `crabbox providers describe machine0 --json` reports these mappings. Machine0
 does not appear in the legacy top-level `classes` compatibility projection.
+These aliases are conditional creation choices, not a guarantee of current
+availability or a way to resize an existing machine. The live native size
+catalog is authoritative for sizes, resources, prices, and available regions.
 
 An explicitly configured `machine0.size`, `CRABBOX_MACHINE0_SIZE`, or
 `--machine0-size` always wins over a portable class, even when the selected size
@@ -167,6 +170,19 @@ regionally after validation; Crabbox preserves the CLI diagnostic and removes a
 partially created VM unless `--keep` was explicit.
 
 ## Lifecycle and reuse
+
+Native size, region, image, image version, desktop image, and registered key
+select a new machine. Their flags report `creationOnly: true` in
+`crabbox providers describe machine0 --json`. Machine0 has no supported in-place
+resize: changing these selectors or a generic class does not resize or replace
+an existing lease. Reuse reports the observed machine size and retains its
+immutable Machine0 ID. Config values and class labels are selection intent,
+not evidence of an existing machine's capacity. Creating or forking a separate
+machine remains a distinct lifecycle operation.
+
+CLI path, work root, release policy, polling interval, and creation timeout
+remain usable with existing machines. Despite its name, creation timeout also
+bounds resume, suspend, and checkpoint waits.
 
 `machine0 new` returns before a VM is usable. Crabbox polls `get --json` through
 `CREATING` and `STARTING`, requires a `RUNNING` VM with an IP, and treats
