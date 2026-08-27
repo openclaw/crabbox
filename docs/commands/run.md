@@ -113,8 +113,8 @@ custom-slug runs.
 If the local SSH multiplexing socket is temporarily full before a command
 starts, Crabbox retries that same session once, then disables multiplexing for
 that invocation if the exact file-descriptor handoff failure recurs. The
-existing lease and command are preserved; ordinary remote command failures are
-never replayed.
+existing lease and command are preserved; ordinary remote command failures do
+not trigger this multiplexing recovery.
 
 Crabbox records a local repo claim for each reused lease. If a lease is already
 claimed by another repo, pass `--reclaim` to move the claim intentionally.
