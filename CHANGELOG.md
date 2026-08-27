@@ -11,12 +11,12 @@
 
 ### Fixed
 
-- Preserved bounded Docker and Podman diagnostics when runtime identity probes return empty successful output, without accepting missing identities. Thanks @coygeek.
 - Required exact host/project-scoped Semaphore job ownership claims and fresh provider verification before stopping jobs.
 - Required exact API-scoped Morph instance ownership claims and fresh provider verification before pause or deletion.
 - Returned machine-readable missing checkpoint verdicts and made checkpoint deletion idempotent when local records or coordinator-owned resources are already absent.
 - Required exact pool-scoped VM ownership claims and fresh provider verification before XCP-ng release or cleanup deletion.
 - Required exact, scope-bound ownership claims and fresh provider verification before Sprites deletion or Tenki session termination.
+- Preserved bounded Docker and Podman diagnostics when runtime identity probes return empty successful output, without accepting missing identities. Thanks @coygeek.
 - Required exact, scope-bound local ownership claims before Namespace Devbox and Compute Instance lifecycle mutations, with ownership-verified forced recovery for exact Compute Instance IDs.
 - Made direct Daytona SDK commands honor caller deadlines without the default one-minute HTTP cutoff or a separate one-hour execution cap. Thanks @arisylafeta.
 - Removed coordinator URL credentials from Code and WebVNC browser links, opener arguments, and viewer bootstrap form actions. Thanks @coygeek.
