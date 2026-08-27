@@ -11,7 +11,6 @@
 
 ### Fixed
 
-- Recovered overloaded SSH multiplexed sessions with one exact-diagnostic retry and a direct-connection fallback while preserving the original lease and command. Thanks @excelsier.
 - Required exact host/project-scoped Semaphore job ownership claims and fresh provider verification before stopping jobs.
 - Required exact API-scoped Morph instance ownership claims and fresh provider verification before pause or deletion.
 - Returned machine-readable missing checkpoint verdicts and made checkpoint deletion idempotent when local records or coordinator-owned resources are already absent.
@@ -19,6 +18,7 @@
 - Required exact, scope-bound ownership claims and fresh provider verification before Sprites deletion or Tenki session termination.
 - Required exact, scope-bound local ownership claims before Namespace Devbox and Compute Instance lifecycle mutations, with ownership-verified forced recovery for exact Compute Instance IDs.
 - Made direct Daytona SDK commands honor caller deadlines without the default one-minute HTTP cutoff or a separate one-hour execution cap. Thanks @arisylafeta.
+- Recovered overloaded SSH multiplexed sessions with one exact-diagnostic retry and a direct-connection fallback while preserving the original lease and command. Thanks @excelsier.
 - Removed coordinator URL credentials from Code and WebVNC browser links, opener arguments, and viewer bootstrap form actions. Thanks @coygeek.
 - Redacted configured and runtime-only credentials from coordinator-stored run failure diagnostics while preserving raw command output. Thanks @coygeek.
 - Retried temporary Machine0 read outages within the existing operation deadline while keeping provider mutations single-attempt.
