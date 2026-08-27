@@ -325,3 +325,8 @@ is `diagnostic_only`.
 
 - [Provider backends](../provider-backends.md)
 - [Provider Reference](README.md)
+
+For contributors, the config wiring is generated from the concrete
+`VercelSandboxConfig` declaration. See [Typed provider config](../refactor/typed-provider-config.md)
+before adding fields; runtime credentials and cross-field validation remain
+outside the generator.
