@@ -89,6 +89,7 @@ func testBackend(runner *recordingRunner) *backend {
 		Memory:   "8g",
 		Network:  "bridge",
 	}
+	core.MarkLocalContainerRuntimeExplicit(&cfg)
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
 	b.captureRuntimeScope = func(context.Context, core.Config) (checkpointScope, error) {
 		return checkpointScope{Runtime: "docker", Context: "default", Endpoint: "unix:///tmp/docker-test.sock", DaemonID: "daemon-test"}, nil
@@ -176,6 +177,13 @@ func TestFixedAcquireCreatesRequestedIDAndReplays(t *testing.T) {
 		Repo: core.Repo{Root: t.TempDir()}, Keep: true,
 		RequestedLeaseID: "cbx_abcdef123451", RequestedSlug: "pending-test",
 	}
+	// Generate the test-owned key before hiding system tools; replay reuses it.
+	if _, _, err := core.EnsureTestboxKeyForConfig(b.cfg, req.RequestedLeaseID); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	writeExecutable(t, filepath.Join(dir, "podman"))
+	t.Setenv("PATH", dir)
 
 	first, err := b.Acquire(context.Background(), req)
 	if err != nil {
@@ -508,15 +516,16 @@ func TestReleasedFixedLeaseTombstoneDoesNotReserveSlugRouting(t *testing.T) {
 
 func TestFixedAcquireRecoversPreparedLiveContainer(t *testing.T) {
 	b, runner, _, _, _, _ := pendingAcquireBackend(t)
+	sshErr := errors.New("temporary SSH transport failure")
 	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
-		return errors.New("temporary SSH transport failure")
+		return sshErr
 	}
 	req := core.AcquireRequest{
 		Repo: core.Repo{Root: t.TempDir()}, Keep: true,
 		RequestedLeaseID: "cbx_abcdef123454", RequestedSlug: "pending-test",
 	}
-	if _, err := b.Acquire(context.Background(), req); err == nil {
-		t.Fatal("initial fixed acquisition unexpectedly succeeded")
+	if _, err := b.Acquire(context.Background(), req); !errors.Is(err, sshErr) {
+		t.Fatalf("initial fixed acquisition error=%v, want temporary SSH transport failure", err)
 	}
 	claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
 	if err != nil || claim.Provider != core.FixedLocalContainerClaimProvider ||
@@ -759,6 +768,13 @@ func TestFixedAcquireStoppedContainerNeverBindsMismatchedIdentity(t *testing.T) 
 			}
 			_, err := b.Acquire(context.Background(), req)
 			requireFixedLocalContainerConflict(t, err)
+			if test.mutateAttempt {
+				if !errors.Is(err, errContainerIdentityMismatch) {
+					t.Fatalf("stopped-container replay error=%v, want durable container identity mismatch", err)
+				}
+			} else if errors.Is(err, errContainerIdentityMismatch) || !strings.Contains(err.Error(), "does not match its fixed create intent") {
+				t.Fatalf("stopped-container replay error=%v, want fixed create intent mismatch", err)
+			}
 			claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
 			if err != nil || claim.CloudID != "" || len(claim.Labels) != 0 ||
 				(test.mutateAttempt && claim.FixedCreateIntent.Attempt["container_id"] != "different-container") {
@@ -3914,7 +3930,7 @@ func TestConfigForRunFallsBackToPodmanWhenDockerIsUnavailable(t *testing.T) {
 	dir := t.TempDir()
 	writeExecutable(t, filepath.Join(dir, "podman"))
 	t.Setenv("PATH", dir)
-	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
+	b := newBackend(Provider{}.Spec(), core.BaseConfig(), core.Runtime{}).(*backend)
 	got := b.configForRun()
 	if got.LocalContainer.Runtime != "podman" {
 		t.Fatalf("runtime=%q, want podman", got.LocalContainer.Runtime)
@@ -3926,7 +3942,7 @@ func TestConfigForRunPrefersDockerWhenBothRuntimesExist(t *testing.T) {
 	writeExecutable(t, filepath.Join(dir, "docker"))
 	writeExecutable(t, filepath.Join(dir, "podman"))
 	t.Setenv("PATH", dir)
-	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
+	b := newBackend(Provider{}.Spec(), core.BaseConfig(), core.Runtime{}).(*backend)
 	got := b.configForRun()
 	if got.LocalContainer.Runtime != "docker" {
 		t.Fatalf("runtime=%q, want docker", got.LocalContainer.Runtime)
@@ -3937,7 +3953,7 @@ func TestConfigForRunHonorsExplicitRuntime(t *testing.T) {
 	dir := t.TempDir()
 	writeExecutable(t, filepath.Join(dir, "docker"))
 	t.Setenv("PATH", dir)
-	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
+	b := newBackend(Provider{}.Spec(), core.BaseConfig(), core.Runtime{}).(*backend)
 	b.cfg.LocalContainer.Runtime = "podman"
 	core.MarkLocalContainerRuntimeExplicit(&b.cfg)
 	got := b.configForRun()
@@ -3950,7 +3966,7 @@ func TestConfigForRunHonorsExplicitDockerRuntime(t *testing.T) {
 	dir := t.TempDir()
 	writeExecutable(t, filepath.Join(dir, "podman"))
 	t.Setenv("PATH", dir)
-	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
+	b := newBackend(Provider{}.Spec(), core.BaseConfig(), core.Runtime{}).(*backend)
 	b.cfg.LocalContainer.Runtime = "docker"
 	core.MarkLocalContainerRuntimeExplicit(&b.cfg)
 	got := b.configForRun()
