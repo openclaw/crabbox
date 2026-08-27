@@ -180,6 +180,10 @@ Bootstrap:
 
 - CLI cloud-init bootstrap: `internal/cli/bootstrap.go`
 - Worker cloud-init bootstrap: `worker/src/bootstrap.ts`
+- Shared script fragments, pinned downloads, and portable OS aliases/images: `recipes/bootstrap/v1/`; regenerate with `node scripts/generate-bootstrap.mjs` and verify with `--check`. See [runner bootstrap](features/runner-bootstrap.md#editing-shared-bootstrap-sources).
+- Generated consumers: `internal/cli/bootstrap_generated.go`, `internal/cli/os_image_generated.go`, `worker/src/bootstrap.generated.ts`, `worker/src/os-image.generated.ts`
+- Shared rendering and catalog fixtures: `testdata/bootstrap/`; generator/parity/escaping tests: `scripts/generate-bootstrap.test.mjs`; composition tests: `internal/cli/bootstrap_shared_test.go`, `worker/test/bootstrap-shared.test.ts`
+- Linux readiness recipes and generation remain separate: `recipes/linux/v1/`, `scripts/generate-linux-readiness.mjs`
 
 Bootstrap stays intentionally small unless optional lease capabilities are
 requested: OpenSSH, CA certificates, curl, Git, rsync, jq, the work root

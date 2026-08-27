@@ -259,6 +259,9 @@ jobs:
       - name: Check generated Linux readiness contracts
         run: node scripts/generate-linux-readiness.mjs --check
 
+      - name: Check generated bootstrap and OS catalog
+        run: node scripts/generate-bootstrap.mjs --check
+
       - name: Test
         run: node --test scripts/*.test.js scripts/*.test.mjs
 

@@ -629,6 +629,7 @@ npm run build:node --prefix worker
 
 # Repository scripts
 node scripts/generate-linux-readiness.mjs --check
+node scripts/generate-bootstrap.mjs --check
 node --test scripts/*.test.js scripts/*.test.mjs
 
 # Docs
