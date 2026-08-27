@@ -18591,6 +18591,14 @@ function readyPoolCriteriaEqual(
 ): boolean {
   const normalizedLeft = readyPoolCriteria(left);
   const normalizedRight = readyPoolCriteria(right);
+  for (const criteria of [normalizedLeft, normalizedRight]) {
+    if (
+      criteria.identity &&
+      (!validReadyPoolIdentityV1(criteria.identity) || normalizeReadyPoolIdentityProvider(criteria))
+    ) {
+      return false;
+    }
+  }
   for (const key of [
     "repo",
     "ref",

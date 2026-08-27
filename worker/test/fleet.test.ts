@@ -14643,95 +14643,132 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
-  it("migrates only the current provider-bound typed desired key without double-filling", async () => {
-    const storage = new MemoryStorage();
-    const fleet = testFleet(storage);
-    const headers = typedReadyPoolHeaders();
-    const owner = headers["x-crabbox-owner"];
-    const org = orgKeyForLabel(headers["x-crabbox-org"]);
-    const key = "builders";
-    const compatibilityKey = "linux-16-vcpu";
-    const identity = await typedReadyPoolIdentity();
-    const metadata = typedReadyPoolMetadata();
-    const legacyKey = `typed-ready-pool-v1-desired:${[
-      org,
-      owner,
-      key,
-      compatibilityKey,
-      identity.image.provider,
-      identity.image.scope,
-      identity.image.id,
-      identity.architecture,
-      identity.seedDigest,
-      identity.cacheCompatibility,
-    ]
-      .map((part) => encodeURIComponent(part))
-      .join(":")}`;
-    const unrelatedLegacyKey = `${legacyKey}:shadow`;
-    const createdAt = "2026-08-20T00:00:00.000Z";
-    const desired: ReadyPoolDesiredCapacity = {
-      key,
-      owner,
-      org,
-      compatibilityKey,
-      criteria: {
-        ...metadata,
+  it.each([undefined, "aws"] as const)(
+    "migrates typed desired capacity with a stored %s provider without double-filling",
+    async (provider) => {
+      const storage = new MemoryStorage();
+      const fleet = testFleet(storage);
+      const headers = typedReadyPoolHeaders();
+      const owner = headers["x-crabbox-owner"];
+      const org = orgKeyForLabel(headers["x-crabbox-org"]);
+      const key = "builders";
+      const compatibilityKey = "linux-16-vcpu";
+      const identity = await typedReadyPoolIdentity();
+      const metadata = typedReadyPoolMetadata();
+      const legacyKey = `typed-ready-pool-v1-desired:${[
+        org,
+        owner,
+        key,
         compatibilityKey,
-        provider: identity.image.provider,
-        identity,
-      },
-      minReady: 1,
-      maxReady: 1,
-      createdAt,
-      updatedAt: createdAt,
-    };
-    storage.seed(legacyKey, desired);
-    storage.seed(unrelatedLegacyKey, desired);
+        identity.image.provider,
+        identity.image.scope,
+        identity.image.id,
+        identity.architecture,
+        identity.seedDigest,
+        identity.cacheCompatibility,
+      ]
+        .map((part) => encodeURIComponent(part))
+        .join(":")}`;
+      const unrelatedLegacyKey = `${legacyKey}:shadow`;
+      const createdAt = "2026-08-20T00:00:00.000Z";
+      const desired: ReadyPoolDesiredCapacity = {
+        key,
+        owner,
+        org,
+        compatibilityKey,
+        criteria: {
+          ...metadata,
+          compatibilityKey,
+          ...(provider === undefined ? {} : { provider }),
+          identity,
+        },
+        minReady: 1,
+        maxReady: 1,
+        createdAt,
+        updatedAt: createdAt,
+      };
+      storage.seed(legacyKey, desired);
+      storage.seed(unrelatedLegacyKey, desired);
+      const claimToken = "existing-v1-fill-claim";
+      storage.seed(`typed-ready-pool-v1-fill-claim:${claimToken}`, {
+        token: claimToken,
+        key,
+        owner,
+        org,
+        compatibilityKey,
+        criteria: desired.criteria,
+        createdAt,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      });
 
-    const reconcile = () =>
-      fleet.fetch(
-        request("POST", `/v1/ready-pools/${key}/reconcile-identity`, {
+      const reconcile = () =>
+        fleet.fetch(
+          request("POST", `/v1/ready-pools/${key}/reconcile-identity`, {
+            headers,
+            body: {
+              ...metadata,
+              compatibilityKey,
+              identity,
+              minReady: 1,
+              maxReady: 1,
+              claim: true,
+            },
+          }),
+        );
+      const first = await reconcile();
+      expect(first.status).toBe(200);
+      const firstBody = await first.json();
+      expect(firstBody).toMatchObject({
+        counts: { inFlight: 1 },
+        reconciling: true,
+      });
+      expect(firstBody).not.toHaveProperty("claim");
+      expect(
+        storage.value<{ criteria: { provider?: string } }>(
+          `typed-ready-pool-v1-fill-claim:${claimToken}`,
+        )?.criteria.provider,
+      ).toBe(provider);
+
+      const v2Key = await readyPoolDesiredCapacityKeyV2({
+        org,
+        owner,
+        key,
+        compatibilityKey,
+        identity,
+      });
+      expect(storage.value(legacyKey)).toBeUndefined();
+      expect(storage.value(unrelatedLegacyKey)).toBeDefined();
+      expect(storage.value<ReadyPoolDesiredCapacity>(v2Key)).toMatchObject({
+        createdAt,
+        identity,
+        criteria: { provider: identity.image.provider, identity },
+      });
+
+      const second = await reconcile();
+      expect(second.status).toBe(200);
+      await expect(second.json()).resolves.toMatchObject({
+        counts: { inFlight: 1 },
+        capped: true,
+      });
+      expect((await storage.list({ prefix: "typed-ready-pool-v1-fill-claim:" })).size).toBe(1);
+      const lease = typedReadyPoolLease();
+      storage.seed(`lease:${lease.id}`, lease);
+      const registered = await fleet.fetch(
+        request("POST", `/v1/ready-pools/${key}/register-identity`, {
           headers,
           body: {
             ...metadata,
             compatibilityKey,
             identity,
-            minReady: 1,
-            maxReady: 1,
-            claim: true,
+            leaseID: lease.id,
+            fillClaimToken: claimToken,
           },
         }),
       );
-    const first = await reconcile();
-    expect(first.status).toBe(200);
-    await expect(first.json()).resolves.toMatchObject({
-      counts: { inFlight: 1 },
-      reconciling: true,
-    });
-
-    const v2Key = await readyPoolDesiredCapacityKeyV2({
-      org,
-      owner,
-      key,
-      compatibilityKey,
-      identity,
-    });
-    expect(storage.value(legacyKey)).toBeUndefined();
-    expect(storage.value(unrelatedLegacyKey)).toBeDefined();
-    expect(storage.value<ReadyPoolDesiredCapacity>(v2Key)).toMatchObject({
-      createdAt,
-      identity,
-      criteria: { provider: identity.image.provider, identity },
-    });
-
-    const second = await reconcile();
-    expect(second.status).toBe(200);
-    await expect(second.json()).resolves.toMatchObject({
-      counts: { inFlight: 1 },
-      capped: true,
-    });
-    expect((await storage.list({ prefix: "typed-ready-pool-v1-fill-claim:" })).size).toBe(1);
-  });
+      expect(registered.status).toBe(200);
+      expect(storage.value(`typed-ready-pool-v1-fill-claim:${claimToken}`)).toBeUndefined();
+    },
+  );
 
   it("keeps the untyped desired-capacity key byte-for-byte compatible", async () => {
     const storage = new MemoryStorage();
