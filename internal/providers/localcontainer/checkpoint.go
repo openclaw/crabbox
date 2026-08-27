@@ -311,17 +311,11 @@ func checkpointScopeForServer(ctx context.Context, cfg core.Config, server core.
 			return checkpointScope{}, err
 		}
 		scope.Config = configPath
-		var stderr strings.Builder
 		cmd := exec.CommandContext(ctx, runtimeName, "context", "show")
 		cmd.Env = checkpointEnvForScope(scope)
-		cmd.Stderr = &stderr
-		out, err := cmd.Output()
+		scope.Context, err = checkpointRequiredOutput(cmd, "resolve Docker context", "context")
 		if err != nil {
-			return checkpointScope{}, core.Exit(7, "resolve Docker context: %v: %s", err, trimCheckpointFailure(stderr.String()))
-		}
-		scope.Context = strings.TrimSpace(string(out))
-		if scope.Context == "" {
-			return checkpointScope{}, core.Exit(7, "resolve Docker context: command returned an empty context")
+			return checkpointScope{}, err
 		}
 	}
 	if scope.Config == "" && scope.Host == "" {
@@ -545,48 +539,40 @@ func validateCheckpointFork(ctx context.Context, cfg core.Config) error {
 }
 
 func checkpointContextEndpoint(ctx context.Context, scope checkpointScope) (string, error) {
-	var stderr strings.Builder
 	cmd := checkpointCommand(ctx, scope, "context", "inspect", scope.Context, "--format", `{{(index .Endpoints "docker").Host}}`)
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		return "", core.Exit(7, "resolve Docker context %s endpoint: %v: %s", scope.Context, err, trimCheckpointFailure(stderr.String()))
-	}
-	endpoint := strings.TrimSpace(string(out))
-	if endpoint == "" {
-		return "", core.Exit(7, "resolve Docker context %s endpoint: command returned an empty endpoint", scope.Context)
-	}
-	return endpoint, nil
+	return checkpointRequiredOutput(cmd, fmt.Sprintf("resolve Docker context %s endpoint", scope.Context), "endpoint")
 }
 
 func checkpointDaemonID(ctx context.Context, scope checkpointScope) (string, error) {
 	if isPodmanRuntime(scope.Runtime) {
-		var stderr strings.Builder
 		cmd := checkpointCommand(ctx, scope, "info", "--format", `{{.Host.Hostname}}|{{.Store.GraphRoot}}|{{.Store.RunRoot}}|{{.Host.RemoteSocket.Path}}|{{.Host.Security.Rootless}}`)
-		cmd.Stderr = &stderr
-		out, err := cmd.Output()
+		identity, err := checkpointRequiredOutput(cmd, "resolve Podman runtime identity", "identity")
 		if err != nil {
-			return "", core.Exit(7, "resolve Podman runtime identity: %v: %s", err, trimCheckpointFailure(stderr.String()))
-		}
-		identity := strings.TrimSpace(string(out))
-		if identity == "" {
-			return "", core.Exit(7, "resolve Podman runtime identity: command returned an empty identity")
+			return "", err
 		}
 		sum := sha256.Sum256([]byte(identity))
 		return fmt.Sprintf("podman-%x", sum[:16]), nil
 	}
-	var stderr strings.Builder
 	cmd := checkpointCommand(ctx, scope, "info", "--format", "{{.ID}}")
+	return checkpointRequiredOutput(cmd, "resolve Docker daemon identity", "id")
+}
+
+func checkpointRequiredOutput(cmd *exec.Cmd, operation, valueName string) (string, error) {
+	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return "", core.Exit(7, "resolve Docker daemon identity: %v: %s", err, trimCheckpointFailure(stderr.String()))
+		return "", core.Exit(7, "%s: %v: %s", operation, err, trimCheckpointFailure(stderr.String()))
 	}
-	daemonID := strings.TrimSpace(string(out))
-	if daemonID == "" {
-		return "", core.Exit(7, "resolve Docker daemon identity: command returned an empty id")
+	value := strings.TrimSpace(string(out))
+	if value == "" {
+		detail := ""
+		if strings.TrimSpace(stderr.String()) != "" {
+			detail = ": " + trimCheckpointFailure(stderr.String())
+		}
+		return "", core.Exit(7, "%s: command returned an empty %s%s", operation, valueName, detail)
 	}
-	return daemonID, nil
+	return value, nil
 }
 
 func checkpointConfigPath() (string, error) {

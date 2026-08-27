@@ -81,6 +81,12 @@ Docker Desktop-specific APIs. Crabbox detects an installed `docker` or `podman`
 CLI and uses that runtime. Set `localContainer.runtime` when you need a specific
 CLI.
 
+Runtime discovery rejects empty Docker context, endpoint, or daemon identities
+and empty Podman identities, even when the runtime command exits successfully.
+If the command supplies stderr, Crabbox includes its bounded diagnostic in the
+error so daemon startup failures are not hidden behind an empty-identity message.
+These failures stop acquisition before a lease or container is created.
+
 ### Fixed-ID replay
 
 ```sh

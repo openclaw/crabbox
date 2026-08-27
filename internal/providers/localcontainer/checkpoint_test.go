@@ -2,6 +2,7 @@ package localcontainer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,59 @@ import (
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func TestCheckpointIdentityProbeDiagnostics(t *testing.T) {
+	for _, probe := range []struct {
+		name, runtime, operation, empty string
+		read                            func(context.Context, checkpointScope) (string, error)
+	}{
+		{"docker identity", "docker", "resolve Docker daemon identity", "id", checkpointDaemonID},
+		{"podman identity", "podman", "resolve Podman runtime identity", "identity", checkpointDaemonID},
+		{"docker endpoint", "docker", "resolve Docker context proof endpoint", "endpoint", checkpointContextEndpoint},
+		{"docker context", "docker", "resolve Docker context", "context", func(ctx context.Context, scope checkpointScope) (string, error) {
+			cfg := core.Config{LocalContainer: core.LocalContainerConfig{Runtime: scope.Runtime}}
+			resolved, err := checkpointScopeForServer(ctx, cfg, core.Server{})
+			return resolved.Context, err
+		}},
+	} {
+		t.Run(probe.name, func(t *testing.T) {
+			dir := t.TempDir()
+			runtimePath := filepath.Join(dir, probe.runtime)
+			script := "#!/bin/sh\nprintf '%s' \"$CRABBOX_PROBE_STDOUT\"\nprintf '%s' \"$CRABBOX_PROBE_STDERR\" >&2\nexit \"$CRABBOX_PROBE_EXIT\"\n"
+			if err := os.WriteFile(runtimePath, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("DOCKER_CONTEXT", "")
+			t.Setenv("DOCKER_HOST", "")
+			t.Setenv("DOCKER_CONFIG", dir)
+			for _, tc := range []struct{ name, stdout, stderr, code, want string }{
+				{"diagnostic", "\n", "daemon unavailable\n", "0", probe.operation + ": command returned an empty " + probe.empty + ": daemon unavailable"},
+				{"silent", "", "", "0", probe.operation + ": command returned an empty " + probe.empty},
+				{"whitespace", "\t\n", " \t\n", "0", probe.operation + ": command returned an empty " + probe.empty},
+				{"bounded", "", strings.Repeat("x", 700), "0", probe.operation + ": command returned an empty " + probe.empty + ": " + strings.Repeat("x", 500) + "..."},
+				{"failure", "ignored-output", "daemon unavailable\n", "3", probe.operation + ": exit status 3: daemon unavailable"},
+				{"success with warning", "identity-ok\n", "warning\n", "0", ""},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					t.Setenv("CRABBOX_PROBE_STDOUT", tc.stdout)
+					t.Setenv("CRABBOX_PROBE_STDERR", tc.stderr)
+					t.Setenv("CRABBOX_PROBE_EXIT", tc.code)
+					value, err := probe.read(context.Background(), checkpointScope{Runtime: runtimePath, Context: "proof"})
+					if tc.want == "" {
+						if err != nil || value == "" || strings.Contains(value, "warning") {
+							t.Fatalf("value=%q error=%v", value, err)
+						}
+						return
+					}
+					var exitErr core.ExitError
+					if !errors.As(err, &exitErr) || exitErr.Code != 7 || err.Error() != tc.want || value != "" {
+						t.Fatalf("value=%q error=%v want exit 7: %s", value, err, tc.want)
+					}
+				})
+			}
+		})
+	}
+}
 
 func TestNativeCheckpointWorkdirUsesResolvedLeaseRoot(t *testing.T) {
 	cfg := core.Config{Provider: providerName, WorkRoot: "/stale"}
