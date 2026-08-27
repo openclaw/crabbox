@@ -161,6 +161,9 @@ deletes the sandbox. `heartbeat --idle-timeout` changes the provider's auto-stop
 policy as well as Crabbox metadata. Status readiness comes from Daytona's live
 state, never a previously stored `ready` label. Explicit stop and rollback wait
 for confirmed provider deletion, with a bounded cleanup deadline.
+If `stop` cannot resolve the claimed sandbox, it returns the lookup error and
+preserves the local recovery claim. A missing sandbox in the current account or
+API endpoint does not prove deletion in the original scope, even after native TTL.
 
 API, toolbox, and archive-upload clients refuse redirects that change scheme,
 host, or effective port. Custom endpoints require HTTPS except for loopback

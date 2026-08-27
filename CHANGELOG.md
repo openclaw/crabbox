@@ -12,6 +12,7 @@
 ### Fixed
 
 - Unified provider-owned routing for stop, retry, rescue, and WebVNC commands, preserving scope, explicit false release settings, and Kubernetes environment selectors without exposing URL credentials.
+- Preserved Daytona recovery claims and lookup errors when `stop` cannot verify the sandbox, instead of reporting release from an unverified not-found response.
 - Fixed portable Node coordinator control heartbeats deadlocking subsequent lifecycle operations, releases, and graceful shutdown.
 - Made direct Daytona sandboxes private, preserved dependencies across syncs, enforced native TTL and idle heartbeats, reported authoritative readiness, and verified allocation rollback and credential-safe redirects.
 - Fixed brokered Windows bootstrap on images with built-in OpenSSH by sharing the CLI's installed/system/PATH command resolution; centralized common bootstrap fragments, pinned downloads, and portable OS metadata across both runtimes.
@@ -20,6 +21,7 @@
 - Required exact API-scoped Morph instance ownership claims and fresh provider verification before pause or deletion.
 - Returned machine-readable missing checkpoint verdicts and made checkpoint deletion idempotent when local records or coordinator-owned resources are already absent.
 - Required exact pool-scoped VM ownership claims and fresh provider verification before XCP-ng release or cleanup deletion.
+- Kept local-container bootstrap mounts under the user cache directory for desktop Docker VMs and retained cleanup recovery state when cache settings change. Thanks @johan-eilertsen.
 - Required exact, scope-bound ownership claims and fresh provider verification before Sprites deletion or Tenki session termination.
 - Required exact, scope-bound local ownership claims before Namespace Devbox and Compute Instance lifecycle mutations, with ownership-verified forced recovery for exact Compute Instance IDs.
 - Made direct Daytona SDK commands honor caller deadlines without the default one-minute HTTP cutoff or a separate one-hour execution cap. Thanks @arisylafeta.
