@@ -5,19 +5,34 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { runnerTargets } from "./runner-release-bundle.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const read = (file) => fs.readFileSync(path.join(repoRoot, file), "utf8");
+
+function writeRunnerComponents(directory) {
+  for (const { name } of runnerTargets) {
+    const file = path.join(directory, ".components", name);
+    fs.writeFileSync(file, `unsigned:${name}\n`, { mode: 0o755 });
+    fs.chmodSync(file, 0o755);
+  }
+}
 
 test("release workflow is verifier-only, protected-default, dual-native, and token-bounded", () => {
   const workflow = read(".github/workflows/release-assets.yml");
   assert.match(workflow, /^  workflow_dispatch:$/m);
   assert.doesNotMatch(workflow, /repository_dispatch:|^  push:|^  release:/m);
   assert.match(workflow, /name: guard-protected-release-policy/);
-  assert.match(workflow, /expected_workflow_ref="\$GITHUB_REPOSITORY\/\.github\/workflows\/release-assets\.yml@\$expected_ref"/);
+  assert.match(
+    workflow,
+    /expected_workflow_ref="\$GITHUB_REPOSITORY\/\.github\/workflows\/release-assets\.yml@\$expected_ref"/,
+  );
   assert.match(workflow, /\[\[ "\$GITHUB_WORKFLOW_REF" == "\$expected_workflow_ref" \]\]/);
   assert.match(workflow, /verify-github-release-policy\.mjs/);
-  assert.match(workflow, /workflow_commit:\n\s+description: "Current protected default-branch workflow commit SHA"\n\s+required: true/);
+  assert.match(
+    workflow,
+    /workflow_commit:\n\s+description: "Current protected default-branch workflow commit SHA"\n\s+required: true/,
+  );
   assert.match(workflow, /\[\[ "\$\{\{ github\.workflow_sha \}\}" == "\$WORKFLOW_COMMIT" \]\]/);
   assert.match(workflow, /git merge-base --is-ancestor "\$VERIFIER_COMMIT" "\$WORKFLOW_COMMIT"/);
   assert.match(workflow, /git merge-base --is-ancestor "\$SOURCE_COMMIT" "\$VERIFIER_COMMIT"/);
@@ -42,10 +57,19 @@ test("release workflow is verifier-only, protected-default, dual-native, and tok
     workflow,
     /name: Freeze exact static proof before candidate execution[\s\S]*env -i[\s\S]*PATH="\$PATH" VERIFY_ARCH="\$VERIFY_ARCH" node/,
   );
-  assert.match(workflow, /name: Execute candidate in isolated clean job without release credentials[\s\S]*exec env -i/);
+  assert.match(
+    workflow,
+    /name: Execute candidate in isolated clean job without release credentials[\s\S]*exec env -i/,
+  );
   assert.match(workflow, /CRABBOX_VERIFY_EXEC_ARCH="\$VERIFY_ARCH"/);
-  assert.equal((workflow.match(/CRABBOX_VERIFY_TOOLING_COMMIT="\$WORKFLOW_COMMIT"/g) ?? []).length, 2);
-  assert.match(workflow, /verifierCommit: process\.env\.VERIFIER_COMMIT,\n\s+workflowCommit: process\.env\.WORKFLOW_COMMIT,/);
+  assert.equal(
+    (workflow.match(/CRABBOX_VERIFY_TOOLING_COMMIT="\$WORKFLOW_COMMIT"/g) ?? []).length,
+    2,
+  );
+  assert.match(
+    workflow,
+    /verifierCommit: process\.env\.VERIFIER_COMMIT,\n\s+workflowCommit: process\.env\.WORKFLOW_COMMIT,/,
+  );
   assert.match(workflow, /scripts\/verify-release\.sh/);
   assert.match(workflow, /name: release-input/);
   assert.match(workflow, /name: verified-assets-\$\{\{ matrix\.arch \}\}/);
@@ -81,23 +105,35 @@ test("release verifier rejects provenance that is not an ancestor of protected t
     execFileSync("git", ["config", "user.email", "release@example.test"], { cwd: directory });
     execFileSync("git", ["add", "scripts"], { cwd: directory });
     execFileSync("git", ["commit", "-m", "tooling base"], { cwd: directory, stdio: "ignore" });
-    const base = execFileSync("git", ["rev-parse", "HEAD"], { cwd: directory, encoding: "utf8" }).trim();
+    const base = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: directory,
+      encoding: "utf8",
+    }).trim();
     fs.writeFileSync(path.join(directory, "tooling.txt"), "protected tooling\n");
     execFileSync("git", ["add", "tooling.txt"], { cwd: directory });
     execFileSync("git", ["commit", "-m", "tooling head"], { cwd: directory, stdio: "ignore" });
-    const tooling = execFileSync("git", ["rev-parse", "HEAD"], { cwd: directory, encoding: "utf8" }).trim();
+    const tooling = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: directory,
+      encoding: "utf8",
+    }).trim();
     execFileSync("git", ["switch", "--detach", base], { cwd: directory, stdio: "ignore" });
     fs.writeFileSync(path.join(directory, "unrelated.txt"), "unrelated verifier\n");
     execFileSync("git", ["add", "unrelated.txt"], { cwd: directory });
-    execFileSync("git", ["commit", "-m", "unrelated verifier"], { cwd: directory, stdio: "ignore" });
-    const unrelated = execFileSync("git", ["rev-parse", "HEAD"], { cwd: directory, encoding: "utf8" }).trim();
+    execFileSync("git", ["commit", "-m", "unrelated verifier"], {
+      cwd: directory,
+      stdio: "ignore",
+    });
+    const unrelated = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: directory,
+      encoding: "utf8",
+    }).trim();
     execFileSync("git", ["switch", "--detach", tooling], { cwd: directory, stdio: "ignore" });
 
     const bin = path.join(directory, "bin");
     fs.mkdirSync(bin);
     fs.writeFileSync(
       path.join(bin, "uname"),
-      "#!/bin/sh\ncase \"${1:-}\" in -s) echo Darwin ;; -m) echo arm64 ;; *) exit 64 ;; esac\n",
+      '#!/bin/sh\ncase "${1:-}" in -s) echo Darwin ;; -m) echo arm64 ;; *) exit 64 ;; esac\n',
     );
     fs.chmodSync(path.join(bin, "uname"), 0o755);
     for (const tool of ["codesign", "lipo"]) {
@@ -127,7 +163,10 @@ test("release verifier rejects provenance that is not an ancestor of protected t
       },
     );
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /provenance verifier commit is not an ancestor of protected tooling/);
+    assert.match(
+      result.stderr,
+      /provenance verifier commit is not an ancestor of protected tooling/,
+    );
 
     const sourceDrift = spawnSync(
       "bash",
@@ -152,7 +191,10 @@ test("release verifier rejects provenance that is not an ancestor of protected t
       },
     );
     assert.notEqual(sourceDrift.status, 0);
-    assert.match(sourceDrift.stderr, /release source commit is not an ancestor of the provenance verifier/);
+    assert.match(
+      sourceDrift.stderr,
+      /release source commit is not an ancestor of the provenance verifier/,
+    );
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -172,10 +214,7 @@ test("Homebrew verifier keeps downloaded proof inputs outside the protected chec
   assert.notEqual(proofDownloadEnd, -1);
   assert.notEqual(toolsStepStart, -1);
   assert.notEqual(toolsStepEnd, -1);
-  const proofDownloadStep = workflow.slice(
-    proofDownloadStart,
-    proofDownloadEnd,
-  );
+  const proofDownloadStep = workflow.slice(proofDownloadStart, proofDownloadEnd);
   const toolsStep = workflow.slice(toolsStepStart, toolsStepEnd);
   const verifyStart = workflow.indexOf(
     "      - name: Verify public Homebrew install without credentials",
@@ -184,7 +223,10 @@ test("Homebrew verifier keeps downloaded proof inputs outside the protected chec
   assert.match(workflow, /WORKFLOW_SHA: \$\{\{ github\.workflow_sha \}\}/);
   assert.match(workflow, /RUN_SHA: \$\{\{ github\.sha \}\}/);
   assert.match(workflow, /\[\[ "\$WORKFLOW_SHA" == "\$RUN_SHA" \]\]/);
-  assert.match(workflow, /name: Check out protected Homebrew tooling[\s\S]*ref: \$\{\{ github\.workflow_sha \}\}/);
+  assert.match(
+    workflow,
+    /name: Check out protected Homebrew tooling[\s\S]*ref: \$\{\{ github\.workflow_sha \}\}/,
+  );
   assert.doesNotMatch(workflow, /ref: \$\{\{ inputs\.verifier_commit \}\}/);
   assert.ok((workflow.match(/fetch-depth: 0/g) ?? []).length >= 2);
   for (const ancestry of [
@@ -233,11 +275,17 @@ test("Homebrew verifier keeps downloaded proof inputs outside the protected chec
   assert.match(workflow, /"\$RUNNER_TEMP\/public-proofs"/);
   assert.doesNotMatch(workflow, /"\$PWD\/(?:release-assets|public-proofs)"/);
   assert.doesNotMatch(workflow, /mkdir -m 700 (?:release-assets|public-proofs)/);
-  assert.match(verifyStep, /unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_RUNTIME_TOKEN GH_TOKEN GITHUB_TOKEN/);
+  assert.match(
+    verifyStep,
+    /unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_RUNTIME_TOKEN GH_TOKEN GITHUB_TOKEN/,
+  );
   assert.match(verifyStep, /unset HOMEBREW_GITHUB_API_TOKEN HOMEBREW_TAP_GITHUB_TOKEN/);
   assert.equal(
-    (workflow.match(/unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_RUNTIME_TOKEN GH_TOKEN GITHUB_TOKEN/g) ?? [])
-      .length,
+    (
+      workflow.match(
+        /unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_RUNTIME_TOKEN GH_TOKEN GITHUB_TOKEN/g,
+      ) ?? []
+    ).length,
     4,
   );
   assert.match(
@@ -247,11 +295,11 @@ test("Homebrew verifier keeps downloaded proof inputs outside the protected chec
   const homebrewVerifier = read("scripts/verify-homebrew-release.sh");
   assert.match(homebrewVerifier, /workflow_commit=\$\(jq -er '\.head_sha/);
   assert.match(homebrewVerifier, /CRABBOX_PUBLISH_WORKFLOW_COMMIT="\$workflow_commit"/);
+  assert.match(homebrewVerifier, /merge-base --is-ancestor "\$workflow_commit" "\$tooling_commit"/);
   assert.match(
     homebrewVerifier,
-    /merge-base --is-ancestor "\$workflow_commit" "\$tooling_commit"/,
+    /external public postflight requires the protected Homebrew workflow/,
   );
-  assert.match(homebrewVerifier, /external public postflight requires the protected Homebrew workflow/);
   assert.equal(
     (homebrewVerifier.match(/freeze_public_release \\\n/g) ?? []).length,
     2,
@@ -319,11 +367,11 @@ printf '%s\\n' "\$body" >"\$output"
       delete env[name];
     }
     const script = path.join(repoRoot, "scripts/fetch-public-release-witness.sh");
-    const result = spawnSync(
-      "bash",
-      [script, "openclaw/crabbox", "355", "44", witness],
-      { cwd: repoRoot, env, encoding: "utf8" },
-    );
+    const result = spawnSync("bash", [script, "openclaw/crabbox", "355", "44", witness], {
+      cwd: repoRoot,
+      env,
+      encoding: "utf8",
+    });
     assert.equal(result.status, 0, result.stderr);
     const release = JSON.parse(fs.readFileSync(path.join(witness, "release.json")));
     assert.equal(release.id, 355);
@@ -377,7 +425,10 @@ test("external Homebrew postflight mode is bound to the protected workflow", () 
     },
   );
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /external public postflight requires the protected Homebrew workflow/);
+  assert.match(
+    result.stderr,
+    /external public postflight requires the protected Homebrew workflow/,
+  );
 });
 
 test("script CI fetches signed release tags for publication fixtures", () => {
@@ -401,6 +452,9 @@ test("GoReleaser is credential-free build-only with exact binary archives", () =
   assert.match(config, /files:\n\s+- none\*/);
   assert.match(config, /allow_different_binary_count: true/);
   assert.match(config, /crabbox-apple-vm-helper[\s\S]*- -tags=vmdembed/);
+  assert.match(config, /bash scripts\/build-runners\.sh/);
+  assert.match(config, /- -tags=runnerembed/);
+  assert.match(config, /runner\.BundleBuildID=\{\{ \.FullCommit \}\}/);
 
   const build = read("scripts/build-release-candidate.sh");
   assert.match(build, /env -i[\s\S]*goreleaser release --clean --skip=publish/);
@@ -586,6 +640,14 @@ test("provenance binds the explicit producer manifest, separate packager, notari
   const rawVmd = path.join(candidate, ".components", "crabbox-apple-vm-vmd");
   fs.writeFileSync(rawVmd, "unsigned-vmd\n", { mode: 0o755 });
   fs.chmodSync(rawVmd, 0o755);
+  writeRunnerComponents(candidate);
+  const runnerBundle = path.join(directory, "runner-bundle.bin");
+  execFileSync(process.execPath, [
+    path.join(repoRoot, "scripts/pack-release-runners.mjs"),
+    path.join(candidate, ".components"),
+    sourceCommit,
+    runnerBundle,
+  ]);
   const candidateManifestSha256 = execFileSync(
     process.execPath,
     [
@@ -650,6 +712,12 @@ test("provenance binds the explicit producer manifest, separate packager, notari
     "33333333-3333-4333-8333-333333333333",
     "--notary-vmd-arm64",
     "44444444-4444-4444-8444-444444444444",
+    "--runner-bundle",
+    runnerBundle,
+    "--notary-runner-amd64",
+    "55555555-5555-4555-8555-555555555555",
+    "--notary-runner-arm64",
+    "66666666-6666-4666-8666-666666666666",
     "--packager-go-version",
     "go1.26.4",
     "--packager-os",
@@ -686,7 +754,14 @@ test("provenance binds the explicit producer manifest, separate packager, notari
     const provenance = JSON.parse(fs.readFileSync(path.join(directory, "provenance.json")));
     assert.equal(provenance.producer.manifestSha256, candidateManifestSha256);
     assert.equal(provenance.producer.swift, "Apple Swift version 6.1 (swiftlang-test)");
-    assert.equal(provenance.producer.inputs.length, 7);
+    assert.equal(provenance.producer.inputs.length, 13);
+    assert.equal(provenance.schemaVersion, 2);
+    assert.equal(provenance.runnerBundle.members.length, 6);
+    assert.ok(
+      provenance.payloads.every(
+        (entry) => entry.binaries[0].runnerBundleSha256 === provenance.runnerBundle.sha256,
+      ),
+    );
     assert.equal(provenance.packager.go, "go1.26.4");
     assert.equal(
       provenance.payloads
@@ -694,6 +769,62 @@ test("provenance binds the explicit producer manifest, separate packager, notari
         .find((entry) => entry.name === "crabbox-apple-vm-helper").embeddedVmd.size,
       123456,
     );
+    for (const mutate of [
+      (value) => {
+        delete value.runnerBundle;
+      },
+      (value) => {
+        value.schemaVersion = 1;
+      },
+      (value) => {
+        value.runnerBundle.members.pop();
+      },
+      (value) => {
+        value.runnerBundle.members[0].notarized = false;
+      },
+      (value) => {
+        value.runnerBundle.members[1].os = "linux";
+      },
+      (value) => {
+        value.payloads[3].binaries[0].runnerBundleSha256 = "0".repeat(64);
+      },
+      (value) => {
+        value.producer.inputs[12].sha256 = "0".repeat(64);
+      },
+      (value) => {
+        value.runnerBundle.members[2].sha256 = "0".repeat(64);
+      },
+      (value) => {
+        value.runnerBundle.members[5].size += 1;
+      },
+    ]) {
+      const altered = structuredClone(provenance);
+      mutate(altered);
+      fs.writeFileSync(path.join(directory, "provenance.json"), JSON.stringify(altered));
+      assert.notEqual(spawnSync(process.execPath, [script, ...verifyArgs]).status, 0);
+    }
+    const substitutedRaw = path.join(directory, "substituted-runners");
+    fs.mkdirSync(substitutedRaw);
+    for (const name of fs.readdirSync(path.join(candidate, ".components"))) {
+      if (name.startsWith("crabbox-runner-"))
+        fs.copyFileSync(path.join(candidate, ".components", name), path.join(substitutedRaw, name));
+    }
+    fs.appendFileSync(path.join(substitutedRaw, "crabbox-runner-linux-amd64"), "substitution");
+    const substitutedBundle = path.join(directory, "substituted-bundle.bin");
+    execFileSync(process.execPath, [
+      path.join(repoRoot, "scripts/pack-release-runners.mjs"),
+      substitutedRaw,
+      sourceCommit,
+      substitutedBundle,
+    ]);
+    const substitutedArgs = [...writeArgs];
+    substitutedArgs[substitutedArgs.indexOf("--runner-bundle") + 1] = substitutedBundle;
+    const substituted = spawnSync(process.execPath, [script, ...substitutedArgs], {
+      encoding: "utf8",
+    });
+    assert.notEqual(substituted.status, 0);
+    assert.match(substituted.stderr, /final runner differs from pinned producer input/);
+    fs.writeFileSync(path.join(directory, "provenance.json"), JSON.stringify(provenance));
     fs.appendFileSync(path.join(directory, "crabbox_1.2.3_linux_arm64.tar.gz"), "drift");
     assert.notEqual(spawnSync(process.execPath, [script, ...verifyArgs]).status, 0);
   } finally {
@@ -732,10 +863,12 @@ test("candidate manifest rejects byte, mode, and pinned source drift before sign
   ];
   try {
     fs.mkdirSync(path.join(directory, ".components"), { mode: 0o700 });
-    for (const name of archiveNames) fs.writeFileSync(path.join(directory, name), `input:${name}\n`);
+    for (const name of archiveNames)
+      fs.writeFileSync(path.join(directory, name), `input:${name}\n`);
     const vmd = path.join(directory, ".components", "crabbox-apple-vm-vmd");
     fs.writeFileSync(vmd, "raw-vmd\n", { mode: 0o755 });
     fs.chmodSync(vmd, 0o755);
+    writeRunnerComponents(directory);
     execFileSync(process.execPath, [
       script,
       "candidate-write",
@@ -802,13 +935,26 @@ test("Go binary proof checks clean exact VCS and target build info", () => {
     const commit = git("rev-parse", "HEAD").toString().trim();
     execFileSync("go", ["build", "-trimpath", "-buildvcs=true", "-o", binary, "."], {
       cwd: root,
-      env: { ...process.env, CGO_ENABLED: "0", GOOS: process.platform === "darwin" ? "darwin" : "linux", GOARCH: process.arch === "arm64" ? "arm64" : "amd64" },
+      env: {
+        ...process.env,
+        CGO_ENABLED: "0",
+        GOOS: process.platform === "darwin" ? "darwin" : "linux",
+        GOARCH: process.arch === "arm64" ? "arm64" : "amd64",
+      },
     });
     const goVersion = execFileSync("go", ["env", "GOVERSION"], { encoding: "utf8" }).trim();
     const goos = process.platform === "darwin" ? "darwin" : "linux";
     const goarch = process.arch === "arm64" ? "arm64" : "amd64";
     assert.doesNotThrow(() =>
-      execFileSync(process.execPath, [verifier, binary, "example.test/release", commit, goos, goarch, goVersion]),
+      execFileSync(process.execPath, [
+        verifier,
+        binary,
+        "example.test/release",
+        commit,
+        goos,
+        goarch,
+        goVersion,
+      ]),
     );
     assert.notEqual(
       spawnSync(process.execPath, [
@@ -850,7 +996,10 @@ test("signing and verification enforce Foundation identity, runtime, timestamp, 
   assert.match(packager, /ALLOWED_SIGNERS="\$ROOT\/\.github\/release-allowed-signers"/);
   assert.match(packager, /RELEASE_RECORD="\$ROOT\/release\/records\/\$TAG\.json"/);
   assert.match(packager, /remote_main=.*ls-remote origin/);
-  assert.match(packager, /protected remote main must exactly equal the verifier commit before signing/);
+  assert.match(
+    packager,
+    /protected remote main must exactly equal the verifier commit before signing/,
+  );
   assert.match(packager, /ALLOWED_SIGNERS RELEASE_RECORD/);
 });
 
@@ -986,7 +1135,10 @@ test("credential-free producer captures tool output before parsing under pipefai
   assert.match(producer, /producer_swift_version_output=\$\(swift --version\)/);
   assert.match(producer, /producer_xcode_version_output=\$\(xcodebuild -version\)/);
   assert.match(producer, /unsigned_vmd_build=\$\(vtool -show-build/);
-  assert.doesNotMatch(producer, /(?:goreleaser --version|swift --version|xcodebuild -version|vtool -show-build[^\n]*) \|/);
+  assert.doesNotMatch(
+    producer,
+    /(?:goreleaser --version|swift --version|xcodebuild -version|vtool -show-build[^\n]*) \|/,
+  );
 });
 
 test("credential-bearing packager is pipefail-safe and removes read-only Go toolchains", () => {
@@ -1000,9 +1152,9 @@ test("credential-bearing packager is pipefail-safe and removes read-only Go tool
 
 test("draft creation performs static-only verification and never deletes or replaces partial records", () => {
   const script = read("scripts/create-release-draft.sh");
-  const verifyIndex = script.indexOf('env -i');
+  const verifyIndex = script.indexOf("env -i");
   const lookupIndex = script.indexOf('gh release view "$TAG"');
-  const createIndex = script.indexOf('gh release create');
+  const createIndex = script.indexOf("gh release create");
   assert.ok(verifyIndex >= 0 && verifyIndex < lookupIndex && lookupIndex < createIndex);
   assert.match(script, /CRABBOX_VERIFY_MODE=static/);
   assert.doesNotMatch(script, /CRABBOX_VERIFY_MODE=execute/);

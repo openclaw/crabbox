@@ -11,6 +11,8 @@
 
 ### Fixed
 
+- Aligned runner bundle build identities and result-count limits across producers and consumers, and preserved in-workspace Windows report links with drive-less rooted targets.
+- Unified SSH archive copy and JUnit collection in a versioned runner with shared confinement, bounded binary framing, validated publication, and preserved transaction recovery; bundled all target runners so official installations need no remote compiler or download.
 - Fixed portable Node coordinator control heartbeats deadlocking subsequent lifecycle operations, releases, and graceful shutdown.
 - Made direct Daytona sandboxes private, preserved dependencies across syncs, enforced native TTL and idle heartbeats, reported authoritative readiness, and verified allocation rollback and credential-safe redirects.
 - Fixed brokered Windows bootstrap on images with built-in OpenSSH by sharing the CLI's installed/system/PATH command resolution; centralized common bootstrap fragments, pinned downloads, and portable OS metadata across both runtimes.

@@ -114,7 +114,8 @@ actual_unsigned=$(find "$INPUT_DIR" -mindepth 1 -maxdepth 1 -type f -exec basena
 }
 component_inventory=$(find "$INPUT_DIR/.components" -mindepth 1 -maxdepth 1 \
   -type f -exec basename {} \; | LC_ALL=C sort)
-[[ "$component_inventory" == $'candidate-manifest.json\ncrabbox-apple-vm-vmd' ]] || {
+expected_components=$({ printf '%s\n' candidate-manifest.json crabbox-apple-vm-vmd; crabbox_release_runner_names; } | LC_ALL=C sort)
+[[ "$component_inventory" == "$expected_components" ]] || {
   echo "private release-component inventory mismatch" >&2
   exit 1
 }
@@ -125,6 +126,9 @@ cp -p "$INPUT_DIR/.components/candidate-manifest.json" \
   "$CANDIDATE/.components/candidate-manifest.json"
 cp -p "$INPUT_DIR/.components/crabbox-apple-vm-vmd" \
   "$CANDIDATE/.components/crabbox-apple-vm-vmd"
+while IFS= read -r name; do
+  cp -p "$INPUT_DIR/.components/$name" "$CANDIDATE/.components/$name"
+done < <(crabbox_release_runner_names)
 candidate_manifest_sha=$(node "$ROOT/scripts/release-provenance.mjs" candidate-verify \
   --dir "$CANDIDATE" \
   --tag "$TAG" \
@@ -203,14 +207,19 @@ git -C "$SOURCE" check-ignore -q internal/applevmhelper/embedded/crabbox-apple-v
   echo "signed embedded VMD path must remain ignored for clean VCS provenance" >&2
   exit 1
 }
-
-for name in \
-  "crabbox_${version}_linux_amd64.tar.gz" \
-  "crabbox_${version}_linux_arm64.tar.gz" \
-  "crabbox_${version}_windows_amd64.zip" \
-  "crabbox_${version}_windows_arm64.zip"; do
-  cp -p "$CANDIDATE/$name" "$PAYLOAD/$name"
-done
+git -C "$SOURCE" grep -q 'ReleaseRunnerTrustPolicyVersion = 1' \
+  "$TAG_COMMIT" -- internal/runner/bundle_format.go || {
+  echo "source tag does not implement runner release trust policy version 1" >&2
+  exit 1
+}
+git -C "$SOURCE" cat-file -e "$TAG_COMMIT:internal/runner/bundle_embed.go" || {
+  echo "source tag lacks the explicit runnerembed build mode" >&2
+  exit 1
+}
+git -C "$SOURCE" check-ignore -q internal/runner/embedded/runners.bin || {
+  echo "embedded runner path must remain ignored for clean VCS provenance" >&2
+  exit 1
+}
 
 extract_exact_tar() {
   local archive=$1 destination=$2 expected=$3 listing
@@ -257,6 +266,28 @@ sign_and_capture_notary_id() {
   printf '%s\n' "$id"
 }
 
+# Sign only byte-verified producer inputs. Every operator-platform CLI embeds
+# both Darwin runners, so no unsigned CLI archive can pass through unchanged.
+official_runners="$WORK/runners"
+mkdir -m 700 "$official_runners"
+for runner_os in darwin linux windows; do
+  for runner_arch in amd64 arm64; do
+    runner_name="crabbox-runner-${runner_os}-${runner_arch}"
+    [[ "$runner_os" != windows ]] || runner_name="${runner_name}.exe"
+    cp -p "$CANDIDATE/.components/$runner_name" "$official_runners/$runner_name"
+    node "$ROOT/scripts/verify-go-release-binary.mjs" \
+      "$official_runners/$runner_name" github.com/openclaw/crabbox/cmd/crabbox-runner \
+      "$TAG_COMMIT" "$runner_os" "$runner_arch" "$CRABBOX_RELEASE_GO_VERSION"
+  done
+done
+notary_runner_amd64=$(sign_and_capture_notary_id \
+  "$CRABBOX_RELEASE_RUNNER_IDENTIFIER" x86_64 "$official_runners/crabbox-runner-darwin-amd64")
+notary_runner_arm64=$(sign_and_capture_notary_id \
+  "$CRABBOX_RELEASE_RUNNER_IDENTIFIER" arm64 "$official_runners/crabbox-runner-darwin-arm64")
+mkdir -p "$SOURCE/internal/runner/embedded"
+runner_bundle="$SOURCE/internal/runner/embedded/runners.bin"
+node "$ROOT/scripts/pack-release-runners.mjs" "$official_runners" "$TAG_COMMIT" "$runner_bundle"
+
 official_vmd="$WORK/crabbox-apple-vm-vmd"
 cp "$unsigned_vmd" "$official_vmd"
 notary_vmd_arm64=$(sign_and_capture_notary_id \
@@ -278,6 +309,30 @@ cp "$official_vmd" \
 # credentials. This produces, but never executes, the official helper while
 # the signing keychain/notary profile is available.
 clean_build_path="${go_bin%/*}:/usr/bin:/bin:/usr/sbin:/sbin"
+for runner_os in darwin linux windows; do
+  for runner_arch in amd64 arm64; do
+    cli_stage="$WORK/${runner_os}-${runner_arch}"
+    mkdir -p "$cli_stage"
+    cli_name=crabbox
+    [[ "$runner_os" != windows ]] || cli_name=crabbox.exe
+    (
+      cd "$SOURCE"
+      env -i \
+        CGO_ENABLED=0 GOARCH="$runner_arch" GOOS="$runner_os" \
+        GOCACHE="$WORK/gocache" GOMODCACHE="$WORK/gomodcache" \
+        GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org \
+        GOTOOLCHAIN="$CRABBOX_RELEASE_GO_VERSION" GOWORK=off \
+        HOME="$BUILD_HOME" PATH="$clean_build_path" TMPDIR="$BUILD_TMP" \
+        "$go_bin" build -p 1 -buildvcs=true -trimpath -tags=runnerembed \
+          -ldflags="-s -w -X github.com/openclaw/crabbox/internal/cli.version=$version -X github.com/openclaw/crabbox/internal/runner.BundleBuildID=$TAG_COMMIT" \
+          -o "$cli_stage/$cli_name.official" ./cmd/crabbox
+    )
+    mv "$cli_stage/$cli_name.official" "$cli_stage/$cli_name"
+    node "$ROOT/scripts/verify-go-release-binary.mjs" \
+      "$cli_stage/$cli_name" github.com/openclaw/crabbox/cmd/crabbox \
+      "$TAG_COMMIT" "$runner_os" "$runner_arch" "$CRABBOX_RELEASE_GO_VERSION"
+  done
+done
 (
   cd "$SOURCE"
   env -i \
@@ -319,6 +374,12 @@ COPYFILE_DISABLE=1 tar -czf "$PAYLOAD/crabbox_${version}_darwin_amd64.tar.gz" \
   -C "$amd64_stage" crabbox
 COPYFILE_DISABLE=1 tar -czf "$PAYLOAD/crabbox_${version}_darwin_arm64.tar.gz" \
   -C "$arm64_stage" crabbox crabbox-apple-vm-helper
+for runner_arch in amd64 arm64; do
+  COPYFILE_DISABLE=1 tar -czf "$PAYLOAD/crabbox_${version}_linux_${runner_arch}.tar.gz" \
+    -C "$WORK/linux-${runner_arch}" crabbox
+  zip -q -j "$PAYLOAD/crabbox_${version}_windows_${runner_arch}.zip" \
+    "$WORK/windows-${runner_arch}/crabbox.exe"
+done
 
 notes="$WORK/release-notes.md"
 tagged_changelog="$WORK/tagged-changelog.md"
@@ -342,6 +403,9 @@ node "$ROOT/scripts/release-provenance.mjs" write \
   --notary-cli-arm64 "$notary_cli_arm64" \
   --notary-helper-arm64 "$notary_helper_arm64" \
   --notary-vmd-arm64 "$notary_vmd_arm64" \
+  --runner-bundle "$runner_bundle" \
+  --notary-runner-amd64 "$notary_runner_amd64" \
+  --notary-runner-arm64 "$notary_runner_arm64" \
   --packager-go-version "$packager_go_version" \
   --packager-os "$(sw_vers -productVersion)" \
   --packager-arch "$(uname -m)" \

@@ -95,7 +95,7 @@ scripts/build-release-candidate.sh \
 The producer atomically writes a private `.components/candidate-manifest.json`
 beside the unsigned inputs. It binds the signed tag identity, protected verifier
 commit and release configuration, exact SHA-256, size, and mode of all six
-archives and the raw VMD, plus the actual Go, GoReleaser, Swift, Xcode, macOS,
+archives, the raw VMD, and six raw cross-platform runner binaries, plus the actual Go, GoReleaser, Swift, Xcode, macOS,
 and architecture facts. Treat the printed SHA-256 as a separate handoff value;
 do not re-read or infer it from a replaceable candidate directory.
 
@@ -117,7 +117,9 @@ Developer ID Application: OpenClaw Foundation (FWJYW4S8P8)
 
 The signed set includes `crabbox` for `darwin/arm64` and `darwin/amd64`,
 `crabbox-apple-vm-helper` for `darwin/arm64`, and its embedded
-`crabbox-apple-vm-vmd` payload. The VMD uses identifier
+`crabbox-apple-vm-vmd` payload, plus the `darwin/arm64` and `darwin/amd64`
+remote runners. Runners use identifier `org.openclaw.crabbox.runner`.
+The VMD uses identifier
 `org.openclaw.crabbox.apple-vm-vmd` and the exact tracked virtualization/network
 entitlements. Each executable must have Team ID `FWJYW4S8P8`, the expected
 designated requirement and architecture, hardened runtime, and a secure
@@ -143,6 +145,19 @@ decision with an ad-hoc signature. Official packaging compiles the helper with
 build and is not publishable. Protected native verification exports the exact
 embedded bytes, matches their provenance digest, and independently checks their
 signature, entitlements, hardened runtime, timestamp, and online notarization.
+
+Every CLI embeds the same six-platform runner bundle. Sign and notarize the two
+Darwin runner inputs first, then use protected byte-only tooling to construct
+the bundle and rebuild all six CLIs with `runnerembed`. Linux and Windows CLI
+archives cannot pass through unchanged: they also carry the Darwin runners.
+Pin the helper BuildID and CLI BundleBuildID to the exact source commit. Build
+official helpers directly from that clean commit with the pinned release Go
+toolchain; the development embedded-source compiler is not an official producer.
+Static verification extracts the bundle without executing candidate code,
+checks every target and compressed/raw digest and size, and independently checks
+both Darwin signatures and online notarization. Installation preserves those
+exact bytes; it never re-signs them. Public asset and archive-member inventories
+remain unchanged.
 
 The signing wrapper never runs candidate code while its managed keychain or
 notary profile is available. It signs the token-free producer outputs, embeds
@@ -173,13 +188,19 @@ unlisted executables are allowed.
 
 `provenance.json` binds the repository, version, signed tag-object ID, peeled
 source commit, protected verifier commit, exact candidate-manifest digest and
-seven producer inputs, separate producer and packager toolchain facts, macOS
+thirteen producer inputs, separate producer and packager toolchain facts, macOS
 identifiers, Team ID and authority, native architectures, notarization
 submissions, archive members, and the name, size, and SHA-256 of each payload it
 describes. Its own
 name, size, digest, upload timestamp, and unique GitHub asset ID are captured in
 the immutable draft proof after upload. `checksums.txt` and provenance must not
 form a self-referential digest cycle.
+
+Candidate and final provenance schema 2 require the runner bundle, its exact six
+members, and six distinct notarization submission IDs. Every CLI record names
+the same bundle digest. Missing runner metadata is an error, not a compatibility
+fallback; older releases remain bound to their recorded historical verifier
+policy rather than being treated as schema 2 releases.
 
 The GitHub record is exactly one draft selected by numeric release ID, with:
 

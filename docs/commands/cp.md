@@ -62,9 +62,13 @@ the full transfer and removes it after the child exits.
 The rsync path requires rsync on both sides. The local client must be rsync
 3.4.3 or newer; Crabbox rejects older clients for data transfer because known
 sender/receiver vulnerabilities cross the lease trust boundary. The archive
-path instead requires standard POSIX tools including `bash`, `tar`, `gzip`,
-`find`, `mktemp`, `awk`, `ps`, `ln`, and `sync` on the native Linux or macOS POSIX
-lease. Local Go code creates uploads and validates downloads. Download entries must remain under one
+path installs a versioned Crabbox runner on the native Linux or macOS lease.
+Official CLIs embed all supported runner binaries; the lease needs neither Go
+nor internet access. Development builds compile their embedded runner source
+with Go 1.26 or later on the operator. Installation needs `sh`, `mktemp`, and
+`sha256sum` or `shasum`, verifies the exact binary digest, and preserves separate
+versions in the user's private cache. The same Go implementation creates and
+validates archives at both ends. Download entries must remain under one
 source root and may contain only regular files and directories; Crabbox rejects
 links (including hard links), special files, duplicate or escaping paths, archives over 1,000,000
 entries, individual files over 64 GiB, or streams over 256 GiB. Tar header
@@ -72,6 +76,12 @@ checksums and the gzip stream checksum must validate before publication.
 
 Archive uploads reject host-side symlinks by default and follow them with `-L`,
 so no preserved link graph can escape the transferred tree.
+Remote paths may be absolute, relative to the SSH user's working directory, or
+under `~/`. The selected destination itself cannot be a symlink; existing parent
+directory aliases are supported. Unlike workspace sync, `cp` operates on the
+explicitly requested filesystem path and is not restricted to the lease workdir.
+The archive transport rejects paths that cannot be represented in UTF-8 metadata
+rather than silently changing the requested filename.
 Uploads extract into a private remote staging directory. Downloads extract into
 a private directory beside the destination. Both replace the selected target
 only after the complete archive validates. An interruption before publication
@@ -86,6 +96,13 @@ deleted automatically and produces an actionable error. This differs
 from rsync's incremental merge: archive fallback replaces an existing selected
 file or directory subtree on success instead of retaining unrelated entries in
 that subtree.
+
+Current clients read both earlier local and remote transaction formats. New
+records use the existing versioned local format; an older remote-shell client
+refuses an interrupted new transaction rather than guessing its owner. Use a
+current client to recover it. Both the complete archive and final protocol frame
+must validate before publication; file contents cannot impersonate protocol
+markers.
 
 Downloads preserve regular files, directories, and timestamps, but do not
 materialize lease-provided symlinks or special files and do not apply remote

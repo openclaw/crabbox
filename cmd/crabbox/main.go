@@ -10,6 +10,7 @@ import (
 	"github.com/openclaw/crabbox/internal/cli"
 	_ "github.com/openclaw/crabbox/internal/providers/all"
 	"github.com/openclaw/crabbox/internal/providers/vercelsandbox"
+	"github.com/openclaw/crabbox/internal/runner"
 )
 
 func main() {
@@ -21,7 +22,9 @@ func main() {
 	}()
 	args := os.Args[1:]
 	var err error
-	if len(args) > 0 && args[0] == "__vercel-sandbox-bridge" {
+	if len(args) == 1 && args[0] == "__runner-verify" {
+		err = runner.VerifyEmbeddedRuntime(ctx, os.Stdout)
+	} else if len(args) > 0 && args[0] == "__vercel-sandbox-bridge" {
 		err = vercelsandbox.RunBridgeCLI(ctx, os.Stdin, os.Stdout, os.Stderr)
 	} else {
 		err = cli.Run(ctx, args)

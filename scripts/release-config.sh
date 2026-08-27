@@ -11,6 +11,7 @@ CRABBOX_RELEASE_AUTHORITY="Developer ID Application: OpenClaw Foundation (${CRAB
 CRABBOX_RELEASE_CLI_IDENTIFIER=org.openclaw.crabbox
 CRABBOX_RELEASE_HELPER_IDENTIFIER=org.openclaw.crabbox.apple-vm-helper
 CRABBOX_RELEASE_VMD_IDENTIFIER=org.openclaw.crabbox.apple-vm-vmd
+CRABBOX_RELEASE_RUNNER_IDENTIFIER=org.openclaw.crabbox.runner
 readonly \
   CRABBOX_RELEASE_REPOSITORY \
   CRABBOX_RELEASE_DEFAULT_BRANCH \
@@ -20,7 +21,8 @@ readonly \
   CRABBOX_RELEASE_AUTHORITY \
   CRABBOX_RELEASE_CLI_IDENTIFIER \
   CRABBOX_RELEASE_HELPER_IDENTIFIER \
-  CRABBOX_RELEASE_VMD_IDENTIFIER
+  CRABBOX_RELEASE_VMD_IDENTIFIER \
+  CRABBOX_RELEASE_RUNNER_IDENTIFIER
 
 crabbox_release_normalize_version() {
   local version=${1:-}
@@ -49,11 +51,23 @@ crabbox_release_asset_names() {
   printf '%s\n' checksums.txt provenance.json
 }
 
+crabbox_release_runner_names() {
+  local runner_os runner_arch runner_name
+  for runner_os in darwin linux windows; do
+    for runner_arch in amd64 arm64; do
+      runner_name="crabbox-runner-${runner_os}-${runner_arch}"
+      [[ "$runner_os" != windows ]] || runner_name="${runner_name}.exe"
+      printf '%s\n' "$runner_name"
+    done
+  done
+}
+
 crabbox_release_designated_requirement() {
   local identifier=${1:-}
   case "$identifier" in
     "$CRABBOX_RELEASE_CLI_IDENTIFIER" | \
       "$CRABBOX_RELEASE_HELPER_IDENTIFIER" | \
+      "$CRABBOX_RELEASE_RUNNER_IDENTIFIER" | \
       "$CRABBOX_RELEASE_VMD_IDENTIFIER") ;;
     *)
       echo "unsupported Crabbox release identifier: ${identifier:-<empty>}" >&2
@@ -82,6 +96,8 @@ crabbox_release_assert_identifier_arch() {
     "$CRABBOX_RELEASE_CLI_IDENTIFIER:arm64" | \
       "$CRABBOX_RELEASE_CLI_IDENTIFIER:x86_64" | \
       "$CRABBOX_RELEASE_HELPER_IDENTIFIER:arm64" | \
+      "$CRABBOX_RELEASE_RUNNER_IDENTIFIER:arm64" | \
+      "$CRABBOX_RELEASE_RUNNER_IDENTIFIER:x86_64" | \
       "$CRABBOX_RELEASE_VMD_IDENTIFIER:arm64") ;;
     *)
       echo "unsupported Crabbox release identifier/architecture: ${identifier:-<empty>}/${arch}" >&2

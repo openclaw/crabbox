@@ -40,7 +40,10 @@ test("protected extractor finds one exact embedded arm64 Mach-O without executin
     const helper = path.join(directory, "helper");
     const provenance = path.join(directory, "provenance.json");
     const output = path.join(directory, "vmd");
-    fs.writeFileSync(helper, Buffer.concat([Buffer.from("helper-prefix"), vmd, Buffer.from("suffix")]));
+    fs.writeFileSync(
+      helper,
+      Buffer.concat([Buffer.from("helper-prefix"), vmd, Buffer.from("suffix")]),
+    );
     writeProvenance(provenance, vmd);
 
     const result = spawnSync(
@@ -99,7 +102,10 @@ test("workflow freezes static proof before dependent clean candidate execution",
   assert.match(executeJob, /Download immutable opaque input/);
   assert.match(executeJob, /exec env -i[\s\S]*CRABBOX_VERIFY_MODE=execute/);
   assert.match(executeJob, /permissions:\n\s+contents: read/);
-  assert.doesNotMatch(executeJob, /actions\/upload-artifact@|verified-assets\.json|GH_TOKEN:|contents: write/);
+  assert.doesNotMatch(
+    executeJob,
+    /actions\/upload-artifact@|verified-assets\.json|GH_TOKEN:|contents: write/,
+  );
 });
 
 test("release-capable token is isolated from checkout, verification, and candidate jobs", () => {
@@ -108,7 +114,12 @@ test("release-capable token is isolated from checkout, verification, and candida
   const downloadStart = workflow.indexOf("  download-draft:");
   const verifyStart = workflow.indexOf("  verify-native:");
   const executeStart = workflow.indexOf("  execute-native:");
-  assert.ok(guardStart >= 0 && downloadStart > guardStart && verifyStart > downloadStart && executeStart > verifyStart);
+  assert.ok(
+    guardStart >= 0 &&
+      downloadStart > guardStart &&
+      verifyStart > downloadStart &&
+      executeStart > verifyStart,
+  );
   const guardJob = workflow.slice(guardStart, downloadStart);
   const downloadJob = workflow.slice(downloadStart, verifyStart);
   const verifierJobs = workflow.slice(verifyStart);
@@ -127,7 +138,20 @@ test("static verifier extracts VMD bytes before its candidate execution boundary
   const verifier = read("scripts/verify-release.sh");
   const extractor = verifier.indexOf("scripts/extract-release-vmd.mjs");
   const staticExit = verifier.indexOf('if [[ "$VERIFY_MODE" == static ]]');
-  const helperExecution = verifier.indexOf("crabbox-apple-vm-helper\" vmd-info");
+  const helperExecution = verifier.indexOf('crabbox-apple-vm-helper" vmd-info');
   assert.ok(extractor >= 0 && staticExit > extractor && helperExecution > staticExit);
   assert.doesNotMatch(verifier, /vmd-export/);
+});
+
+test("native runner execution follows static verification without a Go toolchain on PATH", () => {
+  const verifier = read("scripts/verify-release.sh");
+  const staticExit = verifier.indexOf('if [[ "$VERIFY_MODE" == static ]]');
+  const runnerExecution = verifier.indexOf('"$candidate" __runner-verify');
+  assert.ok(runnerExecution > staticExit);
+  assert.match(
+    verifier,
+    /runner_probe=\$\(env -i[\s\S]*PATH=\/usr\/bin:\/bin:\/usr\/sbin:\/sbin[\s\S]*"\$candidate" __runner-verify/,
+  );
+  assert.match(verifier, /actual\.sha256 !== member\.sha256/);
+  assert.match(verifier, /actual\.identity\?\.buildId !== proof\.source\.commit/);
 });

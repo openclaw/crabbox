@@ -171,6 +171,14 @@ unsigned_vmd_build=$(vtool -show-build "$unsigned_vmd")
 }
 mkdir -m 700 "$stage/.components"
 cp -p "$unsigned_vmd" "$stage/.components/crabbox-apple-vm-vmd"
+while IFS= read -r name; do
+  raw_runner="$SOURCE/internal/runner/embedded/raw/$name"
+  [[ -f "$raw_runner" && ! -L "$raw_runner" && -x "$raw_runner" ]] || {
+    echo "credential-free build did not produce raw runner $name" >&2
+    exit 1
+  }
+  cp -p "$raw_runner" "$stage/.components/$name"
+done < <(crabbox_release_runner_names)
 
 manifest_sha=$(node "$ROOT/scripts/release-provenance.mjs" candidate-write \
   --dir "$stage" \

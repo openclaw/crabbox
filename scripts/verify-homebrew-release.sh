@@ -12,8 +12,10 @@ PROTECTED_HOMEBREW_TOOLING=(
   .goreleaser.yaml
   scripts/extract-release-notes.sh
   scripts/extract-release-vmd.mjs
+  scripts/extract-release-runners.mjs
   scripts/release-config.sh
   scripts/release-provenance.mjs
+  scripts/runner-release-bundle.mjs
   scripts/render-homebrew-formula.mjs
   scripts/validate-release-publication.mjs
   scripts/verify-go-release-binary.mjs

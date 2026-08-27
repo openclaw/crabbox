@@ -105,6 +105,9 @@ jobs:
       - name: Test pond mesh cancellation
         run: go test ./internal/cli/ -run PondMeshCancel -count=1 -v
 
+      - name: Test native runner protocol and filesystem
+        run: go test ./internal/runner/... -count=1 -timeout=5m
+
       - name: Test Windows SSH and rsync transport selection
         run: go test ./internal/cli/ -run '^(TestWSL2TransportStagesWithoutWindowsAutomount|TestWorkspaceOwnerWSL2InputStreamPreparationIsBoundedAndReplayable|TestWindowsWSLNativeToolProbeUsesDirectCommandOutput|TestWindowsWSLNativeToolPathsRejectsWindowsShims|TestDirectSSHExecutableSelection|TestSSHCommandContextUsesNativeWindowsOpenSSHEvenWhenPATHSelectsMSYS2|TestResolveWindowsNativeRsyncPairUsesExactSibling|TestResolveWindowsNativeRsyncPairFailsClosedWithoutSibling|TestBindWindowsNativeRsyncSSHPreservesOwnedArguments|TestWindowsNativeRsyncCommandUsesSiblingPairAndEnvironment|TestResolvedSSHCopyCommandUsesNativeWindowsSiblingPair|TestResolvedSSHCopyCommandFailsClosedWithoutNativeWindowsSibling)$' -count=1 -v
 

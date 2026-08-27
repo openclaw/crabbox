@@ -12,6 +12,8 @@ release:
 
 before:
   hooks:
+    # All target helpers are bundled into each CLI; targets need no compiler.
+    - bash scripts/build-runners.sh
     # Build the Swift VM daemon so the helper build below can embed it.
     - sh scripts/build-vmd.sh
 
@@ -23,9 +25,11 @@ builds:
       - CGO_ENABLED=0
     flags:
       - -trimpath
+      - -tags=runnerembed
     mod_timestamp: "{{ .CommitTimestamp }}"
     ldflags:
       - -s -w -X github.com/openclaw/crabbox/internal/cli.version={{ .Version }}
+        -X github.com/openclaw/crabbox/internal/runner.BundleBuildID={{ .FullCommit }}
     targets:
       - darwin_amd64
       - darwin_arm64

@@ -156,6 +156,17 @@ for platform in darwin linux windows; do
     node "$ROOT/scripts/verify-go-release-binary.mjs" \
       "$destination/$binary" github.com/openclaw/crabbox/cmd/crabbox \
       "$TAG_COMMIT" "$platform" "$arch" "$CRABBOX_RELEASE_GO_VERSION"
+    node "$ROOT/scripts/extract-release-runners.mjs" \
+      "$destination/$binary" "$ASSET_DIR/provenance.json" "$destination/runners"
+    for runner_os in darwin linux windows; do
+      for runner_arch in amd64 arm64; do
+        runner_name="crabbox-runner-${runner_os}-${runner_arch}"
+        [[ "$runner_os" != windows ]] || runner_name="${runner_name}.exe"
+        node "$ROOT/scripts/verify-go-release-binary.mjs" \
+          "$destination/runners/$runner_name" github.com/openclaw/crabbox/cmd/crabbox-runner \
+          "$TAG_COMMIT" "$runner_os" "$runner_arch" "$CRABBOX_RELEASE_GO_VERSION"
+      done
+    done
     if [[ "$platform" == darwin && "$arch" == arm64 ]]; then
       node "$ROOT/scripts/verify-go-release-binary.mjs" \
         "$destination/crabbox-apple-vm-helper" \
@@ -171,6 +182,13 @@ done
   "$CRABBOX_RELEASE_CLI_IDENTIFIER" arm64 "$WORK/darwin-arm64/crabbox"
 "$ROOT/scripts/verify-macos-binary.sh" \
   "$CRABBOX_RELEASE_HELPER_IDENTIFIER" arm64 "$WORK/darwin-arm64/crabbox-apple-vm-helper"
+
+# Extraction bound every CLI to the same exact bundle and raw member digests.
+# Each distinct Darwin payload therefore needs one online signature check.
+"$ROOT/scripts/verify-macos-binary.sh" \
+  "$CRABBOX_RELEASE_RUNNER_IDENTIFIER" x86_64 "$WORK/darwin-amd64/runners/crabbox-runner-darwin-amd64"
+"$ROOT/scripts/verify-macos-binary.sh" \
+  "$CRABBOX_RELEASE_RUNNER_IDENTIFIER" arm64 "$WORK/darwin-amd64/runners/crabbox-runner-darwin-arm64"
 
 embedded_vmd="$WORK/crabbox-apple-vm-vmd"
 node "$ROOT/scripts/extract-release-vmd.mjs" \
@@ -224,6 +242,24 @@ actual_version=$(env -i \
   "$candidate" --version)
 [[ "$actual_version" == "$version" ]] || {
   echo "native candidate version mismatch: $actual_version" >&2
+  exit 1
+}
+
+runner_probe=$(env -i \
+  HOME="$execution_home" PATH=/usr/bin:/bin:/usr/sbin:/sbin TMPDIR="$WORK" \
+  "$candidate" __runner-verify)
+node -e '
+  const fs = require("node:fs");
+  const proof = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  const actual = JSON.parse(process.argv[2]);
+  const arch = process.argv[3] === "x86_64" ? "amd64" : "arm64";
+  const member = proof.runnerBundle.members.find((entry) => entry.os === "darwin" && entry.arch === arch);
+  if (!member || actual.verified !== true || actual.trustPolicyVersion !== 1 ||
+      actual.sha256 !== member.sha256 || actual.identity?.buildId !== proof.source.commit ||
+      actual.identity?.protocol !== proof.runnerBundle.protocol ||
+      actual.identity?.os !== "darwin" || actual.identity?.arch !== arch) process.exit(1);
+' "$ASSET_DIR/provenance.json" "$runner_probe" "$EXEC_ARCH" || {
+  echo "embedded runner handshake or fixture verification mismatch" >&2
   exit 1
 }
 

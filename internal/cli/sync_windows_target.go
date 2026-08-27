@@ -456,24 +456,6 @@ New-Item -ItemType Directory -Force -Path $workdir | Out-Null
 `)
 }
 
-func windowsRemoteReadResultFiles(workdir string, paths []string) string {
-	var b bytes.Buffer
-	b.WriteString(`$ErrorActionPreference = "Stop"` + "\n")
-	b.WriteString(`Set-Location -LiteralPath ` + psQuote(workdir) + "\n")
-	b.WriteString(`Add-Type -Name N -Namespace Cbx -MemberDefinition '[DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)]public static extern uint GetFinalPathNameByHandle(Microsoft.Win32.SafeHandles.SafeFileHandle h,System.Text.StringBuilder p,uint n,uint f);[DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)]public static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFile(string p,uint a,System.IO.FileShare s,System.IntPtr z,System.IO.FileMode m,uint f,System.IntPtr t);'
-function FinalPath($h){$b=New-Object Text.StringBuilder 32768;if(-not[Cbx.N]::GetFinalPathNameByHandle($h,$b,$b.Capacity,0)){throw 'final path failed'};$p=$b.ToString();if($p.StartsWith('\\?\UNC\')){return '\\'+$p.Substring(8)};if($p.StartsWith('\\?\')){return $p.Substring(4)};return $p}
-$rh=[Cbx.N]::CreateFile($pwd.Path,0,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete),[IntPtr]::Zero,[IO.FileMode]::Open,0x02000000,[IntPtr]::Zero);if($rh.IsInvalid){throw 'workdir open failed'};try{$r=FinalPath $rh}finally{$rh.Dispose()};$q=$r.TrimEnd('\')+'\'
-@(`)
-	for i, path := range paths {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		b.WriteString(psQuote(path))
-	}
-	b.WriteString(`)|ForEach-Object{$f=$_;$s=$null;try{if([IO.Path]::IsPathRooted($f)){$o=$f}else{$o=Join-Path $pwd.Path $f};$s=[IO.File]::Open($o,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete));$p=FinalPath $s.SafeFileHandle;if($p.StartsWith($q,[StringComparison]::Ordinal)){$z=New-Object IO.StreamReader($s,[Text.Encoding]::UTF8,$true,4096,$true);try{$v=$z.ReadToEnd()}finally{$z.Dispose()};Write-Output "` + resultFileMarker + `${f}";Write-Output $v}}catch{}finally{if($s){$s.Dispose()}}}`)
-	return powershellCommand(b.String())
-}
-
 func windowsRemoteTouchResultsMarker(workdir string) string {
 	return powershellCommand(`$ErrorActionPreference = "Stop"
 Set-Location -LiteralPath ` + psQuote(workdir) + `
@@ -482,76 +464,6 @@ $markerDir = Split-Path -Parent $marker
 if ($markerDir) { New-Item -ItemType Directory -Force -Path $markerDir | Out-Null }
 Set-Content -LiteralPath $marker -Value ""
 `)
-}
-
-func windowsRemoteFindJUnitResultFiles(workdir, marker string) string {
-	var b bytes.Buffer
-	b.WriteString(`$ErrorActionPreference = "Stop"` + "\n")
-	b.WriteString(`Set-Location -LiteralPath ` + psQuote(workdir) + "\n")
-	b.WriteString(`$ErrorActionPreference = "SilentlyContinue"` + "\n")
-	b.WriteString(fmt.Sprintf("$maxBytes = %d\n", autoJUnitMaxBytes))
-	b.WriteString(fmt.Sprintf("$maxTotalBytes = %d\n", autoJUnitMaxTotalBytes))
-	b.WriteString(fmt.Sprintf("$sniffBytes = %d\n", autoJUnitSniffBytes))
-	b.WriteString(fmt.Sprintf("$failureSniffBytes = %d\n", autoJUnitFailureSniffBytes))
-	b.WriteString(fmt.Sprintf("$maxFiles = %d\n", autoJUnitMaxFiles))
-	if strings.TrimSpace(marker) != "" {
-		b.WriteString(windowsResolveResultsMarker())
-		b.WriteString("\n")
-		b.WriteString(`if (-not (Test-Path -LiteralPath $marker)) { return }` + "\n")
-		b.WriteString(`$markerTime = (Get-Item -LiteralPath $marker).LastWriteTimeUtc` + "\n")
-	}
-	b.WriteString(`function Get-CrabboxJUnitFiles([string]$Path, [int]$Depth) {` + "\n")
-	b.WriteString(`  if ($Depth -lt 0) { return }` + "\n")
-	b.WriteString(`  Get-ChildItem -LiteralPath $Path -Force | ForEach-Object {` + "\n")
-	b.WriteString(`    if ($_.PSIsContainer) {` + "\n")
-	b.WriteString(`      if ($_.Name -ne 'node_modules' -and $_.Name -ne '.git') { Get-CrabboxJUnitFiles $_.FullName ($Depth - 1) }` + "\n")
-	b.WriteString(`    } elseif ($_.Name -like 'junit*.xml' -or $_.Name -like 'TEST-*.xml' -or $_.Name -eq 'results.xml') {` + "\n")
-	if strings.TrimSpace(marker) != "" {
-		b.WriteString(`      if ($_.LastWriteTimeUtc -ge $markerTime) { $_ }` + "\n")
-	} else {
-		b.WriteString(`      $_` + "\n")
-	}
-	b.WriteString(`    }` + "\n")
-	b.WriteString(`  }` + "\n")
-	b.WriteString(`}` + "\n")
-	b.WriteString(`$count = 0` + "\n")
-	b.WriteString(`$totalBytes = 0` + "\n")
-	b.WriteString(`$files = @(Get-CrabboxJUnitFiles (Get-Location).Path 5 | Sort-Object FullName)` + "\n")
-	b.WriteString(`foreach ($wantFailed in @($true, $false)) {` + "\n")
-	b.WriteString(`  foreach ($file in $files) {` + "\n")
-	b.WriteString(`    if ($count -ge $maxFiles) { break }` + "\n")
-	b.WriteString(`    $fs = [System.IO.File]::OpenRead($file.FullName)` + "\n")
-	b.WriteString(`    try {` + "\n")
-	b.WriteString(`      $sniffLength = [Math]::Min([int64]$sniffBytes, $fs.Length)` + "\n")
-	b.WriteString(`      $sniff = New-Object byte[] ([int]$sniffLength)` + "\n")
-	b.WriteString(`      $sniffRead = $fs.Read($sniff, 0, $sniff.Length)` + "\n")
-	b.WriteString(`      $prefix = if ($sniffRead -gt 0) { [System.Text.Encoding]::UTF8.GetString($sniff, 0, $sniffRead) } else { "" }` + "\n")
-	b.WriteString(`      if ($prefix -notmatch '<testsuites?') { continue }` + "\n")
-	b.WriteString(`      $fs.Seek(0, [System.IO.SeekOrigin]::Begin) | Out-Null` + "\n")
-	b.WriteString(`      $length = [Math]::Min([int64]$failureSniffBytes, $fs.Length)` + "\n")
-	b.WriteString(`      $buffer = New-Object byte[] ([int]$length)` + "\n")
-	b.WriteString(`      $read = $fs.Read($buffer, 0, $buffer.Length)` + "\n")
-	b.WriteString(`      $body = if ($read -gt 0) { [System.Text.Encoding]::UTF8.GetString($buffer, 0, $read) } else { "" }` + "\n")
-	b.WriteString(`      $hasFailed = $body -match '<(failure|error)(\s|>)'` + "\n")
-	b.WriteString(`      if ($hasFailed -ne $wantFailed) { continue }` + "\n")
-	b.WriteString(`      $count++` + "\n")
-	b.WriteString(`      if ($fs.Length -gt $maxBytes) { Write-Output "` + resultWarningMarker + `$($file.FullName)` + "`t" + `report exceeds $maxBytes-byte per-file limit"; continue }` + "\n")
-	b.WriteString(`      if (($totalBytes + $fs.Length) -gt $maxTotalBytes) { Write-Output "` + resultWarningMarker + `$($file.FullName)` + "`t" + `report exceeds remaining $maxTotalBytes-byte aggregate limit"; continue }` + "\n")
-	b.WriteString(`      $totalBytes += $fs.Length` + "\n")
-	b.WriteString(`      $fs.Seek(0, [System.IO.SeekOrigin]::Begin) | Out-Null` + "\n")
-	b.WriteString(`      $buffer = New-Object byte[] ([int]$fs.Length)` + "\n")
-	b.WriteString(`      $read = $fs.Read($buffer, 0, $buffer.Length)` + "\n")
-	b.WriteString(`      $body = if ($read -gt 0) { [System.Text.Encoding]::UTF8.GetString($buffer, 0, $read) } else { "" }` + "\n")
-	b.WriteString(`      Write-Output "` + resultFileMarker + `$($file.FullName)"` + "\n")
-	b.WriteString(`      [Console]::Write($body)` + "\n")
-	b.WriteString(`      [Console]::WriteLine()` + "\n")
-	b.WriteString(`    } finally {` + "\n")
-	b.WriteString(`      $fs.Dispose()` + "\n")
-	b.WriteString(`    }` + "\n")
-	b.WriteString(`  }` + "\n")
-	b.WriteString(`  if ($count -ge $maxFiles) { break }` + "\n")
-	b.WriteString(`}` + "\n")
-	return powershellCommand(b.String())
 }
 
 func windowsResolveResultsMarker() string {

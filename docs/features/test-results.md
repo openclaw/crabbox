@@ -59,6 +59,10 @@ resolving directory junctions and symbolic links. Collection validates the
 opened file and reads from the same descriptor or stream, so a background
 process cannot swap a checked path before the read.
 
+Runner collection accepts at most 4,096 explicit paths and rejects longer lists
+before opening report files. Each explicit report is limited to 64 MiB, with
+256 MiB total. The encoded request must also fit the runner's 64 KiB frame header.
+
 Auto discovery (`--results-auto`) is freshness-aware so it never reports stale
 reports from an earlier run:
 

@@ -3,6 +3,12 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import {
+  maxRunnerBundleBytes,
+  maxRunnerBytes,
+  runnerTargets,
+  unpackRunnerBundle,
+} from "./runner-release-bundle.mjs";
 
 const REPOSITORY = "openclaw/crabbox";
 const TEAM_ID = "FWJYW4S8P8";
@@ -10,13 +16,16 @@ const AUTHORITY = `Developer ID Application: OpenClaw Foundation (${TEAM_ID})`;
 const CLI_ID = "org.openclaw.crabbox";
 const HELPER_ID = "org.openclaw.crabbox.apple-vm-helper";
 const VMD_ID = "org.openclaw.crabbox.apple-vm-vmd";
+const RUNNER_ID = "org.openclaw.crabbox.runner";
 const GO_VERSION = "go1.26.4";
 const GORELEASER_VERSION = "2.17.0";
 const CANDIDATE_MANIFEST = ".components/candidate-manifest.json";
 const VMD_COMPONENT = ".components/crabbox-apple-vm-vmd";
 const VMD_ENTITLEMENTS_SHA256 = crypto
   .createHash("sha256")
-  .update(fs.readFileSync(new URL("../internal/applevmhelper/vmd-entitlements.plist", import.meta.url)))
+  .update(
+    fs.readFileSync(new URL("../internal/applevmhelper/vmd-entitlements.plist", import.meta.url)),
+  )
   .digest("hex");
 const RELEASE_CONFIG_SHA256 = crypto
   .createHash("sha256")
@@ -49,16 +58,23 @@ function candidateInput(directory, relativePath, kind) {
     throw new Error(`candidate input must be a nonempty regular file: ${relativePath}`);
   }
   const mode = fileMode(stat);
-  if (kind === "embedded-vmd" && (Number.parseInt(mode, 8) & 0o111) === 0) {
-    throw new Error("candidate Apple VM daemon must be executable");
+  if (kind !== "archive" && (Number.parseInt(mode, 8) & 0o111) === 0) {
+    throw new Error("candidate embedded executable must be executable");
   }
   return { path: relativePath, kind, size: stat.size, mode, sha256: sha256(file) };
 }
 
 function candidateInputs(directory, version) {
+  return candidateInputSpecs(version).map(({ path, kind }) =>
+    candidateInput(directory, path, kind),
+  );
+}
+
+function candidateInputSpecs(version) {
   return [
-    ...expectedArchives(version).map((name) => candidateInput(directory, name, "archive")),
-    candidateInput(directory, VMD_COMPONENT, "embedded-vmd"),
+    ...expectedArchives(version).map((path) => ({ path, kind: "archive" })),
+    { path: VMD_COMPONENT, kind: "embedded-vmd" },
+    ...runnerTargets.map(({ name }) => ({ path: `.components/${name}`, kind: "embedded-runner" })),
   ];
 }
 
@@ -74,7 +90,8 @@ function expectedArchives(version) {
 }
 
 function assertSha(name, value) {
-  if (!/^[0-9a-f]{40}$/.test(value ?? "")) throw new Error(`${name} must be a full lowercase SHA-1`);
+  if (!/^[0-9a-f]{40}$/.test(value ?? ""))
+    throw new Error(`${name} must be a full lowercase SHA-1`);
 }
 
 function releaseNotes(notesFile) {
@@ -83,7 +100,7 @@ function releaseNotes(notesFile) {
   return { bytes: bytes.length, sha256: crypto.createHash("sha256").update(bytes).digest("hex") };
 }
 
-function payloadFor(directory, name, version, embeddedVmd, notaryIds = {}) {
+function payloadFor(directory, name, version, embeddedVmd, notaryIds = {}, runnerBundleSha256) {
   const match = new RegExp(
     `^crabbox_${version.replaceAll(".", "\\.")}_(darwin|linux|windows)_(amd64|arm64)\\.(tar\\.gz|zip)$`,
   ).exec(name);
@@ -93,6 +110,7 @@ function payloadFor(directory, name, version, embeddedVmd, notaryIds = {}) {
     {
       name: platform === "windows" ? "crabbox.exe" : "crabbox",
       package: "github.com/openclaw/crabbox/cmd/crabbox",
+      runnerBundleSha256,
       ...(platform === "darwin"
         ? {
             identifier: CLI_ID,
@@ -119,7 +137,15 @@ function payloadFor(directory, name, version, embeddedVmd, notaryIds = {}) {
     });
   }
   const file = path.join(directory, name);
-  return { name, sha256: sha256(file), size: fs.statSync(file).size, platform, arch, format, binaries };
+  return {
+    name,
+    sha256: sha256(file),
+    size: fs.statSync(file).size,
+    platform,
+    arch,
+    format,
+    binaries,
+  };
 }
 
 function exactJson(value) {
@@ -127,9 +153,7 @@ function exactJson(value) {
 }
 
 function isNotaryId(value) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-    value ?? "",
-  );
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value ?? "");
 }
 
 function assertExactKeys(value, expected, label) {
@@ -158,9 +182,12 @@ function assertCandidateInventory(directory, version, manifestPresent) {
   const componentsDir = path.join(directory, ".components");
   const components = fs.readdirSync(componentsDir, { withFileTypes: true });
   const componentNames = components.map((entry) => entry.name).sort();
-  const expectedComponents = manifestPresent
-    ? [path.basename(CANDIDATE_MANIFEST), path.basename(VMD_COMPONENT)].sort()
-    : [path.basename(VMD_COMPONENT)];
+  const expectedComponents = [
+    path.basename(VMD_COMPONENT),
+    ...runnerTargets.map(({ name }) => name),
+  ];
+  if (manifestPresent) expectedComponents.push(path.basename(CANDIDATE_MANIFEST));
+  expectedComponents.sort();
   if (JSON.stringify(componentNames) !== JSON.stringify(expectedComponents)) {
     throw new Error("candidate private-component inventory is not exact");
   }
@@ -223,13 +250,13 @@ function assertPackager(value) {
 }
 
 function assertCandidateInputRecords(value, directory, version) {
-  if (!Array.isArray(value) || value.length !== 7) {
-    throw new Error("candidate input inventory must contain exactly seven files");
+  if (!Array.isArray(value) || value.length !== candidateInputSpecs(version).length) {
+    throw new Error("candidate input inventory must contain exactly thirteen files");
   }
   for (const entry of value) {
     assertExactKeys(entry, ["kind", "mode", "path", "sha256", "size"], "candidate input");
     if (
-      !["archive", "embedded-vmd"].includes(entry.kind) ||
+      !["archive", "embedded-vmd", "embedded-runner"].includes(entry.kind) ||
       !/^[0-7]{4}$/.test(entry.mode ?? "") ||
       !/^[0-9a-f]{64}$/.test(entry.sha256 ?? "") ||
       !Number.isSafeInteger(entry.size) ||
@@ -245,22 +272,22 @@ function assertCandidateInputRecords(value, directory, version) {
 }
 
 function assertRecordedCandidateInputs(value, version) {
-  const expectedPaths = [...expectedArchives(version), VMD_COMPONENT];
-  if (!Array.isArray(value) || value.length !== expectedPaths.length) {
+  const expectedInputs = candidateInputSpecs(version);
+  if (!Array.isArray(value) || value.length !== expectedInputs.length) {
     throw new Error("recorded candidate input inventory is not exact");
   }
   for (let index = 0; index < value.length; index += 1) {
     const entry = value[index];
     assertExactKeys(entry, ["kind", "mode", "path", "sha256", "size"], "candidate input");
-    const expectedKind = index === expectedPaths.length - 1 ? "embedded-vmd" : "archive";
+    const expectedKind = expectedInputs[index].kind;
     if (
-      entry.path !== expectedPaths[index] ||
+      entry.path !== expectedInputs[index].path ||
       entry.kind !== expectedKind ||
       !/^[0-7]{4}$/.test(entry.mode ?? "") ||
       !/^[0-9a-f]{64}$/.test(entry.sha256 ?? "") ||
       !Number.isSafeInteger(entry.size) ||
       entry.size <= 0 ||
-      (expectedKind === "embedded-vmd" && (Number.parseInt(entry.mode, 8) & 0o111) === 0)
+      (expectedKind !== "archive" && (Number.parseInt(entry.mode, 8) & 0o111) === 0)
     ) {
       throw new Error("recorded candidate input metadata is invalid");
     }
@@ -291,7 +318,7 @@ function assertFinalProducer(value, releaseIdentity, version) {
     throw new Error("candidate manifest digest is invalid");
   }
   const originalManifest = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     repository: REPOSITORY,
     tag: releaseIdentity.tag,
     tagObject: releaseIdentity.tagObject,
@@ -300,7 +327,10 @@ function assertFinalProducer(value, releaseIdentity, version) {
     producer: toolchain,
     inputs,
   };
-  const actualManifestSha256 = crypto.createHash("sha256").update(exactJson(originalManifest)).digest("hex");
+  const actualManifestSha256 = crypto
+    .createHash("sha256")
+    .update(exactJson(originalManifest))
+    .digest("hex");
   if (manifestSha256 !== actualManifestSha256) {
     throw new Error("candidate manifest digest does not bind the recorded producer handoff");
   }
@@ -323,7 +353,7 @@ function validateCandidateManifest(value, directory, args) {
   );
   const version = args.tag?.slice(1);
   if (
-    value.schemaVersion !== 1 ||
+    value.schemaVersion !== 2 ||
     value.repository !== REPOSITORY ||
     value.tag !== args.tag ||
     value.tagObject !== args["tag-object"] ||
@@ -363,7 +393,7 @@ function candidateWrite(args) {
   const version = args.tag.slice(1);
   assertCandidateInventory(args.dir, version, false);
   const value = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     repository: REPOSITORY,
     tag: args.tag,
     tagObject: args["tag-object"],
@@ -442,6 +472,92 @@ function assertEmbeddedVmd(value) {
   }
 }
 
+function runnerMemberRecord(name, metadata, notaryIds) {
+  return {
+    name,
+    package: "github.com/openclaw/crabbox/cmd/crabbox-runner",
+    ...metadata,
+    ...(metadata.os === "darwin"
+      ? {
+          identifier: RUNNER_ID,
+          teamId: TEAM_ID,
+          hardenedRuntime: true,
+          timestamp: true,
+          notarized: true,
+          notarizationSubmissionId: notaryIds[`runner-${metadata.arch}`],
+        }
+      : {}),
+  };
+}
+
+function assertRunnerBundle(value, sourceCommit) {
+  assertExactKeys(
+    value,
+    ["formatVersion", "buildId", "protocol", "sha256", "size", "members"],
+    "runner bundle",
+  );
+  if (
+    value.formatVersion !== 1 ||
+    value.protocol !== 1 ||
+    value.buildId !== sourceCommit ||
+    !/^[0-9a-f]{64}$/.test(value.sha256) ||
+    !Number.isSafeInteger(value.size) ||
+    value.size < 12 ||
+    value.size > maxRunnerBundleBytes ||
+    !Array.isArray(value.members) ||
+    value.members.length !== runnerTargets.length
+  ) {
+    throw new Error("runner bundle provenance identity or inventory mismatch");
+  }
+  let offset = 0;
+  for (const [index, target] of runnerTargets.entries()) {
+    const member = value.members[index];
+    const metadata = Object.fromEntries(
+      ["os", "arch", "sha256", "size", "packedSha256", "packedSize", "offset"].map((key) => [
+        key,
+        member?.[key],
+      ]),
+    );
+    const expected = runnerMemberRecord(target.name, metadata, {
+      [`runner-${target.arch}`]: member?.notarizationSubmissionId,
+    });
+    if (
+      JSON.stringify(member) !== JSON.stringify(expected) ||
+      member.os !== target.os ||
+      member.arch !== target.arch ||
+      member.offset !== offset ||
+      !Number.isSafeInteger(member.size) ||
+      member.size < 1 ||
+      member.size > maxRunnerBytes ||
+      !Number.isSafeInteger(member.packedSize) ||
+      member.packedSize < 18 ||
+      member.packedSize > maxRunnerBytes ||
+      !/^[0-9a-f]{64}$/.test(member.sha256) ||
+      !/^[0-9a-f]{64}$/.test(member.packedSha256) ||
+      (member.os === "darwin" && !isNotaryId(member.notarizationSubmissionId))
+    ) {
+      throw new Error("runner member provenance violates the exact trust policy");
+    }
+    offset += member.packedSize;
+  }
+  if (offset >= value.size) throw new Error("runner bundle size is inconsistent");
+}
+
+function assertUnchangedRunnerInputs(bundle, inputs) {
+  for (const member of bundle.members) {
+    if (member.os === "darwin") continue;
+    const input = inputs.find((entry) => entry.path === `.components/${member.name}`);
+    if (
+      !input ||
+      input.kind !== "embedded-runner" ||
+      input.sha256 !== member.sha256 ||
+      input.size !== member.size
+    ) {
+      throw new Error(`final runner differs from pinned producer input: ${member.name}`);
+    }
+  }
+}
+
 function write(args) {
   for (const required of [
     "dir",
@@ -459,6 +575,9 @@ function write(args) {
     "notary-cli-arm64",
     "notary-helper-arm64",
     "notary-vmd-arm64",
+    "runner-bundle",
+    "notary-runner-amd64",
+    "notary-runner-arm64",
     "packager-go-version",
     "packager-os",
     "packager-arch",
@@ -486,12 +605,11 @@ function write(args) {
     "cli-arm64": args["notary-cli-arm64"],
     "helper-arm64": args["notary-helper-arm64"],
     "vmd-arm64": args["notary-vmd-arm64"],
+    "runner-amd64": args["notary-runner-amd64"],
+    "runner-arm64": args["notary-runner-arm64"],
   };
-  if (
-    !Object.values(notaryIds).every(isNotaryId) ||
-    new Set(Object.values(notaryIds)).size !== 4
-  ) {
-    throw new Error("notarization submission IDs must be four distinct UUIDs");
+  if (!Object.values(notaryIds).every(isNotaryId) || new Set(Object.values(notaryIds)).size !== 6) {
+    throw new Error("notarization submission IDs must be six distinct UUIDs");
   }
   const embeddedVmd = {
     sha256: args["embedded-vmd-sha256"],
@@ -506,6 +624,21 @@ function write(args) {
     entitlementsSha256: VMD_ENTITLEMENTS_SHA256,
     trustPolicyVersion: 1,
   };
+  const unpackedRunners = unpackRunnerBundle(
+    fs.readFileSync(args["runner-bundle"]),
+    args["source-commit"],
+  );
+  const runnerBundle = {
+    formatVersion: 1,
+    buildId: args["source-commit"],
+    protocol: 1,
+    sha256: unpackedRunners.sha256,
+    size: unpackedRunners.size,
+    members: unpackedRunners.members.map(({ name, metadata }) =>
+      runnerMemberRecord(name, metadata, notaryIds),
+    ),
+  };
+  assertRunnerBundle(runnerBundle, args["source-commit"]);
   const version = args.tag.slice(1);
   const archives = expectedArchives(version);
   const releaseAssets = [...archives, "checksums.txt", "provenance.json"].sort();
@@ -522,6 +655,7 @@ function write(args) {
   ) {
     throw new Error("candidate manifest changed after the producer handoff was pinned");
   }
+  assertUnchangedRunnerInputs(runnerBundle, candidate.value.inputs);
   const packager = {
     platform: args["packager-os"],
     arch: args["packager-arch"],
@@ -531,7 +665,7 @@ function write(args) {
   };
   assertPackager(packager);
   const provenance = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     repository: REPOSITORY,
     version,
     source: {
@@ -548,7 +682,12 @@ function write(args) {
       hardenedRuntime: true,
       timestamp: true,
       onlineNotarization: true,
-      identifiers: { crabbox: CLI_ID, appleVmHelper: HELPER_ID, appleVmVmd: VMD_ID },
+      identifiers: {
+        crabbox: CLI_ID,
+        appleVmHelper: HELPER_ID,
+        appleVmVmd: VMD_ID,
+        runner: RUNNER_ID,
+      },
     },
     producer: {
       manifestSha256: candidate.sha256,
@@ -556,9 +695,10 @@ function write(args) {
       inputs: candidate.value.inputs,
     },
     packager,
+    runnerBundle,
     releaseAssets,
     payloads: archives.map((name) =>
-      payloadFor(args.dir, name, version, embeddedVmd, notaryIds),
+      payloadFor(args.dir, name, version, embeddedVmd, notaryIds, runnerBundle.sha256),
     ),
   };
   fs.writeFileSync(path.join(args.dir, "provenance.json"), exactJson(provenance), {
@@ -592,6 +732,7 @@ function verify(args) {
       "releaseAssets",
       "releaseNotes",
       "repository",
+      "runnerBundle",
       "schemaVersion",
       "signaturePolicy",
       "source",
@@ -610,7 +751,7 @@ function verify(args) {
   );
   assertExactKeys(
     value.signaturePolicy.identifiers,
-    ["appleVmHelper", "appleVmVmd", "crabbox"],
+    ["appleVmHelper", "appleVmVmd", "crabbox", "runner"],
     "signature identifiers",
   );
   assertFinalProducer(
@@ -624,8 +765,10 @@ function verify(args) {
     version,
   );
   assertPackager(value.packager);
+  assertRunnerBundle(value.runnerBundle, args["source-commit"]);
+  assertUnchangedRunnerInputs(value.runnerBundle, value.producer.inputs);
   if (
-    value.schemaVersion !== 1 ||
+    value.schemaVersion !== 2 ||
     value.repository !== REPOSITORY ||
     value.version !== version ||
     value.source?.tag !== args.tag ||
@@ -642,6 +785,7 @@ function verify(args) {
     value.signaturePolicy?.identifiers?.crabbox !== CLI_ID ||
     value.signaturePolicy?.identifiers?.appleVmHelper !== HELPER_ID ||
     value.signaturePolicy?.identifiers?.appleVmVmd !== VMD_ID ||
+    value.signaturePolicy?.identifiers?.runner !== RUNNER_ID ||
     JSON.stringify(value.releaseAssets) !== JSON.stringify(releaseAssets)
   ) {
     throw new Error("release provenance metadata does not match the pinned contract");
@@ -651,7 +795,9 @@ function verify(args) {
   }
   const payloads = new Map(value.payloads.map((entry) => [entry.name, entry]));
   if (payloads.size !== archives.length) throw new Error("duplicate release provenance payload");
-  const verifiedNotaryIds = [];
+  const verifiedNotaryIds = value.runnerBundle.members
+    .filter((entry) => entry.os === "darwin")
+    .map((entry) => entry.notarizationSubmissionId);
   for (const name of archives) {
     const actual = payloads.get(name);
     if (!actual) throw new Error(`missing provenance payload ${name}`);
@@ -669,6 +815,7 @@ function verify(args) {
       version,
       helperEntry?.embeddedVmd,
       notaryIds,
+      value.runnerBundle.sha256,
     );
     if (JSON.stringify(actual) !== JSON.stringify(expected)) {
       throw new Error(`provenance payload mismatch: ${name}`);
@@ -688,8 +835,8 @@ function verify(args) {
       if (helperEntry) verifiedNotaryIds.push(helperEntry.embeddedVmd.notarizationSubmissionId);
     }
   }
-  if (new Set(verifiedNotaryIds).size !== 4 || verifiedNotaryIds.length !== 4) {
-    throw new Error("notarization provenance must contain four distinct submissions");
+  if (new Set(verifiedNotaryIds).size !== 6 || verifiedNotaryIds.length !== 6) {
+    throw new Error("notarization provenance must contain six distinct submissions");
   }
 }
 
@@ -698,4 +845,7 @@ if (command === "candidate-write") candidateWrite(args);
 else if (command === "candidate-verify") candidateVerify(args);
 else if (command === "write") write(args);
 else if (command === "verify") verify(args);
-else throw new Error("usage: release-provenance.mjs <candidate-write|candidate-verify|write|verify> --dir ...");
+else
+  throw new Error(
+    "usage: release-provenance.mjs <candidate-write|candidate-verify|write|verify> --dir ...",
+  );
