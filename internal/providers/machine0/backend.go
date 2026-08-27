@@ -286,6 +286,7 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 		if item.Name == "" {
 			return LeaseTarget{}, exit(4, "lease/server not found: %s", lookup)
 		}
+		return LeaseTarget{}, exit(4, "machine0 lease %s has no local claim; candidate %q matches only a short name hash: inspect the machine and use its explicit name with --reclaim to adopt it", lookup, item.Name)
 	} else {
 		item, err = b.api.Get(ctx, lookup)
 		if err != nil {
