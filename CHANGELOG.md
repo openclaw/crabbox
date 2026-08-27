@@ -11,6 +11,7 @@
 
 ### Fixed
 
+- Put copy-command usage, path syntax, and examples before the provider flag reference in `cp --help`. Thanks @coygeek.
 - Required exact host/project-scoped Semaphore job ownership claims and fresh provider verification before stopping jobs.
 - Required exact API-scoped Morph instance ownership claims and fresh provider verification before pause or deletion.
 - Returned machine-readable missing checkpoint verdicts and made checkpoint deletion idempotent when local records or coordinator-owned resources are already absent.

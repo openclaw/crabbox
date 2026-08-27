@@ -12,9 +12,31 @@ import (
 	"strings"
 )
 
+const copyUsage = "crabbox cp --id <lease-id-or-slug> [-L] <src> <dst>"
+const copyPathRule = "exactly one path must use SANDBOX:PATH"
+
 func (a App) copyCommand(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("cp", a.Stderr)
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), `Usage:
+  %s
+
+Copy between the host and a Crabbox-owned lease; %s.
+
+Examples:
+  crabbox cp --id blue-box ./file.txt SANDBOX:/tmp/file.txt
+  crabbox cp --id blue-box SANDBOX:/tmp/file.txt ./file.txt
+
+Copy flags:
+  --id <lease-id-or-slug>  required lease identifier
+  --provider <name>       override the configured provider
+  -L                     follow host-side symbolic links when uploading
+
+All flags:
+`, copyUsage, copyPathRule)
+		fs.PrintDefaults()
+	}
 	provider := registerProviderSelectionFlag(fs, defaults, providerHelpAll())
 	id := fs.String("id", "", "lease id or slug")
 	followLink := fs.Bool("L", false, "follow symbolic links when copying from host to sandbox")
@@ -24,7 +46,7 @@ func (a App) copyCommand(ctx context.Context, args []string) error {
 		return err
 	}
 	if strings.TrimSpace(*id) == "" || fs.NArg() != 2 {
-		return exit(2, "usage: crabbox cp --id <lease-id-or-slug> [-L] <src> <dst>")
+		return exit(2, "usage: %s", copyUsage)
 	}
 	if err := validateCopyArgs(fs.Arg(0), fs.Arg(1)); err != nil {
 		return err
@@ -69,7 +91,7 @@ func validateCopyArgs(src, dst string) error {
 	srcSandbox := isSandboxCopyArg(src)
 	dstSandbox := isSandboxCopyArg(dst)
 	if srcSandbox == dstSandbox {
-		return exit(2, "usage: crabbox cp --id <lease-id-or-slug> [-L] <src> <dst> (exactly one path must use SANDBOX:PATH)")
+		return exit(2, "usage: %s (%s)", copyUsage, copyPathRule)
 	}
 	return nil
 }
