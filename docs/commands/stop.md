@@ -212,6 +212,22 @@ Each provider also registers its own flags; the ones relevant to `stop` include:
 Run `crabbox stop --help` for the full, provider-aware flag list, and
 `crabbox providers` for the providers available in your build.
 
+Generated stop commands use each provider's routing hook, preserving its
+endpoint, scope, and explicit release policy, including `false` overrides.
+Aliases are printed as canonical provider names. Configured Azure
+subscription/resource group/location, GCP project/zone, AWS region, and inherited
+Kubernetes kubeconfig lists are carried as environment assignments where
+appropriate; keep those assignments when copying the command. API credentials
+are not included. External adapters continue to use private, digest-bound
+routing files instead of printing arbitrary adapter config or arguments.
+
+For legacy claim scopes that include sensitive URL bytes, a generated command
+leaves the endpoint in your private configuration instead of printing it or
+overriding it with a differently scoped URL. Keep that original configuration
+available when replaying the command. This applies to Railway query/fragment
+identities, opaque E2B/CubeSandbox, Proxmox, and Namespace Instance identities,
+and Morph URL userinfo; existing claim keys are not rewritten.
+
 ## See also
 
 - [`cleanup`](cleanup.md) — sweep expired direct-provider machines and stale

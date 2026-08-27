@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -2394,8 +2393,9 @@ afterSync:
 			CommandDisplay:        commandDisplay,
 			ShellMode:             *shellMode || useShell,
 			ScriptMode:            script != nil,
-			RoutingArgs:           runFailureDigestRoutingArgs(cfg, leaseID),
-			SSHRoutingArgs:        runFailureDigestSSHRoutingArgs(cfg, leaseID),
+			Routing:               CommandRoutingFor(cfg, leaseID, CommandRoutingRetry),
+			SSHRouting:            CommandRoutingFor(cfg, leaseID, CommandRoutingRetry),
+			StopRouting:           CommandRoutingFor(cfg, leaseID, CommandRoutingStop),
 			StopCommand:           report.StopCommand,
 			Classification:        classification,
 			Phases:                timings.commandPhases,
@@ -2645,266 +2645,12 @@ func runCommandShellStringWithLiteralArgs(command []string, shellMode bool, lite
 }
 
 func runStopCommand(cfg Config, id string) string {
-	args := []string{"crabbox", "stop", "--provider", cfg.Provider}
-	if strings.TrimSpace(cfg.TargetOS) != "" {
-		args = append(args, "--target", cfg.TargetOS)
-	}
-	if cfg.TargetOS == targetWindows && strings.TrimSpace(cfg.WindowsMode) != "" {
-		args = append(args, "--windows-mode", cfg.WindowsMode)
-	}
-	if strings.TrimSpace(cfg.Static.Host) != "" {
-		args = append(args, "--static-host", cfg.Static.Host)
-	}
-	if strings.TrimSpace(cfg.Static.User) != "" {
-		args = append(args, "--static-user", cfg.Static.User)
-	}
-	if strings.TrimSpace(cfg.Static.Port) != "" {
-		args = append(args, "--static-port", cfg.Static.Port)
-	}
-	if strings.TrimSpace(cfg.Static.WorkRoot) != "" {
-		args = append(args, "--static-work-root", cfg.Static.WorkRoot)
-	}
-	args = appendProviderStopRoutingArgs(args, cfg, id)
+	routing := CommandRoutingFor(cfg, id, CommandRoutingStop)
+	args := append([]string{"crabbox", "stop"}, routing.Args...)
 	if strings.TrimSpace(id) != "" {
 		args = append(args, "--id", id)
 	}
-	return readableShellCommand(args)
-}
-
-func appendProviderStopRoutingArgs(args []string, cfg Config, id string) []string {
-	switch normalizeProviderName(cfg.Provider) {
-	case "namespace-instance":
-		if strings.TrimSpace(cfg.NamespaceInstance.CLIPath) != "" && cfg.NamespaceInstance.CLIPath != "nsc" {
-			args = append(args, "--namespace-instance-cli", cfg.NamespaceInstance.CLIPath)
-		}
-		if strings.TrimSpace(cfg.NamespaceInstance.Endpoint) != "" {
-			args = append(args, "--namespace-instance-endpoint", routingSafeURL(cfg.NamespaceInstance.Endpoint))
-		}
-		if strings.TrimSpace(cfg.NamespaceInstance.Region) != "" {
-			args = append(args, "--namespace-instance-region", cfg.NamespaceInstance.Region)
-		}
-		if strings.TrimSpace(cfg.NamespaceInstance.Keychain) != "" {
-			args = append(args, "--namespace-instance-keychain", cfg.NamespaceInstance.Keychain)
-		}
-	case "proxmox":
-		if strings.TrimSpace(cfg.Proxmox.APIURL) != "" {
-			args = append(args, "--proxmox-api-url", routingSafeURL(cfg.Proxmox.APIURL))
-		}
-		if strings.TrimSpace(cfg.Proxmox.Node) != "" {
-			args = append(args, "--proxmox-node", cfg.Proxmox.Node)
-		}
-		if cfg.Proxmox.InsecureTLS {
-			args = append(args, "--proxmox-insecure-tls")
-		}
-	case "xcp-ng":
-		if strings.TrimSpace(cfg.XCPNg.APIURL) != "" {
-			args = append(args, "--xcp-ng-api-url", routingSafeURL(cfg.XCPNg.APIURL))
-		}
-		if strings.TrimSpace(cfg.XCPNg.Username) != "" {
-			args = append(args, "--xcp-ng-username", cfg.XCPNg.Username)
-		}
-		if strings.TrimSpace(cfg.XCPNg.Template) != "" {
-			args = append(args, "--xcp-ng-template", cfg.XCPNg.Template)
-		}
-		if strings.TrimSpace(cfg.XCPNg.TemplateUUID) != "" {
-			args = append(args, "--xcp-ng-template-uuid", cfg.XCPNg.TemplateUUID)
-		}
-		if strings.TrimSpace(cfg.XCPNg.SR) != "" {
-			args = append(args, "--xcp-ng-sr", cfg.XCPNg.SR)
-		}
-		if strings.TrimSpace(cfg.XCPNg.SRUUID) != "" {
-			args = append(args, "--xcp-ng-sr-uuid", cfg.XCPNg.SRUUID)
-		}
-		if strings.TrimSpace(cfg.XCPNg.Network) != "" {
-			args = append(args, "--xcp-ng-network", cfg.XCPNg.Network)
-		}
-		if strings.TrimSpace(cfg.XCPNg.NetworkUUID) != "" {
-			args = append(args, "--xcp-ng-network-uuid", cfg.XCPNg.NetworkUUID)
-		}
-		if strings.TrimSpace(cfg.XCPNg.Host) != "" {
-			args = append(args, "--xcp-ng-host", cfg.XCPNg.Host)
-		}
-		if strings.TrimSpace(cfg.XCPNg.User) != "" {
-			args = append(args, "--xcp-ng-user", cfg.XCPNg.User)
-		}
-		if strings.TrimSpace(cfg.XCPNg.WorkRoot) != "" {
-			args = append(args, "--xcp-ng-work-root", cfg.XCPNg.WorkRoot)
-		}
-		if cfg.XCPNg.InsecureTLS {
-			args = append(args, "--xcp-ng-insecure-tls")
-		}
-	case "namespace", "namespace-devbox":
-		if strings.TrimSpace(cfg.Namespace.Site) != "" {
-			args = append(args, "--namespace-site", cfg.Namespace.Site)
-		}
-		if strings.TrimSpace(cfg.Namespace.WorkRoot) != "" {
-			args = append(args, "--namespace-work-root", cfg.Namespace.WorkRoot)
-		}
-		if DeleteOnReleaseExplicit(cfg, "namespace-devbox") {
-			args = append(args, fmt.Sprintf("--namespace-delete-on-release=%t", cfg.Namespace.DeleteOnRelease))
-		}
-	case "coder":
-		args = append(args, fmt.Sprintf("--coder-delete-on-release=%t", cfg.Coder.DeleteOnRelease))
-	case "daytona":
-		if strings.TrimSpace(cfg.Daytona.APIURL) != "" {
-			args = append(args, "--daytona-api-url", routingSafeURL(cfg.Daytona.APIURL))
-		}
-		if strings.TrimSpace(cfg.Daytona.Target) != "" {
-			args = append(args, "--daytona-target", cfg.Daytona.Target)
-		}
-		if strings.TrimSpace(cfg.Daytona.User) != "" {
-			args = append(args, "--daytona-user", cfg.Daytona.User)
-		}
-	case "sprites":
-		if strings.TrimSpace(cfg.Sprites.APIURL) != "" {
-			args = append(args, "--sprites-api-url", routingSafeURL(cfg.Sprites.APIURL))
-		}
-	case "semaphore":
-		if strings.TrimSpace(cfg.Semaphore.Host) != "" {
-			args = append(args, "--semaphore-host", cfg.Semaphore.Host)
-		}
-	case "exe-dev":
-		if strings.TrimSpace(cfg.ExeDev.ControlHost) != "" {
-			args = append(args, "--exe-dev-control-host", cfg.ExeDev.ControlHost)
-		}
-	case "morph":
-		if strings.TrimSpace(cfg.Morph.APIURL) != "" {
-			args = append(args, "--morph-api-url", routingSafeURL(cfg.Morph.APIURL))
-		}
-		if DeleteOnReleaseExplicit(cfg, "morph") {
-			args = append(args, fmt.Sprintf("--morph-delete-on-release=%t", cfg.Morph.DeleteOnRelease))
-		}
-	case "hostinger":
-		if strings.TrimSpace(cfg.Hostinger.APIURL) != "" {
-			args = append(args, "--hostinger-url", routingSafeURL(cfg.Hostinger.APIURL))
-		}
-	case "vast", "vast-ai", "vastai":
-		if apiURL := strings.TrimSpace(cfg.Vast.APIURL); apiURL != "" {
-			args = append(args, "--vast-api-url", routingSafeURL(apiURL))
-		}
-		if DeleteOnReleaseExplicit(cfg, "vast") {
-			args = append(args, "--vast-release-action", cfg.Vast.ReleaseAction)
-		}
-	case "nvidia-brev":
-		if cli := strings.TrimSpace(cfg.NvidiaBrev.CLI); cli != "" {
-			args = append(args, "--nvidia-brev-cli", cli)
-		}
-		if target := strings.TrimSpace(cfg.NvidiaBrev.Target); target != "" && target != "container" {
-			args = append(args, "--nvidia-brev-target", target)
-		}
-		if user := strings.TrimSpace(cfg.NvidiaBrev.User); user != "" {
-			args = append(args, "--nvidia-brev-user", user)
-		}
-		if DeleteOnReleaseExplicit(cfg, "nvidia-brev") {
-			args = append(args, "--nvidia-brev-release-action", cfg.NvidiaBrev.ReleaseAction)
-		}
-	case "kubevirt":
-		if strings.TrimSpace(cfg.KubeVirt.Kubectl) != "" {
-			args = append(args, "--kubevirt-kubectl", cfg.KubeVirt.Kubectl)
-		}
-		if strings.TrimSpace(cfg.KubeVirt.Virtctl) != "" {
-			args = append(args, "--kubevirt-virtctl", cfg.KubeVirt.Virtctl)
-		}
-		if strings.TrimSpace(cfg.KubeVirt.Kubeconfig) != "" {
-			args = append(args, "--kubevirt-kubeconfig", cfg.KubeVirt.Kubeconfig)
-		} else if value := strings.TrimSpace(os.Getenv("KUBECONFIG")); value != "" {
-			args = append([]string{"KUBECONFIG=" + value}, args...)
-		}
-		if strings.TrimSpace(cfg.KubeVirt.Context) != "" {
-			args = append(args, "--kubevirt-context", cfg.KubeVirt.Context)
-		}
-		if strings.TrimSpace(cfg.KubeVirt.Namespace) != "" {
-			args = append(args, "--kubevirt-namespace", cfg.KubeVirt.Namespace)
-		}
-		if strings.TrimSpace(cfg.KubeVirt.Template) != "" {
-			args = append(args, "--kubevirt-template", cfg.KubeVirt.Template)
-		}
-		if DeleteOnReleaseExplicit(cfg, "kubevirt") {
-			args = append(args, fmt.Sprintf("--kubevirt-delete-on-release=%t", cfg.KubeVirt.DeleteOnRelease))
-		}
-	case "sealos-devbox":
-		workRoot := EffectiveSealosDevboxWorkRoot(cfg)
-		if strings.TrimSpace(cfg.SealosDevbox.Kubectl) != "" {
-			args = append(args, "--sealos-devbox-kubectl", cfg.SealosDevbox.Kubectl)
-		}
-		if strings.TrimSpace(cfg.SealosDevbox.Kubeconfig) != "" {
-			args = append(args, "--sealos-devbox-kubeconfig", cfg.SealosDevbox.Kubeconfig)
-		}
-		for _, routing := range []struct {
-			flagName string
-			value    string
-		}{
-			{flagName: "--sealos-devbox-context", value: cfg.SealosDevbox.Context},
-			{flagName: "--sealos-devbox-namespace", value: cfg.SealosDevbox.Namespace},
-			{flagName: "--sealos-devbox-network", value: cfg.SealosDevbox.Network},
-			{flagName: "--sealos-devbox-ssh-gateway-host", value: cfg.SealosDevbox.SSHGatewayHost},
-			{flagName: "--sealos-devbox-ssh-gateway-port", value: cfg.SealosDevbox.SSHGatewayPort},
-			{flagName: "--sealos-devbox-node-host", value: cfg.SealosDevbox.NodeHost},
-			{flagName: "--sealos-devbox-ssh-user", value: cfg.SealosDevbox.SSHUser},
-			{flagName: "--sealos-devbox-work-root", value: workRoot},
-		} {
-			if strings.TrimSpace(routing.value) != "" {
-				args = append(args, routing.flagName, routing.value)
-			}
-		}
-		if DeleteOnReleaseExplicit(cfg, "sealos-devbox") {
-			args = append(args, fmt.Sprintf("--sealos-devbox-delete-on-release=%t", cfg.SealosDevbox.DeleteOnRelease))
-		}
-		if strings.TrimSpace(cfg.SealosDevbox.Kubeconfig) == "" {
-			if value := strings.TrimSpace(os.Getenv("KUBECONFIG")); value != "" {
-				args = append([]string{"KUBECONFIG=" + value}, args...)
-			}
-		}
-	case "incus":
-		if DeleteOnReleaseExplicit(cfg, "incus") {
-			args = append(args, fmt.Sprintf("--incus-delete-on-release=%t", cfg.Incus.DeleteOnRelease))
-		}
-	case "external":
-		if path, err := ExternalRoutingPath(id); err == nil {
-			args = append(args, externalRoutingFileArgs(path, cfg.External)...)
-		} else {
-			if strings.TrimSpace(cfg.External.Command) != "" {
-				args = append(args, "--external-command", cfg.External.Command)
-			}
-			if strings.TrimSpace(cfg.External.WorkRoot) != "" {
-				args = append(args, "--external-work-root", cfg.External.WorkRoot)
-			}
-			if strings.TrimSpace(cfg.External.Connection.Desktop.Username) != "" {
-				args = append(args, "--external-desktop-username", cfg.External.Connection.Desktop.Username)
-			}
-			if strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv) != "" {
-				args = append(args, "--external-desktop-password-env", cfg.External.Connection.Desktop.PasswordEnv)
-			}
-		}
-	}
-	return args
-}
-
-func routingSafeURL(value string) string {
-	raw := strings.TrimSpace(value)
-	if raw == "" {
-		return value
-	}
-	addedScheme := false
-	parseValue := raw
-	if !strings.Contains(parseValue, "://") {
-		parseValue = "https://" + parseValue
-		addedScheme = true
-	}
-	u, err := url.Parse(parseValue)
-	if err != nil {
-		return sanitizedMalformedConfigURL(parseValue, addedScheme)
-	}
-	if u.User == nil {
-		return value
-	}
-	safe := *u
-	safe.User = nil
-	out := safe.String()
-	if addedScheme {
-		out = strings.TrimPrefix(out, "https://")
-	}
-	return out
+	return routing.ShellCommand(args)
 }
 
 type runTimings struct {

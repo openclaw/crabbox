@@ -2,6 +2,7 @@ package sealosdevbox
 
 import (
 	"flag"
+	"os"
 	"strconv"
 	"strings"
 
@@ -49,7 +50,7 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	return applyFlags(cfg, fs, values)
 }
 
-func (Provider) CommandRoutingArgs(cfg core.Config, _ string) []string {
+func (Provider) CommandRouting(cfg core.Config, _ core.CommandRoutingRequest) core.CommandRouting {
 	values := cfg.SealosDevbox
 	args := []string{
 		"--sealos-devbox-kubectl", values.Kubectl,
@@ -75,7 +76,13 @@ func (Provider) CommandRoutingArgs(cfg core.Config, _ string) []string {
 	if core.DeleteOnReleaseExplicit(cfg, providerName) {
 		args = append(args, "--sealos-devbox-delete-on-release="+strconv.FormatBool(values.DeleteOnRelease))
 	}
-	return args
+	routing := core.CommandRouting{Args: args}
+	if strings.TrimSpace(values.Kubeconfig) == "" {
+		if value := strings.TrimSpace(os.Getenv("KUBECONFIG")); value != "" {
+			routing.Env = []string{"KUBECONFIG=" + value}
+		}
+	}
+	return routing
 }
 
 func (Provider) ValidateConfig(cfg core.Config) error {

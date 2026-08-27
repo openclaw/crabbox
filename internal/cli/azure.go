@@ -2741,3 +2741,12 @@ func isAzureRetryableDeleteError(err error) bool {
 		strings.Contains(s, "AnotherOperationInProgress") ||
 		(strings.Contains(s, "OperationNotAllowed") && strings.Contains(s, "retry after"))
 }
+
+func azureLeaseClaimScope(subscriptionID, resourceGroup string) string {
+	subscriptionID = strings.ToLower(strings.TrimSpace(subscriptionID))
+	resourceGroup = strings.ToLower(strings.TrimSpace(resourceGroup))
+	if subscriptionID == "" || resourceGroup == "" {
+		return ""
+	}
+	return "subscription:" + subscriptionID + "|resource-group:" + resourceGroup
+}

@@ -50,6 +50,7 @@ type ProviderArchitectureCapability interface {
 
 // ProviderClaimScoper contributes opaque routing identity to local claims.
 // Core persists and compares the value without interpreting provider fields.
+// The adapter must preserve its historical normalization, including whitespace.
 type ProviderClaimScoper interface {
 	ClaimScope(cfg Config) string
 }
@@ -80,8 +81,35 @@ type LeaseClaimEndpointPreparer interface {
 	PrepareLeaseClaimEndpoint(existing LeaseClaim, provider, slug string, server Server, allowProviderMetadata bool) (Server, error)
 }
 
-type ProviderCommandRoutingArgs interface {
-	CommandRoutingArgs(cfg Config, leaseID string) []string
+// ProviderCommandRouter owns the non-secret route for generated follow-up commands.
+// Core owns shell rendering and passes Env separately to subprocesses.
+// Adapters use RoutingSafeURL for URL-valued fields, never for opaque paths/selectors.
+type ProviderCommandRouter interface {
+	CommandRouting(cfg Config, request CommandRoutingRequest) CommandRouting
+}
+
+// CommandRoutingRequest carries resolved lease context without making core
+// interpret provider-specific target or release settings.
+type CommandRoutingRequest struct {
+	LeaseID string
+	Purpose CommandRoutingPurpose
+	Target  SSHTarget
+}
+
+type CommandRoutingPurpose string
+
+const (
+	CommandRoutingReconnect CommandRoutingPurpose = "reconnect"
+	CommandRoutingRescue    CommandRoutingPurpose = "rescue"
+	CommandRoutingRetry     CommandRoutingPurpose = "retry"
+	CommandRoutingStop      CommandRoutingPurpose = "stop"
+)
+
+// CommandRouting keeps environment assignments out of argv. Env contains only
+// non-secret routing selectors, never credentials or credential contents.
+type CommandRouting struct {
+	Args []string
+	Env  []string
 }
 
 type DesktopCredentials struct {
@@ -1359,18 +1387,6 @@ func validateProviderConfig(cfg Config) error {
 		}
 	}
 	return validateProviderClassSelector(provider, cfg)
-}
-
-func providerCommandRoutingArgs(cfg Config, leaseID string) []string {
-	provider, err := ProviderFor(cfg.Provider)
-	if err != nil {
-		return nil
-	}
-	router, ok := provider.(ProviderCommandRoutingArgs)
-	if !ok {
-		return nil
-	}
-	return router.CommandRoutingArgs(cfg, leaseID)
 }
 
 func routeProviderFlagOverride(cfg *Config, fs *flag.FlagSet, values providerFlagValues) (bool, error) {

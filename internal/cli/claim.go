@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net"
-	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1225,137 +1223,10 @@ func claimProviderForIdentifier(identifier string) (string, bool, error) {
 func providerClaimScope(provider string, cfg Config) string {
 	if resolved, err := ProviderFor(provider); err == nil {
 		if scoper, ok := resolved.(ProviderClaimScoper); ok {
-			return strings.TrimSpace(scoper.ClaimScope(cfg))
-		}
-	}
-	switch provider {
-	case "azure":
-		return azureLeaseClaimScope(cfg.AzureSubscription, cfg.AzureResourceGroup)
-	case "gcp":
-		if cfg.GCPProject != "" {
-			return "project:" + cfg.GCPProject
-		}
-	case "cubesandbox":
-		if endpoint := normalizedCubeSandboxClaimEndpoint(cfg.CubeSandbox.APIURL); endpoint != "" {
-			return "endpoint:" + endpoint
-		}
-	case "e2b":
-		if endpoint := normalizedCubeSandboxClaimEndpoint(cfg.E2B.APIURL); endpoint != "" {
-			return "endpoint:" + endpoint
-		}
-	case "namespace-instance":
-		parts := make([]string, 0, 3)
-		if endpoint := normalizedNamespaceClaimEndpoint(cfg.NamespaceInstance.Endpoint); endpoint != "" {
-			parts = append(parts, "endpoint:"+endpoint)
-		}
-		if region := strings.TrimSpace(cfg.NamespaceInstance.Region); region != "" {
-			parts = append(parts, "region:"+region)
-		}
-		if keychain := strings.TrimSpace(cfg.NamespaceInstance.Keychain); keychain != "" {
-			parts = append(parts, "keychain:"+keychain)
-		}
-		return strings.Join(parts, "|")
-	case "phala":
-		if node := strings.TrimSpace(cfg.Phala.NodeID); node != "" {
-			return "node:" + node
-		}
-	case "proxmox":
-		endpoint := normalizedProxmoxClaimEndpoint(cfg.Proxmox.APIURL)
-		node := strings.TrimSpace(cfg.Proxmox.Node)
-		if endpoint != "" && node != "" {
-			return "endpoint:" + endpoint + "|node:" + node
-		}
-	case "railway":
-		endpoint := strings.TrimRight(strings.TrimSpace(routingSafeURL(cfg.Railway.APIURL)), "/")
-		projectID := strings.TrimSpace(cfg.Railway.ProjectID)
-		environmentID := strings.TrimSpace(cfg.Railway.EnvironmentID)
-		if endpoint != "" && projectID != "" && environmentID != "" {
-			return "endpoint:" + endpoint + "|project:" + projectID + "|environment:" + environmentID
+			return scoper.ClaimScope(cfg)
 		}
 	}
 	return ""
-}
-
-func normalizedCubeSandboxClaimEndpoint(raw string) string {
-	endpoint := strings.TrimSpace(routingSafeURL(raw))
-	parsed, err := url.Parse(endpoint)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return strings.TrimRight(endpoint, "/")
-	}
-	parsed.User = nil
-	parsed.RawQuery = ""
-	parsed.ForceQuery = false
-	parsed.Fragment = ""
-	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	host := strings.ToLower(parsed.Hostname())
-	port := parsed.Port()
-	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
-		port = ""
-	}
-	if port != "" {
-		parsed.Host = net.JoinHostPort(host, port)
-	} else if strings.Contains(host, ":") {
-		parsed.Host = "[" + host + "]"
-	} else {
-		parsed.Host = host
-	}
-	parsed.Path = strings.TrimRight(parsed.Path, "/")
-	parsed.RawPath = ""
-	return strings.TrimRight(parsed.String(), "/")
-}
-
-func azureLeaseClaimScope(subscriptionID, resourceGroup string) string {
-	subscriptionID = strings.ToLower(strings.TrimSpace(subscriptionID))
-	resourceGroup = strings.ToLower(strings.TrimSpace(resourceGroup))
-	if subscriptionID == "" || resourceGroup == "" {
-		return ""
-	}
-	return "subscription:" + subscriptionID + "|resource-group:" + resourceGroup
-}
-
-func normalizedNamespaceClaimEndpoint(raw string) string {
-	endpoint := strings.TrimSpace(routingSafeURL(raw))
-	addedScheme := false
-	parseValue := endpoint
-	if endpoint != "" && !strings.Contains(endpoint, "://") {
-		parseValue = "https://" + endpoint
-		addedScheme = true
-	}
-	parsed, err := url.Parse(parseValue)
-	if err != nil || parsed.Host == "" {
-		return strings.TrimRight(endpoint, "/")
-	}
-	parsed.User = nil
-	parsed.RawQuery = ""
-	parsed.Fragment = ""
-	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	parsed.Host = strings.ToLower(parsed.Host)
-	parsed.Path = strings.TrimRight(parsed.Path, "/")
-	parsed.RawPath = ""
-	out := parsed.String()
-	if addedScheme {
-		out = strings.TrimPrefix(out, "https://")
-	}
-	return out
-}
-
-func normalizedProxmoxClaimEndpoint(raw string) string {
-	endpoint := strings.TrimSpace(raw)
-	parsed, err := url.Parse(endpoint)
-	if err != nil || parsed.Host == "" {
-		endpoint = strings.TrimRight(endpoint, "/")
-		endpoint = strings.TrimSuffix(endpoint, "/api2/json")
-		return endpoint
-	}
-	parsed.User = nil
-	parsed.RawQuery = ""
-	parsed.Fragment = ""
-	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	parsed.Host = strings.ToLower(parsed.Host)
-	parsed.Path = strings.TrimRight(parsed.Path, "/")
-	parsed.Path = strings.TrimSuffix(parsed.Path, "/api2/json")
-	parsed.RawPath = ""
-	return parsed.String()
 }
 
 func resolveLeaseClaim(identifier string) (leaseClaim, bool, error) {
