@@ -129,10 +129,15 @@ The non-auth settings can also be set through environment variables:
 `CRABBOX_DAYTONA_WORK_ROOT`, `CRABBOX_DAYTONA_SSH_GATEWAY_HOST`, and
 `CRABBOX_DAYTONA_SSH_ACCESS_MINUTES`.
 
-## Lifecycle
+## Direct lifecycle
 
 1. Create or resolve a Daytona sandbox from `daytona.snapshot`.
-2. Store Crabbox labels and a local repo claim for the lease.
+2. Create private previews, configure Daytona's native wall-clock TTL and idle
+   auto-stop interval, and store Crabbox labels and an exact local repo claim.
+   The adapter records allocation before waiting for readiness, so a failed
+   startup is rolled back. A lost create response is reconciled by the unique
+   sandbox name and verified ownership, without allocating again. Failed
+   cleanup retains a recovery claim and reports the exact sandbox and lease IDs.
 3. For `run`, build the Crabbox sync manifest, stream a gzipped tar archive to
    the Daytona toolbox upload endpoint, extract it in the sandbox, and execute
    the command through the Daytona process APIs. Remote process timeouts are
@@ -140,9 +145,26 @@ The non-auth settings can also be set through environment variables:
    capped at Daytona's maximum supported value; callers without a deadline use
    that maximum. Toolbox HTTP requests are canceled by their request context
    without an independent client-wide timeout.
+   Sync prunes only deleted manifest-owned source paths; dependencies, caches,
+   and other remote-only files survive ordinary resyncs. The next manifest is
+   published only after successful extraction. Active sync and execution
+   refresh Daytona activity at least every 30 seconds so quiet commands do not
+   trigger idle auto-stop.
 4. For `ssh`, request short-lived SSH access (TTL `daytona.sshAccessMinutes`),
    parse Daytona's `sshCommand`, and redact the token in normal output.
 5. Delete the sandbox on release unless the lease is kept.
+
+`--ttl` is a hard upper bound even while commands run or a lease is kept.
+Daytona lifetime settings use whole minutes, so positive durations are rounded
+up. Idle auto-stop preserves the sandbox filesystem; native TTL ultimately
+deletes the sandbox. `heartbeat --idle-timeout` changes the provider's auto-stop
+policy as well as Crabbox metadata. Status readiness comes from Daytona's live
+state, never a previously stored `ready` label. Explicit stop and rollback wait
+for confirmed provider deletion, with a bounded cleanup deadline.
+
+API, toolbox, and archive-upload clients refuse redirects that change scheme,
+host, or effective port. Custom endpoints require HTTPS except for loopback
+development endpoints.
 
 ## Capabilities
 

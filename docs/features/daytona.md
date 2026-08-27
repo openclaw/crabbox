@@ -130,10 +130,16 @@ crabbox stop --provider daytona swift-crab
 - **`warmup`** creates a Daytona sandbox from `daytona.snapshot`, waits for it to
   become ready, records Crabbox labels, then prints a normal Crabbox lease ID and
   slug.
+  Both direct creation paths use private previews and Daytona's native hard TTL.
+  Allocation is recorded before readiness polling; failed startup triggers
+  ownership-checked cleanup and preserves the recovery claim if cleanup fails.
 - **`run --id`** resolves a Daytona sandbox, uploads a Crabbox sync-manifest
   archive through Daytona toolbox file APIs, extracts it in the sandbox, and
   executes the command through Daytona toolbox process APIs. The command transport
   is Daytona's SDK — not direct SSH.
+  Resync preserves installed dependencies and remote-only files, deleting only
+  source paths removed from the sync manifest. Periodic activity refreshes keep
+  quiet commands alive until their command deadline or the hard sandbox TTL.
 - **`list`** and **`status`** discover sandboxes only when Daytona labels bind
   them to the Daytona provider and a canonical Crabbox lease. Direct IDs with
   missing or mismatched ownership labels are rejected.

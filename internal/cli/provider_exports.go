@@ -556,6 +556,20 @@ func TouchDirectLeaseLabelsWithIdleTimeoutOverride(labels map[string]string, cfg
 	return touchDirectLeaseLabelsWithIdleTimeoutOverride(labels, cfg, state, now, idleTimeoutOverride)
 }
 
+// PruneArchiveSyncManifestCommand preserves remote-only files while pruning the
+// previous archive manifest with the same path checks as Git overlay sync.
+func PruneArchiveSyncManifestCommand(workdir, token string, allowMassDeletions bool) string {
+	metadata := `if [ -L .crabbox ] || [ ! -d .crabbox ]; then
+  echo "archive sync requires nonsymlink metadata" >&2; exit 67
+fi
+meta_dir="$PWD/.crabbox"
+for file in "$meta_dir/sync-manifest" "$meta_dir/sync-manifest.` + token + `.new" "$meta_dir/sync-deleted.` + token + `.new"; do
+  if [ -L "$file" ]; then echo "archive sync refuses symlink manifest" >&2; exit 67; fi
+done
+`
+	return remotePruneSafeSyncManifest(workdir, token, metadata, allowMassDeletions)
+}
+
 func LeaseLabelTime(t time.Time) string {
 	return leaseLabelTime(t)
 }
