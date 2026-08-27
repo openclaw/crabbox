@@ -916,6 +916,7 @@ func runSSHStreamResult(ctx context.Context, target SSHTarget, remote string, st
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 		probe := target
 		probe.Port = port
+		probe = sshStreamTargetForGOOS(probe, runtime.GOOS)
 		runErr := transport.run(ctx, probe, "10", "3", stdout, stderr)
 		if runErr == nil {
 			return 0, nil
@@ -927,6 +928,13 @@ func runSSHStreamResult(ctx context.Context, target SSHTarget, remote string, st
 		}
 	}
 	return lastCode, errors.Join(lastErr, prepared.close(ctx, target))
+}
+
+func sshStreamTargetForGOOS(target SSHTarget, goos string) SSHTarget {
+	if goos == "darwin" {
+		target.NoControlMaster = true
+	}
+	return target
 }
 
 func runSSHCommand(cmd *exec.Cmd, stdout, stderr io.Writer) error {

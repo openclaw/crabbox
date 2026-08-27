@@ -97,7 +97,8 @@ bootstrap attestation, keep their own aliases and lifecycle rules.
 On macOS and Linux, connection multiplexing is enabled
 (`ControlMaster=auto`, `ControlPersist=10m`) with a `ControlPath` scoped by the
 key path, so reused IPs do not share a control socket between leases. Windows
-OpenSSH and secret-authenticated targets disable multiplexing
+OpenSSH and secret-authenticated targets disable multiplexing. On macOS, final
+streaming commands also disable multiplexing at the user-command boundary
 (`ControlMaster=no`).
 
 ## What the broker sees

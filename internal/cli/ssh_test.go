@@ -1584,6 +1584,56 @@ exit 0
 	}
 }
 
+func TestSSHStreamTargetForGOOSDisablesMuxOnlyOnMacOS(t *testing.T) {
+	target := SSHTarget{User: "crabbox", Host: "203.0.113.10", Port: "22"}
+	if got := sshStreamTargetForGOOS(target, "darwin"); !got.NoControlMaster {
+		t.Fatal("macOS stream target kept ControlMaster enabled")
+	}
+	if got := sshStreamTargetForGOOS(target, "linux"); got.NoControlMaster {
+		t.Fatal("Linux stream target unexpectedly disabled ControlMaster")
+	}
+	if target.NoControlMaster {
+		t.Fatal("input target was mutated")
+	}
+}
+
+func TestRunSSHStreamResultDoesNotReplayMatchingRemoteStderr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell ssh fixture")
+	}
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "ssh")
+	callsPath := filepath.Join(dir, "calls")
+	script := `#!/bin/sh
+printf 'call\n' >> "$CRABBOX_FAKE_SSH_CALLS"
+printf '%s\n' "$@" >> "$CRABBOX_FAKE_SSH_CALLS"
+echo 'mux_client_request_session: send fds failed' >&2
+exit 255
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_CALLS", callsPath)
+
+	code, err := runSSHStreamResult(t.Context(), SSHTarget{
+		User: "crabbox", Host: "203.0.113.10", Port: "22", FallbackPorts: []string{},
+	}, "true", io.Discard, io.Discard)
+	if code != 255 || err == nil {
+		t.Fatalf("code=%d err=%v, want one exit-255 failure", code, err)
+	}
+	calls, readErr := os.ReadFile(callsPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if got := strings.Count(string(calls), "call\n"); got != 1 {
+		t.Fatalf("SSH calls=%d want 1", got)
+	}
+	if got, want := strings.Contains(string(calls), "ControlMaster=no"), runtime.GOOS == "darwin"; got != want {
+		t.Fatalf("ControlMaster=no present=%t want %t:\n%s", got, want, calls)
+	}
+}
+
 func TestSSHCommandLineRedactsSecretAuthUser(t *testing.T) {
 	target := SSHTarget{
 		User:       "tok_live_secret",

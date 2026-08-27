@@ -18,9 +18,11 @@ There is no special slow-network mode. SSH stays the universal command
 transport, but the CLI enables SSH `ControlMaster` with a `ControlPersist`
 window (10 minutes) so repeated readiness probes, sync helpers, and commands
 reuse one connection instead of paying a fresh handshake each time. Connection
-multiplexing is disabled only when a target requires an auth secret. Streaming
-commands retry coordinator-provided SSH fallback ports, just like readiness and
-helper probes.
+multiplexing is disabled when a target requires an auth secret. On macOS, the
+final streaming command also uses a non-multiplexed connection to avoid local
+ControlMaster socket backpressure at the non-idempotent command boundary.
+Streaming commands retry coordinator-provided SSH fallback ports, just like
+readiness and helper probes.
 
 When you use a broker (coordinator), `crabbox attach` and lease heartbeats use a
 single authenticated coordinator WebSocket (`/v1/control`) instead of repeated
