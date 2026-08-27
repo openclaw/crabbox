@@ -650,6 +650,12 @@ on native Apple Silicon and Intel runners from protected-default code, then
 authorize publication and the Homebrew update as separate gates. See
 [Release engineering](docs/RELEASING.md).
 
+Git-overlay integration tests use real Git with task-owned local and loopback
+origins. Their local SSH stand-ins isolate Git authentication settings and
+disable interactive credential requests, including during ordinary seed
+fallback. A credential-helper/askpass canary guards this test-only boundary;
+the separate production overlay security tests still inject hostile Git config.
+
 Cloudflare, Node/PostgreSQL, container, ingress, secrets, and DNS deployment live
 in [docs/infrastructure.md](docs/infrastructure.md). The dedicated ECS Fargate
 path is documented in
