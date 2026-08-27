@@ -274,14 +274,6 @@ func (b *daytonaLeaseBackend) Stop(ctx context.Context, req StopRequest) error {
 	}
 	sandbox, leaseID, err := resolveDaytonaSandbox(ctx, client, b.cfg, req.ID)
 	if err != nil {
-		// Native TTL may already have destroyed an exactly claimed resource.
-		if claim, ok, claimErr := resolveLeaseClaimForProvider(req.ID, daytonaProvider); claimErr == nil && ok && claim.CloudID != "" {
-			if _, getErr := client.GetSandbox(ctx, claim.CloudID); daytonaIsNotFoundError(getErr) {
-				removeLeaseClaim(claim.LeaseID)
-				fmt.Fprintf(b.rt.Stderr, "released lease=%s sandbox=%s already_absent=true\n", claim.LeaseID, claim.CloudID)
-				return nil
-			}
-		}
 		return err
 	}
 	if err := requireExactDaytonaClaim(leaseID, sandbox); err != nil {
