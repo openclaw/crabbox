@@ -52,6 +52,12 @@ the `environment` retain the canonical provider name and report selected=true. P
 `config show --provider <name>` reports `flag` because that command-scoped
 override wins the merge.
 
+For `local-container`, an omitted architecture is reported as `arch=native`
+(JSON: `"architecture":"native"`). This describes the runtime's native selection,
+not a resolved daemon architecture; config inspection does not probe Docker or
+Podman. Explicit `amd64` or `arm64` selections remain unchanged. `native` is a
+diagnostic value, not a new accepted `--arch` or configuration input.
+
 Secrets are never printed. Token-bearing fields are reduced to a status word:
 
 - Provider endpoint URL userinfo is replaced with `<redacted>@`; query and

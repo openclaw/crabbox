@@ -45,6 +45,10 @@ func (Provider) SupportsArchitecture(cfg core.Config, architecture string) bool 
 	return cfg.TargetOS == core.TargetLinux && (architecture == core.ArchitectureAMD64 || architecture == core.ArchitectureARM64)
 }
 
+func (Provider) DescribeImplicitArchitecture(core.Config) string {
+	return "native"
+}
+
 func (Provider) CreationOnlyFlagNames() []string {
 	return []string{"local-container-volume"}
 }

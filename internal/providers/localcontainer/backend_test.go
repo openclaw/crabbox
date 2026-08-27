@@ -1634,6 +1634,10 @@ func TestAssertRequestedArchitectureUsesCapturedRemoteRuntimeRoute(t *testing.T)
 }
 
 func TestAssertRequestedArchitectureOmittedDoesNotProbe(t *testing.T) {
+	describer, ok := any(Provider{}).(core.ProviderConfigArchitectureDescriber)
+	if !ok || describer.DescribeImplicitArchitecture(core.BaseConfig()) != "native" {
+		t.Fatal("omitted architecture diagnostics must describe native runtime selection")
+	}
 	runner := &recordingRunner{}
 	b := testBackend(runner)
 	if got, err := b.assertRequestedArchitecture(context.Background(), b.cfg); err != nil || got != "" {

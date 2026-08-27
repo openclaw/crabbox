@@ -132,6 +132,10 @@ in `--preflight` output. A mismatch or unrecognized daemon response fails before
 container creation. Crabbox never adds `--platform` or opts into emulation for
 this assertion. When `--arch` is omitted, the runtime keeps its existing native
 behavior without an added architecture guarantee or probe.
+`config show` describes this omitted-architecture state as `arch=native`
+(JSON: `"architecture":"native"`), rather than presenting the compiled AMD64
+compatibility default as an effective runtime architecture. Explicit selections
+remain `amd64` or `arm64`; `native` is output-only.
 
 ### Memory-failure evidence
 
