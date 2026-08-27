@@ -8,9 +8,9 @@ import (
 	"strings"
 )
 
-func (b *modalBackend) uploadEnvProfile(ctx context.Context, client modalAPI, sandboxID string, env map[string]string) (string, func(), error) {
+func (b *modalBackend) uploadEnvProfile(ctx context.Context, client modalAPI, sandboxID string, env map[string]string) (string, func(context.Context), error) {
 	if len(env) == 0 {
-		return "", func() {}, nil
+		return "", func(context.Context) {}, nil
 	}
 	file, err := os.CreateTemp("", "crabbox-modal-env-*.sh")
 	if err != nil {
@@ -32,16 +32,16 @@ func (b *modalBackend) uploadEnvProfile(ctx context.Context, client modalAPI, sa
 		return "", nil, fmt.Errorf("close modal env profile: %w", err)
 	}
 	remotePath := "/tmp/crabbox-modal-env-" + modalRandomSuffix() + ".sh"
-	if err := client.UploadFile(ctx, sandboxID, localPath, remotePath); err != nil {
-		return "", nil, err
-	}
-	keep = true
-	cleanup := func() {
+	cleanup := func(cleanupCtx context.Context) {
 		cleanupLocal()
-		if err := b.execShell(context.Background(), client, sandboxID, "rm -f "+shellQuote(remotePath), nil); err != nil {
+		if err := b.execShell(cleanupCtx, client, sandboxID, "rm -f "+shellQuote(remotePath), nil); err != nil {
 			fmt.Fprintf(b.rt.Stderr, "warning: modal env profile cleanup failed for %s: %v\n", sandboxID, err)
 		}
 	}
+	if err := client.UploadFile(ctx, sandboxID, localPath, remotePath); err != nil {
+		return "", cleanup, err
+	}
+	keep = true
 	return remotePath, cleanup, nil
 }
 
