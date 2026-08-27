@@ -131,7 +131,11 @@ desired-capacity policies, and counters use independent
 coordinator deletes a v1 key only after writing the matching v2 policy
 successfully. Counters remain in the v1 namespace. Neither Durable Object
 prefix scans nor PostgreSQL prefix scans used by deployed legacy coordinators
-can enumerate or borrow typed capacity after a rollback. Legacy clients
+can enumerate or borrow typed capacity after a rollback. Existing typed fill
+claims that omitted `provider` retain their capacity reservation: their valid
+typed image identity supplies the provider for comparison, while an explicit
+conflicting provider never matches. This prevents a migration from issuing
+duplicate fill claims. Legacy clients
 continue using unchanged legacy records; typed clients fail explicitly against
 old coordinators and never retry legacy routes.
 
