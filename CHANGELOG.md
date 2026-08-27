@@ -12,6 +12,7 @@
 ### Fixed
 
 - Unified provider-owned routing for stop, retry, rescue, and WebVNC commands, preserving scope, explicit false release settings, and Kubernetes environment selectors without exposing URL credentials.
+- Fixed portable Node coordinator control heartbeats deadlocking subsequent lifecycle operations, releases, and graceful shutdown.
 - Made direct Daytona sandboxes private, preserved dependencies across syncs, enforced native TTL and idle heartbeats, reported authoritative readiness, and verified allocation rollback and credential-safe redirects.
 - Fixed brokered Windows bootstrap on images with built-in OpenSSH by sharing the CLI's installed/system/PATH command resolution; centralized common bootstrap fragments, pinned downloads, and portable OS metadata across both runtimes.
 - Unified E2B, Modal, and Cloudflare Sandbox run retention, bounded cleanup, and final timing; preserved command exit codes on cleanup failure, applied Modal keep-on-failure to setup/sync failures, and checked Modal archives before creation with staged workspace replacement.
@@ -25,6 +26,7 @@
 - Removed coordinator URL credentials from Code and WebVNC browser links, opener arguments, and viewer bootstrap form actions. Thanks @coygeek.
 - Redacted configured and runtime-only credentials from coordinator-stored run failure diagnostics while preserving raw command output. Thanks @coygeek.
 - Retried temporary Machine0 read outages within the existing operation deadline while keeping provider mutations single-attempt.
+- Added actionable Machine0 recovery hints for unclaimed lease IDs without treating short name hashes as proof of lease ownership.
 
 ## 0.46.1 - 2026-08-24
 

@@ -184,9 +184,17 @@ Use `--keep` to keep a normal Crabbox run lease for later reuse. Adopt an
 existing unclaimed Machine0 VM only through an explicit `--reclaim` reuse;
 destructive release requires an exact local claim bound to the Machine0 ID.
 
+If a local claim is missing, a canonical Crabbox lease ID can suggest a
+Crabbox-named VM from Machine0 inventory, but the short name hash cannot prove
+the full lease identity. Even a unique match fails closed with a candidate-name
+hint. Inspect that machine and use its explicit name with `--reclaim` to adopt
+it; Crabbox fetches its full details, including its SSH key and endpoint.
+Discovery alone never authorizes reuse or deletion.
+
 Machine0 VM names are limited to 31 lowercase letters, digits, and hyphens.
 Crabbox truncates only the human slug portion and retains an eight-character
-lease hash, so long requested slugs remain deterministic and collision-safe.
+lease hash, so long requested slugs remain deterministic. The short hash can
+collide; durable claims, not name hashes, establish lease ownership.
 
 ### Fixed-ID replay
 
