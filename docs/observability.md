@@ -152,10 +152,11 @@ are mutually exclusive and add up to `runnerTotalMs`; any observed time that
 cannot be assigned from an existing measurement is named `unattributed`.
 Provider acquire or pool borrow, provider/SSH readiness, workspace seed and
 overlay, command, artifacts, and cleanup appear when Crabbox observes them.
-Provider-owned delegated setup is named `delegated.opaque` rather than split
-into invented timings. The older `leaseMs`, `bootstrapMs`, `syncMs`,
-`syncPhases`, `commandMs`, and `commandPhases` fields remain unchanged for
-compatibility.
+Unmeasured time inside a delegated provider call is named `delegated.opaque`;
+Crabbox-owned follow-up work is `unattributed`. The final JSON record is written
+after receipts and cleanup, including when post-command downloads or artifact
+globs fail. The older `leaseMs`, `bootstrapMs`, `syncMs`, `syncPhases`,
+`commandMs`, and `commandPhases` fields remain unchanged for compatibility.
 
 Commands can define their own phases by printing marker lines to stdout or
 stderr:

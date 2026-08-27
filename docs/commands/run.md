@@ -619,9 +619,12 @@ when a sum-safe breakdown is required.
 Crabbox emits provider startup subdivisions only when the coordinator returned
 measured request, network-readiness, or bootstrap timing. It does not infer
 provider-internal timings. Delegated providers expose known sync and command
-time and place the provider-owned remainder in an explicit
-`delegated.opaque` phase. Phase identity fields and artifact transfer counts or
-bytes appear only when the underlying run already has those values.
+time and place only unmeasured time inside the delegated provider call in
+`delegated.opaque`; Crabbox-owned follow-up work is `unattributed`. The final
+JSON record follows receipts and cleanup, including when a post-command
+download or artifact-glob collection fails. Phase identity fields and artifact
+transfer counts or bytes appear only when the underlying run already has those
+values.
 Commands can emit
 phase markers on stdout or stderr as
 `CRABBOX_PHASE:<name>`; Crabbox records those as `commandPhases` without removing

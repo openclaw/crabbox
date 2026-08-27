@@ -319,7 +319,7 @@ func finalizeRunnerPhases(report TimingReport) TimingReport {
 	filtered := make([]RunnerPhase, 0, len(report.RunnerPhases)+1)
 	var accounted int64
 	for _, phase := range report.RunnerPhases {
-		if phase.Ms <= 0 || phase.Name == "unattributed" {
+		if phase.Ms <= 0 {
 			continue
 		}
 		phase = populateRunnerPhaseMetadata(report, phase)

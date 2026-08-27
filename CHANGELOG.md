@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Preserved final timing reports and delegated/client phase ownership when post-command artifact downloads or glob collection fail.
 - Required exact host/project-scoped Semaphore job ownership claims and fresh provider verification before stopping jobs.
 - Required exact API-scoped Morph instance ownership claims and fresh provider verification before pause or deletion.
 - Returned machine-readable missing checkpoint verdicts and made checkpoint deletion idempotent when local records or coordinator-owned resources are already absent.

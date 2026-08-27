@@ -396,6 +396,41 @@ func assertSSHLogContains(t *testing.T, logPath, want string) {
 	}
 }
 
+func requireArtifactFailureTimingAfterReceipt(t *testing.T, stderr string) TimingReport {
+	t.Helper()
+	lines := strings.Split(strings.TrimSpace(stderr), "\n")
+	var (
+		report    TimingReport
+		jsonLine  string
+		jsonCount int
+	)
+	for _, line := range lines {
+		var candidate TimingReport
+		if err := json.Unmarshal([]byte(line), &candidate); err == nil && candidate.Provider != "" {
+			report = candidate
+			jsonLine = line
+			jsonCount++
+		}
+	}
+	if jsonCount != 1 || jsonLine != lines[len(lines)-1] {
+		t.Fatalf("timing JSON count=%d final=%t\nstderr:\n%s", jsonCount, jsonLine == lines[len(lines)-1], stderr)
+	}
+	if report.ExitCode != 7 {
+		t.Fatalf("timing exitCode=%d, want 7\nreport=%#v", report.ExitCode, report)
+	}
+	var artifactTiming bool
+	for _, phase := range report.RunnerPhases {
+		artifactTiming = artifactTiming || phase.Name == "artifacts" && phase.Ms > 0
+	}
+	if !artifactTiming {
+		t.Fatalf("missing artifact timing: %#v", report.RunnerPhases)
+	}
+	if receiptIndex, jsonIndex := strings.LastIndex(stderr, "artifact kind=receipt"), strings.LastIndex(stderr, jsonLine); receiptIndex < 0 || jsonIndex <= receiptIndex {
+		t.Fatalf("receipt was not written before timing JSON:\n%s", stderr)
+	}
+	return report
+}
+
 func TestRunCommandInjectsReservedMetadataAcrossSSHCommandModes(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1852,7 +1887,7 @@ func TestRunnerPhasesUseOnlyKnownDisjointDelegatedMeasurements(t *testing.T) {
 	}
 }
 
-func TestDelegatedRunnerTailExtendsOpaquePhase(t *testing.T) {
+func TestDelegatedRunnerFollowUpStaysUnattributed(t *testing.T) {
 	startedAt := time.Unix(100, 0)
 	report := finalizeTimingReport(TimingReport{
 		Provider:      "blacksmith-testbox",
@@ -1863,12 +1898,15 @@ func TestDelegatedRunnerTailExtendsOpaquePhase(t *testing.T) {
 	})
 	includeObservedRunnerTail(&report, startedAt, startedAt.Add(1300*time.Millisecond))
 	report = finalizeTimingReport(report)
+	report.RunnerTotalMs += 200
+	report.RunnerPhases = append(report.RunnerPhases, RunnerPhase{Name: "unattributed", Ms: 200})
+	report = finalizeTimingReport(finalizeTimingReport(report))
 
-	var opaque *RunnerPhase
+	var opaque, unattributed *RunnerPhase
 	for index := range report.RunnerPhases {
 		phase := &report.RunnerPhases[index]
 		if phase.Name == "unattributed" {
-			t.Fatalf("delegated tail was generic unattributed: %#v", report.RunnerPhases)
+			unattributed = phase
 		}
 		if phase.Name == "delegated.opaque" {
 			opaque = phase
@@ -1876,6 +1914,9 @@ func TestDelegatedRunnerTailExtendsOpaquePhase(t *testing.T) {
 	}
 	if opaque == nil || opaque.Ms != 700 || !opaque.Opaque {
 		t.Fatalf("delegated opaque phase=%#v phases=%#v", opaque, report.RunnerPhases)
+	}
+	if unattributed == nil || unattributed.Ms != 200 || report.RunnerTotalMs != 1500 {
+		t.Fatalf("client unattributed phase=%#v total=%d phases=%#v", unattributed, report.RunnerTotalMs, report.RunnerPhases)
 	}
 }
 
@@ -3889,7 +3930,7 @@ func TestRunCommandWritesTerminalReceiptWhenPostCommandDownloadFails(t *testing.
 cmd=""
 for arg do cmd="$arg"; done
 case "$cmd" in
-  *"base64 <"*) printf 'post-command download failed\n' >&2; exit 8 ;;
+  *"base64 <"*) sleep 0.01; printf 'post-command download failed\n' >&2; exit 8 ;;
 esac
 exit 0
 `)
@@ -3902,12 +3943,14 @@ exit 0
 		"--provider", "run-env-profile-test",
 		"--no-sync",
 		"--keep-on-failure",
+		"--timing-json",
 		"--attest", receiptPath,
 		"--download", "reports/data/manifest.json=" + downloadPath,
 		"--", "true",
 	})
-	if err == nil {
-		t.Fatalf("runCommand succeeded\nstdout=%s\nstderr=%s", stdout.String(), stderr.String())
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 7 {
+		t.Fatalf("error=%v, want exit 7\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
 	}
 	data, readErr := os.ReadFile(receiptPath)
 	if readErr != nil {
@@ -3917,12 +3960,72 @@ exit 0
 	if decodeErr != nil {
 		t.Fatalf("decode terminal receipt: %v", decodeErr)
 	}
-	if receipt.ExitCode != exitCodeForError(err, 7) || receipt.ExitCode == 0 {
-		t.Fatalf("receipt exit=%d want=%d run error=%v", receipt.ExitCode, exitCodeForError(err, 7), err)
+	if receipt.ExitCode != 7 {
+		t.Fatalf("receipt exit=%d want=7 run error=%v", receipt.ExitCode, err)
 	}
-	if !strings.Contains(stderr.String(), "artifact kind=receipt") {
-		t.Fatalf("missing terminal receipt output:\n%s", stderr.String())
+	requireArtifactFailureTimingAfterReceipt(t, stderr.String())
+}
+
+func TestRunCommandWritesTimingWhenPostCommandArtifactGlobFails(t *testing.T) {
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	sshPath := filepath.Join(dir, "ssh")
+	receiptPath := filepath.Join(dir, "receipt.json")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	_, sshPort, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	installWorkspaceOwnerAwareSSH(t, sshPath, `#!/bin/sh
+input="$(cat)"
+case "$input" in
+  *"artifact_safe_search_root"*) sleep 0.01; printf 'post-command artifact glob failed\n' >&2; exit 8 ;;
+esac
+exit 0
+`)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+
+	var stdout, stderr bytes.Buffer
+	err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-env-profile-test",
+		"--no-sync",
+		"--keep-on-failure",
+		"--timing-json",
+		"--attest", receiptPath,
+		"--artifact-glob", "reports/*.txt",
+		"--", "true",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 7 {
+		t.Fatalf("error=%v, want exit 7\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	data, readErr := os.ReadFile(receiptPath)
+	if readErr != nil {
+		t.Fatalf("read terminal receipt: %v\nrun error=%v\nstderr=%s", readErr, err, stderr.String())
+	}
+	receipt, decodeErr := decodeTerminalRunReceipt(data)
+	if decodeErr != nil {
+		t.Fatalf("decode terminal receipt: %v", decodeErr)
+	}
+	if receipt.ExitCode != 7 {
+		t.Fatalf("receipt exit=%d want=7 run error=%v", receipt.ExitCode, err)
+	}
+	requireArtifactFailureTimingAfterReceipt(t, stderr.String())
 }
 
 func TestRunCommandMacOSMissingRequiredArtifactE2E(t *testing.T) {
