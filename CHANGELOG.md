@@ -11,10 +11,10 @@
 
 ### Fixed
 
-- Put copy-command usage, path syntax, and examples before the provider flag reference in `cp --help`. Thanks @coygeek.
 - Required exact host/project-scoped Semaphore job ownership claims and fresh provider verification before stopping jobs.
 - Required exact API-scoped Morph instance ownership claims and fresh provider verification before pause or deletion.
 - Returned machine-readable missing checkpoint verdicts and made checkpoint deletion idempotent when local records or coordinator-owned resources are already absent.
+- Put copy-command usage, path syntax, and examples before the provider flag reference in `cp --help`. Thanks @coygeek.
 - Required exact pool-scoped VM ownership claims and fresh provider verification before XCP-ng release or cleanup deletion.
 - Required exact, scope-bound ownership claims and fresh provider verification before Sprites deletion or Tenki session termination.
 - Required exact, scope-bound local ownership claims before Namespace Devbox and Compute Instance lifecycle mutations, with ownership-verified forced recovery for exact Compute Instance IDs.
