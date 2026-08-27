@@ -2,6 +2,7 @@ package vercelsandbox
 
 import (
 	"flag"
+	"io"
 	"strings"
 	"testing"
 
@@ -158,5 +159,47 @@ func TestValidateVercelSandboxConfigAcceptsCurrentRuntimes(t *testing.T) {
 				t.Fatalf("validate runtime %q: %v", runtime, err)
 			}
 		})
+	}
+}
+
+func TestVercelSandboxFlagPresence(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		t.Run(map[bool]string{true: "explicit zero values", false: "omitted"}[explicit], func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.Provider = providerName
+			cfg.VercelSandbox.Persistent = true
+			cfg.VercelSandbox.VCPUs = 2
+			cfg.VercelSandbox.Ports = []string{"3000"}
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			values := RegisterVercelSandboxProviderFlags(fs, core.BaseConfig())
+			var args []string
+			if explicit {
+				args = []string{"--vercel-sandbox-runtime=", "--vercel-sandbox-vcpus=0", "--vercel-sandbox-persistent=false", "--vercel-sandbox-ports="}
+			}
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			if err := ApplyVercelSandboxProviderFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if explicit {
+				if cfg.VercelSandbox.Runtime != "" || cfg.VercelSandbox.VCPUs != 0 || cfg.VercelSandbox.Persistent || len(cfg.VercelSandbox.Ports) != 0 {
+					t.Fatalf("explicit zero values not applied: %#v", cfg.VercelSandbox)
+				}
+			} else if cfg.VercelSandbox.VCPUs != 2 || !cfg.VercelSandbox.Persistent || len(cfg.VercelSandbox.Ports) != 1 {
+				t.Fatalf("registration defaults overrode config: %#v", cfg.VercelSandbox)
+			}
+		})
+	}
+}
+
+func TestVercelSandboxFlagParsingAndNoSecretFlags(t *testing.T) {
+	for _, arg := range []string{"--vercel-sandbox-vcpus=nope", "--vercel-sandbox-timeout-secs=nope", "--vercel-sandbox-persistent=nope", "--vercel-sandbox-token=fake", "--vercel-sandbox-auth-token=fake", "--vercel-sandbox-api-url=https://untrusted.example"} {
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		RegisterVercelSandboxProviderFlags(fs, core.BaseConfig())
+		if err := fs.Parse([]string{arg}); err == nil {
+			t.Fatalf("accepted %s", arg)
+		}
 	}
 }

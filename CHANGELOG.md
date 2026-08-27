@@ -12,6 +12,7 @@
 ### Fixed
 
 - Fixed brokered Windows bootstrap on images with built-in OpenSSH by sharing the CLI's installed/system/PATH command resolution; centralized common bootstrap fragments, pinned downloads, and portable OS metadata across both runtimes.
+- Unified E2B, Modal, and Cloudflare Sandbox run retention, bounded cleanup, and final timing; preserved command exit codes on cleanup failure, applied Modal keep-on-failure to setup/sync failures, and checked Modal archives before creation with staged workspace replacement.
 - Required exact host/project-scoped Semaphore job ownership claims and fresh provider verification before stopping jobs.
 - Required exact API-scoped Morph instance ownership claims and fresh provider verification before pause or deletion.
 - Returned machine-readable missing checkpoint verdicts and made checkpoint deletion idempotent when local records or coordinator-owned resources are already absent.

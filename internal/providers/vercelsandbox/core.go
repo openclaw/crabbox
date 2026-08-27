@@ -36,8 +36,8 @@ const (
 	providerName   = "vercel-sandbox"
 	providerFamily = "vercel"
 	leasePrefix    = "vsbx_"
-	defaultWorkdir = "/vercel/sandbox/crabbox"
-	defaultRuntime = "node24"
+	defaultWorkdir = core.VercelSandboxConfigDefaultWorkdir
+	defaultRuntime = core.VercelSandboxConfigDefaultRuntime
 	targetLinux    = core.TargetLinux
 	NetworkPublic  = "public"
 )

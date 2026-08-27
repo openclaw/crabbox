@@ -362,7 +362,7 @@ func UpdateLeaseClaimTouchIfUnchanged(leaseID string, expected LeaseClaim, label
 // UpdateLeaseClaimTouchIfUnchangedAction fences a provider mutation and commits
 // its endpoint, lifecycle timestamps, and optional timeout in one claim write.
 func UpdateLeaseClaimTouchIfUnchangedAction(leaseID string, expected LeaseClaim, lastUsed time.Time, idleTimeoutOverride *time.Duration, action func() (Server, SSHTarget, bool, error)) (LeaseClaim, Server, SSHTarget, error) {
-	return updateLeaseClaimEndpointIfUnchangedActionMode(leaseID, expected, action, false, &leaseClaimTouchPayload{
+	return updateLeaseClaimEndpointIfUnchangedActionMode(leaseID, expected, action, claimEndpointUpdate, &leaseClaimTouchPayload{
 		lastUsed:            lastUsed,
 		idleTimeoutOverride: idleTimeoutOverride,
 	})

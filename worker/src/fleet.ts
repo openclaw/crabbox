@@ -41,6 +41,15 @@ import {
 import { InvalidAWSRegionError, sanitizeAWSRegion } from "./aws-region";
 import { AzureClient, azureRegionCandidates, type AzureDeferredCleanupRequest } from "./azure";
 import {
+  BridgeTickets,
+  validBridgeTicket as validLeaseBridgeTicket,
+  type BridgeTicketRecord,
+  type CachedAdminGrant,
+  type CachedBridgeGrant,
+  type EgressRole,
+  type LeaseBridgeTicketConsumption,
+} from "./bridge-tickets";
+import {
   codeOriginForLease,
   codeProxyRequestBodyBytes,
   isIsolatedCodeRequest,
@@ -323,13 +332,10 @@ const runLogChunkBytes = 64 * 1024;
 const maxLeaseTelemetryHistory = 60;
 const maxRunTelemetrySamples = 60;
 const maxExternalRunnerSyncItems = 200;
-const webVNCTicketTTLSeconds = 120;
 const webVNCPortalViewerTicketTTLSeconds = 120;
 const webVNCPortalViewerSessionTTLSeconds = 30 * 60;
-const codeTicketTTLSeconds = 120;
 const codeViewerTicketTTLSeconds = 120;
 const codeViewerSessionTTLSeconds = 8 * 60 * 60;
-const egressTicketTTLSeconds = 120;
 export const replacedEgressSessionsPerLease = 256;
 const runtimeAdapterTicketTTLSeconds = 120;
 const nativeVNCTicketTTLSeconds = 60;
@@ -445,31 +451,6 @@ function coordinatorDiagnosticSecrets(env: Env): Array<string | undefined> {
   ];
 }
 
-interface CachedAdminGrant {
-  auth?: AuthContext["auth"];
-  login?: string;
-  adminTokenHash?: string;
-  adminGrantVersion?: string;
-}
-
-interface CachedBridgeGrant extends CachedAdminGrant {
-  auth?: AuthContext["auth"];
-  login?: string;
-  sharedTokenHash?: string;
-  portalSessionHash?: string;
-  githubGrant?: GitHubUserGrant;
-}
-
-interface WebVNCTicketRecord extends CachedBridgeGrant {
-  ticket: string;
-  leaseID: string;
-  owner: string;
-  org: string;
-  admin?: boolean;
-  createdAt: string;
-  expiresAt: string;
-}
-
 interface PortalViewerPrincipalRecord extends CachedBridgeGrant {
   auth: AuthContext["auth"];
   admin: boolean;
@@ -507,16 +488,6 @@ interface NativeVNCTicketRecord {
   leaseID: string;
   owner: string;
   org: string;
-  createdAt: string;
-  expiresAt: string;
-}
-
-interface CodeTicketRecord extends CachedBridgeGrant {
-  ticket: string;
-  leaseID: string;
-  owner: string;
-  org: string;
-  admin?: boolean;
   createdAt: string;
   expiresAt: string;
 }
@@ -623,27 +594,6 @@ interface RuntimeAdapterLegacyDeleteCompletion {
   workspaceID: string;
   status: "absent";
 }
-
-type EgressRole = "host" | "client";
-
-interface EgressTicketRecord extends CachedBridgeGrant {
-  ticket: string;
-  leaseID: string;
-  owner: string;
-  org: string;
-  admin?: boolean;
-  role: EgressRole;
-  sessionID: string;
-  profile?: string;
-  allow?: string[];
-  createdAt: string;
-  expiresAt: string;
-}
-
-type LeaseBridgeTicketConsumption<T> =
-  | { status: "invalid" }
-  | { status: "not_found" }
-  | { status: "accepted"; ticket: T; lease: LeaseRecord };
 
 type RuntimeAdapterTicketConsumption =
   | { status: "invalid" }
@@ -1065,6 +1015,7 @@ export class FleetCoordinator {
   private bridgeRestoreReady: Promise<boolean> | undefined;
   private readyPoolBorrowQueue: Promise<void> = Promise.resolve();
   private bridgeTicketQueue: Promise<void> = Promise.resolve();
+  private readonly bridgeTickets: BridgeTickets;
   private awsIngressBarrier: Promise<void> = Promise.resolve();
   private readonly awsIngressAdditiveOperations = new Set<Promise<void>>();
   private providerMaintenanceQueue: Promise<void> = Promise.resolve();
@@ -1077,6 +1028,12 @@ export class FleetCoordinator {
     private readonly authContext: AuthRequestContext = {},
     private readonly coordinatorGeneration: string = crypto.randomUUID(),
   ) {
+    this.bridgeTickets = new BridgeTickets(state.storage, {
+      withLock: (operation) => this.withBridgeTicketLock(operation),
+      getLease: (id) => this.getLease(id),
+      identifierMatchesLease,
+      currentTicket: (ticket, lease) => this.currentLeaseBridgeTicket(ticket, lease),
+    });
     this.webVNCCredentialHandoffs = new WebVNCCredentialHandoffs(state);
     this.restoreBridgeWebSockets();
   }
@@ -1355,7 +1312,7 @@ export class FleetCoordinator {
         parts[3] === "webvnc" &&
         parts[4] === "ticket"
       ) {
-        return await this.createWebVNCTicket(request, parts[2]);
+        return await this.createAgentBridgeTicket(request, parts[2], "webvnc-agent");
       }
       if (
         parts[0] === "v1" &&
@@ -1391,7 +1348,7 @@ export class FleetCoordinator {
         parts[3] === "code" &&
         parts[4] === "ticket"
       ) {
-        return await this.createCodeTicket(request, parts[2]);
+        return await this.createAgentBridgeTicket(request, parts[2], "code-agent");
       }
       if (
         parts[0] === "v1" &&
@@ -8857,55 +8814,52 @@ export class FleetCoordinator {
         { status: 426 },
       );
     }
-    return await this.withBridgeTicketLock(async () => {
-      const consumed = await this.consumeWebVNCTicketUnderLock(request, identifier);
-      if (consumed.status === "invalid") {
-        return json(
-          { error: "webvnc_ticket_required", message: "valid WebVNC bridge ticket required" },
-          { status: 401 },
-        );
-      }
-      if (consumed.status === "not_found") {
-        return notFound();
-      }
-      const { lease, ticket } = consumed;
-      const error = webVNCLeaseError(lease);
-      if (error) {
-        return json({ error: "webvnc_unavailable", message: error }, { status: 409 });
-      }
-      const upgrade = this.state.createWebSocketUpgrade();
-      const agent = upgrade.socket;
+    return await this.bridgeTickets.consumeAndUse(
+      "webvnc-agent",
+      bridgeTicketFromRequest(request, this.env),
+      identifier,
+      async (consumed) => {
+        if (consumed.status === "invalid") {
+          return json(
+            { error: "webvnc_ticket_required", message: "valid WebVNC bridge ticket required" },
+            { status: 401 },
+          );
+        }
+        if (consumed.status === "not_found") {
+          return notFound();
+        }
+        const { lease, ticket } = consumed;
+        const error = webVNCLeaseError(lease);
+        if (error) {
+          return json({ error: "webvnc_unavailable", message: error }, { status: 409 });
+        }
+        const upgrade = this.state.createWebSocketUpgrade();
+        const agent = upgrade.socket;
 
-      const agentID = newWebVNCSessionID("agent");
-      const capabilities = webVNCAgentCapabilities(request);
-      this.trackWebVNCAgent(lease.id, agentID, agent, capabilities);
-      this.recordWebVNCEvent(lease.id, "bridge_connected");
-      this.acceptBridgeWebSocket(agent, {
-        ...leaseBridgeTicketPrincipal(ticket),
-        kind: "webvnc-agent",
-        leaseID: lease.id,
-        id: agentID,
-        capabilities,
-      });
-      return upgrade.response;
-    });
+        const agentID = newWebVNCSessionID("agent");
+        const capabilities = webVNCAgentCapabilities(request);
+        this.trackWebVNCAgent(lease.id, agentID, agent, capabilities);
+        this.recordWebVNCEvent(lease.id, "bridge_connected");
+        this.acceptBridgeWebSocket(agent, {
+          ...leaseBridgeTicketPrincipal(ticket),
+          kind: "webvnc-agent",
+          leaseID: lease.id,
+          id: agentID,
+          capabilities,
+        });
+        return upgrade.response;
+      },
+    );
   }
 
   private async createEgressTicket(request: Request, identifier: string): Promise<Response> {
-    if (request.method.toUpperCase() !== "POST") {
-      return json({ error: "not_found" }, { status: 404 });
-    }
-    const admin = isAdminRequest(request);
-    const lease = await this.resolveLease(identifier, request, admin);
-    if (!lease) {
-      return notFound();
-    }
-    if (!this.leaseManageableByRequest(lease, request, admin)) {
-      return json({ error: "forbidden", message: "lease manage access required" }, { status: 403 });
-    }
-    if (lease.state !== "active") {
-      return json({ error: "egress_unavailable", message: "lease is not active" }, { status: 409 });
-    }
+    const lease = await this.bridgeTicketLeaseForRequest(
+      request,
+      identifier,
+      (candidate) => (candidate.state !== "active" ? "lease is not active" : undefined),
+      "egress_unavailable",
+    );
+    if (lease instanceof Response) return lease;
     const input = await optionalJson<{
       role?: string;
       sessionID?: string;
@@ -8913,52 +8867,49 @@ export class FleetCoordinator {
       profile?: string;
       allow?: string[];
     }>(request);
-    const role = input.role === "host" || input.role === "client" ? input.role : undefined;
+    const role: EgressRole | undefined =
+      input.role === "host" || input.role === "client" ? input.role : undefined;
     if (!role) {
       return json(
         { error: "invalid_egress_role", message: "egress ticket role must be host or client" },
         { status: 400 },
       );
     }
-    const bridgeGrant = await bridgeGrantForRequest(request, admin, this.env.CRABBOX_SHARED_TOKEN);
-    if (!bridgeGrant) {
-      return json(
-        { error: "user_session_invalid", message: "GitHub user session cannot be revalidated" },
-        { status: 401 },
-      );
-    }
-    await this.cleanupExpiredEgressTickets();
-    const now = new Date();
-    const requestedSessionID = input.sessionID ?? input.sessionId;
-    await this.hydrateEgressSessionState(lease.id);
-    if (
-      validEgressSessionID(requestedSessionID) &&
-      this.egressSessionWasReplaced(lease.id, requestedSessionID)
-    ) {
-      return egressSessionReplacedResponse();
-    }
-    const sessionID = validEgressSessionID(requestedSessionID)
-      ? requestedSessionID
-      : newEgressSessionID();
-    const ticket: EgressTicketRecord = {
-      ticket: newEgressTicket(),
-      leaseID: lease.id,
-      owner: requestOwner(request),
-      org: requestOrg(request, this.env),
-      admin,
-      ...bridgeGrant,
-      role,
-      sessionID,
-      allow: boundedEgressAllowlist(input.allow),
-      createdAt: now.toISOString(),
-      expiresAt: new Date(now.getTime() + egressTicketTTLSeconds * 1000).toISOString(),
-    };
-    const profile = boundedEgressString(input.profile);
-    if (profile) {
-      ticket.profile = profile;
-    }
-    await this.state.storage.put(egressTicketKey(ticket.ticket), ticket);
-    await this.activateEgressSession(lease.id, ticket.sessionID, profile, ticket.allow ?? [], now);
+    const principal = await this.bridgeTicketPrincipalForRequest(request);
+    if (principal instanceof Response) return principal;
+    const ticket = await this.bridgeTickets.create(
+      role === "host" ? "egress-host" : "egress-client",
+      async () => {
+        const requestedSessionID = input.sessionID ?? input.sessionId;
+        await this.hydrateEgressSessionState(lease.id);
+        if (
+          validEgressSessionID(requestedSessionID) &&
+          this.egressSessionWasReplaced(lease.id, requestedSessionID)
+        ) {
+          return egressSessionReplacedResponse();
+        }
+        const sessionID = validEgressSessionID(requestedSessionID)
+          ? requestedSessionID
+          : newEgressSessionID();
+        const profile = boundedEgressString(input.profile);
+        return {
+          leaseID: lease.id,
+          ...principal,
+          role,
+          sessionID,
+          allow: boundedEgressAllowlist(input.allow),
+          ...(profile ? { profile } : {}),
+        };
+      },
+    );
+    if (ticket instanceof Response) return ticket;
+    await this.activateEgressSession(
+      lease.id,
+      ticket.sessionID,
+      ticket.profile,
+      ticket.allow ?? [],
+      new Date(ticket.createdAt),
+    );
     return json({
       ticket: ticket.ticket,
       leaseID: ticket.leaseID,
@@ -8979,56 +8930,60 @@ export class FleetCoordinator {
         { status: 426 },
       );
     }
-    return await this.withBridgeTicketLock(async () => {
-      const consumed = await this.consumeEgressTicketUnderLock(request, identifier, role);
-      if (consumed.status === "invalid") {
-        return json(
-          { error: "egress_ticket_required", message: "valid egress bridge ticket required" },
-          { status: 401 },
+    return await this.bridgeTickets.consumeAndUse(
+      role === "host" ? "egress-host" : "egress-client",
+      bridgeTicketFromRequest(request, this.env),
+      identifier,
+      async (consumed) => {
+        if (consumed.status === "invalid") {
+          return json(
+            { error: "egress_ticket_required", message: "valid egress bridge ticket required" },
+            { status: 401 },
+          );
+        }
+        if (consumed.status === "not_found") {
+          return notFound();
+        }
+        const { lease, ticket } = consumed;
+        await this.hydrateEgressSessionState(lease.id);
+        if (this.egressSessionWasReplaced(lease.id, ticket.sessionID)) {
+          return egressSessionReplacedResponse();
+        }
+        if (lease.state !== "active") {
+          return json(
+            { error: "egress_unavailable", message: "lease is not active" },
+            { status: 409 },
+          );
+        }
+        const upgrade = this.state.createWebSocketUpgrade();
+        const agent = upgrade.socket;
+        const principal = leaseBridgeTicketPrincipal(ticket);
+        const attachment: BridgeAttachment = {
+          kind: role === "host" ? "egress-host" : "egress-client",
+          leaseID: lease.id,
+          sessionID: ticket.sessionID,
+          ...principal,
+        };
+        const ticketCreatedAt = new Date(ticket.createdAt);
+        await this.activateEgressSession(
+          lease.id,
+          ticket.sessionID,
+          ticket.profile,
+          ticket.allow ?? [],
+          ticketCreatedAt,
         );
-      }
-      if (consumed.status === "not_found") {
-        return notFound();
-      }
-      const { lease, ticket } = consumed;
-      await this.hydrateEgressSessionState(lease.id);
-      if (this.egressSessionWasReplaced(lease.id, ticket.sessionID)) {
-        return egressSessionReplacedResponse();
-      }
-      if (lease.state !== "active") {
-        return json(
-          { error: "egress_unavailable", message: "lease is not active" },
-          { status: 409 },
-        );
-      }
-      const upgrade = this.state.createWebSocketUpgrade();
-      const agent = upgrade.socket;
-      const principal = leaseBridgeTicketPrincipal(ticket);
-      const attachment: BridgeAttachment = {
-        kind: role === "host" ? "egress-host" : "egress-client",
-        leaseID: lease.id,
-        sessionID: ticket.sessionID,
-        ...principal,
-      };
-      const ticketCreatedAt = new Date(ticket.createdAt);
-      await this.activateEgressSession(
-        lease.id,
-        ticket.sessionID,
-        ticket.profile,
-        ticket.allow ?? [],
-        ticketCreatedAt,
-      );
-      const key = egressSocketKey(lease.id, ticket.sessionID);
-      if (role === "host") {
-        closeSocket(this.egressHosts.get(key), 1012, "replaced by a newer egress host");
-        this.egressHosts.set(key, agent);
-      } else {
-        closeSocket(this.egressClients.get(key), 1012, "replaced by a newer egress client");
-        this.egressClients.set(key, agent);
-      }
-      this.acceptBridgeWebSocket(agent, attachment);
-      return upgrade.response;
-    });
+        const key = egressSocketKey(lease.id, ticket.sessionID);
+        if (role === "host") {
+          closeSocket(this.egressHosts.get(key), 1012, "replaced by a newer egress host");
+          this.egressHosts.set(key, agent);
+        } else {
+          closeSocket(this.egressClients.get(key), 1012, "replaced by a newer egress client");
+          this.egressClients.set(key, agent);
+        }
+        this.acceptBridgeWebSocket(agent, attachment);
+        return upgrade.response;
+      },
+    );
   }
 
   private async egressStatus(request: Request, identifier: string): Promise<Response> {
@@ -10073,47 +10028,60 @@ export class FleetCoordinator {
     });
   }
 
-  private async createWebVNCTicket(request: Request, identifier: string): Promise<Response> {
+  private async bridgeTicketLeaseForRequest(
+    request: Request,
+    identifier: string,
+    capabilityError: (lease: LeaseRecord) => string | undefined,
+    unavailableError: string,
+  ): Promise<LeaseRecord | Response> {
     if (request.method.toUpperCase() !== "POST") {
       return json({ error: "not_found" }, { status: 404 });
     }
     const admin = isAdminRequest(request);
     const lease = await this.resolveLease(identifier, request, admin);
-    if (!lease) {
-      return notFound();
-    }
+    if (!lease) return notFound();
     if (!this.leaseManageableByRequest(lease, request, admin)) {
       return json({ error: "forbidden", message: "lease manage access required" }, { status: 403 });
     }
-    const error = webVNCLeaseError(lease);
-    if (error) {
-      return json({ error: "webvnc_unavailable", message: error }, { status: 409 });
-    }
-    const bridgeGrant = await bridgeGrantForRequest(request, admin, this.env.CRABBOX_SHARED_TOKEN);
-    if (!bridgeGrant) {
+    const error = capabilityError(lease);
+    if (error) return json({ error: unavailableError, message: error }, { status: 409 });
+    return lease;
+  }
+
+  private async bridgeTicketPrincipalForRequest(
+    request: Request,
+  ): Promise<(CachedBridgeGrant & { owner: string; org: string; admin: boolean }) | Response> {
+    const admin = isAdminRequest(request);
+    const grant = await bridgeGrantForRequest(request, admin, this.env.CRABBOX_SHARED_TOKEN);
+    if (!grant) {
       return json(
         { error: "user_session_invalid", message: "GitHub user session cannot be revalidated" },
         { status: 401 },
       );
     }
-    await this.cleanupExpiredWebVNCTickets();
-    const now = new Date();
-    const ticket: WebVNCTicketRecord = {
-      ticket: newWebVNCTicket(),
+    return { owner: requestOwner(request), org: requestOrg(request, this.env), admin, ...grant };
+  }
+
+  private async createAgentBridgeTicket(
+    request: Request,
+    identifier: string,
+    kind: "webvnc-agent" | "code-agent",
+  ): Promise<Response> {
+    const lease = await this.bridgeTicketLeaseForRequest(
+      request,
+      identifier,
+      kind === "webvnc-agent" ? webVNCLeaseError : codeLeaseError,
+      kind === "webvnc-agent" ? "webvnc_unavailable" : "code_unavailable",
+    );
+    if (lease instanceof Response) return lease;
+    const principal = await this.bridgeTicketPrincipalForRequest(request);
+    if (principal instanceof Response) return principal;
+    const ticket = await this.bridgeTickets.create(kind, async () => ({
       leaseID: lease.id,
-      owner: requestOwner(request),
-      org: requestOrg(request, this.env),
-      admin,
-      ...bridgeGrant,
-      createdAt: now.toISOString(),
-      expiresAt: new Date(now.getTime() + webVNCTicketTTLSeconds * 1000).toISOString(),
-    };
-    await this.state.storage.put(webVNCTicketKey(ticket.ticket), ticket);
-    return json({
-      ticket: ticket.ticket,
-      leaseID: ticket.leaseID,
-      expiresAt: ticket.expiresAt,
-    });
+      ...principal,
+    }));
+    if (ticket instanceof Response) return ticket;
+    return json({ ticket: ticket.ticket, leaseID: ticket.leaseID, expiresAt: ticket.expiresAt });
   }
 
   private async webVNCStatus(request: Request, identifier: string): Promise<Response> {
@@ -10413,49 +10381,6 @@ export class FleetCoordinator {
     return json({ ok: true, leaseID: lease.id, theme });
   }
 
-  private async createCodeTicket(request: Request, identifier: string): Promise<Response> {
-    if (request.method.toUpperCase() !== "POST") {
-      return json({ error: "not_found" }, { status: 404 });
-    }
-    const admin = isAdminRequest(request);
-    const lease = await this.resolveLease(identifier, request, admin);
-    if (!lease) {
-      return notFound();
-    }
-    if (!this.leaseManageableByRequest(lease, request, admin)) {
-      return json({ error: "forbidden", message: "lease manage access required" }, { status: 403 });
-    }
-    const error = codeLeaseError(lease);
-    if (error) {
-      return json({ error: "code_unavailable", message: error }, { status: 409 });
-    }
-    const bridgeGrant = await bridgeGrantForRequest(request, admin, this.env.CRABBOX_SHARED_TOKEN);
-    if (!bridgeGrant) {
-      return json(
-        { error: "user_session_invalid", message: "GitHub user session cannot be revalidated" },
-        { status: 401 },
-      );
-    }
-    await this.cleanupExpiredCodeTickets();
-    const now = new Date();
-    const ticket: CodeTicketRecord = {
-      ticket: newCodeTicket(),
-      leaseID: lease.id,
-      owner: requestOwner(request),
-      org: requestOrg(request, this.env),
-      admin,
-      ...bridgeGrant,
-      createdAt: now.toISOString(),
-      expiresAt: new Date(now.getTime() + codeTicketTTLSeconds * 1000).toISOString(),
-    };
-    await this.state.storage.put(codeTicketKey(ticket.ticket), ticket);
-    return json({
-      ticket: ticket.ticket,
-      leaseID: ticket.leaseID,
-      expiresAt: ticket.expiresAt,
-    });
-  }
-
   private async codeAgent(request: Request, identifier: string): Promise<Response> {
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
       return json(
@@ -10463,35 +10388,39 @@ export class FleetCoordinator {
         { status: 426 },
       );
     }
-    return await this.withBridgeTicketLock(async () => {
-      const consumed = await this.consumeCodeTicketUnderLock(request, identifier);
-      if (consumed.status === "invalid") {
-        return json(
-          { error: "code_ticket_required", message: "valid code bridge ticket required" },
-          { status: 401 },
-        );
-      }
-      if (consumed.status === "not_found") {
-        return notFound();
-      }
-      const { lease, ticket } = consumed;
-      const error = codeLeaseError(lease);
-      if (error) {
-        return json({ error: "code_unavailable", message: error }, { status: 409 });
-      }
-      const upgrade = this.state.createWebSocketUpgrade();
-      const agent = upgrade.socket;
+    return await this.bridgeTickets.consumeAndUse(
+      "code-agent",
+      bridgeTicketFromRequest(request, this.env),
+      identifier,
+      async (consumed) => {
+        if (consumed.status === "invalid") {
+          return json(
+            { error: "code_ticket_required", message: "valid code bridge ticket required" },
+            { status: 401 },
+          );
+        }
+        if (consumed.status === "not_found") {
+          return notFound();
+        }
+        const { lease, ticket } = consumed;
+        const error = codeLeaseError(lease);
+        if (error) {
+          return json({ error: "code_unavailable", message: error }, { status: 409 });
+        }
+        const upgrade = this.state.createWebSocketUpgrade();
+        const agent = upgrade.socket;
 
-      closeSocket(this.codeAgents.get(lease.id), 1012, "replaced by a newer code bridge");
-      this.clearCodeLease(lease.id);
-      this.codeAgents.set(lease.id, agent);
-      this.acceptBridgeWebSocket(agent, {
-        ...leaseBridgeTicketPrincipal(ticket),
-        kind: "code-agent",
-        leaseID: lease.id,
-      });
-      return upgrade.response;
-    });
+        closeSocket(this.codeAgents.get(lease.id), 1012, "replaced by a newer code bridge");
+        this.clearCodeLease(lease.id);
+        this.codeAgents.set(lease.id, agent);
+        this.acceptBridgeWebSocket(agent, {
+          ...leaseBridgeTicketPrincipal(ticket),
+          kind: "code-agent",
+          leaseID: lease.id,
+        });
+        return upgrade.response;
+      },
+    );
   }
 
   private async codePortalProxy(
@@ -11683,8 +11612,12 @@ export class FleetCoordinator {
   private async consumeWebVNCTicket(
     request: Request,
     identifier: string,
-  ): Promise<LeaseBridgeTicketConsumption<WebVNCTicketRecord>> {
-    return this.withBridgeTicketLock(() => this.consumeWebVNCTicketUnderLock(request, identifier));
+  ): Promise<LeaseBridgeTicketConsumption<BridgeTicketRecord<"webvnc-agent">>> {
+    return this.bridgeTickets.consume(
+      "webvnc-agent",
+      bridgeTicketFromRequest(request, this.env),
+      identifier,
+    );
   }
 
   private async currentLeaseBridgeTicket<
@@ -11716,94 +11649,14 @@ export class FleetCoordinator {
     return currentTicket;
   }
 
-  private async consumeWebVNCTicketUnderLock(
-    request: Request,
-    identifier: string,
-  ): Promise<LeaseBridgeTicketConsumption<WebVNCTicketRecord>> {
-    const value = bridgeTicketFromRequest(request, this.env);
-    if (!validWebVNCTicket(value)) {
-      return { status: "invalid" };
-    }
-    const key = webVNCTicketKey(value);
-    const ticket = await this.state.storage.get<WebVNCTicketRecord>(key);
-    if (!ticket || ticket.ticket !== value) {
-      return { status: "invalid" };
-    }
-    if (Date.parse(ticket.expiresAt) <= Date.now()) {
-      await this.state.storage.delete(key);
-      return { status: "invalid" };
-    }
-    const lease = await this.getLease(ticket.leaseID);
-    if (!lease || !identifierMatchesLease(identifier, lease)) {
-      return { status: "not_found" };
-    }
-    const currentTicket = await this.currentLeaseBridgeTicket(ticket, lease);
-    if (!currentTicket) {
-      await this.state.storage.delete(key);
-      return { status: "invalid" };
-    }
-    await this.state.storage.delete(key);
-    return { status: "accepted", ticket: currentTicket, lease };
-  }
-
-  private async cleanupExpiredWebVNCTickets(): Promise<void> {
-    const tickets = await this.state.storage.list<WebVNCTicketRecord>({
-      prefix: webVNCTicketPrefix(),
-    });
-    const now = Date.now();
-    await Promise.all(
-      [...tickets.entries()]
-        .filter(([, ticket]) => Date.parse(ticket.expiresAt) <= now)
-        .map(([key]) => this.state.storage.delete(key)),
-    );
-  }
-
   private async consumeCodeTicket(
     request: Request,
     identifier: string,
-  ): Promise<LeaseBridgeTicketConsumption<CodeTicketRecord>> {
-    return this.withBridgeTicketLock(() => this.consumeCodeTicketUnderLock(request, identifier));
-  }
-
-  private async consumeCodeTicketUnderLock(
-    request: Request,
-    identifier: string,
-  ): Promise<LeaseBridgeTicketConsumption<CodeTicketRecord>> {
-    const value = bridgeTicketFromRequest(request, this.env);
-    if (!validCodeTicket(value)) {
-      return { status: "invalid" };
-    }
-    const key = codeTicketKey(value);
-    const ticket = await this.state.storage.get<CodeTicketRecord>(key);
-    if (!ticket || ticket.ticket !== value) {
-      return { status: "invalid" };
-    }
-    if (Date.parse(ticket.expiresAt) <= Date.now()) {
-      await this.state.storage.delete(key);
-      return { status: "invalid" };
-    }
-    const lease = await this.getLease(ticket.leaseID);
-    if (!lease || !identifierMatchesLease(identifier, lease)) {
-      return { status: "not_found" };
-    }
-    const currentTicket = await this.currentLeaseBridgeTicket(ticket, lease);
-    if (!currentTicket) {
-      await this.state.storage.delete(key);
-      return { status: "invalid" };
-    }
-    await this.state.storage.delete(key);
-    return { status: "accepted", ticket: currentTicket, lease };
-  }
-
-  private async cleanupExpiredCodeTickets(): Promise<void> {
-    const tickets = await this.state.storage.list<CodeTicketRecord>({
-      prefix: codeTicketPrefix(),
-    });
-    const now = Date.now();
-    await Promise.all(
-      [...tickets.entries()]
-        .filter(([, ticket]) => Date.parse(ticket.expiresAt) <= now)
-        .map(([key]) => this.state.storage.delete(key)),
+  ): Promise<LeaseBridgeTicketConsumption<BridgeTicketRecord<"code-agent">>> {
+    return this.bridgeTickets.consume(
+      "code-agent",
+      bridgeTicketFromRequest(request, this.env),
+      identifier,
     );
   }
 
@@ -11811,55 +11664,11 @@ export class FleetCoordinator {
     request: Request,
     identifier: string,
     role: EgressRole,
-  ): Promise<LeaseBridgeTicketConsumption<EgressTicketRecord>> {
-    return this.withBridgeTicketLock(() =>
-      this.consumeEgressTicketUnderLock(request, identifier, role),
-    );
-  }
-
-  private async consumeEgressTicketUnderLock(
-    request: Request,
-    identifier: string,
-    role: EgressRole,
-  ): Promise<LeaseBridgeTicketConsumption<EgressTicketRecord>> {
-    const value = bridgeTicketFromRequest(request, this.env);
-    if (!validEgressTicket(value)) {
-      return { status: "invalid" };
-    }
-    const key = egressTicketKey(value);
-    const ticket = await this.state.storage.get<EgressTicketRecord>(key);
-    if (!ticket || ticket.ticket !== value) {
-      return { status: "invalid" };
-    }
-    if (Date.parse(ticket.expiresAt) <= Date.now()) {
-      await this.state.storage.delete(key);
-      return { status: "invalid" };
-    }
-    if (ticket.role !== role) {
-      return { status: "invalid" };
-    }
-    const lease = await this.getLease(ticket.leaseID);
-    if (!lease || !identifierMatchesLease(identifier, lease)) {
-      return { status: "not_found" };
-    }
-    const currentTicket = await this.currentLeaseBridgeTicket(ticket, lease);
-    if (!currentTicket) {
-      await this.state.storage.delete(key);
-      return { status: "invalid" };
-    }
-    await this.state.storage.delete(key);
-    return { status: "accepted", ticket: currentTicket, lease };
-  }
-
-  private async cleanupExpiredEgressTickets(): Promise<void> {
-    const tickets = await this.state.storage.list<EgressTicketRecord>({
-      prefix: egressTicketPrefix(),
-    });
-    const now = Date.now();
-    await Promise.all(
-      [...tickets.entries()]
-        .filter(([, ticket]) => Date.parse(ticket.expiresAt) <= now)
-        .map(([key]) => this.state.storage.delete(key)),
+  ): Promise<LeaseBridgeTicketConsumption<BridgeTicketRecord<"egress-host" | "egress-client">>> {
+    return this.bridgeTickets.consume(
+      role === "host" ? "egress-host" : "egress-client",
+      bridgeTicketFromRequest(request, this.env),
+      identifier,
     );
   }
 
@@ -18070,14 +17879,6 @@ function sanitizeMacHostQuotaError(message: string): string {
   return message.replace(/\s+/g, " ");
 }
 
-function webVNCTicketPrefix(): string {
-  return "webvnc-ticket:";
-}
-
-function webVNCTicketKey(ticket: string): string {
-  return `${webVNCTicketPrefix()}${ticket}`;
-}
-
 function webVNCPortalViewerTicketPrefix(): string {
   return "webvnc-viewer-ticket:";
 }
@@ -18092,14 +17893,6 @@ function webVNCPortalViewerSessionPrefix(): string {
 
 function webVNCPortalViewerSessionKey(session: string): string {
   return `${webVNCPortalViewerSessionPrefix()}${session}`;
-}
-
-function codeTicketPrefix(): string {
-  return "code-ticket:";
-}
-
-function codeTicketKey(ticket: string): string {
-  return `${codeTicketPrefix()}${ticket}`;
 }
 
 function codeViewerTicketPrefix(): string {
@@ -18124,14 +17917,6 @@ function codeViewerSessionRevocationPrefix(): string {
 
 function codeViewerSessionRevocationKey(portalSessionHash: string): string {
   return `${codeViewerSessionRevocationPrefix()}${portalSessionHash}`;
-}
-
-function egressTicketPrefix(): string {
-  return "egress-ticket:";
-}
-
-function egressTicketKey(ticket: string): string {
-  return `${egressTicketPrefix()}${ticket}`;
 }
 
 function activeEgressSessionKey(leaseID: string): string {
@@ -19549,12 +19334,6 @@ function newRunID(): string {
   return `run_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
-function newWebVNCTicket(): string {
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
-  return `wvnc_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
-}
-
 function newWebVNCSessionID(prefix: "agent" | "viewer"): string {
   const bytes = new Uint8Array(8);
   crypto.getRandomValues(bytes);
@@ -19567,18 +19346,6 @@ function newWebVNCPortalViewerTicket(): string {
 
 function newWebVNCPortalViewerSession(): string {
   return randomHexToken("webvnc_session_");
-}
-
-function newCodeTicket(): string {
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
-  return `code_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
-}
-
-function newEgressTicket(): string {
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
-  return `egress_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
 function newRuntimeAdapterTicket(): string {
@@ -19702,10 +19469,6 @@ function validRegisteredLeaseID(value: string | undefined): value is string {
   return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{2,127}$/.test(value);
 }
 
-function validWebVNCTicket(value: string | undefined): value is string {
-  return typeof value === "string" && /^wvnc_[a-f0-9]{32}$/.test(value);
-}
-
 function validWebVNCPortalViewerTicket(value: string | undefined): value is string {
   return typeof value === "string" && /^webvnc_view_[a-f0-9]{32}$/.test(value);
 }
@@ -19766,10 +19529,6 @@ function webVNCViewerLabel(owner: string): string {
   }
   const at = trimmed.indexOf("@");
   return at > 0 ? trimmed.slice(0, at) : trimmed;
-}
-
-function validCodeTicket(value: string | undefined): value is string {
-  return typeof value === "string" && /^code_[a-f0-9]{32}$/.test(value);
 }
 
 function validCodeViewerTicket(value: string | undefined): value is string {
@@ -20175,11 +19934,11 @@ export function bridgeTicketFromRequest(
 }
 
 function validBridgeTicket(value: string): boolean {
-  return validWebVNCTicket(value) || validCodeTicket(value) || validEgressTicket(value);
-}
-
-function validEgressTicket(value: string | undefined): value is string {
-  return typeof value === "string" && /^egress_[a-f0-9]{32}$/.test(value);
+  return (
+    validLeaseBridgeTicket("webvnc-agent", value) ||
+    validLeaseBridgeTicket("code-agent", value) ||
+    validLeaseBridgeTicket("egress-host", value)
+  );
 }
 
 function validEgressSessionID(value: string | undefined): value is string {

@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1599,5 +1600,55 @@ func tarGzipContains(t *testing.T, data []byte, name string) bool {
 		if header.Name == name {
 			return true
 		}
+	}
+}
+
+func TestE2BRunLifecycleArchiveGuardrailBeforeCreation(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	client := &fakeE2BSyncClient{}
+	restore := swapNewE2BClient(client)
+	defer restore()
+	backend := &e2bBackend{cfg: Config{E2B: E2BConfig{Workdir: "repo"}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+	backend.cfg.Sync.FailFiles = 1
+	result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "repo", Root: newE2BSyncTestRepo(t)}, Command: []string{"true"}})
+	var ee ExitError
+	if !errors.As(err, &ee) || ee.Code != 6 || result.ExitCode != 6 || client.createCalls != 0 || result.Session != nil {
+		t.Fatalf("result=%#v err=%v creates=%d", result, err, client.createCalls)
+	}
+}
+
+func TestE2BRunLifecycleCleanupOutcomeAndTiming(t *testing.T) {
+	for _, code := range []int{0, 7} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			client := &fakeE2BSyncClient{processCodes: []int{0, code}, deleteErr: errors.New("delete unavailable")}
+			restore := swapNewE2BClient(client)
+			defer restore()
+			var stderr bytes.Buffer
+			backend := &e2bBackend{cfg: Config{TTL: time.Minute, E2B: E2BConfig{Workdir: "repo"}}, rt: Runtime{Stdout: io.Discard, Stderr: &stderr}}
+			result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "repo", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true, TimingJSON: true})
+			wantCode, wantKind := code, core.RunErrorCommandExit
+			if code == 0 {
+				wantCode, wantKind = 1, core.RunErrorProvider
+			}
+			var ee ExitError
+			if !errors.As(err, &ee) || ee.Code != wantCode || result.ExitCode != wantCode || result.ErrorKind != wantKind || result.Session == nil || !result.Session.Kept || len(client.deleteIDs) != 1 || !client.deleteDeadlineSet {
+				t.Fatalf("result=%#v err=%v deletes=%v", result, err, client.deleteIDs)
+			}
+			if _, exists, claimErr := readLeaseClaimWithPresence(result.LeaseID); claimErr != nil || !exists {
+				t.Fatalf("cleanup failure lost claim: exists=%t err=%v", exists, claimErr)
+			}
+			var report core.TimingReport
+			for _, line := range strings.Split(stderr.String(), "\n") {
+				if strings.HasPrefix(line, "{") {
+					if err := json.Unmarshal([]byte(line), &report); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if report.ExitCode != result.ExitCode || report.RunStatus != result.Status || report.ErrorKind != result.ErrorKind || report.TotalMs != result.Total.Milliseconds() {
+				t.Fatalf("report=%#v result=%#v", report, result)
+			}
+		})
 	}
 }
