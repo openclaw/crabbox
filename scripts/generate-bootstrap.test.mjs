@@ -106,7 +106,7 @@ test("compiled Go and TypeScript agree exactly for every shared fragment and fix
   }
   const constants = Object.keys(sources.constants).map((name) => `${JSON.stringify(name)}:${name},`);
   await writeFile(join(directory, "bootstrap.go"), (await readFile(resolve(repoRoot, "internal/cli/bootstrap_generated.go"), "utf8")).replace("package cli", "package main"));
-  await writeFile(join(directory, "catalog.go"), (await readFile(resolve(repoRoot, "internal/cli/os_image_generated.go"), "utf8")).replace("package cli", "package main"));
+  await writeFile(join(directory, "catalog.go"), (await readFile(resolve(repoRoot, "internal/cli/os_image.go"), "utf8")).replace("package cli", "package main"));
   await writeFile(join(directory, "main.go"), `package main\nimport("encoding/json";"os")\nfunc main(){json.NewEncoder(os.Stdout).Encode(map[string]any{"fragments":map[string]string{${entries.join("\n")}},"constants":map[string]string{${constants.join("\n")}},"images":osImageSpecs,"aliases":osImageAliases,"default":defaultOSImage})}\n`);
   const actual = JSON.parse(run("go", ["run", join(directory, "main.go"), join(directory, "bootstrap.go"), join(directory, "catalog.go")]));
   for (const [key, value] of Object.entries(expected)) assert.ok(actual.fragments[key] === value, `fragment differs: ${key}`);
@@ -232,4 +232,8 @@ test("check detects missing and stale outputs without rewriting, and regeneratio
   await main(["--check"], directory);
   await main([], directory);
   await main(["--check"], directory);
+});
+
+test("generated catalog preserves the shipped Apple VM source-verifier contract", () => {
+  run("go", ["test", "./scripts/apple-vm-image-source", "-run", "^TestExtractCurrentRealSource$", "-count=1"], { cwd: repoRoot });
 });

@@ -230,7 +230,7 @@ function bootstrapShellQuote(value: string): string {
   return new Map([
     ["internal/cli/bootstrap_generated.go", gofmt(go)],
     ["worker/src/bootstrap.generated.ts", ts],
-    ["internal/cli/os_image_generated.go", gofmt(catalogGo)],
+    ["internal/cli/os_image.go", gofmt(catalogGo)],
     ["worker/src/os-image.generated.ts", catalogTS],
   ]);
 }
