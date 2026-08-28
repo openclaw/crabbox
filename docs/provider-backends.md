@@ -134,6 +134,11 @@ safe relative file paths instead of globs. Do not pretend a delegated provider
 is SSH-like unless it has a stable SSH contract. If Crabbox cannot run rsync and
 remote commands itself, use `DelegatedRunBackend`.
 
+`--no-sync` is validated by each adapter, not inferred from `FeatureArchiveSync`:
+some SDK/CLI transports support it without archive sync. An adapter that cannot
+skip transfer must reject it before lease access or provider activity. Blacksmith
+Testbox does this because its native run command has no supported sync bypass.
+
 ### Optional interfaces
 
 Add optional capabilities as small interfaces instead of widening every backend.

@@ -101,6 +101,9 @@ func (b *blacksmithBackend) Warmup(ctx context.Context, req WarmupRequest) error
 }
 
 func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+	if req.NoSync {
+		return RunResult{}, exit(2, "%s delegates sync; --no-sync is not supported because Blacksmith Testbox run cannot skip workspace sync", blacksmithTestboxProvider)
+	}
 	if err := core.RejectDelegatedSyncOptionsForSpec(b.spec, req); err != nil {
 		return RunResult{}, err
 	}

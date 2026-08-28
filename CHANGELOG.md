@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Rejected Blacksmith Testbox `run --no-sync` before lease access or provider execution instead of silently syncing local edits over the remote workspace.
 - Preserved managed Daytona cleanup responsibility after lost create responses, with native TTL for kept sandboxes, early exact-resource tracking, and original-context deletion confirmed by provider observation.
 - Preserved configured Machine0 executable paths and polling settings during checkpoint verification, deletion, and pruning while retaining exact image/version ownership checks and local records on uncertain failures.
 - Made config path diagnostics honor `CRABBOX_CONFIG`, matching the file selected for reads and writes. Thanks @coygeek.

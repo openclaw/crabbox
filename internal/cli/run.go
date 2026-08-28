@@ -254,7 +254,7 @@ func registerRunFlags(fs *flag.FlagSet, defaults Config, options leaseCreateFlag
 		LeaseID:                fs.String("id", "", "existing lease or server id"),
 		Keep:                   fs.Bool("keep", false, "keep server after command"),
 		KeepOnFailure:          fs.Bool("keep-on-failure", false, "keep a newly acquired lease when the remote command exits non-zero"),
-		NoSync:                 fs.Bool("no-sync", false, "skip rsync"),
+		NoSync:                 fs.Bool("no-sync", false, "skip local file transfer (unsupported by Blacksmith Testbox)"),
 		SyncOnly:               fs.Bool("sync-only", false, "sync and exit"),
 		NoHydrate:              fs.Bool("no-hydrate", false, "skip configured Actions hydration"),
 		DebugSync:              fs.Bool("debug", false, "print detailed sync timing"),

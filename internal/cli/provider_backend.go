@@ -1649,6 +1649,7 @@ func featureSetHas(features FeatureSet, feature Feature) bool {
 }
 
 func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error {
+	// NoSync is adapter-owned: SDK/CLI transports can skip sync without archive sync.
 	provider := spec.Name
 	archiveSync := featureSetHas(spec.Features, FeatureArchiveSync)
 	moduleRun := featureSetHas(spec.Features, FeatureModuleRun)

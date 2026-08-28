@@ -47,6 +47,11 @@ This path only needs Blacksmith auth and a reachable Testbox. Crabbox resolves t
 preserves the local repo claim, forwards the command to `blacksmith testbox run`, and prints
 `sync=delegated` in the final summary.
 
+Reusing an ID does not disable Blacksmith's workspace sync. `--no-sync` is
+rejected before lease access, warmup, or command execution because the native
+Testbox run command does not offer a supported sync bypass. Do not use this
+path to inspect a remote baseline without transferring local edits.
+
 To create a fresh Testbox without YAML, pass the workflow details as flags:
 
 ```sh
@@ -194,7 +199,7 @@ markers. If the CLI starts syncing but does not print a completion marker within
 Because Blacksmith owns sync and execution, Crabbox rejects the following `run` options for
 `provider=blacksmith-testbox`:
 
-- sync flags: `--sync-only`, `--checksum`, `--force-sync-large`, `--full-resync`, `--fresh-pr`;
+- sync flags: `--no-sync`, `--sync-only`, `--checksum`, `--force-sync-large`, `--full-resync`, `--fresh-pr`;
 - execution flags: `--script`, `--script-stdin`, `--env-helper`, `--capture-stdout`,
   `--capture-stderr`, `--capture-on-fail`, `--download`, `--stop-after`;
 - environment forwarding: `--allow-env` and `CRABBOX_ENV_ALLOW` are unsupported — configure

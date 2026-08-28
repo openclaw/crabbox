@@ -392,6 +392,11 @@ Workflow:
 - Stop with crabbox stop <slug> when finished.
 
 Do not debug product failures on a reused box that fails sync sanity. Stop it, warm a fresh box, and rerun.
+
+Use --no-sync only with a provider that supports skipping local file transfer.
+Blacksmith Testbox rejects it: native runs sync even with --id, so do not use
+them to inspect a remote baseline without uploading local edits. Avoid Blacksmith
+prewarm --probe-command too; its generated --no-sync run fails after warmup.
 `)
 	if len(detected.Commands) > 0 {
 		b.WriteString("\nDetected workflow:\n- Prefer crabbox job run detected for the broad remote check.\n\n```sh\ncrabbox job run detected\n```\n")

@@ -1363,6 +1363,19 @@ func TestRejectDelegatedSyncOptionsAllowsArchiveSyncControls(t *testing.T) {
 	}
 }
 
+func TestRejectDelegatedSyncOptionsLeavesNoSyncToAdapter(t *testing.T) {
+	// Archive sync is not required: SDK/CLI transports can also skip uploads.
+	for _, features := range []FeatureSet{nil, {FeatureArchiveSync}} {
+		spec := ProviderSpec{Name: "delegated-test", Kind: ProviderKindDelegatedRun, Features: features}
+		if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{NoSync: true}); err != nil {
+			t.Fatalf("generic guard rejected adapter-owned --no-sync: %v", err)
+		}
+		if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{NoSync: true, FullResync: true}); err == nil {
+			t.Fatal("--no-sync bypassed unsupported --full-resync rejection")
+		}
+	}
+}
+
 func TestRejectDelegatedSyncOptionsAllowsBoundedDownloads(t *testing.T) {
 	spec := ProviderSpec{
 		Name:     "islo",

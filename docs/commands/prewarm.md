@@ -33,7 +33,11 @@ crabbox run --id <id-or-slug> -- pnpm test
 
 Use `--no-sync` when the prewarmed checkout already contains the code you want
 to test. Omit it when local edits must be copied; fingerprint sync should skip
-the upload quickly when nothing changed.
+the upload quickly when nothing changed. This requires a provider that supports
+`--no-sync`; Blacksmith Testbox rejects it because its native runs own sync.
+For Blacksmith, also omit `--probe-command`: the generated probe uses `--no-sync`
+and fails after the Testbox has already been warmed. Put the probe in the
+Blacksmith workflow instead.
 
 ## Behavior
 

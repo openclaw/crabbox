@@ -139,6 +139,12 @@ crabbox actions hydrate --github-runner --id <cbx_id-or-slug>
 
 ## Sync And Fresh Checkouts
 
+Use `--no-sync` only with a provider that supports skipping local file transfer.
+Blacksmith Testbox rejects it: native Testbox runs sync even with an existing
+`--id`. Do not use that path to inspect a remote baseline without uploading local
+edits. Also avoid Blacksmith `prewarm --probe-command`, which generates an
+unsupported `--no-sync` run after warmup; put the probe in its workflow instead.
+
 Normal sync transfers tracked files plus non-ignored untracked files, excludes
 ignored dependency/build/cache output, honors `.crabboxignore` and
 `sync.exclude`, seeds the remote checkout from `origin` when possible, and skips

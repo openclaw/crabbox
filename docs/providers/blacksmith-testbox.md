@@ -47,6 +47,12 @@ crabbox status --provider blacksmith-testbox --id tbx_123
 crabbox stop --provider blacksmith-testbox tbx_123
 ```
 
+Every Testbox run delegates workspace sync to Blacksmith, including runs with
+`--id`. Crabbox rejects `--no-sync` before touching the lease or invoking
+Blacksmith because its native run command has no supported sync bypass. Do not
+use this path to inspect a remote baseline without uploading local edits; use
+a provider that supports `--no-sync` when that guarantee is required.
+
 Run delegated sync from a full Git checkout. Crabbox rejects a checkout when
 sparse rules or `skip-worktree` index state leave tracked paths absent because
 those paths can otherwise be misread as deletions during a later full sync. A
@@ -232,8 +238,10 @@ visibility-only detail page.
 
 ## Gotchas
 
-- `--sync-only`, `--checksum`, and `--force-sync-large` do not apply because
-  Blacksmith owns sync.
+- `--no-sync`, `--sync-only`, `--checksum`, and `--force-sync-large` are rejected
+  because Blacksmith owns sync.
+- Avoid `prewarm --probe-command`: its generated `--no-sync` run is unsupported
+  and fails after warmup. Use plain `prewarm` or put the probe in the workflow.
 - `--script`, `--script-stdin`, `--fresh-pr`, local stdout/stderr captures, and
   `--download` are rejected because Blacksmith owns command transport and remote
   file transport. Use `--emit-proof` for PR-ready transcript proof.
