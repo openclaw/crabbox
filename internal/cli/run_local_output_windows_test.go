@@ -16,7 +16,11 @@ import (
 )
 
 func TestFailureBundleWindowsSecuresDirectoryBeforeTempAndPublishesHandle(t *testing.T) {
-	dir := t.TempDir()
+	// TempDir can be owned by Administrators on elevated Windows runners.
+	dir := filepath.Join(t.TempDir(), "captures")
+	if err := createPrivateRunOutputDir(dir); err != nil {
+		t.Fatal(err)
+	}
 	testSID := makeWindowsTestParentPermissive(t, dir)
 	assertWindowsPathGrantsSID(t, dir, testSID)
 	if err := prepareFailureBundleDir(dir); err != nil {
