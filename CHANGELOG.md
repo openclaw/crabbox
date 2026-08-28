@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.47.0 - 2026-08-28
 
 ### Added
 
@@ -10,6 +10,7 @@
 - Added targeted `stop --force` recovery through verified provider adoption or exact coordinator lease inspection without weakening ownership checks.
 - Added replay-safe fixed lease IDs to checkpoint forks and machine-readable JSON output to checkpoint creation and forking.
 - Added strict, provider-neutral Linux image readiness manifests with shared CLI/coordinator capability verification and safe legacy-image migration. Thanks @vincentkoc.
+- Added fixed idempotent `--lease-id` replay to local-container warmups, with exact container-intent matching and single-use released IDs.
 
 ### Fixed
 
@@ -33,15 +34,6 @@
 - Redacted configured and runtime-only credentials from coordinator-stored run failure diagnostics while preserving raw command output. Thanks @coygeek.
 - Retried temporary Machine0 read outages within the existing operation deadline while keeping provider mutations single-attempt.
 - Added actionable Machine0 recovery hints for unclaimed lease IDs without treating short name hashes as proof of lease ownership.
-
-## 0.46.1 - 2026-08-24
-
-### Added
-
-- Added fixed idempotent `--lease-id` replay to local-container warmups, with exact container-intent matching and single-use released IDs.
-
-### Fixed
-
 - Removed idle gaps throughout media previews while preserving every moving interval, so long recordings produce short GIFs without hiding late changes.
 - Exposed coordinator cleanup state in brokered `inspect --json`, preserving pending, error, and retry signals plus the distinction between omitted and explicit `releaseDeletesServer: false`.
 - Reduced Machine0 provisioning reads about twelvefold by polling every 60 seconds by default while preserving fresh fixed-lease ownership checks.
