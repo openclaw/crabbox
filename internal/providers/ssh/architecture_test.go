@@ -3,6 +3,7 @@ package ssh
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -533,6 +534,107 @@ func TestStaticSSHArchitectureRequestSources(t *testing.T) {
 			err := (core.App{Stdout: &log, Stderr: &log}).Run(context.Background(), args)
 			if err == nil || !strings.Contains(err.Error(), "architecture=amd64 assertion failed") {
 				t.Fatalf("source did not assert: err=%v log=%s", err, &log)
+			}
+		})
+	}
+}
+
+func TestStaticSSHArchitectureLegacyConfigMigration(t *testing.T) {
+	_, _, repo := staticArchitectureFixture(t, "linux", "normal", "")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("APPDATA", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Chdir(repo)
+	repo, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	userDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	userPath := filepath.Join(userDir, "crabbox", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(userPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	const leaseID = "static_architecture_migration"
+	const baseYAML = "provider: ssh\ntarget: linux\nstatic:\n  id: " + leaseID + "\n  host: build.example.test\n  user: builder\n"
+	writeConfig := func(path, contents string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	probes := 0
+	runArchitectureProbe = func(_ context.Context, target SSHTarget, _ string, _ int) (string, error) {
+		probes++
+		if target.Host != "build.example.test" || target.User != "builder" || target.Port != "2207" || target.TargetOS != "linux" {
+			t.Fatalf("migration changed the resolved SSH identity: %#v", target)
+		}
+		return "v1|arm64|-|-|-", nil
+	}
+	var out, log bytes.Buffer
+	app := core.App{Stdout: &out, Stderr: &log}
+	args := []string{"warmup", "--provider", "ssh", "--static-host", "build.example.test"}
+	for _, step := range []struct {
+		name, userYAML, repoYAML, env string
+		discover                      bool
+	}{
+		{name: "legacy user YAML", userYAML: "architecture: amd64\n"},
+		{name: "legacy repo YAML", repoYAML: "architecture: amd64\n"},
+		{name: "legacy environment overrides YAML", userYAML: "architecture: arm64\n", repoYAML: "architecture: arm64\n", env: "amd64"},
+		{name: "all legacy sources", userYAML: "architecture: amd64\n", repoYAML: "architecture: amd64\n", env: "amd64"},
+		{name: "empty overrides retain user assertion", userYAML: "architecture: amd64\n", repoYAML: "architecture: ''\n"},
+		{name: "removing user and environment retains repo assertion", repoYAML: "architecture: amd64\n"},
+		{name: "remove all explicit sources", discover: true},
+	} {
+		t.Run(step.name, func(t *testing.T) {
+			writeConfig(userPath, baseYAML+step.userYAML)
+			writeConfig(filepath.Join(repo, "crabbox.yaml"), step.repoYAML)
+			t.Setenv("CRABBOX_ARCH", step.env)
+			if step.discover {
+				if err := os.Unsetenv("CRABBOX_ARCH"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			out.Reset()
+			before := probes
+			if err := app.Run(context.Background(), []string{"config", "show", "--json"}); err != nil {
+				t.Fatal(err)
+			}
+			var view map[string]any
+			if err := json.Unmarshal(out.Bytes(), &view); err != nil {
+				t.Fatal(err)
+			}
+			if view["architecture"] != "amd64" || view["architectureExplicit"] != !step.discover || probes != before {
+				t.Fatalf("offline config did not preserve requested/default distinction: %s probes=%d", &out, probes-before)
+			}
+			log.Reset()
+			err := app.Run(context.Background(), args)
+			claim, exists, readErr := core.ReadLeaseClaimWithPresence(leaseID)
+			if readErr != nil || probes != before+1 {
+				t.Fatalf("read=%v probes=%d warmup=%v log=%s", readErr, probes-before, err, &log)
+			}
+			if !step.discover {
+				if err == nil || !strings.Contains(err.Error(), "architecture=amd64 assertion failed: observed=arm64") || exists {
+					t.Fatalf("legacy assertion did not reject before claim publication: err=%v exists=%t log=%s", err, exists, &log)
+				}
+				return
+			}
+			if err != nil || !exists {
+				t.Fatalf("discovery failed: err=%v exists=%t log=%s", err, exists, &log)
+			}
+			if claim.LeaseID != leaseID || claim.Provider != "ssh" || claim.RepoRoot != repo || claim.SSHHost != "build.example.test" || claim.SSHPort != 2207 {
+				t.Fatalf("discovery changed lease identity: %#v", claim)
+			}
+			if claim.Labels["architecture"] != "arm64" || claim.Labels["architecture_source"] != "ssh-uname" || claim.Labels["architecture_scope"] != "posix-environment" || claim.Labels["architecture_observed_at"] == "" || claim.Labels["architecture_process"] != "" {
+				t.Fatalf("discovery did not publish scoped fresh evidence: %v", claim.Labels)
+			}
+			t.Chdir(t.TempDir())
+			err = app.Run(context.Background(), args)
+			after, exists, readErr := core.ReadLeaseClaimWithPresence(leaseID)
+			if err == nil || !strings.Contains(err.Error(), "claimed by repo") || readErr != nil || !exists || !reflect.DeepEqual(after, claim) {
+				t.Fatalf("migration bypassed repository ownership: err=%v read=%v exists=%t", err, readErr, exists)
 			}
 		})
 	}

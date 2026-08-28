@@ -1,9 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.47.1 (Unreleased)
 
 ### Fixed
 
+- Fixed static SSH architecture admission across Linux, macOS, Windows, and WSL2: configured values, including inherited `amd64`, now require fresh matching evidence; remove explicit architecture settings for automatic discovery, with measured or unknown evidence reported separately from offline defaults.
 - Preserved configured Machine0 executable paths and polling settings during checkpoint verification, deletion, and pruning while retaining exact image/version ownership checks and local records on uncertain failures.
 
 ## 0.47.0 - 2026-08-28
@@ -20,7 +21,6 @@
 
 ### Fixed
 
-- Fixed static SSH architecture admission and fresh execution-environment assertions across Linux, macOS, Windows, and WSL2; report measured or unknown evidence separately from offline configuration defaults.
 - Clarified static SSH stop/run documentation and added command-path regression coverage for existing best-effort connection cleanup before local unclaiming, without changing runtime behavior.
 - Unified provider-owned routing for stop, retry, rescue, and WebVNC commands, preserving scope, explicit false release settings, and Kubernetes environment selectors without exposing URL credentials.
 - Saved automatic failure bundles in private user state when the project capture destination is unwritable, retaining verified directories through creation, publication, and cleanup to prevent path substitution while preserving the command exit status.

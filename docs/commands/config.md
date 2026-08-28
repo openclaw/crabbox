@@ -60,6 +60,11 @@ and does not acquire or probe a host. JSON `architectureExplicit` (text:
 an explicit `--arch`, including `--arch amd64`, as an assertion; their flags are
 not part of `config show` output.
 
+Static SSH now checks these assertions against fresh host evidence, including
+inherited `amd64` values. See [Upgrading existing static-host configuration](../providers/ssh.md#upgrading-existing-static-host-configuration)
+to keep a strict constraint or remove the contributing values for automatic
+discovery; a blank override does not clear an inherited assertion.
+
 Secrets are never printed. Token-bearing fields are reduced to a status word:
 
 - Provider endpoint URL userinfo is replaced with `<redacted>@`; query and

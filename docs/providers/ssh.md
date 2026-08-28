@@ -149,6 +149,44 @@ not observed architecture or proof of supported runtime behavior. The JSON
 `architectureExplicit` boolean (text: `architecture_explicit`) distinguishes an
 explicit assertion from the default. Observations never rewrite that configuration.
 
+### Upgrading existing static-host configuration
+
+Older static SSH versions accepted configured values such as `architecture: amd64`
+or `CRABBOX_ARCH=amd64` without checking the host. These values are now strict
+assertions, including `amd64` inherited from user configuration or the environment.
+Together with `--arch`, they must match fresh evidence on acquisition and prepared
+reuse. An unchanged configuration can therefore fail after upgrading if the SSH
+environment has a different architecture, runs under translation, or cannot provide
+the required evidence. There is no compatibility fallback for explicit values.
+
+For automatic discovery, remove `architecture` from every applicable user and
+repository config, including any config selected by a profile or wrapper through
+`CRABBOX_CONFIG`. Unset `CRABBOX_ARCH` and remove exports that set it again in shell
+profiles or CI. Also stop passing `--arch` in commands or wrappers. Check the
+effective config from the same directory and environment used for execution:
+
+```sh
+unset CRABBOX_ARCH
+crabbox config path
+crabbox config show --json
+```
+
+Verify `architectureExplicit` is `false` (text output: `architecture_explicit=false`).
+The displayed `architecture` may still be the offline default `amd64`; fresh SSH
+evidence determines the discovered architecture. A blank YAML value does not clear
+an inherited assertion, and an empty or unset `CRABBOX_ARCH` does not clear YAML.
+Normally user config loads first, then `crabbox.yaml`, then `.crabbox.yaml`, then
+nonempty environment overrides. `CRABBOX_CONFIG` selects a single file instead of
+the normal user/repository files. Remove the value from its contributing sources;
+see [config show](../commands/config.md#config-show) for the merged view.
+
+If a strict constraint is intended, keep an explicit supported value (`amd64` or
+`arm64`) matching the actual SSH environment, and ensure it can provide matching,
+non-translated evidence. Changing the assertion does not select an emulator or
+change the host. The probe describes the SSH environment only: it does not prove
+that every workload binary, such as Node, runs natively. Discovery also leaves SSH
+trust, endpoint identity, and repository claim/reclaim checks unchanged.
+
 ## Configuration
 
 The static target lives under the `static:` block. SSH credentials fall back to
