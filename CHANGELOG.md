@@ -12,7 +12,7 @@
 ### Fixed
 
 - Unified provider-owned routing for stop, retry, rescue, and WebVNC commands, preserving scope, explicit false release settings, and Kubernetes environment selectors without exposing URL credentials.
-- Saved automatic failure bundles in private user state when the project capture destination is unwritable, preserving security checks and the command exit status.
+- Saved automatic failure bundles in private user state when the project capture destination is unwritable, securing directories before file creation and preventing Windows temporary-file substitution while preserving the command exit status.
 - Refreshed coordinator runtime and Worker development dependencies, including Nano ID and Undici advisory fixes.
 - Preserved Daytona recovery claims and lookup errors when `stop` cannot verify the sandbox, instead of reporting release from an unverified not-found response.
 - Fixed portable Node coordinator control heartbeats deadlocking subsequent lifecycle operations, releases, and graceful shutdown.

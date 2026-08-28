@@ -18,6 +18,39 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestFailureBundleSecuresPermissiveDirectoryBeforeTemp(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareFailureBundleDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	assertRunOutputMode(t, dir, 0o700)
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Fatalf("directory preparation created names: entries=%v err=%v", entries, err)
+	}
+	path := filepath.Join(dir, "bundle.tar.gz")
+	file, tempPath, err := createFailureBundleTemp(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	assertRunOutputMode(t, tempPath, 0o600)
+	if _, err := file.WriteString("original bundle"); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishFailureBundleTemp(file, tempPath, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "original bundle" {
+		t.Fatalf("published data=%q err=%v", data, err)
+	}
+}
+
 func TestFailureBundleDestinationUnwritable(t *testing.T) {
 	for _, tc := range []struct {
 		name string

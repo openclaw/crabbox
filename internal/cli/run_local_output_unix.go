@@ -23,6 +23,10 @@ func ensurePrivateRunOutputDir(path string) error {
 		return err
 	}
 	defer unix.Close(fd)
+	return securePrivateRunOutputDirFD(fd)
+}
+
+func securePrivateRunOutputDirFD(fd int) error {
 	if err := setPrivateFDPermissions(uintptr(fd), privateRunOutputDirMode); err != nil {
 		return err
 	}
@@ -47,7 +51,7 @@ func privateRunOutputPermissionError(err error) bool {
 	return errors.Is(err, os.ErrPermission) || errors.Is(err, unix.EROFS)
 }
 
-func createFailureBundleDir(path string) error {
+func prepareFailureBundleDir(path string) error {
 	if err := createPrivateRunOutputDir(path); err != nil {
 		return err
 	}
@@ -60,7 +64,15 @@ func createFailureBundleDir(path string) error {
 	if err := unix.Fstat(fd, &stat); err != nil {
 		return err
 	}
-	return validateFailureBundleDirectoryOwner(stat.Uid, uint32(os.Geteuid()))
+	if err := validateFailureBundleDirectoryOwner(stat.Uid, uint32(os.Geteuid())); err != nil {
+		return err
+	}
+	// Check existing access without exposing a temporary name or granting access
+	// the caller did not already have. Only then exclude other directory writers.
+	if err := unix.Faccessat(fd, ".", unix.W_OK|unix.X_OK, unix.AT_EACCESS); err != nil {
+		return privateRunOutputWriteError{err}
+	}
+	return securePrivateRunOutputDirFD(fd)
 }
 
 func validateFailureBundleDirectoryOwner(owner, current uint32) error {
@@ -70,7 +82,11 @@ func validateFailureBundleDirectoryOwner(owner, current uint32) error {
 	return nil
 }
 
-func replacePrivateRunOutputTemp(tempPath, path string) error {
+func createFailureBundleTemp(path string) (*os.File, string, error) {
+	return createPrivateRunOutputTemp(path)
+}
+
+func publishFailureBundleTemp(_ *os.File, tempPath, path string) error {
 	return os.Rename(tempPath, path)
 }
 

@@ -965,12 +965,10 @@ func openFailureBundleFile(localPath string) (*os.File, error) {
 			return nil, fmt.Errorf("unsafe failure bundle destination %s", path)
 		}
 	}
-	if err := createFailureBundleDir(dir); err != nil {
+	if err := prepareFailureBundleDir(dir); err != nil {
 		return nil, err
 	}
-	// Probe actual writability before securing an existing directory. Never make
-	// an unwritable project directory writable just to save diagnostics.
-	file, tempPath, err := createPrivateRunOutputTemp(localPath)
+	file, tempPath, err := createFailureBundleTemp(localPath)
 	if err != nil {
 		return nil, err
 	}
@@ -978,12 +976,7 @@ func openFailureBundleFile(localPath string) (*os.File, error) {
 		_ = file.Close()
 		_ = os.Remove(tempPath)
 	}
-	if err := ensurePrivateRunOutputDir(dir); err != nil {
-		cleanup()
-		// Do not propagate a write-error marker from directory privacy checks.
-		return nil, fmt.Errorf("secure failure bundle directory %s: %v", dir, err)
-	}
-	if err := replacePrivateRunOutputTemp(tempPath, localPath); err != nil {
+	if err := publishFailureBundleTemp(file, tempPath, localPath); err != nil {
 		cleanup()
 		return nil, privateRunOutputWriteError{err}
 	}

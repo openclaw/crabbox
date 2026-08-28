@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,139 @@ import (
 
 	"golang.org/x/sys/windows"
 )
+
+func TestFailureBundleWindowsSecuresDirectoryBeforeTempAndPublishesHandle(t *testing.T) {
+	dir := t.TempDir()
+	testSID := makeWindowsTestParentPermissive(t, dir)
+	assertWindowsPathGrantsSID(t, dir, testSID)
+	if err := prepareFailureBundleDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	assertWindowsPathPrivateFromSID(t, dir, true, testSID)
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Fatalf("directory preparation created names: entries=%v err=%v", entries, err)
+	}
+
+	path := filepath.Join(dir, "bundle.tar.gz")
+	if err := os.WriteFile(path, []byte("previous bundle"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, tempPath, err := createFailureBundleTemp(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := file.WriteString("original bundle"); err != nil {
+		t.Fatal(err)
+	}
+	// Even the owner cannot remove the open temporary name and insert another
+	// inode. This also protects against previously granted directory access.
+	tempName, err := windows.UTF16PtrFromString(tempPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.DeleteFile(tempName); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+		t.Fatalf("temporary deletion should be denied by sharing mode: %v", err)
+	}
+	substitute := filepath.Join(dir, "substitute")
+	if err := os.WriteFile(substitute, []byte("substitute bundle"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(substitute, tempPath); err == nil {
+		t.Fatal("substitute replaced the open temporary file")
+	}
+	// Deliberately pass the substitute's path: publication must use the original
+	// handle, not whichever inode a caller-supplied source name refers to.
+	if err := publishFailureBundleTemp(file, substitute, path); err != nil {
+		t.Fatal(err)
+	}
+	finalName, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.DeleteFile(finalName); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+		t.Fatalf("published bundle must remain protected until close: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "original bundle" {
+		t.Fatalf("published data=%q err=%v", data, err)
+	}
+	if data, err := os.ReadFile(substitute); err != nil || string(data) != "substitute bundle" {
+		t.Fatalf("substitute was promoted: data=%q err=%v", data, err)
+	}
+	if _, err := os.Lstat(tempPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary name remains after handle publication: %v", err)
+	}
+	assertWindowsPathPrivateFromSID(t, path, false, testSID)
+}
+
+func TestFailureBundleWindowsPreservesUnwritablePrivateDirectory(t *testing.T) {
+	isolateTestUserDirs(t)
+	t.Chdir(t.TempDir())
+	dir := filepath.Join(".crabbox", "captures")
+	if err := createPrivateRunOutputDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	user, err := currentWindowsUserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Keep metadata/security access but omit FILE_ADD_FILE. The caller must not
+	// grant itself that missing right as a side effect of capturing a failure.
+	access := uint32(windows.FILE_GENERIC_READ | windows.FILE_GENERIC_EXECUTE | windows.WRITE_DAC | windows.WRITE_OWNER | windows.DELETE)
+	descriptor, err := windows.SecurityDescriptorFromString(fmt.Sprintf("O:%sD:P(A;;0x%08x;;;%s)", user.String(), access, user.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	acl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := securePrivateWindowsPath(dir, true); err != nil {
+			t.Error(err)
+		}
+	})
+	before, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if probe, err := os.CreateTemp(dir, "probe-*"); err == nil {
+		_ = probe.Close()
+		t.Fatal("fixture did not deny file creation")
+	} else if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("unexpected probe error: %v", err)
+	}
+	path, _, err := writeLocalFailureBundle("bundle.tar.gz", "", FailureCaptureMetadata{ExitCode: 23})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := crabboxStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != filepath.Join(state, "captures", "bundle.tar.gz") {
+		t.Fatalf("path=%q state=%q", path, state)
+	}
+	if len(readTarGzContents(t, path)["crabbox-artifacts/crabbox-run.json"]) == 0 {
+		t.Fatal("fallback bundle is missing metadata")
+	}
+	after, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.String() != after.String() {
+		t.Fatal("unwritable directory DACL was changed")
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Fatalf("unwritable directory gained a temporary name: entries=%v err=%v", entries, err)
+	}
+}
 
 func TestFailureBundleDestinationUnwritableWindows(t *testing.T) {
 	for _, tc := range []struct {

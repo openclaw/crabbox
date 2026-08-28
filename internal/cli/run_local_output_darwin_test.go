@@ -10,6 +10,32 @@ import (
 	"testing"
 )
 
+func TestFailureBundleRemovesDarwinDirectoryACLBeforeTemp(t *testing.T) {
+	parent := t.TempDir()
+	if output, err := exec.Command("chmod", "+a", "everyone allow read,file_inherit,directory_inherit", parent).CombinedOutput(); err != nil {
+		t.Fatalf("add inherited ACL: %v\n%s", err, output)
+	}
+	dir := filepath.Join(parent, "captures")
+	if err := os.Mkdir(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	assertDarwinPathHasInheritedACL(t, dir, true)
+	if err := prepareFailureBundleDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	assertRunOutputMode(t, dir, 0o700)
+	assertDarwinPathHasInheritedACL(t, dir, false)
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Fatalf("directory preparation created names: entries=%v err=%v", entries, err)
+	}
+	file, tempPath, err := createFailureBundleTemp(filepath.Join(dir, "bundle.tar.gz"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	assertDarwinPathHasInheritedACL(t, tempPath, false)
+}
+
 func TestPrivateRunOutputRemovesInheritedDarwinACL(t *testing.T) {
 	parent := t.TempDir()
 	if output, err := exec.Command("chmod", "+a", "everyone allow read,file_inherit", parent).CombinedOutput(); err != nil {
@@ -29,7 +55,7 @@ func TestPrivateRunOutputRemovesInheritedDarwinACL(t *testing.T) {
 
 func assertDarwinPathHasInheritedACL(t *testing.T, path string, want bool) {
 	t.Helper()
-	output, err := exec.Command("ls", "-le", path).CombinedOutput()
+	output, err := exec.Command("ls", "-lde", path).CombinedOutput()
 	if err != nil {
 		t.Fatalf("inspect ACL: %v\n%s", err, output)
 	}
