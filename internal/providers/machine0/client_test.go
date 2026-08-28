@@ -95,27 +95,173 @@ func TestClientStopCommandConstruction(t *testing.T) {
 	}
 }
 
+func TestClientGetUUIDUsesVerifiedFullDetail(t *testing.T) {
+	const id = "abcdef12-3456-7890-abcd-ef1234567890"
+	for _, tc := range []struct {
+		name        string
+		lookup      string
+		inventoryID string
+		detailID    string
+	}{
+		{name: "lowercase", lookup: id, inventoryID: id, detailID: id},
+		{name: "uppercase input", lookup: strings.ToUpper(id), inventoryID: id, detailID: id},
+		{name: "uppercase inventory", lookup: id, inventoryID: strings.ToUpper(id), detailID: id},
+		{name: "uppercase detail", lookup: id, inventoryID: id, detailID: strings.ToUpper(id)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+				"ls\x00--json":                  {Stdout: `[{"id":"11111111-1111-1111-1111-111111111111","name":"other","status":"RUNNING"},{"id":"` + tc.inventoryID + `","name":"current-name","status":"STARTING","ip":"203.0.113.10"}]`},
+				"get\x00current-name\x00--json": {Stdout: `{"id":"` + tc.detailID + `","name":"current-name","status":"RUNNING","ip":"203.0.113.99","defaultSSHUsername":"nix","distribution":"nixos","image":"nixos-loaded","imageVersion":2,"key":{"name":"ci-key","type":"MANAGED","fileName":"machine0__ci-key"}}`},
+			}, errors: map[string]error{
+				"get\x00" + tc.lookup + "\x00--json": errors.New("No such procedure"),
+			}}
+			item, err := testClient(runner).Get(context.Background(), tc.lookup)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := machine{ID: tc.detailID, Name: "current-name", Status: "RUNNING", IP: "203.0.113.99", DefaultSSHUsername: "nix", Distribution: "nixos", Image: "nixos-loaded", ImageVersion: 2, Key: &machineKey{Name: "ci-key", Type: "MANAGED", FileName: "machine0__ci-key"}}
+			if !reflect.DeepEqual(item, want) {
+				t.Fatalf("detail=%#v want=%#v", item, want)
+			}
+			if len(runner.calls) != 2 || !reflect.DeepEqual(runner.calls[0].Args, []string{"ls", "--json"}) || !reflect.DeepEqual(runner.calls[1].Args, []string{"get", "current-name", "--json"}) {
+				t.Fatalf("UUID lookup must list then read full detail by current name: %#v", runner.calls)
+			}
+		})
+	}
+}
+
+func TestClientGetNonUUIDUsesDirectDetail(t *testing.T) {
+	for _, name := range []string{
+		"my-app", "cbx_abcdef123456", "abcdef1234567890abcdef1234567890ab",
+		"{abcdef12-3456-7890-abcd-ef1234567890}", "urn:uuid:abcdef12-3456-7890-abcd-ef1234567890",
+		"abcdef12-3456-7890-abcd-ef123456789z", "abcdef12-3456-7890-abcd-ef1234567890-extra",
+	} {
+		t.Run(name, func(t *testing.T) {
+			runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+				"get\x00" + name + "\x00--json": {Stdout: `{"id":"vm-1","name":"my-app","status":"RUNNING","defaultSSHUsername":"nix"}`},
+			}}
+			item, err := testClient(runner).Get(context.Background(), name)
+			if err != nil || item.ID != "vm-1" || item.DefaultSSHUsername != "nix" {
+				t.Fatalf("item=%#v err=%v", item, err)
+			}
+			if len(runner.calls) != 1 || !reflect.DeepEqual(runner.calls[0].Args, []string{"get", name, "--json"}) {
+				t.Fatalf("non-UUID lookup must remain a single direct detail read: %#v", runner.calls)
+			}
+		})
+	}
+}
+
+func TestClientGetUUIDRejectsUnverifiedLookup(t *testing.T) {
+	const id = "abcdef12-3456-7890-abcd-ef1234567890"
+	const row = `{"id":"` + id + `","name":"my-app","status":"RUNNING"}`
+	const other = `{"id":"11111111-1111-1111-1111-111111111111","name":"other","status":"RUNNING"}`
+	for _, tc := range []struct {
+		name      string
+		inventory string
+		listError string
+		detail    string
+		getError  string
+		wantError string
+		wantCode  int
+		wantGet   bool
+	}{
+		{name: "empty inventory", inventory: `[]`, wantError: "absent from current authorized inventory", wantCode: 4},
+		{name: "no exact UUID", inventory: `[` + other + `]`, wantError: "absent from current authorized inventory", wantCode: 4},
+		{name: "duplicate exact UUID", inventory: `[` + row + `,` + row + `]`, wantError: "multiple", wantCode: 5},
+		{name: "duplicate UUID differs only in case", inventory: `[` + row + `,` + strings.Replace(row, id, strings.ToUpper(id), 1) + `]`, wantError: "multiple", wantCode: 5},
+		{name: "missing ID cannot prove absence", inventory: `[{"name":"other","status":"RUNNING"}]`, wantError: "missing or malformed UUID", wantCode: 5},
+		{name: "missing ID after match", inventory: `[` + row + `,{"name":"other","status":"RUNNING"}]`, wantError: "missing or malformed UUID", wantCode: 5},
+		{name: "malformed ID", inventory: `[` + strings.Replace(other, "11111111-1111-1111-1111-111111111111", "not-a-uuid", 1) + `]`, wantError: "missing or malformed UUID", wantCode: 5},
+		{name: "missing name", inventory: `[{"id":"` + id + `","status":"RUNNING"}]`, wantError: "missing name", wantCode: 5},
+		{name: "missing status", inventory: `[{"id":"` + id + `","name":"my-app"}]`, wantError: "missing status", wantCode: 5},
+		{name: "UUID cannot be a transport name", inventory: `[` + strings.Replace(row, "my-app", id, 1) + `]`, wantError: "invalid machine name", wantCode: 5},
+		{name: "null inventory", inventory: `null`, wantError: "expected an array", wantCode: 5},
+		{name: "wrong inventory shape", inventory: `{"machines":[]}`, wantError: "parse machine0 ls", wantCode: 5},
+		{name: "null inventory row", inventory: `[null]`, wantError: "missing name", wantCode: 5},
+		{name: "invalid inventory JSON", inventory: `not-json`, wantError: "parse machine0 ls", wantCode: 5},
+		{name: "truncated inventory", inventory: `[` + row, wantError: "parse machine0 ls", wantCode: 5},
+		{name: "trailing inventory JSON", inventory: `[] {}`, wantError: "trailing JSON", wantCode: 5},
+		{name: "inventory authentication failure with empty output", inventory: `[]`, listError: "Not logged in.", wantError: "authentication is required", wantCode: 3},
+		{name: "inventory read failure with matching output", inventory: `[` + row + `]`, listError: "upstream read failed", wantError: "upstream read failed", wantCode: 5},
+		{name: "name reused for another UUID", inventory: `[` + row + `]`, detail: strings.Replace(other, "other", "my-app", 1), wantError: "identity changed", wantCode: 5, wantGet: true},
+		{name: "detail name changed", inventory: `[` + row + `]`, detail: strings.Replace(row, "my-app", "renamed", 1), wantError: "identity changed", wantCode: 5, wantGet: true},
+		{name: "detail missing ID", inventory: `[` + row + `]`, detail: `{"name":"my-app","status":"RUNNING"}`, wantError: "missing id", wantCode: 5, wantGet: true},
+		{name: "invalid detail JSON", inventory: `[` + row + `]`, detail: `not-json`, wantError: "parse machine0 get", wantCode: 5, wantGet: true},
+		{name: "full detail failure", inventory: `[` + row + `]`, getError: "No such procedure", wantError: "No such procedure", wantCode: 5, wantGet: true},
+		{name: "detail disappears after inventory", inventory: `[` + row + `]`, getError: "VM not found", wantError: "VM not found", wantCode: 5, wantGet: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+				"ls\x00--json":            {Stdout: tc.inventory, Stderr: tc.listError},
+				"get\x00my-app\x00--json": {Stdout: tc.detail, Stderr: tc.getError},
+			}, errors: map[string]error{}}
+			if tc.listError != "" {
+				runner.errors["ls\x00--json"] = errors.New("exit status 1")
+			}
+			if tc.getError != "" {
+				runner.errors["get\x00my-app\x00--json"] = errors.New("exit status 1")
+			}
+			item, err := testClient(runner).Get(context.Background(), id)
+			assertMachine0Exit(t, err, tc.wantCode, tc.wantError)
+			if !reflect.DeepEqual(item, machine{}) {
+				t.Fatalf("unverified lookup returned a machine: %#v", item)
+			}
+			if tc.wantCode != 4 && strings.Contains(err.Error(), "absent from current authorized inventory") {
+				t.Fatalf("uncertain lookup reported absence: %v", err)
+			}
+			wantCalls := [][]string{{"ls", "--json"}}
+			if tc.wantGet {
+				wantCalls = append(wantCalls, []string{"get", "my-app", "--json"})
+			}
+			var calls [][]string
+			for _, call := range runner.calls {
+				calls = append(calls, call.Args)
+			}
+			if !reflect.DeepEqual(calls, wantCalls) {
+				t.Fatalf("calls=%#v want=%#v", calls, wantCalls)
+			}
+		})
+	}
+}
+
 func TestClientReadRetriesUnavailableThenSucceeds(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		message      string
 		pollInterval time.Duration
+		uuidStage    string
 	}{
 		{name: "rate limited canonical default", message: "Rate limited. Please wait a moment and try again.", pollInterval: core.BaseConfig().Machine0.PollInterval},
 		{name: "rate limited explicit override", message: "Rate limited. Please wait a moment and try again.", pollInterval: 3 * time.Second},
 		{name: "cloud unavailable canonical default", message: "The cloud provider is temporarily unavailable. Please try again shortly.", pollInterval: core.BaseConfig().Machine0.PollInterval},
 		{name: "cloud unavailable explicit override", message: "The cloud provider is temporarily unavailable. Please try again shortly.", pollInterval: 3 * time.Second},
+		{name: "UUID inventory rate limited", message: "Rate limited. Please wait a moment and try again.", pollInterval: 3 * time.Second, uuidStage: "inventory"},
+		{name: "UUID detail unavailable", message: "The cloud provider is temporarily unavailable. Please try again shortly.", pollInterval: 3 * time.Second, uuidStage: "detail"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			unavailable := runnerResponse{
 				result: core.LocalCommandResult{Stderr: "Warning: using cached credentials\n" + tc.message},
 				err:    errors.New("exit status 1"),
 			}
-			runner := &recordingRunner{sequence: []runnerResponse{
-				unavailable,
-				unavailable,
-				{result: core.LocalCommandResult{Stdout: `{"id":"vm-1","name":"box","status":"RUNNING","ip":"203.0.113.10"}`}},
-			}}
+			lookup, id := "box", "vm-1"
+			if tc.uuidStage != "" {
+				id = "abcdef12-3456-7890-abcd-ef1234567890"
+				lookup = id
+			}
+			detail := `{"id":"` + id + `","name":"box","status":"RUNNING","ip":"203.0.113.10"}`
+			inventory := runnerResponse{result: core.LocalCommandResult{Stdout: `[{"id":"` + id + `","name":"box","status":"RUNNING"}]`}}
+			sequence := []runnerResponse{unavailable, unavailable}
+			wantCalls := [][]string{{"get", "box", "--json"}, {"get", "box", "--json"}, {"get", "box", "--json"}}
+			switch tc.uuidStage {
+			case "inventory":
+				sequence = append(sequence, inventory)
+				wantCalls = [][]string{{"ls", "--json"}, {"ls", "--json"}, {"ls", "--json"}, {"get", "box", "--json"}}
+			case "detail":
+				sequence = append([]runnerResponse{inventory}, sequence...)
+				wantCalls = append([][]string{{"ls", "--json"}}, wantCalls...)
+			}
+			sequence = append(sequence, runnerResponse{result: core.LocalCommandResult{Stdout: detail}})
+			runner := &recordingRunner{sequence: sequence}
 			var stderr bytes.Buffer
 			c := &client{cfg: Machine0Config{CLIPath: "/opt/bin/machine0", PollInterval: tc.pollInterval}, rt: Runtime{Exec: runner, Stdout: io.Discard, Stderr: &stderr}}
 			var sleeps []time.Duration
@@ -124,12 +270,16 @@ func TestClientReadRetriesUnavailableThenSucceeds(t *testing.T) {
 				return nil
 			}
 
-			item, err := c.Get(context.Background(), "box")
+			item, err := c.Get(context.Background(), lookup)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if item.ID != "vm-1" || len(runner.calls) != 3 {
-				t.Fatalf("item=%#v calls=%d", item, len(runner.calls))
+			var calls [][]string
+			for _, call := range runner.calls {
+				calls = append(calls, call.Args)
+			}
+			if item.ID != id || !reflect.DeepEqual(calls, wantCalls) {
+				t.Fatalf("item=%#v calls=%#v want=%#v", item, calls, wantCalls)
 			}
 			if len(sleeps) != 2 || sleeps[0] != tc.pollInterval || sleeps[1] != tc.pollInterval {
 				t.Fatalf("sleeps=%v want=%s", sleeps, tc.pollInterval)

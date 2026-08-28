@@ -180,6 +180,25 @@ stop/start preserves an IP, while suspend removes compute and a later start can
 assign a different IP. Crabbox always prefers `defaultSSHUsername` returned by
 Machine0, falling back to `ubuntu` for Ubuntu and `nix` for NixOS.
 
+For canonical dashed UUID lookups (`8-4-4-4-12` hexadecimal digits), Crabbox
+reads `machine0 ls --json`, validates the inventory and every row's UUID, and
+requires exactly one matching UUID, ignoring hexadecimal letter case. It then
+fetches full details with `machine0 get <current-name> --json` and requires both
+the original UUID and the selected name to match. Inventory summaries are never
+returned as full details: they can omit the SSH key, default SSH username, and
+other metadata. Ordinary name lookups, including named readiness polls, remain
+direct detail reads without an extra inventory request.
+
+Only a successful, complete, valid inventory with no exact UUID match reports
+the UUID as absent from the current authorized inventory. Missing or malformed
+IDs, duplicate matches, authentication/read/JSON errors, and failed detail
+reads fail closed; they do not establish absence. A reused name or a UUID/name
+change between inventory and detail reads is rejected. The name is only a
+transport address: CloudID, ImmutableID, and claim scope remain bound to the
+UUID, and lookup does not delete or rebind claims. This verifies identity across
+the lookup reads; it does not make later name-addressed mutations atomic with
+those reads or remove the existing remote name-reuse race before mutation.
+
 Use `--keep` to keep a normal Crabbox run lease for later reuse. Adopt an
 existing unclaimed Machine0 VM only through an explicit `--reclaim` reuse;
 destructive release requires an exact local claim bound to the Machine0 ID.
@@ -380,7 +399,7 @@ instead of baking secrets into a reusable image.
 
 ## CLI contract
 
-The adapter uses the documented CLI, currently tested with
+The adapter uses the documented CLI. Prior lifecycle testing used
 `@machine0/cli` 1.0.155:
 
 - `machine0 new`, `get --json`, `ls --json`, `start`, `suspend --yes`, and
@@ -389,6 +408,26 @@ The adapter uses the documented CLI, currently tested with
 - `machine0 sizes --all --json` for live availability and prices;
 - `machine0 images ls/get/save/rm` and image-version removal for native
   checkpoints.
+
+On 2026-08-28, read-only checks with `@machine0/cli` 1.0.164 observed native
+`get <UUID>` returning `No such procedure` for an existing VM, while inventory
+and full details by name succeeded under the same authentication. The repaired
+Crabbox UUID lookup returned that same VM's verified identity and SSH username;
+an absent UUID returned a clean absence error. A missing-procedure error alone
+neither diagnoses authentication failure nor establishes resource existence.
+These checks did not verify the full 1.0.164 lifecycle. The
+[public 1.0.164 package](https://registry.npmjs.org/@machine0/cli/-/cli-1.0.164.tgz)
+routes canonical UUIDs to `machines.getMachineById`, names to
+`machines.getByName`, and inventory to `machines.list` through the same CLI
+authentication client. The [native machine command documentation](https://docs.machine0.io/cli/machines)
+describes `get <vm>`; the separately documented MCP UUID lookup uses a different
+transport and is not Crabbox's CLI contract.
+
+Crabbox therefore resolves canonical UUIDs through inventory and verified
+name-addressed full details without issuing native UUID `get` first or matching
+an error message to trigger a fallback. Both reads retain the existing outage
+retry behavior. Mutations remain single-attempt, with existing ownership guards
+unchanged; no direct API or MCP authentication path is added.
 
 Crabbox does not use Machine0's published OpenAPI document because it is not
 the VM control-plane contract. All command execution is behind an injectable
