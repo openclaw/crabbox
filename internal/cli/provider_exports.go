@@ -228,6 +228,10 @@ func IsArchitectureExplicit(cfg Config) bool {
 	return cfg.architectureExplicit
 }
 
+func IsWindowsModeExplicit(cfg Config) bool {
+	return cfg.explicitWindowsMode != "" || cfg.windowsModeFlagExplicit
+}
+
 func MarkArchitectureExplicit(cfg *Config) {
 	cfg.architectureExplicit = true
 }

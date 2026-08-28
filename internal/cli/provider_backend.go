@@ -42,8 +42,10 @@ type ProviderSSHTargetConfigurer interface {
 	ConfigureSSHTarget(target *SSHTarget, readyCommand string)
 }
 
-// ProviderArchitectureCapability lets a provider admit architecture requests
-// whose runtime feasibility is validated inside the provider adapter.
+// ProviderArchitectureCapability owns admission of the complete target/mode/
+// architecture tuple (including amd64), within ProviderSpec.Targets. Providers
+// without this capability retain core's managed architecture restrictions.
+// Runtime feasibility and explicit assertions are validated by the adapter.
 type ProviderArchitectureCapability interface {
 	SupportsArchitecture(cfg Config, architecture string) bool
 }

@@ -85,6 +85,70 @@ On Linux, macOS, and WSL2 targets, Crabbox's workspace-owner protocol invokes
 `/bin/sh` explicitly and does not require the SSH account to use a POSIX login
 shell; zsh, Bash, and Fish login shells are supported.
 
+### Architecture assertions and observations
+
+All three provider names accept `amd64` and `arm64` for all four targets.
+`--arch`, `CRABBOX_ARCH`, or a nonempty YAML `architecture` is an explicit
+assertion, including `amd64`. The omitted `amd64` configuration default is
+not an assertion. For example:
+
+```sh
+crabbox run --provider ssh --target macos --arch arm64 \
+  --static-host mac.example.com -- xcodebuild test
+```
+
+Acquisition and prepared reuse (including `run --id` and cached leases) measure
+architecture after SSH readiness and before updating the claim or allowing sync,
+hydration, or workload execution. The probe uses the resolved SSH user, working
+port, and existing trust/credential transport. It never chooses emulation or
+forces `arch -arm64`. Explicit assertions require fresh, supported matching
+evidence; missing, malformed, contradictory, or translated evidence fails closed.
+
+Linux uses `uname -m` for the SSH execution environment. WSL2 runs that probe
+**inside WSL**, through the existing Windows-to-WSL wrapper, which stages a
+temporary script. macOS combines `uname` with hardware and Rosetta `sysctl`
+queries. Native Windows combines `IsWow64Process2` native-machine evidence with
+the current PowerShell process's `RuntimeInformation.ProcessArchitecture`.
+An unknown WOW64 process-machine value alone is not proof of native execution.
+Unavailable APIs or process queries remain unknown; no environment variable or
+older `.NET OSArchitecture` value substitutes for native-host evidence.
+
+Without an assertion, supported measured architecture is published even when it
+differs from the configured default. Unknown measurements produce a bounded
+warning and permit unconstrained use. SSH authentication, identity, transport,
+timeout, and cancellation errors still fail. Translated launchers expose host,
+process, and translation fields; they cannot satisfy an explicit native assertion.
+These observations describe the probe/SSH environment, not bare-metal provenance
+on POSIX or the architecture of every later executable. An ARM shell does not
+prove that Node or another workload binary is native.
+
+Lease metadata contains normalized `architecture` (or `unknown`),
+`architecture_source`, `architecture_scope`, `architecture_version`, and
+`architecture_observed_at` (Unix milliseconds), with host/process/translation
+fields where available.
+`ServerType.Architecture` is populated only for supported measured architecture.
+Opaque route bindings prevent evidence from being attached to a different
+endpoint, user, or target after an override. No raw probe output is persisted.
+Offline `List`/non-prepared `Resolve` returns only **historical** timestamped
+evidence, or unknown for legacy/unmatched claims; it does not contact the host.
+Execution always refreshes this evidence. Touch preserves it without making it
+fresh again.
+
+Prepared resolution returns fresh evidence with the original exact claim snapshot;
+it does not change the persisted claim or the adapter's cache. `run` publishes
+the evidence through its repository-aware claim transaction before work. A
+different repository must use `--reclaim`; rejected adoption leaves the existing
+claim untouched. Acquisition still publishes its evidence directly through the
+guarded repository claim transaction. Pond/admin preparation with no repository
+context does not infer an owner or adopt a claim: a caller that persists the
+returned endpoint must use its existing guarded publication step. Until then,
+offline lookup and Touch retain the previously published evidence.
+
+`config show` remains offline: its architecture is a configured/effective value,
+not observed architecture or proof of supported runtime behavior. The JSON
+`architectureExplicit` boolean (text: `architecture_explicit`) distinguishes an
+explicit assertion from the default. Observations never rewrite that configuration.
+
 ## Configuration
 
 The static target lives under the `static:` block. SSH credentials fall back to
