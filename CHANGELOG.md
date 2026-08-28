@@ -4,13 +4,16 @@
 
 ### Fixed
 
-- Rejected Blacksmith Testbox `run --no-sync` before lease access or provider execution instead of silently syncing local edits over the remote workspace.
+- Rejected Blacksmith Testbox `--no-sync` with exit 2 before acquisition or reuse instead of silently delegating sync, including nonblank `prewarm --probe-command` and named jobs with `noSync: true` before warmup or dry-run planning.
 - Preserved managed Daytona cleanup responsibility after lost create responses, with native TTL for kept sandboxes, early exact-resource tracking, and original-context deletion confirmed by provider observation.
 - Preserved configured Machine0 executable paths and polling settings during checkpoint verification, deletion, and pruning while retaining exact image/version ownership checks and local records on uncertain failures.
 - Made config path diagnostics honor `CRABBOX_CONFIG`, matching the file selected for reads and writes. Thanks @coygeek.
 - Fixed static SSH architecture admission across Linux, macOS, Windows, and WSL2: configured values, including inherited `amd64`, now require fresh matching evidence after read-only ownership checks and before guarded claim publication; remove explicit architecture settings for automatic discovery, with measured or unknown evidence reported separately from offline defaults.
 - Preserved the remote caller's umask for workspace-owned POSIX and WSL2 commands while keeping staged scripts, stdin, and owner state private.
 - Disabled automatic host clipboard and audio passthrough for Tart VMs.
+- Prevented active lease operations from blocking unrelated claim discovery, slug allocation, and Testbox runs while preserving exact ownership checks and cleanup fencing.
+- Made native Windows state replacement and cleanup preserve open readers; the CLI now requires Windows 10 version 1709+ or Windows Server 2019+.
+- Kept Windows external routing state readable after publication by creating it with current-user ownership and private ACLs.
 
 ## 0.47.0 - 2026-08-28
 

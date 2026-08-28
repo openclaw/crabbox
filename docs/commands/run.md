@@ -159,12 +159,6 @@ that explicitly advertise the matching bounded artifact capability.
 per-provider docs under [providers](../providers/README.md) for how `--id`
 resolves and any extra sync limitations.
 
-Blacksmith Testbox rejects `--no-sync` before lease access or provider execution:
-its native run command owns sync and has no supported bypass, even with `--id`.
-Do not use a Testbox run to inspect remote files while relying on `--no-sync`
-to protect them from local edits. Other delegated adapters may support skipping
-their own transfer; see their provider docs.
-
 Vercel Sandbox forwards non-auth command environment values through the SDK
 bridge request body and strips Vercel provider auth variables from
 `--allow-env` forwarding. Use Crabbox env forwarding for live secrets; raw
@@ -275,8 +269,9 @@ hint, and `sync.timeout` kills stalled syncs.
 
 ### Sync alternatives
 
-- `--no-sync` skips local file transfer on supported providers; Blacksmith Testbox
-  rejects it. `--sync-only` syncs and exits on supported providers.
+- `--no-sync` skips local file transfer and `--sync-only` syncs and exits on
+  supported providers. Blacksmith Testbox rejects both: its native command owns
+  sync even with `--id`, so reusing a Testbox does not provide a sync bypass.
 - `--fresh-pr <owner/repo#number|url|number>` skips local dirty sync and creates
   a fresh remote checkout of a GitHub PR. A bare `<number>` uses the current
   repository's GitHub origin. Only `github.com` PR URLs are accepted; other

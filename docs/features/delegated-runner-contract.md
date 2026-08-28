@@ -224,11 +224,6 @@ equivalent contract:
 Use `RejectDelegatedSyncOptionsForSpec` as the default guard. Add capability
 flags only when the provider really implements the corresponding behavior.
 
-The shared guard leaves `--no-sync` validation to the adapter: both archive
-uploads and other SDK/CLI transports can implement a sync bypass. Reject it
-before lease access or provider activity when the transport cannot honor it,
-as Blacksmith Testbox does. Never silently sync or report a skipped sync instead.
-
 ## Provider Spec
 
 A runner-backed delegated provider should normally declare:

@@ -47,12 +47,6 @@ crabbox status --provider blacksmith-testbox --id tbx_123
 crabbox stop --provider blacksmith-testbox tbx_123
 ```
 
-Every Testbox run delegates workspace sync to Blacksmith, including runs with
-`--id`. Crabbox rejects `--no-sync` before touching the lease or invoking
-Blacksmith because its native run command has no supported sync bypass. Do not
-use this path to inspect a remote baseline without uploading local edits; use
-a provider that supports `--no-sync` when that guarantee is required.
-
 Run delegated sync from a full Git checkout. Crabbox rejects a checkout when
 sparse rules or `skip-worktree` index state leave tracked paths absent because
 those paths can otherwise be misread as deletions during a later full sync. A
@@ -238,10 +232,18 @@ visibility-only detail page.
 
 ## Gotchas
 
-- `--no-sync`, `--sync-only`, `--checksum`, and `--force-sync-large` are rejected
-  because Blacksmith owns sync.
-- Avoid `prewarm --probe-command`: its generated `--no-sync` run is unsupported
-  and fails after warmup. Use plain `prewarm` or put the probe in the workflow.
+- `--no-sync` exits 2 before acquiring or reusing a Testbox because Blacksmith
+  has no supported skip-sync contract. Callers that need no file transfer must
+  choose a provider that supports skipping sync.
+- `prewarm --probe-command` requires `--no-sync`, so a nonblank probe exits 2
+  before warmup, key generation, provider calls, or claim changes, including
+  with `--dry-run`. Plain `prewarm` (also an empty or whitespace-only probe)
+  stays supported; omit `--no-sync` when reusing the resulting Testbox.
+- Named jobs with `noSync: true` also exit 2 before warmup, hydration, run, or
+  stop, including dry runs and existing leases. No keys are generated or claims
+  changed; omit `noSync` or set it to `false` for ordinary Blacksmith jobs.
+- `--sync-only`, `--checksum`, and `--force-sync-large` do not apply because
+  Blacksmith owns sync.
 - `--script`, `--script-stdin`, `--fresh-pr`, local stdout/stderr captures, and
   `--download` are rejected because Blacksmith owns command transport and remote
   file transport. Use `--emit-proof` for PR-ready transcript proof.

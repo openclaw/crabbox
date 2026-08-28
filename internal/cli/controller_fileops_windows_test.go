@@ -15,11 +15,26 @@ func TestRemoveControllerFileRecoversDeterministicTombstone(t *testing.T) {
 	if err := os.WriteFile(tombstone, []byte("stale sensitive state"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	reader, err := openArtifactReadOnly(tombstone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
 	if err := removeControllerFile(path); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(tombstone); !os.IsNotExist(err) {
 		t.Fatalf("recovered tombstone still exists: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("new state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeControllerFile(path); err != nil {
+		t.Fatalf("reuse tombstone with recovered reader open: %v", err)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil || string(data) != "stale sensitive state" {
+		t.Fatalf("lost recovered tombstone snapshot: %q err=%v", data, err)
 	}
 }
 
@@ -57,6 +72,26 @@ func TestConfirmedAbsentStateCleanupRecoversControllerTombstones(t *testing.T) {
 		}
 		if _, err := os.Stat(path + ".deleted"); !os.IsNotExist(err) {
 			t.Fatalf("routing tombstone remains: %v", err)
+		}
+
+		cfg := ExternalConfig{Command: "provider-adapter", WorkRoot: "/work/crabbox"}
+		if _, err := PersistExternalRouting(leaseID, cfg); err != nil {
+			t.Fatalf("persist routing after tombstone recovery: %v", err)
+		}
+		loaded, err := LoadExternalRouting(path)
+		if err != nil {
+			t.Fatalf("load routing after tombstone recovery: %v", err)
+		}
+		if loaded.Command != cfg.Command || loaded.WorkRoot != cfg.WorkRoot {
+			t.Fatalf("routing roundtrip changed config: %#v", loaded)
+		}
+		if err := RemoveExternalRoutingIfUnchanged(leaseID, loaded); err != nil {
+			t.Fatalf("remove routing after tombstone recovery: %v", err)
+		}
+		for _, candidate := range []string{path, path + ".deleted"} {
+			if _, err := os.Stat(candidate); !os.IsNotExist(err) {
+				t.Fatalf("routing cleanup left %s: %v", candidate, err)
+			}
 		}
 	})
 

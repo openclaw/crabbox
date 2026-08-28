@@ -19,10 +19,7 @@ import (
 
 const privateRunOutputTempAttempts = 32
 
-var (
-	movePrivateRunOutputFileExW = windows.NewLazySystemDLL("kernel32.dll").NewProc("MoveFileExW")
-	reopenPrivateRunOutputFile  = windows.NewLazySystemDLL("kernel32.dll").NewProc("ReOpenFile")
-)
+var movePrivateRunOutputFileExW = windows.NewLazySystemDLL("kernel32.dll").NewProc("MoveFileExW")
 
 func createPrivateRunOutputDir(path string) error {
 	handles, err := openWindowsRunOutputDirectory(path, false)
@@ -369,34 +366,30 @@ func securePrivateWindowsHandle(handle windows.Handle, directory bool) error {
 	if err != nil {
 		return fmt.Errorf("read private Windows output owner: %w", err)
 	}
-	securityInformation := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION)
-	var newOwner *windows.SID
-	securityHandle := handle
-	closeSecurityHandle := false
-	if owner == nil || !owner.Equals(user) {
-		securityInformation |= windows.OWNER_SECURITY_INFORMATION
-		newOwner = user
-		securityHandle, err = reOpenPrivateWindowsHandle(handle, windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER, directory)
-		if err != nil {
-			return err
-		}
-		closeSecurityHandle = true
-	}
-	if closeSecurityHandle {
-		defer windows.CloseHandle(securityHandle)
-	}
+	// WRITE_DAC does not imply WRITE_OWNER. Apply the private grant through
+	// the retained handle before requesting ownership access to the same object.
 	if err := windows.SetSecurityInfo(
-		securityHandle,
+		handle,
 		windows.SE_FILE_OBJECT,
-		securityInformation,
-		newOwner,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
 		nil,
 		acl,
 		nil,
 	); err != nil {
 		return fmt.Errorf("apply private Windows access-control list: %w", err)
 	}
-	return verifyPrivateWindowsHandle(securityHandle, directory, user)
+	if owner == nil || !owner.Equals(user) {
+		securityHandle, err := reOpenPrivateWindowsHandle(handle, windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.WRITE_OWNER, directory)
+		if err != nil {
+			return err
+		}
+		defer windows.CloseHandle(securityHandle)
+		if err := windows.SetSecurityInfo(securityHandle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, user, nil, nil, nil); err != nil {
+			return fmt.Errorf("apply private Windows output owner: %w", err)
+		}
+	}
+	return verifyPrivateWindowsHandle(handle, directory, user)
 }
 
 func verifyPrivateWindowsHandle(handle windows.Handle, directory bool, currentUser *windows.SID) error {
@@ -581,24 +574,31 @@ func validateCurrentUserPrivateWindowsDescriptor(descriptor *windows.SECURITY_DE
 }
 
 func reOpenPrivateWindowsHandle(handle windows.Handle, access uint32, directory bool) (windows.Handle, error) {
-	flags := uint32(windows.FILE_FLAG_OPEN_REPARSE_POINT)
+	// An empty relative name reopens the retained object without resolving a path.
+	// ReOpenFile can deny directory handles even when the DACL permits the access.
+	name, err := windows.NewNTUnicodeString("")
+	if err != nil {
+		return windows.InvalidHandle, err
+	}
+	attributes := &windows.OBJECT_ATTRIBUTES{
+		Length:        uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
+		RootDirectory: handle,
+		ObjectName:    name,
+		Attributes:    windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
+	}
+	fileType := uint32(windows.FILE_NON_DIRECTORY_FILE)
 	if directory {
-		flags |= windows.FILE_FLAG_BACKUP_SEMANTICS
+		fileType = windows.FILE_DIRECTORY_FILE
 	}
-	result, _, callErr := reopenPrivateRunOutputFile.Call(
-		uintptr(handle),
-		uintptr(access),
-		uintptr(windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE),
-		uintptr(flags),
-	)
-	reopened := windows.Handle(result)
-	if reopened != windows.InvalidHandle {
-		return reopened, nil
+	var reopened windows.Handle
+	err = windows.NtCreateFile(&reopened, access, attributes, &windows.IO_STATUS_BLOCK{}, nil,
+		windows.FILE_ATTRIBUTE_NORMAL, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		windows.FILE_OPEN, fileType|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_OPEN_FOR_BACKUP_INTENT, 0, 0)
+	if err != nil {
+		// NtCreateFile returns NTStatus; retain the callers' Win32 error matching.
+		return windows.InvalidHandle, fmt.Errorf("reopen private Windows output handle: %w", err.(windows.NTStatus).Errno())
 	}
-	if callErr != nil && callErr != syscall.Errno(0) {
-		return windows.InvalidHandle, fmt.Errorf("reopen private Windows output handle: %w", callErr)
-	}
-	return windows.InvalidHandle, fmt.Errorf("reopen private Windows output handle")
+	return reopened, nil
 }
 
 func replacePrivateRunOutputTemp(tempPath, path string) error {

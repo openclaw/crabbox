@@ -160,6 +160,8 @@ executables or assets, especially `crabbox-apple-vm-helper`, and it is not the
 signed/notarized prebuilt distribution. Use Homebrew or a release archive for
 complete platform capabilities, notably the Apple VM provider on Apple Silicon.
 
+The native Windows CLI requires Windows 10 version 1709+ or Windows Server
+2019+ for snapshot-preserving state replacement and cleanup.
 Supported WSL2 and x64 no-WSL Windows transfer selection requires a build from
 current `main` or Crabbox v0.42.1 and newer. Follow the
 [Windows installation guide](docs/windows-install.md) for the supported setup.
