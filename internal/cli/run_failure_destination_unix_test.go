@@ -23,31 +23,148 @@ func TestFailureBundleSecuresPermissiveDirectoryBeforeTemp(t *testing.T) {
 	if err := os.Chmod(dir, 0o777); err != nil {
 		t.Fatal(err)
 	}
-	if err := prepareFailureBundleDir(dir); err != nil {
+	output, err := prepareFailureBundleDir(dir)
+	if err != nil {
 		t.Fatal(err)
 	}
+	defer output.Close()
 	assertRunOutputMode(t, dir, 0o700)
 	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
 		t.Fatalf("directory preparation created names: entries=%v err=%v", entries, err)
 	}
 	path := filepath.Join(dir, "bundle.tar.gz")
-	file, tempPath, err := createFailureBundleTemp(path)
-	if err != nil {
+	if err := output.createTemp("bundle.tar.gz"); err != nil {
 		t.Fatal(err)
 	}
-	defer file.Close()
-	assertRunOutputMode(t, tempPath, 0o600)
-	if _, err := file.WriteString("original bundle"); err != nil {
+	assertRunOutputMode(t, filepath.Join(dir, output.name), 0o600)
+	if _, err := output.Write([]byte("original bundle")); err != nil {
 		t.Fatal(err)
 	}
-	if err := publishFailureBundleTemp(file, tempPath, path); err != nil {
+	if err := output.publish("bundle.tar.gz"); err != nil {
 		t.Fatal(err)
 	}
-	if err := file.Close(); err != nil {
+	if err := output.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if data, err := os.ReadFile(path); err != nil || string(data) != "original bundle" {
 		t.Fatalf("published data=%q err=%v", data, err)
+	}
+}
+
+func TestFailureBundleDirectoryReplacementStaysWithOwner(t *testing.T) {
+	for _, component := range []string{"parent", "captures"} {
+		for _, stage := range []string{"prepared", "created", "published"} {
+			for _, fail := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/fail=%t", component, stage, fail), func(t *testing.T) {
+					root := t.TempDir()
+					parent := filepath.Join(root, ".crabbox")
+					dir := filepath.Join(parent, "captures")
+					output, err := prepareFailureBundleDir(dir)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer output.Close()
+					// A writable parent can rename the private directory itself.
+					if err := os.Chmod(parent, 0o777); err != nil {
+						t.Fatal(err)
+					}
+					if stage != "prepared" {
+						if err := output.createTemp("bundle.tar.gz"); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if stage == "published" {
+						if err := output.publish("bundle.tar.gz"); err != nil {
+							t.Fatal(err)
+						}
+					}
+					moved := filepath.Join(root, "moved")
+					target, original := dir, moved
+					if component == "parent" {
+						target, original = parent, filepath.Join(moved, "captures")
+					}
+					if err := os.Rename(target, moved); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.MkdirAll(dir, 0o777); err != nil {
+						t.Fatal(err)
+					}
+					if stage == "prepared" {
+						if err := output.createTemp("bundle.tar.gz"); err != nil {
+							t.Fatal(err)
+						}
+					}
+					// Cleanup must not delete a replacement with the same name either.
+					for _, name := range []string{output.name, "bundle.tar.gz"} {
+						if err := os.WriteFile(filepath.Join(dir, name), []byte("replacement"), 0o600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if _, err := output.Write([]byte("private bundle")); err != nil {
+						t.Fatal(err)
+					}
+					if stage != "published" {
+						if fail {
+							if err := os.Mkdir(filepath.Join(original, "bundle.tar.gz"), 0o700); err != nil {
+								t.Fatal(err)
+							}
+						}
+						err := output.publish("bundle.tar.gz")
+						if (err != nil) != fail {
+							t.Fatalf("publication error=%v, want failure=%t", err, fail)
+						}
+						if fail {
+							if err := os.Remove(filepath.Join(original, "bundle.tar.gz")); err != nil {
+								t.Fatal(err)
+							}
+						}
+					} else if fail {
+						output.published = false // A bundle-writing failure discards it.
+					}
+					if err := output.Close(); err != nil {
+						t.Fatal(err)
+					}
+					var stat unix.Stat_t
+					if err := unix.Fstat(output.directory.fd, &stat); !errors.Is(err, unix.EBADF) {
+						t.Fatalf("directory descriptor was not closed: %v", err)
+					}
+					entries, err := os.ReadDir(original)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if fail {
+						if len(entries) != 0 {
+							t.Fatalf("failed bundle leaked: %v", entries)
+						}
+					} else {
+						if len(entries) != 1 || entries[0].Name() != "bundle.tar.gz" {
+							t.Fatalf("unexpected original directory entries: %v", entries)
+						}
+						if data, err := os.ReadFile(filepath.Join(original, "bundle.tar.gz")); err != nil || string(data) != "private bundle" {
+							t.Fatalf("original bundle=%q err=%v", data, err)
+						}
+						assertRunOutputMode(t, filepath.Join(original, "bundle.tar.gz"), 0o600)
+					}
+					assertRunOutputMode(t, original, 0o700)
+					replacements, err := os.ReadDir(dir)
+					if err != nil {
+						t.Fatal(err)
+					}
+					wantEntries := 2
+					if stage == "published" {
+						wantEntries = 1
+					}
+					if len(replacements) != wantEntries {
+						t.Fatalf("replacement directory mutated: %v", replacements)
+					}
+					for _, entry := range replacements {
+						if data, err := os.ReadFile(filepath.Join(dir, entry.Name())); err != nil || string(data) != "replacement" {
+							t.Fatalf("replacement bundle=%q err=%v", data, err)
+						}
+					}
+				})
+			}
+		}
 	}
 }
 
@@ -79,6 +196,34 @@ func TestFailureBundleDestinationUnwritable(t *testing.T) {
 	}
 }
 
+func TestFailureBundleRemovedDirectoryFailsClosed(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "captures")
+	output, err := prepareFailureBundleDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer output.Close()
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := output.createTemp("bundle.tar.gz"); err == nil {
+		t.Fatal("created a bundle after its verified directory was removed")
+	}
+	if err := output.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(output.directory.fd, &stat); !errors.Is(err, unix.EBADF) {
+		t.Fatalf("failed creation retained directory descriptor: %v", err)
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Fatalf("replacement gained a bundle: entries=%v err=%v", entries, err)
+	}
+}
+
 func TestFailureBundleDirectoryRequiresCurrentOwner(t *testing.T) {
 	for _, tc := range []struct{ owner, current uint32 }{{1000, 1000}, {1001, 1000}, {1001, 0}} {
 		err := validateFailureBundleDirectoryOwner(tc.owner, tc.current)
@@ -95,7 +240,7 @@ func TestFailureBundleReadOnlyFilesystemSelection(t *testing.T) {
 			local := filepath.Join(".crabbox", "captures", "bundle.tar.gz")
 			fallback := filepath.Join(state, "captures", "bundle.tar.gz")
 			calls := 0
-			file, path, err := openFailureBundleDestination("bundle.tar.gz", func() (string, error) { return state, nil }, func(path string) (*os.File, error) {
+			file, path, err := openFailureBundleDestination("bundle.tar.gz", func() (string, error) { return state, nil }, func(path string) (*failureBundleOutput, error) {
 				calls++
 				if calls == 1 {
 					if path != local {
@@ -109,7 +254,7 @@ func TestFailureBundleReadOnlyFilesystemSelection(t *testing.T) {
 				if fallbackFails {
 					return nil, privateRunOutputWriteError{unix.EACCES}
 				}
-				return openFailureBundleFile(path)
+				return openFailureBundleOutput(path)
 			})
 			if calls != 2 || path != fallback {
 				t.Fatalf("calls=%d path=%q err=%v", calls, path, err)
@@ -264,7 +409,7 @@ func TestFailureBundleFallbackErrorsNameBothDestinations(t *testing.T) {
 				resolve = func() (string, error) { return "", errors.New("user state directory is unavailable") }
 				want = "user state directory is unavailable"
 			}
-			file, path, err := openFailureBundleDestination("bundle.tar.gz", resolve, openFailureBundleFile)
+			file, path, err := openFailureBundleDestination("bundle.tar.gz", resolve, openFailureBundleOutput)
 			if err == nil || file != nil || !strings.Contains(err.Error(), filepath.Join(".crabbox", "captures", "bundle.tar.gz")) || !strings.Contains(err.Error(), want) {
 				t.Fatalf("path=%q file=%v err=%v", path, file, err)
 			}

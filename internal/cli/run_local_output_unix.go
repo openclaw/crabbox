@@ -51,45 +51,6 @@ func privateRunOutputPermissionError(err error) bool {
 	return errors.Is(err, os.ErrPermission) || errors.Is(err, unix.EROFS)
 }
 
-func prepareFailureBundleDir(path string) error {
-	if err := createPrivateRunOutputDir(path); err != nil {
-		return err
-	}
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return err
-	}
-	defer unix.Close(fd)
-	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); err != nil {
-		return err
-	}
-	if err := validateFailureBundleDirectoryOwner(stat.Uid, uint32(os.Geteuid())); err != nil {
-		return err
-	}
-	// Check existing access without exposing a temporary name or granting access
-	// the caller did not already have. Only then exclude other directory writers.
-	if err := unix.Faccessat(fd, ".", unix.W_OK|unix.X_OK, unix.AT_EACCESS); err != nil {
-		return privateRunOutputWriteError{err}
-	}
-	return securePrivateRunOutputDirFD(fd)
-}
-
-func validateFailureBundleDirectoryOwner(owner, current uint32) error {
-	if owner != current {
-		return fmt.Errorf("failure bundle directory must be owned by the current user")
-	}
-	return nil
-}
-
-func createFailureBundleTemp(path string) (*os.File, string, error) {
-	return createPrivateRunOutputTemp(path)
-}
-
-func publishFailureBundleTemp(_ *os.File, tempPath, path string) error {
-	return os.Rename(tempPath, path)
-}
-
 func openPrivateRunOutputFile(path string) (*os.File, error) {
 	file, tempPath, err := createPrivateRunOutputTemp(path)
 	if err != nil {

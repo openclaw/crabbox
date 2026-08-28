@@ -128,6 +128,11 @@ fallback. If both destinations fail, the warning includes both paths and the
 remote command's exit status is preserved. Explicit `--capture-stdout` and
 `--capture-stderr` destinations are never moved.
 
+The bundle directory stays open and private through file creation, publication,
+and writing, so a concurrent replacement of its parent path cannot redirect the
+capture. Failed archive writes remove the incomplete bundle through that same
+directory.
+
 Crabbox does **not** redact captured files. Treat every bundle and capture file
 as secret-bearing until you have reviewed it. On Unix-like hosts, Crabbox
 creates local captures, downloads, proofs, and failure bundles with owner-only

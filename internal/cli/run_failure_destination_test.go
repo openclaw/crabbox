@@ -13,7 +13,7 @@ func TestFailureBundleWritableProjectKeepsDefault(t *testing.T) {
 	file, path, err := openFailureBundleDestination("bundle.tar.gz", func() (string, error) {
 		t.Fatal("writable project must not resolve a fallback")
 		return "", nil
-	}, openFailureBundleFile)
+	}, openFailureBundleOutput)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestFailureBundleUnsafeDestinationDoesNotFallback(t *testing.T) {
 				file, _, err := openFailureBundleDestination("bundle.tar.gz", func() (string, error) {
 					t.Fatal("unsafe destination must not resolve a fallback")
 					return "", nil
-				}, openFailureBundleFile)
+				}, openFailureBundleOutput)
 				if err == nil || file != nil || !strings.Contains(err.Error(), "unsafe failure bundle destination") {
 					t.Fatalf("file=%v err=%v", file, err)
 				}
@@ -62,9 +62,53 @@ func TestFailureBundleRejectsNonLocalName(t *testing.T) {
 			file, path, err := openFailureBundleDestination(name, func() (string, error) {
 				t.Fatal("invalid name must not resolve a fallback")
 				return "", nil
-			}, openFailureBundleFile)
+			}, openFailureBundleOutput)
 			if err == nil || file != nil || path != "" {
 				t.Fatalf("file=%v path=%q err=%v", file, path, err)
+			}
+		})
+	}
+}
+
+func TestFailureBundleOwnerClosesWithoutPublishing(t *testing.T) {
+	for _, stage := range []string{"prepared", "created", "publication rejected"} {
+		t.Run(stage, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "captures")
+			output, err := prepareFailureBundleDir(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer output.Close()
+			if stage != "prepared" {
+				if err := output.createTemp("bundle.tar.gz"); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := output.Write([]byte("incomplete")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if stage == "publication rejected" {
+				if err := output.publish("../escape.tar.gz"); err == nil {
+					t.Fatal("owner accepted a non-local destination")
+				}
+			}
+			if err := output.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := output.Close(); err != nil {
+				t.Fatalf("repeated close: %v", err)
+			}
+			if _, err := output.Write([]byte("closed")); !errors.Is(err, os.ErrClosed) {
+				t.Fatalf("closed owner accepted writes: %v", err)
+			}
+			if err := output.createTemp("late.tar.gz"); err == nil {
+				t.Fatal("closed owner accepted creation")
+			}
+			if err := output.publish("late.tar.gz"); err == nil {
+				t.Fatal("closed owner accepted publication")
+			}
+			if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+				t.Fatalf("unpublished bundle leaked: entries=%v err=%v", entries, err)
 			}
 		})
 	}
@@ -90,6 +134,9 @@ func TestFailureBundleReadErrorsDoNotFallback(t *testing.T) {
 				t.Fatalf("path=%q err=%v", path, err)
 			}
 			assertNoFailureBundleFallback(t)
+			if entries, err := os.ReadDir(filepath.Dir(path)); err != nil || len(entries) != 0 {
+				t.Fatalf("failed bundle was not cleaned up: entries=%v err=%v", entries, err)
+			}
 		})
 	}
 }

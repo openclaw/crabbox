@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -883,50 +884,50 @@ func captureFailureBundle(ctx context.Context, target SSHTarget, workdir, leaseI
 }
 
 func writeLocalFailureBundle(name, remoteTarPath string, meta FailureCaptureMetadata) (string, int, error) {
-	file, localPath, err := openFailureBundleDestination(name, crabboxStateDir, openFailureBundleFile)
+	file, localPath, err := openFailureBundleDestination(name, crabboxStateDir, openFailureBundleOutput)
 	if err != nil {
 		return localPath, 0, err
 	}
 	counting := &countingWriteCloser{WriteCloser: file}
 	gzipWriter := gzip.NewWriter(counting)
 	tarWriter := tar.NewWriter(gzipWriter)
-	closeErr := func() error {
+	closeErr := func(success bool) error {
+		file.published = success
 		if err := tarWriter.Close(); err != nil {
-			_ = gzipWriter.Close()
-			_ = counting.Close()
-			return err
+			file.published = false
+			return errors.Join(err, gzipWriter.Close(), counting.Close())
 		}
 		if err := gzipWriter.Close(); err != nil {
-			_ = counting.Close()
-			return err
+			file.published = false
+			return errors.Join(err, counting.Close())
 		}
 		return counting.Close()
 	}
 	if err := addFailureBundleMetadata(tarWriter, meta); err != nil {
-		_ = closeErr()
+		err = errors.Join(err, closeErr(false))
 		return localPath, int(counting.N), err
 	}
 	if err := addFailureBundleFile(tarWriter, "crabbox-artifacts/stdout.log", meta.StdoutPath); err != nil {
-		_ = closeErr()
+		err = errors.Join(err, closeErr(false))
 		return localPath, int(counting.N), err
 	}
 	if err := addFailureBundleFile(tarWriter, "crabbox-artifacts/stderr.log", meta.StderrPath); err != nil {
-		_ = closeErr()
+		err = errors.Join(err, closeErr(false))
 		return localPath, int(counting.N), err
 	}
 	if remoteTarPath != "" {
 		if err := appendRemoteFailureTar(tarWriter, remoteTarPath, "crabbox-artifacts/remote/"); err != nil {
-			_ = closeErr()
+			err = errors.Join(err, closeErr(false))
 			return localPath, int(counting.N), err
 		}
 	}
-	if err := closeErr(); err != nil {
+	if err := closeErr(true); err != nil {
 		return localPath, int(counting.N), exit(2, "failure bundle close %s: %v", localPath, err)
 	}
 	return localPath, int(counting.N), nil
 }
 
-func openFailureBundleDestination(name string, stateDir func() (string, error), openFile func(string) (*os.File, error)) (*os.File, string, error) {
+func openFailureBundleDestination(name string, stateDir func() (string, error), openFile func(string) (*failureBundleOutput, error)) (*failureBundleOutput, string, error) {
 	if name == "." || !filepath.IsLocal(name) || filepath.Base(name) != name {
 		return nil, "", exit(2, "invalid failure bundle name %q", name)
 	}
@@ -950,7 +951,7 @@ func openFailureBundleDestination(name string, stateDir func() (string, error), 
 	return file, fallbackPath, nil
 }
 
-func openFailureBundleFile(localPath string) (*os.File, error) {
+func openFailureBundleOutput(localPath string) (*failureBundleOutput, error) {
 	dir := filepath.Dir(localPath)
 	// Reject links in Crabbox's managed directories before mkdir or a write probe.
 	for _, path := range []string{filepath.Dir(dir), dir, localPath} {
@@ -965,22 +966,17 @@ func openFailureBundleFile(localPath string) (*os.File, error) {
 			return nil, fmt.Errorf("unsafe failure bundle destination %s", path)
 		}
 	}
-	if err := prepareFailureBundleDir(dir); err != nil {
-		return nil, err
-	}
-	file, tempPath, err := createFailureBundleTemp(localPath)
+	output, err := prepareFailureBundleDir(dir)
 	if err != nil {
 		return nil, err
 	}
-	cleanup := func() {
-		_ = file.Close()
-		_ = os.Remove(tempPath)
+	if err := output.createTemp(filepath.Base(localPath)); err != nil {
+		return nil, errors.Join(err, output.Close())
 	}
-	if err := publishFailureBundleTemp(file, tempPath, localPath); err != nil {
-		cleanup()
-		return nil, privateRunOutputWriteError{err}
+	if err := output.publish(filepath.Base(localPath)); err != nil {
+		return nil, errors.Join(err, output.Close())
 	}
-	return file, nil
+	return output, nil
 }
 
 func addFailureBundleMetadata(tw *tar.Writer, meta FailureCaptureMetadata) error {

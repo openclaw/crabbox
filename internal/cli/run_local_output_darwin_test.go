@@ -20,20 +20,20 @@ func TestFailureBundleRemovesDarwinDirectoryACLBeforeTemp(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertDarwinPathHasInheritedACL(t, dir, true)
-	if err := prepareFailureBundleDir(dir); err != nil {
+	output, err := prepareFailureBundleDir(dir)
+	if err != nil {
 		t.Fatal(err)
 	}
+	defer output.Close()
 	assertRunOutputMode(t, dir, 0o700)
 	assertDarwinPathHasInheritedACL(t, dir, false)
 	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
 		t.Fatalf("directory preparation created names: entries=%v err=%v", entries, err)
 	}
-	file, tempPath, err := createFailureBundleTemp(filepath.Join(dir, "bundle.tar.gz"))
-	if err != nil {
+	if err := output.createTemp("bundle.tar.gz"); err != nil {
 		t.Fatal(err)
 	}
-	defer file.Close()
-	assertDarwinPathHasInheritedACL(t, tempPath, false)
+	assertDarwinPathHasInheritedACL(t, filepath.Join(dir, output.name), false)
 }
 
 func TestPrivateRunOutputRemovesInheritedDarwinACL(t *testing.T) {
