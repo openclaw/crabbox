@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Preserved configured Machine0 executable paths and polling settings during checkpoint verification, deletion, and pruning while retaining exact image/version ownership checks and local records on uncertain failures.
+
 ## 0.47.0 - 2026-08-28
 
 ### Added

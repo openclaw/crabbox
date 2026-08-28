@@ -263,6 +263,12 @@ crabbox checkpoint fork <checkpoint-id> --slug experiment
 crabbox checkpoint delete <checkpoint-id>
 ```
 
+Verified inspection and listing (`--verify`), deletion, and pruning use the
+current Crabbox configuration, including `machine0.cliPath` (or
+`CRABBOX_MACHINE0_CLI`) and `machine0.pollInterval`. A custom executable does
+not need to be on `PATH`. Provider-backed deletion keeps the local checkpoint
+record if configuration or resource verification fails.
+
 Creation flushes a running source over SSH, calls `machine0 stop`, waits for
 exact `STOPPED`, and then uses `machine0 images save <vm> <image>`. The VM stays
 stopped while Crabbox polls the exact metadata-matching version until its
