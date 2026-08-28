@@ -55,6 +55,19 @@ the `environment` retain the canonical provider name and report selected=true. P
 `config show --provider <name>` reports `flag` because that command-scoped
 override wins the merge.
 
+`architecture` (text: `arch`) is the configured/effective architecture, not a host
+observation or proof that a provider/runtime supports it. `config show` is offline
+and does not acquire or probe a host. JSON `architectureExplicit` (text:
+`architecture_explicit`) is true for a nonempty YAML `architecture` or
+`CRABBOX_ARCH`, and false for the omitted default. Execution commands also treat
+an explicit `--arch`, including `--arch amd64`, as an assertion; their flags are
+not part of `config show` output.
+
+Static SSH now checks these assertions against fresh host evidence, including
+inherited `amd64` values. See [Upgrading existing static-host configuration](../providers/ssh.md#upgrading-existing-static-host-configuration)
+to keep a strict constraint or remove the contributing values for automatic
+discovery; a blank override does not clear an inherited assertion.
+
 Secrets are never printed. Token-bearing fields are reduced to a status word:
 
 - Provider endpoint URL userinfo is replaced with `<redacted>@`; query and

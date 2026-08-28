@@ -4,6 +4,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -24,9 +25,22 @@ var (
 )
 
 func createPrivateRunOutputDir(path string) error {
+	handles, err := openWindowsRunOutputDirectory(path, false)
+	return errors.Join(err, closeWindowsRunOutputDirectories(handles))
+}
+
+func closeWindowsRunOutputDirectories(handles []windows.Handle) error {
+	var err error
+	for index := len(handles) - 1; index >= 0; index-- {
+		err = errors.Join(err, windows.CloseHandle(handles[index]))
+	}
+	return err
+}
+
+func openWindowsRunOutputDirectory(path string, preserveUnwritable bool) ([]windows.Handle, error) {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	absPath = filepath.Clean(absPath)
 	volume := filepath.VolumeName(absPath)
@@ -34,12 +48,12 @@ func createPrivateRunOutputDir(path string) error {
 		return r == '\\' || r == '/'
 	})
 	if volume == "" || len(components) == 0 {
-		return fmt.Errorf("private output directory must be below a Windows volume root")
+		return nil, fmt.Errorf("private output directory must be below a Windows volume root")
 	}
 	rootPath := volume + string(os.PathSeparator)
 	rootPathPtr, err := windows.UTF16PtrFromString(rootPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	rootHandle, err := windows.CreateFile(
 		rootPathPtr,
@@ -51,45 +65,76 @@ func createPrivateRunOutputDir(path string) error {
 		0,
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	handles := []windows.Handle{rootHandle}
+	ready := false
 	defer func() {
-		for index := len(handles) - 1; index >= 0; index-- {
-			_ = windows.CloseHandle(handles[index])
+		if !ready {
+			_ = closeWindowsRunOutputDirectories(handles)
 		}
 	}()
 	descriptor, user, err := privateWindowsSecurityDescriptor(true)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	parent := rootHandle
 	for index, component := range components {
 		final := index == len(components)-1
-		handle, created, err := openOrCreatePrivateWindowsDirectoryAt(parent, component, descriptor, final)
+		var handle windows.Handle
+		var created bool
+		if preserveUnwritable {
+			handle, created, err = openOrCreateWindowsFailureDirectoryAt(parent, component, descriptor)
+		} else {
+			handle, created, err = openOrCreatePrivateWindowsDirectoryAt(parent, component, descriptor, final)
+			if err != nil {
+				err = privateRunOutputWriteError{err}
+			}
+		}
 		if err != nil {
-			return fmt.Errorf("open private output directory component %q: %w", component, err)
+			return nil, fmt.Errorf("open private output directory component %q: %w", component, err)
 		}
 		handles = append(handles, handle)
 		if err := validatePrivateWindowsFileType(handle, true); err != nil {
-			return err
+			return nil, err
 		}
 		if created {
 			if err := verifyPrivateWindowsHandle(handle, true, user); err != nil {
-				return err
+				return nil, err
+			}
+		} else if final && !preserveUnwritable {
+			if err := securePrivateWindowsHandle(handle, true); err != nil {
+				return nil, err
 			}
 		} else if final {
-			if err := securePrivateWindowsHandle(handle, true); err != nil {
-				return err
+			descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+			if err != nil {
+				return nil, err
+			}
+			owner, _, err := descriptor.Owner()
+			if err != nil {
+				return nil, err
+			}
+			if owner == nil || !owner.Equals(user) {
+				return nil, fmt.Errorf("failure bundle directory must be owned by the current user")
+			}
+			if err := prepareWindowsFailureBundleDirectory(parent, component, handle, user); err != nil {
+				return nil, err
 			}
 		}
 		parent = handle
 	}
-	return nil
+	ready = true
+	return handles, nil
 }
 
 func ensurePrivateRunOutputDir(path string) error {
 	return createPrivateRunOutputDir(path)
+}
+
+func privateRunOutputPermissionError(err error) bool {
+	return errors.Is(err, os.ErrPermission) || errors.Is(err, windows.ERROR_WRITE_PROTECT) ||
+		errors.Is(err, windows.STATUS_ACCESS_DENIED) || errors.Is(err, windows.STATUS_MEDIA_WRITE_PROTECTED)
 }
 
 func openOrCreatePrivateWindowsDirectoryAt(parent windows.Handle, name string, descriptor *windows.SECURITY_DESCRIPTOR, secureExisting bool) (windows.Handle, bool, error) {
@@ -174,6 +219,8 @@ func createPrivateRunOutputTemp(path string) (*os.File, string, error) {
 	}
 	dir := filepath.Dir(path)
 	base := filepath.Base(path)
+	access := uint32(windows.GENERIC_WRITE | windows.FILE_READ_ATTRIBUTES | windows.READ_CONTROL)
+	share := uint32(windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE)
 	for attempt := 0; attempt < privateRunOutputTempAttempts; attempt++ {
 		token, err := randomHex(12)
 		if err != nil {
@@ -186,8 +233,8 @@ func createPrivateRunOutputTemp(path string) (*os.File, string, error) {
 		}
 		handle, err := windows.CreateFile(
 			tempPathPtr,
-			windows.GENERIC_WRITE|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL,
-			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+			access,
+			share,
 			security,
 			windows.CREATE_NEW,
 			windows.FILE_ATTRIBUTE_NORMAL,
@@ -197,7 +244,7 @@ func createPrivateRunOutputTemp(path string) (*os.File, string, error) {
 			if err == windows.ERROR_FILE_EXISTS || err == windows.ERROR_ALREADY_EXISTS {
 				continue
 			}
-			return nil, "", err
+			return nil, "", privateRunOutputWriteError{err}
 		}
 		if err := verifyPrivateWindowsHandle(handle, false, user); err != nil {
 			_ = windows.CloseHandle(handle)

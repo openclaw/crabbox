@@ -7,27 +7,6 @@ import (
 	"strings"
 )
 
-const (
-	tightVNCMSIURL                   = "https://www.tightvnc.com/download/2.8.85/tightvnc-2.8.85-gpl-setup-64bit.msi"
-	tightVNCMSISHA256                = "d8fbed7b27ebab86df6f780f6e86f723668f3715cee521ccaa4568812aef5f3e"
-	gitForWindowsSetupURL            = "https://github.com/git-for-windows/git/releases/download/v2.52.0.windows.1/Git-2.52.0-64-bit.exe"
-	gitForWindowsSetupSHA256         = "d8de7a3152266c8bb13577eab850ea1df6dccf8c2aa48be5b4a1c58b7190d62c"
-	openSSHWin64ZipURL               = "https://github.com/PowerShell/Win32-OpenSSH/releases/download/v9.8.3.0p2-Preview/OpenSSH-Win64.zip"
-	openSSHWin64ZipSHA256            = "0ca131f3a78f404dc819a6336606caec0db1663a692ccc3af1e90232706ada54"
-	ubuntuWSLRootFSURL               = "https://cloud-images.ubuntu.com/wsl/releases/24.04/20240423/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz"
-	ubuntuWSLRootFSSHA256            = "8251e27ffff381a4af5f41dcb94d867de3e0d9774a9241908ab34555d99315ea"
-	wslTruffleHogVersion             = "3.95.9"
-	wslTruffleHogAMD64SHA256         = "f6d1106b85107d79527ed7a5b98b592beadd8b770dc3c9e8c1ad99e1b2cf127e"
-	defaultTailscaleVersion          = "1.98.4"
-	defaultTailscaleAMD64SHA256      = "e6c08a8ee7e63e69aaf1b62ecd12672b3883fbcd2a176bf6cfa42a15fdce0b6b"
-	defaultTailscaleARM64SHA256      = "3cb068eb1368b6bb218d0ef0aa0a7a679a7156b7c979e2279cc2c2321b5f05c7"
-	defaultTailscaleKeyringSHA256    = "3e03dacf222698c60b8e2f990b809ca1b3e104de127767864284e6c228f1fb39"
-	defaultCodeServerVersion         = "4.126.0"
-	defaultCodeServerAMD64SHA256     = "54b648d010c02b6583aa06bd8d2aaf109fc624479b9bc2ff71cb94807ac39afa"
-	defaultCodeServerARM64SHA256     = "441614708ae81b13f14b26db41da8f46f88d7d092c08343a42a0c6c52c51a69d"
-	googleLinuxSigningKeyFingerprint = "EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796"
-)
-
 func awsUserData(cfg Config, publicKey string) string {
 	switch cfg.TargetOS {
 	case targetWindows:
@@ -138,178 +117,20 @@ tasks:
 }
 
 func windowsBootstrapHeaderPowerShell(cfg Config, publicKey, workRoot string) string {
-	return `
-$ErrorActionPreference = "Stop"
-$ProgressPreference = "SilentlyContinue"
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-function Retry($ScriptBlock) {
-  for ($i = 1; $i -le 8; $i++) {
-    try { & $ScriptBlock; return }
-    catch {
-      if ($i -eq 8) { throw }
-      Start-Sleep -Seconds ($i * 5)
-    }
-  }
-}
-function Assert-CrabboxFileSHA256([string]$Path, [string]$Expected) {
-  if (-not (Test-Path -LiteralPath $Path)) { throw "downloaded artifact is missing: $Path" }
-  $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
-  if ($actual -ne $Expected.ToLowerInvariant()) {
-    Remove-Item -Force -LiteralPath $Path -ErrorAction SilentlyContinue
-    throw "SHA-256 mismatch for downloaded artifact: $Path"
-  }
-}
-function New-CrabboxPassword {
-  $bytes = New-Object byte[] 18
-  $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
-  try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
-  return "Cb1!" + [Convert]::ToBase64String($bytes).Substring(0, 18)
-}
-function Resolve-CrabboxOpenSSHCommand([string]$Name) {
-  foreach ($root in @($openSSHInstallRoot, $openSSHSystemRoot)) {
-    $candidate = Join-Path $root $Name
-    if (Test-Path -LiteralPath $candidate) { return $candidate }
-  }
-  $command = Get-Command $Name -ErrorAction SilentlyContinue
-  if ($command -and $command.Source) { return $command.Source }
-  throw "OpenSSH command $Name was not found"
-}
-$user = ` + psQuote(cfg.SSHUser) + `
-$publicKey = ` + psQuote(publicKey) + `
-$workRoot = ` + psQuote(workRoot) + `
-$sshPorts = ` + windowsSSHPortsPowerShell(cfg) + `
-$base = "C:\ProgramData\crabbox"
-$setupCompletePath = Join-Path $base "setup-complete"
-$openSSHZip = "$env:TEMP\OpenSSH-Win64.zip"
-$openSSHInstallRoot = "C:\Program Files\OpenSSH"
-$openSSHSystemRoot = Join-Path $env:WINDIR "System32\OpenSSH"
-$gitInstaller = "$env:TEMP\Git-2.52.0-64-bit.exe"
-New-Item -ItemType Directory -Force -Path $base, $workRoot | Out-Null
-New-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Network\NewNetworkWindowOff" -Force | Out-Null
-Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\ServerManager" -Name DoNotOpenServerManagerAtLogon -Type DWord -Value 1 -ErrorAction SilentlyContinue
-`
-}
-
-func windowsBootstrapCorePowerShell() string {
-	return `
-if (-not (Test-Path -LiteralPath $passwordPath)) {
-  New-CrabboxPassword | Set-Content -NoNewline -Encoding ASCII -Path $passwordPath
-}
-$userPassword = (Get-Content -Raw -Path $passwordPath).Trim()
-if ($userPassword.Length -lt 12 -or $userPassword -notmatch '[A-Z]' -or $userPassword -notmatch '[a-z]' -or $userPassword -notmatch '[0-9]' -or $userPassword -notmatch '[^A-Za-z0-9]') {
-  $userPassword = New-CrabboxPassword
-  Set-Content -NoNewline -Encoding ASCII -Path $passwordPath -Value $userPassword
-}
-$secure = ConvertTo-SecureString $userPassword -AsPlainText -Force
-if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
-  New-LocalUser -Name $user -Password $secure -PasswordNeverExpires -AccountNeverExpires | Out-Null
-} else {
-  Set-LocalUser -Name $user -Password $secure -PasswordNeverExpires $true
-}
-Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
-Set-Content -NoNewline -Encoding ASCII -Path $usernamePath -Value $user
-$userSID = (Get-LocalUser -Name $user).SID.Value
-$credentialPaths = @($passwordPath)
-if ($passwordMirrorPath) {
-  Set-Content -NoNewline -Encoding ASCII -Path $passwordMirrorPath -Value $userPassword
-  $credentialPaths += $passwordMirrorPath
-}
-foreach ($credentialPath in $credentialPaths) {
-  icacls.exe $credentialPath /inheritance:r /grant "*${userSID}:F" /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F" | Out-Null
-}
-icacls.exe $workRoot /grant "*${userSID}:(OI)(CI)F" | Out-Null
-$userSSHDir = Join-Path (Join-Path "C:\Users" $user) ".ssh"
-$userAuthorizedKeys = Join-Path $userSSHDir "authorized_keys"
-New-Item -ItemType Directory -Force -Path $userSSHDir | Out-Null
-Set-Content -Encoding ASCII -Path $userAuthorizedKeys -Value $publicKey
-icacls.exe $userSSHDir /inheritance:r /grant "*${userSID}:F" /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F" | Out-Null
-icacls.exe $userAuthorizedKeys /inheritance:r /grant "*${userSID}:F" /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F" | Out-Null
-if (-not (Get-Service -Name sshd -ErrorAction SilentlyContinue)) {
-  Retry { Invoke-WebRequest -Uri ` + psQuote(openSSHWin64ZipURL) + ` -OutFile $openSSHZip -UseBasicParsing }
-  Assert-CrabboxFileSHA256 $openSSHZip ` + psQuote(openSSHWin64ZipSHA256) + `
-  Remove-Item -Recurse -Force $openSSHInstallRoot -ErrorAction SilentlyContinue
-  Expand-Archive -LiteralPath $openSSHZip -DestinationPath (Split-Path -Parent $openSSHInstallRoot) -Force
-  $expandedOpenSSH = Join-Path (Split-Path -Parent $openSSHInstallRoot) "OpenSSH-Win64"
-  if (Test-Path -LiteralPath $expandedOpenSSH) {
-    Rename-Item -LiteralPath $expandedOpenSSH -NewName (Split-Path -Leaf $openSSHInstallRoot) -Force
-  }
-  & (Join-Path $openSSHInstallRoot "install-sshd.ps1")
-}
-New-Item -ItemType Directory -Force -Path "$env:ProgramData\ssh" | Out-Null
-Set-Content -Encoding ASCII -Path "$env:ProgramData\ssh\administrators_authorized_keys" -Value $publicKey
-icacls.exe "$env:ProgramData\ssh\administrators_authorized_keys" /inheritance:r /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F" | Out-Null
-$sshdConfigPath = "$env:ProgramData\ssh\sshd_config"
-$sshdConfig = ""
-if (Test-Path -LiteralPath $sshdConfigPath) {
-  $sshdConfig = Get-Content -Raw -LiteralPath $sshdConfigPath
-}
-$globalLines = @()
-$matchLines = @()
-$inMatch = $false
-foreach ($line in ($sshdConfig -split "\r?\n")) {
-  if ($line -match '^\s*Match\s+') { $inMatch = $true }
-  if (-not $inMatch -and $line -match '^\s*Port\s+\d+\s*$') { continue }
-  if (-not $inMatch -and $line -match '^\s*Subsystem\s+sftp\s+') { continue }
-  if (-not $inMatch -and $line -match '^\s*HostKey\s+') { continue }
-  if (-not $inMatch -and $line -match '^\s*(PasswordAuthentication|PubkeyAuthentication)\s+') { continue }
-  if ($inMatch) { $matchLines += $line } else { $globalLines += $line }
-}
-foreach ($port in $sshPorts) { $globalLines += "Port $port" }
-$globalLines += "Subsystem sftp internal-sftp"
-$globalLines += "HostKey __PROGRAMDATA__/ssh/ssh_host_ed25519_key"
-$globalLines += "PubkeyAuthentication yes"
-$globalLines += "PasswordAuthentication no"
-if (($matchLines -join [Environment]::NewLine) -notmatch '(?im)^\s*Match\s+Group\s+administrators\b') {
-  $matchLines += "Match Group administrators"
-  $matchLines += "       AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys"
-}
-Set-Content -Encoding ASCII -LiteralPath $sshdConfigPath -Value (($globalLines + $matchLines) -join [Environment]::NewLine)
-$sshKeygen = Resolve-CrabboxOpenSSHCommand "ssh-keygen.exe"
-& $sshKeygen -A
-$hostKey = "$env:ProgramData\ssh\ssh_host_ed25519_key"
-if (-not (Test-Path -LiteralPath $hostKey)) {
-  $hostKeyProcess = Start-Process -FilePath $sshKeygen -ArgumentList ('-q -t ed25519 -N "" -f "' + $hostKey + '"') -Wait -PassThru -NoNewWindow
-  if ($hostKeyProcess.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $hostKey)) {
-    throw "failed to generate OpenSSH host key"
-  }
-}
-icacls.exe $hostKey /inheritance:r /grant "*S-1-5-18:F" /grant "*S-1-5-32-544:F" | Out-Null
-foreach ($port in $sshPorts) {
-  $ruleName = "crabbox-sshd-$port"
-  if (-not (Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue)) {
-    New-NetFirewallRule -Name $ruleName -DisplayName "Crabbox OpenSSH $port" -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort $port | Out-Null
-  }
-}
-Set-Service -Name sshd -StartupType Automatic
-Start-Service sshd
-if ((Get-Service -Name sshd).Status -ne "Running") {
-  throw "sshd failed to start with generated sshd_config"
-}
-if (-not (Test-Path -LiteralPath "C:\Program Files\Git\cmd\git.exe")) {
-  Retry { Invoke-WebRequest -Uri ` + psQuote(gitForWindowsSetupURL) + ` -OutFile $gitInstaller -UseBasicParsing }
-  Assert-CrabboxFileSHA256 $gitInstaller ` + psQuote(gitForWindowsSetupSHA256) + `
-  Start-Process -FilePath $gitInstaller -ArgumentList "/VERYSILENT","/NORESTART","/NOCANCEL","/SP-" -Wait
-}
-$machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
-foreach ($path in @($openSSHInstallRoot, $openSSHSystemRoot, "C:\Program Files\Git\cmd", "C:\Program Files\Git\usr\bin")) {
-  if ($machinePath -notlike "*$path*") { $machinePath = "$machinePath;$path" }
-  if ($env:Path -notlike "*$path*") { $env:Path = "$env:Path;$path" }
-}
-[Environment]::SetEnvironmentVariable("Path", $machinePath, "Machine")
-`
+	return sharedWindowsHeader(cfg.SSHUser, publicKey, workRoot, sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts))
 }
 
 func windowsBootstrapPowerShell(cfg Config, publicKey string) string {
 	script := windowsBootstrapHeaderPowerShell(cfg, publicKey, windowsBootstrapWorkRoot(cfg)) +
 		windowsManagedCorePreludePowerShell(cfg) +
-		windowsBootstrapCorePowerShell()
+		sharedWindowsCore()
 	if cfg.WindowsMode == windowsModeWSL2 {
 		return script + windowsWSL2BootstrapPowerShell(cfg)
 	}
 	if cfg.Desktop {
 		return script + windowsDesktopBootstrapPowerShell()
 	}
-	return script + windowsCoreBootstrapFinalizePowerShell()
+	return script + sharedWindowsFinalize()
 }
 
 func windowsBootstrapWorkRoot(cfg Config) string {
@@ -331,28 +152,13 @@ func windowsWSLWorkRoot(cfg Config) string {
 
 func windowsManagedCorePreludePowerShell(cfg Config) string {
 	if cfg.WindowsMode == windowsModeNormal && cfg.Desktop {
-		return `
-	$vncPasswordPath = "C:\ProgramData\crabbox\vnc.password"
-	$windowsUsernamePath = "C:\ProgramData\crabbox\windows.username"
-	$windowsPasswordPath = "C:\ProgramData\crabbox\windows.password"
-	$passwordPath = $vncPasswordPath
-	$usernamePath = $windowsUsernamePath
-	$passwordMirrorPath = $windowsPasswordPath
-	$tightVNCInstaller = "$env:TEMP\tightvnc-2.8.85-gpl-setup-64bit.msi"
-	`
+		return sharedWindowsDesktopPrelude()
 	}
-	return `
-	$windowsUsernamePath = "C:\ProgramData\crabbox\windows.username"
-	$windowsPasswordPath = "C:\ProgramData\crabbox\windows.password"
-	$passwordPath = $windowsPasswordPath
-	$usernamePath = $windowsUsernamePath
-	$passwordMirrorPath = $null
-	`
+	return sharedWindowsNativePrelude()
 }
 
 func windowsWSL2BootstrapPowerShell(cfg Config) string {
 	workRoot := windowsWSLWorkRoot(cfg)
-	truffleHogVersionPattern := strings.ReplaceAll(wslTruffleHogVersion, ".", "[.]")
 	return `
 	$wslDistro = "Crabbox"
 	$wslRoot = "C:\ProgramData\crabbox\wsl\Crabbox"
@@ -440,30 +246,7 @@ APT
 rm -rf /var/lib/apt/lists/*
 apt-get update
 apt-get install -y --no-install-recommends ca-certificates curl git jq python3-minimal rsync
-trufflehog_version=` + shellQuote(wslTruffleHogVersion) + `
-trufflehog_sha256=` + shellQuote(wslTruffleHogAMD64SHA256) + `
-if ! command -v trufflehog >/dev/null 2>&1 || ! trufflehog --no-update --version | grep -Eq '(^|[[:space:]])` + truffleHogVersionPattern + `($|[[:space:]])'; then
-  trufflehog_archive="trufflehog_${trufflehog_version}_linux_amd64.tar.gz"
-  trufflehog_tmp="$(mktemp -d)"
-  curl -fsSL --retry 3 --output "$trufflehog_tmp/$trufflehog_archive" \
-    "https://github.com/trufflesecurity/trufflehog/releases/download/v${trufflehog_version}/${trufflehog_archive}"
-  (
-    cd "$trufflehog_tmp"
-    printf '%s  %s\n' "$trufflehog_sha256" "$trufflehog_archive" | sha256sum -c -
-  )
-  tar --no-same-owner -xzf "$trufflehog_tmp/$trufflehog_archive" -C "$trufflehog_tmp" trufflehog
-  trufflehog_candidate="$(mktemp /usr/local/bin/trufflehog.tmp.XXXXXX)"
-  install -m 0755 "$trufflehog_tmp/trufflehog" "$trufflehog_candidate"
-  if ! "$trufflehog_candidate" --no-update --version | grep -Eq '(^|[[:space:]])` + truffleHogVersionPattern + `($|[[:space:]])'; then
-    rm -f "$trufflehog_candidate"
-    rm -rf "$trufflehog_tmp"
-    exit 1
-  fi
-  mv -f "$trufflehog_candidate" /usr/local/bin/trufflehog
-  rm -rf "$trufflehog_tmp"
-fi
-trufflehog --no-update --version
-cat >/usr/local/bin/crabbox-ready <<'READY'
+` + sharedWslTruffleHogInstall() + `cat >/usr/local/bin/crabbox-ready <<'READY'
 #!/usr/bin/env bash
 set -euo pipefail
 git --version >/dev/null
@@ -489,67 +272,7 @@ crabbox-ready
 }
 
 func windowsDesktopBootstrapPowerShell() string {
-	return windowsDesktopLauncherServicePowerShell() + `
-	if (-not (Test-Path -LiteralPath "C:\Program Files\TightVNC\tvnserver.exe")) {
-	  Retry { Invoke-WebRequest -Uri ` + psQuote(tightVNCMSIURL) + ` -OutFile $tightVNCInstaller -UseBasicParsing }
-	  Assert-CrabboxFileSHA256 $tightVNCInstaller ` + psQuote(tightVNCMSISHA256) + `
-	  $vncPassword = Get-Content -Raw -Path $vncPasswordPath
-	  Start-Process -FilePath msiexec.exe -ArgumentList @(
-    "/i", $tightVNCInstaller, "/quiet", "/norestart",
-    "ADDLOCAL=Server",
-    "SERVER_REGISTER_AS_SERVICE=1",
-    "SERVER_ADD_FIREWALL_EXCEPTION=0",
-    "SET_USEVNCAUTHENTICATION=1", "VALUE_OF_USEVNCAUTHENTICATION=1",
-    "SET_PASSWORD=1", "VALUE_OF_PASSWORD=$vncPassword",
-    "SET_USECONTROLAUTHENTICATION=1", "VALUE_OF_USECONTROLAUTHENTICATION=1",
-    "SET_CONTROLPASSWORD=1", "VALUE_OF_CONTROLPASSWORD=$vncPassword",
-    "SET_ALLOWLOOPBACK=1", "VALUE_OF_ALLOWLOOPBACK=1",
-    "SET_ACCEPTHTTPCONNECTIONS=1", "VALUE_OF_ACCEPTHTTPCONNECTIONS=0"
-  ) -Wait
-}
-$startupTask = "CrabboxUserVNC"
-cmd.exe /c "schtasks.exe /Delete /TN $startupTask /F 2>NUL" | Out-Null
-Remove-Item -Force -LiteralPath "C:\ProgramData\crabbox\start-user-vnc.ps1" -ErrorAction SilentlyContinue
-Remove-Item -Force -LiteralPath (Join-Path (Join-Path (Join-Path "C:\Users" $user) "AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup") "crabbox-user-vnc.cmd") -ErrorAction SilentlyContinue
-Get-Process tvnserver -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ne 0 } | Stop-Process -Force -ErrorAction SilentlyContinue
-Get-Service -Name tvnserver | Set-Service -StartupType Automatic
-Start-Service -Name tvnserver
-$winlogon = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
-$oobe = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE"
-if (-not (Test-Path -LiteralPath $oobe)) {
-  New-Item -Path $oobe | Out-Null
-}
-# Azure's Windows 11 client images can leave the privacy-consent page in the
-# first interactive session even after provisioning has created the account.
-# Mark the remaining first-logon gates complete before auto-logon so the
-# desktop is actually usable by Crabbox's desktop transport.
-New-ItemProperty -Force -Path $oobe -Name PrivacyConsentStatus -PropertyType DWord -Value 1 | Out-Null
-New-ItemProperty -Force -Path $oobe -Name SetupDisplayedEula -PropertyType DWord -Value 1 | Out-Null
-New-ItemProperty -Force -Path $oobe -Name SkipMachineOOBE -PropertyType DWord -Value 1 | Out-Null
-New-ItemProperty -Force -Path $oobe -Name SkipUserOOBE -PropertyType DWord -Value 1 | Out-Null
-$systemPolicies = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
-New-ItemProperty -Force -Path $systemPolicies -Name EnableFirstLogonAnimation -PropertyType DWord -Value 0 | Out-Null
-Set-ItemProperty -Path $winlogon -Name AutoAdminLogon -Value "1" -Type String
-Set-ItemProperty -Path $winlogon -Name ForceAutoLogon -Value "1" -Type String
-Set-ItemProperty -Path $winlogon -Name DefaultDomainName -Value $env:COMPUTERNAME -Type String
-Set-ItemProperty -Path $winlogon -Name DefaultUserName -Value $user -Type String
-Set-ItemProperty -Path $winlogon -Name DefaultPassword -Value $userPassword -Type String
-if (-not (Test-Path -LiteralPath $setupCompletePath)) {
-  Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath -Value (Get-Date).ToString("o")
-	  Restart-Computer -Force
-	  exit 0
-	}
-Restart-Service sshd
-	`
-}
-
-func windowsCoreBootstrapFinalizePowerShell() string {
-	return `
-	git --version | Out-Null
-	tar --version | Out-Null
-	Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath -Value (Get-Date).ToString("o")
-	Restart-Service sshd -Force
-	`
+	return windowsDesktopLauncherServicePowerShell() + sharedWindowsDesktop()
 }
 
 func azureWindowsSnapshotRehydratePowerShell(cfg Config, publicKey string) string {
@@ -557,11 +280,11 @@ func azureWindowsSnapshotRehydratePowerShell(cfg Config, publicKey string) strin
 	script := windowsBootstrapHeaderPowerShell(cfg, publicKey, workRoot) +
 		windowsManagedCorePreludePowerShell(cfg) +
 		azureWindowsSnapshotResetCredentialsPowerShell() +
-		windowsBootstrapCorePowerShell()
+		sharedWindowsCore()
 	if cfg.Desktop {
 		return script + azureWindowsSnapshotRotateVNCPasswordPowerShell() + windowsDesktopBootstrapPowerShell()
 	}
-	return script + windowsCoreBootstrapFinalizePowerShell()
+	return script + sharedWindowsFinalize()
 }
 
 func azureWindowsSnapshotRotateVNCPasswordPowerShell() string {
@@ -616,7 +339,7 @@ func azureWindowsBootstrapPowerShell(cfg Config, publicKey string) string {
 $passwordPath = Join-Path $base "windows.password"
 $usernamePath = Join-Path $base "windows.username"
 $passwordMirrorPath = $null
-` + windowsBootstrapCorePowerShell() + `
+` + sharedWindowsCore() + `
 git --version | Out-Null
 tar --version | Out-Null
 ` + setupComplete + `
@@ -624,105 +347,12 @@ Restart-Service sshd -Force
 `
 }
 
-func windowsSSHPortsPowerShell(cfg Config) string {
-	ports := sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts)
-	quoted := make([]string, 0, len(ports))
-	for _, port := range ports {
-		quoted = append(quoted, psQuote(port))
-	}
-	return "@(" + strings.Join(quoted, ", ") + ")"
-}
-
 func macOSUserData(cfg Config, publicKey string) string {
 	workRoot := cfg.WorkRoot
 	if workRoot == "" {
 		workRoot = defaultMacOSWorkRoot
 	}
-	quotedPorts := make([]string, 0, len(sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts)))
-	for _, port := range sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts) {
-		quotedPorts = append(quotedPorts, shellQuote(port))
-	}
-	sshPortsShell := strings.Join(quotedPorts, " ")
-	return `#!/bin/bash
-set -euxo pipefail
-crabbox_user=` + shellQuote(cfg.SSHUser) + `
-crabbox_work_root=` + shellQuote(workRoot) + `
-crabbox_public_key=` + shellQuote(publicKey) + `
-crabbox_ssh_ports=(` + sshPortsShell + `)
-id "$crabbox_user" >/dev/null
-install -d -m 0755 "$crabbox_work_root" /var/db/crabbox
-chown -R "$crabbox_user":staff "$crabbox_work_root"
-user_home="$(dscl . -read "/Users/$crabbox_user" NFSHomeDirectory 2>/dev/null | awk '{print $2; exit}')"
-if [ -z "$user_home" ]; then
-  user_home="/Users/$crabbox_user"
-fi
-install -d -m 0700 -o "$crabbox_user" -g staff "$user_home/.ssh"
-authorized_keys="$user_home/.ssh/authorized_keys"
-touch "$authorized_keys"
-if [ -n "$crabbox_public_key" ] && ! grep -qxF "$crabbox_public_key" "$authorized_keys"; then
-  printf '%s\n' "$crabbox_public_key" >>"$authorized_keys"
-fi
-chown "$crabbox_user":staff "$user_home/.ssh" "$authorized_keys"
-chmod 0700 "$user_home/.ssh"
-chmod 0600 "$authorized_keys"
-sshd_config=/etc/ssh/sshd_config
-touch "$sshd_config"
-tmp_config="$(mktemp)"
-awk '
-  /^# crabbox ssh ports begin$/ { skip=1; next }
-  /^# crabbox ssh ports end$/ { skip=0; next }
-  !skip { print }
-' "$sshd_config" >"$tmp_config"
-cat "$tmp_config" >"$sshd_config"
-rm -f "$tmp_config"
-{
-  printf '%s\n' '# crabbox ssh ports begin'
-  for port in "${crabbox_ssh_ports[@]}"; do
-    printf 'Port %s\n' "$port"
-  done
-  printf '%s\n' 'PubkeyAuthentication yes'
-  printf '%s\n' 'PasswordAuthentication no'
-  printf '%s\n' '# crabbox ssh ports end'
-} >>"$sshd_config"
-/usr/sbin/sshd -t -f "$sshd_config"
-systemsetup -setremotelogin on || true
-launchctl enable system/com.openssh.sshd || true
-launchctl load -w /System/Library/LaunchDaemons/ssh.plist || true
-launchctl kickstart -k system/com.openssh.sshd || true
-if [ ! -s /var/db/crabbox/vnc.password ]; then
-  set +o pipefail
-  pw="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16)"
-  set -o pipefail
-  if [ "${#pw}" -ne 16 ]; then
-    echo "failed to generate vnc password" >&2
-    exit 1
-  fi
-  printf '%s\n' "$pw" >/var/db/crabbox/vnc.password
-  dscl . -passwd /Users/` + shellQuote(cfg.SSHUser) + ` "$pw"
-fi
-chmod 0600 /var/db/crabbox/vnc.password
-launchctl enable system/com.apple.screensharing || true
-launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist || true
-launchctl kickstart -k system/com.apple.screensharing || true
-cat >/usr/local/bin/crabbox-ready <<'READY'
-#!/bin/bash
-set -euo pipefail
-rsync --version >/dev/null
-curl --version >/dev/null
-test -w ` + shellQuote(workRoot) + `
-ssh_ready=0
-for port in ` + sshPortsShell + `; do
-  if nc -z 127.0.0.1 "$port"; then
-    ssh_ready=1
-    break
-  fi
-done
-test "$ssh_ready" -eq 1
-nc -z 127.0.0.1 5900
-READY
-chmod 0755 /usr/local/bin/crabbox-ready
-/usr/local/bin/crabbox-ready
-`
+	return sharedMacOS(cfg.SSHUser, publicKey, workRoot, sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts))
 }
 
 func cloudInitOptionalReadyChecks(cfg Config) string {
@@ -1493,35 +1123,10 @@ chmod 0755 /usr/local/bin/crabbox-configure-desktop-theme
 	}
 	if cfg.Code {
 		parts = append(parts, `    retry apt-get install -y --no-install-recommends libatomic1
-    `+cloudInitCodeServerInstallBootstrap()+`
+    `+sharedCodeServerInstall()+`
     /usr/local/bin/code-server --version >/dev/null`)
 	}
 	return strings.Join(parts, "\n")
-}
-
-func cloudInitCodeServerInstallBootstrap() string {
-	return `CS_VERSION=` + shellQuote(defaultCodeServerVersion) + `
-    case "$(uname -m)" in
-      x86_64) CS_ARCH=amd64; CS_SHA256=` + shellQuote(defaultCodeServerAMD64SHA256) + ` ;;
-      aarch64|arm64) CS_ARCH=arm64; CS_SHA256=` + shellQuote(defaultCodeServerARM64SHA256) + ` ;;
-      *) echo "unsupported code-server architecture: $(uname -m)" >&2; exit 3 ;;
-    esac
-    if [ -z "$CS_SHA256" ]; then echo "missing code-server checksum for $CS_ARCH" >&2; exit 3; fi
-    CS_INSTALL_DIR="$(mktemp -d)"
-    trap 'rm -rf "$CS_INSTALL_DIR"' EXIT
-    CS_ARCHIVE="$CS_INSTALL_DIR/code-server.tgz"
-    retry sh -c "curl -fsSL -o \"$CS_ARCHIVE\" \"https://github.com/coder/code-server/releases/download/v${CS_VERSION}/code-server-${CS_VERSION}-linux-${CS_ARCH}.tar.gz\""
-    printf '%s  %s\n' "$CS_SHA256" "$CS_ARCHIVE" | sha256sum -c -
-    tar -xzf "$CS_ARCHIVE" -C "$CS_INSTALL_DIR" --strip-components=1
-    rm -f "$CS_ARCHIVE"
-    rm -rf /usr/local/lib/code-server
-    install -d -m 0755 /usr/local/lib/code-server
-    cp -a "$CS_INSTALL_DIR/." /usr/local/lib/code-server/
-    # cp -a preserves mktemp's private root mode; restore traversal for lease users.
-    chmod 0755 /usr/local/lib/code-server
-    ln -sfn /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server
-    rm -rf "$CS_INSTALL_DIR"
-    trap - EXIT`
 }
 
 func indentCloudInitRuncmd(script string) string {
@@ -1715,73 +1320,12 @@ func cloudInitTailscaleBootstrap(cfg Config) string {
 
 func cloudInitTailscaleInstallBootstrap() string {
 	if !strings.EqualFold(strings.TrimSpace(os.Getenv("CRABBOX_TAILSCALE_INSTALL_MODE")), "pinned") {
-		return cloudInitTailscalePackageInstallBootstrap()
+		return sharedTailscalePackageInstall()
 	}
 	version := firstNonEmpty(strings.TrimSpace(os.Getenv("CRABBOX_TAILSCALE_VERSION")), defaultTailscaleVersion)
 	amd64SHA := firstNonEmpty(strings.TrimSpace(os.Getenv("CRABBOX_TAILSCALE_SHA256_AMD64")), defaultTailscaleAMD64SHA256)
 	arm64SHA := firstNonEmpty(strings.TrimSpace(os.Getenv("CRABBOX_TAILSCALE_SHA256_ARM64")), defaultTailscaleARM64SHA256)
-	return `TS_VERSION=` + shellQuote(version) + `
-    case "$(uname -m)" in
-      x86_64) TS_ARCH=amd64; TS_SHA256=` + shellQuote(amd64SHA) + ` ;;
-      aarch64|arm64) TS_ARCH=arm64; TS_SHA256=` + shellQuote(arm64SHA) + ` ;;
-      *) echo "unsupported Tailscale architecture: $(uname -m)" >&2; exit 3 ;;
-    esac
-    if [ -z "$TS_SHA256" ]; then echo "missing Tailscale checksum for $TS_ARCH" >&2; exit 3; fi
-    TS_INSTALL_DIR="$(mktemp -d)"
-    trap 'rm -rf "$TS_INSTALL_DIR"' EXIT
-    TS_ARCHIVE="$TS_INSTALL_DIR/tailscale.tgz"
-    retry sh -c "curl -fsSL -o \"$TS_ARCHIVE\" \"https://pkgs.tailscale.com/stable/tailscale_${TS_VERSION}_${TS_ARCH}.tgz\""
-    printf '%s  %s\n' "$TS_SHA256" "$TS_ARCHIVE" | sha256sum -c -
-    tar -xzf "$TS_ARCHIVE" -C "$TS_INSTALL_DIR" --strip-components=1
-    install -m 0755 "$TS_INSTALL_DIR/tailscale" /usr/local/bin/tailscale
-    install -m 0755 "$TS_INSTALL_DIR/tailscaled" /usr/local/sbin/tailscaled
-    install -d -m 0755 /var/lib/tailscale /run/tailscale
-    {
-      printf '%s\n' '[Unit]'
-      printf '%s\n' 'Description=Tailscale node agent'
-      printf '%s\n' 'After=network-online.target'
-      printf '%s\n' 'Wants=network-online.target'
-      printf '%s\n' ''
-      printf '%s\n' '[Service]'
-      printf '%s\n' 'ExecStart=/usr/local/sbin/tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock'
-      printf '%s\n' 'Restart=on-failure'
-      printf '%s\n' 'RuntimeDirectory=tailscale'
-      printf '%s\n' 'StateDirectory=tailscale'
-      printf '%s\n' ''
-      printf '%s\n' '[Install]'
-      printf '%s\n' 'WantedBy=multi-user.target'
-    } >/etc/systemd/system/tailscaled.service
-    rm -rf "$TS_INSTALL_DIR"
-    trap - EXIT
-    systemctl daemon-reload || true`
-}
-
-func cloudInitTailscalePackageInstallBootstrap() string {
-	return `if [ ! -r /etc/os-release ]; then
-      echo "Tailscale package install requires /etc/os-release" >&2
-      exit 3
-    fi
-    . /etc/os-release
-    TS_DIST_ID="${ID:-}"
-    TS_CODENAME="${VERSION_CODENAME:-}"
-    case "$TS_DIST_ID" in
-      ubuntu|debian) ;;
-      *) echo "unsupported Tailscale package distribution: $TS_DIST_ID" >&2; exit 3 ;;
-    esac
-    case "$TS_CODENAME" in
-      ''|*[!a-z0-9.-]*) echo "invalid Tailscale package codename: $TS_CODENAME" >&2; exit 3 ;;
-    esac
-    install -d -m 0755 /usr/share/keyrings
-    TS_KEYRING_TMP="$(mktemp)"
-    trap 'rm -f "$TS_KEYRING_TMP"' EXIT
-    retry curl -fsSL -o "$TS_KEYRING_TMP" "https://pkgs.tailscale.com/stable/${TS_DIST_ID}/${TS_CODENAME}.noarmor.gpg"
-    printf '%s  %s\n' '` + defaultTailscaleKeyringSHA256 + `' "$TS_KEYRING_TMP" | sha256sum -c -
-    install -m 0644 "$TS_KEYRING_TMP" /usr/share/keyrings/tailscale-archive-keyring.gpg
-    printf 'deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/%s %s main\n' "$TS_DIST_ID" "$TS_CODENAME" >/etc/apt/sources.list.d/tailscale.list
-    rm -f "$TS_KEYRING_TMP"
-    trap - EXIT
-    retry apt-get update
-    retry apt-get install -y --no-install-recommends tailscale`
+	return sharedTailscalePinnedInstall(version, amd64SHA, arm64SHA)
 }
 
 // cloudInitPondHostsBootstrap installs /usr/local/bin/crabbox-pond-hosts and a

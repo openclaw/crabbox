@@ -160,6 +160,7 @@ func configShowView(cfg Config) map[string]any {
 		"providerSource":             cfg.providerSelectionSource,
 		"target":                     cfg.TargetOS,
 		"architecture":               effectiveArchitectureForConfig(cfg),
+		"architectureExplicit":       IsArchitectureExplicit(cfg),
 		"os":                         cfg.OSImage,
 		"windowsMode":                cfg.WindowsMode,
 		"class":                      cfg.Class,
@@ -787,7 +788,7 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 		provider = ""
 		serverType = ""
 	}
-	fmt.Fprintf(w, "provider=%s provider_selected=%t provider_source=%s target=%s arch=%s os=%s windows_mode=%s class=%s type=%s profile=%s\n", provider, providerSelected, cfg.providerSelectionSource, cfg.TargetOS, effectiveArchitectureForConfig(cfg), cfg.OSImage, cfg.WindowsMode, cfg.Class, serverType, cfg.Profile)
+	fmt.Fprintf(w, "provider=%s provider_selected=%t provider_source=%s target=%s arch=%s architecture_explicit=%t os=%s windows_mode=%s class=%s type=%s profile=%s\n", provider, providerSelected, cfg.providerSelectionSource, cfg.TargetOS, effectiveArchitectureForConfig(cfg), IsArchitectureExplicit(cfg), cfg.OSImage, cfg.WindowsMode, cfg.Class, serverType, cfg.Profile)
 	fmt.Fprintf(w, "broker=%s mode=%s auto_webvnc=%t login_redirect_origins=%s auth=%s admin_auth=%s\n", blank(redactedConfigURL(cfg.Coordinator), "-"), cfg.BrokerMode, cfg.BrokerAutoWebVNC, blank(strings.Join(cfg.BrokerLoginRedirectOrigins, ","), "-"), coordinatorTokenState(cfg), tokenState(cfg.CoordAdminToken))
 	fmt.Fprintf(w, "access_auth=%s\n", accessAuthState(cfg.Access))
 	fmt.Fprintf(w, "ssh=%s@<host>:%s fallback_ports=%s key=%s\n", cfg.SSHUser, cfg.SSHPort, blank(strings.Join(cfg.SSHFallbackPorts, ","), "-"), cfg.SSHKey)

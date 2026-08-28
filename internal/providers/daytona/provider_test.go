@@ -11,7 +11,7 @@ func TestProviderSupportsCoordinator(t *testing.T) {
 	if spec.Name != "daytona" || spec.Kind != core.ProviderKindSSHLease || spec.Coordinator != core.CoordinatorSupported {
 		t.Fatalf("spec=%#v", spec)
 	}
-	for _, feature := range []core.Feature{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureArchiveSync} {
+	for _, feature := range []core.Feature{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureArchiveSync, core.FeatureCheckpoint, core.FeatureFork, core.FeatureSnapshot} {
 		if !spec.Features.Has(feature) {
 			t.Fatalf("features=%v missing %s", spec.Features, feature)
 		}
@@ -21,10 +21,7 @@ func TestProviderSupportsCoordinator(t *testing.T) {
 		core.FeatureBrowser,
 		core.FeatureCode,
 		core.FeatureTailscale,
-		core.FeatureCheckpoint,
-		core.FeatureFork,
 		core.FeatureRestore,
-		core.FeatureSnapshot,
 	} {
 		if spec.Features.Has(unsupported) {
 			t.Fatalf("features=%v unexpectedly includes %s", spec.Features, unsupported)

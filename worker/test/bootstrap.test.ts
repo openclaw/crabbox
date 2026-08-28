@@ -595,10 +595,13 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("HostKey __PROGRAMDATA__/ssh/ssh_host_ed25519_key");
     expect(got).toContain("PubkeyAuthentication yes");
     expect(got).toContain("PasswordAuthentication no");
-    expect(got).toContain('Start-Process -FilePath "C:\\Program Files\\OpenSSH\\ssh-keygen.exe"');
+    expect(got).toContain("Start-Process -FilePath $sshKeygen");
+    expect(got).toContain('$sshKeygen = Resolve-CrabboxOpenSSHCommand "ssh-keygen.exe"');
+    expect(got).toContain("foreach ($root in @($openSSHInstallRoot, $openSSHSystemRoot))");
+    expect(got).toContain('$openSSHSystemRoot = Join-Path $env:WINDIR "System32\\OpenSSH"');
     expect(got).toContain('-q -t ed25519 -N "" -f "');
     expect(got).toContain("$hostKey + '\"'");
-    expect(got).toContain('ssh-keygen.exe" -A');
+    expect(got).toContain("& $sshKeygen -A");
     expect(got).toContain("sshd failed to start with generated sshd_config");
     expect(got).toContain("crabbox-sshd-$port");
     expect(got).toContain("tightvnc-2.8.85-gpl-setup-64bit.msi");
@@ -717,7 +720,7 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc");
     expect(got).toContain("test -w /proc/sys/fs/binfmt_misc/register");
     expect(got).toContain(":WSLInterop:M::MZ::/init:PF");
-    expect(got).toContain("trufflehog_version=3.95.9");
+    expect(got).toContain("trufflehog_version='3.95.9'");
     expect(got).toContain("trufflehog_${trufflehog_version}_linux_amd64.tar.gz");
     expect(got).toContain("f6d1106b85107d79527ed7a5b98b592beadd8b770dc3c9e8c1ad99e1b2cf127e");
     expect(got).toContain("sha256sum -c -");

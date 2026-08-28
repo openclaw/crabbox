@@ -102,9 +102,13 @@ files.
 2. Store Crabbox metadata on the sandbox and write a local repo claim bound to
    the exact API endpoint and sandbox ID.
 3. Build the Crabbox sync manifest, upload a gzipped archive into `/tmp`, and
-   extract it into the resolved workdir.
+   extract it into the resolved workdir. For new sandboxes, archive preparation
+   and guardrails run before creation.
 4. Execute the command through the E2B process stream in that workdir.
-5. Delete the sandbox on release unless the lease is kept.
+5. Delete a newly created sandbox unless kept. Reused sandboxes remain
+   available. Cleanup failure fails the run and preserves its claim; a prior
+   command failure keeps its exit code. Timing is emitted after cleanup. See
+   the [shared sandbox lifecycle](../features/delegated-runner-contract.md#shared-sandbox-lifecycle).
 
 E2B caps sandbox timeouts at one hour. Crabbox clamps a longer local lease TTL to
 that limit when creating or connecting to a sandbox, and a TTL of zero falls back

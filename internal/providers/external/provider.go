@@ -85,46 +85,6 @@ func (Provider) RouteConfig(cfg *core.Config, _ *flag.FlagSet, _ any) error {
 	return nil
 }
 
-func (Provider) CommandRoutingArgs(cfg core.Config, leaseID string) []string {
-	path := strings.TrimSpace(cfg.External.RoutingFile)
-	if path == "" {
-		var err error
-		path, err = core.ExternalRoutingPath(leaseID)
-		if err != nil {
-			return nil
-		}
-	}
-	args := []string{"--external-routing-file", path}
-	routing := cfg.External
-	digest := core.ExternalRoutingDigest(routing)
-	if digest == "" {
-		loaded, err := core.LoadExternalRouting(path)
-		if err == nil {
-			routing = loaded
-			digest = core.ExternalRoutingDigest(loaded)
-		}
-	}
-	// Keep generated children fail-closed if the route cannot be read now.
-	// The explicit empty digest is invalid and cannot become an unbound load if
-	// another process later replaces the deterministic path.
-	args = append(args, "--external-routing-digest", digest)
-	username := strings.TrimSpace(routing.Connection.Desktop.Username)
-	if core.IsExternalDesktopUsernameExplicit(&cfg) {
-		username = strings.TrimSpace(cfg.External.Connection.Desktop.Username)
-	}
-	if username != "" || core.IsExternalDesktopUsernameExplicit(&cfg) {
-		args = append(args, "--external-desktop-username", username)
-	}
-	passwordEnv := strings.TrimSpace(routing.Connection.Desktop.PasswordEnv)
-	if core.IsExternalDesktopPasswordEnvExplicit(&cfg) {
-		passwordEnv = strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv)
-	}
-	if passwordEnv != "" || core.IsExternalDesktopPasswordEnvExplicit(&cfg) {
-		args = append(args, "--external-desktop-password-env", passwordEnv)
-	}
-	return args
-}
-
 func (Provider) ControllerProviderScope(cfg core.Config) (string, error) {
 	return externalControllerScope(cfg)
 }

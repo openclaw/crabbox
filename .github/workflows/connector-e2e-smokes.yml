@@ -83,7 +83,7 @@ jobs:
           - name: ssh-localhost
             runner: ubuntu-latest
             build-cli: true
-            smoke: CRABBOX_BIN="$PWD/bin/crabbox" scripts/live-ssh-localhost-smoke.sh
+            smoke: CRABBOX_ARCH=amd64 CRABBOX_BIN="$PWD/bin/crabbox" scripts/live-ssh-localhost-smoke.sh
 
           # Mirrors the apple-vm job in ci.yml: hermetic native helper and
           # embedded VM daemon proof on Apple Silicon.

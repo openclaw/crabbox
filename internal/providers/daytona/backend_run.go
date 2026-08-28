@@ -1,6 +1,7 @@
 package daytona
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	sdkdaytona "github.com/daytonaio/daytona/libs/sdk-go/pkg/daytona"
 	sdkoptions "github.com/daytonaio/daytona/libs/sdk-go/pkg/options"
 	sdktypes "github.com/daytonaio/daytona/libs/sdk-go/pkg/types"
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 var daytonaCleanupTimeout = 30 * time.Second
@@ -79,9 +81,9 @@ func (b *daytonaLeaseBackend) Warmup(ctx context.Context, req WarmupRequest) err
 	return nil
 }
 
-func (b *daytonaLeaseBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+func (b *daytonaLeaseBackend) Run(ctx context.Context, req RunRequest) (result RunResult, runErr error) {
 	started := time.Now()
-	client, err := newDaytonaToolboxClient(b.cfg)
+	client, err := newDaytonaClient(b.cfg, b.rt)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -89,14 +91,14 @@ func (b *daytonaLeaseBackend) Run(ctx context.Context, req RunRequest) (RunResul
 	leaseID, slug := "", ""
 	acquired := false
 	if req.ID == "" {
-		sandbox, leaseID, slug, err = b.createDaytonaToolboxSandboxWithClient(ctx, client, req.Repo, req.Keep, req.Reclaim, req.RequestedSlug)
+		sandbox, leaseID, slug, err = b.createDaytonaToolboxSandbox(ctx, req.Repo, req.Keep, req.Reclaim, req.RequestedSlug)
 		if err != nil {
 			return RunResult{}, err
 		}
 		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=daytona sandbox=%s\n", leaseID, slug, sandbox.ID)
 		acquired = true
 	} else {
-		sandbox, leaseID, err = b.resolveDaytonaToolboxSandbox(ctx, client, req.ID, req.Repo, req.Reclaim)
+		sandbox, leaseID, err = b.resolveDaytonaToolboxSandbox(ctx, req.ID, req.Repo, req.Reclaim)
 		if err != nil {
 			return RunResult{}, err
 		}
@@ -117,6 +119,20 @@ func (b *daytonaLeaseBackend) Run(ctx context.Context, req RunRequest) (RunResul
 			}
 		}()
 	}
+	defer func() {
+		if runErr != nil {
+			handleDelegatedRunFailure(b.rt.Stderr, req, daytonaProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
+		}
+	}()
+	apiSandbox, err := client.GetSandbox(ctx, sandbox.ID)
+	if err != nil {
+		return RunResult{}, daytonaError("get sandbox before run", err)
+	}
+	stopActivity, err := b.startDaytonaActivity(ctx, apiSandbox)
+	if err != nil {
+		return RunResult{}, err
+	}
+	defer stopActivity()
 	commands := newDaytonaCommandRunner(sandbox)
 	cfg := b.cfg
 	cfg.Provider = daytonaProvider
@@ -133,8 +149,10 @@ func (b *daytonaLeaseBackend) Run(ctx context.Context, req RunRequest) (RunResul
 		}
 		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
 	} else {
-		if _, err := commands.ExecuteCommand(ctx, "mkdir -p "+shellQuote(workdir)); err != nil {
+		if response, err := commands.ExecuteCommand(ctx, "mkdir -p "+shellQuote(workdir)); err != nil {
 			return RunResult{}, fmt.Errorf("daytona create workdir: %w", err)
+		} else if responseExitCode(response) != 0 {
+			return RunResult{}, exit(responseExitCode(response), "daytona create workdir failed: %s", response.Result)
 		}
 	}
 	if req.SyncOnly {
@@ -168,7 +186,7 @@ func (b *daytonaLeaseBackend) Run(ctx context.Context, req RunRequest) (RunResul
 	}
 	response, err := commands.ExecuteCommand(ctx, command, execOpts...)
 	commandDuration := time.Since(commandStarted)
-	result := RunResult{
+	result = RunResult{
 		ExitCode:      responseExitCode(response),
 		Command:       commandDuration,
 		Total:         time.Since(started),
@@ -198,17 +216,24 @@ func (b *daytonaLeaseBackend) Run(ctx context.Context, req RunRequest) (RunResul
 		}
 	}
 	if err != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, daytonaProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 		return result, ExitError{Code: 1, Message: fmt.Sprintf("daytona run failed: %v", err)}
 	}
 	if result.ExitCode != 0 {
-		handleDelegatedRunFailure(b.rt.Stderr, req, daytonaProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 		return result, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("daytona run exited %d", result.ExitCode)}
 	}
 	return result, nil
 }
 
 func (b *daytonaLeaseBackend) Status(ctx context.Context, req StatusRequest) (statusView, error) {
+	if req.Wait {
+		timeout := req.WaitTimeout
+		if timeout <= 0 {
+			timeout = 5 * time.Minute
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 	client, err := newDaytonaClient(b.cfg, b.rt)
 	if err != nil {
 		return statusView{}, err
@@ -226,6 +251,9 @@ func (b *daytonaLeaseBackend) Status(ctx context.Context, req StatusRequest) (st
 		if !req.Wait || view.Ready {
 			return view, nil
 		}
+		if daytonaStateFailed(daytonaSandboxState(sandbox)) {
+			return view, exit(5, "daytona sandbox %s entered terminal state=%s", req.ID, daytonaSandboxState(sandbox))
+		}
 		if time.Now().After(deadline) {
 			return statusView{}, exit(5, "timed out waiting for sandbox %s to become ready", req.ID)
 		}
@@ -238,6 +266,8 @@ func (b *daytonaLeaseBackend) Status(ctx context.Context, req StatusRequest) (st
 }
 
 func (b *daytonaLeaseBackend) Stop(ctx context.Context, req StopRequest) error {
+	ctx, cancel := context.WithTimeout(ctx, daytonaCleanupTimeout)
+	defer cancel()
 	client, err := newDaytonaClient(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -249,7 +279,7 @@ func (b *daytonaLeaseBackend) Stop(ctx context.Context, req StopRequest) error {
 	if err := requireExactDaytonaClaim(leaseID, sandbox); err != nil {
 		return err
 	}
-	if err := client.DeleteSandbox(ctx, sandbox.GetId()); err != nil {
+	if err := deleteOwnedDaytonaSandbox(ctx, client, sandbox.GetId(), leaseID); err != nil {
 		return daytonaError("delete sandbox", err)
 	}
 	removeLeaseClaim(leaseID)
@@ -258,68 +288,18 @@ func (b *daytonaLeaseBackend) Stop(ctx context.Context, req StopRequest) error {
 }
 
 func (b *daytonaLeaseBackend) createDaytonaToolboxSandbox(ctx context.Context, repo Repo, keep, reclaim bool, requestedSlug string) (*sdkdaytona.Sandbox, string, string, error) {
-	client, err := newDaytonaToolboxClient(b.cfg)
+	sandbox, leaseID, slug, err := b.createDaytonaSandbox(ctx, repo, keep, reclaim, requestedSlug)
 	if err != nil {
-		return nil, "", "", err
+		return nil, leaseID, slug, err
 	}
-	return b.createDaytonaToolboxSandboxWithClient(ctx, client, repo, keep, reclaim, requestedSlug)
+	toolboxSandbox, err := newDaytonaToolboxSandbox(b.cfg, b.rt, sandbox)
+	if err != nil {
+		return nil, leaseID, slug, b.rollbackDaytonaSandbox(sandbox.GetId(), leaseID, err)
+	}
+	return toolboxSandbox, leaseID, slug, nil
 }
 
-func (b *daytonaLeaseBackend) createDaytonaToolboxSandboxWithClient(ctx context.Context, client *sdkdaytona.Client, repo Repo, keep, reclaim bool, requestedSlug string) (*sdkdaytona.Sandbox, string, string, error) {
-	if strings.TrimSpace(b.cfg.Daytona.Snapshot) == "" {
-		return nil, "", "", exit(2, "provider=daytona requires --daytona-snapshot or daytona.snapshot")
-	}
-	apiClient, err := newDaytonaClient(b.cfg, b.rt)
-	if err != nil {
-		return nil, "", "", err
-	}
-	leaseID := newLeaseID()
-	existing, err := apiClient.ListCrabboxSandboxes(ctx)
-	if err != nil {
-		return nil, "", "", daytonaError("list sandboxes", err)
-	}
-	slug, err := allocateDirectLeaseSlug(leaseID, requestedSlug, daytonaSandboxesToServers(existing, b.cfg))
-	if err != nil {
-		return nil, "", "", err
-	}
-	cfg := b.cfg
-	cfg.Provider = daytonaProvider
-	cfg.ServerType = "snapshot"
-	cfg.WorkRoot = daytonaWorkRoot(cfg)
-	cfg.SSHUser = daytonaUser(cfg)
-	cfg.SSHPort = "22"
-	labels := directLeaseLabels(cfg, leaseID, slug, daytonaProvider, "", keep, time.Now().UTC())
-	labels["lease_name"] = leaseProviderName(leaseID, slug)
-	labels["work_root"] = cfg.WorkRoot
-	autoStop := durationMinutesCeil(cfg.IdleTimeout)
-	fmt.Fprintf(b.rt.Stderr, "provisioning provider=daytona lease=%s slug=%s snapshot=%s target=%s keep=%v mode=sdk\n", leaseID, slug, cfg.Daytona.Snapshot, blank(cfg.Daytona.Target, "-"), keep)
-	sandbox, err := client.Create(ctx, sdktypes.SnapshotParams{
-		Snapshot: strings.TrimSpace(cfg.Daytona.Snapshot),
-		SandboxBaseParams: sdktypes.SandboxBaseParams{
-			Name:             labels["lease_name"],
-			User:             daytonaUser(cfg),
-			Labels:           labels,
-			Public:           true,
-			AutoStopInterval: &autoStop,
-		},
-	}, sdkoptions.WithTimeout(5*time.Minute))
-	if err != nil {
-		return nil, "", "", daytonaError("create sandbox", err)
-	}
-	labels["state"] = "ready"
-	labels["last_touched_at"] = leaseLabelTime(time.Now().UTC())
-	if _, err := establishDaytonaSandboxOwnership(ctx, apiClient, sandbox.ID, leaseID, labels); err != nil {
-		_ = sandbox.Delete(context.Background())
-		return nil, "", "", err
-	}
-	if err := claimLeaseTargetForRepoConfig(leaseID, slug, cfg, Server{Provider: daytonaProvider, CloudID: sandbox.ID, Labels: labels}, SSHTarget{}, repo.Root, cfg.IdleTimeout, reclaim); err != nil {
-		_ = sandbox.Delete(context.Background())
-		return nil, "", "", err
-	}
-	return sandbox, leaseID, slug, nil
-}
-
-func (b *daytonaLeaseBackend) resolveDaytonaToolboxSandbox(ctx context.Context, sdkClient *sdkdaytona.Client, id string, repo Repo, reclaim bool) (*sdkdaytona.Sandbox, string, error) {
+func (b *daytonaLeaseBackend) resolveDaytonaToolboxSandbox(ctx context.Context, id string, repo Repo, reclaim bool) (*sdkdaytona.Sandbox, string, error) {
 	apiClient, err := newDaytonaClient(b.cfg, b.rt)
 	if err != nil {
 		return nil, "", err
@@ -343,14 +323,21 @@ func (b *daytonaLeaseBackend) resolveDaytonaToolboxSandbox(ctx context.Context, 
 		}
 	}
 	if !daytonaStateReady(daytonaSandboxState(apiSandbox)) {
+		if daytonaStateFailed(daytonaSandboxState(apiSandbox)) {
+			return nil, "", exit(5, "daytona sandbox %s entered terminal state=%s", apiSandbox.GetId(), daytonaSandboxState(apiSandbox))
+		}
 		if _, err := apiClient.StartSandbox(ctx, apiSandbox.GetId()); err != nil {
 			return nil, "", daytonaError("start sandbox", err)
 		}
-		if _, err := waitForDaytonaReady(ctx, apiClient, apiSandbox.GetId(), 5*time.Minute); err != nil {
+		if apiSandbox, err = waitForDaytonaReady(ctx, apiClient, apiSandbox.GetId(), 5*time.Minute); err != nil {
 			return nil, "", err
 		}
 	}
-	sandbox, err := sdkClient.Get(ctx, apiSandbox.GetId())
+	apiSandbox, err = apiClient.GetSandbox(ctx, apiSandbox.GetId())
+	if err != nil {
+		return nil, "", daytonaError("get sandbox", err)
+	}
+	sandbox, err := newDaytonaToolboxSandbox(b.cfg, b.rt, apiSandbox)
 	if err != nil {
 		return nil, "", daytonaError("get sandbox", err)
 	}
@@ -363,7 +350,7 @@ func (b *daytonaLeaseBackend) deleteDaytonaToolboxSandbox(ctx context.Context, s
 		fmt.Fprintf(b.rt.Stderr, "warning: daytona stop failed for %s: %v\n", sandboxID, err)
 		return
 	}
-	if err := client.DeleteSandbox(ctx, sandboxID); err != nil {
+	if err := deleteOwnedDaytonaSandbox(ctx, client, sandboxID, leaseID); err != nil {
 		fmt.Fprintf(b.rt.Stderr, "warning: daytona stop failed for %s: %v\n", sandboxID, daytonaError("delete sandbox", err))
 		return
 	}
@@ -371,6 +358,11 @@ func (b *daytonaLeaseBackend) deleteDaytonaToolboxSandbox(ctx context.Context, s
 }
 
 func (b *daytonaLeaseBackend) syncDaytonaToolbox(ctx context.Context, sandbox *sdkdaytona.Sandbox, commands *daytonaCommandRunner, req RunRequest, workdir string) ([]timingPhase, error) {
+	if b.cfg.Sync.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, b.cfg.Sync.Timeout)
+		defer cancel()
+	}
 	start := time.Now()
 	excludes, err := syncExcludes(req.Repo.Root, b.cfg)
 	if err != nil {
@@ -397,6 +389,11 @@ func (b *daytonaLeaseBackend) syncDaytonaToolbox(ctx context.Context, sandbox *s
 	archiveDuration := time.Since(archiveStarted)
 	uploadStarted := time.Now()
 	archivePath := path.Join("/tmp", "crabbox-"+newLeaseID()+".tgz")
+	defer func() {
+		cleanupCtx, cancel := daytonaCleanupContext()
+		defer cancel()
+		_, _ = commands.ExecuteCommand(cleanupCtx, "rm -f "+shellQuote(archivePath))
+	}()
 	if _, err := archive.Seek(0, 0); err != nil {
 		return nil, fmt.Errorf("daytona rewind archive: %w", err)
 	}
@@ -405,11 +402,32 @@ func (b *daytonaLeaseBackend) syncDaytonaToolbox(ctx context.Context, sandbox *s
 	}
 	uploadDuration := time.Since(uploadStarted)
 	extractStarted := time.Now()
-	deletePrefix := ""
-	if b.cfg.Sync.Delete {
-		deletePrefix = "rm -rf " + shellQuote(workdir) + " && "
+	metaDir := path.Join(workdir, ".crabbox")
+	token := strings.TrimPrefix(newLeaseID(), "cbx_")
+	manifestPath := path.Join(metaDir, "sync-manifest."+token+".new")
+	deletedPath := path.Join(metaDir, "sync-deleted."+token+".new")
+	defer func() {
+		cleanupCtx, cancel := daytonaCleanupContext()
+		defer cancel()
+		_, _ = commands.ExecuteCommand(cleanupCtx, "rm -f "+shellQuote(manifestPath)+" "+shellQuote(deletedPath))
+	}()
+	prepare := "mkdir -p " + shellQuote(workdir) + " && test ! -L " + shellQuote(metaDir) + " && mkdir -p " + shellQuote(metaDir) + " && tar -tzf " + shellQuote(archivePath) + " >/dev/null"
+	if response, err := commands.ExecuteCommand(ctx, prepare); err != nil {
+		return nil, fmt.Errorf("daytona prepare sync: %w", err)
+	} else if responseExitCode(response) != 0 {
+		return nil, exit(responseExitCode(response), "daytona prepare sync failed: %s", response.Result)
 	}
-	extractCommand := daytonaExtractArchiveCommand(workdir, archivePath, deletePrefix)
+	if err := sandbox.FileSystem.UploadFileStream(ctx, bytes.NewReader(manifest.NUL()), manifestPath); err != nil {
+		return nil, fmt.Errorf("daytona upload pending manifest: %w", err)
+	}
+	if err := sandbox.FileSystem.UploadFileStream(ctx, bytes.NewReader(manifest.DeletedNUL()), deletedPath); err != nil {
+		return nil, fmt.Errorf("daytona upload deleted manifest: %w", err)
+	}
+	prune := ""
+	if b.cfg.Sync.Delete {
+		prune = core.PruneArchiveSyncManifestCommand(workdir, token, true) + " && "
+	}
+	extractCommand := daytonaExtractArchiveCommand(workdir, archivePath, prune)
 	if response, err := commands.ExecuteCommand(ctx, extractCommand); err != nil {
 		return nil, fmt.Errorf("daytona extract archive: %w", err)
 	} else if responseExitCode(response) != 0 {
@@ -417,12 +435,11 @@ func (b *daytonaLeaseBackend) syncDaytonaToolbox(ctx context.Context, sandbox *s
 	}
 	extractDuration := time.Since(extractStarted)
 	manifestWriteStarted := time.Now()
-	metaDir := path.Join(workdir, ".crabbox")
-	if err := sandbox.FileSystem.CreateFolder(ctx, metaDir); err != nil {
-		return nil, fmt.Errorf("daytona create metadata dir: %w", err)
-	}
-	if err := sandbox.FileSystem.UploadFile(ctx, manifest.NUL(), path.Join(metaDir, "sync-manifest")); err != nil {
-		return nil, fmt.Errorf("daytona upload sync manifest: %w", err)
+	finalize := "mv -f " + shellQuote(manifestPath) + " " + shellQuote(path.Join(metaDir, "sync-manifest")) + " && rm -f " + shellQuote(deletedPath)
+	if response, err := commands.ExecuteCommand(ctx, finalize); err != nil {
+		return nil, fmt.Errorf("daytona finalize sync: %w", err)
+	} else if responseExitCode(response) != 0 {
+		return nil, exit(responseExitCode(response), "daytona finalize sync failed: %s", response.Result)
 	}
 	manifestWriteDuration := time.Since(manifestWriteStarted)
 	phases := []timingPhase{
@@ -464,9 +481,6 @@ func daytonaCommandString(command []string, shellMode bool) string {
 func daytonaStatusView(leaseID string, sandbox *apidaytona.Sandbox, cfg Config) statusView {
 	server := daytonaSandboxToServer(sandbox, cfg)
 	state := server.Status
-	if !daytonaStateReady(state) {
-		state = blank(server.Labels["state"], state)
-	}
 	return statusView{
 		ID:         leaseID,
 		Slug:       serverSlug(server),
@@ -476,7 +490,7 @@ func daytonaStatusView(leaseID string, sandbox *apidaytona.Sandbox, cfg Config) 
 		ServerID:   server.DisplayID(),
 		ServerType: server.ServerType.Name,
 		Network:    NetworkPublic,
-		Ready:      daytonaStateReady(state) || daytonaStateReady(server.Status),
+		Ready:      daytonaStateReady(state),
 		HasHost:    true,
 		LastTouchedAt: blank(leaseLabelTimeDisplay(server.Labels["last_touched_at"]),
 			server.Labels["last_touched_at"]),

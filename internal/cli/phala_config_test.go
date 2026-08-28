@@ -152,15 +152,3 @@ func TestPhalaTrustedConfigRedirectsCLIAndAccount(t *testing.T) {
 		t.Fatalf("trusted compose not applied: %#v", got)
 	}
 }
-
-func TestPhalaClaimScope(t *testing.T) {
-	cfg := baseConfig()
-	// No pinned node yields an empty (global) claim scope.
-	if got := ProviderClaimScope("phala", cfg); got != "" {
-		t.Fatalf("scope without node=%q want empty", got)
-	}
-	cfg.Phala.NodeID = "  node-7  "
-	if got, want := ProviderClaimScope("phala", cfg), "node:node-7"; got != want {
-		t.Fatalf("scope=%q want %q", got, want)
-	}
-}

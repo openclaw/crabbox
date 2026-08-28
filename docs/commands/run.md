@@ -559,6 +559,13 @@ special files are omitted.
 `--capture-on-fail` remains accepted as a compatibility alias. Crabbox does not
 redact captured files; the caller owns redaction before sharing them.
 
+When the project capture destination is unwritable, automatic bundles fall
+back to the Crabbox user state directory's `captures/` subdirectory. The
+`failure-bundle local=...` line reports the actual path. Security-validation
+and archive/read failures do not trigger fallback, and explicit stdout/stderr
+capture paths never move. See [local capture storage](../observability.md#capturing-run-output-locally)
+for the state path and retention details.
+
 ## Test results
 
 Add `--junit <path>` (comma-separated) or configure `results.junit` to attach

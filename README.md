@@ -547,7 +547,10 @@ or `--capture-stderr <path>`. Add `--preflight` for a remote capability
 snapshot, `--keep-on-failure` to SSH into the exact failed one-shot lease, or
 `--download remote=local` to copy a successful-run artifact back. Failed
 SSH-backed and Blacksmith delegated runs save local `.crabbox/captures/*.tar.gz`
-bundles by default. Captured files are not redacted by Crabbox.
+bundles by default, falling back to the Crabbox user state directory when the
+project destination is unwritable. The reported `failure-bundle local=...`
+path identifies the saved bundle; see [local capture storage](docs/observability.md#capturing-run-output-locally).
+Captured files are not redacted by Crabbox.
 
 Optional Tailscale reachability for managed Linux leases:
 
@@ -629,6 +632,7 @@ npm run build:node --prefix worker
 
 # Repository scripts
 node scripts/generate-linux-readiness.mjs --check
+node scripts/generate-bootstrap.mjs --check
 node --test scripts/*.test.js scripts/*.test.mjs
 
 # Docs

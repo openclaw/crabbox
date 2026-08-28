@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net"
-	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -284,7 +282,7 @@ func claimLeaseForRepoProviderScopePondWithLabels(leaseID, slug, provider, provi
 		labels:    labels,
 		guard:     unchangedLeaseClaimGuard(leaseID, leaseClaim{}, false),
 		result:    &updated,
-		durable:   true,
+		directory: claimDirectoryDurableNamespace,
 	})
 	return updated, err
 }
@@ -329,26 +327,33 @@ type staticClaimDetails struct {
 }
 
 type claimMetadata struct {
-	setCacheVolumes       bool
-	cacheVolumes          []string
-	setEndpoint           bool
-	replaceEndpoint       bool
-	server                Server
-	target                SSHTarget
-	reservationLabel      string
-	reservationDuration   time.Duration
-	guard                 func(leaseClaim, bool) error
-	result                *leaseClaim
-	allowProviderMetadata bool
-	allowEmptyRepoRoot    bool
-	durable               bool
-	action                func() error
-	setLabels             bool
-	labels                map[string]string
+	setCacheVolumes     bool
+	cacheVolumes        []string
+	setEndpoint         bool
+	endpointMode        leaseClaimEndpointMode
+	server              Server
+	target              SSHTarget
+	reservationLabel    string
+	reservationDuration time.Duration
+	guard               func(leaseClaim, bool) error
+	result              *leaseClaim
+	providerMetadata    leaseClaimMetadataPolicy
+	allowEmptyRepoRoot  bool
+	directory           claimDirectoryPolicy
+	action              func() error
+	setLabels           bool
+	labels              map[string]string
 }
 
 func claimLeaseForRepoProviderScopePondDetails(leaseID, slug, provider, providerScope, pond string, staticDetails staticClaimDetails, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
 	return claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, pond, staticDetails, repoRoot, idleTimeout, reclaim, claimMetadata{})
+}
+
+func checkLeaseClaimRepositoryOwner(leaseID string, existing leaseClaim, repoRoot string, reclaim bool) error {
+	if existing.LeaseID != "" && existing.RepoRoot != "" && existing.RepoRoot != repoRoot && !reclaim {
+		return exit(2, "lease %s is claimed by repo %s; use --reclaim to claim it for %s", leaseID, existing.RepoRoot, repoRoot)
+	}
+	return nil
 }
 
 func claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, pond string, staticDetails staticClaimDetails, repoRoot string, idleTimeout time.Duration, reclaim bool, metadata claimMetadata) error {
@@ -360,100 +365,91 @@ func claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, 
 		guard = endpointClaimGuard(leaseID, metadata.guard)
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	mutate := mutateLeaseClaimGuarded
-	if metadata.durable {
-		mutate = mutateLeaseClaimGuardedDurable
+	directory := metadata.directory
+	if directory == claimDirectoryExisting {
+		directory = claimDirectoryCreate
 	}
-	return mutate(leaseID, guard, func(existing *leaseClaim) error {
-		hadExisting := existing.LeaseID != ""
-		original := cloneLeaseClaim(*existing)
-		if metadata.action != nil {
-			if err := metadata.action(); err != nil {
+	updated, err := transactLeaseClaim(leaseID, leaseClaimTransaction{
+		guard:       guard,
+		action:      claimTransactionAction(metadata.action),
+		revision:    claimRevisionBeforeAction,
+		directory:   directory,
+		publication: claimSkipEmpty,
+		mutate: func(existing *leaseClaim) error {
+			hadExisting := existing.LeaseID != ""
+			original := cloneLeaseClaim(*existing)
+			if metadata.setEndpoint && hadExisting {
+				server, err := prepareLeaseClaimEndpoint(original, provider, slug, metadata.server, metadata.providerMetadata)
+				if err != nil {
+					return err
+				}
+				metadata.server = server
+			}
+			if err := checkLeaseClaimRepositoryOwner(leaseID, *existing, repoRoot, reclaim); err != nil {
 				return err
 			}
-		}
-		if metadata.setEndpoint && hadExisting {
-			server, err := prepareLeaseClaimEndpoint(original, provider, slug, metadata.server, metadata.allowProviderMetadata)
-			if err != nil {
-				return err
+			if existing.ClaimedAt == "" || reclaim || existing.RepoRoot != repoRoot {
+				existing.ClaimedAt = now
 			}
-			metadata.server = server
-		}
-		if existing.LeaseID != "" && existing.RepoRoot != "" && existing.RepoRoot != repoRoot && !reclaim {
-			return exit(2, "lease %s is claimed by repo %s; use --reclaim to claim it for %s", leaseID, existing.RepoRoot, repoRoot)
-		}
-		if existing.ClaimedAt == "" || reclaim || existing.RepoRoot != repoRoot {
-			existing.ClaimedAt = now
-		}
-		existing.LeaseID = leaseID
-		existing.Slug = slug
-		if provider != "" {
-			if existing.FixedCreateIntent != nil && existing.Provider != "" {
-				if canonicalClaimProvider(existing.Provider) != canonicalClaimProvider(provider) {
-					return exit(2, "lease %s fixed claim provider changed from %s to %s", leaseID, existing.Provider, provider)
-				}
-			} else {
-				existing.Provider = provider
-			}
-		}
-		if providerScope != "" {
-			existing.ProviderScope = providerScope
-		}
-		if pond = normalizePondName(pond); pond != "" {
-			existing.Pond = pond
-		}
-		if staticDetails.Present {
-			existing.StaticHost = staticDetails.Host
-			existing.StaticUser = staticDetails.User
-			existing.StaticPort = staticDetails.Port
-			existing.StaticWorkRoot = staticDetails.WorkRoot
-			existing.TargetOS = staticDetails.TargetOS
-			existing.WindowsMode = staticDetails.WindowsMode
-		} else if provider != "" && !isStaticProvider(provider) {
-			existing.StaticHost = ""
-			existing.StaticUser = ""
-			existing.StaticPort = ""
-			existing.StaticWorkRoot = ""
-			existing.TargetOS = ""
-			existing.WindowsMode = ""
-		}
-		existing.RepoRoot = repoRoot
-		existing.LastUsedAt = now
-		if idleTimeout > 0 {
-			existing.IdleTimeoutSeconds = int(idleTimeout.Seconds())
-		}
-		if metadata.setCacheVolumes {
-			existing.CacheVolumes = append([]string(nil), metadata.cacheVolumes...)
-		}
-		if metadata.setLabels {
-			existing.Labels = cloneStringMap(metadata.labels)
-		}
-		if metadata.setEndpoint {
-			if metadata.replaceEndpoint {
-				clearLeaseClaimTailscaleFields(existing)
-				existing.BridgeURL = ""
-			}
-			applyLeaseClaimEndpoint(existing, metadata.server, metadata.target)
-			if metadata.reservationLabel != "" && metadata.reservationDuration > 0 {
-				if existing.Labels == nil {
-					existing.Labels = make(map[string]string)
-				}
-				existing.Labels[metadata.reservationLabel] = leaseLabelTime(time.Now().UTC().Add(metadata.reservationDuration))
-			}
-			if metadata.replaceEndpoint {
-				existing.SSHHost = metadata.target.Host
-				if port, err := strconv.Atoi(strings.TrimSpace(metadata.target.Port)); err == nil && port > 0 {
-					existing.SSHPort = port
+			existing.LeaseID = leaseID
+			existing.Slug = slug
+			if provider != "" {
+				if existing.FixedCreateIntent != nil && existing.Provider != "" {
+					if canonicalClaimProvider(existing.Provider) != canonicalClaimProvider(provider) {
+						return exit(2, "lease %s fixed claim provider changed from %s to %s", leaseID, existing.Provider, provider)
+					}
 				} else {
-					existing.SSHPort = 0
+					existing.Provider = provider
 				}
 			}
-		}
-		if metadata.result != nil {
-			*metadata.result = cloneLeaseClaim(*existing)
-		}
-		return nil
+			if providerScope != "" {
+				existing.ProviderScope = providerScope
+			}
+			if pond = normalizePondName(pond); pond != "" {
+				existing.Pond = pond
+			}
+			if staticDetails.Present {
+				existing.StaticHost = staticDetails.Host
+				existing.StaticUser = staticDetails.User
+				existing.StaticPort = staticDetails.Port
+				existing.StaticWorkRoot = staticDetails.WorkRoot
+				existing.TargetOS = staticDetails.TargetOS
+				existing.WindowsMode = staticDetails.WindowsMode
+			} else if provider != "" && !isStaticProvider(provider) {
+				existing.StaticHost = ""
+				existing.StaticUser = ""
+				existing.StaticPort = ""
+				existing.StaticWorkRoot = ""
+				existing.TargetOS = ""
+				existing.WindowsMode = ""
+			}
+			existing.RepoRoot = repoRoot
+			existing.LastUsedAt = now
+			if idleTimeout > 0 {
+				existing.IdleTimeoutSeconds = int(idleTimeout.Seconds())
+			}
+			if metadata.setCacheVolumes {
+				existing.CacheVolumes = append([]string(nil), metadata.cacheVolumes...)
+			}
+			if metadata.setLabels {
+				existing.Labels = cloneStringMap(metadata.labels)
+			}
+			if metadata.setEndpoint {
+				applyLeaseClaimEndpoint(existing, metadata.server, metadata.target, metadata.endpointMode)
+				if metadata.reservationLabel != "" && metadata.reservationDuration > 0 {
+					if existing.Labels == nil {
+						existing.Labels = make(map[string]string)
+					}
+					existing.Labels[metadata.reservationLabel] = leaseLabelTime(time.Now().UTC().Add(metadata.reservationDuration))
+				}
+			}
+			return nil
+		},
 	})
+	if metadata.result != nil {
+		*metadata.result = updated
+	}
+	return err
 }
 
 func claimLeaseTargetForConfig(leaseID, slug string, cfg Config, server Server, target SSHTarget, idleTimeout time.Duration) error {
@@ -495,35 +491,35 @@ func claimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug string, cfg Config, 
 }
 
 func claimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected leaseClaim, expectedExists bool) (leaseClaim, error) {
-	return claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug, cfg, providerScope, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists, false, false, nil)
+	return claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug, cfg, providerScope, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists, leaseClaimTargetOptions{})
 }
 
 func claimLeaseTargetForRepoConfigScopeIfUnchangedDurable(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected leaseClaim, expectedExists bool) (leaseClaim, error) {
-	return claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug, cfg, providerScope, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists, false, true, nil)
+	return claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug, cfg, providerScope, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists, leaseClaimTargetOptions{directory: claimDirectoryDurableNamespace})
 }
 
 func claimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfter(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected leaseClaim, expectedExists bool, action func() error) (leaseClaim, error) {
-	return claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug, cfg, providerScope, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists, false, true, action)
+	return claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug, cfg, providerScope, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists, leaseClaimTargetOptions{directory: claimDirectoryDurableNamespace, action: action})
 }
 
 func claimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected leaseClaim, expectedExists bool) (leaseClaim, error) {
-	return claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug, cfg, providerScope, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists, true, false, nil)
+	return claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug, cfg, providerScope, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists, leaseClaimTargetOptions{endpoint: claimEndpointReplace})
 }
 
-func claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected leaseClaim, expectedExists, replaceEndpoint, durable bool, action func() error) (leaseClaim, error) {
+func claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected leaseClaim, expectedExists bool, options leaseClaimTargetOptions) (leaseClaim, error) {
 	provider, staticDetails := claimProviderDetailsForConfig(cfg)
 	var updated leaseClaim
 	err := claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, cfg.Pond, staticDetails, repoRoot, idleTimeout, reclaim, claimMetadata{
 		setCacheVolumes: true,
 		cacheVolumes:    CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes),
 		setEndpoint:     true,
-		replaceEndpoint: replaceEndpoint,
+		endpointMode:    options.endpoint,
 		server:          server,
 		target:          target,
 		guard:           unchangedLeaseClaimGuard(leaseID, expected, expectedExists),
 		result:          &updated,
-		durable:         durable,
-		action:          action,
+		directory:       options.directory,
+		action:          options.action,
 	})
 	return updated, err
 }
@@ -548,17 +544,11 @@ func updateLeaseClaimEndpoint(leaseID string, server Server, target SSHTarget) e
 		if claim.LeaseID == "" {
 			return nil
 		}
-		provider := firstNonBlank(server.Labels["provider"], server.Provider)
-		prepared, err := prepareLeaseClaimEndpoint(*claim, provider, server.Labels["slug"], server, false)
-		if err != nil {
-			return err
-		}
-		applyLeaseClaimEndpoint(claim, prepared, target)
-		return nil
+		return transformLeaseClaimEndpoint(claim, server, target, leaseClaimEndpointPolicy{})
 	})
 }
 
-func prepareLeaseClaimEndpoint(existing leaseClaim, providerName, slug string, server Server, allowProviderMetadata bool) (Server, error) {
+func prepareLeaseClaimEndpoint(existing leaseClaim, providerName, slug string, server Server, providerMetadata leaseClaimMetadataPolicy) (Server, error) {
 	provider, err := ProviderFor(canonicalClaimProvider(firstNonBlank(existing.Provider, providerName)))
 	if err != nil {
 		return Server{}, exit(2, "lease %s claim has unavailable provider %q", existing.LeaseID, existing.Provider)
@@ -567,59 +557,33 @@ func prepareLeaseClaimEndpoint(existing leaseClaim, providerName, slug string, s
 	if !ok {
 		return server, nil
 	}
-	return preparer.PrepareLeaseClaimEndpoint(existing, providerName, slug, server, allowProviderMetadata)
+	return preparer.PrepareLeaseClaimEndpoint(existing, providerName, slug, server, providerMetadata == claimMetadataAdmitProvider)
 }
 
 func updateLeaseClaimEndpointIfUnchanged(leaseID string, expected leaseClaim, server Server, target SSHTarget) (leaseClaim, error) {
-	return updateLeaseClaimEndpointIfUnchangedMode(leaseID, expected, server, target, false, false)
+	return updateLeaseClaimEndpointIfUnchangedMode(leaseID, expected, server, target, leaseClaimEndpointPolicy{})
 }
 
 func updateLeaseClaimEndpointIfUnchangedWithProviderMetadata(leaseID string, expected leaseClaim, server Server, target SSHTarget) (leaseClaim, error) {
-	return updateLeaseClaimEndpointIfUnchangedMode(leaseID, expected, server, target, true, false)
+	return updateLeaseClaimEndpointIfUnchangedMode(leaseID, expected, server, target, leaseClaimEndpointPolicy{metadata: claimMetadataAdmitProvider})
 }
 
 func replaceLeaseClaimEndpointIfUnchangedWithProviderMetadata(leaseID string, expected leaseClaim, server Server, target SSHTarget) (leaseClaim, error) {
-	return updateLeaseClaimEndpointIfUnchangedMode(leaseID, expected, server, target, true, true)
+	return updateLeaseClaimEndpointIfUnchangedMode(leaseID, expected, server, target, leaseClaimEndpointPolicy{mode: claimEndpointReplace, metadata: claimMetadataAdmitProvider})
 }
 
 func updateLeaseClaimEndpointIfUnchangedAfter(leaseID string, expected leaseClaim, server Server, target SSHTarget, action func() error) (leaseClaim, error) {
 	if leaseID == "" {
 		return leaseClaim{}, nil
 	}
-	path, err := leaseClaimPath(leaseID)
-	if err != nil {
-		return leaseClaim{}, err
-	}
-	var updated leaseClaim
-	err = withLeaseClaimLock(path, func() error {
-		claim, exists, err := readLeaseClaimPathWithPresence(path)
-		if err != nil {
-			return err
-		}
-		if err := validateLeaseClaimFileIdentity(leaseID, claim, exists); err != nil {
-			return err
-		}
-		if err := endpointClaimGuard(leaseID, unchangedLeaseClaimGuard(leaseID, expected, true))(claim, exists); err != nil {
-			return err
-		}
-		if action != nil {
-			if err := action(); err != nil {
-				return err
-			}
-		}
-		if err := refreshLeaseClaimRevision(&claim); err != nil {
-			return err
-		}
-		provider := firstNonBlank(server.Labels["provider"], server.Provider)
-		prepared, err := prepareLeaseClaimEndpoint(claim, provider, server.Labels["slug"], server, false)
-		if err != nil {
-			return err
-		}
-		applyLeaseClaimEndpoint(&claim, prepared, target)
-		updated = cloneLeaseClaim(claim)
-		return writeLeaseClaimAtomic(path, claim)
+	return transactLeaseClaim(leaseID, leaseClaimTransaction{
+		guard:    endpointClaimGuard(leaseID, unchangedLeaseClaimGuard(leaseID, expected, true)),
+		action:   claimTransactionAction(action),
+		revision: claimRevisionBeforeMutation,
+		mutate: func(claim *leaseClaim) error {
+			return transformLeaseClaimEndpoint(claim, server, target, leaseClaimEndpointPolicy{})
+		},
 	})
-	return updated, err
 }
 
 func withLeaseClaimUnchanged(leaseID string, expected leaseClaim, action func() error) error {
@@ -647,7 +611,7 @@ func updateLeaseClaimEndpointIfUnchangedAction(
 	expected leaseClaim,
 	action func() (Server, SSHTarget, bool, error),
 ) (leaseClaim, Server, SSHTarget, error) {
-	return updateLeaseClaimEndpointIfUnchangedActionMode(leaseID, expected, action, false, nil)
+	return updateLeaseClaimEndpointIfUnchangedActionMode(leaseID, expected, action, claimEndpointUpdate, nil)
 }
 
 func replaceLeaseClaimEndpointIfUnchangedAction(
@@ -655,7 +619,7 @@ func replaceLeaseClaimEndpointIfUnchangedAction(
 	expected leaseClaim,
 	action func() (Server, SSHTarget, bool, error),
 ) (leaseClaim, Server, SSHTarget, error) {
-	return updateLeaseClaimEndpointIfUnchangedActionMode(leaseID, expected, action, true, nil)
+	return updateLeaseClaimEndpointIfUnchangedActionMode(leaseID, expected, action, claimEndpointReplace, nil)
 }
 
 type leaseClaimTouchPayload struct {
@@ -667,7 +631,7 @@ func updateLeaseClaimEndpointIfUnchangedActionMode(
 	leaseID string,
 	expected leaseClaim,
 	action func() (Server, SSHTarget, bool, error),
-	replaceEndpoint bool,
+	endpointMode leaseClaimEndpointMode,
 	touch *leaseClaimTouchPayload,
 ) (leaseClaim, Server, SSHTarget, error) {
 	if touch != nil && touch.idleTimeoutOverride != nil {
@@ -678,98 +642,62 @@ func updateLeaseClaimEndpointIfUnchangedActionMode(
 			return leaseClaim{}, Server{}, SSHTarget{}, exit(2, "lease %s idle timeout override must be at least one second", leaseID)
 		}
 	}
-	path, err := leaseClaimPath(leaseID)
-	if err != nil {
-		return leaseClaim{}, Server{}, SSHTarget{}, err
-	}
-	var updated leaseClaim
 	var server Server
 	var target SSHTarget
-	err = withLeaseClaimLock(path, func() error {
-		claim, exists, err := readLeaseClaimPathWithPresence(path)
-		if err != nil {
-			return err
-		}
-		if err := validateLeaseClaimFileIdentity(leaseID, claim, exists); err != nil {
-			return err
-		}
-		if err := endpointClaimGuard(leaseID, unchangedLeaseClaimGuard(leaseID, expected, true))(claim, exists); err != nil {
-			return err
-		}
-		if action == nil {
-			updated = cloneLeaseClaim(claim)
+	updated, err := transactLeaseClaim(leaseID, leaseClaimTransaction{
+		guard:    endpointClaimGuard(leaseID, unchangedLeaseClaimGuard(leaseID, expected, true)),
+		revision: claimRevisionAfterMutation,
+		action: func() (claimActionDecision, error) {
+			if action == nil {
+				return claimActionKeepSnapshot, nil
+			}
+			var shouldUpdate bool
+			var err error
+			server, target, shouldUpdate, err = action()
+			if err != nil || !shouldUpdate {
+				return claimActionKeepSnapshot, err
+			}
+			return claimActionContinue, nil
+		},
+		mutate: func(claim *leaseClaim) error {
+			if err := transformLeaseClaimEndpoint(claim, server, target, leaseClaimEndpointPolicy{mode: endpointMode}); err != nil {
+				return err
+			}
+			if touch != nil {
+				claim.LastUsedAt = touch.lastUsed.UTC().Format(time.RFC3339)
+				if touch.idleTimeoutOverride != nil {
+					claim.IdleTimeoutSeconds = int(touch.idleTimeoutOverride.Round(time.Second) / time.Second)
+				}
+			}
 			return nil
-		}
-		var shouldUpdate bool
-		server, target, shouldUpdate, err = action()
-		if err != nil || !shouldUpdate {
-			updated = cloneLeaseClaim(claim)
-			return err
-		}
-		provider := firstNonBlank(server.Labels["provider"], server.Provider)
-		prepared, err := prepareLeaseClaimEndpoint(claim, provider, server.Labels["slug"], server, false)
-		if err != nil {
-			return err
-		}
-		if replaceEndpoint {
-			clearLeaseClaimTailscaleFields(&claim)
-			claim.BridgeURL = ""
-		}
-		applyLeaseClaimEndpoint(&claim, prepared, target)
-		if touch != nil {
-			claim.LastUsedAt = touch.lastUsed.UTC().Format(time.RFC3339)
-			if touch.idleTimeoutOverride != nil {
-				claim.IdleTimeoutSeconds = int(touch.idleTimeoutOverride.Round(time.Second) / time.Second)
-			}
-		}
-		if replaceEndpoint {
-			claim.SSHHost = target.Host
-			if port, err := strconv.Atoi(strings.TrimSpace(target.Port)); err == nil && port > 0 {
-				claim.SSHPort = port
-			} else {
-				claim.SSHPort = 0
-			}
-		}
-		if err := refreshLeaseClaimRevision(&claim); err != nil {
-			return err
-		}
-		updated = cloneLeaseClaim(claim)
-		return writeLeaseClaimAtomic(path, claim)
+		},
 	})
 	return updated, server, target, err
 }
 
-func updateLeaseClaimEndpointIfUnchangedMode(leaseID string, expected leaseClaim, server Server, target SSHTarget, allowProviderMetadata, replaceEndpoint bool) (leaseClaim, error) {
+func updateLeaseClaimEndpointIfUnchangedMode(leaseID string, expected leaseClaim, server Server, target SSHTarget, policy leaseClaimEndpointPolicy) (leaseClaim, error) {
 	if leaseID == "" {
 		return leaseClaim{}, nil
 	}
-	var updated leaseClaim
-	err := mutateLeaseClaimGuarded(leaseID, endpointClaimGuard(leaseID, unchangedLeaseClaimGuard(leaseID, expected, true)), func(claim *leaseClaim) error {
-		if claim.LeaseID == "" {
-			return nil
-		}
-		provider := firstNonBlank(server.Labels["provider"], server.Provider)
-		prepared, err := prepareLeaseClaimEndpoint(*claim, provider, server.Labels["slug"], server, allowProviderMetadata)
-		if err != nil {
-			return err
-		}
-		if replaceEndpoint {
-			clearLeaseClaimTailscaleFields(claim)
-			claim.BridgeURL = ""
-		}
-		applyLeaseClaimEndpoint(claim, prepared, target)
-		if replaceEndpoint {
-			claim.SSHHost = target.Host
-			if port, err := strconv.Atoi(strings.TrimSpace(target.Port)); err == nil && port > 0 {
-				claim.SSHPort = port
-			} else {
-				claim.SSHPort = 0
-			}
-		}
-		updated = cloneLeaseClaim(*claim)
-		return nil
+	return transactLeaseClaim(leaseID, leaseClaimTransaction{
+		guard:       endpointClaimGuard(leaseID, unchangedLeaseClaimGuard(leaseID, expected, true)),
+		revision:    claimRevisionBeforeMutation,
+		directory:   claimDirectoryCreate,
+		publication: claimSkipEmpty,
+		mutate: func(claim *leaseClaim) error {
+			return transformLeaseClaimEndpoint(claim, server, target, policy)
+		},
 	})
-	return updated, err
+}
+
+func transformLeaseClaimEndpoint(claim *leaseClaim, server Server, target SSHTarget, policy leaseClaimEndpointPolicy) error {
+	provider := firstNonBlank(server.Labels["provider"], server.Provider)
+	prepared, err := prepareLeaseClaimEndpoint(*claim, provider, server.Labels["slug"], server, policy.metadata)
+	if err != nil {
+		return err
+	}
+	applyLeaseClaimEndpoint(claim, prepared, target, policy.mode)
+	return nil
 }
 
 func updateLeaseClaimLabelsIfUnchanged(leaseID string, expected leaseClaim, labels map[string]string) (leaseClaim, error) {
@@ -835,35 +763,15 @@ func updateLeaseClaimLabelsIfUnchangedAfter(leaseID string, expected leaseClaim,
 	if leaseID == "" {
 		return leaseClaim{}, nil
 	}
-	path, err := leaseClaimPath(leaseID)
-	if err != nil {
-		return leaseClaim{}, err
-	}
-	var updated leaseClaim
-	err = withLeaseClaimLock(path, func() error {
-		claim, exists, err := readLeaseClaimPathWithPresence(path)
-		if err != nil {
-			return err
-		}
-		if err := validateLeaseClaimFileIdentity(leaseID, claim, exists); err != nil {
-			return err
-		}
-		if err := unchangedLeaseClaimGuard(leaseID, expected, true)(claim, exists); err != nil {
-			return err
-		}
-		if action != nil {
-			if err := action(); err != nil {
-				return err
-			}
-		}
-		if err := refreshLeaseClaimRevision(&claim); err != nil {
-			return err
-		}
-		claim.Labels = cloneStringMap(labels)
-		updated = cloneLeaseClaim(claim)
-		return writeLeaseClaimAtomic(path, claim)
+	return transactLeaseClaim(leaseID, leaseClaimTransaction{
+		guard:    unchangedLeaseClaimGuard(leaseID, expected, true),
+		action:   claimTransactionAction(action),
+		revision: claimRevisionBeforeMutation,
+		mutate: func(claim *leaseClaim) error {
+			claim.Labels = cloneStringMap(labels)
+			return nil
+		},
 	})
-	return updated, err
 }
 
 func cloneLeaseClaim(claim leaseClaim) leaseClaim {
@@ -909,7 +817,11 @@ func endpointClaimGuard(leaseID string, next func(leaseClaim, bool) error) func(
 	}
 }
 
-func applyLeaseClaimEndpoint(claim *leaseClaim, server Server, target SSHTarget) {
+func applyLeaseClaimEndpoint(claim *leaseClaim, server Server, target SSHTarget, mode leaseClaimEndpointMode) {
+	if mode == claimEndpointReplace {
+		clearLeaseClaimTailscaleFields(claim)
+		claim.BridgeURL = ""
+	}
 	if server.CloudID != "" {
 		claim.CloudID = server.CloudID
 	}
@@ -934,12 +846,12 @@ func applyLeaseClaimEndpoint(claim *leaseClaim, server Server, target SSHTarget)
 	}
 	if target.Host != "" {
 		claim.SSHHost = target.Host
-	} else if claimEndpointInactiveState(server.Labels["state"]) {
+	} else if mode == claimEndpointReplace || claimEndpointInactiveState(server.Labels["state"]) {
 		claim.SSHHost = ""
 	}
 	if port, err := strconv.Atoi(strings.TrimSpace(target.Port)); err == nil && port > 0 {
 		claim.SSHPort = port
-	} else if claimEndpointInactiveState(server.Labels["state"]) {
+	} else if mode == claimEndpointReplace || claimEndpointInactiveState(server.Labels["state"]) {
 		claim.SSHPort = 0
 	}
 }
@@ -1048,64 +960,28 @@ func mutateLeaseClaimGuarded(leaseID string, guard func(leaseClaim, bool) error,
 	return mutateLeaseClaimGuardedWithWrite(leaseID, guard, mutate, writeLeaseClaimAtomic)
 }
 
-func mutateLeaseClaimGuardedDurable(leaseID string, guard func(leaseClaim, bool) error, mutate func(*leaseClaim) error) error {
-	return mutateLeaseClaimGuardedDurableWithSync(leaseID, guard, mutate, syncControllerDirectory)
-}
-
 func mutateLeaseClaimGuardedDurableWithSync(leaseID string, guard func(leaseClaim, bool) error, mutate func(*leaseClaim) error, syncDirectory func(string) error) error {
-	path, err := leaseClaimPath(leaseID)
-	if err != nil {
-		return err
-	}
-	dir := filepath.Dir(path)
-	firstExistingDir, err := nearestExistingClaimDirectory(dir)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return exit(2, "create claim directory: %v", err)
-	}
-	return mutateLeaseClaimPathGuardedWithWrite(leaseID, path, guard, mutate, func(path string, claim leaseClaim) error {
-		return writeLeaseClaimAtomicDurableWithSync(path, claim, firstExistingDir, syncDirectory)
+	_, err := transactLeaseClaim(leaseID, leaseClaimTransaction{
+		guard:         guard,
+		mutate:        mutate,
+		revision:      claimRevisionBeforeAction,
+		publication:   claimSkipEmpty,
+		directory:     claimDirectoryDurableNamespace,
+		syncDirectory: syncDirectory,
 	})
+	return err
 }
 
 func mutateLeaseClaimGuardedWithWrite(leaseID string, guard func(leaseClaim, bool) error, mutate func(*leaseClaim) error, write func(string, leaseClaim) error) error {
-	path, err := leaseClaimPath(leaseID)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return exit(2, "create claim directory: %v", err)
-	}
-	return mutateLeaseClaimPathGuardedWithWrite(leaseID, path, guard, mutate, write)
-}
-
-func mutateLeaseClaimPathGuardedWithWrite(leaseID, path string, guard func(leaseClaim, bool) error, mutate func(*leaseClaim) error, write func(string, leaseClaim) error) error {
-	return withLeaseClaimLock(path, func() error {
-		claim, exists, err := readLeaseClaimPathWithPresence(path)
-		if err != nil {
-			return err
-		}
-		if err := validateLeaseClaimFileIdentity(leaseID, claim, exists); err != nil {
-			return err
-		}
-		if guard != nil {
-			if err := guard(claim, exists); err != nil {
-				return err
-			}
-		}
-		if err := refreshLeaseClaimRevision(&claim); err != nil {
-			return err
-		}
-		if err := mutate(&claim); err != nil {
-			return err
-		}
-		if claim.LeaseID == "" {
-			return nil
-		}
-		return write(path, claim)
+	_, err := transactLeaseClaim(leaseID, leaseClaimTransaction{
+		guard:       guard,
+		mutate:      mutate,
+		write:       write,
+		revision:    claimRevisionBeforeAction,
+		publication: claimSkipEmpty,
+		directory:   claimDirectoryCreate,
 	})
+	return err
 }
 
 func claimMutationMutex(path string) *sync.Mutex {
@@ -1354,137 +1230,10 @@ func claimProviderForIdentifier(identifier string) (string, bool, error) {
 func providerClaimScope(provider string, cfg Config) string {
 	if resolved, err := ProviderFor(provider); err == nil {
 		if scoper, ok := resolved.(ProviderClaimScoper); ok {
-			return strings.TrimSpace(scoper.ClaimScope(cfg))
-		}
-	}
-	switch provider {
-	case "azure":
-		return azureLeaseClaimScope(cfg.AzureSubscription, cfg.AzureResourceGroup)
-	case "gcp":
-		if cfg.GCPProject != "" {
-			return "project:" + cfg.GCPProject
-		}
-	case "cubesandbox":
-		if endpoint := normalizedCubeSandboxClaimEndpoint(cfg.CubeSandbox.APIURL); endpoint != "" {
-			return "endpoint:" + endpoint
-		}
-	case "e2b":
-		if endpoint := normalizedCubeSandboxClaimEndpoint(cfg.E2B.APIURL); endpoint != "" {
-			return "endpoint:" + endpoint
-		}
-	case "namespace-instance":
-		parts := make([]string, 0, 3)
-		if endpoint := normalizedNamespaceClaimEndpoint(cfg.NamespaceInstance.Endpoint); endpoint != "" {
-			parts = append(parts, "endpoint:"+endpoint)
-		}
-		if region := strings.TrimSpace(cfg.NamespaceInstance.Region); region != "" {
-			parts = append(parts, "region:"+region)
-		}
-		if keychain := strings.TrimSpace(cfg.NamespaceInstance.Keychain); keychain != "" {
-			parts = append(parts, "keychain:"+keychain)
-		}
-		return strings.Join(parts, "|")
-	case "phala":
-		if node := strings.TrimSpace(cfg.Phala.NodeID); node != "" {
-			return "node:" + node
-		}
-	case "proxmox":
-		endpoint := normalizedProxmoxClaimEndpoint(cfg.Proxmox.APIURL)
-		node := strings.TrimSpace(cfg.Proxmox.Node)
-		if endpoint != "" && node != "" {
-			return "endpoint:" + endpoint + "|node:" + node
-		}
-	case "railway":
-		endpoint := strings.TrimRight(strings.TrimSpace(routingSafeURL(cfg.Railway.APIURL)), "/")
-		projectID := strings.TrimSpace(cfg.Railway.ProjectID)
-		environmentID := strings.TrimSpace(cfg.Railway.EnvironmentID)
-		if endpoint != "" && projectID != "" && environmentID != "" {
-			return "endpoint:" + endpoint + "|project:" + projectID + "|environment:" + environmentID
+			return scoper.ClaimScope(cfg)
 		}
 	}
 	return ""
-}
-
-func normalizedCubeSandboxClaimEndpoint(raw string) string {
-	endpoint := strings.TrimSpace(routingSafeURL(raw))
-	parsed, err := url.Parse(endpoint)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return strings.TrimRight(endpoint, "/")
-	}
-	parsed.User = nil
-	parsed.RawQuery = ""
-	parsed.ForceQuery = false
-	parsed.Fragment = ""
-	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	host := strings.ToLower(parsed.Hostname())
-	port := parsed.Port()
-	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
-		port = ""
-	}
-	if port != "" {
-		parsed.Host = net.JoinHostPort(host, port)
-	} else if strings.Contains(host, ":") {
-		parsed.Host = "[" + host + "]"
-	} else {
-		parsed.Host = host
-	}
-	parsed.Path = strings.TrimRight(parsed.Path, "/")
-	parsed.RawPath = ""
-	return strings.TrimRight(parsed.String(), "/")
-}
-
-func azureLeaseClaimScope(subscriptionID, resourceGroup string) string {
-	subscriptionID = strings.ToLower(strings.TrimSpace(subscriptionID))
-	resourceGroup = strings.ToLower(strings.TrimSpace(resourceGroup))
-	if subscriptionID == "" || resourceGroup == "" {
-		return ""
-	}
-	return "subscription:" + subscriptionID + "|resource-group:" + resourceGroup
-}
-
-func normalizedNamespaceClaimEndpoint(raw string) string {
-	endpoint := strings.TrimSpace(routingSafeURL(raw))
-	addedScheme := false
-	parseValue := endpoint
-	if endpoint != "" && !strings.Contains(endpoint, "://") {
-		parseValue = "https://" + endpoint
-		addedScheme = true
-	}
-	parsed, err := url.Parse(parseValue)
-	if err != nil || parsed.Host == "" {
-		return strings.TrimRight(endpoint, "/")
-	}
-	parsed.User = nil
-	parsed.RawQuery = ""
-	parsed.Fragment = ""
-	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	parsed.Host = strings.ToLower(parsed.Host)
-	parsed.Path = strings.TrimRight(parsed.Path, "/")
-	parsed.RawPath = ""
-	out := parsed.String()
-	if addedScheme {
-		out = strings.TrimPrefix(out, "https://")
-	}
-	return out
-}
-
-func normalizedProxmoxClaimEndpoint(raw string) string {
-	endpoint := strings.TrimSpace(raw)
-	parsed, err := url.Parse(endpoint)
-	if err != nil || parsed.Host == "" {
-		endpoint = strings.TrimRight(endpoint, "/")
-		endpoint = strings.TrimSuffix(endpoint, "/api2/json")
-		return endpoint
-	}
-	parsed.User = nil
-	parsed.RawQuery = ""
-	parsed.Fragment = ""
-	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	parsed.Host = strings.ToLower(parsed.Host)
-	parsed.Path = strings.TrimRight(parsed.Path, "/")
-	parsed.Path = strings.TrimSuffix(parsed.Path, "/api2/json")
-	parsed.RawPath = ""
-	return parsed.String()
 }
 
 func resolveLeaseClaim(identifier string) (leaseClaim, bool, error) {
@@ -1850,27 +1599,8 @@ func restoreLeaseClaimIfUnchanged(leaseID string, current, previous leaseClaim, 
 	if !previousExists {
 		return removeLeaseClaimIfUnchanged(leaseID, current)
 	}
-	path, err := leaseClaimPath(leaseID)
-	if err != nil {
-		return err
-	}
-	return withLeaseClaimLock(path, func() error {
-		claim, exists, err := readLeaseClaimPathWithPresence(path)
-		if err != nil {
-			return err
-		}
-		if err := validateLeaseClaimFileIdentity(leaseID, claim, exists); err != nil {
-			return err
-		}
-		if err := unchangedLeaseClaimGuard(leaseID, current, true)(claim, exists); err != nil {
-			return err
-		}
-		replacement := cloneLeaseClaim(previous)
-		if err := refreshLeaseClaimRevision(&replacement); err != nil {
-			return err
-		}
-		return writeLeaseClaimAtomic(path, replacement)
-	})
+	_, err := replaceLeaseClaimIfUnchangedWithWrite(leaseID, current, previous, writeLeaseClaimAtomic)
+	return err
 }
 
 func replaceLeaseClaimIfUnchanged(leaseID string, current, replacement leaseClaim) error {
@@ -1883,65 +1613,27 @@ func replaceLeaseClaimIfUnchangedDurableReturning(leaseID string, current, repla
 }
 
 func replaceLeaseClaimIfUnchangedDurableAfter(leaseID string, current, replacement leaseClaim, action func() error) (leaseClaim, error) {
-	path, err := leaseClaimPath(leaseID)
-	if err != nil {
-		return leaseClaim{}, err
-	}
-	var written leaseClaim
-	err = withLeaseClaimLock(path, func() error {
-		claim, exists, err := readLeaseClaimPathWithPresence(path)
-		if err != nil {
-			return err
-		}
-		if err := validateLeaseClaimFileIdentity(leaseID, claim, exists); err != nil {
-			return err
-		}
-		if err := unchangedLeaseClaimGuard(leaseID, current, true)(claim, exists); err != nil {
-			return err
-		}
-		if action != nil {
-			if err := action(); err != nil {
-				return err
-			}
-		}
-		written = cloneLeaseClaim(replacement)
-		written.LeaseID = leaseID
-		if err := refreshLeaseClaimRevision(&written); err != nil {
-			return err
-		}
-		return writeLeaseClaimAtomicDurable(path, written)
-	})
-	return written, err
+	// This entrypoint binds replacement identity; restore/replace retain the
+	// supplied payload, including incomplete claims used by rollback.
+	replacement.LeaseID = leaseID
+	return replaceLeaseClaimTransaction(leaseID, current, replacement, action, writeLeaseClaimAtomicDurable)
 }
 
 func replaceLeaseClaimIfUnchangedWithWrite(leaseID string, current, replacement leaseClaim, write func(string, leaseClaim) error) (leaseClaim, error) {
-	path, err := leaseClaimPath(leaseID)
-	if err != nil {
-		return leaseClaim{}, err
-	}
-	var written leaseClaim
-	err = withLeaseClaimLock(path, func() error {
-		claim, exists, err := readLeaseClaimPathWithPresence(path)
-		if err != nil {
-			return err
-		}
-		if err := validateLeaseClaimFileIdentity(leaseID, claim, exists); err != nil {
-			return err
-		}
-		if err := unchangedLeaseClaimGuard(leaseID, current, true)(claim, exists); err != nil {
-			return err
-		}
-		replacement = cloneLeaseClaim(replacement)
-		if err := refreshLeaseClaimRevision(&replacement); err != nil {
-			return err
-		}
-		written = cloneLeaseClaim(replacement)
-		if err := write(path, replacement); err != nil {
-			return err
-		}
-		return nil
+	return replaceLeaseClaimTransaction(leaseID, current, replacement, nil, write)
+}
+
+func replaceLeaseClaimTransaction(leaseID string, current, replacement leaseClaim, action func() error, write func(string, leaseClaim) error) (leaseClaim, error) {
+	return transactLeaseClaim(leaseID, leaseClaimTransaction{
+		guard:    unchangedLeaseClaimGuard(leaseID, current, true),
+		action:   claimTransactionAction(action),
+		revision: claimRevisionAfterMutation,
+		write:    write,
+		mutate: func(claim *leaseClaim) error {
+			*claim = cloneLeaseClaim(replacement)
+			return nil
+		},
 	})
-	return written, err
 }
 
 func listLeaseClaims() ([]leaseClaim, error) {

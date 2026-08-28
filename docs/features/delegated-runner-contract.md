@@ -149,6 +149,59 @@ claim model:
 If a provider resource is created before local claim setup fails, the adapter
 must cancel that resource before returning the error.
 
+## Shared Sandbox Lifecycle
+
+E2B, Modal, and Cloudflare Sandbox use `shared.RunDelegatedSandbox` in
+`internal/providers/shared/delegated.go`. The lifecycle sequences preflight,
+archive preparation, acquisition or authorized reuse, setup, sync or workspace
+preparation, command preparation, execution, retention, cleanup, and reporting.
+The adapters still own provider APIs, claim authorization and scope binding,
+operation locks, credential filtering, archive transport, and actual execution.
+It does not apply to delegated jobs, Blacksmith, or SSH leases.
+
+New sandbox runs prepare and check the archive before resource creation. Reused
+sandboxes are resolved and authorized first, then use the existing archive sync
+helper. `--no-sync` skips the archive and transfer but still prepares the workdir.
+`--sync-only` skips command preparation/execution and follows normal retention
+and cleanup rules. Modal now uses the shared staged workspace replacement when
+`sync.delete` is enabled, so failed upload or extraction does not first erase the
+previous workspace.
+
+New sandboxes are cleaned up unless `--keep` is set, or `--keep-on-failure` is
+set and pre-cleanup work fails. This includes setup, sync, command preparation,
+command execution, timeout, and cancellation failures. Reused sandboxes are
+never automatically deleted by a run. Failure before successful acquisition
+does not create a session handle or grant deletion authority: partial-create
+rollback stays in the adapter, including failures while establishing a claim.
+
+Each automatic sandbox cleanup is attempted once, with an uncanceled context
+bounded to 30 seconds (15 seconds for Cloudflare Sandbox). Provider command
+transport cleanup runs before sandbox deletion, including for retained
+sandboxes. Adapter operation locks remain held through finalization. E2B still
+verifies the exact live claim before deletion; Cloudflare still resolves and
+verifies reused claims under its operation lock. Cloudflare refreshes retained
+claim activity after failed setup/sync as well as command completion.
+
+The first failure determines the command exit code and normalized outcome.
+A nonzero user command exit is preserved if cleanup also fails; cleanup errors
+are added as diagnostics. Setup/sync errors retain their existing CLI error
+codes but are classified as provider failures, not user command exits. A
+transport failure returns code 1; its cancellation or deadline cause is retained
+for outcome classification. Cleanup failure after otherwise successful work
+returns code 1 with `errorKind=provider-error`. A failed deletion leaves the
+claim and `session.kept=true` so the cleanup command remains available.
+
+Timing JSON is emitted once after retention and cleanup, including early
+failures, and agrees with the returned exit code, status, error kind, and total
+duration. Total duration includes remote cleanup; command duration excludes
+command preparation and cleanup. An output-writer failure is returned without
+replacing an earlier failure or retrying cleanup; no successful timing emission
+can be guaranteed when the writer itself fails.
+
+These rules correct Modal's earlier omission of setup/sync failures from
+`--keep-on-failure`, E2B/Modal's warning-only cleanup failures, and timing records
+that could report success before cleanup or retained-claim bookkeeping failed.
+
 ## Unsupported SSH Features
 
 Delegated providers must reject SSH-only run features unless they implement an

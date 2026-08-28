@@ -34,6 +34,42 @@ crabbox ssh --provider daytona --id swift-crab
 crabbox stop --provider daytona swift-crab
 ```
 
+## Native snapshots and forks
+
+Direct Daytona leases support filesystem snapshots through `checkpoint`:
+
+```sh
+crabbox checkpoint create --provider daytona --id swift-crab \
+  --mode native --name after-install --no-reboot=false
+crabbox checkpoint inspect chk_<id> --verify
+crabbox checkpoint fork chk_<id> --slug snapshot-fork
+crabbox run --provider daytona --id snapshot-fork -- pnpm test
+crabbox checkpoint delete chk_<id>
+```
+
+Capture flushes and stops a running source, waits for the snapshot to become
+active, then restarts the source. A stopped source stays stopped. The default
+`--no-reboot=true` refuses to stop a running source; explicitly allow the
+interruption with `--no-reboot=false`. The snapshot barrier applies even with
+`--wait=false`, bounded by `--wait-timeout`. Memory and running processes are
+not captured. Forks start independent sandboxes and relocate the saved workspace
+into the new lease's workdir.
+
+The local `daytona-snapshot` record binds the exact snapshot ID, organization,
+API endpoint, and source sandbox. Provider names include the checkpoint ID to
+avoid collisions. Verify, fork, and delete reject identity or scope mismatches;
+deletion waits for provider-confirmed absence. A missing snapshot on the initial
+lookup does not authorize removal of the local record: use `--local-only` only
+after checking the account and endpoint. Failed or uncertain captures retain a
+recovery record when a snapshot may exist. If capture completion cannot be
+confirmed, Crabbox leaves the source stopped and reports the source and snapshot
+to inspect before restarting it.
+
+Native capture currently requires direct Daytona credentials; it is not exposed
+through the coordinator. Use `--mode native` (or an explicit strategy); default
+auto mode retains the existing workspace-archive behavior. Snapshots may contain
+credentials and other filesystem state and incur storage charges until deleted.
+
 ## Live Smoke
 
 The shared live-smoke harness can validate Daytona without a coordinator:
@@ -129,10 +165,15 @@ The non-auth settings can also be set through environment variables:
 `CRABBOX_DAYTONA_WORK_ROOT`, `CRABBOX_DAYTONA_SSH_GATEWAY_HOST`, and
 `CRABBOX_DAYTONA_SSH_ACCESS_MINUTES`.
 
-## Lifecycle
+## Direct lifecycle
 
 1. Create or resolve a Daytona sandbox from `daytona.snapshot`.
-2. Store Crabbox labels and a local repo claim for the lease.
+2. Create private previews, configure Daytona's native wall-clock TTL and idle
+   auto-stop interval, and store Crabbox labels and an exact local repo claim.
+   The adapter records allocation before waiting for readiness, so a failed
+   startup is rolled back. A lost create response is reconciled by the unique
+   sandbox name and verified ownership, without allocating again. Failed
+   cleanup retains a recovery claim and reports the exact sandbox and lease IDs.
 3. For `run`, build the Crabbox sync manifest, stream a gzipped tar archive to
    the Daytona toolbox upload endpoint, extract it in the sandbox, and execute
    the command through the Daytona process APIs. Remote process timeouts are
@@ -140,9 +181,29 @@ The non-auth settings can also be set through environment variables:
    capped at Daytona's maximum supported value; callers without a deadline use
    that maximum. Toolbox HTTP requests are canceled by their request context
    without an independent client-wide timeout.
+   Sync prunes only deleted manifest-owned source paths; dependencies, caches,
+   and other remote-only files survive ordinary resyncs. The next manifest is
+   published only after successful extraction. Active sync and execution
+   refresh Daytona activity at least every 30 seconds so quiet commands do not
+   trigger idle auto-stop.
 4. For `ssh`, request short-lived SSH access (TTL `daytona.sshAccessMinutes`),
    parse Daytona's `sshCommand`, and redact the token in normal output.
 5. Delete the sandbox on release unless the lease is kept.
+
+`--ttl` is a hard upper bound even while commands run or a lease is kept.
+Daytona lifetime settings use whole minutes, so positive durations are rounded
+up. Idle auto-stop preserves the sandbox filesystem; native TTL ultimately
+deletes the sandbox. `heartbeat --idle-timeout` changes the provider's auto-stop
+policy as well as Crabbox metadata. Status readiness comes from Daytona's live
+state, never a previously stored `ready` label. Explicit stop and rollback wait
+for confirmed provider deletion, with a bounded cleanup deadline.
+If `stop` cannot resolve the claimed sandbox, it returns the lookup error and
+preserves the local recovery claim. A missing sandbox in the current account or
+API endpoint does not prove deletion in the original scope, even after native TTL.
+
+API, toolbox, and archive-upload clients refuse redirects that change scheme,
+host, or effective port. Custom endpoints require HTTPS except for loopback
+development endpoints.
 
 ## Capabilities
 
@@ -156,6 +217,8 @@ The non-auth settings can also be set through environment variables:
   API key and rotates the lease's SSH token.
 - Broker readiness: read-only Daytona inventory plus explicit coordinator and
   SSH/rsync data-plane diagnostics; no sandbox is created.
+- Native checkpoint / fork / snapshot: yes, for direct Linux leases; filesystem
+  capture only. In-place native restore and memory capture are not supported.
 
 ## Gotchas
 

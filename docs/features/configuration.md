@@ -1233,3 +1233,11 @@ Related docs:
 - [Provider Reference](../providers/README.md)
 - [Capacity and fallback](capacity-fallback.md)
 - [Network and reachability](network.md)
+
+## Contributor wiring
+
+Vercel Sandbox is the pilot for generated mechanical config wiring. Its concrete
+Go config type is the single description for YAML, env, defaults, and flags;
+provider validation and credential policy remain explicit. See
+[Typed provider config](../refactor/typed-provider-config.md) for the design,
+preserved presence/precedence behavior, regeneration checks, and field recipe.

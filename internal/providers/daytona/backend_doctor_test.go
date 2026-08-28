@@ -39,6 +39,9 @@ func (a *fakeDaytonaDoctorAPI) StartSandbox(context.Context, string) (*apidayton
 func (a *fakeDaytonaDoctorAPI) DeleteSandbox(_ context.Context, id string) error {
 	a.mutated = true
 	a.deleted = append(a.deleted, id)
+	if sandbox := a.getSandboxes[id]; sandbox != nil {
+		sandbox.SetState(apidaytona.SANDBOXSTATE_DESTROYED)
+	}
 	return nil
 }
 
@@ -48,6 +51,11 @@ func (a *fakeDaytonaDoctorAPI) ReplaceLabels(context.Context, string, map[string
 }
 
 func (a *fakeDaytonaDoctorAPI) UpdateLastActivity(context.Context, string) error {
+	a.mutated = true
+	return nil
+}
+
+func (a *fakeDaytonaDoctorAPI) SetAutoStopInterval(context.Context, string, time.Duration) error {
 	a.mutated = true
 	return nil
 }
