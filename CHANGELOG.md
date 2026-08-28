@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added an experimental Boxd SSH-lease provider with interactive HTTPS login, immutable ownership claims, and safe rejection of the vendor's currently non-isolated production VMs. Thanks @MichielMAnalytics.
 - Added explicitly opt-in, image-pinned typed ready pools with exact repository/cache identities and rollback-isolated coordinator storage. Thanks @vincentkoc.
 - Added targeted `stop --force` recovery through verified provider adoption or exact coordinator lease inspection without weakening ownership checks.
 - Added replay-safe fixed lease IDs to checkpoint forks and machine-readable JSON output to checkpoint creation and forking.

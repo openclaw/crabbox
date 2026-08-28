@@ -175,6 +175,8 @@ type Config struct {
 	NamespaceInstance             NamespaceInstanceConfig
 	Phala                         PhalaConfig
 	phalaTypeExplicitOrder        uint64
+	Boxd                          BoxdConfig
+	boxdWorkRootExplicit          bool
 	Coder                         CoderConfig
 	Morph                         MorphConfig
 	Daytona                       DaytonaConfig
@@ -2738,6 +2740,14 @@ func MarkWorkRootExplicit(cfg *Config) {
 	cfg.explicitWorkRoot = cfg.WorkRoot
 }
 
+func IsBoxdWorkRootExplicit(cfg *Config) bool {
+	return cfg.boxdWorkRootExplicit
+}
+
+func MarkBoxdWorkRootExplicit(cfg *Config) {
+	cfg.boxdWorkRootExplicit = true
+}
+
 func IsSealosDevboxWorkRootExplicit(cfg *Config) bool {
 	return cfg != nil && cfg.sealosDevboxWorkRootExplicit
 }
@@ -3029,6 +3039,11 @@ func baseConfig() Config {
 			// The dstack --dev-os guest roots on a read-only squashfs; /work is not
 			// writable. /var/volatile is a writable tmpfs on every dstack guest.
 			WorkRoot: "/var/volatile/crabbox",
+		},
+		Boxd: BoxdConfig{
+			APIURL:          "https://app.boxd.sh",
+			WorkRoot:        "/home/boxd/crabbox",
+			DeleteOnRelease: true,
 		},
 		Coder: CoderConfig{
 			CLIPath:         "coder",
@@ -3454,6 +3469,7 @@ type fileConfig struct {
 	Namespace                *fileNamespaceConfig                `yaml:"namespace,omitempty"`
 	NamespaceInstance        *fileNamespaceInstanceConfig        `yaml:"namespaceInstance,omitempty"`
 	Phala                    *filePhalaConfig                    `yaml:"phala,omitempty"`
+	Boxd                     *fileBoxdConfig                     `yaml:"boxd,omitempty"`
 	Coder                    *fileCoderConfig                    `yaml:"coder,omitempty"`
 	Morph                    *fileMorphConfig                    `yaml:"morph,omitempty"`
 	Daytona                  *fileDaytonaConfig                  `yaml:"daytona,omitempty"`
@@ -3960,6 +3976,22 @@ type fileNamespaceInstanceConfig struct {
 	Volumes     []string `yaml:"volumes,omitempty"`
 	WorkRoot    string   `yaml:"workRoot,omitempty"`
 	Bare        *bool    `yaml:"bare,omitempty"`
+}
+
+// BoxdConfig contains non-secret HTTPS console routing and lease settings.
+// Interactive session tokens are read only from the environment by the provider.
+type BoxdConfig struct {
+	APIURL          string
+	Org             string // Empty selects the fixed personal account context.
+	WorkRoot        string
+	DeleteOnRelease bool
+}
+
+type fileBoxdConfig struct {
+	APIURL          string `yaml:"apiUrl,omitempty"`
+	Org             string `yaml:"org,omitempty"`
+	WorkRoot        string `yaml:"workRoot,omitempty"`
+	DeleteOnRelease *bool  `yaml:"deleteOnRelease,omitempty"`
 }
 
 type filePhalaConfig struct {
@@ -6429,6 +6461,25 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Phala.Attest = &value
 		}
 	}
+	if file.Boxd != nil {
+		// Only trusted config can redirect credentials or organization billing.
+		if trusted {
+			if file.Boxd.APIURL != "" {
+				cfg.Boxd.APIURL = file.Boxd.APIURL
+			}
+			if file.Boxd.Org != "" {
+				cfg.Boxd.Org = file.Boxd.Org
+			}
+		}
+		if file.Boxd.WorkRoot != "" {
+			cfg.Boxd.WorkRoot = file.Boxd.WorkRoot
+			MarkBoxdWorkRootExplicit(cfg)
+		}
+		if file.Boxd.DeleteOnRelease != nil {
+			cfg.Boxd.DeleteOnRelease = *file.Boxd.DeleteOnRelease
+			MarkDeleteOnReleaseExplicit(cfg, "boxd")
+		}
+	}
 	if file.Coder != nil {
 		if file.Coder.CLIPath != "" {
 			cfg.Coder.CLIPath = expandUserPath(file.Coder.CLIPath)
@@ -8843,6 +8894,20 @@ func applyEnv(cfg *Config) error {
 	if value := os.Getenv("CRABBOX_MORPH_API_URL"); value != "" {
 		cfg.Morph.APIURL = value
 		cfg.credentialProvenance.morphAPIURL = credentialSourceEnvironment
+	}
+	if value, ok := os.LookupEnv("CRABBOX_BOXD_API_URL"); ok {
+		cfg.Boxd.APIURL = value
+	}
+	if value, ok := os.LookupEnv("CRABBOX_BOXD_ORG"); ok {
+		cfg.Boxd.Org = value
+	}
+	if value := os.Getenv("CRABBOX_BOXD_WORK_ROOT"); value != "" {
+		cfg.Boxd.WorkRoot = value
+		MarkBoxdWorkRootExplicit(cfg)
+	}
+	if value, ok := getenvBool("CRABBOX_BOXD_DELETE_ON_RELEASE"); ok {
+		cfg.Boxd.DeleteOnRelease = value
+		MarkDeleteOnReleaseExplicit(cfg, "boxd")
 	}
 	cfg.Coder.CLIPath = expandUserPath(getenv("CRABBOX_CODER_CLI", cfg.Coder.CLIPath))
 	cfg.Coder.Template = getenv("CRABBOX_CODER_TEMPLATE", cfg.Coder.Template)
