@@ -15,11 +15,26 @@ func TestRemoveControllerFileRecoversDeterministicTombstone(t *testing.T) {
 	if err := os.WriteFile(tombstone, []byte("stale sensitive state"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	reader, err := openArtifactReadOnly(tombstone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
 	if err := removeControllerFile(path); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(tombstone); !os.IsNotExist(err) {
 		t.Fatalf("recovered tombstone still exists: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("new state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeControllerFile(path); err != nil {
+		t.Fatalf("reuse tombstone with recovered reader open: %v", err)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil || string(data) != "stale sensitive state" {
+		t.Fatalf("lost recovered tombstone snapshot: %q err=%v", data, err)
 	}
 }
 

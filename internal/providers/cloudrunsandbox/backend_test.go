@@ -201,64 +201,195 @@ func TestCloudRunSandboxCreateConflictRemovalPrecedesWaitingStop(t *testing.T) {
 	}
 }
 
-func TestCloudRunSandboxCleanupSerializesCreateInFlight(t *testing.T) {
-	isolateLeaseHome(t)
-	createStarted := make(chan struct{})
-	allowCreate := make(chan struct{})
-	var mu sync.Mutex
-	destroyed := false
-	transport := &fakeTransport{
-		mode: "remote",
-		onCreate: func(string) error {
-			close(createStarted)
-			<-allowCreate
-			return nil
-		},
-		onDestroy: func(string) error {
-			mu.Lock()
-			destroyed = true
-			mu.Unlock()
-			return nil
-		},
-	}
-	previousTransport := newTransport
-	newTransport = func(Config, Runtime) (sandboxTransport, error) { return transport, nil }
-	t.Cleanup(func() { newTransport = previousTransport })
-	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: defaultCLIPath, Workdir: defaultWorkdir},
-		IdleTimeout:     time.Nanosecond,
-	}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
-
-	createDone := make(chan error, 1)
-	repoRoot := t.TempDir()
-	go func() {
-		_, _, _, _, err := b.createSandbox(context.Background(), transport, Repo{Root: repoRoot}, false, "creating")
-		createDone <- err
-	}()
-	<-createStarted
-	cleanupDone := make(chan error, 1)
-	go func() { cleanupDone <- b.Cleanup(context.Background(), CleanupRequest{}) }()
-	select {
-	case err := <-cleanupDone:
-		t.Fatalf("cleanup bypassed the in-flight create lock: %v", err)
-	case <-time.After(100 * time.Millisecond):
-	}
-	close(allowCreate)
-	if err := <-createDone; err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	if err := <-cleanupDone; err != nil {
-		t.Fatalf("cleanup after create: %v", err)
-	}
-	claims, err := listCloudRunSandboxLeaseClaims()
-	if err != nil {
-		t.Fatal(err)
-	}
-	mu.Lock()
-	wasDestroyed := destroyed
-	mu.Unlock()
-	if len(claims) == 0 && !wasDestroyed {
-		t.Fatal("cleanup removed the claim without destroying the completed sandbox")
+func TestCloudRunSandboxCleanupSkipsInFlightThenDeletesIdle(t *testing.T) {
+	for _, state := range []string{"creating", "running"} {
+		t.Run(state, func(t *testing.T) {
+			isolateLeaseHome(t)
+			// Idle has elapsed on the provider clock; only activity should prevent cleanup.
+			now := time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
+			started := make(chan string, 1)
+			allowAction := make(chan struct{})
+			release := sync.OnceFunc(func() { close(allowAction) })
+			gate := func(id string) {
+				started <- id
+				<-allowAction
+			}
+			var owner string
+			var destroys [][2]string
+			transport := &fakeTransport{
+				mode: "remote",
+				onCreate: func(id string) error {
+					owner = id
+					if state == "creating" {
+						gate(id)
+					}
+					return nil
+				},
+				onExec: func(id, command string) (int, string, string, error) {
+					if strings.Contains(command, "active") {
+						gate(id)
+					}
+					return 0, "", "", nil
+				},
+				onDestroyOwned: func(id, token string) error {
+					destroys = append(destroys, [2]string{id, token})
+					if id != owner || token != owner {
+						return errors.New("destroy did not match remote ownership")
+					}
+					owner = ""
+					return nil
+				},
+			}
+			previousTransport := newTransport
+			newTransport = func(Config, Runtime) (sandboxTransport, error) { return transport, nil }
+			t.Cleanup(func() { newTransport = previousTransport })
+			b := NewBackend(Provider{}.Spec(), Config{
+				CloudRunSandbox: CloudRunSandboxConfig{CLIPath: defaultCLIPath, Workdir: defaultWorkdir},
+				IdleTimeout:     time.Second,
+			}, Runtime{Clock: cloudRunSandboxFixedClock{now: now}, Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+			repo := Repo{Root: t.TempDir()}
+			action := func() error {
+				_, _, _, _, err := b.createSandbox(context.Background(), transport, repo, false, state)
+				return err
+			}
+			if state == "running" {
+				leaseID, _, _, _, err := b.createSandbox(context.Background(), transport, repo, false, state)
+				if err != nil {
+					t.Fatal(err)
+				}
+				action = func() error {
+					result, err := b.Run(context.Background(), RunRequest{
+						ID: leaseID, Repo: repo, Command: []string{"echo", "active"}, NoSync: true,
+					})
+					if err == nil && (result.Session == nil || !result.Session.Reused || !result.Session.Kept) {
+						return errors.New("run did not retain the reused sandbox")
+					}
+					return err
+				}
+			}
+			wait := func(done <-chan struct{}, name string) bool {
+				t.Helper()
+				select {
+				case <-done:
+					return true
+				case <-time.After(5 * time.Second):
+					t.Errorf("timed out waiting for %s", name)
+					return false
+				}
+			}
+			actionDone := make(chan struct{})
+			var cleanupDone chan struct{}
+			// Release and join before restoring the transport or isolated claim home,
+			// including when an assertion fails while the provider action is gated.
+			defer func() {
+				release()
+				wait(actionDone, "provider action")
+				if cleanupDone != nil {
+					wait(cleanupDone, "cleanup")
+				}
+			}()
+			var actionErr error
+			go func() {
+				defer close(actionDone)
+				actionErr = action()
+			}()
+			var sandboxID string
+			select {
+			case sandboxID = <-started:
+			case <-actionDone:
+				t.Fatalf("action ended before provider gate: %v", actionErr)
+			case <-time.After(5 * time.Second):
+				t.Fatal("provider action did not reach gate")
+			}
+			leaseID := leasePrefix + sandboxID
+			claimPath := filepath.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "claims", leaseID+".json")
+			before, err := os.ReadFile(claimPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var snapshot LeaseClaim
+			if err := json.Unmarshal(before, &snapshot); err != nil {
+				t.Fatal(err)
+			}
+			if snapshot.Revision == "" || snapshot.Labels[claimStateLabel] != state || snapshot.Labels[claimOwnershipLabel] != sandboxID || snapshot.IdleTimeoutSeconds != 1 {
+				t.Fatalf("in-flight claim=%#v", snapshot)
+			}
+			assertPreserved := func() {
+				t.Helper()
+				after, err := os.ReadFile(claimPath)
+				if err != nil || !bytes.Equal(before, after) {
+					t.Fatalf("cleanup changed claim bytes/revision: %v", err)
+				}
+				if len(destroys) != 0 || owner != sandboxID {
+					t.Fatalf("cleanup changed remote ownership: owner=%q destroys=%v", owner, destroys)
+				}
+			}
+			var stdout, stderr bytes.Buffer
+			cleanup := *b
+			cleanup.rt.Stdout, cleanup.rt.Stderr = &stdout, &stderr
+			cleanupDone = make(chan struct{})
+			var cleanupErr error
+			go func() {
+				defer close(cleanupDone)
+				cleanupErr = cleanup.Cleanup(context.Background(), CleanupRequest{})
+			}()
+			if !wait(cleanupDone, "in-flight cleanup without releasing provider action") {
+				t.FailNow()
+			}
+			if cleanupErr != nil || !strings.Contains(stderr.String(), "skip sandbox="+sandboxID+" lease="+leaseID+" reason=in-flight-"+state+"\n") {
+				t.Fatalf("cleanup err=%v stderr=%q", cleanupErr, stderr.String())
+			}
+			if stdout.String() != providerName+" cleanup removed=0 claims_removed=0 checked=1\n" {
+				t.Fatalf("cleanup stdout=%q", stdout.String())
+			}
+			assertPreserved()
+			release()
+			if !wait(actionDone, "completed provider action") {
+				t.FailNow()
+			}
+			if actionErr != nil {
+				t.Fatal(actionErr)
+			}
+			completed, err := readLeaseClaim(leaseID)
+			if err != nil || completed.Revision == snapshot.Revision || completed.Labels[claimStateLabel] != "" || completed.Labels[claimActiveUntilLabel] != "" {
+				t.Fatalf("completed claim=%#v err=%v", completed, err)
+			}
+			lastUsed, err := time.Parse(time.RFC3339, completed.LastUsedAt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, err = os.ReadFile(claimPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, idleExpired := range []bool{false, true} {
+				cleanupNow := lastUsed
+				if idleExpired {
+					cleanupNow = cleanupNow.Add(2 * time.Second)
+				}
+				cleanup.rt.Clock = cloudRunSandboxFixedClock{now: cleanupNow}
+				stdout.Reset()
+				stderr.Reset()
+				if err := cleanup.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+					t.Fatal(err)
+				}
+				if !idleExpired {
+					if !strings.Contains(stderr.String(), "reason=idle-timeout-remaining\n") {
+						t.Fatalf("fresh claim cleanup stderr=%q", stderr.String())
+					}
+					assertPreserved()
+				}
+			}
+			if !strings.Contains(stdout.String(), "delete sandbox="+sandboxID+" lease="+leaseID+" reason=idle-timeout-expired\n") {
+				t.Fatalf("expired cleanup stdout=%q", stdout.String())
+			}
+			if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists {
+				t.Fatalf("deleted claim exists=%v err=%v", exists, err)
+			}
+			if owner != "" || len(destroys) != 1 || destroys[0] != [2]string{sandboxID, snapshot.Labels[claimOwnershipLabel]} {
+				t.Fatalf("expired cleanup owner=%q destroys=%v", owner, destroys)
+			}
+		})
 	}
 }
 
@@ -390,78 +521,6 @@ func TestCloudRunSandboxCreatePersistsTTL(t *testing.T) {
 	}
 	if due, reason := claimCleanupDue(claim, expires); !due || reason != "ttl-expired" {
 		t.Fatalf("at ttl due=%v reason=%s", due, reason)
-	}
-}
-
-func TestCloudRunSandboxCleanupSerializesActiveRun(t *testing.T) {
-	isolateLeaseHome(t)
-	runStarted := make(chan struct{})
-	allowRun := make(chan struct{})
-	var mu sync.Mutex
-	destroyed := false
-	transport := &fakeTransport{
-		mode: "direct",
-		onExec: func(_ string, command string) (int, string, string, error) {
-			if strings.Contains(command, "active") {
-				close(runStarted)
-				<-allowRun
-			}
-			return 0, "", "", nil
-		},
-		onDestroy: func(string) error {
-			mu.Lock()
-			destroyed = true
-			mu.Unlock()
-			return nil
-		},
-	}
-	previousTransport := newTransport
-	newTransport = func(Config, Runtime) (sandboxTransport, error) { return transport, nil }
-	t.Cleanup(func() { newTransport = previousTransport })
-	repoRoot := t.TempDir()
-	b := NewBackend(Provider{}.Spec(), Config{
-		CloudRunSandbox: CloudRunSandboxConfig{CLIPath: defaultCLIPath, Workdir: defaultWorkdir},
-		IdleTimeout:     time.Nanosecond,
-	}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
-	leaseID, _, _, _, err := b.createSandbox(context.Background(), transport, Repo{Root: repoRoot}, false, "active")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	runDone := make(chan error, 1)
-	go func() {
-		_, runErr := b.Run(context.Background(), RunRequest{
-			ID:      leaseID,
-			Repo:    Repo{Root: repoRoot},
-			Command: []string{"echo", "active"},
-			NoSync:  true,
-		})
-		runDone <- runErr
-	}()
-	<-runStarted
-	cleanupDone := make(chan error, 1)
-	go func() { cleanupDone <- b.Cleanup(context.Background(), CleanupRequest{}) }()
-	select {
-	case err := <-cleanupDone:
-		t.Fatalf("cleanup bypassed the active-run claim lock: %v", err)
-	case <-time.After(100 * time.Millisecond):
-	}
-	close(allowRun)
-	if err := <-runDone; err != nil {
-		t.Fatalf("run: %v", err)
-	}
-	if err := <-cleanupDone; err != nil {
-		t.Fatalf("cleanup after run: %v", err)
-	}
-	claims, err := listCloudRunSandboxLeaseClaims()
-	if err != nil {
-		t.Fatal(err)
-	}
-	mu.Lock()
-	wasDestroyed := destroyed
-	mu.Unlock()
-	if len(claims) == 0 && !wasDestroyed {
-		t.Fatal("cleanup removed the claim without destroying the completed sandbox")
 	}
 }
 
