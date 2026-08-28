@@ -387,6 +387,12 @@ type NativeCheckpointProvider interface {
 	NativeCheckpointCapability(req NativeCheckpointRequest) (NativeCheckpointCapability, bool)
 }
 
+// NativeCheckpointSourcePolicyProvider lets API-native capture resolve a source
+// without starting it or minting transport credentials before stop consent.
+type NativeCheckpointSourcePolicyProvider interface {
+	NativeCheckpointSourceStatusOnly(Config) bool
+}
+
 type NativeCheckpointImage struct {
 	ID           string
 	Name         string

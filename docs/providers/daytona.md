@@ -34,6 +34,42 @@ crabbox ssh --provider daytona --id swift-crab
 crabbox stop --provider daytona swift-crab
 ```
 
+## Native snapshots and forks
+
+Direct Daytona leases support filesystem snapshots through `checkpoint`:
+
+```sh
+crabbox checkpoint create --provider daytona --id swift-crab \
+  --mode native --name after-install --no-reboot=false
+crabbox checkpoint inspect chk_<id> --verify
+crabbox checkpoint fork chk_<id> --slug snapshot-fork
+crabbox run --provider daytona --id snapshot-fork -- pnpm test
+crabbox checkpoint delete chk_<id>
+```
+
+Capture flushes and stops a running source, waits for the snapshot to become
+active, then restarts the source. A stopped source stays stopped. The default
+`--no-reboot=true` refuses to stop a running source; explicitly allow the
+interruption with `--no-reboot=false`. The snapshot barrier applies even with
+`--wait=false`, bounded by `--wait-timeout`. Memory and running processes are
+not captured. Forks start independent sandboxes and relocate the saved workspace
+into the new lease's workdir.
+
+The local `daytona-snapshot` record binds the exact snapshot ID, organization,
+API endpoint, and source sandbox. Provider names include the checkpoint ID to
+avoid collisions. Verify, fork, and delete reject identity or scope mismatches;
+deletion waits for provider-confirmed absence. A missing snapshot on the initial
+lookup does not authorize removal of the local record: use `--local-only` only
+after checking the account and endpoint. Failed or uncertain captures retain a
+recovery record when a snapshot may exist. If capture completion cannot be
+confirmed, Crabbox leaves the source stopped and reports the source and snapshot
+to inspect before restarting it.
+
+Native capture currently requires direct Daytona credentials; it is not exposed
+through the coordinator. Use `--mode native` (or an explicit strategy); default
+auto mode retains the existing workspace-archive behavior. Snapshots may contain
+credentials and other filesystem state and incur storage charges until deleted.
+
 ## Live Smoke
 
 The shared live-smoke harness can validate Daytona without a coordinator:
@@ -181,6 +217,8 @@ development endpoints.
   API key and rotates the lease's SSH token.
 - Broker readiness: read-only Daytona inventory plus explicit coordinator and
   SSH/rsync data-plane diagnostics; no sandbox is created.
+- Native checkpoint / fork / snapshot: yes, for direct Linux leases; filesystem
+  capture only. In-place native restore and memory capture are not supported.
 
 ## Gotchas
 

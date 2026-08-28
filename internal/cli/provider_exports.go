@@ -678,6 +678,7 @@ const (
 	CheckpointKindMachine0         = checkpointKindMachine0
 	CheckpointKindParallels        = checkpointKindParallels
 	CheckpointKindDockerCommit     = checkpointKindDockerCommit
+	CheckpointKindDaytona          = checkpointKindDaytona
 	CheckpointStrategyImage        = checkpointStrategyImage
 	CheckpointStrategyDiskSnapshot = checkpointStrategyDiskSnapshot
 )

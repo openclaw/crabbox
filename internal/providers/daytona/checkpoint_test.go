@@ -1,0 +1,328 @@
+package daytona
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	api "github.com/daytonaio/daytona/libs/api-client-go"
+	core "github.com/openclaw/crabbox/internal/cli"
+)
+
+type snapshotFixture struct {
+	*daytonaLifecycleFixture
+	snapshot                                 *api.SnapshotDto
+	creates, starts, stops, removes, reads   int
+	lostResponse, failSnapshot, neverVisible bool
+	rejectCreate                             bool
+	transientReadFailure, replaceInRecovery  bool
+	request                                  core.NativeCheckpointCreateRequest
+}
+
+func newSnapshotFixture(t *testing.T) *snapshotFixture {
+	t.Helper()
+	f, b, repo := newDaytonaLifecycleFixture(t)
+	sandbox, leaseID, _, err := b.createDaytonaToolboxSandbox(t.Context(), repo, true, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.sandbox.SetOrganizationId("org-test")
+	f.sandbox.SetUser("daytona")
+	s := &snapshotFixture{daytonaLifecycleFixture: f, request: core.NativeCheckpointCreateRequest{Config: b.cfg, Server: core.Server{Provider: daytonaProvider, CloudID: sandbox.ID}, LeaseID: leaseID, CheckpointID: "chk_0123456789abcdef", RepoName: repo.Name, WaitTimeout: time.Second, Stderr: io.Discard}}
+	oldInterval, oldRecovery := checkpointPollInterval, checkpointRecoveryTimeout
+	checkpointPollInterval, checkpointRecoveryTimeout = time.Millisecond, 25*time.Millisecond
+	t.Cleanup(func() { checkpointPollInterval, checkpointRecoveryTimeout = oldInterval, oldRecovery })
+	original := f.server.Config.Handler
+	f.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/process/execute"):
+			_, _ = io.WriteString(w, `{"result":"","exitCode":0}`)
+		case r.URL.Path == "/sandbox/sandbox-test/stop":
+			s.stops++
+			f.sandbox.SetState(api.SANDBOXSTATE_STOPPED)
+			_ = json.NewEncoder(w).Encode(f.sandbox)
+		case r.URL.Path == "/sandbox/sandbox-test/start":
+			s.starts++
+			if s.snapshot != nil && s.snapshot.GetState() != api.SNAPSHOTSTATE_ACTIVE && !daytonaSnapshotFailed(s.snapshot.GetState()) {
+				t.Error("restarted before snapshot completed")
+			}
+			f.sandbox.SetState(api.SANDBOXSTATE_STARTED)
+			_ = json.NewEncoder(w).Encode(f.sandbox)
+		case r.URL.Path == "/sandbox/sandbox-test/snapshot":
+			s.creates++
+			if s.rejectCreate {
+				w.WriteHeader(403)
+				_, _ = io.WriteString(w, `{"message":"snapshot permission denied"}`)
+				return
+			}
+			var body api.CreateSandboxSnapshot
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Error(err)
+			}
+			if body.GetIncludeMemory() {
+				t.Error("unexpected memory snapshot")
+			}
+			if f.sandbox.GetState() != api.SANDBOXSTATE_STOPPED {
+				t.Error("snapshot source must be stopped")
+			}
+			s.snapshot = &api.SnapshotDto{Id: "snapshot-exact-id", Name: body.Name, State: api.SNAPSHOTSTATE_PENDING, Entrypoint: []string{}}
+			s.snapshot.SetOrganizationId("org-test")
+			if s.lostResponse {
+				w.WriteHeader(502)
+				_, _ = io.WriteString(w, `{"message":"response lost"}`)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(f.sandbox)
+		case strings.HasPrefix(r.URL.Path, "/snapshots/"):
+			if s.snapshot == nil || s.neverVisible {
+				w.WriteHeader(404)
+				_, _ = io.WriteString(w, `{"message":"not found"}`)
+				return
+			}
+			if r.Method == "DELETE" {
+				if r.URL.Path != "/snapshots/snapshot-exact-id" {
+					t.Error("deletion must use exact ID")
+				}
+				s.removes++
+				s.snapshot = nil
+				w.WriteHeader(204)
+				return
+			}
+			s.reads++
+			if s.reads == 3 && s.transientReadFailure {
+				w.WriteHeader(503)
+				_, _ = io.WriteString(w, `{"message":"transient read failure"}`)
+				return
+			}
+			if s.reads > 3 && s.replaceInRecovery {
+				s.snapshot.SetId("replacement-snapshot")
+			}
+			if s.reads == 1 {
+				w.WriteHeader(404)
+				_, _ = io.WriteString(w, `{"message":"not visible yet"}`)
+				return
+			}
+			if s.reads > 2 {
+				s.snapshot.SetState(api.SNAPSHOTSTATE_ACTIVE)
+				if s.failSnapshot {
+					s.snapshot.SetState(api.SNAPSHOTSTATE_ERROR)
+				}
+			}
+			_ = json.NewEncoder(w).Encode(s.snapshot)
+		default:
+			original.ServeHTTP(w, r)
+		}
+	})
+	return s
+}
+
+func TestDaytonaSnapshotRequiresStopConsentAndOwnership(t *testing.T) {
+	for _, test := range []string{"no-reboot", "claim", "labels", "organization", "broker", "name"} {
+		t.Run(test, func(t *testing.T) {
+			f := newSnapshotFixture(t)
+			req := f.request
+			switch test {
+			case "no-reboot":
+				req.NoReboot = true
+			case "claim":
+				core.RemoveLeaseClaim(req.LeaseID)
+			case "labels":
+				f.sandbox.Labels["lease"] = "cbx_aaaaaaaaaaaa"
+			case "organization":
+				f.sandbox.SetOrganizationId("")
+			case "broker":
+				req.Config.Coordinator = "https://broker.example"
+			case "name":
+				req.Name = "../invalid"
+			}
+			if _, err := (Provider{}).CreateNativeCheckpoint(t.Context(), req); err == nil {
+				t.Fatal("expected refusal")
+			}
+			if f.stops+f.creates+f.starts != 0 {
+				t.Fatal("refusal mutated provider")
+			}
+		})
+	}
+}
+
+func TestDaytonaSnapshotLifecycleWaitsEvenWithoutWaitFlag(t *testing.T) {
+	for _, stopped := range []bool{false, true} {
+		t.Run(map[bool]string{false: "running", true: "stopped"}[stopped], func(t *testing.T) {
+			f := newSnapshotFixture(t)
+			if stopped {
+				f.sandbox.SetState(api.SANDBOXSTATE_STOPPED)
+			}
+			result, err := (Provider{}).CreateNativeCheckpoint(t.Context(), f.request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Image.ID != "snapshot-exact-id" || result.Image.State != "active" || result.Metadata["snapshot_id"] != result.Image.ID {
+				t.Fatalf("result=%+v", result)
+			}
+			if f.creates != 1 || f.reads < 3 {
+				t.Fatal("snapshot not captured and waited")
+			}
+			if stopped && (f.starts != 0 || f.stops != 0) || !stopped && (f.starts != 1 || f.stops != 1) {
+				t.Fatal("source state not preserved")
+			}
+			resource := core.NativeCheckpointResourceRequest{Config: f.request.Config, Image: result.Image, Metadata: result.Metadata}
+			verified, err := (Provider{}).VerifyNativeCheckpoint(t.Context(), resource)
+			if err != nil || verified.NextAction != "fork_or_delete" {
+				t.Fatalf("verify=%+v err=%v", verified, err)
+			}
+			cfg := f.request.Config
+			err = (Provider{}).ApplyNativeCheckpointForkConfig(core.NativeCheckpointForkRequest{Config: &cfg, Record: core.NativeCheckpointForkRecord{Kind: result.Image.Kind, ImageID: result.Image.ID, Name: result.Image.Name, Direct: true, Metadata: result.Metadata}})
+			if err != nil || cfg.Daytona.Snapshot != result.Image.ID || cfg.WorkRoot != f.request.Config.Daytona.WorkRoot {
+				t.Fatalf("fork err=%v snapshot=%s workRoot=%s", err, cfg.Daytona.Snapshot, cfg.WorkRoot)
+			}
+			if err := (Provider{}).DeleteNativeCheckpoint(t.Context(), resource); err != nil {
+				t.Fatal(err)
+			}
+			if f.removes != 1 {
+				t.Fatal("snapshot not deleted")
+			}
+		})
+	}
+}
+
+func TestDaytonaSnapshotFailureRetainsIdentityAndRestoresSource(t *testing.T) {
+	for _, failure := range []string{"lost-response", "snapshot-error", "unconfirmed"} {
+		t.Run(failure, func(t *testing.T) {
+			f := newSnapshotFixture(t)
+			f.lostResponse = failure == "lost-response"
+			f.failSnapshot = failure == "snapshot-error"
+			f.neverVisible = failure == "unconfirmed"
+			f.request.WaitTimeout = 30 * time.Millisecond
+			result, err := (Provider{}).CreateNativeCheckpoint(t.Context(), f.request)
+			if err == nil || result.Image.ID == "" || result.Metadata["source"] == "" {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+			if f.creates != 1 {
+				t.Fatal("allocation was retried")
+			}
+			if failure == "unconfirmed" {
+				if f.starts != 0 || !strings.Contains(err.Error(), "left stopped") {
+					t.Fatalf("unsafe restart: %v", err)
+				}
+			} else if f.starts != 1 || result.Image.ID != "snapshot-exact-id" {
+				t.Fatalf("source not restored or identity lost: %+v %v", result, err)
+			}
+		})
+	}
+}
+
+func TestDaytonaSnapshotDeletionRejectsIdentityAndScopeDrift(t *testing.T) {
+	for _, drift := range []string{"api", "organization", "id", "name", "general", "missing", "unconfirmed"} {
+		t.Run(drift, func(t *testing.T) {
+			f := newSnapshotFixture(t)
+			result, err := (Provider{}).CreateNativeCheckpoint(t.Context(), f.request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resource := core.NativeCheckpointResourceRequest{Config: f.request.Config, Image: result.Image, Metadata: result.Metadata}
+			switch drift {
+			case "api":
+				resource.Metadata["api_url"] = "https://other.example/api"
+			case "organization":
+				f.snapshot.SetOrganizationId("other-org")
+			case "id":
+				f.snapshot.SetId("replacement")
+			case "name":
+				f.snapshot.SetName("replacement")
+			case "general":
+				f.snapshot.SetGeneral(true)
+			case "missing":
+				f.snapshot = nil
+			case "unconfirmed":
+				delete(resource.Metadata, "snapshot_id")
+			}
+			if err := (Provider{}).DeleteNativeCheckpoint(t.Context(), resource); err == nil {
+				t.Fatal("expected refusal")
+			}
+			if f.removes != 0 {
+				t.Fatal("deleted mismatched snapshot")
+			}
+		})
+	}
+}
+
+func TestDaytonaSnapshotRejectedRequestRestartsWithoutWaitingForMissingSnapshot(t *testing.T) {
+	f := newSnapshotFixture(t)
+	f.rejectCreate = true
+	result, err := (Provider{}).CreateNativeCheckpoint(t.Context(), f.request)
+	if err == nil || result.Image.ID != "" || f.starts != 1 || f.creates != 1 {
+		t.Fatalf("result=%+v err=%v starts=%d creates=%d", result, err, f.starts, f.creates)
+	}
+}
+
+func TestDaytonaCheckpointCLILeavesStoppedSourceStopped(t *testing.T) {
+	f := newSnapshotFixture(t)
+	f.sandbox.SetState(api.SANDBOXSTATE_STOPPED)
+	claim, _, err := resolveLeaseClaimForProvider(f.request.LeaseID, daytonaProvider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(claim.RepoRoot)
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	config := fmt.Sprintf("provider: daytona\ntarget: linux\ndaytona:\n  apiUrl: %s\n  apiKey: test-credential\n", f.server.URL)
+	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_DAYTONA_API_KEY", "test-credential")
+	var stdout, stderr bytes.Buffer
+	app := core.App{Stdout: &stdout, Stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"checkpoint", "create", "--provider", "daytona", "--id", f.request.LeaseID, "--mode", "native", "--json", "--reclaim"}); err != nil {
+		t.Fatalf("create: %v %s", err, stderr.String())
+	}
+	var record struct{ ID, Kind string }
+	if err := json.Unmarshal(stdout.Bytes(), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.Kind != core.CheckpointKindDaytona || record.ID == "" || f.starts != 0 || f.stops != 0 {
+		t.Fatalf("record=%+v starts=%d stops=%d", record, f.starts, f.stops)
+	}
+	stdout.Reset()
+	if err := app.Run(t.Context(), []string{"checkpoint", "inspect", record.ID, "--verify", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), `"providerState":"active"`) {
+		t.Fatal(stdout.String())
+	}
+	if err := app.Run(t.Context(), []string{"checkpoint", "delete", record.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if f.removes != 1 {
+		t.Fatal("snapshot not deleted through CLI")
+	}
+}
+
+func TestDaytonaSnapshotRecoveryPreservesIdentityAndHandlesTerminalFailure(t *testing.T) {
+	for _, replacement := range []bool{false, true} {
+		t.Run(map[bool]string{false: "terminal failure", true: "replacement"}[replacement], func(t *testing.T) {
+			f := newSnapshotFixture(t)
+			f.transientReadFailure = true
+			f.replaceInRecovery = replacement
+			f.failSnapshot = !replacement
+			result, err := (Provider{}).CreateNativeCheckpoint(t.Context(), f.request)
+			if err == nil || result.Image.ID != "snapshot-exact-id" || result.Metadata["snapshot_id"] != "snapshot-exact-id" {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+			if replacement {
+				if f.starts != 0 || !strings.Contains(err.Error(), "identity changed") {
+					t.Fatalf("replacement authorized restart or escaped detection: starts=%d err=%v", f.starts, err)
+				}
+			} else if f.starts != 1 || result.Image.State != "error" || !strings.Contains(err.Error(), "state=error") {
+				t.Fatalf("terminal recovery failure did not restore source: starts=%d result=%+v err=%v", f.starts, result, err)
+			}
+		})
+	}
+}

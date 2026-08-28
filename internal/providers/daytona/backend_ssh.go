@@ -127,6 +127,9 @@ func (b *daytonaLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (
 		return LeaseTarget{}, err
 	}
 	server := daytonaSandboxToServer(sandbox, b.cfg)
+	if req.StatusOnly {
+		server.Labels["state"] = server.Status
+	}
 	if req.Reclaim && !req.NoLocalStateMutations {
 		if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), b.cfg, server, SSHTarget{}, req.Repo.Root, b.cfg.IdleTimeout, true); err != nil {
 			return LeaseTarget{}, err
@@ -141,7 +144,6 @@ func (b *daytonaLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (
 		}
 	}
 	if req.StatusOnly {
-		server.Labels["state"] = server.Status
 		return LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
 	if !daytonaStateReady(daytonaSandboxState(sandbox)) {

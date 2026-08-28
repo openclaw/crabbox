@@ -165,6 +165,13 @@ persist an SSH endpoint beyond the rotating credential.
 
 ## Snapshot bootstrap administration
 
+For snapshots of an existing direct lease, use `crabbox checkpoint create
+--provider daytona --id <lease> --mode native --no-reboot=false`, then
+`checkpoint fork`, `inspect --verify`, and `delete`. See
+[Native snapshots and forks](../providers/daytona.md#native-snapshots-and-forks)
+for the stop/restart contract and cleanup. The administration endpoint below is
+the separate coordinator workflow for bootstrapping shared base snapshots.
+
 The coordinator exposes `POST /v1/admin/providers/daytona/snapshot-bootstrap`
 for creating a reusable Daytona snapshot without giving clients Daytona
 credentials. The request requires coordinator admin authentication and an
