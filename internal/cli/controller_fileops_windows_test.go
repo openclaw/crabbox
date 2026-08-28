@@ -73,6 +73,26 @@ func TestConfirmedAbsentStateCleanupRecoversControllerTombstones(t *testing.T) {
 		if _, err := os.Stat(path + ".deleted"); !os.IsNotExist(err) {
 			t.Fatalf("routing tombstone remains: %v", err)
 		}
+
+		cfg := ExternalConfig{Command: "provider-adapter", WorkRoot: "/work/crabbox"}
+		if _, err := PersistExternalRouting(leaseID, cfg); err != nil {
+			t.Fatalf("persist routing after tombstone recovery: %v", err)
+		}
+		loaded, err := LoadExternalRouting(path)
+		if err != nil {
+			t.Fatalf("load routing after tombstone recovery: %v", err)
+		}
+		if loaded.Command != cfg.Command || loaded.WorkRoot != cfg.WorkRoot {
+			t.Fatalf("routing roundtrip changed config: %#v", loaded)
+		}
+		if err := RemoveExternalRoutingIfUnchanged(leaseID, loaded); err != nil {
+			t.Fatalf("remove routing after tombstone recovery: %v", err)
+		}
+		for _, candidate := range []string{path, path + ".deleted"} {
+			if _, err := os.Stat(candidate); !os.IsNotExist(err) {
+				t.Fatalf("routing cleanup left %s: %v", candidate, err)
+			}
+		}
 	})
 
 	t.Run("lease claim", func(t *testing.T) {

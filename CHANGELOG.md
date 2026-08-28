@@ -10,6 +10,7 @@
 - Disabled automatic host clipboard and audio passthrough for Tart VMs.
 - Prevented active lease operations from blocking unrelated claim discovery, slug allocation, and Testbox runs while preserving exact ownership checks and cleanup fencing.
 - Made native Windows state replacement and cleanup preserve open readers; the CLI now requires Windows 10 version 1709+ or Windows Server 2019+.
+- Kept Windows external routing state readable after publication by creating it with current-user ownership and private ACLs.
 
 ## 0.47.0 - 2026-08-28
 
