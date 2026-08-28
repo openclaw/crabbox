@@ -435,9 +435,10 @@ type NativeCheckpointWorkdirRequest struct {
 }
 
 type NativeCheckpointResourceRequest struct {
-	Config   Config
-	Image    NativeCheckpointImage
-	Metadata map[string]string
+	// LoadConfig is required only when the provider needs current CLI settings.
+	LoadConfig func() (Config, error)
+	Image      NativeCheckpointImage
+	Metadata   map[string]string
 }
 
 type NativeCheckpointVerifyResult struct {

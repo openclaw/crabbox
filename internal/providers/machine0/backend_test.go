@@ -1961,7 +1961,6 @@ func TestCheckpointImageRequiresExactVersionAndRemoteOwnershipMetadata(t *testin
 	}}
 	b := testBackendWithAPI(api)
 	req := core.NativeCheckpointResourceRequest{
-		Config:   b.cfg,
 		Image:    core.NativeCheckpointImage{Provider: providerName, Kind: core.CheckpointKindMachine0, Direct: true, ResourceID: "img-1"},
 		Metadata: map[string]string{metadataImageName: "baseline", metadataImageID: "img-1", metadataImageVersion: "2", metadataSourceMachine: "vm-123", "crabbox_checkpoint": "chk_123", "crabbox_lease": "cbx_123"},
 	}
@@ -1986,8 +1985,7 @@ func TestWholeImageCheckpointDeleteRefusesUnrelatedLaterVersions(t *testing.T) {
 	}}
 	b := testBackendWithAPI(api)
 	req := core.NativeCheckpointResourceRequest{
-		Config: b.cfg,
-		Image:  core.NativeCheckpointImage{Provider: providerName, Kind: core.CheckpointKindMachine0, Direct: true, ResourceID: "img-1"},
+		Image: core.NativeCheckpointImage{Provider: providerName, Kind: core.CheckpointKindMachine0, Direct: true, ResourceID: "img-1"},
 		Metadata: map[string]string{
 			metadataImageName: "baseline", metadataImageID: "img-1", metadataImageVersion: "1", metadataCreatedImage: "true", metadataSourceMachine: "vm-123", "crabbox_checkpoint": "chk_123", "crabbox_lease": "cbx_123",
 		},

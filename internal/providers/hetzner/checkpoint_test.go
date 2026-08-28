@@ -1,10 +1,14 @@
 package hetzner
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -12,6 +16,98 @@ import (
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func TestHetznerCheckpointCLIWithMalformedUnrelatedConfig(t *testing.T) {
+	for _, operation := range []string{"delete", "prune", "image-delete"} {
+		for _, outcome := range []string{"owned", "wrong-owner", "read-failure", "delete-failure"} {
+			t.Run(operation+"/"+outcome, func(t *testing.T) {
+				installHetznerClaimState(t)
+				t.Chdir(t.TempDir())
+				if err := os.WriteFile(os.Getenv("CRABBOX_CONFIG"), []byte("machine0: [\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				image := ownedCheckpointImage()
+				client := &fakeHetznerSnapshotClient{created: image}
+				wantError := ""
+				switch outcome {
+				case "wrong-owner":
+					image.Labels["lease"] = "cbx_other123456"
+					wantError = "mismatched lease label"
+				case "read-failure":
+					client.getImageErr = errors.New("fixture lookup uncertain")
+					wantError = "fixture lookup uncertain"
+				case "delete-failure":
+					client.deleteErr = errors.New("fixture deletion uncertain")
+					wantError = "fixture deletion uncertain"
+				}
+				installHetznerCheckpointHooks(t, client)
+				metaPath := filepath.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "checkpoints", "chk_123abc", "checkpoint.json")
+				before, err := json.Marshal(map[string]any{
+					"id": "chk_123abc", "kind": core.CheckpointKindHetzner, "provider": providerName,
+					"createdAt": time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339),
+					"native":    map[string]any{"provider": providerName, "imageId": "99", "region": "fsn1", "architecture": "x86", "direct": true, "metadata": checkpointMetadata()},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(filepath.Dir(metaPath), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(metaPath, before, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				var stdout bytes.Buffer
+				app := core.App{Stdout: &stdout, Stderr: io.Discard}
+				for _, args := range [][]string{{"checkpoint", "inspect", "chk_123abc", "--verify", "--json"}, {"checkpoint", "list", "--verify", "--json"}} {
+					stdout.Reset()
+					if err := app.Run(t.Context(), args); err != nil {
+						t.Fatal(err)
+					}
+					if outcome == "wrong-owner" || outcome == "read-failure" {
+						if !strings.Contains(stdout.String(), wantError) {
+							t.Errorf("%v did not report %q: %s", args, wantError, &stdout)
+						}
+					} else if !strings.Contains(stdout.String(), `"providerState":"available"`) {
+						t.Errorf("%v did not verify owned snapshot: %s", args, &stdout)
+					}
+				}
+				args := []string{"checkpoint", "delete", "chk_123abc"}
+				if operation == "prune" {
+					args = []string{"checkpoint", "prune", "--older-than", "24h", "--kind", "native"}
+				} else if operation == "image-delete" {
+					args = []string{"image", "delete", "99", "--provider", providerName, "--region", "fsn1"}
+				}
+				err = app.Run(t.Context(), args)
+				if wantError == "" {
+					if err != nil {
+						t.Errorf("owned cleanup failed: %v", err)
+					}
+					if _, err := os.Stat(metaPath); !os.IsNotExist(err) {
+						t.Errorf("metadata retained after successful cleanup: %v", err)
+					}
+				} else {
+					if err == nil || !strings.Contains(err.Error(), wantError) {
+						t.Errorf("cleanup err=%v, want %q", err, wantError)
+					}
+					after, readErr := os.ReadFile(metaPath)
+					if readErr != nil || !bytes.Equal(before, after) {
+						t.Errorf("uncertain cleanup changed local record: %v", readErr)
+					}
+				}
+				wantEvents := []string{"get-image", "get-image", "get-image"}
+				if outcome == "owned" || outcome == "delete-failure" {
+					wantEvents = append(wantEvents, "delete-image")
+					if !reflect.DeepEqual(client.deletedImages, []int64{99}) {
+						t.Errorf("deleted IDs=%v", client.deletedImages)
+					}
+				}
+				if !reflect.DeepEqual(client.events, wantEvents) {
+					t.Errorf("provider events=%v, want %v", client.events, wantEvents)
+				}
+			})
+		}
+	}
+}
 
 type fakeHetznerSnapshotClient struct {
 	server            Server

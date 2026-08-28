@@ -109,8 +109,15 @@ func TestDeleteHetznerCheckpointImageChecksLocationAndDeletesRemoteFirst(t *test
 		t.Fatalf("deleted=%+v requests=%d", deleted, len(lifecycle.requests))
 	}
 	req := lifecycle.requests[1]
-	if !reflect.DeepEqual(req.Config, cfg) {
-		t.Errorf("resource request lost effective config: Machine0=%+v LocalContainer.Runtime=%q", req.Config.Machine0, req.Config.LocalContainer.Runtime)
+	if req.LoadConfig == nil {
+		t.Fatal("resource request is missing its config loader")
+	}
+	loaded, err := req.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(loaded, cfg) {
+		t.Errorf("resource request lost effective config: Machine0=%+v LocalContainer.Runtime=%q", loaded.Machine0, loaded.LocalContainer.Runtime)
 	}
 	if req.Image.Kind != checkpointKindHetzner || req.Image.ID != "99" || req.Image.Region != "fsn1" || req.Metadata["checkpoint"] != record.ID {
 		t.Fatalf("request=%+v", req)

@@ -280,7 +280,7 @@ func machine0NativeCheckpointResult(req core.NativeCheckpointCreateRequest, clai
 }
 
 func (Provider) VerifyNativeCheckpoint(ctx context.Context, req core.NativeCheckpointResourceRequest) (core.NativeCheckpointVerifyResult, error) {
-	b, err := checkpointBackend(req.Config)
+	b, err := checkpointBackend(req)
 	if err != nil {
 		return core.NativeCheckpointVerifyResult{}, err
 	}
@@ -300,7 +300,7 @@ func (Provider) VerifyNativeCheckpoint(ctx context.Context, req core.NativeCheck
 }
 
 func (Provider) DeleteNativeCheckpoint(ctx context.Context, req core.NativeCheckpointResourceRequest) error {
-	b, err := checkpointBackend(req.Config)
+	b, err := checkpointBackend(req)
 	if err != nil {
 		return err
 	}
@@ -339,7 +339,11 @@ func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkReq
 	return nil
 }
 
-func checkpointBackend(cfg Config) (*backend, error) {
+func checkpointBackend(req core.NativeCheckpointResourceRequest) (*backend, error) {
+	cfg, err := req.LoadConfig()
+	if err != nil {
+		return nil, err
+	}
 	p := Provider{}
 	configured, err := p.Configure(cfg, providerOperationRuntime(nil))
 	if err != nil {

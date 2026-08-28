@@ -495,13 +495,9 @@ func nativeCheckpointDeleteID(record checkpointRecord) string {
 	return record.nativeDeleteID()
 }
 
-func nativeCheckpointResourceRequest(record checkpointRecord) (NativeCheckpointResourceRequest, error) {
-	cfg, err := loadConfig()
-	if err != nil {
-		return NativeCheckpointResourceRequest{}, err
-	}
+func nativeCheckpointResourceRequest(record checkpointRecord) NativeCheckpointResourceRequest {
 	return NativeCheckpointResourceRequest{
-		Config: cfg,
+		LoadConfig: loadConfig,
 		Image: NativeCheckpointImage{
 			ID:           record.Native.ImageID,
 			Name:         record.Native.Name,
@@ -514,7 +510,7 @@ func nativeCheckpointResourceRequest(record checkpointRecord) (NativeCheckpointR
 			Direct:       record.Native.Direct,
 		},
 		Metadata: record.Native.Metadata,
-	}, nil
+	}
 }
 
 func checkpointKindForProviderImage(image CoordinatorImage) string {

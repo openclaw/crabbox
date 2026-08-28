@@ -173,12 +173,17 @@ func TestDaytonaSnapshotLifecycleWaitsEvenWithoutWaitFlag(t *testing.T) {
 			if stopped && (f.starts != 0 || f.stops != 0) || !stopped && (f.starts != 1 || f.stops != 1) {
 				t.Fatal("source state not preserved")
 			}
-			resource := core.NativeCheckpointResourceRequest{Config: f.request.Config, Image: result.Image, Metadata: result.Metadata}
+			resource := core.NativeCheckpointResourceRequest{LoadConfig: func() (Config, error) { return f.request.Config, nil }, Image: result.Image, Metadata: result.Metadata}
 			verified, err := (Provider{}).VerifyNativeCheckpoint(t.Context(), resource)
 			if err != nil || verified.NextAction != "fork_or_delete" {
 				t.Fatalf("verify=%+v err=%v", verified, err)
 			}
 			cfg := f.request.Config
+			configPath := filepath.Join(t.TempDir(), "malformed.yaml")
+			if err := os.WriteFile(configPath, []byte("daytona: [\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CRABBOX_CONFIG", configPath)
 			err = (Provider{}).ApplyNativeCheckpointForkConfig(core.NativeCheckpointForkRequest{Config: &cfg, Record: core.NativeCheckpointForkRecord{Kind: result.Image.Kind, ImageID: result.Image.ID, Name: result.Image.Name, Direct: true, Metadata: result.Metadata}})
 			if err != nil || cfg.Daytona.Snapshot != result.Image.ID || cfg.WorkRoot != f.request.Config.Daytona.WorkRoot {
 				t.Fatalf("fork err=%v snapshot=%s workRoot=%s", err, cfg.Daytona.Snapshot, cfg.WorkRoot)
@@ -227,7 +232,7 @@ func TestDaytonaSnapshotDeletionRejectsIdentityAndScopeDrift(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			resource := core.NativeCheckpointResourceRequest{Config: f.request.Config, Image: result.Image, Metadata: result.Metadata}
+			resource := core.NativeCheckpointResourceRequest{LoadConfig: func() (Config, error) { return f.request.Config, nil }, Image: result.Image, Metadata: result.Metadata}
 			switch drift {
 			case "api":
 				resource.Metadata["api_url"] = "https://other.example/api"
@@ -296,6 +301,32 @@ func TestDaytonaCheckpointCLILeavesStoppedSourceStopped(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), `"providerState":"active"`) {
 		t.Fatal(stdout.String())
+	}
+	metaPath := filepath.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "checkpoints", record.ID, "checkpoint.json")
+	before, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte("daytona: [\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reads := f.reads
+	stdout.Reset()
+	if err := app.Run(t.Context(), []string{"checkpoint", "inspect", record.ID, "--verify", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), `"providerState":"unknown"`) || !strings.Contains(stdout.String(), "parse config") {
+		t.Fatalf("invalid config did not fail verification: %s", &stdout)
+	}
+	if err := app.Run(t.Context(), []string{"checkpoint", "delete", record.ID}); err == nil || !strings.Contains(err.Error(), "parse config") {
+		t.Fatalf("invalid config did not fail deletion: %v", err)
+	}
+	after, err := os.ReadFile(metaPath)
+	if err != nil || !bytes.Equal(before, after) || f.reads != reads || f.removes != 0 {
+		t.Fatalf("invalid config changed provider or record: reads=%d removes=%d err=%v", f.reads-reads, f.removes, err)
+	}
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	if err := app.Run(t.Context(), []string{"checkpoint", "delete", record.ID}); err != nil {
 		t.Fatal(err)

@@ -1376,11 +1376,7 @@ func deleteCheckpoint(ctx context.Context, store checkpointStore, id string, loc
 	providerID := nativeCheckpointDeleteID(record)
 	if isNativeCheckpointKind(record.Kind) && providerID != "" && !localOnly {
 		if provider, ok := nativeCheckpointLifecycleProvider(Config{Provider: record.nativeProvider()}, Server{}); ok {
-			request, err := nativeCheckpointResourceRequest(record)
-			if err != nil {
-				return err
-			}
-			if err := provider.DeleteNativeCheckpoint(ctx, request); err != nil {
+			if err := provider.DeleteNativeCheckpoint(ctx, nativeCheckpointResourceRequest(record)); err != nil {
 				return err
 			}
 			return store.Delete(id)
@@ -1635,11 +1631,7 @@ func (a App) verifyCheckpointRecord(ctx context.Context, store checkpointStore, 
 			return verifyDirectAzureCheckpoint(ctx, audit, cfg, providerID), nil
 		}
 		if provider, ok := nativeCheckpointLifecycleProvider(Config{Provider: record.nativeProvider()}, Server{}); ok {
-			request, err := nativeCheckpointResourceRequest(record)
-			var result NativeCheckpointVerifyResult
-			if err == nil {
-				result, err = provider.VerifyNativeCheckpoint(ctx, request)
-			}
+			result, err := provider.VerifyNativeCheckpoint(ctx, nativeCheckpointResourceRequest(record))
 			if err != nil {
 				audit.ProviderState = "unknown"
 				audit.NextAction = "check_runtime"
