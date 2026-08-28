@@ -68,6 +68,8 @@ func TestConfirmedAbsentStateCleanupRecoversControllerTombstones(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err := removeExternalRoutingIfUnchangedWithSync(leaseID, ExternalConfig{}, func(string) error { return nil }); err != nil {
+			logWindowsPrivateHandleDiagnostics(t, filepath.Dir(path), true)
+			logWindowsPrivateHandleDiagnostics(t, path+".deleted", false)
 			t.Fatal(err)
 		}
 		if _, err := os.Stat(path + ".deleted"); !os.IsNotExist(err) {

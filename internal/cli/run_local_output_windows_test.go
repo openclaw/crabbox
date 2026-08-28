@@ -348,6 +348,7 @@ func TestPrivateRunOutputWindowsDoesNotInheritPermissiveDACL(t *testing.T) {
 
 			path := filepath.Join(dir, "proof.txt")
 			if err := writeRunDownloadFile(path, []byte("private proof")); err != nil {
+				logWindowsPrivateHandleDiagnostics(t, dir, true)
 				t.Fatal(err)
 			}
 			assertWindowsPathPrivateFromSID(t, dir, true, testSID)
@@ -376,6 +377,152 @@ func TestPrivateRunOutputWindowsDoesNotInheritPermissiveDACL(t *testing.T) {
 			}
 			assertWindowsPathPrivateFromSID(t, path, false, testSID)
 		})
+	}
+}
+
+// Failed-boundary diagnostics only: open existing fixture objects without
+// changing their security or contents, and never log SIDs or raw descriptors.
+func logWindowsPrivateHandleDiagnostics(t *testing.T, path string, directory bool) {
+	t.Helper()
+	t.Logf("private-handle diagnostics: directory=%t", directory)
+	const share = windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE
+	const comparisonShare = share | windows.FILE_SHARE_DELETE
+	parentName, err := windows.UTF16PtrFromString(filepath.Dir(path))
+	if err != nil {
+		t.Logf("diagnostic parent encoding: %v", err)
+		return
+	}
+	parent, err := windows.CreateFile(parentName, windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.FILE_TRAVERSE,
+		share, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		t.Logf("diagnostic parent open: %v", err)
+		return
+	}
+	defer windows.CloseHandle(parent)
+	if err := validatePrivateWindowsFileType(parent, true); err != nil {
+		t.Errorf("diagnostic parent type: %v", err)
+		return
+	}
+	options := uint32(windows.FILE_NON_DIRECTORY_FILE | windows.FILE_OPEN_REPARSE_POINT | windows.FILE_OPEN_FOR_BACKUP_INTENT)
+	flags := uint32(windows.FILE_FLAG_OPEN_REPARSE_POINT)
+	baseAccess := uint32(windows.FILE_READ_ATTRIBUTES | windows.READ_CONTROL | windows.WRITE_DAC | windows.SYNCHRONIZE)
+	if directory {
+		options = windows.FILE_DIRECTORY_FILE | windows.FILE_OPEN_REPARSE_POINT | windows.FILE_OPEN_FOR_BACKUP_INTENT
+		flags |= windows.FILE_FLAG_BACKUP_SEMANTICS
+		baseAccess |= windows.FILE_TRAVERSE
+	}
+	openNT := func(root windows.Handle, name string, access, openOptions, shareMode uint32) (windows.Handle, error) {
+		objectName, err := windows.NewNTUnicodeString(name)
+		if err != nil {
+			return windows.InvalidHandle, err
+		}
+		attributes := &windows.OBJECT_ATTRIBUTES{
+			Length:        uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
+			RootDirectory: root,
+			ObjectName:    objectName,
+			Attributes:    windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
+		}
+		var handle windows.Handle
+		err = windows.NtCreateFile(&handle, access, attributes, &windows.IO_STATUS_BLOCK{}, nil,
+			windows.FILE_ATTRIBUTE_NORMAL, shareMode, windows.FILE_OPEN, openOptions, 0, 0)
+		return handle, err
+	}
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Logf("diagnostic path encoding: %v", err)
+		return
+	}
+	win32, err := windows.CreateFile(name, baseAccess, share, nil, windows.OPEN_EXISTING, flags, 0)
+	if err != nil {
+		t.Logf("diagnostic CreateFile baseline access=%#x flags=%#x share=%#x: %v", baseAccess, flags, share, err)
+		return
+	}
+	defer windows.CloseHandle(win32)
+	if err := validatePrivateWindowsFileType(win32, directory); err != nil {
+		t.Errorf("diagnostic fixture type: %v", err)
+		return
+	}
+	var before windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(win32, &before); err != nil {
+		t.Logf("diagnostic fixture identity: %v", err)
+		return
+	}
+	checkIdentity := func(label string, handle windows.Handle, openErr error) {
+		t.Helper()
+		if openErr != nil {
+			t.Logf("%s: open_error=%v", label, openErr)
+			return
+		}
+		var after windows.ByHandleFileInformation
+		if err := windows.GetFileInformationByHandle(handle, &after); err != nil {
+			t.Errorf("%s: identity_error=%v", label, err)
+			return
+		}
+		equal := before.VolumeSerialNumber == after.VolumeSerialNumber && before.FileIndexHigh == after.FileIndexHigh && before.FileIndexLow == after.FileIndexLow
+		t.Logf("%s: open_ok=true identity_equal=%t directory=%t", label, equal, after.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0)
+		if !equal {
+			t.Errorf("%s: comparison opened a different fixture object", label)
+		}
+	}
+	user, userErr := currentWindowsUserSID()
+	descriptor, securityErr := windows.GetSecurityInfo(win32, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if userErr != nil || securityErr != nil {
+		t.Logf("diagnostic security: user_error=%v descriptor_error=%v", userErr, securityErr)
+	} else {
+		owner, _, ownerErr := descriptor.Owner()
+		control, _, controlErr := descriptor.Control()
+		acl, _, aclErr := descriptor.DACL()
+		t.Logf("diagnostic security: owner_present=%t owner_current=%t owner_error=%v protected_dacl=%t control_error=%v dacl_present=%t dacl_error=%v", owner != nil, owner != nil && owner.Equals(user), ownerErr, control&windows.SE_DACL_PROTECTED != 0, controlErr, acl != nil, aclErr)
+		if acl != nil && aclErr == nil {
+			t.Logf("diagnostic dacl: ace_count=%d (showing at most 8)", acl.AceCount)
+			for index := uint32(0); index < uint32(acl.AceCount) && index < 8; index++ {
+				var ace *windows.ACCESS_ALLOWED_ACE
+				if err := windows.GetAce(acl, index, &ace); err != nil || ace == nil {
+					t.Logf("diagnostic ace=%d: read_error=%v", index, err)
+					continue
+				}
+				if ace.Header.AceType == windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE {
+					sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+					t.Logf("diagnostic ace=%d: type=%d flags=%#x mask=%#x current_user=%t", index, ace.Header.AceType, ace.Header.AceFlags, ace.Mask, sid.Equals(user))
+				} else {
+					t.Logf("diagnostic ace=%d: unparsed_type=%d", index, ace.Header.AceType)
+				}
+			}
+		}
+	}
+	native, nativeErr := openNT(parent, filepath.Base(path), baseAccess, options|windows.FILE_SYNCHRONOUS_IO_NONALERT, share)
+	checkIdentity("NtCreateFile retained baseline", native, nativeErr)
+	if nativeErr == nil {
+		defer windows.CloseHandle(native)
+	}
+	t.Logf("diagnostic flags: baseline_access=%#x baseline_share=%#x win32_flags=%#x baseline_nt_options=%#x comparison_nt_options=%#x comparison_share=%#x", baseAccess, share, flags, options|windows.FILE_SYNCHRONOUS_IO_NONALERT, options, comparisonShare)
+	type handleProbe struct {
+		label string
+		open  func() (windows.Handle, error)
+	}
+	for _, access := range []uint32{windows.READ_CONTROL, windows.READ_CONTROL | windows.WRITE_DAC, windows.READ_CONTROL | windows.WRITE_OWNER, windows.READ_CONTROL | windows.WRITE_DAC | windows.WRITE_OWNER} {
+		access |= windows.FILE_READ_ATTRIBUTES
+		probes := []handleProbe{
+			{"CreateFile no-follow", func() (windows.Handle, error) { return openPrivateWindowsSecurityHandle(path, directory, access) }},
+			{"ReOpenFile from CreateFile", func() (windows.Handle, error) { return reOpenPrivateWindowsHandle(win32, access, directory) }},
+			{"NtCreateFile parent-relative", func() (windows.Handle, error) {
+				return openNT(parent, filepath.Base(path), access, options, comparisonShare)
+			}},
+		}
+		if nativeErr == nil {
+			probes = append(probes,
+				handleProbe{"ReOpenFile from NtCreateFile", func() (windows.Handle, error) { return reOpenPrivateWindowsHandle(native, access, directory) }},
+				handleProbe{"NtCreateFile empty-name", func() (windows.Handle, error) { return openNT(native, "", access, options, comparisonShare) }})
+		}
+		for _, probe := range probes {
+			handle, err := probe.open()
+			checkIdentity(fmt.Sprintf("%s access=%#x", probe.label, access), handle, err)
+			if err == nil {
+				if err := windows.CloseHandle(handle); err != nil {
+					t.Errorf("%s: close_error=%v", probe.label, err)
+				}
+			}
+		}
 	}
 }
 

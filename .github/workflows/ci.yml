@@ -103,13 +103,13 @@ jobs:
         run: go test ./internal/testutil ./internal/providers/aws ./internal/providers/daytona ./internal/providers/digitalocean ./internal/providers/hyperv ./internal/providers/namespace ./internal/providers/scaleway ./internal/providers/vast ./internal/providers/vultr -count=1
 
       - name: Test concurrent claim discovery and ownership
-        run: go test ./internal/cli/ -run '^Test(ClaimMetadata|ClaimTransaction|RemoveControllerFile|ConfirmedAbsentStateCleanup)' -count=1 -v
+        run: go test ./internal/cli/ -run '^Test(ClaimMetadata|ClaimTransaction|RemoveControllerFile|ConfirmedAbsentStateCleanup|PrivateRunOutput)' -count=1 -v
 
       - name: Test pond mesh cancellation
         run: go test ./internal/cli/ -run PondMeshCancel -count=1 -v
 
       - name: Test native Windows failure captures and private outputs
-        run: go test ./internal/cli/ -run '^(TestFailureBundle|TestNativeWindowsFailureBundle|TestPrivateRunOutput|TestManagedAttestKeyWindows|TestArtifactOutputWindows)' -count=1 -v
+        run: go test ./internal/cli/ -run '^(TestFailureBundle|TestNativeWindowsFailureBundle|TestManagedAttestKeyWindows|TestArtifactOutputWindows)' -count=1 -v
 
       - name: Test Windows SSH and rsync transport selection
         run: go test ./internal/cli/ -run '^(TestWSL2TransportStagesWithoutWindowsAutomount|TestWorkspaceOwnerWSL2InputStreamPreparationIsBoundedAndReplayable|TestWindowsWSLNativeToolProbeUsesDirectCommandOutput|TestWindowsWSLNativeToolPathsRejectsWindowsShims|TestDirectSSHExecutableSelection|TestSSHCommandContextUsesNativeWindowsOpenSSHEvenWhenPATHSelectsMSYS2|TestResolveWindowsNativeRsyncPairUsesExactSibling|TestResolveWindowsNativeRsyncPairFailsClosedWithoutSibling|TestBindWindowsNativeRsyncSSHPreservesOwnedArguments|TestWindowsNativeRsyncCommandUsesSiblingPairAndEnvironment|TestResolvedSSHCopyCommandUsesNativeWindowsSiblingPair|TestResolvedSSHCopyCommandFailsClosedWithoutNativeWindowsSibling)$' -count=1 -v
