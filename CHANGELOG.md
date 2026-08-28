@@ -12,6 +12,7 @@
 ### Fixed
 
 - Unified provider-owned routing for stop, retry, rescue, and WebVNC commands, preserving scope, explicit false release settings, and Kubernetes environment selectors without exposing URL credentials.
+- Refreshed coordinator runtime and Worker development dependencies, including Nano ID and Undici advisory fixes.
 - Preserved Daytona recovery claims and lookup errors when `stop` cannot verify the sandbox, instead of reporting release from an unverified not-found response.
 - Fixed portable Node coordinator control heartbeats deadlocking subsequent lifecycle operations, releases, and graceful shutdown.
 - Made direct Daytona sandboxes private, preserved dependencies across syncs, enforced native TTL and idle heartbeats, reported authoritative readiness, and verified allocation rollback and credential-safe redirects.
