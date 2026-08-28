@@ -192,7 +192,10 @@ func checkpointRollbackContext() (context.Context, context.CancelFunc) {
 }
 
 func (Provider) VerifyNativeCheckpoint(ctx context.Context, req core.NativeCheckpointResourceRequest) (core.NativeCheckpointVerifyResult, error) {
-	scope := checkpointScopeFromRequest(req)
+	scope, err := checkpointScopeFromRequest(req)
+	if err != nil {
+		return core.NativeCheckpointVerifyResult{}, err
+	}
 	if err := validateCheckpointScope(ctx, scope); err != nil {
 		return core.NativeCheckpointVerifyResult{}, err
 	}
@@ -214,7 +217,10 @@ func (Provider) VerifyNativeCheckpoint(ctx context.Context, req core.NativeCheck
 }
 
 func (Provider) DeleteNativeCheckpoint(ctx context.Context, req core.NativeCheckpointResourceRequest) error {
-	scope := checkpointScopeFromRequest(req)
+	scope, err := checkpointScopeFromRequest(req)
+	if err != nil {
+		return err
+	}
 	if err := validateCheckpointScope(ctx, scope); err != nil {
 		return err
 	}
@@ -403,8 +409,16 @@ func listPodmanConnections(ctx context.Context, runtimeName string) ([]podmanCon
 	return connections, nil
 }
 
-func checkpointScopeFromRequest(req core.NativeCheckpointResourceRequest) checkpointScope {
-	return checkpointScopeFromMetadata(req.Metadata, req.Config.LocalContainer.Runtime)
+func checkpointScopeFromRequest(req core.NativeCheckpointResourceRequest) (checkpointScope, error) {
+	var fallbackRuntime string
+	if strings.TrimSpace(req.Metadata[checkpointMetadataRuntime]) == "" {
+		cfg, err := req.LoadConfig()
+		if err != nil {
+			return checkpointScope{}, err
+		}
+		fallbackRuntime = cfg.LocalContainer.Runtime
+	}
+	return checkpointScopeFromMetadata(req.Metadata, fallbackRuntime), nil
 }
 
 func checkpointScopeFromMetadata(metadata map[string]string, fallbackRuntime string) checkpointScope {

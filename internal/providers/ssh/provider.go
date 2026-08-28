@@ -13,6 +13,20 @@ func init() {
 
 type Provider struct{}
 
+func (Provider) SupportsArchitecture(cfg Config, architecture string) bool {
+	if architecture != core.ArchitectureAMD64 && architecture != core.ArchitectureARM64 {
+		return false
+	}
+	switch cfg.TargetOS {
+	case core.TargetLinux, core.TargetMacOS:
+		return cfg.WindowsMode == "" || cfg.WindowsMode == core.WindowsModeNormal
+	case core.TargetWindows:
+		return cfg.WindowsMode == "normal" || cfg.WindowsMode == "wsl2"
+	default:
+		return false
+	}
+}
+
 func (Provider) Name() string { return "ssh" }
 func (Provider) Aliases() []string {
 	return []string{"static", "static-ssh"}

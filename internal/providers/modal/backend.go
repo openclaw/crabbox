@@ -7,6 +7,9 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func NewModalBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
@@ -53,156 +56,84 @@ func (b *modalBackend) Warmup(ctx context.Context, req WarmupRequest) error {
 }
 
 func (b *modalBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
-	if err := rejectModalSyncOptions(req); err != nil {
-		return RunResult{}, err
+	workdir, workdirErr := cleanModalWorkdir(modalWorkdir(b.cfg))
+	var client modalAPI
+	var leaseID, sandboxID, slug string
+	handle := func() shared.DelegatedSandbox {
+		return shared.DelegatedSandbox{LeaseID: leaseID, Slug: slug, CleanupCommand: modalCleanupCommand(leaseID)}
 	}
-	workdir, err := cleanModalWorkdir(modalWorkdir(b.cfg))
-	if err != nil {
-		return RunResult{}, err
-	}
-	started := b.now()
-	client, err := newModalAPI(b.cfg, b.rt)
-	if err != nil {
-		return RunResult{}, err
-	}
-	leaseID, sandboxID, slug := "", "", ""
-	acquired := false
-	if req.ID == "" {
-		var sandbox modalSandbox
-		leaseID, sandbox, slug, err = b.createSandbox(ctx, client, req.Repo, req.Keep, req.Reclaim, req.RequestedSlug)
-		if err != nil {
-			return RunResult{}, err
-		}
-		sandboxID = sandbox.ID
-		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=modal sandbox=%s\n", leaseID, slug, sandboxID)
-		acquired = true
-	} else {
-		leaseID, sandboxID, slug, err = b.resolveSandboxID(ctx, client, req.ID, req.Repo.Root, req.Reclaim)
-		if err != nil {
-			return RunResult{}, err
-		}
-	}
-	shouldStop := acquired && !req.Keep
-	if shouldStop {
-		defer func() {
-			if !shouldStop {
-				return
+	return shared.RunDelegatedSandbox(ctx, req, shared.DelegatedSandboxLifecycle{
+		Provider: providerName, Runtime: b.rt, Workdir: workdir, IdleTimeout: b.cfg.IdleTimeout, TTL: b.cfg.TTL,
+		Preflight: func(context.Context) error {
+			if err := rejectModalSyncOptions(req); err != nil {
+				return err
 			}
-			if err := client.Terminate(context.Background(), sandboxID); err != nil {
-				fmt.Fprintf(b.rt.Stderr, "warning: modal terminate failed for %s: %v\n", sandboxID, err)
-				return
+			if workdirErr != nil {
+				return workdirErr
+			}
+			var err error
+			client, err = newModalAPI(b.cfg, b.rt)
+			return err
+		},
+		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
+			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
+				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
+				TempPattern: "crabbox-modal-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
+			})
+		},
+		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			var sandbox modalSandbox
+			var err error
+			leaseID, sandbox, slug, err = b.createSandbox(ctx, client, req.Repo, req.Keep, req.Reclaim, req.RequestedSlug)
+			sandboxID = sandbox.ID
+			if err == nil {
+				fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=modal sandbox=%s\n", leaseID, slug, sandboxID)
+			}
+			return handle(), err
+		},
+		Resolve: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			var err error
+			leaseID, sandboxID, slug, err = b.resolveSandboxID(ctx, client, req.ID, req.Repo.Root, req.Reclaim)
+			return handle(), err
+		},
+		Sync: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+			return b.syncWorkspace(ctx, client, sandboxID, req, workdir, prepared)
+		},
+		NoSync: func(ctx context.Context) error {
+			return b.prepareWorkspace(ctx, client, sandboxID, workdir)
+		},
+		Command: func(ctx context.Context) (shared.DelegatedSandboxCommand, error) {
+			command, err := buildModalCommand(req.Command, req.ShellMode, workdir)
+			if err != nil {
+				return shared.DelegatedSandboxCommand{}, err
+			}
+			if req.EnvSummary {
+				printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
+			}
+			var cleanup func(context.Context)
+			if len(req.Env) > 0 {
+				var envPath string
+				envPath, cleanup, err = b.uploadEnvProfile(ctx, client, sandboxID, req.Env)
+				if err != nil {
+					return shared.DelegatedSandboxCommand{Close: cleanup}, err
+				}
+				command = wrapModalCommandWithEnvProfile(command, envPath)
+			}
+			return shared.DelegatedSandboxCommand{Close: cleanup, Run: func(ctx context.Context) (int, error) {
+				return client.Exec(ctx, modalExecRequest{
+					SandboxID: sandboxID, Command: command,
+					Timeout: durationSecondsCeil(modalTimeoutDuration(b.cfg.TTL)), Stdout: b.rt.Stdout, Stderr: b.rt.Stderr,
+				})
+			}}, nil
+		},
+		Cleanup: func(ctx context.Context) error {
+			if err := client.Terminate(ctx, sandboxID); err != nil {
+				return modalError("terminate", err)
 			}
 			removeLeaseClaim(leaseID)
-		}()
-	}
-	result := RunResult{
-		SyncDelegated: true,
-		Session: &RunSessionHandle{
-			Provider:       providerName,
-			LeaseID:        leaseID,
-			Slug:           slug,
-			Reused:         !acquired,
-			Kept:           !shouldStop,
-			CleanupCommand: modalCleanupCommand(leaseID),
+			return nil
 		},
-	}
-	finishResult := func() RunResult {
-		result.Total = b.now().Sub(started)
-		result.Session.Kept = !shouldStop
-		return result
-	}
-
-	syncDuration := time.Duration(0)
-	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
-	if !req.NoSync {
-		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, sandboxID, req, workdir)
-		if err != nil {
-			return finishResult(), err
-		}
-		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
-	} else if err := b.prepareWorkspace(ctx, client, sandboxID, workdir, false); err != nil {
-		return finishResult(), err
-	}
-	if req.SyncOnly {
-		result := finishResult()
-		fmt.Fprintf(b.rt.Stdout, "synced %s\n", workdir)
-		if req.TimingJSON {
-			err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
-				Provider:      providerName,
-				LeaseID:       leaseID,
-				Slug:          slug,
-				SyncDelegated: true,
-				SyncMs:        syncDuration.Milliseconds(),
-				SyncPhases:    syncPhases,
-				SyncSkipped:   req.NoSync,
-				TotalMs:       result.Total.Milliseconds(),
-				ExitCode:      0,
-				Label:         strings.TrimSpace(req.Label),
-			}, result, nil))
-			return result, err
-		}
-		return result, nil
-	}
-
-	command, err := buildModalCommand(req.Command, req.ShellMode, workdir)
-	if err != nil {
-		return finishResult(), err
-	}
-	if req.EnvSummary {
-		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
-	}
-	if len(req.Env) > 0 {
-		envPath, cleanup, err := b.uploadEnvProfile(ctx, client, sandboxID, req.Env)
-		if err != nil {
-			return finishResult(), err
-		}
-		defer cleanup()
-		command = wrapModalCommandWithEnvProfile(command, envPath)
-	}
-	commandStarted := b.now()
-	exitCode, commandErr := client.Exec(ctx, modalExecRequest{
-		SandboxID: sandboxID,
-		Command:   command,
-		Timeout:   durationSecondsCeil(modalTimeoutDuration(b.cfg.TTL)),
-		Stdout:    b.rt.Stdout,
-		Stderr:    b.rt.Stderr,
 	})
-	commandDuration := b.now().Sub(commandStarted)
-	result.ExitCode = exitCode
-	result.Command = commandDuration
-	result.Total = b.now().Sub(started)
-	result.Session.Kept = !shouldStop
-	if req.NoSync {
-		fmt.Fprintf(b.rt.Stderr, "modal run summary sync_skipped=true command=%s total=%s exit=%d\n", result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
-	} else {
-		fmt.Fprintf(b.rt.Stderr, "modal run summary sync=%s command=%s total=%s exit=%d\n", syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
-	}
-	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
-			Provider:      providerName,
-			LeaseID:       leaseID,
-			Slug:          slug,
-			SyncDelegated: true,
-			SyncMs:        syncDuration.Milliseconds(),
-			SyncPhases:    syncPhases,
-			SyncSkipped:   req.NoSync,
-			CommandMs:     commandDuration.Milliseconds(),
-			TotalMs:       result.Total.Milliseconds(),
-			ExitCode:      result.ExitCode,
-			Label:         strings.TrimSpace(req.Label),
-		}, result, commandErr)); err != nil {
-			return result, err
-		}
-	}
-	if commandErr != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return finishResult(), ExitError{Code: 1, Message: fmt.Sprintf("modal run failed: %v", commandErr)}
-	}
-	if result.ExitCode != 0 {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return finishResult(), ExitError{Code: result.ExitCode, Message: fmt.Sprintf("modal run exited %d", result.ExitCode)}
-	}
-	return finishResult(), nil
 }
 
 func (b *modalBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {

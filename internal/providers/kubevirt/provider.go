@@ -2,6 +2,7 @@ package kubevirt
 
 import (
 	"flag"
+	"os"
 	"strconv"
 	"strings"
 
@@ -46,8 +47,12 @@ func (Provider) RouteConfig(cfg *core.Config, _ *flag.FlagSet, _ any) error {
 	return nil
 }
 
-func (Provider) CommandRoutingArgs(cfg core.Config, _ string) []string {
+func (Provider) CommandRouting(cfg core.Config, request core.CommandRoutingRequest) core.CommandRouting {
 	values := cfg.KubeVirt
+	base := core.BaseConfig()
+	if strings.TrimSpace(cfg.WorkRoot) != "" && cfg.WorkRoot != base.WorkRoot && (strings.TrimSpace(values.WorkRoot) == "" || values.WorkRoot == base.KubeVirt.WorkRoot) {
+		values.WorkRoot = cfg.WorkRoot
+	}
 	args := []string{
 		"--kubevirt-kubectl", values.Kubectl,
 		"--kubevirt-virtctl", values.Virtctl,
@@ -56,7 +61,6 @@ func (Provider) CommandRoutingArgs(cfg core.Config, _ string) []string {
 		"--kubevirt-ssh-user", values.SSHUser,
 		"--kubevirt-ssh-port", values.SSHPort,
 		"--kubevirt-work-root", values.WorkRoot,
-		"--kubevirt-delete-on-release=" + strconv.FormatBool(values.DeleteOnRelease),
 	}
 	for _, optional := range []struct {
 		flagName string
@@ -71,7 +75,17 @@ func (Provider) CommandRoutingArgs(cfg core.Config, _ string) []string {
 			args = append(args, optional.flagName, optional.value)
 		}
 	}
-	return args
+	if request.Purpose == core.CommandRoutingReconnect || request.Purpose == core.CommandRoutingRescue || core.DeleteOnReleaseExplicit(cfg, providerName) {
+		args = append(args, "--kubevirt-delete-on-release="+strconv.FormatBool(values.DeleteOnRelease))
+	}
+
+	routing := core.CommandRouting{Args: args}
+	if strings.TrimSpace(values.Kubeconfig) == "" {
+		if value := strings.TrimSpace(os.Getenv("KUBECONFIG")); value != "" {
+			routing.Env = []string{"KUBECONFIG=" + value}
+		}
+	}
+	return routing
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {

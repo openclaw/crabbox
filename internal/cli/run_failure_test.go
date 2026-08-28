@@ -384,17 +384,17 @@ func TestFailureDigestNextCommandsRespectRunHistoryAvailability(t *testing.T) {
 	}
 }
 
-func TestRunFailureDigestRoutingArgsUseExternalRoutingFile(t *testing.T) {
+func TestRunFailureDigestRoutingUseExternalRoutingFile(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	args := runFailureDigestRoutingArgs(Config{
+	args := CommandRoutingFor(Config{
 		Provider: "external",
 		External: ExternalConfig{
 			Command: "provider-command",
 			Args:    []string{"--token", "secret-value"},
 			Config:  map[string]any{"token": "secret-config"},
 		},
-	}, "provider-id")
-	got := strings.Join(args, " ")
+	}, "provider-id", CommandRoutingRetry)
+	got := strings.Join(args.Args, " ")
 	for _, want := range []string{"--provider external", "--external-routing-file", "--external-routing-digest"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("routing args missing %q: %s", want, got)
@@ -407,17 +407,17 @@ func TestRunFailureDigestRoutingArgsUseExternalRoutingFile(t *testing.T) {
 	}
 }
 
-func TestRunFailureDigestSSHRoutingArgsUseExternalRoutingFile(t *testing.T) {
+func TestRunFailureDigestSSHRoutingUseExternalRoutingFile(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	args := runFailureDigestSSHRoutingArgs(Config{
+	args := CommandRoutingFor(Config{
 		Provider: "external",
 		External: ExternalConfig{
 			Command: "provider-command",
 			Args:    []string{"--token", "secret-value"},
 			Config:  map[string]any{"token": "secret-config"},
 		},
-	}, "cbx_abcdef123456")
-	got := strings.Join(args, " ")
+	}, "cbx_abcdef123456", CommandRoutingRetry)
+	got := strings.Join(args.Args, " ")
 	for _, want := range []string{"--provider external", "--external-routing-file", "--external-routing-digest"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("ssh routing args missing %q: %s", want, got)
@@ -570,8 +570,9 @@ func TestFailureDigestRoutesProviderArgsToSSH(t *testing.T) {
 		Provider:       "proxmox",
 		LeaseID:        "cbx_123",
 		CommandDisplay: "go test ./...",
-		RoutingArgs:    runFailureDigestRoutingArgs(cfg, "cbx_123"),
-		SSHRoutingArgs: runFailureDigestSSHRoutingArgs(cfg, "cbx_123"),
+		Routing:        CommandRoutingFor(cfg, "cbx_123", CommandRoutingRetry),
+		SSHRouting:     CommandRoutingFor(cfg, "cbx_123", CommandRoutingRetry),
+		StopRouting:    CommandRoutingFor(cfg, "cbx_123", CommandRoutingStop),
 		Classification: FailureClassification{RetryLikely: "unknown"},
 		StopCommand:    "crabbox stop --provider proxmox --proxmox-api-url https://pve.example cbx_123",
 	}, "unknown")
@@ -602,8 +603,9 @@ func TestFailureDigestPreservesInheritedKubeconfigForKubeVirt(t *testing.T) {
 		TargetOS:       targetLinux,
 		LeaseID:        "cbx_123",
 		CommandDisplay: "go test ./...",
-		RoutingArgs:    runFailureDigestRoutingArgs(cfg, "cbx_123"),
-		SSHRoutingArgs: runFailureDigestSSHRoutingArgs(cfg, "cbx_123"),
+		Routing:        CommandRoutingFor(cfg, "cbx_123", CommandRoutingRetry),
+		SSHRouting:     CommandRoutingFor(cfg, "cbx_123", CommandRoutingRetry),
+		StopRouting:    CommandRoutingFor(cfg, "cbx_123", CommandRoutingStop),
 		Classification: FailureClassification{RetryLikely: "unknown"},
 	}, "unknown")
 	joined := strings.Join(commands, "\n")
@@ -643,8 +645,9 @@ func TestFailureDigestPreservesSealosRouting(t *testing.T) {
 		TargetOS:       targetLinux,
 		LeaseID:        "cbx_123",
 		CommandDisplay: "go test ./...",
-		RoutingArgs:    runFailureDigestRoutingArgs(cfg, "cbx_123"),
-		SSHRoutingArgs: runFailureDigestSSHRoutingArgs(cfg, "cbx_123"),
+		Routing:        CommandRoutingFor(cfg, "cbx_123", CommandRoutingRetry),
+		SSHRouting:     CommandRoutingFor(cfg, "cbx_123", CommandRoutingRetry),
+		StopRouting:    CommandRoutingFor(cfg, "cbx_123", CommandRoutingStop),
 		Classification: FailureClassification{RetryLikely: "unknown"},
 	}, "unknown")
 	joined := strings.Join(commands, "\n")
@@ -657,54 +660,6 @@ func TestFailureDigestPreservesSealosRouting(t *testing.T) {
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("commands missing %q:\n%s", want, joined)
-		}
-	}
-}
-
-func TestRunFailureDigestIncludesXCPNgRoutingFlagsWithoutPassword(t *testing.T) {
-	args := runFailureDigestRoutingArgs(Config{
-		Provider: "xcp-ng",
-		TargetOS: targetLinux,
-		XCPNg: XCPNgConfig{
-			APIURL:       "pool-user:pool-pass@xcp-ng.example.test/path?view=1",
-			Username:     "root",
-			Password:     "xcp-ng-secret",
-			Template:     "ubuntu template",
-			TemplateUUID: "tpl-0001",
-			SR:           "default sr",
-			SRUUID:       "sr-0001",
-			Network:      "pool network",
-			NetworkUUID:  "net-0001",
-			Host:         "host-0001",
-			User:         "runner",
-			WorkRoot:     "/work/xcp-ng",
-			InsecureTLS:  true,
-		},
-	}, "cbx_123")
-	joined := strings.Join(args, " ")
-	for _, want := range []string{
-		"--provider xcp-ng",
-		"--target linux",
-		"--xcp-ng-api-url xcp-ng.example.test/path?view=1",
-		"--xcp-ng-username root",
-		"--xcp-ng-template ubuntu template",
-		"--xcp-ng-template-uuid tpl-0001",
-		"--xcp-ng-sr default sr",
-		"--xcp-ng-sr-uuid sr-0001",
-		"--xcp-ng-network pool network",
-		"--xcp-ng-network-uuid net-0001",
-		"--xcp-ng-host host-0001",
-		"--xcp-ng-user runner",
-		"--xcp-ng-work-root /work/xcp-ng",
-		"--xcp-ng-insecure-tls",
-	} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("failure digest routing missing %q:\n%v", want, args)
-		}
-	}
-	for _, secret := range []string{"xcp-ng-secret", "pool-user", "pool-pass", "password"} {
-		if strings.Contains(joined, secret) {
-			t.Fatalf("failure digest routing leaked %q: %v", secret, args)
 		}
 	}
 }

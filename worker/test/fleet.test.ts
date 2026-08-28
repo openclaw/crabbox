@@ -10792,6 +10792,469 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  it.each([
+    ...(["fixed", "ordinary", "legacy"] as const).flatMap((mode) => [
+      ...(["none", "during", "after", "retain", "retainDuring"] as const).map((release) => ({
+        mode,
+        release,
+        responseLost: true,
+        cancelAttempt: false,
+      })),
+      ...(["during", "after", "retain", "retainDuring"] as const).map((release) => ({
+        mode,
+        release,
+        responseLost: false,
+        cancelAttempt: false,
+      })),
+    ]),
+    ...(["during", "after"] as const).map((release) => ({
+      mode: "ordinary" as const,
+      release,
+      responseLost: true,
+      cancelAttempt: true,
+    })),
+  ])(
+    "retains managed Daytona uncertain-create cleanup for $mode with release=$release, responseLost=$responseLost, cancelAttempt=$cancelAttempt",
+    async ({ mode, release, responseLost, cancelAttempt }) => {
+      const method = mode === "fixed" ? "PUT" : "POST";
+      const retain = release === "retain" || release === "retainDuring";
+      const releaseDuring = release === "during" || release === "retainDuring";
+      const createAttemptID =
+        mode === "ordinary" ? "cat_10000000000000000000000000000001" : undefined;
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const now = Date.UTC(2026, 7, 28, 12);
+      vi.setSystemTime(now);
+      try {
+        const storage = new MemoryStorage();
+        const leaseID = "cbx_abcdef123490";
+        const sandboxID = "b1d5afbd-9eda-4ead-9fa5-52c3238e691a";
+        const accepted = deferred<void>();
+        const loseResponse = deferred<void>();
+        const deleted: string[] = [];
+        const providerRequests: string[] = [];
+        const releaseStatuses: number[] = [];
+        let visible = false;
+        let createBody: Record<string, unknown> | undefined;
+        let sandbox: Record<string, unknown> | undefined;
+        vi.stubGlobal(
+          "fetch",
+          vi.fn<typeof fetch>(async (input, init) => {
+            const providerRequest = new Request(input, init);
+            const url = new URL(providerRequest.url);
+            const operation = `${providerRequest.method} ${url.pathname}`;
+            providerRequests.push(operation);
+            if (url.origin !== "https://daytona.example") {
+              throw new Error(`unexpected provider origin: ${url.origin}`);
+            }
+            if (operation === "POST /api/sandbox") {
+              createBody = (await providerRequest.json()) as Record<string, unknown>;
+              const ttlMinutes = createBody["ttlMinutes"];
+              sandbox = {
+                ...createBody,
+                id: sandboxID,
+                state: "started",
+                ...(typeof ttlMinutes === "number"
+                  ? {
+                      createdAt: new Date(now).toISOString(),
+                      autoDestroyAt: new Date(now + ttlMinutes * 60_000).toISOString(),
+                    }
+                  : {}),
+              };
+              accepted.resolve();
+              await loseResponse.promise;
+              if (responseLost)
+                throw new TypeError("provider create response lost after acceptance");
+              return jsonResponse(sandbox);
+            }
+            if (operation === `POST /api/sandbox/${sandboxID}/ssh-access`) {
+              return jsonResponse({
+                token: "synthetic-ssh-token",
+                expiresAt: new Date(now + 2 * 60 * 60_000).toISOString(),
+                sshCommand: "ssh synthetic-ssh-token@ssh.daytona.example",
+              });
+            }
+            if (operation === "GET /api/sandbox") {
+              return jsonResponse({ items: visible && sandbox ? [sandbox] : [] });
+            }
+            if (operation === `GET /api/sandbox/${sandboxID}`) {
+              return sandbox ? jsonResponse(sandbox) : new Response(null, { status: 404 });
+            }
+            if (operation === `DELETE /api/sandbox/${sandboxID}`) {
+              deleted.push(sandboxID);
+              sandbox = undefined;
+              return new Response(null, { status: 204 });
+            }
+            throw new Error(`unexpected provider operation: ${operation}`);
+          }),
+        );
+        const env = {
+          DAYTONA_CRABBOX_KEY: "synthetic-daytona-key",
+          CRABBOX_DAYTONA_API_URL: "https://daytona.example/api",
+          CRABBOX_DAYTONA_ORGANIZATION_ID: "synthetic-organization",
+          CRABBOX_DAYTONA_SNAPSHOT: "test-ready",
+          CF_VERSION_METADATA: { id: "before-restart" },
+        };
+        const headers = {
+          "x-crabbox-owner": "alice@example.com",
+          "x-crabbox-org": "example-org",
+        };
+        const fleet = testFleet(storage, {}, env);
+        const create = fleet
+          .fetch(
+            request(method, method === "PUT" ? `/v1/leases/${leaseID}` : "/v1/leases", {
+              headers,
+              body: {
+                leaseID,
+                createAttemptID,
+                keep: retain,
+                slug: "uncertain-daytona",
+                provider: "daytona",
+                sshPublicKey: "ssh-ed25519 test",
+                ttlSeconds: 600,
+                idleTimeoutSeconds: 600,
+              },
+            }),
+          )
+          .then(
+            async (response) => ({ status: response.status, body: await response.json() }),
+            (error: unknown) => ({ error: String(error) }),
+          );
+        await Promise.race([
+          accepted.promise,
+          create.then((result) => {
+            throw new Error(
+              `create returned before provider acceptance: ${JSON.stringify(result)}`,
+            );
+          }),
+        ]);
+        expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.state).toBe("provisioning");
+        const releasePath = `/v1/leases/${leaseID}/${cancelAttempt ? "cancel-create" : "release"}`;
+        const releaseBody = cancelAttempt ? { createAttemptID } : { delete: !retain };
+        if (releaseDuring) {
+          const released = await fleet.fetch(
+            request("POST", releasePath, { headers, body: releaseBody }),
+          );
+          releaseStatuses.push(released.status);
+        }
+        loseResponse.resolve();
+        const createResult = await create;
+        const expectedStatus = responseLost ? 500 : releaseDuring ? 409 : 201;
+        expect(createResult).toMatchObject({ status: expectedStatus });
+        const afterFailure = structuredClone(storage.value<LeaseRecord>(`lease:${leaseID}`));
+        if (release === "after" || release === "retain") {
+          const released = await fleet.fetch(
+            request("POST", releasePath, { headers, body: releaseBody }),
+          );
+          releaseStatuses.push(released.status);
+        }
+        expect(releaseStatuses).toEqual(release === "none" ? [] : [200]);
+        const afterRelease = structuredClone(storage.value<LeaseRecord>(`lease:${leaseID}`));
+        visible = true;
+        const restartedFleet = testFleet(
+          storage,
+          {},
+          {
+            ...env,
+            CF_VERSION_METADATA: { id: "after-restart" },
+          },
+        );
+        await restartedFleet.alarm();
+        vi.setSystemTime(now + 6 * 60_000);
+        await restartedFleet.alarm();
+        vi.setSystemTime(now + 60 * 60_000);
+        await restartedFleet.alarm();
+        const finalLease = storage.value<LeaseRecord>(`lease:${leaseID}`);
+        console.info(
+          "managed-daytona-uncertain-create",
+          JSON.stringify({
+            method,
+            release,
+            responseLost,
+            nativeLifecycle: {
+              autoStopInterval: createBody?.["autoStopInterval"],
+              autoDeleteInterval: createBody?.["autoDeleteInterval"],
+            },
+            checkpoints: [afterFailure, afterRelease, finalLease].map((lease) => ({
+              state: lease?.state,
+              cloudID: lease?.cloudID,
+              resourceMayExist: lease?.provisioningResourceMayExist,
+              requestStartedAt: lease?.provisioningRequestStartedAt,
+              releaseDeletesServer: lease?.releaseDeletesServer,
+            })),
+            nextAlarm: storage.alarm() ?? null,
+            providerRequests,
+            deleted,
+            resourceStillExists: Boolean(sandbox),
+          }),
+        );
+        expect.soft(Boolean(afterFailure?.provisioningResourceMayExist)).toBe(responseLost);
+        expect.soft(Boolean(afterRelease?.provisioningRequestStartedAt)).toBe(responseLost);
+        expect.soft(deleted).toEqual(responseLost || retain ? [] : [sandboxID]);
+        expect.soft(Boolean(sandbox)).toBe(responseLost || retain);
+        const accessRequests = providerRequests.filter((operation) =>
+          operation.endsWith("/ssh-access"),
+        );
+        expect.soft(accessRequests).toHaveLength(responseLost || releaseDuring ? 0 : 1);
+        expect.soft(createBody?.["ttlMinutes"]).toBe(10);
+        expect.soft(finalLease?.providerScope).toMatch(/^daytona:context:v1:[a-f0-9]{64}$/);
+        expect.soft(Boolean(finalLease?.cleanupError)).toBe(responseLost);
+        expect.soft(Boolean(finalLease?.failureError)).toBe(responseLost);
+        expect.soft(storage.alarm()).toBeUndefined();
+        expect.soft(providerRequests).not.toContain("GET /api/sandbox");
+        expect
+          .soft(providerRequests.filter((operation) => operation === "POST /api/sandbox"))
+          .toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(["create-response", "readiness"] as const)(
+    "preserves managed Daytona cleanup across restart during %s",
+    async (phase) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const now = Date.UTC(2026, 7, 28, 12);
+      vi.setSystemTime(now);
+      const storage = new MemoryStorage();
+      const leaseID = "cbx_abcdef123491";
+      const sandboxID = "77c94e74-624d-4083-9939-1f190d18dced";
+      const entered = deferred<void>();
+      const resume = deferred<void>();
+      const operations: string[] = [];
+      let sandbox: Record<string, unknown> | undefined;
+      let pausedReadiness = false;
+      let deleted = false;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn<typeof fetch>(async (input, init) => {
+          const providerRequest = new Request(input, init);
+          const url = new URL(providerRequest.url);
+          const operation = `${providerRequest.method} ${url.pathname}`;
+          operations.push(operation);
+          if (url.origin !== "https://daytona.example")
+            throw new Error(`unexpected origin ${url.origin}`);
+          if (operation === "POST /api/sandbox") {
+            const body = (await providerRequest.json()) as Record<string, unknown>;
+            const ttlMinutes = body["ttlMinutes"];
+            sandbox = {
+              ...body,
+              id: sandboxID,
+              state: "started",
+              ...(typeof ttlMinutes === "number"
+                ? {
+                    createdAt: new Date(now).toISOString(),
+                    autoDestroyAt: new Date(now + ttlMinutes * 60_000).toISOString(),
+                  }
+                : {}),
+            };
+            if (phase === "create-response") {
+              entered.resolve();
+              await resume.promise;
+            }
+            return jsonResponse(sandbox);
+          }
+          if (operation === `GET /api/sandbox/${sandboxID}`) {
+            if (phase === "readiness" && !pausedReadiness) {
+              pausedReadiness = true;
+              entered.resolve();
+              await resume.promise;
+            }
+            return deleted ? new Response(null, { status: 404 }) : jsonResponse(sandbox);
+          }
+          if (operation === `DELETE /api/sandbox/${sandboxID}`) {
+            deleted = true;
+            return new Response(null, { status: 204 });
+          }
+          if (operation === `POST /api/sandbox/${sandboxID}/ssh-access`) {
+            return jsonResponse({
+              token: "synthetic-ssh-token",
+              expiresAt: new Date(now + 2 * 60 * 60_000).toISOString(),
+              sshCommand: "ssh synthetic-ssh-token@ssh.daytona.example",
+            });
+          }
+          throw new Error(`unexpected operation ${operation}`);
+        }),
+      );
+      const env = {
+        DAYTONA_CRABBOX_KEY: "synthetic-daytona-key",
+        CRABBOX_DAYTONA_API_URL: "https://daytona.example/api",
+        CF_VERSION_METADATA: { id: "original-runtime" },
+      };
+      const fleet = testFleet(storage, {}, env);
+      const creating = fleet.fetch(
+        request("PUT", `/v1/leases/${leaseID}`, {
+          headers: { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" },
+          body: {
+            provider: "daytona",
+            slug: "restart-daytona",
+            sshPublicKey: "ssh-ed25519 test",
+            ttlSeconds: 600,
+            idleTimeoutSeconds: 600,
+          },
+        }),
+      );
+      try {
+        await Promise.race([
+          entered.promise,
+          creating.then(async (response) => {
+            throw new Error(`create returned before pause: ${await response.text()}`);
+          }),
+        ]);
+        const pending = storage.value<LeaseRecord>(`lease:${leaseID}`);
+        expect(pending?.cloudID).toBe(phase === "readiness" ? sandboxID : "");
+        expect(pending?.providerScope).toMatch(/^daytona:context:v1:[a-f0-9]{64}$/);
+        const restarted = testFleet(
+          storage,
+          {},
+          { ...env, CF_VERSION_METADATA: { id: "new-runtime" } },
+        );
+        await restarted.alarm();
+        vi.setSystemTime(now + (phase === "readiness" ? 11 : 6) * 60_000);
+        await restarted.alarm();
+        expect(deleted).toBe(phase === "readiness");
+        expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.state).not.toBe("active");
+        resume.resolve();
+        const response = await creating;
+        expect(response.status).toBe(phase === "readiness" ? 500 : 409);
+        vi.setSystemTime(now + 20 * 60_000);
+        await restarted.alarm();
+        const completed = storage.value<LeaseRecord>(`lease:${leaseID}`);
+        expect(deleted).toBe(true);
+        expect(completed?.cloudID).toBe(sandboxID);
+        expect(completed?.state).not.toBe("active");
+        expect(completed?.cleanupError).toBeUndefined();
+        expect(completed?.provisioningRequestStartedAt).toBeUndefined();
+        expect(operations.filter((operation) => operation.startsWith("DELETE "))).toEqual([
+          `DELETE /api/sandbox/${sandboxID}`,
+        ]);
+        expect(operations.filter((operation) => operation.endsWith("/ssh-access"))).toEqual([]);
+        expect(operations).not.toContain("GET /api/sandbox");
+        expect(storage.alarm()).toBeUndefined();
+      } finally {
+        resume.resolve();
+        await creating;
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(["key", "organization", "api", "legacy"] as const)(
+    "keeps managed Daytona cleanup unresolved after %s context loss",
+    async (change) => {
+      const storage = new MemoryStorage();
+      const now = Date.now();
+      const env: Env = {
+        FLEET: {} as DurableObjectNamespace,
+        HETZNER_TOKEN: "",
+        DAYTONA_CRABBOX_KEY: "synthetic-original-key",
+        CRABBOX_DAYTONA_ORGANIZATION_ID: "synthetic-organization",
+        CRABBOX_DAYTONA_API_URL: "https://daytona.example/api",
+      };
+      const prepared = await new DaytonaProvider(env).prepareLeaseCreate(
+        leaseConfig({ provider: "daytona", sshPublicKey: "ssh-ed25519 test" }),
+        testLease({
+          id: "cbx_abcdef123492",
+          slug: "scoped-daytona",
+          provider: "daytona",
+          owner: "alice@example.com",
+          org: "example-org",
+          cloudID: "1111174a-fdee-48e0-9e15-ffadbd323d42",
+          state: "active",
+          expiresAt: new Date(now + 60 * 60_000).toISOString(),
+          providerAccessExpiresAt: new Date(now + 2 * 60 * 60_000).toISOString(),
+        }),
+      );
+      const lease = prepared.lease;
+      if (change === "legacy") delete lease.providerScope;
+      const originalScope = lease.providerScope;
+      storage.seed(`lease:${lease.id}`, lease);
+      const operations: string[] = [];
+      let deleted = false;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn<typeof fetch>(async (input, init) => {
+          const providerRequest = new Request(input, init);
+          const url = new URL(providerRequest.url);
+          const operation = `${providerRequest.method} ${url.pathname}`;
+          operations.push(operation);
+          if (operation === `GET /api/sandbox/${lease.cloudID}`) {
+            return deleted
+              ? new Response(null, { status: 404 })
+              : jsonResponse({
+                  id: lease.cloudID,
+                  name: "scoped-daytona",
+                  state: "started",
+                  labels: {
+                    crabbox: "true",
+                    created_by: "crabbox",
+                    lease: lease.id,
+                    slug: "scoped-daytona",
+                    provider: "daytona",
+                    owner: "alice_example.com",
+                  },
+                });
+          }
+          if (operation === `DELETE /api/sandbox/${lease.cloudID}`) {
+            deleted = true;
+            return new Response(null, { status: 204 });
+          }
+          throw new Error(`unexpected operation ${operation}`);
+        }),
+      );
+      const changed: Partial<Env> = {
+        key: { DAYTONA_CRABBOX_KEY: "synthetic-replacement-key" },
+        organization: { CRABBOX_DAYTONA_ORGANIZATION_ID: "other-organization" },
+        api: { CRABBOX_DAYTONA_API_URL: "https://other-daytona.example/api" },
+        legacy: {},
+      }[change];
+      const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+      const fleet = testFleet(storage, {}, { ...env, ...changed });
+      const release = await fleet.fetch(
+        request("POST", `/v1/leases/${lease.id}/release`, { headers, body: { delete: true } }),
+      );
+      expect(release.status).toBe(200);
+      await fleet.alarm();
+      const unresolved = storage.value<LeaseRecord>(`lease:${lease.id}`);
+      expect(unresolved).toMatchObject({
+        state: "released",
+        cloudID: lease.cloudID,
+        provisioningResourceMayExist: true,
+        provisioningFailureRetryable: false,
+      });
+      expect(unresolved?.cleanupError).toContain(
+        "original API, organization, and credential context",
+      );
+      expect(unresolved?.providerScope).toBe(originalScope);
+      expect(operations).toEqual([]);
+      expect(storage.alarm()).toBeUndefined();
+      await fleet.alarm();
+      expect(operations).toEqual([]);
+
+      const restored = testFleet(storage, {}, env);
+      const retry = await restored.fetch(
+        request("POST", `/v1/leases/${lease.id}/release`, { headers, body: { delete: true } }),
+      );
+      expect(retry.status).toBe(200);
+      await restored.alarm();
+      expect(deleted).toBe(change !== "legacy");
+      expect(Boolean(storage.value<LeaseRecord>(`lease:${lease.id}`)?.cleanupError)).toBe(
+        change === "legacy",
+      );
+      const expectedOperations =
+        change === "legacy"
+          ? []
+          : [
+              `GET /api/sandbox/${lease.cloudID}`,
+              `DELETE /api/sandbox/${lease.cloudID}`,
+              `GET /api/sandbox/${lease.cloudID}`,
+            ];
+      expect(operations).toEqual(expectedOperations);
+      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.providerScope).toBe(originalScope);
+      expect(storage.alarm()).toBeUndefined();
+    },
+  );
+
   it("keeps checking after an empty interrupted provisioning lookup", async () => {
     const storage = new MemoryStorage();
     const now = Date.now();

@@ -1,0 +1,144 @@
+[
+  {
+    "name": "linux-minimal",
+    "target": "linux",
+    "architecture": "amd64",
+    "user": "crabbox",
+    "workRoot": "/work/crabbox",
+    "publicKey": "ssh-ed25519 fixture",
+    "ports": [
+      "2222",
+      "22"
+    ]
+  },
+  {
+    "name": "linux-code-amd64",
+    "target": "linux",
+    "architecture": "amd64",
+    "code": true,
+    "tailscale": true,
+    "user": "crabbox",
+    "workRoot": "/work/crabbox",
+    "publicKey": "ssh-ed25519 fixture",
+    "ports": [
+      "2222",
+      "22"
+    ],
+    "tailscaleMode": "pinned"
+  },
+  {
+    "name": "linux-code-arm64",
+    "target": "linux",
+    "architecture": "arm64",
+    "code": true,
+    "tailscale": true,
+    "user": "crabbox",
+    "workRoot": "/work/crabbox",
+    "publicKey": "ssh-ed25519 fixture",
+    "ports": [
+      "2222",
+      "22"
+    ],
+    "tailscaleMode": "package"
+  },
+  {
+    "name": "linux-desktop-browser",
+    "target": "linux",
+    "architecture": "amd64",
+    "desktop": true,
+    "browser": true,
+    "user": "crabbox",
+    "workRoot": "/work/team's $HOME `id` 🦀",
+    "publicKey": "ssh-ed25519 fixture",
+    "ports": [
+      "2222",
+      "22"
+    ]
+  },
+  {
+    "name": "windows-native",
+    "target": "windows",
+    "architecture": "amd64",
+    "user": "crabbox",
+    "workRoot": "C:\\crabbox",
+    "publicKey": "ssh-ed25519 fixture",
+    "ports": [
+      "2222",
+      "22"
+    ]
+  },
+  {
+    "name": "windows-quotes",
+    "target": "windows",
+    "architecture": "amd64",
+    "user": "alice's $HOME `id` 🦀",
+    "workRoot": "C:\\team's $HOME `id`",
+    "publicKey": "ssh-ed25519 test' $(Write-Error injection)",
+    "ports": [
+      "2222",
+      "22"
+    ]
+  },
+  {
+    "name": "windows-desktop",
+    "target": "windows",
+    "architecture": "amd64",
+    "desktop": true,
+    "user": "crabbox",
+    "workRoot": "C:\\crabbox",
+    "publicKey": "ssh-ed25519 fixture",
+    "ports": [
+      "2222",
+      "22"
+    ]
+  },
+  {
+    "name": "windows-wsl2",
+    "target": "windows",
+    "architecture": "amd64",
+    "windowsMode": "wsl2",
+    "user": "crabbox",
+    "workRoot": "/work/team's $HOME `id`",
+    "publicKey": "ssh-ed25519 fixture",
+    "ports": [
+      "2222",
+      "22"
+    ]
+  },
+  {
+    "name": "macos-amd64",
+    "target": "macos",
+    "architecture": "amd64",
+    "user": "ec2-user",
+    "workRoot": "/Users/ec2-user/crabbox",
+    "publicKey": "ssh-ed25519 fixture",
+    "ports": [
+      "2222",
+      "22"
+    ]
+  },
+  {
+    "name": "macos-arm64-quotes",
+    "target": "macos",
+    "architecture": "arm64",
+    "user": "alice's $HOME `id` 🦀",
+    "workRoot": "/Users/alice's $HOME `id`/work",
+    "publicKey": "ssh-ed25519 fixture' $HOME `id` 🦀",
+    "ports": [
+      "2222",
+      "22"
+    ]
+  },
+  {
+    "name": "macos-heredoc",
+    "target": "macos",
+    "architecture": "arm64",
+    "user": "alice",
+    "workRoot": "/work/line\nREADY\nprintf injected\r",
+    "publicKey": "ssh-ed25519 fixture",
+    "ports": [
+      "2222",
+      "22"
+    ]
+  }
+]

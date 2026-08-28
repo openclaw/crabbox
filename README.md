@@ -160,6 +160,8 @@ executables or assets, especially `crabbox-apple-vm-helper`, and it is not the
 signed/notarized prebuilt distribution. Use Homebrew or a release archive for
 complete platform capabilities, notably the Apple VM provider on Apple Silicon.
 
+The native Windows CLI requires Windows 10 version 1709+ or Windows Server
+2019+ for snapshot-preserving state replacement and cleanup.
 Supported WSL2 and x64 no-WSL Windows transfer selection requires a build from
 current `main` or Crabbox v0.42.1 and newer. Follow the
 [Windows installation guide](docs/windows-install.md) for the supported setup.
@@ -547,7 +549,10 @@ or `--capture-stderr <path>`. Add `--preflight` for a remote capability
 snapshot, `--keep-on-failure` to SSH into the exact failed one-shot lease, or
 `--download remote=local` to copy a successful-run artifact back. Failed
 SSH-backed and Blacksmith delegated runs save local `.crabbox/captures/*.tar.gz`
-bundles by default. Captured files are not redacted by Crabbox.
+bundles by default, falling back to the Crabbox user state directory when the
+project destination is unwritable. The reported `failure-bundle local=...`
+path identifies the saved bundle; see [local capture storage](docs/observability.md#capturing-run-output-locally).
+Captured files are not redacted by Crabbox.
 
 Optional Tailscale reachability for managed Linux leases:
 
@@ -629,6 +634,7 @@ npm run build:node --prefix worker
 
 # Repository scripts
 node scripts/generate-linux-readiness.mjs --check
+node scripts/generate-bootstrap.mjs --check
 node --test scripts/*.test.js scripts/*.test.mjs
 
 # Docs
@@ -649,6 +655,12 @@ Developer ID sign/notarize the macOS candidates locally, verify the exact draft
 on native Apple Silicon and Intel runners from protected-default code, then
 authorize publication and the Homebrew update as separate gates. See
 [Release engineering](docs/RELEASING.md).
+
+Git-overlay integration tests use real Git with task-owned local and loopback
+origins. Their local SSH stand-ins isolate Git authentication settings and
+disable interactive credential requests, including during ordinary seed
+fallback. A credential-helper/askpass canary guards this test-only boundary;
+the separate production overlay security tests still inject hostile Git config.
 
 Cloudflare, Node/PostgreSQL, container, ingress, secrets, and DNS deployment live
 in [docs/infrastructure.md](docs/infrastructure.md). The dedicated ECS Fargate

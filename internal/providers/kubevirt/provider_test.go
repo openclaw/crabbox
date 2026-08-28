@@ -102,7 +102,7 @@ func TestCommandRoutingArgsPreservesEffectiveConfig(t *testing.T) {
 	cfg.KubeVirt.SSHKey = "/tmp/id_ed25519"
 	cfg.KubeVirt.SSHPublicKey = "/tmp/id_ed25519.pub"
 	cfg.KubeVirt.DeleteOnRelease = false
-	got := strings.Join((Provider{}).CommandRoutingArgs(cfg, "cbx_abcdef123456"), "\n")
+	got := strings.Join((Provider{}).CommandRouting(cfg, core.CommandRoutingRequest{LeaseID: "cbx_abcdef123456", Purpose: core.CommandRoutingReconnect}).Args, "\n")
 	for _, want := range []string{
 		"--kubevirt-kubectl\nkubectl-custom",
 		"--kubevirt-context\ntest-context",
@@ -1085,4 +1085,20 @@ func (r *recordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (
 		return core.LocalCommandResult{ExitCode: 1, Stderr: stderr}, io.ErrUnexpectedEOF
 	}
 	return core.LocalCommandResult{Stdout: stdout}, nil
+}
+
+func TestCommandRoutingUsesEffectiveTopLevelWorkRoot(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.WorkRoot = "/srv/app"
+	for _, purpose := range []core.CommandRoutingPurpose{core.CommandRoutingReconnect, core.CommandRoutingRetry, core.CommandRoutingStop} {
+		route := (Provider{}).CommandRouting(cfg, core.CommandRoutingRequest{LeaseID: "lease", Purpose: purpose})
+		if !strings.Contains(strings.Join(route.Args, " "), "--kubevirt-work-root /srv/app") {
+			t.Fatalf("%s lost effective work root: %v", purpose, route.Args)
+		}
+	}
+	cfg.KubeVirt.WorkRoot = "/provider/root"
+	route := (Provider{}).CommandRouting(cfg, core.CommandRoutingRequest{LeaseID: "lease", Purpose: core.CommandRoutingReconnect})
+	if !strings.Contains(strings.Join(route.Args, " "), "--kubevirt-work-root /provider/root") {
+		t.Fatalf("lost provider work root: %v", route.Args)
+	}
 }

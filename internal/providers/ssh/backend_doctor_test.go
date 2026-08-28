@@ -27,6 +27,7 @@ func TestStaticSSHDoctorDoesNotReportProbeWhenUnchecked(t *testing.T) {
 }
 
 func TestStaticSSHRequestedSlugPersistsThroughClaimedResolveAndList(t *testing.T) {
+	stubStaticArchitecture(t)
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
@@ -108,6 +109,7 @@ func TestStaticSSHRequestedSlugPersistsThroughClaimedResolveAndList(t *testing.T
 }
 
 func TestStaticSSHRequestedSlugAvoidsClaimCollision(t *testing.T) {
+	stubStaticArchitecture(t)
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())

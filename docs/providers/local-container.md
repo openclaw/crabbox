@@ -232,8 +232,18 @@ metadata updates.
 
 ## Lease behavior
 
+Custom cache directories must be mounted into the Docker VM. If cache settings
+change after creation, stop refuses to delete an existing bootstrap directory
+outside the current trusted cache/temp roots and retains the claim and key.
+Restore the original cache settings, or explicitly remove the verified residue,
+then retry stop. Orphan cleanup also preserves claims with bootstrap residue.
+Bootstrap paths from older releases under the current system temp root remain
+supported.
+
 1. `warmup` or a fresh `run` creates a per-lease SSH key.
-2. The provider runs `docker run -d` with Crabbox labels, loopback SSH port
+2. The provider writes its bootstrap script under the user's cache directory,
+   normally shared with desktop Docker VMs, then runs
+   `docker run -d` with Crabbox labels, loopback SSH port
    publishing, and the public-key auth environment the bootstrap script needs.
 3. On Debian/Ubuntu-compatible images, the container installs
    `openssh-server`, `git`, `rsync`, `curl`, and `sudo` when they are missing,

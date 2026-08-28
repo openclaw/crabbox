@@ -30,6 +30,20 @@ type recordingRunner struct {
 	run       func(core.LocalCommandRequest) (core.LocalCommandResult, error)
 }
 
+type recordedCommandSummary struct {
+	Name string
+	Args []string
+}
+
+func (r *recordingRunner) commandSummary() []recordedCommandSummary {
+	// Keep captured requests intact, but never format their environment or streams.
+	summary := make([]recordedCommandSummary, len(r.calls))
+	for i, req := range r.calls {
+		summary[i] = recordedCommandSummary{Name: req.Name, Args: req.Args}
+	}
+	return summary
+}
+
 type localContainerTestClock struct{ now time.Time }
 
 func (c localContainerTestClock) Now() time.Time { return c.now }
@@ -61,7 +75,7 @@ func recordedArgsForCommand(t *testing.T, runner *recordingRunner, command strin
 			return strings.Join(runner.calls[i].Args, "\n")
 		}
 	}
-	t.Fatalf("%s command was not recorded: %#v", command, runner.calls)
+	t.Fatalf("%s command was not recorded: %#v", command, runner.commandSummary())
 	return ""
 }
 
@@ -89,6 +103,7 @@ func testBackend(runner *recordingRunner) *backend {
 		Memory:   "8g",
 		Network:  "bridge",
 	}
+	core.MarkLocalContainerRuntimeExplicit(&cfg)
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
 	b.captureRuntimeScope = func(context.Context, core.Config) (checkpointScope, error) {
 		return checkpointScope{Runtime: "docker", Context: "default", Endpoint: "unix:///tmp/docker-test.sock", DaemonID: "daemon-test"}, nil
@@ -176,6 +191,13 @@ func TestFixedAcquireCreatesRequestedIDAndReplays(t *testing.T) {
 		Repo: core.Repo{Root: t.TempDir()}, Keep: true,
 		RequestedLeaseID: "cbx_abcdef123451", RequestedSlug: "pending-test",
 	}
+	// Generate the test-owned key before hiding system tools; replay reuses it.
+	if _, _, err := core.EnsureTestboxKeyForConfig(b.cfg, req.RequestedLeaseID); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	writeExecutable(t, filepath.Join(dir, "podman"))
+	t.Setenv("PATH", dir)
 
 	first, err := b.Acquire(context.Background(), req)
 	if err != nil {
@@ -508,15 +530,16 @@ func TestReleasedFixedLeaseTombstoneDoesNotReserveSlugRouting(t *testing.T) {
 
 func TestFixedAcquireRecoversPreparedLiveContainer(t *testing.T) {
 	b, runner, _, _, _, _ := pendingAcquireBackend(t)
+	sshErr := errors.New("temporary SSH transport failure")
 	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
-		return errors.New("temporary SSH transport failure")
+		return sshErr
 	}
 	req := core.AcquireRequest{
 		Repo: core.Repo{Root: t.TempDir()}, Keep: true,
 		RequestedLeaseID: "cbx_abcdef123454", RequestedSlug: "pending-test",
 	}
-	if _, err := b.Acquire(context.Background(), req); err == nil {
-		t.Fatal("initial fixed acquisition unexpectedly succeeded")
+	if _, err := b.Acquire(context.Background(), req); !errors.Is(err, sshErr) {
+		t.Fatalf("initial fixed acquisition error=%v, want temporary SSH transport failure", err)
 	}
 	claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
 	if err != nil || claim.Provider != core.FixedLocalContainerClaimProvider ||
@@ -759,6 +782,13 @@ func TestFixedAcquireStoppedContainerNeverBindsMismatchedIdentity(t *testing.T) 
 			}
 			_, err := b.Acquire(context.Background(), req)
 			requireFixedLocalContainerConflict(t, err)
+			if test.mutateAttempt {
+				if !errors.Is(err, errContainerIdentityMismatch) {
+					t.Fatalf("stopped-container replay error=%v, want durable container identity mismatch", err)
+				}
+			} else if errors.Is(err, errContainerIdentityMismatch) || !strings.Contains(err.Error(), "does not match its fixed create intent") {
+				t.Fatalf("stopped-container replay error=%v, want fixed create intent mismatch", err)
+			}
 			claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
 			if err != nil || claim.CloudID != "" || len(claim.Labels) != 0 ||
 				(test.mutateAttempt && claim.FixedCreateIntent.Attempt["container_id"] != "different-container") {
@@ -1338,7 +1368,7 @@ func TestResolveContainerHydratesCustomRuntimeRouteBeforeLookup(t *testing.T) {
 						}
 					}
 					if !foundHost {
-						t.Fatalf("captured Docker host missing: %v", req.Env)
+						t.Fatalf("captured Docker host missing: command=%s args=%q", req.Name, req.Args)
 					}
 				}
 				switch firstArg(args) {
@@ -1640,7 +1670,7 @@ func TestAssertRequestedArchitectureOmittedDoesNotProbe(t *testing.T) {
 		t.Fatalf("architecture=%q err=%v", got, err)
 	}
 	if len(runner.calls) != 0 {
-		t.Fatalf("omitted architecture probed runtime: %#v", runner.calls)
+		t.Fatalf("omitted architecture probed runtime: %#v", runner.commandSummary())
 	}
 }
 
@@ -1662,7 +1692,7 @@ func TestAcquireArchitectureMismatchFailsBeforeContainerCreation(t *testing.T) {
 				t.Fatalf("err=%v", err)
 			}
 			if len(runner.calls) != 1 {
-				t.Fatalf("runtime calls=%d, want architecture probe only: %#v", len(runner.calls), runner.calls)
+				t.Fatalf("runtime calls=%d, want architecture probe only: %#v", len(runner.calls), runner.commandSummary())
 			}
 		})
 	}
@@ -1693,7 +1723,7 @@ func TestResolveArchitectureAssertionMatchesAndNormalizesAliases(t *testing.T) {
 				t.Fatalf("resolved architecture=%q, want %q", got, tc.want)
 			}
 			if len(runner.calls) != 3 {
-				t.Fatalf("runtime calls=%d, want info/list/inspect: %#v", len(runner.calls), runner.calls)
+				t.Fatalf("runtime calls=%d, want info/list/inspect: %#v", len(runner.calls), runner.commandSummary())
 			}
 			for _, call := range runner.calls {
 				if slices.Contains(call.Args, "--platform") {
@@ -1730,7 +1760,7 @@ func TestResolveArchitectureAssertionUsesCapturedRemoteRuntimeRoute(t *testing.T
 				t.Fatalf("resolved architecture=%q, want %q", got, want)
 			}
 			if len(runner.calls) != 3 {
-				t.Fatalf("runtime calls=%d, want info/list/inspect: %#v", len(runner.calls), runner.calls)
+				t.Fatalf("runtime calls=%d, want info/list/inspect: %#v", len(runner.calls), runner.commandSummary())
 			}
 		})
 	}
@@ -1757,7 +1787,7 @@ func TestResolveArchitectureAssertionFailurePrecedesContainerUseAndClaimMutation
 				t.Fatalf("Resolve error=%v, want %q", err, tc.wantError)
 			}
 			if len(runner.calls) != 1 {
-				t.Fatalf("runtime calls=%d, want architecture probe only: %#v", len(runner.calls), runner.calls)
+				t.Fatalf("runtime calls=%d, want architecture probe only: %#v", len(runner.calls), runner.commandSummary())
 			}
 			for _, forbidden := range []string{"ps", "inspect", "exec", "run", "rm"} {
 				if slices.Contains(runner.calls[0].Args, forbidden) {
@@ -1907,12 +1937,16 @@ func TestCreateContainerUsesDockerCompatibleSSHLease(t *testing.T) {
 	cfg := b.configForRun()
 	runner.responses[commandKey([]string{"run"})] = core.LocalCommandResult{Stdout: "container123456\n"}
 
-	id, _, err := b.createContainer(context.Background(), cfg, "crabbox-blue", "cbx_123", "blue-lobster", "ssh-ed25519 AAAA test", true)
+	id, bootstrapDir, err := b.createContainer(context.Background(), cfg, "crabbox-blue", "cbx_123", "blue-lobster", "ssh-ed25519 AAAA test", true)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = os.RemoveAll(bootstrapDir) })
 	if id != "container123456" {
 		t.Fatalf("id=%q", id)
+	}
+	if parent := filepath.Dir(bootstrapDir); parent != localContainerBootstrapRoot() {
+		t.Fatalf("bootstrap parent=%q want %q", parent, localContainerBootstrapRoot())
 	}
 	if len(runner.calls) != 1 {
 		t.Fatalf("calls=%d", len(runner.calls))
@@ -3708,12 +3742,12 @@ func TestUnclaimedRollbackContinuesSidecarCleanupAfterError(t *testing.T) {
 	if _, err := os.Stat(bootstrapDir); !os.IsNotExist(err) {
 		t.Fatalf("bootstrap cleanup did not continue: %v", err)
 	}
-	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
-		t.Fatalf("key cleanup did not continue: %v", err)
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("key should remain after incomplete sidecar cleanup: %v", err)
 	}
 }
 
-func TestPendingRollbackContinuesSidecarAndKeyCleanupAfterError(t *testing.T) {
+func TestPendingRollbackContinuesSidecarCleanupAndRetainsKeyAfterError(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_pending_sidecars"
@@ -3780,8 +3814,8 @@ func TestPendingRollbackContinuesSidecarAndKeyCleanupAfterError(t *testing.T) {
 	if _, err := os.Stat(bootstrapDir); !os.IsNotExist(err) {
 		t.Fatalf("bootstrap cleanup did not continue: %v", err)
 	}
-	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
-		t.Fatalf("key cleanup did not continue: %v", err)
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("key should remain after incomplete sidecar cleanup: %v", err)
 	}
 	if current, err := core.ReadLeaseClaim(leaseID); err != nil || current.LeaseID != leaseID {
 		t.Fatalf("claim should remain for sidecar retry: %#v err=%v", current, err)
@@ -3914,7 +3948,7 @@ func TestConfigForRunFallsBackToPodmanWhenDockerIsUnavailable(t *testing.T) {
 	dir := t.TempDir()
 	writeExecutable(t, filepath.Join(dir, "podman"))
 	t.Setenv("PATH", dir)
-	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
+	b := newBackend(Provider{}.Spec(), core.BaseConfig(), core.Runtime{}).(*backend)
 	got := b.configForRun()
 	if got.LocalContainer.Runtime != "podman" {
 		t.Fatalf("runtime=%q, want podman", got.LocalContainer.Runtime)
@@ -3926,7 +3960,7 @@ func TestConfigForRunPrefersDockerWhenBothRuntimesExist(t *testing.T) {
 	writeExecutable(t, filepath.Join(dir, "docker"))
 	writeExecutable(t, filepath.Join(dir, "podman"))
 	t.Setenv("PATH", dir)
-	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
+	b := newBackend(Provider{}.Spec(), core.BaseConfig(), core.Runtime{}).(*backend)
 	got := b.configForRun()
 	if got.LocalContainer.Runtime != "docker" {
 		t.Fatalf("runtime=%q, want docker", got.LocalContainer.Runtime)
@@ -3937,7 +3971,7 @@ func TestConfigForRunHonorsExplicitRuntime(t *testing.T) {
 	dir := t.TempDir()
 	writeExecutable(t, filepath.Join(dir, "docker"))
 	t.Setenv("PATH", dir)
-	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
+	b := newBackend(Provider{}.Spec(), core.BaseConfig(), core.Runtime{}).(*backend)
 	b.cfg.LocalContainer.Runtime = "podman"
 	core.MarkLocalContainerRuntimeExplicit(&b.cfg)
 	got := b.configForRun()
@@ -3950,7 +3984,7 @@ func TestConfigForRunHonorsExplicitDockerRuntime(t *testing.T) {
 	dir := t.TempDir()
 	writeExecutable(t, filepath.Join(dir, "podman"))
 	t.Setenv("PATH", dir)
-	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
+	b := newBackend(Provider{}.Spec(), core.BaseConfig(), core.Runtime{}).(*backend)
 	b.cfg.LocalContainer.Runtime = "docker"
 	core.MarkLocalContainerRuntimeExplicit(&b.cfg)
 	got := b.configForRun()
@@ -4290,7 +4324,7 @@ func TestCreateContainerCleansDockerSocketLeaseRootOnMountError(t *testing.T) {
 		t.Fatalf("host work root marker missing after docker socket mount error")
 	}
 	if len(runner.calls) != 0 {
-		t.Fatalf("docker should not be invoked after mount path rejection: %#v", runner.calls)
+		t.Fatalf("docker should not be invoked after mount path rejection: %#v", runner.commandSummary())
 	}
 }
 
@@ -5270,22 +5304,37 @@ func TestHostLeaseWorkRootRequiresTrustedLabels(t *testing.T) {
 }
 
 func TestTrustedBootstrapDir(t *testing.T) {
-	tmpDir := os.TempDir()
-	good := filepath.Join(tmpDir, "crabbox-bootstrap-abc123")
-	if !trustedBootstrapDir(good) {
-		t.Fatalf("should trust %q", good)
+	trusted := []string{
+		filepath.Join(localContainerBootstrapRoot(), "crabbox-bootstrap-abc123"),
+		filepath.Join(os.TempDir(), "crabbox-bootstrap-legacy"),
+	}
+	for _, good := range trusted {
+		if !trustedBootstrapDir(good) {
+			t.Fatalf("should trust %q", good)
+		}
 	}
 	for _, bad := range []string{
 		"",
 		"crabbox-bootstrap-abc123",
-		filepath.Join(tmpDir, "not-crabbox-dir"),
-		filepath.Join(tmpDir, "crabbox-bootstrap-abc123", ".."),
+		filepath.Join(localContainerBootstrapRoot(), "not-crabbox-dir"),
+		filepath.Join(localContainerBootstrapRoot(), "crabbox-bootstrap-abc123", ".."),
 		filepath.Join("/some/other/path", "crabbox-bootstrap-abc123"),
 		"/etc/passwd",
 	} {
 		if trustedBootstrapDir(bad) {
 			t.Fatalf("should reject %q", bad)
 		}
+	}
+}
+
+func TestLocalContainerBootstrapRootUsesUserCache(t *testing.T) {
+	cacheDir, err := os.UserCacheDir()
+	if err != nil || strings.TrimSpace(cacheDir) == "" {
+		t.Skip("user cache directory unavailable")
+	}
+	want := filepath.Join(cacheDir, "crabbox", "local-container-bootstrap")
+	if got := localContainerBootstrapRoot(); got != want {
+		t.Fatalf("bootstrap root=%q want %q", got, want)
 	}
 }
 
@@ -5338,7 +5387,7 @@ func TestReleaseLeaseRemovesStoredKey(t *testing.T) {
 	}
 }
 
-func TestReleaseLeaseContinuesSidecarAndKeyCleanupAfterError(t *testing.T) {
+func TestReleaseLeaseContinuesSidecarCleanupAndRetainsKeyAfterError(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_release_sidecars"
@@ -5402,8 +5451,8 @@ func TestReleaseLeaseContinuesSidecarAndKeyCleanupAfterError(t *testing.T) {
 	if _, err := os.Stat(bootstrapDir); !os.IsNotExist(err) {
 		t.Fatalf("bootstrap cleanup did not continue: %v", err)
 	}
-	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
-		t.Fatalf("key cleanup did not continue: %v", err)
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("key should remain after incomplete sidecar cleanup: %v", err)
 	}
 	if claim, err := core.ReadLeaseClaim(leaseID); err != nil || claim.LeaseID != leaseID {
 		t.Fatalf("claim should remain for sidecar retry: %#v err=%v", claim, err)
@@ -5426,7 +5475,7 @@ func TestReleaseLeaseRejectsUnclaimedContainer(t *testing.T) {
 	}
 	for _, call := range runner.calls {
 		if len(call.Args) > 0 && call.Args[0] == "rm" {
-			t.Fatalf("unclaimed container reached rm: %#v", runner.calls)
+			t.Fatalf("unclaimed container reached rm: %#v", runner.commandSummary())
 		}
 	}
 }
@@ -5455,7 +5504,7 @@ func TestReleaseLeaseRejectsClaimBoundToDifferentContainerOrScope(t *testing.T) 
 			}
 			for _, call := range runner.calls {
 				if len(call.Args) > 0 && call.Args[0] == "rm" {
-					t.Fatalf("mismatched claim reached rm: %#v", runner.calls)
+					t.Fatalf("mismatched claim reached rm: %#v", runner.commandSummary())
 				}
 			}
 		})
@@ -5618,7 +5667,7 @@ func TestResolveRawContainerRequiresExplicitReclaimAndPersistsBinding(t *testing
 	if !slices.ContainsFunc(runner.calls, func(call core.LocalCommandRequest) bool {
 		return commandKey(call.Args) == commandKey([]string{"rm", "-f", "raw-container"})
 	}) {
-		t.Fatalf("reclaimed container was not released: %#v", runner.calls)
+		t.Fatalf("reclaimed container was not released: %#v", runner.commandSummary())
 	}
 }
 
@@ -6003,11 +6052,116 @@ func TestReleaseLeaseDoesNotRemoveUntrustedBootstrapDir(t *testing.T) {
 		},
 	}
 
-	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
-		t.Fatal(err)
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "outside the current cache/temp roots") {
+		t.Fatalf("expected actionable bootstrap cleanup error, got %v", err)
 	}
 	if _, err := os.Stat(bootstrapDir); err != nil {
 		t.Fatalf("untrusted bootstrap directory removed: %v", err)
+	}
+}
+
+func TestBootstrapCleanupAfterCacheChangeRetainsRecoveryState(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("XDG_CACHE_HOME controls the user cache on Linux")
+	}
+	for _, action := range []string{"release", "rollback"} {
+		t.Run(action, func(t *testing.T) {
+			cache := t.TempDir()
+			t.Setenv("XDG_CACHE_HOME", cache)
+			f := newCleanupClaimFixture(t, "cbx_cache_change", "cache-change-container", "running", false)
+			if err := os.MkdirAll(localContainerBootstrapRoot(), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			dir, err := os.MkdirTemp(localContainerBootstrapRoot(), "crabbox-bootstrap-*")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := core.WithDurableLeaseClaimLock(f.leaseID, func(claim *core.LeaseClaim, exists bool, save func() error) error {
+				if !exists {
+					t.Fatal("missing fixture claim")
+				}
+				claim.Labels["bootstrap_dir"] = dir
+				return save()
+			}); err != nil {
+				t.Fatal(err)
+			}
+			f.claim, err = core.ReadLeaseClaim(f.leaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lease := core.LeaseTarget{LeaseID: f.leaseID, Server: core.Server{CloudID: f.containerID, Labels: f.claim.Labels}}
+			cleanup := func() error {
+				if action == "rollback" {
+					return f.b.rollbackPendingLease(f.claim, lease, dir)
+				}
+				return f.b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease})
+			}
+			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			if err := cleanup(); err == nil || !strings.Contains(err.Error(), "outside the current cache/temp roots") {
+				t.Fatalf("cleanup error=%v", err)
+			}
+			for _, path := range []string{dir, f.keyPath} {
+				if _, err := os.Lstat(path); err != nil {
+					t.Fatalf("recovery path %s missing: %v", path, err)
+				}
+			}
+			if claim, err := core.ReadLeaseClaim(f.leaseID); err != nil || claim.LeaseID != f.leaseID {
+				t.Fatalf("claim lost: %#v %v", claim, err)
+			}
+			t.Setenv("XDG_CACHE_HOME", cache)
+			if err := cleanup(); err != nil {
+				t.Fatal(err)
+			}
+			for _, path := range []string{dir, f.keyPath} {
+				if _, err := os.Lstat(path); !os.IsNotExist(err) {
+					t.Fatalf("recovery path %s remains: %v", path, err)
+				}
+			}
+		})
+	}
+}
+
+func TestRemoveBootstrapDirHandlesAbsentAndDanglingUntrustedPaths(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "crabbox-bootstrap-old-cache")
+	b := testBackend(&recordingRunner{})
+	if err := b.removeBootstrapDir(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(t.TempDir(), "missing-target"), path); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := b.removeBootstrapDir(path); err == nil {
+		t.Fatal("dangling untrusted symlink was treated as absent")
+	}
+	if _, err := os.Lstat(path); err != nil {
+		t.Fatalf("symlink removed: %v", err)
+	}
+}
+
+func TestCleanupRetainsOrphanClaimWithBootstrapResidue(t *testing.T) {
+	f := newCleanupClaimFixture(t, "cbx_orphan_bootstrap", "missing-bootstrap-container", "running", false)
+	f.runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		if result, ok := defaultLocalContainerScopeResponse(req); ok {
+			return result, nil
+		}
+		if firstArg(req.Args) == "inspect" {
+			return core.LocalCommandResult{Stderr: "Error: No such object: missing-bootstrap-container", ExitCode: 1}, errors.New("exit status 1")
+		}
+		return core.LocalCommandResult{}, nil
+	}
+	if err := f.b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if claim, err := core.ReadLeaseClaim(f.leaseID); err != nil || claim.LeaseID != f.leaseID {
+		t.Fatalf("orphan recovery claim lost: %#v %v", claim, err)
+	}
+	for _, path := range []string{f.bootstrapDir, f.keyPath} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("recovery path missing: %v", err)
+		}
+	}
+	if !strings.Contains(f.output.String(), "bootstrap-cleanup-pending") {
+		t.Fatalf("missing recovery diagnostic: %s", f.output.String())
 	}
 }
 
@@ -7062,7 +7216,7 @@ func TestCreateContainerRejectsHostVolumeOverlapWithBootstrapPaths(t *testing.T)
 				t.Fatalf("err=%v, want bootstrap-managed path rejection", err)
 			}
 			if len(runner.calls) != 0 {
-				t.Fatalf("runtime invoked before volume validation: %#v", runner.calls)
+				t.Fatalf("runtime invoked before volume validation: %#v", runner.commandSummary())
 			}
 		})
 	}
@@ -7080,7 +7234,7 @@ func TestCreateContainerRejectsRelativeWorkRootWithHostVolume(t *testing.T) {
 		t.Fatalf("err=%v, want absolute work root rejection", err)
 	}
 	if len(runner.calls) != 0 {
-		t.Fatalf("runtime invoked before work root validation: %#v", runner.calls)
+		t.Fatalf("runtime invoked before work root validation: %#v", runner.commandSummary())
 	}
 }
 

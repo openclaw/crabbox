@@ -695,11 +695,11 @@ func TestDesktopLaunchWebVNCArgsCarriesExternalPrivateRouting(t *testing.T) {
 	want := []string{
 		"--provider", "external",
 		"--target", targetMacOS,
-		"--id", leaseID,
 		"--external-routing-file", routingPath,
 		"--external-routing-digest", ExternalRoutingDigest(routing),
 		"--external-desktop-username", "screen-user",
 		"--external-desktop-password-env", "SCREEN_SHARING_PASSWORD",
+		"--id", leaseID,
 		"--open",
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -718,8 +718,8 @@ func TestDesktopLaunchWebVNCArgsCarriesProviderRoutingHook(t *testing.T) {
 	want := []string{
 		"--provider", "direct-webvnc-test",
 		"--target", targetLinux,
-		"--id", "cbx_abcdef123456",
 		"--direct-webvnc-routing", "route-cbx_abcdef123456",
+		"--id", "cbx_abcdef123456",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("webvnc args=%#v, want %#v", got, want)

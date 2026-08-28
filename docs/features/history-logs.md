@@ -126,7 +126,11 @@ command runs.
 On a non-zero exit, SSH-backed and Blacksmith delegated runs also write a local
 failure bundle under `.crabbox/captures/` by default (the bundled streams are
 capped at 16 MiB each). `--capture-on-fail` is accepted as a no-op compatibility
-alias; bundles save automatically on failure. Treat captured logs and bundles as
+alias; bundles save automatically on failure. An unwritable project capture
+destination falls back to the Crabbox user state directory's `captures/`
+subdirectory; the `failure-bundle local=...` line reports the actual path. See
+[local capture storage](../observability.md#capturing-run-output-locally) for
+fallback boundaries and retention. Treat captured logs and bundles as
 secret-bearing files unless you redact them before sharing.
 
 ## Phase timings

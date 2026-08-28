@@ -789,14 +789,14 @@ func (a App) webVNCDaemonStart(ctx context.Context, args []string) error {
 	if expectedIdentity.set && !identityValidated {
 		return exit(4, "controller WebVNC provider identity could not be resolved and validated")
 	}
-	daemonArgs := webVNCBridgeArgs(cfg, target, bridgeID, *openPortal, *takeControl)
+	daemonArgs := webVNCBridgeRouting(cfg, target, bridgeID, *openPortal, *takeControl)
 	if strings.TrimSpace(*localPort) != "" {
-		daemonArgs = append(daemonArgs, "--local-port", strings.TrimSpace(*localPort))
+		daemonArgs.Args = append(daemonArgs.Args, "--local-port", strings.TrimSpace(*localPort))
 	}
 	if *reclaim {
-		daemonArgs = append(daemonArgs, "--reclaim")
+		daemonArgs.Args = append(daemonArgs.Args, "--reclaim")
 	}
-	daemonArgs = append(daemonArgs, expectedIdentity.args()...)
+	daemonArgs.Args = append(daemonArgs.Args, expectedIdentity.args()...)
 	return a.startWebVNCDaemon(daemonArgs, *id, *controllerOwned, *controllerOwnerID, credentialInput, target.ChildEnvDenylist...)
 }
 
@@ -1243,13 +1243,13 @@ func (a App) webVNCResetCommand(ctx context.Context, args []string) error {
 	return nil
 }
 
-func webVNCResetDaemonLaunch(cfg Config, target SSHTarget, leaseID string, openPortal, takeControl bool) ([]string, *string) {
-	args := webVNCBridgeArgs(cfg, target, leaseID, openPortal, takeControl)
-	return args, registeredWebVNCDaemonCredentialInput(cfg, args)
+func webVNCResetDaemonLaunch(cfg Config, target SSHTarget, leaseID string, openPortal, takeControl bool) (CommandRouting, *string) {
+	args := webVNCBridgeRouting(cfg, target, leaseID, openPortal, takeControl)
+	return args, registeredWebVNCDaemonCredentialInput(cfg, args.Args)
 }
 
-func (a App) startWebVNCDaemon(args []string, leaseID string, controllerOwned bool, controllerOwnerID string, credentialInput *string, childEnvDenylist ...string) error {
-	args = prepareWebVNCDaemonArgs(args, controllerOwned)
+func (a App) startWebVNCDaemon(routing CommandRouting, leaseID string, controllerOwned bool, controllerOwnerID string, credentialInput *string, childEnvDenylist ...string) error {
+	args := prepareWebVNCDaemonArgs(routing.Args, controllerOwned)
 	localPort := webVNCDaemonLocalPortArg(args)
 	if localPort != "" && !validWebVNCDaemonPort(localPort) {
 		return exit(2, "invalid local WebVNC port %q", localPort)
@@ -1335,7 +1335,7 @@ func (a App) startWebVNCDaemon(args []string, leaseID string, controllerOwned bo
 	cmd.Stdin = gateReader
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.Env = webVNCDaemonPortReservationEnvironment(webVNCDaemonChildEnvironment(os.Environ(), args, childEnvDenylist...), "", "")
+	cmd.Env = webVNCDaemonPortReservationEnvironment(webVNCDaemonChildEnvironment(append(os.Environ(), routing.Env...), args, childEnvDenylist...), "", "")
 	configureDaemonCommand(cmd)
 	descriptor, err := portReservation.inherit(cmd)
 	if err != nil {
@@ -2463,18 +2463,9 @@ func optionalReason(reason string) string {
 }
 
 func nativeVNCOpenCommand(cfg Config, target SSHTarget, leaseID string) string {
-	targetOS := firstNonBlank(target.TargetOS, cfg.TargetOS)
-	args := []string{"crabbox", "vnc", "--provider", cfg.Provider, "--target", targetOS}
-	if cfg.Network != "" && cfg.Network != NetworkAuto {
-		args = append(args, "--network", string(cfg.Network))
-	}
-	windowsMode := firstNonBlank(target.WindowsMode, cfg.WindowsMode)
-	if targetOS == targetWindows && windowsMode != "" {
-		args = append(args, "--windows-mode", windowsMode)
-	}
-	args = append(args, providerCommandRoutingArgs(cfg, leaseID)...)
-	args = append(args, "--id", leaseID, "--open")
-	return strings.Join(readableShellWords(args), " ")
+	routing := leaseCommandRouting(cfg, target, leaseID, CommandRoutingReconnect)
+	args := append(append([]string{"crabbox", "vnc"}, routing.Args...), "--open")
+	return routing.ShellCommand(args)
 }
 
 func resolvedWebVNCCommandConfig(cfg Config, server Server, target SSHTarget) Config {
@@ -2546,25 +2537,15 @@ func shellBareWord(value string) bool {
 	return true
 }
 
-func webVNCBridgeArgs(cfg Config, target SSHTarget, leaseID string, openPortal, takeControl bool) []string {
-	targetOS := firstNonBlank(target.TargetOS, cfg.TargetOS)
-	args := []string{"--provider", cfg.Provider, "--target", targetOS}
-	if cfg.Network != "" && cfg.Network != NetworkAuto {
-		args = append(args, "--network", string(cfg.Network))
-	}
-	windowsMode := firstNonBlank(target.WindowsMode, cfg.WindowsMode)
-	if targetOS == targetWindows && windowsMode != "" {
-		args = append(args, "--windows-mode", windowsMode)
-	}
-	args = append(args, providerCommandRoutingArgs(cfg, leaseID)...)
-	args = append(args, "--id", leaseID)
+func webVNCBridgeRouting(cfg Config, target SSHTarget, leaseID string, openPortal, takeControl bool) CommandRouting {
+	routing := leaseCommandRouting(cfg, target, leaseID, CommandRoutingReconnect)
 	if openPortal {
-		args = append(args, "--open")
+		routing.Args = append(routing.Args, "--open")
 	}
 	if takeControl {
-		args = append(args, "--take-control")
+		routing.Args = append(routing.Args, "--take-control")
 	}
-	return args
+	return routing
 }
 
 func recentWebVNCLogEvents(path string, limit int) []string {
@@ -3615,8 +3596,9 @@ func (a App) directSSHWebVNCReset(ctx context.Context, cfg Config, id string, op
 	if openViewer {
 		return a.directSSHWebVNC(ctx, cfg, leaseID, "", true, takeControl, false, false, webVNCExpectedProviderIdentity{}, "")
 	}
-	command := append([]string{"crabbox", "webvnc"}, webVNCBridgeArgs(cfg, target, leaseID, false, false)...)
-	fmt.Fprintf(a.Stdout, "webvnc: run %s\n", readableShellCommand(command))
+	routing := webVNCBridgeRouting(cfg, target, leaseID, false, false)
+	command := append([]string{"crabbox", "webvnc"}, routing.Args...)
+	fmt.Fprintf(a.Stdout, "webvnc: run %s\n", routing.ShellCommand(command))
 	return nil
 }
 
