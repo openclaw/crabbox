@@ -35,7 +35,10 @@ func (prewarmDelegatedTestBackend) Spec() ProviderSpec {
 	return ProviderSpec{Name: "prewarm-delegated-test", Kind: ProviderKindDelegatedRun}
 }
 
-type prewarmOptionsTestProvider struct{ backend Backend }
+type prewarmOptionsTestProvider struct {
+	backend    Backend
+	configured *int
+}
 
 func (p prewarmOptionsTestProvider) Name() string      { return p.backend.Spec().Name }
 func (p prewarmOptionsTestProvider) Aliases() []string { return nil }
@@ -50,15 +53,18 @@ func (prewarmOptionsTestProvider) ApplyFlags(*Config, *flag.FlagSet, any) error 
 	return nil
 }
 func (p prewarmOptionsTestProvider) Configure(Config, Runtime) (Backend, error) {
+	*p.configured++
 	return p.backend, nil
 }
 
-type prewarmOptionsTestBackend struct {
-	prewarmDelegatedTestBackend
+type prewarmValidatingTestProvider struct {
+	prewarmOptionsTestProvider
 	validate func(RunRequest) error
 }
 
-func (b prewarmOptionsTestBackend) ValidateRunOptions(req RunRequest) error { return b.validate(req) }
+func (p prewarmValidatingTestProvider) ValidateRunOptions(req RunRequest) error {
+	return p.validate(req)
+}
 
 func TestPrewarmRunOptionsValidation(t *testing.T) {
 	for _, tc := range []struct {
@@ -82,9 +88,11 @@ func TestPrewarmRunOptionsValidation(t *testing.T) {
 			t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, ".config"))
 			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
 			var requests []RunRequest
-			var backend Backend = prewarmDelegatedTestBackend{}
+			configured := 0
+			base := prewarmOptionsTestProvider{backend: prewarmDelegatedTestBackend{}, configured: &configured}
+			var provider Provider = base
 			if tc.validator {
-				backend = prewarmOptionsTestBackend{validate: func(req RunRequest) error {
+				provider = prewarmValidatingTestProvider{prewarmOptionsTestProvider: base, validate: func(req RunRequest) error {
 					requests = append(requests, req)
 					if tc.reject {
 						return errors.New("probe options rejected")
@@ -92,7 +100,6 @@ func TestPrewarmRunOptionsValidation(t *testing.T) {
 					return nil
 				}}
 			}
-			provider := prewarmOptionsTestProvider{backend: backend}
 			RegisterProvider(provider)
 			t.Cleanup(func() { delete(providerRegistry, provider.Name()) })
 			args := []string{"prewarm", "--provider", provider.Name(), "--probe-command", tc.probe}
@@ -102,14 +109,22 @@ func TestPrewarmRunOptionsValidation(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			err := (App{Stdout: &stdout, Stderr: &stderr}).Run(context.Background(), args)
 			hasProbe := strings.TrimSpace(tc.probe) != ""
-			var wantRequests []RunRequest
+			wantRequests := 0
 			if tc.validator && hasProbe {
-				wantRequests = []RunRequest{{NoSync: true, ShellMode: true, Command: []string{tc.probe}}}
+				wantRequests = 1
 			}
-			if !reflect.DeepEqual(requests, wantRequests) {
-				t.Fatalf("validation requests=%+v, want %+v", requests, wantRequests)
+			if len(requests) != wantRequests {
+				t.Fatalf("validation requests=%+v, want %d", requests, wantRequests)
+			}
+			for _, req := range requests {
+				if !req.NoSync || !req.NoHydrate || !req.ShellMode || !req.ReuseLease || req.ID != "" || !reflect.DeepEqual(req.Command, []string{tc.probe}) {
+					t.Fatalf("unexpected probe intent: %+v", req)
+				}
 			}
 			if tc.reject && hasProbe {
+				if configured != 0 {
+					t.Fatalf("rejection configured %d backends", configured)
+				}
 				var exitErr ExitError
 				if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(err.Error(), "--probe-command") || !strings.Contains(err.Error(), "probe options rejected") {
 					t.Fatalf("rejection=%v, want contextual exit 2", err)

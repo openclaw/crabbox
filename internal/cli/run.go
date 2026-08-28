@@ -310,6 +310,58 @@ func registerRunFlags(fs *flag.FlagSet, defaults Config, options leaseCreateFlag
 	return values
 }
 
+func loadRunConfig(fs *flag.FlagSet, flags runFlagValues, target leaseFlagTarget, mutateExternal bool) (Config, error) {
+	cfg, err := loadConfig()
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.Profile = *flags.Lease.Profile
+	if err := applySelectedProfileConfig(&cfg); err != nil {
+		return Config{}, err
+	}
+	if err := applyLeaseCreateFlagsForTarget(&cfg, fs, flags.Lease, target, mutateExternal); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+// Shared projection for run and generated probes; runtime metadata is added later.
+func runRequestFromFlags(cfg Config, flags runFlagValues, command []string) RunRequest {
+	return RunRequest{
+		ID:                    *flags.LeaseID,
+		ReuseLease:            *flags.LeaseID != "",
+		Options:               leaseOptionsFromConfig(cfg),
+		Keep:                  *flags.Keep,
+		KeepOnFailure:         *flags.KeepOnFailure,
+		Reclaim:               *flags.Reclaim,
+		NoSync:                *flags.NoSync,
+		NoHydrate:             *flags.NoHydrate,
+		SyncOnly:              *flags.SyncOnly,
+		DebugSync:             *flags.DebugSync,
+		ShellMode:             *flags.ShellMode,
+		ChecksumSync:          *flags.ChecksumSync,
+		ForceSyncLarge:        *flags.ForceSyncLarge,
+		FullResync:            *flags.FullResync || *flags.FreshSync,
+		EnvHelper:             strings.TrimSpace(*flags.EnvHelper),
+		CaptureStdout:         *flags.CaptureStdout,
+		CaptureStderr:         *flags.CaptureStderr,
+		CaptureOnFail:         *flags.CaptureOnFail,
+		Preflight:             *flags.Preflight,
+		Downloads:             append([]string(nil), (*flags.Downloads)...),
+		ScriptRequested:       *flags.ScriptPath != "" || *flags.ScriptStdin,
+		ApplyLocalPatch:       *flags.ApplyLocalPatch,
+		Command:               command,
+		Label:                 strings.TrimSpace(*flags.RunLabel),
+		RequestedSlug:         strings.TrimSpace(*flags.Lease.Slug),
+		TimingJSON:            *flags.TimingJSON,
+		ArtifactGlobs:         append([]string(nil), (*flags.ArtifactGlobs)...),
+		RequiredArtifactGlobs: appendUniqueStrings(nil, (*flags.RequiredArtifacts)...),
+		EmitProof:             strings.TrimSpace(*flags.EmitProof),
+		ProofTemplate:         strings.TrimSpace(*flags.ProofTemplate),
+		StopAfter:             strings.TrimSpace(*flags.StopAfter),
+	}
+}
+
 func (a App) runCommand(ctx context.Context, args []string) error {
 	return a.runCommandWithBenchmarkRecord(ctx, args, benchmarkRecordContext{})
 }
@@ -478,15 +530,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		return exit(2, "--pool cannot be combined with --full-resync or --fresh-sync")
 	}
 
-	cfg, err := loadConfig()
+	cfg, err := loadRunConfig(fs, runFlags, leaseFlagTarget{ID: *leaseIDFlag, Reuse: *leaseIDFlag != ""}, true)
 	if err != nil {
-		return err
-	}
-	cfg.Profile = *leaseFlags.Profile
-	if err := applySelectedProfileConfig(&cfg); err != nil {
-		return err
-	}
-	if err := applyLeaseCreateFlagsForLease(&cfg, fs, leaseFlags, *leaseIDFlag); err != nil {
 		return err
 	}
 	if err := validateReadyPoolImageRequirements(cfg.imageRequirements, *readyPool); err != nil {
@@ -683,43 +728,17 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	options := leaseOptionsFromConfig(cfg)
 	scriptRequested := *scriptPath != "" || *scriptStdin
 	var script *RunScriptSpec
-	runReq := RunRequest{
-		Repo:                  repo,
-		ID:                    *leaseIDFlag,
-		RunID:                 executionRunID,
-		Options:               options,
-		Keep:                  *keep,
-		KeepOnFailure:         *keepOnFailure,
-		Reclaim:               *reclaim,
-		NoSync:                *noSync,
-		SyncOnly:              *syncOnly,
-		DebugSync:             *debugSync,
-		ShellMode:             *shellMode,
-		ChecksumSync:          *checksumSync,
-		ForceSyncLarge:        *forceSyncLarge,
-		FullResync:            fullResyncRequested,
-		EnvHelper:             envHelperName,
-		CaptureStdout:         *captureStdout,
-		CaptureStderr:         *captureStderr,
-		CaptureOnFail:         *captureOnFail,
-		Preflight:             *preflight,
-		Downloads:             downloads,
-		Env:                   envSelection.Effective,
-		EnvSummary:            envSelection.SummaryRequested,
-		ScriptRequested:       scriptRequested,
-		FreshPR:               freshPR,
-		ApplyLocalPatch:       *applyLocalPatch,
-		Command:               command,
-		Label:                 runLabelValue,
-		RequestedSlug:         requestedSlug,
-		TimingJSON:            *timingJSON || timingRecordEnabled,
-		ArtifactGlobs:         expansion.ArtifactGlobs,
-		RequiredArtifactGlobs: requiredArtifactGlobs,
-		EmitProof:             strings.TrimSpace(*emitProof),
-		ProofTemplate:         strings.TrimSpace(*proofTemplate),
-		ProfileVariables:      expansion.Variables,
-		StopAfter:             strings.TrimSpace(*stopAfter),
-	}
+	runReq := runRequestFromFlags(cfg, runFlags, command)
+	runReq.Repo = repo
+	runReq.RunID = executionRunID
+	runReq.Env = envSelection.Effective
+	runReq.EnvSummary = envSelection.SummaryRequested
+	runReq.FreshPR = freshPR
+	runReq.RequestedSlug = requestedSlug
+	runReq.TimingJSON = *timingJSON || timingRecordEnabled
+	runReq.ArtifactGlobs = expansion.ArtifactGlobs
+	runReq.RequiredArtifactGlobs = requiredArtifactGlobs
+	runReq.ProfileVariables = expansion.Variables
 	delegatedRoutePreflighted := false
 	if providerSelectionIsActionable(cfg) {
 		provider, err := ProviderFor(cfg.Provider)
@@ -727,10 +746,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return err
 		}
 		providerSpec := provider.Spec()
+		if err := validateProviderRun(provider, runReq, *readyPool, len(requiredArtifactSchemas) > 0, expansion.Profile.Doctor.Enabled); err != nil {
+			return err
+		}
 		if providerSpec.Kind == ProviderKindDelegatedRun {
-			if err := validateDelegatedRunRouting(providerSpec, runReq, *readyPool, len(requiredArtifactSchemas) > 0, expansion.Profile.Doctor.Enabled); err != nil {
-				return err
-			}
 			if delegatedRunNeedsLocalWorkspaceSync(providerSpec, runReq) {
 				if err := validateLocalWorkspaceSyncSource(repo); err != nil {
 					return err
@@ -2790,6 +2809,18 @@ func validateDelegatedRunRouting(spec ProviderSpec, req RunRequest, readyPool st
 		return exit(2, "%s delegates run execution; profile doctor is not supported", spec.Name)
 	}
 	return RejectDelegatedSyncOptionsForSpec(spec, req)
+}
+
+func validateProviderRun(provider Provider, req RunRequest, readyPool string, hasArtifactSchemas, profileDoctor bool) error {
+	if validator, ok := provider.(RunOptionsValidator); ok {
+		if err := validator.ValidateRunOptions(req); err != nil {
+			return err
+		}
+	}
+	if spec := provider.Spec(); spec.Kind == ProviderKindDelegatedRun {
+		return validateDelegatedRunRouting(spec, req, readyPool, hasArtifactSchemas, profileDoctor)
+	}
+	return nil
 }
 
 func rawJSRuntimeHydrateSuggestion(cfg Config, target SSHTarget, leaseID string, acquired, keep, keepOnFailure bool) string {

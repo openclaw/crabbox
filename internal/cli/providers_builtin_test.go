@@ -1305,6 +1305,13 @@ func (p testBlacksmithProvider) Configure(cfg Config, rt Runtime) (Backend, erro
 	return testDelegatedBackend{spec: p.Spec()}, nil
 }
 
+func (testBlacksmithProvider) ValidateRunOptions(req RunRequest) error {
+	if req.NoSync {
+		return exit(2, "blacksmith-testbox delegates sync; --no-sync is not supported")
+	}
+	return nil
+}
+
 type testDaytonaProvider struct{}
 
 type testNamespaceProvider struct{}

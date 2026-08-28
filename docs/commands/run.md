@@ -272,6 +272,8 @@ hint, and `sync.timeout` kills stalled syncs.
 - `--no-sync` skips local file transfer and `--sync-only` syncs and exits on
   supported providers. Blacksmith Testbox rejects both: its native command owns
   sync even with `--id`, so reusing a Testbox does not provide a sync bypass.
+  Provider admission runs before backend configuration; skipping sync does not
+  skip provider initialization or existing-lease preparation.
 - `--fresh-pr <owner/repo#number|url|number>` skips local dirty sync and creates
   a fresh remote checkout of a GitHub PR. A bare `<number>` uses the current
   repository's GitHub origin. Only `github.com` PR URLs are accepted; other

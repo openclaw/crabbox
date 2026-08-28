@@ -143,11 +143,31 @@ Testbox does this because its native run command has no supported sync bypass.
 
 Add optional capabilities as small interfaces instead of widening every backend.
 
-`RunOptionsValidator` admits run options before prewarm/job acquisition or
-dry-run planning. Its `ValidateRunOptions(RunRequest) error` method must perform
-no external I/O or lease-state access. Implement it on the provider for callers
-that cannot configure a backend yet, and reuse the same policy at backend `Run`
-entry.
+Provider-specific run admission belongs on the provider, beside config validation:
+
+```go
+type RunOptionsValidator interface {
+	ValidateRunOptions(RunRequest) error
+}
+```
+
+This hook must be side-effect-free: no `Configure`, backend creation, process
+spawning, credential lookup, lease resolution, state writes, or network calls.
+Core combines it with the generic delegated routing guard before normal run
+configuration and before prewarm configures or warms anything for a probe.
+Jobs also use this contract before acquisition or dry-run planning.
+Prewarm projects the actual follow-up flags and config, excluding creation-only
+flags. Its request has `ReuseLease: true` and an empty `ID` until allocation;
+a nonempty `ID` also implies reuse. The display placeholder `<lease>` is never
+a lease identifier. Effective lease settings and opaque provider routing are
+carried in `Options`. `NoSync`, `NoHydrate`, shell mode, and command intent are
+preserved. Runtime-only fields such as `Repo`, `RunID`, and `Env` may be absent;
+concrete claim/cache-volume checks remain in the subsequent run. Normal run
+retains its existing earlier output, environment, and profile preflights.
+
+Backends should reuse their provider's rejection policy defensively before any
+activity in direct `Run` calls. Skipping sync does not skip provider
+initialization; hydration intent is separate.
 
 Requested fixed lease IDs are optional:
 

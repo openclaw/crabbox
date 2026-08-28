@@ -42,6 +42,40 @@ func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFi
 	}
 	typedIdentityFile := flagWasSet(fs, "pool-identity-file")
 	typedCacheCompatibility := flagWasSet(fs, "pool-cache-compatibility")
+	_ = reclaim
+	requestedSlug, err := requestedLeaseSlug(*leaseFlags.Slug)
+	if err != nil {
+		return err
+	}
+	if requestedSlug != "" {
+		*leaseFlags.Slug = requestedSlug
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	if err := applyLeaseCreateFlagsForLeaseMode(&cfg, fs, leaseFlags, "", false); err != nil {
+		return err
+	}
+	if *repoFlag != "" {
+		cfg.Actions.Repo = *repoFlag
+	}
+	if *workflowFlag != "" {
+		cfg.Actions.Workflow = *workflowFlag
+	}
+	if *jobFlag != "" {
+		cfg.Actions.Job = *jobFlag
+	}
+	if *refFlag != "" {
+		cfg.Actions.Ref = *refFlag
+	}
+	followupArgs := prewarmProviderPassthroughArgs(args, defaults)
+	if strings.TrimSpace(*probeCommand) != "" {
+		// Project the follow-up, not the creation request or the display placeholder.
+		if err := admitPrewarmProbe(prewarmProbeArgs(cfg, "", *probeCommand, followupArgs)); err != nil {
+			return err
+		}
+	}
 	if (typedIdentityFile || typedCacheCompatibility) && strings.TrimSpace(*poolKey) == "" {
 		return exit(2, "typed ready-pool identity flags require --pool")
 	}
@@ -59,47 +93,12 @@ func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFi
 		}
 		poolIdentity = &identity
 	}
-	_ = reclaim
-	requestedSlug, err := requestedLeaseSlug(*leaseFlags.Slug)
-	if err != nil {
-		return err
-	}
-	if requestedSlug != "" {
-		*leaseFlags.Slug = requestedSlug
-	}
-	cfg, err := loadConfig()
-	if err != nil {
-		return err
-	}
-	mutateExternal := !*dryRun
-	if err := applyLeaseCreateFlagsForLeaseMode(&cfg, fs, leaseFlags, "", mutateExternal); err != nil {
-		return err
-	}
-	if *repoFlag != "" {
-		cfg.Actions.Repo = *repoFlag
-	}
-	if *workflowFlag != "" {
-		cfg.Actions.Workflow = *workflowFlag
-	}
-	if *jobFlag != "" {
-		cfg.Actions.Job = *jobFlag
-	}
-	if *refFlag != "" {
-		cfg.Actions.Ref = *refFlag
-	}
 	backend, err := loadBackend(cfg, runtimeForApp(a))
 	if err != nil {
 		return err
 	}
 	if backend.Spec().Kind == ProviderKindServiceControl {
 		return exit(2, "prewarm is not supported for provider=%s; it does not provide a lease or run surface", backend.Spec().Name)
-	}
-	if strings.TrimSpace(*probeCommand) != "" {
-		if validator, ok := backend.(RunOptionsValidator); ok {
-			if err := validator.ValidateRunOptions(RunRequest{NoSync: true, ShellMode: true, Command: []string{*probeCommand}}); err != nil {
-				return exit(2, "prewarm --probe-command is not supported for provider=%s: %v; omit --probe-command or choose a provider that supports the probe options", backend.Spec().Name, err)
-			}
-		}
 	}
 	readyPoolKey := strings.TrimSpace(*poolKey)
 	if strings.TrimSpace(poolFillClaim) != "" && readyPoolKey == "" {
@@ -121,7 +120,6 @@ func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFi
 	if backend.Spec().Kind == ProviderKindDelegatedRun && isBlacksmithProvider(cfg.Provider) {
 		leaseArgs = prewarmBlacksmithHydrationArgs(fs, leaseArgs, *workflowFlag, *jobFlag, *refFlag)
 	}
-	followupArgs := prewarmProviderPassthroughArgs(args, defaults)
 	hydrateArgs := prewarmHydrateArgs(cfg, "<lease>", *githubRunner, *waitTimeout, *keepAliveMinutes, followupArgs)
 	probeArgs := prewarmProbeArgs(cfg, "<lease>", *probeCommand, followupArgs)
 	if *dryRun {
@@ -424,6 +422,36 @@ func prewarmBlacksmithHydrationArgs(fs *flag.FlagSet, args []string, workflow, j
 		args = append(args, "--blacksmith-ref", ref)
 	}
 	return args
+}
+
+func admitPrewarmProbe(args []string) error {
+	fs := newFlagSet("prewarm-probe", io.Discard)
+	flags := registerRunFlags(fs, defaultConfig(), ordinaryLeaseCreateFlagRegistrationOptions())
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	cfg, err := loadRunConfig(fs, flags, leaseFlagTarget{Reuse: true}, false)
+	if err != nil {
+		return err
+	}
+	expansion, err := expandRunProfile(cfg, *flags.PresetName, *flags.Scenario, *flags.PresetVars, fs.Args(), *flags.ShellMode, *flags.Preflight, *flags.ArtifactGlobs, *flags.ProofTemplate)
+	if err != nil {
+		return err
+	}
+	req := runRequestFromFlags(cfg, flags, expansion.Command)
+	req.ReuseLease = true
+	req.ShellMode = expansion.Shell
+	req.Preflight = expansion.Preflight
+	req.ArtifactGlobs = expansion.ArtifactGlobs
+	req.ProfileVariables = expansion.Variables
+	provider, err := ProviderFor(cfg.Provider)
+	if err != nil {
+		return err
+	}
+	if err := validateProviderRun(provider, req, *flags.ReadyPool, len(*flags.RequiredSchemas) > 0, expansion.Profile.Doctor.Enabled); err != nil {
+		return exit(2, "prewarm --probe-command is not supported for provider=%s: %v; omit --probe-command or choose a provider that supports the probe options", provider.Spec().Name, err)
+	}
+	return nil
 }
 
 func prewarmProbeArgs(cfg Config, leaseID, command string, passthrough []string) []string {

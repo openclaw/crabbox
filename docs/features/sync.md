@@ -17,6 +17,9 @@ Blacksmith Testbox rejects it before lease access or execution because native
 Testbox runs own sync and offer no supported bypass, including when reusing an
 ID. See [Blacksmith Testbox](../providers/blacksmith-testbox.md).
 
+Skipping sync does not skip provider initialization. Generated prewarm probes
+are admitted before backend configuration or warmup.
+
 ## Remote workspace path
 
 For normal SSH-backed runs, sync starts from the effective work root and derives

@@ -270,8 +270,11 @@ type TailscaleMetadataBackend interface {
 // RunOptionsValidator optionally checks run flags before a caller acquires a
 // lease, including during dry-run planning. Validation must be side-effect-free:
 // no external I/O or lease-state access, and no dependency on a resolved lease.
-// Providers may implement it directly to allow admission without configuring a
-// backend; their backend must reuse the same policy at Run entry.
+// Providers implement it for admission before Configure; their backend must
+// reuse the same policy at Run entry. No backend creation, processes, credential
+// lookup, or state writes are allowed. Planned reuse has ReuseLease=true and an
+// empty ID; a nonempty ID also implies reuse. Runtime-only fields such as Repo,
+// RunID, and Env may be absent during prewarm admission.
 type RunOptionsValidator interface {
 	ValidateRunOptions(RunRequest) error
 }
@@ -973,11 +976,13 @@ type ListRequest struct {
 type RunRequest struct {
 	Repo                  Repo
 	ID                    string
+	ReuseLease            bool // Planned reuse without an ID; a nonempty ID also implies reuse.
 	RunID                 string
 	Options               LeaseOptions
 	Keep                  bool
 	Reclaim               bool
 	NoSync                bool
+	NoHydrate             bool
 	SyncOnly              bool
 	DebugSync             bool
 	ShellMode             bool

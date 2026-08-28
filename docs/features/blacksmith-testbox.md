@@ -201,6 +201,11 @@ Because Blacksmith owns sync and execution, Crabbox rejects the following `run` 
   secrets in the Testbox workflow instead;
 - `--actions-runner` on `warmup` — Blacksmith owns runner hydration.
 
+Run option admission precedes backend configuration, including when reusing
+`--id`. Because `prewarm --probe-command` promises a no-sync shell probe, it
+also rejects before configuration, including in dry-run mode. Put readiness
+checks in the Blacksmith workflow or use plain `prewarm` without a probe.
+
 `crabbox run` prints `sync=delegated` in the final summary. `--emit-proof` is supported: it
 persists a local proof bundle (stdout/stderr logs, `timing.json`, `metadata.json`) and links the
 detected GitHub Actions run URL when one appears in the output. Failed runs always save a local
