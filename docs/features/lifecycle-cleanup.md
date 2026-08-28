@@ -17,18 +17,20 @@ through a coordinator.
 
 When a provider is brokered (only `aws`, `azure`, `daytona`, `gcp`, and
 `hetzner`, and only when a coordinator URL is configured), the coordinator owns
-the lease record and its lifecycle. A brokered lease record moves through four states
-(`worker/src/types.ts`):
+the lease record and its lifecycle. The coordinator persists a `provisioning`
+reservation before calling the provider (`worker/src/types.ts`):
 
 ```text
-active -> released   (explicit release)
-active -> expired    (TTL or idle expiry reclaimed the box)
-active -> failed     (provisioning or cleanup failure)
+provisioning -> active    (readiness completed)
+provisioning -> failed    (creation or readiness failed)
+active       -> released  (explicit release)
+active       -> expired   (TTL or idle cleanup completed)
 ```
 
-A lease is created `active`. There is no separate `provisioning` state in the
-brokered record; provisioning happens inside lease creation and the record only
-persists once the box exists.
+Release can also end a provisioning lease. It records user intent; it does not
+cancel an already-dispatched provider request. Failed and released records can
+still carry unresolved cleanup responsibility. Their local state alone is not
+proof that the provider resource was deleted.
 
 ### Heartbeats and expiry
 
@@ -81,6 +83,44 @@ is scheduled for the soonest of all active-lease expiry/retry times, so a failed
 delete is retried automatically. On success the cleanup metadata is cleared and
 the state becomes `expired`. You can inspect stuck cleanups with `crabbox admin
 lease-audit`.
+
+### Managed Daytona cleanup
+
+New brokered Daytona sandboxes receive native wall-clock TTL in the original
+allocation request: the requested lease TTL rounded up to whole minutes, with a
+one-minute minimum. This clock starts at provider creation, not coordinator
+reservation, and applies even when the sandbox is kept or explicitly retained.
+Heartbeats do not extend it. A TTL-capable Daytona API is required; Crabbox never
+retries allocation without TTL. Before publishing access, a ready sandbox must
+report a future native destruction deadline no later than one requested TTL from
+the start of readiness observation. This bound does not move during polling or
+assume that the provider's creation and TTL timestamps share an exact clock tick.
+An API that silently ignores TTL is not accepted as ready. Organization, region,
+and sandbox-class lifespan limits still apply. This is a provider lifetime
+contract, not a teardown-latency SLA during provider failures.
+
+Before dispatch, the lease stores a nonsecret fingerprint of the normalized API
+URL, configured organization, and credential context. A returned sandbox UUID is
+recorded before readiness waits. Cleanup uses that exact UUID and original
+context, verifies current ownership before mutation, and observes a terminal
+provider state or exact-resource absence before reporting completion. Accepted
+DELETE requests alone are not completion.
+
+If no authoritative UUID arrives, cleanup remains explicitly unresolved. The
+coordinator preserves its original dispatch evidence, `failureError`, and
+`cleanupError`; it neither adopts name/label matches nor declares deletion after
+an empty inventory read or elapsed TTL. It does not repeatedly schedule a lookup
+that cannot establish identity. Inspect these records with `crabbox admin
+lease-audit` and resolve the resource in its original provider account. A release
+acknowledgment does not clear this responsibility.
+
+Missing historical scope or a changed API URL, organization, or API key blocks
+automatic cleanup and access refresh rather than adopting the current context.
+This deliberately includes same-organization key rotation: the fingerprint
+proves identical credential context, not upstream account continuity. Finish
+known-ID cleanup before rotating credentials, or restore the original context
+and repeat explicit stop. Legacy records without scope require operator
+resolution; never backfill them from current configuration.
 
 ### AWS orphan sweep
 

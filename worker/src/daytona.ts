@@ -1,6 +1,11 @@
+import { sha256Hex } from "./auth";
 import type { LeaseConfig } from "./config";
 import { redactDiagnosticSecrets } from "./http";
-import { leaseProviderLabels } from "./provider-labels";
+import { leaseProviderLabels, providerMachineOwnedByLease } from "./provider-labels";
+import {
+  ProviderResourceUnresolvedError,
+  validateProviderProvisioningCleanupClaim,
+} from "./provider-provisioning";
 import { leaseProviderName } from "./slug";
 import type { Env, LeaseRecord, ProviderMachine } from "./types";
 
@@ -8,6 +13,18 @@ const defaultAPIURL = "https://app.daytona.io/api";
 const defaultSSHGatewayHost = "ssh.app.daytona.io";
 const defaultSSHAccessMinutes = 120;
 const maxSSHAccessMinutes = 24 * 60;
+
+type DaytonaLeaseIdentity = Pick<
+  LeaseRecord,
+  | "id"
+  | "slug"
+  | "provider"
+  | "owner"
+  | "providerOwner"
+  | "workspaceID"
+  | "cloudID"
+  | "providerScope"
+>;
 
 interface DaytonaSandbox {
   id: string;
@@ -17,6 +34,7 @@ interface DaytonaSandbox {
   labels?: Record<string, string>;
   target?: string;
   state?: string;
+  autoDestroyAt?: string;
   cpu?: number;
   memory?: number;
   disk?: number;
@@ -88,8 +106,9 @@ export class DaytonaClient {
   private readonly apiURL: string;
   private readonly token: string;
   private readonly organizationID: string;
+  private scopeValue?: Promise<string>;
 
-  constructor(private readonly env: Env) {
+  constructor(env: Env) {
     this.token = env.DAYTONA_CRABBOX_KEY?.trim() ?? "";
     if (!this.token) {
       throw new Error("DAYTONA_CRABBOX_KEY secret is required");
@@ -127,14 +146,38 @@ export class DaytonaClient {
     return servers;
   }
 
-  async findServerByLease(leaseID: string): Promise<ProviderMachine | undefined> {
-    const matches = (await this.listCrabboxServers()).filter(
-      (server) => server.labels["lease"] === leaseID,
-    );
-    if (matches.length > 1) {
-      throw new Error(`ambiguous Daytona recovery for ${leaseID}: ${matches.length} sandboxes`);
+  providerScope(): Promise<string> {
+    // Bind the immutable request context without retaining credentials. Key rotation
+    // needs original-scope resolution, not silent adoption into the replacement account.
+    this.scopeValue ??= sha256Hex(
+      JSON.stringify(["crabbox-daytona-context-v1", this.apiURL, this.organizationID, this.token]),
+    ).then((digest) => `daytona:context:v1:${digest}`);
+    return this.scopeValue;
+  }
+
+  async getOwnedServer(lease: DaytonaLeaseIdentity): Promise<ProviderMachine> {
+    const claim = lease.providerScope
+      ? validateProviderProvisioningCleanupClaim(
+          { provider: "daytona", cloudID: lease.cloudID, providerScope: lease.providerScope },
+          "daytona",
+        )
+      : undefined;
+    if (!claim || claim.providerScope !== (await this.providerScope())) {
+      throw new ProviderResourceUnresolvedError(
+        `Daytona cleanup unresolved for lease ${lease.id}: an authoritative sandbox UUID and its original API, organization, and credential context are required; no provider mutation attempted`,
+      );
     }
-    return matches[0];
+    const server = await this.getServer(claim.cloudID);
+    if (!providerMachineOwnedByLease(server, lease, "daytona")) {
+      throw new ProviderResourceUnresolvedError(
+        `Daytona cleanup unresolved for lease ${lease.id}: sandbox ${claim.cloudID} ownership does not match; no provider mutation attempted`,
+      );
+    }
+    return server;
+  }
+
+  async deleteOwnedServer(lease: DaytonaLeaseIdentity): Promise<void> {
+    await this.deleteSandboxAndWait(lease.cloudID, () => this.getOwnedServer(lease));
   }
 
   async getServer(id: string): Promise<ProviderMachine> {
@@ -156,6 +199,9 @@ export class DaytonaClient {
       name: leaseProviderName(leaseID, slug),
       user: this.user,
       labels,
+      // Creation-relative wall-clock TTL also applies to kept sandboxes. Sending it
+      // with allocation bounds lifetime even when no response UUID reaches the coordinator.
+      ttlMinutes: Math.max(1, Math.ceil(config.ttlSeconds / 60)),
       autoStopInterval: 0,
       autoDeleteInterval: -1,
     };
@@ -165,14 +211,29 @@ export class DaytonaClient {
     return daytonaMachine(sandbox);
   }
 
-  async waitForStarted(id: string): Promise<ProviderMachine> {
-    const deadline = Date.now() + this.maxWaitMs;
+  async waitForStarted(id: string, ttlSeconds: number): Promise<ProviderMachine> {
+    const startedAt = Date.now();
+    const deadline = startedAt + this.maxWaitMs;
+    const latestAutoDestroyAt = startedAt + Math.max(1, Math.ceil(ttlSeconds / 60)) * 60_000;
     let lastState = "";
     while (Date.now() <= deadline) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- readiness polling is intentionally sequential.
-      const server = await this.getServer(id);
-      lastState = server.status;
-      if (daytonaReadyState(lastState)) return server;
+      const sandbox = await this.getSandbox(id);
+      lastState = sandbox.state ?? "unknown";
+      if (daytonaReadyState(lastState)) {
+        const autoDestroyAt = Date.parse(sandbox.autoDestroyAt ?? "");
+        // Creation and TTL anchoring need not share a clock tick. Verify the
+        // remaining native bound without extending it on each readiness poll;
+        // older APIs that ignore TTL must still fail before access is published.
+        if (
+          !Number.isFinite(autoDestroyAt) ||
+          autoDestroyAt <= Date.now() ||
+          autoDestroyAt > latestAutoDestroyAt
+        ) {
+          throw new Error(`Daytona sandbox ${id} did not confirm a valid native TTL`);
+        }
+        return daytonaMachine(sandbox);
+      }
       if (daytonaTerminalState(lastState)) {
         throw new Error(`daytona sandbox ${id} entered terminal state=${lastState}`);
       }
@@ -366,10 +427,16 @@ export class DaytonaClient {
   }
 
   private async getSandbox(id: string): Promise<DaytonaSandbox> {
-    return await this.request<DaytonaSandbox>(
+    const sandbox = await this.request<DaytonaSandbox>(
       "GET",
       `/sandbox/${encodeURIComponent(id)}?verbose=true`,
     );
+    if (sandbox.id !== id) {
+      throw new ProviderResourceUnresolvedError(
+        `Daytona sandbox identity mismatch for ${id}; refusing name-based substitution`,
+      );
+    }
+    return sandbox;
   }
 
   private async getSnapshot(idOrName: string): Promise<DaytonaSnapshot> {
@@ -423,20 +490,31 @@ export class DaytonaClient {
     );
   }
 
-  private async deleteSandboxAndWait(id: string): Promise<void> {
+  private async deleteSandboxAndWait(
+    id: string,
+    beforeDelete?: () => Promise<ProviderMachine>,
+  ): Promise<void> {
     const deadline = Date.now() + this.maxWaitMs;
     let deleteRequested = false;
     let lastState = "";
     while (Date.now() <= deadline) {
       if (!deleteRequested) {
         try {
-          // DELETE returns 409 while snapshotting or another state change is
-          // pending. Retry that authoritative conflict instead of abandoning cleanup.
-          // deleteServer already normalizes an already-absent sandbox to success.
-          // oxlint-disable-next-line eslint/no-await-in-loop -- each retry observes provider state.
-          await this.deleteServer(id);
+          // Recheck scoped ownership before every mutation, including after a conflict.
+          // oxlint-disable-next-line eslint/no-await-in-loop -- each delete attempt needs current identity.
+          const current = await beforeDelete?.();
+          if (current && daytonaDeletedState(current.status)) return;
+          const deletionPending =
+            current && ["destroying", "deleting"].includes(normalizeDaytonaState(current.status));
+          if (!deletionPending) {
+            // DELETE may conflict with snapshotting. Revalidate before retrying,
+            // but only observe a deletion already accepted by an earlier attempt.
+            // oxlint-disable-next-line eslint/no-await-in-loop -- each retry observes provider state.
+            await this.deleteServer(id);
+          }
           deleteRequested = true;
         } catch (error) {
+          if (isDaytonaNotFound(error)) return;
           if (!isDaytonaConflict(error)) throw error;
           lastState = "state_change_in_progress";
           // oxlint-disable-next-line eslint/no-await-in-loop -- delay between sequential cleanup retries.
@@ -450,8 +528,7 @@ export class DaytonaClient {
         // oxlint-disable-next-line eslint/no-await-in-loop -- each poll observes the latest provider state.
         const sandbox = await this.getSandbox(id);
         lastState = sandbox.state ?? "";
-        const normalized = normalizeDaytonaState(lastState);
-        if (normalized === "destroyed" || normalized === "deleted") return;
+        if (daytonaDeletedState(lastState)) return;
       } catch (error) {
         if (isDaytonaNotFound(error)) return;
         if (isDaytonaTransient(error)) {
@@ -595,6 +672,10 @@ function stableMachineID(value: string): number {
     hash = Math.imul(hash, 16_777_619);
   }
   return hash >>> 0;
+}
+
+function daytonaDeletedState(state: string): boolean {
+  return ["destroyed", "deleted"].includes(normalizeDaytonaState(state));
 }
 
 function daytonaTerminalState(state: string): boolean {

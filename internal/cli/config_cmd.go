@@ -780,7 +780,7 @@ func redactedParallelsHostConfigs(hosts []ParallelsHostConfig) []ParallelsHostCo
 }
 
 func writeConfigShowText(w io.Writer, cfg Config) {
-	fmt.Fprintf(w, "config=%s\n", userConfigPath())
+	fmt.Fprintf(w, "config=%s\n", writableConfigPath())
 	provider := cfg.Provider
 	serverType := cfg.ServerType
 	providerSelected := providerSelectionIsActionable(cfg)

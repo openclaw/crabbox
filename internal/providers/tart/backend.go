@@ -144,7 +144,7 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		_ = b.deleteVM(context.Background(), name)
 		return LeaseTarget{}, err
 	}
-	if err := b.startVM(ctx, cfg, name, req.Keep); err != nil {
+	if err := b.startVM(ctx, name, req.Keep); err != nil {
 		_ = b.deleteVM(context.Background(), name)
 		return LeaseTarget{}, err
 	}
@@ -433,16 +433,12 @@ func (b *backend) configureVM(ctx context.Context, cfg Config, name string) erro
 	return nil
 }
 
-// startVMArgs returns the tart run arguments for starting a VM headless.
-func startVMArgs(name string) []string {
-	return []string{"run", name, "--no-graphics"}
-}
-
 // startVM starts the VM headless in the background.
 // When keep is true the tart process is fully detached so it survives
 // crabbox exit, matching how docker run -d keeps containers alive.
-func (b *backend) startVM(ctx context.Context, cfg Config, name string, keep bool) error {
-	args := startVMArgs(name)
+func (b *backend) startVM(ctx context.Context, name string, keep bool) error {
+	// Headless mode alone still exposes the host clipboard and audio to the guest.
+	args := []string{"run", name, "--no-graphics", "--no-clipboard", "--no-audio"}
 	var stderrBuf bytes.Buffer
 	var detachedStderr *os.File
 	var devNull *os.File

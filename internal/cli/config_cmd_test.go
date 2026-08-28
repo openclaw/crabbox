@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,6 +11,63 @@ import (
 	"testing"
 	"time"
 )
+
+func TestConfigCommandsReportSelectedPath(t *testing.T) {
+	for _, name := range []string{"default", "absolute", "relative", "missing", "symlink"} {
+		t.Run(name, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Chdir(t.TempDir())
+			t.Setenv("CRABBOX_CONFIG", "")
+			path := userConfigPath()
+			if name != "default" {
+				path = filepath.Join(t.TempDir(), "selected config.yaml")
+				if name == "relative" {
+					path = "selected config.yaml"
+				}
+				t.Setenv("CRABBOX_CONFIG", path)
+			}
+			profile := "selected-path-proof"
+			if name == "missing" {
+				profile = "default"
+			} else {
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("profile: "+profile+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if name == "symlink" {
+					link := filepath.Join(filepath.Dir(path), "selected link.yaml")
+					if err := os.Symlink(path, link); err != nil {
+						t.Skipf("symlink unavailable: %v", err)
+					}
+					path = link
+					t.Setenv("CRABBOX_CONFIG", path)
+				}
+			}
+			var stdout, stderr bytes.Buffer
+			app := App{Stdout: &stdout, Stderr: &stderr}
+			if err := app.Run(context.Background(), []string{"config", "path"}); err != nil {
+				t.Fatal(err)
+			}
+			if got := stdout.String(); got != path+"\n" {
+				t.Fatalf("config path=%q want %q", got, path)
+			}
+			stdout.Reset()
+			if err := app.Run(context.Background(), []string{"config", "show"}); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.HasPrefix(stdout.String(), "config="+path+"\n") || !strings.Contains(stdout.String(), " profile="+profile+"\n") {
+				t.Fatalf("config show path/profile mismatch: %s", stdout.String())
+			}
+			if name == "missing" {
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Fatalf("diagnostics created missing config: %v", err)
+				}
+			}
+		})
+	}
+}
 
 func TestConfigShowReportsProviderSelectionSource(t *testing.T) {
 	t.Run("compiled default text", func(t *testing.T) {
