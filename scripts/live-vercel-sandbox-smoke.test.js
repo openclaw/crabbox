@@ -14,6 +14,10 @@ function writeExecutable(file, body) {
 
 function setupFakeTools() {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-vercel-sandbox-live-smoke-"));
+	const home = path.join(dir, "home");
+	const tmp = path.join(dir, "tmp");
+	fs.mkdirSync(home);
+	fs.mkdirSync(tmp);
 	const calls = path.join(dir, "calls.log");
 	const state = path.join(dir, "lease.state");
 	const remoteStopped = path.join(dir, "remote-stopped.state");
@@ -152,20 +156,56 @@ case "$1" in
 esac
 `,
 	);
-	return { dir, calls, state, remoteStopped, fakeCrabbox, fakeSandbox };
+	return { dir, home, tmp, calls, state, remoteStopped, fakeCrabbox, fakeSandbox };
 }
 
 function runSmoke(fake, env) {
 	return spawnSync("bash", ["scripts/live-vercel-sandbox-smoke.sh"], {
 		cwd: repoRoot,
 		env: {
-			...process.env,
 			PATH: `${fake.dir}${path.delimiter}${process.env.PATH}`,
+			HOME: fake.home,
+			XDG_CONFIG_HOME: path.join(fake.home, ".config"),
+			XDG_STATE_HOME: path.join(fake.home, ".state"),
+			TMPDIR: fake.tmp,
+			GIT_CONFIG_NOSYSTEM: "1",
+			GIT_CONFIG_GLOBAL: path.join(fake.home, ".gitconfig"),
 			CRABBOX_BIN: fake.fakeCrabbox,
 			...env,
 		},
 		encoding: "utf8",
 	});
+}
+
+function traceEagerGitMaintenance(fake) {
+	// Keep maintenance synchronous so a failing test leaves no background writer.
+	fs.writeFileSync(
+		path.join(fake.home, ".gitconfig"),
+		`[maintenance]
+	auto = true
+	autoDetach = false
+[maintenance "gc"]
+	enabled = false
+[maintenance "loose-objects"]
+	enabled = true
+	auto = 1
+[gc]
+	auto = 0
+`,
+	);
+	return { GIT_TRACE2_EVENT: path.join(fake.dir, "git-trace.jsonl") };
+}
+
+function assertNoGitMaintenance(fake, expectedCommits) {
+	const events = fs
+		.readFileSync(path.join(fake.dir, "git-trace.jsonl"), "utf8")
+		.trim()
+		.split("\n")
+		.map((line) => JSON.parse(line));
+	assert.equal(events.filter((event) => event.event === "cmd_name" && event.name === "commit").length, expectedCommits);
+	const maintenance = events.filter((event) => event.event === "child_start" && event.argv.includes("maintenance"));
+	assert.deepEqual(maintenance.map((event) => event.argv), [], "disposable repo must not launch automatic maintenance");
+	assert.deepEqual(fs.readdirSync(fake.tmp), [], "smoke must remove its temporary repository");
 }
 
 test("requires explicit live opt-in before mutation or sandbox preflight", () => {
@@ -238,6 +278,7 @@ test("classifies sandbox CLI auth failure before Crabbox mutation", () => {
 test("classifies doctor SDK failure before creating a sandbox", () => {
 	const fake = setupFakeTools();
 	const result = runSmoke(fake, {
+		...traceEagerGitMaintenance(fake),
 		CRABBOX_LIVE: "1",
 		CRABBOX_LIVE_PROVIDERS: "vercel-sandbox",
 		FAKE_CRABBOX_FAIL_DOCTOR: "1",
@@ -247,12 +288,14 @@ test("classifies doctor SDK failure before creating a sandbox", () => {
 	assert.match(result.stdout, /classification=environment_blocked reason=doctor_failed/);
 	assert.equal(fs.existsSync(fake.state), false);
 	assert.doesNotMatch(fs.readFileSync(fake.calls, "utf8"), /^crabbox run --provider vercel-sandbox /m);
+	assertNoGitMaintenance(fake, 1);
 });
 
 test("runs retained reuse lifecycle and verifies cleanup", () => {
 	const fake = setupFakeTools();
 	const secret = "vercel_secret_value_for_redaction";
 	const result = runSmoke(fake, {
+		...traceEagerGitMaintenance(fake),
 		CRABBOX_BIN: path.relative(repoRoot, fake.fakeCrabbox),
 		CRABBOX_LIVE: "1",
 		CRABBOX_LIVE_PROVIDERS: "vercel-sandbox",
@@ -279,6 +322,7 @@ test("runs retained reuse lifecycle and verifies cleanup", () => {
 	assert.match(calls, /^crabbox run --provider vercel-sandbox --id vs-live-.*VERCEL_SANDBOX_STREAM_START/m);
 	assert.match(calls, /^crabbox run --provider vercel-sandbox --id vs-live-.* --no-sync -- /m);
 	assert.match(calls, /^crabbox stop --provider vercel-sandbox vs-live-/m);
+	assertNoGitMaintenance(fake, 2);
 });
 
 test("ignores successful inventory warnings while parsing JSON", () => {
