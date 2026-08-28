@@ -5,10 +5,80 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
 )
+
+type jobNoConfigureProvider struct {
+	testHetznerProvider
+	t *testing.T
+}
+
+func (p jobNoConfigureProvider) Configure(Config, Runtime) (Backend, error) {
+	p.t.Fatal("job admission configured a backend")
+	return nil, nil
+}
+
+type jobOptionsTestProvider struct {
+	jobNoConfigureProvider
+	requests *[]RunRequest
+}
+
+func (p jobOptionsTestProvider) ValidateRunOptions(req RunRequest) error {
+	*p.requests = append(*p.requests, req)
+	return nil
+}
+
+func TestJobNoSyncDryRunProviderAdmission(t *testing.T) {
+	for _, mode := range []string{"optional", "validator", "unselected"} {
+		t.Run(mode, func(t *testing.T) {
+			clearConfigEnv(t)
+			dir := t.TempDir()
+			t.Setenv("HOME", dir)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, ".config"))
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "config.yaml"))
+			var requests []RunRequest
+			original := providerRegistry["hetzner"]
+			base := jobNoConfigureProvider{t: t}
+			var provider Provider = base
+			if mode != "optional" {
+				provider = jobOptionsTestProvider{jobNoConfigureProvider: base, requests: &requests}
+			}
+			providerRegistry["hetzner"] = provider
+			t.Cleanup(func() { providerRegistry["hetzner"] = original })
+			selection := "provider: hetzner\n"
+			if mode == "unselected" {
+				selection = ""
+			}
+			config := selection + "jobs:\n  check:\n    noSync: true\n    shell: true\n    command: echo ready\n"
+			if err := os.WriteFile(os.Getenv("CRABBOX_CONFIG"), []byte(config), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			app := App{Stdout: &stdout, Stderr: &stderr}
+			if err := app.Run(context.Background(), []string{"job", "run", "--dry-run", "check"}); err != nil {
+				t.Fatalf("dry run: %v\nstderr=%s", err, &stderr)
+			}
+			var want []RunRequest
+			if mode == "validator" {
+				want = []RunRequest{{NoSync: true, ShellMode: true, Command: []string{"echo ready"}}}
+			}
+			if !reflect.DeepEqual(requests, want) {
+				t.Fatalf("validation requests=%+v, want %+v", requests, want)
+			}
+			if !strings.Contains(stdout.String(), "--no-sync --shell -- 'echo ready'") {
+				t.Fatalf("supported no-sync job missing from plan: %s", &stdout)
+			}
+			if mode == "unselected" {
+				if err := app.Run(context.Background(), []string{"job", "run", "check"}); err == nil || !strings.Contains(err.Error(), "no provider selected") {
+					t.Fatalf("job silently selected a default provider: %v", err)
+				}
+			}
+		})
+	}
+}
 
 func TestLoadConfigJobs(t *testing.T) {
 	clearConfigEnv(t)

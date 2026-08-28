@@ -393,7 +393,7 @@ func TestRouteConfigUsesProviderWorkRoot(t *testing.T) {
 
 func TestCommandRoutingArgsUsesPrivateLeaseState(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	args := (Provider{}).CommandRoutingArgs(testConfig(), "cbx_abcdef123456")
+	args := (Provider{}).CommandRouting(testConfig(), core.CommandRoutingRequest{LeaseID: "cbx_abcdef123456", Purpose: core.CommandRoutingReconnect}).Args
 	if len(args) != 4 || args[0] != "--external-routing-file" || !strings.HasSuffix(args[1], ".json") || args[2] != "--external-routing-digest" || args[3] != "" {
 		t.Fatalf("args=%#v", args)
 	}
@@ -467,7 +467,7 @@ func TestCommandRoutingArgsCarryDesktopCredentialOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	args := strings.Join((Provider{}).CommandRoutingArgs(cfg, leaseID), " ")
+	args := strings.Join((Provider{}).CommandRouting(cfg, core.CommandRoutingRequest{LeaseID: leaseID, Purpose: core.CommandRoutingReconnect}).Args, " ")
 	for _, want := range []string{
 		"--external-desktop-username screen-user",
 		"--external-desktop-password-env SCREEN_SHARING_PASSWORD",
@@ -491,7 +491,7 @@ func TestCommandRoutingArgsBindChildToExactRouteDigest(t *testing.T) {
 		t.Fatal(err)
 	}
 	first.External = loaded
-	args := (Provider{}).CommandRoutingArgs(first, leaseID)
+	args := (Provider{}).CommandRouting(first, core.CommandRoutingRequest{LeaseID: leaseID, Purpose: core.CommandRoutingReconnect}).Args
 	if len(args) < 4 || args[2] != "--external-routing-digest" || args[3] != core.ExternalRoutingDigest(loaded) {
 		t.Fatalf("routing args=%#v", args)
 	}
@@ -501,7 +501,7 @@ func TestCommandRoutingArgsBindChildToExactRouteDigest(t *testing.T) {
 	if _, err := core.PersistValidatedExternalRouting(leaseID, replacement.External); err != nil {
 		t.Fatal(err)
 	}
-	args = (Provider{}).CommandRoutingArgs(first, leaseID)
+	args = (Provider{}).CommandRouting(first, core.CommandRoutingRequest{LeaseID: leaseID, Purpose: core.CommandRoutingReconnect}).Args
 	if args[3] != core.ExternalRoutingDigest(loaded) {
 		t.Fatalf("routing args lost loaded route binding: %#v", args)
 	}
@@ -530,7 +530,7 @@ func TestCommandRoutingArgsLoadsPersistedRouteWhenConfigIsUnbound(t *testing.T) 
 		t.Fatal(err)
 	}
 	cfg := testConfig()
-	args := (Provider{}).CommandRoutingArgs(cfg, leaseID)
+	args := (Provider{}).CommandRouting(cfg, core.CommandRoutingRequest{LeaseID: leaseID, Purpose: core.CommandRoutingReconnect}).Args
 	if len(args) < 4 || args[3] != core.ExternalRoutingDigest(loaded) {
 		t.Fatalf("routing args=%#v", args)
 	}
@@ -569,7 +569,7 @@ func TestCommandRoutingArgsPreserveExplicitDesktopCredentialClears(t *testing.T)
 	if err := applyFlags(&zero, zeroFS, zeroValues); err != nil {
 		t.Fatal(err)
 	}
-	if args := (Provider{}).CommandRoutingArgs(zero, zeroLeaseID); len(args) != 4 || args[2] != "--external-routing-digest" || args[3] != core.ExternalRoutingDigest(zero.External) {
+	if args := (Provider{}).CommandRouting(zero, core.CommandRoutingRequest{LeaseID: zeroLeaseID, Purpose: core.CommandRoutingReconnect}).Args; len(args) != 4 || args[2] != "--external-routing-digest" || args[3] != core.ExternalRoutingDigest(zero.External) {
 		t.Fatalf("non-explicit zero desktop changed legacy routing args: %#v", args)
 	}
 
@@ -599,7 +599,7 @@ func TestCommandRoutingArgsPreserveExplicitDesktopCredentialClears(t *testing.T)
 		t.Fatalf("desktop clear was not applied: %#v", cfg.External.Connection.Desktop)
 	}
 
-	args := (Provider{}).CommandRoutingArgs(cfg, leaseID)
+	args := (Provider{}).CommandRouting(cfg, core.CommandRoutingRequest{LeaseID: leaseID, Purpose: core.CommandRoutingReconnect}).Args
 	want := []string{
 		"--external-routing-file", path,
 		"--external-routing-digest", core.ExternalRoutingDigest(cfg.External),

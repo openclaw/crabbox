@@ -34,6 +34,10 @@ The trailing command after `--` is sent to the box verbatim as argv. Use
 `--shell` to run it through the remote shell instead, for multi-statement
 snippets, pipes, or shell expansion.
 
+On POSIX and WSL2 SSH targets, private command staging does not change the
+remote caller's umask for user work. Commands keep the target shell's creation
+policy; Crabbox's staged scripts, input, and workspace-owner state remain private.
+
 ## Remote workspace root
 
 Use `CRABBOX_WORK_ROOT` to change the portable base root for one run without
@@ -265,6 +269,8 @@ hint, and `sync.timeout` kills stalled syncs.
 ### Sync alternatives
 
 - `--no-sync` skips rsync entirely and `--sync-only` syncs and exits.
+  Blacksmith Testbox rejects both options: it owns sync and has no supported
+  skip-sync contract.
 - `--fresh-pr <owner/repo#number|url|number>` skips local dirty sync and creates
   a fresh remote checkout of a GitHub PR. A bare `<number>` uses the current
   repository's GitHub origin. Only `github.com` PR URLs are accepted; other
@@ -558,6 +564,13 @@ Remote archive entries are confined to the bundle subtree; unsafe links and
 special files are omitted.
 `--capture-on-fail` remains accepted as a compatibility alias. Crabbox does not
 redact captured files; the caller owns redaction before sharing them.
+
+When the project capture destination is unwritable, automatic bundles fall
+back to the Crabbox user state directory's `captures/` subdirectory. The
+`failure-bundle local=...` line reports the actual path. Security-validation
+and archive/read failures do not trigger fallback, and explicit stdout/stderr
+capture paths never move. See [local capture storage](../observability.md#capturing-run-output-locally)
+for the state path and retention details.
 
 ## Test results
 

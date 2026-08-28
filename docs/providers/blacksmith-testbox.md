@@ -232,6 +232,16 @@ visibility-only detail page.
 
 ## Gotchas
 
+- `--no-sync` exits 2 before acquiring or reusing a Testbox because Blacksmith
+  has no supported skip-sync contract. Callers that need no file transfer must
+  choose a provider that supports skipping sync.
+- `prewarm --probe-command` requires `--no-sync`, so a nonblank probe exits 2
+  before warmup, key generation, provider calls, or claim changes, including
+  with `--dry-run`. Plain `prewarm` (also an empty or whitespace-only probe)
+  stays supported; omit `--no-sync` when reusing the resulting Testbox.
+- Named jobs with `noSync: true` also exit 2 before warmup, hydration, run, or
+  stop, including dry runs and existing leases. No keys are generated or claims
+  changed; omit `noSync` or set it to `false` for ordinary Blacksmith jobs.
 - `--sync-only`, `--checksum`, and `--force-sync-large` do not apply because
   Blacksmith owns sync.
 - `--script`, `--script-stdin`, `--fresh-pr`, local stdout/stderr captures, and

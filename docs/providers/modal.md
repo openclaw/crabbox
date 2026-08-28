@@ -118,14 +118,21 @@ variables; repository-local config cannot select a Modal environment or Secret.
    and a friendly slug.
 2. The sandbox timeout is derived from `--ttl`: it defaults to 5 minutes when no
    TTL is set and is capped at 24 hours.
-3. By default `run` archive-syncs the working tree: Git manifest → local
-   `tar -czf` → upload to `/tmp/crabbox-modal-sync-*.tgz` in the sandbox →
-   in-sandbox `tar -xzf` into `modal.workdir`.
+3. By default `run` archive-syncs the working tree: Git manifest → portable
+   gzip archive → upload to `/tmp/crabbox-modal-sync-*.tgz` in the sandbox →
+   in-sandbox `tar -xzf` into `modal.workdir`. For new sandboxes, archive
+   preparation and size guardrails run before creation. With `sync.delete`,
+   extraction is staged before replacing the workdir; the sync timeout bounds
+   archiving and transfer.
 4. The user command runs through `Sandbox.exec` in a `bash -lc` wrapper that
    first `cd`s into `modal.workdir`, streaming stdout/stderr back through
    Crabbox.
 5. One-shot sandboxes are terminated after a `run` that did not pass `--keep`.
-   `--keep` and `--keep-on-failure` retain the sandbox until `crabbox stop`.
+   `--keep` retains the sandbox; `--keep-on-failure` retains it after setup,
+   sync, or command failure. Reused sandboxes remain available. Termination
+   failure is a run failure and leaves the claim available for explicit stop.
+   See the [shared sandbox lifecycle](../features/delegated-runner-contract.md#shared-sandbox-lifecycle)
+   for exit-code precedence and timing semantics.
 
 Note: `warmup` always keeps the sandbox until an explicit `crabbox stop`. If you
 pass `--keep=false` to `warmup`, Crabbox prints a warning and still keeps it.

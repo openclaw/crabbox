@@ -141,7 +141,7 @@ func TestClaimsListRejectsLargeSparseFilesWithoutCreatingState(t *testing.T) {
 	}
 }
 
-func TestRuntimeClaimsSnapshotChecksFileTypeInsideLock(t *testing.T) {
+func TestRuntimeClaimsSnapshotRejectsNonRegularFilesWithoutLocks(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	stateDir, err := crabboxStateDir()
 	if err != nil {
@@ -174,8 +174,8 @@ func TestRuntimeClaimsSnapshotChecksFileTypeInsideLock(t *testing.T) {
 		if !errors.As(snapshot.invalid[leaseID], &fileErr) || fileErr.code != "non_regular_file" {
 			t.Fatalf("invalid[%s]=%v", leaseID, snapshot.invalid[leaseID])
 		}
-		if _, err := os.Stat(filepath.Join(stateDir, "claim-locks", leaseID+".json.lock")); err != nil {
-			t.Fatalf("runtime lock missing for %s: %v", leaseID, err)
-		}
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "claim-locks")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("runtime snapshot created lock state: %v", err)
 	}
 }

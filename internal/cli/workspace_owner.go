@@ -612,6 +612,7 @@ esac
 		timeout = "0"
 	}
 	return `set -u
+umask 077
 root="$HOME/.crabbox/workspace-owners"
 mkdir -p "$root"
 chmod 700 "$HOME/.crabbox" "$root" 2>/dev/null || true
@@ -766,7 +767,8 @@ func remoteWorkspaceOwnerPOSIXLauncher(key, token, script string) string {
 }
 
 func remoteWorkspaceOwnerPOSIXEncodedLauncher(key, token, encoded string, decodedSize int) string {
-	launcher := `set -u; umask 077; root="$HOME/.crabbox/workspace-owners"; run_dir="$root/` + key + `.launcher.` + token + `.$$"; script="$run_dir/script"; cleanup_launcher() { rm -f "$script"; rmdir "$run_dir" 2>/dev/null || true; }; decoded_size_ok() { set -- $(wc -c <"$script"); [ "$#" -eq 1 ] && [ "$1" = ` + strconv.Itoa(decodedSize) + ` ]; }; mkdir -p "$root" || exit 74; chmod 700 "$HOME/.crabbox" "$root" 2>/dev/null || true; mkdir -m 700 "$run_dir" || exit 74; payload_b64="` + encoded + `"; decoded=; if command -v base64 >/dev/null 2>&1; then if printf %s "$payload_b64" | base64 --decode >"$script" 2>/dev/null && decoded_size_ok; then decoded=1; elif printf %s "$payload_b64" | base64 -d >"$script" 2>/dev/null && decoded_size_ok; then decoded=1; elif printf %s "$payload_b64" | base64 -D >"$script" 2>/dev/null && decoded_size_ok; then decoded=1; fi; fi; if [ -z "$decoded" ] && command -v openssl >/dev/null 2>&1; then if printf %s "$payload_b64" | openssl base64 -d -A >"$script" 2>/dev/null && decoded_size_ok; then decoded=1; fi; fi; if [ -z "$decoded" ]; then cleanup_launcher; exit 74; fi; /bin/sh "$script"; code=$?; cleanup_launcher; exit "$code"`
+	// Private staging must not impose its creation policy on the launched script.
+	launcher := `set -u; command_umask=$(umask); umask 077; root="$HOME/.crabbox/workspace-owners"; run_dir="$root/` + key + `.launcher.` + token + `.$$"; script="$run_dir/script"; cleanup_launcher() { rm -f "$script"; rmdir "$run_dir" 2>/dev/null || true; }; decoded_size_ok() { set -- $(wc -c <"$script"); [ "$#" -eq 1 ] && [ "$1" = ` + strconv.Itoa(decodedSize) + ` ]; }; mkdir -p "$root" || exit 74; chmod 700 "$HOME/.crabbox" "$root" 2>/dev/null || true; mkdir -m 700 "$run_dir" || exit 74; payload_b64="` + encoded + `"; decoded=; if command -v base64 >/dev/null 2>&1; then if printf %s "$payload_b64" | base64 --decode >"$script" 2>/dev/null && decoded_size_ok; then decoded=1; elif printf %s "$payload_b64" | base64 -d >"$script" 2>/dev/null && decoded_size_ok; then decoded=1; elif printf %s "$payload_b64" | base64 -D >"$script" 2>/dev/null && decoded_size_ok; then decoded=1; fi; fi; if [ -z "$decoded" ] && command -v openssl >/dev/null 2>&1; then if printf %s "$payload_b64" | openssl base64 -d -A >"$script" 2>/dev/null && decoded_size_ok; then decoded=1; fi; fi; if [ -z "$decoded" ]; then cleanup_launcher; exit 74; fi; umask "$command_umask"; /bin/sh "$script"; code=$?; cleanup_launcher; exit "$code"`
 	return "exec /bin/sh -c " + shellQuote(launcher)
 }
 
@@ -809,6 +811,8 @@ recorded_identity=$(sed -n '2p' "$child" 2>/dev/null || true)
 [ "$recorded_pid" = "$child_pid" ] && [ "$recorded_identity" = "$child_identity" ] || exit 74
 rm -f "$child"`
 	return `set -u
+command_umask=$(umask)
+umask 077
 root="$HOME/.crabbox/workspace-owners"
 key=` + shellQuote(key) + `
 token=` + shellQuote(token) + `
@@ -829,7 +833,7 @@ run_owner_gate() {
 }
 rm -rf "$run_dir"
 mkdir -m 700 "$run_dir" || exit 74
-` + inputSetup + `(trap '' HUP; while [ ! -f "$start" ]; do sleep 0.05; done; exec sh -c "$payload"` + inputRedirect + `) &
+` + inputSetup + `(trap '' HUP; while [ ! -f "$start" ]; do sleep 0.05; done; umask "$command_umask"; exec sh -c "$payload"` + inputRedirect + `) &
 child_pid=$!
 child_identity=$(ps -o lstart= -p "$child_pid" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' | cut -c1-96)
 if [ -z "$child_identity" ] || ! kill -0 "$child_pid" 2>/dev/null; then kill "$child_pid" 2>/dev/null || true; rm -rf "$run_dir"; exit 74; fi

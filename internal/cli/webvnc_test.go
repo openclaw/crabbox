@@ -1000,14 +1000,14 @@ func TestIsMacOSDesktopProviderUsesExplicitTargetOrDedicatedProvider(t *testing.
 
 func TestWebVNCBridgeArgsPreserveProviderRouting(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	args := webVNCBridgeArgs(
+	args := webVNCBridgeRouting(
 		Config{Provider: "direct-webvnc-test", TargetOS: targetLinux},
 		SSHTarget{TargetOS: targetLinux},
 		"cbx_abcdef123456",
 		false,
 		false,
 	)
-	got := strings.Join(args, " ")
+	got := strings.Join(args.Args, " ")
 	if !strings.Contains(got, "--direct-webvnc-routing route-cbx_abcdef123456") {
 		t.Fatalf("args=%#v", args)
 	}
@@ -1043,15 +1043,15 @@ func (directWebVNCTestProvider) DesktopCredentials(cfg Config, target SSHTarget)
 	}
 	return DesktopCredentials{Username: "provider-user", Password: " provider-secret "}, true
 }
-func (directWebVNCTestProvider) CommandRoutingArgs(cfg Config, leaseID string) []string {
-	args := []string{"--direct-webvnc-routing", "route-" + leaseID}
+func (directWebVNCTestProvider) CommandRouting(cfg Config, request CommandRoutingRequest) CommandRouting {
+	args := []string{"--direct-webvnc-routing", "route-" + request.LeaseID}
 	if username := strings.TrimSpace(cfg.External.Connection.Desktop.Username); username != "" {
 		args = append(args, "--external-desktop-username", username)
 	}
 	if passwordEnv := strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv); passwordEnv != "" {
 		args = append(args, "--external-desktop-password-env", passwordEnv)
 	}
-	return args
+	return CommandRouting{Args: args}
 }
 
 func TestWebVNCPortalCredentialsUseMacOSProviderAccount(t *testing.T) {
@@ -1146,7 +1146,7 @@ func TestWebVNCResetDaemonLaunchPreservesExternalDesktopCredentialHandoff(t *tes
 		false,
 		false,
 	)
-	joinedArgs := strings.Join(args, "\n")
+	joinedArgs := strings.Join(args.Args, "\n")
 	for _, want := range []string{
 		"--external-desktop-username\nscreen-user",
 		"--external-desktop-password-env\n" + passwordEnv,
@@ -1164,7 +1164,7 @@ func TestWebVNCResetDaemonLaunchPreservesExternalDesktopCredentialHandoff(t *tes
 	childEnvironment := strings.Join(webVNCDaemonChildEnvironment([]string{
 		"PATH=/bin",
 		passwordEnv + "=synthetic-reset-secret",
-	}, args), "\n")
+	}, args.Args), "\n")
 	if strings.Contains(childEnvironment, passwordEnv) || strings.Contains(childEnvironment, "synthetic-reset-secret") {
 		t.Fatalf("reset daemon environment retained desktop credential: %q", childEnvironment)
 	}
@@ -2225,7 +2225,7 @@ func TestResolvedWebVNCCommandConfigPrefersResolvedLeaseProvider(t *testing.T) {
 	}
 
 	bridge := strings.Join(
-		webVNCBridgeArgs(cfg, SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, "cbx_1", true, false),
+		webVNCBridgeRouting(cfg, SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, "cbx_1", true, false).Args,
 		" ",
 	)
 	if bridge != "--provider aws --target windows --windows-mode wsl2 --id cbx_1 --open" {
@@ -2259,13 +2259,13 @@ func TestResolvedWebVNCCommandConfigPrefersResolvedLeaseProvider(t *testing.T) {
 }
 
 func TestWebVNCBridgeArgsCarriesNetworkOverride(t *testing.T) {
-	got := strings.Join(webVNCBridgeArgs(
+	got := strings.Join(webVNCBridgeRouting(
 		Config{Provider: "aws", TargetOS: targetLinux, Network: NetworkTailscale},
 		SSHTarget{TargetOS: targetLinux},
 		"cbx_1",
 		true,
 		true,
-	), " ")
+	).Args, " ")
 	if got != "--provider aws --target linux --network tailscale --id cbx_1 --open --take-control" {
 		t.Fatalf("bridge args=%q", got)
 	}

@@ -719,23 +719,15 @@ func shellJoin(args []string) string {
 }
 
 func desktopLaunchWebVNCArgs(cfg Config, target SSHTarget, leaseID string, openPortal, takeControl bool) []string {
-	targetOS := firstNonBlank(target.TargetOS, cfg.TargetOS)
-	args := []string{"--provider", cfg.Provider, "--target", targetOS, "--id", leaseID}
-	if cfg.Network != "" && cfg.Network != NetworkAuto {
-		args = append(args, "--network", string(cfg.Network))
-	}
-	windowsMode := firstNonBlank(target.WindowsMode, cfg.WindowsMode)
-	if targetOS == targetWindows && windowsMode != "" {
-		args = append(args, "--windows-mode", windowsMode)
-	}
-	args = append(args, leaseCommandRoutingArgs(cfg, leaseID)...)
+	// This call stays in-process, retaining the environment used to resolve cfg.
+	routing := leaseCommandRouting(cfg, target, leaseID, CommandRoutingRescue)
 	if openPortal {
-		args = append(args, "--open")
+		routing.Args = append(routing.Args, "--open")
 	}
 	if takeControl {
-		args = append(args, "--take-control")
+		routing.Args = append(routing.Args, "--take-control")
 	}
-	return args
+	return routing.Args
 }
 
 func firstNonBlank(values ...string) string {

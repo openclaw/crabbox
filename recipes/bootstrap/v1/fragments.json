@@ -1,0 +1,74 @@
+{
+  "schema": "crabbox-bootstrap-fragments/v1",
+  "fragments": [
+    {
+      "name": "windowsHeader",
+      "file": "windowsHeader.ps1",
+      "parameters": {
+        "user": "ps-string",
+        "publicKey": "ps-string",
+        "workRoot": "ps-string",
+        "ports": "ps-strings"
+      }
+    },
+    {
+      "name": "windowsCore",
+      "file": "windowsCore.ps1",
+      "parameters": {}
+    },
+    {
+      "name": "windowsDesktopPrelude",
+      "file": "windowsDesktopPrelude.ps1",
+      "parameters": {}
+    },
+    {
+      "name": "windowsNativePrelude",
+      "file": "windowsNativePrelude.ps1",
+      "parameters": {}
+    },
+    {
+      "name": "windowsFinalize",
+      "file": "windowsFinalize.ps1",
+      "parameters": {}
+    },
+    {
+      "name": "windowsDesktop",
+      "file": "windowsDesktop.ps1",
+      "parameters": {}
+    },
+    {
+      "name": "macOS",
+      "file": "macOS.sh",
+      "parameters": {
+        "user": "sh-string",
+        "publicKey": "sh-string",
+        "workRoot": "sh-string",
+        "ports": "sh-strings"
+      }
+    },
+    {
+      "name": "codeServerInstall",
+      "file": "codeServerInstall.sh",
+      "parameters": {}
+    },
+    {
+      "name": "tailscalePinnedInstall",
+      "file": "tailscalePinnedInstall.sh",
+      "parameters": {
+        "version": "sh-string",
+        "amd64SHA": "sh-string",
+        "arm64SHA": "sh-string"
+      }
+    },
+    {
+      "name": "tailscalePackageInstall",
+      "file": "tailscalePackageInstall.sh",
+      "parameters": {}
+    },
+    {
+      "name": "wslTruffleHogInstall",
+      "file": "wslTruffleHogInstall.sh",
+      "parameters": {}
+    }
+  ]
+}

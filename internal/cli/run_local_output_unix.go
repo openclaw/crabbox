@@ -4,6 +4,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -22,6 +23,10 @@ func ensurePrivateRunOutputDir(path string) error {
 		return err
 	}
 	defer unix.Close(fd)
+	return securePrivateRunOutputDirFD(fd)
+}
+
+func securePrivateRunOutputDirFD(fd int) error {
 	if err := setPrivateFDPermissions(uintptr(fd), privateRunOutputDirMode); err != nil {
 		return err
 	}
@@ -36,7 +41,14 @@ func ensurePrivateRunOutputDir(path string) error {
 }
 
 func createPrivateRunOutputDir(path string) error {
-	return os.MkdirAll(path, privateRunOutputDirMode)
+	if err := os.MkdirAll(path, privateRunOutputDirMode); err != nil {
+		return privateRunOutputWriteError{err}
+	}
+	return nil
+}
+
+func privateRunOutputPermissionError(err error) bool {
+	return errors.Is(err, os.ErrPermission) || errors.Is(err, unix.EROFS)
 }
 
 func openPrivateRunOutputFile(path string) (*os.File, error) {
@@ -80,7 +92,7 @@ func createPrivateRunOutputTemp(path string) (*os.File, string, error) {
 	dir := filepath.Dir(path)
 	file, err := os.CreateTemp(dir, "."+filepath.Base(path)+".crabbox-*")
 	if err != nil {
-		return nil, "", err
+		return nil, "", privateRunOutputWriteError{err}
 	}
 	tempPath := file.Name()
 	if err := securePrivateFile(file); err != nil {

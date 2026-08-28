@@ -74,6 +74,9 @@ func (a App) jobRun(ctx context.Context, args []string) (err error) {
 	createdLease := leaseID == ""
 	plannedLease := blank(leaseID, "<lease>")
 	runNoHydrate := *noHydrate || !job.Hydrate.Actions
+	if err := validateJobRunOptions(cfg, job, leaseID); err != nil {
+		return exit(2, "job %q: %v", name, err)
+	}
 	if *dryRun {
 		for _, line := range jobPlanCommands(cfg, name, job, plannedLease, createdLease, runNoHydrate, *githubRunner, stopPolicy) {
 			fmt.Fprintln(a.Stdout, line)
@@ -120,6 +123,37 @@ func (a App) jobRun(ctx context.Context, args []string) (err error) {
 	}
 	err = a.runCommand(ctx, jobRunArgs(cfg, job, leaseID, runNoHydrate))
 	return err
+}
+
+func validateJobRunOptions(cfg Config, job JobConfig, leaseID string) error {
+	if !job.NoSync {
+		return nil
+	}
+	// Reuse run's lease flags and claim routing, with external mutations disabled.
+	// Provider-level validation does not require configuring a backend or auth.
+	fs := newFlagSet("job run options", io.Discard)
+	flags := registerLeaseCreateFlags(fs, cfg)
+	if err := parseFlags(fs, jobLeaseCreateArgsFor(cfg, job, false)); err != nil {
+		return err
+	}
+	if err := applyLeaseCreateFlagsForLeaseMode(&cfg, fs, flags, leaseID, false); err != nil {
+		return err
+	}
+	if !providerSelectionIsActionable(cfg) {
+		return nil
+	}
+	provider, err := ProviderFor(cfg.Provider)
+	if err != nil {
+		return err
+	}
+	if validator, ok := provider.(RunOptionsValidator); ok {
+		command := strings.Fields(job.Command)
+		if job.Shell {
+			command = []string{job.Command}
+		}
+		return validator.ValidateRunOptions(RunRequest{NoSync: job.NoSync, ShellMode: job.Shell, Command: command})
+	}
+	return nil
 }
 
 func validateJobConfig(name string, job JobConfig) error {

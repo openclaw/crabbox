@@ -67,7 +67,7 @@ func TestCommandRoutingArgsPreservesEffectiveConfig(t *testing.T) {
 	cfg.SealosDevbox.DeleteOnRelease = false
 	core.MarkDeleteOnReleaseExplicit(&cfg, providerName)
 
-	got := strings.Join((Provider{}).CommandRoutingArgs(cfg, "cbx_abcdef123456"), "\n")
+	got := strings.Join((Provider{}).CommandRouting(cfg, core.CommandRoutingRequest{LeaseID: "cbx_abcdef123456", Purpose: core.CommandRoutingReconnect}).Args, "\n")
 	for _, want := range []string{
 		"--sealos-devbox-kubectl\n/opt/bin/kubectl",
 		"--sealos-devbox-kubeconfig\n/tmp/kube config",
@@ -92,7 +92,7 @@ func TestCommandRoutingArgsUsesExplicitTopLevelWorkRoot(t *testing.T) {
 	cfg.WorkRoot = "/srv/crabbox"
 	core.MarkWorkRootExplicit(&cfg)
 
-	got := strings.Join((Provider{}).CommandRoutingArgs(cfg, "cbx_abcdef123456"), "\n")
+	got := strings.Join((Provider{}).CommandRouting(cfg, core.CommandRoutingRequest{LeaseID: "cbx_abcdef123456", Purpose: core.CommandRoutingReconnect}).Args, "\n")
 	if !strings.Contains(got, "--sealos-devbox-work-root\n/srv/crabbox") {
 		t.Fatalf("routing args lost explicit work root:\n%s", got)
 	}
@@ -108,7 +108,7 @@ func TestCommandRoutingArgsPrefersExplicitProviderWorkRoot(t *testing.T) {
 	cfg.SealosDevbox.WorkRoot = "/home/devbox/override"
 	core.MarkSealosDevboxWorkRootExplicit(&cfg)
 
-	got := strings.Join((Provider{}).CommandRoutingArgs(cfg, "cbx_abcdef123456"), "\n")
+	got := strings.Join((Provider{}).CommandRouting(cfg, core.CommandRoutingRequest{LeaseID: "cbx_abcdef123456", Purpose: core.CommandRoutingReconnect}).Args, "\n")
 	if !strings.Contains(got, "--sealos-devbox-work-root\n/home/devbox/override") {
 		t.Fatalf("routing args lost provider work root:\n%s", got)
 	}

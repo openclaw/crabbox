@@ -93,6 +93,28 @@ func runOverlayCommand(t *testing.T, command string, input []byte, environment .
 	return cmd.CombinedOutput()
 }
 
+func installGitOverlayCredentialCanary(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "credential-called")
+	helper := filepath.Join(dir, "credential-canary")
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\nprintf called >>"+shellQuote(marker)+"\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	global := filepath.Join(dir, "gitconfig")
+	runGit(t, dir, "config", "--file", global, "credential.helper", "!"+shellQuote(helper))
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	t.Setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_COUNT", "0")
+	t.Setenv("GIT_CONFIG_PARAMETERS", "")
+	t.Setenv("GIT_ASKPASS", helper)
+	t.Setenv("SSH_ASKPASS", helper)
+	// Keep a regressed fixture bounded even when the test runner has a TTY.
+	t.Setenv("GIT_TERMINAL_PROMPT", "0")
+	return marker
+}
+
 func assertNoGitOverlayResidue(t *testing.T, workdir string) {
 	t.Helper()
 	for _, pattern := range []string{".overlay-git.*", ".overlay-seed.*"} {
@@ -1372,6 +1394,11 @@ func TestRunGitOverlaySuccessFallbackAndLateLocalEdit(t *testing.T) {
 				}
 			}
 			installWorkspaceOwnerAwareSSH(t, filepath.Join(binDir, "ssh"), fmt.Sprintf(`#!/bin/sh
+# These remote commands run locally, including the ordinary Git seed fallback.
+# Keep the stand-in noninteractive and independent of the operator's Git auth.
+unset GIT_CONFIG_PARAMETERS
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=0
+export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false GCM_INTERACTIVE=Never
 cmd="$1"
 printf '%%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
 case "$cmd" in
@@ -1431,9 +1458,19 @@ done < "$tmp"
 			t.Setenv("CRABBOX_FAKE_ATTACK_BIN", attackBin)
 			t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
 			t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
-			var stdout, stderr bytes.Buffer
+			credentialMarker := ""
+			if mode == "private-origin" {
+				credentialMarker = installGitOverlayCredentialCanary(t)
+			}
+			var stdout bytes.Buffer
+			var stderr synchronizedBuffer
 			app := App{Stdout: &stdout, Stderr: &stderr}
 			runErr := app.runCommand(context.Background(), []string{"--provider", providerName, "--no-hydrate", "--sync-only"})
+			if credentialMarker != "" {
+				if _, err := os.Stat(credentialMarker); !os.IsNotExist(err) {
+					t.Fatalf("local SSH fixture consulted ambient Git credentials: %v", err)
+				}
+			}
 			if mode == "unsafe-metadata" {
 				if runErr == nil || !strings.Contains(runErr.Error(), "unsafe_overlay_metadata") {
 					t.Fatalf("unsafe metadata did not fail closed: err=%v stderr=%s", runErr, stderr.String())

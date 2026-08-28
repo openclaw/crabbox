@@ -163,11 +163,15 @@ func validateProviderTarget(cfg Config) error {
 		return exit(2, "%s", unsupportedManagedTargetMessageForConfig(provider.Name(), cfg))
 	}
 	machineTarget := cfg.TargetOS != targetWorkerRuntime
-	if machineTarget && (provider.Name() == "tart" || provider.Name() == "apple-vm" || provider.Name() == "lume" || provider.Name() == "aws-lambda-microvm") && cfg.architectureExplicit && effectiveArchitectureForConfig(cfg) != ArchitectureARM64 {
+	_, ownsArchitecture := provider.(ProviderArchitectureCapability)
+	if machineTarget && !ownsArchitecture && (provider.Name() == "tart" || provider.Name() == "apple-vm" || provider.Name() == "lume" || provider.Name() == "aws-lambda-microvm") && cfg.architectureExplicit && effectiveArchitectureForConfig(cfg) != ArchitectureARM64 {
 		return exit(2, "provider=%s supports architecture=arm64 only", provider.Name())
 	}
 	architecture := effectiveArchitectureForConfig(cfg)
-	if machineTarget && architecture == ArchitectureARM64 {
+	if machineTarget && ownsArchitecture && !providerSupportsArchitecture(provider, cfg, architecture) {
+		return exit(2, "provider=%s does not support target=%s windows.mode=%s architecture=%s", provider.Name(), cfg.TargetOS, cfg.WindowsMode, architecture)
+	}
+	if machineTarget && !ownsArchitecture && architecture == ArchitectureARM64 {
 		if !providerSupportsArchitecture(provider, cfg, architecture) {
 			return exit(2, "architecture=arm64 currently supports provider=azure, provider=aws, provider=tart, provider=apple-container, provider=apple-vm, provider=lume, provider=aws-lambda-microvm, provider=external, or a provider with runtime-native architecture support such as provider=local-container")
 		}

@@ -173,6 +173,21 @@
     "auth": "API key via CRABBOX_BLAXEL_API_KEY or BL_API_KEY; env-only remote sandbox auth",
     "docs": "blaxel.md"
   },
+  "boxd": {
+    "status": "built-in",
+    "category": "direct-cloud",
+    "substrate": "boxd KVM microVM (Ubuntu 24.04)",
+    "location": "provider-managed",
+    "ssh": "crabbox-managed",
+    "sync": "crabbox-sync",
+    "gpu": "no",
+    "lifecycle": "HTTPS console API + WSS bootstrap",
+    "cleanup": "machine destroy (claim-gated)",
+    "bestFit": "Experimental isolated Linux microVM SSH leases",
+    "caveat": "2026-08-27: production ignores isolated=true; Crabbox rejects guest access and rolls back; guest execution unverified; guest port 8000 is public",
+    "auth": "BOXD_TOKEN or CRABBOX_BOXD_TOKEN interactive session from HTTPS device login; API-key sessions cannot mutate",
+    "docs": "boxd.md"
+  },
   "cloud-run-sandbox": {
     "status": "built-in",
     "category": "delegated-sandbox",

@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -8,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadRunScriptUsesContentHashedStandalonePath(t *testing.T) {
@@ -69,9 +72,6 @@ func TestRemoteRunScriptCommandUsesWorkdirAndUploadedScriptIdentity(t *testing.T
 	}
 	remotePath := ".crabbox/scripts/abc-check.sh"
 	fullPath := filepath.Join(workdir, filepath.FromSlash(remotePath))
-	if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	script := `#!/bin/sh
 set -eu
 if [ "$PWD" = "$1" ]; then echo PWD_WORKDIR=yes; fi
@@ -82,12 +82,55 @@ script_dir=$(cd "$(dirname "$0")" && pwd -P)
 upload_dir=$(cd "$1/.crabbox/scripts" && pwd -P)
 if [ "$script_dir" = "$upload_dir" ]; then echo DIR_UPLOAD=yes; fi
 `
-	if err := os.WriteFile(fullPath, []byte(script), 0o700); err != nil {
+	upload := exec.Command("sh", "-c", "umask 022; "+remoteUploadRunScriptCommand(workdir, remotePath))
+	upload.Env = []string{"HOME=" + t.TempDir(), "PATH=" + os.Getenv("PATH")}
+	input, err := upload.StdinPipe()
+	if err != nil {
 		t.Fatal(err)
+	}
+	var uploadOutput bytes.Buffer
+	upload.Stdout, upload.Stderr = &uploadOutput, &uploadOutput
+	if err := upload.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = input.Close()
+		if upload.ProcessState == nil {
+			_ = upload.Process.Kill()
+			_ = upload.Wait()
+		}
+	})
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		info, err := os.Stat(fullPath)
+		if err == nil {
+			if info.Mode().Perm() != 0o600 {
+				t.Errorf("script is readable before upload completes: mode=%04o want=0600", info.Mode().Perm())
+			}
+			break
+		}
+		if !os.IsNotExist(err) || time.Now().After(deadline) {
+			t.Fatalf("wait for upload: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := fmt.Fprint(input, script); err != nil {
+		t.Fatal(err)
+	}
+	if err := input.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := upload.Wait(); err != nil {
+		t.Fatalf("upload: %v\n%s", err, uploadOutput.String())
+	}
+	if info, err := os.Stat(fullPath); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("completed upload mode: info=%v err=%v", info, err)
 	}
 	spec := &RunScriptSpec{Source: "./scripts/check.sh", RemotePath: remotePath, Shebang: true}
 	command := remoteRunScriptCommandWithEnvFile(workdir, nil, "", spec, []string{workdir})
-	output, err := exec.Command("bash", "-lc", command).CombinedOutput()
+	run := exec.Command("bash", "-lc", command)
+	run.Env = upload.Env
+	output, err := run.CombinedOutput()
 	if err != nil {
 		t.Fatalf("execute remote script command: %v\n%s", err, output)
 	}

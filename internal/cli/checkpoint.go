@@ -34,6 +34,7 @@ const (
 	checkpointKindMachine0     = "machine0-image"
 	checkpointKindParallels    = "parallels-snapshot"
 	checkpointKindDockerCommit = "docker-commit"
+	checkpointKindDaytona      = "daytona-snapshot"
 
 	checkpointStrategyAuto         = "auto"
 	checkpointStrategyImage        = "image"
@@ -127,7 +128,17 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
-	server, target, leaseID, err := operationApp.resolveNetworkLeaseTargetForRepoWithConfig(ctx, &cfg, *id, true, *reclaim)
+	var server Server
+	var target SSHTarget
+	var leaseID string
+	selected, _ := ProviderFor(cfg.Provider)
+	policy, apiSource := selected.(NativeCheckpointSourcePolicyProvider)
+	requestedKind := checkpointCreateMode(*mode, *strategy, cfg, Server{Provider: cfg.Provider, CloudID: *id}, SSHTarget{TargetOS: cfg.TargetOS}, *recipeOnly)
+	if apiSource && policy.NativeCheckpointSourceStatusOnly(cfg) && isNativeCheckpointKind(requestedKind) {
+		server, target, leaseID, err = operationApp.resolveLeaseTargetWithRequestConfig(ctx, &cfg, ResolveRequest{Repo: repo, ID: *id, Reclaim: *reclaim, StatusOnly: true})
+	} else {
+		server, target, leaseID, err = operationApp.resolveNetworkLeaseTargetForRepoWithConfig(ctx, &cfg, *id, true, *reclaim)
+	}
 	if err != nil {
 		return err
 	}
@@ -157,7 +168,7 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	}
 	createKind := checkpointCreateMode(*mode, *strategy, cfg, server, target, *recipeOnly)
 	switch createKind {
-	case checkpointKindRecipe, checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindMachine0, checkpointKindParallels, checkpointKindDockerCommit, checkpointKindArchive:
+	case checkpointKindRecipe, checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindMachine0, checkpointKindParallels, checkpointKindDockerCommit, checkpointKindDaytona, checkpointKindArchive:
 		record.Kind = createKind
 	default:
 		return exit(2, "checkpoint mode must be auto, native, or archive")
@@ -174,7 +185,7 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	}()
 	switch createKind {
 	case checkpointKindRecipe:
-	case checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindMachine0, checkpointKindParallels, checkpointKindDockerCommit:
+	case checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindMachine0, checkpointKindParallels, checkpointKindDockerCommit, checkpointKindDaytona:
 		createStrategy := checkpointCreateStrategy(*mode, *strategy, createKind)
 		image, metadata, err := operationApp.createNativeCheckpoint(ctx, cfg, server, target, record.ID, leaseID, record.Name, repo.Name, workdir, createStrategy, *noReboot, *wait, *waitTimeout)
 		if image.ID != "" {
@@ -1875,7 +1886,7 @@ func nativeCheckpointForkWorkdir(cfg Config, leaseID, repoName, override string)
 }
 
 func isNativeCheckpointKind(kind string) bool {
-	return kind == checkpointKindAWSAMI || kind == checkpointKindAWSEBS || kind == checkpointKindAzure || kind == checkpointKindAzureOS || kind == checkpointKindGCP || kind == checkpointKindGCPDisk || kind == checkpointKindHetzner || kind == checkpointKindMachine0 || kind == checkpointKindParallels || kind == checkpointKindDockerCommit
+	return kind == checkpointKindAWSAMI || kind == checkpointKindAWSEBS || kind == checkpointKindAzure || kind == checkpointKindAzureOS || kind == checkpointKindGCP || kind == checkpointKindGCPDisk || kind == checkpointKindHetzner || kind == checkpointKindMachine0 || kind == checkpointKindParallels || kind == checkpointKindDockerCommit || kind == checkpointKindDaytona
 }
 
 func checkpointProviderForKind(kind string) string {
@@ -1894,6 +1905,8 @@ func checkpointProviderForKind(kind string) string {
 		return "parallels"
 	case checkpointKindDockerCommit:
 		return "local-container"
+	case checkpointKindDaytona:
+		return "daytona"
 	default:
 		return ""
 	}

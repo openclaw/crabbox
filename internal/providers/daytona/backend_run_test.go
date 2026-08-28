@@ -488,6 +488,10 @@ func TestDeleteDaytonaToolboxSandboxUsesBoundedContext(t *testing.T) {
 	daytonaCleanupTimeout = 10 * time.Millisecond
 	t.Cleanup(func() { daytonaCleanupTimeout = oldTimeout })
 	fake := &blockingDeleteDaytonaAPI{canceled: make(chan struct{})}
+	sandbox := &apidaytona.Sandbox{}
+	sandbox.SetId("sandbox-one")
+	sandbox.SetLabels(map[string]string{"crabbox": "true", "provider": daytonaProvider, "lease": "cbx_111111111111"})
+	fake.getSandboxes = map[string]*apidaytona.Sandbox{"sandbox-one": sandbox}
 	oldClient := newDaytonaClient
 	newDaytonaClient = func(Config, Runtime) (daytonaAPI, error) {
 		return fake, nil
@@ -499,7 +503,7 @@ func TestDeleteDaytonaToolboxSandboxUsesBoundedContext(t *testing.T) {
 	started := time.Now()
 	ctx, cancel := daytonaCleanupContext()
 	defer cancel()
-	backend.deleteDaytonaToolboxSandbox(ctx, "sandbox-one", "lease-one")
+	backend.deleteDaytonaToolboxSandbox(ctx, "sandbox-one", "cbx_111111111111")
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("delete cleanup took %s, want bounded timeout", elapsed)
 	}

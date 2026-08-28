@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,6 +11,63 @@ import (
 	"testing"
 	"time"
 )
+
+func TestConfigCommandsReportSelectedPath(t *testing.T) {
+	for _, name := range []string{"default", "absolute", "relative", "missing", "symlink"} {
+		t.Run(name, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Chdir(t.TempDir())
+			t.Setenv("CRABBOX_CONFIG", "")
+			path := userConfigPath()
+			if name != "default" {
+				path = filepath.Join(t.TempDir(), "selected config.yaml")
+				if name == "relative" {
+					path = "selected config.yaml"
+				}
+				t.Setenv("CRABBOX_CONFIG", path)
+			}
+			profile := "selected-path-proof"
+			if name == "missing" {
+				profile = "default"
+			} else {
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("profile: "+profile+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if name == "symlink" {
+					link := filepath.Join(filepath.Dir(path), "selected link.yaml")
+					if err := os.Symlink(path, link); err != nil {
+						t.Skipf("symlink unavailable: %v", err)
+					}
+					path = link
+					t.Setenv("CRABBOX_CONFIG", path)
+				}
+			}
+			var stdout, stderr bytes.Buffer
+			app := App{Stdout: &stdout, Stderr: &stderr}
+			if err := app.Run(context.Background(), []string{"config", "path"}); err != nil {
+				t.Fatal(err)
+			}
+			if got := stdout.String(); got != path+"\n" {
+				t.Fatalf("config path=%q want %q", got, path)
+			}
+			stdout.Reset()
+			if err := app.Run(context.Background(), []string{"config", "show"}); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.HasPrefix(stdout.String(), "config="+path+"\n") || !strings.Contains(stdout.String(), " profile="+profile+"\n") {
+				t.Fatalf("config show path/profile mismatch: %s", stdout.String())
+			}
+			if name == "missing" {
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Fatalf("diagnostics created missing config: %v", err)
+				}
+			}
+		})
+	}
+}
 
 func TestConfigShowReportsProviderSelectionSource(t *testing.T) {
 	t.Run("compiled default text", func(t *testing.T) {
@@ -2316,5 +2374,51 @@ func TestMachine0ConfigWorkRootDisplay(t *testing.T) {
 	}
 	if got := machine0ConfigWorkRoot("/srv/explicit"); got != "/srv/explicit" {
 		t.Fatalf("explicit work root display=%q", got)
+	}
+}
+
+func TestConfigShowArchitectureExplicitnessOffline(t *testing.T) {
+	for _, tc := range []struct {
+		name, yaml, env, arch string
+		explicit              bool
+	}{
+		{name: "default", arch: "amd64"},
+		{name: "empty yaml", yaml: "architecture: ''\n", arch: "amd64"},
+		{name: "yaml amd64", yaml: "architecture: amd64\n", arch: "amd64", explicit: true},
+		{name: "yaml arm64", yaml: "architecture: arm64\n", arch: "arm64", explicit: true},
+		{name: "environment overrides yaml", yaml: "architecture: arm64\n", env: "amd64", arch: "amd64", explicit: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateDoctorProviderSelectionTest(t)
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte("provider: ssh\ntarget: macos\nstatic:\n  host: offline.example.test\n"+tc.yaml), 0600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CRABBOX_CONFIG", path)
+			t.Setenv("CRABBOX_ARCH", tc.env)
+			// No executable can run. config show must not probe/admit the host.
+			t.Setenv("PATH", t.TempDir())
+			for _, jsonOutput := range []bool{false, true} {
+				var out, log bytes.Buffer
+				args := []string{}
+				if jsonOutput {
+					args = []string{"--json"}
+				}
+				if err := (App{Stdout: &out, Stderr: &log}).configShow(args); err != nil {
+					t.Fatal(err)
+				}
+				if jsonOutput {
+					var view map[string]any
+					if err := json.Unmarshal(out.Bytes(), &view); err != nil {
+						t.Fatal(err)
+					}
+					if view["architecture"] != tc.arch || view["architectureExplicit"] != tc.explicit {
+						t.Fatalf("view=%v", view)
+					}
+				} else if !strings.Contains(out.String(), fmt.Sprintf("arch=%s architecture_explicit=%t", tc.arch, tc.explicit)) {
+					t.Fatalf("text=%s", &out)
+				}
+			}
+		})
 	}
 }

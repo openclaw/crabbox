@@ -3,7 +3,9 @@ package cloudflaresandbox
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -716,4 +718,95 @@ func sawExecContaining(execReqs []execRequest, needle string) bool {
 	return slices.ContainsFunc(execReqs, func(req execRequest) bool {
 		return strings.Contains(req.Command, needle)
 	})
+}
+
+func TestRunLifecycleArchiveGuardrailBeforeCreation(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newLifecycleFakeClient()
+	backend := testBackend(fake, io.Discard, io.Discard)
+	backend.cfg.Sync.FailFiles = 1
+	result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "repo", Root: tempRepo(t)}, Command: []string{"true"}})
+	var ee ExitError
+	if !errors.As(err, &ee) || ee.Code != 6 || result.ExitCode != 6 || len(fake.creates) != 0 || result.Session != nil {
+		t.Fatalf("result=%#v err=%v creates=%v", result, err, fake.creates)
+	}
+}
+
+func TestRunLifecycleCleanupOutcomeAndTiming(t *testing.T) {
+	for _, code := range []int{0, 7} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			fake := newLifecycleFakeClient()
+			fake.exitCode, fake.deleteErr = code, errors.New("delete unavailable")
+			var stderr bytes.Buffer
+			backend := testBackend(fake, io.Discard, &stderr)
+			result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "repo", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true, TimingJSON: true})
+			wantCode, wantKind := code, core.RunErrorCommandExit
+			if code == 0 {
+				wantCode, wantKind = 1, core.RunErrorProvider
+			}
+			var ee ExitError
+			if !errors.As(err, &ee) || ee.Code != wantCode || result.ExitCode != wantCode || result.ErrorKind != wantKind || result.Session == nil || !result.Session.Kept {
+				t.Fatalf("result=%#v err=%v", result, err)
+			}
+			count := 0
+			for _, call := range fake.calls {
+				if strings.HasPrefix(call, "delete:") {
+					count++
+				}
+			}
+			if count != 1 {
+				t.Fatalf("delete count=%d", count)
+			}
+			var report core.TimingReport
+			for _, line := range strings.Split(stderr.String(), "\n") {
+				if strings.HasPrefix(line, "{") {
+					if err := json.Unmarshal([]byte(line), &report); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if report.ExitCode != result.ExitCode || report.RunStatus != result.Status || report.ErrorKind != result.ErrorKind || report.TotalMs != result.Total.Milliseconds() {
+				t.Fatalf("report=%#v result=%#v", report, result)
+			}
+		})
+	}
+}
+
+func TestRunLifecycleHonorsOperationLockAndReleasesOnOwnershipFailure(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := newLifecycleFakeClient()
+	backend := testBackend(fake, io.Discard, io.Discard)
+	repo := Repo{Name: "repo", Root: t.TempDir()}
+	kept, err := backend.Run(t.Context(), RunRequest{Repo: repo, NoSync: true, Keep: true, SyncOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := lockCloudflareSandboxLeaseOperation(t.Context(), kept.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callsBefore := len(fake.calls)
+	ctx, cancel := context.WithTimeout(t.Context(), 25*time.Millisecond)
+	result, err := backend.Run(ctx, RunRequest{Repo: repo, ID: kept.LeaseID, NoSync: true, Command: []string{"true"}})
+	cancel()
+	unlock()
+	if !errors.Is(err, context.DeadlineExceeded) || result.Session != nil || len(fake.calls) != callsBefore {
+		t.Fatalf("run bypassed lock: result=%#v err=%v calls=%v", result, err, fake.calls[callsBefore:])
+	}
+	for id, sandbox := range fake.sandboxes {
+		sandbox.Metadata[metadataClaimKey] = "foreign"
+		fake.sandboxes[id] = sandbox
+	}
+	result, err = backend.Run(t.Context(), RunRequest{Repo: repo, ID: kept.LeaseID, NoSync: true, Command: []string{"true"}})
+	if err == nil || result.Session != nil || len(fake.execs) != 1 || len(fake.sandboxes) != 1 {
+		t.Fatalf("ownership check bypassed: result=%#v err=%v execs=%v", result, err, fake.execs)
+	}
+	ctx, cancel = context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	unlock, err = lockCloudflareSandboxLeaseOperation(ctx, kept.LeaseID)
+	if err != nil {
+		t.Fatalf("failed resolution leaked lock: %v", err)
+	}
+	unlock()
 }

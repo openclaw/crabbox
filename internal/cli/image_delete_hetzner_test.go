@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -62,6 +65,19 @@ func TestDeleteHetznerCheckpointImageRequiresUniqueLocalRecord(t *testing.T) {
 }
 
 func TestDeleteHetznerCheckpointImageChecksLocationAndDeletesRemoteFirst(t *testing.T) {
+	clearConfigEnv(t)
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("provider: hetzner\nmachine0:\n  cliPath: /fixture/custom-machine0\n  pollInterval: 7s\n  createTimeout: 23m\nlocalContainer:\n  runtime: /fixture/custom-docker\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Machine0.PollInterval != 7*time.Second || cfg.Machine0.CreateTimeout != 23*time.Minute {
+		t.Fatal("fixture did not load custom polling config")
+	}
 	store := checkpointStore{root: t.TempDir()}
 	record := hetznerImageDeleteRecord("chk_owned", "99", "fsn1")
 	if _, err := store.Create(record); err != nil {
@@ -93,6 +109,16 @@ func TestDeleteHetznerCheckpointImageChecksLocationAndDeletesRemoteFirst(t *test
 		t.Fatalf("deleted=%+v requests=%d", deleted, len(lifecycle.requests))
 	}
 	req := lifecycle.requests[1]
+	if req.LoadConfig == nil {
+		t.Fatal("resource request is missing its config loader")
+	}
+	loaded, err := req.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(loaded, cfg) {
+		t.Errorf("resource request lost effective config: Machine0=%+v LocalContainer.Runtime=%q", loaded.Machine0, loaded.LocalContainer.Runtime)
+	}
 	if req.Image.Kind != checkpointKindHetzner || req.Image.ID != "99" || req.Image.Region != "fsn1" || req.Metadata["checkpoint"] != record.ID {
 		t.Fatalf("request=%+v", req)
 	}
