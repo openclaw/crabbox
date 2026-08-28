@@ -30,6 +30,20 @@ type recordingRunner struct {
 	run       func(core.LocalCommandRequest) (core.LocalCommandResult, error)
 }
 
+type recordedCommandSummary struct {
+	Name string
+	Args []string
+}
+
+func (r *recordingRunner) commandSummary() []recordedCommandSummary {
+	// Keep captured requests intact, but never format their environment or streams.
+	summary := make([]recordedCommandSummary, len(r.calls))
+	for i, req := range r.calls {
+		summary[i] = recordedCommandSummary{Name: req.Name, Args: req.Args}
+	}
+	return summary
+}
+
 type localContainerTestClock struct{ now time.Time }
 
 func (c localContainerTestClock) Now() time.Time { return c.now }
@@ -61,7 +75,7 @@ func recordedArgsForCommand(t *testing.T, runner *recordingRunner, command strin
 			return strings.Join(runner.calls[i].Args, "\n")
 		}
 	}
-	t.Fatalf("%s command was not recorded: %#v", command, runner.calls)
+	t.Fatalf("%s command was not recorded: %#v", command, runner.commandSummary())
 	return ""
 }
 
@@ -1354,7 +1368,7 @@ func TestResolveContainerHydratesCustomRuntimeRouteBeforeLookup(t *testing.T) {
 						}
 					}
 					if !foundHost {
-						t.Fatalf("captured Docker host missing: %v", req.Env)
+						t.Fatalf("captured Docker host missing: command=%s args=%q", req.Name, req.Args)
 					}
 				}
 				switch firstArg(args) {
@@ -1656,7 +1670,7 @@ func TestAssertRequestedArchitectureOmittedDoesNotProbe(t *testing.T) {
 		t.Fatalf("architecture=%q err=%v", got, err)
 	}
 	if len(runner.calls) != 0 {
-		t.Fatalf("omitted architecture probed runtime: %#v", runner.calls)
+		t.Fatalf("omitted architecture probed runtime: %#v", runner.commandSummary())
 	}
 }
 
@@ -1678,7 +1692,7 @@ func TestAcquireArchitectureMismatchFailsBeforeContainerCreation(t *testing.T) {
 				t.Fatalf("err=%v", err)
 			}
 			if len(runner.calls) != 1 {
-				t.Fatalf("runtime calls=%d, want architecture probe only: %#v", len(runner.calls), runner.calls)
+				t.Fatalf("runtime calls=%d, want architecture probe only: %#v", len(runner.calls), runner.commandSummary())
 			}
 		})
 	}
@@ -1709,7 +1723,7 @@ func TestResolveArchitectureAssertionMatchesAndNormalizesAliases(t *testing.T) {
 				t.Fatalf("resolved architecture=%q, want %q", got, tc.want)
 			}
 			if len(runner.calls) != 3 {
-				t.Fatalf("runtime calls=%d, want info/list/inspect: %#v", len(runner.calls), runner.calls)
+				t.Fatalf("runtime calls=%d, want info/list/inspect: %#v", len(runner.calls), runner.commandSummary())
 			}
 			for _, call := range runner.calls {
 				if slices.Contains(call.Args, "--platform") {
@@ -1746,7 +1760,7 @@ func TestResolveArchitectureAssertionUsesCapturedRemoteRuntimeRoute(t *testing.T
 				t.Fatalf("resolved architecture=%q, want %q", got, want)
 			}
 			if len(runner.calls) != 3 {
-				t.Fatalf("runtime calls=%d, want info/list/inspect: %#v", len(runner.calls), runner.calls)
+				t.Fatalf("runtime calls=%d, want info/list/inspect: %#v", len(runner.calls), runner.commandSummary())
 			}
 		})
 	}
@@ -1773,7 +1787,7 @@ func TestResolveArchitectureAssertionFailurePrecedesContainerUseAndClaimMutation
 				t.Fatalf("Resolve error=%v, want %q", err, tc.wantError)
 			}
 			if len(runner.calls) != 1 {
-				t.Fatalf("runtime calls=%d, want architecture probe only: %#v", len(runner.calls), runner.calls)
+				t.Fatalf("runtime calls=%d, want architecture probe only: %#v", len(runner.calls), runner.commandSummary())
 			}
 			for _, forbidden := range []string{"ps", "inspect", "exec", "run", "rm"} {
 				if slices.Contains(runner.calls[0].Args, forbidden) {
@@ -4310,7 +4324,7 @@ func TestCreateContainerCleansDockerSocketLeaseRootOnMountError(t *testing.T) {
 		t.Fatalf("host work root marker missing after docker socket mount error")
 	}
 	if len(runner.calls) != 0 {
-		t.Fatalf("docker should not be invoked after mount path rejection: %#v", runner.calls)
+		t.Fatalf("docker should not be invoked after mount path rejection: %#v", runner.commandSummary())
 	}
 }
 
@@ -5461,7 +5475,7 @@ func TestReleaseLeaseRejectsUnclaimedContainer(t *testing.T) {
 	}
 	for _, call := range runner.calls {
 		if len(call.Args) > 0 && call.Args[0] == "rm" {
-			t.Fatalf("unclaimed container reached rm: %#v", runner.calls)
+			t.Fatalf("unclaimed container reached rm: %#v", runner.commandSummary())
 		}
 	}
 }
@@ -5490,7 +5504,7 @@ func TestReleaseLeaseRejectsClaimBoundToDifferentContainerOrScope(t *testing.T) 
 			}
 			for _, call := range runner.calls {
 				if len(call.Args) > 0 && call.Args[0] == "rm" {
-					t.Fatalf("mismatched claim reached rm: %#v", runner.calls)
+					t.Fatalf("mismatched claim reached rm: %#v", runner.commandSummary())
 				}
 			}
 		})
@@ -5653,7 +5667,7 @@ func TestResolveRawContainerRequiresExplicitReclaimAndPersistsBinding(t *testing
 	if !slices.ContainsFunc(runner.calls, func(call core.LocalCommandRequest) bool {
 		return commandKey(call.Args) == commandKey([]string{"rm", "-f", "raw-container"})
 	}) {
-		t.Fatalf("reclaimed container was not released: %#v", runner.calls)
+		t.Fatalf("reclaimed container was not released: %#v", runner.commandSummary())
 	}
 }
 
@@ -7202,7 +7216,7 @@ func TestCreateContainerRejectsHostVolumeOverlapWithBootstrapPaths(t *testing.T)
 				t.Fatalf("err=%v, want bootstrap-managed path rejection", err)
 			}
 			if len(runner.calls) != 0 {
-				t.Fatalf("runtime invoked before volume validation: %#v", runner.calls)
+				t.Fatalf("runtime invoked before volume validation: %#v", runner.commandSummary())
 			}
 		})
 	}
@@ -7220,7 +7234,7 @@ func TestCreateContainerRejectsRelativeWorkRootWithHostVolume(t *testing.T) {
 		t.Fatalf("err=%v, want absolute work root rejection", err)
 	}
 	if len(runner.calls) != 0 {
-		t.Fatalf("runtime invoked before work root validation: %#v", runner.calls)
+		t.Fatalf("runtime invoked before work root validation: %#v", runner.commandSummary())
 	}
 }
 
