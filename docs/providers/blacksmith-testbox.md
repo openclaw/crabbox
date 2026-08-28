@@ -232,6 +232,9 @@ visibility-only detail page.
 
 ## Gotchas
 
+- `--no-sync` exits 2 before acquiring or reusing a Testbox because Blacksmith
+  has no supported skip-sync contract. Callers that need no file transfer must
+  choose a provider that supports skipping sync.
 - `--sync-only`, `--checksum`, and `--force-sync-large` do not apply because
   Blacksmith owns sync.
 - `--script`, `--script-stdin`, `--fresh-pr`, local stdout/stderr captures, and

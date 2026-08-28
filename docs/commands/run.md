@@ -265,6 +265,8 @@ hint, and `sync.timeout` kills stalled syncs.
 ### Sync alternatives
 
 - `--no-sync` skips rsync entirely and `--sync-only` syncs and exits.
+  Blacksmith Testbox rejects both options: it owns sync and has no supported
+  skip-sync contract.
 - `--fresh-pr <owner/repo#number|url|number>` skips local dirty sync and creates
   a fresh remote checkout of a GitHub PR. A bare `<number>` uses the current
   repository's GitHub origin. Only `github.com` PR URLs are accepted; other
