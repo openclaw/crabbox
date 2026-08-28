@@ -165,6 +165,16 @@ The non-auth settings can also be set through environment variables:
 `CRABBOX_DAYTONA_WORK_ROOT`, `CRABBOX_DAYTONA_SSH_GATEWAY_HOST`, and
 `CRABBOX_DAYTONA_SSH_ACCESS_MINUTES`.
 
+## Managed lifecycle
+
+Brokered allocation includes native wall-clock TTL even for kept or explicitly
+retained sandboxes. The coordinator records returned UUIDs before readiness and
+confirms exact-resource deletion in the original allocation context. A lost
+create response remains visibly unresolved; name/label matches and elapsed TTL
+are not deletion proof. Legacy records without scope and changed credentials
+require operator resolution. See [managed Daytona cleanup](../features/lifecycle-cleanup.md#managed-daytona-cleanup)
+for lifetime, key-rotation, and recovery behavior.
+
 ## Direct lifecycle
 
 1. Create or resolve a Daytona sandbox from `daytona.snapshot`.

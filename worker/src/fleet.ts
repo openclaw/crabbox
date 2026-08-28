@@ -210,9 +210,11 @@ import {
 } from "./provider-labels";
 import {
   ProviderProvisioningCleanupError,
+  ProviderResourceUnresolvedError,
   providerProvisioningCleanupClaim,
   type ProviderProvisioningCleanupClaim,
   validatedProviderProvisioningCleanupClaim,
+  validateProviderProvisioningCleanupClaim,
 } from "./provider-provisioning";
 import {
   observeProviderReconciliationCandidate,
@@ -3272,6 +3274,82 @@ export class FleetCoordinator {
     });
   }
 
+  private async recordCreatedProviderResource(
+    reservation: LeaseRecord,
+    suppliedClaim: ProviderProvisioningCleanupClaim,
+  ): Promise<boolean> {
+    const provider = managedLeaseProvider(reservation);
+    const claim = provider && validateProviderProvisioningCleanupClaim(suppliedClaim, provider);
+    if (!claim || claim.providerScope !== reservation.providerScope) {
+      throw new ProviderResourceUnresolvedError(
+        "provider create returned an invalid allocation claim",
+      );
+    }
+    return await this.state.runExclusive(async () => {
+      const current = await this.getLease(reservation.id);
+      if (
+        !current ||
+        !sameLeaseReleaseIdentity(current, reservation) ||
+        current.provider !== reservation.provider ||
+        current.createAttemptID !== reservation.createAttemptID ||
+        current.fixedCreateIntentHash !== reservation.fixedCreateIntentHash ||
+        current.providerScope !== reservation.providerScope ||
+        (current.cloudID && current.cloudID !== claim.cloudID) ||
+        (!current.cloudID &&
+          current.provisioningRequestStartedAt !== reservation.provisioningRequestStartedAt)
+      ) {
+        throw new ProviderResourceUnresolvedError(
+          `provider resource ${claim.cloudID} cannot be bound to the original lease incarnation`,
+        );
+      }
+      const attempt = current.createAttemptID ? await this.getCreateAttempt(current.id) : undefined;
+      if (current.createAttemptID && (!attempt || !createAttemptMatchesLease(attempt, current))) {
+        throw new ProviderResourceUnresolvedError(
+          "provider create attempt changed before identity publication",
+        );
+      }
+      const lease = structuredClone(current);
+      const now = new Date();
+      const continueReadiness =
+        lease.state === "provisioning" &&
+        Date.parse(lease.expiresAt) > now.getTime() &&
+        (!attempt || attempt.state === "pending");
+      lease.cloudID = claim.cloudID;
+      lease.serverID = claim.serverID ?? 0;
+      lease.serverName = claim.cloudID;
+      lease.updatedAt = now.toISOString();
+      if (
+        !continueReadiness &&
+        !(lease.state === "released" && lease.releaseDeletesServer === false)
+      ) {
+        if (lease.state === "provisioning") lease.state = "failed";
+        lease.endedAt ??= lease.updatedAt;
+        lease.releaseDeletesServer = true;
+        lease.provisioningResourceMayExist = true;
+        lease.provisioningFailureRetryable = false;
+        delete lease.failureError;
+        lease.cleanupError = "provider resource returned after the lease ended; cleanup pending";
+        lease.cleanupRetryAt = new Date(now.getTime() + leaseCleanupRetryDelayMs).toISOString();
+      } else if (!continueReadiness) {
+        clearProvisioningRecoveryMetadata(lease);
+        clearLeaseCleanupMetadata(lease);
+        delete lease.failureError;
+      }
+      // Publish identity before readiness or SSH side effects. A released/canceled
+      // incarnation still owns this allocation, but never becomes active again.
+      await this.putLease(lease);
+      if (attempt) {
+        await this.putCreateAttempt({
+          ...attempt,
+          cloudID: claim.cloudID,
+          updatedAt: lease.updatedAt,
+        });
+      }
+      await this.scheduleAlarm();
+      return continueReadiness;
+    });
+  }
+
   private async createLease(
     request: Request,
     reservationGuard?: () => Promise<Response | undefined>,
@@ -4068,7 +4146,7 @@ export class FleetCoordinator {
     const { prepared } = preparation;
     record = preparation.record;
     let lastProvisioningTarget: ProviderProvisioningTarget | undefined;
-    const provisioning = prepared?.provisioning
+    const targetProvisioning = prepared?.provisioning
       ? {
           ...prepared.provisioning,
           onTargetAttempt: async (target: ProviderProvisioningTarget) => {
@@ -4163,6 +4241,11 @@ export class FleetCoordinator {
       );
     }
     record = provisioningStart.current;
+    const dispatched = structuredClone(record);
+    const provisioning: ProviderProvisioningContext = {
+      ...targetProvisioning,
+      onResourceCreated: (claim) => this.recordCreatedProviderResource(dispatched, claim),
+    };
     const provision = () =>
       provider.createServerWithFallback(config, leaseID, slug, owner, provisioning);
     const provisioned =
@@ -4260,11 +4343,7 @@ export class FleetCoordinator {
     const finalizationBase = structuredClone(current);
     record = structuredClone(current);
     record.state = "active";
-    delete record.provisioningRequestStartedAt;
-    delete record.provisioningCoordinatorVersion;
-    delete record.provisioningRequestSettledAt;
-    delete record.provisioningRecoveryObservedAt;
-    delete record.provisioningRecoveryMissingSince;
+    clearProvisioningRecoveryMetadata(record);
     record.cloudID = server.cloudID;
     record.serverType = serverType;
     if (server.hostID) {
@@ -5827,6 +5906,14 @@ export class FleetCoordinator {
     provider: CloudProvider,
     lease: LeaseRecord,
   ): Promise<ProviderMachine | undefined> {
+    if (provider.recoveryIsAuthoritative) {
+      if (!provider.recoverServer) {
+        throw new ProviderResourceUnresolvedError("authoritative provider recovery is unavailable");
+      }
+      // An authoritative absence or unresolved identity must not fall through to
+      // metadata discovery and acquire deletion authority from a name/label match.
+      return await provider.recoverServer(lease);
+    }
     const lookup = async (
       find: (() => Promise<ProviderMachine | undefined>) | undefined,
     ): Promise<ProviderMachine | undefined> => {
@@ -14172,6 +14259,11 @@ export class FleetCoordinator {
           return;
         }
         const failedAt = new Date();
+        if (error instanceof ProviderResourceUnresolvedError) {
+          retainUnresolvedProviderResource(current, failure, failedAt.toISOString());
+          await this.putLease(current);
+          return;
+        }
         current.cleanupAttempts = (current.cleanupAttempts ?? 0) + 1;
         current.cleanupError = failure;
         current.cleanupFailedAt = failedAt.toISOString();
@@ -14310,12 +14402,10 @@ export class FleetCoordinator {
           lease.state = "failed";
           lease.updatedAt = nowISO;
           lease.endedAt = nowISO;
-          delete lease.provisioningCoordinatorVersion;
-          delete lease.provisioningRequestSettledAt;
-          delete lease.provisioningRecoveryObservedAt;
-          delete lease.provisioningRecoveryMissingSince;
+          if (lease.provisioningRequestStartedAt) lease.provisioningResourceMayExist = true;
           lease.cleanupFailedAt = nowISO;
-          lease.cleanupError = "lease expired before provider returned a cloud resource";
+          lease.cleanupError =
+            "lease expired before provider returned a cloud resource; cleanup remains unresolved";
           await this.putLease(lease, { noCache: true });
           return;
         }
@@ -14335,13 +14425,11 @@ export class FleetCoordinator {
     await Promise.all(
       claims.map(async ({ claim, lease }) => {
         const cleanup = async () => {
-          let failure: string | undefined;
-          let manualResolution = false;
+          let failure: { error: unknown; message: string } | undefined;
           try {
             await this.deleteLeaseServer(lease);
           } catch (error) {
-            failure = coordinatorErrorMessage(this.env, error);
-            manualResolution = error instanceof ProviderCleanupManualResolutionError;
+            failure = { error, message: coordinatorErrorMessage(this.env, error) };
           }
           await this.state.runExclusive(async () => {
             const current = await this.getLease(lease.id);
@@ -14350,37 +14438,23 @@ export class FleetCoordinator {
             }
             const nowDate = new Date();
             const nowISO = nowDate.toISOString();
-            if (failure && manualResolution) {
-              terminalizeManualProviderCleanup(current, failure, nowISO);
-              await this.putLease(current);
-              return;
-            }
             if (failure) {
-              current.cleanupAttempts = (current.cleanupAttempts ?? 0) + 1;
-              delete current.cleanupStartedAt;
-              delete current.cleanupClaimExpiresAt;
-              current.cleanupError = failure;
-              current.cleanupFailedAt = nowISO;
-              current.cleanupRetryAt = new Date(
-                nowDate.getTime() + leaseCleanupRetryDelayMs,
-              ).toISOString();
-              current.updatedAt = nowISO;
+              recordLeaseCleanupFailure(current, failure.error, failure.message, nowISO);
               await this.putLease(current);
               console.warn(
-                `lease cleanup failed lease=${current.id} provider=${current.provider} cloud=${current.cloudID}: ${failure}`,
+                `lease cleanup failed lease=${current.id} provider=${current.provider} cloud=${current.cloudID}: ${failure.message}`,
               );
               return;
             }
             current.state = leaseIsLive(current) ? "expired" : current.state;
             current.updatedAt = nowISO;
             current.endedAt = nowISO;
-            if (current.state === "failed" && current.provisioningResourceMayExist) {
+            if (current.provisioningResourceMayExist) {
               if (!current.failureError && current.cleanupError) {
                 current.failureError = current.cleanupError;
               }
-              current.provisioningResourceMayExist = false;
-              current.provisioningFailureRetryable = false;
             }
+            clearProvisioningRecoveryMetadata(current);
             delete current.releaseDeletesServer;
             clearLeaseCleanupMetadata(current);
             delete current.providerKeyCleanupPending;
@@ -16196,7 +16270,10 @@ export class FleetCoordinator {
       if (
         !current ||
         current.state !== "provisioning" ||
-        current.createdAt !== reservation.createdAt
+        current.createdAt !== reservation.createdAt ||
+        current.cloudID ||
+        current.provisioningRequestStartedAt ||
+        current.provisioningResourceMayExist
       ) {
         return;
       }
@@ -16240,6 +16317,8 @@ export class FleetCoordinator {
         !latest ||
         latest.state !== "released" ||
         latest.cloudID ||
+        latest.provisioningRequestStartedAt ||
+        latest.provisioningResourceMayExist ||
         latest.createdAt !== reservation.createdAt
       ) {
         return latest;
@@ -16391,6 +16470,16 @@ export class FleetCoordinator {
         await this.deleteProviderAccess(record.id);
       }
       const latest = await this.getLease(record.id);
+      if (
+        latest &&
+        (!sameLeaseReleaseIdentity(latest, record) ||
+          latest.providerScope !== record.providerScope ||
+          (latest.cloudID && latest.cloudID !== server.cloudID))
+      ) {
+        throw new ProviderResourceUnresolvedError(
+          "lease incarnation changed before provider rollback",
+        );
+      }
       const previous = latest ? structuredClone(latest) : undefined;
       const cleanupLease = provisionedLeaseRecord(latest ?? record, config, server, serverType);
       if (latest?.state === "released" && latest.releaseDeletesServer === false) {
@@ -16467,14 +16556,13 @@ export class FleetCoordinator {
         if (cleanupLease.state === "released") {
           cleanupLease.releaseDeletesServer = true;
         }
-        cleanupLease.cleanupAttempts = (cleanupLease.cleanupAttempts ?? 0) + 1;
-        delete cleanupLease.cleanupStartedAt;
-        delete cleanupLease.cleanupClaimExpiresAt;
-        cleanupLease.cleanupFailedAt = failedAt;
-        cleanupLease.cleanupError = coordinatorErrorMessage(this.env, error);
-        cleanupLease.cleanupRetryAt = new Date(Date.now() + leaseCleanupRetryDelayMs).toISOString();
         cleanupLease.expiresAt = failedAt;
-        cleanupLease.updatedAt = failedAt;
+        recordLeaseCleanupFailure(
+          cleanupLease,
+          error,
+          coordinatorErrorMessage(this.env, error),
+          failedAt,
+        );
         await this.putLease(cleanupLease);
         await this.markAWSIngressReconcilePending(cleanupLease);
         await this.scheduleAlarm();
@@ -16502,6 +16590,7 @@ export class FleetCoordinator {
             preparation.previous,
           );
           clearLeaseCleanupMetadata(completed);
+          clearProvisioningRecoveryMetadata(completed);
           delete completed.cleanupStartedAt;
           delete completed.cleanupClaimExpiresAt;
           delete completed.releaseDeletesServer;
@@ -16725,27 +16814,13 @@ export class FleetCoordinator {
         if (!current || current.cleanupStartedAt !== preparation.claim) {
           return;
         }
-        if (error instanceof ProviderCleanupManualResolutionError) {
-          terminalizeManualProviderCleanup(
-            current,
-            coordinatorErrorMessage(this.env, error),
-            new Date().toISOString(),
-          );
-          await this.putLease(current);
-          await this.scheduleAlarm();
-          return;
-        }
-        const failedAt = new Date();
-        current.cleanupAttempts = (current.cleanupAttempts ?? 0) + 1;
-        delete current.cleanupStartedAt;
-        delete current.cleanupClaimExpiresAt;
-        current.cleanupError = coordinatorErrorMessage(this.env, error);
-        current.cleanupFailedAt = failedAt.toISOString();
-        current.cleanupRetryAt = new Date(
-          failedAt.getTime() + leaseCleanupRetryDelayMs,
-        ).toISOString();
-        current.updatedAt = failedAt.toISOString();
         current.releaseDeletesServer = true;
+        recordLeaseCleanupFailure(
+          current,
+          error,
+          coordinatorErrorMessage(this.env, error),
+          new Date().toISOString(),
+        );
         await this.putLease(current);
         await this.scheduleAlarm();
       });
@@ -16757,6 +16832,7 @@ export class FleetCoordinator {
         return current ?? preparation.lease;
       }
       const released = finalizedReleasedLease(current, true, preparation.keep);
+      clearProvisioningRecoveryMetadata(released);
       delete released.providerKeyCleanupPending;
       delete released.providerKeyCleanupID;
       await this.putLease(released);
@@ -21833,7 +21909,57 @@ function managedLeaseProvider(lease: LeaseRecord): Provider | undefined {
     : undefined;
 }
 
+function leaseCleanupIsUnresolved(lease: LeaseRecord): boolean {
+  return Boolean(
+    lease.provisioningResourceMayExist === true &&
+    lease.provisioningFailureRetryable === false &&
+    lease.failureError &&
+    lease.cleanupError &&
+    !lease.cleanupRetryAt,
+  );
+}
+
+function retainUnresolvedProviderResource(lease: LeaseRecord, message: string, at: string): void {
+  if (leaseIsLive(lease)) {
+    lease.state = "failed";
+    lease.endedAt = at;
+  }
+  lease.updatedAt = at;
+  lease.failureError = message;
+  lease.cleanupError = message;
+  lease.cleanupFailedAt = at;
+  lease.provisioningResourceMayExist = true;
+  lease.provisioningFailureRetryable = false;
+  delete lease.cleanupRetryAt;
+  delete lease.cleanupStartedAt;
+  delete lease.cleanupClaimExpiresAt;
+  // Preserve original dispatch/scope and user intent. No next attempt can make
+  // progress without identity resolution, and elapsed TTL is not observed deletion.
+}
+
+function recordLeaseCleanupFailure(
+  lease: LeaseRecord,
+  error: unknown,
+  message: string,
+  at: string,
+): void {
+  if (error instanceof ProviderResourceUnresolvedError) {
+    retainUnresolvedProviderResource(lease, message, at);
+  } else if (error instanceof ProviderCleanupManualResolutionError) {
+    terminalizeManualProviderCleanup(lease, message, at);
+  } else {
+    lease.cleanupAttempts = (lease.cleanupAttempts ?? 0) + 1;
+    delete lease.cleanupStartedAt;
+    delete lease.cleanupClaimExpiresAt;
+    lease.cleanupError = message;
+    lease.cleanupFailedAt = at;
+    lease.cleanupRetryAt = new Date(Date.parse(at) + leaseCleanupRetryDelayMs).toISOString();
+    lease.updatedAt = at;
+  }
+}
+
 function leaseNeedsCleanup(lease: LeaseRecord, now: number): boolean {
+  if (leaseCleanupIsUnresolved(lease)) return false;
   if (leaseIsLive(lease) && Date.parse(lease.expiresAt) <= now) {
     return true;
   }
@@ -21923,6 +22049,10 @@ function mergeProvisioningFailureMetadata(
   message: string,
   failedAt: string,
 ): void {
+  if (error instanceof ProviderResourceUnresolvedError) {
+    retainUnresolvedProviderResource(lease, message, failedAt);
+    return;
+  }
   const retainResource = lease.state === "released" && lease.releaseDeletesServer === false;
   const awsOutcomeUncertain =
     config.provider === "aws" && config.awsPrivate && isAWSRunInstancesOutcomeUncertain(message);
@@ -22033,10 +22163,8 @@ function retainProvisioningCleanupClaim(
 }
 
 function leaseMayNeedInterruptedProvisioningRecovery(lease: LeaseRecord): boolean {
-  const canceledProvisioning =
-    lease.state === "released" &&
-    lease.releaseDeletesServer === true &&
-    Boolean(lease.createAttemptID);
+  if (leaseCleanupIsUnresolved(lease)) return false;
+  const canceledProvisioning = lease.state === "released" && lease.releaseDeletesServer === true;
   const failedUncertainProvisioning =
     lease.state === "failed" && lease.provisioningResourceMayExist === true;
   return Boolean(
@@ -22108,7 +22236,7 @@ function sameProvisioningAttempt(
   );
 }
 
-function nextLeaseAlarmTime(lease: LeaseRecord, coordinatorGeneration: string): number {
+function nextLeaseAlarmTime(lease: LeaseRecord, coordinatorGeneration: string): number | undefined {
   const now = Date.now();
   const expiresAt = Date.parse(lease.expiresAt);
   const interruptedProvisioningAt = interruptedProvisioningRecoveryAt(lease, coordinatorGeneration);
@@ -22156,6 +22284,9 @@ function nextLeaseAlarmTime(lease: LeaseRecord, coordinatorGeneration: string): 
     }
     return includeInterruptedProvisioning(Math.min(expiresAt, cleanupRetryAt));
   }
+  // A terminal, still-owned create can have no due operation until it settles or
+  // its runtime generation changes. Reusing its expired TTL would spin the alarm.
+  if (!leaseIsLive(lease) && !leaseNeedsCleanup(lease, now)) return interruptedProvisioningAt;
   return includeInterruptedProvisioning(expiresAt);
 }
 
@@ -22173,6 +22304,16 @@ function clearLeaseCleanupMetadata(lease: LeaseRecord): void {
   delete lease.cleanupError;
   delete lease.cleanupFailedAt;
   delete lease.cleanupRetryAt;
+}
+
+function clearProvisioningRecoveryMetadata(lease: LeaseRecord): void {
+  delete lease.provisioningRequestStartedAt;
+  delete lease.provisioningCoordinatorVersion;
+  delete lease.provisioningRequestSettledAt;
+  delete lease.provisioningRecoveryObservedAt;
+  delete lease.provisioningRecoveryMissingSince;
+  if (lease.provisioningResourceMayExist !== undefined) lease.provisioningResourceMayExist = false;
+  if (lease.provisioningFailureRetryable !== undefined) lease.provisioningFailureRetryable = false;
 }
 
 function terminalizeManualProviderCleanup(
@@ -22240,17 +22381,29 @@ function finalizedReleasedLease(
   keep?: boolean,
 ): LeaseRecord {
   const lease = structuredClone(current);
+  const unresolvedCreation =
+    !lease.cloudID &&
+    Boolean(lease.provisioningRequestStartedAt || lease.provisioningResourceMayExist);
   const wasUnprovisionedRelease =
-    !lease.cloudID && (lease.state === "provisioning" || lease.state === "released");
+    !lease.cloudID &&
+    (lease.state === "provisioning" || lease.state === "released" || unresolvedCreation);
   const now = new Date().toISOString();
   lease.state = "released";
   lease.updatedAt = now;
   lease.releasedAt = now;
   lease.endedAt = now;
-  delete lease.provisioningCoordinatorVersion;
-  delete lease.provisioningRequestSettledAt;
-  delete lease.provisioningRecoveryObservedAt;
-  delete lease.provisioningRecoveryMissingSince;
+  if (!unresolvedCreation) {
+    delete lease.provisioningCoordinatorVersion;
+    delete lease.provisioningRequestSettledAt;
+    delete lease.provisioningRecoveryObservedAt;
+    delete lease.provisioningRecoveryMissingSince;
+    clearLeaseCleanupMetadata(lease);
+  } else {
+    // Release records user intent, not cancellation of an already-dispatched
+    // provider request. Keep its original recovery evidence and visible debt.
+    lease.provisioningResourceMayExist = true;
+    lease.cleanupError ??= "provider creation is unresolved; cleanup has not been confirmed";
+  }
   if (wasUnprovisionedRelease) {
     lease.releaseDeletesServer = deleteServer;
   } else if (
@@ -22262,7 +22415,6 @@ function finalizedReleasedLease(
   } else {
     delete lease.releaseDeletesServer;
   }
-  clearLeaseCleanupMetadata(lease);
   clearRuntimeAdapterDeleteMetadata(lease);
   delete lease.cleanupStartedAt;
   delete lease.cleanupClaimExpiresAt;
@@ -22810,6 +22962,7 @@ interface CloudProvider {
   supportsSSHHostKeyInjection(config: ReturnType<typeof leaseConfig>): boolean;
   restrictedLeaseRequestFields?(input: LeaseRequest): string[];
   ownershipLabelValue?(value: string): string;
+  recoveryIsAuthoritative?: true;
   recoverServer?(lease: LeaseRecord): Promise<ProviderMachine | undefined>;
   resumeRecoveredServer?(
     config: ReturnType<typeof leaseConfig>,
@@ -22961,6 +23114,7 @@ interface ProviderProvisioningContext {
   allowEmptySSHIngress?: boolean;
   publishAccessBeforeProvisioning?: boolean;
   onTargetAttempt?: (target: ProviderProvisioningTarget) => Promise<void>;
+  onResourceCreated?: (claim: ProviderProvisioningCleanupClaim) => Promise<boolean>;
 }
 
 interface ProviderProvisioningTarget {
@@ -23767,6 +23921,7 @@ export class GCPProvider implements CloudProvider {
 }
 
 export class DaytonaProvider implements CloudProvider {
+  readonly recoveryIsAuthoritative = true;
   private clientValue?: DaytonaClient;
   private readonly pendingAccess = new Map<string, DaytonaSSHEndpoint>();
 
@@ -23820,13 +23975,21 @@ export class DaytonaProvider implements CloudProvider {
     return this.client.getServer(id);
   }
 
-  findServerByLease(leaseID: string): Promise<ProviderMachine | undefined> {
-    return this.client.findServerByLease(leaseID);
+  async recoverServer(lease: LeaseRecord): Promise<ProviderMachine | undefined> {
+    try {
+      return await this.client.getOwnedServer(lease);
+    } catch (error) {
+      if (isDaytonaNotFound(error)) return undefined;
+      throw error;
+    }
   }
 
-  async recoverServer(lease: LeaseRecord): Promise<ProviderMachine | undefined> {
-    const server = await this.findServerByLease(lease.id);
-    return server && providerMachineOwnedByLease(server, lease, "daytona") ? server : undefined;
+  async prepareLeaseCreate(
+    config: LeaseConfig,
+    lease: LeaseRecord,
+  ): Promise<ProviderLeaseCreatePreparation> {
+    const providerScope = await this.client.providerScope();
+    return { config, lease: { ...lease, providerScope } };
   }
 
   prepareLeaseConfig(
@@ -23847,37 +24010,36 @@ export class DaytonaProvider implements CloudProvider {
     leaseID: string,
     slug: string,
     owner: string,
-  ): Promise<{
-    server: ProviderMachine;
-    serverType: string;
-    market?: string;
-    attempts?: ProvisioningAttempt[];
-  }> {
+    provisioning?: ProviderProvisioningContext,
+  ): Promise<{ server: ProviderMachine; serverType: string }> {
+    const providerScope = await this.client.providerScope();
     let server: ProviderMachine;
     try {
       server = await this.client.createServer(config, leaseID, slug, owner);
     } catch (error) {
-      const recovered = await this.client.findServerByLease(leaseID).catch(() => undefined);
-      if (
-        !recovered ||
-        !providerMachineOwnedByLease(
-          recovered,
-          {
-            id: leaseID,
-            slug,
-            provider: "daytona",
-            owner,
-            cloudID: recovered.cloudID,
-          },
-          "daytona",
-        )
-      ) {
-        throw error;
-      }
-      server = recovered;
+      throw new ProviderResourceUnresolvedError(
+        `Daytona creation unresolved for lease ${leaseID}: ${coordinatorErrorMessage(this.env, error)}; no authoritative sandbox UUID received. Native TTL was requested, but deletion is unobserved; inspect the original allocation context before resolving cleanup`,
+        { cause: error },
+      );
+    }
+    const claim = validateProviderProvisioningCleanupClaim(
+      { provider: "daytona", cloudID: server.cloudID, serverID: server.id, providerScope },
+      "daytona",
+    );
+    if (!claim) {
+      throw new ProviderResourceUnresolvedError(
+        `Daytona creation unresolved for lease ${leaseID}: create returned no valid sandbox UUID; native TTL was requested, but deletion is unobserved`,
+      );
     }
     try {
-      const ready = await this.client.waitForStarted(server.cloudID);
+      const continueReadiness = await provisioning?.onResourceCreated?.(claim);
+      if (continueReadiness === false) {
+        return { server, serverType: this.client.snapshot || server.serverType || "default" };
+      }
+      const ready = await this.client.waitForStarted(server.cloudID, config.ttlSeconds);
+      if ((await provisioning?.onResourceCreated?.(claim)) === false) {
+        return { server: ready, serverType: this.client.snapshot || ready.serverType || "default" };
+      }
       const access = await this.client.createSSHAccess(ready.cloudID, {
         expiresAt: new Date(Date.now() + config.ttlSeconds * 1_000).toISOString(),
       });
@@ -23887,38 +24049,13 @@ export class DaytonaProvider implements CloudProvider {
         serverType: this.client.snapshot || ready.serverType || "default",
       };
     } catch (error) {
-      try {
-        const current = await this.client.getServer(server.cloudID);
-        const owned = providerMachineOwnedByLease(
-          current,
-          {
-            id: leaseID,
-            slug,
-            provider: "daytona",
-            owner,
-            cloudID: server.cloudID,
-          },
-          "daytona",
-        );
-        if (!owned) {
-          throw new Error(
-            `refusing to clean Daytona sandbox ${server.cloudID}: ownership does not match lease ${leaseID}`,
-            { cause: error },
-          );
-        }
-        await this.client.deleteServer(server.cloudID);
-      } catch (cleanupError) {
-        if (!isDaytonaNotFound(cleanupError)) {
-          throw new ProviderProvisioningCleanupError(
-            `${errorMessage(error)}; cleanup failed for Daytona sandbox ${server.cloudID}: ${errorMessage(cleanupError)}`,
-            { provider: "daytona", cloudID: server.cloudID, serverID: server.id },
-            cleanupError,
-          );
-        }
-      }
-      throw new Error(
-        `${errorMessage(error)}; deleted Daytona sandbox ${server.cloudID} after readiness failure`,
-        { cause: error },
+      if (error instanceof ProviderResourceUnresolvedError) throw error;
+      // The coordinator owns rollback and current retain/delete intent. A returned
+      // UUID is durable before readiness, so restart or release cannot orphan it.
+      throw new ProviderProvisioningCleanupError(
+        `${coordinatorErrorMessage(this.env, error)}; Daytona sandbox ${server.cloudID} cleanup remains pending`,
+        claim,
+        error,
       );
     }
   }
@@ -23949,6 +24086,7 @@ export class DaytonaProvider implements CloudProvider {
 
   async refreshLeaseAccessForResolution(lease: LeaseRecord): Promise<LeaseRecord | void> {
     if (!daytonaAccessNeedsRefresh(lease)) return;
+    await this.client.getOwnedServer(lease);
     const access = await this.client.createSSHAccess(lease.cloudID, lease);
     return {
       ...lease,
@@ -23962,24 +24100,13 @@ export class DaytonaProvider implements CloudProvider {
 
   async releaseLease(lease: LeaseRecord): Promise<void> {
     this.pendingAccess.delete(lease.cloudID);
-    let server: ProviderMachine;
-    try {
-      server = await this.client.getServer(lease.cloudID);
-    } catch (error) {
-      if (isDaytonaNotFound(error)) return;
-      throw error;
-    }
-    if (!providerMachineOwnedByLease(server, lease, "daytona")) {
-      throw new Error(
-        `refusing to delete Daytona sandbox ${lease.cloudID}: ownership does not match lease ${lease.id}`,
-      );
-    }
-    await this.client.deleteServer(lease.cloudID);
+    await this.client.deleteOwnedServer(lease);
   }
 
-  deleteServer(id: string): Promise<void> {
-    this.pendingAccess.delete(id);
-    return this.client.deleteServer(id);
+  async deleteServer(id: string): Promise<void> {
+    throw new ProviderResourceUnresolvedError(
+      `Daytona sandbox ${id} requires its retained lease and original allocation context for deletion`,
+    );
   }
 
   supportsNativeImages(): boolean {

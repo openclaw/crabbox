@@ -1,7 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { leaseConfig } from "../src/config";
 import { DaytonaClient, daytonaAccessNeedsRefresh, daytonaSSHEndpoint } from "../src/daytona";
+import { ProviderResourceUnresolvedError } from "../src/provider-provisioning";
 import type { Env } from "../src/types";
 
 const baseEnv: Env = {
@@ -12,6 +13,61 @@ const baseEnv: Env = {
   CRABBOX_DAYTONA_SNAPSHOT: "crabbox-ready",
 };
 const baseImage = `daytonaio/sandbox@sha256:${"a".repeat(64)}`;
+const sandboxID = "11111111-1111-4111-8111-111111111111";
+const otherSandboxID = "22222222-2222-4222-8222-222222222222";
+const ownedLease = {
+  id: "cbx_abcdef123456",
+  slug: "blue-lobster",
+  provider: "daytona" as const,
+  owner: "alice@example.com",
+  cloudID: sandboxID,
+};
+const ownedSandbox = {
+  id: sandboxID,
+  name: "crabbox-blue-lobster",
+  state: "started",
+  labels: {
+    crabbox: "true",
+    created_by: "crabbox",
+    lease: "cbx_abcdef123456",
+    slug: "blue-lobster",
+    provider: "daytona",
+    owner: "alice_example.com",
+  },
+};
+
+type SandboxReply = Response | (() => Response | Promise<Response>);
+
+function failedResponseBody(message: string): Response {
+  return new Response(
+    new ReadableStream({
+      start(controller) {
+        controller.error(new TypeError(message));
+      },
+    }),
+  );
+}
+
+function mockOwnedSandboxRequests(client: DaytonaClient, replies: SandboxReply[]): string[] {
+  const methods: string[] = [];
+  client.fetcher = vi.fn<typeof fetch>(async (input, init) => {
+    const request = new Request(input, init);
+    const url = new URL(request.url);
+    const query = request.method === "GET" ? "?verbose=true" : "";
+    if (
+      url.origin !== "https://daytona.example" ||
+      url.pathname !== `/api/sandbox/${sandboxID}` ||
+      url.search !== query
+    ) {
+      throw new Error(`unexpected sandbox request ${request.method} ${request.url}`);
+    }
+    methods.push(request.method);
+    const reply = replies.shift();
+    if (!reply) throw new Error(`unexpected extra sandbox request ${request.method}`);
+    return typeof reply === "function" ? reply() : reply;
+  });
+  return methods;
+}
 
 describe("daytona coordinator client", () => {
   it("requires a dedicated Worker secret and a safe API URL", () => {
@@ -126,6 +182,7 @@ describe("daytona coordinator client", () => {
     expect(createBodies).toHaveLength(1);
     expect(createBodies[0]).toMatchObject({
       snapshot: "crabbox-ready",
+      ttlMinutes: 90,
       autoStopInterval: 0,
       autoDeleteInterval: -1,
       labels: {
@@ -139,6 +196,200 @@ describe("daytona coordinator client", () => {
     });
     expect(listLabels).toEqual(['{"crabbox":"true"}', '{"crabbox":"true"}']);
     expect(accessMinutes).toEqual(["120"]);
+  });
+
+  it.each([
+    { ttlSeconds: 0.5, keep: false, ttlMinutes: 1 },
+    { ttlSeconds: 1, keep: false, ttlMinutes: 1 },
+    { ttlSeconds: 60, keep: false, ttlMinutes: 1 },
+    { ttlSeconds: 61, keep: false, ttlMinutes: 2 },
+    { ttlSeconds: 61, keep: true, ttlMinutes: 2 },
+  ])(
+    "requests native TTL=$ttlMinutes minutes for ttlSeconds=$ttlSeconds, keep=$keep",
+    async ({ ttlSeconds, keep, ttlMinutes }) => {
+      const client = new DaytonaClient(baseEnv);
+      const requests: Request[] = [];
+      client.fetcher = vi.fn<typeof fetch>(async (input, init) => {
+        requests.push(new Request(input, init));
+        return Response.json(ownedSandbox);
+      });
+      const config = leaseConfig({
+        provider: "daytona",
+        sshPublicKey: "ssh-ed25519 test",
+        ttlSeconds,
+        keep,
+      });
+
+      await client.createServer(config, ownedLease.id, ownedLease.slug, ownedLease.owner);
+
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.method).toBe("POST");
+      expect(requests[0]?.url).toBe("https://daytona.example/api/sandbox");
+      expect(await requests[0]!.json()).toMatchObject({
+        ttlMinutes,
+        autoStopInterval: 0,
+        autoDeleteInterval: -1,
+        labels: { keep: String(keep) },
+      });
+    },
+  );
+
+  it("does not retry allocation without native TTL when the API rejects it", async () => {
+    const client = new DaytonaClient(baseEnv);
+    const bodies: Record<string, unknown>[] = [];
+    client.fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const request = new Request(input, init);
+      const body = (await request.json()) as Record<string, unknown>;
+      bodies.push(body);
+      return body["ttlMinutes"] === undefined
+        ? Response.json(ownedSandbox)
+        : new Response("ttlMinutes is not supported", { status: 400 });
+    });
+    const config = leaseConfig({
+      provider: "daytona",
+      sshPublicKey: "ssh-ed25519 test",
+      ttlSeconds: 600,
+      keep: true,
+    });
+
+    await expect(
+      client.createServer(config, ownedLease.id, ownedLease.slug, ownedLease.owner),
+    ).rejects.toThrow("http 400: ttlMinutes is not supported");
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toMatchObject({ ttlMinutes: 10, labels: { keep: "true" } });
+  });
+
+  it.each<{
+    name: string;
+    original?: Partial<Env>;
+    replacement: Partial<Env>;
+    sameScope: boolean;
+    outcome: string;
+    requestCount: number;
+  }>([
+    {
+      name: "equivalent URL, trimmed key, and omitted organization",
+      replacement: {
+        CRABBOX_DAYTONA_API_URL: " HTTPS://DAYTONA.EXAMPLE:443/api/// ",
+        DAYTONA_CRABBOX_KEY: " daytona-test-key ",
+        CRABBOX_DAYTONA_ORGANIZATION_ID: " ",
+      },
+      sameScope: true,
+      outcome: "owned",
+      requestCount: 1,
+    },
+    {
+      name: "explicit default URL instead of an omitted URL",
+      original: { CRABBOX_DAYTONA_API_URL: undefined },
+      replacement: { CRABBOX_DAYTONA_API_URL: "https://app.daytona.io:443/api/" },
+      sameScope: true,
+      outcome: "owned",
+      requestCount: 1,
+    },
+    {
+      name: "trimmed configured organization",
+      original: { CRABBOX_DAYTONA_ORGANIZATION_ID: "organization-one" },
+      replacement: { CRABBOX_DAYTONA_ORGANIZATION_ID: " organization-one " },
+      sameScope: true,
+      outcome: "owned",
+      requestCount: 1,
+    },
+    {
+      name: "changed API host",
+      replacement: { CRABBOX_DAYTONA_API_URL: "https://other-daytona.example/api" },
+      sameScope: false,
+      outcome: "unresolved",
+      requestCount: 0,
+    },
+    {
+      name: "changed API path",
+      replacement: { CRABBOX_DAYTONA_API_URL: "https://daytona.example/api/v2" },
+      sameScope: false,
+      outcome: "unresolved",
+      requestCount: 0,
+    },
+    {
+      name: "new explicit organization",
+      replacement: { CRABBOX_DAYTONA_ORGANIZATION_ID: "organization-one" },
+      sameScope: false,
+      outcome: "unresolved",
+      requestCount: 0,
+    },
+    {
+      name: "changed explicit organization",
+      original: { CRABBOX_DAYTONA_ORGANIZATION_ID: "organization-one" },
+      replacement: { CRABBOX_DAYTONA_ORGANIZATION_ID: "organization-two" },
+      sameScope: false,
+      outcome: "unresolved",
+      requestCount: 0,
+    },
+    {
+      name: "removed explicit organization",
+      original: { CRABBOX_DAYTONA_ORGANIZATION_ID: "organization-one" },
+      replacement: {},
+      sameScope: false,
+      outcome: "unresolved",
+      requestCount: 0,
+    },
+    {
+      name: "rotated key within the same organization",
+      original: { CRABBOX_DAYTONA_ORGANIZATION_ID: "organization-one" },
+      replacement: {
+        CRABBOX_DAYTONA_ORGANIZATION_ID: "organization-one",
+        DAYTONA_CRABBOX_KEY: "daytona-replacement-test-key",
+      },
+      sameScope: false,
+      outcome: "unresolved",
+      requestCount: 0,
+    },
+  ])("binds cleanup to the original request context: $name", async (testCase) => {
+    const originalClient = new DaytonaClient({ ...baseEnv, ...testCase.original });
+    const client = new DaytonaClient({ ...baseEnv, ...testCase.replacement });
+    const lease = { ...ownedLease, providerScope: await originalClient.providerScope() };
+    const replacementScope = await client.providerScope();
+    client.fetcher = vi.fn<typeof fetch>(async () => Response.json(ownedSandbox));
+
+    const result = await client.getOwnedServer(lease).then(
+      () => "owned",
+      (error: unknown) => (error instanceof ProviderResourceUnresolvedError ? "unresolved" : error),
+    );
+
+    expect(lease.providerScope).toMatch(/^daytona:context:v1:[a-f0-9]{64}$/);
+    expect(replacementScope).toMatch(/^daytona:context:v1:[a-f0-9]{64}$/);
+    expect(replacementScope === lease.providerScope).toBe(testCase.sameScope);
+    expect(JSON.stringify(lease)).not.toContain("daytona-test-key");
+    expect(replacementScope).not.toContain("daytona-replacement-test-key");
+    expect(result).toBe(testCase.outcome);
+    expect(client.fetcher).toHaveBeenCalledTimes(testCase.requestCount);
+  });
+
+  it("sends the same canonical scope used by the fingerprint in HTTP requests", async () => {
+    const client = new DaytonaClient({
+      ...baseEnv,
+      CRABBOX_DAYTONA_API_URL: " HTTPS://DAYTONA.EXAMPLE:443/api/// ",
+      CRABBOX_DAYTONA_ORGANIZATION_ID: " organization-one ",
+      DAYTONA_CRABBOX_KEY: " daytona-test-key ",
+    });
+    const requests: Request[] = [];
+    client.fetcher = async (input, init) => {
+      requests.push(new Request(input, init));
+      return Response.json(ownedSandbox);
+    };
+
+    await client.getOwnedServer({ ...ownedLease, providerScope: await client.providerScope() });
+
+    const requestScopes = requests.map((request) => ({
+      url: request.url,
+      organization: request.headers.get("x-daytona-organization-id"),
+      authorization: request.headers.get("authorization"),
+    }));
+    expect(requestScopes).toEqual([
+      {
+        url: `https://daytona.example/api/sandbox/${sandboxID}?verbose=true`,
+        organization: "organization-one",
+        authorization: "Bearer daytona-test-key",
+      },
+    ]);
   });
 
   it("redacts credentials from provider error diagnostics", async () => {
@@ -181,6 +432,289 @@ describe("daytona coordinator client", () => {
     await expect(client.deleteServer("sandbox-one")).resolves.toBeUndefined();
     await expect(client.deleteServer("sandbox-one")).resolves.toBeUndefined();
     await expect(client.deleteServer("sandbox-one")).rejects.toThrow("http 503");
+  });
+
+  describe("scoped managed cleanup", () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it.each([
+      { name: "legacy missing scope", patch: { providerScope: undefined } },
+      { name: "malformed scope", patch: { providerScope: "daytona:context:v1:not-a-digest" } },
+      { name: "unknown resource ID", patch: { cloudID: "" } },
+      { name: "malformed UUID", patch: { cloudID: "11111111-1111-4111-8111-not-a-uuid" } },
+      { name: "sandbox name instead of UUID", patch: { cloudID: "crabbox-blue-lobster" } },
+    ])("rejects $name before any provider request", async ({ patch }) => {
+      const client = new DaytonaClient(baseEnv);
+      client.fetcher = vi.fn<typeof fetch>();
+      const lease = { ...ownedLease, providerScope: await client.providerScope(), ...patch };
+
+      await expect(client.getOwnedServer(lease)).rejects.toBeInstanceOf(
+        ProviderResourceUnresolvedError,
+      );
+      await expect(client.deleteOwnedServer(lease)).rejects.toBeInstanceOf(
+        ProviderResourceUnresolvedError,
+      );
+      expect(client.fetcher).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      {
+        name: "a different returned UUID with matching labels",
+        sandbox: { ...ownedSandbox, id: otherSandboxID },
+      },
+      {
+        name: "the exact UUID with a different owner",
+        sandbox: { ...ownedSandbox, labels: { ...ownedSandbox.labels, owner: "bob_example.com" } },
+      },
+    ])("rejects $name instead of granting cleanup authority", async ({ sandbox }) => {
+      const client = new DaytonaClient(baseEnv);
+      const lease = { ...ownedLease, providerScope: await client.providerScope() };
+      const methods = mockOwnedSandboxRequests(client, [
+        Response.json(sandbox),
+        Response.json(sandbox),
+      ]);
+
+      await expect(client.getOwnedServer(lease)).rejects.toBeInstanceOf(
+        ProviderResourceUnresolvedError,
+      );
+      await expect(client.deleteOwnedServer(lease)).rejects.toBeInstanceOf(
+        ProviderResourceUnresolvedError,
+      );
+      expect(methods).toEqual(["GET", "GET"]);
+    });
+
+    it.each([204, 404])(
+      "does not complete cleanup on DELETE HTTP %i without a terminal observation",
+      async (deleteStatus) => {
+        const client = new DaytonaClient(baseEnv);
+        const lease = { ...ownedLease, providerScope: await client.providerScope() };
+        client.pollDelayMs = 1_000;
+        const methods = mockOwnedSandboxRequests(client, [
+          Response.json(ownedSandbox),
+          new Response(null, { status: deleteStatus }),
+          Response.json({ ...ownedSandbox, state: "destroying" }),
+          new Response(null, { status: 404 }),
+        ]);
+        let settled = false;
+        const cleanup = client.deleteOwnedServer(lease).then(
+          () => {
+            settled = true;
+            return "deleted";
+          },
+          (error: unknown) => {
+            settled = true;
+            return error;
+          },
+        );
+
+        await vi.advanceTimersByTimeAsync(0);
+        expect(settled).toBe(false);
+        expect(methods).toEqual(["GET", "DELETE", "GET"]);
+
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(await cleanup).toBe("deleted");
+        expect(methods).toEqual(["GET", "DELETE", "GET", "GET"]);
+      },
+    );
+
+    it.each([
+      { name: "exact-resource 404", response: () => new Response(null, { status: 404 }) },
+      { name: "deleted", response: () => Response.json({ ...ownedSandbox, state: "deleted" }) },
+      { name: "destroyed", response: () => Response.json({ ...ownedSandbox, state: "destroyed" }) },
+    ])("accepts $name without another DELETE", async ({ response }) => {
+      const client = new DaytonaClient(baseEnv);
+      const lease = { ...ownedLease, providerScope: await client.providerScope() };
+      const methods = mockOwnedSandboxRequests(client, [response]);
+
+      await expect(client.deleteOwnedServer(lease)).resolves.toBeUndefined();
+      expect(methods).toEqual(["GET"]);
+    });
+
+    it.each(["destroying", "deleting"])(
+      "observes a prior %s transition without resubmitting DELETE",
+      async (state) => {
+        const client = new DaytonaClient(baseEnv);
+        const lease = { ...ownedLease, providerScope: await client.providerScope() };
+        const methods = mockOwnedSandboxRequests(client, [
+          Response.json({ ...ownedSandbox, state }),
+          Response.json({ ...ownedSandbox, state }),
+          Response.json({ ...ownedSandbox, state: "deleted" }),
+        ]);
+        const cleanup = client.deleteOwnedServer(lease).then(
+          () => "deleted",
+          (error: unknown) => error,
+        );
+
+        await vi.runAllTimersAsync();
+
+        expect(await cleanup).toBe("deleted");
+        expect(methods).toEqual(["GET", "GET", "GET"]);
+      },
+    );
+
+    it.each(["destroying", "build_failed"])(
+      "leaves cleanup pending when an accepted DELETE remains in state=%s",
+      async (state) => {
+        const client = new DaytonaClient(baseEnv);
+        const lease = { ...ownedLease, providerScope: await client.providerScope() };
+        client.maxWaitMs = 1_000;
+        client.pollDelayMs = 1_000;
+        const methods = mockOwnedSandboxRequests(client, [
+          Response.json(ownedSandbox),
+          new Response(null, { status: 204 }),
+          Response.json({ ...ownedSandbox, state }),
+          Response.json({ ...ownedSandbox, state }),
+        ]);
+        const cleanup = client.deleteOwnedServer(lease).catch((error: unknown) => error);
+
+        await vi.runAllTimersAsync();
+
+        expect(await cleanup).toMatchObject({
+          message: `timed out waiting for daytona sandbox ${sandboxID} cleanup (state=${state})`,
+        });
+        expect(methods[0]).toBe("GET");
+        expect(methods.filter((method) => method === "DELETE")).toHaveLength(1);
+        expect(methods.filter((method) => method === "GET").length).toBeGreaterThan(1);
+      },
+    );
+
+    it.each([
+      {
+        name: "unchanged ownership",
+        owner: "alice_example.com",
+        outcome: "deleted",
+        methods: ["GET", "DELETE", "GET", "DELETE", "GET"],
+      },
+      {
+        name: "changed ownership",
+        owner: "bob_example.com",
+        outcome: "unresolved",
+        methods: ["GET", "DELETE", "GET"],
+      },
+    ])("rechecks $name before retrying a conflicted DELETE", async (testCase) => {
+      const client = new DaytonaClient(baseEnv);
+      const lease = { ...ownedLease, providerScope: await client.providerScope() };
+      const methods = mockOwnedSandboxRequests(client, [
+        Response.json(ownedSandbox),
+        new Response("Sandbox state change in progress", { status: 409 }),
+        Response.json({
+          ...ownedSandbox,
+          labels: { ...ownedSandbox.labels, owner: testCase.owner },
+        }),
+        new Response(null, { status: 204 }),
+        Response.json({ ...ownedSandbox, state: "destroyed" }),
+      ]);
+      const cleanup = client.deleteOwnedServer(lease).then(
+        () => "deleted",
+        (error: unknown) =>
+          error instanceof ProviderResourceUnresolvedError ? "unresolved" : error,
+      );
+
+      await vi.runAllTimersAsync();
+
+      expect(await cleanup).toBe(testCase.outcome);
+      expect(methods).toEqual(testCase.methods);
+    });
+
+    it.each([
+      {
+        name: "ownership-read fetch failure",
+        replies: [() => Promise.reject(new TypeError("ownership read disconnected"))],
+        error: "ownership read disconnected",
+        methods: ["GET"],
+      },
+      {
+        name: "ownership-read body failure",
+        replies: [() => failedResponseBody("ownership body disconnected")],
+        error: "ownership body disconnected",
+        methods: ["GET"],
+      },
+      {
+        name: "DELETE fetch failure",
+        replies: [
+          Response.json(ownedSandbox),
+          () => Promise.reject(new TypeError("delete disconnected")),
+        ],
+        error: "delete disconnected",
+        methods: ["GET", "DELETE"],
+      },
+      {
+        name: "DELETE body failure",
+        replies: [
+          Response.json(ownedSandbox),
+          () => failedResponseBody("delete body disconnected"),
+        ],
+        error: "delete body disconnected",
+        methods: ["GET", "DELETE"],
+      },
+      {
+        name: "malformed deletion observation",
+        replies: [
+          Response.json(ownedSandbox),
+          new Response(null, { status: 204 }),
+          new Response("{"),
+        ],
+        error: SyntaxError,
+        methods: ["GET", "DELETE", "GET"],
+      },
+      {
+        name: "another UUID returned as deleted",
+        replies: [
+          Response.json(ownedSandbox),
+          new Response(null, { status: 204 }),
+          Response.json({ ...ownedSandbox, id: otherSandboxID, state: "deleted" }),
+        ],
+        error: "identity mismatch",
+        methods: ["GET", "DELETE", "GET"],
+      },
+    ])("does not mistake $name for cleanup success", async ({ replies, error, methods }) => {
+      const client = new DaytonaClient(baseEnv);
+      const lease = { ...ownedLease, providerScope: await client.providerScope() };
+      const observedMethods = mockOwnedSandboxRequests(client, replies);
+
+      await expect(client.deleteOwnedServer(lease)).rejects.toThrow(error);
+      expect(observedMethods).toEqual(methods);
+    });
+
+    it.each([
+      {
+        name: "fetch failures",
+        reply: () => Promise.reject(new TypeError("cleanup observation disconnected")),
+        state: "network_unavailable",
+      },
+      {
+        name: "response-body read failures",
+        reply: () => failedResponseBody("cleanup body disconnected"),
+        state: "network_unavailable",
+      },
+      {
+        name: "provider HTTP failures",
+        reply: () => new Response("provider unavailable", { status: 503 }),
+        state: "http_503",
+      },
+    ])("keeps accepted cleanup pending through repeated $name", async ({ reply, state }) => {
+      const client = new DaytonaClient(baseEnv);
+      const lease = { ...ownedLease, providerScope: await client.providerScope() };
+      client.maxWaitMs = 1_000;
+      client.pollDelayMs = 1_000;
+      const methods = mockOwnedSandboxRequests(client, [
+        Response.json(ownedSandbox),
+        new Response(null, { status: 204 }),
+        reply,
+        reply,
+      ]);
+      const cleanup = client.deleteOwnedServer(lease).catch((error: unknown) => error);
+
+      await vi.runAllTimersAsync();
+
+      expect(await cleanup).toMatchObject({
+        message: `timed out waiting for daytona sandbox ${sandboxID} cleanup (state=${state})`,
+      });
+      expect(methods[0]).toBe("GET");
+      expect(methods.filter((method) => method === "DELETE")).toHaveLength(1);
+      expect(methods.filter((method) => method === "GET").length).toBeGreaterThan(1);
+    });
   });
 
   it("creates a larger snapshot from the configured base and deletes its builder", async () => {
@@ -687,24 +1221,80 @@ describe("daytona coordinator client", () => {
     },
   );
 
+  it.each([
+    { name: "missing expiry", lifetime: undefined },
+    { name: "invalid expiry", lifetime: "invalid" },
+    { name: "expired lifetime", lifetime: -1 },
+    { name: "excess lifetime", lifetime: 601 },
+  ])("rejects ready sandboxes with $name instead of assuming native TTL", async ({ lifetime }) => {
+    const client = new DaytonaClient(baseEnv);
+    const createdAt = Date.now();
+    const autoDestroyAt =
+      typeof lifetime === "number"
+        ? new Date(createdAt + lifetime * 1_000).toISOString()
+        : lifetime;
+    client.fetcher = vi.fn<typeof fetch>(async () =>
+      Response.json({
+        ...ownedSandbox,
+        state: "started",
+        autoDestroyAt,
+      }),
+    );
+    await expect(client.waitForStarted(sandboxID, 600)).rejects.toThrow(
+      "did not confirm a valid native TTL",
+    );
+    expect(client.fetcher).toHaveBeenCalledTimes(1);
+  });
+
   it.each(["started", "running", "ready", "active", " Active "])(
-    "accepts Daytona ready state %j",
+    "accepts Daytona ready state %j with independently anchored native TTL",
     async (state) => {
       const client = new DaytonaClient(baseEnv);
+      const observedAt = Date.now();
       client.fetcher = async () =>
         Response.json({
           id: "sandbox-one",
           name: "crabbox-one",
           state,
+          // Live Daytona reports creation and TTL anchoring on separate clock ticks.
+          createdAt: new Date(observedAt - 64).toISOString(),
+          autoDestroyAt: new Date(observedAt + 600_000 - 63).toISOString(),
           labels: { crabbox: "true" },
         });
 
-      await expect(client.waitForStarted("sandbox-one")).resolves.toMatchObject({
+      await expect(client.waitForStarted("sandbox-one", 600)).resolves.toMatchObject({
         cloudID: "sandbox-one",
         status: state,
       });
     },
   );
+
+  it("does not extend the native deadline bound while polling readiness", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = new DaytonaClient(baseEnv);
+      const startedAt = Date.now();
+      client.pollDelayMs = 10_000;
+      let reads = 0;
+      client.fetcher = async () =>
+        Response.json({
+          ...ownedSandbox,
+          state: ++reads === 1 ? "creating" : "started",
+          createdAt: new Date(startedAt).toISOString(),
+          autoDestroyAt: new Date(startedAt + 610_000).toISOString(),
+        });
+      const result = client.waitForStarted(sandboxID, 600).catch((error: unknown) => error);
+
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      expect(await result).toMatchObject({
+        message: `Daytona sandbox ${sandboxID} did not confirm a valid native TTL`,
+      });
+      expect(reads).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it.each(["error", "errored", "failed", "build_failed", "destroyed", "destroying", "deleted"])(
     "rejects Daytona terminal state %j",
@@ -718,7 +1308,7 @@ describe("daytona coordinator client", () => {
           labels: { crabbox: "true" },
         });
 
-      await expect(client.waitForStarted("sandbox-one")).rejects.toThrow(
+      await expect(client.waitForStarted("sandbox-one", 600)).rejects.toThrow(
         `entered terminal state=${state}`,
       );
     },
