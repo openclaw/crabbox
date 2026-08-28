@@ -721,29 +721,39 @@ func TestAcquirePreflightsPublicSSHKeyBeforeCreate(t *testing.T) {
 		createFile bool
 		wantError  bool
 	}{
+		{name: "public key without filename", key: machineKey{Name: "no-filename", Type: "PUBLIC"}, wantError: true},
+		{name: "public key with unsafe filename", key: machineKey{Name: "unsafe-filename", Type: "PUBLIC", FileName: "../other-key"}, wantError: true},
 		{name: "public key without local private key", key: machineKey{Name: "remote-only", Type: "PUBLIC", FileName: "remote-only"}, wantError: true},
 		{name: "public key with local private key", key: machineKey{Name: "local-key", Type: "PUBLIC", FileName: "local-key"}, createFile: true},
 		{name: "managed key can materialize later", key: machineKey{Name: "managed-key", Type: "MANAGED", FileName: "machine0__managed-key"}},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			repo := setupState(t)
-			if tc.createFile {
-				if err := os.WriteFile(filepath.Join(os.Getenv("SSH_KEY_PATH"), tc.key.FileName), []byte("fixture private key"), 0o600); err != nil {
-					t.Fatal(err)
+		for _, leaseID := range []string{"", fixedMachine0TestLeaseID} {
+			t.Run(tc.name+"/"+blank(leaseID, "ordinary"), func(t *testing.T) {
+				repo := setupState(t)
+				if tc.createFile {
+					if err := os.WriteFile(filepath.Join(os.Getenv("SSH_KEY_PATH"), tc.key.FileName), []byte("fixture private key"), 0o600); err != nil {
+						t.Fatal(err)
+					}
 				}
-			}
-			api := &fakeAPI{sizes: []machineSize{testSize()}, selectedKey: &tc.key, getSequence: []machine{readyMachine("203.0.113.10")}}
-			_, err := testBackendWithAPI(api).Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
-			if tc.wantError {
-				if err == nil || !strings.Contains(err.Error(), tc.key.Name) || !strings.Contains(err.Error(), "--machine0-key <managed-key-name>") || len(api.created) != 0 {
+				api := &fakeAPI{sizes: []machineSize{testSize()}, selectedKey: &tc.key, getSequence: []machine{readyMachine("203.0.113.10")}}
+				_, err := testBackendWithAPI(api).Acquire(context.Background(), AcquireRequest{RequestedLeaseID: leaseID, Repo: core.Repo{Root: repo}})
+				if tc.wantError {
+					if err == nil || !strings.Contains(err.Error(), tc.key.Name) || !strings.Contains(err.Error(), "--machine0-key <managed-key-name>") || len(api.created) != 0 {
+						t.Fatalf("err=%v created=%#v", err, api.created)
+					}
+					if leaseID != "" {
+						claim := readFixedMachine0Claim(t, leaseID)
+						if claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != fixedMachine0IntentPrepared || len(claim.FixedCreateIntent.Attempt) != 0 || claim.CloudID != "" {
+							t.Fatalf("preflight failure persisted a create attempt or resource: %#v", claim)
+						}
+					}
+					return
+				}
+				if err != nil || len(api.created) != 1 {
 					t.Fatalf("err=%v created=%#v", err, api.created)
 				}
-				return
-			}
-			if err != nil || len(api.created) != 1 {
-				t.Fatalf("err=%v created=%#v", err, api.created)
-			}
-		})
+			})
+		}
 	}
 }
 
