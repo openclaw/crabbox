@@ -1306,7 +1306,8 @@ func wsl2StdinScriptCommandWithWaitTimeout(inputSize int, waitTimeout time.Durat
 func wsl2StdinScriptCommandWithPayload(scriptSize, payloadSize int, waitTimeout time.Duration) string {
 	// Keep staging, execution, and cleanup in one WSL process so the timeout
 	// covers the lifecycle. The frame accounts for .NET's stdin preamble, and
-	// the marker lets post-exit cleanup preserve collisions.
+	// the marker lets post-exit cleanup preserve collisions. Restore the incoming
+	// umask before execution so private staging does not restrict user-created files.
 	wait := `$process.WaitForExit()
   $code = $process.ExitCode`
 	copyScript := `[Console]::OpenStandardInput().CopyTo($process.StandardInput.BaseStream)`
@@ -1347,7 +1348,7 @@ $cleanupAllowed = $true
 $psi = [System.Diagnostics.ProcessStartInfo]::new("wsl.exe")
 $psi.UseShellExecute = $false
 $psi.RedirectStandardInput = $true
-$psi.Arguments = '--exec sh -c "set -u;umask 077;dir=$1;script_expected=$2;payload_expected=$3;preamble=$4;mkdir -m 700 -- $dir||exit;: >$dir/.crabbox-owned;trap ''rm -rf -- $dir'' EXIT;cat >$dir/framed||exit;test $(wc -c <$dir/framed) = $((script_expected+payload_expected+preamble))||exit;dd if=$dir/framed of=$dir/script.sh bs=1 skip=$preamble count=$script_expected 2>/dev/null||exit;dd if=$dir/framed of=$dir/payload bs=1 skip=$((preamble+script_expected)) count=$payload_expected 2>/dev/null||exit;rm -f -- $dir/framed;code=0;bash $dir/script.sh <$dir/payload||code=$?;rm -rf -- $dir;cleanup=$?;trap - EXIT;if [ $cleanup -ne 0 ];then echo ''WSL2 command cleanup failed: exit ''$cleanup >&2;[ $code -ne 0 ]||code=$cleanup;fi;exit $code" sh ' + $dir + ' ` + strconv.Itoa(scriptSize) + ` ` + strconv.Itoa(payloadSize) + ` ' + $preamble
+$psi.Arguments = '--exec sh -c "set -u;mask=$(umask);umask 077;dir=$1;script_expected=$2;payload_expected=$3;preamble=$4;mkdir -m 700 -- $dir||exit;: >$dir/.crabbox-owned;trap ''rm -rf -- $dir'' EXIT;cat >$dir/framed||exit;test $(wc -c <$dir/framed) = $((script_expected+payload_expected+preamble))||exit;dd if=$dir/framed of=$dir/script.sh bs=1 skip=$preamble count=$script_expected 2>/dev/null||exit;dd if=$dir/framed of=$dir/payload bs=1 skip=$((preamble+script_expected)) count=$payload_expected 2>/dev/null||exit;rm -f -- $dir/framed;code=0;umask $mask;bash $dir/script.sh <$dir/payload||code=$?;rm -rf -- $dir;cleanup=$?;trap - EXIT;if [ $cleanup -ne 0 ];then echo ''WSL2 command cleanup failed: exit ''$cleanup >&2;[ $code -ne 0 ]||code=$cleanup;fi;exit $code" sh ' + $dir + ' ` + strconv.Itoa(scriptSize) + ` ` + strconv.Itoa(payloadSize) + ` ' + $preamble
 $process = [System.Diagnostics.Process]::Start($psi)
 try {
   try {

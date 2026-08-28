@@ -866,6 +866,80 @@ func TestWSL2StdinScriptCommandWithWaitTimeoutReadsPayloadFromStdin(t *testing.T
 	}
 }
 
+func TestWSL2StdinShellPreservesUmask(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("executes the generated WSL POSIX shell locally")
+	}
+	for _, mask := range []string{"022", "027", "077"} {
+		for _, owned := range []bool{false, true} {
+			for _, input := range []string{"", "payload\x00\xff\n"} {
+				t.Run(fmt.Sprintf("umask-%s/owned-%t/input-%t", mask, owned, input != ""), func(t *testing.T) {
+					home := t.TempDir()
+					stage := filepath.Join(home, "stage")
+					output := filepath.Join(home, "user-file")
+					directory := filepath.Join(home, "user-directory")
+					wantCode := 0
+					if input != "" {
+						wantCode = 23
+					}
+					script := `private_paths=$(find ` + shellQuote(stage) + ` \( -type d ! -perm 700 -o -type f ! -perm 600 \) -print) || exit 99; [ -z "$private_paths" ] || { printf 'non-private staging paths: %s\n' "$private_paths" >&2; exit 99; }` + "\n" +
+						"mkdir " + shellQuote(directory) + " && cat > " + shellQuote(output) + "; exit " + strconv.Itoa(wantCode)
+					key, token := workspaceOwnerKey("cbx_umask"), strings.Repeat("a", 64)
+					if owned {
+						request := workspaceOwnerRemoteRequest{Action: workspaceOwnerAcquire, Key: key, Token: token, TTL: time.Minute}
+						if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerCommand(SSHTarget{TargetOS: targetLinux}, request)); err != nil || out != "ACQUIRED" {
+							t.Fatalf("acquire out=%q err=%v", out, err)
+						}
+						script = remoteWorkspaceOwnerPOSIXWitness(key, token, script, input != "")
+					}
+					// Execute the actual sh payload, not a reimplementation of WSL staging.
+					decoded := decodePowerShellCommand(t, wsl2StdinScriptCommandWithPayload(len(script), len(input), 0))
+					_, arguments, ok := strings.Cut(decoded, `$psi.Arguments = '--exec sh -c "`)
+					if !ok {
+						t.Fatal("missing WSL shell invocation")
+					}
+					inline, _, ok := strings.Cut(arguments, `" sh ' + $dir + ' `)
+					if !ok {
+						t.Fatal("missing WSL shell arguments")
+					}
+					inline = strings.ReplaceAll(inline, "''", "'")
+					cmd := exec.Command("sh", "-c", `umask "$1"; shift; exec sh -c "$@"`, "umask-test", mask, inline, "sh", stage, strconv.Itoa(len(script)), strconv.Itoa(len(input)), "0")
+					cmd.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}
+					cmd.Stdin = strings.NewReader(script + input)
+					if out, err := cmd.CombinedOutput(); exitCode(err) != wantCode {
+						t.Fatalf("WSL shell exit=%d want=%d err=%v output=%s", exitCode(err), wantCode, err, out)
+					}
+					if data, err := os.ReadFile(output); err != nil || string(data) != input {
+						t.Fatalf("stdin=%q want=%q err=%v", data, input, err)
+					}
+					bits, err := strconv.ParseUint(mask, 8, 32)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for path, base := range map[string]os.FileMode{output: 0o666, directory: 0o777} {
+						info, err := os.Stat(path)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if want := base &^ os.FileMode(bits); info.Mode().Perm() != want {
+							t.Errorf("caller umask %s: %s mode=%04o want=%04o", mask, filepath.Base(path), info.Mode().Perm(), want)
+						}
+					}
+					if _, err := os.Stat(stage); !os.IsNotExist(err) {
+						t.Errorf("WSL staging remains: %v", err)
+					}
+					if owned {
+						request := workspaceOwnerRemoteRequest{Action: workspaceOwnerRelease, Key: key, Token: token, TTL: time.Minute}
+						if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerCommand(SSHTarget{TargetOS: targetLinux}, request)); err != nil || out != "RELEASED" {
+							t.Fatalf("release out=%q err=%v", out, err)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestStaticLeaseBypassesCoordinatorAndUsesTargetServerType(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "ssh"
