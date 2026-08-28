@@ -369,34 +369,30 @@ func securePrivateWindowsHandle(handle windows.Handle, directory bool) error {
 	if err != nil {
 		return fmt.Errorf("read private Windows output owner: %w", err)
 	}
-	securityInformation := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION)
-	var newOwner *windows.SID
-	securityHandle := handle
-	closeSecurityHandle := false
-	if owner == nil || !owner.Equals(user) {
-		securityInformation |= windows.OWNER_SECURITY_INFORMATION
-		newOwner = user
-		securityHandle, err = reOpenPrivateWindowsHandle(handle, windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER, directory)
-		if err != nil {
-			return err
-		}
-		closeSecurityHandle = true
-	}
-	if closeSecurityHandle {
-		defer windows.CloseHandle(securityHandle)
-	}
+	// WRITE_DAC does not imply WRITE_OWNER. Apply the private grant through
+	// the retained handle before requesting ownership access to the same object.
 	if err := windows.SetSecurityInfo(
-		securityHandle,
+		handle,
 		windows.SE_FILE_OBJECT,
-		securityInformation,
-		newOwner,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
 		nil,
 		acl,
 		nil,
 	); err != nil {
 		return fmt.Errorf("apply private Windows access-control list: %w", err)
 	}
-	return verifyPrivateWindowsHandle(securityHandle, directory, user)
+	if owner == nil || !owner.Equals(user) {
+		securityHandle, err := reOpenPrivateWindowsHandle(handle, windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.WRITE_OWNER, directory)
+		if err != nil {
+			return err
+		}
+		defer windows.CloseHandle(securityHandle)
+		if err := windows.SetSecurityInfo(securityHandle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, user, nil, nil, nil); err != nil {
+			return fmt.Errorf("apply private Windows output owner: %w", err)
+		}
+	}
+	return verifyPrivateWindowsHandle(handle, directory, user)
 }
 
 func verifyPrivateWindowsHandle(handle windows.Handle, directory bool, currentUser *windows.SID) error {

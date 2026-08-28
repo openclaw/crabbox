@@ -283,24 +283,100 @@ func TestFailureBundleDestinationUnwritableWindows(t *testing.T) {
 }
 
 func TestPrivateRunOutputWindowsDoesNotInheritPermissiveDACL(t *testing.T) {
-	parent := t.TempDir()
-	testSID := makeWindowsTestParentPermissive(t, parent)
+	for _, fixture := range []string{"new directory", "current owner without WRITE_OWNER", "different owner without WRITE_OWNER"} {
+		t.Run(fixture, func(t *testing.T) {
+			parent := t.TempDir()
+			testSID := makeWindowsTestParentPermissive(t, parent)
+			dir := filepath.Join(parent, "downloads")
+			var before *windows.ByHandleFileInformation
+			if fixture != "new directory" {
+				if fixture == "current owner without WRITE_OWNER" {
+					if err := createPrivateRunOutputDir(dir); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.Mkdir(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				user, err := currentWindowsUserSID()
+				if err != nil {
+					t.Fatal(err)
+				}
+				security, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+				if err != nil {
+					t.Fatal(err)
+				}
+				owner, _, err := security.Owner()
+				if err != nil || owner == nil {
+					t.Fatalf("read fixture owner: %v", err)
+				}
+				// Elevated Windows runners create legacy directories owned by
+				// Administrators. Do not change the owner to manufacture the case.
+				if fixture == "different owner without WRITE_OWNER" && owner.Equals(user) {
+					t.Skip("requires a default directory owner distinct from the current user")
+				}
+				access := uint32(windows.FILE_GENERIC_READ | windows.FILE_GENERIC_WRITE | windows.FILE_GENERIC_EXECUTE | windows.DELETE | windows.WRITE_DAC)
+				descriptor, err := windows.SecurityDescriptorFromString(fmt.Sprintf("D:P(A;OICI;0x%08x;;;%s)(A;OICI;GR;;;%s)", access, user.String(), testSID.String()))
+				if err != nil {
+					t.Fatal(err)
+				}
+				acl, _, err := descriptor.DACL()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil); err != nil {
+					t.Fatal(err)
+				}
+				probe, err := openPrivateWindowsSecurityHandle(dir, true, windows.WRITE_OWNER)
+				if err == nil {
+					_ = windows.CloseHandle(probe)
+					t.Fatal("fixture unexpectedly permits WRITE_OWNER")
+				}
+				if !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+					t.Fatalf("probe fixture ownership access: %v", err)
+				}
+				assertWindowsPathGrantsSID(t, dir, testSID)
+				original, err := openPrivateWindowsSecurityHandle(dir, true, windows.READ_CONTROL)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer windows.CloseHandle(original)
+				before = &windows.ByHandleFileInformation{}
+				if err := windows.GetFileInformationByHandle(original, before); err != nil {
+					t.Fatal(err)
+				}
+			}
 
-	path := filepath.Join(parent, "downloads", "proof.txt")
-	if err := writeRunDownloadFile(path, []byte("private proof")); err != nil {
-		t.Fatal(err)
-	}
-	assertWindowsPathPrivateFromSID(t, filepath.Dir(path), true, testSID)
-	assertWindowsPathPrivateFromSID(t, path, false, testSID)
+			path := filepath.Join(dir, "proof.txt")
+			if err := writeRunDownloadFile(path, []byte("private proof")); err != nil {
+				t.Fatal(err)
+			}
+			assertWindowsPathPrivateFromSID(t, dir, true, testSID)
+			assertWindowsPathPrivateFromSID(t, path, false, testSID)
+			if before != nil {
+				repaired, err := openPrivateWindowsSecurityHandle(dir, true, windows.READ_CONTROL)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer windows.CloseHandle(repaired)
+				var after windows.ByHandleFileInformation
+				if err := windows.GetFileInformationByHandle(repaired, &after); err != nil {
+					t.Fatal(err)
+				}
+				if before.VolumeSerialNumber != after.VolumeSerialNumber || before.FileIndexHigh != after.FileIndexHigh || before.FileIndexLow != after.FileIndexLow {
+					t.Fatal("ownership repair replaced the directory")
+				}
+			}
 
-	if err := setWindowsPathPermissive(t, path, false, testSID); err != nil {
-		t.Fatal(err)
+			if err := setWindowsPathPermissive(t, path, false, testSID); err != nil {
+				t.Fatal(err)
+			}
+			assertWindowsPathGrantsSID(t, path, testSID)
+			if err := writeRunDownloadFile(path, []byte("replacement proof")); err != nil {
+				t.Fatal(err)
+			}
+			assertWindowsPathPrivateFromSID(t, path, false, testSID)
+		})
 	}
-	assertWindowsPathGrantsSID(t, path, testSID)
-	if err := writeRunDownloadFile(path, []byte("replacement proof")); err != nil {
-		t.Fatal(err)
-	}
-	assertWindowsPathPrivateFromSID(t, path, false, testSID)
 }
 
 func TestManagedAttestKeyWindowsRepairsPermissiveDACL(t *testing.T) {
