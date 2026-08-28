@@ -267,6 +267,15 @@ type TailscaleMetadataBackend interface {
 	UpdateTailscaleMetadata(ctx context.Context, lease LeaseTarget, meta TailscaleMetadata) (Server, error)
 }
 
+// RunOptionsValidator optionally checks run flags before a caller acquires a
+// lease, including during dry-run planning. Validation must be side-effect-free:
+// no external I/O or lease-state access, and no dependency on a resolved lease.
+// Providers may implement it directly to allow admission without configuring a
+// backend; their backend must reuse the same policy at Run entry.
+type RunOptionsValidator interface {
+	ValidateRunOptions(RunRequest) error
+}
+
 type DelegatedRunBackend interface {
 	Backend
 	Warmup(ctx context.Context, req WarmupRequest) error

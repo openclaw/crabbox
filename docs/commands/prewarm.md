@@ -35,6 +35,10 @@ Use `--no-sync` when the prewarmed checkout already contains the code you want
 to test. Omit it when local edits must be copied; fingerprint sync should skip
 the upload quickly when nothing changed.
 
+Blacksmith Testbox is an exception: it owns sync and has no supported
+`--no-sync` option. Reuse a Blacksmith lease without `--no-sync`; Blacksmith
+will manage source sync on each run.
+
 ## Behavior
 
 - Creates a fresh lease with the normal `warmup` flags.
@@ -43,7 +47,11 @@ the upload quickly when nothing changed.
 - Skips hydration for delegated-run providers and reports
   `hydration=provider-owned`.
 - Optionally runs `--probe-command` without source sync to prove the hydrated
-  runtime is usable.
+  runtime is usable. Blacksmith Testbox rejects a nonblank `--probe-command`
+  with exit 2 before warmup, key generation, provider calls, or claim changes,
+  including with `--dry-run`, because its runs do not support `--no-sync`.
+  Omit the probe to prewarm Blacksmith, or use a provider that supports no-sync
+  probes. An empty or whitespace-only probe is treated as no probe.
 - Optionally registers the hydrated lease in a broker ready pool with `--pool`.
 - `--timing-json` includes `hydrateMs` and `probeMs`.
 

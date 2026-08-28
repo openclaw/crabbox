@@ -13,6 +13,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestBlacksmithRunNoSyncContract(t *testing.T) {
@@ -35,11 +36,8 @@ func TestBlacksmithRunNoSyncContract(t *testing.T) {
 				{name: "reject_no_sync", noSync: true},
 			} {
 				t.Run(mode.name, func(t *testing.T) {
-					home := t.TempDir()
-					t.Setenv("HOME", home)
-					t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-					t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
-					t.Setenv("TMPDIR", home)
+					dirs := testutil.IsolateUserDirs(t)
+					t.Setenv("TMPDIR", dirs.Root)
 					t.Setenv("CRABBOX_ENV_ALLOW", "")
 					t.Setenv("CRABBOX_BLACKSMITH_SYNC_TIMEOUT_MS", "0")
 					t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
