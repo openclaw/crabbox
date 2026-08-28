@@ -8,8 +8,9 @@ Read when:
 
 Static SSH is the provider for machines Crabbox does **not** create. The backend
 resolves a configured SSH target and hands it to core, which owns sync, command
-execution, results, tunnels, and status rendering. There is no provisioning,
-cleanup, or cost accounting — the host's lifecycle is yours.
+execution, results, tunnels, and status rendering. Crabbox does not provision,
+stop, or delete the machine, or account for its cost. The host's lifecycle is
+yours; commands can still perform connection cleanup when releasing a lease.
 
 The provider id is `ssh`, with aliases `static` and `static-ssh`. It is
 direct-only and is never brokered through the coordinator.
@@ -39,8 +40,35 @@ configured target and returns it as a lease-like object so the rest of the
 warm-box workflow (`run`, `ssh`, `status`, tunnels) behaves the same as for
 provisioned providers.
 
-`stop` for a static lease removes only the local claim. It never touches the
-host. There is no `cleanup` action.
+`stop` (also spelled `release`) removes the local claim after attempting the
+shared connection cleanup described below. `run` does the same when its release
+policy fires: normally after a fresh one-shot run, but not a kept run or a run
+reusing an ID by default. Remote cleanup is best-effort: failures warn but do
+not block local unclaiming. The static backend itself only removes the local
+claim and cached target; it never stops or deletes the machine. There is no
+static machine `cleanup` action.
+
+### Connection cleanup
+
+Commands attempt to write an Actions stop marker for the lease ID at
+`$HOME/.crabbox/actions/<leaseID>.stop` on POSIX targets, or under
+`C:\ProgramData\crabbox\actions` on native Windows. This signals the
+[Actions hydration](../features/actions-hydration.md) workflow to end its
+keep-alive phase. The remote directory and marker can be created even when no
+hydration state exists or reading it fails.
+
+Cleanup also attempts to stop local mediated-egress daemon state. On Linux
+(or an unspecified target OS), remote egress cleanup attempts to stop processes
+matching the common Crabbox egress-client command pattern, even if this lease
+did not set up egress. That match is not restricted to a lease or session and
+can affect other matching clients accessible to the SSH account. Other target
+OSes skip this remote egress step.
+
+Remote Tailscale logout is attempted only when stored lease metadata marks
+Tailscale as enabled. Ordinary static `--tailscale` provisioning is unsupported;
+using an existing tailnet address or MagicDNS name does not set that metadata
+or trigger logout by itself. The metadata gate is not a live node-ownership
+check.
 
 ## Targets
 
@@ -198,8 +226,9 @@ path.
 
 ## Gotchas
 
-- Crabbox never cleans up static hosts. Disk, processes, and leftover state are
-  yours to manage.
+- General disk, workspace, process, and leftover-state housekeeping on static
+  hosts remains yours to manage; release-time connection cleanup is limited to
+  the operations described above.
 - Static hosts drift. Run `crabbox doctor --provider ssh` and a small
   `crabbox run` before long jobs.
 - The provider connects with your configured SSH key; it does not mint a

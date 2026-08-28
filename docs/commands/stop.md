@@ -2,8 +2,9 @@
 
 `crabbox stop` ends a single lease. For coordinator-backed and direct cloud
 providers it releases or deletes the backing machine; for delegated runners it
-tears down the underlying sandbox; for static `provider=ssh` hosts it only
-removes the local claim and never touches the host.
+tears down the underlying sandbox; for static `provider=ssh` hosts it attempts
+connection cleanup and removes the local claim without stopping or deleting
+the machine.
 
 ```sh
 crabbox stop swift-crab
@@ -112,8 +113,9 @@ Crabbox lease ID and local slug:
   Crabbox keeps after a successful one-shot command.
 - `hostinger` — stops the VPS and retains its local claim and SSH key for later
   reuse. Hostinger still owns the subscription and may continue billing it.
-- `ssh` (static hosts) — removes the local claim for the configured static
-  target; it never deletes the host.
+- `ssh` (static hosts) — attempts shared connection cleanup, then removes the
+  local claim without stopping or deleting the host. See
+  [Static SSH connection cleanup](../providers/ssh.md#connection-cleanup).
 - `xcp-ng` — requires an exact pool/account-scoped local claim for the same
   Crabbox lease, slug, and VM UUID, then verifies fresh live ownership metadata
   before deleting the VM. Missing or mismatched claims never authorize
@@ -150,11 +152,14 @@ non-destructive post-create workflows on a running sandbox. The separate
 [`pause`](pause.md) and [`resume`](resume.md) commands are provider-dependent
 and are not supported by Docker Sandbox.
 
-Where applicable, `stop` makes a best-effort attempt to stop GitHub
-[Actions hydration](../features/actions-hydration.md) on the host before
-releasing it. For SSH leases that can host mediated egress, it also best-effort
-stops egress state: the local host daemon pid state and the lease-side egress
-client are cleaned up before the provider release runs.
+For SSH leases, shared connection cleanup makes best-effort attempts to signal
+[Actions hydration](../features/actions-hydration.md) shutdown, stop local
+mediated-egress daemon state and supported remote egress clients, and log out
+remote Tailscale when stored lease metadata marks it enabled. Providers can
+gate remote cleanup behind their ownership checks. Static SSH attempts cleanup
+before local unclaiming, even without hydration state; remote failures warn
+but do not block unclaiming. See the [static provider details](../providers/ssh.md#connection-cleanup)
+for marker paths, Linux egress process-matching scope, and Tailscale limits.
 
 ## Flags
 

@@ -14,6 +14,7 @@
 
 ### Fixed
 
+- Clarified static SSH stop/run documentation and added command-path regression coverage for existing best-effort connection cleanup before local unclaiming, without changing runtime behavior.
 - Unified provider-owned routing for stop, retry, rescue, and WebVNC commands, preserving scope, explicit false release settings, and Kubernetes environment selectors without exposing URL credentials.
 - Saved automatic failure bundles in private user state when the project capture destination is unwritable, retaining verified directories through creation, publication, and cleanup to prevent path substitution while preserving the command exit status.
 - Refreshed coordinator runtime and Worker development dependencies, including Nano ID and Undici advisory fixes.

@@ -17,9 +17,11 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	sdk "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
@@ -2214,49 +2216,161 @@ func TestSDKClientRunCommandBoundsEndpointDiscovery(t *testing.T) {
 
 func TestSDKClientRunCommandBoundsStreamingRequest(t *testing.T) {
 	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
-	var interrupted string
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-stalled/endpoints/44772":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"endpoint":"`+server.URL+`","headers":{"X-EXECD-ACCESS-TOKEN":"exec-token"}}`)
-		case r.Method == http.MethodPost && r.URL.Path == "/command":
-			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = io.WriteString(w, "data: {\"type\":\"init\",\"text\":\"cmd-stalled\"}\n\n")
-			w.(http.Flusher).Flush()
-			<-r.Context().Done()
-		case r.Method == http.MethodDelete && r.URL.Path == "/command":
-			interrupted = r.URL.Query().Get("id")
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			http.NotFound(w, r)
+	for _, beforeInit := range []bool{false, true} {
+		name := "after_init"
+		if beforeInit {
+			name = "before_init"
 		}
-	}))
-	defer server.Close()
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				const timeout = 20 * time.Millisecond
+				var interrupted []string
+				streamCanceled := make(chan struct{})
+				var server *httptest.Server
+				server = newOpenSandboxPipeServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-stalled/endpoints/44772":
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = io.WriteString(w, `{"endpoint":"`+server.URL+`","headers":{"X-EXECD-ACCESS-TOKEN":"exec-token"}}`)
+					case r.Method == http.MethodPost && r.URL.Path == "/command":
+						w.Header().Set("Content-Type", "text/event-stream")
+						_, _ = io.WriteString(w, "data: {\"type\":\"init\",\"text\":\"cmd-stalled\"}\n\n")
+						w.(http.Flusher).Flush()
+						<-r.Context().Done()
+						close(streamCanceled)
+					case r.Method == http.MethodDelete && r.URL.Path == "/command":
+						interrupted = append(interrupted, r.URL.Query().Get("id"))
+						w.WriteHeader(http.StatusNoContent)
+					default:
+						http.NotFound(w, r)
+					}
+				}))
 
-	cfg := testConfig()
-	cfg.OpenSandbox.APIURL = server.URL
-	client, err := newOpenSandboxClient(cfg, Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client.(*sdkOpenSandboxClient).execTimeoutOverride = 20 * time.Millisecond
+				httpClient := server.Client()
+				var heldInit bool
+				if beforeInit {
+					// A flush does not guarantee consumption: hold real response bytes
+					// until expiry, before the parser can dispatch the command ID.
+					httpClient.Transport = openSandboxDelayedInitTransport{httpClient.Transport, &heldInit}
+				}
+				cfg := testConfig()
+				cfg.OpenSandbox.APIURL = server.URL
+				client, err := newOpenSandboxClient(cfg, Runtime{HTTP: httpClient, Stdout: io.Discard, Stderr: io.Discard})
+				if err != nil {
+					t.Fatal(err)
+				}
+				client.(*sdkOpenSandboxClient).execTimeoutOverride = timeout
 
-	start := time.Now()
-	_, err = client.RunCommand(context.Background(), "sb-stalled", runCommandRequest{
-		Command:     "sleep 3600",
-		TimeoutSecs: 3600,
-	})
-	if err == nil {
-		t.Fatal("expected stalled streaming request to time out")
+				// In-memory HTTP lets synctest finish discovery and consume init
+				// before advancing time, unless the read is deliberately held.
+				start := time.Now()
+				exitCode, err := client.RunCommand(context.Background(), "sb-stalled", runCommandRequest{
+					Command:     "sleep 3600",
+					TimeoutSecs: 3600,
+				})
+				if !errors.Is(err, context.DeadlineExceeded) || exitCode != 1 {
+					t.Fatalf("exit=%d err=%v, want exit 1 and request deadline", exitCode, err)
+				}
+				if elapsed := time.Since(start); elapsed != timeout {
+					t.Fatalf("streaming timeout took %s, want %s", elapsed, timeout)
+				}
+				synctest.Wait()
+				select {
+				case <-streamCanceled:
+				default:
+					t.Fatal("HTTP transport did not cancel the streaming request")
+				}
+				if beforeInit {
+					if !heldInit {
+						t.Fatal("did not hold flushed init bytes until request expiry")
+					}
+					if len(interrupted) != 0 {
+						t.Fatalf("interrupted=%q, want no DELETE without a consumed ID", interrupted)
+					}
+				} else if len(interrupted) != 1 || interrupted[0] != "cmd-stalled" {
+					t.Fatalf("interrupted=%q, want one DELETE for cmd-stalled", interrupted)
+				}
+			})
+		})
 	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("streaming timeout took %s, want under 1s", elapsed)
+}
+
+type openSandboxDelayedInitTransport struct {
+	base http.RoundTripper
+	held *bool
+}
+
+func (t openSandboxDelayedInitTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	response, err := t.base.RoundTrip(r)
+	if err == nil && r.Method == http.MethodPost && r.URL.Path == "/command" {
+		response.Body = &openSandboxDelayedInitBody{ReadCloser: response.Body, ctx: r.Context(), held: t.held}
 	}
-	if interrupted != "cmd-stalled" {
-		t.Fatalf("interrupted=%q want cmd-stalled", interrupted)
+	return response, err
+}
+
+type openSandboxDelayedInitBody struct {
+	io.ReadCloser
+	ctx  context.Context
+	held *bool
+}
+
+func (b *openSandboxDelayedInitBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if n > 0 && !*b.held {
+		<-b.ctx.Done()
+		*b.held = true
 	}
+	return n, err
+}
+
+// Keep HTTP transport cancellation real while making connection reads durably
+// block under synctest's clock. Loopback sockets cannot provide that guarantee.
+func newOpenSandboxPipeServer(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	listener := &openSandboxPipeListener{connections: make(chan net.Conn), done: make(chan struct{})}
+	server := &httptest.Server{Listener: listener, Config: &http.Server{Handler: handler}}
+	server.Start()
+	server.Client().Transport.(*http.Transport).DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+		clientConn, serverConn := net.Pipe()
+		select {
+		case listener.connections <- serverConn:
+			return clientConn, nil
+		case <-ctx.Done():
+			clientConn.Close()
+			serverConn.Close()
+			return nil, ctx.Err()
+		case <-listener.done:
+			clientConn.Close()
+			serverConn.Close()
+			return nil, net.ErrClosed
+		}
+	}
+	t.Cleanup(server.Close)
+	return server
+}
+
+type openSandboxPipeListener struct {
+	connections chan net.Conn
+	done        chan struct{}
+	closeOnce   sync.Once
+}
+
+func (l *openSandboxPipeListener) Accept() (net.Conn, error) {
+	select {
+	case conn := <-l.connections:
+		return conn, nil
+	case <-l.done:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *openSandboxPipeListener) Close() error {
+	l.closeOnce.Do(func() { close(l.done) })
+	return nil
+}
+
+func (*openSandboxPipeListener) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 80}
 }
 
 func TestSDKClientRunCommandAddsConfiguredSchemeToBareEndpoint(t *testing.T) {
