@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -12,6 +13,28 @@ import (
 
 	"golang.org/x/sys/windows"
 )
+
+func TestFailureBundleDestinationUnwritableWindows(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"permission", privateRunOutputWriteError{windows.ERROR_ACCESS_DENIED}, true},
+		{"write protected", privateRunOutputWriteError{windows.ERROR_WRITE_PROTECT}, true},
+		{"NT permission", privateRunOutputWriteError{windows.STATUS_ACCESS_DENIED}, true},
+		{"NT write protected", privateRunOutputWriteError{windows.STATUS_MEDIA_WRITE_PROTECTED}, true},
+		{"security failure", fmt.Errorf("verify DACL: %w", windows.ERROR_ACCESS_DENIED), false},
+		{"reparse point", privateRunOutputWriteError{windows.STATUS_REPARSE_POINT_ENCOUNTERED}, false},
+		{"disk full", privateRunOutputWriteError{windows.ERROR_DISK_FULL}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := failureBundleDestinationUnwritable(tc.err); got != tc.want {
+				t.Fatalf("unwritable=%t want=%t error=%v", got, tc.want, tc.err)
+			}
+		})
+	}
+}
 
 func TestPrivateRunOutputWindowsDoesNotInheritPermissiveDACL(t *testing.T) {
 	parent := t.TempDir()

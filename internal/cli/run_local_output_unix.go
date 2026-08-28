@@ -4,6 +4,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -36,7 +37,41 @@ func ensurePrivateRunOutputDir(path string) error {
 }
 
 func createPrivateRunOutputDir(path string) error {
-	return os.MkdirAll(path, privateRunOutputDirMode)
+	if err := os.MkdirAll(path, privateRunOutputDirMode); err != nil {
+		return privateRunOutputWriteError{err}
+	}
+	return nil
+}
+
+func privateRunOutputPermissionError(err error) bool {
+	return errors.Is(err, os.ErrPermission) || errors.Is(err, unix.EROFS)
+}
+
+func createFailureBundleDir(path string) error {
+	if err := createPrivateRunOutputDir(path); err != nil {
+		return err
+	}
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(fd)
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return err
+	}
+	return validateFailureBundleDirectoryOwner(stat.Uid, uint32(os.Geteuid()))
+}
+
+func validateFailureBundleDirectoryOwner(owner, current uint32) error {
+	if owner != current {
+		return fmt.Errorf("failure bundle directory must be owned by the current user")
+	}
+	return nil
+}
+
+func replacePrivateRunOutputTemp(tempPath, path string) error {
+	return os.Rename(tempPath, path)
 }
 
 func openPrivateRunOutputFile(path string) (*os.File, error) {
@@ -80,7 +115,7 @@ func createPrivateRunOutputTemp(path string) (*os.File, string, error) {
 	dir := filepath.Dir(path)
 	file, err := os.CreateTemp(dir, "."+filepath.Base(path)+".crabbox-*")
 	if err != nil {
-		return nil, "", err
+		return nil, "", privateRunOutputWriteError{err}
 	}
 	tempPath := file.Name()
 	if err := securePrivateFile(file); err != nil {

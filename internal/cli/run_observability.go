@@ -883,13 +883,9 @@ func captureFailureBundle(ctx context.Context, target SSHTarget, workdir, leaseI
 }
 
 func writeLocalFailureBundle(name, remoteTarPath string, meta FailureCaptureMetadata) (string, int, error) {
-	localPath := filepath.Join(".crabbox", "captures", name)
-	if err := ensurePrivateRunOutputDir(filepath.Dir(localPath)); err != nil {
-		return localPath, 0, exit(2, "failure bundle create %s: %v", filepath.Dir(localPath), err)
-	}
-	file, err := openPrivateRunOutputFile(localPath)
+	file, localPath, err := openFailureBundleDestination(name, crabboxStateDir, openFailureBundleFile)
 	if err != nil {
-		return localPath, 0, exit(2, "failure bundle create %s: %v", localPath, err)
+		return localPath, 0, err
 	}
 	counting := &countingWriteCloser{WriteCloser: file}
 	gzipWriter := gzip.NewWriter(counting)
@@ -928,6 +924,70 @@ func writeLocalFailureBundle(name, remoteTarPath string, meta FailureCaptureMeta
 		return localPath, int(counting.N), exit(2, "failure bundle close %s: %v", localPath, err)
 	}
 	return localPath, int(counting.N), nil
+}
+
+func openFailureBundleDestination(name string, stateDir func() (string, error), openFile func(string) (*os.File, error)) (*os.File, string, error) {
+	if name == "." || !filepath.IsLocal(name) || filepath.Base(name) != name {
+		return nil, "", exit(2, "invalid failure bundle name %q", name)
+	}
+	localPath := filepath.Join(".crabbox", "captures", name)
+	file, err := openFile(localPath)
+	if err == nil {
+		return file, localPath, nil
+	}
+	if !failureBundleDestinationUnwritable(err) {
+		return nil, localPath, exit(2, "failure bundle create %s: %v", localPath, err)
+	}
+	state, stateErr := stateDir()
+	if stateErr != nil {
+		return nil, localPath, exit(2, "failure bundle create %s: %v; resolve user state fallback: %v", localPath, err, stateErr)
+	}
+	fallbackPath := filepath.Join(state, "captures", name)
+	file, fallbackErr := openFile(fallbackPath)
+	if fallbackErr != nil {
+		return nil, fallbackPath, exit(2, "failure bundle create %s: %v; fallback %s: %v", localPath, err, fallbackPath, fallbackErr)
+	}
+	return file, fallbackPath, nil
+}
+
+func openFailureBundleFile(localPath string) (*os.File, error) {
+	dir := filepath.Dir(localPath)
+	// Reject links in Crabbox's managed directories before mkdir or a write probe.
+	for _, path := range []string{filepath.Dir(dir), dir, localPath} {
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || (path != localPath && !info.IsDir()) || (path == localPath && !info.Mode().IsRegular()) {
+			return nil, fmt.Errorf("unsafe failure bundle destination %s", path)
+		}
+	}
+	if err := createFailureBundleDir(dir); err != nil {
+		return nil, err
+	}
+	// Probe actual writability before securing an existing directory. Never make
+	// an unwritable project directory writable just to save diagnostics.
+	file, tempPath, err := createPrivateRunOutputTemp(localPath)
+	if err != nil {
+		return nil, err
+	}
+	cleanup := func() {
+		_ = file.Close()
+		_ = os.Remove(tempPath)
+	}
+	if err := ensurePrivateRunOutputDir(dir); err != nil {
+		cleanup()
+		// Do not propagate a write-error marker from directory privacy checks.
+		return nil, fmt.Errorf("secure failure bundle directory %s: %v", dir, err)
+	}
+	if err := replacePrivateRunOutputTemp(tempPath, localPath); err != nil {
+		cleanup()
+		return nil, privateRunOutputWriteError{err}
+	}
+	return file, nil
 }
 
 func addFailureBundleMetadata(tw *tar.Writer, meta FailureCaptureMetadata) error {

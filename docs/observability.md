@@ -117,6 +117,17 @@ file. Remote archive entries are confined to the bundle subtree; unsafe links
 and special files are omitted. `--capture-on-fail` is still accepted as a compatibility alias; failure
 bundles are saved automatically on non-zero exit regardless.
 
+If the project capture destination is unwritable (permission denied or a
+read-only filesystem), Crabbox saves the bundle under its per-user state
+directory instead: `$XDG_STATE_HOME/crabbox/captures/` when `XDG_STATE_HOME` is
+set, otherwise `<user-config-dir>/crabbox/state/captures/`. The
+`failure-bundle local=...` line reports the actual path. These fallback bundles
+persist outside the project; remove them when no longer needed. Unsafe
+destinations, including symlinks, and archive/read errors do not trigger this
+fallback. If both destinations fail, the warning includes both paths and the
+remote command's exit status is preserved. Explicit `--capture-stdout` and
+`--capture-stderr` destinations are never moved.
+
 Crabbox does **not** redact captured files. Treat every bundle and capture file
 as secret-bearing until you have reviewed it. On Unix-like hosts, Crabbox
 creates local captures, downloads, proofs, and failure bundles with owner-only
