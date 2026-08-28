@@ -19,10 +19,7 @@ import (
 
 const privateRunOutputTempAttempts = 32
 
-var (
-	movePrivateRunOutputFileExW = windows.NewLazySystemDLL("kernel32.dll").NewProc("MoveFileExW")
-	reopenPrivateRunOutputFile  = windows.NewLazySystemDLL("kernel32.dll").NewProc("ReOpenFile")
-)
+var movePrivateRunOutputFileExW = windows.NewLazySystemDLL("kernel32.dll").NewProc("MoveFileExW")
 
 func createPrivateRunOutputDir(path string) error {
 	handles, err := openWindowsRunOutputDirectory(path, false)
@@ -577,24 +574,31 @@ func validateCurrentUserPrivateWindowsDescriptor(descriptor *windows.SECURITY_DE
 }
 
 func reOpenPrivateWindowsHandle(handle windows.Handle, access uint32, directory bool) (windows.Handle, error) {
-	flags := uint32(windows.FILE_FLAG_OPEN_REPARSE_POINT)
+	// An empty relative name reopens the retained object without resolving a path.
+	// ReOpenFile can deny directory handles even when the DACL permits the access.
+	name, err := windows.NewNTUnicodeString("")
+	if err != nil {
+		return windows.InvalidHandle, err
+	}
+	attributes := &windows.OBJECT_ATTRIBUTES{
+		Length:        uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
+		RootDirectory: handle,
+		ObjectName:    name,
+		Attributes:    windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
+	}
+	fileType := uint32(windows.FILE_NON_DIRECTORY_FILE)
 	if directory {
-		flags |= windows.FILE_FLAG_BACKUP_SEMANTICS
+		fileType = windows.FILE_DIRECTORY_FILE
 	}
-	result, _, callErr := reopenPrivateRunOutputFile.Call(
-		uintptr(handle),
-		uintptr(access),
-		uintptr(windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE),
-		uintptr(flags),
-	)
-	reopened := windows.Handle(result)
-	if reopened != windows.InvalidHandle {
-		return reopened, nil
+	var reopened windows.Handle
+	err = windows.NtCreateFile(&reopened, access, attributes, &windows.IO_STATUS_BLOCK{}, nil,
+		windows.FILE_ATTRIBUTE_NORMAL, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		windows.FILE_OPEN, fileType|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_OPEN_FOR_BACKUP_INTENT, 0, 0)
+	if err != nil {
+		// NtCreateFile returns NTStatus; retain the callers' Win32 error matching.
+		return windows.InvalidHandle, fmt.Errorf("reopen private Windows output handle: %w", err.(windows.NTStatus).Errno())
 	}
-	if callErr != nil && callErr != syscall.Errno(0) {
-		return windows.InvalidHandle, fmt.Errorf("reopen private Windows output handle: %w", callErr)
-	}
-	return windows.InvalidHandle, fmt.Errorf("reopen private Windows output handle")
+	return reopened, nil
 }
 
 func replacePrivateRunOutputTemp(tempPath, path string) error {

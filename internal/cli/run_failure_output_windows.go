@@ -49,7 +49,6 @@ func prepareWindowsFailureBundleDirectory(parent windows.Handle, name string, ha
 	}
 	// FILE_ADD_FILE (0x2) checks the existing DACL without creating a name.
 	// The retained handles deny deletion, binding both opens to the same object.
-	// ReOpenFile requires a CreateFile handle; traversal uses NtCreateFile.
 	const fileAddFile = 0x2
 	probe, err := openWindowsFailureBundleAt(parent, name, fileAddFile|windows.FILE_TRAVERSE, windows.FILE_DIRECTORY_FILE, windows.FILE_OPEN, nil)
 	if err != nil {
