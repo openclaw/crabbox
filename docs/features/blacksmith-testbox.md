@@ -194,7 +194,7 @@ markers. If the CLI starts syncing but does not print a completion marker within
 Because Blacksmith owns sync and execution, Crabbox rejects the following `run` options for
 `provider=blacksmith-testbox`:
 
-- sync flags: `--sync-only`, `--checksum`, `--force-sync-large`, `--full-resync`, `--fresh-pr`;
+- sync flags: `--no-sync`, `--sync-only`, `--checksum`, `--force-sync-large`, `--full-resync`, `--fresh-pr`;
 - execution flags: `--script`, `--script-stdin`, `--env-helper`, `--capture-stdout`,
   `--capture-stderr`, `--capture-on-fail`, `--download`, `--stop-after`;
 - environment forwarding: `--allow-env` and `CRABBOX_ENV_ALLOW` are unsupported — configure
