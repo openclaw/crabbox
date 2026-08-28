@@ -62,6 +62,16 @@ func (b *staticLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (L
 	if err != nil {
 		return LeaseTarget{}, err
 	}
+	if exists {
+		if err := core.VerifyLeaseClaimUnchanged(leaseID, expected); err != nil {
+			return LeaseTarget{}, err
+		}
+		if req.Repo.Root != "" {
+			if err := core.CheckLeaseClaimRepositoryOwner(leaseID, expected, req.Repo.Root, req.Reclaim); err != nil {
+				return LeaseTarget{}, err
+			}
+		}
+	}
 	if exists && expected.Provider == staticProvider && staticLeaseClaimMatchesConfig(cfg, expected) {
 		// Reacquisition must not erase lifecycle history or unrelated labels.
 		labels := staticLeaseLabelsFromClaim(expected)
@@ -116,6 +126,24 @@ func (b *staticLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (L
 		if err := validateStaticTouchIdentity(b.Cfg, lease, expected); err != nil {
 			return LeaseTarget{}, err
 		}
+	} else if !set && req.Repo.Root != "" {
+		// Endpoint overrides can hide a known claim from target selection, but
+		// cannot bypass its ID's owner. Do not attach it as endpoint identity.
+		expected, exists, err = core.ReadLeaseClaimWithPresence(lease.LeaseID)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+	}
+	if exists {
+		// Cached ownership must still match disk before any credentialed SSH.
+		if err := core.VerifyLeaseClaimUnchanged(lease.LeaseID, expected); err != nil {
+			return LeaseTarget{}, err
+		}
+		if req.Repo.Root != "" {
+			if err := core.CheckLeaseClaimRepositoryOwner(lease.LeaseID, expected, req.Repo.Root, req.Reclaim); err != nil {
+				return LeaseTarget{}, err
+			}
+		}
 	}
 	route := architectureEndpoint(lease.SSH)
 	// Claimed routes may already use the previously selected fallback port.
@@ -129,14 +157,14 @@ func (b *staticLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (L
 		return LeaseTarget{}, err
 	}
 	lease.Server.Labels["architecture_route"] = route
-	if set && exists {
+	if exists {
 		if err := core.VerifyLeaseClaimUnchanged(lease.LeaseID, expected); err != nil {
 			return LeaseTarget{}, err
 		}
 	}
 	// Run/pond own claim publication after resolution. Keep fresh evidence in
 	// the return value and retain the original CAS snapshot, including on reclaim.
-	// Updating the claim or cache here would precede repository authorization.
+	// Early publication would invalidate the caller's guarded adoption snapshot.
 	return lease, nil
 }
 

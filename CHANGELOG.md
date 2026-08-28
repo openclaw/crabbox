@@ -4,8 +4,8 @@
 
 ### Fixed
 
-- Fixed static SSH architecture admission across Linux, macOS, Windows, and WSL2: configured values, including inherited `amd64`, now require fresh matching evidence; remove explicit architecture settings for automatic discovery, with measured or unknown evidence reported separately from offline defaults.
 - Preserved configured Machine0 executable paths and polling settings during checkpoint verification, deletion, and pruning while retaining exact image/version ownership checks and local records on uncertain failures.
+- Fixed static SSH architecture admission across Linux, macOS, Windows, and WSL2: configured values, including inherited `amd64`, now require fresh matching evidence after read-only ownership checks and before guarded claim publication; remove explicit architecture settings for automatic discovery, with measured or unknown evidence reported separately from offline defaults.
 
 ## 0.47.0 - 2026-08-28
 

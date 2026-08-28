@@ -2287,6 +2287,45 @@ func TestClaimLeaseForRepoRejectsOtherRepoUnlessReclaimed(t *testing.T) {
 	}
 }
 
+func TestClaimLeaseRepositoryOwnerEmptyRootSemantics(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_repo_owner"
+	if err := claimLeaseForRepoProvider(leaseID, "owned", "ssh", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		run  func() error
+		deny bool
+	}{
+		{name: "repository publisher skips empty root", run: func() error {
+			return claimLeaseForRepo(leaseID, "owned", "", time.Minute, false)
+		}},
+		{name: "config publisher cannot clear owner", deny: true, run: func() error {
+			return claimLeaseTargetForConfig(leaseID, "owned", Config{Provider: "ssh"}, Server{}, SSHTarget{}, time.Minute)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.run()
+			if tc.deny {
+				if err == nil || !strings.Contains(err.Error(), "claimed by repo /repo; use --reclaim") {
+					t.Fatalf("expected repository-owner rejection, got %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			after, err := readLeaseClaim(leaseID)
+			if err != nil || !reflect.DeepEqual(after, initial) {
+				t.Fatalf("empty-root publication changed claim: err=%v before=%#v after=%#v", err, initial, after)
+			}
+		})
+	}
+}
+
 func TestClaimLeaseForRepoIgnoresIncompleteClaimAndRemoveIsIdempotent(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	if err := claimLeaseForRepo("", "slug", "/repo", time.Minute, false); err != nil {

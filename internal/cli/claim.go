@@ -349,6 +349,13 @@ func claimLeaseForRepoProviderScopePondDetails(leaseID, slug, provider, provider
 	return claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, pond, staticDetails, repoRoot, idleTimeout, reclaim, claimMetadata{})
 }
 
+func checkLeaseClaimRepositoryOwner(leaseID string, existing leaseClaim, repoRoot string, reclaim bool) error {
+	if existing.LeaseID != "" && existing.RepoRoot != "" && existing.RepoRoot != repoRoot && !reclaim {
+		return exit(2, "lease %s is claimed by repo %s; use --reclaim to claim it for %s", leaseID, existing.RepoRoot, repoRoot)
+	}
+	return nil
+}
+
 func claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, pond string, staticDetails staticClaimDetails, repoRoot string, idleTimeout time.Duration, reclaim bool, metadata claimMetadata) error {
 	if leaseID == "" || (repoRoot == "" && !metadata.allowEmptyRepoRoot) {
 		return nil
@@ -378,8 +385,8 @@ func claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, 
 				}
 				metadata.server = server
 			}
-			if existing.LeaseID != "" && existing.RepoRoot != "" && existing.RepoRoot != repoRoot && !reclaim {
-				return exit(2, "lease %s is claimed by repo %s; use --reclaim to claim it for %s", leaseID, existing.RepoRoot, repoRoot)
+			if err := checkLeaseClaimRepositoryOwner(leaseID, *existing, repoRoot, reclaim); err != nil {
+				return err
 			}
 			if existing.ClaimedAt == "" || reclaim || existing.RepoRoot != repoRoot {
 				existing.ClaimedAt = now

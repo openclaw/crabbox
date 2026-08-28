@@ -666,7 +666,8 @@ func TestStaticSSHArchitectureDestinationApprovalPrecedesProbe(t *testing.T) {
 }
 
 func TestStaticSSHArchitecturePreparedWindowsModeOverride(t *testing.T) {
-	b, _, _ := staticArchitectureFixture(t, "windows", "wsl2", "")
+	b, _, repo := staticArchitectureFixture(t, "windows", "wsl2", "")
+	t.Chdir(repo)
 	root, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -691,7 +692,7 @@ func TestStaticSSHArchitecturePreparedWindowsModeOverride(t *testing.T) {
 		return "", sentinel
 	}
 	var log bytes.Buffer
-	err = (core.App{Stdout: &log, Stderr: &log}).Run(context.Background(), []string{"run", "--provider", "ssh", "--id", lease.LeaseID, "--static-host", "build.example.test", "--windows-mode", "normal", "--arch", "arm64", "--", "true"})
+	err = (core.App{Stdout: &log, Stderr: &log}).Run(context.Background(), []string{"run", "--provider", "ssh", "--id", lease.LeaseID, "--static-host", "build.example.test", "--windows-mode", "normal", "--arch", "arm64", "--no-sync", "--", "true"})
 	if !errors.Is(err, sentinel) || calls != 1 {
 		t.Fatalf("err=%v calls=%d log=%s", err, calls, &log)
 	}

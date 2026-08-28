@@ -97,12 +97,17 @@ crabbox run --provider ssh --target macos --arch arm64 \
   --static-host mac.example.com -- xcodebuild test
 ```
 
-Acquisition and prepared reuse (including `run --id` and cached leases) measure
-architecture after SSH readiness and before updating the claim or allowing sync,
-hydration, or workload execution. The probe uses the resolved SSH user, working
-port, and existing trust/credential transport. It never chooses emulation or
-forces `arch -arm64`. Explicit assertions require fresh, supported matching
-evidence; missing, malformed, contradictory, or translated evidence fails closed.
+Acquisition and prepared reuse (including `run --id` and cached leases) check
+known repository ownership before SSH readiness or architecture probes. An
+explicitly approved host override does not bypass the owner of an existing lease
+ID. Prepared reuse of claimed targets, including cached leases, also verifies the
+exact stored claim snapshot and static target identity before opening SSH.
+Architecture is measured after readiness and before updating the claim or allowing
+sync, hydration, or workload execution.
+The probe uses the resolved SSH user, working port, and existing trust/credential
+transport. It never chooses emulation or forces `arch -arm64`. Explicit assertions
+require fresh, supported matching evidence; missing, malformed, contradictory, or
+translated evidence fails closed.
 
 Linux uses `uname -m` for the SSH execution environment. WSL2 runs that probe
 **inside WSL**, through the existing Windows-to-WSL wrapper, which stages a
@@ -137,12 +142,16 @@ fresh again.
 Prepared resolution returns fresh evidence with the original exact claim snapshot;
 it does not change the persisted claim or the adapter's cache. `run` publishes
 the evidence through its repository-aware claim transaction before work. A
-different repository must use `--reclaim`; rejected adoption leaves the existing
-claim untouched. Acquisition still publishes its evidence directly through the
-guarded repository claim transaction. Pond/admin preparation with no repository
-context does not infer an owner or adopt a claim: a caller that persists the
-returned endpoint must use its existing guarded publication step. Until then,
-offline lookup and Touch retain the previously published evidence.
+different repository must use `--reclaim` before preparation can open SSH;
+reclaim permits probing but adopts the claim only after successful architecture
+validation. Rejected preparation leaves the claim, timestamps, and cache unchanged.
+The snapshot is checked again after probing and during guarded publication so
+a concurrent replacement or removal cannot be overwritten. Acquisition still
+publishes its evidence directly through the guarded repository claim transaction.
+Pond/admin preparation with no repository context does not infer an owner or
+adopt a claim: a caller that persists the returned endpoint must use its existing
+guarded publication step. Until then, offline lookup and Touch retain the
+previously published evidence.
 
 `config show` remains offline: its architecture is a configured/effective value,
 not observed architecture or proof of supported runtime behavior. The JSON

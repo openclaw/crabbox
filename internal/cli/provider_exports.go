@@ -252,6 +252,13 @@ func VerifyLeaseClaimUnchanged(leaseID string, expected LeaseClaim) error {
 	return verifyLeaseClaimUnchanged(leaseID, expected)
 }
 
+// CheckLeaseClaimRepositoryOwner checks the publication owner policy without
+// changing the claim. Preparation without repository context should skip this
+// check; publication retains its own empty-root rules.
+func CheckLeaseClaimRepositoryOwner(leaseID string, existing LeaseClaim, repoRoot string, reclaim bool) error {
+	return checkLeaseClaimRepositoryOwner(leaseID, existing, repoRoot, reclaim)
+}
+
 // RemoveLeaseClaimIfUnchangedAfter holds the claim lock across action and
 // removes the claim only when it still matches expected.
 func RemoveLeaseClaimIfUnchangedAfter(leaseID string, expected LeaseClaim, action func() error) error {
