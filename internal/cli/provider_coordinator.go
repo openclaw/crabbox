@@ -723,7 +723,15 @@ func isCoordinatorStaleInstanceCleanedSignal(err error) bool {
 	return strings.Contains(text, "crabbox_aws_stale_instance_cleaned") && isCoordinatorStaleInstanceError(err)
 }
 
+const coordinatorReleaseResolveTimeout = 10 * time.Second
+
 func (b *coordinatorLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
+	if req.ReleaseOnly {
+		// Leave the caller's budget available for the provider-scoped release fallback.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, coordinatorReleaseResolveTimeout)
+		defer cancel()
+	}
 	lease, err := b.coord.GetLease(ctx, req.ID)
 	if err != nil {
 		if b.cfg.CoordAdminToken != "" && (isCoordinatorNotFoundError(err) || isCoordinatorUnauthorized(err)) {
