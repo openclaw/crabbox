@@ -34,6 +34,7 @@
 - Preserved SIGINT and SIGQUIT behavior for kept and reused POSIX SSH workloads without weakening child ownership checks or changing caller umasks. Thanks @coygeek.
 - Omitted speculative `&&` failure diagnostics for compound shell commands while retaining simple-chain explanations and workload exit behavior. Thanks @coygeek.
 - Printed failed-run output tails once after the digest, preserving both streams, bounded output, capture notices, redaction, and failure bundles. Thanks @coygeek.
+- Clarified uploaded-script path semantics in the Agent Skill, including when to run a synced repository script in place for adjacent assets. Thanks @coygeek.
 
 ## 0.47.0 - 2026-08-28
 
