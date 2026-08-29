@@ -1377,7 +1377,8 @@ func TestWorkspaceOwnerPOSIXLauncherRejectsMalformedPayload(t *testing.T) {
 	marker := filepath.Join(home, "payload-ran")
 	script := "touch " + shellQuote(marker)
 	encoded := base64.StdEncoding.EncodeToString([]byte(script))
-	transport := remoteWorkspaceOwnerPOSIXEncodedLauncher(key, token, encoded[:len(encoded)-1], len(script))
+	// Remove payload bytes, not just padding that permissive decoders can omit.
+	transport := remoteWorkspaceOwnerPOSIXEncodedLauncher(key, token, encoded[:len(encoded)-4], len(script))
 	cmd := exec.Command("sh", "-c", transport)
 	cmd.Env = append(os.Environ(), "HOME="+home)
 	if out, err := cmd.CombinedOutput(); err == nil || exitCode(err) != 74 {
