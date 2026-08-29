@@ -82,22 +82,22 @@ func TestRunExitWitnessExcludesSetup(t *testing.T) {
 					env["BASH_ENV"] = file
 				}
 			}
-			var output bytes.Buffer
-			w, err := newRunExitWitness(&output)
+			var stdout, stderr bytes.Buffer
+			w, err := newRunExitWitness(&stderr)
 			if err != nil {
 				t.Fatal(err)
 			}
 			cmd := exec.Command("sh", "-c", w.command(workdir, env, envFiles, []string{"echo should-not-run; exit 23"}, true, nil))
 			cmd.Stderr = w
-			cmd.Stdout = &output
+			cmd.Stdout = &stdout
 			runErr := cmd.Run()
 			transportCode := 0
 			if runErr != nil {
 				transportCode = exitCode(runErr)
 			}
 			code, _, eligible := w.finish(context.Background(), transportCode, runErr)
-			if eligible || code == 0 || strings.Contains(output.String(), "should-not-run") {
-				t.Fatalf("setup eligible=%t code=%d output=%q", eligible, code, output.String())
+			if eligible || code == 0 || strings.Contains(stdout.String()+stderr.String(), "should-not-run") {
+				t.Fatalf("setup eligible=%t code=%d stdout=%q stderr=%q", eligible, code, stdout.String(), stderr.String())
 			}
 		})
 	}
