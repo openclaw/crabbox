@@ -88,10 +88,19 @@ func runCheckpointAWSStrategyContract(t *testing.T, repo, binary string) {
 			if err := os.WriteFile(filepath.Join(f.root, "config.yaml"), []byte(config), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(f.root, "bin", "ssh"), []byte("#!/bin/sh\ncase \"$*\" in *'cloud-init clean --logs'*'sync'*) exit 0;; *) exit 97;; esac\n"), 0o700); err != nil {
+			sshCalls := filepath.Join(f.root, "ssh-calls")
+			sshFixture := `#!/bin/sh
+for arg do remote=$arg; done
+case "$remote" in
+  'exit 0') printf 'probe\n' >> "$CAPTURE_AWS_SSH_CALLS";;
+  "bash -lc 'if command -v cloud-init >/dev/null 2>&1; then sudo cloud-init clean --logs; fi; sync'") printf 'prepare\n' >> "$CAPTURE_AWS_SSH_CALLS";;
+  *) printf 'unexpected SSH command: %s\n' "$remote" >&2; exit 97;;
+esac
+`
+			if err := os.WriteFile(filepath.Join(f.root, "bin", "ssh"), []byte(sshFixture), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			f.env = append(f.env, "AWS_ENDPOINT_URL="+endpoint.URL, "AWS_ACCESS_KEY_ID=fixture", "AWS_SECRET_ACCESS_KEY=fixture", "AWS_EC2_METADATA_DISABLED=true", "AWS_REGION=us-east-1")
+			f.env = append(f.env, "AWS_ENDPOINT_URL="+endpoint.URL, "AWS_ACCESS_KEY_ID=fixture", "AWS_SECRET_ACCESS_KEY=fixture", "AWS_EC2_METADATA_DISABLED=true", "AWS_REGION=us-east-1", "CAPTURE_AWS_SSH_CALLS="+sshCalls)
 			claim := f.claim()
 			claim.Provider, claim.CloudID, claim.ProviderScope, claim.Slug = "aws", instanceID, "", "aws-strategy-proof"
 			claim.FixedCreateIntent = nil
@@ -154,6 +163,14 @@ func runCheckpointAWSStrategyContract(t *testing.T, repo, binary string) {
 			}
 			if creates != want || removes != want || (want == 0 && strings.Contains(strings.Join(actions, ","), "Create")) {
 				t.Fatalf("wrong native effects: creates=%d removes=%d actions=%v", creates, removes, actions)
+			}
+			calls, readErr := os.ReadFile(sshCalls)
+			if want == 0 {
+				if !os.IsNotExist(readErr) {
+					t.Fatalf("unsupported strategy reached SSH: calls=%q err=%v", calls, readErr)
+				}
+			} else if readErr != nil || string(calls) != "probe\nprepare\n" {
+				t.Fatalf("expected one SSH probe then one preparation: calls=%q err=%v", calls, readErr)
 			}
 		})
 	}

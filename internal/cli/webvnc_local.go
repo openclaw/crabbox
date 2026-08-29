@@ -428,41 +428,18 @@ func relayWebSocketVNCWithARDAuthenticationWithTimeout(ctx context.Context, ws *
 func relayWebSocketVNCWithMacOSAuthenticationWithTimeout(ctx context.Context, ws *websocket.Conn, tcp net.Conn, credentials rfbCredentials, authMode localWebVNCAuthenticationMode, negotiationTimeout time.Duration) error {
 	browser := websocket.NetConn(context.Background(), ws, websocket.MessageBinary)
 	authenticationName := rfbAuthenticationModeName(authMode)
-	negotiationCtx, cancelNegotiation := context.WithCancel(ctx)
-	negotiation := make(chan error, 1)
-	go func() {
-		negotiation <- forceRFBMacOSAuthenticationWithTimeout(negotiationCtx, browser, tcp, credentials, authMode, negotiationTimeout)
-	}()
-	var timer *time.Timer
-	var timeout <-chan time.Time
-	if negotiationTimeout > 0 {
-		timer = time.NewTimer(negotiationTimeout)
-		timeout = timer.C
-		defer timer.Stop()
-	}
-	select {
-	case err := <-negotiation:
-		cancelNegotiation()
-		if cause := context.Cause(ctx); cause != nil {
-			_ = ws.Close(websocket.StatusGoingAway, "bridge stopped")
-			return cause
-		}
-		if err != nil {
-			message := authenticationName + " authentication negotiation failed"
-			_ = ws.Close(websocket.StatusPolicyViolation, message)
-			return fmt.Errorf("%s: %w", message, err)
-		}
-	case <-ctx.Done():
+	err := forceRFBMacOSAuthenticationWithTimeout(ctx, browser, tcp, credentials, authMode, negotiationTimeout)
+	if cause := context.Cause(ctx); cause != nil {
 		_ = ws.Close(websocket.StatusGoingAway, "bridge stopped")
-		cancelNegotiation()
-		<-negotiation
-		return context.Cause(ctx)
-	case <-timeout:
-		message := authenticationName + " authentication negotiation timed out"
+		return cause
+	}
+	if err != nil {
+		message := authenticationName + " authentication negotiation failed"
+		if errors.Is(err, context.DeadlineExceeded) {
+			message = authenticationName + " authentication negotiation timed out"
+		}
 		_ = ws.Close(websocket.StatusPolicyViolation, message)
-		cancelNegotiation()
-		<-negotiation
-		return errors.New(message)
+		return fmt.Errorf("%s: %w", message, err)
 	}
 	errors := make(chan error, 2)
 	go func() {
@@ -504,8 +481,9 @@ func forceRFBARDAuthenticationWithTimeout(ctx context.Context, browser, server n
 	return forceRFBMacOSAuthenticationWithTimeout(ctx, browser, server, credentials, localWebVNCAuthARD, negotiationTimeout)
 }
 
-func forceRFBMacOSAuthenticationWithTimeout(ctx context.Context, browser, server net.Conn, credentials rfbCredentials, authMode localWebVNCAuthenticationMode, negotiationTimeout time.Duration) error {
-	if deadline, ok := rfbAuthenticationDeadline(ctx, negotiationTimeout); ok {
+func forceRFBMacOSAuthenticationWithTimeout(ctx context.Context, browser, server net.Conn, credentials rfbCredentials, authMode localWebVNCAuthenticationMode, negotiationTimeout time.Duration) (err error) {
+	deadline, hasDeadline := rfbAuthenticationDeadline(ctx, negotiationTimeout)
+	if hasDeadline {
 		if err := browser.SetDeadline(deadline); err != nil {
 			return fmt.Errorf("set RFB browser authentication deadline: %w", err)
 		}
@@ -521,6 +499,17 @@ func forceRFBMacOSAuthenticationWithTimeout(ctx context.Context, browser, server
 		_ = server.SetDeadline(time.Now())
 	})
 	defer func() {
+		if err != nil {
+			cause := context.Cause(ctx)
+			// WebSocket deadlines can report a closed connection. Classify using
+			// the negotiation's deadline before clearing the transport deadlines.
+			if cause == nil && hasDeadline && !time.Now().Before(deadline) {
+				cause = context.DeadlineExceeded
+			}
+			if cause != nil {
+				err = fmt.Errorf("%w: %w", err, cause)
+			}
+		}
 		if !stopCancellation() {
 			<-cancellationDone
 		}

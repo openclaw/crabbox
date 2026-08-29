@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -370,7 +371,10 @@ case "$current" in
   *"protocol_action='acquire'"*) printf ACQUIRED; exit 0 ;;
   *"protocol_action='renew'"*) printf RENEWED; exit 0 ;;
   *"protocol_action='inspect'"*)
-    if [ -e "$(dirname "$0")/owner-child" ]; then printf CHILD; else printf OWNED; fi
+    case "${CRABBOX_FAKE_OWNER_INSPECT:-}" in
+      CHILD|AMBIGUOUS) printf %s "$CRABBOX_FAKE_OWNER_INSPECT" ;;
+      *) if [ -e "$(dirname "$0")/owner-child" ]; then printf CHILD; else printf OWNED; fi ;;
+    esac
     exit 0
     ;;
   *"protocol_action='release'"*) printf RELEASED; exit 0 ;;
@@ -1721,6 +1725,30 @@ func TestRunCommandAcceptsE2BLeaseOutput(t *testing.T) {
 	}
 	if session.Provider != "e2b" || session.LeaseID != "tbx_test" || !session.Kept || session.CleanupCommand == "" {
 		t.Fatalf("session=%#v", session)
+	}
+}
+
+func TestRunCommandWorkspaceOwnerInspectPreservesOrOverridesRemoteExit(t *testing.T) {
+	for _, tt := range []struct {
+		name, inspect string
+		wantCode      int
+		wantMessage   string
+	}{
+		{name: "clean", wantCode: 23, wantMessage: "remote command exited 23"},
+		{name: "ambiguous", inspect: "AMBIGUOUS", wantCode: 7, wantMessage: "ambiguous"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			setupLocalContainerRunSessionTest(t, "#!/bin/sh\ncase \"$1\" in *\"exit 23\"*) exit 23;; esac\nexit 0\n")
+			t.Setenv("CRABBOX_FAKE_OWNER_INSPECT", tt.inspect)
+			var stdout, stderr bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+				"--provider", "run-env-profile-test", "--no-sync", "--no-hydrate", "--keep", "--shell", "--", "exit 23",
+			})
+			var exitErr ExitError
+			if !AsExitError(err, &exitErr) || exitErr.Code != tt.wantCode || !strings.Contains(exitErr.Message, tt.wantMessage) {
+				t.Fatalf("error=%v want exit=%d containing %q\nstdout=%s\nstderr=%s", err, tt.wantCode, tt.wantMessage, stdout.String(), stderr.String())
+			}
+		})
 	}
 }
 
@@ -5197,6 +5225,14 @@ func TestWindowsWSL2RemoteCapabilityPreflightUsesBoundedWrapper(t *testing.T) {
 	logPath := installRecordingSSH(t, dir)
 	stdinLog := filepath.Join(dir, "ssh.stdin")
 	t.Setenv("CRABBOX_FAKE_SSH_STDIN_LOG", stdinLog)
+	nonce := strings.Repeat("a", 32)
+	var staged []byte
+	var launcher string
+	captureWSLStage(t, nonce, func(spool *wslStageSpool, target *SSHTarget, _ wslStageTiming, data []byte) {
+		staged = data
+		target.NoControlMaster = true
+		launcher = wslStageLauncherCommand(nonce, spool.size, spool.digest(), wslStageCMD)
+	})
 	cfg := defaultConfig()
 	cfg.Run.PreflightTools = []string{"node"}
 	target := SSHTarget{
@@ -5218,30 +5254,25 @@ func TestWindowsWSL2RemoteCapabilityPreflightUsesBoundedWrapper(t *testing.T) {
 	if len(commands) != 1 {
 		t.Fatalf("ssh commands=%d want 1:\n%s", len(commands), data)
 	}
-	decoded := decodePowerShellCommand(t, commands[0])
-	for _, want := range []string{
-		`[Console]::OpenStandardInput().CopyToAsync($process.StandardInput.BaseStream)`,
-		`$left = 15000 - [int]$watch.ElapsedMilliseconds`,
-		`$copy.Wait($left)`,
-		`$process.WaitForExit($left)`,
-		`$cleanupAllowed = $process.WaitForExit(5000)`,
-		`if (-not $cleanupAllowed)`,
-		`throw "WSL2 command timed out after 15s"`,
-	} {
-		if !strings.Contains(decoded, want) {
-			t.Fatalf("WSL2 preflight command missing %q in %q", want, decoded)
-		}
-	}
-	if strings.Contains(decoded, `preflight_cmd`) {
-		t.Fatalf("WSL2 preflight script should be sent over stdin, not embedded in command: %q", decoded)
+	if commands[0] != launcher || len(commands[0]) >= wslStageLauncherCommandLimit {
+		t.Fatalf("WSL2 preflight launcher=%q", commands[0])
 	}
 	payloadBytes, err := os.ReadFile(stdinLog)
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload := string(payloadBytes)
-	if !strings.Contains(payload, `preflight_cmd '\''node'\'' '\''node'\'' node --version`) {
-		t.Fatalf("WSL2 preflight payload missing node probe in %q", payload)
+	if len(payloadBytes) != 0 {
+		t.Fatalf("WSL2 preflight execute stdin bytes=%d want zero", len(payloadBytes))
+	}
+	_, _, suffix, _ := decodeWSLStage(t, staged)
+	if binary.LittleEndian.Uint64(staged[32:]) != uint64((15 * time.Second).Milliseconds()) {
+		t.Fatal("preflight lost its execution limit")
+	}
+	if strings.Contains(decodePowerShellCommand(t, commands[0]), "preflight_cmd") {
+		t.Fatal("preflight leaked into argv")
+	}
+	if !strings.Contains(suffix, `preflight_cmd '\''node'\'' '\''node'\'' node --version`) {
+		t.Fatalf("WSL2 preflight payload missing node probe in %q", suffix)
 	}
 }
 

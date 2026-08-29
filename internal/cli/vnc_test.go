@@ -537,13 +537,19 @@ func TestVNCLoopbackCheckCommandSupportsWindows(t *testing.T) {
 	}
 }
 
-func TestVNCPasswordCommandSupportsManagedTargets(t *testing.T) {
-	windows := vncPasswordCommand(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal})
+func TestRemoteVNCCredentialReadCommandSupportsManagedTargets(t *testing.T) {
+	windows := remoteVNCCredentialReadCommand(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal})
 	if !strings.Contains(windows, "EncodedCommand") {
 		t.Fatalf("windows password command should be encoded PowerShell: %q", windows)
 	}
-	if got := vncPasswordCommand(SSHTarget{TargetOS: targetMacOS}); got != "sudo cat '/var/db/crabbox/vnc.password'" {
+	if got := decodePowerShellCommand(t, windows); !strings.HasSuffix(got, "\nGet-Content -Raw -LiteralPath "+psQuote(windowsVNCPasswordPath)) {
+		t.Fatalf("windows credential read command=%q", got)
+	}
+	if got := remoteVNCCredentialReadCommand(SSHTarget{TargetOS: targetMacOS}); got != "sudo cat '/var/db/crabbox/vnc.password'" {
 		t.Fatalf("mac password command=%q", got)
+	}
+	if got := remoteVNCCredentialReadCommand(SSHTarget{}); got != "cat "+shellQuote(vncPasswordPath) {
+		t.Fatalf("linux credential read command=%q", got)
 	}
 }
 

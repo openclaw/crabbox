@@ -1297,22 +1297,31 @@ func TestDirectSSHWebVNCRemoteReadinessRequiresExactOwnedSocket(t *testing.T) {
 	if !strings.Contains(reset, `expected_identity="$owned_pid $owned_started $owned_boot_id $owned_owner_id $owned_port $owned_process_nonce"`) {
 		t.Fatalf("direct SSH reset does not bind final cleanup to the boot identity:\n%s", reset)
 	}
-	if stop, start := strings.Index(reset, `kill "$owned_pid"`), strings.LastIndex(reset, "nohup env CRABBOX_DIRECT_WEBVNC_PROCESS_NONCE="); stop < 0 || start < 0 || stop >= start {
+	if stop, start := strings.Index(reset, `kill "$owned_pid"`), strings.LastIndex(reset, "nohup setsid env CRABBOX_DIRECT_WEBVNC_PROCESS_NONCE="); stop < 0 || start < 0 || stop >= start {
 		t.Fatalf("reset did not terminate its verified process before starting a replacement:\n%s", reset)
 	}
 }
 
-func TestDirectSSHWebVNCWSL2StagesLargeCommandOverStdin(t *testing.T) {
+func TestDirectSSHWebVNCWSL2StagesLargeCommandBeforeZeroInputExecute(t *testing.T) {
 	dir := t.TempDir()
 	argvPath := filepath.Join(dir, "argv")
+	remotePath := filepath.Join(dir, "remote")
 	stdinPath := filepath.Join(dir, "stdin")
 	sshPath := filepath.Join(dir, "ssh")
-	script := "#!/bin/sh\nprintf '%s' \"$*\" > " + shellQuote(argvPath) + "\ncat > " + shellQuote(stdinPath) + "\nprintf running\n"
+	script := "#!/bin/sh\nprintf '%s' \"$*\" > " + shellQuote(argvPath) + "\nlast=;for arg;do last=$arg;done\nprintf '%s' \"$last\" > " + shellQuote(remotePath) + "\ncat > " + shellQuote(stdinPath) + "\nprintf running\n"
 	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	remote := strings.Repeat("large-webvnc-command\n", 2000)
+	nonce := strings.Repeat("e", 32)
+	var launcher string
+	captureWSLStage(t, nonce, func(spool *wslStageSpool, _ *SSHTarget, _ wslStageTiming, data []byte) {
+		if !bytes.Contains(data, []byte(remote)) {
+			t.Fatalf("staged WebVNC bytes=%d missing command", len(data))
+		}
+		launcher = wslStageLauncherCommand(nonce, spool.size, spool.digest(), wslStageCMD)
+	})
 	target := SSHTarget{User: "crabbox", Host: "windows.test", Port: "22", TargetOS: targetWindows, WindowsMode: windowsModeWSL2}
 	out, err := runDirectSSHWebVNCRemoteCombinedOutput(context.Background(), target, remote)
 	if err != nil {
@@ -1325,15 +1334,22 @@ func TestDirectSSHWebVNCWSL2StagesLargeCommandOverStdin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(stdin) != remote {
-		t.Fatal("WSL2 WebVNC command was not staged intact over stdin")
+	if len(stdin) != 0 {
+		t.Fatalf("WSL2 WebVNC execute stdin bytes=%d want zero", len(stdin))
 	}
 	argv, err := os.ReadFile(argvPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(argv) >= 8191 || bytes.Contains(argv, []byte("large-webvnc-command")) {
-		t.Fatalf("WSL2 WebVNC wrapper still embeds the remote payload: argv bytes=%d", len(argv))
+	remoteArg, err := os.ReadFile(remotePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(remoteArg) != launcher || len(remoteArg) >= wslStageLauncherCommandLimit || bytes.Contains(argv, []byte("large-webvnc-command")) {
+		t.Fatalf("WSL2 WebVNC wrapper bytes=%d or SSH argv embeds the remote payload", len(remoteArg))
+	}
+	if strings.Contains(decodePowerShellCommand(t, string(remoteArg)), "large-webvnc-command") {
+		t.Fatal("encoded launcher embeds the WebVNC payload")
 	}
 }
 

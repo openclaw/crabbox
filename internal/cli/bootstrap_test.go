@@ -734,12 +734,13 @@ func TestAWSUserDataWindowsCoreProfileSkipsDesktop(t *testing.T) {
 		}
 	}
 	setupIndex := strings.Index(got, "Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath")
+	sftpIndex := strings.Index(got, "Subsystem sftp internal-sftp")
 	restartIndex := strings.Index(got, "Restart-Service sshd -Force")
-	if setupIndex < 0 || restartIndex < 0 {
-		t.Fatalf("windows core bootstrap missing setup/restart markers")
+	if setupIndex < 0 || sftpIndex < 0 || restartIndex < 0 {
+		t.Fatalf("windows core bootstrap missing setup/SFTP/restart markers")
 	}
-	if setupIndex > restartIndex {
-		t.Fatalf("windows core bootstrap must mark setup complete before restarting sshd")
+	if setupIndex > restartIndex || sftpIndex > restartIndex {
+		t.Fatalf("windows core bootstrap must configure setup and SFTP before restarting sshd")
 	}
 	for _, notWant := range []string{
 		"tightvnc-2.8.85-gpl-setup-64bit.msi",
@@ -824,6 +825,9 @@ func TestAWSUserDataWindowsWSL2Profile(t *testing.T) {
 	}
 	if verifyIndex, importIndex := strings.LastIndex(got, "Assert-CrabboxFileSHA256 $wslRootfs"), strings.Index(got, "wsl.exe --import $wslDistro"); verifyIndex < 0 || importIndex < 0 || verifyIndex > importIndex {
 		t.Fatalf("windows WSL2 bootstrap must verify the rootfs before import")
+	}
+	if sftpIndex, readyIndex := strings.Index(got, "Subsystem sftp internal-sftp"), strings.Index(got, "crabbox-ready"); sftpIndex < 0 || readyIndex < 0 || sftpIndex > readyIndex {
+		t.Fatalf("windows WSL2 bootstrap must configure SFTP before checking WSL readiness")
 	}
 }
 
@@ -917,7 +921,8 @@ func TestWindowsStableSSHProbeUsesWindowsReadinessProfile(t *testing.T) {
 		ProxyCommand:   "provider proxy %h %p",
 		ReadyCheck:     "true",
 	}
-	if !probeWindowsSSHStable(context.Background(), &target, time.Now().Add(time.Second)) {
+	// This checks readiness options; deadline enforcement is tested separately.
+	if !probeWindowsSSHStable(t.Context(), &target, time.Now().Add(30*time.Second)) {
 		t.Fatal("stable Windows SSH probe failed with fake ssh")
 	}
 	args := readSSHArgsRecorder(t, logPath)

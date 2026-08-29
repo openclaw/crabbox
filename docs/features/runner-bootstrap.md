@@ -182,10 +182,11 @@ with per-OS scripts rather than cloud-init:
   `crabbox-ready` that checks `rsync`/`curl`, a writable work root, an open SSH
   port, and the VNC port `5900`.
 - **Windows** — a PowerShell script installs OpenSSH, configures key-only access
-  for administrators, opens firewall rules on the SSH ports, and installs Git
-  for Windows so `git` and `tar` are on the machine PATH. Crabbox verifies pinned
-  SHA-256 values before extracting or executing those downloads; desktop
-  TightVNC and the versioned WSL rootfs use the same fail-closed check.
+  for administrators, enables the `internal-sftp` subsystem before restarting
+  `sshd`, opens firewall rules on the SSH ports, and installs Git for Windows so
+  `git` and `tar` are on the machine PATH. Crabbox verifies pinned SHA-256 values
+  before extracting or executing those downloads; desktop TightVNC and the
+  versioned WSL rootfs use the same fail-closed check.
   `--windows-mode wsl2`
   additionally enables the WSL feature set, imports an Ubuntu rootfs, and runs
   the minimal Linux base inside WSL; `--desktop` adds TightVNC. The work root
@@ -201,13 +202,25 @@ OpenSSH as well as the pinned archive installation.
 `provider=ssh` (aliases `static`, `static-ssh`) targets are **not** bootstrapped
 by Crabbox. They are assumed to be operator-managed and must already provide:
 
-- macOS and Windows WSL2 targets: SSH, `bash`, `git`, `rsync`, and `tar`;
+- macOS targets: SSH, `bash`, `git`, `rsync`, and `tar`;
+- Windows WSL2 targets: Windows OpenSSH with `Subsystem sftp internal-sftp`,
+  WSL, `bash`, `git`, `rsync`, and `tar`;
 - native Windows targets: OpenSSH, PowerShell, `git`, and `tar`;
 - `static.workRoot` pointing at a writable directory for that target mode.
 
 For native Windows, install Git before the Crabbox check or restart OpenSSH
 Server afterward, so new non-interactive SSH sessions inherit `git` and `tar` on
 PATH.
+
+For Windows WSL2, run `crabbox doctor --provider ssh --target windows
+--windows-mode wsl2 --static-host <host> --doctor-probe-ssh` after changing
+OpenSSH or WSL. Doctor verifies the SFTP handshake without staging a workload;
+only a conclusive OpenSSH subsystem rejection is diagnosed as missing SFTP.
+Staged commands upload one digest-bound envelope without a content readback;
+the native exclusive-handle verifier remains mandatory before execution or deletion.
+Windows PowerShell 5.1 is supported, including its stdin encoding preamble.
+The launcher uses existing distribution tools without installing a Linux loader
+or requiring Windows-drive automount.
 
 ## SSH port fallback
 

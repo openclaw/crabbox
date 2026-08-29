@@ -593,20 +593,51 @@ func probeSSHTransportRouteCapabilities(ctx context.Context, target SSHTarget, c
 }
 
 func runOwnedSSHTransportCommand(ctx context.Context, target SSHTarget, args []string, stdout, stderr io.Writer) error {
-	handle := pondMeshExecCommand(ctx, target.ChildEnvDenylist, directSSHExecutable(), args...)
-	if execHandle, ok := handle.(*pondMeshExecHandle); ok {
-		applyTargetChildEnvironment(execHandle.cmd, target)
-		execHandle.cmd.Stdout = stdout
-		execHandle.cmd.Stderr = stderr
-	}
+	handle := newOwnedSSHTransportCommand(ctx, target, args)
+	handle.cmd.Stdout = stdout
+	handle.cmd.Stderr = stderr
 	if err := handle.Start(); err != nil {
 		return err
 	}
+	return waitOwnedSSHTransportCommand(ctx, handle)
+}
+
+func waitOwnedSSHTransportCommand(ctx context.Context, handle *pondMeshExecHandle) error {
 	err := handle.Wait()
 	if ctxErr := context.Cause(ctx); ctxErr != nil && handle.WasTerminatedByOurCancel() {
 		return ctxErr
 	}
 	return err
+}
+
+func newOwnedSSHTransportCommand(ctx context.Context, target SSHTarget, args []string) *pondMeshExecHandle {
+	handle := pondMeshExecCommand(ctx, target.ChildEnvDenylist, directSSHExecutable(), args...).(*pondMeshExecHandle)
+	applyTargetChildEnvironment(handle.cmd, target)
+	return handle
+}
+
+func startOwnedSSHTransportSubsystem(ctx context.Context, target SSHTarget, connectTimeout, connectionAttempts, subsystem string, stderr io.Writer) (io.Reader, io.WriteCloser, func() error, error) {
+	target.NoControlMaster = true
+	session, err := newSSHTransportSession(ctx, target, false)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	args := append(session.commandPrefix(), "-o", "ConnectTimeout="+connectTimeout, "-o", "ConnectionAttempts="+connectionAttempts, "-s", session.host(), subsystem)
+	handle := newOwnedSSHTransportCommand(ctx, target, args)
+	handle.cmd.Stderr = stderr
+	input, err := handle.cmd.StdinPipe()
+	if err != nil {
+		return nil, nil, nil, errors.Join(err, session.Close())
+	}
+	output, err := handle.cmd.StdoutPipe()
+	if err != nil {
+		return nil, nil, nil, errors.Join(err, input.Close(), session.Close())
+	}
+	if err := handle.Start(); err != nil {
+		return nil, nil, nil, errors.Join(err, input.Close(), session.Close())
+	}
+	wait := func() error { return errors.Join(waitOwnedSSHTransportCommand(ctx, handle), session.Close()) }
+	return output, input, wait, nil
 }
 
 func renderSSHTransportRouteSeed(target SSHTarget, userConfigPath string, userPercentExpansion bool) (string, error) {

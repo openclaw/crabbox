@@ -788,7 +788,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if lifecycleOwner == nil {
 			return
 		}
-		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), 30*time.Second)
+		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), lifecycleOwner.quiesceTimeout())
 		closeErr := lifecycleOwner.Close(releaseCtx)
 		cancel()
 		if closeErr != nil {
@@ -815,7 +815,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		ownerQuiescent := true
 		if lifecycleOwner != nil {
-			inspectCtx, cancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), 15*time.Second)
+			inspectCtx, cancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), lifecycleOwner.callTimeout())
 			ownerErr := lifecycleOwner.ConfirmNoChild(inspectCtx)
 			cancel()
 			if ownerErr != nil {
@@ -866,8 +866,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if ownerQuiescent && readyPoolReturnNeedsHydrationStop(result) {
 			a.writeActionsHydrationStopBestEffort(context.WithoutCancel(ctx), target, borrowedPool.Entry.LeaseID)
 		}
-		returnCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-		returnErr := returnReadyPoolAfterWorkspaceOwner(returnCtx, &lifecycleOwner, func() error {
+		returnErr := returnReadyPoolAfterWorkspaceOwner(ctx, &lifecycleOwner, func(returnCtx context.Context) error {
 			var err error
 			if borrowedPool.Entry.Identity != nil {
 				_, err = coord.ReturnTypedReadyPoolLease(returnCtx, borrowedPool.Entry.Key, map[string]any{
@@ -879,7 +878,6 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			}
 			return err
 		})
-		cancel()
 		if returnErr != nil {
 			fmt.Fprintf(a.Stderr, "warning: ready-pool owner release/return failed for %s: %v\n", borrowedPool.Entry.LeaseID, returnErr)
 			if failure == nil && scrubErr == nil {
@@ -1098,7 +1096,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return
 		}
 		if lifecycleOwner != nil {
-			inspectCtx, cancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), 15*time.Second)
+			inspectCtx, cancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), lifecycleOwner.quiesceTimeout())
 			ownerErr := lifecycleOwner.QuiesceForLeaseRelease(inspectCtx)
 			cancel()
 			if ownerErr != nil {
@@ -2274,7 +2272,7 @@ afterSync:
 	stderrPhaseWriter.Flush()
 	timings.command = time.Since(commandStart)
 	timings.commandPhases = phaseTracker.Finish(time.Now())
-	if err := waitWorkspaceOwnerNoChild(ctx, lifecycleOwner, 10*time.Second); err != nil {
+	if err := waitWorkspaceOwnerNoChild(ctx, lifecycleOwner, lifecycleOwner.callTimeout()); err != nil {
 		return recordFailure(exit(7, "remote command child ownership remains active; refusing collection and cleanup: %v", err))
 	}
 	if cfg.Results.Auto || len(cfg.Results.JUnit) > 0 {
@@ -2480,15 +2478,19 @@ afterSync:
 	return nil
 }
 
-func returnReadyPoolAfterWorkspaceOwner(ctx context.Context, owner **workspaceOwner, returnLease func() error) error {
+func returnReadyPoolAfterWorkspaceOwner(ctx context.Context, owner **workspaceOwner, returnLease func(context.Context) error) error {
 	if owner != nil && *owner != nil {
 		current := *owner
 		*owner = nil
-		if err := current.Close(ctx); err != nil {
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), current.quiesceTimeout())
+		defer cancel()
+		if err := current.Close(closeCtx); err != nil {
 			return fmt.Errorf("release workspace owner before pool return: %w", err)
 		}
 	}
-	return returnLease()
+	returnCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	return returnLease(returnCtx)
 }
 
 func applyRunEnvAllowFlags(cfg *Config, values []string) {

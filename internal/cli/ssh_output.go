@@ -35,7 +35,7 @@ func RunSSHOutputBounded(ctx context.Context, target SSHTarget, remote string, m
 			}
 		}
 	}()
-	transport, err := prepareSSHTransport(target, prepared, nil, nil, 0, false, 0)
+	transport, err := prepareSSHTransport(target, prepared.command, nil, 0, sshCommandLimit{})
 	if err != nil {
 		return "", err
 	}
@@ -44,30 +44,17 @@ func RunSSHOutputBounded(ctx context.Context, target SSHTarget, remote string, m
 			err = errors.Join(err, closeErr)
 		}
 	}()
-	var lastErr error
-	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
-		probe := target
-		probe.Port, probe.FallbackPorts = port, []string{}
-		out := boundedSSHOutput{limit: maxBytes}
-		err := transport.run(ctx, probe, "10", "1", &out, io.Discard)
+	out := boundedSSHOutput{limit: maxBytes}
+	if err := transport.run(ctx, &target, "10", "1", &out, io.Discard); err != nil {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
-		if err == nil {
-			if out.exceeded {
-				return "", ErrSSHOutputLimit
-			}
-			return strings.TrimSpace(out.String()), nil
-		}
-		lastErr = err
-		if !shouldRetrySSHPort(err) {
-			return "", err
-		}
+		return "", err
 	}
-	if lastErr == nil {
-		lastErr = errors.New("SSH target has no port")
+	if out.exceeded {
+		return "", ErrSSHOutputLimit
 	}
-	return "", lastErr
+	return strings.TrimSpace(out.String()), nil
 }
 
 type boundedSSHOutput struct {
