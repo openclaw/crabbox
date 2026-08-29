@@ -158,6 +158,7 @@ import {
   GCPClient,
   gcpMachineImageNotFound,
   gcpProviderLabelValue,
+  gcpReadyPoolImageScope,
   gcpSnapshotNotFound,
 } from "./gcp";
 import {
@@ -285,6 +286,7 @@ import {
   ProviderProvisioningCleanupError,
   ProviderResourceUnresolvedError,
   providerProvisioningCleanupClaim,
+  providerProvisioningOutcomeUncertain,
   type ProviderProvisioningCleanupClaim,
   validatedProviderProvisioningCleanupClaim,
   validateProviderProvisioningCleanupClaim,
@@ -3575,7 +3577,12 @@ export class FleetCoordinator {
         current.providerScope !== reservation.providerScope ||
         (current.cloudID &&
           (current.cloudID !== claim.cloudID ||
-            (claim.region && current.region !== claim.region))) ||
+            (claim.region && current.region !== claim.region) ||
+            (current.providerResourceID &&
+              claim.providerResourceID &&
+              current.providerResourceID !== claim.providerResourceID))) ||
+        (claim.providerProject && current.providerProject !== claim.providerProject) ||
+        (claim.providerProject && claim.region && current.region !== claim.region) ||
         (!current.cloudID &&
           current.provisioningRequestStartedAt !== reservation.provisioningRequestStartedAt)
       ) {
@@ -3596,6 +3603,7 @@ export class FleetCoordinator {
       // Rechecks must not reopen terminal cleanup; expired provisioning still needs its failed transition.
       if (
         current.cloudID === claim.cloudID &&
+        (!claim.providerResourceID || current.providerResourceID === claim.providerResourceID) &&
         (continueReadiness || current.state !== "provisioning")
       ) {
         return continueReadiness;
@@ -3604,6 +3612,9 @@ export class FleetCoordinator {
       const now = new Date();
       lease.cloudID = claim.cloudID;
       lease.serverID = claim.serverID ?? 0;
+      if (claim.providerResourceID) {
+        lease.providerResourceID = claim.providerResourceID;
+      }
       lease.serverName = claim.cloudID;
       if (claim.region) lease.region = claim.region;
       lease.updatedAt = now.toISOString();
@@ -4784,6 +4795,11 @@ export class FleetCoordinator {
       record.provisioningTiming = provisioningTiming;
     }
     record.serverID = server.id;
+    if (server.providerResourceID) {
+      record.providerResourceID = server.providerResourceID;
+    } else {
+      delete record.providerResourceID;
+    }
     record.serverName = server.name;
     record.host = server.host;
     const finalized = await provider.finalizeLeaseCreate?.(config, record, server, attempts ?? []);
@@ -7202,6 +7218,7 @@ export class FleetCoordinator {
       current.endedAt = failedAt;
       current.cloudID = "";
       current.serverID = 0;
+      delete current.providerResourceID;
       current.serverName = "";
       current.host = "";
       current.provisioningResourceMayExist = false;
@@ -12723,17 +12740,6 @@ export class FleetCoordinator {
     if (lease.state !== "active" || Date.parse(lease.expiresAt) <= Date.now()) {
       return json({ error: "lease_not_active" }, { status: 409 });
     }
-    const image = this.readyPoolLeaseImageIdentity(lease);
-    if (!image || lease.target !== "linux" || !canonicalReadyPoolArchitecture(lease.architecture)) {
-      return json(
-        {
-          error: "unsupported_ready_pool_lease_identity",
-          message:
-            "lease lacks provider-owned immutable image, scope, or canonical architecture evidence",
-        },
-        { status: 409 },
-      );
-    }
     const cacheCompatibility = input.cacheCompatibility;
     if (!validReadyPoolIdentityValue(cacheCompatibility)) {
       return json({ error: "invalid_cache_compatibility" }, { status: 400 });
@@ -12747,10 +12753,27 @@ export class FleetCoordinator {
         { status: 400 },
       );
     }
+    const observed = await this.observeReadyPoolLeaseImageIdentity(lease, request);
+    if (observed instanceof Response) return observed;
+    const image = this.readyPoolLeaseImageIdentity(observed);
+    if (
+      !image ||
+      observed.target !== "linux" ||
+      !canonicalReadyPoolArchitecture(observed.architecture)
+    ) {
+      return json(
+        {
+          error: "unsupported_ready_pool_lease_identity",
+          message:
+            "lease lacks provider-owned immutable image, scope, or canonical architecture evidence",
+        },
+        { status: 409 },
+      );
+    }
     const identity: ReadyPoolIdentityV1 = {
       schema: readyPoolIdentitySchemaV1,
       image,
-      architecture: lease.architecture!,
+      architecture: observed.architecture!,
       seedDigest,
       cacheCompatibility,
     };
@@ -12813,7 +12836,13 @@ export class FleetCoordinator {
     if (resolvedLease.state !== "active" || Date.parse(resolvedLease.expiresAt) <= Date.now()) {
       return json({ error: "lease_not_active" }, { status: 409 });
     }
-    if (typed && !this.readyPoolIdentityMatchesLease(input.identity!, resolvedLease)) {
+    let checkedLease = resolvedLease;
+    if (typed) {
+      const observed = await this.observeReadyPoolLeaseImageIdentity(resolvedLease, request);
+      if (observed instanceof Response) return observed;
+      checkedLease = observed;
+    }
+    if (typed && !this.readyPoolIdentityMatchesLease(input.identity!, checkedLease)) {
       return json(
         {
           error: "ready_pool_lease_identity_mismatch",
@@ -12824,7 +12853,8 @@ export class FleetCoordinator {
     }
     return await this.withReadyPoolBorrowLock(() =>
       this.state.runExclusive(async () => {
-        const lease = (await this.getLease(leaseID)) ?? resolvedLease;
+        const lease = await this.getLease(leaseID);
+        if (!lease) return notFound();
         if (!this.leaseManageableByRequest(lease, request, isAdminRequest(request))) {
           return json(
             { error: "forbidden", message: "lease manage access required" },
@@ -12833,6 +12863,15 @@ export class FleetCoordinator {
         }
         if (lease.state !== "active" || Date.parse(lease.expiresAt) <= Date.now()) {
           return json({ error: "lease_not_active" }, { status: 409 });
+        }
+        if (typed && !sameReadyPoolObservationLease(lease, checkedLease)) {
+          return json(
+            {
+              error: "ready_pool_image_observation_conflict",
+              message: "lease changed after immutable image evidence was observed",
+            },
+            { status: 409 },
+          );
         }
         if (typed && !this.readyPoolIdentityMatchesLease(input.identity!, lease)) {
           return json({ error: "ready_pool_lease_identity_mismatch" }, { status: 409 });
@@ -13706,11 +13745,72 @@ export class FleetCoordinator {
     );
   }
 
+  private async observeReadyPoolLeaseImageIdentity(
+    lease: LeaseRecord,
+    request: Request,
+  ): Promise<LeaseRecord | Response> {
+    const providerName = managedLeaseProvider(lease);
+    if (!providerName) return lease;
+    const provider = this.provider(providerName, lease.region, lease.providerProject);
+    if (!provider.observeReadyPoolImageIdentity) return lease;
+    let image: LeaseImageIdentity | undefined;
+    let observationError: unknown;
+    try {
+      image = await provider.observeReadyPoolImageIdentity(lease);
+    } catch (error) {
+      observationError = error;
+    }
+    return await this.state.runExclusive(async () => {
+      const current = await this.getLease(lease.id);
+      if (!current) {
+        return readyPoolImageObservationConflict(
+          "lease changed while immutable image evidence was being observed",
+        );
+      }
+      if (!this.leaseManageableByRequest(current, request, isAdminRequest(request))) {
+        return json(
+          { error: "forbidden", message: "lease manage access required" },
+          { status: 403 },
+        );
+      }
+      if (current.state !== "active" || Date.parse(current.expiresAt) <= Date.now()) {
+        return json({ error: "lease_not_active" }, { status: 409 });
+      }
+      if (!sameReadyPoolObservationLease(current, lease)) {
+        return readyPoolImageObservationConflict(
+          "lease changed while immutable image evidence was being observed",
+        );
+      }
+      if (observationError !== undefined) {
+        return json(
+          {
+            error: "ready_pool_image_observation_failed",
+            message: `provider immutable image observation failed: ${coordinatorErrorMessage(this.env, observationError)}`,
+          },
+          { status: 502 },
+        );
+      }
+      if (!image) {
+        const masked = structuredClone(current);
+        delete masked.image;
+        return masked;
+      }
+      if (current.image) {
+        return sameLeaseImageIdentity(current.image, image)
+          ? current
+          : readyPoolImageObservationConflict(
+              "lease already records different immutable image evidence",
+            );
+      }
+      const updated = { ...current, image, updatedAt: new Date().toISOString() };
+      await this.putLease(updated);
+      return updated;
+    });
+  }
+
   private readyPoolImageIdentitySupported(image: ReadyPoolImageIdentity): boolean {
     if (!isCoordinatorProvider(image.provider)) return false;
-    return (
-      this.provider(image.provider, image.scope).supportsReadyPoolImageIdentity?.(image) === true
-    );
+    return this.provider(image.provider).supportsReadyPoolImageIdentity?.(image) === true;
   }
 
   private async drainMismatchedReadyPoolEntry(
@@ -16211,15 +16311,43 @@ export class FleetCoordinator {
     }
     const provider = this.provider(providerName, lease.region, lease.providerProject);
     let server: ProviderMachine | undefined;
+    let recoveryFence: { lease: LeaseRecord; attempt: CreateAttemptRecord } | undefined;
     try {
-      server = await this.recoverProviderServer(providerName, provider, lease);
+      const unbound = await this.recoverUnboundInterruptedProvisioningResource(provider, lease);
+      if (unbound) {
+        recoveryFence = { lease: unbound.lease, attempt: unbound.attempt };
+        lease = unbound.lease;
+        if (unbound.server) {
+          const strictLease = structuredClone(unbound.lease);
+          strictLease.cloudID = unbound.server.cloudID;
+          strictLease.serverName = unbound.server.name;
+          server = await this.recoverProviderServer(providerName, provider, strictLease);
+          if (!server) {
+            throw new ProviderResourceUnresolvedError(
+              "captured provider resource disappeared before strict recovery",
+            );
+          }
+          if (
+            server.providerResourceID !== unbound.server.providerResourceID ||
+            server.cloudID !== unbound.server.cloudID ||
+            server.name !== unbound.server.name
+          ) {
+            throw new ProviderResourceUnresolvedError(
+              "captured provider resource changed during strict recovery",
+            );
+          }
+        }
+      } else {
+        server = await this.recoverProviderServer(providerName, provider, lease);
+      }
     } catch (error) {
       const failure = `interrupted provisioning recovery failed: ${coordinatorErrorMessage(this.env, error)}`;
       await this.state.runExclusive(async () => {
         const current = await this.getLease(lease.id);
         if (
-          !sameProvisioningAttempt(current, lease) ||
-          (await provisioningOwnsLease(this.state.storage, lease.id))
+          !current ||
+          (await provisioningOwnsLease(this.state.storage, current.id)) ||
+          !(await this.interruptedProvisioningRecoveryMatches(current, lease, recoveryFence))
         ) {
           return;
         }
@@ -16243,8 +16371,9 @@ export class FleetCoordinator {
     await this.state.runExclusive(async () => {
       const current = await this.getLease(lease.id);
       if (
-        !sameProvisioningAttempt(current, lease) ||
-        (await provisioningOwnsLease(this.state.storage, lease.id))
+        !current ||
+        (await provisioningOwnsLease(this.state.storage, current.id)) ||
+        !(await this.interruptedProvisioningRecoveryMatches(current, lease, recoveryFence))
       ) {
         return;
       }
@@ -16304,6 +16433,7 @@ export class FleetCoordinator {
         delete current.provisioningRecoveryMissingSince;
         current.cloudID = "";
         current.serverID = 0;
+        delete current.providerResourceID;
         current.serverName = "";
         current.host = "";
         current.failureError = `${interruption}; no provider resource found`;
@@ -16314,6 +16444,110 @@ export class FleetCoordinator {
       }
       await this.putLease(current);
     });
+  }
+
+  private async recoverUnboundInterruptedProvisioningResource(
+    provider: CloudProvider,
+    expected: LeaseRecord,
+  ): Promise<
+    | {
+        lease: LeaseRecord;
+        attempt: CreateAttemptRecord;
+        server?: ProviderMachine;
+      }
+    | undefined
+  > {
+    if (!provider.recoverUnboundProvisioningResource) return undefined;
+    const snapshot = await this.state.runExclusive(async () => {
+      const current = await this.getLease(expected.id);
+      const attempt = current?.createAttemptID
+        ? await this.getCreateAttempt(current.id)
+        : undefined;
+      if (
+        !sameProvisioningAttempt(current, expected) ||
+        !unboundProvisioningRecoveryEligible(current, attempt)
+      ) {
+        return undefined;
+      }
+      return {
+        lease: structuredClone(current),
+        attempt: structuredClone(attempt),
+      };
+    });
+    if (!snapshot) return undefined;
+    const server = await provider.recoverUnboundProvisioningResource(snapshot.lease);
+    if (!server) {
+      if (snapshot.lease.providerResourceID !== undefined) {
+        throw new ProviderResourceUnresolvedError(
+          "captured provider resource disappeared before strict recovery retry",
+        );
+      }
+      return snapshot;
+    }
+    const providerResourceID = server.providerResourceID;
+    if (
+      server.provider !== snapshot.lease.provider ||
+      !server.cloudID ||
+      server.cloudID !== server.name ||
+      !providerResourceID
+    ) {
+      throw new ProviderResourceUnresolvedError(
+        "provider returned invalid unbound provisioning identity",
+      );
+    }
+    if (snapshot.lease.providerResourceID !== undefined) {
+      if (snapshot.lease.providerResourceID !== providerResourceID) {
+        throw new ProviderResourceUnresolvedError(
+          "captured provider resource identity changed before strict recovery retry",
+        );
+      }
+      return {
+        lease: snapshot.lease,
+        attempt: snapshot.attempt,
+        server,
+      };
+    }
+    return await this.state.runExclusive(async () => {
+      const current = await this.getLease(snapshot.lease.id);
+      const attempt = current?.createAttemptID
+        ? await this.getCreateAttempt(current.id)
+        : undefined;
+      if (
+        !current ||
+        !attempt ||
+        !sameUnboundProvisioningRecoveryLease(current, snapshot.lease) ||
+        !sameCreateAttempt(attempt, snapshot.attempt) ||
+        !unboundProvisioningRecoveryEligible(current, attempt)
+      ) {
+        throw new ProviderResourceUnresolvedError(
+          "provider resource identity changed before unbound recovery capture",
+        );
+      }
+      const captured: LeaseRecord = {
+        ...current,
+        providerResourceID,
+        updatedAt: new Date().toISOString(),
+      };
+      await this.putLease(captured);
+      return {
+        lease: captured,
+        attempt: snapshot.attempt,
+        server,
+      };
+    });
+  }
+
+  private async interruptedProvisioningRecoveryMatches(
+    current: LeaseRecord | undefined,
+    expected: LeaseRecord,
+    fence: { lease: LeaseRecord; attempt: CreateAttemptRecord } | undefined,
+  ): Promise<boolean> {
+    if (!fence) return sameProvisioningAttempt(current, expected);
+    if (!current || !sameUnboundProvisioningRecoveryLease(current, fence.lease)) {
+      return false;
+    }
+    const attempt = current.createAttemptID ? await this.getCreateAttempt(current.id) : undefined;
+    return Boolean(attempt && sameCreateAttempt(attempt, fence.attempt));
   }
 
   private async expireLeases(): Promise<void> {
@@ -20451,6 +20685,46 @@ function sameLeaseReleaseIdentity(left: LeaseRecord, right: LeaseRecord): boolea
   );
 }
 
+function sameReadyPoolObservationLease(left: LeaseRecord, right: LeaseRecord): boolean {
+  return (
+    sameLeaseReleaseIdentity(left, right) &&
+    left.createAttemptID === right.createAttemptID &&
+    left.provider === right.provider &&
+    left.cloudID === right.cloudID &&
+    left.serverID === right.serverID &&
+    left.providerResourceID === right.providerResourceID &&
+    left.serverName === right.serverName &&
+    left.slug === right.slug &&
+    left.owner === right.owner &&
+    left.providerOwner === right.providerOwner &&
+    left.workspaceID === right.workspaceID &&
+    left.region === right.region &&
+    left.providerProject === right.providerProject &&
+    left.providerScope === right.providerScope &&
+    left.lifecycle === right.lifecycle &&
+    left.target === right.target &&
+    left.architecture === right.architecture &&
+    left.state === right.state &&
+    left.expiresAt === right.expiresAt
+  );
+}
+
+function sameLeaseImageIdentity(left: LeaseImageIdentity, right: LeaseImageIdentity): boolean {
+  return (
+    left.id === right.id &&
+    left.source === right.source &&
+    left.provider === right.provider &&
+    left.kind === right.kind &&
+    left.region === right.region &&
+    left.promotedAt === right.promotedAt &&
+    left.sourceID === right.sourceID
+  );
+}
+
+function readyPoolImageObservationConflict(message: string): Response {
+  return json({ error: "ready_pool_image_observation_conflict", message }, { status: 409 });
+}
+
 function sameCreateAttempt(left: CreateAttemptRecord, right: CreateAttemptRecord): boolean {
   return (
     (left.version === 1 || left.version === 2) &&
@@ -24432,6 +24706,7 @@ function provisionedLeaseRecord(
     state: "active",
     cloudID: server.cloudID,
     serverID: server.id,
+    ...(server.providerResourceID ? { providerResourceID: server.providerResourceID } : {}),
     serverName: server.name,
     serverType,
     providerKey,
@@ -24466,6 +24741,7 @@ function mergeProvisioningFailureMetadata(
     cleanupClaim &&
     lease.provider === cleanupClaim.provider &&
     lease.cloudID === cleanupClaim.cloudID &&
+    lease.providerResourceID === cleanupClaim.providerResourceID &&
     (!cleanupClaim.region || lease.region === cleanupClaim.region) &&
     (!cleanupClaim.providerProject || lease.providerProject === cleanupClaim.providerProject) &&
     lease.providerScope === cleanupClaim.providerScope &&
@@ -24482,6 +24758,7 @@ function mergeProvisioningFailureMetadata(
   const retainResource = lease.state === "released" && lease.releaseDeletesServer === false;
   const awsOutcomeUncertain =
     config.provider === "aws" && config.awsPrivate && isAWSRunInstancesOutcomeUncertain(message);
+  const providerOutcomeUncertain = providerProvisioningOutcomeUncertain(error);
   const hetznerResourceMayExist =
     config.provider === "hetzner" && hetznerProvisioningFailureMayHaveResource(error);
   const hetznerRetryable =
@@ -24493,6 +24770,7 @@ function mergeProvisioningFailureMetadata(
   const resourceMayExist = Boolean(
     cleanupClaim ||
     awsOutcomeUncertain ||
+    providerOutcomeUncertain ||
     hetznerResourceMayExist ||
     lease.provisioningResourceMayExist,
   );
@@ -24504,6 +24782,7 @@ function mergeProvisioningFailureMetadata(
   lease.provisioningFailureRetryable = Boolean(
     !cleanupClaim &&
     !awsOutcomeUncertain &&
+    !providerOutcomeUncertain &&
     (hetznerRetryable || lease.provisioningFailureRetryable),
   );
 
@@ -24569,6 +24848,9 @@ function retainProvisioningCleanupClaim(
   lease.cloudID = claim.cloudID;
   lease.serverName = claim.cloudID;
   lease.serverID = claim.serverID ?? 0;
+  if (claim.providerResourceID) {
+    lease.providerResourceID = claim.providerResourceID;
+  }
   lease.updatedAt = failedAt;
   if (claim.region) lease.region = claim.region;
   if (claim.providerProject) lease.providerProject = claim.providerProject;
@@ -24660,6 +24942,62 @@ function sameProvisioningAttempt(
     current.provisioningRecoveryObservedAt === expected.provisioningRecoveryObservedAt &&
     current.provisioningRecoveryMissingSince === expected.provisioningRecoveryMissingSince,
   );
+}
+
+function unboundProvisioningRecoveryEligible(
+  lease: LeaseRecord,
+  attempt: CreateAttemptRecord | undefined,
+): attempt is CreateAttemptRecord {
+  const validState =
+    lease.state === "provisioning" ||
+    (lease.state === "failed" && lease.provisioningResourceMayExist === true) ||
+    (lease.state === "released" &&
+      lease.provisioningResourceMayExist === true &&
+      lease.releaseDeletesServer === true);
+  const validAttemptState =
+    lease.state === "released" ? attempt?.state === "canceled" : attempt?.state === "pending";
+  const validTimestamps = [
+    lease.createdAt,
+    lease.updatedAt,
+    lease.expiresAt,
+    lease.provisioningRequestStartedAt,
+    lease.provisioningRecoveryObservedAt,
+    attempt?.createdAt,
+    attempt?.updatedAt,
+  ].every((value) => Number.isFinite(Date.parse(value ?? "")));
+  return Boolean(
+    validState &&
+    validAttemptState &&
+    validTimestamps &&
+    (lease.provisioningRequestSettledAt === undefined ||
+      Number.isFinite(Date.parse(lease.provisioningRequestSettledAt))) &&
+    !isRegisteredLease(lease) &&
+    !lease.workspaceID &&
+    managedLeaseProvider(lease) &&
+    lease.cloudID === "" &&
+    lease.serverID === 0 &&
+    (lease.providerResourceID === undefined ||
+      (lease.providerResourceID.length > 0 &&
+        lease.providerResourceID === lease.providerResourceID.trim())) &&
+    lease.serverName === "" &&
+    lease.host === "" &&
+    !lease.cleanupStartedAt &&
+    !lease.cleanupClaimExpiresAt &&
+    !lease.providerKeyCleanupPending &&
+    validCreateAttemptID(lease.createAttemptID) &&
+    Boolean(lease.createAttemptGeneration?.trim()) &&
+    attempt &&
+    attempt.cloudID === undefined &&
+    createAttemptMatchesLease(attempt, lease),
+  );
+}
+
+function sameUnboundProvisioningRecoveryLease(
+  current: LeaseRecord,
+  expected: LeaseRecord,
+): boolean {
+  // Fail closed on any lease field drift; object key reordering can only cause a safe retry.
+  return JSON.stringify(current) === JSON.stringify(expected);
 }
 
 function nextLeaseAlarmTime(lease: LeaseRecord, coordinatorGeneration: string): number | undefined {
@@ -25405,6 +25743,7 @@ function parseProviderLabelTime(value: string | undefined): number {
 interface CloudProvider {
   resumableProvisioning?(): ProviderResumableProvisioning;
   readyPoolImageIdentity?(lease: LeaseRecord): ReadyPoolImageIdentity | undefined;
+  observeReadyPoolImageIdentity?(lease: LeaseRecord): Promise<LeaseImageIdentity | undefined>;
   supportsReadyPoolImageIdentity?(identity: ReadyPoolImageIdentity): boolean;
   listCrabboxServers(): Promise<ProviderMachine[]>;
   listReconciliationResources?(): Promise<ProviderMachine[]>;
@@ -25416,6 +25755,7 @@ interface CloudProvider {
   restrictedLeaseRequestFields?(input: LeaseRequest): string[];
   ownershipLabelValue?(value: string): string;
   recoveryIsAuthoritative?: true;
+  recoverUnboundProvisioningResource?(lease: LeaseRecord): Promise<ProviderMachine | undefined>;
   recoverServer?(lease: LeaseRecord): Promise<ProviderMachine | undefined>;
   resumeRecoveredServer?(
     config: ReturnType<typeof leaseConfig>,
@@ -26392,6 +26732,8 @@ export class AzureProvider implements CloudProvider {
 }
 
 export class GCPProvider implements CloudProvider {
+  readonly recoveryIsAuthoritative = true;
+
   private clientValue?: GCPClient;
 
   constructor(
@@ -26404,6 +26746,22 @@ export class GCPProvider implements CloudProvider {
   private get client(): GCPClient {
     this.clientValue ??= new GCPClient(this.env, this.zone, this.project);
     return this.clientValue;
+  }
+
+  readyPoolImageIdentity(lease: LeaseRecord): ReadyPoolImageIdentity | undefined {
+    const image = lease.image;
+    if (
+      lease.provider !== "gcp" ||
+      !image ||
+      image.provider !== "gcp" ||
+      !lease.providerProject ||
+      lease.providerProject.trim() !== lease.providerProject ||
+      !/^[0-9]+$/.test(image.id)
+    ) {
+      return undefined;
+    }
+    const scope = gcpReadyPoolImageScope(image.sourceID, image.kind);
+    return scope ? { provider: "gcp", scope, id: image.id } : undefined;
   }
 
   restrictedLeaseRequestFields(input: LeaseRequest): string[] {
@@ -26438,7 +26796,11 @@ export class GCPProvider implements CloudProvider {
   }
 
   recoverServer(lease: LeaseRecord): Promise<ProviderMachine | undefined> {
-    return this.client.recoverServerForLease(lease.id, lease.slug);
+    return this.client.recoverServerForLease(lease);
+  }
+
+  recoverUnboundProvisioningResource(lease: LeaseRecord): Promise<ProviderMachine | undefined> {
+    return this.client.recoverUnboundProvisioningResource(lease);
   }
 
   async prepareLeaseConfig(
@@ -26451,6 +26813,10 @@ export class GCPProvider implements CloudProvider {
       ...config,
       gcpProject: this.env.CRABBOX_GCP_PROJECT?.trim() || this.env.GCP_PROJECT_ID?.trim() || "",
     };
+  }
+
+  observeReadyPoolImageIdentity(lease: LeaseRecord): Promise<LeaseImageIdentity | undefined> {
+    return this.client.observeReadyPoolImageIdentity(lease);
   }
 
   prepareLeaseCreate(
@@ -26496,11 +26862,25 @@ export class GCPProvider implements CloudProvider {
 
   async releaseLease(lease: LeaseRecord): Promise<void> {
     if (
-      !(await ownedProviderMachineForRelease("gcp", lease, (id) => this.findServer(id), {
-        labelValue: gcpProviderLabelValue,
-      }))
+      !lease.providerResourceID ||
+      lease.providerResourceID !== lease.providerResourceID.trim() ||
+      !/^[0-9]+$/.test(lease.providerResourceID)
     ) {
-      return;
+      throw new ProviderResourceUnresolvedError(
+        `refusing to delete GCP instance ${lease.cloudID}: lease ${lease.id} has no numeric resource id`,
+      );
+    }
+    const machine = await ownedProviderMachineForRelease(
+      "gcp",
+      lease,
+      (id) => this.findServer(id),
+      { labelValue: gcpProviderLabelValue },
+    );
+    if (!machine) return;
+    if (machine.providerResourceID !== lease.providerResourceID) {
+      throw new ProviderResourceUnresolvedError(
+        `refusing to delete GCP instance ${lease.cloudID}: numeric resource id does not match lease ${lease.id}`,
+      );
     }
     await this.deleteServer(lease.cloudID);
   }
