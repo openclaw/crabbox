@@ -3433,7 +3433,7 @@ func TestRemoteGitCoherenceRepairsReuseBeforeFingerprintSkip(t *testing.T) {
 	if got := readCoherentFingerprint(t, workdir, planB); got != "fp-b" {
 		t.Fatalf("coherent B fingerprint=%q", got)
 	}
-	if out, err := exec.Command("bash", "-lc", remoteInvalidateSyncFingerprintForTarget(SSHTarget{TargetOS: targetLinux}, workdir)).CombinedOutput(); err != nil {
+	if out, err := exec.Command("bash", "-lc", remoteInvalidateSyncFingerprintForTarget(SSHTarget{TargetOS: targetLinux}, workdir, false)).CombinedOutput(); err != nil {
 		t.Fatalf("invalidate fingerprint: %v\n%s", err, out)
 	}
 	if got := readCoherentFingerprint(t, workdir, planB); got != "" {

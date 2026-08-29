@@ -258,7 +258,8 @@ func (a App) hydrateActionsWithGitHubRunner(ctx context.Context, cfg Config, rep
 	if err := a.registerGitHubActionsRunnerOwned(ctx, cfg, target, leaseID, slug, ghRepo, "", nil, owner); err != nil {
 		return actionsHydrationState{}, err
 	}
-	if err := invalidateActionsHydrationWorkspaces(ctx, cfg, repo, target, leaseID); err != nil {
+	plainManifest := classifyGitOrigin(repo.RemoteURL) != gitOriginRemoteAttemptSafe
+	if err := invalidateActionsHydrationWorkspaces(ctx, target, leaseID, remoteJoin(cfg, leaseID, repo.Name), plainManifest); err != nil {
 		return actionsHydrationState{}, err
 	}
 	if err := clearActionsHydrationState(ctx, target, leaseID); err != nil {
@@ -589,27 +590,28 @@ func (a App) hydrateActionsLocally(ctx context.Context, cfg Config, repo Repo, t
 	if err != nil {
 		return actionsHydrationState{}, err
 	}
-	return a.executeLocalActionsHydration(ctx, cfg, repo, target, plan, waitTimeout, streamOutput, syncBefore, owner)
+	plainManifest := classifyGitOrigin(repo.RemoteURL) != gitOriginRemoteAttemptSafe
+	return a.executeLocalActionsHydration(ctx, cfg, repo, target, plan, waitTimeout, streamOutput, syncBefore, plainManifest, owner)
 }
 
-func (a App) executeLocalActionsHydration(ctx context.Context, cfg Config, repo Repo, target SSHTarget, plan localActionsHydrationPlan, waitTimeout time.Duration, streamOutput bool, syncBefore bool, owner *workspaceOwner) (actionsHydrationState, error) {
+func (a App) executeLocalActionsHydration(ctx context.Context, cfg Config, repo Repo, target SSHTarget, plan localActionsHydrationPlan, waitTimeout time.Duration, streamOutput bool, syncBefore bool, plainManifest bool, owner *workspaceOwner) (actionsHydrationState, error) {
 	target = targetWithConfigDefaults(target, cfg)
 	fmt.Fprint(a.Stderr, plan.warnings)
 	if streamOutput {
 		fmt.Fprintf(a.Stdout, "local actions hydrate workflow=%s job=%s workspace=%s\n", cfg.Actions.Workflow, plan.jobName, plan.workdir)
 	}
-	if err := invalidateActionsHydrationWorkspaces(ctx, cfg, repo, target, plan.leaseID); err != nil {
+	if err := invalidateActionsHydrationWorkspaces(ctx, target, plan.leaseID, plan.workdir, plainManifest); err != nil {
 		return actionsHydrationState{}, err
 	}
 	if err := clearActionsHydrationState(ctx, target, plan.leaseID); err != nil {
 		return actionsHydrationState{}, err
 	}
 	if syncBefore {
-		if err := a.syncLocalActionsWorkspace(ctx, cfg, repo, target, plan.workdir); err != nil {
+		if err := a.syncLocalActionsWorkspace(ctx, cfg, repo, target, plan.workdir, plainManifest); err != nil {
 			return actionsHydrationState{}, err
 		}
 	}
-	if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteInvalidateSyncFingerprintForTarget(target, plan.workdir), idempotentSSHRetryDelay); err != nil {
+	if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteInvalidateSyncFingerprintForTarget(target, plan.workdir, plainManifest), idempotentSSHRetryDelay); err != nil {
 		return actionsHydrationState{}, exit(7, "invalidate reusable sync fingerprint before Actions hydration: %v", err)
 	}
 	stdout := io.Discard
@@ -674,9 +676,8 @@ func (a App) executeLocalActionsHydration(ctx context.Context, cfg Config, repo 
 	return state, nil
 }
 
-func invalidateActionsHydrationWorkspaces(ctx context.Context, cfg Config, repo Repo, target SSHTarget, leaseID string) error {
-	plainManifest := classifyGitOrigin(repo.RemoteURL) != gitOriginRemoteAttemptSafe
-	workdirs := []string{remoteJoin(cfg, leaseID, repo.Name)}
+func invalidateActionsHydrationWorkspaces(ctx context.Context, target SSHTarget, leaseID, workdir string, plainManifest bool) error {
+	workdirs := []string{workdir}
 	state, err := readActionsHydrationState(ctx, target, leaseID)
 	if err != nil {
 		return exit(7, "read Actions workspace before fingerprint invalidation: %v", err)
@@ -692,7 +693,7 @@ func invalidateActionsHydrationWorkspaces(ctx context.Context, cfg Config, repo 
 	return nil
 }
 
-func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Repo, target SSHTarget, workdir string) error {
+func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Repo, target SSHTarget, workdir string, plainManifest bool) error {
 	if cfg.Sync.BaseRef == "" {
 		cfg.Sync.BaseRef = repo.BaseRef
 	}
@@ -711,7 +712,6 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 		return exit(7, "create remote workdir: %v", err)
 	}
 	coherence, credentialBlocked := syncGitCoherencePlan(cfg, repo)
-	plainManifest := classifyGitOrigin(repo.RemoteURL) != gitOriginRemoteAttemptSafe
 	if credentialBlocked {
 		warnCredentialBearingGitSeed(a.Stderr)
 	}

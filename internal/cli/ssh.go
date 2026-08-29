@@ -2120,13 +2120,13 @@ fi`
 	return "bash -lc " + shellQuote(script)
 }
 
-func remoteInvalidateSyncFingerprintForTarget(target SSHTarget, workdir string, plainManifest ...bool) string {
+func remoteInvalidateSyncFingerprintForTarget(target SSHTarget, workdir string, plainManifest bool) string {
 	if isWindowsNativeTarget(target) {
 		return powershellCommand("exit 0")
 	}
 	metadataScript := remoteSyncMetaDirScript()
 	shellCommand := func(script string) string { return "bash -lc " + shellQuote(script) }
-	if len(plainManifest) != 0 && plainManifest[0] {
+	if plainManifest {
 		metadataScript = remotePlainManifestGitFunction() + remotePlainManifestSyncMetaDirScript()
 		shellCommand = remotePlainManifestShellCommand
 	}

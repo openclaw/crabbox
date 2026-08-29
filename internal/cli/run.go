@@ -1387,7 +1387,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		return failure
 	}
-	autoHydrateActionsIfNeeded := func(currentTarget SSHTarget) error {
+	autoHydrateActionsIfNeeded := func(currentTarget SSHTarget, plainManifest bool) error {
 		if !autoHydrateActions || hydratedByActions {
 			return nil
 		}
@@ -1417,7 +1417,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			err = exit(7, "prepared local Actions hydration no longer matches lease=%s workspace=%s", leaseID, workdir)
 		}
 		if err == nil {
-			state, err = a.executeLocalActionsHydration(ctx, cfg, repo, currentTarget, *plan, 20*time.Minute, false, false, lifecycleOwner)
+			state, err = a.executeLocalActionsHydration(ctx, cfg, repo, currentTarget, *plan, 20*time.Minute, false, false, plainManifest, lifecycleOwner)
 		}
 		if err != nil {
 			recorder.Event("actions.hydrate.failed", "hydrate", err.Error())
@@ -1913,7 +1913,7 @@ afterSync:
 		}
 	}
 	if !*noSync {
-		if err := autoHydrateActionsIfNeeded(target); err != nil {
+		if err := autoHydrateActionsIfNeeded(target, plainManifestMode); err != nil {
 			return recordFailure(err)
 		}
 	}
