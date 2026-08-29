@@ -44,10 +44,8 @@ func TestWSLStageEnvelopeIsFiniteBlindedAndLauncherSafe(t *testing.T) {
 		!bytes.Equal(frame[48:80], entropy) || !bytes.HasSuffix(frame, append([]byte(command), payload...)) {
 		t.Fatalf("invalid envelope shape size=%d frame=%d", spool.size, len(frame))
 	}
-	if spool.digest != sha256.Sum256(frame) {
-		t.Fatal("digest does not bind the complete finite envelope")
-	}
-	launcher := wslStageFileCommand(strings.Repeat("a", 32), strings.Repeat("a", 32)+".ready", spool.size, spool.digest, false, wslStageCMD)
+	digest := sha256.Sum256(frame)
+	launcher := wslStageFileCommand(strings.Repeat("a", 32), strings.Repeat("a", 32)+".ready", spool.size, digest, false, wslStageCMD)
 	if launcher == "" || len(launcher) >= wslStageLauncherMax {
 		t.Fatalf("launcher length=%d", len(launcher))
 	}
@@ -161,7 +159,7 @@ func TestWSLStagePublishesOneExclusiveEnvelopeAfterRouteProof(t *testing.T) {
 	}
 	frame := harness.readFile(t, wslStageRoot+"/"+nonce+".ready")
 	if int64(len(frame)) != spool.size || sha256.Sum256(frame) != spool.digest {
-		t.Fatal("published bytes do not match the local finite envelope")
+		t.Fatal("upload digest does not bind the published finite envelope")
 	}
 	harness.requireAbsent(t, wslStageRoot+"/."+nonce+".proof")
 	harness.requireAbsent(t, wslStageRoot+"/"+nonce+".part")

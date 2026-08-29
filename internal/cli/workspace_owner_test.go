@@ -836,9 +836,6 @@ func TestWorkspaceOwnerWSL2InputStreamPreparationUsesPrivateStage(t *testing.T) 
 	if transport.stage == nil || transport.input != nil || transport.command != "" {
 		t.Fatalf("workspace workload did not select the private stage: %#v", transport)
 	}
-	if source.total != int64(len(payload)) {
-		t.Fatalf("stage digest consumed %d payload bytes, want %d", source.total, len(payload))
-	}
 	reader, err := transport.stage.input.reset()
 	if err != nil {
 		t.Fatal(err)
@@ -849,6 +846,9 @@ func TestWorkspaceOwnerWSL2InputStreamPreparationUsesPrivateStage(t *testing.T) 
 	}
 	if !bytes.HasSuffix(frame, append([]byte(remote.command), payload...)) {
 		t.Fatal("finite stage did not preserve command and input")
+	}
+	if source.total != int64(len(payload)) {
+		t.Fatalf("stage consumed %d payload bytes, want %d", source.total, len(payload))
 	}
 }
 

@@ -492,7 +492,7 @@ func TestWSLStageWindowsPrivateRouteAndLauncherConsumesOnce(t *testing.T) {
 				t.Fatalf("prepare stdout=%q stderr=%q err=%v", prepared, diagnostics, err)
 			}
 			ready := writeWSLStageWindowsReady(t, home, nonce, raw)
-			launcher := wslStageFileCommand(nonce, nonce+".ready", spool.size, spool.digest, false, shell)
+			launcher := wslStageFileCommand(nonce, nonce+".ready", spool.size, sha256.Sum256(raw), false, shell)
 			stdout, stderr, err := runWSLStageWindowsShell(t, shell, launcher)
 			if exitCode(err) != 23 || string(stdout) != "stage-stdout\x00\xff\r\n" ||
 				string(stderr) != "stage-stderr\x00\xfe\n" {

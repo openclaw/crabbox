@@ -134,10 +134,6 @@ func newWSLStageSpool(command string, payload []byte, source io.ReadSeeker, payl
 		return nil, err
 	}
 	spool := &wslStageSpool{input: input, size: total}
-	spool.digest, err = spool.prefixDigest(total)
-	if err != nil {
-		return nil, errors.Join(err, spool.close())
-	}
 	return spool, nil
 }
 
@@ -355,8 +351,9 @@ func (s *wslStageSpool) upload(ctx context.Context, cancel context.CancelCauseFu
 		return false, exit(7, "WSL2 stage exclusive creation is ambiguous: %v", errors.Join(err, closeErr))
 	}
 	source, err := s.input.reset()
+	hash := sha256.New()
 	if err == nil {
-		err = copyWSLStage(ctx, remote, source, s.size, wslStageIdleTimeout, cancel)
+		err = copyWSLStage(ctx, io.MultiWriter(remote, hash), source, s.size, wslStageIdleTimeout, cancel)
 	}
 	err = errors.Join(err, remote.Close(), context.Cause(ctx))
 	if err != nil {
@@ -367,6 +364,7 @@ func (s *wslStageSpool) upload(ctx context.Context, cancel context.CancelCauseFu
 		}
 		return false, exit(7, "upload WSL2 stage and exact partial cleanup failed: %v", errors.Join(err, closeErr, cleanupErr))
 	}
+	copy(s.digest[:], hash.Sum(nil))
 	info, err := client.Lstat(part)
 	if err != nil || !info.Mode().IsRegular() || info.Size() != s.size {
 		closeErr := closeClient()

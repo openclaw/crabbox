@@ -61,6 +61,8 @@ remove_evidence() {
     rm -rf -- "$directory"
 }
 preownership_failure() {
+    kill "${watcher:-}" 2>/dev/null || :
+    wait "${watcher:-}" 2>/dev/null || :
     remove_evidence || :
     exit 74
 }
@@ -135,12 +137,12 @@ done
 wait "$receiver" || failed=1
 [ "$(wc -c <"$directory/frame")" = "$((command_size + input_size))" ] || failed=1
 if [ "$failed" = 1 ]; then remove_evidence || :; exit 74; fi
-head -c "$command_size" "$directory/frame" >"$directory/command" || preownership_failure
-dd if="$directory/frame" of="$directory/input" bs=65536 skip="$command_size" count="$input_size" iflag=skip_bytes,count_bytes status=none || preownership_failure
-rm "$directory/frame" || preownership_failure
 bash -c "$CBX_HELPER" sh watch "$directory" "$nonce" 0 0 0 0 "$caller_mask" </dev/null &
 watcher=$!
 exec 3<&-
+head -c "$command_size" "$directory/frame" >"$directory/command" || preownership_failure
+dd if="$directory/frame" of="$directory/input" bs=65536 skip="$command_size" count="$input_size" iflag=skip_bytes,count_bytes status=none || preownership_failure
+rm "$directory/frame" || preownership_failure
 mkfifo -m 600 "$directory/guard-wait" || preownership_failure
 exec 6<>"$directory/guard-wait"
 set -m
