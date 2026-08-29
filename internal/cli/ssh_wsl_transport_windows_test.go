@@ -403,6 +403,18 @@ func installFakeWSLStage(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bin, "wsl.exe"), payload, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	fakeWSL := filepath.Join(bin, "wsl.exe")
+	oldOwner := wslStageWindowsOwner
+	wslStageWindowsOwner = strings.Replace(
+		wslStageWindowsOwner,
+		"[Diagnostics.ProcessStartInfo]::new('wsl.exe')",
+		"[Diagnostics.ProcessStartInfo]::new("+psQuote(fakeWSL)+")",
+		1,
+	)
+	if wslStageWindowsOwner == oldOwner {
+		t.Fatal("test owner did not bind the fake WSL executable")
+	}
+	t.Cleanup(func() { wslStageWindowsOwner = oldOwner })
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv(fakeWSLStageHelper, "1")
 }
