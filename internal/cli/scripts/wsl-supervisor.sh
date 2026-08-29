@@ -24,7 +24,10 @@ valid_guard() {
     local current
     current=$(cat "$directory/.owned" 2>/dev/null) || return 1
     [ "$current" = "$guard $started $group" ] &&
-        [ "$(identity "$guard")" = "$group $started" ]
+        valid_process_guard
+}
+valid_process_guard() {
+    [ "$(identity "$guard")" = "$group $started" ]
 }
 group_exists() {
     local diagnostic
@@ -33,23 +36,30 @@ group_exists() {
     [[ "$diagnostic" != *": (-$group) - No such process" ]]
 }
 cleanup_group() {
-    # Keep the immutable witness alive through TERM, then revalidate before KILL.
-    valid_guard || return 1
+    # The in-memory tuple was proven before arming and remains authoritative
+    # for stopping the group even if the on-disk evidence was later tampered.
+    valid_process_guard || return 1
     kill -TERM -- "-$group" 2>/dev/null || return 1
     local ticks=$(((grace_ms + 99) / 100))
     while [ "$ticks" -gt 0 ]; do sleep .1; ticks=$((ticks - 1)); done
-    valid_guard || return 1
+    valid_process_guard || return 1
     kill -KILL -- "-$group" 2>/dev/null || return 1
     wait "$leader" 2>/dev/null || :
     wait "$guard" 2>/dev/null || :
     ticks=$(((grace_ms + 99) / 100))
     while group_exists && [ "$ticks" -gt 0 ]; do sleep .1; ticks=$((ticks - 1)); done
     ! group_exists || return 1
-    [ "$(cat "$directory/.owned" 2>/dev/null)" = "$guard $started $group" ]
 }
 remove_evidence() {
     [ "$(cat "$directory/.nonce" 2>/dev/null)" = "$nonce" ] || return 1
+    if [ -n "${guard:-}" ]; then
+        [ "$(cat "$directory/.owned" 2>/dev/null)" = "$guard $started $group" ] || return 1
+    fi
     rm -rf -- "$directory"
+}
+preownership_failure() {
+    remove_evidence || :
+    exit 74
 }
 
 case $mode in
@@ -74,7 +84,8 @@ workload)
         wait "$child" || code=$?
         kill -0 "$child" 2>/dev/null || break
     done
-    printf '%s\n' "$code" >"$directory/.result"
+    printf '%s\n' "$code" >"$directory/.result.tmp" &&
+        mv "$directory/.result.tmp" "$directory/.result"
     exit "$code"
     ;;
 watch)
@@ -98,7 +109,7 @@ esac
 
 mkdir -m 700 -- "$directory" || exit 74
 printf '%s' "$nonce" >"$directory/.nonce"
-printf '%s %s\n' "$$" "$(identity "$$")" >"$directory/.supervisor"
+printf '%s %s\n' "$$" "$(identity "$$")" >"$directory/.supervisor" || preownership_failure
 exec 3<&0
 exec 0</dev/null
 head -c "$((command_size + input_size))" <&3 >"$directory/frame" 3<&- &
@@ -121,13 +132,13 @@ done
 wait "$receiver" || failed=1
 [ "$(wc -c <"$directory/frame")" = "$((command_size + input_size))" ] || failed=1
 if [ "$failed" = 1 ]; then remove_evidence || :; exit 74; fi
-head -c "$command_size" "$directory/frame" >"$directory/command" || exit 74
-dd if="$directory/frame" of="$directory/input" bs=65536 skip="$command_size" count="$input_size" iflag=skip_bytes,count_bytes status=none || exit 74
-rm "$directory/frame"
+head -c "$command_size" "$directory/frame" >"$directory/command" || preownership_failure
+dd if="$directory/frame" of="$directory/input" bs=65536 skip="$command_size" count="$input_size" iflag=skip_bytes,count_bytes status=none || preownership_failure
+rm "$directory/frame" || preownership_failure
 bash -c "$CBX_HELPER" sh watch "$directory" "$nonce" 0 0 0 0 "$caller_mask" </dev/null &
 watcher=$!
 exec 3<&-
-mkfifo -m 600 "$directory/guard-wait" || exit 74
+mkfifo -m 600 "$directory/guard-wait" || preownership_failure
 exec 6<>"$directory/guard-wait"
 set -m
 bash -c "$CBX_HELPER" sh guard "$directory" "$nonce" 0 0 0 0 "$caller_mask" </dev/null |
@@ -145,6 +156,7 @@ if ! read_guard || [ "$guard" != "$owned_guard" ] || ! valid_guard; then
     # Before arming, only exact direct children may be stopped.
     kill -KILL "$owned_guard" "$leader" "$watcher" 2>/dev/null || :
     wait 2>/dev/null || :
+    [ -e "$directory/.owned" ] || remove_evidence || :
     exit 74
 fi
 if [ ! -e "$directory/.lost" ] && [ ! -e "$directory/.cancel" ]; then : >"$directory/.armed"; fi
@@ -157,8 +169,12 @@ while valid_guard; do
 done
 kill "$watcher" 2>/dev/null || :
 wait "$watcher" 2>/dev/null || :
-cleanup_group && remove_evidence || {
+if ! cleanup_group; then
     echo 'WSL2 command cleanup failed: group absence unconfirmed' >&2
     exit 74
-}
+fi
+if ! remove_evidence; then
+    echo 'WSL2 command cleanup failed: evidence ownership unconfirmed' >&2
+    exit 74
+fi
 exit "$code"

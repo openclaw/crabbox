@@ -65,6 +65,7 @@ jobs:
             TestWSLStageLinuxPassesExitOutputAndFiniteInput
             TestWSLStageLinuxDisconnectKillsExactProcessGroup
             TestWSLStageLinuxGuardMismatchPreservesEvidence
+            TestWSLStageLinuxPreOwnershipFailureRemovesExactResidue
             TestWSLStageLinuxNormalExitPreservesDetachedBackground
           )
           pattern="^($(IFS='|'; echo "${tests[*]}"))$"

@@ -17,12 +17,13 @@ import (
 )
 
 type wslStageLinuxFixture struct {
-	directory string
-	command   *exec.Cmd
-	control   *os.File
-	output    synchronizedBuffer
-	done      chan error
-	group     int
+	directory  string
+	command    *exec.Cmd
+	control    *os.File
+	output     synchronizedBuffer
+	diagnostic synchronizedBuffer
+	done       chan error
+	group      int
 }
 
 func startWSLStageLinuxFixture(t *testing.T, command string, input []byte) *wslStageLinuxFixture {
@@ -47,7 +48,7 @@ func startWSLStageLinuxFixture(t *testing.T, command string, input []byte) *wslS
 	)
 	fixture.command.Stdin = reader
 	fixture.command.Stdout = &fixture.output
-	fixture.command.Stderr = &fixture.output
+	fixture.command.Stderr = &fixture.diagnostic
 	if err := fixture.command.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -75,10 +76,10 @@ func (f *wslStageLinuxFixture) wait(t *testing.T, code int) {
 	select {
 	case err := <-f.done:
 		if exitCode(err) != code {
-			t.Fatalf("exit=%d want=%d: %v\n%s", exitCode(err), code, err, f.output.String())
+			t.Fatalf("exit=%d want=%d: %v\nstdout:\n%s\nstderr:\n%s", exitCode(err), code, err, f.output.String(), f.diagnostic.String())
 		}
 	case <-time.After(12 * time.Second):
-		t.Fatalf("supervisor did not finish\n%s", f.output.String())
+		t.Fatalf("supervisor did not finish\nstdout:\n%s\nstderr:\n%s", f.output.String(), f.diagnostic.String())
 	}
 }
 
@@ -154,9 +155,11 @@ func TestWSLStageLinuxPassesExitOutputAndFiniteInput(t *testing.T) {
 	fixture := startWSLStageLinuxFixture(t, "printf stdout; printf stderr >&2; cat; exit 23\n", input)
 	fixture.waitArmed(t)
 	fixture.wait(t, 23)
-	if !bytes.Contains(fixture.output.Bytes(), append([]byte("stdout"), input...)) ||
-		!strings.Contains(fixture.output.String(), "stderr") {
-		t.Fatalf("workload output changed: %q", fixture.output.String())
+	if want := append([]byte("stdout"), input...); !bytes.Equal(fixture.output.Bytes(), want) {
+		t.Fatalf("workload stdout changed: %q", fixture.output.String())
+	}
+	if fixture.diagnostic.String() != "stderr" {
+		t.Fatalf("workload stderr changed: %q", fixture.diagnostic.String())
 	}
 	requireWSLStageLinuxClean(t, fixture)
 }
@@ -186,6 +189,26 @@ func TestWSLStageLinuxGuardMismatchPreservesEvidence(t *testing.T) {
 	fixture.wait(t, 74)
 	if _, err := os.Stat(fixture.directory); err != nil {
 		t.Fatalf("guard mismatch erased evidence: %v", err)
+	}
+}
+
+func TestWSLStageLinuxPreOwnershipFailureRemovesExactResidue(t *testing.T) {
+	head, err := exec.LookPath("head")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	failingHead := filepath.Join(bin, "head")
+	script := "#!/bin/sh\nif [ \"$#\" -eq 2 ]; then exec " + shellQuote(head) + " \"$@\"; fi\nexit 1\n"
+	if err := os.WriteFile(failingHead, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	fixture := startWSLStageLinuxFixture(t, "exit 0\n", []byte("finite-input"))
+	fixture.wait(t, 74)
+	if _, err := os.Stat(fixture.directory); !os.IsNotExist(err) {
+		t.Fatalf("pre-ownership failure retained nonce residue: %v", err)
 	}
 }
 

@@ -852,7 +852,7 @@ func TestWorkspaceOwnerWSL2InputStreamPreparationUsesPrivateStage(t *testing.T) 
 	}
 }
 
-func TestWorkspaceOwnerWSL2BackgroundCommandsStreamExpandedScripts(t *testing.T) {
+func TestWorkspaceOwnerWSL2BackgroundCommandsUsePrivateStage(t *testing.T) {
 	target := SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22", TargetOS: targetWindows, WindowsMode: windowsModeWSL2}
 	owner := &workspaceOwner{target: target, key: workspaceOwnerKey("cbx_wsl2_background"), token: strings.Repeat("a", 64)}
 	tests := []struct {
@@ -864,18 +864,32 @@ func TestWorkspaceOwnerWSL2BackgroundCommandsStreamExpandedScripts(t *testing.T)
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			dir := installWorkspaceOwnerRecordingSSH(t)
-			t.Setenv("CRABBOX_OWNER_SSH_SUCCESS_STDOUT", "123")
-			if _, err := runWorkspaceOwnerBackgroundOutput(t.Context(), target, owner, test.remote); err != nil {
+			remote := workspaceOwnerRemotePreparation{
+				command:       owner.wrapPOSIXBackgroundCommand(test.remote),
+				ownerExpanded: true,
+			}
+			transport, err := prepareSSHTransport(target, remote, nil, nil, 0, false, 0)
+			if err != nil {
 				t.Fatal(err)
 			}
-			command, input := readWorkspaceOwnerSSHCall(t, dir, 1)
-			wantInput := owner.wrapPOSIXBackgroundCommand(test.remote)
-			if input != wantInput || command != wsl2StdinScriptCommandWithPayload(len(wantInput), 0, 0) {
-				t.Fatalf("background transport command_match=%t input_match=%t", command == wsl2StdinScriptCommandWithPayload(len(wantInput), 0, 0), input == wantInput)
+			defer func() {
+				if err := transport.close(); err != nil {
+					t.Error(err)
+				}
+			}()
+			if transport.stage == nil || transport.command != "" || transport.input != nil {
+				t.Fatalf("background workload did not select the private stage: %#v", transport)
 			}
-			if len(command) >= 8191 || strings.Contains(command, owner.token) || strings.Contains(command, test.remote) {
-				t.Fatal("background workspace script escaped the fixed WSL2 transport")
+			reader, err := transport.stage.input.reset()
+			if err != nil {
+				t.Fatal(err)
+			}
+			frame, err := io.ReadAll(reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.HasSuffix(frame, []byte(remote.command)) {
+				t.Fatal("background workspace command was not staged exactly once")
 			}
 		})
 	}

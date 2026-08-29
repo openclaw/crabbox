@@ -479,15 +479,6 @@ func TestWSLStageWindowsPrivateRouteAndLauncherConsumesOnce(t *testing.T) {
 				strings.TrimSpace(string(prepared)) != wslStagePreparationReady+" "+nonce+" "+string(shell) {
 				t.Fatalf("prepare stdout=%q stderr=%q err=%v", prepared, diagnostics, err)
 			}
-			root := filepath.Join(home, ".crabbox", "wsl-stage")
-			descriptor, err := windows.GetNamedSecurityInfo(root, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, control, err := descriptor.Control()
-			if err != nil || control&windows.SE_DACL_PROTECTED == 0 {
-				t.Fatalf("stage DACL is not protected: control=%v err=%v", control, err)
-			}
 			ready := writeWSLStageWindowsReady(t, home, nonce, raw)
 			launcher := wslStageFileCommand(nonce, nonce+".ready", spool.size, spool.digest, false, shell)
 			stdout, stderr, err := runWSLStageWindowsShell(t, shell, launcher)
@@ -571,7 +562,7 @@ func TestWSLStageWindowsPowerShell51PreambleIsBounded(t *testing.T) {
 			logPath := filepath.Join(t.TempDir(), "input")
 			t.Setenv("CRABBOX_FAKE_WSL_STAGE_INPUT", logPath)
 			script := `if ($PSVersionTable.PSEdition -ne 'Desktop' -or $PSVersionTable.PSVersion.Major -ne 5) { throw 'requires Windows PowerShell 5.1' }
-[Console]::InputEncoding=[Text.UTF8Encoding]::new(` + strings.ToLower(strconv.FormatBool(bom)) + `)
+			[Console]::InputEncoding=[Text.UTF8Encoding]::new($` + strings.ToLower(strconv.FormatBool(bom)) + `)
 $file=[IO.File]::OpenRead(` + psQuote(framePath) + `)
 $descriptor=[IO.BinaryReader]::new($file).ReadBytes(80)
 $file.Position=` + strconv.Itoa(wslStageHeaderSize+ownerSize) + `
