@@ -67,6 +67,7 @@ Native checkpoints use one of two provider primitives, selected with
 | GCP | `gcp-disk-snapshot` |
 | Hetzner Linux (direct only) | `hetzner-snapshot` |
 | Parallels | `parallels-snapshot` |
+| Incus Linux containers (direct, root disk only) | `incus-image` (private image published from a stateless disk snapshot) |
 
 Disk snapshots are faster to create and (on AWS and GCP) boot with fresh
 per-lease SSH keys via injected user-data.
@@ -124,6 +125,16 @@ changed ambient Docker configuration cannot select another daemon. The forked
 lease persists that scope for later `run`, `ssh`, and `stop` commands and
 reuses the source container user and work root during workspace relocation.
 
+**Incus notes.** Native capture is opt-in with `--mode native`; `auto` retains
+the generic archive default. A private Incus image outlives source-instance
+deletion, unlike an ordinary Incus snapshot. Forks replace SSH login/host keys,
+machine ID, and hostname on the stopped clone before first boot, disable
+inherited cloud-init/templates, and preserve root-disk workspace and dependency
+data. Fixed-ID allocation and checkpoint forks are supported. Attached disks,
+mounted workspaces, and VM native captures are rejected. Memory and running
+processes are not included. See [Incus](../providers/incus.md#native-disk-checkpoints)
+for ownership, cleanup, and live-proof requirements.
+
 **Azure notes.** Disk-snapshot checkpoints require managed OS disks, the default
 for new Azure leases. Crabbox refuses native checkpoint creation from Azure
 ephemeral-OS-disk leases (Azure reports success but does not capture live disk
@@ -164,6 +175,11 @@ delete by checkpoint ID; deleting the provider resource leaves the local record
 unable to fork.
 
 ## Lifecycle and expiry
+
+Capture and deletion of the same checkpoint cannot overlap. A conflicting delete
+or prune reports that the checkpoint is busy; retry after the active operation
+finishes. Usage updates read the current record, so a late fork or restore cannot
+recreate a checkpoint that was deleted in the meantime.
 
 Checkpoint records store both `createdAt` and `lastUsedAt`. A new checkpoint
 initializes `lastUsedAt` to exactly `createdAt`; each successful recorded

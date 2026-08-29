@@ -2,6 +2,10 @@
 
 ## 0.47.1 (Unreleased)
 
+### Added
+
+- Added durable fixed-ID Incus leases and private container disk checkpoints that survive source deletion, with ownership-checked cleanup and fresh SSH identity before fork startup.
+
 ### Fixed
 
 - Kept automatic egress client tickets off SSH, remote shell, and helper process arguments with a foreground bounded-input handoff to the detached client, preventing SSH teardown from truncating ticket delivery.

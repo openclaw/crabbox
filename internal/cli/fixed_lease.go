@@ -2,11 +2,33 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/gofrs/flock"
 )
+
+// Provider claim locks end before CLI registration and fork preparation. Keep
+// same-ID callers serialized through that publication without nesting claim locks.
+// Never unlink this lock: a waiter must keep using the same inode after unlock.
+func lockFixedLeaseAcquisition(ctx context.Context, leaseID string) (func(), error) {
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		return nil, err
+	}
+	lockPath, err := leaseClaimLockPath(path + ".acquire")
+	if err != nil {
+		return nil, err
+	}
+	lock := flock.New(lockPath, flock.SetPermissions(0o600))
+	if _, err := lock.TryLockContext(ctx, 100*time.Millisecond); err != nil {
+		return nil, fmt.Errorf("wait for fixed lease %s acquisition: %w", leaseID, err)
+	}
+	return func() { _ = lock.Close() }, nil
+}
 
 type FixedLeaseBinding struct {
 	ProviderScope string
@@ -115,7 +137,11 @@ func AcquireFixedLease(
 			claim.SSHPort = port
 		}
 		intent.State = "acquired"
-		return persist()
+		if err := persist(); err != nil {
+			return err
+		}
+		SetServerLeaseClaimSnapshot(&acquired.Server, *claim, true)
+		return nil
 	})
 	if err != nil {
 		return LeaseTarget{}, err

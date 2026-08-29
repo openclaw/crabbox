@@ -1213,24 +1213,25 @@ type XCPNgConfig struct {
 }
 
 type IncusConfig struct {
-	Remote            string
-	Project           string
-	Address           string
-	Socket            string
-	InstanceType      string
-	Image             string
-	Profile           string
-	User              string
-	WorkRoot          string
-	DeleteOnRelease   bool
-	StartTimeout      time.Duration
-	LaunchPort        string
-	ProxyListenHost   string
-	ProxyListenPort   string
-	ProxyDevice       string
-	TLSServerCert     string
-	InsecureTLS       bool
-	RemoteImageServer string
+	CheckpointMetadata map[string]string `yaml:"-" json:"-"`
+	Remote             string
+	Project            string
+	Address            string
+	Socket             string
+	InstanceType       string
+	Image              string
+	Profile            string
+	User               string
+	WorkRoot           string
+	DeleteOnRelease    bool
+	StartTimeout       time.Duration
+	LaunchPort         string
+	ProxyListenHost    string
+	ProxyListenPort    string
+	ProxyDevice        string
+	TLSServerCert      string
+	InsecureTLS        bool
+	RemoteImageServer  string
 }
 
 type ParallelsConfig struct {

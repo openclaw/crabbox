@@ -3,10 +3,13 @@ package cli
 import (
 	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
 	"time"
+
+	"github.com/gofrs/flock"
 )
 
 type checkpointStore struct {
@@ -91,6 +94,10 @@ func (s checkpointStore) Reserve(record checkpointRecord) (checkpointRecord, che
 	if err != nil {
 		return checkpointRecord{}, checkpointPaths{}, err
 	}
+	firstExistingDir, err := nearestExistingClaimDirectory(paths.Dir)
+	if err != nil {
+		return checkpointRecord{}, checkpointPaths{}, err
+	}
 	if err := os.MkdirAll(s.root, 0o700); err != nil {
 		return checkpointRecord{}, checkpointPaths{}, exit(2, "create checkpoint root: %v", err)
 	}
@@ -102,6 +109,9 @@ func (s checkpointStore) Reserve(record checkpointRecord) (checkpointRecord, che
 	}
 	if err := s.writeMetadata(record, paths); err != nil {
 		_ = os.RemoveAll(paths.Dir)
+		return checkpointRecord{}, checkpointPaths{}, err
+	}
+	if err := syncCreatedClaimDirectoryParentsWithSync(paths.Dir, firstExistingDir, syncControllerDirectory); err != nil {
 		return checkpointRecord{}, checkpointPaths{}, err
 	}
 	return record, paths, nil
@@ -133,10 +143,17 @@ func (s checkpointStore) Write(record checkpointRecord) error {
 	if err != nil {
 		return err
 	}
+	firstExistingDir, err := nearestExistingClaimDirectory(paths.Dir)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(paths.Dir, 0o700); err != nil {
 		return exit(2, "create checkpoint directory: %v", err)
 	}
-	return s.writeMetadata(record, paths)
+	if err := s.writeMetadata(record, paths); err != nil {
+		return err
+	}
+	return syncCreatedClaimDirectoryParentsWithSync(paths.Dir, firstExistingDir, syncControllerDirectory)
 }
 
 func (s checkpointStore) writeMetadata(record checkpointRecord, paths checkpointPaths) error {
@@ -145,7 +162,7 @@ func (s checkpointStore) writeMetadata(record checkpointRecord, paths checkpoint
 		return exit(2, "encode checkpoint %s: %v", record.ID, err)
 	}
 	data = append(data, '\n')
-	if err := os.WriteFile(paths.Meta, data, 0o600); err != nil {
+	if err := writeStateFileAtomic(paths.Meta, data, syncControllerDirectory); err != nil {
 		return exit(2, "write checkpoint %s: %v", record.ID, err)
 	}
 	return nil
@@ -189,9 +206,61 @@ func validateCheckpointRecordTimes(record checkpointRecord) error {
 	return nil
 }
 
+// The lock survives record deletion; capture and deletion cannot publish through
+// different lock inodes. Usage updates reread under the same lock instead of
+// restoring a stale record after a concurrent delete or capture completion.
+func (s checkpointStore) withRecord(id string, wait bool, action func(checkpointRecord) error) error {
+	paths, err := s.Paths(id)
+	if err != nil {
+		return err
+	}
+	lockPath := paths.Dir + ".lock"
+	busy := exit(2, "checkpoint %s is busy; retry after its current operation finishes", id)
+	mu := claimMutationMutex(lockPath)
+	if wait {
+		mu.Lock()
+	} else if !mu.TryLock() {
+		return busy
+	}
+	defer mu.Unlock()
+	lock := flock.New(lockPath, flock.SetPermissions(0o600))
+	defer lock.Close()
+	locked := true
+	if wait {
+		err = lock.Lock()
+	} else {
+		locked, err = lock.TryLock()
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return checkpointNotFoundError{exit(2, "checkpoint %s not found", id)}
+	}
+	if err != nil {
+		return exit(2, "lock checkpoint %s: %v", id, err)
+	}
+	if !locked {
+		return busy
+	}
+	current, _, err := s.Read(id)
+	if err != nil {
+		return err
+	}
+	return action(current)
+}
+
 func recordCheckpointUse(store checkpointStore, record *checkpointRecord) error {
-	record.LastUsedAt = time.Now().UTC().Format(time.RFC3339)
-	return store.Write(*record)
+	err := store.withRecord(record.ID, true, func(current checkpointRecord) error {
+		current.LastUsedAt = time.Now().UTC().Format(time.RFC3339)
+		if err := store.Write(current); err != nil {
+			return err
+		}
+		*record = current
+		return nil
+	})
+	if isCheckpointNotFound(err) {
+		// An already-created fork survives checkpoint deletion; usage must not recreate it.
+		return nil
+	}
+	return err
 }
 
 func (s checkpointStore) List() ([]checkpointRecord, error) {
@@ -232,5 +301,18 @@ func (s checkpointStore) Delete(id string) error {
 	if err := os.RemoveAll(paths.Dir); err != nil {
 		return exit(2, "delete checkpoint %s: %v", id, err)
 	}
+	return nil
+}
+
+// WriteNativeProgress keeps the CLI's canonical record authoritative across provider
+// interruption. Do not advance the caller's state until the durable write succeeds.
+func (s checkpointStore) WriteNativeProgress(record *checkpointRecord, result NativeCheckpointCreateResult, noReboot bool) error {
+	next := *record
+	applyNativeImageCheckpointRecord(&next, coordinatorImageFromNativeCheckpoint(result.Image), noReboot)
+	next.Native.Metadata = maps.Clone(result.Metadata)
+	if err := s.Write(next); err != nil {
+		return err
+	}
+	*record = next
 	return nil
 }

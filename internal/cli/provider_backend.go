@@ -433,6 +433,9 @@ type NativeCheckpointImage struct {
 }
 
 type NativeCheckpointCreateRequest struct {
+	// Persist durably records cleanup identity before a provider mutates remote resources.
+	// Providers requiring interruption recovery must stop if persistence fails.
+	Persist      func(NativeCheckpointCreateResult) error
 	Config       Config
 	Server       Server
 	Target       SSHTarget
@@ -462,6 +465,8 @@ type NativeCheckpointWorkdirRequest struct {
 }
 
 type NativeCheckpointResourceRequest struct {
+	// Persist records recovered identity before deletion; absent on read-only verification.
+	Persist func(NativeCheckpointCreateResult) error
 	// LoadConfig is required only when the provider needs current CLI settings.
 	LoadConfig func() (Config, error)
 	Image      NativeCheckpointImage

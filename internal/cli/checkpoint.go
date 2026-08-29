@@ -35,6 +35,7 @@ const (
 	checkpointKindParallels    = "parallels-snapshot"
 	checkpointKindDockerCommit = "docker-commit"
 	checkpointKindDaytona      = "daytona-snapshot"
+	checkpointKindIncus        = "incus-image"
 
 	checkpointStrategyAuto         = "auto"
 	checkpointStrategyImage        = "image"
@@ -168,7 +169,7 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	}
 	createKind := checkpointCreateMode(*mode, *strategy, cfg, server, target, *recipeOnly)
 	switch createKind {
-	case checkpointKindRecipe, checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindMachine0, checkpointKindParallels, checkpointKindDockerCommit, checkpointKindDaytona, checkpointKindArchive:
+	case checkpointKindRecipe, checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindMachine0, checkpointKindParallels, checkpointKindDockerCommit, checkpointKindDaytona, checkpointKindIncus, checkpointKindArchive:
 		record.Kind = createKind
 	default:
 		return exit(2, "checkpoint mode must be auto, native, or archive")
@@ -178,53 +179,61 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
-	dir = paths.Dir
-	recordWritten := false
-	defer func() {
-		cleanupUncommittedCheckpointDir(dir, recordWritten, err)
-	}()
-	switch createKind {
-	case checkpointKindRecipe:
-	case checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindMachine0, checkpointKindParallels, checkpointKindDockerCommit, checkpointKindDaytona:
-		createStrategy := checkpointCreateStrategy(*mode, *strategy, createKind)
-		image, metadata, err := operationApp.createNativeCheckpoint(ctx, cfg, server, target, record.ID, leaseID, record.Name, repo.Name, workdir, createStrategy, *noReboot, *wait, *waitTimeout)
-		if image.ID != "" {
-			applyNativeImageCheckpointRecord(&record, image, *noReboot)
-			record.Native.Metadata = metadata
-		}
-		if err != nil {
-			if record.Native.ImageID != "" {
-				if writeErr := store.Write(record); writeErr != nil {
-					return writeErr
+	return store.withRecord(record.ID, false, func(record checkpointRecord) (err error) {
+		dir = paths.Dir
+		recordWritten := false
+		defer func() {
+			cleanupUncommittedCheckpointDir(dir, recordWritten, err)
+		}()
+		switch createKind {
+		case checkpointKindRecipe:
+		case checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindMachine0, checkpointKindParallels, checkpointKindDockerCommit, checkpointKindDaytona, checkpointKindIncus:
+			createStrategy := checkpointCreateStrategy(*mode, *strategy, createKind)
+			image, metadata, err := operationApp.createNativeCheckpoint(ctx, cfg, server, target, record.ID, leaseID, record.Name, repo.Name, workdir, createStrategy, *noReboot, *wait, *waitTimeout, func(result NativeCheckpointCreateResult) error {
+				if err := store.WriteNativeProgress(&record, result, *noReboot); err != nil {
+					return err
 				}
 				recordWritten = true
+				return nil
+			})
+			if image.ID != "" {
+				applyNativeImageCheckpointRecord(&record, image, *noReboot)
+				record.Native.Metadata = metadata
 			}
+			if err != nil {
+				if record.Native.ImageID != "" {
+					if writeErr := store.Write(record); writeErr != nil {
+						return writeErr
+					}
+					recordWritten = true
+				}
+				return err
+			}
+		case checkpointKindArchive:
+			if err := ensureCheckpointArchiveTarget(target); err != nil {
+				return err
+			}
+			bytes, err := createCheckpointArchive(ctx, target, workdir, paths.Archive)
+			if err != nil {
+				return err
+			}
+			record.ArchivePath = checkpointArchive
+			record.ArchiveBytes = bytes
+		}
+		if err := store.Write(record); err != nil {
 			return err
 		}
-	case checkpointKindArchive:
-		if err := ensureCheckpointArchiveTarget(target); err != nil {
-			return err
+		recordWritten = true
+		if *jsonOut {
+			return json.NewEncoder(a.Stdout).Encode(record)
 		}
-		bytes, err := createCheckpointArchive(ctx, target, workdir, paths.Archive)
-		if err != nil {
-			return err
+		if isNativeCheckpointKind(record.Kind) {
+			fmt.Fprintf(a.Stdout, "checkpoint created id=%s kind=%s resource=%s state=%s region=%s workdir=%s\n", record.ID, record.Kind, record.Native.ImageID, record.Native.State, blank(record.Native.Region, "-"), record.Workdir)
+			return nil
 		}
-		record.ArchivePath = checkpointArchive
-		record.ArchiveBytes = bytes
-	}
-	if err := store.Write(record); err != nil {
-		return err
-	}
-	recordWritten = true
-	if *jsonOut {
-		return json.NewEncoder(a.Stdout).Encode(record)
-	}
-	if isNativeCheckpointKind(record.Kind) {
-		fmt.Fprintf(a.Stdout, "checkpoint created id=%s kind=%s resource=%s state=%s region=%s workdir=%s\n", record.ID, record.Kind, record.Native.ImageID, record.Native.State, blank(record.Native.Region, "-"), record.Workdir)
+		fmt.Fprintf(a.Stdout, "checkpoint created id=%s kind=%s bytes=%s workdir=%s\n", record.ID, record.Kind, humanBytes(record.ArchiveBytes), record.Workdir)
 		return nil
-	}
-	fmt.Fprintf(a.Stdout, "checkpoint created id=%s kind=%s bytes=%s workdir=%s\n", record.ID, record.Kind, humanBytes(record.ArchiveBytes), record.Workdir)
-	return nil
+	})
 }
 
 type checkpointAudit struct {
@@ -1027,6 +1036,13 @@ func (a App) provisionCheckpointForkWithLeaseID(ctx context.Context, cfg Config,
 }
 
 func (a App) checkpointForkRecordOnce(ctx context.Context, cfg Config, backend Backend, sshBackend SSHLeaseBackend, repo Repo, store checkpointStore, record *checkpointRecord, paths checkpointPaths, keep, reclaim bool, requestedLeaseID, requestedSlug, workdirOverride string, clear bool, runOpts checkpointForkRunOptions) error {
+	if requestedLeaseID != "" {
+		unlock, err := lockFixedLeaseAcquisition(ctx, requestedLeaseID)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+	}
 	resultIndex := -1
 	var onAcquired func(LeaseTarget)
 	if runOpts.JSON && runOpts.Results != nil {
@@ -1369,14 +1385,21 @@ func (a App) checkpointDelete(ctx context.Context, args []string) error {
 }
 
 func deleteCheckpoint(ctx context.Context, store checkpointStore, id string, localOnly bool) error {
-	record, _, err := store.Read(id)
-	if err != nil {
-		return err
-	}
+	return store.withRecord(id, false, func(record checkpointRecord) error {
+		return deleteCheckpointRecord(ctx, store, record, localOnly)
+	})
+}
+
+func deleteCheckpointRecord(ctx context.Context, store checkpointStore, record checkpointRecord, localOnly bool) error {
+	id := record.ID
 	providerID := nativeCheckpointDeleteID(record)
 	if isNativeCheckpointKind(record.Kind) && providerID != "" && !localOnly {
 		if provider, ok := nativeCheckpointLifecycleProvider(Config{Provider: record.nativeProvider()}, Server{}); ok {
-			if err := provider.DeleteNativeCheckpoint(ctx, nativeCheckpointResourceRequest(record)); err != nil {
+			request := nativeCheckpointResourceRequest(record)
+			request.Persist = func(result NativeCheckpointCreateResult) error {
+				return store.WriteNativeProgress(&record, result, record.Native.NoReboot)
+			}
+			if err := provider.DeleteNativeCheckpoint(ctx, request); err != nil {
 				return err
 			}
 			return store.Delete(id)
@@ -1500,30 +1523,56 @@ func (a App) checkpointPrune(ctx context.Context, args []string) error {
 	now := time.Now()
 	createdCutoff := now.Add(-createdAge)
 	unusedCutoff := now.Add(-unusedAge)
-	matched := 0
-	for _, record := range records {
+	matches := func(record checkpointRecord) (bool, error) {
 		created, err := time.Parse(time.RFC3339, record.CreatedAt)
 		if err != nil {
-			return exit(2, "checkpoint %s has invalid createdAt: %v", record.ID, err)
+			return false, exit(2, "checkpoint %s has invalid createdAt: %v", record.ID, err)
 		}
 		lastUsed, err := time.Parse(time.RFC3339, record.LastUsedAt)
 		if err != nil {
-			return exit(2, "checkpoint %s has invalid lastUsedAt: %v", record.ID, err)
+			return false, exit(2, "checkpoint %s has invalid lastUsedAt: %v", record.ID, err)
 		}
 		matchesCreatedAge := createdAge == 0 || created.Before(createdCutoff)
 		matchesUnusedAge := unusedAge == 0 || lastUsed.Before(unusedCutoff)
-		if !matchesCreatedAge || !matchesUnusedAge || !checkpointMatchesPruneKind(record, kindFilter) {
+		return matchesCreatedAge && matchesUnusedAge && checkpointMatchesPruneKind(record, kindFilter), nil
+	}
+	matched := 0
+	for _, record := range records {
+		eligible, err := matches(record)
+		if err != nil {
+			return err
+		}
+		if !eligible {
 			continue
 		}
-		matched++
 		if *dryRun {
+			matched++
 			fmt.Fprintf(a.Stdout, "would delete id=%s kind=%s created=%s last_used=%s\n", record.ID, record.Kind, record.CreatedAt, record.LastUsedAt)
 			continue
 		}
-		if err := deleteCheckpoint(ctx, store, record.ID, *localOnly); err != nil {
+		var pruned *checkpointRecord
+		err = store.withRecord(record.ID, false, func(current checkpointRecord) error {
+			// A fork may have refreshed usage since the inventory was read.
+			eligible, err := matches(current)
+			if err != nil || !eligible {
+				return err
+			}
+			if err := deleteCheckpointRecord(ctx, store, current, *localOnly); err != nil {
+				return err
+			}
+			pruned = &current
+			return nil
+		})
+		if isCheckpointNotFound(err) {
+			continue
+		}
+		if err != nil {
 			return err
 		}
-		fmt.Fprintf(a.Stdout, "checkpoint pruned id=%s kind=%s created=%s last_used=%s\n", record.ID, record.Kind, record.CreatedAt, record.LastUsedAt)
+		if pruned != nil {
+			matched++
+			fmt.Fprintf(a.Stdout, "checkpoint pruned id=%s kind=%s created=%s last_used=%s\n", pruned.ID, pruned.Kind, pruned.CreatedAt, pruned.LastUsedAt)
+		}
 	}
 	if matched == 0 {
 		fmt.Fprintln(a.Stdout, "no checkpoints matched prune criteria")
@@ -1886,7 +1935,7 @@ func nativeCheckpointForkWorkdir(cfg Config, leaseID, repoName, override string)
 }
 
 func isNativeCheckpointKind(kind string) bool {
-	return kind == checkpointKindAWSAMI || kind == checkpointKindAWSEBS || kind == checkpointKindAzure || kind == checkpointKindAzureOS || kind == checkpointKindGCP || kind == checkpointKindGCPDisk || kind == checkpointKindHetzner || kind == checkpointKindMachine0 || kind == checkpointKindParallels || kind == checkpointKindDockerCommit || kind == checkpointKindDaytona
+	return kind == checkpointKindAWSAMI || kind == checkpointKindAWSEBS || kind == checkpointKindAzure || kind == checkpointKindAzureOS || kind == checkpointKindGCP || kind == checkpointKindGCPDisk || kind == checkpointKindHetzner || kind == checkpointKindMachine0 || kind == checkpointKindParallels || kind == checkpointKindDockerCommit || kind == checkpointKindDaytona || kind == checkpointKindIncus
 }
 
 func checkpointProviderForKind(kind string) string {
@@ -1907,6 +1956,8 @@ func checkpointProviderForKind(kind string) string {
 		return "local-container"
 	case checkpointKindDaytona:
 		return "daytona"
+	case checkpointKindIncus:
+		return "incus"
 	default:
 		return ""
 	}

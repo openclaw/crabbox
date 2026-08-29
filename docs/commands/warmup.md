@@ -72,8 +72,8 @@ attempt so an interrupted operation can be safely replayed.
 it and may append a short suffix if an active lease already uses that slug.
 
 `--lease-id cbx_<12 lowercase hex>` is the automation idempotency contract for
-providers that explicitly support fixed identities. Direct AWS, Machine0, and
-local-container leases, managed coordinator leases, and explicitly capable
+providers that explicitly support fixed identities. Direct AWS, Machine0, Incus,
+and local-container leases, managed coordinator leases, and explicitly capable
 external providers accept it. Replaying the same normalized create intent
 returns or joins the same lease, including after the creating process loses its
 response. Reusing the ID with a different provider, slug request, SSH key,
@@ -81,13 +81,19 @@ machine or container shape, capabilities, lifetime, or other immutable create
 input fails with `lease_id_conflict` before another provider create. Slugs
 remain display aliases and are never used as the idempotency key.
 
+Concurrent fixed-ID warmup and fork commands sharing a local state directory
+wait for the current acquisition to finish registration and preparation. A
+cancelled waiter makes no provider changes. If preparation fails after a fixed
+lease was acquired, the CLI retains it: retry the original command or explicitly
+stop the ID. A failed replay never owns automatic deletion of an adopted lease.
+
 Coordinator-backed fixed-ID creation uses a versioned `PUT /v1/leases/<id>`
 route. An older coordinator therefore rejects the request before provisioning;
 the CLI never falls back to slug lookup or legacy create behavior. After an
 ambiguous fixed create response, the CLI repeats that exact PUT to atomically
 confirm the same intent before it may poll lease status with GET.
 
-A fixed lease ID is single-use. Direct AWS, Machine0, and local-container
+A fixed lease ID is single-use. Direct AWS, Machine0, Incus, and local-container
 acquisitions fail closed if their bound resource later disappears. Successful
 stop and missing-resource cleanup replace the live local claim with a compact
 terminal tombstone, so the ID remains rejected after release. Use a new

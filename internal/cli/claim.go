@@ -1080,39 +1080,8 @@ func writeLeaseClaimAtomicWithSync(path string, claim leaseClaim, syncDirectory 
 	}
 	data = append(data, '\n')
 
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
-	if err != nil {
+	if err := writeStateFileAtomic(path, data, syncDirectory); err != nil {
 		return exit(2, "write claim %s: %v", path, err)
-	}
-	tmpPath := tmp.Name()
-	removeTemp := true
-	defer func() {
-		if removeTemp {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return exit(2, "write claim %s: %v", path, err)
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return exit(2, "write claim %s: %v", path, err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return exit(2, "write claim %s: %v", path, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return exit(2, "write claim %s: %v", path, err)
-	}
-	if err := replaceClaimFile(tmpPath, path); err != nil {
-		return exit(2, "write claim %s: %v", path, err)
-	}
-	removeTemp = false
-	if err := syncDirectory(dir); err != nil {
-		return exit(2, "sync claim directory %s: %v", dir, err)
 	}
 	return nil
 }
