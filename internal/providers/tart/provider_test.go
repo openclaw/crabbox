@@ -1402,6 +1402,7 @@ func TestDoctorTartNotInstalled(t *testing.T) {
 }
 
 func TestReleaseLease(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
 			commandKey([]string{"stop", "crabbox-blue-1234"}):   {},
@@ -1476,6 +1477,7 @@ func TestReleaseLeaseMessage(t *testing.T) {
 }
 
 func TestReleaseLeaseInfersLeaseIDFromLabels(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
 			commandKey([]string{"stop", "crabbox-blue-1234"}):   {},
@@ -2443,8 +2445,7 @@ func TestReleaseLeaseFallsBackToResolve(t *testing.T) {
 }
 
 func TestReleaseLeasePrunesMissingResolvedInstance(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	err := core.ClaimLeaseForRepoProviderScopePond(
 		"cbx_missingrel", "missing-rel", providerName, "instance:crabbox-missing-rel", "", t.TempDir(), 30*time.Minute, false,
 	)
@@ -2498,8 +2499,7 @@ func TestReleaseLeasePrunesMissingResolvedInstance(t *testing.T) {
 }
 
 func TestReleaseLeasePrunesAlreadyResolvedMissingInstance(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	err := core.ClaimLeaseForRepoProviderScopePond(
 		"cbx_resolvedmissing", "resolved-missing", providerName, "instance:crabbox-resolved-missing", "", t.TempDir(), 30*time.Minute, false,
 	)
@@ -2569,6 +2569,7 @@ func TestReleaseLeaseEmptyName(t *testing.T) {
 }
 
 func TestReleaseLeaseFromLabels(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
 			commandKey([]string{"stop", "crabbox-lab-vm"}):   {},
@@ -2591,6 +2592,7 @@ func TestReleaseLeaseFromLabels(t *testing.T) {
 }
 
 func TestReleaseLeaseIDFromLabel(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
 			commandKey([]string{"stop", "crabbox-noid-vm"}):   {},

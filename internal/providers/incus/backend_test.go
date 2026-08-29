@@ -14,6 +14,7 @@ import (
 	"github.com/lxc/incus/v7/shared/api"
 	"github.com/lxc/incus/v7/shared/cliconfig"
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 type fakeClient struct {
@@ -1921,6 +1922,7 @@ func TestResolveSkipsForeignInstancesBeforeManagedOnes(t *testing.T) {
 }
 
 func TestCleanupContinuesPastForeignAndFreshInstances(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	oldNewClient := newClient
 	now := time.Now().UTC()
 	fake := &fakeClient{
@@ -1992,6 +1994,7 @@ func TestCleanupContinuesPastForeignAndFreshInstances(t *testing.T) {
 }
 
 func TestCleanupStopsRunningStaleInstancesBeforeDelete(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	oldNewClient := newClient
 	now := time.Now().UTC()
 	fake := &fakeClient{
