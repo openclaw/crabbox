@@ -383,6 +383,24 @@ Three independent safety nets enforce expiry:
 
 See [Lifecycle and cleanup](../features/lifecycle-cleanup.md) for the shared model.
 
+## Typed ready-pool provenance
+
+Linux leases created from a boot image or disk snapshot record the exact
+immutable numeric resource ID and source reference after Compute Engine accepts
+the VM creation. Typed ready-pool identity uses the source namespace
+`projects/<project>/global/images` or
+`projects/<project>/global/snapshots`, the numeric ID, and the canonical
+architecture. The execution project must also be recorded as launch evidence,
+but it is not substituted for the source project and does not enter the
+identity. The launch zone is excluded so capacity fallback does not split an
+otherwise identical cohort.
+
+Only relative resource names and the lowercase official Compute API HTTPS forms
+are accepted. Family aliases, extra path segments, ports, queries, fragments,
+percent-encoded ambiguity, kind/collection mismatches, and non-numeric IDs fail
+closed. Machine images remain valid checkpoint sources but do not expose the
+created boot disk provenance required for typed ready-pool reuse.
+
 ## Checkpoints
 
 Brokered Linux GCP leases support native [checkpoints](../features/checkpoints.md):

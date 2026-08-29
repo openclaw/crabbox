@@ -29,6 +29,10 @@ import type {
 } from "./types";
 
 const computeBaseURL = "https://compute.googleapis.com/compute/v1";
+const gcpReadyPoolResourcePattern =
+  /^(?:https:\/\/(?:compute|www)\.googleapis\.com\/compute\/v1\/)?projects\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\/global\/(images|snapshots)\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)$/;
+const gcpReadyPoolScopePattern =
+  /^projects\/[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\/global\/(?:images|snapshots)$/;
 const tokenURL = "https://oauth2.googleapis.com/token";
 const metadataTokenURL =
   "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
@@ -61,6 +65,31 @@ class GCPOperationError extends Error {}
 
 export class ProviderProvisioningOutcomeUncertainError extends Error {
   override name = "ProviderProvisioningOutcomeUncertainError";
+}
+
+export function gcpReadyPoolImageScope(
+  sourceID: string | undefined,
+  kind: string | undefined,
+): string | undefined {
+  if (!sourceID || (kind !== "gcp-image" && kind !== "gcp-disk-snapshot")) {
+    return undefined;
+  }
+  const match = gcpReadyPoolResourcePattern.exec(sourceID);
+  if (!match) return undefined;
+  const project = match[1];
+  const collection = match[2];
+  if (!project || !collection) return undefined;
+  if (
+    (kind === "gcp-image" && collection !== "images") ||
+    (kind === "gcp-disk-snapshot" && collection !== "snapshots")
+  ) {
+    return undefined;
+  }
+  return `projects/${project}/global/${collection}`;
+}
+
+export function gcpReadyPoolImageScopeSupported(scope: string): boolean {
+  return gcpReadyPoolScopePattern.test(scope);
 }
 
 class GCPMetadataTokenRequestError extends Error {}

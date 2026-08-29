@@ -31,7 +31,7 @@ without being drained.
 ```text
 pool list                 list provider machine inventory
 pool ready [key]          list ready-pool entries
-pool identity <key>       generate an identity from an existing AWS image-backed lease
+pool identity <key>       generate an identity from an existing AWS or GCP image-backed lease
 pool register <key>       register a hydrated lease
 pool borrow <key>         borrow one ready lease
 pool heartbeat <key>      refresh a borrowed lease deadline
@@ -67,8 +67,9 @@ separate.
 ## Opt-in typed pools
 
 Typed pools are a separate, provider-scoped and image-pinned protocol; they do
-not replace legacy provider-neutral pools or let AWS and Azure share a typed
-cohort. Generate a supported identity from an existing active AWS Linux lease:
+not replace legacy provider-neutral pools or let providers share a typed
+cohort. Generate a supported identity from an existing active AWS or GCP Linux
+lease:
 
 ```sh
 crabbox pool identity example/app/main/linux \
@@ -89,16 +90,22 @@ crabbox pool ensure example/app/main/linux --min-ready 2 --max-ready 2 \
 `pool register --cache-compatibility node-22-pnpm-10` can also derive and
 register the identity automatically. `--cache-compatibility` is trusted operator
 metadata compared exactly; it is neither independently verified nor a security
-attestation. The coordinator independently derives the AWS region and immutable
-AMI from the lease, validates its persisted canonical architecture, and
-recomputes a length-framed UTF-8 hash of the exact repo/ref/commit/fingerprint
-metadata. Regenerate the identity when any bound repository input changes.
+attestation. The coordinator independently derives the immutable source from
+the lease: AWS uses the AMI and region; GCP uses the numeric image or
+disk-snapshot ID and its exact source project/collection namespace. GCP's
+execution project is required evidence but is not part of the source identity,
+and the launch zone does not split a cohort. The coordinator also validates
+persisted canonical architecture and recomputes a length-framed UTF-8 hash of
+the exact repo/ref/commit/fingerprint metadata. Regenerate the identity when any
+bound repository input changes.
 
-Only AWS Linux leases with an authoritative immutable AMI, matching region,
-and persisted canonical architecture are currently supported. Older leases
-missing that evidence and Azure, GCP, and other providers fail closed. Typed
-operations against an older coordinator report that typed pools are
-unsupported; they never fall back to legacy capacity.
+Supported leases are AWS Linux with an authoritative immutable AMI and matching
+region, or GCP Linux with an authoritative boot-image or disk-snapshot source,
+numeric resource ID, and execution project. Both require persisted canonical
+architecture. GCP machine-image checkpoints, older leases missing evidence,
+Azure, and other providers fail closed. Typed operations against an older
+coordinator report that typed pools are unsupported; they never fall back to
+legacy capacity.
 
 ## See Also
 

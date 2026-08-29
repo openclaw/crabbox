@@ -65,6 +65,7 @@ type CoordinatorLease struct {
 	Code                  bool                           `json:"code,omitempty"`
 	Tailscale             *TailscaleMetadata             `json:"tailscale,omitempty"`
 	Region                string                         `json:"region,omitempty"`
+	ProviderProject       string                         `json:"providerProject,omitempty"`
 	Owner                 string                         `json:"owner"`
 	Org                   string                         `json:"org"`
 	Share                 *CoordinatorShare              `json:"share,omitempty"`

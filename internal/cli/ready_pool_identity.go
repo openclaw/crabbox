@@ -19,7 +19,47 @@ const (
 	readyPoolIdentityValueMax  = 1024
 )
 
-var readyPoolDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+var (
+	readyPoolDigestPattern       = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	gcpReadyPoolNumericIDPattern = regexp.MustCompile(`^[0-9]+$`)
+	gcpReadyPoolResourcePattern  = regexp.MustCompile(
+		`^projects/([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)/global/(images|snapshots)/([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)$`,
+	)
+	gcpReadyPoolScopePattern = regexp.MustCompile(
+		`^projects/[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?/global/(images|snapshots)$`,
+	)
+)
+
+func gcpReadyPoolImageScope(sourceID, kind string) (string, bool) {
+	resource := sourceID
+	if strings.HasPrefix(resource, "https://") {
+		matched := false
+		for _, prefix := range []string{
+			"https://compute.googleapis.com/compute/v1/",
+			"https://www.googleapis.com/compute/v1/",
+		} {
+			if strings.HasPrefix(resource, prefix) {
+				resource = strings.TrimPrefix(resource, prefix)
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return "", false
+		}
+	}
+	match := gcpReadyPoolResourcePattern.FindStringSubmatch(resource)
+	if match == nil {
+		return "", false
+	}
+	collection := match[3]
+	if (kind == "gcp-image" && collection != "images") ||
+		(kind == "gcp-disk-snapshot" && collection != "snapshots") ||
+		(kind != "gcp-image" && kind != "gcp-disk-snapshot") {
+		return "", false
+	}
+	return fmt.Sprintf("projects/%s/global/%s", match[1], collection), true
+}
 
 func loadReadyPoolIdentity(path string) (CoordinatorReadyPoolIdentityV1, error) {
 	path = strings.TrimSpace(path)
@@ -129,7 +169,32 @@ func readyPoolIdentityMatchesLease(identity CoordinatorReadyPoolIdentityV1, leas
 	if lease.TargetOS != targetLinux {
 		return exit(2, "typed ready pools currently require a native Linux lease")
 	}
-	if lease.Image == nil || lease.Image.ID != identity.Image.ID || lease.Image.Provider != identity.Image.Provider || lease.Image.Region != identity.Image.Scope || lease.Region != identity.Image.Scope || lease.Provider != identity.Image.Provider {
+	switch identity.Image.Provider {
+	case "aws":
+		if lease.Image == nil || lease.Image.ID != identity.Image.ID || lease.Image.Provider != identity.Image.Provider || lease.Image.Region != identity.Image.Scope || lease.Region != identity.Image.Scope || lease.Provider != identity.Image.Provider {
+			return exit(7, "coordinator lease provider, immutable image, or scope does not match ready-pool identity")
+		}
+	case "gcp":
+		scope := ""
+		ok := false
+		if lease.Image != nil {
+			scope, ok = gcpReadyPoolImageScope(lease.Image.SourceID, lease.Image.Kind)
+		}
+		// Match the immutable source namespace, not the execution zone used for
+		// capacity routing. The execution project remains required evidence.
+		if lease.Image == nil ||
+			lease.Provider != "gcp" ||
+			lease.Image.Provider != "gcp" ||
+			lease.ProviderProject == "" ||
+			strings.TrimSpace(lease.ProviderProject) != lease.ProviderProject ||
+			!ok ||
+			!gcpReadyPoolScopePattern.MatchString(identity.Image.Scope) ||
+			!gcpReadyPoolNumericIDPattern.MatchString(identity.Image.ID) ||
+			lease.Image.ID != identity.Image.ID ||
+			scope != identity.Image.Scope {
+			return exit(7, "coordinator lease provider, immutable image, or scope does not match ready-pool identity")
+		}
+	default:
 		return exit(7, "coordinator lease provider, immutable image, or scope does not match ready-pool identity")
 	}
 	if lease.Architecture != identity.Architecture {
