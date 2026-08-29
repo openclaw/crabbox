@@ -541,6 +541,20 @@ limits as `--artifact-glob` apply. Delegated providers that support bounded run
 artifact retrieval enforce provider-owned file and byte limits before returning
 local artifacts.
 
+Use repeatable `--require-artifact-change <path>` for created-or-changed byte
+evidence on ordinary Linux SSH runs. Every exact relative path must be a regular
+file with no symlink components. Crabbox compares bounded content snapshots
+after sync/hydration and after successful execution; unchanged bytes (including
+identical rewrites) or missing files fail with exit 7, before schema validation
+or downloads. Only accepted paths enter the archive, using the checked snapshot
+bytes even when broader artifact globs are supplied. Existing flags retain their
+behavior without this opt-in mode. Workload/transport failures preserve their
+result and record `not-evaluated` in timing JSON's `artifactChanges` list.
+Limits: 32 paths, 1 KiB per path, 5 MiB per file, 20 MiB per snapshot. Delegated
+providers, macOS, WSL2, native Windows, and `--sync-only` are unsupported. See
+[Artifacts](../features/artifacts.md#run-scoped-artifacts) for the exact states
+and collection contract.
+
 Use repeatable `--download remote=local` when the command writes proof files on
 the box. Downloads run only after a successful remote command, paths resolve
 relative to the remote workdir unless absolute, and Windows paths use `=`
@@ -774,6 +788,7 @@ Run-specific flags:
 --fail-on-test-failures
 --artifact-glob <glob>       Repeatable.
 --require-artifact <glob>    Repeatable.
+--require-artifact-change <path>  Repeatable; Linux SSH, created or changed bytes.
 --download <remote=local>    Repeatable.
 --capture-stdout <local path>
 --capture-stderr <local path>
