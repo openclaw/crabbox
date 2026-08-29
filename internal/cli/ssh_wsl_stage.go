@@ -144,10 +144,6 @@ func (s *wslStageSpool) close() error {
 	return s.input.close()
 }
 
-func (s *wslStageSpool) prefixDigest(size int64) (digest [sha256.Size]byte, err error) {
-	return s.prefixDigestContext(context.Background(), size)
-}
-
 func (s *wslStageSpool) prefixDigestContext(ctx context.Context, size int64) (digest [sha256.Size]byte, err error) {
 	if size < 0 || size > s.size {
 		return digest, errors.New("invalid WSL2 stage prefix length")
