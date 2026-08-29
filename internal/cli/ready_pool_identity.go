@@ -20,46 +20,11 @@ const (
 )
 
 var (
-	readyPoolDigestPattern       = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-	gcpReadyPoolNumericIDPattern = regexp.MustCompile(`^[0-9]+$`)
-	gcpReadyPoolResourcePattern  = regexp.MustCompile(
-		`^projects/([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)/global/(images|snapshots)/([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)$`,
-	)
-	gcpReadyPoolScopePattern = regexp.MustCompile(
-		`^projects/[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?/global/(images|snapshots)$`,
+	readyPoolDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	gcpReadyPoolImagePath  = regexp.MustCompile(
+		`^(projects/([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)/global/(images|snapshots))/([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)$`,
 	)
 )
-
-func gcpReadyPoolImageScope(sourceID, kind string) (string, bool) {
-	resource := sourceID
-	if strings.HasPrefix(resource, "https://") {
-		matched := false
-		for _, prefix := range []string{
-			"https://compute.googleapis.com/compute/v1/",
-			"https://www.googleapis.com/compute/v1/",
-		} {
-			if strings.HasPrefix(resource, prefix) {
-				resource = strings.TrimPrefix(resource, prefix)
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			return "", false
-		}
-	}
-	match := gcpReadyPoolResourcePattern.FindStringSubmatch(resource)
-	if match == nil {
-		return "", false
-	}
-	collection := match[3]
-	if (kind == "gcp-image" && collection != "images") ||
-		(kind == "gcp-disk-snapshot" && collection != "snapshots") ||
-		(kind != "gcp-image" && kind != "gcp-disk-snapshot") {
-		return "", false
-	}
-	return fmt.Sprintf("projects/%s/global/%s", match[1], collection), true
-}
 
 func loadReadyPoolIdentity(path string) (CoordinatorReadyPoolIdentityV1, error) {
 	path = strings.TrimSpace(path)
@@ -175,10 +140,9 @@ func readyPoolIdentityMatchesLease(identity CoordinatorReadyPoolIdentityV1, leas
 			return exit(7, "coordinator lease provider, immutable image, or scope does not match ready-pool identity")
 		}
 	case "gcp":
-		scope := ""
-		ok := false
+		var source []string
 		if lease.Image != nil {
-			scope, ok = gcpReadyPoolImageScope(lease.Image.SourceID, lease.Image.Kind)
+			source = gcpReadyPoolImagePath.FindStringSubmatch(lease.Image.SourceID)
 		}
 		// Match the immutable source namespace, not the execution zone used for
 		// capacity routing. The execution project remains required evidence.
@@ -187,11 +151,13 @@ func readyPoolIdentityMatchesLease(identity CoordinatorReadyPoolIdentityV1, leas
 			lease.Image.Provider != "gcp" ||
 			lease.ProviderProject == "" ||
 			strings.TrimSpace(lease.ProviderProject) != lease.ProviderProject ||
-			!ok ||
-			!gcpReadyPoolScopePattern.MatchString(identity.Image.Scope) ||
-			!gcpReadyPoolNumericIDPattern.MatchString(identity.Image.ID) ||
+			source == nil ||
+			(lease.Image.Kind == "gcp-image" && source[4] != "images") ||
+			(lease.Image.Kind == "gcp-disk-snapshot" && source[4] != "snapshots") ||
+			(lease.Image.Kind != "gcp-image" && lease.Image.Kind != "gcp-disk-snapshot") ||
+			strings.Trim(identity.Image.ID, "0123456789") != "" ||
 			lease.Image.ID != identity.Image.ID ||
-			scope != identity.Image.Scope {
+			source[1] != identity.Image.Scope {
 			return exit(7, "coordinator lease provider, immutable image, or scope does not match ready-pool identity")
 		}
 	default:

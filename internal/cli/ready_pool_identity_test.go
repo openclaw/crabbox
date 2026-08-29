@@ -28,27 +28,6 @@ func testReadyPoolIdentity(t *testing.T, repo, ref, commit, fingerprint string) 
 	}
 }
 
-func testGCPReadyPoolIdentity(t *testing.T, repo, ref, commit, fingerprint string) CoordinatorReadyPoolIdentityV1 {
-	t.Helper()
-	identity := testReadyPoolIdentity(t, repo, ref, commit, fingerprint)
-	identity.Image = CoordinatorReadyPoolImageIdentity{
-		Provider: "gcp", Scope: "projects/source-project/global/images", ID: "1234567890123456789",
-	}
-	identity.Architecture = "arm64"
-	return identity
-}
-
-func testGCPReadyPoolLease(identity CoordinatorReadyPoolIdentityV1) CoordinatorLease {
-	return CoordinatorLease{
-		Provider: "gcp", ProviderProject: "execution-project", Region: "europe-west4-a",
-		TargetOS: targetLinux, Architecture: identity.Architecture,
-		Image: &CoordinatorLeaseImage{
-			ID: identity.Image.ID, Provider: "gcp", Kind: "gcp-image", Region: "us-central1-b",
-			SourceID: "https://www.googleapis.com/compute/v1/projects/source-project/global/images/runner-v3",
-		},
-	}
-}
-
 func writeTestReadyPoolIdentity(t *testing.T, identity CoordinatorReadyPoolIdentityV1) string {
 	t.Helper()
 	encoded, err := json.Marshal(identity)
@@ -151,44 +130,38 @@ func TestReadyPoolIdentityRejectsMismatchedLeaseEvidence(t *testing.T) {
 	}
 }
 
-func TestGCPReadyPoolIdentityGrammarAndLeaseEvidence(t *testing.T) {
-	for _, tc := range []struct {
-		sourceID string
-		kind     string
-		scope    string
-	}{
-		{"projects/source-project/global/images/runner-v3", "gcp-image", "projects/source-project/global/images"},
-		{"https://compute.googleapis.com/compute/v1/projects/source-project/global/images/runner-v3", "gcp-image", "projects/source-project/global/images"},
-		{"https://www.googleapis.com/compute/v1/projects/source-project/global/snapshots/runner-v3", "gcp-disk-snapshot", "projects/source-project/global/snapshots"},
-	} {
-		scope, ok := gcpReadyPoolImageScope(tc.sourceID, tc.kind)
-		if !ok || scope != tc.scope {
-			t.Fatalf("source=%q kind=%q scope=%q ok=%t want=%q", tc.sourceID, tc.kind, scope, ok, tc.scope)
-		}
+func TestReadyPoolIdentityMatchesDecodedGCPProvenance(t *testing.T) {
+	var lease CoordinatorLease
+	if err := json.Unmarshal([]byte(`{
+		"provider":"gcp","providerProject":"execution-project","region":"us-west1-b",
+		"target":"linux","architecture":"amd64",
+		"image":{"id":"8123456789012345678","provider":"gcp","kind":"gcp-image",
+		"region":"us-west1-b","sourceID":"projects/source-project/global/images/runner-v3"}
+	}`), &lease); err != nil {
+		t.Fatal(err)
 	}
-	for _, tc := range []struct {
-		sourceID string
-		kind     string
-	}{
-		{"https://compute.googleapis.com:443/compute/v1/projects/p/global/images/i", "gcp-image"},
-		{"https://compute.googleapis.com/compute/v1/projects/p/global/images/i?x=1", "gcp-image"},
-		{"https://compute.googleapis.com/compute/v1/projects/p/global/images/i#x", "gcp-image"},
-		{"projects/p/global/images/i%2fextra", "gcp-image"},
-		{"projects/p/global/images/family/i", "gcp-image"},
-		{"projects/p/global/images/i/extra", "gcp-image"},
-		{"projects/p/global/snapshots/i", "gcp-image"},
-		{"projects/p/global/images/i", "gcp-machine-image"},
-		{"Projects/p/global/images/i", "gcp-image"},
-	} {
-		if scope, ok := gcpReadyPoolImageScope(tc.sourceID, tc.kind); ok {
-			t.Fatalf("invalid source=%q kind=%q accepted as %q", tc.sourceID, tc.kind, scope)
-		}
+	identity := testReadyPoolIdentity(t, "", "", "", "")
+	identity.Image = CoordinatorReadyPoolImageIdentity{
+		Provider: "gcp",
+		Scope:    "projects/source-project/global/images",
+		ID:       "8123456789012345678",
 	}
-
-	identity := testGCPReadyPoolIdentity(t, "", "", "", "")
-	lease := testGCPReadyPoolLease(identity)
 	if err := readyPoolIdentityMatchesLease(identity, lease); err != nil {
 		t.Fatal(err)
+	}
+	for _, mutate := range []func(*CoordinatorLease){
+		func(value *CoordinatorLease) { value.ProviderProject = "" },
+		func(value *CoordinatorLease) { value.Image.SourceID = "projects/other/global/images/runner-v3" },
+		func(value *CoordinatorLease) { value.Image.ID = "different" },
+		func(value *CoordinatorLease) { value.Image.Kind = "gcp-machine-image" },
+	} {
+		changed := lease
+		image := *lease.Image
+		changed.Image = &image
+		mutate(&changed)
+		if err := readyPoolIdentityMatchesLease(identity, changed); err == nil {
+			t.Fatalf("mismatched GCP lease accepted: %#v", changed)
+		}
 	}
 }
 
@@ -337,80 +310,6 @@ func TestTypedReadyPoolBorrowDrainsMismatchedResponse(t *testing.T) {
 	}, identity)
 	if err == nil || !drained {
 		t.Fatalf("mismatch error=%v drained=%t", err, drained)
-	}
-}
-
-func TestTypedGCPReadyPoolBorrowAcceptsSourceIdentityWithoutZoneBinding(t *testing.T) {
-	identity := testGCPReadyPoolIdentity(t, "example-org/my-app", "main", "abc123", "")
-	lease := testGCPReadyPoolLease(identity)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if request.URL.Path != "/v1/ready-pools/builders/borrow-identity" {
-			t.Fatalf("valid GCP borrow attempted cleanup through %s", request.URL.Path)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(CoordinatorReadyPoolResponse{
-			Entry: CoordinatorReadyPoolEntry{
-				Key: "builders", LeaseID: "cbx_000000000002", BorrowToken: "borrow", Identity: &identity,
-			},
-			Lease: lease,
-		})
-	}))
-	defer server.Close()
-	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
-	if _, err := borrowValidatedTypedReadyPoolLease(context.Background(), &client, "builders", map[string]any{
-		"repo": "example-org/my-app", "ref": "main", "commit": "abc123", "identity": identity,
-	}, identity); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestTypedGCPReadyPoolBorrowDrainsMismatchedLeaseEvidence(t *testing.T) {
-	identity := testGCPReadyPoolIdentity(t, "example-org/my-app", "main", "abc123", "")
-	for _, tc := range []struct {
-		name   string
-		mutate func(*CoordinatorLease)
-	}{
-		{"source project", func(lease *CoordinatorLease) {
-			lease.Image.SourceID = "projects/other-project/global/images/runner-v3"
-		}},
-		{"source collection", func(lease *CoordinatorLease) {
-			lease.Image.Kind = "gcp-disk-snapshot"
-			lease.Image.SourceID = "projects/source-project/global/snapshots/runner-v3"
-		}},
-		{"numeric id", func(lease *CoordinatorLease) { lease.Image.ID = "987654321" }},
-		{"architecture", func(lease *CoordinatorLease) { lease.Architecture = "amd64" }},
-		{"execution project evidence", func(lease *CoordinatorLease) { lease.ProviderProject = "" }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			lease := testGCPReadyPoolLease(identity)
-			tc.mutate(&lease)
-			drained := false
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				switch request.URL.Path {
-				case "/v1/ready-pools/builders/borrow-identity":
-					_ = json.NewEncoder(w).Encode(CoordinatorReadyPoolResponse{
-						Entry: CoordinatorReadyPoolEntry{
-							Key: "builders", LeaseID: "cbx_000000000002", BorrowToken: "borrow", Identity: &identity,
-						},
-						Lease: lease,
-					})
-				case "/v1/ready-pools/builders/return-identity":
-					drained = true
-					_ = json.NewEncoder(w).Encode(map[string]any{"entry": map[string]any{"state": "draining"}})
-				default:
-					t.Fatalf("unexpected path %s", request.URL.Path)
-				}
-			}))
-			defer server.Close()
-			client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
-			_, err := borrowValidatedTypedReadyPoolLease(context.Background(), &client, "builders", map[string]any{
-				"repo": "example-org/my-app", "ref": "main", "commit": "abc123", "identity": identity,
-			}, identity)
-			if err == nil || !drained {
-				t.Fatalf("mismatch error=%v drained=%t", err, drained)
-			}
-		})
 	}
 }
 

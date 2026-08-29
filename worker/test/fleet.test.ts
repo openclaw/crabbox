@@ -45,11 +45,7 @@ import {
   workspaceTerminalOriginAllowed,
   type WebVNCBuffer,
 } from "../src/fleet";
-import {
-  GCPClient,
-  ProviderProvisioningOutcomeUncertainError,
-  gcpProviderLabelValue,
-} from "../src/gcp";
+import { GCPClient, gcpProviderLabelValue } from "../src/gcp";
 import { HetznerClient, HetznerProvisioningError } from "../src/hetzner";
 import { MISSING_ORG_KEY, isCurrentOrgKey, orgKeyForLabel } from "../src/org-identity";
 import { portalCode, portalVNC, webVNCCredentialsFromHistoryState } from "../src/portal";
@@ -67,6 +63,7 @@ import {
 import type {
   Env,
   ExternalRunnerRecord,
+  LeaseImageIdentity,
   LeaseRecord,
   LeaseRequest,
   ProviderFastSnapshotRestore,
@@ -9158,220 +9155,6 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
-  it.each([
-    {
-      name: "zone",
-      claim: {
-        provider: "gcp" as const,
-        cloudID: "crabbox-published",
-        region: "us-central1-c",
-        providerProject: "proj",
-      },
-    },
-    {
-      name: "project",
-      claim: {
-        provider: "gcp" as const,
-        cloudID: "crabbox-published",
-        region: "us-central1-b",
-        providerProject: "other-project",
-      },
-    },
-  ])("rejects a GCP publication claim outside the persisted $name", async ({ claim }) => {
-    const storage = new MemoryStorage();
-    const leaseID = "cbx_abcdef123456";
-    const fleet = testFleet(storage, {
-      gcp: fakeProvider(undefined, {
-        provider: "gcp",
-        cloudID: claim.cloudID,
-        region: "us-central1-b",
-        onPrepareLeaseCreate(config, lease) {
-          return { config, lease, provisioning: {} };
-        },
-        async onCreateProvisioning(provisioning) {
-          await provisioning?.onTargetAttempt?.({ region: "us-central1-b" });
-          await provisioning?.onResourceCreated?.(claim);
-        },
-      }),
-    });
-
-    const response = await fleet.fetch(
-      request("POST", "/v1/leases", {
-        body: {
-          leaseID,
-          provider: "gcp",
-          target: "linux",
-          gcpProject: "proj",
-          gcpZone: "us-central1-a",
-          sshPublicKey: "ssh-ed25519 test",
-        },
-      }),
-    );
-
-    expect(response.status).toBe(500);
-    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
-      state: "failed",
-      cloudID: "",
-      region: "us-central1-b",
-      providerProject: "proj",
-      provisioningResourceMayExist: true,
-      provisioningFailureRetryable: false,
-      cleanupError: expect.stringContaining("invalid allocation claim"),
-    });
-  });
-
-  it("publishes exact GCP fallback identity before the lease becomes active", async () => {
-    const storage = new MemoryStorage();
-    const leaseID = "cbx_abcdef123456";
-    const cloudID = "crabbox-published";
-    const fleet = testFleet(storage, {
-      gcp: fakeProvider(undefined, {
-        provider: "gcp",
-        cloudID,
-        region: "us-central1-b",
-        onPrepareLeaseCreate(config, lease) {
-          return { config, lease, provisioning: {} };
-        },
-        async onCreateProvisioning(provisioning) {
-          await provisioning?.onTargetAttempt?.({ region: "us-central1-b" });
-          expect(
-            await provisioning?.onResourceCreated?.({
-              provider: "gcp",
-              cloudID,
-              region: "us-central1-b",
-              providerProject: "proj",
-            }),
-          ).toBe(true);
-          expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
-            state: "provisioning",
-            cloudID,
-            region: "us-central1-b",
-            providerProject: "proj",
-          });
-        },
-      }),
-    });
-
-    const response = await fleet.fetch(
-      request("POST", "/v1/leases", {
-        body: {
-          leaseID,
-          provider: "gcp",
-          target: "linux",
-          gcpProject: "proj",
-          gcpZone: "us-central1-a",
-          sshPublicKey: "ssh-ed25519 test",
-        },
-      }),
-    );
-
-    expect(response.status).toBe(201);
-    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
-      state: "active",
-      cloudID,
-      region: "us-central1-b",
-      providerProject: "proj",
-    });
-  });
-
-  it("keeps GCP uncertainty in interrupted-create recovery until a later lookup is visible", async () => {
-    const storage = new MemoryStorage();
-    const leaseID = "cbx_abcdef123456";
-    let recoveries = 0;
-    const releases: string[] = [];
-    const recovered: ProviderMachine = {
-      provider: "gcp",
-      id: 123,
-      cloudID: "crabbox-blue-lobster-c80c2195",
-      name: "crabbox-blue-lobster-c80c2195",
-      status: "running",
-      serverType: "e2-micro",
-      host: "192.0.2.10",
-      region: "us-central1-a",
-      labels: {
-        crabbox: "true",
-        created_by: "crabbox",
-        provider: "gcp",
-        lease: leaseID,
-        owner: "alice_example.com",
-        slug: "blue-lobster",
-      },
-    };
-    const fleet = testFleet(storage, {
-      gcp: fakeProvider(
-        async () => {
-          throw new ProviderProvisioningOutcomeUncertainError(
-            "GCP instance insert outcome is uncertain: socket closed",
-          );
-        },
-        {
-          provider: "gcp",
-          onPrepareLeaseCreate(config, lease) {
-            return { config, lease, provisioning: {} };
-          },
-          onRecoverServer() {
-            recoveries += 1;
-            if (recoveries === 1) {
-              throw new Error("gcp GET instance: http 404: not found");
-            }
-            return recovered;
-          },
-          onReleaseLease(lease) {
-            releases.push(lease.cloudID);
-          },
-        },
-      ),
-    });
-
-    const response = await fleet.fetch(
-      request("POST", "/v1/leases", {
-        body: {
-          leaseID,
-          provider: "gcp",
-          target: "linux",
-          gcpProject: "proj",
-          gcpZone: "us-central1-a",
-          sshPublicKey: "ssh-ed25519 test",
-        },
-      }),
-    );
-
-    expect(response.status).toBe(500);
-    const failed = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
-    expect(failed).toMatchObject({
-      state: "failed",
-      cloudID: "",
-      provisioningResourceMayExist: true,
-      provisioningFailureRetryable: false,
-      provisioningRequestStartedAt: expect.any(String),
-      provisioningRequestSettledAt: expect.any(String),
-    });
-
-    await fleet.alarm();
-    const missing = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
-    expect(recoveries).toBe(1);
-    expect(releases).toEqual([]);
-    expect(missing).toMatchObject({
-      cloudID: "",
-      provisioningRecoveryMissingSince: expect.any(String),
-      provisioningRequestStartedAt: failed.provisioningRequestStartedAt,
-    });
-
-    storage.seed(`lease:${leaseID}`, {
-      ...missing,
-      cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
-    });
-    await fleet.alarm();
-
-    expect(recoveries).toBe(2);
-    expect(releases).toEqual([recovered.cloudID]);
-    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
-      state: "failed",
-      cloudID: recovered.cloudID,
-      provisioningResourceMayExist: false,
-    });
-  });
-
   it("persists and retries an exact funded-provider cleanup claim", async () => {
     const storage = new MemoryStorage();
     const leaseID = "cbx_abcdef123456";
@@ -14027,6 +13810,7 @@ describe("fleet lease identity and idle", () => {
 
     for (const [, override] of [
       ["azure snapshot", { provider: "azure", providerScope: "/subscriptions/a/resourceGroups/b" }],
+      ["gcp image", { provider: "gcp", providerProject: "example-project" }],
       ["missing architecture", { architecture: undefined }],
       ["noncanonical architecture", { architecture: "x86_64" }],
       ["missing immutable image", { image: undefined }],
@@ -14050,173 +13834,189 @@ describe("fleet lease identity and idle", () => {
     }
   });
 
-  it("derives strict GCP image and snapshot identities without binding fallback zones", async () => {
+  it("observes and persists GCP evidence for generated and supplied typed identities", async () => {
+    for (const action of ["identity", "register-identity"] as const) {
+      const storage = new MemoryStorage();
+      const lease = typedGCPReadyPoolLease(
+        action === "identity" ? "cbx_000000000097" : "cbx_000000000098",
+      );
+      storage.seed(`lease:${lease.id}`, lease);
+      let observations = 0;
+      const fleet = testFleet(storage, {
+        gcp: fakeProvider(undefined, {
+          provider: "gcp",
+          onObserveReadyPoolImageIdentity(observed) {
+            observations += 1;
+            expect(observed.region).toBe("us-west1-b");
+            expect(observed.providerProject).toBe("execution-project");
+            return typedGCPImage;
+          },
+        }),
+      });
+      const identity = await typedGCPReadyPoolIdentity();
+      const response = await fleet.fetch(
+        request("POST", `/v1/ready-pools/builders/${action}`, {
+          headers: typedReadyPoolHeaders(),
+          body: {
+            leaseID: lease.id,
+            ...typedReadyPoolMetadata(),
+            ...(action === "identity" ? { cacheCompatibility: "node-22" } : { identity }),
+          },
+        }),
+      );
+
+      expect(response.status).toBe(200);
+      expect(observations).toBe(1);
+      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.image).toEqual(typedGCPImage);
+      if (action === "identity") {
+        expect(await response.json()).toEqual({ identity });
+      } else {
+        expect(await response.json()).toMatchObject({ entry: { identity } });
+      }
+    }
+  });
+
+  it("authorizes before GCP observation and maps provider failures to actionable 502s", async () => {
     const storage = new MemoryStorage();
-    const fleet = testFleet(storage);
-    const baseLease = testLease({
-      id: "cbx_000000000098",
-      provider: "gcp",
-      target: "linux",
-      architecture: "arm64",
-      owner: "alice@example.com",
-      org: "example-org",
-      cloudID: "crabbox-builders",
-      region: "us-central1-b",
-      providerProject: "execution-project",
-      image: {
-        id: "1234567890123456789",
-        source: "explicit",
+    const lease = typedGCPReadyPoolLease();
+    storage.seed(`lease:${lease.id}`, lease);
+    let observations = 0;
+    const fleet = testFleet(storage, {
+      gcp: fakeProvider(undefined, {
         provider: "gcp",
-        kind: "gcp-image",
-        region: "us-central1-a",
-        sourceID:
-          "https://compute.googleapis.com/compute/v1/projects/source-project/global/images/runner-v3",
-      },
-      expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
-    });
-    storage.seed(`lease:${baseLease.id}`, baseLease);
-
-    const generated = await fleet.fetch(
-      request("POST", "/v1/ready-pools/builders/identity", {
-        headers: typedReadyPoolHeaders(),
-        body: {
-          leaseID: baseLease.id,
-          ...typedReadyPoolMetadata(),
-          cacheCompatibility: "node-22",
+        onObserveReadyPoolImageIdentity() {
+          observations += 1;
+          throw new Error("permission denied");
         },
       }),
-    );
-    expect(generated.status).toBe(200);
-    expect(await generated.json()).toEqual({
-      identity: {
-        ...(await typedReadyPoolIdentity("node-22")),
-        image: {
-          provider: "gcp",
-          scope: "projects/source-project/global/images",
-          id: "1234567890123456789",
-        },
-        architecture: "arm64",
-      },
     });
-
-    storage.seed(`lease:${baseLease.id}`, {
-      ...baseLease,
-      region: "europe-west4-a",
-      image: {
-        ...baseLease.image!,
-        kind: "gcp-disk-snapshot",
-        source: "snapshot",
-        sourceID: "projects/source-project/global/snapshots/runner-v3",
-      },
-    });
-    const snapshot = await fleet.fetch(
+    const body = { leaseID: lease.id, ...typedReadyPoolMetadata(), cacheCompatibility: "node-22" };
+    const forbidden = await fleet.fetch(
       request("POST", "/v1/ready-pools/builders/identity", {
-        headers: typedReadyPoolHeaders(),
-        body: {
-          leaseID: baseLease.id,
-          ...typedReadyPoolMetadata(),
-          cacheCompatibility: "node-22",
+        headers: {
+          "x-crabbox-owner": "mallory@example.com",
+          "x-crabbox-org": "example-org",
         },
+        body,
       }),
     );
-    expect(snapshot.status).toBe(200);
-    expect(await snapshot.json()).toMatchObject({
-      identity: {
-        image: {
-          provider: "gcp",
-          scope: "projects/source-project/global/snapshots",
-          id: "1234567890123456789",
-        },
-        architecture: "arm64",
-      },
-    });
+    expect(forbidden.status).toBe(404);
+    expect(observations).toBe(0);
 
-    const withoutProviderProject = { ...baseLease };
-    delete withoutProviderProject.providerProject;
-    const invalidLeases: LeaseRecord[] = [
-      withoutProviderProject,
-      { ...baseLease, image: { ...baseLease.image!, id: "image-name" } },
-      { ...baseLease, image: { ...baseLease.image!, kind: "gcp-machine-image" } },
-      {
-        ...baseLease,
-        image: {
-          ...baseLease.image!,
-          sourceID: "projects/source-project/global/images/family/runner-v3",
-        },
-      },
-      {
-        ...baseLease,
-        image: {
-          ...baseLease.image!,
-          sourceID: "https://compute.googleapis.com:443/compute/v1/projects/p/global/images/i",
-        },
-      },
-      {
-        ...baseLease,
-        image: {
-          ...baseLease.image!,
-          sourceID: "projects/source-project/global/images/runner-v3?x=1",
-        },
-      },
-      {
-        ...baseLease,
-        image: {
-          ...baseLease.image!,
-          sourceID: "projects/source-project/global/images/runner-v3#x",
-        },
-      },
-      {
-        ...baseLease,
-        image: {
-          ...baseLease.image!,
-          sourceID: "projects/source-project/global/images/runner%2dv3",
-        },
-      },
-      {
-        ...baseLease,
-        image: {
-          ...baseLease.image!,
-          sourceID: "projects/source-project/global/images/runner-v3/extra",
-        },
-      },
-      {
-        ...baseLease,
-        image: {
-          ...baseLease.image!,
-          sourceID: "Projects/source-project/global/images/runner-v3",
-        },
-      },
-      {
-        ...baseLease,
-        image: {
-          ...baseLease.image!,
-          sourceID:
-            "https://example.googleapis.com/compute/v1/projects/p/global/images/runner-v3",
-        },
-      },
-      {
-        ...baseLease,
-        image: {
-          ...baseLease.image!,
-          sourceID: "projects/source-project/global/snapshots/runner-v3",
-        },
-      },
-    ];
-    for (const invalidLease of invalidLeases) {
-      storage.seed(`lease:${baseLease.id}`, invalidLease);
-      // oxlint-disable-next-line eslint/no-await-in-loop -- each request validates one persisted GCP provenance shape.
+    storage.seed(`lease:${lease.id}`, { ...lease, state: "released" });
+    const inactive = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/identity", {
+        headers: typedReadyPoolHeaders(),
+        body,
+      }),
+    );
+    expect(inactive.status).toBe(409);
+    expect(observations).toBe(0);
+    storage.seed(`lease:${lease.id}`, lease);
+
+    const failed = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/identity", {
+        headers: typedReadyPoolHeaders(),
+        body,
+      }),
+    );
+    expect(failed.status).toBe(502);
+    expect(await failed.json()).toMatchObject({
+      error: "ready_pool_image_observation_failed",
+      message: expect.stringContaining("compute.instances.get and compute.disks.get"),
+    });
+  });
+
+  it("CAS-persisted GCP evidence is idempotent and rejects lease drift", async () => {
+    for (const fixture of [
+      { name: "equal evidence", equal: true, want: 200 },
+      { name: "region drift", equal: false, want: 409 },
+    ]) {
+      const storage = new MemoryStorage();
+      const lease = typedGCPReadyPoolLease();
+      storage.seed(`lease:${lease.id}`, lease);
+      const fleet = testFleet(storage, {
+        gcp: fakeProvider(undefined, {
+          provider: "gcp",
+          onObserveReadyPoolImageIdentity() {
+            storage.seed(`lease:${lease.id}`, {
+              ...lease,
+              ...(fixture.equal ? { image: typedGCPImage } : { region: "us-west1-c" }),
+            });
+            return typedGCPImage;
+          },
+        }),
+      });
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each fixture owns separate state.
       const response = await fleet.fetch(
         request("POST", "/v1/ready-pools/builders/identity", {
           headers: typedReadyPoolHeaders(),
           body: {
-            leaseID: baseLease.id,
+            leaseID: lease.id,
             ...typedReadyPoolMetadata(),
             cacheCompatibility: "node-22",
           },
         }),
       );
-      expect(response.status).toBe(409);
+      expect(response.status, fixture.name).toBe(fixture.want);
+      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.region).toBe(
+        fixture.equal ? "us-west1-b" : "us-west1-c",
+      );
     }
+  });
+
+  it("does not observe legacy registration, AWS identities, or missing GCP evidence", async () => {
+    const storage = new MemoryStorage();
+    const gcpLease = typedGCPReadyPoolLease();
+    storage.seed(`lease:${gcpLease.id}`, gcpLease);
+    let observations = 0;
+    const fleet = testFleet(storage, {
+      gcp: fakeProvider(undefined, {
+        provider: "gcp",
+        onObserveReadyPoolImageIdentity() {
+          observations += 1;
+          return undefined;
+        },
+      }),
+    });
+    const legacy = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/register", {
+        headers: typedReadyPoolHeaders(),
+        body: { leaseID: gcpLease.id },
+      }),
+    );
+    expect(legacy.status).toBe(200);
+    expect(observations).toBe(0);
+
+    const missing = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/identity", {
+        headers: typedReadyPoolHeaders(),
+        body: {
+          leaseID: gcpLease.id,
+          ...typedReadyPoolMetadata(),
+          cacheCompatibility: "node-22",
+        },
+      }),
+    );
+    expect(missing.status).toBe(409);
+    expect(observations).toBe(1);
+
+    const observeGCP = vi.spyOn(GCPClient.prototype, "observeReadyPoolImageIdentity");
+    const awsLease = typedReadyPoolLease();
+    storage.seed(`lease:${awsLease.id}`, awsLease);
+    const aws = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/identity", {
+        headers: typedReadyPoolHeaders(),
+        body: {
+          leaseID: awsLease.id,
+          ...typedReadyPoolMetadata(),
+          cacheCompatibility: "node-22",
+        },
+      }),
+    );
+    expect(aws.status).toBe(200);
+    expect(observeGCP).not.toHaveBeenCalled();
+    observeGCP.mockRestore();
   });
 
   it("persists canonical architecture on newly provisioned leases", async () => {
@@ -14535,201 +14335,6 @@ describe("fleet lease identity and idle", () => {
       counts: { ready: 1, inFlight: 0 },
       satisfied: true,
     });
-  });
-
-  it("runs GCP image and snapshot cohorts through typed claim, registration, and borrowing", async () => {
-    await Promise.all(
-      [
-        {
-          key: "gcp-images",
-          leaseID: "cbx_000000000096",
-          kind: "gcp-image",
-          source: "explicit",
-          collection: "images",
-        },
-        {
-          key: "gcp-snapshots",
-          leaseID: "cbx_000000000097",
-          kind: "gcp-disk-snapshot",
-          source: "snapshot",
-          collection: "snapshots",
-        },
-      ].map(async (fixture) => {
-        const storage = new MemoryStorage();
-        const fleet = testFleet(storage);
-        const headers = typedReadyPoolHeaders();
-        const metadata = typedReadyPoolMetadata();
-        const lease = testLease({
-          id: fixture.leaseID,
-          provider: "gcp",
-          target: "linux",
-          architecture: "amd64",
-          owner: "alice@example.com",
-          org: "example-org",
-          cloudID: `crabbox-${fixture.key}`,
-          region: "us-central1-b",
-          providerProject: "execution-project",
-          image: {
-            id: "1234567890123456789",
-            source: fixture.source as "explicit" | "snapshot",
-            provider: "gcp",
-            kind: fixture.kind,
-            region: "us-central1-a",
-            sourceID: `https://www.googleapis.com/compute/v1/projects/source-project/global/${fixture.collection}/runner-v3`,
-          },
-          expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
-        });
-        storage.seed(`lease:${lease.id}`, lease);
-
-        const generated = await fleet.fetch(
-          request("POST", `/v1/ready-pools/${fixture.key}/identity`, {
-            headers,
-            body: { leaseID: lease.id, ...metadata, cacheCompatibility: "node-22" },
-          }),
-        );
-        expect(generated.status).toBe(200);
-        const generatedBody = (await generated.json()) as { identity: ReadyPoolIdentityV1 };
-        const identity = generatedBody.identity;
-        expect(identity.image).toEqual({
-          provider: "gcp",
-          scope: `projects/source-project/global/${fixture.collection}`,
-          id: "1234567890123456789",
-        });
-
-        storage.seed(`lease:${lease.id}`, {
-          ...lease,
-          region: "europe-west4-a",
-          image: {
-            ...lease.image!,
-            sourceID: `projects/source-project/global/${fixture.collection}/runner-v3`,
-          },
-        });
-        const equivalent = await fleet.fetch(
-          request("POST", `/v1/ready-pools/${fixture.key}/identity`, {
-            headers,
-            body: { leaseID: lease.id, ...metadata, cacheCompatibility: "node-22" },
-          }),
-        );
-        expect(await equivalent.json()).toEqual({ identity });
-
-        const first = await fleet.fetch(
-          request("POST", `/v1/ready-pools/${fixture.key}/reconcile-identity`, {
-            headers,
-            body: { ...metadata, identity, minReady: 1, maxReady: 1, claim: true },
-          }),
-        );
-        expect(first.status).toBe(200);
-        const firstBody = (await first.json()) as { claim: { token: string } };
-        expect(firstBody.claim.token).toBeTruthy();
-
-        const registered = await fleet.fetch(
-          request("POST", `/v1/ready-pools/${fixture.key}/register-identity`, {
-            headers,
-            body: {
-              leaseID: lease.id,
-              ...metadata,
-              identity,
-              fillClaimToken: firstBody.claim.token,
-            },
-          }),
-        );
-        expect(registered.status).toBe(200);
-        expect(
-          storage.value(`typed-ready-pool-v1-fill-claim:${firstBody.claim.token}`),
-        ).toBeUndefined();
-        expect(
-          storage.value<ReadyPoolEntry>(`typed-ready-pool-v1:${fixture.key}:${lease.id}`),
-        ).toMatchObject({ state: "ready", identity });
-
-        const settled = await fleet.fetch(
-          request("POST", `/v1/ready-pools/${fixture.key}/reconcile-identity`, {
-            headers,
-            body: { ...metadata, identity, minReady: 1, maxReady: 1, claim: true },
-          }),
-        );
-        expect(await settled.json()).toMatchObject({
-          counts: { ready: 1, inFlight: 0 },
-          satisfied: true,
-        });
-
-        const borrowed = await fleet.fetch(
-          request("POST", `/v1/ready-pools/${fixture.key}/borrow-identity`, {
-            headers,
-            body: { ...metadata, identity },
-          }),
-        );
-        expect(borrowed.status).toBe(200);
-        expect(await borrowed.json()).toMatchObject({ entry: { state: "busy", identity } });
-        const busy = await fleet.fetch(
-          request("POST", `/v1/ready-pools/${fixture.key}/borrow-identity`, {
-            headers,
-            body: { ...metadata, identity },
-          }),
-        );
-        expect(busy.status).toBe(409);
-      }),
-    );
-  });
-
-  it("separates GCP source namespaces and rejects malformed typed identities", async () => {
-    const storage = new MemoryStorage();
-    const fleet = testFleet(storage);
-    const headers = typedReadyPoolHeaders();
-    const metadata = typedReadyPoolMetadata();
-    const base = await typedReadyPoolIdentity();
-    const imageIdentity: ReadyPoolIdentityV1 = {
-      ...base,
-      image: {
-        provider: "gcp",
-        scope: "projects/source-project/global/images",
-        id: "1234567890123456789",
-      },
-    };
-    for (const identity of [
-      imageIdentity,
-      {
-        ...imageIdentity,
-        image: { ...imageIdentity.image, scope: "projects/other-project/global/images" },
-      },
-      {
-        ...imageIdentity,
-        image: { ...imageIdentity.image, scope: "projects/source-project/global/snapshots" },
-      },
-    ]) {
-      // oxlint-disable-next-line eslint/no-await-in-loop -- each valid identity must persist a separate desired cohort.
-      const response = await fleet.fetch(
-        request("POST", "/v1/ready-pools/gcp-collisions/reconcile-identity", {
-          headers,
-          body: { ...metadata, identity, minReady: 1, maxReady: 1, claim: true },
-        }),
-      );
-      expect(response.status).toBe(200);
-    }
-    expect((await storage.list({ prefix: "typed-ready-pool-v1-desired:" })).size).toBe(3);
-
-    for (const image of [
-      { provider: "gcp", scope: "projects/source-project/global/images/extra", id: "123" },
-      { provider: "gcp", scope: "projects/source-project/global/images", id: "image-name" },
-      { provider: "gcp", scope: "projects/SOURCE/global/images", id: "123" },
-      { provider: "gcp", scope: "projects/source-project/global/machineImages", id: "123" },
-      {
-        provider: "gcp",
-        scope: "https://compute.googleapis.com/compute/v1/projects/p/global/images",
-        id: "123",
-      },
-    ]) {
-      // oxlint-disable-next-line eslint/no-await-in-loop -- each malformed namespace is independently rejected.
-      const response = await fleet.fetch(
-        request("POST", "/v1/ready-pools/gcp-invalid/reconcile-identity", {
-          headers,
-          body: { ...metadata, identity: { ...base, image }, minReady: 1, maxReady: 1 },
-        }),
-      );
-      expect(response.status).toBe(409);
-      expect(await response.json()).toMatchObject({
-        error: "unsupported_ready_pool_image_identity",
-      });
-    }
   });
 
   it("drains typed entries immediately when their authoritative lease image or return identity changes", async () => {
@@ -23184,216 +22789,25 @@ describe("fleet lease identity and idle", () => {
     expect(lease.region).toBe("us-central1-a");
   });
 
-  it("resolves one GCP boot image before provisioning and persists the successful zone identity", async () => {
-    const storage = new MemoryStorage();
-    const env: Partial<Env> = {
-      CRABBOX_GCP_PROJECT: "operator-project",
-      CRABBOX_GCP_ZONE: "us-central1-a",
-      GCP_CLIENT_EMAIL: "coordinator@example-project.iam.gserviceaccount.com",
-      GCP_PRIVATE_KEY: "test-private-key",
-    };
-    const resolved = {
-      identity: {
-        id: "8123456789012345678",
-        source: "explicit" as const,
-        provider: "gcp" as const,
-        kind: "gcp-image",
-        region: "us-central1-a",
-        sourceID:
-          "https://www.googleapis.com/compute/v1/projects/operator-project/global/images/runner-v3",
-      },
-      launchSource:
-        "https://www.googleapis.com/compute/v1/projects/operator-project/global/images/runner-v3",
-    };
-    const resolveBootImage = vi
-      .spyOn(GCPClient.prototype, "resolveBootImage")
-      .mockResolvedValue(resolved);
-    let createdConfig: LeaseConfig | undefined;
-    const createServer = vi
-      .spyOn(GCPClient.prototype, "createServerWithFallback")
-      .mockImplementation(async (config) => {
-        createdConfig = config;
-        return {
-          server: {
-            provider: "gcp",
-            id: 123,
-            cloudID: "crabbox-gcp-test",
-            name: "crabbox-gcp-test",
-            status: "running",
-            serverType: "e2-micro",
-            host: "192.0.2.10",
-            region: "us-central1-b",
-            labels: {},
-          },
-          serverType: "e2-micro",
-          image: { ...resolved.identity, region: "us-central1-b" },
-        };
-      });
-    try {
-      const fleet = testFleet(storage, { gcp: new GCPProvider(env as Env) }, env);
-      const create = await fleet.fetch(
-        request("POST", "/v1/leases", {
-          headers: {
-            "x-crabbox-admin": "true",
-            "x-crabbox-owner": "alice@example.com",
-            "x-crabbox-org": "example-org",
-          },
-          body: {
-            leaseID: "cbx_abcdef123456",
-            provider: "gcp",
-            gcpImage: "projects/operator-project/global/images/family/runner",
-            class: "standard",
-            serverType: "e2-micro",
-            sshPublicKey: "ssh-ed25519 test",
-          },
-        }),
+  it("keeps ordinary GCP launch selectors unchanged without provenance observation", async () => {
+    const provider = new GCPProvider({
+      CRABBOX_GCP_PROJECT: "execution-project",
+    } as Env);
+    const observe = vi.spyOn(GCPClient.prototype, "observeReadyPoolImageIdentity");
+    for (const input of [
+      { gcpImage: "projects/source/global/images/runner-v3" },
+      { gcpSnapshot: "projects/source/global/snapshots/runner-v3" },
+      { gcpMachineImage: "projects/source/global/machineImages/runner-v3" },
+    ]) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- verify each selector independently.
+      const prepared = await provider.prepareLeaseConfig(
+        leaseConfig({ provider: "gcp", sshPublicKey: "ssh-ed25519 test", ...input }),
       );
-
-      expect(create.status).toBe(201);
-      expect(resolveBootImage).toHaveBeenCalledOnce();
-      expect(createServer).toHaveBeenCalledOnce();
-      expect(createdConfig).toMatchObject({
-        gcpImage: resolved.launchSource,
-        selectedImage: resolved.identity,
-      });
-      expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")).toMatchObject({
-        region: "us-central1-b",
-        image: { ...resolved.identity, region: "us-central1-b" },
-      });
-    } finally {
-      resolveBootImage.mockRestore();
-      createServer.mockRestore();
+      expect(prepared).toMatchObject(input);
+      expect(prepared.gcpProject).toBe("execution-project");
     }
-  });
-
-  it("canonicalizes a GCP disk snapshot once during provider preparation", async () => {
-    const env = {
-      CRABBOX_GCP_PROJECT: "operator-project",
-      CRABBOX_GCP_ZONE: "us-central1-a",
-      GCP_CLIENT_EMAIL: "coordinator@example-project.iam.gserviceaccount.com",
-      GCP_PRIVATE_KEY: "test-private-key",
-    } as Env;
-    const resolveBootImage = vi.spyOn(GCPClient.prototype, "resolveBootImage");
-    const resolveDiskSnapshot = vi
-      .spyOn(GCPClient.prototype, "resolveDiskSnapshot")
-      .mockResolvedValue({
-        identity: {
-          id: "7123456789012345678",
-          source: "snapshot",
-          provider: "gcp",
-          kind: "gcp-disk-snapshot",
-          region: "us-central1-a",
-          sourceID:
-            "https://www.googleapis.com/compute/v1/projects/operator-project/global/snapshots/checkpoint-v3",
-        },
-        launchSource:
-          "https://www.googleapis.com/compute/v1/projects/operator-project/global/snapshots/checkpoint-v3",
-      });
-    try {
-      const prepared = await new GCPProvider(env).prepareLeaseConfig(
-        leaseConfig({
-          provider: "gcp",
-          gcpSnapshot: "checkpoint",
-          sshPublicKey: "ssh-ed25519 test",
-        }),
-      );
-
-      expect(resolveDiskSnapshot).toHaveBeenCalledOnce();
-      expect(resolveBootImage).not.toHaveBeenCalled();
-      expect(prepared).toMatchObject({
-        gcpProject: "operator-project",
-        gcpSnapshot:
-          "https://www.googleapis.com/compute/v1/projects/operator-project/global/snapshots/checkpoint-v3",
-        selectedImage: {
-          id: "7123456789012345678",
-          kind: "gcp-disk-snapshot",
-        },
-      });
-    } finally {
-      resolveBootImage.mockRestore();
-      resolveDiskSnapshot.mockRestore();
-    }
-  });
-
-  it("keeps GCP machine-image launches untyped and rejects typed registration without evidence", async () => {
-    const storage = new MemoryStorage();
-    const env: Partial<Env> = {
-      CRABBOX_GCP_PROJECT: "operator-project",
-      CRABBOX_GCP_ZONE: "us-central1-a",
-      GCP_CLIENT_EMAIL: "coordinator@example-project.iam.gserviceaccount.com",
-      GCP_PRIVATE_KEY: "test-private-key",
-    };
-    const resolveBootImage = vi.spyOn(GCPClient.prototype, "resolveBootImage");
-    const resolveDiskSnapshot = vi.spyOn(GCPClient.prototype, "resolveDiskSnapshot");
-    let createdConfig: LeaseConfig | undefined;
-    const createServer = vi
-      .spyOn(GCPClient.prototype, "createServerWithFallback")
-      .mockImplementation(async (config) => {
-        createdConfig = config;
-        return {
-          server: {
-            provider: "gcp",
-            id: 123,
-            cloudID: "crabbox-gcp-machine-image",
-            name: "crabbox-gcp-machine-image",
-            status: "running",
-            serverType: "e2-micro",
-            host: "192.0.2.10",
-            region: "us-central1-a",
-            labels: {},
-          },
-          serverType: "e2-micro",
-        };
-      });
-    try {
-      const fleet = testFleet(storage, { gcp: new GCPProvider(env as Env) }, env);
-      const headers = {
-        "x-crabbox-admin": "true",
-        "x-crabbox-owner": "alice@example.com",
-        "x-crabbox-org": "example-org",
-      };
-      const create = await fleet.fetch(
-        request("POST", "/v1/leases", {
-          headers,
-          body: {
-            leaseID: "cbx_abcdef123456",
-            provider: "gcp",
-            gcpMachineImage: "projects/operator-project/global/machineImages/checkpoint-gcp",
-            class: "standard",
-            serverType: "e2-micro",
-            sshPublicKey: "ssh-ed25519 test",
-          },
-        }),
-      );
-
-      expect(create.status).toBe(201);
-      expect(resolveBootImage).not.toHaveBeenCalled();
-      expect(resolveDiskSnapshot).not.toHaveBeenCalled();
-      expect(createdConfig?.gcpMachineImage).toBe(
-        "projects/operator-project/global/machineImages/checkpoint-gcp",
-      );
-      expect(createdConfig?.selectedImage).toBeUndefined();
-      expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")?.image).toBeUndefined();
-
-      const register = await fleet.fetch(
-        request("POST", "/v1/ready-pools/builders/identity", {
-          headers,
-          body: {
-            leaseID: "cbx_abcdef123456",
-            ...typedReadyPoolMetadata(),
-            cacheCompatibility: "node-22",
-          },
-        }),
-      );
-      expect(register.status).toBe(409);
-      expect(await register.json()).toMatchObject({
-        error: "unsupported_ready_pool_lease_identity",
-      });
-    } finally {
-      resolveBootImage.mockRestore();
-      resolveDiskSnapshot.mockRestore();
-      createServer.mockRestore();
-    }
+    expect(observe).not.toHaveBeenCalled();
+    observe.mockRestore();
   });
 
   it("records requested type and provider fallback attempts on resolved leases", async () => {
@@ -37718,6 +37132,9 @@ function fakeProvider(
       context: { requestSourceCIDRs: string[]; activeLeases: LeaseRecord[] },
     ) => LeaseRecord | undefined;
     onRefreshLeaseAccessForResolution?: (lease: LeaseRecord) => LeaseRecord | undefined;
+    onObserveReadyPoolImageIdentity?: (
+      lease: LeaseRecord,
+    ) => Promise<LeaseImageIdentity | undefined> | LeaseImageIdentity | undefined;
     onReconcileLeaseAccess?: (
       lease: LeaseRecord,
       context: { requestSourceCIDRs: string[]; activeLeases: LeaseRecord[] },
@@ -37726,14 +37143,6 @@ function fakeProvider(
       sshIngressReconcile?: "authoritative" | "additive";
       publishAccessBeforeProvisioning?: boolean;
       onTargetAttempt?: (target: { region?: string }) => Promise<void>;
-      onResourceCreated?: (claim: {
-        provider: "aws" | "azure" | "gcp" | "daytona";
-        cloudID: string;
-        region?: string;
-        providerProject?: string;
-        providerScope?: string;
-        serverID?: number;
-      }) => Promise<boolean>;
     }) => Promise<void> | void;
     onPrepareLeaseConfig?: (
       config: LeaseConfig,
@@ -37815,8 +37224,21 @@ function fakeProvider(
       : {}),
     ...(result.provider === "gcp"
       ? {
+          readyPoolImageIdentity(lease: LeaseRecord) {
+            return new GCPProvider({} as Env).readyPoolImageIdentity(lease);
+          },
+          supportsReadyPoolImageIdentity(identity: ReadyPoolIdentityV1["image"]) {
+            return new GCPProvider({} as Env).supportsReadyPoolImageIdentity(identity);
+          },
           ownershipLabelValue(value: string) {
             return gcpProviderLabelValue(value);
+          },
+        }
+      : {}),
+    ...(result.onObserveReadyPoolImageIdentity
+      ? {
+          async observeReadyPoolImageIdentity(lease: LeaseRecord) {
+            return await result.onObserveReadyPoolImageIdentity?.(lease);
           },
         }
       : {}),
@@ -37932,14 +37354,6 @@ function fakeProvider(
         sshIngressReconcile?: "authoritative" | "additive";
         publishAccessBeforeProvisioning?: boolean;
         onTargetAttempt?: (target: { region?: string }) => Promise<void>;
-        onResourceCreated?: (claim: {
-          provider: "aws" | "azure" | "gcp" | "daytona";
-          cloudID: string;
-          region?: string;
-          providerProject?: string;
-          providerScope?: string;
-          serverID?: number;
-        }) => Promise<boolean>;
       },
     ) {
       await result.onCreateProvisioning?.(provisioning);
@@ -38581,6 +37995,48 @@ function typedReadyPoolLease(): LeaseRecord {
     },
     expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
   });
+}
+
+function typedGCPReadyPoolLease(id = "cbx_000000000098"): LeaseRecord {
+  return testLease({
+    id,
+    provider: "gcp",
+    target: "linux",
+    architecture: "arm64",
+    owner: "alice@example.com",
+    org: "example-org",
+    cloudID: `crabbox-${id}`,
+    serverName: `crabbox-${id}`,
+    region: "us-west1-b",
+    providerProject: "execution-project",
+    image: undefined,
+    expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+  });
+}
+
+const typedGCPImage: LeaseImageIdentity = {
+  id: "8123456789012345678",
+  source: "explicit",
+  provider: "gcp",
+  kind: "gcp-image",
+  region: "us-west1-b",
+  sourceID: "projects/source-project/global/images/runner-v3",
+};
+
+async function typedGCPReadyPoolIdentity(
+  cacheCompatibility = "node-22",
+): Promise<ReadyPoolIdentityV1> {
+  return {
+    schema: "crabbox-ready-pool-identity/v1",
+    image: {
+      provider: "gcp",
+      scope: "projects/source-project/global/images",
+      id: typedGCPImage.id,
+    },
+    architecture: "arm64",
+    seedDigest: await readyPoolSeedDigestV1(typedReadyPoolMetadata()),
+    cacheCompatibility,
+  };
 }
 
 async function typedReadyPoolIdentity(

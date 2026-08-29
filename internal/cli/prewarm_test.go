@@ -213,6 +213,23 @@ func TestPrewarmPostWarmupFailuresReleaseSSHLease(t *testing.T) {
 	}
 }
 
+func TestTypedPrewarmRegistrationFailureReleasesLease(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	backend := &prewarmCleanupTestBackend{}
+	cause := errors.New("typed registration failed")
+	err := (App{Stdout: io.Discard, Stderr: io.Discard}).runPrewarmPostWarmupStep(
+		context.Background(),
+		backend,
+		Config{Provider: "prewarm-cleanup-test"},
+		LeaseTarget{LeaseID: "cbx_abcdef123456"},
+		"pool registration",
+		func() error { return cause },
+	)
+	if !errors.Is(err, cause) || backend.releaseCalls != 1 {
+		t.Fatalf("error=%v releaseCalls=%d", err, backend.releaseCalls)
+	}
+}
+
 func TestPrewarmSuccessfulStepDoesNotReleaseLease(t *testing.T) {
 	backend := &prewarmCleanupTestBackend{}
 	err := (App{Stdout: io.Discard, Stderr: io.Discard}).runPrewarmPostWarmupStep(

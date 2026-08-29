@@ -16,7 +16,7 @@ import {
   providerProvisioningCleanupClaim,
 } from "../src/provider-provisioning";
 import { leaseProviderName } from "../src/slug";
-import type { Env, ProviderMachine } from "../src/types";
+import type { Env, LeaseRecord, ProviderMachine } from "../src/types";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -64,336 +64,237 @@ describe("gcp provider", () => {
     expect(new GCPClient(env, undefined, "request-project").project).toBe("request-project");
   });
 
-  it("resolves bare custom images in the per-request project", async () => {
-    const client = new GCPClient(env);
-    primeAccessToken(client);
-    const calls: string[] = [];
-    client.fetcher = async (input) => {
-      calls.push(String(input));
-      return Response.json({
-        id: "8123456789012345678",
-        name: "custom-builder-v3",
-        selfLink:
-          "https://www.googleapis.com/compute/v1/projects/request-project/global/images/custom-builder-v3",
-        status: "READY",
-      });
-    };
-
-    await expect(
-      client.forScope(undefined, "request-project").resolveBootImage("custom-builder-v3"),
-    ).resolves.toMatchObject({
-      identity: {
-        id: "8123456789012345678",
-        sourceID:
-          "https://www.googleapis.com/compute/v1/projects/request-project/global/images/custom-builder-v3",
-      },
-      launchSource:
-        "https://www.googleapis.com/compute/v1/projects/request-project/global/images/custom-builder-v3",
-    });
-    expect(calls).toEqual([
-      "https://compute.googleapis.com/compute/v1/projects/request-project/global/images/custom-builder-v3",
-    ]);
-  });
-
-  it("resolves image families to an immutable boot image identity", async () => {
-    const client = new GCPClient(env);
-    primeAccessToken(client);
-    const calls: string[] = [];
-    client.fetcher = async (input) => {
-      calls.push(String(input));
-      return Response.json({
-        id: "9123456789012345678",
-        name: "ubuntu-2604-amd64-v20260801",
-        selfLink:
-          "https://www.googleapis.com/compute/v1/projects/ubuntu-os-cloud/global/images/ubuntu-2604-amd64-v20260801",
-        status: "READY",
-      });
-    };
-
-    await expect(
-      client.resolveBootImage(
-        "projects/ubuntu-os-cloud/global/images/family/ubuntu-2604-lts-amd64",
-      ),
-    ).resolves.toEqual({
-      identity: {
-        id: "9123456789012345678",
-        source: "explicit",
-        provider: "gcp",
-        kind: "gcp-image",
-        region: "us-central1-a",
-        sourceID:
-          "https://www.googleapis.com/compute/v1/projects/ubuntu-os-cloud/global/images/ubuntu-2604-amd64-v20260801",
-      },
-      launchSource:
-        "https://www.googleapis.com/compute/v1/projects/ubuntu-os-cloud/global/images/ubuntu-2604-amd64-v20260801",
-    });
-    expect(calls).toEqual([
-      "https://compute.googleapis.com/compute/v1/projects/ubuntu-os-cloud/global/images/family/ubuntu-2604-lts-amd64",
-    ]);
-  });
-
-  it("distinguishes same-name GCP image resources by immutable id in the request project", async () => {
-    const fixtures = [
+  it("observes exact boot image and snapshot identities from the persisted instance scope", async () => {
+    for (const fixture of [
       {
-        collection: "images",
-        name: "warm-boot-image",
-        resolve: (client: GCPClient, name: string) => client.resolveBootImage(name),
+        disk: {
+          sourceImage: "projects/source-project/global/images/runner-v3",
+          sourceImageId: "8123456789012345678",
+        },
+        expected: {
+          id: "8123456789012345678",
+          source: "explicit",
+          kind: "gcp-image",
+          sourceID: "projects/source-project/global/images/runner-v3",
+        },
       },
       {
-        collection: "snapshots",
-        name: "warm-disk-snapshot",
-        resolve: (client: GCPClient, name: string) => client.resolveDiskSnapshot(name),
+        disk: {
+          sourceSnapshot:
+            "https://www.googleapis.com/compute/v1/projects/source-project/global/snapshots/runner-v3",
+          sourceSnapshotId: "7123456789012345678",
+        },
+        expected: {
+          id: "7123456789012345678",
+          source: "snapshot",
+          kind: "gcp-disk-snapshot",
+          sourceID: "projects/source-project/global/snapshots/runner-v3",
+        },
       },
-    ] as const;
-
-    for (const [fixtureIndex, fixture] of fixtures.entries()) {
+    ]) {
       const client = new GCPClient(env);
       primeAccessToken(client);
+      const leaseID = "cbx_abcdef123456";
+      const slug = "blue-lobster";
+      const name = leaseProviderName(leaseID, slug);
       const calls: string[] = [];
-      let request = 0;
-      const launchSource = `https://www.googleapis.com/compute/v1/projects/request-project/global/${fixture.collection}/${fixture.name}`;
       client.fetcher = async (input) => {
-        calls.push(String(input));
-        request += 1;
-        return Response.json({
-          id: `${fixtureIndex + 1}00000000000000000${request}`,
-          name: fixture.name,
-          selfLink: launchSource,
-          status: "READY",
-        });
+        const path = new URL(String(input)).pathname;
+        calls.push(path);
+        if (path.endsWith(`/zones/us-west1-b/instances/${name}`)) {
+          return Response.json({
+            name,
+            labels: {
+              crabbox: "true",
+              created_by: "crabbox",
+              provider: "gcp",
+              lease: leaseID,
+              slug,
+              owner: "alice_example_com",
+            },
+            disks: [
+              {
+                boot: true,
+                type: "PERSISTENT",
+                source: `projects/execution-project/zones/us-west1-b/disks/${name}`,
+              },
+            ],
+          });
+        }
+        return Response.json(fixture.disk);
       };
-      const scoped = client.forScope("us-west1-b", "request-project");
+      const lease = {
+        id: leaseID,
+        slug,
+        provider: "gcp",
+        cloudID: name,
+        serverName: name,
+        owner: "alice@example.com",
+        org: "example-org",
+        region: "us-west1-b",
+        providerProject: "execution-project",
+      } as LeaseRecord;
 
-      // oxlint-disable-next-line eslint/no-await-in-loop -- the second response models a later resource incarnation.
-      const first = await fixture.resolve(scoped, fixture.name);
-      // oxlint-disable-next-line eslint/no-await-in-loop -- preserve response order for the recreated resource.
-      const second = await fixture.resolve(scoped, fixture.name);
-
-      expect(first.launchSource).toBe(launchSource);
-      expect(second.launchSource).toBe(launchSource);
-      expect(first.identity.sourceID).toBe(launchSource);
-      expect(second.identity.sourceID).toBe(launchSource);
-      expect(first.identity.id).not.toBe(second.identity.id);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each fixture owns an isolated client.
+      await expect(client.observeReadyPoolImageIdentity(lease)).resolves.toEqual({
+        ...fixture.expected,
+        provider: "gcp",
+        region: "us-west1-b",
+      });
       expect(calls).toEqual([
-        `https://compute.googleapis.com/compute/v1/projects/request-project/global/${fixture.collection}/${fixture.name}`,
-        `https://compute.googleapis.com/compute/v1/projects/request-project/global/${fixture.collection}/${fixture.name}`,
+        `/compute/v1/projects/execution-project/zones/us-west1-b/instances/${name}`,
+        `/compute/v1/projects/execution-project/zones/us-west1-b/disks/${name}`,
       ]);
     }
   });
 
-  it("fails closed when a GCP image resource omits its immutable numeric id", async () => {
-    const fixtures = [
+  it("rejects machine images and incomplete provenance before extra provider reads", async () => {
+    const leaseID = "cbx_abcdef123456";
+    const slug = "blue-lobster";
+    const name = leaseProviderName(leaseID, slug);
+    const lease = {
+      id: leaseID,
+      slug,
+      provider: "gcp",
+      cloudID: name,
+      serverName: name,
+      owner: "alice@example.com",
+      org: "example-org",
+      region: "us-central1-a",
+      providerProject: "default-project",
+    } as LeaseRecord;
+    const ownedInstance = {
+      name,
+      labels: {
+        crabbox: "true",
+        created_by: "crabbox",
+        provider: "gcp",
+        lease: leaseID,
+        slug,
+        owner: "alice_example_com",
+      },
+      disks: [
+        {
+          boot: true,
+          type: "PERSISTENT",
+          source: `projects/default-project/zones/us-central1-a/disks/${name}`,
+        },
+      ],
+    };
+    for (const fixture of [
       {
-        collection: "images",
-        name: "boot-image",
-        resolve: (client: GCPClient, name: string) => client.resolveBootImage(name),
+        instance: { ...ownedInstance, sourceMachineImage: "projects/p/global/machineImages/m" },
+        reads: 1,
+      },
+      { instance: { ...ownedInstance, name: "foreign" }, reads: 1 },
+      {
+        instance: { ...ownedInstance, labels: { ...ownedInstance.labels, owner: "mallory" } },
+        reads: 1,
+      },
+      { instance: { ...ownedInstance, disks: [] }, reads: 1 },
+      {
+        instance: { ...ownedInstance, disks: [...ownedInstance.disks, ...ownedInstance.disks] },
+        reads: 1,
       },
       {
-        collection: "snapshots",
-        name: "disk-snapshot",
-        resolve: (client: GCPClient, name: string) => client.resolveDiskSnapshot(name),
+        instance: {
+          ...ownedInstance,
+          disks: [{ ...ownedInstance.disks[0], type: "SCRATCH" }],
+        },
+        reads: 1,
       },
-    ] as const;
-
-    for (const fixture of fixtures) {
+      {
+        instance: {
+          ...ownedInstance,
+          disks: [{ ...ownedInstance.disks[0], source: "projects/other/zones/z/disks/d" }],
+        },
+        reads: 1,
+      },
+      { instance: ownedInstance, disk: { sourceImageId: "1" }, reads: 2 },
+      { instance: ownedInstance, disk: { sourceImage: "projects/p/global/images/i" }, reads: 2 },
+      {
+        instance: ownedInstance,
+        disk: {
+          sourceImage: "projects/p/global/images/i",
+          sourceImageId: "not-numeric",
+        },
+        reads: 2,
+      },
+      {
+        instance: ownedInstance,
+        disk: {
+          sourceImage: "projects/p/global/images/i?family=latest",
+          sourceImageId: "1",
+        },
+        reads: 2,
+      },
+      {
+        instance: ownedInstance,
+        disk: {
+          sourceImage: "projects/p/global/images/i",
+          sourceImageId: "1",
+          sourceSnapshot: "projects/p/global/snapshots/s",
+          sourceSnapshotId: "2",
+        },
+        reads: 2,
+      },
+    ]) {
       const client = new GCPClient(env);
       primeAccessToken(client);
+      let calls = 0;
       client.fetcher = async () =>
-        Response.json({
-          name: fixture.name,
-          selfLink: `https://www.googleapis.com/compute/v1/projects/default-project/global/${fixture.collection}/${fixture.name}`,
-          status: "READY",
-        });
-      // oxlint-disable-next-line eslint/no-await-in-loop -- each source must reject before its fetcher is replaced.
-      await expect(fixture.resolve(client, fixture.name)).rejects.toThrow(
-        "missing an immutable numeric id",
-      );
-      client.fetcher = async () =>
-        Response.json({
-          id: "not-numeric",
-          name: fixture.name,
-          status: "READY",
-        });
-      // oxlint-disable-next-line eslint/no-await-in-loop -- validate the replacement response on the same source.
-      await expect(fixture.resolve(client, fixture.name)).rejects.toThrow(
-        "missing an immutable numeric id",
-      );
+        Response.json(++calls === 1 ? fixture.instance : "disk" in fixture ? fixture.disk : {});
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each malformed shape is independent.
+      await expect(client.observeReadyPoolImageIdentity(lease)).resolves.toBeUndefined();
+      expect(calls).toBe(fixture.reads);
     }
   });
 
-  it("keeps a canonical snapshot launch selector when GCP omits selfLink", async () => {
-    const client = new GCPClient(env, undefined, "request-project");
-    primeAccessToken(client);
-    client.fetcher = async () =>
-      Response.json({
-        id: "5123456789012345678",
-        name: "warm-disk-snapshot",
-        status: "READY",
-      });
-
-    await expect(client.resolveDiskSnapshot("warm-disk-snapshot")).resolves.toEqual({
-      identity: {
-        id: "5123456789012345678",
-        source: "snapshot",
-        provider: "gcp",
-        kind: "gcp-disk-snapshot",
-        region: "us-central1-a",
-        sourceID: "projects/request-project/global/snapshots/warm-disk-snapshot",
-      },
-      launchSource: "projects/request-project/global/snapshots/warm-disk-snapshot",
-    });
+  it("propagates instance and disk IAM failures to the typed caller", async () => {
+    const name = leaseProviderName("cbx_abcdef123456", "blue-lobster");
+    const lease = {
+      id: "cbx_abcdef123456",
+      slug: "blue-lobster",
+      provider: "gcp",
+      cloudID: name,
+      serverName: name,
+      owner: "alice@example.com",
+      org: "example-org",
+      region: "us-central1-a",
+      providerProject: "default-project",
+    } as LeaseRecord;
+    for (const failAt of [1, 2]) {
+      const client = new GCPClient(env);
+      primeAccessToken(client);
+      let calls = 0;
+      client.fetcher = async () => {
+        calls += 1;
+        if (calls === failAt) return new Response("forbidden", { status: 403 });
+        return Response.json({
+          name,
+          labels: {
+            crabbox: "true",
+            created_by: "crabbox",
+            provider: "gcp",
+            lease: lease.id,
+            slug: lease.slug,
+            owner: "alice_example_com",
+          },
+          disks: [
+            {
+              boot: true,
+              type: "PERSISTENT",
+              source: `projects/default-project/zones/us-central1-a/disks/${name}`,
+            },
+          ],
+        });
+      };
+      // oxlint-disable-next-line eslint/no-await-in-loop -- cover each permission boundary.
+      await expect(client.observeReadyPoolImageIdentity(lease)).rejects.toThrow("http 403");
+    }
   });
 
-  it("requires resolved boot images and snapshots to be ready", async () => {
-    const client = new GCPClient(env);
-    primeAccessToken(client);
-    client.fetcher = async () =>
-      Response.json({
-        id: "5123456789012345678",
-        name: "not-ready",
-        status: "CREATING",
-      });
-
-    await expect(client.resolveBootImage("not-ready")).rejects.toThrow(
-      "did not resolve to a ready resource",
-    );
-    await expect(client.resolveDiskSnapshot("not-ready")).rejects.toThrow(
-      "did not resolve to a ready resource",
-    );
-  });
-
-  it("verifies the immutable source id used by a created GCP boot disk", async () => {
-    const client = new GCPClient(env);
-    const internal = client as unknown as {
-      verifyCreatedLeaseImage(
-        config: ReturnType<typeof leaseConfig>,
-        instance: { name: string; disks: { boot: boolean; source: string }[] },
-      ): Promise<void>;
-      gcp<T>(method: string, path: string): Promise<T>;
-    };
-    const gcp = vi.spyOn(internal, "gcp").mockResolvedValue({
-      sourceImageId: "8123456789012345678",
-    });
-    const config = leaseConfig({
-      provider: "gcp",
-      sshPublicKey: "ssh-ed25519 test",
-    });
-    config.selectedImage = {
-      id: "8123456789012345678",
-      source: "explicit",
-      provider: "gcp",
-      kind: "gcp-image",
-    };
-    const instance = {
-      name: "crabbox-test",
-      disks: [{ boot: true, source: "zones/us-central1-a/disks/crabbox-test" }],
-    };
-
-    await expect(internal.verifyCreatedLeaseImage(config, instance)).resolves.toBeUndefined();
-    expect(gcp).toHaveBeenCalledWith("GET", "/zones/us-central1-a/disks/crabbox-test");
-
-    gcp.mockResolvedValue({ sourceImageId: "9123456789012345678" });
-    await expect(internal.verifyCreatedLeaseImage(config, instance)).rejects.toThrow(
-      "does not match selected image 8123456789012345678",
-    );
-
-    config.selectedImage = {
-      id: "7123456789012345678",
-      source: "snapshot",
-      provider: "gcp",
-      kind: "gcp-disk-snapshot",
-    };
-    gcp.mockResolvedValue({ sourceSnapshotId: "7123456789012345678" });
-    await expect(internal.verifyCreatedLeaseImage(config, instance)).resolves.toBeUndefined();
-  });
-
-  it("rejects typed machine-image launches before cloud mutation", async () => {
-    const client = new GCPClient(env);
-    const internal = client as unknown as {
-      ensureFirewall(config: ReturnType<typeof leaseConfig>): Promise<void>;
-      gcp<T>(method: string, path: string, body?: unknown): Promise<T>;
-    };
-    const ensureFirewall = vi.spyOn(internal, "ensureFirewall");
-    const gcp = vi.spyOn(internal, "gcp");
-    const config = leaseConfig({
-      provider: "gcp",
-      gcpMachineImage: "projects/default-project/global/machineImages/warm-machine-image",
-      sshPublicKey: "ssh-ed25519 test",
-    });
-    config.selectedImage = {
-      id: "8123456789012345678",
-      source: "snapshot",
-      kind: "gcp-machine-image",
-    };
-
-    await expect(
-      client.createServer(config, "cbx_abcdef123456", "blue-lobster", "alice@example.com"),
-    ).rejects.toThrow("cannot verify immutable created-instance provenance for machine images");
-    expect(ensureFirewall).not.toHaveBeenCalled();
-    expect(gcp).not.toHaveBeenCalled();
-  });
-
-  it("persists selected image labels and cleans up a provenance mismatch", async () => {
-    const client = new GCPClient(env);
-    const leaseID = "cbx_abcdef123456";
-    const slug = "blue-lobster";
-    const instanceName = leaseProviderName(leaseID, slug);
-    const calls: string[] = [];
-    let labels: Record<string, string> = {};
-    const internal = client as unknown as {
-      ensureFirewall(config: ReturnType<typeof leaseConfig>): Promise<void>;
-      waitZoneOperation(operation: { name?: string }): Promise<void>;
-      gcp<T>(method: string, path: string, body?: unknown): Promise<T>;
-    };
-    vi.spyOn(internal, "ensureFirewall").mockResolvedValue();
-    vi.spyOn(internal, "waitZoneOperation").mockResolvedValue();
-    vi.spyOn(internal, "gcp").mockImplementation(async (method, path, body) => {
-      calls.push(`${method} ${path}`);
-      if (method === "POST" && path === "/zones/us-central1-a/instances") {
-        labels = (body as { labels: Record<string, string> }).labels;
-        return { name: "create-op" } as T;
-      }
-      if (method === "GET" && path === `/zones/us-central1-a/instances/${instanceName}`) {
-        return {
-          id: "123",
-          name: instanceName,
-          status: "RUNNING",
-          machineType: "zones/us-central1-a/machineTypes/e2-micro",
-          labels,
-          disks: [{ boot: true, source: `zones/us-central1-a/disks/${instanceName}` }],
-        } as T;
-      }
-      if (method === "GET" && path === `/zones/us-central1-a/disks/${instanceName}`) {
-        return { sourceImageId: "9123456789012345678" } as T;
-      }
-      if (method === "DELETE" && path === `/zones/us-central1-a/instances/${instanceName}`) {
-        return { name: "delete-op" } as T;
-      }
-      throw new Error(`unexpected GCP request ${method} ${path}`);
-    });
-    const config = leaseConfig({
-      provider: "gcp",
-      serverType: "e2-micro",
-      sshPublicKey: "ssh-ed25519 test",
-    });
-    config.selectedImage = {
-      id: "8123456789012345678",
-      source: "explicit",
-      provider: "gcp",
-      kind: "gcp-image",
-    };
-
-    await expect(client.createServer(config, leaseID, slug, "alice@example.com")).rejects.toThrow(
-      "does not match selected image 8123456789012345678",
-    );
-    expect(labels).toMatchObject({
-      image_id: "8123456789012345678",
-      image_source: "explicit",
-    });
-    expect(calls).toContain(`DELETE /zones/us-central1-a/instances/${instanceName}`);
-  });
-
-  it("fails closed without fallback when the instance insert response is lost", async () => {
+  it("does not retry another zone when instance creation becomes uncertain", async () => {
     const client = new GCPClient(env);
     const internal = client as unknown as {
       ensureFirewall(config: ReturnType<typeof leaseConfig>): Promise<void>;
@@ -402,18 +303,16 @@ describe("gcp provider", () => {
     vi.spyOn(internal, "ensureFirewall").mockResolvedValue();
     const gcp = vi.spyOn(internal, "gcp").mockRejectedValue(new TypeError("socket closed"));
     const targets: string[] = [];
-    const config = leaseConfig({
-      provider: "gcp",
-      gcpZone: "us-central1-a",
-      capacity: { availabilityZones: ["us-central1-b"] },
-      serverType: "e2-micro",
-      serverTypeExplicit: true,
-      sshPublicKey: "ssh-ed25519 test",
-    });
-
     await expect(
       client.createServerWithFallback(
-        config,
+        leaseConfig({
+          provider: "gcp",
+          gcpZone: "us-central1-a",
+          capacity: { availabilityZones: ["us-central1-b"] },
+          serverType: "e2-micro",
+          serverTypeExplicit: true,
+          sshPublicKey: "ssh-ed25519 test",
+        }),
         "cbx_abcdef123456",
         "blue-lobster",
         "alice@example.com",
@@ -431,185 +330,46 @@ describe("gcp provider", () => {
     expect(gcp).toHaveBeenCalledOnce();
   });
 
-  it("fails closed without fallback when an accepted instance operation becomes unobservable", async () => {
+  it("publishes ownership before readiness and preserves unresolved cleanup", async () => {
     const client = new GCPClient(env);
     const internal = client as unknown as {
       ensureFirewall(config: ReturnType<typeof leaseConfig>): Promise<void>;
       gcp<T>(method: string, path: string, body?: unknown): Promise<T>;
     };
     vi.spyOn(internal, "ensureFirewall").mockResolvedValue();
-    const calls: string[] = [];
-    vi.spyOn(internal, "gcp").mockImplementation(async (method, path) => {
-      calls.push(`${method} ${path}`);
-      if (path.endsWith("/instances")) return { name: "insert-op" } as T;
-      throw new TypeError("operation wait disconnected");
-    });
-    const targets: string[] = [];
-    const config = leaseConfig({
-      provider: "gcp",
-      gcpZone: "us-central1-a",
-      capacity: { availabilityZones: ["us-central1-b"] },
-      serverType: "e2-micro",
-      serverTypeExplicit: true,
-      sshPublicKey: "ssh-ed25519 test",
-    });
-
-    await expect(
-      client.createServerWithFallback(
-        config,
-        "cbx_abcdef123456",
-        "blue-lobster",
-        "alice@example.com",
-        {
-          async onTargetAttempt(target) {
-            targets.push(target.region ?? "");
-          },
-          async onResourceCreated() {
-            return true;
-          },
-        },
-      ),
-    ).rejects.toBeInstanceOf(ProviderProvisioningOutcomeUncertainError);
-    expect(targets).toEqual(["us-central1-a"]);
-    expect(calls).toEqual([
-      "POST /zones/us-central1-a/instances",
-      "POST /zones/us-central1-a/operations/insert-op/wait",
-    ]);
-  });
-
-  it("returns immediately without provenance I/O when publication stops readiness", async () => {
-    const client = new GCPClient(env);
-    const internal = client as unknown as {
-      ensureFirewall(config: ReturnType<typeof leaseConfig>): Promise<void>;
-      gcp<T>(method: string, path: string, body?: unknown): Promise<T>;
-    };
-    vi.spyOn(internal, "ensureFirewall").mockResolvedValue();
-    const calls: string[] = [];
-    vi.spyOn(internal, "gcp").mockImplementation(async (method, path) => {
-      calls.push(`${method} ${path}`);
-      if (path.endsWith("/instances")) return { name: "insert-op" } as T;
+    vi.spyOn(internal, "gcp").mockImplementation(async (_method, path) => {
+      if (path.endsWith("/instances")) return { name: "insert-op" } as never;
       if (path.endsWith("/operations/insert-op/wait")) {
-        return { name: "insert-op", status: "DONE" } as T;
+        return { name: "insert-op", status: "DONE" } as never;
       }
-      throw new Error(`unexpected GCP request ${method} ${path}`);
-    });
-    const claims: unknown[] = [];
-
-    const server = await client.createServer(
-      leaseConfig({
-        provider: "gcp",
-        serverType: "e2-micro",
-        sshPublicKey: "ssh-ed25519 test",
-      }),
-      "cbx_abcdef123456",
-      "blue-lobster",
-      "alice@example.com",
-      {
-        async onResourceCreated(claim) {
-          claims.push(claim);
-          return false;
-        },
-      },
-    );
-
-    expect(claims).toEqual([
-      {
-        provider: "gcp",
-        cloudID: leaseProviderName("cbx_abcdef123456", "blue-lobster"),
-        region: "us-central1-a",
-        providerProject: "default-project",
-      },
-    ]);
-    expect(server).toMatchObject({
-      cloudID: leaseProviderName("cbx_abcdef123456", "blue-lobster"),
-      status: "provisioning",
-      region: "us-central1-a",
-    });
-    expect(calls).toEqual([
-      "POST /zones/us-central1-a/instances",
-      "POST /zones/us-central1-a/operations/insert-op/wait",
-    ]);
-  });
-
-  it("propagates unresolved publication and wraps other post-publication failures", async () => {
-    const client = new GCPClient(env);
-    const internal = client as unknown as {
-      ensureFirewall(config: ReturnType<typeof leaseConfig>): Promise<void>;
-      gcp<T>(method: string, path: string, body?: unknown): Promise<T>;
-    };
-    vi.spyOn(internal, "ensureFirewall").mockResolvedValue();
-    const calls: string[] = [];
-    vi.spyOn(internal, "gcp").mockImplementation(async (method, path) => {
-      calls.push(`${method} ${path}`);
-      if (path.endsWith("/instances")) return { name: "insert-op" } as T;
-      if (path.endsWith("/operations/insert-op/wait")) {
-        return { name: "insert-op", status: "DONE" } as T;
-      }
-      if (path.includes("/instances/")) {
-        return {
-          id: "123",
-          name: leaseProviderName("cbx_abcdef123456", "blue-lobster"),
-          status: "RUNNING",
-          machineType: "zones/us-central1-a/machineTypes/e2-micro",
-          disks: [{ boot: true, source: "zones/us-central1-a/disks/boot-disk" }],
-        } as T;
-      }
-      if (path.endsWith("/disks/boot-disk")) {
-        return { sourceImageId: "wrong-image-id" } as T;
-      }
-      throw new Error(`unexpected GCP request ${method} ${path}`);
+      throw new Error("readiness failed");
     });
     const config = leaseConfig({
       provider: "gcp",
       serverType: "e2-micro",
       sshPublicKey: "ssh-ed25519 test",
     });
-    config.selectedImage = {
-      id: "8123456789012345678",
-      source: "explicit",
-      provider: "gcp",
-      kind: "gcp-image",
-    };
     const unresolved = new ProviderResourceUnresolvedError("lease incarnation changed");
-
-    const unresolvedResult = await client
-      .createServer(
-        config,
-        "cbx_abcdef123456",
-        "blue-lobster",
-        "alice@example.com",
-        {
-          async onResourceCreated() {
-            throw unresolved;
-          },
+    await expect(
+      client.createServer(config, "cbx_abcdef123456", "blue-lobster", "alice@example.com", {
+        async onResourceCreated() {
+          throw unresolved;
         },
-      )
-      .catch((error: unknown) => error);
-    expect(unresolvedResult).toBe(unresolved);
-    expect(calls).toHaveLength(2);
-
-    calls.length = 0;
+      }),
+    ).rejects.toBe(unresolved);
     const cleanupError = await client
-      .createServer(
-        config,
-        "cbx_abcdef123456",
-        "blue-lobster",
-        "alice@example.com",
-        {
-          async onResourceCreated() {
-            return true;
-          },
+      .createServer(config, "cbx_abcdef123456", "blue-lobster", "alice@example.com", {
+        async onResourceCreated() {
+          return true;
         },
-      )
+      })
       .catch((error: unknown) => error);
     expect(cleanupError).toBeInstanceOf(ProviderProvisioningCleanupError);
-    expect(providerProvisioningCleanupClaim(cleanupError)).toEqual({
+    expect(providerProvisioningCleanupClaim(cleanupError)).toMatchObject({
       provider: "gcp",
-      cloudID: leaseProviderName("cbx_abcdef123456", "blue-lobster"),
       region: "us-central1-a",
       providerProject: "default-project",
     });
-    expect(calls.some((call) => call.startsWith("DELETE "))).toBe(false);
   });
 
   it("uses the metadata server when service account key credentials are omitted", async () => {
@@ -1303,23 +1063,15 @@ describe("gcp provider", () => {
       };
     });
 
-    const config = leaseConfig({
-      provider: "gcp",
-      gcpZone: "us-central1-a",
-      capacity: { availabilityZones: ["us-central1-b"] },
-      serverType: "e2-micro",
-      serverTypeExplicit: true,
-      sshPublicKey: "ssh-ed25519 test",
-    });
-    config.selectedImage = {
-      id: "8123456789012345678",
-      source: "explicit",
-      provider: "gcp",
-      kind: "gcp-image",
-      region: "us-central1-a",
-    };
-    const result = await client.createServerWithFallback(
-      config,
+    await client.createServerWithFallback(
+      leaseConfig({
+        provider: "gcp",
+        gcpZone: "us-central1-a",
+        capacity: { availabilityZones: ["us-central1-b"] },
+        serverType: "e2-micro",
+        serverTypeExplicit: true,
+        sshPublicKey: "ssh-ed25519 test",
+      }),
       "cbx_abcdef123456",
       "blue-lobster",
       "alice@example.com",
@@ -1332,7 +1084,6 @@ describe("gcp provider", () => {
 
     expect(attemptedZones).toEqual(["us-central1-a", "us-central1-b"]);
     expect(createCalls).toEqual(["us-central1-a", "us-central1-b"]);
-    expect(result.image).toEqual({ ...config.selectedImage, region: "us-central1-b" });
   });
 
   it("creates and deletes machine images through Compute Engine", async () => {
@@ -1492,9 +1243,10 @@ describe("gcp provider", () => {
     );
     expect(createCall?.body).not.toHaveProperty("disks");
     expect(String(createCall?.body?.name)).toMatch(/^crabbox-blue-lobster-/);
+    expect(calls.some((call) => /\/(?:disks|images|snapshots)\//.test(call.path))).toBe(false);
   });
 
-  it("creates instances from resolved disk snapshot URLs without forcing default disk size", async () => {
+  it("creates instances from disk snapshots without forcing default disk size", async () => {
     const client = new GCPClient(env);
     (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
       token: "test-token",
@@ -1539,13 +1291,11 @@ describe("gcp provider", () => {
       return Response.json({});
     };
 
-    const resolvedSnapshot =
-      "https://www.googleapis.com/compute/v1/projects/default-project/global/snapshots/checkpoint-gcp";
     await client.createServer(
       leaseConfig({
         provider: "gcp",
         serverType: "e2-micro",
-        gcpSnapshot: resolvedSnapshot,
+        gcpSnapshot: "checkpoint-gcp",
         sshPublicKey: "ssh-ed25519 test",
       }),
       "cbx_123456789abc",
@@ -1558,10 +1308,11 @@ describe("gcp provider", () => {
     );
     const disks = createCall?.body?.disks as Array<{ initializeParams?: Record<string, unknown> }>;
     expect(disks[0]?.initializeParams).toMatchObject({
-      sourceSnapshot: resolvedSnapshot,
+      sourceSnapshot: "projects/default-project/global/snapshots/checkpoint-gcp",
       diskType: "zones/us-central1-a/diskTypes/pd-balanced",
     });
     expect(disks[0]?.initializeParams).not.toHaveProperty("diskSizeGb");
+    expect(calls.some((call) => /\/(?:disks|images|snapshots)\//.test(call.path))).toBe(false);
   });
 
   it("keeps exact GCP types eligible for zone fallback", async () => {

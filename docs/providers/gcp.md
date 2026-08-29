@@ -385,21 +385,17 @@ See [Lifecycle and cleanup](../features/lifecycle-cleanup.md) for the shared mod
 
 ## Typed ready-pool provenance
 
-Linux leases created from a boot image or disk snapshot record the exact
-immutable numeric resource ID and source reference after Compute Engine accepts
-the VM creation. Typed ready-pool identity uses the source namespace
+Typed identity generation and registration observe the active VM and boot disk
+to record the exact immutable numeric resource ID and source reference.
+Ordinary creates keep their existing IAM and request flow; typed observation
+additionally requires `compute.instances.get` and `compute.disks.get`. Typed
+ready-pool identity uses the source namespace
 `projects/<project>/global/images` or
 `projects/<project>/global/snapshots`, the numeric ID, and the canonical
 architecture. The execution project must also be recorded as launch evidence,
 but it is not substituted for the source project and does not enter the
 identity. The launch zone is excluded so capacity fallback does not split an
 otherwise identical cohort.
-
-Only relative resource names and the lowercase official Compute API HTTPS forms
-are accepted. Family aliases, extra path segments, ports, queries, fragments,
-percent-encoded ambiguity, kind/collection mismatches, and non-numeric IDs fail
-closed. Machine images remain valid checkpoint sources but do not expose the
-created boot disk provenance required for typed ready-pool reuse.
 
 ## Checkpoints
 
@@ -412,10 +408,8 @@ Brokered Linux GCP leases support native [checkpoints](../features/checkpoints.m
 recorded project and zone. Native checkpoints require a coordinator and a known
 cloud instance ID; they are not available for direct-only leases.
 
-Machine images remain valid checkpoint fork/restore sources, but Compute Engine
-does not expose exact created-disk source evidence for them. They therefore
-cannot supply typed ready-pool immutable provenance; use a boot image or disk
-snapshot when that identity is required.
+Machine images remain valid checkpoint fork/restore sources, but cannot supply
+typed immutable provenance. Use a boot image or disk snapshot for typed pools.
 
 `crabbox image delete <image-id> --provider gcp` deletes a GCP image. GCP does
 not yet have the AWS-style `image promote` bake pipeline.

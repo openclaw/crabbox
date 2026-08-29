@@ -11912,8 +11912,14 @@ export class FleetCoordinator {
     if (lease.state !== "active" || Date.parse(lease.expiresAt) <= Date.now()) {
       return json({ error: "lease_not_active" }, { status: 409 });
     }
-    const image = this.readyPoolLeaseImageIdentity(lease);
-    if (!image || lease.target !== "linux" || !canonicalReadyPoolArchitecture(lease.architecture)) {
+    const observed = await this.observeReadyPoolLeaseImageIdentity(lease);
+    if (observed instanceof Response) return observed;
+    const image = this.readyPoolLeaseImageIdentity(observed);
+    if (
+      !image ||
+      observed.target !== "linux" ||
+      !canonicalReadyPoolArchitecture(observed.architecture)
+    ) {
       return json(
         {
           error: "unsupported_ready_pool_lease_identity",
@@ -11939,7 +11945,7 @@ export class FleetCoordinator {
     const identity: ReadyPoolIdentityV1 = {
       schema: readyPoolIdentitySchemaV1,
       image,
-      architecture: lease.architecture!,
+      architecture: observed.architecture!,
       seedDigest,
       cacheCompatibility,
     };
@@ -12002,7 +12008,13 @@ export class FleetCoordinator {
     if (resolvedLease.state !== "active" || Date.parse(resolvedLease.expiresAt) <= Date.now()) {
       return json({ error: "lease_not_active" }, { status: 409 });
     }
-    if (typed && !this.readyPoolIdentityMatchesLease(input.identity!, resolvedLease)) {
+    let checkedLease = resolvedLease;
+    if (typed) {
+      const observed = await this.observeReadyPoolLeaseImageIdentity(resolvedLease);
+      if (observed instanceof Response) return observed;
+      checkedLease = observed;
+    }
+    if (typed && !this.readyPoolIdentityMatchesLease(input.identity!, checkedLease)) {
       return json(
         {
           error: "ready_pool_lease_identity_mismatch",
@@ -12013,7 +12025,7 @@ export class FleetCoordinator {
     }
     return await this.withReadyPoolBorrowLock(() =>
       this.state.runExclusive(async () => {
-        const lease = (await this.getLease(leaseID)) ?? resolvedLease;
+        const lease = (await this.getLease(leaseID)) ?? checkedLease;
         if (!this.leaseManageableByRequest(lease, request, isAdminRequest(request))) {
           return json(
             { error: "forbidden", message: "lease manage access required" },
@@ -12801,6 +12813,59 @@ export class FleetCoordinator {
       identity.image.scope === image.scope &&
       identity.image.id === image.id
     );
+  }
+
+  private async observeReadyPoolLeaseImageIdentity(
+    lease: LeaseRecord,
+  ): Promise<LeaseRecord | Response> {
+    const providerName = managedLeaseProvider(lease);
+    if (!providerName) return lease;
+    const provider = this.provider(providerName, lease.region, lease.providerProject);
+    if (!provider.observeReadyPoolImageIdentity) return lease;
+    let image: LeaseImageIdentity | undefined;
+    try {
+      image = await provider.observeReadyPoolImageIdentity(lease);
+    } catch (error) {
+      const requirement =
+        providerName === "gcp"
+          ? "GCP typed ready-pool observation requires compute.instances.get and compute.disks.get"
+          : `${providerName} typed ready-pool image observation failed`;
+      return json(
+        {
+          error: "ready_pool_image_observation_failed",
+          message: `${requirement}: ${coordinatorErrorMessage(this.env, error)}`,
+        },
+        { status: 502 },
+      );
+    }
+    if (!image) return lease;
+    return await this.state.runExclusive(async () => {
+      const current = await this.getLease(lease.id);
+      const conflict = (message: string) =>
+        json({ error: "ready_pool_image_observation_conflict", message }, { status: 409 });
+      if (
+        !current ||
+        !sameLeaseReleaseIdentity(current, lease) ||
+        current.createAttemptID !== lease.createAttemptID ||
+        current.provider !== lease.provider ||
+        current.cloudID !== lease.cloudID ||
+        current.region !== lease.region ||
+        current.providerProject !== lease.providerProject ||
+        current.lifecycle !== lease.lifecycle ||
+        current.state !== "active" ||
+        Date.parse(current.expiresAt) <= Date.now()
+      ) {
+        return conflict("lease changed while immutable image evidence was being observed");
+      }
+      if (current.image) {
+        return sameLeaseImageIdentity(current.image, image!)
+          ? current
+          : conflict("lease already records different immutable image evidence");
+      }
+      const updated = { ...current, image, updatedAt: new Date().toISOString() };
+      await this.putLease(updated);
+      return updated;
+    });
   }
 
   private readyPoolImageIdentitySupported(image: ReadyPoolImageIdentity): boolean {
@@ -18222,6 +18287,18 @@ function sameLeaseReleaseIdentity(left: LeaseRecord, right: LeaseRecord): boolea
   );
 }
 
+function sameLeaseImageIdentity(left: LeaseImageIdentity, right: LeaseImageIdentity): boolean {
+  return (
+    left.id === right.id &&
+    left.source === right.source &&
+    left.provider === right.provider &&
+    left.kind === right.kind &&
+    left.region === right.region &&
+    left.promotedAt === right.promotedAt &&
+    left.sourceID === right.sourceID
+  );
+}
+
 function sameCreateAttempt(left: CreateAttemptRecord, right: CreateAttemptRecord): boolean {
   return (
     left.version === 1 &&
@@ -22965,6 +23042,7 @@ function parseProviderLabelTime(value: string | undefined): number {
 
 interface CloudProvider {
   readyPoolImageIdentity?(lease: LeaseRecord): ReadyPoolImageIdentity | undefined;
+  observeReadyPoolImageIdentity?(lease: LeaseRecord): Promise<LeaseImageIdentity | undefined>;
   supportsReadyPoolImageIdentity?(identity: ReadyPoolImageIdentity): boolean;
   listCrabboxServers(): Promise<ProviderMachine[]>;
   listReconciliationResources?(): Promise<ProviderMachine[]>;
@@ -23824,26 +23902,17 @@ export class GCPProvider implements CloudProvider {
   async prepareLeaseConfig(
     config: ReturnType<typeof leaseConfig>,
   ): Promise<ReturnType<typeof leaseConfig>> {
-    const gcpProject =
-      config.gcpProject ||
-      this.env.CRABBOX_GCP_PROJECT?.trim() ||
-      this.env.GCP_PROJECT_ID?.trim() ||
-      "";
-    const scoped = config.gcpProject === gcpProject ? config : { ...config, gcpProject };
-    if (scoped.gcpMachineImage) {
-      return scoped;
+    if (config.gcpProject) {
+      return config;
     }
-    const client = this.client.forScope(scoped.gcpZone, gcpProject);
-    const selected = scoped.gcpSnapshot
-      ? await client.resolveDiskSnapshot(scoped.gcpSnapshot)
-      : await client.resolveBootImage(scoped.gcpImage);
     return {
-      ...scoped,
-      ...(scoped.gcpSnapshot
-        ? { gcpSnapshot: selected.launchSource }
-        : { gcpImage: selected.launchSource }),
-      selectedImage: selected.identity,
+      ...config,
+      gcpProject: this.env.CRABBOX_GCP_PROJECT?.trim() || this.env.GCP_PROJECT_ID?.trim() || "",
     };
+  }
+
+  observeReadyPoolImageIdentity(lease: LeaseRecord): Promise<LeaseImageIdentity | undefined> {
+    return this.client.observeReadyPoolImageIdentity(lease);
   }
 
   prepareLeaseCreate(
@@ -23864,7 +23933,6 @@ export class GCPProvider implements CloudProvider {
     serverType: string;
     market?: string;
     attempts?: ProvisioningAttempt[];
-    image?: LeaseImageIdentity;
   }> {
     return this.client.createServerWithFallback(config, leaseID, slug, owner, provisioning);
   }

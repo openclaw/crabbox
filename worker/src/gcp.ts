@@ -23,6 +23,7 @@ import { leaseProviderName } from "./slug";
 import type {
   Env,
   LeaseImageIdentity,
+  LeaseRecord,
   ProviderImage,
   ProviderMachine,
   ProvisioningAttempt,
@@ -31,6 +32,8 @@ import type {
 const computeBaseURL = "https://compute.googleapis.com/compute/v1";
 const gcpReadyPoolResourcePattern =
   /^(?:https:\/\/(?:compute|www)\.googleapis\.com\/compute\/v1\/)?projects\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\/global\/(images|snapshots)\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)$/;
+const gcpObservedDiskPattern =
+  /^(?:https:\/\/(?:compute|www)\.googleapis\.com\/compute\/v1\/)?projects\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\/zones\/([a-z0-9-]+)\/disks\/([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)$/;
 const gcpReadyPoolScopePattern =
   /^projects\/[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\/global\/(?:images|snapshots)$/;
 const tokenURL = "https://oauth2.googleapis.com/token";
@@ -71,21 +74,8 @@ export function gcpReadyPoolImageScope(
   sourceID: string | undefined,
   kind: string | undefined,
 ): string | undefined {
-  if (!sourceID || (kind !== "gcp-image" && kind !== "gcp-disk-snapshot")) {
-    return undefined;
-  }
-  const match = gcpReadyPoolResourcePattern.exec(sourceID);
-  if (!match) return undefined;
-  const project = match[1];
-  const collection = match[2];
-  if (!project || !collection) return undefined;
-  if (
-    (kind === "gcp-image" && collection !== "images") ||
-    (kind === "gcp-disk-snapshot" && collection !== "snapshots")
-  ) {
-    return undefined;
-  }
-  return `projects/${project}/global/${collection}`;
+  const match = gcpReadyPoolSourceMatch(sourceID, kind);
+  return match ? `projects/${match[1]}/global/${match[2]}` : undefined;
 }
 
 export function gcpReadyPoolImageScopeSupported(scope: string): boolean {
@@ -99,6 +89,7 @@ class GCPMetadataTokenTrustError extends Error {}
 interface GCPInstance {
   id?: string;
   name?: string;
+  sourceMachineImage?: string;
   status?: string;
   machineType?: string;
   zone?: string;
@@ -109,6 +100,7 @@ interface GCPInstance {
   disks?: {
     boot?: boolean;
     source?: string;
+    type?: string;
   }[];
 }
 
@@ -137,13 +129,10 @@ interface GCPSnapshot {
 }
 
 interface GCPDisk {
+  sourceImage?: string;
   sourceImageId?: string;
+  sourceSnapshot?: string;
   sourceSnapshotId?: string;
-}
-
-export interface GCPResolvedLeaseImage {
-  identity: LeaseImageIdentity;
-  launchSource: string;
 }
 
 export class GCPClient {
@@ -208,60 +197,6 @@ export class GCPClient {
       .filter(canonicalGCPMachine);
   }
 
-  resolveBootImage(reference: string): Promise<GCPResolvedLeaseImage> {
-    return this.resolveLeaseImage(reference.trim() || this.image, "images", "gcp-image");
-  }
-
-  resolveDiskSnapshot(reference: string): Promise<GCPResolvedLeaseImage> {
-    return this.resolveLeaseImage(reference, "snapshots", "gcp-disk-snapshot");
-  }
-
-  private async resolveLeaseImage(
-    reference: string,
-    collection: "images" | "snapshots",
-    kind: "gcp-image" | "gcp-disk-snapshot",
-  ): Promise<GCPResolvedLeaseImage> {
-    const requested = reference.trim();
-    if (!requested) {
-      throw new Error(`gcp ${kind} reference is required`);
-    }
-    const token = await this.accessToken();
-    const response = await this.fetcher(gcpGlobalResourceURL(requested, this.project, collection), {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-    });
-    const text = await response.text();
-    if (!response.ok) {
-      throw new GCPHTTPError("GET", requested, response.status, text);
-    }
-    const image = (text ? JSON.parse(text) : {}) as GCPMachineImage | GCPSnapshot;
-    const immutableID = image.id?.trim() ?? "";
-    if (!/^[0-9]+$/.test(immutableID)) {
-      throw new Error(`gcp ${kind} ${requested} is missing an immutable numeric id`);
-    }
-    if (image.status !== "READY") {
-      throw new Error(`gcp ${kind} ${requested} did not resolve to a ready resource`);
-    }
-    const resourceProject = gcpResourceProject(requested) || this.project;
-    const launchSource =
-      image.selfLink?.trim() ||
-      (image.name ? `projects/${resourceProject}/global/${collection}/${image.name}` : requested);
-    return {
-      identity: {
-        id: immutableID,
-        source: kind === "gcp-image" ? "explicit" : "snapshot",
-        provider: "gcp",
-        kind,
-        region: this.zone,
-        sourceID: launchSource,
-      },
-      launchSource,
-    };
-  }
-
   forScope(zone?: string, project?: string): GCPClient {
     const scopedZone = zone?.trim() || this.zone;
     const scopedProject = project?.trim() || this.project;
@@ -274,6 +209,58 @@ export class GCPClient {
       client.cache = this.cache;
     }
     return client;
+  }
+
+  async observeReadyPoolImageIdentity(
+    lease: LeaseRecord,
+  ): Promise<LeaseImageIdentity | undefined> {
+    const project = lease.providerProject?.trim() ?? "";
+    const zone = lease.region?.trim() ?? "";
+    const name = lease.cloudID.trim();
+    if (
+      lease.provider !== "gcp" ||
+      !project ||
+      project !== lease.providerProject ||
+      !zone ||
+      zone !== lease.region ||
+      !name ||
+      name !== lease.serverName
+    ) {
+      return undefined;
+    }
+    const client = this.forScope(zone, project);
+    const instance = await client.gcp<GCPInstance>("GET", `/zones/${zone}/instances/${name}`);
+    const machine = toMachine(instance, zone);
+    if (
+      instance.name !== name ||
+      !providerMachineOwnedByLease(machine, lease, "gcp", gcpProviderLabelValue)
+    ) {
+      return undefined;
+    }
+    if (instance.sourceMachineImage?.trim()) return undefined;
+    const bootDisks = (instance.disks ?? []).filter(
+      (disk) => disk.boot === true && disk.type === "PERSISTENT",
+    );
+    if (bootDisks.length !== 1) return undefined;
+    const diskName = gcpObservedDiskName(bootDisks[0]?.source, project, zone);
+    if (!diskName) return undefined;
+    const disk = await client.gcp<GCPDisk>("GET", `/zones/${zone}/disks/${diskName}`);
+    const imagePresent = Boolean(disk.sourceImage?.trim() || disk.sourceImageId?.trim());
+    const snapshotPresent = Boolean(disk.sourceSnapshot?.trim() || disk.sourceSnapshotId?.trim());
+    if (imagePresent === snapshotPresent) return undefined;
+    const kind = imagePresent ? "gcp-image" : "gcp-disk-snapshot";
+    const source = imagePresent ? disk.sourceImage : disk.sourceSnapshot;
+    const id = (imagePresent ? disk.sourceImageId : disk.sourceSnapshotId)?.trim() ?? "";
+    const canonicalSource = canonicalGCPReadyPoolSource(source, kind);
+    if (!canonicalSource || !/^[0-9]+$/.test(id)) return undefined;
+    return {
+      id,
+      source: imagePresent ? "explicit" : "snapshot",
+      provider: "gcp",
+      kind,
+      region: zone,
+      sourceID: canonicalSource,
+    };
   }
 
   async recoverServerForLease(
@@ -321,7 +308,6 @@ export class GCPClient {
     serverType: string;
     market?: string;
     attempts?: ProvisioningAttempt[];
-    image?: LeaseImageIdentity;
   }> {
     const candidates = gcpProvisioningCandidatesForConfig(config);
     const zones = prependUnique(
@@ -351,21 +337,11 @@ export class GCPClient {
             serverType: string;
             market?: string;
             attempts?: ProvisioningAttempt[];
-            image?: LeaseImageIdentity;
           } = { server, serverType: machineType, market: config.capacityMarket };
           if (attempts.length > 0) result.attempts = attempts;
-          if (config.selectedImage) {
-            result.image = { ...config.selectedImage, region: zone };
-          }
           return result;
         } catch (error) {
-          if (
-            error instanceof ProviderProvisioningOutcomeUncertainError ||
-            error instanceof ProviderResourceUnresolvedError ||
-            providerProvisioningCleanupClaim(error)
-          ) {
-            throw error;
-          }
+          if (gcpProvisioningMustStop(error)) throw error;
           const message = errorMessage(error);
           failures.push(`${zone}/${machineType}: ${message}`);
           attempts.push({
@@ -407,16 +383,9 @@ export class GCPClient {
               serverType: machineType,
               market: "on-demand",
               attempts,
-              ...(config.selectedImage ? { image: { ...config.selectedImage, region: zone } } : {}),
             };
           } catch (error) {
-            if (
-              error instanceof ProviderProvisioningOutcomeUncertainError ||
-              error instanceof ProviderResourceUnresolvedError ||
-              providerProvisioningCleanupClaim(error)
-            ) {
-              throw error;
-            }
+            if (gcpProvisioningMustStop(error)) throw error;
             const message = errorMessage(error);
             failures.push(`on-demand ${zone}/${machineType}: ${message}`);
             if (!isFallbackProvisioningError(message)) {
@@ -440,11 +409,6 @@ export class GCPClient {
   ): Promise<ProviderMachine> {
     if (config.target !== "linux") {
       throw new Error("brokered gcp currently supports target=linux only");
-    }
-    if (config.selectedImage?.kind === "gcp-machine-image") {
-      throw new Error(
-        "gcp cannot verify immutable created-instance provenance for machine images; use a boot image or disk snapshot",
-      );
     }
     await this.ensureFirewall(config);
     const name = leaseProviderName(leaseID, slug);
@@ -529,24 +493,10 @@ export class GCPClient {
       throw error;
     }
     if (provisioning?.onResourceCreated) {
-      let continueReadiness: boolean;
       try {
-        continueReadiness = await provisioning.onResourceCreated(claim);
-      } catch (error) {
-        if (error instanceof ProviderResourceUnresolvedError) throw error;
-        throw new ProviderProvisioningCleanupError(
-          `${errorMessage(error)}; GCP instance ${name} cleanup remains pending`,
-          claim,
-          error,
-        );
-      }
-      if (!continueReadiness) {
-        return pendingMachine(name, config.serverType, this.zone, labels);
-      }
-      try {
-        const created = await this.gcp<GCPInstance>("GET", `/zones/${this.zone}/instances/${name}`);
-        await this.verifyCreatedLeaseImage(config, created);
-        return toMachine(created, this.zone);
+        if (!(await provisioning.onResourceCreated(claim))) {
+          return pendingMachine(name, config.serverType, this.zone, labels);
+        }
       } catch (error) {
         if (error instanceof ProviderResourceUnresolvedError) throw error;
         throw new ProviderProvisioningCleanupError(
@@ -558,9 +508,16 @@ export class GCPClient {
     }
     try {
       const created = await this.gcp<GCPInstance>("GET", `/zones/${this.zone}/instances/${name}`);
-      await this.verifyCreatedLeaseImage(config, created);
       return toMachine(created, this.zone);
     } catch (error) {
+      if (provisioning?.onResourceCreated) {
+        if (error instanceof ProviderResourceUnresolvedError) throw error;
+        throw new ProviderProvisioningCleanupError(
+          `${errorMessage(error)}; GCP instance ${name} cleanup remains pending`,
+          claim,
+          error,
+        );
+      }
       await this.rollbackDirectCreate(name, leaseID, slug, owner, claim, error);
       throw error;
     }
@@ -609,34 +566,6 @@ export class GCPClient {
         `${errorMessage(createError)}; GCP provisioning cleanup failed closed: ${errorMessage(cleanupError)}`,
         claim,
         cleanupError,
-      );
-    }
-  }
-
-  private async verifyCreatedLeaseImage(config: LeaseConfig, instance: GCPInstance): Promise<void> {
-    const expected = config.selectedImage;
-    if (!expected) return;
-    if (expected.kind === "gcp-machine-image") {
-      throw new Error(
-        "gcp cannot verify immutable created-instance provenance for machine images; use a boot image or disk snapshot",
-      );
-    }
-    if (expected.provider !== "gcp") return;
-
-    const sourceDisk = instance.disks?.find((disk) => disk.boot)?.source;
-    if (!sourceDisk) {
-      throw new Error(`gcp boot disk not found for instance ${instance.name ?? ""}`);
-    }
-    const disk = await this.gcp<GCPDisk>(
-      "GET",
-      `/zones/${this.zone}/disks/${lastPathPart(sourceDisk)}`,
-    );
-    const actualID =
-      expected.kind === "gcp-disk-snapshot" ? disk.sourceSnapshotId : disk.sourceImageId;
-    if (actualID !== expected.id) {
-      const sourceKind = expected.kind === "gcp-disk-snapshot" ? "snapshot" : "image";
-      throw new Error(
-        `gcp created boot disk ${sourceKind} id ${actualID ?? "<missing>"} does not match selected image ${expected.id}`,
       );
     }
   }
@@ -1276,6 +1205,14 @@ function isUnavailableMachineTypeError(value: string): boolean {
   );
 }
 
+function gcpProvisioningMustStop(error: unknown): boolean {
+  return (
+    error instanceof ProviderProvisioningOutcomeUncertainError ||
+    error instanceof ProviderResourceUnresolvedError ||
+    providerProvisioningCleanupClaim(error) !== undefined
+  );
+}
+
 function operationError(op: GCPOperation): void {
   const errors = op.error?.errors ?? [];
   if (errors.length > 0) {
@@ -1429,39 +1366,39 @@ function gcpSnapshotRef(value: string, project: string): string {
   return `projects/${project}/global/snapshots/${value}`;
 }
 
-function gcpGlobalResourceURL(
-  value: string,
-  project: string,
-  collection: "images" | "snapshots",
-): string {
-  const reference = value.trim();
-  if (reference.startsWith("https://")) {
-    const url = new URL(reference);
-    if (
-      !["compute.googleapis.com", "www.googleapis.com"].includes(url.hostname) ||
-      !url.pathname.startsWith("/compute/v1/projects/") ||
-      !url.pathname.includes(`/global/${collection}/`)
-    ) {
-      throw new Error(`gcp ${collection} URL must be a Google Compute Engine resource`);
-    }
-    return url.toString();
-  }
-  if (reference.startsWith("projects/")) {
-    if (!reference.includes(`/global/${collection}/`)) {
-      throw new Error(`gcp ${collection} reference must identify a global ${collection} resource`);
-    }
-    return `${computeBaseURL}/${reference}`;
-  }
-  const path = reference.includes("/") ? reference : `global/${collection}/${reference}`;
-  if (!path.startsWith(`global/${collection}/`)) {
-    throw new Error(`gcp ${collection} reference must identify a global ${collection} resource`);
-  }
-  return `${computeBaseURL}/projects/${project}/${path}`;
+function canonicalGCPReadyPoolSource(
+  source: string | undefined,
+  kind: string | undefined,
+): string | undefined {
+  const match = gcpReadyPoolSourceMatch(source, kind);
+  return match ? `projects/${match[1]}/global/${match[2]}/${match[3]}` : undefined;
 }
 
-function gcpResourceProject(reference: string): string | undefined {
-  const match = reference.match(/(?:^|\/)projects\/([^/]+)/);
-  return match?.[1];
+function gcpReadyPoolSourceMatch(
+  source: string | undefined,
+  kind: string | undefined,
+): RegExpExecArray | undefined {
+  if (!source || (kind !== "gcp-image" && kind !== "gcp-disk-snapshot")) return undefined;
+  const match = gcpReadyPoolResourcePattern.exec(source.trim());
+  if (
+    !match?.[1] ||
+    !match[2] ||
+    !match[3] ||
+    (kind === "gcp-image" ? match[2] !== "images" : match[2] !== "snapshots")
+  ) {
+    return undefined;
+  }
+  return match;
+}
+
+function gcpObservedDiskName(
+  source: string | undefined,
+  project: string,
+  zone: string,
+): string | undefined {
+  if (!source) return undefined;
+  const match = gcpObservedDiskPattern.exec(source.trim());
+  return match?.[1] === project && match[2] === zone ? match[3] : undefined;
 }
 
 function numberFromEnv(value: string | undefined, fallback: number): number {
