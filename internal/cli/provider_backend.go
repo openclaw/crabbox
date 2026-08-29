@@ -1766,6 +1766,8 @@ func renderServerList(stdout io.Writer, servers []Server) {
 	}
 }
 
+const bestEffortLeaseTouchTimeout = 20 * time.Second
+
 func (a App) touchLeaseTargetBestEffort(ctx context.Context, cfg Config, lease LeaseTarget, state string) Server {
 	backend, err := loadBackend(cfg, runtimeForApp(a))
 	if err != nil {
@@ -1780,7 +1782,9 @@ func (a App) touchLeaseTargetBestEffort(ctx context.Context, cfg Config, lease L
 	if state == "" {
 		state = blank(lease.Server.Labels["state"], "ready")
 	}
-	server, err := sshBackend.Touch(ctx, TouchRequest{Lease: lease, State: state, IdleTimeout: cfg.IdleTimeout})
+	touchCtx, cancel := context.WithTimeout(ctx, bestEffortLeaseTouchTimeout)
+	defer cancel()
+	server, err := sshBackend.Touch(touchCtx, TouchRequest{Lease: lease, State: state, IdleTimeout: cfg.IdleTimeout})
 	if err != nil {
 		fmt.Fprintf(a.Stderr, "warning: touch failed for %s: %v\n", lease.LeaseID, err)
 		return lease.Server

@@ -24,10 +24,12 @@ Crabbox uses internally (`BatchMode`, `StrictHostKeyChecking=accept-new`, a
 per-lease `known_hosts` file, and connection keepalives). For most providers
 that is a plain `ssh -i … user@host -p <port>` line you can run as-is.
 
-`crabbox ssh` touches the lease as a side effect — printing the command signals
-intended manual use, so the lease's idle timer is refreshed and the local repo
-claim is validated. Pass `--reclaim` when you are intentionally taking over a
-lease that is claimed by another repo checkout.
+`crabbox ssh` validates the local repo claim, then attempts a best-effort lease
+refresh to signal intended manual use. The refresh has a 20-second budget;
+failure warns and printing continues without guaranteeing renewed expiry.
+Cancellation by the caller stops the command without printing a successful
+result. Pass `--reclaim` when you are intentionally taking over a lease that is
+claimed by another repo checkout.
 
 ## Network selection
 

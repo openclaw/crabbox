@@ -36,6 +36,7 @@
 - Printed failed-run output tails once after the digest, preserving both streams, bounded output, capture notices, redaction, and failure bundles. Thanks @coygeek.
 - Clarified uploaded-script path semantics in the Agent Skill, including when to run a synced repository script in place for adjacent assets. Thanks @coygeek.
 - Rejected proven Machine0 PUBLIC-key identity mismatches before VM creation without changing key selection or treating unverified keys as mismatches, and avoided blocking extraction on special files.
+- Bounded best-effort foreground lease refreshes to 20 seconds so stalled maintenance does not block SSH-backed copy and connection commands for the coordinator's full HTTP budget, while preserving claim checks and caller cancellation.
 
 ## 0.47.0 - 2026-08-28
 
