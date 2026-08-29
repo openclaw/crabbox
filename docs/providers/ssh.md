@@ -91,7 +91,11 @@ Static SSH supports all four targets:
 cannot infer whether a Windows host runs native PowerShell or WSL2 commands.
 On Linux, macOS, and WSL2 targets, Crabbox's workspace-owner protocol invokes
 `/bin/sh` explicitly and does not require the SSH account to use a POSIX login
-shell; zsh, Bash, and Fish login shells are supported.
+shell on POSIX hosts; zsh, Bash, and Fish login shells are supported there.
+WSL staging supports Windows OpenSSH with `cmd.exe`, Windows PowerShell, or
+PowerShell (`pwsh`) as DefaultShell. Preparation binds the observed shell kind
+to the fresh route nonce; PowerShell executes the verified script directly to
+preserve raw stderr and the workload exit code. Unknown shell kinds fail closed.
 
 ### Architecture assertions and observations
 
@@ -265,6 +269,14 @@ static:
   workRoot: /home/builder/crabbox
 ```
 
+Intentional workspace-owner background helpers start a separate Linux session
+on WSL and retain their existing child witness, token, and expiry checks. The
+staged command waits for detachment before returning. Ordinary foreground
+children remain subject to stage cancellation and group cleanup. Direct WebVNC's
+retained websockify process similarly uses a separate session under its existing
+PID/start-time/boot/nonce identity checks. This does not add general POSIX
+workspace descendant containment or require `setsid` on macOS.
+
 ### Config fields
 
 | `static:` key | Purpose |
@@ -326,9 +338,117 @@ Windows native hosts need:
 - `tar` for archive sync;
 - VNC/browser tooling only if desktop flows are requested.
 
-WSL2 hosts additionally need WSL installed and reachable through `wsl.exe`, with
-Linux tooling inside the default distribution and `static.workRoot` set to a WSL
-path.
+WSL2 hosts additionally need:
+
+- WSL installed and reachable through `wsl.exe`, with Linux tooling inside the
+  default distribution and `static.workRoot` set to a WSL path;
+- the Windows OpenSSH server's SFTP subsystem enabled so Crabbox can stage WSL2
+  workloads before one-shot execution.
+
+Verify both the WSL runtime and SFTP transport before a long run:
+
+```sh
+crabbox doctor --provider ssh --target windows --windows-mode wsl2 \
+  --static-host win-dev.local --doctor-probe-ssh
+```
+
+If `wsl2-sftp` fails, configure `Subsystem sftp internal-sftp` in the Windows
+OpenSSH `sshd_config`, restart the Windows `sshd` service, and rerun Doctor.
+This is a compatibility change from v0.47.0, which shipped the stdin fallback:
+WSL2 execution now requires SFTP. Enable and verify it before upgrading.
+Connection loss and malformed protocol responses remain transport errors rather
+than being mislabeled as a missing subsystem.
+
+The staged launcher supports both `cmd.exe` and PowerShell as the Windows
+OpenSSH default shell. Its complete encoded command stays below 8191 bytes.
+Encoding prevents outer-shell expansion; it does not provide secrecy. Workload
+scripts and sensitive payload bytes remain in the private stage, not the
+launcher command line.
+
+The staged file is one finite envelope: a bounded descriptor, a Windows owner,
+a Linux helper, the command, and binary input. The launcher binds its complete
+length and SHA-256 digest, including the descriptor. The private `CBXFLAT2`
+descriptor is 80 bytes: version, length, and limit fields occupy its first 48
+bytes, followed by 32 cryptographically random blinding bytes generated once per
+spool. The blinder stays inside the private envelope across retries; it is never
+included in launcher arguments or route proofs. Every prefix containing program,
+command, or input bytes includes the entire blinder, keeping exposed integrity
+digests from revealing predictable payloads. SFTP validates the fresh
+nonce-root proof before sensitive writes, then uploads once and checks regular-file
+metadata and exact size before publication. It does not download the envelope
+again: the mandatory native verifier is the full-content authority. Size-scaled
+transfer allowances count one upload, not an upload plus readback. The launcher verifies and consumes
+the file through the same exclusive Windows handle. Ready files, route proofs,
+and acknowledged partial uploads use that same verifier for discard; partial
+uploads must match the corresponding exact prefix of the retained local spool.
+Identity means nonce plus expected content, not a persistent creation ID: a
+byte-identical copy is equivalent, but different content is never deleted.
+Unknown objects are not swept by age. An unacknowledged create, changed partial,
+or uncertain publication requires cleanup investigation and never authorizes replay.
+
+Windows sends the helper and finite input through bounded asynchronous WSL pipe
+writes through an unbuffered view of the same stdin handle. Initial stdin opening
+and helper delivery share a 15-second cap measured from launcher startup, clipped
+to the remaining original native operation deadline. Fixed internal owner-protocol
+calls derive a 38-second whole-operation guard from that 15-second startup cap,
+a 12-second control-work allowance, and 11 seconds for normal completion (two
+5-second signal/absence-polling allowances plus a 1-second margin). Unused
+allowance can serve other phases within that finite total; the 12 seconds are
+not an independently enforced payload timer. The descriptor and Go execution
+reserve use the same guard, while control uploads retain their 59-second floor
+and size scaling. Earlier caller deadlines still clip the call, and insufficient
+execution/cleanup reserve rejects staging or launch before mutation. Apparent
+success after expiry is rejected. Ordinary finite limits and unlimited execution
+are unchanged. No handoff or progress resets the original operation clock or
+authorizes replay. Later command/input writes retain their transfer idle limit: 2 seconds
+for control calls, 15 seconds otherwise. Cleanup handoff is clipped to its own
+existing 10-second deadline; unlimited workloads still have bounded startup.
+Failure phases distinguish launcher startup, pipe opening/flushing, and helper writing. In these
+diagnostics, `expected` is the command/input length; `read` and `written` count
+workload bytes from completed reads and writes. They exclude the helper and do
+not measure kernel progress during an unfinished write. Windows PowerShell
+5.1 remains supported: its Framework StreamWriter uses the console input
+encoding, so the launcher declares and flushes its preamble first. The bounded
+bootstrap accepts exactly the declared empty preamble or UTF-8 BOM before the
+unchanged helper bytes; other preambles fail closed. Core uses explicit UTF-8
+without a BOM. No console encoding is changed by production. The helper is fully read before execution; it needs no installed loader
+or drive automount. Windows keeps its single writer open after frame completion.
+Linux materializes finite command/input files, then gives the control descriptor
+only to a launcher-loss watcher. Workloads do not inherit that descriptor.
+An independent Linux supervisor directly parents an in-group guard and the
+workload leader. Cleanup revalidates guard PID, start identity, group, and record
+before TERM and KILL, reaps its children, and removes evidence only after actual
+group absence. Fallback cleanup asks the surviving supervisor to stop; it never
+reconstructs signal authority from a pathname after that supervisor dies.
+Supervisor loss, a missing witness, or an unreaped group zombie leaves evidence and
+reports cleanup ambiguity. This transport containment does not change the POSIX
+workspace-owner protocol's separate direct-child ownership contract.
+
+WSL2 staging requires a private Windows HOME owned by the SSH user, SYSTEM, or
+Builtin Administrators. The `.crabbox` parent and `wsl-stage` directory must be
+owned by the SSH user. Access may be granted only to that user, SYSTEM, and
+Builtin Administrators; Crabbox does not change HOME ownership or ACLs. Crabbox
+rejects files, reparse points, and existing unsafe ACLs before changing
+permissions or writing a route proof or payload.
+Both safe inherited staging directories are normalized to an explicit SSH-user
+owner and protected inheritable DACL on preparation. Directories already matching
+the full private ACL policy are validated without rewriting their owner or DACL;
+a fresh nonce proof checks that each SFTP route reaches the same protected
+Windows root.
+Each configured route has a bounded preparation, transfer, and cleanup budget;
+with multiple routes, a no-input reachability probe shares the preparation budget
+and may fail over without cleanup because it creates no state. Once nonce-proof
+preparation starts, fallback requires exact owned cleanup and is allowed only
+before publication. A successful probe does not authorize retrying a mutation.
+Closed-pipe failures during SFTP teardown follow the same fallback rules as
+connection loss. Permission, integrity, collision, ambiguous publication, and
+failed cleanup errors remain terminal.
+
+If an existing staging directory or its parent was permissive, quiesce the
+target (including untrusted processes and their open handles) before repairing
+its ACLs or removing it for safe recreation. Tightening an ACL alone does not
+revoke existing handles and does not establish safe staging. Crabbox does not
+automatically repair unsafe existing directories or HOME permissions.
 
 ## Capabilities
 

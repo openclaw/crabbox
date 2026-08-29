@@ -29,6 +29,28 @@ func workspaceOwnerReadinessError(err error, phase string) error {
 	return nil
 }
 
+// Attach only to the command execution, never staging, route probes, or cleanup.
+// The returned finisher runs after both streams have stopped.
+func workspaceOwnerSetupStreams(marker string, stdout, stderr io.Writer) (io.Writer, io.Writer, func(error) error) {
+	if marker == "" {
+		return stdout, stderr, func(err error) error { return err }
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	diagnostic := &workspaceOwnerSetupWriter{destination: stderr, marker: marker}
+	if sameCommandStreamWriter(stdout, stderr) {
+		stdout = workspaceOwnerSetupStdout{setup: diagnostic}
+	}
+	return stdout, diagnostic, func(err error) error {
+		err = errors.Join(err, diagnostic.flush())
+		if diagnostic.failure != "" {
+			return &workspaceOwnerSetupError{phase: diagnostic.failure, cause: err}
+		}
+		return err
+	}
+}
+
 // Only the current witness can report setup failure, and only before handing
 // off to user code. Do not classify a workload's exit code or stderr as setup.
 type workspaceOwnerSetupWriter struct {

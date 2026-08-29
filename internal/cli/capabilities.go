@@ -398,7 +398,8 @@ if (-not $result.TcpTestSucceeded) { exit 1 }`)
 	return "ss -ltn | grep -q '127.0.0.1:5900'"
 }
 
-func vncPasswordCommand(target SSHTarget) string {
+// remoteVNCCredentialReadCommand builds a remote read operation, not a credential value.
+func remoteVNCCredentialReadCommand(target SSHTarget) string {
 	if isWindowsNativeTarget(target) {
 		return powershellCommand("Get-Content -Raw -LiteralPath " + psQuote(windowsVNCPasswordPath))
 	}

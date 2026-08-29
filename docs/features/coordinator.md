@@ -57,6 +57,24 @@ the coordinator. The dedicated
 SSM-only workspace API path. See [Architecture](../architecture.md) for the full
 topology.
 
+## CLI request budgets
+
+The CLI bounds individual lease reads (including authoritative provider
+metadata), health, identity, provider readiness, and HTTP heartbeat requests to
+30 seconds. The same deadline covers authentication, response-body reads, and
+any eligible read-only curl fallback; an earlier caller deadline still wins.
+Best-effort foreground lease touches retain their shorter 20-second budget.
+Provisioning and image operations retain the 30-minute HTTP budget.
+
+Before releasing a lease, `stop` allows ten seconds for its preliminary lookup.
+If that lookup fails, ordinary stop can use the existing provider-scoped release
+request; provider identity errors still fail closed, and `stop --force` still
+requires successful inspection. Caller cancellation stops the command rather
+than starting this fallback. Release attempts and cleanup observation retain
+their existing separate budgets. An uncertain cleanup result preserves the
+local claim and SSH artifacts; a request timeout is not proof of remote failure
+or successful deletion and does not add mutation retries.
+
 ## Responsibilities
 
 The fleet coordinator owns:

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,50 @@ import (
 	"testing"
 	"time"
 )
+
+func TestOwnedSSHTransportChildEnvironment(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("POSIX local child fixture")
+	}
+	dir := t.TempDir()
+	script := `#!/bin/sh
+[ -z "${CRABBOX_TEST_OWNED_DENIED+x}" ] || exit 41
+[ "$CRABBOX_TEST_OWNED_OVERRIDE" = target ] || exit 42
+printf environment-ok
+cat
+`
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_TEST_OWNED_DENIED", "fixture-only")
+	t.Setenv("CRABBOX_TEST_OWNED_OVERRIDE", "ambient")
+	target := SSHTarget{Host: "fixture.invalid", User: "builder", Port: "22",
+		ChildEnvDenylist: []string{"CRABBOX_TEST_OWNED_DENIED"},
+		ChildEnv:         map[string]string{"CRABBOX_TEST_OWNED_OVERRIDE": "target"}}
+	for _, subsystem := range []bool{false, true} {
+		t.Run(map[bool]string{false: "command", true: "sftp"}[subsystem], func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			var out bytes.Buffer
+			var err error
+			if subsystem {
+				reader, input, wait, startErr := startOwnedSSHTransportSubsystem(ctx, target, "10", "3", "sftp", io.Discard)
+				if startErr != nil {
+					t.Fatal(startErr)
+				}
+				closeErr := input.Close()
+				_, readErr := io.Copy(&out, reader)
+				err = errors.Join(closeErr, readErr, wait())
+			} else {
+				err = runOwnedSSHTransportCommand(ctx, target, nil, &out, io.Discard)
+			}
+			if err != nil || out.String() != "environment-ok" {
+				t.Fatalf("owned child environment not applied: err=%v marker=%q", err, out.String())
+			}
+		})
+	}
+}
 
 func TestSSHTransportConfigParsesWithOpenSSH(t *testing.T) {
 	ssh, err := exec.LookPath("ssh")

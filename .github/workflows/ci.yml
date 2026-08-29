@@ -57,6 +57,30 @@ jobs:
       - name: Test
         run: go test -race ./...
 
+      - name: Require executed Linux supervision fixtures
+        shell: bash
+        run: |
+          go test ./internal/cli -run '^(TestWorkspaceOwnerWSL2Watchdog.*|TestWSL2(OrdinaryShortFrameWatchdogCleansState|MarkerPublicationFailureLeavesUnarmedDiagnosticState|GuardSurvivesPublishedMarkerBeforeArm|ProductionCleanup.*))$' -count=1 -json | tee "$RUNNER_TEMP/wsl-linux-tests.jsonl"
+          python3 - "$RUNNER_TEMP/wsl-linux-tests.jsonl" <<'PY'
+          import json, sys
+          records = [json.loads(line) for line in open(sys.argv[1])]
+          required = (
+              'TestWorkspaceOwnerWSL2WatchdogAllowsCompletedFrameExecution',
+              'TestWSL2OrdinaryShortFrameWatchdogCleansState',
+              'TestWSL2MarkerPublicationFailureLeavesUnarmedDiagnosticState',
+              'TestWSL2GuardSurvivesPublishedMarkerBeforeArm',
+              'TestWSL2ProductionCleanupKillsEntireStagingGroup',
+              'TestWSL2ProductionCleanupFailsClosedWithoutLiveGuard',
+              'TestWSL2ProductionCleanupFailsClosedWhenGuardMarkerChanges',
+              'TestWorkspaceOwnerWSL2WatchdogCleansCompletedFrameAfterLauncherExit',
+              'TestWorkspaceOwnerWSL2WatchdogPreservesIntentionalBackgroundWitness',
+          )
+          for name in required:
+              for action in ('run', 'pass'):
+                  assert any(r.get('Test') == name and r['Action'] == action for r in records), (name, action)
+          assert not any(r['Action'] == 'skip' for r in records), 'native fixture skipped'
+          PY
+
       - name: Test all Go modules
         run: scripts/test-go-modules.sh
 
@@ -108,11 +132,43 @@ jobs:
       - name: Test pond mesh cancellation
         run: go test ./internal/cli/ -run PondMeshCancel -count=1 -v
 
+      - name: Run required native WSL stage behaviors without skips
+        shell: pwsh
+        run: |
+          $required = @(
+            'TestWSLStageLauncherVerifiesAndConsumesReadyFile',
+            'TestWSLStageLauncherRejectsCorruptOrNonFileStage',
+            'TestWSLStageLauncherRejectsSameNonceValidReplacement',
+            'TestWSLStageLauncherIsFixedAndCarriesDigestBinding',
+            'TestWSLStageLauncherConfirmsOriginalAndCleanupTermination',
+            'TestWSLStageRootPreparationSecuresInheritedWindowsACL',
+            'TestWSLStageRootPreparationRejectsFilesAndReparsePoints',
+            'TestWSLStageFrameworkInputPreamble',
+            'TestWSLStageDelayedInitialHandoff',
+            'TestWSLStageInitialHandoffBudgets',
+            'TestWSLStageBlindingBindsFullAndPartialDigests',
+            'TestWSLStageEntropyFailurePreventsDeliveryAndSpoolCreation',
+            'TestWSLStageBlindingStaysOutOfPublicTransportMetadata'
+          )
+          $events = @(go test ./internal/cli/ -run ('^(' + ($required -join '|') + ')$') -count=1 -json)
+          $code = $LASTEXITCODE
+          $events | ForEach-Object { Write-Host $_ }
+          if ($code -ne 0) { exit $code }
+          $records = @($events | ForEach-Object { $_ | ConvertFrom-Json })
+          foreach ($name in $required) {
+            foreach ($action in @('run', 'pass')) {
+              if (-not ($records | Where-Object { $_.Test -eq $name -and $_.Action -eq $action })) {
+                throw "required native behavior $name did not $action"
+              }
+            }
+          }
+          if ($records | Where-Object { $_.Action -eq 'skip' }) { throw 'required native behavior was skipped' }
+
       - name: Test native Windows failure captures and private outputs
-        run: go test ./internal/cli/ -run '^(TestFailureBundle|TestNativeWindowsFailureBundle|TestManagedAttestKeyWindows|TestArtifactOutputWindows)' -count=1 -v
+        run: go test ./internal/cli/ -run '^(TestFailureBundle|TestNativeWindowsFailureBundle|TestPrivateRunOutput|TestManagedAttestKeyWindows|TestArtifactOutputWindows)' -count=1 -v
 
       - name: Test Windows SSH and rsync transport selection
-        run: go test ./internal/cli/ -run '^(TestWSL2TransportStagesWithoutWindowsAutomount|TestWorkspaceOwnerWSL2InputStreamPreparationIsBoundedAndReplayable|TestWindowsWSLNativeToolProbeUsesDirectCommandOutput|TestWindowsWSLNativeToolPathsRejectsWindowsShims|TestDirectSSHExecutableSelection|TestSSHCommandContextUsesNativeWindowsOpenSSHEvenWhenPATHSelectsMSYS2|TestResolveWindowsNativeRsyncPairUsesExactSibling|TestResolveWindowsNativeRsyncPairFailsClosedWithoutSibling|TestBindWindowsNativeRsyncSSHPreservesOwnedArguments|TestWindowsNativeRsyncCommandUsesSiblingPairAndEnvironment|TestResolvedSSHCopyCommandUsesNativeWindowsSiblingPair|TestResolvedSSHCopyCommandFailsClosedWithoutNativeWindowsSibling)$' -count=1 -v
+        run: go test ./internal/cli/ -run '^(TestWindowsWSLNativeToolProbeUsesDirectCommandOutput|TestWindowsWSLNativeToolPathsRejectsWindowsShims|TestDirectSSHExecutableSelection|TestSSHCommandContextUsesNativeWindowsOpenSSHEvenWhenPATHSelectsMSYS2|TestResolveWindowsNativeRsyncPairUsesExactSibling|TestResolveWindowsNativeRsyncPairFailsClosedWithoutSibling|TestBindWindowsNativeRsyncSSHPreservesOwnedArguments|TestWindowsNativeRsyncCommandUsesSiblingPairAndEnvironment|TestResolvedSSHCopyCommandUsesNativeWindowsSiblingPair|TestResolvedSSHCopyCommandFailsClosedWithoutNativeWindowsSibling)$' -count=1 -v
 
       - name: Test native Windows Python and CMake preflight probes
         run: go test ./internal/cli/ -run '^(TestPythonPreflightToolValidationAndTargetFiltering|TestPythonPreflightWindowsProbeUsesLiteralExecutableAndMissingContract|TestCMakePreflightNativeWindowsPresentAndMissing)$' -count=1 -v

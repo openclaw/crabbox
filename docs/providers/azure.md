@@ -261,7 +261,10 @@ beast     Standard_D16ads_v6, Standard_D16ds_v6, Standard_D16ads_v5, Standard_D1
 
 Class-based provisioning falls back across the candidate list when Azure rejects a
 SKU for capacity or quota (`SkuNotAvailable`, `QuotaExceeded`, `AllocationFailed`,
-`OverconstrainedAllocationRequest`). When `capacity.regions` (or broker-side
+`OverconstrainedAllocationRequest`). If the rejected attempt already created its
+exact lease-owned NIC and public IP, Crabbox verifies and removes both and clears
+their durable cleanup claim before the next SKU creates a new public IP. When
+`capacity.regions` (or broker-side
 `CRABBOX_AZURE_REGIONS`) is set, Crabbox also tries those Azure regions in order
 and uses region-scoped shared network names for the fallback path. Spot leases
 fall back to on-demand when `capacity.fallback` starts with `on-demand`. Azure

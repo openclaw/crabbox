@@ -173,7 +173,7 @@ func resolveMacOSWebVNCCredentials(ctx context.Context, cfg Config, target SSHTa
 	if ok {
 		return credentials, localWebVNCAuthARD, nil
 	}
-	password, err := readPassword(ctx, target, vncPasswordCommand(target))
+	password, err := readPassword(ctx, target, remoteVNCCredentialReadCommand(target))
 	if err != nil {
 		return rfbCredentials{}, localWebVNCAuthAuto, exit(5, "read managed macOS desktop credentials: %v", err)
 	}

@@ -141,6 +141,14 @@ paths, or process command lines. A per-command marker separates them from
 workload stderr, and classification ends before workload execution. A workload
 that returns exit code 74 therefore remains a workload failure.
 
+For WSL2, the marker travels inside the verified private staged envelope and
+is filtered only when its command executes. Upload, route probes, and cleanup
+do not classify witness diagnostics. Readiness still checks the WSL runtime
+and SFTP first; when a workspace owner is active, its readiness command then
+passes the same staged witness setup. A setup failure stops readiness without
+port fallback or replay. Workload output after handoff, including marker-like
+stderr, retains its ordinary meaning.
+
 ## Related
 
 - [`cp`](../commands/cp.md)

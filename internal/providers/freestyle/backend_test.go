@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -1105,23 +1106,32 @@ func TestFreestyleSyncHonorsConfiguredTimeout(t *testing.T) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
-	client := &fakeFreestyleClient{writeFileBlock: true}
-	backend := &freestyleBackend{
-		cfg: Config{
-			Freestyle: FreestyleConfig{Workdir: "repo"},
-			Sync:      SyncConfig{Timeout: 100 * time.Millisecond},
-		},
-		rt: Runtime{Stderr: io.Discard},
-	}
-	started := time.Now()
-	if _, _, err := backend.syncWorkspace(context.Background(), client, "vm123", RunRequest{
-		Repo: Repo{Root: root, Name: "repo"},
-	}); err == nil || !strings.Contains(err.Error(), "context deadline exceeded") {
-		t.Fatalf("syncWorkspace err=%v, want timeout", err)
-	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("syncWorkspace took %s, timeout should bound transfer", elapsed)
-	}
+	// Advance time only once the upload blocks, independent of Git/archive setup.
+	synctest.Test(t, func(t *testing.T) {
+		client := &fakeFreestyleClient{writeFileBlock: true}
+		backend := &freestyleBackend{
+			cfg: Config{
+				Freestyle: FreestyleConfig{Workdir: "repo"},
+				Sync:      SyncConfig{Timeout: 100 * time.Millisecond},
+			},
+			rt: Runtime{Stderr: io.Discard},
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		wantDeadline := time.Now().Add(backend.cfg.Sync.Timeout)
+		_, _, err := backend.syncWorkspace(ctx, client, "vm123", RunRequest{
+			Repo: Repo{Root: root, Name: "repo"},
+		})
+		if !client.writeFileDeadline.Equal(wantDeadline) {
+			t.Fatalf("WriteFile deadline=%v, want configured deadline %v", client.writeFileDeadline, wantDeadline)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("syncWorkspace err=%v, want timeout", err)
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("parent watchdog expired: %v", ctx.Err())
+		}
+	})
 }
 
 func TestFreestyleFallbackUploadCleansPartialArchiveAfterChunkFailure(t *testing.T) {
@@ -1240,6 +1250,7 @@ type fakeFreestyleClient struct {
 	writeFileEncoding string
 	writeFileErr      error
 	writeFileBlock    bool
+	writeFileDeadline time.Time
 	execCommands      []string
 	deleteIDs         []string
 	deleteErr         error
@@ -1295,6 +1306,7 @@ func (f *fakeFreestyleClient) WriteFile(ctx context.Context, _ string, path, con
 	f.writeFileContent = content
 	f.writeFileEncoding = encoding
 	if f.writeFileBlock {
+		f.writeFileDeadline, _ = ctx.Deadline()
 		<-ctx.Done()
 		return ctx.Err()
 	}
