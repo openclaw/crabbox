@@ -118,21 +118,8 @@ func (s checkpointStore) Reserve(record checkpointRecord) (checkpointRecord, che
 }
 
 func (s checkpointStore) Create(record checkpointRecord) (checkpointRecord, error) {
-	record, paths, err := s.Reserve(record)
-	if err != nil {
-		return checkpointRecord{}, err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = os.RemoveAll(paths.Dir)
-		}
-	}()
-	if err := s.Write(record); err != nil {
-		return checkpointRecord{}, err
-	}
-	committed = true
-	return record, nil
+	record, _, err := s.Reserve(record)
+	return record, err
 }
 
 func (s checkpointStore) Write(record checkpointRecord) error {
@@ -277,6 +264,11 @@ func (s checkpointStore) List() ([]checkpointRecord, error) {
 			continue
 		}
 		record, _, err := s.Read(entry.Name())
+		// The directory can precede atomic metadata publication or outlive a
+		// concurrent deletion. Only published metadata constitutes a record.
+		if isCheckpointNotFound(err) {
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
