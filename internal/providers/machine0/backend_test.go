@@ -3,11 +3,15 @@ package machine0
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -17,6 +21,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"golang.org/x/crypto/ssh"
 )
 
 type fakeAPI struct {
@@ -768,42 +773,161 @@ func TestAcquireRecoveryClaimTracksCreatedMachines(t *testing.T) {
 }
 
 func TestAcquirePreflightsPublicSSHKeyBeforeCreate(t *testing.T) {
+	if _, err := exec.LookPath("ssh-keygen"); err != nil {
+		t.Fatal("ssh-keygen is required for the private-file identity boundary test")
+	}
+	makeKey := func() ([]byte, string, ssh.Signer) {
+		_, private, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		block, err := ssh.MarshalPrivateKey(private, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		signer, err := ssh.NewSignerFromKey(private)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pem.EncodeToMemory(block), strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey()))), signer
+	}
+	private, public, signer := makeKey()
+	_, otherPublic, _ := makeKey()
+	raw, err := ssh.ParseRawPrivateKey(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := ssh.MarshalPrivateKeyWithPassphrase(raw, "", []byte("synthetic-test-passphrase"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert := &ssh.Certificate{Key: signer.PublicKey(), CertType: ssh.UserCert, ValidBefore: ssh.CertTimeInfinity}
+	if err := cert.SignCert(rand.Reader, signer); err != nil {
+		t.Fatal(err)
+	}
+	publicKey := func(value string) machineKey {
+		return machineKey{Name: "selected-key", Type: "PUBLIC", FileName: "local-key", PublicKey: value}
+	}
 	for _, tc := range []struct {
 		name       string
 		key        machineKey
-		createFile bool
+		private    []byte
+		sidecar    string
 		wantError  bool
+		mismatch   bool
+		extractErr error
+		cancel     bool
 	}{
 		{name: "public key without filename", key: machineKey{Name: "no-filename", Type: "PUBLIC"}, wantError: true},
 		{name: "public key with unsafe filename", key: machineKey{Name: "unsafe-filename", Type: "PUBLIC", FileName: "../other-key"}, wantError: true},
-		{name: "public key without local private key", key: machineKey{Name: "remote-only", Type: "PUBLIC", FileName: "remote-only"}, wantError: true},
-		{name: "public key with local private key", key: machineKey{Name: "local-key", Type: "PUBLIC", FileName: "local-key"}, createFile: true},
+		{name: "public key without local private key", key: publicKey(public), sidecar: public, wantError: true},
+		{name: "matching private key without sidecar", key: publicKey(public), private: private},
+		{name: "mismatching private key without sidecar", key: publicKey(otherPublic), private: private, wantError: true, mismatch: true},
+		{name: "matching private key with misleading sidecar", key: publicKey(public), private: private, sidecar: otherPublic},
+		{name: "mismatching private key with matching sidecar", key: publicKey(otherPublic), private: private, sidecar: otherPublic, wantError: true, mismatch: true},
+		{name: "public key comments are not identity", key: publicKey(public + " registered comment"), private: private},
+		{name: "encrypted private key remains unknown", key: publicKey(otherPublic), private: pem.EncodeToMemory(encrypted)},
+		{name: "unsupported private key remains unknown", key: publicKey(otherPublic), private: []byte("unsupported private key format")},
+		{name: "missing public metadata remains unknown", key: publicKey(""), private: private},
+		{name: "invalid public metadata remains unknown", key: publicKey("not a public key"), private: private},
+		{name: "certificate metadata is not a bare key", key: publicKey(string(ssh.MarshalAuthorizedKey(cert))), private: private},
+		{name: "multiple public keys remain unknown", key: publicKey(otherPublic + "\n" + public), private: private},
+		{name: "authorized key options remain unknown", key: publicKey("restrict " + otherPublic), private: private},
+		{name: "extraction unavailable remains unknown", key: publicKey(otherPublic), private: private, extractErr: exec.ErrNotFound},
+		{name: "cancellation during extraction prevents create", key: publicKey(public), private: private, cancel: true, wantError: true},
 		{name: "managed key can materialize later", key: machineKey{Name: "managed-key", Type: "MANAGED", FileName: "machine0__managed-key"}},
 	} {
 		for _, leaseID := range []string{"", fixedMachine0TestLeaseID} {
 			t.Run(tc.name+"/"+blank(leaseID, "ordinary"), func(t *testing.T) {
 				repo := setupState(t)
-				if tc.createFile {
-					if err := os.WriteFile(filepath.Join(os.Getenv("SSH_KEY_PATH"), tc.key.FileName), []byte("fixture private key"), 0o600); err != nil {
+				keyPath := filepath.Join(os.Getenv("SSH_KEY_PATH"), tc.key.FileName)
+				if tc.private != nil {
+					if err := os.WriteFile(keyPath, tc.private, 0o600); err != nil {
 						t.Fatal(err)
 					}
 				}
+				if tc.sidecar != "" {
+					if err := os.WriteFile(keyPath+".pub", []byte(tc.sidecar), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				ctx, cancel := context.WithCancelCause(t.Context())
+				defer cancel(nil)
+				cause := errors.New("key extraction canceled")
+				runner := &recordingRunner{run: func(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+					if req.Name != "ssh-keygen" || !reflect.DeepEqual(req.Args, []string{"-y", "-P", "", "-f", keyPath}) || req.MaxCapturedOutputBytes <= 0 || req.Stdout != nil || req.Stderr != nil {
+						t.Fatal("expected bounded, captured, noninteractive extraction from the exact private file")
+					}
+					if tc.cancel {
+						cancel(cause)
+						return core.LocalCommandResult{ExitCode: 1, Stderr: "sensitive diagnostic"}, context.Canceled
+					}
+					if tc.extractErr != nil {
+						return core.LocalCommandResult{ExitCode: 1, Stderr: "sensitive diagnostic"}, tc.extractErr
+					}
+					output, err := exec.CommandContext(ctx, req.Name, req.Args...).Output()
+					result := core.LocalCommandResult{Stdout: string(output)}
+					if err != nil {
+						result.ExitCode = 1
+					}
+					return result, err
+				}}
 				api := &fakeAPI{sizes: []machineSize{testSize()}, selectedKey: &tc.key, getSequence: []machine{readyMachine("203.0.113.10")}}
-				_, err := testBackendWithAPI(api).Acquire(context.Background(), AcquireRequest{RequestedLeaseID: leaseID, Repo: core.Repo{Root: repo}})
+				b := testBackendWithAPI(api)
+				b.rt.Exec = runner
+				var diagnostics bytes.Buffer
+				b.rt.Stdout, b.rt.Stderr = &diagnostics, &diagnostics
+				waited := 0
+				b.waitSSH = func(context.Context, *SSHTarget, time.Duration) error { waited++; return nil }
+				_, err := b.Acquire(ctx, AcquireRequest{RequestedLeaseID: leaseID, Repo: core.Repo{Root: repo}})
+				for _, material := range []string{public, otherPublic, string(private), "sensitive diagnostic"} {
+					if strings.Contains(diagnostics.String(), material) {
+						t.Fatal("preflight logged key material or raw extraction diagnostics")
+					}
+				}
+				if tc.private != nil {
+					got, readErr := os.ReadFile(keyPath)
+					if readErr != nil || !bytes.Equal(got, tc.private) {
+						t.Fatal("preflight changed the private file")
+					}
+				}
+				if tc.mismatch && len(runner.calls) != 1 {
+					t.Fatal("mismatch must be established by private-file extraction")
+				}
 				if tc.wantError {
-					if err == nil || !strings.Contains(err.Error(), tc.key.Name) || !strings.Contains(err.Error(), "--machine0-key <managed-key-name>") || len(api.created) != 0 {
-						t.Fatalf("err=%v created=%#v", err, api.created)
+					if err == nil || len(api.created) != 0 || len(api.started) != 0 || len(api.primed) != 0 || len(api.removed) != 0 || waited != 0 {
+						t.Fatalf("preflight must fail before allocation or readiness: err=%v creates=%d starts=%d primes=%d removals=%d waits=%d", err, len(api.created), len(api.started), len(api.primed), len(api.removed), waited)
+					}
+					if tc.cancel {
+						if !errors.Is(err, cause) {
+							t.Fatalf("cancellation cause lost: %v", err)
+						}
+					} else if tc.mismatch {
+						var exitErr core.ExitError
+						if !errors.As(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(err.Error(), "does not match") || !strings.Contains(err.Error(), "--machine0-key") {
+							t.Fatalf("expected actionable key mismatch: %v", err)
+						}
+						for _, secret := range []string{tc.key.Name, keyPath, public, otherPublic, string(private), "sensitive diagnostic"} {
+							if strings.Contains(err.Error(), secret) {
+								t.Fatal("mismatch error disclosed key identity or material")
+							}
+						}
+					} else if !strings.Contains(err.Error(), tc.key.Name) || !strings.Contains(err.Error(), "--machine0-key <managed-key-name>") {
+						t.Fatalf("existing filename/private-file guard lost: %v", err)
 					}
 					if leaseID != "" {
 						claim := readFixedMachine0Claim(t, leaseID)
 						if claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != fixedMachine0IntentPrepared || len(claim.FixedCreateIntent.Attempt) != 0 || claim.CloudID != "" {
-							t.Fatalf("preflight failure persisted a create attempt or resource: %#v", claim)
+							t.Fatal("preflight failure persisted a create attempt or resource")
 						}
 					}
 					return
 				}
-				if err != nil || len(api.created) != 1 {
-					t.Fatalf("err=%v created=%#v", err, api.created)
+				if err != nil || len(api.created) != 1 || waited != 1 {
+					t.Fatalf("err=%v creates=%d waits=%d", err, len(api.created), waited)
+				}
+				if tc.key.Type == "MANAGED" && len(runner.calls) != 0 {
+					t.Fatal("managed key reached PUBLIC key extraction")
 				}
 			})
 		}

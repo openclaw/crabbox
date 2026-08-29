@@ -1,6 +1,7 @@
 package machine0
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -15,6 +16,7 @@ import (
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
+	"golang.org/x/crypto/ssh"
 )
 
 type backend struct {
@@ -249,12 +251,46 @@ func (b *backend) preflightSSHKey(ctx context.Context, name string) error {
 	keyPath := filepath.Join(keyRoot, fileName)
 	info, err := b.stat(keyPath)
 	if err == nil && !info.IsDir() {
+		registered := machine0BarePublicKey(key.PublicKey)
+		if registered == nil {
+			return nil
+		}
+		// Like native Machine0 SSH, compare the private file, not its .pub sidecar.
+		// Failed noninteractive extraction (including encrypted keys) is unknown.
+		result, extractErr := b.rt.Exec.Run(ctx, LocalCommandRequest{
+			Name: "ssh-keygen", Args: []string{"-y", "-P", "", "-f", keyPath},
+			MaxCapturedOutputBytes: 64 << 10,
+		})
+		if cause := context.Cause(ctx); cause != nil {
+			return cause
+		}
+		if extractErr == nil && result.ExitCode == 0 {
+			if local := machine0BarePublicKey(result.Stdout); local != nil && !bytes.Equal(local.Marshal(), registered.Marshal()) {
+				return exit(2, "Machine0 PUBLIC SSH key does not match the local private key; provide the matching local key or select the intended key with --machine0-key")
+			}
+		}
 		return nil
 	}
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return exit(2, "inspect private key for Machine0 PUBLIC SSH key %q at %q: %v", blank(key.Name, "<default>"), keyPath, err)
 	}
 	return exit(2, "Machine0 PUBLIC SSH key %q has no local private key at %q; select a managed key with --machine0-key <managed-key-name>", blank(key.Name, "<default>"), keyPath)
+}
+
+// Certificates, options and multiple records need more than a bare-key comparison.
+func machine0BarePublicKey(value string) ssh.PublicKey {
+	value = strings.TrimSpace(value)
+	if strings.ContainsAny(value, "\r\n") {
+		return nil
+	}
+	key, _, options, _, err := ssh.ParseAuthorizedKey([]byte(value))
+	if err != nil || len(options) != 0 {
+		return nil
+	}
+	if _, certificate := key.(*ssh.Certificate); certificate {
+		return nil
+	}
+	return key
 }
 
 func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {

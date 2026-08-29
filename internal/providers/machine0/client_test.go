@@ -15,6 +15,7 @@ import (
 )
 
 type recordingRunner struct {
+	run       func(context.Context, core.LocalCommandRequest) (core.LocalCommandResult, error)
 	calls     []core.LocalCommandRequest
 	responses map[string]core.LocalCommandResult
 	errors    map[string]error
@@ -26,8 +27,11 @@ type runnerResponse struct {
 	err    error
 }
 
-func (r *recordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+func (r *recordingRunner) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.calls = append(r.calls, req)
+	if r.run != nil {
+		return r.run(ctx, req)
+	}
 	if len(r.sequence) > 0 {
 		response := r.sequence[0]
 		r.sequence = r.sequence[1:]

@@ -111,6 +111,13 @@ direct SSH host-key handling. The provider-owned path overrides a generic
 provider-owned key identity. Set `SSH_KEY_PATH` when Machine0 uses a custom key
 directory.
 
+Before creating a VM with a PUBLIC key, Crabbox checks the selected key's local
+filename and rejects a proven mismatch with the registered public key. It uses
+noninteractive `ssh-keygen -y` on the private file, not its `.pub` sidecar.
+Encrypted or unsupported keys and missing public metadata remain unverified;
+this check does not prove that SSH authentication will succeed. Crabbox never
+changes the selected key or downloads PUBLIC private keys to repair a mismatch.
+
 Machine0 SSH targets use a provider-isolated host-trust file under
 `<key-directory>/crabbox/machine0/known_hosts.d/`, keyed by a hash of the
 immutable Machine0 machine ID. The directory is private (`0700`), OpenSSH host
