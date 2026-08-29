@@ -205,20 +205,29 @@ source and image for explicit recovery. A stopped VM is not a retired VM.
 After inspecting a terminal failure, add `--discard-failed` to that same
 command to delete its exact failed image, verify image absence, and complete
 the requested source retirement. The returned `capture.discardFailed: true`
-means there is no reusable image. An ambiguous submission cannot be discarded
-through this flag; it remains held until its provider identity is reconciled.
+means there is no reusable image, and that checkpoint cannot be forked even
+after retirement completes. An ambiguous submission cannot be discarded through
+this flag; it remains held until its provider identity is reconciled.
 
 The operation binds the source resource, repository, and claim generation
 before effects. Checkpoint and claim locks serialize cooperating owners;
 unknown or replaced sources are never adopted. Machine0 reconciles an
-ambiguous save against the original operation and exact image version. Other
-supported native providers (AWS, Hetzner, local-container, and brokered Azure
+ambiguous save against the original operation and exact image version. It records
+the authenticated account before stopping the source and checks that account
+before accepting source absence or retiring the claim. Changing accounts causes
+a refusal; already-started captures without an account binding remain held for
+recovery. Keep the native account and API endpoint stable throughout each
+command; separate native invocations cannot make credential changes atomic. Other
+supported native providers (AWS, local-container, and brokered Azure
 disk/GCP checkpoints) retain an ambiguous submission without resaving
 when no provider recovery identity was returned. No background worker is
 started. Ordinary checkpoint creation retains its existing restore-source
 behavior; source retirement is explicit and does not restart a source merely
 to delete it. A configured Machine0 `suspend` release policy is incompatible
-with `--retire-source`, not silently changed to destruction.
+with `--retire-source`, not silently changed to destruction. Hetzner ordinary
+snapshots remain supported, but source retirement is refused before admission:
+its project-scoped API cannot attest the original project after a token change.
+Existing unfinished Hetzner retirements remain held for operator recovery.
 
 A provider may retain the released source's immutable identity in a terminal
 cleanup receipt. Retirement replay preserves that receipt and revalidates it

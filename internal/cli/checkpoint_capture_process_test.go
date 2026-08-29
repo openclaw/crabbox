@@ -4,8 +4,10 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -14,6 +16,79 @@ import (
 	"testing"
 	"time"
 )
+
+func runCheckpointNativeLifetimeContract(t *testing.T, repo, binary string) {
+	t.Run("paused native helper exits when invocation lifetime closes", func(t *testing.T) {
+		f := newCheckpointCaptureFixture(t, repo, binary)
+		state := f.state()
+		state.Pause = "inventory"
+		f.writeState(state)
+		path := filepath.Join(f.root, "helper-lifetime.fifo")
+		if err := syscall.Mkfifo(path, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		owner, err := os.OpenFile(path, os.O_RDWR|syscall.O_NONBLOCK, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer owner.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, binary+".provider", "--", "machine0", "ls", "--json")
+		cmd.Env = append(append([]string(nil), f.env...), "CRABBOX_CAPTURE_LIFETIME="+path)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		var output bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &output, &output
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
+		select {
+		case event := <-f.events:
+			if event.Kind != "inventory" || event.PID != cmd.Process.Pid {
+				t.Fatal("wrong helper reached lifetime probe")
+			}
+		case err := <-done:
+			t.Fatalf("helper exited before pause: %v %s", err, output.String())
+		case <-ctx.Done():
+			t.Fatalf("helper never paused: %v", <-done)
+		}
+		if err := owner.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-done; err == nil || ctx.Err() != nil {
+			t.Fatalf("lifetime closure failed to end helper: err=%v context=%v", err, ctx.Err())
+		}
+	})
+	for _, missing := range []bool{true, false} {
+		t.Run("native helper rejects ended lifetime missing="+strconv.FormatBool(missing), func(t *testing.T) {
+			f := newCheckpointCaptureFixture(t, repo, binary)
+			before, err := os.ReadFile(filepath.Join(f.root, "provider.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			lifetime := filepath.Join(f.root, "ended-lifetime.fifo")
+			if !missing {
+				if err := syscall.Mkfifo(lifetime, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, binary+".provider", "--", "machine0", "ls", "--json")
+			cmd.Env = append(append([]string(nil), f.env...), "CRABBOX_CAPTURE_LIFETIME="+lifetime)
+			output, err := cmd.CombinedOutput()
+			if err == nil || ctx.Err() != nil || !bytes.Contains(output, []byte("lifetime")) {
+				t.Fatalf("late helper err=%v context=%v output=%s", err, ctx.Err(), output)
+			}
+			after, err := os.ReadFile(filepath.Join(f.root, "provider.json"))
+			if err != nil || !bytes.Equal(before, after) || len(f.eventLog()) != 0 {
+				t.Fatalf("late helper reached native effects: err=%v", err)
+			}
+		})
+	}
+}
 
 func TestCheckpointCaptureProcessOwnership(t *testing.T) {
 	for _, tc := range []struct {
@@ -64,16 +139,11 @@ func TestCheckpointCaptureProcessOwnership(t *testing.T) {
 			if err != nil || parentErr != nil || group != parentGroup || group == syscall.Getpgrp() {
 				t.Fatalf("child=%d group=%d parent=%d group=%d errors=%v/%v", child, group, p.cmd.Process.Pid, parentGroup, err, parentErr)
 			}
-			// Independent safety cleanup makes a red regression safe. It is not
-			// credited as harness cleanup, and only touches the observed group.
-			finished := false
+			// Rescue uses the retained anchor too; an observed numeric group
+			// is not signal authority once Wait has sealed that ownership.
 			rescue := func() {
-				if finished {
-					return
-				}
-				if current, err := syscall.Getpgid(child); err == nil && current == group {
-					_ = syscall.Kill(-group, syscall.SIGKILL)
-				}
+				p.closeNativeHelpers()
+				_ = p.signalGroup(syscall.SIGKILL)
 			}
 			t.Cleanup(rescue)
 			if tc.terminated {
@@ -131,14 +201,13 @@ func TestCheckpointCaptureProcessOwnership(t *testing.T) {
 				rescue()
 			}
 			waitForPondMeshSignalProcessExit(t, child)
-			finished = true
 			t.Logf("parent=%d child=%d group=%d elapsed=%s wait=%v childAbsent=true", p.cmd.Process.Pid, child, group, time.Since(started), p.err)
 		})
 	}
 }
 
 func TestCheckpointCaptureProcessCleanupIsolation(t *testing.T) {
-	for _, mode := range []string{"concurrent cancellation", "late event after exit"} {
+	for _, mode := range []string{"concurrent cancellation", "late event after exit", "stale helper event"} {
 		t.Run(mode, func(t *testing.T) {
 			root := t.TempDir()
 			f := &checkpointCaptureFixture{t: t, root: root, repo: root, binary: "/bin/sh", env: []string{"PATH=/usr/bin:/bin"}}
@@ -161,6 +230,11 @@ func TestCheckpointCaptureProcessCleanupIsolation(t *testing.T) {
 				}
 				// Model a later event whose owner number has been reused. A
 				// completed invocation must never interpret new ownership claims.
+				events = append(events, checkpointCaptureFixtureEvent{PID: guardGroup, PGID: guardGroup, Owner: p.cmd.Process.Pid})
+			}
+			if mode == "stale helper event" {
+				// Model a completed helper's PGID reused while its owner still runs.
+				// Both groups remain test-owned, so the failing regression is safe.
 				events = append(events, checkpointCaptureFixtureEvent{PID: guardGroup, PGID: guardGroup, Owner: p.cmd.Process.Pid})
 			}
 			var log bytes.Buffer

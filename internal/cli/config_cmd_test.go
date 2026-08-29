@@ -2183,6 +2183,133 @@ func TestRedactedConfigURLRemovesQueryAndFragment(t *testing.T) {
 	}
 }
 
+func TestConfigShowIncusResolvedSettings(t *testing.T) {
+	for _, source := range []string{"defaults", "file", "environment"} {
+		t.Run(source, func(t *testing.T) {
+			clearConfigEnv(t)
+			for _, suffix := range strings.Fields(`REMOTE PROJECT ADDRESS SOCKET INSTANCE_TYPE IMAGE PROFILE USER WORK_ROOT
+DELETE_ON_RELEASE START_TIMEOUT LAUNCH_PORT PROXY_LISTEN_HOST PROXY_LISTEN_PORT PROXY_DEVICE TLS_SERVER_CERT INSECURE_TLS REMOTE_IMAGE_SERVER`) {
+				t.Setenv("CRABBOX_INCUS_"+suffix, "")
+			}
+			t.Setenv("CRABBOX_PROVIDER", "")
+			t.Chdir(t.TempDir())
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			t.Setenv("CRABBOX_CONFIG", configPath)
+			want := map[string]any{
+				"remote": "local", "project": "", "address": "", "socket": "",
+				"instanceType": "container", "image": "images:ubuntu/24.04/cloud", "profile": "",
+				"user": "crabbox", "workRoot": "/work/crabbox", "deleteOnRelease": true,
+				"startTimeout": "10m0s", "launchPort": "22", "proxyListenHost": "127.0.0.1",
+				"proxyListenPort": "", "proxyDevice": "crabbox-ssh", "tlsServerCert": "",
+				"insecureTLS": false, "remoteImageServer": "",
+			}
+			if source != "defaults" {
+				config := `provider: incus
+incus:
+  remote: lab
+  project: proof
+  address: https://incus.example.test:8443
+  socket: ~/incus.sock
+  instanceType: container
+  image: local:custom-image
+  profile: file-profile
+  user: alice
+  workRoot: /workspace
+  deleteOnRelease: false
+  startTimeout: 3m
+  launchPort: "2200"
+  proxyListenHost: 192.0.2.10
+  proxyDevice: proof-ssh
+  tlsServerCert: ~/server.crt
+  insecureTLS: true
+  remoteImageServer: https://images.example.test
+`
+				if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				want = map[string]any{
+					"remote": "lab", "project": "proof", "address": "https://incus.example.test:8443",
+					"socket":       filepath.Join(os.Getenv("HOME"), "incus.sock"),
+					"instanceType": "container", "image": "local:custom-image", "profile": "file-profile",
+					"user": "alice", "workRoot": "/workspace", "deleteOnRelease": false,
+					"startTimeout": "3m0s", "launchPort": "2200", "proxyListenHost": "192.0.2.10",
+					"proxyListenPort": "", "proxyDevice": "proof-ssh",
+					"tlsServerCert": filepath.Join(os.Getenv("HOME"), "server.crt"),
+					"insecureTLS":   true, "remoteImageServer": "https://images.example.test",
+				}
+			}
+			if source == "environment" {
+				t.Setenv("CRABBOX_PROVIDER", "incus")
+				t.Setenv("CRABBOX_INCUS_INSTANCE_TYPE", "vm")
+				t.Setenv("CRABBOX_INCUS_PROFILE", "proof-secureboot")
+				t.Setenv("CRABBOX_INCUS_SOCKET", "~/env-incus.sock")
+				want["instanceType"] = "vm"
+				want["profile"] = "proof-secureboot"
+				want["socket"] = filepath.Join(os.Getenv("HOME"), "env-incus.sock")
+			}
+			cfg, err := loadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := json.Marshal(configShowView(effectiveConfigForShow(cfg)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var view struct {
+				Incus map[string]any `json:"incus"`
+			}
+			if err := json.Unmarshal(data, &view); err != nil {
+				t.Fatal(err)
+			}
+			if len(view.Incus) != len(want) {
+				t.Fatalf("incus field count=%d, want %d", len(view.Incus), len(want))
+			}
+			for key, value := range want {
+				if view.Incus[key] != value {
+					t.Errorf("incus.%s=%#v, want %#v", key, view.Incus[key], value)
+				}
+			}
+		})
+	}
+}
+
+func TestConfigShowIncusRedactsEndpoints(t *testing.T) {
+	const userinfo = "api-user:api-password@"
+	for _, tc := range []struct{ name, raw, want string }{
+		{"empty", "", ""},
+		{"https", "https://" + userinfo + "incus.example.test:8443/path?token=query-secret#fragment-secret", "https://<redacted>@incus.example.test:8443/path"},
+		{"scheme-less", userinfo + "incus.example.test:8443/path?token=query-secret#fragment-secret", "<redacted>@incus.example.test:8443/path"},
+		{"malformed", "https://" + userinfo + "incus.example.test/%zz?token=query-secret#fragment-secret", "<redacted>"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Incus.Address, cfg.Incus.RemoteImageServer = tc.raw, tc.raw
+			cfg.Incus.CheckpointMetadata = map[string]string{"private": "checkpoint-secret"}
+			view, ok := configShowView(cfg)["incus"].(map[string]any)
+			if !ok {
+				t.Fatal("missing incus object")
+			}
+			for _, field := range []string{"address", "remoteImageServer"} {
+				if view[field] != tc.want {
+					t.Errorf("incus.%s=%q, want %q", field, view[field], tc.want)
+				}
+			}
+			data, err := json.Marshal(view)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, secret := range []string{"api-user", "api-password", "query-secret", "fragment-secret", "checkpoint-secret"} {
+				if strings.Contains(string(data), secret) {
+					t.Errorf("incus JSON leaked %q", secret)
+				}
+			}
+			if cfg.Incus.Address != tc.raw || cfg.Incus.RemoteImageServer != tc.raw {
+				t.Fatal("config show mutated Incus endpoints")
+			}
+		})
+	}
+}
+
 func TestConfigShowRedactsAllEndpointURLComponents(t *testing.T) {
 	const rawURL = "https://api-user:api-password@api.example.test/v1?token=query-secret#fragment-secret"
 	cfg := Config{Coordinator: rawURL}

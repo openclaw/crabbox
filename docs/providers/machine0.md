@@ -25,7 +25,10 @@ For non-interactive environments, Machine0 also supports
 `MACHINE0_API_TOKEN`. Authentication remains owned by Machine0: Crabbox passes
 the current process environment to the CLI but never reads, logs, or persists
 the token. `crabbox doctor --provider machine0` checks the CLI, authentication,
-inventory, and live size catalog without creating a VM.
+inventory, live size catalog, and the same SSH-key prerequisites used before
+new VM creation. It does not create VMs, upload/download keys, or change the
+account default. `ssh_key_prerequisites=checked` is not proof of successful
+guest SSH authentication; runtime remains unchecked without a running lease.
 
 ## Quick start
 
@@ -121,10 +124,18 @@ changes the selected key or downloads PUBLIC private keys to repair a mismatch.
 Before creation, Crabbox reads `machine0 keys get <name> --json` for the
 configured key or the default name discovered by `machine0 keys ls --json`.
 List rows can omit `fileName`; the detail response supplies the authoritative
-filename for the existing PUBLIC-key preflight. Missing default names and
-failed or mismatched detail reads stop preflight. If no default is listed,
-Crabbox preserves Machine0's native key-selection behavior. These reads do not
+filename for the existing PUBLIC-key preflight. A selected default without a
+name, or a failed or mismatched detail read, stops preflight. These reads do not
 request or download private-key fields.
+
+When no default key is registered and no explicit key is selected, the native
+Machine0 CLI falls back to `id_rsa` and `id_rsa.pub` under `SSH_KEY_PATH` (or
+`~/.ssh`). Doctor and new creation require both to be regular files before
+allowing that path. Their presence does not prove their contents form a usable
+key pair. Doctor never invokes the native fallback, which can upload a public
+key during creation. To avoid that fallback, select an existing managed or
+PUBLIC key with `--machine0-key`. Replaying an already-owned fixed lease keeps
+its recorded key identity and does not recheck today's default-key selection.
 
 Machine0 SSH targets use a provider-isolated host-trust file under
 `<key-directory>/crabbox/machine0/known_hosts.d/`, keyed by a hash of the
@@ -316,10 +327,15 @@ held, even when it was previously observed; an acquired resource whose absence
 is confirmed can be finalized by stop. Automatic cleanup skips incomplete
 fixed acquisition.
 
+An acquired fixed lease missing from the current inventory is not enough to
+prove deletion in its original account: stop retains the claim for inspection.
+Account-bound checkpoint retirement can reconcile its own source absence.
+
 Validated released tombstones report `state: "released"`; repeat stop succeeds
 without changing or removing the tombstone, and `status --wait` reports the
 existing terminal-state error. Malformed tombstones fail closed. Released
-fixed IDs can never be replayed.
+fixed IDs can never be replayed. Resuming a released or confirmed-missing fixed
+lease returns an error rather than reporting success without a live machine.
 
 Current catalog capacity is checked only when creating a new VM. An exact,
 attested owned VM can replay even if its size disappears from the catalog or
@@ -451,6 +467,11 @@ unrelated work. For an existing image name, deletion targets only the recorded
 draft version. Machine0 suspend snapshots such as
 `suspended-<machine>-<timestamp>` remain lifecycle artifacts, not reusable
 named checkpoint records.
+
+If an ordinary or legacy image has no captured account binding, missing inventory
+cannot prove deletion: verification and deletion retain its checkpoint metadata.
+A visible, exact legacy image can still be deleted; that invocation verifies
+absence under the same freshly observed account without rewriting old metadata.
 
 If the image still exists but its recorded version is already missing before
 deletion, verification reports `unknown`/`check_runtime` and deletion refuses

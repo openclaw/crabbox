@@ -1,12 +1,35 @@
 package cli
 
 import (
+	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestCheckpointForkRejectsDiscardedCapture(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := checkpointRecord{ID: "chk_discarded", Kind: checkpointKindMachine0, Provider: "machine0", Capture: &NativeCheckpointCapture{SourceDisposition: "retire", Phase: "retired", DiscardFailed: true}}
+	record.Native.ImageID = "deleted-image"
+	if _, err := store.Create(record); err != nil {
+		t.Fatal(err)
+	}
+	if err := (App{Stdout: io.Discard, Stderr: io.Discard}).checkpointFork(context.Background(), []string{record.ID, "--dry-run"}); err == nil || !strings.Contains(err.Error(), "discarded") {
+		t.Fatalf("discarded capture reached fork: %v", err)
+	}
+	if err := deleteCheckpoint(context.Background(), store, record.ID, true); err != nil {
+		t.Fatalf("discarded capture blocked local cleanup: %v", err)
+	}
+}
 
 func TestCheckpointCaptureBindingSurvivesReopenAndRejectsReplacedGeneration(t *testing.T) {
 	for _, mutation := range []string{"unchanged", "revision", "source", "scope", "owner", "binding", "missing"} {

@@ -18,6 +18,11 @@ crabbox cp --id blue-box SANDBOX:/tmp/results ./results
 `--id` is required. It accepts a Crabbox lease id or active slug. Providers only
 act on Crabbox-owned leases; raw user-created sandboxes are rejected.
 
+For SSH-backed copies, claim validation remains mandatory. The subsequent
+best-effort lease refresh has a 20-second budget; a refresh failure warns and
+copying continues without guaranteeing renewed expiry. Cancellation by the
+caller stops the command instead. This budget does not limit the file transfer.
+
 ## Path Syntax
 
 Exactly one side must use `SANDBOX:PATH`.

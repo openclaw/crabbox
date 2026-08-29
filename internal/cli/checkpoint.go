@@ -824,6 +824,9 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 	if unresolvedCheckpoint(record) {
 		return exit(2, "checkpoint %s capture is unresolved; reconcile it before fork", record.ID)
 	}
+	if record.Capture != nil && record.Capture.DiscardFailed {
+		return exit(2, "checkpoint %s image was discarded; it cannot be forked", record.ID)
+	}
 	cfg, err := loadConfig()
 	if err != nil {
 		return err

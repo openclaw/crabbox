@@ -714,8 +714,8 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 		warnCredentialBearingGitSeed(a.Stderr)
 	}
 	if coherence.seedEnabled() {
-		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay); err != nil {
-			fmt.Fprintf(a.Stderr, "warning: remote git seed failed: %v\n", err)
+		if out, err := runIdempotentSSHCombinedOutputLimit(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay, gitSeedDiagnosticLimit); err != nil {
+			warnRemoteGitSeedFailure(a.Stderr, out, err)
 		}
 	}
 	manifestData := manifest.NUL()

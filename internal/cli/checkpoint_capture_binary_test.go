@@ -403,6 +403,75 @@ func TestCheckpointCaptureBuiltBinaryContract(t *testing.T) {
 			t.Fatalf("failed-image replay did not complete its exact cleanup: %+v", s)
 		}
 	})
+
+	t.Run("failed legacy account remains held before discard", func(t *testing.T) {
+		f := newCheckpointCaptureFixture(t, repo, binary)
+		f.requirePending()
+		s := f.state()
+		s.Failed = true
+		f.writeState(s)
+		result := f.run(f.retireArgs()...)
+		if result.err != nil || f.record(captureFixtureCheckpoint).Capture.Phase != "failed" {
+			t.Fatalf("reach failed capture: %v %s", result.err, result.stderr)
+		}
+		record := f.record(captureFixtureCheckpoint)
+		delete(record.Native.Metadata, "machine0_account_id")
+		f.writeJSON(filepath.Join(f.root, "state", "crabbox", "checkpoints", captureFixtureCheckpoint, checkpointMetaFile), record)
+		result = f.run(append(f.retireArgs(), "--discard-failed")...)
+		if result.err == nil || !bytes.Contains(result.stderr, []byte("account identity")) {
+			t.Fatalf("unbound failed capture was discarded: %v %s", result.err, result.stderr)
+		}
+		if current := f.state(); current.Image == nil || current.Machine == nil || current.Removes != 0 || current.Starts != 0 {
+			t.Fatal("unbound failed capture lost source or image")
+		}
+	})
+	for _, accountCase := range []string{"switched", "unbound legacy", "same account absent"} {
+		t.Run("retiring account fence "+accountCase, func(t *testing.T) {
+			f := newCheckpointCaptureFixture(t, repo, binary)
+			f.requirePending()
+			s := f.state()
+			s.Ready, s.Machine["status"] = true, "STOPPING"
+			f.writeState(s)
+			result := f.run(f.retireArgs()...)
+			if result.err != nil || f.record(captureFixtureCheckpoint).Capture.Phase != "retiring" {
+				t.Fatalf("reach retiring: %v %s", result.err, result.stderr)
+			}
+			record := f.record(captureFixtureCheckpoint)
+			if record.Native.Metadata["machine0_account_id"] != "fixture-account" {
+				t.Fatal("account binding lost during image observation")
+			}
+			if accountCase == "unbound legacy" {
+				delete(record.Native.Metadata, "machine0_account_id")
+				f.writeJSON(filepath.Join(f.root, "state", "crabbox", "checkpoints", captureFixtureCheckpoint, checkpointMetaFile), record)
+			}
+			s = f.state()
+			s.Machine = nil
+			if accountCase == "switched" {
+				s.AccountID, s.Image = "other-account", nil
+			}
+			f.writeState(s)
+			claimBefore, _ := json.Marshal(f.claim())
+			recordBefore, _ := json.Marshal(f.record(captureFixtureCheckpoint))
+			result = f.run(f.retireArgs()...)
+			if accountCase == "same account absent" {
+				if result.err != nil || f.record(captureFixtureCheckpoint).Capture.Phase != "retired" {
+					t.Fatalf("same-account absence: %v %s", result.err, result.stderr)
+				}
+			} else {
+				if result.err == nil || !bytes.Contains(result.stderr, []byte("account identity")) {
+					t.Fatalf("unattested account accepted: %v %s", result.err, result.stderr)
+				}
+				claimAfter, _ := json.Marshal(f.claim())
+				recordAfter, _ := json.Marshal(f.record(captureFixtureCheckpoint))
+				if !bytes.Equal(claimBefore, claimAfter) || !bytes.Equal(recordBefore, recordAfter) {
+					t.Fatal("refused account replay changed durable ownership")
+				}
+			}
+			if current := f.state(); current.Saves != s.Saves || current.Starts != s.Starts || current.Removes != s.Removes {
+				t.Fatal("absence replay mutated provider")
+			}
+		})
+	}
 	runCheckpointCaptureReviewContract(t, repo, binary)
 	runCheckpointReadinessOverlapContract(t, repo, binary)
 	runCheckpointContainerReviewContract(t, repo, binary)
@@ -440,9 +509,11 @@ func TestCheckpointCaptureBuiltBinaryContract(t *testing.T) {
 	})
 
 	runCheckpointMachine0StrategyContract(t, repo, binary)
+	runCheckpointNativeLifetimeContract(t, repo, binary)
 }
 
 type checkpointCaptureFixtureState struct {
+	AccountID         string            `json:"accountId"`
 	Machine           map[string]any    `json:"machine"`
 	Image             map[string]any    `json:"image"`
 	Metadata          map[string]string `json:"metadata"`
@@ -571,9 +642,9 @@ type checkpointCaptureProcess struct {
 	groupMu         sync.Mutex
 	groupStopped    bool
 	groupTerminated bool
-	nativeMu        sync.Mutex
-	nativeKilled    map[int]bool
-	nativeClosed    bool
+	nativeLifetime  *os.File
+	nativeDirectory string
+	nativeClose     sync.Once
 }
 
 type checkpointCaptureOutput struct {
@@ -617,10 +688,27 @@ func (f *checkpointCaptureFixture) start(marker string, args ...string) *checkpo
 	f.t.Helper()
 	started := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	p := &checkpointCaptureProcess{cmd: exec.CommandContext(ctx, f.binary, args...), ctx: ctx, done: make(chan struct{}), cancel: cancel, nativeKilled: make(map[int]bool)}
+	p := &checkpointCaptureProcess{cmd: exec.CommandContext(ctx, f.binary, args...), ctx: ctx, done: make(chan struct{}), cancel: cancel}
+	directory, err := os.MkdirTemp(f.root, "native-lifetime-")
+	if err != nil {
+		cancel()
+		f.t.Fatal(err)
+	}
+	p.nativeDirectory = directory
+	f.t.Cleanup(p.closeNativeHelpers)
+	lifetime := filepath.Join(directory, "owner.fifo")
+	if err := syscall.Mkfifo(lifetime, 0o600); err != nil {
+		cancel()
+		f.t.Fatal(err)
+	}
+	p.nativeLifetime, err = os.OpenFile(lifetime, os.O_RDWR|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		cancel()
+		f.t.Fatal(err)
+	}
 	p.owner = &pondMeshExecHandle{cmd: p.cmd, managed: true}
 	p.output.marker, p.output.matched = marker, make(chan struct{})
-	p.cmd.Dir, p.cmd.Env = f.repo, f.env
+	p.cmd.Dir, p.cmd.Env = f.repo, append(append([]string(nil), f.env...), "CRABBOX_CAPTURE_LIFETIME="+lifetime)
 	// Cancel must only signal: Cmd.Wait receives the context watcher's result.
 	p.cmd.Cancel = func() error { return p.signalGroup(syscall.SIGKILL) }
 	// Own the pipes so Cmd.Wait can reap the leader before descendants close
@@ -666,7 +754,7 @@ func (f *checkpointCaptureFixture) start(marker string, args ...string) *checkpo
 		waitElapsed, cause := time.Since(started), context.Cause(ctx)
 		// Seal signaling before reaping the anchor, so late cleanup can never
 		// target a recycled PGID, even when the invocation leader exited first.
-		f.signalGroups(p, true)
+		f.signalGroups(p)
 		cleanupErr := p.owner.finishPondMeshPlatform()
 		var exitErr *exec.ExitError
 		if p.groupTerminated && errors.As(cleanupErr, &exitErr) {
@@ -710,7 +798,19 @@ func (p *checkpointCaptureProcess) signalGroup(signal syscall.Signal) error {
 	return err
 }
 
-func (f *checkpointCaptureFixture) signalGroups(p *checkpointCaptureProcess, final bool) {
+func (p *checkpointCaptureProcess) closeNativeHelpers() {
+	p.nativeClose.Do(func() {
+		if p.nativeLifetime != nil {
+			_ = p.nativeLifetime.Close()
+		}
+		_ = os.RemoveAll(p.nativeDirectory)
+	})
+}
+
+func (f *checkpointCaptureFixture) signalGroups(p *checkpointCaptureProcess) {
+	// Native fixture helpers exit on their invocation's EOF. Historical event
+	// PIDs may already be reaped/reused and never authorize an external signal.
+	p.closeNativeHelpers()
 	if err := p.signalGroup(syscall.SIGKILL); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		// Darwin reports EPERM for a group containing only the SIGTERM-killed
 		// zombie anchor. Keep live-group failures and inspect outside Cancel.
@@ -719,22 +819,6 @@ func (f *checkpointCaptureFixture) signalGroups(p *checkpointCaptureProcess, fin
 			f.t.Logf("checkpoint group=%d has no live members after SIGTERM; reaping anchor", group)
 		} else {
 			f.t.Errorf("signal checkpoint group: %v", err)
-		}
-	}
-	p.nativeMu.Lock()
-	defer p.nativeMu.Unlock()
-	if p.nativeClosed {
-		return
-	}
-	p.nativeClosed = final
-	// Captured native commands own separate groups. Keep exact invocation
-	// ownership, and never signal an earlier replay's helpers or our own group.
-	for _, event := range f.eventLog() {
-		if event.Owner == p.cmd.Process.Pid && event.PGID == event.PID && event.PGID > 1 && event.PGID != syscall.Getpgrp() && event.PGID != p.owner.platform.anchor.Process.Pid && !p.nativeKilled[event.PID] {
-			p.nativeKilled[event.PID] = true
-			if err := syscall.Kill(-event.PGID, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-				f.t.Errorf("signal native helper pid=%d owner=%d: %v", event.PID, event.Owner, err)
-			}
 		}
 	}
 }
@@ -761,7 +845,7 @@ func (f *checkpointCaptureFixture) lastBoundary(p *checkpointCaptureProcess) str
 func (f *checkpointCaptureFixture) kill(p *checkpointCaptureProcess) {
 	p.killed.Do(func() {
 		f.t.Logf("checkpoint cleanup pid=%d cause_before_cancel=%v", p.cmd.Process.Pid, context.Cause(p.ctx))
-		f.signalGroups(p, false)
+		f.signalGroups(p)
 		p.cancel()
 		<-p.done
 	})
@@ -835,10 +919,12 @@ func (f *checkpointCaptureFixture) requirePending() {
 
 func (f *checkpointCaptureFixture) scrub() {
 	f.t.Helper()
-	cmd := exec.Command(filepath.Join(f.root, "bin", "ssh"), "fixture-source", "fixture-scrub")
-	cmd.Env = f.env
-	if output, err := cmd.CombinedOutput(); err != nil {
-		f.t.Fatalf("fixture scrub: %v\n%s", err, output)
+	scrubber := *f
+	scrubber.binary = filepath.Join(f.root, "bin", "ssh")
+	p := scrubber.start("", "fixture-source", "fixture-scrub")
+	<-p.done
+	if p.err != nil {
+		f.t.Fatalf("fixture scrub: %v\n%s", p.err, p.output.stderr.String())
 	}
 }
 

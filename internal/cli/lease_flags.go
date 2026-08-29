@@ -656,6 +656,9 @@ func updateResolvedLeaseClaimEndpoint(leaseID string, server Server, target SSHT
 }
 
 func (a App) claimAndTouchLeaseTarget(ctx context.Context, cfg Config, server *Server, target SSHTarget, leaseID string, reclaim bool) error {
+	if cause := context.Cause(ctx); cause != nil {
+		return cause
+	}
 	repo, err := findRepo()
 	if err != nil {
 		return err
@@ -664,5 +667,5 @@ func (a App) claimAndTouchLeaseTarget(ctx context.Context, cfg Config, server *S
 		return err
 	}
 	*server = a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: *server, SSH: target, LeaseID: leaseID}, "")
-	return nil
+	return context.Cause(ctx)
 }

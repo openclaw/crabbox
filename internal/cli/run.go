@@ -1792,8 +1792,8 @@ retrySync:
 		}
 		if !overlayDecision.Enabled && !plainManifestFallback && coherence.seedEnabled() {
 			stepStart = time.Now()
-			if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay); err != nil {
-				fmt.Fprintf(a.Stderr, "warning: remote git seed failed: %v\n", err)
+			if out, err := runIdempotentSSHCombinedOutputLimit(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay, gitSeedDiagnosticLimit); err != nil {
+				warnRemoteGitSeedFailure(a.Stderr, out, err)
 			}
 			timings.syncSteps.gitSeed += time.Since(stepStart)
 		}
@@ -4053,6 +4053,9 @@ func (a App) stop(ctx context.Context, args []string) error {
 		ExpectedProviderIdentity: expectedIdentity,
 	})
 	if err != nil {
+		if cause := context.Cause(ctx); cause != nil {
+			return cause
+		}
 		if backendCoordinator(backend) != nil && !*forceRecovery {
 			if isCoordinatorProviderIdentityError(err) {
 				return err

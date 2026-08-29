@@ -32,6 +32,17 @@ cancel an already-dispatched provider request. Failed and released records can
 still carry unresolved cleanup responsibility. Their local state alone is not
 proof that the provider resource was deleted.
 
+For an exact Azure lease whose provisioning stops before VM creation, ordinary
+owned-resource release can clean the observed creation prefix: an unattached
+canonical public IP alone, or the exact canonical public IP and NIC together.
+A fresh NIC without its public IP is not a valid creation prefix and remains
+report-only; cleanup can resume past a missing public IP only when its exact
+durable claim already proves Crabbox deleted that public IP. A managed disk
+without its complete NIC/public-IP set, a managed-disk VM without that disk,
+foreign attachments, replacements, and missing immutable identities also fail
+closed. This narrow exact-lease release path does not relax the separate Azure
+orphan sweep's complete-set and quarantine requirements.
+
 ### Heartbeats and expiry
 
 While a command runs, the CLI heartbeats the active lease (`POST

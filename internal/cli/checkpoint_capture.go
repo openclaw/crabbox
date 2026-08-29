@@ -217,34 +217,42 @@ func ValidateCheckpointCaptureClaim(claim LeaseClaim, id string, capture *Native
 // AuthorizeCheckpointRelease prevents ordinary release/cleanup from cutting
 // through a source-dependent snapshot. Only the recorded retirement may release.
 func AuthorizeCheckpointRelease(claim LeaseClaim, checkpointID string) error {
+	_, err := AuthorizedCheckpointReleaseResource(claim, checkpointID)
+	return err
+}
+
+// AuthorizedCheckpointReleaseResource returns the journal's resource only after
+// validating retirement authority. Call under the claim fence for finalization;
+// the checkpoint owner already holds its journal lock before taking that fence.
+func AuthorizedCheckpointReleaseResource(claim LeaseClaim, checkpointID string) (NativeCheckpointResourceRequest, error) {
 	if claim.CheckpointCapture == nil {
 		if checkpointID != "" {
-			return exit(2, "checkpoint %s source claim binding disappeared", checkpointID)
+			return NativeCheckpointResourceRequest{}, exit(2, "checkpoint %s source claim binding disappeared", checkpointID)
 		}
 		store, err := defaultCheckpointStore()
 		if err != nil {
-			return err
+			return NativeCheckpointResourceRequest{}, err
 		}
-		return requireResolvedSourceCheckpoints(store, claim.LeaseID)
+		return NativeCheckpointResourceRequest{}, requireResolvedSourceCheckpoints(store, claim.LeaseID)
 	}
 	if checkpointID == "" || claim.CheckpointCapture.ID != checkpointID {
-		return exit(2, "source is held by checkpoint %s; replay checkpoint create --retire-source with that --checkpoint-id", claim.CheckpointCapture.ID)
+		return NativeCheckpointResourceRequest{}, exit(2, "source is held by checkpoint %s; replay checkpoint create --retire-source with that --checkpoint-id", claim.CheckpointCapture.ID)
 	}
 	store, err := defaultCheckpointStore()
 	if err != nil {
-		return err
+		return NativeCheckpointResourceRequest{}, err
 	}
 	record, _, err := store.Read(checkpointID)
 	if err != nil {
-		return err
+		return NativeCheckpointResourceRequest{}, err
 	}
 	if err := ValidateCheckpointCaptureClaim(claim, checkpointID, record.Capture); err != nil {
-		return err
+		return NativeCheckpointResourceRequest{}, err
 	}
 	if record.Capture.Phase != "retiring" {
-		return exit(2, "checkpoint %s has not authorized source retirement", checkpointID)
+		return NativeCheckpointResourceRequest{}, exit(2, "checkpoint %s has not authorized source retirement", checkpointID)
 	}
-	return nil
+	return nativeCheckpointResourceRequest(record), nil
 }
 
 func (a App) advanceCheckpointCapture(ctx context.Context, cfg Config, repo Repo, store checkpointStore, record *checkpointRecord) error {
@@ -370,6 +378,17 @@ func (a App) discardFailedCheckpoint(ctx context.Context, cfg Config, repo Repo,
 	}
 	err = withLeaseClaimUnchanged(record.LeaseID, claim, func() error {
 		if err := ValidateCheckpointCaptureClaim(claim, record.ID, record.Capture); err != nil {
+			return err
+		}
+		verifier, ok := backend.(CheckpointSourceVerifier)
+		if !ok {
+			return exit(2, "provider=%s cannot attest checkpoint source scope; retain failed image", record.Provider)
+		}
+		resource := nativeCheckpointResourceRequest(*record)
+		resource.LoadConfig = func() (Config, error) { return cfg, nil }
+		// A present source is expected here. The provider must still attest the
+		// capture's account/scope before we delete its failed recovery image.
+		if _, err := verifier.CheckpointSourceAbsent(ctx, CheckpointSourceRequest{LeaseID: record.LeaseID, Capture: *record.Capture, Resource: resource, AccountID: record.Native.AccountID}); err != nil {
 			return err
 		}
 		image := *record

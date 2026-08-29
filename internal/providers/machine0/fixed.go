@@ -313,11 +313,16 @@ func (b *backend) bindFixedMachine0Claim(claim LeaseClaim, item machine) (LeaseC
 
 func (b *backend) destroyClaimedMachine(ctx context.Context, expected LeaseClaim, lease LeaseTarget) error {
 	if expected.Provider != core.FixedMachine0ClaimProvider && expected.FixedCreateIntent == nil {
-		var remove func() error
-		if lease.Server.Name != "" {
-			remove = func() error { return b.api.Remove(ctx, lease.Server.Name) }
-		}
-		return fixedMachine0LeaseKind.FinalizeAfterCleanup(expected, remove)
+		return fixedMachine0LeaseKind.FinalizeAfterCleanup(expected, func() error {
+			// Reservation holds the source before it changes the claim revision.
+			if err := core.AuthorizeCheckpointRelease(expected, ""); err != nil {
+				return err
+			}
+			if lease.Server.Name != "" {
+				return b.api.Remove(ctx, lease.Server.Name)
+			}
+			return nil
+		})
 	}
 	if snapshot, exists, set := core.ServerLeaseClaimSnapshot(lease.Server); set && (!exists || !reflect.DeepEqual(snapshot, expected)) {
 		return exit(4, "fixed Machine0 lease %s claim changed after resolution; retry", expected.LeaseID)
@@ -353,8 +358,8 @@ func (b *backend) destroyClaimedMachine(ctx context.Context, expected LeaseClaim
 			if err := b.api.Remove(ctx, item.Name); err != nil {
 				return err
 			}
-		} else if claim.CloudID == "" {
-			return exit(4, "fixed Machine0 lease %s has no observed resource; retain its claim and inspect the create attempt", claim.LeaseID)
+		} else {
+			return exit(4, "fixed Machine0 lease %s is not visible in the current account; absence is unverified, retain its claim and inspect the original account", claim.LeaseID)
 		}
 		*claim = fixedMachine0LeaseKind.TerminalClaim(*claim, b.now())
 		return persist()

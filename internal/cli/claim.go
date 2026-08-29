@@ -1553,6 +1553,19 @@ func cleanupLeaseClaimIfUnchangedAfter(leaseID string, expected leaseClaim, expe
 }
 
 func cleanupLeaseClaimIfUnchangedAfterWithSync(leaseID string, expected leaseClaim, expectedExists bool, action func() error, syncDirectory func(string) error) error {
+	return finalizeLeaseClaimIfUnchangedAfter(leaseID, expected, expectedExists, func() (bool, error) {
+		if action != nil {
+			if err := action(); err != nil {
+				return false, err
+			}
+		}
+		return true, nil
+	}, syncDirectory)
+}
+
+// Finalization keeps the original claim when remote cleanup is retained or
+// pending. The same fence covers admission, provider effects and local removal.
+func finalizeLeaseClaimIfUnchangedAfter(leaseID string, expected leaseClaim, expectedExists bool, action func() (bool, error), syncDirectory func(string) error) error {
 	path, err := leaseClaimPath(leaseID)
 	if err != nil {
 		return err
@@ -1565,10 +1578,9 @@ func cleanupLeaseClaimIfUnchangedAfterWithSync(leaseID string, expected leaseCla
 		if err := unchangedLeaseClaimGuard(leaseID, expected, expectedExists)(claim, exists); err != nil {
 			return err
 		}
-		if action != nil {
-			if err := action(); err != nil {
-				return err
-			}
+		remove, err := action()
+		if err != nil || !remove {
+			return err
 		}
 		// Even when the source is absent, Windows may still have the
 		// deterministic tombstone left by an interrupted write-through remove.

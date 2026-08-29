@@ -27,14 +27,37 @@ func (b *backend) advanceCheckpointCapture(ctx context.Context, req core.NativeC
 		return result, exit(2, "checkpoint capture metadata conflicts with its source binding")
 	}
 	result.Metadata = metadata
+	req.Metadata = metadata
 	remoteMetadata := map[string]string{"crabbox_checkpoint": req.CheckpointID, "crabbox_lease": claim.LeaseID, "crabbox_source": claim.CloudID}
 	persist := func(phase string) error { req.Capture.Phase = phase; return req.Persist(result) }
 	err = withClaimUnchanged(claim.LeaseID, claim, func() error {
+		if metadata[metadataAccountID] == "" && req.Capture.Phase != "prepared" {
+			return exit(2, "checkpoint has no captured Machine0 account identity; retain source for recovery")
+		}
+		accountID, err := b.api.AccountID(ctx)
+		if err != nil {
+			return err
+		}
+		if accountID == "" || (metadata[metadataAccountID] != "" && metadata[metadataAccountID] != accountID) {
+			return exit(2, "Machine0 checkpoint account identity changed; retain source")
+		}
 		readSource := func() (machine, error) {
+			if err := b.attestCheckpointAccount(ctx, metadata); err != nil {
+				return machine{}, err
+			}
 			return b.readCheckpointSource(ctx, claim, req.Capture.SourceName)
 		}
-		item, err := readSource()
+		item, err := b.readCheckpointSource(ctx, claim, req.Capture.SourceName)
 		if err != nil {
+			return err
+		}
+		if metadata[metadataAccountID] == "" {
+			metadata[metadataAccountID] = accountID
+			if err := req.Persist(result); err != nil {
+				return err
+			}
+		}
+		if err := b.attestCheckpointAccount(ctx, metadata); err != nil {
 			return err
 		}
 		if req.Capture.Phase == "prepared" {
@@ -175,11 +198,18 @@ func (b *backend) releaseCheckpointSource(ctx context.Context, req ReleaseLeaseR
 		return exit(2, "%s", reason)
 	}
 	return fixedMachine0LeaseKind.FinalizeAfterCleanup(claim, func() error {
+		resource, err := core.AuthorizedCheckpointReleaseResource(claim, req.CheckpointID)
+		if err != nil {
+			return err
+		}
 		name := claim.Labels["machine0_name"]
 		if name == "" || req.Lease.Server.CloudID != claim.CloudID {
 			return exit(2, "checkpoint source release identity changed")
 		}
 		findSource := func() (bool, error) {
+			if err := b.attestCheckpointAccount(ctx, resource.Metadata); err != nil {
+				return false, err
+			}
 			items, err := b.api.List(ctx)
 			if err != nil {
 				return false, err
@@ -196,7 +226,7 @@ func (b *backend) releaseCheckpointSource(ctx context.Context, req ReleaseLeaseR
 					found = true
 				}
 			}
-			return found, nil
+			return found, b.attestCheckpointAccount(ctx, resource.Metadata)
 		}
 		found, err := findSource()
 		if err != nil || !found {
@@ -212,6 +242,9 @@ func (b *backend) releaseCheckpointSource(ctx context.Context, req ReleaseLeaseR
 		case "RUNNING", "STOPPED", "ERRORED":
 		default:
 			return exit(5, "checkpoint source state=%s is not safe to retire; retain operation", item.Status)
+		}
+		if err := b.attestCheckpointAccount(ctx, resource.Metadata); err != nil {
+			return err
 		}
 		removeErr := b.api.Remove(ctx, name)
 		found, err = findSource()
@@ -229,6 +262,9 @@ func (b *backend) releaseCheckpointSource(ctx context.Context, req ReleaseLeaseR
 }
 
 func (b *backend) CheckpointSourceAbsent(ctx context.Context, req core.CheckpointSourceRequest) (bool, error) {
+	if err := b.attestCheckpointAccount(ctx, req.Resource.Metadata); err != nil {
+		return false, err
+	}
 	items, err := b.api.List(ctx)
 	if err != nil {
 		return false, err
@@ -241,5 +277,23 @@ func (b *backend) CheckpointSourceAbsent(ctx context.Context, req core.Checkpoin
 			return false, nil
 		}
 	}
+	if err := b.attestCheckpointAccount(ctx, req.Resource.Metadata); err != nil {
+		return false, err
+	}
 	return true, nil
+}
+
+func (b *backend) attestCheckpointAccount(ctx context.Context, metadata map[string]string) error {
+	expected := metadata[metadataAccountID]
+	if expected == "" {
+		return exit(2, "checkpoint has no captured Machine0 account identity; retain source for recovery")
+	}
+	actual, err := b.api.AccountID(ctx)
+	if err != nil {
+		return err
+	}
+	if actual != expected {
+		return exit(2, "Machine0 checkpoint account identity changed; retain checkpoint and source")
+	}
+	return nil
 }

@@ -15,6 +15,8 @@ func init() {
 
 type Provider struct{}
 
+const hetznerRetirementUnsupported = "Hetzner source retirement requires durable project identity, which the native API does not expose; keep the source and use ordinary snapshots"
+
 var (
 	_ core.ProviderClassProfileProvider = Provider{}
 	_ core.ProviderClassSpecProvider    = Provider{}
@@ -58,7 +60,7 @@ func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (co
 	if err != nil || serverID <= 0 {
 		return core.NativeCheckpointCapability{}, false
 	}
-	capability := core.NativeCheckpointCapability{Kind: core.CheckpointKindHetzner, Direct: true, RetireSource: true}
+	capability := core.NativeCheckpointCapability{Kind: core.CheckpointKindHetzner, Direct: true, RetireUnsupported: hetznerRetirementUnsupported}
 	if core.NormalizeCheckpointStrategy(req.Strategy) == core.CheckpointStrategyImage {
 		capability.CreateUnsupported = "Hetzner native checkpoints use project snapshots; --strategy image is unsupported, use --strategy disk-snapshot"
 	}

@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 const captureFixtureEnv = "CRABBOX_CAPTURE_BINARY_FIXTURE"
@@ -28,6 +29,7 @@ func fail(format any, args ...any) {
 }
 
 type checkpointCaptureFixtureState struct {
+	AccountID         string            `json:"accountId"`
 	Machine           map[string]any    `json:"machine"`
 	Image             map[string]any    `json:"image"`
 	Metadata          map[string]string `json:"metadata"`
@@ -57,6 +59,35 @@ func main() {
 	if root == "" {
 		fail("missing fixture root")
 	}
+	// These fixtures spawn no descendants. A unique invocation-owned writer
+	// controls their lifetime without signaling a possibly recycled PID/PGID.
+	fd, err := syscall.Open(os.Getenv("CRABBOX_CAPTURE_LIFETIME"), syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		fail("missing invocation lifetime")
+	}
+	defer syscall.Close(fd)
+	ownerAlive := func() bool {
+		for {
+			_, err := syscall.Read(fd, make([]byte, 1))
+			if err != syscall.EINTR {
+				return err == syscall.EAGAIN
+			}
+		}
+	}
+	if !ownerAlive() {
+		fail("invocation lifetime ended")
+	}
+	go func() {
+		// Poll the owned descriptor so shutdown does not depend on FIFO
+		// readiness wakeups from the runtime poller.
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for range ticker.C {
+			if !ownerAlive() {
+				os.Exit(1)
+			}
+		}
+	}()
 	args := os.Args
 	for len(args) > 0 && args[0] != "--" {
 		args = args[1:]
@@ -112,7 +143,7 @@ func main() {
 		_ = fifo.Close()
 		if gate != nil {
 			// Deliberately withhold the native command response after its effect.
-			// The test either releases this read or kills the exact process group.
+			// The test releases this read or closes the invocation lifetime.
 			_, _ = gate.Read(make([]byte, 1))
 		}
 	}
@@ -138,6 +169,12 @@ func main() {
 		}
 	}
 	switch args[0] {
+	case "whoami":
+		accountID := state.AccountID
+		if accountID == "" {
+			accountID = "fixture-account"
+		}
+		output(map[string]any{"user": map[string]string{"id": accountID}})
 	case "get":
 		if state.Machine == nil {
 			fmt.Fprintln(os.Stderr, "fixture machine not found")
@@ -171,10 +208,14 @@ func main() {
 	case "sizes":
 		output([]map[string]any{{"size": "large", "vcpu": 2, "ramGb": 4, "diskGb": 80, "regions": []string{"eu"}}})
 	case "keys":
-		if len(args) != 3 || args[1] != "ls" || args[2] != "--json" {
+		switch strings.Join(args, " ") {
+		case "keys ls --json":
+			output([]map[string]any{{"name": "ci", "type": "MANAGED", "isDefault": true}})
+		case "keys get ci --json":
+			output(map[string]any{"name": "ci", "type": "MANAGED"})
+		default:
 			fail("unsupported key lookup: %v", args)
 		}
-		output([]any{})
 	case "new":
 		if state.Machine != nil || len(args) != 10 || args[2] != "--size" || args[4] != "--region" || args[6] != "--image" || args[8] != "--image-version" {
 			fail("unsupported or duplicate fixture create: %v", args)

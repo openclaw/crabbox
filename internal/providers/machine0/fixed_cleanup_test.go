@@ -61,6 +61,78 @@ func TestMachine0FixedReadinessFailureBindsIdentity(t *testing.T) {
 	}
 }
 
+func TestMachine0ResumeRejectsTerminalFixedLease(t *testing.T) {
+	for _, released := range []bool{false, true} {
+		t.Run(fmt.Sprintf("released=%t", released), func(t *testing.T) {
+			b, api, req := fixedMachine0TestFixture(t)
+			lease, err := b.Acquire(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if released {
+				if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			api.machines = []machine{}
+			before := readFixedMachine0Claim(t, req.RequestedLeaseID)
+			starts := len(api.started)
+			if err := b.Resume(context.Background(), ResumeRequest{ID: req.RequestedLeaseID}); err == nil {
+				t.Fatal("resume reported success without a live resource")
+			}
+			if len(api.started) != starts || !reflect.DeepEqual(before, readFixedMachine0Claim(t, req.RequestedLeaseID)) {
+				t.Fatal("terminal resume mutated provider or claim")
+			}
+		})
+	}
+}
+
+func TestMachine0OrdinaryDestroyRechecksReservedCapture(t *testing.T) {
+	for _, resourcePresent := range []bool{false, true} {
+		t.Run(fmt.Sprintf("resource_present=%t", resourcePresent), func(t *testing.T) {
+			b, api, req := fixedMachine0TestFixture(t)
+			req.RequestedLeaseID = ""
+			lease, err := b.Acquire(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			claim, exists, err := resolveClaim(lease.LeaseID)
+			if err != nil || !exists {
+				t.Fatalf("claim exists=%t err=%v", exists, err)
+			}
+			if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+				t.Fatal(err)
+			}
+			// A reservation can appear after outer release admission without
+			// changing the source revision. Finalization must recheck under lock.
+			err = core.WithLeaseClaimUnchanged(claim.LeaseID, claim, func() error {
+				dir := filepath.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "checkpoints", "chk_release_race")
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					return err
+				}
+				data, err := json.Marshal(map[string]any{"id": "chk_release_race", "kind": "machine0-image", "provider": providerName, "leaseId": claim.LeaseID, "capture": map[string]string{"sourceDisposition": "retire", "phase": "prepared"}})
+				if err != nil {
+					return err
+				}
+				return os.WriteFile(filepath.Join(dir, "checkpoint.json"), data, 0o600)
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !resourcePresent {
+				lease.Server.Name = ""
+			}
+			if err := b.destroyClaimedMachine(context.Background(), claim, lease); err == nil {
+				t.Fatal("previous admission bypassed reserved capture")
+			}
+			after, exists, err := resolveClaim(claim.LeaseID)
+			if err != nil || !exists || !reflect.DeepEqual(after, claim) || len(api.removed) != 0 {
+				t.Fatalf("capture lost source/claim: exists=%t err=%v removes=%v", exists, err, api.removed)
+			}
+		})
+	}
+}
+
 func TestMachine0FixedNativeCreateResponseRemainsStoppable(t *testing.T) {
 	for _, readFailure := range []bool{false, true} {
 		t.Run(fmt.Sprintf("first_get_fails=%t", readFailure), func(t *testing.T) {
@@ -72,8 +144,10 @@ func TestMachine0FixedNativeCreateResponseRemainsStoppable(t *testing.T) {
 			sizes, _ := json.Marshal([]machineSize{testSize()})
 			get, create := "get\x00"+item.Name+"\x00--json", "new\x00"+item.Name+"\x00--size\x00"+item.Size+"\x00--region\x00"+item.Region+"\x00--image\x00"+item.Image
 			runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
-				"sizes\x00--all\x00--json": {Stdout: string(sizes)}, "ls\x00--json": {Stdout: "[]"}, "keys\x00ls\x00--json": {Stdout: "[]"},
-				create: {Stdout: "VM is starting\n"}, get: {Stdout: string(data)},
+				"sizes\x00--all\x00--json": {Stdout: string(sizes)}, "ls\x00--json": {Stdout: "[]"},
+				"keys\x00ls\x00--json":        {Stdout: `[{"name":"ci","type":"MANAGED","isDefault":true}]`},
+				"keys\x00get\x00ci\x00--json": {Stdout: `{"name":"ci","type":"MANAGED"}`},
+				create:                        {Stdout: "VM is starting\n"}, get: {Stdout: string(data)},
 			}}
 			if readFailure {
 				runner.responses[get] = core.LocalCommandResult{Stdout: "{"}
@@ -169,7 +243,7 @@ func TestMachine0FixedPreparedStopCommand(t *testing.T) {
 		{name: "retained running", state: "RUNNING"},
 		{name: "invisible attempt", absent: true, failure: "unresolved create attempt"},
 		{name: "invisible observed preparation", bound: true, absent: true, failure: "unresolved create attempt"},
-		{name: "authoritative acquired absence", bound: true, acquired: true, absent: true},
+		{name: "acquired absence lacks account authority", bound: true, acquired: true, absent: true, failure: "absence is unverified"},
 		{name: "same name replacement", bound: true, substitute: true, failure: "does not match acquired CloudID"},
 		{name: "replacement before native removal", detailSubstitute: true, failure: "inventory resource identity"},
 		{name: "immutable identity conflict", bound: true, immutableMismatch: true, failure: "inconsistent immutable identity"},
@@ -319,6 +393,152 @@ esac
 				if call != "ls --json" && call != "get "+item.Name+" --json" && call != "rm "+item.Name+" --yes" {
 					t.Fatalf("cleanup tried unrelated or readiness operation: %s", call)
 				}
+			}
+		})
+	}
+}
+
+func TestMachine0ResolveReclaimsExistingLease(t *testing.T) {
+	for _, fixed := range []bool{false, true} {
+		t.Run(fmt.Sprint(fixed), func(t *testing.T) {
+			b, api, req := fixedMachine0TestFixture(t)
+			if !fixed {
+				req.RequestedLeaseID = ""
+			}
+			lease, err := b.Acquire(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, _, err := resolveClaim(lease.LeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			other := core.Repo{Root: t.TempDir()}
+			resolved, err := b.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID, Repo: other, Reclaim: true, Prepare: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			after, _, err := resolveClaim(lease.LeaseID)
+			if err != nil || after.RepoRoot != other.Root || after.CloudID != before.CloudID || !reflect.DeepEqual(after.FixedCreateIntent, before.FixedCreateIntent) || len(api.created) != 1 || resolved.Server.CloudID != before.CloudID {
+				t.Fatalf("reclaim did not transfer exact lease: err=%v before=%+v after=%+v", err, before, after)
+			}
+			if _, err := b.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID, Repo: other, Prepare: true}); err != nil {
+				t.Fatalf("new owner resolve: %v", err)
+			}
+		})
+	}
+}
+
+func TestMachine0CheckpointAccountFencesAbsenceAndRelease(t *testing.T) {
+	for _, tc := range []struct {
+		name, stored, current string
+		fail                  bool
+	}{
+		{"same", "fixture-account", "fixture-account", false},
+		{"switched", "fixture-account", "other-account", true},
+		{"legacy unbound", "", "fixture-account", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, api, req := fixedMachine0TestFixture(t)
+			lease, err := b.Acquire(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const checkpointID = "chk_account_fence"
+			err = core.WithDurableLeaseClaimLock(lease.LeaseID, func(claim *core.LeaseClaim, _ bool, persist func() error) error {
+				claim.CheckpointCapture = &core.CheckpointCaptureBinding{ID: checkpointID, Revision: claim.Revision}
+				return persist()
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			claim, _, err := resolveClaim(lease.LeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			capture := core.NativeCheckpointCapture{SourceDisposition: "retire", Phase: "retiring", SourceID: claim.CloudID, SourceName: claim.Labels["machine0_name"], SourceScope: claim.ProviderScope, SourceRevision: claim.CheckpointCapture.Revision, SourceClaimedAt: claim.ClaimedAt}
+			metadata := map[string]string{metadataAccountID: tc.stored}
+			dir := filepath.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "checkpoints", checkpointID)
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			data, err := json.Marshal(map[string]any{"id": checkpointID, "leaseId": claim.LeaseID, "kind": core.CheckpointKindMachine0, "provider": providerName, "capture": capture, "native": map[string]any{"metadata": metadata}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "checkpoint.json")
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			api.accountID = tc.current
+			api.machines = []machine{}
+			absent, err := b.CheckpointSourceAbsent(context.Background(), core.CheckpointSourceRequest{Capture: capture, Resource: core.NativeCheckpointResourceRequest{Metadata: metadata}})
+			if (err != nil) != tc.fail || absent == tc.fail {
+				t.Fatalf("absence=%t err=%v", absent, err)
+			}
+			err = b.releaseCheckpointSource(context.Background(), ReleaseLeaseRequest{Lease: lease, CheckpointID: checkpointID})
+			if (err != nil) != tc.fail {
+				t.Fatalf("release=%v", err)
+			}
+			after, _, err := resolveClaim(lease.LeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.fail && !reflect.DeepEqual(after, claim) {
+				t.Fatal("refused retirement changed claim")
+			}
+			if !tc.fail {
+				assertFixedMachine0Tombstone(t, after)
+			}
+			if len(api.removed) != 0 || len(api.started) != 0 || len(api.savedImages) != 0 {
+				t.Fatal("absence proof mutated provider")
+			}
+			unchanged, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(unchanged, data) {
+				t.Fatal("provider changed capture journal")
+			}
+		})
+	}
+}
+
+func TestMachine0CaptureAccountBindingPrecedesEffects(t *testing.T) {
+	for _, phase := range []string{"prepared", "stopping", "submitting", "pending", "ready", "failed"} {
+		t.Run(phase, func(t *testing.T) {
+			b, api, req := fixedMachine0TestFixture(t)
+			lease, err := b.Acquire(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const id = "chk_account_persist"
+			if err := core.WithDurableLeaseClaimLock(lease.LeaseID, func(claim *core.LeaseClaim, _ bool, persist func() error) error {
+				claim.CheckpointCapture = &core.CheckpointCaptureBinding{ID: id, Revision: claim.Revision}
+				return persist()
+			}); err != nil {
+				t.Fatal(err)
+			}
+			claim, _, err := resolveClaim(lease.LeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			capture := &core.NativeCheckpointCapture{Phase: phase, SourceID: claim.CloudID, SourceName: claim.Labels["machine0_name"], SourceScope: claim.ProviderScope, SourceRevision: claim.CheckpointCapture.Revision, SourceClaimedAt: claim.ClaimedAt}
+			persistErr := errors.New("durable account write failed")
+			writes := 0
+			_, err = b.advanceCheckpointCapture(context.Background(), core.NativeCheckpointCreateRequest{CheckpointID: id, Server: lease.Server, Capture: capture, Persist: func(result core.NativeCheckpointCreateResult) error {
+				writes++
+				if result.Metadata[metadataAccountID] != "fixture-account" || capture.Phase != "prepared" {
+					t.Fatal("account not observed before first phase transition")
+				}
+				return persistErr
+			}}, claim)
+			if phase == "prepared" {
+				if !errors.Is(err, persistErr) || writes != 1 {
+					t.Fatalf("persistence=%v writes=%d", err, writes)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "account identity") || writes != 0 {
+				t.Fatalf("unbound legacy phase adopted account: err=%v writes=%d", err, writes)
+			}
+			if len(api.stopped) != 0 || len(api.started) != 0 || len(api.savedImages) != 0 || len(api.removed) != 0 {
+				t.Fatal("failed binding caused remote effect")
 			}
 		})
 	}

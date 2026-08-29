@@ -652,6 +652,9 @@ func (b *backend) rollbackPendingLease(expected core.LeaseClaim, lease core.Leas
 	rollbackCtx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
 	defer cancel()
 	err := fixedLocalContainerLeaseKind.FinalizeAfterCleanup(expected, func() error {
+		if err := core.AuthorizeCheckpointRelease(expected, ""); err != nil {
+			return err
+		}
 		if err := b.removeContainer(rollbackCtx, lease.Server.CloudID); err != nil {
 			return err
 		}
@@ -941,7 +944,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	}
 	id := strings.TrimSpace(req.Lease.Server.CloudID)
 	if id == "" {
-		if handled, err := b.releaseMissingClaim(ctx, lease); handled || err != nil {
+		if handled, err := b.releaseMissingClaim(ctx, lease, req.CheckpointID); handled || err != nil {
 			return err
 		}
 		container, leaseID, _, err := b.resolveContainer(ctx, req.Lease.LeaseID)
@@ -979,6 +982,9 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		return core.Exit(4, "lease_id_conflict: refusing to release fixed local-container lease %s without its durable create intent", lease.LeaseID)
 	}
 	err = fixedLocalContainerLeaseKind.FinalizeAfterCleanup(claim, func() error {
+		if err := core.AuthorizeCheckpointRelease(claim, req.CheckpointID); err != nil {
+			return err
+		}
 		if err := b.removeContainer(ctx, id); err != nil {
 			return err
 		}
@@ -1066,7 +1072,7 @@ func (b *backend) AuthorizeStatusTouchClaim(ctx context.Context, lease core.Leas
 	return b.validateExactLocalContainerClaim(ctx, claim, lease.LeaseID, lease.Server.CloudID)
 }
 
-func (b *backend) releaseMissingClaim(ctx context.Context, lease core.LeaseTarget) (bool, error) {
+func (b *backend) releaseMissingClaim(ctx context.Context, lease core.LeaseTarget, checkpointID string) (bool, error) {
 	leaseID := strings.TrimSpace(firstNonBlank(lease.LeaseID, lease.Server.Labels["lease"]))
 	if leaseID == "" || strings.TrimSpace(lease.Server.CloudID) != "" {
 		return false, nil
@@ -1079,6 +1085,9 @@ func (b *backend) releaseMissingClaim(ctx context.Context, lease core.LeaseTarge
 		return true, localContainerOwnershipError(leaseID, claim.CloudID)
 	}
 	err := fixedLocalContainerLeaseKind.FinalizeAfterCleanup(claim, func() error {
+		if err := core.AuthorizeCheckpointRelease(claim, checkpointID); err != nil {
+			return err
+		}
 		absent, err := b.confirmContainerAbsent(ctx, claim.CloudID)
 		if err != nil {
 			return err
@@ -1356,7 +1365,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			continue
 		}
 		if req.DryRun {
-			if err := core.VerifyLeaseClaimUnchanged(claim.LeaseID, claim); err != nil {
+			if err := core.WithLeaseClaimUnchanged(claim.LeaseID, claim, func() error { return core.AuthorizeCheckpointRelease(claim, "") }); err != nil {
 				fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s slug=%s reason=changed-during-cleanup err=%v\n", claim.LeaseID, blank(claim.Slug, "-"), err)
 				continue
 			}
@@ -1372,7 +1381,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 				continue
 			}
 		}
-		if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+		if err := core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error { return core.AuthorizeCheckpointRelease(claim, "") }); err != nil {
 			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s slug=%s reason=changed-during-cleanup err=%v\n", claim.LeaseID, blank(claim.Slug, "-"), err)
 			continue
 		}
@@ -1425,6 +1434,9 @@ func (b *backend) cleanupClaimedContainer(ctx context.Context, claim core.LeaseC
 	mutationEntered := false
 	action := func() error {
 		actionEntered = true
+		if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+			return err
+		}
 		if err := b.validateCleanupClaim(ctx, claim, claim.LeaseID, containerID); err != nil {
 			return err
 		}
@@ -1462,6 +1474,9 @@ func (b *backend) cleanupClaimlessContainer(ctx context.Context, leaseID, contai
 			claimAppeared = true
 			return nil
 		}
+		if err := core.AuthorizeCheckpointRelease(core.LeaseClaim{LeaseID: leaseID}, ""); err != nil {
+			return err
+		}
 		if dryRun {
 			return nil
 		}
@@ -1482,6 +1497,9 @@ func (b *backend) cleanupMissingPendingClaim(ctx context.Context, claim core.Lea
 	actionEntered := false
 	action := func() error {
 		actionEntered = true
+		if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+			return err
+		}
 		checkCtx, cancel := context.WithTimeout(ctx, rollbackTimeout)
 		defer cancel()
 		if err := b.validateCleanupClaim(checkCtx, claim, claim.LeaseID, claim.CloudID); err != nil {
@@ -2966,6 +2984,69 @@ install_verified_apt_keyring() {
 }
 `
 
+const localContainerBrowserInstallScript = `
+if [ "${CRABBOX_BROWSER:-0}" = "1" ] && command -v apt-get >/dev/null 2>&1; then
+  has_working_browser() {
+    for candidate in google-chrome chromium firefox-esr firefox; do
+      if candidate_path="$(command -v "$candidate" 2>/dev/null)" && "$candidate_path" --version >/dev/null 2>&1; then
+        return 0
+      fi
+    done
+    return 1
+  }
+  browser_install_failed() {
+    echo "local-container $1; use a prebuilt image with a working browser or a supported Debian image" >&2
+    exit 127
+  }
+  if ! has_working_browser; then
+    apt-get update
+    ID=""
+    if [ -r /etc/os-release ]; then . /etc/os-release; fi
+    if [ "$ID" = ubuntu ]; then
+      # Ubuntu's Firefox package is a Snap transition, not a container browser.
+      if ! apt-get install -y --no-install-recommends ca-certificates curl gnupg; then
+        browser_install_failed "Mozilla Firefox signing key tools unavailable"
+      fi
+      if ! install_verified_apt_keyring "https://packages.mozilla.org/apt/repo-signing-key.gpg" /etc/apt/keyrings/crabbox-mozilla.gpg "35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3"; then
+        browser_install_failed "Mozilla Firefox signing key verification failed"
+      fi
+      install -m 0755 -d /etc/apt/sources.list.d /etc/apt/preferences.d
+      arch="$(dpkg --print-architecture)"
+      cat > /etc/apt/sources.list.d/crabbox-mozilla.sources <<MOZILLA
+Types: deb
+URIs: https://packages.mozilla.org/apt
+Suites: mozilla
+Components: main
+Architectures: $arch
+Signed-By: /etc/apt/keyrings/crabbox-mozilla.gpg
+MOZILLA
+      cat > /etc/apt/preferences.d/crabbox-mozilla <<'MOZILLA'
+Package: firefox
+Pin: origin packages.mozilla.org
+Pin-Priority: 1000
+
+Package: firefox
+Pin: release o=Ubuntu
+Pin-Priority: -1
+MOZILLA
+      chmod 0644 /etc/apt/sources.list.d/crabbox-mozilla.sources /etc/apt/preferences.d/crabbox-mozilla
+      if ! apt-get update -o APT::Update::Error-Mode=any ||
+        ! apt-get install -y --no-install-recommends firefox/mozilla ||
+        ! has_working_browser; then
+        browser_install_failed "Mozilla Firefox installation failed"
+      fi
+    else
+      for browser_package in chromium firefox-esr firefox; do
+        if has_working_browser; then break; fi
+        if apt-cache show "$browser_package" >/dev/null 2>&1; then
+          apt-get install -y --no-install-recommends "$browser_package" || true
+        fi
+      done
+    fi
+  fi
+fi
+`
+
 const bootstrapScript = `
 set -eu
 image_path="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
@@ -3066,21 +3147,7 @@ if [ "${CRABBOX_DESKTOP:-0}" = "1" ] && command -v apt-get >/dev/null 2>&1; then
     apt-get install -y --no-install-recommends xvfb xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings x11vnc xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation iproute2 openssl arc-theme procps netcat-openbsd novnc websockify
   fi
 fi
-if [ "${CRABBOX_BROWSER:-0}" = "1" ] && command -v apt-get >/dev/null 2>&1; then
-  apt-get update
-  if apt-cache show chromium >/dev/null 2>&1; then
-    apt-get install -y --no-install-recommends chromium || true
-  fi
-  if ! command -v chromium >/dev/null 2>&1 || ! chromium --version >/dev/null 2>&1; then
-    rm -f /usr/local/bin/crabbox-browser
-    if apt-cache show firefox-esr >/dev/null 2>&1; then
-      apt-get install -y --no-install-recommends firefox-esr || true
-    fi
-  fi
-  if ! command -v chromium >/dev/null 2>&1 && ! command -v firefox-esr >/dev/null 2>&1 && apt-cache show firefox >/dev/null 2>&1; then
-    apt-get install -y --no-install-recommends firefox || true
-  fi
-fi
+` + localContainerBrowserInstallScript + `
 if [ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ] && ! command -v docker >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
   apt-get update
   install_docker_cli=0

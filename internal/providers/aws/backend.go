@@ -592,11 +592,17 @@ func (b *awsLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequ
 	}
 	if fixedAWSLeaseKind.IsFixedClaim(exact) {
 		return fixedAWSLeaseKind.FinalizeAfterCleanup(exact, func() error {
+			if err := core.AuthorizeCheckpointRelease(exact, req.CheckpointID); err != nil {
+				return err
+			}
 			return deleteServer(ctx, awsConfigForServer(b.Cfg, req.Lease.Server), req.Lease.Server)
 		})
 	}
 	var providerKeyErr error
 	if err := core.RemoveLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, exact, func() error {
+		if err := core.AuthorizeCheckpointRelease(exact, req.CheckpointID); err != nil {
+			return err
+		}
 		if err := deleteServer(ctx, awsConfigForServer(b.Cfg, req.Lease.Server), req.Lease.Server); err != nil {
 			var keyErr *awsProviderKeyCleanupError
 			if errors.As(err, &keyErr) {
@@ -905,6 +911,9 @@ func deleteClaimedAWSServerWithClient(ctx context.Context, client awsClient, ser
 	}
 	var cleanupErr error
 	err := fixedAWSLeaseKind.FinalizeAfterCleanup(claim, func() error {
+		if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+			return err
+		}
 		cleanupErr = deleteAWSCleanupServerWithClient(ctx, client, server, cleanupKeyID)
 		return cleanupErr
 	})
@@ -1015,6 +1024,9 @@ func deleteMissingClaimedAWSResourcesWithClient(ctx context.Context, client awsC
 		return err
 	}
 	return fixedAWSLeaseKind.FinalizeAfterCleanup(claim, func() error {
+		if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+			return err
+		}
 		return client.DeleteCleanupSSHKeyID(ctx, cleanupKeyID)
 	})
 }

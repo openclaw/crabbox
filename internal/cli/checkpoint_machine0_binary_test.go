@@ -61,7 +61,7 @@ func TestNativeCheckpointMachine0ConfiguredCLI(t *testing.T) {
 		{name: "unknown_inventory", inventoryFailure: true, wantError: "fixture inventory lookup failed"},
 		{name: "bad_credentials", authFailure: true, wantError: "Machine0 authentication is required"},
 		{name: "invalid_config", invalidConfig: true, wantError: "parse config"},
-		{name: "whole_image_absent", createdImage: true, absentImage: true},
+		{name: "unbound_whole_image_absent", createdImage: true, absentImage: true, wantError: "original account is unbound"},
 		{name: "whole_image_remove_leaves_empty_image", createdImage: true, postRemove: "empty", deleteError: "version 2 was not found"},
 		{name: "whole_image_remove_omits_versions", createdImage: true, postRemove: "omitted", deleteError: "version 2 was not found"},
 		{name: "version_remove_not_confirmed", postRemove: "unchanged", deleteError: "checkpoint source transition is pending"},
@@ -205,6 +205,7 @@ func TestNativeCheckpointMachine0ConfiguredCLI(t *testing.T) {
 			script := fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> %s
 case "$*" in
+  'whoami --json') printf '%%s\n' '{"user":{"id":"fixture-account"}}' ;;
   'images ls --json')
     if [ -f %s ]; then %s; else %s; fi ;;
   'images get baseline --json')
@@ -307,8 +308,14 @@ esac
 					}
 					if tc.invalidConfig {
 						wantCommands = ""
-					} else if tc.wantError == "" && !tc.absentImage {
-						wantCommands += deleteCommand + "\nimages ls --json\n"
+					} else if (tc.wantError == "" || tc.name == "later_version_protects_whole_image") && !tc.absentImage {
+						wantCommands += "whoami --json\nwhoami --json\nimages ls --json\nimages get baseline --json\n"
+					}
+					if !tc.invalidConfig && tc.wantError == "" && !tc.absentImage {
+						wantCommands += deleteCommand + "\nwhoami --json\nimages ls --json\n"
+						if tc.createdImage && tc.postRemove == "" {
+							wantCommands += "whoami --json\n"
+						}
 						if (!tc.createdImage || tc.postRemove != "") && tc.postRemove != "inventory_failure" && tc.postRemove != "inventory_replacement" {
 							wantCommands += "images get baseline --json\n"
 						}

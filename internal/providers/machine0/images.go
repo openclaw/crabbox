@@ -16,6 +16,7 @@ import (
 
 const (
 	metadataImageName     = "machine0_image_name"
+	metadataAccountID     = "machine0_account_id"
 	metadataImageID       = "machine0_image_id"
 	metadataImageVersion  = "machine0_image_version"
 	metadataCreatedImage  = "machine0_created_image"
@@ -345,6 +346,9 @@ func machine0NativeCheckpointResult(req core.NativeCheckpointCreateRequest, clai
 		return core.NativeCheckpointCreateResult{}
 	}
 	metadata := map[string]string{metadataImageName: name, metadataImageID: detail.Image.ID, metadataImageVersion: strconv.Itoa(version.Version), metadataCreatedImage: strconv.FormatBool(createdImage), metadataSourceMachine: req.Server.CloudID, "crabbox_checkpoint": req.CheckpointID, "crabbox_lease": claim.LeaseID}
+	if accountID := req.Metadata[metadataAccountID]; accountID != "" {
+		metadata[metadataAccountID] = accountID
+	}
 	for key, value := range machine0ImageCostMetadata(version) {
 		metadata[key] = value
 	}
@@ -389,6 +393,24 @@ func (b *backend) deleteNativeCheckpoint(ctx context.Context, req core.NativeChe
 	}
 	if err != nil {
 		return err
+	}
+	if req.Metadata[metadataAccountID] == "" {
+		// A legacy image can be deleted while its exact identity is visible.
+		// Bind only this invocation's absence check, never rewrite its history.
+		accountID, err := b.api.AccountID(ctx)
+		if err != nil {
+			return err
+		}
+		metadata := make(map[string]string, len(req.Metadata)+1)
+		for key, value := range req.Metadata {
+			metadata[key] = value
+		}
+		metadata[metadataAccountID] = accountID
+		req.Metadata = metadata
+		detail, version, err = b.loadCheckpointImage(ctx, req)
+		if err != nil {
+			return err
+		}
 	}
 	createdImage := req.Metadata[metadataCreatedImage] == "true"
 	if createdImage {
@@ -512,6 +534,13 @@ func machine0ImageVersionMetadataMatches(version machineImageVersion, expected m
 }
 
 func (b *backend) loadCheckpointImage(ctx context.Context, req core.NativeCheckpointResourceRequest) (machineImageDetail, machineImageVersion, error) {
+	// Ordinary checkpoints predating account-bound retirement keep their existing
+	// image contract. A bound capture must never treat another account as absence.
+	if req.Metadata[metadataAccountID] != "" {
+		if err := b.attestCheckpointAccount(ctx, req.Metadata); err != nil {
+			return machineImageDetail{}, machineImageVersion{}, err
+		}
+	}
 	if req.Image.Provider != providerName || req.Image.Kind != core.CheckpointKindMachine0 || !req.Image.Direct {
 		return machineImageDetail{}, machineImageVersion{}, exit(2, "refusing to operate on a non-direct Machine0 checkpoint")
 	}
@@ -537,6 +566,14 @@ func (b *backend) loadCheckpointImage(ctx context.Context, req core.NativeCheckp
 		}
 	}
 	if !found {
+		if req.Metadata[metadataAccountID] == "" {
+			return machineImageDetail{}, machineImageVersion{}, exit(4, "Machine0 checkpoint image is not visible and its original account is unbound; retain checkpoint metadata and inspect the original account")
+		}
+		if req.Metadata[metadataAccountID] != "" {
+			if err := b.attestCheckpointAccount(ctx, req.Metadata); err != nil {
+				return machineImageDetail{}, machineImageVersion{}, err
+			}
+		}
 		return machineImageDetail{}, machineImageVersion{}, core.ErrNativeCheckpointAbsent
 	}
 	detail, err := b.api.GetImage(ctx, name)

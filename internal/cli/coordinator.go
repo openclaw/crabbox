@@ -31,6 +31,7 @@ func (c *CoordinatorClient) hasConfiguredAuth() bool {
 }
 
 const coordinatorHTTPTimeout = 30 * time.Minute
+const coordinatorControlTimeout = 30 * time.Second
 const coordinatorTokenCommandTimeout = 15 * time.Second
 const maxCoordinatorTokenBytes = 16 * 1024
 
@@ -1119,7 +1120,7 @@ func (c *CoordinatorClient) getLease(ctx context.Context, id string, providerMet
 	if providerMetadata {
 		path += "?providerMetadata=authoritative"
 	}
-	err := c.do(ctx, http.MethodGet, path, nil, &res)
+	err := c.doControl(ctx, http.MethodGet, path, nil, &res)
 	return res.Lease, err
 }
 
@@ -1273,7 +1274,7 @@ func (c *CoordinatorClient) heartbeatLease(ctx context.Context, id, expectedProv
 	if err != nil {
 		return res.Lease, err
 	}
-	err = c.do(ctx, http.MethodPost, "/v1/leases/"+url.PathEscape(id)+"/heartbeat", heartbeatRequestBody(expectedProvider, idleTimeout, telemetry), &res)
+	err = c.doControl(ctx, http.MethodPost, "/v1/leases/"+url.PathEscape(id)+"/heartbeat", heartbeatRequestBody(expectedProvider, idleTimeout, telemetry), &res)
 	return res.Lease, err
 }
 
@@ -1515,7 +1516,7 @@ func (c *CoordinatorClient) MarketplaceQuote(ctx context.Context, input Coordina
 
 func (c *CoordinatorClient) Whoami(ctx context.Context) (CoordinatorWhoami, error) {
 	var res CoordinatorWhoami
-	err := c.do(ctx, http.MethodGet, "/v1/whoami", nil, &res)
+	err := c.doControl(ctx, http.MethodGet, "/v1/whoami", nil, &res)
 	return res, err
 }
 
@@ -1538,7 +1539,7 @@ func (c *CoordinatorClient) ProviderReadiness(ctx context.Context, cfg Config) (
 	if encoded := values.Encode(); encoded != "" {
 		path += "?" + encoded
 	}
-	err = c.do(ctx, http.MethodGet, path, nil, &res)
+	err = c.doControl(ctx, http.MethodGet, path, nil, &res)
 	return res, err
 }
 
@@ -2191,7 +2192,15 @@ func (c *CoordinatorClient) RunReceipt(ctx context.Context, runID string) (termi
 
 func (c *CoordinatorClient) Health(ctx context.Context) error {
 	var res map[string]any
-	return c.do(ctx, http.MethodGet, "/v1/health", nil, &res)
+	return c.doControl(ctx, http.MethodGet, "/v1/health", nil, &res)
+}
+
+// Control requests share one deadline across authentication, HTTP response bodies,
+// and eligible curl fallback. Provisioning and image operations keep their budget.
+func (c *CoordinatorClient) doControl(ctx context.Context, method, path string, body any, out any) error {
+	ctx, cancel := context.WithTimeout(ctx, coordinatorControlTimeout)
+	defer cancel()
+	return c.do(ctx, method, path, body, out)
 }
 
 func (c *CoordinatorClient) do(ctx context.Context, method, path string, body any, out any) error {
