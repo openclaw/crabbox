@@ -163,6 +163,17 @@ renewal and release fail closed. After a client crash, an expired owner is
 recoverable only when the exact witnessed child is no longer alive. POSIX,
 WSL2, and native Windows targets share these semantics.
 
+POSIX and WSL2 children register themselves before executing the requested
+workload. Registration waits at most five seconds for the owner lock; it does
+not leave a background child waiting indefinitely for a start file. A failed
+setup exits cooperatively and closes inherited SSH streams without requiring
+permission to signal the child. If the supervising shell disappears before
+handoff, the registration deadline and closed identity pipe still prevent the
+waiting child from running the workload. After handoff, the existing witnessed
+child and recovery rules continue to apply. A denied `kill -0` is never proof
+that a recorded child is dead: cleanup and recovery require independent PID
+absence evidence, and retain authority when observation is ambiguous.
+
 Once ownership is established, sync runs these steps:
 
 1. Resolve the local repository root.

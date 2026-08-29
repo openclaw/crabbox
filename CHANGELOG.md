@@ -10,6 +10,7 @@
 
 - Exposed resolved Incus settings in `config show --json`, with endpoint credential redaction and no daemon access.
 - Retained scoped direct-AWS fixed-lease cleanup receipts for canonical stop replay after inventory disappears, with fresh account, region, identity, and inventory checks; older compact tombstones remain unchanged and fail closed.
+- Reported POSIX and WSL2 workspace-owner setup failures separately from SSH readiness, with bounded pre-start cleanup and fail-closed recovery when child observation is denied.
 - Kept automatic egress client tickets off SSH, remote shell, and helper process arguments with a foreground bounded-input handoff to the detached client, preventing SSH teardown from truncating ticket delivery.
 - Kept secret SSH usernames out of VNC/WebVNC and pond tunnel arguments and daemon state, retained private configs through attached teardown or authenticated detached listener readiness, and preserved pond child environment filtering and overrides.
 - Honored `pond connect` flags after the pond name so the documented `pond connect <name> --export` form starts tracked daemons instead of blocking in foreground mode.

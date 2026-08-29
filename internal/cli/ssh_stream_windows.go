@@ -112,13 +112,6 @@ func runCommandWithPlatformStreams(cmd *exec.Cmd, stdout, stderr io.Writer) erro
 	}
 }
 
-func sameCommandStreamWriter(left, right io.Writer) bool {
-	defer func() {
-		_ = recover()
-	}()
-	return left == right
-}
-
 func collectCommandStreamResults(results <-chan error, count int) []error {
 	errs := make([]error, 0, count)
 	for range count {

@@ -297,8 +297,12 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 			return exit(5, "timed out waiting for SSH on %s during %s; %s", target.Host, phase, sshWaitNextAction(phase))
 		}
 		if target.SSHConfigProxy {
-			if runSSHQuietWithOptionsResolvePort(probeCtx, target, sshReadyCommand(*target), profile.connectTimeout, profile.connectionAttempts) == nil {
+			err := runSSHQuietWithOptionsResolvePort(probeCtx, target, sshReadyCommand(*target), profile.connectTimeout, profile.connectionAttempts)
+			if err == nil {
 				return nil
+			}
+			if setupErr := workspaceOwnerReadinessError(err, phase); setupErr != nil {
+				return setupErr
 			}
 			lastPorts = "proxy"
 			fmt.Fprintln(stderr, sshWaitProgressMessage(target, phase, target.Port, "", lastPorts, time.Since(start), time.Until(deadline)))
@@ -319,19 +323,26 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 				if reachablePort == "" {
 					reachablePort = probe.Port
 				}
-				if runSSHQuietWithOptions(probeCtx, probe, sshTransportProbeCommand(probe), profile.connectTimeout, profile.connectionAttempts) != nil {
+				if err := runSSHQuietWithOptions(probeCtx, probe, sshTransportProbeCommand(probe), profile.connectTimeout, profile.connectionAttempts); err != nil {
+					if setupErr := workspaceOwnerReadinessError(err, phase); setupErr != nil {
+						return setupErr
+					}
 					probes = append(probes, port+":tcp")
 					continue
 				}
 				if transportPort == "" {
 					transportPort = probe.Port
 				}
-				if runSSHQuietWithOptions(probeCtx, probe, sshReadyCommand(probe), profile.connectTimeout, profile.connectionAttempts) == nil {
+				err = runSSHQuietWithOptions(probeCtx, probe, sshReadyCommand(probe), profile.connectTimeout, profile.connectionAttempts)
+				if err == nil {
 					if target.Port != probe.Port {
 						fmt.Fprintf(stderr, "using ssh port %s for %s (configured %s not ready)\n", probe.Port, target.Host, target.Port)
 						target.Port = probe.Port
 					}
 					return nil
+				}
+				if setupErr := workspaceOwnerReadinessError(err, phase); setupErr != nil {
+					return setupErr
 				}
 				probes = append(probes, port+":auth")
 			}
@@ -480,9 +491,10 @@ func uniqueSSHPorts(ports []string) []string {
 }
 
 type sshTransportPreparation struct {
-	command string
-	input   *replayableSSHInput
-	direct  io.ReadSeeker
+	command     string
+	input       *replayableSSHInput
+	direct      io.ReadSeeker
+	setupMarker string
 }
 
 const sshMuxDescriptorFailure = "mux_client_request_session: send fds failed"
@@ -535,13 +547,15 @@ func prepareSSHTransport(target SSHTarget, remote workspaceOwnerRemotePreparatio
 			return sshTransportPreparation{}, err
 		}
 		return sshTransportPreparation{
-			command: wsl2StdinScriptCommandWithPayload(len(remote.command), int(payloadSize), waitTimeout),
-			input:   replay,
+			command:     wsl2StdinScriptCommandWithPayload(len(remote.command), int(payloadSize), waitTimeout),
+			input:       replay,
+			setupMarker: remote.setupMarker,
 		}, nil
 	}
 
 	prepared := sshTransportPreparation{
-		command: wrapRemoteForTargetWithWaitTimeout(target, remote.command, waitTimeout),
+		command:     wrapRemoteForTargetWithWaitTimeout(target, remote.command, waitTimeout),
+		setupMarker: remote.setupMarker,
 	}
 	if !hasInput {
 		return prepared, nil
@@ -580,6 +594,23 @@ func (p *sshTransportPreparation) runOnce(ctx context.Context, target SSHTarget,
 		return false, err
 	}
 	cmd.Stdin = input
+	if p.setupMarker != "" {
+		if stderr == nil {
+			stderr = io.Discard
+		}
+		diagnostic := &workspaceOwnerSetupWriter{destination: stderr, marker: p.setupMarker}
+		if sameCommandStreamWriter(stdout, stderr) {
+			stdout = workspaceOwnerSetupStdout{setup: diagnostic}
+		}
+		stderr = diagnostic
+		defer func() {
+			err = errors.Join(err, diagnostic.flush())
+			if diagnostic.failure != "" {
+				muxFailure = false
+				err = &workspaceOwnerSetupError{phase: diagnostic.failure, cause: err}
+			}
+		}()
+	}
 	if captureLocalDiagnostics {
 		return runSSHCommandWithLocalDiagnostics(cmd, stdout, stderr)
 	}
@@ -847,19 +878,15 @@ func runWSL2ControlScriptCombinedOutput(ctx context.Context, target SSHTarget, r
 	defer func() {
 		err = errors.Join(err, input.close())
 	}()
+	transport := sshTransportPreparation{command: command, input: input, setupMarker: prepared.setupMarker}
 	var lastOut []byte
 	var lastErr error
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 		probe := target
 		probe.Port = port
 		probe.FallbackPorts = []string{}
-		cmd := sshCommandContext(ctx, probe, sshArgsWithOptions(probe, command, connectTimeout, connectionAttempts)...)
-		cmd.Stdin, err = input.reset()
-		if err != nil {
-			return "", err
-		}
 		var out synchronizedBuffer
-		err = runSSHCommand(cmd, &out, &out)
+		_, err = transport.runOnce(ctx, probe, connectTimeout, connectionAttempts, &out, &out, false)
 		if err == nil {
 			return strings.TrimSpace(out.String()), nil
 		}
@@ -962,6 +989,20 @@ func runSSHStream(ctx context.Context, target SSHTarget, remote string, stdout, 
 }
 
 func runSSHStreamResult(ctx context.Context, target SSHTarget, remote string, stdout, stderr io.Writer) (code int, err error) {
+	// Some streaming callers retain only the exit code. Report proven setup
+	// failures here, once, without changing workload stderr or exit semantics.
+	defer func() {
+		var setupErr *workspaceOwnerSetupError
+		if stderr == nil || !errors.As(err, &setupErr) {
+			return
+		}
+		detail := setupErr.Error() + "\n"
+		n, writeErr := io.WriteString(stderr, detail)
+		if writeErr == nil && n < len(detail) {
+			writeErr = io.ErrShortWrite
+		}
+		err = errors.Join(err, writeErr)
+	}()
 	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, nil)
 	if err != nil {
 		return 7, err
@@ -991,6 +1032,13 @@ func runSSHStreamResult(ctx context.Context, target SSHTarget, remote string, st
 
 func runSSHCommand(cmd *exec.Cmd, stdout, stderr io.Writer) error {
 	return runCommandWithPlatformStreams(cmd, stdout, stderr)
+}
+
+func sameCommandStreamWriter(left, right io.Writer) bool {
+	defer func() {
+		_ = recover()
+	}()
+	return left == right
 }
 
 type synchronizedBuffer struct {
@@ -1044,6 +1092,10 @@ func sshArgsNoInput(target SSHTarget, remote string) []string {
 }
 
 func shouldRetrySSHPort(err error) bool {
+	var setupErr *workspaceOwnerSetupError
+	if errors.As(err, &setupErr) {
+		return false
+	}
 	return exitCode(err) == 255
 }
 

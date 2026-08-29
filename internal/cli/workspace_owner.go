@@ -140,6 +140,7 @@ type workspaceOwnerRemotePreparation struct {
 	cleanup       string
 	name          string
 	ownerExpanded bool
+	setupMarker   string
 }
 
 const (
@@ -155,9 +156,15 @@ func prepareWorkspaceOwnerRemote(ctx context.Context, target SSHTarget, remote s
 		return workspaceOwnerRemotePreparation{command: remote}, nil
 	}
 	if !isWindowsNativeTarget(target) {
+		nonce, err := randomHex(16)
+		if err != nil {
+			return workspaceOwnerRemotePreparation{}, fmt.Errorf("create workspace witness diagnostic marker: %w", err)
+		}
+		marker := workspaceOwnerSetupPrefix + nonce
 		return workspaceOwnerRemotePreparation{
-			command:       owner.wrapPOSIXCommand(remote, inputSize != nil),
+			command:       owner.wrapPOSIXCommand(remote, inputSize != nil, marker),
 			ownerExpanded: true,
+			setupMarker:   marker,
 		}, nil
 	}
 	return stageWorkspaceOwnerWindowsWitness(contextWithoutWorkspaceOwner(ctx), target, owner, remote, inputSize, false)
@@ -490,11 +497,15 @@ func (o *workspaceOwner) stopRenewal() {
 	})
 }
 
-func (o *workspaceOwner) wrapPOSIXCommand(remote string, preserveInput bool) string {
+func (o *workspaceOwner) wrapPOSIXCommand(remote string, preserveInput bool, setupMarker ...string) string {
 	if o == nil {
 		return remote
 	}
-	return remoteWorkspaceOwnerPOSIXWitness(o.key, o.token, remote, preserveInput)
+	marker := ""
+	if len(setupMarker) > 0 {
+		marker = setupMarker[0]
+	}
+	return remoteWorkspaceOwnerPOSIXLauncher(o.key, o.token, remoteWorkspaceOwnerPOSIXWitnessScript(o.key, o.token, remote, marker, preserveInput), marker)
 }
 
 func (o *workspaceOwner) wrapPOSIXBackgroundCommand(remote string) string {
@@ -521,8 +532,18 @@ func workspaceOwnerTTLSeconds(ttl time.Duration) int64 {
 	return seconds
 }
 
+// A denied signal probe is not proof of death. Never erase a witness until
+// independent PID-only observation confirms absence (no process arguments).
+const workspaceOwnerPOSIXAbsent = `owner_child_absent() {
+  observed_pids=$(ps -e -o pid= 2>/dev/null) || return 1
+  matching_pid=$(printf '%s\n' "$observed_pids" | awk -v pid="$1" '$1 == pid { print $1 }') || return 1
+  [ -z "$matching_pid" ]
+}
+`
+
 func remoteWorkspaceOwnerPOSIX(req workspaceOwnerRemoteRequest) string {
 	body := `set -eu
+` + workspaceOwnerPOSIXAbsent + `
 root="$HOME/.crabbox/workspace-owners"
 key=` + shellQuote(req.Key) + `
 token=` + shellQuote(req.Token) + `
@@ -559,6 +580,8 @@ child_status() {
     live_identity=$(ps -o lstart= -p "$child_pid" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' | cut -c1-96)
     [ -n "$live_identity" ] || return 2
     [ "$live_identity" = "$child_identity" ] && return 0
+  else
+    owner_child_absent "$child_pid" || return 2
   fi
   return 1
 }
@@ -762,43 +785,64 @@ try {
 `
 }
 
-func remoteWorkspaceOwnerPOSIXLauncher(key, token, script string) string {
-	return remoteWorkspaceOwnerPOSIXEncodedLauncher(key, token, base64.StdEncoding.EncodeToString([]byte(script)), len(script))
+func remoteWorkspaceOwnerPOSIXLauncher(key, token, script string, setupMarker ...string) string {
+	return remoteWorkspaceOwnerPOSIXEncodedLauncher(key, token, base64.StdEncoding.EncodeToString([]byte(script)), len(script), setupMarker...)
 }
 
-func remoteWorkspaceOwnerPOSIXEncodedLauncher(key, token, encoded string, decodedSize int) string {
+func remoteWorkspaceOwnerPOSIXEncodedLauncher(key, token, encoded string, decodedSize int, setupMarker ...string) string {
 	// Private staging must not impose its creation policy on the launched script.
-	launcher := `set -u; command_umask=$(umask); umask 077; root="$HOME/.crabbox/workspace-owners"; run_dir="$root/` + key + `.launcher.` + token + `.$$"; script="$run_dir/script"; cleanup_launcher() { rm -f "$script"; rmdir "$run_dir" 2>/dev/null || true; }; decoded_size_ok() { set -- $(wc -c <"$script"); [ "$#" -eq 1 ] && [ "$1" = ` + strconv.Itoa(decodedSize) + ` ]; }; mkdir -p "$root" || exit 74; chmod 700 "$HOME/.crabbox" "$root" 2>/dev/null || true; mkdir -m 700 "$run_dir" || exit 74; payload_b64="` + encoded + `"; decoded=; if command -v base64 >/dev/null 2>&1; then if printf %s "$payload_b64" | base64 --decode >"$script" 2>/dev/null && decoded_size_ok; then decoded=1; elif printf %s "$payload_b64" | base64 -d >"$script" 2>/dev/null && decoded_size_ok; then decoded=1; elif printf %s "$payload_b64" | base64 -D >"$script" 2>/dev/null && decoded_size_ok; then decoded=1; fi; fi; if [ -z "$decoded" ] && command -v openssl >/dev/null 2>&1; then if printf %s "$payload_b64" | openssl base64 -d -A >"$script" 2>/dev/null && decoded_size_ok; then decoded=1; fi; fi; if [ -z "$decoded" ]; then cleanup_launcher; exit 74; fi; umask "$command_umask"; /bin/sh "$script"; code=$?; cleanup_launcher; exit "$code"`
+	launcher := `set -u; command_umask=$(umask); umask 077; root="$HOME/.crabbox/workspace-owners"; run_dir="$root/` + key + `.launcher.` + token + `.$$"; script="$run_dir/script"; cleanup_launcher() { rm -f "$script" 2>/dev/null; rmdir "$run_dir" 2>/dev/null || true; }; decoded_size_ok() { set -- $(wc -c <"$script"); [ "$#" -eq 1 ] && [ "$1" = ` + strconv.Itoa(decodedSize) + ` ]; }; mkdir -p "$root" 2>/dev/null || exit 74; chmod 700 "$HOME/.crabbox" "$root" 2>/dev/null || true; mkdir -m 700 "$run_dir" 2>/dev/null || exit 74; payload_b64="` + encoded + `"; decoded=; if command -v base64 >/dev/null 2>&1; then if printf %s "$payload_b64" | base64 --decode 2>/dev/null >"$script" && decoded_size_ok; then decoded=1; elif printf %s "$payload_b64" | base64 -d 2>/dev/null >"$script" && decoded_size_ok; then decoded=1; elif printf %s "$payload_b64" | base64 -D 2>/dev/null >"$script" && decoded_size_ok; then decoded=1; fi; fi; if [ -z "$decoded" ] && command -v openssl >/dev/null 2>&1; then if printf %s "$payload_b64" | openssl base64 -d -A 2>/dev/null >"$script" && decoded_size_ok; then decoded=1; fi; fi; if [ -z "$decoded" ]; then cleanup_launcher; exit 74; fi; umask "$command_umask"; /bin/sh "$script"; code=$?; cleanup_launcher; exit "$code"`
+	if len(setupMarker) > 0 && setupMarker[0] != "" {
+		launcher = remoteWorkspaceOwnerPOSIXSetupDiagnostic(setupMarker[0]) + strings.ReplaceAll(launcher, "exit 74", "setup_failed staging")
+	}
 	return "exec /bin/sh -c " + shellQuote(launcher)
 }
 
 func remoteWorkspaceOwnerPOSIXWitness(key, token, remote string, preserveInput ...bool) string {
-	return remoteWorkspaceOwnerPOSIXLauncher(key, token, remoteWorkspaceOwnerPOSIXWitnessScript(key, token, remote, preserveInput...))
+	return remoteWorkspaceOwnerPOSIXLauncher(key, token, remoteWorkspaceOwnerPOSIXWitnessScript(key, token, remote, "", preserveInput...))
 }
 
-func remoteWorkspaceOwnerPOSIXWitnessScript(key, token, remote string, preserveInput ...bool) string {
+func remoteWorkspaceOwnerPOSIXSetupDiagnostic(marker string) string {
+	if marker == "" {
+		marker = "remote workspace owner setup:"
+	}
+	// The marker is fixed ASCII plus locally generated hex, never remote input.
+	// Double quotes keep the outer launcher portable across login shells.
+	return `setup_failed() { printf "%s\n" "` + marker + ` failed $1" >&2; exit "${2:-74}"; }; `
+}
+
+func remoteWorkspaceOwnerPOSIXWitnessScript(key, token, remote, setupMarker string, preserveInput ...bool) string {
+	diagnostic := remoteWorkspaceOwnerPOSIXSetupDiagnostic(setupMarker)
+	started := ""
+	if setupMarker != "" {
+		started = "printf '%s\\n' " + shellQuote(setupMarker+" started") + " >&2 || setup_failed handoff\n"
+	}
 	inputSetup := ""
 	inputRedirect := ""
 	if len(preserveInput) > 0 && preserveInput[0] {
-		inputSetup = `(umask 077; cat >"$run_dir/input") || { rm -rf "$run_dir"; exit 74; }
+		inputSetup = `(umask 077; cat >"$run_dir/input") 2>/dev/null || { rm -rf "$run_dir" 2>/dev/null; setup_failed input; }
 `
 		inputRedirect = ` <"$run_dir/input"`
 	}
 	gateFunction := `run_owner_gate() {
 	if command -v flock >/dev/null 2>&1; then
-		flock -x -w 5 "$gate" /bin/sh -c "$1"
+		flock -x -w 5 "$gate" /bin/sh -c "$1" 2>/dev/null
 	elif command -v lockf >/dev/null 2>&1; then
-		lockf -t 5 "$gate" /bin/sh -c "$1"
+		lockf -t 5 "$gate" /bin/sh -c "$1" 2>/dev/null
 	else
 		return 74
 	fi
 }
 `
 	installBody := `set -eu
+` + workspaceOwnerPOSIXAbsent + `
 [ "$(sed -n '2p' "$state" 2>/dev/null || true)" = "$token" ] || exit 75
 owner_expiry=$(sed -n '3p' "$state" 2>/dev/null || true)
 case "$owner_expiry" in ''|*[!0-9]*) exit 74 ;; esac
 [ "$owner_expiry" -gt "$(date +%s)" ] || exit 75
+kill -0 "$child_pid" 2>/dev/null || exit 74
+live_child_identity=$(ps -o lstart= -p "$child_pid" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' | cut -c1-96)
+[ -n "$live_child_identity" ] && [ "$live_child_identity" = "$child_identity" ] || exit 74
 if [ -f "$child" ]; then
 	existing_pid=$(sed -n '1p' "$child" 2>/dev/null || true)
 	existing_identity=$(sed -n '2p' "$child" 2>/dev/null || true)
@@ -808,6 +852,8 @@ if [ -f "$child" ]; then
 		live_existing_identity=$(ps -o lstart= -p "$existing_pid" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' | cut -c1-96)
 		[ -n "$live_existing_identity" ] || exit 74
 		[ "$live_existing_identity" != "$existing_identity" ] || exit 75
+	else
+		owner_child_absent "$existing_pid" || exit 74
 	fi
 	rm -f "$child"
 fi
@@ -815,6 +861,7 @@ child_tmp="$child.tmp.$$"
 (umask 077; printf '%s\n%s\n' "$child_pid" "$child_identity" >"$child_tmp")
 mv "$child_tmp" "$child"`
 	clearBody := `set -eu
+` + workspaceOwnerPOSIXAbsent + `
 [ "$(sed -n '2p' "$state" 2>/dev/null || true)" = "$token" ] || exit 75
 recorded_pid=$(sed -n '1p' "$child" 2>/dev/null || true)
 recorded_identity=$(sed -n '2p' "$child" 2>/dev/null || true)
@@ -823,27 +870,30 @@ if kill -0 "$recorded_pid" 2>/dev/null; then
 	live_identity=$(ps -o lstart= -p "$recorded_pid" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' | cut -c1-96)
 	[ -n "$live_identity" ] && [ "$live_identity" != "$recorded_identity" ] || exit 74
 else
-	observed_pids=$(ps -e -o pid= 2>/dev/null) || exit 74
-	[ -z "$(printf '%s\n' "$observed_pids" | awk -v pid="$recorded_pid" '$1 == pid { print $1 }')" ] || exit 74
+	owner_child_absent "$recorded_pid" || exit 74
 fi
 rm -f "$child"`
 	// An asynchronous shell list makes INT/QUIT ignored before exec. Register in
 	// a foreground shell instead; close its identity pipe before user code runs.
 	// The parent catches these signals while waiting so Bash reaches cleanup
 	// after a signaled child; caught dispositions reset in the fresh child shell.
-	registrar := `set -u
+	// Pre-start waits use the lock's five-second deadline, never signal-based
+	// cleanup. If the supervisor disappears, the identity pipe refuses handoff.
+	registrar := diagnostic + `set -u
 trap '' HUP
+trap 'rm -rf "$run_dir" 2>/dev/null' 0
+trap 'setup_failed handoff' PIPE
 child_pid=$$
 child_identity=$(ps -o lstart= -p "$child_pid" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' | cut -c1-96)
-[ -n "$child_identity" ] || exit 74
+[ -n "$child_identity" ] || setup_failed identity
 export child_pid child_identity
-` + gateFunction + `run_owner_gate ` + shellQuote(installBody) + ` || exit $?
-printf '%s\n%s\n' "$child_pid" "$child_identity" >&3 || exit 74
+` + gateFunction + `run_owner_gate ` + shellQuote(installBody) + ` || setup_failed registration "$?"
+printf '%s\n%s\n' "$child_pid" "$child_identity" >&3 || setup_failed handoff
 exec 3>&-
 umask "$command_umask"
-exec sh -c ` + shellQuote(remote) + inputRedirect + `
+` + started + `exec sh -c ` + shellQuote(remote) + inputRedirect + `
 `
-	return `set -u
+	return diagnostic + `set -u
 command_umask=$(umask)
 umask 077
 root="$HOME/.crabbox/workspace-owners"
@@ -854,7 +904,7 @@ child="$root/$key.child"
 gate="$root/$key.gate"
 run_dir="$root/$key.run.$token.$$"
 ` + gateFunction + `
-mkdir -m 700 "$run_dir" || exit 74
+mkdir -m 700 "$run_dir" 2>/dev/null || setup_failed staging
 ` + inputSetup + `export state child gate token command_umask run_dir
 exec 4>&1
 trap : INT QUIT
@@ -863,11 +913,11 @@ identity=$(exec /bin/sh -c ` + shellQuote(registrar) + ` 3>&1 1>&4 4>&-)
 code=$?
 trap - INT QUIT
 exec 4>&-
-if [ -z "$identity" ]; then rm -rf "$run_dir"; [ "$code" -ne 0 ] && exit "$code"; exit 74; fi
+if [ -z "$identity" ]; then rm -rf "$run_dir" 2>/dev/null; [ "$code" -ne 0 ] || code=74; setup_failed handoff "$code"; fi
 child_pid=$(printf '%s\n' "$identity" | sed -n '1p')
 child_identity=$(printf '%s\n' "$identity" | sed -n '2p')
-case "$child_pid" in ''|*[!0-9]*) rm -rf "$run_dir"; exit 74 ;; esac
-if [ -z "$child_identity" ] || [ "${#child_identity}" -gt 96 ]; then rm -rf "$run_dir"; exit 74; fi
+case "$child_pid" in ''|*[!0-9]*) rm -rf "$run_dir" 2>/dev/null; exit 74 ;; esac
+if [ -z "$child_identity" ] || [ "${#child_identity}" -gt 96 ]; then rm -rf "$run_dir" 2>/dev/null; exit 74; fi
 export child_pid child_identity
 run_owner_gate ` + shellQuote(clearBody) + `
 clear_status=$?
