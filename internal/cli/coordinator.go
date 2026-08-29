@@ -2204,6 +2204,9 @@ func (c *CoordinatorClient) doControl(ctx context.Context, method, path string, 
 }
 
 func (c *CoordinatorClient) do(ctx context.Context, method, path string, body any, out any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	var data []byte
 	var err error
 	if body != nil {
@@ -2261,27 +2264,34 @@ func (c *CoordinatorClient) addRequestHeaders(ctx context.Context, headers http.
 		headers.Set("Authorization", "Bearer "+token)
 	}
 	c.addAccessHeaders(headers)
-	if owner := c.localCoordinatorOwner(); owner != "" {
+	if owner := c.localCoordinatorOwner(ctx); owner != "" {
 		headers.Set("X-Crabbox-Owner", owner)
 	}
 	if org := os.Getenv("CRABBOX_ORG"); org != "" {
 		headers.Set("X-Crabbox-Org", org)
 	}
-	return nil
+	return ctx.Err()
 }
 
 func (c *CoordinatorClient) authorizationToken(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if len(c.TokenCommand) == 0 {
 		return c.Token, nil
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, coordinatorTokenCommandTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(commandCtx, c.TokenCommand[0], c.TokenCommand[1:]...)
+	configureBoundedCommandCancellation(cmd)
 	c.applyChildEnvironment(cmd)
 	var output limitedCoordinatorTokenOutput
 	cmd.Stdout = &output
 	cmd.Stderr = io.Discard
 	if err := cmd.Run(); err != nil {
+		if errors.Is(err, exec.ErrWaitDelay) {
+			_ = cmd.Cancel()
+		}
 		if errors.Is(commandCtx.Err(), context.DeadlineExceeded) {
 			return "", errors.New("coordinator token command timed out")
 		}
@@ -2393,11 +2403,15 @@ func (c *CoordinatorClient) curlConfig(ctx context.Context, method, path string,
 		curlConfigValue(&cfg, "header", "Authorization: Bearer "+token)
 	}
 	c.addCurlAccessHeaders(&cfg)
-	if owner := c.localCoordinatorOwner(); owner != "" {
+	if owner := c.localCoordinatorOwner(ctx); owner != "" {
 		curlConfigValue(&cfg, "header", "X-Crabbox-Owner: "+owner)
 	}
 	if org := os.Getenv("CRABBOX_ORG"); org != "" {
 		curlConfigValue(&cfg, "header", "X-Crabbox-Org: "+org)
+	}
+	if err := ctx.Err(); err != nil {
+		cleanup()
+		return "", func() {}, err
 	}
 	return cfg.String(), cleanup, nil
 }
@@ -2494,31 +2508,38 @@ func (c *CoordinatorClient) applyChildEnvironment(cmd *exec.Cmd) {
 	}
 }
 
-func (c *CoordinatorClient) localCoordinatorOwner() string {
+func (c *CoordinatorClient) localCoordinatorOwner(ctx context.Context) string {
 	var denied []string
 	if c != nil {
 		denied = c.ChildEnvDenylist
 	}
-	return localCoordinatorOwnerWithEnvironment(denied)
+	return localCoordinatorOwnerWithEnvironment(ctx, denied)
 }
 
 func localCoordinatorOwner() string {
-	return localCoordinatorOwnerWithEnvironment(nil)
+	return localCoordinatorOwnerWithEnvironment(context.Background(), nil)
 }
 
-func localCoordinatorOwnerWithEnvironment(denied []string) string {
+func localCoordinatorOwnerWithEnvironment(ctx context.Context, denied []string) string {
+	if ctx.Err() != nil {
+		return ""
+	}
 	for _, key := range []string{"CRABBOX_OWNER", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"} {
 		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 			return value
 		}
 	}
-	cmd := exec.Command("git", "config", "--get", "user.email")
+	cmd := exec.CommandContext(ctx, "git", "config", "--get", "user.email")
+	configureBoundedCommandCancellation(cmd)
 	gitEnv := repositoryGitEnvironment()
 	if len(denied) > 0 {
 		gitEnv = childEnvironmentWithout(gitEnv, denied...)
 	}
 	cmd.Env = gitEnv
 	out, err := cmd.Output()
+	if errors.Is(err, exec.ErrWaitDelay) {
+		_ = cmd.Cancel()
+	}
 	if err != nil {
 		return ""
 	}

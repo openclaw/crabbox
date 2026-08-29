@@ -773,25 +773,7 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 		cmd.WaitDelay = req.CancelGracePeriod
 	}
 	if req.MaxCapturedOutputBytes > 0 && !req.DisableOutputCapture {
-		// Provider commands are untrusted process trees. Once bounded capture
-		// overflows, terminate descendants too: a grandchild retaining stdout or
-		// stderr would otherwise keep os/exec's pipe drain blocked indefinitely.
-		// A controller child already belongs to a durable outer process group;
-		// nesting a new group here would let provider descendants escape recovery.
-		controllerOwnsTree := os.Getenv(controllerProcessTreeOwnedEnv) == "1"
-		if !controllerOwnsTree {
-			configureDaemonCommand(cmd)
-		}
-		cmd.Cancel = func() error {
-			if cmd.Process == nil {
-				return os.ErrProcessDone
-			}
-			if controllerOwnsTree {
-				return cmd.Process.Kill()
-			}
-			return stopDaemonProcess(cmd.Process, cmd.Process.Pid)
-		}
-		cmd.WaitDelay = controllerChildWaitDelay
+		configureBoundedCommandCancellation(cmd)
 	}
 	env := req.Env
 	if env == nil {
@@ -831,6 +813,9 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 		}
 	}
 	err := cmd.Run()
+	if errors.Is(err, exec.ErrWaitDelay) && req.MaxCapturedOutputBytes > 0 && !req.DisableOutputCapture {
+		_ = cmd.Cancel()
+	}
 	result := LocalCommandResult{ExitCode: exitCode(err), Stdout: stdout.String(), Stderr: stderr.String()}
 	if stdout.overflow || stderr.overflow {
 		err = fmt.Errorf("captured command output exceeded %d-byte limit", req.MaxCapturedOutputBytes)
@@ -840,6 +825,26 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 		result.ExitCode = 0
 	}
 	return result, err
+}
+
+// Bound pipe draining as well as process exit: CommandContext alone cannot
+// interrupt descendants retaining stdout/stderr after their parent exits.
+func configureBoundedCommandCancellation(cmd *exec.Cmd) {
+	// Controller children must stay in their durable outer process group.
+	controllerOwnsTree := os.Getenv(controllerProcessTreeOwnedEnv) == "1"
+	if !controllerOwnsTree {
+		configureDaemonCommand(cmd)
+	}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		if controllerOwnsTree {
+			return cmd.Process.Kill()
+		}
+		return stopDaemonProcess(cmd.Process, cmd.Process.Pid)
+	}
+	cmd.WaitDelay = controllerChildWaitDelay
 }
 
 type commandCaptureBuffer struct {
@@ -1095,6 +1100,10 @@ type WarmupRequest struct {
 	ActionsRunner bool
 	RequestedSlug string
 	TimingJSON    bool
+	// BeforeComplete runs synchronous, best-effort core bookkeeping once after
+	// successful acquisition/retention and before final output. Providers opting
+	// in must include it in total timing; it cannot fail or roll back the lease.
+	BeforeComplete func()
 }
 
 type StatusRequest struct {

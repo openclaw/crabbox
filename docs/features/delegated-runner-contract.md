@@ -11,6 +11,14 @@ OpenSSH, a shell-compatible bootstrap, or direct process control. The provider
 owns workspace transport and command execution, while Crabbox owns the local CLI
 surface, config, claims, slugs, timing records, and normalized status output.
 
+Delegated warmup adapters with post-readiness core bookkeeping can opt into
+`WarmupRequest.BeforeComplete`. Invoke it synchronously once after successful
+acquisition and retention, before final completion/timing output, and include
+its duration in the total. It has no error return and grants no cleanup or
+allocation-retry authority. Never invoke it on allocation failure. Blacksmith
+uses this boundary for best-effort portal inventory; other adapters need no
+change unless they adopt that finalization contract.
+
 This page defines the minimum portable runner contract a new delegated provider
 must satisfy before it should become a built-in provider.
 

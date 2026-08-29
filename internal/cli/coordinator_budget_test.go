@@ -120,6 +120,8 @@ func TestCoordinatorLeaseReadStallsAreBounded(t *testing.T) {
 
 func TestCoordinatorHeartbeatHonorsCallerDeadlineWithoutReplay(t *testing.T) {
 	clearConfigEnv(t)
+	// Keep this HTTP deadline test independent of local git process startup.
+	t.Setenv("CRABBOX_OWNER", "alice@example.com")
 	var calls atomic.Int32
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

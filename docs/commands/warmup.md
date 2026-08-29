@@ -43,6 +43,13 @@ Scripts should prefer the canonical ID. Add `--timing-json` to emit a final
 JSON timing record (provider, lease ID, slug, total duration, exit code) on
 stderr.
 
+For Blacksmith Testbox with a configured coordinator, the lease summary appears
+as soon as the ready Testbox is retained. Final completion and timing follow the
+optional portal inventory sync, and the total includes that bookkeeping. The
+sync has one five-second budget (or the caller's earlier cancellation/deadline).
+A sync failure prints a warning on stderr but warmup still succeeds and retains
+the ready lease; it does not allocate again or stop the Testbox.
+
 Warmup records a local claim binding the lease to the current repo checkout. Use
 `--reclaim` to overwrite an existing claim for that lease.
 

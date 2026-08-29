@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Bounded best-effort Testbox portal bookkeeping to one five-second budget and delayed final warmup completion/timing until it ends, preserving successful allocations and retained leases on sync failure.
 - Bounded WebVNC bridge response-header waits to 30 seconds without limiting established WebSocket sessions or bypassing configured HTTP transports. Thanks @SebTardif.
 - Simplified WSL2 SSH execution into one verified, privately blinded SFTP envelope with a derived fixed-control startup/work/completion budget, LF helpers on Windows builds, identity-checked cleanup, and no replay after publication uncertainty; SFTP is now required, replacing the v0.47.0 stdin fallback (enable it and verify Doctor's `wsl2-sftp` probe before upgrading). Thanks @vincentkoc.
 - Exposed resolved Incus settings in `config show --json`, with endpoint credential redaction and no daemon access.

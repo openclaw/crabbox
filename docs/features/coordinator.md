@@ -329,6 +329,14 @@ runner leases stay visible without leaking to normal users. External runner rows
 Actions links and stale markers; clicking one opens its visibility-only detail
 page at `/portal/runners/{provider}/{runner-id}`.
 
+The CLI's best-effort external-runner sync has a single five-second budget
+covering inventory, optional Actions enrichment, credential resolution, and the
+HTTP request/response. Earlier caller deadlines still apply. Once canceled, the
+CLI does not publish partial inventory or start further lookups. A warning does
+not change a successful allocation or retained lease; Blacksmith warmup emits
+final completion/timing after the sync attempt. An upload whose response is lost
+may already have been accepted, so it is not retried.
+
 `/portal/leases/{id-or-slug}` shows lease state, bridge status, the latest Linux
 telemetry, copy-ready `ssh`/`run`/WebVNC/code commands, a recent-runs grid, and a
 stop action. `/portal/runs/{run-id}` shows the command, owner, lease, exit
