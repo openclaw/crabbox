@@ -148,6 +148,12 @@ the local relay performs account authentication itself: it does not register a
 credential endpoint, and the viewer neither receives nor fetches the account
 username or password. ARD account credentials are never copied into arguments,
 browser URLs, the handoff file, or a browser credential response.
+
+Local macOS authentication negotiation has a 10-second deadline. An expired
+deadline is reported as `authentication negotiation timed out`, even when the
+WebSocket transport reports a closed connection; the diagnostic retains the
+failed RFB phase and underlying error.
+
 An External provider may source its ARD password from an operator-approved
 environment variable; the local relay reads that value and keeps it
 server-side. The explicitly supplied legacy VNC username remains visible in the
