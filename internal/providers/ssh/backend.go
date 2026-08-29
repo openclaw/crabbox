@@ -230,6 +230,18 @@ func (b *staticLeaseBackend) Doctor(ctx context.Context, req core.DoctorRequest)
 	if b.Cfg.Static.Host == "" {
 		return core.DoctorResult{}, exit(3, "missing static.host")
 	}
+	wsl2 := b.Cfg.TargetOS == core.TargetWindows && b.Cfg.WindowsMode == "wsl2"
+	if wsl2 && !req.ProbeSSH {
+		return core.DoctorResult{
+			Provider: "ssh",
+			Checks: []core.DoctorCheck{{
+				Status:  "skip",
+				Check:   "wsl2-sftp",
+				Message: "SFTP and WSL2 readiness were not probed; rerun with --doctor-probe-ssh",
+				Details: map[string]string{"mutation": "false", "transport": "sftp_required", "runtime": "unchecked"},
+			}},
+		}, nil
+	}
 	runtime := "unchecked"
 	api := "static_config"
 	if req.ProbeSSH {
@@ -239,6 +251,31 @@ func (b *staticLeaseBackend) Doctor(ctx context.Context, req core.DoctorRequest)
 		}
 		if err := waitForSSHReady(ctx, &target, b.RT.Stderr, "doctor", 10*time.Second); err != nil {
 			return core.DoctorResult{}, err
+		}
+		if wsl2 {
+			if err := probeWSLSFTP(ctx, target, "2", "1"); err != nil {
+				if !isWSLSFTPUnavailable(err) {
+					return core.DoctorResult{}, err
+				}
+				return core.DoctorResult{
+					Provider: "ssh",
+					Checks: []core.DoctorCheck{{
+						Status:  "failed",
+						Check:   "wsl2-sftp",
+						Message: "set 'Subsystem sftp internal-sftp' in C:\\ProgramData\\ssh\\sshd_config, run 'Restart-Service sshd', then rerun with --doctor-probe-ssh",
+						Details: map[string]string{"mutation": "false", "runtime": "ssh_reachable", "transport": "sftp_missing"},
+					}},
+				}, nil
+			}
+			return core.DoctorResult{
+				Provider: "ssh",
+				Checks: []core.DoctorCheck{{
+					Status:  "ok",
+					Check:   "wsl2-sftp",
+					Message: "SFTP handshake and WSL2 readiness passed",
+					Details: map[string]string{"mutation": "false", "runtime": "wsl2_ready", "transport": "sftp_ready"},
+				}},
+			}, nil
 		}
 		api = "ssh_probe"
 		runtime = "ssh_reachable"
@@ -308,6 +345,8 @@ func serverSlug(server Server) string                           { return core.Se
 
 var waitForSSH = core.WaitForSSH
 var waitForSSHReady = core.WaitForSSHReady
+var probeWSLSFTP = core.ProbeWSLSFTP
+var isWSLSFTPUnavailable = core.IsWSLSFTPUnavailable
 
 func (b *staticLeaseBackend) rememberAcquiredLease(lease LeaseTarget) {
 	b.mu.Lock()

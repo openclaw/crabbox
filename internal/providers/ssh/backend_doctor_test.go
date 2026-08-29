@@ -2,9 +2,11 @@ package ssh
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -23,6 +25,59 @@ func TestStaticSSHDoctorDoesNotReportProbeWhenUnchecked(t *testing.T) {
 	}
 	if !strings.Contains(result.Message, "runtime=unchecked") {
 		t.Fatalf("result=%#v", result)
+	}
+}
+
+func TestStaticSSHDoctorRequiresExplicitWSL2SFTPProbe(t *testing.T) {
+	cfg := Config{TargetOS: core.TargetWindows, WindowsMode: "wsl2"}
+	cfg.Static.Host = "example.test"
+	backend := NewStaticSSHLeaseBackend(Provider{}.Spec(), cfg, Runtime{Stderr: io.Discard}).(*staticLeaseBackend)
+
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Checks) != 1 || result.Checks[0].Check != "wsl2-sftp" ||
+		result.Checks[0].Status != "skip" || result.Checks[0].Details["mutation"] != "false" {
+		t.Fatalf("result=%#v", result)
+	}
+}
+
+func TestStaticSSHDoctorReportsWSL2SFTPReadiness(t *testing.T) {
+	oldWait, oldProbe, oldUnavailable := waitForSSHReady, probeWSLSFTP, isWSLSFTPUnavailable
+	waitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	t.Cleanup(func() {
+		waitForSSHReady = oldWait
+		probeWSLSFTP = oldProbe
+		isWSLSFTPUnavailable = oldUnavailable
+	})
+	missing := errors.New("missing SFTP")
+	isWSLSFTPUnavailable = func(err error) bool { return errors.Is(err, missing) }
+	cfg := Config{TargetOS: core.TargetWindows, WindowsMode: "wsl2"}
+	cfg.Static.Host = "example.test"
+	backend := NewStaticSSHLeaseBackend(Provider{}.Spec(), cfg, Runtime{Stderr: io.Discard}).(*staticLeaseBackend)
+
+	for _, test := range []struct {
+		name   string
+		probe  func(context.Context, SSHTarget, string, string) error
+		status string
+		state  string
+	}{
+		{name: "ready", probe: func(context.Context, SSHTarget, string, string) error { return nil }, status: "ok", state: "sftp_ready"},
+		{name: "missing", probe: func(context.Context, SSHTarget, string, string) error { return missing }, status: "failed", state: "sftp_missing"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			probeWSLSFTP = test.probe
+			result, err := backend.Doctor(context.Background(), core.DoctorRequest{ProbeSSH: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Checks) != 1 || result.Checks[0].Status != test.status ||
+				result.Checks[0].Details["transport"] != test.state ||
+				result.Checks[0].Details["mutation"] != "false" {
+				t.Fatalf("result=%#v", result)
+			}
+		})
 	}
 }
 

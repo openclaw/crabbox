@@ -327,8 +327,42 @@ Windows native hosts need:
 - VNC/browser tooling only if desktop flows are requested.
 
 WSL2 hosts additionally need WSL installed and reachable through `wsl.exe`, with
-Linux tooling inside the default distribution and `static.workRoot` set to a WSL
-path.
+Linux tooling inside the default distribution, `static.workRoot` set to a WSL
+path, and Windows OpenSSH configured with `Subsystem sftp internal-sftp`.
+
+Verify the prerequisite without staging a workload:
+
+```sh
+crabbox doctor --provider ssh --target windows --windows-mode wsl2 \
+  --static-host win-dev.local --doctor-probe-ssh
+```
+
+Crabbox v0.47.0 shipped workspace-owned WSL2 workload delivery over SSH stdin.
+The next release intentionally replaces that unreliable, replayable path with a
+single private SFTP envelope. Acquire, renew, and release controls keep their
+small framed-stdin protocol. Workload command and input bytes never enter SSH
+arguments or environment.
+
+Each caller-selected port gets one private SSH route. Crabbox validates a random
+proof in the protected Windows stage root before writing the envelope, creates
+the `.part` file exclusively, checks its type and exact length, then uses
+standard non-replacing SFTP rename to publish `.ready`. It does not download the
+payload for verification and does not require the optional SFTP `fsync`
+extension.
+
+The fixed native launcher opens `.ready` with no sharing and rejects reparse
+points, non-files, length changes, and SHA-256 substitutions through that same
+handle. Only then does it arm delete disposition, rewind, and hand the finite
+command/input frame to WSL. The Linux supervisor owns the workload process
+group, cleans exact descendants after disconnect or cancellation, and preserves
+deliberately detached background work after normal completion.
+
+Fallback is allowed before route mutation. After a route proof or acknowledged
+`.part`, another port is considered only after exact cleanup succeeds. An
+unacknowledged exclusive create, attempted rename, published stage, lost
+execution result, or timeout/cancellation after publication is terminal and is
+never replayed or speculatively deleted. Stale, changed, non-file, and
+reparse-point evidence is preserved for investigation.
 
 ## Capabilities
 

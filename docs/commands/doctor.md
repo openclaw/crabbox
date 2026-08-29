@@ -116,6 +116,14 @@ Selecting the same provider explicitly is strict; for example,
   stop, or delete Coder workspaces.
 - Providers with no direct doctor print `skip provider ... direct_doctor=unsupported`.
 
+Static Windows WSL2 targets also report `wsl2-sftp`. Without
+`--doctor-probe-ssh`, the mutation-free check is skipped with a rerun hint. With
+the flag, Doctor verifies WSL readiness and performs an SFTP protocol handshake
+without filesystem operations. A conclusive OpenSSH subsystem rejection reports
+the exact remediation: set `Subsystem sftp internal-sftp` in
+`C:\ProgramData\ssh\sshd_config`, run `Restart-Service sshd`, and rerun the
+probe. Disconnects and malformed protocol responses remain transport failures.
+
 The provider check is bounded to a 10s timeout. A failure adds a `class`
 (`timeout`, `tool`, `config`, `auth`, `permission`, `network`, or `provider`) and a
 remediation `hint`:
