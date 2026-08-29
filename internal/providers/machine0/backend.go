@@ -233,20 +233,34 @@ func (b *backend) preflightSSHKey(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	if key == nil || !strings.EqualFold(strings.TrimSpace(key.Type), "PUBLIC") {
+	if key == nil {
+		keyRoot, err := machine0SSHKeyDirectory()
+		if err != nil {
+			return exit(2, "Machine0 has no default SSH key: set SSH_KEY_PATH or select an existing key with --machine0-key")
+		}
+		for _, name := range []string{"id_rsa", "id_rsa.pub"} {
+			keyPath := filepath.Join(keyRoot, name)
+			info, err := b.stat(keyPath)
+			if err == nil && info.Mode().IsRegular() {
+				continue
+			}
+			if err == nil {
+				err = errors.New("not a regular file")
+			}
+			return exit(2, "Machine0 has no default SSH key and cannot use legacy key file %q: %v; provide both id_rsa and id_rsa.pub in SSH_KEY_PATH, or select an existing key with --machine0-key", keyPath, err)
+		}
+		return nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(key.Type), "PUBLIC") {
 		return nil
 	}
 	fileName := strings.TrimSpace(key.FileName)
 	if fileName == "" || filepath.IsAbs(fileName) || fileName == "." || fileName == ".." || strings.ContainsAny(fileName, `/\`) || filepath.Base(fileName) != fileName {
 		return exit(2, "Machine0 PUBLIC SSH key %q has no usable local private-key filename; select a managed key with --machine0-key <managed-key-name>", blank(key.Name, "<default>"))
 	}
-	keyRoot := strings.TrimSpace(os.Getenv("SSH_KEY_PATH"))
-	if keyRoot == "" {
-		home, homeErr := os.UserHomeDir()
-		if homeErr != nil || strings.TrimSpace(home) == "" {
-			return exit(2, "resolve private key for Machine0 PUBLIC SSH key %q: set SSH_KEY_PATH or select --machine0-key <managed-key-name>", blank(key.Name, "<default>"))
-		}
-		keyRoot = filepath.Join(home, ".ssh")
+	keyRoot, err := machine0SSHKeyDirectory()
+	if err != nil {
+		return exit(2, "resolve private key for Machine0 PUBLIC SSH key %q: set SSH_KEY_PATH or select --machine0-key <managed-key-name>", blank(key.Name, "<default>"))
 	}
 	keyPath := filepath.Join(keyRoot, fileName)
 	info, err := b.stat(keyPath)
@@ -279,6 +293,17 @@ func (b *backend) preflightSSHKey(ctx context.Context, name string) error {
 		return exit(2, "inspect private key for Machine0 PUBLIC SSH key %q at %q: %v", blank(key.Name, "<default>"), keyPath, err)
 	}
 	return exit(2, "Machine0 PUBLIC SSH key %q has no local private key at %q; select a managed key with --machine0-key <managed-key-name>", blank(key.Name, "<default>"), keyPath)
+}
+
+func machine0SSHKeyDirectory() (string, error) {
+	if root := strings.TrimSpace(os.Getenv("SSH_KEY_PATH")); root != "" {
+		return root, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return "", errors.New("user home unavailable")
+	}
+	return filepath.Join(home, ".ssh"), nil
 }
 
 // Certificates, options and multiple records need more than a bare-key comparison.
@@ -616,7 +641,10 @@ func (b *backend) Doctor(ctx context.Context, req DoctorRequest) (DoctorResult, 
 	}
 	probeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	results := make(chan probeResult, 3)
+	results := make(chan probeResult, 4)
+	go func() {
+		results <- probeResult{err: b.preflightSSHKey(probeCtx, b.configForRun().Machine0.Key)}
+	}()
 	go func() {
 		version, err := b.api.Version(probeCtx)
 		results <- probeResult{version: version, err: err}
@@ -633,7 +661,7 @@ func (b *backend) Doctor(ctx context.Context, req DoctorRequest) (DoctorResult, 
 	var sizes []machineSize
 	var machines []machine
 	var probeErr error
-	for range 3 {
+	for range 4 {
 		result := <-results
 		if result.err != nil {
 			if probeErr == nil {
@@ -659,7 +687,7 @@ func (b *backend) Doctor(ctx context.Context, req DoctorRequest) (DoctorResult, 
 	if req.ProbeSSH {
 		probe = "requires_running_lease"
 	}
-	return DoctorResult{Provider: providerName, Message: fmt.Sprintf("cli=ready auth=ready control_plane=ready inventory=ready mutation=false leases=%d sizes=%d runtime=%s version=%s", len(machines), len(sizes), probe, firstLine(version))}, nil
+	return DoctorResult{Provider: providerName, Message: fmt.Sprintf("cli=ready auth=ready control_plane=ready inventory=ready ssh_key_prerequisites=checked mutation=false leases=%d sizes=%d runtime=%s version=%s", len(machines), len(sizes), probe, firstLine(version))}, nil
 }
 
 func (b *backend) SizeCatalog(ctx context.Context, _ bool) ([]core.ProviderSize, error) {

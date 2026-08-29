@@ -39,6 +39,7 @@
 - Bounded best-effort foreground lease refreshes to 20 seconds so stalled maintenance does not block SSH-backed copy and connection commands for the coordinator's full HTTP budget, while preserving claim checks and caller cancellation.
 - Restored Ubuntu ARM64 local-container browser provisioning with signed native Mozilla Firefox packages instead of Snap transition packages, while preserving working browsers and advancing past broken distro candidates. Thanks @coygeek.
 - Reported bounded, secret-safe remote Git seed failure phases and categories across ordinary sync, local Actions hydration, and native Windows, while preserving file sync and Git coherence behavior. Thanks @coygeek.
+- Made Machine0 doctor check the same SSH-key prerequisites as new creation and reject missing legacy key pairs when no default is selected, without mutating keys or blocking existing fixed-lease replay. Thanks @coygeek.
 
 ## 0.47.0 - 2026-08-28
 

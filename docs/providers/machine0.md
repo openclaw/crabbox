@@ -25,7 +25,10 @@ For non-interactive environments, Machine0 also supports
 `MACHINE0_API_TOKEN`. Authentication remains owned by Machine0: Crabbox passes
 the current process environment to the CLI but never reads, logs, or persists
 the token. `crabbox doctor --provider machine0` checks the CLI, authentication,
-inventory, and live size catalog without creating a VM.
+inventory, live size catalog, and the same SSH-key prerequisites used before
+new VM creation. It does not create VMs, upload/download keys, or change the
+account default. `ssh_key_prerequisites=checked` is not proof of successful
+guest SSH authentication; runtime remains unchecked without a running lease.
 
 ## Quick start
 
@@ -117,6 +120,15 @@ noninteractive `ssh-keygen -y` on the private file, not its `.pub` sidecar.
 Encrypted or unsupported keys, nonregular files, and missing public metadata remain unverified;
 this check does not prove that SSH authentication will succeed. Crabbox never
 changes the selected key or downloads PUBLIC private keys to repair a mismatch.
+
+When no default key is registered and no explicit key is selected, the native
+Machine0 CLI falls back to `id_rsa` and `id_rsa.pub` under `SSH_KEY_PATH` (or
+`~/.ssh`). Doctor and new creation require both to be regular files before
+allowing that path. Their presence does not prove their contents form a usable
+key pair. Doctor never invokes the native fallback, which can upload a public
+key during creation. To avoid that fallback, select an existing managed or
+PUBLIC key with `--machine0-key`. Replaying an already-owned fixed lease keeps
+its recorded key identity and does not recheck today's default-key selection.
 
 Machine0 SSH targets use a provider-isolated host-trust file under
 `<key-directory>/crabbox/machine0/known_hosts.d/`, keyed by a hash of the

@@ -35,6 +35,7 @@ type fakeAPI struct {
 	createErr              error
 	selectedKey            *machineKey
 	selectedKeyErr         error
+	noDefaultKey           bool
 	removeErr              error
 	sizes                  []machineSize
 	created                []createMachineRequest
@@ -99,8 +100,17 @@ func (f *fakeAPI) Get(ctx context.Context, name string) (machine, error) {
 	}
 	return f.machine, nil
 }
-func (f *fakeAPI) SelectedKey(context.Context, string) (*machineKey, error) {
-	return f.selectedKey, f.selectedKeyErr
+func (f *fakeAPI) SelectedKey(ctx context.Context, _ string) (*machineKey, error) {
+	if f.selectedKeyErr != nil {
+		return nil, f.selectedKeyErr
+	}
+	if err := f.waitDoctorProbe(ctx); err != nil {
+		return nil, err
+	}
+	if f.selectedKey != nil || f.noDefaultKey {
+		return f.selectedKey, nil
+	}
+	return &machineKey{Name: "ci", Type: "MANAGED"}, nil
 }
 func (f *fakeAPI) Create(ctx context.Context, req createMachineRequest) error {
 	f.created = append(f.created, req)
@@ -620,7 +630,8 @@ func TestAcquirePreservesConfiguredNativeSizeAcrossClassChanges(t *testing.T) {
 				}
 				// Exercise the real client argv, but stop at the intercepted create command.
 				runner := &recordingRunner{sequence: []runnerResponse{
-					{result: core.LocalCommandResult{Stdout: `[]`}},
+					{result: core.LocalCommandResult{Stdout: `[{"name":"ci","type":"MANAGED","isDefault":true}]`}},
+					{result: core.LocalCommandResult{Stdout: `{"name":"ci","type":"MANAGED"}`}},
 					{result: core.LocalCommandResult{Stdout: string(catalog)}},
 					{result: core.LocalCommandResult{Stdout: `[]`}},
 					{err: errors.New("create intercepted")},
@@ -633,10 +644,10 @@ func TestAcquirePreservesConfiguredNativeSizeAcrossClassChanges(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), "create intercepted") {
 					t.Fatalf("Acquire error=%v, want intercepted create", err)
 				}
-				if len(runner.calls) != 4 {
+				if len(runner.calls) != 5 {
 					t.Fatalf("calls=%#v", runner.calls)
 				}
-				args := runner.calls[3].Args
+				args := runner.calls[4].Args
 				if len(args) < 2 || args[0] != "new" {
 					t.Fatalf("create args=%q", args)
 				}
