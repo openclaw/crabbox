@@ -418,7 +418,7 @@ func (a App) pondConnect(ctx context.Context, args []string) error {
 	jsonOut := fs.Bool("json", false, "print the forward table as JSON and exit")
 	exportOnly := fs.Bool("export", false, "print shell exports for the rendered hosts and exit")
 	providerFlags := registerProviderFlags(fs, defaults)
-	if err := parseFlags(fs, args); err != nil {
+	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {

@@ -112,10 +112,13 @@ func TestPondSecretBoundaryDaemon(t *testing.T) {
 				t.Fatal(err)
 			}
 			app := App{Stdout: io.Discard, Stderr: io.Discard}
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
-			if err := app.pondConnect(ctx, []string{"--provider", provider.Name(), "--export", "boundary"}); err != nil {
+			if err := app.pondConnect(ctx, []string{"boundary", "--provider", provider.Name(), "--export"}); err != nil {
 				t.Fatal(err)
+			}
+			if ctx.Err() != nil {
+				t.Fatal("name-first --export did not detach before the startup deadline")
 			}
 			r := f.waitRecord(t)
 			t.Cleanup(func() { _, _ = stopPondMeshDaemonState(f.home, "boundary") })
