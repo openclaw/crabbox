@@ -14,8 +14,8 @@ func syncWindowsNative(ctx context.Context, target SSHTarget, repo Repo, cfg Con
 		return exit(7, "prepare remote workdir: %v", err)
 	}
 	if coherence.seedEnabled() {
-		if err := runSSHQuiet(ctx, target, windowsGitSeed(workdir, coherence)); err != nil {
-			fmt.Fprintf(stderr, "warning: remote git seed failed: %v\n", err)
+		if out, err := runSSHCombinedOutputLimit(ctx, target, windowsGitSeed(workdir, coherence), gitSeedDiagnosticLimit); err != nil {
+			warnRemoteGitSeedFailure(stderr, out, err)
 		}
 	}
 	if opts.FullResync && coherence.seedEnabled() {
@@ -118,6 +118,9 @@ func windowsGitSeed(workdir string, plan gitCoherencePlan) string {
 		return powershellCommand(`exit 0`)
 	}
 	return powershellCommand(`$ErrorActionPreference = "Stop"
+Write-Output 'crabbox-git-seed phase=prerequisite'
+Get-Command git -ErrorAction Stop | Out-Null
+Write-Output 'crabbox-git-seed phase=prepare'
 $workdir = ` + psQuote(workdir) + `
 $expectedOrigin = ` + psQuote(plan.RemoteURL) + `
 $expectedTree = ` + psQuote(plan.Tree) + `
@@ -163,15 +166,19 @@ function Repair-Origin([string]$Path) {
   if ($LASTEXITCODE -ne 0 -or ([string]$actualOrigin).Trim() -ne $expectedOrigin) { throw "Git origin verification failed" }
 }
 if (Test-UsableGitWorkspace $workdir) {
+  Write-Output 'crabbox-git-seed phase=origin'
   Repair-Origin $workdir
   exit 0
 }
 $tmp = Join-Path $parent (".seed-" + [System.Guid]::NewGuid().ToString("N"))
 try {
+  Write-Output 'crabbox-git-seed phase=clone'
   & git clone --quiet --filter=blob:none --no-checkout --single-branch --branch ` + psQuote(plan.Branch) + ` $expectedOrigin $tmp
   if ($LASTEXITCODE -ne 0) { throw "Git seed clone failed" }
+  Write-Output 'crabbox-git-seed phase=checkout'
   & git -C $tmp checkout --quiet --detach ` + psQuote(plan.Target) + `
   if ($LASTEXITCODE -ne 0) { throw "Git seed checkout failed" }
+  Write-Output 'crabbox-git-seed phase=verify'
   $seedHead = & git -C $tmp rev-parse --verify 'HEAD^{commit}' 2>$null
   if ($LASTEXITCODE -ne 0 -or ([string]$seedHead).Trim() -ne ` + psQuote(plan.Target) + `) { throw "Git seed verification failed" }
   if (-not (Test-UsableGitWorkspace $tmp)) { throw "Git seed workspace verification failed" }
@@ -179,7 +186,9 @@ try {
     $seedTree = & git -C $tmp write-tree 2>$null
     if ($LASTEXITCODE -ne 0 -or ([string]$seedTree).Trim() -ne $expectedTree) { throw "Git seed tree verification failed" }
   }
+  Write-Output 'crabbox-git-seed phase=origin'
   Repair-Origin $tmp
+  Write-Output 'crabbox-git-seed phase=publish'
   if (Test-Path -LiteralPath $workdir) {
     Remove-Item -LiteralPath $workdir -Recurse -Force
   }

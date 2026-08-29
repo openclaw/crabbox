@@ -765,6 +765,10 @@ func runSSHOutputWithRemoteWaitTimeout(ctx context.Context, target SSHTarget, re
 }
 
 func runSSHCombinedOutput(ctx context.Context, target SSHTarget, remote string) (output string, err error) {
+	return runSSHCombinedOutputLimit(ctx, target, remote, 0)
+}
+
+func runSSHCombinedOutputLimit(ctx context.Context, target SSHTarget, remote string, maxBytes int) (output string, err error) {
 	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, nil)
 	if err != nil {
 		return "", err
@@ -787,7 +791,7 @@ func runSSHCombinedOutput(ctx context.Context, target SSHTarget, remote string) 
 		// Crabbox's SSH helpers intentionally execute commands assembled by
 		// typed remote-command builders. Callers must shell-quote user data
 		// before it reaches this boundary; see remoteCommand/shellQuote tests.
-		var out synchronizedBuffer
+		out := synchronizedBuffer{limit: maxBytes}
 		err := transport.run(ctx, probe, "10", "3", &out, &out)
 		if err == nil {
 			return strings.TrimSpace(out.String()), nil
@@ -804,10 +808,14 @@ func runSSHCombinedOutput(ctx context.Context, target SSHTarget, remote string) 
 var idempotentSSHRetryDelay = 2 * time.Second
 
 func runIdempotentSSHCombinedOutput(ctx context.Context, target SSHTarget, remote string, retryDelay time.Duration) (string, error) {
+	return runIdempotentSSHCombinedOutputLimit(ctx, target, remote, retryDelay, 0)
+}
+
+func runIdempotentSSHCombinedOutputLimit(ctx context.Context, target SSHTarget, remote string, retryDelay time.Duration, maxBytes int) (string, error) {
 	var lastOut string
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		lastOut, lastErr = runSSHCombinedOutput(ctx, target, remote)
+		lastOut, lastErr = runSSHCombinedOutputLimit(ctx, target, remote, maxBytes)
 		if lastErr == nil || !shouldRetrySSHPort(lastErr) || attempt == 1 {
 			return lastOut, lastErr
 		}
@@ -986,25 +994,39 @@ func runSSHCommand(cmd *exec.Cmd, stdout, stderr io.Writer) error {
 }
 
 type synchronizedBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
+	mu        sync.Mutex
+	buf       bytes.Buffer
+	limit     int
+	truncated bool
 }
 
 func (b *synchronizedBuffer) Write(data []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.buf.Write(data)
+	n := len(data)
+	if b.limit > 0 && len(data) > b.limit-b.buf.Len() {
+		data = data[:b.limit-b.buf.Len()]
+		b.truncated = true
+	}
+	_, _ = b.buf.Write(data)
+	return n, nil
 }
 
 func (b *synchronizedBuffer) Bytes() []byte {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.truncated {
+		return nil
+	}
 	return bytes.Clone(b.buf.Bytes())
 }
 
 func (b *synchronizedBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.truncated {
+		return ""
+	}
 	return b.buf.String()
 }
 
@@ -2057,6 +2079,9 @@ func remoteGitSeed(workdir string, plan gitCoherencePlan) string {
 	}
 	parent := filepath.ToSlash(filepath.Dir(workdir))
 	script := `set -e
+printf 'crabbox-git-seed phase=prerequisite\n'
+command -v git >/dev/null 2>&1 || exit 127
+printf 'crabbox-git-seed phase=prepare\n'
 workdir=` + shellQuote(workdir) + `
 expected_origin=` + shellQuote(plan.RemoteURL) + `
 expected_tree=` + shellQuote(plan.Tree) + `
@@ -2064,6 +2089,7 @@ expected_tree=` + shellQuote(plan.Tree) + `
 if [ -d "$workdir" ]; then
   cd "$workdir"
   if usable_git_workspace; then
+    printf 'crabbox-git-seed phase=origin\n'
     repair_origin
     exit 0
   fi
@@ -2072,15 +2098,20 @@ mkdir -p ` + shellQuote(parent) + `
 tmp="$(mktemp -d ` + shellQuote(parent+"/.seed.XXXXXX") + `)"
 cleanup_seed() { rm -rf -- "$tmp"; }
 trap cleanup_seed EXIT
-git clone --quiet --filter=blob:none --no-checkout --single-branch --branch ` + shellQuote(plan.Branch) + ` "$expected_origin" "$tmp" >/dev/null 2>&1
+printf 'crabbox-git-seed phase=clone\n'
+git clone --quiet --filter=blob:none --no-checkout --single-branch --branch ` + shellQuote(plan.Branch) + ` "$expected_origin" "$tmp"
+printf 'crabbox-git-seed phase=checkout\n'
 git -C "$tmp" checkout --quiet --detach ` + shellQuote(plan.Target) + `
+printf 'crabbox-git-seed phase=verify\n'
 [ "$(git -C "$tmp" rev-parse --verify HEAD^{commit})" = ` + shellQuote(plan.Target) + ` ]
 cd "$tmp"
 usable_git_workspace
 if [ -n "$expected_tree" ]; then
   [ "$(git write-tree)" = "$expected_tree" ]
 fi
+printf 'crabbox-git-seed phase=origin\n'
 repair_origin
+printf 'crabbox-git-seed phase=publish\n'
 cd /
 rm -rf -- "$workdir"
 mv -- "$tmp" "$workdir"
