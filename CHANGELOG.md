@@ -33,6 +33,7 @@
 - Released run-owned workspace authority after static SSH one-shot cleanup so the surviving host can be reused immediately, while preserving guarded owner checks and destructive-provider cleanup ordering.
 - Preserved SIGINT and SIGQUIT behavior for kept and reused POSIX SSH workloads without weakening child ownership checks or changing caller umasks. Thanks @coygeek.
 - Omitted speculative `&&` failure diagnostics for compound shell commands while retaining simple-chain explanations and workload exit behavior. Thanks @coygeek.
+- Printed failed-run output tails once after the digest, preserving both streams, bounded output, capture notices, redaction, and failure bundles. Thanks @coygeek.
 
 ## 0.47.0 - 2026-08-28
 

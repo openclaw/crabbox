@@ -249,7 +249,7 @@ type runFailureDigestInput struct {
 	Results               *TestResultSummary
 }
 
-func printRunFailureDigest(w io.Writer, input runFailureDigestInput, stdoutTail, stderrTail *streamTailBuffer, stdoutCapture, stderrCapture string) {
+func printRunFailureDigest(w io.Writer, input runFailureDigestInput) {
 	if w == nil {
 		return
 	}
@@ -277,10 +277,6 @@ func printRunFailureDigest(w io.Writer, input runFailureDigestInput, stdoutTail,
 	printFailureDigestResults(w, input.Results)
 	for _, command := range failureDigestNextCommands(input, retry) {
 		fmt.Fprintf(w, "  next: %s\n", command)
-	}
-	printFailureDigestTail(w, "stderr", stderrTail, stderrCapture)
-	if stderrCapture != "" || tailLineCount(stderrTail) == 0 {
-		printFailureDigestTail(w, "stdout", stdoutTail, stdoutCapture)
 	}
 }
 
@@ -567,37 +563,4 @@ func fallbackFailureDigestRouting(input runFailureDigestInput, purpose CommandRo
 func canSuggestRunRetry(commandDisplay string) bool {
 	commandDisplay = strings.TrimSpace(commandDisplay)
 	return commandDisplay != "" && !strings.HasPrefix(commandDisplay, "--script")
-}
-
-func printFailureDigestTail(w io.Writer, label string, tail *streamTailBuffer, capturedPath string) {
-	if capturedPath != "" {
-		fmt.Fprintf(w, "  tail %s: captured at %s\n", label, capturedPath)
-		return
-	}
-	if tail == nil {
-		return
-	}
-	lines := tail.Lines()
-	if len(lines) == 0 {
-		return
-	}
-	if len(lines) > 8 {
-		lines = lines[len(lines)-8:]
-	}
-	text := strings.Join(lines, "\n")
-	if redacted, ok := RedactKnownFailureBody(text); ok {
-		fmt.Fprintf(w, "  tail %s: %s\n", label, redacted)
-		return
-	}
-	fmt.Fprintf(w, "  tail %s:\n", label)
-	for _, line := range lines {
-		fmt.Fprintf(w, "    %s\n", line)
-	}
-}
-
-func tailLineCount(tail *streamTailBuffer) int {
-	if tail == nil {
-		return 0
-	}
-	return len(tail.Lines())
 }
