@@ -52,12 +52,14 @@ func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFi
 		return exit(2, "--pool-cache-compatibility must not be empty")
 	}
 	var poolIdentity *CoordinatorReadyPoolIdentityV1
+	var poolIdentityErr error
 	if typedIdentityFile {
 		identity, identityErr := loadReadyPoolIdentity(*poolIdentityFile)
 		if identityErr != nil {
-			return identityErr
+			poolIdentityErr = identityErr
+		} else {
+			poolIdentity = &identity
 		}
-		poolIdentity = &identity
 	}
 	_ = reclaim
 	requestedSlug, err := requestedLeaseSlug(*leaseFlags.Slug)
@@ -111,6 +113,9 @@ func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFi
 		if err := admitPrewarmHydration(cfg, followupArgs); err != nil {
 			return err
 		}
+	}
+	if poolIdentityErr != nil {
+		return poolIdentityErr
 	}
 	backend, err := loadBackend(cfg, runtimeForApp(a))
 	if err != nil {
