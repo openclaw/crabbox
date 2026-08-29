@@ -30,7 +30,7 @@ import (
 const (
 	webVNCDaemonPortReservationEnv   = "CRABBOX_WEBVNC_PORT_RESERVATION"
 	webVNCDaemonPortReservationFDEnv = "CRABBOX_WEBVNC_PORT_RESERVATION_FD"
-	webVNCDaemonCredentialMaxBytes   = 4 << 10
+	webVNCDaemonCredentialMaxBytes   = credentialInputMaxBytes
 	webVNCDaemonCredentialStdinFlag  = "internal-external-desktop-password-stdin"
 )
 
@@ -1903,18 +1903,17 @@ func writeWebVNCDaemonSupervisorGate(w io.Writer, credential string) error {
 }
 
 func readWebVNCDaemonCredentialStdin(r io.Reader) (string, error) {
-	data, err := io.ReadAll(io.LimitReader(r, webVNCDaemonCredentialMaxBytes+1))
-	if err != nil {
+	value, err := readCredentialInput(r)
+	switch err {
+	case errCredentialInputTooLarge:
+		return "", exit(2, "external desktop credential exceeds %d bytes", webVNCDaemonCredentialMaxBytes)
+	case errCredentialInputEmpty:
+		return "", exit(2, "external desktop credential is empty")
+	case nil:
+		return value, nil
+	default:
 		return "", exit(2, "read external desktop credential: %v", err)
 	}
-	if len(data) > webVNCDaemonCredentialMaxBytes {
-		return "", exit(2, "external desktop credential exceeds %d bytes", webVNCDaemonCredentialMaxBytes)
-	}
-	value := string(data)
-	if strings.TrimSpace(value) == "" {
-		return "", exit(2, "external desktop credential is empty")
-	}
-	return value, nil
 }
 
 func readWebVNCDaemonSupervisorGate(r io.Reader) (string, error) {

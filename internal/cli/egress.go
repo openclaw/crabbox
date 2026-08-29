@@ -38,6 +38,8 @@ const (
 	egressRemoteReadyWait   = 5 * time.Second
 	egressDaemonRestartWait = 1 * time.Second
 	egressDaemonFatalCode   = 4
+	egressTicketStdinArg    = "--internal-ticket-stdin"
+	egressTicketChildArg    = "--internal-ticket-child"
 )
 
 type egressProxyMessage struct {
@@ -148,6 +150,13 @@ func (a App) egressHostWithConnectHook(ctx context.Context, args []string, onCon
 }
 
 func (a App) egressClient(ctx context.Context, args []string) error {
+	// This positional dispatch token is private, never a registered CLI flag.
+	// Keep "egress client" intact for the existing remote cleanup identity.
+	bootstrap := len(args) > 0 && args[0] == egressTicketStdinArg
+	stdinTicket := bootstrap || (len(args) > 0 && args[0] == egressTicketChildArg)
+	if stdinTicket {
+		args = args[1:]
+	}
 	defaults := defaultConfig()
 	fs := newFlagSet("egress client", a.Stderr)
 	provider := registerProviderSelectionFlag(fs, defaults, "provider: hetzner or aws")
@@ -159,12 +168,28 @@ func (a App) egressClient(ctx context.Context, args []string) error {
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
+	if stdinTicket {
+		if flagWasSet(fs, "ticket") {
+			return exit(2, "internal egress ticket input cannot be combined with --ticket")
+		}
+		if fs.NArg() != 0 {
+			return exit(2, "unexpected positional arguments for internal egress ticket input")
+		}
+		value, err := readEgressTicketStdin(a.input())
+		if err != nil {
+			return err
+		}
+		*ticket = value
+	}
 	setIDFromFirstArg(fs, id)
 	if *id == "" {
 		return exit(2, "usage: crabbox egress client --id <lease-id-or-slug> [--listen 127.0.0.1:3128]")
 	}
 	if err := validateEgressListen(*listen); err != nil {
 		return err
+	}
+	if bootstrap {
+		return a.startEgressClientProcess(args, *ticket)
 	}
 	coord, leaseID, err := a.egressCoordinatorAndLease(ctx, *provider, *coordinatorURL, *id, *ticket)
 	if err != nil {
@@ -183,6 +208,97 @@ func (a App) egressClient(ctx context.Context, args []string) error {
 		return exit(egressDaemonFatalCode, "egress session replaced: %v", err)
 	}
 	return err
+}
+
+func readEgressTicketStdin(r io.Reader) (string, error) {
+	value, err := readCredentialInput(r)
+	if closer, ok := r.(io.Closer); ok {
+		if closeErr := closer.Close(); closeErr != nil {
+			return "", exit(2, "close egress ticket input failed")
+		}
+	}
+	switch err {
+	case errCredentialInputTooLarge:
+		return "", exit(2, "egress ticket input exceeds %d bytes", credentialInputMaxBytes)
+	case errCredentialInputEmpty:
+		return "", exit(2, "egress ticket input is empty")
+	case nil:
+	default:
+		// Reader errors can contain input bytes. Never echo them into helper logs.
+		return "", exit(2, "read egress ticket input failed")
+	}
+	if len(value) != len("egress_")+32 || !strings.HasPrefix(value, "egress_") || strings.Trim(value[len("egress_"):], "0123456789abcdef") != "" {
+		return "", exit(2, "malformed egress ticket input")
+	}
+	return value, nil
+}
+
+func (a App) startEgressClientProcess(args []string, ticket string) error {
+	// The remote shell already opened the existing log. Only pass file handles:
+	// detached children must not depend on os/exec copy goroutines or SSH pipes.
+	logs := make([]*os.File, 0, 2)
+	for _, output := range []io.Writer{a.Stdout, a.Stderr} {
+		file, ok := output.(*os.File)
+		if !ok {
+			return exit(2, "egress client bootstrap requires regular log files")
+		}
+		info, err := file.Stat()
+		if err != nil || !info.Mode().IsRegular() {
+			return exit(2, "egress client bootstrap requires regular log files")
+		}
+		logs = append(logs, file)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return exit(2, "resolve egress client executable failed")
+	}
+	cmd := exec.Command(exe, append([]string{"egress", "client", egressTicketChildArg}, args...)...)
+	cmd.Stdout, cmd.Stderr = logs[0], logs[1]
+	return launchEgressClientProcess(cmd, ticket)
+}
+
+func launchEgressClientProcess(cmd *exec.Cmd, ticket string) error {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		return exit(2, "create egress client input pipe failed")
+	}
+	defer reader.Close()
+	defer writer.Close()
+	cmd.Stdin = reader
+	configureDaemonCommand(cmd)
+	if err := cmd.Start(); err != nil {
+		return exit(5, "start detached egress client failed")
+	}
+	if err := reader.Close(); err != nil {
+		_ = stopDaemonProcess(cmd.Process, cmd.Process.Pid)
+		_ = cmd.Wait()
+		return exit(5, "close egress client input reader failed")
+	}
+	return completeEgressClientLaunch(cmd, writer, ticket)
+}
+
+func completeEgressClientLaunch(cmd *exec.Cmd, input io.WriteCloser, ticket string) (err error) {
+	pid := cmd.Process.Pid
+	defer func() {
+		_ = input.Close()
+		if err != nil {
+			// Kill and reap even if EOF has already let the bridge start.
+			if stopErr := stopDaemonProcess(cmd.Process, pid); stopErr != nil {
+				err = errors.Join(err, exit(5, "cleanup detached egress client failed"))
+			}
+			_ = cmd.Wait()
+		}
+	}()
+	if n, writeErr := io.WriteString(input, ticket); writeErr != nil || n != len(ticket) {
+		return exit(5, "write egress client ticket input failed")
+	}
+	if err := input.Close(); err != nil {
+		return exit(5, "close egress client ticket input failed")
+	}
+	if err := cmd.Process.Release(); err != nil {
+		return exit(5, "release detached egress client failed")
+	}
+	return nil
 }
 
 func (a App) egressStart(ctx context.Context, args []string) error {
@@ -253,8 +369,8 @@ func (a App) egressStart(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	remote := remoteEgressClientCommand(coord.BaseURL, leaseID, clientTicket.Ticket, sessionID, *listen)
-	if err := runSSHQuiet(ctx, target, remote); err != nil {
+	remote := remoteEgressClientCommand(coord.BaseURL, leaseID, sessionID, *listen)
+	if err := runSSHInputQuiet(ctx, target, remote, clientTicket.Ticket); err != nil {
 		return exit(5, "start remote egress client: %v", err)
 	}
 	if err := waitRemoteEgressClient(ctx, target, *listen); err != nil {
@@ -1341,19 +1457,21 @@ func scpBaseArgs(target SSHTarget) []string {
 	return args
 }
 
-func remoteEgressClientCommand(coordinatorURL, leaseID, ticket, sessionID, listen string) string {
+func remoteEgressClientCommand(coordinatorURL, leaseID, sessionID, listen string) string {
 	args := []string{
 		egressRemoteBinary,
 		"egress",
 		"client",
+		egressTicketStdinArg,
 		"--coordinator", coordinatorURL,
 		"--id", leaseID,
-		"--ticket", ticket,
 		"--session", sessionID,
 		"--listen", listen,
 	}
 	var b strings.Builder
 	b.WriteString(remoteStopEgressClientCommand() + "\n")
+	// Stay foreground until Go has consumed SSH input and handed it to the
+	// detached client. sshd may discard undelivered input when its child exits.
 	b.WriteString("nohup ")
 	for i, arg := range args {
 		if i > 0 {
@@ -1361,7 +1479,7 @@ func remoteEgressClientCommand(coordinatorURL, leaseID, ticket, sessionID, liste
 		}
 		b.WriteString(shellQuote(arg))
 	}
-	b.WriteString(" >" + shellQuote(egressRemoteLog) + " 2>&1 < /dev/null &\n")
+	b.WriteString(" >" + shellQuote(egressRemoteLog) + " 2>&1\n")
 	return b.String()
 }
 

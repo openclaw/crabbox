@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Kept automatic egress client tickets off SSH, remote shell, and helper process arguments with a foreground bounded-input handoff to the detached client, preventing SSH teardown from truncating ticket delivery.
 - Repaired Machine0 UUID lookups through validated inventory and identity-verified full details by name, preserving UUID ownership and rejecting incomplete or changed identities.
 - Validated generated prewarm probes through the provider's run contract before backend configuration, ready-pool checks, or ACL changes, preserving follow-up routing and reuse intent.
 - Rejected Blacksmith Testbox `--no-sync` with exit 2 before acquisition or reuse instead of silently delegating sync, including nonblank `prewarm --probe-command` and named jobs with `noSync: true` before warmup or dry-run planning.
