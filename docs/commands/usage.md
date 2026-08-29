@@ -113,16 +113,17 @@ Explicit overrides are useful for budget policy or conservative accounting:
 
 ```sh
 export CRABBOX_COST_RATES_JSON='{
-  "aws": {
-    "c7a.48xlarge": 2.25
-  },
-  "hetzner": {
-    "ccx63": 0.44
-  }
+  "aws:c7a.48xlarge": 2.25,
+  "hetzner:ccx63": 0.44
 }'
 ```
 
 Hetzner prices are returned in EUR. The broker converts them to USD using `CRABBOX_EUR_TO_USD` (default `1.08`).
+
+Optional live pricing requests stop after five seconds, including response-body
+reads, and use the existing fallback rates on failure. This deadline applies only
+to pricing HTTP requests; Node AWS credential resolution keeps its existing SDK
+ownership.
 
 ## Limits
 

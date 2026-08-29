@@ -80,6 +80,15 @@ hourly USD number; non-positive or non-numeric entries are ignored. Hetzner live
 are quoted in EUR and converted to USD by multiplying with `CRABBOX_EUR_TO_USD`
 (default `1.08`).
 
+Optional AWS and Hetzner pricing requests have a five-second deadline, including
+response-body reads. A timeout aborts that request and uses the existing fallback
+rate. Pricing cannot leave admission or activation waiting indefinitely for HTTP;
+capacity provisioning keeps its existing deadlines.
+AWS pricing makes one signed attempt and keeps its identity check separate from
+other provider operations. On Node coordinators, credential resolution still
+belongs to the AWS SDK credential chain; an expired quote starts no HTTP request
+after that chain returns.
+
 ## Budget guardrails
 
 Budgets are enforced on lease creation. Exceeding any active-lease limit or monthly

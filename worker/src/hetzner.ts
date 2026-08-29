@@ -15,6 +15,7 @@ import {
   sshPublicKeyIdentity,
 } from "./provider-key";
 import { leaseProviderLabels, providerLabelValue } from "./provider-labels";
+import { withPricingDeadline } from "./provider-pricing";
 import { leaseProviderName } from "./slug";
 import type { Env, HetznerSSHKey, HetznerServer, ProviderMachine } from "./types";
 
@@ -243,19 +244,20 @@ export class HetznerClient {
   }
 
   async hourlyPriceUSD(name: string, location: string): Promise<number | undefined> {
-    const response = await this.request<HetznerListServerTypesResponse>(
-      "GET",
-      `/server_types?${new URLSearchParams({ per_page: "100" })}`,
-    );
-    const serverType = response.server_types.find((candidate) => candidate.name === name);
-    const price =
-      serverType?.prices.find((candidate) => candidate.location === location) ??
-      serverType?.prices[0];
-    const hourlyEUR = positiveFloat(price?.price_hourly.gross ?? price?.price_hourly.net ?? "");
-    if (hourlyEUR === undefined) {
-      return undefined;
-    }
-    return roundUSD(hourlyEUR * eurToUSD(this.env));
+    return await withPricingDeadline(async (signal) => {
+      const response = await this.request<HetznerListServerTypesResponse>(
+        "GET",
+        `/server_types?${new URLSearchParams({ per_page: "100" })}`,
+        undefined,
+        signal,
+      );
+      const serverType = response.server_types.find((candidate) => candidate.name === name);
+      const price =
+        serverType?.prices.find((candidate) => candidate.location === location) ??
+        serverType?.prices[0];
+      const hourlyEUR = positiveFloat(price?.price_hourly.gross ?? price?.price_hourly.net ?? "");
+      return hourlyEUR === undefined ? undefined : roundUSD(hourlyEUR * eurToUSD(this.env));
+    });
   }
 
   async createServerWithFallback(
@@ -443,9 +445,15 @@ export class HetznerClient {
     return keys;
   }
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    signal?: AbortSignal,
+  ): Promise<T> {
     const init: RequestInit = {
       method,
+      ...(signal ? { signal } : {}),
       headers: {
         authorization: `Bearer ${this.token}`,
         "content-type": "application/json",

@@ -24,6 +24,7 @@ import {
   sshPublicKeyIdentity,
 } from "./provider-key";
 import { leaseProviderLabels } from "./provider-labels";
+import { withPricingDeadline } from "./provider-pricing";
 import { leaseProviderName } from "./slug";
 import type {
   AWSCredentialProvider,
@@ -259,10 +260,13 @@ class RefreshingAWSFetchClient implements AWSFetchClient {
     private readonly credentials: AWSCredentialProvider,
     private readonly service: string,
     private readonly region: string,
+    private readonly signal?: AbortSignal,
   ) {}
 
   async fetch(input: string, init?: RequestInit): Promise<Response> {
+    this.signal?.throwIfAborted();
     const credentials = await this.credentials();
+    this.signal?.throwIfAborted();
     const accessKeyId = credentials.accessKeyId?.trim();
     const secretAccessKey = credentials.secretAccessKey?.trim();
     if (!accessKeyId || !secretAccessKey) {
@@ -273,12 +277,16 @@ class RefreshingAWSFetchClient implements AWSFetchClient {
       secretAccessKey,
       service: this.service,
       region: this.region,
+      ...(this.signal ? { retries: 0 } : {}),
     };
     const session = credentials.sessionToken?.trim();
     if (session) {
       options.sessionToken = session;
     }
-    return await new AwsClient(options).fetch(input, init);
+    return await new AwsClient(options).fetch(input, {
+      ...init,
+      ...(this.signal ? { signal: this.signal } : {}),
+    });
   }
 }
 
@@ -596,6 +604,7 @@ export class EC2SpotClient {
   constructor(
     private readonly env: Env,
     region: string,
+    requestSignal?: AbortSignal,
   ) {
     this.region = requireAWSRegion(region || env.CRABBOX_AWS_REGION || "eu-west-1");
     const expected = awsExpectedIdentityConfig(env);
@@ -609,10 +618,15 @@ export class EC2SpotClient {
     this.serviceQuotasEndpoint = `https://servicequotas.${this.region}.amazonaws.com/`;
     this.stsEndpoint = `https://sts.${this.region}.amazonaws.com/`;
     this.ssmEndpoint = `https://ssm.${this.region}.amazonaws.com/`;
-    this.aws = new RefreshingAWSFetchClient(credentials, "ec2", this.region);
-    this.serviceQuotas = new RefreshingAWSFetchClient(credentials, "servicequotas", this.region);
-    this.stsClient = new RefreshingAWSFetchClient(credentials, "sts", this.region);
-    this.ssmClient = new RefreshingAWSFetchClient(credentials, "ssm", this.region);
+    this.aws = new RefreshingAWSFetchClient(credentials, "ec2", this.region, requestSignal);
+    this.serviceQuotas = new RefreshingAWSFetchClient(
+      credentials,
+      "servicequotas",
+      this.region,
+      requestSignal,
+    );
+    this.stsClient = new RefreshingAWSFetchClient(credentials, "sts", this.region, requestSignal);
+    this.ssmClient = new RefreshingAWSFetchClient(credentials, "ssm", this.region, requestSignal);
   }
 
   async capacityReadinessChecks(config: LeaseConfig): Promise<AWSCapacityReadinessCheck[]> {
@@ -1275,14 +1289,19 @@ export class EC2SpotClient {
   }
 
   async hourlySpotPriceUSD(instanceType: string): Promise<number | undefined> {
-    const root = await this.ec2("DescribeSpotPriceHistory", {
-      "InstanceType.1": instanceType,
-      MaxResults: "1",
-      "ProductDescription.1": "Linux/UNIX",
-      StartTime: new Date().toISOString(),
+    return await withPricingDeadline(async (signal) => {
+      // The quote owns its identity check; its deadline must not abort another
+      // operation's cached verification or inherit aws4fetch retry backoff.
+      const client = new EC2SpotClient(this.env, this.region, signal);
+      const root = await client.ec2("DescribeSpotPriceHistory", {
+        "InstanceType.1": instanceType,
+        MaxResults: "1",
+        "ProductDescription.1": "Linux/UNIX",
+        StartTime: new Date().toISOString(),
+      });
+      const item = items(record(root["spotPriceHistorySet"])["item"])[0];
+      return positiveFloat(asString(record(item)["spotPrice"]));
     });
-    const item = items(record(root["spotPriceHistorySet"])["item"])[0];
-    return positiveFloat(asString(record(item)["spotPrice"]));
   }
 
   async deleteServer(instanceID: string): Promise<void> {
