@@ -10,6 +10,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type e2bFlagValues struct {
@@ -110,164 +111,78 @@ func (b *e2bBackend) Warmup(ctx context.Context, req WarmupRequest) error {
 }
 
 func (b *e2bBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
-	if err := rejectE2BSyncOptions(req); err != nil {
-		return RunResult{}, err
-	}
-	processUser, err := e2bProcessUser(b.cfg.E2B.User)
-	if err != nil {
-		return RunResult{}, err
-	}
-	started := b.now()
-	client, err := newE2BClient(b.cfg, b.rt)
-	if err != nil {
-		return RunResult{}, err
-	}
-	var prepared *core.PreparedArchive
-	if req.ID == "" && !req.NoSync {
-		prepared, err = core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
-			Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-			TempPattern: "crabbox-e2b-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
-		})
-		if err != nil {
-			return RunResult{}, err
-		}
-		defer prepared.Close()
-	}
-	leaseID, sandboxID, slug := "", "", ""
-	acquired := false
-	if req.ID == "" {
-		var sandbox e2bSandbox
-		leaseID, sandbox, slug, err = b.createSandbox(ctx, client, req.Repo, req.Keep, req.Reclaim, req.RequestedSlug)
-		if err != nil {
-			return RunResult{}, err
-		}
-		sandboxID = sandbox.SandboxID
-		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=e2b sandbox=%s\n", leaseID, slug, sandboxID)
-		acquired = true
-	} else {
-		leaseID, sandboxID, slug, err = b.resolveSandboxID(ctx, client, req.ID, req.Repo.Root, req.Reclaim)
-		if err != nil {
-			return RunResult{}, err
-		}
-	}
-	shouldStop := acquired && !req.Keep
-	if shouldStop {
-		defer func() {
-			if !shouldStop {
-				return
-			}
-			if err := b.deleteClaimedSandboxForCleanup(client, leaseID, sandboxID); err != nil {
-				fmt.Fprintf(b.rt.Stderr, "warning: e2b stop failed for %s: %v\n", sandboxID, err)
-			}
-		}()
-	}
-	result := RunResult{
-		SyncDelegated: true,
-		Session: &RunSessionHandle{
-			Provider:       e2bProvider,
-			LeaseID:        leaseID,
-			Slug:           slug,
-			Reused:         !acquired,
-			Kept:           !shouldStop,
-			CleanupCommand: e2bCleanupCommand(leaseID),
-		},
-	}
-	finishResult := func() RunResult {
-		result.Total = b.now().Sub(started)
-		result.Session.Kept = !shouldStop
-		return result
-	}
-
-	session, err := client.ConnectSandbox(ctx, sandboxID, e2bTimeoutSeconds(b.cfg.TTL))
-	if err != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, e2bProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return finishResult(), e2bError("connect sandbox", err)
-	}
+	var processUser string
 	workspace := e2bWorkspacePath(b.cfg)
-	syncDuration := time.Duration(0)
-	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
-	if !req.NoSync {
-		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, session, req, workspace, prepared)
-		if err != nil {
-			handleDelegatedRunFailure(b.rt.Stderr, req, e2bProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-			return finishResult(), err
-		}
-		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
-	} else if err := b.prepareWorkspace(ctx, client, session, workspace); err != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, e2bProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return finishResult(), err
+	var client e2bAPI
+	var session e2bSession
+	var leaseID, sandboxID, slug string
+	handle := func() shared.DelegatedSandbox {
+		return shared.DelegatedSandbox{LeaseID: leaseID, Slug: slug, CleanupCommand: e2bCleanupCommand(leaseID)}
 	}
-	if req.SyncOnly {
-		result := finishResult()
-		fmt.Fprintf(b.rt.Stdout, "synced %s\n", workspace)
-		if req.TimingJSON {
-			err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
-				Provider:      e2bProvider,
-				LeaseID:       leaseID,
-				Slug:          slug,
-				SyncDelegated: true,
-				SyncMs:        syncDuration.Milliseconds(),
-				SyncPhases:    syncPhases,
-				SyncSkipped:   req.NoSync,
-				TotalMs:       result.Total.Milliseconds(),
-				ExitCode:      0,
-				Label:         strings.TrimSpace(req.Label),
-			}, result, nil))
-			return result, err
-		}
-		return result, nil
-	}
-	command := e2bCommandString(req.Command, req.ShellMode)
-	if command == "" {
-		return finishResult(), exit(2, "missing command")
-	}
-	commandStarted := b.now()
-	fmt.Fprintf(b.rt.Stderr, "running on e2b %s\n", strings.Join(req.Command, " "))
-	exitCode, commandErr := client.StartProcess(ctx, session, e2bProcessRequest{
-		Command: command,
-		CWD:     workspace,
-		Env:     req.Env,
-		User:    processUser,
-		Timeout: e2bTimeoutDuration(b.cfg.TTL),
-		Stdout:  b.rt.Stdout,
-		Stderr:  b.rt.Stderr,
+	return shared.RunDelegatedSandbox(ctx, req, shared.DelegatedSandboxLifecycle{
+		Provider: e2bProvider, Runtime: b.rt, Workdir: workspace,
+		IdleTimeout: b.cfg.IdleTimeout, TTL: b.cfg.TTL, CleanupTimeout: e2bCleanupTimeout,
+		Preflight: func(context.Context) error {
+			if err := rejectE2BSyncOptions(req); err != nil {
+				return err
+			}
+			var err error
+			processUser, err = e2bProcessUser(b.cfg.E2B.User)
+			if err != nil {
+				return err
+			}
+			client, err = newE2BClient(b.cfg, b.rt)
+			return err
+		},
+		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
+			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
+				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
+				TempPattern: "crabbox-e2b-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
+			})
+		},
+		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			var sandbox e2bSandbox
+			var err error
+			leaseID, sandbox, slug, err = b.createSandbox(ctx, client, req.Repo, req.Keep, req.Reclaim, req.RequestedSlug)
+			sandboxID = sandbox.SandboxID
+			if err == nil {
+				fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=e2b sandbox=%s\n", leaseID, slug, sandboxID)
+			}
+			return handle(), err
+		},
+		Resolve: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			var err error
+			leaseID, sandboxID, slug, err = b.resolveSandboxID(ctx, client, req.ID, req.Repo.Root, req.Reclaim)
+			return handle(), err
+		},
+		Setup: func(ctx context.Context) error {
+			var err error
+			session, err = client.ConnectSandbox(ctx, sandboxID, e2bTimeoutSeconds(b.cfg.TTL))
+			return e2bError("connect sandbox", err)
+		},
+		Sync: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+			return b.syncWorkspace(ctx, client, session, req, workspace, prepared)
+		},
+		NoSync: func(ctx context.Context) error {
+			return b.prepareWorkspace(ctx, client, session, workspace)
+		},
+		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
+			command := e2bCommandString(req.Command, req.ShellMode)
+			if command == "" {
+				return shared.DelegatedSandboxCommand{}, exit(2, "missing command")
+			}
+			return shared.DelegatedSandboxCommand{Run: func(ctx context.Context) (int, error) {
+				fmt.Fprintf(b.rt.Stderr, "running on e2b %s\n", strings.Join(req.Command, " "))
+				return client.StartProcess(ctx, session, e2bProcessRequest{
+					Command: command, CWD: workspace, Env: req.Env, User: processUser,
+					Timeout: e2bTimeoutDuration(b.cfg.TTL), Stdout: b.rt.Stdout, Stderr: b.rt.Stderr,
+				})
+			}}, nil
+		},
+		Cleanup: func(ctx context.Context) error {
+			return b.deleteClaimedSandbox(ctx, client, leaseID, sandboxID)
+		},
 	})
-	commandDuration := b.now().Sub(commandStarted)
-	result.ExitCode = exitCode
-	result.Command = commandDuration
-	result.Total = b.now().Sub(started)
-	result.Session.Kept = !shouldStop
-	if req.NoSync {
-		fmt.Fprintf(b.rt.Stderr, "e2b run summary sync_skipped=true command=%s total=%s exit=%d\n", result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
-	} else {
-		fmt.Fprintf(b.rt.Stderr, "e2b run summary sync=%s command=%s total=%s exit=%d\n", syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
-	}
-	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
-			Provider:      e2bProvider,
-			LeaseID:       leaseID,
-			Slug:          slug,
-			SyncDelegated: true,
-			SyncMs:        syncDuration.Milliseconds(),
-			SyncPhases:    syncPhases,
-			SyncSkipped:   req.NoSync,
-			CommandMs:     commandDuration.Milliseconds(),
-			TotalMs:       result.Total.Milliseconds(),
-			ExitCode:      result.ExitCode,
-			Label:         strings.TrimSpace(req.Label),
-		}, result, commandErr)); err != nil {
-			return result, err
-		}
-	}
-	if commandErr != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, e2bProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return finishResult(), ExitError{Code: 1, Message: fmt.Sprintf("e2b run failed: %v", commandErr)}
-	}
-	if result.ExitCode != 0 {
-		handleDelegatedRunFailure(b.rt.Stderr, req, e2bProvider, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		return finishResult(), ExitError{Code: result.ExitCode, Message: fmt.Sprintf("e2b run exited %d", result.ExitCode)}
-	}
-	return finishResult(), nil
 }
 
 func (b *e2bBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
@@ -509,12 +424,6 @@ func (b *e2bBackend) deleteSandboxForCleanup(client e2bAPI, sandboxID string) er
 	ctx, cancel := context.WithTimeout(context.Background(), e2bCleanupTimeout)
 	defer cancel()
 	return client.DeleteSandbox(ctx, sandboxID)
-}
-
-func (b *e2bBackend) deleteClaimedSandboxForCleanup(client e2bAPI, leaseID, sandboxID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), e2bCleanupTimeout)
-	defer cancel()
-	return b.deleteClaimedSandbox(ctx, client, leaseID, sandboxID)
 }
 
 func e2bCleanupCommand(leaseID string) string {

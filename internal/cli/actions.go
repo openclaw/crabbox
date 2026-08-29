@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net/url"
@@ -34,14 +35,38 @@ func (r GitHubRepo) Slug() string {
 	return r.Owner + "/" + r.Name
 }
 
+type actionsHydrateTargetFlags struct {
+	provider      *string
+	providerFlags providerFlagValues
+	target        targetFlagValues
+	network       networkModeFlagValues
+}
+
+func registerActionsHydrateTargetFlags(fs *flag.FlagSet, defaults Config) actionsHydrateTargetFlags {
+	return actionsHydrateTargetFlags{
+		provider:      registerProviderSelectionFlag(fs, defaults, providerHelpAll()),
+		providerFlags: registerProviderFlags(fs, defaults),
+		target:        registerTargetFlags(fs, defaults),
+		network:       registerNetworkModeFlag(fs, defaults),
+	}
+}
+
+func (f actionsHydrateTargetFlags) loadConfig(fs *flag.FlagSet, leaseID string) (Config, error) {
+	cfg, err := loadLeaseTargetConfig(fs, *f.provider, f.target, f.network, leaseTargetConfigOptions{LeaseID: leaseID})
+	if err != nil {
+		return Config{}, err
+	}
+	if err := applyProviderFlags(&cfg, fs, f.providerFlags); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
 func (a App) actionsHydrate(ctx context.Context, args []string) (err error) {
 	started := time.Now()
 	defaults := defaultConfig()
 	fs := newFlagSet("actions hydrate", a.Stderr)
-	provider := registerProviderSelectionFlag(fs, defaults, providerHelpAll())
-	providerFlags := registerProviderFlags(fs, defaults)
-	targetFlags := registerTargetFlags(fs, defaults)
-	networkFlags := registerNetworkModeFlag(fs, defaults)
+	connectionFlags := registerActionsHydrateTargetFlags(fs, defaults)
 	leaseIDFlag := fs.String("id", "", "existing lease id or slug")
 	repoFlag := fs.String("repo", "", "GitHub repository owner/name")
 	workflowFlag := fs.String("workflow", "", "workflow file/name/id")
@@ -61,7 +86,7 @@ func (a App) actionsHydrate(ctx context.Context, args []string) (err error) {
 	if *leaseIDFlag == "" {
 		return exit(2, "actions hydrate requires --id")
 	}
-	if skipped, skippedID, err := shouldSkipBlacksmithActionsHydrate(*leaseIDFlag, *provider); err != nil {
+	if skipped, skippedID, err := shouldSkipBlacksmithActionsHydrate(*leaseIDFlag, *connectionFlags.provider); err != nil {
 		return err
 	} else if skipped {
 		fmt.Fprintf(a.Stdout, "actions hydrate skipped id=%s provider=blacksmith-testbox reason=provider-owned\n", skippedID)
@@ -79,11 +104,8 @@ func (a App) actionsHydrate(ctx context.Context, args []string) (err error) {
 		}
 		return nil
 	}
-	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *leaseIDFlag})
+	cfg, err := connectionFlags.loadConfig(fs, *leaseIDFlag)
 	if err != nil {
-		return err
-	}
-	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
 	repo, err := findRepo()

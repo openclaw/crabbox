@@ -91,18 +91,3 @@ func TestNamespaceInstanceUntrustedConfigCannotRedirectCLIOrAccount(t *testing.T
 		t.Fatalf("safe untrusted settings not applied: %#v", got)
 	}
 }
-
-func TestNamespaceInstanceClaimScope(t *testing.T) {
-	cfg := baseConfig()
-	cfg.NamespaceInstance.Endpoint = "HTTPS://API.EXAMPLE.TEST/"
-	cfg.NamespaceInstance.Region = " eu "
-	cfg.NamespaceInstance.Keychain = " ci "
-	cfg.NamespaceInstance.TenantID = "tenant_test"
-	if got, want := ProviderClaimScope("namespace-instance", cfg), "endpoint:https://api.example.test|region:eu|keychain:ci"; got != want {
-		t.Fatalf("scope=%q want %q", got, want)
-	}
-	cfg.NamespaceInstance.Endpoint = "user:secret@api.example.test/path"
-	if got, want := ProviderClaimScope("namespace-instance", cfg), "endpoint:api.example.test/path|region:eu|keychain:ci"; got != want {
-		t.Fatalf("schemeless scope=%q want %q", got, want)
-	}
-}

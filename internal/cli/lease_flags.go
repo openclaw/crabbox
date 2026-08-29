@@ -135,6 +135,16 @@ func autoRouteLeaseProviderForIdentifier(cfg *Config, fs *flag.FlagSet, identifi
 }
 
 func applyLeaseCreateFlagsForLeaseMode(cfg *Config, fs *flag.FlagSet, values leaseCreateFlagValues, existingLeaseID string, mutateExternal bool) error {
+	return applyLeaseCreateFlagsForTarget(cfg, fs, values, leaseFlagTarget{ID: existingLeaseID, Reuse: existingLeaseID != ""}, mutateExternal)
+}
+
+// Reuse with no ID projects a future follow-up without consulting lease claims.
+type leaseFlagTarget struct {
+	ID    string
+	Reuse bool
+}
+
+func applyLeaseCreateFlagsForTarget(cfg *Config, fs *flag.FlagSet, values leaseCreateFlagValues, target leaseFlagTarget, mutateExternal bool) error {
 	cfg.Provider = *values.Provider
 	prepareProviderDefaults(cfg)
 	cfg.Profile = *values.Profile
@@ -194,7 +204,8 @@ func applyLeaseCreateFlagsForLeaseMode(cfg *Config, fs *flag.FlagSet, values lea
 	if err := applyTargetFlagOverrides(cfg, fs, values.Target); err != nil {
 		return err
 	}
-	if err := autoRouteLeaseProviderForIdentifier(cfg, fs, existingLeaseID); err != nil {
+	// An empty ID preserves explicit routing hints without reading lease claims.
+	if err := autoRouteLeaseProviderForIdentifier(cfg, fs, target.ID); err != nil {
 		return err
 	}
 	if flagWasSet(fs, "os") {
@@ -215,7 +226,7 @@ func applyLeaseCreateFlagsForLeaseMode(cfg *Config, fs *flag.FlagSet, values lea
 	prepareProviderDefaults(cfg)
 	applySingleProviderTargetDefault(cfg)
 	applyOSImageProviderDefaults(cfg, false)
-	if existingLeaseID != "" && cfg.Provider == "aws" && cfg.TargetOS == targetMacOS && !flagWasSet(fs, "market") {
+	if target.Reuse && cfg.Provider == "aws" && cfg.TargetOS == targetMacOS && !flagWasSet(fs, "market") {
 		cfg.Capacity.Market = "on-demand"
 	}
 	if err := applyCapacityMarketFlag(cfg, fs, *values.Market); err != nil {
@@ -244,7 +255,7 @@ func applyLeaseCreateFlagsForLeaseMode(cfg *Config, fs *flag.FlagSet, values lea
 		}
 		cfg.Cache.Volumes = mergeCacheVolumes(cfg.Cache.Volumes, volumes)
 	}
-	if err := validateCacheVolumesForLeaseReuse(*cfg, existingLeaseID); err != nil {
+	if err := validateCacheVolumesForLeaseReuse(*cfg, target.ID); err != nil {
 		return err
 	}
 	if err := applyProviderConfigDefaults(cfg); err != nil {
@@ -256,7 +267,7 @@ func applyLeaseCreateFlagsForLeaseMode(cfg *Config, fs *flag.FlagSet, values lea
 	if err := validateProviderTarget(*cfg); err != nil {
 		return err
 	}
-	if err := validateImageRequirementsForLease(*cfg, existingLeaseID); err != nil {
+	if err := validateImageRequirementsForLease(*cfg, target.Reuse); err != nil {
 		return err
 	}
 	if err := validateRequestedCapabilities(*cfg); err != nil {
@@ -276,7 +287,7 @@ func applyLeaseCreateFlagsForLeaseMode(cfg *Config, fs *flag.FlagSet, values lea
 		dynamicTailscaleTagAllowed := pondDynamicTailscaleTagAllowed(*cfg)
 		appendPondTailscaleTag(cfg, dynamicTailscaleTagAllowed)
 		// Reuse paths do not mutate ACL state.
-		if mutateExternal && existingLeaseID == "" && dynamicTailscaleTagAllowed {
+		if mutateExternal && !target.Reuse && dynamicTailscaleTagAllowed {
 			if err := maybeBootstrapPondACL(context.Background(), *cfg); err != nil {
 				return err
 			}
@@ -285,11 +296,11 @@ func applyLeaseCreateFlagsForLeaseMode(cfg *Config, fs *flag.FlagSet, values lea
 	return nil
 }
 
-func validateImageRequirementsForLease(cfg Config, existingLeaseID string) error {
+func validateImageRequirementsForLease(cfg Config, reuse bool) error {
 	if imageRequirementsEmpty(cfg.imageRequirements) {
 		return nil
 	}
-	if existingLeaseID != "" {
+	if reuse {
 		return exit(2, "image capability requirements apply only when creating a new lease")
 	}
 	if cfg.Provider != "aws" ||

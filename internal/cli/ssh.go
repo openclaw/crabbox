@@ -485,6 +485,41 @@ type sshTransportPreparation struct {
 	direct  io.ReadSeeker
 }
 
+const sshMuxDescriptorFailure = "mux_client_request_session: send fds failed"
+
+type sshMuxFailureDetector struct {
+	log      []byte
+	overflow bool
+}
+
+func (d *sshMuxFailureDetector) Write(data []byte) (int, error) {
+	if len(d.log)+len(data) > 512 {
+		d.overflow = true
+	} else if !d.overflow {
+		d.log = append(d.log, data...)
+	}
+	return len(data), nil
+}
+
+func (d *sshMuxFailureDetector) failed() bool {
+	if d.overflow {
+		return false
+	}
+	lines := strings.Split(strings.TrimSuffix(strings.ReplaceAll(string(d.log), "\r\n", "\n"), "\n"), "\n")
+	// Even a local OpenSSH log can embed server-supplied disconnect text.
+	// Require the complete two-line failure, with no surrounding log records.
+	if len(lines) != 2 || lines[1] != sshMuxDescriptorFailure {
+		return false
+	}
+	for fd := 0; fd < 3; fd++ {
+		prefix := fmt.Sprintf("mm_send_fd: sendmsg(%d): ", fd)
+		if strings.HasPrefix(lines[0], prefix) && len(lines[0]) > len(prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func prepareSSHTransport(target SSHTarget, remote workspaceOwnerRemotePreparation, payload []byte, direct io.ReadSeeker, payloadSize int64, hasInput bool, waitTimeout time.Duration) (sshTransportPreparation, error) {
 	// Only owner-expanded WSL2 commands need stdin staging; every other target
 	// keeps its established argv and input transport.
@@ -521,6 +556,20 @@ func prepareSSHTransport(target SSHTarget, remote workspaceOwnerRemotePreparatio
 }
 
 func (p *sshTransportPreparation) run(ctx context.Context, target SSHTarget, connectTimeout, connectionAttempts string, stdout, stderr io.Writer) error {
+	multiplexed := runtime.GOOS != "windows" && !target.AuthSecret && !target.NoControlMaster
+	for attempt := 0; ; attempt++ {
+		probe := target
+		if attempt == 2 {
+			probe.NoControlMaster = true
+		}
+		muxFailure, err := p.runOnce(ctx, probe, connectTimeout, connectionAttempts, stdout, stderr, multiplexed && attempt < 2)
+		if err == nil || ctx.Err() != nil || exitCode(err) != 255 || !muxFailure || attempt == 2 {
+			return err
+		}
+	}
+}
+
+func (p *sshTransportPreparation) runOnce(ctx context.Context, target SSHTarget, connectTimeout, connectionAttempts string, stdout, stderr io.Writer, captureLocalDiagnostics bool) (muxFailure bool, err error) {
 	args := sshArgsNoInputWithOptions(target, p.command, connectTimeout, connectionAttempts)
 	if p.input != nil || p.direct != nil {
 		args = sshArgsWithOptions(target, p.command, connectTimeout, connectionAttempts)
@@ -528,10 +577,13 @@ func (p *sshTransportPreparation) run(ctx context.Context, target SSHTarget, con
 	cmd := sshCommandContext(ctx, target, args...)
 	input, err := p.reset()
 	if err != nil {
-		return err
+		return false, err
 	}
 	cmd.Stdin = input
-	return runSSHCommand(cmd, stdout, stderr)
+	if captureLocalDiagnostics {
+		return runSSHCommandWithLocalDiagnostics(cmd, stdout, stderr)
+	}
+	return false, runSSHCommand(cmd, stdout, stderr)
 }
 
 func (p *sshTransportPreparation) reset() (io.Reader, error) {
@@ -1306,7 +1358,8 @@ func wsl2StdinScriptCommandWithWaitTimeout(inputSize int, waitTimeout time.Durat
 func wsl2StdinScriptCommandWithPayload(scriptSize, payloadSize int, waitTimeout time.Duration) string {
 	// Keep staging, execution, and cleanup in one WSL process so the timeout
 	// covers the lifecycle. The frame accounts for .NET's stdin preamble, and
-	// the marker lets post-exit cleanup preserve collisions.
+	// the marker lets post-exit cleanup preserve collisions. Restore the incoming
+	// umask before execution so private staging does not restrict user-created files.
 	wait := `$process.WaitForExit()
   $code = $process.ExitCode`
 	copyScript := `[Console]::OpenStandardInput().CopyTo($process.StandardInput.BaseStream)`
@@ -1347,7 +1400,7 @@ $cleanupAllowed = $true
 $psi = [System.Diagnostics.ProcessStartInfo]::new("wsl.exe")
 $psi.UseShellExecute = $false
 $psi.RedirectStandardInput = $true
-$psi.Arguments = '--exec sh -c "set -u;umask 077;dir=$1;script_expected=$2;payload_expected=$3;preamble=$4;mkdir -m 700 -- $dir||exit;: >$dir/.crabbox-owned;trap ''rm -rf -- $dir'' EXIT;cat >$dir/framed||exit;test $(wc -c <$dir/framed) = $((script_expected+payload_expected+preamble))||exit;dd if=$dir/framed of=$dir/script.sh bs=1 skip=$preamble count=$script_expected 2>/dev/null||exit;dd if=$dir/framed of=$dir/payload bs=1 skip=$((preamble+script_expected)) count=$payload_expected 2>/dev/null||exit;rm -f -- $dir/framed;code=0;bash $dir/script.sh <$dir/payload||code=$?;rm -rf -- $dir;cleanup=$?;trap - EXIT;if [ $cleanup -ne 0 ];then echo ''WSL2 command cleanup failed: exit ''$cleanup >&2;[ $code -ne 0 ]||code=$cleanup;fi;exit $code" sh ' + $dir + ' ` + strconv.Itoa(scriptSize) + ` ` + strconv.Itoa(payloadSize) + ` ' + $preamble
+$psi.Arguments = '--exec sh -c "set -u;mask=$(umask);umask 077;dir=$1;script_expected=$2;payload_expected=$3;preamble=$4;mkdir -m 700 -- $dir||exit;: >$dir/.crabbox-owned;trap ''rm -rf -- $dir'' EXIT;cat >$dir/framed||exit;test $(wc -c <$dir/framed) = $((script_expected+payload_expected+preamble))||exit;dd if=$dir/framed of=$dir/script.sh bs=1 skip=$preamble count=$script_expected 2>/dev/null||exit;dd if=$dir/framed of=$dir/payload bs=1 skip=$((preamble+script_expected)) count=$payload_expected 2>/dev/null||exit;rm -f -- $dir/framed;code=0;umask $mask;bash $dir/script.sh <$dir/payload||code=$?;rm -rf -- $dir;cleanup=$?;trap - EXIT;if [ $cleanup -ne 0 ];then echo ''WSL2 command cleanup failed: exit ''$cleanup >&2;[ $code -ne 0 ]||code=$cleanup;fi;exit $code" sh ' + $dir + ' ` + strconv.Itoa(scriptSize) + ` ` + strconv.Itoa(payloadSize) + ` ' + $preamble
 $process = [System.Diagnostics.Process]::Start($psi)
 try {
   try {

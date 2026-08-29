@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -14,6 +16,8 @@ import (
 	daytona "github.com/daytonaio/daytona/libs/api-client-go"
 	sdkdaytona "github.com/daytonaio/daytona/libs/sdk-go/pkg/daytona"
 	sdktypes "github.com/daytonaio/daytona/libs/sdk-go/pkg/types"
+	toolbox "github.com/daytonaio/daytona/libs/toolbox-api-client-go"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type daytonaAPI interface {
@@ -24,6 +28,7 @@ type daytonaAPI interface {
 	DeleteSandbox(context.Context, string) error
 	ReplaceLabels(context.Context, string, map[string]string) error
 	UpdateLastActivity(context.Context, string) error
+	SetAutoStopInterval(context.Context, string, time.Duration) error
 	CreateSSHAccess(context.Context, string, time.Duration) (daytonaSSHAccess, error)
 }
 
@@ -48,8 +53,9 @@ var newDaytonaClient = func(cfg Config, rt Runtime) (daytonaAPI, error) {
 	apiURL := daytonaAPIURL(cfg, auth)
 	apiCfg := daytona.NewConfiguration()
 	apiCfg.Servers = daytona.ServerConfigurations{{URL: apiURL}}
-	if rt.HTTP != nil {
-		apiCfg.HTTPClient = rt.HTTP
+	apiCfg.HTTPClient, err = daytonaHTTPClient(rt.HTTP, apiURL)
+	if err != nil {
+		return nil, err
 	}
 	return &daytonaSDKClient{api: daytona.NewAPIClient(apiCfg), token: auth.token(), orgID: auth.OrganizationID}, nil
 }
@@ -105,18 +111,40 @@ func daytonaAPIURL(cfg Config, auth daytonaAuth) string {
 	return strings.TrimRight(blank(configured, defaultDaytonaAPIURL), "/")
 }
 
-func newDaytonaToolboxClient(cfg Config) (*sdkdaytona.Client, error) {
-	auth, err := daytonaAuthConfig(cfg)
+func daytonaHTTPClient(source *http.Client, endpoint string) (*http.Client, error) {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return nil, fmt.Errorf("invalid Daytona HTTP endpoint")
+	}
+	if u.Scheme != "https" && !(u.Scheme == "http" && (u.Hostname() == "localhost" || u.Hostname() == "127.0.0.1" || u.Hostname() == "::1")) {
+		return nil, fmt.Errorf("Daytona HTTP endpoint must use HTTPS except for loopback tests")
+	}
+	if source == nil {
+		source = http.DefaultClient
+	}
+	return shared.SecureHTTPClient(source, u, func(*url.URL) error {
+		return fmt.Errorf("daytona refused cross-origin HTTP redirect")
+	}), nil
+}
+
+// The adapter owns allocation and HTTP policy; SDK services own only toolbox operations.
+func newDaytonaToolboxSandbox(cfg Config, rt Runtime, sandbox *daytona.Sandbox) (*sdkdaytona.Sandbox, error) {
+	headers, err := daytonaToolboxHeaders(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return sdkdaytona.NewClientWithConfig(&sdktypes.DaytonaConfig{
-		APIKey:         auth.APIKey,
-		JWTToken:       auth.JWTToken,
-		OrganizationID: auth.OrganizationID,
-		APIUrl:         daytonaAPIURL(cfg, auth),
-		Target:         strings.TrimSpace(cfg.Daytona.Target),
-	})
+	endpoint := strings.TrimRight(sandbox.GetToolboxProxyUrl(), "/") + "/" + url.PathEscape(sandbox.GetId())
+	httpClient, err := daytonaHTTPClient(rt.HTTP, endpoint)
+	if err != nil {
+		return nil, err
+	}
+	toolboxConfig := toolbox.NewConfiguration()
+	toolboxConfig.Servers = toolbox.ServerConfigurations{{URL: endpoint}}
+	toolboxConfig.HTTPClient = httpClient
+	for key, value := range headers {
+		toolboxConfig.AddDefaultHeader(key, value)
+	}
+	return sdkdaytona.NewSandbox(nil, toolbox.NewAPIClient(toolboxConfig), sandbox, sdktypes.CodeLanguagePython), nil
 }
 
 type daytonaCLIConfig struct {
@@ -371,6 +399,15 @@ func (c *daytonaSDKClient) UpdateLastActivity(ctx context.Context, id string) er
 		req = req.XDaytonaOrganizationID(c.orgID)
 	}
 	_, err := req.Execute()
+	return c.redactError(err)
+}
+
+func (c *daytonaSDKClient) SetAutoStopInterval(ctx context.Context, id string, interval time.Duration) error {
+	req := c.api.SandboxAPI.SetAutostopInterval(c.ctx(ctx), id, float32(durationMinutesCeil(interval)))
+	if c.orgID != "" {
+		req = req.XDaytonaOrganizationID(c.orgID)
+	}
+	_, _, err := req.Execute()
 	return c.redactError(err)
 }
 

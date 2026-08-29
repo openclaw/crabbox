@@ -240,8 +240,9 @@ type runFailureDigestInput struct {
 	CommandDisplay        string
 	ShellMode             bool
 	ScriptMode            bool
-	RoutingArgs           []string
-	SSHRoutingArgs        []string
+	Routing               CommandRouting
+	SSHRouting            CommandRouting
+	StopRouting           CommandRouting
 	StopCommand           string
 	Classification        FailureClassification
 	Phases                []TimingPhase
@@ -349,28 +350,27 @@ func failureDigestNextCommands(input runFailureDigestInput, retry string) []stri
 	}
 	leaseRef := firstNonBlank(input.Slug, input.LeaseID)
 	if leaseRef != "" {
-		sshRouting := append([]string(nil), input.SSHRoutingArgs...)
-		if len(sshRouting) == 0 {
-			sshRouting = fallbackFailureDigestRoutingArgs(input)
+		sshRouting := input.SSHRouting
+		if len(sshRouting.Args) == 0 {
+			sshRouting = fallbackFailureDigestRouting(input, CommandRoutingRetry)
 		}
-		commands = append(commands, crabboxCommandString(append(append([]string{"ssh"}, sshRouting...), "--id", leaseRef)))
+		commands = append(commands, sshRouting.ShellCommand(append(append([]string{"crabbox", "ssh"}, sshRouting.Args...), "--id", leaseRef)))
 		if retry != "false" && !input.ScriptMode && canSuggestRunRetry(input.CommandDisplay) {
-			routing := append([]string(nil), input.RoutingArgs...)
-			if len(routing) == 0 {
-				routing = fallbackFailureDigestRoutingArgs(input)
+			routing := input.Routing
+			if len(routing.Args) == 0 {
+				routing = fallbackFailureDigestRouting(input, CommandRoutingRetry)
 			}
-			runArgs := append(append([]string{"run"}, routing...), "--id", leaseRef, "--fresh-sync")
+			runArgs := append(append([]string{"crabbox", "run"}, routing.Args...), "--id", leaseRef, "--fresh-sync")
 			if input.ShellMode {
 				runArgs = append(runArgs, "--shell")
 			}
-			runCommand := crabboxCommandString(runArgs) + " -- " + failureDigestRetryCommand(input)
-			commands = append(commands, runCommand)
+			commands = append(commands, routing.ShellCommand(runArgs)+" -- "+failureDigestRetryCommand(input))
 		}
-		stopRouting := append([]string(nil), input.RoutingArgs...)
-		if len(stopRouting) == 0 {
-			stopRouting = fallbackFailureDigestRoutingArgs(input)
+		stopRouting := input.StopRouting
+		if len(stopRouting.Args) == 0 {
+			stopRouting = fallbackFailureDigestRouting(input, CommandRoutingStop)
 		}
-		commands = append(commands, firstNonBlank(input.StopCommand, crabboxCommandString(append(append([]string{"stop"}, stopRouting...), leaseRef))))
+		commands = append(commands, firstNonBlank(input.StopCommand, stopRouting.ShellCommand(append(append([]string{"crabbox", "stop"}, stopRouting.Args...), leaseRef))))
 	}
 	return commands
 }
@@ -491,92 +491,8 @@ func printFailureDigestResults(w io.Writer, results *TestResultSummary) {
 	}
 }
 
-func runFailureDigestRoutingArgs(cfg Config, leaseID string) []string {
-	args := []string{}
-	if strings.TrimSpace(cfg.Provider) != "" {
-		args = append(args, "--provider", cfg.Provider)
-	}
-	if strings.TrimSpace(cfg.TargetOS) != "" {
-		args = append(args, "--target", cfg.TargetOS)
-	}
-	if cfg.TargetOS == targetWindows && strings.TrimSpace(cfg.WindowsMode) != "" {
-		args = append(args, "--windows-mode", cfg.WindowsMode)
-	}
-	if strings.TrimSpace(cfg.Static.Host) != "" {
-		args = append(args, "--static-host", cfg.Static.Host)
-	}
-	if strings.TrimSpace(cfg.Static.User) != "" {
-		args = append(args, "--static-user", cfg.Static.User)
-	}
-	if strings.TrimSpace(cfg.Static.Port) != "" {
-		args = append(args, "--static-port", cfg.Static.Port)
-	}
-	if strings.TrimSpace(cfg.Static.WorkRoot) != "" {
-		args = append(args, "--static-work-root", cfg.Static.WorkRoot)
-	}
-	return appendProviderStopRoutingArgs(args, cfg, leaseID)
-}
-
-func runFailureDigestSSHRoutingArgs(cfg Config, leaseID string) []string {
-	args := []string{}
-	if strings.TrimSpace(cfg.Provider) != "" {
-		args = append(args, "--provider", cfg.Provider)
-	}
-	if strings.TrimSpace(cfg.TargetOS) != "" {
-		args = append(args, "--target", cfg.TargetOS)
-	}
-	if cfg.TargetOS == targetWindows && strings.TrimSpace(cfg.WindowsMode) != "" {
-		args = append(args, "--windows-mode", cfg.WindowsMode)
-	}
-	if strings.TrimSpace(cfg.Static.Host) != "" {
-		args = append(args, "--static-host", cfg.Static.Host)
-	}
-	if strings.TrimSpace(cfg.Static.User) != "" {
-		args = append(args, "--static-user", cfg.Static.User)
-	}
-	if strings.TrimSpace(cfg.Static.Port) != "" {
-		args = append(args, "--static-port", cfg.Static.Port)
-	}
-	if strings.TrimSpace(cfg.Static.WorkRoot) != "" {
-		args = append(args, "--static-work-root", cfg.Static.WorkRoot)
-	}
-	return appendProviderStopRoutingArgs(args, cfg, leaseID)
-}
-
-func fallbackFailureDigestRoutingArgs(input runFailureDigestInput) []string {
-	args := []string{}
-	if strings.TrimSpace(input.Provider) != "" {
-		args = append(args, "--provider", input.Provider)
-	}
-	if strings.TrimSpace(input.TargetOS) != "" {
-		args = append(args, "--target", input.TargetOS)
-	}
-	if input.TargetOS == targetWindows && strings.TrimSpace(input.WindowsMode) != "" {
-		args = append(args, "--windows-mode", input.WindowsMode)
-	}
-	return args
-}
-
-func crabboxCommandString(args []string) string {
-	env := []string{}
-	rest := make([]string, 0, len(args))
-	index := 0
-	for index < len(args) && isShellEnvAssignment(args[index]) {
-		env = append(env, args[index])
-		index++
-	}
-	if index < len(args) {
-		rest = append(rest, args[index])
-		index++
-	}
-	for index < len(args) && isShellEnvAssignment(args[index]) {
-		env = append(env, args[index])
-		index++
-	}
-	rest = append(rest, args[index:]...)
-	command := append(env, "crabbox")
-	command = append(command, rest...)
-	return readableShellCommand(command)
+func fallbackFailureDigestRouting(input runFailureDigestInput, purpose CommandRoutingPurpose) CommandRouting {
+	return CommandRoutingFor(Config{Provider: input.Provider, TargetOS: input.TargetOS, WindowsMode: input.WindowsMode}, input.LeaseID, purpose)
 }
 
 func canSuggestRunRetry(commandDisplay string) bool {

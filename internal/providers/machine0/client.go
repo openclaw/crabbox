@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -19,6 +20,8 @@ const (
 	machine0ReadRetryFallback       = 5 * time.Second
 	machine0ReadRetryMinimumCadence = time.Second
 )
+
+var machine0UUIDPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 type machine0API interface {
 	Version(context.Context) (string, error)
@@ -260,6 +263,36 @@ func (c *client) List(ctx context.Context) ([]machine, error) {
 }
 
 func (c *client) Get(ctx context.Context, name string) (machine, error) {
+	var id string
+	if machine0UUIDPattern.MatchString(name) {
+		// Native UUID get uses an unavailable procedure in CLI 1.0.164.
+		// Resolve a transport name from inventory, then verify full detail identity.
+		id, name = name, ""
+		machines, err := c.List(ctx)
+		if err != nil {
+			return machine{}, err
+		}
+		if machines == nil {
+			return machine{}, exit(5, "invalid machine0 ls --json for UUID lookup: expected an array")
+		}
+		for i, candidate := range machines {
+			if !machine0UUIDPattern.MatchString(candidate.ID) {
+				return machine{}, exit(5, "invalid machine0 ls --json item %d: missing or malformed UUID", i)
+			}
+			if strings.EqualFold(candidate.ID, id) {
+				if name != "" {
+					return machine{}, exit(5, "multiple Machine0 inventory entries match UUID %s", id)
+				}
+				name = candidate.Name
+			}
+		}
+		if name == "" {
+			return machine{}, exit(4, "Machine0 UUID %s is absent from current authorized inventory", id)
+		}
+		if machine0UUIDPattern.MatchString(name) {
+			return machine{}, exit(5, "invalid machine name in Machine0 inventory for UUID %s: %q", id, name)
+		}
+	}
 	result, err := c.runRead(ctx, "get", name, "--json")
 	if err != nil {
 		return machine{}, err
@@ -270,6 +303,9 @@ func (c *client) Get(ctx context.Context, name string) (machine, error) {
 	}
 	if err := validateMachine(item, true); err != nil {
 		return machine{}, exit(5, "invalid machine0 get %s --json: %v", name, err)
+	}
+	if id != "" && (!strings.EqualFold(item.ID, id) || item.Name != name) {
+		return machine{}, exit(5, "Machine0 lookup identity changed: expected id=%s name=%q, found id=%s name=%q", id, name, item.ID, item.Name)
 	}
 	return item, nil
 }

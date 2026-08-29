@@ -53,15 +53,18 @@ classify_validation_failure() {
 run_capture() {
   local command="$1"
   shift
-  local output
-  set +e
-  output="$("$@" 2>&1)"
-  local status=$?
-  set -e
+  local output stderr_file status=0
+  stderr_file="$(mktemp "$work_dir/command-stderr-XXXXXX")"
+  # Keep diagnostics out of captured stdout, especially list --json.
+  output="$("$@" 2>"$stderr_file")" || status=$?
   if [ "$status" -ne 0 ]; then
+    output+=$'\n'"$(cat "$stderr_file")"
+    rm -f "$stderr_file"
     classify_blocker "$command" "$status" "$output"
     exit "$status"
   fi
+  cat "$stderr_file" >&2
+  rm -f "$stderr_file"
   printf '%s\n' "$output"
 }
 

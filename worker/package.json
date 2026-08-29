@@ -1,6 +1,6 @@
 {
   "name": "@openclaw/crabbox-worker",
-  "version": "0.46.1",
+  "version": "0.47.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -23,28 +23,28 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@aws-sdk/credential-providers": "^3.1095.0",
+    "@aws-sdk/credential-providers": "^3.1120.0",
     "@cloudflare/containers": "^0.3.7",
     "@novnc/novnc": "^1.7.0",
     "aws4fetch": "^1.0.20",
-    "fast-xml-parser": "^5.10.1",
-    "pg": "^8.22.0",
-    "pg-boss": "^12.26.3",
+    "fast-xml-parser": "^5.11.1",
+    "pg": "^8.23.0",
+    "pg-boss": "^12.28.0",
     "ssh2": "^1.17.0",
-    "ws": "^8.21.1"
+    "ws": "^8.21.3"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20260708.1",
+    "@cloudflare/workers-types": "^5.20260827.1",
     "@types/node": "^22.20.1",
-    "@types/pg": "^8.20.0",
+    "@types/pg": "^8.23.1",
     "@types/ws": "^8.18.1",
-    "esbuild": "^0.28.1",
-    "oxfmt": "^0.60.0",
-    "oxlint": "^1.75.0",
+    "esbuild": "^0.28.2",
+    "oxfmt": "^0.65.0",
+    "oxlint": "^1.80.0",
     "oxlint-tsgolint": "^7.0.2001",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.10",
-    "wrangler": "^4.114.0"
+    "vitest": "^4.1.11",
+    "wrangler": "^4.127.0"
   },
   "engines": {
     "node": ">=22.12.0"

@@ -394,9 +394,12 @@ CRABBOX_CLOUD_RUN_SANDBOX_ROOTFS
    probe provider liveness rather than treating the local claim as proof that a
    sandbox is still running.
 6. One-shot `run` without `--keep` destroys the sandbox after the command.
-7. `cleanup` deletes idle- or TTL-expired claimed sandboxes. Claim locking
-   serializes cleanup against create, archive sync, command execution, stop,
-   and reclaim so cleanup cannot remove ownership while work is in flight.
+7. `cleanup` deletes idle- or TTL-expired claimed sandboxes. Discovery can read
+   a claim and report an in-flight skip without waiting for its active operation.
+   Destructive cleanup locks the exact target and rechecks the claim snapshot.
+   That comparison and deletion remain serialized with create, archive sync,
+   command execution, stop, and reclaim so cleanup cannot remove ownership
+   while work is in flight.
 
 ## Doctor
 
@@ -434,10 +437,12 @@ CRABBOX_CLOUD_RUN_SANDBOX_ROOTFS
 - Writable state is an isolated overlay unless you bind-mount or export tar.
 - Secrets stay in env + request headers only (never Crabbox config or argv).
 - Local claims are scoped so list/stop cannot cross gateways by accident.
-- In-flight create/sync/exec and cleanup share an unchanged-claim lock; a
-  timed-out create remains tracked for later stop or cleanup. If Crabbox exits
-  during create, the durable `creating` claim becomes cleanup-eligible after
-  its active deadline, and destruction still requires its exact ownership token.
+- In-flight create/sync/exec and destructive cleanup share an unchanged-claim
+  lock. Cleanup discovery skips claims with unexpired activity markers without
+  taking that operation lock; a timed-out create remains tracked for later stop
+  or cleanup. If Crabbox exits during create, the durable `creating` claim becomes
+  cleanup-eligible after its active deadline, and destruction still requires
+  its exact ownership token.
 - A structured, exact-ID create conflict drops the provisional claim instead
   of taking destructive ownership of a sandbox that already existed. Conflict
   classification and claim removal occur under the same claim lock.
