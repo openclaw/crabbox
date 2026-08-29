@@ -55,29 +55,59 @@ func TestClientCreateCommandConstruction(t *testing.T) {
 }
 
 func TestClientSelectedKeyReadsExplicitOrDefaultKey(t *testing.T) {
+	const summary = `[{"name":"other","type":"MANAGED"},{"name":"default-key","type":"PUBLIC","isDefault":true}]`
+	const detail = `{"name":"default-key","type":"PUBLIC","fileName":"id_ed25519","isDefault":true}`
+	list := []string{"keys", "ls", "--json"}
+	getDefault := []string{"keys", "get", "default-key", "--json"}
+	getExplicit := []string{"keys", "get", "remote-key", "--json"}
 	for _, tc := range []struct {
-		name     string
-		selected string
-		command  string
-		output   string
-		wantName string
+		name        string
+		selected    string
+		listOutput  string
+		listError   error
+		detail      string
+		detailError error
+		want        *machineKey
+		wantError   string
+		commands    [][]string
 	}{
-		{name: "explicit key", selected: "remote-key", command: "keys\x00get\x00remote-key\x00--json", output: `{"name":"remote-key","type":"PUBLIC","fileName":"id_ed25519"}`, wantName: "remote-key"},
-		{name: "account default", command: "keys\x00ls\x00--json", output: `[{"name":"other","type":"MANAGED"},{"name":"default-key","type":"PUBLIC","fileName":"id_rsa","isDefault":true}]`, wantName: "default-key"},
-		{name: "no default preserves CLI behavior", command: "keys\x00ls\x00--json", output: `[]`},
+		{name: "explicit key trims lookup and validates trimmed detail name", selected: " remote-key\n", detail: `{"name":" remote-key ","type":"PUBLIC","fileName":"id_ed25519"}`, want: &machineKey{Name: " remote-key ", Type: "PUBLIC", FileName: "id_ed25519"}, commands: [][]string{getExplicit}},
+		{name: "account default reads full metadata", listOutput: summary, detail: detail, want: &machineKey{Name: "default-key", Type: "PUBLIC", FileName: "id_ed25519", IsDefault: true}, commands: [][]string{list, getDefault}},
+		{name: "default name is trimmed", selected: " \n", listOutput: `[{"name":" default-key ","type":"PUBLIC","isDefault":true}]`, detail: detail, want: &machineKey{Name: "default-key", Type: "PUBLIC", FileName: "id_ed25519", IsDefault: true}, commands: [][]string{list, getDefault}},
+		{name: "no keys preserves CLI behavior", listOutput: `[]`, commands: [][]string{list}},
+		{name: "no default does not choose another key", listOutput: `[{"name":"other","type":"MANAGED"}]`, commands: [][]string{list}},
+		{name: "unnamed default fails without another selection", listOutput: `[{"name":" \t","isDefault":true},{"name":"other","isDefault":true}]`, wantError: "default SSH key has no name", commands: [][]string{list}},
+		{name: "default detail name mismatch", listOutput: summary, detail: `{"name":"other","fileName":"id_ed25519"}`, wantError: "mismatched key name", commands: [][]string{list, getDefault}},
+		{name: "explicit detail name mismatch", selected: "remote-key", detail: detail, wantError: "mismatched key name", commands: [][]string{getExplicit}},
+		{name: "default detail omits name", listOutput: summary, detail: `{"fileName":"id_ed25519"}`, wantError: "mismatched key name", commands: [][]string{list, getDefault}},
+		{name: "default detail parse failure", listOutput: summary, detail: `{`, wantError: "parse machine0 keys get", commands: [][]string{list, getDefault}},
+		{name: "default detail command failure", listOutput: summary, detailError: errors.New("key detail unavailable"), wantError: "key detail unavailable", commands: [][]string{list, getDefault}},
+		{name: "list command failure", listError: errors.New("key list unavailable"), wantError: "key list unavailable", commands: [][]string{list}},
+		{name: "list parse failure", listOutput: `{`, wantError: "parse machine0 keys ls", commands: [][]string{list}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			runner := &recordingRunner{responses: map[string]core.LocalCommandResult{tc.command: {Stdout: tc.output}}, errors: map[string]error{}}
+			runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+				strings.Join(list, "\x00"):        {Stdout: tc.listOutput},
+				strings.Join(getDefault, "\x00"):  {Stdout: tc.detail},
+				strings.Join(getExplicit, "\x00"): {Stdout: tc.detail},
+			}, errors: map[string]error{
+				strings.Join(list, "\x00"):        tc.listError,
+				strings.Join(getDefault, "\x00"):  tc.detailError,
+				strings.Join(getExplicit, "\x00"): tc.detailError,
+			}}
 			key, err := testClient(runner).SelectedKey(context.Background(), tc.selected)
-			if err != nil || len(runner.calls) != 1 {
-				t.Fatalf("key=%#v err=%v calls=%#v", key, err, runner.calls)
+			if tc.wantError == "" && err != nil || tc.wantError != "" && (err == nil || !strings.Contains(err.Error(), tc.wantError)) {
+				t.Fatalf("err=%v want=%q", err, tc.wantError)
 			}
-			if tc.wantName == "" {
-				if key != nil {
-					t.Fatalf("unexpected key=%#v", key)
-				}
-			} else if key == nil || key.Name != tc.wantName {
-				t.Fatalf("key=%#v want name=%q", key, tc.wantName)
+			if !reflect.DeepEqual(key, tc.want) {
+				t.Fatalf("key=%#v want=%#v", key, tc.want)
+			}
+			var commands [][]string
+			for _, call := range runner.calls {
+				commands = append(commands, call.Args)
+			}
+			if !reflect.DeepEqual(commands, tc.commands) {
+				t.Fatalf("commands=%q want=%q", commands, tc.commands)
 			}
 		})
 	}

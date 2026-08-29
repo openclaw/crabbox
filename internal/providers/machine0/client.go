@@ -311,34 +311,41 @@ func (c *client) Get(ctx context.Context, name string) (machine, error) {
 }
 
 func (c *client) SelectedKey(ctx context.Context, name string) (*machineKey, error) {
-	if name = strings.TrimSpace(name); name != "" {
-		result, err := c.runRead(ctx, "keys", "get", name, "--json")
+	if name = strings.TrimSpace(name); name == "" {
+		result, err := c.runRead(ctx, "keys", "ls", "--json")
 		if err != nil {
 			return nil, err
 		}
-		var key machineKey
-		if err := decodeJSON(result.Stdout, &key); err != nil {
-			return nil, exit(5, "parse machine0 keys get %s --json: %v", name, err)
+		var keys []machineKey
+		if err := decodeJSON(result.Stdout, &keys); err != nil {
+			return nil, exit(5, "parse machine0 keys ls --json: %v", err)
 		}
-		if strings.TrimSpace(key.Name) != name {
-			return nil, exit(5, "machine0 key lookup returned mismatched key name: expected %s, found %s", name, blank(key.Name, "<empty>"))
+		for _, key := range keys {
+			if key.IsDefault {
+				name = strings.TrimSpace(key.Name)
+				if name == "" {
+					return nil, exit(5, "machine0 default SSH key has no name")
+				}
+				break
+			}
 		}
-		return &key, nil
+		if name == "" {
+			return nil, nil
+		}
 	}
-	result, err := c.runRead(ctx, "keys", "ls", "--json")
+	// List summaries can omit fileName; both selections need the full key details.
+	result, err := c.runRead(ctx, "keys", "get", name, "--json")
 	if err != nil {
 		return nil, err
 	}
-	var keys []machineKey
-	if err := decodeJSON(result.Stdout, &keys); err != nil {
-		return nil, exit(5, "parse machine0 keys ls --json: %v", err)
+	var key machineKey
+	if err := decodeJSON(result.Stdout, &key); err != nil {
+		return nil, exit(5, "parse machine0 keys get %s --json: %v", name, err)
 	}
-	for index := range keys {
-		if keys[index].IsDefault {
-			return &keys[index], nil
-		}
+	if strings.TrimSpace(key.Name) != name {
+		return nil, exit(5, "machine0 key lookup returned mismatched key name: expected %s, found %s", name, blank(key.Name, "<empty>"))
 	}
-	return nil, nil
+	return &key, nil
 }
 
 func validateMachine(item machine, requireID bool) error {
