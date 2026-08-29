@@ -27,6 +27,12 @@ positional argument, or more than one positional argument, is an error.
 Several providers also accept their own native identifiers in addition to the
 Crabbox lease ID and local slug:
 
+- `aws` — direct fixed-ID canonical stops can replay a retained terminal
+  receipt after successful instance/key cleanup, with fresh account, configured
+  region, identity, and inventory checks. Older compact tombstones lack the
+  required binding and still fail closed after upgrading; missing inventory
+  alone never acknowledges cleanup. This does not extend to slug, raw instance,
+  or ordinary non-fixed lookups. See [AWS fixed-ID replay](../providers/aws.md#fixed-id-replay).
 - `blacksmith-testbox` — accepts a `tbx_...` ID or local slug and forwards to
   `blacksmith testbox stop`.
 - `blaxel` — accepts a Crabbox lease ID (`blx_<sandbox-id>`) or local slug and

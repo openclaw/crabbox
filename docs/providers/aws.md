@@ -74,12 +74,34 @@ the attempt during the original invocation. A changed create intent returns
 acquisition is marked complete, a missing bound instance is also a terminal
 conflict rather than permission to call `RunInstances` again.
 
-Acknowledged stop and exact missing-resource cleanup replace the live claim
-with a compact terminal tombstone containing the versioned fingerprint,
-provider scope, slug, and terminal state. Automatic AWS cleanup does not prune
-these tombstones and there is no time-based operation-ID reuse window. Explicit
-local claim deletion forfeits this guarantee; normal automation must always use
-a new operation ID for a later lease.
+Successful stop and exact resource/key cleanup retain a terminal receipt in
+the existing claim fields: the original account, region, canonical lease ID,
+slug, instance ID, repository path, and versioned intent plus its original
+fingerprint label. SSH connectivity, launch attempts, and other active state
+are cleared. After inventory no longer includes the instance, a repeated
+`stop --provider aws --id cbx_...` can acknowledge that receipt without another
+deletion or rewriting it. AWS checks the current caller account and configured
+region scope, expected release identity when supplied, and conflicting visible
+resources. The release owner reloads and revalidates the receipt and inventory
+under the durable claim lock; missing inventory or a terminal provider status
+alone never proves cleanup. The recorded repository path is retained as
+identity evidence, not a requirement to run stop from the original directory.
+
+This is a forward repair: older compact tombstones discarded instance and
+region binding and cannot prove that scope after upgrading. They remain
+unchanged and fail closed on repeated stop. Definitive launch rejections also
+block reuse but, without an acquired instance identity, are not successful-stop
+receipts. An acquired claim whose instance disappears before successful key
+cleanup still makes stop fail; the existing exact AWS cleanup path may finish
+those obligations separately. Failed key cleanup keeps the acquired claim.
+Receipt replay applies only to canonical fixed-ID stop, not inspect, reuse,
+slug lookup, raw instance lookup, or ordinary non-fixed leases.
+
+Automatic AWS cleanup does not prune terminal claims and there is no time-based
+operation-ID reuse window. Both retained receipts and older compact tombstones
+continue blocking fixed-ID reallocation. Explicit local claim deletion forfeits
+this guarantee; normal automation must always use a new operation ID for a
+later lease.
 
 Fixed claims and tombstones use the local provider discriminator
 `aws-fixed-v1`. Current Crabbox resolves that marker to runtime provider AWS,

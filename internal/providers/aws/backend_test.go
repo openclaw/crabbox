@@ -548,9 +548,7 @@ func TestAWSFixedReleasePersistsTerminalTombstoneAndRejectsReplay(t *testing.T) 
 	if intent.Version != fixedAWSCreateIntentVersion || intent.Fingerprint == "" || intent.ProviderScope == "" || intent.Slug != req.RequestedSlug || intent.State != fixedAWSIntentReleased {
 		t.Fatalf("terminal intent=%#v", intent)
 	}
-	if claim.CloudID != "" || claim.Labels != nil || claim.SSHHost != "" || len(intent.Attempt) != 0 || len(intent.FailedAttempts) != 0 {
-		t.Fatalf("terminal tombstone retained live resource state: claim=%#v", claim)
-	}
+	assertAWSReceiptIdentity(t, claim, liveClaim)
 
 	if err := backend.cleanupOrphanedAWSClaims(context.Background(), false); err != nil {
 		t.Fatal(err)
@@ -762,6 +760,9 @@ func TestAWSFixedAcquireTerminalizesDefinitiveProviderRejection(t *testing.T) {
 	}
 	if err := fixedAWSLeaseKind.ValidateTerminalClaim(claim, core.LeaseClaim{}, req.RequestedLeaseID, nil); err != nil {
 		t.Fatalf("terminal claim: %v", err)
+	}
+	if _, err := backend.Resolve(t.Context(), ResolveRequest{ID: req.RequestedLeaseID, ReleaseOnly: true}); err == nil {
+		t.Fatal("no-allocation rejection became a successful stop receipt")
 	}
 	keyPath, err := core.TestboxKeyPath(req.RequestedLeaseID)
 	if err != nil {
