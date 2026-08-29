@@ -706,7 +706,9 @@ func TestFailureDigestStoppedLeaseKeepsHistoryAndLocalEvidence(t *testing.T) {
 	printRunFailureDigest(&out, runFailureDigestInput{
 		LeaseID: "cbx_stopped", LeaseStopped: true, RunID: "run_failed",
 		CommandDisplay: "false", StopCommand: "crabbox stop --id cbx_stopped",
-	}, nil, nil, "stdout.log", "stderr.log")
+	})
+	printFailureTail(&out, "stdout", nil, "stdout.log")
+	printFailureTail(&out, "stderr", nil, "stderr.log")
 	for _, want := range []string{"crabbox logs run_failed", "crabbox events run_failed", "crabbox doctor --from-run run_failed", "lease: stopped", "stderr.log", "stdout.log"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("missing %q: %s", want, out.String())
