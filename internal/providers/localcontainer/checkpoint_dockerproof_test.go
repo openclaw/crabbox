@@ -86,7 +86,7 @@ func TestDockerCommitCheckpointLifecycleProof(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
-	if verify.ProviderState != "available" || verify.NextAction != "delete" {
+	if verify.ProviderState != "available" || verify.NextAction != "fork_or_delete" {
 		t.Fatalf("verify=%+v", verify)
 	}
 	if err := (Provider{}).DeleteNativeCheckpoint(context.Background(), resource); err != nil {

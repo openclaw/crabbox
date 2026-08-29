@@ -97,7 +97,7 @@ func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (co
 	if req.StrategyExplicit {
 		return core.NativeCheckpointCapability{}, false
 	}
-	return core.NativeCheckpointCapability{Kind: core.CheckpointKindDockerCommit, Direct: true}, true
+	return core.NativeCheckpointCapability{Kind: core.CheckpointKindDockerCommit, Direct: true, RetireSource: true}, true
 }
 
 // leaseHasDockerSocket reports whether a resolved lease was created with

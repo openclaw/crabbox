@@ -80,6 +80,11 @@ func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheck
 	if err != nil {
 		return core.NativeCheckpointCreateResult{}, err
 	}
+	if req.Capture != nil {
+		if err := core.ValidateCheckpointCaptureClaim(claim, req.CheckpointID, req.Capture); err != nil {
+			return core.NativeCheckpointCreateResult{}, err
+		}
+	}
 	location := ""
 	if source.Location != nil {
 		location = strings.TrimSpace(source.Location.Name)

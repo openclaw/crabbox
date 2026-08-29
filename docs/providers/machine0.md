@@ -121,6 +121,13 @@ Encrypted or unsupported keys, nonregular files, and missing public metadata rem
 this check does not prove that SSH authentication will succeed. Crabbox never
 changes the selected key or downloads PUBLIC private keys to repair a mismatch.
 
+Before creation, Crabbox reads `machine0 keys get <name> --json` for the
+configured key or the default name discovered by `machine0 keys ls --json`.
+List rows can omit `fileName`; the detail response supplies the authoritative
+filename for the existing PUBLIC-key preflight. Missing default names and
+failed or mismatched detail reads stop preflight. These reads do not request
+or download private-key fields.
+
 When no default key is registered and no explicit key is selected, the native
 Machine0 CLI falls back to `id_rsa` and `id_rsa.pub` under `SSH_KEY_PATH` (or
 `~/.ssh`). Doctor and new creation require both to be regular files before
@@ -175,7 +182,27 @@ the selected size exists and is currently offered in the requested region.
 ```sh
 crabbox providers sizes machine0 --json
 crabbox providers sizes machine0 --all --refresh
+crabbox providers sizes machine0 --with-context --class fast --all --json
+crabbox warmup --provider machine0 --class fast --type xl-nvme --slug native-ci
 ```
+
+The static matrix and `providers describe machine0 --json` advertise
+`sizeSelection: "type"`. Each live catalog `name` is the exact value for the
+existing `--type` flag; native names are not portable class names. Keep the
+configured `--class` and omit `--type` to preserve configured defaults. Add
+`--type <name>` only to select a native size explicitly. Generic `--type` wins
+over both native configuration and `--machine0-size`, regardless of flag order;
+`--machine0-size` wins over inherited native or generic type configuration.
+
+With `--with-context --json`, discovery returns `sizes` plus
+`selection: { "selector": "type", "effectiveType": "xxxl", "region": "eu" }`
+for class `fast` with no explicit native configuration. YAML or environment
+native `large` instead reports `effectiveType: "large"`. The region is the
+effective Machine0 region. Unavailable or missing configured types remain
+visible in `selection`; no fallback size or resource estimate is invented.
+The ordinary JSON array and human table do not change. `--all` includes sizes
+unavailable everywhere; check a row's regions for availability in the effective
+region. The installed Machine0 CLI must also support the chosen size.
 
 The JSON output preserves exact hourly microcurrency integers
 (`1_000_000 = 1` currency unit), vCPU, RAM, boot disk, transfer allowance,
@@ -187,6 +214,17 @@ The current Machine0 region names are `us-east`, `us-west`, `uk`, `eu`, and
 `asia`, but the live size catalog is authoritative. Capacity can still fail
 regionally after validation; Crabbox preserves the CLI diagnostic and removes a
 partially created VM unless `--keep` was explicit.
+
+Before accepting a created VM, Crabbox verifies that its reported size equals
+the requested size. A mismatch fails with the existing rollback policy for
+ordinary leases; fixed leases retain their durable attempt and refuse
+mismatched replay. GPU catalog membership does not prove image compatibility:
+Crabbox supplies its configured image explicitly, so Machine0's automatic GPU
+image selection does not apply.
+
+A fixed create with a retained attempt but no attested resource ID remains
+unresolved. Crabbox cannot authorize deletion from its name alone;
+inspect the exact VM through Machine0 before any manual provider cleanup.
 
 ## Lifecycle and reuse
 
@@ -267,22 +305,62 @@ create attempt authorizes the first visible matching VM and records its exact
 Machine0 resource ID; every later adoption must match that ID. A matching name
 or slug alone never authorizes reuse.
 
+Canonical `cbx_` lease IDs are never passed to Machine0 as native VM names.
+Without a local claim, inventory provides only the recovery hint described
+above; no matching candidate returns not found. Native-name and UUID
+inspection remain available.
+
+Prepared fixed claims remain held until a durable attempt and full native
+machine details establish ownership. An empty persisted record is not proof
+that creation never started: older clients could erase an ambiguous attempt.
+This also means a current preflight failure, although known not to have
+submitted in that invocation, cannot authorize creation or cancellation from
+its empty record in a later process. `inspect`, `status`, and `stop` report
+unresolved ownership instead of inventing an absent or never-started resource.
+
+For an attested resource, `inspect` and `stop` resolve the original fixed lease
+ID without replaying creation, starting the VM, or requiring SSH readiness.
+They work with creating, stopped, suspended, and errored VMs. The immutable UUID
+is persisted after the first attested detail, before later readiness or SSH
+failure can lose the binding. A prepared attempt absent from inventory stays
+held, even when it was previously observed; an acquired resource whose absence
+is confirmed can be finalized by stop. Automatic cleanup skips incomplete
+fixed acquisition.
+
+Validated released tombstones report `state: "released"`; repeat stop succeeds
+without changing or removing the tombstone, and `status --wait` reports the
+existing terminal-state error. Malformed tombstones fail closed. Released
+fixed IDs can never be replayed.
+
+Current catalog capacity is checked only when creating a new VM. An exact,
+attested owned VM can replay even if its size disappears from the catalog or
+loses regional availability. A changed selector still conflicts with the
+durable intent before any provider mutation; replay never substitutes a size
+or creates a replacement VM.
+
 An ambiguous create remains pinned to its original name, size, region, image,
 image version, and key. Replay fails closed without another `machine0 new` call
 while that attempt has no visible machine, deliberately accepting a false
 negative if the process stopped after persisting the attempt but before sending
-the request. When `machine0 new` returns an error, the original invocation polls
-inventory for a bounded 60-second reconciliation window. A machine that appears
-is retained and adopted; a definite no-machine result clears the attempt so an
-ordinary capacity failure remains retryable.
+the request. When `machine0 new` returns an error, the same resolver checks
+inventory for an attested VM. An empty result never clears the attempt or
+proves the request cannot finish later. Further inspection, stop, or exact
+replay may reconcile a visible resource, but never submit another create.
 
-The `machine0 ls --json` summary can omit a VM's entire SSH-key object. When a
-fixed replay has a durable selected key but its exactly owned inventory entry
-has no usable key identity, Crabbox performs one `machine0 get <vm> --json`
-detail read. The detail must identify the same VM and selected key; missing or
-mismatched identity or conflicting key types fail closed. Explicitly public keys
-retain public-key semantics, and replay without a selected provider key keeps
-generic SSH-key fallback without an additional detail read.
+The `machine0 ls --json` summary can omit `imageVersion` and a VM's SSH-key
+object. Fixed replay uses inventory only to discover the exact resource, then
+reads `machine0 get <vm> --json` before validating the durable attempt or
+starting the VM. Detail must match both the inventory ID and name, the pinned
+size, region, image and version, and any selected SSH key. Missing pinned
+versions, mismatched fields, and failed detail reads stop replay without
+creating a replacement. When detail omits only the key type, Crabbox preserves
+the inventory type after rejecting conflicting key names or types. Public-key
+semantics and generic SSH-key fallback without a selected provider key remain
+supported. Readiness refreshes must pass the same attestation before binding or starting.
+Destroy rechecks full details under the claim lock immediately before the
+name-based removal. These checks reject observed replacements; they do not
+provide atomic fencing against a privileged replacement inside the native CLI
+request.
 
 Once creation may have succeeded, later readiness or SSH failures never roll the
 VM back: the caller's fixed lease identity remains bound to it, and a matching
@@ -320,6 +398,7 @@ through the provider-neutral checkpoint commands:
 crabbox checkpoint create --id linux-ci --mode native --strategy image --name ci-baseline
 crabbox checkpoint inspect <checkpoint-id> --verify
 crabbox checkpoint fork <checkpoint-id> --slug experiment
+crabbox checkpoint fork <checkpoint-id> --class fast --type xl-nvme --slug native-fork
 crabbox checkpoint delete <checkpoint-id>
 ```
 
@@ -328,6 +407,11 @@ current Crabbox configuration, including `machine0.cliPath` (or
 `CRABBOX_MACHINE0_CLI`) and `machine0.pollInterval`. A custom executable does
 not need to be on `PATH`. Provider-backed deletion keeps the local checkpoint
 record if configuration or resource verification fails.
+
+An explicit `--type` also selects the exact native size for a checkpoint fork.
+The fork uses the checkpoint's recorded region and image version. The provider
+still enforces image and disk compatibility; a catalog row alone does not prove
+that a smaller target can boot a larger snapshot.
 
 Creation flushes a running source over SSH, calls `machine0 stop`, waits for
 exact `STOPPED`, and then uses `machine0 images save <vm> <image>`. The VM stays
@@ -344,6 +428,28 @@ its underlying snapshot must be `READY` before a running source can restart.
 The barrier uses `--wait-timeout` when it is positive, otherwise
 `machine0.createTimeout`. Stop continues billing compute, so this is a
 consistency requirement rather than a cost-saving lifecycle action.
+
+For source retirement, use the explicit replayable
+[`checkpoint create --retire-source`](../commands/checkpoint.md#replayable-source-retirement)
+contract with a caller-persisted `--checkpoint-id`. It records submission and
+observed image/version identity durably, returns pending without starting the
+source, and removes the source only after its exact snapshot is `READY`.
+`STARTING` and `STOPPING` are pending observations, not destruction proof.
+Lost save or remove responses retain the same operation for reconciliation.
+Ordinary stop, resume, reuse, and cleanup cannot take over its source.
+Readiness probes hold the source claim fence through start, SSH preparation,
+and endpoint publication; status touches authorize inside their mutation fence
+as well. Capture admission uses that same fence, including
+the interval after journal reservation but before claim binding. Read-only
+status does not start the source or publish a new claim generation.
+
+The native CLI accepts names for save and lifecycle mutations. Crabbox checks
+the immutable source identity again at each observable boundary and rejects a
+replacement; remote checkpoint metadata is correlation, not independent
+source attestation. These checks are not atomic remote fencing: a separately
+privileged administrator replacing a managed name inside an opaque native CLI
+request is outside the cooperating Crabbox owner contract. The adapter does
+not assume an undocumented immutable-ID getter or conditional mutation API.
 
 Reusing an image name creates a new version, which Crabbox records and passes
 back through `--image-version` when forking. A draft becomes usable only after

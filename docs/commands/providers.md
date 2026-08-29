@@ -22,6 +22,7 @@ crabbox providers recommend run-evidence --reachability provider-url --evidence 
 crabbox providers recommend versioned-workspace
 crabbox providers sizes machine0
 crabbox providers sizes machine0 --all --refresh --json
+crabbox providers sizes machine0 --with-context --class fast --json
 ```
 
 ## Flags
@@ -84,11 +85,25 @@ crabbox providers sizes machine0 --all --refresh
 Flags:
 
 - `--json` emits the complete catalog as a JSON array.
-- `--all` includes currently unavailable sizes whose live `regions` array is
-  empty. Without it, those entries are omitted.
+- `--all` includes currently unavailable sizes whose `regions` is empty or
+  `null`. Without it, those entries are omitted.
 - `--refresh` asks the provider to bypass any catalog cache. Providers that
   always fetch live data already satisfy this request without retaining a
   cache.
+- `--with-context` requires `--json` and wraps the same catalog in
+  `{ "sizes": [...], "selection": { "selector": "type", "effectiveType": "xxxl", "region": "eu" } }`.
+  Only providers explicitly advertising `sizeSelection: "type"` support this
+  context. Each catalog `name` is an exact native `--type` selector.
+- `--class <class>` resolves the existing portable class against the selected
+  provider and merged configuration. Explicit native configuration still wins.
+
+`selection` describes the effective selection without a session override, not
+a capacity reservation. A configured type may be missing from the catalog or
+unavailable; the response preserves that identifier without fabricating a row
+or choosing a fallback. `--all` still controls inclusion of sizes unavailable
+everywhere; callers can compare each row's `regions` with `selection.region`
+for regional availability. Catalog errors fail the command without partial JSON.
+Without `--with-context`, the JSON array and human table remain unchanged.
 
 Human output includes size, vCPU, GPU label, RAM GB, disk GB, hourly cost,
 and current regions. JSON preserves the provider's exact integer
@@ -177,6 +192,11 @@ explicit `(none)` in their provider section. Shared flags are command-level
 target, provider-kind, or option-combination validation.
 
 ### JSON schema v2
+
+Providers that opt into native size selection also include the optional
+top-level `sizeSelection: "type"` field, as in the static matrix. This is a
+provider declaration, not a live catalog or effective configuration. Schema
+version 2 and the existing flag metadata remain unchanged.
 
 `--json` emits one object. Every array is present, including empty arrays, and
 identity aliases, targets, capability arrays, and flag records are sorted for

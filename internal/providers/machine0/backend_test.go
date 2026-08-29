@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -218,6 +217,12 @@ func (f *fakeAPI) SaveImage(_ context.Context, vm, image string, _ map[string]st
 }
 func (f *fakeAPI) RemoveImage(_ context.Context, image string) error {
 	f.removedImage = append(f.removedImage, image)
+	for i, candidate := range f.images {
+		if candidate.Name == image {
+			f.images = append(f.images[:i], f.images[i+1:]...)
+			break
+		}
+	}
 	return nil
 }
 func (f *fakeAPI) RemoveImageVersion(_ context.Context, image string, version int) error {
@@ -680,6 +685,7 @@ func TestAcquireRecoveryClaimTracksCreatedMachines(t *testing.T) {
 		removeErr     error
 		ready         bool
 		bindingFails  bool
+		wrongSize     bool
 		claimChanged  bool
 		sshErr        error
 		wantClaim     bool
@@ -695,6 +701,8 @@ func TestAcquireRecoveryClaimTracksCreatedMachines(t *testing.T) {
 		{name: "successful rollback removes claim", wantRemovals: 1},
 		{name: "failed ID binding rolls back pending claim", ready: true, bindingFails: true, wantRemovals: 1},
 		{name: "success upgrades claim", keep: true, ready: true, wantClaim: true, wantCloudID: "vm-123"},
+		{name: "substituted size rolls back", ready: true, wrongSize: true, wantRemovals: 1, wantErrorPart: "mismatched machine size"},
+		{name: "kept substituted size remains stoppable", keep: true, ready: true, wrongSize: true, wantClaim: true, wantRecovery: true, stopRecovery: true, wantErrorPart: "mismatched machine size"},
 		{name: "SSH failure retains ID-scoped recovery claim", keep: true, ready: true, sshErr: errors.New("SSH authentication failed"), wantClaim: true, wantRecovery: true, wantCloudID: "vm-123"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -726,6 +734,9 @@ func TestAcquireRecoveryClaimTracksCreatedMachines(t *testing.T) {
 				if tc.bindingFails {
 					item.ID = ""
 				}
+				if tc.wrongSize {
+					item.Size = "medium"
+				}
 				api.machine = item
 				if tc.ready {
 					return item, nil
@@ -733,7 +744,7 @@ func TestAcquireRecoveryClaimTracksCreatedMachines(t *testing.T) {
 				return machine{}, context.Canceled
 			}
 			b := testBackendWithAPI(api)
-			if tc.ready && !tc.bindingFails {
+			if tc.ready && !tc.bindingFails && !tc.wrongSize {
 				b.waitSSH = func(context.Context, *SSHTarget, time.Duration) error {
 					bound, ok, err := resolveClaim(observed.LeaseID)
 					if err != nil || !ok || bound.CloudID != "vm-123" || bound.ProviderScope != machineScope("vm-123") {
@@ -743,7 +754,7 @@ func TestAcquireRecoveryClaimTracksCreatedMachines(t *testing.T) {
 				}
 			}
 			lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}, RequestedSlug: "recovery", Keep: tc.keep})
-			if tc.ready && !tc.bindingFails && tc.sshErr == nil {
+			if tc.ready && !tc.bindingFails && !tc.wrongSize && tc.sshErr == nil {
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -753,7 +764,7 @@ func TestAcquireRecoveryClaimTracksCreatedMachines(t *testing.T) {
 			if len(api.removed) != tc.wantRemovals {
 				t.Fatalf("rollback removals=%v", api.removed)
 			}
-			claim, ok, claimErr := resolveClaim(observed.LeaseID)
+			claim, ok, claimErr := core.ReadLeaseClaimWithPresence(observed.LeaseID)
 			if claimErr != nil || ok != tc.wantClaim {
 				t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, claimErr)
 			}
@@ -775,7 +786,7 @@ func TestAcquireRecoveryClaimTracksCreatedMachines(t *testing.T) {
 				if releaseErr := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: claim.LeaseID}}); releaseErr != nil {
 					t.Fatalf("recovery stop: %v", releaseErr)
 				}
-				if _, remains, resolveErr := resolveClaim(claim.LeaseID); resolveErr != nil || remains {
+				if _, remains, resolveErr := core.ReadLeaseClaimWithPresence(claim.LeaseID); resolveErr != nil || remains {
 					t.Fatalf("released recovery claim remains=%v err=%v", remains, resolveErr)
 				}
 			}
@@ -1876,6 +1887,12 @@ func checkpointCreateFixture(t *testing.T) (*backend, *fakeAPI, LeaseTarget, Lea
 	return b, api, lease, claim, req
 }
 
+func checkpointSource(req core.NativeCheckpointCreateRequest, ip string) machine {
+	item := readyMachine(ip)
+	item.Name = req.Server.Name
+	return item
+}
+
 func readyCheckpointImage(req core.NativeCheckpointCreateRequest, claim LeaseClaim, version int) machineImageDetail {
 	return machineImageDetail{
 		Image: machineImage{ID: "img-1", Name: req.Name, Status: "READY"},
@@ -1901,11 +1918,12 @@ func TestCreateNativeCheckpointStopsSavesRestartsAndRefreshesClaimEndpoint(t *te
 	}
 	api.rejectStartBeforeReady = true
 	api.getSequence = []machine{
-		readyMachine("203.0.113.10"),
-		func() machine { item := readyMachine("203.0.113.10"); item.Status = "STOPPING"; return item }(),
-		func() machine { item := readyMachine("203.0.113.10"); item.Status = "STOPPED"; return item }(),
-		func() machine { item := readyMachine("203.0.113.77"); item.Status = "STARTING"; return item }(),
-		readyMachine("203.0.113.77"),
+		checkpointSource(req, "203.0.113.10"),
+		checkpointSource(req, "203.0.113.10"),
+		func() machine { item := checkpointSource(req, "203.0.113.10"); item.Status = "STOPPING"; return item }(),
+		func() machine { item := checkpointSource(req, "203.0.113.10"); item.Status = "STOPPED"; return item }(),
+		func() machine { item := checkpointSource(req, "203.0.113.77"); item.Status = "STARTING"; return item }(),
+		checkpointSource(req, "203.0.113.77"),
 	}
 	b.prepareNativeImageSource = func(context.Context, SSHTarget) error {
 		api.actions = append(api.actions, "prepare")
@@ -1963,9 +1981,10 @@ func TestCreateNativeCheckpointSaveFailureRestartsSource(t *testing.T) {
 	b, api, _, claim, req := checkpointCreateFixture(t)
 	api.saveErr = errors.New("image save rejected")
 	api.getSequence = []machine{
-		readyMachine("203.0.113.10"),
-		func() machine { item := readyMachine("203.0.113.10"); item.Status = "STOPPED"; return item }(),
-		readyMachine("203.0.113.10"),
+		checkpointSource(req, "203.0.113.10"),
+		checkpointSource(req, "203.0.113.10"),
+		func() machine { item := checkpointSource(req, "203.0.113.10"); item.Status = "STOPPED"; return item }(),
+		checkpointSource(req, "203.0.113.10"),
 	}
 
 	result, err := b.createNativeCheckpoint(context.Background(), req, claim)
@@ -1985,8 +2004,9 @@ func TestCreateNativeCheckpointJoinsSaveAndRestartFailures(t *testing.T) {
 	api.saveErr = errors.New("image save rejected")
 	api.startErr = errors.New("start rejected")
 	api.getSequence = []machine{
-		readyMachine("203.0.113.10"),
-		func() machine { item := readyMachine("203.0.113.10"); item.Status = "STOPPED"; return item }(),
+		checkpointSource(req, "203.0.113.10"),
+		checkpointSource(req, "203.0.113.10"),
+		func() machine { item := checkpointSource(req, "203.0.113.10"); item.Status = "STOPPED"; return item }(),
 	}
 
 	_, err := b.createNativeCheckpoint(context.Background(), req, claim)
@@ -2002,8 +2022,9 @@ func TestCreateNativeCheckpointRestartFailureKeepsObservedImageIdentity(t *testi
 	b, api, _, claim, req := checkpointCreateFixture(t)
 	api.startErr = errors.New("start rejected")
 	api.getSequence = []machine{
-		readyMachine("203.0.113.10"),
-		func() machine { item := readyMachine("203.0.113.10"); item.Status = "STOPPED"; return item }(),
+		checkpointSource(req, "203.0.113.10"),
+		checkpointSource(req, "203.0.113.10"),
+		func() machine { item := checkpointSource(req, "203.0.113.10"); item.Status = "STOPPED"; return item }(),
 	}
 
 	result, err := b.createNativeCheckpoint(context.Background(), req, claim)
@@ -2019,9 +2040,10 @@ func TestCreateNativeCheckpointRestartsAfterTerminalSnapshotState(t *testing.T) 
 	b, api, _, claim, req := checkpointCreateFixture(t)
 	api.imageDetail = checkpointImageSnapshotState(req, claim, 1, "FAILED")
 	api.getSequence = []machine{
-		readyMachine("203.0.113.10"),
-		func() machine { item := readyMachine("203.0.113.10"); item.Status = "STOPPED"; return item }(),
-		readyMachine("203.0.113.10"),
+		checkpointSource(req, "203.0.113.10"),
+		checkpointSource(req, "203.0.113.10"),
+		func() machine { item := checkpointSource(req, "203.0.113.10"); item.Status = "STOPPED"; return item }(),
+		checkpointSource(req, "203.0.113.10"),
 	}
 
 	result, err := b.createNativeCheckpoint(context.Background(), req, claim)
@@ -2041,8 +2063,9 @@ func TestCreateNativeCheckpointJoinsSnapshotAndRestartFailures(t *testing.T) {
 	api.imageDetail = checkpointImageSnapshotState(req, claim, 1, "FAILED")
 	api.startErr = errors.New("start rejected")
 	api.getSequence = []machine{
-		readyMachine("203.0.113.10"),
-		func() machine { item := readyMachine("203.0.113.10"); item.Status = "STOPPED"; return item }(),
+		checkpointSource(req, "203.0.113.10"),
+		checkpointSource(req, "203.0.113.10"),
+		func() machine { item := checkpointSource(req, "203.0.113.10"); item.Status = "STOPPED"; return item }(),
 	}
 
 	result, err := b.createNativeCheckpoint(context.Background(), req, claim)
@@ -2061,9 +2084,10 @@ func TestCreateNativeCheckpointRestartsAfterSnapshotTimeout(t *testing.T) {
 	b.sleep = sleepContext
 	api.imageDetail = checkpointImageSnapshotState(req, claim, 1, "CREATING")
 	api.getSequence = []machine{
-		readyMachine("203.0.113.10"),
-		func() machine { item := readyMachine("203.0.113.10"); item.Status = "STOPPED"; return item }(),
-		readyMachine("203.0.113.10"),
+		checkpointSource(req, "203.0.113.10"),
+		checkpointSource(req, "203.0.113.10"),
+		func() machine { item := checkpointSource(req, "203.0.113.10"); item.Status = "STOPPED"; return item }(),
+		checkpointSource(req, "203.0.113.10"),
 	}
 
 	result, err := b.createNativeCheckpoint(context.Background(), req, claim)
@@ -2083,9 +2107,10 @@ func TestCreateNativeCheckpointRestartsAfterCallerCancellation(t *testing.T) {
 	b.sleep = sleepContext
 	api.imageDetail = checkpointImageSnapshotState(req, claim, 1, "CREATING")
 	api.getSequence = []machine{
-		readyMachine("203.0.113.10"),
-		func() machine { item := readyMachine("203.0.113.10"); item.Status = "STOPPED"; return item }(),
-		readyMachine("203.0.113.10"),
+		checkpointSource(req, "203.0.113.10"),
+		checkpointSource(req, "203.0.113.10"),
+		func() machine { item := checkpointSource(req, "203.0.113.10"); item.Status = "STOPPED"; return item }(),
+		checkpointSource(req, "203.0.113.10"),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -2115,9 +2140,9 @@ func TestCreateNativeCheckpointStopTimeoutRestartsWithoutSaving(t *testing.T) {
 	b, api, _, claim, req := checkpointCreateFixture(t)
 	b.cfg.Machine0.CreateTimeout = time.Nanosecond
 	b.sleep = sleepContext
-	stopping := readyMachine("203.0.113.10")
+	stopping := checkpointSource(req, "203.0.113.10")
 	stopping.Status = "STOPPING"
-	api.getSequence = []machine{readyMachine("203.0.113.10"), stopping, readyMachine("203.0.113.10")}
+	api.getSequence = []machine{checkpointSource(req, "203.0.113.10"), checkpointSource(req, "203.0.113.10"), stopping, checkpointSource(req, "203.0.113.10")}
 
 	result, err := b.createNativeCheckpoint(context.Background(), req, claim)
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
@@ -2135,7 +2160,7 @@ func TestCreateNativeCheckpointPreservesAlreadyStoppedSource(t *testing.T) {
 		checkpointImageSnapshotState(req, claim, 1, "CREATING"),
 		readyCheckpointImage(req, claim, 1),
 	}
-	stopped := readyMachine("203.0.113.10")
+	stopped := checkpointSource(req, "203.0.113.10")
 	stopped.Status = "STOPPED"
 	api.getSequence = []machine{stopped}
 	b.prepareNativeImageSource = func(context.Context, SSHTarget) error {
@@ -2163,7 +2188,7 @@ func TestCreateNativeCheckpointRejectsMismatchedClaimScopeBeforeMutation(t *test
 	if err != nil || !ok || claim.ProviderScope != machineScope("vm-other") {
 		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
 	}
-	api.getSequence = []machine{readyMachine("203.0.113.10")}
+	api.getSequence = []machine{checkpointSource(req, "203.0.113.10")}
 
 	_, err = b.createNativeCheckpoint(context.Background(), req, claim)
 	if err == nil || !strings.Contains(err.Error(), "provider scope mismatch") {
@@ -2238,6 +2263,7 @@ func TestCheckpointImageRequiresExactVersionAndRemoteOwnershipMetadata(t *testin
 		}}},
 	}}
 	b := testBackendWithAPI(api)
+	api.images = []machineImage{api.imageDetail.Image}
 	req := core.NativeCheckpointResourceRequest{
 		Image:    core.NativeCheckpointImage{Provider: providerName, Kind: core.CheckpointKindMachine0, Direct: true, ResourceID: "img-1"},
 		Metadata: map[string]string{metadataImageName: "baseline", metadataImageID: "img-1", metadataImageVersion: "2", metadataSourceMachine: "vm-123", "crabbox_checkpoint": "chk_123", "crabbox_lease": "cbx_123"},
@@ -2262,6 +2288,7 @@ func TestWholeImageCheckpointDeleteRefusesUnrelatedLaterVersions(t *testing.T) {
 		Versions: []machineImageVersion{owned, {Version: 2, Status: "DRAFT", DisplayStatus: "DRAFT", SnapshotStatus: "READY"}},
 	}}
 	b := testBackendWithAPI(api)
+	api.images = []machineImage{api.imageDetail.Image}
 	req := core.NativeCheckpointResourceRequest{
 		Image: core.NativeCheckpointImage{Provider: providerName, Kind: core.CheckpointKindMachine0, Direct: true, ResourceID: "img-1"},
 		Metadata: map[string]string{
@@ -2420,34 +2447,5 @@ func TestImageWaitSelectsMatchingConcurrentSaveVersion(t *testing.T) {
 	}
 	if version.Version != 2 {
 		t.Fatalf("selected concurrent version v%d, want owned v2", version.Version)
-	}
-}
-
-func TestCLIProvidersSizesUsesMachine0LiveCatalog(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell fixture is POSIX-only")
-	}
-	setupState(t)
-	dir := t.TempDir()
-	cli := filepath.Join(dir, "machine0")
-	script := `#!/bin/sh
-if [ "$1" = "sizes" ]; then
-  printf '%s\n' '[{"size":"gpu-l40s-1","vcpu":8,"ramGb":64,"diskGb":500,"gpu":{"label":"1x L40S","vramGb":48},"regions":["eu"],"pricePerHourMicro":1727000}]'
-  exit 0
-fi
-exit 1
-`
-	if err := os.WriteFile(cli, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("CRABBOX_MACHINE0_CLI", cli)
-	t.Setenv("CRABBOX_PROVIDER", providerName)
-	var stdout, stderr bytes.Buffer
-	app := core.App{Stdout: &stdout, Stderr: &stderr}
-	if err := app.Run(context.Background(), []string{"providers", "sizes", "machine0", "--json"}); err != nil {
-		t.Fatalf("providers sizes: %v stderr=%s", err, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), `"name":"gpu-l40s-1"`) || !strings.Contains(stdout.String(), `"pricePerHourMicro":1727000`) || !strings.Contains(stdout.String(), `"vramGb":48`) {
-		t.Fatalf("stdout=%s", stdout.String())
 	}
 }

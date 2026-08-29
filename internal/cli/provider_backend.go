@@ -182,6 +182,25 @@ type ProviderSizeCatalogBackend interface {
 	SizeCatalog(ctx context.Context, refresh bool) ([]ProviderSize, error)
 }
 
+// ProviderSizeSelector declares how a live catalog name selects a machine.
+type ProviderSizeSelector string
+
+// ProviderSizeSelectorType uses catalog Name verbatim as the existing --type value.
+const ProviderSizeSelectorType ProviderSizeSelector = "type"
+
+// ProviderSizeSelectionBackend reports already-resolved provider configuration;
+// resource facts remain owned by SizeCatalog.
+type ProviderSizeSelectionBackend interface {
+	ProviderSizeCatalogBackend
+	SizeSelection() ProviderSizeSelection
+}
+
+type ProviderSizeSelection struct {
+	Selector      ProviderSizeSelector `json:"selector"`
+	EffectiveType string               `json:"effectiveType"`
+	Region        string               `json:"region"`
+}
+
 type ProviderSize struct {
 	Name                string            `json:"name"`
 	VCPU                int               `json:"vcpu"`
@@ -400,6 +419,9 @@ type NativeCheckpointCapability struct {
 	Kind              string
 	Direct            bool
 	CreateUnsupported string
+	RetireUnsupported string
+	ReplayCapture     bool
+	RetireSource      bool
 }
 
 type NativeCheckpointRequest struct {
@@ -449,6 +471,24 @@ type NativeCheckpointCreateRequest struct {
 	Wait         bool
 	WaitTimeout  time.Duration
 	Stderr       io.Writer
+	Capture      *NativeCheckpointCapture
+	Metadata     map[string]string
+}
+
+// NativeCheckpointCapture is the host-owned operation journal. Provider metadata
+// is correlation only; source authority comes from the bound local claim.
+type NativeCheckpointCapture struct {
+	SourceDisposition string `json:"sourceDisposition"`
+	Phase             string `json:"phase"`
+	StrategyExplicit  bool   `json:"strategyExplicit,omitempty"`
+	SourceID          string `json:"sourceId"`
+	SourceName        string `json:"sourceName"`
+	SourceScope       string `json:"sourceScope"`
+	SourceRevision    string `json:"sourceRevision"`
+	SourceClaimedAt   string `json:"sourceClaimedAt"`
+	SourceIntent      string `json:"sourceIntent,omitempty"`
+	Error             string `json:"error,omitempty"`
+	DiscardFailed     bool   `json:"discardFailed,omitempty"`
 }
 
 type NativeCheckpointCreateResult struct {
@@ -471,6 +511,19 @@ type NativeCheckpointResourceRequest struct {
 	LoadConfig func() (Config, error)
 	Image      NativeCheckpointImage
 	Metadata   map[string]string
+}
+
+// CheckpointSourceVerifier must use provider authority, not a filtered lease
+// inventory or a missing local claim, to confirm the captured source is gone.
+type CheckpointSourceVerifier interface {
+	CheckpointSourceAbsent(context.Context, CheckpointSourceRequest) (bool, error)
+}
+
+type CheckpointSourceRequest struct {
+	LeaseID   string
+	Capture   NativeCheckpointCapture
+	Resource  NativeCheckpointResourceRequest
+	AccountID string
 }
 
 type NativeCheckpointVerifyResult struct {
@@ -540,6 +593,7 @@ type ProviderSpec struct {
 	Features         FeatureSet
 	Coordinator      CoordinatorMode
 	ClassDisposition ProviderClassDisposition
+	SizeSelection    ProviderSizeSelector
 	// TailscaleEgressOnly marks FeatureTailscale as outbound userspace access,
 	// not a bidirectional peer endpoint.
 	TailscaleEgressOnly bool
@@ -885,6 +939,7 @@ func (r ResolveRequest) IsReadOnlyStatus() bool {
 
 type ReleaseLeaseRequest struct {
 	Lease                    LeaseTarget
+	CheckpointID             string
 	Force                    bool
 	ExpectedProviderIdentity ProviderIdentityExpectation
 	// DeferProviderCleanupObservation queues coordinator cleanup without waiting

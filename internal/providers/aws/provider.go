@@ -303,8 +303,9 @@ func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (co
 			return core.NativeCheckpointCapability{}, false
 		}
 		return core.NativeCheckpointCapability{
-			Kind:   core.CheckpointKindAWSAMI,
-			Direct: req.Config.Coordinator == "",
+			Kind:         core.CheckpointKindAWSAMI,
+			Direct:       req.Config.Coordinator == "",
+			RetireSource: true,
 		}, true
 	}
 	if targetOS != core.TargetLinux && targetOS != core.TargetMacOS {
@@ -314,12 +315,12 @@ func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (co
 		if targetOS != core.TargetMacOS && strategy != core.CheckpointStrategyImage {
 			return core.NativeCheckpointCapability{}, false
 		}
-		return core.NativeCheckpointCapability{Kind: core.CheckpointKindAWSAMI, Direct: true}, true
+		return core.NativeCheckpointCapability{Kind: core.CheckpointKindAWSAMI, Direct: true, RetireSource: true}, true
 	}
 	if targetOS == core.TargetMacOS || strategy == core.CheckpointStrategyImage {
-		return core.NativeCheckpointCapability{Kind: core.CheckpointKindAWSAMI}, true
+		return core.NativeCheckpointCapability{Kind: core.CheckpointKindAWSAMI, RetireSource: true}, true
 	}
-	return core.NativeCheckpointCapability{Kind: core.CheckpointKindAWSEBS}, true
+	return core.NativeCheckpointCapability{Kind: core.CheckpointKindAWSEBS, RetireSource: true}, true
 }
 
 func firstNonBlank(values ...string) string {
