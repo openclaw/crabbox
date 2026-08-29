@@ -452,6 +452,16 @@ draft version. Machine0 suspend snapshots such as
 `suspended-<machine>-<timestamp>` remain lifecycle artifacts, not reusable
 named checkpoint records.
 
+If the image still exists but its recorded version is already missing before
+deletion, verification reports `unknown`/`check_runtime` and deletion refuses
+with exit 4, retaining local metadata for manual reconciliation. A version
+deletion admitted after exact ownership checks can confirm that version's
+removal in the same invocation, including after a lost remove response, while
+preserving sibling versions. Whole-image deletion requires confirmed absence
+of the whole image; an existing image with no versions is not sufficient.
+Failed lookups, credentials, or identity checks never prove absence. No
+ordinary deletion-attempt state is persisted to authorize a later retry.
+
 Image and suspended-snapshot storage is billed separately. Removing or
 destroying a VM does not imply that unrelated named images should be deleted.
 Image-version storage prices may be fractional values; Crabbox preserves their

@@ -469,6 +469,16 @@ Even when the checkpoint originally created the image name, Crabbox refuses
 version. Resolve extra versions manually so checkpoint deletion cannot erase
 unrelated work.
 
+If a Machine0 image exists but its recorded version is missing before deletion,
+Crabbox refuses with exit 4 and keeps local metadata for manual reconciliation.
+After an admitted version removal, the same invocation may confirm that exact
+version is gone; whole-image removal must confirm the whole image is gone.
+An empty version list alone does not prove whole-image deletion.
+
+Delete and prune return exit 2 (`busy`) while another operation owns the
+checkpoint lock. They leave resources and metadata unchanged; retry explicitly
+after that operation, including any source rollback, finishes.
+
 **Flags**
 
 ```

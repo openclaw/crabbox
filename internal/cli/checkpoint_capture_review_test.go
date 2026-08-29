@@ -140,8 +140,18 @@ func runCheckpointCaptureReviewContract(t *testing.T, repo, binary string) {
 				t.Fatal(err)
 			}
 			if !held {
-				t.Error("ordinary writer did not hold the canonical checkpoint lock after image publication")
+				t.Fatal("ordinary writer did not hold the canonical checkpoint lock after image publication")
 			}
+			lockInfo, err := lock.Stat()
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(records[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			providerBefore, _ := json.Marshal(f.state())
+			claimBefore, _ := json.Marshal(f.claim())
 			args := []string{"checkpoint", "delete", id}
 			if action == "delete-local" {
 				args = append(args, "--local-only")
@@ -150,28 +160,69 @@ func runCheckpointCaptureReviewContract(t *testing.T, repo, binary string) {
 				args = []string{"checkpoint", "prune", "--older-than", "1ns"}
 			}
 			deleter := f.start("", args...)
-			// On the broken writer, finish the intervening deletion first to
-			// reproduce directory resurrection. The fixed writer owns the lock;
-			// its cancellation/restore must finish before deletion can proceed.
-			if !held {
-				<-deleter.done
+			// Deletion must fail fast while capture still owns the canonical lock.
+			// Cancel the writer only after that refusal, then explicitly retry.
+			<-deleter.done
+			if deleter.err == nil || deleter.cmd.ProcessState.ExitCode() != 2 || !bytes.Contains(deleter.output.stderr.Bytes(), []byte("checkpoint "+id+" is busy; retry after its current operation finishes")) {
+				t.Fatalf("deletion did not refuse the active writer: %v %s", deleter.err, deleter.output.stderr.String())
+			}
+			select {
+			case <-writer.done:
+				t.Fatalf("writer exited before the busy refusal: %v", writer.err)
+			default:
+			}
+			if after, err := os.ReadFile(records[0]); err != nil || !bytes.Equal(before, after) {
+				t.Fatalf("busy deletion changed checkpoint metadata: %v", err)
+			}
+			providerAfter, _ := json.Marshal(f.state())
+			claimAfter, _ := json.Marshal(f.claim())
+			if !bytes.Equal(providerBefore, providerAfter) || !bytes.Equal(claimBefore, claimAfter) {
+				t.Fatal("busy deletion changed the source, image, or claim")
+			}
+			if current, err := os.Stat(lockPath); err != nil || !os.SameFile(lockInfo, current) {
+				t.Fatalf("busy deletion replaced the canonical lock inode: %v", err)
 			}
 			if err := writer.signalGroup(syscall.SIGTERM); err != nil {
 				t.Fatal(err)
 			}
 			<-writer.done
-			<-deleter.done
-			if writer.err == nil || deleter.err != nil {
-				t.Fatalf("writer=%v deleter=%v %s", writer.err, deleter.err, deleter.output.stderr.String())
+			if writer.err == nil || writer.cmd.ProcessState.ExitCode() != 1 {
+				t.Fatalf("writer lost its cancellation status: %v %s", writer.err, writer.output.stderr.String())
 			}
-			if _, err := os.Stat(records[0]); !os.IsNotExist(err) {
-				t.Fatalf("ordinary writer recreated deleted checkpoint: %v", err)
+			if f.record(id).Native.ImageID == "" || f.state().Image == nil {
+				t.Fatal("writer rollback lost the checkpoint before explicit deletion")
 			}
 			if s := f.state(); s.Saves != 1 || s.Starts != 1 || s.Machine["status"] != "RUNNING" {
 				t.Fatalf("ordinary restore changed: %+v", s)
 			}
+			f.requireOrder("stopped", "saved", "image", "started", "ssh-ready")
+			restoredProvider, _ := json.Marshal(f.state())
+			if result := f.run(args...); result.err != nil {
+				t.Fatalf("explicit deletion retry failed: %v %s", result.err, result.stderr)
+			}
+			if _, err := os.Stat(filepath.Dir(records[0])); !os.IsNotExist(err) {
+				t.Fatalf("ordinary writer recreated deleted checkpoint directory: %v", err)
+			}
+			if current, err := os.Stat(lockPath); err != nil || !os.SameFile(lockInfo, current) {
+				t.Fatalf("successful deletion replaced the canonical lock inode: %v", err)
+			}
+			if s := f.state(); s.Saves != 1 || s.Starts != 1 || s.Machine["status"] != "RUNNING" || s.Removes != 0 {
+				t.Fatalf("deletion retry changed source restoration: %+v", s)
+			}
 			if action != "delete-local" {
-				f.requireOrder("started", "image-removed")
+				f.requireOrder("started", "ssh-ready", "image-removed")
+				if f.state().Image != nil {
+					t.Fatal("provider deletion retry retained the image")
+				}
+			} else {
+				if after, _ := json.Marshal(f.state()); !bytes.Equal(restoredProvider, after) {
+					t.Fatal("local-only deletion changed provider resources")
+				}
+				for _, event := range f.eventLog() {
+					if event.Kind == "image-removed" {
+						t.Fatal("local-only deletion invoked provider removal")
+					}
+				}
 			}
 		})
 	}

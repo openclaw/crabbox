@@ -302,11 +302,7 @@ func deleteHetznerCheckpointImage(ctx context.Context, store checkpointStore, li
 	if unresolvedCheckpoint(record) {
 		return checkpointRecord{}, exit(2, "checkpoint %s is unresolved; reconcile its capture before deletion", record.ID)
 	}
-	cfg, err := loadConfig()
-	if err != nil {
-		return checkpointRecord{}, err
-	}
-	if err := lifecycle.DeleteNativeCheckpoint(ctx, nativeCheckpointResourceRequest(record, cfg)); err != nil {
+	if err := lifecycle.DeleteNativeCheckpoint(ctx, nativeCheckpointResourceRequest(record)); err != nil {
 		return checkpointRecord{}, err
 	}
 	if err := store.Delete(record.ID); err != nil {
