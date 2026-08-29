@@ -68,7 +68,7 @@ Windows, including provider proxy descendants.
 
 ## Credential boundary
 
-For each transfer or forward, Crabbox writes a private temporary OpenSSH config
+For file copy and `crabbox tunnel`, Crabbox writes a private temporary OpenSSH config
 containing the resolved user, host, port, key/certificate paths, host-key
 policy, and ProxyCommand. The Crabbox-launched subprocess receives only `-F
 <private-path>` and a fixed non-secret alias. Token usernames therefore do not
@@ -84,6 +84,47 @@ uses WSL rsync, Crabbox stages the private config and identity in a
 mode-restricted WSL directory and removes that directory after the copy.
 Config-backed Windows aliases instead use native rsync and OpenSSH so
 `%USERPROFILE%\.ssh\config` routing can be resolved safely.
+
+VNC/WebVNC tunnel children and pond member forwards use this private session
+when the resolved target marks its SSH username as secret (`AuthSecret`).
+Ordinary, non-secret tunnel invocations retain their established arguments.
+Printed VNC/WebVNC tunnel commands redact secret usernames and provider proxy
+commands; those placeholders are not runnable credentials. Managed secret
+targets reject proxy commands containing or expanding the secret username and
+disable ambient identities, certificates, and agents unless the target
+explicitly supplies identity/certificate files. Config-backed routes preserve
+the operator's explicit authentication and routing contract. Their
+`ProxyCommand`, `Match exec`, or `ProxyJump` directives may independently expand
+tokens into descendant arguments; private root arguments do not guarantee
+secrecy inside those external helpers.
+
+Attached VNC/WebVNC and pond sessions retain the private config until SSH is
+reaped and owned process-tree teardown completes. Pond forwards keep one
+connection per member and preserve the ten-second connect timeout and three
+connection attempts. Its Unix anchor receives the same filtered and overridden
+child environment as SSH.
+
+Detached native VNC and secret-backed `pond connect --export` instead retain
+all private configs, including generated jump configs, until every requested
+IPv4 `127.0.0.1` listener belongs to its exact tracked SSH root PID. Roots use
+`ControlMaster=no`, `ControlPath=none`, `ControlPersist=no`, and
+`ForkAfterAuthentication=no`. OpenSSH establishes these listeners after
+authentication, so this barrier permits deleting the configs before returning
+success while forwarding continues over the established connections. A
+descendant's listener, a reachable port, or an elapsed grace period is not
+sufficient. Startup remains bounded and cancellable; failures stop and reap
+started children. Cleanup failures are reported rather than successful
+detachment, and failed tree teardown retains configs. Pond publishes its
+existing daemon state only after this barrier and config cleanup, with a safe
+`-F` path and alias in the recorded command. Windows pond export remains
+unsupported; platforms without listener ownership checks fail closed.
+
+An abrupt parent death before the barrier can leave a temporary config
+directory; there is no new crash-recovery daemon. This protection covers the
+tunnel spawn owners, not all SSH-based CLI commands: command-based readiness,
+password retrieval, remote setup/cleanup, and sync need their own transport
+boundary. Native VNC handoff stdout still intentionally contains the viewer
+credentials documented by that command.
 
 ## Related
 

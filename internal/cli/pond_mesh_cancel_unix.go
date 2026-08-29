@@ -72,7 +72,7 @@ func (h *pondMeshExecHandle) Start() error {
 		return fmt.Errorf("create pond mesh anchor pipe: %w", err)
 	}
 	anchor := exec.Command(executable, pondMeshAnchorArg)
-	anchor.Env = append(os.Environ(), pondMeshAnchorEnv+"=1")
+	anchor.Env = append(h.cmd.Environ(), pondMeshAnchorEnv+"=1")
 	anchor.ExtraFiles = []*os.File{anchorRead}
 	anchor.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := anchor.Start(); err != nil {

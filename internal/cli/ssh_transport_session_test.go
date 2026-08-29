@@ -154,6 +154,58 @@ func TestSSHTransportSessionKeepsSecretsOutOfProcessArgs(t *testing.T) {
 	}
 }
 
+func TestSSHTransportManagedIdentityPolicy(t *testing.T) {
+	for _, keyed := range []bool{false, true} {
+		t.Run(fmt.Sprint("keyed=", keyed), func(t *testing.T) {
+			isolateTestUserDirs(t)
+			target := SSHTarget{User: "synthetic-ssh-credential", Host: "ssh.example.test", Port: "22", AuthSecret: true}
+			if keyed {
+				target.Key = filepath.Join(t.TempDir(), "managed-key")
+				target.CertificateFile = target.Key + "-cert.pub"
+			}
+			session, err := newSSHTransportSession(t.Context(), target, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = session.Close() })
+			config, err := os.ReadFile(session.configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			identity := target.Key
+			if identity == "" {
+				identity = "none"
+			}
+			// Fail before invoking a real parser unless the config explicitly
+			// excludes operator identities and the ambient agent.
+			for _, required := range []string{`IdentityFile "` + identity + `"`, `IdentityAgent "none"`, "IdentitiesOnly yes", "ControlPath none"} {
+				if !strings.Contains(string(config), required) {
+					t.Fatalf("private config missing %s", strings.Fields(required)[0])
+				}
+			}
+			ssh, err := exec.LookPath("ssh")
+			if err != nil {
+				t.Skip("OpenSSH parser unavailable")
+			}
+			out, err := exec.Command(ssh, "-G", "-F", session.configPath, session.host()).Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, required := range []string{"identityfile " + identity + "\n", "identityagent none\n", "identitiesonly yes\n", "controlmaster false\n"} {
+				if !strings.Contains(string(out), required) {
+					t.Errorf("effective config missing %s", strings.Fields(required)[0])
+				}
+			}
+			if path, ok := parseSSHTransportControlPath(string(out)); ok && path != "none" {
+				t.Error("effective config selected a control socket")
+			}
+			if keyed && !strings.Contains(string(out), "certificatefile "+target.CertificateFile+"\n") {
+				t.Error("effective config lost managed certificate")
+			}
+		})
+	}
+}
+
 func TestSSHTransportConfigProxyIncludesUserRouting(t *testing.T) {
 	if os.PathSeparator == '\\' {
 		t.Skip("POSIX OpenSSH config fixture")
@@ -631,6 +683,14 @@ func TestProxyJumpExpansionQuotesResolvedTokensBeforeShell(t *testing.T) {
 }
 
 func TestSSHTransportConfigRejectsUnsafeProxyTokens(t *testing.T) {
+	for _, proxy := range []string{"provider-proxy %r", "provider-proxy synthetic-ssh-credential"} {
+		_, err := renderSSHTransportConfig(SSHTarget{
+			User: "synthetic-ssh-credential", Host: "example.test", Port: "22", AuthSecret: true, ProxyCommand: proxy,
+		}, false)
+		if err == nil || !strings.Contains(err.Error(), "must not contain or expand") || strings.Contains(err.Error(), "synthetic-ssh-credential") {
+			t.Fatalf("secret-bearing proxy was not rejected safely: %v", err)
+		}
+	}
 	_, err := renderSSHTransportConfig(SSHTarget{
 		User:         "alice",
 		Host:         "host;touch-pwn",

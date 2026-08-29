@@ -14,6 +14,14 @@ import (
 
 func controllerListenerOwnershipSupported() bool { return true }
 
+func sshForwardRootListenerReady(port string, pid int) error {
+	owners, err := controllerLinuxLoopbackListenerOwnerPIDs(port)
+	if err != nil {
+		return err
+	}
+	return verifySSHForwardRootOwners(owners, pid)
+}
+
 func controllerVerifyDaemonOwnedListener(port string, supervisorPID int) error {
 	owners, err := controllerLinuxLoopbackListenerOwnerPIDs(port)
 	if err != nil {

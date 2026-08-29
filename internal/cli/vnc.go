@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -437,49 +438,65 @@ func runVNCNativeHandoff(
 }
 
 func vncTunnelCommand(target SSHTarget, localPort string) string {
-	return strings.Join(shellWords(append([]string{"ssh"}, vncTunnelArgs(target, localPort, "127.0.0.1", managedVNCPort)...)), " ")
+	return vncTunnelCommandTo(target, localPort, "127.0.0.1", managedVNCPort)
 }
 
 func startVNCTunnel(ctx context.Context, target SSHTarget, localPort, remoteHost, remotePort string) (int, error) {
-	cmd := exec.Command(directSSHExecutable(), vncTunnelArgs(target, localPort, remoteHost, remotePort)...)
+	args, session, err := vncTunnelInvocation(ctx, target, localPort, remoteHost, remotePort)
+	if err != nil {
+		return 0, err
+	}
+	cmd := exec.Command(directSSHExecutable(), args...)
 	applyTargetChildEnvironment(cmd, target)
 	configureDaemonCommand(cmd)
+	cmd.WaitDelay = pondMeshCancelWaitDelay
 	var output bytes.Buffer
 	cmd.Stdout = &output
 	cmd.Stderr = &output
 	if err := cmd.Start(); err != nil {
-		return 0, err
+		return 0, errors.Join(err, session.Close())
 	}
-	deadline := time.Now().Add(vncTunnelReadinessTimeout())
-	var listenerErr error
-	for time.Now().Before(deadline) {
-		if ctx.Err() != nil {
-			_ = stopDaemonProcess(cmd.Process, cmd.Process.Pid)
-			_ = cmd.Wait()
-			return 0, context.Cause(ctx)
-		}
-		if ready, err := startedTunnelListenerReady(ctx, localPort, cmd.Process.Pid, target.ChildEnvDenylist...); ready {
-			pid := cmd.Process.Pid
-			if err := cmd.Process.Release(); err != nil {
-				_ = stopDaemonProcess(cmd.Process, pid)
-				_ = cmd.Wait()
-				return 0, err
-			}
-			return pid, nil
-		} else {
-			listenerErr = err
-		}
-		time.Sleep(100 * time.Millisecond)
+	// One waiter observes early exit and reaps while this CLI is alive. It owns
+	// no config after successful detachment and does not cancel on parent exit.
+	wait := startSSHForwardWait(cmd.Wait)
+	err = waitSSHForwardRoots(ctx, []sshForwardRoot{{pid: cmd.Process.Pid, ports: []string{localPort}, wait: wait}}, vncTunnelReadinessTimeout())
+	if err == nil {
+		err = session.Close()
 	}
-	_ = stopDaemonProcess(cmd.Process, cmd.Process.Pid)
-	_ = cmd.Wait()
-	if text := strings.TrimSpace(output.String()); text != "" {
-		return 0, exit(5, "start VNC SSH tunnel on 127.0.0.1:%s: %s", localPort, text)
+	if err == nil {
+		err = sshForwardStartupError(ctx, wait)
 	}
-	if listenerErr != nil {
-		return 0, exit(5, "verify VNC SSH tunnel listener on %s:%s: %v", vncLoopbackHost, localPort, listenerErr)
+	if err == nil {
+		return cmd.Process.Pid, nil
 	}
-	return 0, exit(5, "timed out starting VNC SSH tunnel on %s:%s", vncLoopbackHost, localPort)
+	cleanupErr := terminateWebVNCDaemonProcessTree(cmd.Process.Pid)
+	if cleanupErr != nil {
+		_ = stopDaemonProcess(cmd.Process, cmd.Process.Pid)
+	}
+	<-wait.done
+	if cleanupErr == nil {
+		cleanupErr = session.Close()
+	}
+	if diagnostic := strings.TrimSpace(redactSSHTransportDiagnostic(target, output.String())); diagnostic != "" {
+		err = fmt.Errorf("%w: %s", err, diagnostic)
+	}
+	if cause := context.Cause(ctx); cause == nil || !errors.Is(err, cause) {
+		err = errors.Join(exit(5, "start VNC SSH tunnel on %s:%s", vncLoopbackHost, localPort), err)
+	}
+	return 0, errors.Join(err, cleanupErr)
+}
+
+func vncTunnelInvocation(ctx context.Context, target SSHTarget, localPort, remoteHost, remotePort string) ([]string, *sshTransportSession, error) {
+	if !target.AuthSecret {
+		return vncTunnelArgs(target, localPort, remoteHost, remotePort), nil, nil
+	}
+	session, err := newSSHTransportSession(ctx, target, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	args := append(session.commandPrefix(), "-o", "ForkAfterAuthentication=no", "-N", "-L",
+		fmt.Sprintf("%s:%s:%s:%s", vncLoopbackHost, localPort, remoteHost, remotePort), session.host())
+	return args, session, nil
 }
 
 func vncTunnelArgs(target SSHTarget, localPort, remoteHost, remotePort string) []string {
