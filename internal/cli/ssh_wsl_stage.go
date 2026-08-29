@@ -149,16 +149,34 @@ func (s *wslStageSpool) close() error {
 }
 
 func (s *wslStageSpool) prefixDigest(size int64) (digest [sha256.Size]byte, err error) {
+	return s.prefixDigestContext(context.Background(), size)
+}
+
+func (s *wslStageSpool) prefixDigestContext(ctx context.Context, size int64) (digest [sha256.Size]byte, err error) {
 	if size < 0 || size > s.size {
 		return digest, errors.New("invalid WSL2 stage prefix length")
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return digest, cause
 	}
 	reader, err := s.input.reset()
 	if err != nil {
 		return digest, err
 	}
 	hash := sha256.New()
-	if _, err := io.CopyN(hash, reader, size); err != nil {
-		return digest, err
+	buffer := make([]byte, 32<<10)
+	for remaining := size; remaining > 0; {
+		if cause := context.Cause(ctx); cause != nil {
+			return digest, cause
+		}
+		count := min(int64(len(buffer)), remaining)
+		if _, err := io.ReadFull(reader, buffer[:count]); err != nil {
+			return digest, err
+		}
+		if _, err := hash.Write(buffer[:count]); err != nil {
+			return digest, err
+		}
+		remaining -= count
 	}
 	copy(digest[:], hash.Sum(nil))
 	return digest, nil
@@ -449,11 +467,11 @@ func (s *wslStageSpool) cleanupPart(ctx context.Context, target SSHTarget, sessi
 	if !info.Mode().IsRegular() || info.Size() < 0 || info.Size() > s.size {
 		return errors.New("refuse non-regular or oversized WSL2 partial")
 	}
-	digest, err := s.prefixDigest(info.Size())
+	digest, err := s.prefixDigestContext(cleanupCtx, info.Size())
 	if err != nil {
 		return err
 	}
-	return discardWSLStage(cleanupCtx, target, session, nonce+".part", info.Size(), digest, connectTimeout)
+	return discardWSLStageWithinContext(cleanupCtx, target, session, nonce+".part", info.Size(), digest, connectTimeout)
 }
 
 func wslStageCleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -465,15 +483,19 @@ func wslStageCleanupContext(ctx context.Context) (context.Context, context.Cance
 }
 
 func discardWSLStage(ctx context.Context, target SSHTarget, session *sshTransportSession, name string, size int64, digest [sha256.Size]byte, connectTimeout string) error {
+	cleanupCtx, cancel := wslStageCleanupContext(ctx)
+	defer cancel()
+	return discardWSLStageWithinContext(cleanupCtx, target, session, name, size, digest, connectTimeout)
+}
+
+func discardWSLStageWithinContext(ctx context.Context, target SSHTarget, session *sshTransportSession, name string, size int64, digest [sha256.Size]byte, connectTimeout string) error {
 	nonce := strings.TrimSuffix(strings.TrimPrefix(name, "."), ".proof")
 	nonce = strings.TrimSuffix(nonce, ".part")
 	command := wslStageFileCommand(nonce, name, size, digest, true, wslStageCMD)
 	if command == "" || len(command) >= wslStageLauncherMax {
 		return errors.New("invalid WSL2 exact discard command")
 	}
-	cleanupCtx, cancel := wslStageCleanupContext(ctx)
-	defer cancel()
-	return runWSLStageCommand(cleanupCtx, target, session, command, connectTimeout, "1", io.Discard, io.Discard)
+	return runWSLStageCommand(ctx, target, session, command, connectTimeout, "1", io.Discard, io.Discard)
 }
 
 func wslStageFileCommand(nonce, name string, size int64, digest [sha256.Size]byte, discard bool, shell wslStageShell) string {

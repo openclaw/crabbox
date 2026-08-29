@@ -63,6 +63,7 @@ jobs:
           manifest="$RUNNER_TEMP/wsl-stage-linux.jsonl"
           tests=(
             TestWSLStageLinuxPassesExitOutputAndFiniteInput
+            TestWSLStageLinuxNormalExitSkipsSignalGrace
             TestWSLStageLinuxDisconnectKillsExactProcessGroup
             TestWSLStageLinuxGuardMismatchPreservesEvidence
             TestWSLStageLinuxPreOwnershipFailureRemovesExactResidue

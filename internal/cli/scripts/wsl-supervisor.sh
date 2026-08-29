@@ -39,10 +39,13 @@ cleanup_group() {
     # The in-memory tuple was proven before arming and remains authoritative
     # for stopping the group even if the on-disk evidence was later tampered.
     valid_process_guard || return 1
-    kill -TERM -- "-$group" 2>/dev/null || return 1
-    local ticks=$(((grace_ms + 99) / 100))
-    while [ "$ticks" -gt 0 ]; do sleep .1; ticks=$((ticks - 1)); done
-    valid_process_guard || return 1
+    local ticks
+    if [ "$1" != complete ]; then
+        kill -TERM -- "-$group" 2>/dev/null || return 1
+        ticks=$(((grace_ms + 99) / 100))
+        while [ "$ticks" -gt 0 ]; do sleep .1; ticks=$((ticks - 1)); done
+        valid_process_guard || return 1
+    fi
     kill -KILL -- "-$group" 2>/dev/null || return 1
     wait "$leader" 2>/dev/null || :
     wait "$guard" 2>/dev/null || :
@@ -161,15 +164,20 @@ if ! read_guard || [ "$guard" != "$owned_guard" ] || ! valid_guard; then
 fi
 if [ ! -e "$directory/.lost" ] && [ ! -e "$directory/.cancel" ]; then : >"$directory/.armed"; fi
 code=74
+completion=interrupted
 while valid_guard; do
     [ -e "$directory/.lost" ] || [ -e "$directory/.cancel" ] && break
-    if [ -e "$directory/.result" ]; then read -r code <"$directory/.result"; break; fi
+    if [ -e "$directory/.result" ]; then
+        read -r code <"$directory/.result" || break
+        completion=complete
+        break
+    fi
     kill -0 "$leader" 2>/dev/null || break
     sleep .1
 done
 kill "$watcher" 2>/dev/null || :
 wait "$watcher" 2>/dev/null || :
-if ! cleanup_group; then
+if ! cleanup_group "$completion"; then
     echo 'WSL2 command cleanup failed: group absence unconfirmed' >&2
     exit 74
 fi

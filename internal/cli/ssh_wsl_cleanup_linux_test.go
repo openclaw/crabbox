@@ -27,6 +27,10 @@ type wslStageLinuxFixture struct {
 }
 
 func startWSLStageLinuxFixture(t *testing.T, command string, input []byte) *wslStageLinuxFixture {
+	return startWSLStageLinuxFixtureWithGrace(t, command, input, 300*time.Millisecond)
+}
+
+func startWSLStageLinuxFixtureWithGrace(t *testing.T, command string, input []byte, grace time.Duration) *wslStageLinuxFixture {
 	t.Helper()
 	if _, err := exec.LookPath("setsid"); err != nil {
 		t.Fatal("WSL2 supervisor proof requires setsid")
@@ -44,7 +48,7 @@ func startWSLStageLinuxFixture(t *testing.T, command string, input []byte) *wslS
 		"sh", "-c", wslStageHelperBootstrap, "sh",
 		strconv.Itoa(len(wslStageLinuxSupervisor)), "0", "run",
 		fixture.directory, "nonce", strconv.Itoa(len(command)), strconv.Itoa(len(input)),
-		"300", "300",
+		"300", strconv.FormatInt(grace.Milliseconds(), 10),
 	)
 	fixture.command.Stdin = reader
 	fixture.command.Stdout = &fixture.output
@@ -160,6 +164,17 @@ func TestWSLStageLinuxPassesExitOutputAndFiniteInput(t *testing.T) {
 	}
 	if fixture.diagnostic.String() != "stderr" {
 		t.Fatalf("workload stderr changed: %q", fixture.diagnostic.String())
+	}
+	requireWSLStageLinuxClean(t, fixture)
+}
+
+func TestWSLStageLinuxNormalExitSkipsSignalGrace(t *testing.T) {
+	start := time.Now()
+	fixture := startWSLStageLinuxFixtureWithGrace(t, "exit 0\n", nil, 5*time.Second)
+	fixture.waitArmed(t)
+	fixture.wait(t, 0)
+	if elapsed := time.Since(start); elapsed >= 3*time.Second {
+		t.Fatalf("normal completion waited for signal grace: %s", elapsed)
 	}
 	requireWSLStageLinuxClean(t, fixture)
 }

@@ -71,6 +71,15 @@ func TestWSLStageEnvelopeRejectsUnboundedOrChangedInput(t *testing.T) {
 	}
 }
 
+func TestWSLStagePrefixDigestObservesCleanupContext(t *testing.T) {
+	spool := testWSLStageSpool(t, "true", bytes.Repeat([]byte("x"), 1<<20))
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(errors.New("cleanup deadline"))
+	if _, err := spool.prefixDigestContext(ctx, spool.size); err == nil || !strings.Contains(err.Error(), "cleanup deadline") {
+		t.Fatalf("prefix digest ignored cleanup context: %v", err)
+	}
+}
+
 func TestWSLStageUsesPrivateAliasOnly(t *testing.T) {
 	session := &sshTransportSession{configPath: filepath.Join("private", "ssh_config"), destination: sshTransportHostAlias}
 	target := SSHTarget{User: "secret-user", Host: "private.example", ProxyCommand: "secret-proxy"}
