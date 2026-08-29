@@ -2076,6 +2076,27 @@ func TestProvidersJSONIncludesBuiltIns(t *testing.T) {
 		if description.SchemaVersion != 2 || !reflect.DeepEqual(description.ClassCatalog, matrix.ClassCatalog) {
 			t.Fatalf("provider=%s requested=%s schema=%d describe classCatalog=%#v matrix classCatalog=%#v", smoke.canonical, smoke.requested, description.SchemaVersion, description.ClassCatalog, matrix.ClassCatalog)
 		}
+		if smoke.canonical == "machine0" {
+			flags := descriptionFlagMap(description.ProviderFlags)
+			for name, wantCreationOnly := range map[string]bool{
+				"machine0-size":           true,
+				"machine0-image":          true,
+				"machine0-image-version":  true,
+				"machine0-desktop-image":  true,
+				"machine0-region":         true,
+				"machine0-key":            true,
+				"machine0-cli":            false,
+				"machine0-work-root":      false,
+				"machine0-release-policy": false,
+				"machine0-create-timeout": false,
+				"machine0-poll-interval":  false,
+			} {
+				item, ok := flags[name]
+				if !ok || item.CreationOnly != wantCreationOnly {
+					t.Errorf("--%s present=%t creationOnly=%t want=%t", name, ok, item.CreationOnly, wantCreationOnly)
+				}
+			}
+		}
 	}
 }
 

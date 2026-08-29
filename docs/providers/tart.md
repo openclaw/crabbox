@@ -74,7 +74,7 @@ and process metadata.
 
 1. `tart clone <image> crabbox-<slug>` creates a new VM from the base image.
 2. `tart set crabbox-<slug> --cpu N --memory N` configures resources (disk size is only resized when `--tart-disk` is explicitly set).
-3. `tart run crabbox-<slug> --no-graphics` starts the VM headless.
+3. `tart run crabbox-<slug> --no-graphics --no-clipboard --no-audio` starts the VM headless with Tart's automatic host clipboard and audio passthrough disabled.
 4. `tart ip crabbox-<slug>` polls for the guest IP (DHCP, typically ~10s).
 5. `tart exec crabbox-<slug> bash -c "..."` injects the SSH public key.
 6. Crabbox waits for SSH readiness, then syncs and runs commands normally.

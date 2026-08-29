@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -58,7 +59,7 @@ type fakeControllerWorkspaceRunner struct {
 
 type shutdownAwareControllerRunner struct {
 	*fakeControllerWorkspaceRunner
-	stopStarted  chan struct{}
+	stopStarted  chan context.Context
 	stopCanceled chan error
 }
 
@@ -93,7 +94,7 @@ func (r *blockingProviderIdentityRunner) ProviderIdentity(ctx context.Context) (
 }
 
 func (r *shutdownAwareControllerRunner) Stop(ctx context.Context, _ string, _ controllerWorkspaceRequest) error {
-	r.stopStarted <- struct{}{}
+	r.stopStarted <- ctx
 	<-ctx.Done()
 	err := context.Cause(ctx)
 	r.stopCanceled <- err
@@ -1398,40 +1399,59 @@ func TestControllerExpiryTransitionCancelsActiveWarmup(t *testing.T) {
 }
 
 func TestControllerShutdownCancelsActiveCleanup(t *testing.T) {
-	runner := &shutdownAwareControllerRunner{
-		fakeControllerWorkspaceRunner: newFakeControllerWorkspaceRunner(),
-		stopStarted:                   make(chan struct{}, 1),
-		stopCanceled:                  make(chan error, 1),
-	}
-	service, cancel := testControllerService(t, runner, 1)
-	created := controllerHTTP(service, http.MethodPost, "/v1/workspaces", "test-token", controllerWorkspaceRequest{ID: "shutdown-cleanup-box"})
-	if created.Code != http.StatusAccepted {
-		cancel()
-		t.Fatalf("create status=%d", created.Code)
-	}
-	waitControllerWorkspaceStatus(t, service, "shutdown-cleanup-box", "ready")
-	deleted := controllerHTTP(service, http.MethodDelete, "/v1/workspaces/shutdown-cleanup-box", "test-token", nil)
-	if deleted.Code != http.StatusAccepted {
-		cancel()
-		t.Fatalf("delete status=%d", deleted.Code)
-	}
-	select {
-	case <-runner.stopStarted:
-	case <-time.After(time.Second):
-		cancel()
-		t.Fatal("provider cleanup did not start")
-	}
-	cancel()
-	service.waitForShutdown()
-	select {
-	case err := <-runner.stopCanceled:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("cleanup cancellation=%v", err)
+	// Keep scheduling and state-file I/O latency out of the cleanup deadlines.
+	synctest.Test(t, func(t *testing.T) {
+		runner := &shutdownAwareControllerRunner{
+			fakeControllerWorkspaceRunner: newFakeControllerWorkspaceRunner(),
+			stopStarted:                   make(chan context.Context, 1),
+			stopCanceled:                  make(chan error, 1),
 		}
-	case <-time.After(time.Second):
-		t.Fatal("controller shutdown did not cancel provider cleanup")
-	}
-	waitControllerWorkspaceInactive(t, service, "shutdown-cleanup-box")
+		service, cancel := testControllerService(t, runner, 1)
+		shutdownDone := make(chan struct{})
+		shutdown := sync.OnceFunc(func() {
+			go func() {
+				cancel() // The helper also waits for active reconciliations.
+				close(shutdownDone)
+			}()
+		})
+		defer func() {
+			shutdown()
+			select {
+			case <-shutdownDone:
+			case <-time.After(time.Second):
+				t.Error("controller shutdown did not finish active reconciliation")
+			}
+		}()
+		created := controllerHTTP(service, http.MethodPost, "/v1/workspaces", "test-token", controllerWorkspaceRequest{ID: "shutdown-cleanup-box"})
+		if created.Code != http.StatusAccepted {
+			t.Fatalf("create status=%d", created.Code)
+		}
+		waitControllerWorkspaceStatus(t, service, "shutdown-cleanup-box", "ready")
+		deleted := controllerHTTP(service, http.MethodDelete, "/v1/workspaces/shutdown-cleanup-box", "test-token", nil)
+		if deleted.Code != http.StatusAccepted {
+			t.Fatalf("delete status=%d", deleted.Code)
+		}
+		var stopCtx context.Context
+		select {
+		case stopCtx = <-runner.stopStarted:
+		case <-time.After(time.Second):
+			t.Fatal("provider cleanup did not start")
+		}
+		synctest.Wait()
+		if err := context.Cause(stopCtx); err != nil {
+			t.Fatalf("provider cleanup was already canceled before shutdown: %v", err)
+		}
+		shutdown()
+		select {
+		case err := <-runner.stopCanceled:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("cleanup cancellation=%v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("controller shutdown did not cancel provider cleanup")
+		}
+		waitControllerWorkspaceInactive(t, service, "shutdown-cleanup-box")
+	})
 }
 
 func TestControllerWarmupFailureCleansProvisionedResource(t *testing.T) {

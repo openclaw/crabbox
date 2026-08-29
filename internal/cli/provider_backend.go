@@ -42,8 +42,10 @@ type ProviderSSHTargetConfigurer interface {
 	ConfigureSSHTarget(target *SSHTarget, readyCommand string)
 }
 
-// ProviderArchitectureCapability lets a provider admit architecture requests
-// whose runtime feasibility is validated inside the provider adapter.
+// ProviderArchitectureCapability owns admission of the complete target/mode/
+// architecture tuple (including amd64), within ProviderSpec.Targets. Providers
+// without this capability retain core's managed architecture restrictions.
+// Runtime feasibility and explicit assertions are validated by the adapter.
 type ProviderArchitectureCapability interface {
 	SupportsArchitecture(cfg Config, architecture string) bool
 }
@@ -56,6 +58,7 @@ type ProviderConfigArchitectureDescriber interface {
 
 // ProviderClaimScoper contributes opaque routing identity to local claims.
 // Core persists and compares the value without interpreting provider fields.
+// The adapter must preserve its historical normalization, including whitespace.
 type ProviderClaimScoper interface {
 	ClaimScope(cfg Config) string
 }
@@ -86,8 +89,35 @@ type LeaseClaimEndpointPreparer interface {
 	PrepareLeaseClaimEndpoint(existing LeaseClaim, provider, slug string, server Server, allowProviderMetadata bool) (Server, error)
 }
 
-type ProviderCommandRoutingArgs interface {
-	CommandRoutingArgs(cfg Config, leaseID string) []string
+// ProviderCommandRouter owns the non-secret route for generated follow-up commands.
+// Core owns shell rendering and passes Env separately to subprocesses.
+// Adapters use RoutingSafeURL for URL-valued fields, never for opaque paths/selectors.
+type ProviderCommandRouter interface {
+	CommandRouting(cfg Config, request CommandRoutingRequest) CommandRouting
+}
+
+// CommandRoutingRequest carries resolved lease context without making core
+// interpret provider-specific target or release settings.
+type CommandRoutingRequest struct {
+	LeaseID string
+	Purpose CommandRoutingPurpose
+	Target  SSHTarget
+}
+
+type CommandRoutingPurpose string
+
+const (
+	CommandRoutingReconnect CommandRoutingPurpose = "reconnect"
+	CommandRoutingRescue    CommandRoutingPurpose = "rescue"
+	CommandRoutingRetry     CommandRoutingPurpose = "retry"
+	CommandRoutingStop      CommandRoutingPurpose = "stop"
+)
+
+// CommandRouting keeps environment assignments out of argv. Env contains only
+// non-secret routing selectors, never credentials or credential contents.
+type CommandRouting struct {
+	Args []string
+	Env  []string
 }
 
 type DesktopCredentials struct {
@@ -243,6 +273,18 @@ type TailscaleMetadataBackend interface {
 	UpdateTailscaleMetadata(ctx context.Context, lease LeaseTarget, meta TailscaleMetadata) (Server, error)
 }
 
+// RunOptionsValidator optionally checks run flags before a caller acquires a
+// lease, including during dry-run planning. Validation must be side-effect-free:
+// no external I/O or lease-state access, and no dependency on a resolved lease.
+// Providers implement it for admission before Configure; their backend must
+// reuse the same policy at Run entry. No backend creation, processes, credential
+// lookup, or state writes are allowed. Planned reuse has ReuseLease=true and an
+// empty ID; a nonempty ID also implies reuse. Runtime-only fields such as Repo,
+// RunID, and Env may be absent during prewarm admission.
+type RunOptionsValidator interface {
+	ValidateRunOptions(RunRequest) error
+}
+
 type DelegatedRunBackend interface {
 	Backend
 	Warmup(ctx context.Context, req WarmupRequest) error
@@ -365,6 +407,12 @@ type NativeCheckpointProvider interface {
 	NativeCheckpointCapability(req NativeCheckpointRequest) (NativeCheckpointCapability, bool)
 }
 
+// NativeCheckpointSourcePolicyProvider lets API-native capture resolve a source
+// without starting it or minting transport credentials before stop consent.
+type NativeCheckpointSourcePolicyProvider interface {
+	NativeCheckpointSourceStatusOnly(Config) bool
+}
+
 type NativeCheckpointImage struct {
 	ID           string
 	Name         string
@@ -407,9 +455,10 @@ type NativeCheckpointWorkdirRequest struct {
 }
 
 type NativeCheckpointResourceRequest struct {
-	Config   Config
-	Image    NativeCheckpointImage
-	Metadata map[string]string
+	// LoadConfig is required only when the provider needs current CLI settings.
+	LoadConfig func() (Config, error)
+	Image      NativeCheckpointImage
+	Metadata   map[string]string
 }
 
 type NativeCheckpointVerifyResult struct {
@@ -933,11 +982,13 @@ type ListRequest struct {
 type RunRequest struct {
 	Repo                  Repo
 	ID                    string
+	ReuseLease            bool // Planned reuse without an ID; a nonempty ID also implies reuse.
 	RunID                 string
 	Options               LeaseOptions
 	Keep                  bool
 	Reclaim               bool
 	NoSync                bool
+	NoHydrate             bool
 	SyncOnly              bool
 	DebugSync             bool
 	ShellMode             bool
@@ -1367,18 +1418,6 @@ func validateProviderConfig(cfg Config) error {
 	return validateProviderClassSelector(provider, cfg)
 }
 
-func providerCommandRoutingArgs(cfg Config, leaseID string) []string {
-	provider, err := ProviderFor(cfg.Provider)
-	if err != nil {
-		return nil
-	}
-	router, ok := provider.(ProviderCommandRoutingArgs)
-	if !ok {
-		return nil
-	}
-	return router.CommandRoutingArgs(cfg, leaseID)
-}
-
 func routeProviderFlagOverride(cfg *Config, fs *flag.FlagSet, values providerFlagValues) (bool, error) {
 	if fs == nil {
 		return false, nil
@@ -1630,6 +1669,7 @@ func featureSetHas(features FeatureSet, feature Feature) bool {
 }
 
 func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error {
+	// NoSync is adapter-owned: SDK/CLI transports can skip sync without archive sync.
 	provider := spec.Name
 	archiveSync := featureSetHas(spec.Features, FeatureArchiveSync)
 	moduleRun := featureSetHas(spec.Features, FeatureModuleRun)

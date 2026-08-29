@@ -7,6 +7,36 @@ import (
 	"testing"
 )
 
+func TestCopyHelpIncludesCommandContract(t *testing.T) {
+	for _, flag := range []string{"--help", "-h"} {
+		t.Run(flag, func(t *testing.T) {
+			clearConfigEnv(t)
+			var stdout, stderr bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: &stderr}).Run(context.Background(), []string{"cp", flag})
+			var exitErr ExitError
+			if err != nil && (!AsExitError(err, &exitErr) || exitErr.Code != 0) {
+				t.Fatalf("help error=%v stderr=%q", err, stderr.String())
+			}
+			text := stderr.String()
+			for _, want := range []string{
+				"Usage:\n  crabbox cp --id <lease-id-or-slug> [-L] <src> <dst>",
+				"exactly one path must use SANDBOX:PATH",
+				"--provider <name>",
+				"./file.txt SANDBOX:/tmp/file.txt",
+				"SANDBOX:/tmp/file.txt ./file.txt",
+				"-L",
+			} {
+				if at := strings.Index(text, want); at < 0 || at > strings.Index(text, "All flags:") {
+					t.Fatalf("copy help must show %q before the full flag reference", want)
+				}
+			}
+			if !strings.Contains(text, "-local-container-runtime") || stdout.Len() != 0 {
+				t.Fatal("copy help lost the provider reference or changed its output stream")
+			}
+		})
+	}
+}
+
 func TestTopLevelHelpListsRegisteredXCPNgProvider(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	err := (App{Stdout: &stdout, Stderr: &stderr}).Run(context.Background(), []string{"--help"})

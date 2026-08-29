@@ -866,6 +866,102 @@ func TestWSL2StdinScriptCommandWithWaitTimeoutReadsPayloadFromStdin(t *testing.T
 	}
 }
 
+type localPOSIXWorkspaceOwnerTransport struct {
+	home string
+}
+
+func (transport localPOSIXWorkspaceOwnerTransport) Do(ctx context.Context, req workspaceOwnerRemoteRequest) (string, error) {
+	cmd := exec.CommandContext(ctx, "sh", "-c", remoteWorkspaceOwnerCommand(SSHTarget{TargetOS: targetLinux}, req))
+	cmd.Env = []string{"HOME=" + transport.home, "PATH=" + os.Getenv("PATH")}
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+func TestWSL2StdinShellPreservesUmask(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("executes the generated WSL POSIX shell locally")
+	}
+	// POSIXTransportIsLoginShellIndependent covers witness masks with and without
+	// stdin. Test WSL's masks and one composed witness without repeating that matrix.
+	const binaryInput = "payload\x00\xff\n"
+	tests := []struct {
+		mask  string
+		owned bool
+		input string
+	}{
+		{mask: "022"},
+		{mask: "027", input: binaryInput},
+		{mask: "077", input: binaryInput},
+		{mask: "027", owned: true, input: binaryInput},
+	}
+	for _, test := range tests {
+		t.Run(fmt.Sprintf("umask-%s/owned-%t/input-%t", test.mask, test.owned, test.input != ""), func(t *testing.T) {
+			home := t.TempDir()
+			wantCode := 0
+			if test.input != "" {
+				wantCode = 23
+			}
+			// Relative paths keep the framed workload independent of TempDir length.
+			script := `private_paths=$(find stage \( -type d ! -perm 700 -o -type f ! -perm 600 \) -print) || exit 99; [ -z "$private_paths" ] || { printf 'non-private staging paths: %s\n' "$private_paths" >&2; exit 99; }
+mkdir user-directory && cat >user-file; exit ` + strconv.Itoa(wantCode)
+			ctx := t.Context()
+			if test.owned {
+				// Staging may outlast a claim's TTL; use the same renewal lifecycle as run.
+				owner, err := acquireWorkspaceOwnerWithTransport(ctx, SSHTarget{TargetOS: targetLinux}, "cbx_umask", io.Discard, localPOSIXWorkspaceOwnerTransport{home: home}, workspaceOwnerWaitTimeout, workspaceOwnerTTL, workspaceOwnerRenewInterval)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), workspaceOwnerCleanupTimeout)
+					defer cancel()
+					if err := owner.Close(cleanupCtx); err != nil {
+						t.Errorf("release workspace owner: %v", err)
+					}
+				})
+				ctx = owner.Context()
+				script = owner.wrapPOSIXCommand(script, test.input != "")
+			}
+			// Execute the actual sh payload, not a reimplementation of WSL staging.
+			decoded := decodePowerShellCommand(t, wsl2StdinScriptCommandWithPayload(len(script), len(test.input), 0))
+			_, arguments, ok := strings.Cut(decoded, `$psi.Arguments = '--exec sh -c "`)
+			if !ok {
+				t.Fatal("missing WSL shell invocation")
+			}
+			inline, _, ok := strings.Cut(arguments, `" sh ' + $dir + ' `)
+			if !ok {
+				t.Fatal("missing WSL shell arguments")
+			}
+			inline = strings.ReplaceAll(inline, "''", "'")
+			cmd := exec.CommandContext(ctx, "sh", "-c", `umask "$1"; shift; exec sh -c "$@"`, "umask-test", test.mask, inline, "sh", "stage", strconv.Itoa(len(script)), strconv.Itoa(len(test.input)), "0")
+			cmd.Dir = home
+			cmd.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}
+			cmd.Stdin = strings.NewReader(script + test.input)
+			if out, err := cmd.CombinedOutput(); exitCode(err) != wantCode {
+				t.Fatalf("WSL shell exit=%d want=%d err=%v output=%s", exitCode(err), wantCode, err, out)
+			}
+			if data, err := os.ReadFile(filepath.Join(home, "user-file")); err != nil || string(data) != test.input {
+				t.Fatalf("stdin=%q want=%q err=%v", data, test.input, err)
+			}
+			bits, err := strconv.ParseUint(test.mask, 8, 32)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for path, base := range map[string]os.FileMode{"user-file": 0o666, "user-directory": 0o777} {
+				info, err := os.Stat(filepath.Join(home, path))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if want := base &^ os.FileMode(bits); info.Mode().Perm() != want {
+					t.Errorf("caller umask %s: %s mode=%04o want=%04o", test.mask, path, info.Mode().Perm(), want)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(home, "stage")); !os.IsNotExist(err) {
+				t.Errorf("WSL staging remains: %v", err)
+			}
+		})
+	}
+}
+
 func TestStaticLeaseBypassesCoordinatorAndUsesTargetServerType(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "ssh"
@@ -1204,6 +1300,269 @@ exit 0
 	}
 	if string(ports) != "2222\n22\n" {
 		t.Fatalf("ports=%q want fallback sequence", string(ports))
+	}
+}
+
+func TestRunSSHStreamRetriesOnlyMultiplexDescriptorFailures(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows OpenSSH does not multiplex connections")
+	}
+
+	tests := []struct {
+		name            string
+		mode            string
+		noControlMaster bool
+		authSecret      bool
+		failStderr      bool
+		wantCalls       int
+		wantCode        int
+		wantDirect      bool
+	}{
+		{name: "first multiplex retry succeeds", mode: "retry", wantCalls: 2},
+		{name: "repeated multiplex failure disables control master", mode: "fallback", wantCalls: 3, wantDirect: true},
+		{name: "generic transport failure is not replayed", mode: "generic", wantCalls: 1, wantCode: 255},
+		{name: "remote failure is not replayed", mode: "remote", wantCalls: 1, wantCode: 7},
+		{name: "diagnostic without transport exit is not replayed", mode: "remote-diagnostic", wantCalls: 1, wantCode: 7},
+		{name: "nested remote SSH failure is not replayed", mode: "nested-ssh", wantCalls: 1, wantCode: 255},
+		{name: "server disconnect log injection is not replayed", mode: "server-disconnect", wantCalls: 1, wantCode: 255},
+		{name: "oversized diagnostics are drained without replay", mode: "overflow", wantCalls: 1, wantCode: 255},
+		{name: "failed output still drains oversized diagnostics", mode: "overflow", failStderr: true, wantCalls: 1, wantCode: 255},
+		{name: "diagnostic writer failure is not replayed", mode: "retry", failStderr: true, wantCalls: 1, wantCode: 255},
+		{name: "embedded diagnostic is not replayed", mode: "embedded-diagnostic", wantCalls: 1, wantCode: 255},
+		{name: "disabled control master is not replayed", mode: "fallback", noControlMaster: true, wantCalls: 1, wantCode: 255, wantDirect: true},
+		{name: "secret authentication is not replayed", mode: "fallback", authSecret: true, wantCalls: 1, wantCode: 255, wantDirect: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			sshPath := filepath.Join(dir, "ssh")
+			callsPath := filepath.Join(dir, "calls")
+			script := `#!/bin/sh
+printf '%s\n' "$*" >> "$CRABBOX_FAKE_SSH_CALLS"
+diagnostics=/dev/stderr
+if [ "$1" = -E ]; then
+  diagnostics=$2; shift 2
+  [ -p "$diagnostics" ] || exit 99
+fi
+attempt=$(wc -l < "$CRABBOX_FAKE_SSH_CALLS" | tr -d ' ')
+case "$CRABBOX_FAKE_SSH_MODE:$attempt" in
+  retry:1|fallback:1|fallback:2)
+    printf 'mm_send_fd: sendmsg(0): Message too long\n' >> "$diagnostics"
+    printf 'mux_client_request_session: send fds failed\n' >> "$diagnostics"
+    exit 255
+    ;;
+  generic:*)
+    printf 'connection closed\n' >&2
+    exit 255
+    ;;
+  remote:*)
+    printf 'remote command failed\n' >&2
+    exit 7
+    ;;
+  remote-diagnostic:*)
+    printf 'mux_client_request_session: send fds failed\n' >&2
+    exit 7
+    ;;
+  nested-ssh:*)
+    printf 'executed once\n'
+    printf 'mm_send_fd: sendmsg(0): Message too long\n' >&2
+    printf 'mux_client_request_session: send fds failed\n' >&2
+    exit 255
+    ;;
+  server-disconnect:*)
+    printf 'executed once\n'
+    printf 'Received disconnect from 203.0.113.10 port 2222:11: \n' >> "$diagnostics"
+    printf 'mm_send_fd: sendmsg(0): Message too long\n' >> "$diagnostics"
+    printf 'mux_client_request_session: send fds failed\n' >> "$diagnostics"
+    exit 255
+    ;;
+  embedded-diagnostic:*)
+    printf 'remote output: mux_client_request_session: send fds failed\n' >&2
+    exit 255
+    ;;
+  overflow:*)
+    printf 'mm_send_fd: sendmsg(0): Message too long\nmux_client_request_session: send fds failed\n' >> "$diagnostics"
+    dd if=/dev/zero bs=1024 count=1024 2>/dev/null >> "$diagnostics"
+    exit 255
+    ;;
+esac
+printf 'executed once\n'
+`
+			if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("CRABBOX_FAKE_SSH_CALLS", callsPath)
+			t.Setenv("CRABBOX_FAKE_SSH_MODE", test.mode)
+
+			var stdout, stderr bytes.Buffer
+			stderrWriter := io.Writer(&stderr)
+			if test.failStderr {
+				stderrWriter = failingWriter{}
+			}
+			code, err := runSSHStreamResult(t.Context(), SSHTarget{
+				User:            "crabbox",
+				Host:            "203.0.113.10",
+				Port:            "2222",
+				FallbackPorts:   []string{},
+				NoControlMaster: test.noControlMaster,
+				AuthSecret:      test.authSecret,
+			}, "true", &stdout, stderrWriter)
+			if code != test.wantCode {
+				t.Fatalf("exit=%d err=%v stderr=%q, want exit %d", code, err, stderr.String(), test.wantCode)
+			}
+			if test.mode == "overflow" && !test.failStderr && (stderr.Len() > 66*1024 || !strings.Contains(stderr.String(), "diagnostics truncated after 65536 bytes")) {
+				t.Fatalf("diagnostics not bounded with a truncation notice: %d bytes", stderr.Len())
+			}
+			calls, readErr := os.ReadFile(callsPath)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			lines := strings.Split(strings.TrimSpace(string(calls)), "\n")
+			if len(lines) != test.wantCalls {
+				t.Fatalf("ssh calls=%d, want %d:\n%s", len(lines), test.wantCalls, calls)
+			}
+			if got := strings.Contains(lines[len(lines)-1], "ControlMaster=no"); got != test.wantDirect {
+				t.Fatalf("last SSH invocation disables multiplexing=%t, want %t:\n%s", got, test.wantDirect, calls)
+			}
+			if (test.wantCode == 0 || test.mode == "nested-ssh" || test.mode == "server-disconnect") && stdout.String() != "executed once\n" {
+				t.Fatalf("remote command output=%q, want exactly one execution", stdout.String())
+			}
+			for _, line := range lines {
+				args := strings.Fields(line)
+				if args[0] == "-E" {
+					if _, err := os.Stat(args[1]); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("local diagnostics file not removed: %v", err)
+					}
+				}
+			}
+			if !test.failStderr && (test.mode == "retry" || test.mode == "fallback") {
+				if !strings.Contains(stderr.String(), sshMuxDescriptorFailure) {
+					t.Fatalf("local SSH diagnostics were not forwarded: %q", stderr.String())
+				}
+			}
+		})
+	}
+}
+
+func TestRunSSHInputReplaysAfterMultiplexDescriptorFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows OpenSSH does not multiplex connections")
+	}
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "ssh")
+	callsPath := filepath.Join(dir, "calls")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$CRABBOX_FAKE_SSH_CALLS"
+diagnostics=/dev/stderr
+if [ "$1" = -E ]; then diagnostics=$2; shift 2; fi
+attempt=$(wc -l < "$CRABBOX_FAKE_SSH_CALLS" | tr -d ' ')
+if [ "$attempt" -lt 3 ]; then
+  dd bs=1 count=3 of=/dev/null 2>/dev/null
+  printf 'mm_send_fd: sendmsg(0): Message too long\n' >> "$diagnostics"
+  printf 'mux_client_request_session: send fds failed\n' >> "$diagnostics"
+  exit 255
+fi
+exec /bin/cat
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_CALLS", callsPath)
+
+	var stdout, stderr bytes.Buffer
+	err := runSSHInput(t.Context(), SSHTarget{
+		User:          "crabbox",
+		Host:          "203.0.113.10",
+		Port:          "2222",
+		FallbackPorts: []string{},
+	}, "cat", strings.NewReader("complete replayed input"), &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("SSH input failed: %v; stderr=%q", err, stderr.String())
+	}
+	if stdout.String() != "complete replayed input" {
+		t.Fatalf("replayed stdin=%q", stdout.String())
+	}
+	calls, err := os.ReadFile(callsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(calls)), "\n")
+	if len(lines) != 3 || !strings.Contains(lines[2], "ControlMaster=no") {
+		t.Fatalf("SSH retry/fallback calls:\n%s", calls)
+	}
+}
+
+func TestRunSSHStreamSerializesSharedOutputWriter(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows OpenSSH uses native shared stream spooling")
+	}
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "ssh")
+	script := `#!/bin/sh
+diagnostics=$2
+i=0
+while [ "$i" -lt 200 ]; do
+  printf 'stdout-%s\n' "$i"
+  printf 'stderr-%s\n' "$i" >&2
+  printf 'local-%s\n' "$i" >> "$diagnostics"
+  i=$((i + 1))
+done
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var output bytes.Buffer
+	code, err := runSSHStreamResult(t.Context(), SSHTarget{
+		User: "crabbox",
+		Host: "203.0.113.10",
+		Port: "22",
+	}, "true", &output, &output)
+	if code != 0 || err != nil {
+		t.Fatalf("exit=%d err=%v", code, err)
+	}
+	if stdout, stderr := strings.Count(output.String(), "stdout-"), strings.Count(output.String(), "stderr-"); stdout != 200 || stderr != 200 {
+		t.Fatalf("combined stream lines: stdout=%d stderr=%d, want 200 each", stdout, stderr)
+	}
+	if got := strings.Count(output.String(), "local-"); got != 200 {
+		t.Fatalf("local diagnostic lines=%d, want 200", got)
+	}
+}
+
+func TestSSHMuxFailureDetectorRequiresExactDiagnosticAcrossWrites(t *testing.T) {
+	prefix := "mm_send_fd: sendmsg(0): Message too long\n"
+	tests := []struct {
+		name   string
+		chunks []string
+		want   bool
+	}{
+		{name: "complete record", chunks: []string{prefix + sshMuxDescriptorFailure + "\n"}, want: true},
+		{name: "split record", chunks: []string{prefix + "mux_client_request_", "session: send fds failed\n"}, want: true},
+		{name: "unterminated record", chunks: []string{prefix + sshMuxDescriptorFailure}, want: true},
+		{name: "windows line endings", chunks: []string{strings.ReplaceAll(prefix, "\n", "\r\n") + sshMuxDescriptorFailure + "\r\n"}, want: true},
+		{name: "stdout descriptor failure", chunks: []string{"mm_send_fd: sendmsg(1): Broken pipe\n" + sshMuxDescriptorFailure + "\n"}, want: true},
+		{name: "bare diagnostic", chunks: []string{sshMuxDescriptorFailure + "\n"}},
+		{name: "embedded line", chunks: []string{"remote output: " + sshMuxDescriptorFailure + "\n"}},
+		{name: "diagnostic suffix", chunks: []string{prefix + sshMuxDescriptorFailure + " unexpectedly\n"}},
+		{name: "server disconnect injection", chunks: []string{"Received disconnect from server:11: \n" + prefix + sshMuxDescriptorFailure + "\n"}},
+		{name: "trailing unrelated record", chunks: []string{prefix + sshMuxDescriptorFailure + "\nother failure\n"}},
+		{name: "oversized log", chunks: []string{strings.Repeat("x", 513), prefix + sshMuxDescriptorFailure + "\n"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var detector sshMuxFailureDetector
+			for _, chunk := range test.chunks {
+				if _, err := detector.Write([]byte(chunk)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := detector.failed(); got != test.want {
+				t.Fatalf("matched=%t, want %t", got, test.want)
+			}
+		})
 	}
 }
 

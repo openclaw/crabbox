@@ -11,7 +11,7 @@ crabbox config set-broker --url <url> [--provider <provider>] [--mode managed|re
 
 ## config path
 
-Prints the absolute path of the user config file:
+Prints the selected user config path:
 
 ```sh
 crabbox config path
@@ -21,7 +21,10 @@ The file lives at `<os-user-config-dir>/crabbox/config.yaml` (for example
 `~/.config/crabbox/config.yaml` on Linux or
 `~/Library/Application Support/crabbox/config.yaml` on macOS). Set
 `CRABBOX_CONFIG` to point at a different file; that override is used for both
-reads and writes.
+reads and writes. `config path` and the `config=` header from `config show`
+report that override exactly as supplied, including a relative or symlink path.
+Without an override, they report the absolute OS user-config path. Reporting a
+path does not create the file or change its trust classification.
 
 ## config show
 
@@ -52,11 +55,25 @@ the `environment` retain the canonical provider name and report selected=true. P
 `config show --provider <name>` reports `flag` because that command-scoped
 override wins the merge.
 
+`architecture` (text: `arch`) describes the configured architecture or the
+provider's implicit selection, not a host observation or proof of runtime
+support. `config show` is offline and does not acquire or probe a host.
+JSON `architectureExplicit` (text:
+`architecture_explicit`) is true for a nonempty YAML `architecture` or
+`CRABBOX_ARCH`, and false for the omitted default. Execution commands also treat
+an explicit `--arch`, including `--arch amd64`, as an assertion; their flags are
+not part of `config show` output.
+
 For `local-container`, an omitted architecture is reported as `arch=native`
 (JSON: `"architecture":"native"`). This describes the runtime's native selection,
 not a resolved daemon architecture; config inspection does not probe Docker or
 Podman. Explicit `amd64` or `arm64` selections remain unchanged. `native` is a
 diagnostic value, not a new accepted `--arch` or configuration input.
+
+Static SSH now checks these assertions against fresh host evidence, including
+inherited `amd64` values. See [Upgrading existing static-host configuration](../providers/ssh.md#upgrading-existing-static-host-configuration)
+to keep a strict constraint or remove the contributing values for automatic
+discovery; a blank override does not clear an inherited assertion.
 
 Secrets are never printed. Token-bearing fields are reduced to a status word:
 

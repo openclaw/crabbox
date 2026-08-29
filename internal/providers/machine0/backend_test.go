@@ -3,11 +3,13 @@ package machine0
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strings"
@@ -591,6 +593,57 @@ func TestAcquirePollsToRunningAndDefaultReleaseDestroys(t *testing.T) {
 	}
 }
 
+func TestAcquirePreservesConfiguredNativeSizeAcrossClassChanges(t *testing.T) {
+	repo := setupState(t)
+	for _, size := range []string{"large", "xl-nvme", "gpu-h100-1", "future-native-size"} {
+		cfg := core.BaseConfig()
+		cfg.Provider = providerName
+		cfg.Machine0.Size = size
+		cfg.Machine0.SizeExplicit = true
+		catalogSize := testSize()
+		catalogSize.Size = size // Synthetic catalog entry; no static class mapping required.
+		catalog, err := json.Marshal([]machineSize{catalogSize})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, class := range core.CanonicalProviderClasses() {
+			t.Run(size+"/"+class, func(t *testing.T) {
+				cfg.Class = class
+				core.MarkClassExplicit(&cfg)
+				if err := (Provider{}).ApplyConfigDefaults(&cfg); err != nil {
+					t.Fatal(err)
+				}
+				// Exercise the real client argv, but stop at the intercepted create command.
+				runner := &recordingRunner{sequence: []runnerResponse{
+					{result: core.LocalCommandResult{Stdout: `[]`}},
+					{result: core.LocalCommandResult{Stdout: string(catalog)}},
+					{result: core.LocalCommandResult{Stdout: `[]`}},
+					{err: errors.New("create intercepted")},
+				}}
+				b, err := (Provider{}).Configure(cfg, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard})
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = b.(*backend).Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: repo}})
+				if err == nil || !strings.Contains(err.Error(), "create intercepted") {
+					t.Fatalf("Acquire error=%v, want intercepted create", err)
+				}
+				if len(runner.calls) != 4 {
+					t.Fatalf("calls=%#v", runner.calls)
+				}
+				args := runner.calls[3].Args
+				if len(args) < 2 || args[0] != "new" {
+					t.Fatalf("create args=%q", args)
+				}
+				want := []string{"--size", size, "--region", "eu", "--image", "ubuntu-24-04-loaded"}
+				if !reflect.DeepEqual(args[2:], want) {
+					t.Fatalf("create args=%q want selectors=%q", args, want)
+				}
+			})
+		}
+	}
+}
+
 func TestAcquireTerminalStateRollsBackWithDiagnostic(t *testing.T) {
 	repo := setupState(t)
 	api := &fakeAPI{sizes: []machineSize{testSize()}, getSequence: []machine{{ID: "vm-123", Name: "crabbox-blue", Status: "ERRORED", LastErrorMessage: "regional capacity unavailable"}}}
@@ -808,6 +861,180 @@ func TestAcquireDoesNotStartUnexpectedStoppedMachine(t *testing.T) {
 	}
 }
 
+func TestResolveUnclaimedIdentifier(t *testing.T) {
+	const leaseID = "cbx_abcdef123456"
+	matched := readyMachine("203.0.113.10")
+	matched.Name = "crabbox-unknown-slug-c80c2195"
+	other := readyMachine("203.0.113.11")
+	other.ID, other.Name = "vm-other", "crabbox-other-00000000"
+	ambiguous := other
+	ambiguous.Name = "crabbox-another-slug-c80c2195"
+	missingClaim := "machine0 lease " + leaseID + " has no local claim; candidate \"" + matched.Name + "\" matches only a short name hash: inspect the machine and use its explicit name with --reclaim to adopt it"
+	for _, tc := range []struct {
+		name      string
+		id        string
+		machines  []machine
+		listErr   error
+		wantGet   string
+		wantLists int
+		wantErr   string
+	}{
+		{name: "canonical lease ID", id: leaseID, machines: []machine{other, matched}, wantErr: missingClaim, wantLists: 1},
+		{name: "trimmed canonical lease ID", id: " " + leaseID + " ", machines: []machine{matched}, wantErr: missingClaim, wantLists: 1},
+		{name: "missing lease", id: leaseID, machines: []machine{other}, wantLists: 1, wantErr: "lease/server not found: " + leaseID},
+		{name: "empty inventory", id: leaseID, machines: []machine{}, wantLists: 1, wantErr: "lease/server not found: " + leaseID},
+		{name: "name must have Crabbox prefix and exact suffix", id: leaseID, machines: []machine{
+			{ID: "vm-unmanaged", Name: "other-blue-c80c2195", Status: "RUNNING"},
+			{ID: "vm-no-separator", Name: "crabbox-bluec80c2195", Status: "RUNNING"},
+			{ID: "vm-extra-suffix", Name: "crabbox-blue-c80c2195-extra", Status: "RUNNING"},
+		}, wantLists: 1, wantErr: "lease/server not found: " + leaseID},
+		{name: "slug", id: "blue-lobster", wantGet: "blue-lobster"},
+		{name: "machine name", id: matched.Name, wantGet: matched.Name},
+		{name: "noncanonical ID", id: "cbx_notcanonical", wantGet: "cbx_notcanonical"},
+		{name: "ambiguous lease", id: leaseID, machines: []machine{matched, ambiguous}, wantLists: 1, wantErr: "multiple Machine0 machines match lease " + leaseID},
+		{name: "list failure", id: leaseID, listErr: context.Canceled, wantLists: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupState(t)
+			getCalls := 0
+			api := &fakeAPI{machines: tc.machines, getFn: func(_ context.Context, name string) (machine, error) {
+				getCalls++
+				if tc.wantGet == "" || name != tc.wantGet {
+					t.Fatalf("unexpected Get(%q), want %q", name, tc.wantGet)
+				}
+				return matched, nil
+			}}
+			if tc.listErr != nil {
+				api.listFn = func(context.Context, int) ([]machine, error) { return nil, tc.listErr }
+			}
+			lease, err := testBackendWithAPI(api).Resolve(context.Background(), ResolveRequest{ID: tc.id, StatusOnly: true})
+			switch {
+			case tc.listErr != nil:
+				if !errors.Is(err, tc.listErr) {
+					t.Fatalf("err=%v, want %v", err, tc.listErr)
+				}
+			case tc.wantErr != "":
+				var exitErr core.ExitError
+				if !errors.As(err, &exitErr) || exitErr.Code != 4 || err.Error() != tc.wantErr {
+					t.Fatalf("err=%v, want exit 4: %s", err, tc.wantErr)
+				}
+			default:
+				if err != nil || lease.Server.CloudID != matched.ID || lease.Server.Name != matched.Name {
+					t.Fatalf("server=%#v err=%v", lease.Server, err)
+				}
+			}
+			wantGets := 0
+			if tc.wantGet != "" {
+				wantGets = 1
+			}
+			if getCalls != wantGets || api.listCalls != tc.wantLists {
+				t.Fatalf("Get calls=%d List calls=%d, want %d and %d", getCalls, api.listCalls, wantGets, tc.wantLists)
+			}
+		})
+	}
+}
+
+func TestResolveUnclaimedMachineNameUsesDetail(t *testing.T) {
+	for _, mode := range []string{"status", "existing managed key", "materialize managed key", "generic key"} {
+		t.Run(mode, func(t *testing.T) {
+			setupState(t)
+			inventory := readyMachine("203.0.113.10")
+			inventory.Name, inventory.Key = "crabbox-blue-c80c2195", nil
+			detail := inventory
+			detail.IP, detail.DefaultSSHUsername, detail.Distribution = "203.0.113.99", "nix", "nixos"
+			keyPath := filepath.Join(os.Getenv("SSH_KEY_PATH"), "machine0__selected")
+			if mode != "generic key" {
+				detail.Key = &machineKey{Name: "selected", FileName: "machine0__selected"}
+			}
+			if mode == "existing managed key" {
+				if err := os.WriteFile(keyPath, []byte("fixture private key"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			gets, waits := 0, 0
+			api := &fakeAPI{machines: []machine{inventory}, getFn: func(_ context.Context, name string) (machine, error) {
+				gets++
+				if name != inventory.Name {
+					t.Fatalf("Get(%q), want inventory name %q", name, inventory.Name)
+				}
+				return detail, nil
+			}}
+			api.primeSSH = func(name string) error {
+				if mode != "materialize managed key" || name != detail.Name {
+					t.Fatalf("unexpected key priming for %q", name)
+				}
+				return os.WriteFile(keyPath, []byte("fixture private key"), 0o600)
+			}
+			b := testBackendWithAPI(api)
+			if mode == "generic key" {
+				keyPath = b.cfg.SSHKey
+			}
+			b.waitSSH = func(_ context.Context, target *SSHTarget, _ time.Duration) error {
+				waits++
+				if target.Key != keyPath || target.Host != detail.IP || target.User != "nix" {
+					t.Fatalf("readiness target=%#v", target)
+				}
+				return nil
+			}
+			ready := mode != "status"
+			lease, err := b.Resolve(context.Background(), ResolveRequest{ID: inventory.Name, StatusOnly: true, ReadyProbe: ready})
+			if err != nil || gets != 1 || api.listCalls != 0 || lease.Server.PublicNet.IPv4.IP != detail.IP || lease.Server.Labels["work_root"] != "/home/nix/crabbox" {
+				t.Fatalf("lease=%#v gets=%d lists=%d err=%v", lease, gets, api.listCalls, err)
+			}
+			if ready && (waits != 1 || lease.SSH.Key != keyPath) || !ready && waits != 0 {
+				t.Fatalf("waits=%d SSH=%#v", waits, lease.SSH)
+			}
+			wantPrimes := 0
+			if mode == "materialize managed key" {
+				wantPrimes = 1
+			}
+			if len(api.primed) != wantPrimes {
+				t.Fatalf("key priming=%v", api.primed)
+			}
+			claims, err := core.ListLeaseClaims()
+			if err != nil || len(claims) != 0 {
+				t.Fatalf("status lookup published claims=%#v err=%v", claims, err)
+			}
+		})
+	}
+}
+
+func TestResolveUnclaimedLeaseHashCollisionFailsClosed(t *testing.T) {
+	const firstID, secondID = "cbx_f17568b85ee8", "cbx_f3dbca2ff7ac"
+	if machine0LeaseSuffix(firstID) != machine0LeaseSuffix(secondID) {
+		t.Fatal("fixture lease IDs must have colliding name hashes")
+	}
+	for _, id := range []string{firstID, secondID} {
+		t.Run(id, func(t *testing.T) {
+			repo := setupState(t)
+			inventory := readyMachine("203.0.113.10")
+			inventory.Name = "crabbox-blue" + machine0LeaseSuffix(firstID)
+			gets := 0
+			api := &fakeAPI{machines: []machine{inventory}, getFn: func(context.Context, string) (machine, error) {
+				gets++
+				return inventory, nil
+			}}
+			b := testBackendWithAPI(api)
+			b.waitSSH = func(context.Context, *SSHTarget, time.Duration) error {
+				t.Fatal("readiness ran on a hash-only candidate")
+				return nil
+			}
+			_, err := b.Resolve(context.Background(), ResolveRequest{ID: id, Reclaim: true, ReadyProbe: true, Repo: core.Repo{Root: repo}})
+			var exitErr core.ExitError
+			if !errors.As(err, &exitErr) || exitErr.Code != 4 || !strings.Contains(err.Error(), "matches only a short name hash") {
+				t.Fatalf("unexpected error=%v", err)
+			}
+			if gets != 0 || len(api.created)+len(api.started)+len(api.stopped)+len(api.suspended)+len(api.removed)+len(api.primed) != 0 {
+				t.Fatalf("gets=%d mutations=%#v", gets, api)
+			}
+			claims, err := core.ListLeaseClaims()
+			if err != nil || len(claims) != 0 {
+				t.Fatalf("unverified detail published claims=%#v err=%v", claims, err)
+			}
+		})
+	}
+}
+
 func TestResolveRefreshesChangedIPAndPrefersReturnedUsername(t *testing.T) {
 	repo := setupState(t)
 	api := &fakeAPI{sizes: []machineSize{testSize()}, getSequence: []machine{readyMachine("203.0.113.10")}}
@@ -819,15 +1046,35 @@ func TestResolveRefreshesChangedIPAndPrefersReturnedUsername(t *testing.T) {
 	api.machine.IP = "203.0.113.99"
 	api.machine.DefaultSSHUsername = "nix"
 	api.machine.Distribution = "nixos"
+	b.cfg.Class = "beast"
+	core.MarkClassExplicit(&b.cfg)
+	b.cfg.Machine0.Size, b.cfg.Machine0.SizeExplicit = "gpu-h100-1", true
+	b.cfg.Machine0.Region, b.cfg.Machine0.Image, b.cfg.Machine0.Key = "us-east", "other-image", "other-key"
+	api.listCalls = 0
+	api.getFn = func(_ context.Context, name string) (machine, error) {
+		if name != lease.Server.Name {
+			t.Fatalf("claimed Get(%q), want %q", name, lease.Server.Name)
+		}
+		return api.machine, nil
+	}
 	resolved, err := b.Resolve(context.Background(), ResolveRequest{Repo: core.Repo{Root: repo}, ID: lease.LeaseID})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if api.listCalls != 0 {
+		t.Fatalf("claimed resolve called List %d times", api.listCalls)
 	}
 	if resolved.SSH.Host != "203.0.113.99" || resolved.SSH.User != "nix" || resolved.Server.CloudID != "vm-123" {
 		t.Fatalf("resolved=%#v", resolved)
 	}
 	if resolved.Server.Labels["work_root"] != "/home/nix/crabbox" {
 		t.Fatalf("resolved work_root=%q", resolved.Server.Labels["work_root"])
+	}
+	if resolved.Server.ServerType.Name != "large" || resolved.Server.Labels["region"] != "eu" || resolved.SSH.Key != lease.SSH.Key {
+		t.Fatalf("creation selectors changed the observed machine: %#v", resolved)
+	}
+	if len(api.created) != 1 || len(api.removed)+len(api.started)+len(api.stopped)+len(api.suspended) != 0 {
+		t.Fatalf("reuse mutated lifecycle: created=%v removed=%v started=%v stopped=%v suspended=%v", api.created, api.removed, api.started, api.stopped, api.suspended)
 	}
 	claim, ok, err := resolveClaim(lease.LeaseID)
 	if err != nil || !ok || claim.Labels["work_root"] != "/home/nix/crabbox" {
@@ -1777,7 +2024,6 @@ func TestCheckpointImageRequiresExactVersionAndRemoteOwnershipMetadata(t *testin
 	}}
 	b := testBackendWithAPI(api)
 	req := core.NativeCheckpointResourceRequest{
-		Config:   b.cfg,
 		Image:    core.NativeCheckpointImage{Provider: providerName, Kind: core.CheckpointKindMachine0, Direct: true, ResourceID: "img-1"},
 		Metadata: map[string]string{metadataImageName: "baseline", metadataImageID: "img-1", metadataImageVersion: "2", metadataSourceMachine: "vm-123", "crabbox_checkpoint": "chk_123", "crabbox_lease": "cbx_123"},
 	}
@@ -1802,8 +2048,7 @@ func TestWholeImageCheckpointDeleteRefusesUnrelatedLaterVersions(t *testing.T) {
 	}}
 	b := testBackendWithAPI(api)
 	req := core.NativeCheckpointResourceRequest{
-		Config: b.cfg,
-		Image:  core.NativeCheckpointImage{Provider: providerName, Kind: core.CheckpointKindMachine0, Direct: true, ResourceID: "img-1"},
+		Image: core.NativeCheckpointImage{Provider: providerName, Kind: core.CheckpointKindMachine0, Direct: true, ResourceID: "img-1"},
 		Metadata: map[string]string{
 			metadataImageName: "baseline", metadataImageID: "img-1", metadataImageVersion: "1", metadataCreatedImage: "true", metadataSourceMachine: "vm-123", "crabbox_checkpoint": "chk_123", "crabbox_lease": "cbx_123",
 		},

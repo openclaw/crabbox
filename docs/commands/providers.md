@@ -119,6 +119,12 @@ scratch-disk capacity. Optional `providerMetadata` is present only when the
 provider returns forward-compatible catalog fields not yet normalized by
 Crabbox.
 
+For Machine0, this live catalog is the authority for native creation choices;
+filter by the intended region and pass the exact `name` through
+`--machine0-size`. Static class aliases do not guarantee availability, and an
+explicitly configured native size takes priority over a generic class. Neither
+catalog offers an in-place resize operation for existing Machine0 leases.
+
 ## `providers describe`
 
 `crabbox providers describe <provider>` reports the selected runnable
@@ -228,6 +234,14 @@ Scalar `type` values are `string`, `bool`, `int`, `int64`, `float64`, or
 `duration`; durations use canonical Go duration strings. A repeatable string
 list has `type: "string"`, `valueShape: "string-list"`, a JSON string-array
 default, and `repeatable: true`.
+
+`creationOnly: true` marks provider-owned flags that select a new resource;
+it does not advertise mutation of an existing lease. Machine0 marks its size,
+region, image, image version, desktop image, and registered key selectors this
+way. `false` means the flag is not annotated as creation-only, not that it can
+resize a resource. In particular, shared `class` and `type` metadata are not
+resize capabilities. Static flag defaults and class profiles do not describe
+effective config or the observed capacity of an existing machine.
 
 Defaults come from the compiled `baseConfig()` passed through the real `run`
 flag registration. The command does not load config files or environment

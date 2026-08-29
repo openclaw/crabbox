@@ -110,7 +110,7 @@ func uploadRunScript(ctx context.Context, target SSHTarget, workdir string, spec
 
 func remoteUploadRunScriptCommand(workdir, remotePath string) string {
 	dir := filepath.ToSlash(filepath.Dir(remotePath))
-	script := "set -eu\n" +
+	script := "set -eu\numask 077\n" +
 		"cd " + shellQuote(workdir) + "\n" +
 		"mkdir -p " + shellQuote(dir) + "\n" +
 		"cat > " + shellQuote(remotePath) + "\n" +

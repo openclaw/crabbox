@@ -1,3 +1,8 @@
+import {
+  defaultTailscaleVersion,
+  defaultTailscaleAMD64SHA256,
+  defaultTailscaleARM64SHA256,
+} from "./bootstrap.generated";
 import type { Env } from "./types";
 
 export interface TailscaleKeyRequest {
@@ -8,10 +13,10 @@ export interface TailscaleKeyRequest {
 
 export type TailscaleInstallMode = "package" | "pinned";
 
-export const defaultPinnedTailscaleVersion = "1.98.4";
+export const defaultPinnedTailscaleVersion = defaultTailscaleVersion;
 export const defaultPinnedTailscaleSHA256 = {
-  amd64: "e6c08a8ee7e63e69aaf1b62ecd12672b3883fbcd2a176bf6cfa42a15fdce0b6b",
-  arm64: "3cb068eb1368b6bb218d0ef0aa0a7a679a7156b7c979e2279cc2c2321b5f05c7",
+  amd64: defaultTailscaleAMD64SHA256,
+  arm64: defaultTailscaleARM64SHA256,
 } as const;
 
 export interface TailscaleInstallConfig {

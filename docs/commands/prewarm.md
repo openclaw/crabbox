@@ -22,6 +22,19 @@ release cannot resolve or stop the lease, the error output prints the exact
 `crabbox stop` command to run; delegated-run providers retain their
 provider-owned lifecycle behavior.
 
+Before configuring a backend, warming a box, checking typed ready-pool support,
+or printing a dry-run plan, `prewarm` validates the generated probe against the
+selected provider's run contract. The probe reuses the planned lease with
+`--no-sync --no-hydrate --shell`; unsupported probes fail with exit code 2
+before warmup. This admission does not resolve a lease or inspect prior claims.
+
+Prewarm also validates the provider configuration that hydration and probes
+will reload. Creation-only flags stay on warmup and are not forwarded to either
+follow-up. If a creation override hides an invalid saved value, fix that saved
+configuration before requesting hydration or a probe; prewarm rejects the
+invalid follow-up before allocation, including with `--dry-run`. Plain prewarm
+without hydration or a probe keeps its normal creation override behavior.
+
 ## Reuse
 
 Run follow-up commands against the printed lease id or slug:
@@ -35,6 +48,10 @@ Use `--no-sync` when the prewarmed checkout already contains the code you want
 to test. Omit it when local edits must be copied; fingerprint sync should skip
 the upload quickly when nothing changed.
 
+Blacksmith Testbox is an exception: it owns sync and has no supported
+`--no-sync` option. Reuse a Blacksmith lease without `--no-sync`; Blacksmith
+will manage source sync on each run.
+
 ## Behavior
 
 - Creates a fresh lease with the normal `warmup` flags.
@@ -43,7 +60,13 @@ the upload quickly when nothing changed.
 - Skips hydration for delegated-run providers and reports
   `hydration=provider-owned`.
 - Optionally runs `--probe-command` without source sync to prove the hydrated
-  runtime is usable.
+  runtime is usable. Blacksmith Testbox rejects a nonblank `--probe-command`
+  with exit 2 before backend configuration, warmup, key generation, provider
+  calls, or claim changes, including with `--dry-run`, because its runs do not
+  support `--no-sync`.
+  Put readiness checks in the Blacksmith workflow, omit the probe, or use a
+  provider that supports no-sync probes. An empty or whitespace-only probe is
+  treated as no probe.
 - Optionally registers the hydrated lease in a broker ready pool with `--pool`.
 - `--timing-json` includes `hydrateMs` and `probeMs`.
 

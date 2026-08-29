@@ -5,11 +5,12 @@ import type { Duplex } from "node:stream";
 import { PgBoss } from "pg-boss";
 import { WebSocket as NodeWebSocket, WebSocketServer, type RawData } from "ws";
 
-import type {
-  CoordinatorRuntime,
-  CoordinatorSocketHandlers,
-  CoordinatorWebSocketUpgrade,
-  CoordinatorWebSocketUpgradeOptions,
+import {
+  controlMessageOwnsTransaction,
+  type CoordinatorRuntime,
+  type CoordinatorSocketHandlers,
+  type CoordinatorWebSocketUpgrade,
+  type CoordinatorWebSocketUpgradeOptions,
 } from "../src/coordinator-runtime";
 import { PostgresCoordinatorStorage } from "./postgres-storage";
 
@@ -194,8 +195,12 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
       this.socketAlive.set(nodeSocket, true);
     });
     nodeSocket.on("message", (data, isBinary) => {
-      void this.runSocketOperation(nodeSocket, attachment, () =>
-        handlers.message(webSocketData(data, isBinary)),
+      const message = webSocketData(data, isBinary);
+      void this.runSocketOperation(
+        nodeSocket,
+        attachment,
+        () => handlers.message(message),
+        message,
       ).catch((error) => {
         this.failSocket(nodeSocket, "message", error);
       });
@@ -287,12 +292,18 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
     socket: NodeWebSocket,
     attachment: unknown,
     callback: () => Promise<T> | T,
+    message?: string | ArrayBuffer,
   ): Promise<T> {
     const operation = async () => callback();
+    const kind = socketAttachmentKind(attachment);
+    if (kind === "control" && controlMessageOwnsTransaction(message)) {
+      // Heartbeats own the lifecycle transaction in shared fleet code.
+      return this.trackSocketOperation(operation());
+    }
     // Data-plane frames and code-agent replies must be able to complete an HTTP
     // request that currently owns the lifecycle queue. Control frames mutate
     // lease state and stay serialized with HTTP requests and alarms.
-    if (!isBridgeDataAttachment(attachment)) {
+    if (!kind || !bridgeDataAttachmentKinds.has(kind)) {
       return this.trackSocketOperation(this.operationRunner(operation));
     }
     const run = (this.socketOperationTails.get(socket) ?? Promise.resolve()).then(operation);
@@ -368,9 +379,9 @@ function webSocketData(data: RawData, isBinary: boolean): string | ArrayBuffer {
   return Uint8Array.from(buffer).buffer;
 }
 
-function isBridgeDataAttachment(attachment: unknown): boolean {
+function socketAttachmentKind(attachment: unknown): string | undefined {
   if (!attachment || typeof attachment !== "object" || !("kind" in attachment)) {
-    return false;
+    return undefined;
   }
-  return bridgeDataAttachmentKinds.has(String(attachment.kind));
+  return String(attachment.kind);
 }

@@ -44,6 +44,13 @@ func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return registerFlags(fs, defaults)
 }
 
+func (Provider) CreationOnlyFlagNames() []string {
+	return []string{
+		"machine0-size", "machine0-region", "machine0-image", "machine0-image-version",
+		"machine0-desktop-image", "machine0-key",
+	}
+}
+
 func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	return applyFlags(cfg, fs, values)
 }

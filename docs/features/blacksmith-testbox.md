@@ -194,12 +194,17 @@ markers. If the CLI starts syncing but does not print a completion marker within
 Because Blacksmith owns sync and execution, Crabbox rejects the following `run` options for
 `provider=blacksmith-testbox`:
 
-- sync flags: `--sync-only`, `--checksum`, `--force-sync-large`, `--full-resync`, `--fresh-pr`;
+- sync flags: `--no-sync`, `--sync-only`, `--checksum`, `--force-sync-large`, `--full-resync`, `--fresh-pr`;
 - execution flags: `--script`, `--script-stdin`, `--env-helper`, `--capture-stdout`,
   `--capture-stderr`, `--capture-on-fail`, `--download`, `--stop-after`;
 - environment forwarding: `--allow-env` and `CRABBOX_ENV_ALLOW` are unsupported — configure
   secrets in the Testbox workflow instead;
 - `--actions-runner` on `warmup` — Blacksmith owns runner hydration.
+
+Run option admission precedes backend configuration, including when reusing
+`--id`. Because `prewarm --probe-command` promises a no-sync shell probe, it
+also rejects before configuration, including in dry-run mode. Put readiness
+checks in the Blacksmith workflow or use plain `prewarm` without a probe.
 
 `crabbox run` prints `sync=delegated` in the final summary. `--emit-proof` is supported: it
 persists a local proof bundle (stdout/stderr logs, `timing.json`, `metadata.json`) and links the

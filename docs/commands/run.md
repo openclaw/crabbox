@@ -34,6 +34,10 @@ The trailing command after `--` is sent to the box verbatim as argv. Use
 `--shell` to run it through the remote shell instead, for multi-statement
 snippets, pipes, or shell expansion.
 
+On POSIX and WSL2 SSH targets, private command staging does not change the
+remote caller's umask for user work. Commands keep the target shell's creation
+policy; Crabbox's staged scripts, input, and workspace-owner state remain private.
+
 ## Remote workspace root
 
 Use `CRABBOX_WORK_ROOT` to change the portable base root for one run without
@@ -109,6 +113,12 @@ successful sync but before the command starts, Crabbox stops that stale lease,
 creates one replacement lease, and retries sync once. It does not replace
 explicit `--id`, kept, `--keep-on-failure`, `--no-sync`, `--sync-only`, or
 custom-slug runs.
+
+If the local SSH multiplexing socket is temporarily full before a command
+starts, Crabbox retries that same session once, then disables multiplexing for
+that invocation if the exact file-descriptor handoff failure recurs. The
+existing lease and command are preserved; ordinary remote command failures do
+not trigger this multiplexing recovery.
 
 Crabbox records a local repo claim for each reused lease. If a lease is already
 claimed by another repo, pass `--reclaim` to move the claim intentionally.
@@ -211,7 +221,8 @@ Jujutsu workspaces are supported for sync only when `.jj` is colocated with
 same-root `.git` metadata. Native Jujutsu revision mapping is not supported yet;
 `run` fails before lease acquisition or ready-pool borrowing instead of risking
 sync of an outer Git checkout's revision. Use a colocated Git workspace or pass
-`--no-sync` to run without transferring local files. See
+`--no-sync` with a provider that supports it to run without transferring local
+files. See
 [sync](../features/sync.md#jujutsu-workspaces) for safe initialization guidance.
 
 Before the first rsync into a Git checkout, Crabbox seeds the remote worktree
@@ -264,7 +275,11 @@ hint, and `sync.timeout` kills stalled syncs.
 
 ### Sync alternatives
 
-- `--no-sync` skips rsync entirely and `--sync-only` syncs and exits.
+- `--no-sync` skips local file transfer and `--sync-only` syncs and exits on
+  supported providers. Blacksmith Testbox rejects both: its native command owns
+  sync even with `--id`, so reusing a Testbox does not provide a sync bypass.
+  Provider admission runs before backend configuration; skipping sync does not
+  skip provider initialization or existing-lease preparation.
 - `--fresh-pr <owner/repo#number|url|number>` skips local dirty sync and creates
   a fresh remote checkout of a GitHub PR. A bare `<number>` uses the current
   repository's GitHub origin. Only `github.com` PR URLs are accepted; other
@@ -559,6 +574,13 @@ special files are omitted.
 `--capture-on-fail` remains accepted as a compatibility alias. Crabbox does not
 redact captured files; the caller owns redaction before sharing them.
 
+When the project capture destination is unwritable, automatic bundles fall
+back to the Crabbox user state directory's `captures/` subdirectory. The
+`failure-bundle local=...` line reports the actual path. Security-validation
+and archive/read failures do not trigger fallback, and explicit stdout/stderr
+capture paths never move. See [local capture storage](../observability.md#capturing-run-output-locally)
+for the state path and retention details.
+
 ## Test results
 
 Add `--junit <path>` (comma-separated) or configure `results.junit` to attach
@@ -717,7 +739,7 @@ Run-specific flags:
 --keep-on-failure
 --stop-after success|always|failure|never
 --lease-output <file>        Write a retained run-session handle when supported.
---no-sync
+--no-sync                    Skip local file transfer; unsupported by Blacksmith Testbox.
 --sync-only
 --no-hydrate
 --full-resync                Alias: --fresh-sync

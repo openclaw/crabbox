@@ -444,10 +444,10 @@ func (a App) startRegisteredWebVNCDaemonBestEffort(cfg Config, target SSHTarget,
 	if !shouldStartRegisteredWebVNCDaemon(cfg, keep) {
 		return
 	}
-	args := webVNCBridgeArgs(cfg, target, leaseID, false, false)
+	args := webVNCBridgeRouting(cfg, target, leaseID, false, false)
 	// Resolve the password before the daemon environment is scrubbed. The
 	// supervisor forwards this value to the bridge over its one-shot stdin gate.
-	credentialInput := registeredWebVNCDaemonCredentialInput(cfg, args)
+	credentialInput := registeredWebVNCDaemonCredentialInput(cfg, args.Args)
 	if err := a.startWebVNCDaemon(args, leaseID, false, "", credentialInput, target.ChildEnvDenylist...); err != nil {
 		fmt.Fprintf(a.Stderr, "warning: could not start registered WebVNC bridge for %s: %v\n", leaseID, err)
 	}

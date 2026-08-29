@@ -267,9 +267,31 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 	if claimed {
 		lookup = firstNonBlank(claim.Labels["machine0_name"], claim.CloudID, lookup)
 	}
-	item, err := b.api.Get(ctx, lookup)
-	if err != nil {
-		return LeaseTarget{}, err
+	var item machine
+	if !claimed && core.IsCanonicalLeaseID(lookup) {
+		machines, err := b.api.List(ctx)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+		suffix := machine0LeaseSuffix(lookup)
+		for _, candidate := range machines {
+			if !strings.HasPrefix(candidate.Name, "crabbox-") || !strings.HasSuffix(candidate.Name, suffix) {
+				continue
+			}
+			if item.Name != "" {
+				return LeaseTarget{}, exit(4, "multiple Machine0 machines match lease %s", lookup)
+			}
+			item = candidate
+		}
+		if item.Name == "" {
+			return LeaseTarget{}, exit(4, "lease/server not found: %s", lookup)
+		}
+		return LeaseTarget{}, exit(4, "machine0 lease %s has no local claim; candidate %q matches only a short name hash: inspect the machine and use its explicit name with --reclaim to adopt it", lookup, item.Name)
+	} else {
+		item, err = b.api.Get(ctx, lookup)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
 	}
 	cfg := effectiveMachine0Config(baseCfg, item)
 	if claimed && claim.CloudID != "" && claim.CloudID != item.ID {
@@ -1028,17 +1050,21 @@ func machine0MachineName(leaseID, slug string) string {
 	if base == "" {
 		base = core.NormalizeLeaseSlug(strings.ReplaceAll(leaseID, "_", "-"))
 	}
-	hash := fnv.New32a()
-	_, _ = hash.Write([]byte(leaseID))
-	suffix := fmt.Sprintf("%08x", hash.Sum32())
-	maxBase := machine0MachineNameMaxLength - len("crabbox--") - len(suffix)
+	suffix := machine0LeaseSuffix(leaseID)
+	maxBase := machine0MachineNameMaxLength - len("crabbox-") - len(suffix)
 	if len(base) > maxBase {
 		base = strings.Trim(base[:maxBase], "-")
 	}
 	if base == "" {
 		base = "vm"
 	}
-	return "crabbox-" + base + "-" + suffix
+	return "crabbox-" + base + suffix
+}
+
+func machine0LeaseSuffix(leaseID string) string {
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(leaseID))
+	return fmt.Sprintf("-%08x", hash.Sum32())
 }
 
 func shouldCleanupMachine0(server Server, claim LeaseClaim, hasClaim bool, now time.Time) (bool, string) {

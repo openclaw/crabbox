@@ -48,6 +48,7 @@ vi.mock("../node/postgres-storage", () => ({
 }));
 
 import { NodeCoordinatorRuntime } from "../node/node-runtime";
+import { AsyncMutex } from "../node/server-support";
 
 describe("NodeCoordinatorRuntime", () => {
   beforeEach(() => {
@@ -231,103 +232,139 @@ describe("NodeCoordinatorRuntime", () => {
     expect(operationRunner).not.toHaveBeenCalled();
   });
 
-  it("serializes control messages with lifecycle operations", async () => {
-    const runtime = new NodeCoordinatorRuntime("postgresql://example.invalid/test");
-    const socket = Object.assign(new EventEmitter(), {
-      close: vi.fn<(code?: number, reason?: string) => void>(),
-      terminate: vi.fn<() => void>(),
-    });
-    const operationRunner = vi.fn<OperationRunner>(
-      async <T>(callback: () => Promise<T>): Promise<T> => callback(),
-    );
-    const message = vi.fn<() => Promise<void>>(async () => {});
-    runtime.setOperationRunner(operationRunner);
+  it.each([
+    { kind: "control", payload: "{}", isBinary: false },
+    { kind: "control", payload: '{"type":"subscribe"}', isBinary: false },
+    { kind: "control", payload: '{"type":"heartbeat"', isBinary: false },
+    { kind: "control", payload: '{"type":"heartbeat"}', isBinary: true },
+    { kind: "unknown", payload: '{"type":"heartbeat"}', isBinary: false },
+  ])(
+    "serializes $kind messages ($payload, binary=$isBinary) with lifecycle operations",
+    async ({ kind, payload, isBinary }) => {
+      const runtime = new NodeCoordinatorRuntime("postgresql://example.invalid/test");
+      const socket = Object.assign(new EventEmitter(), {
+        close: vi.fn<(code?: number, reason?: string) => void>(),
+        terminate: vi.fn<() => void>(),
+      });
+      const mutex = new AsyncMutex();
+      const operationRunner = vi.fn<OperationRunner>((callback) => mutex.run(callback));
+      runtime.setOperationRunner(operationRunner);
+      const lifecycleDone = deferred<void>();
+      const lifecycle = runtime.runExclusive(async () => lifecycleDone.promise);
+      const message = vi.fn<() => Promise<void>>(async () => {});
 
-    runtime.acceptWebSocket(socket as unknown as WebSocket, { kind: "control" }, [], {
-      message,
-      close: vi.fn<(code: number, reason: string) => void>(),
-      error: vi.fn<() => void>(),
-    });
-    socket.emit("message", Buffer.from("{}"), false);
+      runtime.acceptWebSocket(socket as unknown as WebSocket, { kind }, [], {
+        message,
+        close: vi.fn<(code: number, reason: string) => void>(),
+        error: vi.fn<() => void>(),
+      });
+      socket.emit("message", Buffer.from(payload), isBinary);
 
-    await vi.waitFor(() => {
-      expect(message).toHaveBeenCalledOnce();
-    });
-    expect(operationRunner).toHaveBeenCalledOnce();
-  });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(message).not.toHaveBeenCalled();
+      lifecycleDone.resolve();
+      await lifecycle;
 
-  it("keeps data-plane close callbacks behind earlier messages", async () => {
-    const runtime = new NodeCoordinatorRuntime("postgresql://example.invalid/test");
-    const socket = Object.assign(new EventEmitter(), {
-      close: vi.fn<(code?: number, reason?: string) => void>(),
-      terminate: vi.fn<() => void>(),
-    });
-    const order: string[] = [];
-    const messageDone = deferred<void>();
+      await vi.waitFor(() => {
+        expect(message).toHaveBeenCalledWith(
+          isBinary ? Uint8Array.from(Buffer.from(payload)).buffer : payload,
+        );
+      });
+      expect(operationRunner).toHaveBeenCalledTimes(2);
+    },
+  );
 
-    runtime.acceptWebSocket(socket as unknown as WebSocket, { kind: "code-agent" }, [], {
-      message: async () => {
-        order.push("message");
+  it.each(["code-agent", "runtime-adapter-agent"])(
+    "keeps %s data-plane close callbacks behind earlier messages",
+    async (kind) => {
+      const runtime = new NodeCoordinatorRuntime("postgresql://example.invalid/test");
+      const socket = Object.assign(new EventEmitter(), {
+        close: vi.fn<(code?: number, reason?: string) => void>(),
+        terminate: vi.fn<() => void>(),
+      });
+      const order: string[] = [];
+      const messageDone = deferred<void>();
+
+      runtime.acceptWebSocket(socket as unknown as WebSocket, { kind }, [], {
+        message: async () => {
+          order.push("message");
+          await messageDone.promise;
+        },
+        close: () => {
+          order.push("close");
+        },
+        error: vi.fn<() => void>(),
+      });
+      socket.emit("message", Buffer.from('{"type":"heartbeat"}'), false);
+      socket.emit("message", Buffer.from("{}"), false);
+      socket.emit("close", 1000, Buffer.from("done"));
+
+      await vi.waitFor(() => {
+        expect(order).toEqual(["message"]);
+      });
+      messageDone.resolve();
+      await vi.waitFor(() => {
+        expect(order).toEqual(["message", "message", "close"]);
+      });
+    },
+  );
+
+  it.each(["code-agent", "runtime-adapter-agent", "control"])(
+    "drains %s socket operations that own lifecycle transactions before stopping jobs and closing storage",
+    async (kind) => {
+      const runtime = new NodeCoordinatorRuntime("postgresql://example.invalid/test");
+      const mutex = new AsyncMutex();
+      runtime.setOperationRunner((callback) => mutex.run(callback));
+      const messageDone = deferred<void>();
+      const socket = new EventEmitter();
+      const close = vi.fn<() => void>(() => {
+        queueMicrotask(() => socket.emit("close", 1000, Buffer.from("shutdown")));
+      });
+      Object.assign(socket, {
+        close,
+        terminate: vi.fn<() => void>(),
+        readyState: 1,
+      });
+      let heartbeatCompleted = false;
+      const message = vi.fn<() => Promise<void>>(async () => {
+        await runtime.runExclusive(async () => {
+          await runtime.scheduleAlarm(Date.now() + 60_000);
+        });
+        heartbeatCompleted = true;
         await messageDone.promise;
-      },
-      close: () => {
-        order.push("close");
-      },
-      error: vi.fn<() => void>(),
-    });
-    socket.emit("message", Buffer.from("{}"), false);
-    socket.emit("close", 1000, Buffer.from("done"));
+      });
 
-    await vi.waitFor(() => {
-      expect(order).toEqual(["message"]);
-    });
-    messageDone.resolve();
-    await vi.waitFor(() => {
-      expect(order).toEqual(["message", "close"]);
-    });
-  });
+      runtime.acceptWebSocket(socket as unknown as WebSocket, { kind }, [], {
+        message,
+        close: vi.fn<(code: number, reason: string) => void>(),
+        error: vi.fn<() => void>(),
+      });
+      socket.emit("message", Buffer.from('{"type":"heartbeat"}'), false);
+      await vi.waitFor(() => expect(heartbeatCompleted).toBe(true));
+      const followingLifecycle = vi.fn<() => Promise<void>>(async () => {});
+      await runtime.runExclusive(followingLifecycle);
+      await mutex.drain();
+      expect(followingLifecycle).toHaveBeenCalledOnce();
 
-  it("drains socket operations before stopping jobs and closing storage", async () => {
-    const runtime = new NodeCoordinatorRuntime("postgresql://example.invalid/test");
-    const messageDone = deferred<void>();
-    const socket = new EventEmitter();
-    const close = vi.fn<() => void>(() => {
-      queueMicrotask(() => socket.emit("close", 1000, Buffer.from("shutdown")));
-    });
-    Object.assign(socket, {
-      close,
-      terminate: vi.fn<() => void>(),
-      readyState: 1,
-    });
-    const message = vi.fn<() => Promise<void>>(async () => {
-      await messageDone.promise;
-      await runtime.scheduleAlarm(Date.now() + 60_000);
-    });
+      runtime.beginShutdown();
+      expect(close).toHaveBeenCalledOnce();
+      const stopped = runtime.stop();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(mocks.boss.stop).not.toHaveBeenCalled();
+      expect(mocks.storage.close).not.toHaveBeenCalled();
+      messageDone.resolve();
+      await stopped;
+      await mutex.drain();
 
-    runtime.acceptWebSocket(socket as unknown as WebSocket, { kind: "code-agent" }, [], {
-      message,
-      close: vi.fn<(code: number, reason: string) => void>(),
-      error: vi.fn<() => void>(),
-    });
-    socket.emit("message", Buffer.from("{}"), false);
-    await vi.waitFor(() => expect(message).toHaveBeenCalledOnce());
-
-    runtime.beginShutdown();
-    expect(close).toHaveBeenCalledOnce();
-    const stopped = runtime.stop();
-    expect(mocks.boss.stop).not.toHaveBeenCalled();
-    expect(mocks.storage.close).not.toHaveBeenCalled();
-    messageDone.resolve();
-    await stopped;
-
-    expect(mocks.boss.send).toHaveBeenCalledWith(
-      "coordinator-alarm",
-      null,
-      expect.objectContaining({ singletonKey: "fleet" }),
-    );
-    expect(mocks.boss.send.mock.invocationCallOrder.at(-1)).toBeLessThan(
-      mocks.boss.stop.mock.invocationCallOrder.at(-1) ?? 0,
-    );
-    expect(mocks.storage.close).toHaveBeenCalledOnce();
-  });
+      expect(mocks.boss.send).toHaveBeenCalledWith(
+        "coordinator-alarm",
+        null,
+        expect.objectContaining({ singletonKey: "fleet" }),
+      );
+      expect(mocks.boss.send.mock.invocationCallOrder.at(-1)).toBeLessThan(
+        mocks.boss.stop.mock.invocationCallOrder.at(-1) ?? 0,
+      );
+      expect(mocks.storage.close).toHaveBeenCalledOnce();
+    },
+  );
 });
