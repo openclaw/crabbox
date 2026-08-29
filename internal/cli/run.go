@@ -572,10 +572,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		return err
 	}
 	requiredArtifactGlobs = appendUniqueStrings(nil, requiredArtifactGlobs...)
-	requiredArtifactChanges = appendUniqueStrings(nil, requiredArtifactChanges...)
 	if err := validateArtifactChangePaths(requiredArtifactChanges); err != nil {
 		return err
 	}
+	requiredArtifactChanges = appendUniqueStrings(nil, requiredArtifactChanges...)
 	artifactChangeResults = initialArtifactChanges(requiredArtifactChanges)
 	if err := validateRequiredRunArtifactGlobs(requiredArtifactGlobs); err != nil {
 		return err

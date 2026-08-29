@@ -31,6 +31,21 @@ func TestArtifactChangePathValidation(t *testing.T) {
 	}
 }
 
+func TestRunArtifactChangeRejectsBlankPathBeforeNormalization(t *testing.T) {
+	for _, p := range []string{"", " ", "proof "} {
+		t.Run(fmt.Sprintf("path=%q", p), func(t *testing.T) {
+			clearConfigEnv(t)
+			dir := t.TempDir()
+			isolateRunTestUserDirs(t, dir)
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "config.yaml"))
+			err := (App{Stdout: io.Discard, Stderr: io.Discard}).runCommand(context.Background(), []string{"--provider", "run-env-profile-test", "--require-artifact-change", p, "--", "true"})
+			if exitCodeForError(err, 0) != 2 || !strings.Contains(fmt.Sprint(err), "--require-artifact-change") {
+				t.Fatalf("invalid exact path was normalized away: %v", err)
+			}
+		})
+	}
+}
+
 func TestArtifactChangeSnapshots(t *testing.T) {
 	dir := t.TempDir()
 	paths := []string{"stale", "changed", "created", "missing", "removed", "identical", "empty"}
