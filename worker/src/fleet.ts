@@ -86,7 +86,11 @@ import {
   isDaytonaNotFound,
   type DaytonaSSHEndpoint,
 } from "./daytona";
-import { GCPClient, gcpProviderLabelValue } from "./gcp";
+import {
+  GCPClient,
+  ProviderProvisioningOutcomeUncertainError,
+  gcpProviderLabelValue,
+} from "./gcp";
 import {
   githubMembershipPolicy,
   requireFreshGitHubMembership,
@@ -3294,6 +3298,9 @@ export class FleetCoordinator {
         current.createAttemptID !== reservation.createAttemptID ||
         current.fixedCreateIntentHash !== reservation.fixedCreateIntentHash ||
         current.providerScope !== reservation.providerScope ||
+        (claim.provider === "gcp" &&
+          (claim.region !== current.region ||
+            claim.providerProject !== current.providerProject)) ||
         (current.cloudID && current.cloudID !== claim.cloudID) ||
         (!current.cloudID &&
           current.provisioningRequestStartedAt !== reservation.provisioningRequestStartedAt)
@@ -22056,6 +22063,8 @@ function mergeProvisioningFailureMetadata(
   const retainResource = lease.state === "released" && lease.releaseDeletesServer === false;
   const awsOutcomeUncertain =
     config.provider === "aws" && config.awsPrivate && isAWSRunInstancesOutcomeUncertain(message);
+  const gcpOutcomeUncertain =
+    config.provider === "gcp" && error instanceof ProviderProvisioningOutcomeUncertainError;
   const hetznerResourceMayExist =
     config.provider === "hetzner" && hetznerProvisioningFailureMayHaveResource(error);
   const hetznerRetryable =
@@ -22067,6 +22076,7 @@ function mergeProvisioningFailureMetadata(
   const resourceMayExist = Boolean(
     cleanupClaim ||
     awsOutcomeUncertain ||
+    gcpOutcomeUncertain ||
     hetznerResourceMayExist ||
     lease.provisioningResourceMayExist,
   );
@@ -22078,6 +22088,7 @@ function mergeProvisioningFailureMetadata(
   lease.provisioningFailureRetryable = Boolean(
     !cleanupClaim &&
     !awsOutcomeUncertain &&
+    !gcpOutcomeUncertain &&
     (hetznerRetryable || lease.provisioningFailureRetryable),
   );
 
@@ -23783,12 +23794,25 @@ export class GCPProvider implements CloudProvider {
   async prepareLeaseConfig(
     config: ReturnType<typeof leaseConfig>,
   ): Promise<ReturnType<typeof leaseConfig>> {
-    if (config.gcpProject) {
-      return config;
+    const gcpProject =
+      config.gcpProject ||
+      this.env.CRABBOX_GCP_PROJECT?.trim() ||
+      this.env.GCP_PROJECT_ID?.trim() ||
+      "";
+    const scoped = config.gcpProject === gcpProject ? config : { ...config, gcpProject };
+    if (scoped.gcpMachineImage) {
+      return scoped;
     }
+    const client = this.client.forScope(scoped.gcpZone, gcpProject);
+    const selected = scoped.gcpSnapshot
+      ? await client.resolveDiskSnapshot(scoped.gcpSnapshot)
+      : await client.resolveBootImage(scoped.gcpImage);
     return {
-      ...config,
-      gcpProject: this.env.CRABBOX_GCP_PROJECT?.trim() || this.env.GCP_PROJECT_ID?.trim() || "",
+      ...scoped,
+      ...(scoped.gcpSnapshot
+        ? { gcpSnapshot: selected.launchSource }
+        : { gcpImage: selected.launchSource }),
+      selectedImage: selected.identity,
     };
   }
 
@@ -23810,6 +23834,7 @@ export class GCPProvider implements CloudProvider {
     serverType: string;
     market?: string;
     attempts?: ProvisioningAttempt[];
+    image?: LeaseImageIdentity;
   }> {
     return this.client.createServerWithFallback(config, leaseID, slug, owner, provisioning);
   }

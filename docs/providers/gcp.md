@@ -394,6 +394,11 @@ Brokered Linux GCP leases support native [checkpoints](../features/checkpoints.m
 recorded project and zone. Native checkpoints require a coordinator and a known
 cloud instance ID; they are not available for direct-only leases.
 
+Machine images remain valid checkpoint fork/restore sources, but Compute Engine
+does not expose exact created-disk source evidence for them. They therefore
+cannot supply typed ready-pool immutable provenance; use a boot image or disk
+snapshot when that identity is required.
+
 `crabbox image delete <image-id> --provider gcp` deletes a GCP image. GCP does
 not yet have the AWS-style `image promote` bake pipeline.
 

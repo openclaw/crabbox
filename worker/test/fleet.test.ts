@@ -45,7 +45,11 @@ import {
   workspaceTerminalOriginAllowed,
   type WebVNCBuffer,
 } from "../src/fleet";
-import { gcpProviderLabelValue } from "../src/gcp";
+import {
+  GCPClient,
+  ProviderProvisioningOutcomeUncertainError,
+  gcpProviderLabelValue,
+} from "../src/gcp";
 import { HetznerClient, HetznerProvisioningError } from "../src/hetzner";
 import { MISSING_ORG_KEY, isCurrentOrgKey, orgKeyForLabel } from "../src/org-identity";
 import { portalCode, portalVNC, webVNCCredentialsFromHistoryState } from "../src/portal";
@@ -9151,6 +9155,220 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
       state: "failed",
       region: "us-central1-b",
+    });
+  });
+
+  it.each([
+    {
+      name: "zone",
+      claim: {
+        provider: "gcp" as const,
+        cloudID: "crabbox-published",
+        region: "us-central1-c",
+        providerProject: "proj",
+      },
+    },
+    {
+      name: "project",
+      claim: {
+        provider: "gcp" as const,
+        cloudID: "crabbox-published",
+        region: "us-central1-b",
+        providerProject: "other-project",
+      },
+    },
+  ])("rejects a GCP publication claim outside the persisted $name", async ({ claim }) => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_abcdef123456";
+    const fleet = testFleet(storage, {
+      gcp: fakeProvider(undefined, {
+        provider: "gcp",
+        cloudID: claim.cloudID,
+        region: "us-central1-b",
+        onPrepareLeaseCreate(config, lease) {
+          return { config, lease, provisioning: {} };
+        },
+        async onCreateProvisioning(provisioning) {
+          await provisioning?.onTargetAttempt?.({ region: "us-central1-b" });
+          await provisioning?.onResourceCreated?.(claim);
+        },
+      }),
+    });
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        body: {
+          leaseID,
+          provider: "gcp",
+          target: "linux",
+          gcpProject: "proj",
+          gcpZone: "us-central1-a",
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(500);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "failed",
+      cloudID: "",
+      region: "us-central1-b",
+      providerProject: "proj",
+      provisioningResourceMayExist: true,
+      provisioningFailureRetryable: false,
+      cleanupError: expect.stringContaining("invalid allocation claim"),
+    });
+  });
+
+  it("publishes exact GCP fallback identity before the lease becomes active", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_abcdef123456";
+    const cloudID = "crabbox-published";
+    const fleet = testFleet(storage, {
+      gcp: fakeProvider(undefined, {
+        provider: "gcp",
+        cloudID,
+        region: "us-central1-b",
+        onPrepareLeaseCreate(config, lease) {
+          return { config, lease, provisioning: {} };
+        },
+        async onCreateProvisioning(provisioning) {
+          await provisioning?.onTargetAttempt?.({ region: "us-central1-b" });
+          expect(
+            await provisioning?.onResourceCreated?.({
+              provider: "gcp",
+              cloudID,
+              region: "us-central1-b",
+              providerProject: "proj",
+            }),
+          ).toBe(true);
+          expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+            state: "provisioning",
+            cloudID,
+            region: "us-central1-b",
+            providerProject: "proj",
+          });
+        },
+      }),
+    });
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        body: {
+          leaseID,
+          provider: "gcp",
+          target: "linux",
+          gcpProject: "proj",
+          gcpZone: "us-central1-a",
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(201);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "active",
+      cloudID,
+      region: "us-central1-b",
+      providerProject: "proj",
+    });
+  });
+
+  it("keeps GCP uncertainty in interrupted-create recovery until a later lookup is visible", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_abcdef123456";
+    let recoveries = 0;
+    const releases: string[] = [];
+    const recovered: ProviderMachine = {
+      provider: "gcp",
+      id: 123,
+      cloudID: "crabbox-blue-lobster-c80c2195",
+      name: "crabbox-blue-lobster-c80c2195",
+      status: "running",
+      serverType: "e2-micro",
+      host: "192.0.2.10",
+      region: "us-central1-a",
+      labels: {
+        crabbox: "true",
+        created_by: "crabbox",
+        provider: "gcp",
+        lease: leaseID,
+        owner: "alice_example.com",
+        slug: "blue-lobster",
+      },
+    };
+    const fleet = testFleet(storage, {
+      gcp: fakeProvider(
+        async () => {
+          throw new ProviderProvisioningOutcomeUncertainError(
+            "GCP instance insert outcome is uncertain: socket closed",
+          );
+        },
+        {
+          provider: "gcp",
+          onPrepareLeaseCreate(config, lease) {
+            return { config, lease, provisioning: {} };
+          },
+          onRecoverServer() {
+            recoveries += 1;
+            if (recoveries === 1) {
+              throw new Error("gcp GET instance: http 404: not found");
+            }
+            return recovered;
+          },
+          onReleaseLease(lease) {
+            releases.push(lease.cloudID);
+          },
+        },
+      ),
+    });
+
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        body: {
+          leaseID,
+          provider: "gcp",
+          target: "linux",
+          gcpProject: "proj",
+          gcpZone: "us-central1-a",
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(500);
+    const failed = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+    expect(failed).toMatchObject({
+      state: "failed",
+      cloudID: "",
+      provisioningResourceMayExist: true,
+      provisioningFailureRetryable: false,
+      provisioningRequestStartedAt: expect.any(String),
+      provisioningRequestSettledAt: expect.any(String),
+    });
+
+    await fleet.alarm();
+    const missing = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+    expect(recoveries).toBe(1);
+    expect(releases).toEqual([]);
+    expect(missing).toMatchObject({
+      cloudID: "",
+      provisioningRecoveryMissingSince: expect.any(String),
+      provisioningRequestStartedAt: failed.provisioningRequestStartedAt,
+    });
+
+    storage.seed(`lease:${leaseID}`, {
+      ...missing,
+      cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+    await fleet.alarm();
+
+    expect(recoveries).toBe(2);
+    expect(releases).toEqual([recovered.cloudID]);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "failed",
+      cloudID: recovered.cloudID,
+      provisioningResourceMayExist: false,
     });
   });
 
@@ -22601,6 +22819,218 @@ describe("fleet lease identity and idle", () => {
     const { lease } = (await create.json()) as { lease: LeaseRecord };
     expect(lease.providerProject).toBe("request-project");
     expect(lease.region).toBe("us-central1-a");
+  });
+
+  it("resolves one GCP boot image before provisioning and persists the successful zone identity", async () => {
+    const storage = new MemoryStorage();
+    const env: Partial<Env> = {
+      CRABBOX_GCP_PROJECT: "operator-project",
+      CRABBOX_GCP_ZONE: "us-central1-a",
+      GCP_CLIENT_EMAIL: "coordinator@example-project.iam.gserviceaccount.com",
+      GCP_PRIVATE_KEY: "test-private-key",
+    };
+    const resolved = {
+      identity: {
+        id: "8123456789012345678",
+        source: "explicit" as const,
+        provider: "gcp" as const,
+        kind: "gcp-image",
+        region: "us-central1-a",
+        sourceID:
+          "https://www.googleapis.com/compute/v1/projects/operator-project/global/images/runner-v3",
+      },
+      launchSource:
+        "https://www.googleapis.com/compute/v1/projects/operator-project/global/images/runner-v3",
+    };
+    const resolveBootImage = vi
+      .spyOn(GCPClient.prototype, "resolveBootImage")
+      .mockResolvedValue(resolved);
+    let createdConfig: LeaseConfig | undefined;
+    const createServer = vi
+      .spyOn(GCPClient.prototype, "createServerWithFallback")
+      .mockImplementation(async (config) => {
+        createdConfig = config;
+        return {
+          server: {
+            provider: "gcp",
+            id: 123,
+            cloudID: "crabbox-gcp-test",
+            name: "crabbox-gcp-test",
+            status: "running",
+            serverType: "e2-micro",
+            host: "192.0.2.10",
+            region: "us-central1-b",
+            labels: {},
+          },
+          serverType: "e2-micro",
+          image: { ...resolved.identity, region: "us-central1-b" },
+        };
+      });
+    try {
+      const fleet = testFleet(storage, { gcp: new GCPProvider(env as Env) }, env);
+      const create = await fleet.fetch(
+        request("POST", "/v1/leases", {
+          headers: {
+            "x-crabbox-admin": "true",
+            "x-crabbox-owner": "alice@example.com",
+            "x-crabbox-org": "example-org",
+          },
+          body: {
+            leaseID: "cbx_abcdef123456",
+            provider: "gcp",
+            gcpImage: "projects/operator-project/global/images/family/runner",
+            class: "standard",
+            serverType: "e2-micro",
+            sshPublicKey: "ssh-ed25519 test",
+          },
+        }),
+      );
+
+      expect(create.status).toBe(201);
+      expect(resolveBootImage).toHaveBeenCalledOnce();
+      expect(createServer).toHaveBeenCalledOnce();
+      expect(createdConfig).toMatchObject({
+        gcpImage: resolved.launchSource,
+        selectedImage: resolved.identity,
+      });
+      expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")).toMatchObject({
+        region: "us-central1-b",
+        image: { ...resolved.identity, region: "us-central1-b" },
+      });
+    } finally {
+      resolveBootImage.mockRestore();
+      createServer.mockRestore();
+    }
+  });
+
+  it("canonicalizes a GCP disk snapshot once during provider preparation", async () => {
+    const env = {
+      CRABBOX_GCP_PROJECT: "operator-project",
+      CRABBOX_GCP_ZONE: "us-central1-a",
+      GCP_CLIENT_EMAIL: "coordinator@example-project.iam.gserviceaccount.com",
+      GCP_PRIVATE_KEY: "test-private-key",
+    } as Env;
+    const resolveBootImage = vi.spyOn(GCPClient.prototype, "resolveBootImage");
+    const resolveDiskSnapshot = vi
+      .spyOn(GCPClient.prototype, "resolveDiskSnapshot")
+      .mockResolvedValue({
+        identity: {
+          id: "7123456789012345678",
+          source: "snapshot",
+          provider: "gcp",
+          kind: "gcp-disk-snapshot",
+          region: "us-central1-a",
+          sourceID:
+            "https://www.googleapis.com/compute/v1/projects/operator-project/global/snapshots/checkpoint-v3",
+        },
+        launchSource:
+          "https://www.googleapis.com/compute/v1/projects/operator-project/global/snapshots/checkpoint-v3",
+      });
+    try {
+      const prepared = await new GCPProvider(env).prepareLeaseConfig(
+        leaseConfig({
+          provider: "gcp",
+          gcpSnapshot: "checkpoint",
+          sshPublicKey: "ssh-ed25519 test",
+        }),
+      );
+
+      expect(resolveDiskSnapshot).toHaveBeenCalledOnce();
+      expect(resolveBootImage).not.toHaveBeenCalled();
+      expect(prepared).toMatchObject({
+        gcpProject: "operator-project",
+        gcpSnapshot:
+          "https://www.googleapis.com/compute/v1/projects/operator-project/global/snapshots/checkpoint-v3",
+        selectedImage: {
+          id: "7123456789012345678",
+          kind: "gcp-disk-snapshot",
+        },
+      });
+    } finally {
+      resolveBootImage.mockRestore();
+      resolveDiskSnapshot.mockRestore();
+    }
+  });
+
+  it("keeps GCP machine-image launches untyped and rejects typed registration without evidence", async () => {
+    const storage = new MemoryStorage();
+    const env: Partial<Env> = {
+      CRABBOX_GCP_PROJECT: "operator-project",
+      CRABBOX_GCP_ZONE: "us-central1-a",
+      GCP_CLIENT_EMAIL: "coordinator@example-project.iam.gserviceaccount.com",
+      GCP_PRIVATE_KEY: "test-private-key",
+    };
+    const resolveBootImage = vi.spyOn(GCPClient.prototype, "resolveBootImage");
+    const resolveDiskSnapshot = vi.spyOn(GCPClient.prototype, "resolveDiskSnapshot");
+    let createdConfig: LeaseConfig | undefined;
+    const createServer = vi
+      .spyOn(GCPClient.prototype, "createServerWithFallback")
+      .mockImplementation(async (config) => {
+        createdConfig = config;
+        return {
+          server: {
+            provider: "gcp",
+            id: 123,
+            cloudID: "crabbox-gcp-machine-image",
+            name: "crabbox-gcp-machine-image",
+            status: "running",
+            serverType: "e2-micro",
+            host: "192.0.2.10",
+            region: "us-central1-a",
+            labels: {},
+          },
+          serverType: "e2-micro",
+        };
+      });
+    try {
+      const fleet = testFleet(storage, { gcp: new GCPProvider(env as Env) }, env);
+      const headers = {
+        "x-crabbox-admin": "true",
+        "x-crabbox-owner": "alice@example.com",
+        "x-crabbox-org": "example-org",
+      };
+      const create = await fleet.fetch(
+        request("POST", "/v1/leases", {
+          headers,
+          body: {
+            leaseID: "cbx_abcdef123456",
+            provider: "gcp",
+            gcpMachineImage: "projects/operator-project/global/machineImages/checkpoint-gcp",
+            class: "standard",
+            serverType: "e2-micro",
+            sshPublicKey: "ssh-ed25519 test",
+          },
+        }),
+      );
+
+      expect(create.status).toBe(201);
+      expect(resolveBootImage).not.toHaveBeenCalled();
+      expect(resolveDiskSnapshot).not.toHaveBeenCalled();
+      expect(createdConfig?.gcpMachineImage).toBe(
+        "projects/operator-project/global/machineImages/checkpoint-gcp",
+      );
+      expect(createdConfig?.selectedImage).toBeUndefined();
+      expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")?.image).toBeUndefined();
+
+      const register = await fleet.fetch(
+        request("POST", "/v1/ready-pools/builders/identity", {
+          headers,
+          body: {
+            leaseID: "cbx_abcdef123456",
+            ...typedReadyPoolMetadata(),
+            cacheCompatibility: "node-22",
+          },
+        }),
+      );
+      expect(register.status).toBe(409);
+      expect(await register.json()).toMatchObject({
+        error: "unsupported_ready_pool_lease_identity",
+      });
+    } finally {
+      resolveBootImage.mockRestore();
+      resolveDiskSnapshot.mockRestore();
+      createServer.mockRestore();
+    }
   });
 
   it("records requested type and provider fallback attempts on resolved leases", async () => {
@@ -36933,6 +37363,14 @@ function fakeProvider(
       sshIngressReconcile?: "authoritative" | "additive";
       publishAccessBeforeProvisioning?: boolean;
       onTargetAttempt?: (target: { region?: string }) => Promise<void>;
+      onResourceCreated?: (claim: {
+        provider: "aws" | "azure" | "gcp" | "daytona";
+        cloudID: string;
+        region?: string;
+        providerProject?: string;
+        providerScope?: string;
+        serverID?: number;
+      }) => Promise<boolean>;
     }) => Promise<void> | void;
     onPrepareLeaseConfig?: (
       config: LeaseConfig,
@@ -37131,6 +37569,14 @@ function fakeProvider(
         sshIngressReconcile?: "authoritative" | "additive";
         publishAccessBeforeProvisioning?: boolean;
         onTargetAttempt?: (target: { region?: string }) => Promise<void>;
+        onResourceCreated?: (claim: {
+          provider: "aws" | "azure" | "gcp" | "daytona";
+          cloudID: string;
+          region?: string;
+          providerProject?: string;
+          providerScope?: string;
+          serverID?: number;
+        }) => Promise<boolean>;
       },
     ) {
       await result.onCreateProvisioning?.(provisioning);
