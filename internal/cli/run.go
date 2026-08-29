@@ -1109,8 +1109,11 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		cleanup.Err = releaseApp.releaseBackendLeaseBestEffort(context.Background(), sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord})
 		cleanup.Stopped = cleanup.Err == nil
 		if cleanup.Err == nil {
-			// Destructive cleanup owns the quiesced owner once the lease is gone.
-			lifecycleOwner = nil
+			policy, ok := sshBackend.(ReleaseLeaseWorkspacePolicy)
+			if !ok || !policy.PreservesSSHWorkspaceAfterRelease() {
+				// Destructive cleanup owns the quiesced owner once the lease is gone.
+				lifecycleOwner = nil
+			}
 			recorder.Event("lease.released", "released", "")
 		}
 		if !*timingJSON {

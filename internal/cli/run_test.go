@@ -647,6 +647,7 @@ var runEnvProfileTestReleaseErr error
 var runEnvProfileTestReleaseHook func() error
 var runEnvProfileTestReleaseRequestHook func(ReleaseLeaseRequest) error
 var runEnvProfileTestConnectionCleanupSafe = true
+var runEnvProfileTestPreservesSSHWorkspace bool
 var runEnvProfileTestAcquireHook func(AcquireRequest)
 var runEnvProfileTestAcquireLease func(AcquireRequest) (LeaseTarget, error)
 var runEnvProfileTestTouchHook func(TouchRequest) error
@@ -877,6 +878,10 @@ func TestRunCommandCleanupRejectsClaimReplacedAfterRegistration(t *testing.T) {
 }
 func (b runEnvProfileTestBackend) ReleaseLeaseConnectionCleanupSafe() bool {
 	return runEnvProfileTestConnectionCleanupSafe
+}
+
+func (b runEnvProfileTestBackend) PreservesSSHWorkspaceAfterRelease() bool {
+	return runEnvProfileTestPreservesSSHWorkspace
 }
 
 type runWorkdirCase struct {

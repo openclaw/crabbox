@@ -75,6 +75,30 @@ func TestStaticSSHRunCommandReleasePolicy(t *testing.T) {
 			}) {
 				t.Fatal("run never reached the user command")
 			}
+			ownerReleases := 0
+			cleanupSeen := false
+			for _, record := range commands {
+				if strings.Contains(record.Command, f.cfg.Static.ID+".stop") {
+					cleanupSeen = true
+				}
+				if !strings.Contains(record.Command, "protocol_action='release'") {
+					continue
+				}
+				ownerReleases++
+				var ownerClaim *core.LeaseClaim
+				if err := json.Unmarshal(record.Claim, &ownerClaim); err != nil {
+					t.Fatalf("decode owner-release claim snapshot: %v", err)
+				}
+				if !tt.keep && (!cleanupSeen || ownerClaim != nil) {
+					t.Fatal("workspace owner released before connection cleanup and local unclaiming")
+				}
+				if tt.keep && ownerClaim == nil {
+					t.Fatal("kept run removed its claim before releasing workspace ownership")
+				}
+			}
+			if ownerReleases != 1 {
+				t.Fatalf("workspace owner releases=%d, want exactly one", ownerReleases)
+			}
 		})
 	}
 }

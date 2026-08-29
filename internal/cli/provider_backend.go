@@ -365,6 +365,13 @@ type ReleaseLeaseConnectionCleanupPolicy interface {
 	ReleaseLeaseConnectionCleanupSafe() bool
 }
 
+// ReleaseLeaseWorkspacePolicy keeps run-owned authority available for a guarded
+// close after successful lease release. The captured SSH route must still reach
+// the workspace; retaining disk on a stopped host is not sufficient.
+type ReleaseLeaseWorkspacePolicy interface {
+	PreservesSSHWorkspaceAfterRelease() bool
+}
+
 // ReleaseLeaseTargetRefresher opts a provider into refreshing authorization
 // and connection metadata immediately before automatic lease cleanup.
 type ReleaseLeaseTargetRefresher interface {

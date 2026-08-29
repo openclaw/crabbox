@@ -48,6 +48,14 @@ not block local unclaiming. The static backend itself only removes the local
 claim and cached target; it never stops or deletes the machine. There is no
 static machine `cleanup` action.
 
+When a run releases its static lease, it also releases the run's remote
+workspace ownership after connection cleanup and local unclaiming. The host
+and workspace remain available for immediate reuse. This final release still
+checks the owner token and child state; an unreachable host, changed owner,
+or live/ambiguous child fails closed rather than deleting another run's
+authority. Explicit `stop` does not invent an owner token or remove unrelated
+workspace-owner records.
+
 ### Connection cleanup
 
 Commands attempt to write an Actions stop marker for the lease ID at

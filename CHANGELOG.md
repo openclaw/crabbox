@@ -21,6 +21,7 @@
 - Recovered overloaded SSH multiplexed sessions with one exact-diagnostic retry and a direct-connection fallback while preserving the original lease and command. Thanks @excelsier.
 - Marked Machine0 creation-only selectors in provider discovery and excluded them from prewarm follow-ups, with invalid projected provider configuration rejected before allocation.
 - Reported omitted local-container architecture as `native` in config diagnostics without probing the runtime or changing explicit architecture assertions. Thanks @coygeek.
+- Released run-owned workspace authority after static SSH one-shot cleanup so the surviving host can be reused immediately, while preserving guarded owner checks and destructive-provider cleanup ordering.
 
 ## 0.47.0 - 2026-08-28
 
