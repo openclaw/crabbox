@@ -220,6 +220,11 @@ behavior; source retirement is explicit and does not restart a source merely
 to delete it. A configured Machine0 `suspend` release policy is incompatible
 with `--retire-source`, not silently changed to destruction.
 
+A provider may retain the released source's immutable identity in a terminal
+cleanup receipt. Retirement replay preserves that receipt and revalidates it
+through the provider's current account, region, identity, and inventory checks
+before marking the operation retired.
+
 Unresolved operations cannot be forked, pruned, or deleted locally. Historical
 native records with missing image references are also held: a blank reference
 does not prove that submission never happened. Inspect and reconcile the

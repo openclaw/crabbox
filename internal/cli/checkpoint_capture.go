@@ -443,7 +443,7 @@ func (a App) retireCheckpointSource(ctx context.Context, cfg Config, repo Repo, 
 		if !absent {
 			return exit(5, "checkpoint source is absent from lease inventory but provider absence is unconfirmed; retain operation")
 		}
-		if exists && claim.CloudID != "" {
+		if exists && claim.CloudID != "" && (claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != "released") {
 			if err := ValidateCheckpointCaptureClaim(claim, record.ID, record.Capture); err != nil {
 				return err
 			}
@@ -455,13 +455,39 @@ func (a App) retireCheckpointSource(ctx context.Context, cfg Config, repo Repo, 
 			if err != nil {
 				return err
 			}
-			if exists && claim.CloudID != "" {
+			if exists && claim.CloudID != "" && (claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != "released") {
 				return exit(5, "checkpoint source claim finalization remains pending; retain operation")
 			}
 		}
 		if exists {
 			if claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != "released" || claim.FixedCreateIntent.Fingerprint != record.Capture.SourceIntent || claim.ClaimedAt != record.Capture.SourceClaimedAt {
 				return exit(2, "checkpoint source terminal claim changed")
+			}
+			if claim.CloudID != "" {
+				// A provider may retain immutable identity after removing the capture
+				// binding. Reuse its scoped receipt checks, never reinterpret it as live.
+				if claim.CloudID != record.Capture.SourceID || claim.ProviderScope != record.Capture.SourceScope || claim.RepoRoot != record.Repo.Root || canonicalClaimProvider(claim.Provider) != record.Provider {
+					return exit(2, "checkpoint source terminal resource identity changed")
+				}
+				retainer, ok := backend.(ReleaseLeaseClaimRetentionVerifier)
+				if !ok {
+					return exit(2, "provider=%s cannot attest its retained checkpoint source receipt", record.Provider)
+				}
+				expected := ProviderIdentityExpectation{LeaseID: record.LeaseID, ResourceID: record.Capture.SourceID}
+				lease, err := backend.Resolve(ctx, ResolveRequest{Repo: repo, ID: record.LeaseID, ReleaseOnly: true, NoLocalStateMutations: true, ExpectedProviderIdentity: expected})
+				if err != nil {
+					return err
+				}
+				retained, err := retainer.RetainLeaseClaimAfterReleaseWithClaim(lease, claim)
+				if err != nil {
+					return err
+				}
+				if !retained {
+					return exit(2, "checkpoint source terminal receipt was not retained")
+				}
+				if err := backend.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease, CheckpointID: record.ID, ExpectedProviderIdentity: expected}); err != nil {
+					return err
+				}
 			}
 		}
 		return withDurableLeaseClaimLock(record.LeaseID, func(current *leaseClaim, currentExists bool, _ func() error) error {
