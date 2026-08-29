@@ -182,7 +182,12 @@ func TestPondMeshCancelKillsWindowsProcessTree(t *testing.T) {
 		if err := child.Start(); err != nil {
 			os.Exit(8)
 		}
-		if err := os.WriteFile(os.Getenv("CBX_POND_WINDOWS_CHILD_PID"), []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+		pidPath := os.Getenv("CBX_POND_WINDOWS_CHILD_PID")
+		// The parent polls this path; publish only the complete PID.
+		if err := os.WriteFile(pidPath+".tmp", []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+			os.Exit(9)
+		}
+		if err := os.Rename(pidPath+".tmp", pidPath); err != nil {
 			os.Exit(9)
 		}
 		_ = child.Wait()
