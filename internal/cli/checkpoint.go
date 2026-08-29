@@ -43,23 +43,24 @@ const (
 )
 
 type checkpointRecord struct {
-	ID             string `json:"id"`
-	Name           string `json:"name,omitempty"`
-	Kind           string `json:"kind"`
-	CreatedAt      string `json:"createdAt"`
-	LastUsedAt     string `json:"lastUsedAt"`
-	CrabboxVersion string `json:"crabboxVersion"`
-	Provider       string `json:"provider,omitempty"`
-	LeaseID        string `json:"leaseId,omitempty"`
-	Slug           string `json:"slug,omitempty"`
-	TargetOS       string `json:"targetOS,omitempty"`
-	WindowsMode    string `json:"windowsMode,omitempty"`
-	Desktop        bool   `json:"desktop,omitempty"`
-	ServerType     string `json:"serverType,omitempty"`
-	HostID         string `json:"hostId,omitempty"`
-	Workdir        string `json:"workdir,omitempty"`
-	ArchivePath    string `json:"archivePath,omitempty"`
-	ArchiveBytes   int64  `json:"archiveBytes,omitempty"`
+	Capture        *NativeCheckpointCapture `json:"capture,omitempty"`
+	ID             string                   `json:"id"`
+	Name           string                   `json:"name,omitempty"`
+	Kind           string                   `json:"kind"`
+	CreatedAt      string                   `json:"createdAt"`
+	LastUsedAt     string                   `json:"lastUsedAt"`
+	CrabboxVersion string                   `json:"crabboxVersion"`
+	Provider       string                   `json:"provider,omitempty"`
+	LeaseID        string                   `json:"leaseId,omitempty"`
+	Slug           string                   `json:"slug,omitempty"`
+	TargetOS       string                   `json:"targetOS,omitempty"`
+	WindowsMode    string                   `json:"windowsMode,omitempty"`
+	Desktop        bool                     `json:"desktop,omitempty"`
+	ServerType     string                   `json:"serverType,omitempty"`
+	HostID         string                   `json:"hostId,omitempty"`
+	Workdir        string                   `json:"workdir,omitempty"`
+	ArchivePath    string                   `json:"archivePath,omitempty"`
+	ArchiveBytes   int64                    `json:"archiveBytes,omitempty"`
 	Native         struct {
 		Provider     string            `json:"provider,omitempty"`
 		ImageID      string            `json:"imageId,omitempty"`
@@ -92,6 +93,10 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	provider := registerProviderSelectionFlag(fs, defaults, providerHelpSSH())
 	id := fs.String("id", "", "lease id or slug")
 	name := fs.String("name", "", "checkpoint name")
+	checkpointID := fs.String("checkpoint-id", "", "stable checkpoint ID for replayable source retirement")
+	retireSource := fs.Bool("retire-source", false, "capture then retire the exact source without restoring it")
+	prepareOnly := fs.Bool("prepare-only", false, "check source retirement admission without creating a checkpoint or changing the source")
+	discardFailed := fs.Bool("discard-failed", false, "discard a verified failed image and finish its requested source retirement")
 	mode := fs.String("mode", "auto", "checkpoint mode: auto, native, or archive")
 	strategy := fs.String("strategy", checkpointStrategyAuto, "native checkpoint strategy: auto, disk-snapshot, or image")
 	workdirOverride := fs.String("workdir", "", "remote workdir to archive")
@@ -128,6 +133,12 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	repo, err := findRepo()
 	if err != nil {
 		return err
+	}
+	if *retireSource || *checkpointID != "" || *discardFailed || *prepareOnly {
+		if !*retireSource || *checkpointID == "" || *reclaim || *recipeOnly || *mode != "native" || *workdirOverride != "" || *name != "" || *wait || (*prepareOnly && *discardFailed) {
+			return exit(2, "--retire-source requires --checkpoint-id, --mode native, --wait=false and no --reclaim, --recipe-only, --workdir or --name")
+		}
+		return operationApp.checkpointRetire(ctx, cfg, repo, *id, *checkpointID, *strategy, *noReboot, *discardFailed, *prepareOnly, *jsonOut, a.Stdout)
 	}
 	var server Server
 	var target SSHTarget
@@ -174,14 +185,24 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	default:
 		return exit(2, "checkpoint mode must be auto, native, or archive")
 	}
-	var paths checkpointPaths
-	record, paths, err = store.Reserve(record)
-	if err != nil {
-		return err
-	}
-	return store.withRecord(record.ID, false, func(record checkpointRecord) (err error) {
+	// All observers and final writes share deletion/prune's operation lock.
+	// Take checkpoint before source-claim locks, as retirement does.
+	return store.WithLock(record.ID, func() (err error) {
+		var paths checkpointPaths
+		if isNativeCheckpointKind(record.Kind) {
+			claim, claimErr := readLeaseClaim(leaseID)
+			if claimErr != nil {
+				return claimErr
+			}
+			record, paths, err = reserveSourceCheckpoint(store, record, claim)
+		} else {
+			record, paths, err = store.Reserve(record)
+		}
+		if err != nil {
+			return err
+		}
 		dir = paths.Dir
-		recordWritten := false
+		recordWritten := isNativeCheckpointKind(createKind)
 		defer func() {
 			cleanupUncommittedCheckpointDir(dir, recordWritten, err)
 		}()
@@ -190,11 +211,7 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 		case checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindMachine0, checkpointKindParallels, checkpointKindDockerCommit, checkpointKindDaytona, checkpointKindIncus:
 			createStrategy := checkpointCreateStrategy(*mode, *strategy, createKind)
 			image, metadata, err := operationApp.createNativeCheckpoint(ctx, cfg, server, target, record.ID, leaseID, record.Name, repo.Name, workdir, createStrategy, *noReboot, *wait, *waitTimeout, func(result NativeCheckpointCreateResult) error {
-				if err := store.WriteNativeProgress(&record, result, *noReboot); err != nil {
-					return err
-				}
-				recordWritten = true
-				return nil
+				return store.WriteNativeProgress(&record, result, *noReboot)
 			})
 			if image.ID != "" {
 				applyNativeImageCheckpointRecord(&record, image, *noReboot)
@@ -522,6 +539,15 @@ func (a App) checkpointInspect(ctx context.Context, args []string) error {
 	record, _, err := store.Read(fs.Arg(0))
 	if err != nil {
 		if *jsonOut && isCheckpointNotFound(err) {
+			claims, readErr := listLeaseClaims()
+			if readErr != nil {
+				return readErr
+			}
+			for _, claim := range claims {
+				if claim.CheckpointCapture != nil && claim.CheckpointCapture.ID == fs.Arg(0) {
+					return json.NewEncoder(a.Stdout).Encode(missingCheckpointAudit{ID: fs.Arg(0), LocalState: "missing", ProviderState: "unknown", NextAction: "reconcile_capture"})
+				}
+			}
 			return json.NewEncoder(a.Stdout).Encode(missingCheckpointAudit{
 				ID:            fs.Arg(0),
 				LocalState:    "missing",
@@ -635,6 +661,9 @@ func (a App) checkpointRestore(ctx context.Context, args []string) error {
 	record, paths, err := store.Read(fs.Arg(0))
 	if err != nil {
 		return err
+	}
+	if unresolvedCheckpoint(record) {
+		return exit(2, "checkpoint %s capture is unresolved; reconcile it before fork or restore", record.ID)
 	}
 	if record.Kind != checkpointKindArchive {
 		if isNativeCheckpointKind(record.Kind) {
@@ -791,6 +820,9 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 			return exit(2, "archive checkpoints do not support --lease-id")
 		}
 		return exit(2, "checkpoint kind=%s does not support --lease-id", record.Kind)
+	}
+	if unresolvedCheckpoint(record) {
+		return exit(2, "checkpoint %s capture is unresolved; reconcile it before fork", record.ID)
 	}
 	cfg, err := loadConfig()
 	if err != nil {
@@ -1392,8 +1424,20 @@ func deleteCheckpoint(ctx context.Context, store checkpointStore, id string, loc
 
 func deleteCheckpointRecord(ctx context.Context, store checkpointStore, record checkpointRecord, localOnly bool) error {
 	id := record.ID
+	if unresolvedCheckpoint(record) {
+		return exit(2, "checkpoint %s is unresolved; retain its record and source and reconcile the original capture", id)
+	}
+	if !localOnly {
+		if err := deleteCheckpointResource(ctx, store, record); err != nil {
+			return err
+		}
+	}
+	return store.Delete(id)
+}
+
+func deleteCheckpointResource(ctx context.Context, store checkpointStore, record checkpointRecord) error {
 	providerID := nativeCheckpointDeleteID(record)
-	if isNativeCheckpointKind(record.Kind) && providerID != "" && !localOnly {
+	if isNativeCheckpointKind(record.Kind) && providerID != "" {
 		if provider, ok := nativeCheckpointLifecycleProvider(Config{Provider: record.nativeProvider()}, Server{}); ok {
 			request := nativeCheckpointResourceRequest(record)
 			request.Persist = func(result NativeCheckpointCreateResult) error {
@@ -1402,7 +1446,7 @@ func deleteCheckpointRecord(ctx context.Context, store checkpointStore, record c
 			if err := provider.DeleteNativeCheckpoint(ctx, request); err != nil {
 				return err
 			}
-			return store.Delete(id)
+			return nil
 		}
 		if record.Kind == checkpointKindParallels {
 			cfg, err := loadConfig()
@@ -1413,7 +1457,7 @@ func deleteCheckpointRecord(ctx context.Context, store checkpointStore, record c
 			if err := NewParallelsClient(cfg, nil).DeleteSnapshot(ctx, record.Native.Resource, providerID, false); err != nil {
 				return err
 			}
-			return store.Delete(id)
+			return nil
 		}
 		if cfg, ok := directAWSCheckpointConfig(record); ok {
 			client, err := newAWSClient(ctx, cfg)
@@ -1434,7 +1478,7 @@ func deleteCheckpointRecord(ctx context.Context, store checkpointStore, record c
 			if err := client.DeleteImageCheckpoint(ctx, providerID, record.Native.SnapshotIDs, record.Native.AccountID); err != nil {
 				return err
 			}
-			return store.Delete(id)
+			return nil
 		}
 		if cfg, ok := directAzureCheckpointConfig(record); ok {
 			client, err := NewAzureClient(ctx, cfg)
@@ -1444,7 +1488,7 @@ func deleteCheckpointRecord(ctx context.Context, store checkpointStore, record c
 			if err := client.DeleteOSDiskSnapshot(ctx, providerID); err != nil {
 				return err
 			}
-			return store.Delete(id)
+			return nil
 		}
 		coord, err := configuredAdminCoordinator()
 		if err != nil {
@@ -1463,7 +1507,7 @@ func deleteCheckpointRecord(ctx context.Context, store checkpointStore, record c
 			}
 		}
 	}
-	return store.Delete(id)
+	return nil
 }
 
 func isCoordinatorImageNotFound(err error, imageID string) bool {
@@ -1662,6 +1706,12 @@ func (a App) verifyCheckpointRecord(ctx context.Context, store checkpointStore, 
 		audit.NextAction = "restore_or_fork"
 		return audit, nil
 	case isNativeCheckpointKind(record.Kind):
+		if record.Capture != nil && record.Capture.Phase != "retired" {
+			audit.ProviderState = "pending"
+			audit.NextAction = "replay_capture"
+			audit.Error = record.Capture.Error
+			return audit, nil
+		}
 		providerID := strings.TrimSpace(record.Native.ImageID)
 		if providerID == "" {
 			if nativeCheckpointResourceID(record) != "" {
@@ -1669,8 +1719,8 @@ func (a App) verifyCheckpointRecord(ctx context.Context, store checkpointStore, 
 				audit.NextAction = "fork_or_delete_local"
 				return audit, nil
 			}
-			audit.ProviderState = "missing_ref"
-			audit.NextAction = "delete_local"
+			audit.ProviderState = "unresolved_capture"
+			audit.NextAction = "reconcile_capture"
 			return audit, nil
 		}
 		if cfg, ok := directAWSCheckpointConfig(record); ok {
@@ -1827,19 +1877,8 @@ func checkpointCreateMode(mode, strategy string, cfg Config, server Server, targ
 		}
 		return checkpointKindArchive
 	case "native", "provider-native", "vm":
-		if kind, ok := nativeCheckpointKind(cfg, server, target, strategy); ok {
-			return kind
-		}
-		if kind, ok := directNativeCheckpointKind(cfg, server, target, strategy); ok {
-			return kind
-		}
-		if kind, ok := parallelsNativeCheckpointKind(cfg, server, strategy); ok {
-			return kind
-		}
-		if isAutoCheckpointStrategy(strategy) {
-			if kind, ok := directNativeCheckpointKind(cfg, server, target, checkpointStrategyImage); ok {
-				return kind
-			}
+		if capability, ok := nativeModeCheckpointCapability(cfg, server, target, strategy); ok {
+			return capability.Kind
 		}
 		return "unsupported"
 	case "ami", "image":

@@ -152,7 +152,17 @@ func (s checkpointStore) writeMetadata(record checkpointRecord, paths checkpoint
 	if err := writeStateFileAtomic(paths.Meta, data, syncControllerDirectory); err != nil {
 		return exit(2, "write checkpoint %s: %v", record.ID, err)
 	}
-	return nil
+	return syncControllerDirectory(s.root)
+}
+
+func (s checkpointStore) WithLock(id string, action func() error) error {
+	if _, err := validateCheckpointID(id); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(s.root, 0o700); err != nil {
+		return exit(2, "create checkpoint root: %v", err)
+	}
+	return s.withLock(id, true, action)
 }
 
 func (s checkpointStore) Read(id string) (checkpointRecord, checkpointPaths, error) {
@@ -197,6 +207,16 @@ func validateCheckpointRecordTimes(record checkpointRecord) error {
 // different lock inodes. Usage updates reread under the same lock instead of
 // restoring a stale record after a concurrent delete or capture completion.
 func (s checkpointStore) withRecord(id string, wait bool, action func(checkpointRecord) error) error {
+	return s.withLock(id, wait, func() error {
+		current, _, err := s.Read(id)
+		if err != nil {
+			return err
+		}
+		return action(current)
+	})
+}
+
+func (s checkpointStore) withLock(id string, wait bool, action func() error) error {
 	paths, err := s.Paths(id)
 	if err != nil {
 		return err
@@ -227,11 +247,7 @@ func (s checkpointStore) withRecord(id string, wait bool, action func(checkpoint
 	if !locked {
 		return busy
 	}
-	current, _, err := s.Read(id)
-	if err != nil {
-		return err
-	}
-	return action(current)
+	return action()
 }
 
 func recordCheckpointUse(store checkpointStore, record *checkpointRecord) error {

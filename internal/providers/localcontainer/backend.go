@@ -972,6 +972,9 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		}
 	}
 	lease.Server = mergeLocalContainerClaim(lease.Server, claim)
+	if err := core.AuthorizeCheckpointRelease(claim, req.CheckpointID); err != nil {
+		return err
+	}
 	if strings.TrimSpace(lease.Server.Labels["fixed_intent_sha256"]) != "" && !fixedLocalContainerLeaseKind.IsFixedClaim(claim) {
 		return core.Exit(4, "lease_id_conflict: refusing to release fixed local-container lease %s without its durable create intent", lease.LeaseID)
 	}
@@ -1413,6 +1416,9 @@ func (b *backend) claimMissingInCapturedScope(ctx context.Context, claim core.Le
 }
 
 func (b *backend) cleanupClaimedContainer(ctx context.Context, claim core.LeaseClaim, containerID string, dryRun bool) (cleanupMutationOutcome, error) {
+	if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+		return cleanupMutationOutcome{}, err
+	}
 	originalCfg := b.cfg
 	defer func() { b.cfg = originalCfg }()
 	actionEntered := false
@@ -1468,6 +1474,9 @@ func (b *backend) cleanupClaimlessContainer(ctx context.Context, leaseID, contai
 }
 
 func (b *backend) cleanupMissingPendingClaim(ctx context.Context, claim core.LeaseClaim, dryRun bool) (cleanupMutationOutcome, error) {
+	if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+		return cleanupMutationOutcome{}, err
+	}
 	originalCfg := b.cfg
 	defer func() { b.cfg = originalCfg }()
 	actionEntered := false

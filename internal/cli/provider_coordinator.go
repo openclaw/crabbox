@@ -922,6 +922,13 @@ func isCoordinatorUnauthorized(err error) bool {
 }
 
 func (b *coordinatorLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+	claim, _, claimErr := readLeaseClaimWithPresence(req.Lease.LeaseID)
+	if claimErr != nil {
+		return claimErr
+	}
+	if err := AuthorizeCheckpointRelease(claim, req.CheckpointID); err != nil {
+		return err
+	}
 	if req.Lease.LeaseID == "" {
 		return exit(2, "missing coordinator lease id")
 	}
@@ -981,6 +988,17 @@ func (b *coordinatorLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseL
 	}
 	removeLeaseClaim(req.Lease.LeaseID)
 	return nil
+}
+
+func (b *coordinatorLeaseBackend) CheckpointSourceAbsent(ctx context.Context, req CheckpointSourceRequest) (bool, error) {
+	lease, err := b.coord.GetLease(ctx, req.LeaseID)
+	if err != nil {
+		return false, err
+	}
+	if lease.ID != req.LeaseID || lease.Provider != req.Resource.Image.Provider || lease.CloudID != req.Capture.SourceID {
+		return false, exit(2, "coordinator checkpoint source identity changed")
+	}
+	return coordinatorProviderReleaseConfirmed(lease), nil
 }
 
 func (b *coordinatorLeaseBackend) adminCoordinatorClient() (*CoordinatorClient, error) {

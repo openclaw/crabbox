@@ -189,6 +189,29 @@ func (b *hetznerLeaseBackend) List(ctx context.Context, req ListRequest) ([]Leas
 	return ownedHetznerServers(servers), nil
 }
 
+func (b *hetznerLeaseBackend) CheckpointSourceAbsent(ctx context.Context, req core.CheckpointSourceRequest) (bool, error) {
+	id, err := parsePositiveID(req.Capture.SourceID, "checkpoint source")
+	if err != nil {
+		return false, err
+	}
+	client, err := newHetznerClient()
+	if err != nil {
+		return false, err
+	}
+	source, err := client.GetServer(ctx, id)
+	if err != nil {
+		var httpErr core.HetznerHTTPError
+		if errors.As(err, &httpErr) && httpErr.StatusCode == 404 && httpErr.Method == "GET" && httpErr.Path == fmt.Sprintf("/servers/%d", id) {
+			return true, nil
+		}
+		return false, err
+	}
+	if source.ID != id {
+		return false, exit(2, "checkpoint source identity changed")
+	}
+	return false, nil
+}
+
 func (b *hetznerLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
 	servers, err := b.List(ctx, ListRequest{})
 	if err != nil {
@@ -202,6 +225,11 @@ func (b *hetznerLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) 
 func (b *hetznerLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
 	server := normalizeHetznerServer(req.Lease.Server)
 	claim, err := requireExactHetznerClaim(server, req.Lease.LeaseID)
+	if err == nil {
+		if err := core.AuthorizeCheckpointRelease(claim, req.CheckpointID); err != nil {
+			return err
+		}
+	}
 	if err != nil {
 		if !b.matchesAcquiredLease(server, req.Lease.LeaseID) {
 			return err
@@ -274,6 +302,10 @@ func (b *hetznerLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) e
 		claim, claimErr := requireExactHetznerClaim(server, server.Labels["lease"])
 		if claimErr != nil {
 			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=exact local claim missing or stale\n", server.DisplayID(), server.Name)
+			continue
+		}
+		if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+			fmt.Fprintf(b.RT.Stderr, "skip server id=%s reason=checkpoint hold: %v\n", server.DisplayID(), err)
 			continue
 		}
 		fmt.Fprintf(b.RT.Stderr, "delete server id=%s name=%s\n", server.DisplayID(), server.Name)

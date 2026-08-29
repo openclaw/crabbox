@@ -58,7 +58,7 @@ func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (co
 	if err != nil || serverID <= 0 {
 		return core.NativeCheckpointCapability{}, false
 	}
-	capability := core.NativeCheckpointCapability{Kind: core.CheckpointKindHetzner, Direct: true}
+	capability := core.NativeCheckpointCapability{Kind: core.CheckpointKindHetzner, Direct: true, RetireSource: true}
 	if core.NormalizeCheckpointStrategy(req.Strategy) == core.CheckpointStrategyImage {
 		capability.CreateUnsupported = "Hetzner native checkpoints use project snapshots; --strategy image is unsupported, use --strategy disk-snapshot"
 	}

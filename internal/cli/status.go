@@ -206,6 +206,10 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 		tailscale = &meta
 	}
 	provider := blank(server.Provider, cfg.Provider)
+	serverID := ""
+	if server.CloudID != "" || server.ID != 0 {
+		serverID = server.DisplayID()
+	}
 	return statusView{
 		ID:               lease.LeaseID,
 		Slug:             serverSlug(server),
@@ -213,7 +217,7 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 		TargetOS:         blank(server.Labels["target"], cfg.TargetOS),
 		WindowsMode:      blank(server.Labels["windows_mode"], cfg.WindowsMode),
 		State:            state,
-		ServerID:         server.DisplayID(),
+		ServerID:         serverID,
 		ServerType:       server.ServerType.Name,
 		Host:             server.PublicNet.IPv4.IP,
 		Pond:             blank(server.Labels[pondLabelKey], cfg.Pond),
