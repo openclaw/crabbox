@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -3459,7 +3461,7 @@ func TestRemoteGitCoherenceFailsClosedWhenAdvertisedBranchCannotBeVerified(t *te
 	f := newGitCoherenceFixture(t)
 	workdir := f.workspace(t, f.a, true)
 	plan := f.plan(t, f.b)
-	plan.RemoteURL = filepath.Join(t.TempDir(), "missing-origin.git")
+	plan.Branch = "missing"
 	const token = "abababababababababababababababab"
 	stageCoherenceFinalize(t, workdir, token)
 	out, err := runCoherenceFinalize(workdir, plan, token, "must-not-publish")
@@ -4229,7 +4231,7 @@ func TestRemoteGitSeedRemovesFailedCheckout(t *testing.T) {
 	got := remoteGitSeed("/work/repo", gitCoherencePlan{RemoteURL: "https://github.com/openclaw/crabbox.git", Target: "missing-sha", Tree: "tree", Branch: "main"})
 	for _, want := range []string{
 		"git -C \"$tmp\" checkout --quiet --detach",
-		"cleanup_seed() { rm -rf -- \"$tmp\"; }",
+		"cleanup_seed() { rm -rf -- \"$tmp\"; rm -f -- \"$transport_error\"; }",
 		"trap cleanup_seed EXIT",
 		"mv -- \"$tmp\" \"$workdir\"",
 	} {
@@ -4239,6 +4241,167 @@ func TestRemoteGitSeedRemovesFailedCheckout(t *testing.T) {
 	}
 	if strings.Contains(got, "git checkout --quiet FETCH_HEAD || true") {
 		t.Fatalf("remoteGitSeed should not keep failed checkouts: %q", got)
+	}
+}
+
+func TestRemoteGitSeedClassifiesRuntimeOriginFailures(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX Git seed integration")
+	}
+	for _, kind := range []string{"missing filesystem", "private HTTP", "non-auth HTTP", "missing branch"} {
+		t.Run(kind, func(t *testing.T) {
+			remote := filepath.Join(t.TempDir(), "missing.git")
+			var server *httptest.Server
+			if kind != "missing filesystem" {
+				status := http.StatusUnauthorized
+				if kind == "non-auth HTTP" {
+					status = http.StatusInternalServerError
+				}
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+					if request.Header.Get("Authorization") != "" {
+						t.Errorf("seed forwarded an Authorization header")
+					}
+					if status == http.StatusUnauthorized {
+						w.Header().Set("WWW-Authenticate", `Basic realm="private"`)
+					}
+					http.Error(w, http.StatusText(status), status)
+				}))
+				defer server.Close()
+				remote = server.URL + "/repo.git"
+			}
+			workdir := filepath.Join(t.TempDir(), "work")
+			plan := gitCoherencePlan{RemoteURL: remote, Target: strings.Repeat("a", 40), Tree: strings.Repeat("b", 40), Branch: "main"}
+			if kind == "missing branch" {
+				f := newGitCoherenceFixture(t)
+				plan = f.plan(t, f.b)
+				plan.Branch = "absent"
+				plan.RemoteURL = f.origin
+			}
+			out, err := exec.Command("bash", "-lc", remoteGitSeed(workdir, plan)).CombinedOutput()
+			reason, fallback := gitOriginRuntimeFallbackResult(string(out), err)
+			wantReason := "origin_unavailable"
+			wantFallback := true
+			if kind == "private HTTP" {
+				wantReason = "origin_auth_required"
+			} else if kind == "non-auth HTTP" || kind == "missing branch" {
+				wantReason, wantFallback = "", false
+			}
+			if fallback != wantFallback || reason != wantReason || err == nil {
+				t.Fatalf("fallback=%t reason=%q err=%v output=%q", fallback, reason, err, out)
+			}
+			if _, statErr := os.Stat(workdir); !os.IsNotExist(statErr) {
+				t.Fatalf("failed seed retained workspace: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestRemoteFinalizeRuntimeOriginFallbackRetriesCommittedManifest(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX Git finalize integration")
+	}
+	for _, kind := range []string{"missing filesystem", "private HTTP", "non-auth HTTP", "tree verification"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newGitCoherenceFixture(t)
+			workdir := f.workspace(t, f.a, true)
+			plan := f.plan(t, f.b)
+			var server *httptest.Server
+			switch kind {
+			case "missing filesystem":
+				if err := os.Rename(f.origin, f.origin+".missing"); err != nil {
+					t.Fatal(err)
+				}
+			case "private HTTP", "non-auth HTTP":
+				status := http.StatusUnauthorized
+				if kind == "non-auth HTTP" {
+					status = http.StatusInternalServerError
+				}
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+					if status == http.StatusUnauthorized {
+						w.Header().Set("WWW-Authenticate", `Basic realm="private"`)
+					}
+					http.Error(w, http.StatusText(status), status)
+				}))
+				defer server.Close()
+				plan.RemoteURL = server.URL + "/repo.git"
+			case "tree verification":
+				plan.Tree = strings.Repeat("f", 40)
+			}
+			const token = "1234567890abcdef1234567890abcdef"
+			stageCoherenceFinalize(t, workdir, token)
+			meta := coherenceMetaDir(t, workdir)
+			mustWriteTestFile(t, filepath.Join(meta, "sync-fingerprint"), "stale")
+			mustWriteTestFile(t, filepath.Join(meta, "git-hydrate-base"), "main stale\n")
+
+			tools := t.TempDir()
+			logPath := filepath.Join(tools, "ssh.log")
+			ssh := `#!/bin/sh
+remote=""
+for arg do remote="$arg"; done
+printf '%s\n---\n' "$remote" >> "$CRABBOX_FINALIZE_SSH_LOG"
+exec /bin/bash --noprofile --norc -c "$remote"
+`
+			if err := os.WriteFile(filepath.Join(tools, "ssh"), []byte(ssh), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("CRABBOX_FINALIZE_SSH_LOG", logPath)
+			out, err, reason, fallback := runRemoteFinalizeSync(context.Background(), SSHTarget{
+				User: "crabbox", Host: "example.test", Port: "22", TargetOS: targetLinux, NoControlMaster: true,
+			}, workdir, remoteSyncFinalizeOptions{
+				HydrateGit: true, BaseRef: "main", BaseSHA: f.b, Fingerprint: "new", Token: token, Coherence: plan,
+			})
+			wantFallback := kind == "missing filesystem" || kind == "private HTTP"
+			wantReason := ""
+			if kind == "missing filesystem" {
+				wantReason = "origin_unavailable"
+			} else if kind == "private HTTP" {
+				wantReason = "origin_auth_required"
+			}
+			if fallback != wantFallback || reason != wantReason {
+				t.Fatalf("fallback=%t reason=%q err=%v output=%q", fallback, reason, err, out)
+			}
+			logData, readErr := os.ReadFile(logPath)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			commands := strings.Split(strings.TrimSuffix(string(logData), "---\n"), "---\n")
+			wantAttempts := 1
+			if wantFallback {
+				wantAttempts = 2
+			}
+			if len(commands) != wantAttempts {
+				t.Fatalf("finalize attempts=%d want %d:\n%s", len(commands), wantAttempts, logData)
+			}
+			for _, command := range commands {
+				if !strings.Contains(command, token) {
+					t.Fatalf("finalize retry changed token:\n%s", logData)
+				}
+			}
+			if !wantFallback {
+				if err == nil {
+					t.Fatalf("non-origin failure succeeded: output=%q", out)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("fallback finalize: %v\n%s", err, out)
+			}
+			for _, name := range []string{"sync-finalize-token", "sync-finalize-complete-token"} {
+				value, readErr := os.ReadFile(filepath.Join(meta, name))
+				if readErr != nil || string(value) != token {
+					t.Fatalf("%s=%q err=%v", name, value, readErr)
+				}
+			}
+			for _, name := range []string{"sync-fingerprint", "git-hydrate-base"} {
+				if _, statErr := os.Stat(filepath.Join(meta, name)); !os.IsNotExist(statErr) {
+					t.Fatalf("%s survived fallback: %v", name, statErr)
+				}
+			}
+			if _, statErr := os.Stat(filepath.Join(meta, "sync-manifest")); statErr != nil {
+				t.Fatalf("committed manifest missing: %v", statErr)
+			}
+		})
 	}
 }
 

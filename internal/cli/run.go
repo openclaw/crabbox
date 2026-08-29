@@ -1793,8 +1793,15 @@ retrySync:
 		}
 		if !overlayDecision.Enabled && !plainManifestMode && coherence.seedEnabled() {
 			stepStart = time.Now()
-			if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay); err != nil {
-				fmt.Fprintf(a.Stderr, "warning: remote git seed failed: %v\n", err)
+			if out, err := runIdempotentSSHCombinedOutput(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay); err != nil {
+				if reason, fallback := gitOriginRuntimeFallbackResult(out, err); fallback {
+					plainManifestMode = true
+					coherence = gitCoherencePlan{}
+					fingerprint = ""
+					fmt.Fprintf(a.Stderr, "git origin fallback reason=%s; using plain manifest sync\n", reason)
+				} else {
+					fmt.Fprintf(a.Stderr, "warning: remote git seed failed: %v\n", err)
+				}
 			}
 			timings.syncSteps.gitSeed += time.Since(stepStart)
 		}
@@ -1881,7 +1888,7 @@ retrySync:
 			}
 		}
 		stepStart = time.Now()
-		finalizeCommand := remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
+		out, finalizeErr, reason, fallback := runRemoteFinalizeSync(ctx, target, workdir, remoteSyncFinalizeOptions{
 			AllowMassDeletions: allowRemoteSyncMassDeletions(cfg, hydratedByActions),
 			HydrateGit:         hydrateGit && !overlayDecision.Enabled && !plainManifestMode,
 			GitOverlay:         overlayDecision.Enabled,
@@ -1892,11 +1899,15 @@ retrySync:
 			Token:              finalizeToken,
 			Coherence:          coherence,
 		})
-		if out, err := runIdempotentSSHCombinedOutput(ctx, target, finalizeCommand, idempotentSSHRetryDelay); err != nil {
+		if fallback {
+			plainManifestMode = true
+			fmt.Fprintf(a.Stderr, "git origin fallback reason=%s; using plain manifest sync\n", reason)
+		}
+		if finalizeErr != nil {
 			if out != "" {
-				return recordFailure(exit(6, "remote sync finalize failed: %s: %v", out, err))
+				return recordFailure(exit(6, "remote sync finalize failed: %s: %v", out, finalizeErr))
 			}
-			return recordFailure(exit(6, "remote sync finalize failed: %v", err))
+			return recordFailure(exit(6, "remote sync finalize failed: %v", finalizeErr))
 		}
 		timings.syncSteps.finalize = time.Since(stepStart)
 		timings.sync = time.Since(syncStart)

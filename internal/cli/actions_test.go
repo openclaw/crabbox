@@ -573,7 +573,7 @@ cat >/dev/null
 	repo := Repo{Root: f.source, Name: "repo", RemoteURL: f.origin, Head: f.b, BaseRef: "main"}
 	var stderr bytes.Buffer
 	app := App{Stdout: io.Discard, Stderr: &stderr}
-	err := app.syncLocalActionsWorkspace(context.Background(), cfg, repo, SSHTarget{
+	_, err := app.syncLocalActionsWorkspace(context.Background(), cfg, repo, SSHTarget{
 		User: "crabbox", Host: "example.test", Port: "22", TargetOS: targetLinux,
 	}, "/work/repo", false)
 	if err != nil {
@@ -616,7 +616,7 @@ cat >/dev/null
 	cfg.Sync.BaseRef = "main"
 	repo := Repo{Root: f.source, Name: "repo", RemoteURL: "git@example.test:repo.git", Head: f.b, BaseRef: "main"}
 	var stderr bytes.Buffer
-	err := (App{Stdout: io.Discard, Stderr: &stderr}).syncLocalActionsWorkspace(context.Background(), cfg, repo, SSHTarget{
+	_, err := (App{Stdout: io.Discard, Stderr: &stderr}).syncLocalActionsWorkspace(context.Background(), cfg, repo, SSHTarget{
 		User: "crabbox", Host: "example.test", Port: "22", TargetOS: targetLinux,
 	}, "/work/repo", true)
 	if err != nil {
@@ -1493,10 +1493,14 @@ func TestExecuteLocalActionsHydrationUsesCallerPlainManifestMode(t *testing.T) {
 		name       string
 		remoteURL  string
 		syncBefore bool
+		deriveMode bool
+		fallback   string
 	}{
 		{name: "empty origin"},
 		{name: "SCP origin", remoteURL: "git@example.test:repo.git"},
 		{name: "promoted safe HTTP origin", remoteURL: "https://example.test/repo.git", syncBefore: true},
+		{name: "local caller filesystem seed fallback", syncBefore: true, deriveMode: true, fallback: "seed"},
+		{name: "local caller HTTPS finalize fallback", syncBefore: true, deriveMode: true, fallback: "finalize"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1515,7 +1519,8 @@ func TestExecuteLocalActionsHydrationUsesCallerPlainManifestMode(t *testing.T) {
 			hostileMarker := filepath.Join(dir, "hostile-ran")
 			hostileProfile := filepath.Join(dir, "hostile-profile")
 			hostileGitConfig := filepath.Join(dir, "hostile.gitconfig")
-			workdir := filepath.Join(dir, "work")
+			workRoot := filepath.Join(dir, "work")
+			workdir := filepath.Join(workRoot, "cbx_123", "repo")
 			fingerprint := filepath.Join(workdir, ".crabbox", "sync-fingerprint")
 			if err := os.MkdirAll(filepath.Dir(fingerprint), 0o755); err != nil {
 				t.Fatal(err)
@@ -1560,6 +1565,18 @@ case "$remote" in
 esac
 printf '%s\n---\n' "$decoded" >> "$CRABBOX_FAKE_SSH_LOG"
 case "$decoded" in
+  *"origin_git clone"*)
+    if [ "$CRABBOX_FAKE_ORIGIN_FALLBACK" = seed ]; then
+      printf '%s\n' 'CRABBOX_GIT_ORIGIN_FALLBACK:origin_unavailable' >&2
+      exit 78
+    fi
+    ;;
+  *"origin_git fetch"*)
+    if [ "$CRABBOX_FAKE_ORIGIN_FALLBACK" = finalize ]; then
+      printf '%s\n' 'CRABBOX_GIT_ORIGIN_FALLBACK:origin_auth_required' >&2
+      exit 78
+    fi
+    ;;
   *"/bin/rm -f --"*sync-fingerprint*)
     count=0
     if [ -f "$CRABBOX_INVALIDATION_COUNT" ]; then
@@ -1567,11 +1584,15 @@ case "$decoded" in
     fi
     count=$((count + 1))
     printf '%s\n' "$count" > "$CRABBOX_INVALIDATION_COUNT"
-    PATH="$CRABBOX_HOSTILE_PATH"
-    BASH_ENV="$CRABBOX_HOSTILE_PROFILE"
-    ENV="$CRABBOX_HOSTILE_PROFILE"
-    GIT_CONFIG_GLOBAL="$CRABBOX_HOSTILE_GIT_CONFIG"
-    export PATH BASH_ENV ENV GIT_CONFIG_GLOBAL
+    case "$decoded" in
+      *"/usr/bin/env -i PATH=/usr/bin:/bin"*)
+        PATH="$CRABBOX_HOSTILE_PATH"
+        BASH_ENV="$CRABBOX_HOSTILE_PROFILE"
+        ENV="$CRABBOX_HOSTILE_PROFILE"
+        GIT_CONFIG_GLOBAL="$CRABBOX_HOSTILE_GIT_CONFIG"
+        export PATH BASH_ENV ENV GIT_CONFIG_GLOBAL
+        ;;
+    esac
     eval "$decoded" || exit $?
     if [ "$count" -eq 1 ]; then
       printf stale > "$CRABBOX_FINGERPRINT"
@@ -1609,15 +1630,34 @@ exit 0
 			t.Setenv("CRABBOX_HOSTILE_MARKER", hostileMarker)
 			t.Setenv("CRABBOX_FINGERPRINT", fingerprint)
 			t.Setenv("CRABBOX_WORKDIR", workdir)
+			t.Setenv("CRABBOX_FAKE_ORIGIN_FALLBACK", tt.fallback)
 
 			root := filepath.Join(dir, "source")
-			if err := os.MkdirAll(root, 0o755); err != nil {
-				t.Fatal(err)
+			repo := Repo{Root: root, Name: "repo", RemoteURL: tt.remoteURL}
+			if tt.deriveMode {
+				fixture := newGitCoherenceFixture(t)
+				root = fixture.source
+				remoteURL := fixture.origin + ".missing"
+				if tt.fallback == "finalize" {
+					remoteURL = "https://example.test/private.git"
+				}
+				repo = Repo{Root: root, Name: "repo", RemoteURL: remoteURL, Head: fixture.c, BaseRef: "main"}
+				workflowPath := filepath.Join(root, ".github", "workflows", "hydrate.yml")
+				if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(workflowPath, []byte("jobs:\n  hydrate:\n    steps:\n      - run: echo ok\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.MkdirAll(root, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("content\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
 			}
-			if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("content\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if tt.syncBefore {
+			if tt.syncBefore && !tt.deriveMode {
 				for _, args := range [][]string{
 					{"init"},
 					{"config", "user.name", "Test"},
@@ -1633,7 +1673,10 @@ exit 0
 			cfg := defaultConfig()
 			cfg.TargetOS = targetWindows
 			cfg.WindowsMode = windowsModeWSL2
-			repo := Repo{Root: root, Name: "repo", RemoteURL: tt.remoteURL}
+			cfg.WorkRoot = workRoot
+			if tt.deriveMode {
+				cfg.Actions.Workflow = ".github/workflows/hydrate.yml"
+			}
 			plan := localActionsHydrationPlan{
 				leaseID: "cbx_123",
 				workdir: workdir,
@@ -1641,8 +1684,15 @@ exit 0
 				script:  "echo ok\n",
 			}
 			target := SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22"}
-			app := App{Stdout: io.Discard, Stderr: io.Discard}
-			if _, err := app.executeLocalActionsHydration(context.Background(), cfg, repo, target, plan, time.Minute, false, tt.syncBefore, true, nil); err != nil {
+			var stderr bytes.Buffer
+			app := App{Stdout: io.Discard, Stderr: &stderr}
+			var err error
+			if tt.deriveMode {
+				_, err = app.hydrateActionsLocally(context.Background(), cfg, repo, target, "cbx_123", "", nil, time.Minute, false, true, nil)
+			} else {
+				_, err = app.executeLocalActionsHydration(context.Background(), cfg, repo, target, plan, time.Minute, false, tt.syncBefore, true, nil)
+			}
+			if err != nil {
 				logData, _ := os.ReadFile(logPath)
 				t.Fatalf("%v\n%s", err, logData)
 			}
@@ -1664,10 +1714,22 @@ exit 0
 				t.Fatal(err)
 			}
 			log := string(logData)
-			if strings.Count(log, "/usr/bin/env -i PATH=/usr/bin:/bin") < 2 {
+			wantHermetic := 2
+			if tt.deriveMode {
+				wantHermetic = 1
+			}
+			if strings.Count(log, "/usr/bin/env -i PATH=/usr/bin:/bin") < wantHermetic {
 				t.Fatalf("fingerprint invalidations were not hermetic:\n%s", log)
 			}
-			if tt.syncBefore {
+			if tt.deriveMode {
+				wantReason := "origin_unavailable"
+				if tt.fallback == "finalize" {
+					wantReason = "origin_auth_required"
+				}
+				if !strings.Contains(stderr.String(), "git origin fallback reason="+wantReason) {
+					t.Fatalf("local caller did not observe runtime fallback: %s", stderr.String())
+				}
+			} else if tt.syncBefore {
 				for _, forbidden := range []string{"git clone ", "git fetch ", "git ls-files -z", "repair_origin", "refs/remotes/origin/"} {
 					if strings.Contains(log, forbidden) {
 						t.Fatalf("caller plain mode reached Git path %q:\n%s", forbidden, log)

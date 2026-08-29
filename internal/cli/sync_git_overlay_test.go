@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -600,6 +601,28 @@ func TestRemoteGitOverlayTransportFailuresRemainFatal(t *testing.T) {
 	}
 	if reason, fallback := gitOverlayFallbackResult(string(output), err); fallback {
 		t.Fatalf("transport failure was downgraded to fallback %q: %q", reason, output)
+	}
+}
+
+func TestGitOriginRuntimeFallbackRequiresStructuredExit(t *testing.T) {
+	for _, tc := range []struct {
+		name, output, want string
+		exitCode           int
+	}{
+		{name: "unavailable", output: gitOriginRuntimeFallbackMarker + "origin_unavailable", exitCode: 78, want: "origin_unavailable"},
+		{name: "auth", output: gitOriginRuntimeFallbackMarker + "origin_auth_required", exitCode: 78, want: "origin_auth_required"},
+		{name: "human text", output: "fatal: origin_auth_required", exitCode: 78},
+		{name: "arbitrary marker", output: gitOriginRuntimeFallbackMarker + "checkout_failed", exitCode: 78},
+		{name: "wrong exit", output: gitOriginRuntimeFallbackMarker + "origin_unavailable", exitCode: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			command := exec.Command("sh", "-c", "printf '%s\\n' \"$1\"; exit \"$2\"", "sh", tc.output, strconv.Itoa(tc.exitCode))
+			out, err := command.CombinedOutput()
+			reason, fallback := gitOriginRuntimeFallbackResult(string(out), err)
+			if fallback != (tc.want != "") || reason != tc.want {
+				t.Fatalf("fallback=%t reason=%q err=%v output=%q", fallback, reason, err, out)
+			}
+		})
 	}
 }
 
@@ -1221,7 +1244,7 @@ func TestRunGitOverlaySuccessFallbackAndLateLocalEdit(t *testing.T) {
 	for _, mode := range []string{
 		"success", "file-origin", "runtime-state", "classified-fallback", "private-origin", "origin-unavailable", "missing-origin", "local-ineligible", "local-fingerprint-reuse", "remote-fingerprint-reuse", "unsafe-metadata",
 		"symlinked-workdir", "symlinked-git", "symlinked-git-config", "symlinked-git-objects", "linked-worktree",
-		"checkout-file-obstruction", "post-reset-cache", "post-reset-mass-deletion", "late-local-edit",
+		"checkout-file-obstruction", "post-reset-cache", "post-reset-mass-deletion", "late-local-edit", "default-seed-origin-unavailable", "default-finalize-origin-unavailable",
 	} {
 		t.Run(mode, func(t *testing.T) {
 			clearConfigEnv(t)
@@ -1268,14 +1291,9 @@ func TestRunGitOverlaySuccessFallbackAndLateLocalEdit(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if mode == "origin-unavailable" {
-				if err := os.Rename(fixture.origin, fixture.origin+".unavailable"); err != nil {
-					t.Fatal(err)
-				}
-			}
 			remoteRoot := filepath.Join(testRoot, "remote")
 			configPath := filepath.Join(testRoot, "config.yaml")
-			config := fmt.Sprintf("workRoot: %q\nsync:\n  gitOverlay: true\n  gitSeed: true\n  delete: true\n  fingerprint: %t\n  exclude:\n    - excluded.txt\n", remoteRoot, mode == "local-fingerprint-reuse" || mode == "remote-fingerprint-reuse")
+			config := fmt.Sprintf("workRoot: %q\nsync:\n  gitOverlay: %t\n  gitSeed: true\n  delete: true\n  fingerprint: %t\n  exclude:\n    - excluded.txt\n", remoteRoot, !strings.HasPrefix(mode, "default-"), mode == "local-fingerprint-reuse" || mode == "remote-fingerprint-reuse")
 			if mode == "post-reset-mass-deletion" {
 				config += "    - bulk\n"
 			}
@@ -1309,7 +1327,7 @@ func TestRunGitOverlaySuccessFallbackAndLateLocalEdit(t *testing.T) {
 				t.Fatal(err)
 			}
 			workdir := filepath.Join(remoteRoot, "cbx_overlay_runtime", repo.Name)
-			if mode == "runtime-state" || mode == "checkout-file-obstruction" || mode == "post-reset-cache" || mode == "post-reset-mass-deletion" || mode == "classified-fallback" || mode == "missing-origin" || mode == "local-fingerprint-reuse" || mode == "remote-fingerprint-reuse" || mode == "unsafe-metadata" || mode == "symlinked-workdir" || mode == "symlinked-git" || mode == "symlinked-git-config" || mode == "symlinked-git-objects" || mode == "linked-worktree" {
+			if mode == "runtime-state" || mode == "checkout-file-obstruction" || mode == "post-reset-cache" || mode == "post-reset-mass-deletion" || mode == "classified-fallback" || mode == "missing-origin" || mode == "local-fingerprint-reuse" || mode == "remote-fingerprint-reuse" || mode == "unsafe-metadata" || mode == "symlinked-workdir" || mode == "symlinked-git" || mode == "symlinked-git-config" || mode == "symlinked-git-objects" || mode == "linked-worktree" || mode == "default-finalize-origin-unavailable" {
 				if err := os.MkdirAll(filepath.Dir(workdir), 0o755); err != nil {
 					t.Fatal(err)
 				}
@@ -1366,6 +1384,10 @@ func TestRunGitOverlaySuccessFallbackAndLateLocalEdit(t *testing.T) {
 					mustWriteTestFile(t, filepath.Join(meta, "sync-fingerprint"), "stale")
 					mustWriteTestFile(t, filepath.Join(meta, "git-hydrate-base"), "main stale\n")
 					runGit(t, workdir, "config", "core.fsmonitor", fsmonitor)
+				} else if mode == "default-finalize-origin-unavailable" {
+					meta := filepath.Join(workdir, ".git", "crabbox")
+					mustWriteTestFile(t, filepath.Join(meta, "sync-fingerprint"), "stale")
+					mustWriteTestFile(t, filepath.Join(meta, "git-hydrate-base"), "main stale\n")
 				}
 				if mode == "checkout-file-obstruction" {
 					runGit(t, workdir, "checkout", "-q", "--detach", fixture.repo.Head)
@@ -1426,6 +1448,11 @@ func TestRunGitOverlaySuccessFallbackAndLateLocalEdit(t *testing.T) {
 					}
 				}
 			}
+			if mode == "origin-unavailable" || strings.HasSuffix(mode, "origin-unavailable") {
+				if err := os.Rename(fixture.origin, fixture.origin+".unavailable"); err != nil {
+					t.Fatal(err)
+				}
+			}
 			installWorkspaceOwnerAwareSSH(t, filepath.Join(binDir, "ssh"), fmt.Sprintf(`#!/bin/sh
 # These remote commands run locally, including the ordinary Git seed fallback.
 # Keep the stand-in noninteractive and independent of the operator's Git auth.
@@ -1463,6 +1490,8 @@ tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 cat > "$tmp"
 cp "$tmp" "$CRABBOX_FAKE_RSYNC_LOG"
+count=0; [ ! -f "$CRABBOX_FAKE_RSYNC_COUNT" ] || count=$(cat "$CRABBOX_FAKE_RSYNC_COUNT")
+printf '%s\n' "$((count + 1))" > "$CRABBOX_FAKE_RSYNC_COUNT"
 destination="${!#}"
 workdir="${destination#*:}"
 workdir="${workdir%%/}"
@@ -1484,6 +1513,7 @@ done < "$tmp"
 			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 			t.Setenv("CRABBOX_FAKE_SSH_LOG", sshLog)
 			t.Setenv("CRABBOX_FAKE_RSYNC_LOG", rsyncLog)
+			t.Setenv("CRABBOX_FAKE_RSYNC_COUNT", filepath.Join(testRoot, "rsync-count"))
 			t.Setenv("CRABBOX_FAKE_REPO_ROOT", fixture.root)
 			t.Setenv("CRABBOX_FAKE_OVERLAY_MODE", mode)
 			t.Setenv("CRABBOX_FAKE_OVERLAY_WORKDIR", workdir)
@@ -1576,7 +1606,7 @@ done < "$tmp"
 				if (mode == "local-fingerprint-reuse" || mode == "remote-fingerprint-reuse") && !strings.Contains(stderr.String(), "No changes detected, skipping sync") {
 					t.Fatalf("unmodified fallback discarded the legacy fingerprint: %s", stderr.String())
 				}
-			case "classified-fallback", "private-origin", "origin-unavailable", "missing-origin", "local-ineligible", "linked-worktree", "checkout-file-obstruction", "post-reset-cache", "late-local-edit":
+			case "classified-fallback", "private-origin", "origin-unavailable", "missing-origin", "local-ineligible", "linked-worktree", "checkout-file-obstruction", "post-reset-cache", "late-local-edit", "default-seed-origin-unavailable", "default-finalize-origin-unavailable":
 				transfer, err := os.ReadFile(rsyncLog)
 				if err != nil || !bytes.Contains(transfer, []byte("clean.txt\x00")) {
 					t.Fatalf("fallback omitted full manifest: data=%q err=%v", transfer, err)
@@ -1600,7 +1630,11 @@ done < "$tmp"
 						t.Fatalf("late local edit omitted: %q", content)
 					}
 				}
-				if !strings.Contains(stderr.String(), "git overlay fallback reason="+wantReason) {
+				reasonMessage := "git overlay fallback reason=" + wantReason
+				if strings.HasPrefix(mode, "default-") {
+					reasonMessage = "git origin fallback reason=origin_unavailable"
+				}
+				if !strings.Contains(stderr.String(), reasonMessage) {
 					t.Fatalf("fallback reason missing: %s", stderr.String())
 				}
 				meta := filepath.Join(workdir, ".crabbox")
@@ -1612,7 +1646,7 @@ done < "$tmp"
 				}
 				if mode == "late-local-edit" || mode == "checkout-file-obstruction" || mode == "post-reset-cache" {
 					assertGitOverlayRecoveryCoherent(t, workdir, repo)
-				} else if mode != "private-origin" && mode != "origin-unavailable" && mode != "missing-origin" {
+				} else if mode != "private-origin" && mode != "origin-unavailable" && mode != "missing-origin" && !strings.HasPrefix(mode, "default-") {
 					if _, err := os.Stat(filepath.Join(meta, "git-hydrate-base")); err != nil {
 						t.Fatalf("unmodified fallback lost ordinary Git hydration metadata: %v", err)
 					}
@@ -1649,6 +1683,57 @@ done < "$tmp"
 						t.Fatalf("hardened manifest executed hostile Git/profile state: %v", err)
 					}
 				}
+				if mode == "default-seed-origin-unavailable" || mode == "default-finalize-origin-unavailable" {
+					meta := filepath.Join(workdir, ".crabbox")
+					if mode == "default-finalize-origin-unavailable" {
+						meta = filepath.Join(workdir, ".git", "crabbox")
+					}
+					for _, name := range []string{"sync-fingerprint", "git-hydrate-base"} {
+						if _, err := os.Stat(filepath.Join(meta, name)); !os.IsNotExist(err) {
+							t.Fatalf("default fallback retained %s: %v", name, err)
+						}
+					}
+					count, err := os.ReadFile(filepath.Join(testRoot, "rsync-count"))
+					if err != nil || strings.TrimSpace(string(count)) != "1" {
+						t.Fatalf("rsync count=%q err=%v", count, err)
+					}
+					commands, err := os.ReadFile(sshLog)
+					if err != nil {
+						t.Fatal(err)
+					}
+					manifestWrites := 0
+					finalizeTokens := []string{}
+					for _, command := range strings.Split(string(commands), "\n---\n") {
+						if strings.Contains(command, "invalid sync manifest length") || strings.Contains(command, `manifest_len = read_len("sync manifest")`) {
+							manifestWrites++
+						}
+						for _, line := range strings.Split(command, "\n") {
+							if value, ok := strings.CutPrefix(strings.TrimSpace(line), "expected_token="); ok {
+								finalizeTokens = append(finalizeTokens, value)
+							}
+						}
+					}
+					if manifestWrites != 1 {
+						t.Fatalf("manifest writes=%d want 1", manifestWrites)
+					}
+					wantFinalizes := 1
+					if mode == "default-finalize-origin-unavailable" {
+						wantFinalizes = 2
+					}
+					if len(finalizeTokens) != wantFinalizes {
+						t.Fatalf("finalize attempts=%d want %d: %v", len(finalizeTokens), wantFinalizes, finalizeTokens)
+					}
+					committed, committedErr := os.ReadFile(filepath.Join(meta, "sync-finalize-token"))
+					complete, completeErr := os.ReadFile(filepath.Join(meta, "sync-finalize-complete-token"))
+					if committedErr != nil || completeErr != nil || string(committed) != string(complete) {
+						t.Fatalf("finalize tokens committed=%q complete=%q attempts=%v errors=%v/%v", committed, complete, finalizeTokens, committedErr, completeErr)
+					}
+					for _, attempt := range finalizeTokens {
+						if !strings.Contains(attempt, string(committed)) {
+							t.Fatalf("finalize retry changed token: committed=%q attempts=%v", committed, finalizeTokens)
+						}
+					}
+				}
 				if mode == "linked-worktree" {
 					if _, err := os.Stat(filepath.Join(workdir, ".crabbox", "sync-manifest")); !os.IsNotExist(err) {
 						t.Fatalf("linked fallback relocated its established metadata: %v", err)
@@ -1658,8 +1743,10 @@ done < "$tmp"
 					}
 				}
 			}
-			if _, err := os.Stat(filepath.Join(workdir, "excluded.txt")); !os.IsNotExist(err) {
-				t.Fatalf("excluded tracked source resurrected: %v", err)
+			if mode != "default-finalize-origin-unavailable" {
+				if _, err := os.Stat(filepath.Join(workdir, "excluded.txt")); !os.IsNotExist(err) {
+					t.Fatalf("excluded tracked source resurrected: %v", err)
+				}
 			}
 			if mode == "runtime-state" || mode == "post-reset-cache" {
 				if helper, err := os.ReadFile(filepath.Join(workdir, ".crabbox", "env", "persisted-helper")); err != nil || string(helper) != "runtime helper survives\n" {

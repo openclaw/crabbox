@@ -15,9 +15,11 @@ import (
 )
 
 const (
-	gitOverlayFallbackExitCode = 78
-	gitOverlayFallbackMarker   = "CRABBOX_GIT_OVERLAY_FALLBACK:"
-	gitOverlayMutationMarker   = "CRABBOX_GIT_OVERLAY_WORKSPACE_MUTATED"
+	gitOriginRuntimeFallbackExitCode = 78
+	gitOriginRuntimeFallbackMarker   = "CRABBOX_GIT_ORIGIN_FALLBACK:"
+	gitOverlayFallbackExitCode       = 78
+	gitOverlayFallbackMarker         = "CRABBOX_GIT_OVERLAY_FALLBACK:"
+	gitOverlayMutationMarker         = "CRABBOX_GIT_OVERLAY_WORKSPACE_MUTATED"
 )
 
 var gitOverlayTransformAttributes = []string{
@@ -367,6 +369,21 @@ func gitOverlayLocalFallbackReason(err error) string {
 func gitOverlayFallbackResult(output string, err error) (string, bool) {
 	reason, fallback, _ := gitOverlayFallbackOutcome(output, err)
 	return reason, fallback
+}
+
+func gitOriginRuntimeFallbackResult(output string, err error) (string, bool) {
+	if err == nil || exitCode(err) != gitOriginRuntimeFallbackExitCode {
+		return "", false
+	}
+	for _, line := range strings.Split(output, "\n") {
+		switch strings.TrimSpace(line) {
+		case gitOriginRuntimeFallbackMarker + "origin_unavailable":
+			return "origin_unavailable", true
+		case gitOriginRuntimeFallbackMarker + "origin_auth_required":
+			return "origin_auth_required", true
+		}
+	}
+	return "", false
 }
 
 func gitOverlayFallbackOutcome(output string, err error) (string, bool, bool) {
