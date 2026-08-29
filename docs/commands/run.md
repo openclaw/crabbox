@@ -614,7 +614,9 @@ to attach a short label to the run details, timing JSON, and coordinator run
 record.
 
 When a remote command exits non-zero, `run` prints a compact failure digest
-after the timing summary: the failed phase when phase markers are known, a
+after automatic cleanup. Lease recovery commands are omitted after confirmed
+release, and remain available when the lease is kept or cleanup is uncertain.
+The digest includes the failed phase when phase markers are known, a
 likely area (provider auth, SSH/connectivity, sync, install/setup, user command,
 model/tool/provider limit, or resource exhaustion), retryability when inferable, next commands
 (`logs`, `events`, `doctor --from-run`, `ssh`, retrying with `--fresh-sync`, and
