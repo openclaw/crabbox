@@ -4376,7 +4376,12 @@ $current"
   esac
 done
 if [ -n "$decoded_view" ]; then remote=$decoded_view; fi
-case "$remote" in
+# A witness has its own rm commands; do not match them across payload lines.
+marker_mutation=$(printf '%s\n' "$remote" | awk '
+  /rm -f/ && /[.]crabbox\/actions\/cbx_env_profile_test[.]env[.]sh/ { print "clear"; exit }
+  /rm -f/ && /[.]crabbox\/actions\/cbx_env_profile_test[.]env/ { print "invalidate"; exit }
+')
+case "$marker_mutation:$remote" in
   *"protocol_action='acquire'"*) printf 'owner-acquire\n' >> "$CRABBOX_FAKE_EVENTS"; printf ACQUIRED; exit 0 ;;
   *"protocol_action='renew'"*) printf RENEWED; exit 0 ;;
   *"protocol_action='inspect'"*)
@@ -4398,10 +4403,10 @@ case "$remote" in
     : > "$CRABBOX_FAKE_HYDRATED"
     printf '123\n'
     ;;
-  *"rm -f"*".crabbox/actions/cbx_env_profile_test.env.sh"*)
+  clear:*)
     printf 'clear\n' >> "$CRABBOX_FAKE_EVENTS"
     ;;
-  *"rm -f"*".crabbox/actions/cbx_env_profile_test.env"*)
+  invalidate:*)
     printf 'invalidate\n' >> "$CRABBOX_FAKE_EVENTS"
     if [ "${CRABBOX_FAKE_INVALIDATE_FAIL:-0}" = "1" ]; then
       printf 'marker invalidation denied\n' >&2

@@ -286,12 +286,7 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 		}
 		return core.LeaseTarget{}, err
 	}
-	claim, err := core.ReadLeaseClaim(leaseID)
-	if err != nil {
-		return core.LeaseTarget{}, err
-	}
 	acquired.Server.Labels = publicLocalContainerClaimLabels(acquired.Server.Labels)
-	core.SetServerLeaseClaimSnapshot(&acquired.Server, claim, true)
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s container=%s state=ready\n", leaseID, shortID(acquired.Server.CloudID))
 	if req.OnAcquired != nil {
 		if err := req.OnAcquired(acquired); err != nil {

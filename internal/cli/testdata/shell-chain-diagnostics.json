@@ -205,5 +205,196 @@
   {
     "name": "trailing escape",
     "command": "true && echo \\"
+  },
+  {
+    "name": "embedded hash",
+    "command": "echo x#y && false",
+    "segments": [
+      "echo x#y",
+      "false"
+    ],
+    "exitCode": 1
+  },
+  {
+    "name": "empty quoted word before hash",
+    "command": "echo \"\"#literal && false",
+    "segments": [
+      "echo \"\"#literal",
+      "false"
+    ],
+    "exitCode": 1
+  },
+  {
+    "name": "escaped space before hash",
+    "command": "echo foo\\ #bar && false",
+    "segments": [
+      "echo foo\\ #bar",
+      "false"
+    ],
+    "exitCode": 1
+  },
+  {
+    "name": "continued word before hash",
+    "command": "echo foo\\\n#bar && false",
+    "segments": [
+      "echo foo\\\n#bar",
+      "false"
+    ],
+    "exitCode": 1
+  },
+  {
+    "name": "continued whitespace before comment",
+    "command": "false \\\n#comment && echo skipped",
+    "exitCode": 1
+  },
+  {
+    "name": "comment after operator",
+    "command": "true &&#comment"
+  },
+  {
+    "name": "comment after redirection",
+    "command": "echo >#comment && false"
+  },
+  {
+    "name": "tab before comment",
+    "command": "false\t#comment && echo skipped",
+    "exitCode": 1
+  },
+  {
+    "name": "quoted parameter expansion",
+    "command": "printf '%s' \"${CRABBOX_UNSET_FIXTURE:-\"a && b\"}\" && false",
+    "exitCode": 1
+  },
+  {
+    "name": "legacy arithmetic expansion",
+    "command": "echo \"$[1 && 2]\" && false"
+  },
+  {
+    "name": "single quoted parameter literal",
+    "command": "printf '%s' '${x:-a && b}' && false",
+    "segments": [
+      "printf '%s' '${x:-a && b}'",
+      "false"
+    ],
+    "exitCode": 1
+  },
+  {
+    "name": "escaped parameter literal",
+    "command": "printf '%s' \"\\${x:-a && b}\" && false",
+    "segments": [
+      "printf '%s' \"\\${x:-a && b}\"",
+      "false"
+    ],
+    "exitCode": 1
+  },
+  {
+    "name": "descriptor redirection",
+    "command": "false 2>&1 && echo skipped",
+    "segments": [
+      "false 2>&1",
+      "echo skipped"
+    ],
+    "exitCode": 1
+  },
+  {
+    "name": "input descriptor redirection",
+    "command": "true 0<&0 && false",
+    "segments": [
+      "true 0<&0",
+      "false"
+    ],
+    "exitCode": 1
+  },
+  {
+    "name": "continued descriptor redirection",
+    "command": "false 2>\\\n&1 && echo skipped",
+    "segments": [
+      "false 2>\\\n&1",
+      "echo skipped"
+    ],
+    "exitCode": 1
+  },
+  {
+    "name": "escaped redirection literal",
+    "command": "printf '%s' \\>&&false",
+    "segments": [
+      "printf '%s' \\>",
+      "false"
+    ],
+    "exitCode": 1
+  },
+  {
+    "name": "literal find placeholder",
+    "command": "printf '%s' {} && false",
+    "segments": [
+      "printf '%s' {}",
+      "false"
+    ],
+    "exitCode": 1
+  },
+  {
+    "name": "newline after and",
+    "command": "false &&\n  echo skipped",
+    "segments": [
+      "false",
+      "echo skipped"
+    ],
+    "exitCode": 1
+  },
+  {
+    "name": "multiple newlines after and",
+    "command": "true &&\n\n  false",
+    "segments": [
+      "true",
+      "false"
+    ],
+    "exitCode": 1
+  },
+  {
+    "name": "continued arithmetic prefix",
+    "command": "echo $\\\n[1 && 2] && false"
+  },
+  {
+    "name": "continued parameter prefix",
+    "command": "printf '%s' \"$\\\n{CRABBOX_UNSET_FIXTURE:-\"a && b\"}\" && false",
+    "exitCode": 1
+  },
+  {
+    "name": "ANSI quoted escaped apostrophes",
+    "command": "printf '%s' $'left\\' && right\\'end' && false"
+  },
+  {
+    "name": "quoted dollar apostrophe literal",
+    "command": "printf '%s' \"$'a && b'\" && false",
+    "segments": [
+      "printf '%s' \"$'a && b'\"",
+      "false"
+    ],
+    "exitCode": 1
+  },
+  {
+    "name": "array arithmetic operator",
+    "command": "a[1&&2]=x && false"
+  },
+  {
+    "name": "continued conditional opener",
+    "command": "[\\\n[ 1 = 2 && 2 = 2 ]]"
+  },
+  {
+    "name": "ordinary array assignment",
+    "command": "a[1]=x && false",
+    "segments": [
+      "a[1]=x",
+      "false"
+    ]
+  },
+  {
+    "name": "literal bracket argument",
+    "command": "printf '%s' a[b] && false",
+    "segments": [
+      "printf '%s' a[b]",
+      "false"
+    ],
+    "exitCode": 1
   }
 ]

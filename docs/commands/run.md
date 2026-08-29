@@ -37,6 +37,8 @@ snippets, pipes, or shell expansion.
 On POSIX and WSL2 SSH targets, private command staging does not change the
 remote caller's umask for user work. Commands keep the target shell's creation
 policy; Crabbox's staged scripts, input, and workspace-owner state remain private.
+Keeping or reusing a POSIX SSH lease also preserves the remote caller's SIGINT
+and SIGQUIT dispositions, including intentionally ignored signals.
 
 ## Remote workspace root
 

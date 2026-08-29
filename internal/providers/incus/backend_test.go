@@ -17,6 +17,18 @@ import (
 )
 
 type fakeClient struct {
+	afterImageRead                                                           func()
+	lostDeleteReply, lostImageDeleteReply                                    error
+	lostPublishReply                                                         error
+	profileConfig                                                            map[string]string
+	identity                                                                 connectionIdentity
+	snapshots                                                                map[string]*api.InstanceSnapshot
+	images                                                                   map[string]*api.Image
+	files                                                                    map[string]map[string][]byte
+	imageFiles                                                               map[string]map[string][]byte
+	lostCreateReply                                                          error
+	snapshotErr, publishErr, deleteSnapshotErr, deleteImageErr, writeFileErr error
+
 	instances            map[string]*api.Instance
 	states               map[string]*api.InstanceState
 	listOrder            []string
@@ -74,7 +86,7 @@ func (f *fakeClient) GetInstance(name string) (*api.Instance, string, error) {
 	f.getCalls[name]++
 	inst, ok := f.instances[name]
 	if !ok {
-		return nil, "", core.Exit(4, "missing instance %s", name)
+		return nil, "", api.StatusErrorf(404, "missing instance %s", name)
 	}
 	copy := *inst
 	copy.Config = cloneMap(inst.Config)
@@ -86,6 +98,9 @@ func (f *fakeClient) GetInstance(name string) (*api.Instance, string, error) {
 func (f *fakeClient) CreateInstance(req api.InstancesPost) error {
 	if f.createErr != nil {
 		return f.createErr
+	}
+	if _, exists := f.instances[req.Name]; exists {
+		return api.StatusErrorf(409, "instance exists")
 	}
 	f.created = append(f.created, req)
 	config := cloneMap(req.Config)
@@ -109,7 +124,15 @@ func (f *fakeClient) CreateInstance(req api.InstancesPost) error {
 	if _, ok := f.states[req.Name]; !ok {
 		f.states[req.Name] = &api.InstanceState{Status: "Stopped", StatusCode: api.Stopped}
 	}
-	return nil
+	if f.files == nil {
+		f.files = map[string]map[string][]byte{}
+	}
+	if imageFiles := f.imageFiles[req.Source.Fingerprint]; imageFiles != nil {
+		f.files[req.Name] = cloneFiles(imageFiles)
+	} else {
+		f.files[req.Name] = map[string][]byte{"/proc/1/mountinfo": []byte("1 0 0:1 / / rw - ext4 /dev/root rw\n"), "/etc/passwd": []byte("root:x:0:0:root:/root:/bin/bash\ncrabbox:x:1000:1000::/home/crabbox:/bin/bash\n")}
+	}
+	return f.lostCreateReply
 }
 
 func (f *fakeClient) UpdateInstance(name string, put api.InstancePut, etag string) error {
@@ -182,7 +205,7 @@ func (f *fakeClient) DeleteInstance(name string) error {
 	delete(f.instances, name)
 	delete(f.states, name)
 	f.deleted = append(f.deleted, name)
-	return nil
+	return f.lostDeleteReply
 }
 
 type stateCountingClient struct {

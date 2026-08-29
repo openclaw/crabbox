@@ -237,9 +237,10 @@ func nativeCheckpointCreateDriver(cfg Config, server Server, target SSHTarget, s
 	return nil, false
 }
 
-func (a App) createNativeCheckpoint(ctx context.Context, cfg Config, server Server, target SSHTarget, checkpointID, leaseID, name, repoName, workdir, strategy string, noReboot, wait bool, waitTimeout time.Duration) (CoordinatorImage, map[string]string, error) {
+func (a App) createNativeCheckpoint(ctx context.Context, cfg Config, server Server, target SSHTarget, checkpointID, leaseID, name, repoName, workdir, strategy string, noReboot, wait bool, waitTimeout time.Duration, persist func(NativeCheckpointCreateResult) error) (CoordinatorImage, map[string]string, error) {
 	if provider, ok := nativeCheckpointLifecycleProvider(cfg, server); ok {
 		result, err := provider.CreateNativeCheckpoint(ctx, NativeCheckpointCreateRequest{
+			Persist:      persist,
 			Config:       cfg,
 			Server:       server,
 			Target:       target,
@@ -281,7 +282,7 @@ func (a App) createNativeCheckpoint(ctx context.Context, cfg Config, server Serv
 }
 
 func (a App) createAWSAMICheckpoint(ctx context.Context, cfg Config, target SSHTarget, leaseID, name, repoName string, noReboot, wait bool, waitTimeout time.Duration) (CoordinatorImage, error) {
-	image, _, err := a.createNativeCheckpoint(ctx, cfg, Server{Provider: "aws", CloudID: leaseID}, target, "", leaseID, name, repoName, "", checkpointStrategyImage, noReboot, wait, waitTimeout)
+	image, _, err := a.createNativeCheckpoint(ctx, cfg, Server{Provider: "aws", CloudID: leaseID}, target, "", leaseID, name, repoName, "", checkpointStrategyImage, noReboot, wait, waitTimeout, nil)
 	return image, err
 }
 
@@ -527,6 +528,8 @@ func checkpointKindForProviderImage(image CoordinatorImage) string {
 		return checkpointKindMachine0
 	case checkpointKindDockerCommit:
 		return checkpointKindDockerCommit
+	case checkpointKindIncus:
+		return checkpointKindIncus
 	case checkpointKindDaytona:
 		return checkpointKindDaytona
 	}
@@ -552,7 +555,7 @@ func checkpointStrategyForKind(kind string) string {
 	switch kind {
 	case checkpointKindAWSAMI, checkpointKindAzure, checkpointKindGCP, checkpointKindMachine0, checkpointKindDockerCommit:
 		return checkpointStrategyImage
-	case checkpointKindAWSEBS, checkpointKindAzureOS, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindParallels, checkpointKindDaytona:
+	case checkpointKindAWSEBS, checkpointKindAzureOS, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindParallels, checkpointKindDaytona, checkpointKindIncus:
 		return checkpointStrategyDiskSnapshot
 	default:
 		return ""

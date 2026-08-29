@@ -497,7 +497,7 @@ func TestWorkspaceOwnerProtocolGeneration(t *testing.T) {
 		t.Fatalf("POSIX child witness must use the portable launcher: %q", posixWitnessTransport[:min(len(posixWitnessTransport), 80)])
 	}
 	posixWitness := remoteWorkspaceOwnerPOSIXWitnessScript(key, token, "printf ok")
-	for _, want := range []string{"child_identity=$(ps -o lstart=", "owner_expiry=$(sed -n", "owner_expiry", "date +%s", "mv \"$child_tmp\" \"$child\"", "touch \"$start\"", "wait \"$child_pid\"", "rm -f \"$child\""} {
+	for _, want := range []string{"child_identity=$(ps -o lstart=", "owner_expiry=$(sed -n", "owner_expiry", "date +%s", "mv \"$child_tmp\" \"$child\"", "rm -f \"$child\""} {
 		if !strings.Contains(posixWitness, want) {
 			t.Fatalf("POSIX child witness missing %q:\n%s", want, posixWitness)
 		}

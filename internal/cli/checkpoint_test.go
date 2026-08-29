@@ -994,6 +994,10 @@ func TestFixedLeaseCreateIntentBindsCheckpointIdentity(t *testing.T) {
 			if err != nil || claim.FixedCreateIntent == nil || claim.FixedCreateIntent.CheckpointID != tc.firstCheckpoint {
 				t.Fatalf("durable checkpoint intent=%#v err=%v", claim.FixedCreateIntent, err)
 			}
+			snapshot, exists, set := ServerLeaseClaimSnapshot(first.Server)
+			if !set || !exists || !reflect.DeepEqual(snapshot, claim) {
+				t.Fatalf("acquisition did not carry its committed claim: set=%t exists=%t", set, exists)
+			}
 			opts.CheckpointID = tc.replayCheckpoint
 			replayed, err := AcquireFixedLease(opts, prepare, acquire, context.Background())
 			if tc.wantError {
@@ -2208,6 +2212,7 @@ func TestCreateNativeCheckpointRejectsAzureImageBeforeAdminAndCloudInit(t *testi
 		true,
 		false,
 		0,
+		nil,
 	)
 	if err == nil {
 		t.Fatal("expected Azure image strategy to fail")

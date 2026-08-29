@@ -70,6 +70,43 @@ func TestCheckpointStoreCreateReadList(t *testing.T) {
 	}
 }
 
+func TestCheckpointStoreListRequiresPublishedMetadata(t *testing.T) {
+	store := checkpointStore{root: t.TempDir()}
+	published, err := store.Create(checkpointRecord{ID: "chk_published"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := store.Paths("chk_pending")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(paths.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Reserve has claimed the directory, but the atomic metadata write has not
+	// published yet. A killed writer can leave exactly this state behind.
+	if err := os.WriteFile(filepath.Join(paths.Dir, ".checkpoint.json.tmp-test"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	records, err := store.List()
+	if err != nil || len(records) != 1 || records[0].ID != published.ID {
+		t.Fatalf("unpublished reservation broke inventory: records=%v err=%v", records, err)
+	}
+	if err := os.WriteFile(paths.Meta, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.List(); err == nil || !strings.Contains(err.Error(), "parse checkpoint") {
+		t.Fatalf("published corrupt metadata was hidden: %v", err)
+	}
+	published.ID = "chk_pending"
+	if err := store.Write(published); err != nil {
+		t.Fatal(err)
+	}
+	if records, err := store.List(); err != nil || len(records) != 2 {
+		t.Fatalf("published reservation missing: records=%v err=%v", records, err)
+	}
+}
+
 func TestCheckpointStoreReserveWritesMetadata(t *testing.T) {
 	store := checkpointStore{root: t.TempDir()}
 	record, paths, err := store.Reserve(checkpointRecord{

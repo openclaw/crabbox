@@ -784,6 +784,16 @@ func remoteWorkspaceOwnerPOSIXWitnessScript(key, token, remote string, preserveI
 `
 		inputRedirect = ` <"$run_dir/input"`
 	}
+	gateFunction := `run_owner_gate() {
+	if command -v flock >/dev/null 2>&1; then
+		flock -x -w 5 "$gate" /bin/sh -c "$1"
+	elif command -v lockf >/dev/null 2>&1; then
+		lockf -t 5 "$gate" /bin/sh -c "$1"
+	else
+		return 74
+	fi
+}
+`
 	installBody := `set -eu
 [ "$(sed -n '2p' "$state" 2>/dev/null || true)" = "$token" ] || exit 75
 owner_expiry=$(sed -n '3p' "$state" 2>/dev/null || true)
@@ -809,49 +819,58 @@ mv "$child_tmp" "$child"`
 recorded_pid=$(sed -n '1p' "$child" 2>/dev/null || true)
 recorded_identity=$(sed -n '2p' "$child" 2>/dev/null || true)
 [ "$recorded_pid" = "$child_pid" ] && [ "$recorded_identity" = "$child_identity" ] || exit 74
+if kill -0 "$recorded_pid" 2>/dev/null; then
+	live_identity=$(ps -o lstart= -p "$recorded_pid" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' | cut -c1-96)
+	[ -n "$live_identity" ] && [ "$live_identity" != "$recorded_identity" ] || exit 74
+else
+	observed_pids=$(ps -e -o pid= 2>/dev/null) || exit 74
+	[ -z "$(printf '%s\n' "$observed_pids" | awk -v pid="$recorded_pid" '$1 == pid { print $1 }')" ] || exit 74
+fi
 rm -f "$child"`
+	// An asynchronous shell list makes INT/QUIT ignored before exec. Register in
+	// a foreground shell instead; close its identity pipe before user code runs.
+	// The parent catches these signals while waiting so Bash reaches cleanup
+	// after a signaled child; caught dispositions reset in the fresh child shell.
+	registrar := `set -u
+trap '' HUP
+child_pid=$$
+child_identity=$(ps -o lstart= -p "$child_pid" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' | cut -c1-96)
+[ -n "$child_identity" ] || exit 74
+export child_pid child_identity
+` + gateFunction + `run_owner_gate ` + shellQuote(installBody) + ` || exit $?
+printf '%s\n%s\n' "$child_pid" "$child_identity" >&3 || exit 74
+exec 3>&-
+umask "$command_umask"
+exec sh -c ` + shellQuote(remote) + inputRedirect + `
+`
 	return `set -u
 command_umask=$(umask)
 umask 077
 root="$HOME/.crabbox/workspace-owners"
 key=` + shellQuote(key) + `
 token=` + shellQuote(token) + `
-payload=` + shellQuote(remote) + `
 state="$root/$key.owner"
 child="$root/$key.child"
 gate="$root/$key.gate"
-run_dir="$root/$key.run.$token"
-start="$run_dir/start"
-run_owner_gate() {
-	if command -v flock >/dev/null 2>&1; then
-		flock -x -w 5 "$gate" /bin/sh -c "$1"
-	elif command -v lockf >/dev/null 2>&1; then
-		lockf -t 5 "$gate" /bin/sh -c "$1"
-	else
-		return 74
-	fi
-}
-rm -rf "$run_dir"
+run_dir="$root/$key.run.$token.$$"
+` + gateFunction + `
 mkdir -m 700 "$run_dir" || exit 74
-` + inputSetup + `(trap '' HUP; while [ ! -f "$start" ]; do sleep 0.05; done; umask "$command_umask"; exec sh -c "$payload"` + inputRedirect + `) &
-child_pid=$!
-child_identity=$(ps -o lstart= -p "$child_pid" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' | cut -c1-96)
-if [ -z "$child_identity" ] || ! kill -0 "$child_pid" 2>/dev/null; then kill "$child_pid" 2>/dev/null || true; rm -rf "$run_dir"; exit 74; fi
-export state child token child_pid child_identity
+` + inputSetup + `export state child gate token command_umask run_dir
+exec 4>&1
+trap : INT QUIT
 set +e
-run_owner_gate ` + shellQuote(installBody) + `
-gate_status=$?
-set -e
-if [ "$gate_status" -ne 0 ]; then kill "$child_pid" 2>/dev/null || true; rm -rf "$run_dir"; exit "$gate_status"; fi
-touch "$start"
-set +e
-wait "$child_pid"
+identity=$(exec /bin/sh -c ` + shellQuote(registrar) + ` 3>&1 1>&4 4>&-)
 code=$?
-set -e
-set +e
+trap - INT QUIT
+exec 4>&-
+if [ -z "$identity" ]; then rm -rf "$run_dir"; [ "$code" -ne 0 ] && exit "$code"; exit 74; fi
+child_pid=$(printf '%s\n' "$identity" | sed -n '1p')
+child_identity=$(printf '%s\n' "$identity" | sed -n '2p')
+case "$child_pid" in ''|*[!0-9]*) rm -rf "$run_dir"; exit 74 ;; esac
+if [ -z "$child_identity" ] || [ "${#child_identity}" -gt 96 ]; then rm -rf "$run_dir"; exit 74; fi
+export child_pid child_identity
 run_owner_gate ` + shellQuote(clearBody) + `
 clear_status=$?
-set -e
 rm -rf "$run_dir"
 [ "$clear_status" -eq 0 ] || exit "$clear_status"
 exit "$code"

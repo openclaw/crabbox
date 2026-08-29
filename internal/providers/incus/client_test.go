@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,8 +17,10 @@ import (
 	"testing"
 	"time"
 
+	incusclient "github.com/lxc/incus/v7/client"
 	"github.com/lxc/incus/v7/shared/cliconfig"
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/pkg/sftp"
 	"github.com/zitadel/oidc/v3/pkg/oidc"
 	"golang.org/x/oauth2"
 )
@@ -644,5 +647,51 @@ func writeOIDCTokenFile(t *testing.T, configDir string, remote string, tokens oi
 	}
 	if err := os.WriteFile(filepath.Join(tokenDir, remote+".json"), content, 0o600); err != nil {
 		t.Fatalf("WriteFile oidc token: %v", err)
+	}
+}
+
+// Exercise the pinned SFTP implementation rather than assuming RealPath resolves links.
+type filesystemTestServer struct {
+	incusclient.InstanceServer
+	t *testing.T
+}
+
+func (s filesystemTestServer) GetInstanceFileSFTP(string) (*sftp.Client, error) {
+	clientConn, serverConn := net.Pipe()
+	server, err := sftp.NewServer(serverConn)
+	if err != nil {
+		clientConn.Close()
+		serverConn.Close()
+		return nil, err
+	}
+	s.t.Cleanup(func() { clientConn.Close(); server.Close(); serverConn.Close() })
+	go func() { _ = server.Serve(); _ = server.Close() }()
+	return sftp.NewClientPipe(clientConn, clientConn)
+}
+
+func TestSDKCheckpointWorkspaceRejectsSymlinkTraversal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Incus guest paths use POSIX directory semantics")
+	}
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	workdir := filepath.Join(root, "workspace")
+	if err := os.Mkdir(workdir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(workdir, filepath.Join(root, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	client := &sdkClient{server: filesystemTestServer{t: t}}
+	if canonical, err := client.CanonicalPath("fixture", workdir); err != nil || canonical != workdir {
+		t.Fatalf("root-disk directory: %q %v", canonical, err)
+	}
+	if _, err := client.CanonicalPath("fixture", filepath.Join(root, "alias")); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("symlink workspace accepted: %v", err)
+	}
+	if _, err := client.CanonicalPath("fixture", root+"/alias/../workspace"); err == nil {
+		t.Fatal("unclean traversal accepted")
 	}
 }

@@ -280,7 +280,7 @@ from the CLI.
 | [Parallels](docs/providers/parallels.md) — `parallels` | Linux, macOS, Windows · direct | Local or remote macOS host; checkpoint/fork/restore/snapshot. |
 | [Proxmox](docs/providers/proxmox.md) — `proxmox` | Linux · direct | Clone QEMU templates on a private Proxmox VE cluster. |
 | [XCP-ng](docs/providers/xcp-ng.md) — `xcp-ng` | Linux · direct | Self-hosted XCP-ng pool on dedicated x86_64 server hardware. |
-| [Incus](docs/providers/incus.md) — `incus` | Linux · direct | SSH leases through the official Incus Go client. |
+| [Incus](docs/providers/incus.md) — `incus` | Linux · direct | Idempotent SSH leases and private container disk checkpoints through the official Incus Go client. |
 | [Firecracker](docs/providers/firecracker.md) — `firecracker` | Linux · direct | Self-hosted Firecracker microVM leases on a Linux KVM host with prepared kernel, rootfs, and CNI. |
 | [Static SSH](docs/providers/ssh.md) — `ssh` (`static`, `static-ssh`) | Linux, macOS, Windows · direct | Existing machines; no provisioning. |
 | [Local Container](docs/providers/local-container.md) — `local-container` (`docker`, `container`, `local-docker`) | Linux · direct | Local Docker-compatible runtime (Docker Desktop, OrbStack, Colima, Podman). |

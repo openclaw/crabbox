@@ -537,7 +537,7 @@
     "lifecycle": "Crabbox",
     "cleanup": "instance delete",
     "bestFit": "Self-hosted Linux containers or VMs",
-    "caveat": "Requires an accessible Incus environment",
+    "caveat": "Accessible Incus daemon required; native checkpoints capture container root disks only",
     "docs": "incus.md"
   },
   "islo": {

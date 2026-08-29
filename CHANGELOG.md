@@ -2,10 +2,13 @@
 
 ## 0.47.1 (Unreleased)
 
+### Added
+
+- Added durable fixed-ID Incus leases and private container disk checkpoints that survive source deletion, with ownership-checked cleanup and fresh SSH identity before fork startup.
+
 ### Fixed
 
-- Omitted speculative `&&` failure diagnostics for compound shell commands while retaining simple-chain explanations and workload exit behavior.
-
+- Kept automatic egress client tickets off SSH, remote shell, and helper process arguments with a foreground bounded-input handoff to the detached client, preventing SSH teardown from truncating ticket delivery.
 - Repaired Machine0 UUID lookups through validated inventory and identity-verified full details by name, preserving UUID ownership and rejecting incomplete or changed identities.
 - Validated generated prewarm probes through the provider's run contract before backend configuration, ready-pool checks, or ACL changes, preserving follow-up routing and reuse intent.
 - Rejected Blacksmith Testbox `--no-sync` with exit 2 before acquisition or reuse instead of silently delegating sync, including nonblank `prewarm --probe-command` and named jobs with `noSync: true` before warmup or dry-run planning.
@@ -25,6 +28,8 @@
 - Marked Machine0 creation-only selectors in provider discovery and excluded them from prewarm follow-ups, with invalid projected provider configuration rejected before allocation.
 - Reported omitted local-container architecture as `native` in config diagnostics without probing the runtime or changing explicit architecture assertions. Thanks @coygeek.
 - Released run-owned workspace authority after static SSH one-shot cleanup so the surviving host can be reused immediately, while preserving guarded owner checks and destructive-provider cleanup ordering.
+- Preserved SIGINT and SIGQUIT behavior for kept and reused POSIX SSH workloads without weakening child ownership checks or changing caller umasks. Thanks @coygeek.
+- Omitted speculative `&&` failure diagnostics for compound shell commands while retaining simple-chain explanations and workload exit behavior. Thanks @coygeek.
 
 ## 0.47.0 - 2026-08-28
 

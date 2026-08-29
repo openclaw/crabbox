@@ -25,6 +25,13 @@ coordinator pairs the two WebSockets and forwards multiplexed proxy frames; it
 never opens internet connections itself. Only the host agent dials real
 outbound TCP connections.
 
+Automatic `egress start` sends the client ticket through SSH stdin, keeping it
+out of SSH, remote shell, and helper process arguments. A foreground helper
+validates and closes the bounded SSH input, then hands it through a private
+pipe to the detached client before returning. Invalid input fails without
+starting a client or falling back to coordinator login. Manual
+`host`/`client --ticket` behavior is unchanged.
+
 The data path is:
 
 ```text

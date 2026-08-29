@@ -404,11 +404,29 @@ func shellAndChainSegments(command string) []string {
 	}
 	var segments []string
 	inSingle, inDouble, escaped := false, false, false
+	inWord := false
+	redirection := false
+	brackets := 0
 	start := 0
+	nextLogicalByte := func(i int) byte {
+		i++
+		for i+1 < len(command) && command[i] == '\\' && command[i+1] == '\n' {
+			i += 2
+		}
+		if i < len(command) {
+			return command[i]
+		}
+		return 0
+	}
 	for i := 0; i < len(command); i++ {
 		ch := command[i]
 		if escaped {
 			escaped = false
+			// A removed continuation does not start or end a shell word.
+			if ch != '\n' {
+				inWord = true
+				redirection = false
+			}
 			continue
 		}
 		if ch == '\\' && !inSingle {
@@ -417,6 +435,8 @@ func shellAndChainSegments(command string) []string {
 		}
 		if ch == '\'' && !inDouble {
 			inSingle = !inSingle
+			inWord = true
+			redirection = false
 			continue
 		}
 		if inSingle {
@@ -424,26 +444,71 @@ func shellAndChainSegments(command string) []string {
 		}
 		if ch == '"' {
 			inDouble = !inDouble
+			inWord = true
+			redirection = false
 			continue
 		}
-		if ch == '`' || ch == '$' && i+1 < len(command) && command[i+1] == '(' {
+		if ch == '`' {
 			return nil
+		}
+		if ch == '$' {
+			switch nextLogicalByte(i) {
+			case '(', '{', '[':
+				return nil
+			case '\'', '"':
+				if !inDouble {
+					return nil
+				}
+			}
 		}
 		if inDouble {
 			continue
 		}
+		followsRedirection := redirection
+		redirection = false
 		switch ch {
-		case '(', ')', '{', '}', ';', '\n', '\r', '|', '#':
+		case '(', ')', '}', ';', '\r', '|':
 			return nil
+		case '{':
+			if i+1 >= len(command) || command[i+1] != '}' {
+				return nil
+			}
+			i++
+		case '\n':
+			if len(segments) == 0 || strings.TrimSpace(command[start:i]) != "" {
+				return nil
+			}
+			continue
+		case '#':
+			if !inWord {
+				return nil
+			}
+		case ' ', '\t':
+			inWord = false
+			continue
 		case '[':
-			if i+1 < len(command) && command[i+1] == '[' {
+			if nextLogicalByte(i) == '[' {
 				return nil
 			}
-		case '<':
-			if i+1 < len(command) && command[i+1] == '<' {
+			brackets++
+		case ']':
+			if brackets > 0 {
+				brackets--
+			}
+		case '<', '>':
+			if ch == '<' && i+1 < len(command) && command[i+1] == '<' {
 				return nil
 			}
+			inWord = false
+			redirection = true
+			continue
 		case '&':
+			if brackets > 0 {
+				return nil
+			}
+			if followsRedirection {
+				continue
+			}
 			if i+1 >= len(command) || command[i+1] != '&' {
 				return nil
 			}
@@ -454,10 +519,13 @@ func shellAndChainSegments(command string) []string {
 			segments = append(segments, part)
 			i++
 			start = i + 1
+			inWord = false
+			continue
 		}
+		inWord = true
 	}
 	last := strings.TrimSpace(command[start:])
-	if inSingle || inDouble || escaped || last == "" || len(segments) == 0 {
+	if inSingle || inDouble || escaped || brackets > 0 || last == "" || len(segments) == 0 {
 		return nil
 	}
 	segments = append(segments, last)

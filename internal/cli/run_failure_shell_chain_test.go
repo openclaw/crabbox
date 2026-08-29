@@ -32,12 +32,17 @@ func TestShellChainDiagnosticFixtures(t *testing.T) {
 			}
 			var out bytes.Buffer
 			printFailureDigestShellChain(&out, runFailureDigestInput{ShellMode: true, CommandDisplay: fixture.Command})
-			if got := strings.Contains(out.String(), "would_skip_if_left_failed:"); got != (len(fixture.Segments) > 1) {
-				t.Fatalf("diagnostic=%q", out.String())
+			for _, field := range []string{"shell_chain:", "would_skip_if_left_failed:", "chain_semantics:"} {
+				if got := strings.Contains(out.String(), field); got != (len(fixture.Segments) > 1) {
+					t.Fatalf("field %s: diagnostic=%q", field, out.String())
+				}
 			}
 			if fixture.ExitCode != nil && runtime.GOOS != "windows" {
 				cmd := exec.Command("/bin/sh", "-c", fixture.Command)
 				output, err := cmd.CombinedOutput()
+				if cmd.ProcessState == nil {
+					t.Fatalf("start original workload: %v", err)
+				}
 				if got := cmd.ProcessState.ExitCode(); got != *fixture.ExitCode {
 					t.Fatalf("original workload exit=%d want=%d: %v %s", got, *fixture.ExitCode, err, output)
 				}
