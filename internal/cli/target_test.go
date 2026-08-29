@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-type architectureCapabilityTestProvider struct{}
+type architectureCapabilityTestProvider struct{ denyAMD64 bool }
 
 func (architectureCapabilityTestProvider) Name() string {
 	return "architecture-capability-test"
@@ -17,11 +17,12 @@ func (architectureCapabilityTestProvider) Name() string {
 func (architectureCapabilityTestProvider) Aliases() []string { return nil }
 func (architectureCapabilityTestProvider) Spec() ProviderSpec {
 	return ProviderSpec{
-		Name:        "architecture-capability-test",
-		Family:      "architecture-capability-test",
-		Kind:        ProviderKindSSHLease,
-		Targets:     []TargetSpec{{OS: targetLinux}},
-		Coordinator: CoordinatorNever,
+		Name:             "architecture-capability-test",
+		Family:           "architecture-capability-test",
+		Kind:             ProviderKindSSHLease,
+		Targets:          []TargetSpec{{OS: targetLinux}, {OS: targetMacOS}, {OS: targetWindows, WindowsMode: windowsModeNormal}, {OS: targetWindows, WindowsMode: windowsModeWSL2}},
+		Coordinator:      CoordinatorNever,
+		ClassDisposition: ProviderClassDispositionUnmapped,
 	}
 }
 func (architectureCapabilityTestProvider) RegisterFlags(*flag.FlagSet, Config) any {
@@ -33,8 +34,32 @@ func (architectureCapabilityTestProvider) ApplyFlags(*Config, *flag.FlagSet, any
 func (architectureCapabilityTestProvider) Configure(Config, Runtime) (Backend, error) {
 	return nil, nil
 }
-func (architectureCapabilityTestProvider) SupportsArchitecture(_ Config, architecture string) bool {
-	return architecture == ArchitectureAMD64 || architecture == ArchitectureARM64
+func (p architectureCapabilityTestProvider) SupportsArchitecture(_ Config, architecture string) bool {
+	return architecture == ArchitectureARM64 || (architecture == ArchitectureAMD64 && !p.denyAMD64)
+}
+
+func TestProviderArchitectureCapabilityOwnsTargetAdmission(t *testing.T) {
+	p := architectureCapabilityTestProvider{denyAMD64: true}
+	providerRegistry[p.Name()] = p
+	t.Cleanup(func() { delete(providerRegistry, p.Name()) })
+	for _, target := range []string{targetLinux, targetMacOS, targetWindows} {
+		for _, arch := range []string{ArchitectureAMD64, ArchitectureARM64} {
+			t.Run(target+"/"+arch, func(t *testing.T) {
+				cfg := baseConfig()
+				cfg.Provider, cfg.TargetOS, cfg.Architecture = p.Name(), target, arch
+				cfg.architectureExplicit = true
+				err := validateProviderTarget(cfg)
+				if (err == nil) != (arch == ArchitectureARM64) {
+					t.Fatalf("capability admission architecture=%s: %v", arch, err)
+				}
+			})
+		}
+	}
+	cfg := baseConfig()
+	cfg.Provider, cfg.TargetOS, cfg.Architecture = p.Name(), targetWorkerRuntime, ArchitectureARM64
+	if err := validateProviderTarget(cfg); err == nil {
+		t.Fatal("capability bypassed ProviderSpec.Targets")
+	}
 }
 
 func TestProviderArchitectureCapabilityAdmitsStaticArchitecture(t *testing.T) {

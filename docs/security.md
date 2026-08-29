@@ -460,6 +460,14 @@ private-file boundary protects Crabbox-generated run outputs and the managed
 attestation signing key; replacement or reuse tightens an older broad mode or
 DACL instead of preserving it. Required artifact paths must resolve to regular
 files.
+Failure-bundle destinations are checked for existing write access without
+creating a temporary name, then restricted to the current user before any
+bundle file is created. A retained directory descriptor or handle anchors temp
+creation, publication, and cleanup through the end of writing; replacing a
+parent path cannot redirect bundle bytes. Windows retains ancestor handles
+without delete sharing and publishes the original open file handle, so neither
+directory replacement nor temporary-name substitution can redirect publication.
+An already unwritable directory is not made writable to capture diagnostics.
 Automatic remote failure bundles confine member names and link targets to their
 generated subtree and omit
 escaping, rooted, empty, or special-file entries. These filesystem checks do

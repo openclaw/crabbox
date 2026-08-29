@@ -227,6 +227,14 @@ A conflicting claim (same lease, different `repoRoot`) refuses commands by
 default with a `use --reclaim` error; `--reclaim` overrides the check and
 rewrites the claim atomically.
 
+Metadata discovery reads atomically published claim snapshots without waiting
+for lease operation locks. Active claims remain visible to listing, identifier
+resolution, and slug collision checks, so a busy lease does not block discovery
+or execution of an independent lease. A snapshot is not mutation authority:
+guarded actions and cleanup still lock the target claim and recheck its exact
+contents and revision before acting. Using an exact ID does not bypass that
+lease's own operation lock, repo ownership, or provider scope checks.
+
 Static SSH leases (`provider: ssh`) record extra endpoint fields in the claim —
 `staticHost`, `staticUser`, `staticPort`, `staticWorkRoot`, `targetOS`, and
 `windowsMode` — so the resolver knows the lease bypasses the coordinator and can

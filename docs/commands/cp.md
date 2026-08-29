@@ -33,6 +33,9 @@ is a path on the resolved remote host.
 
 ## Flags
 
+`crabbox cp --help` (or `-h`) shows the invocation, path rule, both copy
+directions, and copy-specific flags before the complete provider flag reference.
+
 ```text
 --id <lease-id-or-slug>
 --provider <name>

@@ -17,8 +17,8 @@ Subcommands: `create`, `list`, `inspect`, `restore`, `fork`, `delete`, `prune`.
 tools, caches, services. Stored in the provider account, so it incurs provider
 storage costs. Recorded as one of `aws-ami`, `aws-ebs-snapshot`,
 `azure-managed-image`, `azure-os-disk-snapshot`, `gcp-machine-image`,
-`gcp-disk-snapshot`, `hetzner-snapshot`, `machine0-image`, or
-`parallels-snapshot`.
+`gcp-disk-snapshot`, `hetzner-snapshot`, `machine0-image`,
+`parallels-snapshot`, or `daytona-snapshot`.
 
 **Archive (workspace tarball)** — captures only the contents of the remote
 workdir as `workspace.tar.gz`. Portable across any POSIX SSH lease, but it does
@@ -76,6 +76,9 @@ crabbox checkpoint create --provider aws --id swift-crab --mode native
 
 # Direct Hetzner lease: create a project snapshot
 crabbox checkpoint create --provider hetzner --id swift-crab --mode native
+
+# Direct Daytona lease: stop, capture filesystem state, and restart the source
+crabbox checkpoint create --provider daytona --id swift-crab --mode native --no-reboot=false
 
 # Machine0 named image; draft readiness requires snapshotStatus=READY
 crabbox checkpoint create --provider machine0 --id swift-crab \
@@ -451,6 +454,7 @@ the detailed lifecycle behavior and scheduled-job recipe.
 | Azure Windows (`windows.mode=normal`) | Managed OS-disk snapshot (`--no-reboot=false`) | not supported |
 | GCP Linux | Persistent-disk snapshot | Machine image |
 | Hetzner Linux (direct only) | Project snapshot | not supported |
+| Daytona Linux (direct only) | Filesystem snapshot (`--no-reboot=false` for a running source) | Same filesystem snapshot |
 | Parallels | VM snapshot | — |
 
 Brokered native checkpoints (through a configured coordinator) cover AWS
@@ -463,6 +467,14 @@ snapshots run directly against the Parallels host.
 Direct Hetzner Linux leases create project snapshots with `--mode native` or an
 explicit disk-snapshot strategy; default auto mode retains the archive fallback.
 Brokered Hetzner leases always use archive checkpoints.
+
+Direct Daytona native snapshots require `--mode native` or an explicit strategy.
+Capture requires a stopped source and waits for snapshot readiness even with
+`--wait=false`; running sources require `--no-reboot=false` and are restarted
+after capture. Already-stopped sources remain stopped. Fork starts a new sandbox
+from the snapshot and relocates the workspace; native in-place restore and
+memory capture are not supported. See [Daytona](../providers/daytona.md#native-snapshots-and-forks)
+for ownership checks and recovery after an uncertain capture.
 
 **Archive checkpoints**
 

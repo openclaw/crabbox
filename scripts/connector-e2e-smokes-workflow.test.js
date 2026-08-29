@@ -33,6 +33,28 @@ test("matrix rows do not fail fast and are time-bounded", () => {
   assert.match(workflow, /timeout-minutes:\s*15/);
 });
 
+test("SSH localhost asserts amd64 only on its hosted x64 lifecycle row", () => {
+  const rows = [
+    ...workflow.matchAll(/^ {10}- name: ssh-localhost\n((?: {12}[^\n]*\n)*)/gm),
+  ];
+  assert.equal(rows.length, 1, "keep one existing SSH localhost row");
+  const row = rows[0][1];
+  assert.match(row, /^ {12}runner: ubuntu-latest$/m);
+  assert.match(row, /^ {12}build-cli: true$/m);
+  assert.match(
+    row,
+    /^ {12}smoke: CRABBOX_ARCH=amd64 CRABBOX_BIN="\$PWD\/bin\/crabbox" scripts\/live-ssh-localhost-smoke\.sh$/m,
+  );
+  assert.equal((workflow.match(/CRABBOX_ARCH/g) ?? []).length, 1);
+  assert.match(workflow, /runs-on: \$\{\{ matrix\.runner \}\}/);
+  assert.match(workflow, /run: \$\{\{ matrix\.smoke \}\}/);
+  assert.match(workflow, /permissions:\n {2}contents: read\n\n/);
+  assert.doesNotMatch(
+    workflow,
+    /pull_request_target:|self-hosted|^\s*(?:environment|services|container|continue-on-error):/m,
+  );
+});
+
 test("pull request runs cancel superseded attempts", () => {
   assert.match(workflow, /concurrency:\s*\n\s+group:/);
   assert.match(workflow, /cancel-in-progress:.*pull_request/);

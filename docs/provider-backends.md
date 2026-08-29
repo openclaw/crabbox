@@ -134,9 +134,20 @@ safe relative file paths instead of globs. Do not pretend a delegated provider
 is SSH-like unless it has a stable SSH contract. If Crabbox cannot run rsync and
 remote commands itself, use `DelegatedRunBackend`.
 
+`--no-sync` is validated by each adapter, not inferred from `FeatureArchiveSync`:
+some SDK/CLI transports support it without archive sync. An adapter that cannot
+skip transfer must reject it before acquisition or provider execution. Blacksmith
+Testbox does this because its native run command has no supported sync bypass.
+
 ### Optional interfaces
 
 Add optional capabilities as small interfaces instead of widening every backend.
+
+`RunOptionsValidator` admits run options before prewarm/job acquisition or
+dry-run planning. Its `ValidateRunOptions(RunRequest) error` method must perform
+no external I/O or lease-state access. Implement it on the provider for callers
+that cannot configure a backend yet, and reuse the same policy at backend `Run`
+entry.
 
 Requested fixed lease IDs are optional:
 

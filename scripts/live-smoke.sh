@@ -1417,6 +1417,66 @@ morph_smoke() {
   lease=""
 }
 
+boxd_smoke() (
+  need_tool jq
+  need_tool python3
+  if [[ -z "${CRABBOX_BOXD_TOKEN:-${BOXD_TOKEN:-}}" ]]; then
+    echo "set BOXD_TOKEN or CRABBOX_BOXD_TOKEN to an interactive session for Boxd HTTPS live smoke; no login or signup is performed" >&2
+    return 2
+  fi
+  case "${CRABBOX_BOXD_TOKEN:-${BOXD_TOKEN:-}}" in
+    bxd_*) echo "Boxd console mutations require an interactive session, not a bxd_ API key; use scripts/boxd-login.mjs" >&2; return 2 ;;
+  esac
+  # Explicit environment routing wins over every config file for both clients.
+  export CRABBOX_BOXD_API_URL="${CRABBOX_BOXD_API_URL:-https://app.boxd.sh}"
+  export CRABBOX_BOXD_ORG="${CRABBOX_BOXD_ORG-}"
+  local slug="${CRABBOX_LIVE_BOXD_SLUG:-boxd-smoke-$$}"
+  local ttl="${CRABBOX_LIVE_BOXD_TTL:-15m}"
+  local idle="${CRABBOX_LIVE_BOXD_IDLE_TIMEOUT:-5m}"
+  local boxd_env=(CRABBOX_PROVIDER=boxd CRABBOX_BOXD_DELETE_ON_RELEASE=1)
+  boxd_run() { run_in_repo env "${boxd_env[@]}" "$cb" "$@"; }
+  local proof_dir
+  proof_dir="$(mktemp -d "${TMPDIR:-/tmp}/crabbox-boxd-proof.XXXXXX")"
+  local lease="" cleanup_needed=0
+  cleanup_boxd() {
+    local exit_code=$?
+    trap - EXIT
+    if [[ "$cleanup_needed" == "1" && -n "$lease" ]]; then
+      boxd_run stop "$lease" || exit_code=1
+    fi
+    if [[ -s "$proof_dir/before.json" ]]; then
+      python3 "$root/scripts/boxd-inventory.py" verify "$proof_dir/before.json" || exit_code=1
+    fi
+    rm -rf "$proof_dir"
+    exit "$exit_code"
+  }
+  trap cleanup_boxd EXIT
+  python3 "$root/scripts/boxd-inventory.py" snapshot > "$proof_dir/before.json"
+  boxd_run doctor
+  boxd_run cleanup --dry-run
+  local out
+  capture_run out boxd_run warmup --keep=false --slug "$slug" --ttl "$ttl" --idle-timeout "$idle"
+  printf '%s\n' "$out"
+  lease="$(printf '%s\n' "$out" | extract_lease)"
+  test -n "$lease"
+  # A requested slug can belong to an existing lease when acquisition fails.
+  # Only a successful acquisition authorizes cleanup of its returned identity.
+  cleanup_needed=1
+  boxd_run status --id "$slug" --wait --wait-timeout 120s
+  boxd_run inspect --id "$slug" --json | jq '{id,slug,provider,state,serverType,host,ready,lastTouchedAt,expiresAt}'
+  boxd_run run --id "$slug" --shell -- "$live_command"
+  boxd_run stop "$lease"
+  cleanup_needed=0
+  python3 "$root/scripts/boxd-inventory.py" verify "$proof_dir/before.json"
+  # The one-shot failure path must release its VM and preserve the command code.
+  local failure_code=0
+  boxd_run run --keep=false --slug "$slug-failure" --shell -- 'exit 37' || failure_code=$?
+  if [[ "$failure_code" != "37" ]]; then
+    echo "boxd failure smoke did not preserve exit code 37" >&2
+    return 1
+  fi
+)
+
 orgo_smoke() {
   need_tool curl
   need_tool jq
@@ -1809,6 +1869,10 @@ fi
 
 if has_provider morph; then
   morph_smoke
+fi
+
+if has_provider boxd; then
+  boxd_smoke
 fi
 
 if has_provider orgo; then

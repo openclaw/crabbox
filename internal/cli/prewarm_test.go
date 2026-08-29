@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -31,6 +33,100 @@ type prewarmDelegatedTestBackend struct{}
 
 func (prewarmDelegatedTestBackend) Spec() ProviderSpec {
 	return ProviderSpec{Name: "prewarm-delegated-test", Kind: ProviderKindDelegatedRun}
+}
+
+type prewarmOptionsTestProvider struct{ backend Backend }
+
+func (p prewarmOptionsTestProvider) Name() string      { return p.backend.Spec().Name }
+func (p prewarmOptionsTestProvider) Aliases() []string { return nil }
+func (p prewarmOptionsTestProvider) Spec() ProviderSpec {
+	spec := p.backend.Spec()
+	spec.Targets = []TargetSpec{{OS: targetLinux}}
+	spec.Coordinator = CoordinatorNever
+	return spec
+}
+func (prewarmOptionsTestProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
+func (prewarmOptionsTestProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (p prewarmOptionsTestProvider) Configure(Config, Runtime) (Backend, error) {
+	return p.backend, nil
+}
+
+type prewarmOptionsTestBackend struct {
+	prewarmDelegatedTestBackend
+	validate func(RunRequest) error
+}
+
+func (b prewarmOptionsTestBackend) ValidateRunOptions(req RunRequest) error { return b.validate(req) }
+
+func TestPrewarmRunOptionsValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		probe     string
+		dryRun    bool
+		validator bool
+		reject    bool
+	}{
+		{name: "reject_before_warmup", probe: "echo ready", validator: true, reject: true},
+		{name: "reject_before_plan", probe: "echo ready", dryRun: true, validator: true, reject: true},
+		{name: "accepted_probe", probe: "echo ready", dryRun: true, validator: true},
+		{name: "optional_validator", probe: "echo ready", dryRun: true},
+		{name: "empty_probe", dryRun: true, validator: true, reject: true},
+		{name: "whitespace_probe", probe: " \t\n", dryRun: true, validator: true, reject: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			dir := t.TempDir()
+			t.Setenv("HOME", dir)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, ".config"))
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+			var requests []RunRequest
+			var backend Backend = prewarmDelegatedTestBackend{}
+			if tc.validator {
+				backend = prewarmOptionsTestBackend{validate: func(req RunRequest) error {
+					requests = append(requests, req)
+					if tc.reject {
+						return errors.New("probe options rejected")
+					}
+					return nil
+				}}
+			}
+			provider := prewarmOptionsTestProvider{backend: backend}
+			RegisterProvider(provider)
+			t.Cleanup(func() { delete(providerRegistry, provider.Name()) })
+			args := []string{"prewarm", "--provider", provider.Name(), "--probe-command", tc.probe}
+			if tc.dryRun {
+				args = append(args, "--dry-run")
+			}
+			var stdout, stderr bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: &stderr}).Run(context.Background(), args)
+			hasProbe := strings.TrimSpace(tc.probe) != ""
+			var wantRequests []RunRequest
+			if tc.validator && hasProbe {
+				wantRequests = []RunRequest{{NoSync: true, ShellMode: true, Command: []string{tc.probe}}}
+			}
+			if !reflect.DeepEqual(requests, wantRequests) {
+				t.Fatalf("validation requests=%+v, want %+v", requests, wantRequests)
+			}
+			if tc.reject && hasProbe {
+				var exitErr ExitError
+				if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(err.Error(), "--probe-command") || !strings.Contains(err.Error(), "probe options rejected") {
+					t.Fatalf("rejection=%v, want contextual exit 2", err)
+				}
+				if stdout.Len() != 0 {
+					t.Fatalf("rejected probe emitted a plan or acquired a lease: %s", &stdout)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("prewarm error=%v stderr=%s", err, &stderr)
+			}
+			if strings.Contains(stdout.String(), "--no-sync --no-hydrate --shell -- 'echo ready'") != hasProbe {
+				t.Fatalf("unexpected probe plan: %s", &stdout)
+			}
+		})
+	}
 }
 
 func (b *prewarmCleanupTestBackend) Spec() ProviderSpec {
@@ -282,7 +378,7 @@ cache:
 
 	var stdout, stderr bytes.Buffer
 	app := App{Stdout: &stdout, Stderr: &stderr}
-	if err := app.Run(context.Background(), []string{"prewarm", "--dry-run", "--provider", "blacksmith-testbox", "--blacksmith-workflow", "testbox.yml", "--blacksmith-job", "check", "--cache-volume", "pnpm=repo-pnpm:/var/cache/crabbox/pnpm", "--probe-command", "node -v"}); err != nil {
+	if err := app.Run(context.Background(), []string{"prewarm", "--dry-run", "--provider", "blacksmith-testbox", "--blacksmith-workflow", "testbox.yml", "--blacksmith-job", "check", "--cache-volume", "pnpm=repo-pnpm:/var/cache/crabbox/pnpm"}); err != nil {
 		t.Fatalf("prewarm dry-run failed: %v\nstderr=%s", err, stderr.String())
 	}
 	got := stdout.String()
@@ -295,9 +391,8 @@ cache:
 	if strings.Contains(got, "actions hydrate") {
 		t.Fatalf("blacksmith prewarm should not run local Actions hydration:\n%s", got)
 	}
-	if !strings.Contains(got, "crabbox run --blacksmith-workflow testbox.yml --blacksmith-job check --provider blacksmith-testbox") ||
-		!strings.Contains(got, "--no-sync --no-hydrate --shell -- 'node -v'") {
-		t.Fatalf("blacksmith prewarm should still run explicit probe:\n%s", got)
+	if strings.Contains(got, "crabbox run") {
+		t.Fatalf("plain blacksmith prewarm should not plan a probe:\n%s", got)
 	}
 }
 

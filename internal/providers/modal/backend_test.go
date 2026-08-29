@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	osexec "os/exec"
@@ -342,7 +343,7 @@ func TestSyncWorkspaceCleansRemoteArchiveWhenExtractFails(t *testing.T) {
 		t.Fatalf("expected extract failure")
 	}
 	verbs := fake.verbs
-	want := []string{"exec", "upload", "exec", "exec"}
+	want := []string{"upload", "exec", "exec", "exec"}
 	if !reflect.DeepEqual(verbs, want) {
 		t.Fatalf("verbs=%v want %v", verbs, want)
 	}
@@ -449,12 +450,17 @@ func withFakeModalAPI(t *testing.T, fake *fakeModalAPI) {
 }
 
 type fakeModalAPI struct {
-	verbs        []string
-	createReq    modalCreateSandboxRequest
-	sandbox      modalSandbox
-	execCommands [][]string
-	execCodes    []int
-	terminateErr error
+	verbs                []string
+	createReq            modalCreateSandboxRequest
+	sandbox              modalSandbox
+	execCommands         [][]string
+	execCodes            []int
+	terminateErr         error
+	uploadErr            error
+	uploadWaitForCancel  bool
+	uploadDeadlineSet    bool
+	terminateDeadlineSet bool
+	cleanupDeadlineSet   bool
 }
 
 func (f *fakeModalAPI) CreateSandbox(_ context.Context, req modalCreateSandboxRequest) (modalSandbox, error) {
@@ -466,9 +472,12 @@ func (f *fakeModalAPI) CreateSandbox(_ context.Context, req modalCreateSandboxRe
 	return modalSandbox{ID: "sb-123", Status: "running", Tags: req.Tags}, nil
 }
 
-func (f *fakeModalAPI) Exec(_ context.Context, req modalExecRequest) (int, error) {
+func (f *fakeModalAPI) Exec(ctx context.Context, req modalExecRequest) (int, error) {
 	f.verbs = append(f.verbs, "exec")
 	f.execCommands = append(f.execCommands, req.Command)
+	if containsArgSubstring(req.Command, "rm -f") {
+		_, f.cleanupDeadlineSet = ctx.Deadline()
+	}
 	if len(f.execCodes) == 0 {
 		return 0, nil
 	}
@@ -477,9 +486,14 @@ func (f *fakeModalAPI) Exec(_ context.Context, req modalExecRequest) (int, error
 	return code, nil
 }
 
-func (f *fakeModalAPI) UploadFile(context.Context, string, string, string) error {
+func (f *fakeModalAPI) UploadFile(ctx context.Context, _ string, _ string, _ string) error {
 	f.verbs = append(f.verbs, "upload")
-	return nil
+	_, f.uploadDeadlineSet = ctx.Deadline()
+	if f.uploadWaitForCancel {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return f.uploadErr
 }
 
 func (f *fakeModalAPI) GetSandbox(context.Context, string) (modalSandbox, error) {
@@ -498,8 +512,9 @@ func (f *fakeModalAPI) ListSandboxes(context.Context, map[string]string) ([]moda
 	return []modalSandbox{{ID: "sb-123", Status: "running", Tags: map[string]string{"provider": "modal", "crabbox": "true", "lease": "cbx_123"}}}, nil
 }
 
-func (f *fakeModalAPI) Terminate(context.Context, string) error {
+func (f *fakeModalAPI) Terminate(ctx context.Context, _ string) error {
 	f.verbs = append(f.verbs, "terminate")
+	_, f.terminateDeadlineSet = ctx.Deadline()
 	return f.terminateErr
 }
 
@@ -538,4 +553,149 @@ func newGitRepo(t *testing.T) string {
 		t.Fatalf("git init: %v: %s", err, out)
 	}
 	return root
+}
+
+func TestRunLifecycleRetainsSetupFailure(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := &fakeModalAPI{execCodes: []int{7}}
+	withFakeModalAPI(t, fake)
+	backend := NewModalBackend(Provider{}.Spec(), newTestConfig(), testRuntime()).(*modalBackend)
+	result, err := backend.Run(t.Context(), RunRequest{
+		Repo: Repo{Name: "repo", Root: t.TempDir()}, Command: []string{"true"},
+		NoSync: true, KeepOnFailure: true,
+	})
+	if err == nil || result.Session == nil || !result.Session.Kept || containsVerb(fake.verbs, "terminate") {
+		t.Fatalf("setup failure must retain sandbox: result=%#v session=%#v err=%v verbs=%v", result, result.Session, err, fake.verbs)
+	}
+}
+
+func TestRunLifecycleReportsCleanupFailure(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := &fakeModalAPI{terminateErr: errors.New("terminate unavailable")}
+	withFakeModalAPI(t, fake)
+	backend := NewModalBackend(Provider{}.Spec(), newTestConfig(), testRuntime()).(*modalBackend)
+	result, err := backend.Run(t.Context(), RunRequest{
+		Repo: Repo{Name: "repo", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true,
+	})
+	if err == nil || result.ExitCode != 1 || result.Session == nil || !result.Session.Kept {
+		t.Fatalf("cleanup failure must fail with retained handle: result=%#v session=%#v err=%v", result, result.Session, err)
+	}
+}
+
+func TestRunLifecycleArchiveGuardrailBeforeCreation(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := &fakeModalAPI{}
+	withFakeModalAPI(t, fake)
+	cfg := newTestConfig()
+	cfg.Sync.FailFiles = 1
+	repo := newGitRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	backend := NewModalBackend(Provider{}.Spec(), cfg, testRuntime()).(*modalBackend)
+	result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "repo", Root: repo}, Command: []string{"true"}})
+	var ee ExitError
+	if !errors.As(err, &ee) || ee.Code != 6 || result.ExitCode != 6 || containsVerb(fake.verbs, "create") || result.Session != nil {
+		t.Fatalf("result=%#v err=%v verbs=%v", result, err, fake.verbs)
+	}
+}
+
+func TestRunLifecycleRetainsSyncFailure(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := &fakeModalAPI{uploadErr: errors.New("upload unavailable")}
+	withFakeModalAPI(t, fake)
+	backend := NewModalBackend(Provider{}.Spec(), newTestConfig(), testRuntime()).(*modalBackend)
+	result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "repo", Root: newGitRepo(t)}, Command: []string{"true"}, KeepOnFailure: true})
+	if err == nil || result.Session == nil || !result.Session.Kept || containsVerb(fake.verbs, "terminate") || !fake.cleanupDeadlineSet {
+		t.Fatalf("result=%#v err=%v verbs=%v cleanupBounded=%t", result, err, fake.verbs, fake.cleanupDeadlineSet)
+	}
+}
+
+func TestRunLifecycleCleanupOutcomeAndTiming(t *testing.T) {
+	for _, code := range []int{0, 7} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			fake := &fakeModalAPI{execCodes: []int{0, code}, terminateErr: errors.New("terminate unavailable")}
+			withFakeModalAPI(t, fake)
+			var stderr bytes.Buffer
+			backend := NewModalBackend(Provider{}.Spec(), newTestConfig(), Runtime{Stdout: io.Discard, Stderr: &stderr}).(*modalBackend)
+			result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "repo", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true, TimingJSON: true})
+			wantCode := code
+			wantKind := "command-exit"
+			if code == 0 {
+				wantCode = 1
+				wantKind = "provider-error"
+			}
+			var ee ExitError
+			if !errors.As(err, &ee) || ee.Code != wantCode || result.ExitCode != wantCode || !fake.terminateDeadlineSet || result.Session == nil || !result.Session.Kept {
+				t.Fatalf("result=%#v err=%v bounded=%t", result, err, fake.terminateDeadlineSet)
+			}
+			var report map[string]any
+			for _, line := range strings.Split(stderr.String(), "\n") {
+				if strings.HasPrefix(line, "{") {
+					if err := json.Unmarshal([]byte(line), &report); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if report["exitCode"] != float64(wantCode) || report["errorKind"] != wantKind || report["runStatus"] != string(result.Status) || report["totalMs"] != float64(result.Total.Milliseconds()) {
+				t.Fatalf("report=%v result=%#v", report, result)
+			}
+		})
+	}
+}
+
+func TestSyncWorkspaceUsesSharedTimeoutAndStaging(t *testing.T) {
+	fake := &fakeModalAPI{uploadWaitForCancel: true}
+	cfg := newTestConfig()
+	repo := Repo{Name: "repo", Root: newGitRepo(t)}
+	prepared, err := core.PrepareDelegatedArchive(t.Context(), core.DelegatedArchivePreparationRequest{Config: cfg, Repo: repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Close()
+	// Isolate the transfer budget from local archive speed.
+	prepared.ArchiveDuration = 0
+	cfg.Sync.Timeout = time.Millisecond
+	cfg.Sync.Delete = true
+	backend := NewModalBackend(Provider{}.Spec(), cfg, testRuntime()).(*modalBackend)
+	_, _, err = backend.syncWorkspace(t.Context(), fake, "sb-123", RunRequest{Repo: repo}, "/workspace/crabbox", prepared)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected transfer timeout, got %v", err)
+	}
+	if !containsVerb(fake.verbs, "upload") || !fake.uploadDeadlineSet || !fake.cleanupDeadlineSet {
+		t.Fatalf("unbounded transfer/cleanup: %#v", fake)
+	}
+	for _, cmd := range fake.execCommands {
+		if containsArgSubstring(cmd, "rm -rf '/workspace/crabbox'") {
+			t.Fatalf("old workspace removed before successful upload: %v", cmd)
+		}
+	}
+}
+
+func TestRunEnvCleanupPrecedesSandboxTermination(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := &fakeModalAPI{}
+	withFakeModalAPI(t, fake)
+	backend := NewModalBackend(Provider{}.Spec(), newTestConfig(), testRuntime()).(*modalBackend)
+	_, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "repo", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true, Env: map[string]string{"EXAMPLE": "value"}})
+	want := []string{"create", "exec", "upload", "exec", "exec", "terminate"}
+	if err != nil || !reflect.DeepEqual(fake.verbs, want) || !fake.cleanupDeadlineSet {
+		t.Fatalf("err=%v verbs=%v bounded=%t", err, fake.verbs, fake.cleanupDeadlineSet)
+	}
+}
+
+func TestRunCleansPartialEnvUploadBeforeRetainingSandbox(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := &fakeModalAPI{uploadErr: errors.New("partial upload failed")}
+	withFakeModalAPI(t, fake)
+	backend := NewModalBackend(Provider{}.Spec(), newTestConfig(), testRuntime()).(*modalBackend)
+	result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "repo", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true, KeepOnFailure: true, Env: map[string]string{"EXAMPLE": "value"}})
+	want := []string{"create", "exec", "upload", "exec"}
+	if err == nil || result.Session == nil || !result.Session.Kept || !reflect.DeepEqual(fake.verbs, want) || !fake.cleanupDeadlineSet {
+		t.Fatalf("result=%#v err=%v verbs=%v bounded=%t", result, err, fake.verbs, fake.cleanupDeadlineSet)
+	}
+	if !containsArgSubstring(fake.execCommands[len(fake.execCommands)-1], "rm -f '/tmp/crabbox-modal-env-") {
+		t.Fatalf("partial environment profile not removed: %v", fake.execCommands)
+	}
 }

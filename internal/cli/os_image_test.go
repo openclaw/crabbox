@@ -2,7 +2,9 @@ package cli
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"net/url"
+	"os"
 	"regexp"
 	"testing"
 )
@@ -77,5 +79,47 @@ func TestAWSLinuxAMIQueryForOS(t *testing.T) {
 	}
 	if name != "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-*" || label != "Ubuntu 24.04" {
 		t.Fatalf("arm query name=%q label=%q", name, label)
+	}
+}
+
+func TestOSImageSharedFixtures(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile("../../testdata/bootstrap/os-images.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixtures []struct{ Input, Selector string }
+	if err := json.Unmarshal(data, &fixtures); err != nil {
+		t.Fatal(err)
+	}
+	for _, fixture := range fixtures {
+		got, err := normalizeOSImage(fixture.Input)
+		if fixture.Selector == "" {
+			if err == nil {
+				t.Errorf("accepted unsupported OS %q", fixture.Input)
+			}
+		} else if err != nil || got != fixture.Selector {
+			t.Errorf("normalizeOSImage(%q) = %q, %v; want %q", fixture.Input, got, err, fixture.Selector)
+		}
+	}
+	for _, spec := range osImageSpecs {
+		for _, architecture := range []string{ArchitectureAMD64, ArchitectureARM64} {
+			name, label, err := awsLinuxAMIQueryForOS(spec.Selector, architecture)
+			want := spec.AWSName
+			if architecture == ArchitectureARM64 {
+				want = spec.AWSArm64Name
+			}
+			if err != nil || name != want || label != spec.AWSLabel {
+				t.Errorf("AWS %s/%s: %s %s %v", spec.Selector, architecture, name, label, err)
+			}
+			_, azure, _, _, _, _, err := osImageDefaultProviderImagesForArchitecture(spec.Selector, architecture)
+			want = spec.AzureImage
+			if architecture == ArchitectureARM64 {
+				want = spec.AzureArm64Image
+			}
+			if err != nil || azure != want {
+				t.Errorf("Azure %s/%s: %s %v", spec.Selector, architecture, azure, err)
+			}
+		}
 	}
 }

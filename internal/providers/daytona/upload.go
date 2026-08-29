@@ -72,8 +72,15 @@ func daytonaToolboxHeaders(cfg Config) (map[string]string, error) {
 }
 
 func uploadDaytonaFileStream(ctx context.Context, client *http.Client, endpoint string, headers map[string]string, file io.Reader, filename string) error {
-	if client == nil {
-		client = http.DefaultClient
+	// The query contains the destination file, not a different trusted origin.
+	origin, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("invalid Daytona upload endpoint")
+	}
+	origin.RawQuery = ""
+	client, err = daytonaHTTPClient(client, origin.String())
+	if err != nil {
+		return err
 	}
 	pr, pw := io.Pipe()
 	writer := multipart.NewWriter(pw)
@@ -98,7 +105,7 @@ func uploadDaytonaFileStream(ctx context.Context, client *http.Client, endpoint 
 		return fmt.Errorf("daytona upload archive: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= http.StatusBadRequest {
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		_ = pr.CloseWithError(fmt.Errorf("daytona upload archive: %s", resp.Status))
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		if len(body) > 0 {

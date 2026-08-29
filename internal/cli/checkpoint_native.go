@@ -497,6 +497,7 @@ func nativeCheckpointDeleteID(record checkpointRecord) string {
 
 func nativeCheckpointResourceRequest(record checkpointRecord) NativeCheckpointResourceRequest {
 	return NativeCheckpointResourceRequest{
+		LoadConfig: loadConfig,
 		Image: NativeCheckpointImage{
 			ID:           record.Native.ImageID,
 			Name:         record.Native.Name,
@@ -526,6 +527,8 @@ func checkpointKindForProviderImage(image CoordinatorImage) string {
 		return checkpointKindMachine0
 	case checkpointKindDockerCommit:
 		return checkpointKindDockerCommit
+	case checkpointKindDaytona:
+		return checkpointKindDaytona
 	}
 	switch image.Provider {
 	case "azure":
@@ -549,7 +552,7 @@ func checkpointStrategyForKind(kind string) string {
 	switch kind {
 	case checkpointKindAWSAMI, checkpointKindAzure, checkpointKindGCP, checkpointKindMachine0, checkpointKindDockerCommit:
 		return checkpointStrategyImage
-	case checkpointKindAWSEBS, checkpointKindAzureOS, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindParallels:
+	case checkpointKindAWSEBS, checkpointKindAzureOS, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindParallels, checkpointKindDaytona:
 		return checkpointStrategyDiskSnapshot
 	default:
 		return ""

@@ -149,14 +149,17 @@ Sandbox sizing is not exposed through Crabbox's v1 bridge contract.
 2. Unless `--no-sync` is set, Crabbox builds a portable gzipped archive from the
    working tree, uploads it through the bridge, and extracts it in the sandbox
    through delegated shell commands. With `sync.delete: true`, Crabbox stages
-   extraction before replacing the configured workdir.
+   extraction before replacing the configured workdir. New runs prepare and
+   check the archive before sandbox creation.
 3. Commands run through the bridge exec API with `workingDir` set to the
    configured workdir and forwarded non-auth environment values sent in the
    request body. The client supports both server-sent-event exec output and a
    buffered JSON exec result.
 4. `--sync-only` performs archive sync, prints the synced workdir, writes timing
-   JSON when requested, and then follows the same one-shot cleanup rules as
-   normal `run`.
+   JSON when requested, and follows the same one-shot cleanup rules as normal
+   `run`. Timing is emitted after cleanup and retained-claim bookkeeping, using
+   the final outcome; see the
+   [shared sandbox lifecycle](../features/delegated-runner-contract.md#shared-sandbox-lifecycle).
 5. One-shot sandboxes are deleted after successful `run` unless `--keep` is set.
    `--keep-on-failure` retains a newly created sandbox after sync, workspace, or
    command failures and prints reuse/stop guidance.

@@ -866,6 +866,102 @@ func TestWSL2StdinScriptCommandWithWaitTimeoutReadsPayloadFromStdin(t *testing.T
 	}
 }
 
+type localPOSIXWorkspaceOwnerTransport struct {
+	home string
+}
+
+func (transport localPOSIXWorkspaceOwnerTransport) Do(ctx context.Context, req workspaceOwnerRemoteRequest) (string, error) {
+	cmd := exec.CommandContext(ctx, "sh", "-c", remoteWorkspaceOwnerCommand(SSHTarget{TargetOS: targetLinux}, req))
+	cmd.Env = []string{"HOME=" + transport.home, "PATH=" + os.Getenv("PATH")}
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+func TestWSL2StdinShellPreservesUmask(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("executes the generated WSL POSIX shell locally")
+	}
+	// POSIXTransportIsLoginShellIndependent covers witness masks with and without
+	// stdin. Test WSL's masks and one composed witness without repeating that matrix.
+	const binaryInput = "payload\x00\xff\n"
+	tests := []struct {
+		mask  string
+		owned bool
+		input string
+	}{
+		{mask: "022"},
+		{mask: "027", input: binaryInput},
+		{mask: "077", input: binaryInput},
+		{mask: "027", owned: true, input: binaryInput},
+	}
+	for _, test := range tests {
+		t.Run(fmt.Sprintf("umask-%s/owned-%t/input-%t", test.mask, test.owned, test.input != ""), func(t *testing.T) {
+			home := t.TempDir()
+			wantCode := 0
+			if test.input != "" {
+				wantCode = 23
+			}
+			// Relative paths keep the framed workload independent of TempDir length.
+			script := `private_paths=$(find stage \( -type d ! -perm 700 -o -type f ! -perm 600 \) -print) || exit 99; [ -z "$private_paths" ] || { printf 'non-private staging paths: %s\n' "$private_paths" >&2; exit 99; }
+mkdir user-directory && cat >user-file; exit ` + strconv.Itoa(wantCode)
+			ctx := t.Context()
+			if test.owned {
+				// Staging may outlast a claim's TTL; use the same renewal lifecycle as run.
+				owner, err := acquireWorkspaceOwnerWithTransport(ctx, SSHTarget{TargetOS: targetLinux}, "cbx_umask", io.Discard, localPOSIXWorkspaceOwnerTransport{home: home}, workspaceOwnerWaitTimeout, workspaceOwnerTTL, workspaceOwnerRenewInterval)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), workspaceOwnerCleanupTimeout)
+					defer cancel()
+					if err := owner.Close(cleanupCtx); err != nil {
+						t.Errorf("release workspace owner: %v", err)
+					}
+				})
+				ctx = owner.Context()
+				script = owner.wrapPOSIXCommand(script, test.input != "")
+			}
+			// Execute the actual sh payload, not a reimplementation of WSL staging.
+			decoded := decodePowerShellCommand(t, wsl2StdinScriptCommandWithPayload(len(script), len(test.input), 0))
+			_, arguments, ok := strings.Cut(decoded, `$psi.Arguments = '--exec sh -c "`)
+			if !ok {
+				t.Fatal("missing WSL shell invocation")
+			}
+			inline, _, ok := strings.Cut(arguments, `" sh ' + $dir + ' `)
+			if !ok {
+				t.Fatal("missing WSL shell arguments")
+			}
+			inline = strings.ReplaceAll(inline, "''", "'")
+			cmd := exec.CommandContext(ctx, "sh", "-c", `umask "$1"; shift; exec sh -c "$@"`, "umask-test", test.mask, inline, "sh", "stage", strconv.Itoa(len(script)), strconv.Itoa(len(test.input)), "0")
+			cmd.Dir = home
+			cmd.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}
+			cmd.Stdin = strings.NewReader(script + test.input)
+			if out, err := cmd.CombinedOutput(); exitCode(err) != wantCode {
+				t.Fatalf("WSL shell exit=%d want=%d err=%v output=%s", exitCode(err), wantCode, err, out)
+			}
+			if data, err := os.ReadFile(filepath.Join(home, "user-file")); err != nil || string(data) != test.input {
+				t.Fatalf("stdin=%q want=%q err=%v", data, test.input, err)
+			}
+			bits, err := strconv.ParseUint(test.mask, 8, 32)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for path, base := range map[string]os.FileMode{"user-file": 0o666, "user-directory": 0o777} {
+				info, err := os.Stat(filepath.Join(home, path))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if want := base &^ os.FileMode(bits); info.Mode().Perm() != want {
+					t.Errorf("caller umask %s: %s mode=%04o want=%04o", test.mask, path, info.Mode().Perm(), want)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(home, "stage")); !os.IsNotExist(err) {
+				t.Errorf("WSL staging remains: %v", err)
+			}
+		})
+	}
+}
+
 func TestStaticLeaseBypassesCoordinatorAndUsesTargetServerType(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "ssh"
@@ -1229,6 +1325,8 @@ func TestRunSSHStreamRetriesOnlyMultiplexDescriptorFailures(t *testing.T) {
 		{name: "diagnostic without transport exit is not replayed", mode: "remote-diagnostic", wantCalls: 1, wantCode: 7},
 		{name: "nested remote SSH failure is not replayed", mode: "nested-ssh", wantCalls: 1, wantCode: 255},
 		{name: "server disconnect log injection is not replayed", mode: "server-disconnect", wantCalls: 1, wantCode: 255},
+		{name: "oversized diagnostics are drained without replay", mode: "overflow", wantCalls: 1, wantCode: 255},
+		{name: "failed output still drains oversized diagnostics", mode: "overflow", failStderr: true, wantCalls: 1, wantCode: 255},
 		{name: "diagnostic writer failure is not replayed", mode: "retry", failStderr: true, wantCalls: 1, wantCode: 255},
 		{name: "embedded diagnostic is not replayed", mode: "embedded-diagnostic", wantCalls: 1, wantCode: 255},
 		{name: "disabled control master is not replayed", mode: "fallback", noControlMaster: true, wantCalls: 1, wantCode: 255, wantDirect: true},
@@ -1242,7 +1340,10 @@ func TestRunSSHStreamRetriesOnlyMultiplexDescriptorFailures(t *testing.T) {
 			script := `#!/bin/sh
 printf '%s\n' "$*" >> "$CRABBOX_FAKE_SSH_CALLS"
 diagnostics=/dev/stderr
-if [ "$1" = -E ]; then diagnostics=$2; shift 2; fi
+if [ "$1" = -E ]; then
+  diagnostics=$2; shift 2
+  [ -p "$diagnostics" ] || exit 99
+fi
 attempt=$(wc -l < "$CRABBOX_FAKE_SSH_CALLS" | tr -d ' ')
 case "$CRABBOX_FAKE_SSH_MODE:$attempt" in
   retry:1|fallback:1|fallback:2)
@@ -1279,6 +1380,11 @@ case "$CRABBOX_FAKE_SSH_MODE:$attempt" in
     printf 'remote output: mux_client_request_session: send fds failed\n' >&2
     exit 255
     ;;
+  overflow:*)
+    printf 'mm_send_fd: sendmsg(0): Message too long\nmux_client_request_session: send fds failed\n' >> "$diagnostics"
+    dd if=/dev/zero bs=1024 count=1024 2>/dev/null >> "$diagnostics"
+    exit 255
+    ;;
 esac
 printf 'executed once\n'
 `
@@ -1304,6 +1410,9 @@ printf 'executed once\n'
 			}, "true", &stdout, stderrWriter)
 			if code != test.wantCode {
 				t.Fatalf("exit=%d err=%v stderr=%q, want exit %d", code, err, stderr.String(), test.wantCode)
+			}
+			if test.mode == "overflow" && !test.failStderr && (stderr.Len() > 66*1024 || !strings.Contains(stderr.String(), "diagnostics truncated after 65536 bytes")) {
+				t.Fatalf("diagnostics not bounded with a truncation notice: %d bytes", stderr.Len())
 			}
 			calls, readErr := os.ReadFile(callsPath)
 			if readErr != nil {
@@ -1392,10 +1501,12 @@ func TestRunSSHStreamSerializesSharedOutputWriter(t *testing.T) {
 	dir := t.TempDir()
 	sshPath := filepath.Join(dir, "ssh")
 	script := `#!/bin/sh
+diagnostics=$2
 i=0
 while [ "$i" -lt 200 ]; do
   printf 'stdout-%s\n' "$i"
   printf 'stderr-%s\n' "$i" >&2
+  printf 'local-%s\n' "$i" >> "$diagnostics"
   i=$((i + 1))
 done
 `
@@ -1415,6 +1526,9 @@ done
 	}
 	if stdout, stderr := strings.Count(output.String(), "stdout-"), strings.Count(output.String(), "stderr-"); stdout != 200 || stderr != 200 {
 		t.Fatalf("combined stream lines: stdout=%d stderr=%d, want 200 each", stdout, stderr)
+	}
+	if got := strings.Count(output.String(), "local-"); got != 200 {
+		t.Fatalf("local diagnostic lines=%d, want 200", got)
 	}
 }
 

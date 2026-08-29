@@ -1,36 +1,59 @@
 # Changelog
 
-## Unreleased
+## 0.47.1 (Unreleased)
+
+### Fixed
+
+- Repaired Machine0 UUID lookups through validated inventory and identity-verified full details by name, preserving UUID ownership and rejecting incomplete or changed identities.
+- Rejected Blacksmith Testbox `--no-sync` with exit 2 before acquisition or reuse instead of silently delegating sync, including nonblank `prewarm --probe-command` and named jobs with `noSync: true` before warmup or dry-run planning.
+- Preserved managed Daytona cleanup responsibility after lost create responses, with native TTL for kept sandboxes, early exact-resource tracking, and original-context deletion confirmed by provider observation.
+- Preserved configured Machine0 executable paths and polling settings during checkpoint verification, deletion, and pruning while retaining exact image/version ownership checks and local records on uncertain failures.
+- Made config path diagnostics honor `CRABBOX_CONFIG`, matching the file selected for reads and writes. Thanks @coygeek.
+- Fixed static SSH architecture admission across Linux, macOS, Windows, and WSL2: configured values, including inherited `amd64`, now require fresh matching evidence after read-only ownership checks and before guarded claim publication; remove explicit architecture settings for automatic discovery, with measured or unknown evidence reported separately from offline defaults.
+- Preserved the remote caller's umask for workspace-owned POSIX and WSL2 commands while keeping staged scripts, stdin, and owner state private.
+- Disabled automatic host clipboard and audio passthrough for Tart VMs.
+- Prevented active lease operations from blocking unrelated claim discovery, slug allocation, and Testbox runs while preserving exact ownership checks and cleanup fencing.
+- Made native Windows state replacement and cleanup preserve open readers; the CLI now requires Windows 10 version 1709+ or Windows Server 2019+.
+- Kept Windows external routing state readable after publication by creating it with current-user ownership and private ACLs.
+- Put copy-command usage, path syntax, and examples before the provider flag reference in `cp --help`. Thanks @coygeek.
+- Preserved bounded Docker and Podman diagnostics when runtime identity probes return empty successful output, without accepting missing identities. Thanks @coygeek.
+- Recovered overloaded SSH multiplexed sessions with one exact-diagnostic retry and a direct-connection fallback while preserving the original lease and command. Thanks @excelsier.
+
+## 0.47.0 - 2026-08-28
 
 ### Added
 
+- Added direct Daytona filesystem checkpoints with explicit stop consent, source restart, verified snapshot forks, and ownership-bound snapshot cleanup.
+- Added an experimental Boxd SSH-lease provider with interactive HTTPS login, immutable ownership claims, and safe rejection of the vendor's currently non-isolated production VMs. Thanks @MichielMAnalytics.
 - Added explicitly opt-in, image-pinned typed ready pools with exact repository/cache identities and rollback-isolated coordinator storage. Thanks @vincentkoc.
 - Added targeted `stop --force` recovery through verified provider adoption or exact coordinator lease inspection without weakening ownership checks.
 - Added replay-safe fixed lease IDs to checkpoint forks and machine-readable JSON output to checkpoint creation and forking.
 - Added strict, provider-neutral Linux image readiness manifests with shared CLI/coordinator capability verification and safe legacy-image migration. Thanks @vincentkoc.
-
-### Fixed
-
-- Required exact host/project-scoped Semaphore job ownership claims and fresh provider verification before stopping jobs.
-- Required exact API-scoped Morph instance ownership claims and fresh provider verification before pause or deletion.
-- Returned machine-readable missing checkpoint verdicts and made checkpoint deletion idempotent when local records or coordinator-owned resources are already absent.
-- Required exact pool-scoped VM ownership claims and fresh provider verification before XCP-ng release or cleanup deletion.
-- Required exact, scope-bound ownership claims and fresh provider verification before Sprites deletion or Tenki session termination.
-- Required exact, scope-bound local ownership claims before Namespace Devbox and Compute Instance lifecycle mutations, with ownership-verified forced recovery for exact Compute Instance IDs.
-- Made direct Daytona SDK commands honor caller deadlines without the default one-minute HTTP cutoff or a separate one-hour execution cap. Thanks @arisylafeta.
-- Recovered overloaded SSH multiplexed sessions with one exact-diagnostic retry and a direct-connection fallback while preserving the original lease and command. Thanks @excelsier.
-- Removed coordinator URL credentials from Code and WebVNC browser links, opener arguments, and viewer bootstrap form actions. Thanks @coygeek.
-- Redacted configured and runtime-only credentials from coordinator-stored run failure diagnostics while preserving raw command output. Thanks @coygeek.
-- Retried temporary Machine0 read outages within the existing operation deadline while keeping provider mutations single-attempt.
-
-## 0.46.1 - 2026-08-24
-
-### Added
-
 - Added fixed idempotent `--lease-id` replay to local-container warmups, with exact container-intent matching and single-use released IDs.
 
 ### Fixed
 
+- Clarified static SSH stop/run documentation and added command-path regression coverage for existing best-effort connection cleanup before local unclaiming, without changing runtime behavior.
+- Unified provider-owned routing for stop, retry, rescue, and WebVNC commands, preserving scope, explicit false release settings, and Kubernetes environment selectors without exposing URL credentials.
+- Saved automatic failure bundles in private user state when the project capture destination is unwritable, retaining verified directories through creation, publication, and cleanup to prevent path substitution while preserving the command exit status.
+- Refreshed coordinator runtime and Worker development dependencies, including Nano ID and Undici advisory fixes.
+- Preserved Daytona recovery claims and lookup errors when `stop` cannot verify the sandbox, instead of reporting release from an unverified not-found response.
+- Fixed portable Node coordinator control heartbeats deadlocking subsequent lifecycle operations, releases, and graceful shutdown.
+- Made direct Daytona sandboxes private, preserved dependencies across syncs, enforced native TTL and idle heartbeats, reported authoritative readiness, and verified allocation rollback and credential-safe redirects.
+- Fixed brokered Windows bootstrap on images with built-in OpenSSH by sharing the CLI's installed/system/PATH command resolution; centralized common bootstrap fragments, pinned downloads, and portable OS metadata across both runtimes.
+- Unified E2B, Modal, and Cloudflare Sandbox run retention, bounded cleanup, and final timing; preserved command exit codes on cleanup failure, applied Modal keep-on-failure to setup/sync failures, and checked Modal archives before creation with staged workspace replacement.
+- Required exact host/project-scoped Semaphore job ownership claims and fresh provider verification before stopping jobs.
+- Required exact API-scoped Morph instance ownership claims and fresh provider verification before pause or deletion.
+- Returned machine-readable missing checkpoint verdicts and made checkpoint deletion idempotent when local records or coordinator-owned resources are already absent.
+- Required exact pool-scoped VM ownership claims and fresh provider verification before XCP-ng release or cleanup deletion.
+- Kept local-container bootstrap mounts under the user cache directory for desktop Docker VMs and retained cleanup recovery state when cache settings change. Thanks @johan-eilertsen.
+- Required exact, scope-bound ownership claims and fresh provider verification before Sprites deletion or Tenki session termination.
+- Required exact, scope-bound local ownership claims before Namespace Devbox and Compute Instance lifecycle mutations, with ownership-verified forced recovery for exact Compute Instance IDs.
+- Made direct Daytona SDK commands honor caller deadlines without the default one-minute HTTP cutoff or a separate one-hour execution cap. Thanks @arisylafeta.
+- Removed coordinator URL credentials from Code and WebVNC browser links, opener arguments, and viewer bootstrap form actions. Thanks @coygeek.
+- Redacted configured and runtime-only credentials from coordinator-stored run failure diagnostics while preserving raw command output. Thanks @coygeek.
+- Retried temporary Machine0 read outages within the existing operation deadline while keeping provider mutations single-attempt.
+- Added actionable Machine0 recovery hints for unclaimed lease IDs without treating short name hashes as proof of lease ownership.
 - Removed idle gaps throughout media previews while preserving every moving interval, so long recordings produce short GIFs without hiding late changes.
 - Exposed coordinator cleanup state in brokered `inspect --json`, preserving pending, error, and retry signals plus the distinction between omitted and explicit `releaseDeletesServer: false`.
 - Reduced Machine0 provisioning reads about twelvefold by polling every 60 seconds by default while preserving fresh fixed-lease ownership checks.

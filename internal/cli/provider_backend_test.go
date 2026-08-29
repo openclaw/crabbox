@@ -244,12 +244,11 @@ func TestLeaseOptionsFromConfigCanonicalizesProviderScope(t *testing.T) {
 		t.Fatalf("provider scope=%q", scope)
 	}
 
-	cfg.Provider = "proxmox"
-	cfg.Proxmox.APIURL = "HTTPS://user:secret@PVE.EXAMPLE.TEST:8006/api2/json/?token=secret#fragment"
-	cfg.Proxmox.Node = "pve1"
-	if scope := leaseOptionsFromConfig(cfg).ProviderScope; scope != "endpoint:https://pve.example.test:8006|node:pve1" {
-		t.Fatalf("proxmox provider scope=%q", scope)
+	cfg.Provider = "purpose-routing-alias"
+	if scope := leaseOptionsFromConfig(cfg).ProviderScope; scope != " opaque routing identity " {
+		t.Fatalf("core changed opaque provider scope: %q", scope)
 	}
+
 }
 
 func TestProviderHelpAllIncludesDelegatedProviders(t *testing.T) {
@@ -1361,6 +1360,19 @@ func TestRejectDelegatedSyncOptionsAllowsArchiveSyncControls(t *testing.T) {
 	}
 	if err := RejectDelegatedSyncOptionsForSpec(ProviderSpec{Name: "islo"}, RunRequest{SyncOnly: true}); err == nil {
 		t.Fatal("plain delegated provider should reject --sync-only")
+	}
+}
+
+func TestRejectDelegatedSyncOptionsLeavesNoSyncToAdapter(t *testing.T) {
+	// Archive sync is not required: SDK/CLI transports can also skip uploads.
+	for _, features := range []FeatureSet{nil, {FeatureArchiveSync}} {
+		spec := ProviderSpec{Name: "delegated-test", Kind: ProviderKindDelegatedRun, Features: features}
+		if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{NoSync: true}); err != nil {
+			t.Fatalf("generic guard rejected adapter-owned --no-sync: %v", err)
+		}
+		if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{NoSync: true, FullResync: true}); err == nil {
+			t.Fatal("--no-sync bypassed unsupported --full-resync rejection")
+		}
 	}
 }
 

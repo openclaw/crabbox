@@ -1,0 +1,18 @@
+[
+  {"input":"","selector":"ubuntu:26.04"},
+  {"input":"  UBUNTU:26_04 ","selector":"ubuntu:26.04"},
+  {"input":"ubuntu-26.04","selector":"ubuntu:26.04"},
+  {"input":"ubuntu2604","selector":"ubuntu:26.04"},
+  {"input":"ubuntu:2604","selector":"ubuntu:26.04"},
+  {"input":"ubuntu-2604","selector":"ubuntu:26.04"},
+  {"input":"  UBUNTU:24_04 ","selector":"ubuntu:24.04"},
+  {"input":"ubuntu-24.04","selector":"ubuntu:24.04"},
+  {"input":"ubuntu2404","selector":"ubuntu:24.04"},
+  {"input":"ubuntu:2404","selector":"ubuntu:24.04"},
+  {"input":"ubuntu-2404","selector":"ubuntu:24.04"},
+  {"input":"constructor","selector":""},
+  {"input":"__proto__","selector":""},
+  {"input":"debian:12","selector":""},
+  {"input":"ubuntu:26.04' $HOME","selector":""},
+  {"input":"ubuntu:26.04\nextra","selector":""}
+]

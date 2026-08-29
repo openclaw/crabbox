@@ -107,8 +107,11 @@ that invocation to `ControlMaster=no`. This recovery preserves the original
 lease, SSH identity, host-key checks, proxy, port, and staged stdin. Only the
 complete two-line local OpenSSH file-descriptor failure record authorizes this
 retry; matching remote stderr, server-supplied log messages, and logs containing
-unrelated records do not. Local diagnostics are kept in a
-private temporary file, forwarded to stderr after each attempt, and removed.
+unrelated records do not. Local diagnostics are captured through a private
+temporary FIFO, without a disk log. After each attempt, Crabbox forwards up to
+64 KiB to stderr and marks any truncation. The retry detector retains at most
+512 bytes; overflow, incomplete capture, or output errors disable this recovery.
+Capture ends when the foreground attempt exits, even if a persistent master remains.
 
 ## What the broker sees
 

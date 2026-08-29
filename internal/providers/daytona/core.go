@@ -92,10 +92,6 @@ func directLeaseLabels(cfg Config, leaseID, slug, provider, market string, keep 
 	return core.DirectLeaseLabels(cfg, leaseID, slug, provider, market, keep, now)
 }
 
-func touchDirectLeaseLabels(labels map[string]string, cfg Config, state string, now time.Time) map[string]string {
-	return core.TouchDirectLeaseLabels(labels, cfg, state, now)
-}
-
 func leaseLabelTime(t time.Time) string {
 	return core.LeaseLabelTime(t)
 }

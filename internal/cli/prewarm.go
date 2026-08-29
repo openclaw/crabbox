@@ -94,6 +94,13 @@ func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFi
 	if backend.Spec().Kind == ProviderKindServiceControl {
 		return exit(2, "prewarm is not supported for provider=%s; it does not provide a lease or run surface", backend.Spec().Name)
 	}
+	if strings.TrimSpace(*probeCommand) != "" {
+		if validator, ok := backend.(RunOptionsValidator); ok {
+			if err := validator.ValidateRunOptions(RunRequest{NoSync: true, ShellMode: true, Command: []string{*probeCommand}}); err != nil {
+				return exit(2, "prewarm --probe-command is not supported for provider=%s: %v; omit --probe-command or choose a provider that supports the probe options", backend.Spec().Name, err)
+			}
+		}
+	}
 	readyPoolKey := strings.TrimSpace(*poolKey)
 	if strings.TrimSpace(poolFillClaim) != "" && readyPoolKey == "" {
 		return exit(2, "ready-pool fill claim requires --pool")

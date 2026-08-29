@@ -89,84 +89,26 @@ type daytonaLeaseBackend struct {
 func (b *daytonaLeaseBackend) Spec() ProviderSpec { return b.spec }
 
 func (b *daytonaLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
-	if strings.TrimSpace(b.cfg.Daytona.Snapshot) == "" {
-		return LeaseTarget{}, exit(2, "provider=daytona requires --daytona-snapshot or daytona.snapshot")
+	sandbox, leaseID, slug, err := b.createDaytonaSandbox(ctx, req.Repo, req.Keep, req.Reclaim, req.RequestedSlug)
+	if err != nil {
+		return LeaseTarget{}, err
 	}
 	client, err := newDaytonaClient(b.cfg, b.rt)
 	if err != nil {
-		return LeaseTarget{}, err
-	}
-	leaseID := newLeaseID()
-	existing, err := client.ListCrabboxSandboxes(ctx)
-	if err != nil {
-		return LeaseTarget{}, daytonaError("list sandboxes", err)
-	}
-	slug, err := allocateDirectLeaseSlug(leaseID, req.RequestedSlug, daytonaSandboxesToServers(existing, b.cfg))
-	if err != nil {
-		return LeaseTarget{}, err
+		return LeaseTarget{}, b.rollbackDaytonaSandbox(sandbox.GetId(), leaseID, err)
 	}
 	cfg := b.cfg
-	cfg.ServerType = "snapshot"
 	cfg.WorkRoot = daytonaWorkRoot(cfg)
-	cfg.SSHKey = ""
-	cfg.SSHUser = daytonaUser(cfg)
-	cfg.SSHPort = "22"
-	now := time.Now().UTC()
-	labels := directLeaseLabels(cfg, leaseID, slug, daytonaProvider, "", req.Keep, now)
-	labels["lease_name"] = leaseProviderName(leaseID, slug)
-	labels["work_root"] = cfg.WorkRoot
-	create := daytona.NewCreateSandbox()
-	create.SetName(labels["lease_name"])
-	create.SetSnapshot(strings.TrimSpace(cfg.Daytona.Snapshot))
-	create.SetLabels(labels)
-	if target := strings.TrimSpace(cfg.Daytona.Target); target != "" {
-		create.SetTarget(target)
-	}
-	if user := daytonaUser(cfg); user != "" {
-		create.SetUser(user)
-	}
-	autoStop := int32(durationMinutesCeil(cfg.IdleTimeout))
-	create.SetAutoStopInterval(autoStop)
-	fmt.Fprintf(b.rt.Stderr, "provisioning provider=daytona lease=%s slug=%s snapshot=%s target=%s keep=%v\n", leaseID, slug, cfg.Daytona.Snapshot, blank(cfg.Daytona.Target, "-"), req.Keep)
-	created, err := client.CreateSandbox(ctx, *create)
-	if err != nil {
-		return LeaseTarget{}, daytonaError("create sandbox", err)
-	}
-	sandbox, err := waitForDaytonaReady(ctx, client, created.GetId(), 5*time.Minute)
-	if err != nil {
-		if !req.Keep {
-			_ = client.DeleteSandbox(context.Background(), created.GetId())
-		}
-		return LeaseTarget{}, err
-	}
 	server := daytonaSandboxToServer(sandbox, cfg)
-	server.Labels["state"] = "ready"
-	sandbox, err = establishDaytonaSandboxOwnership(ctx, client, server.CloudID, leaseID, server.Labels)
-	if err != nil {
-		if !req.Keep {
-			_ = client.DeleteSandbox(context.Background(), server.CloudID)
-		}
-		return LeaseTarget{}, err
-	}
-	server = daytonaSandboxToServer(sandbox, cfg)
 	target, err := daytonaSSHTargetFor(ctx, client, cfg, server)
 	if err != nil {
-		if !req.Keep {
-			_ = client.DeleteSandbox(context.Background(), server.CloudID)
-		}
-		return LeaseTarget{}, err
+		return LeaseTarget{}, b.rollbackDaytonaSandbox(server.CloudID, leaseID, err)
 	}
 	if err := waitForSSHReady(ctx, &target, b.rt.Stderr, "daytona ssh", bootstrapWaitTimeout(cfg)); err != nil {
-		if !req.Keep {
-			_ = client.DeleteSandbox(context.Background(), server.CloudID)
-		}
-		return LeaseTarget{}, err
+		return LeaseTarget{}, b.rollbackDaytonaSandbox(server.CloudID, leaseID, err)
 	}
 	if err := claimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
-		if !req.Keep {
-			_ = client.DeleteSandbox(context.Background(), server.CloudID)
-		}
-		return LeaseTarget{}, err
+		return LeaseTarget{}, b.rollbackDaytonaSandbox(server.CloudID, leaseID, err)
 	}
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s sandbox=%s state=%s\n", leaseID, server.CloudID, server.Status)
 	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
@@ -185,6 +127,9 @@ func (b *daytonaLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (
 		return LeaseTarget{}, err
 	}
 	server := daytonaSandboxToServer(sandbox, b.cfg)
+	if req.StatusOnly {
+		server.Labels["state"] = server.Status
+	}
 	if req.Reclaim && !req.NoLocalStateMutations {
 		if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), b.cfg, server, SSHTarget{}, req.Repo.Root, b.cfg.IdleTimeout, true); err != nil {
 			return LeaseTarget{}, err
@@ -197,6 +142,9 @@ func (b *daytonaLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (
 		if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), b.cfg, server, SSHTarget{}, req.Repo.Root, b.cfg.IdleTimeout, false); err != nil {
 			return LeaseTarget{}, err
 		}
+	}
+	if req.StatusOnly {
+		return LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
 	if !daytonaStateReady(daytonaSandboxState(sandbox)) {
 		if daytonaStateFailed(daytonaSandboxState(sandbox)) {
@@ -251,6 +199,8 @@ func (b *daytonaLeaseBackend) Doctor(ctx context.Context, _ DoctorRequest) (Doct
 }
 
 func (b *daytonaLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+	ctx, cancel := context.WithTimeout(ctx, daytonaCleanupTimeout)
+	defer cancel()
 	client, err := newDaytonaClient(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -259,7 +209,7 @@ func (b *daytonaLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLease
 		if err := requireExactDaytonaResourceClaim(req.Lease.LeaseID, req.Lease.Server.CloudID); err != nil {
 			return err
 		}
-		if err := client.DeleteSandbox(ctx, req.Lease.Server.CloudID); err != nil {
+		if err := deleteOwnedDaytonaSandbox(ctx, client, req.Lease.Server.CloudID, req.Lease.LeaseID); err != nil {
 			return daytonaError("delete sandbox", err)
 		}
 	}
@@ -276,19 +226,26 @@ func (b *daytonaLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Serv
 	if server.Labels == nil {
 		server.Labels = map[string]string{}
 	}
-	server.Labels = touchDirectLeaseLabels(server.Labels, b.cfg, req.State, time.Now().UTC())
+	server.Labels = daytonaTouchedLabels(server.Labels, b.cfg, req)
 	if server.CloudID != "" {
+		if req.IdleTimeoutOverride != nil {
+			if err := client.SetAutoStopInterval(ctx, server.CloudID, *req.IdleTimeoutOverride); err != nil {
+				return req.Lease.Server, daytonaError("update auto-stop interval", err)
+			}
+		}
 		if err := client.ReplaceLabels(ctx, server.CloudID, server.Labels); err != nil {
 			return server, daytonaError("replace labels", err)
 		}
 		if err := client.UpdateLastActivity(ctx, server.CloudID); err != nil {
-			fmt.Fprintf(b.rt.Stderr, "warning: daytona last-activity: %v\n", daytonaError("update last activity", err))
+			return server, daytonaError("update last activity", err)
 		}
 	}
 	return server, nil
 }
 
 func waitForDaytonaReady(ctx context.Context, client daytonaAPI, id string, timeout time.Duration) (*daytona.Sandbox, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	deadline := time.Now().Add(timeout)
 	result, err := shared.Poll(context.WithoutCancel(ctx), 0, 3*time.Second,
 		func(context.Context, time.Duration) error {
@@ -556,7 +513,7 @@ func daytonaStateReady(state string) bool {
 
 func daytonaStateFailed(state string) bool {
 	switch strings.ToLower(strings.TrimSpace(state)) {
-	case "error", "errored", "failed", "build_failed", "destroyed", "deleted":
+	case "error", "errored", "failed", "build_failed", "destroyed", "destroying", "deleted":
 		return true
 	default:
 		return false
