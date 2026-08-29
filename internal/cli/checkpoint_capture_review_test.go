@@ -32,6 +32,11 @@ func runCheckpointCaptureReviewContract(t *testing.T, repo, binary string) {
 			t.Fatal("read-only admission committed ownership or changed the source")
 		}
 		f.requirePending()
+		inspection := f.run("checkpoint", "inspect", captureFixtureCheckpoint, "--verify", "--json")
+		var audit checkpointAudit
+		if err := json.Unmarshal(inspection.stdout, &audit); inspection.err != nil || err != nil || audit.LocalState != "metadata_available" || audit.ProviderState != "pending" || audit.NextAction != "replay_capture" || audit.Record.Capture == nil || audit.Record.Capture.Phase != "pending" || audit.Record.Native.ImageID == "" {
+			t.Fatalf("public inspection lost held capture: audit=%+v err=%v decode=%v stderr=%s", audit, inspection.err, err, inspection.stderr)
+		}
 		if result := f.run(append(f.retireArgs(), "--prepare-only")...); result.err == nil {
 			t.Fatal("admission treated an existing submitted operation as unsubmitted")
 		}

@@ -207,9 +207,9 @@ func TestCLIMachine0NativeSelectionTransport(t *testing.T) {
 cd "$(dirname "$0")" || exit 1
 case "$*" in
  'sizes --all --json') cat catalog.json ;;
+ 'ls --json') printf '[]\n' ;;
  'keys ls --json') printf '%s\n' '[{"name":"ci","type":"MANAGED","isDefault":true}]' ;;
  'keys get ci --json') printf '%s\n' '{"name":"ci","type":"MANAGED"}' ;;
- 'ls --json') printf '[]\n' ;;
  new\ *) printf '%s\n' "$@" > create-argv; echo 'fixture create boundary' >&2; exit 1 ;;
  *) echo "unexpected fixture command: $*" >&2; exit 1 ;;
 esac

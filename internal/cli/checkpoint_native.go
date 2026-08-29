@@ -10,33 +10,18 @@ import (
 	"time"
 )
 
-type checkpointNativeCreateRequest struct {
-	Cfg         Config
-	Server      Server
-	Target      SSHTarget
-	LeaseID     string
-	Name        string
-	RepoName    string
-	Workdir     string
-	Strategy    string
-	NoReboot    bool
-	Wait        bool
-	WaitTimeout time.Duration
-	Stderr      io.Writer
-}
-
 type checkpointNativeCreateDriver interface {
-	Create(context.Context, checkpointNativeCreateRequest) (CoordinatorImage, error)
+	Create(context.Context, NativeCheckpointCreateRequest) (CoordinatorImage, error)
 }
 
 type directAWSAMICheckpointDriver struct{}
 
-func (directAWSAMICheckpointDriver) Create(ctx context.Context, req checkpointNativeCreateRequest) (CoordinatorImage, error) {
+func (directAWSAMICheckpointDriver) Create(ctx context.Context, req NativeCheckpointCreateRequest) (CoordinatorImage, error) {
 	name := req.Name
 	if name == "" {
 		name = defaultNativeImageName(req.LeaseID, req.RepoName)
 	}
-	client, err := newAWSClient(ctx, req.Cfg)
+	client, err := newAWSClient(ctx, req.Config)
 	if err != nil {
 		return CoordinatorImage{}, err
 	}
@@ -86,7 +71,7 @@ func azureOSDiskSnapshotName(requested, leaseID, repoName string) (string, error
 	return seed + suffix, nil
 }
 
-func (directAzureOSDiskCheckpointDriver) Create(ctx context.Context, req checkpointNativeCreateRequest) (CoordinatorImage, error) {
+func (directAzureOSDiskCheckpointDriver) Create(ctx context.Context, req NativeCheckpointCreateRequest) (CoordinatorImage, error) {
 	if normalizeCheckpointStrategy(req.Strategy) == checkpointStrategyImage {
 		return CoordinatorImage{}, exit(2, "Azure Windows checkpoints require --strategy disk-snapshot")
 	}
@@ -97,7 +82,7 @@ func (directAzureOSDiskCheckpointDriver) Create(ctx context.Context, req checkpo
 	if err != nil {
 		return CoordinatorImage{}, err
 	}
-	client, err := NewAzureClient(ctx, req.Cfg)
+	client, err := NewAzureClient(ctx, req.Config)
 	if err != nil {
 		return CoordinatorImage{}, err
 	}
@@ -105,7 +90,7 @@ func (directAzureOSDiskCheckpointDriver) Create(ctx context.Context, req checkpo
 		ctx,
 		req.Server.CloudID,
 		name,
-		req.Cfg.AzureSnapshotSKU,
+		req.Config.AzureSnapshotSKU,
 	)
 	if err != nil {
 		return CoordinatorImage{}, err
@@ -115,12 +100,12 @@ func (directAzureOSDiskCheckpointDriver) Create(ctx context.Context, req checkpo
 
 type coordinatorCheckpointDriver struct{}
 
-func (coordinatorCheckpointDriver) Create(ctx context.Context, req checkpointNativeCreateRequest) (CoordinatorImage, error) {
-	if req.Cfg.Coordinator == "" {
+func (coordinatorCheckpointDriver) Create(ctx context.Context, req NativeCheckpointCreateRequest) (CoordinatorImage, error) {
+	if req.Config.Coordinator == "" {
 		return CoordinatorImage{}, exit(2, "native checkpoints require a configured coordinator")
 	}
 	strategy := normalizeCheckpointStrategy(req.Strategy)
-	capability, ok := providerNativeCheckpointCapability(req.Cfg, req.Server, req.Target, req.Strategy)
+	capability, ok := providerNativeCheckpointCapability(req.Config, req.Server, req.Target, req.Strategy)
 	if !ok || capability.Direct || capability.Kind == "" {
 		return CoordinatorImage{}, exit(2, "native checkpoints support brokered AWS Linux/macOS leases and brokered Azure/GCP Linux leases only")
 	}
@@ -158,13 +143,13 @@ type directParallelsCheckpointDriver struct {
 	Runner CommandRunner
 }
 
-func (d directParallelsCheckpointDriver) Create(ctx context.Context, req checkpointNativeCreateRequest) (image CoordinatorImage, err error) {
+func (d directParallelsCheckpointDriver) Create(ctx context.Context, req NativeCheckpointCreateRequest) (image CoordinatorImage, err error) {
 	name := req.Name
 	if name == "" {
 		name = defaultNativeImageName(req.LeaseID, req.RepoName)
 	}
-	cfg := req.Cfg
-	applyParallelsHostRefConfig(&cfg, firstNonBlank(req.Server.Labels["host"], req.Cfg.Parallels.Host))
+	cfg := req.Config
+	applyParallelsHostRefConfig(&cfg, firstNonBlank(req.Server.Labels["host"], req.Config.Parallels.Host))
 	client := NewParallelsClient(cfg, d.Runner)
 	vm, err := client.GetVM(ctx, req.Server.CloudID)
 	if err != nil {
@@ -237,10 +222,6 @@ func nativeCheckpointCreateDriver(cfg Config, server Server, target SSHTarget, s
 	return nil, false
 }
 
-func (a App) createNativeCheckpoint(ctx context.Context, cfg Config, server Server, target SSHTarget, checkpointID, leaseID, name, repoName, workdir, strategy string, noReboot, wait bool, waitTimeout time.Duration, persist func(NativeCheckpointCreateResult) error) (CoordinatorImage, map[string]string, error) {
-	return a.createNativeCheckpointRequest(ctx, NativeCheckpointCreateRequest{Config: cfg, Server: server, Target: target, CheckpointID: checkpointID, LeaseID: leaseID, Name: name, RepoName: repoName, Workdir: workdir, Strategy: strategy, NoReboot: noReboot, Wait: wait, WaitTimeout: waitTimeout, Stderr: a.Stderr, Persist: persist})
-}
-
 func (a App) createNativeCheckpointRequest(ctx context.Context, req NativeCheckpointCreateRequest) (CoordinatorImage, map[string]string, error) {
 	if provider, ok := nativeCheckpointLifecycleProvider(req.Config, req.Server); ok {
 		result, err := provider.CreateNativeCheckpoint(ctx, req)
@@ -256,7 +237,7 @@ func (a App) createNativeCheckpointRequest(ctx context.Context, req NativeCheckp
 	var image CoordinatorImage
 	create := func() error {
 		var err error
-		image, err = driver.Create(ctx, checkpointNativeCreateRequest{Cfg: req.Config, Server: req.Server, Target: req.Target, LeaseID: req.LeaseID, Name: req.Name, RepoName: req.RepoName, Workdir: req.Workdir, Strategy: req.Strategy, NoReboot: req.NoReboot, Wait: req.Wait, WaitTimeout: req.WaitTimeout, Stderr: req.Stderr})
+		image, err = driver.Create(ctx, req)
 		return err
 	}
 	var err error
@@ -276,7 +257,11 @@ func (a App) createNativeCheckpointRequest(ctx context.Context, req NativeCheckp
 }
 
 func (a App) createAWSAMICheckpoint(ctx context.Context, cfg Config, target SSHTarget, leaseID, name, repoName string, noReboot, wait bool, waitTimeout time.Duration) (CoordinatorImage, error) {
-	image, _, err := a.createNativeCheckpoint(ctx, cfg, Server{Provider: "aws", CloudID: leaseID}, target, "", leaseID, name, repoName, "", checkpointStrategyImage, noReboot, wait, waitTimeout, nil)
+	image, _, err := a.createNativeCheckpointRequest(ctx, NativeCheckpointCreateRequest{
+		Config: cfg, Server: Server{Provider: "aws", CloudID: leaseID}, Target: target,
+		LeaseID: leaseID, Name: name, RepoName: repoName, Strategy: checkpointStrategyImage,
+		NoReboot: noReboot, Wait: wait, WaitTimeout: waitTimeout, Stderr: a.Stderr,
+	})
 	return image, err
 }
 
@@ -305,8 +290,8 @@ func nativeCheckpointLifecycleProvider(cfg Config, server Server) (NativeCheckpo
 }
 
 func (a App) createDirectAWSAMICheckpoint(ctx context.Context, cfg Config, server Server, target SSHTarget, leaseID, name, repoName string, noReboot, wait bool, waitTimeout time.Duration) (CoordinatorImage, error) {
-	return directAWSAMICheckpointDriver{}.Create(ctx, checkpointNativeCreateRequest{
-		Cfg:         cfg,
+	return directAWSAMICheckpointDriver{}.Create(ctx, NativeCheckpointCreateRequest{
+		Config:      cfg,
 		Server:      server,
 		Target:      target,
 		LeaseID:     leaseID,

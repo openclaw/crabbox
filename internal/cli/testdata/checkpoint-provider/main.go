@@ -208,10 +208,10 @@ func main() {
 	case "sizes":
 		output([]map[string]any{{"size": "large", "vcpu": 2, "ramGb": 4, "diskGb": 80, "regions": []string{"eu"}}})
 	case "keys":
-		switch strings.Join(args, " ") {
-		case "keys ls --json":
+		switch {
+		case len(args) == 3 && args[1] == "ls" && args[2] == "--json":
 			output([]map[string]any{{"name": "ci", "type": "MANAGED", "isDefault": true}})
-		case "keys get ci --json":
+		case len(args) == 4 && args[1] == "get" && args[2] == "ci" && args[3] == "--json":
 			output(map[string]any{"name": "ci", "type": "MANAGED"})
 		default:
 			fail("unsupported key lookup: %v", args)

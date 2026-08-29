@@ -440,17 +440,12 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 	prepare := func() (LeaseTarget, error) {
 		resetHostTrust := !machineRunning(item.Status)
 		if resetHostTrust {
-			attested := item
-			item, err = b.waitForResolveRunning(ctx, item, cfg.Machine0.CreateTimeout, true, func(observed machine) error {
+			item, err = b.waitForResolveRunning(ctx, item, cfg.Machine0.CreateTimeout, true, func(previous, observed machine) (machine, error) {
 				if fixedMachine0LeaseKind.IsFixedClaim(claim) {
-					var err error
-					attested, err = attestFixedMachine0Detail(claim, attested, observed)
-					return err
+					return attestFixedMachine0Detail(claim, previous, observed)
 				}
-				attested = observed
-				return nil
+				return observed, nil
 			})
-			item = attested
 			if err != nil {
 				return LeaseTarget{}, err
 			}
@@ -885,17 +880,12 @@ func (b *backend) waitForRunning(ctx context.Context, name string, timeout time.
 	return b.waitForRunningState(ctx, name, timeout, "")
 }
 
-func (b *backend) waitForRunningAfterStart(ctx context.Context, name string, timeout time.Duration, attest ...func(machine) error) (machine, error) {
-	return b.waitForRunningState(ctx, name, timeout, "RUNNING after start", attest...)
+func (b *backend) waitForRunningAfterStart(ctx context.Context, name string, timeout time.Duration, observe ...func(machine, machine) (machine, error)) (machine, error) {
+	return b.waitForRunningState(ctx, name, timeout, "RUNNING after start", observe...)
 }
 
-func (b *backend) waitForRunningState(ctx context.Context, name string, timeout time.Duration, target string, attest ...func(machine) error) (machine, error) {
+func (b *backend) waitForRunningState(ctx context.Context, name string, timeout time.Duration, target string, observe ...func(machine, machine) (machine, error)) (machine, error) {
 	return b.pollMachine(ctx, name, timeout, target, nil, func(_ context.Context, item machine) (bool, error) {
-		for _, check := range attest {
-			if err := check(item); err != nil {
-				return false, err
-			}
-		}
 		if done, err := runningMachineResult(item); done || err != nil {
 			return done, err
 		}
@@ -910,19 +900,16 @@ func (b *backend) waitForRunningState(ctx context.Context, name string, timeout 
 			return false, exit(5, "machine0 machine %s entered unexpected state %s after start", item.Name, item.Status)
 		}
 		return false, nil
-	})
+	}, observe...)
 }
 
-func (b *backend) waitForResolveRunning(ctx context.Context, initial machine, timeout time.Duration, allowStart bool, attest func(machine) error) (machine, error) {
+func (b *backend) waitForResolveRunning(ctx context.Context, initial machine, timeout time.Duration, allowStart bool, observe func(machine, machine) (machine, error)) (machine, error) {
 	started := false
 	first := &initial
 	if initial.ID == "" {
 		first = nil
 	}
 	return b.pollMachine(ctx, initial.Name, timeout, "RUNNING during resolve", first, func(observeCtx context.Context, item machine) (bool, error) {
-		if err := attest(item); err != nil {
-			return false, err
-		}
 		if done, err := runningMachineResult(item); done || err != nil {
 			return done, err
 		}
@@ -936,7 +923,7 @@ func (b *backend) waitForResolveRunning(ctx context.Context, initial machine, ti
 			return false, exit(5, "machine0 machine %s entered unexpected state %s while resolving", item.Name, item.Status)
 		}
 		return false, nil
-	})
+	}, observe)
 }
 
 func (b *backend) waitForSuspended(ctx context.Context, name string, timeout time.Duration, attest ...func(machine) error) (machine, error) {
@@ -982,16 +969,34 @@ func (b *backend) pollMachine(
 	target string,
 	initial *machine,
 	check func(context.Context, machine) (bool, error),
+	observe ...func(machine, machine) (machine, error),
 ) (machine, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	var previous machine
+	if initial != nil {
+		previous = *initial
+	}
 	result, err := shared.Poll(waitCtx, 0, b.configForRun().Machine0.PollInterval, b.sleep, func(observeCtx context.Context) (machine, error) {
+		var item machine
+		var err error
 		if initial != nil {
-			item := *initial
+			item = *initial
 			initial = nil
-			return item, nil
+		} else {
+			item, err = b.api.Get(observeCtx, name)
+			if err != nil {
+				return machine{}, err
+			}
 		}
-		return b.api.Get(observeCtx, name)
+		for _, merge := range observe {
+			item, err = merge(previous, item)
+			if err != nil {
+				return machine{}, err
+			}
+		}
+		previous = item
+		return item, nil
 	}, func(checkCtx context.Context, item machine, fetchErr error) (bool, error) {
 		if fetchErr != nil {
 			return false, fetchErr
