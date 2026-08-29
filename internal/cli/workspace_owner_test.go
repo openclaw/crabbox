@@ -819,122 +819,11 @@ func TestWorkspaceOwnerWSL2ProtocolReplaysIdenticalFallbackInput(t *testing.T) {
 	}
 }
 
-func TestWorkspaceOwnerWSL2SSHHelpersStreamExpandedCommands(t *testing.T) {
-	target := SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22", TargetOS: targetWindows, WindowsMode: windowsModeWSL2}
-	remote := strings.Repeat("printf 'workspace-owned workload'\n", 512)
-	payload := []byte{0, 1, 2, '\n', 0xff, 'x'}
-	tests := []struct {
-		name          string
-		preserveInput bool
-		waitTimeout   time.Duration
-		payload       []byte
-		run           func(context.Context, SSHTarget, string, []byte) error
-	}{
-		{name: "quiet", run: func(ctx context.Context, target SSHTarget, remote string, _ []byte) error {
-			return runSSHQuiet(ctx, target, remote)
-		}},
-		{name: "quiet wait", waitTimeout: 15 * time.Second, run: func(ctx context.Context, target SSHTarget, remote string, _ []byte) error {
-			return runSSHQuietWithRemoteWaitTimeout(ctx, target, remote, 15*time.Second, "1", "1")
-		}},
-		{name: "output", run: func(ctx context.Context, target SSHTarget, remote string, _ []byte) error {
-			_, err := runSSHOutput(ctx, target, remote)
-			return err
-		}},
-		{name: "output wait", waitTimeout: 15 * time.Second, run: func(ctx context.Context, target SSHTarget, remote string, _ []byte) error {
-			_, err := runSSHOutputWithRemoteWaitTimeout(ctx, target, remote, 15*time.Second, "1", "1")
-			return err
-		}},
-		{name: "combined output", run: func(ctx context.Context, target SSHTarget, remote string, _ []byte) error {
-			_, err := runSSHCombinedOutput(ctx, target, remote)
-			return err
-		}},
-		{name: "stream result", run: func(ctx context.Context, target SSHTarget, remote string, _ []byte) error {
-			code, err := runSSHStreamResult(ctx, target, remote, io.Discard, io.Discard)
-			if code != 0 {
-				return fmt.Errorf("stream exit=%d: %w", code, err)
-			}
-			return err
-		}},
-		{name: "input", preserveInput: true, payload: payload, run: func(ctx context.Context, target SSHTarget, remote string, payload []byte) error {
-			return runSSHInput(ctx, target, remote, bytes.NewReader(payload), io.Discard, io.Discard)
-		}},
-		{name: "input stream", preserveInput: true, payload: payload, run: func(ctx context.Context, target SSHTarget, remote string, payload []byte) error {
-			return runSSHInputStream(ctx, target, remote, bytes.NewReader(payload), io.Discard, io.Discard)
-		}},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			dir := installWorkspaceOwnerRecordingSSH(t)
-			t.Setenv("CRABBOX_OWNER_SSH_SUCCESS_STDOUT", "ok")
-			owner := &workspaceOwner{target: target, key: workspaceOwnerKey("cbx_wsl2_" + strings.ReplaceAll(test.name, " ", "_")), token: strings.Repeat("8", 64)}
-			ctx := contextWithWorkspaceOwner(t.Context(), owner)
-			if err := test.run(ctx, target, remote, test.payload); err != nil {
-				t.Fatal(err)
-			}
-			command, input := readWorkspaceOwnerSSHCall(t, dir, 1)
-			script := owner.wrapPOSIXCommand(remote, test.preserveInput)
-			wantInput := append([]byte(script), test.payload...)
-			if input != string(wantInput) {
-				t.Fatalf("stdin bytes=%d want=%d", len(input), len(wantInput))
-			}
-			if want := wsl2StdinScriptCommandWithPayload(len(script), len(test.payload), test.waitTimeout); command != want {
-				t.Fatalf("command mismatch: got length=%d want length=%d", len(command), len(want))
-			}
-			if len(command) >= 8191 {
-				t.Fatalf("command length=%d exceeds cmd.exe limit", len(command))
-			}
-			if strings.Contains(command, remote) || strings.Contains(command, owner.key) || strings.Contains(command, owner.token) {
-				t.Fatal("workspace script or secret leaked into SSH argv")
-			}
-		})
-	}
-}
-
-func TestWorkspaceOwnerWSL2SSHInputReplaysIdenticalFallbackFrame(t *testing.T) {
-	target := SSHTarget{
-		User: "crabbox", Host: "127.0.0.1", Port: "2222", FallbackPorts: []string{"22"},
-		TargetOS: targetWindows, WindowsMode: windowsModeWSL2,
-	}
-	remote := strings.Repeat("printf 'fallback workload'\n", 512)
-	payload := []byte{0, 'b', 0xff, '\n', 0}
-	tests := []struct {
-		name string
-		run  func(context.Context, io.ReadSeeker) error
-	}{
-		{name: "input", run: func(ctx context.Context, input io.ReadSeeker) error {
-			return runSSHInput(ctx, target, remote, input, io.Discard, io.Discard)
-		}},
-		{name: "input stream", run: func(ctx context.Context, input io.ReadSeeker) error {
-			return runSSHInputStream(ctx, target, remote, input, io.Discard, io.Discard)
-		}},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			dir := installWorkspaceOwnerRecordingSSH(t)
-			t.Setenv("CRABBOX_OWNER_SSH_RETRY_CALL", "1")
-			t.Setenv("CRABBOX_OWNER_SSH_SUCCESS_STDOUT", "ok")
-			owner := &workspaceOwner{target: target, key: workspaceOwnerKey("cbx_wsl2_workload_" + strings.ReplaceAll(test.name, " ", "_")), token: strings.Repeat("9", 64)}
-			if err := test.run(contextWithWorkspaceOwner(t.Context(), owner), bytes.NewReader(payload)); err != nil {
-				t.Fatal(err)
-			}
-			script := owner.wrapPOSIXCommand(remote, true)
-			wantCommand := wsl2StdinScriptCommandWithPayload(len(script), len(payload), 0)
-			wantInput := string(append([]byte(script), payload...))
-			for _, index := range []int{1, 2} {
-				command, input := readWorkspaceOwnerSSHCall(t, dir, index)
-				if command != wantCommand || input != wantInput {
-					t.Fatalf("fallback attempt %d command_match=%t input_match=%t", index, command == wantCommand, input == wantInput)
-				}
-			}
-		})
-	}
-}
-
-func TestWorkspaceOwnerWSL2InputStreamPreparationIsBoundedAndReplayable(t *testing.T) {
+func TestWorkspaceOwnerWSL2InputStreamPreparationUsesPrivateStage(t *testing.T) {
 	target := SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}
 	remote := workspaceOwnerRemotePreparation{command: strings.Repeat("printf stream\n", 512), ownerExpanded: true}
 	payload := bytes.Repeat([]byte{0, 1, 2, 3, 0xff}, 400_000)
-	source := &boundedReadSeeker{reader: bytes.NewReader(payload), maxAllowed: 64 * 1024}
+	source := &boundedReadSeeker{reader: bytes.NewReader(payload)}
 	transport, err := prepareSSHTransport(target, remote, nil, source, int64(len(payload)), true, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -944,29 +833,22 @@ func TestWorkspaceOwnerWSL2InputStreamPreparationIsBoundedAndReplayable(t *testi
 			t.Error(err)
 		}
 	}()
-	if source.maxRead > 64*1024 {
-		t.Fatalf("stream preparation requested %d-byte read", source.maxRead)
+	if transport.stage == nil || transport.input != nil || transport.command != "" {
+		t.Fatalf("workspace workload did not select the private stage: %#v", transport)
 	}
-	if runtime.GOOS != "windows" && source.total != 0 {
-		t.Fatalf("stream preparation consumed %d payload bytes before SSH", source.total)
+	if source.total != int64(len(payload)) {
+		t.Fatalf("stage digest consumed %d payload bytes, want %d", source.total, len(payload))
 	}
-	if runtime.GOOS == "windows" && source.total != int64(len(payload)) {
-		t.Fatalf("stream preparation copied %d payload bytes, want %d", source.total, len(payload))
+	reader, err := transport.stage.input.reset()
+	if err != nil {
+		t.Fatal(err)
 	}
-	source.maxAllowed = 0
-	want := append([]byte(remote.command), payload...)
-	for attempt := 1; attempt <= 2; attempt++ {
-		input, resetErr := transport.reset()
-		if resetErr != nil {
-			t.Fatal(resetErr)
-		}
-		got, readErr := io.ReadAll(input)
-		if readErr != nil {
-			t.Fatal(readErr)
-		}
-		if !bytes.Equal(got, want) {
-			t.Fatalf("attempt %d frame bytes=%d want=%d", attempt, len(got), len(want))
-		}
+	frame, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasSuffix(frame, append([]byte(remote.command), payload...)) {
+		t.Fatal("finite stage did not preserve command and input")
 	}
 }
 

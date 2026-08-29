@@ -483,6 +483,7 @@ type sshTransportPreparation struct {
 	command string
 	input   *replayableSSHInput
 	direct  io.ReadSeeker
+	stage   *wslStageSpool
 }
 
 const sshMuxDescriptorFailure = "mux_client_request_session: send fds failed"
@@ -524,20 +525,11 @@ func prepareSSHTransport(target SSHTarget, remote workspaceOwnerRemotePreparatio
 	// Only owner-expanded WSL2 commands need stdin staging; every other target
 	// keeps its established argv and input transport.
 	if isWindowsWSL2Target(target) && remote.ownerExpanded {
-		var replay *replayableSSHInput
-		var err error
-		if direct != nil {
-			replay, err = newReplayableSSHInputStream([]byte(remote.command), direct, payloadSize)
-		} else {
-			replay, err = newReplayableSSHInput(append([]byte(remote.command), payload...))
-		}
+		stage, err := newWSLStageSpool(remote.command, payload, direct, payloadSize, waitTimeout)
 		if err != nil {
 			return sshTransportPreparation{}, err
 		}
-		return sshTransportPreparation{
-			command: wsl2StdinScriptCommandWithPayload(len(remote.command), int(payloadSize), waitTimeout),
-			input:   replay,
-		}, nil
+		return sshTransportPreparation{stage: stage}, nil
 	}
 
 	prepared := sshTransportPreparation{
@@ -556,6 +548,9 @@ func prepareSSHTransport(target SSHTarget, remote workspaceOwnerRemotePreparatio
 }
 
 func (p *sshTransportPreparation) run(ctx context.Context, target SSHTarget, connectTimeout, connectionAttempts string, stdout, stderr io.Writer) error {
+	if p.stage != nil {
+		return p.stage.run(ctx, target, connectTimeout, connectionAttempts, stdout, stderr)
+	}
 	multiplexed := runtime.GOOS != "windows" && !target.AuthSecret && !target.NoControlMaster
 	for attempt := 0; ; attempt++ {
 		probe := target
@@ -600,6 +595,9 @@ func (p *sshTransportPreparation) reset() (io.Reader, error) {
 }
 
 func (p *sshTransportPreparation) close() error {
+	if p.stage != nil {
+		return p.stage.close()
+	}
 	if p.input == nil {
 		return nil
 	}
@@ -2701,6 +2699,10 @@ func remoteSyncSanity(workdir string, allowMassDeletions bool) string {
 func exitCode(err error) int {
 	if err == nil {
 		return 0
+	}
+	var retryableStage retryableWSLStageError
+	if errors.As(err, &retryableStage) {
+		return 255
 	}
 	var exitErr *exec.ExitError
 	if asExitError(err, &exitErr) {

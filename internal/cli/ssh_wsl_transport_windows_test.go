@@ -5,6 +5,7 @@ package cli
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -20,8 +22,12 @@ import (
 )
 
 const fakeWSLTransportHelper = "CRABBOX_FAKE_WSL_TRANSPORT_HELPER"
+const fakeWSLStageHelper = "CRABBOX_FAKE_WSL_STAGE_HELPER"
 
 func init() {
+	if os.Getenv(fakeWSLStageHelper) == "1" && strings.EqualFold(filepath.Base(os.Args[0]), "wsl.exe") {
+		os.Exit(runFakeWSLStage(os.Args[1:]))
+	}
 	if os.Getenv(fakeWSLTransportHelper) != "1" {
 		return
 	}
@@ -29,6 +35,41 @@ func init() {
 		os.Exit(runFakeWSLTransportSSH(os.Args[1:]))
 	}
 	os.Exit(runFakeWSLTransport(os.Args[1:]))
+}
+
+func runFakeWSLStage(args []string) int {
+	if len(args) != 14 || args[0] != "--exec" || args[1] != "sh" || args[2] != "-c" ||
+		args[3] != wslStageHelperBootstrap || len(strings.Join(args, " ")) >= wslStageLauncherMax {
+		return 92
+	}
+	helper, err := strconv.ParseInt(args[5], 10, 64)
+	if err != nil {
+		return 92
+	}
+	preamble, err := strconv.Atoi(args[6])
+	if err != nil || preamble != 0 && preamble != 3 {
+		return 92
+	}
+	count := helper + int64(preamble)
+	if args[7] == "run" {
+		command, commandErr := strconv.ParseInt(args[10], 10, 64)
+		input, inputErr := strconv.ParseInt(args[11], 10, 64)
+		if commandErr != nil || inputErr != nil {
+			return 92
+		}
+		count += command + input
+	}
+	data, err := io.ReadAll(io.LimitReader(os.Stdin, count))
+	if err != nil || int64(len(data)) != count ||
+		preamble == 3 && !bytes.HasPrefix(data, []byte{239, 187, 191}) {
+		return 93
+	}
+	if err := os.WriteFile(os.Getenv("CRABBOX_FAKE_WSL_STAGE_INPUT")+"."+args[7], data, 0o600); err != nil {
+		return 94
+	}
+	_, _ = os.Stdout.WriteString("stage-stdout\x00\xff\r\n")
+	_, _ = os.Stderr.WriteString("stage-stderr\x00\xfe\n")
+	return 23
 }
 
 func appendFakeWSLLog(line string) {
@@ -346,4 +387,213 @@ func TestWSL2TransportStagesWithoutWindowsAutomount(t *testing.T) {
 	requireFakeWSL(t, len(lines) == 2 && !strings.Contains(out, "first-attempt") &&
 		strings.TrimPrefix(lines[0], "ssh:2222:") == strings.TrimPrefix(lines[1], "ssh:22:"),
 		"fallback calls=%q output=%q", lines, out)
+}
+
+func installFakeWSLStage(t *testing.T) {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := os.ReadFile(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "wsl.exe"), payload, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv(fakeWSLStageHelper, "1")
+}
+
+func newWSLStageWindowsHome(t *testing.T) string {
+	t.Helper()
+	home := filepath.Join(t.TempDir(), "home")
+	security, _, err := privateWindowsSecurityAttributes(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, err := windows.UTF16PtrFromString(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.CreateDirectory(name, security); err != nil {
+		t.Fatal(err)
+	}
+	return home
+}
+
+func writeWSLStageWindowsReady(t *testing.T, home, nonce string, data []byte) string {
+	t.Helper()
+	path := filepath.Join(home, ".crabbox", "wsl-stage", nonce+".ready")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func runWSLStageWindowsShell(t *testing.T, shell wslStageShell, command string) ([]byte, []byte, error) {
+	t.Helper()
+	executable, args := "cmd.exe", []string{"/d", "/s", "/c", command}
+	if shell == wslStagePowerShell {
+		executable, args = "powershell.exe", []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command}
+	}
+	cmd := exec.Command(executable, args...)
+	if shell == wslStageCMD {
+		cmd.SysProcAttr = &syscall.SysProcAttr{CmdLine: `cmd.exe /d /s /c "` + command + `"`}
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	return stdout.Bytes(), stderr.Bytes(), err
+}
+
+func TestWSLStageWindowsPrivateRouteAndLauncherConsumesOnce(t *testing.T) {
+	installFakeWSLStage(t)
+	nonce := strings.Repeat("a", 32)
+	command, input := "printf exact", []byte{0, 1, 2, 255}
+	spool := testWSLStageSpool(t, command, input)
+	reader, err := spool.input.reset()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := append(append([]byte(wslStageLinuxSupervisor), command...), input...)
+
+	for _, shell := range []wslStageShell{wslStageCMD, wslStagePowerShell} {
+		t.Run(string(shell), func(t *testing.T) {
+			home := newWSLStageWindowsHome(t)
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home)
+			logPath := filepath.Join(t.TempDir(), "wsl-input")
+			t.Setenv("CRABBOX_FAKE_WSL_STAGE_INPUT", logPath)
+			prepared, diagnostics, err := runWSLStageWindowsShell(t, shell, wslStageRootPreparationCommand(nonce))
+			if err != nil || len(diagnostics) != 0 ||
+				strings.TrimSpace(string(prepared)) != wslStagePreparationReady+" "+nonce+" "+string(shell) {
+				t.Fatalf("prepare stdout=%q stderr=%q err=%v", prepared, diagnostics, err)
+			}
+			root := filepath.Join(home, ".crabbox", "wsl-stage")
+			descriptor, err := windows.GetNamedSecurityInfo(root, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, control, err := descriptor.Control()
+			if err != nil || control&windows.SE_DACL_PROTECTED == 0 {
+				t.Fatalf("stage DACL is not protected: control=%v err=%v", control, err)
+			}
+			ready := writeWSLStageWindowsReady(t, home, nonce, raw)
+			launcher := wslStageFileCommand(nonce, nonce+".ready", spool.size, spool.digest, false, shell)
+			stdout, stderr, err := runWSLStageWindowsShell(t, shell, launcher)
+			if exitCode(err) != 23 || string(stdout) != "stage-stdout\x00\xff\r\n" ||
+				string(stderr) != "stage-stderr\x00\xfe\n" {
+				t.Fatalf("stdout=%q stderr=%q exit=%d err=%v", stdout, stderr, exitCode(err), err)
+			}
+			if _, err := os.Stat(ready); !os.IsNotExist(err) {
+				t.Fatalf("ready stage survived DeleteOnClose: %v", err)
+			}
+			got, err := os.ReadFile(logPath + ".run")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, want) && !bytes.Equal(got, append([]byte{239, 187, 191}, want...)) {
+				t.Fatalf("WSL handoff bytes=%d want exact suffix once=%d", len(got), len(want))
+			}
+
+			replacement := bytes.Clone(raw)
+			replacement[len(replacement)-1] ^= 1
+			writeWSLStageWindowsReady(t, home, nonce, replacement)
+			if err := os.Remove(logPath + ".run"); err != nil {
+				t.Fatal(err)
+			}
+			stdout, stderr, err = runWSLStageWindowsShell(t, shell, launcher)
+			if err == nil || len(stdout) != 0 || !bytes.Contains(stderr, []byte("digest mismatch")) {
+				t.Fatalf("replacement stdout=%q stderr=%q err=%v", stdout, stderr, err)
+			}
+			if preserved, readErr := os.ReadFile(ready); readErr != nil || !bytes.Equal(preserved, replacement) {
+				t.Fatalf("wrong digest stage was changed: %v", readErr)
+			}
+			if _, err := os.Stat(logPath + ".run"); !os.IsNotExist(err) {
+				t.Fatalf("wrong digest reached WSL: %v", err)
+			}
+		})
+	}
+}
+
+func TestWSLStageWindowsHandleBlocksReplacementBeforeDelete(t *testing.T) {
+	home := newWSLStageWindowsHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	nonce := strings.Repeat("b", 32)
+	data := []byte("owned")
+	path := writeWSLStageWindowsReady(t, home, nonce, data)
+	digest := sha256.Sum256(data)
+	script := decodeWSLStagePowerShellCommand(t, wslStageFileCommand(nonce, nonce+".ready", int64(len(data)), digest, true, wslStageCMD))
+	script = strings.Replace(script, "$delete = [byte]1", `try { [IO.File]::Move($path,$path+'.replacement'); throw 'replacement succeeded' } catch [IO.IOException] {}
+    $delete = [byte]1`, 1)
+	output, err := runWindowsPowerShellScript(t, script)
+	if err != nil {
+		t.Fatalf("discard failed: %s: %v", output, err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("owned stage survived: %v", err)
+	}
+	if _, err := os.Stat(path + ".replacement"); !os.IsNotExist(err) {
+		t.Fatalf("replacement succeeded while handle was exclusive: %v", err)
+	}
+}
+
+func TestWSLStageWindowsPowerShell51PreambleIsBounded(t *testing.T) {
+	installFakeWSLStage(t)
+	spool := testWSLStageSpool(t, "exit 0", []byte{0, 255})
+	reader, err := spool.input.reset()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerSize := int(binary.LittleEndian.Uint32(raw[8:12]))
+	owner := string(raw[wslStageHeaderSize : wslStageHeaderSize+ownerSize])
+	framePath := filepath.Join(t.TempDir(), "frame")
+	if err := os.WriteFile(framePath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, bom := range []bool{false, true} {
+		t.Run(fmt.Sprint(bom), func(t *testing.T) {
+			logPath := filepath.Join(t.TempDir(), "input")
+			t.Setenv("CRABBOX_FAKE_WSL_STAGE_INPUT", logPath)
+			script := `if ($PSVersionTable.PSEdition -ne 'Desktop' -or $PSVersionTable.PSVersion.Major -ne 5) { throw 'requires Windows PowerShell 5.1' }
+[Console]::InputEncoding=[Text.UTF8Encoding]::new(` + strings.ToLower(strconv.FormatBool(bom)) + `)
+$file=[IO.File]::OpenRead(` + psQuote(framePath) + `)
+$descriptor=[IO.BinaryReader]::new($file).ReadBytes(80)
+$file.Position=` + strconv.Itoa(wslStageHeaderSize+ownerSize) + `
+& ([ScriptBlock]::Create(` + psQuote(owner) + `)) $file $descriptor '` + strings.Repeat("c", 32) + `'`
+			scriptPath := filepath.Join(t.TempDir(), "owner.ps1")
+			mustWriteTestFile(t, scriptPath, script)
+			cmd := exec.Command("powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath)
+			cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NEW_CONSOLE, HideWindow: true}
+			if output, err := cmd.CombinedOutput(); exitCode(err) != 23 {
+				t.Fatalf("owner output=%q exit=%d err=%v", output, exitCode(err), err)
+			}
+			got, err := os.ReadFile(logPath + ".run")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := append([]byte(wslStageLinuxSupervisor), append([]byte("exit 0"), []byte{0, 255}...)...)
+			if bom {
+				want = append([]byte{239, 187, 191}, want...)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("PowerShell 5.1 handoff bytes=%d want=%d", len(got), len(want))
+			}
+		})
+	}
 }

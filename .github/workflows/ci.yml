@@ -57,6 +57,24 @@ jobs:
       - name: Test
         run: go test -race ./...
 
+      - name: Prove Linux WSL2 staged execution manifest
+        shell: bash
+        run: |
+          manifest="$RUNNER_TEMP/wsl-stage-linux.jsonl"
+          tests=(
+            TestWSLStageLinuxPassesExitOutputAndFiniteInput
+            TestWSLStageLinuxDisconnectKillsExactProcessGroup
+            TestWSLStageLinuxGuardMismatchPreservesEvidence
+            TestWSLStageLinuxNormalExitPreservesDetachedBackground
+          )
+          pattern="^($(IFS='|'; echo "${tests[*]}"))$"
+          go test -json ./internal/cli -run "$pattern" -count=1 | tee "$manifest"
+          for test in "${tests[@]}"; do
+            test "$(jq -r --arg test "$test" 'select(.Test == $test and .Action == "run") | .Test' "$manifest" | wc -l)" -eq 1
+            test "$(jq -r --arg test "$test" 'select(.Test == $test and .Action == "pass") | .Test' "$manifest" | wc -l)" -eq 1
+            test "$(jq -r --arg test "$test" 'select(.Test == $test and .Action == "skip") | .Test' "$manifest" | wc -l)" -eq 0
+          done
+
       - name: Test all Go modules
         run: scripts/test-go-modules.sh
 
@@ -112,7 +130,26 @@ jobs:
         run: go test ./internal/cli/ -run '^(TestFailureBundle|TestNativeWindowsFailureBundle|TestManagedAttestKeyWindows|TestArtifactOutputWindows)' -count=1 -v
 
       - name: Test Windows SSH and rsync transport selection
-        run: go test ./internal/cli/ -run '^(TestWSL2TransportStagesWithoutWindowsAutomount|TestWorkspaceOwnerWSL2InputStreamPreparationIsBoundedAndReplayable|TestWindowsWSLNativeToolProbeUsesDirectCommandOutput|TestWindowsWSLNativeToolPathsRejectsWindowsShims|TestDirectSSHExecutableSelection|TestSSHCommandContextUsesNativeWindowsOpenSSHEvenWhenPATHSelectsMSYS2|TestResolveWindowsNativeRsyncPairUsesExactSibling|TestResolveWindowsNativeRsyncPairFailsClosedWithoutSibling|TestBindWindowsNativeRsyncSSHPreservesOwnedArguments|TestWindowsNativeRsyncCommandUsesSiblingPairAndEnvironment|TestResolvedSSHCopyCommandUsesNativeWindowsSiblingPair|TestResolvedSSHCopyCommandFailsClosedWithoutNativeWindowsSibling)$' -count=1 -v
+        run: go test ./internal/cli/ -run '^(TestWSL2TransportStagesWithoutWindowsAutomount|TestWorkspaceOwnerWSL2InputStreamPreparationUsesPrivateStage|TestWindowsWSLNativeToolProbeUsesDirectCommandOutput|TestWindowsWSLNativeToolPathsRejectsWindowsShims|TestDirectSSHExecutableSelection|TestSSHCommandContextUsesNativeWindowsOpenSSHEvenWhenPATHSelectsMSYS2|TestResolveWindowsNativeRsyncPairUsesExactSibling|TestResolveWindowsNativeRsyncPairFailsClosedWithoutSibling|TestBindWindowsNativeRsyncSSHPreservesOwnedArguments|TestWindowsNativeRsyncCommandUsesSiblingPairAndEnvironment|TestResolvedSSHCopyCommandUsesNativeWindowsSiblingPair|TestResolvedSSHCopyCommandFailsClosedWithoutNativeWindowsSibling)$' -count=1 -v
+
+      - name: Prove Windows WSL2 staged execution manifest
+        shell: pwsh
+        run: |
+          $tests = @(
+            'TestWSLStageWindowsPrivateRouteAndLauncherConsumesOnce',
+            'TestWSLStageWindowsHandleBlocksReplacementBeforeDelete',
+            'TestWSLStageWindowsPowerShell51PreambleIsBounded'
+          )
+          $manifest = Join-Path $env:RUNNER_TEMP 'wsl-stage-windows.jsonl'
+          $pattern = '^(' + ($tests -join '|') + ')$'
+          go test -json ./internal/cli -run $pattern -count=1 | Tee-Object -FilePath $manifest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $events = Get-Content $manifest | ForEach-Object { $_ | ConvertFrom-Json }
+          foreach ($test in $tests) {
+            if (@($events | Where-Object { $_.Test -eq $test -and $_.Action -eq 'run' }).Count -ne 1) { throw "$test did not run exactly once" }
+            if (@($events | Where-Object { $_.Test -eq $test -and $_.Action -eq 'pass' }).Count -ne 1) { throw "$test did not pass exactly once" }
+            if (@($events | Where-Object { $_.Test -eq $test -and $_.Action -eq 'skip' }).Count -ne 0) { throw "$test skipped" }
+          }
 
       - name: Test native Windows Python and CMake preflight probes
         run: go test ./internal/cli/ -run '^(TestPythonPreflightToolValidationAndTargetFiltering|TestPythonPreflightWindowsProbeUsesLiteralExecutableAndMissingContract|TestCMakePreflightNativeWindowsPresentAndMissing)$' -count=1 -v
