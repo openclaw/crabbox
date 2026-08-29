@@ -2275,6 +2275,21 @@ func TestCheckpointImageRequiresExactVersionAndRemoteOwnershipMetadata(t *testin
 	if _, _, err := b.loadCheckpointImage(context.Background(), req); err == nil || !strings.Contains(err.Error(), "mismatched crabbox_source") {
 		t.Fatalf("err=%v", err)
 	}
+	for _, versions := range [][]machineImageVersion{nil, {{Version: 3}}} {
+		api.imageDetail.Versions = versions
+		_, _, err := b.loadCheckpointImage(context.Background(), req)
+		var exitErr core.ExitError
+		if !errors.As(err, &exitErr) || exitErr.Code != 4 || exitErr.Message != "Machine0 image baseline version 2 was not found" || errors.Is(err, core.ErrNativeCheckpointAbsent) {
+			t.Fatalf("missing recorded version was not an ordinary inspection error: %v", err)
+		}
+		for _, createdImage := range []string{"false", "true"} {
+			req.Metadata[metadataCreatedImage] = createdImage
+			err := b.deleteNativeCheckpoint(context.Background(), req)
+			if !errors.As(err, &exitErr) || exitErr.Code != 4 || len(api.removedImage) != 0 {
+				t.Fatalf("initial missing version authorized deletion: createdImage=%s err=%v removed=%v", createdImage, err, api.removedImage)
+			}
+		}
+	}
 }
 
 func TestWholeImageCheckpointDeleteRefusesUnrelatedLaterVersions(t *testing.T) {

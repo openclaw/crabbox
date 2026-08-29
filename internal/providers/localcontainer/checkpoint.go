@@ -236,7 +236,10 @@ func (b *backend) CheckpointSourceAbsent(ctx context.Context, req core.Checkpoin
 	if !isFullContainerID(req.Capture.SourceID) {
 		return false, core.Exit(2, "checkpoint source requires a full container ID")
 	}
-	scope := checkpointScopeFromRequest(req.Resource)
+	scope, err := checkpointScopeFromRequest(req.Resource)
+	if err != nil {
+		return false, err
+	}
 	if err := validateCheckpointScope(ctx, scope); err != nil {
 		return false, err
 	}

@@ -52,6 +52,14 @@ type machineImageDetail struct {
 	Versions []machineImageVersion `json:"versions"`
 }
 
+// An existing image without the recorded version remains an ordinary lookup
+// error. Only the same admitted version deletion may accept this observation.
+type checkpointImageVersionAbsentError struct {
+	core.ExitError
+}
+
+func (e checkpointImageVersionAbsentError) Unwrap() error { return e.ExitError }
+
 var providerOperationRuntime = core.RuntimeForProviderOperation
 
 func (c *client) ListImages(ctx context.Context) ([]machineImage, error) {
@@ -382,7 +390,8 @@ func (b *backend) deleteNativeCheckpoint(ctx context.Context, req core.NativeChe
 	if err != nil {
 		return err
 	}
-	if req.Metadata[metadataCreatedImage] == "true" {
+	createdImage := req.Metadata[metadataCreatedImage] == "true"
+	if createdImage {
 		if len(detail.Versions) != 1 || detail.Versions[0].Version != version.Version {
 			return exit(2, "refusing to remove Machine0 image %q: owned checkpoint version v%d is no longer the only version (%d versions found); remove the exact draft version with `machine0 images versions rm %s %d --yes` when applicable, or resolve the image versions manually", detail.Image.Name, version.Version, len(detail.Versions), detail.Image.Name, version.Version)
 		}
@@ -392,6 +401,10 @@ func (b *backend) deleteNativeCheckpoint(ctx context.Context, req core.NativeChe
 	}
 	_, _, verifyErr := b.loadCheckpointImage(ctx, req)
 	if errors.Is(verifyErr, core.ErrNativeCheckpointAbsent) {
+		return nil
+	}
+	var versionAbsent checkpointImageVersionAbsentError
+	if !createdImage && errors.As(verifyErr, &versionAbsent) {
 		return nil
 	}
 	if verifyErr != nil {
@@ -530,7 +543,7 @@ func (b *backend) loadCheckpointImage(ctx context.Context, req core.NativeCheckp
 	if err != nil {
 		return machineImageDetail{}, machineImageVersion{}, err
 	}
-	if detail.Image.ID != req.Metadata[metadataImageID] || detail.Image.ID != req.Image.ResourceID {
+	if detail.Image.ID != req.Metadata[metadataImageID] || detail.Image.ID != req.Image.ResourceID || detail.Image.Name != name {
 		return machineImageDetail{}, machineImageVersion{}, exit(2, "refusing Machine0 checkpoint operation with mismatched image identity")
 	}
 	for _, version := range detail.Versions {
@@ -547,7 +560,7 @@ func (b *backend) loadCheckpointImage(ctx context.Context, req core.NativeCheckp
 			return detail, version, nil
 		}
 	}
-	return detail, machineImageVersion{}, core.ErrNativeCheckpointAbsent
+	return detail, machineImageVersion{}, checkpointImageVersionAbsentError{exit(4, "Machine0 image %s version %d was not found", name, versionNumber)}
 }
 
 func imageVersionState(version machineImageVersion) string {
