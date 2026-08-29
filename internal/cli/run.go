@@ -459,12 +459,6 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	var cleanup leaseCleanupResult
 	var finalizeFailureDigest func()
-	// Register before lease cleanup so recovery hints use its observed result.
-	defer func() {
-		if finalizeFailureDigest != nil {
-			finalizeFailureDigest()
-		}
-	}()
 	var runFailure error
 	recorder := &runRecorder{}
 	var finalizeTerminalRun func()
@@ -511,6 +505,12 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		if writeErr := writeTimingJSON(a.Stderr, report); writeErr != nil && err == nil {
 			err = writeErr
+		}
+	}()
+	// Cleanup runs first; the final timing JSON must still be the last line.
+	defer func() {
+		if finalizeFailureDigest != nil {
+			finalizeFailureDigest()
 		}
 	}()
 	command := fs.Args()

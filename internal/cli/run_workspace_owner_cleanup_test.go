@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -488,12 +489,20 @@ func TestRunFailureDigestCleanupOutcomes(t *testing.T) {
 				}
 				return test.stopErr
 			}
-			args := []string{"--provider", runEnvProfileTestProvider{}.Name(), "--no-sync", "--no-hydrate"}
+			args := []string{"--provider", runEnvProfileTestProvider{}.Name(), "--no-sync", "--no-hydrate", "--timing-json"}
 			args = append(args, test.flags...)
 			args = append(args, "--", "renewal-cleanup-exit-23")
 			err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), args)
 			assertRunCleanupExitCode(t, err, 23, stdout.String(), stderr.String())
 			out := stderr.String()
+			lines := strings.Split(strings.TrimSpace(out), "\n")
+			var report TimingReport
+			if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil {
+				t.Fatalf("final stderr line must remain timing JSON: %v\n%s", err, out)
+			}
+			if report.ExitCode != 23 || (report.LeaseStopped != nil && *report.LeaseStopped) != test.wantStop {
+				t.Fatalf("timing outcome disagrees with cleanup: %#v", report)
+			}
 			if !strings.Contains(out, "failure digest") {
 				t.Fatalf("missing failure digest:\n%s", out)
 			}
