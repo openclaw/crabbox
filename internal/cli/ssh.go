@@ -2120,15 +2120,21 @@ fi`
 	return "bash -lc " + shellQuote(script)
 }
 
-func remoteInvalidateSyncFingerprintForTarget(target SSHTarget, workdir string) string {
+func remoteInvalidateSyncFingerprintForTarget(target SSHTarget, workdir string, plainManifest ...bool) string {
 	if isWindowsNativeTarget(target) {
 		return powershellCommand("exit 0")
 	}
+	metadataScript := remoteSyncMetaDirScript()
+	shellCommand := func(script string) string { return "bash -lc " + shellQuote(script) }
+	if len(plainManifest) != 0 && plainManifest[0] {
+		metadataScript = remotePlainManifestGitFunction() + remotePlainManifestSyncMetaDirScript()
+		shellCommand = remotePlainManifestShellCommand
+	}
 	script := `set -e
 cd ` + shellQuote(workdir) + `
-` + remoteSyncMetaDirScript() + `
-rm -f "$meta_dir/sync-fingerprint"`
-	return "bash -lc " + shellQuote(script)
+` + metadataScript + `
+/bin/rm -f -- "$meta_dir/sync-fingerprint"`
+	return shellCommand(script)
 }
 
 type remoteSyncFinalizeOptions struct {
@@ -2173,6 +2179,18 @@ func remoteSyncInterpreterCommand(python, perl, args string) string {
 
 func remoteWriteSyncManifestsNew(workdir, finalizeToken string) string {
 	return remoteWriteSyncManifestsNewWithMetadataMode(workdir, finalizeToken, remoteSyncMetaDirScript(), false)
+}
+
+func remoteWriteSyncManifestsNewMode(workdir, finalizeToken string, plainManifest bool) string {
+	if !plainManifest {
+		return remoteWriteSyncManifestsNew(workdir, finalizeToken)
+	}
+	return remoteWriteSyncManifestsNewWithMetadataMode(
+		workdir,
+		finalizeToken,
+		remotePlainManifestGitFunction()+remotePlainManifestSyncMetaDirScript(),
+		true,
+	)
 }
 
 func remoteWriteSyncManifestsNewWithMetadata(workdir, finalizeToken, metadataScript string) string {
@@ -2233,13 +2251,21 @@ func syncManifestInputForTarget(target SSHTarget, manifestData, deletedData []by
 }
 
 func remoteWriteSyncManifestsNewForTarget(target SSHTarget, workdir, finalizeToken string) string {
+	return remoteWriteSyncManifestsNewForTargetMode(target, workdir, finalizeToken, false)
+}
+
+func remoteWriteSyncManifestsNewForTargetMode(target SSHTarget, workdir, finalizeToken string, plainManifest bool) string {
 	if isWindowsWSL2Target(target) {
-		return remoteWriteSyncManifestsNewPython(workdir, finalizeToken)
+		return remoteWriteSyncManifestsNewPythonMode(workdir, finalizeToken, plainManifest)
 	}
-	return remoteWriteSyncManifestsNew(workdir, finalizeToken)
+	return remoteWriteSyncManifestsNewMode(workdir, finalizeToken, plainManifest)
 }
 
 func remoteWriteSyncManifestsNewPython(workdir, finalizeToken string) string {
+	return remoteWriteSyncManifestsNewPythonMode(workdir, finalizeToken, false)
+}
+
+func remoteWriteSyncManifestsNewPythonMode(workdir, finalizeToken string, plainManifest bool) string {
 	manifestName := remoteSyncPendingManifestName(finalizeToken)
 	deletedName := remoteSyncPendingDeletedName(finalizeToken)
 	python := `import base64
@@ -2268,10 +2294,23 @@ with open(sys.argv[1], "wb") as handle:
 with open(sys.argv[2], "wb") as handle:
     handle.write(deleted)
 `
-	script := "set -e\nmkdir -p " + shellQuote(workdir) + "\ncd " + shellQuote(workdir) + "\n" + remoteSyncMetaDirScript() + "mkdir -p \"$meta_dir\"\n" +
-		remoteSyncAbandonedMetadataCleanup() + "\n" +
-		"python3 -c " + shellQuote(python) + " \"$meta_dir/" + manifestName + "\" \"$meta_dir/" + deletedName + "\"\n"
-	return "bash -lc " + shellQuote(script)
+	mkdir, pythonCommand := "mkdir -p ", "python3 -c "
+	metadataScript, cleanup := remoteSyncMetaDirScript(), remoteSyncAbandonedMetadataCleanup()
+	shellCommand := func(script string) string { return "bash -lc " + shellQuote(script) }
+	if plainManifest {
+		mkdir, pythonCommand = "/bin/mkdir -p -- ", "/usr/bin/python3 -c "
+		metadataScript = remotePlainManifestGitFunction() + remotePlainManifestSyncMetaDirScript()
+		cleanup = remotePlainSyncAbandonedMetadataCleanup()
+		shellCommand = remotePlainManifestShellCommand
+	}
+	script := "set -e\n" + mkdir + shellQuote(workdir) + "\ncd " + shellQuote(workdir) + "\n" + metadataScript + mkdir + "\"$meta_dir\"\n" +
+		cleanup + "\n" +
+		pythonCommand + shellQuote(python) + " \"$meta_dir/" + manifestName + "\" \"$meta_dir/" + deletedName + "\"\n"
+	return shellCommand(script)
+}
+
+func remotePlainSyncAbandonedMetadataCleanup() string {
+	return `/usr/bin/find "$meta_dir" -type f \( -name 'sync-manifest.new' -o -name 'sync-deleted.new' -o -name 'sync-manifest.*.new' -o -name 'sync-deleted.*.new' -o -name 'sync-manifest.*.sorted' -o -name 'sync-finalize-token.tmp.*' -o -name 'sync-finalize-complete-token.tmp.*' -o -name 'sync-git-status.*' \) -mtime +7 -exec /bin/rm -f -- {} \; 2>/dev/null || true`
 }
 
 func remoteSyncAbandonedMetadataCleanup() string {
@@ -2351,6 +2390,18 @@ if [ -f "$old" ] && [ -f "$new" ]; then manifest_removed_paths | delete_paths; f
 }
 
 func remotePruneSyncManifestForTarget(target SSHTarget, workdir, finalizeToken string) string {
+	return remotePruneSyncManifestForTargetMode(target, workdir, finalizeToken, false)
+}
+
+func remotePruneSyncManifestForTargetMode(target SSHTarget, workdir, finalizeToken string, plainManifest bool, allowMassDeletions ...bool) string {
+	if plainManifest {
+		return remotePruneSafeSyncManifest(
+			workdir,
+			finalizeToken,
+			remotePlainManifestGitFunction()+remotePlainManifestSyncMetaDirScript(),
+			allowMassDeletions...,
+		)
+	}
 	if isWindowsWSL2Target(target) {
 		return remotePruneSyncManifestCoreutils(workdir, finalizeToken)
 	}
@@ -2404,13 +2455,17 @@ func remoteFinalizeSync(workdir string, opts remoteSyncFinalizeOptions) string {
 	if opts.AllowMassDeletions {
 		allowValue = "1"
 	}
+	plainManifestRecovery := opts.PlainManifest && opts.Coherence.enabled()
 	manifestName := remoteSyncPendingManifestName(opts.Token)
 	deletedName := remoteSyncPendingDeletedName(opts.Token)
 	gitFunctions := remoteGitWorkspaceFunctions()
 	metadataScript := remoteSyncMetaDirScript()
-	if opts.GitOverlay || opts.PlainManifest {
+	if opts.GitOverlay || plainManifestRecovery {
 		gitFunctions = gitOverlayHermeticFunctions() + gitFunctions
 		metadataScript = remotePlainSyncMetaDirScript()
+	} else if opts.PlainManifest {
+		gitFunctions = remotePlainManifestGitFunction()
+		metadataScript = remotePlainManifestSyncMetaDirScript()
 	}
 	script := `set -e
 cd ` + shellQuote(workdir) + `
@@ -2449,8 +2504,24 @@ fi
 `
 	if opts.GitOverlay {
 		script += remoteGitOverlayFinalizeScript(opts.Coherence, allowValue)
-	} else if opts.PlainManifest {
+	} else if plainManifestRecovery {
 		script += remoteGitOverlayRecoveryFinalizeScript(opts.Coherence, opts.BaseRef, opts.BaseSHA, allowValue)
+	} else if opts.PlainManifest {
+		script += `publish_fingerprint=
+git_root=
+if git_root="$(plain_git rev-parse --show-toplevel 2>/dev/null)" &&
+   git_root="$(cd -P -- "$git_root" 2>/dev/null && pwd -P)" &&
+   [ "$git_root" = "$(pwd -P)" ] &&
+   plain_git status --porcelain=v1 --untracked-files=normal >"$git_status" 2>/dev/null; then
+  deletions=$(awk '/^ D|^D / { n++ } END { print n+0 }' "$git_status")
+  if [ ` + shellQuote(allowValue) + ` != '1' ] && [ "$deletions" -ge 200 ]; then
+    echo "remote sync sanity failed: $deletions tracked deletions" >&2
+    awk '/^ D|^D / { print "  " substr($0,4) }' "$git_status" | head -20 >&2
+    exit 66
+  fi
+fi
+rm -f "$meta_dir/git-hydrate-base"
+`
 	} else if opts.Coherence.enabled() {
 		script += remoteGitCoherenceFinalizeScript(opts.Coherence, allowValue)
 	} else {
@@ -2476,7 +2547,7 @@ fi
 fi
 `
 	}
-	if opts.BaseRef != "" && opts.BaseSHA != "" {
+	if (!opts.PlainManifest || plainManifestRecovery) && opts.BaseRef != "" && opts.BaseSHA != "" {
 		script += `base_tmp="$meta_dir/git-hydrate-base.tmp.$$"
 printf %s ` + shellQuote(opts.BaseRef+" "+opts.BaseSHA+"\n") + ` > "$base_tmp"
 mv "$base_tmp" "$meta_dir/git-hydrate-base"
@@ -2494,8 +2565,11 @@ printf %s "$expected_token" > "$complete_tmp"
 mv "$complete_tmp" "$complete_token"
 coherence_committed=1
 `
-	if opts.GitOverlay || opts.PlainManifest {
+	if opts.GitOverlay || plainManifestRecovery {
 		return remoteGitOverlayShellCommand(script)
+	}
+	if opts.PlainManifest {
+		return remotePlainManifestShellCommand(script)
 	}
 	return "bash -lc " + shellQuote(script)
 }
@@ -2666,10 +2740,33 @@ trap 'exit 143' TERM
 }
 
 func remoteSyncMetaDirScript() string {
-	return `meta_dir=$(git_root=; if git_root="$(git rev-parse --show-toplevel 2>/dev/null)" &&
+	return remoteSyncMetaDirScriptWithGit("git")
+}
+
+func remoteSyncMetaDirScriptWithGit(gitCommand string) string {
+	return `meta_dir=$(git_root=; if git_root="$(` + gitCommand + ` rev-parse --show-toplevel 2>/dev/null)" &&
   git_root="$(cd -P -- "$git_root" 2>/dev/null && pwd -P)" &&
-  [ "$git_root" = "$(pwd -P)" ]; then git rev-parse --git-path crabbox; else printf %s .crabbox; fi)
+  [ "$git_root" = "$(pwd -P)" ]; then ` + gitCommand + ` rev-parse --git-path crabbox; else printf %s .crabbox; fi)
 case "$meta_dir" in /*) ;; *) meta_dir="$PWD/$meta_dir" ;; esac
+`
+}
+
+func remotePlainManifestSyncMetaDirScript() string {
+	return remoteSyncMetaDirScriptWithGit("plain_git")
+}
+
+func remotePlainManifestShellCommand(script string) string {
+	return "/usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C BASH_ENV=/dev/null ENV=/dev/null /bin/bash --noprofile --norc -c " + shellQuote(script)
+}
+
+func remotePlainManifestGitFunction() string {
+	return `plain_git() {
+  /usr/bin/env -i HOME=/nonexistent XDG_CONFIG_HOME=/nonexistent PATH=/usr/bin:/bin LANG=C LC_ALL=C \
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_ATTR_NOSYSTEM=1 \
+    GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false GCM_INTERACTIVE=Never \
+    /usr/bin/git -c credential.helper= -c core.fsmonitor=false -c core.hooksPath=/dev/null \
+      -c core.attributesFile=/dev/null -c protocol.allow=never "$@"
+}
 `
 }
 

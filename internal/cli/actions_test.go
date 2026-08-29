@@ -592,6 +592,53 @@ cat >/dev/null
 	}
 }
 
+func TestSyncLocalActionsWorkspaceIsolatesNonForwardableOrigin(t *testing.T) {
+	f := newGitCoherenceFixture(t)
+	tools := t.TempDir()
+	logPath := filepath.Join(tools, "ssh.log")
+	sshScript := `#!/bin/sh
+last=
+for arg do last="$arg"; done
+printf '%s\n' "$last" >> "$CRABBOX_ACTIONS_SSH_LOG"
+cat >/dev/null
+`
+	if err := os.WriteFile(filepath.Join(tools, "ssh"), []byte(sshScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tools, "rsync"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_ACTIONS_SSH_LOG", logPath)
+
+	cfg := baseConfig()
+	cfg.Sync.Fingerprint = true
+	cfg.Sync.BaseRef = "main"
+	repo := Repo{Root: f.source, Name: "repo", RemoteURL: "git@example.test:repo.git", Head: f.b, BaseRef: "main"}
+	var stderr bytes.Buffer
+	err := (App{Stdout: io.Discard, Stderr: &stderr}).syncLocalActionsWorkspace(context.Background(), cfg, repo, SSHTarget{
+		User: "crabbox", Host: "example.test", Port: "22", TargetOS: targetLinux,
+	}, "/work/repo")
+	if err != nil {
+		t.Fatalf("sync local Actions workspace: %v\n%s", err, stderr.String())
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(logData)
+	for _, forbidden := range []string{"git clone ", "git fetch ", "git ls-files -z", "repair_origin", "base_tmp=", "refs/remotes/origin/"} {
+		if strings.Contains(log, forbidden) {
+			t.Fatalf("Actions plain manifest ran forbidden Git path %q:\n%s", forbidden, log)
+		}
+	}
+	for _, want := range []string{"/usr/bin/env -i", "/bin/bash --noprofile --norc", "plain_git", "protocol.allow=never"} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("Actions plain manifest missing %q:\n%s", want, log)
+		}
+	}
+}
+
 func TestLocalActionsHydrateScriptTranslatesCoreSteps(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.Actions.Ref = "main"

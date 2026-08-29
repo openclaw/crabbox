@@ -2607,6 +2607,48 @@ func TestRemoteFinalizeSyncCommitsMetadataInOneCommand(t *testing.T) {
 	}
 }
 
+func TestRemoteFinalizeSyncPlainManifestSuppressesOriginState(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef"
+	workdir := t.TempDir()
+	runGit(t, workdir, "init")
+	runGit(t, workdir, "config", "user.email", "alice@example.com")
+	runGit(t, workdir, "config", "user.name", "Alice")
+	mustWriteTestFile(t, filepath.Join(workdir, "tracked.txt"), "tracked\n")
+	runGit(t, workdir, "add", ".")
+	runGit(t, workdir, "commit", "-qm", "base")
+	metaDir := coherenceMetaDir(t, workdir)
+	mustWriteTestFile(t, filepath.Join(metaDir, remoteSyncPendingManifestName(token)), "tracked.txt\x00")
+	mustWriteTestFile(t, filepath.Join(metaDir, "sync-fingerprint"), "stale")
+	mustWriteTestFile(t, filepath.Join(metaDir, "git-hydrate-base"), "main stale\n")
+
+	command := remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
+		PlainManifest: true,
+		HydrateGit:    true,
+		BaseRef:       "main",
+		BaseSHA:       "abc123",
+		Fingerprint:   "must-not-publish",
+		Token:         token,
+	})
+	for _, forbidden := range []string{"git fetch ", "repair_origin", "base_tmp=", "refs/remotes/origin/"} {
+		if strings.Contains(command, forbidden) {
+			t.Fatalf("plain manifest finalize contains %q:\n%s", forbidden, command)
+		}
+	}
+	for _, want := range []string{"plain_git status --porcelain=v1", "protocol.allow=never", "BASH_ENV=/dev/null", "ENV=/dev/null"} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("plain manifest finalize missing %q:\n%s", want, command)
+		}
+	}
+	if out, err := exec.Command("/bin/bash", "--noprofile", "--norc", "-c", command).CombinedOutput(); err != nil {
+		t.Fatalf("plain manifest finalize: %v\n%s", err, out)
+	}
+	for _, name := range []string{"sync-fingerprint", "git-hydrate-base"} {
+		if _, err := os.Stat(filepath.Join(metaDir, name)); !os.IsNotExist(err) {
+			t.Fatalf("%s survived plain manifest finalize: %v", name, err)
+		}
+	}
+}
+
 func TestRemoteFinalizeSyncHydratesForRepositoryDepth(t *testing.T) {
 	fixture := newGitCoherenceFixture(t)
 	// Exceed the fallback depth so accidentally deepening a complete clone is observable.
@@ -4476,6 +4518,72 @@ func TestRemoteWriteSyncManifestsNewForTargetUsesInterpretedWriterForWSL2(t *tes
 		if !strings.Contains(plain, want) {
 			t.Fatalf("non-WSL2 manifest writer missing %q: %q", want, plain)
 		}
+	}
+}
+
+func TestRemoteWriteSyncManifestsNewForTargetPlainWSL2IsHermetic(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef"
+	target := SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}
+	if got, want := remoteWriteSyncManifestsNewForTargetMode(target, "/work/repo", token, false), remoteWriteSyncManifestsNewPython("/work/repo", token); got != want {
+		t.Fatal("ordinary WSL2 manifest command bytes changed")
+	}
+	got := remoteWriteSyncManifestsNewForTargetMode(target, "/work/repo", token, true)
+	for _, want := range []string{
+		"/usr/bin/env -i",
+		"BASH_ENV=/dev/null",
+		"ENV=/dev/null",
+		"/bin/bash --noprofile --norc -c",
+		"/usr/bin/python3 -c",
+		"/bin/mkdir -p --",
+		"/usr/bin/find",
+		"-exec /bin/rm",
+		"plain_git",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("plain WSL2 writer missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "bash -lc") {
+		t.Fatalf("plain WSL2 writer uses a login shell:\n%s", got)
+	}
+}
+
+func TestPlainManifestMetadataIgnoresHostileEnvironment(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef"
+	workdir := filepath.Join(t.TempDir(), "repo")
+	marker := filepath.Join(t.TempDir(), "executed")
+	profile := filepath.Join(t.TempDir(), "profile")
+	mustWriteTestFile(t, profile, "printf hostile >"+shellQuote(marker)+"\n")
+	hostileBin := t.TempDir()
+	for _, name := range []string{"bash", "git", "python3", "mkdir", "find", "rm"} {
+		writeExecutable(t, filepath.Join(hostileBin, name), "#!/bin/sh\nprintf hostile >"+shellQuote(marker)+"\nexit 97\n")
+	}
+	manifest := []byte("tracked.txt\x00")
+	deleted := []byte("removed.txt\x00")
+	command := exec.Command("/bin/sh", "-c", remoteWriteSyncManifestsNewForTargetMode(
+		SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2},
+		workdir,
+		token,
+		true,
+	))
+	command.Env = []string{"PATH=" + hostileBin, "BASH_ENV=" + profile, "ENV=" + profile}
+	command.Stdin = strings.NewReader(syncManifestInputForTarget(
+		SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2},
+		manifest,
+		deleted,
+	))
+	if out, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("plain WSL2 writer failed: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("hostile environment executed: %v", err)
+	}
+	metaDir := filepath.Join(workdir, ".crabbox")
+	if got, err := os.ReadFile(filepath.Join(metaDir, remoteSyncPendingManifestName(token))); err != nil || !bytes.Equal(got, manifest) {
+		t.Fatalf("manifest=%q err=%v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(metaDir, remoteSyncPendingDeletedName(token))); err != nil || !bytes.Equal(got, deleted) {
+		t.Fatalf("deleted=%q err=%v", got, err)
 	}
 }
 

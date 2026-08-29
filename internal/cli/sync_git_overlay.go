@@ -30,11 +30,20 @@ type gitOverlayDecision struct {
 	Reason    string
 }
 
+type gitOriginDisposition uint8
+
+const (
+	gitOriginAbsent gitOriginDisposition = iota
+	gitOriginRemoteAttemptSafe
+	gitOriginNonForwardable
+)
+
 func decideGitOverlay(cfg Config, repo Repo, target SSHTarget, manifest SyncManifest, coherence gitCoherencePlan, credentialBlocked, fullResync, hydratedByActions bool) gitOverlayDecision {
 	decision := gitOverlayDecision{Requested: cfg.Sync.GitOverlay}
 	if !decision.Requested {
 		return decision
 	}
+	originDisposition := classifyGitOrigin(repo.RemoteURL)
 	switch {
 	case target.TargetOS != targetLinux || isWindowsNativeTarget(target) || isWindowsWSL2Target(target):
 		decision.Reason = "unsupported_target"
@@ -50,7 +59,9 @@ func decideGitOverlay(cfg Config, repo Repo, target SSHTarget, manifest SyncMani
 		decision.Reason = "include_whitelist"
 	case credentialBlocked || gitRemoteURLHasCredentials(repo.RemoteURL):
 		decision.Reason = "credential_origin"
-	case !gitOverlayOriginTransportSupported(repo.RemoteURL) || !gitOverlayOriginTransportSupported(coherence.RemoteURL):
+	case originDisposition == gitOriginAbsent:
+		decision.Reason = "missing_origin"
+	case originDisposition != gitOriginRemoteAttemptSafe || !gitOverlayOriginTransportSupported(coherence.RemoteURL):
 		decision.Reason = "unsupported_origin_transport"
 	case !coherence.enabled():
 		decision.Reason = "unseedable_head"
@@ -65,25 +76,38 @@ func decideGitOverlay(cfg Config, repo Repo, target SSHTarget, manifest SyncMani
 }
 
 func gitOverlayOriginTransportSupported(remoteURL string) bool {
+	return classifyGitOrigin(remoteURL) == gitOriginRemoteAttemptSafe
+}
+
+func classifyGitOrigin(remoteURL string) gitOriginDisposition {
 	raw := strings.TrimSpace(remoteURL)
-	if raw == "" || gitRemoteURLHasCredentials(raw) {
-		return false
+	if raw == "" {
+		return gitOriginAbsent
+	}
+	if gitRemoteURLHasCredentials(raw) || strings.ContainsAny(raw, "?#") {
+		return gitOriginNonForwardable
 	}
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return false
+	if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.Opaque != "" {
+		return gitOriginNonForwardable
 	}
 	if parsed.Scheme != "" {
 		switch strings.ToLower(parsed.Scheme) {
 		case "http", "https":
-			return parsed.Host != ""
+			if parsed.Host != "" {
+				return gitOriginRemoteAttemptSafe
+			}
 		case "file":
-			return parsed.Host == "" || strings.EqualFold(parsed.Host, "localhost")
-		default:
-			return false
+			if parsed.Path != "" && (parsed.Host == "" || strings.EqualFold(parsed.Host, "localhost")) {
+				return gitOriginRemoteAttemptSafe
+			}
 		}
+		return gitOriginNonForwardable
 	}
-	return !strings.Contains(raw, ":") && !strings.HasPrefix(raw, "-")
+	if parsed.Host != "" || strings.HasPrefix(raw, "//") || strings.Contains(raw, ":") || strings.HasPrefix(raw, "-") {
+		return gitOriginNonForwardable
+	}
+	return gitOriginRemoteAttemptSafe
 }
 
 func validateGitOverlayManifest(repo Repo, manifest SyncManifest) error {
@@ -450,7 +474,7 @@ overlay_runtime_state_safe() {
 }
 
 func remoteGitOverlayShellCommand(script string) string {
-	return "/usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /bin/bash --noprofile --norc -c " + shellQuote(script)
+	return "/usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C BASH_ENV=/dev/null ENV=/dev/null /bin/bash --noprofile --norc -c " + shellQuote(script)
 }
 
 func remotePrepareGitOverlay(workdir string, plan gitCoherencePlan) string {

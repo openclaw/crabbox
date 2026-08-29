@@ -68,6 +68,9 @@ Git-ignored output, dependency folders, `.git`, and common local caches stay out
 of the transfer. This keeps a first sync close to what CI would see while still
 letting you test uncommitted local edits.
 
+Filesystem Git origins are resolved on the runner during Git seeding and must
+be readable from that runner; otherwise Crabbox falls back to a full manifest sync.
+
 ### Jujutsu workspaces
 
 Crabbox currently supports Jujutsu workspaces only when they are colocated with

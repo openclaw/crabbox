@@ -675,6 +675,7 @@ func (a App) executeLocalActionsHydration(ctx context.Context, cfg Config, repo 
 }
 
 func invalidateActionsHydrationWorkspaces(ctx context.Context, cfg Config, repo Repo, target SSHTarget, leaseID string) error {
+	plainManifest := classifyGitOrigin(repo.RemoteURL) != gitOriginRemoteAttemptSafe
 	workdirs := []string{remoteJoin(cfg, leaseID, repo.Name)}
 	state, err := readActionsHydrationState(ctx, target, leaseID)
 	if err != nil {
@@ -684,7 +685,7 @@ func invalidateActionsHydrationWorkspaces(ctx context.Context, cfg Config, repo 
 		workdirs = appendUniqueStrings(workdirs, state.Workspace)
 	}
 	for _, workdir := range workdirs {
-		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteInvalidateSyncFingerprintForTarget(target, workdir), idempotentSSHRetryDelay); err != nil {
+		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteInvalidateSyncFingerprintForTarget(target, workdir, plainManifest), idempotentSSHRetryDelay); err != nil {
 			return exit(7, "invalidate reusable sync fingerprint before Actions hydration: %v", err)
 		}
 	}
@@ -710,10 +711,14 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 		return exit(7, "create remote workdir: %v", err)
 	}
 	coherence, credentialBlocked := syncGitCoherencePlan(cfg, repo)
+	plainManifest := classifyGitOrigin(repo.RemoteURL) != gitOriginRemoteAttemptSafe
 	if credentialBlocked {
 		warnCredentialBearingGitSeed(a.Stderr)
 	}
-	if coherence.seedEnabled() {
+	if plainManifest {
+		coherence = gitCoherencePlan{}
+	}
+	if !plainManifest && coherence.seedEnabled() {
 		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay); err != nil {
 			fmt.Fprintf(a.Stderr, "warning: remote git seed failed: %v\n", err)
 		}
@@ -725,14 +730,16 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 		return exit(6, "create sync finalize token: %v", err)
 	}
 	manifestInput := syncManifestInputForTarget(target, manifestData, deletedData)
-	if err := runSSHInput(ctx, target, remoteWriteSyncManifestsNewForTarget(target, workdir, finalizeToken), strings.NewReader(manifestInput), io.Discard, a.Stderr); err != nil {
+	if err := runSSHInput(ctx, target, remoteWriteSyncManifestsNewForTargetMode(target, workdir, finalizeToken, plainManifest), strings.NewReader(manifestInput), io.Discard, a.Stderr); err != nil {
 		return exit(7, "write sync manifests: %v", err)
 	}
 	if shouldPruneRemoteSync(cfg.Sync.Delete, false) {
-		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteSeedSyncManifestFromGit(workdir), idempotentSSHRetryDelay); err != nil {
-			return exit(6, "remote sync seed manifest failed: %v", err)
+		if !plainManifest {
+			if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteSeedSyncManifestFromGit(workdir), idempotentSSHRetryDelay); err != nil {
+				return exit(6, "remote sync seed manifest failed: %v", err)
+			}
 		}
-		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remotePruneSyncManifestForTarget(target, workdir, finalizeToken), idempotentSSHRetryDelay); err != nil {
+		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remotePruneSyncManifestForTargetMode(target, workdir, finalizeToken, plainManifest, true), idempotentSSHRetryDelay); err != nil {
 			return exit(6, "remote sync prune failed: %v", err)
 		}
 	}
@@ -741,7 +748,7 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 		return exit(6, "rsync failed: %v", err)
 	}
 	fingerprint := ""
-	if cfg.Sync.Fingerprint {
+	if cfg.Sync.Fingerprint && !plainManifest {
 		if value, err := syncFingerprintForManifest(repo, cfg, manifest, excludes, coherence); err == nil {
 			fingerprint = value
 		} else {
@@ -750,7 +757,8 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 	}
 	finalizeCommand := remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
 		AllowMassDeletions: true,
-		HydrateGit:         true,
+		HydrateGit:         !plainManifest,
+		PlainManifest:      plainManifest,
 		BaseRef:            cfg.Sync.BaseRef,
 		BaseSHA:            gitHydrateBaseSHA(repo, cfg.Sync.BaseRef),
 		Fingerprint:        fingerprint,
