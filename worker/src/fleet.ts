@@ -12838,7 +12838,9 @@ export class FleetCoordinator {
         { status: 502 },
       );
     }
-    if (!image) return lease;
+    // An installed observer is authoritative for typed calls. Clear only this
+    // request's view so stale persisted evidence cannot pass identity matching.
+    if (!image) return { ...lease, image: undefined };
     return await this.state.runExclusive(async () => {
       const current = await this.getLease(lease.id);
       const conflict = (message: string) =>

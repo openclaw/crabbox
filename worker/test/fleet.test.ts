@@ -13914,61 +13914,82 @@ describe("fleet lease identity and idle", () => {
     expect(observations).toBe(0);
     storage.seed(`lease:${lease.id}`, lease);
 
-    const failed = await fleet.fetch(
-      request("POST", "/v1/ready-pools/builders/identity", {
-        headers: typedReadyPoolHeaders(),
-        body,
-      }),
-    );
-    expect(failed.status).toBe(502);
-    expect(await failed.json()).toMatchObject({
-      error: "ready_pool_image_observation_failed",
-      message: expect.stringContaining("compute.instances.get and compute.disks.get"),
-    });
-  });
-
-  it("CAS-persisted GCP evidence is idempotent and rejects lease drift", async () => {
-    for (const fixture of [
-      { name: "equal evidence", equal: true, want: 200 },
-      { name: "region drift", equal: false, want: 409 },
-    ]) {
-      const storage = new MemoryStorage();
-      const lease = typedGCPReadyPoolLease();
-      storage.seed(`lease:${lease.id}`, lease);
-      const fleet = testFleet(storage, {
-        gcp: fakeProvider(undefined, {
-          provider: "gcp",
-          onObserveReadyPoolImageIdentity() {
-            storage.seed(`lease:${lease.id}`, {
-              ...lease,
-              ...(fixture.equal ? { image: typedGCPImage } : { region: "us-west1-c" }),
-            });
-            return typedGCPImage;
-          },
-        }),
-      });
-      // oxlint-disable-next-line eslint/no-await-in-loop -- each fixture owns separate state.
-      const response = await fleet.fetch(
-        request("POST", "/v1/ready-pools/builders/identity", {
+    const identity = await typedGCPReadyPoolIdentity();
+    for (const action of ["identity", "register-identity"] as const) {
+      const failed = await fleet.fetch(
+        request("POST", `/v1/ready-pools/builders/${action}`, {
           headers: typedReadyPoolHeaders(),
-          body: {
-            leaseID: lease.id,
-            ...typedReadyPoolMetadata(),
-            cacheCompatibility: "node-22",
-          },
+          body:
+            action === "identity"
+              ? body
+              : { leaseID: lease.id, ...typedReadyPoolMetadata(), identity },
         }),
       );
-      expect(response.status, fixture.name).toBe(fixture.want);
-      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.region).toBe(
-        fixture.equal ? "us-west1-b" : "us-west1-c",
-      );
+      expect(failed.status).toBe(502);
+      expect(await failed.json()).toMatchObject({
+        error: "ready_pool_image_observation_failed",
+        message: expect.stringContaining("compute.instances.get and compute.disks.get"),
+      });
     }
   });
 
-  it("does not observe legacy registration, AWS identities, or missing GCP evidence", async () => {
+  it("handles equal, different, and drifted GCP evidence on both typed routes", async () => {
+    const identity = await typedGCPReadyPoolIdentity();
+    for (const mode of ["equal", "different", "drift"] as const) {
+      for (const action of ["identity", "register-identity"] as const) {
+        const storage = new MemoryStorage();
+        const lease = typedGCPReadyPoolLease(
+          action === "identity" ? "cbx_000000000097" : "cbx_000000000098",
+        );
+        if (mode !== "drift") {
+          lease.image =
+            mode === "equal" ? typedGCPImage : { ...typedGCPImage, id: "7123456789012345678" };
+        }
+        storage.seed(`lease:${lease.id}`, lease);
+        let leaseWrites = 0;
+        storage.beforePut = async (key) => {
+          if (key === `lease:${lease.id}`) leaseWrites += 1;
+        };
+        const fleet = testFleet(storage, {
+          gcp: fakeProvider(undefined, {
+            provider: "gcp",
+            onObserveReadyPoolImageIdentity() {
+              if (mode === "drift") {
+                storage.seed(`lease:${lease.id}`, { ...lease, region: "us-west1-c" });
+              }
+              return typedGCPImage;
+            },
+          }),
+        });
+        // oxlint-disable-next-line eslint/no-await-in-loop -- each fixture owns separate state.
+        const response = await fleet.fetch(
+          request("POST", `/v1/ready-pools/builders/${action}`, {
+            headers: typedReadyPoolHeaders(),
+            body: {
+              leaseID: lease.id,
+              ...typedReadyPoolMetadata(),
+              ...(action === "identity" ? { cacheCompatibility: "node-22" } : { identity }),
+            },
+          }),
+        );
+        expect(response.status, `${mode}/${action}`).toBe(mode === "equal" ? 200 : 409);
+        expect(leaseWrites).toBe(0);
+        expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.updatedAt).toBe(lease.updatedAt);
+        if (mode !== "equal") {
+          expect(await response.json()).toMatchObject({
+            error: "ready_pool_image_observation_conflict",
+          });
+        }
+      }
+    }
+  });
+
+  it("does not reuse stale GCP evidence when observation is missing", async () => {
     const storage = new MemoryStorage();
-    const gcpLease = typedGCPReadyPoolLease();
+    const gcpLease = { ...typedGCPReadyPoolLease(), image: typedGCPImage };
     storage.seed(`lease:${gcpLease.id}`, gcpLease);
+    const fillClaimKey = "typed-ready-pool-v1-fill-claim:claim-token";
+    storage.seed(fillClaimKey, { token: "claim-token" });
     let observations = 0;
     const fleet = testFleet(storage, {
       gcp: fakeProvider(undefined, {
@@ -13988,23 +14009,41 @@ describe("fleet lease identity and idle", () => {
     expect(legacy.status).toBe(200);
     expect(observations).toBe(0);
 
-    const missing = await fleet.fetch(
-      request("POST", "/v1/ready-pools/builders/identity", {
-        headers: typedReadyPoolHeaders(),
-        body: {
-          leaseID: gcpLease.id,
-          ...typedReadyPoolMetadata(),
-          cacheCompatibility: "node-22",
-        },
-      }),
-    );
-    expect(missing.status).toBe(409);
-    expect(observations).toBe(1);
+    const identity = await typedGCPReadyPoolIdentity();
+    for (const action of ["identity", "register-identity"] as const) {
+      const missing = await fleet.fetch(
+        request("POST", `/v1/ready-pools/builders/${action}`, {
+          headers: typedReadyPoolHeaders(),
+          body: {
+            leaseID: gcpLease.id,
+            ...typedReadyPoolMetadata(),
+            ...(action === "identity"
+              ? { cacheCompatibility: "node-22" }
+              : { identity, fillClaimToken: "claim-token" }),
+          },
+        }),
+      );
+      expect(missing.status).toBe(409);
+      expect(await missing.json()).toMatchObject({
+        error:
+          action === "identity"
+            ? "unsupported_ready_pool_lease_identity"
+            : "ready_pool_lease_identity_mismatch",
+      });
+    }
+    expect(observations).toBe(2);
+    expect(storage.value<LeaseRecord>(`lease:${gcpLease.id}`)?.image).toEqual(typedGCPImage);
+    expect(storage.value(fillClaimKey)).toBeTruthy();
+    expect(storage.value(`typed-ready-pool-v1:builders:${gcpLease.id}`)).toBeUndefined();
+  });
 
+  it("keeps AWS typed generation and registration on the no-observer path", async () => {
+    const storage = new MemoryStorage();
     const observeGCP = vi.spyOn(GCPClient.prototype, "observeReadyPoolImageIdentity");
     const awsLease = typedReadyPoolLease();
     storage.seed(`lease:${awsLease.id}`, awsLease);
-    const aws = await fleet.fetch(
+    const identity = await typedReadyPoolIdentity();
+    const generated = await fleet.fetch(
       request("POST", "/v1/ready-pools/builders/identity", {
         headers: typedReadyPoolHeaders(),
         body: {
@@ -14014,7 +14053,14 @@ describe("fleet lease identity and idle", () => {
         },
       }),
     );
-    expect(aws.status).toBe(200);
+    const registered = await fleet.fetch(
+      request("POST", "/v1/ready-pools/builders/register-identity", {
+        headers: typedReadyPoolHeaders(),
+        body: { leaseID: awsLease.id, ...typedReadyPoolMetadata(), identity },
+      }),
+    );
+    expect(generated.status).toBe(200);
+    expect(registered.status).toBe(200);
     expect(observeGCP).not.toHaveBeenCalled();
     observeGCP.mockRestore();
   });
