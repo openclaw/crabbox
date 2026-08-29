@@ -264,8 +264,16 @@ supported.
 4. With `--desktop`, the container installs and starts Xvfb, XFCE, x11vnc,
    xdotool, screenshot tools, ffmpeg, noVNC, and websockify — no systemd
    required.
-5. With `--browser`, the container installs a real package-manager browser where
-   the image provides one and writes `/var/lib/crabbox/browser.env`.
+5. With `--browser`, the container preserves a working Chrome, Chromium, Firefox
+   ESR, or Firefox executable and writes `/var/lib/crabbox/browser.env`. When
+   Ubuntu needs a browser, bootstrap installs native Firefox from Mozilla's
+   signed APT repository, with a pinned signing-key fingerprint and a
+   source-specific keyring; it excludes Ubuntu's Snap transition package.
+   Other Debian-compatible images try their distro Chromium, Firefox ESR, and
+   Firefox packages in order, advancing when the executable's version probe
+   fails. If Mozilla trust or installation fails, select a prebuilt image with
+   a working browser or a supported Debian image; bootstrap does not disable
+   authentication or force a downgrade of an installed transition package.
 6. As soon as the runtime returns an exact container ID, before the first
    inspect or readiness probe, Crabbox durably records a `state=provisioning`
    claim bound to that ID, the runtime context/endpoint/daemon identity, SSH

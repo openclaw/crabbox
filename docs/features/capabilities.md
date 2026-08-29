@@ -17,7 +17,7 @@ desktop and exposes one right now".
 
 ```text
 --desktop  visible desktop with a loopback VNC server (XFCE, Wayland, or GNOME)
---browser  Chrome/Chromium installed and exported via $BROWSER and $CHROME_BIN
+--browser  Supported browser installed and exported via $BROWSER and $CHROME_BIN
 --code     code-server bound to a loopback port for the portal code bridge
 ```
 
@@ -137,8 +137,11 @@ CHROME_BIN=/path/to/browser
 CRABBOX_BROWSER=1
 ```
 
-Test runners that read `BROWSER` or `CHROME_BIN` (Vitest, Playwright, etc.)
-work without extra plumbing.
+The [local-container provider](../providers/local-container.md) also supports
+Firefox and Firefox ESR, including native Firefox from Mozilla's signed APT
+repository on Ubuntu. Its exported paths can therefore select Firefox;
+`BROWSER` and `CHROME_BIN` do not promise Chromium or CDP compatibility. Select
+an image with the browser engine required by your test runner.
 
 For browser QA where the remote service is sensitive to source IP (login
 flows, regional CDN behavior), pair `--browser` with
