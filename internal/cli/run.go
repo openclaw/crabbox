@@ -380,6 +380,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	runFlags := registerRunFlags(fs, defaults, ordinaryLeaseCreateFlagRegistrationOptions())
 	var requiredArtifactChanges stringListFlag
 	fs.Var(&requiredArtifactChanges, "require-artifact-change", "require created or changed bytes at an exact relative file path after successful Linux SSH execution; identical rewrites fail; repeatable")
+	var failureDownloads stringListFlag
+	fs.Var(&failureDownloads, "download-on-failure", "download remote=local after a confirmed nonzero Linux SSH workload exit; repeatable")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
@@ -433,6 +435,12 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	readyPoolCompatibilityKey := runFlags.ReadyPoolCompatibility
 	readyPoolReturn := runFlags.ReadyPoolReturn
 	downloads := append(stringListFlag(nil), (*runFlags.Downloads)...)
+	allDownloads := append(append([]string{}, downloads...), failureDownloads...)
+	for _, spec := range failureDownloads {
+		if _, err := parseRunDownloadSpec(spec); err != nil {
+			return exit(2, "--download-on-failure expects remote=local")
+		}
+	}
 	allowEnvFlags := append(stringListFlag(nil), (*runFlags.AllowEnv)...)
 	envProfileFlags := append(stringListFlag(nil), (*runFlags.EnvProfiles)...)
 	presetVars := append(stringListFlag(nil), (*runFlags.PresetVars)...)
@@ -455,7 +463,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		CaptureStderr:       *captureStderr,
 		TimingRecord:        timingRecordPath,
 		TimingRecordEnabled: timingRecordEnabled,
-		Downloads:           downloads,
+		Downloads:           allDownloads,
 	}); err != nil {
 		return err
 	}
@@ -597,6 +605,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if len(requiredArtifactChanges) > 0 {
 			return exit(2, "--require-artifact-change cannot be combined with --sync-only")
 		}
+		if len(failureDownloads) > 0 {
+			return exit(2, "--download-on-failure cannot be combined with --sync-only")
+		}
 		if len(expansion.ArtifactGlobs) > 0 {
 			return exit(2, "--artifact-glob cannot be combined with --sync-only")
 		}
@@ -613,7 +624,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return exit(2, "--attest cannot be combined with --sync-only")
 		}
 	}
-	if err := preflightRunLocalOutputs(*captureStdout, *captureStderr, downloads); err != nil {
+	if err := preflightRunLocalOutputs(*captureStdout, *captureStderr, allDownloads); err != nil {
 		return err
 	}
 	if strings.TrimSpace(*leaseOutput) != "" {
@@ -631,7 +642,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 				return exit(2, "lease output and emit proof paths must be different")
 			}
 		}
-		if err := preflightProofOutputPath(strings.TrimSpace(*emitProof), *captureStdout, *captureStderr, downloads); err != nil {
+		if err := preflightProofOutputPath(strings.TrimSpace(*emitProof), *captureStdout, *captureStderr, allDownloads); err != nil {
 			return err
 		}
 		if strings.TrimSpace(*proofTemplate) != "" {
@@ -740,6 +751,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if err := validateArtifactChangeTarget(SSHTarget{TargetOS: cfg.TargetOS}, requiredArtifactChanges); err != nil {
 			return err
 		}
+		if err := validateFailureDownloadTarget(SSHTarget{TargetOS: cfg.TargetOS}, failureDownloads); err != nil {
+			return err
+		}
 		if err := validateRunArtifactGlobTarget(SSHTarget{TargetOS: cfg.TargetOS, WindowsMode: cfg.WindowsMode}, expansion.ArtifactGlobs); err != nil {
 			return err
 		}
@@ -779,6 +793,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if len(requiredArtifactChanges) > 0 && providerSpec.Kind != ProviderKindSSHLease {
 			return exit(2, "--require-artifact-change requires an ordinary SSH-backed Linux provider")
 		}
+		if len(failureDownloads) > 0 && providerSpec.Kind != ProviderKindSSHLease {
+			return exit(2, "--download-on-failure requires an ordinary SSH-backed Linux provider")
+		}
 		if err := validateProviderRun(provider, runReq, *readyPool, len(requiredArtifactSchemas) > 0, expansion.Profile.Doctor.Enabled); err != nil {
 			return err
 		}
@@ -802,6 +819,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	if len(requiredArtifactChanges) > 0 && backend.Spec().Kind != ProviderKindSSHLease {
 		return exit(2, "--require-artifact-change requires an ordinary SSH-backed Linux provider")
+	}
+	if len(failureDownloads) > 0 && backend.Spec().Kind != ProviderKindSSHLease {
+		return exit(2, "--download-on-failure requires an ordinary SSH-backed Linux provider")
 	}
 	var server Server
 	var target SSHTarget
@@ -933,6 +953,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		if len(requiredArtifactChanges) > 0 {
 			return exit(2, "--require-artifact-change requires an ordinary SSH-backed Linux provider")
+		}
+		if len(failureDownloads) > 0 {
+			return exit(2, "--download-on-failure requires an ordinary SSH-backed Linux provider")
 		}
 		if !delegatedRoutePreflighted && delegatedRunNeedsLocalWorkspaceSync(backend.Spec(), runReq) {
 			if err := validateLocalWorkspaceSyncSource(repo); err != nil {
@@ -1184,6 +1207,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		return recordFailure(err)
 	}
 	if err := validateArtifactChangeTarget(target, requiredArtifactChanges); err != nil {
+		return recordFailure(err)
+	}
+	if err := validateFailureDownloadTarget(target, failureDownloads); err != nil {
 		return recordFailure(err)
 	}
 	if expansion.Profile.Doctor.Enabled && isWindowsNativeTarget(target) {
@@ -2183,6 +2209,24 @@ afterSync:
 	}
 	leaseForEvidence := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord}
 	failureEvidenceCollector := beginRunFailureEvidence(ctx, sshBackend, leaseForEvidence, a.Stderr)
+	var witness *runExitWitness
+	commandTarget := target
+	if len(failureDownloads) > 0 {
+		witness, err = newRunExitWitness(stderr)
+		if err != nil {
+			return recordFailure(err)
+		}
+		witnessCommand := command
+		witnessShell := *shellMode || useShell
+		if script == nil && witnessShell {
+			witnessCommand = []string{runCommandShellStringWithLiteralArgs(command, *shellMode, expansion.LiteralArgs)}
+		}
+		remote = witness.command(workdir, runEnv, envFiles, witnessCommand, witnessShell, script)
+		stderr = witness
+		// A transport failure is ambiguous after dispatch. Do not replay this
+		// observed workload on another port; readiness already selected the port.
+		commandTarget.FallbackPorts = []string{}
+	}
 	beforeArtifacts, err := snapshotArtifactChanges(ctx, target, workdir, requiredArtifactChanges)
 	if err != nil {
 		return recordFailure(err)
@@ -2190,7 +2234,11 @@ afterSync:
 	for i := range beforeArtifacts {
 		beforeArtifacts[i].data = nil
 	}
-	code, streamErr := runSSHStreamResult(ctx, target, remote, stdout, stderr)
+	code, streamErr := runSSHStreamResult(ctx, commandTarget, remote, stdout, stderr)
+	failureDownloadEligible := false
+	if witness != nil {
+		code, streamErr, failureDownloadEligible = witness.finish(ctx, code, streamErr)
+	}
 	failureEvidence := RunFailureEvidence{}
 	var results *TestResultSummary
 	classification := FailureClassification{}
@@ -2324,6 +2372,11 @@ afterSync:
 	timings.commandPhases = phaseTracker.Finish(time.Now())
 	if err := waitWorkspaceOwnerNoChild(ctx, lifecycleOwner, lifecycleOwner.callTimeout()); err != nil {
 		return recordFailure(exit(7, "remote command child ownership remains active; refusing collection and cleanup: %v", err))
+	}
+	if failureDownloadEligible && ctx.Err() == nil {
+		collectFailureDownloads(ctx, target, workdir, failureDownloads, a.Stderr)
+	} else if len(failureDownloads) > 0 && code != 0 {
+		fmt.Fprintln(a.Stderr, "failure downloads skipped: no confirmed owned nonzero workload exit")
 	}
 	if cfg.Results.Auto || len(cfg.Results.JUnit) > 0 {
 		results, err = collectRemoteJUnitResults(ctx, target, workdir, cfg.Results, resultsMarker)

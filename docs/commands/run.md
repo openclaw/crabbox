@@ -564,6 +564,30 @@ command execution. On Unix-like hosts, Crabbox-created download, capture, proof,
 and failure-bundle files use owner-only permissions (`0600`), and newly created
 output directories use `0700`.
 
+Use repeatable `--download-on-failure remote=local` to retrieve explicitly
+selected evidence after a nonzero workload exit on ordinary Linux SSH runs.
+Crabbox requires a fresh owned workload-start/exit marker pair and successful
+SSH completion; a workload exit of 255 is distinguishable from SSH transport
+loss. The observed workload is never retried on a fallback SSH port. Setup,
+sync, hydration, acquisition, preflight, transport, cancellation, and timeout
+failures do not authorize these downloads. A JUnit policy failure after a zero
+workload exit does not authorize them either, nor does a failed
+`--require-artifact-change` guard. When both flags are used, a confirmed nonzero
+workload exit can download evidence while the freshness guard remains
+`not-evaluated`; the download does not claim that the file changed.
+
+Retrieval precedes the automatic failure bundle and lease teardown, including
+`--stop-after always`. A missing/unreadable file or local write failure produces
+a warning and does not prevent the remaining selected downloads. Each retrieval
+has a 30-second limit; the original workload exit and failure classification
+remain authoritative. The existing single-file transport, remote path behavior,
+atomic local writer, and private modes are reused. Destinations are checked for
+collisions across success/failure downloads, captures, proof, receipt, and lease
+output before execution. Existing `--download` stays success-only. macOS, WSL2,
+native Windows, delegated execution, and `--sync-only` reject the first-slice
+flag. Exit markers are removed from captured/logged stderr and leave no remote
+marker files. This does not establish artifact freshness.
+
 See [artifacts](artifacts.md) for the richer collection and publishing workflow.
 
 ## Output capture
@@ -792,6 +816,7 @@ Run-specific flags:
 --require-artifact <glob>    Repeatable.
 --require-artifact-change <path>  Repeatable; Linux SSH, created or changed bytes.
 --download <remote=local>    Repeatable.
+--download-on-failure <remote=local>  Repeatable; confirmed nonzero Linux SSH exit.
 --capture-stdout <local path>
 --capture-stderr <local path>
 --capture-on-fail            Compatibility alias.

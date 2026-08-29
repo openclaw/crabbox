@@ -128,6 +128,18 @@ bounded artifact capability. Archive-capable adapters may validate and collect
 required artifacts and artifact globs. Download-capable adapters may materialize
 safe relative single-file `--download` outputs capped at 64 KiB.
 
+Ordinary Linux SSH runs also support repeatable
+`--download-on-failure remote=local`. It retrieves only the selected files after
+a nonzero workload exit confirmed by a fresh Crabbox-owned start/exit marker
+pair and a clean SSH completion. Transport loss, cancellation, timeout, and
+setup failures are ineligible. Downloads happen before the failure bundle and
+teardown; retrieval warnings never replace the workload exit or stop later
+requested files. Each file has a 30-second retrieval budget. The existing
+single-file transport, collision checks, atomic local writes, and private
+permissions apply. `--download` remains success-only; other OS targets and
+delegated execution reject this first slice. See
+[run](../commands/run.md#artifacts-and-downloads) for the complete contract.
+
 `--emit-proof <path>` renders proof as a derived artifact after a successful
 run. The proof block uses the selected profile's proof template, the expanded
 command, run metadata, copied live console output, artifact paths, and the

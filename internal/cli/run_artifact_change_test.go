@@ -199,6 +199,15 @@ func TestRunArtifactChangeRejectsUnsupportedRoutes(t *testing.T) {
 }
 
 func TestRunArtifactChangeE2E(t *testing.T) {
+	runArtifactChangeE2E(t, false)
+}
+
+func TestRunArtifactChangeWithFailureDownloadsE2E(t *testing.T) {
+	runArtifactChangeE2E(t, true)
+}
+
+func runArtifactChangeE2E(t *testing.T, failureDownloads bool) {
+	t.Helper()
 	for _, tc := range []struct {
 		name, command, status string
 		code                  int
@@ -210,6 +219,8 @@ func TestRunArtifactChangeE2E(t *testing.T) {
 		{"created", "printf new > created", "created", 0, false},
 		{"missing", "rm proof", "missing", 7, false},
 		{"failed", "exit 23", "not-evaluated", 23, false},
+		{"failed with changed bytes", "printf new > proof; exit 23", "not-evaluated", 23, false},
+		{"workload exit 255", "exit 255", "not-evaluated", 255, false},
 		{"transport", "echo TRANSPORT_BREAK", "not-evaluated", 255, false},
 		{"schema cannot rescue stale", "true", "unchanged", 7, true},
 		{"schema after change", "printf '\"new\"' > proof", "changed", 0, true},
@@ -261,9 +272,17 @@ exit 0
 			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "config.yaml"))
 			t.Setenv("CRABBOX_FAKE_SSH_PORT", port)
 			t.Setenv("CRABBOX_WORK_ROOT", remoteRoot)
+			download := filepath.Join(dir, "failed-proof")
+			wantDownload := failureDownloads && tc.status == "not-evaluated" && tc.name != "transport"
+			var stdout, stderr bytes.Buffer
 			releases := 0
 			runEnvProfileTestReleaseHook = func() error {
 				releases++
+				if wantDownload {
+					if _, err := os.Stat(download); err != nil {
+						return fmt.Errorf("failure evidence not collected before teardown: %w", err)
+					}
+				}
 				if tc.code == 0 {
 					files, _ := filepath.Glob(filepath.Join(dir, ".crabbox", "runs", "*", "*-artifacts.tgz"))
 					if len(files) != 1 {
@@ -278,6 +297,9 @@ exit 0
 				p = "created"
 			}
 			args := []string{"--provider", "run-env-profile-test", "--no-sync", "--stop-after", "always", "--timing-json", "--require-artifact-change", p, "--artifact-glob", "*"}
+			if failureDownloads {
+				args = append(args, "--download-on-failure", "proof="+download)
+			}
 			if tc.schema {
 				if err := os.WriteFile(filepath.Join(dir, "schema.json"), []byte(`true`), 0600); err != nil {
 					t.Fatal(err)
@@ -285,7 +307,6 @@ exit 0
 				args = append(args, "--require-artifact-schema", "proof=schema.json")
 			}
 			args = append(args, "--", "sh", "-c", tc.command)
-			var stdout, stderr bytes.Buffer
 			err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), args)
 			if exitCodeForError(err, 0) != tc.code {
 				t.Fatalf("err=%v stdout=%s stderr=%s", err, stdout.String(), stderr.String())
@@ -321,6 +342,22 @@ exit 0
 			}
 			if releases != 1 || report.LeaseStopped == nil || !*report.LeaseStopped {
 				t.Fatalf("cleanup releases=%d report=%+v", releases, report)
+			}
+			data, readErr := os.ReadFile(download)
+			if wantDownload {
+				want := "old"
+				if tc.name == "failed with changed bytes" {
+					want = "new"
+				}
+				if readErr != nil || string(data) != want {
+					t.Fatalf("failure evidence=%q err=%v stderr=%s", data, readErr, stderr.String())
+				}
+			} else if !os.IsNotExist(readErr) {
+				t.Fatalf("ineligible failure evidence exists: %q err=%v", data, readErr)
+			}
+			lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+			if !strings.HasPrefix(lines[len(lines)-1], `{"provider"`) {
+				t.Fatalf("timing report is not the final record: %s", stderr.String())
 			}
 		})
 	}

@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added Linux SSH `--download-on-failure` retrieval after an owned nonzero workload exit, preserving the exit code and collecting selected evidence before failure bundles and teardown.
+
 - Added opt-in Machine0 native size selection context to live catalog discovery while preserving configured defaults and exact fixed-lease replay.
 - Added durable fixed-ID Incus leases and private container disk checkpoints that survive source deletion, with ownership-checked cleanup and fresh SSH identity before fork startup.
 
