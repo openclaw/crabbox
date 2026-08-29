@@ -249,7 +249,7 @@ type runFailureDigestInput struct {
 	Results               *TestResultSummary
 }
 
-func printRunFailureDigest(w io.Writer, input runFailureDigestInput, stdoutTail, stderrTail *streamTailBuffer, stdoutCapture, stderrCapture string) {
+func printRunFailureDigest(w io.Writer, input runFailureDigestInput) {
 	if w == nil {
 		return
 	}
@@ -277,10 +277,6 @@ func printRunFailureDigest(w io.Writer, input runFailureDigestInput, stdoutTail,
 	printFailureDigestResults(w, input.Results)
 	for _, command := range failureDigestNextCommands(input, retry) {
 		fmt.Fprintf(w, "  next: %s\n", command)
-	}
-	printFailureDigestTail(w, "stderr", stderrTail, stderrCapture)
-	if stderrCapture != "" || tailLineCount(stderrTail) == 0 {
-		printFailureDigestTail(w, "stdout", stdoutTail, stdoutCapture)
 	}
 }
 
@@ -395,76 +391,145 @@ func printFailureDigestShellChain(w io.Writer, input runFailureDigestInput) {
 	fmt.Fprintln(w, "  chain_semantics: && only runs later segments if all earlier segments succeed")
 }
 
+// Only attribute simple chains. This scanner is not a shell grammar: compound
+// syntax, substitutions, lists, and pipelines make its explanation uncertain.
 func shellAndChainSegments(command string) []string {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return nil
 	}
 	var segments []string
-	var b strings.Builder
-	inSingle := false
-	inDouble := false
-	escaped := false
-	depth := 0
-	flush := func() {
-		part := strings.TrimSpace(b.String())
-		if part != "" {
-			segments = append(segments, part)
+	inSingle, inDouble, escaped := false, false, false
+	inWord := false
+	redirection := false
+	brackets := 0
+	start := 0
+	nextLogicalByte := func(i int) byte {
+		i++
+		for i+1 < len(command) && command[i] == '\\' && command[i+1] == '\n' {
+			i += 2
 		}
-		b.Reset()
+		if i < len(command) {
+			return command[i]
+		}
+		return 0
 	}
 	for i := 0; i < len(command); i++ {
 		ch := command[i]
 		if escaped {
-			b.WriteByte(ch)
 			escaped = false
+			// A removed continuation does not start or end a shell word.
+			if ch != '\n' {
+				inWord = true
+				redirection = false
+			}
 			continue
 		}
 		if ch == '\\' && !inSingle {
-			b.WriteByte(ch)
 			escaped = true
 			continue
 		}
+		if ch == '\'' && !inDouble {
+			inSingle = !inSingle
+			inWord = true
+			redirection = false
+			continue
+		}
+		if inSingle {
+			continue
+		}
+		if ch == '"' {
+			inDouble = !inDouble
+			inWord = true
+			redirection = false
+			continue
+		}
+		if ch == '`' {
+			return nil
+		}
+		if ch == '$' {
+			switch nextLogicalByte(i) {
+			case '(', '{', '[':
+				return nil
+			case '\'', '"':
+				if !inDouble {
+					return nil
+				}
+			}
+		}
+		if inDouble {
+			continue
+		}
+		followsRedirection := redirection
+		redirection = false
 		switch ch {
-		case '\'':
-			if !inDouble {
-				inSingle = !inSingle
-			}
-			b.WriteByte(ch)
-		case '"':
-			if !inSingle {
-				inDouble = !inDouble
-			}
-			b.WriteByte(ch)
-		case '(', '{', '[':
-			if !inSingle && !inDouble {
-				depth++
-			}
-			b.WriteByte(ch)
-		case ')', '}', ']':
-			if !inSingle && !inDouble && depth > 0 {
-				depth--
-			}
-			b.WriteByte(ch)
-		case '&':
-			if !inSingle && !inDouble && depth == 0 && i+1 < len(command) && command[i+1] == '&' {
-				flush()
-				i++
-				continue
-			}
-			b.WriteByte(ch)
-		case '|':
-			if !inSingle && !inDouble && depth == 0 && i+1 < len(command) && command[i+1] == '|' {
+		case '(', ')', '}', ';', '\r', '|':
+			return nil
+		case '{':
+			if i+1 >= len(command) || command[i+1] != '}' {
 				return nil
 			}
-			b.WriteByte(ch)
-		default:
-			b.WriteByte(ch)
+			i++
+		case '\n':
+			if len(segments) == 0 || strings.TrimSpace(command[start:i]) != "" {
+				return nil
+			}
+			continue
+		case '#':
+			if !inWord {
+				return nil
+			}
+		case ' ', '\t':
+			inWord = false
+			continue
+		case '[':
+			if nextLogicalByte(i) == '[' {
+				return nil
+			}
+			brackets++
+		case ']':
+			if brackets > 0 {
+				brackets--
+			}
+		case '<', '>':
+			if ch == '<' && i+1 < len(command) && command[i+1] == '<' {
+				return nil
+			}
+			inWord = false
+			redirection = true
+			continue
+		case '&':
+			if brackets > 0 {
+				return nil
+			}
+			if followsRedirection {
+				continue
+			}
+			if i+1 >= len(command) || command[i+1] != '&' {
+				return nil
+			}
+			part := strings.TrimSpace(command[start:i])
+			if part == "" {
+				return nil
+			}
+			segments = append(segments, part)
+			i++
+			start = i + 1
+			inWord = false
+			continue
 		}
+		inWord = true
 	}
-	flush()
-	if len(segments) < 2 {
+	last := strings.TrimSpace(command[start:])
+	if inSingle || inDouble || escaped || brackets > 0 || last == "" || len(segments) == 0 {
 		return nil
+	}
+	segments = append(segments, last)
+	for _, segment := range segments {
+		switch strings.Fields(segment)[0] {
+		case "if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac", "select", "function", "coproc", "!":
+			return nil
+		}
 	}
 	return segments
 }
@@ -498,37 +563,4 @@ func fallbackFailureDigestRouting(input runFailureDigestInput, purpose CommandRo
 func canSuggestRunRetry(commandDisplay string) bool {
 	commandDisplay = strings.TrimSpace(commandDisplay)
 	return commandDisplay != "" && !strings.HasPrefix(commandDisplay, "--script")
-}
-
-func printFailureDigestTail(w io.Writer, label string, tail *streamTailBuffer, capturedPath string) {
-	if capturedPath != "" {
-		fmt.Fprintf(w, "  tail %s: captured at %s\n", label, capturedPath)
-		return
-	}
-	if tail == nil {
-		return
-	}
-	lines := tail.Lines()
-	if len(lines) == 0 {
-		return
-	}
-	if len(lines) > 8 {
-		lines = lines[len(lines)-8:]
-	}
-	text := strings.Join(lines, "\n")
-	if redacted, ok := RedactKnownFailureBody(text); ok {
-		fmt.Fprintf(w, "  tail %s: %s\n", label, redacted)
-		return
-	}
-	fmt.Fprintf(w, "  tail %s:\n", label)
-	for _, line := range lines {
-		fmt.Fprintf(w, "    %s\n", line)
-	}
-}
-
-func tailLineCount(tail *streamTailBuffer) int {
-	if tail == nil {
-		return 0
-	}
-	return len(tail.Lines())
 }

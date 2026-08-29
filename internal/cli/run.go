@@ -2430,7 +2430,7 @@ afterSync:
 			Classification:        classification,
 			Phases:                timings.commandPhases,
 			Results:               results,
-		}, stdoutTail, stderrTail, *captureStdout, *captureStderr)
+		})
 		capture := FailureCaptureMetadata{
 			Provider:       cfg.Provider,
 			LeaseID:        leaseID,

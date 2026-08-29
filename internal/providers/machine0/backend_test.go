@@ -833,6 +833,8 @@ func TestAcquirePreflightsPublicSSHKeyBeforeCreate(t *testing.T) {
 		{name: "certificate metadata is not a bare key", key: publicKey(string(ssh.MarshalAuthorizedKey(cert))), private: private},
 		{name: "multiple public keys remain unknown", key: publicKey(otherPublic + "\n" + public), private: private},
 		{name: "authorized key options remain unknown", key: publicKey("restrict " + otherPublic), private: private},
+		{name: "empty option prefix remains unknown", key: publicKey(", " + otherPublic), private: private},
+		{name: "mismatched key type remains unknown", key: publicKey(strings.Replace(otherPublic, "ssh-ed25519", "ssh-rsa", 1)), private: private},
 		{name: "extraction unavailable remains unknown", key: publicKey(otherPublic), private: private, extractErr: exec.ErrNotFound},
 		{name: "cancellation during extraction prevents create", key: publicKey(public), private: private, cancel: true, wantError: true},
 		{name: "managed key can materialize later", key: machineKey{Name: "managed-key", Type: "MANAGED", FileName: "machine0__managed-key"}},
@@ -928,6 +930,74 @@ func TestAcquirePreflightsPublicSSHKeyBeforeCreate(t *testing.T) {
 				}
 				if tc.key.Type == "MANAGED" && len(runner.calls) != 0 {
 					t.Fatal("managed key reached PUBLIC key extraction")
+				}
+			})
+		}
+	}
+}
+
+func TestAcquirePublicSSHKeyFileKinds(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX special files and symlinks")
+	}
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := ssh.MarshalPrivateKey(private, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{"fifo", "symlink fifo", "device", "symlink regular"} {
+		for _, leaseID := range []string{"", fixedMachine0TestLeaseID} {
+			t.Run(kind+"/"+blank(leaseID, "ordinary"), func(t *testing.T) {
+				repo := setupState(t)
+				keyPath := filepath.Join(os.Getenv("SSH_KEY_PATH"), "local-key")
+				target := keyPath + "-target"
+				switch kind {
+				case "fifo", "symlink fifo":
+					if output, err := exec.Command("mkfifo", "-m", "600", target).CombinedOutput(); err != nil {
+						t.Fatalf("mkfifo: %v: %s", err, output)
+					}
+				case "device":
+					target = os.DevNull
+				case "symlink regular":
+					if err := os.WriteFile(target, pem.EncodeToMemory(block), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if kind == "fifo" {
+					err = os.Rename(target, keyPath)
+				} else {
+					err = os.Symlink(target, keyPath)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				api := &fakeAPI{sizes: []machineSize{testSize()}, selectedKey: &machineKey{
+					Name: "selected-key", Type: "PUBLIC", FileName: "local-key",
+					PublicKey: string(ssh.MarshalAuthorizedKey(signer.PublicKey())),
+				}, getSequence: []machine{readyMachine("203.0.113.10")}}
+				b := testBackendWithAPI(api)
+				runner := &recordingRunner{run: func(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+					output, err := exec.CommandContext(ctx, req.Name, req.Args...).Output()
+					return core.LocalCommandResult{Stdout: string(output)}, err
+				}}
+				b.rt.Exec = runner
+				// Bound the regression: ssh-keygen blocks opening an unwritten FIFO.
+				ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+				defer cancel()
+				_, err := b.Acquire(ctx, AcquireRequest{RequestedLeaseID: leaseID, Repo: core.Repo{Root: repo}})
+				wantExtractions := 0
+				if kind == "symlink regular" {
+					wantExtractions = 1
+				}
+				if err != nil || len(api.created) != 1 || len(runner.calls) != wantExtractions {
+					t.Fatalf("err=%v creates=%d extractions=%d, want nil/1/%d", err, len(api.created), len(runner.calls), wantExtractions)
 				}
 			})
 		}

@@ -251,6 +251,10 @@ func (b *backend) preflightSSHKey(ctx context.Context, name string) error {
 	keyPath := filepath.Join(keyRoot, fileName)
 	info, err := b.stat(keyPath)
 	if err == nil && !info.IsDir() {
+		// Special files are unverified: extraction can block opening a FIFO/device.
+		if !info.Mode().IsRegular() {
+			return nil
+		}
 		registered := machine0BarePublicKey(key.PublicKey)
 		if registered == nil {
 			return nil
@@ -285,6 +289,11 @@ func machine0BarePublicKey(value string) ssh.PublicKey {
 	}
 	key, _, options, _, err := ssh.ParseAuthorizedKey([]byte(value))
 	if err != nil || len(options) != 0 {
+		return nil
+	}
+	// ParseAuthorizedKey can discard an empty option prefix such as ", ".
+	fields := strings.Fields(value)
+	if len(fields) < 2 || fields[0] != key.Type() {
 		return nil
 	}
 	if _, certificate := key.(*ssh.Certificate); certificate {

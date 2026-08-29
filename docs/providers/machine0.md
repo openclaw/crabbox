@@ -114,7 +114,7 @@ directory.
 Before creating a VM with a PUBLIC key, Crabbox checks the selected key's local
 filename and rejects a proven mismatch with the registered public key. It uses
 noninteractive `ssh-keygen -y` on the private file, not its `.pub` sidecar.
-Encrypted or unsupported keys and missing public metadata remain unverified;
+Encrypted or unsupported keys, nonregular files, and missing public metadata remain unverified;
 this check does not prove that SSH authentication will succeed. Crabbox never
 changes the selected key or downloads PUBLIC private keys to repair a mismatch.
 

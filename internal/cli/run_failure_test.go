@@ -260,7 +260,7 @@ func TestPrintRunFailureDigestIncludesMemoryGuidance(t *testing.T) {
 			ResourceExhaustion: ResourceExhaustionMemory,
 			RetryLikely:        "false",
 		},
-	}, newStreamTailBuffer(40), newStreamTailBuffer(40), "", "")
+	})
 	out := buf.String()
 	for _, want := range []string{
 		"area: resource_exhaustion",
@@ -278,8 +278,6 @@ func TestPrintRunFailureDigestIncludesMemoryGuidance(t *testing.T) {
 }
 
 func TestPrintRunFailureDigest(t *testing.T) {
-	stderrTail := newStreamTailBuffer(40)
-	_, _ = stderrTail.Write([]byte("setup ok\nunit failed\n"))
 	var buf bytes.Buffer
 	printRunFailureDigest(&buf, runFailureDigestInput{
 		LeaseID:        "cbx_123",
@@ -288,7 +286,7 @@ func TestPrintRunFailureDigest(t *testing.T) {
 		CommandDisplay: "go test ./...",
 		Classification: FailureClassification{BlockedStage: "unknown", RetryLikely: "unknown"},
 		Phases:         []TimingPhase{{Name: "test"}},
-	}, newStreamTailBuffer(40), stderrTail, "", "")
+	})
 	out := buf.String()
 	for _, want := range []string{
 		"failure digest",
@@ -297,8 +295,6 @@ func TestPrintRunFailureDigest(t *testing.T) {
 		"next: crabbox logs run_123 --tail 80",
 		"next: crabbox doctor --from-run run_123",
 		"next: crabbox run --id blue-lobster --fresh-sync -- go test ./...",
-		"tail stderr:",
-		"unit failed",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("digest missing %q:\n%s", want, out)
@@ -315,7 +311,7 @@ func TestPrintRunFailureDigestExplainsUnavailableRunHistory(t *testing.T) {
 		RunHistoryUnavailable: true,
 		CommandDisplay:        "go test ./...",
 		Classification:        FailureClassification{BlockedStage: "unknown", RetryLikely: "unknown"},
-	}, newStreamTailBuffer(40), newStreamTailBuffer(40), "", "")
+	})
 	out := buf.String()
 	for _, want := range []string{
 		"run_history: unavailable; use lease-based recovery commands below",
@@ -431,15 +427,13 @@ func TestRunFailureDigestSSHRoutingUseExternalRoutingFile(t *testing.T) {
 }
 
 func TestPrintRunFailureDigestExplainsAndChainShortCircuit(t *testing.T) {
-	stderrTail := newStreamTailBuffer(40)
-	_, _ = stderrTail.Write([]byte("pnpm check failed\n"))
 	var buf bytes.Buffer
 	printRunFailureDigest(&buf, runFailureDigestInput{
 		LeaseID:        "cbx_123",
 		CommandDisplay: "pnpm check && pnpm test",
 		ShellMode:      true,
 		Classification: FailureClassification{BlockedStage: "unknown", RetryLikely: "unknown"},
-	}, newStreamTailBuffer(40), stderrTail, "", "")
+	})
 	out := buf.String()
 	for _, want := range []string{
 		"area: user_command",
@@ -464,7 +458,7 @@ func TestPrintRunFailureDigestSuppressesMixedAndOrChain(t *testing.T) {
 		CommandDisplay: "pnpm build && pnpm test || pnpm cleanup",
 		ShellMode:      true,
 		Classification: FailureClassification{BlockedStage: "unknown", RetryLikely: "unknown"},
-	}, newStreamTailBuffer(40), newStreamTailBuffer(40), "", "")
+	})
 	out := buf.String()
 	for _, unexpected := range []string{"shell_chain:", "would_skip_if_left_failed:", "chain_semantics:"} {
 		if strings.Contains(out, unexpected) {
@@ -484,7 +478,7 @@ func TestPrintRunFailureDigestIncludesObservedPhases(t *testing.T) {
 			{Name: "check"},
 			{Name: "test"},
 		},
-	}, newStreamTailBuffer(40), newStreamTailBuffer(40), "", "")
+	})
 	out := buf.String()
 	for _, want := range []string{
 		"phase: test",
@@ -515,7 +509,7 @@ func TestPrintRunFailureDigestIncludesStructuredTestFailures(t *testing.T) {
 				Message:   "expected true\rspoofed",
 			}},
 		},
-	}, newStreamTailBuffer(40), newStreamTailBuffer(40), "", "")
+	})
 	out := buf.String()
 	for _, want := range []string{
 		"test_results: files=1 tests=2 failures=1 errors=0 skipped=0",
