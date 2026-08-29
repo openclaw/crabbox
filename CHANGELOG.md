@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Omitted speculative `&&` failure diagnostics for compound shell commands while retaining simple-chain explanations and workload exit behavior.
+
 - Repaired Machine0 UUID lookups through validated inventory and identity-verified full details by name, preserving UUID ownership and rejecting incomplete or changed identities.
 - Validated generated prewarm probes through the provider's run contract before backend configuration, ready-pool checks, or ACL changes, preserving follow-up routing and reuse intent.
 - Rejected Blacksmith Testbox `--no-sync` with exit 2 before acquisition or reuse instead of silently delegating sync, including nonblank `prewarm --probe-command` and named jobs with `noSync: true` before warmup or dry-run planning.

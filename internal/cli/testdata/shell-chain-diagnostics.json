@@ -1,0 +1,209 @@
+[
+  {
+    "name": "reporter if body",
+    "command": "if true; then false && echo nested-success; fi",
+    "exitCode": 1
+  },
+  {
+    "name": "outer and compound",
+    "command": "true && if true; then false && echo nested; fi",
+    "exitCode": 1
+  },
+  {
+    "name": "multiline if",
+    "command": "if true\nthen false && echo nested\nfi",
+    "exitCode": 1
+  },
+  {
+    "name": "for loop",
+    "command": "for x in one; do false && echo nested; done",
+    "exitCode": 1
+  },
+  {
+    "name": "while loop",
+    "command": "while false && echo nested; do :; done; false",
+    "exitCode": 1
+  },
+  {
+    "name": "until loop",
+    "command": "until true; do false && echo nested; done; false",
+    "exitCode": 1
+  },
+  {
+    "name": "case body",
+    "command": "case x in x) false && echo nested;; esac",
+    "exitCode": 1
+  },
+  {
+    "name": "function",
+    "command": "f() { false && echo nested; }; f",
+    "exitCode": 1
+  },
+  {
+    "name": "group",
+    "command": "{ false && echo nested; }",
+    "exitCode": 1
+  },
+  {
+    "name": "subshell",
+    "command": "(false && echo nested)",
+    "exitCode": 1
+  },
+  {
+    "name": "substitution",
+    "command": "echo $(false && echo nested) && false",
+    "exitCode": 1
+  },
+  {
+    "name": "quoted substitution",
+    "command": "echo \"$(false && echo nested)\" && false",
+    "exitCode": 1
+  },
+  {
+    "name": "backticks",
+    "command": "echo `false && echo nested` && false",
+    "exitCode": 1
+  },
+  {
+    "name": "quoted backticks",
+    "command": "echo \"`false && echo nested`\" && false",
+    "exitCode": 1
+  },
+  {
+    "name": "arithmetic",
+    "command": "echo $((1 && 2)) && false",
+    "exitCode": 1
+  },
+  {
+    "name": "conditional",
+    "command": "[[ x == x && y == y ]] && false"
+  },
+  {
+    "name": "mixed or",
+    "command": "false && echo skipped || false",
+    "exitCode": 1
+  },
+  {
+    "name": "pipeline",
+    "command": "printf x | cat && false",
+    "exitCode": 1
+  },
+  {
+    "name": "list",
+    "command": "false && echo skipped; true",
+    "exitCode": 0
+  },
+  {
+    "name": "comment",
+    "command": "false # && echo comment",
+    "exitCode": 1
+  },
+  {
+    "name": "heredoc",
+    "command": "cat <<'END'\ntext && text\nEND\nfalse",
+    "exitCode": 1
+  },
+  {
+    "name": "negated chain",
+    "command": "! true && echo skipped",
+    "exitCode": 1
+  },
+  {
+    "name": "simple failure",
+    "command": "false && echo skipped",
+    "segments": [
+      "false",
+      "echo skipped"
+    ],
+    "exitCode": 1
+  },
+  {
+    "name": "simple success",
+    "command": "true && printf ok",
+    "segments": [
+      "true",
+      "printf ok"
+    ],
+    "exitCode": 0
+  },
+  {
+    "name": "three segments",
+    "command": "true && false && echo skipped",
+    "segments": [
+      "true",
+      "false",
+      "echo skipped"
+    ],
+    "exitCode": 1
+  },
+  {
+    "name": "literal compound text",
+    "command": "printf '%s' 'if true; then a && b; fi' && false",
+    "segments": [
+      "printf '%s' 'if true; then a && b; fi'",
+      "false"
+    ],
+    "exitCode": 1
+  },
+  {
+    "name": "literal substitution",
+    "command": "printf '%s' '$(a && b)' && false",
+    "segments": [
+      "printf '%s' '$(a && b)'",
+      "false"
+    ],
+    "exitCode": 1
+  },
+  {
+    "name": "quoted operator",
+    "command": "printf \"a && b\" && false",
+    "segments": [
+      "printf \"a && b\"",
+      "false"
+    ],
+    "exitCode": 1
+  },
+  {
+    "name": "escaped operator",
+    "command": "printf '%s' a\\&\\&b && false",
+    "segments": [
+      "printf '%s' a\\&\\&b",
+      "false"
+    ],
+    "exitCode": 1
+  },
+  {
+    "name": "keyword argument",
+    "command": "echo if && false",
+    "segments": [
+      "echo if",
+      "false"
+    ],
+    "exitCode": 1
+  },
+  {
+    "name": "test command",
+    "command": "[ x = x ] && false",
+    "segments": [
+      "[ x = x ]",
+      "false"
+    ],
+    "exitCode": 1
+  },
+  {
+    "name": "unterminated quote",
+    "command": "true && echo 'bad"
+  },
+  {
+    "name": "trailing operator",
+    "command": "true &&"
+  },
+  {
+    "name": "leading operator",
+    "command": "&& false"
+  },
+  {
+    "name": "trailing escape",
+    "command": "true && echo \\"
+  }
+]

@@ -395,76 +395,77 @@ func printFailureDigestShellChain(w io.Writer, input runFailureDigestInput) {
 	fmt.Fprintln(w, "  chain_semantics: && only runs later segments if all earlier segments succeed")
 }
 
+// Only attribute simple chains. This scanner is not a shell grammar: compound
+// syntax, substitutions, lists, and pipelines make its explanation uncertain.
 func shellAndChainSegments(command string) []string {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return nil
 	}
 	var segments []string
-	var b strings.Builder
-	inSingle := false
-	inDouble := false
-	escaped := false
-	depth := 0
-	flush := func() {
-		part := strings.TrimSpace(b.String())
-		if part != "" {
-			segments = append(segments, part)
-		}
-		b.Reset()
-	}
+	inSingle, inDouble, escaped := false, false, false
+	start := 0
 	for i := 0; i < len(command); i++ {
 		ch := command[i]
 		if escaped {
-			b.WriteByte(ch)
 			escaped = false
 			continue
 		}
 		if ch == '\\' && !inSingle {
-			b.WriteByte(ch)
 			escaped = true
 			continue
 		}
+		if ch == '\'' && !inDouble {
+			inSingle = !inSingle
+			continue
+		}
+		if inSingle {
+			continue
+		}
+		if ch == '"' {
+			inDouble = !inDouble
+			continue
+		}
+		if ch == '`' || ch == '$' && i+1 < len(command) && command[i+1] == '(' {
+			return nil
+		}
+		if inDouble {
+			continue
+		}
 		switch ch {
-		case '\'':
-			if !inDouble {
-				inSingle = !inSingle
-			}
-			b.WriteByte(ch)
-		case '"':
-			if !inSingle {
-				inDouble = !inDouble
-			}
-			b.WriteByte(ch)
-		case '(', '{', '[':
-			if !inSingle && !inDouble {
-				depth++
-			}
-			b.WriteByte(ch)
-		case ')', '}', ']':
-			if !inSingle && !inDouble && depth > 0 {
-				depth--
-			}
-			b.WriteByte(ch)
-		case '&':
-			if !inSingle && !inDouble && depth == 0 && i+1 < len(command) && command[i+1] == '&' {
-				flush()
-				i++
-				continue
-			}
-			b.WriteByte(ch)
-		case '|':
-			if !inSingle && !inDouble && depth == 0 && i+1 < len(command) && command[i+1] == '|' {
+		case '(', ')', '{', '}', ';', '\n', '\r', '|', '#':
+			return nil
+		case '[':
+			if i+1 < len(command) && command[i+1] == '[' {
 				return nil
 			}
-			b.WriteByte(ch)
-		default:
-			b.WriteByte(ch)
+		case '<':
+			if i+1 < len(command) && command[i+1] == '<' {
+				return nil
+			}
+		case '&':
+			if i+1 >= len(command) || command[i+1] != '&' {
+				return nil
+			}
+			part := strings.TrimSpace(command[start:i])
+			if part == "" {
+				return nil
+			}
+			segments = append(segments, part)
+			i++
+			start = i + 1
 		}
 	}
-	flush()
-	if len(segments) < 2 {
+	last := strings.TrimSpace(command[start:])
+	if inSingle || inDouble || escaped || last == "" || len(segments) == 0 {
 		return nil
+	}
+	segments = append(segments, last)
+	for _, segment := range segments {
+		switch strings.Fields(segment)[0] {
+		case "if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac", "select", "function", "coproc", "!":
+			return nil
+		}
 	}
 	return segments
 }
