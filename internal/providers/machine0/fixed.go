@@ -153,19 +153,16 @@ func (b *backend) acquireFixed(ctx context.Context, req AcquireRequest) (LeaseTa
 				return LeaseTarget{}, err
 			}
 		}
-		attested := item
-		item, err = b.waitForResolveRunning(ctx, item, cfg.Machine0.CreateTimeout, replay, func(observed machine) error {
-			var err error
-			attested, err = attestFixedMachine0Detail(*claim, attested, observed)
+		item, err = b.waitForResolveRunning(ctx, item, cfg.Machine0.CreateTimeout, replay, func(previous, observed machine) (machine, error) {
+			item, err := attestFixedMachine0Detail(*claim, previous, observed)
 			if err != nil {
-				return err
+				return machine{}, err
 			}
-			return b.bindFixedMachine0(claim, attested, req.Keep, persist)
+			return item, b.bindFixedMachine0(claim, item, req.Keep, persist)
 		})
 		if err != nil {
 			return LeaseTarget{}, err
 		}
-		item = attested
 		server := b.serverFromMachine(item, *claim, cfg)
 		server.Labels = machineLabels(cfg, item, leaseID, intent.Slug, req.Keep, b.now())
 		return b.prepareLease(ctx, item, server, leaseID, true)

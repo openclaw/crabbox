@@ -72,8 +72,10 @@ func TestMachine0FixedNativeCreateResponseRemainsStoppable(t *testing.T) {
 			sizes, _ := json.Marshal([]machineSize{testSize()})
 			get, create := "get\x00"+item.Name+"\x00--json", "new\x00"+item.Name+"\x00--size\x00"+item.Size+"\x00--region\x00"+item.Region+"\x00--image\x00"+item.Image
 			runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
-				"sizes\x00--all\x00--json": {Stdout: string(sizes)}, "ls\x00--json": {Stdout: "[]"}, "keys\x00ls\x00--json": {Stdout: "[]"},
-				create: {Stdout: "VM is starting\n"}, get: {Stdout: string(data)},
+				"sizes\x00--all\x00--json": {Stdout: string(sizes)}, "ls\x00--json": {Stdout: "[]"},
+				"keys\x00ls\x00--json":        {Stdout: `[{"name":"ci","type":"MANAGED","isDefault":true}]`},
+				"keys\x00get\x00ci\x00--json": {Stdout: `{"name":"ci","type":"MANAGED"}`},
+				create:                        {Stdout: "VM is starting\n"}, get: {Stdout: string(data)},
 			}}
 			if readFailure {
 				runner.responses[get] = core.LocalCommandResult{Stdout: "{"}

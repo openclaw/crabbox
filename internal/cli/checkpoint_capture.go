@@ -333,9 +333,7 @@ func (a App) advanceCheckpointCapture(ctx context.Context, cfg Config, repo Repo
 	if capture.Phase == "failed" || record.Native.ImageID == "" {
 		return nil
 	}
-	imageRecord := *record
-	imageRecord.Capture = nil
-	audit, err := a.verifyCheckpointRecord(ctx, store, imageRecord)
+	audit, err := a.verifyCheckpointResource(ctx, store, *record)
 	if err != nil {
 		return err
 	}
@@ -372,9 +370,7 @@ func (a App) discardFailedCheckpoint(ctx context.Context, cfg Config, repo Repo,
 		if err := ValidateCheckpointCaptureClaim(claim, record.ID, record.Capture); err != nil {
 			return err
 		}
-		image := *record
-		image.Capture = nil
-		audit, err := a.verifyCheckpointRecord(ctx, store, image)
+		audit, err := a.verifyCheckpointResource(ctx, store, *record)
 		if err != nil {
 			return err
 		}
@@ -388,7 +384,7 @@ func (a App) discardFailedCheckpoint(ctx context.Context, cfg Config, repo Repo,
 			if err := deleteCheckpointResource(ctx, store, *record); err != nil {
 				return err
 			}
-			audit, err = a.verifyCheckpointRecord(ctx, store, image)
+			audit, err = a.verifyCheckpointResource(ctx, store, *record)
 			if err != nil {
 				return err
 			}
@@ -505,9 +501,7 @@ func (a App) retireCheckpointSource(ctx context.Context, cfg Config, repo Repo, 
 		return err
 	}
 	if !record.Capture.DiscardFailed {
-		image := *record
-		image.Capture = nil
-		audit, err := a.verifyCheckpointRecord(ctx, store, image)
+		audit, err := a.verifyCheckpointResource(ctx, store, *record)
 		if err != nil {
 			return err
 		}

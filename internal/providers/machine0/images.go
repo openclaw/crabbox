@@ -314,15 +314,14 @@ func (b *backend) restartCheckpointSource(ctx context.Context, claim LeaseClaim,
 	if err := b.api.Start(restartCtx, stopped.Name); err != nil {
 		return Server{}, SSHTarget{}, fmt.Errorf("restart Machine0 checkpoint source %s: %w", stopped.Name, err)
 	}
-	attested := stopped
-	running, err := b.waitForRunningAfterStart(restartCtx, stopped.Name, timeout, func(observed machine) error {
+	running, err := b.waitForRunningAfterStart(restartCtx, stopped.Name, timeout, func(previous, observed machine) (machine, error) {
 		if fixedMachine0LeaseKind.IsFixedClaim(claim) {
-			var err error
-			attested, err = attestFixedMachine0Detail(claim, attested, observed)
-			return err
+			if previous.ID == "" {
+				previous = stopped
+			}
+			return attestFixedMachine0Detail(claim, previous, observed)
 		}
-		attested = observed
-		return nil
+		return observed, nil
 	})
 	if err != nil {
 		return Server{}, SSHTarget{}, fmt.Errorf("restart Machine0 checkpoint source %s: %w", stopped.Name, err)
@@ -330,7 +329,6 @@ func (b *backend) restartCheckpointSource(ctx context.Context, claim LeaseClaim,
 	if err := validateMachineClaimOwnership(claim, running); err != nil {
 		return Server{}, SSHTarget{}, err
 	}
-	running = attested
 	cfg := effectiveMachine0Config(b.configForRun(), running)
 	server := b.serverFromMachine(running, claim, cfg)
 	lease, err := b.prepareLeaseWithOptions(restartCtx, running, server, claim.LeaseID, machine0PrepareOptions{Check: true, ResetHostTrust: true})

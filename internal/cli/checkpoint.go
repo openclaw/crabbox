@@ -210,8 +210,14 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 		case checkpointKindRecipe:
 		case checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindMachine0, checkpointKindParallels, checkpointKindDockerCommit, checkpointKindDaytona, checkpointKindIncus:
 			createStrategy := checkpointCreateStrategy(*mode, *strategy, createKind)
-			image, metadata, err := operationApp.createNativeCheckpoint(ctx, cfg, server, target, record.ID, leaseID, record.Name, repo.Name, workdir, createStrategy, *noReboot, *wait, *waitTimeout, func(result NativeCheckpointCreateResult) error {
-				return store.WriteNativeProgress(&record, result, *noReboot)
+			image, metadata, err := operationApp.createNativeCheckpointRequest(ctx, NativeCheckpointCreateRequest{
+				Config: cfg, Server: server, Target: target, CheckpointID: record.ID,
+				LeaseID: leaseID, Name: record.Name, RepoName: repo.Name, Workdir: workdir,
+				Strategy: createStrategy, NoReboot: *noReboot, Wait: *wait,
+				WaitTimeout: *waitTimeout, Stderr: operationApp.Stderr,
+				Persist: func(result NativeCheckpointCreateResult) error {
+					return store.WriteNativeProgress(&record, result, *noReboot)
+				},
 			})
 			if image.ID != "" {
 				applyNativeImageCheckpointRecord(&record, image, *noReboot)
@@ -1437,74 +1443,63 @@ func deleteCheckpointRecord(ctx context.Context, store checkpointStore, record c
 
 func deleteCheckpointResource(ctx context.Context, store checkpointStore, record checkpointRecord) error {
 	providerID := nativeCheckpointDeleteID(record)
-	if isNativeCheckpointKind(record.Kind) && providerID != "" {
-		if provider, ok := nativeCheckpointLifecycleProvider(Config{Provider: record.nativeProvider()}, Server{}); ok {
-			request := nativeCheckpointResourceRequest(record)
-			request.Persist = func(result NativeCheckpointCreateResult) error {
-				return store.WriteNativeProgress(&record, result, record.Native.NoReboot)
-			}
-			if err := provider.DeleteNativeCheckpoint(ctx, request); err != nil {
-				return err
-			}
-			return nil
+	if !isNativeCheckpointKind(record.Kind) || providerID == "" {
+		return nil
+	}
+	if provider, ok := nativeCheckpointLifecycleProvider(Config{Provider: record.nativeProvider()}, Server{}); ok {
+		request := nativeCheckpointResourceRequest(record)
+		request.Persist = func(result NativeCheckpointCreateResult) error {
+			return store.WriteNativeProgress(&record, result, record.Native.NoReboot)
 		}
-		if record.Kind == checkpointKindParallels {
-			cfg, err := loadConfig()
-			if err != nil {
-				return err
-			}
-			applyParallelsCheckpointHostConfig(&cfg, record)
-			if err := NewParallelsClient(cfg, nil).DeleteSnapshot(ctx, record.Native.Resource, providerID, false); err != nil {
-				return err
-			}
-			return nil
-		}
-		if cfg, ok := directAWSCheckpointConfig(record); ok {
-			client, err := newAWSClient(ctx, cfg)
-			if err != nil {
-				return err
-			}
-			if err := client.GuardAccount(ctx, record.Native.AccountID); err != nil {
-				return err
-			}
-			if len(record.Native.SnapshotIDs) == 0 {
-				if image, err := client.GetImageCheckpoint(ctx, providerID); err == nil && len(image.SnapshotIDs) > 0 {
-					record.Native.SnapshotIDs = image.SnapshotIDs
-					if writeErr := store.Write(record); writeErr != nil {
-						return writeErr
-					}
-				}
-			}
-			if err := client.DeleteImageCheckpoint(ctx, providerID, record.Native.SnapshotIDs, record.Native.AccountID); err != nil {
-				return err
-			}
-			return nil
-		}
-		if cfg, ok := directAzureCheckpointConfig(record); ok {
-			client, err := NewAzureClient(ctx, cfg)
-			if err != nil {
-				return err
-			}
-			if err := client.DeleteOSDiskSnapshot(ctx, providerID); err != nil {
-				return err
-			}
-			return nil
-		}
-		coord, err := configuredAdminCoordinator()
+		return provider.DeleteNativeCheckpoint(ctx, request)
+	}
+	if record.Kind == checkpointKindParallels {
+		cfg, err := loadConfig()
 		if err != nil {
 			return err
 		}
-		ref := nativeCoordinatorImageRef(record)
-		if err := coord.DeleteImage(ctx, providerID, ref); err != nil && !isCoordinatorImageNotFound(err, providerID) {
-			if !isCoordinatorNotFound(err) {
-				return err
-			}
-			if _, verifyErr := coord.Image(ctx, providerID, ref); !isCoordinatorImageNotFound(verifyErr, providerID) {
-				if verifyErr != nil {
-					return verifyErr
+		applyParallelsCheckpointHostConfig(&cfg, record)
+		return NewParallelsClient(cfg, nil).DeleteSnapshot(ctx, record.Native.Resource, providerID, false)
+	}
+	if cfg, ok := directAWSCheckpointConfig(record); ok {
+		client, err := newAWSClient(ctx, cfg)
+		if err != nil {
+			return err
+		}
+		if err := client.GuardAccount(ctx, record.Native.AccountID); err != nil {
+			return err
+		}
+		if len(record.Native.SnapshotIDs) == 0 {
+			if image, err := client.GetImageCheckpoint(ctx, providerID); err == nil && len(image.SnapshotIDs) > 0 {
+				record.Native.SnapshotIDs = image.SnapshotIDs
+				if writeErr := store.Write(record); writeErr != nil {
+					return writeErr
 				}
-				return err
 			}
+		}
+		return client.DeleteImageCheckpoint(ctx, providerID, record.Native.SnapshotIDs, record.Native.AccountID)
+	}
+	if cfg, ok := directAzureCheckpointConfig(record); ok {
+		client, err := NewAzureClient(ctx, cfg)
+		if err != nil {
+			return err
+		}
+		return client.DeleteOSDiskSnapshot(ctx, providerID)
+	}
+	coord, err := configuredAdminCoordinator()
+	if err != nil {
+		return err
+	}
+	ref := nativeCoordinatorImageRef(record)
+	if err := coord.DeleteImage(ctx, providerID, ref); err != nil && !isCoordinatorImageNotFound(err, providerID) {
+		if !isCoordinatorNotFound(err) {
+			return err
+		}
+		if _, verifyErr := coord.Image(ctx, providerID, ref); !isCoordinatorImageNotFound(verifyErr, providerID) {
+			if verifyErr != nil {
+				return verifyErr
+			}
+			return err
 		}
 	}
 	return nil
@@ -1673,6 +1668,20 @@ func (a App) verifyCheckpointRecords(ctx context.Context, store checkpointStore,
 }
 
 func (a App) verifyCheckpointRecord(ctx context.Context, store checkpointStore, record checkpointRecord) (checkpointAudit, error) {
+	if isNativeCheckpointKind(record.Kind) && record.Capture != nil && record.Capture.Phase != "retired" {
+		if _, err := store.Paths(record.ID); err != nil {
+			return checkpointAudit{}, err
+		}
+		return checkpointAudit{
+			Record: record, LocalState: "metadata_available", ProviderState: "pending",
+			NextAction: "replay_capture", Error: record.Capture.Error,
+		}, nil
+	}
+	return a.verifyCheckpointResource(ctx, store, record)
+}
+
+// Resource verification is also used by retirement while its capture is still held.
+func (a App) verifyCheckpointResource(ctx context.Context, store checkpointStore, record checkpointRecord) (checkpointAudit, error) {
 	audit := checkpointAudit{
 		Record:     record,
 		LocalState: "metadata_available",
@@ -1706,12 +1715,6 @@ func (a App) verifyCheckpointRecord(ctx context.Context, store checkpointStore, 
 		audit.NextAction = "restore_or_fork"
 		return audit, nil
 	case isNativeCheckpointKind(record.Kind):
-		if record.Capture != nil && record.Capture.Phase != "retired" {
-			audit.ProviderState = "pending"
-			audit.NextAction = "replay_capture"
-			audit.Error = record.Capture.Error
-			return audit, nil
-		}
 		providerID := strings.TrimSpace(record.Native.ImageID)
 		if providerID == "" {
 			if nativeCheckpointResourceID(record) != "" {

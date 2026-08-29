@@ -171,10 +171,14 @@ func main() {
 	case "sizes":
 		output([]map[string]any{{"size": "large", "vcpu": 2, "ramGb": 4, "diskGb": 80, "regions": []string{"eu"}}})
 	case "keys":
-		if len(args) != 3 || args[1] != "ls" || args[2] != "--json" {
+		switch {
+		case len(args) == 3 && args[1] == "ls" && args[2] == "--json":
+			output([]map[string]any{{"name": "ci", "type": "MANAGED", "isDefault": true}})
+		case len(args) == 4 && args[1] == "get" && args[2] == "ci" && args[3] == "--json":
+			output(map[string]any{"name": "ci", "type": "MANAGED"})
+		default:
 			fail("unsupported key lookup: %v", args)
 		}
-		output([]any{})
 	case "new":
 		if state.Machine != nil || len(args) != 10 || args[2] != "--size" || args[4] != "--region" || args[6] != "--image" || args[8] != "--image-version" {
 			fail("unsupported or duplicate fixture create: %v", args)
