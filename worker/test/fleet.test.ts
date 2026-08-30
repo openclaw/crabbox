@@ -19311,6 +19311,243 @@ describe("fleet lease identity and idle", () => {
     );
   });
 
+  it("releases an unrelated AWS lease while a new instance waits for its address", async () => {
+    const waitingForAddress = deferred<void>();
+    const addressReady = deferred<ProviderMachine>();
+    const fixture = awsIngressTestFleet();
+    const { storage, activeID, creatingID, headers, fleet } = fixture;
+    storage.seed(`lease:${activeID}`, {
+      ...storage.value<LeaseRecord>(`lease:${activeID}`)!,
+      region: "us-east-1",
+    });
+    const wait = vi.spyOn(EC2SpotClient.prototype, "waitForServerIP").mockImplementation(() => {
+      waitingForAddress.resolve();
+      return addressReady.promise;
+    });
+    const create = fixture.create();
+    let release: Promise<Response> | undefined;
+    try {
+      await Promise.race([
+        waitingForAddress.promise,
+        create.then(async (response) => {
+          throw new Error(await response.text());
+        }),
+      ]);
+      expect(fixture.requests.filter(({ action }) => action === "RunInstances")).toHaveLength(1);
+      let released = false;
+      release = fixture.release().then((response) => {
+        released = true;
+        return response;
+      });
+      const inspect = await fleet.fetch(request("GET", `/v1/leases/${creatingID}`, { headers }));
+      expect(inspect.status).toBe(200);
+      await expect(inspect.json()).resolves.toMatchObject({ lease: { state: "provisioning" } });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(released, "release must not wait for another instance's network readiness").toBe(true);
+      await expect((await release).json()).resolves.toMatchObject({
+        lease: {
+          state: "released",
+          releaseDeletesServer: true,
+          cleanupStartedAt: expect.any(String),
+        },
+      });
+    } finally {
+      addressReady.resolve(ownedTestMachine("aws", "i-new-instance"));
+      await Promise.allSettled([create, ...(release ? [release] : [])]);
+      wait.mockRestore();
+    }
+  });
+
+  it("fences release during an AWS ingress write but not the following address wait", async () => {
+    const ingressStarted = deferred<void>();
+    const finishIngress = deferred<void>();
+    const addressStarted = deferred<void>();
+    const finishAddress = deferred<ProviderMachine>();
+    const { create, release, fleet, headers, creatingID } = awsIngressTestFleet(async (action) => {
+      if (action === "AuthorizeSecurityGroupIngress") {
+        ingressStarted.resolve();
+        await finishIngress.promise;
+      }
+      return undefined;
+    });
+    const wait = vi.spyOn(EC2SpotClient.prototype, "waitForServerIP").mockImplementation(() => {
+      addressStarted.resolve();
+      return finishAddress.promise;
+    });
+    const creating = create();
+    let releasing: Promise<Response> | undefined;
+    try {
+      await Promise.race([
+        ingressStarted.promise,
+        creating.then(async (response) => {
+          throw new Error(await response.text());
+        }),
+      ]);
+      let completed = false;
+      releasing = release().then((response) => {
+        completed = true;
+        return response;
+      });
+      expect(
+        (await fleet.fetch(request("GET", `/v1/leases/${creatingID}`, { headers }))).status,
+      ).toBe(200);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(completed).toBe(false);
+      finishIngress.resolve();
+      await addressStarted.promise;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(completed).toBe(true);
+      expect((await releasing).status).toBe(200);
+    } finally {
+      finishIngress.resolve();
+      finishAddress.resolve(ownedTestMachine("aws", "i-new-instance"));
+      await Promise.allSettled([creating, ...(releasing ? [releasing] : [])]);
+      wait.mockRestore();
+    }
+  });
+
+  it("refreshes queued AWS ingress after an earlier release removes a lease", async () => {
+    const refreshStarted = deferred<void>();
+    const finishRefresh = deferred<void>();
+    const createPrepared = deferred<void>();
+    let refreshing = true;
+    const afterReleaseCIDRs: string[] = [];
+    let fixture: ReturnType<typeof awsIngressTestFleet>;
+    fixture = awsIngressTestFleet(async (action, params) => {
+      if (action === "AuthorizeSecurityGroupIngress" && refreshing) {
+        refreshStarted.resolve();
+        await finishRefresh.promise;
+      }
+      if (
+        action === "AuthorizeSecurityGroupIngress" &&
+        fixture.storage.value<LeaseRecord>(`lease:${fixture.activeID}`)?.state === "released"
+      ) {
+        afterReleaseCIDRs.push(params.get("IpPermissions.1.IpRanges.1.CidrIp") ?? "");
+      }
+      return undefined;
+    });
+    const { fleet, headers, activeID, create, release, provider } = fixture;
+    const prepare = provider.prepareLeaseCreate.bind(provider);
+    const prepared = vi
+      .spyOn(provider, "prepareLeaseCreate")
+      .mockImplementation(async (...args) => {
+        const result = await prepare(...args);
+        createPrepared.resolve();
+        return result;
+      });
+    const refresh = fleet.fetch(
+      request("POST", `/v1/leases/${activeID}/heartbeat`, {
+        headers: { ...headers, "cf-connecting-ip": "198.51.100.30" },
+        body: { idleTimeoutSeconds: 600 },
+      }),
+    );
+    let creating: Promise<Response> | undefined;
+    let releasing: Promise<Response> | undefined;
+    try {
+      await refreshStarted.promise;
+      releasing = release();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      creating = create();
+      await Promise.race([
+        createPrepared.promise,
+        creating.then(async (response) => {
+          throw new Error(await response.text());
+        }),
+      ]);
+      refreshing = false;
+      finishRefresh.resolve();
+      expect((await refresh).status).toBe(200);
+      expect((await releasing).status).toBe(200);
+      expect((await creating).status).toBe(201);
+      expect(afterReleaseCIDRs).toEqual(["198.51.100.20/32"]);
+    } finally {
+      finishRefresh.resolve();
+      await Promise.allSettled([
+        refresh,
+        ...(creating ? [creating] : []),
+        ...(releasing ? [releasing] : []),
+      ]);
+      prepared.mockRestore();
+    }
+  });
+
+  it("keeps regionless AWS access in its original region during create fallback", async () => {
+    const fixture = awsIngressTestFleet(async (action, _params, region) => {
+      if (action === "RunInstances" && region === "eu-west-1") {
+        return ec2XMLResponse(
+          "<Response><Errors><Error><Code>InsufficientInstanceCapacity</Code></Error></Errors></Response>",
+          400,
+        );
+      }
+      return undefined;
+    });
+    const { storage, activeID, create, requests } = fixture;
+    const active = storage.value<LeaseRecord>(`lease:${activeID}`)!;
+    delete active.region;
+    storage.seed(`lease:${activeID}`, active);
+    const response = await create({
+      capacity: { market: "on-demand", fallback: "none", regions: ["eu-west-1", "us-east-1"] },
+    });
+    expect(response.status).toBe(201);
+    const authorized = requests.filter(({ action }) => action === "AuthorizeSecurityGroupIngress");
+    expect(
+      authorized.filter(({ region }) => region === "eu-west-1").map(({ cidr }) => cidr),
+    ).toContain("198.51.100.10/32");
+    expect(
+      authorized.filter(({ region }) => region === "us-east-1").map(({ cidr }) => cidr),
+    ).toEqual(["198.51.100.20/32"]);
+  });
+
+  it("rejects a canceled AWS regional retry before it writes ingress", async () => {
+    const nextRegionStarted = deferred<void>();
+    const finishNextRegionPreparation = deferred<void>();
+    const { fleet, headers, create, creatingID, createAttemptID, requests } = awsIngressTestFleet(
+      async (action, _params, region) => {
+        if (action === "RunInstances" && region === "eu-west-1") {
+          return ec2XMLResponse(
+            "<Response><Errors><Error><Code>InsufficientInstanceCapacity</Code></Error></Errors></Response>",
+            400,
+          );
+        }
+        if (action === "DescribeKeyPairs" && region === "us-east-1") {
+          nextRegionStarted.resolve();
+          await finishNextRegionPreparation.promise;
+        }
+        return undefined;
+      },
+    );
+    const creating = create({
+      capacity: { market: "on-demand", fallback: "none", regions: ["eu-west-1", "us-east-1"] },
+    });
+    try {
+      await Promise.race([
+        nextRegionStarted.promise,
+        creating.then(async (response) => {
+          throw new Error(await response.text());
+        }),
+      ]);
+      const canceled = await fleet.fetch(
+        request("POST", `/v1/leases/${creatingID}/cancel-create`, {
+          headers,
+          body: { createAttemptID },
+        }),
+      );
+      expect(canceled.status).toBe(200);
+      finishNextRegionPreparation.resolve();
+      expect((await creating).status).not.toBe(201);
+      expect(
+        requests.filter(
+          ({ action, region }) =>
+            region === "us-east-1" &&
+            ["AuthorizeSecurityGroupIngress", "RunInstances"].includes(action),
+        ),
+      ).toEqual([]);
+    } finally {
+      finishNextRegionPreparation.resolve();
+      await Promise.allSettled([creating]);
+    }
+  });
+
   it("reconciles AWS ingress after the final overlapping create drains", async () => {
     const storage = new MemoryStorage();
     const started = [deferred<void>(), deferred<void>()];
@@ -19376,75 +19613,33 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value("aws-ingress-reconcile:pending")).toBeUndefined();
   });
 
-  it("recovers additive AWS creates from security-group rule limits", async () => {
-    const storage = new MemoryStorage();
-    let creates = 0;
-    const reconciliations: Array<{ cidrs: string[]; region: string; stateRegions: string[] }> = [];
-    const fleet = testFleet(storage, {
-      aws: fakeProvider(
-        () => {
-          creates += 1;
-          if (creates === 1) {
-            throw new Error("RulesPerSecurityGroupLimitExceeded: security group rule quota");
-          }
-        },
-        {
-          provider: "aws",
-          region: "us-east-1",
-          onPrepareLeaseCreate(config, lease, context) {
-            return {
-              config,
-              lease: {
-                ...lease,
-                network: {
-                  ...lease.network,
-                  sshSourceCIDRs: context.requestSourceCIDRs,
-                  sshSourceCIDRsComplete: true,
-                },
-              },
-              provisioning: {
-                sshIngressReconcile: "additive",
-                publishAccessBeforeProvisioning: true,
-              },
-            };
-          },
-          async onCreateProvisioning(provisioning) {
-            await provisioning?.onTargetAttempt?.({ region: "us-east-1" });
-          },
-          onReconcileLeaseAccess(lease, context) {
-            reconciliations.push({
-              cidrs: context.activeLeases.flatMap(
-                (candidate) => candidate.network?.sshSourceCIDRs ?? [],
-              ),
-              region: lease.region ?? "",
-              stateRegions: context.activeLeases.map((candidate) => candidate.region ?? ""),
-            });
-          },
-        },
-      ),
+  it("recovers additive AWS ingress from rule limits without retrying instance creation", async () => {
+    let blocked = false;
+    const { create, requests } = awsIngressTestFleet(async (action, params) => {
+      if (
+        !blocked &&
+        action === "AuthorizeSecurityGroupIngress" &&
+        params.get("IpPermissions.1.IpRanges.1.CidrIp") === "198.51.100.20/32"
+      ) {
+        blocked = true;
+        return ec2XMLResponse(
+          "<Response><Errors><Error><Code>RulesPerSecurityGroupLimitExceeded</Code></Error></Errors></Response>",
+          400,
+        );
+      }
+      return undefined;
     });
-
-    const response = await fleet.fetch(
-      request("POST", "/v1/leases", {
-        headers: { "cf-connecting-ip": "198.51.100.10" },
-        body: {
-          leaseID: "cbx_abcdef123456",
-          provider: "aws",
-          awsRegion: "eu-west-1",
-          sshPublicKey: "ssh-ed25519 test",
-        },
-      }),
-    );
-
+    const response = await create();
+    expect(await response.clone().text()).not.toContain('"error"');
     expect(response.status).toBe(201);
-    expect(creates).toBe(2);
-    expect(reconciliations).toEqual([
-      {
-        cidrs: ["198.51.100.10/32"],
-        region: "us-east-1",
-        stateRegions: ["us-east-1"],
-      },
-    ]);
+    expect(blocked).toBe(true);
+    expect(requests.filter(({ action }) => action === "RunInstances")).toHaveLength(1);
+    expect(
+      requests.filter(
+        ({ action, cidr }) =>
+          action === "AuthorizeSecurityGroupIngress" && cidr === "198.51.100.20/32",
+      ),
+    ).toHaveLength(3);
   });
 
   it("preserves distinct pending AWS ingress targets until each reconciles", async () => {
@@ -36864,6 +37059,134 @@ function expiredRuntimeAdapterClaim(adapterID: string) {
     claimVersion: 1,
     claimState: "provisional",
     claimExpiresAt: new Date(Date.now() - 1_000).toISOString(),
+  };
+}
+
+function awsIngressTestFleet(
+  onRequest: (
+    action: string,
+    params: URLSearchParams,
+    region: string,
+  ) => Promise<Response | undefined> = async () => undefined,
+) {
+  const storage = new MemoryStorage();
+  const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+  const activeID = "cbx_abcdef123456";
+  const creatingID = "cbx_abcdef123457";
+  const createAttemptID = "cat_00000000000000000000000000000179";
+  const requests: Array<{ action: string; cidr: string; region: string }> = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const fetchRequest = input instanceof Request ? input : new Request(input, init);
+      const region = new URL(fetchRequest.url).hostname.split(".")[1] ?? "";
+      if (fetchRequest.headers.get("x-amz-target")?.includes("GetServiceQuota")) {
+        return jsonResponse({ Quota: { Value: 1024 } });
+      }
+      const params = new URLSearchParams(await requestBodyForTest(input, init));
+      const action = params.get("Action") ?? "";
+      requests.push({
+        action,
+        cidr: params.get("IpPermissions.1.IpRanges.1.CidrIp") ?? "",
+        region,
+      });
+      const response = await onRequest(action, params, region);
+      if (response) return response;
+      if (action === "DescribeKeyPairs") {
+        return ec2XMLResponse(
+          "<Response><Errors><Error><Code>InvalidKeyPair.NotFound</Code></Error></Errors></Response>",
+          400,
+        );
+      }
+      if (action === "DescribeSecurityGroups") {
+        return ec2XMLResponse(
+          "<Response><securityGroupInfo><item><groupId>sg-shared</groupId><ipPermissions /></item></securityGroupInfo></Response>",
+        );
+      }
+      if (action === "RunInstances") {
+        return ec2XMLResponse(
+          "<Response><instancesSet><item><instanceId>i-new-instance</instanceId><instanceType>t3.small</instanceType><instanceState><name>pending</name></instanceState></item></instancesSet></Response>",
+        );
+      }
+      if (action === "DescribeInstances") {
+        return ec2XMLResponse(
+          "<Response><reservationSet><item><instancesSet><item><instanceId>i-new-instance</instanceId><instanceType>t3.small</instanceType><ipAddress>192.0.2.20</ipAddress><instanceState><name>running</name></instanceState></item></instancesSet></item></reservationSet></Response>",
+        );
+      }
+      if (
+        [
+          "ImportKeyPair",
+          "AuthorizeSecurityGroupIngress",
+          "RevokeSecurityGroupIngress",
+          "TerminateInstances",
+        ].includes(action)
+      ) {
+        return ec2XMLResponse("<Response />");
+      }
+      throw new Error(`unexpected EC2 action: ${action}`);
+    }),
+  );
+  const provider = new AWSProvider(
+    { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "test" } as Env,
+    "eu-west-1",
+    storage,
+  );
+  const fleet = testFleet(storage, { aws: provider });
+  storage.seed(
+    `lease:${activeID}`,
+    testLease({
+      id: activeID,
+      owner: "alice@example.com",
+      org: "example-org",
+      provider: "aws",
+      cloudID: "i-active-instance",
+      region: "eu-west-1",
+      sshPort: "22",
+      sshFallbackPorts: [],
+      network: {
+        awsSecurityGroupID: "sg-shared",
+        sshSourceCIDRs: ["198.51.100.10/32"],
+        sshSourceCIDRsComplete: true,
+      },
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+    }),
+  );
+  const create = (overrides: Partial<LeaseRequest> = {}) =>
+    fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: { ...headers, "x-crabbox-admin": "true", "cf-connecting-ip": "198.51.100.20" },
+        body: {
+          leaseID: creatingID,
+          createAttemptID,
+          provider: "aws",
+          awsRegion: "eu-west-1",
+          awsSGID: "sg-shared",
+          awsAMI: "ami-test",
+          serverType: "t3.small",
+          serverTypeExplicit: true,
+          sshPort: "22",
+          sshFallbackPorts: [],
+          capacity: { market: "on-demand", fallback: "none" },
+          sshPublicKey: "ssh-ed25519 test",
+          ...overrides,
+        },
+      }),
+    );
+  const release = () =>
+    fleet.fetch(
+      request("POST", `/v1/leases/${activeID}/release`, { headers, body: { delete: true } }),
+    );
+  return {
+    storage,
+    headers,
+    activeID,
+    creatingID,
+    createAttemptID,
+    requests,
+    fleet,
+    provider,
+    create,
+    release,
   };
 }
 

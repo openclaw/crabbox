@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Kept public AWS lease release independent of other instances’ image and network readiness, while fencing ingress writes with fresh lease authority and access state.
 - Required exact Modal sandbox and native scope bindings for stop, reuse, and one-shot cleanup, fencing claim changes and retaining uncertain or legacy resources until termination is confirmed. Thanks @coygeek.
 - Pinned the built-in Tart macOS image and verified cloned disk, NVRAM, and configuration contents before boot, retaining custom-image overrides, recording verified provenance, and waiting for the guest agent before SSH setup. Thanks @coygeek.
 - Honored explicit Tencent Cloud Spot and on-demand market selections while preserving hourly billing when no market is configured, with invalid values rejected before provider access. Thanks @exAClior.

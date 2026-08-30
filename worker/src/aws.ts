@@ -562,6 +562,7 @@ type DescribedSSHIngressRule = SSHIngressRule & { description: string };
 interface AWSIngressOptions {
   reconcile?: "authoritative" | "additive";
   allowEmpty?: boolean;
+  withIngress?: (apply: (cidrs: string[]) => Promise<string>) => Promise<string>;
 }
 
 const sshIngressRangeFamilies = [
@@ -930,7 +931,11 @@ export class EC2SpotClient {
         : config.target === "macos" || capabilityImageRequired
           ? ""
           : await this.resolveAMI(config);
-      const securityGroupID = await this.ensureSecurityGroup(config, options);
+      const securityGroupID = options.withIngress
+        ? await options.withIngress((cidrs) =>
+            this.ensureSecurityGroup({ ...config, awsSSHCIDRs: cidrs }, options),
+          )
+        : await this.ensureSecurityGroup(config, options);
       const pinnedMacHostID = config.target === "macos" ? config.hostID || config.awsMacHostID : "";
       // An explicit Mac host is tied to one hardware family. Resolve that family once so a
       // defaulted --type cannot send an incompatible instance type to the pinned host.
