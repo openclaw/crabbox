@@ -559,10 +559,8 @@ func TestRunReturnsReusedMachineSession(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	repo := t.TempDir()
 	leaseID := "cbx_123456789abc"
-	if err := core.ClaimLeaseForRepoProvider(leaseID, "blue", providerName, repo, time.Minute, false); err != nil {
-		t.Fatal(err)
-	}
-	fake := &fakeAPI{machine: machineData{ID: "mach_1", Name: "crabbox-blue-123456789abc", State: "running"}}
+	seedSmolvmClaim(t, leaseID, "blue", "mach_1", repo, nil)
+	fake := &fakeAPI{machine: machineData{ID: "mach_1", Name: "crabbox-blue-123456789abc", State: "running", CreatedAt: "2026-08-30T00:00:00Z"}}
 	withFakeAPI(t, fake)
 	backend := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
 	result, err := backend.Run(context.Background(), RunRequest{
@@ -663,7 +661,7 @@ func TestSyncWorkspaceUsesInject(t *testing.T) {
 
 func TestStatusMapsMachineName(t *testing.T) {
 	fake := &fakeAPI{machine: machineData{
-		ID: "mach_1", Name: "crabbox-blue-123456789abc", State: "running",
+		ID: "mach_1", Name: "crabbox-blue-123456789abc", State: "running", CreatedAt: "2026-08-30T00:00:00Z",
 		Source:    smolvmMachineSource{Type: "image", Reference: "alpine"},
 		Resources: smolvmMachineResources{CPUs: 4, MemoryMB: 8192},
 	}}
@@ -701,10 +699,8 @@ func TestRunRawMachineIDEnforcesRepositoryClaim(t *testing.T) {
 	leaseID := "cbx_123456789abc"
 	repoA := t.TempDir()
 	repoB := t.TempDir()
-	if err := core.ClaimLeaseForRepoProvider(leaseID, "blue", providerName, repoA, time.Minute, false); err != nil {
-		t.Fatal(err)
-	}
-	fake := &fakeAPI{machine: machineData{ID: "mach_1", Name: "crabbox-blue-123456789abc", State: "running"}}
+	seedSmolvmClaim(t, leaseID, "blue", "mach_1", repoA, nil)
+	fake := &fakeAPI{machine: machineData{ID: "mach_1", Name: "crabbox-blue-123456789abc", State: "running", CreatedAt: "2026-08-30T00:00:00Z"}}
 	withFakeAPI(t, fake)
 	backend := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
 	_, err := backend.Run(context.Background(), RunRequest{
@@ -771,43 +767,69 @@ type fakeAPI struct {
 	deletedID      string
 	deleteErr      error
 	injected       bool
+	deleted        bool
+	createHook     func(*fakeAPI)
+	startHook      func(context.Context, string) error
+	getHook        func(context.Context, string) (machineData, error)
+	deleteHook     func(context.Context, string) error
+	streamHook     func()
 }
 
 func (f *fakeAPI) CreateMachine(_ context.Context, req createRequest) (machineData, error) {
 	f.verbs = append(f.verbs, "create")
 	f.createReq = req
-	f.machine = machineData{ID: "mach_1", Name: req.Name, State: "running"}
+	f.machine = machineData{ID: "mach_1", Name: req.Name, State: "running", CreatedAt: "2026-08-30T00:00:00Z"}
 	if ref := strings.TrimSpace(req.Source.Reference); ref != "" {
 		f.machine.Source = req.Source
 	} else if req.Source.Type != "" {
 		f.machine.Source.Reference = req.Source.Type
 	}
 	f.machine.Resources = req.Resources
+	if f.createHook != nil {
+		f.createHook(f)
+	}
 	return f.machine, nil
 }
 
-func (f *fakeAPI) GetMachine(context.Context, string) (machineData, error) {
+func (f *fakeAPI) GetMachine(ctx context.Context, id string) (machineData, error) {
+	if f.getHook != nil {
+		return f.getHook(ctx, id)
+	}
+	if f.deleted {
+		return machineData{}, &smolvmAPIError{StatusCode: 404}
+	}
 	if f.machine.ID == "" {
-		f.machine = machineData{ID: "mach_1", Name: "crabbox-blue-123456789abc", State: "running"}
+		f.machine = machineData{ID: "mach_1", Name: "crabbox-blue-123456789abc", State: "running", CreatedAt: "2026-08-30T00:00:00Z"}
 	}
 	return f.machine, nil
 }
 
 func (f *fakeAPI) ListMachines(context.Context) ([]machineData, error) {
 	if f.machine.ID == "" {
-		f.machine = machineData{ID: "mach_1", Name: "crabbox-blue-123456789abc", State: "running"}
+		f.machine = machineData{ID: "mach_1", Name: "crabbox-blue-123456789abc", State: "running", CreatedAt: "2026-08-30T00:00:00Z"}
 	}
 	return []machineData{f.machine}, nil
 }
 
-func (f *fakeAPI) DeleteMachine(_ context.Context, id string) error {
+func (f *fakeAPI) DeleteMachine(ctx context.Context, id string) error {
 	f.verbs = append(f.verbs, "delete")
 	f.deletedID = id
+	if f.deleteHook != nil {
+		return f.deleteHook(ctx, id)
+	}
+	if f.deleteErr == nil {
+		f.deleted = true
+	}
 	return f.deleteErr
 }
 
-func (f *fakeAPI) StartMachine(context.Context, string) error { return nil }
-func (f *fakeAPI) StopMachine(context.Context, string) error  { return nil }
+func (f *fakeAPI) StartMachine(ctx context.Context, id string) error {
+	if f.startHook != nil {
+		return f.startHook(ctx, id)
+	}
+	return nil
+}
+func (f *fakeAPI) StopMachine(context.Context, string) error { return nil }
 
 func (f *fakeAPI) Exec(_ context.Context, _ string, command, folder string) (execResult, error) {
 	f.verbs = append(f.verbs, "exec")
@@ -823,6 +845,9 @@ func (f *fakeAPI) Exec(_ context.Context, _ string, command, folder string) (exe
 
 func (f *fakeAPI) ExecStream(_ context.Context, _ string, command, folder string, stdout io.Writer) (int, error) {
 	f.verbs = append(f.verbs, "stream")
+	if f.streamHook != nil {
+		f.streamHook()
+	}
 	f.streamCommands = append(f.streamCommands, command)
 	f.streamFolders = append(f.streamFolders, folder)
 	_, _ = io.WriteString(stdout, "ok\n")

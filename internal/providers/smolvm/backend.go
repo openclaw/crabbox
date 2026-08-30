@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -36,10 +37,11 @@ func (b *backend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if err != nil {
 		return err
 	}
-	leaseID, machine, slug, err := b.createMachine(ctx, client, req.Repo, true, req.Reclaim, req.RequestedSlug)
+	claim, machine, err := b.createMachine(ctx, client, req.Repo, true, req.RequestedSlug)
 	if err != nil {
 		return err
 	}
+	leaseID, slug := claim.LeaseID, claim.Slug
 	fmt.Fprintf(b.rt.Stdout, "leased %s slug=%s provider=%s machine=%s name=%s\n", leaseID, slug, providerName, machine.ID, machine.Name)
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: smolvm warmup keeps the machine until explicit stop\n")
@@ -75,21 +77,24 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	effectiveKeep := req.Keep || b.cfg.Smolvm.Keep
 	leaseID, machineID, slug := "", "", ""
 	acquired := false
+	var claim core.LeaseClaim
 	if req.ID == "" {
 		var machine machineData
-		leaseID, machine, slug, err = b.createMachine(ctx, client, req.Repo, effectiveKeep, req.Reclaim, req.RequestedSlug)
+		claim, machine, err = b.createMachine(ctx, client, req.Repo, effectiveKeep, req.RequestedSlug)
 		if err != nil {
 			return RunResult{}, err
 		}
+		leaseID, slug = claim.LeaseID, claim.Slug
 		machineID = machine.ID
 		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s machine=%s name=%s\n", leaseID, slug, providerName, machine.ID, machine.Name)
 		acquired = true
 	} else {
-		leaseID, machineID, slug, err = b.resolveMachineID(ctx, client, req.ID, req.Repo.Root, req.Reclaim)
+		claim, err = b.reuseMachine(ctx, client, req.ID, req.Repo.Root, req.Reclaim)
 		if err != nil {
 			return RunResult{}, err
 		}
 	}
+	leaseID, machineID, slug = claim.LeaseID, claim.CloudID, claim.Slug
 	shouldStop := acquired && !effectiveKeep
 	session := &RunSessionHandle{
 		Provider:       providerName,
@@ -105,12 +110,13 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 				session.Kept = true
 				return
 			}
-			if err := client.DeleteMachine(context.Background(), machineID); err != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), smolvmControlTimeout)
+			defer cancel()
+			if err := b.deleteOwnedMachine(cleanupCtx, client, claim); err != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: smolvm delete failed for %s: %v\n", machineID, err)
 				session.Kept = true
 				return
 			}
-			removeLeaseClaim(leaseID)
 			session.Kept = false
 		}()
 	}
@@ -260,7 +266,7 @@ func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, er
 		WaitTimeout: req.WaitTimeout,
 		Now:         b.now,
 		Resolve: func(id string) (string, string, string, error) {
-			return b.resolveMachineID(ctx, client, id, "", false)
+			return b.resolveMachineID(ctx, client, id)
 		},
 		Get: func(getCtx context.Context, machineID string) (shared.DelegatedStatusResource, error) {
 			machine, err := client.GetMachine(getCtx, machineID)
@@ -287,23 +293,24 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
-	leaseID, machineID, _, err := b.resolveMachineID(ctx, client, req.ID, "", false)
+	claim, err := b.resolveOwnedMachine(req.ID)
 	if err != nil {
 		return err
 	}
-	if err := client.DeleteMachine(ctx, machineID); err != nil {
+	cleanupCtx, cancel := context.WithTimeout(ctx, smolvmControlTimeout)
+	defer cancel()
+	if err := b.deleteOwnedMachine(cleanupCtx, client, claim); err != nil {
 		return err
 	}
-	removeLeaseClaim(leaseID)
-	fmt.Fprintf(b.rt.Stderr, "released lease=%s machine=%s\n", leaseID, machineID)
+	fmt.Fprintf(b.rt.Stderr, "released lease=%s machine=%s\n", claim.LeaseID, claim.CloudID)
 	return nil
 }
 
-func (b *backend) createMachine(ctx context.Context, client api, repo Repo, keep, reclaim bool, requestedSlug string) (string, machineData, string, error) {
+func (b *backend) createMachine(ctx context.Context, client api, repo Repo, keep bool, requestedSlug string) (claim core.LeaseClaim, machine machineData, resultErr error) {
 	leaseID := newLeaseID()
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
-		return "", machineData{}, "", err
+		return core.LeaseClaim{}, machineData{}, err
 	}
 	name := machineName(leaseID, slug)
 	cpus := cpusValue(b.cfg)
@@ -329,16 +336,41 @@ func (b *backend) createMachine(ctx context.Context, client api, repo Repo, keep
 		creq.Ephemeral = true
 		creq.TTLSeconds = 3600 // reasonable default; backend stop will delete anyway
 	}
-	machine, err := client.CreateMachine(ctx, creq)
+	machine, err = client.CreateMachine(ctx, creq)
 	if err != nil {
-		return "", machineData{}, "", err
+		return core.LeaseClaim{}, machineData{}, err
 	}
-	// Machines are created stopped; start explicitly for delegated run/warmup.
-	if err := client.StartMachine(ctx, machine.ID); err != nil {
-		_ = client.DeleteMachine(context.Background(), machine.ID)
-		return "", machineData{}, "", fmt.Errorf("smolvm start %s: %w", machine.ID, err)
+	original := machine
+	if machine.Name != name || validateMachineIdentity(machine, machine) != nil {
+		return core.LeaseClaim{}, machineData{}, exit(2, "smolvm create returned an incomplete or unexpected identity; retaining machine id=%q name=%q", machine.ID, machine.Name)
 	}
-	// Poll until ready (started/running etc).
+	// Publish before start so failures retain an exact cleanup receipt. A failed
+	// publication permits rollback only while the lease still has no claim.
+	defer func() {
+		if resultErr == nil {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), smolvmControlTimeout)
+		defer cancel()
+		var cleanupErr error
+		if claim.LeaseID != "" {
+			cleanupErr = b.deleteOwnedMachine(cleanupCtx, client, claim)
+		} else {
+			cleanupErr = core.CleanupLeaseClaimIfUnchangedAfter(leaseID, core.LeaseClaim{}, false, func() error {
+				return deleteExactMachine(cleanupCtx, client, original)
+			})
+		}
+		if cleanupErr != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("smolvm rollback retained machine=%s lease=%s: %w", original.ID, leaseID, cleanupErr))
+		}
+	}()
+	claim, err = b.publishMachineClaim(leaseID, slug, original, repo)
+	if err != nil {
+		return claim, machine, err
+	}
+	if err := client.StartMachine(ctx, original.ID); err != nil {
+		return claim, machine, fmt.Errorf("smolvm start %s: %w", original.ID, err)
+	}
 	deadline := time.Now().Add(5 * time.Minute)
 	for {
 		st := strings.ToLower(strings.TrimSpace(machine.State))
@@ -346,32 +378,29 @@ func (b *backend) createMachine(ctx context.Context, client api, repo Repo, keep
 			break
 		}
 		if st == "error" || st == "failed" || st == "erroring" {
-			_ = client.DeleteMachine(context.Background(), machine.ID)
-			return "", machineData{}, "", exit(5, "smolvm machine failed for %s status=%s", machine.ID, machine.State)
+			return claim, machine, exit(5, "smolvm machine failed for %s status=%s", original.ID, machine.State)
 		}
 		if time.Now().After(deadline) {
-			_ = client.DeleteMachine(context.Background(), machine.ID)
-			return "", machineData{}, "", exit(5, "smolvm start timed out for %s status=%s", machine.ID, machine.State)
+			return claim, machine, exit(5, "smolvm start timed out for %s status=%s", original.ID, machine.State)
 		}
 		select {
 		case <-ctx.Done():
-			_ = client.DeleteMachine(context.Background(), machine.ID)
-			return "", machineData{}, "", ctx.Err()
+			return claim, machine, ctx.Err()
 		case <-time.After(2 * time.Second):
 		}
-		next, err := client.GetMachine(ctx, machine.ID)
-		if err == nil {
-			machine = next
+		next, err := client.GetMachine(ctx, original.ID)
+		if err != nil {
+			return claim, machine, err
 		}
+		if err := validateMachineIdentity(next, original); err != nil {
+			return claim, machine, err
+		}
+		machine = next
 	}
-	if err := claimLeaseForRepoProvider(leaseID, slug, providerName, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
-		_ = client.DeleteMachine(context.Background(), machine.ID)
-		return "", machineData{}, "", err
-	}
-	return leaseID, machine, slug, nil
+	return claim, machine, nil
 }
 
-func (b *backend) resolveMachineID(ctx context.Context, client api, id, repoRoot string, reclaim bool) (string, string, string, error) {
+func (b *backend) resolveMachineID(ctx context.Context, client api, id string) (string, string, string, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return "", "", "", exit(2, "provider=%s requires a Crabbox lease id, slug, or smolvm machine id/name", providerName)
@@ -379,11 +408,6 @@ func (b *backend) resolveMachineID(ctx context.Context, client api, id, repoRoot
 	if claim, ok, err := resolveLeaseClaim(id); err != nil {
 		return "", "", "", err
 	} else if ok && claim.Provider == providerName {
-		if repoRoot != "" {
-			if err := claimLeaseForRepoProvider(claim.LeaseID, claim.Slug, providerName, repoRoot, time.Duration(claim.IdleTimeoutSeconds)*time.Second, reclaim); err != nil {
-				return "", "", "", err
-			}
-		}
 		machine, err := resolveMachineByLease(ctx, client, claim.LeaseID)
 		if err != nil {
 			return "", "", "", err
@@ -395,10 +419,10 @@ func (b *backend) resolveMachineID(ctx context.Context, client api, id, repoRoot
 		if err != nil {
 			return "", "", "", err
 		}
-		return b.finishResolvedMachine(machine, repoRoot, reclaim)
+		return finishResolvedMachine(machine)
 	}
 	if machine, err := client.GetMachine(ctx, id); err == nil && isCrabboxMachine(machine) {
-		return b.finishResolvedMachine(machine, repoRoot, reclaim)
+		return finishResolvedMachine(machine)
 	} else if err != nil && !isNotFound(err) {
 		return "", "", "", err
 	}
@@ -410,20 +434,14 @@ func (b *backend) resolveMachineID(ctx context.Context, client api, id, repoRoot
 		if gerr != nil || !isCrabboxMachine(m) {
 			return "", "", "", err
 		}
-		return b.finishResolvedMachine(m, repoRoot, reclaim)
+		return finishResolvedMachine(m)
 	}
-	return b.finishResolvedMachine(machine, repoRoot, reclaim)
+	return finishResolvedMachine(machine)
 }
 
-func (b *backend) finishResolvedMachine(machine machineData, repoRoot string, reclaim bool) (string, string, string, error) {
+func finishResolvedMachine(machine machineData) (string, string, string, error) {
 	leaseID := machineLeaseID(machine)
-	slug := machineSlug(leaseID, machine)
-	if repoRoot != "" {
-		if err := claimLeaseForRepoProvider(leaseID, slug, providerName, repoRoot, b.cfg.IdleTimeout, reclaim); err != nil {
-			return "", "", "", err
-		}
-	}
-	return leaseID, machine.ID, slug, nil
+	return leaseID, machine.ID, machineSlug(leaseID, machine), nil
 }
 
 func resolveMachineByLease(ctx context.Context, client api, leaseID string) (machineData, error) {

@@ -66,16 +66,8 @@ func directLeaseLabels(cfg Config, leaseID, slug, provider, market string, keep 
 	return core.DirectLeaseLabels(cfg, leaseID, slug, provider, market, keep, now)
 }
 
-func claimLeaseForRepoProvider(leaseID, slug, provider, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return core.ClaimLeaseForRepoProvider(leaseID, slug, provider, repoRoot, idleTimeout, reclaim)
-}
-
 func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaim(identifier)
-}
-
-func removeLeaseClaim(leaseID string) {
-	core.RemoveLeaseClaim(leaseID)
 }
 
 func writeTimingJSON(w io.Writer, report timingReport) error {

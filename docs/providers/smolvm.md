@@ -96,13 +96,19 @@ Defaults: image `alpine` (lightweight; provides the standard shell tools needed 
 ## Lifecycle
 
 1. `warmup` / `run` without `--id` creates a microVM sandbox from the configured `--smolvm-image`.
-2. Crabbox stores a local claim with a normal `cbx_...` lease ID and a friendly slug.
+2. Before startup, Crabbox durably binds a local claim to the returned machine ID, name, creation timestamp, full API endpoint, normal `cbx_...` lease ID, and friendly slug.
 3. By default `run` archive-syncs the working tree using a direct API call to `/exec` (the tarball is base64-encoded and sent in a shell heredoc; the guest decodes + extracts with `base64 -d | tar`).
 4. The user command executes inside the microVM. Because the smolfleet API does not stream live output, command output appears after the command completes.
 5. One-shot sandboxes are deleted after a `run` that did not pass `--keep`. `--keep` and `--keep-on-failure` retain the sandbox until `crabbox stop`.
 6. `run --lease-output <path>` writes the SmolVM lease ID, slug, reuse/retention state, and exact cleanup command for orchestration handoff.
 
 Note: `warmup` always keeps the sandbox until an explicit `crabbox stop`. If you pass `--keep=false` to `warmup`, Crabbox prints a warning and still keeps it.
+
+Deletion and reuse require that exact local claim and a fresh matching machine response. Crabbox holds the unchanged claim through deletion and confirmed absence; run teardown and failed-start rollback use the same ownership checks with a fresh 60-second cleanup budget. Explicit stop preserves caller cancellation within that budget. A concurrent claim change, changed machine identity, failed delete, or uncertain confirmation retains the claim and reports the cleanup problem.
+
+Older claims without the machine ID, endpoint, and creation timestamp do not authorize stop or reuse. Name-matched machines remain discoverable through `list` and `status`, which do not create or upgrade claims. `--reclaim` transfers repository ownership of an already proven binding; it never adopts an unclaimed or legacy machine. Review those machines in the provider console before any manual cleanup, or create a new lease for reuse.
+
+The [hosted API](https://smolmachines.com/docs/cloud/api-reference) uses 404 both for missing machines and machines not owned by the caller. An initial 404 therefore retains the claim, including after credentials change. Crabbox only accepts 404 as deletion confirmation after freshly matching and successfully deleting the bound machine using the same client. No API key or key fingerprint is stored in the claim.
 
 ## Capabilities
 
@@ -158,7 +164,7 @@ during the first exec.
 - `--checksum` is rejected because SmolVM has no SSH/rsync target. Large-sync guardrails still apply; `--force-sync-large` may be honored where supported for intentional large archive syncs.
 - Use `--sync-only` to pre-upload the archive into a kept sandbox before a later command (subject to delegated guardrails).
 - Delegated run/sync options that need an SSH target or proof surface are rejected: `--script` / `--script-stdin`, `--fresh-pr`, `--full-resync`, `--env-helper`, `--capture-stdout` / `--capture-stderr`, `--capture-on-fail`, `--download`, `--artifact-glob`, `--emit-proof`, and `--stop-after`.
-- IDs can be a Crabbox slug, a `cbx_...` lease ID, or a raw SmolVM identifier (when the sandbox carries Crabbox ownership metadata).
+- IDs can be a Crabbox slug, a `cbx_...` lease ID, or a raw SmolVM identifier/name; stop and reuse require an unambiguous exact local claim, not just a Crabbox-looking name.
 - Forwarded environment values (if supported by the backend) are handled inside the injected workspace.
 - The direct archive sync sends the (base64) tar inside the `/exec` command body. Very large repos may hit request size limits (the usual preflight checks still apply).
 

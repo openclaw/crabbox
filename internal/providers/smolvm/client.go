@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -145,33 +146,41 @@ var newAPI = func(cfg Config, rt Runtime) (api, error) {
 	// OpenAPI, like other direct-API providers. If an official Go client
 	// appears, the transport can be swapped behind the api interface.
 	httpClient, dataHTTPClient := smolvmHTTPClients(rt.HTTP, smolvmControlTimeout)
-	base := blank(strings.TrimSpace(cfg.Smolvm.BaseURL), "https://api.smolmachines.com")
-	parsed, err := url.Parse(base)
+	base, err := smolvmEndpoint(cfg)
 	if err != nil {
-		return nil, exit(2, "%s url %q is invalid", providerName, base)
+		return nil, err
 	}
-	if parsed.User != nil {
-		return nil, exit(2, "%s url must not include userinfo", providerName)
-	}
-	if parsed.Scheme == "" || parsed.Host == "" {
-		return nil, exit(2, "%s url %q is invalid", providerName, base)
-	}
-	if parsed.Scheme != "https" && !isLoopbackHTTPURL(parsed) {
-		return nil, exit(2, "%s url %q must use https unless it targets localhost", providerName, base)
-	}
-	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return nil, exit(2, "%s url %q must not include query or fragment components", providerName, base)
-	}
-	if !trustedSmolvmAPIHost(parsed) && !customSmolvmBaseURLAllowed() {
-		return nil, exit(2, "%s url host %q is not an official Smol Machines endpoint; set CRABBOX_SMOLVM_ALLOW_CUSTOM_BASE_URL=1 to send credentials to a custom control plane", providerName, parsed.Hostname())
-	}
-	base = strings.TrimRight(parsed.String(), "/")
+	parsed, _ := url.Parse(base)
 	return &client{
-		apiKey:   apiKey,
-		base:     base,
+		apiKey: apiKey, base: base,
 		http:     shared.SecureHTTPClient(httpClient, parsed, smolvmRedirectError),
 		dataHTTP: shared.SecureHTTPClient(dataHTTPClient, parsed, smolvmRedirectError),
 	}, nil
+}
+
+func smolvmEndpoint(cfg Config) (string, error) {
+	base := blank(strings.TrimSpace(cfg.Smolvm.BaseURL), "https://api.smolmachines.com")
+	parsed, err := url.Parse(base)
+	if err != nil {
+		return "", exit(2, "%s url %q is invalid", providerName, base)
+	}
+	if parsed.User != nil {
+		return "", exit(2, "%s url must not include userinfo", providerName)
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return "", exit(2, "%s url %q is invalid", providerName, base)
+	}
+	if parsed.Scheme != "https" && !isLoopbackHTTPURL(parsed) {
+		return "", exit(2, "%s url %q must use https unless it targets localhost", providerName, base)
+	}
+	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return "", exit(2, "%s url %q must not include query or fragment components", providerName, base)
+	}
+	if !trustedSmolvmAPIHost(parsed) && !customSmolvmBaseURLAllowed() {
+		return "", exit(2, "%s url host %q is not an official Smol Machines endpoint; set CRABBOX_SMOLVM_ALLOW_CUSTOM_BASE_URL=1 to send credentials to a custom control plane", providerName, parsed.Hostname())
+	}
+	base = strings.TrimRight(parsed.String(), "/")
+	return base, nil
 }
 
 func smolvmHTTPClients(injected *http.Client, controlTimeout time.Duration) (*http.Client, *http.Client) {
@@ -468,9 +477,6 @@ func commandExitError(prefix string, result execResult) error {
 }
 
 func isNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "404") || strings.Contains(msg, "not found")
+	var apiErr *smolvmAPIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
 }
