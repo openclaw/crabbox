@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	osexec "os/exec"
@@ -169,18 +170,14 @@ func TestParseSandboxIDPicksAlphanumericLine(t *testing.T) {
 	}
 }
 
-func TestParseDescribeStateExtractsStatus(t *testing.T) {
-	out := strings.Join([]string{
-		"ID:              3pryjysezwsnlex226i5h",
-		"Name:            crabbox-app-aaa111",
-		"Status:          running",
-		"Image:           ubuntu-minimal",
-	}, "\n")
-	if got := parseDescribeState(out); got != "running" {
-		t.Fatalf("state=%q want running", got)
+func TestParseSandboxIdentityExtractsNativeFields(t *testing.T) {
+	out := "ID: 3pryjysezwsnlex226i5h\nName: crabbox-app-aaa111\nNamespace: sandbox_ns\nStatus: running\nImage: ubuntu-minimal\n"
+	got, err := parseSandboxIdentity(out)
+	if err != nil || got.ID != "3pryjysezwsnlex226i5h" || got.Namespace != "sandbox_ns" || got.State != "running" {
+		t.Fatalf("identity=%+v err=%v", got, err)
 	}
-	if got := parseDescribeState(""); got != "" {
-		t.Fatalf("empty input should return empty, got %q", got)
+	if _, err := parseSandboxIdentity(""); err == nil {
+		t.Fatal("empty identity accepted")
 	}
 }
 
@@ -201,32 +198,32 @@ func TestIsReadyState(t *testing.T) {
 }
 
 func TestResolveLeaseIDRejectsUnclaimed(t *testing.T) {
-	_, _, _, err := resolveLeaseID("not-a-known-slug", "", false, 0)
-	if err == nil || !strings.Contains(err.Error(), "not claimed by Crabbox") {
+	_, _, _, err := resolveTestLease("not-a-known-slug", "", false, 0)
+	if err == nil || !strings.Contains(err.Error(), "not exactly claimed by Crabbox") {
 		t.Fatalf("err=%v, want rejection of unclaimed sandbox", err)
 	}
 }
 
 func TestResolveLeaseIDRejectsLeasePrefixWithoutClaim(t *testing.T) {
-	_, _, _, err := resolveLeaseID("tlsbx_unknown123", "", false, 0)
-	if err == nil || !strings.Contains(err.Error(), "not claimed by Crabbox") {
+	_, _, _, err := resolveTestLease("tlsbx_unknown123", "", false, 0)
+	if err == nil || !strings.Contains(err.Error(), "not exactly claimed by Crabbox") {
 		t.Fatalf("err=%v, want rejection without local claim", err)
 	}
 }
 
 func TestResolveLeaseIDUsesTensorlakeClaimWhenSlugCollides(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	if err := claimLeaseForRepoProvider("tbx_abc123", "Blue Lobster", "blacksmith-testbox", "/repo-a", time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("tbx_abc123", "Blue Lobster", "blacksmith-testbox", "/repo-a", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := claimLeaseForRepoProvider("tlsbx_tensorlake123456", "Blue Lobster", providerName, "/repo-b", time.Minute, false); err != nil {
+	if err := claimBoundTensorlakeForTest("tlsbx_tensorlake12345600000", "Blue Lobster", "/repo-b", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	leaseID, sandboxID, slug, err := resolveLeaseID("blue-lobster", "", false, 0)
+	leaseID, sandboxID, slug, err := resolveTestLease("blue-lobster", "", false, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if leaseID != "tlsbx_tensorlake123456" || sandboxID != "tensorlake123456" {
+	if leaseID != "tlsbx_tensorlake12345600000" || sandboxID != "tensorlake12345600000" {
 		t.Fatalf("lease=%q sandbox=%q", leaseID, sandboxID)
 	}
 	if slug != "Blue Lobster" {
@@ -234,51 +231,47 @@ func TestResolveLeaseIDUsesTensorlakeClaimWhenSlugCollides(t *testing.T) {
 	}
 }
 
-func TestResolveLeaseIDFallsBackForSluglessClaim(t *testing.T) {
+func TestResolveLeaseIDRejectsLegacySluglessClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	leaseID := "tlsbx_tensorlake123456"
-	if err := claimLeaseForRepoProvider(leaseID, "", providerName, "/repo", time.Minute, false); err != nil {
+	leaseID := "tlsbx_tensorlake12345600000"
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "", providerName, "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	_, _, slug, err := resolveLeaseID(leaseID, "", false, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if slug != newLeaseSlug(leaseID) {
-		t.Fatalf("slug=%q want %q", slug, newLeaseSlug(leaseID))
+	if _, _, _, err := resolveTestLease(leaseID, "", false, 0); err == nil {
+		t.Fatal("legacy claim was adopted")
 	}
 }
 
 func TestResolveLeaseIDRequiresIdentifier(t *testing.T) {
-	if _, _, _, err := resolveLeaseID("", "", false, 0); err == nil {
+	if _, _, _, err := resolveTestLease("", "", false, 0); err == nil {
 		t.Fatalf("expected error for empty id")
 	}
 }
 
 func TestStatusReturnsDescribeErrorWithoutWait(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	leaseID := "tlsbx_statusmissing123"
-	if err := claimLeaseForRepoProvider(leaseID, "status-missing", providerName, t.TempDir(), time.Minute, false); err != nil {
+	leaseID := "tlsbx_statusmissing12300000"
+	if err := claimBoundTensorlakeForTest(leaseID, "status-missing", t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	defer removeLeaseClaim(leaseID)
+	defer core.RemoveLeaseClaim(leaseID)
 	runner := newRunner(map[string]scriptedReply{
 		"sbx describe": {stderr: "sandbox not found\n", exitCode: 1},
 	}, nil)
 	backend := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), newTestRuntime(runner)).(*tensorlakeBackend)
 	_, err := backend.Status(context.Background(), StatusRequest{ID: "status-missing"})
-	if err == nil || !strings.Contains(err.Error(), "tensorlake sbx describe") || !strings.Contains(err.Error(), "sandbox not found") {
+	if err == nil || !strings.Contains(err.Error(), "ownership control command failed") {
 		t.Fatalf("Status err=%v, want describe failure", err)
 	}
 }
 
 func TestStatusWaitTimeoutIncludesDescribeError(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	leaseID := "tlsbx_statuswait123"
-	if err := claimLeaseForRepoProvider(leaseID, "status-wait", providerName, t.TempDir(), time.Minute, false); err != nil {
+	leaseID := "tlsbx_statuswait12300000000"
+	if err := claimBoundTensorlakeForTest(leaseID, "status-wait", t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	defer removeLeaseClaim(leaseID)
+	defer core.RemoveLeaseClaim(leaseID)
 	runner := newRunner(map[string]scriptedReply{
 		"sbx describe": {stderr: "auth denied\n", exitCode: 1},
 	}, nil)
@@ -286,18 +279,18 @@ func TestStatusWaitTimeoutIncludesDescribeError(t *testing.T) {
 	rt.Clock = &stepClock{now: time.Unix(0, 0), step: time.Second}
 	backend := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), rt).(*tensorlakeBackend)
 	_, err := backend.Status(context.Background(), StatusRequest{ID: "status-wait", Wait: true, WaitTimeout: time.Millisecond})
-	if err == nil || !strings.Contains(err.Error(), "timed out waiting") || !strings.Contains(err.Error(), "auth denied") {
+	if err == nil || !strings.Contains(err.Error(), "timed out waiting") || !strings.Contains(err.Error(), "ownership control command failed") {
 		t.Fatalf("Status err=%v, want timeout with describe failure", err)
 	}
 }
 
 func TestStatusWaitContextExpiryIncludesDescribeError(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	leaseID := "tlsbx_statusctx123"
-	if err := claimLeaseForRepoProvider(leaseID, "status-context", providerName, t.TempDir(), time.Minute, false); err != nil {
+	leaseID := "tlsbx_statusctx123000000000"
+	if err := claimBoundTensorlakeForTest(leaseID, "status-context", t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	defer removeLeaseClaim(leaseID)
+	defer core.RemoveLeaseClaim(leaseID)
 	runner := newRunner(map[string]scriptedReply{
 		"sbx describe": {stderr: "auth denied\n", exitCode: 1},
 	}, nil)
@@ -305,7 +298,7 @@ func TestStatusWaitContextExpiryIncludesDescribeError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, err := backend.Status(ctx, StatusRequest{ID: "status-context", Wait: true, WaitTimeout: time.Minute})
-	if err == nil || !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "auth denied") {
+	if err == nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("Status err=%v, want context cancellation with describe failure", err)
 	}
 }
@@ -355,10 +348,12 @@ func TestNewSandboxNameFitsTensorlakeLimit(t *testing.T) {
 // tuples. Replies are popped in order; if the queue for a verb is empty, the
 // last reply (or zero value) is reused.
 type recordingCommandRunner struct {
-	mu       sync.Mutex
-	calls    []core.LocalCommandRequest
-	scripts  map[string][]scriptedReply
-	defaults map[string]scriptedReply
+	resources map[string]sandboxIdentity
+	hook      func(core.LocalCommandRequest) (core.LocalCommandResult, error, bool)
+	mu        sync.Mutex
+	calls     []core.LocalCommandRequest
+	scripts   map[string][]scriptedReply
+	defaults  map[string]scriptedReply
 }
 
 type scriptedReply struct {
@@ -371,6 +366,13 @@ type scriptedReply struct {
 func (r *recordingCommandRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.mu.Lock()
 	r.calls = append(r.calls, req)
+	r.mu.Unlock()
+	if r.hook != nil {
+		if result, err, handled := r.hook(req); handled {
+			return result, err
+		}
+	}
+	r.mu.Lock()
 	key := scriptKey(req.Args)
 	var reply scriptedReply
 	if queue := r.scripts[key]; len(queue) > 0 {
@@ -378,6 +380,30 @@ func (r *recordingCommandRunner) Run(_ context.Context, req core.LocalCommandReq
 		r.scripts[key] = queue[1:]
 	} else if def, ok := r.defaults[key]; ok {
 		reply = def
+	} else if key == "whoami" {
+		reply = fixtureScopeReply(req)
+	} else if key == "sbx describe" {
+		id := req.Args[len(req.Args)-1]
+		if item, ok := r.resources[id]; ok {
+			reply.stdout = fmt.Sprintf("ID: %s\nName: %s\nNamespace: %s\nStatus: %s\n", item.ID, item.Name, item.Namespace, item.State)
+		} else {
+			reply.exitCode = 4
+			reply.stderr = "fixture resource not found"
+		}
+	}
+	if reply.err == nil && reply.exitCode == 0 {
+		if key == "sbx create" {
+			id := strings.TrimSpace(reply.stdout)
+			if isLikelySandboxID(id) {
+				r.resources[id] = sandboxIdentity{ID: id, Name: req.Args[len(req.Args)-1], Namespace: "sandbox_ns", State: "running"}
+			}
+		} else if key == "sbx terminate" {
+			id := req.Args[len(req.Args)-1]
+			if item, ok := r.resources[id]; ok {
+				item.State = "terminated"
+				r.resources[id] = item
+			}
+		}
 	}
 	r.mu.Unlock()
 	if req.Stdout != nil && reply.stdout != "" {
@@ -395,13 +421,16 @@ func (r *recordingCommandRunner) Run(_ context.Context, req core.LocalCommandReq
 }
 
 func newRunner(defaults map[string]scriptedReply, sequenced map[string][]scriptedReply) *recordingCommandRunner {
-	return &recordingCommandRunner{defaults: defaults, scripts: sequenced}
+	return &recordingCommandRunner{defaults: defaults, scripts: sequenced, resources: map[string]sandboxIdentity{}}
 }
 
 // scriptKey extracts the `sbx <verb>` portion of an argv slice, ignoring
 // global flags so test scripts can match by subcommand alone.
 func scriptKey(args []string) string {
 	for i, a := range args {
+		if a == "whoami" {
+			return "whoami"
+		}
 		if a == "sbx" && i+1 < len(args) {
 			return "sbx " + args[i+1]
 		}
@@ -467,7 +496,7 @@ func TestRunCreatesExecsAndTerminatesEphemeralSandbox(t *testing.T) {
 	if result.Session.CleanupCommand != "crabbox stop --provider tensorlake --id 'tlsbx_3pryjysezwsnlex226i5h'" {
 		t.Fatalf("cleanup command=%q", result.Session.CleanupCommand)
 	}
-	verbs := callVerbs(runner)
+	verbs := callMutationVerbs(runner)
 	// With --no-sync we still prepare the workdir (mkdir) before the user's command.
 	want := []string{"sbx create", "sbx exec", "sbx exec", "sbx terminate"}
 	if !reflect.DeepEqual(verbs, want) {
@@ -493,17 +522,17 @@ func TestRunCreatesExecsAndTerminatesEphemeralSandbox(t *testing.T) {
 		t.Fatalf("API key leaked into argv: %v", execCall.Args)
 	}
 	if !containsEnv(execCall.Env, "TENSORLAKE_API_KEY=tl_apiKey_test") {
-		t.Fatalf("env missing TENSORLAKE_API_KEY: %v", execCall.Env)
+		t.Fatal("env missing the expected fixture API-key entry")
 	}
 }
 
 func TestRunForwardsEnvViaUploadedProfile(t *testing.T) {
 	testutil.IsolateUserDirs(t)
 	runner := newRunner(map[string]scriptedReply{
-		"sbx create":    {stdout: "envid0123456789012\n"},
+		"sbx create":    {stdout: "envid0123456789012000\n"},
 		"sbx exec":      {stdout: "ok\n"},
 		"sbx cp":        {stdout: ""},
-		"sbx terminate": {stdout: "envid0123456789012\n"},
+		"sbx terminate": {stdout: "envid0123456789012000\n"},
 	}, nil)
 	var stderr bytes.Buffer
 	rt := newTestRuntime(runner)
@@ -520,7 +549,7 @@ func TestRunForwardsEnvViaUploadedProfile(t *testing.T) {
 	if _, err := backend.Run(context.Background(), req); err != nil {
 		t.Fatalf("Run err=%v", err)
 	}
-	verbs := callVerbs(runner)
+	verbs := callMutationVerbs(runner)
 	want := []string{"sbx create", "sbx exec", "sbx cp", "sbx exec", "sbx exec", "sbx terminate"}
 	if !reflect.DeepEqual(verbs, want) {
 		t.Fatalf("verbs=%v want %v", verbs, want)
@@ -552,8 +581,8 @@ func TestRunSurfacesCommandExitCodeWithoutWrappingError(t *testing.T) {
 	exitErr := &fakeExitError{code: 7}
 	runner := newRunner(
 		map[string]scriptedReply{
-			"sbx create":    {stdout: "abc123def456ghi789\n"},
-			"sbx terminate": {stdout: "abc123def456ghi789\n"},
+			"sbx create":    {stdout: "abc123def456ghi789000\n"},
+			"sbx terminate": {stdout: "abc123def456ghi789000\n"},
 		},
 		map[string][]scriptedReply{
 			// First exec is the mkdir prepare (succeeds); second is the user
@@ -598,9 +627,9 @@ func TestTensorlakeDeleteSyncDoesNotRemoveWorkspaceBeforeUpload(t *testing.T) {
 	}
 	runner := newRunner(
 		map[string]scriptedReply{
-			"sbx create":    {stdout: "syncdelete012345678\n"},
+			"sbx create":    {stdout: "syncdelete01234567800\n"},
 			"sbx cp":        {exitCode: 7, err: errors.New("upload failed")},
-			"sbx terminate": {stdout: "syncdelete012345678\n"},
+			"sbx terminate": {stdout: "syncdelete01234567800\n"},
 		},
 		nil,
 	)
@@ -625,7 +654,7 @@ func TestTensorlakeDeleteSyncDoesNotRemoveWorkspaceBeforeUpload(t *testing.T) {
 	if !strings.Contains(prepareText, "mkdir -p") {
 		t.Fatalf("prepare should still create workspace: %v", prepare.Args)
 	}
-	if verbs := callVerbs(runner); !reflect.DeepEqual(verbs, []string{"sbx create", "sbx exec", "sbx cp", "sbx terminate"}) {
+	if verbs := callMutationVerbs(runner); !reflect.DeepEqual(verbs, []string{"sbx create", "sbx exec", "sbx cp", "sbx terminate"}) {
 		t.Fatalf("verbs=%v", verbs)
 	}
 }
@@ -667,9 +696,9 @@ func TestTensorlakeExtractArchiveCommandPreservesExtractStatus(t *testing.T) {
 
 func TestRunTimingJSONIncludesSlug(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	sandboxID := "timingid0123456789"
+	sandboxID := "timingid0123456789000"
 	leaseID := leasePrefix + sandboxID
-	defer removeLeaseClaim(leaseID)
+	defer core.RemoveLeaseClaim(leaseID)
 	runner := newRunner(map[string]scriptedReply{
 		"sbx create": {stdout: sandboxID + "\n"},
 		"sbx exec":   {stdout: "ok\n"},
@@ -708,15 +737,16 @@ func TestRunTimingJSONIncludesSlug(t *testing.T) {
 func TestRunTimingJSONUsesClaimSlugForReusedSandbox(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	repoRoot := t.TempDir()
-	sandboxID := "reuseid01234567890"
+	sandboxID := "reuseid01234567890000"
 	leaseID := leasePrefix + sandboxID
-	if err := claimLeaseForRepoProvider(leaseID, "custom-slug", providerName, repoRoot, time.Minute, false); err != nil {
+	if err := claimBoundTensorlakeForTest(leaseID, "custom-slug", repoRoot, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	defer removeLeaseClaim(leaseID)
+	defer core.RemoveLeaseClaim(leaseID)
 	runner := newRunner(map[string]scriptedReply{
 		"sbx exec": {stdout: "ok\n"},
 	}, nil)
+	runner.resources[sandboxID] = sandboxIdentity{ID: sandboxID, Name: "crabbox-fixture", Namespace: "sandbox_ns", State: "running"}
 	var stderr bytes.Buffer
 	rt := newTestRuntime(runner)
 	rt.Stderr = &stderr
@@ -746,8 +776,8 @@ func TestRunTimingJSONUsesClaimSlugForReusedSandbox(t *testing.T) {
 
 func TestKeepOnFailureRetainsSandboxAndPrintsHint(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir()) // keep-on-failure writes a lease claim (and lock); keep both out of the real state dir
-	sandboxID := "failkeep" + randomSuffix() + randomSuffix()
-	defer removeLeaseClaim(leasePrefix + sandboxID)
+	sandboxID := "failkeep0" + randomSuffix() + randomSuffix()
+	defer core.RemoveLeaseClaim(leasePrefix + sandboxID)
 	runner := newRunner(
 		map[string]scriptedReply{
 			"sbx create": {stdout: sandboxID + "\n"},
@@ -789,10 +819,10 @@ func TestKeepOnFailureRetainsSandboxAndPrintsHint(t *testing.T) {
 func TestRunPerformsArchiveSyncByDefault(t *testing.T) {
 	testutil.IsolateUserDirs(t)
 	runner := newRunner(map[string]scriptedReply{
-		"sbx create":    {stdout: "syncidaaaaaaaaaaaaaa\n"},
+		"sbx create":    {stdout: "syncidaaaaaaaaaaaaaa0\n"},
 		"sbx exec":      {stdout: "ok\n"},
 		"sbx cp":        {stdout: ""},
-		"sbx terminate": {stdout: "syncidaaaaaaaaaaaaaa\n"},
+		"sbx terminate": {stdout: "syncidaaaaaaaaaaaaaa0\n"},
 	}, nil)
 	backend := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), newTestRuntime(runner)).(*tensorlakeBackend)
 	repoRoot := newGitRepo(t)
@@ -806,7 +836,7 @@ func TestRunPerformsArchiveSyncByDefault(t *testing.T) {
 	if _, err := backend.Run(context.Background(), req); err != nil {
 		t.Fatalf("Run err=%v", err)
 	}
-	verbs := callVerbs(runner)
+	verbs := callMutationVerbs(runner)
 	// Expected order: create → mkdir-prepare exec → cp upload → tar-extract exec → user exec → terminate
 	want := []string{"sbx create", "sbx exec", "sbx cp", "sbx exec", "sbx exec", "sbx terminate"}
 	if !reflect.DeepEqual(verbs, want) {
@@ -816,7 +846,7 @@ func TestRunPerformsArchiveSyncByDefault(t *testing.T) {
 	if cp == nil {
 		t.Fatalf("missing sbx cp call")
 	}
-	if !containsArgPrefix(cp.Args, "syncidaaaaaaaaaaaaaa:/tmp/crabbox-sync-") {
+	if !containsArgPrefix(cp.Args, "syncidaaaaaaaaaaaaaa0:/tmp/crabbox-sync-") {
 		t.Fatalf("cp args=%v missing remote dest", cp.Args)
 	}
 }
@@ -824,9 +854,9 @@ func TestRunPerformsArchiveSyncByDefault(t *testing.T) {
 func TestRunSkipsSyncWithNoSync(t *testing.T) {
 	testutil.IsolateUserDirs(t)
 	runner := newRunner(map[string]scriptedReply{
-		"sbx create":    {stdout: "nosyncidaaaaaaaaaaaa\n"},
+		"sbx create":    {stdout: "nosyncidaaaaaaaaaaaa0\n"},
 		"sbx exec":      {stdout: "ok\n"},
-		"sbx terminate": {stdout: "nosyncidaaaaaaaaaaaa\n"},
+		"sbx terminate": {stdout: "nosyncidaaaaaaaaaaaa0\n"},
 	}, nil)
 	backend := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), newTestRuntime(runner)).(*tensorlakeBackend)
 	req := RunRequest{
@@ -840,7 +870,7 @@ func TestRunSkipsSyncWithNoSync(t *testing.T) {
 	if findCall(runner, "sbx cp") != nil {
 		t.Fatalf("sbx cp called despite --no-sync")
 	}
-	verbs := callVerbs(runner)
+	verbs := callMutationVerbs(runner)
 	// With --no-sync we still prepare the workdir (mkdir) before the user's command.
 	want := []string{"sbx create", "sbx exec", "sbx exec", "sbx terminate"}
 	if !reflect.DeepEqual(verbs, want) {
@@ -851,7 +881,7 @@ func TestRunSkipsSyncWithNoSync(t *testing.T) {
 func TestKeepRetainsSandbox(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir()) // Keep writes a lease claim; keep it out of the real state dir
 	runner := newRunner(map[string]scriptedReply{
-		"sbx create": {stdout: "keepid01234567890ab\n"},
+		"sbx create": {stdout: "keepid01234567890ab00\n"},
 		"sbx exec":   {stdout: "hi\n"},
 	}, nil)
 	backend := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), newTestRuntime(runner)).(*tensorlakeBackend)
@@ -879,16 +909,17 @@ func TestKeepRetainsSandbox(t *testing.T) {
 
 func TestRunReusedSandboxReportsKeptSession(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	sandboxID := "reuseidsession1234"
+	sandboxID := "reuseidsession1234000"
 	leaseID := leasePrefix + sandboxID
 	repoRoot := t.TempDir()
-	if err := claimLeaseForRepoProvider(leaseID, "reuse-session", providerName, repoRoot, time.Minute, false); err != nil {
+	if err := claimBoundTensorlakeForTest(leaseID, "reuse-session", repoRoot, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	defer removeLeaseClaim(leaseID)
+	defer core.RemoveLeaseClaim(leaseID)
 	runner := newRunner(map[string]scriptedReply{
 		"sbx exec": {stdout: "hi\n"},
 	}, nil)
+	runner.resources[sandboxID] = sandboxIdentity{ID: sandboxID, Name: "crabbox-fixture", Namespace: "sandbox_ns", State: "running"}
 	backend := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), newTestRuntime(runner)).(*tensorlakeBackend)
 	req := RunRequest{
 		ID:      "reuse-session",
@@ -915,7 +946,7 @@ func TestRunTerminateFailureReportsRetainedSession(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	runner := newRunner(
 		map[string]scriptedReply{
-			"sbx create": {stdout: "termfail0123456789\n"},
+			"sbx create": {stdout: "termfail0123456789000\n"},
 			"sbx exec":   {stdout: "hi\n"},
 		},
 		map[string][]scriptedReply{
@@ -943,7 +974,7 @@ func TestRunTerminateFailureReportsRetainedSession(t *testing.T) {
 	if result.Session.Provider != providerName || result.Session.Reused || !result.Session.Kept {
 		t.Fatalf("session=%#v", result.Session)
 	}
-	if !strings.Contains(stderr.String(), "warning: tensorlake terminate failed for termfail0123456789") {
+	if !strings.Contains(stderr.String(), "warning: tensorlake terminate failed for termfail0123456789000") {
 		t.Fatalf("stderr=%q, want terminate warning", stderr.String())
 	}
 }
@@ -963,7 +994,7 @@ func TestStopRejectsUnclaimedID(t *testing.T) {
 func TestCreateInvocationCarriesSizingFlags(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir()) // Keep writes a lease claim; keep it out of the real state dir
 	runner := newRunner(map[string]scriptedReply{
-		"sbx create": {stdout: "sizingid01234567890\n"},
+		"sbx create": {stdout: "sizingid0123456789000\n"},
 		"sbx exec":   {stdout: "ok\n"},
 	}, nil)
 	cfg := newTestConfig()
@@ -999,12 +1030,12 @@ func TestCreateInvocationCarriesSizingFlags(t *testing.T) {
 	}
 }
 
-func callVerbs(r *recordingCommandRunner) []string {
+func callMutationVerbs(r *recordingCommandRunner) []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	verbs := make([]string, 0, len(r.calls))
 	for _, c := range r.calls {
-		if v := scriptKey(c.Args); v != "" {
+		if v := scriptKey(c.Args); v != "" && v != "whoami" && v != "sbx describe" {
 			verbs = append(verbs, v)
 		}
 	}

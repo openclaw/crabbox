@@ -95,26 +95,6 @@ func blank(value, fallback string) string {
 	return core.Blank(value, fallback)
 }
 
-func claimLeaseForRepoProvider(leaseID, slug, provider, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return core.ClaimLeaseForRepoProvider(leaseID, slug, provider, repoRoot, idleTimeout, reclaim)
-}
-
-func claimLeaseForRepoProviderPond(leaseID, slug, provider, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return core.ClaimLeaseForRepoProviderPond(leaseID, slug, provider, pond, repoRoot, idleTimeout, reclaim)
-}
-
-func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
-	return core.ResolveLeaseClaim(identifier)
-}
-
-func resolveLeaseClaimForProvider(identifier, provider string) (core.LeaseClaim, bool, error) {
-	return core.ResolveLeaseClaimForProvider(identifier, provider)
-}
-
-func removeLeaseClaim(leaseID string) {
-	core.RemoveLeaseClaim(leaseID)
-}
-
 func shouldUseShell(command []string) bool {
 	return core.ShouldUseShell(command)
 }
