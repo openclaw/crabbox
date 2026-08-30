@@ -5,11 +5,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"text/tabwriter"
 	"time"
 
 	"github.com/openclaw/crabbox/internal/cli"
@@ -49,7 +51,7 @@ func TestClaimMetadataBlacksmithCLIUnderUnrelatedOwner(t *testing.T) {
 			repo := t.TempDir()
 			t.Chdir(repo)
 			config := filepath.Join(repo, "crabbox.yaml")
-			if err := os.WriteFile(config, []byte("provider: blacksmith-testbox\nblacksmith:\n  workflow: .github/workflows/testbox.yml\n"), 0o600); err != nil {
+			if err := os.WriteFile(config, []byte("provider: blacksmith-testbox\nblacksmith:\n  org: example-org\n  workflow: .github/workflows/testbox.yml\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			t.Setenv("CRABBOX_CONFIG", config)
@@ -57,15 +59,38 @@ func TestClaimMetadataBlacksmithCLIUnderUnrelatedOwner(t *testing.T) {
 			t.Setenv("CRABBOX_COORDINATOR", "")
 			t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
 			t.Setenv("CRABBOX_ENV_ALLOW", "")
+			t.Setenv("BLACKSMITH_API_URL", "")
+			t.Setenv("BLACKSMITH_ORG", "")
 			bin := t.TempDir()
 			callsPath := filepath.Join(bin, "calls")
 			t.Setenv("CRABBOX_TEST_CALLS", callsPath)
+			var status bytes.Buffer
+			w := tabwriter.NewWriter(&status, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "ID\tSTATUS\tIP\tWORKFLOW\tJOB\tREF\tCREATED\tRUN URL")
+			fmt.Fprintln(w, "tbx_metadata123\tready\t\t.github/workflows/testbox.yml\ttest\tmain\t2026-08-30T00:00:00Z\thttps://github.com/example-org/my-app/actions/runs/123")
+			if err := w.Flush(); err != nil {
+				t.Fatal(err)
+			}
+			statusPath := filepath.Join(bin, "status")
+			if err := os.WriteFile(statusPath, status.Bytes(), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CRABBOX_TEST_STATUS", statusPath)
 			fake := `#!/bin/sh
 set -eu
-printf '%s\n' "$*" >> "$CRABBOX_TEST_CALLS"
+if [ "$1" = --org ]; then
+  [ "$2" = example-org ] || exit 92
+  shift 2
+fi
+printf '%s %s\n' "$1" "$2" >> "$CRABBOX_TEST_CALLS"
 case "$1 $2" in
-  'testbox warmup') printf 'ready tbx_metadata123\n' ;;
-  'testbox run') printf 'Sync complete\nfixture-executed\n' ;;
+  'testbox status')
+    [ "$3 $4" = '--id tbx_metadata123' ] || exit 93
+    cat "$CRABBOX_TEST_STATUS" ;;
+  'testbox warmup') printf 'tbx_metadata123\n' ;;
+  'testbox run')
+    [ "$3 $4" = '--id tbx_metadata123' ] || exit 93
+    printf 'Sync complete\nfixture-executed\n' ;;
   *) exit 91 ;;
 esac
 `
@@ -79,7 +104,17 @@ esac
 				if mode == "other repo" {
 					claimRepo = filepath.Join(dirs.Root, "other-repo")
 				}
-				if err := cli.ClaimLeaseForRepoProvider(id, "metadata-sibling", "blacksmith-testbox", claimRepo, time.Minute, false); err != nil {
+				if err := cli.WithDurableLeaseClaimLock(id, func(current *cli.LeaseClaim, exists bool, save func() error) error {
+					if exists {
+						return fmt.Errorf("fixture claim already exists")
+					}
+					*current = cli.LeaseClaim{
+						LeaseID: id, CloudID: id, Slug: "metadata-sibling", Provider: "blacksmith-testbox", RepoRoot: claimRepo,
+						ProviderScope: `{"api":"https://backend.blacksmith.sh","org":"example-org"}`,
+						Labels:        map[string]string{"provider": "blacksmith-testbox", "lease": id, "slug": "metadata-sibling", "workflow": ".github/workflows/testbox.yml", "job": "test", "ref": "main"},
+					}
+					return save()
+				}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -147,8 +182,15 @@ esac
 				}
 			}
 			calls, _ := os.ReadFile(callsPath)
+			if mode == "unclaimed ID" {
+				if err == nil || !strings.Contains(err.Error(), "no exact local ownership claim") || len(calls) != 0 {
+					t.Fatalf("unclaimed ID was not rejected locally: err=%v calls=%q", err, calls)
+				}
+				return
+			}
 			if mode == "other repo" {
-				if err == nil || !strings.Contains(err.Error(), "claimed by repo") || len(calls) != 0 {
+				// Identity inspection may precede the repository guard; mutations may not.
+				if err == nil || !strings.Contains(err.Error(), "claimed by repo") || strings.TrimSpace(string(calls)) != "testbox status" {
 					t.Fatalf("repo guard lost: err=%v calls=%q", err, calls)
 				}
 				return
@@ -160,7 +202,7 @@ esac
 				if !strings.Contains(stdout.String(), "warmup complete") {
 					t.Fatalf("warmup did not finish: %q", stdout.String())
 				}
-			} else if !strings.Contains(string(calls), "testbox run --id "+id) || !strings.Contains(stdout.String(), "fixture-executed") {
+			} else if !strings.Contains(string(calls), "testbox run\n") || !strings.Contains(stdout.String(), "fixture-executed") {
 				t.Fatalf("exact ID did not execute: calls=%q stdout=%q", calls, stdout.String())
 			}
 		})

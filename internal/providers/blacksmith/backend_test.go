@@ -431,10 +431,8 @@ func TestBlacksmithRunIgnoresConfiguredEnvAllowBeforeWarmup(t *testing.T) {
 	}
 }
 
-func TestBlacksmithWarmupFailureRemovesPendingKey(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+func TestBlacksmithWarmupFailureRetainsPendingKey(t *testing.T) {
+	isolateBlacksmithOwnership(t)
 	runner := &blacksmithFuncRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
 		return LocalCommandResult{ExitCode: 1}, errors.New("exit status 1")
 	}}
@@ -443,19 +441,27 @@ func TestBlacksmithWarmupFailureRemovesPendingKey(t *testing.T) {
 	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
 	backend := newTestBlacksmithBackend(cfg, runner)
 	_, err := backend.warmupLease(context.Background(), Repo{Root: "/repo"}, false, "")
-	if err == nil {
-		t.Fatal("expected warmup failure")
+	if err == nil || !strings.Contains(err.Error(), "exit status 1") || !strings.Contains(err.Error(), "retained pending_key=tbx_pending_") {
+		t.Fatalf("expected warmup failure with recovery diagnostic: %v", err)
 	}
 	keyPath, keyErr := testboxKeyPath("tbx_probe")
 	if keyErr != nil {
 		t.Fatal(keyErr)
 	}
-	entries, readErr := os.ReadDir(filepath.Dir(filepath.Dir(keyPath)))
-	if readErr != nil && !os.IsNotExist(readErr) {
-		t.Fatal(readErr)
+	root := filepath.Dir(filepath.Dir(keyPath))
+	entries, readErr := os.ReadDir(root)
+	if readErr != nil || len(entries) != 1 || !strings.Contains(err.Error(), entries[0].Name()) {
+		t.Fatalf("pending recovery key directory missing: entries=%v err=%v", entries, readErr)
 	}
-	if len(entries) != 0 {
-		t.Fatalf("pending key directories leaked: %v", entries)
+	for _, name := range []string{"id_ed25519", "id_ed25519.pub"} {
+		info, keyErr := os.Stat(filepath.Join(root, entries[0].Name(), name))
+		if keyErr != nil || !info.Mode().IsRegular() {
+			t.Fatalf("recovery key missing: %s err=%v", name, keyErr)
+		}
+	}
+	claims, claimErr := core.ListLeaseClaims()
+	if claimErr != nil || len(claims) != 0 || len(runner.calls) != 2 {
+		t.Fatalf("failed warmup acquired authority: claims=%v err=%v calls=%d", claims, claimErr, len(runner.calls))
 	}
 }
 
