@@ -559,8 +559,9 @@ Use repeatable `--download remote=local` when the command writes proof files on
 the box. Downloads run only after a successful remote command, paths resolve
 relative to the remote workdir unless absolute, and Windows paths use `=`
 instead of `:` so drive letters stay unambiguous. Crabbox rejects local output
-path collisions between stdout capture, stderr capture, and downloads before
-command execution. On Unix-like hosts, Crabbox-created download, capture, proof,
+path collisions between lease output, stdout capture, stderr capture, and downloads
+before acquisition, including canonical aliases and existing hardlinks. On
+Unix-like hosts, Crabbox-created download, capture, proof,
 and failure-bundle files use owner-only permissions (`0600`), and newly created
 output directories use `0700`.
 
@@ -583,7 +584,8 @@ has a 30-second limit; the original workload exit and failure classification
 remain authoritative. The existing single-file transport, remote path behavior,
 atomic local writer, and private modes are reused. Destinations are checked for
 collisions across success/failure downloads, captures, proof, receipt, and lease
-output before execution. Existing `--download` stays success-only. macOS, WSL2,
+output before acquisition, leaving existing bytes unchanged on rejection.
+Existing `--download` stays success-only. macOS, WSL2,
 native Windows, delegated execution, and `--sync-only` reject the first-slice
 flag. Exit markers are removed from captured/logged stderr and leave no remote
 marker files. This does not establish artifact freshness.

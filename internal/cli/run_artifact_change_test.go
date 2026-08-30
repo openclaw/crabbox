@@ -224,6 +224,8 @@ func runArtifactChangeE2E(t *testing.T, failureDownloads bool) {
 		{"transport", "echo TRANSPORT_BREAK", "not-evaluated", 255, false},
 		{"schema cannot rescue stale", "true", "unchanged", 7, true},
 		{"schema after change", "printf '\"new\"' > proof", "changed", 0, true},
+		{"changed before JUnit", "printf new > proof", "changed", 1, false},
+		{"stale before JUnit", "true", "unchanged", 7, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clearConfigEnv(t)
@@ -274,6 +276,7 @@ exit 0
 			t.Setenv("CRABBOX_WORK_ROOT", remoteRoot)
 			download := filepath.Join(dir, "failed-proof")
 			wantDownload := failureDownloads && tc.status == "not-evaluated" && tc.name != "transport"
+			wantArchive := tc.code == 0 || tc.name == "changed before JUnit"
 			var stdout, stderr bytes.Buffer
 			releases := 0
 			runEnvProfileTestReleaseHook = func() error {
@@ -283,7 +286,7 @@ exit 0
 						return fmt.Errorf("failure evidence not collected before teardown: %w", err)
 					}
 				}
-				if tc.code == 0 {
+				if wantArchive {
 					files, _ := filepath.Glob(filepath.Join(dir, ".crabbox", "runs", "*", "*-artifacts.tgz"))
 					if len(files) != 1 {
 						return fmt.Errorf("archive not collected before teardown: %v", files)
@@ -306,7 +309,12 @@ exit 0
 				}
 				args = append(args, "--require-artifact-schema", "proof=schema.json")
 			}
-			args = append(args, "--", "sh", "-c", tc.command)
+			command := tc.command
+			if strings.HasSuffix(tc.name, "before JUnit") {
+				args = append(args, "--junit", "junit.xml", "--fail-on-test-failures")
+				command += `; printf '<testsuite tests="1" failures="1"><testcase name="failed"><failure message="expected"/></testcase></testsuite>' > junit.xml`
+			}
+			args = append(args, "--", "sh", "-c", command)
 			err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), args)
 			if exitCodeForError(err, 0) != tc.code {
 				t.Fatalf("err=%v stdout=%s stderr=%s", err, stdout.String(), stderr.String())
@@ -329,7 +337,7 @@ exit 0
 			} else if len(report.SchemaValidations) != 0 {
 				t.Fatalf("schema ran after stale guard: %+v", report)
 			}
-			if tc.code == 0 {
+			if wantArchive {
 				if len(report.Artifacts) != 1 {
 					t.Fatalf("artifacts=%+v", report.Artifacts)
 				}

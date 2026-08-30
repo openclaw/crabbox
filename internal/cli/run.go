@@ -624,6 +624,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return exit(2, "--attest cannot be combined with --sync-only")
 		}
 	}
+	if err := preflightRunOutputCollisions("lease output", strings.TrimSpace(*leaseOutput), *captureStdout, *captureStderr, allDownloads); err != nil {
+		return err
+	}
 	if err := preflightRunLocalOutputs(*captureStdout, *captureStderr, allDownloads); err != nil {
 		return err
 	}
@@ -2459,6 +2462,8 @@ afterSync:
 			fmt.Fprintf(a.Stderr, "artifact kind=%s path=%s bytes=%d\n", artifact.Kind, artifact.Path, artifact.Bytes)
 		}
 	}
+	// JUnit policy follows workload evidence collection; it must neither suppress
+	// fresh artifacts nor authorize failure downloads after a zero workload exit.
 	var testResultsFailure error
 	if failRunForTestResults(code, cfg.Results, results) {
 		code = 1
