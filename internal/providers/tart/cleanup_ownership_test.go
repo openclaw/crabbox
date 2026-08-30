@@ -22,7 +22,11 @@ const cleanupLease = "cbx_cleanupowned"
 func cleanupFixture(t *testing.T) (*backend, *recordingRunner, core.LeaseClaim) {
 	t.Helper()
 	testutil.IsolateUserDirs(t)
-	t.Setenv("TART_HOME", t.TempDir())
+	storage := filepath.Join(t.TempDir(), "Tart store ")
+	if err := os.Mkdir(storage, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TART_HOME", storage)
 	claimTartLease(t, t.TempDir(), cleanupLease, cleanupVM, "stopped")
 	claim, exists, err := core.ReadLeaseClaimWithPresence(cleanupLease)
 	if err != nil || !exists {
@@ -235,6 +239,29 @@ func TestCleanupPreservesOrphanClaimFromDifferentStore(t *testing.T) {
 	if err := core.VerifyLeaseClaimUnchanged(cleanupLease, claim); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestTouchPreservesCleanupOwnershipThroughClaimUpdate(t *testing.T) {
+	b, runner, claim := cleanupFixture(t)
+	server := b.serverFromInstance(tartInstance{Name: cleanupVM, State: "stopped"}, claim, b.configForRun())
+	touched, err := b.Touch(context.Background(), core.TouchRequest{
+		Lease: core.LeaseTarget{LeaseID: cleanupLease, Server: server}, State: "stopped",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := core.UpdateLeaseClaimEndpoint(cleanupLease, touched, core.SSHTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range runner.calls {
+		if call.Args[0] == "delete" {
+			return
+		}
+	}
+	t.Fatal("touch lost the storage/marker binding needed to clean up the owned VM")
 }
 
 func TestTartOwnershipMarkerCannotAdoptOrFollowSymlinks(t *testing.T) {

@@ -464,6 +464,10 @@ func (b *backend) Touch(_ context.Context, req TouchRequest) (Server, error) {
 			server.Labels[key] = value
 		}
 	}
+	// Storage identity is an exact path, not a sanitized provider-label value.
+	if storage, ok := original["tart_storage"]; ok {
+		server.Labels["tart_storage"] = storage
+	}
 	return server, nil
 }
 
