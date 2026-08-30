@@ -163,6 +163,17 @@ renewal and release fail closed. After a client crash, an expired owner is
 recoverable only when the exact witnessed child is no longer alive. POSIX,
 WSL2, and native Windows targets share these semantics.
 
+POSIX and WSL2 children register themselves before executing the requested
+workload. Registration waits at most five seconds for the owner lock; it does
+not leave a background child waiting indefinitely for a start file. A failed
+setup exits cooperatively and closes inherited SSH streams without requiring
+permission to signal the child. If the supervising shell disappears before
+handoff, the registration deadline and closed identity pipe still prevent the
+waiting child from running the workload. After handoff, the existing witnessed
+child and recovery rules continue to apply. A denied `kill -0` is never proof
+that a recorded child is dead: cleanup and recovery require independent PID
+absence evidence, and retain authority when observation is ambiguous.
+
 Once ownership is established, sync runs these steps:
 
 1. Resolve the local repository root.
@@ -211,6 +222,17 @@ Crabbox disables Git seeding when the origin is an HTTP(S) URL with embedded
 userinfo, warns without printing the URL, and uses the normal file sync instead.
 This prevents credentials stored in local Git remotes from reaching lease
 command arguments or the seeded worktree's Git configuration.
+
+If seeding fails, ordinary runs, local Actions hydration, and native Windows
+sync warn with a fixed phase, advisory failure category, and command exit
+status. Categories distinguish missing Git, authentication/access, DNS,
+connectivity, TLS, repository/ref, and verification failures when recognizable.
+Raw Git/SSH output, URLs, paths, and credential-helper messages are never
+replayed in this warning. Capture is limited to 16 KiB in memory; oversized or
+unrecognized output produces an `unknown` diagnosis instead of guessing.
+Crabbox continues with file sync, but this does not guarantee that later Git
+coherence checks or the workload will succeed. Existing Git metadata may still
+be present; the failed seed has not established that it is current or usable.
 
 ### Opt-in Git overlay
 

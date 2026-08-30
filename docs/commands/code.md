@@ -83,6 +83,10 @@ chunks large HTTP responses and websocket frames so VS Code assets and
 extension-host traffic stay under coordinator websocket frame limits, and it
 reconnects automatically on transient bridge errors.
 
+Ctrl+C interrupts both the code-server readiness wait and the reconnect delay;
+it does not wait for the next retry. The local bridge and SSH tunnel close,
+while the lease remains available for reuse.
+
 ## Flags
 
 ```text

@@ -213,12 +213,19 @@ is also honored for legacy compatibility.)
 
 ### Portal visibility
 
-When coordinator auth is configured, `crabbox list --provider blacksmith-testbox`
-syncs visibility-only Testbox rows into the portal lease table. If Crabbox can
+With a configured coordinator, successful `warmup`, `run`, and `list` sync
+visibility-only Testbox rows into the portal lease table. If Crabbox can
 infer the owning GitHub Actions run, the portal links the row to the run and
 workflow, shows the Actions status/conclusion, flags long-queued or long-running
 rows as `stuck`, exposes a copyable local stop command, and provides a
 visibility-only detail page.
+
+This optional bookkeeping shares a five-second budget, including inventory,
+Actions lookups, coordinator credentials, and HTTP. Cancellation or timeout
+stops further work and warns on stderr; it does not fail a successful warmup,
+stop its retained Testbox, or retry allocation. Warmup's final completion and
+timing include the bookkeeping attempt. See [portal visibility](../features/blacksmith-testbox.md#portal-visibility)
+for inventory and enrichment semantics.
 
 ## Capabilities
 

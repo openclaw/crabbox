@@ -111,6 +111,22 @@ func (Provider) NativeCheckpointWorkdir(req core.NativeCheckpointWorkdirRequest)
 }
 
 func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheckpointCreateRequest) (core.NativeCheckpointCreateResult, error) {
+	if req.Capture == nil {
+		return createNativeCheckpoint(ctx, req)
+	}
+	claim, _, err := core.ReadLeaseClaimWithPresence(req.LeaseID)
+	if err != nil {
+		return core.NativeCheckpointCreateResult{}, err
+	}
+	if err := core.ValidateCheckpointCaptureClaim(claim, req.CheckpointID, req.Capture); err != nil {
+		return core.NativeCheckpointCreateResult{}, err
+	}
+	var result core.NativeCheckpointCreateResult
+	err = core.WithLeaseClaimUnchanged(req.LeaseID, claim, func() error { var err error; result, err = createNativeCheckpoint(ctx, req); return err })
+	return result, err
+}
+
+func createNativeCheckpoint(ctx context.Context, req core.NativeCheckpointCreateRequest) (core.NativeCheckpointCreateResult, error) {
 	containerID := strings.TrimSpace(req.Server.CloudID)
 	if containerID == "" {
 		return core.NativeCheckpointCreateResult{}, core.Exit(2, "docker-commit checkpoint requires a running container")
@@ -213,7 +229,35 @@ func (Provider) VerifyNativeCheckpoint(ctx context.Context, req core.NativeCheck
 			Error:         fmt.Sprintf("checkpoint tag %s points to %s, recorded image is %s", req.Image.Name, currentID, req.Image.ID),
 		}, nil
 	}
-	return core.NativeCheckpointVerifyResult{ProviderState: "available", NextAction: "delete"}, nil
+	return core.NativeCheckpointVerifyResult{ProviderState: "available", NextAction: "fork_or_delete"}, nil
+}
+
+func (b *backend) CheckpointSourceAbsent(ctx context.Context, req core.CheckpointSourceRequest) (bool, error) {
+	if !isFullContainerID(req.Capture.SourceID) {
+		return false, core.Exit(2, "checkpoint source requires a full container ID")
+	}
+	scope, err := checkpointScopeFromRequest(req.Resource)
+	if err != nil {
+		return false, err
+	}
+	if err := validateCheckpointScope(ctx, scope); err != nil {
+		return false, err
+	}
+	// Full immutable IDs are returned independently of ownership labels. A
+	// filtered managed-container list cannot prove source retirement.
+	out, err := checkpointCommand(ctx, scope, "ps", "-a", "--no-trunc", "--format", "{{.ID}}").Output()
+	if err != nil {
+		return false, err
+	}
+	for _, id := range strings.Fields(string(out)) {
+		if !isFullContainerID(id) {
+			return false, core.Exit(2, "checkpoint source inventory contains an invalid container ID")
+		}
+		if id == req.Capture.SourceID {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func (Provider) DeleteNativeCheckpoint(ctx context.Context, req core.NativeCheckpointResourceRequest) error {

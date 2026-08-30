@@ -17,6 +17,13 @@ crabbox stop --provider ssh --static-host mac-studio.local mac-studio.local
 
 `crabbox release` is a compatibility alias for `crabbox stop`.
 
+For coordinator-backed leases, the preliminary lookup has a ten-second budget.
+If it stalls, ordinary stop warns and proceeds through the existing
+provider-scoped release request. Provider identity mismatches still block
+release; `--force` still requires successful inspection. Canceling the command
+does not start a release fallback. Cleanup must still be confirmed before local
+claim and SSH artifacts are removed.
+
 ## Identifying the lease
 
 Pass the lease as a positional argument or with `--id`; both accept the

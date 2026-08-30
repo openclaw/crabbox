@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -410,19 +411,19 @@ func TestCoordinatorReleaseRemovesOnlyPerLeaseConnectionArtifacts(t *testing.T) 
 	if err := claimLeaseTargetForConfig(leaseID, "release-test", Config{Provider: "aws"}, Server{Provider: "aws"}, SSHTarget{}, time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	var releasePosts, observations int
+	var releasePosts, observations atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/release"):
-			releasePosts++
+			releasePosts.Add(1)
 			deleting := true
 			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
 				ID: leaseID, Provider: "aws", State: "released", CleanupStartedAt: "2026-08-19T00:00:00Z", ReleaseDeletesServer: &deleting,
 			}})
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/"+leaseID:
-			observations++
+			observation := observations.Add(1)
 			lease := CoordinatorLease{ID: leaseID, Provider: "aws", State: "released", CleanupStartedAt: "2026-08-19T00:00:00Z"}
-			if observations == 2 {
+			if observation == 2 {
 				lease.CleanupStartedAt = ""
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
@@ -449,8 +450,8 @@ func TestCoordinatorReleaseRemovesOnlyPerLeaseConnectionArtifacts(t *testing.T) 
 	if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists {
 		t.Fatalf("claim exists=%t err=%v, want removed after final cleanup", exists, err)
 	}
-	if releasePosts != 1 || observations != 2 {
-		t.Fatalf("release POSTs=%d observations=%d, want 1/2", releasePosts, observations)
+	if posts, observed := releasePosts.Load(), observations.Load(); posts != 1 || observed != 2 {
+		t.Fatalf("release POSTs=%d observations=%d, want 1/2", posts, observed)
 	}
 }
 
@@ -498,12 +499,12 @@ func TestCoordinatorReleasePreservesArtifactsWithoutConfirmedDestroy(t *testing.
 			if err := claimLeaseTargetForConfig(leaseID, "release-test", Config{Provider: "aws"}, Server{Provider: "aws"}, SSHTarget{}, time.Hour); err != nil {
 				t.Fatal(err)
 			}
-			var releasePosts, observations int
+			var releasePosts, observations atomic.Int32
 			var cancel context.CancelFunc
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/release"):
-					releasePosts++
+					releasePosts.Add(1)
 					if tc.failHTTP {
 						cancel()
 						http.Error(w, "provider failed", http.StatusBadRequest)
@@ -513,7 +514,7 @@ func TestCoordinatorReleasePreservesArtifactsWithoutConfirmedDestroy(t *testing.
 					lease.ID = leaseID
 					_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
 				case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/"+leaseID:
-					observations++
+					observations.Add(1)
 					if tc.getNotFound {
 						http.Error(w, `{"error":"not_found"}`, http.StatusNotFound)
 						return
@@ -552,14 +553,15 @@ func TestCoordinatorReleasePreservesArtifactsWithoutConfirmedDestroy(t *testing.
 			if claimErr != nil || claimExists != tc.wantClaim {
 				t.Fatalf("claim exists=%t err=%v want=%t", claimExists, claimErr, tc.wantClaim)
 			}
-			if tc.provider == "external" && (releasePosts != 0 || observations != 0) {
-				t.Fatalf("ownership mismatch sent release POSTs=%d observations=%d", releasePosts, observations)
+			posts, observed := releasePosts.Load(), observations.Load()
+			if tc.provider == "external" && (posts != 0 || observed != 0) {
+				t.Fatalf("ownership mismatch sent release POSTs=%d observations=%d", posts, observed)
 			}
-			if tc.provider != "external" && releasePosts != 1 {
-				t.Fatalf("release POSTs=%d want 1", releasePosts)
+			if tc.provider != "external" && posts != 1 {
+				t.Fatalf("release POSTs=%d want 1", posts)
 			}
-			if (observations > 0) != tc.wantObservations {
-				t.Fatalf("observations=%d wantObservations=%t", observations, tc.wantObservations)
+			if (observed > 0) != tc.wantObservations {
+				t.Fatalf("observations=%d wantObservations=%t", observed, tc.wantObservations)
 			}
 		})
 	}
@@ -584,15 +586,15 @@ func TestCoordinatorReleaseCancellationDuringObservationPreservesLocalState(t *t
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var releasePosts, observations int
+	var releasePosts, observations atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		deleting := true
 		lease := CoordinatorLease{ID: leaseID, Provider: "aws", State: "released", CleanupStartedAt: "2026-08-19T00:00:00Z", ReleaseDeletesServer: &deleting}
 		switch r.Method {
 		case http.MethodPost:
-			releasePosts++
+			releasePosts.Add(1)
 		case http.MethodGet:
-			observations++
+			observations.Add(1)
 			cancel()
 		default:
 			http.NotFound(w, r)
@@ -606,8 +608,8 @@ func TestCoordinatorReleaseCancellationDuringObservationPreservesLocalState(t *t
 	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "coordinator accepted release") {
 		t.Fatalf("error=%v, want accepted-release cancellation", err)
 	}
-	if releasePosts != 1 || observations != 1 {
-		t.Fatalf("release POSTs=%d observations=%d want 1/1", releasePosts, observations)
+	if posts, observed := releasePosts.Load(), observations.Load(); posts != 1 || observed != 1 {
+		t.Fatalf("release POSTs=%d observations=%d want 1/1", posts, observed)
 	}
 	if _, err := os.Stat(keyPath); err != nil {
 		t.Fatalf("artifacts removed after canceled observation: %v", err)
@@ -634,14 +636,14 @@ func TestCoordinatorReleaseObservationProviderMismatchFailsClosed(t *testing.T) 
 	if err := claimLeaseTargetForConfig(leaseID, "release-test", Config{Provider: "aws"}, Server{Provider: "aws"}, SSHTarget{}, time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	var releasePosts, observations int
+	var releasePosts, observations atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		deleting := true
 		lease := CoordinatorLease{ID: leaseID, Provider: "aws", State: "released", CleanupStartedAt: "2026-08-19T00:00:00Z", ReleaseDeletesServer: &deleting}
 		if r.Method == http.MethodPost {
-			releasePosts++
+			releasePosts.Add(1)
 		} else if r.Method == http.MethodGet {
-			observations++
+			observations.Add(1)
 			lease.Provider = "external"
 		} else {
 			http.NotFound(w, r)
@@ -653,8 +655,8 @@ func TestCoordinatorReleaseObservationProviderMismatchFailsClosed(t *testing.T) 
 	backend := coordinatorReleaseTestBackend(server, io.Discard)
 	err = backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: Server{Provider: "aws"}}})
 	assertCoordinatorProviderIdentityError(t, err, "external", leaseID)
-	if releasePosts != 1 || observations != 1 {
-		t.Fatalf("release POSTs=%d observations=%d want 1/1", releasePosts, observations)
+	if posts, observed := releasePosts.Load(), observations.Load(); posts != 1 || observed != 1 {
+		t.Fatalf("release POSTs=%d observations=%d want 1/1", posts, observed)
 	}
 	if _, err := os.Stat(keyPath); err != nil {
 		t.Fatalf("artifacts removed after observation mismatch: %v", err)

@@ -57,6 +57,24 @@ the coordinator. The dedicated
 SSM-only workspace API path. See [Architecture](../architecture.md) for the full
 topology.
 
+## CLI request budgets
+
+The CLI bounds individual lease reads (including authoritative provider
+metadata), health, identity, provider readiness, and HTTP heartbeat requests to
+30 seconds. The same deadline covers authentication, response-body reads, and
+any eligible read-only curl fallback; an earlier caller deadline still wins.
+Best-effort foreground lease touches retain their shorter 20-second budget.
+Provisioning and image operations retain the 30-minute HTTP budget.
+
+Before releasing a lease, `stop` allows ten seconds for its preliminary lookup.
+If that lookup fails, ordinary stop can use the existing provider-scoped release
+request; provider identity errors still fail closed, and `stop --force` still
+requires successful inspection. Caller cancellation stops the command rather
+than starting this fallback. Release attempts and cleanup observation retain
+their existing separate budgets. An uncertain cleanup result preserves the
+local claim and SSH artifacts; a request timeout is not proof of remote failure
+or successful deletion and does not add mutation retries.
+
 ## Responsibilities
 
 The fleet coordinator owns:
@@ -65,6 +83,9 @@ The fleet coordinator owns:
 - lease lifecycle: create, look up, heartbeat, release, expire, share;
 - provider credentials and provider operations (provision, release, images,
   identity, Mac hosts, capacity fallback, orphan sweep);
+- owner/org-scoped brokered native checkpoint records, opt-in unused expiry,
+  bounded checkpoint/fork-claim admission, generation-fenced fork claims,
+  recent checkpoint audit events, promotion pins, and exact provider cleanup;
 - cost and active-lease guardrails enforced at create time;
 - usage aggregation by owner, org, provider, and instance type;
 - run records, run events, run logs, and per-run telemetry;
@@ -73,6 +94,10 @@ The fleet coordinator owns:
 - artifact-upload credentials and scoped upload URLs;
 - expiry and cleanup, driven by Durable Object alarms or durable pg-boss jobs
   plus periodic reconciliation.
+
+The PostgreSQL runtime retries serialization/deadlock contention with bounded
+jittered backoff so parallel checkpoint shard claims do not lose authoritative
+use counts or replay provider mutations inside retried storage transactions.
 
 ## Authentication
 
@@ -133,6 +158,7 @@ GET    /v1/whoami
 GET    /v1/providers/{provider}/readiness
 GET    /v1/control                       (websocket: run events + heartbeats)
 POST   /v1/leases
+POST   /v1/leases/from-checkpoint
 PUT    /v1/leases/{canonical-id}       (fixed-ID idempotent create)
 PUT    /v1/leases/{id}/registration
 GET    /v1/leases
@@ -144,6 +170,13 @@ POST   /v1/leases/{id-or-slug}/tailscale
 GET    /v1/leases/{id-or-slug}/share
 PUT    /v1/leases/{id-or-slug}/share
 DELETE /v1/leases/{id-or-slug}/share
+POST   /v1/checkpoints
+GET    /v1/checkpoints
+GET    /v1/checkpoints/{id}
+GET    /v1/checkpoints/{id}/events
+PATCH  /v1/checkpoints/{id}/retention
+POST   /v1/checkpoints/{id}/use
+DELETE /v1/checkpoints/{id}
 POST   /v1/runs
 GET    /v1/runs
 GET    /v1/runs/{run-id}
@@ -179,6 +212,18 @@ begin, do not roll the coordinator back to a version that ignores their
 tombstones. A newer CLI against an older coordinator fails cancellation closed
 rather than falling back to an unsafe ID-only release.
 
+Checkpoint creation derives owner, canonical organization, provider, and exact
+provider scope from the authoritative source lease. Global/owner/org admission
+and the durable `creating` reservation share one serializable transaction
+before provider mutation; only an exactly owned AWS, Azure, or GCP resource
+can publish the checkpoint. Forks use transactionally bounded, renewable,
+generation-bound claims and the narrowly validated
+`/v1/leases/from-checkpoint` route instead of relaxing ordinary lease image
+overrides. Manual retention is the default; explicit unused expiry, use claims,
+deletion retries, and audit tombstones share the coordinator's sorted
+checkpoint due index and scheduler. `/v1/checkpoints/{id}/events` exposes only
+the retained recent audit suffix: at most 256 ordered events per checkpoint,
+not complete lifetime history.
 Receipt-bearing run finishes use the same fail-closed rollout rule. After every
 successful finish response, the CLI retrieves the stored receipt and requires
 an exact signed match before marking the run recorded. A coordinator that
@@ -310,6 +355,14 @@ runner leases stay visible without leaking to normal users. External runner rows
 (synced via `POST /v1/runners/sync`) render as muted rows with inferred GitHub
 Actions links and stale markers; clicking one opens its visibility-only detail
 page at `/portal/runners/{provider}/{runner-id}`.
+
+The CLI's best-effort external-runner sync has a single five-second budget
+covering inventory, optional Actions enrichment, credential resolution, and the
+HTTP request/response. Earlier caller deadlines still apply. Once canceled, the
+CLI does not publish partial inventory or start further lookups. A warning does
+not change a successful allocation or retained lease; Blacksmith warmup emits
+final completion/timing after the sync attempt. An upload whose response is lost
+may already have been accepted, so it is not retried.
 
 `/portal/leases/{id-or-slug}` shows lease state, bridge status, the latest Linux
 telemetry, copy-ready `ssh`/`run`/WebVNC/code commands, a recent-runs grid, and a

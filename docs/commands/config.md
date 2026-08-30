@@ -75,6 +75,13 @@ inherited `amd64` values. See [Upgrading existing static-host configuration](../
 to keep a strict constraint or remove the contributing values for automatic
 discovery; a blank override does not clear an inherited assertion.
 
+The JSON `incus` object includes the merged Incus settings: connection selectors,
+instance type, image, profile, SSH/proxy settings, release policy, timeout, and
+TLS options. `address` and `remoteImageServer` use the endpoint redaction below;
+`socket` and `tlsServerCert` report configured paths, not file contents.
+Inspection does not resolve named Incus remotes or contact the daemon, so an
+empty `project` remains empty until Incus resolves its remote/project default.
+
 Secrets are never printed. Token-bearing fields are reduced to a status word:
 
 - Provider endpoint URL userinfo is replaced with `<redacted>@`; query and

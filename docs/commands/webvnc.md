@@ -148,6 +148,12 @@ the local relay performs account authentication itself: it does not register a
 credential endpoint, and the viewer neither receives nor fetches the account
 username or password. ARD account credentials are never copied into arguments,
 browser URLs, the handoff file, or a browser credential response.
+
+Local macOS authentication negotiation has a 10-second deadline. An expired
+deadline is reported as `authentication negotiation timed out`, even when the
+WebSocket transport reports a closed connection; the diagnostic retains the
+failed RFB phase and underlying error.
+
 An External provider may source its ARD password from an operator-approved
 environment variable; the local relay reads that value and keeps it
 server-side. The explicitly supplied legacy VNC username remains visible in the
@@ -170,6 +176,11 @@ uses the URL fragment. It is a viewer hint, not a new permission boundary:
 Portal auth and lease sharing still decide who can open the session.
 
 ## Security boundary
+
+Bridge WebSocket upgrades allow 30 seconds for response headers. This handshake
+limit does not impose a lifetime limit on an established session. Custom HTTP
+transports must be supported explicitly; the bridge never replaces them with an
+unrelated default route.
 
 WebVNC keeps the same security boundary as `crabbox vnc`:
 
@@ -240,11 +251,21 @@ files and prints alive/stale state for each bridge, which is useful after agent
 runs leave helpers behind. `daemon stop` terminates both the supervisor and the
 active child bridge, but only after the recorded workspace, process start
 identity, and per-process nonce all match the live Crabbox WebVNC process. A
-legacy, copied, or PID-recycled identity is never reused or signaled. Stop also
-terminates and verifies the complete recorded process group before removing the
-private identity. If the supervisor PID was recycled while descendants may
-remain, Crabbox retains that identity and fails closed instead of losing its
-only cleanup handle.
+legacy, copied, or PID-recycled identity is never reused or signaled.
+On Unix hosts, stop signals only the verified supervisor, which asks its child
+to finish cleanup and waits for it to be reaped. Each child must acknowledge
+cleanup of its separately grouped SSH tunnel before the supervisor can restart
+it or record a private, launch-bound cleanup receipt. Repeated termination
+signals do not interrupt this cleanup. Stop requires both that receipt and an
+empty recorded process group before removing the private identity.
+Unresponsive shutdown escalates within the existing five-second stop budget;
+forced termination or a missing receipt reports failure and retains the
+identity, even if the supervisor has disappeared. Retrying cannot turn that
+uncertainty into success. Verify the recorded processes and their owned tunnels
+before manually removing an unconfirmed identity. Older Go supervisors cannot
+produce a receipt and likewise require verification after stopping. If the
+supervisor PID was recycled while descendants may remain, Crabbox retains the
+identity and fails closed instead of signaling a replacement process.
 On Windows hosts, daemon status, reuse, and stop inspect process creation time
 and command line through native process APIs; they do not require a Unix `ps`
 binary. Manual Windows SSH and WebVNC tunnels remain supported unchanged.

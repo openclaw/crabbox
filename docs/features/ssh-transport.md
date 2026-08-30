@@ -126,6 +126,29 @@ password retrieval, remote setup/cleanup, and sync need their own transport
 boundary. Native VNC handoff stdout still intentionally contains the viewer
 credentials documented by that command.
 
+## Workspace-owner setup failures
+
+On reused POSIX and WSL2 leases, SSH readiness commands also run under the
+remote workspace owner. A successful SSH login or bootstrap readiness command
+does not prove that the host permits child observation and witness registration.
+If that setup fails, Crabbox stops with `remote workspace owner setup failed`
+and the setup stage, rather than retrying it as `ssh-auth` or a TCP-port failure.
+Check the remote process-observation permissions, lock tools, and owner state;
+do not disable ownership checks or relax host-key verification.
+
+Setup diagnostics contain a bounded stage identifier, without owner tokens,
+paths, or process command lines. A per-command marker separates them from
+workload stderr, and classification ends before workload execution. A workload
+that returns exit code 74 therefore remains a workload failure.
+
+For WSL2, the marker travels inside the verified private staged envelope and
+is filtered only when its command executes. Upload, route probes, and cleanup
+do not classify witness diagnostics. Readiness still checks the WSL runtime
+and SFTP first; when a workspace owner is active, its readiness command then
+passes the same staged witness setup. A setup failure stops readiness without
+port fallback or replay. Workload output after handoff, including marker-like
+stderr, retains its ordinary meaning.
+
 ## Related
 
 - [`cp`](../commands/cp.md)

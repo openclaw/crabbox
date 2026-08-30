@@ -146,7 +146,9 @@ func (a App) webCode(ctx context.Context, args []string) error {
 			return err
 		}
 		fmt.Fprintln(a.Stdout, "bridge: disconnected; reconnecting")
-		time.Sleep(300 * time.Millisecond)
+		if err := sleepContext(ctx, 300*time.Millisecond); err != nil {
+			return context.Cause(ctx)
+		}
 	}
 }
 
@@ -162,7 +164,9 @@ func ensureRemoteCodeServer(ctx context.Context, target SSHTarget, workdir strin
 		if err := runSSHQuiet(ctx, target, codeServerReadyCommand()); err == nil {
 			return nil
 		}
-		time.Sleep(500 * time.Millisecond)
+		if err := sleepContext(ctx, 500*time.Millisecond); err != nil {
+			return context.Cause(ctx)
+		}
 	}
 	return exit(5, "timed out waiting for code-server on 127.0.0.1:%s", managedCodePort)
 }

@@ -2,13 +2,13 @@ param($file, [byte[]]$descriptor, [string]$nonce)
 $ErrorActionPreference = 'Stop'
 $helperSize = [BitConverter]::ToUInt32($descriptor,12)
 $commandSize = [BitConverter]::ToUInt64($descriptor,16)
-$inputSize = [BitConverter]::ToUInt64($descriptor,24)
-$timeout = [BitConverter]::ToUInt64($descriptor,32)
+$payloadSize = [BitConverter]::ToUInt64($descriptor,24)
+$execution = [BitConverter]::ToUInt64($descriptor,32)
 $idle = [BitConverter]::ToUInt32($descriptor,40)
 $grace = [BitConverter]::ToUInt32($descriptor,44)
 if (!$helperSize -or $helperSize -gt 32768 -or $commandSize -gt 67108864 -or
-    $inputSize -gt 1099511627776 -or !$idle -or !$grace -or
-    $file.Length - $file.Position -ne $helperSize + $commandSize + $inputSize) {
+    $payloadSize -gt 1099511627776 -or !$idle -or !$grace -or
+    $file.Length - $file.Position -ne $helperSize + $commandSize + $payloadSize) {
     throw 'invalid WSL2 envelope lengths'
 }
 $helper = [IO.BinaryReader]::new($file).ReadBytes($helperSize)
@@ -26,8 +26,8 @@ $writer = $null
 $failure = $null
 
 function Remaining([long]$ceiling) {
-    if ($timeout) {
-        $left = [long]$timeout - $clock.ElapsedMilliseconds
+    if ($execution) {
+        $left = [long]$execution - $clock.ElapsedMilliseconds
         if ($left -le 0) { throw 'WSL2 command timed out' }
         return [int][Math]::Min($ceiling,$left)
     }
@@ -36,7 +36,7 @@ function Remaining([long]$ceiling) {
 function Wait-Pipe($task, [switch]$startup) {
     $ceiling = $idle
     if ($startup) {
-        # Opening and helper delivery share one bounded startup clock.
+        # Opening and helper delivery share the original startup/total clock.
         $ceiling = @STARTUP@ - $clock.ElapsedMilliseconds
         if ($ceiling -le 0) { throw 'WSL2 command timed out' }
     }
@@ -53,7 +53,8 @@ function Start-Linux([string]$mode) {
     $info = [Diagnostics.ProcessStartInfo]::new('wsl.exe')
     $info.UseShellExecute = $false
     $info.RedirectStandardInput = $true
-    # Framework 5.1 may emit Console.InputEncoding's preamble during Start.
+    # Framework / PowerShell 5.1 uses Console.InputEncoding and may emit its
+    # preamble during Start's AutoFlush. Core supports an explicit encoding.
     $encoding = [Console]::InputEncoding
     if ($PSVersionTable.PSEdition -eq 'Core') {
         $info.StandardInputEncoding = $utf8
@@ -63,12 +64,13 @@ function Start-Linux([string]$mode) {
     if ([BitConverter]::ToString($preamble) -notin @('','EF-BB-BF')) { throw 'unsupported WSL2 pipe preamble' }
     $info.Arguments = '--exec sh -c "' + $bootstrap.Replace('"','\"') + '" sh ' +
         $helperSize + ' ' + $preamble.Length + ' ' + $mode + ' ' + $directory + ' ' + $nonce + ' ' +
-        $commandSize + ' ' + $inputSize + ' ' + $idle + ' ' + $grace
+        $commandSize + ' ' + $payloadSize + ' ' + $idle + ' ' + $grace
     return [Diagnostics.Process]::Start($info)
 }
 function Open-LinuxInput($child) {
     Wait-Pipe ($child.StandardInput.FlushAsync()) -startup
-    # One unbuffered view keeps helper and frame bytes on the same handle.
+    # Public Framework API: one unbuffered view of the same pipe handle.
+    # Never write text again or let a small final raw write wait for Close.
     return [IO.FileStream]::new($child.StandardInput.BaseStream.SafeFileHandle,[IO.FileAccess]::Write,1,$false)
 }
 function Stop-Exact($child) {
@@ -82,7 +84,7 @@ try {
     $phase = 'helper-write'
     Write-Pipe $writer $helper $helper.Length -startup
     $buffer = [byte[]]::new(65536)
-    $remaining = [long]$commandSize + [long]$inputSize
+    $remaining = [long]$commandSize + [long]$payloadSize
     while ($remaining -gt 0) {
         $phase = 'file-read'
         $count = $file.Read($buffer,0,[int][Math]::Min($buffer.Length,$remaining))
@@ -93,18 +95,21 @@ try {
         $written += $count
         $remaining -= $count
     }
-    # Complete frame delivery is not control EOF; the watcher owns that signal.
+    # The complete finite frame is not control EOF. Only the watcher inherits
+    # this pipe; workloads use the finite Linux input file instead.
     $phase = 'execute'
-    if ($timeout) {
+    if ($execution) {
         if (!$process.WaitForExit((Remaining ([int]::MaxValue)))) { throw 'WSL2 command timed out' }
     } else { $process.WaitForExit() }
     $code = $process.ExitCode
+    # A late zero exit cannot turn an expired original operation into success.
+    if ($code -eq 0) { $null = Remaining ([int]::MaxValue) }
 } catch {
     $reason = $_.Exception.Message
     if ($reason -notin @('WSL2 command timed out','WSL2 pipe transfer made no progress','WSL2 envelope ended early')) {
         $reason = 'WSL2 transport failed'
     }
-    $failure = $reason + ' phase=' + $phase + ' expected=' + ($commandSize + $inputSize) + ' read=' + $read + ' written=' + $written
+    $failure = $reason + ' phase=' + $phase + ' expected=' + ($commandSize + $payloadSize) + ' read=' + $read + ' written=' + $written
 } finally {
     if ($writer) { $writer.Dispose() }
 }
@@ -113,11 +118,12 @@ if ($failure) {
         [Console]::Error.WriteLine('WSL2 command cleanup failed: launcher termination unconfirmed')
         throw $failure
     }
-    # Cleanup starts only after the original exact launcher is reaped.
+    # A second invocation runs the same helper in cleanup mode, only after the
+    # original exact launcher has exited. Its pipe and exit are bounded too.
     $cleanup = $null
     $cleanupWriter = $null
     try {
-        $timeout = 10000
+        $execution = 10000
         $clock.Restart()
         $cleanup = Start-Linux 'cleanup'
         $cleanupWriter = Open-LinuxInput $cleanup
@@ -125,6 +131,7 @@ if ($failure) {
         $cleanupWriter.Dispose()
         if (!$cleanup.WaitForExit((Remaining 10000))) { throw 'cleanup timeout' }
         if ($cleanup.ExitCode -ne 0) { throw 'cleanup refused' }
+        $null = Remaining 10000
     } catch {
         $confirmed = !$cleanup -or (Stop-Exact $cleanup)
         if ($confirmed) { [Console]::Error.WriteLine('WSL2 command cleanup failed') }

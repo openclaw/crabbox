@@ -85,9 +85,12 @@ func (b *blacksmithBackend) Warmup(ctx context.Context, req WarmupRequest) error
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: blacksmith warmup keeps the testbox until idle timeout or explicit stop\n")
 	}
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", b.rt.Clock.Now().Sub(started).Round(time.Millisecond))
+	if req.BeforeComplete != nil {
+		req.BeforeComplete()
+	}
+	total := b.rt.Clock.Now().Sub(started)
+	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
 	if req.TimingJSON {
-		total := b.rt.Clock.Now().Sub(started)
 		if err := writeTimingJSON(b.rt.Stderr, timingReport{
 			Provider: blacksmithTestboxProvider,
 			LeaseID:  leaseID,

@@ -84,7 +84,8 @@ func TestMachine0TouchDurablyPersistsLifecycleAndIdleTimeout(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			api.machine.Region = "us-east"
+			api.machine.PricePerHour = 123_000
+			api.machines = []machine{api.machine}
 			lease, err = b.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID, StatusOnly: true})
 			if err != nil {
 				t.Fatal(err)
@@ -113,7 +114,7 @@ func TestMachine0TouchDurablyPersistsLifecycleAndIdleTimeout(t *testing.T) {
 			if updated.LastUsedAt != now.Format(time.RFC3339) || updated.Revision == initial.Revision ||
 				updated.IdleTimeoutSeconds != int(wantTimeout.Seconds()) || updated.Labels["idle_timeout_secs"] != wantSeconds ||
 				updated.Labels["last_touched_at"] != core.LeaseLabelTime(now) || updated.Labels["state"] != "running" ||
-				updated.Labels["durable_metadata"] != "preserved" || updated.Labels["region"] != "us-east" {
+				updated.Labels["durable_metadata"] != "preserved" || updated.Labels["price_per_hour_micro"] != "123000" {
 				t.Fatalf("durable touch lost persisted or dynamic lifecycle state: %#v", updated)
 			}
 			snapshot, exists, set := core.ServerLeaseClaimSnapshot(server)
@@ -420,7 +421,13 @@ func configureMachine0CommandFixture(t *testing.T, item machine, coordinatorURL,
 	}
 	binDir := t.TempDir()
 	cliPath := filepath.Join(binDir, "machine0")
-	script := fmt.Sprintf("#!/bin/sh\nif [ \"$#\" -ne 3 ] || [ \"$1\" != \"get\" ] || [ \"$2\" != %q ] || [ \"$3\" != \"--json\" ]; then exit 2; fi\nprintf '%%s\\n' '%s'\n", item.Name, machineJSON)
+	script := fmt.Sprintf(`#!/bin/sh
+case "$*" in
+  'ls --json') printf '%%s\n' '[%s]' ;;
+  'get %s --json') printf '%%s\n' '%s' ;;
+  *) exit 2 ;;
+esac
+`, machineJSON, item.Name, machineJSON)
 	if err := os.WriteFile(cliPath, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}

@@ -148,6 +148,14 @@ One logical `FleetCoordinator` (`worker/src/fleet.ts`) owns:
   sharing, TTL/idle timeout, cost estimates, state
   (`active|released|expired|failed`), telemetry history, cleanup metadata, and
   optional Tailscale/pond/exposed-port fields.
+- **Brokered native checkpoints** — provider-neutral
+  `worker/src/checkpoints.ts` owns versioned `checkpoint:*` records, sorted
+  `checkpoint-due:*` deadlines, exact `checkpoint-resource:*` reverse claims,
+  hashed use claims, promotion pins, and ordered audit events. Storage
+  transactions fence create/use/delete generations; provider-specific AWS,
+  Azure, and GCP identity verification and deletion remain adapter-owned.
+  Manual retention is the default and local checkpoint records are caches,
+  never ownership authority.
 - **Cost and spend caps** (`worker/src/usage.ts`) — `enforceCostLimits` checks
   active-lease counts and monthly reserved-USD budgets (global / per-owner /
   per-org) from `CRABBOX_MAX_*` env. Over-limit requests get HTTP 429
@@ -193,11 +201,24 @@ Lease lifecycle:
 GET  /v1/leases
 GET  /v1/leases/{id-or-slug}
 POST /v1/leases
+POST /v1/leases/from-checkpoint
 POST /v1/leases/{requested-id}/cancel-create
 POST /v1/leases/{id-or-slug}/heartbeat
 POST /v1/leases/{id-or-slug}/release
 POST /v1/leases/{id-or-slug}/tailscale
 GET|PUT|DELETE /v1/leases/{id-or-slug}/share
+```
+
+Owner-scoped brokered native checkpoints:
+
+```text
+POST   /v1/checkpoints
+GET    /v1/checkpoints
+GET    /v1/checkpoints/{id}
+GET    /v1/checkpoints/{id}/events
+PATCH  /v1/checkpoints/{id}/retention
+POST   /v1/checkpoints/{id}/use
+DELETE /v1/checkpoints/{id}
 ```
 
 Runs and observability:

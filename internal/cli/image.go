@@ -226,11 +226,12 @@ func (a App) imageDelete(ctx context.Context, args []string) error {
 	region := fs.String("region", "", "region, location, or zone containing the image")
 	project := fs.String("project", "", "GCP project containing the image")
 	catalogOnly := fs.Bool("catalog-only", false, "unpublish AWS catalog-only variants without deleting the AMI")
+	retirePromotions := fs.Bool("retire-promotions", false, "retire AWS or Azure image catalog/default roles without deleting provider resources")
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return exit(2, "usage: crabbox image delete <image-id> [--provider aws|azure|gcp|hetzner] [--region <region>] [--project <project>] [--catalog-only]")
+		return exit(2, "usage: crabbox image delete <image-id> [--provider aws|azure|gcp|hetzner] [--region <region>] [--project <project>] [--catalog-only|--retire-promotions]")
 	}
 	normalizedProvider := normalizeProviderName(*provider)
 	if normalizedProvider != "aws" && normalizedProvider != "azure" && normalizedProvider != "gcp" && normalizedProvider != "hetzner" {
@@ -238,6 +239,12 @@ func (a App) imageDelete(ctx context.Context, args []string) error {
 	}
 	if *catalogOnly && normalizedProvider != "aws" {
 		return exit(2, "--catalog-only is AWS-only")
+	}
+	if *retirePromotions && normalizedProvider != "aws" && normalizedProvider != "azure" {
+		return exit(2, "--retire-promotions supports AWS and Azure only")
+	}
+	if *retirePromotions && *catalogOnly {
+		return exit(2, "--catalog-only and --retire-promotions are mutually exclusive")
 	}
 	if normalizedProvider == "hetzner" {
 		if strings.TrimSpace(*project) != "" {
@@ -263,6 +270,14 @@ func (a App) imageDelete(ctx context.Context, args []string) error {
 		return err
 	}
 	ref := CoordinatorImageRef{Provider: normalizedProvider, Region: *region, Project: *project}
+	if *retirePromotions {
+		retired, err := coord.RetirePromotedImage(ctx, fs.Arg(0), ref)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(a.Stdout, "retired promoted image=%s provider=%s roles=%d\n", fs.Arg(0), normalizedProvider, retired.Retired)
+		return nil
+	}
 	if *catalogOnly {
 		retired, err := coord.RetireCatalogImage(ctx, fs.Arg(0), ref)
 		if err != nil {
@@ -298,6 +313,9 @@ func deleteHetznerCheckpointImage(ctx context.Context, store checkpointStore, li
 	record := matches[0]
 	if region != "" && region != record.Native.Region {
 		return checkpointRecord{}, exit(2, "Hetzner snapshot %s location mismatch: recorded=%s requested=%s", imageID, blank(record.Native.Region, "unknown"), region)
+	}
+	if unresolvedCheckpoint(record) {
+		return checkpointRecord{}, exit(2, "checkpoint %s is unresolved; reconcile its capture before deletion", record.ID)
 	}
 	if err := lifecycle.DeleteNativeCheckpoint(ctx, nativeCheckpointResourceRequest(record)); err != nil {
 		return checkpointRecord{}, err

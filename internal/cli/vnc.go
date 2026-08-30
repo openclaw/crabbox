@@ -211,7 +211,7 @@ func resolveNativeVNCCredentials(ctx context.Context, cfg Config, target SSHTarg
 	}
 	password := ""
 	if endpoint.Managed || !isStaticProvider(cfg.Provider) {
-		password, _ = runSSHOutput(ctx, target, vncPasswordCommand(target))
+		password, _ = runVNCPasswordSSH(ctx, target, remoteVNCCredentialReadCommand(target))
 	}
 	username := ""
 	if endpoint.Managed && (target.TargetOS == targetWindows || target.TargetOS == targetMacOS) {

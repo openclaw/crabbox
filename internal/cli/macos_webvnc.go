@@ -118,7 +118,7 @@ func (a App) resolveMacOSWebVNCBridgeTarget(ctx context.Context, cfg Config, id 
 	if _, err := resolveVNCEndpoint(ctx, cfg, &target); err != nil {
 		return macOSWebVNCBridgeTarget{}, err
 	}
-	credentials, authMode, err := resolveMacOSWebVNCCredentials(ctx, cfg, target, runSSHOutput)
+	credentials, authMode, err := resolveMacOSWebVNCCredentials(ctx, cfg, target, runVNCPasswordSSH)
 	if err != nil {
 		return macOSWebVNCBridgeTarget{}, err
 	}
@@ -173,7 +173,7 @@ func resolveMacOSWebVNCCredentials(ctx context.Context, cfg Config, target SSHTa
 	if ok {
 		return credentials, localWebVNCAuthARD, nil
 	}
-	password, err := readPassword(ctx, target, vncPasswordCommand(target))
+	password, err := readPassword(ctx, target, remoteVNCCredentialReadCommand(target))
 	if err != nil {
 		return rfbCredentials{}, localWebVNCAuthAuto, exit(5, "read managed macOS desktop credentials: %v", err)
 	}

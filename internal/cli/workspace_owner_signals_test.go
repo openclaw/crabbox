@@ -18,7 +18,7 @@ func TestWorkspaceOwnerPOSIXWitnessSignalDispositions(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX witness requires a POSIX shell")
 	}
-	for _, signal := range []string{"INT", "QUIT"} {
+	for _, signal := range []string{"INT", "QUIT", "PIPE"} {
 		for _, ignored := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/inherited-ignore-%t", signal, ignored), func(t *testing.T) {
 				home := t.TempDir()
@@ -33,7 +33,7 @@ func TestWorkspaceOwnerPOSIXWitnessSignalDispositions(t *testing.T) {
 				payload := "exec /bin/sh -c " + shellQuote("trap 'exit 42' "+signal+"; kill -"+signal+" $$; printf survived-signal")
 				prefix := "ulimit -c 0; "
 				if ignored {
-					prefix += "trap '' INT QUIT; "
+					prefix += "trap '' " + signal + "; "
 				}
 				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 				defer cancel()

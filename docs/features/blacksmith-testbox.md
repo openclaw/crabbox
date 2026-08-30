@@ -164,7 +164,7 @@ it was creating.
 
 ### Portal visibility
 
-When coordinator auth is configured, `crabbox list --provider blacksmith-testbox` also performs a
+When a coordinator is configured, successful `warmup`, `run`, and `list` also perform a
 best-effort sync of the current all-status Blacksmith list into the portal lease table. Those rows
 are owner-scoped **visibility records** for Blacksmith-owned Testboxes, rendered muted in the
 portal. When a row carries enough context, Crabbox links it to the closest GitHub Actions run and
@@ -176,6 +176,16 @@ page with owner/org, Actions ownership, timestamps, and boundary notes.
 These rows are **not** Crabbox leases: they expose no box-access actions, do not heartbeat, do not
 participate in Crabbox expiry or cost control, and become stale when a later sync no longer sees
 the runner.
+
+Each sync shares one five-second budget across inventory, GitHub Actions
+enrichment, coordinator credential resolution, and upload, including response
+body reads. Earlier caller cancellation wins. An ordinary Actions lookup failure
+only omits that optional metadata. If the budget expires or is canceled before
+upload, Crabbox skips publication so incomplete inventory cannot mark other rows stale. Failed
+syncs warn on stderr without changing command success or Testbox ownership.
+Warmup prints its final completion and timing only after this attempt ends, with
+bookkeeping included in the total. Reuse the retained lease after a warning;
+portal visibility is not an allocation or readiness check.
 
 ## Sync-stall guard
 

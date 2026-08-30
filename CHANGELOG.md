@@ -4,11 +4,33 @@
 
 ### Added
 
+- Added Linux SSH `--download-on-failure` retrieval after an owned nonzero workload exit, preserving the exit code and collecting selected evidence before failure bundles and teardown.
+
+- Added opt-in Machine0 native size selection context to live catalog discovery while preserving configured defaults and exact fixed-lease replay.
 - Added durable fixed-ID Incus leases and private container disk checkpoints that survive source deletion, with ownership-checked cleanup and fresh SSH identity before fork startup.
+
+- Added opt-in Linux SSH `--require-artifact-change` checks with bounded content snapshots, created/changed/unchanged/missing timing states, and collection of only accepted bytes.
+
+- Added coordinator-owned brokered native checkpoints with transactional checkpoint and fork-claim admission limits, bounded recent audit events, opt-in unused-checkpoint expiry, and promotion-safe cleanup.
 
 ### Fixed
 
+- Kept WSL2 partial-cleanup hashing within its cancellation budget and published complete workload exit results atomically, preserving staged ownership checks and rejecting malformed statuses. Thanks @vincentkoc.
+- Honored cancellation during Code bridge reconnect and code-server readiness waits, preserving the existing retry delays while returning promptly on Ctrl+C. Thanks @SebTardif.
+- Bounded best-effort Testbox portal bookkeeping to one five-second budget and delayed final warmup completion/timing until it ends, preserving successful allocations and retained leases on sync failure.
+- Rejected lease-output aliases of captures and success/failure downloads before acquisition, preserving retained lease handles and existing output bytes.
+- Honored cancellation during Hostinger bootstrap SSH retry delays while preserving ownership-checked rollback and recovery state. Thanks @SebTardif.
+- Reaped WebVNC daemon SSH tunnels across child restarts and orderly shutdown, retaining exact ownership records and reporting failure when cleanup cannot be confirmed.
+- Bounded VNC/WebVNC credential reads to 30 seconds and 64 KiB, discarding partial credentials on any failure while preserving connection defaults, caller cancellation, and transport cleanup. Thanks @SebTardif.
+- Bounded WebVNC bridge response-header waits to 30 seconds without limiting established WebSocket sessions or bypassing configured HTTP transports. Thanks @SebTardif.
+- Simplified WSL2 SSH execution into one verified, privately blinded SFTP envelope with a derived fixed-control startup/work/completion budget, LF helpers on Windows builds, identity-checked cleanup, and no replay after publication uncertainty; SFTP is now required, replacing the v0.47.0 stdin fallback (enable it and verify Doctor's `wsl2-sftp` probe before upgrading). Thanks @vincentkoc.
+- Exposed resolved Incus settings in `config show --json`, with endpoint credential redaction and no daemon access.
+- Bounded coordinator lease reads, doctor probes, and HTTP heartbeats to 30 seconds, and stop's preliminary lookup to ten seconds, preserving provisioning budgets, provider-scoped release, caller cancellation, and cleanup evidence.
 - Retained scoped direct-AWS fixed-lease cleanup receipts for canonical stop replay after inventory disappears, with fresh account, region, identity, and inventory checks; older compact tombstones remain unchanged and fail closed.
+- Reported POSIX and WSL2 workspace-owner setup failures separately from SSH readiness, with bounded pre-start cleanup and fail-closed recovery when child observation is denied.
+- Attested fixed Machine0 checkpoint-fork replay from identity-checked VM details when inventory omits the pinned image version, preserving key semantics and refusing mismatches without duplicate creation.
+- Made native checkpoint source retirement replayable, preserving pending operation and image identity across interruption, fencing ordinary release after capture reservation, binding Machine0 retirement to its captured account, and refusing forks from discarded images without restarting a retiring Machine0 source or discarding unresolved ownership records; Hetzner retirement remains unavailable until its project identity can be attested.
+- Preserved explicit repository reclaim for existing Machine0 leases and unified fixed replay, inspection, and cleanup around attested native details and early durable UUID binding; retained ambiguous attempts and empty legacy records without duplicate creation or inferred cancellation.
 - Kept automatic egress client tickets off SSH, remote shell, and helper process arguments with a foreground bounded-input handoff to the detached client, preventing SSH teardown from truncating ticket delivery.
 - Kept secret SSH usernames out of VNC/WebVNC and pond tunnel arguments and daemon state, retained private configs through attached teardown or authenticated detached listener readiness, and preserved pond child environment filtering and overrides.
 - Honored `pond connect` flags after the pond name so the documented `pond connect <name> --export` form starts tracked daemons instead of blocking in foreground mode.
@@ -18,10 +40,12 @@
 - Preserved managed Daytona cleanup responsibility after lost create responses, with native TTL for kept sandboxes, early exact-resource tracking, and original-context deletion confirmed by provider observation.
 - Resolved full Machine0 default SSH-key metadata before preflight so public keys are not rejected when list summaries omit their local filenames.
 - Preserved configured Machine0 executable paths and polling settings during checkpoint verification, deletion, and pruning while retaining exact image/version ownership checks and local records on uncertain failures.
+- Preserved Machine0 missing-version cleanup refusals while distinguishing confirmed version removal from whole-image absence, including lost remove responses without erasing sibling versions or unresolved metadata.
 - Made config path diagnostics honor `CRABBOX_CONFIG`, matching the file selected for reads and writes. Thanks @coygeek.
 - Fixed static SSH architecture admission across Linux, macOS, Windows, and WSL2: configured values, including inherited `amd64`, now require fresh matching evidence after read-only ownership checks and before guarded claim publication; remove explicit architecture settings for automatic discovery, with measured or unknown evidence reported separately from offline defaults.
 - Preserved the remote caller's umask for workspace-owned POSIX and WSL2 commands while keeping staged scripts, stdin, and owner state private.
 - Disabled automatic host clipboard and audio passthrough for Tart VMs.
+- Preserved macOS WebVNC authentication timeout diagnostics when a connection deadline closes the browser transport before negotiation returns.
 - Prevented active lease operations from blocking unrelated claim discovery, slug allocation, and Testbox runs while preserving exact ownership checks and cleanup fencing.
 - Made native Windows state replacement and cleanup preserve open readers; the CLI now requires Windows 10 version 1709+ or Windows Server 2019+.
 - Kept Windows external routing state readable after publication by creating it with current-user ownership and private ACLs.
@@ -38,6 +62,11 @@
 - Rejected proven Machine0 PUBLIC-key identity mismatches before VM creation without changing key selection or treating unverified keys as mismatches, and avoided blocking extraction on special files.
 - Bounded best-effort foreground lease refreshes to 20 seconds so stalled maintenance does not block SSH-backed copy and connection commands for the coordinator's full HTTP budget, while preserving claim checks and caller cancellation.
 - Restored Ubuntu ARM64 local-container browser provisioning with signed native Mozilla Firefox packages instead of Snap transition packages, while preserving working browsers and advancing past broken distro candidates. Thanks @coygeek.
+- Reported bounded, secret-safe remote Git seed failure phases and categories across ordinary sync, local Actions hydration, and native Windows, while preserving file sync and Git coherence behavior. Thanks @coygeek.
+- Made Machine0 doctor check the same SSH-key prerequisites as new creation and reject missing legacy key pairs when no default is selected, without mutating keys or blocking existing fixed-lease replay. Thanks @coygeek.
+- Cleaned exact-owned interrupted Azure public-IP and NIC provisioning prefixes while restoring ordered SKU fallback and preserving immutable-identity cleanup fences. Thanks @excelsier and @vincentkoc.
+
+- Rendered failure recovery guidance after automatic cleanup, omitting lease commands only after confirmed release while preserving retained and uncertain cleanup recovery.
 
 ## 0.47.0 - 2026-08-28
 

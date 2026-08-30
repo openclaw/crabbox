@@ -15,6 +15,8 @@ crabbox image promote snapshot-devtools --provider azure --target linux --region
 crabbox image fsr-status ami-1234567890abcdef0 --region us-west-2 --fsr-az us-west-2a
 crabbox image delete ami-1234567890abcdef0 --region eu-west-1
 crabbox image delete ami-external --catalog-only
+crabbox image delete ami-1234567890abcdef0 --retire-promotions --region eu-west-1
+crabbox image delete prepared-snapshot --retire-promotions --provider azure --region westeurope
 crabbox image delete my-managed-image --provider azure --region westeurope
 crabbox image delete my-machine-image --provider gcp --region europe-west1-b --project example-project
 crabbox image delete 123456789 --provider hetzner --region fsn1
@@ -184,6 +186,16 @@ Crabbox retains a scoped catalog of promoted AMIs so a lease can select the
 newest image satisfying every requested image capability, not only the last
 promoted default.
 
+When an AWS AMI or Azure snapshot belongs to a coordinator-managed checkpoint,
+each promotion/default/catalog entry also creates its own durable checkpoint
+pin in the same transaction. Pins block manual deletion and automatic unused
+expiry. Replacing a default removes only that default's pin; the historical
+capability catalog remains selectable and keeps its own pin. Retire every
+matching AWS default/catalog role or exact Azure promotion with
+`crabbox image delete <id> --retire-promotions --provider aws|azure --region <region>`
+before deleting its checkpoint. Retirement changes coordinator catalog metadata
+only and never deletes provider resources; unrelated catalog roles remain pinned.
+
 Promote, smoke-test, and roll back if needed:
 
 ```sh
@@ -243,6 +255,8 @@ Delete a Crabbox-created provider image.
 ```sh
 crabbox image delete ami-1234567890abcdef0 --region eu-west-1
 crabbox image delete ami-external --catalog-only
+crabbox image delete ami-1234567890abcdef0 --retire-promotions --region eu-west-1
+crabbox image delete prepared-snapshot --retire-promotions --provider azure --region westeurope
 crabbox image delete my-managed-image --provider azure --region westeurope
 crabbox image delete my-machine-image --provider gcp --region europe-west1-b --project example-project
 crabbox image delete 123456789 --provider hetzner --region fsn1
@@ -255,6 +269,8 @@ Flags:
 --region <name>     region, location, or zone containing the image
 --project <name>    GCP project containing the image
 --catalog-only      unpublish every AWS catalog-only role without deleting the AMI
+--retire-promotions retire matching AWS defaults/catalog roles or an exact Azure
+                    promotion without deleting its provider resource
 ```
 
 AWS deletion deregisters the AMI and then deletes the EBS snapshots referenced by
@@ -276,8 +292,19 @@ Its text output is:
 retired catalog-only image=ami-external provider=aws variants=1
 ```
 
-Without `--catalog-only`, `image delete` keeps the existing provider deletion
-and ownership checks.
+`--retire-promotions` is available for AWS and Azure and is mutually exclusive
+with `--catalog-only`. It uses a dedicated fail-closed coordinator route,
+removes only matching exact-scope promotion/catalog roles and their checkpoint
+pins transactionally, and never calls the provider deletion API. Without either
+retirement flag, `image delete` keeps its existing provider deletion and
+ownership checks.
+
+Generic image deletion refuses managed checkpoint images, Azure/GCP snapshots,
+and AWS AMI backing snapshots with a `checkpoint_managed` conflict. Retire any
+blocking promotions, then use `crabbox checkpoint delete <checkpoint-id>` so
+use claims, promotion pins, exact provider ownership, retries, and audit
+records remain enforced. `image delete --catalog-only` retires catalog roles
+without deleting the protected provider resource.
 
 Hetzner deletion runs directly without coordinator admin auth. It rejects
 `--project`, requires any supplied `--region` to match the recorded source

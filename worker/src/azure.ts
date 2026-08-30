@@ -19,6 +19,7 @@ import { leaseProviderName } from "./slug";
 import type {
   Env,
   LeaseRecord,
+  ProviderCheckpointOwnership,
   ProviderImage,
   ProviderMachine,
   ProvisioningAttempt,
@@ -147,7 +148,8 @@ interface AzureSnapshot {
   id?: string;
   name?: string;
   location?: string;
-  properties?: { provisioningState?: string; completionPercent?: number };
+  tags?: Record<string, string>;
+  properties?: { provisioningState?: string; completionPercent?: number; uniqueId?: string };
 }
 
 interface AzurePublicIP {
@@ -317,6 +319,7 @@ interface AzureSharedInfraNames {
 interface AzureARMOptions {
   lroTimeoutMs?: number;
   terminalResourceState?: { path: string; apiVersion: string };
+  headers?: Record<string, string>;
 }
 
 class AzureHTTPError extends Error {
@@ -1178,7 +1181,11 @@ export class AzureClient {
       options.prepareClaim &&
       !options.claim &&
       Boolean(vm || nic || pip || initialDisk) &&
-      (!nic || !pip || (!initialDisk && !azureVMUsesEphemeralOSDisk(vm)));
+      (vm
+        ? !nic || !pip || (!initialDisk && !azureVMUsesEphemeralOSDisk(vm))
+        : initialDisk
+          ? !nic || !pip
+          : Boolean(nic && !pip));
 
     const expectedNICID = this.resourceID(nicResourcePath);
     const expectedPIPID = this.resourceID(pipResourcePath);
@@ -1426,6 +1433,14 @@ export class AzureClient {
     if (initialClaimSetIncomplete) {
       throw new Error(
         `refusing to delete Azure resources for ${name}: canonical companion set is incomplete`,
+      );
+    }
+    if (
+      options.prepareClaim &&
+      currentResources.some((resource) => !azureReconciliationMemberHasStableIdentity(resource))
+    ) {
+      throw new Error(
+        `refusing to delete Azure resources for ${name}: stable resource identity is incomplete`,
       );
     }
 
@@ -2215,7 +2230,11 @@ export class AzureClient {
     );
   }
 
-  async createDiskSnapshot(vmName: string, name: string): Promise<ProviderImage> {
+  async createDiskSnapshot(
+    vmName: string,
+    name: string,
+    ownership?: ProviderCheckpointOwnership,
+  ): Promise<ProviderImage> {
     const vm = await this.arm<AzureVM>(
       "GET",
       vmPath(this.resourceGroup, vmName),
@@ -2244,7 +2263,17 @@ export class AzureClient {
       API_VERSIONS.disks,
       {
         location,
-        tags: { crabbox: "true", managed_by: "crabbox" },
+        tags: {
+          crabbox: "true",
+          managed_by: "crabbox",
+          ...(ownership
+            ? {
+                crabbox_checkpoint_id: ownership.checkpointID,
+                crabbox_checkpoint_token: ownership.tokenHash,
+                crabbox_checkpoint_lease: ownership.sourceLeaseID,
+              }
+            : {}),
+        },
         properties: {
           creationData: {
             createOption: "Copy",
@@ -2252,6 +2281,7 @@ export class AzureClient {
           },
         },
       },
+      ownership ? { headers: { "if-none-match": "*" } } : undefined,
     );
     return azureSnapshotProviderImage(snapshot, name, location);
   }
@@ -2324,12 +2354,13 @@ export class AzureClient {
   }
 
   private async deleteDiskSnapshot(name: string): Promise<void> {
+    const snapshotName = azureResourceName(name);
     await this.arm(
       "DELETE",
-      azureSnapshotPath(this.resourceGroup, azureResourceName(name)),
+      azureSnapshotPath(this.resourceGroup, snapshotName),
       API_VERSIONS.disks,
     ).catch((error) => {
-      if (isNotFound(error)) return undefined;
+      if (azureResourceNotFound(error, "snapshots", snapshotName)) return undefined;
       throw error;
     });
   }
@@ -2394,12 +2425,17 @@ export class AzureClient {
       headers: {
         authorization: `Bearer ${token}`,
         "content-type": "application/json",
+        ...opts?.headers,
       },
     };
     if (body !== undefined) init.body = JSON.stringify(body);
     const response = await this.fetcher(url, init);
     if (!response.ok && response.status !== 201 && response.status !== 202) {
-      throw new AzureHTTPError(method, path, response.status, await safeBody(response));
+      const failure = new AzureHTTPError(method, path, response.status, await safeBody(response));
+      if (opts?.headers?.["if-none-match"] === "*" && response.status === 412) {
+        Object.defineProperty(failure, "checkpointResourceMayExist", { value: false });
+      }
+      throw failure;
     }
     const initialText = await response.text();
     if (response.status === 201 || response.status === 202) {
@@ -3641,6 +3677,13 @@ function azureSnapshotProviderImage(
     out.resourceID = snapshot.id;
     out.snapshots = [snapshot.id];
   }
+  if (snapshot.properties?.uniqueId) out.immutableID = snapshot.properties.uniqueId;
+  if (snapshot.tags?.["crabbox_checkpoint_token"]) {
+    out.checkpointOwnershipHash = snapshot.tags["crabbox_checkpoint_token"];
+  }
+  if (snapshot.tags?.["crabbox_checkpoint_lease"]) {
+    out.checkpointSourceLeaseID = snapshot.tags["crabbox_checkpoint_lease"];
+  }
   return out;
 }
 
@@ -3691,9 +3734,29 @@ function azureVMNotFound(error: unknown, name: string): boolean {
   return azureResourceNotFound(error, "virtualMachines", name);
 }
 
+export function azureSnapshotNotFound(error: unknown, canonicalResourceID: string): boolean {
+  if (!(error instanceof AzureHTTPError) || error.status !== 404) return false;
+  const body = error.body.toLowerCase();
+  if (!body.includes("resourcenotfound")) return false;
+  const expected = canonicalResourceID.toLowerCase();
+  if (body.includes(expected)) return true;
+  const scope = expected.match(
+    /^\/subscriptions\/([^/]+)\/resourcegroups\/([^/]+)\/providers\/(microsoft\.compute\/snapshots\/[^/]+)$/,
+  );
+  if (!scope || !body.includes(scope[3]!)) return false;
+  const mentionedSubscription = body.match(/\/subscriptions\/([^/\s'"]+)/);
+  const mentionedGroup = body.match(/\/resourcegroups\/([^/\s'"]+)/);
+  return (
+    (!mentionedSubscription || mentionedSubscription[1] === scope[1]) &&
+    (!mentionedGroup || mentionedGroup[1] === scope[2])
+  );
+}
+
 function azureResourceNotFound(error: unknown, kind: string, name: string): boolean {
   if (!(error instanceof AzureHTTPError) || error.status !== 404) return false;
-  const namespace = kind === "virtualMachines" || kind === "disks" ? "compute" : "network";
+  const namespace = ["virtualMachines", "disks", "snapshots", "images"].includes(kind)
+    ? "compute"
+    : "network";
   const body = error.body.toLowerCase();
   return (
     body.includes("resourcenotfound") &&

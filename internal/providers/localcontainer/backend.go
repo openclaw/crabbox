@@ -652,6 +652,9 @@ func (b *backend) rollbackPendingLease(expected core.LeaseClaim, lease core.Leas
 	rollbackCtx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
 	defer cancel()
 	err := fixedLocalContainerLeaseKind.FinalizeAfterCleanup(expected, func() error {
+		if err := core.AuthorizeCheckpointRelease(expected, ""); err != nil {
+			return err
+		}
 		if err := b.removeContainer(rollbackCtx, lease.Server.CloudID); err != nil {
 			return err
 		}
@@ -941,7 +944,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	}
 	id := strings.TrimSpace(req.Lease.Server.CloudID)
 	if id == "" {
-		if handled, err := b.releaseMissingClaim(ctx, lease); handled || err != nil {
+		if handled, err := b.releaseMissingClaim(ctx, lease, req.CheckpointID); handled || err != nil {
 			return err
 		}
 		container, leaseID, _, err := b.resolveContainer(ctx, req.Lease.LeaseID)
@@ -972,10 +975,16 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		}
 	}
 	lease.Server = mergeLocalContainerClaim(lease.Server, claim)
+	if err := core.AuthorizeCheckpointRelease(claim, req.CheckpointID); err != nil {
+		return err
+	}
 	if strings.TrimSpace(lease.Server.Labels["fixed_intent_sha256"]) != "" && !fixedLocalContainerLeaseKind.IsFixedClaim(claim) {
 		return core.Exit(4, "lease_id_conflict: refusing to release fixed local-container lease %s without its durable create intent", lease.LeaseID)
 	}
 	err = fixedLocalContainerLeaseKind.FinalizeAfterCleanup(claim, func() error {
+		if err := core.AuthorizeCheckpointRelease(claim, req.CheckpointID); err != nil {
+			return err
+		}
 		if err := b.removeContainer(ctx, id); err != nil {
 			return err
 		}
@@ -1063,7 +1072,7 @@ func (b *backend) AuthorizeStatusTouchClaim(ctx context.Context, lease core.Leas
 	return b.validateExactLocalContainerClaim(ctx, claim, lease.LeaseID, lease.Server.CloudID)
 }
 
-func (b *backend) releaseMissingClaim(ctx context.Context, lease core.LeaseTarget) (bool, error) {
+func (b *backend) releaseMissingClaim(ctx context.Context, lease core.LeaseTarget, checkpointID string) (bool, error) {
 	leaseID := strings.TrimSpace(firstNonBlank(lease.LeaseID, lease.Server.Labels["lease"]))
 	if leaseID == "" || strings.TrimSpace(lease.Server.CloudID) != "" {
 		return false, nil
@@ -1076,6 +1085,9 @@ func (b *backend) releaseMissingClaim(ctx context.Context, lease core.LeaseTarge
 		return true, localContainerOwnershipError(leaseID, claim.CloudID)
 	}
 	err := fixedLocalContainerLeaseKind.FinalizeAfterCleanup(claim, func() error {
+		if err := core.AuthorizeCheckpointRelease(claim, checkpointID); err != nil {
+			return err
+		}
 		absent, err := b.confirmContainerAbsent(ctx, claim.CloudID)
 		if err != nil {
 			return err
@@ -1353,7 +1365,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			continue
 		}
 		if req.DryRun {
-			if err := core.VerifyLeaseClaimUnchanged(claim.LeaseID, claim); err != nil {
+			if err := core.WithLeaseClaimUnchanged(claim.LeaseID, claim, func() error { return core.AuthorizeCheckpointRelease(claim, "") }); err != nil {
 				fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s slug=%s reason=changed-during-cleanup err=%v\n", claim.LeaseID, blank(claim.Slug, "-"), err)
 				continue
 			}
@@ -1369,7 +1381,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 				continue
 			}
 		}
-		if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+		if err := core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error { return core.AuthorizeCheckpointRelease(claim, "") }); err != nil {
 			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s slug=%s reason=changed-during-cleanup err=%v\n", claim.LeaseID, blank(claim.Slug, "-"), err)
 			continue
 		}
@@ -1413,12 +1425,18 @@ func (b *backend) claimMissingInCapturedScope(ctx context.Context, claim core.Le
 }
 
 func (b *backend) cleanupClaimedContainer(ctx context.Context, claim core.LeaseClaim, containerID string, dryRun bool) (cleanupMutationOutcome, error) {
+	if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+		return cleanupMutationOutcome{}, err
+	}
 	originalCfg := b.cfg
 	defer func() { b.cfg = originalCfg }()
 	actionEntered := false
 	mutationEntered := false
 	action := func() error {
 		actionEntered = true
+		if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+			return err
+		}
 		if err := b.validateCleanupClaim(ctx, claim, claim.LeaseID, containerID); err != nil {
 			return err
 		}
@@ -1456,6 +1474,9 @@ func (b *backend) cleanupClaimlessContainer(ctx context.Context, leaseID, contai
 			claimAppeared = true
 			return nil
 		}
+		if err := core.AuthorizeCheckpointRelease(core.LeaseClaim{LeaseID: leaseID}, ""); err != nil {
+			return err
+		}
 		if dryRun {
 			return nil
 		}
@@ -1468,11 +1489,17 @@ func (b *backend) cleanupClaimlessContainer(ctx context.Context, leaseID, contai
 }
 
 func (b *backend) cleanupMissingPendingClaim(ctx context.Context, claim core.LeaseClaim, dryRun bool) (cleanupMutationOutcome, error) {
+	if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+		return cleanupMutationOutcome{}, err
+	}
 	originalCfg := b.cfg
 	defer func() { b.cfg = originalCfg }()
 	actionEntered := false
 	action := func() error {
 		actionEntered = true
+		if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+			return err
+		}
 		checkCtx, cancel := context.WithTimeout(ctx, rollbackTimeout)
 		defer cancel()
 		if err := b.validateCleanupClaim(checkCtx, claim, claim.LeaseID, claim.CloudID); err != nil {

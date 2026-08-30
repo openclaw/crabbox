@@ -32,6 +32,17 @@ cancel an already-dispatched provider request. Failed and released records can
 still carry unresolved cleanup responsibility. Their local state alone is not
 proof that the provider resource was deleted.
 
+For an exact Azure lease whose provisioning stops before VM creation, ordinary
+owned-resource release can clean the observed creation prefix: an unattached
+canonical public IP alone, or the exact canonical public IP and NIC together.
+A fresh NIC without its public IP is not a valid creation prefix and remains
+report-only; cleanup can resume past a missing public IP only when its exact
+durable claim already proves Crabbox deleted that public IP. A managed disk
+without its complete NIC/public-IP set, a managed-disk VM without that disk,
+foreign attachments, replacements, and missing immutable identities also fail
+closed. This narrow exact-lease release path does not relax the separate Azure
+orphan sweep's complete-set and quarantine requirements.
+
 ### Heartbeats and expiry
 
 While a command runs, the CLI heartbeats the active lease (`POST
@@ -84,6 +95,30 @@ delete is retried automatically. On success the cleanup metadata is cleared and
 the state becomes `expired`. You can inspect stuck cleanups with `crabbox admin
 lease-audit`.
 
+### Brokered native checkpoint retention
+
+New brokered native AWS, Azure, and GCP checkpoints have their own durable
+lifecycle, independent of the source lease. Retention is manual unless the
+owner explicitly requests `checkpoint create --expire-unused-after <duration>`
+or changes `checkpoint policy`. Coordinator alarms read a bounded, sorted due
+index and expire only those explicitly opted-in records; generic provider
+inventory, old image records, local files, and checkpoint-like names never
+grant cleanup ownership.
+
+Active renewable fork/shard use claims and AWS/Azure promotion pins prevent
+deletion. Manual and automatic deletion share the same generation-fenced
+provider cleanup: AWS confirms the exact AMI and every owned EBS snapshot are
+gone, Azure confirms its exact canonical managed snapshot, and GCP confirms
+its exact project-scoped machine image or disk snapshot. Ambiguous or failed
+provider calls retain ownership and retry with capped backoff; a durable
+provider-deleted phase makes final metadata cleanup restart-safe. Checkpoint
+admission charges creating, ready, failed, and deletion-pending records until
+deletion is confirmed; deleted audit tombstones no longer consume capacity.
+Expired available fork claims can be replaced, but provisioning claims remain
+charged until exact lifecycle reconciliation. Each checkpoint retains only its
+256 most recent ordered audit events, and eventual tombstone pruning removes
+that entire retained suffix. Direct, archive, recipe, and historical checkpoints
+remain operator-managed.
 ### Managed Daytona cleanup
 
 New brokered Daytona sandboxes receive native wall-clock TTL in the original

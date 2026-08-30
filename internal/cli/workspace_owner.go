@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -14,14 +15,41 @@ import (
 )
 
 const (
-	workspaceOwnerTTL           = 45 * time.Second
-	workspaceOwnerRenewInterval = 10 * time.Second
-	workspaceOwnerWaitTimeout   = 2 * time.Minute
-	workspaceOwnerPollInterval  = time.Second
-	workspaceOwnerProgressEvery = 10 * time.Second
+	workspaceOwnerRemoteTimeout                                                                                  = sshControlExecutionLimit
+	workspaceOwnerRenewInterval                                                                                  = 10 * time.Second
+	workspaceOwnerRenewMargin                                                                                    = time.Second
+	workspaceOwnerProgressEvery                                                                                  = 10 * time.Second
+	workspaceOwnerPollInterval, workspaceOwnerSSHConnectTimeoutOption, workspaceOwnerSSHConnectionAttemptsOption = time.Second, "10", "3"
 )
 
+var (
+	workspaceOwnerCallTimeout         = sshTransportCallBudget(SSHTarget{}, sshControlMetadataLimit, sshCommandLimit{execution: workspaceOwnerRemoteTimeout, control: true})
+	workspaceOwnerTTL                 = workspaceOwnerRenewInterval + workspaceOwnerCallTimeout + workspaceOwnerRenewMargin
+	workspaceOwnerCloseQuiesceTimeout = 2*workspaceOwnerCallTimeout + workspaceOwnerRenewMargin
+	workspaceOwnerWaitTimeout         = workspaceOwnerTTL + workspaceOwnerPollInterval + workspaceOwnerCallTimeout + workspaceOwnerRenewMargin
+)
+
+func workspaceOwnerTransportCallBudget(transport workspaceOwnerTransport) time.Duration {
+	if budgeted, ok := transport.(interface{ CallBudget() time.Duration }); ok {
+		return budgeted.CallBudget()
+	}
+	return workspaceOwnerCallTimeout
+}
+
+func (o *workspaceOwner) callTimeout() time.Duration {
+	if o == nil {
+		return workspaceOwnerCallTimeout
+	}
+	return workspaceOwnerTransportCallBudget(o.transport)
+}
+
+func (o *workspaceOwner) quiesceTimeout() time.Duration {
+	return 2*o.callTimeout() + workspaceOwnerRenewMargin
+}
+
 type workspaceOwnerAction string
+
+type workspaceOwnerInspectResult uint8
 
 const (
 	workspaceOwnerAcquire workspaceOwnerAction = "acquire"
@@ -29,6 +57,8 @@ const (
 	workspaceOwnerInspect workspaceOwnerAction = "inspect"
 	workspaceOwnerRelease workspaceOwnerAction = "release"
 )
+
+const workspaceOwnerQuiescent, workspaceOwnerChildActive workspaceOwnerInspectResult = 0, 1
 
 type workspaceOwnerRemoteRequest struct {
 	Action workspaceOwnerAction
@@ -41,64 +71,52 @@ type workspaceOwnerTransport interface {
 	Do(context.Context, workspaceOwnerRemoteRequest) (string, error)
 }
 
+func callWorkspaceOwnerTransport(ctx context.Context, timeout time.Duration, transport workspaceOwnerTransport, req workspaceOwnerRemoteRequest) (string, error) {
+	callCtx, cancel := context.WithTimeout(ctx, min(timeout, workspaceOwnerTransportCallBudget(transport)))
+	defer cancel()
+	return transport.Do(callCtx, req)
+}
+
 type sshWorkspaceOwnerTransport struct {
 	target SSHTarget
 }
 
+func (t sshWorkspaceOwnerTransport) CallBudget() time.Duration {
+	return sshTransportCallBudget(t.target, sshControlMetadataLimit, sshCommandLimit{execution: workspaceOwnerRemoteTimeout, control: true})
+}
+
 func (t sshWorkspaceOwnerTransport) Do(ctx context.Context, req workspaceOwnerRemoteRequest) (string, error) {
 	ctx = contextWithoutWorkspaceOwner(ctx)
+	ctx, cancel := context.WithTimeout(ctx, workspaceOwnerTransportCallBudget(t))
+	defer cancel()
 	remote := remoteWorkspaceOwnerCommand(t.target, req)
-	var input *string
+	var input []byte
 	if isWindowsWSL2Target(t.target) {
-		script := remote
-		input = &script
-		remote = wsl2StdinScriptCommandWithWaitTimeout(len(script), 0)
+		t.target.NoControlMaster = true
 	} else if isWindowsNativeTarget(t.target) {
 		script := remoteWorkspaceOwnerWindows(req)
-		input = &script
+		input = []byte(script)
 		remote = windowsPowerShellStdinScriptCommand(len([]byte(script)))
 	}
 	return runWorkspaceOwnerSSHProtocol(ctx, t.target, remote, input, req.Token)
 }
 
-func runWorkspaceOwnerSSHProtocol(ctx context.Context, target SSHTarget, remote string, input *string, requestToken string) (output string, err error) {
-	var replayableInput *replayableSSHInput
-	if input != nil {
-		// Finite owner scripts may retry ports. File-backed input gives Windows
-		// inbox OpenSSH a reliable EOF while preserving exact replay bytes.
-		replayableInput, err = newReplayableSSHInput([]byte(*input))
-		if err != nil {
-			return "", err
-		}
-		defer func() { err = errors.Join(err, replayableInput.close()) }()
+func runWorkspaceOwnerSSHProtocol(ctx context.Context, target SSHTarget, remote string, input []byte, requestToken string) (output string, err error) {
+	if len(remote)+len(input) > sshControlMetadataLimit {
+		return "", errors.New("workspace owner metadata exceeds its accounted transport budget")
 	}
-	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
-		probe := target
-		probe.Port = port
-		probe.FallbackPorts = []string{}
-		args := sshArgsNoInput(probe, remote)
-		if input != nil {
-			args = sshArgs(probe, remote)
-		}
-		cmd := sshCommandContext(ctx, probe, args...)
-		if replayableInput != nil {
-			cmd.Stdin, err = replayableInput.reset()
-			if err != nil {
-				return "", err
-			}
-		}
-		var stdout, stderr synchronizedBuffer
-		err = runSSHCommand(cmd, &stdout, &stderr)
-		output = strings.TrimSpace(stdout.String())
-		if err == nil {
-			return output, nil
-		}
+	var source io.ReadSeeker
+	if input != nil {
+		source = bytes.NewReader(input)
+	}
+	var stdout, stderr synchronizedBuffer
+	err = executePreparedSSH(ctx, &target, remote, source, int64(len(input)), sshCommandLimit{execution: workspaceOwnerRemoteTimeout, control: true},
+		workspaceOwnerSSHConnectTimeoutOption, workspaceOwnerSSHConnectionAttemptsOption, &stdout, &stderr)
+	output = strings.TrimSpace(stdout.String())
+	if err != nil {
 		detail := trimFailureDetail(RedactDiagnosticSecrets(redactSSHTransportDiagnostic(target, stderr.String()), requestToken))
 		if detail != "" {
 			err = fmt.Errorf("%w: %s", err, detail)
-		}
-		if !shouldRetrySSHPort(err) {
-			return output, err
 		}
 	}
 	return output, err
@@ -136,10 +154,10 @@ func workspaceOwnerFromContext(ctx context.Context) *workspaceOwner {
 }
 
 type workspaceOwnerRemotePreparation struct {
-	command       string
-	cleanup       string
-	name          string
-	ownerExpanded bool
+	command     string
+	cleanup     string
+	name        string
+	setupMarker string
 }
 
 const (
@@ -155,9 +173,14 @@ func prepareWorkspaceOwnerRemote(ctx context.Context, target SSHTarget, remote s
 		return workspaceOwnerRemotePreparation{command: remote}, nil
 	}
 	if !isWindowsNativeTarget(target) {
+		nonce, err := randomHex(16)
+		if err != nil {
+			return workspaceOwnerRemotePreparation{}, fmt.Errorf("create workspace witness diagnostic marker: %w", err)
+		}
+		marker := workspaceOwnerSetupPrefix + nonce
 		return workspaceOwnerRemotePreparation{
-			command:       owner.wrapPOSIXCommand(remote, inputSize != nil),
-			ownerExpanded: true,
+			command:     owner.wrapPOSIXCommand(remote, inputSize != nil, marker),
+			setupMarker: marker,
 		}, nil
 	}
 	return stageWorkspaceOwnerWindowsWitness(contextWithoutWorkspaceOwner(ctx), target, owner, remote, inputSize, false)
@@ -218,10 +241,7 @@ func runWorkspaceOwnerBackgroundOutput(ctx context.Context, target SSHTarget, ow
 		return runSSHOutput(ctx, target, remote)
 	}
 	if !isWindowsNativeTarget(target) {
-		return runSSHOutputPrepared(ctx, target, workspaceOwnerRemotePreparation{
-			command:       owner.wrapPOSIXBackgroundCommand(remote),
-			ownerExpanded: true,
-		})
+		return runSSHOutput(ctx, target, owner.wrapPOSIXBackgroundCommand(remote))
 	}
 	prepared, err := stageWorkspaceOwnerWindowsWitness(ctx, target, owner, remote, nil, true)
 	if err != nil {
@@ -259,7 +279,11 @@ func acquiredRunMayRetainLease(keep, keepOnFailure bool, stopAfter string) bool 
 }
 
 func acquireWorkspaceOwner(ctx context.Context, target SSHTarget, leaseID string, stderr io.Writer) (*workspaceOwner, error) {
-	return acquireWorkspaceOwnerWithTransport(ctx, target, leaseID, stderr, sshWorkspaceOwnerTransport{target: target}, workspaceOwnerWaitTimeout, workspaceOwnerTTL, workspaceOwnerRenewInterval)
+	transport := sshWorkspaceOwnerTransport{target: target}
+	call := workspaceOwnerTransportCallBudget(transport)
+	ttl := workspaceOwnerRenewInterval + call + workspaceOwnerRenewMargin
+	wait := ttl + workspaceOwnerPollInterval + call + workspaceOwnerRenewMargin
+	return acquireWorkspaceOwnerWithTransport(ctx, target, leaseID, stderr, transport, wait, ttl, workspaceOwnerRenewInterval)
 }
 
 func acquireWorkspaceOwnerWithTransport(ctx context.Context, target SSHTarget, leaseID string, stderr io.Writer, transport workspaceOwnerTransport, waitTimeout, ttl, renewInterval time.Duration) (*workspaceOwner, error) {
@@ -293,7 +317,7 @@ func acquireWorkspaceOwnerWithTransport(ctx context.Context, target SSHTarget, l
 	started := time.Now()
 	nextProgress := workspaceOwnerProgressEvery
 	for {
-		response, callErr := transport.Do(waitCtx, workspaceOwnerRemoteRequest{Action: workspaceOwnerAcquire, Key: owner.key, Token: owner.token, TTL: ttl})
+		response, callErr := callWorkspaceOwnerTransport(waitCtx, owner.callTimeout(), transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerAcquire, Key: owner.key, Token: owner.token, TTL: ttl})
 		if callErr != nil {
 			return nil, exit(7, "acquire remote workspace owner: ambiguous remote state: %v", callErr)
 		}
@@ -337,7 +361,7 @@ func (o *workspaceOwner) Context() context.Context {
 func (o *workspaceOwner) renewLoop(interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	o.renewLoopWithTicks(ticker.C, interval)
+	o.renewLoopWithTicks(ticker.C, o.callTimeout())
 }
 
 func (o *workspaceOwner) renewLoopWithTicks(ticks <-chan time.Time, callTimeout time.Duration) {
@@ -349,9 +373,7 @@ func (o *workspaceOwner) renewLoopWithTicks(ticks <-chan time.Time, callTimeout 
 		case <-o.ctx.Done():
 			return
 		case <-ticks:
-			callCtx, cancel := context.WithTimeout(context.WithoutCancel(o.ctx), callTimeout)
-			response, err := o.transport.Do(callCtx, workspaceOwnerRemoteRequest{Action: workspaceOwnerRenew, Key: o.key, Token: o.token, TTL: o.ttl})
-			cancel()
+			response, err := callWorkspaceOwnerTransport(context.WithoutCancel(o.ctx), callTimeout, o.transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerRenew, Key: o.key, Token: o.token, TTL: o.ttl})
 			if err == nil && response == "RENEWED" {
 				continue
 			}
@@ -377,20 +399,32 @@ func (o *workspaceOwner) Err() error {
 }
 
 func (o *workspaceOwner) ConfirmNoChild(ctx context.Context) error {
+	result, err := o.inspectChild(ctx)
+	if err == nil && result == workspaceOwnerChildActive {
+		err = exit(7, "confirm remote workspace owner child state failed closed: child")
+	}
+	return err
+}
+
+func (o *workspaceOwner) inspectChild(ctx context.Context) (workspaceOwnerInspectResult, error) {
 	if o == nil {
-		return nil
+		return workspaceOwnerQuiescent, nil
 	}
 	if err := o.Err(); err != nil {
-		return err
+		return workspaceOwnerQuiescent, err
 	}
-	response, err := o.transport.Do(ctx, workspaceOwnerRemoteRequest{Action: workspaceOwnerInspect, Key: o.key, Token: o.token, TTL: o.ttl})
+	response, err := callWorkspaceOwnerTransport(ctx, o.callTimeout(), o.transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerInspect, Key: o.key, Token: o.token, TTL: o.ttl})
 	if err != nil {
-		return exit(7, "confirm remote workspace owner child state: ambiguous remote state: %v", err)
+		return workspaceOwnerQuiescent, exit(7, "confirm remote workspace owner child state: ambiguous remote state: %v", err)
 	}
-	if response != "OWNED" {
-		return exit(7, "confirm remote workspace owner child state failed closed: %s", strings.ToLower(firstNonBlank(response, "ambiguous")))
+	switch response {
+	case "OWNED":
+		return workspaceOwnerQuiescent, nil
+	case "CHILD":
+		return workspaceOwnerChildActive, nil
+	default:
+		return workspaceOwnerQuiescent, exit(7, "confirm remote workspace owner child state failed closed: %s", strings.ToLower(firstNonBlank(response, "ambiguous")))
 	}
-	return nil
 }
 
 func (o *workspaceOwner) WaitForChild(ctx context.Context, timeout time.Duration) error {
@@ -399,7 +433,7 @@ func (o *workspaceOwner) WaitForChild(ctx context.Context, timeout time.Duration
 	}
 	deadline := time.Now().Add(timeout)
 	for {
-		response, err := o.transport.Do(ctx, workspaceOwnerRemoteRequest{Action: workspaceOwnerInspect, Key: o.key, Token: o.token, TTL: o.ttl})
+		response, err := callWorkspaceOwnerTransport(ctx, min(o.callTimeout(), time.Until(deadline)), o.transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerInspect, Key: o.key, Token: o.token, TTL: o.ttl})
 		if err != nil {
 			return exit(7, "confirm remote workspace phase witness: ambiguous remote state: %v", err)
 		}
@@ -460,7 +494,7 @@ func (o *workspaceOwner) Close(ctx context.Context) error {
 	}
 	o.stopRenewal()
 	renewErr := o.Err()
-	response, releaseErr := o.transport.Do(ctx, workspaceOwnerRemoteRequest{Action: workspaceOwnerRelease, Key: o.key, Token: o.token, TTL: o.ttl})
+	response, releaseErr := callWorkspaceOwnerTransport(ctx, o.callTimeout(), o.transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerRelease, Key: o.key, Token: o.token, TTL: o.ttl})
 	if releaseErr != nil {
 		releaseErr = exit(7, "release remote workspace owner: ambiguous remote state: %v", releaseErr)
 	} else if response != "RELEASED" {
@@ -490,11 +524,15 @@ func (o *workspaceOwner) stopRenewal() {
 	})
 }
 
-func (o *workspaceOwner) wrapPOSIXCommand(remote string, preserveInput bool) string {
+func (o *workspaceOwner) wrapPOSIXCommand(remote string, preserveInput bool, setupMarker ...string) string {
 	if o == nil {
 		return remote
 	}
-	return remoteWorkspaceOwnerPOSIXWitness(o.key, o.token, remote, preserveInput)
+	marker := ""
+	if len(setupMarker) > 0 {
+		marker = setupMarker[0]
+	}
+	return remoteWorkspaceOwnerPOSIXLauncher(o.key, o.token, remoteWorkspaceOwnerPOSIXWitnessScript(o.key, o.token, remote, marker, preserveInput), marker)
 }
 
 func (o *workspaceOwner) wrapPOSIXBackgroundCommand(remote string) string {
@@ -502,7 +540,27 @@ func (o *workspaceOwner) wrapPOSIXBackgroundCommand(remote string) string {
 		return remote
 	}
 	wrapped := o.wrapPOSIXCommand(remote, false)
-	background := "nohup /bin/sh -c " + shellQuote(wrapped) + " >/dev/null 2>&1 < /dev/null & printf '%s\\n' \"$!\""
+	executable := "/bin/sh"
+	if isWindowsWSL2Target(o.target) {
+		// Only intentional owner-witnessed helpers escape the transient stage
+		// group. The witness and its existing expiry policy remain unchanged.
+		executable = "setsid /bin/sh"
+	}
+	background := "nohup " + executable + " -c " + shellQuote(wrapped) + " >/dev/null 2>&1 < /dev/null & child=$!\n"
+	if isWindowsWSL2Target(o.target) {
+		background += `# Observe detachment before returning to the stage supervisor.
+i=0
+while [ "$i" -lt 50 ]; do
+  i=$((i + 1))
+  [ "$(ps -o pgid= -p "$child" | tr -d ' ')" != "$child" ] || break
+  kill -0 "$child" 2>/dev/null || exit 74
+  sleep .1
+done
+[ "$(ps -o pgid= -p "$child" | tr -d ' ')" = "$child" ] || exit 74
+`
+	}
+	background += "printf '%s\\n' \"$child\""
+
 	return remoteWorkspaceOwnerPOSIXLauncher(o.key, o.token, background)
 }
 
@@ -521,8 +579,18 @@ func workspaceOwnerTTLSeconds(ttl time.Duration) int64 {
 	return seconds
 }
 
+// A denied signal probe is not proof of death. Never erase a witness until
+// independent PID-only observation confirms absence (no process arguments).
+const workspaceOwnerPOSIXAbsent = `owner_child_absent() {
+  observed_pids=$(ps -e -o pid= 2>/dev/null) || return 1
+  matching_pid=$(printf '%s\n' "$observed_pids" | awk -v pid="$1" '$1 == pid { print $1 }') || return 1
+  [ -z "$matching_pid" ]
+}
+`
+
 func remoteWorkspaceOwnerPOSIX(req workspaceOwnerRemoteRequest) string {
 	body := `set -eu
+` + workspaceOwnerPOSIXAbsent + `
 root="$HOME/.crabbox/workspace-owners"
 key=` + shellQuote(req.Key) + `
 token=` + shellQuote(req.Token) + `
@@ -559,6 +627,8 @@ child_status() {
     live_identity=$(ps -o lstart= -p "$child_pid" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' | cut -c1-96)
     [ -n "$live_identity" ] || return 2
     [ "$live_identity" = "$child_identity" ] && return 0
+  else
+    owner_child_absent "$child_pid" || return 2
   fi
   return 1
 }
@@ -762,43 +832,64 @@ try {
 `
 }
 
-func remoteWorkspaceOwnerPOSIXLauncher(key, token, script string) string {
-	return remoteWorkspaceOwnerPOSIXEncodedLauncher(key, token, base64.StdEncoding.EncodeToString([]byte(script)), len(script))
+func remoteWorkspaceOwnerPOSIXLauncher(key, token, script string, setupMarker ...string) string {
+	return remoteWorkspaceOwnerPOSIXEncodedLauncher(key, token, base64.StdEncoding.EncodeToString([]byte(script)), len(script), setupMarker...)
 }
 
-func remoteWorkspaceOwnerPOSIXEncodedLauncher(key, token, encoded string, decodedSize int) string {
+func remoteWorkspaceOwnerPOSIXEncodedLauncher(key, token, encoded string, decodedSize int, setupMarker ...string) string {
 	// Private staging must not impose its creation policy on the launched script.
-	launcher := `set -u; command_umask=$(umask); umask 077; root="$HOME/.crabbox/workspace-owners"; run_dir="$root/` + key + `.launcher.` + token + `.$$"; script="$run_dir/script"; cleanup_launcher() { rm -f "$script"; rmdir "$run_dir" 2>/dev/null || true; }; decoded_size_ok() { set -- $(wc -c <"$script"); [ "$#" -eq 1 ] && [ "$1" = ` + strconv.Itoa(decodedSize) + ` ]; }; mkdir -p "$root" || exit 74; chmod 700 "$HOME/.crabbox" "$root" 2>/dev/null || true; mkdir -m 700 "$run_dir" || exit 74; payload_b64="` + encoded + `"; decoded=; if command -v base64 >/dev/null 2>&1; then if printf %s "$payload_b64" | base64 --decode >"$script" 2>/dev/null && decoded_size_ok; then decoded=1; elif printf %s "$payload_b64" | base64 -d >"$script" 2>/dev/null && decoded_size_ok; then decoded=1; elif printf %s "$payload_b64" | base64 -D >"$script" 2>/dev/null && decoded_size_ok; then decoded=1; fi; fi; if [ -z "$decoded" ] && command -v openssl >/dev/null 2>&1; then if printf %s "$payload_b64" | openssl base64 -d -A >"$script" 2>/dev/null && decoded_size_ok; then decoded=1; fi; fi; if [ -z "$decoded" ]; then cleanup_launcher; exit 74; fi; umask "$command_umask"; /bin/sh "$script"; code=$?; cleanup_launcher; exit "$code"`
+	launcher := `set -u; command_umask=$(umask); umask 077; root="$HOME/.crabbox/workspace-owners"; run_dir="$root/` + key + `.launcher.` + token + `.$$"; script="$run_dir/script"; cleanup_launcher() { rm -f "$script" 2>/dev/null; rmdir "$run_dir" 2>/dev/null || true; }; decoded_size_ok() { set -- $(wc -c <"$script"); [ "$#" -eq 1 ] && [ "$1" = ` + strconv.Itoa(decodedSize) + ` ]; }; mkdir -p "$root" 2>/dev/null || exit 74; chmod 700 "$HOME/.crabbox" "$root" 2>/dev/null || true; mkdir -m 700 "$run_dir" 2>/dev/null || exit 74; payload_b64="` + encoded + `"; decoded=; if command -v base64 >/dev/null 2>&1; then if printf %s "$payload_b64" | base64 --decode 2>/dev/null >"$script" && decoded_size_ok; then decoded=1; elif printf %s "$payload_b64" | base64 -d 2>/dev/null >"$script" && decoded_size_ok; then decoded=1; elif printf %s "$payload_b64" | base64 -D 2>/dev/null >"$script" && decoded_size_ok; then decoded=1; fi; fi; if [ -z "$decoded" ] && command -v openssl >/dev/null 2>&1; then if printf %s "$payload_b64" | openssl base64 -d -A 2>/dev/null >"$script" && decoded_size_ok; then decoded=1; fi; fi; if [ -z "$decoded" ]; then cleanup_launcher; exit 74; fi; umask "$command_umask"; /bin/sh "$script"; code=$?; cleanup_launcher; exit "$code"`
+	if len(setupMarker) > 0 && setupMarker[0] != "" {
+		launcher = remoteWorkspaceOwnerPOSIXSetupDiagnostic(setupMarker[0]) + strings.ReplaceAll(launcher, "exit 74", "setup_failed staging")
+	}
 	return "exec /bin/sh -c " + shellQuote(launcher)
 }
 
 func remoteWorkspaceOwnerPOSIXWitness(key, token, remote string, preserveInput ...bool) string {
-	return remoteWorkspaceOwnerPOSIXLauncher(key, token, remoteWorkspaceOwnerPOSIXWitnessScript(key, token, remote, preserveInput...))
+	return remoteWorkspaceOwnerPOSIXLauncher(key, token, remoteWorkspaceOwnerPOSIXWitnessScript(key, token, remote, "", preserveInput...))
 }
 
-func remoteWorkspaceOwnerPOSIXWitnessScript(key, token, remote string, preserveInput ...bool) string {
+func remoteWorkspaceOwnerPOSIXSetupDiagnostic(marker string) string {
+	if marker == "" {
+		marker = "remote workspace owner setup:"
+	}
+	// The marker is fixed ASCII plus locally generated hex, never remote input.
+	// Double quotes keep the outer launcher portable across login shells.
+	return `setup_failed() { printf "%s\n" "` + marker + ` failed $1" >&2; exit "${2:-74}"; }; `
+}
+
+func remoteWorkspaceOwnerPOSIXWitnessScript(key, token, remote, setupMarker string, preserveInput ...bool) string {
+	diagnostic := remoteWorkspaceOwnerPOSIXSetupDiagnostic(setupMarker)
+	started := ""
+	if setupMarker != "" {
+		started = "printf '%s\\n' " + shellQuote(setupMarker+" started") + " >&2 || setup_failed handoff\n"
+	}
 	inputSetup := ""
 	inputRedirect := ""
 	if len(preserveInput) > 0 && preserveInput[0] {
-		inputSetup = `(umask 077; cat >"$run_dir/input") || { rm -rf "$run_dir"; exit 74; }
+		inputSetup = `(umask 077; cat >"$run_dir/input") 2>/dev/null || { rm -rf "$run_dir" 2>/dev/null; setup_failed input; }
 `
 		inputRedirect = ` <"$run_dir/input"`
 	}
 	gateFunction := `run_owner_gate() {
 	if command -v flock >/dev/null 2>&1; then
-		flock -x -w 5 "$gate" /bin/sh -c "$1"
+		flock -x -w 5 "$gate" /bin/sh -c "$1" 2>/dev/null
 	elif command -v lockf >/dev/null 2>&1; then
-		lockf -t 5 "$gate" /bin/sh -c "$1"
+		lockf -t 5 "$gate" /bin/sh -c "$1" 2>/dev/null
 	else
 		return 74
 	fi
 }
 `
 	installBody := `set -eu
+` + workspaceOwnerPOSIXAbsent + `
 [ "$(sed -n '2p' "$state" 2>/dev/null || true)" = "$token" ] || exit 75
 owner_expiry=$(sed -n '3p' "$state" 2>/dev/null || true)
 case "$owner_expiry" in ''|*[!0-9]*) exit 74 ;; esac
 [ "$owner_expiry" -gt "$(date +%s)" ] || exit 75
+kill -0 "$child_pid" 2>/dev/null || exit 74
+live_child_identity=$(ps -o lstart= -p "$child_pid" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' | cut -c1-96)
+[ -n "$live_child_identity" ] && [ "$live_child_identity" = "$child_identity" ] || exit 74
 if [ -f "$child" ]; then
 	existing_pid=$(sed -n '1p' "$child" 2>/dev/null || true)
 	existing_identity=$(sed -n '2p' "$child" 2>/dev/null || true)
@@ -808,6 +899,8 @@ if [ -f "$child" ]; then
 		live_existing_identity=$(ps -o lstart= -p "$existing_pid" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' | cut -c1-96)
 		[ -n "$live_existing_identity" ] || exit 74
 		[ "$live_existing_identity" != "$existing_identity" ] || exit 75
+	else
+		owner_child_absent "$existing_pid" || exit 74
 	fi
 	rm -f "$child"
 fi
@@ -815,6 +908,7 @@ child_tmp="$child.tmp.$$"
 (umask 077; printf '%s\n%s\n' "$child_pid" "$child_identity" >"$child_tmp")
 mv "$child_tmp" "$child"`
 	clearBody := `set -eu
+` + workspaceOwnerPOSIXAbsent + `
 [ "$(sed -n '2p' "$state" 2>/dev/null || true)" = "$token" ] || exit 75
 recorded_pid=$(sed -n '1p' "$child" 2>/dev/null || true)
 recorded_identity=$(sed -n '2p' "$child" 2>/dev/null || true)
@@ -823,27 +917,31 @@ if kill -0 "$recorded_pid" 2>/dev/null; then
 	live_identity=$(ps -o lstart= -p "$recorded_pid" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' | cut -c1-96)
 	[ -n "$live_identity" ] && [ "$live_identity" != "$recorded_identity" ] || exit 74
 else
-	observed_pids=$(ps -e -o pid= 2>/dev/null) || exit 74
-	[ -z "$(printf '%s\n' "$observed_pids" | awk -v pid="$recorded_pid" '$1 == pid { print $1 }')" ] || exit 74
+	owner_child_absent "$recorded_pid" || exit 74
 fi
 rm -f "$child"`
 	// An asynchronous shell list makes INT/QUIT ignored before exec. Register in
 	// a foreground shell instead; close its identity pipe before user code runs.
 	// The parent catches these signals while waiting so Bash reaches cleanup
 	// after a signaled child; caught dispositions reset in the fresh child shell.
-	registrar := `set -u
+	// Pre-start waits use the lock's five-second deadline, never signal-based
+	// cleanup. If the supervisor disappears, the identity pipe refuses handoff.
+	// A closed diagnostic stream must not recursively raise PIPE in its handler.
+	registrar := diagnostic + `set -u
 trap '' HUP
+trap 'rm -rf "$run_dir" 2>/dev/null' 0
+trap 'trap "" PIPE; setup_failed handoff' PIPE
 child_pid=$$
 child_identity=$(ps -o lstart= -p "$child_pid" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' | cut -c1-96)
-[ -n "$child_identity" ] || exit 74
+[ -n "$child_identity" ] || setup_failed identity
 export child_pid child_identity
-` + gateFunction + `run_owner_gate ` + shellQuote(installBody) + ` || exit $?
-printf '%s\n%s\n' "$child_pid" "$child_identity" >&3 || exit 74
+` + gateFunction + `run_owner_gate ` + shellQuote(installBody) + ` || setup_failed registration "$?"
+printf '%s\n%s\n' "$child_pid" "$child_identity" >&3 || setup_failed handoff
 exec 3>&-
 umask "$command_umask"
-exec sh -c ` + shellQuote(remote) + inputRedirect + `
+` + started + `exec sh -c ` + shellQuote(remote) + inputRedirect + `
 `
-	return `set -u
+	return diagnostic + `set -u
 command_umask=$(umask)
 umask 077
 root="$HOME/.crabbox/workspace-owners"
@@ -854,7 +952,7 @@ child="$root/$key.child"
 gate="$root/$key.gate"
 run_dir="$root/$key.run.$token.$$"
 ` + gateFunction + `
-mkdir -m 700 "$run_dir" || exit 74
+mkdir -m 700 "$run_dir" 2>/dev/null || setup_failed staging
 ` + inputSetup + `export state child gate token command_umask run_dir
 exec 4>&1
 trap : INT QUIT
@@ -863,11 +961,11 @@ identity=$(exec /bin/sh -c ` + shellQuote(registrar) + ` 3>&1 1>&4 4>&-)
 code=$?
 trap - INT QUIT
 exec 4>&-
-if [ -z "$identity" ]; then rm -rf "$run_dir"; [ "$code" -ne 0 ] && exit "$code"; exit 74; fi
+if [ -z "$identity" ]; then rm -rf "$run_dir" 2>/dev/null; [ "$code" -ne 0 ] || code=74; setup_failed handoff "$code"; fi
 child_pid=$(printf '%s\n' "$identity" | sed -n '1p')
 child_identity=$(printf '%s\n' "$identity" | sed -n '2p')
-case "$child_pid" in ''|*[!0-9]*) rm -rf "$run_dir"; exit 74 ;; esac
-if [ -z "$child_identity" ] || [ "${#child_identity}" -gt 96 ]; then rm -rf "$run_dir"; exit 74; fi
+case "$child_pid" in ''|*[!0-9]*) rm -rf "$run_dir" 2>/dev/null; exit 74 ;; esac
+if [ -z "$child_identity" ] || [ "${#child_identity}" -gt 96 ]; then rm -rf "$run_dir" 2>/dev/null; exit 74; fi
 export child_pid child_identity
 run_owner_gate ` + shellQuote(clearBody) + `
 clear_status=$?

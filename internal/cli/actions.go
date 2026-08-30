@@ -167,7 +167,7 @@ func (a App) actionsHydrate(ctx context.Context, args []string) (err error) {
 		return err
 	}
 	defer func() {
-		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), 30*time.Second)
+		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), owner.quiesceTimeout())
 		closeErr := owner.Close(releaseCtx)
 		cancel()
 		if closeErr != nil {
@@ -301,7 +301,7 @@ func (a App) hydrateActionsWithGitHubRunner(ctx context.Context, cfg Config, rep
 		cancelCtx = contextWithoutWorkspaceOwner(cancelCtx)
 		_ = runSSHQuiet(cancelCtx, target, remoteCancelActionsHydrationMonitorForTarget(target, leaseID, owner))
 		cancel()
-		if waitWorkspaceOwnerNoChild(context.WithoutCancel(ctx), owner, 40*time.Second) == nil {
+		if waitWorkspaceOwnerNoChild(context.WithoutCancel(ctx), owner, owner.callTimeout()) == nil {
 			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			cleanupCtx = contextWithoutWorkspaceOwner(cleanupCtx)
 			_ = runSSHQuiet(cleanupCtx, target, remotePrepareActionsHydrationMonitorForTarget(target, leaseID, owner))
@@ -331,7 +331,7 @@ func (a App) hydrateActionsWithGitHubRunner(ctx context.Context, cfg Config, rep
 		cancelMonitor()
 		return actionsHydrationState{}, err
 	}
-	if err := waitWorkspaceOwnerNoChild(ctx, owner, 15*time.Second); err != nil {
+	if err := waitWorkspaceOwnerNoChild(ctx, owner, owner.callTimeout()); err != nil {
 		return actionsHydrationState{}, err
 	}
 	return state, nil
@@ -668,7 +668,7 @@ func (a App) executeLocalActionsHydration(ctx context.Context, cfg Config, repo 
 	if err != nil {
 		return actionsHydrationState{}, err
 	}
-	if err := waitWorkspaceOwnerNoChild(ctx, owner, 15*time.Second); err != nil {
+	if err := waitWorkspaceOwnerNoChild(ctx, owner, owner.callTimeout()); err != nil {
 		return actionsHydrationState{}, err
 	}
 	return state, nil
@@ -714,8 +714,8 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 		warnCredentialBearingGitSeed(a.Stderr)
 	}
 	if coherence.seedEnabled() {
-		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay); err != nil {
-			fmt.Fprintf(a.Stderr, "warning: remote git seed failed: %v\n", err)
+		if out, err := runIdempotentSSHCombinedOutputLimit(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay, gitSeedDiagnosticLimit); err != nil {
+			warnRemoteGitSeedFailure(a.Stderr, out, err)
 		}
 	}
 	manifestData := manifest.NUL()
@@ -2682,20 +2682,20 @@ func waitWorkspaceOwnerNoChild(ctx context.Context, owner *workspaceOwner, timeo
 		return nil
 	}
 	if timeout <= 0 {
-		timeout = 15 * time.Second
+		timeout = owner.callTimeout()
 	}
 	deadline := time.Now().Add(timeout)
-	for {
-		checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		err := owner.ConfirmNoChild(checkCtx)
+	for time.Now().Before(deadline) {
+		checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), min(owner.callTimeout(), time.Until(deadline)))
+		result, err := owner.inspectChild(checkCtx)
 		cancel()
-		if err == nil {
-			return nil
-		}
-		if !strings.Contains(err.Error(), "child") || time.Now().After(deadline) {
+		if err != nil || result == workspaceOwnerQuiescent {
 			return err
 		}
-		timer := time.NewTimer(250 * time.Millisecond)
+		if time.Now().After(deadline) {
+			break
+		}
+		timer := time.NewTimer(min(250*time.Millisecond, time.Until(deadline)))
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -2703,6 +2703,7 @@ func waitWorkspaceOwnerNoChild(ctx context.Context, owner *workspaceOwner, timeo
 		case <-timer.C:
 		}
 	}
+	return exit(7, "confirm remote workspace owner child state failed closed: child")
 }
 
 func remoteRunLocalActionsHydrateScriptForeground(leaseID string, timeout time.Duration) string {

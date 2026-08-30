@@ -235,6 +235,19 @@ until the required service-principal secrets are present.
     coordinator's canonical-resource, quarantine, and fresh-preflight rules; see
     [Lifecycle and cleanup](../features/lifecycle-cleanup.md).
 
+### Brokered checkpoint ownership
+
+New brokered Azure managed-OS-disk snapshots are coordinator-owned but manually
+retained unless `checkpoint create --expire-unused-after <duration>` or
+`checkpoint policy` explicitly opts in. Records bind the authoritative source
+lease, Azure subscription, resource group, location, canonical snapshot ID,
+and immutable snapshot identity. Provider cleanup succeeds only after exact
+scoped deletion is confirmed; authentication failures, wrong resource groups,
+and ambiguous API errors retain ownership for retry. Promoting the snapshot
+creates a durable pin that blocks expiry and manual checkpoint deletion until
+the exact promotion is replaced. Direct Azure snapshots and older image records
+remain operator-managed.
+
 ## Classes
 
 Default Linux SKU candidates (first that provisions wins):
@@ -261,7 +274,10 @@ beast     Standard_D16ads_v6, Standard_D16ds_v6, Standard_D16ads_v5, Standard_D1
 
 Class-based provisioning falls back across the candidate list when Azure rejects a
 SKU for capacity or quota (`SkuNotAvailable`, `QuotaExceeded`, `AllocationFailed`,
-`OverconstrainedAllocationRequest`). When `capacity.regions` (or broker-side
+`OverconstrainedAllocationRequest`). If the rejected attempt already created its
+exact lease-owned NIC and public IP, Crabbox verifies and removes both and clears
+their durable cleanup claim before the next SKU creates a new public IP. When
+`capacity.regions` (or broker-side
 `CRABBOX_AZURE_REGIONS`) is set, Crabbox also tries those Azure regions in order
 and uses region-scoped shared network names for the fallback path. Spot leases
 fall back to on-demand when `capacity.fallback` starts with `on-demand`. Azure

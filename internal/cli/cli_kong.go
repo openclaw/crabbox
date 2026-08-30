@@ -503,8 +503,9 @@ type capsulePromoteKongCmd struct {
 
 type checkpointKongCmd struct {
 	Create  checkpointCreateKongCmd  `cmd:"" passthrough:"" help:"Create a VM or workspace checkpoint from a lease."`
-	List    checkpointListKongCmd    `cmd:"" passthrough:"" help:"List local checkpoints."`
+	List    checkpointListKongCmd    `cmd:"" passthrough:"" help:"List coordinator-owned and local checkpoints."`
 	Inspect checkpointInspectKongCmd `cmd:"" passthrough:"" help:"Inspect checkpoint metadata."`
+	Policy  checkpointPolicyKongCmd  `cmd:"" passthrough:"" help:"Update coordinator-managed checkpoint retention."`
 	Restore checkpointRestoreKongCmd `cmd:"" passthrough:"" help:"Restore a checkpoint onto an existing lease."`
 	Fork    checkpointForkKongCmd    `cmd:"" passthrough:"" help:"Lease a new box from a checkpoint."`
 	Delete  checkpointDeleteKongCmd  `cmd:"" passthrough:"" help:"Delete a checkpoint and provider snapshot."`
@@ -517,6 +518,9 @@ type checkpointListKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type checkpointInspectKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type checkpointPolicyKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type checkpointRestoreKongCmd struct {
@@ -851,6 +855,9 @@ func (c *checkpointListKongCmd) Run(ctx context.Context, app App) error {
 }
 func (c *checkpointInspectKongCmd) Run(ctx context.Context, app App) error {
 	return app.checkpointInspect(ctx, stripKongCommandPath(c.Args, "checkpoint", "inspect"))
+}
+func (c *checkpointPolicyKongCmd) Run(ctx context.Context, app App) error {
+	return app.checkpointPolicy(ctx, stripKongCommandPath(c.Args, "checkpoint", "policy"))
 }
 func (c *checkpointRestoreKongCmd) Run(ctx context.Context, app App) error {
 	return app.checkpointRestore(ctx, stripKongCommandPath(c.Args, "checkpoint", "restore"))

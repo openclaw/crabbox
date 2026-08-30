@@ -525,7 +525,7 @@ func TestCoordinatorOwnerGitScrubsExternalDesktopPassword(t *testing.T) {
 	t.Setenv("GIT_CEILING_DIRECTORIES", "/safe/root")
 	t.Setenv("GIT_DENIED_ROUTING", "remove-me")
 	client := CoordinatorClient{ChildEnvDenylist: []string{"TEST_ARD_PASSWORD", "GIT_DENIED_ROUTING"}}
-	if got := client.localCoordinatorOwner(); got != "owner@example.test" {
+	if got := client.localCoordinatorOwner(context.Background()); got != "owner@example.test" {
 		t.Fatalf("owner=%q", got)
 	}
 }
@@ -547,7 +547,7 @@ func TestLocalCoordinatorOwnerGitUsesRepositoryEnvironmentWithoutDenylist(t *tes
 	t.Setenv("TEST_ARD_PASSWORD", "must-not-reach-git")
 	t.Setenv("CRABBOX_TEST_KEEP", "must-not-reach-git")
 	t.Setenv("GIT_CEILING_DIRECTORIES", "/safe/root")
-	if got := localCoordinatorOwnerWithEnvironment(nil); got != "owner@example.test" {
+	if got := localCoordinatorOwnerWithEnvironment(context.Background(), nil); got != "owner@example.test" {
 		t.Fatalf("owner=%q", got)
 	}
 }

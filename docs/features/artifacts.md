@@ -44,6 +44,36 @@ safety scanner. Keep required artifacts bounded and scrubbed, such as manifests,
 summaries, screenshots, or QA reports. Do not use run artifacts for raw datasets,
 secrets, credentials, signed URLs, or unredacted customer rows.
 
+For retained Linux SSH workspaces, repeat `--require-artifact-change <path>` to
+require created or changed bytes from this workload. Each argument is an exact
+safe relative regular-file path: no globs, traversal, `.git`/`.crabbox`
+components, directories, or symlinks (including parent symlinks). All requested
+paths must pass. The limit is 32 paths, 1 KiB per path, 5 MiB per file, and
+20 MiB of contents per snapshot.
+
+Crabbox snapshots bounded contents after sync and hydration, immediately before
+the workload, and compares SHA-256 values after confirmed success. An absent
+file becoming present is `created`; different bytes are `changed`; identical
+bytes, including identical rewrites, are `unchanged`; absence afterward is
+`missing`. Unchanged or missing evidence fails with exit 7. This proves a byte
+change, not producer identity or freshness of identical output. Workload and
+transport failures remain unchanged and record `not-evaluated`.
+
+In this mode the artifact archive contains only accepted paths, using the exact
+post-command snapshot bytes. Broader `--artifact-glob` or `--require-artifact`
+matches cannot add stale files to that archive. Existing existence requirements
+still apply, and schema validation runs only after the change guard passes.
+Without the new flag, existing collection and existence behavior is unchanged;
+`--download` retains its separate success-only behavior. Timing JSON includes
+`artifactChanges`, with each path and status but no content digests. Snapshot
+errors fail closed and leave paths `not-evaluated`.
+
+The first slice supports ordinary SSH-backed Linux only. Delegated providers,
+macOS, WSL2, native Windows, and `--sync-only` reject the flag before workload
+execution. Both `--no-sync` and `--full-resync` are supported; the baseline is
+always taken after any sync, never before it. The remote needs Bash, `head`,
+`base64`, and `tr`; snapshot scripts are sent through SSH stdin.
+
 `--require-artifact-schema remote=schema.json` goes one step further than the
 existence guard: after command success it fetches the named JSON artifact from
 the lease and validates its content against a local schema file. The remote
@@ -97,6 +127,18 @@ Delegated providers reject run artifact collection until they grow an explicit
 bounded artifact capability. Archive-capable adapters may validate and collect
 required artifacts and artifact globs. Download-capable adapters may materialize
 safe relative single-file `--download` outputs capped at 64 KiB.
+
+Ordinary Linux SSH runs also support repeatable
+`--download-on-failure remote=local`. It retrieves only the selected files after
+a nonzero workload exit confirmed by a fresh Crabbox-owned start/exit marker
+pair and a clean SSH completion. Transport loss, cancellation, timeout, and
+setup failures are ineligible. Downloads happen before the failure bundle and
+teardown; retrieval warnings never replace the workload exit or stop later
+requested files. Each file has a 30-second retrieval budget. The existing
+single-file transport, collision checks, atomic local writes, and private
+permissions apply. `--download` remains success-only; other OS targets and
+delegated execution reject this first slice. See
+[run](../commands/run.md#artifacts-and-downloads) for the complete contract.
 
 `--emit-proof <path>` renders proof as a derived artifact after a successful
 run. The proof block uses the selected profile's proof template, the expanded

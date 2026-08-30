@@ -1359,7 +1359,9 @@ func (b *leaseBackend) ensureBootstrap(ctx context.Context, cfg Config, lease Le
 			return exit(5, "timed out bootstrapping hostinger vps %s during %s: %v", lease.Server.DisplayID(), phase, err)
 		}
 		fmt.Fprintf(b.rt.Stderr, "waiting for hostinger bootstrap lease=%s vm=%s phase=%s\n", lease.LeaseID, lease.Server.DisplayID(), phase)
-		hostingerSleep(5 * time.Second)
+		if err := shared.SleepContext(ctx, 5*time.Second); err != nil {
+			return err
+		}
 	}
 }
 

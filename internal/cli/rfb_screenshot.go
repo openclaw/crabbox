@@ -126,7 +126,7 @@ func typeRemoteMacVNC(ctx context.Context, cfg Config, target SSHTarget, text st
 }
 
 func resolveMacOSRFBAuthentication(ctx context.Context, cfg Config, target SSHTarget) (rfbCredentials, localWebVNCAuthenticationMode, error) {
-	credentials, authMode, err := resolveMacOSWebVNCCredentials(ctx, cfg, target, runSSHOutput)
+	credentials, authMode, err := resolveMacOSWebVNCCredentials(ctx, cfg, target, runVNCPasswordSSH)
 	if err != nil {
 		return rfbCredentials{}, localWebVNCAuthAuto, err
 	}

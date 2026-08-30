@@ -1,2 +1,2 @@
-# Embedded native programs must retain LF in Windows checkouts.
+# Embedded programs must also retain LF in Windows source builds.
 /internal/cli/scripts/* text eol=lf

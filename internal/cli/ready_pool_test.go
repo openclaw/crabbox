@@ -12,12 +12,16 @@ import (
 )
 
 type readyPoolWorkspaceOwnerTransport struct {
-	events     *[]string
-	releaseErr error
+	events        *[]string
+	releaseErr    error
+	beforeRelease func()
 }
 
 func (t readyPoolWorkspaceOwnerTransport) Do(_ context.Context, req workspaceOwnerRemoteRequest) (string, error) {
 	*t.events = append(*t.events, "owner."+string(req.Action))
+	if t.beforeRelease != nil {
+		t.beforeRelease()
+	}
 	if t.releaseErr != nil {
 		return "", t.releaseErr
 	}
@@ -53,7 +57,7 @@ func TestReadyPoolReturnReleasesWorkspaceOwnerBeforeCoordinator(t *testing.T) {
 				stop:      make(chan struct{}),
 				done:      done,
 			}
-			err := returnReadyPoolAfterWorkspaceOwner(context.Background(), &owner, func() error {
+			err := returnReadyPoolAfterWorkspaceOwner(context.Background(), &owner, func(context.Context) error {
 				events = append(events, "coordinator."+disposition)
 				return nil
 			})
@@ -85,7 +89,7 @@ func TestReadyPoolReturnStopsWhenWorkspaceOwnerReleaseFails(t *testing.T) {
 		done:      done,
 	}
 	returned := false
-	err := returnReadyPoolAfterWorkspaceOwner(context.Background(), &owner, func() error {
+	err := returnReadyPoolAfterWorkspaceOwner(context.Background(), &owner, func(context.Context) error {
 		returned = true
 		return nil
 	})
@@ -100,6 +104,35 @@ func TestReadyPoolReturnStopsWhenWorkspaceOwnerReleaseFails(t *testing.T) {
 	}
 	if owner != nil {
 		t.Fatal("failed-close owner remained installed for a double close")
+	}
+}
+
+func TestReadyPoolReturnGetsFreshCoordinatorBudgetAfterOwnerRelease(t *testing.T) {
+	events := []string{}
+	started, allow, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	close(done)
+	owner := &workspaceOwner{
+		transport: readyPoolWorkspaceOwnerTransport{events: &events, beforeRelease: func() { close(started); <-allow }},
+		stop:      make(chan struct{}), done: done,
+	}
+	result := make(chan error, 1)
+	go func() {
+		result <- returnReadyPoolAfterWorkspaceOwner(context.Background(), &owner, func(ctx context.Context) error {
+			events = append(events, "coordinator.return")
+			deadline, ok := ctx.Deadline()
+			if !ok || time.Until(deadline) <= 29*time.Second || time.Until(deadline) > 30*time.Second {
+				return errors.New("coordinator return did not receive a fresh 30s budget")
+			}
+			return nil
+		})
+	}()
+	<-started
+	close(allow)
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(events, ","); got != "owner.release,coordinator.return" {
+		t.Fatalf("event order=%q", got)
 	}
 }
 

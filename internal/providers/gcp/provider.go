@@ -190,9 +190,9 @@ func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (co
 		return core.NativeCheckpointCapability{}, false
 	}
 	if core.NormalizeCheckpointStrategy(req.Strategy) == core.CheckpointStrategyImage {
-		return core.NativeCheckpointCapability{Kind: core.CheckpointKindGCP}, true
+		return core.NativeCheckpointCapability{Kind: core.CheckpointKindGCP, RetireSource: true}, true
 	}
-	return core.NativeCheckpointCapability{Kind: core.CheckpointKindGCPDisk}, true
+	return core.NativeCheckpointCapability{Kind: core.CheckpointKindGCPDisk, RetireSource: true}, true
 }
 
 func firstNonBlank(values ...string) string {
