@@ -15,8 +15,8 @@ env:
   GOTOOLCHAIN: local
 
 jobs:
-  go:
-    name: Go
+  go-test:
+    name: Go test
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -84,11 +84,44 @@ jobs:
       - name: Test all Go modules
         run: scripts/test-go-modules.sh
 
+      - name: Build
+        run: go build -trimpath -o /tmp/crabbox ./cmd/crabbox
+
+  go-coverage:
+    name: Go coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
       - name: Coverage
         run: scripts/check-go-coverage.sh 90.0
 
-      - name: Build
-        run: go build -trimpath -o /tmp/crabbox ./cmd/crabbox
+  go:
+    name: Go
+    needs: [go-test, go-coverage]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Require all Go checks
+        shell: bash
+        env:
+          GO_TEST_RESULT: ${{ needs['go-test'].result }}
+          GO_COVERAGE_RESULT: ${{ needs['go-coverage'].result }}
+        run: |
+          printf 'Go test: %s\nGo coverage: %s\n' \
+            "${GO_TEST_RESULT:-missing}" "${GO_COVERAGE_RESULT:-missing}"
+          [[ "${GO_TEST_RESULT:-}" == success && "${GO_COVERAGE_RESULT:-}" == success ]]
 
   go-install:
     name: Direct Go install
@@ -132,7 +165,7 @@ jobs:
       - name: Test pond mesh cancellation
         run: go test ./internal/cli/ -run PondMeshCancel -count=1 -v
 
-      - name: Run required native WSL stage behaviors without skips
+      - name: Run required native transport behaviors without skips
         shell: pwsh
         run: |
           $required = @(
@@ -148,7 +181,10 @@ jobs:
             'TestWSLStageInitialHandoffBudgets',
             'TestWSLStageBlindingBindsFullAndPartialDigests',
             'TestWSLStageEntropyFailurePreventsDeliveryAndSpoolCreation',
-            'TestWSLStageBlindingStaysOutOfPublicTransportMetadata'
+            'TestWSLStageBlindingStaysOutOfPublicTransportMetadata',
+            'TestVNCPasswordSSHBoundsWSLStageContext',
+            'TestRunSSHOutputBoundedDiscardsOutputOnDeferredCleanupFailure',
+            'TestPondMeshJobTerminationFailureStillKillsWindowsProcessTree'
           )
           $events = @(go test ./internal/cli/ -run ('^(' + ($required -join '|') + ')$') -count=1 -json)
           $code = $LASTEXITCODE

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func osExec(name string, args ...string) *osexec.Cmd { return osexec.Command(name, args...) }
@@ -428,6 +429,7 @@ func newTestConfig() Config {
 }
 
 func TestRunCreatesExecsAndTerminatesEphemeralSandbox(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	runner := newRunner(map[string]scriptedReply{
 		"sbx create":    {stdout: "3pryjysezwsnlex226i5h\n"},
 		"sbx exec":      {stdout: "hello\n"},
@@ -496,6 +498,7 @@ func TestRunCreatesExecsAndTerminatesEphemeralSandbox(t *testing.T) {
 }
 
 func TestRunForwardsEnvViaUploadedProfile(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	runner := newRunner(map[string]scriptedReply{
 		"sbx create":    {stdout: "envid0123456789012\n"},
 		"sbx exec":      {stdout: "ok\n"},
@@ -545,6 +548,7 @@ func TestRunForwardsEnvViaUploadedProfile(t *testing.T) {
 }
 
 func TestRunSurfacesCommandExitCodeWithoutWrappingError(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	exitErr := &fakeExitError{code: 7}
 	runner := newRunner(
 		map[string]scriptedReply{
@@ -587,6 +591,7 @@ func TestRunSurfacesCommandExitCodeWithoutWrappingError(t *testing.T) {
 }
 
 func TestTensorlakeDeleteSyncDoesNotRemoveWorkspaceBeforeUpload(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	repoRoot := newGitRepo(t)
 	if err := os.WriteFile(filepath.Join(repoRoot, "hello.txt"), []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
@@ -782,6 +787,7 @@ func TestKeepOnFailureRetainsSandboxAndPrintsHint(t *testing.T) {
 }
 
 func TestRunPerformsArchiveSyncByDefault(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	runner := newRunner(map[string]scriptedReply{
 		"sbx create":    {stdout: "syncidaaaaaaaaaaaaaa\n"},
 		"sbx exec":      {stdout: "ok\n"},
@@ -816,6 +822,7 @@ func TestRunPerformsArchiveSyncByDefault(t *testing.T) {
 }
 
 func TestRunSkipsSyncWithNoSync(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	runner := newRunner(map[string]scriptedReply{
 		"sbx create":    {stdout: "nosyncidaaaaaaaaaaaa\n"},
 		"sbx exec":      {stdout: "ok\n"},

@@ -314,7 +314,7 @@ func TestPrintRunFailureDigestExplainsUnavailableRunHistory(t *testing.T) {
 	})
 	out := buf.String()
 	for _, want := range []string{
-		"run_history: unavailable; use lease-based recovery commands below",
+		"run_history: unavailable",
 		"next: crabbox ssh --id blue-lobster",
 		"next: crabbox run --id blue-lobster --fresh-sync -- go test ./...",
 	} {
@@ -698,5 +698,25 @@ func TestSelectProofLogExcerptRedactsHTMLAuthBody(t *testing.T) {
 	got := SelectProofLogExcerpt("<!doctype html><html><head><title>Cloudflare Access</title></head><body>login</body></html>")
 	if !strings.Contains(got, "redacted auth_cloudflare_html response") {
 		t.Fatalf("proof excerpt was not redacted: %q", got)
+	}
+}
+
+func TestFailureDigestStoppedLeaseKeepsHistoryAndLocalEvidence(t *testing.T) {
+	var out bytes.Buffer
+	printRunFailureDigest(&out, runFailureDigestInput{
+		LeaseID: "cbx_stopped", LeaseStopped: true, RunID: "run_failed",
+		CommandDisplay: "false", StopCommand: "crabbox stop --id cbx_stopped",
+	})
+	printFailureTail(&out, "stdout", nil, "stdout.log")
+	printFailureTail(&out, "stderr", nil, "stderr.log")
+	for _, want := range []string{"crabbox logs run_failed", "crabbox events run_failed", "crabbox doctor --from-run run_failed", "lease: stopped", "stderr.log", "stdout.log"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("missing %q: %s", want, out.String())
+		}
+	}
+	for _, command := range []string{"ssh", "run", "stop"} {
+		if strings.Contains(out.String(), "next: crabbox "+command+" ") {
+			t.Errorf("stale recovery command %s: %s", command, out.String())
+		}
 	}
 }

@@ -1261,8 +1261,8 @@ func TestParallelsSnapshotCheckpointViewMarksForkablePoweroffOnly(t *testing.T) 
 
 func TestDirectParallelsCheckpointRefusesRunningVMWithNoReboot(t *testing.T) {
 	runner := &checkpointParallelsRunner{vmState: "running", snapshotState: "poweroff"}
-	_, err := (directParallelsCheckpointDriver{Runner: runner}).Create(context.Background(), checkpointNativeCreateRequest{
-		Cfg:      Config{Provider: "parallels"},
+	_, err := (directParallelsCheckpointDriver{Runner: runner}).Create(context.Background(), NativeCheckpointCreateRequest{
+		Config:   Config{Provider: "parallels"},
 		Server:   Server{CloudID: "vm1", Labels: map[string]string{}},
 		LeaseID:  "cbx_123",
 		RepoName: "my-app",
@@ -1278,8 +1278,8 @@ func TestDirectParallelsCheckpointRefusesRunningVMWithNoReboot(t *testing.T) {
 
 func TestDirectParallelsCheckpointStopsAndRestartsForForkableSnapshot(t *testing.T) {
 	runner := &checkpointParallelsRunner{vmState: "running", snapshotState: "poweroff"}
-	image, err := (directParallelsCheckpointDriver{Runner: runner}).Create(context.Background(), checkpointNativeCreateRequest{
-		Cfg:      Config{Provider: "parallels"},
+	image, err := (directParallelsCheckpointDriver{Runner: runner}).Create(context.Background(), NativeCheckpointCreateRequest{
+		Config:   Config{Provider: "parallels"},
 		Server:   Server{CloudID: "vm1", Labels: map[string]string{}},
 		LeaseID:  "cbx_123",
 		RepoName: "my-app",
@@ -2198,22 +2198,11 @@ func TestCreateNativeCheckpointRejectsAzureImageBeforeAdminAndCloudInit(t *testi
 	cfg.Coordinator = "https://coordinator.example"
 	cfg.TargetOS = targetLinux
 
-	_, _, err := (App{Stdout: io.Discard, Stderr: io.Discard}).createNativeCheckpoint(
-		context.Background(),
-		cfg,
-		Server{Provider: "azure", CloudID: "crabbox-source"},
-		SSHTarget{TargetOS: targetLinux},
-		"chk_test",
-		"cbx_123",
-		"",
-		"repo",
-		"",
-		checkpointStrategyImage,
-		true,
-		false,
-		0,
-		nil,
-	)
+	_, _, err := (App{Stdout: io.Discard, Stderr: io.Discard}).createNativeCheckpointRequest(context.Background(), NativeCheckpointCreateRequest{
+		Config: cfg, Server: Server{Provider: "azure", CloudID: "crabbox-source"},
+		Target: SSHTarget{TargetOS: targetLinux}, CheckpointID: "chk_test", LeaseID: "cbx_123",
+		RepoName: "repo", Strategy: checkpointStrategyImage, NoReboot: true, Stderr: io.Discard,
+	})
 	if err == nil {
 		t.Fatal("expected Azure image strategy to fail")
 	}
@@ -2224,7 +2213,7 @@ func TestCreateNativeCheckpointRejectsAzureImageBeforeAdminAndCloudInit(t *testi
 
 func TestDirectAzureWindowsCheckpointRejectsImageStrategy(t *testing.T) {
 	t.Parallel()
-	_, err := (directAzureOSDiskCheckpointDriver{}).Create(context.Background(), checkpointNativeCreateRequest{
+	_, err := (directAzureOSDiskCheckpointDriver{}).Create(context.Background(), NativeCheckpointCreateRequest{
 		Strategy: checkpointStrategyImage,
 	})
 	if err == nil || !strings.Contains(err.Error(), "require --strategy disk-snapshot") {
@@ -2234,7 +2223,7 @@ func TestDirectAzureWindowsCheckpointRejectsImageStrategy(t *testing.T) {
 
 func TestDirectAzureWindowsCheckpointRequiresRebootOptIn(t *testing.T) {
 	t.Parallel()
-	_, err := (directAzureOSDiskCheckpointDriver{}).Create(context.Background(), checkpointNativeCreateRequest{
+	_, err := (directAzureOSDiskCheckpointDriver{}).Create(context.Background(), NativeCheckpointCreateRequest{
 		Strategy: checkpointStrategyDiskSnapshot,
 		NoReboot: true,
 	})
@@ -2261,7 +2250,7 @@ func TestAzureOSDiskSnapshotNamePreservesTimestampWithinProviderLimit(t *testing
 func TestDirectAzureWindowsCheckpointRejectsInvalidSnapshotName(t *testing.T) {
 	t.Parallel()
 	for _, name := range []string{strings.Repeat("a", azureSnapshotNameMaxLength+1), "snapshot with spaces"} {
-		_, err := (directAzureOSDiskCheckpointDriver{}).Create(context.Background(), checkpointNativeCreateRequest{
+		_, err := (directAzureOSDiskCheckpointDriver{}).Create(context.Background(), NativeCheckpointCreateRequest{
 			Strategy: checkpointStrategyDiskSnapshot,
 			Name:     name,
 		})

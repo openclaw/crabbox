@@ -118,7 +118,7 @@ func (a App) resolveMacOSWebVNCBridgeTarget(ctx context.Context, cfg Config, id 
 	if _, err := resolveVNCEndpoint(ctx, cfg, &target); err != nil {
 		return macOSWebVNCBridgeTarget{}, err
 	}
-	credentials, authMode, err := resolveMacOSWebVNCCredentials(ctx, cfg, target, runSSHOutput)
+	credentials, authMode, err := resolveMacOSWebVNCCredentials(ctx, cfg, target, runVNCPasswordSSH)
 	if err != nil {
 		return macOSWebVNCBridgeTarget{}, err
 	}

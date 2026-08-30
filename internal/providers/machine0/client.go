@@ -25,6 +25,7 @@ var machine0UUIDPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a
 
 type machine0API interface {
 	Version(context.Context) (string, error)
+	AccountID(context.Context) (string, error)
 	List(context.Context) ([]machine, error)
 	Get(context.Context, string) (machine, error)
 	SelectedKey(context.Context, string) (*machineKey, error)
@@ -243,6 +244,26 @@ func (c *client) Version(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(result.Stdout + result.Stderr), nil
+}
+
+func (c *client) AccountID(ctx context.Context) (string, error) {
+	result, err := c.runRead(ctx, "whoami", "--json")
+	if err != nil {
+		if cause := context.Cause(ctx); cause != nil {
+			return "", cause
+		}
+		// Native output includes personal and billing details; never echo it.
+		return "", exit(5, "machine0 account identity lookup failed; retain checkpoint and source")
+	}
+	var account struct {
+		User struct {
+			ID string `json:"id"`
+		} `json:"user"`
+	}
+	if err := decodeJSON(result.Stdout, &account); err != nil || strings.TrimSpace(account.User.ID) == "" || account.User.ID != strings.TrimSpace(account.User.ID) {
+		return "", exit(5, "machine0 whoami --json omitted a valid user.id; retain checkpoint and source")
+	}
+	return account.User.ID, nil
 }
 
 func (c *client) List(ctx context.Context) ([]machine, error) {

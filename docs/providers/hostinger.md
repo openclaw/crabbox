@@ -211,6 +211,10 @@ Crabbox keeps the local claim and SSH key for recovery and stops the VPS unless
 `--keep` was set. The subscription remains account-owned and may continue
 billing in every case.
 
+Cancelling during a bootstrap SSH retry interrupts its five-second backoff
+immediately. Acquisition still performs the bounded, ownership-checked rollback
+described above; cancellation does not discard the recovery claim or SSH key.
+
 Hostinger may reject an API purchase with HTTP `402` even when `doctor` reports
 an active default payment method. This means the payment or order requires
 interactive checkout, card authentication, or another billing action in hPanel.

@@ -189,6 +189,11 @@ func (b *hetznerLeaseBackend) List(ctx context.Context, req ListRequest) ([]Leas
 	return ownedHetznerServers(servers), nil
 }
 
+func (b *hetznerLeaseBackend) CheckpointSourceAbsent(context.Context, core.CheckpointSourceRequest) (bool, error) {
+	// A project-scoped token cannot distinguish deletion from another project.
+	return false, exit(2, "%s", hetznerRetirementUnsupported)
+}
+
 func (b *hetznerLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
 	servers, err := b.List(ctx, ListRequest{})
 	if err != nil {
@@ -200,8 +205,16 @@ func (b *hetznerLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) 
 }
 
 func (b *hetznerLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+	if req.CheckpointID != "" {
+		return exit(2, "%s", hetznerRetirementUnsupported)
+	}
 	server := normalizeHetznerServer(req.Lease.Server)
 	claim, err := requireExactHetznerClaim(server, req.Lease.LeaseID)
+	if err == nil {
+		if err := core.AuthorizeCheckpointRelease(claim, req.CheckpointID); err != nil {
+			return err
+		}
+	}
 	if err != nil {
 		if !b.matchesAcquiredLease(server, req.Lease.LeaseID) {
 			return err
@@ -276,6 +289,10 @@ func (b *hetznerLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) e
 			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=exact local claim missing or stale\n", server.DisplayID(), server.Name)
 			continue
 		}
+		if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+			fmt.Fprintf(b.RT.Stderr, "skip server id=%s reason=checkpoint hold: %v\n", server.DisplayID(), err)
+			continue
+		}
 		fmt.Fprintf(b.RT.Stderr, "delete server id=%s name=%s\n", server.DisplayID(), server.Name)
 		if req.DryRun {
 			continue
@@ -323,6 +340,9 @@ func deleteServerForRelease(ctx context.Context, cfg Config, server Server) (boo
 func deleteClaimedHetznerServer(ctx context.Context, client hetznerClient, server Server, claim core.LeaseClaim) (bool, error) {
 	serverGone := false
 	updated, err := core.UpdateLeaseClaimLabelsIfUnchangedAfter(claim.LeaseID, claim, claim.Labels, func() error {
+		if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+			return err
+		}
 		var deleteErr error
 		serverGone, deleteErr = deleteServerWithClient(ctx, client, server, true, claim.LeaseID)
 		return deleteErr
@@ -331,7 +351,7 @@ func deleteClaimedHetznerServer(ctx context.Context, client hetznerClient, serve
 		return false, err
 	}
 	if serverGone {
-		if err := core.RemoveLeaseClaimIfUnchanged(updated.LeaseID, updated); err != nil {
+		if err := core.RemoveLeaseClaimIfUnchangedAfter(updated.LeaseID, updated, func() error { return core.AuthorizeCheckpointRelease(updated, "") }); err != nil {
 			return false, fmt.Errorf("finalize Hetzner cleanup claim: %w", err)
 		}
 	}

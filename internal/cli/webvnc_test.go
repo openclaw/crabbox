@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -412,6 +413,28 @@ func TestSameWebVNCOrigin(t *testing.T) {
 	}
 }
 
+func TestWebVNCWebSocketDialOptionsBoundsResponseHeaders(t *testing.T) {
+	options, err := webVNCWebSocketDialOptions(http.Header{
+		"X-Crabbox-Bridge-Ticket": {"bridge-ticket"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options == nil || options.HTTPClient == nil {
+		t.Fatal("dial options missing HTTP client")
+	}
+	if options.HTTPClient.Timeout != 0 {
+		t.Fatalf("client timeout=%s, want 0 so the upgraded websocket is not killed", options.HTTPClient.Timeout)
+	}
+	transport, ok := options.HTTPClient.Transport.(*http.Transport)
+	if !ok || transport == nil {
+		t.Fatalf("transport=%T, want *http.Transport", options.HTTPClient.Transport)
+	}
+	if transport.ResponseHeaderTimeout != 30*time.Second {
+		t.Fatalf("response header timeout=%s, want 30s", transport.ResponseHeaderTimeout)
+	}
+}
+
 func TestWebVNCWebSocketDialRejectsCrossOriginDowngradeRedirect(t *testing.T) {
 	redirected := make(chan http.Header, 1)
 	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -425,9 +448,12 @@ func TestWebVNCWebSocketDialRejectsCrossOriginDowngradeRedirect(t *testing.T) {
 	}))
 	defer redirect.Close()
 
-	options := webVNCWebSocketDialOptions(http.Header{
+	options, err := webVNCWebSocketDialOptions(http.Header{
 		"X-Crabbox-Bridge-Ticket": {"bridge-ticket-must-not-leak"},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	options.HTTPClient.Transport = redirect.Client().Transport
 	wsURL := "wss" + strings.TrimPrefix(redirect.URL, "https")
 	conn, response, err := websocket.Dial(context.Background(), wsURL, options)
@@ -447,6 +473,167 @@ func TestWebVNCWebSocketDialRejectsCrossOriginDowngradeRedirect(t *testing.T) {
 		t.Fatalf("WebVNC WebSocket redirect reached sink with ticket=%q", headers.Get("X-Crabbox-Bridge-Ticket"))
 	default:
 	}
+}
+
+func TestWebVNCWebSocketDialRejectsUnsupportedTransport(t *testing.T) {
+	recorder := &recordingDefaultRoundTripper{}
+	var typedNil *http.Transport
+	for _, tc := range []struct {
+		name      string
+		transport http.RoundTripper
+	}{{"custom", recorder}, {"nil", nil}, {"typed nil", typedNil}} {
+		t.Run(tc.name, func(t *testing.T) {
+			original := http.DefaultTransport
+			t.Cleanup(func() { http.DefaultTransport = original })
+			http.DefaultTransport = tc.transport
+			options, err := webVNCWebSocketDialOptions(nil)
+			if options != nil || err == nil || err.Error() != cloneDefaultTransportError {
+				t.Fatalf("unsupported transport produced options=%v err=%v", options, err)
+			}
+		})
+	}
+	if recorder.calls != 0 {
+		t.Fatalf("unsupported transport invoked %d times", recorder.calls)
+	}
+}
+
+func TestConnectWebVNCBridgeTransportRefusalClosesVNC(t *testing.T) {
+	agentCalls := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/ticket") {
+			_ = json.NewEncoder(w).Encode(CoordinatorWebVNCTicket{Ticket: "fixture-ticket", LeaseID: "cbx_abcdef123456"})
+			return
+		}
+		agentCalls <- struct{}{}
+		http.Error(w, "unexpected agent request", http.StatusBadRequest)
+	}))
+	defer server.Close()
+	transport := &http.Transport{}
+	defer transport.CloseIdleConnections()
+	coord := &CoordinatorClient{BaseURL: server.URL, Token: "fixture-token", Client: &http.Client{Transport: transport}}
+	original := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = original })
+	http.DefaultTransport = &recordingDefaultRoundTripper{}
+	client, peer := net.Pipe()
+	defer client.Close()
+	defer peer.Close()
+	if err := peer.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	bridge, err := connectWebVNCBridgeWithDial(ctx, coord, "cbx_abcdef123456", "unused.invalid", "1", SSHTarget{TargetOS: targetMacOS}, rfbCredentials{}, localWebVNCAuthAuto, io.Discard, func(context.Context) (net.Conn, error) { return client, nil })
+	if bridge != nil {
+		bridge.Close()
+	}
+	if bridge != nil || err == nil || err.Error() != cloneDefaultTransportError {
+		t.Fatalf("bridge=%v err=%v", bridge, err)
+	}
+	if _, err := peer.Read(make([]byte, 1)); err != io.EOF {
+		t.Fatalf("VNC connection was not closed: %v", err)
+	}
+	select {
+	case <-agentCalls:
+		t.Fatal("unsupported transport was bypassed for an agent request")
+	default:
+	}
+}
+
+func TestWebVNCWebSocketHeaderDeadlineNetwork(t *testing.T) {
+	t.Parallel()
+	// Keep socket waits concurrent within one test slot, even on small runners.
+	var checks sync.WaitGroup
+	defer checks.Wait()
+	run := func(name string, check func(*testing.T)) {
+		checks.Add(1)
+		go func() {
+			defer checks.Done()
+			t.Run(name, check)
+		}()
+	}
+	run("earlier caller deadline", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
+		t.Cleanup(server.Close)
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		t.Cleanup(cancel)
+		options, err := webVNCWebSocketDialOptions(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), options)
+		if conn != nil {
+			conn.CloseNow()
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("caller deadline lost: %v", err)
+		}
+	})
+	run("stalled headers", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			<-r.Context().Done()
+		}))
+		t.Cleanup(server.Close)
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		t.Cleanup(cancel)
+		options, err := webVNCWebSocketDialOptions(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		start := time.Now()
+		conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), options)
+		if conn != nil {
+			conn.CloseNow()
+		}
+		var timeout net.Error
+		if err == nil || !errors.As(err, &timeout) || !timeout.Timeout() || ctx.Err() != nil || time.Since(start) < 29*time.Second {
+			t.Fatalf("header deadline elapsed=%s conn=%v err=%v caller=%v", time.Since(start), conn, err, ctx.Err())
+		}
+		t.Logf("actual header timeout after %s, caller deadline still live", time.Since(start))
+	})
+	run("upgraded session survives", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			conn, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer conn.CloseNow()
+			kind, payload, err := conn.Read(ctx)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if err := conn.Write(ctx, kind, payload); err != nil {
+				t.Error(err)
+			}
+		}))
+		t.Cleanup(server.Close)
+		t.Cleanup(cancel)
+		options, err := webVNCWebSocketDialOptions(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.CloseNow()
+		select {
+		case <-time.After(31 * time.Second):
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+		payload := []byte("session-still-live")
+		if err := conn.Write(ctx, websocket.MessageBinary, payload); err != nil {
+			t.Fatal(err)
+		}
+		kind, got, err := conn.Read(ctx)
+		if err != nil || kind != websocket.MessageBinary || !bytes.Equal(got, payload) {
+			t.Fatalf("upgraded session failed after handshake limit: kind=%v payload=%q err=%v", kind, got, err)
+		}
+		t.Log("actual upgraded websocket echoed data after 31 seconds")
+	})
 }
 
 func TestWebVNCRedactingWriterKeepsCredentialsOutOfDaemonLogs(t *testing.T) {

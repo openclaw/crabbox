@@ -41,6 +41,9 @@ func (Provider) NativeCheckpointWorkdir(req core.NativeCheckpointWorkdirRequest)
 }
 
 func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheckpointCreateRequest) (core.NativeCheckpointCreateResult, error) {
+	if req.Capture != nil {
+		return core.NativeCheckpointCreateResult{}, core.Exit(2, "%s", hetznerRetirementUnsupported)
+	}
 	if strings.TrimSpace(req.Config.Coordinator) != "" {
 		return core.NativeCheckpointCreateResult{}, core.Exit(2, "brokered Hetzner leases use archive checkpoints")
 	}
@@ -79,6 +82,11 @@ func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheck
 	claim, err := requireExactHetznerClaim(source, req.LeaseID)
 	if err != nil {
 		return core.NativeCheckpointCreateResult{}, err
+	}
+	if req.Capture != nil {
+		if err := core.ValidateCheckpointCaptureClaim(claim, req.CheckpointID, req.Capture); err != nil {
+			return core.NativeCheckpointCreateResult{}, err
+		}
 	}
 	location := ""
 	if source.Location != nil {

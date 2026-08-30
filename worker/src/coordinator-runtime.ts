@@ -52,8 +52,13 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
   }
   if (
     method === "POST" &&
-    (path.join("/") === "v1/leases" || path.join("/") === "v1/leases/capability-aware")
+    (path.join("/") === "v1/leases" ||
+      path.join("/") === "v1/leases/capability-aware" ||
+      path.join("/") === "v1/leases/from-checkpoint")
   ) {
+    return "direct";
+  }
+  if (path[0] === "v1" && path[1] === "checkpoints") {
     return "direct";
   }
   if (
@@ -85,7 +90,8 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
       path.length === 4 &&
       (path[3] === "promote" || path[3] === "promote-catalog")) ||
       (method === "DELETE" &&
-        (path.length === 3 || (path.length === 4 && path[3] === "promote-catalog"))))
+        (path.length === 3 ||
+          (path.length === 4 && (path[3] === "promote-catalog" || path[3] === "promote")))))
   ) {
     // Existing-image mutations intentionally hold the lifecycle queue across provider I/O:
     // these rare admin calls must validate, re-read, clean up, and publish as one serialized commit.

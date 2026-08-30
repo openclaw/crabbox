@@ -58,10 +58,6 @@ func claimLease(leaseID, slug string, cfg Config, repoRoot string, reclaim bool,
 	return core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, machineScope(server.CloudID), cfg.Pond, repoRoot, cfg.IdleTimeout, reclaim, server, target)
 }
 
-func resolveClaim(identifier string) (LeaseClaim, bool, error) {
-	return core.ResolveLeaseClaimForProvider(identifier, providerName)
-}
-
 func listClaims() ([]LeaseClaim, error) { return core.ListLeaseClaims() }
 
 func updateClaim(leaseID string, expected LeaseClaim, server Server, target SSHTarget) (LeaseClaim, error) {

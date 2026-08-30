@@ -926,10 +926,11 @@ rm -f "$child"`
 	// after a signaled child; caught dispositions reset in the fresh child shell.
 	// Pre-start waits use the lock's five-second deadline, never signal-based
 	// cleanup. If the supervisor disappears, the identity pipe refuses handoff.
+	// A closed diagnostic stream must not recursively raise PIPE in its handler.
 	registrar := diagnostic + `set -u
 trap '' HUP
 trap 'rm -rf "$run_dir" 2>/dev/null' 0
-trap 'setup_failed handoff' PIPE
+trap 'trap "" PIPE; setup_failed handoff' PIPE
 child_pid=$$
 child_identity=$(ps -o lstart= -p "$child_pid" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//' | cut -c1-96)
 [ -n "$child_identity" ] || setup_failed identity

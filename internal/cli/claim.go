@@ -19,11 +19,12 @@ import (
 )
 
 type leaseClaim struct {
-	LeaseID  string `json:"leaseID"`
-	Revision string `json:"revision,omitempty"`
-	Slug     string `json:"slug,omitempty"`
-	Provider string `json:"provider,omitempty"`
-	CloudID  string `json:"cloudID,omitempty"`
+	LeaseID           string                    `json:"leaseID"`
+	Revision          string                    `json:"revision,omitempty"`
+	CheckpointCapture *CheckpointCaptureBinding `json:"checkpointCapture,omitempty"`
+	Slug              string                    `json:"slug,omitempty"`
+	Provider          string                    `json:"provider,omitempty"`
+	CloudID           string                    `json:"cloudID,omitempty"`
 	// CloudNumericID binds providers whose CloudID is a reusable resource name.
 	CloudNumericID int64 `json:"cloudNumericID,omitempty"`
 	// CloudImmutableID binds providers whose immutable identity is a string.
@@ -56,6 +57,12 @@ type leaseClaim struct {
 	CacheVolumes                        []string           `json:"cacheVolumes,omitempty"`
 	Labels                              map[string]string  `json:"labels,omitempty"`
 	FixedCreateIntent                   *FixedCreateIntent `json:"fixedCreateIntent,omitempty"`
+}
+
+type CheckpointCaptureBinding struct {
+	ID            string `json:"id"`
+	Revision      string `json:"revision"`
+	BoundRevision string `json:"boundRevision"`
 }
 
 // FixedCreateIntent is the durable, provider-neutral envelope for a
@@ -389,6 +396,7 @@ func claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, 
 				return err
 			}
 			if existing.ClaimedAt == "" || reclaim || existing.RepoRoot != repoRoot {
+				existing.CheckpointCapture = nil
 				existing.ClaimedAt = now
 			}
 			existing.LeaseID = leaseID
@@ -745,6 +753,10 @@ func updateLeaseClaimTouchIfUnchanged(leaseID string, expected leaseClaim, label
 		if claim.LeaseID == "" {
 			return nil
 		}
+		// A journal can reserve this source without changing its revision.
+		if err := AuthorizeCheckpointRelease(*claim, ""); err != nil {
+			return err
+		}
 		claim.Labels = cloneStringMap(labels)
 		claim.LastUsedAt = lastUsed.UTC().Format(time.RFC3339)
 		if idleTimeoutOverride != nil {
@@ -775,6 +787,10 @@ func updateLeaseClaimLabelsIfUnchangedAfter(leaseID string, expected leaseClaim,
 }
 
 func cloneLeaseClaim(claim leaseClaim) leaseClaim {
+	if claim.CheckpointCapture != nil {
+		binding := *claim.CheckpointCapture
+		claim.CheckpointCapture = &binding
+	}
 	claim.Labels = cloneStringMap(claim.Labels)
 	claim.TailscaleTags = append([]string(nil), claim.TailscaleTags...)
 	claim.CacheVolumes = append([]string(nil), claim.CacheVolumes...)
@@ -1047,6 +1063,11 @@ func withDurableLeaseClaimLock(leaseID string, action func(*leaseClaim, bool, fu
 			}
 			if err := refreshLeaseClaimRevision(&claim); err != nil {
 				return err
+			}
+			if claim.CheckpointCapture != nil && claim.CheckpointCapture.BoundRevision == "" {
+				// Publish the binding and exact claim revision together. Later claim
+				// mutations must not silently reauthorize this capture.
+				claim.CheckpointCapture.BoundRevision = claim.Revision
 			}
 			if err := writeLeaseClaimAtomicDurableWithSync(path, claim, firstExistingDir, syncControllerDirectory); err != nil {
 				return err
@@ -1532,6 +1553,19 @@ func cleanupLeaseClaimIfUnchangedAfter(leaseID string, expected leaseClaim, expe
 }
 
 func cleanupLeaseClaimIfUnchangedAfterWithSync(leaseID string, expected leaseClaim, expectedExists bool, action func() error, syncDirectory func(string) error) error {
+	return finalizeLeaseClaimIfUnchangedAfter(leaseID, expected, expectedExists, func() (bool, error) {
+		if action != nil {
+			if err := action(); err != nil {
+				return false, err
+			}
+		}
+		return true, nil
+	}, syncDirectory)
+}
+
+// Finalization keeps the original claim when remote cleanup is retained or
+// pending. The same fence covers admission, provider effects and local removal.
+func finalizeLeaseClaimIfUnchangedAfter(leaseID string, expected leaseClaim, expectedExists bool, action func() (bool, error), syncDirectory func(string) error) error {
 	path, err := leaseClaimPath(leaseID)
 	if err != nil {
 		return err
@@ -1544,10 +1578,9 @@ func cleanupLeaseClaimIfUnchangedAfterWithSync(leaseID string, expected leaseCla
 		if err := unchangedLeaseClaimGuard(leaseID, expected, expectedExists)(claim, exists); err != nil {
 			return err
 		}
-		if action != nil {
-			if err := action(); err != nil {
-				return err
-			}
+		remove, err := action()
+		if err != nil || !remove {
+			return err
 		}
 		// Even when the source is absent, Windows may still have the
 		// deterministic tombstone left by an interrupted write-through remove.

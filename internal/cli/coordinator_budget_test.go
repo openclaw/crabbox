@@ -80,7 +80,9 @@ func TestCoordinatorOperationBudgets(t *testing.T) {
 }
 
 func TestCoordinatorLeaseReadStallsAreBounded(t *testing.T) {
-	clearConfigEnv(t)
+	// Explicit clients and private servers need no process-wide config changes.
+	// Keep the real control deadlines without serializing their wall-clock waits.
+	t.Parallel()
 	for _, bodyStall := range []bool{false, true} {
 		name := "headers"
 		if bodyStall {
@@ -120,6 +122,8 @@ func TestCoordinatorLeaseReadStallsAreBounded(t *testing.T) {
 
 func TestCoordinatorHeartbeatHonorsCallerDeadlineWithoutReplay(t *testing.T) {
 	clearConfigEnv(t)
+	// Keep this HTTP deadline test independent of local git process startup.
+	t.Setenv("CRABBOX_OWNER", "alice@example.com")
 	var calls atomic.Int32
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

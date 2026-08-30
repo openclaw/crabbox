@@ -933,12 +933,32 @@ func (b *coordinatorLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseL
 	if req.Lease.LeaseID == "" {
 		return exit(2, "missing coordinator lease id")
 	}
-	expectedProvider, err := b.expectedProvider()
+	claim, exists, err := readLeaseClaimWithPresence(req.Lease.LeaseID)
 	if err != nil {
 		return err
 	}
+	return finalizeLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, claim, exists, func() (bool, error) {
+		authority := claim
+		if !exists {
+			authority.LeaseID = req.Lease.LeaseID
+		}
+		if err := AuthorizeCheckpointRelease(authority, req.CheckpointID); err != nil {
+			return false, err
+		}
+		return b.releaseLeaseUnderClaimFence(ctx, req)
+	}, syncControllerDirectory)
+}
+
+func (b *coordinatorLeaseBackend) releaseLeaseUnderClaimFence(ctx context.Context, req ReleaseLeaseRequest) (bool, error) {
+	if req.Lease.LeaseID == "" {
+		return false, exit(2, "missing coordinator lease id")
+	}
+	expectedProvider, err := b.expectedProvider()
+	if err != nil {
+		return false, err
+	}
 	if err := validateCoordinatorProviderIdentity(expectedProvider, req.Lease.LeaseID, req.Lease.Server.Provider, false); err != nil {
-		return err
+		return false, err
 	}
 	released, err := releaseCoordinatorLeaseResult(ctx, b.coord, req.Lease.LeaseID, expectedProvider)
 	observationCoord := b.coord
@@ -946,49 +966,67 @@ func (b *coordinatorLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseL
 		if b.cfg.CoordAdminToken != "" && (isCoordinatorNotFoundError(err) || isCoordinatorUnauthorized(err)) {
 			adminCoord, adminErr := b.adminCoordinatorClient()
 			if adminErr != nil {
-				return err
+				return false, err
 			}
 			if released, adminErr = releaseCoordinatorLeaseMutation(ctx, req.Lease.LeaseID, expectedProvider, func(releaseCtx context.Context) (CoordinatorLease, error) {
 				return adminCoord.AdminReleaseLeaseForProvider(releaseCtx, req.Lease.LeaseID, true, expectedProvider)
 			}); adminErr != nil {
-				return adminErr
+				return false, adminErr
 			}
 			observationCoord = adminCoord
 		} else {
-			return err
+			return false, err
 		}
 	}
 	if req.DeferProviderCleanupObservation {
 		if retainedCoordinatorRelease(released) {
-			return nil
+			return false, nil
 		}
 		if coordinatorProviderReleaseConfirmed(released) {
 			if cleanupReleasedCoordinatorLeaseArtifacts(b.rt.Stderr, req.Lease.LeaseID) != nil {
-				return nil
+				return false, nil
 			}
-			removeLeaseClaim(req.Lease.LeaseID)
-			return nil
+			return true, nil
 		}
 		if coordinatorReleaseCleanupFailed(released) || released.State == "released" && released.CleanupStartedAt != "" {
 			fmt.Fprintf(b.rt.Stderr, "warning: coordinator accepted release for %s; remote cleanup remains pending and local claim/SSH artifacts were preserved\n", req.Lease.LeaseID)
-			return nil
+			return false, nil
 		}
-		return coordinatorReleaseObservationError(req.Lease.LeaseID, "returned an unexpected non-final state")
+		return false, coordinatorReleaseObservationError(req.Lease.LeaseID, "returned an unexpected non-final state")
 	}
 	released, err = observeCoordinatorReleaseCompletion(ctx, observationCoord, released, req.Lease.LeaseID, expectedProvider)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if retainedCoordinatorRelease(released) {
-		return nil
+		return false, nil
 	}
 	if coordinatorProviderReleaseConfirmed(released) {
 		if cleanupReleasedCoordinatorLeaseArtifacts(b.rt.Stderr, req.Lease.LeaseID) != nil {
-			return nil
+			return false, nil
 		}
 	}
-	removeLeaseClaim(req.Lease.LeaseID)
-	return nil
+	return true, nil
+}
+
+func (b *coordinatorLeaseBackend) CheckpointSourceAbsent(ctx context.Context, req CheckpointSourceRequest) (bool, error) {
+	lease, err := b.coord.GetLease(ctx, req.LeaseID)
+	if err != nil && b.cfg.CoordAdminToken != "" && (isCoordinatorNotFoundError(err) || isCoordinatorUnauthorized(err)) {
+		adminCoord, adminErr := b.adminCoordinatorClient()
+		if adminErr == nil {
+			lease, adminErr = adminCoord.GetLease(ctx, req.LeaseID)
+		}
+		if adminErr == nil {
+			err = nil
+		}
+	}
+	if err != nil {
+		return false, err
+	}
+	if lease.ID != req.LeaseID || lease.Provider != req.Resource.Image.Provider || lease.CloudID != req.Capture.SourceID {
+		return false, exit(2, "coordinator checkpoint source identity changed")
+	}
+	return coordinatorProviderReleaseConfirmed(lease), nil
 }
 
 func (b *coordinatorLeaseBackend) adminCoordinatorClient() (*CoordinatorClient, error) {

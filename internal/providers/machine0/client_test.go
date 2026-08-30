@@ -571,3 +571,38 @@ func TestClientCommandFailurePreservesDeadlineAndSignalCause(t *testing.T) {
 		})
 	}
 }
+
+func TestClientAccountIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		fail       bool
+	}{
+		{"fresh identity", `{"user":{"id":"account-a","email":"private@example.invalid"},"creditBalance":17}`, false},
+		{"missing", `{}`, true}, {"null", `null`, true},
+		{"wrong type", `{"user":{"id":12}}`, true},
+		{"blank", `{"user":{"id":" "}}`, true},
+		{"trailing JSON", `{"user":{"id":"account-a"}} {}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &recordingRunner{responses: map[string]core.LocalCommandResult{"whoami\x00--json": {Stdout: tc.body}}}
+			id, err := testClient(r).AccountID(context.Background())
+			if (err != nil) != tc.fail || (!tc.fail && id != "account-a") {
+				t.Fatalf("id=%q err=%v", id, err)
+			}
+			if err != nil && strings.Contains(err.Error(), tc.body) {
+				t.Fatal("identity response leaked into error")
+			}
+			if len(r.calls) != 1 || !reflect.DeepEqual(r.calls[0].Args, []string{"whoami", "--json"}) {
+				t.Fatalf("calls=%+v", r.calls)
+			}
+		})
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := &recordingRunner{run: func(context.Context, core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		return core.LocalCommandResult{ExitCode: 1, Stdout: "private response"}, context.Canceled
+	}}
+	if _, err := testClient(r).AccountID(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation=%v", err)
+	}
+}

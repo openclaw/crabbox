@@ -235,6 +235,19 @@ until the required service-principal secrets are present.
     coordinator's canonical-resource, quarantine, and fresh-preflight rules; see
     [Lifecycle and cleanup](../features/lifecycle-cleanup.md).
 
+### Brokered checkpoint ownership
+
+New brokered Azure managed-OS-disk snapshots are coordinator-owned but manually
+retained unless `checkpoint create --expire-unused-after <duration>` or
+`checkpoint policy` explicitly opts in. Records bind the authoritative source
+lease, Azure subscription, resource group, location, canonical snapshot ID,
+and immutable snapshot identity. Provider cleanup succeeds only after exact
+scoped deletion is confirmed; authentication failures, wrong resource groups,
+and ambiguous API errors retain ownership for retry. Promoting the snapshot
+creates a durable pin that blocks expiry and manual checkpoint deletion until
+the exact promotion is replaced. Direct Azure snapshots and older image records
+remain operator-managed.
+
 ## Classes
 
 Default Linux SKU candidates (first that provisions wins):

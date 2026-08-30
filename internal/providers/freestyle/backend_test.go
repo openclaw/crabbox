@@ -1106,30 +1106,56 @@ func TestFreestyleSyncHonorsConfiguredTimeout(t *testing.T) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
-	// Advance time only once the upload blocks, independent of Git/archive setup.
+	backend := &freestyleBackend{
+		cfg: Config{
+			Freestyle: FreestyleConfig{Workdir: "repo"},
+			Sync:      SyncConfig{Timeout: 100 * time.Millisecond},
+		},
+		rt: Runtime{Stderr: io.Discard},
+	}
+	// Local Git manifest queries and archive I/O finish before the fake transfer
+	// blocks. Measure cancellation in virtual time, independent of their wall time.
 	synctest.Test(t, func(t *testing.T) {
-		client := &fakeFreestyleClient{writeFileBlock: true}
-		backend := &freestyleBackend{
-			cfg: Config{
-				Freestyle: FreestyleConfig{Workdir: "repo"},
-				Sync:      SyncConfig{Timeout: 100 * time.Millisecond},
-			},
-			rt: Runtime{Stderr: io.Discard},
-		}
-		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-		defer cancel()
-		wantDeadline := time.Now().Add(backend.cfg.Sync.Timeout)
-		_, _, err := backend.syncWorkspace(ctx, client, "vm123", RunRequest{
+		started := time.Now()
+		transferred := false
+		client := &fakeFreestyleClient{writeFile: func(ctx context.Context) error {
+			transferred = true
+			deadline, ok := ctx.Deadline()
+			if !ok || deadline.Sub(started) != backend.cfg.Sync.Timeout {
+				t.Fatalf("transfer deadline=%v set=%t, want start + %s", deadline, ok, backend.cfg.Sync.Timeout)
+			}
+			if err := ctx.Err(); err != nil {
+				t.Fatalf("transfer context already canceled: %v", err)
+			}
+			time.Sleep(time.Until(deadline) - time.Nanosecond)
+			synctest.Wait()
+			select {
+			case <-ctx.Done():
+				t.Fatal("transfer canceled before configured timeout")
+			default:
+			}
+			time.Sleep(time.Nanosecond)
+			synctest.Wait()
+			select {
+			case <-ctx.Done():
+			default:
+				t.Fatal("transfer not canceled at configured timeout")
+			}
+			if err := ctx.Err(); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("transfer context error=%v, want deadline exceeded", err)
+			}
+			return ctx.Err()
+		}}
+		if _, _, err := backend.syncWorkspace(context.Background(), client, "vm123", RunRequest{
 			Repo: Repo{Root: root, Name: "repo"},
-		})
-		if !client.writeFileDeadline.Equal(wantDeadline) {
-			t.Fatalf("WriteFile deadline=%v, want configured deadline %v", client.writeFileDeadline, wantDeadline)
-		}
-		if !errors.Is(err, context.DeadlineExceeded) {
+		}); !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("syncWorkspace err=%v, want timeout", err)
 		}
-		if ctx.Err() != nil {
-			t.Fatalf("parent watchdog expired: %v", ctx.Err())
+		if !transferred {
+			t.Fatal("sync did not reach the transfer timeout contract")
+		}
+		if elapsed := time.Since(started); elapsed > time.Second {
+			t.Fatalf("syncWorkspace took %s, timeout should bound transfer", elapsed)
 		}
 	})
 }
@@ -1249,8 +1275,7 @@ type fakeFreestyleClient struct {
 	writeFileContent  string
 	writeFileEncoding string
 	writeFileErr      error
-	writeFileBlock    bool
-	writeFileDeadline time.Time
+	writeFile         func(context.Context) error
 	execCommands      []string
 	deleteIDs         []string
 	deleteErr         error
@@ -1305,10 +1330,8 @@ func (f *fakeFreestyleClient) WriteFile(ctx context.Context, _ string, path, con
 	f.writeFilePath = path
 	f.writeFileContent = content
 	f.writeFileEncoding = encoding
-	if f.writeFileBlock {
-		f.writeFileDeadline, _ = ctx.Deadline()
-		<-ctx.Done()
-		return ctx.Err()
+	if f.writeFile != nil {
+		return f.writeFile(ctx)
 	}
 	if f.writeFileErr != nil {
 		return f.writeFileErr

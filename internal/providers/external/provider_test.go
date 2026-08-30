@@ -18,6 +18,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func testConfig() core.Config {
@@ -4154,6 +4155,7 @@ func TestResolveRejectsNonCanonicalLeaseID(t *testing.T) {
 }
 
 func TestReleaseAllowsLegacyProviderLeaseID(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	runner := &sequenceRunner{responses: []string{
 		`{"protocolVersion":1}`,
 	}}

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -269,6 +270,8 @@ func TestRunCommandLeaseCleanupQuiescesWorkspaceOwner(t *testing.T) {
 		{name: "successful evidence-backed run", command: "renewal-cleanup-success", download: true, wantStop: true},
 		{name: "renewal fails before stop", command: "renewal-cleanup-success", renewErr: errors.New("renew response lost"), wantExit: 7, wantOwnerRelease: true},
 		{name: "stop is not confirmed", command: "renewal-cleanup-success", stopErr: errors.New("stop not confirmed"), wantExit: 7, wantStop: true, wantOwnerRelease: true},
+		{name: "nonzero with ambiguous owner", command: "renewal-cleanup-exit-23", renewErr: errors.New("renew response lost"), wantExit: 23, wantOwnerRelease: true},
+		{name: "nonzero with unconfirmed stop", command: "renewal-cleanup-exit-23", stopErr: errors.New("stop not confirmed"), wantExit: 23, wantStop: true, wantOwnerRelease: true},
 		{name: "remote command remains nonzero", command: "renewal-cleanup-exit-23", wantExit: 23, wantStop: true},
 		{name: "retained workspace", command: "renewal-cleanup-success", preservesSSHWorkspace: true, wantStop: true, wantOwnerRelease: true},
 		{name: "retained workspace command remains nonzero", command: "renewal-cleanup-exit-23", preservesSSHWorkspace: true, wantExit: 23, wantStop: true, wantOwnerRelease: true},
@@ -371,6 +374,12 @@ func TestRunCommandLeaseCleanupQuiescesWorkspaceOwner(t *testing.T) {
 				t.Fatal("backend release observed renewal still in flight")
 			}
 			assertRunCleanupExitCode(t, runErr, test.wantExit, stdout.String(), stderr.String())
+			if test.command == "renewal-cleanup-exit-23" {
+				wantRecovery := test.stopErr != nil || test.renewErr != nil
+				if got := strings.Contains(stderr.String(), "next: crabbox ssh "); got != wantRecovery {
+					t.Fatalf("lease recovery present=%v want=%v:\n%s", got, wantRecovery, stderr.String())
+				}
+			}
 			select {
 			case <-releaseStarted:
 				if !test.wantStop {
@@ -447,6 +456,63 @@ func TestRunCommandRetainedLeaseRetainsFailClosedRenewal(t *testing.T) {
 			}
 			if budget := remote.observedReleaseBudget(); budget <= workspaceOwnerCallTimeout-time.Second || budget > workspaceOwnerCallTimeout {
 				t.Fatalf("release budget=%s want fresh %s transport call after renewal cleanup", budget, workspaceOwnerCallTimeout)
+			}
+		})
+	}
+}
+
+func TestRunFailureDigestCleanupOutcomes(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		flags    []string
+		stopErr  error
+		wantStop bool
+	}{
+		{name: "automatic failure cleanup", wantStop: true},
+		{name: "always", flags: []string{"--stop-after", "always"}, wantStop: true},
+		{name: "failure", flags: []string{"--stop-after", "failure"}, wantStop: true},
+		{name: "success only", flags: []string{"--stop-after", "success"}},
+		{name: "never", flags: []string{"--stop-after", "never"}},
+		{name: "kept", flags: []string{"--keep"}},
+		{name: "keep failed", flags: []string{"--keep-on-failure"}},
+		{name: "failed cleanup", stopErr: errors.New("release failed")},
+		{name: "ambiguous cleanup", stopErr: errors.New("release response lost")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			setupRunCleanupWorkspaceOwnerTest(t)
+			var stdout, stderr bytes.Buffer
+			var releaseCalls int
+			runEnvProfileTestReleaseHook = func() error {
+				releaseCalls++
+				if strings.Contains(stderr.String(), "failure digest") {
+					t.Error("digest printed before cleanup outcome was known")
+				}
+				return test.stopErr
+			}
+			args := []string{"--provider", runEnvProfileTestProvider{}.Name(), "--no-sync", "--no-hydrate", "--timing-json"}
+			args = append(args, test.flags...)
+			args = append(args, "--", "renewal-cleanup-exit-23")
+			err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), args)
+			assertRunCleanupExitCode(t, err, 23, stdout.String(), stderr.String())
+			out := stderr.String()
+			lines := strings.Split(strings.TrimSpace(out), "\n")
+			var report TimingReport
+			if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil {
+				t.Fatalf("final stderr line must remain timing JSON: %v\n%s", err, out)
+			}
+			if report.ExitCode != 23 || (report.LeaseStopped != nil && *report.LeaseStopped) != test.wantStop {
+				t.Fatalf("timing outcome disagrees with cleanup: %#v", report)
+			}
+			if !strings.Contains(out, "failure digest") {
+				t.Fatalf("missing failure digest:\n%s", out)
+			}
+			for _, command := range []string{"ssh", "run", "stop"} {
+				if got := strings.Contains(out, "next: crabbox "+command+" "); got == test.wantStop {
+					t.Errorf("recovery %s present=%v, stopped=%v:\n%s", command, got, test.wantStop, out)
+				}
+			}
+			if (test.wantStop || test.stopErr != nil) != (releaseCalls == 1) {
+				t.Errorf("release calls=%d", releaseCalls)
 			}
 		})
 	}

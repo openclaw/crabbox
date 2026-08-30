@@ -105,6 +105,57 @@ func TestWorkspaceOwnerPOSIXSetupSignalDenialClosesStreams(t *testing.T) {
 	}
 }
 
+func TestWorkspaceOwnerPOSIXClosedDiagnosticPipeExitsCooperatively(t *testing.T) {
+	for _, shellName := range []string{"/bin/sh", "bash", "dash"} {
+		t.Run(shellName, func(t *testing.T) {
+			shell, err := exec.LookPath(shellName)
+			if err != nil {
+				t.Skip("optional shell is unavailable")
+			}
+			testWorkspaceOwnerClosedDiagnosticPipe(t, shell)
+		})
+	}
+}
+
+func testWorkspaceOwnerClosedDiagnosticPipe(t *testing.T, shell string) {
+	t.Helper()
+	home, owner := workspaceOwnerSetupFixture(t)
+	marker := filepath.Join(home, "workload-started")
+	script := remoteWorkspaceOwnerPOSIXWitnessScript(owner.key, owner.token, "touch "+shellQuote(marker), "test-setup-marker")
+	// Exercise each shell's trap semantics without changing the host /bin/sh.
+	script = strings.ReplaceAll(script, "/bin/sh", shell)
+	// Keep recursive-trap regressions bounded without leaving a core dump.
+	cmd, ctx := boundedWorkspaceOwnerCommand(t, home, os.Getenv("PATH"), "ulimit -c 0; ulimit -s 512; "+script)
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+	cmd.Stderr = writer
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	err = cmd.Run()
+	if ctx.Err() != nil || exitCode(err) != 74 {
+		t.Fatalf("closed setup stderr did not exit cooperatively: exit=%d deadline=%v", exitCode(err), ctx.Err())
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("workload ran after setup diagnostic lost its reader")
+	}
+	root := filepath.Join(home, ".crabbox", "workspace-owners")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".run.") || strings.HasSuffix(entry.Name(), ".child") {
+			t.Fatal("closed setup stderr left private staging or child authority")
+		}
+	}
+}
+
 func TestWorkspaceOwnerPOSIXSignalDenialPreservesLiveWitness(t *testing.T) {
 	for _, action := range []workspaceOwnerAction{workspaceOwnerAcquire, workspaceOwnerInspect, workspaceOwnerRelease} {
 		t.Run(string(action), func(t *testing.T) {

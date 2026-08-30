@@ -234,6 +234,7 @@ type runFailureDigestInput struct {
 	TargetOS              string
 	WindowsMode           string
 	LeaseID               string
+	LeaseStopped          bool
 	Slug                  string
 	RunID                 string
 	RunHistoryUnavailable bool
@@ -269,8 +270,11 @@ func printRunFailureDigest(w io.Writer, input runFailureDigestInput) {
 	if input.Classification.ResourceExhaustion == ResourceExhaustionMemory {
 		fmt.Fprintln(w, "  hint: increase the memory limit or reduce workload concurrency before retrying")
 	}
+	if input.LeaseStopped {
+		fmt.Fprintln(w, "  lease: stopped; lease-based recovery is unavailable")
+	}
 	if input.RunHistoryUnavailable {
-		fmt.Fprintln(w, "  run_history: unavailable; use lease-based recovery commands below")
+		fmt.Fprintln(w, "  run_history: unavailable")
 	}
 	printFailureDigestPhases(w, input.Phases)
 	printFailureDigestShellChain(w, input)
@@ -345,7 +349,7 @@ func failureDigestNextCommands(input runFailureDigestInput, retry string) []stri
 		)
 	}
 	leaseRef := firstNonBlank(input.Slug, input.LeaseID)
-	if leaseRef != "" {
+	if leaseRef != "" && !input.LeaseStopped {
 		sshRouting := input.SSHRouting
 		if len(sshRouting.Args) == 0 {
 			sshRouting = fallbackFailureDigestRouting(input, CommandRoutingRetry)

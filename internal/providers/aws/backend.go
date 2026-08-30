@@ -11,6 +11,7 @@ import (
 	"time"
 
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/smithy-go"
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
@@ -508,6 +509,38 @@ func (b *awsLeaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseVie
 	return b.listAcrossRegions(ctx)
 }
 
+func (b *awsLeaseBackend) CheckpointSourceAbsent(ctx context.Context, req core.CheckpointSourceRequest) (bool, error) {
+	cfg := b.Cfg
+	cfg.AWSRegion = req.Resource.Image.Region
+	if cfg.AWSRegion == "" || req.AccountID == "" {
+		return false, exit(2, "checkpoint source account or region is missing; retain operation")
+	}
+	client, err := newAWSClient(ctx, cfg)
+	if err != nil {
+		return false, err
+	}
+	account, err := client.CallerAccountID(ctx)
+	if err != nil {
+		return false, err
+	}
+	if account != req.AccountID {
+		return false, exit(2, "checkpoint source account changed")
+	}
+	source, err := client.GetServer(ctx, req.Capture.SourceID)
+	if err != nil {
+		var missing core.ExitError
+		var apiErr smithy.APIError
+		if errors.As(err, &missing) && missing.Code == 4 || errors.As(err, &apiErr) && apiErr.ErrorCode() == "InvalidInstanceID.NotFound" {
+			return true, nil
+		}
+		return false, err
+	}
+	if source.CloudID != req.Capture.SourceID {
+		return false, exit(2, "checkpoint source identity changed")
+	}
+	return source.Status == "terminated", nil
+}
+
 func (b *awsLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
 	client, err := newAWSClient(ctx, b.Cfg)
 	if err != nil {
@@ -554,13 +587,22 @@ func (b *awsLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequ
 	if err != nil {
 		return err
 	}
+	if err := core.AuthorizeCheckpointRelease(exact, req.CheckpointID); err != nil {
+		return err
+	}
 	if fixedAWSLeaseKind.IsFixedClaim(exact) {
 		return fixedAWSLeaseKind.FinalizeAfterCleanup(exact, func() error {
+			if err := core.AuthorizeCheckpointRelease(exact, req.CheckpointID); err != nil {
+				return err
+			}
 			return deleteServer(ctx, awsConfigForServer(b.Cfg, req.Lease.Server), req.Lease.Server)
 		})
 	}
 	var providerKeyErr error
 	if err := core.RemoveLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, exact, func() error {
+		if err := core.AuthorizeCheckpointRelease(exact, req.CheckpointID); err != nil {
+			return err
+		}
 		if err := deleteServer(ctx, awsConfigForServer(b.Cfg, req.Lease.Server), req.Lease.Server); err != nil {
 			var keyErr *awsProviderKeyCleanupError
 			if errors.As(err, &keyErr) {
@@ -864,8 +906,14 @@ func requireExactAWSClaim(server Server, expectedLeaseID string) (core.LeaseClai
 }
 
 func deleteClaimedAWSServerWithClient(ctx context.Context, client awsClient, server Server, claim core.LeaseClaim, cleanupKeyID string) error {
+	if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+		return err
+	}
 	var cleanupErr error
 	err := fixedAWSLeaseKind.FinalizeAfterCleanup(claim, func() error {
+		if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+			return err
+		}
 		cleanupErr = deleteAWSCleanupServerWithClient(ctx, client, server, cleanupKeyID)
 		return cleanupErr
 	})
@@ -972,7 +1020,13 @@ func (b *awsLeaseBackend) cleanupOrphanedAWSClaims(ctx context.Context, dryRun b
 }
 
 func deleteMissingClaimedAWSResourcesWithClient(ctx context.Context, client awsClient, claim core.LeaseClaim, cleanupKeyID string) error {
+	if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+		return err
+	}
 	return fixedAWSLeaseKind.FinalizeAfterCleanup(claim, func() error {
+		if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+			return err
+		}
 		return client.DeleteCleanupSSHKeyID(ctx, cleanupKeyID)
 	})
 }

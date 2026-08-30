@@ -182,6 +182,25 @@ type ProviderSizeCatalogBackend interface {
 	SizeCatalog(ctx context.Context, refresh bool) ([]ProviderSize, error)
 }
 
+// ProviderSizeSelector declares how a live catalog name selects a machine.
+type ProviderSizeSelector string
+
+// ProviderSizeSelectorType uses catalog Name verbatim as the existing --type value.
+const ProviderSizeSelectorType ProviderSizeSelector = "type"
+
+// ProviderSizeSelectionBackend reports already-resolved provider configuration;
+// resource facts remain owned by SizeCatalog.
+type ProviderSizeSelectionBackend interface {
+	ProviderSizeCatalogBackend
+	SizeSelection() ProviderSizeSelection
+}
+
+type ProviderSizeSelection struct {
+	Selector      ProviderSizeSelector `json:"selector"`
+	EffectiveType string               `json:"effectiveType"`
+	Region        string               `json:"region"`
+}
+
 type ProviderSize struct {
 	Name                string            `json:"name"`
 	VCPU                int               `json:"vcpu"`
@@ -400,6 +419,9 @@ type NativeCheckpointCapability struct {
 	Kind              string
 	Direct            bool
 	CreateUnsupported string
+	RetireUnsupported string
+	ReplayCapture     bool
+	RetireSource      bool
 }
 
 type NativeCheckpointRequest struct {
@@ -449,6 +471,24 @@ type NativeCheckpointCreateRequest struct {
 	Wait         bool
 	WaitTimeout  time.Duration
 	Stderr       io.Writer
+	Capture      *NativeCheckpointCapture
+	Metadata     map[string]string
+}
+
+// NativeCheckpointCapture is the host-owned operation journal. Provider metadata
+// is correlation only; source authority comes from the bound local claim.
+type NativeCheckpointCapture struct {
+	SourceDisposition string `json:"sourceDisposition"`
+	Phase             string `json:"phase"`
+	StrategyExplicit  bool   `json:"strategyExplicit,omitempty"`
+	SourceID          string `json:"sourceId"`
+	SourceName        string `json:"sourceName"`
+	SourceScope       string `json:"sourceScope"`
+	SourceRevision    string `json:"sourceRevision"`
+	SourceClaimedAt   string `json:"sourceClaimedAt"`
+	SourceIntent      string `json:"sourceIntent,omitempty"`
+	Error             string `json:"error,omitempty"`
+	DiscardFailed     bool   `json:"discardFailed,omitempty"`
 }
 
 type NativeCheckpointCreateResult struct {
@@ -471,6 +511,19 @@ type NativeCheckpointResourceRequest struct {
 	LoadConfig func() (Config, error)
 	Image      NativeCheckpointImage
 	Metadata   map[string]string
+}
+
+// CheckpointSourceVerifier must use provider authority, not a filtered lease
+// inventory or a missing local claim, to confirm the captured source is gone.
+type CheckpointSourceVerifier interface {
+	CheckpointSourceAbsent(context.Context, CheckpointSourceRequest) (bool, error)
+}
+
+type CheckpointSourceRequest struct {
+	LeaseID   string
+	Capture   NativeCheckpointCapture
+	Resource  NativeCheckpointResourceRequest
+	AccountID string
 }
 
 type NativeCheckpointVerifyResult struct {
@@ -540,6 +593,7 @@ type ProviderSpec struct {
 	Features         FeatureSet
 	Coordinator      CoordinatorMode
 	ClassDisposition ProviderClassDisposition
+	SizeSelection    ProviderSizeSelector
 	// TailscaleEgressOnly marks FeatureTailscale as outbound userspace access,
 	// not a bidirectional peer endpoint.
 	TailscaleEgressOnly bool
@@ -719,25 +773,7 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 		cmd.WaitDelay = req.CancelGracePeriod
 	}
 	if req.MaxCapturedOutputBytes > 0 && !req.DisableOutputCapture {
-		// Provider commands are untrusted process trees. Once bounded capture
-		// overflows, terminate descendants too: a grandchild retaining stdout or
-		// stderr would otherwise keep os/exec's pipe drain blocked indefinitely.
-		// A controller child already belongs to a durable outer process group;
-		// nesting a new group here would let provider descendants escape recovery.
-		controllerOwnsTree := os.Getenv(controllerProcessTreeOwnedEnv) == "1"
-		if !controllerOwnsTree {
-			configureDaemonCommand(cmd)
-		}
-		cmd.Cancel = func() error {
-			if cmd.Process == nil {
-				return os.ErrProcessDone
-			}
-			if controllerOwnsTree {
-				return cmd.Process.Kill()
-			}
-			return stopDaemonProcess(cmd.Process, cmd.Process.Pid)
-		}
-		cmd.WaitDelay = controllerChildWaitDelay
+		configureBoundedCommandCancellation(cmd)
 	}
 	env := req.Env
 	if env == nil {
@@ -777,6 +813,9 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 		}
 	}
 	err := cmd.Run()
+	if errors.Is(err, exec.ErrWaitDelay) && req.MaxCapturedOutputBytes > 0 && !req.DisableOutputCapture {
+		_ = cmd.Cancel()
+	}
 	result := LocalCommandResult{ExitCode: exitCode(err), Stdout: stdout.String(), Stderr: stderr.String()}
 	if stdout.overflow || stderr.overflow {
 		err = fmt.Errorf("captured command output exceeded %d-byte limit", req.MaxCapturedOutputBytes)
@@ -786,6 +825,26 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 		result.ExitCode = 0
 	}
 	return result, err
+}
+
+// Bound pipe draining as well as process exit: CommandContext alone cannot
+// interrupt descendants retaining stdout/stderr after their parent exits.
+func configureBoundedCommandCancellation(cmd *exec.Cmd) {
+	// Controller children must stay in their durable outer process group.
+	controllerOwnsTree := os.Getenv(controllerProcessTreeOwnedEnv) == "1"
+	if !controllerOwnsTree {
+		configureDaemonCommand(cmd)
+	}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		if controllerOwnsTree {
+			return cmd.Process.Kill()
+		}
+		return stopDaemonProcess(cmd.Process, cmd.Process.Pid)
+	}
+	cmd.WaitDelay = controllerChildWaitDelay
 }
 
 type commandCaptureBuffer struct {
@@ -885,6 +944,7 @@ func (r ResolveRequest) IsReadOnlyStatus() bool {
 
 type ReleaseLeaseRequest struct {
 	Lease                    LeaseTarget
+	CheckpointID             string
 	Force                    bool
 	ExpectedProviderIdentity ProviderIdentityExpectation
 	// DeferProviderCleanupObservation queues coordinator cleanup without waiting
@@ -1040,6 +1100,10 @@ type WarmupRequest struct {
 	ActionsRunner bool
 	RequestedSlug string
 	TimingJSON    bool
+	// BeforeComplete runs synchronous, best-effort core bookkeeping once after
+	// successful acquisition/retention and before final output. Providers opting
+	// in must include it in total timing; it cannot fail or roll back the lease.
+	BeforeComplete func()
 }
 
 type StatusRequest struct {

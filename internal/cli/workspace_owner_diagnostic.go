@@ -89,6 +89,9 @@ func (w *workspaceOwnerSetupWriter) Write(data []byte) (int, error) {
 				w.passthrough = false
 			}
 			n, err := w.destination.Write(data[:count])
+			if err == nil && n != count {
+				err = io.ErrShortWrite
+			}
 			if err != nil {
 				return length - len(data) + n, err
 			}
@@ -133,7 +136,10 @@ func (w *workspaceOwnerSetupWriter) flush() error {
 	if len(w.pending) == 0 {
 		return nil
 	}
-	_, err := w.destination.Write(w.pending)
+	n, err := w.destination.Write(w.pending)
+	if err == nil && n != len(w.pending) {
+		err = io.ErrShortWrite
+	}
 	w.pending = w.pending[:0]
 	return err
 }

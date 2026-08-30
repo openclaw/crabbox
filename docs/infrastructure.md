@@ -638,6 +638,9 @@ Recommended limits for a small installation:
 ```text
 CRABBOX_MAX_ACTIVE_LEASES=2
 CRABBOX_MAX_ACTIVE_LEASES_PER_OWNER=1
+CRABBOX_MAX_CHECKPOINTS=8
+CRABBOX_MAX_CHECKPOINTS_PER_OWNER=4
+CRABBOX_MAX_CHECKPOINTS_PER_ORG=8
 CRABBOX_CAPACITY_ADMIN_OWNERS=github:12345,github:67890
 CRABBOX_MAX_ACTIVE_LEASES_PER_CAPACITY_ADMIN=4
 CRABBOX_MAX_MONTHLY_USD=25
@@ -650,6 +653,18 @@ also available. Over-limit lease creation returns HTTP 429
 `cost_limit_exceeded`. Cost is the hourly rate (`CRABBOX_COST_RATES_JSON`
 override -> provider live price -> built-in defaults) times TTL; see
 [Cost And Usage](features/cost-usage.md).
+
+Managed checkpoint caps default to 64 globally
+(`CRABBOX_MAX_CHECKPOINTS`), 16 per owner
+(`CRABBOX_MAX_CHECKPOINTS_PER_OWNER`), and 32 per organization
+(`CRABBOX_MAX_CHECKPOINTS_PER_ORG`). Active fork/shard claims default to 16 per
+checkpoint (`CRABBOX_MAX_CHECKPOINT_USE_CLAIMS`), 64 per owner
+(`CRABBOX_MAX_CHECKPOINT_USE_CLAIMS_PER_OWNER`), and 256 globally
+(`CRABBOX_MAX_CHECKPOINT_USE_CLAIMS_TOTAL`). Production and preview Wrangler
+configuration explicitly use checkpoint caps of 20/10/20 and claim caps of
+16/64/256. Invalid or zero values fall back to their finite defaults. These
+guardrails reject excess requests before provider mutation or claim/event
+creation; each checkpoint also retains only its latest 256 audit events.
 
 After deployment, point the CLI at the broker:
 
@@ -718,6 +733,8 @@ CRABBOX_CODE_ORIGIN_TEMPLATE             # required for browser Code; per-lease 
 
 # Cost / limits
 CRABBOX_MAX_ACTIVE_LEASES[_PER_OWNER|_PER_ORG]
+CRABBOX_MAX_CHECKPOINTS[_PER_OWNER|_PER_ORG]
+CRABBOX_MAX_CHECKPOINT_USE_CLAIMS[_PER_OWNER|_TOTAL]
 CRABBOX_MAX_MONTHLY_USD[_PER_OWNER|_PER_ORG]
 CRABBOX_COST_RATES_JSON, CRABBOX_EUR_TO_USD
 

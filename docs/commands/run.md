@@ -541,14 +541,54 @@ limits as `--artifact-glob` apply. Delegated providers that support bounded run
 artifact retrieval enforce provider-owned file and byte limits before returning
 local artifacts.
 
+Use repeatable `--require-artifact-change <path>` for created-or-changed byte
+evidence on ordinary Linux SSH runs. Every exact relative path must be a regular
+file with no symlink components. Crabbox compares bounded content snapshots
+after sync/hydration and after successful execution; unchanged bytes (including
+identical rewrites) or missing files fail with exit 7, before schema validation
+or downloads. Only accepted paths enter the archive, using the checked snapshot
+bytes even when broader artifact globs are supplied. Existing flags retain their
+behavior without this opt-in mode. Workload/transport failures preserve their
+result and record `not-evaluated` in timing JSON's `artifactChanges` list.
+Limits: 32 paths, 1 KiB per path, 5 MiB per file, 20 MiB per snapshot. Delegated
+providers, macOS, WSL2, native Windows, and `--sync-only` are unsupported. See
+[Artifacts](../features/artifacts.md#run-scoped-artifacts) for the exact states
+and collection contract.
+
 Use repeatable `--download remote=local` when the command writes proof files on
 the box. Downloads run only after a successful remote command, paths resolve
 relative to the remote workdir unless absolute, and Windows paths use `=`
 instead of `:` so drive letters stay unambiguous. Crabbox rejects local output
-path collisions between stdout capture, stderr capture, and downloads before
-command execution. On Unix-like hosts, Crabbox-created download, capture, proof,
+path collisions between lease output, stdout capture, stderr capture, and downloads
+before acquisition, including canonical aliases and existing hardlinks. On
+Unix-like hosts, Crabbox-created download, capture, proof,
 and failure-bundle files use owner-only permissions (`0600`), and newly created
 output directories use `0700`.
+
+Use repeatable `--download-on-failure remote=local` to retrieve explicitly
+selected evidence after a nonzero workload exit on ordinary Linux SSH runs.
+Crabbox requires a fresh owned workload-start/exit marker pair and successful
+SSH completion; a workload exit of 255 is distinguishable from SSH transport
+loss. The observed workload is never retried on a fallback SSH port. Setup,
+sync, hydration, acquisition, preflight, transport, cancellation, and timeout
+failures do not authorize these downloads. A JUnit policy failure after a zero
+workload exit does not authorize them either, nor does a failed
+`--require-artifact-change` guard. When both flags are used, a confirmed nonzero
+workload exit can download evidence while the freshness guard remains
+`not-evaluated`; the download does not claim that the file changed.
+
+Retrieval precedes the automatic failure bundle and lease teardown, including
+`--stop-after always`. A missing/unreadable file or local write failure produces
+a warning and does not prevent the remaining selected downloads. Each retrieval
+has a 30-second limit; the original workload exit and failure classification
+remain authoritative. The existing single-file transport, remote path behavior,
+atomic local writer, and private modes are reused. Destinations are checked for
+collisions across success/failure downloads, captures, proof, receipt, and lease
+output before acquisition, leaving existing bytes unchanged on rejection.
+Existing `--download` stays success-only. macOS, WSL2,
+native Windows, delegated execution, and `--sync-only` reject the first-slice
+flag. Exit markers are removed from captured/logged stderr and leave no remote
+marker files. This does not establish artifact freshness.
 
 See [artifacts](artifacts.md) for the richer collection and publishing workflow.
 
@@ -614,7 +654,9 @@ to attach a short label to the run details, timing JSON, and coordinator run
 record.
 
 When a remote command exits non-zero, `run` prints a compact failure digest
-after the timing summary: the failed phase when phase markers are known, a
+after automatic cleanup. Lease recovery commands are omitted after confirmed
+release, and remain available when the lease is kept or cleanup is uncertain.
+The digest includes the failed phase when phase markers are known, a
 likely area (provider auth, SSH/connectivity, sync, install/setup, user command,
 model/tool/provider limit, or resource exhaustion), retryability when inferable, next commands
 (`logs`, `events`, `doctor --from-run`, `ssh`, retrying with `--fresh-sync`, and
@@ -774,7 +816,9 @@ Run-specific flags:
 --fail-on-test-failures
 --artifact-glob <glob>       Repeatable.
 --require-artifact <glob>    Repeatable.
+--require-artifact-change <path>  Repeatable; Linux SSH, created or changed bytes.
 --download <remote=local>    Repeatable.
+--download-on-failure <remote=local>  Repeatable; confirmed nonzero Linux SSH exit.
 --capture-stdout <local path>
 --capture-stderr <local path>
 --capture-on-fail            Compatibility alias.
