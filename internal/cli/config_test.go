@@ -2354,7 +2354,7 @@ func TestProviderOverrideReappliesExplicitOSImageDefaults(t *testing.T) {
 	if err := applyProviderConfigDefaults(&cfg); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.TargetOS != targetLinux || cfg.LocalContainer.Image != "ubuntu:24.04" {
+	if cfg.TargetOS != targetLinux || cfg.LocalContainer.Image != osImageSpecs["ubuntu:24.04"].ContainerName {
 		t.Fatalf("provider override target=%q image=%q", cfg.TargetOS, cfg.LocalContainer.Image)
 	}
 }

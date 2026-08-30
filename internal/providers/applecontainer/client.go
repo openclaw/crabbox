@@ -62,7 +62,10 @@ type inspectConfiguration struct {
 // inspectImage tolerates both an object ({"reference":"..."}) and a bare
 // string image form, since the documented surface does not pin this down.
 type inspectImage struct {
-	Reference string `json:"reference,omitempty"`
+	Reference  string `json:"reference,omitempty"`
+	Descriptor struct {
+		Digest string `json:"digest"`
+	} `json:"descriptor"`
 }
 
 func (i *inspectImage) UnmarshalJSON(data []byte) error {

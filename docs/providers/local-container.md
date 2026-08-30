@@ -115,7 +115,7 @@ lease ID for each later operation.
 provider: local-container
 localContainer:
   runtime: docker          # Docker-compatible CLI to invoke; detects docker/podman by default
-  image: debian:bookworm   # base image for the lease
+  # image: debian:bookworm # optional trusted custom-image override
   user: crabbox            # SSH user created inside the container
   workRoot: /work/crabbox  # remote Crabbox work root
   cpus: 0                  # CPU limit; 0 leaves the runtime default
@@ -124,8 +124,18 @@ localContainer:
   dockerSocket: false      # mount the host Docker-compatible socket into the lease
 ```
 
-Defaults applied when unset: `runtime=docker`, `image=debian:bookworm`,
-`user=crabbox`, `network=bridge`, `workRoot=/work/crabbox`, SSH port `2222`.
+Defaults applied when unset: `runtime=docker`, a reviewed Ubuntu OCI index
+selected by `--os` (default `ubuntu:26.04`), `user=crabbox`, `network=bridge`,
+`workRoot=/work/crabbox`, SSH port `2222`. The image reference includes an
+immutable SHA-256 digest; Docker/Podman select the native platform from that
+fixed index and validate its content before starting bootstrap. An unavailable
+or mismatched digest fails rather than falling back to a floating tag. The
+exact reference appears in provisioning output and the lease's image label.
+
+Explicit image overrides remain trusted operator configuration, including
+floating tags. Updating the OS catalog affects new leases, not retained
+containers; a fixed-ID operation may report an intent conflict after a default
+rotation. See [default-image rotation](../operations.md#default-container-image-pins).
 When `runtime` is unset or left at `docker`, Crabbox detects an installed
 container CLI. If both `docker` and `podman` are available, `docker` is selected
 unless `runtime` is set explicitly.

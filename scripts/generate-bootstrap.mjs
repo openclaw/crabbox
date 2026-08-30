@@ -86,6 +86,9 @@ export function validateCatalog(document) {
       throw new Error(`invalid or duplicate selector: ${image.Selector}`);
     }
     selectors.add(image.Selector);
+    if (!/^[a-z0-9][a-z0-9.:-]*\/[a-z0-9][a-z0-9._/-]*@sha256:[a-f0-9]{64}$/u.test(image.ContainerName)) {
+      throw new Error("ContainerName must be a fully qualified, tagless OCI SHA-256 reference");
+    }
     httpsURL(image.AppleVMImage, "AppleVMImage");
     sha256(image.AppleVMSHA256, "AppleVMSHA256");
   }

@@ -1677,7 +1677,7 @@ func applyDefaults(cfg *core.Config) {
 		cfg.LocalContainer.Runtime = "docker"
 	}
 	if cfg.LocalContainer.Image == "" {
-		cfg.LocalContainer.Image = "debian:bookworm"
+		cfg.LocalContainer.Image = core.BaseConfig().LocalContainer.Image
 	}
 	if cfg.LocalContainer.User == "" {
 		cfg.LocalContainer.User = "crabbox"
@@ -1717,6 +1717,9 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 }
 
 func (b *backend) createContainerWithFixedIntent(ctx context.Context, cfg core.Config, name, leaseID, slug, publicKey, fixedFingerprint string, keep bool) (string, string, error) {
+	if digest, known := core.DefaultContainerImageDigest(cfg.LocalContainer.Image); known && digest == "" {
+		return "", "", core.Exit(2, "compiled container image is missing its reviewed digest")
+	}
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, time.Now().UTC())
 	if fixedFingerprint != "" {
 		labels["fixed_intent_sha256"] = fixedFingerprint
