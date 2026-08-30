@@ -172,6 +172,7 @@ func TestBuildRunInstanceRequest(t *testing.T) {
 	cfg := cfgForRun(core.Config{
 		TargetOS: core.TargetLinux,
 		Class:    "standard",
+		Capacity: core.CapacityConfig{Market: "on-demand"},
 		TencentCloud: core.TencentCloudConfig{
 			Region:                  "ap-shanghai",
 			Zone:                    "ap-shanghai-2",
@@ -188,9 +189,12 @@ func TestBuildRunInstanceRequest(t *testing.T) {
 	cfg.ProviderKey = core.ProviderKeyForLease("cbx_abcdef123456")
 	cfg.ServerType = serverTypeForConfig(cfg)
 	tags := leaseTags(cfg, "cbx_abcdef123456", "my-app", "provisioning", false, time.Unix(1700000000, 0))
-	req := buildRunInstanceRequest(cfg, "cbx_abcdef123456", "my-app", "ssh-ed25519 AAAATEST", tags)
+	req, err := buildRunInstanceRequest(cfg, "cbx_abcdef123456", "my-app", "ssh-ed25519 AAAATEST", tags)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	if req.Placement.Zone != "ap-shanghai-2" || req.ImageID != "img-test" || req.InstanceType != "S5.SMALL2" {
+	if req.InstanceChargeType != "POSTPAID_BY_HOUR" || req.Placement.Zone != "ap-shanghai-2" || req.ImageID != "img-test" || req.InstanceType != "S5.SMALL2" {
 		t.Fatalf("basic request=%+v", req)
 	}
 	if req.InstanceName != core.LeaseProviderName("cbx_abcdef123456", "my-app") {
@@ -217,6 +221,37 @@ func TestBuildRunInstanceRequest(t *testing.T) {
 	}
 	if len(req.TagSpecification) != 1 || req.TagSpecification[0].ResourceType != "instance" {
 		t.Fatalf("tag spec=%+v", req.TagSpecification)
+	}
+}
+
+func TestTencentCloudMarketReachesRunInstanceRequest(t *testing.T) {
+	for _, test := range []struct {
+		market string
+		want   string
+		ok     bool
+	}{
+		{market: "spot", want: "SPOTPAID", ok: true},
+		{market: "on-demand", want: "POSTPAID_BY_HOUR", ok: true},
+		{market: "unknown", ok: false},
+	} {
+		t.Run(test.market, func(t *testing.T) {
+			cfg := cfgForRun(core.Config{
+				TargetOS: core.TargetLinux,
+				Capacity: core.CapacityConfig{Market: test.market},
+				TencentCloud: core.TencentCloudConfig{
+					Zone:  "ap-singapore-1",
+					Image: "img-test",
+					Type:  "S5.SMALL2",
+				},
+			})
+			req, err := buildRunInstanceRequest(cfg, "cbx_abcdef123456", "my-app", "ssh-ed25519 AAAATEST", nil)
+			if (err == nil) != test.ok {
+				t.Fatalf("buildRunInstanceRequest market=%q error=%v, want success=%v", test.market, err, test.ok)
+			}
+			if req.InstanceChargeType != test.want {
+				t.Fatalf("buildRunInstanceRequest market=%q chargeType=%q, want %q", test.market, req.InstanceChargeType, test.want)
+			}
+		})
 	}
 }
 

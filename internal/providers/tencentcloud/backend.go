@@ -133,7 +133,10 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	now := b.clockNow()
 	createTags := leaseTags(cfg, leaseID, slug, "provisioning", req.Keep, now)
 	createTags = append(createTags, tag{Key: accountLabel, Value: accountID})
-	createReq := buildRunInstanceRequest(cfg, leaseID, slug, publicKey, createTags)
+	createReq, err := buildRunInstanceRequest(cfg, leaseID, slug, publicKey, createTags)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
 	fmt.Fprintf(b.RT.Stderr, "provisioning provider=tencentcloud lease=%s slug=%s type=%s region=%s zone=%s image=%s keep=%v\n", leaseID, slug, cfg.ServerType, regionForConfig(cfg), zoneForConfig(cfg), imageForConfig(cfg), req.Keep)
 	createdID, err = client.RunInstance(ctx, createReq)
 	if err != nil {
@@ -164,9 +167,13 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	return core.LeaseTarget{Server: server, SSH: ssh, LeaseID: leaseID}, nil
 }
 
-func buildRunInstanceRequest(cfg core.Config, leaseID, slug, publicKey string, tags []tag) runInstanceRequest {
+func buildRunInstanceRequest(cfg core.Config, leaseID, slug, publicKey string, tags []tag) (runInstanceRequest, error) {
+	chargeType, err := tencentCloudChargeType(cfg.Capacity.Market)
+	if err != nil {
+		return runInstanceRequest{}, err
+	}
 	req := runInstanceRequest{
-		InstanceChargeType: "POSTPAID_BY_HOUR",
+		InstanceChargeType: chargeType,
 		Placement:          placement{Zone: zoneForConfig(cfg)},
 		ImageID:            imageForConfig(cfg),
 		InstanceType:       serverTypeForConfig(cfg),
@@ -195,7 +202,18 @@ func buildRunInstanceRequest(cfg core.Config, leaseID, slug, publicKey string, t
 	if cfg.TencentCloud.SecurityGroupID != "" {
 		req.SecurityGroupIDs = []string{cfg.TencentCloud.SecurityGroupID}
 	}
-	return req
+	return req, nil
+}
+
+func tencentCloudChargeType(market string) (string, error) {
+	switch market {
+	case "spot":
+		return "SPOTPAID", nil
+	case "on-demand":
+		return "POSTPAID_BY_HOUR", nil
+	default:
+		return "", fmt.Errorf("unsupported Tencent Cloud capacity market %q: expected spot or on-demand", market)
+	}
 }
 
 func (b *Backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
