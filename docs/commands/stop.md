@@ -41,7 +41,19 @@ Crabbox lease ID and local slug:
   alone never acknowledges cleanup. This does not extend to slug, raw instance,
   or ordinary non-fixed lookups. See [AWS fixed-ID replay](../providers/aws.md#fixed-id-replay).
 - `blacksmith-testbox` — accepts a `tbx_...` ID or local slug and forwards to
-  `blacksmith testbox stop`.
+  `blacksmith testbox stop`. For an unchanged local Blacksmith claim, a failed stop queries
+  fresh native `testbox status --id <same-id>` in the same configured organization
+  and context, under the claim lock. Only a successful, non-canceled query with
+  the native stdout table header and one complete row for the exact ID in state
+  `completed` acknowledges cleanup and removes the claim and key. The IP cell
+  may be empty; identity, status, and the remaining table columns are required. Stderr text,
+  409/“already stopped” errors, absence/404, malformed or duplicate rows, other
+  states, and failed status queries retain the original stop error, diagnostics,
+  claim, and key. Successful stops skip the query; claimless raw-ID stops keep
+  their existing native-stop behavior. Automatic one-shot cleanup uses the same
+  reconciliation without changing the command's original result or timing exit
+  code; Actions job success alone does not prove command success. See
+  [Blacksmith Testbox](../features/blacksmith-testbox.md).
 - `blaxel` — accepts a Crabbox lease ID (`blx_<sandbox-id>`) or local slug and
   deletes the Blaxel sandbox only when the local claim and remote ownership
   labels match. Missing sandboxes keep the local claim unless

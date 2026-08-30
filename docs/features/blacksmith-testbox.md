@@ -143,6 +143,7 @@ blacksmith [--org <org>] testbox run --id <tbx_id> --ssh-private-key <key> [--de
 blacksmith [--org <org>] testbox list
 blacksmith [--org <org>] testbox list --all
 blacksmith [--org <org>] testbox stop --id <tbx_id>
+blacksmith [--org <org>] testbox status --id <tbx_id>
 ```
 
 The wrapper is deliberately thin for warmup, run, and stop. `crabbox list` and `crabbox status`
@@ -154,6 +155,29 @@ parse its table output.
 with the fields Crabbox can see (id, status, repo, workflow, job, ref, created). The parser is a
 compatibility layer, not a Blacksmith API contract; if the CLI gains native JSON output, Crabbox
 should switch to it and drop table parsing.
+
+For a Testbox with an exact local `blacksmith-testbox` claim, a failed stop triggers one fresh native
+`blacksmith testbox status --id <same-id>` query in the same organization and
+cleanup context, while the existing local claim lock remains held. Cleanup is
+acknowledged only when that query succeeds without cancellation and its stdout
+contains the native table header and one complete, unambiguous row identifying
+the **exact requested ID** with state **`completed`**. The IP cell may be empty
+after native stop clears it; the remaining columns must still be present and
+aligned with the header. Successful stops skip this query. Claimless raw-ID stops
+retain their existing native-stop behavior.
+
+Only `completed` establishes terminal status for this reconciliation. A 409 or
+“already stopped” error, stderr text, missing inventory/404, malformed or duplicate
+rows, other states, and failed or canceled status queries do not authorize local
+removal. Without confirmation, Crabbox preserves the original stop error and
+diagnostics and retains the unchanged claim and stored key for retry. Confirmed
+completion removes that claim and key and prints a reconciliation note.
+
+Reconciliation applies to explicit stop and automatic one-shot cleanup; it never
+changes the original run result, command exit code, or timing exit code. A successful
+GitHub Actions job is not proof that the delegated command succeeded: idle expiry
+can complete the job successfully. `--keep`, `--keep-on-failure`, and reused `--id`
+runs retain their existing cleanup policy.
 
 If `blacksmith testbox list --all` and `crabbox status` both work but new warmups stay `queued`
 with no IP, treat it as Blacksmith service, queue, org-limit, or billing pressure rather than a

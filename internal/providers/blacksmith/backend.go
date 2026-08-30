@@ -822,7 +822,24 @@ func (b *blacksmithBackend) Stop(ctx context.Context, req StopRequest) error {
 
 func (b *blacksmithBackend) stopClaimedTestbox(ctx context.Context, leaseID string, claim core.LeaseClaim) error {
 	stop := func() error {
-		_, err := b.runCommand(ctx, blacksmithStopArgs(b.cfg, leaseID), b.rt.Stdout, b.rt.Stderr)
+		result, err := b.runCommand(ctx, blacksmithStopArgs(b.cfg, leaseID), nil, nil)
+		if err != nil && claim.Provider == blacksmithTestboxProvider && claim.LeaseID == leaseID && ctx.Err() == nil {
+			// This callback holds the claim fence through stop, observation and removal.
+			args := append(blacksmithBaseArgs(b.cfg), "testbox", "status", "--id", leaseID)
+			observed, statusErr := b.runCommand(ctx, args, nil, nil)
+			if statusErr == nil && observed.ExitCode == 0 && ctx.Err() == nil && blacksmithCompletedStatus(observed.Stdout, leaseID) {
+				fmt.Fprintf(b.rt.Stderr, "blacksmith cleanup reconciled lease=%s state=completed: stop failed; native status confirmed completion\n", leaseID)
+				return nil
+			}
+		}
+		// Delay stop output until reconciliation so an acknowledged cleanup does
+		// not print a raw provider error. Unconfirmed stops retain their diagnostics.
+		if b.rt.Stdout != nil {
+			fmt.Fprint(b.rt.Stdout, result.Stdout)
+		}
+		if b.rt.Stderr != nil {
+			fmt.Fprint(b.rt.Stderr, result.Stderr)
+		}
 		return err
 	}
 	if claim.LeaseID == leaseID {

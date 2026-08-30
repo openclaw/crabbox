@@ -16,6 +16,7 @@
 ### Fixed
 
 - Pinned the built-in Tart macOS image and verified cloned disk, NVRAM, and configuration contents before boot, retaining custom-image overrides, recording verified provenance, and waiting for the guest agent before SSH setup. Thanks @coygeek.
+- Reconciled failed Blacksmith stops only after fresh exact-Testbox terminal confirmation, removing unchanged owned claims and keys while preserving ownership fences, uncertain cleanup, and original command failures.
 - Honored explicit Tencent Cloud Spot and on-demand market selections while preserving hourly billing when no market is configured, with invalid values rejected before provider access. Thanks @exAClior.
 - Pinned shipped Local Container and Apple Container Ubuntu defaults to reviewed multi-platform OCI digests, verified Apple images before bootstrap, and preserved explicit custom-image overrides. Thanks @coygeek.
 - Required exact Tensorlake resource and API-key scope bindings for reuse and cleanup, fencing claim changes and retaining legacy or uncertain sandboxes until termination is confirmed. Thanks @coygeek.

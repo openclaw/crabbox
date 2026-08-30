@@ -112,6 +112,44 @@ func blacksmithListAllArgs(cfg Config) []string {
 	return append(blacksmithListArgs(cfg), "--all")
 }
 
+var blacksmithStatusHeader = regexp.MustCompile(`^(ID) {2,}(STATUS) {2,}(IP) {2,}(WORKFLOW) {2,}(JOB) {2,}(REF) {2,}(CREATED) {2,}(RUN URL)$`)
+var blacksmithStatusRunURL = regexp.MustCompile(`^https://github\.com/[^/\s]+/[^/\s]+/actions/runs/[0-9]+$`)
+
+// Cleanup accepts only the native single-ID status table, never the permissive
+// inventory parser or stderr. Completed is the only established terminal state.
+func blacksmithCompletedStatus(stdout, leaseID string) bool {
+	lines := strings.Split(strings.TrimSuffix(stdout, "\n"), "\n")
+	if len(lines) != 2 {
+		return false
+	}
+	columns := blacksmithStatusHeader.FindStringSubmatchIndex(lines[0])
+	if columns == nil || strings.ContainsAny(lines[1], "\t\r") {
+		return false
+	}
+	// Native tabwriter columns count runes and include two spaces of padding.
+	// Header boundaries preserve an empty IP cell and spaces within metadata.
+	row := []rune(lines[1])
+	var cells [8]string
+	for i := range cells {
+		start, end := columns[2+i*2], len(row)
+		if i+1 < len(cells) {
+			end = columns[2+(i+1)*2]
+		}
+		if start >= len(row) || end > len(row) {
+			return false
+		}
+		cell := string(row[start:end])
+		if i+1 < len(cells) && !strings.HasSuffix(cell, "  ") {
+			return false
+		}
+		cells[i] = strings.TrimRight(cell, " ")
+		if (cells[i] == "" && i != 2) || strings.HasPrefix(cells[i], " ") {
+			return false
+		}
+	}
+	return cells[0] == leaseID && cells[1] == "completed" && blacksmithStatusRunURL.MatchString(cells[7])
+}
+
 func parseBlacksmithList(output string) []blacksmithListItem {
 	items := []blacksmithListItem{}
 	for _, line := range strings.Split(output, "\n") {
