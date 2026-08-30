@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -17,11 +16,9 @@ func TestNativeCheckpointMachine0ConfiguredCLI(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell executable fixture requires POSIX")
 	}
-	binary := filepath.Join(t.TempDir(), "crabbox")
-	build := exec.Command("go", "build", "-trimpath", "-o", binary, "./cmd/crabbox")
-	build.Dir = filepath.Join("..", "..")
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build CLI: %v\n%s", err, output)
+	binary, err := builtCLITestBinary()
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	for _, tc := range []struct {

@@ -39,11 +39,9 @@ func TestCheckpointCaptureBuiltBinaryContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	binary := filepath.Join(t.TempDir(), "crabbox")
-	build := exec.Command("go", "build", "-trimpath", "-o", binary, "./cmd/crabbox")
-	build.Dir = repo
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build Crabbox: %v\n%s", err, output)
+	binary, err := builtCLITestBinary()
+	if err != nil {
+		t.Fatal(err)
 	}
 	t.Logf("compiled immutable Crabbox binary: %s", binary)
 	providerBuild := exec.Command("go", "build", "-trimpath", "-o", binary+".provider", "./internal/cli/testdata/checkpoint-provider")

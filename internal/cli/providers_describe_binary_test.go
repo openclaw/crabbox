@@ -18,11 +18,9 @@ import (
 
 func TestProvidersDescribeBuiltBinaryContract(t *testing.T) {
 	root := filepath.Clean(filepath.Join("..", ".."))
-	binary := filepath.Join(t.TempDir(), "crabbox")
-	build := exec.Command("go", "build", "-trimpath", "-o", binary, "./cmd/crabbox")
-	build.Dir = root
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("go build ./cmd/crabbox: %v\n%s", err, output)
+	binary, err := builtCLITestBinary()
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	isolation := t.TempDir()

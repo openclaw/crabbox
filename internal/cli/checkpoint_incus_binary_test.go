@@ -2,18 +2,15 @@ package cli
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
 func TestIncusFixedLeaseConfiguredCLI(t *testing.T) {
-	binary := filepath.Join(t.TempDir(), "crabbox")
-	build := exec.Command("go", "build", "-trimpath", "-o", binary, "./cmd/crabbox")
-	build.Dir = filepath.Join("..", "..")
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build CLI: %v\n%s", err, output)
+	binary, err := builtCLITestBinary()
+	if err != nil {
+		t.Fatal(err)
 	}
 	root := t.TempDir()
 	config := filepath.Join(root, "config.yaml")

@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/openclaw/crabbox/internal/testutil"
 	"golang.org/x/sys/windows"
 )
 
@@ -29,7 +28,7 @@ func TestMain(m *testing.M) {
 		time.Sleep(10 * time.Minute)
 		os.Exit(0)
 	}
-	os.Exit(testutil.RunWithIsolatedUserDirs(m))
+	os.Exit(runCLITests(m))
 }
 
 func TestPondMeshCancelRunForwardsReturnsNoErrorOnWindows(t *testing.T) {

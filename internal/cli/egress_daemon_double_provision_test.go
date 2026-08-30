@@ -18,8 +18,6 @@ import (
 	"syscall"
 	"testing"
 	"time"
-
-	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 // TestMain keeps re-invoked test binaries alive as daemon children instead of
@@ -32,7 +30,7 @@ func TestMain(m *testing.M) {
 		time.Sleep(10 * time.Minute)
 		os.Exit(egressDaemonFatalCode)
 	}
-	os.Exit(testutil.RunWithIsolatedUserDirs(m))
+	os.Exit(runCLITests(m))
 }
 
 var egressDaemonPIDRe = regexp.MustCompile(`egress host daemon: pid=(\d+)`)
