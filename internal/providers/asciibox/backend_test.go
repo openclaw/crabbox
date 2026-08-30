@@ -630,11 +630,11 @@ type fakeAPI struct {
 
 func (f *fakeAPI) CreateBox(_ context.Context, req createRequest) (boxData, error) {
 	f.createReq = req
-	if f.box.ID == "" {
-		f.box = testBox()
-	}
 	if f.createErr != nil {
 		return f.box, f.createErr
+	}
+	if f.box.ID == "" {
+		f.box = testBox()
 	}
 	return f.box, nil
 }

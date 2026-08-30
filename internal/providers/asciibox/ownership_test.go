@@ -385,6 +385,28 @@ func TestEndpointRefreshCannotRetargetOwnership(t *testing.T) {
 // Keep this compile-time check near cleanup tests: the provider owns teardown.
 var _ interface{ ReleaseLeaseConnectionCleanupSafe() bool } = (*backend)(nil)
 
+func TestAcquirePreservesUnconfirmedCreateFailureDiagnostic(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	f := &fakeAPI{createErr: errors.New("native quota exhausted (429)")}
+	withFakeAPI(t, f)
+	b := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
+	_, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
+	if err == nil {
+		t.Fatal("failed creation succeeded")
+	}
+	diagnostic := err.Error()
+	var exitErr core.ExitError
+	if core.AsExitError(err, &exitErr) {
+		diagnostic = exitErr.Message
+	}
+	if !strings.Contains(diagnostic, "native quota exhausted (429)") {
+		t.Fatalf("CLI diagnostic hid the provider error: %s", diagnostic)
+	}
+	if len(f.deletedIDs) != 0 || len(f.prepareIDs) != 0 {
+		t.Fatal("unconfirmed creation authorized mutation")
+	}
+}
+
 func TestReadOnlyInventoryAcceptsPaginationWithoutProvingAbsence(t *testing.T) {
 	raw := []byte(`{"boxes":[],"pageInfo":{"hasMore":true,"nextCursor":"next"}}`)
 	if _, err := decodeBoxes(raw, false); err != nil {

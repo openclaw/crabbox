@@ -53,7 +53,10 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s ttl=%s\n", providerName, leaseID, slug, blank(ttl.String(), "-"))
 	box, createErr := client.CreateBox(ctx, createRequest{TTL: ttl})
 	if !concreteBoxID(box.createdID) || box.ID != box.createdID {
-		return LeaseTarget{}, errors.Join(createErr, exit(2, "ascii-box creation did not establish an original Box ID; retaining any resource"))
+		if createErr != nil {
+			return LeaseTarget{}, fmt.Errorf("ascii-box creation did not establish an original Box ID; retaining any resource: %w", createErr)
+		}
+		return LeaseTarget{}, exit(2, "ascii-box creation did not establish an original Box ID; retaining any resource")
 	}
 	if createErr != nil {
 		return LeaseTarget{}, errors.Join(createErr, b.rollbackBox(ctx, client, leaseID, box, LeaseClaim{}, false))
