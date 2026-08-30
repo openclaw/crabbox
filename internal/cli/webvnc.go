@@ -134,6 +134,11 @@ func validateWebVNCResolvedProviderIdentity(cfg Config, server Server, target SS
 }
 
 func (a App) webvnc(ctx context.Context, args []string) error {
+	ctx, finishCleanup, err := beginSupervisedWebVNCCleanup(ctx)
+	if err != nil {
+		return err
+	}
+	defer finishCleanup()
 	if len(args) > 0 {
 		switch args[0] {
 		case "local":
@@ -1330,7 +1335,7 @@ func (a App) startWebVNCDaemon(routing CommandRouting, leaseID string, controlle
 		return exit(2, "create WebVNC daemon launch gate: %v", err)
 	}
 	defer gateWriter.Close()
-	supervisorArgs := append([]string{"__webvnc-supervisor", nonce}, childArgs...)
+	supervisorArgs := append([]string{"__webvnc-supervisor", nonce, leaseID}, childArgs...)
 	cmd := exec.Command(exe, supervisorArgs...)
 	cmd.Stdin = gateReader
 	cmd.Stdout = logFile
@@ -1357,6 +1362,17 @@ func (a App) startWebVNCDaemon(routing CommandRouting, leaseID string, controlle
 			// descendants. EOF makes it exit without starting the bridge.
 			_ = cmd.Wait()
 			return nil
+		}
+		if webVNCDaemonCleanupSupported {
+			identity, err := readWebVNCDaemonIdentity(pidPath)
+			if err != nil {
+				return err
+			}
+			cleanupErr := stopWebVNCDaemonProcessTree(identity, pidPath)
+			if !webVNCDaemonProcessGroupAlive(pid) {
+				_ = cmd.Wait()
+			}
+			return cleanupErr
 		}
 		terminateErr := terminateWebVNCDaemonProcessTree(pid)
 		_ = cmd.Wait()
@@ -1395,6 +1411,7 @@ func (a App) startWebVNCDaemon(routing CommandRouting, leaseID string, controlle
 		NoProviderSideEffects:    controllerOwned,
 		ControllerOwnerID:        controllerOwnerID,
 		AuthenticatesUpstreamVNC: webVNCDaemonAuthenticatesUpstreamVNC(args),
+		CleanupTracked:           webVNCDaemonCleanupSupported,
 	}
 	command, alive := webVNCDaemonProcessCommand(pid)
 	if !alive || !webVNCDaemonIdentityMatchesProcess(identity, command, started) {
@@ -1940,10 +1957,10 @@ func readWebVNCDaemonSupervisorGate(r io.Reader) (string, error) {
 }
 
 func (a App) webVNCDaemonSupervisor(ctx context.Context, args []string) error {
-	if len(args) < 2 || !validWebVNCDaemonNonce(args[0]) || args[1] != "webvnc" {
+	if len(args) < 3 || !validWebVNCDaemonNonce(args[0]) || args[1] == "" || args[2] != "webvnc" {
 		return exit(2, "invalid internal WebVNC supervisor invocation")
 	}
-	childArgs := append([]string(nil), args[1:]...)
+	childArgs := append([]string(nil), args[2:]...)
 	for _, arg := range childArgs {
 		if webVNCDaemonFlagArg(arg, webVNCDaemonCredentialStdinFlag) {
 			return exit(2, "invalid internal WebVNC supervisor credential flag")
@@ -1964,35 +1981,49 @@ func (a App) webVNCDaemonSupervisor(ctx context.Context, args []string) error {
 	if err != nil {
 		return exit(2, "resolve WebVNC daemon executable: %v", err)
 	}
-	return runWebVNCDaemonSupervisor(ctx, exe, childArgs, credentialName, credential, a.Stdout, a.Stderr)
+	return superviseWebVNCDaemonCleanup(ctx, args[0], args[1], func(ctx context.Context) error {
+		return runWebVNCDaemonSupervisor(ctx, exe, childArgs, credentialName, credential, a.Stdout, a.Stderr)
+	})
 }
 
 func runWebVNCDaemonSupervisor(ctx context.Context, exe string, args []string, credentialName, credential string, stdout, stderr io.Writer) error {
+	releaseSignals := retainWebVNCDaemonTerminationSignals()
+	defer releaseSignals()
 	fmt.Fprintln(stdout, "webvnc daemon supervisor: starting")
 	first := true
 	for {
 		childArgs := webVNCDaemonSupervisorChildArgs(args, first, credentialName != "")
 		first = false
 		cmd := exec.CommandContext(ctx, exe, childArgs...)
+		configureWebVNCDaemonChildCancellation(cmd)
 		cmd.Stdout = stdout
 		cmd.Stderr = stderr
 		cmd.Env = webVNCDaemonChildEnvironment(os.Environ(), args)
+		finishChild, cleanupErr := prepareWebVNCDaemonChildCleanup(ctx, cmd)
+		if cleanupErr != nil {
+			return cleanupErr
+		}
 		if credentialName != "" {
 			cmd.Stdin = strings.NewReader(credential)
 		}
 		code := 1
 		cleanupForward, err := forwardInheritedWebVNCDaemonPortReservation(cmd)
 		if err != nil {
+			_ = finishChild(false)
 			fmt.Fprintf(stderr, "webvnc daemon supervisor: prepare child: %v\n", err)
 		} else {
 			runErr := cmd.Run()
 			cleanupForward()
+			if err := finishChild(cmd.Process != nil); err != nil {
+				return errors.Join(err, runErr)
+			}
+			if ctx.Err() != nil {
+				return errors.Join(context.Cause(ctx), runErr)
+			}
 			if runErr == nil {
 				code = 0
 			} else if exitErr, ok := runErr.(*exec.ExitError); ok {
 				code = exitErr.ExitCode()
-			} else if ctx.Err() != nil {
-				return ctx.Err()
 			} else {
 				fmt.Fprintf(stderr, "webvnc daemon supervisor: run child: %v\n", runErr)
 			}
@@ -2066,6 +2097,7 @@ type webVNCDaemonIdentity struct {
 	ControllerOwnerID        string `json:"controllerOwnerId,omitempty"`
 	AuthenticatesUpstreamVNC bool   `json:"authenticatesUpstreamVnc,omitempty"`
 	LegacyOwnerToken         string `json:"controllerOwnerToken,omitempty"`
+	CleanupTracked           bool   `json:"cleanupTracked,omitempty"`
 }
 
 func localWebVNCDaemonStatus(leaseID string) (localWebVNCDaemon, error) {
@@ -2228,6 +2260,17 @@ func (a App) stopWebVNCDaemonIfRunningLocked(leaseID string) (bool, error) {
 		fmt.Fprintf(a.Stdout, "webvnc daemon: removed prior-boot identity pid=%d\n", pid)
 		return true, nil
 	}
+	if identity.CleanupTracked {
+		if err := stopWebVNCDaemonProcessTree(identity, pidPath); err != nil {
+			return false, exit(5, "stop WebVNC daemon pid %d: %v", pid, err)
+		}
+		if err := removeWebVNCDaemonIdentity(pidPath); err != nil {
+			return false, err
+		}
+		_ = os.Remove(pidPath + ".cleanup")
+		fmt.Fprintf(a.Stdout, "webvnc daemon: stopped pid=%d\n", pid)
+		return true, nil
+	}
 	command, alive := webVNCDaemonProcessCommand(pid)
 	defunct := alive && strings.Contains(strings.ToLower(command), "<defunct>")
 	if defunct {
@@ -2241,6 +2284,9 @@ func (a App) stopWebVNCDaemonIfRunningLocked(leaseID string) (bool, error) {
 		} else if webVNCDaemonProcessGroupAlive(pid) {
 			return false, exit(5, "refusing to signal WebVNC daemon process group %d without its recorded supervisor identity", pid)
 		} else {
+			if webVNCDaemonCleanupSupported {
+				return false, exit(5, "WebVNC daemon pid %d exited without a cleanup receipt; retaining its unconfirmed identity", pid)
+			}
 			if err := removeWebVNCDaemonIdentity(pidPath); err != nil {
 				return false, exit(5, "remove exited WebVNC daemon identity: %v", err)
 			}
@@ -2259,6 +2305,15 @@ func (a App) stopWebVNCDaemonIfRunningLocked(leaseID string) (bool, error) {
 	started, startErr := webVNCDaemonProcessStartIdentity(pid)
 	if startErr != nil || !webVNCDaemonIdentityMatchesProcess(identity, command, started) {
 		return false, exit(5, "refusing to drop unverified WebVNC daemon identity pid %d while its recorded process group may still contain the credential bridge", pid)
+	}
+	// Pre-protocol Go supervisors can own separately grouped SSH tunnels but
+	// cannot acknowledge their cleanup. Retain the identity even after exit.
+	if webVNCDaemonCleanupSupported && strings.Contains(command, "__webvnc-supervisor") {
+		identity.CleanupTracked = true
+		if err := writeWebVNCDaemonIdentity(pidPath, identity); err != nil {
+			return false, err
+		}
+		return a.stopWebVNCDaemonIfRunningLocked(leaseID)
 	}
 	if err := terminateWebVNCDaemonProcessTree(pid); err != nil {
 		return false, exit(5, "stop WebVNC daemon process tree pid %d: %v", pid, err)
@@ -2702,18 +2757,23 @@ func startVNCForegroundTunnel(ctx context.Context, target SSHTarget, localPort, 
 	var output strings.Builder
 	cmd.Stdout = &output
 	cmd.Stderr = &output
+	finishCleanup := trackSupervisedWebVNCTunnel(ctx)
 	if err := cmd.Start(); err != nil {
-		return nil, errors.Join(err, session.Close())
+		cleanupErr := session.Close()
+		finishCleanup(cleanupErr)
+		return nil, errors.Join(err, cleanupErr)
 	}
 	tunnel := &vncForegroundTunnel{cmd: cmd, done: make(chan struct{}), output: &output, childEnvDenylist: append([]string(nil), target.ChildEnvDenylist...), session: session, target: target}
 	go func() {
 		err := cmd.Wait()
 		// A reaped leader can leave proxy descendants alive. Retain their config
 		// until the existing platform tree teardown has completed as well.
-		err = errors.Join(err, tunnel.stopTree())
-		if tunnel.stopErr == nil {
-			err = errors.Join(err, tunnel.session.Close())
+		cleanupErr := tunnel.stopTree()
+		if cleanupErr == nil {
+			cleanupErr = tunnel.session.Close()
 		}
+		err = errors.Join(err, cleanupErr)
+		finishCleanup(cleanupErr)
 		tunnel.mu.Lock()
 		tunnel.err = err
 		tunnel.mu.Unlock()

@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- Reaped WebVNC daemon SSH tunnels across child restarts and orderly shutdown, retaining exact ownership records and reporting failure when cleanup cannot be confirmed.
 - Bounded VNC/WebVNC credential reads to 30 seconds and 64 KiB, discarding partial credentials on any failure while preserving connection defaults, caller cancellation, and transport cleanup. Thanks @SebTardif.
 - Bounded WebVNC bridge response-header waits to 30 seconds without limiting established WebSocket sessions or bypassing configured HTTP transports. Thanks @SebTardif.
 - Simplified WSL2 SSH execution into one verified, privately blinded SFTP envelope with a derived fixed-control startup/work/completion budget, LF helpers on Windows builds, identity-checked cleanup, and no replay after publication uncertainty; SFTP is now required, replacing the v0.47.0 stdin fallback (enable it and verify Doctor's `wsl2-sftp` probe before upgrading). Thanks @vincentkoc.

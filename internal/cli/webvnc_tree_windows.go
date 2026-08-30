@@ -5,6 +5,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +21,12 @@ type windowsWebVNCDaemonProcessIdentity struct {
 }
 
 var errWindowsWebVNCDaemonTreeEmpty = errors.New("tracked supervisor process tree is no longer running")
+
+func configureWebVNCDaemonChildCancellation(*exec.Cmd) {}
+
+func stopWebVNCDaemonProcessTree(identity webVNCDaemonIdentity, _ string) error {
+	return terminateWebVNCDaemonProcessTree(identity.PID)
+}
 
 func terminateWebVNCDaemonProcessTree(pid int) error {
 	if pid <= 0 {
