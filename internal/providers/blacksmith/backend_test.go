@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -15,6 +16,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"text/tabwriter"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -28,6 +30,7 @@ type blacksmithFuncRunner struct {
 	calls     [][]string
 	fn        func(LocalCommandRequest) (LocalCommandResult, error)
 	onRequest func(context.Context, LocalCommandRequest)
+	states    map[string]string
 }
 
 func (r *blacksmithFuncRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
@@ -35,15 +38,76 @@ func (r *blacksmithFuncRunner) Run(ctx context.Context, req LocalCommandRequest)
 	if r.onRequest != nil {
 		r.onRequest(ctx, req)
 	}
+	if len(req.Args) >= 2 && req.Args[0] == "auth" && req.Args[1] == "status" {
+		return LocalCommandResult{Stdout: "Authenticated organizations:\n  * example-org (current)\n"}, nil
+	}
+	if len(req.Args) >= 2 && req.Args[0] == "testbox" && req.Args[1] == "status" {
+		id := testBlacksmithFlag(req.Args, "--id")
+		state := r.states[id]
+		if state == "" {
+			state = "ready"
+		}
+		return LocalCommandResult{Stdout: testBlacksmithStatus(id, state)}, nil
+	}
 	if r.fn != nil {
-		return r.fn(req)
+		result, err := r.fn(req)
+		if len(req.Args) >= 2 && req.Args[0] == "testbox" && req.Args[1] == "stop" && err == nil {
+			if r.states == nil {
+				r.states = map[string]string{}
+			}
+			r.states[testBlacksmithFlag(req.Args, "--id")] = "completed"
+		}
+		return result, err
 	}
 	return LocalCommandResult{}, nil
+}
+
+func testBlacksmithFlag(args []string, flag string) string {
+	for i, arg := range args {
+		if arg == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+func testBlacksmithStatus(id, state string) string {
+	var out bytes.Buffer
+	w := tabwriter.NewWriter(&out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tSTATUS\tIP\tWORKFLOW\tJOB\tREF\tCREATED\tRUN URL")
+	fmt.Fprintf(w, "%s\t%s\t\t.github/workflows/testbox.yml\ttest\tmain\t2026-08-30T00:00:00Z\thttps://github.com/example-org/my-app/actions/runs/123\n", id, state)
+	_ = w.Flush()
+	return out.String()
+}
+
+func testOwnedBlacksmithClaim(t *testing.T, id, slug, repo string) core.LeaseClaim {
+	t.Helper()
+	claim := core.LeaseClaim{LeaseID: id, CloudID: id, Slug: slug, Provider: "blacksmith-testbox", RepoRoot: repo, ProviderScope: `{"api":"https://backend.blacksmith.sh","org":"example-org"}`, Labels: map[string]string{"provider": "blacksmith-testbox", "lease": id, "slug": slug, "workflow": ".github/workflows/testbox.yml", "job": "test", "ref": "main"}}
+	if err := core.WithDurableLeaseClaimLock(id, func(current *core.LeaseClaim, exists bool, save func() error) error {
+		if exists {
+			t.Fatal("fixture claim exists")
+		}
+		*current = claim
+		if err := save(); err != nil {
+			return err
+		}
+		claim = *current
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return claim
 }
 
 type blockingSyncRunner struct{}
 
 func (blockingSyncRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+	if len(req.Args) >= 2 && req.Args[0] == "auth" {
+		return LocalCommandResult{Stdout: "Authenticated organizations:\n  * example-org (current)\n"}, nil
+	}
+	if len(req.Args) >= 2 && req.Args[1] == "status" {
+		return LocalCommandResult{Stdout: testBlacksmithStatus(testBlacksmithFlag(req.Args, "--id"), "ready")}, nil
+	}
 	if req.Stdout != nil {
 		_, _ = req.Stdout.Write([]byte("Syncing from repo root: /repo\n"))
 	}
@@ -378,7 +442,7 @@ func TestBlacksmithWarmupFailureRemovesPendingKey(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
 	backend := newTestBlacksmithBackend(cfg, runner)
-	_, _, err := backend.warmupLease(context.Background(), Repo{Root: "/repo"}, false, "")
+	_, err := backend.warmupLease(context.Background(), Repo{Root: "/repo"}, false, "")
 	if err == nil {
 		t.Fatal("expected warmup failure")
 	}
@@ -409,13 +473,13 @@ func TestBlacksmithWarmupFailureStopsPrintedTestbox(t *testing.T) {
 			}
 			return LocalCommandResult{}, nil
 		}
-		return LocalCommandResult{ExitCode: 1, Stdout: "queued tbx_leaked123\n"}, errors.New("exit status 1")
+		return LocalCommandResult{ExitCode: 1, Stdout: "tbx_leaked123\n"}, errors.New("exit status 1")
 	}}
 
 	cfg := baseConfig()
 	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
 	backend := newTestBlacksmithBackend(cfg, runner)
-	_, _, err := backend.warmupLease(context.Background(), Repo{Root: "/repo"}, false, "")
+	_, err := backend.warmupLease(context.Background(), Repo{Root: "/repo"}, false, "")
 	if err == nil {
 		t.Fatal("expected warmup failure")
 	}
@@ -436,7 +500,7 @@ func TestBlacksmithOneShotRunRemovesClaimAfterStop(t *testing.T) {
 			if req.MaxCapturedOutputBytes != blacksmithCommandCaptureBytes || req.DisableOutputCapture {
 				t.Fatalf("warmup capture settings: limit=%d disabled=%t", req.MaxCapturedOutputBytes, req.DisableOutputCapture)
 			}
-			return LocalCommandResult{Stdout: "ready tbx_abc123\n"}, nil
+			return LocalCommandResult{Stdout: "tbx_abc123\n"}, nil
 		}
 		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "run" {
 			if !req.DisableOutputCapture || req.MaxCapturedOutputBytes != 0 {
@@ -469,8 +533,8 @@ func TestBlacksmithOneShotRunRemovesClaimAfterStop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.calls) != 3 {
-		t.Fatalf("blacksmith calls=%d, want warmup/run/stop", len(runner.calls))
+	if len(runner.calls) != 9 {
+		t.Fatalf("blacksmith calls=%d, want scoped warmup/run/stop with inspections", len(runner.calls))
 	}
 	if !cleanupDeadlineSet {
 		t.Fatal("one-shot Testbox cleanup did not receive a deadline")
@@ -496,53 +560,28 @@ func TestBlacksmithOneShotRunRemovesClaimAfterStop(t *testing.T) {
 	}
 }
 
-func TestBlacksmithOneShotCleanupPreservesReplacedClaim(t *testing.T) {
+func TestBlacksmithCleanupPreservesReplacedClaim(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
-	var stderr bytes.Buffer
-	replacementRepo := t.TempDir()
-	stopped := false
-	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
-		if len(req.Args) < 2 || req.Args[0] != "testbox" {
-			return LocalCommandResult{}, nil
-		}
-		switch req.Args[1] {
-		case "warmup":
-			return LocalCommandResult{Stdout: "ready tbx_replaced123\n"}, nil
-		case "run":
-			claim, err := readLeaseClaim("tbx_replaced123")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := claimLeaseForRepoProvider(claim.LeaseID, claim.Slug, blacksmithTestboxProvider, replacementRepo, time.Minute, true); err != nil {
-				t.Fatal(err)
-			}
-		case "stop":
-			stopped = true
-		}
-		return LocalCommandResult{}, nil
-	}}
-	cfg := baseConfig()
-	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
-	backend := &blacksmithBackend{
-		spec: Provider{}.Spec(),
-		cfg:  cfg,
-		rt:   Runtime{Stdout: io.Discard, Stderr: &stderr, Clock: testClock{}, Exec: runner},
-	}
-	if _, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir()}, Command: []string{"true"}}); err != nil {
+	claim := testOwnedBlacksmithClaim(t, "tbx_replaced123", "jade-krill", "/repo")
+	replacement := claim
+	replacement.RepoRoot = "/replacement"
+	if err := core.ReplaceLeaseClaimIfUnchanged(claim.LeaseID, claim, replacement); err != nil {
 		t.Fatal(err)
 	}
-	if stopped {
-		t.Fatal("cleanup stopped a Testbox after its local claim was replaced")
+	runner := &blacksmithFuncRunner{}
+	backend := newTestBlacksmithBackend(baseConfig(), runner)
+	if err := backend.stopClaimedTestbox(t.Context(), claim.LeaseID, claim); err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("cleanup=%v", err)
 	}
-	claim, err := readLeaseClaim("tbx_replaced123")
-	if err != nil || claim.RepoRoot != replacementRepo {
-		t.Fatalf("replacement claim=%#v err=%v", claim, err)
+	if len(runner.calls) != 0 {
+		t.Fatalf("stale snapshot reached provider: %v", runner.calls)
 	}
-	if !strings.Contains(stderr.String(), "claim changed; retry") {
-		t.Fatalf("cleanup warning=%q", stderr.String())
+	got, err := readLeaseClaim(claim.LeaseID)
+	if err != nil || got.RepoRoot != replacement.RepoRoot {
+		t.Fatalf("replacement=%+v err=%v", got, err)
 	}
 }
 
@@ -553,7 +592,7 @@ func TestBlacksmithKeptRunWritesLeaseOutput(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
 	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
 		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "warmup" {
-			return LocalCommandResult{Stdout: "ready tbx_kept123\n"}, nil
+			return LocalCommandResult{Stdout: "tbx_kept123\n"}, nil
 		}
 		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "run" {
 			if req.Stdout != nil {
@@ -575,7 +614,7 @@ func TestBlacksmithKeptRunWritesLeaseOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.calls) != 2 {
+	if len(runner.calls) != 5 {
 		t.Fatalf("blacksmith calls=%d, want warmup/run without stop: %#v", len(runner.calls), runner.calls)
 	}
 	if result.Session == nil {
@@ -656,6 +695,7 @@ func TestBlacksmithReusedRunWritesLeaseOutput(t *testing.T) {
 	}}
 
 	cfg := baseConfig()
+	testOwnedBlacksmithClaim(t, "tbx_reuse123", "jade-krill", "/repo")
 	backend := newTestBlacksmithBackend(cfg, runner)
 	result, err := backend.Run(context.Background(), RunRequest{
 		Repo:    Repo{Root: "/repo"},
@@ -665,8 +705,8 @@ func TestBlacksmithReusedRunWritesLeaseOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.calls) != 1 {
-		t.Fatalf("blacksmith calls=%d, want run only: %#v", len(runner.calls), runner.calls)
+	if len(runner.calls) != 4 {
+		t.Fatalf("blacksmith calls=%d, want scoped run with inspections: %#v", len(runner.calls), runner.calls)
 	}
 	if result.Session == nil {
 		t.Fatal("missing session handle")
@@ -684,7 +724,7 @@ func TestBlacksmithRunTimingJSONIncludesCommandPhases(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
 	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
 		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "warmup" {
-			return LocalCommandResult{Stdout: "ready tbx_phase123\n"}, nil
+			return LocalCommandResult{Stdout: "tbx_phase123\n"}, nil
 		}
 		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "run" {
 			if req.Stdout != nil {
@@ -739,7 +779,7 @@ func TestBlacksmithRunProofArtifactsPersistSuccessStreams(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
 	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
 		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "warmup" {
-			return LocalCommandResult{Stdout: "ready tbx_proof123\n"}, nil
+			return LocalCommandResult{Stdout: "tbx_proof123\n"}, nil
 		}
 		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "run" {
 			if req.Stdout != nil {
@@ -820,6 +860,7 @@ func TestBlacksmithCollectRunArtifactsWritesBoundedArchive(t *testing.T) {
 	}}
 	cfg := baseConfig()
 	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
+	testOwnedBlacksmithClaim(t, "tbx_artifacts", "jade-krill", repo)
 	backend := newTestBlacksmithBackend(cfg, runner)
 	result, err := backend.CollectRunArtifacts(context.Background(), core.DelegatedRunArtifactRequest{
 		RunReq: core.RunRequest{
@@ -851,7 +892,7 @@ func TestBlacksmithCollectRunArtifactsWritesBoundedArchive(t *testing.T) {
 	if !bytes.Equal(got, archive) {
 		t.Fatalf("archive mismatch bytes=%d want=%d", len(got), len(archive))
 	}
-	if len(runner.calls) != 1 || !strings.Contains(runner.calls[0][len(runner.calls[0])-1], core.DelegatedRunArtifactBeginMarker) {
+	if len(runner.calls) != 4 || !strings.Contains(strings.Join(runner.calls[3], " "), core.DelegatedRunArtifactBeginMarker) {
 		t.Fatalf("runner calls=%#v", runner.calls)
 	}
 }
@@ -875,6 +916,7 @@ func TestBlacksmithCollectRunArtifactsBoundsCommandOutput(t *testing.T) {
 	}}
 	cfg := baseConfig()
 	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
+	testOwnedBlacksmithClaim(t, "tbx_artifacts", "jade-krill", repo)
 	backend := newTestBlacksmithBackend(cfg, runner)
 	_, err := backend.CollectRunArtifacts(context.Background(), core.DelegatedRunArtifactRequest{
 		RunReq: core.RunRequest{
@@ -900,7 +942,7 @@ func TestBlacksmithRunCollectsArtifactsBeforeOneShotCleanup(t *testing.T) {
 	runCalls := 0
 	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
 		if len(req.Args) >= 2 && req.Args[0] == "testbox" && req.Args[1] == "warmup" {
-			return LocalCommandResult{Stdout: "ready tbx_artifacts\n"}, nil
+			return LocalCommandResult{Stdout: "tbx_artifacts\n"}, nil
 		}
 		if len(req.Args) >= 2 && req.Args[0] == "testbox" && req.Args[1] == "run" {
 			runCalls++
@@ -932,13 +974,13 @@ func TestBlacksmithRunCollectsArtifactsBeforeOneShotCleanup(t *testing.T) {
 	if len(result.Artifacts) != 1 {
 		t.Fatalf("artifacts=%#v", result.Artifacts)
 	}
-	if len(runner.calls) != 4 {
-		t.Fatalf("calls=%#v", runner.calls)
+	if len(runner.calls) != 11 {
+		t.Fatalf("calls=%d, want scoped artifact retrieval and terminal finalization", len(runner.calls))
 	}
-	if runner.calls[0][1] != "warmup" || runner.calls[1][1] != "run" || runner.calls[2][1] != "run" || runner.calls[3][1] != "stop" {
+	if runner.calls[1][1] != "warmup" || runner.calls[4][1] != "run" || runner.calls[6][1] != "run" || runner.calls[8][1] != "stop" {
 		t.Fatalf("unexpected call order: %#v", runner.calls)
 	}
-	if !strings.Contains(runner.calls[2][len(runner.calls[2])-1], core.DelegatedRunArtifactBeginMarker) {
+	if !strings.Contains(strings.Join(runner.calls[6], " "), core.DelegatedRunArtifactBeginMarker) {
 		t.Fatalf("second run was not artifact collection: %#v", runner.calls[2])
 	}
 }
@@ -953,7 +995,7 @@ func TestBlacksmithRunArtifactFailureKeepsOneShotOnKeepOnFailure(t *testing.T) {
 	runCalls := 0
 	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
 		if len(req.Args) >= 2 && req.Args[0] == "testbox" && req.Args[1] == "warmup" {
-			return LocalCommandResult{Stdout: "ready tbx_artifactfail\n"}, nil
+			return LocalCommandResult{Stdout: "tbx_artifactfail\n"}, nil
 		}
 		if len(req.Args) >= 2 && req.Args[0] == "testbox" && req.Args[1] == "run" {
 			runCalls++
@@ -989,7 +1031,7 @@ func TestBlacksmithRunArtifactFailureKeepsOneShotOnKeepOnFailure(t *testing.T) {
 	if !errors.As(err, &exitErr) || exitErr.Code != 7 {
 		t.Fatalf("err=%v want artifact exit 7", err)
 	}
-	if len(runner.calls) != 3 {
+	if len(runner.calls) != 7 {
 		t.Fatalf("blacksmith calls=%d want warmup/run/artifact-run without stop: %#v", len(runner.calls), runner.calls)
 	}
 	if result.Session == nil || !result.Session.Kept {
@@ -1083,7 +1125,7 @@ func TestBlacksmithKeepOnFailureKeepsTestboxAndWritesBundle(t *testing.T) {
 	t.Chdir(t.TempDir())
 	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
 		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "warmup" {
-			return LocalCommandResult{Stdout: "ready tbx_keepfail\n"}, nil
+			return LocalCommandResult{Stdout: "tbx_keepfail\n"}, nil
 		}
 		if len(req.Args) >= 3 && req.Args[0] == "testbox" && req.Args[1] == "run" {
 			if req.Stdout != nil {
@@ -1113,7 +1155,7 @@ func TestBlacksmithKeepOnFailureKeepsTestboxAndWritesBundle(t *testing.T) {
 	if !errors.As(err, &exitErr) || exitErr.Code != 7 {
 		t.Fatalf("err=%v want exit 7", err)
 	}
-	if len(runner.calls) != 2 {
+	if len(runner.calls) != 5 {
 		t.Fatalf("blacksmith calls=%d want warmup/run without stop: %#v", len(runner.calls), runner.calls)
 	}
 	if result.Session == nil || !result.Session.Kept {
@@ -1205,6 +1247,7 @@ func TestBlacksmithCollectRunArtifactsTerminatesSyncStall(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stderr bytes.Buffer
+	testOwnedBlacksmithClaim(t, "tbx_artifactstall", "jade-krill", "/repo")
 	backend := &blacksmithBackend{
 		spec: Provider{}.Spec(),
 		cfg:  baseConfig(),
@@ -1217,6 +1260,7 @@ func TestBlacksmithCollectRunArtifactsTerminatesSyncStall(t *testing.T) {
 	}
 	_, err := backend.CollectRunArtifacts(context.Background(), core.DelegatedRunArtifactRequest{
 		RunReq: core.RunRequest{
+			Repo:          core.Repo{Root: "/repo"},
 			ArtifactGlobs: []string{"reports/**"},
 		},
 		Result: core.RunResult{LeaseID: "tbx_artifactstall"},
@@ -1534,39 +1578,15 @@ func TestParseBlacksmithID(t *testing.T) {
 	}
 }
 
-func TestResolveBlacksmithLeaseID(t *testing.T) {
+func TestResolveBlacksmithDiscoveryID(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	if got, err := resolveBlacksmithLeaseID("tbx_raw123", "/repo", false); err != nil || got != "tbx_raw123" {
-		t.Fatalf("raw id got=%q err=%v", got, err)
+	if got, err := resolveBlacksmithDiscoveryID("tbx_raw123"); err != nil || got != "tbx_raw123" {
+		t.Fatalf("raw read-only discovery=%q err=%v", got, err)
 	}
-	if err := claimLeaseForRepoProvider("tbx_abc123", "Blue Lobster", blacksmithTestboxProvider, "/repo", time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("tbx_abc123", "Blue Lobster", blacksmithTestboxProvider, "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	got, err := resolveBlacksmithLeaseID("blue-lobster", "/repo", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "tbx_abc123" {
-		t.Fatalf("id=%q", got)
-	}
-	if _, err := resolveBlacksmithLeaseID("blue-lobster", "/other", false); err == nil || !strings.Contains(err.Error(), "use --reclaim") {
-		t.Fatalf("expected repo claim error, got %v", err)
-	}
-	if got, err := resolveBlacksmithLeaseID("blue-lobster", "/other", true); err != nil || got != "tbx_abc123" {
-		t.Fatalf("reclaim got=%q err=%v", got, err)
-	}
-}
-
-func TestBlacksmithClaimSlugPreservesExistingSlug(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	if err := claimLeaseForRepoProvider("tbx_abc123", "Blue Lobster", blacksmithTestboxProvider, "/repo", time.Minute, false); err != nil {
-		t.Fatal(err)
-	}
-	got, err := blacksmithClaimSlug("tbx_abc123", "tbx_abc123")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "Blue Lobster" {
-		t.Fatalf("slug=%q", got)
+	if got, err := resolveBlacksmithDiscoveryID("blue-lobster"); err != nil || got != "tbx_abc123" {
+		t.Fatalf("slug read-only discovery=%q err=%v", got, err)
 	}
 }

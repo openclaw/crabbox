@@ -299,10 +299,6 @@ func moveStoredTestboxKey(oldLeaseID, newLeaseID string) error {
 	return os.Rename(oldDir, newDir)
 }
 
-func MoveStoredTestboxKey(oldLeaseID, newLeaseID string) error {
-	return moveStoredTestboxKey(oldLeaseID, newLeaseID)
-}
-
 func removeStoredTestboxKey(leaseID string) {
 	_ = removeStoredTestboxConnectionArtifacts(leaseID)
 }

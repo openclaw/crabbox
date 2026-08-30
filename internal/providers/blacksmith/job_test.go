@@ -52,7 +52,7 @@ func TestBlacksmithJobNoSyncAdmission(t *testing.T) {
 			if claimProvider == "" {
 				claimProvider = blacksmithTestboxProvider
 			}
-			if err := claimLeaseForRepoProvider(existingID, "existing-box", claimProvider, repo, time.Minute, false); err != nil {
+			if err := core.ClaimLeaseForRepoProvider(existingID, "existing-box", claimProvider, repo, time.Minute, false); err != nil {
 				t.Fatal(err)
 			}
 			before, err := readLeaseClaim(existingID)
@@ -104,8 +104,8 @@ func TestBlacksmithJobNoSyncAdmission(t *testing.T) {
 				if fresh.LeaseID != freshID {
 					t.Errorf("sync control did not run and retain its lease: claim=%q stdout=%s", fresh.LeaseID, &stdout)
 				}
-				if lines := strings.Split(strings.TrimSpace(string(calls)), "\n"); len(lines) != 3 || lines[0] != "keygen" || !strings.HasPrefix(lines[1], "blacksmith testbox warmup ") || !strings.HasPrefix(lines[2], "blacksmith testbox run ") {
-					t.Errorf("sync control calls=%q, want keygen, warmup, run", calls)
+				if lines := strings.Split(strings.TrimSpace(string(calls)), "\n"); len(lines) != 6 || lines[0] != "keygen" || !strings.HasPrefix(lines[1], "blacksmith testbox warmup ") || !strings.HasPrefix(lines[2], "blacksmith testbox status ") || !strings.HasPrefix(lines[3], "blacksmith testbox status ") || !strings.HasPrefix(lines[4], "blacksmith testbox status ") || !strings.HasPrefix(lines[5], "blacksmith testbox run ") {
+					t.Errorf("sync control calls=%q, want keygen, warmup, exact status checks, run", calls)
 				}
 				return
 			}

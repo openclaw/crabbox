@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Required exact scoped Blacksmith Testbox claims for stop/reuse, fenced acquisition rollback and key ownership, and confirmed terminal cleanup before dropping state while preserving active-command cancellation and truthful cleanup results. Thanks @coygeek.
 - Required exact Modal sandbox and native scope bindings for stop, reuse, and one-shot cleanup, fencing claim changes and retaining uncertain or legacy resources until termination is confirmed. Thanks @coygeek.
 - Pinned the built-in Tart macOS image and verified cloned disk, NVRAM, and configuration contents before boot, retaining custom-image overrides, recording verified provenance, and waiting for the guest agent before SSH setup. Thanks @coygeek.
 - Reconciled failed Blacksmith stops only after fresh exact-Testbox terminal confirmation, removing unchanged owned claims and keys while preserving ownership fences, uncertain cleanup, and original command failures.

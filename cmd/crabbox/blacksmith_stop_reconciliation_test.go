@@ -48,25 +48,29 @@ func TestBlacksmithStopReconciliationCLIExit255(t *testing.T) {
 	if err := os.WriteFile(statusPath, []byte(nativeStatus.String()), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(statusPath+".ready", []byte(strings.Replace(nativeStatus.String(), "completed", "ready    ", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	fake := `#!/bin/sh
 set -eu
-printf '%s\n' "$*" >> "$CRABBOX_TEST_CALLS"
-[ "$1" = '--org' ] && [ "$2" = 'example-org' ] || exit 91
-shift 2
+case " $* " in *' --api-url https://backend.blacksmith.sh --org example-org '*) ;; *) exit 91;; esac
+if [ "$1" = '--org' ]; then [ "$2" = 'example-org' ] || exit 91; shift 2; fi
+printf '%s %s\n' "$1" "$2" >> "$CRABBOX_TEST_CALLS"
 case "$1 $2" in
-  'testbox warmup') printf 'ready tbx_process123\n' ;;
+  'testbox warmup') printf 'tbx_process123\n' ;;
   'testbox run')
     [ "$3" = '--id' ] && [ "$4" = 'tbx_process123' ] || exit 92
     [ -f "$CRABBOX_TEST_CLAIM" ] && [ -f "$CRABBOX_TEST_KEY" ] || exit 93
     printf 'FAIL: synthetic assertion mismatch\n' >&2
     exit 255 ;;
   'testbox stop')
-    [ "$#" = 4 ] && [ "$3" = '--id' ] && [ "$4" = 'tbx_process123' ] || exit 94
+    [ "$3" = '--id' ] && [ "$4" = 'tbx_process123' ] || exit 94
+    touch "$CRABBOX_TEST_STATUS.stopped"
     printf 'Error: stop failed: HTTP 409: testbox already stopped\n' >&2
     exit 1 ;;
   'testbox status')
-    [ "$#" = 4 ] && [ "$3" = '--id' ] && [ "$4" = 'tbx_process123' ] || exit 95
-    cat "$CRABBOX_TEST_STATUS" ;;
+    [ "$3" = '--id' ] && [ "$4" = 'tbx_process123' ] || exit 95
+    if [ -f "$CRABBOX_TEST_STATUS.stopped" ]; then cat "$CRABBOX_TEST_STATUS"; else cat "$CRABBOX_TEST_STATUS.ready"; fi ;;
   *) exit 96 ;;
 esac
 `
@@ -111,10 +115,8 @@ esac
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(calls)), "\n")
-	if len(lines) != 4 || !strings.HasPrefix(lines[0], "--org example-org testbox warmup ") ||
-		!strings.HasPrefix(lines[1], "--org example-org testbox run --id "+id+" ") ||
-		lines[2] != "--org example-org testbox stop --id "+id ||
-		lines[3] != "--org example-org testbox status --id "+id {
+	wantCalls := []string{"testbox warmup", "testbox status", "testbox status", "testbox run", "testbox status", "testbox stop", "testbox status", "testbox status"}
+	if strings.Join(lines, "\n") != strings.Join(wantCalls, "\n") {
 		t.Fatalf("unexpected provider calls: %s", calls)
 	}
 	for _, path := range []string{claimPath, key} {

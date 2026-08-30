@@ -10,7 +10,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/testutil"
@@ -53,10 +52,8 @@ func TestBlacksmithRunNoSyncContract(t *testing.T) {
 					if hidden, err := core.GitCheckoutHasHiddenOmissions(repo.Root); err != nil || hidden {
 						t.Fatalf("fixture must allow delegated sync: hidden=%t err=%v", hidden, err)
 					}
-					if tc.slug != "" {
-						if err := claimLeaseForRepoProvider(leaseID, tc.slug, blacksmithTestboxProvider, repo.Root, time.Minute, false); err != nil {
-							t.Fatal(err)
-						}
+					if tc.id != "" {
+						testOwnedBlacksmithClaim(t, leaseID, firstNonBlank(tc.slug, "jade-krill"), repo.Root)
 					}
 					before, err := readLeaseClaim(leaseID)
 					if err != nil {
@@ -73,7 +70,7 @@ func TestBlacksmithRunNoSyncContract(t *testing.T) {
 						operations = append(operations, req.Args[1])
 						switch req.Args[1] {
 						case "warmup":
-							return LocalCommandResult{Stdout: "ready " + leaseID + "\n"}, nil
+							return LocalCommandResult{Stdout: leaseID + "\n"}, nil
 						case "run":
 							var err error
 							claimDuringRun, err = readLeaseClaim(leaseID)

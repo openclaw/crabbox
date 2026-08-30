@@ -57,7 +57,7 @@ esac
 			}
 			t.Setenv("PATH", bin+":/usr/bin:/bin")
 			if id != "" {
-				if err := claimLeaseForRepoProvider(id, "owned", blacksmithTestboxProvider, repo, time.Hour, false); err != nil {
+				if err := core.ClaimLeaseForRepoProvider(id, "owned", blacksmithTestboxProvider, repo, time.Hour, false); err != nil {
 					t.Fatal(err)
 				}
 			}

@@ -39,7 +39,7 @@ crabbox run \
   -- pnpm test
 ```
 
-Reuse an existing Testbox by ID or slug:
+Reuse a Testbox with an exact local Crabbox claim, by ID or slug:
 
 ```sh
 crabbox run --provider blacksmith-testbox --id tbx_123 -- pnpm test
@@ -168,20 +168,63 @@ blacksmith testbox stop --id <tbx-id>
 
 On warmup, Crabbox generates a per-Testbox SSH key locally, passes the public
 key to `blacksmith testbox warmup --ssh-public-key`, parses the returned `tbx_`
-ID, claims the Testbox for the current repo, and assigns a friendly slug. Reusing
-a lease across repos needs `--reclaim`.
+ID, checks its native status, and durably binds the exact Testbox ID, provider,
+repo owner, friendly slug, organization, API endpoint, and observed workflow/job/ref.
+The key is moved into the lease directory under the same absent-claim fence;
+existing key or claim state is never replaced. Reusing a lease across repos needs
+`--reclaim`, which changes only the repo association of an already exact claim.
+
+Stop, reuse, delegated artifact commands, and one-shot cleanup require the
+unchanged claim. Each operation pins the selected organization and API endpoint
+with explicit native CLI flags and checks the exact Testbox status under the
+claim fence. A stop can cancel an active command without allowing claim writers
+to change its authority. After terminal confirmation, stop takes an exclusive
+fence and rechecks the original claim and native status before removing the claim
+and key. A changed claim or a command that fails to exit within the cleanup
+deadline leaves local ownership intact. `hydration_failed` prevents reuse but
+still requires confirmed termination for cleanup. Missing, malformed, duplicate or mismatched status is not proof of
+termination. Uncertain cleanup retains ownership; a successful workload with
+failed cleanup returns a failure and reports the session as kept. An earlier
+workload failure keeps its own exit code.
+
+Use the same organization/API route when reusing or stopping a lease. Workflow
+flags are still unnecessary for reuse; the provider checks stored native
+workflow/job/ref metadata. Token rotation within the same organization remains
+supported. This adapter uses the native status table (verified with Blacksmith
+CLI 0.4.57), and rejects an unsupported table format rather than guessing.
+
+### Older leases and lost local state
+
+Legacy claims without the exact resource/scope binding, and resources with no
+local claim, remain available to read-only `list`/`status`. They cannot authorize
+Crabbox stop or reuse, including with `--reclaim`. After independently verifying
+the organization and exact Testbox in Blacksmith, use native recovery:
+
+```sh
+blacksmith --org example-org testbox status --id tbx_EXACT_ID
+blacksmith --org example-org testbox stop --id tbx_EXACT_ID
+blacksmith --org example-org testbox status --id tbx_EXACT_ID
+```
+
+Verify the final status is terminal, then create a new Crabbox lease. Native stop
+also cancels the backing GitHub Actions run. Do not reconstruct claims from IDs,
+inventory or copied metadata.
 
 One-shot runs stop the Testbox and remove the local claim and key after the
 command completes, unless `--keep` is set. `--keep-on-failure` keeps a failed
-one-shot Testbox alive for debugging; successful runs still stop normally. A
-failed Testbox otherwise remains available until idle timeout or an explicit
-`crabbox stop`.
+one-shot Testbox alive for debugging; successful runs still stop normally. Unconfirmed cleanup leaves the Testbox and its local claim/key available for
+inspection and an exact stop retry.
 
 If `list`/`status` work but new warmups sit `queued` with no IP, Blacksmith is
 accepting requests but not assigning capacity. Stop any queued IDs you created
 and fall back to AWS, Hetzner, Static SSH, or Daytona until Blacksmith service,
-billing, or org limits recover. A failed warmup triggers a best-effort cleanup
-sweep of newly created Testboxes that match your configured workflow/job/ref.
+billing, or org limits recover. Failed warmup can roll back only a unique bare creation receipt from that
+invocation, under its pinned route and while its claim is absent. There is no
+inventory sweep. An ambiguous receipt, appearing/partial claim or existing key
+state prevents rollback. Missing or ambiguous receipts retain the invocation's
+pending SSH key and print its identifier for independently verified native
+recovery; they never authorize a guessed stop. Uncertain rollback prints the exact resource and pending
+key identifier for native inspection; it does not erase recovery state.
 
 ### Failure bundles and proof
 

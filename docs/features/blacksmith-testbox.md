@@ -29,7 +29,7 @@ store Blacksmith credentials.
 
 ## Quick start
 
-If you already have a Testbox ID (`tbx_...`), no Crabbox YAML is required:
+If Crabbox already holds an exact local claim for a Testbox ID (`tbx_...`), no workflow YAML is required for reuse:
 
 ```sh
 crabbox run --provider blacksmith-testbox --id tbx_123 -- pnpm test
@@ -43,8 +43,8 @@ crabbox status --provider blacksmith-testbox --id blue-lobster
 crabbox stop --provider blacksmith-testbox blue-lobster
 ```
 
-This path only needs Blacksmith auth and a reachable Testbox. Crabbox resolves the ID or slug,
-preserves the local repo claim, forwards the command to `blacksmith testbox run`, and prints
+This path needs Blacksmith auth in the claim’s original organization/API scope and a reachable,
+exactly claimed Testbox. Crabbox verifies the ID, native workflow identity and unchanged claim, then forwards the command to `blacksmith testbox run`, and prints
 `sync=delegated` in the final summary.
 
 To create a fresh Testbox without YAML, pass the workflow details as flags:
@@ -163,18 +163,20 @@ acknowledged only when that query succeeds without cancellation and its stdout
 contains the native table header and one complete, unambiguous row identifying
 the **exact requested ID** with state **`completed`**. The IP cell may be empty
 after native stop clears it; the remaining columns must still be present and
-aligned with the header. Successful stops skip this query. Claimless raw-ID stops
-retain their existing native-stop behavior.
+aligned with the header. Successful stops also require terminal confirmation.
+Raw IDs without exact local ownership never reach native stop.
 
 Only `completed` establishes terminal status for this reconciliation. A 409 or
 “already stopped” error, stderr text, missing inventory/404, malformed or duplicate
 rows, other states, and failed or canceled status queries do not authorize local
 removal. Without confirmation, Crabbox preserves the original stop error and
 diagnostics and retains the unchanged claim and stored key for retry. Confirmed
-completion removes that claim and key and prints a reconciliation note.
+completion permits an exclusive recheck of the original claim and native status;
+only successful local finalization prints a cleanup reconciliation note.
 
-Reconciliation applies to explicit stop and automatic one-shot cleanup; it never
-changes the original run result, command exit code, or timing exit code. A successful
+Reconciliation applies to explicit stop and automatic one-shot cleanup. It
+preserves an earlier workload failure; unconfirmed cleanup after a successful
+workload returns failure consistently in the CLI, timing and saved metadata. A successful
 GitHub Actions job is not proof that the delegated command succeeded: idle expiry
 can complete the job successfully. `--keep`, `--keep-on-failure`, and reused `--id`
 runs retain their existing cleanup policy.
@@ -183,8 +185,7 @@ If `blacksmith testbox list --all` and `crabbox status` both work but new warmup
 with no IP, treat it as Blacksmith service, queue, org-limit, or billing pressure rather than a
 Crabbox provisioning bug. Stop queued IDs you created and switch to another provider until the
 Blacksmith account or service recovers. A `warmup` failure prints a hint suggesting a
-coordinator-backed provider (for example `--provider aws`) and best-effort cleans up the Testbox
-it was creating.
+coordinator-backed provider (for example `--provider aws`) and can roll back only the unique Testbox receipt from that invocation while its local claim is absent. It never infers ownership from newly listed resources.
 
 ### Portal visibility
 
@@ -219,6 +220,21 @@ markers. If the CLI starts syncing but does not print a completion marker within
 `CRABBOX_BLACKSMITH_SYNC_TIMEOUT_MS` (milliseconds; `0` disables the guard).
 
 ## Ownership boundary
+
+Stop, reuse, command execution and artifact retrieval require an exact local
+claim binding the provider, Testbox ID, slug, repository owner, organization/API
+route and native workflow/job/ref. Native status checks and actions share the
+unchanged-claim fence. Stop can cancel an active command, then rechecks the
+original claim under an exclusive fence before removing the claim and key.
+Terminal status must be confirmed; a changed claim or cleanup deadline retains
+local state. Uncertainty marks the session kept. A successful
+workload with failed cleanup returns nonzero, while an earlier workload failure
+preserves its exit code.
+
+Legacy or lost claims require independently verified native Blacksmith cleanup;
+raw IDs are accepted only for read-only discovery until a new Crabbox lease is
+created. `--reclaim` changes repository association for an already exact claim,
+not resource or authority. See the [migration and recovery instructions](../providers/blacksmith-testbox.md#older-leases-and-lost-local-state).
 
 - **Blacksmith owns** provisioning, workflow hydration, remote workspace setup, sync, command
   transport, logs emitted by its CLI, machine connectivity, and idle expiry.

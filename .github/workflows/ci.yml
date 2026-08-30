@@ -204,6 +204,9 @@ jobs:
       - name: Test native Windows failure captures and private outputs
         run: go test ./internal/cli/ -run '^(TestFailureBundle|TestNativeWindowsFailureBundle|TestPrivateRunOutput|TestManagedAttestKeyWindows|TestArtifactOutputWindows)' -count=1 -v
 
+      - name: Test native Windows shared claim cancellation fences
+        run: go test ./internal/cli/ -run '^TestClaim(Shared|FenceContext)' -count=1 -v
+
       - name: Test Windows SSH and rsync transport selection
         run: go test ./internal/cli/ -run '^(TestWindowsWSLNativeToolProbeUsesDirectCommandOutput|TestWindowsWSLNativeToolPathsRejectsWindowsShims|TestDirectSSHExecutableSelection|TestSSHCommandContextUsesNativeWindowsOpenSSHEvenWhenPATHSelectsMSYS2|TestResolveWindowsNativeRsyncPairUsesExactSibling|TestResolveWindowsNativeRsyncPairFailsClosedWithoutSibling|TestBindWindowsNativeRsyncSSHPreservesOwnedArguments|TestWindowsNativeRsyncCommandUsesSiblingPairAndEnvironment|TestResolvedSSHCopyCommandUsesNativeWindowsSiblingPair|TestResolvedSSHCopyCommandFailsClosedWithoutNativeWindowsSibling)$' -count=1 -v
 

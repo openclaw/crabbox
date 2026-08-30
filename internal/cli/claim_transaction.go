@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 )
@@ -39,6 +40,7 @@ const (
 )
 
 type leaseClaimTransaction struct {
+	context       context.Context
 	guard         func(leaseClaim, bool) error
 	action        func() (claimActionDecision, error)
 	mutate        func(*leaseClaim) error
@@ -83,7 +85,11 @@ func transactLeaseClaim(leaseID string, tx leaseClaimTransaction) (leaseClaim, e
 		}
 	}
 	var updated leaseClaim
-	err = withLeaseClaimLock(path, func() error {
+	ctx := tx.context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	err = withLeaseClaimLockContext(ctx, path, false, func() error {
 		claim, exists, err := readLeaseClaimPathWithPresence(path)
 		if err != nil {
 			return err
@@ -161,6 +167,7 @@ type leaseClaimEndpointPolicy struct {
 }
 
 type leaseClaimTargetOptions struct {
+	context   context.Context
 	endpoint  leaseClaimEndpointMode
 	directory claimDirectoryPolicy
 	action    func() error

@@ -112,44 +112,6 @@ func blacksmithListAllArgs(cfg Config) []string {
 	return append(blacksmithListArgs(cfg), "--all")
 }
 
-var blacksmithStatusHeader = regexp.MustCompile(`^(ID) {2,}(STATUS) {2,}(IP) {2,}(WORKFLOW) {2,}(JOB) {2,}(REF) {2,}(CREATED) {2,}(RUN URL)$`)
-var blacksmithStatusRunURL = regexp.MustCompile(`^https://github\.com/[^/\s]+/[^/\s]+/actions/runs/[0-9]+$`)
-
-// Cleanup accepts only the native single-ID status table, never the permissive
-// inventory parser or stderr. Completed is the only established terminal state.
-func blacksmithCompletedStatus(stdout, leaseID string) bool {
-	lines := strings.Split(strings.TrimSuffix(stdout, "\n"), "\n")
-	if len(lines) != 2 {
-		return false
-	}
-	columns := blacksmithStatusHeader.FindStringSubmatchIndex(lines[0])
-	if columns == nil || strings.ContainsAny(lines[1], "\t\r") {
-		return false
-	}
-	// Native tabwriter columns count runes and include two spaces of padding.
-	// Header boundaries preserve an empty IP cell and spaces within metadata.
-	row := []rune(lines[1])
-	var cells [8]string
-	for i := range cells {
-		start, end := columns[2+i*2], len(row)
-		if i+1 < len(cells) {
-			end = columns[2+(i+1)*2]
-		}
-		if start >= len(row) || end > len(row) {
-			return false
-		}
-		cell := string(row[start:end])
-		if i+1 < len(cells) && !strings.HasSuffix(cell, "  ") {
-			return false
-		}
-		cells[i] = strings.TrimRight(cell, " ")
-		if (cells[i] == "" && i != 2) || strings.HasPrefix(cells[i], " ") {
-			return false
-		}
-	}
-	return cells[0] == leaseID && cells[1] == "completed" && blacksmithStatusRunURL.MatchString(cells[7])
-}
-
 func parseBlacksmithList(output string) []blacksmithListItem {
 	items := []blacksmithListItem{}
 	for _, line := range strings.Split(output, "\n") {
@@ -263,7 +225,7 @@ func blacksmithSyncTimeout(env func(string) string) time.Duration {
 	return 5 * time.Minute
 }
 
-func resolveBlacksmithLeaseID(identifier, repoRoot string, reclaim bool) (string, error) {
+func resolveBlacksmithDiscoveryID(identifier string) (string, error) {
 	if identifier == "" {
 		return "", exit(2, "blacksmith-testbox requires --id <tbx-id-or-slug>")
 	}
@@ -280,23 +242,7 @@ func resolveBlacksmithLeaseID(identifier, repoRoot string, reclaim bool) (string
 	if claim.Provider != "" && claim.Provider != blacksmithTestboxProvider {
 		return "", exit(4, "%q is claimed by provider %s", identifier, claim.Provider)
 	}
-	if repoRoot != "" && claim.RepoRoot != "" && claim.RepoRoot != repoRoot && !reclaim {
-		return "", exit(2, "lease %s is claimed by repo %s; use --reclaim to claim it for %s", claim.LeaseID, claim.RepoRoot, repoRoot)
-	}
 	return claim.LeaseID, nil
-}
-
-func blacksmithClaimSlug(identifier, leaseID string) (string, error) {
-	for _, candidate := range []string{identifier, leaseID} {
-		claim, ok, err := resolveLeaseClaim(candidate)
-		if err != nil {
-			return "", err
-		}
-		if ok && claim.LeaseID == leaseID {
-			return claim.Slug, nil
-		}
-	}
-	return "", nil
 }
 
 func blacksmithCommandString(command []string, shellMode bool) string {

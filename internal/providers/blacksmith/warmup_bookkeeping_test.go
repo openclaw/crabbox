@@ -54,7 +54,7 @@ func testWarmupBookkeeping(t *testing.T, mode string) {
 		"HOME": home, "XDG_CONFIG_HOME": home, "XDG_STATE_HOME": home,
 		"CRABBOX_CONFIG":            filepath.Join(home, "missing.yaml"),
 		"CRABBOX_COORDINATOR_TOKEN": "", "CRABBOX_COORDINATOR_TOKEN_COMMAND": "",
-		"CRABBOX_PROVIDER": "blacksmith-testbox", "CRABBOX_BLACKSMITH_ORG": "",
+		"CRABBOX_PROVIDER": "blacksmith-testbox", "CRABBOX_BLACKSMITH_ORG": "example-org",
 		"CRABBOX_ACCESS_CLIENT_ID": "", "CRABBOX_ACCESS_CLIENT_SECRET": "", "CRABBOX_ACCESS_TOKEN": "",
 		"CF_ACCESS_CLIENT_ID": "", "CF_ACCESS_CLIENT_SECRET": "", "CF_ACCESS_TOKEN": "",
 		"CRABBOX_COORDINATOR_MODE": "", "CRABBOX_OWNER": "alice@example.com",
@@ -68,6 +68,11 @@ func testWarmupBookkeeping(t *testing.T, mode string) {
 	log := filepath.Join(home, "calls")
 	t.Setenv("BOOKKEEPING_CALLS", log)
 	t.Setenv("BOOKKEEPING_MODE", mode)
+	statusPath := filepath.Join(home, "native-status.txt")
+	if err := os.WriteFile(statusPath, []byte(testBlacksmithStatus("tbx_ready123", "ready")), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BOOKKEEPING_STATUS", statusPath)
 	marker := filepath.Join(home, "list-started")
 	t.Setenv("BOOKKEEPING_STARTED", marker)
 	for name, script := range map[string]string{
@@ -78,7 +83,8 @@ func testWarmupBookkeeping(t *testing.T, mode string) {
 case "$*" in
   *"testbox warmup"*)
     if [ "$BOOKKEEPING_MODE" = 'allocation failure' ]; then exit 7; fi
-    printf 'ready tbx_ready123\n' ;;
+    printf 'tbx_ready123\n' ;;
+  *"testbox status"*) cat "$BOOKKEEPING_STATUS" ;;
   *"testbox list"*)
     if [ "$BOOKKEEPING_MODE" = 'blocked list' ]; then
       /bin/sleep 3 &
@@ -235,7 +241,7 @@ func TestBlacksmithWarmupBookkeepingFinalization(t *testing.T) {
 				if mode == "allocation failure" {
 					return LocalCommandResult{ExitCode: 7}, errors.New("allocation rejected")
 				}
-				return LocalCommandResult{Stdout: "ready tbx_ready123\n"}, nil
+				return LocalCommandResult{Stdout: "tbx_ready123\n"}, nil
 			}}
 			cfg := baseConfig()
 			cfg.Blacksmith.Workflow = "ci.yml"
@@ -285,7 +291,7 @@ func TestBlacksmithWarmupBookkeepingFinalization(t *testing.T) {
 					t.Fatalf("timing=%+v", report)
 				}
 			}
-			if finalizations != 1 || len(runner.calls) != 1 || strings.Count(stdout.String(), "warmup complete total=5s") != 1 {
+			if finalizations != 1 || len(runner.calls) != 3 || strings.Count(stdout.String(), "warmup complete total=5s") != 1 {
 				t.Fatalf("finalizations=%d calls=%v stdout=%q", finalizations, runner.calls, stdout.String())
 			}
 			if _, err := readLeaseClaim("tbx_ready123"); err != nil {

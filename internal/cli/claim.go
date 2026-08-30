@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -14,8 +15,6 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
-
-	"github.com/gofrs/flock"
 )
 
 type leaseClaim struct {
@@ -334,6 +333,7 @@ type staticClaimDetails struct {
 }
 
 type claimMetadata struct {
+	context             context.Context
 	setCacheVolumes     bool
 	cacheVolumes        []string
 	setEndpoint         bool
@@ -377,6 +377,7 @@ func claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, 
 		directory = claimDirectoryCreate
 	}
 	updated, err := transactLeaseClaim(leaseID, leaseClaimTransaction{
+		context:     metadata.context,
 		guard:       guard,
 		action:      claimTransactionAction(metadata.action),
 		revision:    claimRevisionBeforeAction,
@@ -518,6 +519,7 @@ func claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug string, cfg
 	provider, staticDetails := claimProviderDetailsForConfig(cfg)
 	var updated leaseClaim
 	err := claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, cfg.Pond, staticDetails, repoRoot, idleTimeout, reclaim, claimMetadata{
+		context:         options.context,
 		setCacheVolumes: true,
 		cacheVolumes:    CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes),
 		setEndpoint:     true,
@@ -595,11 +597,15 @@ func updateLeaseClaimEndpointIfUnchangedAfter(leaseID string, expected leaseClai
 }
 
 func withLeaseClaimUnchanged(leaseID string, expected leaseClaim, action func() error) error {
+	return withLeaseClaimUnchangedContext(context.Background(), leaseID, expected, false, action)
+}
+
+func withLeaseClaimUnchangedContext(ctx context.Context, leaseID string, expected leaseClaim, shared bool, action func() error) error {
 	path, err := leaseClaimPath(leaseID)
 	if err != nil {
 		return err
 	}
-	return withLeaseClaimLock(path, func() error {
+	return withLeaseClaimLockContext(ctx, path, shared, func() error {
 		claim, exists, err := readLeaseClaimPathWithPresence(path)
 		if err != nil {
 			return err
@@ -1006,20 +1012,7 @@ func claimMutationMutex(path string) *sync.Mutex {
 }
 
 func withLeaseClaimLock(path string, fn func() error) error {
-	lockPath, err := leaseClaimLockPath(path)
-	if err != nil {
-		return err
-	}
-	mu := claimMutationMutex(lockPath)
-	mu.Lock()
-	defer mu.Unlock()
-
-	lock := flock.New(lockPath, flock.SetPermissions(0o600))
-	if err := lock.Lock(); err != nil {
-		return exit(2, "lock claim %s: %v", path, err)
-	}
-	defer lock.Unlock()
-	return fn()
+	return withLeaseClaimLockContext(context.Background(), path, false, fn)
 }
 
 func withLeaseIDOperationLock(leaseID string, action func() error) error {
@@ -1034,6 +1027,10 @@ func withLeaseIDOperationLock(leaseID string, action func() error) error {
 }
 
 func withDurableLeaseClaimLock(leaseID string, action func(*leaseClaim, bool, func() error) error) error {
+	return withDurableLeaseClaimLockContext(context.Background(), leaseID, action)
+}
+
+func withDurableLeaseClaimLockContext(ctx context.Context, leaseID string, action func(*leaseClaim, bool, func() error) error) error {
 	path, err := leaseClaimPath(leaseID)
 	if err != nil {
 		return err
@@ -1046,7 +1043,7 @@ func withDurableLeaseClaimLock(leaseID string, action func(*leaseClaim, bool, fu
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return exit(2, "create claim directory: %v", err)
 	}
-	return withLeaseClaimLock(path, func() error {
+	return withLeaseClaimLockContext(ctx, path, false, func() error {
 		claim, exists, err := readLeaseClaimPathWithPresence(path)
 		if err != nil {
 			return err
@@ -1553,7 +1550,11 @@ func cleanupLeaseClaimIfUnchangedAfter(leaseID string, expected leaseClaim, expe
 }
 
 func cleanupLeaseClaimIfUnchangedAfterWithSync(leaseID string, expected leaseClaim, expectedExists bool, action func() error, syncDirectory func(string) error) error {
-	return finalizeLeaseClaimIfUnchangedAfter(leaseID, expected, expectedExists, func() (bool, error) {
+	return cleanupLeaseClaimIfUnchangedAfterContext(context.Background(), leaseID, expected, expectedExists, action, syncDirectory)
+}
+
+func cleanupLeaseClaimIfUnchangedAfterContext(ctx context.Context, leaseID string, expected leaseClaim, expectedExists bool, action func() error, syncDirectory func(string) error) error {
+	return finalizeLeaseClaimIfUnchangedAfterContext(ctx, leaseID, expected, expectedExists, func() (bool, error) {
 		if action != nil {
 			if err := action(); err != nil {
 				return false, err
@@ -1566,11 +1567,15 @@ func cleanupLeaseClaimIfUnchangedAfterWithSync(leaseID string, expected leaseCla
 // Finalization keeps the original claim when remote cleanup is retained or
 // pending. The same fence covers admission, provider effects and local removal.
 func finalizeLeaseClaimIfUnchangedAfter(leaseID string, expected leaseClaim, expectedExists bool, action func() (bool, error), syncDirectory func(string) error) error {
+	return finalizeLeaseClaimIfUnchangedAfterContext(context.Background(), leaseID, expected, expectedExists, action, syncDirectory)
+}
+
+func finalizeLeaseClaimIfUnchangedAfterContext(ctx context.Context, leaseID string, expected leaseClaim, expectedExists bool, action func() (bool, error), syncDirectory func(string) error) error {
 	path, err := leaseClaimPath(leaseID)
 	if err != nil {
 		return err
 	}
-	return withLeaseClaimLock(path, func() error {
+	return withLeaseClaimLockContext(ctx, path, false, func() error {
 		claim, exists, err := readLeaseClaimPathWithPresence(path)
 		if err != nil {
 			return err
