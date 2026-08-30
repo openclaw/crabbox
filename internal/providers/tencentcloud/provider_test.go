@@ -244,6 +244,7 @@ func TestTencentCloudMarketReachesRunInstanceRequest(t *testing.T) {
 					Type:  "S5.SMALL2",
 				},
 			})
+			core.MarkCapacityMarketExplicit(&cfg)
 			req, err := buildRunInstanceRequest(cfg, "cbx_abcdef123456", "my-app", "ssh-ed25519 AAAATEST", nil)
 			if (err == nil) != test.ok {
 				t.Fatalf("buildRunInstanceRequest market=%q error=%v, want success=%v", test.market, err, test.ok)
@@ -252,6 +253,25 @@ func TestTencentCloudMarketReachesRunInstanceRequest(t *testing.T) {
 				t.Fatalf("buildRunInstanceRequest market=%q chargeType=%q, want %q", test.market, req.InstanceChargeType, test.want)
 			}
 		})
+	}
+}
+
+func TestTencentCloudUnconfiguredMarketPreservesOnDemand(t *testing.T) {
+	cfg := cfgForRun(core.Config{
+		TargetOS: core.TargetLinux,
+		Capacity: core.CapacityConfig{Market: "spot"},
+		TencentCloud: core.TencentCloudConfig{
+			Zone:  "ap-singapore-1",
+			Image: "img-test",
+			Type:  "S5.SMALL2",
+		},
+	})
+	req, err := buildRunInstanceRequest(cfg, "cbx_abcdef123456", "my-app", "ssh-ed25519 AAAATEST", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.InstanceChargeType != "POSTPAID_BY_HOUR" {
+		t.Fatalf("unconfigured chargeType=%q, want POSTPAID_BY_HOUR", req.InstanceChargeType)
 	}
 }
 

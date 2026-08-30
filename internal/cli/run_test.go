@@ -6529,6 +6529,9 @@ func TestApplyCapacityMarketFlag(t *testing.T) {
 	if cfg.Capacity.Market != "on-demand" {
 		t.Fatalf("market=%s want on-demand", cfg.Capacity.Market)
 	}
+	if !CapacityMarketExplicit(cfg) {
+		t.Fatal("command-line market must retain explicit-selection provenance")
+	}
 
 	fs = newFlagSet("test", io.Discard)
 	market = fs.String("market", "spot", "")

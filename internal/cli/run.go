@@ -21,6 +21,7 @@ func applyCapacityMarketFlag(cfg *Config, fs *flag.FlagSet, market string) error
 	switch market {
 	case "spot", "on-demand":
 		cfg.Capacity.Market = market
+		MarkCapacityMarketExplicit(cfg)
 		return nil
 	default:
 		return exit(2, "--market must be spot or on-demand")

@@ -163,6 +163,7 @@ type Config struct {
 	EnvAllow                      []string
 	envAllowOverriddenByEnv       bool
 	Capacity                      CapacityConfig
+	capacityMarketExplicit        bool
 	Actions                       ActionsConfig
 	Blacksmith                    BlacksmithConfig
 	KubeVirt                      KubeVirtConfig
@@ -2569,6 +2570,14 @@ func applyOSImageProviderDefaults(cfg *Config, force bool) {
 
 func MarkIsloImageExplicit(cfg *Config) {
 	cfg.isloImageExplicit = true
+}
+
+func MarkCapacityMarketExplicit(cfg *Config) {
+	cfg.capacityMarketExplicit = true
+}
+
+func CapacityMarketExplicit(cfg Config) bool {
+	return cfg.capacityMarketExplicit
 }
 
 func IsloImageExplicit(cfg Config) bool {
@@ -6078,6 +6087,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 	if file.Capacity != nil {
 		if file.Capacity.Market != "" {
 			cfg.Capacity.Market = file.Capacity.Market
+			MarkCapacityMarketExplicit(cfg)
 		}
 		if file.Capacity.Strategy != "" {
 			cfg.Capacity.Strategy = file.Capacity.Strategy
@@ -8751,7 +8761,10 @@ func applyEnv(cfg *Config) error {
 	if idleTimeout := os.Getenv("CRABBOX_IDLE_TIMEOUT"); idleTimeout != "" {
 		applyLeaseDuration(&cfg.IdleTimeout, idleTimeout)
 	}
-	cfg.Capacity.Market = getenv("CRABBOX_CAPACITY_MARKET", cfg.Capacity.Market)
+	if market := os.Getenv("CRABBOX_CAPACITY_MARKET"); market != "" {
+		cfg.Capacity.Market = market
+		MarkCapacityMarketExplicit(cfg)
+	}
 	cfg.Capacity.Strategy = getenv("CRABBOX_CAPACITY_STRATEGY", cfg.Capacity.Strategy)
 	cfg.Capacity.Fallback = getenv("CRABBOX_CAPACITY_FALLBACK", cfg.Capacity.Fallback)
 	if value, ok := getenvBool("CRABBOX_CAPACITY_HINTS"); ok {

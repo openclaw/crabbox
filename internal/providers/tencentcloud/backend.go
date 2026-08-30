@@ -168,7 +168,11 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 }
 
 func buildRunInstanceRequest(cfg core.Config, leaseID, slug, publicKey string, tags []tag) (runInstanceRequest, error) {
-	chargeType, err := tencentCloudChargeType(cfg.Capacity.Market)
+	market := "on-demand"
+	if core.CapacityMarketExplicit(cfg) {
+		market = cfg.Capacity.Market
+	}
+	chargeType, err := tencentCloudChargeType(market)
 	if err != nil {
 		return runInstanceRequest{}, err
 	}
