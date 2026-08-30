@@ -3121,6 +3121,8 @@ func TestControllerWebVNCResolveIsIdentityBoundAndReadOnly(t *testing.T) {
 	}
 }
 
+const vncTunnelFixtureRelease = "release-tunnel\n"
+
 func TestVNCForegroundTunnelReportsSSHExit(t *testing.T) {
 	if runtime.GOOS == "windows" || !controllerListenerOwnershipSupported() {
 		t.Skip("process listener ownership fixture")
@@ -3138,14 +3140,29 @@ func TestVNCForegroundTunnelReportsSSHExit(t *testing.T) {
 	t.Setenv("CRABBOX_VNC_TUNNEL_HELPER", "1")
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	port := availableControllerListenerTestPort(t)
-	tunnel, err := startVNCForegroundTunnel(context.Background(), SSHTarget{Host: "example.invalid", User: "tester", Port: "22"}, port, "127.0.0.1", "5900")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tunnel, err := startVNCForegroundTunnel(ctx, SSHTarget{Host: "example.invalid", User: "tester", Port: "22"}, port, "127.0.0.1", "5900")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stopProcess(tunnel)
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", port), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		_ = conn.Close()
+		t.Fatal(err)
+	}
+	_, writeErr := io.WriteString(conn, vncTunnelFixtureRelease)
+	if err := errors.Join(writeErr, conn.Close()); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case <-tunnel.Done():
-		if err := tunnel.ExitError(); err == nil || !strings.Contains(err.Error(), "intentional tunnel exit") {
+		var exitErr *exec.ExitError
+		if err := tunnel.ExitError(); !errors.As(err, &exitErr) || exitErr.ExitCode() != 23 || !strings.Contains(err.Error(), "intentional tunnel exit") {
 			t.Fatalf("tunnel exit error=%v", err)
 		}
 	case <-time.After(3 * time.Second):
@@ -3174,10 +3191,30 @@ func TestVNCForegroundTunnelHelperProcess(t *testing.T) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(22)
 	}
-	// Coverage and race instrumentation can make the parent-side process/socket
-	// ownership scan noticeably slower than an ordinary run. Keep the helper
-	// listener alive long enough for that exact-ownership proof to complete.
-	time.Sleep(3 * time.Second)
+	// Keep the listener alive until the parent has verified its exact owner.
+	// A connect-and-close readiness probe must not release the helper.
+	if err := listener.(*net.TCPListener).SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(22)
+	}
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "waiting for tunnel fixture release:", err)
+			os.Exit(22)
+		}
+		if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+			_ = conn.Close()
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(22)
+		}
+		marker := make([]byte, len(vncTunnelFixtureRelease))
+		_, readErr := io.ReadFull(conn, marker)
+		_ = conn.Close()
+		if readErr == nil && string(marker) == vncTunnelFixtureRelease {
+			break
+		}
+	}
 	_ = listener.Close()
 	fmt.Fprintln(os.Stderr, "intentional tunnel exit")
 	os.Exit(23)
