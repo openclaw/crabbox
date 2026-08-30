@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Required durable Incus ownership claims for stop and cleanup, preserving legacy instances and keys without implicit adoption, keeping status read-only, and rechecking identity after stop. Thanks @coygeek.
 - Required exact, unchanged Proxmox cleanup claims bound to the cluster scope, VMID, and native generation ID, retaining unclaimed or ambiguous VMs and keys and preventing endpoint refreshes from rebinding ownership. Thanks @coygeek.
 - Required exact, unchanged Tart cleanup claims bound to the VM's storage and ownership marker, preserving unclaimed, legacy, replaced, or ambiguous VMs and local keys.
 - Kept WSL2 partial-cleanup hashing within its cancellation budget and published complete workload exit results atomically, preserving staged ownership checks and rejecting malformed statuses. Thanks @vincentkoc.

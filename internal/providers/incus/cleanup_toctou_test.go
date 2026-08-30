@@ -95,6 +95,8 @@ func testCleanupPreservesInstanceReclaimedDuringList(t *testing.T, dryRun, reser
 	); err != nil {
 		t.Fatalf("write initial claim: %v", err)
 	}
+	claimDurableFixture(t, fake, name)
+	staleLabels = labelsFromInstance(*fake.instances[name])
 	backdateIncusClaim(t, leaseID, now.Add(-2*time.Hour))
 	keyPath, err := core.TestboxKeyPath(leaseID)
 	if err != nil {
@@ -108,7 +110,7 @@ func testCleanupPreservesInstanceReclaimedDuringList(t *testing.T, dryRun, reser
 	}
 
 	publishFreshClaim := func() {
-		freshLabels := core.TouchDirectLeaseLabels(staleLabels, core.BaseConfig(), "ready", time.Now().UTC())
+		freshLabels := touchInstanceLabels(staleLabels, core.BaseConfig(), "ready", time.Now().UTC())
 		freshServer := core.Server{
 			CloudID:  name,
 			Provider: providerName,
@@ -119,7 +121,7 @@ func testCleanupPreservesInstanceReclaimedDuringList(t *testing.T, dryRun, reser
 		freshServer.Labels = cloneMap(freshLabels)
 		freshServer.Labels[incusClaimReservationUntilLabel] = core.LeaseLabelTime(time.Now().UTC().Add(time.Hour))
 		if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(
-			leaseID, slug, providerName, instanceScope(name), "", repoRoot,
+			leaseID, slug, providerName, claimScopeForInstance(*fake.instances[name]), "", repoRoot,
 			5*time.Minute, true, freshServer, core.SSHTarget{},
 		); err != nil {
 			t.Fatalf("reclaim during ListInstances: %v", err)
@@ -135,7 +137,7 @@ func testCleanupPreservesInstanceReclaimedDuringList(t *testing.T, dryRun, reser
 		if !reserveBeforeSnapshot {
 			publishFreshClaim()
 		}
-		freshLabels := core.TouchDirectLeaseLabels(staleLabels, core.BaseConfig(), "ready", time.Now().UTC())
+		freshLabels := touchInstanceLabels(staleLabels, core.BaseConfig(), "ready", time.Now().UTC())
 		freshConfig := cloneMap(instanceConfig)
 		for key, value := range freshLabels {
 			freshConfig[labelKey(key)] = value
@@ -235,6 +237,7 @@ func TestCleanupRemovesUnchangedClaimedExpiredInstance(t *testing.T) {
 	); err != nil {
 		t.Fatalf("write orphan claim: %v", err)
 	}
+	claimDurableFixture(t, fake, name)
 	// Newer than the stale instance state, but older than the bounded Resolve
 	// reservation window. An abandoned reservation must not leak the instance.
 	backdateIncusClaim(t, leaseID, now.Add(-time.Hour), now.Add(-time.Minute))
@@ -264,8 +267,8 @@ func TestCleanupRemovesUnchangedClaimedExpiredInstance(t *testing.T) {
 	}
 	if claim, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName); err != nil {
 		t.Fatalf("resolve removed claim: %v", err)
-	} else if ok || claim.LeaseID != "" {
-		t.Fatalf("claim still present after legitimate cleanup: %#v", claim)
+	} else if !ok || claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != "released" {
+		t.Fatalf("durable claim not finalized after legitimate cleanup: %#v", claim)
 	}
 	if _, err := os.Stat(keyPath); err != nil {
 		t.Fatalf("stored key should be retained after cleanup: %v", err)
@@ -317,14 +320,14 @@ func TestCleanupClaimGenerationGuardHonorsActiveReservation(t *testing.T) {
 	}
 }
 
-func TestResolveRollsBackReservationWhenCleanupDeletedAbsentClaimInstance(t *testing.T) {
+func TestResolveRollsBackReservationWhenInstanceDisappearsOrChanges(t *testing.T) {
 	for _, test := range []struct {
 		name        string
 		replacement bool
 		wantError   string
 	}{
 		{name: "deleted", wantError: "revalidate Incus instance"},
-		{name: "same-name replacement", replacement: true, wantError: "changed lease identity"},
+		{name: "same-name replacement", replacement: true, wantError: "legacy lease claim scope mismatch"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -332,10 +335,10 @@ func TestResolveRollsBackReservationWhenCleanupDeletedAbsentClaimInstance(t *tes
 			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 			t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".state"))
 			const (
-				leaseID = "cbx_incus_absent_claim"
-				name    = "crabbox-incus-absent-claim"
+				leaseID = "cbx_incus_reserved_claim"
+				name    = "crabbox-incus-reserved-claim"
 			)
-			labels := core.DirectLeaseLabels(core.BaseConfig(), leaseID, "absent-claim", providerName, "", false, time.Now().UTC())
+			labels := core.DirectLeaseLabels(core.BaseConfig(), leaseID, "reserved-claim", providerName, "", false, time.Now().UTC())
 			config := make(map[string]string, len(labels))
 			for key, value := range labels {
 				config[labelKey(key)] = value
@@ -346,6 +349,8 @@ func TestResolveRollsBackReservationWhenCleanupDeletedAbsentClaimInstance(t *tes
 				},
 				states: map[string]*api.InstanceState{name: {Status: "Stopped", StatusCode: api.Stopped}},
 			}
+			repoRoot := t.TempDir()
+			previous := claimLegacyFixture(t, fake, name, repoRoot)
 			client := &afterListClient{fakeClient: fake}
 			client.afterList = func() {
 				delete(fake.instances, name)
@@ -365,14 +370,14 @@ func TestResolveRollsBackReservationWhenCleanupDeletedAbsentClaimInstance(t *tes
 			cfg := core.BaseConfig()
 			cfg.Provider = providerName
 			b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}).(*backend)
-			_, err := b.Resolve(context.Background(), core.ResolveRequest{ID: name, Repo: core.Repo{Root: t.TempDir()}, Reclaim: true})
+			_, err := b.Resolve(context.Background(), core.ResolveRequest{ID: name, Repo: core.Repo{Root: repoRoot}, Reclaim: true})
 			if err == nil || !strings.Contains(err.Error(), test.wantError) {
 				t.Fatalf("Resolve error=%v want %q", err, test.wantError)
 			}
 			if claim, exists, readErr := core.ReadLeaseClaimWithPresence(leaseID); readErr != nil {
 				t.Fatalf("read rolled-back claim: %v", readErr)
-			} else if exists || claim.LeaseID != "" {
-				t.Fatalf("reservation claim survived failed revalidation: %#v", claim)
+			} else if !exists || claim.RepoRoot != previous.RepoRoot || claim.Labels[incusClaimReservationUntilLabel] != previous.Labels[incusClaimReservationUntilLabel] || claim.LastUsedAt != previous.LastUsedAt {
+				t.Fatalf("original claim was not restored after failed revalidation: %#v", claim)
 			}
 		})
 	}

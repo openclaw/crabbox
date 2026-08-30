@@ -243,6 +243,13 @@ func (b *backend) releaseDurable(ctx context.Context, client instanceClient, lea
 				return err
 			}
 		}
+		inst, _, err = client.GetInstance(name)
+		if err != nil {
+			return err
+		}
+		if err := validateClaimInstance(client, claim, *inst); err != nil {
+			return err
+		}
 		labels := labelsFromInstance(*inst)
 		labels["state"], labels["release"] = "stopped", "stop"
 		delete(labels, "host")
@@ -306,6 +313,11 @@ func (b *backend) deleteDurable(ctx context.Context, client instanceClient, clai
 			if err := client.SetInstanceState(name, api.InstanceStatePut{Action: "stop", Force: force, Timeout: durationSecondsCeil(b.cfg.Incus.StartTimeout)}, ""); err != nil {
 				return err
 			}
+		}
+		// Stop may wait for a remote operation; recheck the same incarnation
+		// before the subsequent name-based deletion.
+		if current, err := lookup(); err != nil || current == nil {
+			return err
 		}
 		return client.DeleteInstance(name)
 	})
