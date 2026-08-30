@@ -23,7 +23,10 @@ type modalBackend struct {
 	rt   Runtime
 }
 
-const modalMaxSandboxTimeout = 24 * time.Hour
+const (
+	modalMaxSandboxTimeout = 24 * time.Hour
+	modalCleanupTimeout    = 2 * time.Minute
+)
 
 func (b *modalBackend) Spec() ProviderSpec { return b.spec }
 
@@ -33,10 +36,11 @@ func (b *modalBackend) Warmup(ctx context.Context, req WarmupRequest) error {
 	if err != nil {
 		return err
 	}
-	leaseID, sandbox, slug, err := b.createSandbox(ctx, client, req.Repo, req.Keep, req.Reclaim, req.RequestedSlug)
+	claim, sandbox, err := b.createSandbox(ctx, client, req.Repo, req.Keep, req.Reclaim, req.RequestedSlug)
 	if err != nil {
 		return err
 	}
+	leaseID, slug := claim.LeaseID, claim.Slug
 	fmt.Fprintf(b.rt.Stdout, "leased %s slug=%s provider=modal sandbox=%s\n", leaseID, slug, sandbox.ID)
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: modal warmup keeps the sandbox until explicit stop\n")
@@ -58,12 +62,26 @@ func (b *modalBackend) Warmup(ctx context.Context, req WarmupRequest) error {
 func (b *modalBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	workdir, workdirErr := cleanModalWorkdir(modalWorkdir(b.cfg))
 	var client modalAPI
+	var claim core.LeaseClaim
 	var leaseID, sandboxID, slug string
+	bind := func() error {
+		binding, _, err := modalClaimBinding(claim)
+		if err != nil {
+			return err
+		}
+		leaseID, sandboxID, slug = claim.LeaseID, claim.CloudID, claim.Slug
+		client = client.Bind(binding)
+		return nil
+	}
+	fenced := func(action func() error) error {
+		return core.WithLeaseClaimUnchanged(claim.LeaseID, claim, action)
+	}
 	handle := func() shared.DelegatedSandbox {
 		return shared.DelegatedSandbox{LeaseID: leaseID, Slug: slug, CleanupCommand: modalCleanupCommand(leaseID)}
 	}
 	return shared.RunDelegatedSandbox(ctx, req, shared.DelegatedSandboxLifecycle{
 		Provider: providerName, Runtime: b.rt, Workdir: workdir, IdleTimeout: b.cfg.IdleTimeout, TTL: b.cfg.TTL,
+		CleanupTimeout: modalCleanupTimeout,
 		Preflight: func(context.Context) error {
 			if err := rejectModalSyncOptions(req); err != nil {
 				return err
@@ -82,10 +100,11 @@ func (b *modalBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 			})
 		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
-			var sandbox modalSandbox
 			var err error
-			leaseID, sandbox, slug, err = b.createSandbox(ctx, client, req.Repo, req.Keep, req.Reclaim, req.RequestedSlug)
-			sandboxID = sandbox.ID
+			claim, _, err = b.createSandbox(ctx, client, req.Repo, req.Keep, req.Reclaim, req.RequestedSlug)
+			if err == nil {
+				err = bind()
+			}
 			if err == nil {
 				fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=modal sandbox=%s\n", leaseID, slug, sandboxID)
 			}
@@ -93,14 +112,24 @@ func (b *modalBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 		},
 		Resolve: func(ctx context.Context) (shared.DelegatedSandbox, error) {
 			var err error
-			leaseID, sandboxID, slug, err = b.resolveSandboxID(ctx, client, req.ID, req.Repo.Root, req.Reclaim)
+			claim, err = b.resolveOwnedSandbox(ctx, client, req.ID, req.Repo.Root, req.Reclaim)
+			if err == nil {
+				err = bind()
+			}
 			return handle(), err
 		},
 		Sync: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-			return b.syncWorkspace(ctx, client, sandboxID, req, workdir, prepared)
+			var phases []core.TimingPhase
+			var elapsed time.Duration
+			err := fenced(func() error {
+				var err error
+				phases, elapsed, err = b.syncWorkspace(ctx, client, sandboxID, req, workdir, prepared)
+				return err
+			})
+			return phases, elapsed, err
 		},
 		NoSync: func(ctx context.Context) error {
-			return b.prepareWorkspace(ctx, client, sandboxID, workdir)
+			return fenced(func() error { return b.prepareWorkspace(ctx, client, sandboxID, workdir) })
 		},
 		Command: func(ctx context.Context) (shared.DelegatedSandboxCommand, error) {
 			command, err := buildModalCommand(req.Command, req.ShellMode, workdir)
@@ -113,25 +142,31 @@ func (b *modalBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 			var cleanup func(context.Context)
 			if len(req.Env) > 0 {
 				var envPath string
-				envPath, cleanup, err = b.uploadEnvProfile(ctx, client, sandboxID, req.Env)
+				err = fenced(func() error {
+					var err error
+					envPath, cleanup, err = b.uploadEnvProfile(ctx, client, claim, req.Env)
+					return err
+				})
 				if err != nil {
 					return shared.DelegatedSandboxCommand{Close: cleanup}, err
 				}
 				command = wrapModalCommandWithEnvProfile(command, envPath)
 			}
 			return shared.DelegatedSandboxCommand{Close: cleanup, Run: func(ctx context.Context) (int, error) {
-				return client.Exec(ctx, modalExecRequest{
-					SandboxID: sandboxID, Command: command,
-					Timeout: durationSecondsCeil(modalTimeoutDuration(b.cfg.TTL)), Stdout: b.rt.Stdout, Stderr: b.rt.Stderr,
+				var code int
+				err := fenced(func() error {
+					var err error
+					code, err = client.Exec(ctx, modalExecRequest{
+						SandboxID: sandboxID, Command: command,
+						Timeout: durationSecondsCeil(modalTimeoutDuration(b.cfg.TTL)), Stdout: b.rt.Stdout, Stderr: b.rt.Stderr,
+					})
+					return err
 				})
+				return code, err
 			}}, nil
 		},
 		Cleanup: func(ctx context.Context) error {
-			if err := client.Terminate(ctx, sandboxID); err != nil {
-				return modalError("terminate", err)
-			}
-			removeLeaseClaim(leaseID)
-			return nil
+			return removeModalClaim(ctx, client, claim)
 		},
 	})
 }
@@ -166,7 +201,7 @@ func (b *modalBackend) Status(ctx context.Context, req StatusRequest) (StatusVie
 	if err != nil {
 		return StatusView{}, err
 	}
-	leaseID, sandboxID, slug, err := b.resolveSandboxID(ctx, client, req.ID, "", false)
+	leaseID, sandboxID, slug, err := b.resolveSandboxID(ctx, client, req.ID)
 	if err != nil {
 		return StatusView{}, err
 	}
@@ -195,31 +230,33 @@ func (b *modalBackend) Status(ctx context.Context, req StatusRequest) (StatusVie
 }
 
 func (b *modalBackend) Stop(ctx context.Context, req StopRequest) error {
+	claim, err := resolveModalClaim(req.ID)
+	if err != nil {
+		return err
+	}
 	client, err := newModalAPI(b.cfg, b.rt)
 	if err != nil {
 		return err
 	}
-	leaseID, sandboxID, _, err := b.resolveSandboxID(ctx, client, req.ID, "", false)
-	if err != nil {
+	if err := removeModalClaim(ctx, client, claim); err != nil {
 		return err
 	}
-	if err := client.Terminate(ctx, sandboxID); err != nil {
-		return modalError("terminate sandbox", err)
-	}
-	removeLeaseClaim(leaseID)
-	fmt.Fprintf(b.rt.Stderr, "released lease=%s sandbox=%s\n", leaseID, sandboxID)
+	fmt.Fprintf(b.rt.Stderr, "released lease=%s sandbox=%s\n", claim.LeaseID, claim.CloudID)
 	return nil
 }
 
-func (b *modalBackend) createSandbox(ctx context.Context, client modalAPI, repo Repo, keep, reclaim bool, requestedSlug string) (string, modalSandbox, string, error) {
+func (b *modalBackend) createSandbox(ctx context.Context, client modalAPI, repo Repo, keep, reclaim bool, requestedSlug string) (core.LeaseClaim, modalSandbox, error) {
+	if strings.TrimSpace(repo.Root) == "" {
+		return core.LeaseClaim{}, modalSandbox{}, exit(2, "Modal acquisition requires a repository root for durable ownership")
+	}
 	workspace, err := cleanModalWorkdir(modalWorkdir(b.cfg))
 	if err != nil {
-		return "", modalSandbox{}, "", err
+		return core.LeaseClaim{}, modalSandbox{}, err
 	}
 	leaseID := newLeaseID()
 	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
-		return "", modalSandbox{}, "", err
+		return core.LeaseClaim{}, modalSandbox{}, err
 	}
 	cfg := b.cfg
 	cfg.TTL = modalTimeoutDuration(cfg.TTL)
@@ -237,22 +274,28 @@ func (b *modalBackend) createSandbox(ctx context.Context, client modalAPI, repo 
 		Secrets:        append([]string(nil), cfg.Modal.Secrets...),
 	})
 	if err != nil {
-		return "", modalSandbox{}, "", modalError("create sandbox", err)
+		return core.LeaseClaim{}, modalSandbox{}, fmt.Errorf("%w; inspect Modal app=%s lease=%s before native cleanup of an uncertain creation", modalError("create sandbox", err), modalApp(cfg), leaseID)
 	}
 	if sandbox.ID == "" {
-		return "", modalSandbox{}, "", exit(5, "modal create sandbox returned no sandbox id")
+		return core.LeaseClaim{}, modalSandbox{}, exit(5, "modal create sandbox returned no sandbox id; inspect Modal app=%s lease=%s", modalApp(cfg), leaseID)
 	}
-	if err := claimLeaseForRepoProviderPond(leaseID, slug, providerName, cfg.Pond, repo.Root, cfg.IdleTimeout, reclaim); err != nil {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if cleanupErr := client.Terminate(cleanupCtx, sandbox.ID); cleanupErr != nil {
-			leakErr := fmt.Errorf("cleanup modal sandbox %s after claim failure: %w; run `crabbox stop --provider modal --id %s` to retry cleanup", sandbox.ID, cleanupErr, sandbox.ID)
-			fmt.Fprintf(b.rt.Stderr, "warning: %v\n", leakErr)
-			return "", modalSandbox{}, "", errors.Join(err, leakErr)
+	binding := modalBinding{ID: sandbox.ID, LeaseID: leaseID, Slug: slug, Scope: sandbox.Scope}
+	if err := binding.validate(sandbox); err != nil {
+		return core.LeaseClaim{}, modalSandbox{}, fmt.Errorf("%w; retain and inspect Modal sandbox=%s lease=%s", err, sandbox.ID, leaseID)
+	}
+	claim, err := publishModalClaim(b, ctx, client, binding, sandbox, repo, reclaim)
+	if err != nil {
+		cleanupErr := core.CleanupLeaseClaimIfUnchangedAfter(leaseID, core.LeaseClaim{}, false, func() error {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), modalCleanupTimeout)
+			defer cancel()
+			return client.Terminate(cleanupCtx, binding)
+		})
+		if cleanupErr != nil {
+			return core.LeaseClaim{}, modalSandbox{}, errors.Join(err, fmt.Errorf("retain and inspect Modal sandbox=%s lease=%s after claim failure; cleanup: %w", sandbox.ID, leaseID, cleanupErr))
 		}
-		return "", modalSandbox{}, "", err
+		return core.LeaseClaim{}, modalSandbox{}, err
 	}
-	return leaseID, sandbox, slug, nil
+	return claim, sandbox, nil
 }
 
 func modalCleanupCommand(leaseID string) string {
@@ -278,7 +321,7 @@ func modalSandboxTags(cfg Config, leaseID, slug, repoName string, keep bool, now
 	return tags
 }
 
-func (b *modalBackend) resolveSandboxID(ctx context.Context, client modalAPI, id, repoRoot string, reclaim bool) (string, string, string, error) {
+func (b *modalBackend) resolveSandboxID(ctx context.Context, client modalAPI, id string) (string, string, string, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return "", "", "", exit(2, "provider=modal requires a Crabbox lease id, slug, or Modal sandbox id")
@@ -286,10 +329,8 @@ func (b *modalBackend) resolveSandboxID(ctx context.Context, client modalAPI, id
 	if claim, ok, err := resolveLeaseClaim(id); err != nil {
 		return "", "", "", err
 	} else if ok && claim.Provider == providerName {
-		if repoRoot != "" {
-			if err := claimLeaseForRepoProvider(claim.LeaseID, claim.Slug, providerName, repoRoot, time.Duration(claim.IdleTimeoutSeconds)*time.Second, reclaim); err != nil {
-				return "", "", "", err
-			}
+		if claim.CloudID != "" {
+			return claim.LeaseID, claim.CloudID, claim.Slug, nil
 		}
 		sandbox, err := resolveModalSandboxByLease(ctx, client, claim.LeaseID)
 		if err != nil {
@@ -303,22 +344,12 @@ func (b *modalBackend) resolveSandboxID(ctx context.Context, client modalAPI, id
 			return "", "", "", err
 		}
 		slug := modalSlug(id, sandbox)
-		if repoRoot != "" {
-			if err := claimLeaseForRepoProvider(id, slug, providerName, repoRoot, b.cfg.IdleTimeout, reclaim); err != nil {
-				return "", "", "", err
-			}
-		}
 		return id, sandbox.ID, slug, nil
 	}
 	sandbox, err := client.GetSandbox(ctx, id)
 	if err == nil && isCrabboxModalSandbox(sandbox) {
 		leaseID := modalLeaseID(sandbox)
 		slug := modalSlug(leaseID, sandbox)
-		if repoRoot != "" {
-			if err := claimLeaseForRepoProvider(leaseID, slug, providerName, repoRoot, b.cfg.IdleTimeout, reclaim); err != nil {
-				return "", "", "", err
-			}
-		}
 		return leaseID, sandbox.ID, slug, nil
 	}
 	if err != nil && !isModalNotFoundError(err) {

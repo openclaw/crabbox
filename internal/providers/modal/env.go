@@ -6,9 +6,12 @@ import (
 	"os"
 	"sort"
 	"strings"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func (b *modalBackend) uploadEnvProfile(ctx context.Context, client modalAPI, sandboxID string, env map[string]string) (string, func(context.Context), error) {
+func (b *modalBackend) uploadEnvProfile(ctx context.Context, client modalAPI, claim core.LeaseClaim, env map[string]string) (string, func(context.Context), error) {
+	sandboxID := claim.CloudID
 	if len(env) == 0 {
 		return "", func(context.Context) {}, nil
 	}
@@ -34,7 +37,9 @@ func (b *modalBackend) uploadEnvProfile(ctx context.Context, client modalAPI, sa
 	remotePath := "/tmp/crabbox-modal-env-" + modalRandomSuffix() + ".sh"
 	cleanup := func(cleanupCtx context.Context) {
 		cleanupLocal()
-		if err := b.execShell(cleanupCtx, client, sandboxID, "rm -f "+shellQuote(remotePath), nil); err != nil {
+		if err := core.WithLeaseClaimUnchanged(claim.LeaseID, claim, func() error {
+			return b.execShell(cleanupCtx, client, sandboxID, "rm -f "+shellQuote(remotePath), nil)
+		}); err != nil {
 			fmt.Fprintf(b.rt.Stderr, "warning: modal env profile cleanup failed for %s: %v\n", sandboxID, err)
 		}
 	}

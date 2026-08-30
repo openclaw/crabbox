@@ -12,12 +12,14 @@ import (
 )
 
 type modalAPI interface {
+	Bind(modalBinding) modalAPI
 	CreateSandbox(context.Context, modalCreateSandboxRequest) (modalSandbox, error)
+	InspectSandbox(context.Context, modalBinding) (modalSandbox, error)
 	Exec(context.Context, modalExecRequest) (int, error)
 	UploadFile(context.Context, string, string, string) error
 	GetSandbox(context.Context, string) (modalSandbox, error)
 	ListSandboxes(context.Context, map[string]string) ([]modalSandbox, error)
-	Terminate(context.Context, string) error
+	Terminate(context.Context, modalBinding) error
 }
 
 type modalCreateSandboxRequest struct {
@@ -44,11 +46,13 @@ type modalSandbox struct {
 	Name   string            `json:"name,omitempty"`
 	Status string            `json:"status,omitempty"`
 	Tags   map[string]string `json:"tags,omitempty"`
+	Scope  modalScope        `json:"scope"`
 }
 
 type modalPythonClient struct {
-	cfg Config
-	rt  Runtime
+	cfg     Config
+	rt      Runtime
+	binding *modalBinding
 }
 
 var newModalAPI = func(cfg Config, rt Runtime) (modalAPI, error) {
@@ -60,13 +64,25 @@ var newModalAPI = func(cfg Config, rt Runtime) (modalAPI, error) {
 
 const modalTransportExitCode = 125
 
+func (c *modalPythonClient) Bind(binding modalBinding) modalAPI {
+	bound := *c
+	bound.binding = &binding
+	return &bound
+}
+
+func (c *modalPythonClient) sandboxPayload(id string) map[string]any {
+	return map[string]any{"sandbox_id": id, "binding": c.binding, "app": c.app(), "environment": strings.TrimSpace(c.cfg.Modal.Environment)}
+}
+
+func (c *modalPythonClient) InspectSandbox(ctx context.Context, binding modalBinding) (modalSandbox, error) {
+	bound := c.Bind(binding).(*modalPythonClient)
+	return bound.GetSandbox(ctx, binding.ID)
+}
+
 func (c *modalPythonClient) CreateSandbox(ctx context.Context, req modalCreateSandboxRequest) (modalSandbox, error) {
 	var sandbox modalSandbox
 	if err := c.runJSON(ctx, modalCreateScript, req, &sandbox); err != nil {
 		return modalSandbox{}, err
-	}
-	if sandbox.Tags == nil {
-		sandbox.Tags = req.Tags
 	}
 	return sandbox, nil
 }
@@ -78,11 +94,8 @@ func (c *modalPythonClient) Exec(ctx context.Context, req modalExecRequest) (int
 	if req.Stderr == nil {
 		req.Stderr = io.Discard
 	}
-	payload := map[string]any{
-		"sandbox_id": req.SandboxID,
-		"command":    req.Command,
-		"timeout":    req.Timeout,
-	}
+	payload := c.sandboxPayload(req.SandboxID)
+	payload["command"], payload["timeout"] = req.Command, req.Timeout
 	resultFile, err := os.CreateTemp("", "crabbox-modal-exec-*.rc")
 	if err != nil {
 		return 0, fmt.Errorf("create modal exec result file: %w", err)
@@ -113,11 +126,8 @@ func (c *modalPythonClient) Exec(ctx context.Context, req modalExecRequest) (int
 }
 
 func (c *modalPythonClient) UploadFile(ctx context.Context, sandboxID, localPath, remotePath string) error {
-	payload := map[string]any{
-		"sandbox_id":  sandboxID,
-		"local_path":  localPath,
-		"remote_path": remotePath,
-	}
+	payload := c.sandboxPayload(sandboxID)
+	payload["local_path"], payload["remote_path"] = localPath, remotePath
 	res, err := c.runStreamed(ctx, modalUploadScript, payload, io.Discard, c.rt.Stderr)
 	if err != nil {
 		return err
@@ -130,7 +140,7 @@ func (c *modalPythonClient) UploadFile(ctx context.Context, sandboxID, localPath
 
 func (c *modalPythonClient) GetSandbox(ctx context.Context, sandboxID string) (modalSandbox, error) {
 	var sandbox modalSandbox
-	if err := c.runJSON(ctx, modalGetScript, map[string]string{"sandbox_id": sandboxID}, &sandbox); err != nil {
+	if err := c.runJSON(ctx, modalGetScript, c.sandboxPayload(sandboxID), &sandbox); err != nil {
 		return modalSandbox{}, err
 	}
 	return sandbox, nil
@@ -149,13 +159,17 @@ func (c *modalPythonClient) ListSandboxes(ctx context.Context, tags map[string]s
 	return sandboxes, nil
 }
 
-func (c *modalPythonClient) Terminate(ctx context.Context, sandboxID string) error {
-	res, err := c.runStreamed(ctx, modalTerminateScript, map[string]string{"sandbox_id": sandboxID}, io.Discard, c.rt.Stderr)
-	if err != nil {
+func (c *modalPythonClient) Terminate(ctx context.Context, binding modalBinding) error {
+	bound := c.Bind(binding).(*modalPythonClient)
+	var sandbox modalSandbox
+	if err := bound.runJSON(ctx, modalTerminateScript, bound.sandboxPayload(binding.ID), &sandbox); err != nil {
 		return err
 	}
-	if res.ExitCode != 0 {
-		return exit(res.ExitCode, "modal terminate %s exited %d", sandboxID, res.ExitCode)
+	if err := binding.validate(sandbox); err != nil {
+		return err
+	}
+	if sandbox.Status != "finished" {
+		return exit(5, "Modal termination did not confirm terminal state")
 	}
 	return nil
 }
@@ -271,18 +285,10 @@ def sandbox_id(sb):
     )
 
 def sandbox_tags(sb):
-    try:
-        tags = sb.get_tags()
-        return tags or {}
-    except Exception:
-        return {}
+    return sb.get_tags() or {}
 
 def sandbox_status(sb):
-    try:
-        rc = sb.poll()
-        return "running" if rc is None else "finished"
-    except Exception:
-        return "running"
+    return "running" if sb.poll() is None else "finished"
 
 def sandbox_json(sb):
     return {
@@ -291,6 +297,62 @@ def sandbox_json(sb):
         "status": sandbox_status(sb),
         "tags": sandbox_tags(sb),
     }
+
+def modal_context(req, create=False):
+    import modal
+    from modal.config import config
+    # Capture routing before the first client lookup in this fresh child.
+    endpoint = config.get("server_url")
+    client = modal.Client.from_env()
+    workspace = modal.Workspace.from_context(client=client)
+    workspace.hydrate()
+    if req.get("environment"):
+        environment = modal.Environment.from_name(req["environment"], create_if_missing=False, client=client)
+    else:
+        environment = modal.Environment.from_context(client=client)
+    environment.hydrate()
+    if not environment.name or not workspace.name:
+        raise RuntimeError("Modal returned incomplete workspace/environment identity")
+    os.environ["MODAL_ENVIRONMENT"] = environment.name
+    app = modal.App.lookup(req["app"], client=client, environment_name=environment.name, create_if_missing=create)
+    scope = {"endpoint": endpoint, "workspace": workspace.name, "environment_id": environment.object_id,
+             "environment": environment.name, "app_id": app.app_id, "app": req["app"]}
+    return client, app, scope
+
+def resolve_sandbox(req):
+    import modal
+    binding = req.get("binding")
+    if not binding:
+        # Unclaimed identifiers are allowed only for read-only discovery.
+        sb = modal.Sandbox.from_id(req["sandbox_id"])
+        return sb, sandbox_json(sb)
+    client, app, scope = modal_context(req)
+    if scope != binding["scope"] or req["sandbox_id"] != binding["id"]:
+        raise RuntimeError("Modal authority or sandbox identity changed; retaining resource")
+    sb = modal.Sandbox.from_id(binding["id"], client=client)
+    out = sandbox_json(sb)
+    out["scope"] = scope
+    if out["id"] != binding["id"]:
+        raise RuntimeError("Modal returned a different sandbox ID")
+    expected = {"provider": "modal", "crabbox": "true", "lease": binding["lease"],
+                "slug": binding["slug"], "app": scope["app"]}
+    if any(out["tags"].get(k) != v for k, v in expected.items()):
+        raise RuntimeError("Modal ownership tags changed; retaining resource")
+    if out["status"] == "running":
+        matches = [item for item in modal.Sandbox.list(app_id=app.app_id, tags=expected, client=client)
+                   if sandbox_id(item) == binding["id"]]
+        if len(matches) != 1:
+            raise RuntimeError("Modal sandbox is not uniquely present in the bound app")
+    return sb, out
+
+def running_sandbox(req):
+    if not req.get("binding"):
+        import modal
+        return modal.Sandbox.from_id(req["sandbox_id"])
+    sb, out = resolve_sandbox(req)
+    if req.get("binding") and out["status"] != "running":
+        raise RuntimeError("Modal sandbox has finished; create a new lease")
+    return sb
 
 def write_stream(src, dst):
     try:
@@ -313,16 +375,15 @@ const modalCreateScript = modalPythonPrelude + `
 try:
     req = load_payload()
     import modal
-    app_kwargs = {"create_if_missing": True}
-    if req.get("environment"):
-        app_kwargs["environment_name"] = req["environment"]
-    app = modal.App.lookup(req["app"], **app_kwargs)
+    client, app, scope = modal_context(req, create=True)
     image_name = req.get("image") or "python:3.13-slim"
     image = modal.Image.from_registry(image_name)
     kwargs = {
         "app": app,
         "image": image,
         "timeout": int(req.get("timeout_seconds") or 300),
+        "client": client,
+        "tags": req.get("tags") or {},
     }
     if req.get("workdir"):
         kwargs["workdir"] = req["workdir"]
@@ -330,15 +391,12 @@ try:
         kwargs["name"] = req["name"]
     if req.get("secrets"):
         kwargs["secrets"] = [
-            modal.Secret.from_name(name, environment_name=req.get("environment") or None)
+            modal.Secret.from_name(name, environment_name=scope["environment"])
             for name in req["secrets"]
         ]
     sb = modal.Sandbox.create(**kwargs)
-    tags = req.get("tags") or {}
-    if tags:
-        sb.set_tags(tags)
     out = sandbox_json(sb)
-    out["tags"] = tags
+    out["scope"] = scope
     try:
         sb.detach()
     except Exception:
@@ -352,7 +410,7 @@ const modalExecScript = modalPythonPrelude + `
 try:
     req = load_payload()
     import modal
-    sb = modal.Sandbox.from_id(req["sandbox_id"])
+    sb = running_sandbox(req)
     command = req.get("command") or []
     timeout = int(req.get("timeout") or 0)
     kwargs = {}
@@ -386,7 +444,7 @@ const modalUploadScript = modalPythonPrelude + `
 try:
     req = load_payload()
     import modal
-    sb = modal.Sandbox.from_id(req["sandbox_id"])
+    sb = running_sandbox(req)
     remote_path = req["remote_path"]
     remote_dir = os.path.dirname(remote_path) or "/tmp"
     sb.filesystem.make_directory(remote_dir, create_parents=True)
@@ -399,8 +457,8 @@ const modalGetScript = modalPythonPrelude + `
 try:
     req = load_payload()
     import modal
-    sb = modal.Sandbox.from_id(req["sandbox_id"])
-    print(json.dumps(sandbox_json(sb), sort_keys=True))
+    sb, out = resolve_sandbox(req)
+    print(json.dumps(out, sort_keys=True))
 except Exception as exc:
     fail(exc)
 `
@@ -409,12 +467,9 @@ const modalListScript = modalPythonPrelude + `
 try:
     req = load_payload()
     import modal
-    app_kwargs = {"create_if_missing": True}
-    if req.get("environment"):
-        app_kwargs["environment_name"] = req["environment"]
-    app = modal.App.lookup(req["app"], **app_kwargs)
+    client, app, scope = modal_context(req)
     items = []
-    for sb in modal.Sandbox.list(app_id=app.app_id, tags=req.get("tags") or {}):
+    for sb in modal.Sandbox.list(app_id=app.app_id, tags=req.get("tags") or {}, client=client):
         items.append(sandbox_json(sb))
     print(json.dumps(items, sort_keys=True))
 except Exception as exc:
@@ -425,8 +480,16 @@ const modalTerminateScript = modalPythonPrelude + `
 try:
     req = load_payload()
     import modal
-    sb = modal.Sandbox.from_id(req["sandbox_id"])
-    sb.terminate()
+    if not req.get("binding"):
+        raise RuntimeError("Modal termination requires an exact ownership binding")
+    sb, out = resolve_sandbox(req)
+    if out["status"] == "running":
+        sb.terminate(wait=True)
+        out = sandbox_json(sb)
+        out["scope"] = req["binding"]["scope"]
+    if out["status"] != "finished":
+        raise RuntimeError("Modal termination remains unconfirmed")
+    print(json.dumps(out, sort_keys=True))
     try:
         sb.detach()
     except Exception:

@@ -66,16 +66,8 @@ func directLeaseLabels(cfg Config, leaseID, slug, provider, market string, keep 
 	return core.DirectLeaseLabels(cfg, leaseID, slug, provider, market, keep, now)
 }
 
-var claimLeaseForRepoProvider = core.ClaimLeaseForRepoProvider
-
-var claimLeaseForRepoProviderPond = core.ClaimLeaseForRepoProviderPond
-
 func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaim(identifier)
-}
-
-func removeLeaseClaim(leaseID string) {
-	core.RemoveLeaseClaim(leaseID)
 }
 
 func writeTimingJSON(w io.Writer, report timingReport) error {

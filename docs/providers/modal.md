@@ -21,7 +21,7 @@ VNC, code-server, or Actions hydration — none of those surfaces exist on Modal
 
 ## Prerequisites
 
-- Install the Modal Python client: `pip install modal`.
+- Install Modal Python SDK 1.5.5 or newer: `pip install 'modal>=1.5.5'`.
 - Authenticate Modal locally: `python3 -m modal setup`, or export
   `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET`. The Python client runs with the
   current process environment, so any standard Modal auth state is picked up.
@@ -114,8 +114,11 @@ variables; repository-local config cannot select a Modal environment or Secret.
 
 1. `warmup` / `run` without `--id` creates a Modal Sandbox in the configured
    `modal.app` from `modal.image`, with the sandbox timeout and Crabbox
-   ownership tags. Crabbox stores a local claim with a normal `cbx_...` lease ID
-   and a friendly slug.
+   ownership tags, assigned atomically at creation. Crabbox durably stores a
+   local claim binding the `cbx_...` lease ID and friendly slug to the exact
+   sandbox ID, API endpoint list, authenticated workspace name, native
+   environment ID/name, and native app ID/name. Scope metadata stays local;
+   credentials are never stored in the claim.
 2. The sandbox timeout is derived from `--ttl`: it defaults to 5 minutes when no
    TTL is set and is capped at 24 hours.
 3. By default `run` archive-syncs the working tree: Git manifest → portable
@@ -134,6 +137,48 @@ variables; repository-local config cannot select a Modal environment or Secret.
    See the [shared sandbox lifecycle](../features/delegated-runner-contract.md#shared-sandbox-lifecycle)
    for exit-code precedence and timing semantics.
 
+Stop, reuse, and one-shot cleanup require that exact local claim. Crabbox holds
+the unchanged claim fence while verifying scope and performing each operation;
+each Python child uses the same native client for its scope checks and action.
+Running sandboxes must also appear under the bound native app ID with matching
+ownership tags. Termination waits for a confirmed terminal state before removing
+the claim, with a two-minute cleanup budget. A missing inventory entry, inaccessible sandbox, or failed status
+check is not proof that termination succeeded, so uncertainty retains the claim.
+An already-finished exact sandbox can have its claim removed after scope,
+identity, ownership tags, and terminal state are verified.
+
+Use the same Modal app/environment configuration and authority when stopping or
+reusing a lease. Token rotation within that authority is supported; changing the
+workspace, effective environment, app identity, or endpoint list is not silently
+accepted. An empty `modal.environment` resolves through the SDK's configuration
+or server default rather than assuming an environment named `main`.
+
+### Older leases and lost local state
+
+Older claims without an exact sandbox/scope binding cannot authorize stop or
+reuse. `--reclaim` only changes repository ownership of an already exact claim;
+it cannot adopt an unclaimed sandbox, fill in legacy ownership, or retarget a
+claim to another resource or provider. `stop --reclaim` is not supported for
+Modal. Read-only `list` and `status` remain available for discovery.
+
+If local state is lost or predates this binding, inspect the exact sandbox in
+Modal and clean it up explicitly through Modal's dashboard or SDK. For example,
+after verifying the account and sandbox ID independently:
+
+```python
+import modal
+
+sandbox = modal.Sandbox.from_id("sb-EXACT_SANDBOX_ID")
+sandbox.terminate(wait=True)
+assert sandbox.poll() is not None
+```
+
+Create a new Crabbox lease afterward. Do not reconstruct a claim from tags or
+edit an existing claim to point at a different sandbox. Acquisition rollback is
+limited to the exact sandbox just created and only while its local claim is
+still absent; a concurrent or partially published claim retains the resource for
+inspection.
+
 Note: `warmup` always keeps the sandbox until an explicit `crabbox stop`. If you
 pass `--keep=false` to `warmup`, Crabbox prints a warning and still keeps it.
 
@@ -150,8 +195,9 @@ pass `--keep=false` to `warmup`, Crabbox prints a warning and still keeps it.
 
 ## Gotchas
 
-- IDs can be a Crabbox slug, a `cbx_...` lease ID, or a raw Modal sandbox ID
-  (when that sandbox carries Crabbox tags).
+- IDs can be a Crabbox slug, a `cbx_...` lease ID, or a raw Modal sandbox ID.
+  Stop/reuse require a unique exact local claim; provider tags alone only allow
+  read-only discovery.
 - `--class` and `--type` are rejected. The configured Modal image owns the
   runtime contents and resources.
 - `modal.workdir` must resolve to an absolute, dedicated directory. Broad roots
