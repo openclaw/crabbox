@@ -2,7 +2,9 @@ package daytona
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	api "github.com/daytonaio/daytona/libs/api-client-go"
@@ -18,12 +21,12 @@ import (
 
 type snapshotFixture struct {
 	*daytonaLifecycleFixture
-	snapshot                                 *api.SnapshotDto
-	creates, starts, stops, removes, reads   int
-	lostResponse, failSnapshot, neverVisible bool
-	rejectCreate                             bool
-	transientReadFailure, replaceInRecovery  bool
-	request                                  core.NativeCheckpointCreateRequest
+	snapshot                                *api.SnapshotDto
+	creates, starts, stops, removes, reads  int
+	lostResponse, failSnapshot              bool
+	rejectCreate                            bool
+	transientReadFailure, replaceInRecovery bool
+	request                                 core.NativeCheckpointCreateRequest
 }
 
 func newSnapshotFixture(t *testing.T) *snapshotFixture {
@@ -35,9 +38,9 @@ func newSnapshotFixture(t *testing.T) *snapshotFixture {
 	}
 	f.sandbox.SetOrganizationId("org-test")
 	f.sandbox.SetUser("daytona")
-	s := &snapshotFixture{daytonaLifecycleFixture: f, request: core.NativeCheckpointCreateRequest{Config: b.cfg, Server: core.Server{Provider: daytonaProvider, CloudID: sandbox.ID}, LeaseID: leaseID, CheckpointID: "chk_0123456789abcdef", RepoName: repo.Name, WaitTimeout: time.Second, Stderr: io.Discard}}
+	s := &snapshotFixture{daytonaLifecycleFixture: f, request: core.NativeCheckpointCreateRequest{Config: b.cfg, Server: core.Server{Provider: daytonaProvider, CloudID: sandbox.ID}, LeaseID: leaseID, CheckpointID: "chk_0123456789abcdef", RepoName: repo.Name, WaitTimeout: 5 * time.Second, Stderr: io.Discard}}
 	oldInterval, oldRecovery := checkpointPollInterval, checkpointRecoveryTimeout
-	checkpointPollInterval, checkpointRecoveryTimeout = time.Millisecond, 25*time.Millisecond
+	checkpointPollInterval, checkpointRecoveryTimeout = time.Millisecond, 5*time.Second
 	t.Cleanup(func() { checkpointPollInterval, checkpointRecoveryTimeout = oldInterval, oldRecovery })
 	original := f.server.Config.Handler
 	f.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -82,7 +85,7 @@ func newSnapshotFixture(t *testing.T) *snapshotFixture {
 			}
 			_ = json.NewEncoder(w).Encode(f.sandbox)
 		case strings.HasPrefix(r.URL.Path, "/snapshots/"):
-			if s.snapshot == nil || s.neverVisible {
+			if s.snapshot == nil {
 				w.WriteHeader(404)
 				_, _ = io.WriteString(w, `{"message":"not found"}`)
 				return
@@ -204,8 +207,19 @@ func TestDaytonaSnapshotFailureRetainsIdentityAndRestoresSource(t *testing.T) {
 			f := newSnapshotFixture(t)
 			f.lostResponse = failure == "lost-response"
 			f.failSnapshot = failure == "snapshot-error"
-			f.neverVisible = failure == "unconfirmed"
-			f.request.WaitTimeout = 30 * time.Millisecond
+			var stalled *snapshotDeadlineClient
+			if failure == "unconfirmed" {
+				original := newDaytonaClient
+				newDaytonaClient = func(cfg Config, rt Runtime) (daytonaAPI, error) {
+					client, err := original(cfg, rt)
+					if err != nil {
+						return nil, err
+					}
+					stalled = &snapshotDeadlineClient{daytonaSnapshotAPI: client.(daytonaSnapshotAPI)}
+					return stalled, nil
+				}
+				t.Cleanup(func() { newDaytonaClient = original })
+			}
 			result, err := (Provider{}).CreateNativeCheckpoint(t.Context(), f.request)
 			if err == nil || result.Image.ID == "" || result.Metadata["source"] == "" {
 				t.Fatalf("result=%+v err=%v", result, err)
@@ -214,14 +228,67 @@ func TestDaytonaSnapshotFailureRetainsIdentityAndRestoresSource(t *testing.T) {
 				t.Fatal("allocation was retried")
 			}
 			if failure == "unconfirmed" {
-				if f.starts != 0 || !strings.Contains(err.Error(), "left stopped") {
+				if f.starts != 0 || f.stops != 1 || f.sandbox.GetState() != api.SANDBOXSTATE_STOPPED || !strings.Contains(err.Error(), "left stopped") {
 					t.Fatalf("unsafe restart: %v", err)
+				}
+				if stalled == nil || stalled.deadlineReads != 2 || !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("snapshot polling and recovery did not both observe the injected deadline: %v", err)
 				}
 			} else if f.starts != 1 || result.Image.ID != "snapshot-exact-id" {
 				t.Fatalf("source not restored or identity lost: %+v %v", result, err)
 			}
 		})
 	}
+}
+
+// Inject the failure after real HTTP setup and creation, not while ownership
+// lookup or source stopping is competing with a short wall-clock deadline.
+type snapshotDeadlineClient struct {
+	daytonaSnapshotAPI
+	created       bool
+	deadlineReads int
+}
+
+func (c *snapshotDeadlineClient) CreateSnapshot(ctx context.Context, id, name string) error {
+	err := c.daytonaSnapshotAPI.CreateSnapshot(ctx, id, name)
+	c.created = true
+	return err
+}
+
+func (c *snapshotDeadlineClient) GetSnapshot(ctx context.Context, id string) (*api.SnapshotDto, error) {
+	if c.created {
+		c.deadlineReads++
+		return nil, context.DeadlineExceeded
+	}
+	return c.daytonaSnapshotAPI.GetSnapshot(ctx, id)
+}
+
+func TestDaytonaSnapshotWaitDeadlineRetainsLastIdentity(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		client := &pendingSnapshotClient{snapshot: &api.SnapshotDto{Id: "snapshot-exact-id", Name: "pending", State: api.SNAPSHOTSTATE_PENDING}}
+		client.snapshot.SetOrganizationId("org-test")
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		started := time.Now()
+		result, err := waitDaytonaSnapshot(ctx, client, "pending", "org-test", "snapshot-exact-id")
+		if !errors.Is(err, context.DeadlineExceeded) || result != client.snapshot || client.reads < 2 {
+			t.Fatalf("deadline lost pending snapshot identity: result=%+v reads=%d err=%v", result, client.reads, err)
+		}
+		if elapsed := time.Since(started); elapsed != 5*time.Second {
+			t.Fatalf("wait exceeded virtual deadline: %s", elapsed)
+		}
+	})
+}
+
+type pendingSnapshotClient struct {
+	daytonaSnapshotAPI
+	snapshot *api.SnapshotDto
+	reads    int
+}
+
+func (c *pendingSnapshotClient) GetSnapshot(context.Context, string) (*api.SnapshotDto, error) {
+	c.reads++
+	return c.snapshot, nil
 }
 
 func TestDaytonaSnapshotDeletionRejectsIdentityAndScopeDrift(t *testing.T) {
