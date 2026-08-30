@@ -42,6 +42,7 @@ type proxmoxClient interface {
 	VMExistsInCluster(context.Context, string) (bool, error)
 	DeleteServer(context.Context, string) error
 	DeleteServerOnNode(context.Context, string, string) error
+	DeleteServerOnNodeChecked(context.Context, string, string, func(Server) error) error
 	SetLabels(context.Context, string, map[string]string) error
 	SetLabelsOnNode(context.Context, string, string, map[string]string) error
 }
@@ -428,7 +429,7 @@ func (b *leaseBackend) Touch(ctx context.Context, req TouchRequest) (Server, err
 }
 
 func (b *leaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
-	servers, err := b.List(ctx, ListRequest{Options: req.Options})
+	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		return err
 	}
@@ -436,130 +437,115 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	if err != nil {
 		return err
 	}
-	var deleted []Server
-	var deleteErr error
-	var failedDelete *Server
-	remaining := append([]Server(nil), servers...)
+	servers, err := client.ListCrabboxServersCluster(ctx)
+	if err != nil {
+		return err
+	}
 	for _, server := range servers {
-		shouldDelete, reason := core.ShouldCleanupServer(server, time.Now().UTC())
-		if !shouldDelete {
+		claim, binding, err := b.cleanupClaim(server, servers, claims)
+		if err != nil {
+			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%v\n", server.DisplayID(), server.Name, err)
+			continue
+		}
+		if eligible, reason := core.ShouldCleanupServer(server, time.Now().UTC()); !eligible {
 			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%s\n", server.DisplayID(), server.Name, reason)
 			continue
 		}
-		fmt.Fprintf(b.RT.Stderr, "delete server id=%s name=%s\n", server.DisplayID(), server.Name)
 		if req.DryRun {
+			fmt.Fprintf(b.RT.Stderr, "would delete server id=%s name=%s\n", server.DisplayID(), server.Name)
 			continue
 		}
-		if strings.TrimSpace(core.ProviderClaimScope("proxmox", b.Cfg)) != "" {
-			if err := b.backfillReleaseClaimScope(proxmoxClaimLabelLeaseID(server), server.CloudID, server); err != nil {
-				deleteErr = err
+		if err := b.cleanupClaimedServer(ctx, client, server, claim, binding); err != nil {
+			return err
+		}
+		// Acquisition creates keys before publishing claims; this claim lock
+		// cannot fence a concurrent key creator, so cleanup keeps local keys.
+		fmt.Fprintf(b.RT.Stderr, "delete server id=%s name=%s key_retained=true\n", server.DisplayID(), server.Name)
+	}
+	return nil
+}
+
+func (b *leaseBackend) cleanupClaimedServer(ctx context.Context, client proxmoxClient, server Server, claim core.LeaseClaim, binding shared.ClaimBinding) error {
+	var deleteErr error
+	err := shared.RemoveExactClaimAfter(claim, binding, func() error {
+		// Inventory is discovery only. Revalidate its node, lifecycle and native
+		// generation while the same claim revision is fenced through removal.
+		currentClaims, err := core.ListLeaseClaims()
+		if err != nil {
+			return err
+		}
+		current, err := client.ListCrabboxServersCluster(ctx)
+		if err != nil {
+			return err
+		}
+		var fresh Server
+		for _, candidate := range current {
+			if candidate.CloudID == server.CloudID {
+				fresh = candidate
 				break
 			}
 		}
-		node := core.Blank(server.HostID, b.Cfg.Proxmox.Node)
-		if err := client.DeleteServerOnNode(ctx, node, server.CloudID); err != nil {
-			deleteErr = err
-			failed := server
-			failedDelete = &failed
-			break
+		if fresh.CloudID == "" {
+			return fmt.Errorf("Proxmox VM %s disappeared during cleanup; claim retained", server.CloudID)
 		}
-		deleted = append(deleted, server)
-		remaining = removeProxmoxServerByCloudID(remaining, server.CloudID)
-	}
-	var verifyErr error
-	var reconcileErr error
-	if failedDelete != nil {
-		disappeared, err := verifyProxmoxDeleteFailure(ctx, client, failedDelete.CloudID, deleteErr)
-		if err != nil {
-			verifyErr = fmt.Errorf("verify Proxmox server after delete failure: %w", err)
-		} else if disappeared {
-			remaining = removeProxmoxServerByCloudID(remaining, failedDelete.CloudID)
-			deleted = append(deleted, *failedDelete)
+		if _, _, err := b.cleanupClaim(fresh, current, currentClaims); err != nil {
+			return err
 		}
-	}
-	if len(deleted) > 0 {
-		clusterRemaining, err := client.ListCrabboxServersCluster(ctx)
-		if err != nil {
-			for _, server := range deleted {
-				fmt.Fprintf(b.RT.Stderr, "warning: preserve local lease residue lease=%s reason=cluster_inventory_refresh_failed error=%v\n", proxmoxClaimLabelLeaseID(server), err)
+		check := func(live Server) error {
+			if live.HostID != fresh.HostID {
+				return fmt.Errorf("Proxmox VM %s changed node during cleanup", server.CloudID)
 			}
-			return errors.Join(deleteErr, verifyErr, fmt.Errorf("reconcile Proxmox cleanup across cluster: %w", err))
+			if err := validateCleanupServer(live, claim, binding); err != nil {
+				return err
+			}
+			if eligible, reason := core.ShouldCleanupServer(live, time.Now().UTC()); !eligible {
+				return fmt.Errorf("Proxmox VM %s no longer eligible: %s", server.CloudID, reason)
+			}
+			return nil
 		}
-		remaining = clusterRemaining
-	}
-	for _, server := range deleted {
-		if verifyErr != nil && failedDelete != nil && proxmoxClaimLabelLeaseID(server) == proxmoxClaimLabelLeaseID(*failedDelete) {
-			fmt.Fprintf(b.RT.Stderr, "warning: preserve local lease residue lease=%s reason=ambiguous_delete_verification_failed error=%v\n", proxmoxClaimLabelLeaseID(server), verifyErr)
-			continue
+		if err := check(fresh); err != nil {
+			return err
 		}
-		reconcileErr = errors.Join(reconcileErr, removeCleanupLeaseResidue(ctx, client, server, remaining, b.Cfg, b.RT.Stderr))
-	}
-	return errors.Join(deleteErr, verifyErr, reconcileErr)
+		deleteErr = client.DeleteServerOnNodeChecked(ctx, fresh.HostID, fresh.CloudID, check)
+		if deleteErr != nil {
+			// Only an accepted/ambiguous purge may be reconciled as success;
+			// failed authorization or stop must preserve the original claim.
+			if !core.IsProxmoxDeleteTaskError(deleteErr) && !core.IsProxmoxDeleteRequestError(deleteErr) {
+				return deleteErr
+			}
+			if err := waitForProxmoxCleanupAbsence(ctx, client, fresh.CloudID); err != nil {
+				return err
+			}
+		}
+		remaining, err := client.ListCrabboxServersCluster(ctx)
+		if err != nil {
+			return fmt.Errorf("verify Proxmox cleanup inventory: %w", err)
+		}
+		for _, survivor := range remaining {
+			if survivor.CloudID == fresh.CloudID || proxmoxClaimLabelLeaseID(survivor) == claim.LeaseID {
+				return fmt.Errorf("Proxmox lease %s still has a surviving VM; claim retained", claim.LeaseID)
+			}
+		}
+		// The filtered Crabbox inventory cannot prove a VMID is absent.
+		exists, err := client.VMExistsInCluster(ctx, fresh.CloudID)
+		if err != nil {
+			return fmt.Errorf("verify Proxmox cleanup absence: %w", err)
+		}
+		if exists {
+			return fmt.Errorf("Proxmox VM %s still exists in cluster; claim retained", fresh.CloudID)
+		}
+		return nil
+	})
+	return errors.Join(deleteErr, err)
 }
 
-func verifyProxmoxDeleteFailure(ctx context.Context, client proxmoxClient, cloudID string, deleteErr error) (bool, error) {
-	if core.IsProxmoxDeleteTaskError(deleteErr) || core.IsProxmoxDeleteRequestError(deleteErr) {
-		return waitForProxmoxDeleteReconciliation(ctx, client, cloudID)
-	}
-	_, err := client.GetServer(ctx, cloudID)
-	if err == nil {
-		return false, nil
-	}
-	if core.IsProxmoxNotFound(err) {
-		return true, nil
-	}
-	return false, err
-}
-
-func waitForProxmoxDeleteReconciliation(ctx context.Context, client proxmoxClient, cloudID string) (bool, error) {
+func waitForProxmoxCleanupAbsence(ctx context.Context, client proxmoxClient, cloudID string) error {
 	verifyCtx, cancel := context.WithTimeout(ctx, proxmoxDeleteVerifyTimeout)
 	defer cancel()
-	ticker := time.NewTicker(proxmoxDeleteVerifyPollInterval)
-	defer ticker.Stop()
-	disappeared := false
-	result, err := shared.Poll(verifyCtx, 0, proxmoxDeleteVerifyPollInterval,
-		func(ctx context.Context, _ time.Duration) error {
-			select {
-			case <-ctx.Done():
-				return context.Cause(ctx)
-			case <-ticker.C:
-				return nil
-			}
-		},
-		func(ctx context.Context) (struct{}, error) {
-			_, err := client.GetServer(ctx, cloudID)
-			return struct{}{}, err
-		},
-		func(_ context.Context, _ struct{}, fetchErr error) (bool, error) {
-			if core.IsProxmoxNotFound(fetchErr) {
-				disappeared = true
-				return true, nil
-			}
-			if fetchErr != nil {
-				return false, fetchErr
-			}
-			// The task may still be completing after its status poll failed.
-			return false, nil
-		}, nil)
-	if err == nil {
-		return disappeared, nil
-	}
-	if result.Err == nil && errors.Is(context.Cause(verifyCtx), context.DeadlineExceeded) && errors.Is(err, context.DeadlineExceeded) {
-		return false, nil
-	}
-	if result.Err == nil && context.Cause(verifyCtx) != nil && errors.Is(err, context.Cause(verifyCtx)) {
-		return false, verifyCtx.Err()
-	}
-	return false, err
-}
-
-func removeProxmoxServerByCloudID(servers []Server, cloudID string) []Server {
-	for i, server := range servers {
-		if server.CloudID == cloudID {
-			return append(servers[:i], servers[i+1:]...)
-		}
-	}
-	return servers
+	_, err := shared.Poll(verifyCtx, 0, proxmoxDeleteVerifyPollInterval, shared.SleepContext,
+		func(ctx context.Context) (bool, error) { return client.VMExistsInCluster(ctx, cloudID) },
+		func(_ context.Context, exists bool, err error) (bool, error) { return !exists, err }, nil)
+	return err
 }
 
 func removeCleanupLeaseResidue(ctx context.Context, client proxmoxClient, deleted Server, inventory []Server, cfg Config, stderr io.Writer) error {

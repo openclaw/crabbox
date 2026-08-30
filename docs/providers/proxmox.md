@@ -373,11 +373,39 @@ known wrapper credential filenames.
    `DELETE ... ?purge=1`) unless the lease is kept.
 
 List, release reconciliation, and cleanup use cluster-wide inventory and follow
-VMs that migrated away from the configured node. Cleanup reads the Crabbox
-labels from VM descriptions and only deletes expired, Crabbox-managed VMs
-(those named `crabbox-*` with `crabbox=true` and a matching `provider` label).
+VMs that migrated away from the configured node. Cleanup uses names and labels
+only to discover candidates; they never authorize deletion by themselves.
 Failed acquisition cleanup removes the per-lease SSH key only after confirming
 the VM is absent across the cluster.
+
+### Automatic cleanup ownership
+
+Cleanup requires exactly one local claim matching the provider, configured API
+endpoint and original node scope, VMID, lease, slug, provider-key namespace,
+and native VM generation ID (`vmgenid`). New claims record the generation from
+the VM configuration. Cleanup refreshes cluster inventory under the unchanged
+claim lock, follows a migrated VM to its current node, and checks ownership and
+expiry before stop and again before purge. The claim is removed only after
+cluster-wide absence is confirmed. Failed stop, unreadable inventory, changed
+identity, or uncertain deletion retains the claim; an ambiguous purge response
+may be reconciled by authoritative cluster reads while still reporting the error.
+
+Legacy claims without an exact scope, VMID, or generation binding, and VMs with
+missing, disabled, malformed, or changed `vmgenid`, are retained for manual
+inspection. This also applies to clones of templates that disable generation
+IDs. Cleanup does not enable this device, adopt a VM, backfill authority, or
+retarget a claim to another VM with copied labels. Ordinary endpoint refreshes
+preserve an existing generation binding and do not promote legacy claims.
+Duplicate local bindings or remote lease labels are retained as ambiguous.
+
+Automatic cleanup retains local SSH keys, even after successful VM deletion:
+key creation precedes claim publication and is not fenced by the claim lock.
+Inspect retained legacy VMs and keys explicitly before removing them. Use
+`crabbox cleanup --provider proxmox --dry-run` to see eligible candidates without
+mutation. The generation ID is a native incarnation witness, not protection
+against an operator copying or rewriting the entire VM configuration. Proxmox's
+VMID-based purge has no atomic identity precondition; do not concurrently replace
+VMs through raw Proxmox operations while cleanup runs.
 
 ## Troubleshooting
 
