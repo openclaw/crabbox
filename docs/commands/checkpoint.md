@@ -22,14 +22,16 @@ tools, caches, services. Stored in the provider account, so it incurs provider
 storage costs. Recorded as one of `aws-ami`, `aws-ebs-snapshot`,
 `azure-managed-image`, `azure-os-disk-snapshot`, `gcp-machine-image`,
 `gcp-disk-snapshot`, `hetzner-snapshot`, `machine0-image`,
-`parallels-snapshot`, or `daytona-snapshot`.
+`parallels-snapshot`, `daytona-snapshot`, or `incus-image`.
 
 **Archive (workspace tarball)** — captures only the contents of the remote
 workdir as `workspace.tar.gz`. Portable across any POSIX SSH lease, but it does
 not preserve machine state.
 
 `--mode auto` (the default) picks native for providers that support it on the
-current lease and falls back to an archive otherwise. There is also a
+current lease and falls back to an archive otherwise. Incus native container
+capture is opt-in with `--mode native`; default auto mode retains the archive
+fallback. There is also a
 metadata-only `recipe` kind produced by `--recipe-only`, which records the
 checkpoint without creating any artifact.
 
@@ -484,8 +486,8 @@ crabbox checkpoint fork --provider parallels --parallels-template ubuntu-fast --
   checkpoint, changed create intent, ambiguous resources, or a released lease
   ID fails without allocating a replacement. A later fork failure preserves the
   known fixed-ID lease for recovery instead of deleting adopted work. Direct
-  AWS, Machine0, and local-container backends support this checkpoint-bound
-  contract. Archive checkpoints, direct Hetzner, direct Parallels snapshots,
+  AWS, Machine0, local-container, and Incus container backends support this
+  checkpoint-bound contract. Archive checkpoints, direct Hetzner, direct Parallels snapshots,
   coordinator-backed leases, and external providers reject fixed checkpoint
   forks. Fixed IDs must remain retained and cannot fan out, override the
   deterministic workdir, or run commands following `--`.
@@ -632,6 +634,7 @@ See [Checkpoints](../features/checkpoints.md#lifecycle-and-expiry).
 | GCP Linux | Persistent-disk snapshot | Machine image |
 | Hetzner Linux (direct only) | Project snapshot | not supported |
 | Daytona Linux (direct only) | Filesystem snapshot (`--no-reboot=false` for a running source) | Same filesystem snapshot |
+| Incus Linux containers (direct only, `--mode native`) | Private root-disk image | Same snapshot-to-image capture |
 | Parallels | VM snapshot | — |
 
 Brokered native checkpoints (through a configured coordinator) cover AWS
@@ -652,6 +655,12 @@ after capture. Already-stopped sources remain stopped. Fork starts a new sandbox
 from the snapshot and relocates the workspace; native in-place restore and
 memory capture are not supported. See [Daytona](../providers/daytona.md#native-snapshots-and-forks)
 for ownership checks and recovery after an uncertain capture.
+
+Incus native container checkpoints survive source deletion and support fixed-ID
+forks with fresh SSH identity before startup. They do not capture VMs, memory,
+processes, attached disks, or mounted workspaces. See
+[Incus native disk checkpoints](../providers/incus.md#native-disk-checkpoints)
+for consistency, ownership, and cleanup requirements.
 
 **Archive checkpoints**
 
