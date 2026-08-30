@@ -1016,14 +1016,14 @@ func TestAcquirePublicSSHKeyFileKinds(t *testing.T) {
 				}, getSequence: []machine{readyMachine("203.0.113.10")}}
 				b := testBackendWithAPI(api)
 				runner := &recordingRunner{run: func(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+					// Bound a blocked FIFO extraction, not unrelated durable claim writes.
+					ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+					defer cancel()
 					output, err := exec.CommandContext(ctx, req.Name, req.Args...).Output()
 					return core.LocalCommandResult{Stdout: string(output)}, err
 				}}
 				b.rt.Exec = runner
-				// Bound the regression: ssh-keygen blocks opening an unwritten FIFO.
-				ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
-				defer cancel()
-				_, err := b.Acquire(ctx, AcquireRequest{RequestedLeaseID: leaseID, Repo: core.Repo{Root: repo}})
+				_, err := b.Acquire(t.Context(), AcquireRequest{RequestedLeaseID: leaseID, Repo: core.Repo{Root: repo}})
 				wantExtractions := 0
 				if kind == "symlink regular" {
 					wantExtractions = 1

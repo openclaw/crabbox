@@ -195,6 +195,7 @@ func TestPondMeshCancelKillsWindowsProcessTree(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	handle := pondMeshExecRunner{}.Command(ctx, os.Args[0], "-test.run=^TestPondMeshCancelKillsWindowsProcessTree$")
 	execHandle := handle.(*pondMeshExecHandle)
 	childPIDFile := filepath.Join(t.TempDir(), "child-pid")
@@ -207,13 +208,19 @@ func TestPondMeshCancelKillsWindowsProcessTree(t *testing.T) {
 	}
 	waitCh := make(chan error, 1)
 	go func() { waitCh <- handle.Wait() }()
-	childPID := waitForPondMeshWindowsChildPID(t, childPIDFile)
+	waited := false
 	t.Cleanup(func() {
-		_ = exec.Command("taskkill", "/PID", strconv.Itoa(childPID), "/T", "/F").Run()
+		cancel()
+		if !waited {
+			<-waitCh
+		}
 	})
+	childPID := waitForPondMeshWindowsChildPID(t, childPIDFile)
 
 	cancel()
-	if err := <-waitCh; err == nil {
+	err := <-waitCh
+	waited = true
+	if err == nil {
 		t.Fatal("cancelled process tree returned success")
 	}
 	if !handle.WasTerminatedByOurCancel() {
@@ -233,6 +240,7 @@ func TestPondMeshCancelKillsWindowsProcessTree(t *testing.T) {
 
 func TestPondMeshJobTerminationFailureStillKillsWindowsProcessTree(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	handle := pondMeshExecRunner{}.Command(ctx, os.Args[0], "-test.run=^TestPondMeshCancelKillsWindowsProcessTree$")
 	execHandle := handle.(*pondMeshExecHandle)
 	childPIDFile := filepath.Join(t.TempDir(), "child-pid")
@@ -243,21 +251,26 @@ func TestPondMeshJobTerminationFailureStillKillsWindowsProcessTree(t *testing.T)
 	if err := handle.Start(); err != nil {
 		t.Fatal(err)
 	}
-	childPID := waitForPondMeshWindowsChildPID(t, childPIDFile)
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- handle.Wait() }()
+	waited := false
 	t.Cleanup(func() {
-		_ = exec.Command("taskkill", "/PID", strconv.Itoa(childPID), "/T", "/F").Run()
+		cancel()
+		if !waited {
+			<-waitCh
+		}
 	})
+	childPID := waitForPondMeshWindowsChildPID(t, childPIDFile)
 
 	originalTerminateJob := pondMeshTerminateJobObject
 	forcedErr := errors.New("forced job termination failure")
 	pondMeshTerminateJobObject = func(windows.Handle, uint32) error { return forcedErr }
 	defer func() { pondMeshTerminateJobObject = originalTerminateJob }()
 
-	waitCh := make(chan error, 1)
-	go func() { waitCh <- handle.Wait() }()
 	cancel()
 	select {
 	case err := <-waitCh:
+		waited = true
 		if err == nil || !strings.Contains(err.Error(), forcedErr.Error()) {
 			t.Fatalf("job termination failure = %v, want cleanup diagnostic", err)
 		}
@@ -282,13 +295,46 @@ func waitForPondMeshWindowsChildPID(t *testing.T, path string) int {
 			}
 			return pid
 		}
-		if !errors.Is(err, os.ErrNotExist) {
+		// Windows can expose the renamed path before releasing its sharing lock.
+		if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
 			t.Fatal(err)
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("tree helper did not publish its child pid")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestPondMeshCancelChildPIDWaitsForSharingLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "child-pid")
+	if err := os.WriteFile(path, []byte("12345"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(name, windows.GENERIC_READ, 0, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.ReadFile(path); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+		_ = windows.CloseHandle(handle)
+		t.Fatalf("fixture did not hold a sharing lock: %v", err)
+	}
+	unlocked := make(chan error, 1)
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		unlocked <- windows.CloseHandle(handle)
+	}()
+	t.Cleanup(func() {
+		if err := <-unlocked; err != nil {
+			t.Error(err)
+		}
+	})
+	if pid := waitForPondMeshWindowsChildPID(t, path); pid != 12345 {
+		t.Fatalf("published pid=%d", pid)
 	}
 }
 

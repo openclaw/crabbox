@@ -8,6 +8,7 @@ import {
   azureProvisioningErrorCategory,
   azureRegionCandidates,
   azureRegionalName,
+  azureSnapshotNotFound,
   azureSpotFallbackTimeoutMs,
   azureSupportsEphemeralFullCaching,
   azureSupportsEphemeralOS,
@@ -680,6 +681,31 @@ describe("azure provider", () => {
     ]);
   });
 
+  it("recognizes only the exact managed snapshot in normal Azure resource-not-found responses", async () => {
+    const client = new AzureClient(baseEnv);
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      if (url.hostname === "login.microsoftonline.com") {
+        return Response.json({ access_token: "tkn", expires_in: 3600 });
+      }
+      void init;
+      return azureResourceNotFoundResponse(url);
+    };
+    let failure: unknown;
+    try {
+      await client.getImage("checkpoint-azure", "azure-os-disk-snapshot");
+    } catch (error) {
+      failure = error;
+    }
+    const exact =
+      "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/snapshots/checkpoint-azure";
+    expect(azureSnapshotNotFound(failure, exact)).toBe(true);
+    expect(azureSnapshotNotFound(failure, exact.replace("checkpoint-azure", "other"))).toBe(false);
+    expect(azureSnapshotNotFound(failure, exact.replace("/snapshots/", "/virtualMachines/"))).toBe(
+      false,
+    );
+  });
+
   it("refuses createDiskSnapshot for VMs with an ephemeral OS disk", async () => {
     const client = new AzureClient(baseEnv);
     const calls: Array<{ method: string; pathname: string }> = [];
@@ -721,6 +747,47 @@ describe("azure provider", () => {
     ).rejects.toThrow(/azure ephemeral OS disk on vm crabbox-blue-lobster cannot be snapshotted/);
     expect(calls.map((call) => `${call.method} ${call.pathname}`)).toEqual([
       "GET /subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/virtualMachines/crabbox-blue-lobster",
+    ]);
+  });
+
+  it("refuses to overwrite an existing coordinator-owned snapshot name", async () => {
+    const client = new AzureClient(baseEnv);
+    seedAzureAuthCache(client);
+    const requests: Array<{ method: string; ifNoneMatch: string | null }> = [];
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? "GET";
+      requests.push({ method, ifNoneMatch: new Headers(init?.headers).get("if-none-match") });
+      if (method === "GET" && url.pathname.includes("/virtualMachines/")) {
+        return Response.json({
+          location: "eastus",
+          properties: {
+            storageProfile: {
+              osDisk: {
+                managedDisk: {
+                  id: "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/disks/source-disk",
+                },
+              },
+            },
+          },
+        });
+      }
+      return Response.json({ error: { code: "PreconditionFailed" } }, { status: 412 });
+    };
+    let refused: unknown;
+    try {
+      await client.createDiskSnapshot("source-vm", "existing-unrelated-snapshot", {
+        checkpointID: "chk_conditional_create",
+        tokenHash: "a".repeat(64),
+        sourceLeaseID: "cbx_abcdef123456",
+      });
+    } catch (error) {
+      refused = error;
+    }
+    expect(refused).toMatchObject({ checkpointResourceMayExist: false });
+    expect(requests).toEqual([
+      { method: "GET", ifNoneMatch: null },
+      { method: "PUT", ifNoneMatch: "*" },
     ]);
   });
 

@@ -4,12 +4,22 @@
 
 ### Added
 
+- Added Linux SSH `--download-on-failure` retrieval after an owned nonzero workload exit, preserving the exit code and collecting selected evidence before failure bundles and teardown.
+
 - Added opt-in Machine0 native size selection context to live catalog discovery while preserving configured defaults and exact fixed-lease replay.
 - Added durable fixed-ID Incus leases and private container disk checkpoints that survive source deletion, with ownership-checked cleanup and fresh SSH identity before fork startup.
+
+- Added opt-in Linux SSH `--require-artifact-change` checks with bounded content snapshots, created/changed/unchanged/missing timing states, and collection of only accepted bytes.
+
+- Added coordinator-owned brokered native checkpoints with transactional checkpoint and fork-claim admission limits, bounded recent audit events, opt-in unused-checkpoint expiry, and promotion-safe cleanup.
 
 ### Fixed
 
 - Bounded best-effort Testbox portal bookkeeping to one five-second budget and delayed final warmup completion/timing until it ends, preserving successful allocations and retained leases on sync failure.
+- Rejected lease-output aliases of captures and success/failure downloads before acquisition, preserving retained lease handles and existing output bytes.
+- Honored cancellation during Hostinger bootstrap SSH retry delays while preserving ownership-checked rollback and recovery state. Thanks @SebTardif.
+- Reaped WebVNC daemon SSH tunnels across child restarts and orderly shutdown, retaining exact ownership records and reporting failure when cleanup cannot be confirmed.
+- Bounded VNC/WebVNC credential reads to 30 seconds and 64 KiB, discarding partial credentials on any failure while preserving connection defaults, caller cancellation, and transport cleanup. Thanks @SebTardif.
 - Bounded WebVNC bridge response-header waits to 30 seconds without limiting established WebSocket sessions or bypassing configured HTTP transports. Thanks @SebTardif.
 - Simplified WSL2 SSH execution into one verified, privately blinded SFTP envelope with a derived fixed-control startup/work/completion budget, LF helpers on Windows builds, identity-checked cleanup, and no replay after publication uncertainty; SFTP is now required, replacing the v0.47.0 stdin fallback (enable it and verify Doctor's `wsl2-sftp` probe before upgrading). Thanks @vincentkoc.
 - Exposed resolved Incus settings in `config show --json`, with endpoint credential redaction and no daemon access.
@@ -52,6 +62,8 @@
 - Reported bounded, secret-safe remote Git seed failure phases and categories across ordinary sync, local Actions hydration, and native Windows, while preserving file sync and Git coherence behavior. Thanks @coygeek.
 - Made Machine0 doctor check the same SSH-key prerequisites as new creation and reject missing legacy key pairs when no default is selected, without mutating keys or blocking existing fixed-lease replay. Thanks @coygeek.
 - Cleaned exact-owned interrupted Azure public-IP and NIC provisioning prefixes while restoring ordered SKU fallback and preserving immutable-identity cleanup fences. Thanks @excelsier and @vincentkoc.
+
+- Rendered failure recovery guidance after automatic cleanup, omitting lease commands only after confirmed release while preserving retained and uncertain cleanup recovery.
 
 ## 0.47.0 - 2026-08-28
 

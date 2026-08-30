@@ -394,8 +394,20 @@ Brokered Linux GCP leases support native [checkpoints](../features/checkpoints.m
 recorded project and zone. Native checkpoints require a coordinator and a known
 cloud instance ID; they are not available for direct-only leases.
 
-`crabbox image delete <image-id> --provider gcp` deletes a GCP image. GCP does
-not yet have the AWS-style `image promote` bake pipeline.
+New brokered GCP checkpoints are owned by the coordinator and manually retained
+unless creation or `checkpoint policy` explicitly sets
+`--expire-unused-after <duration>`. Ownership binds the exact project, global
+resource kind/name, canonical resource ID, numeric immutable identity, and
+source lease. Fork/shard use claims block expiry while provisioning is active.
+Wrong-project, disabled-API, authorization, operation, or name-reuse failures
+never count as successful deletion. Provider labels remain within GCP's
+63-character value limit even when the coordinator checkpoint identifier is
+long; a bounded ownership digest links those labels to the full durable ID.
+
+Generic `crabbox image delete <image-id> --provider gcp` refuses an image owned
+by a managed checkpoint; use `checkpoint delete <id>` instead. GCP does not yet
+have the AWS-style `image promote` bake pipeline. Direct and historical images
+remain operator-managed.
 
 ## Troubleshooting
 

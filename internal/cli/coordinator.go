@@ -14,16 +14,20 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 type CoordinatorClient struct {
-	BaseURL          string
-	Token            string
-	TokenCommand     []string
-	Access           AccessConfig
-	Client           *http.Client
-	ChildEnvDenylist []string
+	BaseURL                string
+	Token                  string
+	TokenCommand           []string
+	Access                 AccessConfig
+	Client                 *http.Client
+	ChildEnvDenylist       []string
+	checkpointSupportMu    sync.Mutex
+	checkpointSupportKnown bool
+	checkpointSupported    bool
 }
 
 func (c *CoordinatorClient) hasConfiguredAuth() bool {
@@ -292,6 +296,7 @@ type CoordinatorImage struct {
 	Capabilities         *imageCapabilities               `json:"capabilities,omitempty"`
 	CatalogOnly          bool                             `json:"catalogOnly,omitempty"`
 	VariantSelectors     *imageVariantSelectors           `json:"variantSelectors,omitempty"`
+	managedCheckpoint    *coordinatorCheckpoint
 }
 
 type CoordinatorFastSnapshotRestore struct {
@@ -1013,6 +1018,10 @@ func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicK
 	addCoordinatorGCPFields(req, cfg)
 	method := http.MethodPost
 	path := "/v1/leases"
+	checkpointClaim, checkpointBacked := checkpointLeaseClaimFromContext(ctx)
+	if checkpointBacked && fixed {
+		return CoordinatorLease{}, fmt.Errorf("checkpoint-backed leases do not support fixed lease identifiers")
+	}
 	if fixed {
 		method = http.MethodPut
 		path = "/v1/leases/" + url.PathEscape(leaseID)
@@ -1020,7 +1029,33 @@ func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicK
 		// Older coordinators do not have this route, so mixed-version use fails closed.
 		path = "/v1/leases/capability-aware"
 	}
+	if checkpointBacked {
+		switch cfg.Provider {
+		case "aws":
+			delete(req, "azureLocation")
+			delete(req, "gcpZone")
+			delete(req, "gcpProject")
+		case "azure":
+			delete(req, "awsRegion")
+			delete(req, "gcpZone")
+			delete(req, "gcpProject")
+		case "gcp":
+			delete(req, "awsRegion")
+			delete(req, "azureLocation")
+			req["gcpProject"] = cfg.GCPProject
+			req["gcpZone"] = cfg.GCPZone
+		}
+		req["checkpointID"] = checkpointClaim.CheckpointID
+		req["checkpointUseClaim"] = checkpointClaim.Token
+		path = "/v1/leases/from-checkpoint"
+	}
 	err = c.do(ctx, method, path, req, &res)
+	if err == nil && checkpointBacked && checkpointClaim.LeaseCreated != nil {
+		checkpointClaim.LeaseCreated()
+	}
+	if checkpointBacked && checkpointRouteUnsupported(err) {
+		return CoordinatorLease{}, c.checkpointOperationError(ctx, err)
+	}
 	return res.Lease, err
 }
 
@@ -1979,6 +2014,18 @@ func (c *CoordinatorClient) RetireCatalogImage(ctx context.Context, imageID stri
 	if err != nil {
 		if isCoordinatorNotFound(err) {
 			return CoordinatorCatalogImageRetirement{}, fmt.Errorf("coordinator does not support catalog-only image retirement; upgrade the coordinator before unpublishing variant images (%w)", err)
+		}
+		return CoordinatorCatalogImageRetirement{}, err
+	}
+	return res, nil
+}
+
+func (c *CoordinatorClient) RetirePromotedImage(ctx context.Context, imageID string, refs ...CoordinatorImageRef) (CoordinatorCatalogImageRetirement, error) {
+	var res CoordinatorCatalogImageRetirement
+	err := c.do(ctx, http.MethodDelete, imagePath(imageID, "promote", refs...), nil, &res)
+	if err != nil {
+		if isCoordinatorNotFound(err) {
+			return CoordinatorCatalogImageRetirement{}, fmt.Errorf("coordinator does not support image promotion retirement; upgrade the coordinator before unpublishing promoted images (%w)", err)
 		}
 		return CoordinatorCatalogImageRetirement{}, err
 	}

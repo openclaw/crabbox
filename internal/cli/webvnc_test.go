@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -540,8 +541,17 @@ func TestConnectWebVNCBridgeTransportRefusalClosesVNC(t *testing.T) {
 
 func TestWebVNCWebSocketHeaderDeadlineNetwork(t *testing.T) {
 	t.Parallel()
-	t.Run("earlier caller deadline", func(t *testing.T) {
-		t.Parallel()
+	// Keep socket waits concurrent within one test slot, even on small runners.
+	var checks sync.WaitGroup
+	defer checks.Wait()
+	run := func(name string, check func(*testing.T)) {
+		checks.Add(1)
+		go func() {
+			defer checks.Done()
+			t.Run(name, check)
+		}()
+	}
+	run("earlier caller deadline", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
 		t.Cleanup(server.Close)
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -558,8 +568,7 @@ func TestWebVNCWebSocketHeaderDeadlineNetwork(t *testing.T) {
 			t.Fatalf("caller deadline lost: %v", err)
 		}
 	})
-	t.Run("stalled headers", func(t *testing.T) {
-		t.Parallel()
+	run("stalled headers", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			<-r.Context().Done()
 		}))
@@ -581,8 +590,7 @@ func TestWebVNCWebSocketHeaderDeadlineNetwork(t *testing.T) {
 		}
 		t.Logf("actual header timeout after %s, caller deadline still live", time.Since(start))
 	})
-	t.Run("upgraded session survives", func(t *testing.T) {
-		t.Parallel()
+	run("upgraded session survives", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			conn, err := websocket.Accept(w, r, nil)

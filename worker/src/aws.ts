@@ -30,6 +30,7 @@ import type {
   Env,
   ProviderFastSnapshotRestore,
   ProviderImage,
+  ProviderCheckpointOwnership,
   LeaseImageIdentity,
   ProviderMachine,
   ProvisioningAttempt,
@@ -1328,9 +1329,13 @@ export class EC2SpotClient {
     throw new Error(`timed out confirming AWS instance termination: ${instanceID}`);
   }
 
-  async createDiskSnapshot(instanceID: string, name: string): Promise<ProviderImage> {
+  async createDiskSnapshot(
+    instanceID: string,
+    name: string,
+    ownership?: ProviderCheckpointOwnership,
+  ): Promise<ProviderImage> {
     const source = await this.instanceRootVolumeMetadata(instanceID);
-    const root = await this.ec2("CreateSnapshot", {
+    const params: Record<string, string> = {
       VolumeId: source.volumeID,
       Description: `Crabbox checkpoint from ${instanceID}`,
       "TagSpecification.1.ResourceType": "snapshot",
@@ -1344,7 +1349,16 @@ export class EC2SpotClient {
       "TagSpecification.1.Tag.4.Value": source.rootDeviceName,
       "TagSpecification.1.Tag.5.Key": "crabbox_architecture",
       "TagSpecification.1.Tag.5.Value": source.architecture,
-    });
+    };
+    if (ownership) {
+      params["TagSpecification.1.Tag.6.Key"] = "crabbox_checkpoint_id";
+      params["TagSpecification.1.Tag.6.Value"] = ownership.checkpointID;
+      params["TagSpecification.1.Tag.7.Key"] = "crabbox_checkpoint_token";
+      params["TagSpecification.1.Tag.7.Value"] = ownership.tokenHash;
+      params["TagSpecification.1.Tag.8.Key"] = "crabbox_checkpoint_lease";
+      params["TagSpecification.1.Tag.8.Value"] = ownership.sourceLeaseID;
+    }
+    const root = await this.ec2("CreateSnapshot", params);
     const snapshotID = asString(root["snapshotId"]);
     if (!snapshotID) {
       throw new Error("aws returned no snapshot id");
@@ -1357,11 +1371,23 @@ export class EC2SpotClient {
       kind: "aws-ebs-snapshot",
       region: this.region,
       resourceID: snapshotID,
+      immutableID: snapshotID,
+      ...(ownership
+        ? {
+            checkpointOwnershipHash: ownership.tokenHash,
+            checkpointSourceLeaseID: ownership.sourceLeaseID,
+          }
+        : {}),
       snapshots: [snapshotID],
     };
   }
 
-  async createImage(instanceID: string, name: string, noReboot: boolean): Promise<ProviderImage> {
+  async createImage(
+    instanceID: string,
+    name: string,
+    noReboot: boolean,
+    ownership?: ProviderCheckpointOwnership,
+  ): Promise<ProviderImage> {
     const params: Record<string, string> = {
       InstanceId: instanceID,
       Name: name,
@@ -1374,6 +1400,25 @@ export class EC2SpotClient {
       "TagSpecification.1.Tag.3.Key": "Name",
       "TagSpecification.1.Tag.3.Value": name,
     };
+    if (ownership) {
+      params["TagSpecification.1.Tag.4.Key"] = "crabbox_checkpoint_id";
+      params["TagSpecification.1.Tag.4.Value"] = ownership.checkpointID;
+      params["TagSpecification.1.Tag.5.Key"] = "crabbox_checkpoint_token";
+      params["TagSpecification.1.Tag.5.Value"] = ownership.tokenHash;
+      params["TagSpecification.1.Tag.6.Key"] = "crabbox_checkpoint_lease";
+      params["TagSpecification.1.Tag.6.Value"] = ownership.sourceLeaseID;
+      params["TagSpecification.2.ResourceType"] = "snapshot";
+      params["TagSpecification.2.Tag.1.Key"] = "crabbox";
+      params["TagSpecification.2.Tag.1.Value"] = "true";
+      params["TagSpecification.2.Tag.2.Key"] = "created_by";
+      params["TagSpecification.2.Tag.2.Value"] = "crabbox";
+      params["TagSpecification.2.Tag.3.Key"] = "crabbox_checkpoint_id";
+      params["TagSpecification.2.Tag.3.Value"] = ownership.checkpointID;
+      params["TagSpecification.2.Tag.4.Key"] = "crabbox_checkpoint_token";
+      params["TagSpecification.2.Tag.4.Value"] = ownership.tokenHash;
+      params["TagSpecification.2.Tag.5.Key"] = "crabbox_checkpoint_lease";
+      params["TagSpecification.2.Tag.5.Value"] = ownership.sourceLeaseID;
+    }
     const root = await this.ec2("CreateImage", params);
     const imageID = asString(root["imageId"]);
     if (!imageID) {
@@ -1387,6 +1432,13 @@ export class EC2SpotClient {
       kind: "aws-ami",
       region: this.region,
       resourceID: imageID,
+      immutableID: imageID,
+      ...(ownership
+        ? {
+            checkpointOwnershipHash: ownership.tokenHash,
+            checkpointSourceLeaseID: ownership.sourceLeaseID,
+          }
+        : {}),
     };
   }
 
@@ -1410,6 +1462,16 @@ export class EC2SpotClient {
       kind: "aws-ami",
       region: this.region,
       resourceID: id,
+      immutableID: id,
+      ...(asString(image["imageOwnerId"]) || asString(image["ownerId"])
+        ? { accountID: asString(image["imageOwnerId"]) || asString(image["ownerId"]) }
+        : {}),
+      ...(tagValue(image, "crabbox_checkpoint_token")
+        ? { checkpointOwnershipHash: tagValue(image, "crabbox_checkpoint_token") }
+        : {}),
+      ...(tagValue(image, "crabbox_checkpoint_lease")
+        ? { checkpointSourceLeaseID: tagValue(image, "crabbox_checkpoint_lease") }
+        : {}),
       architecture: asString(image["architecture"]),
       snapshots: imageSnapshotIDs(image),
     };
@@ -1434,6 +1496,36 @@ export class EC2SpotClient {
       // oxlint-disable-next-line eslint/no-await-in-loop -- EBS snapshot deletes are independent cleanup calls.
       await this.deleteSnapshotWithRetry(snapshotID);
     }
+  }
+
+  async findCheckpointImage(
+    name: string,
+    strategy: "image" | "disk-snapshot",
+    ownership: ProviderCheckpointOwnership,
+  ): Promise<ProviderImage | undefined> {
+    const filters: Record<string, string> = {
+      "Filter.1.Name": "tag:crabbox_checkpoint_id",
+      "Filter.1.Value.1": ownership.checkpointID,
+      "Filter.2.Name": "tag:crabbox_checkpoint_token",
+      "Filter.2.Value.1": ownership.tokenHash,
+      "Filter.3.Name": "tag:crabbox_checkpoint_lease",
+      "Filter.3.Value.1": ownership.sourceLeaseID,
+      "Filter.4.Name": strategy === "image" ? "name" : "tag:Name",
+      "Filter.4.Value.1": name,
+    };
+    const root = await this.ec2(strategy === "image" ? "DescribeImages" : "DescribeSnapshots", {
+      ...filters,
+      ...(strategy === "image" ? { "Owner.1": "self" } : { "Owner.1": "self" }),
+    });
+    const entries = items(record(root[strategy === "image" ? "imagesSet" : "snapshotSet"])["item"]);
+    if (entries.length !== 1) {
+      if (entries.length > 1)
+        throw new Error("multiple resources match the checkpoint ownership reservation");
+      return undefined;
+    }
+    const entry = record(entries[0]);
+    const id = asString(entry[strategy === "image" ? "imageId" : "snapshotId"]);
+    return id ? await this.getImage(id) : undefined;
   }
 
   async enableFastSnapshotRestore(
@@ -1690,6 +1782,14 @@ export class EC2SpotClient {
       kind: "aws-ebs-snapshot",
       region: this.region,
       resourceID: id,
+      immutableID: id,
+      ...(asString(snapshot["ownerId"]) ? { accountID: asString(snapshot["ownerId"]) } : {}),
+      ...(tagValue(snapshot, "crabbox_checkpoint_token")
+        ? { checkpointOwnershipHash: tagValue(snapshot, "crabbox_checkpoint_token") }
+        : {}),
+      ...(tagValue(snapshot, "crabbox_checkpoint_lease")
+        ? { checkpointSourceLeaseID: tagValue(snapshot, "crabbox_checkpoint_lease") }
+        : {}),
       snapshots: [id],
     };
   }

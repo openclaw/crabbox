@@ -16,6 +16,10 @@ type checkpointStore struct {
 	root string
 }
 
+type checkpointBusyError struct{ ExitError }
+
+func (e checkpointBusyError) Unwrap() error { return e.ExitError }
+
 type checkpointNotFoundError struct {
 	ExitError
 }
@@ -222,7 +226,7 @@ func (s checkpointStore) withLock(id string, wait bool, action func() error) err
 		return err
 	}
 	lockPath := paths.Dir + ".lock"
-	busy := exit(2, "checkpoint %s is busy; retry after its current operation finishes", id)
+	busy := checkpointBusyError{exit(2, "checkpoint %s is busy; retry after its current operation finishes", id)}
 	mu := claimMutationMutex(lockPath)
 	if wait {
 		mu.Lock()

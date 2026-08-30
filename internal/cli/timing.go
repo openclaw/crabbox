@@ -43,6 +43,7 @@ type TimingReport struct {
 	Artifacts          []runArtifact            `json:"artifacts,omitempty"`
 
 	SchemaValidations []SchemaValidationResult `json:"schemaValidations,omitempty"`
+	ArtifactChanges   []ArtifactChangeResult   `json:"artifactChanges,omitempty"`
 
 	LeaseStopped *bool  `json:"leaseStopped,omitempty"`
 	LeaseStopErr string `json:"leaseStopError,omitempty"`
