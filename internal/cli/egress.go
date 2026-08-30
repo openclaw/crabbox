@@ -1381,11 +1381,8 @@ func installRemoteEgressClient(ctx context.Context, target SSHTarget) error {
 		defer cancel()
 		_ = runSSHQuiet(cleanupCtx, target, "rm -f "+shellQuote(uploadPath))
 	}()
-	args := append(scpBaseArgs(target), exe, target.User+"@"+target.Host+":"+uploadPath)
-	cmd := exec.CommandContext(ctx, "scp", args...)
-	applyTargetChildEnvironment(cmd, target)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return exit(5, "copy egress client: %v: %s", err, strings.TrimSpace(string(out)))
+	if err := copyLocalFileToTarget(ctx, target, exe, uploadPath); err != nil {
+		return exit(5, "copy egress client: %v", err)
 	}
 	if err := runSSHQuiet(ctx, target, "chmod 700 "+shellQuote(uploadPath)+" && mv -f "+shellQuote(uploadPath)+" "+shellQuote(egressRemoteBinary)); err != nil {
 		return exit(5, "install egress client: %v", err)
@@ -1428,33 +1425,6 @@ func crossBuildEgressClient(ctx context.Context, target SSHTarget, repoRoot, out
 		return exit(5, "cross-build linux egress client: %v: %s", err, strings.TrimSpace(string(data)))
 	}
 	return nil
-}
-
-func scpBaseArgs(target SSHTarget) []string {
-	args := sshForwardingDenyArgs()
-	if target.TargetOS == targetWindows && target.WindowsMode != windowsModeWSL2 {
-		args = append(args, "-O")
-	}
-	args = append(args,
-		"-o", "BatchMode=yes",
-	)
-	args = append(args, sshHostKeyVerificationArgs(target)...)
-	args = append(args,
-		"-o", "ConnectTimeout=10",
-		"-o", "ConnectionAttempts=3",
-		"-P", target.Port,
-	)
-	if strings.TrimSpace(target.SSHHostKey) != "" {
-		args = append(args,
-			"-o", "ControlMaster=no",
-			"-o", "ControlPath=none",
-			"-o", "ControlPersist=no",
-		)
-	}
-	if target.Key != "" {
-		args = append([]string{"-i", target.Key, "-o", "IdentitiesOnly=yes"}, args...)
-	}
-	return args
 }
 
 func remoteEgressClientCommand(coordinatorURL, leaseID, sessionID, listen string) string {

@@ -163,15 +163,13 @@ func copyOverResolvedSSH(ctx context.Context, target SSHTarget, src, dst string,
 	if err != nil {
 		return err
 	}
-	handle, err := resolvedSSHCopyCommand(ctx, target, args, wslExe, mountRoot)
+	handle, err := resolvedRsyncCommand(ctx, target, args, wslExe, mountRoot)
 	if err != nil {
 		return err
 	}
 	stderrTail := newSynchronizedTailBuffer(failureTailLines)
-	if execHandle, ok := handle.(*pondMeshExecHandle); ok {
-		execHandle.cmd.Stdout = stdout
-		execHandle.cmd.Stderr = stderrTail
-	}
+	handle.cmd.Stdout = stdout
+	handle.cmd.Stderr = stderrTail
 	if err := handle.Start(); err != nil {
 		return fmt.Errorf("start copy over resolved SSH transport: %w", err)
 	}
@@ -186,50 +184,6 @@ func copyOverResolvedSSH(ctx context.Context, target SSHTarget, src, dst string,
 		return fmt.Errorf("copy over resolved SSH transport: %w", waitErr)
 	}
 	return nil
-}
-
-func resolvedSSHCopyCommand(ctx context.Context, target SSHTarget, args []string, wslExe, mountRoot string) (pondMeshHandle, error) {
-	return resolvedSSHCopyCommandForGOOS(ctx, runtime.GOOS, target, args, wslExe, mountRoot)
-}
-
-func resolvedSSHCopyCommandForGOOS(ctx context.Context, goos string, target SSHTarget, args []string, wslExe, mountRoot string) (pondMeshHandle, error) {
-	name := "rsync"
-	commandArgs := args
-	nativeWindows := goos == "windows" && wslExe == ""
-	if goos == "windows" {
-		if wslExe != "" {
-			name = wslExe
-			commandArgs = append([]string{"rsync"}, resolvedSSHCopyWSLArgs(args, mountRoot)...)
-		} else {
-			var err error
-			name, commandArgs, err = windowsNativeRsyncCommandSpec(args)
-			if err != nil {
-				return nil, err
-			}
-		}
-	}
-	handle := pondMeshExecCommand(ctx, target.ChildEnvDenylist, name, commandArgs...)
-	if nativeWindows {
-		if execHandle, ok := handle.(*pondMeshExecHandle); ok {
-			applyWindowsNativeRsyncEnvironment(execHandle.cmd)
-		}
-	}
-	return handle, nil
-}
-
-func resolvedSSHCopyWSLArgs(args []string, mountRoot string) []string {
-	wslArgs := append([]string(nil), args...)
-	operands := false
-	for index, arg := range wslArgs {
-		if arg == "--" {
-			operands = true
-			continue
-		}
-		if operands && !strings.HasPrefix(arg, sshTransportHostAlias+":") {
-			wslArgs[index] = windowsToWSLPathWithRoot(arg, mountRoot)
-		}
-	}
-	return wslArgs
 }
 
 func probeResolvedSSHRemoteSecludedArgs(ctx context.Context, session *sshTransportSession, target SSHTarget, wslExe string) error {
@@ -346,7 +300,7 @@ func redactSSHTransportDiagnostic(target SSHTarget, value string) string {
 }
 
 func newResolvedSSHCopySession(ctx context.Context, target SSHTarget) (*sshTransportSession, string, string, resolvedRsyncCapabilities, error) {
-	if !sshCopyUsesWSL(runtime.GOOS, target) {
+	if !sshTransferUsesWSL(runtime.GOOS, target) {
 		capabilities, err := resolvedSSHCopyRsyncCapabilities(ctx, target, "")
 		if err != nil {
 			return nil, "", "", resolvedRsyncCapabilities{}, err
@@ -374,17 +328,12 @@ func newResolvedSSHCopySession(ctx context.Context, target SSHTarget) (*sshTrans
 			return session, "", "", nativeCapabilities, err
 		}
 	}
-	mountRoot := windowsWSLMountRoot(ctx, target, wslExe)
-	session, err := newWSLSSHTransportSession(ctx, target, wslExe, mountRoot)
+	session, mountRoot, err := newRsyncTransportSession(ctx, target, wslExe)
 	return session, wslExe, mountRoot, wslCapabilities, err
 }
 
 func preferNativeResolvedRsync(wsl, native resolvedRsyncCapabilities) bool {
 	return !wsl.safeTransport && native.safeTransport
-}
-
-func sshCopyUsesWSL(goos string, target SSHTarget) bool {
-	return goos == "windows" && !target.SSHConfigProxy
 }
 
 func resolvedSSHCopyArgs(session *sshTransportSession, target SSHTarget, src, dst string, followLink, secludedArgs bool) ([]string, error) {

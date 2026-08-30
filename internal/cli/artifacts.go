@@ -2,8 +2,10 @@ package cli
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -1000,12 +1002,23 @@ func windowsDesktopVideoEncoderCommand(ctx context.Context, target SSHTarget, ar
 	return cmd
 }
 
-func copyLocalFileToTarget(ctx context.Context, target SSHTarget, localPath, remotePath string) error {
-	args := append(scpBaseArgs(target), localPath, target.User+"@"+target.Host+":"+remotePath)
-	cmd := exec.CommandContext(ctx, "scp", args...)
-	applyTargetChildEnvironment(cmd, target)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return exit(5, "copy %s to target: %v: %s", filepath.Base(localPath), err, strings.TrimSpace(string(out)))
+func copyLocalFileToTarget(ctx context.Context, target SSHTarget, localPath, remotePath string) (err error) {
+	session, err := newSSHTransportSession(ctx, target, false)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, session.Close()) }()
+	handle := pondMeshExecCommand(ctx, target.ChildEnvDenylist, "scp", resolvedSCPUploadArgs(session, target, localPath, remotePath)...).(*pondMeshExecHandle)
+	applyTargetChildEnvironment(handle.cmd, target)
+	var output bytes.Buffer
+	handle.cmd.Stdout = &output
+	handle.cmd.Stderr = &output
+	err = handle.Start()
+	if err == nil {
+		err = handle.Wait()
+	}
+	if err != nil {
+		return exit(5, "copy %s to target: %v: %s", filepath.Base(localPath), err, strings.TrimSpace(redactSSHTransportDiagnostic(target, output.String())))
 	}
 	return nil
 }

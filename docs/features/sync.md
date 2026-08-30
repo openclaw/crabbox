@@ -12,6 +12,14 @@ own their own file transfer and reject the local sync options. Native Windows
 targets use the same file list but ship it as a tar archive over OpenSSH instead
 of rsync.
 
+SSH-backed workspace sync uses a private, temporary OpenSSH configuration and a
+fixed host alias, so IPv6 addresses are not parsed as rsync host/path separators.
+The configuration preserves the resolved user, authentication, proxy route, and
+host-key policy, and is removed after transfer and workspace-owner cleanup.
+Windows keeps native rsync/SSH pairing or privately staged WSL credentials;
+native SSH-config routes stay on the native client. Artifact and egress uploads
+use the same private SSH configuration boundary.
+
 `--no-sync` skips local file transfer only on providers that support it.
 Blacksmith Testbox rejects it before lease access or execution because native
 Testbox runs own sync and offer no supported bypass, including when reusing an

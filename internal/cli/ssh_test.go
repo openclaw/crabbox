@@ -169,35 +169,6 @@ func TestBindWindowsNativeRsyncSSHPreservesOwnedArguments(t *testing.T) {
 	}
 }
 
-func TestWindowsNativeRsyncCommandUsesSiblingPairAndEnvironment(t *testing.T) {
-	toolDir := filepath.Join(t.TempDir(), "native tools")
-	if err := os.MkdirAll(toolDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"rsync.exe", "ssh.exe"} {
-		if err := os.WriteFile(filepath.Join(toolDir, name), []byte("fixture"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Setenv("PATH", toolDir)
-	cmd, err := windowsNativeRsyncCommand(t.Context(), []string{"-e", "'ssh' '-i' 'injected key'", "source", "host:dest"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cmd.Path != filepath.Join(toolDir, "rsync.exe") {
-		t.Fatalf("rsync path=%q", cmd.Path)
-	}
-	if got := cmd.Args[2]; !strings.HasPrefix(got, rsyncShellWords([]string{filepath.Join(toolDir, "ssh.exe")})[0]+" ") || !strings.Contains(got, "'injected key'") {
-		t.Fatalf("paired remote shell=%q", got)
-	}
-	joinedEnv := strings.Join(cmd.Env, "\n")
-	for _, want := range []string{"MSYS2_ARG_CONV_EXCL=*", "MSYS_NO_PATHCONV=1", "CYGWIN=nodosfilewarning"} {
-		if !strings.Contains(joinedEnv, want) {
-			t.Fatalf("environment missing %q: %q", want, cmd.Env)
-		}
-	}
-}
-
 func TestApplyTargetChildEnvironmentAddsOverridesAndRemovesAmbientValue(t *testing.T) {
 	cmd := &exec.Cmd{Env: []string{"PATH=/bin", "GH_HOST=ambient.example"}}
 	applyTargetChildEnvironment(cmd, SSHTarget{
@@ -2679,7 +2650,7 @@ func TestRsyncFilesFromUsesAuthoritativeManifestWithoutExcludes(t *testing.T) {
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CRABBOX_FAKE_RSYNC_LOG", logPath)
-	target := SSHTarget{Host: "example.test", User: "runner"}
+	target := SSHTarget{Host: "example.test", User: "runner", Port: "22"}
 	err := rsync(
 		context.Background(),
 		target,

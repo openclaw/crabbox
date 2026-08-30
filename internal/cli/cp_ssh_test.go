@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -24,16 +25,16 @@ func TestResolvedSSHCopyCommandUsesNativeWindowsSiblingPair(t *testing.T) {
 		}
 	}
 	t.Setenv("PATH", toolDir)
-	handle, err := resolvedSSHCopyCommandForGOOS(context.Background(), "windows", SSHTarget{}, []string{
+	t.Setenv("CRABBOX_TRANSFER_DENIED", "ambient-sentinel")
+	t.Setenv("CRABBOX_TRANSFER_OVERRIDE", "ambient-sentinel")
+	target := SSHTarget{ChildEnvDenylist: []string{"CRABBOX_TRANSFER_DENIED"}, ChildEnv: map[string]string{"CRABBOX_TRANSFER_OVERRIDE": "target-sentinel"}}
+	handle, err := resolvedRsyncCommandForGOOS(context.Background(), "windows", target, []string{
 		"-az", "-e", "'ssh' '-F' 'private config'", "--", "source", "target:dest",
 	}, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	execHandle, ok := handle.(*pondMeshExecHandle)
-	if !ok {
-		t.Fatalf("handle=%T", handle)
-	}
+	execHandle := handle
 	if execHandle.cmd.Path != filepath.Join(toolDir, "rsync.exe") {
 		t.Fatalf("rsync path=%q", execHandle.cmd.Path)
 	}
@@ -43,7 +44,10 @@ func TestResolvedSSHCopyCommandUsesNativeWindowsSiblingPair(t *testing.T) {
 	}
 	joinedEnv := strings.Join(execHandle.cmd.Env, "\n")
 	if !strings.Contains(joinedEnv, "MSYS2_ARG_CONV_EXCL=*") || !strings.Contains(joinedEnv, "MSYS_NO_PATHCONV=1") || !strings.Contains(joinedEnv, "CYGWIN=nodosfilewarning") {
-		t.Fatalf("native rsync environment=%q", execHandle.cmd.Env)
+		t.Fatal("native rsync conversion environment missing required settings")
+	}
+	if slices.Contains(handle.cmd.Env, "CRABBOX_TRANSFER_DENIED=ambient-sentinel") || !slices.Contains(handle.cmd.Env, "CRABBOX_TRANSFER_OVERRIDE=target-sentinel") {
+		t.Fatal("native rsync lost target environment policy")
 	}
 }
 
@@ -53,7 +57,7 @@ func TestResolvedSSHCopyCommandFailsClosedWithoutNativeWindowsSibling(t *testing
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", toolDir)
-	_, err := resolvedSSHCopyCommandForGOOS(context.Background(), "windows", SSHTarget{}, []string{
+	_, err := resolvedRsyncCommandForGOOS(context.Background(), "windows", SSHTarget{}, []string{
 		"-az", "-e", "'ssh' '-F' 'private config'", "--", "source", "target:dest",
 	}, "", "")
 	var exitErr ExitError
@@ -284,10 +288,10 @@ func TestResolvedSSHCopyArgsSelectsWSLRemoteRsync(t *testing.T) {
 }
 
 func TestSSHCopyUsesNativeWindowsTransportForConfigProxy(t *testing.T) {
-	if sshCopyUsesWSL("windows", SSHTarget{SSHConfigProxy: true}) {
+	if sshTransferUsesWSL("windows", SSHTarget{SSHConfigProxy: true}) {
 		t.Fatal("Windows SSH config proxy must use the native OpenSSH config")
 	}
-	if !sshCopyUsesWSL("windows", SSHTarget{}) {
+	if !sshTransferUsesWSL("windows", SSHTarget{}) {
 		t.Fatal("ordinary Windows SSH copy should use WSL rsync")
 	}
 }
@@ -519,7 +523,7 @@ func TestResolvedSSHCopyWSLArgsConvertsOnlyLocalOperands(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := resolvedSSHCopyWSLArgs(test.args, "/mnt"); !reflect.DeepEqual(got, test.want) {
+			if got := resolvedRsyncWSLArgs(test.args, "/mnt"); !reflect.DeepEqual(got, test.want) {
 				t.Fatalf("args=%#v, want %#v", got, test.want)
 			}
 		})

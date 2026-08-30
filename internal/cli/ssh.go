@@ -1183,16 +1183,21 @@ func normalizeRsyncOptions(opts rsyncOptions) rsyncOptions {
 	return opts
 }
 
-func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []string, stdout, stderr io.Writer, opts rsyncOptions) error {
+func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []string, stdout, stderr io.Writer, opts rsyncOptions) (err error) {
 	opts = normalizeRsyncOptions(opts)
 	if opts.Timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, opts.Timeout)
 		defer cancel()
 	}
+	session, wslExe, mountRoot, err := newWorkspaceRsyncSession(ctx, target)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, session.Close()) }()
 	args := []string{
 		"-az",
-		"-e", strings.Join(shellWords(append([]string{"ssh"}, sshBaseArgs(target)...)), " "),
+		"-e", session.rsyncRemoteShellWithOptions("10", "3"),
 	}
 	if opts.NoTimes {
 		args = append(args, "--no-times", "--omit-dir-times")
@@ -1217,18 +1222,12 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 	if opts.Debug {
 		args = append(args, "--stats", "--itemize-changes", "--progress")
 	}
-	args = append(args, ensureTrailingSlash(rsyncLocalPath(src)), target.User+"@"+target.Host+":"+dst+"/")
-	var cmd *exec.Cmd
-	var err error
-	if runtime.GOOS == "windows" {
-		cmd, err = windowsRsyncCommand(ctx, target, args)
-		if err != nil {
-			return err
-		}
-	} else {
-		cmd = exec.CommandContext(ctx, "rsync", args...)
+	args = append(args, "--", ensureTrailingSlash(rsyncLocalPath(src)), session.host()+":"+dst+"/")
+	handle, err := resolvedRsyncCommand(ctx, target, args, wslExe, mountRoot)
+	if err != nil {
+		return err
 	}
-	applyTargetChildEnvironment(cmd, target)
+	cmd := handle.cmd
 	owner := workspaceOwnerFromContext(ctx)
 	guardStarted := false
 	if owner != nil && !isWindowsNativeTarget(target) {
@@ -1251,7 +1250,10 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	stopHeartbeat := startSyncHeartbeat(stderr, start, opts.HeartbeatInterval)
-	err = cmd.Run()
+	err = handle.Start()
+	if err == nil {
+		err = handle.Wait()
+	}
 	stopHeartbeat()
 	if guardStarted {
 		guardCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), owner.quiesceTimeout())
@@ -1361,19 +1363,6 @@ func rsyncLocalPathForGOOS(goos, path string) string {
 	return path
 }
 
-// windowsRsyncCommand builds an exec.Cmd for rsync on Windows.
-// MSYS2/Cygwin rsync has broken signal handling with Windows SSH child
-// processes, so we prefer WSL rsync when available. The SSH key is copied
-// into WSL /tmp with correct permissions, and paths within args are
-// converted to WSL mount paths.
-func windowsRsyncCommand(ctx context.Context, target SSHTarget, args []string) (*exec.Cmd, error) {
-	wslExe, ok := windowsRsyncWSLExecutable(ctx, target)
-	if !ok {
-		return windowsNativeRsyncCommand(ctx, args)
-	}
-	return windowsWSLRsyncCommand(ctx, target, args, wslExe)
-}
-
 func windowsRsyncWSLExecutable(ctx context.Context, target SSHTarget) (string, bool) {
 	wslExe, err := exec.LookPath("wsl.exe")
 	if err != nil {
@@ -1383,76 +1372,6 @@ func windowsRsyncWSLExecutable(ctx context.Context, target SSHTarget) (string, b
 		return "", false
 	}
 	return wslExe, true
-}
-
-func windowsWSLRsyncCommand(ctx context.Context, target SSHTarget, args []string, wslExe string) (*exec.Cmd, error) {
-	mountRoot := windowsWSLMountRoot(ctx, target, wslExe)
-
-	// Prepare WSL key: copy with correct permissions.
-	wslKey := ""
-	knownHostsPath := ""
-	wslKnownHosts := ""
-	if target.Key != "" {
-		wslKey = "/tmp/crabbox-wsl-" + filepath.Base(filepath.Dir(target.Key))
-		knownHostsPath = knownHostsFile(target)
-		if keyData, err := os.ReadFile(windowsHostPath(target.Key)); err == nil {
-			cpCmd := exec.CommandContext(ctx, wslExe, "sh", "-c",
-				fmt.Sprintf("umask 077; cat > %s && chmod 600 %s",
-					shellQuote(wslKey),
-					shellQuote(wslKey)))
-			cpCmd.Stdin = bytes.NewReader(keyData)
-			applyTargetChildEnvironment(cpCmd, target)
-			if err := cpCmd.Run(); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: copy SSH key into WSL for rsync failed: %v\n", err)
-				return windowsNativeRsyncCommand(ctx, args)
-			}
-		} else {
-			fmt.Fprintf(os.Stderr, "warning: read SSH key for WSL rsync failed: %s: %v\n", target.Key, err)
-			return windowsNativeRsyncCommand(ctx, args)
-		}
-		if knownHostsData, err := os.ReadFile(windowsHostPath(knownHostsPath)); err == nil {
-			wslKnownHosts = wslKey + "-known_hosts"
-			cpKnownHostsCmd := exec.CommandContext(ctx, wslExe, "sh", "-c",
-				fmt.Sprintf("cat > %s && chmod 600 %s",
-					shellQuote(wslKnownHosts),
-					shellQuote(wslKnownHosts)))
-			cpKnownHostsCmd.Stdin = bytes.NewReader(knownHostsData)
-			applyTargetChildEnvironment(cpKnownHostsCmd, target)
-			if err := cpKnownHostsCmd.Run(); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: copy known_hosts into WSL for rsync failed: %v\n", err)
-				wslKnownHosts = ""
-			}
-		}
-	}
-
-	// Convert all args: replace Windows paths inside strings (including
-	// the -e "ssh ..." arg which embeds key and known_hosts paths).
-	wslArgs := make([]string, len(args))
-	for i, arg := range args {
-		converted := windowsToWSLPathWithRoot(arg, mountRoot)
-		// Replace key path with WSL temp copy inside -e string
-		if wslKey != "" && target.Key != "" {
-			keyWSL := windowsToWSLMountPathWithRoot(target.Key, mountRoot)
-			converted = strings.ReplaceAll(converted, keyWSL, wslKey)
-		}
-		// Replace known_hosts path
-		if knownHostsPath != "" && wslKnownHosts != "" {
-			khWSL := windowsToWSLMountPathWithRoot(knownHostsPath, mountRoot)
-			converted = strings.ReplaceAll(converted, khWSL, wslKnownHosts)
-		}
-		wslArgs[i] = converted
-	}
-	return exec.CommandContext(ctx, wslExe, append([]string{"rsync"}, wslArgs...)...), nil
-}
-
-func windowsNativeRsyncCommand(ctx context.Context, args []string) (*exec.Cmd, error) {
-	name, pairedArgs, err := windowsNativeRsyncCommandSpec(args)
-	if err != nil {
-		return nil, err
-	}
-	cmd := exec.CommandContext(ctx, name, pairedArgs...)
-	applyWindowsNativeRsyncEnvironment(cmd)
-	return cmd, nil
 }
 
 func windowsNativeRsyncCommandSpec(args []string) (string, []string, error) {

@@ -52,8 +52,8 @@ printf '%s\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
 	}
 	var destination string
 	for _, line := range strings.Split(strings.TrimSpace(string(scpData)), "\n") {
-		if strings.HasPrefix(line, "crabbox@runner.example:") {
-			destination = strings.TrimPrefix(line, "crabbox@runner.example:")
+		if strings.HasPrefix(line, sshTransportHostAlias+":") {
+			destination = strings.TrimPrefix(line, sshTransportHostAlias+":")
 		}
 	}
 	if !strings.HasPrefix(destination, egressRemoteBinary+".tmp-") || len(strings.TrimPrefix(destination, egressRemoteBinary+".tmp-")) != 16 {

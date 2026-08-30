@@ -342,10 +342,9 @@ func TestAuthoritativeTrustOptionsCoverSSHEntryPaths(t *testing.T) {
 		}
 	}
 	paths := map[string]string{
-		"regular/readiness/rsync/code/multiplexing": strings.Join(sshBaseArgs(target), " "),
-		"scp":                           strings.Join(scpBaseArgs(target), " "),
-		"VNC/desktop":                   vncArgs,
-		"copy/tunnel transport session": transportConfig,
+		"regular/readiness/code/multiplexing":    strings.Join(sshBaseArgs(target), " "),
+		"VNC/desktop":                            vncArgs,
+		"sync/scp/copy/tunnel transport session": transportConfig,
 	}
 	for name, rendered := range paths {
 		t.Run(name, func(t *testing.T) {

@@ -285,6 +285,10 @@ func (s *sshTransportSession) rsyncRemoteShell() string {
 	return strings.Join(rsyncShellWords(append([]string{"ssh"}, s.commandPrefix()...)), " ")
 }
 
+func (s *sshTransportSession) rsyncRemoteShellWithOptions(connectTimeout, connectionAttempts string) string {
+	return strings.Join(rsyncShellWords(append([]string{"ssh"}, s.commandPrefixWithOptions(connectTimeout, connectionAttempts)...)), " ")
+}
+
 func rsyncShellWords(words []string) []string {
 	quoted := make([]string, len(words))
 	for index, word := range words {
