@@ -81,6 +81,33 @@ and process metadata.
 7. For `--desktop` leases, `tart exec` turns on the guest's built-in macOS Screen Sharing (native VNC on port 5900). No VNC password is provisioned — authentication uses the guest account's own credentials.
 8. `tart stop` + `tart delete` on release.
 
+## Automatic cleanup ownership
+
+`crabbox cleanup --provider tart` treats names and stopped state as discovery
+signals, not permission to delete. Cleanup requires one exact local claim that
+binds the provider, lease, slug, VM name, canonical Tart storage directory, and
+the VM's ownership marker. New acquisitions create a private `.crabbox-owner`
+marker after cloning and store its random identity in the claim. Cleanup never
+creates or adopts a missing marker. `TART_HOME` selects the storage directory;
+otherwise Crabbox uses `~/.tart` and passes that same directory to Tart.
+
+The claim lock covers fresh inventory and marker checks, any required stop,
+deletion, and durable claim removal. A changed claim, missing or replaced marker,
+duplicate claim, different store, or inventory failure prevents deletion.
+Legacy claims without this binding are retained for explicit operator inspection;
+they are not silently upgraded by cleanup. Inspect such VMs with Tart before
+choosing any manual `tart stop <name>` / `tart delete <name>` operation.
+
+Cleanup retains local SSH keys because key creation can precede claim publication;
+the claim lock alone cannot prove a concurrent acquisition is not using a key.
+Missing-instance claim pruning is also limited to the bound storage directory.
+Dry runs perform no provider mutations or claim/key removal.
+
+The marker detects ordinary replacement and reuse; it is not a boundary against
+an operator modifying the Tart store directly. Tart's name-based deletion API
+does not provide an atomic expected-identity check against concurrent raw Tart
+or filesystem replacement. Do not modify a VM's store while cleanup is running.
+
 ## Run artifacts
 
 Tart uses the ordinary SSH artifact collector, so `crabbox run` supports both

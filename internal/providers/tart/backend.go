@@ -137,34 +137,38 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s image=%s cpus=%d memory=%dMB disk=%s keep=%v\n", providerName, leaseID, slug, cfg.Tart.Image, cfg.Tart.CPUs, cfg.Tart.Memory, diskLabel, req.Keep)
 
 	if err := b.cloneVM(ctx, cfg, name); err != nil {
-		_ = b.deleteVM(context.Background(), name)
 		return LeaseTarget{}, err
+	}
+	storage, identity, err := createTartVMIdentity(name)
+	if err != nil {
+		return LeaseTarget{}, fmt.Errorf("bind new Tart instance %s ownership (VM retained): %w", name, err)
+	}
+	cleanupUnclaimedVM := func() error {
+		if err := verifyTartVMIdentity(name, storage, identity); err != nil {
+			return err
+		}
+		_ = b.stopVM(context.Background(), name)
+		if err := verifyTartVMIdentity(name, storage, identity); err != nil {
+			return err
+		}
+		return b.deleteVM(context.Background(), name)
 	}
 	if err := b.configureVM(ctx, cfg, name); err != nil {
-		_ = b.deleteVM(context.Background(), name)
-		return LeaseTarget{}, err
+		return LeaseTarget{}, errors.Join(err, cleanupUnclaimedVM())
 	}
 	if err := b.startVM(ctx, name, req.Keep); err != nil {
-		_ = b.deleteVM(context.Background(), name)
-		return LeaseTarget{}, err
-	}
-	cleanupUnclaimedVM := func() {
-		_ = b.stopVM(context.Background(), name)
-		_ = b.deleteVM(context.Background(), name)
+		return LeaseTarget{}, errors.Join(err, cleanupUnclaimedVM())
 	}
 	ip, err := b.waitForIP(ctx, name)
 	if err != nil {
-		cleanupUnclaimedVM()
-		return LeaseTarget{}, err
+		return LeaseTarget{}, errors.Join(err, cleanupUnclaimedVM())
 	}
 	if err := b.injectSSHKey(ctx, name, cfg.Tart.User, publicKey); err != nil {
-		cleanupUnclaimedVM()
-		return LeaseTarget{}, err
+		return LeaseTarget{}, errors.Join(err, cleanupUnclaimedVM())
 	}
 	if cfg.Desktop {
 		if err := b.enableScreenSharing(ctx, name); err != nil {
-			cleanupUnclaimedVM()
-			return LeaseTarget{}, err
+			return LeaseTarget{}, errors.Join(err, cleanupUnclaimedVM())
 		}
 	}
 
@@ -174,17 +178,16 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	labels["ssh_user"] = cfg.Tart.User
 	labels["ssh_port"] = sshPort
 	labels["work_root"] = cfg.Tart.WorkRoot
-	claim := core.LeaseClaim{LeaseID: leaseID, Slug: slug, Provider: providerName, ProviderScope: instanceScope(name), Labels: labels}
+	labels["tart_storage"] = storage
+	claim := core.LeaseClaim{LeaseID: leaseID, Slug: slug, Provider: providerName, ProviderScope: instanceScope(name), CloudImmutableID: identity, Labels: labels}
 
 	inst := tartInstance{Name: name, State: "running", Running: true, Source: cfg.Tart.Image}
 	lease, err := b.prepareLease(ctx, cfg, inst, ip, claim, true)
 	if err != nil {
-		cleanupUnclaimedVM()
-		return LeaseTarget{}, err
+		return LeaseTarget{}, errors.Join(err, cleanupUnclaimedVM())
 	}
 	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, instanceScope(name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, lease.Server, lease.SSH); err != nil {
-		cleanupUnclaimedVM()
-		return LeaseTarget{}, err
+		return LeaseTarget{}, errors.Join(err, cleanupUnclaimedVM())
 	}
 	cleanupKey = false
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s instance=%s state=ready\n", leaseID, name)
@@ -321,20 +324,42 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	if err != nil {
 		return err
 	}
-	claims, err := providerClaims()
+	claims, err := listLeaseClaims()
 	if err != nil {
 		return err
+	}
+	storage, err := tartStorageRoot()
+	if err != nil {
+		return fmt.Errorf("inspect Tart cleanup storage: %w", err)
+	}
+	byName := map[string][]core.LeaseClaim{}
+	for _, claim := range claims {
+		if claim.Provider == providerName {
+			name := instanceNameFromClaim(claim)
+			byName[name] = append(byName[name], claim)
+		}
 	}
 	live := map[string]struct{}{}
 	now := time.Now().UTC()
 	removed := 0
 	for _, inst := range instances {
+		live[inst.Name] = struct{}{}
 		if !strings.HasPrefix(inst.Name, "crabbox-") {
 			continue
 		}
-		claim := claims[inst.Name]
-		if claim.LeaseID != "" {
-			live[claim.LeaseID] = struct{}{}
+		matches := byName[inst.Name]
+		if len(matches) != 1 {
+			fmt.Fprintf(b.rt.Stderr, "skip instance name=%s reason=expected one exact claim, found %d\n", inst.Name, len(matches))
+			continue
+		}
+		claim := matches[0]
+		_, err := tartCleanupBinding(claim, inst.Name, storage)
+		if err == nil {
+			err = verifyTartVMIdentity(inst.Name, storage, claim.CloudImmutableID)
+		}
+		if err != nil {
+			fmt.Fprintf(b.rt.Stderr, "skip instance name=%s reason=%v\n", inst.Name, err)
+			continue
 		}
 		server := b.serverFromInstance(inst, claim, cfg)
 		shouldDelete, reason := shouldCleanup(server, claim, claim.LeaseID != "", now)
@@ -346,15 +371,12 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			fmt.Fprintf(b.rt.Stdout, "would remove instance name=%s lease=%s reason=%s\n", inst.Name, blank(claim.LeaseID, "-"), reason)
 			continue
 		}
-		fmt.Fprintf(b.rt.Stdout, "remove instance name=%s lease=%s reason=%s\n", inst.Name, blank(claim.LeaseID, "-"), reason)
-		_ = b.stopVM(ctx, inst.Name)
-		if err := b.deleteVM(ctx, inst.Name); err != nil {
+		if err := b.cleanupInstance(ctx, cfg, inst, claim, storage); err != nil {
 			return err
 		}
-		if claim.LeaseID != "" {
-			removeLeaseClaim(claim.LeaseID)
-			removeStoredTestboxKey(claim.LeaseID)
-		}
+		// Key creation precedes claim publication, so the claim fence alone
+		// cannot safely authorize deleting a possibly reused local key.
+		fmt.Fprintf(b.rt.Stdout, "remove instance name=%s lease=%s reason=%s key_retained=true\n", inst.Name, claim.LeaseID, reason)
 		removed++
 	}
 	claimsRemoved := 0
@@ -362,13 +384,15 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		if claim.Provider != providerName || claim.LeaseID == "" {
 			continue
 		}
-		if _, ok := live[claim.LeaseID]; ok {
+		name := instanceNameFromClaim(claim)
+		if _, ok := live[name]; ok {
+			continue
+		}
+		if _, err := tartCleanupBinding(claim, name, storage); err != nil {
+			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s reason=%v\n", claim.LeaseID, err)
 			continue
 		}
 		reason := "missing instance"
-		if instanceNameFromClaim(claim) == "" {
-			reason = "malformed claim (no instance)"
-		}
 		if req.DryRun {
 			fmt.Fprintf(b.rt.Stdout, "would remove claim lease=%s slug=%s reason=%s\n", claim.LeaseID, blank(claim.Slug, "-"), reason)
 			continue
@@ -386,6 +410,46 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		fmt.Fprintf(b.rt.Stdout, "%s cleanup removed=%d claims_removed=%d checked=%d\n", providerName, removed, claimsRemoved, len(instances))
 	}
 	return nil
+}
+
+func (b *backend) cleanupInstance(ctx context.Context, cfg Config, inst tartInstance, claim core.LeaseClaim, storage string) error {
+	binding, err := tartCleanupBinding(claim, inst.Name, storage)
+	if err != nil {
+		return err
+	}
+	return shared.RemoveExactClaimAfter(claim, binding, func() error {
+		// Re-read lifecycle state and the incarnation witness under the same
+		// claim fence that covers deletion and durable claim removal.
+		current, err := b.listInstances(ctx)
+		if err != nil {
+			return err
+		}
+		for _, fresh := range current {
+			if fresh.Name != inst.Name {
+				continue
+			}
+			server := b.serverFromInstance(fresh, claim, cfg)
+			if fresh.Running {
+				server.Status = "running"
+			}
+			if eligible, why := shouldCleanup(server, claim, true, time.Now().UTC()); !eligible {
+				return fmt.Errorf("Tart instance %s changed during cleanup: %s", inst.Name, why)
+			}
+			if err := verifyTartVMIdentity(inst.Name, storage, claim.CloudImmutableID); err != nil {
+				return err
+			}
+			if fresh.Running || instanceRunning(fresh.State) {
+				if err := b.stopVM(ctx, inst.Name); err != nil {
+					return err
+				}
+			}
+			if err := verifyTartVMIdentity(inst.Name, storage, claim.CloudImmutableID); err != nil {
+				return err
+			}
+			return b.deleteVM(ctx, inst.Name)
+		}
+		return fmt.Errorf("Tart instance %s disappeared during cleanup; claim retained", inst.Name)
+	})
 }
 
 func (b *backend) Touch(_ context.Context, req TouchRequest) (Server, error) {
@@ -437,6 +501,10 @@ func (b *backend) configureVM(ctx context.Context, cfg Config, name string) erro
 // When keep is true the tart process is fully detached so it survives
 // crabbox exit, matching how docker run -d keeps containers alive.
 func (b *backend) startVM(ctx context.Context, name string, keep bool) error {
+	env, envErr := tartEnvironment()
+	if envErr != nil {
+		return envErr
+	}
 	// Headless mode alone still exposes the host clipboard and audio to the guest.
 	args := []string{"run", name, "--no-graphics", "--no-clipboard", "--no-audio"}
 	var stderrBuf bytes.Buffer
@@ -478,6 +546,7 @@ func (b *backend) startVM(ctx context.Context, name string, keep bool) error {
 		devNull = nil
 		return err
 	}
+	cmd.Env = env
 	if err := cmd.Start(); err != nil {
 		return errors.Join(exit(2, "tart run %s: %v", name, err), closeDevNull())
 	}
@@ -774,11 +843,12 @@ func (b *backend) serverFromInstance(inst tartInstance, claim core.LeaseClaim, c
 		status = "ready"
 	}
 	server := Server{
-		CloudID:  inst.Name,
-		Provider: providerName,
-		Name:     inst.Name,
-		Status:   status,
-		Labels:   labels,
+		CloudID:     inst.Name,
+		ImmutableID: claim.CloudImmutableID,
+		Provider:    providerName,
+		Name:        inst.Name,
+		Status:      status,
+		Labels:      labels,
 	}
 	server.ServerType.Name = firstNonBlank(labels["server_type"], cfg.Tart.Image)
 	return server
@@ -830,6 +900,9 @@ func shouldCleanup(server Server, claim core.LeaseClaim, hasClaim bool, now time
 	if strings.EqualFold(server.Labels["keep"], "true") {
 		return false, "keep=true"
 	}
+	if !hasClaim {
+		return false, "missing claim"
+	}
 	if !instanceRunning(server.Status) && server.Status != "ready" {
 		return true, "instance state=" + blank(server.Status, "unknown")
 	}
@@ -851,9 +924,14 @@ func shouldCleanup(server Server, claim core.LeaseClaim, hasClaim bool, now time
 }
 
 func (b *backend) tart(ctx context.Context, args []string, stdout, stderr io.Writer) (LocalCommandResult, error) {
+	env, err := tartEnvironment()
+	if err != nil {
+		return LocalCommandResult{}, err
+	}
 	return b.rt.Exec.Run(ctx, LocalCommandRequest{
 		Name:   "tart",
 		Args:   args,
+		Env:    env,
 		Stdout: stdout,
 		Stderr: stderr,
 	})

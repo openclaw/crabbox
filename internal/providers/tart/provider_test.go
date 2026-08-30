@@ -20,10 +20,17 @@ type recordingRunner struct {
 	calls     []core.LocalCommandRequest
 	responses map[string]core.LocalCommandResult
 	errors    map[string]error
+	onRun     func(core.LocalCommandRequest)
 }
 
 func (r *recordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
-	r.calls = append(r.calls, req)
+	recorded := req
+	// Failure diagnostics must not print inherited credentials.
+	recorded.Env = nil
+	r.calls = append(r.calls, recorded)
+	if r.onRun != nil {
+		r.onRun(req)
+	}
 	key := commandKey(req.Args)
 	if err, ok := r.errors[key]; ok {
 		return r.responses[key], err
@@ -291,6 +298,7 @@ func TestShouldCleanupSkipsMissingClaim(t *testing.T) {
 
 func TestAcquireKeepIPFailureDeletesUnclaimedVMAndKey(t *testing.T) {
 	testutil.IsolateUserDirs(t)
+	t.Setenv("TART_HOME", t.TempDir())
 	binDir := t.TempDir()
 	fakeTart := filepath.Join(binDir, "tart")
 	if err := os.WriteFile(fakeTart, []byte("#!/bin/sh\nsleep 0.2\n"), 0o755); err != nil {
@@ -300,6 +308,13 @@ func TestAcquireKeepIPFailureDeletesUnclaimedVMAndKey(t *testing.T) {
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
 			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: "[]"},
+		},
+		onRun: func(req core.LocalCommandRequest) {
+			if req.Args[0] == "clone" {
+				if err := os.MkdirAll(filepath.Join(os.Getenv("TART_HOME"), "vms", req.Args[2]), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
 		},
 	}
 	cfg := core.BaseConfig()
@@ -1531,6 +1546,8 @@ func TestReleaseLeaseDeleteError(t *testing.T) {
 
 func TestCleanupSkipsNonCrabboxVMs(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("TART_HOME", t.TempDir())
+	claimTartLease(t, t.TempDir(), "cbx_cleanup", "crabbox-old-1234", "stopped")
 	listJSON := `[{"Name":"my-dev-vm","State":"stopped","Running":false,"Disk":50,"Size":10,"Source":"ghcr.io/test:latest"},{"Name":"crabbox-old-1234","State":"stopped","Running":false,"Disk":50,"Size":10,"Source":"ghcr.io/test:latest"}]`
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
@@ -1559,6 +1576,8 @@ func TestCleanupSkipsNonCrabboxVMs(t *testing.T) {
 
 func TestCleanupDeleteError(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("TART_HOME", t.TempDir())
+	claimTartLease(t, t.TempDir(), "cbx_cleanup", "crabbox-broken-1234", "stopped")
 	listJSON := `[{"Name":"crabbox-broken-1234","State":"stopped","Running":false,"Disk":50,"Size":10,"Source":"ghcr.io/test:latest"}]`
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
@@ -1586,12 +1605,11 @@ func TestCleanupRemovesOrphanedClaimsWithoutDeletingStoredKey(t *testing.T) {
 	configHome := t.TempDir()
 	t.Setenv("HOME", configHome)
 	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("TART_HOME", t.TempDir())
 	const leaseID = "cbx_orphan"
-	err := core.ClaimLeaseForRepoProviderScopePond(
-		leaseID, "orphan-slug", providerName, "instance:crabbox-gone-9999", "", t.TempDir(), 30*time.Minute, false,
-	)
-	if err != nil {
-		t.Fatalf("setup orphan claim: %v", err)
+	claimTartLease(t, t.TempDir(), leaseID, "crabbox-gone-9999", "stopped")
+	if err := os.RemoveAll(filepath.Join(os.Getenv("TART_HOME"), "vms", "crabbox-gone-9999")); err != nil {
+		t.Fatal(err)
 	}
 	keyPath, err := testboxKeyPath(leaseID)
 	if err != nil {
@@ -1635,9 +1653,10 @@ func TestCleanupRemovesOrphanedClaimsWithoutDeletingStoredKey(t *testing.T) {
 	}
 }
 
-func TestCleanupRemovesMalformedClaimsWithNoInstance(t *testing.T) {
+func TestCleanupPreservesLegacyClaimsWithoutStorageBinding(t *testing.T) {
 	stateDir := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", stateDir)
+	t.Setenv("TART_HOME", t.TempDir())
 	err := core.ClaimLeaseForRepoProviderScopePond(
 		"cbx_noinstance", "no-instance", providerName, "", "", t.TempDir(), 30*time.Minute, false,
 	)
@@ -1659,7 +1678,7 @@ func TestCleanupRemovesMalformedClaimsWithNoInstance(t *testing.T) {
 	var stdout strings.Builder
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
-	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: &stdout, Stderr: io.Discard, Exec: runner}).(*backend)
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: &stdout, Stderr: &stdout, Exec: runner}).(*backend)
 
 	err = b.Cleanup(context.Background(), core.CleanupRequest{DryRun: true})
 	if err != nil {
@@ -1669,8 +1688,8 @@ func TestCleanupRemovesMalformedClaimsWithNoInstance(t *testing.T) {
 	if !strings.Contains(output, "cbx_noinstance") {
 		t.Fatalf("malformed claim with no instance should be reported: %q", output)
 	}
-	if !strings.Contains(output, "malformed claim") {
-		t.Fatalf("should use 'malformed claim' reason: %q", output)
+	if !strings.Contains(output, "missing exact claim") || strings.Contains(output, "would remove") {
+		t.Fatalf("legacy claims must be retained without destructive authority: %q", output)
 	}
 	if !strings.Contains(output, "cbx_missingvm") {
 		t.Fatalf("normal orphan claim should also be reported: %q", output)
@@ -1903,6 +1922,8 @@ func TestApplyDefaultsConvertsEmptyTarget(t *testing.T) {
 
 func TestCleanupRemovesStoppedCrabboxVMs(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("TART_HOME", t.TempDir())
+	claimTartLease(t, t.TempDir(), "cbx_cleanup", "crabbox-old-1234", "stopped")
 	listJSON := `[{"Name":"crabbox-old-1234","State":"stopped","Running":false,"Disk":50,"Size":10,"Source":"ghcr.io/test:latest"},{"Name":"my-personal-vm","State":"stopped","Running":false,"Disk":50,"Size":10,"Source":"ghcr.io/test:latest"}]`
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
@@ -1938,6 +1959,8 @@ func TestCleanupRemovesStoppedCrabboxVMs(t *testing.T) {
 
 func TestCleanupDryRunDoesNotDelete(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("TART_HOME", t.TempDir())
+	claimTartLease(t, t.TempDir(), "cbx_cleanup", "crabbox-old-1234", "stopped")
 	listJSON := `[{"Name":"crabbox-old-1234","State":"stopped","Running":false,"Disk":50,"Size":10,"Source":"ghcr.io/test:latest"}]`
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
@@ -2633,8 +2656,8 @@ func TestShouldCleanupEdgeCases(t *testing.T) {
 	t.Run("stopped VM without claim", func(t *testing.T) {
 		server := core.Server{Status: "stopped", Labels: map[string]string{}}
 		shouldDelete, _ := shouldCleanup(server, core.LeaseClaim{}, false, now)
-		if !shouldDelete {
-			t.Fatal("stopped VM without claim should be cleaned up")
+		if shouldDelete {
+			t.Fatal("stopped VM without claim must be preserved")
 		}
 	})
 

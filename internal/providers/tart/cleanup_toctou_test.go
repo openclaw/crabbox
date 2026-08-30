@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -19,7 +21,7 @@ type cleanupRaceRunner struct {
 }
 
 func (r *cleanupRaceRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
-	if len(req.Args) >= 2 && req.Args[0] == "stop" && r.onStop != nil {
+	if len(req.Args) >= 2 && req.Args[0] == "delete" && r.onStop != nil {
 		r.onceStop.Do(r.onStop)
 	}
 	return r.responses[commandKey(req.Args)], nil
@@ -27,6 +29,7 @@ func (r *cleanupRaceRunner) Run(_ context.Context, req core.LocalCommandRequest)
 
 func TestCleanupPreservesClaimCreatedAfterInstanceSnapshot(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("TART_HOME", t.TempDir())
 	repoRoot := t.TempDir()
 	const (
 		staleVM  = "crabbox-stale-old1"
@@ -45,6 +48,7 @@ func TestCleanupPreservesClaimCreatedAfterInstanceSnapshot(t *testing.T) {
 
 func TestCleanupPreservesReclaimedOrphanCandidate(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("TART_HOME", t.TempDir())
 	repoRoot := t.TempDir()
 	const (
 		staleVM     = "crabbox-stale-old2"
@@ -53,6 +57,13 @@ func TestCleanupPreservesReclaimedOrphanCandidate(t *testing.T) {
 	)
 
 	claimTartLease(t, repoRoot, orphanLease, orphanVM, "idle")
+	root, err := tartStorageRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(root, "vms", orphanVM)); err != nil {
+		t.Fatal(err)
+	}
 	out := runCleanupRace(t, staleVM, func() {
 		claimTartLease(t, repoRoot, orphanLease, orphanVM, "ready")
 	})
@@ -64,6 +75,7 @@ func TestCleanupPreservesReclaimedOrphanCandidate(t *testing.T) {
 
 func runCleanupRace(t *testing.T, staleVM string, onStop func()) string {
 	t.Helper()
+	claimTartLease(t, t.TempDir(), "cbx_trigger", staleVM, "stopped")
 	listJSON := `[{"Name":"` + staleVM + `","State":"stopped","Running":false,"Disk":50,"Size":12,"Source":"ghcr.io/test:latest"}]`
 	runner := &cleanupRaceRunner{
 		responses: map[string]core.LocalCommandResult{
@@ -83,18 +95,34 @@ func runCleanupRace(t *testing.T, staleVM string, onStop func()) string {
 
 func claimTartLease(t *testing.T, repoRoot, leaseID, instance, state string) {
 	t.Helper()
+	root, err := tartStorageRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "vms", instance), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := readTartVMIdentity(root, instance)
+	if os.IsNotExist(err) {
+		_, identity, err = createTartVMIdentity(instance)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
 	server := core.Server{
-		CloudID:  instance,
-		Provider: providerName,
-		Name:     instance,
-		Status:   state,
+		CloudID:     instance,
+		ImmutableID: identity,
+		Provider:    providerName,
+		Name:        instance,
+		Status:      state,
 		Labels: map[string]string{
-			"crabbox":  "true",
-			"provider": providerName,
-			"instance": instance,
-			"lease":    leaseID,
-			"slug":     "race-slug",
-			"state":    state,
+			"crabbox":      "true",
+			"provider":     providerName,
+			"instance":     instance,
+			"lease":        leaseID,
+			"slug":         "race-slug",
+			"state":        state,
+			"tart_storage": root,
 		},
 	}
 	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(
