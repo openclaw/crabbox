@@ -350,6 +350,10 @@ func installWorkspaceOwnerAwareSSH(t *testing.T, sshPath, commandScript string) 
 		t.Fatal(err)
 	}
 	wrapper := `#!/bin/sh
+# Configuration queries must never enter the simulated remote-command path.
+for arg do
+  if [ "$arg" = -G ]; then exec /usr/bin/ssh "$@"; fi
+done
 cmd=""
 for arg do cmd="$arg"; done
 current=$cmd
@@ -386,6 +390,28 @@ exec "$(dirname "$0")/ssh-command" "$current"
 `
 	if err := os.WriteFile(sshPath, []byte(wrapper), 0o755); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestWorkspaceOwnerSSHFixtureConfigQueryDoesNotExecuteRemoteCommand(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX SSH fixture")
+	}
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	marker := filepath.Join(dir, "remote-command-executed")
+	sshPath := filepath.Join(dir, "ssh")
+	installWorkspaceOwnerAwareSSH(t, sshPath, "#!/bin/sh\nprintf unexpected > "+shellQuote(marker)+"\nexit 99\n")
+	config := filepath.Join(dir, "config")
+	if err := os.WriteFile(config, []byte("Host fixture\n  HostName 127.0.0.1\n  User fixture\n  Port 2222\n  IdentityFile none\n  IdentityAgent none\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output, err := exec.Command(sshPath, "-G", "-F", config, "--", "fixture", "rsync --server").CombinedOutput()
+	if err != nil || !strings.Contains(string(output), "hostname 127.0.0.1") || !strings.Contains(string(output), "port 2222") {
+		t.Fatalf("fixture config query failed: %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("configuration query executed remote command: %v", err)
 	}
 }
 
