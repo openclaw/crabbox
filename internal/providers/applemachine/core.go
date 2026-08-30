@@ -2,7 +2,6 @@ package applemachine
 
 import (
 	"io"
-	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -43,16 +42,6 @@ func newLeaseID() string                  { return core.NewLeaseID() }
 func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
 	return core.AllocateClaimLeaseSlug(leaseID, requested)
 }
-
-func claimLease(leaseID, slug, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return core.ClaimLeaseForRepoProvider(leaseID, slug, providerName, repoRoot, idleTimeout, reclaim)
-}
-
-func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
-	return core.ResolveLeaseClaimForProvider(identifier, providerName)
-}
-
-func removeLeaseClaim(leaseID string) { core.RemoveLeaseClaim(leaseID) }
 
 func writeTimingJSON(w io.Writer, report timingReport) error {
 	return core.WriteTimingJSON(w, report)

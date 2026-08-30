@@ -15,6 +15,7 @@ import (
 )
 
 type recordingRunner struct {
+	hook      func(core.LocalCommandRequest) (core.LocalCommandResult, error, bool)
 	requests  []core.LocalCommandRequest
 	responses map[string]core.LocalCommandResult
 	errs      map[string]error
@@ -24,6 +25,11 @@ type recordingRunner struct {
 
 func (r *recordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.requests = append(r.requests, req)
+	if r.hook != nil {
+		if result, err, handled := r.hook(req); handled {
+			return result, err
+		}
+	}
 	key := strings.Join(req.Args, "\x00")
 	result, ok := r.responses[key]
 	if !ok {
@@ -89,11 +95,9 @@ func TestRunUsesHomeMountedRepoAndEnv(t *testing.T) {
 	repo := filepath.Join(home, "src", "example")
 	leaseID := "cbx_123456789abc"
 	slug := "blue-crab"
-	if err := claimLease(leaseID, slug, repo, 0, true); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { removeLeaseClaim(leaseID) })
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	fixture := newMachineFixture(t, runner)
+	fixture.claim(t, leaseID, slug, repo)
 	var stderr bytes.Buffer
 	b := newBackend(Provider{}.Spec(), testBackend(runner).cfg, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: &stderr}).(*backend)
 	result, err := b.Run(t.Context(), RunRequest{
@@ -116,15 +120,16 @@ func TestRunUsesHomeMountedRepoAndEnv(t *testing.T) {
 	if result.Session.CleanupCommand != "crabbox stop --provider apple-machine --id "+shellQuote(leaseID) {
 		t.Fatalf("cleanup command=%q", result.Session.CleanupCommand)
 	}
-	got := strings.Join(runner.requests[0].Args, " ")
+	req := runner.requests[len(runner.requests)-1]
+	got := strings.Join(req.Args, " ")
 	if !strings.Contains(got, "machine run --name crabbox-123456789abc --cwd "+repo+" --env-file ") || !strings.HasSuffix(got, " go test ./...") {
 		t.Fatalf("args=%q", got)
 	}
 	if strings.Contains(got, "CI=1") || strings.Contains(got, "/opt/homebrew/bin") {
 		t.Fatalf("environment leaked into argv: %q", got)
 	}
-	if runner.requests[0].Dir != repo {
-		t.Fatalf("dir=%q", runner.requests[0].Dir)
+	if req.Dir != repo {
+		t.Fatalf("dir=%q", req.Dir)
 	}
 	report := decodeLastTimingReport(t, stderr.String())
 	if report.RunStatus != "succeeded" || report.ErrorKind != "" {
@@ -144,16 +149,14 @@ func TestRunTimingJSONClassifiesCommandFailure(t *testing.T) {
 	repo := filepath.Join(home, "src", "example")
 	leaseID := "cbx_abcdef123456"
 	slug := "failed-command"
-	if err := claimLease(leaseID, slug, repo, 0, true); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { removeLeaseClaim(leaseID) })
 	var stderr bytes.Buffer
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{},
 		fallback:  core.LocalCommandResult{ExitCode: 9, Stderr: "boom"},
 		err:       errors.New("exit status 9"),
 	}
+	fixture := newMachineFixture(t, runner)
+	fixture.claim(t, leaseID, slug, repo)
 	b := newBackend(Provider{}.Spec(), testBackend(runner).cfg, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: &stderr}).(*backend)
 	result, err := b.Run(t.Context(), RunRequest{
 		Repo:       Repo{Root: repo},
@@ -185,6 +188,7 @@ func TestRunDeletesOneShotMachineSession(t *testing.T) {
 	}
 	repo := filepath.Join(home, "src", "one-shot")
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	newMachineFixture(t, runner)
 	b := newBackend(Provider{}.Spec(), testBackend(runner).cfg, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 	result, err := b.Run(t.Context(), RunRequest{
 		Repo:    Repo{Root: repo},
