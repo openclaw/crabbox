@@ -9,12 +9,15 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -43,25 +46,28 @@ const (
 )
 
 type checkpointRecord struct {
-	Capture        *NativeCheckpointCapture `json:"capture,omitempty"`
-	ID             string                   `json:"id"`
-	Name           string                   `json:"name,omitempty"`
-	Kind           string                   `json:"kind"`
-	CreatedAt      string                   `json:"createdAt"`
-	LastUsedAt     string                   `json:"lastUsedAt"`
-	CrabboxVersion string                   `json:"crabboxVersion"`
-	Provider       string                   `json:"provider,omitempty"`
-	LeaseID        string                   `json:"leaseId,omitempty"`
-	Slug           string                   `json:"slug,omitempty"`
-	TargetOS       string                   `json:"targetOS,omitempty"`
-	WindowsMode    string                   `json:"windowsMode,omitempty"`
-	Desktop        bool                     `json:"desktop,omitempty"`
-	ServerType     string                   `json:"serverType,omitempty"`
-	HostID         string                   `json:"hostId,omitempty"`
-	Workdir        string                   `json:"workdir,omitempty"`
-	ArchivePath    string                   `json:"archivePath,omitempty"`
-	ArchiveBytes   int64                    `json:"archiveBytes,omitempty"`
-	Native         struct {
+	Capture          *NativeCheckpointCapture        `json:"capture,omitempty"`
+	ID               string                          `json:"id"`
+	Name             string                          `json:"name,omitempty"`
+	Kind             string                          `json:"kind"`
+	CreatedAt        string                          `json:"createdAt"`
+	LastUsedAt       string                          `json:"lastUsedAt"`
+	CrabboxVersion   string                          `json:"crabboxVersion"`
+	Provider         string                          `json:"provider,omitempty"`
+	LeaseID          string                          `json:"leaseId,omitempty"`
+	Slug             string                          `json:"slug,omitempty"`
+	TargetOS         string                          `json:"targetOS,omitempty"`
+	WindowsMode      string                          `json:"windowsMode,omitempty"`
+	Desktop          bool                            `json:"desktop,omitempty"`
+	ServerType       string                          `json:"serverType,omitempty"`
+	HostID           string                          `json:"hostId,omitempty"`
+	Workdir          string                          `json:"workdir,omitempty"`
+	ArchivePath      string                          `json:"archivePath,omitempty"`
+	ArchiveBytes     int64                           `json:"archiveBytes,omitempty"`
+	Ownership        *checkpointOwnership            `json:"ownership,omitempty"`
+	Retention        *coordinatorCheckpointRetention `json:"retention,omitempty"`
+	CoordinatorState string                          `json:"coordinatorState,omitempty"`
+	Native           struct {
 		Provider     string            `json:"provider,omitempty"`
 		ImageID      string            `json:"imageId,omitempty"`
 		Kind         string            `json:"kind,omitempty"`
@@ -87,6 +93,15 @@ type checkpointRecord struct {
 	} `json:"repo"`
 }
 
+type checkpointOwnership struct {
+	Mode   string `json:"mode"`
+	Origin string `json:"origin,omitempty"`
+}
+
+func (record checkpointRecord) coordinatorManaged() bool {
+	return record.Ownership != nil && record.Ownership.Mode == "coordinator"
+}
+
 func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	defaults := defaultConfig()
 	fs := newFlagSet("checkpoint create", a.Stderr)
@@ -105,6 +120,8 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	wait := fs.Bool("wait", true, "wait for native provider snapshot availability")
 	waitTimeout := fs.Duration("wait-timeout", 45*time.Minute, "maximum native snapshot wait duration")
 	noReboot := fs.Bool("no-reboot", true, "avoid rebooting the source instance while creating a native snapshot")
+	expireUnusedAfter := fs.String("expire-unused-after", "", "automatically expire an unused coordinator-managed native checkpoint after this duration")
+	admin := fs.Bool("admin", false, "use the configured coordinator admin credential")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	targetFlags := registerTargetFlags(fs, defaults)
 	networkFlags := registerNetworkModeFlag(fs, defaults)
@@ -112,12 +129,23 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
+	ctx = withCheckpointAdmin(ctx, *admin)
 	operationApp := a
 	if *jsonOut {
 		operationApp.Stdout = a.Stderr
 	}
 	if !validCheckpointStrategy(*strategy) {
 		return exit(2, "checkpoint strategy must be auto, disk-snapshot, or image")
+	}
+	retentionDuration, err := parseCheckpointRetentionDuration(*expireUnusedAfter)
+	if err != nil {
+		return err
+	}
+	if retentionDuration > 0 && (*retireSource || *checkpointID != "" || *discardFailed || *prepareOnly) {
+		return exit(2, "--expire-unused-after cannot be combined with source retirement")
+	}
+	if retentionDuration > 0 && (*recipeOnly || strings.EqualFold(strings.TrimSpace(*mode), "archive") || strings.EqualFold(strings.TrimSpace(*mode), "recipe")) {
+		return exit(2, "--expire-unused-after requires a brokered native AWS, Azure, or GCP checkpoint")
 	}
 	setIDFromFirstArg(fs, id)
 	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
@@ -154,6 +182,24 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
+	createKind := checkpointCreateMode(*mode, *strategy, cfg, server, target, *recipeOnly)
+	if retentionDuration > 0 {
+		driver, supported := nativeCheckpointCreateDriver(cfg, server, target, *strategy)
+		_, coordinatorDriver := driver.(coordinatorCheckpointDriver)
+		if !supported || !coordinatorDriver || !isNativeCheckpointKind(createKind) {
+			return exit(2, "--expire-unused-after requires a brokered native AWS, Azure, or GCP checkpoint")
+		}
+		coord, coordErr := configuredCheckpointCoordinatorFor(ctx)
+		if coordErr != nil {
+			return coordErr
+		}
+		if _, probeErr := coord.Checkpoints(ctx); probeErr != nil {
+			if checkpointRouteUnsupported(probeErr) {
+				return checkpointUpgradeRequired(probeErr)
+			}
+			return probeErr
+		}
+	}
 	if err := operationApp.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, &server, target, repo.Root, *reclaim); err != nil {
 		return err
 	}
@@ -178,7 +224,6 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
-	createKind := checkpointCreateMode(*mode, *strategy, cfg, server, target, *recipeOnly)
 	switch createKind {
 	case checkpointKindRecipe, checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindMachine0, checkpointKindParallels, checkpointKindDockerCommit, checkpointKindDaytona, checkpointKindIncus, checkpointKindArchive:
 		record.Kind = createKind
@@ -210,7 +255,18 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 		case checkpointKindRecipe:
 		case checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindMachine0, checkpointKindParallels, checkpointKindDockerCommit, checkpointKindDaytona, checkpointKindIncus:
 			createStrategy := checkpointCreateStrategy(*mode, *strategy, createKind)
-			image, metadata, err := operationApp.createNativeCheckpointRequest(ctx, NativeCheckpointCreateRequest{
+			retention := checkpointRetentionFromDuration(retentionDuration)
+			createContext := withCheckpointCreateContext(ctx, record, retention, func(managed bool) error {
+				if managed {
+					record.Ownership = &checkpointOwnership{Mode: "coordinator", Origin: checkpointCoordinatorOrigin(cfg.Coordinator)}
+					record.Retention = &retention
+					record.CoordinatorState = "creating"
+				} else {
+					record.Ownership, record.Retention, record.CoordinatorState = nil, nil, ""
+				}
+				return store.Write(record)
+			})
+			image, metadata, err := operationApp.createNativeCheckpointRequest(createContext, NativeCheckpointCreateRequest{
 				Config: cfg, Server: server, Target: target, CheckpointID: record.ID,
 				LeaseID: leaseID, Name: record.Name, RepoName: repo.Name, Workdir: workdir,
 				Strategy: createStrategy, NoReboot: *noReboot, Wait: *wait,
@@ -222,6 +278,15 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 			if image.ID != "" {
 				applyNativeImageCheckpointRecord(&record, image, *noReboot)
 				record.Native.Metadata = metadata
+				if image.managedCheckpoint != nil {
+					managed, managedErr := checkpointRecordFromCoordinator(*image.managedCheckpoint, checkpointCoordinatorOrigin(cfg.Coordinator))
+					if managedErr != nil {
+						return managedErr
+					}
+					managed.Native.State = image.State
+					managed.Capture = record.Capture
+					record = managed
+				}
 			}
 			if err != nil {
 				if record.Native.ImageID != "" {
@@ -244,6 +309,9 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 			record.ArchiveBytes = bytes
 		}
 		if err := store.Write(record); err != nil {
+			if record.coordinatorManaged() {
+				return fmt.Errorf("coordinator checkpoint %s is durable; recover with crabbox checkpoint inspect %s: %w", record.ID, record.ID, err)
+			}
 			return err
 		}
 		recordWritten = true
@@ -299,6 +367,8 @@ func (a App) checkpointList(ctx context.Context, args []string) error {
 	fs := newFlagSet("checkpoint list", a.Stderr)
 	jsonOut := fs.Bool("json", false, "print JSON")
 	verify := fs.Bool("verify", false, "verify local artifacts and provider resources")
+	localOnly := fs.Bool("local-only", false, "list local checkpoint records without contacting the coordinator")
+	admin := fs.Bool("admin", false, "use the configured coordinator admin credential")
 	provider := registerProviderSelectionFlag(fs, defaults, providerHelpSSH())
 	id := fs.String("id", "", "provider source VM id/name for provider-native snapshots")
 	tree := fs.Bool("tree", true, "show provider-native snapshots as a tree")
@@ -311,6 +381,7 @@ func (a App) checkpointList(ctx context.Context, args []string) error {
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
+	ctx = withCheckpointAdmin(ctx, *admin)
 	if flagWasSet(fs, "parallels-template") {
 		*provider = "parallels"
 	}
@@ -337,9 +408,34 @@ func (a App) checkpointList(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	var unreadable map[string]error
 	records, err := store.List()
 	if err != nil {
-		return err
+		if *localOnly {
+			return err
+		}
+		records, unreadable, err = a.recoverableLocalCheckpointRecords(store)
+		if err != nil {
+			return err
+		}
+	}
+	if !*localOnly {
+		records, err = a.mergeCoordinatorCheckpoints(ctx, store, records)
+		if err != nil {
+			return err
+		}
+	}
+	for id, readErr := range unreadable {
+		recovered := false
+		for _, record := range records {
+			if record.ID == id && record.coordinatorManaged() {
+				recovered = true
+				break
+			}
+		}
+		if !recovered {
+			return readErr
+		}
 	}
 	if *verify {
 		audits, err := a.verifyCheckpointRecords(ctx, store, records)
@@ -367,6 +463,9 @@ func (a App) checkpointList(ctx context.Context, args []string) error {
 		return nil
 	}
 	if *jsonOut {
+		if records == nil {
+			records = []checkpointRecord{}
+		}
 		return json.NewEncoder(a.Stdout).Encode(records)
 	}
 	if len(records) == 0 {
@@ -381,6 +480,209 @@ func (a App) checkpointList(ctx context.Context, args []string) error {
 		fmt.Fprintf(a.Stdout, "%s kind=%s name=%q repo=%s lease=%s %s created=%s last_used=%s\n", record.ID, record.Kind, record.Name, record.Repo.Name, blank(record.LeaseID, "-"), extra, record.CreatedAt, record.LastUsedAt)
 	}
 	return nil
+}
+
+func (a App) mergeCoordinatorCheckpoints(ctx context.Context, store checkpointStore, local []checkpointRecord) ([]checkpointRecord, error) {
+	cfg, err := loadConfig()
+	if err != nil {
+		// Local lifecycle records must remain usable without unrelated provider configuration.
+		fmt.Fprintf(a.Stderr, "warning: coordinator checkpoint configuration unavailable; showing partial local inventory with unverified cached state: %v\n", err)
+		return local, nil
+	}
+	if strings.TrimSpace(cfg.Coordinator) == "" {
+		return local, nil
+	}
+	coord, err := configuredCheckpointCoordinatorFor(ctx)
+	if err != nil {
+		return nil, err
+	}
+	remote, err := coord.Checkpoints(ctx)
+	if err != nil {
+		if checkpointRouteUnsupported(err) {
+			return local, nil
+		}
+		if checkpointInventoryUnavailable(ctx, err) {
+			fmt.Fprintf(a.Stderr, "warning: coordinator checkpoint inventory unavailable; showing partial local inventory with unverified cached state: %v\n", err)
+			return local, nil
+		}
+		return nil, fmt.Errorf("list coordinator checkpoints: %w", err)
+	}
+	origin := checkpointCoordinatorOrigin(coord.BaseURL)
+	merged := make(map[string]checkpointRecord, len(local)+len(remote))
+	for _, record := range local {
+		if record.coordinatorManaged() && record.Ownership.Origin == origin {
+			continue
+		}
+		merged[record.ID] = record
+	}
+	for _, checkpoint := range remote {
+		record, convertErr := checkpointRecordFromCoordinator(checkpoint, origin)
+		if convertErr != nil {
+			return nil, convertErr
+		}
+		if existing, ok := merged[record.ID]; ok {
+			if !existing.coordinatorManaged() {
+				return nil, exit(2, "checkpoint %s collides with an operator-managed local checkpoint; refusing to replace local metadata", record.ID)
+			}
+			if existing.Ownership.Origin != origin || !canRefreshManagedCheckpointCache(existing, record) {
+				return nil, exit(2, "checkpoint %s has conflicting coordinator ownership or provider identity", record.ID)
+			}
+		}
+		if paths, pathsErr := store.Paths(record.ID); pathsErr == nil {
+			if _, statErr := os.Stat(paths.Meta); statErr == nil {
+				existing, _, existingErr := store.Read(record.ID)
+				if existingErr != nil {
+					fmt.Fprintf(a.Stderr, "warning: preserving unreadable checkpoint %s cache: %v\n", record.ID, existingErr)
+					merged[record.ID] = record
+					continue
+				}
+				if !existing.coordinatorManaged() || !canRefreshManagedCheckpointCache(existing, record) {
+					return nil, exit(2, "checkpoint %s collides with an existing local checkpoint identity", record.ID)
+				}
+			}
+		}
+		merged[record.ID] = record
+		if writeErr := writeSafeManagedCheckpointCache(store, record); writeErr != nil {
+			var conflict managedCheckpointCacheConflict
+			if errors.As(writeErr, &conflict) {
+				return nil, writeErr
+			}
+			fmt.Fprintf(a.Stderr, "warning: could not cache coordinator checkpoint %s: %v\n", record.ID, writeErr)
+		}
+	}
+	records := make([]checkpointRecord, 0, len(merged))
+	for _, record := range merged {
+		records = append(records, record)
+	}
+	sort.Slice(records, func(i, j int) bool {
+		left, leftErr := time.Parse(time.RFC3339, records[i].CreatedAt)
+		right, rightErr := time.Parse(time.RFC3339, records[j].CreatedAt)
+		if leftErr == nil && rightErr == nil && !left.Equal(right) {
+			return left.After(right)
+		}
+		return records[i].ID > records[j].ID
+	})
+	return records, nil
+}
+
+func checkpointInventoryUnavailable(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	var httpErr CoordinatorHTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.StatusCode >= 500 && httpErr.StatusCode <= 599
+	}
+	var transportErr *url.Error
+	return errors.As(err, &transportErr) || errors.Is(err, context.DeadlineExceeded)
+}
+
+func sameManagedCheckpointSource(local, remote checkpointRecord) bool {
+	return local.coordinatorManaged() && remote.coordinatorManaged() && local.ID == remote.ID && local.Ownership.Origin == remote.Ownership.Origin && local.Provider == remote.Provider && local.LeaseID == remote.LeaseID
+}
+
+func sameManagedCheckpointIdentity(local, remote checkpointRecord) bool {
+	if !sameManagedCheckpointSource(local, remote) || local.CreatedAt != remote.CreatedAt {
+		return false
+	}
+	if local.Native.ImageID == "" || remote.Native.ImageID == "" {
+		return true
+	}
+	return local.Native.ImageID == remote.Native.ImageID && local.Native.Resource == remote.Native.Resource && local.Native.AccountID == remote.Native.AccountID && local.Native.Project == remote.Native.Project && local.Native.Region == remote.Native.Region && local.Native.Kind == remote.Native.Kind
+}
+
+func canRefreshManagedCheckpointCache(local, remote checkpointRecord) bool {
+	// The pre-response journal has a native kind and client timestamp. Reading may
+	// hydrate it from the coordinator; it must not authorize deletion on its own.
+	return sameManagedCheckpointIdentity(local, remote) || sameManagedCheckpointSource(local, remote) && local.Native.ImageID == "" && isNativeCheckpointKind(local.Kind) && local.Capture == nil
+}
+
+func (a App) recoverableLocalCheckpointRecords(store checkpointStore) ([]checkpointRecord, map[string]error, error) {
+	entries, err := os.ReadDir(store.root)
+	if errors.Is(err, os.ErrNotExist) {
+		return []checkpointRecord{}, nil, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	records := make([]checkpointRecord, 0, len(entries))
+	unreadable := make(map[string]error)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		record, _, readErr := store.Read(entry.Name())
+		if isCheckpointNotFound(readErr) {
+			continue
+		}
+		if readErr != nil {
+			unreadable[entry.Name()] = readErr
+			continue
+		}
+		records = append(records, record)
+	}
+	return records, unreadable, nil
+}
+
+func (a App) readCheckpointRecord(ctx context.Context, store checkpointStore, id string) (checkpointRecord, checkpointPaths, error) {
+	record, paths, localErr := store.Read(id)
+	if localErr == nil && !record.coordinatorManaged() {
+		return record, paths, nil
+	}
+	unsafeLocalMetadata := false
+	if localErr != nil {
+		if paths.Meta == "" {
+			paths, _ = store.Paths(id)
+		}
+		if _, statErr := os.Stat(paths.Meta); statErr == nil || !os.IsNotExist(statErr) {
+			unsafeLocalMetadata = true
+			fmt.Fprintf(a.Stderr, "warning: preserving unreadable checkpoint %s cache: %v\n", id, localErr)
+		}
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		return checkpointRecord{}, checkpointPaths{}, err
+	}
+	if cfg.Coordinator == "" {
+		if localErr != nil {
+			return checkpointRecord{}, checkpointPaths{}, localErr
+		}
+		return checkpointRecord{}, checkpointPaths{}, exit(2, "checkpoint %s requires coordinator %s", id, record.Ownership.Origin)
+	}
+	coord, err := configuredCheckpointCoordinatorFor(ctx)
+	if err != nil {
+		return checkpointRecord{}, checkpointPaths{}, err
+	}
+	origin := checkpointCoordinatorOrigin(coord.BaseURL)
+	if localErr == nil && record.Ownership.Origin != origin {
+		return checkpointRecord{}, checkpointPaths{}, exit(2, "checkpoint %s belongs to coordinator %s, not %s", id, record.Ownership.Origin, origin)
+	}
+	previous := record
+	remote, err := coord.Checkpoint(ctx, id)
+	if err != nil {
+		return checkpointRecord{}, checkpointPaths{}, err
+	}
+	record, err = checkpointRecordFromCoordinator(remote, origin)
+	if err != nil {
+		return checkpointRecord{}, checkpointPaths{}, err
+	}
+	if localErr == nil && (!canRefreshManagedCheckpointCache(previous, record) || previous.Capture != nil && unresolvedCheckpoint(previous)) {
+		return checkpointRecord{}, checkpointPaths{}, exit(2, "checkpoint %s has conflicting local and coordinator provider identities", id)
+	}
+	if localErr == nil {
+		record.Capture = previous.Capture
+	}
+	if !unsafeLocalMetadata {
+		if err := writeSafeManagedCheckpointCache(store, record); err != nil {
+			var conflict managedCheckpointCacheConflict
+			if errors.As(err, &conflict) {
+				return checkpointRecord{}, checkpointPaths{}, err
+			}
+			fmt.Fprintf(a.Stderr, "warning: could not cache coordinator checkpoint %s: %v\n", id, err)
+		}
+	}
+	paths, err = store.Paths(id)
+	return record, paths, err
 }
 
 func (a App) checkpointListParallelsSnapshots(ctx context.Context, cfg Config, id string, jsonOut bool, opts checkpointParallelsListOptions) error {
@@ -532,9 +834,11 @@ func (a App) checkpointInspect(ctx context.Context, args []string) error {
 	fs := newFlagSet("checkpoint inspect", a.Stderr)
 	jsonOut := fs.Bool("json", false, "print JSON")
 	verify := fs.Bool("verify", false, "verify local artifact or provider resource")
+	admin := fs.Bool("admin", false, "use the configured coordinator admin credential")
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
+	ctx = withCheckpointAdmin(ctx, *admin)
 	if fs.NArg() != 1 {
 		return exit(2, "usage: crabbox checkpoint inspect <checkpoint-id>")
 	}
@@ -542,7 +846,7 @@ func (a App) checkpointInspect(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	record, _, err := store.Read(fs.Arg(0))
+	record, _, err := a.readCheckpointRecord(ctx, store, fs.Arg(0))
 	if err != nil {
 		if *jsonOut && isCheckpointNotFound(err) {
 			claims, readErr := listLeaseClaims()
@@ -598,6 +902,60 @@ func printCheckpointInspect(stdout io.Writer, record checkpointRecord) {
 			fmt.Fprintf(stdout, "image_resource=%s\n", record.Native.Resource)
 		}
 	}
+}
+
+func (a App) checkpointPolicy(ctx context.Context, args []string) error {
+	fs := newFlagSet("checkpoint policy", a.Stderr)
+	manual := fs.Bool("manual", false, "disable automatic checkpoint expiry")
+	expireUnusedAfter := fs.String("expire-unused-after", "", "expire the checkpoint after this period without a successful fork")
+	jsonOut := fs.Bool("json", false, "print JSON")
+	admin := fs.Bool("admin", false, "use the configured coordinator admin credential")
+	if err := parseInterspersedFlags(fs, args); err != nil {
+		return err
+	}
+	ctx = withCheckpointAdmin(ctx, *admin)
+	if fs.NArg() != 1 || *manual == (strings.TrimSpace(*expireUnusedAfter) != "") {
+		return exit(2, "usage: crabbox checkpoint policy <checkpoint-id> (--manual | --expire-unused-after <duration>)")
+	}
+	duration, err := parseCheckpointRetentionDuration(*expireUnusedAfter)
+	if err != nil {
+		return err
+	}
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		return err
+	}
+	record, _, err := a.readCheckpointRecord(ctx, store, fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	if !record.coordinatorManaged() {
+		return exit(2, "checkpoint %s is operator-managed; retention policy requires a coordinator-managed brokered native checkpoint", record.ID)
+	}
+	coord, err := configuredCheckpointCoordinatorFor(ctx)
+	if err != nil {
+		return err
+	}
+	updated, err := coord.UpdateCheckpointRetention(ctx, record.ID, checkpointRetentionFromDuration(duration))
+	if err != nil {
+		return err
+	}
+	record, err = checkpointRecordFromCoordinator(updated, record.Ownership.Origin)
+	if err != nil {
+		return err
+	}
+	if err := writeSafeManagedCheckpointCache(store, record); err != nil {
+		fmt.Fprintf(a.Stderr, "warning: could not refresh checkpoint %s cache after policy update: %v\n", record.ID, err)
+	}
+	if *jsonOut {
+		return json.NewEncoder(a.Stdout).Encode(record)
+	}
+	if *manual {
+		fmt.Fprintf(a.Stdout, "checkpoint policy id=%s retention=manual\n", record.ID)
+	} else {
+		fmt.Fprintf(a.Stdout, "checkpoint policy id=%s retention=expire-unused unused_for=%s\n", record.ID, duration)
+	}
+	return nil
 }
 
 func (a App) checkpointRestore(ctx context.Context, args []string) error {
@@ -767,9 +1125,11 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 	workdirOverride := fs.String("workdir", "", "remote restore workdir")
 	clear := fs.Bool("clear", true, "clear the remote workdir before restoring")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
+	admin := fs.Bool("admin", false, "use the configured coordinator admin credential")
 	if err := parseInterspersedFlags(fs, forkArgs); err != nil {
 		return err
 	}
+	ctx = withCheckpointAdmin(ctx, *admin)
 	if flagWasSet(fs, "parallels-template") {
 		*leaseFlags.Provider = "parallels"
 	}
@@ -817,7 +1177,7 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
-	record, paths, err := store.Read(fs.Arg(0))
+	record, paths, err := a.readCheckpointRecord(ctx, store, fs.Arg(0))
 	if err != nil {
 		return err
 	}
@@ -843,6 +1203,11 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 	}
 	if err := applyLeaseCreateFlags(&cfg, fs, leaseFlags); err != nil {
 		return err
+	}
+	if record.coordinatorManaged() {
+		if err := bindCheckpointCoordinatorCredential(ctx, &cfg); err != nil {
+			return err
+		}
 	}
 	if record.Kind != checkpointKindArchive && !nativeCheckpoint {
 		return exit(2, "checkpoint %s has kind=%s; fork requires %s or a native image checkpoint", record.ID, record.Kind, checkpointKindArchive)
@@ -1004,6 +1369,145 @@ func (a App) provisionCheckpointFork(ctx context.Context, cfg Config, backend Ba
 }
 
 func (a App) provisionCheckpointForkWithLeaseID(ctx context.Context, cfg Config, backend Backend, sshBackend SSHLeaseBackend, repo Repo, record checkpointRecord, paths checkpointPaths, keep, reclaim bool, requestedLeaseID, requestedSlug, workdirOverride string, clear bool, onAcquired func(LeaseTarget)) (checkpointForkProvision, error) {
+	if record.coordinatorManaged() {
+		return a.provisionManagedCheckpointFork(ctx, cfg, backend, sshBackend, repo, record, paths, keep, reclaim, requestedLeaseID, requestedSlug, workdirOverride, clear, onAcquired)
+	}
+	return a.provisionCheckpointForkWithoutClaim(ctx, cfg, backend, sshBackend, repo, record, paths, keep, reclaim, requestedLeaseID, requestedSlug, workdirOverride, clear, onAcquired)
+}
+
+func (a App) provisionManagedCheckpointFork(ctx context.Context, cfg Config, backend Backend, sshBackend SSHLeaseBackend, repo Repo, record checkpointRecord, paths checkpointPaths, keep, reclaim bool, requestedLeaseID, requestedSlug, workdirOverride string, clear bool, onAcquired func(LeaseTarget)) (checkpointForkProvision, error) {
+	coord, err := configuredCheckpointCoordinatorFor(ctx)
+	if err != nil {
+		return checkpointForkProvision{}, err
+	}
+	if origin := checkpointCoordinatorOrigin(coord.BaseURL); origin != record.Ownership.Origin {
+		return checkpointForkProvision{}, exit(2, "checkpoint %s belongs to coordinator %s, not %s", record.ID, record.Ownership.Origin, origin)
+	}
+	claim, err := coord.BeginCheckpointUse(ctx, record.ID)
+	if err != nil {
+		return checkpointForkProvision{}, err
+	}
+	claimCtx, cancel := context.WithCancel(ctx)
+	renewalCtx, stopRenewal := context.WithCancel(ctx)
+	var leaseCreated atomic.Bool
+	renewalDone := make(chan struct{})
+	renewalErrors := make(chan error, 1)
+	go func() {
+		defer close(renewalDone)
+		interval := 40 * time.Second
+		if expires, parseErr := time.Parse(time.RFC3339, claim.ExpiresAt); parseErr == nil {
+			if remaining := time.Until(expires) / 3; remaining > 0 && remaining < interval {
+				interval = remaining
+			}
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-renewalCtx.Done():
+				return
+			case <-ticker.C:
+				if _, _, renewErr := coord.checkpointUseAction(renewalCtx, record.ID, claim.Claim, "renew"); renewErr != nil {
+					if leaseCreated.Load() || renewalCtx.Err() != nil {
+						return
+					}
+					var httpErr CoordinatorHTTPError
+					var response struct {
+						Error string `json:"error"`
+					}
+					if errors.As(renewErr, &httpErr) &&
+						httpErr.StatusCode == http.StatusConflict &&
+						json.Unmarshal([]byte(httpErr.Message), &response) == nil &&
+						response.Error == "checkpoint_claim_invalid" {
+						return
+					}
+					select {
+					case renewalErrors <- renewErr:
+					default:
+					}
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	claimed := true
+	defer func() {
+		stopRenewal()
+		cancel()
+		<-renewalDone
+		if claimed && !leaseCreated.Load() {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cleanupCancel()
+			_, _, _ = coord.checkpointUseAction(cleanupCtx, record.ID, claim.Claim, "abort")
+		}
+	}()
+	provisionContext := withCheckpointLeaseProvisioned(claimCtx, record.ID, claim.Claim, func() {
+		leaseCreated.Store(true)
+		stopRenewal()
+	})
+	provision, err := a.provisionCheckpointForkWithoutClaim(provisionContext, cfg, backend, sshBackend, repo, record, paths, keep, reclaim, requestedLeaseID, requestedSlug, workdirOverride, clear, onAcquired)
+	if err != nil {
+		select {
+		case renewErr := <-renewalErrors:
+			return checkpointForkProvision{}, fmt.Errorf("renew checkpoint use claim: %w", renewErr)
+		default:
+			return checkpointForkProvision{}, err
+		}
+	}
+	stopRenewal()
+	<-renewalDone
+	select {
+	case renewErr := <-renewalErrors:
+		if requestedLeaseID == "" {
+			provision.Release(context.Background())
+		}
+		return checkpointForkProvision{}, fmt.Errorf("renew checkpoint use claim: %w", renewErr)
+	default:
+	}
+	claimed = false
+	completed, err := coord.Checkpoint(ctx, record.ID)
+	if err != nil {
+		fmt.Fprintf(a.Stderr, "warning: could not refresh checkpoint %s after successful coordinator-owned use: %v\n", record.ID, err)
+		return provision, nil
+	}
+	updated, err := checkpointRecordFromCoordinator(completed, record.Ownership.Origin)
+	if err != nil {
+		fmt.Fprintf(a.Stderr, "warning: could not refresh checkpoint %s cache after successful use: %v\n", record.ID, err)
+		return provision, nil
+	}
+	if store, storeErr := defaultCheckpointStore(); storeErr != nil {
+		fmt.Fprintf(a.Stderr, "warning: could not refresh checkpoint %s cache after successful use: %v\n", record.ID, storeErr)
+	} else if writeErr := writeSafeManagedCheckpointCache(store, updated); writeErr != nil {
+		fmt.Fprintf(a.Stderr, "warning: could not refresh checkpoint %s cache after successful use: %v\n", record.ID, writeErr)
+	}
+	return provision, nil
+}
+
+type managedCheckpointCacheConflict struct{ error }
+
+func writeSafeManagedCheckpointCache(store checkpointStore, record checkpointRecord) error {
+	if !record.coordinatorManaged() {
+		return exit(2, "checkpoint %s is not coordinator-managed", record.ID)
+	}
+	if err := os.MkdirAll(store.root, 0o700); err != nil {
+		return err
+	}
+	return store.withLock(record.ID, false, func() error {
+		existing, _, err := store.Read(record.ID)
+		if err == nil {
+			if !canRefreshManagedCheckpointCache(existing, record) || existing.Capture != nil && unresolvedCheckpoint(existing) {
+				return managedCheckpointCacheConflict{exit(2, "checkpoint %s has conflicting local ownership, provider identity, or unresolved capture", record.ID)}
+			}
+			record.Capture = existing.Capture
+		} else if !isCheckpointNotFound(err) {
+			return fmt.Errorf("preserving unreadable checkpoint cache: %w", err)
+		}
+		return store.Write(record)
+	})
+}
+
+func (a App) provisionCheckpointForkWithoutClaim(ctx context.Context, cfg Config, backend Backend, sshBackend SSHLeaseBackend, repo Repo, record checkpointRecord, paths checkpointPaths, keep, reclaim bool, requestedLeaseID, requestedSlug, workdirOverride string, clear bool, onAcquired func(LeaseTarget)) (checkpointForkProvision, error) {
 	checkpointID := ""
 	if requestedLeaseID != "" {
 		checkpointID = record.ID
@@ -1116,11 +1620,17 @@ func (a App) checkpointForkRecordOnce(ctx context.Context, cfg Config, backend B
 			provision.Release(context.Background())
 		}
 	}()
-	if err := recordCheckpointUse(store, record); err != nil {
-		if requestedLeaseID == "" {
-			provision.Release(context.Background())
+	if record.coordinatorManaged() {
+		if refreshed, _, readErr := store.Read(record.ID); readErr == nil {
+			*record = refreshed
 		}
-		return err
+	} else {
+		if err := recordCheckpointUse(store, record); err != nil {
+			if requestedLeaseID == "" {
+				provision.Release(context.Background())
+			}
+			return err
+		}
 	}
 	leaseID := provision.Lease.LeaseID
 	slug := serverSlug(provision.Lease.Server)
@@ -1335,6 +1845,7 @@ func (a App) checkpointDelete(ctx context.Context, args []string) error {
 	sourceID := fs.String("id", "", "provider source VM id/name for provider-native snapshot")
 	snapshot := fs.String("snapshot", "", "provider-native snapshot name or id")
 	localOnly := fs.Bool("local-only", false, "delete only the local checkpoint record")
+	admin := fs.Bool("admin", false, "use the configured coordinator admin credential")
 	dryRun := fs.Bool("dry-run", false, "show provider-native deletion target without deleting")
 	yes := fs.Bool("yes", false, "allow deleting non-crabbox provider-native snapshots")
 	targetFlags := registerTargetFlags(fs, defaults)
@@ -1343,6 +1854,7 @@ func (a App) checkpointDelete(ctx context.Context, args []string) error {
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
+	ctx = withCheckpointAdmin(ctx, *admin)
 	if flagWasSet(fs, "parallels-template") {
 		*provider = "parallels"
 	}
@@ -1402,19 +1914,33 @@ func (a App) checkpointDelete(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if *dryRun {
-		record, _, err := store.Read(id)
+	record, _, localErr := store.Read(id)
+	if !*localOnly && (localErr != nil || !record.coordinatorManaged()) {
+		record, _, err = a.readCheckpointRecord(ctx, store, id)
 		if err != nil {
-			if isCheckpointNotFound(err) {
+			if isCheckpointNotFound(err) || isCheckpointNotFound(localErr) && isCoordinatorCheckpointNotFound(err) {
 				fmt.Fprintf(a.Stdout, "checkpoint absent id=%s\n", id)
 				return nil
 			}
 			return err
 		}
+	}
+	if *dryRun {
+		if *localOnly && localErr != nil {
+			if isCheckpointNotFound(localErr) {
+				fmt.Fprintf(a.Stdout, "checkpoint absent id=%s\n", id)
+				return nil
+			}
+			return localErr
+		}
 		fmt.Fprintf(a.Stdout, "would delete checkpoint id=%s kind=%s provider=%s resource=%s local_only=%t\n", record.ID, record.Kind, blank(record.Provider, "-"), blank(nativeCheckpointDeleteID(record), "-"), *localOnly)
 		return nil
 	}
-	if err := deleteCheckpoint(ctx, store, id, *localOnly); err != nil {
+	deleteLocal := func() error { return deleteCheckpoint(ctx, store, id, *localOnly) }
+	if record.coordinatorManaged() && !*localOnly {
+		deleteLocal = func() error { return a.deleteManagedCheckpoint(ctx, store, record) }
+	}
+	if err := deleteLocal(); err != nil {
 		if isCheckpointNotFound(err) {
 			fmt.Fprintf(a.Stdout, "checkpoint absent id=%s\n", id)
 			return nil
@@ -1425,6 +1951,39 @@ func (a App) checkpointDelete(ctx context.Context, args []string) error {
 	return nil
 }
 
+func (a App) deleteManagedCheckpoint(ctx context.Context, store checkpointStore, remote checkpointRecord) error {
+	deleteRemote := func(cacheWritable bool) error {
+		current, _, readErr := store.Read(remote.ID)
+		if readErr == nil {
+			if !sameManagedCheckpointIdentity(current, remote) {
+				return exit(2, "checkpoint %s has conflicting local ownership or provider identity", remote.ID)
+			}
+			if current.Capture != nil && unresolvedCheckpoint(current) {
+				return exit(2, "checkpoint %s has an unresolved capture; retain its record and source", remote.ID)
+			}
+		}
+		if err := deleteCheckpointResource(ctx, store, remote); err != nil {
+			return err
+		}
+		if cacheWritable && readErr == nil {
+			if err := store.Delete(remote.ID); err != nil {
+				fmt.Fprintf(a.Stderr, "warning: checkpoint %s was deleted remotely but its cache remains: %v\n", remote.ID, err)
+			}
+		} else if readErr != nil && !isCheckpointNotFound(readErr) || !cacheWritable {
+			fmt.Fprintf(a.Stderr, "warning: checkpoint %s was deleted remotely; preserving unavailable local cache metadata\n", remote.ID)
+		}
+		return nil
+	}
+	entered := false
+	err := store.withLock(remote.ID, false, func() error { entered = true; return deleteRemote(true) })
+	var busy checkpointBusyError
+	if err == nil || entered || errors.As(err, &busy) {
+		return err
+	}
+	// Cache I/O is optional; an active operation or a positively known conflict is not.
+	return deleteRemote(false)
+}
+
 func deleteCheckpoint(ctx context.Context, store checkpointStore, id string, localOnly bool) error {
 	return store.withRecord(id, false, func(record checkpointRecord) error {
 		return deleteCheckpointRecord(ctx, store, record, localOnly)
@@ -1433,7 +1992,7 @@ func deleteCheckpoint(ctx context.Context, store checkpointStore, id string, loc
 
 func deleteCheckpointRecord(ctx context.Context, store checkpointStore, record checkpointRecord, localOnly bool) error {
 	id := record.ID
-	if unresolvedCheckpoint(record) {
+	if unresolvedCheckpoint(record) && (!record.coordinatorManaged() || record.Capture != nil) {
 		return exit(2, "checkpoint %s is unresolved; retain its record and source and reconcile the original capture", id)
 	}
 	if !localOnly {
@@ -1445,6 +2004,34 @@ func deleteCheckpointRecord(ctx context.Context, store checkpointStore, record c
 }
 
 func deleteCheckpointResource(ctx context.Context, store checkpointStore, record checkpointRecord) error {
+	if record.coordinatorManaged() {
+		coord, err := configuredCheckpointCoordinatorFor(ctx)
+		if err != nil {
+			return err
+		}
+		origin := checkpointCoordinatorOrigin(coord.BaseURL)
+		if record.Ownership.Origin != origin {
+			return exit(2, "checkpoint %s belongs to coordinator %s, not %s", record.ID, record.Ownership.Origin, origin)
+		}
+		checkpoint, err := coord.Checkpoint(ctx, record.ID)
+		if err != nil {
+			if isCoordinatorCheckpointNotFound(err) {
+				return coord.DeleteCheckpoint(ctx, record.ID)
+			}
+			return err
+		}
+		current, err := checkpointRecordFromCoordinator(checkpoint, origin)
+		if err != nil {
+			return err
+		}
+		if !sameManagedCheckpointIdentity(record, current) {
+			if canRefreshManagedCheckpointCache(record, current) {
+				return exit(2, "checkpoint %s has not confirmed its coordinator creation identity; run crabbox checkpoint inspect %s before deletion", record.ID, record.ID)
+			}
+			return exit(2, "checkpoint %s has conflicting local and coordinator provider identities", record.ID)
+		}
+		return coord.DeleteCheckpoint(ctx, record.ID)
+	}
 	providerID := nativeCheckpointDeleteID(record)
 	if !isNativeCheckpointKind(record.Kind) || providerID == "" {
 		return nil
@@ -1566,6 +2153,9 @@ func (a App) checkpointPrune(ctx context.Context, args []string) error {
 	createdCutoff := now.Add(-createdAge)
 	unusedCutoff := now.Add(-unusedAge)
 	matches := func(record checkpointRecord) (bool, error) {
+		if record.coordinatorManaged() {
+			return false, nil
+		}
 		created, err := time.Parse(time.RFC3339, record.CreatedAt)
 		if err != nil {
 			return false, exit(2, "checkpoint %s has invalid createdAt: %v", record.ID, err)
@@ -1624,6 +2214,21 @@ func (a App) checkpointPrune(ctx context.Context, args []string) error {
 
 func parseCheckpointPruneDuration(value string) (time.Duration, error) {
 	return parseCheckpointPruneDurationFlag("--older-than", value)
+}
+
+func parseCheckpointRetentionDuration(value string) (time.Duration, error) {
+	if strings.TrimSpace(value) == "" {
+		return 0, nil
+	}
+	duration, err := parseCheckpointPruneDurationFlag("--expire-unused-after", value)
+	if err != nil {
+		return 0, err
+	}
+	const maximum = 10 * 366 * 24 * time.Hour
+	if duration <= 0 || duration > maximum || duration%time.Second != 0 {
+		return 0, exit(2, "--expire-unused-after must be a positive whole-second duration no greater than 10 years")
+	}
+	return duration, nil
 }
 
 func parseCheckpointPruneDurationFlag(flagName, value string) (time.Duration, error) {
@@ -1727,6 +2332,29 @@ func (a App) verifyCheckpointResource(ctx context.Context, store checkpointStore
 			}
 			audit.ProviderState = "unresolved_capture"
 			audit.NextAction = "reconcile_capture"
+			return audit, nil
+		}
+		if record.coordinatorManaged() {
+			coord, err := configuredCheckpointCoordinatorFor(ctx)
+			if err != nil {
+				audit.ProviderState = "unknown"
+				audit.NextAction = "check_coordinator"
+				audit.Error = err.Error()
+				return audit, nil
+			}
+			if checkpointCoordinatorOrigin(coord.BaseURL) != record.Ownership.Origin {
+				audit.ProviderState, audit.NextAction = "unknown", "check_coordinator"
+				audit.Error = fmt.Sprintf("checkpoint belongs to coordinator %s, not %s", record.Ownership.Origin, checkpointCoordinatorOrigin(coord.BaseURL))
+				return audit, nil
+			}
+			image, err := coord.CheckpointImage(ctx, record.ID)
+			if err != nil {
+				audit.ProviderState = "unknown"
+				audit.NextAction = "check_coordinator_or_provider"
+				audit.Error = err.Error()
+				return audit, nil
+			}
+			applyCheckpointImageAudit(&audit, image)
 			return audit, nil
 		}
 		if cfg, ok := directAWSCheckpointConfig(record); ok {

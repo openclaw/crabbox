@@ -248,6 +248,29 @@ their exact organization label. Legacy workspace records are not reused or
 replenished as prewarms. Per-org admission limits conservatively count legacy
 records against every exact label they could have represented.
 
+New brokered native AWS, Azure, and GCP checkpoints bind their owner and exact
+canonical organization to the authoritative source lease. Cross-owner or
+cross-organization reads return `404`; admins retain explicit operator access.
+Coordinator records bind exact provider account/subscription/project, location,
+canonical resource identity, and immutable resource identity before permitting
+deletion. Renewable fork claims are generation-bound and persisted only as
+token hashes; raw use tokens never enter durable records, lease records, logs,
+or normal checkpoint output. The dedicated checkpoint-backed lease route
+accepts only its claimed exact image and preserves generic image-override
+authorization. Promotion pins and reverse resource claims fence both checkpoint
+expiry and generic image-delete bypasses. Direct, archive, recipe, historical,
+and unclaimed provider artifacts are never adopted or swept as checkpoints.
+
+Checkpoint reservation enforces exact global, owner, and conservatively
+canonicalized organization caps in the same serializable transaction, before
+provider mutation. Active fork claims are separately bounded per checkpoint,
+owner, and coordinator; expired provisioning claims continue to count until
+their exact lease outcome is reconciled. Invalid or zero checkpoint limits fall
+back to finite safe defaults rather than disabling protection. Checkpoint event
+storage retains only the latest 256 ordered events per checkpoint, so creation
+or older use activity may age out; it is operational history, not a complete
+or compliance-grade audit trail.
+
 Long-lived control, WebVNC, Code, and egress sessions bind cached admin authority
 to the exact GitHub identity or bearer token plus a deployment grant version.
 Changing any configured admin source revokes older active, restored, ticketed,

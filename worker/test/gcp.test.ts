@@ -6,6 +6,8 @@ import {
   gcpEffectiveTags,
   gcpFirewallNameForPolicy,
   gcpFirewallNameForNetwork,
+  gcpMachineImageNotFound,
+  gcpSnapshotNotFound,
   isFallbackProvisioningError,
   operationDone,
 } from "../src/gcp";
@@ -810,6 +812,82 @@ describe("gcp provider", () => {
       name: "checkpoint-gcp",
       sourceInstance: "zones/us-central1-a/instances/crabbox-source",
     });
+  });
+
+  it.each(["chk_owned_gcp", `chk_${"a".repeat(124)}`])(
+    "encodes bounded GCP ownership labels for checkpoint id %s",
+    async (checkpointID) => {
+      const client = new GCPClient(env);
+      (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
+        token: "test-token",
+        expiresAt: Math.trunc(Date.now() / 1000) + 3600,
+      };
+      const ownership = {
+        checkpointID,
+        sourceLeaseID: "cbx_000000000001",
+        tokenHash: "a".repeat(64),
+      };
+      let labels: Record<string, string> = {};
+      client.fetcher = async (input, init) => {
+        const url = new URL(String(input));
+        if (url.pathname.endsWith("/global/machineImages") && init?.method === "POST") {
+          labels = (JSON.parse(String(init.body)) as { labels: Record<string, string> }).labels;
+          return Response.json({ name: "op-managed", status: "PENDING" });
+        }
+        if (url.pathname.endsWith("/global/operations/op-managed/wait")) {
+          return Response.json({ name: "op-managed", status: "DONE" });
+        }
+        return Response.json({
+          id: "987654321012345678",
+          name: "checkpoint-managed",
+          selfLink: "projects/default-project/global/machineImages/checkpoint-managed",
+          status: "READY",
+          labels,
+        });
+      };
+      const image = await client.createImage("crabbox-source", "checkpoint-managed", ownership);
+      expect(labels).toMatchObject({
+        crabbox_checkpoint_id:
+          ownership.checkpointID.length <= 63
+            ? ownership.checkpointID
+            : ownership.tokenHash.slice(0, 63),
+        crabbox_checkpoint_token_a: "a".repeat(32),
+        crabbox_checkpoint_token_b: "a".repeat(32),
+        crabbox_checkpoint_lease: ownership.sourceLeaseID,
+      });
+      expect(Object.values(labels).every((value) => value.length <= 63)).toBe(true);
+      expect(image).toMatchObject({
+        immutableID: "987654321012345678",
+        checkpointOwnershipHash: ownership.tokenHash,
+        checkpointSourceLeaseID: ownership.sourceLeaseID,
+      });
+    },
+  );
+
+  it("accepts only exact project and resource kind in checkpoint not-found responses", async () => {
+    const client = new GCPClient(env);
+    (client as unknown as { cache: { token: string; expiresAt: number } }).cache = {
+      token: "test-token",
+      expiresAt: Math.trunc(Date.now() / 1000) + 3600,
+    };
+    client.fetcher = async (input) => {
+      const url = new URL(String(input));
+      const resource = url.pathname.slice(url.pathname.indexOf("projects/"));
+      return Response.json(
+        { error: { code: 404, message: `The resource '${resource}' was not found` } },
+        { status: 404 },
+      );
+    };
+    let failure: unknown;
+    try {
+      await client.getImage("checkpoint-gcp", "gcp-disk-snapshot");
+    } catch (error) {
+      failure = error;
+    }
+    expect(gcpSnapshotNotFound(failure, "default-project", "checkpoint-gcp")).toBe(true);
+    expect(gcpSnapshotNotFound(failure, "other-project", "checkpoint-gcp")).toBe(false);
+    expect(gcpSnapshotNotFound(failure, "default-project", "other")).toBe(false);
+    expect(gcpMachineImageNotFound(failure, "default-project", "checkpoint-gcp")).toBe(false);
   });
 
   it("routes kind-specific snapshot reads and deletes to GCP snapshots", async () => {
