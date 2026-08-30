@@ -85,6 +85,12 @@ deletion; they preserve local state while cleanup is pending. Local cleanup is
 scoped to `<user-config>/crabbox/testboxes/<lease-id>` and never follows configured
 or shared SSH key paths.
 
+For public AWS leases, shared security-group writes remain serialized with release
+and authoritative ingress reconciliation. Image selection, instance creation and
+network-address readiness do not hold that fence, so a slow new instance does
+not delay release of another lease. Every regional ingress attempt rechecks the
+creating lease and derives access from current lease records before writing.
+
 ### Cleanup retries
 
 If deleting the cloud server during expiry fails, the lease stays `active` and

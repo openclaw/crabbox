@@ -1081,7 +1081,6 @@ export class FleetCoordinator {
   private bridgeTicketQueue: Promise<void> = Promise.resolve();
   private readonly bridgeTickets: BridgeTickets;
   private awsIngressBarrier: Promise<void> = Promise.resolve();
-  private readonly awsIngressAdditiveOperations = new Set<Promise<void>>();
   private providerMaintenanceQueue: Promise<void> = Promise.resolve();
   private readonly webVNCCredentialHandoffs: WebVNCCredentialHandoffs;
 
@@ -4318,12 +4317,10 @@ export class FleetCoordinator {
     config = preparation.config;
     const { prepared } = preparation;
     record = preparation.record;
-    let lastProvisioningTarget: ProviderProvisioningTarget | undefined;
     const targetProvisioning = prepared?.provisioning
       ? {
           ...prepared.provisioning,
           onTargetAttempt: async (target: ProviderProvisioningTarget) => {
-            lastProvisioningTarget = { ...target };
             if (
               createAttempt &&
               !(await this.pendingCreateAttempt(leaseID, createAttempt.token, owner, org))
@@ -4418,48 +4415,35 @@ export class FleetCoordinator {
     const provisioning: ProviderProvisioningContext = {
       ...targetProvisioning,
       onResourceCreated: (claim) => this.recordCreatedProviderResource(dispatched, claim),
+      // Queued regional attempts must not restore access from their pre-provisioning snapshot.
+      withLeaseAccess: (target, operation) =>
+        this.withAWSIngressOperationLock(async () => {
+          const access = await this.state.runExclusive(async () => {
+            const current = await this.getLease(dispatched.id);
+            const attempt = createAttempt
+              ? await this.pendingCreateAttempt(leaseID, createAttempt.token, owner, org)
+              : undefined;
+            if (
+              !current ||
+              !sameLeaseReleaseIdentity(current, dispatched) ||
+              current.state !== "provisioning" ||
+              current.provisioningRequestStartedAt !== dispatched.provisioningRequestStartedAt ||
+              Date.parse(current.expiresAt) <= Date.now() ||
+              (createAttempt && (!attempt || !createAttemptMatchesLease(attempt, current)))
+            ) {
+              throw new CreateAttemptCanceledError();
+            }
+            return {
+              lease: { ...current, ...(target.region ? { region: target.region } : {}) },
+              context: providerAccessContext([], await this.providerAccessLeaseRecords()),
+            };
+          });
+          return operation(access.lease, access.context);
+        }),
     };
-    const provision = () =>
-      provider.createServerWithFallback(config, leaseID, slug, owner, provisioning);
-    const provisioned =
-      config.provider !== "aws" || config.awsPrivate
-        ? provision()
-        : prepared?.provisioning?.sshIngressReconcile === "additive"
-          ? this.withAWSIngressAdditiveOperation(provision).catch(async (error: unknown) => {
-              if (!isAWSSecurityGroupRuleLimitError(coordinatorErrorMessage(this.env, error))) {
-                throw error;
-              }
-              return await this.withAWSIngressOperationLock(async () => {
-                const recovery = await this.state.runExclusive(async () => {
-                  const current = await this.getLease(record.id);
-                  if (!current || current.state !== "provisioning") {
-                    return undefined;
-                  }
-                  const accessLeases = await this.providerAccessLeaseRecords();
-                  const recoveryRegion = lastProvisioningTarget?.region;
-                  const recoveryLease = recoveryRegion
-                    ? { ...current, region: recoveryRegion }
-                    : current;
-                  return {
-                    current: structuredClone(recoveryLease),
-                    accessState: structuredClone(
-                      replaceProviderAccessState(accessLeases, recoveryLease),
-                    ),
-                  };
-                });
-                if (!recovery) {
-                  throw error;
-                }
-                await provider.reconcileLeaseAccess?.(
-                  recovery.current,
-                  providerAccessContext([], recovery.accessState),
-                );
-                return await provision();
-              });
-            })
-          : this.withAWSIngressOperationLock(provision);
-    const { server, serverType, market, attempts, image, provisioningTiming } =
-      await provisioned.catch(async (error: unknown) => {
+    const { server, serverType, market, attempts, image, provisioningTiming } = await provider
+      .createServerWithFallback(config, leaseID, slug, owner, provisioning)
+      .catch(async (error: unknown) => {
         const cleanupClaim = validatedProviderProvisioningCleanupClaim(error, config.provider);
         await this.state.runExclusive(async () => {
           if (prepared?.provisioning?.publishAccessBeforeProvisioning) {
@@ -16957,34 +16941,9 @@ export class FleetCoordinator {
     });
     this.awsIngressBarrier = previous.then(() => gate);
     await previous;
-    await Promise.all(this.awsIngressAdditiveOperations);
     try {
       return await operation();
     } finally {
-      release();
-    }
-  }
-
-  private async withAWSIngressAdditiveOperation<T>(operation: () => Promise<T>): Promise<T> {
-    let release!: () => void;
-    let active!: Promise<void>;
-    for (;;) {
-      const barrier = this.awsIngressBarrier;
-      // oxlint-disable-next-line eslint/no-await-in-loop -- retry only when an authoritative fence arrived first.
-      await barrier.catch(() => {});
-      if (barrier !== this.awsIngressBarrier) {
-        continue;
-      }
-      active = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      this.awsIngressAdditiveOperations.add(active);
-      break;
-    }
-    try {
-      return await operation();
-    } finally {
-      this.awsIngressAdditiveOperations.delete(active);
       release();
     }
   }
@@ -23973,6 +23932,32 @@ function withLeaseSSHSourceCIDRs(
   };
 }
 
+function awsCreateSSHSourceCIDRs(
+  config: LeaseConfig,
+  lease: LeaseRecord,
+  context: ProviderAccessContext,
+  env: Env,
+  providerRegion: string,
+): string[] {
+  const targetKey = awsIngressAccessTargetKey(
+    lease,
+    lease.region || config.awsRegion,
+    awsLeaseSSHPorts(lease),
+    env,
+  );
+  const targetLeases = replaceProviderAccessState(context.activeLeases, lease).filter(
+    (candidate) =>
+      leaseOwnsAWSSSHAccess(candidate) &&
+      awsIngressAccessTargetKey(
+        candidate,
+        candidate.region || providerRegion,
+        awsLeaseSSHPorts(candidate),
+        env,
+      ) === targetKey,
+  );
+  return activeAWSSSHSourceCIDRs(targetLeases, awsGlobalSSHSourceCIDRs(env));
+}
+
 function leaseOwnsAWSSSHAccess(lease: LeaseRecord): boolean {
   return (
     lease.provider === "aws" &&
@@ -24451,6 +24436,10 @@ interface ProviderProvisioningContext {
   publishAccessBeforeProvisioning?: boolean;
   onTargetAttempt?: (target: ProviderProvisioningTarget) => Promise<void>;
   onResourceCreated?: (claim: ProviderProvisioningCleanupClaim) => Promise<boolean>;
+  withLeaseAccess?: <T>(
+    target: ProviderProvisioningTarget,
+    operation: (lease: LeaseRecord, context: ProviderAccessContext) => Promise<T>,
+  ) => Promise<T>;
 }
 
 interface ProviderProvisioningTarget {
@@ -26166,28 +26155,11 @@ export class AWSProvider implements CloudProvider {
         ...(config.awsSubnetID ? { awsSubnetID: config.awsSubnetID } : {}),
       },
     };
-    const activeLeases = replaceProviderAccessState(context.activeLeases, nextLease);
-    const targetKey = awsIngressAccessTargetKey(
-      nextLease,
-      nextLease.region || config.awsRegion,
-      awsLeaseSSHPorts(nextLease),
-      this.env,
-    );
-    const targetLeases = activeLeases.filter(
-      (candidate) =>
-        leaseOwnsAWSSSHAccess(candidate) &&
-        awsIngressAccessTargetKey(
-          candidate,
-          candidate.region || this.region,
-          awsLeaseSSHPorts(candidate),
-          this.env,
-        ) === targetKey,
-    );
     return {
       config: {
         ...config,
         awsSGName: configuredSecurityGroupID ? "" : managedSecurityGroupName,
-        awsSSHCIDRs: activeAWSSSHSourceCIDRs(targetLeases, [...sourceCIDRs, ...globalCIDRs]),
+        awsSSHCIDRs: awsCreateSSHSourceCIDRs(config, nextLease, context, this.env, this.region),
       },
       lease: nextLease,
       provisioning: {
@@ -26317,6 +26289,7 @@ export class AWSProvider implements CloudProvider {
     provisioningTiming?: LeaseProvisioningTiming;
   }> {
     const regions = awsRegionCandidates(config, this.env, this.region);
+    const withLeaseAccess = provisioning?.withLeaseAccess;
     const totalStartedAt = Date.now();
     const failures: string[] = [];
     const regionAttempts: ProvisioningAttempt[] = [];
@@ -26343,7 +26316,37 @@ export class AWSProvider implements CloudProvider {
             leaseID,
             slug,
             owner,
-            ingressOptions,
+            {
+              ...ingressOptions,
+              // Only ingress writes hold the fence; image, instance and address waits do not.
+              ...(!config.awsPrivate && withLeaseAccess
+                ? {
+                    withIngress: (apply: (cidrs: string[]) => Promise<string>) =>
+                      withLeaseAccess({ region }, async (lease, context) => {
+                        const cidrs = awsCreateSSHSourceCIDRs(
+                          { ...config, awsRegion: region },
+                          lease,
+                          context,
+                          this.env,
+                          this.region,
+                        );
+                        try {
+                          return await apply(cidrs);
+                        } catch (error) {
+                          if (
+                            !isAWSSecurityGroupRuleLimitError(
+                              coordinatorErrorMessage(this.env, error),
+                            )
+                          ) {
+                            throw error;
+                          }
+                          await this.reconcileLeaseAccess(lease, context);
+                          return apply(cidrs);
+                        }
+                      }),
+                  }
+                : {}),
+            },
           );
         const requestMs = Date.now() - requestStartedAt;
         const networkReadyStartedAt = Date.now();
