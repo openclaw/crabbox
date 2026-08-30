@@ -12,6 +12,17 @@ const (
 	privateRunOutputFileMode = 0o600
 )
 
+// Only filesystem writes carry this marker; privacy validation errors do not.
+type privateRunOutputWriteError struct{ err error }
+
+func (e privateRunOutputWriteError) Error() string { return e.err.Error() }
+func (e privateRunOutputWriteError) Unwrap() error { return e.err }
+
+func failureBundleDestinationUnwritable(err error) bool {
+	var writeErr privateRunOutputWriteError
+	return errors.As(err, &writeErr) && privateRunOutputPermissionError(writeErr.err)
+}
+
 func writePrivateRunOutputFileIfAbsent(path string, data []byte) (bool, error) {
 	file, tempPath, err := createPrivateRunOutputTemp(path)
 	if err != nil {

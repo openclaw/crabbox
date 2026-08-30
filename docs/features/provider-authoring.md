@@ -200,8 +200,10 @@ Rules:
     Delegated backends may return a validated handle in `RunResult`. An
     explicitly opted-in SSH-lease provider that also advertises `FeatureSSH`
     and `FeatureCleanup` may instead have core emit the handle after recording
-    the exact lease claim. This SSH-lease contract is opt-in; only
-    `local-container` currently uses it.
+    the exact lease claim. This SSH-lease contract is opt-in; AWS and
+    `local-container` currently use it. Core owns handle construction and
+    output timing. Brokered coordinator run IDs can resolve to signed terminal
+    receipts; direct run IDs are correlation identifiers only.
   - `FeatureMCP` — delegated backend can attach MCP server references when it
     creates a sandbox. This is a create-time attachment contract, not a generic
     Crabbox MCP host.

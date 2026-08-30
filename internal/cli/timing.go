@@ -16,6 +16,10 @@ type TimingReport struct {
 	SyncPhases         []TimingPhase            `json:"syncPhases,omitempty"`
 	SyncSkipped        bool                     `json:"syncSkipped"`
 	SyncDelegated      bool                     `json:"syncDelegated,omitempty"`
+	SyncMode           string                   `json:"syncMode,omitempty"`
+	SyncTransferFiles  int                      `json:"syncTransferFiles,omitempty"`
+	SyncTransferBytes  int64                    `json:"syncTransferBytes,omitempty"`
+	SyncFallbackReason string                   `json:"syncFallbackReason,omitempty"`
 	HydrateMs          int64                    `json:"hydrateMs,omitempty"`
 	ProbeMs            int64                    `json:"probeMs,omitempty"`
 	CommandMs          int64                    `json:"commandMs"`
@@ -39,6 +43,7 @@ type TimingReport struct {
 	Artifacts          []runArtifact            `json:"artifacts,omitempty"`
 
 	SchemaValidations []SchemaValidationResult `json:"schemaValidations,omitempty"`
+	ArtifactChanges   []ArtifactChangeResult   `json:"artifactChanges,omitempty"`
 
 	LeaseStopped *bool  `json:"leaseStopped,omitempty"`
 	LeaseStopErr string `json:"leaseStopError,omitempty"`
@@ -125,6 +130,10 @@ func timingReportFromRun(provider, leaseID, slug string, timings runTimings, tot
 		SyncMs:             timings.sync.Milliseconds(),
 		SyncPhases:         syncTimingPhases(timings.syncSteps),
 		SyncSkipped:        timings.syncSkipped,
+		SyncMode:           timings.syncMode,
+		SyncTransferFiles:  timings.syncTransferFiles,
+		SyncTransferBytes:  timings.syncTransferBytes,
+		SyncFallbackReason: timings.syncFallbackReason,
 		CommandMs:          timings.command.Milliseconds(),
 		CommandPhases:      timings.commandPhases,
 		TotalMs:            total.Milliseconds(),

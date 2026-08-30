@@ -31,6 +31,7 @@ without being drained.
 ```text
 pool list                 list provider machine inventory
 pool ready [key]          list ready-pool entries
+pool identity <key>       generate an identity from an existing AWS image-backed lease
 pool register <key>       register a hydrated lease
 pool borrow <key>         borrow one ready lease
 pool heartbeat <key>      refresh a borrowed lease deadline
@@ -62,6 +63,42 @@ older coordinator.
 example, compatible AWS and Azure 16-vCPU shapes can share `linux-16-vcpu`
 under one logical pool key while incompatible entries and fill claims remain
 separate.
+
+## Opt-in typed pools
+
+Typed pools are a separate, provider-scoped and image-pinned protocol; they do
+not replace legacy provider-neutral pools or let AWS and Azure share a typed
+cohort. Generate a supported identity from an existing active AWS Linux lease:
+
+```sh
+crabbox pool identity example/app/main/linux \
+  --id cbx_0123456789ab \
+  --cache-compatibility node-22-pnpm-10 > pool-identity.json
+
+crabbox pool register example/app/main/linux \
+  --id cbx_0123456789ab --identity-file pool-identity.json
+crabbox pool ready example/app/main/linux --identity-file pool-identity.json
+crabbox pool borrow example/app/main/linux --identity-file pool-identity.json
+crabbox pool return example/app/main/linux --id cbx_0123456789ab \
+  --borrow-token <token> --identity-file pool-identity.json
+crabbox pool ensure example/app/main/linux --min-ready 2 --max-ready 2 \
+  --identity-file pool-identity.json --create -- \
+  --provider aws --type c6i.4xlarge
+```
+
+`pool register --cache-compatibility node-22-pnpm-10` can also derive and
+register the identity automatically. `--cache-compatibility` is trusted operator
+metadata compared exactly; it is neither independently verified nor a security
+attestation. The coordinator independently derives the AWS region and immutable
+AMI from the lease, validates its persisted canonical architecture, and
+recomputes a length-framed UTF-8 hash of the exact repo/ref/commit/fingerprint
+metadata. Regenerate the identity when any bound repository input changes.
+
+Only AWS Linux leases with an authoritative immutable AMI, matching region,
+and persisted canonical architecture are currently supported. Older leases
+missing that evidence and Azure, GCP, and other providers fail closed. Typed
+operations against an older coordinator report that typed pools are
+unsupported; they never fall back to legacy capacity.
 
 ## See Also
 

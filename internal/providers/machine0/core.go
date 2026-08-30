@@ -54,16 +54,8 @@ func directLeaseLabels(cfg Config, leaseID, slug string, keep bool, now time.Tim
 	return core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, now)
 }
 
-func touchDirectLeaseLabels(labels map[string]string, cfg Config, state string, now time.Time) map[string]string {
-	return core.TouchDirectLeaseLabels(labels, cfg, state, now)
-}
-
 func claimLease(leaseID, slug string, cfg Config, repoRoot string, reclaim bool, server Server, target SSHTarget) error {
 	return core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, machineScope(server.CloudID), cfg.Pond, repoRoot, cfg.IdleTimeout, reclaim, server, target)
-}
-
-func resolveClaim(identifier string) (LeaseClaim, bool, error) {
-	return core.ResolveLeaseClaimForProvider(identifier, providerName)
 }
 
 func listClaims() ([]LeaseClaim, error) { return core.ListLeaseClaims() }

@@ -67,7 +67,7 @@ func (a App) status(ctx context.Context, args []string) error {
 			lease, err = sshBackend.Resolve(statusCtx, ResolveRequest{Options: leaseOptionsFromConfig(cfg), ID: *id, StatusOnly: true, ReadyProbe: *wait, NoLocalStateMutations: true})
 			if err == nil {
 				state, err = statusViewFromLeaseTarget(statusCtx, cfg, lease)
-				if err == nil && *wait {
+				if err == nil && *wait && !statusTerminalState(state.State) {
 					claim, claimed, claimErr := statusLeaseExactClaim(statusCtx, backend, lease, backend.Spec().Name, leaseOptionsFromConfig(cfg).ProviderScope)
 					if claimErr != nil {
 						fmt.Fprintf(a.Stderr, "warning: touch skipped for %s: %v\n", lease.LeaseID, claimErr)
@@ -176,7 +176,7 @@ func statusWaitTerminalError(id string, state statusView) error {
 
 func statusTerminalState(state string) bool {
 	switch strings.ToLower(strings.TrimSpace(state)) {
-	case "deleting", "expired", "failed", "missing", "released", "stopped", "stopped_with_code", "terminated":
+	case "dead", "deleting", "exited", "expired", "failed", "missing", "released", "stopped", "stopped_with_code", "terminated":
 		return true
 	default:
 		return false
@@ -206,6 +206,10 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 		tailscale = &meta
 	}
 	provider := blank(server.Provider, cfg.Provider)
+	serverID := ""
+	if server.CloudID != "" || server.ID != 0 {
+		serverID = server.DisplayID()
+	}
 	return statusView{
 		ID:               lease.LeaseID,
 		Slug:             serverSlug(server),
@@ -213,7 +217,7 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 		TargetOS:         blank(server.Labels["target"], cfg.TargetOS),
 		WindowsMode:      blank(server.Labels["windows_mode"], cfg.WindowsMode),
 		State:            state,
-		ServerID:         server.DisplayID(),
+		ServerID:         serverID,
 		ServerType:       server.ServerType.Name,
 		Host:             server.PublicNet.IPv4.IP,
 		Pond:             blank(server.Labels[pondLabelKey], cfg.Pond),
@@ -255,34 +259,38 @@ func leaseStatusStateCanBeReady(lease LeaseTarget, state string) bool {
 }
 
 type StatusView struct {
-	ID               string             `json:"id"`
-	Slug             string             `json:"slug,omitempty"`
-	Provider         string             `json:"provider"`
-	TargetOS         string             `json:"target"`
-	WindowsMode      string             `json:"windowsMode,omitempty"`
-	State            string             `json:"state"`
-	ServerID         string             `json:"serverId"`
-	ServerType       string             `json:"serverType"`
-	Host             string             `json:"host"`
-	Pond             string             `json:"pond,omitempty"`
-	Network          NetworkMode        `json:"network"`
-	Tailscale        *TailscaleMetadata `json:"tailscale,omitempty"`
-	SSHHost          string             `json:"sshHost"`
-	SSHHostKey       string             `json:"sshHostKey,omitempty"`
-	SSHUser          string             `json:"sshUser"`
-	SSHPort          string             `json:"sshPort"`
-	SSHFallbackPorts []string           `json:"sshFallbackPorts,omitempty"`
-	SSHKey           string             `json:"sshKey"`
-	LastTouchedAt    string             `json:"lastTouchedAt,omitempty"`
-	IdleFor          string             `json:"idleFor,omitempty"`
-	IdleTimeout      string             `json:"idleTimeout,omitempty"`
-	ExpiresAt        string             `json:"expiresAt,omitempty"`
-	Labels           map[string]string  `json:"labels,omitempty"`
-	ProviderMetadata map[string]any     `json:"providerMetadata,omitempty"`
-	HasHost          bool               `json:"hasHost"`
-	Ready            bool               `json:"ready"`
-	Telemetry        *LeaseTelemetry    `json:"telemetry,omitempty"`
-	TelemetryHistory []*LeaseTelemetry  `json:"telemetryHistory,omitempty"`
+	ID                   string             `json:"id"`
+	Slug                 string             `json:"slug,omitempty"`
+	Provider             string             `json:"provider"`
+	TargetOS             string             `json:"target"`
+	WindowsMode          string             `json:"windowsMode,omitempty"`
+	State                string             `json:"state"`
+	ServerID             string             `json:"serverId"`
+	ServerType           string             `json:"serverType"`
+	Host                 string             `json:"host"`
+	Pond                 string             `json:"pond,omitempty"`
+	Network              NetworkMode        `json:"network"`
+	Tailscale            *TailscaleMetadata `json:"tailscale,omitempty"`
+	SSHHost              string             `json:"sshHost"`
+	SSHHostKey           string             `json:"sshHostKey,omitempty"`
+	SSHUser              string             `json:"sshUser"`
+	SSHPort              string             `json:"sshPort"`
+	SSHFallbackPorts     []string           `json:"sshFallbackPorts,omitempty"`
+	SSHKey               string             `json:"sshKey"`
+	LastTouchedAt        string             `json:"lastTouchedAt,omitempty"`
+	IdleFor              string             `json:"idleFor,omitempty"`
+	IdleTimeout          string             `json:"idleTimeout,omitempty"`
+	ExpiresAt            string             `json:"expiresAt,omitempty"`
+	CleanupStartedAt     string             `json:"cleanupStartedAt,omitempty"`
+	CleanupError         string             `json:"cleanupError,omitempty"`
+	CleanupRetryAt       string             `json:"cleanupRetryAt,omitempty"`
+	ReleaseDeletesServer *bool              `json:"releaseDeletesServer,omitempty"`
+	Labels               map[string]string  `json:"labels,omitempty"`
+	ProviderMetadata     map[string]any     `json:"providerMetadata,omitempty"`
+	HasHost              bool               `json:"hasHost"`
+	Ready                bool               `json:"ready"`
+	Telemetry            *LeaseTelemetry    `json:"telemetry,omitempty"`
+	TelemetryHistory     []*LeaseTelemetry  `json:"telemetryHistory,omitempty"`
 }
 
 type statusView = StatusView

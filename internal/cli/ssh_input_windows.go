@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -21,6 +22,24 @@ type replayableSSHInput struct {
 // Windows inbox OpenSSH can stall waiting for EOF from Go's anonymous stdin
 // pipe. Finite SSH payloads use a private regular file so EOF is file-backed.
 func newReplayableSSHInput(data []byte) (*replayableSSHInput, error) {
+	return newReplayableSSHInputReaders(int64(len(data)), bytes.NewReader(data))
+}
+
+func newReplayableSSHInputStream(prefix []byte, reader io.ReadSeeker, expectedSize int64) (*replayableSSHInput, error) {
+	size, err := reader.Seek(0, io.SeekEnd)
+	if err != nil {
+		return nil, err
+	}
+	if size != expectedSize {
+		return nil, fmt.Errorf("SSH input size changed: got %d want %d", size, expectedSize)
+	}
+	if _, err := reader.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	return newReplayableSSHInputReaders(int64(len(prefix))+expectedSize, bytes.NewReader(prefix), reader)
+}
+
+func newReplayableSSHInputReaders(expectedSize int64, readers ...io.Reader) (*replayableSSHInput, error) {
 	security, err := commandStreamFileSecurity()
 	if err != nil {
 		return nil, err
@@ -54,9 +73,9 @@ func newReplayableSSHInput(data []byte) (*replayableSSHInput, error) {
 	cleanupWriter := func(cause error) (*replayableSSHInput, error) {
 		return nil, errors.Join(cause, writer.Close(), removeReplayableSSHInputPath(path))
 	}
-	if n, err := writer.Write(data); err != nil {
+	if n, err := io.Copy(writer, io.MultiReader(readers...)); err != nil {
 		return cleanupWriter(fmt.Errorf("write SSH input spool: %w", err))
-	} else if n != len(data) {
+	} else if n != expectedSize {
 		return cleanupWriter(fmt.Errorf("write SSH input spool: %w", io.ErrShortWrite))
 	}
 	if err := writer.Sync(); err != nil {

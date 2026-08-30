@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,50 @@ import (
 	"testing"
 	"time"
 )
+
+func TestOwnedSSHTransportChildEnvironment(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("POSIX local child fixture")
+	}
+	dir := t.TempDir()
+	script := `#!/bin/sh
+[ -z "${CRABBOX_TEST_OWNED_DENIED+x}" ] || exit 41
+[ "$CRABBOX_TEST_OWNED_OVERRIDE" = target ] || exit 42
+printf environment-ok
+cat
+`
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_TEST_OWNED_DENIED", "fixture-only")
+	t.Setenv("CRABBOX_TEST_OWNED_OVERRIDE", "ambient")
+	target := SSHTarget{Host: "fixture.invalid", User: "builder", Port: "22",
+		ChildEnvDenylist: []string{"CRABBOX_TEST_OWNED_DENIED"},
+		ChildEnv:         map[string]string{"CRABBOX_TEST_OWNED_OVERRIDE": "target"}}
+	for _, subsystem := range []bool{false, true} {
+		t.Run(map[bool]string{false: "command", true: "sftp"}[subsystem], func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			var out bytes.Buffer
+			var err error
+			if subsystem {
+				reader, input, wait, startErr := startOwnedSSHTransportSubsystem(ctx, target, "10", "3", "sftp", io.Discard)
+				if startErr != nil {
+					t.Fatal(startErr)
+				}
+				closeErr := input.Close()
+				_, readErr := io.Copy(&out, reader)
+				err = errors.Join(closeErr, readErr, wait())
+			} else {
+				err = runOwnedSSHTransportCommand(ctx, target, nil, &out, io.Discard)
+			}
+			if err != nil || out.String() != "environment-ok" {
+				t.Fatalf("owned child environment not applied: err=%v marker=%q", err, out.String())
+			}
+		})
+	}
+}
 
 func TestSSHTransportConfigParsesWithOpenSSH(t *testing.T) {
 	ssh, err := exec.LookPath("ssh")
@@ -151,6 +196,58 @@ func TestSSHTransportSessionKeepsSecretsOutOfProcessArgs(t *testing.T) {
 	}
 	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
 		t.Fatalf("private config remained after close: %v", err)
+	}
+}
+
+func TestSSHTransportManagedIdentityPolicy(t *testing.T) {
+	for _, keyed := range []bool{false, true} {
+		t.Run(fmt.Sprint("keyed=", keyed), func(t *testing.T) {
+			isolateTestUserDirs(t)
+			target := SSHTarget{User: "synthetic-ssh-credential", Host: "ssh.example.test", Port: "22", AuthSecret: true}
+			if keyed {
+				target.Key = filepath.Join(t.TempDir(), "managed-key")
+				target.CertificateFile = target.Key + "-cert.pub"
+			}
+			session, err := newSSHTransportSession(t.Context(), target, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = session.Close() })
+			config, err := os.ReadFile(session.configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			identity := target.Key
+			if identity == "" {
+				identity = "none"
+			}
+			// Fail before invoking a real parser unless the config explicitly
+			// excludes operator identities and the ambient agent.
+			for _, required := range []string{`IdentityFile "` + identity + `"`, `IdentityAgent "none"`, "IdentitiesOnly yes", "ControlPath none"} {
+				if !strings.Contains(string(config), required) {
+					t.Fatalf("private config missing %s", strings.Fields(required)[0])
+				}
+			}
+			ssh, err := exec.LookPath("ssh")
+			if err != nil {
+				t.Skip("OpenSSH parser unavailable")
+			}
+			out, err := exec.Command(ssh, "-G", "-F", session.configPath, session.host()).Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, required := range []string{"identityfile " + identity + "\n", "identityagent none\n", "identitiesonly yes\n", "controlmaster false\n"} {
+				if !strings.Contains(string(out), required) {
+					t.Errorf("effective config missing %s", strings.Fields(required)[0])
+				}
+			}
+			if path, ok := parseSSHTransportControlPath(string(out)); ok && path != "none" {
+				t.Error("effective config selected a control socket")
+			}
+			if keyed && !strings.Contains(string(out), "certificatefile "+target.CertificateFile+"\n") {
+				t.Error("effective config lost managed certificate")
+			}
+		})
 	}
 }
 
@@ -631,6 +728,14 @@ func TestProxyJumpExpansionQuotesResolvedTokensBeforeShell(t *testing.T) {
 }
 
 func TestSSHTransportConfigRejectsUnsafeProxyTokens(t *testing.T) {
+	for _, proxy := range []string{"provider-proxy %r", "provider-proxy synthetic-ssh-credential"} {
+		_, err := renderSSHTransportConfig(SSHTarget{
+			User: "synthetic-ssh-credential", Host: "example.test", Port: "22", AuthSecret: true, ProxyCommand: proxy,
+		}, false)
+		if err == nil || !strings.Contains(err.Error(), "must not contain or expand") || strings.Contains(err.Error(), "synthetic-ssh-credential") {
+			t.Fatalf("secret-bearing proxy was not rejected safely: %v", err)
+		}
+	}
 	_, err := renderSSHTransportConfig(SSHTarget{
 		User:         "alice",
 		Host:         "host;touch-pwn",

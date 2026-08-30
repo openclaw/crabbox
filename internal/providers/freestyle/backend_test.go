@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -1105,7 +1106,6 @@ func TestFreestyleSyncHonorsConfiguredTimeout(t *testing.T) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
-	client := &fakeFreestyleClient{writeFileBlock: true}
 	backend := &freestyleBackend{
 		cfg: Config{
 			Freestyle: FreestyleConfig{Workdir: "repo"},
@@ -1113,15 +1113,51 @@ func TestFreestyleSyncHonorsConfiguredTimeout(t *testing.T) {
 		},
 		rt: Runtime{Stderr: io.Discard},
 	}
-	started := time.Now()
-	if _, _, err := backend.syncWorkspace(context.Background(), client, "vm123", RunRequest{
-		Repo: Repo{Root: root, Name: "repo"},
-	}); err == nil || !strings.Contains(err.Error(), "context deadline exceeded") {
-		t.Fatalf("syncWorkspace err=%v, want timeout", err)
-	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("syncWorkspace took %s, timeout should bound transfer", elapsed)
-	}
+	// Local Git manifest queries and archive I/O finish before the fake transfer
+	// blocks. Measure cancellation in virtual time, independent of their wall time.
+	synctest.Test(t, func(t *testing.T) {
+		started := time.Now()
+		transferred := false
+		client := &fakeFreestyleClient{writeFile: func(ctx context.Context) error {
+			transferred = true
+			deadline, ok := ctx.Deadline()
+			if !ok || deadline.Sub(started) != backend.cfg.Sync.Timeout {
+				t.Fatalf("transfer deadline=%v set=%t, want start + %s", deadline, ok, backend.cfg.Sync.Timeout)
+			}
+			if err := ctx.Err(); err != nil {
+				t.Fatalf("transfer context already canceled: %v", err)
+			}
+			time.Sleep(time.Until(deadline) - time.Nanosecond)
+			synctest.Wait()
+			select {
+			case <-ctx.Done():
+				t.Fatal("transfer canceled before configured timeout")
+			default:
+			}
+			time.Sleep(time.Nanosecond)
+			synctest.Wait()
+			select {
+			case <-ctx.Done():
+			default:
+				t.Fatal("transfer not canceled at configured timeout")
+			}
+			if err := ctx.Err(); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("transfer context error=%v, want deadline exceeded", err)
+			}
+			return ctx.Err()
+		}}
+		if _, _, err := backend.syncWorkspace(context.Background(), client, "vm123", RunRequest{
+			Repo: Repo{Root: root, Name: "repo"},
+		}); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("syncWorkspace err=%v, want timeout", err)
+		}
+		if !transferred {
+			t.Fatal("sync did not reach the transfer timeout contract")
+		}
+		if elapsed := time.Since(started); elapsed > time.Second {
+			t.Fatalf("syncWorkspace took %s, timeout should bound transfer", elapsed)
+		}
+	})
 }
 
 func TestFreestyleFallbackUploadCleansPartialArchiveAfterChunkFailure(t *testing.T) {
@@ -1239,7 +1275,7 @@ type fakeFreestyleClient struct {
 	writeFileContent  string
 	writeFileEncoding string
 	writeFileErr      error
-	writeFileBlock    bool
+	writeFile         func(context.Context) error
 	execCommands      []string
 	deleteIDs         []string
 	deleteErr         error
@@ -1294,9 +1330,8 @@ func (f *fakeFreestyleClient) WriteFile(ctx context.Context, _ string, path, con
 	f.writeFilePath = path
 	f.writeFileContent = content
 	f.writeFileEncoding = encoding
-	if f.writeFileBlock {
-		<-ctx.Done()
-		return ctx.Err()
+	if f.writeFile != nil {
+		return f.writeFile(ctx)
 	}
 	if f.writeFileErr != nil {
 		return f.writeFileErr

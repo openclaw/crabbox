@@ -359,7 +359,13 @@ scripts/mint-aws-devtools-image.sh \
   checked before installation; primary-key rotations require a reviewed code
   update and a fresh image-bake smoke. Failed TruffleHog, NodeSource, or Docker
   verification stops image preparation; failed Google verification skips
-  Chrome and tries the distro Chromium package.
+  Chrome and tries the distro Chromium package. The installer explicitly
+  installs every `linux-minimal` package (`ca-certificates`, `curl`, `git`,
+  `jq`, `openssh-server`, `rsync`, `tmux`, and `util-linux`) plus the generic
+  builder packages (`build-essential`, `git-lfs`, `pkg-config`, `python3`, and
+  `python3-venv`). The standalone generated readiness producer verifies every
+  functional probe, including creating and checking a disposable pip-enabled
+  virtual environment, before atomically emitting the strongest supported profile.
 - **Windows** (`scripts/install-windows-developer-tools.ps1`): common CLI/build
   tooling, GitHub CLI, Node 24, corepack/pnpm, TruffleHog 3.95.9, and Windows
   Server container support with Docker Engine. It deliberately avoids Docker
@@ -406,10 +412,20 @@ source lease, candidate AMI, and promoted AMI before declaring success unless
 `.crabbox/image-mint-<image-name>-*.log.*` with a per-invocation suffix. Each
 warmup prints its exact `log=` path. Candidate proof requires
 `source=explicit`; final proof requires `source=promoted` with the exact AMI ID
-created by the run. The Linux prep also writes the verified
-`/var/lib/crabbox/image-ready` marker that lets later boots skip redundant base
-APT setup. Use the timing logs to compare provider request, network readiness,
-bootstrap, and end-to-end time before and after each bake.
+created by the run. For Linux, the wrapper stages
+`scripts/linux-readiness.generated.sh` before preparation, the installer invokes
+that standalone producer after installing its packages, and the wrapper reruns
+the producer before any image capture. This proves the canonical, root-owned
+`/var/lib/crabbox-readiness/linux.json` manifest and emits the legacy
+`/var/lib/crabbox/image-ready` marker only after all profile probes pass. A
+missing builder capability downgrades the manifest to `linux-minimal`; a missing
+minimal capability stops preparation before AMI capture. The authoritative
+readiness directory is root-owned even when `/var/lib/crabbox` belongs to the
+runtime user; the marker is only a backwards-compatibility hint, written through
+a safe same-filesystem rename and verified before capture. Later managed Linux
+boots independently rerun the declared probes under a sanitized system PATH
+before skipping baseline APT. Use the timing logs to compare provider request,
+network readiness, bootstrap, and end-to-end time before and after each bake.
 
 ## macOS images
 

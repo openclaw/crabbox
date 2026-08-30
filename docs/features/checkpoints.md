@@ -68,14 +68,14 @@ the default) and you can override it with `--mode` and `--strategy`.
 
 ### Native (provider snapshot)
 
-A native checkpoint snapshots the VM at the provider level.
+A native checkpoint captures a VM or container's disk state at the provider level.
 
-- Preserves full machine state: packages, tools, caches, services, on-disk files.
+- Preserves packages, tools, caches, service configuration, and on-disk files.
 - Fast to fork (cloud-native snapshot/image).
 - Lives in the provider account and incurs storage cost until deleted.
 - Supported on brokered AWS Linux/macOS leases, brokered Azure/GCP Linux leases,
-  direct AWS Linux/macOS and Hetzner Linux leases, and Parallels (local or
-  remote Mac) clones.
+  direct AWS Linux/macOS and Hetzner Linux leases, Parallels (local or remote
+  Mac) clones, and direct Docker and Incus Linux containers.
 
 ### Archive (workspace tarball)
 
@@ -112,6 +112,7 @@ Native checkpoints use one of two provider primitives, selected with
 | GCP | `gcp-disk-snapshot` |
 | Hetzner Linux (direct only) | `hetzner-snapshot` |
 | Parallels | `parallels-snapshot` |
+| Incus Linux containers (direct, root disk only) | `incus-image` (private image published from a stateless disk snapshot) |
 
 Disk snapshots are faster to create and (on AWS and GCP) boot with fresh
 per-lease SSH keys via injected user-data.
@@ -169,6 +170,16 @@ changed ambient Docker configuration cannot select another daemon. The forked
 lease persists that scope for later `run`, `ssh`, and `stop` commands and
 reuses the source container user and work root during workspace relocation.
 
+**Incus notes.** Native capture is opt-in with `--mode native`; `auto` retains
+the generic archive default. A private Incus image outlives source-instance
+deletion, unlike an ordinary Incus snapshot. Forks replace SSH login/host keys,
+machine ID, and hostname on the stopped clone before first boot, disable
+inherited cloud-init/templates, and preserve root-disk workspace and dependency
+data. Fixed-ID allocation and checkpoint forks are supported. Attached disks,
+mounted workspaces, and VM native captures are rejected. Memory and running
+processes are not included. See [Incus](../providers/incus.md#native-disk-checkpoints)
+for ownership, cleanup, and live-proof requirements.
+
 **Azure notes.** Disk-snapshot checkpoints require managed OS disks, the default
 for new Azure leases. Crabbox refuses native checkpoint creation from Azure
 ephemeral-OS-disk leases (Azure reports success but does not capture live disk
@@ -211,6 +222,11 @@ checkpoints remain authoritative local records under
 
 ## Lifecycle and expiry
 
+Capture and deletion of the same checkpoint cannot overlap. A conflicting delete
+or prune reports that the checkpoint is busy; retry after the active operation
+finishes. Usage updates read the current record, so a late fork or restore cannot
+recreate a checkpoint that was deleted in the meantime.
+
 Checkpoint records store both `createdAt` and `lastUsedAt`. A new checkpoint
 initializes `lastUsedAt` to exactly `createdAt`; each successful recorded
 `checkpoint fork` or `checkpoint restore` updates it. Dry runs and failed
@@ -227,6 +243,19 @@ every fork/shard, and only a completed fork advances `lastUsedAt`. Durable
 promotion pins protect AWS and Azure catalog/default images until their exact
 catalog entries are retired or replaced. Provider failures retain ownership,
 redacted retry diagnostics, and the exact resource identity for safe recovery.
+
+Source-retirement captures keep their host-owned capture journal and image lifecycle;
+`--expire-unused-after` cannot be combined with retirement flags. Fixed-ID forks
+remain available on providers that already support checkpoint-bound fixed IDs;
+coordinator-managed forks do not add fixed-ID support.
+
+Default `checkpoint list` includes the coordinator inventory when available. If
+that optional refresh fails because of a transport error, internal timeout, or
+HTTP 5xx, it warns on stderr and returns the unchanged local inventory, including
+cached managed records. JSON remains a bare array. Cached state is unverified,
+not evidence of provider presence or absence. Authentication failures, malformed
+responses, conflicting identities, and caller cancellation still fail. Use
+`--local-only` to skip the coordinator entirely.
 
 Direct, archive, recipe, and all preexisting checkpoints never enter this
 coordinator reaper. Use `checkpoint prune` manually or schedule it in the
@@ -269,9 +298,9 @@ Useful flags:
 - `--no-reboot` (default on) — avoid rebooting the source instance during a
   native snapshot.
 
-On create, native checkpoints flush filesystem writes, reset Linux cloud-init
-state when present (so forks boot with fresh SSH keys), call the provider
-snapshot/image API, and save the local record with the resource ID and region.
+Native checkpoints call the provider snapshot/image API and save the local
+record with its resource identity and location. Source quiescing and fork
+credential handling are provider-specific; see the provider notes above.
 Archive checkpoints tar the workdir over SSH (excluding `.crabbox/env` and
 `.crabbox/scripts`), download it, and save the record.
 
@@ -280,7 +309,9 @@ Archive checkpoints tar the workdir over SSH (excluding `.crabbox/env` and
 `list` prints local checkpoint records; `inspect <id>` prints one record's
 detail. Add `--json` for machine-readable output. Add `--verify` to audit each
 record against its local artifact and the live provider resource — the audit
-reports a local state, provider state, and a suggested next action.
+reports a local state, provider state, and a suggested next action. Listing
+includes only atomically published metadata, not unpublished reservation
+directories. Corrupt published records remain explicit errors.
 
 `list` can also enumerate provider-native snapshots directly for Parallels:
 

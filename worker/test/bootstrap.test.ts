@@ -8,6 +8,7 @@ import {
   windowsBootstrapPowerShell,
 } from "../src/bootstrap";
 import type { LeaseConfig } from "../src/config";
+import { linuxMinimalReadinessBootstrap } from "../src/linux-readiness.generated";
 
 const config: LeaseConfig = {
   provider: "aws",
@@ -81,18 +82,30 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("package_update: false");
     expect(got).toContain("bash -euxo pipefail <<'BOOT'");
     expect(got).toContain('Acquire::Retries "8";');
-    expect(got).toContain("test -f /var/lib/crabbox/image-ready");
-    expect(got).toContain("test -s /etc/ssl/certs/ca-certificates.crt");
-    expect(got).toContain("crabbox prebaked base packages ready; skipping apt bootstrap");
+    expect(got).toContain(
+      "crabbox_readiness_manifest_path='/var/lib/crabbox-readiness/linux.json'",
+    );
+    expect(got).toContain("crabbox_legacy_image_marker_path='/var/lib/crabbox/image-ready'");
+    expect(got).toContain(
+      "crabbox_readiness_system_path='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'",
+    );
+    expect(got).toContain("test -s '/etc/ssl/certs/ca-certificates.crt'");
+    expect(got).toContain("crabbox Linux readiness manifest verified; skipping apt bootstrap");
+    expect(got).toContain("crabbox legacy image readiness migrated without package-manager work");
     expect(got).toContain("retry apt-get update");
     expect(got).toContain(
-      "retry apt-get install -y --no-install-recommends openssh-server ca-certificates curl git rsync jq",
+      "retry apt-get install -y --no-install-recommends $crabbox_readiness_packages",
+    );
+    expect(got).toContain(
+      "crabbox_readiness_packages='ca-certificates curl git jq openssh-server rsync tmux util-linux'",
     );
     expect(got.indexOf("systemctl restart ssh")).toBeLessThan(got.indexOf("retry apt-get update"));
     expect(got.indexOf("retry apt-get update")).toBeLessThan(
       got.indexOf("touch /var/lib/crabbox/bootstrapped"),
     );
     expect(got).toContain("curl --version >/dev/null");
+    expect(got).toContain("tmux -V >/dev/null");
+    expect(got).toContain("flock --version >/dev/null");
     expect(got).toContain("test -f /var/lib/crabbox/bootstrapped");
     expect(got).toContain("test -w /work/crabbox");
     expect(got).toContain("      Port 2222\n      Port 22");
@@ -121,6 +134,21 @@ describe("cloud-init bootstrap", () => {
     expect(got).not.toContain("build-essential");
     expect(got).not.toContain("docker.io");
     expect(got).not.toContain("corepack");
+  });
+
+  it("embeds the complete generated Linux readiness fragment before bootstrap completes", () => {
+    const got = cloudInit(config);
+    const embedded = linuxMinimalReadinessBootstrap
+      .split("\n")
+      .map((line) => `    ${line}`)
+      .join("\n");
+    expect(got).toContain(embedded);
+    expect(got.indexOf(embedded)).toBeLessThan(got.indexOf("touch /var/lib/crabbox/bootstrapped"));
+    const legacyParentCreation = "crabbox_ensure_legacy_image_marker_parent || return 1";
+    expect(embedded).toContain(legacyParentCreation);
+    expect(got.indexOf(legacyParentCreation)).toBeLessThan(
+      got.indexOf("install -d /var/lib/crabbox"),
+    );
   });
 
   it("adds desktop services only when requested", () => {
@@ -567,10 +595,13 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("HostKey __PROGRAMDATA__/ssh/ssh_host_ed25519_key");
     expect(got).toContain("PubkeyAuthentication yes");
     expect(got).toContain("PasswordAuthentication no");
-    expect(got).toContain('Start-Process -FilePath "C:\\Program Files\\OpenSSH\\ssh-keygen.exe"');
+    expect(got).toContain("Start-Process -FilePath $sshKeygen");
+    expect(got).toContain('$sshKeygen = Resolve-CrabboxOpenSSHCommand "ssh-keygen.exe"');
+    expect(got).toContain("foreach ($root in @($openSSHInstallRoot, $openSSHSystemRoot))");
+    expect(got).toContain('$openSSHSystemRoot = Join-Path $env:WINDIR "System32\\OpenSSH"');
     expect(got).toContain('-q -t ed25519 -N "" -f "');
     expect(got).toContain("$hostKey + '\"'");
-    expect(got).toContain('ssh-keygen.exe" -A');
+    expect(got).toContain("& $sshKeygen -A");
     expect(got).toContain("sshd failed to start with generated sshd_config");
     expect(got).toContain("crabbox-sshd-$port");
     expect(got).toContain("tightvnc-2.8.85-gpl-setup-64bit.msi");
@@ -689,7 +720,7 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc");
     expect(got).toContain("test -w /proc/sys/fs/binfmt_misc/register");
     expect(got).toContain(":WSLInterop:M::MZ::/init:PF");
-    expect(got).toContain("trufflehog_version=3.95.9");
+    expect(got).toContain("trufflehog_version='3.95.9'");
     expect(got).toContain("trufflehog_${trufflehog_version}_linux_amd64.tar.gz");
     expect(got).toContain("f6d1106b85107d79527ed7a5b98b592beadd8b770dc3c9e8c1ad99e1b2cf127e");
     expect(got).toContain("sha256sum -c -");

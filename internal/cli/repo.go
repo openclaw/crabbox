@@ -848,8 +848,13 @@ func syncFingerprintForManifest(repo Repo, cfg Config, manifest SyncManifest, ex
 		return "", nil
 	}
 	h := sha256.New()
-	fmt.Fprintf(h, "v5\nremote=%s\nbranch=%s\nhead=%s\ntree=%s\n", plan.RemoteURL, plan.Branch, plan.Target, plan.Tree)
-	fmt.Fprintf(h, "delete=%t\nchecksum=%t\n", cfg.Sync.Delete, cfg.Sync.Checksum)
+	if cfg.Sync.GitOverlay {
+		fmt.Fprintf(h, "v1-overlay\nremote=%s\nbranch=%s\nhead=%s\ntree=%s\n", plan.RemoteURL, plan.Branch, plan.Target, plan.Tree)
+		fmt.Fprintf(h, "delete=%t\nchecksum=%t\ngitOverlay=true\n", cfg.Sync.Delete, cfg.Sync.Checksum)
+	} else {
+		fmt.Fprintf(h, "v5\nremote=%s\nbranch=%s\nhead=%s\ntree=%s\n", plan.RemoteURL, plan.Branch, plan.Target, plan.Tree)
+		fmt.Fprintf(h, "delete=%t\nchecksum=%t\n", cfg.Sync.Delete, cfg.Sync.Checksum)
+	}
 	fmt.Fprintf(h, "manifest=%x\n", sha256.Sum256(manifest.NUL()))
 	fmt.Fprintf(h, "deleted=%x\n", sha256.Sum256(manifest.DeletedNUL()))
 	for _, exclude := range excludes.rules {
@@ -865,6 +870,15 @@ func syncFingerprintForManifest(repo Repo, cfg Config, manifest SyncManifest, ex
 		}
 		fmt.Fprintf(h, "mode=%s size=%d\n", info.Mode().String(), info.Size())
 		if info.IsDir() {
+			continue
+		}
+		if cfg.Sync.GitOverlay && info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(full)
+			if err != nil {
+				return "", err
+			}
+			fmt.Fprintf(h, "symlink=%s\n", target)
+			h.Write([]byte{0})
 			continue
 		}
 		file, err := os.Open(full)
@@ -885,9 +899,11 @@ type SyncManifest struct {
 	Files                    []string
 	Deleted                  []string
 	Changed                  []string
+	OverlayFiles             []string
 	ProtectedTrackedExcludes []SyncProtectedTrackedExclude
 	Bytes                    int64
 	ChangedBytes             int64
+	OverlayBytes             int64
 }
 
 type SyncProtectedTrackedExclude struct {
@@ -1028,6 +1044,7 @@ func syncManifestFilteredRules(root string, excludes SyncExcludeRules, includes 
 		return SyncManifest{}, err
 	}
 	manifest.Changed, manifest.ChangedBytes = changedPathSetBytes(root, changed)
+	manifest.OverlayFiles, manifest.OverlayBytes = overlayPathSetBytes(root, manifest.Files, manifest.Changed)
 	return manifest, nil
 }
 
@@ -1095,6 +1112,15 @@ func (m SyncManifest) NUL() []byte {
 func (m SyncManifest) DeletedNUL() []byte {
 	var b bytes.Buffer
 	for _, rel := range m.Deleted {
+		b.WriteString(rel)
+		b.WriteByte(0)
+	}
+	return b.Bytes()
+}
+
+func (m SyncManifest) OverlayNUL() []byte {
+	var b bytes.Buffer
+	for _, rel := range m.OverlayFiles {
 		b.WriteString(rel)
 		b.WriteByte(0)
 	}
@@ -1237,6 +1263,20 @@ func changedPathSetBytes(root string, paths []string) ([]string, int64) {
 	}
 	sort.Strings(out)
 	return out, bytes
+}
+
+func overlayPathSetBytes(root string, files, changed []string) ([]string, int64) {
+	fileSet := make(map[string]struct{}, len(files))
+	for _, rel := range files {
+		fileSet[rel] = struct{}{}
+	}
+	overlay := make([]string, 0, len(changed))
+	for _, rel := range changed {
+		if _, ok := fileSet[rel]; ok {
+			overlay = append(overlay, rel)
+		}
+	}
+	return changedPathSetBytes(root, overlay)
 }
 
 func safeRepoRel(rel string) bool {

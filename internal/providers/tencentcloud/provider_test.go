@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"flag"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -394,10 +395,129 @@ func TestUpdateTailscaleMetadataPassesCurrentAndDesiredTags(t *testing.T) {
 	}
 }
 
+func TestTencentCloudReleaseRequiresExactClaimedInstance(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		seedClaim bool
+		staleID   bool
+	}{
+		{name: "missing claim"},
+		{name: "stale instance claim", seedClaim: true, staleID: true},
+		{name: "exact claim", seedClaim: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			leaseID := "cbx_abcdef123456"
+			cfg := core.BaseConfig()
+			cfg.Provider = providerName
+			cfg.ProviderKey = core.ProviderKeyForLease(leaseID)
+			tags := leaseTags(cfg, leaseID, "owned", "ready", false, time.Now().UTC())
+			tags = append(tags, tag{Key: accountLabel, Value: "100000000001"})
+			item := instance{InstanceID: "ins-owned", InstanceName: core.LeaseProviderName(leaseID, "owned"), InstanceState: "RUNNING", Tags: tags}
+			api := &fakeTencentCloudAPI{item: item}
+			backend := NewBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*Backend)
+			backend.clientFactory = func(core.Config, core.Runtime) (tencentCloudAPI, error) { return api, nil }
+			server := serverFromInstance(item, backend.Cfg)
+			if test.seedClaim {
+				claimed := server
+				if test.staleID {
+					claimed.CloudID = "ins-stale"
+				}
+				if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "owned", backend.Cfg, claimed, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}})
+			if test.seedClaim && !test.staleID {
+				if err != nil || strings.Join(api.terminated, ",") != item.InstanceID {
+					t.Fatalf("exact release err=%v terminated=%v", err, api.terminated)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "exact local ownership claim") {
+				t.Fatalf("unowned release err=%v", err)
+			}
+			if len(api.terminated) != 0 {
+				t.Fatalf("unowned instance was terminated: %v", api.terminated)
+			}
+		})
+	}
+}
+
+func TestTencentCloudCleanupSkipsNameMatchedUnclaimedInstance(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	leaseID := "cbx_abcdef123457"
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.ProviderKey = core.ProviderKeyForLease(leaseID)
+	tags := leaseTags(cfg, leaseID, "unclaimed", "ready", false, time.Now().Add(-24*time.Hour))
+	tags = append(tags, tag{Key: accountLabel, Value: "100000000001"})
+	api := &fakeTencentCloudAPI{item: instance{InstanceID: "ins-unclaimed", InstanceName: core.LeaseProviderName(leaseID, "unclaimed"), InstanceState: "RUNNING", Tags: tags}}
+	var stderr strings.Builder
+	backend := NewBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: &stderr}).(*Backend)
+	backend.clientFactory = func(core.Config, core.Runtime) (tencentCloudAPI, error) { return api, nil }
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.terminated) != 0 || !strings.Contains(stderr.String(), "no-exact-local-claim") {
+		t.Fatalf("terminated=%v stderr=%q", api.terminated, stderr.String())
+	}
+}
+
+func TestTencentCloudTerminationFencesConcurrentClaimMutation(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	leaseID := "cbx_abcdef123458"
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.ProviderKey = core.ProviderKeyForLease(leaseID)
+	tags := leaseTags(cfg, leaseID, "fenced", "ready", false, time.Now().UTC())
+	tags = append(tags, tag{Key: accountLabel, Value: "100000000001"})
+	item := instance{InstanceID: "ins-fenced", InstanceName: core.LeaseProviderName(leaseID, "fenced"), InstanceState: "RUNNING", Tags: tags}
+	api := &fakeTencentCloudAPI{item: item}
+	backend := NewBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*Backend)
+	backend.clientFactory = func(core.Config, core.Runtime) (tencentCloudAPI, error) { return api, nil }
+	server := serverFromInstance(item, backend.Cfg)
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "fenced", backend.Cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	claim, _, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	updated := make(chan error, 1)
+	api.terminateFn = func() {
+		go func() {
+			close(started)
+			labels := shared.CloneLabels(claim.Labels)
+			labels["state"] = "renewed"
+			_, updateErr := core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, claim, labels)
+			updated <- updateErr
+		}()
+		<-started
+		select {
+		case err := <-updated:
+			t.Errorf("claim mutation escaped termination fence: %v", err)
+		default:
+		}
+	}
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-updated; err == nil || !strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("claim mutation after termination err=%v", err)
+	}
+}
+
 type fakeTencentCloudAPI struct {
 	item            instance
 	replacedCurrent []tag
 	replacedDesired []tag
+	terminated      []string
+	terminateFn     func()
 }
 
 func (f *fakeTencentCloudAPI) AccountID(context.Context) (string, error) {
@@ -416,7 +536,11 @@ func (f *fakeTencentCloudAPI) RunInstance(context.Context, runInstanceRequest) (
 	return "ins-test", nil
 }
 
-func (f *fakeTencentCloudAPI) TerminateInstance(context.Context, string) error {
+func (f *fakeTencentCloudAPI) TerminateInstance(_ context.Context, id string) error {
+	f.terminated = append(f.terminated, id)
+	if f.terminateFn != nil {
+		f.terminateFn()
+	}
 	return nil
 }
 

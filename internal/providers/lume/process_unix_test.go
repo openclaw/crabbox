@@ -14,6 +14,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func fakeLumeOwner(t *testing.T) string {
@@ -25,7 +26,7 @@ func fakeLumeOwner(t *testing.T) string {
 
 func ownerBackend(t *testing.T, runner *fake) *backend {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	if runner == nil {
 		runner = &fake{}
 	}

@@ -234,21 +234,23 @@ type runFailureDigestInput struct {
 	TargetOS              string
 	WindowsMode           string
 	LeaseID               string
+	LeaseStopped          bool
 	Slug                  string
 	RunID                 string
 	RunHistoryUnavailable bool
 	CommandDisplay        string
 	ShellMode             bool
 	ScriptMode            bool
-	RoutingArgs           []string
-	SSHRoutingArgs        []string
+	Routing               CommandRouting
+	SSHRouting            CommandRouting
+	StopRouting           CommandRouting
 	StopCommand           string
 	Classification        FailureClassification
 	Phases                []TimingPhase
 	Results               *TestResultSummary
 }
 
-func printRunFailureDigest(w io.Writer, input runFailureDigestInput, stdoutTail, stderrTail *streamTailBuffer, stdoutCapture, stderrCapture string) {
+func printRunFailureDigest(w io.Writer, input runFailureDigestInput) {
 	if w == nil {
 		return
 	}
@@ -268,18 +270,17 @@ func printRunFailureDigest(w io.Writer, input runFailureDigestInput, stdoutTail,
 	if input.Classification.ResourceExhaustion == ResourceExhaustionMemory {
 		fmt.Fprintln(w, "  hint: increase the memory limit or reduce workload concurrency before retrying")
 	}
+	if input.LeaseStopped {
+		fmt.Fprintln(w, "  lease: stopped; lease-based recovery is unavailable")
+	}
 	if input.RunHistoryUnavailable {
-		fmt.Fprintln(w, "  run_history: unavailable; use lease-based recovery commands below")
+		fmt.Fprintln(w, "  run_history: unavailable")
 	}
 	printFailureDigestPhases(w, input.Phases)
 	printFailureDigestShellChain(w, input)
 	printFailureDigestResults(w, input.Results)
 	for _, command := range failureDigestNextCommands(input, retry) {
 		fmt.Fprintf(w, "  next: %s\n", command)
-	}
-	printFailureDigestTail(w, "stderr", stderrTail, stderrCapture)
-	if stderrCapture != "" || tailLineCount(stderrTail) == 0 {
-		printFailureDigestTail(w, "stdout", stdoutTail, stdoutCapture)
 	}
 }
 
@@ -348,29 +349,28 @@ func failureDigestNextCommands(input runFailureDigestInput, retry string) []stri
 		)
 	}
 	leaseRef := firstNonBlank(input.Slug, input.LeaseID)
-	if leaseRef != "" {
-		sshRouting := append([]string(nil), input.SSHRoutingArgs...)
-		if len(sshRouting) == 0 {
-			sshRouting = fallbackFailureDigestRoutingArgs(input)
+	if leaseRef != "" && !input.LeaseStopped {
+		sshRouting := input.SSHRouting
+		if len(sshRouting.Args) == 0 {
+			sshRouting = fallbackFailureDigestRouting(input, CommandRoutingRetry)
 		}
-		commands = append(commands, crabboxCommandString(append(append([]string{"ssh"}, sshRouting...), "--id", leaseRef)))
+		commands = append(commands, sshRouting.ShellCommand(append(append([]string{"crabbox", "ssh"}, sshRouting.Args...), "--id", leaseRef)))
 		if retry != "false" && !input.ScriptMode && canSuggestRunRetry(input.CommandDisplay) {
-			routing := append([]string(nil), input.RoutingArgs...)
-			if len(routing) == 0 {
-				routing = fallbackFailureDigestRoutingArgs(input)
+			routing := input.Routing
+			if len(routing.Args) == 0 {
+				routing = fallbackFailureDigestRouting(input, CommandRoutingRetry)
 			}
-			runArgs := append(append([]string{"run"}, routing...), "--id", leaseRef, "--fresh-sync")
+			runArgs := append(append([]string{"crabbox", "run"}, routing.Args...), "--id", leaseRef, "--fresh-sync")
 			if input.ShellMode {
 				runArgs = append(runArgs, "--shell")
 			}
-			runCommand := crabboxCommandString(runArgs) + " -- " + failureDigestRetryCommand(input)
-			commands = append(commands, runCommand)
+			commands = append(commands, routing.ShellCommand(runArgs)+" -- "+failureDigestRetryCommand(input))
 		}
-		stopRouting := append([]string(nil), input.RoutingArgs...)
-		if len(stopRouting) == 0 {
-			stopRouting = fallbackFailureDigestRoutingArgs(input)
+		stopRouting := input.StopRouting
+		if len(stopRouting.Args) == 0 {
+			stopRouting = fallbackFailureDigestRouting(input, CommandRoutingStop)
 		}
-		commands = append(commands, firstNonBlank(input.StopCommand, crabboxCommandString(append(append([]string{"stop"}, stopRouting...), leaseRef))))
+		commands = append(commands, firstNonBlank(input.StopCommand, stopRouting.ShellCommand(append(append([]string{"crabbox", "stop"}, stopRouting.Args...), leaseRef))))
 	}
 	return commands
 }
@@ -395,76 +395,145 @@ func printFailureDigestShellChain(w io.Writer, input runFailureDigestInput) {
 	fmt.Fprintln(w, "  chain_semantics: && only runs later segments if all earlier segments succeed")
 }
 
+// Only attribute simple chains. This scanner is not a shell grammar: compound
+// syntax, substitutions, lists, and pipelines make its explanation uncertain.
 func shellAndChainSegments(command string) []string {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return nil
 	}
 	var segments []string
-	var b strings.Builder
-	inSingle := false
-	inDouble := false
-	escaped := false
-	depth := 0
-	flush := func() {
-		part := strings.TrimSpace(b.String())
-		if part != "" {
-			segments = append(segments, part)
+	inSingle, inDouble, escaped := false, false, false
+	inWord := false
+	redirection := false
+	brackets := 0
+	start := 0
+	nextLogicalByte := func(i int) byte {
+		i++
+		for i+1 < len(command) && command[i] == '\\' && command[i+1] == '\n' {
+			i += 2
 		}
-		b.Reset()
+		if i < len(command) {
+			return command[i]
+		}
+		return 0
 	}
 	for i := 0; i < len(command); i++ {
 		ch := command[i]
 		if escaped {
-			b.WriteByte(ch)
 			escaped = false
+			// A removed continuation does not start or end a shell word.
+			if ch != '\n' {
+				inWord = true
+				redirection = false
+			}
 			continue
 		}
 		if ch == '\\' && !inSingle {
-			b.WriteByte(ch)
 			escaped = true
 			continue
 		}
+		if ch == '\'' && !inDouble {
+			inSingle = !inSingle
+			inWord = true
+			redirection = false
+			continue
+		}
+		if inSingle {
+			continue
+		}
+		if ch == '"' {
+			inDouble = !inDouble
+			inWord = true
+			redirection = false
+			continue
+		}
+		if ch == '`' {
+			return nil
+		}
+		if ch == '$' {
+			switch nextLogicalByte(i) {
+			case '(', '{', '[':
+				return nil
+			case '\'', '"':
+				if !inDouble {
+					return nil
+				}
+			}
+		}
+		if inDouble {
+			continue
+		}
+		followsRedirection := redirection
+		redirection = false
 		switch ch {
-		case '\'':
-			if !inDouble {
-				inSingle = !inSingle
-			}
-			b.WriteByte(ch)
-		case '"':
-			if !inSingle {
-				inDouble = !inDouble
-			}
-			b.WriteByte(ch)
-		case '(', '{', '[':
-			if !inSingle && !inDouble {
-				depth++
-			}
-			b.WriteByte(ch)
-		case ')', '}', ']':
-			if !inSingle && !inDouble && depth > 0 {
-				depth--
-			}
-			b.WriteByte(ch)
-		case '&':
-			if !inSingle && !inDouble && depth == 0 && i+1 < len(command) && command[i+1] == '&' {
-				flush()
-				i++
-				continue
-			}
-			b.WriteByte(ch)
-		case '|':
-			if !inSingle && !inDouble && depth == 0 && i+1 < len(command) && command[i+1] == '|' {
+		case '(', ')', '}', ';', '\r', '|':
+			return nil
+		case '{':
+			if i+1 >= len(command) || command[i+1] != '}' {
 				return nil
 			}
-			b.WriteByte(ch)
-		default:
-			b.WriteByte(ch)
+			i++
+		case '\n':
+			if len(segments) == 0 || strings.TrimSpace(command[start:i]) != "" {
+				return nil
+			}
+			continue
+		case '#':
+			if !inWord {
+				return nil
+			}
+		case ' ', '\t':
+			inWord = false
+			continue
+		case '[':
+			if nextLogicalByte(i) == '[' {
+				return nil
+			}
+			brackets++
+		case ']':
+			if brackets > 0 {
+				brackets--
+			}
+		case '<', '>':
+			if ch == '<' && i+1 < len(command) && command[i+1] == '<' {
+				return nil
+			}
+			inWord = false
+			redirection = true
+			continue
+		case '&':
+			if brackets > 0 {
+				return nil
+			}
+			if followsRedirection {
+				continue
+			}
+			if i+1 >= len(command) || command[i+1] != '&' {
+				return nil
+			}
+			part := strings.TrimSpace(command[start:i])
+			if part == "" {
+				return nil
+			}
+			segments = append(segments, part)
+			i++
+			start = i + 1
+			inWord = false
+			continue
 		}
+		inWord = true
 	}
-	flush()
-	if len(segments) < 2 {
+	last := strings.TrimSpace(command[start:])
+	if inSingle || inDouble || escaped || brackets > 0 || last == "" || len(segments) == 0 {
 		return nil
+	}
+	segments = append(segments, last)
+	for _, segment := range segments {
+		switch strings.Fields(segment)[0] {
+		case "if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac", "select", "function", "coproc", "!":
+			return nil
+		}
 	}
 	return segments
 }
@@ -491,128 +560,11 @@ func printFailureDigestResults(w io.Writer, results *TestResultSummary) {
 	}
 }
 
-func runFailureDigestRoutingArgs(cfg Config, leaseID string) []string {
-	args := []string{}
-	if strings.TrimSpace(cfg.Provider) != "" {
-		args = append(args, "--provider", cfg.Provider)
-	}
-	if strings.TrimSpace(cfg.TargetOS) != "" {
-		args = append(args, "--target", cfg.TargetOS)
-	}
-	if cfg.TargetOS == targetWindows && strings.TrimSpace(cfg.WindowsMode) != "" {
-		args = append(args, "--windows-mode", cfg.WindowsMode)
-	}
-	if strings.TrimSpace(cfg.Static.Host) != "" {
-		args = append(args, "--static-host", cfg.Static.Host)
-	}
-	if strings.TrimSpace(cfg.Static.User) != "" {
-		args = append(args, "--static-user", cfg.Static.User)
-	}
-	if strings.TrimSpace(cfg.Static.Port) != "" {
-		args = append(args, "--static-port", cfg.Static.Port)
-	}
-	if strings.TrimSpace(cfg.Static.WorkRoot) != "" {
-		args = append(args, "--static-work-root", cfg.Static.WorkRoot)
-	}
-	return appendProviderStopRoutingArgs(args, cfg, leaseID)
-}
-
-func runFailureDigestSSHRoutingArgs(cfg Config, leaseID string) []string {
-	args := []string{}
-	if strings.TrimSpace(cfg.Provider) != "" {
-		args = append(args, "--provider", cfg.Provider)
-	}
-	if strings.TrimSpace(cfg.TargetOS) != "" {
-		args = append(args, "--target", cfg.TargetOS)
-	}
-	if cfg.TargetOS == targetWindows && strings.TrimSpace(cfg.WindowsMode) != "" {
-		args = append(args, "--windows-mode", cfg.WindowsMode)
-	}
-	if strings.TrimSpace(cfg.Static.Host) != "" {
-		args = append(args, "--static-host", cfg.Static.Host)
-	}
-	if strings.TrimSpace(cfg.Static.User) != "" {
-		args = append(args, "--static-user", cfg.Static.User)
-	}
-	if strings.TrimSpace(cfg.Static.Port) != "" {
-		args = append(args, "--static-port", cfg.Static.Port)
-	}
-	if strings.TrimSpace(cfg.Static.WorkRoot) != "" {
-		args = append(args, "--static-work-root", cfg.Static.WorkRoot)
-	}
-	return appendProviderStopRoutingArgs(args, cfg, leaseID)
-}
-
-func fallbackFailureDigestRoutingArgs(input runFailureDigestInput) []string {
-	args := []string{}
-	if strings.TrimSpace(input.Provider) != "" {
-		args = append(args, "--provider", input.Provider)
-	}
-	if strings.TrimSpace(input.TargetOS) != "" {
-		args = append(args, "--target", input.TargetOS)
-	}
-	if input.TargetOS == targetWindows && strings.TrimSpace(input.WindowsMode) != "" {
-		args = append(args, "--windows-mode", input.WindowsMode)
-	}
-	return args
-}
-
-func crabboxCommandString(args []string) string {
-	env := []string{}
-	rest := make([]string, 0, len(args))
-	index := 0
-	for index < len(args) && isShellEnvAssignment(args[index]) {
-		env = append(env, args[index])
-		index++
-	}
-	if index < len(args) {
-		rest = append(rest, args[index])
-		index++
-	}
-	for index < len(args) && isShellEnvAssignment(args[index]) {
-		env = append(env, args[index])
-		index++
-	}
-	rest = append(rest, args[index:]...)
-	command := append(env, "crabbox")
-	command = append(command, rest...)
-	return readableShellCommand(command)
+func fallbackFailureDigestRouting(input runFailureDigestInput, purpose CommandRoutingPurpose) CommandRouting {
+	return CommandRoutingFor(Config{Provider: input.Provider, TargetOS: input.TargetOS, WindowsMode: input.WindowsMode}, input.LeaseID, purpose)
 }
 
 func canSuggestRunRetry(commandDisplay string) bool {
 	commandDisplay = strings.TrimSpace(commandDisplay)
 	return commandDisplay != "" && !strings.HasPrefix(commandDisplay, "--script")
-}
-
-func printFailureDigestTail(w io.Writer, label string, tail *streamTailBuffer, capturedPath string) {
-	if capturedPath != "" {
-		fmt.Fprintf(w, "  tail %s: captured at %s\n", label, capturedPath)
-		return
-	}
-	if tail == nil {
-		return
-	}
-	lines := tail.Lines()
-	if len(lines) == 0 {
-		return
-	}
-	if len(lines) > 8 {
-		lines = lines[len(lines)-8:]
-	}
-	text := strings.Join(lines, "\n")
-	if redacted, ok := RedactKnownFailureBody(text); ok {
-		fmt.Fprintf(w, "  tail %s: %s\n", label, redacted)
-		return
-	}
-	fmt.Fprintf(w, "  tail %s:\n", label)
-	for _, line := range lines {
-		fmt.Fprintf(w, "    %s\n", line)
-	}
-}
-
-func tailLineCount(tail *streamTailBuffer) int {
-	if tail == nil {
-		return 0
-	}
-	return len(tail.Lines())
 }

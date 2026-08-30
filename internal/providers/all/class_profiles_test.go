@@ -13,7 +13,7 @@ import (
 func TestProductionProviderClassCatalogCompleteness(t *testing.T) {
 	mappedProviders := map[string]struct{}{
 		"aws": {}, "azure": {}, "cloudflare": {}, "digitalocean": {}, "gcp": {}, "hetzner": {}, "linode": {},
-		"namespace-devbox": {}, "namespace-instance": {}, "ovh": {}, "phala": {}, "scaleway": {}, "tencentcloud": {}, "vultr": {},
+		"machine0": {}, "namespace-devbox": {}, "namespace-instance": {}, "ovh": {}, "phala": {}, "scaleway": {}, "tencentcloud": {}, "vultr": {},
 	}
 	counts := map[core.ProviderClassDisposition]int{}
 	compatibilityProviders := map[string]struct{}{
@@ -70,8 +70,8 @@ func TestProductionProviderClassCatalogCompleteness(t *testing.T) {
 			}
 		}
 	}
-	if counts[core.ProviderClassDispositionMapped] != 14 || counts[core.ProviderClassDispositionUnmapped] != 66 || len(counts) != 2 {
-		t.Fatalf("class disposition counts=%v want mapped=14 unmapped=66", counts)
+	if counts[core.ProviderClassDispositionMapped] != 15 || counts[core.ProviderClassDispositionUnmapped] != 66 || len(counts) != 2 {
+		t.Fatalf("class disposition counts=%v want mapped=15 unmapped=66", counts)
 	}
 }
 
@@ -115,6 +115,7 @@ func TestTinyAndSmallProfilePrimariesForMappedProviders(t *testing.T) {
 		"gcp":                {"tiny": "c4-standard-4", "small": "c4-standard-8"},
 		"hetzner":            {"tiny": "ccx13", "small": "ccx23"},
 		"linode":             {"tiny": "g6-standard-1", "small": "g6-standard-1"},
+		"machine0":           {"tiny": "large", "small": "xl"},
 		"namespace-devbox":   {"tiny": "S", "small": "S"},
 		"namespace-instance": {"tiny": "1x2", "small": "2x4"},
 		"ovh":                {"tiny": "b3-8", "small": "b3-8"},

@@ -2,6 +2,8 @@ package cli
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 )
@@ -10,6 +12,9 @@ type FixedLeaseKind struct {
 	ClaimProvider string
 	IntentVersion int
 	Label         string
+	// TerminalIdentityLabels opts into retaining resource/repository identity
+	// and only these immutable labels. Other kinds keep compact tombstones.
+	TerminalIdentityLabels []string
 }
 
 func (k FixedLeaseKind) IsFixedClaim(claim LeaseClaim) bool {
@@ -21,7 +26,7 @@ func (k FixedLeaseKind) TerminalClaim(claim LeaseClaim, now time.Time) LeaseClai
 	intent.State = "released"
 	intent.Attempt = nil
 	intent.FailedAttempts = nil
-	return LeaseClaim{
+	terminal := LeaseClaim{
 		LeaseID:           claim.LeaseID,
 		Slug:              intent.Slug,
 		Provider:          k.ClaimProvider,
@@ -30,6 +35,21 @@ func (k FixedLeaseKind) TerminalClaim(claim LeaseClaim, now time.Time) LeaseClai
 		LastUsedAt:        now.Format(time.RFC3339),
 		FixedCreateIntent: &intent,
 	}
+	if len(k.TerminalIdentityLabels) != 0 {
+		terminal.CloudID = claim.CloudID
+		terminal.CloudNumericID = claim.CloudNumericID
+		terminal.CloudImmutableID = claim.CloudImmutableID
+		terminal.RepoRoot = claim.RepoRoot
+		for _, key := range k.TerminalIdentityLabels {
+			if value, ok := claim.Labels[key]; ok {
+				if terminal.Labels == nil {
+					terminal.Labels = make(map[string]string)
+				}
+				terminal.Labels[key] = value
+			}
+		}
+	}
+	return terminal
 }
 
 func (k FixedLeaseKind) FinalizeAfterCleanup(claim LeaseClaim, action func() error) error {
@@ -43,6 +63,15 @@ func (k FixedLeaseKind) FinalizeAfterCleanup(claim LeaseClaim, action func() err
 
 func (k FixedLeaseKind) ValidateTerminalClaim(claim, previous LeaseClaim, leaseID string, extra func(LeaseClaim) error) error {
 	intent := claim.FixedCreateIntent
+	validIdentity := claim.CloudID == "" && len(claim.Labels) == 0
+	if len(k.TerminalIdentityLabels) != 0 {
+		validIdentity = true
+		for key := range claim.Labels {
+			if !slices.Contains(k.TerminalIdentityLabels, key) {
+				validIdentity = false
+			}
+		}
+	}
 	if claim.LeaseID != leaseID || !k.IsFixedClaim(claim) ||
 		intent.Version != k.IntentVersion ||
 		strings.TrimSpace(intent.Fingerprint) == "" ||
@@ -50,7 +79,7 @@ func (k FixedLeaseKind) ValidateTerminalClaim(claim, previous LeaseClaim, leaseI
 		claim.ProviderScope != intent.ProviderScope ||
 		claim.Slug != intent.Slug ||
 		intent.State != "released" ||
-		claim.CloudID != "" || len(claim.Labels) != 0 || claim.SSHHost != "" || claim.SSHPort != 0 ||
+		!validIdentity || claim.SSHHost != "" || claim.SSHPort != 0 ||
 		len(intent.Attempt) != 0 || len(intent.FailedAttempts) != 0 {
 		return exit(4, "lease_id_conflict: fixed %s lease %s has an invalid terminal tombstone", k.Label, leaseID)
 	}
@@ -61,10 +90,19 @@ func (k FixedLeaseKind) ValidateTerminalClaim(claim, previous LeaseClaim, leaseI
 	}
 	if k.IsFixedClaim(previous) {
 		previousIntent := previous.FixedCreateIntent
+		if len(k.TerminalIdentityLabels) != 0 {
+			expected := k.TerminalClaim(previous, time.Time{})
+			if claim.CloudID != expected.CloudID || claim.CloudNumericID != expected.CloudNumericID ||
+				claim.CloudImmutableID != expected.CloudImmutableID || claim.RepoRoot != expected.RepoRoot ||
+				!maps.Equal(claim.Labels, expected.Labels) {
+				return exit(4, "lease_id_conflict: fixed %s lease %s terminal tombstone changed resource identity", k.Label, leaseID)
+			}
+		}
 		if previous.LeaseID != leaseID ||
 			previousIntent.Version != intent.Version ||
 			previousIntent.Fingerprint != intent.Fingerprint ||
 			previousIntent.ProviderScope != intent.ProviderScope ||
+			previousIntent.CheckpointID != intent.CheckpointID ||
 			previousIntent.Slug != intent.Slug {
 			return exit(4, "lease_id_conflict: fixed %s lease %s terminal tombstone changed identity", k.Label, leaseID)
 		}

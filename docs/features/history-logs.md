@@ -15,7 +15,8 @@ captures you ask for.
 
 ## What a recorded run contains
 
-The CLI creates a run handle (`run_<hex>`) before leasing starts, then appends
+The CLI creates a run handle (`run_<hex>`) before remote command execution,
+after lease resolution when the coordinator requires a lease ID, then appends
 ordered events as it advances:
 
 - `run.started`
@@ -28,6 +29,13 @@ ordered events as it advances:
 - `command.started`, streamed `stdout`/`stderr` events, `command.finished`
 - `lease.released`
 - `run.failed` (if the run errors before the command finishes)
+
+Crabbox-generated event messages are redacted before they enter coordinator
+storage. The recorder removes configured and provider-discovered runtime
+credentials, authorization headers, credential-bearing URLs, and other known
+secret encodings while preserving useful diagnostic context. Raw `stdout` and
+`stderr` event data and retained command logs remain caller-owned output and are
+not automatically redacted.
 
 Each event carries a sequence number, type, phase, and stream. Streamed output
 events are capped at **64 KiB total per run**; once the cap is hit the CLI emits
@@ -46,6 +54,10 @@ When the command exits, the CLI finishes the run with:
 - a failure classification (`blockedStage`, `retryLikely`) on non-zero exits;
 - optional Linux telemetry: a start sample, bounded mid-run samples (every 15s,
   up to 60 retained), and an end sample covering load, memory, disk, and uptime.
+- a signed schema v2 terminal receipt from current clients, atomically committed
+  with the terminal run record. Current clients verify the exact stored receipt
+  before reporting the finish as recorded; legacy clients may finish without
+  one.
 
 ## Reading history
 
@@ -58,12 +70,22 @@ crabbox logs run_a1b2c3d4 --tail 80  # last 80 lines only
 crabbox events run_a1b2c3d4          # ordered run events
 crabbox events run_a1b2c3d4 --type stderr  # filter events by type
 crabbox attach run_a1b2c3d4          # follow an in-progress run live
+crabbox receipt run_a1b2c3d4         # retrieve and verify terminal evidence
 ```
 
 `crabbox attach` follows a still-running run, preferring the broker's live
 control WebSocket and falling back to polling. Use `attach` for active runs and
 `logs` for the retained output of a finished run. All four commands accept
 `--json`.
+
+The run record is created in coordinator storage before remote command
+execution. If the finish response or local receipt write is lost, use its run ID
+with `crabbox receipt`. The CLI prints that ID. Automation that must recover it
+after losing client output should also use `run --lease-output <file>` on a
+supported retained run; the handle is written before SSH wait, sync, or command
+execution and includes `runID`. A missing receipt is not reconstructed from logs
+or events. A receipt-bearing CLI fails closed against a coordinator that accepts
+the finish but cannot return the exact stored receipt.
 
 Run records keep the initiating actor in `owner`/`org` and retain every backing
 lease identity used by a replacement flow. Each backing lease owner has
@@ -104,7 +126,11 @@ command runs.
 On a non-zero exit, SSH-backed and Blacksmith delegated runs also write a local
 failure bundle under `.crabbox/captures/` by default (the bundled streams are
 capped at 16 MiB each). `--capture-on-fail` is accepted as a no-op compatibility
-alias; bundles save automatically on failure. Treat captured logs and bundles as
+alias; bundles save automatically on failure. An unwritable project capture
+destination falls back to the Crabbox user state directory's `captures/`
+subdirectory; the `failure-bundle local=...` line reports the actual path. See
+[local capture storage](../observability.md#capturing-run-output-locally) for
+fallback boundaries and retention. Treat captured logs and bundles as
 secret-bearing files unless you redact them before sharing.
 
 ## Phase timings
@@ -131,4 +157,5 @@ browser-side inspection.
 - [events command](../commands/events.md)
 - [attach command](../commands/attach.md)
 - [results command](../commands/results.md)
+- [receipt command](../commands/receipt.md)
 - [Observability](../observability.md)

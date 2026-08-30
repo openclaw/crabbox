@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -370,7 +371,10 @@ case "$current" in
   *"protocol_action='acquire'"*) printf ACQUIRED; exit 0 ;;
   *"protocol_action='renew'"*) printf RENEWED; exit 0 ;;
   *"protocol_action='inspect'"*)
-    if [ -e "$(dirname "$0")/owner-child" ]; then printf CHILD; else printf OWNED; fi
+    case "${CRABBOX_FAKE_OWNER_INSPECT:-}" in
+      CHILD|AMBIGUOUS) printf %s "$CRABBOX_FAKE_OWNER_INSPECT" ;;
+      *) if [ -e "$(dirname "$0")/owner-child" ]; then printf CHILD; else printf OWNED; fi ;;
+    esac
     exit 0
     ;;
   *"protocol_action='release'"*) printf RELEASED; exit 0 ;;
@@ -647,6 +651,7 @@ var runEnvProfileTestReleaseErr error
 var runEnvProfileTestReleaseHook func() error
 var runEnvProfileTestReleaseRequestHook func(ReleaseLeaseRequest) error
 var runEnvProfileTestConnectionCleanupSafe = true
+var runEnvProfileTestPreservesSSHWorkspace bool
 var runEnvProfileTestAcquireHook func(AcquireRequest)
 var runEnvProfileTestAcquireLease func(AcquireRequest) (LeaseTarget, error)
 var runEnvProfileTestTouchHook func(TouchRequest) error
@@ -877,6 +882,10 @@ func TestRunCommandCleanupRejectsClaimReplacedAfterRegistration(t *testing.T) {
 }
 func (b runEnvProfileTestBackend) ReleaseLeaseConnectionCleanupSafe() bool {
 	return runEnvProfileTestConnectionCleanupSafe
+}
+
+func (b runEnvProfileTestBackend) PreservesSSHWorkspaceAfterRelease() bool {
+	return runEnvProfileTestPreservesSSHWorkspace
 }
 
 type runWorkdirCase struct {
@@ -1719,6 +1728,30 @@ func TestRunCommandAcceptsE2BLeaseOutput(t *testing.T) {
 	}
 }
 
+func TestRunCommandWorkspaceOwnerInspectPreservesOrOverridesRemoteExit(t *testing.T) {
+	for _, tt := range []struct {
+		name, inspect string
+		wantCode      int
+		wantMessage   string
+	}{
+		{name: "clean", wantCode: 23, wantMessage: "remote command exited 23"},
+		{name: "ambiguous", inspect: "AMBIGUOUS", wantCode: 7, wantMessage: "ambiguous"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			setupLocalContainerRunSessionTest(t, "#!/bin/sh\ncase \"$1\" in *\"exit 23\"*) exit 23;; esac\nexit 0\n")
+			t.Setenv("CRABBOX_FAKE_OWNER_INSPECT", tt.inspect)
+			var stdout, stderr bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+				"--provider", "run-env-profile-test", "--no-sync", "--no-hydrate", "--keep", "--shell", "--", "exit 23",
+			})
+			var exitErr ExitError
+			if !AsExitError(err, &exitErr) || exitErr.Code != tt.wantCode || !strings.Contains(exitErr.Message, tt.wantMessage) {
+				t.Fatalf("error=%v want exit=%d containing %q\nstdout=%s\nstderr=%s", err, tt.wantCode, tt.wantMessage, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
 const localContainerRunSessionTestLeaseID = "cbx_1260abc12345"
 
 func setupLocalContainerRunSessionTest(t *testing.T, commandScript string) (string, LeaseTarget) {
@@ -1915,6 +1948,185 @@ func TestRunCommandWritesReusedLocalContainerLeaseOutput(t *testing.T) {
 			}
 			if releases != 0 {
 				t.Fatalf("reused run released lease %d time(s)", releases)
+			}
+		})
+	}
+}
+
+func TestRunCommandWritesBrokeredReusedAWSLeaseOutputBeforeCommand(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		createRunFail bool
+	}{
+		{name: "success"},
+		{name: "create run failure", createRunFail: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			dir := t.TempDir()
+			isolateRunTestUserDirs(t, dir)
+			t.Chdir(dir)
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+			runGit(t, dir, "init")
+			runGit(t, dir, "config", "user.email", "test@example.com")
+			runGit(t, dir, "config", "user.name", "Test")
+			writeFile(t, filepath.Join(dir, "README.md"), "fixture\n")
+			runGit(t, dir, "add", ".")
+			runGit(t, dir, "commit", "-m", "fixture")
+
+			const (
+				leaseID = "cbx_aws_session"
+				runID   = "run_aws_session"
+				slug    = "aws-session"
+			)
+			sessionPath := filepath.Join(dir, "session.json")
+			commandMarker := filepath.Join(dir, "command-ran")
+			sshPath := filepath.Join(dir, "ssh")
+			installWorkspaceOwnerAwareSSH(t, sshPath, `#!/bin/sh
+case "$1" in
+  *session-command-sentinel*)
+    test -s "$CRABBOX_TEST_LEASE_OUTPUT" || exit 91
+    : > "$CRABBOX_TEST_COMMAND_MARKER"
+    ;;
+esac
+/bin/cat >/dev/null || true
+exit 0
+`)
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("CRABBOX_TEST_LEASE_OUTPUT", sessionPath)
+			t.Setenv("CRABBOX_TEST_COMMAND_MARKER", commandMarker)
+
+			lease := CoordinatorLease{
+				ID:                 leaseID,
+				Slug:               slug,
+				Provider:           "aws",
+				TargetOS:           targetLinux,
+				State:              "active",
+				Host:               "127.0.0.1",
+				SSHUser:            "crabbox",
+				SSHPort:            "22",
+				SSHHostKey:         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICFNHmH+uXzuQadD4Pg9JhPQvl5fkM4L9spUDQ/mI+pc",
+				WorkRoot:           "/work/crabbox",
+				IdleTimeoutSeconds: 1800,
+			}
+			var (
+				mu             sync.Mutex
+				createRunCalls atomic.Int32
+				storedReceipt  terminalRunReceipt
+			)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/v1/control":
+					http.NotFound(w, r)
+				case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/"+leaseID:
+					_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+				case r.Method == http.MethodPost && r.URL.Path == "/v1/runs":
+					createRunCalls.Add(1)
+					if tc.createRunFail {
+						http.Error(w, "run store unavailable", http.StatusServiceUnavailable)
+						return
+					}
+					var body map[string]any
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+					if body["leaseID"] != leaseID {
+						http.Error(w, "wrong lease", http.StatusBadRequest)
+						return
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"run": CoordinatorRun{
+						ID: runID, LeaseID: leaseID, Provider: "aws", State: "running",
+						StartedAt: "2026-08-24T00:00:00Z",
+					}})
+				case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/"+runID+"/events":
+					_ = json.NewEncoder(w).Encode(map[string]any{"event": CoordinatorRunEvent{
+						RunID: runID, Seq: 1, Type: "run.event", CreatedAt: "2026-08-24T00:00:00Z",
+					}})
+				case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/"+leaseID+"/heartbeat":
+					_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+				case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/"+runID+"/finish":
+					var body struct {
+						Receipt terminalRunReceipt `json:"receipt"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+					mu.Lock()
+					storedReceipt = body.Receipt
+					mu.Unlock()
+					_ = json.NewEncoder(w).Encode(map[string]any{"run": CoordinatorRun{
+						ID: runID, LeaseID: leaseID, Provider: "aws", State: "succeeded",
+						StartedAt: "2026-08-24T00:00:00Z",
+					}})
+				case r.Method == http.MethodGet && r.URL.Path == "/v1/runs/"+runID+"/receipt":
+					mu.Lock()
+					receipt := storedReceipt
+					mu.Unlock()
+					_ = json.NewEncoder(w).Encode(map[string]any{"receipt": receipt})
+				default:
+					http.Error(w, r.Method+" "+r.URL.Path, http.StatusNotFound)
+				}
+			}))
+			t.Cleanup(server.Close)
+			t.Setenv("CRABBOX_COORDINATOR", server.URL)
+			t.Setenv("CRABBOX_COORDINATOR_TOKEN", "test-token")
+			testAWSBackendOverride = testSSHBackend{spec: testAWSProvider{}.Spec()}
+			t.Cleanup(func() {
+				testAWSBackendOverride = nil
+				removeLeaseClaim(leaseID)
+			})
+
+			var stdout, stderr bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(t.Context(), []string{
+				"--provider", "aws",
+				"--id", leaseID,
+				"--no-sync",
+				"--no-hydrate",
+				"--lease-output", sessionPath,
+				"--", "session-command-sentinel",
+			})
+			if calls := createRunCalls.Load(); calls != 1 {
+				t.Fatalf("create run calls=%d, want 1; error=%v\nstdout=%s\nstderr=%s", calls, err, stdout.String(), stderr.String())
+			}
+			if tc.createRunFail {
+				var exitErr ExitError
+				if !AsExitError(err, &exitErr) || exitErr.Code != 7 || !strings.Contains(exitErr.Message, "coordinator run handle") {
+					t.Fatalf("error=%v, want exit 7 coordinator handle failure\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+				}
+				assertRunSessionValidationStoppedBeforeWork(t, sessionPath, commandMarker, filepath.Join(dir, "unused-sync-marker"))
+				return
+			}
+			if err != nil {
+				t.Fatalf("runCommand: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+			}
+			if _, err := os.Stat(commandMarker); err != nil {
+				t.Fatalf("command marker: %v", err)
+			}
+			session, _, _ := readRunSessionHandleTest(t, sessionPath)
+			if session.Provider != "aws" || session.LeaseID != leaseID || session.Slug != slug || !session.Reused || !session.Kept {
+				t.Fatalf("session=%#v", session)
+			}
+			if session.RunID != runID {
+				t.Fatalf("runId=%q want %q", session.RunID, runID)
+			}
+			if want := "crabbox stop --provider aws --target linux --id " + leaseID; session.CleanupCommand != want {
+				t.Fatalf("cleanupCommand=%q want %q", session.CleanupCommand, want)
+			}
+			client := CoordinatorClient{BaseURL: server.URL, Token: "test-token", Client: server.Client()}
+			receipt, err := client.RunReceipt(t.Context(), runID)
+			if err != nil {
+				t.Fatalf("retrieve persisted receipt: %v", err)
+			}
+			if receipt.SchemaVersion != terminalReceiptSchemaVersion || receipt.ReceiptType != terminalReceiptType {
+				t.Fatalf("receipt schema=%d type=%q", receipt.SchemaVersion, receipt.ReceiptType)
+			}
+			if receipt.Provider != "aws" || receipt.LeaseID != leaseID || receipt.RunID != runID {
+				t.Fatalf("receipt identity=%#v", receipt)
+			}
+			if strings.TrimSpace(receipt.Signer) == "" || strings.TrimSpace(receipt.Signature) == "" {
+				t.Fatalf("receipt missing signer or signature: %#v", receipt)
 			}
 		})
 	}
@@ -2419,6 +2631,27 @@ func TestPrintRunContextSummarySeparatesExecutionAndHistoryRunIDs(t *testing.T) 
 	} {
 		if !strings.Contains(recorded.String(), want) {
 			t.Fatalf("recorded run context missing %q:\n%s", want, recorded.String())
+		}
+	}
+}
+
+func TestPrintRunContextSummaryRedactsCoordinatorURLCredentials(t *testing.T) {
+	username, userinfo := "fixture-user", "fixture-value"
+	coord := &CoordinatorClient{BaseURL: fmt.Sprintf("https://%s:%s@coordinator.example.test/team?key=fixture-query#fixture-fragment", username, userinfo)}
+	var output bytes.Buffer
+	printRunContextSummary(&output, coord, Config{Provider: "aws", TargetOS: targetLinux}, Server{}, SSHTarget{}, "cbx_123", "run_execution", "run_history", "/work/repo", false, "")
+
+	for _, want := range []string{
+		"portal=https://<redacted>@coordinator.example.test/team/portal/runs/run_history",
+		"logs=https://<redacted>@coordinator.example.test/team/v1/runs/run_history/logs",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("redacted run context missing %q:\n%s", want, output.String())
+		}
+	}
+	for _, forbidden := range []string{username, userinfo, "fixture-query", "fixture-fragment"} {
+		if strings.Contains(output.String(), forbidden) {
+			t.Fatalf("run context exposed %q:\n%s", forbidden, output.String())
 		}
 	}
 }
@@ -2957,6 +3190,382 @@ exit 0
 	}
 }
 
+func TestRunCommandWritesTerminalReceiptOnSuccess(t *testing.T) {
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	sshPath := filepath.Join(dir, "ssh")
+	receiptPath := filepath.Join(dir, "receipt.json")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	_, sshPort, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	installWorkspaceOwnerAwareSSH(t, sshPath, "#!/bin/sh\nexit 0\n")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+
+	var stdout, stderr bytes.Buffer
+	err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-env-profile-test",
+		"--no-sync",
+		"--attest", receiptPath,
+		"--", "true",
+	})
+	if err != nil {
+		t.Fatalf("runCommand error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	data, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatalf("read terminal receipt: %v", err)
+	}
+	receipt, err := decodeTerminalRunReceipt(data)
+	if err != nil {
+		t.Fatalf("decode terminal receipt: %v", err)
+	}
+	if receipt.SchemaVersion != terminalReceiptSchemaVersion || receipt.ReceiptType != terminalReceiptType || receipt.ExitCode != 0 {
+		t.Fatalf("receipt=%+v", receipt)
+	}
+	if !strings.Contains(stderr.String(), "artifact kind=receipt") {
+		t.Fatalf("missing terminal receipt output:\n%s", stderr.String())
+	}
+}
+
+func TestRunCommandTerminalReceiptIncludesCleanupFailure(t *testing.T) {
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	sshPath := filepath.Join(dir, "ssh")
+	receiptPath := filepath.Join(dir, "receipt.json")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	_, sshPort, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	installWorkspaceOwnerAwareSSH(t, sshPath, "#!/bin/sh\nexit 0\n")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+	runEnvProfileTestReleaseErr = errors.New("release API unavailable")
+	t.Cleanup(func() { runEnvProfileTestReleaseErr = nil })
+
+	var stdout, stderr bytes.Buffer
+	err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-env-profile-test",
+		"--no-sync",
+		"--stop-after", "success",
+		"--attest", receiptPath,
+		"--", "true",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 7 {
+		t.Fatalf("error=%v, want exit 7\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	data, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatalf("read terminal receipt: %v", err)
+	}
+	receipt, err := decodeTerminalRunReceipt(data)
+	if err != nil {
+		t.Fatalf("decode terminal receipt: %v", err)
+	}
+	if receipt.ExitCode != 7 {
+		t.Fatalf("receipt exit=%d, want cleanup exit 7\nreceipt=%+v", receipt.ExitCode, receipt)
+	}
+	if !strings.Contains(exitErr.Message, "lease cleanup failed") || !strings.Contains(stderr.String(), "lease cleanup stopped=false") {
+		t.Fatalf("missing cleanup failure:\n%s", stderr.String())
+	}
+}
+
+func TestRunCommandTerminalReceiptIncludesLateTimingRecordFailure(t *testing.T) {
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	sshPath := filepath.Join(dir, "ssh")
+	receiptPath := filepath.Join(dir, "receipt.json")
+	timingRecordPath := filepath.Join(dir, "timings")
+	if err := os.Mkdir(timingRecordPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	_, sshPort, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	installWorkspaceOwnerAwareSSH(t, sshPath, "#!/bin/sh\nexit 0\n")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+
+	var stdout, stderr bytes.Buffer
+	err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-env-profile-test",
+		"--no-sync",
+		"--timing-record", timingRecordPath,
+		"--attest", receiptPath,
+		"--", "true",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 {
+		t.Fatalf("error=%v, want late timing-record exit 2\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	data, readErr := os.ReadFile(receiptPath)
+	if readErr != nil {
+		t.Fatalf("read terminal receipt: %v", readErr)
+	}
+	receipt, decodeErr := decodeTerminalRunReceipt(data)
+	if decodeErr != nil {
+		t.Fatalf("decode terminal receipt: %v", decodeErr)
+	}
+	if receipt.ExitCode != 2 {
+		t.Fatalf("receipt exit=%d, want late timing-record exit 2\nreceipt=%+v", receipt.ExitCode, receipt)
+	}
+	if !strings.Contains(exitErr.Message, "open benchmark timing store") {
+		t.Fatalf("missing timing-record failure: %v", exitErr)
+	}
+}
+
+func TestRunCommandTerminalReceiptMarksCoordinatorFinishFailureLocally(t *testing.T) {
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	sshPath := filepath.Join(dir, "ssh")
+	receiptPath := filepath.Join(dir, "receipt.json")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	_, sshPort, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	installWorkspaceOwnerAwareSSH(t, sshPath, "#!/bin/sh\nexit 0\n")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+
+	const (
+		leaseID = "cbx_finish_failure"
+		runID   = "run_finish_failure"
+	)
+	lease := CoordinatorLease{
+		ID:         leaseID,
+		Slug:       "finish-failure",
+		Provider:   "run-ready-pool-preflight-test",
+		Owner:      "test@example.com",
+		Org:        "test",
+		Class:      "standard",
+		ServerType: "test",
+		Host:       "127.0.0.1",
+		SSHUser:    "crabbox",
+		SSHPort:    sshPort,
+		WorkRoot:   "/work/crabbox",
+		State:      "active",
+	}
+	var (
+		mu              sync.Mutex
+		finishAttempts  int
+		finishReceipts  []terminalRunReceipt
+		unexpectedCalls []string
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/control":
+			http.NotFound(w, r)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/"+leaseID:
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/"+leaseID+"/heartbeat":
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs":
+			_ = json.NewEncoder(w).Encode(map[string]any{"run": CoordinatorRun{
+				ID: runID, LeaseID: leaseID, Provider: lease.Provider, State: "running",
+				StartedAt: "2026-08-24T00:00:00Z",
+			}})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/"+runID+"/events":
+			_ = json.NewEncoder(w).Encode(map[string]any{"event": CoordinatorRunEvent{
+				RunID: runID, Seq: 1, Type: "run.event", CreatedAt: "2026-08-24T00:00:00Z",
+			}})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/"+runID+"/finish":
+			var body struct {
+				Receipt terminalRunReceipt `json:"receipt"`
+			}
+			if decodeErr := json.NewDecoder(r.Body).Decode(&body); decodeErr != nil {
+				http.Error(w, decodeErr.Error(), http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			finishAttempts++
+			finishReceipts = append(finishReceipts, body.Receipt)
+			mu.Unlock()
+			http.Error(w, "terminal store unavailable", http.StatusServiceUnavailable)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runs/"+runID+"/receipt":
+			http.NotFound(w, r)
+		default:
+			mu.Lock()
+			unexpectedCalls = append(unexpectedCalls, r.Method+" "+r.URL.Path)
+			mu.Unlock()
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "test-token")
+
+	var stdout, stderr bytes.Buffer
+	err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-ready-pool-preflight-test",
+		"--id", leaseID,
+		"--no-sync",
+		"--stop-after", "never",
+		"--attest", receiptPath,
+		"--", "true",
+	})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 7 {
+		t.Fatalf("error=%v, want coordinator finish exit 7\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+	}
+	data, readErr := os.ReadFile(receiptPath)
+	if readErr != nil {
+		t.Fatalf("read terminal receipt: %v", readErr)
+	}
+	localReceipt, decodeErr := decodeTerminalRunReceipt(data)
+	if decodeErr != nil {
+		t.Fatalf("decode terminal receipt: %v", decodeErr)
+	}
+	if localReceipt.ExitCode != 7 {
+		t.Fatalf("local receipt exit=%d, want coordinator failure exit 7", localReceipt.ExitCode)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if finishAttempts != runRecorderFinishAttempts || len(finishReceipts) != runRecorderFinishAttempts {
+		t.Fatalf("finish attempts=%d receipts=%d, want %d", finishAttempts, len(finishReceipts), runRecorderFinishAttempts)
+	}
+	for i, receipt := range finishReceipts {
+		if receipt.ExitCode != 0 {
+			t.Fatalf("remote receipt attempt %d exit=%d, want original execution exit 0", i+1, receipt.ExitCode)
+		}
+		if receipt != finishReceipts[0] {
+			t.Fatalf("remote receipt attempt %d changed:\nfirst=%+v\ncurrent=%+v", i+1, finishReceipts[0], receipt)
+		}
+	}
+	if localReceipt == finishReceipts[0] {
+		t.Fatal("local failure receipt must differ from the ambiguous remote execution receipt")
+	}
+	if len(unexpectedCalls) != 0 {
+		t.Fatalf("unexpected coordinator calls: %v", unexpectedCalls)
+	}
+}
+
+func TestRunCommandWritesTerminalReceiptWhenPostCommandDownloadFails(t *testing.T) {
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	sshPath := filepath.Join(dir, "ssh")
+	receiptPath := filepath.Join(dir, "receipt.json")
+	downloadPath := filepath.Join(dir, "manifest.json")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	_, sshPort, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	installWorkspaceOwnerAwareSSH(t, sshPath, `#!/bin/sh
+cmd=""
+for arg do cmd="$arg"; done
+case "$cmd" in
+  *"base64 <"*) printf 'post-command download failed\n' >&2; exit 8 ;;
+esac
+exit 0
+`)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+
+	var stdout, stderr bytes.Buffer
+	err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+		"--provider", "run-env-profile-test",
+		"--no-sync",
+		"--keep-on-failure",
+		"--attest", receiptPath,
+		"--download", "reports/data/manifest.json=" + downloadPath,
+		"--", "true",
+	})
+	if err == nil {
+		t.Fatalf("runCommand succeeded\nstdout=%s\nstderr=%s", stdout.String(), stderr.String())
+	}
+	data, readErr := os.ReadFile(receiptPath)
+	if readErr != nil {
+		t.Fatalf("read terminal receipt: %v\nrun error=%v\nstderr=%s", readErr, err, stderr.String())
+	}
+	receipt, decodeErr := decodeTerminalRunReceipt(data)
+	if decodeErr != nil {
+		t.Fatalf("decode terminal receipt: %v", decodeErr)
+	}
+	if receipt.ExitCode != exitCodeForError(err, 7) || receipt.ExitCode == 0 {
+		t.Fatalf("receipt exit=%d want=%d run error=%v", receipt.ExitCode, exitCodeForError(err, 7), err)
+	}
+	if !strings.Contains(stderr.String(), "artifact kind=receipt") {
+		t.Fatalf("missing terminal receipt output:\n%s", stderr.String())
+	}
+}
+
 func TestRunCommandMacOSMissingRequiredArtifactE2E(t *testing.T) {
 	dir := t.TempDir()
 	isolateRunTestUserDirs(t, dir)
@@ -3081,9 +3690,10 @@ func TestRunCommandSSHArtifactE2E(t *testing.T) {
 			script := `#!/bin/sh
 cmd=""
 for arg do cmd="$arg"; done
-printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
+input="$(cat)"
+printf '%s\n%s\n---\n' "$cmd" "$input" >> "$CRABBOX_FAKE_SSH_LOG"
 case "$cmd" in
-  mkdir\ -p*|cd\ *|bash\ -lc*|/bin/bash\ -lc*) exec sh -c "$cmd" ;;
+  mkdir\ -p*|cd\ *|bash\ -lc*|/bin/bash\ -lc*) printf '%s' "$input" | sh -c "$cmd"; exit $? ;;
 esac
 exit 0
 `
@@ -3181,6 +3791,56 @@ exit 0
 				previous = index
 			}
 		})
+	}
+}
+
+func TestCollectRunArtifactGlobsStreamsScriptOutsideSSHArguments(t *testing.T) {
+	dir := t.TempDir()
+	workdir := filepath.Join(dir, "remote")
+	if err := os.MkdirAll(filepath.Join(workdir, "reports"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"first.txt", "second.txt"} {
+		if err := os.WriteFile(filepath.Join(workdir, "reports", name), []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logPath := filepath.Join(dir, "ssh.log")
+	sshPath := filepath.Join(dir, "ssh")
+	sshScript := `#!/bin/sh
+cmd=""
+for arg do cmd="$arg"; done
+if [ ${#cmd} -gt 1024 ]; then
+  printf 'mux_client_request_session: send fds failed\n' >&2
+  exit 255
+fi
+printf 'argv:%s\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
+exec sh -c "$cmd"
+`
+	if err := os.WriteFile(sshPath, []byte(sshScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_LOG", logPath)
+	target := SSHTarget{User: "runner", Host: "example.test", Port: "2222", TargetOS: targetLinux}
+	artifacts, _, err := collectRunArtifactGlobs(t.Context(), target, workdir, dir, "run_artifacts", "cbx_artifacts", []string{"reports/first.txt", "reports/second.txt"})
+	if err != nil {
+		t.Fatalf("collect multiple artifact globs: %v", err)
+	}
+	if len(artifacts) != 1 {
+		t.Fatalf("artifacts=%#v, want one archive", artifacts)
+	}
+	for _, name := range []string{"reports/first.txt", "reports/second.txt"} {
+		if !stringSliceContains(tarGzNames(t, artifacts[0].Path), name) {
+			t.Fatalf("artifact archive missing %q", name)
+		}
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(log), "artifact_safe_search_root") {
+		t.Fatalf("artifact script leaked into SSH arguments:\n%s", log)
 	}
 }
 
@@ -3744,7 +4404,12 @@ $current"
   esac
 done
 if [ -n "$decoded_view" ]; then remote=$decoded_view; fi
-case "$remote" in
+# A witness has its own rm commands; do not match them across payload lines.
+marker_mutation=$(printf '%s\n' "$remote" | awk '
+  /rm -f/ && /[.]crabbox\/actions\/cbx_env_profile_test[.]env[.]sh/ { print "clear"; exit }
+  /rm -f/ && /[.]crabbox\/actions\/cbx_env_profile_test[.]env/ { print "invalidate"; exit }
+')
+case "$marker_mutation:$remote" in
   *"protocol_action='acquire'"*) printf 'owner-acquire\n' >> "$CRABBOX_FAKE_EVENTS"; printf ACQUIRED; exit 0 ;;
   *"protocol_action='renew'"*) printf RENEWED; exit 0 ;;
   *"protocol_action='inspect'"*)
@@ -3766,10 +4431,10 @@ case "$remote" in
     : > "$CRABBOX_FAKE_HYDRATED"
     printf '123\n'
     ;;
-  *"rm -f"*".crabbox/actions/cbx_env_profile_test.env.sh"*)
+  clear:*)
     printf 'clear\n' >> "$CRABBOX_FAKE_EVENTS"
     ;;
-  *"rm -f"*".crabbox/actions/cbx_env_profile_test.env"*)
+  invalidate:*)
     printf 'invalidate\n' >> "$CRABBOX_FAKE_EVENTS"
     if [ "${CRABBOX_FAKE_INVALIDATE_FAIL:-0}" = "1" ]; then
       printf 'marker invalidation denied\n' >&2
@@ -4560,6 +5225,14 @@ func TestWindowsWSL2RemoteCapabilityPreflightUsesBoundedWrapper(t *testing.T) {
 	logPath := installRecordingSSH(t, dir)
 	stdinLog := filepath.Join(dir, "ssh.stdin")
 	t.Setenv("CRABBOX_FAKE_SSH_STDIN_LOG", stdinLog)
+	nonce := strings.Repeat("a", 32)
+	var staged []byte
+	var launcher string
+	captureWSLStage(t, nonce, func(spool *wslStageSpool, target *SSHTarget, _ wslStageTiming, data []byte) {
+		staged = data
+		target.NoControlMaster = true
+		launcher = wslStageLauncherCommand(nonce, spool.size, spool.digest(), wslStageCMD)
+	})
 	cfg := defaultConfig()
 	cfg.Run.PreflightTools = []string{"node"}
 	target := SSHTarget{
@@ -4581,26 +5254,25 @@ func TestWindowsWSL2RemoteCapabilityPreflightUsesBoundedWrapper(t *testing.T) {
 	if len(commands) != 1 {
 		t.Fatalf("ssh commands=%d want 1:\n%s", len(commands), data)
 	}
-	decoded := decodePowerShellCommand(t, commands[0])
-	for _, want := range []string{
-		`[Console]::OpenStandardInput().CopyTo($script)`,
-		`$process.WaitForExit(15000)`,
-		`throw "WSL2 command timed out after 15s"`,
-	} {
-		if !strings.Contains(decoded, want) {
-			t.Fatalf("WSL2 preflight command missing %q in %q", want, decoded)
-		}
-	}
-	if strings.Contains(decoded, `preflight_cmd`) {
-		t.Fatalf("WSL2 preflight script should be sent over stdin, not embedded in command: %q", decoded)
+	if commands[0] != launcher || len(commands[0]) >= wslStageLauncherCommandLimit {
+		t.Fatalf("WSL2 preflight launcher=%q", commands[0])
 	}
 	payloadBytes, err := os.ReadFile(stdinLog)
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload := string(payloadBytes)
-	if !strings.Contains(payload, `preflight_cmd '\''node'\'' '\''node'\'' node --version`) {
-		t.Fatalf("WSL2 preflight payload missing node probe in %q", payload)
+	if len(payloadBytes) != 0 {
+		t.Fatalf("WSL2 preflight execute stdin bytes=%d want zero", len(payloadBytes))
+	}
+	_, _, suffix, _ := decodeWSLStage(t, staged)
+	if binary.LittleEndian.Uint64(staged[32:]) != uint64((15 * time.Second).Milliseconds()) {
+		t.Fatal("preflight lost its execution limit")
+	}
+	if strings.Contains(decodePowerShellCommand(t, commands[0]), "preflight_cmd") {
+		t.Fatal("preflight leaked into argv")
+	}
+	if !strings.Contains(suffix, `preflight_cmd '\''node'\'' '\''node'\'' node --version`) {
+		t.Fatalf("WSL2 preflight payload missing node probe in %q", suffix)
 	}
 }
 

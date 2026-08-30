@@ -68,6 +68,7 @@ type blacksmithBackend struct {
 }
 
 var _ core.DelegatedRunArtifactBackend = (*blacksmithBackend)(nil)
+var _ core.RunOptionsValidator = (*blacksmithBackend)(nil)
 
 func (b *blacksmithBackend) Spec() ProviderSpec { return b.spec }
 
@@ -100,8 +101,19 @@ func (b *blacksmithBackend) Warmup(ctx context.Context, req WarmupRequest) error
 	return nil
 }
 
+func (b *blacksmithBackend) ValidateRunOptions(req RunRequest) error {
+	return validateBlacksmithRunOptions(b.spec, req)
+}
+
+func validateBlacksmithRunOptions(spec ProviderSpec, req RunRequest) error {
+	if req.NoSync {
+		return core.Exit(2, "%s delegates sync; --no-sync is not supported", blacksmithTestboxProvider)
+	}
+	return core.RejectDelegatedSyncOptionsForSpec(spec, req)
+}
+
 func (b *blacksmithBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
-	if err := core.RejectDelegatedSyncOptionsForSpec(b.spec, req); err != nil {
+	if err := b.ValidateRunOptions(req); err != nil {
 		return RunResult{}, err
 	}
 	if blacksmithEnvForwardingRequested(req) {

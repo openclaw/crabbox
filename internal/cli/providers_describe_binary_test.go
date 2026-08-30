@@ -66,7 +66,19 @@ func TestProvidersDescribeBuiltBinaryContract(t *testing.T) {
 	if err := json.Unmarshal(matrixOut, &entries); err != nil {
 		t.Fatalf("providers --json: %v\n%s", err, matrixOut)
 	}
-	for _, entry := range entries {
+	var rows []map[string]any
+	if err := json.Unmarshal(matrixOut, &rows); err != nil {
+		t.Fatal(err)
+	}
+	for i, entry := range entries {
+		row := rows[i]
+		wantSelection := any(nil)
+		if entry.Provider == "machine0" {
+			wantSelection = "type"
+		}
+		if row["sizeSelection"] != wantSelection {
+			t.Errorf("provider=%s sizeSelection=%v want=%v", entry.Provider, row["sizeSelection"], wantSelection)
+		}
 		stdout, stderr, exitCode := runDescribeTestBinary(binary, root, env, "providers", "describe", entry.Provider, "--json")
 		switch entry.Kind {
 		case ProviderKindSSHLease, ProviderKindDelegatedRun:
@@ -81,6 +93,13 @@ func TestProvidersDescribeBuiltBinaryContract(t *testing.T) {
 			}
 			if !description.Runnable || description.Provider.Canonical != entry.Provider {
 				t.Errorf("describe %s identity=%#v runnable=%t", entry.Provider, description.Provider, description.Runnable)
+			}
+			var described map[string]any
+			if err := json.Unmarshal(stdout, &described); err != nil {
+				t.Fatal(err)
+			}
+			if described["sizeSelection"] != wantSelection || description.SchemaVersion != 2 {
+				t.Errorf("describe %s sizeSelection=%v want=%v schema=%d", entry.Provider, described["sizeSelection"], wantSelection, description.SchemaVersion)
 			}
 		case ProviderKindServiceControl:
 			if exitCode != 2 || len(stdout) != 0 || !strings.Contains(string(stderr), "not runnable") {
@@ -165,9 +184,9 @@ func TestProvidersDescribeBuiltBinaryContract(t *testing.T) {
 		t.Fatalf("run --help exit=%d stdout=%q stderr=%q", helpCode, helpStdout, helpStderr)
 	}
 	digest := sha256.Sum256(helpStderr)
-	const baselineSHA256 = "58465abab3d45593df5b62cd86ebb3644207011ac07f1d7bbb14ae98032a4011"
-	if got := hex.EncodeToString(digest[:]); got != baselineSHA256 || len(helpStderr) != 60698 {
-		t.Fatalf("run --help changed: sha256=%s bytes=%d, want sha256=%s bytes=60698", got, len(helpStderr), baselineSHA256)
+	const baselineSHA256 = "fbd551d4049593e65061fbc04dc5fc1a786ae9ddf9009da16c0e0c804f91e849"
+	if got := hex.EncodeToString(digest[:]); got != baselineSHA256 || len(helpStderr) != 61392 {
+		t.Fatalf("run --help changed: sha256=%s bytes=%d, want sha256=%s bytes=61392", got, len(helpStderr), baselineSHA256)
 	}
 }
 

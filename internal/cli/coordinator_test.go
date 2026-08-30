@@ -143,7 +143,7 @@ func TestCoordinatorFinishRunSendsLogChunks(t *testing.T) {
 	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
 	log := strings.Repeat("x", coordinatorRunLogChunkBytes) + "tail"
 	load := 0.42
-	if _, err := client.FinishRun(context.Background(), "run_123", 1, time.Second, 2*time.Second, log, false, nil, &RunTelemetrySummary{End: &LeaseTelemetry{Load1: &load}}, FailureClassification{BlockedStage: "unknown", RetryLikely: "unknown"}); err != nil {
+	if _, err := client.FinishRun(context.Background(), "run_123", 1, time.Second, 2*time.Second, log, false, nil, &RunTelemetrySummary{End: &LeaseTelemetry{Load1: &load}}, FailureClassification{BlockedStage: "unknown", RetryLikely: "unknown"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	chunks, ok := finishBody["logChunks"].([]any)
@@ -167,6 +167,87 @@ func TestCoordinatorFinishRunSendsLogChunks(t *testing.T) {
 	}
 	if finishBody["blockedStage"] != "unknown" || finishBody["retryLikely"] != "unknown" {
 		t.Fatalf("classification fields missing: %#v", finishBody)
+	}
+}
+
+func TestCoordinatorFinishRunSendsAndRetrievesTerminalReceipt(t *testing.T) {
+	setAttestTestHome(t)
+	startedAt := time.Date(2026, 8, 23, 10, 0, 0, 0, time.UTC)
+	receipt, err := buildTerminalRunReceipt("", terminalRunReceiptInput{
+		Provider:          "aws",
+		LeaseID:           "cbx_abc123",
+		Slug:              "blue-lobster",
+		RunID:             "run_123",
+		Command:           []string{"go", "test", "./..."},
+		CommandDisplay:    "go test ./...",
+		ExitCode:          1,
+		SyncMs:            100,
+		CommandMs:         1900,
+		StartedAt:         startedAt,
+		EndedAt:           startedAt.Add(2 * time.Second),
+		LogSHA256:         sha256Digest([]byte("failed\n")),
+		RetainedLogSHA256: sha256Digest([]byte("failed\n")),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var finishBody struct {
+		Receipt terminalRunReceipt `json:"receipt"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/run_123/finish":
+			if err := json.NewDecoder(r.Body).Decode(&finishBody); err != nil {
+				t.Fatal(err)
+			}
+			_, _ = w.Write([]byte(`{"run":{"id":"run_123","leaseID":"cbx_abc123","owner":"peter@example.com","org":"example-org","provider":"aws","class":"standard","serverType":"t3.small","command":["go","test","./..."],"state":"failed","phase":"failed","exitCode":1,"logBytes":7,"logTruncated":false,"startedAt":"2026-08-23T10:00:00Z"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runs/run_123/receipt":
+			_ = json.NewEncoder(w).Encode(map[string]any{"receipt": receipt})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	if _, err := client.FinishRun(context.Background(), "run_123", 1, 100*time.Millisecond, 1900*time.Millisecond, "failed\n", false, nil, nil, FailureClassification{}, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if finishBody.Receipt.Signature != receipt.Signature {
+		t.Fatalf("finish receipt signature=%q", finishBody.Receipt.Signature)
+	}
+	recovered, err := client.RunReceipt(context.Background(), "run_123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.RunID != "run_123" || recovered.ExitCode != 1 {
+		t.Fatalf("recovered receipt=%#v", recovered)
+	}
+}
+
+func TestCoordinatorRunReceiptRejectsMalformedAndOversizedEvidence(t *testing.T) {
+	tests := map[string]any{
+		"unknown field": map[string]any{
+			"schema_version": terminalReceiptSchemaVersion,
+			"unexpected":     true,
+		},
+		"oversized": map[string]any{
+			"schema_version": terminalReceiptSchemaVersion,
+			"command":        strings.Repeat("x", maxTerminalReceiptBytes),
+		},
+	}
+	for name, receipt := range tests {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{"receipt": receipt})
+			}))
+			defer server.Close()
+			client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+			if _, err := client.RunReceipt(context.Background(), "run_123"); err == nil ||
+				!strings.Contains(err.Error(), "invalid terminal receipt") {
+				t.Fatalf("RunReceipt error=%v", err)
+			}
+		})
 	}
 }
 

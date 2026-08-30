@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -14,13 +15,22 @@ import (
 	"time"
 )
 
+const runCleanupTestTimeout = 30 * time.Second
+
 type runCleanupWorkspaceOwnerTransport struct {
 	mu sync.Mutex
 
-	blockInspectAt int
-	inspectCount   int
-	renewErr       error
-	destroyed      atomic.Bool
+	blockInspectAt            int
+	inspectCount              int
+	renewErr                  error
+	destroyed                 atomic.Bool
+	releaseReply              string
+	releaseErr                error
+	backendReturned           atomic.Bool
+	ownerReleaseBeforeBackend atomic.Bool
+	releaseContextErr         error
+	releaseBudget             time.Duration
+	releaseEarly              atomic.Bool
 
 	renewStarted   chan struct{}
 	allowRenew     chan struct{}
@@ -54,12 +64,12 @@ func (r *runCleanupWorkspaceOwnerTransport) Do(ctx context.Context, req workspac
 	switch req.Action {
 	case workspaceOwnerRenew:
 		r.renewStartOnce.Do(func() { close(r.renewStarted) })
+		defer r.renewFinishOnce.Do(func() { close(r.renewFinished) })
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
 		case <-r.allowRenew:
 		}
-		r.renewFinishOnce.Do(func() { close(r.renewFinished) })
 		if r.destroyed.Load() {
 			return "", errors.New("renew transport destroyed with lease")
 		}
@@ -82,11 +92,34 @@ func (r *runCleanupWorkspaceOwnerTransport) Do(ctx context.Context, req workspac
 		}
 		return "OWNED", nil
 	case workspaceOwnerRelease:
+		r.mu.Lock()
+		if deadline, ok := ctx.Deadline(); ok {
+			r.releaseBudget = time.Until(deadline)
+		}
+		r.mu.Unlock()
+		select {
+		case <-r.renewFinished:
+		default:
+			r.releaseEarly.Store(true)
+		}
+		r.releaseContextErr = ctx.Err()
+		if !r.backendReturned.Load() {
+			r.ownerReleaseBeforeBackend.Store(true)
+		}
 		r.ownerReleaseOnce.Do(func() { close(r.ownerReleased) })
-		return "RELEASED", nil
+		if r.releaseErr != nil {
+			return "", r.releaseErr
+		}
+		return firstNonBlank(r.releaseReply, "RELEASED"), ctx.Err()
 	default:
 		return "", errors.New("unexpected workspace-owner action")
 	}
+}
+
+func (r *runCleanupWorkspaceOwnerTransport) observedReleaseBudget() time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.releaseBudget
 }
 
 func (r *runCleanupWorkspaceOwnerTransport) unblockRenewal() {
@@ -125,7 +158,7 @@ func waitRunCleanupSignal(t *testing.T, signal <-chan struct{}, label string) {
 	t.Helper()
 	select {
 	case <-signal:
-	case <-time.After(5 * time.Second):
+	case <-time.After(runCleanupTestTimeout):
 		t.Fatalf("timed out waiting for %s", label)
 	}
 }
@@ -147,11 +180,8 @@ func startRunCleanupAsync(t *testing.T, remote *runCleanupWorkspaceOwnerTranspor
 		remote.unblockInspect()
 		remote.unblockRenewal()
 		cancel()
-		select {
-		case <-result.done:
-		case <-time.After(5 * time.Second):
-			t.Errorf("run goroutine did not stop during cleanup")
-		}
+		// Shared hooks and user directories must outlive every run defer.
+		<-result.done
 	})
 	return result
 }
@@ -161,7 +191,7 @@ func (r *runCleanupAsyncResult) wait(t *testing.T) error {
 	select {
 	case <-r.done:
 		return r.err
-	case <-time.After(5 * time.Second):
+	case <-time.After(runCleanupTestTimeout):
 		t.Fatal("run did not finish")
 		return nil
 	}
@@ -207,6 +237,7 @@ exit 0
 	runEnvProfileTestTouchHook = nil
 	runEnvProfileTestReleaseErr = nil
 	runEnvProfileTestConnectionCleanupSafe = true
+	runEnvProfileTestPreservesSSHWorkspace = false
 	t.Cleanup(func() {
 		runEnvProfileTestAcquireLease = nil
 		runEnvProfileTestAcquireHook = nil
@@ -215,42 +246,66 @@ exit 0
 		runEnvProfileTestTouchHook = nil
 		runEnvProfileTestReleaseErr = nil
 		runEnvProfileTestConnectionCleanupSafe = true
+		runEnvProfileTestPreservesSSHWorkspace = false
 		removeLeaseClaim("cbx_env_profile_test")
 	})
 	return dir
 }
 
-func TestRunCommandDestructiveCleanupQuiescesWorkspaceOwner(t *testing.T) {
+func TestRunCommandLeaseCleanupQuiescesWorkspaceOwner(t *testing.T) {
 	tests := []struct {
-		name             string
-		command          string
-		renewErr         error
-		stopErr          error
-		download         bool
-		wantExit         int
-		wantStop         bool
-		wantOwnerRelease bool
+		name                  string
+		command               string
+		renewErr              error
+		stopErr               error
+		download              bool
+		wantExit              int
+		wantStop              bool
+		wantOwnerRelease      bool
+		preservesSSHWorkspace bool
+		releaseReply          string
+		releaseErr            error
+		cancelParent          bool
 	}{
 		{name: "successful evidence-backed run", command: "renewal-cleanup-success", download: true, wantStop: true},
 		{name: "renewal fails before stop", command: "renewal-cleanup-success", renewErr: errors.New("renew response lost"), wantExit: 7, wantOwnerRelease: true},
 		{name: "stop is not confirmed", command: "renewal-cleanup-success", stopErr: errors.New("stop not confirmed"), wantExit: 7, wantStop: true, wantOwnerRelease: true},
+		{name: "nonzero with ambiguous owner", command: "renewal-cleanup-exit-23", renewErr: errors.New("renew response lost"), wantExit: 23, wantOwnerRelease: true},
+		{name: "nonzero with unconfirmed stop", command: "renewal-cleanup-exit-23", stopErr: errors.New("stop not confirmed"), wantExit: 23, wantStop: true, wantOwnerRelease: true},
 		{name: "remote command remains nonzero", command: "renewal-cleanup-exit-23", wantExit: 23, wantStop: true},
+		{name: "retained workspace", command: "renewal-cleanup-success", preservesSSHWorkspace: true, wantStop: true, wantOwnerRelease: true},
+		{name: "retained workspace command remains nonzero", command: "renewal-cleanup-exit-23", preservesSSHWorkspace: true, wantExit: 23, wantStop: true, wantOwnerRelease: true},
+		{name: "retained workspace renewal fails", command: "renewal-cleanup-success", preservesSSHWorkspace: true, renewErr: errors.New("renew response lost"), wantExit: 7, wantOwnerRelease: true},
+		{name: "retained workspace backend release fails", command: "renewal-cleanup-success", preservesSSHWorkspace: true, stopErr: errors.New("release not confirmed"), wantExit: 7, wantStop: true, wantOwnerRelease: true},
+		{name: "retained workspace close response lost", command: "renewal-cleanup-success", preservesSSHWorkspace: true, releaseErr: errors.New("release response lost"), wantExit: 7, wantStop: true, wantOwnerRelease: true},
+		{name: "retained workspace close failure preserves command exit", command: "renewal-cleanup-exit-23", preservesSSHWorkspace: true, releaseErr: errors.New("release response lost"), wantExit: 23, wantStop: true, wantOwnerRelease: true},
+		{name: "retained workspace successor owner", command: "renewal-cleanup-success", preservesSSHWorkspace: true, releaseReply: "MISMATCH", wantExit: 7, wantStop: true, wantOwnerRelease: true},
+		{name: "retained workspace active child", command: "renewal-cleanup-success", preservesSSHWorkspace: true, releaseReply: "CHILD", wantExit: 7, wantStop: true, wantOwnerRelease: true},
+		{name: "retained workspace ambiguous child", command: "renewal-cleanup-success", preservesSSHWorkspace: true, releaseReply: "AMBIGUOUS", wantExit: 7, wantStop: true, wantOwnerRelease: true},
+		{name: "retained workspace canceled parent", command: "renewal-cleanup-success", preservesSSHWorkspace: true, cancelParent: true, wantStop: true, wantOwnerRelease: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			dir := setupRunCleanupWorkspaceOwnerTest(t)
 			remote := newRunCleanupWorkspaceOwnerTransport(2, test.renewErr)
+			remote.releaseReply, remote.releaseErr = test.releaseReply, test.releaseErr
+			runEnvProfileTestPreservesSSHWorkspace = test.preservesSSHWorkspace
+			var cancelParent context.CancelFunc
 			releaseStarted := make(chan struct{})
 			var releaseOnce sync.Once
 			var releaseOvertookRenewal atomic.Bool
 			runEnvProfileTestReleaseHook = func() error {
-				remote.destroyed.Store(true)
+				defer remote.backendReturned.Store(true)
+				remote.destroyed.Store(!test.preservesSSHWorkspace)
 				releaseOnce.Do(func() { close(releaseStarted) })
 				select {
 				case <-remote.renewFinished:
 				default:
 					releaseOvertookRenewal.Store(true)
 					remote.unblockRenewal()
+				}
+				if test.cancelParent {
+					cancelParent()
 				}
 				return test.stopErr
 			}
@@ -281,12 +336,14 @@ func TestRunCommandDestructiveCleanupQuiescesWorkspaceOwner(t *testing.T) {
 				},
 			}
 			result := startRunCleanupAsync(t, remote, func(ctx context.Context) error {
+				ctx, cancelParent = context.WithCancel(ctx)
+				defer cancelParent()
 				return app.runCommand(ctx, args)
 			})
 			var owner *workspaceOwner
 			select {
 			case owner = <-ownerReady:
-			case <-time.After(5 * time.Second):
+			case <-time.After(runCleanupTestTimeout):
 				t.Fatal("run did not acquire workspace owner")
 			}
 
@@ -301,7 +358,7 @@ func TestRunCommandDestructiveCleanupQuiescesWorkspaceOwner(t *testing.T) {
 			select {
 			case <-releaseStarted:
 				t.Fatal("destructive stop overtook workspace-owner renewal quiescence")
-			case <-time.After(5 * time.Second):
+			case <-time.After(runCleanupTestTimeout):
 				t.Fatal("workspace-owner renewal was not asked to quiesce")
 			case <-owner.stop:
 			}
@@ -317,6 +374,12 @@ func TestRunCommandDestructiveCleanupQuiescesWorkspaceOwner(t *testing.T) {
 				t.Fatal("backend release observed renewal still in flight")
 			}
 			assertRunCleanupExitCode(t, runErr, test.wantExit, stdout.String(), stderr.String())
+			if test.command == "renewal-cleanup-exit-23" {
+				wantRecovery := test.stopErr != nil || test.renewErr != nil
+				if got := strings.Contains(stderr.String(), "next: crabbox ssh "); got != wantRecovery {
+					t.Fatalf("lease recovery present=%v want=%v:\n%s", got, wantRecovery, stderr.String())
+				}
+			}
 			select {
 			case <-releaseStarted:
 				if !test.wantStop {
@@ -331,6 +394,12 @@ func TestRunCommandDestructiveCleanupQuiescesWorkspaceOwner(t *testing.T) {
 			case <-remote.ownerReleased:
 				if !test.wantOwnerRelease {
 					t.Fatal("confirmed stop attempted a remote owner release")
+				}
+				if test.wantStop && remote.ownerReleaseBeforeBackend.Load() {
+					t.Fatal("remote owner released before backend release returned")
+				}
+				if remote.releaseContextErr != nil {
+					t.Fatalf("remote owner release inherited canceled context: %v", remote.releaseContextErr)
 				}
 			default:
 				if test.wantOwnerRelease {
@@ -382,6 +451,69 @@ func TestRunCommandRetainedLeaseRetainsFailClosedRenewal(t *testing.T) {
 			default:
 			}
 			waitRunCleanupSignal(t, remote.ownerReleased, "retained owner release")
+			if remote.releaseEarly.Load() {
+				t.Fatal("owner release began before failed renewal transport cleanup completed")
+			}
+			if budget := remote.observedReleaseBudget(); budget <= workspaceOwnerCallTimeout-time.Second || budget > workspaceOwnerCallTimeout {
+				t.Fatalf("release budget=%s want fresh %s transport call after renewal cleanup", budget, workspaceOwnerCallTimeout)
+			}
+		})
+	}
+}
+
+func TestRunFailureDigestCleanupOutcomes(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		flags    []string
+		stopErr  error
+		wantStop bool
+	}{
+		{name: "automatic failure cleanup", wantStop: true},
+		{name: "always", flags: []string{"--stop-after", "always"}, wantStop: true},
+		{name: "failure", flags: []string{"--stop-after", "failure"}, wantStop: true},
+		{name: "success only", flags: []string{"--stop-after", "success"}},
+		{name: "never", flags: []string{"--stop-after", "never"}},
+		{name: "kept", flags: []string{"--keep"}},
+		{name: "keep failed", flags: []string{"--keep-on-failure"}},
+		{name: "failed cleanup", stopErr: errors.New("release failed")},
+		{name: "ambiguous cleanup", stopErr: errors.New("release response lost")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			setupRunCleanupWorkspaceOwnerTest(t)
+			var stdout, stderr bytes.Buffer
+			var releaseCalls int
+			runEnvProfileTestReleaseHook = func() error {
+				releaseCalls++
+				if strings.Contains(stderr.String(), "failure digest") {
+					t.Error("digest printed before cleanup outcome was known")
+				}
+				return test.stopErr
+			}
+			args := []string{"--provider", runEnvProfileTestProvider{}.Name(), "--no-sync", "--no-hydrate", "--timing-json"}
+			args = append(args, test.flags...)
+			args = append(args, "--", "renewal-cleanup-exit-23")
+			err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), args)
+			assertRunCleanupExitCode(t, err, 23, stdout.String(), stderr.String())
+			out := stderr.String()
+			lines := strings.Split(strings.TrimSpace(out), "\n")
+			var report TimingReport
+			if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil {
+				t.Fatalf("final stderr line must remain timing JSON: %v\n%s", err, out)
+			}
+			if report.ExitCode != 23 || (report.LeaseStopped != nil && *report.LeaseStopped) != test.wantStop {
+				t.Fatalf("timing outcome disagrees with cleanup: %#v", report)
+			}
+			if !strings.Contains(out, "failure digest") {
+				t.Fatalf("missing failure digest:\n%s", out)
+			}
+			for _, command := range []string{"ssh", "run", "stop"} {
+				if got := strings.Contains(out, "next: crabbox "+command+" "); got == test.wantStop {
+					t.Errorf("recovery %s present=%v, stopped=%v:\n%s", command, got, test.wantStop, out)
+				}
+			}
+			if (test.wantStop || test.stopErr != nil) != (releaseCalls == 1) {
+				t.Errorf("release calls=%d", releaseCalls)
+			}
 		})
 	}
 }

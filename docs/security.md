@@ -400,8 +400,9 @@ session.
 Configured provider credentials are redacted from documented HTTP or streamed
 error diagnostics, including Azure Dynamic Sessions, Cloudflare runner, Daytona,
 DigitalOcean, E2B, FastAPI Cloud, Freestyle, Islo, Morph, OpenComputer, Orgo,
-Railway, RunPod, Semaphore, SmolVM, Sprites, and Upstash Box. The same final redaction covers `doctor` text and JSON
-messages/details. It removes exact configured secrets, authorization and API-key
+Railway, RunPod, Semaphore, SmolVM, Sprites, and Upstash Box. The same final
+redaction covers `doctor` text and JSON messages/details, plus coordinator-bound
+run-event diagnostic messages. It removes exact configured secrets, authorization and API-key
 headers, credential-bearing URL query/userinfo components, common secret JSON
 fields, bearer values, and PEM private keys while retaining non-secret routing
 context. Providers contribute runtime-only environment and local CLI-store
@@ -410,7 +411,9 @@ provider that owns it. Header and bearer fallbacks treat whitespace or an
 unescaped JSON quote as the credential boundary, so punctuation inside an
 otherwise unknown credential cannot expose a suffix. Generated stop and
 failure-routing commands retain provider endpoint routing but remove URL userinfo
-before they are printed or stored.
+before they are printed or stored. Code and WebVNC portal links, browser opener
+arguments, and WebVNC bootstrap form actions also remove coordinator URL
+userinfo while preserving authenticated coordinator and agent transport.
 GitHub Actions registration metadata and its short-lived runner token travel
 over SSH stdin rather than the remote command line. These guarantees apply to
 Crabbox-generated diagnostics and process arguments, not to arbitrary command
@@ -445,6 +448,24 @@ can resume without trusting reused names. Cleanup skips weakly labeled,
 unclaimed, and stale-claim servers instead of turning provider inventory into
 ownership proof.
 
+Tencent Cloud, Nebius, Vast, Orgo, Upstash Box, and Coder follow the same
+provider-neutral destructive ownership contract: a durable local claim must
+bind the provider, lease, exact resource identity, slug, and any applicable
+endpoint, account, workspace, or provider-key namespace. Crabbox holds the
+per-lease claim lock across final provider identity checks, the destructive
+operation, and claim removal or retained-state update. Names, provider tags,
+and inventory matches remain discovery hints; missing, stale, or concurrently
+replaced claims never authorize deletion or stopping.
+
+`stop --force` is an explicit, single-resource recovery path rather than an
+authorization bypass. It requires an explicit provider and exact resource ID.
+Adapters that support safe adoption must first inspect provider identity and
+scope, create a conflict-safe exact claim, and retain that claim through the
+normal fenced operation. Brokered recovery instead requires a successful fresh
+inspection of the exact coordinator lease and its provider. Unsupported
+providers, ambiguous identifiers, and failed ownership inspections fail closed;
+there is no force-enabled cleanup sweep.
+
 Artifact publishing rejects symlinks, directories at reserved generated-output
 paths, and other non-regular bundle entries before upload side effects.
 Publishing copies validated file objects into a private snapshot before broker,
@@ -462,6 +483,14 @@ private-file boundary protects Crabbox-generated run outputs and the managed
 attestation signing key; replacement or reuse tightens an older broad mode or
 DACL instead of preserving it. Required artifact paths must resolve to regular
 files.
+Failure-bundle destinations are checked for existing write access without
+creating a temporary name, then restricted to the current user before any
+bundle file is created. A retained directory descriptor or handle anchors temp
+creation, publication, and cleanup through the end of writing; replacing a
+parent path cannot redirect bundle bytes. Windows retains ancestor handles
+without delete sharing and publishes the original open file handle, so neither
+directory replacement nor temporary-name substitution can redirect publication.
+An already unwritable directory is not made writable to capture diagnostics.
 Automatic remote failure bundles confine member names and link targets to their
 generated subtree and omit
 escaping, rooted, empty, or special-file entries. These filesystem checks do
@@ -654,10 +683,13 @@ never proxies SSH traffic. The posture:
 - SSH listens on the configured primary port (default `2222`) plus configured
   fallback ports (default `22`), because port 22 is not reliably reachable from
   every operator network.
-- AWS security groups use `CRABBOX_AWS_SSH_CIDRS` when set. Brokered leases
-  otherwise scope ingress to the CLI-detected outbound IPv4 CIDR, falling back
-  to the Cloudflare request source IP for the lease. Hetzner direct mode relies
-  on provider firewall defaults unless a profile tightens them.
+- AWS security groups keep explicitly configured SSH CIDRs pinned and never add
+  detected or request-source CIDRs to that policy. Without pinned CIDRs, brokered
+  leases admit both the CLI-detected outbound IPv4 `/32`, when available, and the
+  coordinator-authenticated request source (`/32` or `/128`); an IPv6 heartbeat
+  does not remove working IPv4 ingress. Direct AWS leases detect the client's
+  outbound IPv4 CIDR. Hetzner direct mode relies on provider firewall defaults
+  unless a profile tightens them.
 - Machines are disposable and cleanable; boot-time cleanup clears stale
   work-root directories.
 
@@ -729,7 +761,12 @@ Brokered cloud orphan sweeps treat coordinator lease state as the authority.
 Provider tags discover candidates and explain why they look stale, but do not
 authorize a destructive action. Automatic AWS or Azure deletion requires an
 exact retained coordinator lease binding for the same provider resource and
-region; EC2 Mac host release likewise requires an exact retained host binding.
+region; both automatic and administrator-requested EC2 Mac host release
+likewise require an exact retained host binding plus freshly verified Crabbox
+provider tags. Administrative release also checks the account namespace
+recorded before Mac host provisioning against the current authenticated STS
+identity and clears its retained host binding only after AWS confirms release.
+Administrative confirmation cannot substitute for ownership.
 Azure's canonical-set, topology, stable-identity, quarantine, and fresh-preflight
 rules are maintained in [Lifecycle and cleanup](features/lifecycle-cleanup.md);
 shared VNets, subnets, NSGs, and resource groups are never sweep candidates.

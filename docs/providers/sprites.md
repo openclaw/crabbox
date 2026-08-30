@@ -117,8 +117,15 @@ crabbox list --provider sprites
 5. Return an SSH target with `ProxyCommand=sprite proxy -s %h -W 22` and wait
    until SSH is ready.
 6. Crabbox syncs the checkout and runs commands over SSH.
-7. On release, delete the sprite and remove the local claim and key (unless the
-   lease is kept).
+7. On release, require the exact local lease claim, API endpoint, sprite name,
+   and live lease ownership labels before deleting the sprite. Successful
+   deletion removes the fenced claim and local key; failed deletion preserves
+   the claim for a safe retry.
+
+Raw names and provider labels only discover sprites; they never authorize
+deletion. Explicit `--reclaim` can adopt a verified sprite through a normal
+reuse command before it can be stopped. `stop --force` is unavailable because
+Sprites cannot independently prove ownership of an arbitrary lost-claim sprite.
 
 ## Live smoke
 

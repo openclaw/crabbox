@@ -25,6 +25,9 @@ import (
 // TestMain keeps re-invoked test binaries alive as daemon children instead of
 // recursively running the suite.
 func TestMain(m *testing.M) {
+	if os.Getenv("CRABBOX_TEST_EGRESS_BOOTSTRAP") != "" && len(os.Args) > 1 && os.Args[1] == "egress" {
+		os.Exit(runEgressBootstrapTestProcess())
+	}
 	if os.Getenv("CRABBOX_EGRESS_DAEMON_TESTCHILD") == "1" {
 		time.Sleep(10 * time.Minute)
 		os.Exit(egressDaemonFatalCode)

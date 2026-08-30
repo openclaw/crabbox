@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -15,14 +16,19 @@ import (
 const (
 	maxCLIOutput                    = 16 << 20
 	machine0RateLimitMessage        = "rate limited. please wait a moment and try again."
+	machine0UnavailableMessage      = "the cloud provider is temporarily unavailable. please try again shortly."
 	machine0ReadRetryFallback       = 5 * time.Second
 	machine0ReadRetryMinimumCadence = time.Second
 )
 
+var machine0UUIDPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
 type machine0API interface {
 	Version(context.Context) (string, error)
+	AccountID(context.Context) (string, error)
 	List(context.Context) ([]machine, error)
 	Get(context.Context, string) (machine, error)
+	SelectedKey(context.Context, string) (*machineKey, error)
 	Create(context.Context, createMachineRequest) error
 	Start(context.Context, string) error
 	Stop(context.Context, string) error
@@ -73,6 +79,7 @@ type machineKey struct {
 	Type      string `json:"type"`
 	FileName  string `json:"fileName"`
 	PublicKey string `json:"publicKey"`
+	IsDefault bool   `json:"isDefault"`
 }
 
 type createMachineRequest struct {
@@ -125,6 +132,7 @@ func (s *machineSize) UnmarshalJSON(data []byte) error {
 }
 
 func (c *client) run(ctx context.Context, args ...string) (LocalCommandResult, error) {
+	started := time.Now()
 	result, err := c.rt.Exec.Run(ctx, LocalCommandRequest{
 		Name:                   c.cfg.CLIPath,
 		Args:                   args,
@@ -142,6 +150,19 @@ func (c *client) run(ctx context.Context, args ...string) (LocalCommandResult, e
 	}
 	if detail == "" {
 		detail = strings.TrimSpace(fmt.Sprint(err))
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		if output := strings.TrimSpace(strings.Join([]string{result.Stderr, result.Stdout}, "\n")); output != "" {
+			detail = fmt.Sprintf("%v after %s; partial output: %s", cause, time.Since(started).Round(time.Millisecond), output)
+		} else {
+			detail = fmt.Sprintf("%v after %s", cause, time.Since(started).Round(time.Millisecond))
+		}
+	} else if err != nil && result.ExitCode < 0 {
+		if output := strings.TrimSpace(strings.Join([]string{result.Stderr, result.Stdout}, "\n")); output != "" {
+			detail = fmt.Sprintf("%v; partial output: %s", err, output)
+		} else {
+			detail = err.Error()
+		}
 	}
 	lower := strings.ToLower(detail)
 	if strings.Contains(lower, "not logged in") || strings.Contains(lower, "not authenticated") || strings.Contains(lower, "unauthorized") {
@@ -168,12 +189,12 @@ func (c *client) runRead(ctx context.Context, args ...string) (LocalCommandResul
 		if ctxErr := context.Cause(ctx); ctxErr != nil {
 			return result, ctxErr
 		}
-		if !machine0ReadRateLimited(result, err) {
+		if !machine0ReadUnavailable(result, err) {
 			return result, err
 		}
 		if !warned {
 			if c.rt.Stderr != nil {
-				_, _ = fmt.Fprintf(c.rt.Stderr, "machine0 read rate limited; retrying every %s until the current operation ends\n", delay)
+				_, _ = fmt.Fprintf(c.rt.Stderr, "machine0 read unavailable; retrying every %s until the current operation ends\n", delay)
 			}
 			warned = true
 		}
@@ -196,9 +217,9 @@ func machine0ReadRetryDelay(configured time.Duration) time.Duration {
 	return configured
 }
 
-func machine0ReadRateLimited(result LocalCommandResult, err error) bool {
+func machine0ReadUnavailable(result LocalCommandResult, err error) bool {
 	detail := strings.ToLower(strings.Join([]string{result.Stdout, result.Stderr, fmt.Sprint(err)}, "\n"))
-	return strings.Contains(detail, machine0RateLimitMessage)
+	return strings.Contains(detail, machine0RateLimitMessage) || strings.Contains(detail, machine0UnavailableMessage)
 }
 
 func decodeJSON(output string, target any) error {
@@ -225,6 +246,26 @@ func (c *client) Version(ctx context.Context) (string, error) {
 	return strings.TrimSpace(result.Stdout + result.Stderr), nil
 }
 
+func (c *client) AccountID(ctx context.Context) (string, error) {
+	result, err := c.runRead(ctx, "whoami", "--json")
+	if err != nil {
+		if cause := context.Cause(ctx); cause != nil {
+			return "", cause
+		}
+		// Native output includes personal and billing details; never echo it.
+		return "", exit(5, "machine0 account identity lookup failed; retain checkpoint and source")
+	}
+	var account struct {
+		User struct {
+			ID string `json:"id"`
+		} `json:"user"`
+	}
+	if err := decodeJSON(result.Stdout, &account); err != nil || strings.TrimSpace(account.User.ID) == "" || account.User.ID != strings.TrimSpace(account.User.ID) {
+		return "", exit(5, "machine0 whoami --json omitted a valid user.id; retain checkpoint and source")
+	}
+	return account.User.ID, nil
+}
+
 func (c *client) List(ctx context.Context) ([]machine, error) {
 	result, err := c.runRead(ctx, "ls", "--json")
 	if err != nil {
@@ -243,6 +284,36 @@ func (c *client) List(ctx context.Context) ([]machine, error) {
 }
 
 func (c *client) Get(ctx context.Context, name string) (machine, error) {
+	var id string
+	if machine0UUIDPattern.MatchString(name) {
+		// Native UUID get uses an unavailable procedure in CLI 1.0.164.
+		// Resolve a transport name from inventory, then verify full detail identity.
+		id, name = name, ""
+		machines, err := c.List(ctx)
+		if err != nil {
+			return machine{}, err
+		}
+		if machines == nil {
+			return machine{}, exit(5, "invalid machine0 ls --json for UUID lookup: expected an array")
+		}
+		for i, candidate := range machines {
+			if !machine0UUIDPattern.MatchString(candidate.ID) {
+				return machine{}, exit(5, "invalid machine0 ls --json item %d: missing or malformed UUID", i)
+			}
+			if strings.EqualFold(candidate.ID, id) {
+				if name != "" {
+					return machine{}, exit(5, "multiple Machine0 inventory entries match UUID %s", id)
+				}
+				name = candidate.Name
+			}
+		}
+		if name == "" {
+			return machine{}, exit(4, "Machine0 UUID %s is absent from current authorized inventory", id)
+		}
+		if machine0UUIDPattern.MatchString(name) {
+			return machine{}, exit(5, "invalid machine name in Machine0 inventory for UUID %s: %q", id, name)
+		}
+	}
 	result, err := c.runRead(ctx, "get", name, "--json")
 	if err != nil {
 		return machine{}, err
@@ -254,7 +325,48 @@ func (c *client) Get(ctx context.Context, name string) (machine, error) {
 	if err := validateMachine(item, true); err != nil {
 		return machine{}, exit(5, "invalid machine0 get %s --json: %v", name, err)
 	}
+	if id != "" && (!strings.EqualFold(item.ID, id) || item.Name != name) {
+		return machine{}, exit(5, "Machine0 lookup identity changed: expected id=%s name=%q, found id=%s name=%q", id, name, item.ID, item.Name)
+	}
 	return item, nil
+}
+
+func (c *client) SelectedKey(ctx context.Context, name string) (*machineKey, error) {
+	if name = strings.TrimSpace(name); name == "" {
+		result, err := c.runRead(ctx, "keys", "ls", "--json")
+		if err != nil {
+			return nil, err
+		}
+		var keys []machineKey
+		if err := decodeJSON(result.Stdout, &keys); err != nil {
+			return nil, exit(5, "parse machine0 keys ls --json: %v", err)
+		}
+		for _, key := range keys {
+			if key.IsDefault {
+				name = strings.TrimSpace(key.Name)
+				if name == "" {
+					return nil, exit(5, "machine0 default SSH key has no name")
+				}
+				break
+			}
+		}
+		if name == "" {
+			return nil, nil
+		}
+	}
+	// List summaries can omit fileName; both selections need the full key details.
+	result, err := c.runRead(ctx, "keys", "get", name, "--json")
+	if err != nil {
+		return nil, err
+	}
+	var key machineKey
+	if err := decodeJSON(result.Stdout, &key); err != nil {
+		return nil, exit(5, "parse machine0 keys get %s --json: %v", name, err)
+	}
+	if strings.TrimSpace(key.Name) != name {
+		return nil, exit(5, "machine0 key lookup returned mismatched key name: expected %s, found %s", name, blank(key.Name, "<empty>"))
+	}
+	return &key, nil
 }
 
 func validateMachine(item machine, requireID bool) error {

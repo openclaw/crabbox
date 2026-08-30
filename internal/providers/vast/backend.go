@@ -43,6 +43,7 @@ func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) *backe
 	applyVastDefaults(&cfg)
 	b := &backend{cfg: cfg, rt: rt, pollTimeout: vastPollTimeout, cleanupTimeout: vastCleanupTimeout}
 	b.DirectSSHBackend = shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt, Delete: b.deleteServer, StoredLeaseKeys: true}
+	b.DirectSSHBackend.PrepareCleanup = b.prepareExactCleanupClaim
 	b.apiFactory = func(rt core.Runtime) (vastAPI, error) { return newVastClient(cfg.Vast, rt) }
 	b.waitSSH = func(ctx context.Context, target *core.SSHTarget, phase string, timeout time.Duration) error {
 		return core.WaitForSSHReady(ctx, target, b.stderr(), phase, timeout)
@@ -668,65 +669,94 @@ func (b *backend) deleteServer(ctx context.Context, _ core.Config, server core.S
 	if err := validateVastServer(server); err != nil {
 		return err
 	}
-	client, err := b.api()
+	binding := b.vastClaimBinding(server)
+	claim, err := shared.RequireExactClaim(binding)
 	if err != nil {
 		return err
 	}
-	leaseID := server.Labels["lease"]
-	claim, claimExists, err := core.ReadLeaseClaimWithPresence(leaseID)
-	if err != nil {
-		return fmt.Errorf("read vast cleanup claim: %w", err)
+	if snapshot, _, set := core.ServerLeaseClaimSnapshot(server); set {
+		claim = snapshot
 	}
-	if !claimExists {
-		return exit(2, "lease=%s has no local Vast claim; refusing destructive cleanup", leaseID)
-	}
-	if claim.Provider != providerName {
-		return exit(2, "lease=%s is claimed by provider=%s; refusing Vast cleanup", leaseID, claim.Provider)
-	}
-	if claim.CloudID != "" && server.CloudID != "" && claim.CloudID != server.CloudID {
-		return exit(2, "refusing to release Vast instance %s from stale local claim", server.CloudID)
-	}
-	if err := b.validateVastCleanupIdentity(ctx, client, claim); err != nil {
-		return err
-	}
+	leaseID := binding.LeaseID
 	instanceID, ok := parseVastInstanceID(firstNonBlank(server.CloudID, claim.CloudID))
 	if !ok {
 		return exit(2, "provider=%s release requires a Vast instance id", providerName)
-	}
-	if live, getErr := client.GetInstance(ctx, instanceID); getErr == nil {
-		if err := validateLiveVastInstance(live, server); err != nil {
-			return err
-		}
-	} else if !isVastNotFound(getErr) {
-		return getErr
 	}
 	action := effectiveVastReleaseAction(b.cfg, claim.Labels)
 	switch action {
 	case "keep":
 		return nil
 	case "stop":
-		if _, err := client.ManageInstance(ctx, instanceID, vastManageInstanceInput{State: "stopped", Label: encodeVastOwnershipLabel(leaseID, server.Labels["slug"], "stopped")}); err != nil {
-			return err
-		}
 		labels := shared.CloneLabels(claim.Labels)
 		labels["state"] = "stopped"
 		labels[vastReleaseActionLabel] = "stop"
-		if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, claim, labels); err != nil {
+		if _, err := shared.UpdateExactClaimLabelsAfter(claim, binding, labels, func() error {
+			client, err := b.api()
+			if err != nil {
+				return err
+			}
+			if err := b.validateClaimedVastInstance(ctx, client, claim, server, instanceID); err != nil {
+				return err
+			}
+			_, err = client.ManageInstance(ctx, instanceID, vastManageInstanceInput{State: "stopped", Label: encodeVastOwnershipLabel(leaseID, server.Labels["slug"], "stopped")})
+			return err
+		}); err != nil {
 			return fmt.Errorf("finalize vast stop claim: %w", err)
 		}
 	default:
-		if keyID := strings.TrimSpace(claim.Labels[vastKeyIDLabel]); keyID != "" && claim.Labels[vastKeyOwnedLabel] == "true" {
-			if err := client.DetachInstanceSSHKey(ctx, instanceID, keyID); err != nil && !isVastNotFound(err) {
+		if err := shared.RemoveExactClaimAfter(claim, binding, func() error {
+			client, err := b.api()
+			if err != nil {
 				return err
 			}
-		}
-		if err := client.DestroyInstance(ctx, instanceID); err != nil && !isVastNotFound(err) {
-			return err
-		}
-		if err := core.RemoveLeaseClaimIfUnchanged(leaseID, claim); err != nil {
+			if err := b.validateClaimedVastInstance(ctx, client, claim, server, instanceID); err != nil {
+				return err
+			}
+			if keyID := strings.TrimSpace(claim.Labels[vastKeyIDLabel]); keyID != "" && claim.Labels[vastKeyOwnedLabel] == "true" {
+				if err := client.DetachInstanceSSHKey(ctx, instanceID, keyID); err != nil && !isVastNotFound(err) {
+					return err
+				}
+			}
+			if err := client.DestroyInstance(ctx, instanceID); err != nil && !isVastNotFound(err) {
+				return err
+			}
+			return nil
+		}); err != nil {
 			return fmt.Errorf("finalize vast cleanup claim: %w", err)
 		}
 		core.RemoveStoredTestboxKey(leaseID)
+	}
+	return nil
+}
+
+func (b *backend) vastClaimBinding(server core.Server) shared.ClaimBinding {
+	return shared.ClaimBinding{
+		Provider:      providerName,
+		ProviderScope: core.ProviderClaimScope(providerName, b.cfg),
+		LeaseID:       strings.TrimSpace(server.Labels["lease"]),
+		Slug:          strings.TrimSpace(server.Labels["slug"]),
+		CloudID:       strings.TrimSpace(server.CloudID),
+	}
+}
+
+func (b *backend) prepareExactCleanupClaim(_ context.Context, server core.Server) (core.Server, bool, shared.CleanupSkipReason, error) {
+	claim, err := shared.RequireExactClaim(b.vastClaimBinding(server))
+	if err != nil {
+		eligible, cleanupErr := shared.CleanupClaimEligible(err)
+		return server, eligible, shared.CleanupSkipNoExactLocalClaim, cleanupErr
+	}
+	core.SetServerLeaseClaimSnapshot(&server, claim, true)
+	return server, true, "", nil
+}
+
+func (b *backend) validateClaimedVastInstance(ctx context.Context, client vastAPI, claim core.LeaseClaim, server core.Server, instanceID int) error {
+	if err := b.validateVastCleanupIdentity(ctx, client, claim); err != nil {
+		return err
+	}
+	if live, err := client.GetInstance(ctx, instanceID); err == nil {
+		return validateLiveVastInstance(live, server)
+	} else if !isVastNotFound(err) {
+		return err
 	}
 	return nil
 }

@@ -282,6 +282,7 @@ func TestStaticSSHTouchDoesNotRecreateRacedAwayClaim(t *testing.T) {
 
 func acquireStaticLifecycleLease(t *testing.T, idleTimeout time.Duration) (Config, LeaseTarget, core.LeaseClaim) {
 	t.Helper()
+	stubStaticArchitecture(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	oldWait := waitForSSH

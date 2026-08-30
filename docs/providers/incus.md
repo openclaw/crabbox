@@ -18,17 +18,17 @@ reachable SSH target, then uses the normal Crabbox SSH sync/run lifecycle.
 - Kind: `ssh-lease`
 - Targets: Linux only
 - Coordinator: never
-- Features: `ssh`, `crabbox-sync`, `cleanup`
+- Features: `ssh`, `crabbox-sync`, `cleanup`, `workspace-checkpoint`, `workspace-fork`
 - Authentication model: reuse existing Incus client trust state or an explicit
   socket/address override; no Crabbox-specific token flags
 
-The first implementation is intentionally small:
+The provider stays focused on:
 
 - Linux guests only
 - direct Incus control only
 - no broker/Worker path
 - no delegated `incus exec` mode
-- no provider-native checkpoint/fork support in v1
+- private disk-image checkpoints and forks for root-disk-only Linux containers (VM native captures are rejected)
 
 ## Connection modes
 
@@ -179,27 +179,114 @@ Supported flags:
 
 ## Lease behavior
 
-On acquire, Crabbox:
+On acquire, Crabbox generates a per-lease SSH key and durably records the
+creation intent before submitting the Incus request. It creates a named instance
+with Crabbox cloud-init and `user.crabbox.*` metadata, starts it, and waits for
+SSH readiness. Container leases can use the optional TCP proxy device; VMs need
+a directly reachable address.
 
-1. allocates a Crabbox lease id and slug;
-2. generates a per-lease SSH key;
-3. creates an Incus instance from the configured image;
-4. injects Crabbox cloud-init plus provider metadata in `user.crabbox.*`
-   instance config keys;
-5. optionally adds an Incus TCP proxy device for containers when
-   `incus.proxyListenPort` is set;
-6. starts the instance and waits for a reachable SSH path;
-7. returns a normal Crabbox SSH lease target.
+`warmup --lease-id cbx_0123456789ab` and `checkpoint fork --lease-id ...` support
+fixed, idempotent allocation. Use `run --id cbx_0123456789ab` to run on an acquired lease. Repeating the same intent reuses the same instance and
+key, including after a lost create response or client restart. A per-ID CLI lock
+serializes acquisition through registration and fork preparation; provider claim
+locks continue to fence ownership changes. Configuration, resolved profile
+contents, checkpoint, endpoint, project, daemon certificate, and resource UUID
+conflicts fail closed. A fixed ID becomes terminal after deletion and cannot be
+recycled. Normal generated-ID leases use the same durable creation path.
 
-Crabbox-managed metadata is stored on the instance itself in `user.crabbox.*`
-keys. That is how list/resolve/touch/cleanup identify managed leases without any
-extra Incus-side service.
+Claims preserve the original connection settings and bind the resolved endpoint,
+project, daemon certificate fingerprint, instance name, and UUID. Changing a
+remote alias or replacing a daemon does not redirect a claim to another resource.
+Use the original connection settings for lease reuse and cleanup; certificate
+rotation requires operator reconciliation. A failed or inconclusive allocation
+keeps its claim and key when cleanup cannot be confirmed. Retry the same fixed
+ID to reconcile it, or stop the recorded lease. Incomplete leases cannot be run
+or started through ordinary reuse; replay the original warmup/fork intent to
+finish preparation. A validated deletion is recorded before removing the instance,
+so a lost delete reply can be reconciled by another stop or cleanup. Do not discard the claim to
+work around an ownership conflict.
 
-On release:
+Release deletes the instance by default. With `incus.deleteOnRelease: false`,
+release stops it and retains the key and claim for later `--id` reuse. Retained
+leases created by older Crabbox versions remain usable through their original
+name-based scope, but cannot be captured natively; create a new lease to obtain
+the durable identity contract.
 
-- default behavior deletes the instance;
-- if `incus.deleteOnRelease: false`, Crabbox stops the instance and keeps the
-  retained lease reusable through later `--id` resolves.
+## Native disk checkpoints
+
+`--mode native` creates an `incus-image` checkpoint. The generic default remains
+`--mode auto` with workspace-archive fallback for direct providers. Native
+`--strategy auto` normalizes to `disk-snapshot`; `--strategy image` uses the same
+snapshot-to-image implementation. Capture always waits for Incus operations to
+finish, including with `--wait=false`; `--wait-timeout` bounds the snapshot and
+publish wait (45 minutes by default), retaining an uncertain record on timeout.
+
+Crabbox creates a **stateless disk snapshot**, publishes it as a **private,
+non-expiring, non-updating Incus image**, and removes the temporary snapshot. The image has an
+independent lifetime: delete the source lease, verify the checkpoint, fork it,
+and then delete the checkpoint. Existing forks survive image deletion. Images
+stay private; Crabbox never publishes with public visibility. Publication explicitly
+clears inherited base-image expiry. Before snapshot creation, the canonical local
+checkpoint record durably stores the source UUID, snapshot name, and exact Incus
+connection identity. Recovery records the image fingerprint before deleting it,
+so interrupted deletion can safely reconcile a missing image. An unresolved
+publication retains its record and snapshot until its outcome can be established.
+
+Capture does not stop/reboot the source, reset its cloud-init, or change its
+credentials. A running source produces a crash-consistent disk capture; quiesce
+applications yourself when application consistency matters. Memory, running
+processes, CRIU, and live migration are not captured. All attached non-root disk
+devices are rejected, and a running source's canonical workspace must not
+intersect a guest mount. Symlinked or non-normalized workspace paths are rejected
+so path aliases cannot bypass mount checks. Use `--mode archive` for mounted workspaces. In-guest
+mounts outside the workspace are not captured as part of the root disk.
+
+Native captures and forks currently require Linux **containers** with the
+Crabbox SSH bootstrap. VMs use workspace archives: the pinned Incus API cannot
+edit their files without starting the guest agent, which would expose inherited
+SSH authority before replacement.
+
+Before starting a fork, Crabbox disables inherited image templates and cloud-init
+on the stopped clone, replaces the configured user's `authorized_keys`, installs
+a root-owned authorization file containing only the new lease's public key, and
+replaces `sshd_config` to use that file exclusively. It generates a new Ed25519
+host key, machine ID, and hostname. Incus receives a fresh resource UUID and
+creates fresh virtual network identity. Forks do not rerun the source's
+cloud-init commands or preserve custom SSH configuration. Autostart is disabled
+so an incomplete clone stays stopped across daemon restarts. Identity write
+failure leaves the clone stopped and its claim available for retry or cleanup.
+The source lease's private key cannot authenticate to the fork's managed SSH
+service. Workspace contents, installed dependencies, and other root-disk data
+remain available; application-specific credentials are data, not rotated by
+Crabbox. Treat checkpoint images as sensitive even though they are private.
+
+Verify, fork, and delete use the recorded connection and recheck image
+fingerprint, checkpoint ownership, source UUID, and daemon/project identity.
+Partial snapshot/publish failures retain a pending local checkpoint record;
+verification can discover a completed image after a lost response. Delete
+refuses to remove the last cleanup identity while capture remains inconclusive.
+Image or temporary-snapshot deletion failures retain the record for retry.
+
+```sh
+crabbox warmup --provider incus --lease-id cbx_0123456789ab
+crabbox run --provider incus --id cbx_0123456789ab -- npm ci
+crabbox checkpoint create --provider incus --id cbx_0123456789ab --mode native --name prepared
+crabbox stop --provider incus cbx_0123456789ab
+crabbox checkpoint inspect <checkpoint-id> --verify
+crabbox checkpoint fork <checkpoint-id> --lease-id cbx_abcdef012345
+crabbox checkpoint delete <checkpoint-id>
+```
+
+The implementation uses the pinned [Incus v7.1.0 client interfaces](https://github.com/lxc/incus/blob/v7.1.0/client/interfaces.go)
+and [image API types](https://github.com/lxc/incus/blob/v7.1.0/shared/api/image.go).
+The upstream [container driver](https://github.com/lxc/incus/blob/4411badd84fdb1740232fb0906f51e6fecf8e696/internal/server/instance/drivers/driver_lxc.go)
+mounts a stopped container's root filesystem for file access and applies image
+templates during startup; the fork clears those templates before writing
+identity. [Instance creation](https://github.com/lxc/incus/blob/4411badd84fdb1740232fb0906f51e6fecf8e696/internal/server/instance/instance_utils.go)
+assigns UUID and cloud-init instance identity. A new cloud-init instance ID alone
+does not guarantee old authorized keys are removed, so forks use the documented
+[cloud-init disable marker](https://docs.cloud-init.io/en/23.2.2/howto/disable_cloud_init.html)
+and replace SSH authority explicitly instead.
 
 ## Examples
 
@@ -285,6 +372,24 @@ smoke first requires local `jq` and `rg` before it calls Incus. It then proves
 reuse cycle from the Mac, then forces a final delete so repeat runs do not strand
 test instances.
 
+For the native lifecycle, run the separate bounded smoke against a dedicated
+root-disk-only container profile. It creates two leases and one private image,
+checks fixed-ID replay, deletes the source before forking, checks disk contents
+and changed machine/SSH host identity, rejects the source private key against
+the fork, and deletes all tracked resources. Configure the connection and
+`instanceType: container` through `CRABBOX_CONFIG` or the existing environment
+settings; the script accepts no arguments. This keeps creation-only flags out of
+commands such as `inspect` that do not accept them.
+
+```sh
+CRABBOX_LIVE=1 CRABBOX_BIN=/tmp/crabbox-incus-candidate \
+  CRABBOX_LIVE_REPO=$PWD scripts/live-incus-checkpoint-smoke.sh
+```
+
+The smoke's temporary source-key copy is mode 0600 and is removed on exit.
+Cleanup failures print the exact tracked IDs and fail the run. Fake-backed Go
+tests are not live Incus proof.
+
 ## Limits
 
 - Linux only
@@ -294,7 +399,7 @@ test instances.
   reachability
 - OIDC remotes require a macOS or Linux Crabbox client so refreshed credentials
   can be persisted atomically; Windows clients can use TLS certificate auth
-- no provider-native snapshot/checkpoint/fork support in v1
+- native disk checkpoints are container-only and exclude attached volumes
 
 ## Troubleshooting
 

@@ -81,6 +81,34 @@ Docker Desktop-specific APIs. Crabbox detects an installed `docker` or `podman`
 CLI and uses that runtime. Set `localContainer.runtime` when you need a specific
 CLI.
 
+Runtime discovery rejects empty Docker context, endpoint, or daemon identities
+and empty Podman identities, even when the runtime command exits successfully.
+If the command supplies stderr, Crabbox includes its bounded diagnostic in the
+error so daemon startup failures are not hidden behind an empty-identity message.
+These failures stop acquisition before a lease or container is created.
+
+### Fixed-ID replay
+
+```sh
+crabbox warmup --provider local-container \
+  --lease-id cbx_abcdef123456 --slug my-app-operation
+```
+
+A fixed lease ID makes warmup replay-safe across process restarts. Crabbox
+persists the runtime identity and normalized container-create intent before
+starting the container, then reuses an existing container only when its lease,
+slug, runtime scope, and intent fingerprint match. Changing the image or other
+container-shaping configuration returns `lease_id_conflict` instead of silently
+reusing the lease. An unresolved create attempt or a missing previously
+acquired container also fails closed without starting a second container.
+If the exact container exits, stops, or becomes dead before SSH is ready,
+fixed-ID warmup fails promptly while retaining its original fixed claim and
+recovery metadata when kept.
+
+Stopping a fixed lease preserves a terminal local tombstone, so the same
+operation ID cannot create another container after release. Use a new fixed
+lease ID for each later operation.
+
 ## Configuration
 
 ```yaml
@@ -110,6 +138,10 @@ in `--preflight` output. A mismatch or unrecognized daemon response fails before
 container creation. Crabbox never adds `--platform` or opts into emulation for
 this assertion. When `--arch` is omitted, the runtime keeps its existing native
 behavior without an added architecture guarantee or probe.
+`config show` describes this omitted-architecture state as `arch=native`
+(JSON: `"architecture":"native"`), rather than presenting the compiled AMD64
+compatibility default as an effective runtime architecture. Explicit selections
+remain `amd64` or `arm64`; `native` is output-only.
 
 ### Memory-failure evidence
 
@@ -210,8 +242,18 @@ metadata updates.
 
 ## Lease behavior
 
+Custom cache directories must be mounted into the Docker VM. If cache settings
+change after creation, stop refuses to delete an existing bootstrap directory
+outside the current trusted cache/temp roots and retains the claim and key.
+Restore the original cache settings, or explicitly remove the verified residue,
+then retry stop. Orphan cleanup also preserves claims with bootstrap residue.
+Bootstrap paths from older releases under the current system temp root remain
+supported.
+
 1. `warmup` or a fresh `run` creates a per-lease SSH key.
-2. The provider runs `docker run -d` with Crabbox labels, loopback SSH port
+2. The provider writes its bootstrap script under the user's cache directory,
+   normally shared with desktop Docker VMs, then runs
+   `docker run -d` with Crabbox labels, loopback SSH port
    publishing, and the public-key auth environment the bootstrap script needs.
 3. On Debian/Ubuntu-compatible images, the container installs
    `openssh-server`, `git`, `rsync`, `curl`, and `sudo` when they are missing,
@@ -222,8 +264,16 @@ metadata updates.
 4. With `--desktop`, the container installs and starts Xvfb, XFCE, x11vnc,
    xdotool, screenshot tools, ffmpeg, noVNC, and websockify — no systemd
    required.
-5. With `--browser`, the container installs a real package-manager browser where
-   the image provides one and writes `/var/lib/crabbox/browser.env`.
+5. With `--browser`, the container preserves a working Chrome, Chromium, Firefox
+   ESR, or Firefox executable and writes `/var/lib/crabbox/browser.env`. When
+   Ubuntu needs a browser, bootstrap installs native Firefox from Mozilla's
+   signed APT repository, with a pinned signing-key fingerprint and a
+   source-specific keyring; it excludes Ubuntu's Snap transition package.
+   Other Debian-compatible images try their distro Chromium, Firefox ESR, and
+   Firefox packages in order, advancing when the executable's version probe
+   fails. If Mozilla trust or installation fails, select a prebuilt image with
+   a working browser or a supported Debian image; bootstrap does not disable
+   authentication or force a downgrade of an installed transition package.
 6. As soon as the runtime returns an exact container ID, before the first
    inspect or readiness probe, Crabbox durably records a `state=provisioning`
    claim bound to that ID, the runtime context/endpoint/daemon identity, SSH
@@ -252,17 +302,30 @@ metadata updates.
 
 When `warmup` or `run --keep` creates the container but SSH readiness is
 canceled, fails, or times out, Crabbox keeps the exact pending claim, container,
-key, and bootstrap directory. The failed command prints copyable, runtime-scoped
-`inspect`, `run --reclaim --sync-only`, and `stop` commands. Pending claims stay
-visible in inventory as `provisioning` (or `missing` with a provisioning label
-if the container disappeared) and never report ready. `stop` accepts the exact
-pending claim without requiring a successful intervening run and fences the
-container deletion against concurrent claim changes. The provider cleanup sweep
-leaves a missing keep-enabled pending claim for explicit recovery or `stop`
-instead of discarding its ownership evidence; a missing non-keep pending claim
-is fenced and removed with its key and bootstrap state. Fresh one-shot runs and
-`warmup --keep=false` still remove the container, key, bootstrap directory, and
-claim when readiness does not complete.
+key, and bootstrap directory. If that exact container exits, stops, or becomes
+dead, acquisition and `status --wait` fail promptly instead of waiting out the
+SSH timeout. `status` and inventory report the observed terminal runtime state
+even when the retained ownership claim is still `provisioning` or previously
+reached `ready`; checking terminal status never rewrites recovery metadata.
+
+The failed command prints copyable, runtime-scoped `inspect` and `stop`
+commands, plus `run --reclaim --sync-only` when recovery remains possible.
+Terminal bootstrap failures also report the runtime state and, when the
+container is restartable and its runtime route can be reproduced safely, an
+exact-container `docker start` or `podman start` command; restart that container
+before reclaiming it. A `dead` container cannot be restarted or reclaimed and
+must be cleaned up. Running pending claims stay visible as `provisioning`, while
+a disappeared container is reported as `missing` with its provisioning label
+intact. `stop` accepts the exact pending claim without requiring a successful
+intervening run and fences the container deletion against concurrent claim
+changes. The provider cleanup sweep leaves a missing keep-enabled pending claim
+for explicit recovery or `stop` instead of discarding its ownership evidence; a
+missing non-keep pending claim is fenced and removed with its key and bootstrap
+state. Fresh one-shot runs and `warmup --keep=false` still remove the container,
+key, bootstrap directory, and active claim when readiness does not complete;
+fixed IDs retain only their terminal single-use tombstone.
+If an exact inspect returns a replacement container, Crabbox refuses all
+destructive cleanup and retains the original ownership evidence.
 
 Named Docker contexts and Podman connections are included in those recovery
 commands. Custom runtime endpoints remain private in the local claim rather

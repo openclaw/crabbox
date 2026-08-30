@@ -164,7 +164,9 @@ recoverable because the reservation exists before provider I/O begins.
 HTTP routes are classified as lifecycle or direct operations. Direct routes
 perform their own smaller critical sections. Bridge data frames bypass the
 global lifecycle mutex and retain per-socket ordering; control messages that
-mutate fleet state stay serialized.
+mutate fleet state stay serialized. Control heartbeats acquire their lifecycle
+transaction in shared fleet code, so Node dispatch does not wrap them in a second
+lock. They remain tracked for shutdown alongside other socket operations.
 
 ## WebSockets and shutdown
 

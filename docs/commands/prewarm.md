@@ -9,6 +9,7 @@ Blacksmith Testbox, hydration stays provider-owned.
 crabbox prewarm
 crabbox prewarm --provider azure --probe-command 'node -v && pnpm -v'
 crabbox prewarm --pool example/app/main/linux --pool-compatibility-key linux-16-vcpu
+crabbox prewarm --provider aws --pool example/app/main/linux --pool-cache-compatibility node-22-pnpm-10
 crabbox prewarm --dry-run
 ```
 
@@ -20,6 +21,19 @@ If Actions hydration, the optional probe, or ready-pool registration fails,
 release cannot resolve or stop the lease, the error output prints the exact
 `crabbox stop` command to run; delegated-run providers retain their
 provider-owned lifecycle behavior.
+
+Before configuring a backend, warming a box, checking typed ready-pool support,
+or printing a dry-run plan, `prewarm` validates the generated probe against the
+selected provider's run contract. The probe reuses the planned lease with
+`--no-sync --no-hydrate --shell`; unsupported probes fail with exit code 2
+before warmup. This admission does not resolve a lease or inspect prior claims.
+
+Prewarm also validates the provider configuration that hydration and probes
+will reload. Creation-only flags stay on warmup and are not forwarded to either
+follow-up. If a creation override hides an invalid saved value, fix that saved
+configuration before requesting hydration or a probe; prewarm rejects the
+invalid follow-up before allocation, including with `--dry-run`. Plain prewarm
+without hydration or a probe keeps its normal creation override behavior.
 
 ## Reuse
 
@@ -34,6 +48,10 @@ Use `--no-sync` when the prewarmed checkout already contains the code you want
 to test. Omit it when local edits must be copied; fingerprint sync should skip
 the upload quickly when nothing changed.
 
+Blacksmith Testbox is an exception: it owns sync and has no supported
+`--no-sync` option. Reuse a Blacksmith lease without `--no-sync`; Blacksmith
+will manage source sync on each run.
+
 ## Behavior
 
 - Creates a fresh lease with the normal `warmup` flags.
@@ -42,7 +60,13 @@ the upload quickly when nothing changed.
 - Skips hydration for delegated-run providers and reports
   `hydration=provider-owned`.
 - Optionally runs `--probe-command` without source sync to prove the hydrated
-  runtime is usable.
+  runtime is usable. Blacksmith Testbox rejects a nonblank `--probe-command`
+  with exit 2 before backend configuration, warmup, key generation, provider
+  calls, or claim changes, including with `--dry-run`, because its runs do not
+  support `--no-sync`.
+  Put readiness checks in the Blacksmith workflow, omit the probe, or use a
+  provider that supports no-sync probes. An empty or whitespace-only probe is
+  treated as no probe.
 - Optionally registers the hydrated lease in a broker ready pool with `--pool`.
 - `--timing-json` includes `hydrateMs` and `probeMs`.
 
@@ -63,9 +87,19 @@ same way they do on `warmup`.
 --keep-alive-minutes <n>     GitHub-runner keep-alive window
 --probe-command <command>    shell probe to run after hydration
 --pool <key>                 register the hydrated lease in a broker ready pool
+--pool-identity-file <file>  opt into an exact generated, image-pinned pool identity
+--pool-cache-compatibility <value>  derive an image-pinned identity after leasing
 --dry-run                    print planned commands
 --timing-json                print machine-readable timing
 ```
+
+Typed registration is optional and currently supports only AWS Linux leases
+with a coordinator-recorded immutable AMI, region, and canonical architecture.
+Generate a reusable identity with `crabbox pool identity`, or pass
+`--pool-cache-compatibility` to derive it automatically from the new lease and
+current repository. The cache value is operator-declared compatibility
+metadata, not an attestation. Crabbox checks typed coordinator support before
+provisioning and releases a newly created lease if typed registration fails.
 
 ## See Also
 

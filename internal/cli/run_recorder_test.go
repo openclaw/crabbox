@@ -4,13 +4,264 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestRunRecorderRedactsCoordinatorDiagnosticEvents(t *testing.T) {
+	const (
+		configuredSecret = "configured-provider-fixture-value"
+		runtimeSecret    = "runtime-provider-fixture-value"
+	)
+	t.Setenv("AWS_SESSION_TOKEN", runtimeSecret)
+
+	message := strings.Join([]string{
+		"provider request failed region=eu",
+		"configured=" + configuredSecret,
+		"runtime=" + runtimeSecret,
+		"Authorization: Bearer minted-provider-fixture-value",
+		strings.Join([]string{
+			"https://fixture-user",
+			"fixture-password@example.test/path?token=query-fixture-value&region=eu",
+		}, ":"),
+		`{"clientSecret":"json-fixture-value","message":"quota exceeded"}`,
+	}, "\n")
+
+	for _, test := range []struct {
+		name   string
+		kind   string
+		phase  string
+		record func(*runRecorder)
+	}{
+		{
+			name:  "hydration failure",
+			kind:  "actions.hydrate.failed",
+			phase: "hydrate",
+			record: func(rec *runRecorder) {
+				rec.Event("actions.hydrate.failed", "hydrate", message)
+			},
+		},
+		{
+			name:  "lease replacement failure",
+			kind:  "lease.replace.failed",
+			phase: "leasing",
+			record: func(rec *runRecorder) {
+				rec.Event("lease.replace.failed", "leasing", message)
+			},
+		},
+		{
+			name:  "terminal run failure",
+			kind:  "run.failed",
+			phase: "failed",
+			record: func(rec *runRecorder) {
+				rec.Failed(errors.New(message))
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var events []CoordinatorRunEventInput
+			client := &CoordinatorClient{
+				BaseURL: "https://example.test",
+				Client:  &http.Client{Transport: runEventRecordingRoundTripper{events: &events}},
+			}
+			rec := newRunRecorder(context.Background(), client, Config{
+				Morph: MorphConfig{APIKey: configuredSecret},
+			}, []string{"go", "test"}, "", io.Discard, true)
+			rec.runID = "run_123"
+
+			test.record(rec)
+
+			if len(events) != 1 {
+				t.Fatalf("events=%v, want one posted diagnostic", events)
+			}
+			event := events[0]
+			if event.Type != test.kind || event.Phase != test.phase {
+				t.Fatalf("event=%#v, want type=%q phase=%q", event, test.kind, test.phase)
+			}
+			for _, leaked := range []string{
+				configuredSecret,
+				runtimeSecret,
+				"minted-provider-fixture-value",
+				"fixture-user",
+				"fixture-password",
+				"query-fixture-value",
+				"json-fixture-value",
+			} {
+				if strings.Contains(event.Message, leaked) {
+					t.Fatalf("coordinator diagnostic leaked %q: %s", leaked, event.Message)
+				}
+			}
+			for _, preserved := range []string{"provider request failed", "region=eu", "quota exceeded", diagnosticRedaction} {
+				if !strings.Contains(event.Message, preserved) {
+					t.Fatalf("coordinator diagnostic lost %q: %s", preserved, event.Message)
+				}
+			}
+		})
+	}
+}
+
+func TestRunRecorderPreservesRawStreamEventData(t *testing.T) {
+	const configuredSecret = "configured-output-fixture-value"
+	var events []CoordinatorRunEventInput
+	client := &CoordinatorClient{
+		BaseURL: "https://example.test",
+		Client:  &http.Client{Transport: runEventRecordingRoundTripper{events: &events}},
+	}
+	rec := newRunRecorder(context.Background(), client, Config{
+		Morph: MorphConfig{APIKey: configuredSecret},
+	}, []string{"go", "test"}, "", io.Discard, true)
+	rec.runID = "run_123"
+
+	stdout := rec.StreamWriter("stdout")
+	if _, err := stdout.Write([]byte("caller-owned output " + configuredSecret)); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Flush()
+	rec.waitForOutputEvents(time.Second)
+
+	if len(events) != 1 || events[0].Type != "stdout" {
+		t.Fatalf("events=%#v, want one stdout event", events)
+	}
+	if !strings.Contains(events[0].Data, configuredSecret) {
+		t.Fatalf("caller-owned stdout was unexpectedly rewritten: %#v", events[0])
+	}
+}
+
+func TestRunRecorderRedactsRefreshedRuntimeDiagnosticSecrets(t *testing.T) {
+	const (
+		originalSecret  = "original-runtime-fixture-value"
+		refreshedSecret = "refreshed-runtime-fixture-value"
+	)
+	t.Setenv("AWS_SESSION_TOKEN", originalSecret)
+
+	var events []CoordinatorRunEventInput
+	client := &CoordinatorClient{
+		BaseURL: "https://example.test",
+		Client:  &http.Client{Transport: runEventRecordingRoundTripper{events: &events}},
+	}
+	rec := newRunRecorder(context.Background(), client, Config{}, []string{"go", "test"}, "", io.Discard, true)
+	rec.runID = "run_123"
+	t.Setenv("AWS_SESSION_TOKEN", refreshedSecret)
+
+	rec.Event("actions.hydrate.failed", "hydrate", "original="+originalSecret+" refreshed="+refreshedSecret+" region=eu")
+
+	if len(events) != 1 {
+		t.Fatalf("events=%#v, want one posted diagnostic", events)
+	}
+	for _, leaked := range []string{originalSecret, refreshedSecret} {
+		if strings.Contains(events[0].Message, leaked) {
+			t.Fatalf("runtime diagnostic leaked %q after refresh: %s", leaked, events[0].Message)
+		}
+	}
+	if !strings.Contains(events[0].Message, "region=eu") {
+		t.Fatalf("runtime diagnostic lost routing context: %s", events[0].Message)
+	}
+}
+
+func TestRunRecorderRedactsDiagnosticSecretsAfterLateCoordinatorAttachment(t *testing.T) {
+	const (
+		configuredSecret = "late-configured-provider-fixture-value"
+		originalSecret   = "late-original-runtime-fixture-value"
+		refreshedSecret  = "late-refreshed-runtime-fixture-value"
+	)
+	t.Setenv("AWS_SESSION_TOKEN", originalSecret)
+
+	rec := newRunRecorder(context.Background(), nil, Config{
+		Morph: MorphConfig{APIKey: configuredSecret},
+	}, []string{"go", "test"}, "", io.Discard, true)
+	t.Setenv("AWS_SESSION_TOKEN", refreshedSecret)
+
+	var events []CoordinatorRunEventInput
+	rec.UseCoordinator(&CoordinatorClient{
+		BaseURL: "https://example.test",
+		Client:  &http.Client{Transport: runEventRecordingRoundTripper{events: &events}},
+	})
+	rec.runID = "run_123"
+	rec.Event("actions.hydrate.failed", "hydrate", strings.Join([]string{
+		"configured=" + configuredSecret,
+		"original=" + originalSecret,
+		"refreshed=" + refreshedSecret,
+		"region=eu",
+	}, " "))
+
+	if len(events) != 1 {
+		t.Fatalf("events=%#v, want one posted diagnostic", events)
+	}
+	for _, leaked := range []string{configuredSecret, originalSecret, refreshedSecret} {
+		if strings.Contains(events[0].Message, leaked) {
+			t.Fatalf("late-attached coordinator diagnostic leaked %q: %s", leaked, events[0].Message)
+		}
+	}
+	if !strings.Contains(events[0].Message, "region=eu") {
+		t.Fatalf("late-attached coordinator diagnostic lost routing context: %s", events[0].Message)
+	}
+}
+
+func TestRunRecorderRedactsPersistedCoordinatorDiagnosticEvents(t *testing.T) {
+	coordinatorURL := strings.TrimSpace(os.Getenv("CRABBOX_RUN_RECORDER_PROOF_URL"))
+	if coordinatorURL == "" {
+		t.Skip("set CRABBOX_RUN_RECORDER_PROOF_URL to verify a running coordinator")
+	}
+
+	const (
+		configuredSecret = "persisted-configured-provider-fixture-value"
+		originalSecret   = "persisted-original-runtime-fixture-value"
+		refreshedSecret  = "persisted-refreshed-runtime-fixture-value"
+	)
+	t.Setenv("AWS_SESSION_TOKEN", originalSecret)
+	cfg := Config{
+		Provider:   "aws",
+		Class:      "standard",
+		ServerType: "t3.small",
+		Morph:      MorphConfig{APIKey: configuredSecret},
+	}
+	client := &CoordinatorClient{
+		BaseURL: coordinatorURL,
+		Token:   os.Getenv("CRABBOX_RUN_RECORDER_PROOF_TOKEN"),
+		Client:  &http.Client{Timeout: 10 * time.Second},
+	}
+	rec := newRunRecorder(context.Background(), nil, cfg, []string{"go", "test"}, "security-redaction-proof", io.Discard, true)
+	t.Setenv("AWS_SESSION_TOKEN", refreshedSecret)
+	rec.UseCoordinator(client)
+	run, err := client.CreateRun(context.Background(), "", cfg, rec.command, rec.label)
+	if err != nil {
+		t.Fatalf("create coordinator run: %v", err)
+	}
+	rec.attachRun(run)
+	rec.Event("actions.hydrate.failed", "hydrate", strings.Join([]string{
+		"configured=" + configuredSecret,
+		"original=" + originalSecret,
+		"refreshed=" + refreshedSecret,
+		"region=eu",
+	}, " "))
+
+	events, err := client.RunEvents(context.Background(), run.ID, 0, 20)
+	if err != nil {
+		t.Fatalf("read persisted coordinator events: %v", err)
+	}
+	for _, event := range events {
+		if event.Type != "actions.hydrate.failed" {
+			continue
+		}
+		for _, leaked := range []string{configuredSecret, originalSecret, refreshedSecret} {
+			if strings.Contains(event.Message, leaked) {
+				t.Fatalf("persisted coordinator event leaked %q: %s", leaked, event.Message)
+			}
+		}
+		if !strings.Contains(event.Message, "region=eu") || !strings.Contains(event.Message, diagnosticRedaction) {
+			t.Fatalf("persisted coordinator event lost diagnostic context: %s", event.Message)
+		}
+		t.Logf("persisted coordinator run=%s event=%s message=%q", run.ID, event.Type, event.Message)
+		return
+	}
+	t.Fatalf("persisted coordinator events missing diagnostic: %#v", events)
+}
 
 func TestRunEventStreamWriterCapsOutputEvents(t *testing.T) {
 	t.Setenv("CRABBOX_OWNER", "test@example.com")
@@ -483,6 +734,9 @@ func TestRunRecorderSuppressesMissingEventEndpoint(t *testing.T) {
 		Class:      "standard",
 		ServerType: "t3.small",
 	}, []string{"pnpm", "test"}, "", &stderr, false)
+	if rec.runID != "run_123" || rec.finished {
+		t.Fatalf("run handle must exist before lease attach or finish: %#v", rec)
+	}
 	rec.AttachLease("cbx_abcdef123456", "blue-lobster", Config{
 		Provider:   "aws",
 		Class:      "standard",
@@ -494,7 +748,7 @@ func TestRunRecorderSuppressesMissingEventEndpoint(t *testing.T) {
 	}
 	stdout.Flush()
 	rec.waitForOutputEvents(time.Second)
-	rec.Finish(context.Background(), SSHTarget{TargetOS: targetWindows}, 0, time.Second, time.Second, "ok", false, nil, FailureClassification{})
+	rec.Finish(context.Background(), SSHTarget{TargetOS: targetWindows}, 0, time.Second, time.Second, "ok", false, nil, FailureClassification{}, nil)
 
 	if eventRequests != 1 {
 		t.Fatalf("event requests=%d, want 1", eventRequests)
@@ -504,6 +758,19 @@ func TestRunRecorderSuppressesMissingEventEndpoint(t *testing.T) {
 	}
 	if text := stderr.String(); strings.Contains(text, "warning:") || !strings.Contains(text, "recording run run_123") {
 		t.Fatalf("stderr=%q", text)
+	}
+}
+
+func TestRunRecorderRequiresCoordinatorHandleBeforeExecution(t *testing.T) {
+	rec := &runRecorder{coord: &CoordinatorClient{}}
+	err := rec.requireHandle()
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 7 || !strings.Contains(exitErr.Message, "coordinator run handle") {
+		t.Fatalf("requireHandle error=%v", err)
+	}
+	rec.runID = "run_123"
+	if err := rec.requireHandle(); err != nil {
+		t.Fatalf("coordinator handle rejected: %v", err)
 	}
 }
 
@@ -530,9 +797,160 @@ func TestRunRecorderFinishUsesExtendedTimeout(t *testing.T) {
 		})},
 	}
 	rec := &runRecorder{coord: client, runID: "run_123", stderr: io.Discard}
-	rec.Finish(context.Background(), SSHTarget{}, 0, time.Second, time.Second, strings.Repeat("x", 2*runLogFallbackPreviewBytes), true, nil, FailureClassification{})
+	rec.Finish(context.Background(), SSHTarget{}, 0, time.Second, time.Second, strings.Repeat("x", 2*runLogFallbackPreviewBytes), true, nil, FailureClassification{}, nil)
 	if deadlineRemaining < runRecorderFinishTimeout-5*time.Second {
 		t.Fatalf("deadline remaining=%s, want near %s", deadlineRemaining, runRecorderFinishTimeout)
+	}
+}
+
+func TestRunRecorderFinishRetriesIdenticalCommit(t *testing.T) {
+	var attempts int
+	var bodies [][]byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/runs/run_123/finish" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		attempts++
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bodies = append(bodies, body)
+		if attempts == 1 {
+			http.Error(w, "retry", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte(`{"run":{"id":"run_123"}}`))
+	}))
+	defer server.Close()
+
+	rec := &runRecorder{
+		coord:  &CoordinatorClient{BaseURL: server.URL, Client: server.Client()},
+		runID:  "run_123",
+		stderr: io.Discard,
+	}
+	if err := rec.Finish(context.Background(), SSHTarget{}, 7, time.Second, 2*time.Second, "failed\n", false, nil, FailureClassification{}, nil); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	if attempts != 2 || !rec.finished {
+		t.Fatalf("attempts=%d finished=%v", attempts, rec.finished)
+	}
+	if len(bodies) != 2 || !bytes.Equal(bodies[0], bodies[1]) {
+		t.Fatalf("finish retries changed payload: %q %q", bodies[0], bodies[1])
+	}
+}
+
+func runRecorderTestReceipt(t *testing.T) terminalRunReceipt {
+	t.Helper()
+	setAttestTestHome(t)
+	startedAt := time.Date(2026, 8, 23, 10, 0, 0, 0, time.UTC)
+	receipt, err := buildTerminalRunReceipt("", terminalRunReceiptInput{
+		Provider:          "aws",
+		RunID:             "run_123",
+		Command:           []string{"false"},
+		CommandDisplay:    "false",
+		ExitCode:          1,
+		CommandMs:         100,
+		StartedAt:         startedAt,
+		EndedAt:           startedAt.Add(100 * time.Millisecond),
+		LogSHA256:         sha256Digest(nil),
+		RetainedLogSHA256: sha256Digest(nil),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return receipt
+}
+
+func TestRunRecorderFinishVerifiesPersistedReceiptAfterSuccess(t *testing.T) {
+	receipt := runRecorderTestReceipt(t)
+	var finishRequests, receiptRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/run_123/finish":
+			finishRequests++
+			_, _ = w.Write([]byte(`{"run":{"id":"run_123"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runs/run_123/receipt":
+			receiptRequests++
+			_ = json.NewEncoder(w).Encode(map[string]any{"receipt": receipt})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	rec := &runRecorder{
+		coord:  &CoordinatorClient{BaseURL: server.URL, Client: server.Client()},
+		runID:  "run_123",
+		stderr: io.Discard,
+	}
+	if err := rec.Finish(context.Background(), SSHTarget{}, 1, 0, 100*time.Millisecond, "", false, nil, FailureClassification{}, &receipt); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	if finishRequests != 1 || receiptRequests != 1 || !rec.finished {
+		t.Fatalf("finish=%d receipt=%d finished=%v", finishRequests, receiptRequests, rec.finished)
+	}
+}
+
+func TestRunRecorderFinishRejectsLegacySuccessWithoutReceiptPersistence(t *testing.T) {
+	receipt := runRecorderTestReceipt(t)
+	var finishRequests, receiptRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/run_123/finish":
+			finishRequests++
+			_, _ = w.Write([]byte(`{"run":{"id":"run_123"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runs/run_123/receipt":
+			receiptRequests++
+			http.NotFound(w, r)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	rec := &runRecorder{
+		coord:  &CoordinatorClient{BaseURL: server.URL, Client: server.Client()},
+		runID:  "run_123",
+		stderr: io.Discard,
+	}
+	err := rec.Finish(context.Background(), SSHTarget{}, 1, 0, 100*time.Millisecond, "", false, nil, FailureClassification{}, &receipt)
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 7 || !strings.Contains(exitErr.Message, "verify persisted terminal receipt") {
+		t.Fatalf("Finish error=%v, want fail-closed receipt verification", err)
+	}
+	if finishRequests != 1 || receiptRequests != 1 || rec.finished {
+		t.Fatalf("finish=%d receipt=%d finished=%v", finishRequests, receiptRequests, rec.finished)
+	}
+}
+
+func TestRunRecorderFinishRecoversCommittedReceiptAfterLostResponse(t *testing.T) {
+	receipt := runRecorderTestReceipt(t)
+	var finishRequests, receiptRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/run_123/finish":
+			finishRequests++
+			_, _ = w.Write([]byte(`{`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runs/run_123/receipt":
+			receiptRequests++
+			_ = json.NewEncoder(w).Encode(map[string]any{"receipt": receipt})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	rec := &runRecorder{
+		coord:  &CoordinatorClient{BaseURL: server.URL, Client: server.Client()},
+		runID:  "run_123",
+		stderr: io.Discard,
+	}
+	if err := rec.Finish(context.Background(), SSHTarget{}, 1, 0, 100*time.Millisecond, "", false, nil, FailureClassification{}, &receipt); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	if finishRequests != 1 || receiptRequests != 1 || !rec.finished {
+		t.Fatalf("finish=%d receipt=%d finished=%v", finishRequests, receiptRequests, rec.finished)
 	}
 }
 

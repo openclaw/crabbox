@@ -2,9 +2,12 @@ package ssh
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -26,7 +29,59 @@ func TestStaticSSHDoctorDoesNotReportProbeWhenUnchecked(t *testing.T) {
 	}
 }
 
+func TestStaticSSHDoctorReportsWSL2SFTPPrerequisite(t *testing.T) {
+	cfg := Config{Provider: "ssh"}
+	cfg.TargetOS = core.TargetWindows
+	cfg.WindowsMode = "wsl2"
+	cfg.Static.Host = "example.test"
+	oldWait := waitForSSHReady
+	oldIsUnavailable := isWSLSFTPUnavailable
+	t.Cleanup(func() {
+		waitForSSHReady = oldWait
+		isWSLSFTPUnavailable = oldIsUnavailable
+	})
+
+	backend := NewStaticSSHLeaseBackend(Provider{}.Spec(), cfg, Runtime{Stderr: io.Discard}).(*staticLeaseBackend)
+	result, err := backend.Doctor(t.Context(), core.DoctorRequest{})
+	if err != nil || len(result.Checks) != 1 || result.Checks[0].Check != "wsl2-sftp" || result.Checks[0].Status != "skip" ||
+		!strings.Contains(result.Checks[0].Message, "runtime=unchecked transport=sftp_required mutation=false") ||
+		!strings.Contains(result.Checks[0].Message, "--doctor-probe-ssh") {
+		t.Fatalf("unchecked result=%#v err=%v", result, err)
+	}
+
+	var readyCheck string
+	waitForSSHReady = func(_ context.Context, target *SSHTarget, _ io.Writer, _ string, _ time.Duration) error {
+		readyCheck = target.ReadyCheck
+		return nil
+	}
+	result, err = backend.Doctor(t.Context(), core.DoctorRequest{ProbeSSH: true})
+	if err != nil || result.Checks[0].Status != "ok" || !strings.Contains(result.Checks[0].Message, "transport=sftp_ready") {
+		t.Fatalf("ready result=%#v err=%v", result, err)
+	}
+	if readyCheck != "git --version >/dev/null && rsync --version >/dev/null && tar --version >/dev/null" ||
+		strings.Contains(readyCheck, "/tmp/crabbox-ready") || strings.Contains(readyCheck, "wsl-stage") {
+		t.Fatalf("Doctor WSL2 readiness mutates target: %q", readyCheck)
+	}
+
+	missingSFTP := errors.New("missing SFTP")
+	isWSLSFTPUnavailable = func(err error) bool { return errors.Is(err, missingSFTP) }
+	waitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+		return fmt.Errorf("wrapped: %w", missingSFTP)
+	}
+	result, err = backend.Doctor(t.Context(), core.DoctorRequest{ProbeSSH: true})
+	if err != nil || result.Checks[0].Status != "failed" || !strings.Contains(result.Checks[0].Message, "enable_internal-sftp_restart_sshd") {
+		t.Fatalf("missing result=%#v err=%v", result, err)
+	}
+
+	toolErr := errors.New("remote git missing")
+	waitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error { return toolErr }
+	if _, err = backend.Doctor(t.Context(), core.DoctorRequest{ProbeSSH: true}); !errors.Is(err, toolErr) {
+		t.Fatalf("tool failure=%v, want unchanged %v", err, toolErr)
+	}
+}
+
 func TestStaticSSHRequestedSlugPersistsThroughClaimedResolveAndList(t *testing.T) {
+	stubStaticArchitecture(t)
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
@@ -108,6 +163,7 @@ func TestStaticSSHRequestedSlugPersistsThroughClaimedResolveAndList(t *testing.T
 }
 
 func TestStaticSSHRequestedSlugAvoidsClaimCollision(t *testing.T) {
+	stubStaticArchitecture(t)
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())

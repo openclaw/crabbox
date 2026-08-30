@@ -317,7 +317,21 @@ func TestReleaseLeaseCleansNamespaceSSHFiles(t *testing.T) {
 		cfg: Config{Namespace: NamespaceConfig{DeleteOnRelease: true}},
 		rt:  Runtime{Stdout: &out, Stderr: io.Discard, Exec: runner},
 	}
-	lease := LeaseTarget{LeaseID: "cbx_deadbeef0000", Server: Server{Name: "crabbox-blue-lobster-deadbeef"}}
+	leaseID := "cbx_deadbeef0000"
+	name := "crabbox-blue-lobster-deadbeef"
+	server := Server{
+		CloudID:  name,
+		Provider: namespaceProvider,
+		Name:     name,
+		Labels:   map[string]string{"provider": namespaceProvider, "lease": leaseID, "slug": "blue-lobster", "name": name},
+	}
+	if err := claimLeaseForRepoProvider(leaseID, "blue-lobster", namespaceProvider, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateLeaseClaimEndpoint(leaseID, server, SSHTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	lease := LeaseTarget{LeaseID: leaseID, Server: server}
 	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -329,6 +343,58 @@ func TestReleaseLeaseCleansNamespaceSSHFiles(t *testing.T) {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("%s should be removed, err=%v", path, err)
 		}
+	}
+}
+
+func TestReleaseLeaseRequiresExactNamespaceClaim(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		deleteOnRelease bool
+		claimName       string
+		failProvider    bool
+		wantCalls       int
+	}{
+		{name: "unclaimed delete", deleteOnRelease: true},
+		{name: "unclaimed shutdown"},
+		{name: "wrong claimed devbox", deleteOnRelease: true, claimName: "crabbox-other-deadbeef"},
+		{name: "provider deletion failure retains claim", deleteOnRelease: true, claimName: "crabbox-blue-lobster-deadbeef", failProvider: true, wantCalls: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			testutil.IsolateUserDirs(t)
+			const leaseID = "cbx_deadbeef0000"
+			const slug = "blue-lobster"
+			const name = "crabbox-blue-lobster-deadbeef"
+			if test.claimName != "" {
+				if err := claimLeaseForRepoProvider(leaseID, slug, namespaceProvider, t.TempDir(), time.Hour, false); err != nil {
+					t.Fatal(err)
+				}
+				claimed := Server{CloudID: test.claimName, Provider: namespaceProvider, Name: test.claimName, Labels: map[string]string{
+					"provider": namespaceProvider, "lease": leaseID, "slug": slug, "name": test.claimName,
+				}}
+				if err := updateLeaseClaimEndpoint(leaseID, claimed, SSHTarget{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			runner := &namespaceRecordingRunner{failAll: test.failProvider}
+			backend := &namespaceLeaseBackend{
+				cfg: Config{Namespace: NamespaceConfig{DeleteOnRelease: test.deleteOnRelease}},
+				rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
+			}
+			lease := LeaseTarget{LeaseID: leaseID, Server: Server{Name: name, Labels: map[string]string{"slug": slug}}}
+			err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease, Force: true})
+			if err == nil {
+				t.Fatal("expected release to fail")
+			}
+			if len(runner.calls) != test.wantCalls {
+				t.Fatalf("calls=%#v want %d", runner.calls, test.wantCalls)
+			}
+			if test.claimName != "" {
+				claim, exists, claimErr := resolveLeaseClaim(leaseID)
+				if claimErr != nil || !exists || claim.CloudID != test.claimName {
+					t.Fatalf("claim=%#v exists=%v err=%v", claim, exists, claimErr)
+				}
+			}
+		})
 	}
 }
 

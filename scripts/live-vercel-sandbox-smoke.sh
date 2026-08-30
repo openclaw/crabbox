@@ -244,6 +244,8 @@ export CRABBOX_VERCEL_SANDBOX_SMOKE_VALUE="forwarded-ok"
 mkdir -p "$smoke_repo"
 cd "$smoke_repo"
 git init -q
+# Do not leave background Git maintenance racing this disposable repo's cleanup.
+git config --local maintenance.auto false
 git config user.email smoke@example.com
 git config user.name "Crabbox Vercel Sandbox Smoke"
 cat >.crabbox.yaml <<EOF

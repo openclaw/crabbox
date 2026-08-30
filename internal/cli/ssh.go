@@ -84,7 +84,7 @@ func sshTargetForLease(cfg Config, host, user, port string) SSHTarget {
 	if port == "" {
 		port = cfg.SSHPort
 	}
-	return SSHTarget{
+	target := SSHTarget{
 		User:             user,
 		Host:             host,
 		Key:              cfg.SSHKey,
@@ -94,6 +94,12 @@ func sshTargetForLease(cfg Config, host, user, port string) SSHTarget {
 		WindowsMode:      cfg.WindowsMode,
 		ChildEnvDenylist: externalDesktopChildEnvDenylist(cfg, cfg.TargetOS),
 	}
+	if provider, err := ProviderFor(cfg.Provider); err == nil {
+		if configurer, ok := provider.(ProviderSSHTargetConfigurer); ok {
+			configurer.ConfigureSSHTarget(&target, sshReadyCommand(target))
+		}
+	}
+	return target
 }
 
 // PreserveExternalDesktopChildEnvironmentBoundary records a valid, trusted or
@@ -255,22 +261,51 @@ func BootstrapWaitTimeout(cfg Config) time.Duration {
 	return bootstrapWaitTimeout(cfg)
 }
 
+type sshReadinessProfile struct {
+	connectTimeout     string
+	connectionAttempts string
+}
+
+func sshReadinessProfileForTarget(target SSHTarget) sshReadinessProfile {
+	if target.TargetOS == targetWindows {
+		return sshReadinessProfile{
+			connectTimeout:     "10",
+			connectionAttempts: "3",
+		}
+	}
+	return sshReadinessProfile{
+		connectTimeout:     "5",
+		connectionAttempts: "1",
+	}
+}
+
 func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
 	start := time.Now()
 	deadline := time.Now().Add(timeout)
+	profile := sshReadinessProfileForTarget(*target)
+	probeCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
 	lastPorts := ""
 	for {
 		if ctx.Err() != nil {
 			return context.Cause(ctx)
 		}
-		if time.Now().After(deadline) {
+		if time.Until(deadline) <= 0 {
 			if lastPorts != "" {
 				return exit(5, "timed out waiting for SSH on %s during %s ports=%s; %s", target.Host, phase, lastPorts, sshWaitNextAction(phase))
 			}
 			return exit(5, "timed out waiting for SSH on %s during %s; %s", target.Host, phase, sshWaitNextAction(phase))
 		}
-		if target.SSHConfigProxy {
-			if runSSHQuietWithOptionsResolvePort(ctx, target, sshReadyCommand(*target), "5", "1") == nil {
+		if isWindowsWSL2Target(*target) {
+			if err := probeWSL2SSHReady(probeCtx, target, profile, stderr); err == nil {
+				return nil
+			} else if IsWSLSFTPUnavailable(err) {
+				return err
+			}
+			lastPorts = "wsl2"
+			fmt.Fprintln(stderr, sshWaitProgressMessage(target, phase, "", "", lastPorts, time.Since(start), time.Until(deadline)))
+		} else if target.SSHConfigProxy {
+			if probeProxySSHReady(probeCtx, target, profile) == nil {
 				return nil
 			}
 			lastPorts = "proxy"
@@ -292,14 +327,14 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 				if reachablePort == "" {
 					reachablePort = probe.Port
 				}
-				if runSSHQuietWithOptions(ctx, probe, sshTransportProbeCommand(probe), "5", "1") != nil {
+				if runSSHQuietWithOptions(probeCtx, probe, sshTransportProbeCommand(probe), profile.connectTimeout, profile.connectionAttempts) != nil {
 					probes = append(probes, port+":tcp")
 					continue
 				}
 				if transportPort == "" {
 					transportPort = probe.Port
 				}
-				if runSSHQuietWithOptions(ctx, probe, sshReadyCommand(probe), "5", "1") == nil {
+				if runSSHQuietWithOptions(probeCtx, probe, sshReadyCommand(probe), profile.connectTimeout, profile.connectionAttempts) == nil {
 					if target.Port != probe.Port {
 						fmt.Fprintf(stderr, "using ssh port %s for %s (configured %s not ready)\n", probe.Port, target.Host, target.Port)
 						target.Port = probe.Port
@@ -310,6 +345,9 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 			}
 			lastPorts = strings.Join(probes, ",")
 			fmt.Fprintln(stderr, sshWaitProgressMessage(target, phase, reachablePort, transportPort, lastPorts, time.Since(start), time.Until(deadline)))
+		}
+		if time.Until(deadline) <= 0 {
+			continue
 		}
 		if err := sleepContext(ctx, 10*time.Second); err != nil {
 			return context.Cause(ctx)
@@ -355,10 +393,14 @@ func probeSSHReady(ctx context.Context, target *SSHTarget, timeout time.Duration
 	if target.Host == "" {
 		return false
 	}
+	profile := sshReadinessProfileForTarget(*target)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	if isWindowsWSL2Target(*target) {
+		return probeWSL2SSHReady(ctx, target, profile, io.Discard) == nil
+	}
 	if target.SSHConfigProxy {
-		return runSSHQuietWithOptionsResolvePort(ctx, target, sshReadyCommand(*target), "2", "1") == nil
+		return probeProxySSHReady(ctx, target, profile) == nil
 	}
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 		probe := *target
@@ -370,12 +412,72 @@ func probeSSHReady(ctx context.Context, target *SSHTarget, timeout time.Duration
 			continue
 		}
 		_ = conn.Close()
-		if runSSHQuietWithOptions(ctx, probe, sshReadyCommand(probe), "2", "1") == nil {
+		if runSSHQuietWithOptions(ctx, probe, sshReadyCommand(probe), profile.connectTimeout, profile.connectionAttempts) == nil {
 			target.Port = probe.Port
 			return true
 		}
 	}
 	return false
+}
+
+func probeProxySSHReady(ctx context.Context, target *SSHTarget, profile sshReadinessProfile) error {
+	var lastErr error
+	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
+		candidate := *target
+		candidate.Port, candidate.FallbackPorts = port, []string{}
+		if lastErr = runSSHQuietWithOptions(ctx, candidate, sshTransportProbeCommand(candidate), profile.connectTimeout, profile.connectionAttempts); lastErr != nil {
+			continue
+		}
+		if lastErr = runSSHQuietWithOptions(ctx, candidate, sshReadyCommand(candidate), profile.connectTimeout, profile.connectionAttempts); lastErr != nil {
+			continue
+		}
+		target.Port, target.FallbackPorts = port, []string{}
+		return nil
+	}
+	return lastErr
+}
+
+func probeWSL2SSHReady(ctx context.Context, target *SSHTarget, profile sshReadinessProfile, stderr io.Writer) error {
+	ports := sshPortCandidates(target.Port, target.FallbackPorts)
+	type outcome struct {
+		err         error
+		missingSFTP bool
+	}
+	outcomes := make([]outcome, 0, len(ports))
+	for _, port := range ports {
+		probe := *target
+		probe.Port, probe.FallbackPorts = port, []string{}
+		run := func(remote string) error {
+			args := sshArgsNoInputWithOptions(probe, wsl2ReadinessCommand(remote), profile.connectTimeout, profile.connectionAttempts)
+			return runSSHCommand(sshCommandContext(ctx, probe, args...), io.Discard, io.Discard)
+		}
+		if err := run(sshTransportProbeCommand(probe)); err != nil {
+			outcomes = append(outcomes, outcome{err: err})
+			continue
+		}
+		if err := probeWSLSFTPSubsystem(ctx, probe, profile.connectTimeout, profile.connectionAttempts, stderr); err != nil {
+			outcomes = append(outcomes, outcome{err: err, missingSFTP: IsWSLSFTPUnavailable(err)})
+			continue
+		}
+		if err := run(sshReadyCommand(probe)); err == nil {
+			target.Port, target.FallbackPorts = port, []string{}
+			return nil
+		} else {
+			outcomes = append(outcomes, outcome{err: err})
+		}
+	}
+	allMissing := len(outcomes) == len(ports)
+	var lastErr error
+	for _, result := range outcomes {
+		allMissing = allMissing && result.missingSFTP
+		if !result.missingSFTP {
+			lastErr = result.err
+		}
+	}
+	if allMissing {
+		return errWSLSFTPUnavailable
+	}
+	return lastErr
 }
 
 func probeSSHTransport(ctx context.Context, target *SSHTarget, timeout time.Duration) bool {
@@ -422,6 +524,12 @@ if (-not (Test-Path -LiteralPath ` + psQuote(targetWindowsReadyRoot(target)) + `
 	return "test -x /usr/local/bin/crabbox-ready && /usr/local/bin/crabbox-ready >/tmp/crabbox-ready.log 2>&1"
 }
 
+func wsl2ReadinessCommand(remote string) string {
+	return powershellCommand(`$c=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('` + base64.StdEncoding.EncodeToString([]byte(remote)) + `'))
+& wsl.exe --exec sh -lc $c
+exit $LASTEXITCODE`)
+}
+
 func targetWindowsReadyRoot(target SSHTarget) string {
 	_ = target
 	return `C:\`
@@ -448,6 +556,156 @@ func uniqueSSHPorts(ports []string) []string {
 	return out
 }
 
+// Port probes may retry before delivery; a delivered command must never replay.
+func resolveSSHPortNoInput(ctx context.Context, target *SSHTarget, connectTimeout, connectionAttempts string, stderr io.Writer) error {
+	ports := sshPortCandidates(target.Port, target.FallbackPorts)
+	if len(ports) == 0 {
+		ports = []string{"22"}
+	}
+	if len(ports) == 1 {
+		target.Port, target.FallbackPorts = ports[0], []string{}
+		return nil
+	}
+	probe := *target
+	probe.FallbackPorts = []string{}
+	var err error
+	for index, port := range ports {
+		probe.Port = port
+		args := sshArgsNoInputWithOptions(probe, sshTransportProbeCommand(probe), connectTimeout, connectionAttempts)
+		var diagnostic synchronizedBuffer
+		err = runSSHCommand(sshCommandContext(ctx, probe, args...), io.Discard, &diagnostic)
+		if err == nil {
+			target.Port, target.FallbackPorts = port, []string{}
+			return nil
+		}
+		if !shouldRetrySSHPort(err) || index == len(ports)-1 {
+			if stderr != nil {
+				_, _ = stderr.Write(diagnostic.Bytes())
+			}
+			return err
+		}
+	}
+	return err
+}
+
+type sshTransportPreparation struct {
+	command string
+	direct  io.ReadSeeker
+	stage   *wslStageSpool
+}
+
+type sshCommandLimit struct {
+	execution time.Duration
+	control   bool
+}
+
+const sshMuxDescriptorFailure = "mux_client_request_session: send fds failed"
+
+type sshMuxFailureDetector struct {
+	log      []byte
+	overflow bool
+}
+
+func (d *sshMuxFailureDetector) Write(data []byte) (int, error) {
+	if len(d.log)+len(data) > 512 {
+		d.overflow = true
+	} else if !d.overflow {
+		d.log = append(d.log, data...)
+	}
+	return len(data), nil
+}
+
+func (d *sshMuxFailureDetector) failed() bool {
+	if d.overflow {
+		return false
+	}
+	lines := strings.Split(strings.TrimSuffix(strings.ReplaceAll(string(d.log), "\r\n", "\n"), "\n"), "\n")
+	// Even a local OpenSSH log can embed server-supplied disconnect text.
+	// Require the complete two-line failure, with no surrounding log records.
+	if len(lines) != 2 || lines[1] != sshMuxDescriptorFailure {
+		return false
+	}
+	for fd := 0; fd < 3; fd++ {
+		prefix := fmt.Sprintf("mm_send_fd: sendmsg(%d): ", fd)
+		if strings.HasPrefix(lines[0], prefix) && len(lines[0]) > len(prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func prepareSSHTransport(target SSHTarget, command string, input io.ReadSeeker, size int64, limit sshCommandLimit) (sshTransportPreparation, error) {
+	if size < 0 || limit.execution < 0 || limit.control && (int64(len(command))+size > sshControlMetadataLimit || limit.execution <= 0) {
+		return sshTransportPreparation{}, errors.New("command exceeds finite transport limits")
+	}
+	if isWindowsWSL2Target(target) {
+		spool, err := newWSLStageSpool(command, nil, input, size, limit)
+		if err == nil && limit.control {
+			if spool.size > sshControlMetadataLimit {
+				_ = spool.close()
+				return sshTransportPreparation{}, errors.New("control envelope exceeds its accounted transport budget")
+			}
+		}
+		return sshTransportPreparation{stage: spool}, err
+	}
+	return sshTransportPreparation{command: wrapRemoteForTarget(target, command), direct: input}, nil
+}
+
+func (p *sshTransportPreparation) run(ctx context.Context, target *SSHTarget, connectTimeout, connectionAttempts string, stdout, stderr io.Writer) error {
+	if p.stage != nil {
+		return p.stage.run(ctx, target, connectTimeout, connectionAttempts, stdout, stderr)
+	}
+	if err := resolveSSHPortNoInput(ctx, target, connectTimeout, connectionAttempts, stderr); err != nil {
+		return err
+	}
+	multiplexed := runtime.GOOS != "windows" && !target.AuthSecret && !target.NoControlMaster
+	for attempt := 0; ; attempt++ {
+		probe := *target
+		if attempt == 2 {
+			probe.NoControlMaster = true
+		}
+		muxFailure, err := p.runOnce(ctx, probe, connectTimeout, connectionAttempts, stdout, stderr, multiplexed && attempt < 2)
+		if err == nil || ctx.Err() != nil || exitCode(err) != 255 || !muxFailure || attempt == 2 {
+			return err
+		}
+	}
+}
+
+func (p *sshTransportPreparation) runOnce(ctx context.Context, target SSHTarget, connectTimeout, connectionAttempts string, stdout, stderr io.Writer, captureLocalDiagnostics bool) (muxFailure bool, err error) {
+	args := sshArgsNoInputWithOptions(target, p.command, connectTimeout, connectionAttempts)
+	if p.direct != nil {
+		args = sshArgsWithOptions(target, p.command, connectTimeout, connectionAttempts)
+	}
+	cmd := sshCommandContext(ctx, target, args...)
+	input, err := p.reset()
+	if err != nil {
+		return false, err
+	}
+	cmd.Stdin = input
+	if captureLocalDiagnostics {
+		return runSSHCommandWithLocalDiagnostics(cmd, stdout, stderr)
+	}
+	return false, runSSHCommand(cmd, stdout, stderr)
+}
+
+func (p *sshTransportPreparation) reset() (io.Reader, error) {
+	if p.direct != nil {
+		if _, err := p.direct.Seek(0, io.SeekStart); err != nil {
+			return nil, err
+		}
+		return p.direct, nil
+	}
+	return nil, nil
+}
+
+func (p *sshTransportPreparation) close() error {
+	var err error
+	if p.stage != nil {
+		err = errors.Join(err, p.stage.close())
+	}
+	return err
+}
+
 func runSSHQuiet(ctx context.Context, target SSHTarget, remote string) error {
 	return runSSHQuietWithOptions(ctx, target, remote, "10", "3")
 }
@@ -468,174 +726,90 @@ func runSSHQuietWithOptions(ctx context.Context, target SSHTarget, remote, conne
 	return runSSHQuietWithOptionsResolvePort(ctx, &target, remote, connectTimeout, connectionAttempts)
 }
 
-func runSSHQuietWithOptionsResolvePort(ctx context.Context, target *SSHTarget, remote, connectTimeout, connectionAttempts string) (err error) {
-	prepared, err := prepareWorkspaceOwnerRemote(ctx, *target, remote, nil)
+type sshPreparationError struct{ error }
+
+func (e sshPreparationError) Unwrap() error { return e.error }
+
+// executeSSH owns workspace preparation; executePreparedSSH is the lower,
+// generic transport boundary and has no knowledge of workspace ownership.
+func executeSSH(ctx context.Context, target *SSHTarget, remote string, input io.ReadSeeker, size int64, limit time.Duration, connectTimeout, attempts string, stdout, stderr io.Writer) (err error) {
+	var inputSize *int64
+	if input != nil {
+		inputSize = &size
+	}
+	prepared, err := prepareWorkspaceOwnerRemote(ctx, *target, remote, inputSize)
 	if err != nil {
-		return err
+		return sshPreparationError{err}
 	}
 	defer func() {
 		if err != nil {
 			err = errors.Join(err, prepared.close(ctx, *target))
 		}
 	}()
-	remote = prepared.command
-	remote = wrapRemoteForTarget(*target, remote)
-	var lastErr error
-	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
-		probe := *target
-		probe.Port = port
-		probe.FallbackPorts = []string{}
-		cmd := sshCommandContext(ctx, probe, sshArgsNoInputWithOptions(probe, remote, connectTimeout, connectionAttempts)...)
-		err := runSSHCommand(cmd, io.Discard, io.Discard)
-		if err == nil {
-			target.Port = probe.Port
-			return nil
-		}
-		lastErr = err
-		if !shouldRetrySSHPort(err) {
-			return err
-		}
-	}
-	return lastErr
+	return executePreparedSSH(ctx, target, prepared.command, input, size, sshCommandLimit{execution: limit}, connectTimeout, attempts, stdout, stderr)
 }
 
-func runSSHQuietWithRemoteWaitTimeout(ctx context.Context, target SSHTarget, remote string, waitTimeout time.Duration, connectTimeout, connectionAttempts string) (err error) {
-	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, nil)
+func executePreparedSSH(ctx context.Context, target *SSHTarget, command string, input io.ReadSeeker, size int64, limit sshCommandLimit, connectTimeout, attempts string, stdout, stderr io.Writer) (err error) {
+	transport, err := prepareSSHTransport(*target, command, input, size, limit)
 	if err != nil {
-		return err
+		return sshPreparationError{err}
 	}
-	defer func() {
-		if err != nil {
-			err = errors.Join(err, prepared.close(ctx, target))
+	defer func() { err = errors.Join(err, transport.close()) }()
+	if limit.execution > 0 {
+		bytes := int64(len(command)) + size
+		if transport.stage != nil {
+			bytes = transport.stage.size
 		}
-	}()
-	remote = prepared.command
-	remote = wrapRemoteForTargetWithWaitTimeout(target, remote, waitTimeout)
-	var lastErr error
-	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
-		probe := target
-		probe.Port = port
-		probe.FallbackPorts = []string{}
-		cmd := sshCommandContext(ctx, probe, sshArgsNoInputWithOptions(probe, remote, connectTimeout, connectionAttempts)...)
-		err := runSSHCommand(cmd, io.Discard, io.Discard)
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-		if !shouldRetrySSHPort(err) {
-			return err
-		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, sshTransportCallBudget(*target, bytes, limit))
+		defer cancel()
 	}
-	return lastErr
+	err = transport.run(ctx, target, connectTimeout, attempts, stdout, stderr)
+	if err == nil {
+		err = context.Cause(ctx)
+	}
+	return err
 }
 
-func runSSHOutput(ctx context.Context, target SSHTarget, remote string) (output string, err error) {
-	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, nil)
-	if err != nil {
-		return "", err
-	}
-	defer func() {
-		if err != nil {
-			err = errors.Join(err, prepared.close(ctx, target))
-		}
-	}()
-	remote = prepared.command
-	remote = wrapRemoteForTarget(target, remote)
-	var lastOut []byte
-	var lastErr error
-	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
-		probe := target
-		probe.Port = port
-		cmd := sshCommandContext(ctx, probe, sshArgsNoInput(probe, remote)...)
-		var out bytes.Buffer
-		err := runSSHCommand(cmd, &out, io.Discard)
-		if err == nil {
-			return strings.TrimSpace(out.String()), nil
-		}
-		lastOut = out.Bytes()
-		lastErr = err
-		if !shouldRetrySSHPort(err) {
-			return "", err
-		}
-	}
-	return strings.TrimSpace(string(lastOut)), lastErr
+func runSSHQuietWithOptionsResolvePort(ctx context.Context, target *SSHTarget, remote, connectTimeout, connectionAttempts string) error {
+	return executeSSH(ctx, target, remote, nil, 0, 0, connectTimeout, connectionAttempts, io.Discard, io.Discard)
 }
 
-func runSSHOutputWithRemoteWaitTimeout(ctx context.Context, target SSHTarget, remote string, waitTimeout time.Duration, connectTimeout, connectionAttempts string) (output string, err error) {
-	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, nil)
-	if err != nil {
-		return "", err
-	}
-	defer func() {
-		if err != nil {
-			err = errors.Join(err, prepared.close(ctx, target))
-		}
-	}()
-	remote = prepared.command
-	remote = wrapRemoteForTargetWithWaitTimeout(target, remote, waitTimeout)
-	var lastOut []byte
-	var lastErr error
-	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
-		probe := target
-		probe.Port = port
-		probe.FallbackPorts = []string{}
-		cmd := sshCommandContext(ctx, probe, sshArgsNoInputWithOptions(probe, remote, connectTimeout, connectionAttempts)...)
-		var out bytes.Buffer
-		err := runSSHCommand(cmd, &out, io.Discard)
-		if err == nil {
-			return strings.TrimSpace(out.String()), nil
-		}
-		lastOut = out.Bytes()
-		lastErr = err
-		if !shouldRetrySSHPort(err) {
-			return "", err
-		}
-	}
-	return strings.TrimSpace(string(lastOut)), lastErr
+func runSSHQuietWithRemoteWaitTimeout(ctx context.Context, target SSHTarget, remote string, waitTimeout time.Duration, connectTimeout, connectionAttempts string) error {
+	return executeSSH(ctx, &target, remote, nil, 0, waitTimeout, connectTimeout, connectionAttempts, io.Discard, io.Discard)
 }
 
-func runSSHCombinedOutput(ctx context.Context, target SSHTarget, remote string) (output string, err error) {
-	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, nil)
-	if err != nil {
-		return "", err
-	}
-	defer func() {
-		if err != nil {
-			err = errors.Join(err, prepared.close(ctx, target))
-		}
-	}()
-	remote = prepared.command
-	remote = wrapRemoteForTarget(target, remote)
-	var lastOut []byte
-	var lastErr error
-	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
-		probe := target
-		probe.Port = port
-		// Crabbox's SSH helpers intentionally execute commands assembled by
-		// typed remote-command builders. Callers must shell-quote user data
-		// before it reaches this boundary; see remoteCommand/shellQuote tests.
-		cmd := sshCommandContext(ctx, probe, sshArgsNoInput(probe, remote)...)
-		var out synchronizedBuffer
-		err := runSSHCommand(cmd, &out, &out)
-		if err == nil {
-			return strings.TrimSpace(out.String()), nil
-		}
-		lastOut = out.Bytes()
-		lastErr = err
-		if !shouldRetrySSHPort(err) {
-			return strings.TrimSpace(out.String()), err
-		}
-	}
-	return strings.TrimSpace(string(lastOut)), lastErr
+func runSSHOutput(ctx context.Context, target SSHTarget, remote string) (string, error) {
+	return runSSHOutputWithRemoteWaitTimeout(ctx, target, remote, 0, "10", "3")
+}
+
+func runSSHOutputWithRemoteWaitTimeout(ctx context.Context, target SSHTarget, remote string, waitTimeout time.Duration, connectTimeout, connectionAttempts string) (string, error) {
+	var out bytes.Buffer
+	err := executeSSH(ctx, &target, remote, nil, 0, waitTimeout, connectTimeout, connectionAttempts, &out, io.Discard)
+	return strings.TrimSpace(out.String()), err
+}
+
+func runSSHCombinedOutput(ctx context.Context, target SSHTarget, remote string) (string, error) {
+	return runSSHCombinedOutputLimit(ctx, target, remote, 0)
+}
+
+func runSSHCombinedOutputLimit(ctx context.Context, target SSHTarget, remote string, maxBytes int) (string, error) {
+	out := synchronizedBuffer{limit: maxBytes}
+	err := executeSSH(ctx, &target, remote, nil, 0, 0, "10", "3", &out, &out)
+	return strings.TrimSpace(out.String()), err
 }
 
 var idempotentSSHRetryDelay = 2 * time.Second
 
 func runIdempotentSSHCombinedOutput(ctx context.Context, target SSHTarget, remote string, retryDelay time.Duration) (string, error) {
+	return runIdempotentSSHCombinedOutputLimit(ctx, target, remote, retryDelay, 0)
+}
+
+func runIdempotentSSHCombinedOutputLimit(ctx context.Context, target SSHTarget, remote string, retryDelay time.Duration, maxBytes int) (string, error) {
 	var lastOut string
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		lastOut, lastErr = runSSHCombinedOutput(ctx, target, remote)
+		lastOut, lastErr = runSSHCombinedOutputLimit(ctx, target, remote, maxBytes)
 		if lastErr == nil || !shouldRetrySSHPort(lastErr) || attempt == 1 {
 			return lastOut, lastErr
 		}
@@ -648,103 +822,17 @@ func runIdempotentSSHCombinedOutput(ctx context.Context, target SSHTarget, remot
 	return lastOut, lastErr
 }
 
-func runWSL2ControlScriptCombinedOutput(ctx context.Context, target SSHTarget, remote string, waitTimeout time.Duration, connectTimeout, connectionAttempts string) (output string, err error) {
-	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, nil)
-	if err != nil {
-		return "", err
-	}
-	defer func() {
-		if err != nil {
-			err = errors.Join(err, prepared.close(ctx, target))
-		}
-	}()
-	remote = prepared.command
-	command := wsl2StdinScriptCommandWithWaitTimeout(waitTimeout)
-	input, err := newReplayableSSHInput([]byte(remote))
-	if err != nil {
-		return "", err
-	}
-	defer func() {
-		err = errors.Join(err, input.close())
-	}()
-	var lastOut []byte
-	var lastErr error
-	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
-		probe := target
-		probe.Port = port
-		probe.FallbackPorts = []string{}
-		cmd := sshCommandContext(ctx, probe, sshArgsWithOptions(probe, command, connectTimeout, connectionAttempts)...)
-		cmd.Stdin, err = input.reset()
-		if err != nil {
-			return "", err
-		}
-		var out synchronizedBuffer
-		err = runSSHCommand(cmd, &out, &out)
-		if err == nil {
-			return strings.TrimSpace(out.String()), nil
-		}
-		lastOut = out.Bytes()
-		lastErr = err
-		if !shouldRetrySSHPort(err) {
-			return strings.TrimSpace(string(lastOut)), err
-		}
-	}
-	return strings.TrimSpace(string(lastOut)), lastErr
+func runWSL2ControlScriptCombinedOutput(ctx context.Context, target SSHTarget, remote string, waitTimeout time.Duration, connectTimeout, connectionAttempts string) (string, error) {
+	var out synchronizedBuffer
+	err := executeSSH(ctx, &target, remote, nil, 0, waitTimeout, connectTimeout, connectionAttempts, &out, &out)
+	return strings.TrimSpace(out.String()), err
 }
 
 func runSSHInputQuiet(ctx context.Context, target SSHTarget, remote, input string) error {
 	return runSSHInput(ctx, target, remote, strings.NewReader(input), io.Discard, io.Discard)
 }
 
-func runSSHInputCombinedOutput(ctx context.Context, target SSHTarget, remote string, input io.Reader) (output string, err error) {
-	if input == nil {
-		input = strings.NewReader("")
-	}
-	data, err := io.ReadAll(input)
-	if err != nil {
-		return "", err
-	}
-	inputSize := int64(len(data))
-	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, &inputSize)
-	if err != nil {
-		return "", err
-	}
-	defer func() {
-		if err != nil {
-			err = errors.Join(err, prepared.close(ctx, target))
-		}
-	}()
-	remote = wrapRemoteForTarget(target, prepared.command)
-	replayableInput, err := newReplayableSSHInput(data)
-	if err != nil {
-		return "", err
-	}
-	defer func() { err = errors.Join(err, replayableInput.close()) }()
-	var lastOutput string
-	var lastErr error
-	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
-		probe := target
-		probe.Port = port
-		cmd := sshCommandContext(ctx, probe, sshArgs(probe, remote)...)
-		cmd.Stdin, err = replayableInput.reset()
-		if err != nil {
-			return "", err
-		}
-		var attempt synchronizedBuffer
-		err = runSSHCommand(cmd, &attempt, &attempt)
-		lastOutput = strings.TrimSpace(attempt.String())
-		if err == nil {
-			return lastOutput, nil
-		}
-		lastErr = err
-		if !shouldRetrySSHPort(err) {
-			return lastOutput, err
-		}
-	}
-	return lastOutput, lastErr
-}
-
-func runSSHInput(ctx context.Context, target SSHTarget, remote string, input io.Reader, stdout, stderr io.Writer) (err error) {
+func runSSHInput(ctx context.Context, target SSHTarget, remote string, input io.Reader, stdout, stderr io.Writer) error {
 	if input == nil {
 		input = strings.NewReader("")
 	}
@@ -752,85 +840,21 @@ func runSSHInput(ctx context.Context, target SSHTarget, remote string, input io.
 	if err != nil {
 		return err
 	}
-	inputSize := int64(len(data))
-	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, &inputSize)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err != nil {
-			err = errors.Join(err, prepared.close(ctx, target))
-		}
-	}()
-	remote = wrapRemoteForTarget(target, prepared.command)
-	replayableInput, err := newReplayableSSHInput(data)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		err = errors.Join(err, replayableInput.close())
-	}()
-	var lastErr error
-	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
-		probe := target
-		probe.Port = port
-		cmd := sshCommandContext(ctx, probe, sshArgs(probe, remote)...)
-		cmd.Stdin, err = replayableInput.reset()
-		if err != nil {
-			return err
-		}
-		err = runSSHCommand(cmd, stdout, stderr)
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-		if !shouldRetrySSHPort(err) {
-			return err
-		}
-	}
-	return lastErr
+	return runSSHInputStream(ctx, target, remote, bytes.NewReader(data), stdout, stderr)
 }
 
-func runSSHInputStream(ctx context.Context, target SSHTarget, remote string, input io.ReadSeeker, stdout, stderr io.Writer) (err error) {
+func runSSHInputStream(ctx context.Context, target SSHTarget, remote string, input io.ReadSeeker, stdout, stderr io.Writer) error {
 	if input == nil {
 		input = strings.NewReader("")
 	}
-	inputSize, err := input.Seek(0, io.SeekEnd)
+	size, err := input.Seek(0, io.SeekEnd)
 	if err != nil {
 		return err
 	}
 	if _, err := input.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
-	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, &inputSize)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err != nil {
-			err = errors.Join(err, prepared.close(ctx, target))
-		}
-	}()
-	remote = wrapRemoteForTarget(target, prepared.command)
-	var lastErr error
-	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
-		if _, err := input.Seek(0, io.SeekStart); err != nil {
-			return err
-		}
-		probe := target
-		probe.Port = port
-		cmd := sshCommandContext(ctx, probe, sshArgs(probe, remote)...)
-		cmd.Stdin = input
-		err := runSSHCommand(cmd, stdout, stderr)
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-		if !shouldRetrySSHPort(err) {
-			return err
-		}
-	}
-	return lastErr
+	return executeSSH(ctx, &target, remote, input, size, 0, "10", "3", stdout, stderr)
 }
 
 func runSSHStream(ctx context.Context, target SSHTarget, remote string, stdout, stderr io.Writer) int {
@@ -839,29 +863,12 @@ func runSSHStream(ctx context.Context, target SSHTarget, remote string, stdout, 
 }
 
 func runSSHStreamResult(ctx context.Context, target SSHTarget, remote string, stdout, stderr io.Writer) (int, error) {
-	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, remote, nil)
-	if err != nil {
+	err := executeSSH(ctx, &target, remote, nil, 0, 0, "10", "3", stdout, stderr)
+	var preparation sshPreparationError
+	if errors.As(err, &preparation) {
 		return 7, err
 	}
-	remote = prepared.command
-	remote = wrapRemoteForTarget(target, remote)
-	lastCode := 7
-	var lastErr error
-	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
-		probe := target
-		probe.Port = port
-		cmd := sshCommandContext(ctx, probe, sshArgsNoInput(probe, remote)...)
-		err := runSSHCommand(cmd, stdout, stderr)
-		if err == nil {
-			return 0, nil
-		}
-		lastErr = err
-		lastCode = exitCode(err)
-		if !shouldRetrySSHPort(err) {
-			return lastCode, errors.Join(err, prepared.close(ctx, target))
-		}
-	}
-	return lastCode, errors.Join(lastErr, prepared.close(ctx, target))
+	return exitCode(err), err
 }
 
 func runSSHCommand(cmd *exec.Cmd, stdout, stderr io.Writer) error {
@@ -869,25 +876,39 @@ func runSSHCommand(cmd *exec.Cmd, stdout, stderr io.Writer) error {
 }
 
 type synchronizedBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
+	mu        sync.Mutex
+	buf       bytes.Buffer
+	limit     int
+	truncated bool
 }
 
 func (b *synchronizedBuffer) Write(data []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.buf.Write(data)
+	n := len(data)
+	if b.limit > 0 && len(data) > b.limit-b.buf.Len() {
+		data = data[:b.limit-b.buf.Len()]
+		b.truncated = true
+	}
+	_, _ = b.buf.Write(data)
+	return n, nil
 }
 
 func (b *synchronizedBuffer) Bytes() []byte {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.truncated {
+		return nil
+	}
 	return bytes.Clone(b.buf.Bytes())
 }
 
 func (b *synchronizedBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.truncated {
+		return ""
+	}
 	return b.buf.String()
 }
 
@@ -1134,10 +1155,10 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 		if err := runSSHQuiet(rawCtx, target, owner.rsyncPrepareCommand()); err != nil {
 			return exit(7, "prepare rsync workspace witness: %v", err)
 		}
-		if _, err := runSSHOutput(rawCtx, target, owner.wrapPOSIXBackgroundCommand(owner.rsyncGuardPayload(dst))); err != nil {
+		if _, err := runWorkspaceOwnerBackgroundOutput(rawCtx, target, owner, owner.rsyncGuardPayload(dst)); err != nil {
 			return exit(7, "start rsync workspace witness: %v", err)
 		}
-		if err := owner.WaitForChild(rawCtx, 10*time.Second); err != nil {
+		if err := owner.WaitForChild(rawCtx, owner.callTimeout()); err != nil {
 			return err
 		}
 		guardStarted = true
@@ -1152,11 +1173,11 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 	err = cmd.Run()
 	stopHeartbeat()
 	if guardStarted {
-		guardCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
+		guardCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), owner.quiesceTimeout())
 		rawGuardCtx := contextWithoutWorkspaceOwner(guardCtx)
 		guardErr := runSSHQuiet(rawGuardCtx, target, owner.rsyncStopCommand())
 		if guardErr == nil {
-			guardErr = waitWorkspaceOwnerNoChild(rawGuardCtx, owner, 15*time.Second)
+			guardErr = waitWorkspaceOwnerNoChild(rawGuardCtx, owner, owner.callTimeout())
 		}
 		cleanupErr := runSSHQuiet(rawGuardCtx, target, owner.rsyncPrepareCommand())
 		cancel()
@@ -1177,10 +1198,6 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 }
 
 func wrapRemoteForTarget(target SSHTarget, remote string) string {
-	return wrapRemoteForTargetWithWaitTimeout(target, remote, 0)
-}
-
-func wrapRemoteForTargetWithWaitTimeout(target SSHTarget, remote string, waitTimeout time.Duration) string {
 	if isWindowsNativeTarget(target) {
 		if strings.HasPrefix(remote, "powershell.exe ") || strings.HasPrefix(remote, "powershell ") {
 			return remote
@@ -1188,35 +1205,13 @@ func wrapRemoteForTargetWithWaitTimeout(target SSHTarget, remote string, waitTim
 		return powershellCommand(remote)
 	}
 	if isWindowsWSL2Target(target) {
-		return wsl2CommandWithWaitTimeout(remote, waitTimeout)
+		return wsl2Command(remote)
 	}
 	return remote
 }
 
-func wsl2CommandWithWaitTimeout(remote string, waitTimeout time.Duration) string {
+func wsl2Command(remote string) string {
 	encoded := base64.StdEncoding.EncodeToString([]byte(remote))
-	wait := `$process.WaitForExit()
-  $code = $process.ExitCode`
-	invoke := `& wsl.exe --exec bash $wslPath
-  $code = $LASTEXITCODE`
-	if waitTimeout > 0 {
-		waitMS := int(waitTimeout / time.Millisecond)
-		wait = fmt.Sprintf(`if (-not $process.WaitForExit(%d)) {
-    try {
-      $process.Kill($true)
-    } catch {
-      $process.Kill()
-    }
-    $process.WaitForExit(5000) | Out-Null
-    throw "WSL2 command timed out after %s"
-  }
-  $code = $process.ExitCode`, waitMS, waitTimeout.Round(time.Second))
-		invoke = `$psi = [System.Diagnostics.ProcessStartInfo]::new("wsl.exe")
-  $psi.UseShellExecute = $false
-  $psi.Arguments = "--exec bash " + $wslPath
-  $process = [System.Diagnostics.Process]::Start($psi)
-  ` + wait
-	}
 	return powershellCommand(`$ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $dir = "C:\ProgramData\crabbox\commands"
@@ -1227,48 +1222,8 @@ $scriptBytes = [Convert]::FromBase64String("` + encoded + `")
 [System.IO.File]::WriteAllBytes($path, $scriptBytes)
 $wslPath = "/mnt/c/ProgramData/crabbox/commands/" + $name
 try {
-  ` + invoke + `
-} finally {
-  Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
-}
-exit $code`)
-}
-
-func wsl2StdinScriptCommandWithWaitTimeout(waitTimeout time.Duration) string {
-	wait := `$process.WaitForExit()
-  $code = $process.ExitCode`
-	if waitTimeout > 0 {
-		waitMS := int(waitTimeout / time.Millisecond)
-		wait = fmt.Sprintf(`if (-not $process.WaitForExit(%d)) {
-    try {
-      $process.Kill($true)
-    } catch {
-      $process.Kill()
-    }
-    $process.WaitForExit(5000) | Out-Null
-    throw "WSL2 command timed out after %s"
-  }
-  $code = $process.ExitCode`, waitMS, waitTimeout.Round(time.Second))
-	}
-	return powershellCommand(`$ErrorActionPreference = "Stop"
-$ProgressPreference = "SilentlyContinue"
-$dir = "C:\ProgramData\crabbox\commands"
-New-Item -ItemType Directory -Force -Path $dir | Out-Null
-$name = "cmd-" + [Guid]::NewGuid().ToString("N") + ".sh"
-$path = Join-Path $dir $name
-try {
-  $script = [System.IO.File]::Open($path, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-  try {
-    [Console]::OpenStandardInput().CopyTo($script)
-  } finally {
-    $script.Close()
-  }
-  $wslPath = "/mnt/c/ProgramData/crabbox/commands/" + $name
-  $psi = [System.Diagnostics.ProcessStartInfo]::new("wsl.exe")
-  $psi.UseShellExecute = $false
-  $psi.Arguments = "--exec bash " + $wslPath
-  $process = [System.Diagnostics.Process]::Start($psi)
-  ` + wait + `
+  & wsl.exe --exec bash $wslPath
+  $code = $LASTEXITCODE
 } finally {
   Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
 }
@@ -1895,6 +1850,9 @@ func remoteGitSeed(workdir string, plan gitCoherencePlan) string {
 	}
 	parent := filepath.ToSlash(filepath.Dir(workdir))
 	script := `set -e
+printf 'crabbox-git-seed phase=prerequisite\n'
+command -v git >/dev/null 2>&1 || exit 127
+printf 'crabbox-git-seed phase=prepare\n'
 workdir=` + shellQuote(workdir) + `
 expected_origin=` + shellQuote(plan.RemoteURL) + `
 expected_tree=` + shellQuote(plan.Tree) + `
@@ -1902,6 +1860,7 @@ expected_tree=` + shellQuote(plan.Tree) + `
 if [ -d "$workdir" ]; then
   cd "$workdir"
   if usable_git_workspace; then
+    printf 'crabbox-git-seed phase=origin\n'
     repair_origin
     exit 0
   fi
@@ -1910,15 +1869,20 @@ mkdir -p ` + shellQuote(parent) + `
 tmp="$(mktemp -d ` + shellQuote(parent+"/.seed.XXXXXX") + `)"
 cleanup_seed() { rm -rf -- "$tmp"; }
 trap cleanup_seed EXIT
-git clone --quiet --filter=blob:none --no-checkout --single-branch --branch ` + shellQuote(plan.Branch) + ` "$expected_origin" "$tmp" >/dev/null 2>&1
+printf 'crabbox-git-seed phase=clone\n'
+git clone --quiet --filter=blob:none --no-checkout --single-branch --branch ` + shellQuote(plan.Branch) + ` "$expected_origin" "$tmp"
+printf 'crabbox-git-seed phase=checkout\n'
 git -C "$tmp" checkout --quiet --detach ` + shellQuote(plan.Target) + `
+printf 'crabbox-git-seed phase=verify\n'
 [ "$(git -C "$tmp" rev-parse --verify HEAD^{commit})" = ` + shellQuote(plan.Target) + ` ]
 cd "$tmp"
 usable_git_workspace
 if [ -n "$expected_tree" ]; then
   [ "$(git write-tree)" = "$expected_tree" ]
 fi
+printf 'crabbox-git-seed phase=origin\n'
 repair_origin
+printf 'crabbox-git-seed phase=publish\n'
 cd /
 rm -rf -- "$workdir"
 mv -- "$tmp" "$workdir"
@@ -1972,6 +1936,8 @@ rm -f "$meta_dir/sync-fingerprint"`
 type remoteSyncFinalizeOptions struct {
 	AllowMassDeletions bool
 	HydrateGit         bool
+	GitOverlay         bool
+	PlainManifest      bool
 	BaseRef            string
 	BaseSHA            string
 	Fingerprint        string
@@ -2008,9 +1974,20 @@ func remoteSyncInterpreterCommand(python, perl, args string) string {
 }
 
 func remoteWriteSyncManifestsNew(workdir, finalizeToken string) string {
+	return remoteWriteSyncManifestsNewWithMetadataMode(workdir, finalizeToken, remoteSyncMetaDirScript(), false)
+}
+
+func remoteWriteSyncManifestsNewWithMetadata(workdir, finalizeToken, metadataScript string) string {
+	return remoteWriteSyncManifestsNewWithMetadataMode(workdir, finalizeToken, metadataScript, true)
+}
+
+func remoteWriteSyncManifestsNewWithMetadataMode(workdir, finalizeToken, metadataScript string, hermetic bool) string {
 	manifestName := remoteSyncPendingManifestName(finalizeToken)
 	deletedName := remoteSyncPendingDeletedName(finalizeToken)
-	script := "set -e\nmkdir -p " + shellQuote(workdir) + "\ncd " + shellQuote(workdir) + "\n" + remoteSyncMetaDirScript() + `mkdir -p "$meta_dir"
+	if hermetic {
+		metadataScript = gitOverlayHermeticFunctions() + metadataScript
+	}
+	script := "set -e\nmkdir -p " + shellQuote(workdir) + "\ncd " + shellQuote(workdir) + "\n" + metadataScript + `mkdir -p "$meta_dir"
 ` + remoteSyncAbandonedMetadataCleanup() + `
 if ! IFS= read -r manifest_len; then
   echo "invalid sync manifest length" >&2
@@ -2042,6 +2019,9 @@ if [ "$deleted_size" != "$deleted_len" ]; then
   exit 1
 fi
 `
+	if hermetic {
+		return remoteGitOverlayShellCommand(script)
+	}
 	return "bash -lc " + shellQuote(script)
 }
 
@@ -2228,10 +2208,16 @@ func remoteFinalizeSync(workdir string, opts remoteSyncFinalizeOptions) string {
 	}
 	manifestName := remoteSyncPendingManifestName(opts.Token)
 	deletedName := remoteSyncPendingDeletedName(opts.Token)
+	gitFunctions := remoteGitWorkspaceFunctions()
+	metadataScript := remoteSyncMetaDirScript()
+	if opts.GitOverlay || opts.PlainManifest {
+		gitFunctions = gitOverlayHermeticFunctions() + gitFunctions
+		metadataScript = remotePlainSyncMetaDirScript()
+	}
 	script := `set -e
 cd ` + shellQuote(workdir) + `
-` + remoteGitWorkspaceFunctions() + `
-` + remoteSyncMetaDirScript() + `
+` + gitFunctions + `
+` + metadataScript + `
 mkdir -p "$meta_dir"
 new="$meta_dir/` + manifestName + `"
 deleted="$meta_dir/` + deletedName + `"
@@ -2263,7 +2249,11 @@ elif [ ! -f "$manifest" ] || [ ! -f "$committed_token" ] || [ "$(cat "$committed
   exit 67
 fi
 `
-	if opts.Coherence.enabled() {
+	if opts.GitOverlay {
+		script += remoteGitOverlayFinalizeScript(opts.Coherence, allowValue)
+	} else if opts.PlainManifest {
+		script += remoteGitOverlayRecoveryFinalizeScript(opts.Coherence, opts.BaseRef, opts.BaseSHA, allowValue)
+	} else if opts.Coherence.enabled() {
 		script += remoteGitCoherenceFinalizeScript(opts.Coherence, allowValue)
 	} else {
 		script += `publish_fingerprint=
@@ -2277,7 +2267,7 @@ if exact_git_root && git status --short >"$git_status" 2>/dev/null; then
 fi
 `
 	}
-	if opts.HydrateGit && opts.BaseRef != "" {
+	if !opts.GitOverlay && !opts.PlainManifest && opts.HydrateGit && opts.BaseRef != "" {
 		refspec := "+refs/heads/" + opts.BaseRef + ":refs/remotes/origin/" + opts.BaseRef
 		script += `if exact_git_root && git remote get-url origin >/dev/null 2>&1; then
   if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
@@ -2306,7 +2296,60 @@ printf %s "$expected_token" > "$complete_tmp"
 mv "$complete_tmp" "$complete_token"
 coherence_committed=1
 `
+	if opts.GitOverlay || opts.PlainManifest {
+		return remoteGitOverlayShellCommand(script)
+	}
 	return "bash -lc " + shellQuote(script)
+}
+
+func remoteGitOverlayFinalizeScript(plan gitCoherencePlan, allowMassDeletions string) string {
+	return `
+if ! overlay_workspace_safe "$PWD" || ! exact_git_root; then
+  echo "remote overlay finalize failed: unsafe Git workspace" >&2
+  exit 67
+fi
+if [ "$(git remote get-url origin 2>/dev/null || true)" != ` + shellQuote(plan.RemoteURL) + ` ] ||
+   [ "$(git rev-parse --verify HEAD^{commit} 2>/dev/null || true)" != ` + shellQuote(plan.Target) + ` ] ||
+   [ "$(git write-tree 2>/dev/null || true)" != ` + shellQuote(plan.Tree) + ` ]; then
+  echo "remote overlay finalize failed: Git identity changed" >&2
+  exit 67
+fi
+git diff-files --name-status >"$git_status" 2>/dev/null || {
+  echo "remote overlay finalize failed: Git status inspection failed" >&2
+  exit 67
+}
+deletions=$(awk '$1 == "D" { n++ } END { print n+0 }' "$git_status")
+if [ ` + shellQuote(allowMassDeletions) + ` != '1' ] && [ "$deletions" -ge 200 ]; then
+  echo "remote sync sanity failed: $deletions tracked deletions" >&2
+  exit 66
+fi
+`
+}
+
+func remoteGitOverlayRecoveryFinalizeScript(plan gitCoherencePlan, baseRef, baseSHA, allowMassDeletions string) string {
+	if !plan.enabled() {
+		return `echo "Git overlay recovery requires the original coherence plan" >&2; exit 67
+`
+	}
+	script := `publish_fingerprint=
+if ! overlay_workspace_safe "$PWD" || ! overlay_runtime_state_safe "$PWD" || ! exact_git_root; then
+  echo "Git overlay recovery requires an isolated safe Git workspace" >&2
+  exit 67
+fi
+if [ "$(git remote get-url origin 2>/dev/null || true)" != ` + shellQuote(plan.RemoteURL) + ` ]; then
+  echo "Git overlay recovery requires the original safe Git origin" >&2
+  exit 67
+fi
+`
+	if baseRef != "" && baseSHA != "" {
+		script += `if [ "$(git rev-parse --verify ` + shellQuote("refs/remotes/origin/"+baseRef+"^{commit}") + ` 2>/dev/null || true)" != ` + shellQuote(baseSHA) + ` ] ||
+   ! git merge-base ` + shellQuote(baseSHA) + ` ` + shellQuote(plan.Target) + ` >/dev/null 2>&1; then
+  echo "Git overlay recovery requires the planned base ref and history" >&2
+  exit 67
+fi
+`
+	}
+	return script + remoteGitCoherenceFinalizeScript(plan, allowMassDeletions)
 }
 
 func remoteGitCoherenceFinalizeScript(plan gitCoherencePlan, allowMassDeletions string) string {
@@ -2429,6 +2472,15 @@ func remoteSyncMetaDirScript() string {
   git_root="$(cd -P -- "$git_root" 2>/dev/null && pwd -P)" &&
   [ "$git_root" = "$(pwd -P)" ]; then git rev-parse --git-path crabbox; else printf %s .crabbox; fi)
 case "$meta_dir" in /*) ;; *) meta_dir="$PWD/$meta_dir" ;; esac
+`
+}
+
+func remotePlainSyncMetaDirScript() string {
+	return `if ! overlay_workspace_safe "$PWD" || ! overlay_metadata_safe "$PWD"; then
+  echo "Git overlay requires isolated, nonsymlink workspace metadata" >&2
+  exit 67
+fi
+meta_dir="$PWD/.git/crabbox"
 `
 }
 

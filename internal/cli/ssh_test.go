@@ -3,7 +3,10 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +15,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -688,6 +692,22 @@ exit 0
 
 func decodePowerShellCommand(t *testing.T, command string) string {
 	t.Helper()
+	if offset := strings.Index(command, "[Convert]::FromBase64String('"); offset >= 0 {
+		encoded, _, ok := strings.Cut(command[offset+len("[Convert]::FromBase64String('"):], "')")
+		if !ok {
+			t.Fatal("invalid UTF-8 PowerShell command")
+		}
+		raw, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+	return decodePowerShellEncodedCommand(t, command)
+}
+
+func decodePowerShellEncodedCommand(t *testing.T, command string) string {
+	t.Helper()
 	const prefix = powerShellEncodedCommandPrefix
 	if !strings.HasPrefix(command, prefix) {
 		t.Fatalf("command missing encoded powershell prefix: %q", command)
@@ -711,7 +731,7 @@ func runDecodedWindowsPowerShell(t *testing.T, command string) ([]byte, error) {
 	return runWindowsPowerShellScript(t, decodePowerShellCommand(t, command))
 }
 
-func runWindowsPowerShellScript(t *testing.T, script string) ([]byte, error) {
+func windowsPowerShellScriptCommand(t *testing.T, script string) *exec.Cmd {
 	t.Helper()
 	powerShell, err := exec.LookPath("powershell.exe")
 	if err != nil {
@@ -722,7 +742,12 @@ func runWindowsPowerShellScript(t *testing.T, script string) ([]byte, error) {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(powerShell, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath)
-	return cmd.CombinedOutput()
+	return cmd
+}
+
+func runWindowsPowerShellScript(t *testing.T, script string) ([]byte, error) {
+	t.Helper()
+	return windowsPowerShellScriptCommand(t, script).CombinedOutput()
 }
 
 func TestWSL2WrapsRemoteCommand(t *testing.T) {
@@ -763,47 +788,269 @@ func TestWSL2WrapsRemoteCommand(t *testing.T) {
 	}
 }
 
-func TestWSL2CommandWithWaitTimeoutBoundsRemoteProcess(t *testing.T) {
-	got := wsl2CommandWithWaitTimeout(`printf "ok\n"`, 15*time.Second)
-	decoded := decodePowerShellCommand(t, got)
-	for _, want := range []string{
-		`$process.WaitForExit(15000)`,
-		`$process.Kill($true)`,
-		`$process.Kill()`,
-		`throw "WSL2 command timed out after 15s"`,
-		`$code = $process.ExitCode`,
-	} {
-		if !strings.Contains(decoded, want) {
-			t.Fatalf("bounded WSL2 command missing %q in %q", want, decoded)
-		}
-	}
-}
-
-func TestWSL2WrapRemoteCommandWithWaitTimeout(t *testing.T) {
+func TestWSL2WrapsLargeRemoteBelowWindowsCommandLimit(t *testing.T) {
 	target := SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}
-	got := wrapRemoteForTargetWithWaitTimeout(target, `printf "ok\n"`, 15*time.Second)
-	decoded := decodePowerShellCommand(t, got)
-	if !strings.Contains(decoded, `$process.WaitForExit(15000)`) {
-		t.Fatalf("bounded WSL2 wrapper missing timeout:\n%s", decoded)
+	command := wrapRemoteForTarget(target, remoteEnsureLocalActionsRunEnv("cbx_example", ""))
+	if len(command) >= 8191 {
+		t.Fatalf("WSL2 command length=%d exceeds cmd.exe limit", len(command))
 	}
 }
 
-func TestWSL2StdinScriptCommandWithWaitTimeoutReadsPayloadFromStdin(t *testing.T) {
-	got := wsl2StdinScriptCommandWithWaitTimeout(15 * time.Second)
-	decoded := decodePowerShellCommand(t, got)
-	for _, want := range []string{
-		`[Console]::OpenStandardInput().CopyTo($script)`,
-		`$process.WaitForExit(15000)`,
-		`throw "WSL2 command timed out after 15s"`,
-		`$process.Kill($true)`,
-		`$code = $process.ExitCode`,
-	} {
-		if !strings.Contains(decoded, want) {
-			t.Fatalf("stdin-backed WSL2 command missing %q in %q", want, decoded)
+func decodeWSLStage(t *testing.T, data []byte) (owner, helper, command string, payload []byte) {
+	t.Helper()
+	if len(data) < wslStageHeaderSize || string(data[:8]) != "CBXFLAT2" {
+		t.Fatal("invalid envelope descriptor")
+	}
+	offset := wslStageHeaderSize
+	take := func(size uint64) []byte {
+		if size > uint64(len(data)-offset) {
+			t.Fatal("envelope exceeds finite input")
+		}
+		value := data[offset : offset+int(size)]
+		offset += int(size)
+		return value
+	}
+	owner = string(take(uint64(binary.LittleEndian.Uint32(data[8:]))))
+	helper = string(take(uint64(binary.LittleEndian.Uint32(data[12:]))))
+	command = string(take(binary.LittleEndian.Uint64(data[16:])))
+	payload = take(binary.LittleEndian.Uint64(data[24:]))
+	if offset != len(data) {
+		t.Fatal("unaccounted envelope bytes")
+	}
+	return
+}
+
+func captureWSLStage(t *testing.T, nonce string, inspect func(*wslStageSpool, *SSHTarget, wslStageTiming, []byte)) {
+	t.Helper()
+	previous := stageWSLSpool
+	t.Cleanup(func() { stageWSLSpool = previous })
+	stageWSLSpool = func(spool *wslStageSpool, _ context.Context, target *SSHTarget, timing wslStageTiming, _, _ string, _ io.Writer) (string, error) {
+		reader, err := spool.input.reset()
+		if err != nil {
+			return "", err
+		}
+		data, err := io.ReadAll(reader)
+		if err != nil {
+			return "", err
+		}
+		spool.shell = wslStageCMD
+		inspect(spool, target, timing, data)
+		return nonce, nil
+	}
+}
+
+func TestWSL2StagedTransportBuildsExactPrivateSpool(t *testing.T) {
+	remote := strings.Repeat("# large command\n", 2048) + "printf 'exact'"
+	payload := bytes.Repeat([]byte{0, 1, 2, 255}, 2<<20)
+	spool, err := newWSLStageSpool(remote, payload, nil, int64(len(payload)), sshCommandLimit{execution: 15 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer spool.close()
+	reader, err := spool.input.reset()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, helper, command, input := decodeWSLStage(t, data)
+	if command != remote || helper != wslLinuxHelper || !bytes.Equal(input, payload) || sha256.Sum256(data) != spool.digest() {
+		t.Fatal("envelope changed exact bytes")
+	}
+	for _, index := range []int{0, 8, 40, wslStageBlindingOffset, wslStageHeaderSize - 1, len(data) - 1} {
+		changed := bytes.Clone(data)
+		changed[index] ^= 1
+		if sha256.Sum256(changed) == spool.digest() {
+			t.Fatal("descriptor or content not bound")
 		}
 	}
-	if strings.Contains(decoded, `[Convert]::FromBase64String("`) {
-		t.Fatalf("stdin-backed WSL2 command should not embed script payload: %q", decoded)
+	for _, size := range []int64{0, spool.size, wslStageMaxSize} {
+		launcher := wslStageLauncherCommand(strings.Repeat("f", 32), size, spool.digest(), wslStageCMD)
+		if len(launcher) >= wslStageLauncherCommandLimit || launcher == "" {
+			t.Fatalf("launcher bytes=%d", len(launcher))
+		}
+		if strings.Contains(decodePowerShellCommand(t, launcher), remote) {
+			t.Fatal("command leaked into argv")
+		}
+	}
+}
+
+func TestWSL2StagedTransportPowerShellParses(t *testing.T) {
+	powerShell, err := exec.LookPath("pwsh")
+	if err != nil {
+		powerShell, err = exec.LookPath("powershell.exe")
+		if err != nil {
+			t.Skip("PowerShell is unavailable")
+		}
+	}
+	launcher := wslStageLauncherCommand(strings.Repeat("f", 32), 100, sha256.Sum256([]byte("test")), wslStageCMD)
+	if size := len(wslStageRootPreparationCommand(strings.Repeat("a", 32))); size >= wslStageLauncherCommandLimit {
+		t.Fatalf("root preparation bytes=%d", size)
+	}
+	_, raw := newTestWSLStageSpool(t, nil)
+	owner, _, _, _ := decodeWSLStage(t, raw)
+	for name, script := range map[string]string{"verifier": decodePowerShellCommand(t, launcher), "owner": owner, "root": decodePowerShellCommand(t, wslStageRootPreparationCommand(strings.Repeat("a", 32)))} {
+		t.Run(name, func(t *testing.T) {
+			cmd := exec.CommandContext(t.Context(), powerShell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", `$errors=$null;[Management.Automation.Language.Parser]::ParseInput([Console]::In.ReadToEnd(),[ref]$null,[ref]$errors)|Out-Null;if($errors){$errors|%{[Console]::Error.WriteLine($_.Message)};exit 1}`)
+			cmd.Stdin = strings.NewReader(script)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("PowerShell rejected %s: %v\n%s", name, err, output)
+			}
+		})
+	}
+	// Execute the complete command through the outer default shell, mocking
+	// only the inner executable so this also runs on non-Windows hosts.
+	script := `function powershell.exe {$script:childArgs=@($args)};` + launcher + `;ConvertTo-Json -Compress -InputObject $script:childArgs`
+	output, err := exec.CommandContext(t.Context(), powerShell, "-NoProfile", "-Command", script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("outer shell: %v %s", err, output)
+	}
+	var args []string
+	if err := json.Unmarshal(bytes.TrimSpace(output), &args); err != nil {
+		t.Fatal(err)
+	}
+	if len(args) != 7 || args[5] != "-Command" || args[6] != wslStagePowerShellCommand(decodePowerShellCommand(t, launcher), wslStagePowerShell) {
+		t.Fatal("outer shell changed launcher arguments")
+	}
+}
+
+func TestWSLHelperBootstrapPreservesExactBytes(t *testing.T) {
+	helper := "# é\nprintf '%s' \"$CBX_HELPER\"\ncat\n\n\n"
+	payload := []byte{0, 255, 10, 13, 65}
+	for _, test := range []struct {
+		name     string
+		preamble []byte
+		declared string
+		extra    int
+		fail     bool
+	}{
+		{name: "no preamble", declared: "0"},
+		{name: "UTF8 BOM", preamble: []byte{239, 187, 191}, declared: "3"},
+		{name: "wrong preamble", preamble: []byte{239, 187, 190}, declared: "3", fail: true},
+		{name: "absent declared BOM", declared: "3", fail: true},
+		{name: "invalid preamble length", declared: "2", fail: true},
+		{name: "incomplete helper", declared: "0", extra: 1, fail: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cmd := exec.CommandContext(t.Context(), "sh", "-c", wslHelperBootstrap, "sh", strconv.Itoa(len(helper)+test.extra), test.declared)
+			input := append(bytes.Clone(test.preamble), []byte(helper)...)
+			if test.extra == 0 {
+				input = append(input, payload...)
+			}
+			cmd.Stdin = bytes.NewReader(input)
+			got, err := cmd.Output()
+			if test.fail {
+				if err == nil || len(got) != 0 {
+					t.Fatalf("invalid preamble/helper executed: %x %v", got, err)
+				}
+				return
+			}
+			want := append([]byte(helper), payload...)
+			if err != nil || !bytes.Equal(got, want) {
+				t.Fatalf("bootstrap bytes=%x err=%v", got, err)
+			}
+		})
+	}
+}
+
+type localPOSIXWorkspaceOwnerTransport struct {
+	home string
+}
+
+func (transport localPOSIXWorkspaceOwnerTransport) Do(ctx context.Context, req workspaceOwnerRemoteRequest) (string, error) {
+	cmd := exec.CommandContext(ctx, "sh", "-c", remoteWorkspaceOwnerCommand(SSHTarget{TargetOS: targetLinux}, req))
+	cmd.Env = []string{"HOME=" + transport.home, "PATH=" + os.Getenv("PATH")}
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+func TestWSLStageWorkloadPreservesCallerUmask(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("executes the staged WSL POSIX helper locally")
+	}
+	// POSIXTransportIsLoginShellIndependent covers witness masks with and without
+	// stdin. Test WSL's masks and one composed witness without repeating that matrix.
+	const binaryInput = "payload\x00\xff\n"
+	tests := []struct {
+		mask  string
+		owned bool
+		input string
+	}{
+		{mask: "022"},
+		{mask: "027", input: binaryInput},
+		{mask: "077", input: binaryInput},
+		{mask: "027", owned: true, input: binaryInput},
+	}
+	for _, test := range tests {
+		t.Run(fmt.Sprintf("umask-%s/owned-%t/input-%t", test.mask, test.owned, test.input != ""), func(t *testing.T) {
+			home := t.TempDir()
+			wantCode := 0
+			if test.input != "" {
+				wantCode = 23
+			}
+			// Relative paths keep the framed workload independent of TempDir length.
+			script := `private_paths=$(find stage \( -type d ! -perm 700 -o -type f ! -perm 600 \) -print) || exit 99; [ -z "$private_paths" ] || { printf 'non-private staging paths: %s\n' "$private_paths" >&2; exit 99; }
+mkdir user-directory && cat >user-file; exit ` + strconv.Itoa(wantCode)
+			ctx := t.Context()
+			if test.owned {
+				// Staging may outlast a claim's TTL; use the same renewal lifecycle as run.
+				owner, err := acquireWorkspaceOwnerWithTransport(ctx, SSHTarget{TargetOS: targetLinux}, "cbx_umask", io.Discard, localPOSIXWorkspaceOwnerTransport{home: home}, workspaceOwnerWaitTimeout, workspaceOwnerTTL, workspaceOwnerRenewInterval)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), workspaceOwnerCleanupTimeout)
+					defer cancel()
+					if err := owner.Close(cleanupCtx); err != nil {
+						t.Errorf("release workspace owner: %v", err)
+					}
+				})
+				ctx = owner.Context()
+				script = owner.wrapPOSIXCommand(script, test.input != "")
+			}
+			stage := filepath.Join(home, "stage")
+			if err := os.Mkdir(stage, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for name, data := range map[string]string{
+				".armed":  "",
+				"command": script,
+				"input":   test.input,
+			} {
+				if err := os.WriteFile(filepath.Join(stage, name), []byte(data), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Execute the actual staged workload branch, including its private
+			// helper mask and restoration of the incoming caller mask.
+			cmd := exec.CommandContext(ctx, "bash", "-c", wslLinuxHelper, "sh", "workload", stage, "nonce", "0", "0", "0", "0", test.mask)
+			cmd.Dir = home
+			cmd.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}
+			if out, err := cmd.CombinedOutput(); exitCode(err) != wantCode {
+				t.Fatalf("WSL shell exit=%d want=%d err=%v output=%s", exitCode(err), wantCode, err, out)
+			}
+			if data, err := os.ReadFile(filepath.Join(home, "user-file")); err != nil || string(data) != test.input {
+				t.Fatalf("stdin=%q want=%q err=%v", data, test.input, err)
+			}
+			bits, err := strconv.ParseUint(test.mask, 8, 32)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for path, base := range map[string]os.FileMode{"user-file": 0o666, "user-directory": 0o777} {
+				info, err := os.Stat(filepath.Join(home, path))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if want := base &^ os.FileMode(bits); info.Mode().Perm() != want {
+					t.Errorf("caller umask %s: %s mode=%04o want=%04o", test.mask, path, info.Mode().Perm(), want)
+				}
+			}
+			if result, err := os.ReadFile(filepath.Join(stage, ".result")); err != nil || strings.TrimSpace(string(result)) != strconv.Itoa(wantCode) {
+				t.Errorf("WSL result=%q err=%v, want %d", result, err, wantCode)
+			}
+		})
 	}
 }
 
@@ -1100,21 +1347,24 @@ exit 7
 	}
 }
 
-func TestRunSSHStreamRetriesFallbackPorts(t *testing.T) {
+func TestRunSSHStreamResolvesFallbackBeforeExecution(t *testing.T) {
 	dir := t.TempDir()
 	sshPath := filepath.Join(dir, "ssh")
-	portsPath := filepath.Join(dir, "ports")
+	callsPath := filepath.Join(dir, "calls")
 	script := `#!/bin/sh
 port=""
+remote=""
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "-p" ]; then
     shift
     port="$1"
   fi
+  remote="$1"
   shift
 done
-printf '%s\n' "$port" >> "$CRABBOX_FAKE_SSH_PORTS"
+printf '%s:%s\n' "$port" "$remote" >> "$CRABBOX_FAKE_SSH_CALLS"
 if [ "$port" = "2222" ]; then
+  printf 'failed primary probe\n' >&2
   exit 255
 fi
 printf 'ok\n'
@@ -1124,7 +1374,7 @@ exit 0
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("CRABBOX_FAKE_SSH_PORTS", portsPath)
+	t.Setenv("CRABBOX_FAKE_SSH_CALLS", callsPath)
 
 	var stdout, stderr bytes.Buffer
 	code := runSSHStream(context.Background(), SSHTarget{
@@ -1139,12 +1389,324 @@ exit 0
 	if stdout.String() != "ok\n" {
 		t.Fatalf("stdout=%q want ok", stdout.String())
 	}
-	ports, err := os.ReadFile(portsPath)
+	if stderr.String() != "" {
+		t.Fatalf("successful fallback leaked probe stderr=%q", stderr.String())
+	}
+	calls, err := os.ReadFile(callsPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(ports) != "2222\n22\n" {
-		t.Fatalf("ports=%q want fallback sequence", string(ports))
+	if string(calls) != "2222:exit 0\n22:exit 0\n22:true\n" {
+		t.Fatalf("calls=%q want probe fallback then one execution", string(calls))
+	}
+}
+
+func TestSSHAllProbeFailureReportsOnlyFinalDiagnostic(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(context.Context, SSHTarget, *bytes.Buffer, *bytes.Buffer) error
+	}{
+		{name: "combined output", run: func(ctx context.Context, target SSHTarget, stdout, _ *bytes.Buffer) error {
+			out, err := runSSHCombinedOutput(ctx, target, "true")
+			stdout.WriteString(out)
+			return err
+		}},
+		{name: "stream", run: func(ctx context.Context, target SSHTarget, stdout, stderr *bytes.Buffer) error {
+			_, err := runSSHStreamResult(ctx, target, "true", stdout, stderr)
+			return err
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			sshPath := filepath.Join(dir, "ssh")
+			script := `#!/bin/sh
+port=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-p" ]; then shift; port="$1"; fi
+  shift
+done
+printf 'probe-%s\n' "$port" >&2
+exit 255
+`
+			if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			target := SSHTarget{User: "crabbox", Host: "example.test", Port: "2222", FallbackPorts: []string{"22"}}
+			var stdout, stderr bytes.Buffer
+			err := test.run(t.Context(), target, &stdout, &stderr)
+			if err == nil || exitCode(err) != 255 {
+				t.Fatalf("err=%v exit=%d, want 255", err, exitCode(err))
+			}
+			diagnostic := stdout.String() + stderr.String()
+			if diagnostic != "probe-22\n" && diagnostic != "probe-22" {
+				t.Fatalf("diagnostic=%q, want only final probe", diagnostic)
+			}
+		})
+	}
+}
+
+func TestRunSSHStreamRetriesOnlyMultiplexDescriptorFailures(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows OpenSSH does not multiplex connections")
+	}
+
+	tests := []struct {
+		name            string
+		mode            string
+		noControlMaster bool
+		authSecret      bool
+		failStderr      bool
+		wantCalls       int
+		wantCode        int
+		wantDirect      bool
+	}{
+		{name: "first multiplex retry succeeds", mode: "retry", wantCalls: 2},
+		{name: "repeated multiplex failure disables control master", mode: "fallback", wantCalls: 3, wantDirect: true},
+		{name: "generic transport failure is not replayed", mode: "generic", wantCalls: 1, wantCode: 255},
+		{name: "remote failure is not replayed", mode: "remote", wantCalls: 1, wantCode: 7},
+		{name: "diagnostic without transport exit is not replayed", mode: "remote-diagnostic", wantCalls: 1, wantCode: 7},
+		{name: "nested remote SSH failure is not replayed", mode: "nested-ssh", wantCalls: 1, wantCode: 255},
+		{name: "server disconnect log injection is not replayed", mode: "server-disconnect", wantCalls: 1, wantCode: 255},
+		{name: "oversized diagnostics are drained without replay", mode: "overflow", wantCalls: 1, wantCode: 255},
+		{name: "failed output still drains oversized diagnostics", mode: "overflow", failStderr: true, wantCalls: 1, wantCode: 255},
+		{name: "diagnostic writer failure is not replayed", mode: "retry", failStderr: true, wantCalls: 1, wantCode: 255},
+		{name: "embedded diagnostic is not replayed", mode: "embedded-diagnostic", wantCalls: 1, wantCode: 255},
+		{name: "disabled control master is not replayed", mode: "fallback", noControlMaster: true, wantCalls: 1, wantCode: 255, wantDirect: true},
+		{name: "secret authentication is not replayed", mode: "fallback", authSecret: true, wantCalls: 1, wantCode: 255, wantDirect: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			sshPath := filepath.Join(dir, "ssh")
+			callsPath := filepath.Join(dir, "calls")
+			script := `#!/bin/sh
+printf '%s\n' "$*" >> "$CRABBOX_FAKE_SSH_CALLS"
+diagnostics=/dev/stderr
+if [ "$1" = -E ]; then
+  diagnostics=$2; shift 2
+  [ -p "$diagnostics" ] || exit 99
+fi
+attempt=$(wc -l < "$CRABBOX_FAKE_SSH_CALLS" | tr -d ' ')
+case "$CRABBOX_FAKE_SSH_MODE:$attempt" in
+  retry:1|fallback:1|fallback:2)
+    printf 'mm_send_fd: sendmsg(0): Message too long\n' >> "$diagnostics"
+    printf 'mux_client_request_session: send fds failed\n' >> "$diagnostics"
+    exit 255
+    ;;
+  generic:*)
+    printf 'connection closed\n' >&2
+    exit 255
+    ;;
+  remote:*)
+    printf 'remote command failed\n' >&2
+    exit 7
+    ;;
+  remote-diagnostic:*)
+    printf 'mux_client_request_session: send fds failed\n' >&2
+    exit 7
+    ;;
+  nested-ssh:*)
+    printf 'executed once\n'
+    printf 'mm_send_fd: sendmsg(0): Message too long\n' >&2
+    printf 'mux_client_request_session: send fds failed\n' >&2
+    exit 255
+    ;;
+  server-disconnect:*)
+    printf 'executed once\n'
+    printf 'Received disconnect from 203.0.113.10 port 2222:11: \n' >> "$diagnostics"
+    printf 'mm_send_fd: sendmsg(0): Message too long\n' >> "$diagnostics"
+    printf 'mux_client_request_session: send fds failed\n' >> "$diagnostics"
+    exit 255
+    ;;
+  embedded-diagnostic:*)
+    printf 'remote output: mux_client_request_session: send fds failed\n' >&2
+    exit 255
+    ;;
+  overflow:*)
+    printf 'mm_send_fd: sendmsg(0): Message too long\nmux_client_request_session: send fds failed\n' >> "$diagnostics"
+    dd if=/dev/zero bs=1024 count=1024 2>/dev/null >> "$diagnostics"
+    exit 255
+    ;;
+esac
+printf 'executed once\n'
+`
+			if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("CRABBOX_FAKE_SSH_CALLS", callsPath)
+			t.Setenv("CRABBOX_FAKE_SSH_MODE", test.mode)
+
+			var stdout, stderr bytes.Buffer
+			stderrWriter := io.Writer(&stderr)
+			if test.failStderr {
+				stderrWriter = failingWriter{}
+			}
+			code, err := runSSHStreamResult(t.Context(), SSHTarget{
+				User:            "crabbox",
+				Host:            "203.0.113.10",
+				Port:            "2222",
+				FallbackPorts:   []string{},
+				NoControlMaster: test.noControlMaster,
+				AuthSecret:      test.authSecret,
+			}, "true", &stdout, stderrWriter)
+			if code != test.wantCode {
+				t.Fatalf("exit=%d err=%v stderr=%q, want exit %d", code, err, stderr.String(), test.wantCode)
+			}
+			if test.mode == "overflow" && !test.failStderr && (stderr.Len() > 66*1024 || !strings.Contains(stderr.String(), "diagnostics truncated after 65536 bytes")) {
+				t.Fatalf("diagnostics not bounded with a truncation notice: %d bytes", stderr.Len())
+			}
+			calls, readErr := os.ReadFile(callsPath)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			lines := strings.Split(strings.TrimSpace(string(calls)), "\n")
+			if len(lines) != test.wantCalls {
+				t.Fatalf("ssh calls=%d, want %d:\n%s", len(lines), test.wantCalls, calls)
+			}
+			if got := strings.Contains(lines[len(lines)-1], "ControlMaster=no"); got != test.wantDirect {
+				t.Fatalf("last SSH invocation disables multiplexing=%t, want %t:\n%s", got, test.wantDirect, calls)
+			}
+			if (test.wantCode == 0 || test.mode == "nested-ssh" || test.mode == "server-disconnect") && stdout.String() != "executed once\n" {
+				t.Fatalf("remote command output=%q, want exactly one execution", stdout.String())
+			}
+			for _, line := range lines {
+				args := strings.Fields(line)
+				if args[0] == "-E" {
+					if _, err := os.Stat(args[1]); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("local diagnostics file not removed: %v", err)
+					}
+				}
+			}
+			if !test.failStderr && (test.mode == "retry" || test.mode == "fallback") {
+				if !strings.Contains(stderr.String(), sshMuxDescriptorFailure) {
+					t.Fatalf("local SSH diagnostics were not forwarded: %q", stderr.String())
+				}
+			}
+		})
+	}
+}
+
+func TestRunSSHInputReplaysAfterMultiplexDescriptorFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows OpenSSH does not multiplex connections")
+	}
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "ssh")
+	callsPath := filepath.Join(dir, "calls")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$CRABBOX_FAKE_SSH_CALLS"
+diagnostics=/dev/stderr
+if [ "$1" = -E ]; then diagnostics=$2; shift 2; fi
+attempt=$(wc -l < "$CRABBOX_FAKE_SSH_CALLS" | tr -d ' ')
+if [ "$attempt" -lt 3 ]; then
+  dd bs=1 count=3 of=/dev/null 2>/dev/null
+  printf 'mm_send_fd: sendmsg(0): Message too long\n' >> "$diagnostics"
+  printf 'mux_client_request_session: send fds failed\n' >> "$diagnostics"
+  exit 255
+fi
+exec /bin/cat
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_CALLS", callsPath)
+
+	var stdout, stderr bytes.Buffer
+	err := runSSHInput(t.Context(), SSHTarget{
+		User:          "crabbox",
+		Host:          "203.0.113.10",
+		Port:          "2222",
+		FallbackPorts: []string{},
+	}, "cat", strings.NewReader("complete replayed input"), &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("SSH input failed: %v; stderr=%q", err, stderr.String())
+	}
+	if stdout.String() != "complete replayed input" {
+		t.Fatalf("replayed stdin=%q", stdout.String())
+	}
+	calls, err := os.ReadFile(callsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(calls)), "\n")
+	if len(lines) != 3 || !strings.Contains(lines[2], "ControlMaster=no") {
+		t.Fatalf("SSH retry/fallback calls:\n%s", calls)
+	}
+}
+
+func TestRunSSHStreamSerializesSharedOutputWriter(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows OpenSSH uses native shared stream spooling")
+	}
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "ssh")
+	script := `#!/bin/sh
+diagnostics=$2
+i=0
+while [ "$i" -lt 200 ]; do
+  printf 'stdout-%s\n' "$i"
+  printf 'stderr-%s\n' "$i" >&2
+  printf 'local-%s\n' "$i" >> "$diagnostics"
+  i=$((i + 1))
+done
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var output bytes.Buffer
+	code, err := runSSHStreamResult(t.Context(), SSHTarget{
+		User: "crabbox",
+		Host: "203.0.113.10",
+		Port: "22",
+	}, "true", &output, &output)
+	if code != 0 || err != nil {
+		t.Fatalf("exit=%d err=%v", code, err)
+	}
+	if stdout, stderr := strings.Count(output.String(), "stdout-"), strings.Count(output.String(), "stderr-"); stdout != 200 || stderr != 200 {
+		t.Fatalf("combined stream lines: stdout=%d stderr=%d, want 200 each", stdout, stderr)
+	}
+	if got := strings.Count(output.String(), "local-"); got != 200 {
+		t.Fatalf("local diagnostic lines=%d, want 200", got)
+	}
+}
+
+func TestSSHMuxFailureDetectorRequiresExactDiagnosticAcrossWrites(t *testing.T) {
+	prefix := "mm_send_fd: sendmsg(0): Message too long\n"
+	tests := []struct {
+		name   string
+		chunks []string
+		want   bool
+	}{
+		{name: "complete record", chunks: []string{prefix + sshMuxDescriptorFailure + "\n"}, want: true},
+		{name: "split record", chunks: []string{prefix + "mux_client_request_", "session: send fds failed\n"}, want: true},
+		{name: "unterminated record", chunks: []string{prefix + sshMuxDescriptorFailure}, want: true},
+		{name: "windows line endings", chunks: []string{strings.ReplaceAll(prefix, "\n", "\r\n") + sshMuxDescriptorFailure + "\r\n"}, want: true},
+		{name: "stdout descriptor failure", chunks: []string{"mm_send_fd: sendmsg(1): Broken pipe\n" + sshMuxDescriptorFailure + "\n"}, want: true},
+		{name: "bare diagnostic", chunks: []string{sshMuxDescriptorFailure + "\n"}},
+		{name: "embedded line", chunks: []string{"remote output: " + sshMuxDescriptorFailure + "\n"}},
+		{name: "diagnostic suffix", chunks: []string{prefix + sshMuxDescriptorFailure + " unexpectedly\n"}},
+		{name: "server disconnect injection", chunks: []string{"Received disconnect from server:11: \n" + prefix + sshMuxDescriptorFailure + "\n"}},
+		{name: "trailing unrelated record", chunks: []string{prefix + sshMuxDescriptorFailure + "\nother failure\n"}},
+		{name: "oversized log", chunks: []string{strings.Repeat("x", 513), prefix + sshMuxDescriptorFailure + "\n"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var detector sshMuxFailureDetector
+			for _, chunk := range test.chunks {
+				if _, err := detector.Write([]byte(chunk)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := detector.failed(); got != test.want {
+				t.Fatalf("matched=%t, want %t", got, test.want)
+			}
+		})
 	}
 }
 
@@ -1192,8 +1754,419 @@ exit 0
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(ports) != "2222\n22\n" {
-		t.Fatalf("ports=%q want fallback sequence", string(ports))
+	if string(ports) != "2222\n22\n22\n" {
+		t.Fatalf("ports=%q want probe fallback then readiness execution", string(ports))
+	}
+}
+
+func TestProxySSHReadinessPreservesCandidatesUntilSuccessfulProbe(t *testing.T) {
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "ssh")
+	callsPath := filepath.Join(dir, "calls")
+	script := `#!/bin/sh
+port=""
+remote=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-p" ]; then shift; port="$1"; fi
+  remote="$1"
+  shift
+done
+count=0
+if [ -f "$CRABBOX_FAKE_SSH_CALLS" ]; then count=$(/usr/bin/wc -l < "$CRABBOX_FAKE_SSH_CALLS" | /usr/bin/tr -d ' '); fi
+printf '%s:%s\n' "$port" "$remote" >> "$CRABBOX_FAKE_SSH_CALLS"
+if [ "$remote" = "exit 0" ] && [ "$count" -lt 2 ]; then exit 255; fi
+exit 0
+`
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_CALLS", callsPath)
+	target := SSHTarget{User: "crabbox", Host: "proxy.example", Port: "2222", FallbackPorts: []string{"22"}, SSHConfigProxy: true}
+	original := target
+	if err := runSSHQuietWithOptionsResolvePort(t.Context(), &target, "true", "1", "1"); exitCode(err) != 255 {
+		t.Fatalf("first readiness err=%v exit=%d, want 255", err, exitCode(err))
+	}
+	if !reflect.DeepEqual(target, original) {
+		t.Fatalf("failed readiness mutated target: got=%#v want=%#v", target, original)
+	}
+	if err := runSSHQuietWithOptionsResolvePort(t.Context(), &target, "true", "1", "1"); err != nil {
+		t.Fatal(err)
+	}
+	if target.Port != "2222" || len(target.FallbackPorts) != 0 {
+		t.Fatalf("successful readiness target=%#v, want pinned port 2222", target)
+	}
+	calls, err := os.ReadFile(callsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(calls), "2222:exit 0\n22:exit 0\n2222:exit 0\n2222:true\n"; got != want {
+		t.Fatalf("calls=%q want %q", got, want)
+	}
+}
+
+func TestProxySSHReadinessPinsOnlyFullyReadyFallback(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake SSH fixture")
+	}
+	for _, test := range []struct {
+		name string
+		run  func(context.Context, *SSHTarget) bool
+	}{
+		{name: "wait", run: func(ctx context.Context, target *SSHTarget) bool {
+			return waitForSSHReady(ctx, target, io.Discard, "test", 5*time.Second) == nil
+		}},
+		{name: "probe", run: func(ctx context.Context, target *SSHTarget) bool {
+			return probeSSHReady(ctx, target, 5*time.Second)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			callsPath := filepath.Join(dir, "calls")
+			script := `#!/bin/sh
+port=
+remote=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-p" ]; then shift; port="$1"; fi
+  remote="$1"
+  shift
+done
+printf '%s:%s\n' "$port" "$remote" >> "$CRABBOX_FAKE_SSH_CALLS"
+if [ "$port" = "2222" ] && [ "$remote" != "exit 0" ]; then exit 1; fi
+exit 0
+`
+			if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("CRABBOX_FAKE_SSH_CALLS", callsPath)
+			target := SSHTarget{
+				User: "crabbox", Host: "proxy.example", Port: "2222", FallbackPorts: []string{"22"},
+				SSHConfigProxy: true, ReadyCheck: "true",
+			}
+			if !test.run(t.Context(), &target) || target.Port != "22" || len(target.FallbackPorts) != 0 {
+				t.Fatalf("readiness did not pin the fully ready fallback: %+v", target)
+			}
+			calls, err := os.ReadFile(callsPath)
+			if got, want := string(calls), "2222:exit 0\n2222:true\n22:exit 0\n22:true\n"; err != nil || got != want {
+				t.Fatalf("readiness calls=%q error=%v want=%q", got, err, want)
+			}
+		})
+	}
+}
+
+func TestSSHReadinessProfileForTarget(t *testing.T) {
+	tests := []struct {
+		name               string
+		target             SSHTarget
+		connectTimeout     string
+		connectionAttempts string
+	}{
+		{
+			name:               "linux",
+			target:             SSHTarget{TargetOS: targetLinux},
+			connectTimeout:     "5",
+			connectionAttempts: "1",
+		},
+		{
+			name:               "macos",
+			target:             SSHTarget{TargetOS: targetMacOS},
+			connectTimeout:     "5",
+			connectionAttempts: "1",
+		},
+		{
+			name:               "windows normal",
+			target:             SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal},
+			connectTimeout:     "10",
+			connectionAttempts: "3",
+		},
+		{
+			name:               "windows wsl2",
+			target:             SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2},
+			connectTimeout:     "10",
+			connectionAttempts: "3",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			profile := sshReadinessProfileForTarget(test.target)
+			if profile.connectTimeout != test.connectTimeout || profile.connectionAttempts != test.connectionAttempts {
+				t.Fatalf("profile=%+v want ConnectTimeout=%s ConnectionAttempts=%s", profile, test.connectTimeout, test.connectionAttempts)
+			}
+		})
+	}
+}
+
+func TestSSHReadinessCallsUseTargetProfile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
+	}
+	tests := []struct {
+		name               string
+		target             SSHTarget
+		connectTimeout     string
+		connectionAttempts string
+	}{
+		{name: "linux", target: SSHTarget{TargetOS: targetLinux}, connectTimeout: "5", connectionAttempts: "1"},
+		{name: "macos", target: SSHTarget{TargetOS: targetMacOS}, connectTimeout: "5", connectionAttempts: "1"},
+		{name: "windows normal", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, connectTimeout: "10", connectionAttempts: "3"},
+		{name: "windows wsl2", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, connectTimeout: "10", connectionAttempts: "3"},
+	}
+	for _, test := range tests {
+		for _, call := range []struct {
+			name string
+			run  func(context.Context, *SSHTarget) bool
+		}{
+			{
+				name: "wait",
+				run: func(ctx context.Context, target *SSHTarget) bool {
+					return waitForSSHReady(ctx, target, io.Discard, "test", 4*time.Second) == nil
+				},
+			},
+			{
+				name: "probe",
+				run: func(ctx context.Context, target *SSHTarget) bool {
+					return probeSSHReady(ctx, target, 4*time.Second)
+				},
+			},
+		} {
+			t.Run(test.name+"/"+call.name, func(t *testing.T) {
+				logPath := installSSHArgsRecorder(t)
+				if isWindowsWSL2Target(test.target) {
+					oldProbe := probeWSLSFTPSubsystem
+					probeWSLSFTPSubsystem = func(_ context.Context, _ SSHTarget, connectTimeout, attempts string, _ io.Writer) error {
+						if connectTimeout != test.connectTimeout || attempts != test.connectionAttempts {
+							t.Fatalf("SFTP profile timeout=%q attempts=%q", connectTimeout, attempts)
+						}
+						return nil
+					}
+					t.Cleanup(func() { probeWSLSFTPSubsystem = oldProbe })
+				}
+				target := test.target
+				target.User = "crabbox"
+				target.Host = "private.example"
+				target.Port = "22"
+				target.SSHConfigProxy = true
+				target.ProxyCommand = "provider proxy %h %p"
+				target.ReadyCheck = "true"
+				if !call.run(context.Background(), &target) {
+					t.Fatal("readiness call failed with fake ssh")
+				}
+				args := readSSHArgsRecorder(t, logPath)
+				assertSSHOption(t, args, "ConnectTimeout", test.connectTimeout)
+				assertSSHOption(t, args, "ConnectionAttempts", test.connectionAttempts)
+			})
+		}
+	}
+}
+
+func installWSL2ReadinessRecorder(t *testing.T, shell, ready string) string {
+	t.Helper()
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "calls")
+	script := `#!/bin/sh
+port=""
+remote=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-p" ]; then shift; port="$1"; fi
+  remote="$1"
+  shift
+done
+kind=other
+if [ "$remote" = "$CRABBOX_WSL_SHELL" ]; then kind=shell; fi
+if [ "$remote" = "$CRABBOX_WSL_READY" ]; then kind=ready; fi
+printf 'ssh:%s:%s\n' "$port" "$kind" >> "$CRABBOX_WSL_CALLS"
+if [ "$kind" = ready ] && [ "${CRABBOX_WSL_READY_FAIL:-}" = 1 ]; then exit 1; fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_WSL_CALLS", logPath)
+	t.Setenv("CRABBOX_WSL_SHELL", wsl2ReadinessCommand(shell))
+	t.Setenv("CRABBOX_WSL_READY", wsl2ReadinessCommand(ready))
+	return logPath
+}
+
+func TestWSL2ReadinessUsesDirectNoInputWrapperAndPinsFullFallback(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
+	}
+	target := SSHTarget{User: "crabbox", Host: "example.test", Port: "2222", FallbackPorts: []string{"22"}, TargetOS: targetWindows, WindowsMode: windowsModeWSL2, ReadyCheck: "git --version"}
+	logPath := installWSL2ReadinessRecorder(t, "exit 0", target.ReadyCheck)
+	oldProbe := probeWSLSFTPSubsystem
+	probeWSLSFTPSubsystem = func(_ context.Context, candidate SSHTarget, _, _ string, _ io.Writer) error {
+		file, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		fmt.Fprintf(file, "sftp:%s\n", candidate.Port)
+		if candidate.Port == "2222" {
+			return errWSLSFTPUnavailable
+		}
+		return nil
+	}
+	t.Cleanup(func() { probeWSLSFTPSubsystem = oldProbe })
+
+	if err := probeWSL2SSHReady(t.Context(), &target, sshReadinessProfileForTarget(target), io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if target.Port != "22" || len(target.FallbackPorts) != 0 {
+		t.Fatalf("target=%+v, want fully-ready fallback pinned", target)
+	}
+	calls, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(calls), "ssh:2222:shell\nsftp:2222\nssh:22:shell\nsftp:22\nssh:22:ready\n"; got != want {
+		t.Fatalf("calls=%q want=%q", got, want)
+	}
+}
+
+func TestWSL2ReadinessAllMissingSFTPStopsWithoutRepollOrMutation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
+	}
+	target := SSHTarget{User: "crabbox", Host: "example.test", Port: "2222", FallbackPorts: []string{"22"}, TargetOS: targetWindows, WindowsMode: windowsModeWSL2, ReadyCheck: "true"}
+	original := target
+	logPath := installWSL2ReadinessRecorder(t, "exit 0", target.ReadyCheck)
+	oldProbe := probeWSLSFTPSubsystem
+	probes := 0
+	probeWSLSFTPSubsystem = func(context.Context, SSHTarget, string, string, io.Writer) error {
+		probes++
+		return errWSLSFTPUnavailable
+	}
+	t.Cleanup(func() { probeWSLSFTPSubsystem = oldProbe })
+
+	err := waitForSSHReady(t.Context(), &target, io.Discard, "doctor", 4*time.Second)
+	if !IsWSLSFTPUnavailable(err) || probes != 2 || !reflect.DeepEqual(target, original) {
+		t.Fatalf("err=%v probes=%d target=%+v", err, probes, target)
+	}
+	calls, readErr := os.ReadFile(logPath)
+	if readErr != nil || strings.Count(string(calls), "\n") != 2 {
+		t.Fatalf("calls=%q err=%v, want one shell/auth attempt per port", calls, readErr)
+	}
+}
+
+func TestWSL2ReadinessMixedCandidateFailuresPreserveNonMissingError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
+	}
+	exit255 := exec.Command("sh", "-c", "exit 255").Run()
+	for _, test := range []struct {
+		name    string
+		results map[string]error
+	}{
+		{name: "missing then transport", results: map[string]error{"2222": errWSLSFTPUnavailable, "22": exit255}},
+		{name: "transport then missing", results: map[string]error{"2222": exit255, "22": errWSLSFTPUnavailable}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			target := SSHTarget{User: "crabbox", Host: "example.test", Port: "2222", FallbackPorts: []string{"22"}, TargetOS: targetWindows, WindowsMode: windowsModeWSL2, ReadyCheck: "true"}
+			original := target
+			installWSL2ReadinessRecorder(t, "exit 0", target.ReadyCheck)
+			oldProbe := probeWSLSFTPSubsystem
+			probeWSLSFTPSubsystem = func(_ context.Context, candidate SSHTarget, _, _ string, _ io.Writer) error {
+				return test.results[candidate.Port]
+			}
+			t.Cleanup(func() { probeWSLSFTPSubsystem = oldProbe })
+
+			err := probeWSL2SSHReady(t.Context(), &target, sshReadinessProfileForTarget(target), io.Discard)
+			if exitCode(err) != 255 || IsWSLSFTPUnavailable(err) || !reflect.DeepEqual(target, original) {
+				t.Fatalf("err=%v target=%+v", err, target)
+			}
+		})
+	}
+}
+
+func TestWSL2ReadinessToolFailureIsNotSFTPFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
+	}
+	target := SSHTarget{User: "crabbox", Host: "example.test", Port: "22", FallbackPorts: []string{}, TargetOS: targetWindows, WindowsMode: windowsModeWSL2, ReadyCheck: "git --version"}
+	installWSL2ReadinessRecorder(t, "exit 0", target.ReadyCheck)
+	t.Setenv("CRABBOX_WSL_READY_FAIL", "1")
+	oldProbe := probeWSLSFTPSubsystem
+	probeWSLSFTPSubsystem = func(context.Context, SSHTarget, string, string, io.Writer) error { return nil }
+	t.Cleanup(func() { probeWSLSFTPSubsystem = oldProbe })
+
+	err := probeWSL2SSHReady(t.Context(), &target, sshReadinessProfileForTarget(target), io.Discard)
+	if err == nil || IsWSLSFTPUnavailable(err) {
+		t.Fatalf("tool failure misclassified: %v", err)
+	}
+}
+
+func TestWSL2ReadinessCommandIsFixedDirectAndZeroInput(t *testing.T) {
+	command := wsl2ReadinessCommand("printf ready")
+	if len(command) >= 2048 {
+		t.Fatalf("command length=%d", len(command))
+	}
+	script := decodePowerShellEncodedCommand(t, command)
+	for _, want := range []string{"FromBase64String", "wsl.exe --exec sh -lc", "exit $LASTEXITCODE"} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("readiness wrapper missing %q: %s", want, script)
+		}
+	}
+	for _, absent := range []string{"OpenStandardInput", "wsl-stage", "Set-Content", "WriteAllBytes"} {
+		if strings.Contains(script, absent) {
+			t.Fatalf("readiness wrapper contains staged/input path %q: %s", absent, script)
+		}
+	}
+	args := sshArgsNoInputWithOptions(SSHTarget{User: "crabbox", Host: "example.test", Port: "22"}, command, "10", "3")
+	if !slices.Contains(args, "-n") {
+		t.Fatalf("readiness args missing -n: %v", args)
+	}
+}
+
+func TestWindowsSSHReadyProbeHonorsCallerBudget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
+	}
+	installSSHArgsRecorder(t)
+	t.Setenv("CRABBOX_FAKE_SSH_DELAY", "0.1")
+	target := SSHTarget{
+		User:           "crabbox",
+		Host:           "private.example",
+		Port:           "22",
+		TargetOS:       targetWindows,
+		WindowsMode:    windowsModeNormal,
+		SSHConfigProxy: true,
+		ProxyCommand:   "provider proxy %h %p",
+		ReadyCheck:     "true",
+	}
+	start := time.Now()
+	if probeSSHReady(context.Background(), &target, 20*time.Millisecond) {
+		t.Fatal("Windows readiness probe ignored the caller's short budget")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("probe exceeded the caller's short budget by too much: %s", elapsed)
+	}
+}
+
+func TestWaitForSSHReadyHonorsDeadlineDuringWindowsProbe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
+	}
+	installSSHArgsRecorder(t)
+	t.Setenv("CRABBOX_FAKE_SSH_DELAY", "0.2")
+	target := SSHTarget{
+		User:           "crabbox",
+		Host:           "private.example",
+		Port:           "22",
+		TargetOS:       targetWindows,
+		WindowsMode:    windowsModeNormal,
+		SSHConfigProxy: true,
+		ProxyCommand:   "provider proxy %h %p",
+		ReadyCheck:     "true",
+	}
+	start := time.Now()
+	err := waitForSSHReady(context.Background(), &target, io.Discard, "test", 30*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "timed out waiting for SSH") {
+		t.Fatalf("waitForSSHReady error=%v, want readiness timeout", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Windows readiness attempt exceeded overall deadline by too much: %s", elapsed)
 	}
 }
 
@@ -1205,6 +2178,45 @@ type sshWaitProgressSignal struct {
 func (w *sshWaitProgressSignal) Write(p []byte) (int, error) {
 	w.once.Do(func() { close(w.ready) })
 	return len(p), nil
+}
+
+func installSSHArgsRecorder(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "ssh-args")
+	script := `#!/bin/sh
+printf '%s\n' "$@" > "$CRABBOX_FAKE_SSH_ARGS"
+if [ -n "${CRABBOX_FAKE_SSH_DELAY:-}" ]; then
+  sleep "$CRABBOX_FAKE_SSH_DELAY"
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_ARGS", logPath)
+	return logPath
+}
+
+func readSSHArgsRecorder(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSpace(string(data)), "\n")
+}
+
+func assertSSHOption(t *testing.T, args []string, name, value string) {
+	t.Helper()
+	want := name + "=" + value
+	for _, arg := range args {
+		if arg == want {
+			return
+		}
+	}
+	t.Fatalf("SSH args missing %q: %q", want, args)
 }
 
 func TestWaitForSSHReadyPreservesCancellationCauseDuringBackoff(t *testing.T) {
@@ -4551,5 +5563,78 @@ func TestRemoteSyncSanityReportsDeletionSample(t *testing.T) {
 	}
 	if strings.Contains(got, "/tmp/crabbox-git-status") {
 		t.Fatalf("remoteSyncSanity() uses a global status file: %q", got)
+	}
+}
+
+func TestSSHControlBudgetsSeparateFiniteAuthorityFromUnlimitedWork(t *testing.T) {
+	limit := sshCommandLimit{execution: sshControlExecutionLimit, control: true}
+	for _, target := range []SSHTarget{{Port: "22", FallbackPorts: []string{}}, {Port: "2222", FallbackPorts: []string{"22", "22"}}} {
+		routes := len(sshPortCandidates(target.Port, target.FallbackPorts))
+		attempts := 1
+		if routes > 1 {
+			attempts += routes
+		}
+		want := time.Duration(attempts)*sshTransportPreparationTimeout + sshControlExecutionLimit
+		if got := sshTransportCallBudget(target, sshControlMetadataLimit, limit); got != want {
+			t.Fatalf("control budget=%s want=%s", got, want)
+		}
+		if got := sshTransportCallBudget(target, sshControlMetadataLimit, sshCommandLimit{}); got != 0 {
+			t.Fatal("ordinary unlimited execution acquired a control duration")
+		}
+	}
+	if _, err := prepareSSHTransport(SSHTarget{}, "true", nil, 0, sshCommandLimit{control: true}); err == nil {
+		t.Fatal("unlimited control command accepted")
+	}
+}
+
+func TestWSLStreamWriterPreambleContract(t *testing.T) {
+	powerShell, err := exec.LookPath("pwsh")
+	if err != nil {
+		powerShell, err = exec.LookPath("powershell.exe")
+	}
+	if err != nil {
+		t.Skip("PowerShell is unavailable")
+	}
+	helper := "# é\nprintf '%s' \"$CBX_HELPER\"\ncat\n\n\n"
+	payload := []byte{0, 255, 13, 10}
+	frame := append([]byte(helper), payload...)
+	for _, bom := range []bool{false, true} {
+		t.Run(fmt.Sprint(bom), func(t *testing.T) {
+			flag := "$false"
+			if bom {
+				flag = "$true"
+			}
+			path := filepath.Join(t.TempDir(), "wire")
+			script := `$path=` + psQuote(path) + `;$m=[IO.File]::Open($path,'CreateNew','ReadWrite','ReadWrite');$w=[IO.StreamWriter]::new($m,[Text.UTF8Encoding]::new(` + flag + `),4096,$true);$w.AutoFlush=$true
+$t=$w.FlushAsync();if(!$t.Wait(5000)){exit 74};$null=$t.GetAwaiter().GetResult()
+$b=[Convert]::FromBase64String('` + base64.StdEncoding.EncodeToString(frame) + `')
+$raw=[IO.FileStream]::new($w.BaseStream.SafeFileHandle,[IO.FileAccess]::Write,1,$false)
+$t=$raw.WriteAsync($b,0,$b.Length);if(!$t.Wait(5000)){exit 74};$null=$t.GetAwaiter().GetResult()
+# Observe bytes before any writer closes; no EOF may be needed for delivery.
+[Console]::Out.Write([Convert]::ToBase64String([IO.File]::ReadAllBytes($path)));$raw.Dispose()`
+			encoded, err := exec.CommandContext(t.Context(), powerShell, "-NoProfile", "-NonInteractive", "-Command", script).Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			wire, err := base64.StdEncoding.DecodeString(string(encoded))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := frame
+			count := "0"
+			if bom {
+				want = append([]byte{239, 187, 191}, frame...)
+				count = "3"
+			}
+			if !bytes.Equal(wire, want) {
+				t.Fatalf("StreamWriter wire=%x want=%x", wire, want)
+			}
+			cmd := exec.CommandContext(t.Context(), "sh", "-c", wslHelperBootstrap, "sh", strconv.Itoa(len(helper)), count)
+			cmd.Stdin = bytes.NewReader(wire)
+			got, err := cmd.Output()
+			if err != nil || !bytes.Equal(got, frame) {
+				t.Fatalf("post-preamble bytes=%x err=%v", got, err)
+			}
+		})
 	}
 }

@@ -27,11 +27,18 @@ crabbox run --provider ssh --target macos --static-host mac-studio.local -- xcod
 crabbox run --provider ssh --target windows --windows-mode normal --static-host win-dev.local -- dotnet test
 crabbox run --profile live-qa --preset qa-live --scenario login-regression --emit-proof /tmp/proof.md --stop-after success
 crabbox run --pool example/app/main/linux --pool-compatibility-key linux-16-vcpu -- pnpm test
+crabbox run --pool example/app/main/linux --pool-identity-file pool-identity.json -- pnpm test
 ```
 
 The trailing command after `--` is sent to the box verbatim as argv. Use
 `--shell` to run it through the remote shell instead, for multi-statement
 snippets, pipes, or shell expansion.
+
+On POSIX and WSL2 SSH targets, private command staging does not change the
+remote caller's umask for user work. Commands keep the target shell's creation
+policy; Crabbox's staged scripts, input, and workspace-owner state remain private.
+Keeping or reusing a POSIX SSH lease also preserves the remote caller's SIGINT
+and SIGQUIT dispositions, including intentionally ignored signals.
 
 ## Remote workspace root
 
@@ -95,11 +102,25 @@ for one-shot PR work.
 Pooled runs also reject `--keep` and
 `--keep-on-failure`; use `--pool-return ready|drain|release` for lifecycle.
 
+Use `--pool-identity-file` to explicitly opt into a provider-scoped,
+image-pinned typed pool. Create the file with `crabbox pool identity <key> --id
+<lease-id> --cache-compatibility <value>`. The repository seed, immutable AWS
+AMI and region, canonical architecture, and operator-declared cache value must
+match exactly; unexpected identity or lease evidence drains the entry. Older
+coordinators fail explicitly instead of borrowing from a legacy pool. Existing
+`--pool` calls without this flag retain their provider-neutral legacy behavior.
+
 On coordinator-backed one-shot runs, if SSH becomes unavailable after a
 successful sync but before the command starts, Crabbox stops that stale lease,
 creates one replacement lease, and retries sync once. It does not replace
 explicit `--id`, kept, `--keep-on-failure`, `--no-sync`, `--sync-only`, or
 custom-slug runs.
+
+If the local SSH multiplexing socket is temporarily full before a command
+starts, Crabbox retries that same session once, then disables multiplexing for
+that invocation if the exact file-descriptor handoff failure recurs. The
+existing lease and command are preserved; ordinary remote command failures do
+not trigger this multiplexing recovery.
 
 Crabbox records a local repo claim for each reused lease. If a lease is already
 claimed by another repo, pass `--reclaim` to move the claim intentionally.
@@ -114,14 +135,16 @@ for debugging when the remote command exits non-zero; Crabbox then prints
 inspect/SSH/stop commands for the exact failed box. Add `--lease-output <file>`
 with `--keep` to write a small JSON lease handle for orchestrators on providers
 that advertise `run-session`. Delegated providers return their own handle.
-`local-container` opts into the same schema through the core SSH path: a fresh
-run requires `--keep`, while a reused `--id` run requires the default or
+AWS and `local-container` opt into the same schema through the core SSH path: a
+fresh run requires `--keep`, while a reused `--id` run requires the default or
 `--stop-after never` policy so the lease cannot be released after the handle is
 reported. Conflicting policies are rejected before acquisition. Core writes the
 handle after recording the exact lease claim and before sync or command
 execution, so later run failures leave the cleanup handle available. The handle
 contains only the provider, exact lease ID, optional slug, reused/kept state,
-optional run ID, and the exact `crabbox stop` cleanup command.
+optional run ID, and the exact `crabbox stop` cleanup command. On brokered AWS,
+the run ID is the coordinator run that can later resolve to a signed terminal
+receipt; direct AWS run IDs are local correlation identifiers only.
 
 ## Delegated providers
 
@@ -200,7 +223,8 @@ Jujutsu workspaces are supported for sync only when `.jj` is colocated with
 same-root `.git` metadata. Native Jujutsu revision mapping is not supported yet;
 `run` fails before lease acquisition or ready-pool borrowing instead of risking
 sync of an outer Git checkout's revision. Use a colocated Git workspace or pass
-`--no-sync` to run without transferring local files. See
+`--no-sync` with a provider that supports it to run without transferring local
+files. See
 [sync](../features/sync.md#jujutsu-workspaces) for safe initialization guidance.
 
 Before the first rsync into a Git checkout, Crabbox seeds the remote worktree
@@ -253,7 +277,11 @@ hint, and `sync.timeout` kills stalled syncs.
 
 ### Sync alternatives
 
-- `--no-sync` skips rsync entirely and `--sync-only` syncs and exits.
+- `--no-sync` skips local file transfer and `--sync-only` syncs and exits on
+  supported providers. Blacksmith Testbox rejects both: its native command owns
+  sync even with `--id`, so reusing a Testbox does not provide a sync bypass.
+  Provider admission runs before backend configuration; skipping sync does not
+  skip provider initialization or existing-lease preparation.
 - `--fresh-pr <owner/repo#number|url|number>` skips local dirty sync and creates
   a fresh remote checkout of a GitHub PR. A bare `<number>` uses the current
   repository's GitHub origin. Only `github.com` PR URLs are accepted; other
@@ -465,13 +493,28 @@ parser-sensitive PR wording stays project-owned. Default headings are
 context-neutral; put patch- or fix-specific claims in repository-owned template
 fields only when the run actually proves them.
 
-Use `--attest <path>` to write a signed run receipt after a successful run: a
-flat JSON record of the provider, lease, command, exit code, timing, and the
-SHA-256 of the combined live output stream, signed with a per-user Ed25519 key
-minted on first use under the user config dir. Check receipts later with
-[`crabbox verify`](verify.md), then compare the reported signer fingerprint
-through a trusted channel. Pass `--attest-key <path>` to sign with an existing
-PKCS8 PEM Ed25519 key instead of the default one.
+Use `--attest <path>` to write a signed receipt after a command completes,
+including non-zero exits. SSH terminal receipts use schema v2 and bind the final
+run outcome, raw command digest, timing, retained-log digest, and full observed
+stream digest. Delegated providers retain schema v1 when they report a
+definitive command exit. Check local receipts with [`crabbox verify`](verify.md).
+
+Brokered runs submit a schema v2 terminal receipt with the finish request even
+when `--attest` is omitted. The CLI verifies that the coordinator returns the
+exact persisted receipt before treating the finish as recorded, so a
+coordinator that predates receipt storage fails closed instead of silently
+discarding the evidence. Deploy the coordinator before distributing a
+receipt-bearing CLI. Retrieve and verify committed evidence later with
+[`crabbox receipt <run-id>`](receipt.md). Signing uses a per-user Ed25519 key
+minted on first use under the user config dir. Pass `--attest-key <path>` to
+use an existing PKCS8 PEM Ed25519 key instead.
+
+The coordinator creates the run record before remote command execution and the
+CLI prints its ID. An orchestrator that must recover the ID after losing the
+client output should also use `--lease-output <file>` on a supported retained
+run. That file is written before SSH wait, sync, or command execution and
+includes `runID`; its existing retention and stop-policy requirements still
+apply.
 
 ## Artifacts and downloads
 
@@ -497,6 +540,20 @@ symlinks to directories do not satisfy the proof gate. The same SSH-run target
 limits as `--artifact-glob` apply. Delegated providers that support bounded run
 artifact retrieval enforce provider-owned file and byte limits before returning
 local artifacts.
+
+Use repeatable `--require-artifact-change <path>` for created-or-changed byte
+evidence on ordinary Linux SSH runs. Every exact relative path must be a regular
+file with no symlink components. Crabbox compares bounded content snapshots
+after sync/hydration and after successful execution; unchanged bytes (including
+identical rewrites) or missing files fail with exit 7, before schema validation
+or downloads. Only accepted paths enter the archive, using the checked snapshot
+bytes even when broader artifact globs are supplied. Existing flags retain their
+behavior without this opt-in mode. Workload/transport failures preserve their
+result and record `not-evaluated` in timing JSON's `artifactChanges` list.
+Limits: 32 paths, 1 KiB per path, 5 MiB per file, 20 MiB per snapshot. Delegated
+providers, macOS, WSL2, native Windows, and `--sync-only` are unsupported. See
+[Artifacts](../features/artifacts.md#run-scoped-artifacts) for the exact states
+and collection contract.
 
 Use repeatable `--download remote=local` when the command writes proof files on
 the box. Downloads run only after a successful remote command, paths resolve
@@ -533,6 +590,13 @@ special files are omitted.
 `--capture-on-fail` remains accepted as a compatibility alias. Crabbox does not
 redact captured files; the caller owns redaction before sharing them.
 
+When the project capture destination is unwritable, automatic bundles fall
+back to the Crabbox user state directory's `captures/` subdirectory. The
+`failure-bundle local=...` line reports the actual path. Security-validation
+and archive/read failures do not trigger fallback, and explicit stdout/stderr
+capture paths never move. See [local capture storage](../observability.md#capturing-run-output-locally)
+for the state path and retention details.
+
 ## Test results
 
 Add `--junit <path>` (comma-separated) or configure `results.junit` to attach
@@ -564,12 +628,18 @@ to attach a short label to the run details, timing JSON, and coordinator run
 record.
 
 When a remote command exits non-zero, `run` prints a compact failure digest
-after the timing summary: the failed phase when phase markers are known, a
+after automatic cleanup. Lease recovery commands are omitted after confirmed
+release, and remain available when the lease is kept or cleanup is uncertain.
+The digest includes the failed phase when phase markers are known, a
 likely area (provider auth, SSH/connectivity, sync, install/setup, user command,
 model/tool/provider limit, or resource exhaustion), retryability when inferable, next commands
 (`logs`, `events`, `doctor --from-run`, `ssh`, retrying with `--fresh-sync`, and
-`stop`), and a short redacted stdout/stderr tail. It does not reconstruct secrets
-or hidden local shell state. When an SSH backend supplies per-run memory
+`stop`). After failure-bundle information and command hints, each stream has one
+redacted tail section of up to 40 lines, or its capture path when explicitly
+captured. Live output and failure-bundle contents are unchanged. The digest does
+not reconstruct secrets or hidden local shell state. Short-circuit explanations are limited to simple
+`&&` chains; compound commands and substitutions are left unattributed.
+When an SSH backend supplies per-run memory
 exhaustion evidence, the summary and digest use
 `blocked_stage=resource_exhaustion resource_exhaustion=memory retry_likely=false`
 and recommend increasing the memory limit or reducing workload concurrency.
@@ -691,7 +761,7 @@ Run-specific flags:
 --keep-on-failure
 --stop-after success|always|failure|never
 --lease-output <file>        Write a retained run-session handle when supported.
---no-sync
+--no-sync                    Skip local file transfer; unsupported by Blacksmith Testbox.
 --sync-only
 --no-hydrate
 --full-resync                Alias: --fresh-sync
@@ -720,6 +790,7 @@ Run-specific flags:
 --fail-on-test-failures
 --artifact-glob <glob>       Repeatable.
 --require-artifact <glob>    Repeatable.
+--require-artifact-change <path>  Repeatable; Linux SSH, created or changed bytes.
 --download <remote=local>    Repeatable.
 --capture-stdout <local path>
 --capture-stderr <local path>

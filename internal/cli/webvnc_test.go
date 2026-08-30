@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -73,6 +74,46 @@ func TestWebVNCURLs(t *testing.T) {
 	}
 	if supportsDirectSSHWebVNC("static") || supportsDirectSSHWebVNC("aws") {
 		t.Fatal("static and coordinator-backed providers should not use direct SSH WebVNC")
+	}
+}
+
+func TestWebVNCPortalURLsRemoveCoordinatorCredentials(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		user *url.Userinfo
+	}{
+		{name: "username and password", user: url.UserPassword("fixture-user", "fixture-password")},
+		{name: "username only", user: url.User("fixture-user")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			coordinator := &url.URL{
+				Scheme:   "https",
+				User:     test.user,
+				Host:     "broker.example.test",
+				Path:     "/team",
+				RawQuery: "token=fixture-query-value",
+				Fragment: "fixture-fragment-value",
+			}
+			portal := webVNCPortalURL(coordinator.String(), "cbx_abcdef123456", "vnc_handoff_fixture", webVNCPortalOptions{TakeControl: true})
+			wantPortal := "https://broker.example.test/team/portal/leases/cbx_abcdef123456/vnc#control=take&handoff=vnc_handoff_fixture"
+			if portal != wantPortal {
+				t.Fatalf("portal URL=%q, want %q", portal, wantPortal)
+			}
+			bootstrap := webVNCPortalBootstrapURL(coordinator.String(), "cbx_abcdef123456")
+			wantBootstrap := "https://broker.example.test/team/portal/leases/cbx_abcdef123456/vnc/bootstrap"
+			if bootstrap != wantBootstrap {
+				t.Fatalf("bootstrap URL=%q, want %q", bootstrap, wantBootstrap)
+			}
+			_, openerArgs := openURLCommand(portal)
+			for _, forbidden := range []string{"fixture-user", "fixture-password", "fixture-query-value", "fixture-fragment-value"} {
+				if strings.Contains(portal, forbidden) || strings.Contains(bootstrap, forbidden) || strings.Contains(strings.Join(openerArgs, " "), forbidden) {
+					t.Fatalf("presentation URL or opener arguments exposed %q: portal=%q bootstrap=%q argv=%#v", forbidden, portal, bootstrap, openerArgs)
+				}
+			}
+			if agent := webVNCAgentURL(coordinator.String(), "cbx_abcdef123456"); !strings.Contains(agent, "fixture-user@") && !strings.Contains(agent, "fixture-user:fixture-password@") {
+				t.Fatalf("authenticated agent transport lost coordinator userinfo: %s", agent)
+			}
+		})
 	}
 }
 
@@ -372,6 +413,28 @@ func TestSameWebVNCOrigin(t *testing.T) {
 	}
 }
 
+func TestWebVNCWebSocketDialOptionsBoundsResponseHeaders(t *testing.T) {
+	options, err := webVNCWebSocketDialOptions(http.Header{
+		"X-Crabbox-Bridge-Ticket": {"bridge-ticket"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options == nil || options.HTTPClient == nil {
+		t.Fatal("dial options missing HTTP client")
+	}
+	if options.HTTPClient.Timeout != 0 {
+		t.Fatalf("client timeout=%s, want 0 so the upgraded websocket is not killed", options.HTTPClient.Timeout)
+	}
+	transport, ok := options.HTTPClient.Transport.(*http.Transport)
+	if !ok || transport == nil {
+		t.Fatalf("transport=%T, want *http.Transport", options.HTTPClient.Transport)
+	}
+	if transport.ResponseHeaderTimeout != 30*time.Second {
+		t.Fatalf("response header timeout=%s, want 30s", transport.ResponseHeaderTimeout)
+	}
+}
+
 func TestWebVNCWebSocketDialRejectsCrossOriginDowngradeRedirect(t *testing.T) {
 	redirected := make(chan http.Header, 1)
 	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -385,9 +448,12 @@ func TestWebVNCWebSocketDialRejectsCrossOriginDowngradeRedirect(t *testing.T) {
 	}))
 	defer redirect.Close()
 
-	options := webVNCWebSocketDialOptions(http.Header{
+	options, err := webVNCWebSocketDialOptions(http.Header{
 		"X-Crabbox-Bridge-Ticket": {"bridge-ticket-must-not-leak"},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	options.HTTPClient.Transport = redirect.Client().Transport
 	wsURL := "wss" + strings.TrimPrefix(redirect.URL, "https")
 	conn, response, err := websocket.Dial(context.Background(), wsURL, options)
@@ -407,6 +473,167 @@ func TestWebVNCWebSocketDialRejectsCrossOriginDowngradeRedirect(t *testing.T) {
 		t.Fatalf("WebVNC WebSocket redirect reached sink with ticket=%q", headers.Get("X-Crabbox-Bridge-Ticket"))
 	default:
 	}
+}
+
+func TestWebVNCWebSocketDialRejectsUnsupportedTransport(t *testing.T) {
+	recorder := &recordingDefaultRoundTripper{}
+	var typedNil *http.Transport
+	for _, tc := range []struct {
+		name      string
+		transport http.RoundTripper
+	}{{"custom", recorder}, {"nil", nil}, {"typed nil", typedNil}} {
+		t.Run(tc.name, func(t *testing.T) {
+			original := http.DefaultTransport
+			t.Cleanup(func() { http.DefaultTransport = original })
+			http.DefaultTransport = tc.transport
+			options, err := webVNCWebSocketDialOptions(nil)
+			if options != nil || err == nil || err.Error() != cloneDefaultTransportError {
+				t.Fatalf("unsupported transport produced options=%v err=%v", options, err)
+			}
+		})
+	}
+	if recorder.calls != 0 {
+		t.Fatalf("unsupported transport invoked %d times", recorder.calls)
+	}
+}
+
+func TestConnectWebVNCBridgeTransportRefusalClosesVNC(t *testing.T) {
+	agentCalls := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/ticket") {
+			_ = json.NewEncoder(w).Encode(CoordinatorWebVNCTicket{Ticket: "fixture-ticket", LeaseID: "cbx_abcdef123456"})
+			return
+		}
+		agentCalls <- struct{}{}
+		http.Error(w, "unexpected agent request", http.StatusBadRequest)
+	}))
+	defer server.Close()
+	transport := &http.Transport{}
+	defer transport.CloseIdleConnections()
+	coord := &CoordinatorClient{BaseURL: server.URL, Token: "fixture-token", Client: &http.Client{Transport: transport}}
+	original := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = original })
+	http.DefaultTransport = &recordingDefaultRoundTripper{}
+	client, peer := net.Pipe()
+	defer client.Close()
+	defer peer.Close()
+	if err := peer.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	bridge, err := connectWebVNCBridgeWithDial(ctx, coord, "cbx_abcdef123456", "unused.invalid", "1", SSHTarget{TargetOS: targetMacOS}, rfbCredentials{}, localWebVNCAuthAuto, io.Discard, func(context.Context) (net.Conn, error) { return client, nil })
+	if bridge != nil {
+		bridge.Close()
+	}
+	if bridge != nil || err == nil || err.Error() != cloneDefaultTransportError {
+		t.Fatalf("bridge=%v err=%v", bridge, err)
+	}
+	if _, err := peer.Read(make([]byte, 1)); err != io.EOF {
+		t.Fatalf("VNC connection was not closed: %v", err)
+	}
+	select {
+	case <-agentCalls:
+		t.Fatal("unsupported transport was bypassed for an agent request")
+	default:
+	}
+}
+
+func TestWebVNCWebSocketHeaderDeadlineNetwork(t *testing.T) {
+	t.Parallel()
+	// Keep socket waits concurrent within one test slot, even on small runners.
+	var checks sync.WaitGroup
+	defer checks.Wait()
+	run := func(name string, check func(*testing.T)) {
+		checks.Add(1)
+		go func() {
+			defer checks.Done()
+			t.Run(name, check)
+		}()
+	}
+	run("earlier caller deadline", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
+		t.Cleanup(server.Close)
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		t.Cleanup(cancel)
+		options, err := webVNCWebSocketDialOptions(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), options)
+		if conn != nil {
+			conn.CloseNow()
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("caller deadline lost: %v", err)
+		}
+	})
+	run("stalled headers", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			<-r.Context().Done()
+		}))
+		t.Cleanup(server.Close)
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		t.Cleanup(cancel)
+		options, err := webVNCWebSocketDialOptions(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		start := time.Now()
+		conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), options)
+		if conn != nil {
+			conn.CloseNow()
+		}
+		var timeout net.Error
+		if err == nil || !errors.As(err, &timeout) || !timeout.Timeout() || ctx.Err() != nil || time.Since(start) < 29*time.Second {
+			t.Fatalf("header deadline elapsed=%s conn=%v err=%v caller=%v", time.Since(start), conn, err, ctx.Err())
+		}
+		t.Logf("actual header timeout after %s, caller deadline still live", time.Since(start))
+	})
+	run("upgraded session survives", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			conn, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer conn.CloseNow()
+			kind, payload, err := conn.Read(ctx)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if err := conn.Write(ctx, kind, payload); err != nil {
+				t.Error(err)
+			}
+		}))
+		t.Cleanup(server.Close)
+		t.Cleanup(cancel)
+		options, err := webVNCWebSocketDialOptions(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.CloseNow()
+		select {
+		case <-time.After(31 * time.Second):
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+		payload := []byte("session-still-live")
+		if err := conn.Write(ctx, websocket.MessageBinary, payload); err != nil {
+			t.Fatal(err)
+		}
+		kind, got, err := conn.Read(ctx)
+		if err != nil || kind != websocket.MessageBinary || !bytes.Equal(got, payload) {
+			t.Fatalf("upgraded session failed after handshake limit: kind=%v payload=%q err=%v", kind, got, err)
+		}
+		t.Log("actual upgraded websocket echoed data after 31 seconds")
+	})
 }
 
 func TestWebVNCRedactingWriterKeepsCredentialsOutOfDaemonLogs(t *testing.T) {
@@ -960,14 +1187,14 @@ func TestIsMacOSDesktopProviderUsesExplicitTargetOrDedicatedProvider(t *testing.
 
 func TestWebVNCBridgeArgsPreserveProviderRouting(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	args := webVNCBridgeArgs(
+	args := webVNCBridgeRouting(
 		Config{Provider: "direct-webvnc-test", TargetOS: targetLinux},
 		SSHTarget{TargetOS: targetLinux},
 		"cbx_abcdef123456",
 		false,
 		false,
 	)
-	got := strings.Join(args, " ")
+	got := strings.Join(args.Args, " ")
 	if !strings.Contains(got, "--direct-webvnc-routing route-cbx_abcdef123456") {
 		t.Fatalf("args=%#v", args)
 	}
@@ -1003,15 +1230,15 @@ func (directWebVNCTestProvider) DesktopCredentials(cfg Config, target SSHTarget)
 	}
 	return DesktopCredentials{Username: "provider-user", Password: " provider-secret "}, true
 }
-func (directWebVNCTestProvider) CommandRoutingArgs(cfg Config, leaseID string) []string {
-	args := []string{"--direct-webvnc-routing", "route-" + leaseID}
+func (directWebVNCTestProvider) CommandRouting(cfg Config, request CommandRoutingRequest) CommandRouting {
+	args := []string{"--direct-webvnc-routing", "route-" + request.LeaseID}
 	if username := strings.TrimSpace(cfg.External.Connection.Desktop.Username); username != "" {
 		args = append(args, "--external-desktop-username", username)
 	}
 	if passwordEnv := strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv); passwordEnv != "" {
 		args = append(args, "--external-desktop-password-env", passwordEnv)
 	}
-	return args
+	return CommandRouting{Args: args}
 }
 
 func TestWebVNCPortalCredentialsUseMacOSProviderAccount(t *testing.T) {
@@ -1106,7 +1333,7 @@ func TestWebVNCResetDaemonLaunchPreservesExternalDesktopCredentialHandoff(t *tes
 		false,
 		false,
 	)
-	joinedArgs := strings.Join(args, "\n")
+	joinedArgs := strings.Join(args.Args, "\n")
 	for _, want := range []string{
 		"--external-desktop-username\nscreen-user",
 		"--external-desktop-password-env\n" + passwordEnv,
@@ -1124,7 +1351,7 @@ func TestWebVNCResetDaemonLaunchPreservesExternalDesktopCredentialHandoff(t *tes
 	childEnvironment := strings.Join(webVNCDaemonChildEnvironment([]string{
 		"PATH=/bin",
 		passwordEnv + "=synthetic-reset-secret",
-	}, args), "\n")
+	}, args.Args), "\n")
 	if strings.Contains(childEnvironment, passwordEnv) || strings.Contains(childEnvironment, "synthetic-reset-secret") {
 		t.Fatalf("reset daemon environment retained desktop credential: %q", childEnvironment)
 	}
@@ -1257,22 +1484,31 @@ func TestDirectSSHWebVNCRemoteReadinessRequiresExactOwnedSocket(t *testing.T) {
 	if !strings.Contains(reset, `expected_identity="$owned_pid $owned_started $owned_boot_id $owned_owner_id $owned_port $owned_process_nonce"`) {
 		t.Fatalf("direct SSH reset does not bind final cleanup to the boot identity:\n%s", reset)
 	}
-	if stop, start := strings.Index(reset, `kill "$owned_pid"`), strings.LastIndex(reset, "nohup env CRABBOX_DIRECT_WEBVNC_PROCESS_NONCE="); stop < 0 || start < 0 || stop >= start {
+	if stop, start := strings.Index(reset, `kill "$owned_pid"`), strings.LastIndex(reset, "nohup setsid env CRABBOX_DIRECT_WEBVNC_PROCESS_NONCE="); stop < 0 || start < 0 || stop >= start {
 		t.Fatalf("reset did not terminate its verified process before starting a replacement:\n%s", reset)
 	}
 }
 
-func TestDirectSSHWebVNCWSL2StagesLargeCommandOverStdin(t *testing.T) {
+func TestDirectSSHWebVNCWSL2StagesLargeCommandBeforeZeroInputExecute(t *testing.T) {
 	dir := t.TempDir()
 	argvPath := filepath.Join(dir, "argv")
+	remotePath := filepath.Join(dir, "remote")
 	stdinPath := filepath.Join(dir, "stdin")
 	sshPath := filepath.Join(dir, "ssh")
-	script := "#!/bin/sh\nprintf '%s' \"$*\" > " + shellQuote(argvPath) + "\ncat > " + shellQuote(stdinPath) + "\nprintf running\n"
+	script := "#!/bin/sh\nprintf '%s' \"$*\" > " + shellQuote(argvPath) + "\nlast=;for arg;do last=$arg;done\nprintf '%s' \"$last\" > " + shellQuote(remotePath) + "\ncat > " + shellQuote(stdinPath) + "\nprintf running\n"
 	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	remote := strings.Repeat("large-webvnc-command\n", 2000)
+	nonce := strings.Repeat("e", 32)
+	var launcher string
+	captureWSLStage(t, nonce, func(spool *wslStageSpool, _ *SSHTarget, _ wslStageTiming, data []byte) {
+		if !bytes.Contains(data, []byte(remote)) {
+			t.Fatalf("staged WebVNC bytes=%d missing command", len(data))
+		}
+		launcher = wslStageLauncherCommand(nonce, spool.size, spool.digest(), wslStageCMD)
+	})
 	target := SSHTarget{User: "crabbox", Host: "windows.test", Port: "22", TargetOS: targetWindows, WindowsMode: windowsModeWSL2}
 	out, err := runDirectSSHWebVNCRemoteCombinedOutput(context.Background(), target, remote)
 	if err != nil {
@@ -1285,15 +1521,22 @@ func TestDirectSSHWebVNCWSL2StagesLargeCommandOverStdin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(stdin) != remote {
-		t.Fatal("WSL2 WebVNC command was not staged intact over stdin")
+	if len(stdin) != 0 {
+		t.Fatalf("WSL2 WebVNC execute stdin bytes=%d want zero", len(stdin))
 	}
 	argv, err := os.ReadFile(argvPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(argv) >= 8191 || bytes.Contains(argv, []byte("large-webvnc-command")) {
-		t.Fatalf("WSL2 WebVNC wrapper still embeds the remote payload: argv bytes=%d", len(argv))
+	remoteArg, err := os.ReadFile(remotePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(remoteArg) != launcher || len(remoteArg) >= wslStageLauncherCommandLimit || bytes.Contains(argv, []byte("large-webvnc-command")) {
+		t.Fatalf("WSL2 WebVNC wrapper bytes=%d or SSH argv embeds the remote payload", len(remoteArg))
+	}
+	if strings.Contains(decodePowerShellCommand(t, string(remoteArg)), "large-webvnc-command") {
+		t.Fatal("encoded launcher embeds the WebVNC payload")
 	}
 }
 
@@ -2185,7 +2428,7 @@ func TestResolvedWebVNCCommandConfigPrefersResolvedLeaseProvider(t *testing.T) {
 	}
 
 	bridge := strings.Join(
-		webVNCBridgeArgs(cfg, SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, "cbx_1", true, false),
+		webVNCBridgeRouting(cfg, SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, "cbx_1", true, false).Args,
 		" ",
 	)
 	if bridge != "--provider aws --target windows --windows-mode wsl2 --id cbx_1 --open" {
@@ -2219,13 +2462,13 @@ func TestResolvedWebVNCCommandConfigPrefersResolvedLeaseProvider(t *testing.T) {
 }
 
 func TestWebVNCBridgeArgsCarriesNetworkOverride(t *testing.T) {
-	got := strings.Join(webVNCBridgeArgs(
+	got := strings.Join(webVNCBridgeRouting(
 		Config{Provider: "aws", TargetOS: targetLinux, Network: NetworkTailscale},
 		SSHTarget{TargetOS: targetLinux},
 		"cbx_1",
 		true,
 		true,
-	), " ")
+	).Args, " ")
 	if got != "--provider aws --target linux --network tailscale --id cbx_1 --open --take-control" {
 		t.Fatalf("bridge args=%q", got)
 	}

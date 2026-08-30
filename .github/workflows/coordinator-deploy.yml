@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       clearDaytonaSnapshot:
-        description: Clear the Worker snapshot binding and use the Daytona account default
+        description: Clear the Worker snapshot binding after removing the coordinator environment secret
         required: false
         default: false
         type: boolean
@@ -66,32 +66,39 @@ jobs:
         run: npm ci
         working-directory: worker
 
-      - name: Configure Daytona snapshot
-        if: steps.token.outputs.ready == 'true'
-        run: |
-          if [ "${CLEAR_DAYTONA_SNAPSHOT}" = "true" ]; then
-            printf '{"CRABBOX_DAYTONA_SNAPSHOT":null}\n' |
-              npx wrangler secret bulk
-          elif [ -n "${CRABBOX_DAYTONA_SNAPSHOT}" ]; then
-            # Snapshot selection is runtime config independent of Worker code.
-            # Sync first so both the current and newly deployed versions agree.
-            printf '%s' "${CRABBOX_DAYTONA_SNAPSHOT}" |
-              npx wrangler secret put CRABBOX_DAYTONA_SNAPSHOT
-          else
-            echo "::notice::CRABBOX_DAYTONA_SNAPSHOT is not set; keeping the Daytona account-default mode."
-          fi
-        working-directory: worker
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: "91b59577e757131d68d55a471fe32aca"
-          CRABBOX_DAYTONA_SNAPSHOT: ${{ secrets.CRABBOX_DAYTONA_SNAPSHOT }}
-          CLEAR_DAYTONA_SNAPSHOT: ${{ inputs.clearDaytonaSnapshot }}
-
       - name: Deploy
         if: steps.token.outputs.ready == 'true'
         # `npm run deploy` runs the predeploy bundle (vendor-novnc) then
         # `wrangler deploy`; a bundling failure fails the job before publishing.
-        run: npm run deploy
+        run: |
+          set -euo pipefail
+
+          if [ "${CLEAR_DAYTONA_SNAPSHOT}" = "true" ]; then
+            if [ -n "${CRABBOX_DAYTONA_SNAPSHOT}" ]; then
+              echo "::error::Remove CRABBOX_DAYTONA_SNAPSHOT from the coordinator GitHub environment before clearing the Worker binding."
+              exit 1
+            fi
+            npm run deploy
+            printf '{"CRABBOX_DAYTONA_SNAPSHOT":null}\n' |
+              npx wrangler secret bulk
+          elif [ -n "${CRABBOX_DAYTONA_SNAPSHOT}" ]; then
+            SECRETS_FILE="$(mktemp "${RUNNER_TEMP}/crabbox-coordinator-secrets.XXXXXX")"
+            export SECRETS_FILE
+            trap 'rm -f "${SECRETS_FILE}"' EXIT
+            node --input-type=module -e '
+              import fs from "node:fs";
+              fs.writeFileSync(
+                process.env.SECRETS_FILE,
+                JSON.stringify({
+                  CRABBOX_DAYTONA_SNAPSHOT: process.env.CRABBOX_DAYTONA_SNAPSHOT,
+                }),
+              );
+            '
+            npm run deploy -- --secrets-file "${SECRETS_FILE}"
+          else
+            echo "::notice::CRABBOX_DAYTONA_SNAPSHOT is not set; deploying without changing existing secret bindings."
+            npm run deploy
+          fi
         working-directory: worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -99,3 +106,5 @@ jobs:
           # worker's wrangler.jsonc omits account_id so local deploys stay
           # account-agnostic, so CI supplies it explicitly.
           CLOUDFLARE_ACCOUNT_ID: "91b59577e757131d68d55a471fe32aca"
+          CRABBOX_DAYTONA_SNAPSHOT: ${{ secrets.CRABBOX_DAYTONA_SNAPSHOT }}
+          CLEAR_DAYTONA_SNAPSHOT: ${{ inputs.clearDaytonaSnapshot }}

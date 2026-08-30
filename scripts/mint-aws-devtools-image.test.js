@@ -47,6 +47,10 @@ case "$1" in
     fi
     ;;
   run)
+    if [[ "\${CRABBOX_FAKE_READINESS_FAIL:-0}" == "1" && "$*" == *"linux-readiness.generated.sh"* && "$*" != *"-- --install"* ]]; then
+      printf 'Linux readiness producer: minimal capability proof failed\\n' >&2
+      exit 74
+    fi
     if [[ -n "\${CRABBOX_FAKE_CAPTURE_RUN_SCRIPT:-}" ]]; then
       last_arg="\${@: -1}"
       if [[ "$last_arg" == *"docker_probe="* ]]; then
@@ -146,6 +150,29 @@ test("AWS developer image smoke executes package managers and requires TruffleHo
   );
 });
 
+test("AWS Linux image production stages and invokes only the generated readiness producer", async () => {
+  const source = await readFile(script, "utf8");
+  assert.match(source, /--script "\$ROOT\/scripts\/linux-readiness\.generated\.sh" -- --install/);
+  assert.equal((source.match(/--script "\$ROOT\/scripts\/linux-readiness\.generated\.sh"/g) ?? []).length, 1);
+  assert.match(source, /--shell -- \/usr\/local\/libexec\/crabbox\/linux-readiness\.generated\.sh/);
+  assert.match(source, /test -f \/var\/lib\/crabbox-readiness\/linux\.json/);
+  assert.doesNotMatch(source, /sudo tee \/var\/lib\/crabbox\/image-ready/);
+  assert.doesNotMatch(source, /printf 'crabbox-devtools-v1/);
+});
+
+test("AWS Linux image capture refuses a failed minimal readiness proof", async () => {
+  const fake = await setupFakeCrabbox();
+  const result = await runScript(
+    ["--target", "linux", "--run", "--no-promote", "--prep-script", fake.linuxPrep],
+    { CRABBOX_BIN: fake.fake, CRABBOX_FAKE_LOG: fake.log, CRABBOX_FAKE_READINESS_FAIL: "1" },
+  );
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /minimal capability proof failed/);
+  const log = await readFile(fake.log, "utf8");
+  assert.match(log, /linux-readiness\.generated\.sh -- --install/);
+  assert.doesNotMatch(log, /checkpoint create/);
+});
+
 test("AWS devtools mint wrapper runs linux source candidate and promoted proof", async () => {
   const fake = await setupFakeCrabbox();
   const result = await runScript(
@@ -182,6 +209,9 @@ test("AWS devtools mint wrapper runs linux source candidate and promoted proof",
   assert.match(log, /--browser/);
   assert.doesNotMatch(log, /warmup .*--region us-west-2/);
   assert.match(log, /run --provider aws --target linux --id cbx_source --no-sync --script/);
+  assert.match(log, /linux-readiness\.generated\.sh -- --install/);
+  assert.equal((log.match(/linux-readiness\.generated\.sh/g) ?? []).length, 2);
+  assert.match(log, /run --provider aws --target linux --id cbx_source --no-sync --shell -- \/usr\/local\/libexec\/crabbox\/linux-readiness\.generated\.sh/);
   assert.match(log, /run --provider aws --target linux --id cbx_source --no-sync --shell -- set -euo pipefail/);
   assert.equal((log.match(/corepack --version/g) ?? []).length, 3);
   assert.equal((log.match(/pnpm --version/g) ?? []).length, 3);
@@ -301,6 +331,7 @@ exit 80
 
   const generated = (await readFile(smokeScript, "utf8"))
     .replace("test -d /var/cache/crabbox/pnpm", "true")
+    .replace("test -f /var/lib/crabbox-readiness/linux.json", "true")
     .replace("test -f /var/lib/crabbox/image-ready", "true");
   const smoke = await new Promise((resolve, reject) => {
     const child = spawn("bash", ["-c", generated], {

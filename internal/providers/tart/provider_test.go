@@ -339,13 +339,6 @@ func TestAcquireKeepIPFailureDeletesUnclaimedVMAndKey(t *testing.T) {
 	}
 }
 
-func TestStartVMArgsHeadless(t *testing.T) {
-	args := startVMArgs("crabbox-blue-1234abcd")
-	if len(args) != 3 || args[0] != "run" || args[2] != "--no-graphics" {
-		t.Fatalf("startVMArgs=%v want [run <name> --no-graphics]", args)
-	}
-}
-
 func TestApplyFlagsRejectsExplicitLinuxTarget(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
@@ -1409,6 +1402,7 @@ func TestDoctorTartNotInstalled(t *testing.T) {
 }
 
 func TestReleaseLease(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
 			commandKey([]string{"stop", "crabbox-blue-1234"}):   {},
@@ -1483,6 +1477,7 @@ func TestReleaseLeaseMessage(t *testing.T) {
 }
 
 func TestReleaseLeaseInfersLeaseIDFromLabels(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
 			commandKey([]string{"stop", "crabbox-blue-1234"}):   {},
@@ -2450,8 +2445,7 @@ func TestReleaseLeaseFallsBackToResolve(t *testing.T) {
 }
 
 func TestReleaseLeasePrunesMissingResolvedInstance(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	err := core.ClaimLeaseForRepoProviderScopePond(
 		"cbx_missingrel", "missing-rel", providerName, "instance:crabbox-missing-rel", "", t.TempDir(), 30*time.Minute, false,
 	)
@@ -2505,8 +2499,7 @@ func TestReleaseLeasePrunesMissingResolvedInstance(t *testing.T) {
 }
 
 func TestReleaseLeasePrunesAlreadyResolvedMissingInstance(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	err := core.ClaimLeaseForRepoProviderScopePond(
 		"cbx_resolvedmissing", "resolved-missing", providerName, "instance:crabbox-resolved-missing", "", t.TempDir(), 30*time.Minute, false,
 	)
@@ -2576,6 +2569,7 @@ func TestReleaseLeaseEmptyName(t *testing.T) {
 }
 
 func TestReleaseLeaseFromLabels(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
 			commandKey([]string{"stop", "crabbox-lab-vm"}):   {},
@@ -2598,6 +2592,7 @@ func TestReleaseLeaseFromLabels(t *testing.T) {
 }
 
 func TestReleaseLeaseIDFromLabel(t *testing.T) {
+	testutil.IsolateUserDirs(t)
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
 			commandKey([]string{"stop", "crabbox-noid-vm"}):   {},
@@ -4160,22 +4155,6 @@ func TestServerFromInstanceSourcePreferred(t *testing.T) {
 	server := b.serverFromInstance(inst, claim, cfg)
 	if server.Labels["server_type"] != "source-image" {
 		t.Fatalf("server_type should prefer inst.Source, got %q", server.Labels["server_type"])
-	}
-}
-
-func TestStartVMArgsFormat(t *testing.T) {
-	args := startVMArgs("test-vm-name")
-	if len(args) != 3 {
-		t.Fatalf("startVMArgs len = %d, want 3", len(args))
-	}
-	if args[0] != "run" {
-		t.Fatalf("args[0] = %q, want run", args[0])
-	}
-	if args[1] != "test-vm-name" {
-		t.Fatalf("args[1] = %q, want test-vm-name", args[1])
-	}
-	if args[2] != "--no-graphics" {
-		t.Fatalf("args[2] = %q, want --no-graphics", args[2])
 	}
 }
 

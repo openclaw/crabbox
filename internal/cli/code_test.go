@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +26,41 @@ func TestWebCodeURLs(t *testing.T) {
 	}
 	if got := webCodePortalURL("https://broker.example.com/", "cbx_abcdef123456", "/work/cbx/repo/worker"); got != "https://broker.example.com/portal/leases/cbx_abcdef123456/code/?folder=%2Fwork%2Fcbx%2Frepo%2Fworker" {
 		t.Fatalf("portal URL with folder=%q", got)
+	}
+}
+
+func TestWebCodePortalURLRemovesCoordinatorCredentials(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		user *url.Userinfo
+	}{
+		{name: "username and password", user: url.UserPassword("fixture-user", "fixture-password")},
+		{name: "username only", user: url.User("fixture-user")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			coordinator := &url.URL{
+				Scheme:   "https",
+				User:     test.user,
+				Host:     "broker.example.test",
+				Path:     "/team",
+				RawQuery: "token=fixture-query-value",
+				Fragment: "fixture-fragment-value",
+			}
+			portal := webCodePortalURL(coordinator.String(), "cbx_abcdef123456", "/work/cbx/repo/worker")
+			want := "https://broker.example.test/team/portal/leases/cbx_abcdef123456/code/?folder=%2Fwork%2Fcbx%2Frepo%2Fworker"
+			if portal != want {
+				t.Fatalf("portal URL=%q, want %q", portal, want)
+			}
+			_, openerArgs := openURLCommand(portal)
+			for _, forbidden := range []string{"fixture-user", "fixture-password", "fixture-query-value", "fixture-fragment-value"} {
+				if strings.Contains(portal, forbidden) || strings.Contains(strings.Join(openerArgs, " "), forbidden) {
+					t.Fatalf("presentation URL or opener arguments exposed %q: url=%q argv=%#v", forbidden, portal, openerArgs)
+				}
+			}
+			if agent := webCodeAgentURL(coordinator.String(), "cbx_abcdef123456"); !strings.Contains(agent, "fixture-user@") && !strings.Contains(agent, "fixture-user:fixture-password@") {
+				t.Fatalf("authenticated agent transport lost coordinator userinfo: %s", agent)
+			}
+		})
 	}
 }
 

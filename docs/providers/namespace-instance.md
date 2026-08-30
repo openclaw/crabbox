@@ -24,6 +24,7 @@ crabbox warmup --provider namespace-instance --class standard --ttl 15m
 crabbox run --provider namespace-instance -- go test ./...
 crabbox list --provider namespace-instance --json
 crabbox stop --provider namespace-instance <lease-id-or-slug>
+crabbox stop --provider namespace-instance --id <exact-instance-id> --force
 ```
 
 Crabbox injects a per-lease SSH public key, connects through
@@ -81,12 +82,18 @@ fragments. Machine-type OS prefixes must be Linux.
 - Linux only; coordinator disabled.
 - `nsc create --bare --duration ... --ssh_key ...` provisions the instance.
 - Ownership labels restrict list and cleanup to Crabbox-created resources.
+  Release and cleanup additionally require an exact local claim bound to the
+  instance ID, lease, slug, Namespace tenant, and configured endpoint, region,
+  and keychain scope; provider labels alone never authorize destruction.
 - `touch` uses `nsc extend --ensure_minimum` only for the remaining original
   TTL; activity never moves the maximum lifetime forward.
 - `stop` uses `nsc destroy --force`.
-- `cleanup` never destroys unlabeled Namespace resources.
+- `stop --force` accepts only an exact Namespace instance ID, verifies the live
+  Crabbox ownership labels and tenant, adopts the exact claim without replacing
+  conflicting local state, and then performs the normal fenced release.
+- `cleanup` never destroys unlabeled or locally unclaimed Namespace resources.
 - `--keep` keeps the instance after the current command, but its Namespace
-  duration deadline still applies.
+	  duration deadline still applies.
 
 The deprecated `nsc create --ephemeral` flag is intentionally not used; current
 `nsc` versions ignore it. Duration controls automatic destruction.

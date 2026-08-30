@@ -5,15 +5,17 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestStatusWaitDoneTreatsTerminalStatesAsDone(t *testing.T) {
-	for _, state := range []string{"deleting", "expired", "failed", "missing", "released", "stopped", "stopped_with_code", "terminated"} {
+	for _, state := range []string{"dead", "deleting", "exited", "expired", "failed", "missing", "released", "stopped", "stopped_with_code", "terminated"} {
 		if !statusWaitDone(statusView{State: state}) {
 			t.Fatalf("statusWaitDone(%q) = false, want true", state)
 		}
@@ -69,7 +71,7 @@ func TestStatusWaitTerminalErrorFailsNonReadyTerminalState(t *testing.T) {
 }
 
 func TestLeaseStatusStateCanBeReadyRejectsTerminalStates(t *testing.T) {
-	for _, state := range []string{"deleting", "stopped", "released", "terminated"} {
+	for _, state := range []string{"dead", "deleting", "exited", "stopped", "released", "terminated"} {
 		if leaseStatusStateCanBeReady(LeaseTarget{}, state) {
 			t.Fatalf("leaseStatusStateCanBeReady(%q) = true, want false", state)
 		}
@@ -124,6 +126,58 @@ func TestStatusViewIncludesProviderMetadata(t *testing.T) {
 	if view.ProviderMetadata != nil {
 		t.Fatalf("providerMetadata=%v, want omitted invalid metadata", view.ProviderMetadata)
 	}
+}
+
+func TestStatusViewKeepsFourSecondWindowsSSHProbe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
+	}
+	logPath := installSSHArgsRecorder(t)
+	t.Setenv("CRABBOX_FAKE_SSH_DELAY", "4.2")
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	host, port, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = targetWindows
+	cfg.WindowsMode = windowsModeNormal
+	cfg.Network = NetworkPublic
+	start := time.Now()
+	view, err := statusViewFromLeaseTarget(context.Background(), cfg, LeaseTarget{
+		LeaseID: "cbx_status_windows",
+		Server: Server{
+			Provider: "aws",
+			Status:   "active",
+			Labels:   map[string]string{"target": targetWindows, "windows_mode": windowsModeNormal},
+		},
+		SSH: SSHTarget{
+			User:        "crabbox",
+			Host:        host,
+			Port:        port,
+			TargetOS:    targetWindows,
+			WindowsMode: windowsModeNormal,
+			NetworkKind: NetworkPublic,
+			ReadyCheck:  "true",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Ready {
+		t.Fatal("status Ready=true, want false when Windows SSH exceeds the 4s status budget")
+	}
+	if elapsed := time.Since(start); elapsed < 3500*time.Millisecond || elapsed > 6*time.Second {
+		t.Fatalf("status probe elapsed=%s, want approximately 4s", elapsed)
+	}
+	args := readSSHArgsRecorder(t, logPath)
+	assertSSHOption(t, args, "ConnectTimeout", "10")
+	assertSSHOption(t, args, "ConnectionAttempts", "3")
 }
 
 func TestStatusWaitRequestsReadyProbe(t *testing.T) {
@@ -226,6 +280,67 @@ func TestStatusWaitRequestsReadyProbe(t *testing.T) {
 	snapshot, exists, set := ServerLeaseClaimSnapshot(backend.touches[0].Lease.Server)
 	if !set || !exists || snapshot.Revision != claim.Revision || backend.touches[0].IdleTimeoutOverride != nil {
 		t.Fatalf("status touch snapshot=%#v exists=%t set=%t override=%v", snapshot, exists, set, backend.touches[0].IdleTimeoutOverride)
+	}
+}
+
+func TestStatusWaitTerminalRuntimeStatePreservesExactClaim(t *testing.T) {
+	for _, state := range []string{"exited", "dead", "stopped"} {
+		t.Run(state, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+			t.Setenv("CRABBOX_COORDINATOR", "")
+			t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+			backend := &statusResolveRecordingBackend{state: state}
+			testAWSBackendOverride = backend
+			defer func() { testAWSBackendOverride = nil }()
+
+			cfg := defaultConfig()
+			cfg.Provider = "aws"
+			claimServer := Server{
+				Provider: "aws",
+				CloudID:  "i-status",
+				Labels: map[string]string{
+					"lease": "cbx_status", "slug": "status", "provider": "aws",
+					"state": "provisioning", "recovery": "ssh-readiness-pending",
+				},
+			}
+			if err := claimLeaseTargetForRepoConfig("cbx_status", "status", cfg, claimServer, SSHTarget{}, "/repo", time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+			before, err := readLeaseClaim("cbx_status")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var stdout bytes.Buffer
+			app := App{Stdout: &stdout, Stderr: io.Discard}
+			if err := app.status(context.Background(), []string{"--provider", "aws", "--id", "cbx_status"}); err != nil {
+				t.Fatalf("plain terminal status failed: %v", err)
+			}
+			if !strings.Contains(stdout.String(), "state="+state) {
+				t.Fatalf("plain terminal status output=%q", stdout.String())
+			}
+			stdout.Reset()
+			started := time.Now()
+			err = app.status(context.Background(), []string{"--provider", "aws", "--id", "cbx_status", "--wait", "--wait-timeout", "1m", "--json"})
+			var exitErr ExitError
+			if !AsExitError(err, &exitErr) || exitErr.Code != 5 || !strings.Contains(err.Error(), "terminal state "+state) {
+				t.Fatalf("terminal status --wait error=%v", err)
+			}
+			if elapsed := time.Since(started); elapsed > time.Second {
+				t.Fatalf("terminal status --wait took %s", elapsed)
+			}
+			if !strings.Contains(stdout.String(), `"state":"`+state+`"`) {
+				t.Fatalf("terminal JSON status output=%q", stdout.String())
+			}
+			if len(backend.touches) != 0 {
+				t.Fatalf("terminal status touched claim: %#v", backend.touches)
+			}
+			after, err := readLeaseClaim("cbx_status")
+			if err != nil || !reflect.DeepEqual(after, before) {
+				t.Fatalf("terminal status changed claim: before=%#v after=%#v err=%v", before, after, err)
+			}
+		})
 	}
 }
 
@@ -377,6 +492,7 @@ type statusResolveRecordingBackend struct {
 	requests      []ResolveRequest
 	touches       []TouchRequest
 	touchFn       func(TouchRequest) (Server, error)
+	state         string
 	block         bool
 	timeoutDetail string
 }
@@ -415,6 +531,7 @@ func (b *statusResolveRecordingBackend) Resolve(ctx context.Context, req Resolve
 		}
 		return LeaseTarget{}, ctx.Err()
 	}
+	state := blank(b.state, "ready")
 	return LeaseTarget{
 		Server: Server{
 			Provider: "aws",
@@ -424,7 +541,7 @@ func (b *statusResolveRecordingBackend) Resolve(ctx context.Context, req Resolve
 				"lease":             "cbx_status",
 				"slug":              "status",
 				"provider":          "aws",
-				"state":             "ready",
+				"state":             state,
 				"idle_timeout_secs": "60",
 			},
 		},

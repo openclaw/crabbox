@@ -77,8 +77,9 @@ type checkpointCreateContextKey struct{}
 type checkpointAdminContextKey struct{}
 
 type checkpointCreateContext struct {
-	Record    checkpointRecord
-	Retention coordinatorCheckpointRetention
+	Record           checkpointRecord
+	Retention        coordinatorCheckpointRetention
+	PersistOwnership func(bool) error
 }
 
 type checkpointLeaseClaim struct {
@@ -107,10 +108,11 @@ func checkpointLeaseClaimFromContext(ctx context.Context) (checkpointLeaseClaim,
 	return claim, ok && claim.CheckpointID != "" && claim.Token != ""
 }
 
-func withCheckpointCreateContext(ctx context.Context, record checkpointRecord, retention coordinatorCheckpointRetention) context.Context {
+func withCheckpointCreateContext(ctx context.Context, record checkpointRecord, retention coordinatorCheckpointRetention, persistOwnership func(bool) error) context.Context {
 	return context.WithValue(ctx, checkpointCreateContextKey{}, checkpointCreateContext{
-		Record:    record,
-		Retention: retention,
+		Record:           record,
+		Retention:        retention,
+		PersistOwnership: persistOwnership,
 	})
 }
 
@@ -183,8 +185,16 @@ func (c *CoordinatorClient) checkpointOperationError(ctx context.Context, operat
 	return operationErr
 }
 
-func checkpointUpgradeRequired(err error) error {
-	return fmt.Errorf("coordinator does not support coordinator-managed checkpoints; upgrade the coordinator (%w)", err)
+type checkpointUpgradeRequiredError struct{ cause error }
+
+func (e checkpointUpgradeRequiredError) Error() string {
+	return fmt.Sprintf("coordinator does not support coordinator-managed checkpoints; upgrade the coordinator (%v)", e.cause)
+}
+func (e checkpointUpgradeRequiredError) Unwrap() error { return e.cause }
+func checkpointUpgradeRequired(err error) error        { return checkpointUpgradeRequiredError{err} }
+func isCoordinatorCheckpointNotFound(err error) bool {
+	var unsupported checkpointUpgradeRequiredError
+	return !errors.As(err, &unsupported) && isCoordinatorNotFound(err)
 }
 
 func checkpointRouteUnsupported(err error) bool {
@@ -213,6 +223,9 @@ func (c *CoordinatorClient) CreateCheckpoint(ctx context.Context, record checkpo
 		},
 	}
 	err := c.do(ctx, http.MethodPost, "/v1/checkpoints", request, &response)
+	if err == nil {
+		err = validateCoordinatorCheckpointResponse(record.ID, response.Checkpoint)
+	}
 	return response.Checkpoint, response.Image, err
 }
 
@@ -220,7 +233,10 @@ func (c *CoordinatorClient) Checkpoints(ctx context.Context) ([]coordinatorCheck
 	var response struct {
 		Checkpoints []coordinatorCheckpoint `json:"checkpoints"`
 	}
-	err := c.do(ctx, http.MethodGet, "/v1/checkpoints", nil, &response)
+	err := c.doControl(ctx, http.MethodGet, "/v1/checkpoints", nil, &response)
+	if err == nil && response.Checkpoints == nil {
+		err = fmt.Errorf("coordinator checkpoint inventory must contain a checkpoint array")
+	}
 	c.checkpointSupportMu.Lock()
 	if err == nil {
 		c.checkpointSupportKnown, c.checkpointSupported = true, true
@@ -236,6 +252,9 @@ func (c *CoordinatorClient) Checkpoint(ctx context.Context, id string) (coordina
 		Checkpoint coordinatorCheckpoint `json:"checkpoint"`
 	}
 	err := c.do(ctx, http.MethodGet, checkpointCoordinatorPath(id, ""), nil, &response)
+	if err == nil {
+		err = validateCoordinatorCheckpointResponse(id, response.Checkpoint)
+	}
 	return response.Checkpoint, c.checkpointOperationError(ctx, err)
 }
 
@@ -252,6 +271,9 @@ func (c *CoordinatorClient) UpdateCheckpointRetention(ctx context.Context, id st
 		Checkpoint coordinatorCheckpoint `json:"checkpoint"`
 	}
 	err := c.do(ctx, http.MethodPatch, checkpointCoordinatorPath(id, "retention"), map[string]any{"retention": retention}, &response)
+	if err == nil {
+		err = validateCoordinatorCheckpointResponse(id, response.Checkpoint)
+	}
 	return response.Checkpoint, c.checkpointOperationError(ctx, err)
 }
 
@@ -288,6 +310,13 @@ func (c *CoordinatorClient) DeleteCheckpoint(ctx context.Context, id string) err
 		return fmt.Errorf("coordinator did not confirm deletion of checkpoint %s", id)
 	}
 	return err
+}
+
+func validateCoordinatorCheckpointResponse(id string, checkpoint coordinatorCheckpoint) error {
+	if checkpoint.ID != id {
+		return fmt.Errorf("coordinator returned checkpoint %q for requested checkpoint %q", checkpoint.ID, id)
+	}
+	return nil
 }
 
 func checkpointCoordinatorPath(id, action string) string {

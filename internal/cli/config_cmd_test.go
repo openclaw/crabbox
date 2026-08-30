@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,6 +11,109 @@ import (
 	"testing"
 	"time"
 )
+
+type configArchitectureTestProvider struct {
+	architectureCapabilityTestProvider
+}
+
+func (configArchitectureTestProvider) Name() string { return "config-architecture-test" }
+func (configArchitectureTestProvider) DescribeImplicitArchitecture(Config) string {
+	return "native"
+}
+
+func TestConfigShowUsesProviderImplicitArchitecture(t *testing.T) {
+	provider := configArchitectureTestProvider{}
+	RegisterProvider(provider)
+	t.Cleanup(func() { delete(providerRegistry, provider.Name()) })
+	for _, tc := range []struct {
+		name, provider, architecture, want string
+		explicit                           bool
+	}{
+		{"implicit", provider.Name(), ArchitectureAMD64, "native", false},
+		{"explicit amd64", provider.Name(), ArchitectureAMD64, ArchitectureAMD64, true},
+		{"explicit arm64", provider.Name(), ArchitectureARM64, ArchitectureARM64, true},
+		{"no descriptor", "unknown-config-provider", ArchitectureAMD64, ArchitectureAMD64, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Provider, cfg.Architecture, cfg.architectureExplicit = tc.provider, tc.architecture, tc.explicit
+			if got := configShowView(cfg)["architecture"]; got != tc.want {
+				t.Fatalf("JSON architecture=%q want %q", got, tc.want)
+			}
+			if got := configShowView(cfg)["architectureExplicit"]; got != tc.explicit {
+				t.Fatalf("JSON architectureExplicit=%v want %t", got, tc.explicit)
+			}
+			var text bytes.Buffer
+			writeConfigShowText(&text, cfg)
+			if !strings.Contains(text.String(), " arch="+tc.want+" ") {
+				t.Fatalf("text architecture missing %q", tc.want)
+			}
+			if !strings.Contains(text.String(), fmt.Sprintf(" architecture_explicit=%t ", tc.explicit)) {
+				t.Fatalf("text explicit-architecture marker changed: %s", text.String())
+			}
+			if got := effectiveArchitectureForConfig(cfg); got != tc.architecture {
+				t.Fatalf("diagnostics changed execution architecture=%q", got)
+			}
+		})
+	}
+}
+
+func TestConfigCommandsReportSelectedPath(t *testing.T) {
+	for _, name := range []string{"default", "absolute", "relative", "missing", "symlink"} {
+		t.Run(name, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Chdir(t.TempDir())
+			t.Setenv("CRABBOX_CONFIG", "")
+			path := userConfigPath()
+			if name != "default" {
+				path = filepath.Join(t.TempDir(), "selected config.yaml")
+				if name == "relative" {
+					path = "selected config.yaml"
+				}
+				t.Setenv("CRABBOX_CONFIG", path)
+			}
+			profile := "selected-path-proof"
+			if name == "missing" {
+				profile = "default"
+			} else {
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("profile: "+profile+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if name == "symlink" {
+					link := filepath.Join(filepath.Dir(path), "selected link.yaml")
+					if err := os.Symlink(path, link); err != nil {
+						t.Skipf("symlink unavailable: %v", err)
+					}
+					path = link
+					t.Setenv("CRABBOX_CONFIG", path)
+				}
+			}
+			var stdout, stderr bytes.Buffer
+			app := App{Stdout: &stdout, Stderr: &stderr}
+			if err := app.Run(context.Background(), []string{"config", "path"}); err != nil {
+				t.Fatal(err)
+			}
+			if got := stdout.String(); got != path+"\n" {
+				t.Fatalf("config path=%q want %q", got, path)
+			}
+			stdout.Reset()
+			if err := app.Run(context.Background(), []string{"config", "show"}); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.HasPrefix(stdout.String(), "config="+path+"\n") || !strings.Contains(stdout.String(), " profile="+profile+"\n") {
+				t.Fatalf("config show path/profile mismatch: %s", stdout.String())
+			}
+			if name == "missing" {
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Fatalf("diagnostics created missing config: %v", err)
+				}
+			}
+		})
+	}
+}
 
 func TestConfigShowReportsProviderSelectionSource(t *testing.T) {
 	t.Run("compiled default text", func(t *testing.T) {
@@ -2079,6 +2183,133 @@ func TestRedactedConfigURLRemovesQueryAndFragment(t *testing.T) {
 	}
 }
 
+func TestConfigShowIncusResolvedSettings(t *testing.T) {
+	for _, source := range []string{"defaults", "file", "environment"} {
+		t.Run(source, func(t *testing.T) {
+			clearConfigEnv(t)
+			for _, suffix := range strings.Fields(`REMOTE PROJECT ADDRESS SOCKET INSTANCE_TYPE IMAGE PROFILE USER WORK_ROOT
+DELETE_ON_RELEASE START_TIMEOUT LAUNCH_PORT PROXY_LISTEN_HOST PROXY_LISTEN_PORT PROXY_DEVICE TLS_SERVER_CERT INSECURE_TLS REMOTE_IMAGE_SERVER`) {
+				t.Setenv("CRABBOX_INCUS_"+suffix, "")
+			}
+			t.Setenv("CRABBOX_PROVIDER", "")
+			t.Chdir(t.TempDir())
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			t.Setenv("CRABBOX_CONFIG", configPath)
+			want := map[string]any{
+				"remote": "local", "project": "", "address": "", "socket": "",
+				"instanceType": "container", "image": "images:ubuntu/24.04/cloud", "profile": "",
+				"user": "crabbox", "workRoot": "/work/crabbox", "deleteOnRelease": true,
+				"startTimeout": "10m0s", "launchPort": "22", "proxyListenHost": "127.0.0.1",
+				"proxyListenPort": "", "proxyDevice": "crabbox-ssh", "tlsServerCert": "",
+				"insecureTLS": false, "remoteImageServer": "",
+			}
+			if source != "defaults" {
+				config := `provider: incus
+incus:
+  remote: lab
+  project: proof
+  address: https://incus.example.test:8443
+  socket: ~/incus.sock
+  instanceType: container
+  image: local:custom-image
+  profile: file-profile
+  user: alice
+  workRoot: /workspace
+  deleteOnRelease: false
+  startTimeout: 3m
+  launchPort: "2200"
+  proxyListenHost: 192.0.2.10
+  proxyDevice: proof-ssh
+  tlsServerCert: ~/server.crt
+  insecureTLS: true
+  remoteImageServer: https://images.example.test
+`
+				if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				want = map[string]any{
+					"remote": "lab", "project": "proof", "address": "https://incus.example.test:8443",
+					"socket":       filepath.Join(os.Getenv("HOME"), "incus.sock"),
+					"instanceType": "container", "image": "local:custom-image", "profile": "file-profile",
+					"user": "alice", "workRoot": "/workspace", "deleteOnRelease": false,
+					"startTimeout": "3m0s", "launchPort": "2200", "proxyListenHost": "192.0.2.10",
+					"proxyListenPort": "", "proxyDevice": "proof-ssh",
+					"tlsServerCert": filepath.Join(os.Getenv("HOME"), "server.crt"),
+					"insecureTLS":   true, "remoteImageServer": "https://images.example.test",
+				}
+			}
+			if source == "environment" {
+				t.Setenv("CRABBOX_PROVIDER", "incus")
+				t.Setenv("CRABBOX_INCUS_INSTANCE_TYPE", "vm")
+				t.Setenv("CRABBOX_INCUS_PROFILE", "proof-secureboot")
+				t.Setenv("CRABBOX_INCUS_SOCKET", "~/env-incus.sock")
+				want["instanceType"] = "vm"
+				want["profile"] = "proof-secureboot"
+				want["socket"] = filepath.Join(os.Getenv("HOME"), "env-incus.sock")
+			}
+			cfg, err := loadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := json.Marshal(configShowView(effectiveConfigForShow(cfg)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var view struct {
+				Incus map[string]any `json:"incus"`
+			}
+			if err := json.Unmarshal(data, &view); err != nil {
+				t.Fatal(err)
+			}
+			if len(view.Incus) != len(want) {
+				t.Fatalf("incus field count=%d, want %d", len(view.Incus), len(want))
+			}
+			for key, value := range want {
+				if view.Incus[key] != value {
+					t.Errorf("incus.%s=%#v, want %#v", key, view.Incus[key], value)
+				}
+			}
+		})
+	}
+}
+
+func TestConfigShowIncusRedactsEndpoints(t *testing.T) {
+	const userinfo = "api-user:api-password@"
+	for _, tc := range []struct{ name, raw, want string }{
+		{"empty", "", ""},
+		{"https", "https://" + userinfo + "incus.example.test:8443/path?token=query-secret#fragment-secret", "https://<redacted>@incus.example.test:8443/path"},
+		{"scheme-less", userinfo + "incus.example.test:8443/path?token=query-secret#fragment-secret", "<redacted>@incus.example.test:8443/path"},
+		{"malformed", "https://" + userinfo + "incus.example.test/%zz?token=query-secret#fragment-secret", "<redacted>"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Incus.Address, cfg.Incus.RemoteImageServer = tc.raw, tc.raw
+			cfg.Incus.CheckpointMetadata = map[string]string{"private": "checkpoint-secret"}
+			view, ok := configShowView(cfg)["incus"].(map[string]any)
+			if !ok {
+				t.Fatal("missing incus object")
+			}
+			for _, field := range []string{"address", "remoteImageServer"} {
+				if view[field] != tc.want {
+					t.Errorf("incus.%s=%q, want %q", field, view[field], tc.want)
+				}
+			}
+			data, err := json.Marshal(view)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, secret := range []string{"api-user", "api-password", "query-secret", "fragment-secret", "checkpoint-secret"} {
+				if strings.Contains(string(data), secret) {
+					t.Errorf("incus JSON leaked %q", secret)
+				}
+			}
+			if cfg.Incus.Address != tc.raw || cfg.Incus.RemoteImageServer != tc.raw {
+				t.Fatal("config show mutated Incus endpoints")
+			}
+		})
+	}
+}
+
 func TestConfigShowRedactsAllEndpointURLComponents(t *testing.T) {
 	const rawURL = "https://api-user:api-password@api.example.test/v1?token=query-secret#fragment-secret"
 	cfg := Config{Coordinator: rawURL}
@@ -2316,5 +2547,51 @@ func TestMachine0ConfigWorkRootDisplay(t *testing.T) {
 	}
 	if got := machine0ConfigWorkRoot("/srv/explicit"); got != "/srv/explicit" {
 		t.Fatalf("explicit work root display=%q", got)
+	}
+}
+
+func TestConfigShowArchitectureExplicitnessOffline(t *testing.T) {
+	for _, tc := range []struct {
+		name, yaml, env, arch string
+		explicit              bool
+	}{
+		{name: "default", arch: "amd64"},
+		{name: "empty yaml", yaml: "architecture: ''\n", arch: "amd64"},
+		{name: "yaml amd64", yaml: "architecture: amd64\n", arch: "amd64", explicit: true},
+		{name: "yaml arm64", yaml: "architecture: arm64\n", arch: "arm64", explicit: true},
+		{name: "environment overrides yaml", yaml: "architecture: arm64\n", env: "amd64", arch: "amd64", explicit: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateDoctorProviderSelectionTest(t)
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte("provider: ssh\ntarget: macos\nstatic:\n  host: offline.example.test\n"+tc.yaml), 0600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CRABBOX_CONFIG", path)
+			t.Setenv("CRABBOX_ARCH", tc.env)
+			// No executable can run. config show must not probe/admit the host.
+			t.Setenv("PATH", t.TempDir())
+			for _, jsonOutput := range []bool{false, true} {
+				var out, log bytes.Buffer
+				args := []string{}
+				if jsonOutput {
+					args = []string{"--json"}
+				}
+				if err := (App{Stdout: &out, Stderr: &log}).configShow(args); err != nil {
+					t.Fatal(err)
+				}
+				if jsonOutput {
+					var view map[string]any
+					if err := json.Unmarshal(out.Bytes(), &view); err != nil {
+						t.Fatal(err)
+					}
+					if view["architecture"] != tc.arch || view["architectureExplicit"] != tc.explicit {
+						t.Fatalf("view=%v", view)
+					}
+				} else if !strings.Contains(out.String(), fmt.Sprintf("arch=%s architecture_explicit=%t", tc.arch, tc.explicit)) {
+					t.Fatalf("text=%s", &out)
+				}
+			}
+		})
 	}
 }

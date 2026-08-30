@@ -586,23 +586,27 @@ func TestEgressHostConnectHookSkippedOnConnectFailure(t *testing.T) {
 	}
 }
 
-func TestRemoteEgressClientCommandRedactsThroughShellQuoting(t *testing.T) {
-	got := remoteEgressClientCommand("https://broker.example.com", "cbx_abcdef123456", "egress_ticket", "egress_session", "127.0.0.1:3128")
+func TestRemoteEgressClientCommandPreservesInputAndCleanupIdentity(t *testing.T) {
+	got := remoteEgressClientCommand("https://broker.example.com", "cbx_abcdef123456", "egress_session", "127.0.0.1:3128")
 	for _, want := range []string{
 		"pkill -f '[c]rabbox-egress-client egress client'",
 		"'/tmp/crabbox-egress-client' 'egress' 'client'",
 		"'--coordinator' 'https://broker.example.com'",
-		"'--ticket' 'egress_ticket'",
+		"'client' '" + egressTicketStdinArg + "'",
+		"\nnohup ",
 		">'/tmp/crabbox-egress-client.log' 2>&1",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("remote command missing %q:\n%s", want, got)
 		}
 	}
+	if strings.Contains(got, "3<&") || strings.Contains(got, " &\n") {
+		t.Fatal("remote bootstrap must remain foreground without inherited descriptor plumbing")
+	}
 }
 
 func TestEgressStopUsesSharedRemoteClientStopCommand(t *testing.T) {
-	got := remoteEgressClientCommand("https://broker.example.com", "cbx_abcdef123456", "egress_ticket", "egress_session", "127.0.0.1:3128")
+	got := remoteEgressClientCommand("https://broker.example.com", "cbx_abcdef123456", "egress_session", "127.0.0.1:3128")
 	want := remoteStopEgressClientCommand()
 	if !strings.HasPrefix(got, want+"\n") {
 		t.Fatalf("remote start command should stop existing client with shared command %q:\n%s", want, got)

@@ -8,6 +8,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/testutil"
 	"golang.org/x/crypto/ssh"
 )
@@ -303,6 +305,10 @@ func TestMorphAcquireStoresMetadataAndKey(t *testing.T) {
 	}
 	if lease.LeaseID == "" || lease.Server.CloudID != "inst_1" || lease.Server.Labels["slug"] != "blue-lobster" {
 		t.Fatalf("unexpected lease: %#v", lease)
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+	if err != nil || !exists || claim.ProviderScope != (Provider{}).ClaimScope(cfg) || claim.CloudID != "inst_1" {
+		t.Fatalf("exact ownership claim=%#v exists=%v err=%v", claim, exists, err)
 	}
 	if gotMetadata["lease"] != lease.LeaseID || gotMetadata["provider"] != providerName || gotMetadata["instance_id"] != "inst_1" || gotMetadata["work_root"] != "/tmp/crabbox" || gotMetadata["snapshot_id"] != "snapshot_123" {
 		t.Fatalf("unexpected metadata: %#v", gotMetadata)
@@ -967,6 +973,176 @@ func TestMorphReleaseRejectsUnmanagedInstance(t *testing.T) {
 	}
 }
 
+func TestMorphReleaseRequiresExactScopedClaimAndLiveOwnership(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		claim          bool
+		legacyClaim    bool
+		wrongEndpoint  bool
+		wrongInstance  bool
+		changedOwner   bool
+		providerFails  bool
+		providerGone   bool
+		delete         bool
+		wantMutation   bool
+		wantClaimAfter bool
+	}{
+		{name: "delete rejects missing claim", delete: true},
+		{name: "pause rejects missing claim"},
+		{name: "delete rejects another API endpoint", claim: true, wrongEndpoint: true, delete: true, wantClaimAfter: true},
+		{name: "delete rejects another instance", claim: true, wrongInstance: true, delete: true, wantClaimAfter: true},
+		{name: "delete rejects changed live ownership", claim: true, changedOwner: true, delete: true, wantClaimAfter: true},
+		{name: "pause rejects changed live ownership", claim: true, changedOwner: true, wantClaimAfter: true},
+		{name: "failed deletion preserves ownership", claim: true, providerFails: true, delete: true, wantMutation: true, wantClaimAfter: true},
+		{name: "failed pause preserves ownership", claim: true, providerFails: true, wantMutation: true, wantClaimAfter: true},
+		{name: "verified legacy claim authorizes deletion", claim: true, legacyClaim: true, delete: true, wantMutation: true},
+		{name: "legacy claim rejects changed live ownership", claim: true, legacyClaim: true, changedOwner: true, delete: true, wantClaimAfter: true},
+		{name: "already deleted instance clears exact claim", claim: true, providerGone: true, delete: true, wantMutation: true},
+		{name: "exact claim authorizes deletion", claim: true, delete: true, wantMutation: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configureMorphTestHome(t)
+			cfg := testMorphConfig()
+			cfg.Morph.DeleteOnRelease = tc.delete
+			markDeleteOnReleaseExplicit(&cfg)
+			labels := map[string]string{
+				"crabbox": "true", "provider": providerName, "lease": "cbx_owned",
+				"slug": "owned", "instance_id": "inst_owned",
+			}
+			server := Server{CloudID: "inst_owned", Provider: providerName, Labels: labels}
+			if tc.claim {
+				claimCfg := cfg
+				claimServer := server
+				if tc.wrongEndpoint {
+					claimCfg.Morph.APIURL = "https://another.example.com"
+				}
+				if tc.wrongInstance {
+					claimServer.CloudID = "inst_another"
+					claimServer.Labels = map[string]string{
+						"crabbox": "true", "provider": providerName, "lease": "cbx_owned",
+						"slug": "owned", "instance_id": "inst_another",
+					}
+				}
+				if tc.legacyClaim {
+					if err := core.ClaimLeaseForRepoProvider("cbx_owned", "owned", providerName, t.TempDir(), time.Hour, false); err != nil {
+						t.Fatal(err)
+					}
+					legacyServer := claimServer
+					legacyServer.Labels = make(map[string]string, len(claimServer.Labels)-1)
+					for key, value := range claimServer.Labels {
+						if key != "crabbox" {
+							legacyServer.Labels[key] = value
+						}
+					}
+					if err := core.UpdateLeaseClaimEndpoint("cbx_owned", legacyServer, SSHTarget{}); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := core.ClaimLeaseTargetForRepoConfig("cbx_owned", "owned", claimCfg, claimServer, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			gets, mutations := 0, 0
+			fake := &fakeMorphAPI{
+				getInstance: func(_ context.Context, id string) (morphInstance, error) {
+					gets++
+					metadata := morphMetadata{
+						"crabbox": "true", "provider": providerName, "lease": "cbx_owned",
+						"slug": "owned", "instance_id": "inst_owned",
+					}
+					if tc.changedOwner && gets > 1 {
+						metadata["lease"] = "cbx_someone_else"
+					}
+					return morphInstance{ID: id, Status: "ready", Metadata: metadata}, nil
+				},
+				deleteInstance: func(context.Context, string) error {
+					mutations++
+					if tc.providerFails {
+						return errors.New("provider unavailable")
+					}
+					if tc.providerGone {
+						return &morphAPIError{StatusCode: 404, Status: "404 Not Found"}
+					}
+					return nil
+				},
+				pauseInstance: func(context.Context, string) error {
+					mutations++
+					if tc.providerFails {
+						return errors.New("provider unavailable")
+					}
+					return nil
+				},
+				setInstanceMetadata: func(context.Context, string, map[string]string) error { return nil },
+			}
+			backend := &morphLeaseBackend{spec: Provider{}.Spec(), cfg: cfg, rt: Runtime{Stderr: io.Discard}, client: fake, now: time.Now}
+			err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: "cbx_owned", Server: server}})
+			wantSuccess := tc.claim && !tc.wrongEndpoint && !tc.wrongInstance && !tc.changedOwner && !tc.providerFails
+			if (err == nil) != wantSuccess {
+				t.Fatalf("err=%v wantSuccess=%v", err, wantSuccess)
+			}
+			if (mutations > 0) != tc.wantMutation {
+				t.Fatalf("mutations=%d wantMutation=%v", mutations, tc.wantMutation)
+			}
+			_, exists, claimErr := core.ReadLeaseClaimWithPresence("cbx_owned")
+			if claimErr != nil || exists != tc.wantClaimAfter {
+				t.Fatalf("claim exists=%v err=%v wantExists=%v", exists, claimErr, tc.wantClaimAfter)
+			}
+		})
+	}
+}
+
+func TestMorphReleaseMissingInstanceRequiresMatchingEndpointClaim(t *testing.T) {
+	for _, wrongEndpoint := range []bool{false, true} {
+		t.Run(fmt.Sprintf("wrong-endpoint-%t", wrongEndpoint), func(t *testing.T) {
+			configureMorphTestHome(t)
+			cfg := testMorphConfig()
+			claimCfg := cfg
+			if wrongEndpoint {
+				claimCfg.Morph.APIURL = "https://another.example.com"
+			}
+			server := Server{
+				CloudID: "inst_missing", Provider: providerName,
+				Labels: map[string]string{
+					"crabbox": "true", "provider": providerName, "lease": "cbx_missing",
+					"slug": "missing", "instance_id": "inst_missing",
+				},
+			}
+			if err := core.ClaimLeaseTargetForRepoConfig("cbx_missing", "missing", claimCfg, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+				t.Fatal(err)
+			}
+			keyPath, err := testboxKeyPath("cbx_missing")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(keyPath, []byte("PRIVATE KEY"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			fake := &fakeMorphAPI{
+				getInstance: func(context.Context, string) (morphInstance, error) {
+					return morphInstance{}, &morphAPIError{StatusCode: 404, Status: "404 Not Found"}
+				},
+				listInstances: func(context.Context, map[string]string) ([]morphInstance, error) { return nil, nil },
+			}
+			backend := &morphLeaseBackend{spec: Provider{}.Spec(), cfg: cfg, rt: Runtime{Stderr: io.Discard}, client: fake, now: time.Now}
+			err = backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: "cbx_missing", Server: server}})
+			if (err != nil) != wrongEndpoint {
+				t.Fatalf("err=%v wrongEndpoint=%v", err, wrongEndpoint)
+			}
+			_, keyErr := os.Stat(keyPath)
+			if wrongEndpoint && keyErr != nil || !wrongEndpoint && !errors.Is(keyErr, os.ErrNotExist) {
+				t.Fatalf("key error=%v wrongEndpoint=%v", keyErr, wrongEndpoint)
+			}
+			_, exists, claimErr := core.ReadLeaseClaimWithPresence("cbx_missing")
+			if claimErr != nil || exists != wrongEndpoint {
+				t.Fatalf("claim exists=%v err=%v wrongEndpoint=%v", exists, claimErr, wrongEndpoint)
+			}
+		})
+	}
+}
+
 func TestMorphResolveStatusOnlyAndReleaseOnlySkipSSHPreparation(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1055,14 +1231,12 @@ func TestMorphReleaseUsesStoredPolicyAndPreservesPausedClaim(t *testing.T) {
 			if err := os.WriteFile(keyPath, []byte("PRIVATE KEY"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if err := claimLeaseForRepoProvider("cbx_release", "release", providerName, t.TempDir(), time.Hour, false); err != nil {
-				t.Fatal(err)
-			}
 			server := Server{
 				CloudID:  "inst_release",
 				Provider: providerName,
 				Name:     "crabbox-release",
 				Labels: map[string]string{
+					"crabbox":     "true",
 					"provider":    providerName,
 					"lease":       "cbx_release",
 					"slug":        "release",
@@ -1071,7 +1245,7 @@ func TestMorphReleaseUsesStoredPolicyAndPreservesPausedClaim(t *testing.T) {
 					"state":       "ready",
 				},
 			}
-			if err := updateLeaseClaimEndpoint("cbx_release", server, SSHTarget{Host: "ssh.cloud.morph.so", Port: "22"}); err != nil {
+			if err := core.ClaimLeaseTargetForRepoConfig("cbx_release", "release", cfg, server, SSHTarget{Host: "ssh.cloud.morph.so", Port: "22"}, t.TempDir(), time.Hour, false); err != nil {
 				t.Fatal(err)
 			}
 

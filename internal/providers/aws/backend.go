@@ -11,6 +11,7 @@ import (
 	"time"
 
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/smithy-go"
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
@@ -56,6 +57,8 @@ func NewAWSLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
 }
 
 func (b *awsLeaseBackend) SupportsRequestedLeaseID() bool { return true }
+
+func (b *awsLeaseBackend) SupportsRequestedCheckpointID() bool { return true }
 
 func (b *awsLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
 	if strings.TrimSpace(req.RequestedLeaseID) != "" {
@@ -154,6 +157,10 @@ var fixedAWSLeaseKind = core.FixedLeaseKind{
 	ClaimProvider: core.FixedAWSClaimProvider,
 	IntentVersion: fixedAWSCreateIntentVersion,
 	Label:         "AWS",
+	TerminalIdentityLabels: []string{
+		"crabbox", "created_by", "provider", "lease", "slug",
+		"aws_account_id", "aws_region", "fixed_intent_sha256", "provider_key", "aws_key_pair_id",
+	},
 }
 
 func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
@@ -165,14 +172,15 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req AcquireRequest) 
 	var client awsClient
 	var accountID, providerScope, publicKey, fingerprint string
 	acquired, err := core.AcquireFixedLease(core.FixedAcquireOptions{
-		Kind:        fixedAWSLeaseKind,
-		LeaseID:     leaseID,
-		RepoRoot:    req.Repo.Root,
-		Reclaim:     req.Reclaim,
-		TargetOS:    cfg.TargetOS,
-		WindowsMode: cfg.WindowsMode,
-		TTL:         cfg.TTL,
-		IdleTimeout: cfg.IdleTimeout,
+		Kind:         fixedAWSLeaseKind,
+		LeaseID:      leaseID,
+		CheckpointID: req.RequestedCheckpointID,
+		RepoRoot:     req.Repo.Root,
+		Reclaim:      req.Reclaim,
+		TargetOS:     cfg.TargetOS,
+		WindowsMode:  cfg.WindowsMode,
+		TTL:          cfg.TTL,
+		IdleTimeout:  cfg.IdleTimeout,
 	}, func(ctx context.Context, _ *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
 		var err error
 		client, err = newAWSClient(ctx, cfg)
@@ -466,6 +474,15 @@ func (b *awsLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Leas
 	if err != nil {
 		return LeaseTarget{}, err
 	}
+	if req.ReleaseOnly && core.IsCanonicalLeaseID(req.ID) {
+		claim, exists, err := core.ReadLeaseClaimWithPresence(req.ID)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+		if exists && claim.FixedCreateIntent != nil && claim.FixedCreateIntent.State == fixedAWSIntentReleased {
+			return b.resolveTerminalRelease(ctx, req, claim, servers)
+		}
+	}
 	if server, leaseID, err := findServerByAlias(servers, req.ID); err != nil {
 		return LeaseTarget{}, err
 	} else if leaseID != "" {
@@ -490,6 +507,38 @@ func isCrabboxAWSLease(server Server) bool {
 func (b *awsLeaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
 	_ = req
 	return b.listAcrossRegions(ctx)
+}
+
+func (b *awsLeaseBackend) CheckpointSourceAbsent(ctx context.Context, req core.CheckpointSourceRequest) (bool, error) {
+	cfg := b.Cfg
+	cfg.AWSRegion = req.Resource.Image.Region
+	if cfg.AWSRegion == "" || req.AccountID == "" {
+		return false, exit(2, "checkpoint source account or region is missing; retain operation")
+	}
+	client, err := newAWSClient(ctx, cfg)
+	if err != nil {
+		return false, err
+	}
+	account, err := client.CallerAccountID(ctx)
+	if err != nil {
+		return false, err
+	}
+	if account != req.AccountID {
+		return false, exit(2, "checkpoint source account changed")
+	}
+	source, err := client.GetServer(ctx, req.Capture.SourceID)
+	if err != nil {
+		var missing core.ExitError
+		var apiErr smithy.APIError
+		if errors.As(err, &missing) && missing.Code == 4 || errors.As(err, &apiErr) && apiErr.ErrorCode() == "InvalidInstanceID.NotFound" {
+			return true, nil
+		}
+		return false, err
+	}
+	if source.CloudID != req.Capture.SourceID {
+		return false, exit(2, "checkpoint source identity changed")
+	}
+	return source.Status == "terminated", nil
 }
 
 func (b *awsLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
@@ -525,27 +574,48 @@ func (b *awsLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequ
 	if err != nil {
 		return err
 	}
+	snapshot, _, _ := core.ServerLeaseClaimSnapshot(req.Lease.Server)
+	if (claim.FixedCreateIntent != nil && claim.FixedCreateIntent.State == fixedAWSIntentReleased) ||
+		(snapshot.FixedCreateIntent != nil && snapshot.FixedCreateIntent.State == fixedAWSIntentReleased) ||
+		req.Lease.Server.Status == fixedAWSIntentReleased {
+		return b.releaseTerminalReceipt(ctx, req)
+	}
 	if strings.TrimSpace(req.Lease.Server.Labels["fixed_intent_sha256"]) != "" && (!exists || !fixedAWSLeaseKind.IsFixedClaim(claim)) {
 		return exit(4, "refusing to release fixed AWS lease %s without its durable create intent", req.Lease.LeaseID)
 	}
-	if exists && fixedAWSLeaseKind.IsFixedClaim(claim) {
-		exact, err := requireExactAWSClaim(req.Lease.Server, req.Lease.LeaseID)
-		if err != nil {
-			return err
-		}
+	exact, err := requireExactAWSClaim(req.Lease.Server, req.Lease.LeaseID)
+	if err != nil {
+		return err
+	}
+	if err := core.AuthorizeCheckpointRelease(exact, req.CheckpointID); err != nil {
+		return err
+	}
+	if fixedAWSLeaseKind.IsFixedClaim(exact) {
 		return fixedAWSLeaseKind.FinalizeAfterCleanup(exact, func() error {
+			if err := core.AuthorizeCheckpointRelease(exact, req.CheckpointID); err != nil {
+				return err
+			}
 			return deleteServer(ctx, awsConfigForServer(b.Cfg, req.Lease.Server), req.Lease.Server)
 		})
 	}
-	if err := deleteServer(ctx, awsConfigForServer(b.Cfg, req.Lease.Server), req.Lease.Server); err != nil {
-		var keyErr *awsProviderKeyCleanupError
-		if errors.As(err, &keyErr) {
-			removeLeaseClaim(req.Lease.LeaseID)
+	var providerKeyErr error
+	if err := core.RemoveLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, exact, func() error {
+		if err := core.AuthorizeCheckpointRelease(exact, req.CheckpointID); err != nil {
+			return err
 		}
+		if err := deleteServer(ctx, awsConfigForServer(b.Cfg, req.Lease.Server), req.Lease.Server); err != nil {
+			var keyErr *awsProviderKeyCleanupError
+			if errors.As(err, &keyErr) {
+				providerKeyErr = err
+				return nil
+			}
+			return err
+		}
+		return nil
+	}); err != nil {
 		return err
 	}
-	removeLeaseClaim(req.Lease.LeaseID)
-	return nil
+	return providerKeyErr
 }
 
 func (b *awsLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
@@ -563,7 +633,9 @@ func (b *awsLeaseBackend) RetainLeaseClaimAfterReleaseWithClaim(lease LeaseTarge
 
 func (b *awsLeaseBackend) retainLeaseClaimAfterRelease(lease LeaseTarget, previous core.LeaseClaim) (bool, error) {
 	serverFingerprint := strings.TrimSpace(lease.Server.Labels["fixed_intent_sha256"])
-	return fixedAWSLeaseKind.RetainClaimAfterRelease(lease.LeaseID, previous, serverFingerprint != "", nil, func(claim core.LeaseClaim) error {
+	return fixedAWSLeaseKind.RetainClaimAfterRelease(lease.LeaseID, previous, serverFingerprint != "", func(claim core.LeaseClaim) error {
+		return validateAWSTerminalReceipt(claim, lease.LeaseID)
+	}, func(claim core.LeaseClaim) error {
 		if serverFingerprint != "" && serverFingerprint != claim.FixedCreateIntent.Fingerprint {
 			return exit(4, "lease_id_conflict: fixed AWS lease %s server tag differs from its terminal tombstone", lease.LeaseID)
 		}
@@ -808,6 +880,9 @@ func requireExactAWSClaim(server Server, expectedLeaseID string) (core.LeaseClai
 	if !exists {
 		return core.LeaseClaim{}, exit(2, "aws lease=%s has no exact local claim; refusing destructive operation", expectedLeaseID)
 	}
+	if claim.FixedCreateIntent != nil && claim.FixedCreateIntent.State == fixedAWSIntentReleased {
+		return core.LeaseClaim{}, exit(4, "lease_id_conflict: AWS lease %s is terminal; refusing another destructive operation", expectedLeaseID)
+	}
 	if !isCrabboxAWSLease(server) ||
 		claim.LeaseID != expectedLeaseID ||
 		!isAWSClaimProvider(claim.Provider) ||
@@ -831,8 +906,14 @@ func requireExactAWSClaim(server Server, expectedLeaseID string) (core.LeaseClai
 }
 
 func deleteClaimedAWSServerWithClient(ctx context.Context, client awsClient, server Server, claim core.LeaseClaim, cleanupKeyID string) error {
+	if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+		return err
+	}
 	var cleanupErr error
 	err := fixedAWSLeaseKind.FinalizeAfterCleanup(claim, func() error {
+		if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+			return err
+		}
 		cleanupErr = deleteAWSCleanupServerWithClient(ctx, client, server, cleanupKeyID)
 		return cleanupErr
 	})
@@ -888,6 +969,10 @@ func (b *awsLeaseBackend) cleanupOrphanedAWSClaims(ctx context.Context, dryRun b
 		if !isAWSClaimProvider(claim.Provider) || !core.IsCanonicalLeaseID(claim.LeaseID) {
 			continue
 		}
+		// Released receipts retain identity, not outstanding cleanup obligations.
+		if claim.FixedCreateIntent != nil && claim.FixedCreateIntent.State == fixedAWSIntentReleased {
+			continue
+		}
 		labels := claim.Labels
 		if labels == nil || labels["lease"] != claim.LeaseID || labels["provider"] != "aws" || strings.TrimSpace(labels["aws_region"]) == "" ||
 			!strings.HasPrefix(claim.CloudID, "i-") || !core.ValidCrabboxProviderKey(core.ServerProviderKey(Server{Labels: labels})) ||
@@ -935,7 +1020,13 @@ func (b *awsLeaseBackend) cleanupOrphanedAWSClaims(ctx context.Context, dryRun b
 }
 
 func deleteMissingClaimedAWSResourcesWithClient(ctx context.Context, client awsClient, claim core.LeaseClaim, cleanupKeyID string) error {
+	if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+		return err
+	}
 	return fixedAWSLeaseKind.FinalizeAfterCleanup(claim, func() error {
+		if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+			return err
+		}
 		return client.DeleteCleanupSSHKeyID(ctx, cleanupKeyID)
 	})
 }
@@ -985,8 +1076,6 @@ func (e *awsProviderKeyCleanupError) Error() string {
 }
 
 func (e *awsProviderKeyCleanupError) Unwrap() error { return e.err }
-
-func removeLeaseClaim(leaseID string) { core.RemoveLeaseClaim(leaseID) }
 
 func cleanupAWSCreatedResources(ctx context.Context, stderr io.Writer, cfg Config, cloudID, keyPairID string) {
 	client, err := newAWSClient(ctx, cfg)

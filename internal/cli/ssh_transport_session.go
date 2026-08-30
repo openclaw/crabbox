@@ -195,7 +195,7 @@ func validWSLSSHTransportDirectory(value string) bool {
 
 func probeSSHTransportUserPercentExpansion(ctx context.Context, target SSHTarget, dir string) (bool, error) {
 	path := filepath.Join(dir, "user_percent_config")
-	if err := os.WriteFile(path, []byte(`User "crabbox%%probe"`+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`User "crabbox%%probe"`+"\nIdentityFile none\nIdentityAgent none\n"), 0o600); err != nil {
 		return false, fmt.Errorf("write private SSH user capability config: %w", err)
 	}
 	if err := secureSSHTransportPath(path, false); err != nil {
@@ -214,7 +214,7 @@ func probeSSHTransportUserPercentExpansion(ctx context.Context, target SSHTarget
 
 func probeWSLSSHTransportUserPercentExpansion(ctx context.Context, target SSHTarget, wslExe, wslDir string) (bool, error) {
 	path := wslDir + "/user_percent_config"
-	if err := writeWSLSSHTransportFile(ctx, wslExe, path, []byte(`User "crabbox%%probe"`+"\n"), target); err != nil {
+	if err := writeWSLSSHTransportFile(ctx, wslExe, path, []byte(`User "crabbox%%probe"`+"\nIdentityFile none\nIdentityAgent none\n"), target); err != nil {
 		return false, err
 	}
 	cmd := exec.CommandContext(ctx, wslExe, "ssh", "-G", "-F", path, "--", "crabbox-user-probe.invalid")
@@ -275,6 +275,10 @@ func writeWSLSSHTransportFile(ctx context.Context, wslExe, path string, data []b
 
 func (s *sshTransportSession) commandPrefix() []string {
 	return []string{"-F", s.configPath}
+}
+
+func (s *sshTransportSession) commandPrefixWithOptions(connectTimeout, connectionAttempts string) []string {
+	return append(s.commandPrefix(), "-o", "ConnectTimeout="+connectTimeout, "-o", "ConnectionAttempts="+connectionAttempts)
 }
 
 func (s *sshTransportSession) rsyncRemoteShell() string {
@@ -353,7 +357,7 @@ func resolveSSHTransportConfigRoute(ctx context.Context, target SSHTarget, local
 		return sshTransportConfigRoute{}, fmt.Errorf("secure private SSH route config: %w", err)
 	}
 	capabilityPath := filepath.Join(dir, "capability_config")
-	if err := os.WriteFile(capabilityPath, nil, 0o600); err != nil {
+	if err := os.WriteFile(capabilityPath, []byte("IdentityFile none\nIdentityAgent none\n"), 0o600); err != nil {
 		return sshTransportConfigRoute{}, fmt.Errorf("write private SSH capability config: %w", err)
 	}
 	if err := secureSSHTransportPath(capabilityPath, false); err != nil {
@@ -589,19 +593,51 @@ func probeSSHTransportRouteCapabilities(ctx context.Context, target SSHTarget, c
 }
 
 func runOwnedSSHTransportCommand(ctx context.Context, target SSHTarget, args []string, stdout, stderr io.Writer) error {
-	handle := pondMeshExecCommand(ctx, target.ChildEnvDenylist, directSSHExecutable(), args...)
-	if execHandle, ok := handle.(*pondMeshExecHandle); ok {
-		execHandle.cmd.Stdout = stdout
-		execHandle.cmd.Stderr = stderr
-	}
+	handle := newOwnedSSHTransportCommand(ctx, target, args)
+	handle.cmd.Stdout = stdout
+	handle.cmd.Stderr = stderr
 	if err := handle.Start(); err != nil {
 		return err
 	}
+	return waitOwnedSSHTransportCommand(ctx, handle)
+}
+
+func waitOwnedSSHTransportCommand(ctx context.Context, handle *pondMeshExecHandle) error {
 	err := handle.Wait()
 	if ctxErr := context.Cause(ctx); ctxErr != nil && handle.WasTerminatedByOurCancel() {
 		return ctxErr
 	}
 	return err
+}
+
+func newOwnedSSHTransportCommand(ctx context.Context, target SSHTarget, args []string) *pondMeshExecHandle {
+	handle := pondMeshExecCommand(ctx, target.ChildEnvDenylist, directSSHExecutable(), args...).(*pondMeshExecHandle)
+	applyTargetChildEnvironment(handle.cmd, target)
+	return handle
+}
+
+func startOwnedSSHTransportSubsystem(ctx context.Context, target SSHTarget, connectTimeout, connectionAttempts, subsystem string, stderr io.Writer) (io.Reader, io.WriteCloser, func() error, error) {
+	target.NoControlMaster = true
+	session, err := newSSHTransportSession(ctx, target, false)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	args := append(session.commandPrefix(), "-o", "ConnectTimeout="+connectTimeout, "-o", "ConnectionAttempts="+connectionAttempts, "-s", session.host(), subsystem)
+	handle := newOwnedSSHTransportCommand(ctx, target, args)
+	handle.cmd.Stderr = stderr
+	input, err := handle.cmd.StdinPipe()
+	if err != nil {
+		return nil, nil, nil, errors.Join(err, session.Close())
+	}
+	output, err := handle.cmd.StdoutPipe()
+	if err != nil {
+		return nil, nil, nil, errors.Join(err, input.Close(), session.Close())
+	}
+	if err := handle.Start(); err != nil {
+		return nil, nil, nil, errors.Join(err, input.Close(), session.Close())
+	}
+	wait := func() error { return errors.Join(waitOwnedSSHTransportCommand(ctx, handle), session.Close()) }
+	return output, input, wait, nil
 }
 
 func renderSSHTransportRouteSeed(target SSHTarget, userConfigPath string, userPercentExpansion bool) (string, error) {
@@ -809,6 +845,11 @@ func renderSSHTransportConfigWithRoute(target SSHTarget, localForward bool, rout
 	if proxyCommand == "" {
 		proxyCommand = route.proxyCommand
 	}
+	if target.AuthSecret && !target.SSHConfigProxy && target.User != "" &&
+		(strings.Contains(proxyCommand, target.User) || strings.Contains(strings.ReplaceAll(proxyCommand, "%%", ""), "%r")) {
+		// A private config must not move the username into a proxy child's argv.
+		return "", exit(2, "managed SSH proxy command must not contain or expand the secret SSH user")
+	}
 	proxyUseFDPass := route.proxyUseFDPass
 	if proxyCommand != "" {
 		for token, field := range map[string]struct {
@@ -841,6 +882,18 @@ func renderSSHTransportConfigWithRoute(target SSHTarget, localForward bool, rout
 	certificateFiles := route.certificateFiles
 	if target.CertificateFile != "" {
 		certificateFiles = []string{target.CertificateFile}
+	}
+	if target.AuthSecret && !target.SSHConfigProxy {
+		// An empty managed key is explicit no-identity authentication, not
+		// permission to try account-home keys or an ambient authentication agent.
+		if len(identityFiles) == 0 {
+			identityFiles = []string{"none"}
+		}
+		if len(certificateFiles) == 0 {
+			certificateFiles = []string{"none"}
+		}
+		route.identitiesOnly = true
+		route.identityAgent = "none"
 	}
 	for name, value := range map[string]string{
 		"host":             hostName,

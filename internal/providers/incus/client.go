@@ -1,6 +1,7 @@
 package incus
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -24,6 +25,10 @@ type Runtime = core.Runtime
 type Server = core.Server
 
 type instanceClient interface {
+	Identity() (connectionIdentity, error)
+	Profile(name string) (*api.Profile, error)
+	CanonicalPath(name, path string) (string, error)
+	ClearTemplates(name string) error
 	ListInstances() ([]api.Instance, error)
 	GetInstance(name string) (*api.Instance, string, error)
 	CreateInstance(req api.InstancesPost) error
@@ -31,6 +36,15 @@ type instanceClient interface {
 	SetInstanceState(name string, put api.InstanceStatePut, etag string) error
 	GetInstanceState(name string) (*api.InstanceState, string, error)
 	DeleteInstance(name string) error
+	CreateSnapshot(ctx context.Context, name, snapshot string) error
+	GetSnapshot(name, snapshot string) (*api.InstanceSnapshot, error)
+	DeleteSnapshot(ctx context.Context, name, snapshot string) error
+	PublishSnapshot(ctx context.Context, name, snapshot string, properties map[string]string) (string, error)
+	ListImages() ([]api.Image, error)
+	GetImage(fingerprint string) (*api.Image, error)
+	DeleteImage(ctx context.Context, fingerprint string) error
+	ReadFile(name, path string) ([]byte, error)
+	WriteFile(name, path string, data []byte, mode int) error
 }
 
 type sdkClient struct {

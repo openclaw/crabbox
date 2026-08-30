@@ -228,6 +228,10 @@ func IsArchitectureExplicit(cfg Config) bool {
 	return cfg.architectureExplicit
 }
 
+func IsWindowsModeExplicit(cfg Config) bool {
+	return cfg.explicitWindowsMode != "" || cfg.windowsModeFlagExplicit
+}
+
 func MarkArchitectureExplicit(cfg *Config) {
 	cfg.architectureExplicit = true
 }
@@ -246,6 +250,13 @@ func RemoveLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
 
 func VerifyLeaseClaimUnchanged(leaseID string, expected LeaseClaim) error {
 	return verifyLeaseClaimUnchanged(leaseID, expected)
+}
+
+// CheckLeaseClaimRepositoryOwner checks the publication owner policy without
+// changing the claim. Preparation without repository context should skip this
+// check; publication retains its own empty-root rules.
+func CheckLeaseClaimRepositoryOwner(leaseID string, existing LeaseClaim, repoRoot string, reclaim bool) error {
+	return checkLeaseClaimRepositoryOwner(leaseID, existing, repoRoot, reclaim)
 }
 
 // RemoveLeaseClaimIfUnchangedAfter holds the claim lock across action and
@@ -362,7 +373,7 @@ func UpdateLeaseClaimTouchIfUnchanged(leaseID string, expected LeaseClaim, label
 // UpdateLeaseClaimTouchIfUnchangedAction fences a provider mutation and commits
 // its endpoint, lifecycle timestamps, and optional timeout in one claim write.
 func UpdateLeaseClaimTouchIfUnchangedAction(leaseID string, expected LeaseClaim, lastUsed time.Time, idleTimeoutOverride *time.Duration, action func() (Server, SSHTarget, bool, error)) (LeaseClaim, Server, SSHTarget, error) {
-	return updateLeaseClaimEndpointIfUnchangedActionMode(leaseID, expected, action, false, &leaseClaimTouchPayload{
+	return updateLeaseClaimEndpointIfUnchangedActionMode(leaseID, expected, action, claimEndpointUpdate, &leaseClaimTouchPayload{
 		lastUsed:            lastUsed,
 		idleTimeoutOverride: idleTimeoutOverride,
 	})
@@ -556,6 +567,20 @@ func TouchDirectLeaseLabelsWithIdleTimeoutOverride(labels map[string]string, cfg
 	return touchDirectLeaseLabelsWithIdleTimeoutOverride(labels, cfg, state, now, idleTimeoutOverride)
 }
 
+// PruneArchiveSyncManifestCommand preserves remote-only files while pruning the
+// previous archive manifest with the same path checks as Git overlay sync.
+func PruneArchiveSyncManifestCommand(workdir, token string, allowMassDeletions bool) string {
+	metadata := `if [ -L .crabbox ] || [ ! -d .crabbox ]; then
+  echo "archive sync requires nonsymlink metadata" >&2; exit 67
+fi
+meta_dir="$PWD/.crabbox"
+for file in "$meta_dir/sync-manifest" "$meta_dir/sync-manifest.` + token + `.new" "$meta_dir/sync-deleted.` + token + `.new"; do
+  if [ -L "$file" ]; then echo "archive sync refuses symlink manifest" >&2; exit 67; fi
+done
+`
+	return remotePruneSafeSyncManifest(workdir, token, metadata, allowMassDeletions)
+}
+
 func LeaseLabelTime(t time.Time) string {
 	return leaseLabelTime(t)
 }
@@ -578,6 +603,10 @@ func SlugWithCollisionSuffix(base, seed string) string {
 
 func NormalizeLeaseSlug(value string) string {
 	return normalizeLeaseSlug(value)
+}
+
+func NormalizePondName(value string) string {
+	return normalizePondName(value)
 }
 
 func RenderTailscaleHostname(template, leaseID, slug, provider string) string {
@@ -660,6 +689,8 @@ const (
 	CheckpointKindMachine0         = checkpointKindMachine0
 	CheckpointKindParallels        = checkpointKindParallels
 	CheckpointKindDockerCommit     = checkpointKindDockerCommit
+	CheckpointKindDaytona          = checkpointKindDaytona
+	CheckpointKindIncus            = checkpointKindIncus
 	CheckpointStrategyImage        = checkpointStrategyImage
 	CheckpointStrategyDiskSnapshot = checkpointStrategyDiskSnapshot
 )

@@ -5,10 +5,56 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
+import { loadRecipes } from "./generate-linux-readiness.mjs";
+
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const nodesourceSigningKeyFingerprint = "6F71F525282841EEDAF851B42F59B5F99B1BE0B4";
 const dockerSigningKeyFingerprint = "9DC858229FC7DD38854AE2D88D81803C0EBFCD88";
 const googleLinuxSigningKeyFingerprint = "EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796";
+
+test("linux developer image installs every readiness package from the generated effective builder profile", async () => {
+  const { minimal, builder } = await loadRecipes();
+  const source = fs.readFileSync(path.join(repoRoot, "scripts/install-linux-developer-tools.sh"), "utf8");
+  const producer = path.join(repoRoot, "scripts/linux-readiness.generated.sh");
+  const printed = spawnSync(producer, ["--print-packages", "linux-builder"], { encoding: "utf8" });
+  assert.equal(printed.status, 0, printed.stderr || printed.stdout);
+  const packages = printed.stdout.trim().split(/\s+/u);
+  assert.deepEqual(packages, builder.aptPackages);
+  for (const name of minimal.aptPackages) assert.ok(packages.includes(name), name);
+  assert.match(source, /"\$readiness_producer" --print-packages linux-builder/);
+  assert.match(source, /apt_install "\$\{apt_get_base\[@\]\}" "\$\{readiness_packages\[@\]\}"/);
+  assert.doesNotMatch(source, /\beval\b/);
+  assert.match(source, /"\$readiness_producer"/);
+  assert.doesNotMatch(source, /(?:>|tee\s+).*\/var\/lib\/crabbox(?:\/image-ready|-readiness\/linux\.json)/);
+});
+
+test("linux developer image executes the standalone producer and stops when capability proof fails", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-linux-readiness-installer-"));
+  const scriptRoot = path.join(root, "scripts");
+  const marker = path.join(root, "producer.called");
+  fs.mkdirSync(scriptRoot);
+  fs.copyFileSync(path.join(repoRoot, "scripts/install-linux-developer-tools.sh"), path.join(scriptRoot, "install.sh"));
+  writeExecutable(
+    path.join(scriptRoot, "linux-readiness.generated.sh"),
+    `#!/usr/bin/env bash\nprintf 'verified\\n' >${JSON.stringify(marker)}\nexit \"\${CRABBOX_FAKE_PRODUCER_EXIT:-0}\"\n`,
+  );
+  const shell = `set -euo pipefail
+source ${JSON.stringify(path.join(scriptRoot, "install.sh"))}
+install() { return 0; }
+systemctl() { return 0; }
+cloud-init() { return 0; }
+sync() { return 0; }
+prepare_fast_boot`;
+  const successful = spawnSync("bash", ["-c", shell], { cwd: repoRoot, encoding: "utf8" });
+  assert.equal(successful.status, 0, successful.stderr || successful.stdout);
+  assert.equal(fs.readFileSync(marker, "utf8"), "verified\n");
+  const failed = spawnSync("bash", ["-c", shell], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: { ...process.env, CRABBOX_FAKE_PRODUCER_EXIT: "73" },
+  });
+  assert.equal(failed.status, 73, failed.stderr || failed.stdout);
+});
 
 function writeExecutable(file, body) {
 	fs.writeFileSync(file, body, "utf8");

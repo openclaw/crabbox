@@ -29,6 +29,9 @@ func TestNormalizePondName(t *testing.T) {
 		if got := normalizePondName(tc.in); got != tc.want {
 			t.Fatalf("normalizePondName(%q)=%q want %q", tc.in, got, tc.want)
 		}
+		if got := NormalizePondName(tc.in); got != tc.want {
+			t.Fatalf("NormalizePondName(%q)=%q want %q", tc.in, got, tc.want)
+		}
 	}
 }
 

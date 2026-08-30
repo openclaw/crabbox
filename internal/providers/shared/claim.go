@@ -15,6 +15,7 @@ var ErrStrictClaimMismatch = errors.New("strict claim identifier mismatch")
 type ClaimBinding struct {
 	Provider, ProviderScope, LeaseID, Slug, CloudID string
 	RequiredLabels                                  map[string]string
+	ExactProviderScope                              bool
 }
 
 type ScopedLeaseResolver struct {
@@ -47,7 +48,7 @@ func ValidateClaimBinding(claim core.LeaseClaim, want ClaimBinding) error {
 		{"label slug", claim.Labels["slug"], claim.Slug},
 	}
 	for _, field := range fields {
-		if field.want != "" && field.got != field.want {
+		if (field.want != "" || field.name == "provider scope" && want.ExactProviderScope) && field.got != field.want {
 			return fmt.Errorf("claim %s mismatch: got %q, want %q", field.name, field.got, field.want)
 		}
 	}
@@ -57,6 +58,43 @@ func ValidateClaimBinding(claim core.LeaseClaim, want ClaimBinding) error {
 		}
 	}
 	return nil
+}
+
+// RequireExactClaim resolves durable local ownership; provider inventory and
+// resource names alone never authorize a destructive lifecycle operation.
+func RequireExactClaim(want ClaimBinding) (core.LeaseClaim, error) {
+	if strings.TrimSpace(want.Provider) == "" || strings.TrimSpace(want.LeaseID) == "" || strings.TrimSpace(want.CloudID) == "" {
+		return core.LeaseClaim{}, core.Exit(2, "destructive provider operation requires an exact provider, lease, and resource identity")
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(want.LeaseID)
+	if err != nil {
+		return core.LeaseClaim{}, err
+	}
+	if !exists {
+		return core.LeaseClaim{}, core.Exit(2, "%s lease=%s has no exact local ownership claim for resource=%s", want.Provider, want.LeaseID, want.CloudID)
+	}
+	if err := ValidateClaimBinding(claim, want); err != nil {
+		return core.LeaseClaim{}, core.Exit(2, "%s lease=%s has a missing or stale exact local ownership claim for resource=%s: %v", want.Provider, want.LeaseID, want.CloudID, err)
+	}
+	return claim, nil
+}
+
+// RemoveExactClaimAfter keeps the exact claim fenced until the provider action
+// succeeds and its durable ownership record has been removed.
+func RemoveExactClaimAfter(claim core.LeaseClaim, want ClaimBinding, action func() error) error {
+	if err := ValidateClaimBinding(claim, want); err != nil {
+		return core.Exit(2, "%s lease=%s has a stale exact local ownership claim: %v", want.Provider, want.LeaseID, err)
+	}
+	return core.RemoveLeaseClaimIfUnchangedAfter(want.LeaseID, claim, action)
+}
+
+// UpdateExactClaimLabelsAfter fences provider mutations that retain their
+// resource, such as stopping rather than deleting a workspace or instance.
+func UpdateExactClaimLabelsAfter(claim core.LeaseClaim, want ClaimBinding, labels map[string]string, action func() error) (core.LeaseClaim, error) {
+	if err := ValidateClaimBinding(claim, want); err != nil {
+		return core.LeaseClaim{}, core.Exit(2, "%s lease=%s has a stale exact local ownership claim: %v", want.Provider, want.LeaseID, err)
+	}
+	return core.UpdateLeaseClaimLabelsIfUnchangedAfter(want.LeaseID, claim, labels, action)
 }
 
 // ResolveProviderClaimStrict resolves exact claims before slugs and never treats a canonical lease ID as a slug.

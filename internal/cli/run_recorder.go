@@ -2,8 +2,10 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +15,8 @@ const (
 	runTelemetrySampleInterval = 15 * time.Second
 	runRecorderRequestTimeout  = 10 * time.Second
 	runRecorderFinishTimeout   = 60 * time.Second
+	runRecorderFinishAttempts  = 3
+	runRecorderFinishRetry     = 250 * time.Millisecond
 )
 
 type runRecorder struct {
@@ -20,7 +24,11 @@ type runRecorder struct {
 	command            []string
 	label              string
 	runID              string
+	startedAt          time.Time
+	attachedAt         time.Time
 	stderr             io.Writer
+	diagnosticConfig   Config
+	diagnosticSecrets  []string
 	createPending      bool
 	historyUnavailable bool
 	eventsMu           sync.Mutex
@@ -37,7 +45,14 @@ type runRecorder struct {
 }
 
 func newRunRecorder(ctx context.Context, coord *CoordinatorClient, cfg Config, command []string, label string, stderr io.Writer, createAfterLease bool) *runRecorder {
-	rec := &runRecorder{coord: coord, command: command, label: strings.TrimSpace(label), stderr: stderr}
+	rec := &runRecorder{
+		coord:             coord,
+		command:           command,
+		label:             strings.TrimSpace(label),
+		stderr:            stderr,
+		diagnosticConfig:  cfg,
+		diagnosticSecrets: configuredDiagnosticSecrets(cfg),
+	}
 	if coord == nil {
 		return rec
 	}
@@ -69,6 +84,13 @@ func (r *runRecorder) historyIsUnavailable() bool {
 	return r == nil || r.runID == "" || r.historyUnavailable
 }
 
+func (r *runRecorder) requireHandle() error {
+	if r == nil || r.coord == nil || r.runID != "" {
+		return nil
+	}
+	return exit(7, "run history unavailable before command; refusing execution without a coordinator run handle")
+}
+
 func (r *runRecorder) Event(kind, phase, message string) {
 	if r == nil || r.runID == "" || (r.finished && kind != "lease.released") {
 		return
@@ -83,6 +105,11 @@ func (r *runRecorder) Event(kind, phase, message string) {
 func (r *runRecorder) appendEvent(kind string, input CoordinatorRunEventInput) {
 	if r == nil || r.coord == nil || r.runID == "" || !r.runEventsEnabled() {
 		return
+	}
+	if input.Message != "" {
+		secrets := append([]string(nil), r.diagnosticSecrets...)
+		secrets = append(secrets, configuredDiagnosticSecrets(r.diagnosticConfig)...)
+		input.Message = RedactDiagnosticSecrets(input.Message, secrets...)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), runRecorderRequestTimeout)
 	defer cancel()
@@ -167,6 +194,8 @@ func (r *runRecorder) StartTelemetrySampler(ctx context.Context, target SSHTarge
 
 func (r *runRecorder) attachRun(run CoordinatorRun) {
 	r.runID = run.ID
+	r.startedAt, _ = time.Parse(time.RFC3339Nano, run.StartedAt)
+	r.attachedAt = time.Now()
 	r.createPending = false
 	r.historyUnavailable = false
 	r.output = newRunOutputEventQueue(r.coord, run.ID, r.handleRunEventAppendError)
@@ -180,20 +209,73 @@ func (r *runRecorder) StreamWriter(stream string) *runEventStreamWriter {
 	return &runEventStreamWriter{recorder: r, stream: stream}
 }
 
-func (r *runRecorder) Finish(ctx context.Context, target SSHTarget, exitCode int, sync, command time.Duration, log string, truncated bool, results *TestResultSummary, classification FailureClassification) {
+func (r *runRecorder) Finish(ctx context.Context, target SSHTarget, exitCode int, sync, command time.Duration, log string, truncated bool, results *TestResultSummary, classification FailureClassification, receipt *terminalRunReceipt) error {
 	if r == nil || r.runID == "" || r.finished {
-		return
+		return nil
 	}
 	r.waitForOutputEvents(runEventOutputPostWait)
-	r.finished = true
 	r.stopTelemetrySampler()
 	telemetryEnd := collectLeaseTelemetryBestEffort(contextWithoutWorkspaceOwner(ctx), leaseTelemetryCollectorForTarget(target))
 	r.recordTelemetrySample(telemetryEnd)
+	telemetry := runTelemetrySummary(r.telemetryStart, telemetryEnd, r.telemetrySnapshot())
 	ctx, cancel := context.WithTimeout(context.Background(), runRecorderFinishTimeout)
 	defer cancel()
-	if _, err := r.coord.FinishRun(ctx, r.runID, exitCode, sync, command, log, truncated, results, runTelemetrySummary(r.telemetryStart, telemetryEnd, r.telemetrySnapshot()), classification); err != nil {
-		r.warn("run history finish failed for %s: %v", r.runID, err)
+	var lastErr error
+	attempts := 0
+	for attempt := 1; attempt <= runRecorderFinishAttempts; attempt++ {
+		attempts = attempt
+		_, finishErr := r.coord.FinishRun(ctx, r.runID, exitCode, sync, command, log, truncated, results, telemetry, classification, receipt)
+		if finishErr == nil && receipt == nil {
+			r.finished = true
+			return nil
+		}
+		if receipt != nil {
+			committed, receiptErr := r.coord.RunReceipt(ctx, r.runID)
+			if receiptErr == nil {
+				if committed == *receipt {
+					r.finished = true
+					return nil
+				}
+				lastErr = fmt.Errorf("stored terminal receipt differs from the signed finish payload")
+				break
+			}
+			if finishErr == nil {
+				lastErr = fmt.Errorf("verify persisted terminal receipt: %w", receiptErr)
+				if attempt == runRecorderFinishAttempts || !runRecorderFinishRetryable(receiptErr) {
+					break
+				}
+			} else {
+				lastErr = finishErr
+				if attempt == runRecorderFinishAttempts || !runRecorderFinishRetryable(finishErr) {
+					break
+				}
+			}
+		} else {
+			lastErr = finishErr
+			if attempt == runRecorderFinishAttempts || !runRecorderFinishRetryable(finishErr) {
+				break
+			}
+		}
+		timer := time.NewTimer(runRecorderFinishRetry)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return exit(7, "run history terminal commit failed for %s: %v", r.runID, ctx.Err())
+		case <-timer.C:
+		}
 	}
+	return exit(7, "run history terminal commit failed for %s after %d attempts: %v; recover with `crabbox receipt %s`", r.runID, attempts, lastErr, r.runID)
+}
+
+func runRecorderFinishRetryable(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var httpErr CoordinatorHTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.StatusCode == http.StatusTooManyRequests || httpErr.StatusCode >= http.StatusInternalServerError
+	}
+	return true
 }
 
 func (r *runRecorder) Failed(err error) {

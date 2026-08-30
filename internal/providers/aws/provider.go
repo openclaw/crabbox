@@ -17,6 +17,7 @@ type Provider struct{}
 var (
 	_ core.ProviderClassProfileProvider = Provider{}
 	_ core.ProviderClassSpecProvider    = Provider{}
+	_ core.ProviderSSHTargetConfigurer  = Provider{}
 )
 
 // AWS publishes C7 compute-optimized instances at 2 GiB/vCPU, M7/M8
@@ -55,7 +56,7 @@ func (Provider) Spec() core.ProviderSpec {
 			{OS: core.TargetWindows, WindowsMode: "wsl2"},
 			{OS: core.TargetMacOS},
 		},
-		Features:         core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureDesktop, core.FeatureBrowser, core.FeatureCode},
+		Features:         core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureDesktop, core.FeatureBrowser, core.FeatureCode, core.FeatureRunSession},
 		Coordinator:      core.CoordinatorSupported,
 		ClassDisposition: core.ProviderClassDispositionMapped,
 	}
@@ -63,6 +64,12 @@ func (Provider) Spec() core.ProviderSpec {
 func (Provider) RegisterFlags(*flag.FlagSet, core.Config) any { return core.NoProviderFlags() }
 func (Provider) ApplyFlags(*core.Config, *flag.FlagSet, any) error {
 	return nil
+}
+
+func (Provider) ConfigureSSHTarget(target *core.SSHTarget, readyCommand string) {
+	if target.TargetOS == core.TargetLinux {
+		target.ReadyCheck = "timeout 20m cloud-init status --wait >/tmp/crabbox-cloud-init.log 2>&1 && " + readyCommand
+	}
 }
 
 func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, slug string, server core.Server, allowProviderMetadata bool) (core.Server, error) {
@@ -296,8 +303,9 @@ func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (co
 			return core.NativeCheckpointCapability{}, false
 		}
 		return core.NativeCheckpointCapability{
-			Kind:   core.CheckpointKindAWSAMI,
-			Direct: req.Config.Coordinator == "",
+			Kind:         core.CheckpointKindAWSAMI,
+			Direct:       req.Config.Coordinator == "",
+			RetireSource: true,
 		}, true
 	}
 	if targetOS != core.TargetLinux && targetOS != core.TargetMacOS {
@@ -307,12 +315,12 @@ func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (co
 		if targetOS != core.TargetMacOS && strategy != core.CheckpointStrategyImage {
 			return core.NativeCheckpointCapability{}, false
 		}
-		return core.NativeCheckpointCapability{Kind: core.CheckpointKindAWSAMI, Direct: true}, true
+		return core.NativeCheckpointCapability{Kind: core.CheckpointKindAWSAMI, Direct: true, RetireSource: true}, true
 	}
 	if targetOS == core.TargetMacOS || strategy == core.CheckpointStrategyImage {
-		return core.NativeCheckpointCapability{Kind: core.CheckpointKindAWSAMI}, true
+		return core.NativeCheckpointCapability{Kind: core.CheckpointKindAWSAMI, RetireSource: true}, true
 	}
-	return core.NativeCheckpointCapability{Kind: core.CheckpointKindAWSEBS}, true
+	return core.NativeCheckpointCapability{Kind: core.CheckpointKindAWSEBS, RetireSource: true}, true
 }
 
 func firstNonBlank(values ...string) string {

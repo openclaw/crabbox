@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://crabbox.sh/schemas/linux-readiness-profile-v1.json",
+  "title": "Linux image readiness capability profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "profile", "description", "shell", "inherits", "aptPackages", "probes"],
+  "properties": {
+    "schema": { "const": "crabbox-linux-readiness/v1" },
+    "profile": { "enum": ["linux-minimal", "linux-builder"] },
+    "description": { "type": "string", "minLength": 1 },
+    "shell": { "const": "posix" },
+    "inherits": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "enum": ["linux-minimal", "linux-builder"] }
+    },
+    "aptPackages": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]*$" }
+    },
+    "probes": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "command"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "command": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

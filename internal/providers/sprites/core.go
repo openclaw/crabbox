@@ -84,10 +84,6 @@ func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaim(identifier)
 }
 
-func removeLeaseClaim(leaseID string) {
-	core.RemoveLeaseClaim(leaseID)
-}
-
 func ensureTestboxKey(leaseID string) (string, string, error) {
 	return core.EnsureTestboxKey(leaseID)
 }

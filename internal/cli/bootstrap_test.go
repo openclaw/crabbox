@@ -32,12 +32,18 @@ func TestCloudInitUsesRetryingBootstrap(t *testing.T) {
 		"package_update: false",
 		"bash -euxo pipefail <<'BOOT'",
 		"Acquire::Retries \"8\";",
-		"test -f /var/lib/crabbox/image-ready",
-		"test -s /etc/ssl/certs/ca-certificates.crt",
-		"crabbox prebaked base packages ready; skipping apt bootstrap",
+		"crabbox_readiness_manifest_path='/var/lib/crabbox-readiness/linux.json'",
+		"crabbox_legacy_image_marker_path='/var/lib/crabbox/image-ready'",
+		"crabbox_readiness_system_path='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'",
+		"test -s '/etc/ssl/certs/ca-certificates.crt'",
+		"crabbox Linux readiness manifest verified; skipping apt bootstrap",
+		"crabbox legacy image readiness migrated without package-manager work",
 		"retry apt-get update",
-		"retry apt-get install -y --no-install-recommends openssh-server ca-certificates curl git rsync jq",
+		"retry apt-get install -y --no-install-recommends $crabbox_readiness_packages",
+		"crabbox_readiness_packages='ca-certificates curl git jq openssh-server rsync tmux util-linux'",
 		"curl --version >/dev/null",
+		"tmux -V >/dev/null",
+		"flock --version >/dev/null",
 		"test -f /var/lib/crabbox/bootstrapped",
 		"test -w '/work/crabbox'",
 		"      Port 2222\n      Port 22",
@@ -59,6 +65,24 @@ func TestCloudInitUsesRetryingBootstrap(t *testing.T) {
 		if strings.Contains(got, notWant) {
 			t.Fatalf("cloudInit() should not install project language runtime %q", notWant)
 		}
+	}
+}
+
+func TestLinuxReadinessGeneratedContract(t *testing.T) {
+	got := cloudInit(baseConfig(), "ssh-ed25519 test")
+	embedded := indentCloudInitRuncmd(linuxMinimalReadinessBootstrap)
+	if !strings.Contains(got, embedded) {
+		t.Fatal("cloudInit() must embed the complete generated Linux readiness fragment")
+	}
+	if strings.Index(got, embedded) >= strings.Index(got, "touch /var/lib/crabbox/bootstrapped") {
+		t.Fatal("cloudInit() must verify Linux readiness before declaring bootstrap complete")
+	}
+	legacyParentCreation := "crabbox_ensure_legacy_image_marker_parent || return 1"
+	if !strings.Contains(embedded, legacyParentCreation) {
+		t.Fatal("generated readiness writer must ensure its own legacy marker parent")
+	}
+	if strings.Index(got, legacyParentCreation) >= strings.Index(got, "install -d /var/lib/crabbox") {
+		t.Fatal("generated readiness writer must safely create its marker parent before runtime-directory setup")
 	}
 }
 
@@ -710,12 +734,13 @@ func TestAWSUserDataWindowsCoreProfileSkipsDesktop(t *testing.T) {
 		}
 	}
 	setupIndex := strings.Index(got, "Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath")
+	sftpIndex := strings.Index(got, "Subsystem sftp internal-sftp")
 	restartIndex := strings.Index(got, "Restart-Service sshd -Force")
-	if setupIndex < 0 || restartIndex < 0 {
-		t.Fatalf("windows core bootstrap missing setup/restart markers")
+	if setupIndex < 0 || sftpIndex < 0 || restartIndex < 0 {
+		t.Fatalf("windows core bootstrap missing setup/SFTP/restart markers")
 	}
-	if setupIndex > restartIndex {
-		t.Fatalf("windows core bootstrap must mark setup complete before restarting sshd")
+	if setupIndex > restartIndex || sftpIndex > restartIndex {
+		t.Fatalf("windows core bootstrap must configure setup and SFTP before restarting sshd")
 	}
 	for _, notWant := range []string{
 		"tightvnc-2.8.85-gpl-setup-64bit.msi",
@@ -801,6 +826,9 @@ func TestAWSUserDataWindowsWSL2Profile(t *testing.T) {
 	if verifyIndex, importIndex := strings.LastIndex(got, "Assert-CrabboxFileSHA256 $wslRootfs"), strings.Index(got, "wsl.exe --import $wslDistro"); verifyIndex < 0 || importIndex < 0 || verifyIndex > importIndex {
 		t.Fatalf("windows WSL2 bootstrap must verify the rootfs before import")
 	}
+	if sftpIndex, readyIndex := strings.Index(got, "Subsystem sftp internal-sftp"), strings.Index(got, "crabbox-ready"); sftpIndex < 0 || readyIndex < 0 || sftpIndex > readyIndex {
+		t.Fatalf("windows WSL2 bootstrap must configure SFTP before checking WSL readiness")
+	}
 }
 
 func TestWindowsWSL2BootstrapAttemptStreamsOutput(t *testing.T) {
@@ -843,8 +871,7 @@ func TestWindowsWSL2BootstrapCompleteProbeUsesWindowsMarker(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
 	}
-	dir := t.TempDir()
-	logPath := installRecordingSSH(t, dir)
+	logPath := installSSHArgsRecorder(t)
 	bootstrapTarget := SSHTarget{
 		User:        "crabbox",
 		Host:        "127.0.0.1",
@@ -862,11 +889,10 @@ func TestWindowsWSL2BootstrapCompleteProbeUsesWindowsMarker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	commands := recordedSSHCommands(string(data))
-	if len(commands) != 1 {
-		t.Fatalf("ssh commands=%d want 1:\n%s", len(commands), data)
-	}
-	decoded := decodePowerShellCommand(t, commands[0])
+	args := strings.Split(strings.TrimSpace(string(data)), "\n")
+	assertSSHOption(t, args, "ConnectTimeout", "10")
+	assertSSHOption(t, args, "ConnectionAttempts", "3")
+	decoded := decodePowerShellCommand(t, args[len(args)-1])
 	for _, want := range []string{
 		`Test-Path -LiteralPath "C:\ProgramData\crabbox\setup-complete"`,
 		`setup-complete marker missing`,
@@ -877,6 +903,55 @@ func TestWindowsWSL2BootstrapCompleteProbeUsesWindowsMarker(t *testing.T) {
 	}
 	if strings.Contains(decoded, "wsl.exe") {
 		t.Fatalf("setup marker probe should not invoke WSL: %q", decoded)
+	}
+}
+
+func TestWindowsStableSSHProbeUsesWindowsReadinessProfile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
+	}
+	logPath := installSSHArgsRecorder(t)
+	target := SSHTarget{
+		User:           "crabbox",
+		Host:           "private.example",
+		Port:           "22",
+		TargetOS:       targetWindows,
+		WindowsMode:    windowsModeNormal,
+		SSHConfigProxy: true,
+		ProxyCommand:   "provider proxy %h %p",
+		ReadyCheck:     "true",
+	}
+	// This checks readiness options; deadline enforcement is tested separately.
+	if !probeWindowsSSHStable(t.Context(), &target, time.Now().Add(30*time.Second)) {
+		t.Fatal("stable Windows SSH probe failed with fake ssh")
+	}
+	args := readSSHArgsRecorder(t, logPath)
+	assertSSHOption(t, args, "ConnectTimeout", "10")
+	assertSSHOption(t, args, "ConnectionAttempts", "3")
+}
+
+func TestWindowsStableSSHProbeHonorsBootstrapDeadline(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
+	}
+	installSSHArgsRecorder(t)
+	t.Setenv("CRABBOX_FAKE_SSH_DELAY", "0.2")
+	target := SSHTarget{
+		User:           "crabbox",
+		Host:           "private.example",
+		Port:           "22",
+		TargetOS:       targetWindows,
+		WindowsMode:    windowsModeNormal,
+		SSHConfigProxy: true,
+		ProxyCommand:   "provider proxy %h %p",
+		ReadyCheck:     "true",
+	}
+	start := time.Now()
+	if probeWindowsSSHStable(context.Background(), &target, time.Now().Add(30*time.Millisecond)) {
+		t.Fatal("stable Windows SSH probe ignored the bootstrap deadline")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("stable probe exceeded its bootstrap deadline by too much: %s", elapsed)
 	}
 }
 

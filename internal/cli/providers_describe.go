@@ -21,6 +21,7 @@ type providerDescription struct {
 	Targets       []string                    `json:"targets"`
 	Capabilities  providerDescriptionCaps     `json:"capabilities"`
 	ClassCatalog  ProviderClassCatalog        `json:"classCatalog"`
+	SizeSelection ProviderSizeSelector        `json:"sizeSelection,omitempty"`
 	SharedFlags   []providerDescriptionFlag   `json:"sharedFlags"`
 	ProviderFlags []providerDescriptionFlag   `json:"providerFlags"`
 }
@@ -174,6 +175,9 @@ func describeProvider(requestedName string) (providerDescription, error) {
 	}
 
 	entry := providerMatrixEntryFor(provider)
+	if _, ok := provider.(NativeCheckpointProvider); ok {
+		entry.Lifecycle = append(entry.Lifecycle, "checkpoint-retirement-prepare")
+	}
 	aliases := normalizedSortedStrings(provider.Aliases())
 	inputAlias := ""
 	if requested != canonical {
@@ -203,6 +207,7 @@ func describeProvider(requestedName string) (providerDescription, error) {
 			Coordinator:  firstNonBlank(entry.Coordinator, string(CoordinatorNever)),
 		},
 		ClassCatalog:  entry.ClassCatalog,
+		SizeSelection: entry.SizeSelection,
 		SharedFlags:   shared,
 		ProviderFlags: selected,
 	}, nil
@@ -314,6 +319,9 @@ func printProviderDescription(out io.Writer, description providerDescription) {
 	fmt.Fprintf(out, "  evidence: %s\n", commaOrDash(description.Capabilities.Evidence))
 	fmt.Fprintf(out, "  lifecycle: %s\n", commaOrDash(description.Capabilities.Lifecycle))
 	fmt.Fprintf(out, "  coordinator: %s\n", description.Capabilities.Coordinator)
+	if description.SizeSelection != "" {
+		fmt.Fprintf(out, "  size selection: %s\n", description.SizeSelection)
+	}
 	printProviderDescriptionFlags(out, "Shared run flags", description.SharedFlags)
 	printProviderDescriptionFlags(out, description.Provider.Canonical+" flags", description.ProviderFlags)
 }

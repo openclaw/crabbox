@@ -323,11 +323,23 @@ install_docker() {
   fi
 }
 
+readiness_producer_path() {
+  local producer="/usr/local/libexec/crabbox/linux-readiness.generated.sh"
+  if [[ ! -x "$producer" ]]; then
+    producer="$(dirname "${BASH_SOURCE[0]}")/linux-readiness.generated.sh"
+  fi
+  if [[ ! -x "$producer" ]]; then
+    log "standalone Linux readiness producer is missing"
+    return 1
+  fi
+  printf '%s\n' "$producer"
+}
+
 prepare_fast_boot() {
+  local readiness_producer
+  readiness_producer="$(readiness_producer_path)" || return 1
   install -d -m 1777 /var/cache/crabbox /var/cache/crabbox/pnpm /var/cache/crabbox/npm /var/cache/crabbox/corepack /var/cache/crabbox/docker
-  install -d -m 0755 /var/lib/crabbox
-  printf 'crabbox-devtools-v1\n' >/var/lib/crabbox/image-ready
-  chmod 0644 /var/lib/crabbox/image-ready
+  "$readiness_producer"
   systemctl disable --now apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
   systemctl mask apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
   cloud-init clean --logs --seed 2>/dev/null || true
@@ -355,6 +367,21 @@ print_versions() {
 
 main() {
   need_root "$@"
+  local readiness_producer readiness_package_output package
+  local -a readiness_packages apt_get_base
+  readiness_producer="$(readiness_producer_path)"
+  readiness_package_output="$("$readiness_producer" --print-packages linux-builder)"
+  if [[ -z "$readiness_package_output" || "$readiness_package_output" == *$'\n'* ]]; then
+    log "invalid Linux readiness package contract"
+    return 1
+  fi
+  read -r -a readiness_packages <<<"$readiness_package_output"
+  for package in "${readiness_packages[@]}"; do
+    if [[ ! "$package" =~ ^[a-z0-9][a-z0-9+.-]*$ ]]; then
+      log "invalid Linux readiness package name"
+      return 1
+    fi
+  done
   export DEBIAN_FRONTEND=noninteractive
   install -d -m 0755 "$apt_conf_dir" "$apt_sources_dir"
   cat >"$apt_conf_dir/80-crabbox-retries" <<'APT'
@@ -363,19 +390,14 @@ Acquire::http::Timeout "30";
 Acquire::https::Timeout "30";
 APT
 
-  apt_get_base=(apt-transport-https ca-certificates curl gnupg lsb-release software-properties-common)
+  apt_get_base=(apt-transport-https gnupg lsb-release software-properties-common)
   retry apt-get update
-  apt_install "${apt_get_base[@]}"
+  apt_install "${apt_get_base[@]}" "${readiness_packages[@]}"
   add_nodesource
   add_docker_repo
   retry apt-get update
   apt_install \
-    build-essential \
-    pkg-config \
-    git \
-    git-lfs \
     gh \
-    jq \
     yq \
     ripgrep \
     fd-find \
@@ -384,14 +406,11 @@ APT
     tar \
     sed \
     findutils \
-    rsync \
     unzip \
     zip \
     shellcheck \
     shfmt \
-    python3 \
     python3-pip \
-    python3-venv \
     python3-dev \
     netcat-openbsd \
     iproute2 \

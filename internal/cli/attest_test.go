@@ -84,10 +84,188 @@ func TestAttestReceiptRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(data, &receipt); err != nil {
 		t.Fatal(err)
 	}
+	if receipt["schema_version"] != float64(attestReceiptSchemaVersion) {
+		t.Fatalf("schema_version=%v, want existing v1 success format", receipt["schema_version"])
+	}
 	for _, key := range []string{"schema_version", "generated_at", "provider", "lease_id", "slug", "run_id", "command", "exit_code", "command_ms", "actions_url", "log_sha256", "public_key", "signature"} {
 		if _, ok := receipt[key]; !ok {
 			t.Fatalf("receipt missing %s", key)
 		}
+	}
+}
+
+func TestTerminalReceiptSignsNonzeroExitAndBindsCommand(t *testing.T) {
+	setAttestTestHome(t)
+	startedAt := time.Date(2026, 8, 23, 10, 0, 0, 0, time.UTC)
+	endedAt := startedAt.Add(1500 * time.Millisecond)
+	receipt, err := buildTerminalRunReceipt("", terminalRunReceiptInput{
+		Provider:          "aws",
+		LeaseID:           "cbx_abc123",
+		Slug:              "blue-lobster",
+		RunID:             "run_42",
+		Command:           []string{"sh", "-c", "printf 'failed\n'; exit 17"},
+		CommandDisplay:    "sh -c \"printf 'failed\\n'; exit 17\"",
+		ExitCode:          17,
+		SyncMs:            250,
+		CommandMs:         1250,
+		StartedAt:         startedAt,
+		EndedAt:           endedAt,
+		LogSHA256:         sha256Digest([]byte("failed\n")),
+		RetainedLogSHA256: sha256Digest([]byte("failed\n")),
+	})
+	if err != nil {
+		t.Fatalf("build terminal receipt: %v", err)
+	}
+	if receipt.ExitCode != 17 {
+		t.Fatalf("exit_code=%d, want 17", receipt.ExitCode)
+	}
+	if receipt.CommandSHA256 != commandSHA256([]string{"sh", "-c", "printf 'failed\n'; exit 17"}) {
+		t.Fatalf("command_sha256=%q", receipt.CommandSHA256)
+	}
+	path := filepath.Join(t.TempDir(), "terminal-receipt.json")
+	if _, err := writeTerminalRunReceipt(path, receipt); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runVerify(t, path); err != nil || !strings.Contains(out, " exit=17") {
+		t.Fatalf("verify output=%q error=%v", out, err)
+	}
+	if err := verifyTerminalRunReceipt(receipt, terminalRunReceiptInput{
+		Provider:          "aws",
+		LeaseID:           "cbx_abc123",
+		Slug:              "blue-lobster",
+		RunID:             "run_42",
+		Command:           []string{"sh", "-c", "printf 'failed\n'; exit 17"},
+		ExitCode:          17,
+		SyncMs:            250,
+		CommandMs:         1250,
+		StartedAt:         startedAt,
+		EndedAt:           endedAt,
+		LogSHA256:         sha256Digest([]byte("failed\n")),
+		RetainedLogSHA256: sha256Digest([]byte("failed\n")),
+	}); err != nil {
+		t.Fatalf("verify terminal receipt: %v", err)
+	}
+}
+
+func TestTerminalReceiptRejectsBindingMismatches(t *testing.T) {
+	setAttestTestHome(t)
+	startedAt := time.Date(2026, 8, 23, 10, 0, 0, 0, time.UTC)
+	endedAt := startedAt.Add(time.Second)
+	logDigest := sha256Digest([]byte("failed\n"))
+	receipt, err := buildTerminalRunReceipt("", terminalRunReceiptInput{
+		Provider:          "aws",
+		LeaseID:           "cbx_abc123",
+		Slug:              "blue-lobster",
+		RunID:             "run_42",
+		Command:           []string{"false"},
+		CommandDisplay:    "false",
+		ExitCode:          1,
+		CommandMs:         1000,
+		StartedAt:         startedAt,
+		EndedAt:           endedAt,
+		LogSHA256:         logDigest,
+		RetainedLogSHA256: logDigest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := terminalRunReceiptInput{
+		Provider:          "aws",
+		LeaseID:           "cbx_abc123",
+		Slug:              "blue-lobster",
+		RunID:             "run_42",
+		Command:           []string{"false"},
+		ExitCode:          1,
+		CommandMs:         1000,
+		StartedAt:         startedAt,
+		EndedAt:           endedAt,
+		LogSHA256:         logDigest,
+		RetainedLogSHA256: logDigest,
+	}
+	tests := map[string]func(*terminalRunReceiptInput){
+		"provider":  func(binding *terminalRunReceiptInput) { binding.Provider = "gcp" },
+		"lease":     func(binding *terminalRunReceiptInput) { binding.LeaseID = "cbx_other" },
+		"no lease":  func(binding *terminalRunReceiptInput) { binding.LeaseID = "" },
+		"no slug":   func(binding *terminalRunReceiptInput) { binding.Slug = "" },
+		"run":       func(binding *terminalRunReceiptInput) { binding.RunID = "run_other" },
+		"command":   func(binding *terminalRunReceiptInput) { binding.Command = []string{"true"} },
+		"log":       func(binding *terminalRunReceiptInput) { binding.LogSHA256 = sha256Digest([]byte("other")) },
+		"exit_code": func(binding *terminalRunReceiptInput) { binding.ExitCode = 0 },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			binding := base
+			mutate(&binding)
+			if err := verifyTerminalRunReceipt(receipt, binding); err == nil {
+				t.Fatal("mismatched binding verified")
+			}
+		})
+	}
+}
+
+func TestTerminalReceiptBoundsLongCommandDisplayWithoutLosingArgvBinding(t *testing.T) {
+	setAttestTestHome(t)
+	startedAt := time.Date(2026, 8, 23, 10, 0, 0, 0, time.UTC)
+	command := []string{"printf", strings.Repeat("x", maxTerminalReceiptFieldBytes+1)}
+	receipt, err := buildTerminalRunReceipt("", terminalRunReceiptInput{
+		Provider:          "aws",
+		LeaseID:           "cbx_abc123",
+		Slug:              "blue-lobster",
+		RunID:             "run_42",
+		Command:           command,
+		CommandDisplay:    strings.Repeat("x", maxTerminalReceiptFieldBytes+1),
+		ExitCode:          1,
+		CommandMs:         1000,
+		StartedAt:         startedAt,
+		EndedAt:           startedAt.Add(time.Second),
+		LogSHA256:         sha256Digest(nil),
+		RetainedLogSHA256: sha256Digest(nil),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(receipt.Command) > maxTerminalReceiptFieldBytes {
+		t.Fatalf("command display bytes=%d", len(receipt.Command))
+	}
+	if receipt.CommandSHA256 != commandSHA256(command) {
+		t.Fatalf("command_sha256=%q", receipt.CommandSHA256)
+	}
+	if !strings.Contains(receipt.Command, receipt.CommandSHA256) {
+		t.Fatalf("bounded command display does not name exact digest: %q", receipt.Command)
+	}
+}
+
+func TestTerminalReceiptCrossLanguageGolden(t *testing.T) {
+	receipt := terminalRunReceipt{
+		SchemaVersion:     2,
+		ReceiptType:       "terminal",
+		StartedAt:         "2026-08-23T10:00:00Z",
+		EndedAt:           "2026-08-23T10:00:01Z",
+		Provider:          "aws",
+		LeaseID:           "cbx_abc123",
+		Slug:              "blue-lobster",
+		RunID:             "run_123",
+		Command:           "sh -c \"printf '<ok>\\n'; exit 17\"",
+		CommandSHA256:     "sha256:5bcb64bd81339235f6b76ab37c6f4e5febc1b787fcaf4e27783410b477c8ed5c",
+		ExitCode:          17,
+		SyncMs:            100,
+		CommandMs:         900,
+		DurationMs:        1000,
+		LogSHA256:         "sha256:6da5b18878e110928643ebcc38dbb7552cf3a296eea56493e23edc2b93eecff8",
+		RetainedLogSHA256: "sha256:6da5b18878e110928643ebcc38dbb7552cf3a296eea56493e23edc2b93eecff8",
+		PublicKey:         "A6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+		Signer:            "sha256:56475aa75463474c0285df5dbf2bcab73da651358839e9b77481b2eab107708c",
+	}
+	seed, err := base64.StdEncoding.DecodeString("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(ed25519.NewKeyFromSeed(seed), terminalReceiptSigningBytes(receipt)))
+	if receipt.Signature != "3N80Q2zyXRS0g3V3phmRmegGwIkO6n9eiXXO+d36LKbfbAl7FDTAupodcy76YKk7WD5voQk9R5a9prqjNmxKDg==" {
+		t.Fatalf("signature=%q", receipt.Signature)
+	}
+	if err := verifyTerminalRunReceiptSignature(receipt); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -393,6 +571,33 @@ func TestDelegatedRunReceiptOmitsMissingLeaseID(t *testing.T) {
 	}
 	if !strings.HasPrefix(out, "PASS ") {
 		t.Fatalf("unexpected verify output: %q", out)
+	}
+}
+
+func TestDelegatedRunReceiptRecordsNonzeroExit(t *testing.T) {
+	setAttestTestHome(t)
+	path := filepath.Join(t.TempDir(), "receipt.json")
+	if _, err := writeDelegatedRunReceipt(path, "", Config{Provider: "e2b"}, RunResult{
+		Provider:    "e2b",
+		CommandText: "pnpm test",
+		ExitCode:    17,
+		Command:     1500 * time.Millisecond,
+	}, RunRequest{Command: []string{"pnpm", "test"}}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receipt map[string]any
+	if err := json.Unmarshal(data, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if receipt["exit_code"] != float64(17) {
+		t.Fatalf("exit_code=%v, want 17", receipt["exit_code"])
+	}
+	if out, err := runVerify(t, path); err != nil || !strings.HasPrefix(out, "PASS ") {
+		t.Fatalf("verify output=%q error=%v", out, err)
 	}
 }
 

@@ -2829,6 +2829,91 @@ test("RunPod live smoke dispatches to the provider-specific script", () => {
   );
 });
 
+test("boxd live smoke requires an interactive session without API-key fallback", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-boxd-no-key-"));
+  const marker = path.join(dir, "vendor-cli-ran");
+  writeExecutable(path.join(dir, "boxd"), `#!/bin/sh\ntouch ${marker}\nexit 99\n`);
+  const result = spawnSync("bash", [path.join(repoRoot, "scripts/live-smoke.sh")], {
+    cwd: repoRoot,
+    env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, CRABBOX_CONFIG: path.join(dir, "missing.yaml"),
+      CRABBOX_BOXD_TOKEN: "", BOXD_TOKEN: "", BOXD_API_KEY: "bxd_fixture-key", CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0", CRABBOX_LIVE_PROVIDERS: "boxd", CRABBOX_LIVE_REPO: dir },
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.match(result.stderr, /set BOXD_TOKEN or CRABBOX_BOXD_TOKEN/);
+  assert.equal(fs.existsSync(marker), false);
+});
+
+for (const failure of [false, true]) {
+  test(`boxd live smoke verifies independent inventory on ${failure ? "failure" : "success"}`, () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-boxd-api-"));
+    const calls = path.join(dir, "calls.log");
+    writeExecutable(path.join(dir, "python3"), `#!/usr/bin/env bash
+printf 'inventory:%s\\n' "$2" >> '${calls}'
+[[ "$2" == snapshot ]] && printf '{"machines":[]}\\n'
+exit 0
+`);
+    writeExecutable(path.join(dir, "crabbox"), `#!/usr/bin/env bash
+printf 'crabbox:%s api=%s org=%s\\n' "$*" "$CRABBOX_BOXD_API_URL" "$CRABBOX_BOXD_ORG" >> '${calls}'
+case "$1" in
+warmup) printf 'lease=cbx_123456789abc slug=boxd-smoke\\n' ;;
+inspect) printf '{}\\n' ;;
+run) [[ "$*" == *'exit 37'* ]] && exit 37; ${failure ? "exit 19" : "exit 0"} ;;
+esac
+exit 0
+`);
+    const result = spawnSync("bash", [path.join(repoRoot, "scripts/live-smoke.sh")], {
+      cwd: repoRoot,
+      env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, CRABBOX_BIN: path.join(dir, "crabbox"),
+        CRABBOX_CONFIG: path.join(dir, "missing.yaml"), CRABBOX_BOXD_TOKEN: "fixture-session", BOXD_TOKEN: "",
+        CRABBOX_BOXD_API_URL: "", CRABBOX_BOXD_ORG: "", CRABBOX_LIVE: "1", CRABBOX_LIVE_COORDINATOR: "0",
+        CRABBOX_LIVE_PROVIDERS: "boxd", CRABBOX_LIVE_REPO: dir },
+      encoding: "utf8",
+    });
+    assert.equal(result.status, failure ? 19 : 0, result.stdout + result.stderr);
+    const seen = fs.readFileSync(calls, "utf8");
+    assert.match(seen, /inventory:snapshot/);
+    assert.match(seen, /inventory:verify/);
+    assert.match(seen, /crabbox:stop cbx_123456789abc /);
+    assert.doesNotMatch(seen, /crabbox:stop boxd-smoke/);
+    assert.match(seen, /api=https:\/\/app\.boxd\.sh org=/);
+    assert.doesNotMatch(seen + result.stdout + result.stderr, /fixture-session/);
+    if (!failure) assert.match(seen, /exit 37/);
+  });
+}
+
+test("boxd live smoke does not delete a preexisting slug after failed acquisition", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-boxd-collision-"));
+  const calls = path.join(dir, "calls.log");
+  writeExecutable(path.join(dir, "python3"), `#!/usr/bin/env bash
+printf 'inventory:%s\\n' "$2" >> '${calls}'
+[[ "$2" == snapshot ]] && printf '{"machines":[{"id":"existing","name":"preexisting"}]}\\n'
+exit 0
+`);
+  writeExecutable(path.join(dir, "crabbox"), `#!/usr/bin/env bash
+printf 'crabbox:%s\\n' "$*" >> '${calls}'
+if [[ "$1" == warmup ]]; then
+  printf 'slug is already claimed\\n' >&2
+  exit 4
+fi
+exit 0
+`);
+  const result = spawnSync("bash", [path.join(repoRoot, "scripts/live-smoke.sh")], {
+    cwd: repoRoot,
+    env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, CRABBOX_BIN: path.join(dir, "crabbox"),
+      CRABBOX_CONFIG: path.join(dir, "missing.yaml"), CRABBOX_BOXD_TOKEN: "fixture-session", BOXD_TOKEN: "",
+      CRABBOX_BOXD_API_URL: "", CRABBOX_BOXD_ORG: "", CRABBOX_LIVE: "1", CRABBOX_LIVE_COORDINATOR: "0",
+      CRABBOX_LIVE_PROVIDERS: "boxd", CRABBOX_LIVE_REPO: dir, CRABBOX_LIVE_BOXD_SLUG: "preexisting" },
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  const seen = fs.readFileSync(calls, "utf8");
+  assert.match(seen, /warmup --keep=false --slug preexisting/);
+  assert.match(seen, /inventory:verify/);
+  assert.doesNotMatch(seen, /crabbox:stop/);
+});
+
 test("vultr live smoke dispatches to the provider-specific smoke", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-vultr-dispatch-"));
   const bin = path.join(dir, "bin");
@@ -4424,4 +4509,21 @@ exit 99
   assert.match(result.stderr, /must use HTTPS/);
   const calls = fs.existsSync(curlLog) ? fs.readFileSync(curlLog, "utf8") : "";
   assert.equal(calls, "");
+});
+
+test("boxd live smoke rejects raw API keys before inventory or vendor CLI", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-boxd-raw-key-"));
+  const marker = path.join(dir, "unexpected-auth");
+  for (const name of ["python3", "boxd"]) writeExecutable(path.join(dir, name), `#!/bin/sh\ntouch '${marker}'\nexit 99\n`);
+  const result = spawnSync("bash", [path.join(repoRoot, "scripts/live-smoke.sh")], {
+    cwd: repoRoot,
+    env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, CRABBOX_CONFIG: path.join(dir, "missing.yaml"),
+      CRABBOX_BOXD_TOKEN: "bxd_fixture-never-log", BOXD_TOKEN: "unused-fixture-session", CRABBOX_LIVE: "1",
+      CRABBOX_LIVE_COORDINATOR: "0", CRABBOX_LIVE_PROVIDERS: "boxd", CRABBOX_LIVE_REPO: dir },
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 2, result.stdout + result.stderr);
+  assert.match(result.stderr, /require an interactive session/);
+  assert.doesNotMatch(result.stdout + result.stderr, /bxd_fixture-never-log/);
+  assert.equal(fs.existsSync(marker), false);
 });

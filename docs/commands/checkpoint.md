@@ -21,8 +21,8 @@ Subcommands: `create`, `list`, `inspect`, `policy`, `restore`, `fork`, `delete`,
 tools, caches, services. Stored in the provider account, so it incurs provider
 storage costs. Recorded as one of `aws-ami`, `aws-ebs-snapshot`,
 `azure-managed-image`, `azure-os-disk-snapshot`, `gcp-machine-image`,
-`gcp-disk-snapshot`, `hetzner-snapshot`, `machine0-image`, or
-`parallels-snapshot`.
+`gcp-disk-snapshot`, `hetzner-snapshot`, `machine0-image`,
+`parallels-snapshot`, or `daytona-snapshot`.
 
 **Archive (workspace tarball)** — captures only the contents of the remote
 workdir as `workspace.tar.gz`. Portable across any POSIX SSH lease, but it does
@@ -84,6 +84,9 @@ crabbox checkpoint create --provider aws --id swift-crab --mode native
 # Direct Hetzner lease: create a project snapshot
 crabbox checkpoint create --provider hetzner --id swift-crab --mode native
 
+# Direct Daytona lease: stop, capture filesystem state, and restart the source
+crabbox checkpoint create --provider daytona --id swift-crab --mode native --no-reboot=false
+
 # Machine0 named image; draft readiness requires snapshotStatus=READY
 crabbox checkpoint create --provider machine0 --id swift-crab \
   --mode native --strategy image --name ci-baseline
@@ -94,6 +97,10 @@ crabbox checkpoint create --provider azure --target windows --id swift-crab \
 
 # Archive a custom workdir
 crabbox checkpoint create --id swift-crab --workdir /work/cbx_123/my-app
+
+# Return the complete checkpoint record for orchestration
+crabbox checkpoint create --id swift-crab --mode native --json
+# {"id":"chk_abc123","kind":"aws-ebs-snapshot","leaseId":"cbx_abcdef123456","workdir":"/work/cbx_abcdef123456/my-app","native":{"imageId":"snap-0123456789abcdef0","state":"available"}}
 ```
 
 **Flags**
@@ -117,7 +124,14 @@ crabbox checkpoint create --id swift-crab --workdir /work/cbx_123/my-app
 --expire-unused-after <duration>
                             Opt into coordinator-managed unused expiry; only
                             supported for brokered native AWS/Azure/GCP checkpoints.
+                            Cannot be combined with source retirement.
+--json                      Print the complete checkpoint record as one JSON
+                            object instead of the human-readable summary.
 --reclaim                   Claim this lease for the current repo.
+--checkpoint-id <id>        Stable caller-owned operation ID; requires retirement.
+--retire-source             Replayable capture followed by verified source release.
+--prepare-only              Read-only retirement eligibility; no capture reservation.
+--discard-failed            Explicitly discard a verified failed capture and retire.
 ```
 
 `--mode` also accepts the aliases `provider-native`/`vm` (native),
@@ -162,6 +176,96 @@ Before a native snapshot, Crabbox cleans the source: on Linux it runs
 `cloud-init clean --logs` (so a forked box regenerates SSH host keys) and
 `sync` to flush filesystem writes.
 
+### Replayable source retirement
+
+Before scrubbing a source, check `providers describe <provider> --json` for
+`checkpoint-retirement-prepare` in `capabilities.lifecycle`. An older binary
+without this capability cannot admit retirement; leave the source on its
+ordinary release path. Then invoke the command below with `--prepare-only`.
+Its JSON receipt binds `id`, `leaseId`, `provider`, `sourceId`, and
+`sourceDisposition: "retire"` to `admission: "ready"` or `"unsupported"`
+(with a `reason`). A known policy or strategy refusal writes no checkpoint
+journal or claim binding and leaves ordinary release usable. An error, malformed
+response, existing operation, or historical hold is not such a refusal.
+
+Preparation is a read-only eligibility observation, not a reservation or
+transferable authorization. Actual creation rechecks the current source and
+claim before binding them. Persist the ID and scrub/capture phase before their
+effects; never treat a later create error as proof that capture was not submitted.
+Admission uses ordinary native-mode strategy selection: direct AWS Linux uses
+an AMI for default/auto, while local-container uses Docker commit. That selection
+retains its implicitness across replay; explicit strategies retain their provider
+restrictions.
+
+An orchestrator retiring a source can supply its own stable checkpoint ID:
+
+```sh
+crabbox checkpoint create --provider machine0 --id cbx_abcdef012345 \
+  --checkpoint-id chk_0123456789abcdef --retire-source --mode native \
+  --wait=false --json
+```
+
+Retirement uses the lease's canonical repository workspace. It requires
+`--mode native` and `--wait=false` and rejects `--workdir`, `--name`, `--reclaim`,
+and `--recipe-only`; those options belong to ordinary checkpoint creation.
+
+Persist that ID before invoking Crabbox. Replay the same command after a
+pending result, transport failure, or process interruption; never generate a
+replacement ID because a response was lost. The returned record includes
+`capture.sourceDisposition: "retire"` and a `capture.phase`. Only `retired`
+proves source retirement. `prepared`, `stopping`, `submitting`, `pending`,
+`ready`, and `retiring` require another bounded replay. `failed` holds the
+source and image for explicit recovery. A stopped VM is not a retired VM.
+After inspecting a terminal failure, add `--discard-failed` to that same
+command to delete its exact failed image, verify image absence, and complete
+the requested source retirement. The returned `capture.discardFailed: true`
+means there is no reusable image, and that checkpoint cannot be forked even
+after retirement completes. An ambiguous submission cannot be discarded through
+this flag; it remains held until its provider identity is reconciled.
+
+The operation binds the source resource, repository, and claim generation
+before effects. Checkpoint and claim locks serialize cooperating owners;
+unknown or replaced sources are never adopted. Machine0 reconciles an
+ambiguous save against the original operation and exact image version. It records
+the authenticated account before stopping the source and checks that account
+before accepting source absence or retiring the claim. Changing accounts causes
+a refusal; already-started captures without an account binding remain held for
+recovery. Keep the native account and API endpoint stable throughout each
+command; separate native invocations cannot make credential changes atomic. Other
+supported native providers (AWS, local-container, and brokered Azure
+disk/GCP checkpoints) retain an ambiguous submission without resaving
+when no provider recovery identity was returned. No background worker is
+started. Ordinary checkpoint creation retains its existing restore-source
+behavior; source retirement is explicit and does not restart a source merely
+to delete it. A configured Machine0 `suspend` release policy is incompatible
+with `--retire-source`, not silently changed to destruction. Hetzner ordinary
+snapshots remain supported, but source retirement is refused before admission:
+its project-scoped API cannot attest the original project after a token change.
+Existing unfinished Hetzner retirements remain held for operator recovery.
+
+A provider may retain the released source's immutable identity in a terminal
+cleanup receipt. Retirement replay preserves that receipt and revalidates it
+through the provider's current account, region, identity, and inventory checks
+before marking the operation retired.
+
+Unresolved operations cannot be forked, pruned, or deleted locally. Historical
+native records with missing image references are also held: a blank reference
+does not prove that submission never happened. Inspect and reconcile the
+original provider operation before removing any ownership evidence.
+
+Older binaries do not understand these operation holds. Before downgrading,
+stop new capture admission and finish all operations with this binary; do not
+run older capture, release, or cleanup commands against unresolved records.
+Retain the candidate and its state if an ambiguous operation cannot be
+resolved. This is an operational rollback boundary, not transparent downgrade
+support.
+
+An older writer can erase a checkpoint record or release a held source because
+it ignores the added fields. If it already ran, stop that writer, preserve all
+remaining records, and restore the checkpoint journal before resuming with the
+new binary. A surviving claim binding prevents recapture after a missing
+journal; it cannot undo a source deletion performed by an older binary.
+
 ## list and inspect
 
 ```sh
@@ -173,6 +277,7 @@ crabbox checkpoint list --local-only
 crabbox checkpoint inspect chk_abc123
 crabbox checkpoint inspect chk_abc123 --json
 crabbox checkpoint inspect chk_abc123 --verify
+crabbox checkpoint inspect chk_abc123 --verify --json
 ```
 
 `list` merges owner-scoped coordinator checkpoints with local records and
@@ -190,6 +295,18 @@ checkpoint id/name/kind, source lease/provider/region, repo name and git head,
 workdir, creation and last-use times, and — for native checkpoints — the
 provider resource id; for archives, the tarball path and size.
 
+If optional inventory refresh cannot load configuration or reach the coordinator,
+times out, or receives HTTP 5xx, `list` warns and returns the unchanged local
+inventory. That view can be incomplete and cached remote state is unverified.
+Authorization failures, malformed inventory responses, and invalid coordinator
+URLs remain errors. Corrupt published local records remain errors unless the
+matching authoritative managed record can be recovered.
+
+If creation was interrupted before the first coordinator response, the local
+journal does not yet have the coordinator's creation identity. Run `inspect` or
+`list` to refresh it before deletion. An older authoritative cache with a
+different creation identity remains a conflict, even before image publication.
+
 Managed cache ownership includes the coordinator's complete normalized base
 URL, including its deployment path: coordinators served from `/team-a` and
 `/team-b` on the same host remain separate authorities.
@@ -203,6 +320,18 @@ URL, including its deployment path: coordinators served from `/team-a` and
 still exists; for native checkpoints it asks the provider (directly for AWS and
 Hetzner, or via the coordinator) whether the snapshot or image is still present. JSON output
 includes `localState`, `providerState`, and `nextAction`.
+
+An existing native record with a missing provider resource reports
+`localState: "metadata_available"`, `providerState: "missing"`, and
+`nextAction: "delete_local"`. If the local checkpoint record itself is missing,
+JSON inspection succeeds and instead returns a terminal verdict that callers
+can use to remove their own reference:
+
+```json
+{"id":"chk_abc123","localState":"missing","providerState":"missing","nextAction":"forget"}
+```
+
+Human-readable inspection still reports a missing checkpoint as an error.
 
 ### Parallels: live VM snapshots
 
@@ -282,11 +411,22 @@ crabbox checkpoint fork chk_abc123 --class beast
 # Request a friendly slug for the forked lease
 crabbox checkpoint fork chk_abc123 --slug update-flow-smoke
 
+# Request a deterministic lease ID; replay adopts the same existing lease
+crabbox checkpoint fork chk_abc123 --lease-id cbx_abcdef123456 --slug update-flow
+
+# Return machine-readable lease details for one fork
+crabbox checkpoint fork chk_abc123 --lease-id cbx_abcdef123456 --json
+# {"checkpointId":"chk_abc123","leaseId":"cbx_abcdef123456","slug":"purple-whale","provider":"aws","workdir":"/work/cbx_abcdef123456/my-app"}
+
 # Fan out one checkpoint into several forked leases for parallel attempts
 crabbox checkpoint fork chk_abc123 --count 3 --slug update-flow
 # checkpoint forked id=chk_abc123 lease=cbx_... slug=update-flow-1 ...
 # checkpoint forked id=chk_abc123 lease=cbx_... slug=update-flow-2 ...
 # checkpoint forked id=chk_abc123 lease=cbx_... slug=update-flow-3 ...
+
+# Return machine-readable details for several forked leases as a JSON array
+crabbox checkpoint fork chk_abc123 --count 2 --slug update-flow --json
+# [{"checkpointId":"chk_abc123","leaseId":"cbx_abcdef123456","slug":"update-flow-1","provider":"aws","workdir":"/work/cbx_abcdef123456/my-app"},{"checkpointId":"chk_abc123","leaseId":"cbx_abcdef123457","slug":"update-flow-2","provider":"aws","workdir":"/work/cbx_abcdef123457/my-app"}]
 
 # Fan out one checkpoint and run the same command on each fork
 crabbox checkpoint fork chk_abc123 --count 3 --slug update-flow -- pnpm test -- --shard '{{index}}/{{total}}'
@@ -304,6 +444,12 @@ crabbox checkpoint fork --provider parallels --parallels-template ubuntu-fast --
 ```
 --keep            Keep the forked lease running (default true).
 --count <n>       Create multiple forked leases (default 1).
+--lease-id <id>   Fixed cbx_<12 lowercase hex characters> lease ID for
+                  idempotent external-provider orchestration; native checkpoints
+                  only; incompatible with --keep=false, fan-out, --workdir,
+                  and commands after --.
+--json            Print one fork as a JSON object or multiple forks as a JSON
+                  array; incompatible with --dry-run.
 --id <vm>         Parallels source VM when forking from --snapshot.
 --snapshot <name> Parallels snapshot name or id for a direct fork.
 --clear           Clear the workdir before restoring an archive (default true).
@@ -332,6 +478,26 @@ crabbox checkpoint fork --provider parallels --parallels-template ubuntu-fast --
 - *Fan-out:* `--count <n>` repeats the same provider-neutral fork flow. When
   combined with `--slug`, Crabbox appends a stable numeric suffix such as
   `update-flow-1`, `update-flow-2`, and `update-flow-3`.
+- *Fixed lease IDs:* `--lease-id` reuses the provider's existing fixed-ID
+  acquisition and binds the exact native checkpoint ID to its durable create
+  intent. Replaying the same checkpoint adopts the existing lease; a different
+  checkpoint, changed create intent, ambiguous resources, or a released lease
+  ID fails without allocating a replacement. A later fork failure preserves the
+  known fixed-ID lease for recovery instead of deleting adopted work. Direct
+  AWS, Machine0, and local-container backends support this checkpoint-bound
+  contract. Archive checkpoints, direct Hetzner, direct Parallels snapshots,
+  coordinator-backed leases, and external providers reject fixed checkpoint
+  forks. Fixed IDs must remain retained and cannot fan out, override the
+  deterministic workdir, or run commands following `--`.
+- *JSON output:* one fork prints one JSON object; `--count` greater than one
+  prints one JSON array. Every object contains `checkpointId`, `leaseId`,
+  `slug`, `provider`, and `workdir`. Native Windows desktop forks preserve their
+  filesystem in place and report an empty `workdir`. Direct Parallels snapshot
+  forks have no local checkpoint record, so both their `checkpointId` and
+  `workdir` are empty.
+  If a later fork or command fails, JSON still reports every lease already
+  acquired before the nonzero exit so orchestrators can recover or clean up.
+  Provider progress and commands following `--` write to stderr in JSON mode.
 - *Command fan-out:* arguments after `--` run through `crabbox run --id <lease>`
   on each fork, so normal sync, command wrapping, history, and proof behavior are
   preserved. Use `{{index}}`, `{{total}}`, `{{lease}}`, and `{{slug}}` in command
@@ -376,12 +542,28 @@ the generic image endpoint. Active use claims, promoted-image catalog pins,
 pending deletion, provider errors, and ambiguous deletion retain coordinator
 ownership and the local recovery cache. Only confirmed provider deletion and
 durable finalization permit local-cache removal.
+Deletion is idempotent: if the local checkpoint is already absent and no
+coordinator is configured (or the coordinator also confirms absence), it
+succeeds and prints `checkpoint absent id=chk_abc123`. If the coordinator
+confirms that a recorded provider resource is already gone, Crabbox removes the
+remaining local record and succeeds. Other provider or authorization failures
+still preserve the local record.
 
 Machine0 whole-image deletion is additionally fenced against later versions.
 Even when the checkpoint originally created the image name, Crabbox refuses
 `images rm` unless the exact metadata-bound version is still the image's only
 version. Resolve extra versions manually so checkpoint deletion cannot erase
 unrelated work.
+
+If a Machine0 image exists but its recorded version is missing before deletion,
+Crabbox refuses with exit 4 and keeps local metadata for manual reconciliation.
+After an admitted version removal, the same invocation may confirm that exact
+version is gone; whole-image removal must confirm the whole image is gone.
+An empty version list alone does not prove whole-image deletion.
+
+Delete and prune return exit 2 (`busy`) while another operation owns the
+checkpoint lock. They leave resources and metadata unchanged; retry explicitly
+after that operation, including any source rollback, finishes.
 
 **Flags**
 
@@ -395,8 +577,8 @@ unrelated work.
                   prefixed with `crabbox-`.
 ```
 
-Use `--local-only` only when the provider resource was already removed outside
-Crabbox (manual cleanup, account migration, and so on).
+Use `--local-only` when provider access cannot confirm safe resource deletion,
+such as after account migration or an ownership ambiguity.
 
 ## prune
 
@@ -449,6 +631,7 @@ See [Checkpoints](../features/checkpoints.md#lifecycle-and-expiry).
 | Azure Windows (`windows.mode=normal`) | Managed OS-disk snapshot (`--no-reboot=false`) | not supported |
 | GCP Linux | Persistent-disk snapshot | Machine image |
 | Hetzner Linux (direct only) | Project snapshot | not supported |
+| Daytona Linux (direct only) | Filesystem snapshot (`--no-reboot=false` for a running source) | Same filesystem snapshot |
 | Parallels | VM snapshot | — |
 
 Brokered native checkpoints (through a configured coordinator) cover AWS
@@ -461,6 +644,14 @@ snapshots run directly against the Parallels host.
 Direct Hetzner Linux leases create project snapshots with `--mode native` or an
 explicit disk-snapshot strategy; default auto mode retains the archive fallback.
 Brokered Hetzner leases always use archive checkpoints.
+
+Direct Daytona native snapshots require `--mode native` or an explicit strategy.
+Capture requires a stopped source and waits for snapshot readiness even with
+`--wait=false`; running sources require `--no-reboot=false` and are restarted
+after capture. Already-stopped sources remain stopped. Fork starts a new sandbox
+from the snapshot and relocates the workspace; native in-place restore and
+memory capture are not supported. See [Daytona](../providers/daytona.md#native-snapshots-and-forks)
+for ownership checks and recovery after an uncertain capture.
 
 **Archive checkpoints**
 

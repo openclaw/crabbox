@@ -43,7 +43,13 @@ What cleanup does depends on the selected provider:
 - **`namespace-devbox`** removes only Crabbox-owned local Namespace SSH files;
   it does not delete remote Devboxes.
 - **`namespace-instance`** destroys only Namespace Compute instances carrying
-  Crabbox ownership labels and removes claims for instances already gone.
+  Crabbox ownership labels and an exact local claim for the same instance,
+  tenant, and configured scope; labeled but unclaimed instances are skipped.
+  Claims for instances already gone are removed.
+- **`xcp-ng`** deletes eligible VMs only when an exact local claim matches the
+  normalized pool endpoint, account, lease, slug, and immutable VM UUID.
+  Labeled but unclaimed or wrong-pool VMs are skipped, and failed deletion
+  preserves the claim for a safe retry.
 - **`vercel-sandbox`** sweeps only local `vsbx_...` claims in the configured
   project/team/scope. It deletes idle-expired Crabbox-owned Vercel Sandboxes and
   keeps missing-or-inaccessible claims unless

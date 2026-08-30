@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -28,6 +29,12 @@ type fakeWorkspaceOwnerRemote struct {
 	ambiguousRelease bool
 	blockBusyAcquire bool
 	changed          chan struct{}
+}
+
+type workspaceOwnerTransportFunc func(context.Context, workspaceOwnerRemoteRequest) (string, error)
+
+func (f workspaceOwnerTransportFunc) Do(ctx context.Context, req workspaceOwnerRemoteRequest) (string, error) {
+	return f(ctx, req)
 }
 
 func newFakeWorkspaceOwnerRemote() *fakeWorkspaceOwnerRemote {
@@ -474,7 +481,7 @@ func TestWorkspaceOwnerProtocolGeneration(t *testing.T) {
 		t.Fatalf("POSIX child witness must use the portable launcher: %q", posixWitnessTransport[:min(len(posixWitnessTransport), 80)])
 	}
 	posixWitness := remoteWorkspaceOwnerPOSIXWitnessScript(key, token, "printf ok")
-	for _, want := range []string{"child_identity=$(ps -o lstart=", "owner_expiry=$(sed -n", "owner_expiry", "date +%s", "mv \"$child_tmp\" \"$child\"", "touch \"$start\"", "wait \"$child_pid\"", "rm -f \"$child\""} {
+	for _, want := range []string{"child_identity=$(ps -o lstart=", "owner_expiry=$(sed -n", "owner_expiry", "date +%s", "mv \"$child_tmp\" \"$child\"", "rm -f \"$child\""} {
 		if !strings.Contains(posixWitness, want) {
 			t.Fatalf("POSIX child witness missing %q:\n%s", want, posixWitness)
 		}
@@ -529,11 +536,49 @@ if [ -f "$log_dir/count" ]; then read count < "$log_dir/count"; fi
 count=$((count + 1))
 printf '%s' "$count" > "$log_dir/count"
 command=
-for arg do command=$arg; done
+port=
+previous=
+for arg do
+  if [ "$previous" = "-p" ]; then port=$arg; fi
+  previous=$arg
+  command=$arg
+done
 printf '%s' "$command" > "$log_dir/$count.command"
+printf '%s\n' "$@" > "$log_dir/$count.args"
+if [ -n "${CRABBOX_OWNER_SSH_REAL_PORT:-}" ] && [ "$port" = "$CRABBOX_OWNER_SSH_REAL_PORT" ]; then
+  : > "$log_dir/$count.stdin"
+  exec "$CRABBOX_OWNER_SSH_REAL_EXECUTABLE" -F /dev/null "$@"
+fi
+if [ "$command" = "exit 0" ] && [ "${CRABBOX_OWNER_SSH_FAIL_PROBES:-}" = 1 ]; then
+  : > "$log_dir/$count.stdin"
+  printf 'probe-%s %s\n' "$port" "${CRABBOX_OWNER_SSH_PROBE_SECRET:-}" >&2
+  exit 255
+fi
+if [ "$command" != "exit 0" ] && [ "${CRABBOX_OWNER_SSH_DELIVERY_255:-}" = partial ]; then
+  /bin/dd bs=1 count=1 > "$log_dir/$count.stdin" 2>/dev/null
+  exit 255
+fi
 /bin/cat > "$log_dir/$count.stdin"
-if [ "${CRABBOX_OWNER_SSH_RETRY_CALL:-}" = "$count" ]; then printf 'failed port diagnostic\n' >&2; exit 255; fi
-if [ "${CRABBOX_OWNER_SSH_FAIL_CALL:-}" = "$count" ]; then exit 7; fi
+if [ "$command" != "exit 0" ] && [ "${CRABBOX_OWNER_SSH_FAIL_FIRST_DELIVERY:-}" = 1 ] &&
+   [ ! -e "$log_dir/failed-delivery" ]; then
+  : > "$log_dir/failed-delivery"
+  exit "${CRABBOX_OWNER_SSH_FAIL_CODE:-7}"
+fi
+if [ "${CRABBOX_OWNER_SSH_RETRY_CALL:-}" = "$count" ]; then
+  printf '%s' "${CRABBOX_OWNER_SSH_RETRY_STDOUT:-}"
+  printf '%s' "${CRABBOX_OWNER_SSH_RETRY_STDERR:-failed port diagnostic}" >&2
+  exit 255
+fi
+if [ "${CRABBOX_OWNER_SSH_FAIL_CALL:-}" = "$count" ]; then
+  printf '%s' "${CRABBOX_OWNER_SSH_FAIL_STDOUT:-}"
+  printf '%s' "${CRABBOX_OWNER_SSH_FAIL_STDERR:-}" >&2
+  exit "${CRABBOX_OWNER_SSH_FAIL_CODE:-7}"
+fi
+if [ "$command" != "exit 0" ] && [ "${CRABBOX_OWNER_SSH_DELIVERY_255:-}" = full ]; then
+  exit 255
+fi
+printf '%s' "${CRABBOX_OWNER_SSH_SUCCESS_STDERR:-}" >&2
+if [ -n "${CRABBOX_OWNER_SSH_SUCCESS_STDOUT:-}" ]; then printf '%s' "$CRABBOX_OWNER_SSH_SUCCESS_STDOUT"; exit 0; fi
 if /usr/bin/grep -Fq "\$action = 'acquire'" "$log_dir/$count.stdin"; then printf ACQUIRED; fi
 if /usr/bin/grep -Fq "\$action = 'renew'" "$log_dir/$count.stdin"; then printf RENEWED; fi
 if /usr/bin/grep -Fq "\$action = 'inspect'" "$log_dir/$count.stdin"; then printf OWNED; fi
@@ -558,6 +603,269 @@ func readWorkspaceOwnerSSHCall(t *testing.T, dir string, index int) (string, str
 		t.Fatal(err)
 	}
 	return string(command), string(input)
+}
+
+func requireWorkspaceOwnerSSHNoMux(t *testing.T, dir string, index int) {
+	t.Helper()
+	args, err := os.ReadFile(filepath.Join(dir, strconv.Itoa(index)+".args"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(args)
+	for _, want := range []string{"ControlMaster=no", "ControlPath=none", "ControlPersist=no"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("SSH call %d missing %q in %q", index, want, text)
+		}
+	}
+	for _, unwanted := range []string{"ControlMaster=auto", "ControlPersist=10m"} {
+		if strings.Contains(text, unwanted) {
+			t.Fatalf("SSH call %d retained %q in %q", index, unwanted, text)
+		}
+	}
+}
+
+func requireWorkspaceOwnerSSHOptions(t *testing.T, dir string, index int, connectTimeout, connectionAttempts string) {
+	t.Helper()
+	args, err := os.ReadFile(filepath.Join(dir, strconv.Itoa(index)+".args"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(args)
+	for _, want := range []string{"ConnectTimeout=" + connectTimeout, "ConnectionAttempts=" + connectionAttempts} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("SSH call %d missing %q in %q", index, want, text)
+		}
+	}
+}
+
+func requireWorkspaceOwnerSSHProbe(t *testing.T, dir string, index int, port string) {
+	t.Helper()
+	command, input := readWorkspaceOwnerSSHCall(t, dir, index)
+	if command != "exit 0" || input != "" {
+		t.Fatalf("SSH call %d command=%q stdin=%q, want zero-byte probe", index, command, input)
+	}
+	args, err := os.ReadFile(filepath.Join(dir, strconv.Itoa(index)+".args"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := "\n" + string(args)
+	if !strings.Contains(text, "\n-n\n") || !strings.Contains(text, "\n-p\n"+port+"\n") {
+		t.Fatalf("SSH call %d probe args=%q, want -n on port %s", index, text, port)
+	}
+}
+
+func TestSSHSingletonPortExecutesOnceWithoutProbe(t *testing.T) {
+	tests := []struct {
+		name   string
+		target SSHTarget
+		port   string
+	}{
+		{name: "default", target: SSHTarget{}, port: "22"},
+		{name: "configured", target: SSHTarget{Port: "2222", FallbackPorts: []string{}}, port: "2222"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := installWorkspaceOwnerRecordingSSH(t)
+			test.target.User, test.target.Host = "crabbox", "example.test"
+			payload := "one delivery\n"
+			if err := runSSHInput(t.Context(), test.target, "cat", strings.NewReader(payload), io.Discard, io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			if count, err := os.ReadFile(filepath.Join(dir, "count")); err != nil || string(count) != "1" {
+				t.Fatalf("SSH call count=%q err=%v, want one delivery", count, err)
+			}
+			command, input := readWorkspaceOwnerSSHCall(t, dir, 1)
+			if command != "cat" || input != payload {
+				t.Fatalf("command=%q stdin=%q", command, input)
+			}
+			args, err := os.ReadFile(filepath.Join(dir, "1.args"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if text := "\n" + string(args); !strings.Contains(text, "\n-p\n"+test.port+"\n") || strings.Contains(text, "\n-p\n\n") {
+				t.Fatalf("SSH args=%q, want pinned port %s", text, test.port)
+			}
+		})
+	}
+}
+
+func TestWorkspaceOwnerSSHProtocolIgnoresSuccessfulWarnings(t *testing.T) {
+	tests := []struct {
+		name   string
+		target SSHTarget
+	}{
+		{name: "POSIX", target: SSHTarget{TargetOS: targetLinux}},
+		{name: "WSL2", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}},
+		{name: "native Windows", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			installWorkspaceOwnerRecordingSSH(t)
+			if isWindowsWSL2Target(test.target) {
+				oldStage := stageWSLSpool
+				stageWSLSpool = func(spool *wslStageSpool, _ context.Context, target *SSHTarget, _ wslStageTiming, _, _ string, _ io.Writer) (string, error) {
+					spool.shell = wslStageCMD
+					target.NoControlMaster = true
+					return strings.Repeat("a", 32), nil
+				}
+				t.Cleanup(func() { stageWSLSpool = oldStage })
+			}
+			t.Setenv("CRABBOX_OWNER_SSH_SUCCESS_STDOUT", "ACQUIRED")
+			t.Setenv("CRABBOX_OWNER_SSH_SUCCESS_STDERR", "** WARNING: connection is not using a post-quantum key exchange algorithm.\n")
+			test.target.User, test.target.Host, test.target.Port = "crabbox", "127.0.0.1", "22"
+			got, err := (sshWorkspaceOwnerTransport{target: test.target}).Do(context.Background(), workspaceOwnerRemoteRequest{
+				Action: workspaceOwnerAcquire,
+				Key:    workspaceOwnerKey("cbx_warning_" + test.name),
+				Token:  strings.Repeat("a", 64),
+				TTL:    time.Minute,
+			})
+			if err != nil || got != "ACQUIRED" {
+				t.Fatalf("response=%q err=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestWorkspaceOwnerSSHProtocolFailurePreservesResponseAndSafeDiagnostic(t *testing.T) {
+	tests := []struct {
+		name   string
+		target SSHTarget
+	}{
+		{name: "POSIX", target: SSHTarget{TargetOS: targetLinux}},
+		{name: "WSL2", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}},
+		{name: "native Windows", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			installWorkspaceOwnerRecordingSSH(t)
+			if isWindowsWSL2Target(test.target) {
+				oldStage, oldCleanup := stageWSLSpool, cleanupPublishedWSLStage
+				stageWSLSpool = func(spool *wslStageSpool, _ context.Context, target *SSHTarget, _ wslStageTiming, _, _ string, _ io.Writer) (string, error) {
+					spool.shell = wslStageCMD
+					target.NoControlMaster = true
+					return strings.Repeat("a", 32), nil
+				}
+				cleanupPublishedWSLStage = func(context.Context, SSHTarget, string, *wslStageSpool, time.Duration, time.Duration, string) error {
+					return nil
+				}
+				t.Cleanup(func() { stageWSLSpool, cleanupPublishedWSLStage = oldStage, oldCleanup })
+			}
+			secret := strings.Repeat("s", 80)
+			requestToken := strings.Repeat("b", 64)
+			t.Setenv("CRABBOX_OWNER_SSH_FAIL_CALL", "1")
+			t.Setenv("CRABBOX_OWNER_SSH_FAIL_CODE", "23")
+			t.Setenv("CRABBOX_OWNER_SSH_FAIL_STDOUT", "MISMATCH")
+			t.Setenv("CRABBOX_OWNER_SSH_FAIL_STDERR", strings.Repeat("x", 190)+" owner-token="+requestToken+" Authorization: Bearer "+secret+" "+strings.Repeat("z", 300)+"\n")
+			test.target.User, test.target.Host, test.target.Port = "crabbox", "127.0.0.1", "22"
+			got, err := (sshWorkspaceOwnerTransport{target: test.target}).Do(context.Background(), workspaceOwnerRemoteRequest{
+				Action: workspaceOwnerRenew,
+				Key:    workspaceOwnerKey("cbx_failure_" + test.name),
+				Token:  requestToken,
+				TTL:    time.Minute,
+			})
+			if got != "MISMATCH" || err == nil || exitCode(err) != 23 {
+				t.Fatalf("response=%q err=%v exit=%d", got, err, exitCode(err))
+			}
+			if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), requestToken) || !strings.Contains(err.Error(), diagnosticRedaction) {
+				t.Fatalf("failure diagnostic was not redacted: %q", err)
+			}
+			if detail := strings.TrimPrefix(err.Error(), "exit status 23: "); len(detail) > 243 {
+				t.Fatalf("failure detail length=%d want <=243: %q", len(detail), detail)
+			}
+		})
+	}
+}
+
+func TestWorkspaceOwnerSSHProtocolFailureRedactsAuthSecretUser(t *testing.T) {
+	installWorkspaceOwnerRecordingSSH(t)
+	secret := "token-as-username-must-not-leak"
+	t.Setenv("CRABBOX_OWNER_SSH_FAIL_CALL", "1")
+	t.Setenv("CRABBOX_OWNER_SSH_FAIL_STDERR", secret+"@example.test: Permission denied\n")
+	target := SSHTarget{
+		User:       secret,
+		Host:       "127.0.0.1",
+		Port:       "22",
+		TargetOS:   targetLinux,
+		AuthSecret: true,
+	}
+	_, err := (sshWorkspaceOwnerTransport{target: target}).Do(context.Background(), workspaceOwnerRemoteRequest{
+		Action: workspaceOwnerRenew,
+		Key:    workspaceOwnerKey("cbx_failure_auth_secret"),
+		Token:  strings.Repeat("b", 64),
+		TTL:    time.Minute,
+	})
+	if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), diagnosticRedaction) {
+		t.Fatalf("AuthSecret username was not redacted: %q", err)
+	}
+}
+
+func TestWorkspaceOwnerSSHProtocolAllProbeFailureRedactsFinalDiagnostic(t *testing.T) {
+	dir := installWorkspaceOwnerRecordingSSH(t)
+	secret := "token-as-username-must-not-leak"
+	requestToken := strings.Repeat("b", 64)
+	t.Setenv("CRABBOX_OWNER_SSH_FAIL_PROBES", "1")
+	t.Setenv("CRABBOX_OWNER_SSH_PROBE_SECRET", secret+" "+requestToken)
+	target := SSHTarget{
+		User: secret, Host: "example.test", Port: "2222", FallbackPorts: []string{"22"},
+		TargetOS: targetLinux, AuthSecret: true,
+	}
+	_, err := (sshWorkspaceOwnerTransport{target: target}).Do(t.Context(), workspaceOwnerRemoteRequest{
+		Action: workspaceOwnerRenew,
+		Key:    workspaceOwnerKey("cbx_probe_failure"),
+		Token:  requestToken,
+		TTL:    time.Minute,
+	})
+	if err == nil || exitCode(err) != 255 {
+		t.Fatalf("err=%v exit=%d, want 255", err, exitCode(err))
+	}
+	if strings.Contains(err.Error(), "probe-2222") || !strings.Contains(err.Error(), "probe-22") {
+		t.Fatalf("owner diagnostic=%q, want only final probe", err)
+	}
+	if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), requestToken) || !strings.Contains(err.Error(), diagnosticRedaction) {
+		t.Fatalf("owner probe diagnostic was not redacted: %q", err)
+	}
+	requireWorkspaceOwnerSSHProbe(t, dir, 1, "2222")
+	requireWorkspaceOwnerSSHProbe(t, dir, 2, "22")
+}
+
+func TestWorkspaceOwnerSSHProtocolResolvesFallbackBeforeSingleDelivery(t *testing.T) {
+	tests := []struct {
+		name   string
+		target SSHTarget
+	}{
+		{name: "POSIX", target: SSHTarget{TargetOS: targetLinux}},
+		{name: "native Windows", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := installWorkspaceOwnerRecordingSSH(t)
+			t.Setenv("CRABBOX_OWNER_SSH_RETRY_CALL", "1")
+			t.Setenv("CRABBOX_OWNER_SSH_RETRY_STDOUT", "MISMATCH")
+			t.Setenv("CRABBOX_OWNER_SSH_RETRY_STDERR", "first port failed")
+			t.Setenv("CRABBOX_OWNER_SSH_SUCCESS_STDOUT", "ACQUIRED")
+			t.Setenv("CRABBOX_OWNER_SSH_SUCCESS_STDERR", "second port warning")
+			test.target.User, test.target.Host, test.target.Port = "crabbox", "127.0.0.1", "2222"
+			test.target.FallbackPorts = []string{"22"}
+			got, err := (sshWorkspaceOwnerTransport{target: test.target}).Do(context.Background(), workspaceOwnerRemoteRequest{
+				Action: workspaceOwnerAcquire,
+				Key:    workspaceOwnerKey("cbx_fallback_" + test.name),
+				Token:  strings.Repeat("c", 64),
+				TTL:    time.Minute,
+			})
+			if err != nil || got != "ACQUIRED" {
+				t.Fatalf("fallback response=%q err=%v", got, err)
+			}
+			if count, readErr := os.ReadFile(filepath.Join(dir, "count")); readErr != nil || string(count) != "3" {
+				t.Fatalf("SSH call count=%q err=%v", count, readErr)
+			}
+			requireWorkspaceOwnerSSHProbe(t, dir, 1, "2222")
+			requireWorkspaceOwnerSSHProbe(t, dir, 2, "22")
+			command, _ := readWorkspaceOwnerSSHCall(t, dir, 3)
+			if command == "exit 0" {
+				t.Fatal("owner delivery was replaced by another probe")
+			}
+		})
+	}
 }
 
 func TestWorkspaceOwnerNativeWindowsProtocolStreamsScriptsOverStdin(t *testing.T) {
@@ -598,7 +906,332 @@ func TestWorkspaceOwnerNativeWindowsProtocolStreamsScriptsOverStdin(t *testing.T
 	}
 }
 
-func TestWorkspaceOwnerNativeWindowsProtocolKeepsOnlySuccessfulFallbackOutput(t *testing.T) {
+func TestWorkspaceOwnerWSL2StagesThenExecutesOnceWithoutStdin(t *testing.T) {
+	dir := installWorkspaceOwnerRecordingSSH(t)
+	nonce := strings.Repeat("a", 32)
+	staged := 0
+	var launchers []string
+	wantTiming := sshTransportTiming(sshCommandLimit{execution: workspaceOwnerRemoteTimeout, control: true})
+	captureWSLStage(t, nonce, func(spool *wslStageSpool, target *SSHTarget, timing wslStageTiming, data []byte) {
+		staged++
+		if timing != wantTiming || !target.NoControlMaster {
+			t.Fatalf("timing=%+v no-mux=%t", timing, target.NoControlMaster)
+		}
+		if len(data) != int(spool.size) || string(data[:8]) != "CBXFLAT2" {
+			t.Fatalf("invalid staged owner spool bytes=%d", len(data))
+		}
+		if spool.size > 1<<20 || wslStageBudget(timing.stage, timing.idle, spool.size) != sshTransportTiming(sshCommandLimit{execution: workspaceOwnerRemoteTimeout, control: true}).stage {
+			t.Fatalf("owner spool exceeds its accounted upload phase: bytes=%d budget=%s", spool.size, wslStageBudget(timing.stage, timing.idle, spool.size))
+		}
+		if binary.LittleEndian.Uint64(data[32:]) != uint64(timing.operation.Milliseconds()) || timing.operation != 38*time.Second {
+			t.Fatal("derived control operation guard missing")
+		}
+		launchers = append(launchers, wslStageLauncherCommand(nonce, spool.size, spool.digest(), wslStageCMD))
+	})
+
+	target := SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22", TargetOS: targetWindows, WindowsMode: windowsModeWSL2}
+	key, token := workspaceOwnerKey("cbx_wsl2_staged_protocol"), strings.Repeat("6", 64)
+	for index, action := range []workspaceOwnerAction{workspaceOwnerAcquire, workspaceOwnerRenew, workspaceOwnerInspect, workspaceOwnerRelease} {
+		want := map[workspaceOwnerAction]string{
+			workspaceOwnerAcquire: "ACQUIRED", workspaceOwnerRenew: "RENEWED",
+			workspaceOwnerInspect: "OWNED", workspaceOwnerRelease: "RELEASED",
+		}[action]
+		t.Setenv("CRABBOX_OWNER_SSH_SUCCESS_STDOUT", want)
+		got, err := (sshWorkspaceOwnerTransport{target: target}).Do(t.Context(), workspaceOwnerRemoteRequest{
+			Action: action, Key: key, Token: token, TTL: time.Minute,
+		})
+		if err != nil || got != want {
+			t.Fatalf("%s response=%q err=%v", action, got, err)
+		}
+		command, input := readWorkspaceOwnerSSHCall(t, dir, index+1)
+		if command != launchers[index] || input != "" {
+			t.Fatalf("%s command_match=%t stdin=%q", action, command == launchers[index], input)
+		}
+		if len(command) >= wslStageLauncherCommandLimit {
+			t.Fatalf("%s launcher bytes=%d exceeds Windows command limit", action, len(command))
+		}
+		decoded := decodePowerShellCommand(t, command)
+		if strings.Contains(decoded, key) || strings.Contains(decoded, token) {
+			t.Fatalf("%s leaked owner data in argv", action)
+		}
+		requireWorkspaceOwnerSSHNoMux(t, dir, index+1)
+		requireWorkspaceOwnerSSHOptions(t, dir, index+1, "10", "3")
+	}
+	if staged != 4 {
+		t.Fatalf("stage calls=%d want 4", staged)
+	}
+}
+
+func TestWorkspaceOwnerWSL2AmbiguousExecuteDoesNotRestage(t *testing.T) {
+	dir := installWorkspaceOwnerRecordingSSH(t)
+	oldStage, oldCleanup := stageWSLSpool, cleanupPublishedWSLStage
+	staged, cleaned := 0, 0
+	stageWSLSpool = func(spool *wslStageSpool, _ context.Context, _ *SSHTarget, _ wslStageTiming, _, _ string, _ io.Writer) (string, error) {
+		spool.shell = wslStageCMD
+		staged++
+		return strings.Repeat("b", 32), nil
+	}
+	cleanupPublishedWSLStage = func(_ context.Context, _ SSHTarget, nonce string, _ *wslStageSpool, _, _ time.Duration, _ string) error {
+		cleaned++
+		if nonce != strings.Repeat("b", 32) {
+			t.Fatalf("ambiguous delivery cleaned an unowned nonce: %q", nonce)
+		}
+		return nil
+	}
+	t.Cleanup(func() { stageWSLSpool, cleanupPublishedWSLStage = oldStage, oldCleanup })
+	t.Setenv("CRABBOX_OWNER_SSH_FAIL_CALL", "1")
+	t.Setenv("CRABBOX_OWNER_SSH_FAIL_CODE", "255")
+	target := SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22", TargetOS: targetWindows, WindowsMode: windowsModeWSL2}
+	_, err := (sshWorkspaceOwnerTransport{target: target}).Do(t.Context(), workspaceOwnerRemoteRequest{
+		Action: workspaceOwnerAcquire, Key: workspaceOwnerKey("cbx_wsl2_ambiguous"), Token: strings.Repeat("7", 64), TTL: time.Minute,
+	})
+	var exitErr ExitError
+	if err == nil || !AsExitError(err, &exitErr) || exitErr.Code != 7 || staged != 1 || cleaned != 1 {
+		t.Fatalf("err=%v exit=%+v stages=%d cleanups=%d", err, exitErr, staged, cleaned)
+	}
+	if count, readErr := os.ReadFile(filepath.Join(dir, "count")); readErr != nil || string(count) != "1" {
+		t.Fatalf("SSH calls=%q err=%v", count, readErr)
+	}
+}
+
+func TestWorkspaceOwnerWANBudgetContract(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		target SSHTarget
+		routes int
+	}{
+		{"default port", SSHTarget{}, 1},
+		{"explicit singleton", SSHTarget{Port: "2222", FallbackPorts: []string{}}, 1},
+		{"default fallback", SSHTarget{Port: "2222"}, 2},
+		{"multiple deduplicated fallbacks", SSHTarget{Port: "2222", FallbackPorts: []string{"22", "2200", "22"}}, 3},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			target := test.target
+			target.TargetOS, target.WindowsMode = "windows", "wsl2"
+			timing := sshTransportTiming(sshCommandLimit{execution: workspaceOwnerRemoteTimeout, control: true})
+			stage := wslStageRouteBudgets(target, timing, 1<<20)
+			// Each route has ACL prep, one complete WAN upload, exact cleanup,
+			// and separate upload/cleanup subprocess completion bounds.
+			candidate := 47*time.Second + 59*time.Second + 15*time.Second + 2*sshCommandWaitDelay
+			if len(stage.ports) != test.routes || stage.candidate != candidate || stage.total != time.Duration(test.routes)*candidate+wslStageCompletionMargin {
+				t.Fatalf("route allocation=%+v", stage)
+			}
+			call := sshTransportCallBudget(target, sshControlMetadataLimit, sshCommandLimit{execution: workspaceOwnerRemoteTimeout, control: true})
+			if timing.execute != 110*time.Second || timing.reserve != 131*time.Second || call != time.Duration(131*test.routes+132)*time.Second {
+				t.Fatalf("control allocation: timing=%+v call=%s", timing, call)
+			}
+			lifecycle := time.Duration(test.routes)*candidate + timing.execute + wslStageCleanupTimeout + sshCommandWaitDelay
+			if call <= lifecycle || call != stage.total+timing.reserve {
+				t.Fatalf("call=%s lifecycle=%s", call, lifecycle)
+			}
+			owner := &workspaceOwner{transport: sshWorkspaceOwnerTransport{target: target}}
+			if owner.callTimeout() != call || owner.quiesceTimeout() != 2*call+time.Second {
+				t.Fatal("owner caller lost dynamic route allocation")
+			}
+			ttl := workspaceOwnerRenewInterval + call + workspaceOwnerRenewMargin
+			wait := ttl + workspaceOwnerPollInterval + call + workspaceOwnerRenewMargin
+			if ttl != call+11*time.Second || wait != 2*call+13*time.Second || ttl <= workspaceOwnerRenewInterval+lifecycle {
+				t.Fatal("renewal exceeds TTL")
+			}
+		})
+	}
+}
+
+func TestWorkspaceOwnerAcquisitionAllowsCompleteCallAfterStaleExpiry(t *testing.T) {
+	calls := 0
+	var postExpiryBudget time.Duration
+	transport := workspaceOwnerTransportFunc(func(ctx context.Context, req workspaceOwnerRemoteRequest) (string, error) {
+		if req.Action == workspaceOwnerRelease {
+			return "RELEASED", nil
+		}
+		calls++
+		if calls == 1 {
+			return "BUSY", nil
+		}
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("post-expiry acquisition has no bounded deadline")
+		}
+		postExpiryBudget = time.Until(deadline)
+		time.Sleep(75 * time.Millisecond)
+		return "RECOVERED", nil
+	})
+	owner, err := acquireWorkspaceOwnerWithTransport(t.Context(), SSHTarget{}, "cbx_stale_owner_wan", io.Discard, transport,
+		workspaceOwnerPollInterval+300*time.Millisecond, 100*time.Millisecond, 50*time.Millisecond)
+	if err != nil || calls != 2 || postExpiryBudget < 200*time.Millisecond {
+		t.Fatalf("owner=%v calls=%d post-expiry budget=%s error=%v", owner, calls, postExpiryBudget, err)
+	}
+	if err := owner.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWorkspaceOwnerAcquireBoundsTransportCalls(t *testing.T) {
+	t.Run("call budget", func(t *testing.T) {
+		calls := 0
+		var remaining time.Duration
+		transport := workspaceOwnerTransportFunc(func(ctx context.Context, _ workspaceOwnerRemoteRequest) (string, error) {
+			calls++
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				t.Fatal("acquire transport call has no deadline")
+			}
+			remaining = time.Until(deadline)
+			return "", errors.New("delivery outcome lost")
+		})
+		_, err := acquireWorkspaceOwnerWithTransport(context.Background(), SSHTarget{}, "cbx_acquire_call_budget", io.Discard, transport, workspaceOwnerWaitTimeout, time.Minute, 10*time.Second)
+		if calls != 1 || remaining <= workspaceOwnerCallTimeout-time.Second || remaining > workspaceOwnerCallTimeout || err == nil || !strings.Contains(err.Error(), "ambiguous remote state") {
+			t.Fatalf("calls=%d remaining=%s err=%v", calls, remaining, err)
+		}
+	})
+
+	t.Run("smaller overall deadline stays ambiguous", func(t *testing.T) {
+		calls := 0
+		var remaining time.Duration
+		started := time.Now()
+		transport := workspaceOwnerTransportFunc(func(ctx context.Context, _ workspaceOwnerRemoteRequest) (string, error) {
+			calls++
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				t.Fatal("acquire transport call has no deadline")
+			}
+			remaining = time.Until(deadline)
+			<-ctx.Done()
+			return "", ctx.Err()
+		})
+		_, err := acquireWorkspaceOwnerWithTransport(context.Background(), SSHTarget{}, "cbx_acquire_delivery_timeout", io.Discard, transport, 50*time.Millisecond, time.Minute, 10*time.Second)
+		elapsed := time.Since(started)
+		var exitErr ExitError
+		if calls != 1 || remaining <= 0 || remaining > 100*time.Millisecond || elapsed >= time.Second || !AsExitError(err, &exitErr) || exitErr.Code != 7 || !strings.Contains(err.Error(), "ambiguous remote state") || strings.Contains(err.Error(), "timed out after") {
+			t.Fatalf("calls=%d remaining=%s elapsed=%s err=%v", calls, remaining, elapsed, err)
+		}
+	})
+
+	t.Run("definitive busy uses outer wait deadline", func(t *testing.T) {
+		calls := 0
+		transport := workspaceOwnerTransportFunc(func(context.Context, workspaceOwnerRemoteRequest) (string, error) {
+			calls++
+			return "BUSY", nil
+		})
+		_, err := acquireWorkspaceOwnerWithTransport(context.Background(), SSHTarget{}, "cbx_acquire_busy", io.Discard, transport, 40*time.Millisecond, time.Minute, 10*time.Second)
+		var exitErr ExitError
+		if calls != 1 || !AsExitError(err, &exitErr) || exitErr.Code != 7 || !strings.Contains(err.Error(), "timed out after") || strings.Contains(err.Error(), "ambiguous remote state") {
+			t.Fatalf("calls=%d err=%v", calls, err)
+		}
+	})
+}
+
+func TestWorkspaceOwnerOperationDeadlineTable(t *testing.T) {
+	tests := []struct {
+		name       string
+		action     workspaceOwnerAction
+		wantBudget time.Duration
+		response   string
+		invoke     func(*workspaceOwner) error
+	}{
+		{name: "acquire", action: workspaceOwnerAcquire, wantBudget: workspaceOwnerCallTimeout, response: "lost", invoke: func(owner *workspaceOwner) error {
+			_, err := acquireWorkspaceOwnerWithTransport(context.Background(), SSHTarget{}, "cbx_deadline_table", io.Discard, owner.transport, workspaceOwnerWaitTimeout, workspaceOwnerTTL, workspaceOwnerRenewInterval)
+			return err
+		}},
+		{name: "renew", action: workspaceOwnerRenew, wantBudget: workspaceOwnerCallTimeout, response: "lost", invoke: func(owner *workspaceOwner) error {
+			ticks := make(chan time.Time, 1)
+			ticks <- time.Now()
+			owner.renewLoopWithTicks(ticks, workspaceOwnerCallTimeout)
+			return owner.Err()
+		}},
+		{name: "inspect", action: workspaceOwnerInspect, wantBudget: workspaceOwnerCallTimeout, response: "OWNED", invoke: func(owner *workspaceOwner) error {
+			_, err := owner.inspectChild(context.Background())
+			return err
+		}},
+		{name: "witness", action: workspaceOwnerInspect, wantBudget: workspaceOwnerCallTimeout, response: "CHILD", invoke: func(owner *workspaceOwner) error {
+			return owner.WaitForChild(context.Background(), workspaceOwnerCallTimeout)
+		}},
+		{name: "release", action: workspaceOwnerRelease, wantBudget: workspaceOwnerCallTimeout, response: "RELEASED", invoke: func(owner *workspaceOwner) error {
+			close(owner.done)
+			return owner.Close(context.Background())
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var gotAction workspaceOwnerAction
+			var gotBudget time.Duration
+			ownerCtx, cancel := context.WithCancel(context.Background())
+			owner := &workspaceOwner{
+				transport: workspaceOwnerTransportFunc(func(ctx context.Context, req workspaceOwnerRemoteRequest) (string, error) {
+					gotAction = req.Action
+					deadline, ok := ctx.Deadline()
+					if !ok {
+						t.Fatal("owner transport call has no deadline")
+					}
+					gotBudget = time.Until(deadline)
+					if test.response == "lost" {
+						return "", errors.New("delivery outcome lost")
+					}
+					return test.response, nil
+				}),
+				ttl: workspaceOwnerTTL, ctx: ownerCtx, cancel: cancel, stop: make(chan struct{}), done: make(chan struct{}),
+			}
+			err := test.invoke(owner)
+			if gotAction != test.action || gotBudget <= test.wantBudget-time.Second || gotBudget > test.wantBudget ||
+				test.response != "lost" && err != nil || test.response == "lost" && err == nil {
+				t.Fatalf("action=%s budget=%s err=%v want action=%s budget=%s", gotAction, gotBudget, err, test.action, test.wantBudget)
+			}
+		})
+	}
+}
+
+func TestWaitWorkspaceOwnerNoChildUsesTypedResult(t *testing.T) {
+	tests := []struct {
+		name      string
+		responses []string
+		err       error
+		timeout   time.Duration
+		wantCalls int
+		wantErr   string
+	}{
+		{name: "child then owned", responses: []string{"CHILD", "OWNED"}, timeout: time.Second, wantCalls: 2},
+		{name: "persistent child", responses: []string{"CHILD"}, timeout: 10 * time.Millisecond, wantCalls: 1, wantErr: "failed closed: child"},
+		{name: "transport ambiguity mentions child", err: errors.New("child route disconnected"), timeout: time.Second, wantCalls: 1, wantErr: "ambiguous remote state"},
+		{name: "malformed response", responses: []string{"CHILDISH"}, timeout: time.Second, wantCalls: 1, wantErr: "childish"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			owner := &workspaceOwner{transport: workspaceOwnerTransportFunc(func(_ context.Context, _ workspaceOwnerRemoteRequest) (string, error) {
+				calls++
+				if tt.err != nil {
+					return "", tt.err
+				}
+				return tt.responses[min(calls-1, len(tt.responses)-1)], nil
+			})}
+			err := waitWorkspaceOwnerNoChild(context.Background(), owner, tt.timeout)
+			if calls != tt.wantCalls || (tt.wantErr == "") != (err == nil) || tt.wantErr != "" && !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("calls=%d err=%v want calls=%d error containing %q", calls, err, tt.wantCalls, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestWaitWorkspaceOwnerNoChildBoundsInspectToDeadline(t *testing.T) {
+	calls := 0
+	owner := &workspaceOwner{transport: workspaceOwnerTransportFunc(func(ctx context.Context, _ workspaceOwnerRemoteRequest) (string, error) {
+		calls++
+		if calls == 1 {
+			return "CHILD", nil
+		}
+		<-ctx.Done()
+		return "", ctx.Err()
+	})}
+	started := time.Now()
+	err := waitWorkspaceOwnerNoChild(context.Background(), owner, 500*time.Millisecond)
+	elapsed := time.Since(started)
+	var exitErr ExitError
+	if calls != 2 || !AsExitError(err, &exitErr) || exitErr.Code != 7 || elapsed < 400*time.Millisecond || elapsed >= 1500*time.Millisecond {
+		t.Fatalf("calls=%d err=%v elapsed=%s want 2 calls, exit 7, and about 500ms", calls, err, elapsed)
+	}
+}
+
+func TestWorkspaceOwnerNativeWindowsProtocolProbesBeforeSingleDelivery(t *testing.T) {
 	dir := installWorkspaceOwnerRecordingSSH(t)
 	t.Setenv("CRABBOX_OWNER_SSH_RETRY_CALL", "1")
 	target := SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "2222", FallbackPorts: []string{"22"}, TargetOS: targetWindows, WindowsMode: windowsModeNormal}
@@ -609,17 +1242,17 @@ func TestWorkspaceOwnerNativeWindowsProtocolKeepsOnlySuccessfulFallbackOutput(t 
 	if err != nil || got != "ACQUIRED" {
 		t.Fatalf("fallback response=%q err=%v", got, err)
 	}
-	for _, index := range []int{1, 2} {
-		command, input := readWorkspaceOwnerSSHCall(t, dir, index)
-		if command != windowsPowerShellStdinScriptCommand(len([]byte(input))) || !strings.Contains(input, "$action = 'acquire'") {
-			t.Fatalf("fallback attempt %d command=%q", index, command)
-		}
+	requireWorkspaceOwnerSSHProbe(t, dir, 1, "2222")
+	requireWorkspaceOwnerSSHProbe(t, dir, 2, "22")
+	command, input := readWorkspaceOwnerSSHCall(t, dir, 3)
+	if command != windowsPowerShellStdinScriptCommand(len([]byte(input))) || !strings.Contains(input, "$action = 'acquire'") {
+		t.Fatalf("delivery command=%q", command)
 	}
 }
 
 func TestWorkspaceOwnerNativeWindowsAmbiguousStageCleansExactWitness(t *testing.T) {
 	dir := installWorkspaceOwnerRecordingSSH(t)
-	t.Setenv("CRABBOX_OWNER_SSH_FAIL_CALL", "1")
+	t.Setenv("CRABBOX_OWNER_SSH_FAIL_FIRST_DELIVERY", "1")
 	target := SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22", FallbackPorts: []string{"2222"}, TargetOS: targetWindows, WindowsMode: windowsModeNormal}
 	owner := &workspaceOwner{target: target, key: workspaceOwnerKey("cbx_windows_ambiguous_stage"), token: strings.Repeat("8", 64)}
 	ctx := contextWithWorkspaceOwner(context.Background(), owner)
@@ -628,7 +1261,8 @@ func TestWorkspaceOwnerNativeWindowsAmbiguousStageCleansExactWitness(t *testing.
 		t.Fatalf("ambiguous stage err=%v", err)
 	}
 
-	stageCommand, stagedScript := readWorkspaceOwnerSSHCall(t, dir, 1)
+	requireWorkspaceOwnerSSHProbe(t, dir, 1, "22")
+	stageCommand, stagedScript := readWorkspaceOwnerSSHCall(t, dir, 2)
 	if !strings.Contains(stagedScript, base64.StdEncoding.EncodeToString([]byte("Write-Output ambiguous-stage"))) {
 		t.Fatal("staging failure did not follow a complete remote witness write")
 	}
@@ -643,13 +1277,14 @@ func TestWorkspaceOwnerNativeWindowsAmbiguousStageCleansExactWitness(t *testing.
 		t.Fatalf("stage command missing witness suffix: %s", stage)
 	}
 	name := stage[start : start+end+len(".ps1")]
-	cleanupCommand, cleanupInput := readWorkspaceOwnerSSHCall(t, dir, 2)
+	requireWorkspaceOwnerSSHProbe(t, dir, 3, "22")
+	cleanupCommand, cleanupInput := readWorkspaceOwnerSSHCall(t, dir, 4)
 	if cleanupCommand != remoteWorkspaceOwnerWindowsCleanupWitnessCommand(name) || cleanupInput != "" {
 		t.Fatalf("cleanup command=%q stdin=%q want exact witness=%q", cleanupCommand, cleanupInput, name)
 	}
 	count, readErr := os.ReadFile(filepath.Join(dir, "count"))
-	if readErr != nil || string(count) != "2" {
-		t.Fatalf("SSH call count=%q err=%v; want one failed stage and one cleanup without fallback", count, readErr)
+	if readErr != nil || string(count) != "4" {
+		t.Fatalf("SSH call count=%q err=%v; want probes around one failed stage and one cleanup", count, readErr)
 	}
 }
 
@@ -822,14 +1457,17 @@ func TestWorkspaceOwnerPOSIXTransportIsLoginShellIndependent(t *testing.T) {
 
 	shells := []struct {
 		name string
+		mask string
 		args []string
 	}{
-		{name: "bash", args: []string{"--noprofile", "--norc", "-c"}},
-		{name: "zsh", args: []string{"-f", "-c"}},
-		{name: "fish", args: []string{"--no-config", "-c"}},
+		{name: "bash", mask: "022", args: []string{"--noprofile", "--norc", "-c"}},
+		{name: "bash", mask: "027", args: []string{"--noprofile", "--norc", "-c"}},
+		{name: "bash", mask: "077", args: []string{"--noprofile", "--norc", "-c"}},
+		{name: "zsh", mask: "027", args: []string{"-f", "-c"}},
+		{name: "fish", mask: "077", args: []string{"--no-config", "-c"}},
 	}
 	for _, shell := range shells {
-		t.Run(shell.name, func(t *testing.T) {
+		t.Run(shell.name+"/umask-"+shell.mask, func(t *testing.T) {
 			shellPath, err := exec.LookPath(shell.name)
 			if err != nil {
 				t.Skipf("%s is not installed; portable launcher source remains covered", shell.name)
@@ -843,6 +1481,11 @@ func TestWorkspaceOwnerPOSIXTransportIsLoginShellIndependent(t *testing.T) {
 				if _, err := os.Stat("/bin/zsh"); err == nil {
 					shellPath = "/bin/zsh"
 				}
+			}
+
+			command := func(remote string) *exec.Cmd {
+				args := append([]string{"-c", `umask "$1"; shift; exec "$@"`, "umask-test", shell.mask, shellPath}, shell.args...)
+				return exec.Command("sh", append(args, remote)...)
 			}
 
 			const finalizeToken = "0123456789abcdef0123456789abcdef"
@@ -867,12 +1510,15 @@ func TestWorkspaceOwnerPOSIXTransportIsLoginShellIndependent(t *testing.T) {
 			if !strings.HasPrefix(acquireTransport, "exec /bin/sh -c '") || strings.Contains(acquireTransport, "\n") || strings.Count(acquireTransport, "'") != 2 {
 				t.Fatalf("workspace owner protocol is raw login-shell input: %q", acquireTransport[:min(len(acquireTransport), 80)])
 			}
-			acquireCmd := exec.Command(shellPath, append(shell.args, acquireTransport)...)
-			acquireCmd.Env = append(os.Environ(), "HOME="+home)
+			acquireCmd := command(acquireTransport)
+			acquireCmd.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}
 			if out, err := acquireCmd.CombinedOutput(); err != nil || string(out) != "ACQUIRED" {
 				t.Fatalf("owner acquisition failed through %s: out=%q err=%v", shell.name, out, err)
 			}
 
+			privateCheck := `private_paths=$(find ` + shellQuote(ownerRoot) + ` \( -type d ! -perm 700 -o -type f ! -perm 600 \) -print) || exit 99; [ -z "$private_paths" ] || { printf 'non-private control paths: %s\n' "$private_paths" >&2; exit 99; }`
+			userDir := filepath.Join(workdir, "user-directory")
+			failedFile := filepath.Join(workdir, "nonzero.txt")
 			inputPath := filepath.Join(workdir, "preserved input.txt")
 			payload := remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
 				HydrateGit:  true,
@@ -886,7 +1532,7 @@ func TestWorkspaceOwnerPOSIXTransportIsLoginShellIndependent(t *testing.T) {
 					Tree:      strings.Repeat("2", 40),
 					Branch:    "main",
 				},
-			}) + " && cat > " + shellQuote(inputPath)
+			}) + " && " + privateCheck + "\nmkdir " + shellQuote(userDir) + " && cat > " + shellQuote(inputPath)
 			transportCommand := remoteWorkspaceOwnerPOSIXWitness(key, token, payload, true)
 			if !strings.HasPrefix(transportCommand, "exec /bin/sh -c '") || strings.Contains(transportCommand, "\n") || strings.Count(transportCommand, "'") != 2 {
 				t.Fatalf("workspace owner transport is raw login-shell input: %q", transportCommand[:min(len(transportCommand), 80)])
@@ -894,8 +1540,8 @@ func TestWorkspaceOwnerPOSIXTransportIsLoginShellIndependent(t *testing.T) {
 			if len(transportCommand) >= 30_000 {
 				t.Fatalf("workspace owner transport is too large for a bounded Windows SSH command: %d bytes", len(transportCommand))
 			}
-			cmd := exec.Command(shellPath, append(shell.args, transportCommand)...)
-			cmd.Env = append(os.Environ(), "HOME="+home)
+			cmd := command(transportCommand)
+			cmd.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}
 			cmd.Stdin = strings.NewReader("preserved stdin\n")
 			if out, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("assembled transport failed through %s: %v\n%s", shell.name, err, out)
@@ -916,11 +1562,40 @@ func TestWorkspaceOwnerPOSIXTransportIsLoginShellIndependent(t *testing.T) {
 				}
 			}
 
-			nonzero := remoteWorkspaceOwnerPOSIXWitness(key, token, "exit 23")
-			nonzeroCmd := exec.Command(shellPath, append(shell.args, nonzero)...)
-			nonzeroCmd.Env = append(os.Environ(), "HOME="+home)
+			nonzero := remoteWorkspaceOwnerPOSIXWitness(key, token, privateCheck+"\nprintf failed > "+shellQuote(failedFile)+"; exit 23")
+			nonzeroCmd := command(nonzero)
+			nonzeroCmd.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}
 			if out, err := nonzeroCmd.CombinedOutput(); err == nil || exitCode(err) != 23 {
 				t.Fatalf("nonzero child through %s: out=%q err=%v", shell.name, out, err)
+			}
+			mask, err := strconv.ParseUint(shell.mask, 8, 32)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for path, base := range map[string]os.FileMode{inputPath: 0o666, failedFile: 0o666, userDir: 0o777} {
+				info, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := base &^ os.FileMode(mask)
+				if info.Mode().Perm() != want {
+					t.Errorf("caller umask %s: %s mode=%04o want=%04o", shell.mask, filepath.Base(path), info.Mode().Perm(), want)
+				}
+			}
+			entries, err = os.ReadDir(ownerRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range entries {
+				if strings.Contains(entry.Name(), ".launcher.") || strings.Contains(entry.Name(), ".run.") || strings.HasSuffix(entry.Name(), ".child") {
+					t.Errorf("nonzero transport left temporary owner state %q", entry.Name())
+				}
+			}
+			request.Action = workspaceOwnerRelease
+			releaseCmd := command(remoteWorkspaceOwnerCommand(SSHTarget{TargetOS: targetLinux}, request))
+			releaseCmd.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH")}
+			if out, err := releaseCmd.CombinedOutput(); err != nil || string(out) != "RELEASED" {
+				t.Fatalf("owner release through %s: out=%q err=%v", shell.name, out, err)
 			}
 		})
 	}
@@ -936,7 +1611,8 @@ func TestWorkspaceOwnerPOSIXLauncherRejectsMalformedPayload(t *testing.T) {
 	marker := filepath.Join(home, "payload-ran")
 	script := "touch " + shellQuote(marker)
 	encoded := base64.StdEncoding.EncodeToString([]byte(script))
-	transport := remoteWorkspaceOwnerPOSIXEncodedLauncher(key, token, encoded[:len(encoded)-1], len(script))
+	// Remove payload bytes, not just padding that permissive decoders can omit.
+	transport := remoteWorkspaceOwnerPOSIXEncodedLauncher(key, token, encoded[:len(encoded)-4], len(script))
 	cmd := exec.Command("sh", "-c", transport)
 	cmd.Env = append(os.Environ(), "HOME="+home)
 	if out, err := cmd.CombinedOutput(); err == nil || exitCode(err) != 74 {

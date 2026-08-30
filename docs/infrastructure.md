@@ -367,9 +367,12 @@ launches one-time instances, tags instances and volumes with lease metadata, and
 terminates non-kept instances after the command.
 
 SSH ingress is source-scoped. If `CRABBOX_AWS_SSH_CIDRS` is set, those CIDRs are
-added; otherwise the CLI sends its detected outbound IPv4 `/32`, and the Worker
-falls back to `CF-Connecting-IP` (`/32` or `/128`). Crabbox revokes any legacy
-managed `0.0.0.0/0` SSH rule when it touches the managed security group. Supplying
+pinned and authoritative: detected and request-source CIDRs are not added.
+Otherwise, brokered leases combine the CLI-detected outbound IPv4 `/32`, when
+available, with the coordinator-authenticated request source (`/32` or `/128`).
+Later IPv6 requests preserve existing IPv4 ingress. Direct AWS leases detect the
+client's outbound IPv4 `/32`. Crabbox revokes any legacy managed `0.0.0.0/0` SSH
+rule when it touches the managed security group. Supplying
 `CRABBOX_AWS_SECURITY_GROUP_ID` makes network policy your responsibility.
 
 #### Dedicated SSM-only private workspace service

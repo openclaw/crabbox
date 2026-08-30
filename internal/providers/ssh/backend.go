@@ -29,8 +29,9 @@ type SSHTarget = core.SSHTarget
 
 type staticLeaseBackend struct {
 	shared.DirectSSHBackend
-	mu       sync.Mutex
-	acquired LeaseTarget
+	mu            sync.Mutex
+	acquired      LeaseTarget
+	acquiredRoute string
 }
 
 const staticProvider = "ssh"
@@ -57,20 +58,52 @@ func (b *staticLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (L
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	fmt.Fprintf(b.RT.Stderr, "using static target lease=%s slug=%s target=%s windows_mode=%s host=%s keep=%v\n", leaseID, serverSlug(server), b.Cfg.TargetOS, b.Cfg.WindowsMode, target.Host, req.Keep)
-	if err := waitForSSH(ctx, &target, b.RT.Stderr); err != nil {
-		return LeaseTarget{}, err
-	}
-	server.Labels["state"] = "ready"
-	lease := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
-	if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), cfg, server, target, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
-		return LeaseTarget{}, err
-	}
-	claim, claimed, exact, err := core.ResolveLeaseClaimForProviderWithExact(leaseID, staticProvider)
+	expected, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	if claimed && exact && staticLeaseClaimMatchesConfig(cfg, claim) {
+	if exists {
+		if err := core.VerifyLeaseClaimUnchanged(leaseID, expected); err != nil {
+			return LeaseTarget{}, err
+		}
+		if req.Repo.Root != "" {
+			if err := core.CheckLeaseClaimRepositoryOwner(leaseID, expected, req.Repo.Root, req.Reclaim); err != nil {
+				return LeaseTarget{}, err
+			}
+		}
+	}
+	if exists && expected.Provider == staticProvider && staticLeaseClaimMatchesConfig(cfg, expected) {
+		// Reacquisition must not erase lifecycle history or unrelated labels.
+		labels := staticLeaseLabelsFromClaim(expected)
+		labels["slug"] = server.Labels["slug"]
+		labels["target"] = target.TargetOS
+		delete(labels, "windows_mode")
+		if target.TargetOS == core.TargetWindows {
+			labels["windows_mode"] = target.WindowsMode
+		}
+		server.Labels = labels
+		if state := labels["state"]; state != "" {
+			server.Status = state
+		}
+	}
+	fmt.Fprintf(b.RT.Stderr, "using static target lease=%s slug=%s target=%s windows_mode=%s host=%s keep=%v\n", leaseID, serverSlug(server), b.Cfg.TargetOS, b.Cfg.WindowsMode, target.Host, req.Keep)
+	route := architectureEndpoint(target)
+	if err := waitForSSH(ctx, &target, b.RT.Stderr); err != nil {
+		return LeaseTarget{}, err
+	}
+	lease := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
+	if err := b.observeArchitecture(ctx, &lease); err != nil {
+		return LeaseTarget{}, err
+	}
+	lease.Server.Labels["architecture_route"] = route
+	if !exists {
+		lease.Server.Labels["state"] = "ready"
+	}
+	claim, err := core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, serverSlug(lease.Server), cfg, lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, expected, exists)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	if claim.LeaseID != "" {
 		core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
 	} else if req.Repo.Root != "" {
 		return LeaseTarget{}, exit(4, "static lease %s claim changed after acquisition", leaseID)
@@ -79,7 +112,63 @@ func (b *staticLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (L
 	return lease, nil
 }
 
-func (b *staticLeaseBackend) Resolve(_ context.Context, req ResolveRequest) (LeaseTarget, error) {
+func (b *staticLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
+	lease, err := b.resolveOffline(req)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	if !req.Prepare {
+		b.reportHistoricalArchitecture(lease.Server)
+		return lease, nil
+	}
+	expected, exists, set := core.ServerLeaseClaimSnapshot(lease.Server)
+	if set && exists {
+		if err := validateStaticTouchIdentity(b.Cfg, lease, expected); err != nil {
+			return LeaseTarget{}, err
+		}
+	} else if !set && req.Repo.Root != "" {
+		// Endpoint overrides can hide a known claim from target selection, but
+		// cannot bypass its ID's owner. Do not attach it as endpoint identity.
+		expected, exists, err = core.ReadLeaseClaimWithPresence(lease.LeaseID)
+		if err != nil {
+			return LeaseTarget{}, err
+		}
+	}
+	if exists {
+		// Cached ownership must still match disk before any credentialed SSH.
+		if err := core.VerifyLeaseClaimUnchanged(lease.LeaseID, expected); err != nil {
+			return LeaseTarget{}, err
+		}
+		if req.Repo.Root != "" {
+			if err := core.CheckLeaseClaimRepositoryOwner(lease.LeaseID, expected, req.Repo.Root, req.Reclaim); err != nil {
+				return LeaseTarget{}, err
+			}
+		}
+	}
+	route := architectureEndpoint(lease.SSH)
+	// Claimed routes may already use the previously selected fallback port.
+	if lease.Server.Labels["architecture_route"] != "" {
+		route = lease.Server.Labels["architecture_route"]
+	}
+	if err := waitForSSH(ctx, &lease.SSH, b.RT.Stderr); err != nil {
+		return LeaseTarget{}, err
+	}
+	if err := b.observeArchitecture(ctx, &lease); err != nil {
+		return LeaseTarget{}, err
+	}
+	lease.Server.Labels["architecture_route"] = route
+	if exists {
+		if err := core.VerifyLeaseClaimUnchanged(lease.LeaseID, expected); err != nil {
+			return LeaseTarget{}, err
+		}
+	}
+	// Run/pond own claim publication after resolution. Keep fresh evidence in
+	// the return value and retain the original CAS snapshot, including on reclaim.
+	// Early publication would invalidate the caller's guarded adoption snapshot.
+	return lease, nil
+}
+
+func (b *staticLeaseBackend) resolveOffline(req ResolveRequest) (LeaseTarget, error) {
 	if lease, ok := b.acquiredLeaseForID(req.ID); ok {
 		return lease, nil
 	}
@@ -116,6 +205,7 @@ func (b *staticLeaseBackend) Resolve(_ context.Context, req ResolveRequest) (Lea
 func (b *staticLeaseBackend) List(_ context.Context, req ListRequest) ([]LeaseView, error) {
 	_ = req
 	if lease, ok := b.acquiredLeaseView(); ok {
+		b.reportHistoricalArchitecture(lease.Server)
 		return []LeaseView{lease.Server}, nil
 	}
 	if claim, ok, err := staticLeaseClaimForConfig(b.Cfg); err != nil {
@@ -125,18 +215,24 @@ func (b *staticLeaseBackend) List(_ context.Context, req ListRequest) ([]LeaseVi
 		if err != nil {
 			return nil, err
 		}
+		b.reportHistoricalArchitecture(server)
 		return []LeaseView{server}, nil
 	}
 	server, _, _, err := staticLease(b.Cfg)
 	if err != nil {
 		return nil, err
 	}
+	b.reportHistoricalArchitecture(server)
 	return []LeaseView{server}, nil
 }
 
 func (b *staticLeaseBackend) Doctor(ctx context.Context, req core.DoctorRequest) (core.DoctorResult, error) {
 	if b.Cfg.Static.Host == "" {
 		return core.DoctorResult{}, exit(3, "missing static.host")
+	}
+	wsl2 := b.Cfg.TargetOS == core.TargetWindows && b.Cfg.WindowsMode == "wsl2"
+	if wsl2 && !req.ProbeSSH {
+		return core.DoctorResult{Provider: "ssh", Checks: []core.DoctorCheck{{Status: "skip", Check: "wsl2-sftp", Message: "runtime=unchecked transport=sftp_required mutation=false rerun=crabbox_doctor_--provider_ssh_--target_windows_--windows-mode_wsl2_--doctor-probe-ssh"}}}, nil
 	}
 	runtime := "unchecked"
 	api := "static_config"
@@ -146,10 +242,16 @@ func (b *staticLeaseBackend) Doctor(ctx context.Context, req core.DoctorRequest)
 			return core.DoctorResult{}, err
 		}
 		if err := waitForSSHReady(ctx, &target, b.RT.Stderr, "doctor", 10*time.Second); err != nil {
+			if wsl2 && isWSLSFTPUnavailable(err) {
+				return core.DoctorResult{Provider: "ssh", Checks: []core.DoctorCheck{{Status: "failed", Check: "wsl2-sftp", Message: "runtime=ssh_reachable transport=sftp_required mutation=false remediation=enable_internal-sftp_restart_sshd_then_rerun_with_--doctor-probe-ssh"}}}, nil
+			}
 			return core.DoctorResult{}, err
 		}
 		api = "ssh_probe"
 		runtime = "ssh_reachable"
+	}
+	if wsl2 {
+		return core.DoctorResult{Provider: "ssh", Checks: []core.DoctorCheck{{Status: "ok", Check: "wsl2-sftp", Message: "runtime=ssh_reachable transport=sftp_ready mutation=false"}}}, nil
 	}
 	return core.DoctorResult{
 		Provider: "ssh",
@@ -162,6 +264,8 @@ func (b *staticLeaseBackend) ReleaseLease(_ context.Context, req ReleaseLeaseReq
 	b.clearAcquiredLease(req.Lease.LeaseID)
 	return nil
 }
+
+func (b *staticLeaseBackend) PreservesSSHWorkspaceAfterRelease() bool { return true }
 
 func (b *staticLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
 	return fmt.Sprintf("released static lease=%s host=%s", lease.LeaseID, lease.SSH.Host)
@@ -195,6 +299,8 @@ func (b *staticLeaseBackend) Touch(_ context.Context, req TouchRequest) (Server,
 	}
 	server := req.Lease.Server
 	server.Labels = labels
+	server.ServerType.Architecture = ""
+	historicalArchitecture(&server, req.Lease.SSH)
 	if state := strings.TrimSpace(labels["state"]); state != "" {
 		server.Status = state
 	}
@@ -212,11 +318,14 @@ func serverSlug(server Server) string                           { return core.Se
 
 var waitForSSH = core.WaitForSSH
 var waitForSSHReady = core.WaitForSSHReady
+var isWSLSFTPUnavailable = core.IsWSLSFTPUnavailable
 
 func (b *staticLeaseBackend) rememberAcquiredLease(lease LeaseTarget) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.acquired = lease
+	_, configured, _, _ := staticLease(b.Cfg)
+	b.acquiredRoute = architectureEndpoint(configured)
 }
 
 func (b *staticLeaseBackend) refreshAcquiredLeaseServer(leaseID string, server Server) {
@@ -230,19 +339,25 @@ func (b *staticLeaseBackend) refreshAcquiredLeaseServer(leaseID string, server S
 func (b *staticLeaseBackend) acquiredLeaseForID(id string) (LeaseTarget, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if !staticLeaseTargetMatchesID(b.acquired, id) {
+	_, configured, _, _ := staticLease(b.Cfg)
+	if b.acquiredRoute != architectureEndpoint(configured) || !staticLeaseTargetMatchesID(b.acquired, id) {
 		return LeaseTarget{}, false
 	}
-	return b.acquired, true
+	lease := b.acquired
+	historicalArchitecture(&lease.Server, lease.SSH)
+	return lease, true
 }
 
 func (b *staticLeaseBackend) acquiredLeaseView() (LeaseTarget, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.acquired.LeaseID == "" {
+	_, configured, _, _ := staticLease(b.Cfg)
+	if b.acquired.LeaseID == "" || b.acquiredRoute != architectureEndpoint(configured) {
 		return LeaseTarget{}, false
 	}
-	return b.acquired, true
+	lease := b.acquired
+	historicalArchitecture(&lease.Server, lease.SSH)
+	return lease, true
 }
 
 func (b *staticLeaseBackend) clearAcquiredLease(leaseID string) {
@@ -301,7 +416,7 @@ func staticLeaseFromClaim(cfg Config, claim core.LeaseClaim) (Server, SSHTarget,
 	}
 	if claim.TargetOS != "" && !core.IsTargetExplicit(&cfg) {
 		cfg.TargetOS = claim.TargetOS
-		if claim.WindowsMode != "" {
+		if claim.WindowsMode != "" && !core.IsWindowsModeExplicit(cfg) {
 			cfg.WindowsMode = claim.WindowsMode
 		}
 	}
@@ -313,6 +428,15 @@ func staticLeaseFromClaim(cfg Config, claim core.LeaseClaim) (Server, SSHTarget,
 		return Server{}, SSHTarget{}, "", err
 	}
 	server.Labels = staticLeaseLabelsFromClaim(claim)
+	server.Labels["target"] = target.TargetOS
+	delete(server.Labels, "windows_mode")
+	if target.TargetOS == core.TargetWindows {
+		server.Labels["windows_mode"] = target.WindowsMode
+	}
+	if server.Labels["architecture_route"] == architectureEndpoint(target) && claim.SSHPort > 0 {
+		target.Port = strconv.Itoa(claim.SSHPort)
+	}
+	historicalArchitecture(&server, target)
 	if state := strings.TrimSpace(server.Labels["state"]); state != "" {
 		server.Status = state
 	}
@@ -391,9 +515,6 @@ func exit(code int, format string, args ...any) core.ExitError {
 func removeLeaseClaim(leaseID string) { core.RemoveLeaseClaim(leaseID) }
 func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
 	return core.AllocateClaimLeaseSlug(leaseID, requested)
-}
-func claimLeaseTargetForRepoConfig(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, reclaim)
 }
 func resolveLeaseClaimForProvider(id, provider string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaimForProvider(id, provider)

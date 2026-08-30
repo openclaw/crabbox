@@ -537,6 +537,7 @@ if ! sh -c "$docker_probe"; then
   fi
 fi
 test -d /var/cache/crabbox/pnpm
+test -f /var/lib/crabbox-readiness/linux.json
 test -f /var/lib/crabbox/image-ready
 SHELL
   fi
@@ -582,20 +583,18 @@ run_prep() {
   run_cmd "$CRABBOX_BIN" run --provider aws --target "$target" --id "$lease" --no-sync --script "$prep_script"
 }
 
-mark_linux_image_ready() {
+stage_linux_readiness_producer() {
   local lease="$1"
   [[ "$target" == "linux" ]] || return 0
-  run_cmd "$CRABBOX_BIN" run --provider aws --target linux --id "$lease" --no-sync --shell -- \
-    "set -euo pipefail
-command -v git >/dev/null
-command -v curl >/dev/null
-command -v rsync >/dev/null
-command -v jq >/dev/null
-command -v tmux >/dev/null
-test -x /usr/sbin/sshd
-sudo install -d -m 0755 /var/lib/crabbox
-printf 'crabbox-devtools-v1\\n' | sudo tee /var/lib/crabbox/image-ready >/dev/null
-sudo chmod 0644 /var/lib/crabbox/image-ready"
+  run_cmd "$CRABBOX_BIN" run --provider aws --target linux --id "$lease" --no-sync \
+    --script "$ROOT/scripts/linux-readiness.generated.sh" -- --install
+}
+
+verify_linux_image_readiness() {
+  local lease="$1"
+  [[ "$target" == "linux" ]] || return 0
+  run_cmd "$CRABBOX_BIN" run --provider aws --target linux --id "$lease" --no-sync \
+    --shell -- /usr/local/libexec/crabbox/linux-readiness.generated.sh
 }
 
 windows_reboot_required() {
@@ -658,9 +657,10 @@ if [[ "$run" != "1" ]]; then
 fi
 
 source_lease="$(warmup source)"
+stage_linux_readiness_producer "$source_lease"
 run_prep "$source_lease"
 reboot_windows_source_if_needed "$source_lease"
-mark_linux_image_ready "$source_lease"
+verify_linux_image_readiness "$source_lease"
 smoke "$source_lease"
 
 image_env=(env)

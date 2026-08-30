@@ -9,6 +9,12 @@ export interface ProviderProvisioningCleanupClaim {
   serverID?: number;
 }
 
+// Unlike retryable cleanup failure, this requires identity or scope resolution before
+// another provider operation can be authorized. It never establishes resource absence.
+export class ProviderResourceUnresolvedError extends Error {
+  override name = "ProviderResourceUnresolvedError";
+}
+
 export class ProviderProvisioningCleanupError extends Error {
   constructor(
     message: string,
@@ -35,10 +41,20 @@ export function validatedProviderProvisioningCleanupClaim(
   error: unknown,
   provider: Provider,
 ): ProviderProvisioningCleanupClaim | undefined {
-  const claim = providerProvisioningCleanupClaim(error);
+  return validateProviderProvisioningCleanupClaim(
+    providerProvisioningCleanupClaim(error),
+    provider,
+  );
+}
+
+export function validateProviderProvisioningCleanupClaim(
+  claim: ProviderProvisioningCleanupClaim | undefined,
+  provider: Provider,
+): ProviderProvisioningCleanupClaim | undefined {
   if (
     !claim ||
     claim.provider !== provider ||
+    typeof claim.cloudID !== "string" ||
     claim.cloudID !== claim.cloudID.trim() ||
     !claim.cloudID
   ) {
@@ -56,7 +72,12 @@ export function validatedProviderProvisioningCleanupClaim(
         ? claim
         : undefined;
     case "daytona":
-      return claim;
+      // Daytona accepts names at its ID route too; only a returned UUID in the
+      // original allocation context grants managed cleanup authority.
+      return /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(claim.cloudID) &&
+        /^daytona:context:v1:[a-f0-9]{64}$/.test(claim.providerScope ?? "")
+        ? claim
+        : undefined;
   }
 }
 

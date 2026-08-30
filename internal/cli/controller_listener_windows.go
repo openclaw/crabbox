@@ -24,6 +24,10 @@ var windowsGetExtendedTCPTable = windows.NewLazySystemDLL("iphlpapi.dll").NewPro
 
 func controllerListenerOwnershipSupported() bool { return true }
 
+func sshForwardRootListenerReady(port string, pid int) error {
+	return controllerVerifyDaemonOwnedListener(port, pid)
+}
+
 func controllerVerifyDaemonOwnedListener(port string, expectedPID int) error {
 	portNumber, err := strconv.Atoi(port)
 	if err != nil || portNumber < 1 || portNumber > 65535 || expectedPID <= 0 {

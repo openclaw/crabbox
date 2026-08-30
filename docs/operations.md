@@ -23,7 +23,8 @@ Run these before a release or after changing secrets:
 go test ./...
 npm run check --prefix worker
 npm test --prefix worker
-node --test scripts/*.test.js
+node scripts/generate-linux-readiness.mjs --check
+node --test scripts/*.test.js scripts/*.test.mjs
 scripts/check-docs.sh
 bin/crabbox doctor
 bin/crabbox whoami
@@ -821,7 +822,8 @@ Before creating or reusing a signed release tag:
 - `go build -trimpath -o bin/crabbox ./cmd/crabbox`
 - `scripts/check-go-coverage.sh 90.0`
 - Worker gate: `npm run format:check --prefix worker && npm run lint --prefix worker && npm run check --prefix worker && npm test --prefix worker && npm run build --prefix worker`
-- `node --test scripts/*.test.js`
+- `node scripts/generate-linux-readiness.mjs --check`
+- `node --test scripts/*.test.js scripts/*.test.mjs`
 - `scripts/check-docs.sh`
 - `git diff --check`
 - Live smoke at least one coordinator-backed `crabbox run`, then verify `crabbox attach`, `crabbox events`, `crabbox logs`, and lease cleanup.

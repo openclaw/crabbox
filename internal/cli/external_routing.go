@@ -200,16 +200,11 @@ func writeExternalRoutingAtomic(
 	renameFile func(string, string) error,
 	syncDirectory func(string) error,
 ) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".routing-*.json")
+	tmp, tmpPath, err := createPrivateRunOutputTemp(path)
 	if err != nil {
 		return fmt.Errorf("create external routing file: %w", err)
 	}
-	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("secure external routing file: %w", err)
-	}
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("write external routing file: %w", err)
@@ -399,7 +394,7 @@ func removeExternalRoutingIfUnchangedWithSync(leaseID string, expected ExternalC
 }
 
 func withExternalRoutingLock(path string, action func() error) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := createPrivateRunOutputDir(filepath.Dir(path)); err != nil {
 		return fmt.Errorf("create external routing directory: %w", err)
 	}
 	lockPath := path + ".lock"

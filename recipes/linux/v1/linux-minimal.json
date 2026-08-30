@@ -1,0 +1,27 @@
+{
+  "schema": "crabbox-linux-readiness/v1",
+  "profile": "linux-minimal",
+  "description": "Portable Debian and Ubuntu SSH runner prerequisites",
+  "shell": "posix",
+  "inherits": [],
+  "aptPackages": [
+    "ca-certificates",
+    "curl",
+    "git",
+    "jq",
+    "openssh-server",
+    "rsync",
+    "tmux",
+    "util-linux"
+  ],
+  "probes": [
+    { "name": "ca-certificates", "command": "test -s /etc/ssl/certs/ca-certificates.crt" },
+    { "name": "curl", "command": "curl --version" },
+    { "name": "flock", "command": "flock --version" },
+    { "name": "git", "command": "git --version" },
+    { "name": "jq", "command": "jq --version" },
+    { "name": "rsync", "command": "rsync --version" },
+    { "name": "sshd", "command": "test -x /usr/sbin/sshd" },
+    { "name": "tmux", "command": "tmux -V" }
+  ]
+}

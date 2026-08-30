@@ -92,6 +92,9 @@ func TestInitProjectWritesExpectedFiles(t *testing.T) {
 	if !strings.Contains(string(config), "job: hydrate") {
 		t.Fatalf("config missing actions job:\n%s", config)
 	}
+	if !strings.Contains(string(config), "gitOverlay: false") {
+		t.Fatalf("config missing default-off Git overlay:\n%s", config)
+	}
 	if err := app.Run(context.Background(), []string{"init"}); err == nil {
 		t.Fatal("second init without --force succeeded")
 	}

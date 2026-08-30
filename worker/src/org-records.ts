@@ -33,6 +33,9 @@ export function publicRunRecord(record: RunRecord): RunRecord {
     ...record,
     org: orgLabelForDisplay(record.org),
   };
+  delete publicRecord.terminalReceipt;
+  delete publicRecord.terminalFinishSHA256;
+  delete publicRecord.terminalLogPrefix;
   if (!record.leaseOwners) {
     return publicRecord;
   }

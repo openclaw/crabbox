@@ -29,11 +29,11 @@ Both `--input` and `--output` are required.
 By default the preview is motion-focused so the GIF shows the change, not the
 idle desktop around it:
 
-- ffmpeg `freezedetect` locates leading and trailing static regions.
-- Crabbox keeps `--trim-padding` (default `750ms`) of context before the first
-  and after the last moving frame.
-- The window is widened to at least `--min-duration` (default `1500ms`) when the
-  detected motion is shorter.
+- ffmpeg `freezedetect` locates every static region across the recording.
+- Crabbox removes long static spans, keeps `--trim-padding` (default `750ms`)
+  around each moving segment, then stitches the segments together.
+- The stitched preview is widened to at least `--min-duration` (default
+  `1500ms`) when the detected motion is shorter.
 - If no motion is detected at all, Crabbox keeps the full source rather than
   emitting an empty preview.
 
@@ -58,11 +58,11 @@ higher-quality palette. Control this with `--gifsicle`:
 ```text
 --input <path>                  source video (required)
 --output <path>                 GIF preview output (required)
---trimmed-video-output <path>   also write an MP4 clip of the same window
+--trimmed-video-output <path>   also write an MP4 with the same motion segments
 --width <px>                    preview width (default 1000)
 --fps <n>                       preview frames per second (default 24)
---trim-static                   trim static edges (default true)
---no-trim-static                disable static-edge trimming
+--trim-static                   remove static regions (default true)
+--no-trim-static                disable static-region trimming
 --trim-padding <duration>       context kept around motion (default 750ms)
 --freeze-duration <duration>    min still duration for freezedetect (default 500ms)
 --freeze-noise <level>          freezedetect noise threshold (default -50dB)
@@ -75,17 +75,21 @@ higher-quality palette. Control this with `--gifsicle`:
 
 ### Output
 
-By default `media preview` prints the paths it wrote (and the trimmed window
-when static edges were removed):
+By default `media preview` prints the paths it wrote and the stitched preview
+duration when static regions were removed:
 
 ```text
-wrote desktop-preview.gif from 1.250s..4.500s
+wrote desktop-preview.gif motion-only (3.250s)
 wrote desktop-change.mp4
 ```
 
 With `--json` it prints structured metadata instead, including the source and
-preview durations, the detected motion window, the number of freeze intervals
-found, and whether the gifsicle pass ran:
+preview durations, the number of freeze intervals found, and whether the
+gifsicle pass ran:
+
+`previewStartSeconds` is the first retained source timestamp, while
+`previewDurationSeconds` is the stitched output duration. `previewSegments`
+lists every retained source interval as `startSeconds` and `endSeconds`.
 
 ```sh
 crabbox media preview --input desktop.mp4 --output desktop-preview.gif --json

@@ -251,6 +251,16 @@ func (b *morphLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (Le
 	server := morphServer(instance, cfg, leaseID, slug)
 	createdLease.Server = server
 	createdLease.SSH = target
+	var claimErr error
+	if req.Repo.Root == "" {
+		claimErr = core.ClaimLeaseTargetForConfig(leaseID, slug, cfg, server, target, cfg.IdleTimeout)
+	} else {
+		claimErr = core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, req.Repo.Root, cfg.IdleTimeout, req.Reclaim)
+	}
+	if claimErr != nil {
+		cleanupCreated()
+		return LeaseTarget{}, fmt.Errorf("persist exact morph instance ownership claim: %w", claimErr)
+	}
 	return createdLease, nil
 }
 
@@ -369,6 +379,28 @@ func (b *morphLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRe
 	if instanceID == "" {
 		instanceID = strings.TrimSpace(req.Lease.Server.Labels["instance_id"])
 	}
+	removeMissingInstance := func() error {
+		claim, ok, claimErr := resolveLeaseClaimForProvider(blank(leaseID, instanceID), providerName)
+		if claimErr != nil {
+			return claimErr
+		}
+		if !ok {
+			return exit(2, "morph instance %s has no exact local ownership claim", instanceID)
+		}
+		binding := shared.ClaimBinding{
+			Provider: providerName, ProviderScope: Provider{}.ClaimScope(cfg), ExactProviderScope: true,
+			LeaseID: claim.LeaseID, CloudID: blank(instanceID, claim.CloudID),
+		}
+		exact, claimErr := shared.RequireExactClaim(binding)
+		if claimErr != nil {
+			return claimErr
+		}
+		if claimErr = shared.RemoveExactClaimAfter(exact, binding, func() error { return nil }); claimErr != nil {
+			return claimErr
+		}
+		removeStoredTestboxKey(claim.LeaseID)
+		return nil
+	}
 	var instance morphInstance
 	if instanceID != "" {
 		instance, err = client.GetInstance(ctx, instanceID)
@@ -386,9 +418,7 @@ func (b *morphLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRe
 			if resolveErr != nil {
 				var exitErr ExitError
 				if asExitError(resolveErr, &exitErr) && exitErr.Code == 4 {
-					removeLeaseClaim(leaseID)
-					removeStoredTestboxKey(blank(leaseID, resolveID))
-					return nil
+					return removeMissingInstance()
 				}
 				return resolveErr
 			}
@@ -399,20 +429,76 @@ func (b *morphLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRe
 		}
 	}
 	if instance.ID == "" {
-		removeLeaseClaim(leaseID)
-		removeStoredTestboxKey(blank(leaseID, instanceID))
+		return removeMissingInstance()
+	}
+	slug := strings.TrimSpace(instance.Metadata["slug"])
+	binding := shared.ClaimBinding{
+		Provider:           providerName,
+		ProviderScope:      Provider{}.ClaimScope(cfg),
+		ExactProviderScope: true,
+		LeaseID:            leaseID,
+		Slug:               slug,
+		CloudID:            instance.ID,
+		RequiredLabels:     map[string]string{"crabbox": "true", "provider": providerName, "lease": leaseID, "slug": slug, "instance_id": instance.ID},
+	}
+	verifyLiveOwnership := func() error {
+		live, err := client.GetInstance(ctx, instance.ID)
+		if err != nil {
+			return fmt.Errorf("verify live morph instance %s ownership: %w", instance.ID, err)
+		}
+		if live.ID != instance.ID || !morphIsManaged(live) || live.Metadata["lease"] != leaseID || live.Metadata["slug"] != slug || live.Metadata["instance_id"] != instance.ID {
+			return exit(2, "morph instance %s ownership changed before release", instance.ID)
+		}
 		return nil
 	}
-	claim, claimOK, err := resolveLeaseClaimForProvider(leaseID, providerName)
+	claim, err := shared.RequireExactClaim(binding)
 	if err != nil {
-		return err
+		legacy, exists, readErr := core.ReadLeaseClaimWithPresence(leaseID)
+		if readErr != nil {
+			return readErr
+		}
+		if !exists || legacy.ProviderScope != "" {
+			return err
+		}
+		legacyBinding := binding
+		legacyBinding.ProviderScope = ""
+		legacyBinding.RequiredLabels = map[string]string{"provider": providerName, "lease": leaseID, "slug": slug, "instance_id": instance.ID}
+		if shared.ValidateClaimBinding(legacy, legacyBinding) != nil {
+			return err
+		}
+		if verifyErr := verifyLiveOwnership(); verifyErr != nil {
+			return verifyErr
+		}
+		replacement := legacy
+		replacement.ProviderScope = binding.ProviderScope
+		replacement.Labels = make(map[string]string, len(legacy.Labels)+len(binding.RequiredLabels))
+		for key, value := range legacy.Labels {
+			replacement.Labels[key] = value
+		}
+		for key, value := range binding.RequiredLabels {
+			replacement.Labels[key] = value
+		}
+		if replaceErr := core.ReplaceLeaseClaimIfUnchanged(leaseID, legacy, replacement); replaceErr != nil {
+			return replaceErr
+		}
+		claim, err = shared.RequireExactClaim(binding)
+		if err != nil {
+			return err
+		}
 	}
 	deleteInstance := morphDeleteOnRelease(req.Lease, cfg)
 	if deleteInstance {
-		if err := client.DeleteInstance(ctx, instance.ID); err != nil && !isMorphNotFound(err) {
-			return exit(1, "morph delete instance %s failed: %v", instance.ID, err)
+		if err := shared.RemoveExactClaimAfter(claim, binding, func() error {
+			if err := verifyLiveOwnership(); err != nil {
+				return err
+			}
+			if err := client.DeleteInstance(ctx, instance.ID); err != nil && !isMorphNotFound(err) {
+				return exit(1, "morph delete instance %s failed: %v", instance.ID, err)
+			}
+			return nil
+		}); err != nil {
+			return err
 		}
-		removeLeaseClaim(leaseID)
 		removeStoredTestboxKey(blank(leaseID, instance.ID))
 		return nil
 	}
@@ -421,6 +507,9 @@ func (b *morphLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRe
 	labels := morphLeaseMetadata(cfg, instance, leaseID, req.Lease.Server.Labels["slug"], "paused", true, b.now().UTC(), true)
 	labels["release"] = "pause"
 	pauseAndPersist := func() error {
+		if err := verifyLiveOwnership(); err != nil {
+			return err
+		}
 		if !wasPaused {
 			if err := client.PauseInstance(ctx, instance.ID); err != nil && !isMorphNotFound(err) {
 				return exit(1, "morph pause instance %s failed: %v", instance.ID, err)
@@ -433,11 +522,8 @@ func (b *morphLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRe
 	}
 	instance.Metadata = labels
 	server := morphServer(instance, cfg, leaseID, labels["slug"])
-	if claimOK {
-		_, err = updateLeaseClaimEndpointIfUnchangedAfter(leaseID, claim, server, SSHTarget{}, pauseAndPersist)
-		return err
-	}
-	return pauseAndPersist()
+	_, err = updateLeaseClaimEndpointIfUnchangedAfter(leaseID, claim, server, SSHTarget{}, pauseAndPersist)
+	return err
 }
 
 func (b *morphLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {

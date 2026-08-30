@@ -134,9 +134,56 @@ safe relative file paths instead of globs. Do not pretend a delegated provider
 is SSH-like unless it has a stable SSH contract. If Crabbox cannot run rsync and
 remote commands itself, use `DelegatedRunBackend`.
 
+`--no-sync` is validated by each adapter, not inferred from `FeatureArchiveSync`:
+some SDK/CLI transports support it without archive sync. An adapter that cannot
+skip transfer must reject it before acquisition or provider execution. Blacksmith
+Testbox does this because its native run command has no supported sync bypass.
+
 ### Optional interfaces
 
 Add optional capabilities as small interfaces instead of widening every backend.
+
+Provider-specific run admission belongs on the provider, beside config validation:
+
+```go
+type RunOptionsValidator interface {
+	ValidateRunOptions(RunRequest) error
+}
+```
+
+This hook must be side-effect-free: no `Configure`, backend creation, process
+spawning, credential lookup, lease resolution, state writes, or network calls.
+Core combines it with the generic delegated routing guard before normal run
+configuration and before prewarm configures or warms anything for a probe.
+Jobs also use this contract before acquisition or dry-run planning.
+Prewarm projects the actual follow-up flags and config, excluding creation-only
+flags. Its request has `ReuseLease: true` and an empty `ID` until allocation;
+a nonempty `ID` also implies reuse. The display placeholder `<lease>` is never
+a lease identifier. Effective lease settings and opaque provider routing are
+carried in `Options`. `NoSync`, `NoHydrate`, shell mode, and command intent are
+preserved. Runtime-only fields such as `Repo`, `RunID`, and `Env` may be absent;
+concrete claim/cache-volume checks remain in the subsequent run. Normal run
+retains its existing earlier output, environment, and profile preflights.
+
+Backends should reuse their provider's rejection policy defensively before any
+activity in direct `Run` calls. Skipping sync does not skip provider
+initialization; hydration intent is separate.
+
+Requested fixed lease IDs are optional:
+
+```go
+type IdempotentLeaseIDBackend interface {
+	SupportsRequestedLeaseID() bool
+}
+```
+
+Direct AWS, Machine0, and local-container backends implement this capability;
+coordinator-backed leases support it through the coordinator wrapper. External
+backends support it only when their configured protocol explicitly advertises
+idempotent lease IDs. `crabbox warmup --lease-id` rejects other backends before
+provisioning. Built-in direct adapters reuse `core.AcquireFixedLease` for
+durable intent and replay mechanics while keeping resource creation,
+reconciliation, and identity validation provider-owned.
 
 Cleanup is optional:
 
@@ -386,8 +433,9 @@ Acquisition already shares the mechanics that have provider-neutral contracts:
 - `core.AcquireFixedLease`, `core.FixedAcquireOptions`,
   `core.FixedLeaseBinding`, and `core.FixedLeaseKind` already share durable
   fixed-ID intent locking, replay validation, acquired-state commit, and
-  terminal tombstones for AWS and Machine0. Their adapters still own exact
-  create attempts, provider reconciliation, and immutable resource identity.
+  terminal tombstones for AWS, Machine0, and local-container. Their adapters
+  still own exact create attempts, provider reconciliation, and immutable
+  resource identity.
 
 The transaction boundary deliberately remains inside each adapter:
 
@@ -415,9 +463,9 @@ The transaction boundary deliberately remains inside each adapter:
   back failed creation even with `Keep`, so retention cannot be a global rule.
 - **`OnAcquired` placement:** Lume acknowledges an early provisional identity,
   Vast acknowledges after readiness but before its final claim, and fixed-ID
-  Machine0 acknowledges only after durable commit and lock release. Moving the
-  callback changes when controller ownership transfers and which transaction
-  must clean up if acknowledgment fails.
+  Machine0 and local-container acknowledge only after durable commit and lock
+  release. Moving the callback changes when controller ownership transfers and
+  which transaction must clean up if acknowledgment fails.
 - **Security-critical bootstrap ordering:** Hyper-V locks down guest SSH before
   attaching networking; Lume pins authenticated guest identity before accepting
   SSH; Vast probes initial access, installs required tools, and only then proves
@@ -671,7 +719,10 @@ Checkpoint-related features are reserved for versioned workspaces:
 - `FeatureRunSession`: exposes a provider-neutral run-session handle. Delegated
   adapters may return it in `RunResult`; an explicitly opted-in SSH-lease
   provider may have core emit it after claim recording. SSH participants must
-  also advertise `FeatureSSH` and `FeatureCleanup`.
+  also advertise `FeatureSSH` and `FeatureCleanup`. AWS and `local-container`
+  use this core-owned SSH contract; providers do not construct the handle
+  themselves. A brokered run ID identifies coordinator history, while a direct
+  run ID is only local correlation metadata.
 - `FeatureRunArtifacts`: delegated provider can validate and collect bounded run
   artifact globs after a successful command, including required artifacts.
 - `FeatureRunDownloads`: delegated provider can materialize bounded single-file

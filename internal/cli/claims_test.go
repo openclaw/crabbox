@@ -220,6 +220,10 @@ func TestClaimsListSizeLimitDoesNotChangeRuntimeClaimReader(t *testing.T) {
 	if claim.LeaseID != leaseID {
 		t.Fatalf("runtime claim=%#v", claim)
 	}
+	snapshot, err := snapshotLeaseClaims()
+	if err != nil || len(snapshot.invalid) != 0 || len(snapshot.claims) != 1 || snapshot.claims[0].LeaseID != leaseID {
+		t.Fatalf("runtime snapshot rejected compatible large claim: snapshot=%#v err=%v", snapshot, err)
+	}
 }
 
 func TestLocalClaimInventoryBoundsUnknownOrGrowingRead(t *testing.T) {
@@ -251,7 +255,7 @@ func TestClaimsListClaimStoreFailureIsNotMalformedPartialOutput(t *testing.T) {
 	}
 }
 
-func TestRuntimeClaimsSnapshotRetainsLockedReader(t *testing.T) {
+func TestRuntimeClaimsSnapshotDoesNotCreateLocks(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	writeClaimsListFixture(t, "cbx_runtime.json", leaseClaim{LeaseID: "cbx_runtime", Provider: "local-container"})
 
@@ -266,9 +270,8 @@ func TestRuntimeClaimsSnapshotRetainsLockedReader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lockPath := filepath.Join(stateDir, "claim-locks", "cbx_runtime.json.lock")
-	if info, err := os.Stat(lockPath); err != nil || !info.Mode().IsRegular() {
-		t.Fatalf("runtime claim lock missing or invalid: info=%v err=%v", info, err)
+	if _, err := os.Stat(filepath.Join(stateDir, "claim-locks")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("runtime snapshot created lock state: %v", err)
 	}
 }
 
@@ -308,23 +311,14 @@ func TestLeaseClaimsSnapshotBoundaryHandling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lockEntries, err := os.ReadDir(filepath.Join(stateDir, "claim-locks"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	gotLocks := make([]string, 0, len(lockEntries))
-	for _, entry := range lockEntries {
-		gotLocks = append(gotLocks, entry.Name())
-	}
-	wantLocks := []string{"cbx_empty.json.lock", "cbx_mismatch.json.lock", "cbx_skip.json.lock"}
-	if !reflect.DeepEqual(gotLocks, wantLocks) {
-		t.Fatalf("runtime locks=%q want=%q", gotLocks, wantLocks)
+	if _, err := os.Stat(filepath.Join(stateDir, "claim-locks")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("runtime snapshot created lock state: %v", err)
 	}
 
-	if claim, exists, err := readLeaseClaimSnapshotLockedWithPresence("bad/name"); err != nil || exists || claim.LeaseID != "" {
+	if claim, exists, err := readLeaseClaimRuntimeSnapshotWithPresence("bad/name"); err != nil || exists || claim.LeaseID != "" {
 		t.Fatalf("invalid ID read=(%#v, %t, %v)", claim, exists, err)
 	}
-	if claim, exists, err := readLeaseClaimSnapshotLockedWithPresence("cbx_missing"); err != nil || exists || claim.LeaseID != "" {
+	if claim, exists, err := readLeaseClaimRuntimeSnapshotWithPresence("cbx_missing"); err != nil || exists || claim.LeaseID != "" {
 		t.Fatalf("missing read=(%#v, %t, %v)", claim, exists, err)
 	}
 

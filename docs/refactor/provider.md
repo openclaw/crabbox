@@ -220,11 +220,77 @@ type JSONListBackend interface {
 }
 ```
 
+`FeatureRunSession` is also an explicit capability contract. Delegated
+providers return their handle in `RunResult`; opted-in SSH providers such as AWS
+and `local-container` rely on core to write the handle after exact claim and
+coordinator run recording. Do not add provider-specific handle construction.
+
 Provider-native checkpoints/images are also expressed through optional hooks
 (`NativeCheckpointProvider`, `NativeCheckpointForkProvider`) rather than core
 provider-name checks, and config routing/server-type defaults through
 `ProviderRouter` and `ProviderServerTypeProvider`. New providers implement only
 the interfaces they need.
+
+### Generated command routing and claim scope
+
+`ProviderCommandRouter.CommandRouting` owns the provider's non-secret follow-up
+selectors. Its request carries the purpose, lease ID, and resolved SSH target;
+static-host fallback stays in the SSH adapter. It returns `CommandRouting{Args, Env}`; environment assignments are
+never argv. Core adds canonical provider names, target/Windows mode, network and
+lease selectors, renders shell commands, and passes the environment separately
+when starting a WebVNC daemon. In-process desktop-to-WebVNC calls retain the
+environment in which their config was resolved. Endpoint credentials stay out
+of generated commands: core's shared URL sanitizer removes userinfo, credential query parameters,
+and fragments while retaining harmless endpoint parameters, scheme spelling,
+and empty query markers used by legacy claim scopes. Adapters apply it only to
+URL-valued fields, including endpoints without a scheme. Opaque paths and other
+selectors are never guessed to be URLs. Credential contents must never be
+returned by the hook.
+
+The purpose is explicit because release and recovery have different contracts:
+
+- `reconnect` is used by WebVNC daemons and native VNC guidance. KubeVirt pins
+  its resolved SSH settings and release policy, including false.
+- `rescue` is used by printed desktop/WebVNC repair commands and the in-process
+  desktop launch handoff. It has reconnect semantics, but External may use its
+  restricted simple-command flag fallback when no routing file exists.
+- `retry` supplies failed-run retry and SSH guidance. Like `stop`, it carries
+  only explicit release-policy overrides for providers that otherwise recover
+  the policy from resource metadata. KubeVirt must not turn an ambient default
+  into a cleanup override here. Coder retains its existing always-explicit
+  delete-on-release selector.
+- `stop` supplies generated cleanup commands. External reconnect, retry, and
+  stop prefer the configured routing file or canonical per-lease path and bind
+  the child to its digest; missing/unreadable state produces an invalid empty
+  digest, not an unbound load.
+
+KubeVirt and Sealos preserve inherited multi-file `KUBECONFIG` in `Env` when no
+provider kubeconfig is set. Their explicit kubeconfig flag suppresses that
+environment override. Azure account/resource-group/location, GCP project/zone,
+and AWS region use the existing public environment selectors where no matching
+CLI flags exist. Stop/retry retain the same endpoint and SSH route fields as
+reconnect; they do not need a second provider-name switch in core.
+
+`ProviderClaimScoper.ClaimScope` owns config-derived local claim identity. Core
+treats the returned string as opaque, including its historical whitespace and
+endpoint normalization. Azure, GCP, E2B/CubeSandbox, Namespace Instance, Phala,
+Proxmox, and Railway no longer depend on a core fallback switch. Do not replace
+their differing endpoint formats with a new universal normalizer: existing
+claims must keep matching, including schemes, ports, query handling, and legacy
+incomplete-route behavior. E2B and CubeSandbox share their existing compatible
+normalizer. Runtime-discovered scope remains the backend/client's responsibility;
+for example the Azure API client supplies its resolved account scope.
+
+Some legacy endpoint scopes contain bytes that generated commands cannot safely
+repeat: Railway retains fragments and credential query fields, E2B/CubeSandbox
+and Proxmox retain opaque schemeless forms, Namespace Instance has legacy opaque
+endpoint forms, and Morph can retain URL userinfo.
+These adapters omit an endpoint override when sanitization would change that
+identity. Follow-ups then require the original private endpoint configuration,
+as they require authentication configuration; they never print the sensitive
+endpoint or migrate its claim key. Other endpoint scopes still cannot match the
+original claim. Self-contained replay of these legacy forms would require a
+separate private routing-state contract, outside this interface refactor.
 
 ## Runtime
 
@@ -338,8 +404,8 @@ const (
 `FeatureRunSession` is provider-neutral and explicitly opt-in. A delegated
 backend may return a validated handle in `RunResult`; an SSH-lease provider may
 instead have core emit the handle after exact claim recording only when its
-spec also advertises `FeatureSSH` and `FeatureCleanup`. Only `local-container`
-currently opts into that SSH-lease contract.
+spec also advertises `FeatureSSH` and `FeatureCleanup`. AWS and
+`local-container` currently opt into that SSH-lease contract.
 
 Actions-runner hydration is **not** modeled as a provider feature. That workflow
 is core-over-SSH after a Linux or Windows lease exists, so `--actions-runner`
@@ -352,7 +418,7 @@ representative slice:
 ```text
 provider                kind           coordinator  features
 hetzner                 ssh-lease      supported    ssh, crabbox-sync, cleanup, desktop, browser, code, tailscale
-aws                     ssh-lease      supported    ssh, crabbox-sync, cleanup, desktop, browser, code
+aws                     ssh-lease      supported    ssh, crabbox-sync, cleanup, desktop, browser, code, run-session
 azure                   ssh-lease      supported    ssh, crabbox-sync, cleanup, desktop, browser, code, tailscale
 gcp                     ssh-lease      supported    ssh, crabbox-sync, cleanup, tailscale
 ssh                     ssh-lease      never        ssh, crabbox-sync, desktop, browser, code

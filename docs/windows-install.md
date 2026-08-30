@@ -1,5 +1,14 @@
 # Install Crabbox on Windows
 
+The native CLI requires **Windows 10 version 1709 or later, or Windows Server
+2019 or later**. Claim, config, and controller state publication uses native
+POSIX rename/delete semantics to preserve open readers while replacement and
+cleanup proceed, with write-through metadata and explicit file flushing.
+Older Windows versions and filesystems that cannot provide these operations
+are unsupported; Crabbox reports errors instead of falling back to weaker
+snapshot or durability guarantees. Transfer tools may require a newer Windows
+version than this native CLI minimum.
+
 The supported Windows client setup uses the native `crabbox.exe` from the
 latest GitHub Release, native Windows OpenSSH for Crabbox control commands,
 and one of two matched transfer toolchains:

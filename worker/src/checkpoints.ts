@@ -1345,8 +1345,7 @@ export async function resolveRejectedCheckpointProvisioning(
       !checkpoint ||
       checkpoint.id !== checkpointID ||
       checkpoint.state !== "ready" ||
-      checkpoint.owner !== principal.owner ||
-      !sameOrgIdentityKey(checkpoint.org, principal.org) ||
+      !checkpointVisibleTo(checkpoint, principal) ||
       !claim ||
       claim.checkpointID !== checkpointID ||
       claim.tokenHash !== tokenHash ||
@@ -1447,6 +1446,64 @@ export async function renewCheckpointUse(
   return { checkpoint, expiresAt };
 }
 
+async function completedCheckpointUse(
+  transaction: CoordinatorStorageView,
+  checkpointID: string,
+  tokenHash: string,
+  principal: CheckpointPrincipal,
+  attemptID: string,
+  completion: { requestedLeaseID: string; generation: number; createdAt: string },
+): Promise<CoordinatorCheckpointRecord | undefined> {
+  const checkpoint = await transaction.get<CoordinatorCheckpointRecord>(
+    checkpointKey(checkpointID),
+  );
+  const attempt = await transaction.get<CreateAttemptRecord>(
+    `create-attempt:${completion.requestedLeaseID}`,
+  );
+  const lease = attempt?.canonicalLeaseID
+    ? await transaction.get<LeaseRecord>(`lease:${attempt.canonicalLeaseID}`)
+    : undefined;
+  if (
+    !checkpoint ||
+    !checkpointVisibleTo(checkpoint, principal) ||
+    checkpoint.createdAt !== completion.createdAt ||
+    (checkpoint.generation !== completion.generation &&
+      !(
+        checkpoint.generation === completion.generation + 1 &&
+        ["deleting", "delete-pending", "deleted"].includes(checkpoint.state)
+      )) ||
+    !attempt ||
+    attempt.version !== 1 ||
+    attempt.requestedLeaseID !== completion.requestedLeaseID ||
+    attempt.token !== attemptID ||
+    attempt.state === "canceled" ||
+    attempt.checkpointID !== checkpointID ||
+    attempt.checkpointUseClaimHash !== tokenHash ||
+    attempt.owner !== principal.owner ||
+    !sameOrgIdentityKey(attempt.org ?? "", principal.org) ||
+    !lease ||
+    lease.state !== "active" ||
+    lease.id !== attempt.canonicalLeaseID ||
+    lease.checkpointID !== checkpointID ||
+    lease.createAttemptID !== attemptID ||
+    !attempt.generation ||
+    lease.createAttemptGeneration !== attempt.generation ||
+    (attempt.cloudID !== undefined && lease.cloudID !== attempt.cloudID) ||
+    lease.owner !== principal.owner ||
+    !sameOrgIdentityKey(lease.org, principal.org) ||
+    (lease.id !== completion.requestedLeaseID &&
+      !(
+        checkpoint.provider === "aws" &&
+        checkpoint.target === "macos" &&
+        lease.provider === "aws" &&
+        lease.target === "macos"
+      ))
+  )
+    return undefined;
+  // Reconciliation already recorded completion; replay must not advance usage twice.
+  return checkpoint;
+}
+
 export async function finishCheckpointUse(
   storage: CoordinatorStorage,
   checkpointID: string,
@@ -1454,9 +1511,27 @@ export async function finishCheckpointUse(
   principal: CheckpointPrincipal,
   complete: boolean,
   attemptID?: string,
+  completion?: { requestedLeaseID: string; generation: number; createdAt: string },
 ): Promise<CoordinatorCheckpointRecord> {
   const tokenHash = await sha256Hex(token);
   return storage.transaction(async (transaction) => {
+    let resolvedAttemptID = attemptID;
+    if (
+      complete &&
+      attemptID &&
+      completion &&
+      !(await transaction.get(checkpointUseKey(checkpointID, tokenHash)))
+    ) {
+      const recovered = await completedCheckpointUse(
+        transaction,
+        checkpointID,
+        tokenHash,
+        principal,
+        attemptID,
+        completion,
+      );
+      if (recovered) return recovered;
+    }
     const { checkpoint: previous, claim } = await validatedUseClaim(
       transaction,
       checkpointID,
@@ -1469,12 +1544,21 @@ export async function finishCheckpointUse(
         "checkpoint use can complete only after exact lease provisioning",
       );
     }
-    if (complete && !attemptID) {
-      const lease = await transaction.get<LeaseRecord>(`lease:${claim.leaseID}`);
+    if (complete && !resolvedAttemptID) {
       const attempt = await transaction.get<CreateAttemptRecord>(`create-attempt:${claim.leaseID}`);
+      const lease = await transaction.get<LeaseRecord>(
+        `lease:${attempt?.canonicalLeaseID ?? claim.leaseID}`,
+      );
       if (
         !lease ||
         lease.state !== "active" ||
+        (lease.id !== claim.leaseID &&
+          !(
+            previous.provider === "aws" &&
+            previous.target === "macos" &&
+            lease.provider === "aws" &&
+            lease.target === "macos"
+          )) ||
         lease.checkpointID !== checkpointID ||
         lease.createAttemptID !== claim.attemptID ||
         !attempt ||
@@ -1491,15 +1575,18 @@ export async function finishCheckpointUse(
           "checkpoint lease provisioning has not completed successfully",
         );
       }
-      attemptID = claim.attemptID;
+      resolvedAttemptID = claim.attemptID;
     }
-    if (claim.state === "provisioning" && claim.attemptID !== attemptID) {
+    if (claim.state === "provisioning" && claim.attemptID !== resolvedAttemptID) {
       throw new CheckpointError(
         "checkpoint_in_use",
         "checkpoint use claim is bound to active lease provisioning",
       );
     }
-    if (attemptID && (claim.state !== "provisioning" || claim.attemptID !== attemptID)) {
+    if (
+      resolvedAttemptID &&
+      (claim.state !== "provisioning" || claim.attemptID !== resolvedAttemptID)
+    ) {
       throw new CheckpointError(
         "checkpoint_claim_invalid",
         "checkpoint use claim does not own this lease attempt",
@@ -2045,8 +2132,21 @@ export async function pinCheckpointPromotion(
   provider: CoordinatorCheckpointProvider,
   image: ProviderImage,
   catalogKey: string,
+  expected?: Pick<CoordinatorCheckpointRecord, "id" | "generation">,
 ): Promise<void> {
   const checkpoint = await findManagedCheckpointImage(transaction, provider, image);
+  if (
+    (expected &&
+      (!checkpoint ||
+        checkpoint.id !== expected.id ||
+        checkpoint.generation !== expected.generation)) ||
+    (!checkpoint && (image.checkpointOwnershipHash || image.checkpointSourceLeaseID))
+  ) {
+    throw new CheckpointError(
+      "checkpoint_delete_in_progress",
+      "checkpoint ownership changed before image promotion committed",
+    );
+  }
   if (!checkpoint) return;
   if (checkpoint.state !== "ready" || checkpoint.deleteClaim) {
     throw new CheckpointError(
@@ -2107,15 +2207,21 @@ export async function expireCheckpointClaims(
       const current = await pending;
       const expired = Date.parse(claim.expiresAt) <= now;
       if (claim.state === "provisioning") {
-        const lease = claim.leaseID
-          ? await transaction.get<LeaseRecord>(`lease:${claim.leaseID}`)
-          : undefined;
         const attempt = claim.leaseID
           ? await transaction.get<CreateAttemptRecord>(`create-attempt:${claim.leaseID}`)
           : undefined;
+        const canonicalLeaseID = attempt?.canonicalLeaseID ?? claim.leaseID;
+        const lease = canonicalLeaseID
+          ? await transaction.get<LeaseRecord>(`lease:${canonicalLeaseID}`)
+          : undefined;
         const exactLease = Boolean(
           lease &&
-          lease.id === claim.leaseID &&
+          lease.id === canonicalLeaseID &&
+          (lease.id === claim.leaseID ||
+            (current.provider === "aws" &&
+              current.target === "macos" &&
+              lease.provider === "aws" &&
+              lease.target === "macos")) &&
           lease.checkpointID === current.id &&
           lease.createAttemptID === claim.attemptID &&
           lease.owner === claim.owner &&
@@ -2125,7 +2231,11 @@ export async function expireCheckpointClaims(
           attempt &&
           attempt.requestedLeaseID === claim.leaseID &&
           attempt.token === claim.attemptID &&
-          (!attempt.canonicalLeaseID || attempt.canonicalLeaseID === claim.leaseID) &&
+          (!attempt.canonicalLeaseID ||
+            attempt.canonicalLeaseID === claim.leaseID ||
+            (lease?.provider === "aws" &&
+              lease.target === "macos" &&
+              attempt.canonicalLeaseID === lease.id)) &&
           attempt.owner === claim.owner &&
           sameOrgIdentityKey(attempt.org ?? "", claim.org) &&
           ((attempt.checkpointID === undefined && attempt.checkpointUseClaimHash === undefined) ||

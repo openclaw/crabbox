@@ -160,6 +160,8 @@ executables or assets, especially `crabbox-apple-vm-helper`, and it is not the
 signed/notarized prebuilt distribution. Use Homebrew or a release archive for
 complete platform capabilities, notably the Apple VM provider on Apple Silicon.
 
+The native Windows CLI requires Windows 10 version 1709+ or Windows Server
+2019+ for snapshot-preserving state replacement and cleanup.
 Supported WSL2 and x64 no-WSL Windows transfer selection requires a build from
 current `main` or Crabbox v0.42.1 and newer. Follow the
 [Windows installation guide](docs/windows-install.md) for the supported setup.
@@ -278,7 +280,7 @@ from the CLI.
 | [Parallels](docs/providers/parallels.md) — `parallels` | Linux, macOS, Windows · direct | Local or remote macOS host; checkpoint/fork/restore/snapshot. |
 | [Proxmox](docs/providers/proxmox.md) — `proxmox` | Linux · direct | Clone QEMU templates on a private Proxmox VE cluster. |
 | [XCP-ng](docs/providers/xcp-ng.md) — `xcp-ng` | Linux · direct | Self-hosted XCP-ng pool on dedicated x86_64 server hardware. |
-| [Incus](docs/providers/incus.md) — `incus` | Linux · direct | SSH leases through the official Incus Go client. |
+| [Incus](docs/providers/incus.md) — `incus` | Linux · direct | Idempotent SSH leases and private container disk checkpoints through the official Incus Go client. |
 | [Firecracker](docs/providers/firecracker.md) — `firecracker` | Linux · direct | Self-hosted Firecracker microVM leases on a Linux KVM host with prepared kernel, rootfs, and CNI. |
 | [Static SSH](docs/providers/ssh.md) — `ssh` (`static`, `static-ssh`) | Linux, macOS, Windows · direct | Existing machines; no provisioning. |
 | [Local Container](docs/providers/local-container.md) — `local-container` (`docker`, `container`, `local-docker`) | Linux · direct | Local Docker-compatible runtime (Docker Desktop, OrbStack, Colima, Podman). |
@@ -547,7 +549,10 @@ or `--capture-stderr <path>`. Add `--preflight` for a remote capability
 snapshot, `--keep-on-failure` to SSH into the exact failed one-shot lease, or
 `--download remote=local` to copy a successful-run artifact back. Failed
 SSH-backed and Blacksmith delegated runs save local `.crabbox/captures/*.tar.gz`
-bundles by default. Captured files are not redacted by Crabbox.
+bundles by default, falling back to the Crabbox user state directory when the
+project destination is unwritable. The reported `failure-bundle local=...`
+path identifies the saved bundle; see [local capture storage](docs/observability.md#capturing-run-output-locally).
+Captured files are not redacted by Crabbox.
 
 Optional Tailscale reachability for managed Linux leases:
 
@@ -628,7 +633,9 @@ npm run check:node --prefix worker
 npm run build:node --prefix worker
 
 # Repository scripts
-node --test scripts/*.test.js
+node scripts/generate-linux-readiness.mjs --check
+node scripts/generate-bootstrap.mjs --check
+node --test scripts/*.test.js scripts/*.test.mjs
 
 # Docs
 scripts/check-docs.sh
@@ -648,6 +655,12 @@ Developer ID sign/notarize the macOS candidates locally, verify the exact draft
 on native Apple Silicon and Intel runners from protected-default code, then
 authorize publication and the Homebrew update as separate gates. See
 [Release engineering](docs/RELEASING.md).
+
+Git-overlay integration tests use real Git with task-owned local and loopback
+origins. Their local SSH stand-ins isolate Git authentication settings and
+disable interactive credential requests, including during ordinary seed
+fallback. A credential-helper/askpass canary guards this test-only boundary;
+the separate production overlay security tests still inject hostile Git config.
 
 Cloudflare, Node/PostgreSQL, container, ingress, secrets, and DNS deployment live
 in [docs/infrastructure.md](docs/infrastructure.md). The dedicated ECS Fargate

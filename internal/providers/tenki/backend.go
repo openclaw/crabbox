@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -172,17 +173,35 @@ func (b *tenkiBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTa
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	lease, err := b.prepareLease(ctx, cfg, session, leaseID, slug, req.Keep, true)
-	if err != nil {
-		if !req.Keep {
-			_ = b.terminateSession(context.Background(), session.ID)
+	claimed := false
+	cleanupFailedAcquire := func() {
+		if req.Keep {
+			return
 		}
+		terminate := func() error { return b.terminateSession(context.Background(), session.ID) }
+		if !claimed {
+			_ = terminate()
+			return
+		}
+		binding := b.claimBinding(leaseID, slug, session.ID)
+		claim, err := shared.RequireExactClaim(binding)
+		if err == nil {
+			_ = shared.RemoveExactClaimAfter(claim, binding, terminate)
+		}
+	}
+	server := b.sessionToServer(cfg, session, leaseID, slug, req.Keep)
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, SSHTarget{}, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+		cleanupFailedAcquire()
 		return LeaseTarget{}, err
 	}
-	if err := claimLeaseForRepoProvider(leaseID, slug, tenkiProvider, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
-		if !req.Keep {
-			_ = b.terminateSession(context.Background(), session.ID)
-		}
+	claimed = true
+	lease, err := b.prepareLease(ctx, cfg, session, leaseID, slug, req.Keep, true)
+	if err != nil {
+		cleanupFailedAcquire()
+		return LeaseTarget{}, err
+	}
+	if err := updateLeaseClaimEndpoint(leaseID, lease.Server, lease.SSH); err != nil {
+		cleanupFailedAcquire()
 		return LeaseTarget{}, err
 	}
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s tenki_session=%s state=ready\n", leaseID, session.ID)
@@ -212,10 +231,19 @@ func (b *tenkiBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 		return LeaseTarget{}, err
 	}
 	if req.Repo.Root != "" {
-		if err := claimLeaseForRepoProvider(leaseID, slug, tenkiProvider, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
-			return LeaseTarget{}, err
+		if !tenkiHasExactOwnership(session, leaseID, slug) {
+			adopted := req.Reclaim
+			if previous, ok, err := resolveLeaseClaim(leaseID); err != nil {
+				return LeaseTarget{}, err
+			} else if ok && previous.Labels["tenki_ownership"] == "adopted" && previous.CloudID == session.ID {
+				adopted = true
+			}
+			if !adopted {
+				return LeaseTarget{}, exit(4, "Tenki session %q has incomplete Crabbox ownership metadata; use --reclaim to adopt it", session.ID)
+			}
+			lease.Server.Labels["tenki_ownership"] = "adopted"
 		}
-		if err := updateLeaseClaimEndpoint(leaseID, lease.Server, lease.SSH); err != nil {
+		if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
 			return LeaseTarget{}, err
 		}
 	}
@@ -294,12 +322,53 @@ func (b *tenkiBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest
 		}
 		sessionID = session.ID
 	}
-	if err := b.terminateSession(ctx, sessionID); err != nil {
+	binding := b.claimBinding(req.Lease.LeaseID, req.Lease.Server.Labels["slug"], sessionID)
+	claim, err := shared.RequireExactClaim(binding)
+	if err != nil {
 		return err
 	}
-	removeLeaseClaim(req.Lease.LeaseID)
+	if err := shared.RemoveExactClaimAfter(claim, binding, func() error {
+		session, err := b.getSession(ctx, sessionID)
+		if err != nil {
+			return err
+		}
+		if session.ID != sessionID {
+			return exit(4, "refusing to terminate Tenki session %q: live session identity is %q", sessionID, session.ID)
+		}
+		liveLeaseID, _ := tenkiLeaseMetadata(session)
+		if liveLeaseID != "" && liveLeaseID != req.Lease.LeaseID {
+			return exit(4, "refusing to terminate Tenki session %q: live lease %q does not match %q", sessionID, liveLeaseID, req.Lease.LeaseID)
+		}
+		if !tenkiHasExactOwnership(session, req.Lease.LeaseID, claim.Slug) && claim.Labels["tenki_ownership"] != "adopted" {
+			return exit(4, "refusing to terminate Tenki session %q without exact Crabbox ownership metadata or explicit adoption", sessionID)
+		}
+		if project := claim.Labels["project_id"]; project != "" && session.ProjectID != project {
+			return exit(4, "refusing to terminate Tenki session %q: project does not match its ownership claim", sessionID)
+		}
+		return b.terminateSession(ctx, sessionID)
+	}); err != nil {
+		return err
+	}
 	fmt.Fprintf(b.rt.Stderr, "released lease=%s tenki_session=%s\n", req.Lease.LeaseID, sessionID)
 	return nil
+}
+
+func (b *tenkiBackend) claimBinding(leaseID, slug, sessionID string) shared.ClaimBinding {
+	return shared.ClaimBinding{
+		Provider:           tenkiProvider,
+		ProviderScope:      core.ProviderClaimScope(tenkiProvider, b.configForRun()),
+		ExactProviderScope: true,
+		LeaseID:            leaseID,
+		Slug:               slug,
+		CloudID:            sessionID,
+		RequiredLabels:     map[string]string{"tenki_session_id": sessionID},
+	}
+}
+
+func tenkiHasExactOwnership(session tenkiSession, leaseID, slug string) bool {
+	return session.Metadata[tenkiMetadataProvider] == tenkiProvider &&
+		session.Metadata[tenkiMetadataLease] == leaseID &&
+		session.Metadata[tenkiMetadataSlug] == slug
 }
 
 func (b *tenkiBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {

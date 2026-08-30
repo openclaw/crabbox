@@ -56,6 +56,44 @@ func TestFixedMachine0ClaimProviderCanonicalizes(t *testing.T) {
 	}
 }
 
+func TestFixedLocalContainerClaimProviderCanonicalizesWithoutOverwritingMarker(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_abcdef123465"
+	err := withDurableLeaseClaimLock(leaseID, func(claim *leaseClaim, _ bool, persist func() error) error {
+		claim.LeaseID = leaseID
+		claim.Slug = "fixed-local-container"
+		claim.Provider = FixedLocalContainerClaimProvider
+		claim.ProviderScope = "runtime:docker/context:default"
+		claim.RepoRoot = "/repo"
+		claim.FixedCreateIntent = &FixedCreateIntent{
+			Version: 1, Fingerprint: strings.Repeat("a", 64), ProviderScope: claim.ProviderScope,
+			Slug: claim.Slug, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), State: "acquired",
+		}
+		return persist()
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := canonicalClaimProvider(FixedLocalContainerClaimProvider); got != "local-container" {
+		t.Fatalf("fixed local-container marker canonicalized to %q", got)
+	}
+	resolved, ok, exact, err := resolveLeaseClaimForProviderWithExact(leaseID, "local-container")
+	if err != nil || !ok || !exact || resolved.Provider != FixedLocalContainerClaimProvider {
+		t.Fatalf("resolved=%#v ok=%t exact=%t err=%v", resolved, ok, exact, err)
+	}
+	if err := claimLeaseForRepoProvider(leaseID, "fixed-local-container", "local-container", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	after, exists, err := readLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists || after.Provider != FixedLocalContainerClaimProvider {
+		t.Fatalf("runtime local-container claim update overwrote marker: claim=%#v exists=%t err=%v", after, exists, err)
+	}
+	peer := bridgePeerFromClaim(after, TransportNone)
+	if peer.Provider != "local-container" {
+		t.Fatalf("fixed marker displayed as provider %q", peer.Provider)
+	}
+}
+
 func TestClaimEndpointReservationDeadlineStartsAfterClaimLockAcquired(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	const leaseID = "cbx_reservation_lock"
@@ -471,19 +509,6 @@ func TestClaimLeaseTargetForConfigStoresUnattachedProviderResource(t *testing.T)
 	}
 }
 
-func TestAzureProviderClaimScopeRequiresCompleteRoute(t *testing.T) {
-	cfg := baseConfig()
-	cfg.AzureSubscription = " TEST-SUB "
-	cfg.AzureResourceGroup = " Production-RG "
-	if got, want := providerClaimScope("azure", cfg), "subscription:test-sub|resource-group:production-rg"; got != want {
-		t.Fatalf("providerClaimScope(azure)=%q, want %q", got, want)
-	}
-	cfg.AzureResourceGroup = ""
-	if got := providerClaimScope("azure", cfg); got != "" {
-		t.Fatalf("incomplete azure scope=%q, want empty", got)
-	}
-}
-
 func TestClaimLeaseTargetForConfigIfUnchangedStoresProviderScope(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	cfg := baseConfig()
@@ -522,43 +547,6 @@ func TestClaimLeaseTargetForConfigIfUnchangedStoresProviderScope(t *testing.T) {
 
 	if _, err := claimLeaseTargetForConfigIfUnchanged(leaseID, "", cfg, Server{Provider: "railway", CloudID: "svc-2"}, SSHTarget{}, 0, previous, previousExists); err == nil || !strings.Contains(err.Error(), "claim changed") {
 		t.Fatalf("stale create-if-absent err=%v", err)
-	}
-}
-
-func TestRailwayProviderClaimScopeRequiresCompleteRoute(t *testing.T) {
-	cfg := baseConfig()
-	cfg.Railway.APIURL = "https://railway.example.test/graphql/v2/"
-	cfg.Railway.ProjectID = "proj-1"
-	cfg.Railway.EnvironmentID = "env-1"
-	want := "endpoint:https://railway.example.test/graphql/v2|project:proj-1|environment:env-1"
-	if got := providerClaimScope("railway", cfg); got != want {
-		t.Fatalf("providerClaimScope(railway)=%q, want %q", got, want)
-	}
-	cfg.Railway.EnvironmentID = ""
-	if got := providerClaimScope("railway", cfg); got != "" {
-		t.Fatalf("incomplete railway scope=%q, want empty", got)
-	}
-}
-
-func TestCubeSandboxProviderClaimScopeBindsAPIEndpoint(t *testing.T) {
-	cfg := Config{CubeSandbox: CubeSandboxConfig{APIURL: "HTTPS://CUBE.EXAMPLE.TEST:443/root/"}}
-	if got, want := providerClaimScope("cubesandbox", cfg), "endpoint:https://cube.example.test/root"; got != want {
-		t.Fatalf("providerClaimScope(cubesandbox)=%q, want %q", got, want)
-	}
-	cfg.CubeSandbox.APIURL = ""
-	if got := providerClaimScope("cubesandbox", cfg); got != "" {
-		t.Fatalf("providerClaimScope(cubesandbox)=%q, want empty", got)
-	}
-}
-
-func TestE2BProviderClaimScopeBindsAPIEndpoint(t *testing.T) {
-	cfg := Config{E2B: E2BConfig{APIURL: "HTTPS://API.E2B.APP:443/v1/"}}
-	if got, want := providerClaimScope("e2b", cfg), "endpoint:https://api.e2b.app/v1"; got != want {
-		t.Fatalf("providerClaimScope(e2b)=%q, want %q", got, want)
-	}
-	cfg.E2B.APIURL = ""
-	if got := providerClaimScope("e2b", cfg); got != "" {
-		t.Fatalf("providerClaimScope(e2b)=%q, want empty", got)
 	}
 }
 
@@ -2296,6 +2284,45 @@ func TestClaimLeaseForRepoRejectsOtherRepoUnlessReclaimed(t *testing.T) {
 	}
 	if claim.RepoRoot != secondRepo {
 		t.Fatalf("repo root=%q want %q", claim.RepoRoot, secondRepo)
+	}
+}
+
+func TestClaimLeaseRepositoryOwnerEmptyRootSemantics(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_repo_owner"
+	if err := claimLeaseForRepoProvider(leaseID, "owned", "ssh", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := readLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		run  func() error
+		deny bool
+	}{
+		{name: "repository publisher skips empty root", run: func() error {
+			return claimLeaseForRepo(leaseID, "owned", "", time.Minute, false)
+		}},
+		{name: "config publisher cannot clear owner", deny: true, run: func() error {
+			return claimLeaseTargetForConfig(leaseID, "owned", Config{Provider: "ssh"}, Server{}, SSHTarget{}, time.Minute)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.run()
+			if tc.deny {
+				if err == nil || !strings.Contains(err.Error(), "claimed by repo /repo; use --reclaim") {
+					t.Fatalf("expected repository-owner rejection, got %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			after, err := readLeaseClaim(leaseID)
+			if err != nil || !reflect.DeepEqual(after, initial) {
+				t.Fatalf("empty-root publication changed claim: err=%v before=%#v after=%#v", err, initial, after)
+			}
+		})
 	}
 }
 

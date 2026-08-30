@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { sha256Hex } from "../src/auth";
 import {
   CheckpointError,
+  expireCheckpointClaims,
   backfillFailedCheckpointCreateRecovery,
   checkpointAuditRetentionMS,
   checkpointDueKey,
@@ -20,10 +21,12 @@ import {
   bindCheckpointUseProvisioning as bindCheckpointUseProvisioningTransaction,
   claimCheckpointDeletion,
   findManagedCheckpointImage,
+  finalizeCheckpointDeletion,
   markCheckpointProviderDeleted,
   pinCheckpointPromotion,
   pruneCheckpointTombstone,
   recordCheckpointCreateRecoveryFailure,
+  recordCheckpointDeletionFailure,
   unpinCheckpointPromotion,
 } from "../src/checkpoints";
 import type {
@@ -857,6 +860,123 @@ describe("coordinator-managed checkpoints", () => {
     );
   });
 
+  it.each([
+    { scope: "/subscriptions/other/resourceGroups/checkpoint-rg", allowed: false },
+    { scope: "/subscriptions/sub-123/resourceGroups/other", allowed: false },
+    { scope: "/SUBSCRIPTIONS/SUB-123/RESOURCEGROUPS/CHECKPOINT-RG", allowed: true },
+  ])(
+    "checks durable Azure recovery scope before provider reads: $scope",
+    async ({ scope, allowed }) => {
+      const provider = new AzureProvider({
+        FLEET: {} as DurableObjectNamespace,
+        HETZNER_TOKEN: "",
+      });
+      const ownership = {
+        checkpointID: "chk_azure_scope",
+        tokenHash: "a".repeat(64),
+        sourceLeaseID: leaseID,
+      };
+      const image = providerImage("azure", "recoverable", "disk-snapshot", ownership);
+      const getImage = vi.fn<() => Promise<ProviderImage>>().mockResolvedValue(image);
+      Reflect.set(provider, "clientValue", { providerScope: () => scope, getImage });
+      const checkpoint = {
+        id: ownership.checkpointID,
+        provider: "azure",
+        leaseID,
+        scope: providerScope("azure"),
+        createClaim: { resourceName: "recoverable", tokenHash: ownership.tokenHash },
+      } as CoordinatorCheckpointRecord;
+      const outcome = await provider.recoverCheckpointImage(checkpoint).then(
+        (recovered) => ({ image: recovered }),
+        (error: CheckpointError) => ({ code: error.code }),
+      );
+      expect(outcome).toEqual(allowed ? { image } : { code: "checkpoint_source_mismatch" });
+      expect(getImage).toHaveBeenCalledTimes(Number(allowed));
+    },
+  );
+
+  it.each([
+    { strategy: "image", initiallyAbsent: true },
+    { strategy: "image", initiallyAbsent: false },
+    { strategy: "disk-snapshot", initiallyAbsent: true },
+    { strategy: "disk-snapshot", initiallyAbsent: false },
+  ] as const)(
+    "finalizes AWS $strategy empty-describe absence (initial=$initiallyAbsent)",
+    async ({ strategy, initiallyAbsent }) => {
+      const storage = new CheckpointMemoryStorage();
+      const provider = new AWSProvider(
+        { FLEET: {} as DurableObjectNamespace, HETZNER_TOKEN: "" },
+        "eu-west-1",
+        storage,
+      );
+      const ownership = {
+        checkpointID: "chk_aws_absent",
+        tokenHash: "a".repeat(64),
+        sourceLeaseID: leaseID,
+      };
+      const described = providerImage("aws", "absent-image", strategy, ownership);
+      let deleted = initiallyAbsent;
+      const getImage = vi.fn<(id: string) => Promise<ProviderImage>>(async (id) => {
+        if (deleted)
+          throw new Error(`aws ${id.startsWith("snap-") ? "snapshot" : "image"} not found: ${id}`);
+        return described;
+      });
+      const deleteImage = vi.fn<() => Promise<void>>(async () => {
+        deleted = true;
+      });
+      Reflect.set(provider, "clientValue", {
+        verifiedIdentity: async () => ({ account: "123456789012", region: "eu-west-1" }),
+        getImage,
+        deleteImage,
+      });
+      const checkpoint = {
+        id: ownership.checkpointID,
+        name: "absent-image",
+        provider: "aws",
+        scope: providerScope("aws"),
+        image: { ...described, snapshotIDs: described.snapshots ?? [] },
+      } as CoordinatorCheckpointRecord;
+      await expect(provider.deleteCheckpointImage(checkpoint)).resolves.toBeUndefined();
+      expect(deleteImage).toHaveBeenCalledExactlyOnceWith(described.id, described.snapshots);
+      for (const id of new Set([described.id, ...(described.snapshots ?? [])]))
+        expect(getImage).toHaveBeenCalledWith(id);
+    },
+  );
+
+  it.each([
+    "aws image not found: ami-another-resource",
+    "AccessDenied",
+    "InvalidSnapshot.NotFound",
+  ])("retains AWS deletion ownership on unrelated absence: %s", async (message) => {
+    const storage = new CheckpointMemoryStorage();
+    const provider = new AWSProvider(
+      { FLEET: {} as DurableObjectNamespace, HETZNER_TOKEN: "" },
+      "eu-west-1",
+      storage,
+    );
+    const described = providerImage("aws", "owned-image", "image", {
+      checkpointID: "chk_aws_wrong_absence",
+      tokenHash: "a".repeat(64),
+      sourceLeaseID: leaseID,
+    });
+    const deleteImage = vi.fn<() => Promise<void>>();
+    Reflect.set(provider, "clientValue", {
+      verifiedIdentity: async () => ({ account: "123456789012", region: "eu-west-1" }),
+      getImage: async () => {
+        throw new Error(message);
+      },
+      deleteImage,
+    });
+    const checkpoint = {
+      id: "chk_aws_wrong_absence",
+      provider: "aws",
+      scope: providerScope("aws"),
+      image: { ...described, snapshotIDs: described.snapshots ?? [] },
+    } as CoordinatorCheckpointRecord;
+    await expect(provider.deleteCheckpointImage(checkpoint)).rejects.toThrow(message);
+    expect(deleteImage).not.toHaveBeenCalled();
+  });
+
   it("hides checkpoints and source leases across owners and canonical organizations", async () => {
     const { coordinator } = await checkpointFixture();
     expect((await createCheckpoint(coordinator, "chk_private")).status).toBe(201);
@@ -1374,6 +1494,115 @@ describe("coordinator-managed checkpoints", () => {
       (await coordinator.fetch(checkpointRequest("DELETE", `/v1/checkpoints/${record.id}`))).status,
     ).toBe(200);
   });
+
+  it.each(
+    (["aws", "azure"] as const).flatMap((providerName) =>
+      ["deleting", "delete-pending", "before-commit", "after-metadata", "generation-change"].map(
+        (phase) => ({ providerName, phase }),
+      ),
+    ),
+  )(
+    "refuses $providerName promotion when checkpoint ownership changes $phase",
+    async ({ providerName, phase }) => {
+      const storage = new CheckpointMemoryStorage();
+      const runtime = new CheckpointRuntime(storage);
+      const env = {
+        FLEET: {} as DurableObjectNamespace,
+        HETZNER_TOKEN: "",
+        CRABBOX_DEFAULT_ORG: "example-org",
+        AZURE_TENANT_ID: "tenant",
+        AZURE_CLIENT_ID: "client",
+        AZURE_CLIENT_SECRET: "test-value",
+        AZURE_SUBSCRIPTION_ID: "sub-123",
+      } satisfies Env;
+      const region = providerName === "aws" ? "eu-west-1" : "westeurope";
+      const provider =
+        providerName === "aws"
+          ? new AWSProvider(env, region, storage)
+          : new AzureProvider(env, undefined, storage, region);
+      vi.spyOn(provider, "checkpointScope").mockResolvedValue(providerScope(providerName));
+      vi.spyOn(provider, "createCheckpointImage").mockImplementation(
+        async (_lease, name, _noReboot, strategy, ownership) => ({
+          ...providerImage(providerName, name, strategy, ownership),
+          serverType: "standard-small",
+        }),
+      );
+      const coordinator = new FleetCoordinator(runtime, env, { [providerName]: provider });
+      await storage.put(`lease:${leaseID}`, checkpointLease(providerName));
+      const id = "chk_promotion_race";
+      expect(
+        (
+          await createCheckpoint(
+            coordinator,
+            id,
+            { mode: "manual" },
+            providerName === "aws" ? "image" : "disk-snapshot",
+          )
+        ).status,
+      ).toBe(201);
+      const record = (await storage.get<CoordinatorCheckpointRecord>(checkpointKey(id)))!;
+      const image = (await provider.storedImageMetadata(record.image!.id))!;
+      vi.spyOn(provider, "getImage").mockResolvedValue(image);
+      const promote = provider.promoteImage.bind(provider);
+      const promotion = vi.spyOn(provider, "promoteImage");
+      const finishDeletion = async () => {
+        const claimed = await claimCheckpointDeletion(storage, id, undefined, "manual");
+        await markCheckpointProviderDeleted(storage, id, claimed.token);
+        await finalizeCheckpointDeletion(storage, id, claimed.token);
+      };
+      if (phase === "deleting" || phase === "delete-pending") {
+        const claimed = await claimCheckpointDeletion(storage, id, undefined, "manual");
+        if (phase === "delete-pending")
+          await recordCheckpointDeletionFailure(storage, id, claimed.token, "retry");
+      } else if (phase === "after-metadata") {
+        const metadata = provider.storedImageMetadata.bind(provider);
+        vi.spyOn(provider, "storedImageMetadata").mockImplementation(async (imageID) => {
+          const known = await metadata(imageID);
+          await finishDeletion();
+          return known;
+        });
+      } else {
+        promotion.mockImplementation(async (...args) => {
+          if (phase === "before-commit") await finishDeletion();
+          else
+            await storage.put(checkpointKey(id), { ...record, generation: record.generation + 1 });
+          return promote(...args);
+        });
+      }
+      const catalogPrefixes =
+        providerName === "aws"
+          ? ["image:aws:promoted", "image:aws:catalog:", "image:aws:variant:"]
+          : ["image:azure:promoted:"];
+      const oldKey = `${catalogPrefixes[0]}:previous`;
+      await storage.put(oldKey, {
+        id: "previous-image",
+        provider: providerName,
+        state: "available",
+      });
+      const before = await Promise.all(
+        catalogPrefixes.map(async (prefix) => await storage.list({ prefix })),
+      );
+      const response = await coordinator.fetch(
+        checkpointRequest(
+          "POST",
+          `/v1/images/${encodeURIComponent(record.image!.id)}/promote?provider=${providerName}&region=${region}`,
+          { target: "linux" },
+          { admin: true },
+        ),
+      );
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({
+        error: "checkpoint_delete_in_progress",
+      });
+      expect(promotion).toHaveBeenCalledTimes(
+        ["before-commit", "generation-change"].includes(phase) ? 1 : 0,
+      );
+      expect(
+        await Promise.all(catalogPrefixes.map(async (prefix) => await storage.list({ prefix }))),
+      ).toEqual(before);
+      expect(await storage.list({ prefix: `checkpoint-pin:${id}:` })).toHaveLength(0);
+    },
+  );
 
   it("pins Azure promoted snapshots and blocks checkpoint deletion without removing promotion metadata", async () => {
     const storage = new CheckpointMemoryStorage();
@@ -3831,6 +4060,153 @@ describe("coordinator-managed checkpoints", () => {
     expect(storage.snapshot()).not.toContain(acquired.claim);
   });
 
+  it.each(
+    [false, true].flatMap((macOS) =>
+      ["none", "deleting", "delete-pending", "deleted"].map((deletion) => ({ macOS, deletion })),
+    ),
+  )(
+    "completes a reconciled fork and replays its canonical ID (macOS=$macOS deletion=$deletion)",
+    async ({ macOS, deletion }) => {
+      const { coordinator, storage } = await checkpointFixture();
+      const checkpointID = "chk_reconciled_success";
+      await createCheckpoint(coordinator, checkpointID, { mode: "manual" }, "image");
+      const checkpoint = (await storage.get<CoordinatorCheckpointRecord>(
+        checkpointKey(checkpointID),
+      ))!;
+      if (macOS) await storage.put(checkpointKey(checkpointID), { ...checkpoint, target: "macos" });
+      const acquired = (await (
+        await coordinator.fetch(
+          checkpointRequest("POST", `/v1/checkpoints/${checkpointID}/use`, { action: "begin" }),
+        )
+      ).json()) as { claim: string };
+      const requestedLeaseID = "cbx_000000000002";
+      const canonicalLeaseID = macOS ? "cbx_000000000099" : requestedLeaseID;
+      const createAttemptID = `cat_${"8".repeat(32)}`;
+      const provision = vi
+        .spyOn(coordinator as never, "createLease" as never)
+        .mockImplementation(async () => {
+          const lease: LeaseRecord = {
+            ...checkpointLease("aws"),
+            id: canonicalLeaseID,
+            target: macOS ? "macos" : "linux",
+            checkpointID,
+            createAttemptID,
+            createAttemptGeneration: "reconciled-generation",
+          };
+          const attempt = (await storage.get<CreateAttemptRecord>(
+            `create-attempt:${requestedLeaseID}`,
+          ))!;
+          await storage.put(`lease:${canonicalLeaseID}`, lease);
+          await storage.put(`create-attempt:${requestedLeaseID}`, {
+            ...attempt,
+            canonicalLeaseID,
+            cloudID: lease.cloudID,
+            generation: lease.createAttemptGeneration,
+          });
+          await expireCheckpointClaims(storage, checkpointID);
+          expect(await storage.list({ prefix: `checkpoint-use:${checkpointID}:` })).toHaveLength(0);
+          if (deletion !== "none") {
+            const claimed = await claimCheckpointDeletion(
+              storage,
+              checkpointID,
+              undefined,
+              "manual",
+            );
+            if (deletion === "deleted") {
+              await markCheckpointProviderDeleted(storage, checkpointID, claimed.token);
+              await finalizeCheckpointDeletion(storage, checkpointID, claimed.token);
+            } else if (deletion === "delete-pending") {
+              await recordCheckpointDeletionFailure(storage, checkpointID, claimed.token, "retry");
+            }
+          }
+          return Response.json({ lease }, { status: 201 });
+        });
+      const body = {
+        provider: "aws",
+        awsAMI: "ami-000000000001",
+        checkpointID,
+        checkpointUseClaim: acquired.claim,
+        leaseID: requestedLeaseID,
+        createAttemptID,
+      };
+      const response = await coordinator.fetch(
+        checkpointRequest("POST", "/v1/leases/from-checkpoint", body),
+      );
+      expect(response.status).toBe(201);
+      const completed = await storage.get(checkpointKey(checkpointID));
+      const events = await storage.list({ prefix: `checkpoint-event:${checkpointID}:` });
+      const replay = await coordinator.fetch(
+        checkpointRequest("POST", "/v1/leases/from-checkpoint", body),
+      );
+      expect(replay.ok).toBe(true);
+      await expect(replay.json()).resolves.toMatchObject({ lease: { id: canonicalLeaseID } });
+      expect(provision).toHaveBeenCalledOnce();
+      expect(await storage.get(checkpointKey(checkpointID))).toEqual(completed);
+      expect(await storage.list({ prefix: `checkpoint-event:${checkpointID}:` })).toEqual(events);
+    },
+  );
+
+  it.each(["complete", "reconcile"])(
+    "recovers an AWS macOS canonical provisioning lease via %s",
+    async (action) => {
+      const { coordinator, storage } = await checkpointFixture();
+      const checkpointID = "chk_canonical_recovery";
+      await createCheckpoint(coordinator, checkpointID, { mode: "manual" }, "image");
+      const checkpoint = (await storage.get<CoordinatorCheckpointRecord>(
+        checkpointKey(checkpointID),
+      ))!;
+      await storage.put(checkpointKey(checkpointID), { ...checkpoint, target: "macos" });
+      const acquired = (await (
+        await coordinator.fetch(
+          checkpointRequest("POST", `/v1/checkpoints/${checkpointID}/use`, { action: "begin" }),
+        )
+      ).json()) as { claim: string };
+      const requestedLeaseID = "cbx_000000000002",
+        canonicalLeaseID = "cbx_000000000099";
+      const attemptID = `cat_${"7".repeat(32)}`;
+      await bindCheckpointUseProvisioning(
+        storage,
+        checkpointID,
+        acquired.claim,
+        { owner: "alice@example.com", org },
+        attemptID,
+        requestedLeaseID,
+      );
+      const lease: LeaseRecord = {
+        ...checkpointLease("aws"),
+        id: canonicalLeaseID,
+        target: "macos",
+        checkpointID,
+        createAttemptID: attemptID,
+        createAttemptGeneration: "canonical-generation",
+      };
+      const attempt = (await storage.get<CreateAttemptRecord>(
+        `create-attempt:${requestedLeaseID}`,
+      ))!;
+      await storage.put(`lease:${canonicalLeaseID}`, lease);
+      await storage.put(`create-attempt:${requestedLeaseID}`, {
+        ...attempt,
+        canonicalLeaseID,
+        cloudID: lease.cloudID,
+        generation: lease.createAttemptGeneration,
+      });
+      const completed =
+        action === "complete"
+          ? (
+              await coordinator.fetch(
+                checkpointRequest("POST", `/v1/checkpoints/${checkpointID}/use`, {
+                  action: "complete",
+                  claim: acquired.claim,
+                }),
+              )
+            ).ok
+          : Boolean(await expireCheckpointClaims(storage, checkpointID));
+      expect(completed).toBe(true);
+      expect(await storage.list({ prefix: `checkpoint-use:${checkpointID}:` })).toHaveLength(0);
+      expect(await storage.get(checkpointKey(checkpointID))).toMatchObject({ activeUseCount: 0 });
+    },
+  );
+
   it("keeps an explicit administrator as the principal throughout checkpoint-backed provisioning", async () => {
     const { coordinator } = await checkpointFixture();
     await createCheckpoint(coordinator, "chk_admin_provision");
@@ -3869,6 +4245,60 @@ describe("coordinator-managed checkpoints", () => {
     );
     expect(response.status).toBe(201);
   });
+
+  it.each([400, 503])(
+    "releases an administrator's rejected checkpoint fork claim on HTTP %i",
+    async (status) => {
+      const { coordinator, storage } = await checkpointFixture();
+      const id = "chk_admin_rejected";
+      await createCheckpoint(coordinator, id);
+      const before = (await storage.get<CoordinatorCheckpointRecord>(checkpointKey(id)))!;
+      const admin = { owner: "operator@example.com", admin: true };
+      const acquired = (await (
+        await coordinator.fetch(
+          checkpointRequest("POST", `/v1/checkpoints/${id}/use`, { action: "begin" }, admin),
+        )
+      ).json()) as { claim: string };
+      vi.spyOn(coordinator as never, "createLease" as never).mockImplementation(async () =>
+        Response.json({ error: "preflight_rejected" }, { status }),
+      );
+      const rejectedLeaseID = "cbx_000000000002";
+      const attemptID = `cat_${"d".repeat(32)}`;
+      const response = await coordinator.fetch(
+        checkpointRequest(
+          "POST",
+          "/v1/leases/from-checkpoint",
+          {
+            provider: "aws",
+            awsSnapshot: "snap-000000000001",
+            checkpointID: id,
+            checkpointUseClaim: acquired.claim,
+            leaseID: rejectedLeaseID,
+            createAttemptID: attemptID,
+          },
+          admin,
+        ),
+      );
+      expect(response.status).toBe(status);
+      expect(await storage.get(`create-attempt:${rejectedLeaseID}`)).toMatchObject({
+        state: "canceled",
+        owner: admin.owner,
+        token: attemptID,
+      });
+      expect(await storage.list({ prefix: `checkpoint-use:${id}:` })).toHaveLength(0);
+      expect(await storage.get(checkpointKey(id))).toMatchObject({
+        activeUseCount: 0,
+        lastUsedAt: before.lastUsedAt,
+      });
+      expect(
+        (
+          await coordinator.fetch(
+            checkpointRequest("DELETE", `/v1/checkpoints/${id}`, undefined, admin),
+          )
+        ).status,
+      ).toBe(200);
+    },
+  );
 
   it("retains failed creation ownership across repeated inconclusive deletion attempts", async () => {
     vi.useFakeTimers();
@@ -5306,7 +5736,11 @@ describe("coordinator-managed checkpoints", () => {
         ...providerImage(providerName, "foreign-snapshot", "disk-snapshot", ownership),
         checkpointOwnershipHash: "b".repeat(64),
       };
-      Reflect.set(provider, "clientValue", { getImage: async () => image });
+      Reflect.set(provider, "clientValue", {
+        getImage: async () => image,
+        providerScope: () =>
+          `/subscriptions/${providerScope("azure").subscriptionID}/resourceGroups/${providerScope("azure").resourceGroup}`,
+      });
       const checkpoint = {
         id: ownership.checkpointID,
         leaseID,

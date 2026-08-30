@@ -57,19 +57,29 @@ private token and generation never appear in public lease records. Fixed-ID
 to own replay, and caller cancellation never releases them.
 
 Automation may instead supply the canonical ID with `warmup --lease-id`. For
-direct AWS, direct Machine0, and managed coordinator leases, that ID is an
-immutable create identity: an identical semantic replay returns the same lease,
-while intent drift returns `lease_id_conflict`. The coordinator durably stores
-a versioned normalized request hash. Direct AWS durably stores the intent and
-current resolved EC2 attempt in the normal lease claim before `RunInstances`,
-then uses a deterministic regional/zonal client token. Neither path uses the
-slug to decide replay ownership.
+direct AWS, direct Machine0, direct local-container, and managed coordinator
+leases, that ID is an immutable create identity: an identical semantic replay
+returns the same lease, while intent drift returns `lease_id_conflict`. External
+providers also accept requested IDs when their protocol explicitly advertises
+idempotent lease identity support. The coordinator durably stores a versioned
+normalized request hash. Direct AWS durably stores the intent and current
+resolved EC2 attempt in the normal lease claim before `RunInstances`, then uses
+a deterministic regional/zonal client token. No path uses the slug to decide
+replay ownership.
 
 Direct Machine0 binds the intent to its deterministic VM name before creation;
 the durable attempt binds the first visible match to its Machine0 resource ID,
 and every later adoption requires that exact recorded ID. Its fixed claims use
 the downgrade-safe `machine0-fixed-v1` marker alongside AWS's `aws-fixed-v1`
 marker.
+
+Direct local-container binds the intent to its runtime and daemon scope,
+normalized container configuration, and deterministic container name before
+creation. Replay adopts only the exact recorded container when its lease, name,
+runtime identity, and intent fingerprint still match; an unresolved attempt or
+missing acquired container fails closed instead of starting another container.
+Its fixed claims use the downgrade-safe `local-container-fixed-v1` marker, so
+older clients cannot mistake them for ordinary local-container claims.
 
 After the direct AWS launch attempt is durable, Crabbox never submits that
 attempt again. An ambiguous replay with no visible tagged instance fails closed;
@@ -79,11 +89,11 @@ match the persisted attempt exactly. Fixed AWS
 claims use the downgrade-safe local discriminator `aws-fixed-v1`; current
 clients map it to runtime AWS, while older clients skip/refuse it.
 
-Fixed IDs are single-use operation identities. Direct AWS and Machine0 keep a
-compact terminal claim tombstone after successful destroy release or exact
-missing-resource cleanup. Tombstones contain only the ID, slug, provider scope,
-versioned intent hash, timestamps, and terminal state; automatic provider
-cleanup never prunes them.
+Fixed IDs are single-use operation identities. Direct AWS, Machine0, and
+local-container keep a compact terminal claim tombstone after successful
+destroy release or exact missing-resource cleanup. Tombstones contain only the
+ID, slug, provider scope, versioned intent hash, timestamps, and terminal
+state; automatic provider cleanup never prunes them.
 There is no time-based reuse window. Explicitly deleting local Crabbox claim
 state forfeits this replay protection, so automation must instead mint a new
 operation ID.
@@ -216,6 +226,14 @@ Claims do three things:
 A conflicting claim (same lease, different `repoRoot`) refuses commands by
 default with a `use --reclaim` error; `--reclaim` overrides the check and
 rewrites the claim atomically.
+
+Metadata discovery reads atomically published claim snapshots without waiting
+for lease operation locks. Active claims remain visible to listing, identifier
+resolution, and slug collision checks, so a busy lease does not block discovery
+or execution of an independent lease. A snapshot is not mutation authority:
+guarded actions and cleanup still lock the target claim and recheck its exact
+contents and revision before acting. Using an exact ID does not bypass that
+lease's own operation lock, repo ownership, or provider scope checks.
 
 Static SSH leases (`provider: ssh`) record extra endpoint fields in the claim —
 `staticHost`, `staticUser`, `staticPort`, `staticWorkRoot`, `targetOS`, and

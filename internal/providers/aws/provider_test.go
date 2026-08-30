@@ -1,10 +1,126 @@
 package aws
 
 import (
+	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func TestProviderAdvertisesRunSessionContract(t *testing.T) {
+	spec := (Provider{}).Spec()
+	for _, feature := range []core.Feature{core.FeatureSSH, core.FeatureCleanup, core.FeatureRunSession} {
+		if !spec.Features.Has(feature) {
+			t.Fatalf("features=%v missing %s", spec.Features, feature)
+		}
+	}
+	if err := core.ValidateRunSessionFeatureSpec(spec); err != nil {
+		t.Fatalf("run-session contract: %v", err)
+	}
+}
+
+func TestAWSLinuxReadinessWaitsForCurrentBootCloudInit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("executing Linux readiness checks requires a POSIX shell")
+	}
+
+	target := core.SSHTargetFromConfig(core.Config{Provider: "aws", TargetOS: core.TargetLinux}, "example.test")
+	dir := t.TempDir()
+	ready := filepath.Join(dir, "crabbox-ready")
+	invoked := filepath.Join(dir, "ready-invoked")
+	cloudInit := filepath.Join(dir, "cloud-init")
+	timeout := filepath.Join(dir, "timeout")
+	if err := os.WriteFile(cloudInit, []byte("#!/bin/sh\ntest \"$1\" = status && test \"$2\" = --wait || exit 2\nprintf w >&4\nIFS= read -r current_boot <&3\ntest \"$current_boot\" = complete\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(timeout, []byte("#!/bin/sh\ntest \"$1\" = 20m || exit 2\nshift\nexec \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := fmt.Sprintf("#!/bin/sh\nprintf ready > %q\n", invoked)
+	if err := os.WriteFile(ready, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	command := strings.NewReplacer(
+		"/usr/local/bin/crabbox-ready", ready,
+		"/tmp/crabbox-ready.log", filepath.Join(dir, "ready.log"),
+		"/tmp/crabbox-cloud-init.log", filepath.Join(dir, "cloud-init.log"),
+	).Replace(target.ReadyCheck)
+	completionReader, completionWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = completionWriter.Close() })
+	startedReader, startedWriter, err := os.Pipe()
+	if err != nil {
+		_ = completionReader.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = startedReader.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cmd.ExtraFiles = []*os.File{completionReader, startedWriter}
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	if err := cmd.Start(); err != nil {
+		_ = completionReader.Close()
+		_ = startedWriter.Close()
+		t.Fatal(err)
+	}
+	_ = completionReader.Close()
+	_ = startedWriter.Close()
+	if _, err := io.ReadFull(startedReader, make([]byte, 1)); err != nil {
+		commandErr := cmd.Wait()
+		t.Fatalf("ready check did not wait for current-boot cloud-init: signal=%v command=%v output=%s", err, commandErr, output.String())
+	}
+	if _, err := os.Stat(invoked); !os.IsNotExist(err) {
+		cancel()
+		_ = cmd.Wait()
+		t.Fatalf("crabbox-ready ran before cloud-init completed the current boot: %v", err)
+	}
+	if _, err := io.WriteString(completionWriter, "complete\n"); err != nil {
+		cancel()
+		_ = cmd.Wait()
+		t.Fatal(err)
+	}
+	_ = completionWriter.Close()
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("ready check rejected completed current boot: %v: %s", err, output.String())
+	}
+	if _, err := os.Stat(invoked); err != nil {
+		t.Fatalf("ready check did not execute crabbox-ready after cloud-init completed: %v", err)
+	}
+}
+
+func TestAWSCloudInitReadinessDoesNotChangeOtherTargets(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		provider string
+		targetOS string
+	}{
+		{name: "AWS Windows", provider: "aws", targetOS: core.TargetWindows},
+		{name: "AWS macOS", provider: "aws", targetOS: core.TargetMacOS},
+		{name: "other Linux provider", provider: "hetzner", targetOS: core.TargetLinux},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			target := core.SSHTargetFromConfig(core.Config{Provider: test.provider, TargetOS: test.targetOS}, "example.test")
+			if target.ReadyCheck != "" {
+				t.Fatalf("ready check=%q, want unchanged default", target.ReadyCheck)
+			}
+		})
+	}
+}
 
 func TestNativeCheckpointCapabilitySupportsWindowsImages(t *testing.T) {
 	req := core.NativeCheckpointRequest{

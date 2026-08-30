@@ -121,11 +121,12 @@ func NewLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) c
 
 func (b *leaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
 	return shared.AcquireAttemptsRetry(b.RT, req.Keep, func() (LeaseTarget, error) {
-		return b.acquireOnce(ctx, req.Keep, req.RequestedSlug)
+		return b.acquireOnce(ctx, req)
 	})
 }
 
-func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug string) (lease LeaseTarget, err error) {
+func (b *leaseBackend) acquireOnce(ctx context.Context, req AcquireRequest) (lease LeaseTarget, err error) {
+	keep := req.Keep
 	if err := validateXCPNgProvisioningConfig(xcpNgProviderConfig(b.Cfg)); err != nil {
 		return LeaseTarget{}, err
 	}
@@ -140,7 +141,7 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	slug, err := allocateDirectLeaseSlug(leaseID, requestedSlug, servers)
+	slug, err := allocateDirectLeaseSlug(leaseID, req.RequestedSlug, servers)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
@@ -198,6 +199,18 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, "ready", currentTime(b.RT).UTC())
 	if err := client.SetLabels(ctx, server.CloudID, server.Labels); err != nil {
 		fmt.Fprintf(b.RT.Stderr, "warning: set xcp-ng labels: %v\n", err)
+	}
+	claimErr := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, req.Repo.Root, cfg.IdleTimeout, req.Reclaim)
+	if req.Repo.Root == "" {
+		claimErr = core.ClaimLeaseTargetForConfig(leaseID, slug, cfg, server, target, cfg.IdleTimeout)
+	}
+	if err := claimErr; err != nil {
+		vmRetained, cleanupErr := b.cleanupFailedLease(ctx, client, server.CloudID, configDrive)
+		retainKey = vmRetained
+		if vmRetained {
+			return LeaseTarget{}, fmt.Errorf("xcp-ng VM retained after ownership claim failure; manual cleanup required for %s: %v; cleanup: %v", server.CloudID, err, cleanupErr)
+		}
+		return LeaseTarget{}, errors.Join(fmt.Errorf("persist exact xcp-ng VM ownership claim: %w", err), cleanupErr)
 	}
 	fmt.Fprintf(b.RT.Stderr, "provisioned lease=%s server=%s ip=%s\n", leaseID, server.DisplayID(), ip)
 	retainKey = true
@@ -502,11 +515,46 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest
 	if !isCrabboxLease(server) {
 		return exit(4, "refusing to release non-Crabbox xcp-ng VM: %s", server.DisplayID())
 	}
-	if err := client.DeleteServer(ctx, server.CloudID); err != nil {
+	if err := b.deleteClaimedServer(ctx, client, server, req.Lease.LeaseID); err != nil {
 		return err
 	}
-	removeLeaseClaim(req.Lease.LeaseID)
-	removeStoredTestboxKey(req.Lease.LeaseID)
+	return nil
+}
+
+func (b *leaseBackend) claimBinding(server Server, leaseID string) shared.ClaimBinding {
+	return shared.ClaimBinding{
+		Provider:           "xcp-ng",
+		ProviderScope:      core.ProviderClaimScope("xcp-ng", b.Cfg),
+		ExactProviderScope: true,
+		LeaseID:            leaseID,
+		Slug:               server.Labels["slug"],
+		CloudID:            server.CloudID,
+		RequiredLabels: map[string]string{
+			"crabbox":    "true",
+			"created_by": "crabbox",
+		},
+	}
+}
+
+func (b *leaseBackend) deleteClaimedServer(ctx context.Context, client lifecycleClient, server Server, leaseID string) error {
+	binding := b.claimBinding(server, leaseID)
+	claim, err := shared.RequireExactClaim(binding)
+	if err != nil {
+		return err
+	}
+	if err := shared.RemoveExactClaimAfter(claim, binding, func() error {
+		live, err := client.GetServer(ctx, server.CloudID)
+		if err != nil {
+			return err
+		}
+		if live.CloudID != server.CloudID || !isCrabboxLease(live) || live.Labels["lease"] != leaseID || live.Labels["slug"] != claim.Slug {
+			return exit(4, "refusing to delete xcp-ng VM %s without exact live Crabbox ownership metadata", server.CloudID)
+		}
+		return client.DeleteServer(ctx, server.CloudID)
+	}); err != nil {
+		return err
+	}
+	removeStoredTestboxKey(leaseID)
 	return nil
 }
 
@@ -547,17 +595,17 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%s\n", server.DisplayID(), server.Name, reason)
 			continue
 		}
+		leaseID := strings.TrimSpace(server.Labels["lease"])
+		if _, err := shared.RequireExactClaim(b.claimBinding(server, leaseID)); err != nil {
+			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=no-exact-local-ownership-claim\n", server.DisplayID(), server.Name)
+			continue
+		}
 		fmt.Fprintf(b.RT.Stderr, "delete server id=%s name=%s\n", server.DisplayID(), server.Name)
 		if req.DryRun {
 			continue
 		}
-		if err := client.DeleteServer(ctx, server.CloudID); err != nil {
+		if err := b.deleteClaimedServer(ctx, client, server, leaseID); err != nil {
 			return err
-		}
-		leaseID := strings.TrimSpace(server.Labels["lease"])
-		if leaseID != "" {
-			removeLeaseClaim(leaseID)
-			removeStoredTestboxKey(leaseID)
 		}
 	}
 	return nil
@@ -793,7 +841,6 @@ var xcpNgPartialRollbackTimeout = 30 * time.Second
 var findServerByAlias = func(servers []Server, id string) (Server, string, error) {
 	return core.FindServerByAlias(servers, id)
 }
-var removeLeaseClaim = func(leaseID string) { core.RemoveLeaseClaim(leaseID) }
 var removeStoredTestboxKey = func(leaseID string) { core.RemoveStoredTestboxKey(leaseID) }
 var exit = func(code int, format string, args ...any) core.ExitError { return core.Exit(code, format, args...) }
 

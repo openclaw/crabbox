@@ -2,6 +2,7 @@ package tenki
 
 import (
 	"flag"
+	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
@@ -15,6 +16,14 @@ type Provider struct{}
 
 func (Provider) Name() string      { return tenkiProvider }
 func (Provider) Aliases() []string { return nil }
+
+func (Provider) ClaimScope(cfg core.Config) string {
+	endpoint := strings.TrimRight(strings.TrimSpace(cfg.Tenki.Endpoint), "/")
+	if endpoint == "" {
+		endpoint = "default"
+	}
+	return "endpoint:" + endpoint + "|workspace:" + strings.TrimSpace(cfg.Tenki.Workspace) + "|project:" + strings.TrimSpace(cfg.Tenki.Project)
+}
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{

@@ -438,6 +438,7 @@ export interface LeaseRecord {
   runtimeAdapterDeleteAttempts?: number;
   runtimeAdapterDeleteError?: string;
   target: TargetOS;
+  architecture?: string;
   os?: string;
   windowsMode?: WindowsMode;
   desktop?: boolean;
@@ -517,6 +518,20 @@ export interface LeaseRecord {
 
 export type ReadyPoolEntryState = "ready" | "busy" | "draining" | "quarantined" | "stale";
 
+export interface ReadyPoolImageIdentity {
+  provider: string;
+  scope: string;
+  id: string;
+}
+
+export interface ReadyPoolIdentityV1 {
+  schema: "crabbox-ready-pool-identity/v1";
+  image: ReadyPoolImageIdentity;
+  architecture: string;
+  seedDigest: string;
+  cacheCompatibility: string;
+}
+
 export interface ReadyPoolEntry {
   key: string;
   leaseID: string;
@@ -528,6 +543,7 @@ export interface ReadyPoolEntry {
   commit?: string;
   fingerprint?: string;
   compatibilityKey?: string;
+  identity?: ReadyPoolIdentityV1;
   image?: string;
   provider?: string;
   target?: TargetOS;
@@ -560,6 +576,7 @@ export interface ReadyPoolRegisterRequest {
   commit?: string;
   fingerprint?: string;
   compatibilityKey?: string;
+  identity?: ReadyPoolIdentityV1;
   fillClaimToken?: string;
   image?: string;
   sshHost?: string;
@@ -575,6 +592,7 @@ export interface ReadyPoolBorrowRequest {
   allowMissingCommit?: boolean;
   fingerprint?: string;
   compatibilityKey?: string;
+  identity?: ReadyPoolIdentityV1;
   heartbeat?: boolean;
   provider?: Provider;
   target?: TargetOS;
@@ -585,6 +603,7 @@ export interface ReadyPoolReturnRequest {
   result?: "ready" | "drain" | "release";
   reason?: string;
   borrowToken?: string;
+  identity?: ReadyPoolIdentityV1;
 }
 
 export interface ReadyPoolBorrowHeartbeatRequest {
@@ -937,6 +956,32 @@ export interface RunRecord {
   lastEventAt?: string;
   eventCount?: number;
   endedAt?: string;
+  terminalReceipt?: TerminalRunReceipt;
+  terminalFinishSHA256?: string;
+  terminalLogPrefix?: string;
+}
+
+export interface TerminalRunReceipt {
+  schema_version: 2;
+  receipt_type: "terminal";
+  started_at: string;
+  ended_at: string;
+  provider: string;
+  lease_id?: string;
+  slug?: string;
+  run_id: string;
+  command: string;
+  command_sha256: string;
+  exit_code: number;
+  sync_ms: number;
+  command_ms: number;
+  duration_ms: number;
+  log_sha256: string;
+  retained_log_sha256: string;
+  log_truncated: boolean;
+  public_key: string;
+  signer: string;
+  signature: string;
 }
 
 export interface RunCreateRequest {
@@ -961,6 +1006,7 @@ export interface RunFinishRequest {
   retryLikely?: string;
   results?: TestResultSummary;
   telemetry?: RunTelemetrySummary;
+  receipt?: TerminalRunReceipt;
 }
 
 export interface RunTelemetryRequest {

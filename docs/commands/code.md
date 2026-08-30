@@ -59,6 +59,11 @@ The portal URL is lease-scoped:
 /portal/leases/<lease-id>/code/
 ```
 
+Displayed and opened portal URLs never include coordinator URL usernames,
+passwords, original query parameters, or fragments. Coordinator HTTP and bridge
+authentication retain their configured credentials; browsers authenticate
+through their existing portal session or normal browser authentication.
+
 If the browser opens before the local bridge connects, the Code portal renders a
 waiting state with the exact `crabbox code` command, copy/reload controls, and
 bridge status; it opens the workspace automatically once the bridge connects.

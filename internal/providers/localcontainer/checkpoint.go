@@ -111,6 +111,22 @@ func (Provider) NativeCheckpointWorkdir(req core.NativeCheckpointWorkdirRequest)
 }
 
 func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheckpointCreateRequest) (core.NativeCheckpointCreateResult, error) {
+	if req.Capture == nil {
+		return createNativeCheckpoint(ctx, req)
+	}
+	claim, _, err := core.ReadLeaseClaimWithPresence(req.LeaseID)
+	if err != nil {
+		return core.NativeCheckpointCreateResult{}, err
+	}
+	if err := core.ValidateCheckpointCaptureClaim(claim, req.CheckpointID, req.Capture); err != nil {
+		return core.NativeCheckpointCreateResult{}, err
+	}
+	var result core.NativeCheckpointCreateResult
+	err = core.WithLeaseClaimUnchanged(req.LeaseID, claim, func() error { var err error; result, err = createNativeCheckpoint(ctx, req); return err })
+	return result, err
+}
+
+func createNativeCheckpoint(ctx context.Context, req core.NativeCheckpointCreateRequest) (core.NativeCheckpointCreateResult, error) {
 	containerID := strings.TrimSpace(req.Server.CloudID)
 	if containerID == "" {
 		return core.NativeCheckpointCreateResult{}, core.Exit(2, "docker-commit checkpoint requires a running container")
@@ -192,7 +208,10 @@ func checkpointRollbackContext() (context.Context, context.CancelFunc) {
 }
 
 func (Provider) VerifyNativeCheckpoint(ctx context.Context, req core.NativeCheckpointResourceRequest) (core.NativeCheckpointVerifyResult, error) {
-	scope := checkpointScopeFromRequest(req)
+	scope, err := checkpointScopeFromRequest(req)
+	if err != nil {
+		return core.NativeCheckpointVerifyResult{}, err
+	}
 	if err := validateCheckpointScope(ctx, scope); err != nil {
 		return core.NativeCheckpointVerifyResult{}, err
 	}
@@ -210,11 +229,42 @@ func (Provider) VerifyNativeCheckpoint(ctx context.Context, req core.NativeCheck
 			Error:         fmt.Sprintf("checkpoint tag %s points to %s, recorded image is %s", req.Image.Name, currentID, req.Image.ID),
 		}, nil
 	}
-	return core.NativeCheckpointVerifyResult{ProviderState: "available", NextAction: "delete"}, nil
+	return core.NativeCheckpointVerifyResult{ProviderState: "available", NextAction: "fork_or_delete"}, nil
+}
+
+func (b *backend) CheckpointSourceAbsent(ctx context.Context, req core.CheckpointSourceRequest) (bool, error) {
+	if !isFullContainerID(req.Capture.SourceID) {
+		return false, core.Exit(2, "checkpoint source requires a full container ID")
+	}
+	scope, err := checkpointScopeFromRequest(req.Resource)
+	if err != nil {
+		return false, err
+	}
+	if err := validateCheckpointScope(ctx, scope); err != nil {
+		return false, err
+	}
+	// Full immutable IDs are returned independently of ownership labels. A
+	// filtered managed-container list cannot prove source retirement.
+	out, err := checkpointCommand(ctx, scope, "ps", "-a", "--no-trunc", "--format", "{{.ID}}").Output()
+	if err != nil {
+		return false, err
+	}
+	for _, id := range strings.Fields(string(out)) {
+		if !isFullContainerID(id) {
+			return false, core.Exit(2, "checkpoint source inventory contains an invalid container ID")
+		}
+		if id == req.Capture.SourceID {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func (Provider) DeleteNativeCheckpoint(ctx context.Context, req core.NativeCheckpointResourceRequest) error {
-	scope := checkpointScopeFromRequest(req)
+	scope, err := checkpointScopeFromRequest(req)
+	if err != nil {
+		return err
+	}
 	if err := validateCheckpointScope(ctx, scope); err != nil {
 		return err
 	}
@@ -311,17 +361,11 @@ func checkpointScopeForServer(ctx context.Context, cfg core.Config, server core.
 			return checkpointScope{}, err
 		}
 		scope.Config = configPath
-		var stderr strings.Builder
 		cmd := exec.CommandContext(ctx, runtimeName, "context", "show")
 		cmd.Env = checkpointEnvForScope(scope)
-		cmd.Stderr = &stderr
-		out, err := cmd.Output()
+		scope.Context, err = checkpointRequiredOutput(cmd, "resolve Docker context", "context")
 		if err != nil {
-			return checkpointScope{}, core.Exit(7, "resolve Docker context: %v: %s", err, trimCheckpointFailure(stderr.String()))
-		}
-		scope.Context = strings.TrimSpace(string(out))
-		if scope.Context == "" {
-			return checkpointScope{}, core.Exit(7, "resolve Docker context: command returned an empty context")
+			return checkpointScope{}, err
 		}
 	}
 	if scope.Config == "" && scope.Host == "" {
@@ -403,8 +447,16 @@ func listPodmanConnections(ctx context.Context, runtimeName string) ([]podmanCon
 	return connections, nil
 }
 
-func checkpointScopeFromRequest(req core.NativeCheckpointResourceRequest) checkpointScope {
-	return checkpointScopeFromMetadata(req.Metadata, req.Config.LocalContainer.Runtime)
+func checkpointScopeFromRequest(req core.NativeCheckpointResourceRequest) (checkpointScope, error) {
+	var fallbackRuntime string
+	if strings.TrimSpace(req.Metadata[checkpointMetadataRuntime]) == "" {
+		cfg, err := req.LoadConfig()
+		if err != nil {
+			return checkpointScope{}, err
+		}
+		fallbackRuntime = cfg.LocalContainer.Runtime
+	}
+	return checkpointScopeFromMetadata(req.Metadata, fallbackRuntime), nil
 }
 
 func checkpointScopeFromMetadata(metadata map[string]string, fallbackRuntime string) checkpointScope {
@@ -545,48 +597,40 @@ func validateCheckpointFork(ctx context.Context, cfg core.Config) error {
 }
 
 func checkpointContextEndpoint(ctx context.Context, scope checkpointScope) (string, error) {
-	var stderr strings.Builder
 	cmd := checkpointCommand(ctx, scope, "context", "inspect", scope.Context, "--format", `{{(index .Endpoints "docker").Host}}`)
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		return "", core.Exit(7, "resolve Docker context %s endpoint: %v: %s", scope.Context, err, trimCheckpointFailure(stderr.String()))
-	}
-	endpoint := strings.TrimSpace(string(out))
-	if endpoint == "" {
-		return "", core.Exit(7, "resolve Docker context %s endpoint: command returned an empty endpoint", scope.Context)
-	}
-	return endpoint, nil
+	return checkpointRequiredOutput(cmd, fmt.Sprintf("resolve Docker context %s endpoint", scope.Context), "endpoint")
 }
 
 func checkpointDaemonID(ctx context.Context, scope checkpointScope) (string, error) {
 	if isPodmanRuntime(scope.Runtime) {
-		var stderr strings.Builder
 		cmd := checkpointCommand(ctx, scope, "info", "--format", `{{.Host.Hostname}}|{{.Store.GraphRoot}}|{{.Store.RunRoot}}|{{.Host.RemoteSocket.Path}}|{{.Host.Security.Rootless}}`)
-		cmd.Stderr = &stderr
-		out, err := cmd.Output()
+		identity, err := checkpointRequiredOutput(cmd, "resolve Podman runtime identity", "identity")
 		if err != nil {
-			return "", core.Exit(7, "resolve Podman runtime identity: %v: %s", err, trimCheckpointFailure(stderr.String()))
-		}
-		identity := strings.TrimSpace(string(out))
-		if identity == "" {
-			return "", core.Exit(7, "resolve Podman runtime identity: command returned an empty identity")
+			return "", err
 		}
 		sum := sha256.Sum256([]byte(identity))
 		return fmt.Sprintf("podman-%x", sum[:16]), nil
 	}
-	var stderr strings.Builder
 	cmd := checkpointCommand(ctx, scope, "info", "--format", "{{.ID}}")
+	return checkpointRequiredOutput(cmd, "resolve Docker daemon identity", "id")
+}
+
+func checkpointRequiredOutput(cmd *exec.Cmd, operation, valueName string) (string, error) {
+	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return "", core.Exit(7, "resolve Docker daemon identity: %v: %s", err, trimCheckpointFailure(stderr.String()))
+		return "", core.Exit(7, "%s: %v: %s", operation, err, trimCheckpointFailure(stderr.String()))
 	}
-	daemonID := strings.TrimSpace(string(out))
-	if daemonID == "" {
-		return "", core.Exit(7, "resolve Docker daemon identity: command returned an empty id")
+	value := strings.TrimSpace(string(out))
+	if value == "" {
+		detail := ""
+		if strings.TrimSpace(stderr.String()) != "" {
+			detail = ": " + trimCheckpointFailure(stderr.String())
+		}
+		return "", core.Exit(7, "%s: command returned an empty %s%s", operation, valueName, detail)
 	}
-	return daemonID, nil
+	return value, nil
 }
 
 func checkpointConfigPath() (string, error) {

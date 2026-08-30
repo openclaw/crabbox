@@ -3,7 +3,9 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -30,28 +32,36 @@ func TestParseFreezeIntervalsClosesTrailingFreeze(t *testing.T) {
 	}
 }
 
-func TestMotionPreviewWindowTrimsStaticEdges(t *testing.T) {
-	got := motionPreviewWindow(10, []mediaInterval{
+func TestMotionPreviewSegmentsRemoveStaticRegions(t *testing.T) {
+	got := motionPreviewSegments(12, []mediaInterval{
 		{Start: 0, End: 2},
-		{Start: 7, End: 10},
+		{Start: 3, End: 8},
+		{Start: 9, End: 12},
 	}, 500*time.Millisecond, 1500*time.Millisecond)
+	want := []mediaInterval{{Start: 1.5, End: 3.5}, {Start: 7.5, End: 9.5}}
 	if !got.Trimmed {
-		t.Fatalf("expected trimmed window: %#v", got)
+		t.Fatalf("expected static regions to be removed: %#v", got)
 	}
-	if got.Start != 1.5 || got.End != 7.5 {
-		t.Fatalf("window=%#v, want 1.5..7.5", got)
+	if len(got.Segments) != len(want) {
+		t.Fatalf("segments=%#v, want %#v", got.Segments, want)
+	}
+	for i := range want {
+		if got.Segments[i] != want[i] {
+			t.Fatalf("segment[%d]=%#v, want %#v", i, got.Segments[i], want[i])
+		}
 	}
 }
 
-func TestMotionPreviewWindowKeepsFullVideoWhenNoMotionDetected(t *testing.T) {
-	got := motionPreviewWindow(10, []mediaInterval{{Start: 0, End: 10}}, 500*time.Millisecond, 1500*time.Millisecond)
-	if got.Trimmed || got.Start != 0 || got.End != 10 || got.Note != "no-motion-detected" {
-		t.Fatalf("window=%#v, want full no-motion window", got)
+func TestMotionPreviewSegmentsKeepFullVideoWhenNoMotionDetected(t *testing.T) {
+	got := motionPreviewSegments(10, []mediaInterval{{Start: 0, End: 10}}, 500*time.Millisecond, 1500*time.Millisecond)
+	if got.Trimmed || len(got.Segments) != 1 || got.Segments[0] != (mediaInterval{Start: 0, End: 10}) || got.Note != "no-motion-detected" {
+		t.Fatalf("plan=%#v, want full no-motion preview", got)
 	}
 }
 
 func TestPreviewCommandsUsePaletteGIFAndTrimWindow(t *testing.T) {
-	palette := strings.Join(previewPaletteArgs("desktop.mp4", "palette.png", 640, 4, 1.25, 6.5), " ")
+	segment := mediaInterval{Start: 1.25, End: 7.75}
+	palette := strings.Join(previewPaletteArgs("desktop.mp4", "palette.png", 640, 4, segment), " ")
 	for _, want := range []string{
 		"-ss 1.250",
 		"-t 6.500",
@@ -66,7 +76,7 @@ func TestPreviewCommandsUsePaletteGIFAndTrimWindow(t *testing.T) {
 		}
 	}
 
-	gif := strings.Join(previewGIFArgs("desktop.mp4", "palette.png", "preview.gif", 640, 4, 1.25, 6.5), " ")
+	gif := strings.Join(previewGIFArgs("desktop.mp4", "palette.png", "preview.gif", 640, 4, segment), " ")
 	for _, want := range []string{
 		"-ss 1.250",
 		"-t 6.500",
@@ -99,7 +109,7 @@ func TestGifsicleOptimizeArgsUseHQDefaults(t *testing.T) {
 }
 
 func TestTrimmedVideoCommandUsesSameWindow(t *testing.T) {
-	got := strings.Join(trimmedVideoArgs("desktop.mp4", "change.mp4", 2, 4), " ")
+	got := strings.Join(trimmedVideoArgs("desktop.mp4", "change.mp4", []mediaInterval{{Start: 2, End: 6}}), " ")
 	for _, want := range []string{
 		"-ss 2.000",
 		"-t 4.000",
@@ -112,6 +122,92 @@ func TestTrimmedVideoCommandUsesSameWindow(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("trimmed video args missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestTrimmedVideoCommandConcatenatesMotionSegments(t *testing.T) {
+	got := strings.Join(trimmedVideoArgs("desktop.mp4", "change.mp4", []mediaInterval{
+		{Start: 1.5, End: 3.5},
+		{Start: 7.5, End: 9.5},
+	}), " ")
+	for _, want := range []string{
+		"[0:v]split=2[source0][source1]",
+		"[source0]trim=start=1.500:end=3.500,setpts=PTS-STARTPTS[segment0]",
+		"[source1]trim=start=7.500:end=9.500,setpts=PTS-STARTPTS[segment1]",
+		"[segment0][segment1]concat=n=2:v=1:a=0,format=yuv420p[out]",
+		"-map [out]",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("segmented video args missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestMediaPreviewStitchesMotionAcrossInternalFreeze(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fixture command uses the Unix ffmpeg build")
+	}
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		t.Skip("ffprobe not installed")
+	}
+	dir := t.TempDir()
+	input := filepath.Join(dir, "input.mp4")
+	fixture := exec.Command("ffmpeg",
+		"-hide_banner", "-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "color=c=red:s=96x64:r=12:d=2",
+		"-f", "lavfi", "-i", "testsrc2=s=96x64:r=12:d=1",
+		"-f", "lavfi", "-i", "color=c=blue:s=96x64:r=12:d=5",
+		"-f", "lavfi", "-i", "testsrc2=s=96x64:r=12:d=1",
+		"-f", "lavfi", "-i", "color=c=green:s=96x64:r=12:d=3",
+		"-filter_complex", "[0:v][1:v][2:v][3:v][4:v]concat=n=5:v=1:a=0,format=yuv420p[v]",
+		"-map", "[v]", input,
+	)
+	if output, err := fixture.CombinedOutput(); err != nil {
+		t.Fatalf("create fixture: %v: %s", err, output)
+	}
+
+	opts := defaultMediaPreviewOptions(input, filepath.Join(dir, "preview.gif"), filepath.Join(dir, "motion.mp4"))
+	opts.Width = 96
+	opts.FPS = 4
+	opts.GifsicleMode = "off"
+	result, err := createMediaPreview(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.PreviewDurationSeconds < 4.5 || result.PreviewDurationSeconds > 5.5 {
+		t.Fatalf("preview duration=%v, want stitched motion near 5s", result.PreviewDurationSeconds)
+	}
+	wantSegments := []mediaPreviewSegment{
+		{StartSeconds: 1.25, EndSeconds: 3.75},
+		{StartSeconds: 7.25, EndSeconds: 9.75},
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata struct {
+		PreviewSegments []mediaPreviewSegment `json:"previewSegments"`
+	}
+	if err := json.Unmarshal(encoded, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if len(metadata.PreviewSegments) != len(wantSegments) {
+		t.Fatalf("preview segments=%#v, want %#v", metadata.PreviewSegments, wantSegments)
+	}
+	for i := range wantSegments {
+		if metadata.PreviewSegments[i] != wantSegments[i] {
+			t.Fatalf("preview segment[%d]=%#v, want %#v", i, metadata.PreviewSegments[i], wantSegments[i])
+		}
+	}
+	trimmedDuration, err := probeMediaDuration(context.Background(), opts.TrimmedVideoOutput, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trimmedDuration < 4.4 || trimmedDuration > 5.5 {
+		t.Fatalf("trimmed video duration=%v, want stitched motion near 5s", trimmedDuration)
 	}
 }
 

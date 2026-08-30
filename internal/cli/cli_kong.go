@@ -34,6 +34,7 @@ type crabboxKongCLI struct {
 	Events      eventsKongCmd      `cmd:"" passthrough:"" help:"Print recorded run events."`
 	Attach      attachKongCmd      `cmd:"" passthrough:"" help:"Follow recorded events for an active run."`
 	Results     resultsKongCmd     `cmd:"" passthrough:"" help:"Show recorded test result summaries."`
+	Receipt     receiptKongCmd     `cmd:"" passthrough:"" help:"Retrieve and verify a signed terminal run receipt."`
 	Verify      verifyKongCmd      `cmd:"" passthrough:"" help:"Verify a signed run receipt."`
 	Cache       cacheKongCmd       `cmd:"" help:"Inspect, purge, or warm remote caches."`
 	Status      statusKongCmd      `cmd:"" passthrough:"" help:"Show lease state; add --wait to block until ready."`
@@ -214,6 +215,9 @@ type attachKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type resultsKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type receiptKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type verifyKongCmd struct {
@@ -577,6 +581,7 @@ type controllerStateValidateKongCmd struct {
 type poolKongCmd struct {
 	List      poolListKongCmd      `cmd:"" passthrough:"" help:"List machine inventory."`
 	Ready     poolReadyKongCmd     `cmd:"" passthrough:"" help:"List ready-pool leases."`
+	Identity  poolIdentityKongCmd  `cmd:"" passthrough:"" help:"Generate a typed ready-pool identity from an existing lease."`
 	Register  poolRegisterKongCmd  `cmd:"" passthrough:"" help:"Register a hydrated lease in a ready pool."`
 	Borrow    poolBorrowKongCmd    `cmd:"" passthrough:"" help:"Borrow a ready-pool lease."`
 	Heartbeat poolHeartbeatKongCmd `cmd:"" passthrough:"" help:"Refresh a ready-pool borrow deadline."`
@@ -587,6 +592,9 @@ type poolListKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type poolReadyKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type poolIdentityKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type poolRegisterKongCmd struct {
@@ -661,6 +669,7 @@ func (c *logsKongCmd) Run(ctx context.Context, app App) error      { return app.
 func (c *eventsKongCmd) Run(ctx context.Context, app App) error    { return app.events(ctx, c.Args) }
 func (c *attachKongCmd) Run(ctx context.Context, app App) error    { return app.attach(ctx, c.Args) }
 func (c *resultsKongCmd) Run(ctx context.Context, app App) error   { return app.results(ctx, c.Args) }
+func (c *receiptKongCmd) Run(ctx context.Context, app App) error   { return app.receipt(ctx, c.Args) }
 func (c *verifyKongCmd) Run(ctx context.Context, app App) error    { return app.verify(ctx, c.Args) }
 func (c *portsKongCmd) Run(ctx context.Context, app App) error     { return app.ports(ctx, c.Args) }
 func (c *cpKongCmd) Run(ctx context.Context, app App) error        { return app.copyCommand(ctx, c.Args) }
@@ -864,7 +873,7 @@ func (c *checkpointPruneKongCmd) Run(ctx context.Context, app App) error {
 }
 
 func (c *configPathKongCmd) Run(ctx context.Context, app App) error {
-	path := userConfigPath()
+	path := writableConfigPath()
 	if path == "" {
 		return exit(2, "user config directory is unavailable")
 	}
@@ -902,6 +911,9 @@ func (c *poolListKongCmd) Run(ctx context.Context, app App) error {
 }
 func (c *poolReadyKongCmd) Run(ctx context.Context, app App) error {
 	return app.readyPoolList(ctx, stripKongCommandPath(c.Args, "pool", "ready"))
+}
+func (c *poolIdentityKongCmd) Run(ctx context.Context, app App) error {
+	return app.readyPoolIdentity(ctx, stripKongCommandPath(c.Args, "pool", "identity"))
 }
 func (c *poolRegisterKongCmd) Run(ctx context.Context, app App) error {
 	return app.readyPoolRegister(ctx, stripKongCommandPath(c.Args, "pool", "register"))

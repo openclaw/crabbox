@@ -2,8 +2,9 @@
 
 `crabbox stop` ends a single lease. For coordinator-backed and direct cloud
 providers it releases or deletes the backing machine; for delegated runners it
-tears down the underlying sandbox; for static `provider=ssh` hosts it only
-removes the local claim and never touches the host.
+tears down the underlying sandbox; for static `provider=ssh` hosts it attempts
+connection cleanup and removes the local claim without stopping or deleting
+the machine.
 
 ```sh
 crabbox stop swift-crab
@@ -16,6 +17,13 @@ crabbox stop --provider ssh --static-host mac-studio.local mac-studio.local
 
 `crabbox release` is a compatibility alias for `crabbox stop`.
 
+For coordinator-backed leases, the preliminary lookup has a ten-second budget.
+If it stalls, ordinary stop warns and proceeds through the existing
+provider-scoped release request. Provider identity mismatches still block
+release; `--force` still requires successful inspection. Canceling the command
+does not start a release fallback. Cleanup must still be confirmed before local
+claim and SSH artifacts are removed.
+
 ## Identifying the lease
 
 Pass the lease as a positional argument or with `--id`; both accept the
@@ -26,6 +34,12 @@ positional argument, or more than one positional argument, is an error.
 Several providers also accept their own native identifiers in addition to the
 Crabbox lease ID and local slug:
 
+- `aws` — direct fixed-ID canonical stops can replay a retained terminal
+  receipt after successful instance/key cleanup, with fresh account, configured
+  region, identity, and inventory checks. Older compact tombstones lack the
+  required binding and still fail closed after upgrading; missing inventory
+  alone never acknowledges cleanup. This does not extend to slug, raw instance,
+  or ordinary non-fixed lookups. See [AWS fixed-ID replay](../providers/aws.md#fixed-id-replay).
 - `blacksmith-testbox` — accepts a `tbx_...` ID or local slug and forwards to
   `blacksmith testbox stop`.
 - `blaxel` — accepts a Crabbox lease ID (`blx_<sandbox-id>`) or local slug and
@@ -33,22 +47,37 @@ Crabbox lease ID and local slug:
   labels match. Missing sandboxes keep the local claim unless
   `--blaxel-forget-missing` is set.
 - `namespace-devbox` — shuts down the Namespace Devbox by default and retains
-  its local claim and SSH files for reuse. Set `namespace.deleteOnRelease` (or
-  pass `--namespace-delete-on-release`) to delete the Devbox and local SSH
-  files instead.
+  its exact local claim and SSH files for reuse. Set
+  `namespace.deleteOnRelease` (or pass `--namespace-delete-on-release`) to
+  delete the Devbox and local SSH files instead. Both operations reject
+  missing or mismatched claims; `--force` is unsupported because Devbox
+  inventory cannot independently prove lost-claim ownership.
 - `namespace-instance` — accepts a lease ID, local slug, or Namespace instance
-  ID and destroys the Compute instance with `nsc destroy --force`.
-- `morph` — pauses the instance by default and retains its local claim and SSH
-  key for reuse. Set `morph.deleteOnRelease` (or pass
-  `--morph-delete-on-release`) to delete the instance and key instead.
+  ID and destroys the Compute instance only with an exact scoped local claim.
+  `--force --id <exact-instance-id>` can recover a lost claim after verifying
+  the instance's live Crabbox ownership labels and Namespace tenant.
+- `morph` — requires an exact API-scoped local ownership claim and fresh
+  matching instance metadata before pausing or deleting an instance. It pauses
+  by default and retains the claim and SSH key for reuse; set
+  `morph.deleteOnRelease` (or pass `--morph-delete-on-release`) to delete the
+  instance and key instead. Failed provider operations preserve the claim.
 - `exe-dev` — accepts a Crabbox lease ID, local slug, or exe.dev VM name only
   when an unchanged local claim binds the exact deterministic VM name,
   complete remote ownership tags, and current control route. Claimless or
   legacy unscoped tagged VMs require explicit `--reclaim` through a normal
   reuse command before stop; untagged VMs remain read-only inventory. Failed
   deletion keeps the claim.
-- `semaphore` — stops the Semaphore CI job and removes the local claim.
-- `sprites` — deletes the Sprites sprite and removes the local claim.
+- `semaphore` — requires an exact organization-host/project-scoped local claim
+  and fresh live job ownership before stopping the Semaphore CI job. Failed
+  stops preserve the claim and SSH key; verified legacy claims are safely
+  upgraded before the fenced stop.
+- `sprites` — requires an exact API-scoped local claim plus fresh matching
+  provider ownership labels before deleting the sprite. Failed deletion keeps
+  the claim; claimless sprites require explicit `--reclaim` reuse.
+- `tenki` — requires an exact endpoint/workspace/project-scoped local claim plus
+  fresh matching session ownership metadata before terminating the sandbox.
+  Failed termination keeps the claim; claimless sessions require explicit
+  `--reclaim` reuse.
 - `daytona` — deletes the Daytona sandbox.
 - `coder` — stops the Coder workspace by default and removes the local claim.
   Set `coder.deleteOnRelease` or pass `--coder-delete-on-release` to delete the
@@ -97,11 +126,13 @@ Crabbox lease ID and local slug:
   Crabbox keeps after a successful one-shot command.
 - `hostinger` — stops the VPS and retains its local claim and SSH key for later
   reuse. Hostinger still owns the subscription and may continue billing it.
-- `ssh` (static hosts) — removes the local claim for the configured static
-  target; it never deletes the host.
-- `xcp-ng` — accepts a Crabbox lease ID or local slug for a Crabbox-managed VM,
-  deletes the attached config drive when present, and refuses to touch VMs that
-  are not labeled as Crabbox-managed XCP-ng leases.
+- `ssh` (static hosts) — attempts shared connection cleanup, then removes the
+  local claim without stopping or deleting the host. See
+  [Static SSH connection cleanup](../providers/ssh.md#connection-cleanup).
+- `xcp-ng` — requires an exact pool/account-scoped local claim for the same
+  Crabbox lease, slug, and VM UUID, then verifies fresh live ownership metadata
+  before deleting the VM. Missing or mismatched claims never authorize
+  deletion, and provider failures preserve the claim for a safe retry.
 
 ## Behavior by provider mode
 
@@ -134,11 +165,14 @@ non-destructive post-create workflows on a running sandbox. The separate
 [`pause`](pause.md) and [`resume`](resume.md) commands are provider-dependent
 and are not supported by Docker Sandbox.
 
-Where applicable, `stop` makes a best-effort attempt to stop GitHub
-[Actions hydration](../features/actions-hydration.md) on the host before
-releasing it. For SSH leases that can host mediated egress, it also best-effort
-stops egress state: the local host daemon pid state and the lease-side egress
-client are cleaned up before the provider release runs.
+For SSH leases, shared connection cleanup makes best-effort attempts to signal
+[Actions hydration](../features/actions-hydration.md) shutdown, stop local
+mediated-egress daemon state and supported remote egress clients, and log out
+remote Tailscale when stored lease metadata marks it enabled. Providers can
+gate remote cleanup behind their ownership checks. Static SSH attempts cleanup
+before local unclaiming, even without hydration state; remote failures warn
+but do not block unclaiming. See the [static provider details](../providers/ssh.md#connection-cleanup)
+for marker paths, Linux egress process-matching scope, and Tailscale limits.
 
 ## Flags
 
@@ -148,6 +182,7 @@ client are cleaned up before the provider release runs.
 --provider <name>          provider to act against (see crabbox providers)
 --id <lease-or-slug>        lease ID or slug (equivalent to the positional arg)
 --reclaim                   explicitly adopt a provider resource when that provider supports safe stop adoption
+--force                     recover one exact resource through verified provider adoption or an inspected coordinator lease
 --target linux|macos|windows
 --windows-mode normal|wsl2
 --static-host <host>        static SSH host (provider=ssh)
@@ -155,6 +190,24 @@ client are cleaned up before the provider release runs.
 --static-port <port>        static SSH port (provider=ssh)
 --static-work-root <path>   static target work root (provider=ssh)
 ```
+
+`--force` is a targeted recovery operation, not an ownership bypass. It always
+requires both an explicit `--provider` and an exact `--id`; positional IDs,
+coordinator slugs, `--reclaim`, and internal controller release-identity flags
+cannot be combined with it. Providers with a
+verified stop-adoption contract inspect the exact remote resource, validate its
+provider scope and ownership metadata, persist a conflict-safe local claim,
+and then perform their ordinary claim-fenced stop. Brokered providers inspect
+the exact coordinator lease and verify its provider before release; inspection
+failures never fall back to releasing an unverified ID. Providers without a
+verified recovery contract reject `--force` and direct the operator to their
+native provider CLI. `cleanup` does not support `--force`.
+
+`--reclaim` remains the existing provider-specific adoption interface where
+supported. `--force` is the consistent cross-provider recovery interface for
+one exact resource: it reuses verified adoption for supported direct providers
+and adds fresh, exact-lease inspection for coordinator-backed providers. Neither
+flag bypasses provider ownership, scope, or claim-fencing requirements.
 
 Each provider also registers its own flags; the ones relevant to `stop` include:
 
@@ -176,6 +229,22 @@ Each provider also registers its own flags; the ones relevant to `stop` include:
 
 Run `crabbox stop --help` for the full, provider-aware flag list, and
 `crabbox providers` for the providers available in your build.
+
+Generated stop commands use each provider's routing hook, preserving its
+endpoint, scope, and explicit release policy, including `false` overrides.
+Aliases are printed as canonical provider names. Configured Azure
+subscription/resource group/location, GCP project/zone, AWS region, and inherited
+Kubernetes kubeconfig lists are carried as environment assignments where
+appropriate; keep those assignments when copying the command. API credentials
+are not included. External adapters continue to use private, digest-bound
+routing files instead of printing arbitrary adapter config or arguments.
+
+For legacy claim scopes that include sensitive URL bytes, a generated command
+leaves the endpoint in your private configuration instead of printing it or
+overriding it with a differently scoped URL. Keep that original configuration
+available when replaying the command. This applies to Railway query/fragment
+identities, opaque E2B/CubeSandbox, Proxmox, and Namespace Instance identities,
+and Morph URL userinfo; existing claim keys are not rewritten.
 
 ## See also
 

@@ -100,10 +100,18 @@ match.
 
 Release is conservative:
 
-- By default, `crabbox stop` runs `coder stop --yes <workspace>` and removes the
-  local Crabbox claim.
+- Both stop and delete require an exact retained local claim for the canonical
+  workspace reference and its immutable, canonical Coder workspace UUID.
+  Exact workspace names and `owner/workspace` references remain valid for
+  read-only discovery but never authorize lifecycle mutations by themselves;
+  renamed claimed workspaces are still released by their immutable UUID.
+  Legacy claims without a UUID remain retained because a missing old name
+  cannot prove that their workspace was not renamed.
+- By default, `crabbox stop` runs `coder stop --yes <workspace-uuid>` and
+  removes the local Crabbox claim. A dashed UUID cannot be a valid Coder
+  workspace name, so the CLI never falls back to a reused name.
 - Deletion requires `coder.deleteOnRelease: true` or
-  `--coder-delete-on-release`, which runs `coder delete --yes <workspace>`.
+  `--coder-delete-on-release`, which runs `coder delete --yes <workspace-uuid>`.
   New local claims persist that release action so later cleanup does not turn an
   originally stop-on-release workspace into a delete-on-cleanup workspace after
   a config change.

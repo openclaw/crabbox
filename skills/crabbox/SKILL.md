@@ -139,6 +139,13 @@ crabbox actions hydrate --github-runner --id <cbx_id-or-slug>
 
 ## Sync And Fresh Checkouts
 
+Use `--no-sync` only with a provider that supports skipping local file transfer.
+Blacksmith Testbox rejects it: native Testbox runs sync even with an existing
+`--id`. Do not use that path to inspect a remote baseline without uploading local
+edits. Blacksmith also rejects nonblank `prewarm --probe-command` probes and jobs
+with `noSync: true` before lease acquisition. Put probes in its native workflow
+instead.
+
 Normal sync transfers tracked files plus non-ignored untracked files, excludes
 ignored dependency/build/cache output, honors `.crabboxignore` and
 `sync.exclude`, seeds the remote checkout from `origin` when possible, and skips
@@ -181,8 +188,12 @@ crabbox run --id <lease> -- go test ./...
 crabbox run --id <lease> --shell 'corepack enable && pnpm install --frozen-lockfile && pnpm test'
 ```
 
-Prefer uploaded scripts for multi-line commands. Scripts are included in failure
-bundles and avoid brittle quoted shell strings:
+Use `--script` for standalone multi-line commands, included in failure bundles.
+On POSIX SSH leases, it runs a content-hashed copy under `.crabbox/scripts/`.
+The remote workdir is `$PWD`; `$0`, `dirname "$0"`, and Python's `__file__`
+refer to the uploaded copy, not the original script directory. Resolve synced
+assets from `$PWD`, or run a repository script in place when it needs adjacent
+files: `crabbox run -- ./scripts/check.sh`.
 
 ```sh
 crabbox run --script ./scripts/e2e-smoke.sh --timing-json

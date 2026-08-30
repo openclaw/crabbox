@@ -104,7 +104,7 @@ Accepted values, validated before the API is called:
    `crabbox-<slug>-<lease-hex>` with the configured runtime and size, then waits
    (up to 5 minutes) until the Box reports a ready status (`idle`, `running`,
    `ready`, or `paused`). Crabbox stores a local claim with a normal `cbx_...`
-   lease ID and a friendly slug.
+   lease ID and a friendly slug, bound to the exact Box ID and API endpoint.
 2. By default `run` archive-syncs the working tree: Git manifest → local
    `tar -czf` → upload into the Box workspace as
    `.crabbox-upstash-box-sync-*.tgz` → in-Box `tar -xzf` into the workdir
@@ -132,7 +132,9 @@ pass `--keep=false` to `warmup`, Crabbox prints a warning and still keeps it.
 ## Gotchas
 
 - IDs can be a Crabbox slug, a `cbx_...` lease ID, or a raw Upstash Box ID (when
-  that Box carries Crabbox naming, i.e. `crabbox-<slug>-<hex>`).
+  that Box carries Crabbox naming, i.e. `crabbox-<slug>-<hex>`). Destructive
+  stop additionally requires the unchanged local claim to match the exact Box
+  ID and API endpoint; a matching Box name alone never grants deletion authority.
 - `--class` and `--type` are rejected; use `--upstash-box-size` and
   `--upstash-box-runtime`.
 - `upstashBox.workdir` must resolve to an absolute path **under**

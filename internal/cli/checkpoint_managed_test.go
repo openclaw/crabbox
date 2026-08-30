@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -207,6 +208,136 @@ func TestCheckpointManagedDeleteRetainsCacheUntilCoordinatorConfirms(t *testing.
 	}
 	if _, err := os.Stat(paths.Meta); !os.IsNotExist(err) {
 		t.Fatalf("metadata remains after confirmed deletion: %v", err)
+	}
+}
+
+func TestCheckpointManagedDeleteRejectsReusedIdentity(t *testing.T) {
+	for _, changed := range []string{"resource", "creation", "lease", "cache-without-image", "replacement-without-image", "both-without-image"} {
+		t.Run(changed, func(t *testing.T) {
+			checkpoint := managedCheckpointFixture("chk_reused_delete")
+			remote := checkpoint
+			image := *checkpoint.Image
+			remote.Image = &image
+			switch changed {
+			case "resource":
+				remote.Image.ID, remote.Image.ResourceID = "snap-replacement", "snap-replacement"
+			case "creation":
+				remote.CreatedAt = "2026-08-21T12:00:00Z"
+			case "lease":
+				remote.LeaseID = "cbx_000000000099"
+			case "cache-without-image":
+				checkpoint.State, checkpoint.Image = "creating", nil
+				remote.CreatedAt = "2026-08-21T12:00:00Z"
+			case "replacement-without-image":
+				remote.State, remote.Image = "creating", nil
+				remote.CreatedAt = "2026-08-21T12:00:00Z"
+			case "both-without-image":
+				checkpoint.State, checkpoint.Image = "failed", nil
+				remote.State, remote.Image = "creating", nil
+				remote.CreatedAt = "2026-08-21T12:00:00Z"
+			}
+			deletes := 0
+			server, store := configureManagedCheckpointTest(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodDelete {
+					deletes++
+					_ = json.NewEncoder(w).Encode(map[string]any{"deleted": true, "checkpointID": remote.ID})
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"checkpoint": remote})
+			})
+			record, err := checkpointRecordFromCoordinator(checkpoint, checkpointCoordinatorOrigin(server.URL))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Write(record); err != nil {
+				t.Fatal(err)
+			}
+			paths, _ := store.Paths(record.ID)
+			before, err := os.ReadFile(paths.Meta)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = (App{Stdout: io.Discard, Stderr: io.Discard}).checkpointDelete(context.Background(), []string{record.ID})
+			if err == nil || !strings.Contains(err.Error(), "conflicting") || deletes != 0 {
+				t.Fatalf("reused identity accepted: err=%v deletes=%d", err, deletes)
+			}
+			after, err := os.ReadFile(paths.Meta)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatalf("stale recovery cache changed: %v", err)
+			}
+		})
+	}
+}
+
+func TestCheckpointManagedDeleteAllowsSameCreationImagePublication(t *testing.T) {
+	remote := managedCheckpointFixture("chk_pending_publication")
+	deletes := 0
+	server, store := configureManagedCheckpointTest(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deletes++
+			_ = json.NewEncoder(w).Encode(map[string]any{"deleted": true, "checkpointID": remote.ID})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"checkpoint": remote})
+	})
+	pending := remote
+	pending.State, pending.Image = "creating", nil
+	record, err := checkpointRecordFromCoordinator(pending, checkpointCoordinatorOrigin(server.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Write(record); err != nil {
+		t.Fatal(err)
+	}
+	if err := (App{Stdout: io.Discard, Stderr: io.Discard}).checkpointDelete(context.Background(), []string{record.ID}); err != nil || deletes != 1 {
+		t.Fatalf("same creation publication blocked: %v deletes=%d", err, deletes)
+	}
+}
+
+func TestCheckpointManagedUnconfirmedJournalRequiresReadBeforeDeletion(t *testing.T) {
+	for _, operation := range []string{"inspect", "list"} {
+		t.Run(operation, func(t *testing.T) {
+			remote := managedCheckpointFixture("chk_unconfirmed_journal")
+			deletes := 0
+			server, store := configureManagedCheckpointTest(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodDelete {
+					deletes++
+					_ = json.NewEncoder(w).Encode(map[string]any{"deleted": true, "checkpointID": remote.ID})
+					return
+				}
+				if r.URL.Path == "/v1/checkpoints" {
+					_ = json.NewEncoder(w).Encode(map[string]any{"checkpoints": []coordinatorCheckpoint{remote}})
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"checkpoint": remote})
+			})
+			journal := checkpointRecord{
+				ID: remote.ID, Provider: remote.Provider, LeaseID: remote.LeaseID,
+				Kind: checkpointKindAWSEBS, CreatedAt: "2026-08-19T12:00:00Z", LastUsedAt: "2026-08-19T12:00:00Z", CoordinatorState: "creating",
+				Ownership: &checkpointOwnership{Mode: "coordinator", Origin: checkpointCoordinatorOrigin(server.URL)},
+			}
+			if err := store.Write(journal); err != nil {
+				t.Fatal(err)
+			}
+			app := App{Stdout: io.Discard, Stderr: io.Discard}
+			if err := app.checkpointDelete(context.Background(), []string{journal.ID}); err == nil || !strings.Contains(err.Error(), "inspect") || deletes != 0 {
+				t.Fatalf("unconfirmed journal authorized deletion: %v deletes=%d", err, deletes)
+			}
+			args := []string{"checkpoint", operation, "--json"}
+			if operation == "inspect" {
+				args = append(args, journal.ID)
+			}
+			if err := app.Run(context.Background(), args); err != nil {
+				t.Fatalf("journal hydration: %v", err)
+			}
+			current, _, err := store.Read(journal.ID)
+			if err != nil || current.CreatedAt != remote.CreatedAt || current.Native.ImageID != remote.Image.ID {
+				t.Fatalf("journal did not acquire coordinator identity: %#v %v", current, err)
+			}
+			if err := app.checkpointDelete(context.Background(), []string{journal.ID}); err != nil || deletes != 1 {
+				t.Fatalf("confirmed identity deletion: %v deletes=%d", err, deletes)
+			}
+		})
 	}
 }
 
@@ -558,10 +689,18 @@ func TestCheckpointManagedUnwritableCacheDoesNotBlockRemoteInspect(t *testing.T)
 	}
 }
 
-func TestCheckpointManagedDeleteRetriesTombstoneWithoutPreflightGet(t *testing.T) {
+func TestCheckpointManagedDeleteRetriesTombstoneAfterPreflightGet(t *testing.T) {
 	checkpoint := managedCheckpointFixture("chk_lost_delete_response")
 	deletes := 0
 	server, store := configureManagedCheckpointTest(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			if r.URL.Path == "/v1/checkpoints" {
+				_ = json.NewEncoder(w).Encode(map[string]any{"checkpoints": []coordinatorCheckpoint{}})
+			} else {
+				http.NotFound(w, r)
+			}
+			return
+		}
 		if r.Method != http.MethodDelete || r.URL.Path != "/v1/checkpoints/"+checkpoint.ID {
 			t.Errorf("unexpected preflight request: %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
@@ -947,7 +1086,7 @@ func TestCheckpointManagedRenewalCompletionRace(t *testing.T) {
 			go func() {
 				provision, provisionErr := (App{Stdout: io.Discard, Stderr: io.Discard}).provisionManagedCheckpointFork(
 					context.Background(), cfg, backend, backend, repo,
-					record, checkpointPaths{}, false, false, "fork", "", true,
+					record, checkpointPaths{}, false, false, "", "fork", "", true, nil,
 				)
 				finished <- result{provision: provision, err: provisionErr}
 			}()
@@ -1059,9 +1198,9 @@ func TestCheckpointManagedExpiryRejectsOlderCoordinatorBeforeSourcePreparation(t
 	record := checkpointRecord{ID: "chk_preflight_expiry", Provider: "aws", LeaseID: "cbx_000000000001"}
 	ctx := withCheckpointCreateContext(context.Background(), record, coordinatorCheckpointRetention{
 		Mode: "expire-unused", UnusedForSeconds: 3600,
-	})
-	_, err := (coordinatorCheckpointDriver{}).Create(ctx, checkpointNativeCreateRequest{
-		Cfg:          cfg,
+	}, nil)
+	_, err := (coordinatorCheckpointDriver{}).Create(ctx, NativeCheckpointCreateRequest{
+		Config:       cfg,
 		Server:       Server{Provider: "aws", CloudID: "i-000000000001"},
 		Target:       SSHTarget{Host: "source-must-not-be-contacted.invalid"},
 		CheckpointID: record.ID,
@@ -1073,5 +1212,516 @@ func TestCheckpointManagedExpiryRejectsOlderCoordinatorBeforeSourcePreparation(t
 	}
 	if len(requests) != 1 || requests[0] != "GET /v1/checkpoints" {
 		t.Fatalf("unexpected pre-mutation requests = %#v", requests)
+	}
+}
+
+func TestCheckpointManagedListFallsBackWithoutChangingLocalCache(t *testing.T) {
+	for _, failure := range []string{"offline", "500", "503"} {
+		t.Run(failure, func(t *testing.T) {
+			calls := 0
+			server, store := configureManagedCheckpointTest(t, func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.Method != http.MethodGet || r.URL.Path != "/v1/checkpoints" {
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+				}
+				code := http.StatusInternalServerError
+				if failure == "503" {
+					code = http.StatusServiceUnavailable
+				}
+				http.Error(w, "unavailable", code)
+			})
+			if failure == "offline" {
+				server.Close()
+			}
+			remote := managedCheckpointFixture("chk_cached_offline")
+			cached, err := checkpointRecordFromCoordinator(remote, checkpointCoordinatorOrigin(server.URL))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Write(cached); err != nil {
+				t.Fatal(err)
+			}
+			local, err := store.Create(checkpointRecord{ID: "chk_local_offline", Kind: checkpointKindArchive})
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := map[string][]byte{}
+			for _, id := range []string{cached.ID, local.ID} {
+				paths, _ := store.Paths(id)
+				before[id], err = os.ReadFile(paths.Meta)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			var stdout, stderr bytes.Buffer
+			if err := (App{Stdout: &stdout, Stderr: &stderr}).checkpointList(context.Background(), []string{"--json"}); err != nil {
+				t.Fatal(err)
+			}
+			var records []checkpointRecord
+			if err := json.Unmarshal(stdout.Bytes(), &records); err != nil || len(records) != 2 {
+				t.Fatalf("inventory: %q, %v", stdout.String(), err)
+			}
+			if !strings.Contains(stderr.String(), "partial local inventory") {
+				t.Fatalf("missing warning: %s", stderr.String())
+			}
+			for id, data := range before {
+				paths, _ := store.Paths(id)
+				after, err := os.ReadFile(paths.Meta)
+				if err != nil || !bytes.Equal(data, after) {
+					t.Fatalf("fallback changed cache %s: %v", id, err)
+				}
+			}
+			if failure != "offline" && calls != 1 {
+				t.Fatalf("requests = %d", calls)
+			}
+		})
+	}
+}
+
+func TestCheckpointManagedListDoesNotHideAuthorizationOrMalformedInventory(t *testing.T) {
+	for _, code := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusOK} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			_, _ = configureManagedCheckpointTest(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(code)
+				_, _ = io.WriteString(w, "invalid inventory")
+			})
+			var stdout bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: io.Discard}).checkpointList(context.Background(), []string{"--json"})
+			if err == nil || stdout.Len() != 0 {
+				t.Fatalf("hidden failure: %v, %s", err, stdout.String())
+			}
+		})
+	}
+}
+
+func TestCheckpointInventoryTimeoutDistinguishesCallerCancellation(t *testing.T) {
+	if !checkpointInventoryUnavailable(context.Background(), context.DeadlineExceeded) {
+		t.Fatal("internal deadline did not permit cached inventory")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if checkpointInventoryUnavailable(ctx, context.DeadlineExceeded) {
+		t.Fatal("caller cancellation hidden")
+	}
+	if checkpointInventoryUnavailable(context.Background(), errors.New("invalid inventory")) {
+		t.Fatal("malformed inventory hidden")
+	}
+}
+
+func TestCheckpointManagedCachePreservesCaptureAndRejectsActiveCapture(t *testing.T) {
+	server, store := configureManagedCheckpointTest(t, func(w http.ResponseWriter, r *http.Request) { t.Error("cache write contacted coordinator") })
+	record, err := checkpointRecordFromCoordinator(managedCheckpointFixture("chk_capture_cache"), checkpointCoordinatorOrigin(server.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, phase := range []string{"retired", "submitting"} {
+		t.Run(phase, func(t *testing.T) {
+			existing := record
+			existing.Capture = &NativeCheckpointCapture{Phase: phase}
+			if err := store.Write(existing); err != nil {
+				t.Fatal(err)
+			}
+			err := writeSafeManagedCheckpointCache(store, record)
+			if (err != nil) != (phase == "submitting") {
+				t.Fatalf("refresh = %v", err)
+			}
+			current, _, err := store.Read(record.ID)
+			if err != nil || current.Capture == nil || current.Capture.Phase != phase {
+				t.Fatalf("capture lost: %#v, %v", current.Capture, err)
+			}
+		})
+	}
+}
+
+func TestCheckpointExpiryRejectsRetirementBeforeAccess(t *testing.T) {
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	for _, option := range []string{"--retire-source", "--prepare-only", "--discard-failed", "--checkpoint-id=chk_retirement"} {
+		err := (App{Stdout: io.Discard, Stderr: io.Discard}).checkpointCreate(context.Background(), []string{"--expire-unused-after=1h", option})
+		if err == nil || !strings.Contains(err.Error(), "cannot be combined with source retirement") {
+			t.Fatalf("%s: %v", option, err)
+		}
+	}
+}
+
+func TestCheckpointManagedCreatePersistsOwnershipBeforeProviderMutation(t *testing.T) {
+	for _, outcome := range []string{"ambiguous", "legacy", "journal-failure"} {
+		t.Run(outcome, func(t *testing.T) {
+			var ownership []bool
+			posts := 0
+			server, _ := configureManagedCheckpointTest(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost {
+					posts++
+				}
+				if len(ownership) == 0 || !ownership[0] {
+					t.Error("request preceded durable managed ownership")
+				}
+				if outcome == "legacy" {
+					if r.URL.Path == "/v1/checkpoints" {
+						http.NotFound(w, r)
+						return
+					}
+					if len(ownership) != 2 || ownership[1] {
+						t.Error("legacy create retained managed ownership")
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"image": CoordinatorImage{ID: "ami-test", State: "available"}})
+					return
+				}
+				http.Error(w, "ambiguous provider result", http.StatusServiceUnavailable)
+			})
+			t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "test-admin")
+			cfg := defaultConfig()
+			cfg.Provider, cfg.Coordinator, cfg.TargetOS = "aws", server.URL, targetWindows
+			cfg.WindowsMode = windowsModeNormal
+			record := checkpointRecord{ID: "chk_create_recovery", Provider: "aws", LeaseID: "cbx_000000000001"}
+			ctx := withCheckpointCreateContext(context.Background(), record, checkpointRetentionFromDuration(0), func(managed bool) error {
+				ownership = append(ownership, managed)
+				if outcome == "journal-failure" {
+					return errors.New("journal unavailable")
+				}
+				return nil
+			})
+			image, err := (coordinatorCheckpointDriver{}).Create(ctx, NativeCheckpointCreateRequest{
+				Config: cfg, Server: Server{Provider: "aws", CloudID: "i-test"},
+				Target:       SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal},
+				CheckpointID: record.ID, LeaseID: record.LeaseID, Strategy: checkpointStrategyImage,
+			})
+			if outcome == "legacy" {
+				if err != nil || image.ID != "ami-test" || posts != 2 {
+					t.Fatalf("legacy result: %#v, %v, posts=%d", image, err, posts)
+				}
+			} else if outcome == "journal-failure" {
+				if err == nil || !strings.Contains(err.Error(), "journal unavailable") || posts != 0 {
+					t.Fatalf("journal failure: %v, posts=%d", err, posts)
+				}
+			} else if err == nil || posts != 1 || len(ownership) != 1 || !ownership[0] {
+				t.Fatalf("ambiguous ownership: %v, posts=%d, journal=%v", err, posts, ownership)
+			}
+		})
+	}
+}
+
+func TestCheckpointRetirementUsesHostOwnedCoordinatorImage(t *testing.T) {
+	calls := 0
+	server, _ := configureManagedCheckpointTest(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/images" {
+			t.Errorf("retirement used %s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"image": CoordinatorImage{ID: "ami-retirement", State: "available"}})
+	})
+	t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "test-admin")
+	cfg := defaultConfig()
+	cfg.Provider, cfg.Coordinator, cfg.TargetOS = "aws", server.URL, targetWindows
+	cfg.WindowsMode = windowsModeNormal
+	image, err := (coordinatorCheckpointDriver{}).Create(context.Background(), NativeCheckpointCreateRequest{
+		Config: cfg, Server: Server{Provider: "aws", CloudID: "i-test"},
+		Target:       SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal},
+		CheckpointID: "chk_host_capture", LeaseID: "cbx_000000000001", Strategy: checkpointStrategyImage,
+		Capture: &NativeCheckpointCapture{Phase: "submitting"},
+	})
+	if err != nil || image.ID != "ami-retirement" || image.managedCheckpoint != nil || calls != 1 {
+		t.Fatalf("host capture: %#v, %v, calls=%d", image, err, calls)
+	}
+}
+
+func TestCheckpointManagedDeleteWithoutCacheStillDeletesRemote(t *testing.T) {
+	checkpoint := managedCheckpointFixture("chk_uncached_delete")
+	calls := 0
+	server, store := configureManagedCheckpointTest(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode(map[string]any{"checkpoint": checkpoint})
+			return
+		}
+		if r.Method != http.MethodDelete || r.URL.Path != "/v1/checkpoints/"+checkpoint.ID {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"deleted": true, "checkpointID": checkpoint.ID})
+	})
+	record, err := checkpointRecordFromCoordinator(checkpoint, checkpointCoordinatorOrigin(server.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (App{Stdout: io.Discard, Stderr: io.Discard}).deleteManagedCheckpoint(context.Background(), store, record); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("remote deletion requests = %d", calls)
+	}
+	if _, _, err := store.Read(record.ID); !isCheckpointNotFound(err) {
+		t.Fatalf("created a cache on deletion: %v", err)
+	}
+}
+
+func TestCheckpointManagedDeleteDistinguishesUnsupportedAPIFromAbsence(t *testing.T) {
+	for _, code := range []int{200, 404, 405} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			_, _ = configureManagedCheckpointTest(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet {
+					t.Errorf("unexpected mutation: %s", r.Method)
+				}
+				if r.URL.Path == "/v1/checkpoints" && code == 200 {
+					_, _ = io.WriteString(w, `{"checkpoints":[]}`)
+					return
+				}
+				w.WriteHeader(codeIfInventory(r.URL.Path, code))
+				_, _ = io.WriteString(w, `{"error":"not_found"}`)
+			})
+			var stdout bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: io.Discard}).checkpointDelete(context.Background(), []string{"chk_missing_cache"})
+			if code == 200 {
+				if err != nil || !strings.Contains(stdout.String(), "checkpoint absent") {
+					t.Fatalf("confirmed absence: %v %q", err, stdout.String())
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "upgrade the coordinator") || stdout.Len() != 0 {
+				t.Fatalf("unsupported route: %v %q", err, stdout.String())
+			}
+		})
+	}
+}
+
+func codeIfInventory(path string, code int) int {
+	if path == "/v1/checkpoints" {
+		return code
+	}
+	return http.StatusNotFound
+}
+
+func TestCheckpointManagedListRejectsMissingInventoryArray(t *testing.T) {
+	for _, body := range []string{`{}`, `null`, `{"checkpoints":null}`} {
+		t.Run(body, func(t *testing.T) {
+			server, store := configureManagedCheckpointTest(t, func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, body) })
+			record, _ := checkpointRecordFromCoordinator(managedCheckpointFixture("chk_inventory_shape"), checkpointCoordinatorOrigin(server.URL))
+			if err := store.Write(record); err != nil {
+				t.Fatal(err)
+			}
+			paths, _ := store.Paths(record.ID)
+			before, _ := os.ReadFile(paths.Meta)
+			var stdout bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: io.Discard}).checkpointList(context.Background(), []string{"--json"})
+			after, _ := os.ReadFile(paths.Meta)
+			if err == nil || stdout.Len() != 0 || !bytes.Equal(before, after) {
+				t.Fatalf("invalid response accepted or cache changed: %v %q", err, stdout.String())
+			}
+		})
+	}
+}
+
+func TestCheckpointManagedLookupRejectsAnotherCheckpointID(t *testing.T) {
+	other := managedCheckpointFixture("chk_other_resource")
+	mutations := 0
+	_, store := configureManagedCheckpointTest(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			mutations++
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"checkpoint": other})
+	})
+	err := (App{Stdout: io.Discard, Stderr: io.Discard}).checkpointDelete(context.Background(), []string{"chk_requested_resource"})
+	if err == nil || !strings.Contains(err.Error(), "requested checkpoint") || mutations != 0 {
+		t.Fatalf("wrong resource accepted: %v mutations=%d", err, mutations)
+	}
+	if _, _, err := store.Read(other.ID); !isCheckpointNotFound(err) {
+		t.Fatalf("cached wrong response: %v", err)
+	}
+}
+
+func TestCheckpointManagedListRecoversOnlyAuthoritativeCorruptCache(t *testing.T) {
+	for _, scenario := range []string{"no-coordinator", "unrecovered", "recovered"} {
+		t.Run(scenario, func(t *testing.T) {
+			remote := managedCheckpointFixture("chk_corrupt_inventory")
+			_, store := configureManagedCheckpointTest(t, func(w http.ResponseWriter, r *http.Request) {
+				records := []coordinatorCheckpoint{}
+				if scenario == "recovered" {
+					records = append(records, remote)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"checkpoints": records})
+			})
+			if scenario == "no-coordinator" {
+				t.Setenv("CRABBOX_COORDINATOR", "")
+			}
+			paths, _ := store.Paths(remote.ID)
+			if err := os.MkdirAll(paths.Dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			const corrupt = "preserve corrupt published checkpoint"
+			if err := os.WriteFile(paths.Meta, []byte(corrupt), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var stdout bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: io.Discard}).checkpointList(context.Background(), []string{"--json"})
+			if scenario == "recovered" {
+				if err != nil || !strings.Contains(stdout.String(), remote.ID) {
+					t.Fatalf("recovery: %v %q", err, stdout.String())
+				}
+			} else if err == nil || stdout.Len() != 0 {
+				t.Fatalf("corruption hidden: %v %q", err, stdout.String())
+			}
+			after, err := os.ReadFile(paths.Meta)
+			if err != nil || string(after) != corrupt {
+				t.Fatalf("corrupt bytes changed: %v", err)
+			}
+		})
+	}
+}
+
+func TestCheckpointListKeepsLocalRecordsWhenConfigurationCannotLoad(t *testing.T) {
+	for _, scenario := range []string{"malformed-file", "unregistered-provider"} {
+		t.Run(scenario, func(t *testing.T) {
+			_, store := configureManagedCheckpointTest(t, func(w http.ResponseWriter, r *http.Request) {
+				t.Error("invalid configuration must not contact a coordinator")
+			})
+			if scenario == "malformed-file" {
+				if err := os.WriteFile(os.Getenv("CRABBOX_CONFIG"), []byte("unrelated: [\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				t.Setenv("CRABBOX_PROVIDER", "missing-provider")
+			}
+			record := checkpointRecord{ID: "chk_local_config", Kind: checkpointKindArchive, CreatedAt: "2026-08-19T12:00:00Z"}
+			if _, err := store.Create(record); err != nil {
+				t.Fatal(err)
+			}
+			paths, err := store.Paths(record.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(paths.Meta)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			err = (App{Stdout: &stdout, Stderr: &stderr}).checkpointList(context.Background(), []string{"--json"})
+			if err != nil || !strings.Contains(stdout.String(), record.ID) || !strings.Contains(stderr.String(), "partial local inventory") {
+				t.Fatalf("local inventory: err=%v stdout=%q stderr=%q", err, &stdout, &stderr)
+			}
+			after, err := os.ReadFile(paths.Meta)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatalf("local metadata changed: %v", err)
+			}
+		})
+	}
+}
+
+func TestCheckpointManagedDeleteRecoversUnavailableCache(t *testing.T) {
+	for _, scenario := range []string{"corrupt", "unwritable"} {
+		t.Run(scenario, func(t *testing.T) {
+			remote := managedCheckpointFixture("chk_delete_recovery")
+			deletes := 0
+			_, store := configureManagedCheckpointTest(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodDelete {
+					deletes++
+					_ = json.NewEncoder(w).Encode(map[string]any{"deleted": true, "checkpointID": remote.ID})
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"checkpoint": remote})
+			})
+			paths, _ := store.Paths(remote.ID)
+			preserved := paths.Meta
+			if scenario == "unwritable" {
+				preserved = store.root
+			}
+			if err := os.MkdirAll(filepath.Dir(preserved), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			const contents = "unavailable local cache evidence"
+			if err := os.WriteFile(preserved, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			app := App{Stdout: &stdout, Stderr: &stderr}
+			if err := app.checkpointDelete(context.Background(), []string{remote.ID, "--dry-run"}); err != nil {
+				t.Fatal(err)
+			}
+			if deletes != 0 || !strings.Contains(stdout.String(), "would delete checkpoint") {
+				t.Fatalf("dry run: %d %q", deletes, stdout.String())
+			}
+			if err := app.checkpointDelete(context.Background(), []string{remote.ID}); err != nil {
+				t.Fatal(err)
+			}
+			after, err := os.ReadFile(preserved)
+			if deletes != 1 || err != nil || string(after) != contents || !strings.Contains(stderr.String(), "preserving") {
+				t.Fatalf("delete recovery: calls=%d err=%v bytes=%q warnings=%q", deletes, err, after, stderr.String())
+			}
+		})
+	}
+}
+
+func TestCheckpointManagedDeleteDoesNotBypassBusyCapture(t *testing.T) {
+	calls := 0
+	server, store := configureManagedCheckpointTest(t, func(w http.ResponseWriter, r *http.Request) { calls++ })
+	record, _ := checkpointRecordFromCoordinator(managedCheckpointFixture("chk_busy_managed"), checkpointCoordinatorOrigin(server.URL))
+	if err := store.Write(record); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WithLock(record.ID, func() error {
+		err := (App{Stdout: io.Discard, Stderr: io.Discard}).checkpointDelete(context.Background(), []string{record.ID})
+		var busy checkpointBusyError
+		if !errors.As(err, &busy) {
+			t.Fatalf("busy operation bypassed: %v", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("busy capture made %d requests", calls)
+	}
+}
+
+func TestCheckpointManagedVerificationRejectsForeignCoordinator(t *testing.T) {
+	for _, localOnly := range []bool{false, true} {
+		t.Run(strconv.FormatBool(localOnly), func(t *testing.T) {
+			calls := 0
+			_, store := configureManagedCheckpointTest(t, func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.URL.Path != "/v1/checkpoints" {
+					t.Errorf("queried foreign checkpoint: %s", r.URL.Path)
+				}
+				_, _ = io.WriteString(w, `{"checkpoints":[]}`)
+			})
+			record, _ := checkpointRecordFromCoordinator(managedCheckpointFixture("chk_foreign_verify"), "https://other-coordinator.example")
+			if err := store.Write(record); err != nil {
+				t.Fatal(err)
+			}
+			args := []string{"--verify", "--json"}
+			if localOnly {
+				args = append(args, "--local-only")
+			}
+			var stdout bytes.Buffer
+			if err := (App{Stdout: &stdout, Stderr: io.Discard}).checkpointList(context.Background(), args); err != nil {
+				t.Fatal(err)
+			}
+			var audits []checkpointAudit
+			if err := json.Unmarshal(stdout.Bytes(), &audits); err != nil {
+				t.Fatal(err)
+			}
+			if len(audits) != 1 || audits[0].ProviderState != "unknown" || !strings.Contains(audits[0].Error, "belongs to coordinator") {
+				t.Fatalf("foreign audit: %s", stdout.String())
+			}
+			if localOnly && calls != 0 || !localOnly && calls != 1 {
+				t.Fatalf("wrong-authority requests: %d", calls)
+			}
+		})
+	}
+}
+
+func TestCheckpointManagedMutationsRejectResponseIDMismatch(t *testing.T) {
+	for _, operation := range []string{"create", "retention"} {
+		t.Run(operation, func(t *testing.T) {
+			other := managedCheckpointFixture("chk_wrong_response")
+			server, _ := configureManagedCheckpointTest(t, func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{"checkpoint": other, "image": CoordinatorImage{ID: "snap-wrong"}})
+			})
+			client := &CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+			var err error
+			if operation == "create" {
+				_, _, err = client.CreateCheckpoint(context.Background(), checkpointRecord{ID: "chk_requested"}, "fixture", checkpointStrategyDiskSnapshot, true, checkpointRetentionFromDuration(0))
+			} else {
+				_, err = client.UpdateCheckpointRetention(context.Background(), "chk_requested", checkpointRetentionFromDuration(0))
+			}
+			if err == nil || !strings.Contains(err.Error(), "requested checkpoint") {
+				t.Fatalf("accepted wrong response: %v", err)
+			}
+		})
 	}
 }

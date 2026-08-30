@@ -260,7 +260,7 @@ func TestPrintRunFailureDigestIncludesMemoryGuidance(t *testing.T) {
 			ResourceExhaustion: ResourceExhaustionMemory,
 			RetryLikely:        "false",
 		},
-	}, newStreamTailBuffer(40), newStreamTailBuffer(40), "", "")
+	})
 	out := buf.String()
 	for _, want := range []string{
 		"area: resource_exhaustion",
@@ -278,8 +278,6 @@ func TestPrintRunFailureDigestIncludesMemoryGuidance(t *testing.T) {
 }
 
 func TestPrintRunFailureDigest(t *testing.T) {
-	stderrTail := newStreamTailBuffer(40)
-	_, _ = stderrTail.Write([]byte("setup ok\nunit failed\n"))
 	var buf bytes.Buffer
 	printRunFailureDigest(&buf, runFailureDigestInput{
 		LeaseID:        "cbx_123",
@@ -288,7 +286,7 @@ func TestPrintRunFailureDigest(t *testing.T) {
 		CommandDisplay: "go test ./...",
 		Classification: FailureClassification{BlockedStage: "unknown", RetryLikely: "unknown"},
 		Phases:         []TimingPhase{{Name: "test"}},
-	}, newStreamTailBuffer(40), stderrTail, "", "")
+	})
 	out := buf.String()
 	for _, want := range []string{
 		"failure digest",
@@ -297,8 +295,6 @@ func TestPrintRunFailureDigest(t *testing.T) {
 		"next: crabbox logs run_123 --tail 80",
 		"next: crabbox doctor --from-run run_123",
 		"next: crabbox run --id blue-lobster --fresh-sync -- go test ./...",
-		"tail stderr:",
-		"unit failed",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("digest missing %q:\n%s", want, out)
@@ -315,10 +311,10 @@ func TestPrintRunFailureDigestExplainsUnavailableRunHistory(t *testing.T) {
 		RunHistoryUnavailable: true,
 		CommandDisplay:        "go test ./...",
 		Classification:        FailureClassification{BlockedStage: "unknown", RetryLikely: "unknown"},
-	}, newStreamTailBuffer(40), newStreamTailBuffer(40), "", "")
+	})
 	out := buf.String()
 	for _, want := range []string{
-		"run_history: unavailable; use lease-based recovery commands below",
+		"run_history: unavailable",
 		"next: crabbox ssh --id blue-lobster",
 		"next: crabbox run --id blue-lobster --fresh-sync -- go test ./...",
 	} {
@@ -384,17 +380,17 @@ func TestFailureDigestNextCommandsRespectRunHistoryAvailability(t *testing.T) {
 	}
 }
 
-func TestRunFailureDigestRoutingArgsUseExternalRoutingFile(t *testing.T) {
+func TestRunFailureDigestRoutingUseExternalRoutingFile(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	args := runFailureDigestRoutingArgs(Config{
+	args := CommandRoutingFor(Config{
 		Provider: "external",
 		External: ExternalConfig{
 			Command: "provider-command",
 			Args:    []string{"--token", "secret-value"},
 			Config:  map[string]any{"token": "secret-config"},
 		},
-	}, "provider-id")
-	got := strings.Join(args, " ")
+	}, "provider-id", CommandRoutingRetry)
+	got := strings.Join(args.Args, " ")
 	for _, want := range []string{"--provider external", "--external-routing-file", "--external-routing-digest"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("routing args missing %q: %s", want, got)
@@ -407,17 +403,17 @@ func TestRunFailureDigestRoutingArgsUseExternalRoutingFile(t *testing.T) {
 	}
 }
 
-func TestRunFailureDigestSSHRoutingArgsUseExternalRoutingFile(t *testing.T) {
+func TestRunFailureDigestSSHRoutingUseExternalRoutingFile(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	args := runFailureDigestSSHRoutingArgs(Config{
+	args := CommandRoutingFor(Config{
 		Provider: "external",
 		External: ExternalConfig{
 			Command: "provider-command",
 			Args:    []string{"--token", "secret-value"},
 			Config:  map[string]any{"token": "secret-config"},
 		},
-	}, "cbx_abcdef123456")
-	got := strings.Join(args, " ")
+	}, "cbx_abcdef123456", CommandRoutingRetry)
+	got := strings.Join(args.Args, " ")
 	for _, want := range []string{"--provider external", "--external-routing-file", "--external-routing-digest"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("ssh routing args missing %q: %s", want, got)
@@ -431,15 +427,13 @@ func TestRunFailureDigestSSHRoutingArgsUseExternalRoutingFile(t *testing.T) {
 }
 
 func TestPrintRunFailureDigestExplainsAndChainShortCircuit(t *testing.T) {
-	stderrTail := newStreamTailBuffer(40)
-	_, _ = stderrTail.Write([]byte("pnpm check failed\n"))
 	var buf bytes.Buffer
 	printRunFailureDigest(&buf, runFailureDigestInput{
 		LeaseID:        "cbx_123",
 		CommandDisplay: "pnpm check && pnpm test",
 		ShellMode:      true,
 		Classification: FailureClassification{BlockedStage: "unknown", RetryLikely: "unknown"},
-	}, newStreamTailBuffer(40), stderrTail, "", "")
+	})
 	out := buf.String()
 	for _, want := range []string{
 		"area: user_command",
@@ -464,7 +458,7 @@ func TestPrintRunFailureDigestSuppressesMixedAndOrChain(t *testing.T) {
 		CommandDisplay: "pnpm build && pnpm test || pnpm cleanup",
 		ShellMode:      true,
 		Classification: FailureClassification{BlockedStage: "unknown", RetryLikely: "unknown"},
-	}, newStreamTailBuffer(40), newStreamTailBuffer(40), "", "")
+	})
 	out := buf.String()
 	for _, unexpected := range []string{"shell_chain:", "would_skip_if_left_failed:", "chain_semantics:"} {
 		if strings.Contains(out, unexpected) {
@@ -484,7 +478,7 @@ func TestPrintRunFailureDigestIncludesObservedPhases(t *testing.T) {
 			{Name: "check"},
 			{Name: "test"},
 		},
-	}, newStreamTailBuffer(40), newStreamTailBuffer(40), "", "")
+	})
 	out := buf.String()
 	for _, want := range []string{
 		"phase: test",
@@ -515,7 +509,7 @@ func TestPrintRunFailureDigestIncludesStructuredTestFailures(t *testing.T) {
 				Message:   "expected true\rspoofed",
 			}},
 		},
-	}, newStreamTailBuffer(40), newStreamTailBuffer(40), "", "")
+	})
 	out := buf.String()
 	for _, want := range []string{
 		"test_results: files=1 tests=2 failures=1 errors=0 skipped=0",
@@ -570,8 +564,9 @@ func TestFailureDigestRoutesProviderArgsToSSH(t *testing.T) {
 		Provider:       "proxmox",
 		LeaseID:        "cbx_123",
 		CommandDisplay: "go test ./...",
-		RoutingArgs:    runFailureDigestRoutingArgs(cfg, "cbx_123"),
-		SSHRoutingArgs: runFailureDigestSSHRoutingArgs(cfg, "cbx_123"),
+		Routing:        CommandRoutingFor(cfg, "cbx_123", CommandRoutingRetry),
+		SSHRouting:     CommandRoutingFor(cfg, "cbx_123", CommandRoutingRetry),
+		StopRouting:    CommandRoutingFor(cfg, "cbx_123", CommandRoutingStop),
 		Classification: FailureClassification{RetryLikely: "unknown"},
 		StopCommand:    "crabbox stop --provider proxmox --proxmox-api-url https://pve.example cbx_123",
 	}, "unknown")
@@ -602,8 +597,9 @@ func TestFailureDigestPreservesInheritedKubeconfigForKubeVirt(t *testing.T) {
 		TargetOS:       targetLinux,
 		LeaseID:        "cbx_123",
 		CommandDisplay: "go test ./...",
-		RoutingArgs:    runFailureDigestRoutingArgs(cfg, "cbx_123"),
-		SSHRoutingArgs: runFailureDigestSSHRoutingArgs(cfg, "cbx_123"),
+		Routing:        CommandRoutingFor(cfg, "cbx_123", CommandRoutingRetry),
+		SSHRouting:     CommandRoutingFor(cfg, "cbx_123", CommandRoutingRetry),
+		StopRouting:    CommandRoutingFor(cfg, "cbx_123", CommandRoutingStop),
 		Classification: FailureClassification{RetryLikely: "unknown"},
 	}, "unknown")
 	joined := strings.Join(commands, "\n")
@@ -643,8 +639,9 @@ func TestFailureDigestPreservesSealosRouting(t *testing.T) {
 		TargetOS:       targetLinux,
 		LeaseID:        "cbx_123",
 		CommandDisplay: "go test ./...",
-		RoutingArgs:    runFailureDigestRoutingArgs(cfg, "cbx_123"),
-		SSHRoutingArgs: runFailureDigestSSHRoutingArgs(cfg, "cbx_123"),
+		Routing:        CommandRoutingFor(cfg, "cbx_123", CommandRoutingRetry),
+		SSHRouting:     CommandRoutingFor(cfg, "cbx_123", CommandRoutingRetry),
+		StopRouting:    CommandRoutingFor(cfg, "cbx_123", CommandRoutingStop),
 		Classification: FailureClassification{RetryLikely: "unknown"},
 	}, "unknown")
 	joined := strings.Join(commands, "\n")
@@ -657,54 +654,6 @@ func TestFailureDigestPreservesSealosRouting(t *testing.T) {
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("commands missing %q:\n%s", want, joined)
-		}
-	}
-}
-
-func TestRunFailureDigestIncludesXCPNgRoutingFlagsWithoutPassword(t *testing.T) {
-	args := runFailureDigestRoutingArgs(Config{
-		Provider: "xcp-ng",
-		TargetOS: targetLinux,
-		XCPNg: XCPNgConfig{
-			APIURL:       "pool-user:pool-pass@xcp-ng.example.test/path?view=1",
-			Username:     "root",
-			Password:     "xcp-ng-secret",
-			Template:     "ubuntu template",
-			TemplateUUID: "tpl-0001",
-			SR:           "default sr",
-			SRUUID:       "sr-0001",
-			Network:      "pool network",
-			NetworkUUID:  "net-0001",
-			Host:         "host-0001",
-			User:         "runner",
-			WorkRoot:     "/work/xcp-ng",
-			InsecureTLS:  true,
-		},
-	}, "cbx_123")
-	joined := strings.Join(args, " ")
-	for _, want := range []string{
-		"--provider xcp-ng",
-		"--target linux",
-		"--xcp-ng-api-url xcp-ng.example.test/path?view=1",
-		"--xcp-ng-username root",
-		"--xcp-ng-template ubuntu template",
-		"--xcp-ng-template-uuid tpl-0001",
-		"--xcp-ng-sr default sr",
-		"--xcp-ng-sr-uuid sr-0001",
-		"--xcp-ng-network pool network",
-		"--xcp-ng-network-uuid net-0001",
-		"--xcp-ng-host host-0001",
-		"--xcp-ng-user runner",
-		"--xcp-ng-work-root /work/xcp-ng",
-		"--xcp-ng-insecure-tls",
-	} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("failure digest routing missing %q:\n%v", want, args)
-		}
-	}
-	for _, secret := range []string{"xcp-ng-secret", "pool-user", "pool-pass", "password"} {
-		if strings.Contains(joined, secret) {
-			t.Fatalf("failure digest routing leaked %q: %v", secret, args)
 		}
 	}
 }
@@ -749,5 +698,25 @@ func TestSelectProofLogExcerptRedactsHTMLAuthBody(t *testing.T) {
 	got := SelectProofLogExcerpt("<!doctype html><html><head><title>Cloudflare Access</title></head><body>login</body></html>")
 	if !strings.Contains(got, "redacted auth_cloudflare_html response") {
 		t.Fatalf("proof excerpt was not redacted: %q", got)
+	}
+}
+
+func TestFailureDigestStoppedLeaseKeepsHistoryAndLocalEvidence(t *testing.T) {
+	var out bytes.Buffer
+	printRunFailureDigest(&out, runFailureDigestInput{
+		LeaseID: "cbx_stopped", LeaseStopped: true, RunID: "run_failed",
+		CommandDisplay: "false", StopCommand: "crabbox stop --id cbx_stopped",
+	})
+	printFailureTail(&out, "stdout", nil, "stdout.log")
+	printFailureTail(&out, "stderr", nil, "stderr.log")
+	for _, want := range []string{"crabbox logs run_failed", "crabbox events run_failed", "crabbox doctor --from-run run_failed", "lease: stopped", "stderr.log", "stdout.log"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("missing %q: %s", want, out.String())
+		}
+	}
+	for _, command := range []string{"ssh", "run", "stop"} {
+		if strings.Contains(out.String(), "next: crabbox "+command+" ") {
+			t.Errorf("stale recovery command %s: %s", command, out.String())
+		}
 	}
 }

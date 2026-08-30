@@ -111,9 +111,9 @@ crabbox desktop launch --id swift-crab \
 `egress start`:
 
 1. resolves the lease through the coordinator;
-2. copies and starts the lease-side egress client over SSH, listening on the
-   loopback proxy port;
-3. creates a client ticket and waits for the lease proxy to come up;
+2. copies the lease-side egress client over SSH;
+3. creates a client ticket, sends it through SSH stdin to start the client on
+   the loopback proxy port, and waits for the lease proxy to come up;
 4. creates a host ticket and starts the local host agent (in the background
    with `--daemon`, otherwise in the foreground).
 
@@ -263,6 +263,11 @@ Mediated egress defaults closed:
   `--profile` or `--allow`;
 - tickets are one-use, short-lived (120s), and bound to lease, owner/org, role,
   and session;
+- automatic client startup carries the ticket through SSH stdin, never SSH,
+  shell, or helper arguments, environment variables, or a remote credential
+  file; a foreground helper validates and closes bounded SSH input before
+  handing it through a private pipe to the detached client, failing closed
+  without client startup, login, or ticket-mint fallback on invalid input;
 - the host agent dials only allowlisted destinations whose resolved address is
   public; private, loopback, link-local, multicast, and reserved IP ranges are
   rejected, including IP-literal requests;

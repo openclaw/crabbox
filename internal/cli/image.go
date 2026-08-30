@@ -314,6 +314,9 @@ func deleteHetznerCheckpointImage(ctx context.Context, store checkpointStore, li
 	if region != "" && region != record.Native.Region {
 		return checkpointRecord{}, exit(2, "Hetzner snapshot %s location mismatch: recorded=%s requested=%s", imageID, blank(record.Native.Region, "unknown"), region)
 	}
+	if unresolvedCheckpoint(record) {
+		return checkpointRecord{}, exit(2, "checkpoint %s is unresolved; reconcile its capture before deletion", record.ID)
+	}
 	if err := lifecycle.DeleteNativeCheckpoint(ctx, nativeCheckpointResourceRequest(record)); err != nil {
 		return checkpointRecord{}, err
 	}
