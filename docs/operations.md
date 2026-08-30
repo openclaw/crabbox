@@ -846,6 +846,29 @@ Pins never refresh silently at build time or runtime. See Docker's
 [image-digest model](https://docs.docker.com/dhi/explore/security-concepts/digests/)
 and the [Apple Container lifecycle](providers/apple-container.md#configuration).
 
+## Tart Default Image
+
+The built-in macOS Sequoia image is pinned by `DefaultTartImage` in
+`internal/cli/config.go`. Its raw OCI manifest and SHA-bound VM configuration
+are stored in `internal/providers/tart/images`. The Tart adapter verifies the
+cloned disk, NVRAM, and configuration before configuration or boot; neither a
+digest-shaped cache path nor a successful download is sufficient proof.
+
+Review this pin before each release and after relevant upstream security fixes.
+Resolve the publisher's intended macOS Sequoia image over authenticated HTTPS,
+hash the raw manifest bytes, and fetch that same digest to confirm identical
+bytes. Fetch and hash the referenced VM config blob, then update the constant,
+both metadata files, and provider documentation together. Do not reformat the
+metadata files: their exact bytes are part of the reviewed identity.
+
+Validate a fresh pull and a warm-cache clone using native Tart. Run a real SSH
+workload and stop the lease; verify tampered configuration, NVRAM, disk chunks,
+wrong disk size, and suspended state cannot reach VM configuration or startup.
+Measure verification time because each new default clone reads its whole disk.
+Record the upstream manifest digest, metadata hashes, native Tart version,
+macOS workload result, and cleanup evidence in the PR. Preserve explicit custom
+image references and never silently fall back to a mutable tag.
+
 ## Release Checklist
 
 The authoritative serialized release contract is [Release engineering](RELEASING.md).

@@ -1373,6 +1373,9 @@ type Machine0Config struct {
 	PollInterval  time.Duration
 }
 
+// DefaultTartImage is the immutable built-in image; the Tart adapter verifies its contents.
+const DefaultTartImage = "ghcr.io/cirruslabs/macos-sequoia-base@sha256:785c3acb40fa5af6dd5aab96cd60408372c26125e173c14ea417498d086f829c"
+
 type TartConfig struct {
 	Image    string
 	User     string
@@ -3382,7 +3385,7 @@ func baseConfig() Config {
 			PollInterval:  60 * time.Second,
 		},
 		Tart: TartConfig{
-			Image:    "ghcr.io/cirruslabs/macos-sequoia-base:latest",
+			Image:    DefaultTartImage,
 			User:     "admin",
 			WorkRoot: "/Users/admin/crabbox",
 			CPUs:     4,

@@ -475,7 +475,7 @@ func decodeTerminalRunReceipt(data []byte) (terminalRunReceipt, error) {
 	if len(data) > maxTerminalReceiptBytes {
 		return terminalRunReceipt{}, fmt.Errorf("terminal receipt exceeds %d bytes", maxTerminalReceiptBytes)
 	}
-	duplicate, err := jsonHasDuplicateKeys(json.NewDecoder(bytes.NewReader(data)))
+	duplicate, err := JSONHasDuplicateKeys(json.NewDecoder(bytes.NewReader(data)))
 	if err != nil {
 		return terminalRunReceipt{}, err
 	}
@@ -526,7 +526,9 @@ func (w *attestDigestWriter) sum() string {
 	return "sha256:" + hex.EncodeToString(w.digest.Sum(nil))
 }
 
-func jsonHasDuplicateKeys(dec *json.Decoder) (bool, error) {
+// JSONHasDuplicateKeys scans one JSON value recursively. Callers remain
+// responsible for rejecting trailing data and enforcing input size limits.
+func JSONHasDuplicateKeys(dec *json.Decoder) (bool, error) {
 	token, err := dec.Token()
 	if err != nil {
 		return false, err
@@ -551,7 +553,7 @@ func jsonHasDuplicateKeys(dec *json.Decoder) (bool, error) {
 				return true, nil
 			}
 			seen[key] = true
-			duplicate, err := jsonHasDuplicateKeys(dec)
+			duplicate, err := JSONHasDuplicateKeys(dec)
 			if duplicate || err != nil {
 				return duplicate, err
 			}
@@ -560,7 +562,7 @@ func jsonHasDuplicateKeys(dec *json.Decoder) (bool, error) {
 		return false, err
 	case '[':
 		for dec.More() {
-			duplicate, err := jsonHasDuplicateKeys(dec)
+			duplicate, err := JSONHasDuplicateKeys(dec)
 			if duplicate || err != nil {
 				return duplicate, err
 			}
@@ -610,7 +612,7 @@ var attestRequiredReceiptFields = []string{
 }
 
 func decodeRunReceipt(data []byte) (map[string]any, error) {
-	duplicate, err := jsonHasDuplicateKeys(json.NewDecoder(bytes.NewReader(data)))
+	duplicate, err := JSONHasDuplicateKeys(json.NewDecoder(bytes.NewReader(data)))
 	if err != nil {
 		return nil, err
 	}

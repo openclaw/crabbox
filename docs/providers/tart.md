@@ -40,7 +40,7 @@ CLI flags:
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--tart-image` | `ghcr.io/cirruslabs/macos-sequoia-base:latest` | OCI base image to clone |
+| `--tart-image` | `ghcr.io/cirruslabs/macos-sequoia-base@sha256:785c3acb40fa5af6dd5aab96cd60408372c26125e173c14ea417498d086f829c` | OCI base image to clone |
 | `--tart-cpu` | 4 | Guest CPU count |
 | `--tart-memory` | 8192 | Guest memory in MB |
 | `--tart-disk` | (clone default) | Guest disk size in GB; only applied when explicitly set |
@@ -49,7 +49,8 @@ YAML (`.crabbox.yaml`):
 
 ```yaml
 tart:
-  image: ghcr.io/cirruslabs/macos-ventura-base:latest
+  # Omit image to use the verified built-in macOS Sequoia image.
+  # image: my-local-base  # explicit custom image; operator-managed trust
   user: admin
   workRoot: /Users/admin/crabbox
   cpus: 4
@@ -73,13 +74,51 @@ and process metadata.
 ## How it works
 
 1. `tart clone <image> crabbox-<slug>` creates a new VM from the base image.
+   For the built-in image, Crabbox verifies the clone's disk, NVRAM, and
+   configuration against checked-in image metadata before configuring or
+   starting it. A failed verification stops provisioning and removes only the
+   new clone whose ownership marker still matches.
 2. `tart set crabbox-<slug> --cpu N --memory N` configures resources (disk size is only resized when `--tart-disk` is explicitly set).
 3. `tart run crabbox-<slug> --no-graphics --no-clipboard --no-audio` starts the VM headless with Tart's automatic host clipboard and audio passthrough disabled.
 4. `tart ip crabbox-<slug>` polls for the guest IP (DHCP, typically ~10s).
-5. `tart exec crabbox-<slug> bash -c "..."` injects the SSH public key.
+5. Crabbox waits up to two minutes for the Tart Guest Agent using a harmless
+   `tart exec crabbox-<slug> /usr/bin/true` probe, then injects the SSH public key
+   with `tart exec crabbox-<slug> bash -c "..."`. An IP alone is not guest-agent
+   readiness. Only native connection-pool/agent-startup errors are retried;
+   cancellation and other failures stop provisioning. The key-writing command
+   is never retried.
 6. Crabbox waits for SSH readiness, then syncs and runs commands normally.
 7. For `--desktop` leases, `tart exec` turns on the guest's built-in macOS Screen Sharing (native VNC on port 5900). No VNC password is provisioned — authentication uses the guest account's own credentials.
 8. `tart stop` + `tart delete` on release.
+
+## Built-in image identity
+
+New leases without an image override use the immutable Sequoia image above.
+The original registry manifest and its VM configuration are checked in under
+`internal/providers/tart/images`. Crabbox hashes the manifest against the pin,
+then checks the cloned disk's exact size and every uncompressed chunk digest,
+the NVRAM size and digest, and the configuration before guest execution. Native
+Tart MAC-address regeneration and JSON formatting changes are allowed; other
+configuration changes, duplicate JSON keys, and suspended state are rejected.
+The verified manifest digest is recorded as `image_digest` in lease labels and
+preserved on touch.
+
+This check also runs for warm-cache clones: a cache name or successful
+`tart clone` is not content verification. It streams the 50 GB disk with bounded
+memory, so provisioning includes a full local disk read even on a cache hit.
+Cancellation interrupts verification. The check does not protect against an
+operator modifying the local VM directory concurrently or after verification.
+
+Existing leases keep their image. Explicit `--tart-image`, `tart.image`, and
+`CRABBOX_TART_IMAGE` values remain operator-managed configuration, including
+local names and mutable tags. An explicitly configured old `:latest` value
+therefore stays mutable; remove the override to adopt the verified default.
+There is no fallback to a tag when the pinned image is unavailable or fails
+verification. Legacy leases without recorded provenance are not given the new
+verified digest retroactively.
+
+Maintainers refresh this pin and its metadata before releases and when upstream
+security fixes require it; see [image maintenance](../operations.md#tart-default-image).
 
 ## Automatic cleanup ownership
 

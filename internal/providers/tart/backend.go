@@ -52,7 +52,7 @@ func applyDefaults(cfg *Config) {
 	cfg.WindowsMode = ""
 	cfg.SSHFallbackPorts = []string{}
 	if cfg.Tart.Image == "" {
-		cfg.Tart.Image = "ghcr.io/cirruslabs/macos-sequoia-base:latest"
+		cfg.Tart.Image = core.DefaultTartImage
 	}
 	if cfg.Tart.User == "" {
 		if cfg.SSHUser != "" && cfg.SSHUser != "crabbox" {
@@ -153,6 +153,16 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 		}
 		return b.deleteVM(context.Background(), name)
 	}
+	if cfg.Tart.Image == core.DefaultTartImage {
+		fmt.Fprintln(b.rt.Stderr, "verifying built-in Tart image contents before boot (full disk read)")
+	}
+	imageDigest, err := verifyDefaultTartImage(ctx, cfg.Tart.Image, storage, name)
+	if err != nil {
+		return LeaseTarget{}, errors.Join(err, cleanupUnclaimedVM())
+	}
+	if err := verifyTartVMIdentity(name, storage, identity); err != nil {
+		return LeaseTarget{}, fmt.Errorf("Tart clone ownership changed before configuration (VM retained): %w", err)
+	}
 	if err := b.configureVM(ctx, cfg, name); err != nil {
 		return LeaseTarget{}, errors.Join(err, cleanupUnclaimedVM())
 	}
@@ -175,6 +185,9 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 	labels := directLeaseLabels(cfg, leaseID, slug, providerName, "", req.Keep, time.Now().UTC())
 	labels["instance"] = name
 	labels["image"] = cfg.Tart.Image
+	if imageDigest != "" {
+		labels["image_digest"] = imageDigest
+	}
 	labels["ssh_user"] = cfg.Tart.User
 	labels["ssh_port"] = sshPort
 	labels["work_root"] = cfg.Tart.WorkRoot
@@ -459,7 +472,7 @@ func (b *backend) Touch(_ context.Context, req TouchRequest) (Server, error) {
 	}
 	original := server.Labels
 	server.Labels = touchDirectLeaseLabels(original, b.configForRun(), req.State, time.Now().UTC())
-	for _, key := range []string{"image", "instance", "ssh_user", "ssh_port", "work_root"} {
+	for _, key := range []string{"image", "image_digest", "instance", "ssh_user", "ssh_port", "work_root"} {
 		if value := strings.TrimSpace(original[key]); value != "" {
 			server.Labels[key] = value
 		}
@@ -639,6 +652,9 @@ func (b *backend) injectSSHKey(ctx context.Context, name string, user string, pu
 	if !validPOSIXUser.MatchString(user) {
 		return exit(2, "tart.user %q is not a valid POSIX account name", user)
 	}
+	if err := b.waitForGuestAgent(ctx, name); err != nil {
+		return fmt.Errorf("ssh key injection: %w", err)
+	}
 	sshDir := fmt.Sprintf("~%s/.ssh", user)
 	safeKey := strings.ReplaceAll(strings.TrimSpace(publicKey), "'", "'\\''")
 	injectScript := fmt.Sprintf(
@@ -648,6 +664,44 @@ func (b *backend) injectSSHKey(ctx context.Context, name string, user string, pu
 	injectResult, err := b.tart(ctx, []string{"exec", name, "bash", "-c", injectScript}, nil, b.rt.Stderr)
 	if err != nil {
 		return commandError("ssh key injection", injectResult, err)
+	}
+	return nil
+}
+
+func (b *backend) waitForGuestAgent(ctx context.Context, name string) error {
+	// An IP can come from a previous DHCP lease before the new guest agent is
+	// ready. Probe with a read-only command; never retry the key-writing script.
+	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	type observation struct {
+		result LocalCommandResult
+		err    error
+	}
+	_, err := shared.Poll(waitCtx, 0, 500*time.Millisecond, shared.SleepContext,
+		func(ctx context.Context) (observation, error) {
+			result, err := b.tart(ctx, []string{"exec", name, "/usr/bin/true"}, nil, nil)
+			return observation{result: result, err: err}, nil
+		},
+		func(ctx context.Context, current observation, _ error) (bool, error) {
+			if err := context.Cause(ctx); err != nil {
+				return false, err
+			}
+			if current.err == nil {
+				return true, nil
+			}
+			detail := current.result.Stderr + " " + current.err.Error()
+			if strings.Contains(detail, "GRPCConnectionPoolError") || strings.Contains(detail, "is the Tart Guest Agent running?") {
+				return false, nil
+			}
+			return false, commandError("Tart Guest Agent readiness", current.result, current.err)
+		},
+		func(result shared.PollResult[observation]) {
+			if result.Attempt == 1 {
+				fmt.Fprintln(b.rt.Stderr, "waiting for Tart Guest Agent before SSH key injection")
+			}
+		})
+	if err != nil {
+		return fmt.Errorf("wait for Tart Guest Agent: %w", err)
 	}
 	return nil
 }
@@ -830,9 +884,8 @@ func (b *backend) serverFromInstance(inst tartInstance, claim core.LeaseClaim, c
 	if labels["server_type"] == "" {
 		labels["server_type"] = firstNonBlank(inst.Source, cfg.Tart.Image)
 	}
-	if labels["image"] == "" {
-		labels["image"] = cfg.Tart.Image
-	}
+	// Native inventory's Source is a storage kind, not an image identity.
+	// Only acquisition records image provenance in the claim.
 	if labels["ssh_user"] == "" {
 		labels["ssh_user"] = cfg.Tart.User
 	}

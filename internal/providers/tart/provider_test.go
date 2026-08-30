@@ -154,7 +154,7 @@ func TestApplyDefaults(t *testing.T) {
 	cfg.Provider = providerName
 	cfg.Tart = core.TartConfig{}
 	applyDefaults(&cfg)
-	if cfg.Tart.Image != "ghcr.io/cirruslabs/macos-sequoia-base:latest" {
+	if cfg.Tart.Image != core.DefaultTartImage {
 		t.Fatalf("default image=%q", cfg.Tart.Image)
 	}
 	if cfg.Tart.User != "admin" {
@@ -319,6 +319,7 @@ func TestAcquireKeepIPFailureDeletesUnclaimedVMAndKey(t *testing.T) {
 	}
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
+	cfg.Tart.Image = "custom-base"
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
 	b.startupObserveTimeout = 20 * time.Millisecond
 	// Keep setup outside the deadline race under coverage while still forcing
@@ -786,7 +787,7 @@ func TestServerFromInstanceDefaultsLabels(t *testing.T) {
 		"slug":        "my-slug",
 		"state":       "running",
 		"server_type": "ghcr.io/test:latest",
-		"image":       cfg.Tart.Image,
+		"image":       "",
 		"ssh_user":    cfg.Tart.User,
 		"ssh_port":    sshPort,
 	}
@@ -2265,11 +2266,12 @@ func TestTouchPreservesProviderLabels(t *testing.T) {
 	original := core.LeaseTarget{
 		Server: core.Server{
 			Labels: map[string]string{
-				"image":     "ghcr.io/test:latest",
-				"instance":  "crabbox-blue-1234",
-				"ssh_user":  "admin",
-				"ssh_port":  "22",
-				"work_root": "/Users/admin/crabbox",
+				"image":        "ghcr.io/test:latest",
+				"image_digest": "sha256:" + strings.Repeat("a", 64),
+				"instance":     "crabbox-blue-1234",
+				"ssh_user":     "admin",
+				"ssh_port":     "22",
+				"work_root":    "/Users/admin/crabbox",
 			},
 		},
 	}
@@ -2280,7 +2282,7 @@ func TestTouchPreservesProviderLabels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Touch: %v", err)
 	}
-	for _, key := range []string{"image", "instance", "ssh_user", "ssh_port", "work_root"} {
+	for _, key := range []string{"image", "image_digest", "instance", "ssh_user", "ssh_port", "work_root"} {
 		if server.Labels[key] != original.Server.Labels[key] {
 			t.Errorf("Touch lost label %s: got %q, want %q", key, server.Labels[key], original.Server.Labels[key])
 		}
