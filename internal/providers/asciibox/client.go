@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -22,13 +23,14 @@ type api interface {
 	CreateBox(context.Context, createRequest) (boxData, error)
 	PrepareSSH(context.Context, string) error
 	GetBox(context.Context, string) (boxData, error)
-	ListBoxes(context.Context) ([]boxData, error)
-	ReleaseBox(context.Context, string) error
+	ListBoxes(context.Context, bool) ([]boxData, error)
+	ReleaseBox(context.Context, string, func(context.Context) error) error
 }
 
 type client struct {
 	apiKey              string
 	apiURL              string
+	org                 string
 	cliPath             string
 	home                string
 	runner              CommandRunner
@@ -39,7 +41,14 @@ type createRequest struct {
 	TTL time.Duration
 }
 
+type boxIdentityError struct{ id string }
+
+func (e *boxIdentityError) Error() string {
+	return fmt.Sprintf("ascii-box info returned a different Box ID for %q", e.id)
+}
+
 type boxData struct {
+	createdID    string
 	ID           string `json:"id"`
 	Name         string `json:"name,omitempty"`
 	State        string `json:"state,omitempty"`
@@ -74,7 +83,7 @@ var newAPI = func(cfg Config, rt Runtime) (api, error) {
 	if cliPath == "" {
 		cliPath = "box"
 	}
-	return &client{apiKey: apiKey, apiURL: apiURL, cliPath: cliPath, home: asciiBoxCLIHome(), runner: rt.Exec}, nil
+	return &client{apiKey: apiKey, apiURL: apiURL, org: asciiBoxOrg(), cliPath: cliPath, home: asciiBoxCLIHome(), runner: rt.Exec}, nil
 }
 
 func validateAsciiBoxBaseURL(raw string) (string, error) {
@@ -134,7 +143,7 @@ func (c *client) CreateBox(ctx context.Context, req createRequest) (boxData, err
 	result, err := c.run(ctx, args...)
 	if err != nil {
 		partial, parseErr := decodeNewBox(result.Stdout)
-		if partial.ID != "" {
+		if partial.createdID != "" {
 			if parseErr != nil {
 				return partial, fmt.Errorf("ascii-box CLI new failed after creating %s: %s", partial.ID, c.formatError(result, err))
 			}
@@ -153,9 +162,7 @@ func (c *client) CreateBox(ctx context.Context, req createRequest) (boxData, err
 		return boxData{}, fmt.Errorf("ascii-box CLI new response missing box id")
 	}
 	if !boxReadyForSSH(box) {
-		if ready, err := c.waitForBoxReady(ctx, box); err == nil {
-			return ready, nil
-		}
+		return c.waitForBoxReady(ctx, box)
 	}
 	return box, nil
 }
@@ -181,30 +188,43 @@ func (c *client) GetBox(ctx context.Context, id string) (boxData, error) {
 	if err != nil {
 		return boxData{}, fmt.Errorf("ascii-box CLI info failed: %s", c.formatError(result, err))
 	}
-	return decodeBox([]byte(result.Stdout))
+	box, err := decodeBox([]byte(result.Stdout))
+	if err == nil && (!concreteBoxID(box.ID) || concreteBoxID(id) && box.ID != id) {
+		return boxData{}, &boxIdentityError{id: id}
+	}
+	return box, err
 }
 
-func (c *client) ListBoxes(ctx context.Context) ([]boxData, error) {
-	result, err := c.run(ctx, "list")
+func (c *client) ListBoxes(ctx context.Context, requireComplete bool) ([]boxData, error) {
+	result, err := c.run(ctx, "list", "--all")
 	if err != nil {
 		return nil, fmt.Errorf("ascii-box CLI list failed: %s", c.formatError(result, err))
 	}
-	return decodeBoxes([]byte(result.Stdout))
+	return decodeBoxes([]byte(result.Stdout), requireComplete)
 }
 
-func (c *client) ReleaseBox(ctx context.Context, id string) error {
+func (c *client) ReleaseBox(ctx context.Context, id string, validate func(context.Context) error) error {
+	if !concreteBoxID(id) || validate == nil {
+		return fmt.Errorf("ascii-box release requires a concrete ID and ownership validator")
+	}
 	if err := c.ensureConfig(ctx); err != nil {
 		return fmt.Errorf("prepare ascii-box CLI release: %w", err)
 	}
+	if err := validate(ctx); err != nil {
+		return err
+	}
 	stopResult, stopErr := c.runPrepared(ctx, "stop", id)
-	deleteResult, deleteErr := c.runPrepared(ctx, "delete", id)
+	if err := validate(ctx); err != nil {
+		return err
+	}
+	deleteResult, deleteErr := c.runPrepared(ctx, "delete", id, "--yes")
 	if deleteErr == nil {
 		return nil
 	}
 	if !c.snapshotGuardConflict(deleteResult, deleteErr) {
 		return c.releaseError(stopResult, stopErr, deleteResult, deleteErr, "")
 	}
-	return c.releaseAfterSnapshotGuard(ctx, id, stopResult, stopErr, deleteResult, deleteErr)
+	return c.releaseAfterSnapshotGuard(ctx, id, stopResult, stopErr, deleteResult, deleteErr, validate)
 }
 
 func (c *client) releaseAfterSnapshotGuard(
@@ -214,6 +234,7 @@ func (c *client) releaseAfterSnapshotGuard(
 	stopErr error,
 	deleteResult LocalCommandResult,
 	deleteErr error,
+	validate func(context.Context) error,
 ) error {
 	if err := ctx.Err(); err != nil {
 		return c.releaseError(
@@ -227,6 +248,9 @@ func (c *client) releaseAfterSnapshotGuard(
 	recoveryCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
+	if err := validate(recoveryCtx); err != nil {
+		return err
+	}
 	extendResult, extendErr := c.runPrepared(recoveryCtx, "extend", id, "--ttl", "1")
 	if extendErr != nil {
 		return c.releaseError(
@@ -278,7 +302,10 @@ func (c *client) releaseAfterSnapshotGuard(
 			if !boxReadyForDelete(box) {
 				continue
 			}
-			retryResult, retryErr := c.runPrepared(recoveryCtx, "delete", id)
+			if err := validate(recoveryCtx); err != nil {
+				return err
+			}
+			retryResult, retryErr := c.runPrepared(recoveryCtx, "delete", id, "--yes")
 			if retryErr == nil {
 				return nil
 			}
@@ -353,7 +380,7 @@ func (c *client) runPreparedWithEnv(ctx context.Context, env []string, args ...s
 		ctx, cancel = context.WithTimeout(ctx, cliTimeout(args))
 		defer cancel()
 	}
-	argv := []string{"--no-update", "--json"}
+	argv := []string{"--no-update", "--json", "--org", blank(c.org, "personal")}
 	if c.apiURL != "" {
 		argv = append(argv, "--api-url", c.apiURL)
 	}
@@ -387,7 +414,7 @@ func (c *client) ensureConfig(ctx context.Context) error {
 	}
 	result, err := c.runner.Run(ctx, LocalCommandRequest{
 		Name: c.cliPath,
-		Args: []string{"--no-update", "--json", "--api-url", c.apiURL, "status"},
+		Args: []string{"--no-update", "--json", "--org", blank(c.org, "personal"), "--api-url", c.apiURL, "status"},
 		Env:  c.env(),
 	})
 	if err != nil {
@@ -493,11 +520,18 @@ func (c *client) waitForBoxReady(ctx context.Context, box boxData) (boxData, err
 				return nil
 			}
 		},
-		func(context.Context) (boxData, error) { return c.GetBox(ctx, latest.ID) },
+		func(context.Context) (boxData, error) { return c.GetBox(ctx, box.ID) },
 		func(_ context.Context, refreshed boxData, fetchErr error) (bool, error) {
 			if fetchErr != nil {
+				var identityErr *boxIdentityError
+				if errors.As(fetchErr, &identityErr) {
+					return false, fetchErr
+				}
 				lastErr = fetchErr
 				return false, nil
+			}
+			if refreshed.ID != box.ID || boxCreationTime(latest) != "" && boxCreationTime(refreshed) != boxCreationTime(latest) {
+				return false, fmt.Errorf("ascii-box identity changed during readiness")
 			}
 			latest = mergeBox(latest, refreshed)
 			return boxReadyForSSH(latest), nil
@@ -577,7 +611,7 @@ func decodeNewBox(output string) (boxData, error) {
 			Box  boxData `json:"box"`
 		}
 		if err := json.Unmarshal(line, &event); err != nil {
-			return boxData{}, fmt.Errorf("decode ascii-box CLI new line: %w", err)
+			return latest, fmt.Errorf("decode ascii-box CLI new line: %w", err)
 		}
 		box := event.boxData
 		if box.ID == "" {
@@ -586,18 +620,27 @@ func decodeNewBox(output string) (boxData, error) {
 		if box.ID == "" {
 			box = event.Box
 		}
-		if box.ID != "" {
-			latest = mergeBox(latest, box)
+		if latest.createdID == "" && event.Event == "created" && concreteBoxID(box.ID) {
+			latest.createdID = box.ID
 		}
-		if event.Event == "ready" && latest.ID != "" {
-			return latest, nil
+		if latest.createdID == "" && box.ID != "" {
+			return latest, fmt.Errorf("ascii-box CLI new did not confirm creation of a concrete Box ID")
+		}
+		if box.ID != "" && box.ID != latest.createdID {
+			return latest, fmt.Errorf("ascii-box CLI new changed its created Box ID")
+		}
+		if boxCreationTime(latest) != "" && box.CreatedAt != nil && boxCreationTime(latest) != boxCreationTime(box) {
+			return latest, fmt.Errorf("ascii-box CLI new changed its creation timestamp")
+		}
+		if box.ID != "" && event.Event != "error" {
+			latest = mergeBox(latest, box)
 		}
 		if event.Event == "error" {
 			return latest, fmt.Errorf("ascii-box CLI new failed: %s", redactBoxSecrets(string(line)))
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return boxData{}, err
+		return latest, err
 	}
 	if latest.ID == "" {
 		return boxData{}, fmt.Errorf("decode ascii-box CLI new: no box event")
@@ -671,16 +714,37 @@ func decodeBox(data []byte) (boxData, error) {
 	return box, nil
 }
 
-func decodeBoxes(data []byte) ([]boxData, error) {
+func decodeBoxes(data []byte, requireComplete bool) ([]boxData, error) {
 	var wrapped struct {
-		Boxes []boxData `json:"boxes"`
+		Boxes    []boxData `json:"boxes"`
+		PageInfo struct {
+			HasMore    bool   `json:"hasMore"`
+			NextCursor string `json:"nextCursor"`
+		} `json:"pageInfo"`
 	}
 	if err := json.Unmarshal(data, &wrapped); err == nil && wrapped.Boxes != nil {
-		return wrapped.Boxes, nil
+		if requireComplete && (wrapped.PageInfo.HasMore || wrapped.PageInfo.NextCursor != "") {
+			return nil, fmt.Errorf("ascii-box inventory is paginated; cannot prove complete absence")
+		}
+		return completeBoxes(wrapped.Boxes)
 	}
 	var boxes []boxData
 	if err := json.Unmarshal(data, &boxes); err != nil {
 		return nil, fmt.Errorf("decode ascii-box boxes: %w", err)
+	}
+	if boxes == nil {
+		return nil, fmt.Errorf("ascii-box inventory response is missing boxes")
+	}
+	return completeBoxes(boxes)
+}
+
+func completeBoxes(boxes []boxData) ([]boxData, error) {
+	seen := make(map[string]bool, len(boxes))
+	for _, box := range boxes {
+		if !concreteBoxID(box.ID) || seen[box.ID] {
+			return nil, fmt.Errorf("ascii-box inventory contains invalid or duplicate Box IDs")
+		}
+		seen[box.ID] = true
 	}
 	return boxes, nil
 }

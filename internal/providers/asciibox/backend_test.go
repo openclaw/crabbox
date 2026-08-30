@@ -63,41 +63,41 @@ func TestClientUsesOfficialAsciiBoxCLI(t *testing.T) {
 	if _, err := client.GetBox(context.Background(), "bx_1"); err != nil {
 		t.Fatal(err)
 	}
-	if boxes, err := client.ListBoxes(context.Background()); err != nil || len(boxes) != 1 {
+	if boxes, err := client.ListBoxes(context.Background(), false); err != nil || len(boxes) != 1 {
 		t.Fatalf("boxes=%#v err=%v", boxes, err)
 	}
-	if err := client.ReleaseBox(context.Background(), "bx_1"); err != nil {
+	if err := client.ReleaseBox(context.Background(), "bx_1", func(context.Context) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
-		"box --no-update --json --api-url https://ascii.dev status",
-		"box --no-update --json --api-url https://ascii.dev new --ttl 1800",
-		"box --no-update --json --api-url https://ascii.dev status",
-		"box --no-update --json --api-url https://ascii.dev ssh bx_1 -- true",
-		"box --no-update --json --api-url https://ascii.dev status",
-		"box --no-update --json --api-url https://ascii.dev info bx_1",
-		"box --no-update --json --api-url https://ascii.dev status",
-		"box --no-update --json --api-url https://ascii.dev list",
-		"box --no-update --json --api-url https://ascii.dev status",
-		"box --no-update --json --api-url https://ascii.dev stop bx_1",
-		"box --no-update --json --api-url https://ascii.dev delete bx_1",
+		"box --no-update --json --org personal --api-url https://ascii.dev status",
+		"box --no-update --json --org personal --api-url https://ascii.dev new --ttl 1800",
+		"box --no-update --json --org personal --api-url https://ascii.dev status",
+		"box --no-update --json --org personal --api-url https://ascii.dev ssh bx_1 -- true",
+		"box --no-update --json --org personal --api-url https://ascii.dev status",
+		"box --no-update --json --org personal --api-url https://ascii.dev info bx_1",
+		"box --no-update --json --org personal --api-url https://ascii.dev status",
+		"box --no-update --json --org personal --api-url https://ascii.dev list --all",
+		"box --no-update --json --org personal --api-url https://ascii.dev status",
+		"box --no-update --json --org personal --api-url https://ascii.dev stop bx_1",
+		"box --no-update --json --org personal --api-url https://ascii.dev delete bx_1 --yes",
 	}
 	if !reflect.DeepEqual(runner.commands, want) {
 		t.Fatalf("commands=%v want=%v", runner.commands, want)
 	}
 	for _, env := range runner.env {
 		if !hasEnv(env, "BOX_API_KEY=box_key") {
-			t.Fatalf("env missing BOX_API_KEY: %v", env)
+			t.Fatal("child environment missing the synthetic BOX_API_KEY")
 		}
 		if hasEnv(env, "BOX_API_KEY=stale_key") {
-			t.Fatalf("env kept stale BOX_API_KEY: %v", env)
+			t.Fatal("child environment retained the synthetic stale BOX_API_KEY")
 		}
 		if !hasEnv(env, "HOME="+home) {
-			t.Fatalf("env missing HOME: %v", env)
+			t.Fatal("child environment missing the isolated HOME")
 		}
 	}
 	if !hasEnv(runner.env[3], "SSH_AUTH_SOCK=") {
-		t.Fatalf("ssh setup env should disable agent identities: %v", runner.env[3])
+		t.Fatal("SSH setup must disable agent identities")
 	}
 }
 
@@ -123,17 +123,17 @@ func TestReleaseBoxRecoversFromRecentSnapshotGuard(t *testing.T) {
 		releasePollInterval: time.Nanosecond,
 	}
 
-	if err := client.ReleaseBox(context.Background(), "bx_guard"); err != nil {
+	if err := client.ReleaseBox(context.Background(), "bx_guard", func(context.Context) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
-		"box --no-update --json --api-url https://ascii.dev status",
-		"box --no-update --json --api-url https://ascii.dev stop bx_guard",
-		"box --no-update --json --api-url https://ascii.dev delete bx_guard",
-		"box --no-update --json --api-url https://ascii.dev extend bx_guard --ttl 1",
-		"box --no-update --json --api-url https://ascii.dev info bx_guard",
-		"box --no-update --json --api-url https://ascii.dev info bx_guard",
-		"box --no-update --json --api-url https://ascii.dev delete bx_guard",
+		"box --no-update --json --org personal --api-url https://ascii.dev status",
+		"box --no-update --json --org personal --api-url https://ascii.dev stop bx_guard",
+		"box --no-update --json --org personal --api-url https://ascii.dev delete bx_guard --yes",
+		"box --no-update --json --org personal --api-url https://ascii.dev extend bx_guard --ttl 1",
+		"box --no-update --json --org personal --api-url https://ascii.dev info bx_guard",
+		"box --no-update --json --org personal --api-url https://ascii.dev info bx_guard",
+		"box --no-update --json --org personal --api-url https://ascii.dev delete bx_guard --yes",
 	}
 	if !reflect.DeepEqual(runner.commands, want) {
 		t.Fatalf("commands=%v want=%v", runner.commands, want)
@@ -150,11 +150,11 @@ func TestReleaseBoxDoesNotRecoverUnrelatedDeleteFailure(t *testing.T) {
 	}
 	client := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: t.TempDir(), runner: runner}
 
-	err := client.ReleaseBox(context.Background(), "bx_guard")
+	err := client.ReleaseBox(context.Background(), "bx_guard", func(context.Context) error { return nil })
 	if err == nil || !strings.Contains(err.Error(), "permission denied") {
 		t.Fatalf("ReleaseBox err=%v", err)
 	}
-	if containsCommand(runner.commands, "box --no-update --json --api-url https://ascii.dev extend bx_guard --ttl 1") {
+	if containsCommand(runner.commands, "box --no-update --json --org personal --api-url https://ascii.dev extend bx_guard --ttl 1") {
 		t.Fatalf("unexpected snapshot recovery commands=%v", runner.commands)
 	}
 }
@@ -170,7 +170,7 @@ func TestReleaseBoxReportsSnapshotRecoveryExtendFailure(t *testing.T) {
 	}
 	client := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: t.TempDir(), runner: runner}
 
-	err := client.ReleaseBox(context.Background(), "bx_guard")
+	err := client.ReleaseBox(context.Background(), "bx_guard", func(context.Context) error { return nil })
 	if err == nil || !strings.Contains(err.Error(), "snapshot recovery extend: extend throttled") {
 		t.Fatalf("ReleaseBox err=%v", err)
 	}
@@ -192,11 +192,11 @@ func TestReleaseBoxSkipsSnapshotRecoveryAfterCancellation(t *testing.T) {
 	}
 	client := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: t.TempDir(), runner: runner}
 
-	err := client.ReleaseBox(ctx, "bx_guard")
+	err := client.ReleaseBox(ctx, "bx_guard", func(context.Context) error { return nil })
 	if err == nil || !strings.Contains(err.Error(), "snapshot recovery: context canceled") {
 		t.Fatalf("ReleaseBox err=%v", err)
 	}
-	if containsCommand(runner.commands, "box --no-update --json --api-url https://ascii.dev extend bx_guard --ttl 1") {
+	if containsCommand(runner.commands, "box --no-update --json --org personal --api-url https://ascii.dev extend bx_guard --ttl 1") {
 		t.Fatalf("unexpected snapshot recovery commands=%v", runner.commands)
 	}
 }
@@ -363,7 +363,7 @@ func TestClientPollsPartialCreateOutput(t *testing.T) {
 	if got := boxExpiresAt(box); got != "2026-06-10T12:00:00Z" {
 		t.Fatalf("boxExpiresAt=%q, want info response expiration", got)
 	}
-	if !containsCommand(runner.commands, "box --no-update --json --api-url https://ascii.dev info bx_2") {
+	if !containsCommand(runner.commands, "box --no-update --json --org personal --api-url https://ascii.dev info bx_2") {
 		t.Fatalf("commands missing info poll: %v", runner.commands)
 	}
 }
@@ -432,7 +432,7 @@ func TestAcquireClaimsBoxAndReturnsSSHTarget(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("claim ok=%t err=%v", ok, err)
 	}
-	if claim.Provider != providerName || claim.ProviderScope != "box:bx_1" || claim.Slug != "proof" {
+	if claim.Provider != providerName || claim.ProviderScope != (Provider{}).ClaimScope(testConfig()) || claim.Slug != "proof" {
 		t.Fatalf("claim=%#v", claim)
 	}
 }
@@ -440,7 +440,7 @@ func TestAcquireClaimsBoxAndReturnsSSHTarget(t *testing.T) {
 func TestAcquireReleasesPartiallyCreatedBox(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := &fakeAPI{
-		box:       boxData{ID: "bx_partial"},
+		box:       boxData{ID: "bx_partial", createdID: "bx_partial", CreatedAt: "2026-08-30T12:00:00Z"},
 		createErr: fmt.Errorf("create failed"),
 	}
 	withFakeAPI(t, fake)
@@ -463,7 +463,7 @@ func TestResolveUsesClaimScopeAndReleaseDeletesBox(t *testing.T) {
 	fake := &fakeAPI{box: testBox()}
 	withFakeAPI(t, fake)
 	stubSSHWait(t)
-	if err := claimLeaseForRepoProviderScope("cbx_123456789abc", "proof", providerName, "box:bx_1", t.TempDir(), time.Minute, false); err != nil {
+	if _, err := publishBoxClaim(testConfig(), "cbx_123456789abc", "proof", t.TempDir(), fake.box, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -488,9 +488,9 @@ func TestResolveUsesClaimScopeAndReleaseDeletesBox(t *testing.T) {
 
 func TestResolveReleaseOnlyDoesNotRequireSSHFields(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	fake := &fakeAPI{box: boxData{ID: "bx_booting", Status: "provisioning"}}
+	fake := &fakeAPI{box: boxData{ID: "bx_booting", Status: "provisioning", CreatedAt: "2026-08-30T12:00:00Z"}}
 	withFakeAPI(t, fake)
-	if err := claimLeaseForRepoProviderScope("cbx_abcdef123456", "booting", providerName, "box:bx_booting", t.TempDir(), time.Minute, false); err != nil {
+	if _, err := publishBoxClaim(testConfig(), "cbx_abcdef123456", "booting", t.TempDir(), fake.box, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -504,31 +504,20 @@ func TestResolveReleaseOnlyDoesNotRequireSSHFields(t *testing.T) {
 	}
 }
 
-func TestResolveRawBoxIDClaimsProviderScope(t *testing.T) {
+func TestResolveRawBoxIDDoesNotAdopt(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := &fakeAPI{box: boxData{ID: "bx_external", State: "ready", IP: "203.0.113.30"}}
 	withFakeAPI(t, fake)
-	stubSSHWait(t)
-
-	repoRoot := t.TempDir()
 	backend := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
-	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "bx_external", Repo: core.Repo{Root: repoRoot}})
-	if err != nil {
-		t.Fatal(err)
+	for _, releaseOnly := range []bool{false, true} {
+		_, err := backend.Resolve(context.Background(), ResolveRequest{ID: "bx_external", Repo: core.Repo{Root: t.TempDir()}, ReleaseOnly: releaseOnly, Reclaim: true})
+		if err == nil {
+			t.Fatal("unclaimed raw ID was accepted")
+		}
 	}
-	claim, ok, err := core.ResolveLeaseClaim(lease.LeaseID)
-	if err != nil || !ok {
-		t.Fatalf("claim ok=%t err=%v", ok, err)
-	}
-	if claim.ProviderScope != "box:bx_external" {
-		t.Fatalf("provider scope=%q", claim.ProviderScope)
-	}
-	resolved, err := backend.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID, ReleaseOnly: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resolved.Server.CloudID != "bx_external" {
-		t.Fatalf("resolved=%#v", resolved)
+	claims, err := core.ListLeaseClaims()
+	if err != nil || len(claims) != 0 || len(fake.prepareIDs) != 0 || len(fake.deletedIDs) != 0 {
+		t.Fatalf("unclaimed reuse mutated state: claims=%d err=%v", len(claims), err)
 	}
 }
 
@@ -609,7 +598,7 @@ func testRuntime() Runtime {
 }
 
 func testBox() boxData {
-	return boxData{ID: "bx_1", State: "ready", IP: "203.0.113.10"}
+	return boxData{ID: "bx_1", createdID: "bx_1", CreatedAt: "2026-08-30T12:00:00Z", State: "ready", IP: "203.0.113.10"}
 }
 
 func withFakeAPI(t *testing.T, fake *fakeAPI) {
@@ -627,11 +616,16 @@ func stubSSHWait(t *testing.T) {
 }
 
 type fakeAPI struct {
-	createReq  createRequest
-	createErr  error
-	box        boxData
-	prepareIDs []string
-	deletedIDs []string
+	createReq   createRequest
+	createErr   error
+	box         boxData
+	prepareIDs  []string
+	deletedIDs  []string
+	deleted     bool
+	getHook     func(string) (boxData, error)
+	prepareHook func(string) error
+	listHook    func() ([]boxData, error)
+	releaseHook func(string) error
 }
 
 func (f *fakeAPI) CreateBox(_ context.Context, req createRequest) (boxData, error) {
@@ -649,10 +643,19 @@ func (f *fakeAPI) Check(context.Context) error { return nil }
 
 func (f *fakeAPI) PrepareSSH(_ context.Context, id string) error {
 	f.prepareIDs = append(f.prepareIDs, id)
+	if f.prepareHook != nil {
+		return f.prepareHook(id)
+	}
 	return nil
 }
 
 func (f *fakeAPI) GetBox(_ context.Context, id string) (boxData, error) {
+	if f.getHook != nil {
+		return f.getHook(id)
+	}
+	if f.deleted {
+		return boxData{}, fmt.Errorf("404 not found")
+	}
 	if f.box.ID == "" {
 		f.box = testBox()
 	}
@@ -662,15 +665,30 @@ func (f *fakeAPI) GetBox(_ context.Context, id string) (boxData, error) {
 	return f.box, nil
 }
 
-func (f *fakeAPI) ListBoxes(context.Context) ([]boxData, error) {
+func (f *fakeAPI) ListBoxes(context.Context, bool) ([]boxData, error) {
+	if f.listHook != nil {
+		return f.listHook()
+	}
+	if f.deleted {
+		return []boxData{}, nil
+	}
 	if f.box.ID == "" {
 		f.box = testBox()
 	}
 	return []boxData{f.box}, nil
 }
 
-func (f *fakeAPI) ReleaseBox(_ context.Context, id string) error {
+func (f *fakeAPI) ReleaseBox(ctx context.Context, id string, validate func(context.Context) error) error {
+	if err := validate(ctx); err != nil {
+		return err
+	}
+	if f.releaseHook != nil {
+		if err := f.releaseHook(id); err != nil {
+			return err
+		}
+	}
 	f.deletedIDs = append(f.deletedIDs, id)
+	f.deleted = true
 	return nil
 }
 

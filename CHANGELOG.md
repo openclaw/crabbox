@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Required exact ASCII Box ownership claims for reuse and deletion, pinning creation identity and endpoint/organization routing, fencing teardown and rollback, and retaining uncertain resources until deletion is confirmed. Thanks @coygeek.
 - Required exact SmolVM ownership claims for deletion and reuse, binding machine identity and endpoint before startup, fencing cleanup against claim changes, and retaining legacy or uncertain resources without implicit adoption. Thanks @coygeek.
 - Fenced Nomad stop, cleanup, run teardown, and setup rollback against concurrent claim changes, preserving successor jobs and retaining claims until remote absence is confirmed. Thanks @coygeek.
 - Required durable Incus ownership claims for stop and cleanup, preserving legacy instances and keys without implicit adoption, keeping status read-only, and rechecking identity after stop. Thanks @coygeek.

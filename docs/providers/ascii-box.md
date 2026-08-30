@@ -48,6 +48,10 @@ export ASCII_BOX_API_KEY=...
 hosts may use HTTP. Userinfo, queries, and fragments are rejected before the
 API key is written to Box CLI configuration or passed to the CLI.
 
+`BOX_ORG` selects an organization by ID or name. Without it, Crabbox explicitly
+uses `personal`; the native CLI's sticky organization selection is not inherited.
+Keep the same endpoint and organization selector when reusing or stopping a lease.
+
 ## Config
 
 ```yaml
@@ -75,24 +79,43 @@ CRABBOX_ASCII_BOX_BASE_URL / ASCII_BOX_BASE_URL
 CRABBOX_ASCII_BOX_CLI / BOX_CLI
 CRABBOX_ASCII_BOX_HOME
 CRABBOX_ASCII_BOX_WORKDIR
+BOX_ORG
 ```
 
 ## Lifecycle
 
 1. `crabbox warmup --provider ascii-box` creates a Box through `box new --json`,
-   stores the returned Box id in a local lease claim, prepares the SSH key with
+   verifies the original Box ID and creation timestamp through `box info`, stores
+   an exact local ownership claim before preparing the SSH key with
    `box ssh <id> -- true`, waits for SSH, and keeps the Box until
    `crabbox stop`. The default SSH key lives in the private Box CLI home
    (`CRABBOX_ASCII_BOX_HOME`, otherwise Crabbox state).
 2. `crabbox run --provider ascii-box` provisions a Box for one run, or reuses an
-   existing lease/slug/id, then uses the standard SSH sync and run path.
+   existing claimed lease/slug/Box ID, then uses the standard SSH sync and run path.
+   Reuse requires a matching endpoint, organization, Box ID, and creation
+   timestamp. `--reclaim` may transfer repository ownership of an already owned
+   lease; it does not adopt an unclaimed Box.
 3. `crabbox status` resolves the local lease claim or raw Box id and reads Box
    state through `box info --json`.
-4. `crabbox stop` releases the Box with `box stop --json`, removes the Box
-   record with `box delete --json`, and removes the local lease claim. If the
+4. `crabbox stop` requires the exact, unchanged local claim and freshly matching
+   native identity before remote teardown or each native mutation. It releases
+   the Box with `box stop --json`, deletes it with `box delete --json --yes`, and
+   removes the claim only after successful deletion completion and complete
+   `box list --all` inventory confirms absence. The claim stays locked through
+   teardown, deletion, retries, confirmation, and local removal. If the
    service temporarily refuses deletion until a recent snapshot exists,
    Crabbox shortens the Box TTL, waits for its managed stop transition, and
-   retries deletion for up to two minutes.
+   retries deletion for up to two minutes, within a three-minute overall release
+   budget that also honors caller cancellation. The shared native CLI SSH key
+   is retained.
+
+Raw IDs, provider names, and legacy claims without the full ownership binding
+remain inspectable but cannot authorize reuse or deletion. Missing or changed
+identity, failed lookups, incomplete inventory, and uncertain deletion preserve
+the local claim. There is no implicit adoption or legacy upgrade; inspect such
+resources with the native CLI and manage them explicitly there after verifying
+ownership. Setup rollback likewise targets only the original confirmed creation
+attempt and retains resources when ownership or completion cannot be proven.
 
 ## Limitations
 

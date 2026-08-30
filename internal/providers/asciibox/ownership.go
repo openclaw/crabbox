@@ -1,0 +1,214 @@
+package asciibox
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"strings"
+	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
+)
+
+const boxCreationLabel = "ascii_box_created_at"
+const boxReleaseTimeout = 3 * time.Minute
+
+func asciiBoxOrg() string { return blank(strings.TrimSpace(os.Getenv("BOX_ORG")), "personal") }
+
+func (Provider) ClaimScope(cfg Config) string {
+	endpoint, err := validateAsciiBoxBaseURL(blank(strings.TrimSpace(cfg.AsciiBox.BaseURL), "https://ascii.dev"))
+	if err != nil {
+		return ""
+	}
+	encoded, _ := json.Marshal([]string{endpoint, asciiBoxOrg()})
+	return string(encoded)
+}
+
+func boxCreationTime(box boxData) string {
+	value, ok := box.CreatedAt.(string)
+	if !ok {
+		return ""
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return ""
+	}
+	return parsed.UTC().Format(time.RFC3339Nano)
+}
+
+func concreteBoxID(id string) bool {
+	if !strings.HasPrefix(id, "bx_") || len(id) <= 3 {
+		return false
+	}
+	for _, r := range id[3:] {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+func validateBoxIdentity(actual, expected boxData) error {
+	if !concreteBoxID(expected.ID) || actual.ID != expected.ID || boxCreationTime(expected) == "" || boxCreationTime(actual) != boxCreationTime(expected) {
+		return exit(2, "ascii-box %q identity is missing or changed; retaining resource and claim", expected.ID)
+	}
+	return nil
+}
+
+func boxClaimBinding(cfg Config, claim LeaseClaim) (shared.ClaimBinding, error) {
+	scope := (Provider{}).ClaimScope(cfg)
+	if !core.IsCanonicalLeaseID(claim.LeaseID) || claim.Slug == "" || !concreteBoxID(claim.CloudID) || claim.Revision == "" || claim.Labels[boxCreationLabel] == "" || scope == "" {
+		return shared.ClaimBinding{}, exit(2, "ascii-box lease %q requires an exact local ownership claim; legacy and unclaimed resources are retained", claim.LeaseID)
+	}
+	want := shared.ClaimBinding{Provider: providerName, ProviderScope: scope, ExactProviderScope: true,
+		LeaseID: claim.LeaseID, Slug: claim.Slug, CloudID: claim.CloudID,
+		RequiredLabels: map[string]string{"box_id": claim.CloudID, "ascii_box_scope": scope, boxCreationLabel: claim.Labels[boxCreationLabel]},
+	}
+	if err := shared.ValidateClaimBinding(claim, want); err != nil {
+		return want, exit(2, "ascii-box ownership mismatch: %v", err)
+	}
+	if boxCreationTime(boxFromClaim(claim)) == "" {
+		return want, exit(2, "ascii-box claim creation identity is invalid")
+	}
+	return want, nil
+}
+
+func boxFromClaim(claim LeaseClaim) boxData {
+	return boxData{ID: claim.CloudID, CreatedAt: claim.Labels[boxCreationLabel]}
+}
+
+func resolveOwnedBox(cfg Config, identifier string) (LeaseClaim, error) {
+	id := strings.TrimSpace(identifier)
+	if id == "" {
+		return LeaseClaim{}, exit(2, "ascii-box requires a lease ID, slug, or concrete Box ID")
+	}
+	if core.IsCanonicalLeaseID(id) {
+		claim, exists, err := core.ReadLeaseClaimWithPresence(id)
+		if err != nil {
+			return LeaseClaim{}, err
+		}
+		if !exists {
+			return LeaseClaim{}, exit(2, "ascii-box %q has no exact local ownership claim", id)
+		}
+		_, err = boxClaimBinding(cfg, claim)
+		return claim, err
+	}
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		return LeaseClaim{}, err
+	}
+	var matches []LeaseClaim
+	for _, claim := range claims {
+		if claim.Provider == providerName && (id == claim.Slug || id == claim.CloudID) {
+			matches = append(matches, claim)
+		}
+	}
+	if len(matches) != 1 {
+		return LeaseClaim{}, exit(2, "ascii-box %q requires one unambiguous exact local ownership claim (found %d)", id, len(matches))
+	}
+	_, err = boxClaimBinding(cfg, matches[0])
+	return matches[0], err
+}
+
+func publishBoxClaim(cfg Config, leaseID, slug, repoRoot string, box boxData, keep bool) (LeaseClaim, error) {
+	var published LeaseClaim
+	err := core.WithDurableLeaseClaimLock(leaseID, func(claim *LeaseClaim, exists bool, persist func() error) error {
+		if exists {
+			return exit(2, "ascii-box lease %s acquired a claim during creation; retaining resource", leaseID)
+		}
+		now := time.Now().UTC().Format(time.RFC3339)
+		server := boxToServer(cfg, box, leaseID, slug, keep)
+		*claim = LeaseClaim{LeaseID: leaseID, Slug: slug, Provider: providerName, ProviderScope: (Provider{}).ClaimScope(cfg),
+			CloudID: box.ID, RepoRoot: repoRoot, ClaimedAt: now, LastUsedAt: now,
+			IdleTimeoutSeconds: int(cfg.IdleTimeout.Seconds()), Labels: server.Labels}
+		if err := persist(); err != nil {
+			return err
+		}
+		published = *claim
+		return nil
+	})
+	return published, err
+}
+
+// Generic SSH refreshes may update connection details, never ownership identity.
+func (Provider) PrepareLeaseClaimEndpoint(existing LeaseClaim, provider, slug string, server Server, _ bool) (Server, error) {
+	if provider != providerName || existing.Provider != providerName || slug != existing.Slug || server.CloudID != existing.CloudID ||
+		server.Labels["lease"] != existing.LeaseID || server.Labels["slug"] != existing.Slug {
+		return Server{}, exit(2, "refusing to retarget ascii-box lease %s", existing.LeaseID)
+	}
+	labels := shared.CloneLabels(server.Labels)
+	for _, key := range []string{"provider", "box_id", "ascii_box_scope", boxCreationLabel} {
+		original := existing.Labels[key]
+		if original != "" && labels[key] != "" && labels[key] != original {
+			return Server{}, exit(2, "ascii-box lease %s changed %s", existing.LeaseID, key)
+		}
+		if original == "" {
+			delete(labels, key)
+		} else {
+			labels[key] = original
+		}
+	}
+	server.Labels = labels
+	return server, nil
+}
+
+func (b *backend) ReleaseLeaseConnectionCleanupSafe() bool { return false }
+
+func releaseExactBox(ctx context.Context, client api, expected boxData, beforeRelease func(boxData)) error {
+	validate := func(ctx context.Context) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		fresh, err := client.GetBox(ctx, expected.ID)
+		if err != nil {
+			return fmt.Errorf("ascii-box ownership lookup; retaining claim: %w", err)
+		}
+		return validateBoxIdentity(fresh, expected)
+	}
+	if err := validate(ctx); err != nil {
+		return err
+	}
+	if beforeRelease != nil {
+		fresh, err := client.GetBox(ctx, expected.ID)
+		if err != nil {
+			return err
+		}
+		if err := validateBoxIdentity(fresh, expected); err != nil {
+			return err
+		}
+		beforeRelease(fresh)
+	}
+	if err := client.ReleaseBox(ctx, expected.ID, validate); err != nil {
+		return err
+	}
+	// A failed/pending delete can hide the Box from inventory. Only successful
+	// native deletion completion followed by complete inventory is finalization.
+	for {
+		boxes, err := client.ListBoxes(ctx, true)
+		if err != nil {
+			return fmt.Errorf("ascii-box deletion confirmation; retaining claim: %w", err)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		found := false
+		for _, box := range boxes {
+			if box.ID == expected.ID {
+				if err := validateBoxIdentity(box, expected); err != nil {
+					return err
+				}
+				found = true
+			}
+		}
+		if !found {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
