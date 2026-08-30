@@ -323,7 +323,8 @@ exit 0
 
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		if _, err := os.Stat(probesPath); err == nil {
+		// Redirection creates the file before printf commits the probe marker.
+		if probes, err := os.ReadFile(probesPath); err == nil && string(probes) == "probe\n" {
 			break
 		}
 		select {
