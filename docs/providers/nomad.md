@@ -226,9 +226,12 @@ ID is unused, so a collision cannot retarget an existing job.
 2. `status` and `list` start from local `cbx_...` claims scoped to the selected
    Nomad address, namespace, region, and task. They verify remote job ownership
    before reporting readiness.
-3. `stop` and cleanup retain the local claim unless the remote job has matching
-   ownership metadata and its removal is confirmed, or an exact Nomad `404`
-   proves it is already absent. Auth, transport, and other lookup failures keep
+3. `stop`, cleanup, and automatic run teardown hold the original local claim
+   unchanged under the claim lock while rechecking remote ownership, purging the
+   job, confirming absence, and removing the claim. A replaced or removed claim
+   prevents teardown; an old run never adopts a successor claim. An exact Nomad
+   `404` may retire a stale claim, but cleanup rechecks absence under the lock and
+   retains a job that reappears. Auth, transport, and other lookup failures keep
    the claim for a safe retry.
 4. Unless `--no-sync` is set, `run` creates a portable archive of the checkout,
    uploads it through allocation exec, and extracts it inside `nomad.workdir`.
@@ -244,6 +247,20 @@ ID is unused, so a collision cannot retarget an existing job.
    deregisters TTL-expired or idle-expired Crabbox-owned jobs, removes missing
    stale claims, and skips active claims. `--dry-run` prints the planned action
    without mutating Nomad or local claim state.
+
+Destructive remote work under the claim lock shares one `nomad.evalTimeout`
+budget (default `5m`), including ownership lookup, deregistration evaluation,
+and absence confirmation. Explicit stop and cleanup preserve caller
+cancellation. Local claim-lock acquisition is not itself cancelable; a waiter
+whose deadline has expired performs no remote work once admitted. Automatic
+run teardown and setup rollback retain their independent `30s` cleanup budget
+after command cancellation.
+
+Setup rollback is allowed only while the lease still has no local claim and
+the remote job matches the original registration metadata. Any claim published
+in the meantime, including a partial publication, retains the job for explicit
+inspection instead of guessing who now owns it. These locks serialize Crabbox
+claim writers; they do not fence external Nomad operators changing jobs directly.
 
 ## Capabilities
 

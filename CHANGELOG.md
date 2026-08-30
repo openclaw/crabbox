@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Fenced Nomad stop, cleanup, run teardown, and setup rollback against concurrent claim changes, preserving successor jobs and retaining claims until remote absence is confirmed. Thanks @coygeek.
 - Required durable Incus ownership claims for stop and cleanup, preserving legacy instances and keys without implicit adoption, keeping status read-only, and rechecking identity after stop. Thanks @coygeek.
 - Required exact, unchanged Proxmox cleanup claims bound to the cluster scope, VMID, and native generation ID, retaining unclaimed or ambiguous VMs and keys and preventing endpoint refreshes from rebinding ownership. Thanks @coygeek.
 - Required exact, unchanged Tart cleanup claims bound to the VM's storage and ownership marker, preserving unclaimed, legacy, replaced, or ambiguous VMs and local keys.

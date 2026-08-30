@@ -385,23 +385,33 @@ func (b *backend) cleanupUnclaimedJob(ctx context.Context, client Client, expect
 	cleanupCtx, cancel := b.cleanupContext(ctx)
 	defer cancel()
 	jobID := stringValue(expected.ID)
-	job, err := client.JobInfo(cleanupCtx, jobID)
-	if err != nil {
-		if isNotFoundError(err) {
-			return cause
+	leaseID := expected.Meta[metadataLeaseID]
+	cleanupErr := core.CleanupLeaseClaimIfUnchangedAfter(leaseID, LeaseClaim{}, false, func() error {
+		if err := cleanupCtx.Err(); err != nil {
+			return err
 		}
-		return errors.Join(cause, fmt.Errorf("inspect nomad job %s before setup cleanup: %w", jobID, err))
-	}
-	if job == nil || stringValue(job.ID) != jobID || !metadataMatches(job.Meta, expected.Meta) {
-		return errors.Join(cause, exit(4, "refusing cleanup of nomad job %s after setup failure: ownership changed", jobID))
-	}
-	if cleanupErr := b.deregisterJobAndConfirmAbsent(cleanupCtx, client, jobID); cleanupErr != nil {
+		job, err := client.JobInfo(cleanupCtx, jobID)
+		if err != nil {
+			if isNotFoundError(err) {
+				return nil
+			}
+			return fmt.Errorf("inspect nomad job %s before setup cleanup: %w", jobID, err)
+		}
+		if job == nil || stringValue(job.ID) != jobID || !metadataMatches(job.Meta, expected.Meta) {
+			return exit(4, "refusing cleanup of nomad job %s after setup failure: ownership changed", jobID)
+		}
+		return b.deregisterJobAndConfirmAbsent(cleanupCtx, client, jobID)
+	})
+	if cleanupErr != nil {
 		return errors.Join(cause, fmt.Errorf("cleanup nomad job %s after unclaimed setup failure: %w", jobID, cleanupErr))
 	}
 	return cause
 }
 
 func (b *backend) deregisterJobAndConfirmAbsent(ctx context.Context, client Client, jobID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	evalID, err := client.DeregisterJob(ctx, jobID, true)
 	if err != nil {
 		return err
@@ -434,31 +444,45 @@ func (b *backend) deleteOwnedRunJob(ctx context.Context, client Client, expected
 	if expected.LeaseID == "" {
 		return nil
 	}
-	claim, err := readLeaseClaim(expected.LeaseID)
-	if err != nil {
-		return err
-	}
-	if claim.LeaseID == "" {
-		return exit(4, "nomad lease %s disappeared before release", expected.LeaseID)
-	}
-	if err := authorizeClaimScope(b.cfg, claim); err != nil {
-		return err
-	}
-	jobID := claim.Labels[claimLabelJobID]
-	job, err := client.JobInfo(ctx, jobID)
-	if err != nil {
-		if isNotFoundError(err) {
-			return removeLeaseClaimIfUnchanged(claim.LeaseID, claim)
+	_, err := b.removeOwnedJob(ctx, client, expected, false)
+	return err
+}
+
+// The original claim is the authority, including for a run that finishes after
+// another caller changed it. Keep the fence through remote absence and removal.
+func (b *backend) removeOwnedJob(ctx context.Context, client Client, expected LeaseClaim, requireMissing bool) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, b.evalTimeout())
+	defer cancel()
+	missing := false
+	err := core.RemoveLeaseClaimIfUnchangedAfter(expected.LeaseID, expected, func() error {
+		// Lock admission is not cancelable; an expired waiter must do no work.
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		return err
-	}
-	if err := validateRemoteOwnership(b.cfg, claim, job); err != nil {
-		return err
-	}
-	if err := b.deregisterJobAndConfirmAbsent(ctx, client, jobID); err != nil {
-		return err
-	}
-	return removeLeaseClaimIfUnchanged(claim.LeaseID, claim)
+		if err := authorizeClaimScope(b.cfg, expected); err != nil {
+			return err
+		}
+		jobID := expected.Labels[claimLabelJobID]
+		if strings.TrimSpace(jobID) == "" {
+			return exit(4, "nomad lease %s has no job ID", expected.LeaseID)
+		}
+		job, err := client.JobInfo(ctx, jobID)
+		if err != nil {
+			if isNotFoundError(err) {
+				missing = true
+				return nil
+			}
+			return err
+		}
+		if requireMissing {
+			return exit(4, "refusing removal of nomad claim %s: job %s reappeared", expected.LeaseID, jobID)
+		}
+		if err := validateRemoteOwnership(b.cfg, expected, job); err != nil {
+			return err
+		}
+		return b.deregisterJobAndConfirmAbsent(ctx, client, jobID)
+	})
+	return missing, err
 }
 
 func refreshNomadLeaseActivity(cfg Config, claim LeaseClaim) error {
@@ -572,25 +596,13 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 		return err
 	}
 	jobID := claim.Labels[claimLabelJobID]
-	job, err := client.JobInfo(ctx, jobID)
+	missing, err := b.removeOwnedJob(ctx, client, claim, false)
 	if err != nil {
-		if isNotFoundError(err) {
-			if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
-				return err
-			}
-			fmt.Fprintf(b.rt.Stderr, "removed stale nomad claim lease=%s job=%s reason=missing\n", claim.LeaseID, jobID)
-			return nil
-		}
 		return err
 	}
-	if err := validateRemoteOwnership(b.cfg, claim, job); err != nil {
-		return err
-	}
-	if err := b.deregisterJobAndConfirmAbsent(ctx, client, jobID); err != nil {
-		return err
-	}
-	if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
-		return err
+	if missing {
+		fmt.Fprintf(b.rt.Stderr, "removed stale nomad claim lease=%s job=%s reason=missing\n", claim.LeaseID, jobID)
+		return nil
 	}
 	fmt.Fprintf(b.rt.Stderr, "released lease=%s job=%s\n", claim.LeaseID, jobID)
 	return nil
@@ -629,10 +641,13 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 				return err
 			}
 			if req.DryRun {
+				if err := core.VerifyLeaseClaimUnchanged(claim.LeaseID, claim); err != nil {
+					return err
+				}
 				fmt.Fprintf(b.rt.Stdout, "would remove nomad claim lease=%s job=%s reason=missing\n", claim.LeaseID, jobID)
 				continue
 			}
-			if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+			if _, err := b.removeOwnedJob(ctx, client, claim, true); err != nil {
 				return err
 			}
 			fmt.Fprintf(b.rt.Stdout, "remove nomad claim lease=%s job=%s reason=missing\n", claim.LeaseID, jobID)
@@ -648,13 +663,13 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			return err
 		}
 		if req.DryRun {
+			if err := core.VerifyLeaseClaimUnchanged(claim.LeaseID, claim); err != nil {
+				return err
+			}
 			fmt.Fprintf(b.rt.Stdout, "would deregister nomad job=%s lease=%s reason=%s\n", jobID, claim.LeaseID, reason)
 			continue
 		}
-		if err := b.deregisterJobAndConfirmAbsent(ctx, client, jobID); err != nil {
-			return err
-		}
-		if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+		if _, err := b.removeOwnedJob(ctx, client, claim, false); err != nil {
 			return err
 		}
 		fmt.Fprintf(b.rt.Stdout, "deregister nomad job=%s lease=%s reason=%s\n", jobID, claim.LeaseID, reason)
