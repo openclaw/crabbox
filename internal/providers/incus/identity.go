@@ -70,7 +70,7 @@ func validateClaimInstance(client instanceClient, claim core.LeaseClaim, inst ap
 		return err
 	}
 	intent := claim.FixedCreateIntent
-	if claim.Provider != providerName || claim.LeaseID != labels["lease"] || !isCrabboxInstance(inst) ||
+	if claim.Provider != providerName || labels["provider"] != providerName || claim.LeaseID != labels["lease"] || !isCrabboxInstance(inst) ||
 		intent.ProviderScope != claim.ProviderScope || intent.State == "released" || claim.Slug != intent.Slug ||
 		inst.Name != intent.Attempt["name"] || inst.Config["volatile.uuid"] != intent.Attempt["uuid"] || intent.Attempt["uuid"] == "" ||
 		labels["fixed_intent_sha256"] != intent.Fingerprint || labels[identityLabel] != claim.ProviderScope || labels["incus_uuid"] != intent.Attempt["uuid"] ||

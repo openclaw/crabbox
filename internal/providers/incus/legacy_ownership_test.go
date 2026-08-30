@@ -57,7 +57,9 @@ func claimDurableFixture(t *testing.T, fake *fakeClient, name string) core.Lease
 	if err := core.ReplaceLeaseClaimIfUnchanged(leaseID, claim, replacement); err != nil {
 		t.Fatal(err)
 	}
-	backdateIncusClaim(t, leaseID, time.Now().Add(-2*time.Hour))
+	// Keep the claim strictly older than the two-hour-old instance fixtures,
+	// even when setup crosses a whole-second timestamp boundary.
+	backdateIncusClaim(t, leaseID, time.Now().Add(-24*time.Hour))
 	claim, err = core.ReadLeaseClaim(leaseID)
 	if err != nil {
 		t.Fatal(err)
@@ -198,6 +200,38 @@ func TestDurableOwnershipRecheckedAfterStop(t *testing.T) {
 				t.Fatalf("recovery key lost: %v", err)
 			}
 		})
+	}
+}
+
+func TestDurableOwnershipRejectsConflictingProviderLabel(t *testing.T) {
+	for _, operation := range []string{"release", "cleanup"} {
+		for _, provider := range []string{"other", ""} {
+			t.Run(operation+"/provider="+provider, func(t *testing.T) {
+				b, fake, req := lifecycleFixture(t)
+				req.Keep = false
+				lease, err := b.Acquire(context.Background(), req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				inst := fake.instances[lease.Server.Name]
+				inst.Config[labelKey("provider")] = provider
+				inst.Config[labelKey("expires_at")] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
+				backdateIncusClaim(t, lease.LeaseID, time.Now().Add(-2*time.Hour))
+				before, err := core.ReadLeaseClaim(lease.LeaseID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fake.updated, fake.stateUpdates = nil, nil
+				if operation == "release" {
+					if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease, Force: true}); err == nil {
+						t.Fatal("release accepted conflicting provider label")
+					}
+				} else if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+					t.Fatal(err)
+				}
+				assertLegacyOwnershipUnchanged(t, fake, lease.LeaseID, before, true)
+			})
+		}
 	}
 }
 
