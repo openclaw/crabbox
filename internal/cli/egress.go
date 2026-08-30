@@ -1631,26 +1631,15 @@ func (a App) stopEgressHostDaemonLocked(leaseID string) (bool, error) {
 	return true, nil
 }
 
-func (a App) cleanupMediatedEgressBestEffort(ctx context.Context, requestedID string, lease LeaseTarget) {
-	seen := map[string]bool{}
-	for _, id := range []string{requestedID, lease.LeaseID} {
-		id = strings.TrimSpace(id)
-		if id == "" || seen[id] {
-			continue
-		}
-		seen[id] = true
-		if _, err := a.stopEgressHostDaemon(id); err != nil {
-			fmt.Fprintf(a.Stderr, "warning: egress host daemon cleanup failed for %s: %v\n", id, err)
-		}
-	}
-	a.cleanupMediatedEgressRemoteBestEffort(ctx, lease)
-}
-
 func (a App) cleanupMediatedEgressRemoteBestEffort(ctx context.Context, lease LeaseTarget) {
 	if !supportsRemoteEgressClientCleanup(lease.SSH) {
 		return
 	}
-	if err := runSSHQuiet(ctx, lease.SSH, remoteStopEgressClientCommand()); err != nil {
+	// Best-effort guest cleanup must leave the caller's budget for provider release,
+	// including when provisioning never made SSH reachable.
+	cleanupCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if err := runSSHQuiet(cleanupCtx, lease.SSH, remoteStopEgressClientCommand()); err != nil {
 		fmt.Fprintf(a.Stderr, "warning: egress remote client cleanup failed for %s: %v\n", lease.LeaseID, err)
 	}
 }

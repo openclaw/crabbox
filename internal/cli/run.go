@@ -3737,14 +3737,27 @@ func (a App) cleanupBackendLeaseLocalConnectionsBestEffort(leaseIDs ...string) {
 }
 
 func (a App) cleanupBackendLeaseConnectionsBestEffort(ctx context.Context, lease LeaseTarget) {
-	a.cleanupBackendLeaseLocalConnectionsBestEffort(lease.LeaseID)
+	// Keep mediated outbound connections alive while the guest winds down.
 	a.cleanupBackendLeaseRemoteConnectionsBestEffort(ctx, lease)
+	a.cleanupBackendLeaseLocalConnectionsBestEffort(lease.LeaseID)
 }
 
+const remoteConnectionCleanupTimeout = 35 * time.Second
+const remoteConnectionCleanupReserve = 5 * time.Second
+
 func (a App) cleanupBackendLeaseRemoteConnectionsBestEffort(ctx context.Context, lease LeaseTarget) {
-	a.writeActionsHydrationStopBestEffort(ctx, lease.SSH, lease.LeaseID)
-	a.cleanupMediatedEgressRemoteBestEffort(ctx, lease)
-	a.logoutRemoteTailscaleBestEffort(ctx, lease)
+	// Signal-only CLI callers have no deadline. Bound the whole optional chain,
+	// retaining a window for each later hygiene step before provider release.
+	cleanupCtx, cancel := context.WithTimeout(ctx, remoteConnectionCleanupTimeout)
+	defer cancel()
+	deadline, _ := cleanupCtx.Deadline()
+	hydrationCtx, hydrationCancel := context.WithDeadline(cleanupCtx, deadline.Add(-2*remoteConnectionCleanupReserve))
+	a.writeActionsHydrationStopBestEffort(hydrationCtx, lease.SSH, lease.LeaseID)
+	hydrationCancel()
+	egressCtx, egressCancel := context.WithDeadline(cleanupCtx, deadline.Add(-remoteConnectionCleanupReserve))
+	a.cleanupMediatedEgressRemoteBestEffort(egressCtx, lease)
+	egressCancel()
+	a.logoutRemoteTailscaleBestEffort(cleanupCtx, lease)
 }
 
 func (a App) releaseBackendLease(ctx context.Context, backend SSHLeaseBackend, cfg Config, lease LeaseTarget) error {
@@ -4223,11 +4236,8 @@ func (a App) stop(ctx context.Context, args []string) error {
 	}
 	connectionCleanupSafe := releaseLeaseConnectionCleanupSafe(sshBackend)
 	if connectionCleanupSafe {
-		if lease.SSH.Host != "" {
-			a.writeActionsHydrationStopBestEffort(ctx, lease.SSH, lease.LeaseID)
-		}
-		a.cleanupMediatedEgressBestEffort(ctx, *id, lease)
-		a.logoutRemoteTailscaleBestEffort(ctx, lease)
+		a.cleanupBackendLeaseRemoteConnectionsBestEffort(ctx, lease)
+		a.cleanupBackendLeaseLocalConnectionsBestEffort(*id, lease.LeaseID)
 	}
 	request := ReleaseLeaseRequest{
 		Lease:                    lease,
@@ -4340,7 +4350,10 @@ func (a App) writeActionsHydrationStopBestEffort(ctx context.Context, target SSH
 		return
 	}
 	if hydrated {
-		time.Sleep(actionsHydrationStopSettleDelay)
+		// The marker I/O budget is shorter than the normal Actions poll grace.
+		if err := sleepContext(ctx, actionsHydrationStopSettleDelay); err != nil {
+			fmt.Fprintf(a.Stderr, "warning: hydration stop wait ended for %s: %v\n", leaseID, err)
+		}
 	}
 }
 

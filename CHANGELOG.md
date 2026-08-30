@@ -16,6 +16,7 @@
 ### Fixed
 
 - Required exact Apple Machine ownership claims bound to daemon storage and an acquisition-only marker, fencing cleanup and retaining legacy, replaced, or uncertain machines without implicit adoption. Thanks @coygeek.
+- Prevented guest cleanup of confirmed deleted coordinator leases, bounded ordered guest cleanup before authoritative release, and kept prewarm cleanup behind the release owner.
 - Fixed IPv6 workspace sync and artifact/egress uploads by using private SSH transport aliases, preserving authentication, host trust, Windows/WSL routing, and transfer cleanup.
 - Required exact ASCII Box ownership claims for reuse and deletion, pinning creation identity and endpoint/organization routing, fencing teardown and rollback, and retaining uncertain resources until deletion is confirmed. Thanks @coygeek.
 - Required exact SmolVM ownership claims for deletion and reuse, binding machine identity and endpoint before startup, fencing cleanup against claim changes, and retaining legacy or uncertain resources without implicit adoption. Thanks @coygeek.
