@@ -25,7 +25,9 @@ does not expose SSH through Crabbox.
 
 - The `tensorlake` CLI must be on `PATH`, or pointed at with `--tensorlake-cli`
   / `tensorlake.cliPath`. Crabbox invokes `tensorlake sbx create`, `exec`, `cp`,
-  `describe`, `ls`, and `terminate`.
+  `describe`, `ls`, `terminate`, and `whoami --output json`. Use a current native
+  CLI with API-key scope introspection and exact sandbox details (verified with
+  Tensorlake CLI 0.5.118).
 - A Tensorlake API key from [cloud.tensorlake.ai](https://cloud.tensorlake.ai).
   Crabbox passes it to the CLI through the `TENSORLAKE_API_KEY` environment
   variable; it is never placed on the command line.
@@ -58,6 +60,15 @@ The API key is read from `CRABBOX_TENSORLAKE_API_KEY` or `TENSORLAKE_API_KEY`.
 `https://api.tensorlake.ai`. `TENSORLAKE_ORGANIZATION_ID` and
 `TENSORLAKE_PROJECT_ID` select the org and project when your account spans more
 than one; the namespace also falls back to `INDEXIFY_NAMESPACE`.
+
+Crabbox pins the effective API URL and namespace on every native invocation
+(defaults: `https://api.tensorlake.ai` and `default`). The API key's introspected
+organization and project must agree with any explicit selectors. Rotating a
+key within the same scope is supported; changing accounts, endpoints, or
+namespaces does not retarget existing leases. Native login/config defaults and
+inherited PAT, debug, or Git-token overrides cannot replace that binding.
+Scope probes capture and discard native credential prefixes; neither keys nor
+their prefixes are stored in ownership claims or printed by these probes.
 
 ## Config
 
@@ -127,7 +138,8 @@ local `tensorlake` process argv.
    Tensorlake-assigned sandbox ID is parsed from stdout and used as the
    canonical identifier.
 2. The local lease is stored as `tlsbx_<sandbox-id>` with a friendly slug and a
-   repo claim.
+   durable repo claim bound to the exact sandbox ID, API endpoints, API-key
+   organization/project, requested namespace, and reported sandbox namespace.
 3. By default `run` archive-syncs the working tree: a `git ls-files`-driven
    manifest is packed into a gzipped tar locally, uploaded with
    `tensorlake sbx cp` to `/tmp/crabbox-sync-*.tgz`, and extracted into the
@@ -135,9 +147,35 @@ local `tensorlake` process argv.
    still created).
 4. The command runs via `tensorlake sbx exec -w <workdir> <id> -- <cmd>`,
    streaming stdout and stderr back through Crabbox.
-5. On release the sandbox is terminated with `tensorlake sbx terminate <id>`
-   unless `--keep` was set. `--keep-on-failure` retains a newly created sandbox
-   after a failed run and prints a rerun/stop hint.
+5. On release the original claim and provider scope are rechecked while claim
+   changes are fenced, then the sandbox is terminated with
+   `tensorlake sbx terminate <id>` unless `--keep` was set. The claim is removed
+   only after exact sandbox metadata confirms `terminated`. Failed or ambiguous
+   confirmation retains the claim; retrying stop can confirm archived terminated
+   metadata without issuing another termination. `--keep-on-failure` retains a
+   newly created sandbox after a failed run and prints a rerun/stop hint.
+
+Reuse, one-shot teardown, and failed-acquisition rollback use the same exact
+identity checks. A changed claim blocks stale cleanup. Native control calls are
+bounded; authentication, malformed output, and missing metadata fail closed.
+An empty list or a `not found` response alone is not deletion proof.
+
+### Legacy and uncertain ownership
+
+Older provider-only claims cannot prove account or resource ownership. Crabbox
+will not reuse, stop, or silently adopt them, including with `--reclaim`. Preserve
+the claim and inspect the exact sandbox with the native CLI using the intended
+API endpoint, namespace, and API key. After independently verifying ownership,
+an operator can terminate it with `tensorlake sbx terminate <sandbox-id>` and
+confirm its terminated state with `tensorlake sbx describe <sandbox-id>`. Create
+a fresh Crabbox lease for future managed runs; do not edit an old claim to add
+guessed binding fields. Uncertain creation reports the generated sandbox name
+or ID for this same manual inspection path.
+
+The local claim fence coordinates Crabbox processes, not external Tensorlake
+administrators. Native termination has no atomic expected-account condition;
+Crabbox verifies scope immediately before it and never falls back from a
+canonical sandbox ID to a mutable name.
 
 `run --lease-output` records the Tensorlake lease, reuse/retention state, and
 matching `crabbox stop --provider tensorlake --id ...` cleanup command for
@@ -177,9 +215,10 @@ orchestrators that need to inspect or clean up retained sandboxes later.
   It serves as both the sync target and the `-w` working directory for exec. The
   default requires a writable `/workspace`; the `tl-crabbox` image provides one,
   otherwise point `workdir` at a user-writable path.
-- IDs accepted by `--id` and `stop` are Crabbox slugs and `tlsbx_<sandbox-id>`
-  lease IDs that have a local Crabbox claim. Sandboxes without a local claim are
-  rejected (the same Crabbox-owned-only safety pattern as Islo).
+- IDs accepted by `--id` and `stop` are Crabbox slugs, `tlsbx_<sandbox-id>`
+  lease IDs, and canonical 21-character lowercase-alphanumeric sandbox IDs
+  that have an exact bound local Crabbox claim. Sandboxes without such a claim
+  are rejected; an exact ID never falls back to a matching slug.
 
 Related docs:
 

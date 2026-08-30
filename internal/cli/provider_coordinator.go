@@ -83,6 +83,8 @@ func (b *coordinatorLeaseBackend) Spec() ProviderSpec { return b.spec }
 
 func (b *coordinatorLeaseBackend) SupportsRequestedLeaseID() bool { return true }
 
+func (b *coordinatorLeaseBackend) ReleaseLeaseConnectionCleanupSafe() bool { return false }
+
 func (b *coordinatorLeaseBackend) validateCoordinatorLeaseProviderIdentity(lease CoordinatorLease) error {
 	return b.validateCoordinatorProviderIdentity(lease.ID, lease.Provider)
 }
@@ -135,7 +137,11 @@ func (b *coordinatorLeaseBackend) coordinatorLeaseTargetForConfig(lease Coordina
 		return LeaseTarget{}, err
 	}
 	server, target, leaseID := leaseToServerTarget(lease, cfg)
-	if err := prepareLeaseSSHTrust(&target, leaseID); err != nil {
+	if coordinatorProviderReleaseConfirmed(lease) {
+		// Confirmed deletion retires guest access, not the release operation. Keep
+		// platform metadata for local cleanup without recreating SSH trust.
+		target = SSHTarget{TargetOS: target.TargetOS, WindowsMode: target.WindowsMode}
+	} else if err := prepareLeaseSSHTrust(&target, leaseID); err != nil {
 		return LeaseTarget{}, err
 	}
 	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord}, nil
@@ -933,6 +939,9 @@ func (b *coordinatorLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseL
 	if req.Lease.LeaseID == "" {
 		return exit(2, "missing coordinator lease id")
 	}
+	if err := ValidateLeaseTargetProviderIdentity(req.Lease, req.ExpectedProviderIdentity); err != nil {
+		return err
+	}
 	claim, exists, err := readLeaseClaimWithPresence(req.Lease.LeaseID)
 	if err != nil {
 		return err
@@ -959,6 +968,40 @@ func (b *coordinatorLeaseBackend) releaseLeaseUnderClaimFence(ctx context.Contex
 	}
 	if err := validateCoordinatorProviderIdentity(expectedProvider, req.Lease.LeaseID, req.Lease.Server.Provider, false); err != nil {
 		return false, err
+	}
+	// Refresh old guest targets under the release fence. No endpoint means no
+	// remote cleanup, so a failed explicit-stop lookup must not be repeated.
+	if req.GuardedRemoteCleanup != nil && req.Lease.SSH.Host != "" {
+		fresh, inspectErr := b.Resolve(ctx, ResolveRequest{ID: req.Lease.LeaseID, ReleaseOnly: true})
+		if cause := context.Cause(ctx); cause != nil {
+			return false, cause
+		}
+		if isCoordinatorProviderIdentityError(inspectErr) {
+			return false, inspectErr
+		}
+		if inspectErr != nil {
+			fmt.Fprintf(b.rt.Stderr, "warning: could not inspect lease before release: %v\n", inspectErr)
+		} else {
+			if err := ValidateLeaseTargetProviderIdentity(fresh, ProviderIdentityExpectation{LeaseID: req.Lease.LeaseID}); err != nil {
+				return false, err
+			}
+			if err := ValidateLeaseTargetProviderIdentity(fresh, req.ExpectedProviderIdentity); err != nil {
+				return false, err
+			}
+			if fresh.SSH.Host != "" {
+				// Route probes are guest cleanup too; they must not consume the
+				// provider-release budget or replace a tailnet route with the public host.
+				cleanupCtx, cancel := context.WithTimeout(ctx, remoteConnectionCleanupTimeout)
+				resolved, routeErr := resolveNetworkTarget(cleanupCtx, b.cfg, fresh.Server, fresh.SSH)
+				if routeErr != nil {
+					fmt.Fprintf(b.rt.Stderr, "warning: could not resolve guest network before release: %v\n", routeErr)
+				} else {
+					fresh.SSH = resolved.Target
+					req.GuardedRemoteCleanup(cleanupCtx, fresh)
+				}
+				cancel()
+			}
+		}
 	}
 	released, err := releaseCoordinatorLeaseResult(ctx, b.coord, req.Lease.LeaseID, expectedProvider)
 	observationCoord := b.coord

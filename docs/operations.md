@@ -805,6 +805,47 @@ bin/crabbox usage --scope all --json
 
 Cost is an estimate for compute leases, not an invoice. See [Cost and Usage](features/cost-usage.md).
 
+## Default Container Image Pins
+
+The Local Container and Apple Container defaults are reviewed, tagless OCI
+index references in `recipes/bootstrap/v1/os-catalog.json` (`ContainerName`).
+One index fixes the supported platform manifests transitively while preserving
+native architecture selection. Explicit custom image settings remain operator
+controlled. These pins constrain the base filesystem, not packages subsequently
+installed from authenticated distribution repositories.
+
+Reviewed on 2026-08-30 against Docker Hub's official `library/ubuntu` manifests:
+
+| OS selector | Reviewed index digest |
+| --- | --- |
+| `ubuntu:24.04` | `sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517` |
+| `ubuntu:26.04` | `sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b` |
+
+Review these pins before each release and when upstream image security fixes
+require an earlier update. Rotate through an ordinary reviewed PR:
+
+1. Resolve the official Ubuntu tag's index, verify the raw manifest SHA-256,
+   then verify the referenced Linux amd64 and arm64 manifests/configurations.
+   Check their Ubuntu version, platform, entrypoint, and publication metadata;
+   retain the digest evidence with the PR. Do not substitute a tag for a missing
+   or unavailable digest.
+2. Update only the intended `ContainerName` catalog entries, the table above,
+   and the review date. `DockerImage` is a separate provider setting and is not
+   part of this policy. Run `node scripts/generate-bootstrap.mjs`; never edit
+   generated Go or TypeScript catalog output by hand.
+3. Run the generator checks, configuration/provider regressions, and a real
+   create/bootstrap/command/cleanup smoke on available supported runtimes.
+   Check the actual selected platform and image identity. For Apple Container,
+   verify the created configuration's index digest before `start`, and prove
+   that missing/mismatched metadata cannot reach bootstrap. Disclose unavailable
+   native coverage rather than claiming it from fixture tests.
+
+Existing leases keep their original image. New leases use the new pin, while a
+fixed-ID replay can reject a changed default as a different creation intent.
+Pins never refresh silently at build time or runtime. See Docker's
+[image-digest model](https://docs.docker.com/dhi/explore/security-concepts/digests/)
+and the [Apple Container lifecycle](providers/apple-container.md#configuration).
+
 ## Release Checklist
 
 The authoritative serialized release contract is [Release engineering](RELEASING.md).

@@ -275,6 +275,40 @@ func TestTencentCloudUnconfiguredMarketPreservesOnDemand(t *testing.T) {
 	}
 }
 
+func TestInvalidExplicitMarketRejectsBeforeClientOrKey(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	cfg := core.BaseConfig()
+	cfg.TencentCloud.Image = "img-test"
+	cfg.Capacity.Market = "reserved"
+	core.MarkCapacityMarketExplicit(&cfg)
+	b := &Backend{
+		DirectSSHBackend: shared.DirectSSHBackend{Cfg: cfg},
+		clientFactory: func(core.Config, core.Runtime) (tencentCloudAPI, error) {
+			t.Fatal("invalid market reached provider client")
+			return nil, nil
+		},
+	}
+	_, err := b.acquireOnce(t.Context(), core.AcquireRequest{})
+	var configurationError core.ExitError
+	if !core.AsExitError(err, &configurationError) || configurationError.Code != 2 || !strings.Contains(err.Error(), "capacity market") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			t.Errorf("invalid market wrote file %s", path)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSignTencentCloudRequest(t *testing.T) {
 	req, err := http.NewRequest(http.MethodPost, "https://cvm.tencentcloudapi.com", strings.NewReader("{}"))
 	if err != nil {

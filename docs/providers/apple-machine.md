@@ -61,6 +61,25 @@ Provider flags:
   reuse/retention state, and exact cleanup command for orchestration handoff.
 - `status` and `list` use machine JSON inspection.
 - `stop` deletes the machine and its persistent storage with `container machine rm`.
+- New leases bind the exact machine name and daemon-reported storage root to a
+  private ownership marker in the machine bundle. Reuse, status, and deletion
+  verify that binding without booting the machine to inspect it. Cleanup holds
+  the unchanged local claim until a complete inventory response and missing
+  bundle confirm deletion; uncertainty retains the claim. A later `stop` can
+  confirm an already-absent machine without issuing another deletion.
+- Older leases without this binding are not adopted or deleted automatically,
+  even with `--reclaim`. Inspect them with `container machine inspect <name>`
+  and, only after confirming ownership and accepting loss of persistent storage,
+  remove them manually with `container machine rm <name>`. Create a new Crabbox
+  lease to obtain an ownership binding. Do not copy or regenerate ownership
+  markers for replacement machines.
+- The storage root comes from `container system status --format json`, not the
+  calling shell's `CONTAINER_APP_ROOT`. Missing daemon storage evidence or an
+  unexpected bundle layout fails closed. Apple currently stores machine bundles
+  under `appRoot/plugin-state/machine-apiserver/machines`.
+- Apple's native removal API does not offer an atomic expected-identity check.
+  Crabbox fences its own claim changes and rejects observed replacements, but
+  external tools must not replace machines concurrently with lifecycle commands.
 - The home directory is mounted read-write. Use `apple-container` when a narrower
   disposable filesystem boundary is more important than persistence.
 - The default is `alpine:latest`. Custom images must include `/sbin/init`, as

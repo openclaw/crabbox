@@ -22,6 +22,15 @@ func newTensorlakeCLI(cfg Config, rt Runtime) (*tensorlakeCLI, error) {
 	if rt.Exec == nil {
 		return nil, exit(2, "provider=tensorlake requires Runtime.Exec")
 	}
+	apiURL, err := canonicalTensorlakeURL(blank(cfg.Tensorlake.APIURL, defaultAPIURL))
+	if err != nil {
+		return nil, err
+	}
+	cfg.Tensorlake.APIURL = apiURL
+	cfg.Tensorlake.Namespace = blank(strings.TrimSpace(cfg.Tensorlake.Namespace), "default")
+	if !validScopeValue(cfg.Tensorlake.Namespace) {
+		return nil, exit(2, "invalid Tensorlake namespace")
+	}
 	return &tensorlakeCLI{cfg: cfg, rt: rt}, nil
 }
 
@@ -47,7 +56,15 @@ func (c *tensorlakeCLI) globalArgs() []string {
 }
 
 func (c *tensorlakeCLI) env() []string {
-	env := append([]string{}, os.Environ()...)
+	var env []string
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		switch strings.ToUpper(key) {
+		case "TENSORLAKE_API_KEY", "TENSORLAKE_API_URL", "TENSORLAKE_ORGANIZATION_ID", "TENSORLAKE_PROJECT_ID", "INDEXIFY_NAMESPACE", "TENSORLAKE_PAT", "TENSORLAKE_DEBUG", "TENSORLAKE_GIT_TOKEN":
+			continue
+		}
+		env = append(env, entry)
+	}
 	env = append(env, "TENSORLAKE_API_KEY="+c.cfg.Tensorlake.APIKey)
 	if v := strings.TrimSpace(c.cfg.Tensorlake.APIURL); v != "" {
 		env = append(env, "TENSORLAKE_API_URL="+v)
@@ -134,7 +151,7 @@ func (c *tensorlakeCLI) createSandbox(ctx context.Context, name string) (string,
 	}
 	id := parseSandboxID(out)
 	if id == "" {
-		return "", fmt.Errorf("tensorlake sbx create: empty sandbox id in output %q", out)
+		return "", fmt.Errorf("tensorlake sbx create did not return a canonical sandbox ID")
 	}
 	return id, nil
 }
@@ -157,7 +174,7 @@ func parseSandboxID(out string) string {
 // isLikelySandboxID returns true for the lowercase-alphanumeric token format
 // Tensorlake uses for sandbox IDs (e.g. "3pryjysezwsnlex226i5h").
 func isLikelySandboxID(s string) bool {
-	if len(s) < 12 || len(s) > 40 {
+	if len(s) != 21 {
 		return false
 	}
 	for _, r := range s {
@@ -198,15 +215,6 @@ func (c *tensorlakeCLI) uploadFile(ctx context.Context, name, localPath, remoteP
 	dst := name + ":" + remotePath
 	_, err := c.runQuiet(ctx, []string{"sbx", "cp"}, []string{src, dst})
 	return err
-}
-
-func (c *tensorlakeCLI) terminate(ctx context.Context, name string) error {
-	_, err := c.runQuiet(ctx, []string{"sbx", "terminate"}, []string{name})
-	return err
-}
-
-func (c *tensorlakeCLI) describe(ctx context.Context, name string) (string, error) {
-	return c.runQuiet(ctx, []string{"sbx", "describe"}, []string{name})
 }
 
 func (c *tensorlakeCLI) listIDs(ctx context.Context) ([]string, error) {

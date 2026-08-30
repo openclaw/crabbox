@@ -128,6 +128,20 @@ config. It must be `spot` or `on-demand`. Reach for it when an account is
 temporarily out of Spot quota or when Spot interruption rates spike. The same
 value is also available as the `CRABBOX_CAPACITY_MARKET` environment variable.
 
+### Tencent Cloud Market Selection
+
+Tencent Cloud also honors explicit `spot` and `on-demand` choices, mapping them
+to CVM `SPOTPAID` and `POSTPAID_BY_HOUR`. This is selection only: Tencent does
+not perform market, instance-type, or region fallback, and `capacity.fallback`
+does not change that behavior. Spot requests use Tencent's default discounted
+bid without a Crabbox maximum-price override.
+
+An unconfigured Tencent lease keeps its historical hourly billing, independent
+of the generic `spot` default. After upgrading, an explicitly configured
+`capacity.market: spot`, environment override, CLI flag, or job market now
+requests interruptible Spot capacity; select `on-demand` to keep hourly billing.
+See the [Tencent Cloud provider guide](../providers/tencentcloud.md#capacity-market).
+
 ## AWS Capacity Hints
 
 The brokered AWS path can preflight large requests against Service Quotas:

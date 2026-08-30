@@ -165,11 +165,23 @@ non-destructive post-create workflows on a running sandbox. The separate
 [`pause`](pause.md) and [`resume`](resume.md) commands are provider-dependent
 and are not supported by Docker Sandbox.
 
+Coordinator-backed stops refresh guest connection state inside the release owner.
+A confirmed deletion skips guest SSH cleanup but still sends the provider-scoped
+release request and verifies its result. Retained machines and pending or failed
+provider cleanup do not count as confirmed deletion.
+
 For SSH leases, shared connection cleanup makes best-effort attempts to signal
 [Actions hydration](../features/actions-hydration.md) shutdown, stop local
 mediated-egress daemon state and supported remote egress clients, and log out
 remote Tailscale when stored lease metadata marks it enabled. Providers can
-gate remote cleanup behind their ownership checks. Static SSH attempts cleanup
+gate remote cleanup behind their ownership checks. The ordered remote cleanup
+chain has a 35-second budget, including coordinator guest network selection and
+reserving five-second windows for later egress
+and Tailscale cleanup. Responsive hydrated jobs keep their normal 20-second
+stop-marker grace; cancellation or the phase deadline ends that wait early.
+The local egress daemon stays alive through guest cleanup. Provider release uses
+the original caller context; this budget does not guarantee that provider deletion
+finishes before the caller's deadline. Static SSH attempts cleanup
 before local unclaiming, even without hydration state; remote failures warn
 but do not block unclaiming. See the [static provider details](../providers/ssh.md#connection-cleanup)
 for marker paths, Linux egress process-matching scope, and Tailscale limits.

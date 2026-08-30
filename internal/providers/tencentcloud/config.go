@@ -116,6 +116,9 @@ func providerClassType(class string) (string, bool) {
 }
 
 func validateAcquireConfig(cfg core.Config) error {
+	if _, err := tencentCloudChargeType(cfg); err != nil {
+		return err
+	}
 	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
 		return core.Exit(2, "provider=tencentcloud only supports target=linux")
 	}

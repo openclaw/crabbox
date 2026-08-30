@@ -168,11 +168,7 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 }
 
 func buildRunInstanceRequest(cfg core.Config, leaseID, slug, publicKey string, tags []tag) (runInstanceRequest, error) {
-	market := "on-demand"
-	if core.CapacityMarketExplicit(cfg) {
-		market = cfg.Capacity.Market
-	}
-	chargeType, err := tencentCloudChargeType(market)
+	chargeType, err := tencentCloudChargeType(cfg)
 	if err != nil {
 		return runInstanceRequest{}, err
 	}
@@ -209,14 +205,19 @@ func buildRunInstanceRequest(cfg core.Config, leaseID, slug, publicKey string, t
 	return req, nil
 }
 
-func tencentCloudChargeType(market string) (string, error) {
+func tencentCloudChargeType(cfg core.Config) (string, error) {
+	// Tencent historically used hourly billing despite the global Spot default.
+	market := "on-demand"
+	if core.CapacityMarketExplicit(cfg) {
+		market = cfg.Capacity.Market
+	}
 	switch market {
 	case "spot":
 		return "SPOTPAID", nil
 	case "on-demand":
 		return "POSTPAID_BY_HOUR", nil
 	default:
-		return "", fmt.Errorf("unsupported Tencent Cloud capacity market %q: expected spot or on-demand", market)
+		return "", core.Exit(2, "unsupported Tencent Cloud capacity market %q: expected spot or on-demand", market)
 	}
 }
 
