@@ -80,7 +80,9 @@ func TestCoordinatorOperationBudgets(t *testing.T) {
 }
 
 func TestCoordinatorLeaseReadStallsAreBounded(t *testing.T) {
-	clearConfigEnv(t)
+	// Explicit clients and private servers need no process-wide config changes.
+	// Keep the real control deadlines without serializing their wall-clock waits.
+	t.Parallel()
 	for _, bodyStall := range []bool{false, true} {
 		name := "headers"
 		if bodyStall {

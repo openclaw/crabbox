@@ -91,6 +91,9 @@ func runCheckpointNativeLifetimeContract(t *testing.T, repo, binary string) {
 }
 
 func TestCheckpointCaptureProcessOwnership(t *testing.T) {
+	// Each case owns its environment, FIFOs, and process groups; the real
+	// 15-second deadlines can run alongside other independent network waits.
+	t.Parallel()
 	for _, tc := range []struct {
 		name       string
 		deadline   bool
@@ -104,6 +107,7 @@ func TestCheckpointCaptureProcessOwnership(t *testing.T) {
 		{"terminated anchor", false, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			gate := filepath.Join(root, "exit.fifo")
 			if err := syscall.Mkfifo(gate, 0o600); err != nil {
