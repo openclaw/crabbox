@@ -949,11 +949,19 @@ type checkpointRenewalRaceBackend struct {
 	coordinator *CoordinatorClient
 	config      Config
 	createCtx   chan context.Context
+	lateSuccess bool
 }
 
 func (backend *checkpointRenewalRaceBackend) Acquire(ctx context.Context, _ AcquireRequest) (LeaseTarget, error) {
 	backend.createCtx <- ctx
-	lease, err := backend.coordinator.CreateLease(ctx, backend.config, "ssh-ed25519 public", false, "cbx_000000000002", "fork")
+	requestCtx := ctx
+	if backend.lateSuccess {
+		// Model a provider returning an acquired lease after cancellation.
+		var cancel context.CancelFunc
+		requestCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+	}
+	lease, err := backend.coordinator.CreateLease(requestCtx, backend.config, "ssh-ed25519 public", false, "cbx_000000000002", "fork")
 	if err != nil {
 		return LeaseTarget{}, err
 	}
@@ -972,6 +980,7 @@ func TestCheckpointManagedRenewalCompletionRace(t *testing.T) {
 		createFails   bool
 		wantSuccess   bool
 		wantRenewal   bool
+		lateSuccess   bool
 	}{
 		{
 			name:          "consumed claim waits for successful create response",
@@ -984,6 +993,13 @@ func TestCheckpointManagedRenewalCompletionRace(t *testing.T) {
 			renewalStatus: http.StatusConflict,
 			renewalBody:   `{"error":"checkpoint_source_mismatch","message":"checkpoint_claim_invalid is not the structured error"}`,
 			wantRenewal:   true,
+		},
+		{
+			name:          "fatal renewal releases a late successful acquisition",
+			renewalStatus: http.StatusConflict,
+			renewalBody:   `{"error":"checkpoint_source_mismatch"}`,
+			wantRenewal:   true,
+			lateSuccess:   true,
 		},
 		{
 			name:          "consumed claim does not turn failed create into success",
@@ -1005,6 +1021,8 @@ func TestCheckpointManagedRenewalCompletionRace(t *testing.T) {
 			createStarted := make(chan struct{})
 			renewalResponded := make(chan struct{})
 			allowCreateResponse := make(chan struct{})
+			var responseOnce sync.Once
+			releaseCreateResponse := func() { responseOnce.Do(func() { close(allowCreateResponse) }) }
 			var renewals atomic.Int32
 			var aborts atomic.Int32
 			server, _ := configureManagedCheckpointTest(t, func(w http.ResponseWriter, r *http.Request) {
@@ -1076,16 +1094,29 @@ func TestCheckpointManagedRenewalCompletionRace(t *testing.T) {
 				coordinator:      &CoordinatorClient{BaseURL: server.URL, Client: server.Client()},
 				config:           cfg,
 				createCtx:        make(chan context.Context, 1),
+				lateSuccess:      test.lateSuccess,
 			}
 			type result struct {
 				provision checkpointForkProvision
 				err       error
 			}
 			finished := make(chan result, 1)
+			done := make(chan struct{})
+			ctx, cancel := context.WithCancel(context.Background())
 			repo := Repo{Root: t.TempDir(), Name: "my-app"}
+			t.Cleanup(func() {
+				cancel()
+				releaseCreateResponse()
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					t.Error("checkpoint provisioning goroutine did not stop")
+				}
+			})
 			go func() {
+				defer close(done)
 				provision, provisionErr := (App{Stdout: io.Discard, Stderr: io.Discard}).provisionManagedCheckpointFork(
-					context.Background(), cfg, backend, backend, repo,
+					ctx, cfg, backend, backend, repo,
 					record, checkpointPaths{}, false, false, "", "fork", "", true, nil,
 				)
 				finished <- result{provision: provision, err: provisionErr}
@@ -1099,7 +1130,12 @@ func TestCheckpointManagedRenewalCompletionRace(t *testing.T) {
 				}
 			}
 			await(createStarted, "checkpoint-backed create to start")
-			createCtx := <-backend.createCtx
+			var createCtx context.Context
+			select {
+			case createCtx = <-backend.createCtx:
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed out waiting for acquisition context")
+			}
 			await(renewalResponded, "coordinator renewal response")
 			if test.wantRenewal {
 				await(createCtx.Done(), "fatal renewal error to cancel the in-flight create")
@@ -1110,16 +1146,28 @@ func TestCheckpointManagedRenewalCompletionRace(t *testing.T) {
 				case <-time.After(50 * time.Millisecond):
 				}
 			}
-			close(allowCreateResponse)
+			// Fatal cancellation must finish before the server can return success;
+			// the explicit late-success case separately checks cleanup of that lease.
+			if !test.wantRenewal || test.lateSuccess {
+				releaseCreateResponse()
+			}
 			var got result
 			select {
 			case got = <-finished:
 			case <-time.After(5 * time.Second):
 				t.Fatal("checkpoint provisioning did not finish")
 			}
+			releaseCreateResponse()
 			_, _, releases := backend.counts()
-			if renewals.Load() != 1 || releases != 0 {
-				t.Fatalf("renewals=%d releases=%d; want one stopped renewal and no release", renewals.Load(), releases)
+			wantReleases := 0
+			if test.lateSuccess {
+				wantReleases = 1
+			}
+			if renewals.Load() != 1 || releases != wantReleases {
+				t.Fatalf("renewals=%d releases=%d; want one stopped renewal and %d releases", renewals.Load(), releases, wantReleases)
+			}
+			if test.lateSuccess && (backend.releaseLease.LeaseID != "cbx_000000000002" || backend.releaseCtx == nil || backend.releaseCtx.Err() != nil) {
+				t.Fatalf("late acquisition needs fresh-context cleanup of its exact lease: lease=%#v context=%v", backend.releaseLease, backend.releaseCtx)
 			}
 			if test.wantSuccess {
 				if got.err != nil || got.provision.Lease.LeaseID != "cbx_000000000002" || aborts.Load() != 0 {
@@ -1127,7 +1175,11 @@ func TestCheckpointManagedRenewalCompletionRace(t *testing.T) {
 				}
 				return
 			}
-			if got.err == nil || aborts.Load() != 1 {
+			wantAborts := int32(1)
+			if test.lateSuccess {
+				wantAborts = 0
+			}
+			if got.err == nil || aborts.Load() != wantAborts {
 				t.Fatalf("failed create: provision=%#v err=%v aborts=%d", got.provision, got.err, aborts.Load())
 			}
 			if test.wantRenewal != strings.Contains(got.err.Error(), "renew checkpoint use claim:") {
