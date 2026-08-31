@@ -76,6 +76,16 @@ does **not** exempt a lease from idle or TTL expiry.
 
 After one release mutation is accepted, an explicit CLI stop observes the lease
 with read-only requests until provider deletion is final or a bounded wait ends.
+The public `cleanupStatus` distinguishes normal pending creation or cleanup from
+an observed failure. Pending work uses that same observation loop and five-minute
+bound; the CLI does not send another release mutation after acceptance. Existing
+cleanup diagnostics remain intact for clients that predate this classification.
+New AWS instance IDs can be temporarily invisible. Cleanup observes visibility
+within the existing bound before verifying allocation ownership; unconfirmed
+visibility or termination retains cleanup debt rather than reporting deletion.
+Allocation claims carry the prepared account scope for AWS Mac instances.
+Storage failures while publishing or checking an allocation preserve its cleanup
+claim without retrying creation.
 The CLI removes its local per-lease SSH connection directory only after final
 cleanup state is observed. Pending or retrying cleanup, observation timeout or
 cancellation, provider errors, ownership mismatches, and retained resources keep

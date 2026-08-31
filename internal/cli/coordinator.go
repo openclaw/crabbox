@@ -106,6 +106,7 @@ type CoordinatorLease struct {
 	Telemetry             *LeaseTelemetry                `json:"telemetry,omitempty"`
 	TelemetryHistory      []*LeaseTelemetry              `json:"telemetryHistory,omitempty"`
 	CleanupAttempts       int                            `json:"cleanupAttempts,omitempty"`
+	CleanupStatus         string                         `json:"cleanupStatus,omitempty"`
 	CleanupStartedAt      string                         `json:"cleanupStartedAt,omitempty"`
 	CleanupError          string                         `json:"cleanupError,omitempty"`
 	CleanupRetryAt        string                         `json:"cleanupRetryAt,omitempty"`

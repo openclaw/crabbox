@@ -349,7 +349,7 @@ func (a App) egressStart(ctx context.Context, args []string) error {
 	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 		return err
 	}
-	unlockDaemon, err := acquireEgressDaemonLock(leaseID)
+	unlockDaemon, err := acquireEgressDaemonLock(ctx, leaseID)
 	if err != nil {
 		return exit(2, "acquire egress daemon lock: %v", err)
 	}
@@ -485,7 +485,7 @@ func (a App) egressStop(ctx context.Context, args []string) error {
 			resolved = true
 		}
 	}
-	unlock, err := acquireEgressDaemonLocks(*id, leaseID)
+	unlock, err := acquireEgressDaemonLocks(ctx, *id, leaseID)
 	if err != nil {
 		return exit(2, "acquire egress daemon locks: %v", err)
 	}
@@ -1482,7 +1482,7 @@ func egressRemoteProbeCommand(host, port string) string {
 // acquireEgressDaemonLock serializes every local egress daemon lifecycle
 // operation for a lease. It is keyed on the egress pid path, so it does not
 // contend with the WebVNC daemon lock for the same lease.
-func acquireEgressDaemonLock(leaseID string) (func(), error) {
+func acquireEgressDaemonLock(ctx context.Context, leaseID string) (func(), error) {
 	_, pidPath, err := egressDaemonPaths(leaseID)
 	if err != nil {
 		return nil, err
@@ -1494,10 +1494,10 @@ func acquireEgressDaemonLock(leaseID string) (func(), error) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return nil, err
 	}
-	return acquireDaemonFileLock(pidPath + ".lock")
+	return acquireDaemonFileLock(ctx, pidPath+".lock")
 }
 
-func acquireEgressDaemonLocks(leaseIDs ...string) (func(), error) {
+func acquireEgressDaemonLocks(ctx context.Context, leaseIDs ...string) (func(), error) {
 	unique := map[string]bool{}
 	ids := make([]string, 0, len(leaseIDs))
 	for _, leaseID := range leaseIDs {
@@ -1511,7 +1511,7 @@ func acquireEgressDaemonLocks(leaseIDs ...string) (func(), error) {
 	sort.Strings(ids)
 	unlocks := make([]func(), 0, len(ids))
 	for _, leaseID := range ids {
-		unlock, err := acquireEgressDaemonLock(leaseID)
+		unlock, err := acquireEgressDaemonLock(ctx, leaseID)
 		if err != nil {
 			for i := len(unlocks) - 1; i >= 0; i-- {
 				unlocks[i]()
@@ -1527,8 +1527,8 @@ func acquireEgressDaemonLocks(leaseIDs ...string) (func(), error) {
 	}, nil
 }
 
-func (a App) startEgressHostDaemon(leaseID string, args, childEnvDenylist []string) error {
-	unlock, err := acquireEgressDaemonLock(leaseID)
+func (a App) startEgressHostDaemon(ctx context.Context, leaseID string, args, childEnvDenylist []string) error {
+	unlock, err := acquireEgressDaemonLock(ctx, leaseID)
 	if err != nil {
 		return exit(2, "acquire egress daemon lock: %v", err)
 	}
@@ -1589,8 +1589,8 @@ func egressDaemonSupervisorCommand(exe string, args, childEnvDenylist []string) 
 	return cmd
 }
 
-func (a App) stopEgressHostDaemon(leaseID string) (bool, error) {
-	unlock, err := acquireEgressDaemonLock(leaseID)
+func (a App) stopEgressHostDaemon(ctx context.Context, leaseID string) (bool, error) {
+	unlock, err := acquireEgressDaemonLock(ctx, leaseID)
 	if err != nil {
 		return false, exit(2, "acquire egress daemon lock: %v", err)
 	}

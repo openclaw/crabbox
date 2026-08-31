@@ -73,8 +73,12 @@ coordinator inspection.
 
 Brokered JSON records also expose the coordinator's provider-cleanup state:
 
+- `cleanupStatus`: for released leases, `pending`, `failed`, `complete`, or
+  `retained`. This is computed from the current lifecycle record, not persisted
+  as a separate state or used as provider deletion authority.
 - `cleanupStartedAt`: cleanup has started but is not yet terminal.
-- `cleanupError`: the coordinator observed a provider-cleanup failure.
+- `cleanupError`: cleanup remains unconfirmed; this can include legacy diagnostics
+  for pending creation as well as observed failures.
 - `cleanupRetryAt`: the coordinator scheduled another cleanup attempt.
 - `releaseDeletesServer`: whether release is intended to delete the provider
   resource.
@@ -86,8 +90,17 @@ absent, and `releaseDeletesServer` is either omitted or `true`. An explicit
 retained and must not be treated as deletion-confirmed. Omitted and `false` are
 therefore distinct states.
 
+`pending` includes an allocation response or cleanup attempt still being
+observed. An explicit stop keeps observing that state within its existing
+five-minute bound instead of treating it as a provider failure. A real cleanup
+failure or uncertain abandoned allocation remains `failed`; local claims and
+SSH files are retained. Older coordinators omit `cleanupStatus`, and clients
+continue using the existing conservative metadata checks. The original
+diagnostics remain available so older clients also fail closed.
+
 These fields report the coordinator's lifecycle observation. They are not an
-independent provider inventory check.
+independent provider inventory check. `complete` does not override remaining
+cleanup metadata or an explicit retained-resource flag.
 
 For coordinator leases whose provider can inject an SSH host key before first
 boot, JSON also includes `sshHostKey`. Its value is exactly the public host-key

@@ -565,6 +565,8 @@ interface AWSIngressOptions {
   withIngress?: (apply: (cidrs: string[]) => Promise<string>) => Promise<string>;
 }
 
+type AWSReadinessCheck = () => Promise<void>;
+
 const sshIngressRangeFamilies = [
   {
     cidrField: "cidrIp",
@@ -1138,12 +1140,32 @@ export class EC2SpotClient {
     }
   }
 
-  async waitForServerIP(instanceID: string, allowPrivateAddress = false): Promise<ProviderMachine> {
+  async waitForServerVisibility(instanceID: string): Promise<ProviderMachine> {
+    for (const delay of awsInstanceVisibilityBackoffMs) {
+      try {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- newly allocated IDs propagate through EC2 reads.
+        return await this.getServer(instanceID);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!isAWSInstanceNotFoundError(message)) throw error;
+      }
+      // oxlint-disable-next-line eslint/no-await-in-loop -- reuse the existing bounded EC2 observation schedule.
+      await sleep(delay);
+    }
+    return this.getServer(instanceID);
+  }
+
+  async waitForServerIP(
+    instanceID: string,
+    allowPrivateAddress = false,
+    checkReadiness?: AWSReadinessCheck,
+  ): Promise<ProviderMachine> {
     const deadline = Date.now() + 600_000;
+    /* oxlint-disable eslint/no-await-in-loop -- Polling serially revalidates lease authority around each provider read. */
     while (Date.now() < deadline) {
+      await checkReadiness?.();
       let server: ProviderMachine | undefined;
       try {
-        // oxlint-disable-next-line eslint/no-await-in-loop -- polling waits between EC2 reads.
         server = await this.getServer(instanceID);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -1151,22 +1173,24 @@ export class EC2SpotClient {
           throw error;
         }
       }
+      await checkReadiness?.();
       const address = server?.host || (allowPrivateAddress ? server?.privateHost : "");
       if (server && address) {
         return { ...server, host: address };
       }
-      // oxlint-disable-next-line eslint/no-await-in-loop -- this delay is the polling interval.
       await sleep(5_000);
     }
+    /* oxlint-enable eslint/no-await-in-loop */
     throw new Error(`timed out waiting for AWS instance network address: ${instanceID}`);
   }
 
-  async waitForSSMOnline(instanceID: string): Promise<void> {
+  async waitForSSMOnline(instanceID: string, checkReadiness?: AWSReadinessCheck): Promise<void> {
     const deadline = Date.now() + 10 * 60_000;
+    /* oxlint-disable eslint/no-await-in-loop -- Polling serially revalidates lease authority around each provider read. */
     while (Date.now() < deadline) {
+      await checkReadiness?.();
       let result: Record<string, unknown>;
       try {
-        // oxlint-disable-next-line eslint/no-await-in-loop -- SSM registration is polled serially.
         result = await this.ssm("DescribeInstanceInformation", {
           Filters: [{ Key: "InstanceIds", Values: [instanceID] }],
           MaxResults: 5,
@@ -1178,6 +1202,7 @@ export class EC2SpotClient {
         }
         result = {};
       }
+      await checkReadiness?.();
       const instances = items(result["InstanceInformationList"]).map(record);
       if (
         instances.some(
@@ -1188,9 +1213,9 @@ export class EC2SpotClient {
       ) {
         return;
       }
-      // oxlint-disable-next-line eslint/no-await-in-loop -- SSM registration is eventually consistent.
       await sleep(5_000);
     }
+    /* oxlint-enable eslint/no-await-in-loop */
     throw new Error(`timed out waiting for AWS SSM managed-node readiness: ${instanceID}`);
   }
 
@@ -1225,6 +1250,7 @@ export class EC2SpotClient {
     leaseID: string,
     command: string,
     logGroup: string,
+    checkReadiness?: AWSReadinessCheck,
   ): Promise<{ commandID: string; status: string }> {
     const bootstrapScript = [
       "set -euo pipefail",
@@ -1236,6 +1262,7 @@ export class EC2SpotClient {
     if (!command.trim() || new TextEncoder().encode(guardedCommand).byteLength > 24 * 1024) {
       throw new Error("AWS SSM workspace bootstrap command is empty or too large");
     }
+    await checkReadiness?.();
     const sent = await this.ssm("SendCommand", {
       CloudWatchOutputConfig: {
         CloudWatchLogGroupName: logGroup,
@@ -1250,18 +1277,21 @@ export class EC2SpotClient {
       },
       TimeoutSeconds: 900,
     });
+    await checkReadiness?.();
     const commandID = asString(record(sent["Command"])["CommandId"]);
     if (!commandID) {
       throw new Error("AWS SSM SendCommand returned no command ID");
     }
     const deadline = Date.now() + 17 * 60_000;
+    /* oxlint-disable eslint/no-await-in-loop -- Polling serially revalidates lease authority around each provider read. */
     while (Date.now() < deadline) {
+      await checkReadiness?.();
       try {
-        // oxlint-disable-next-line eslint/no-await-in-loop -- command status is sequential.
         const invocation = await this.ssm("GetCommandInvocation", {
           CommandId: commandID,
           InstanceId: instanceID,
         });
+        await checkReadiness?.();
         const status = asString(invocation["Status"]);
         if (status === "Success") {
           return { commandID, status };
@@ -1274,9 +1304,9 @@ export class EC2SpotClient {
         const message = error instanceof Error ? error.message : String(error);
         if (!message.includes("InvocationDoesNotExist")) throw error;
       }
-      // oxlint-disable-next-line eslint/no-await-in-loop -- SSM command delivery is asynchronous.
       await sleep(2_000);
     }
+    /* oxlint-enable eslint/no-await-in-loop */
     throw new Error(`timed out waiting for AWS SSM workspace bootstrap: ${commandID}`);
   }
 
@@ -1296,14 +1326,8 @@ export class EC2SpotClient {
   }
 
   async terminateServerAndWait(instanceID: string): Promise<void> {
-    let terminated: Record<string, unknown>;
-    try {
-      terminated = await this.ec2("TerminateInstances", { "InstanceId.1": instanceID });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (isAWSInstanceNotFoundError(message)) return;
-      throw error;
-    }
+    // NotFound before acknowledgement can be creation propagation, not termination.
+    const terminated = await this.ec2("TerminateInstances", { "InstanceId.1": instanceID });
     const returnedIDs = items(record(terminated["instancesSet"])["item"])
       .map((item) => asString(record(item)["instanceId"]))
       .filter(Boolean);
@@ -3674,16 +3698,6 @@ export function isAWSRunInstancesOutcomeUncertain(message: string): boolean {
 
 export function isAWSInvalidHostIDError(message: string): boolean {
   return message.includes("InvalidHostID.NotFound");
-}
-
-export function isAWSInstanceCleanedAfterReadinessFailure(
-  waitMessage: string,
-  cleanupMessage: string,
-): boolean {
-  if (cleanupMessage === "") {
-    return true;
-  }
-  return isAWSInstanceNotFoundError(waitMessage) && isAWSInstanceNotFoundError(cleanupMessage);
 }
 
 function trimBody(text: string): string {
