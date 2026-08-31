@@ -14,6 +14,7 @@
 
 - **WSL2 now requires SFTP.** Enable the Windows OpenSSH SFTP subsystem and verify Doctor's `wsl2-sftp` probe before upgrading; the v0.47.0 stdin fallback has been removed.
 - **Native Windows requires Windows 10 version 1709+ or Windows Server 2019+.**
+- **Blacksmith Testbox stop and reuse require exact local claims.** For legacy or missing claims, independently verify the organization and Testbox, stop it with the native CLI, confirm terminal status, and create a new lease; `--reclaim` does not bypass this requirement.
 - **Blacksmith Testbox rejects `--no-sync`.** Remove it from runs, prewarm probes, and named jobs; Testbox manages workspace synchronization.
 - **Static SSH architecture settings are assertions.** Explicit or inherited architecture settings, including `amd64`, must match fresh host evidence; remove the explicit setting to use automatic discovery.
 
