@@ -15,6 +15,8 @@
 
 ### Fixed
 
+- Preserved coordinator control-heartbeat failures when HTTP fallback also fails or has no remaining budget, without extending heartbeat deadlines or changing successful fallback.
+
 - Fixed cleanup of Docker checkpoint forks from fixed-ID source leases by clearing inherited allocation ownership, including when forking older checkpoint images.
 
 - Kept public AWS lease release independent of other instances’ image and network readiness, while fencing ingress writes with fresh lease authority and access state.
