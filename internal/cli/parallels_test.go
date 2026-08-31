@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -110,7 +111,7 @@ func TestParallelsRemoteCommandUsesSSHHostThenCommand(t *testing.T) {
 	runner := &parallelsFakeRunner{}
 	client := NewParallelsClient(Config{Parallels: ParallelsConfig{Host: "mac.example", HostUser: "build"}}, runner)
 	_, _ = client.Version(context.Background())
-	if runner.lastReq.Name != "ssh" {
+	if runner.lastReq.Name != directSSHExecutable() {
 		t.Fatalf("name=%q", runner.lastReq.Name)
 	}
 	if len(runner.lastReq.Args) != 2 {
@@ -130,14 +131,111 @@ func TestParallelsRemoteCommandUsesSSHHostThenCommand(t *testing.T) {
 	}
 }
 
+func TestParallelsCloneDestination(t *testing.T) {
+	const vmName = "crabbox-cbx-abcdef123456-fork"
+	for _, mode := range []struct {
+		name       string
+		cloneMode  string
+		snapshotID string
+		flags      []string
+	}{
+		{name: "default", snapshotID: "{snap1}", flags: []string{"--linked", "-i", "{snap1}"}},
+		{name: "linked", cloneMode: "linked", snapshotID: "{snap1}", flags: []string{"--linked", "-i", "{snap1}"}},
+		{name: "full", cloneMode: "full"},
+		{name: "unlink", cloneMode: "unlink", flags: []string{"--unlink"}},
+	} {
+		for _, root := range []struct {
+			name  string
+			value string
+			want  string
+		}{
+			{name: "configured", value: "/Volumes/VMs", want: "/Volumes/VMs"},
+			{name: "spaces", value: "/Volumes/VM Storage", want: "/Volumes/VM Storage"},
+			{name: "trimmed", value: " \t/Volumes/VM Storage\n", want: "/Volumes/VM Storage"},
+			{name: "trailing-slash", value: "/Volumes/VMs/", want: "/Volumes/VMs/"},
+			{name: "unset"},
+			{name: "blank", value: " \t\n"},
+		} {
+			t.Run(mode.name+"/"+root.name, func(t *testing.T) {
+				t.Setenv("XDG_STATE_HOME", t.TempDir())
+				runner := &parallelsCloneRunner{t: t}
+				if mode.snapshotID != "" {
+					runner.steps = append(runner.steps, parallelsCloneStep{
+						request: LocalCommandRequest{Name: "prlctl", Args: []string{"snapshot-list", "source-vm", "-j"}},
+						stdout:  `{"{snap1}":{"name":"fresh","state":"poweroff"}}`,
+					})
+				}
+				wantArgs := []string{"clone", "source-vm", "--name", vmName}
+				if root.want != "" {
+					wantArgs = append(wantArgs, "--dst", root.want)
+				}
+				wantArgs = append(wantArgs, mode.flags...)
+				runner.steps = append(runner.steps,
+					parallelsCloneStep{request: LocalCommandRequest{Name: "prlctl", Args: wantArgs}},
+					parallelsCloneStep{
+						request: LocalCommandRequest{Name: "prlctl", Args: []string{"list", "-i", "-f", "-j", vmName}},
+						stdout:  `[{"uuid":"clone-id","name":"` + vmName + `","status":"stopped"}]`,
+					},
+				)
+				client := NewParallelsClient(Config{Parallels: ParallelsConfig{
+					VMRoot: root.value, CloneMode: mode.cloneMode,
+				}}, runner)
+				server, err := client.Clone(context.Background(), "source-vm", mode.snapshotID, "cbx_abcdef123456", "fork", true)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(runner.requests) != len(runner.steps) {
+					t.Fatalf("requests=%#v, want %d commands", runner.requests, len(runner.steps))
+				}
+				if server.CloudID != "clone-id" || server.Name != vmName {
+					t.Fatalf("server=%#v", server)
+				}
+				for key, want := range map[string]string{
+					"provider": "parallels", "lease": "cbx_abcdef123456", "slug": "fork",
+					"source": "source-vm", "source_snapshot": mode.snapshotID, "host": "local", "keep": "true",
+				} {
+					if server.Labels[key] != want {
+						t.Errorf("label %s=%q, want %q", key, server.Labels[key], want)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestParallelsCloneRemoteDestination(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const prefix = "PATH=/usr/local/bin:/opt/homebrew/bin:$PATH "
+	runner := &parallelsCloneRunner{t: t, steps: []parallelsCloneStep{
+		{request: LocalCommandRequest{Name: directSSHExecutable(), Args: []string{
+			"build@mac.example",
+			prefix + "'prlctl' 'clone' 'source-vm' '--name' 'crabbox-cbx-abcdef123456-fork' '--dst' '/Volumes/VM Storage'",
+		}}},
+		{
+			request: LocalCommandRequest{Name: directSSHExecutable(), Args: []string{
+				"build@mac.example", prefix + "'prlctl' 'list' '-i' '-f' '-j' 'crabbox-cbx-abcdef123456-fork'",
+			}},
+			stdout: `[{"uuid":"clone-id","name":"crabbox-cbx-abcdef123456-fork","status":"stopped"}]`,
+		},
+	}}
+	client := NewParallelsClient(Config{Parallels: ParallelsConfig{
+		Host: "mac.example", HostUser: "build", VMRoot: " /Volumes/VM Storage ", CloneMode: "full",
+	}}, runner)
+	server, err := client.Clone(context.Background(), "source-vm", "", "cbx_abcdef123456", "fork", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.requests) != len(runner.steps) || server.CloudID != "clone-id" || server.Labels["host"] != "mac.example" {
+		t.Fatalf("server=%#v requests=%#v", server, runner.requests)
+	}
+}
+
 func TestParallelsCloneRejectsSnapshotIDForFullAndUnlink(t *testing.T) {
 	for _, cloneMode := range []string{"full", "unlink"} {
 		t.Run(cloneMode, func(t *testing.T) {
-			runner := &parallelsFakeRunner{
-				stdout: `[{"uuid":"vm1","status":"stopped","ip_configured":"10.0.0.2","name":"crabbox-cbx-abcdef123456-fork"}]`,
-			}
+			runner := &parallelsFakeRunner{}
 			client := NewParallelsClient(Config{
-				Parallels: ParallelsConfig{CloneMode: cloneMode},
+				Parallels: ParallelsConfig{CloneMode: cloneMode, VMRoot: "/Volumes/VM Storage"},
 			}, runner)
 			_, err := client.Clone(context.Background(), "source-vm", "{snap1}", "cbx_abcdef123456", "fork", true)
 			if err == nil || !strings.Contains(err.Error(), "prlctl selects snapshots only for linked clones") {
@@ -151,16 +249,37 @@ func TestParallelsCloneRejectsSnapshotIDForFullAndUnlink(t *testing.T) {
 }
 
 func TestParallelsLinkedCloneRequiresExplicitSnapshot(t *testing.T) {
-	runner := &parallelsFakeRunner{}
-	client := NewParallelsClient(Config{
-		Parallels: ParallelsConfig{CloneMode: "linked"},
-	}, runner)
-	_, err := client.Clone(context.Background(), "source-vm", "", "cbx_abcdef123456", "fork", true)
-	if err == nil || !strings.Contains(err.Error(), "require --parallels-source-snapshot") {
+	for _, cloneMode := range []string{"", "linked"} {
+		for _, snapshotID := range []string{"", " \t\n"} {
+			runner := &parallelsFakeRunner{}
+			client := NewParallelsClient(Config{
+				Parallels: ParallelsConfig{CloneMode: cloneMode, VMRoot: "/Volumes/VM Storage"},
+			}, runner)
+			_, err := client.Clone(context.Background(), "source-vm", snapshotID, "cbx_abcdef123456", "fork", true)
+			if err == nil || !strings.Contains(err.Error(), "require --parallels-source-snapshot") {
+				t.Fatalf("mode=%q snapshot=%q err=%v", cloneMode, snapshotID, err)
+			}
+			if len(runner.requests) != 0 {
+				t.Fatalf("clone should fail before prlctl: %#v", runner.requests)
+			}
+		}
+	}
+}
+
+func TestParallelsCloneRejectsPowerOnSnapshot(t *testing.T) {
+	runner := &parallelsCloneRunner{t: t, steps: []parallelsCloneStep{{
+		request: LocalCommandRequest{Name: "prlctl", Args: []string{"snapshot-list", "source-vm", "-j"}},
+		stdout:  `{"{snap1}":{"name":"live","state":"poweron"}}`,
+	}}}
+	client := NewParallelsClient(Config{Parallels: ParallelsConfig{
+		CloneMode: "linked", VMRoot: "/Volumes/VM Storage",
+	}}, runner)
+	_, err := client.Clone(context.Background(), "source-vm", "{snap1}", "cbx_abcdef123456", "fork", true)
+	if err == nil || !strings.Contains(err.Error(), "power-off snapshot") {
 		t.Fatalf("err=%v", err)
 	}
-	if len(runner.requests) != 0 {
-		t.Fatalf("clone should fail before prlctl: %#v", runner.requests)
+	if len(runner.requests) != 1 {
+		t.Fatalf("only snapshot lookup should run: %#v", runner.requests)
 	}
 }
 
@@ -360,6 +479,31 @@ func TestParallelsEnsureGuestReadySkipsWindows(t *testing.T) {
 	if runner.lastReq.Name != "" {
 		t.Fatalf("unexpected command: %#v", runner.lastReq)
 	}
+}
+
+type parallelsCloneStep struct {
+	request LocalCommandRequest
+	stdout  string
+}
+
+type parallelsCloneRunner struct {
+	t        *testing.T
+	steps    []parallelsCloneStep
+	requests []LocalCommandRequest
+}
+
+func (r *parallelsCloneRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+	r.t.Helper()
+	index := len(r.requests)
+	r.requests = append(r.requests, req)
+	if index >= len(r.steps) {
+		r.t.Fatalf("unexpected command: %#v", req)
+	}
+	step := r.steps[index]
+	if req.Name != step.request.Name || !reflect.DeepEqual(req.Args, step.request.Args) {
+		r.t.Errorf("command %d: got %s %q; want %s %q", index, req.Name, req.Args, step.request.Name, step.request.Args)
+	}
+	return LocalCommandResult{Stdout: step.stdout}, nil
 }
 
 type parallelsFakeRunner struct {

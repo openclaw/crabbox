@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.48.1 (Unreleased)
+
+### Fixed
+
+- Fixed Parallels clone destinations to pass the configured parent directory to `prlctl --dst`, letting Parallels name and create the VM bundle beneath it.
+
 ## 0.48.0 - 2026-08-30
 
 ### Highlights
