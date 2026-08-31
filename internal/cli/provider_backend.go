@@ -310,6 +310,8 @@ type DelegatedRunBackend interface {
 	Run(ctx context.Context, req RunRequest) (RunResult, error)
 	List(ctx context.Context, req ListRequest) ([]LeaseView, error)
 	Status(ctx context.Context, req StatusRequest) (StatusView, error)
+	// Stop owns local claim finalization, including retention. Callers must not
+	// remove the claim afterward: a replacement may exist once Stop returns.
 	Stop(ctx context.Context, req StopRequest) error
 }
 
