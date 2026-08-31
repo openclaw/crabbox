@@ -187,6 +187,13 @@ termination. Uncertain cleanup retains ownership; a successful workload with
 failed cleanup returns a failure and reports the session as kept. An earlier
 workload failure keeps its own exit code.
 
+Local connection artifacts must be removed successfully before the exact claim
+is deleted; an unsafe or undeletable lease key directory reports cleanup failure
+and retains the claim for retry. Missing lease key directories are already clean.
+Failed stops report both the native failure and any independent verification or
+finalization failure, preserving the native exit code. Failed-query stderr is
+diagnostic only and never proves completion.
+
 Use the same organization/API route when reusing or stopping a lease. Workflow
 flags are still unnecessary for reuse; the provider checks stored native
 workflow/job/ref metadata. Token rotation within the same organization remains

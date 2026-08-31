@@ -3,6 +3,7 @@ package blacksmith
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -179,16 +180,45 @@ func (i blacksmithIdentity) usable() error {
 
 func (b *blacksmithBackend) inspectTestbox(ctx context.Context, id string) (blacksmithIdentity, error) {
 	result, err := b.runCommand(ctx, []string{"testbox", "status", "--id", id}, nil, nil)
+	err = blacksmithContextError(ctx, err)
+	if err == nil && result.ExitCode != 0 {
+		err = exit(result.ExitCode, "Blacksmith exact status failed")
+	}
 	if err != nil {
-		return blacksmithIdentity{}, err
-	}
-	if err := ctx.Err(); err != nil {
-		return blacksmithIdentity{}, err
-	}
-	if result.ExitCode != 0 {
-		return blacksmithIdentity{}, exit(result.ExitCode, "Blacksmith exact status failed")
+		if diagnostic := strings.TrimSpace(result.Stderr); diagnostic != "" {
+			err = fmt.Errorf("%w: %s", err, diagnostic)
+		}
+		return blacksmithIdentity{}, blacksmithExitDiagnostics(err)
 	}
 	return parseBlacksmithIdentity(result.Stdout, id)
+}
+
+// Present all diagnostics through AsExitError while retaining the native code
+// and causes. The CLI prints only the first ExitError's Message.
+type blacksmithCommandError struct {
+	core.ExitError
+	cause error
+}
+
+func (e blacksmithCommandError) Unwrap() []error { return []error{e.ExitError, e.cause} }
+
+func blacksmithExitDiagnostics(err error) error {
+	var exitErr core.ExitError
+	if core.AsExitError(err, &exitErr) {
+		exitErr.Message = err.Error()
+		return blacksmithCommandError{ExitError: exitErr, cause: err}
+	}
+	return err
+}
+
+func blacksmithContextError(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
+		err = errors.Join(err, ctxErr)
+	}
+	if cause := context.Cause(ctx); cause != nil && !errors.Is(err, cause) {
+		err = errors.Join(err, cause)
+	}
+	return err
 }
 
 func (b *blacksmithBackend) verifyTestbox(ctx context.Context, claim core.LeaseClaim) (blacksmithIdentity, error) {
@@ -276,11 +306,19 @@ func (b *blacksmithBackend) terminateTestbox(ctx context.Context, claim core.Lea
 		return nil, err
 	}
 	result, stopErr := b.runCommand(ctx, blacksmithStopArgs(b.cfg, claim.CloudID), nil, nil)
-	if stopErr != nil && ctx.Err() == nil {
-		observed, statusErr := b.verifyTestbox(ctx, claim)
-		if statusErr == nil && observed.terminal() {
-			return &blacksmithReconciledStop{result: result, err: stopErr}, nil
+	if stopErr != nil {
+		statusErr := blacksmithContextError(ctx, nil)
+		if statusErr == nil {
+			var observed blacksmithIdentity
+			observed, statusErr = b.verifyTestbox(ctx, claim)
+			if statusErr == nil && observed.terminal() {
+				return &blacksmithReconciledStop{result: result, err: stopErr}, nil
+			}
+			if statusErr == nil {
+				statusErr = fmt.Errorf("Testbox state=%s is not completed", observed.State)
+			}
 		}
+		stopErr = errors.Join(stopErr, fmt.Errorf("Blacksmith stop verification failed: %w", statusErr))
 	}
 	// A native error is suppressed only by fresh exact completion evidence.
 	b.printStopOutput(result)
@@ -344,7 +382,9 @@ func (b *blacksmithBackend) rollbackTestbox(id, pendingID, repoRoot string) {
 		if _, err := b.terminateTestbox(ctx, claim); err != nil {
 			return err
 		}
-		removeStoredTestboxKey(pendingID)
+		if err := core.RemoveStoredTestboxConnectionArtifacts(pendingID); err != nil {
+			return fmt.Errorf("Blacksmith local connection artifacts cleanup failed: %w", err)
+		}
 		return nil
 	})
 	if err != nil {

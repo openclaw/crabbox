@@ -863,7 +863,8 @@ func (b *blacksmithBackend) Stop(ctx context.Context, req StopRequest) error {
 	return b.stopClaimedTestbox(ctx, claim.LeaseID, claim)
 }
 
-func (b *blacksmithBackend) stopClaimedTestbox(ctx context.Context, leaseID string, claim core.LeaseClaim) error {
+func (b *blacksmithBackend) stopClaimedTestbox(ctx context.Context, leaseID string, claim core.LeaseClaim) (stopErr error) {
+	defer func() { stopErr = blacksmithExitDiagnostics(stopErr) }()
 	_, _, err := blacksmithClaimBinding(claim)
 	if err != nil {
 		return err
@@ -897,7 +898,9 @@ func (b *blacksmithBackend) stopClaimedTestbox(ctx context.Context, leaseID stri
 		if !identity.terminal() {
 			return exit(2, "Blacksmith termination is not confirmed; retaining claim and key")
 		}
-		removeStoredTestboxKey(leaseID)
+		if err := core.RemoveStoredTestboxConnectionArtifacts(leaseID); err != nil {
+			return fmt.Errorf("Blacksmith local connection artifacts cleanup failed; retaining claim: %w", err)
+		}
 		return nil
 	})
 	if err != nil && reconciled != nil {
@@ -1076,7 +1079,7 @@ func (b *blacksmithBackend) runCommandCapture(ctx context.Context, args []string
 	}
 	result, err := b.rt.Exec.Run(ctx, request)
 	if err != nil {
-		return result, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("blacksmith failed: %v", err)}
+		return result, blacksmithCommandError{ExitError: ExitError{Code: result.ExitCode, Message: fmt.Sprintf("blacksmith failed: %v", err)}, cause: err}
 	}
 	return result, nil
 }

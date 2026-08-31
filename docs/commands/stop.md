@@ -46,6 +46,9 @@ Crabbox lease ID and local slug:
   only after fresh native stdout confirms the exact ID in state `completed`.
   Failed native stops can reconcile through the same confirmation; ambiguous,
   failed or cancelled queries retain the original stop error and local state.
+  Verification and local artifact cleanup failures remain visible alongside the
+  native error and exit code. Failed artifact removal retains the exact claim;
+  an already absent lease key directory is safe to finalize.
   Legacy or lost claims require independently verified native Blacksmith cleanup;
   raw IDs alone never authorize stop. See
   [Blacksmith Testbox](../features/blacksmith-testbox.md).

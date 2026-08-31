@@ -266,7 +266,7 @@ func TestBlacksmithStopReconciliationFailsClosed(t *testing.T) {
 			backend.rt.Stdout, backend.rt.Stderr = &stdout, &stderr
 			err := backend.Stop(ctx, StopRequest{ID: id})
 			var exitErr ExitError
-			if !errors.As(err, &exitErr) || exitErr.Code != 1 || exitErr.Message != "blacksmith failed: exit status 1" {
+			if !core.AsExitError(err, &exitErr) || exitErr.Code != 1 || !strings.Contains(exitErr.Message, "blacksmith failed: exit status 1") || !strings.Contains(exitErr.Message, "verification") {
 				t.Fatalf("original stop error lost: %v", err)
 			}
 			want := []string{"status", "stop", "status"}
@@ -341,7 +341,7 @@ func TestBlacksmithReconciliationRetainsOriginalErrorUntilFinalized(t *testing.T
 			backend.rt.Stdout, backend.rt.Stderr = &stdout, &stderr
 			err := backend.Stop(ctx, StopRequest{ID: claim.LeaseID})
 			var nativeErr ExitError
-			if !errors.As(err, &nativeErr) || nativeErr.Code != 1 || nativeErr.Message != "blacksmith failed: exit status 1" || inspections != 3 {
+			if !core.AsExitError(err, &nativeErr) || nativeErr.Code != 1 || !strings.Contains(nativeErr.Message, "blacksmith failed: exit status 1") || nativeErr.Message != err.Error() || inspections != 3 {
 				t.Fatalf("original failure lost after finalization: err=%v inspections=%d", err, inspections)
 			}
 			assertStopState(t, claim, true)
@@ -479,7 +479,7 @@ func TestBlacksmithOneShotReconciliationPreservesCommandResult(t *testing.T) {
 		{"test failure 7", 7, "FAIL: assertion mismatch\n"},
 		{"not found", 127, "sh: test-runner: command not found\n"},
 	} {
-		for _, state := range []string{"completed", "ready"} {
+		for _, state := range []string{"completed", "ready", "artifact-failure"} {
 			t.Run(command.name+"/"+state, func(t *testing.T) {
 				testutil.IsolateUserDirs(t)
 				repo := t.TempDir()
@@ -487,6 +487,7 @@ func TestBlacksmithOneShotReconciliationPreservesCommandResult(t *testing.T) {
 				const id = "tbx_oneshot123"
 				var stderr bytes.Buffer
 				stopped := false
+				keyMoved := false
 				runner := reconciliationRunner(t, func(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
 					switch req.Args[1] {
 					case "warmup":
@@ -508,7 +509,25 @@ func TestBlacksmithOneShotReconciliationPreservesCommandResult(t *testing.T) {
 						if !ok || time.Until(deadline) > blacksmithCleanupTimeout {
 							t.Error("unbounded cleanup context")
 						}
-						return LocalCommandResult{Stdout: nativeStopStatus(id, state, "")}, nil
+						observed := state
+						if state == "artifact-failure" {
+							observed = "completed"
+							if !keyMoved {
+								key, err := testboxKeyPath(id)
+								if err != nil {
+									t.Fatal(err)
+								}
+								target := filepath.Join(t.TempDir(), "original")
+								if err := os.Rename(filepath.Dir(key), target); err != nil {
+									t.Fatal(err)
+								}
+								if err := os.Symlink(target, filepath.Dir(key)); err != nil {
+									t.Skipf("directory symlink unavailable: %v", err)
+								}
+								keyMoved = true
+							}
+						}
+						return LocalCommandResult{Stdout: nativeStopStatus(id, observed, "")}, nil
 					default:
 						t.Fatalf("unexpected command: %v", req.Args)
 						return LocalCommandResult{}, nil
@@ -534,6 +553,9 @@ func TestBlacksmithOneShotReconciliationPreservesCommandResult(t *testing.T) {
 				}
 				if result.ExitCode != wantCode || result.LeaseID != id {
 					t.Fatalf("result=%#v", result)
+				}
+				if result.Session == nil || result.Session.Kept != (state != "completed") {
+					t.Errorf("cleanup retention changed: %#v", result.Session)
 				}
 				var reports []core.TimingReport
 				for _, line := range strings.Split(stderr.String(), "\n") {
@@ -566,6 +588,9 @@ func TestBlacksmithOneShotReconciliationPreservesCommandResult(t *testing.T) {
 				}
 				if command.code != 0 && !strings.Contains(stderr.String(), command.output) {
 					t.Fatal("command failure output was hidden")
+				}
+				if state == "artifact-failure" && !strings.Contains(stderr.String(), "local connection artifacts") {
+					t.Error("run summary hid artifact cleanup failure")
 				}
 			})
 		}
@@ -623,5 +648,197 @@ func reconciliationRunner(t *testing.T, fn func(context.Context, LocalCommandReq
 			req.Args = req.Args[2:]
 		}
 		return fn(ctx, req)
+	}
+}
+
+func TestBlacksmithStopArtifactFinalization(t *testing.T) {
+	for _, mode := range []string{"unsafe", "missing", "reconciled-unsafe"} {
+		t.Run(mode, func(t *testing.T) {
+			isolateBlacksmithOwnership(t)
+			const id = "tbx_artifact123"
+			claim := testOwnedBlacksmithClaim(t, id, "artifact-krill", t.TempDir())
+			key, err := testboxKeyPath(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sibling, err := testboxKeyPath("tbx_sibling123")
+			if err != nil {
+				t.Fatal(err)
+			}
+			shared := filepath.Join(t.TempDir(), "shared-key-marker")
+			markers := []string{sibling, shared}
+			if mode != "missing" {
+				markers = append(markers, key, key+".pub", filepath.Join(filepath.Dir(key), "known_hosts"))
+			}
+			for _, path := range markers {
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("harmless marker"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode != "missing" {
+				// Symlinks fail deterministically without depending on uid or chmod.
+				target := filepath.Join(t.TempDir(), "original")
+				if err := os.Rename(filepath.Dir(key), target); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, filepath.Dir(key)); err != nil {
+					t.Skipf("directory symlink unavailable: %v", err)
+				}
+			}
+			before := map[string]os.FileInfo{}
+			for _, path := range markers {
+				before[path], err = os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			var stderr bytes.Buffer
+			inspections, stops := 0, 0
+			nativeCause := errors.New("synthetic stop failure")
+			cfg := baseConfig()
+			cfg.Blacksmith.Org = "example-org"
+			backend := newTestBlacksmithBackend(cfg, reconciliationRunner(t, func(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+				if req.Args[1] == "stop" {
+					stops++
+					return LocalCommandResult{ExitCode: 9, Stderr: stopDiagnostic}, nativeCause
+				}
+				inspections++
+				state := "completed"
+				if mode == "reconciled-unsafe" && inspections == 1 {
+					state = "ready"
+				}
+				return LocalCommandResult{Stdout: nativeStopStatus(id, state, "")}, nil
+			}))
+			backend.rt.Stderr = &stderr
+			err = backend.Stop(t.Context(), StopRequest{ID: id})
+			got, readErr := readLeaseClaim(id)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if mode == "missing" {
+				if err != nil || got.LeaseID != "" {
+					t.Fatalf("missing directory cleanup: err=%v claim=%+v", err, got)
+				}
+			} else {
+				if err == nil || !strings.Contains(err.Error(), "local connection artifacts") || !strings.Contains(err.Error(), "non-directory") {
+					t.Errorf("artifact failure hidden: %v", err)
+				}
+				if !reflect.DeepEqual(got, claim) {
+					t.Error("failed finalization changed the exact claim")
+				}
+				if strings.Contains(stderr.String(), "cleanup reconciled") {
+					t.Error("failed finalization reported reconciliation")
+				}
+			}
+			if mode == "reconciled-unsafe" {
+				var exitErr ExitError
+				if !core.AsExitError(err, &exitErr) || exitErr.Code != 9 || exitErr.Message != err.Error() || !errors.Is(err, nativeCause) || stops != 1 || inspections != 3 {
+					t.Errorf("late failure lost native error: %v stops=%d inspections=%d", err, stops, inspections)
+				}
+			} else if stops != 0 || inspections != 2 {
+				t.Errorf("already-terminal calls stops=%d inspections=%d", stops, inspections)
+			}
+			for _, path := range markers {
+				after, statErr := os.Stat(path)
+				if statErr != nil || !os.SameFile(before[path], after) || before[path].Size() != after.Size() || before[path].ModTime() != after.ModTime() {
+					t.Errorf("marker changed: %s: %v", path, statErr)
+				}
+			}
+		})
+	}
+}
+
+func TestBlacksmithStopVerificationDiagnostics(t *testing.T) {
+	for _, mode := range []string{"query-error", "nonterminal", "cancel-stop", "cancel-query", "late-query-error"} {
+		t.Run(mode, func(t *testing.T) {
+			isolateBlacksmithOwnership(t)
+			claim := seedStopClaim(t, "tbx_diagnostics123")
+			nativeCause, queryCause := errors.New("synthetic stop failure"), errors.New("synthetic lookup failure")
+			cancelCause := errors.New("synthetic operator cancellation")
+			ctx, cancel := context.WithCancelCause(t.Context())
+			defer cancel(nil)
+			inspections := 0
+			cfg := baseConfig()
+			cfg.Blacksmith.Org = "example-org"
+			backend := newTestBlacksmithBackend(cfg, reconciliationRunner(t, func(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+				if req.Args[1] == "stop" {
+					if mode == "cancel-stop" {
+						cancel(cancelCause)
+					}
+					return LocalCommandResult{ExitCode: 9}, nativeCause
+				}
+				inspections++
+				if inspections == 1 || mode == "nonterminal" {
+					return LocalCommandResult{Stdout: nativeStopStatus(claim.LeaseID, "ready", "")}, nil
+				}
+				if mode == "cancel-query" {
+					cancel(cancelCause)
+					return LocalCommandResult{Stdout: nativeStopStatus(claim.LeaseID, "completed", "")}, nil
+				}
+				if mode == "late-query-error" && inspections == 2 {
+					return LocalCommandResult{Stdout: nativeStopStatus(claim.LeaseID, "completed", "")}, nil
+				}
+				return LocalCommandResult{ExitCode: 7, Stdout: nativeStopStatus(claim.LeaseID, "completed", ""), Stderr: "authentication unavailable\n"}, queryCause
+			}))
+			err := backend.Stop(ctx, StopRequest{ID: claim.LeaseID})
+			var exitErr ExitError
+			if !core.AsExitError(err, &exitErr) || exitErr.Code != 9 || exitErr.Message != err.Error() || strings.Count(exitErr.Message, nativeCause.Error()) != 1 || !errors.Is(err, nativeCause) {
+				t.Errorf("native diagnostic/cause lost: %v", err)
+			}
+			switch mode {
+			case "nonterminal":
+				if !strings.Contains(exitErr.Message, "ready") || !strings.Contains(exitErr.Message, "verification") {
+					t.Errorf("nonterminal verification hidden: %v", err)
+				}
+			case "cancel-stop", "cancel-query":
+				if !errors.Is(err, context.Canceled) || !errors.Is(err, cancelCause) || !strings.Contains(exitErr.Message, cancelCause.Error()) {
+					t.Errorf("cancellation cause hidden: %v", err)
+				}
+			default:
+				if !errors.Is(err, queryCause) || strings.Count(exitErr.Message, queryCause.Error()) != 1 || strings.Count(exitErr.Message, "authentication unavailable") != 1 {
+					t.Errorf("independent lookup diagnostic/cause lost: %v", err)
+				}
+			}
+			assertStopState(t, claim, true)
+		})
+	}
+}
+
+func TestBlacksmithRollbackWarnsOnArtifactFailure(t *testing.T) {
+	isolateBlacksmithOwnership(t)
+	const pending = "tbx_pending_artifact123"
+	key, err := testboxKeyPath(pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(filepath.Dir(key)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	marker := filepath.Join(target, "id_ed25519")
+	if err := os.WriteFile(marker, []byte("harmless marker"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Dir(key)); err != nil {
+		t.Skipf("directory symlink unavailable: %v", err)
+	}
+	var stderr bytes.Buffer
+	backend := newTestBlacksmithBackend(baseConfig(), reconciliationRunner(t, func(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+		if req.Args[1] != "status" {
+			t.Fatalf("already-terminal rollback reached %v", req.Args)
+		}
+		return LocalCommandResult{Stdout: nativeStopStatus("tbx_rollback123", "completed", "")}, nil
+	}))
+	backend.route = &blacksmithRoute{API: blacksmithDefaultAPI, Org: "example-org"}
+	backend.rt.Stderr = &stderr
+	backend.rollbackTestbox("tbx_rollback123", pending, t.TempDir())
+	if !strings.Contains(stderr.String(), "acquisition cleanup unconfirmed") || !strings.Contains(stderr.String(), "local connection artifacts") || !strings.Contains(stderr.String(), pending) {
+		t.Errorf("pending key deletion failure hidden: %s", stderr.String())
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatal("rollback removed recovery marker", err)
 	}
 }

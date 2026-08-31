@@ -307,6 +307,11 @@ func RemoveStoredTestboxKey(leaseID string) {
 	removeStoredTestboxKey(leaseID)
 }
 
+// RemoveStoredTestboxConnectionArtifacts removes only the canonical lease SSH directory.
+func RemoveStoredTestboxConnectionArtifacts(leaseID string) error {
+	return removeStoredTestboxConnectionArtifacts(leaseID)
+}
+
 func providerKeyForLease(leaseID string) string {
 	return strings.ReplaceAll("crabbox-"+leaseID, "_", "-")
 }
