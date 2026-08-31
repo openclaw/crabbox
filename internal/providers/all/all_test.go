@@ -719,6 +719,7 @@ func TestArchiveSyncFeatureGatesDelegatedSyncOptions(t *testing.T) {
 
 func TestModuleRunFeatureGatesScriptMode(t *testing.T) {
 	checked := 0
+	checkedPOSIX := 0
 	script := &core.RunScriptSpec{Source: "worker.mjs", Data: []byte("export default {}")}
 	for _, name := range allBuiltInProviderNames() {
 		provider := mustProvider(t, name)
@@ -746,12 +747,31 @@ func TestModuleRunFeatureGatesScriptMode(t *testing.T) {
 			checked++
 			continue
 		}
+		if spec.Features.Has(core.FeaturePOSIXScript) {
+			if err != nil {
+				t.Fatalf("%s advertises %s but rejects script mode: %v", name, core.FeaturePOSIXScript, err)
+			}
+			// Unlike module-run, a POSIX script takes positional arguments, so a
+			// trailing command list is part of the contract rather than a conflict.
+			if err := core.RejectDelegatedSyncOptionsForSpec(spec, core.RunRequest{
+				ScriptRequested: true,
+				Script:          script,
+				Command:         []string{"--flag"},
+			}); err != nil {
+				t.Fatalf("%s advertises %s but rejects script arguments: %v", name, core.FeaturePOSIXScript, err)
+			}
+			checkedPOSIX++
+			continue
+		}
 		if err == nil {
-			t.Fatalf("%s accepts script mode without %s", name, core.FeatureModuleRun)
+			t.Fatalf("%s accepts script mode without %s or %s", name, core.FeatureModuleRun, core.FeaturePOSIXScript)
 		}
 	}
 	if checked == 0 {
 		t.Fatalf("no providers advertised %s; conformance test is stale", core.FeatureModuleRun)
+	}
+	if checkedPOSIX == 0 {
+		t.Fatalf("no providers advertised %s; conformance test is stale", core.FeaturePOSIXScript)
 	}
 }
 

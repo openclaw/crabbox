@@ -1640,3 +1640,33 @@ func TestServerLeaseClaimSnapshotIsExplicitAndCloned(t *testing.T) {
 		t.Fatalf("snapshot alias=%#v", again)
 	}
 }
+
+func TestValidateDelegatedRunRoutingAllowsPOSIXScriptFeature(t *testing.T) {
+	spec := ProviderSpec{Name: "posix-script-test", Kind: ProviderKindDelegatedRun, Features: FeatureSet{FeaturePOSIXScript}}
+	req := RunRequest{ScriptRequested: true, NoSync: true}
+	if err := validateDelegatedRunRouting(spec, req, "", false, false); err != nil {
+		t.Fatalf("posix-script provider should accept --script: %v", err)
+	}
+}
+
+func TestValidateDelegatedRunRoutingRejectsScriptWithoutFeature(t *testing.T) {
+	spec := ProviderSpec{Name: "plain-delegated-test", Kind: ProviderKindDelegatedRun}
+	req := RunRequest{ScriptRequested: true, NoSync: true}
+	err := validateDelegatedRunRouting(spec, req, "", false, false)
+	if err == nil {
+		t.Fatal("a delegated provider without the feature must still reject --script")
+	}
+	if !strings.Contains(err.Error(), "--script is not supported") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateDelegatedRunRoutingPOSIXScriptAllowsTrailingCommand(t *testing.T) {
+	// Unlike module-run, a POSIX script takes positional arguments, so a
+	// trailing command list must not be rejected.
+	spec := ProviderSpec{Name: "posix-script-args-test", Kind: ProviderKindDelegatedRun, Features: FeatureSet{FeaturePOSIXScript}}
+	req := RunRequest{ScriptRequested: true, NoSync: true, Command: []string{"--flag"}}
+	if err := validateDelegatedRunRouting(spec, req, "", false, false); err != nil {
+		t.Fatalf("posix-script provider should accept script arguments: %v", err)
+	}
+}

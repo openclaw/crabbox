@@ -216,8 +216,9 @@ Delegated providers must reject SSH-only run features unless they implement an
 equivalent contract:
 
 - `--fresh-pr`;
-- uploaded POSIX scripts, except module-run providers that explicitly treat
-  scripts as module source;
+- uploaded POSIX scripts, unless the provider advertises `FeaturePOSIXScript`
+  and executes the payload as a POSIX shell script, or is a module-run provider
+  that explicitly treats scripts as module source;
 - `--full-resync` and checksum rsync;
 - local stdout/stderr capture files;
 - capture-on-fail bundles;

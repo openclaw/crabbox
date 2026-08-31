@@ -681,6 +681,9 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 		if hasFeature(FeatureModuleRun) {
 			add(10, "runs source modules in a worker runtime")
 		}
+		if hasFeature(FeaturePOSIXScript) {
+			add(10, "runs POSIX shell scripts through the delegated run path")
+		}
 		if hasFeature(FeatureMCP) {
 			add(8, "can attach MCP servers at sandbox creation")
 		}
