@@ -336,16 +336,8 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 				if reachablePort == "" {
 					reachablePort = probe.Port
 				}
-				if err := runSSHQuietWithOptions(probeCtx, probe, sshTransportProbeCommand(probe), profile.connectTimeout, profile.connectionAttempts); err != nil {
-					if setupErr := workspaceOwnerReadinessError(err, phase); setupErr != nil {
-						return setupErr
-					}
-					probes = append(probes, port+":tcp")
-					continue
-				}
-				if transportPort == "" {
-					transportPort = probe.Port
-				}
+				// Successful readiness also proves transport. Diagnose authentication
+				// separately only when readiness fails, avoiding a healthy-path SSH call.
 				err = runSSHQuietWithOptions(probeCtx, probe, sshReadyCommand(probe), profile.connectTimeout, profile.connectionAttempts)
 				if err == nil {
 					if target.Port != probe.Port {
@@ -356,6 +348,16 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 				}
 				if setupErr := workspaceOwnerReadinessError(err, phase); setupErr != nil {
 					return setupErr
+				}
+				if err := runSSHQuietWithOptions(probeCtx, probe, sshTransportProbeCommand(probe), profile.connectTimeout, profile.connectionAttempts); err != nil {
+					if setupErr := workspaceOwnerReadinessError(err, phase); setupErr != nil {
+						return setupErr
+					}
+					probes = append(probes, port+":tcp")
+					continue
+				}
+				if transportPort == "" {
+					transportPort = probe.Port
 				}
 				probes = append(probes, port+":auth")
 			}
@@ -441,13 +443,6 @@ func probeProxySSHReady(ctx context.Context, target *SSHTarget, profile sshReadi
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
 		candidate := *target
 		candidate.Port, candidate.FallbackPorts = port, []string{}
-		if lastErr = runSSHQuietWithOptions(ctx, candidate, sshTransportProbeCommand(candidate), profile.connectTimeout, profile.connectionAttempts); lastErr != nil {
-			var setupErr *workspaceOwnerSetupError
-			if errors.As(lastErr, &setupErr) {
-				return lastErr
-			}
-			continue
-		}
 		if lastErr = runSSHQuietWithOptions(ctx, candidate, sshReadyCommand(candidate), profile.connectTimeout, profile.connectionAttempts); lastErr != nil {
 			var setupErr *workspaceOwnerSetupError
 			if errors.As(lastErr, &setupErr) {

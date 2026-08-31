@@ -1725,8 +1725,8 @@ exit 0
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(ports) != "2222\n22\n22\n" {
-		t.Fatalf("ports=%q want probe fallback then readiness execution", string(ports))
+	if string(ports) != "2222\n22\n" {
+		t.Fatalf("ports=%q want one readiness execution per candidate", string(ports))
 	}
 }
 
@@ -1819,7 +1819,7 @@ exit 0
 				t.Fatalf("readiness did not pin the fully ready fallback: %+v", target)
 			}
 			calls, err := os.ReadFile(callsPath)
-			if got, want := string(calls), "2222:exit 0\n2222:true\n22:exit 0\n22:true\n"; err != nil || got != want {
+			if got, want := string(calls), "2222:true\n22:true\n"; err != nil || got != want {
 				t.Fatalf("readiness calls=%q error=%v want=%q", got, err, want)
 			}
 		})

@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed Parallels clone destinations to pass the configured parent directory to `prlctl --dst`, letting Parallels name and create the VM bundle beneath it.
+- Reduced SSH startup round trips by checking readiness before transport diagnosis and skipping unused run telemetry when no coordinator run handle exists.
 
 ## 0.48.0 - 2026-08-30
 

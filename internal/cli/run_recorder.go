@@ -151,7 +151,7 @@ func (r *runRecorder) AttachLease(leaseID, slug string, cfg Config) {
 }
 
 func (r *runRecorder) CaptureTelemetryStart(ctx context.Context, target SSHTarget) {
-	if r == nil || r.telemetryStart != nil {
+	if r == nil || r.coord == nil || r.runID == "" || r.telemetryStart != nil {
 		return
 	}
 	r.telemetryStart = collectLeaseTelemetryBestEffort(contextWithoutWorkspaceOwner(ctx), leaseTelemetryCollectorForTarget(target))
