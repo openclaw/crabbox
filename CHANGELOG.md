@@ -2,6 +2,10 @@
 
 ## 0.48.1 (Unreleased)
 
+### Added
+
+- Added an Islo idle-pause policy, on by default for every new sandbox at the 30-minute `--idle-timeout` default: it is sent as the sandbox `pause_after_idle` lifecycle field with `auto_resume` pinned to `never`, reused leases are resumed by Crabbox before sync and exec, and a `--reclaim` whose idle timeout differs from the sandbox's immutable policy fails instead of adopting it. Raise `--idle-timeout` for runs longer than it. `--ttl` is not handed to Islo as a deletion deadline; Crabbox remains the only thing that deletes an Islo lease.
+
 ### Fixed
 
 - Scoped automatic SSH failure bundles to the current uploaded script, excluding retained uploads and neighboring files while preserving explicit artifact/download selection.

@@ -88,6 +88,26 @@ crabbox resume --provider islo blue-lobster
 crabbox stop --provider islo blue-lobster
 ```
 
+## Idle pause policy
+
+`--idle-timeout` is sent on create as the Islo `lifecycle` object's
+`pause_after_idle`, asking Islo to pause a sandbox that has been idle that long
+rather than leave it billing for CPU and memory. It defaults to 30 minutes and
+cannot be turned off, so this applies to every Islo sandbox the CLI creates.
+`auto_resume` is pinned to `never`: Crabbox checks the sandbox status and resumes
+it itself before reusing a lease over `run --id` or `ssh`, so an explicit
+`crabbox pause` is not undone by a background policy. What Islo counts as
+activity is undocumented, so a run longer than the idle timeout may be paused
+mid-exec — see [the provider reference](../providers/islo.md#idle-pause-policy).
+
+`--ttl` is deliberately not mapped to `delete_after`: Crabbox stays the only
+thing that deletes a Crabbox lease, so for Islo `--ttl` has no provider-side
+effect and a kept sandbox lives until an explicit `stop`.
+
+Islo fixes the policy at create time, so a `--reclaim` of a sandbox whose
+reported `pause_after_idle` differs from the current `--idle-timeout` fails with
+exit 2 instead of pretending the new value applies.
+
 ## Behavior
 
 - **warmup** creates a `crabbox-...` Islo sandbox and records a local lease ID of

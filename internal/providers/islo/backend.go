@@ -217,6 +217,15 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 			}
 			tailnetReady = err == nil && meta.Enabled
 		}
+		// A reused lease can be paused: `crabbox pause` pauses it outright, and
+		// Crabbox now asks Islo to pause it after the configured idle timeout
+		// (isloLifecycleForConfig). Crabbox does not drive a paused sandbox --
+		// whether Islo would accept a sync or exec request against one, or wake
+		// it, is not documented -- so bring it back first, exactly as the SSH
+		// resolve path does.
+		if _, err := b.resolveRunningSandbox(ctx, client, name, core.ResolveRequest{}); err != nil {
+			return RunResult{}, err
+		}
 	}
 	shouldStop := acquired && !req.Keep
 	if shouldStop {
@@ -633,6 +642,7 @@ func (b *isloBackend) createSandbox(ctx context.Context, client isloAPI, repo Re
 	if b.cfg.Islo.DiskGB > 0 && (b.cfg.Islo.DiskGB != base.Islo.DiskGB || core.IsloDiskGBExplicit(b.cfg)) {
 		create.DiskGb = intValue(b.cfg.Islo.DiskGB)
 	}
+	create.Lifecycle = isloLifecycleForConfig(b.cfg)
 	sandbox, err := client.CreateSandbox(ctx, create)
 	if err != nil {
 		return "", "", "", isloError("create sandbox", err)
@@ -772,6 +782,12 @@ func (b *isloBackend) resolveLeaseIDForRepo(ctx context.Context, client isloAPI,
 	}
 	if sandbox == nil || sandbox.GetName() != name {
 		return "", "", "", exit(4, "islo sandbox %q was not found; refusing to create a local claim", name)
+	}
+	// Islo fixes the lifecycle policy at create time, so adopting a sandbox whose
+	// policy disagrees with this config must fail instead of leaving the caller
+	// with an idle timeout that was never sent for this sandbox.
+	if err := isloLifecycleConflict(name, sandbox, b.cfg); err != nil {
+		return "", "", "", err
 	}
 	if err := claimLeaseForRepoProviderWithPond(leaseID, slug, isloProvider, b.cfg.Pond, repoRoot, b.cfg.IdleTimeout, true); err != nil {
 		return "", "", "", err

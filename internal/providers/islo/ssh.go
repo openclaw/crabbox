@@ -28,7 +28,7 @@ func (b *isloBackend) Resolve(ctx context.Context, req core.ResolveRequest) (cor
 			return core.LeaseTarget{}, err
 		}
 	}
-	sandbox, err := b.resolveSSHReadySandbox(ctx, client, name, req)
+	sandbox, err := b.resolveRunningSandbox(ctx, client, name, req)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -50,7 +50,13 @@ func (b *isloBackend) Touch(_ context.Context, req core.TouchRequest) (Server, e
 	return server, nil
 }
 
-func (b *isloBackend) resolveSSHReadySandbox(ctx context.Context, client isloAPI, name string, req core.ResolveRequest) (*gosdk.SandboxResponse, error) {
+// resolveRunningSandbox returns the sandbox once it reports ready, resuming it
+// if Islo has it paused. Every path that resolves a lease before driving it goes
+// through this, so a sync, an exec, or a rendered SSH target is never built
+// against a paused sandbox. The paths that work straight off the lease ID -
+// PublishPeer and fetchRunFileAs - do not resolve and can still act on a paused
+// sandbox; see the idle pause policy in docs/providers/islo.md.
+func (b *isloBackend) resolveRunningSandbox(ctx context.Context, client isloAPI, name string, req core.ResolveRequest) (*gosdk.SandboxResponse, error) {
 	sandbox, err := client.GetSandbox(ctx, name)
 	if err != nil {
 		return nil, isloError("get sandbox", err)
