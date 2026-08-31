@@ -513,6 +513,13 @@ type NativeCheckpointResourceRequest struct {
 	LoadConfig func() (Config, error)
 	Image      NativeCheckpointImage
 	Metadata   map[string]string
+	Capture    *NativeCheckpointCapture
+}
+
+// NativeCheckpointAbandonProvider binds positive source-cleanup evidence without
+// asserting that the original image was submitted, absent, or safe to discard.
+type NativeCheckpointAbandonProvider interface {
+	PrepareNativeCheckpointAbandon(context.Context, NativeCheckpointCreateRequest) (map[string]string, error)
 }
 
 // CheckpointSourceVerifier must use provider authority, not a filtered lease

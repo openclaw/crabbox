@@ -532,10 +532,13 @@ func machine0ImageVersionMetadataMatches(version machineImageVersion, expected m
 }
 
 func (b *backend) loadCheckpointImage(ctx context.Context, req core.NativeCheckpointResourceRequest) (machineImageDetail, machineImageVersion, error) {
+	if req.Capture != nil && req.Capture.SourceDisposition == "abandon" {
+		return machineImageDetail{}, machineImageVersion{}, exit(2, "checkpoint abandonment does not authorize image operations; retain the unresolved image obligation")
+	}
 	// Ordinary checkpoints predating account-bound retirement keep their existing
 	// image contract. A bound capture must never treat another account as absence.
 	if req.Metadata[metadataAccountID] != "" {
-		if err := b.attestCheckpointAccount(ctx, req.Metadata); err != nil {
+		if err := b.attestCheckpointAccount(ctx, req.Metadata[metadataAccountID]); err != nil {
 			return machineImageDetail{}, machineImageVersion{}, err
 		}
 	}
@@ -568,7 +571,7 @@ func (b *backend) loadCheckpointImage(ctx context.Context, req core.NativeCheckp
 			return machineImageDetail{}, machineImageVersion{}, exit(4, "Machine0 checkpoint image is not visible and its original account is unbound; retain checkpoint metadata and inspect the original account")
 		}
 		if req.Metadata[metadataAccountID] != "" {
-			if err := b.attestCheckpointAccount(ctx, req.Metadata); err != nil {
+			if err := b.attestCheckpointAccount(ctx, req.Metadata[metadataAccountID]); err != nil {
 				return machineImageDetail{}, machineImageVersion{}, err
 			}
 		}

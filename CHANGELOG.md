@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Added exact-source abandonment for unresolved ordinary Machine0 checkpoints: dispose of the positively identified source through its existing claim owner while retaining the unknown image obligation and rejecting later fork, prune, or local deletion.
 - Fixed Parallels clone destinations to pass the configured parent directory to `prlctl --dst`, letting Parallels name and create the VM bundle beneath it.
 
 ## 0.48.0 - 2026-08-30

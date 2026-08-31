@@ -604,6 +604,7 @@ func nativeCheckpointResourceRequest(record checkpointRecord) NativeCheckpointRe
 			Direct:       record.Native.Direct,
 		},
 		Metadata: record.Native.Metadata,
+		Capture:  record.Capture,
 	}
 }
 

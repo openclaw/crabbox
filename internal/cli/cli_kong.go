@@ -503,6 +503,7 @@ type capsulePromoteKongCmd struct {
 
 type checkpointKongCmd struct {
 	Create  checkpointCreateKongCmd  `cmd:"" passthrough:"" help:"Create a VM or workspace checkpoint from a lease."`
+	Abandon checkpointAbandonKongCmd `cmd:"" passthrough:"" help:"Dispose of an exact source while retaining an unresolved checkpoint."`
 	List    checkpointListKongCmd    `cmd:"" passthrough:"" help:"List coordinator-owned and local checkpoints."`
 	Inspect checkpointInspectKongCmd `cmd:"" passthrough:"" help:"Inspect checkpoint metadata."`
 	Policy  checkpointPolicyKongCmd  `cmd:"" passthrough:"" help:"Update coordinator-managed checkpoint retention."`
@@ -512,6 +513,9 @@ type checkpointKongCmd struct {
 	Prune   checkpointPruneKongCmd   `cmd:"" passthrough:"" help:"Delete checkpoints matching age and kind filters."`
 }
 type checkpointCreateKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type checkpointAbandonKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type checkpointListKongCmd struct {
@@ -849,6 +853,9 @@ func (c *capsulePromoteKongCmd) Run(ctx context.Context, app App) error {
 
 func (c *checkpointCreateKongCmd) Run(ctx context.Context, app App) error {
 	return app.checkpointCreate(ctx, stripKongCommandPath(c.Args, "checkpoint", "create"))
+}
+func (c *checkpointAbandonKongCmd) Run(ctx context.Context, app App) error {
+	return app.checkpointAbandon(ctx, stripKongCommandPath(c.Args, "checkpoint", "abandon"))
 }
 func (c *checkpointListKongCmd) Run(ctx context.Context, app App) error {
 	return app.checkpointList(ctx, stripKongCommandPath(c.Args, "checkpoint", "list"))

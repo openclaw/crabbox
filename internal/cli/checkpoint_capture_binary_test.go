@@ -50,6 +50,8 @@ func TestCheckpointCaptureBuiltBinaryContract(t *testing.T) {
 		t.Fatalf("build fake provider: %v\n%s", err, output)
 	}
 
+	runCheckpointAbandonContract(t, repo, binary)
+
 	t.Run("ordinary capture retains observed image before killed rollback", func(t *testing.T) {
 		f := newCheckpointCaptureFixture(t, repo, binary)
 		s := f.state()
