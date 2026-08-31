@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed Parallels clone destinations to pass the configured parent directory to `prlctl --dst`, letting Parallels name and create the VM bundle beneath it.
+- Preserved exclusive ready-pool lease ownership across typed and legacy pools, including existing duplicate records, and prevented expired or quarantined borrows from becoming ready through return or re-registration.
 
 ## 0.48.0 - 2026-08-30
 
@@ -35,7 +36,6 @@
 
 ### Fixed
 
-- Preserved exclusive ready-pool lease ownership across typed and legacy pools, including existing duplicate records, and prevented expired or quarantined borrows from becoming ready through return or re-registration.
 - Prevented active lease operations from blocking unrelated claim discovery, slug allocation, and Testbox runs while preserving exact ownership checks and cleanup fencing.
 - Fixed IPv6 workspace sync and artifact/egress uploads by using private SSH transport aliases, preserving authentication, host trust, Windows/WSL routing, and transfer cleanup.
 - Recovered overloaded SSH multiplexed sessions with one exact-diagnostic retry and a direct-connection fallback while preserving the original lease and command. Thanks @excelsier.
