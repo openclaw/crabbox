@@ -177,13 +177,25 @@ type IdempotentLeaseIDBackend interface {
 }
 ```
 
-Direct AWS, Machine0, and local-container backends implement this capability;
-coordinator-backed leases support it through the coordinator wrapper. External
-backends support it only when their configured protocol explicitly advertises
-idempotent lease IDs. `crabbox warmup --lease-id` rejects other backends before
-provisioning. Built-in direct adapters reuse `core.AcquireFixedLease` for
+Direct AWS, Machine0, Incus, and local-container backends implement this
+capability; coordinator-backed leases support it through the coordinator
+wrapper. External backends support it only when their configured protocol
+explicitly advertises idempotent lease IDs. `crabbox warmup --lease-id` rejects
+other backends before provisioning. Built-in direct adapters reuse `core.AcquireFixedLease` for
 durable intent and replay mechanics while keeping resource creation,
 reconciliation, and identity validation provider-owned.
+
+Every backend that implements this capability today is an SSH-lease backend, and
+those read the requested ID from `AcquireRequest.RequestedLeaseID`.
+`WarmupRequest.RequestedLeaseID` is the delegated-run counterpart: core now
+carries the value across the delegated warmup path, so a delegated-run adapter
+that opts into `IdempotentLeaseIDBackend` receives it instead of having it
+dropped. No built-in delegated-run adapter advertises the capability yet, so the
+field is a contract for adapters to opt into rather than behaviour any shipped
+delegated-run provider has today. Core populates either field only after
+validating the flag against `cbx_<12 lowercase hex>` and taking the
+fixed-acquisition lock, so a capable backend always receives the caller's exact
+ID.
 
 Cleanup is optional:
 

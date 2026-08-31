@@ -1100,8 +1100,16 @@ type WarmupRequest struct {
 	Keep          bool
 	Reclaim       bool
 	ActionsRunner bool
-	RequestedSlug string
-	TimingJSON    bool
+	// RequestedLeaseID carries the caller's fixed identity, mirroring
+	// AcquireRequest.RequestedLeaseID. It is only ever populated for backends that
+	// advertise IdempotentLeaseIDBackend.SupportsRequestedLeaseID, and the caller
+	// has already validated its shape and taken the fixed-acquisition lock. Every
+	// current implementer of that capability is an SSH-lease backend reading
+	// AcquireRequest.RequestedLeaseID instead, so no delegated-run adapter
+	// consumes this field yet; it exists so one can opt in without a core change.
+	RequestedLeaseID string
+	RequestedSlug    string
+	TimingJSON       bool
 	// BeforeComplete runs synchronous, best-effort core bookkeeping once after
 	// successful acquisition/retention and before final output. Providers opting
 	// in must include it in total timing; it cannot fail or roll back the lease.

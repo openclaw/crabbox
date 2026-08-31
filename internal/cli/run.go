@@ -96,8 +96,11 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 	if delegated, ok := backend.(DelegatedRunBackend); ok {
 		return delegated.Warmup(ctx, WarmupRequest{
 			Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim,
-			ActionsRunner: *actionsRunner, RequestedSlug: requestedSlug, TimingJSON: *timingJSON,
-			BeforeComplete: func() { a.syncExternalRunnersBestEffort(ctx, cfg, backend) },
+			ActionsRunner:    *actionsRunner,
+			RequestedLeaseID: strings.TrimSpace(*requestedLeaseID),
+			RequestedSlug:    requestedSlug,
+			TimingJSON:       *timingJSON,
+			BeforeComplete:   func() { a.syncExternalRunnersBestEffort(ctx, cfg, backend) },
 		})
 	}
 	sshBackend, ok := backend.(SSHLeaseBackend)
