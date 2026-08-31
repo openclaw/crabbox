@@ -289,6 +289,10 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 				}
 			}
 			if err != nil {
+				var notSubmitted NativeCheckpointNotSubmittedError
+				if record.Native.ImageID == "" && errors.As(err, &notSubmitted) && !record.coordinatorManaged() {
+					recordWritten = false
+				}
 				if record.Native.ImageID != "" {
 					if writeErr := store.Write(record); writeErr != nil {
 						return writeErr

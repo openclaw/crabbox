@@ -1390,7 +1390,7 @@ func TestWebVNCResetDaemonLaunchRejectsMissingExternalDesktopCredential(t *testi
 		t.Fatal("missing external desktop credential produced daemon stdin")
 	}
 
-	err := (App{Stdout: io.Discard, Stderr: io.Discard}).startWebVNCDaemon(
+	err := (App{Stdout: io.Discard, Stderr: io.Discard}).startWebVNCDaemon(t.Context(),
 		args,
 		"cbx_abcdef123456",
 		false,
@@ -2826,7 +2826,7 @@ func TestSafeWebVNCDaemonName(t *testing.T) {
 
 func TestWebVNCDaemonLockSerializesWorkspaceState(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	firstUnlock, err := acquireWebVNCDaemonLock("workspace-lock")
+	firstUnlock, err := acquireWebVNCDaemonLock(t.Context(), "workspace-lock")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2835,7 +2835,7 @@ func TestWebVNCDaemonLockSerializesWorkspaceState(t *testing.T) {
 	releaseSecond := make(chan struct{})
 	go func() {
 		close(secondStarted)
-		unlock, err := acquireWebVNCDaemonLock("workspace-lock")
+		unlock, err := acquireWebVNCDaemonLock(t.Context(), "workspace-lock")
 		secondAcquired <- err
 		if err != nil {
 			return
@@ -2897,7 +2897,7 @@ func TestWebVNCDaemonStatusRequiresExactWorkspaceAndProcessIdentity(t *testing.T
 	}); err != nil {
 		t.Fatal(err)
 	}
-	status, err := localWebVNCDaemonStatus("workspace-a")
+	status, err := localWebVNCDaemonStatus(t.Context(), "workspace-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2906,7 +2906,7 @@ func TestWebVNCDaemonStatusRequiresExactWorkspaceAndProcessIdentity(t *testing.T
 	}
 	var stdout bytes.Buffer
 	app := App{Stdout: &stdout, Stderr: io.Discard}
-	if _, err := app.stopWebVNCDaemonIfRunning("workspace-a"); err == nil {
+	if _, err := app.stopWebVNCDaemonIfRunning(t.Context(), "workspace-a"); err == nil {
 		t.Fatal("cross-workspace daemon stop was not refused")
 	}
 	if _, alive := webVNCDaemonProcessCommand(cmd.Process.Pid); !alive {
@@ -2937,7 +2937,7 @@ func TestWebVNCDaemonStopDoesNotSignalRecycledPID(t *testing.T) {
 	}
 	var stdout bytes.Buffer
 	app := App{Stdout: &stdout, Stderr: io.Discard}
-	stopped, err := app.stopWebVNCDaemonIfRunning("workspace-a")
+	stopped, err := app.stopWebVNCDaemonIfRunning(t.Context(), "workspace-a")
 	if err == nil || stopped || !strings.Contains(err.Error(), "refusing to drop unverified") {
 		t.Fatalf("stale identity cleanup stopped=%t output=%q err=%v", stopped, stdout.String(), err)
 	}
@@ -2970,7 +2970,7 @@ func TestWebVNCDaemonStopSignalsOnlyVerifiedIdentity(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	status, err := localWebVNCDaemonStatus("workspace-a")
+	status, err := localWebVNCDaemonStatus(t.Context(), "workspace-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2982,7 +2982,7 @@ func TestWebVNCDaemonStopSignalsOnlyVerifiedIdentity(t *testing.T) {
 	}
 	var stdout bytes.Buffer
 	app := App{Stdout: &stdout, Stderr: io.Discard}
-	stopped, err := app.stopWebVNCDaemonIfRunning("workspace-a")
+	stopped, err := app.stopWebVNCDaemonIfRunning(t.Context(), "workspace-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3015,7 +3015,7 @@ func TestLegacyControllerOwnerTokenIdentityIsStaleButStoppable(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	status, err := localWebVNCDaemonStatus("workspace-legacy")
+	status, err := localWebVNCDaemonStatus(t.Context(), "workspace-legacy")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3028,7 +3028,7 @@ func TestLegacyControllerOwnerTokenIdentityIsStaleButStoppable(t *testing.T) {
 		t.Fatalf("legacy owner token leaked into stale status: %q", output.String())
 	}
 	app := App{Stdout: io.Discard, Stderr: io.Discard}
-	stopped, err := app.stopWebVNCDaemonIfRunning("workspace-legacy")
+	stopped, err := app.stopWebVNCDaemonIfRunning(t.Context(), "workspace-legacy")
 	if err != nil || !stopped {
 		t.Fatalf("legacy verified daemon stop stopped=%t err=%v", stopped, err)
 	}

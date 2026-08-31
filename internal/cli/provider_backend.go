@@ -498,6 +498,13 @@ type NativeCheckpointCreateResult struct {
 	Metadata map[string]string
 }
 
+// NativeCheckpointNotSubmittedError attests that this invocation never attempted
+// image submission. An empty result or a failed request cannot establish this.
+type NativeCheckpointNotSubmittedError struct{ Cause error }
+
+func (e NativeCheckpointNotSubmittedError) Error() string { return e.Cause.Error() }
+func (e NativeCheckpointNotSubmittedError) Unwrap() error { return e.Cause }
+
 type NativeCheckpointWorkdirRequest struct {
 	Config   Config
 	Server   Server

@@ -70,7 +70,7 @@ func TestWebVNCDaemonStopDoesNotSignalPriorBootPID(t *testing.T) {
 		t.Fatal(err)
 	}
 	var output bytes.Buffer
-	stopped, err := (App{Stdout: &output, Stderr: io.Discard}).stopWebVNCDaemonIfRunning("prior-boot-workspace")
+	stopped, err := (App{Stdout: &output, Stderr: io.Discard}).stopWebVNCDaemonIfRunning(t.Context(), "prior-boot-workspace")
 	if err != nil || !stopped || !strings.Contains(output.String(), "removed prior-boot identity") {
 		t.Fatalf("prior-boot cleanup stopped=%t output=%q err=%v", stopped, output.String(), err)
 	}
