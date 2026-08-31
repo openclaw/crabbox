@@ -738,6 +738,105 @@ func TestCheckpointManagedCurrentCoordinatorPreservesResourceNotFound(t *testing
 	}
 }
 
+func TestCheckpointManagedInspectAbsence(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		local     string
+		status    int
+		inventory string
+		want      string
+	}{
+		{name: "absent", status: 200, inventory: `{"checkpoints":[]}`, want: "forget"},
+		{name: "capture binding", local: "capture", status: 200, inventory: `{"checkpoints":[]}`, want: "reconcile_capture"},
+		{name: "surviving cache", local: "cache", status: 200, inventory: `{"checkpoints":[]}`},
+		{name: "corrupt cache", local: "corrupt", status: 200, inventory: `{"checkpoints":[]}`},
+		{name: "unsupported route", status: 404},
+		{name: "unsupported method", status: 405},
+		{name: "probe unauthorized", status: 401},
+		{name: "probe forbidden", status: 403},
+		{name: "probe unavailable", status: 503},
+		{name: "malformed inventory", status: 200, inventory: `{}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const id = "chk_absence"
+			server, store := configureManagedCheckpointTest(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet {
+					t.Errorf("inspection mutated coordinator: %s %s", r.Method, r.URL.Path)
+				}
+				if r.URL.Path == "/v1/checkpoints" {
+					w.WriteHeader(tc.status)
+					_, _ = io.WriteString(w, tc.inventory)
+					return
+				}
+				if r.URL.Path != "/v1/checkpoints/"+id {
+					t.Errorf("inspection queried another checkpoint: %s", r.URL.Path)
+				}
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = io.WriteString(w, `{"error":"not_found"}`)
+			})
+			paths, err := store.Paths(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch tc.local {
+			case "cache":
+				record, err := checkpointRecordFromCoordinator(managedCheckpointFixture(id), checkpointCoordinatorOrigin(server.URL))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := store.Write(record); err != nil {
+					t.Fatal(err)
+				}
+			case "corrupt":
+				if err := os.MkdirAll(paths.Dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(paths.Meta, []byte("{"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "capture":
+				const leaseID = "cbx_abcdef123456"
+				if err := withDurableLeaseClaimLock(leaseID, func(claim *leaseClaim, _ bool, persist func() error) error {
+					*claim = leaseClaim{LeaseID: leaseID, Provider: "aws", CheckpointCapture: &CheckpointCaptureBinding{ID: id}}
+					return persist()
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, _ := os.ReadFile(paths.Meta)
+			for _, verify := range []bool{false, true} {
+				var stdout bytes.Buffer
+				args := []string{id, "--json"}
+				if verify {
+					args = append(args, "--verify")
+				}
+				err := (App{Stdout: &stdout, Stderr: io.Discard}).checkpointInspect(context.Background(), args)
+				if tc.want == "" {
+					if err == nil || stdout.Len() != 0 {
+						t.Fatalf("uncertain absence accepted: err=%v stdout=%s", err, &stdout)
+					}
+				} else {
+					var got missingCheckpointAudit
+					if err != nil || json.Unmarshal(stdout.Bytes(), &got) != nil {
+						t.Fatalf("missing JSON verdict: err=%v stdout=%s", err, &stdout)
+					}
+					providerState := "missing"
+					if tc.want == "reconcile_capture" {
+						providerState = "unknown"
+					}
+					if got != (missingCheckpointAudit{ID: id, LocalState: "missing", ProviderState: providerState, NextAction: tc.want}) {
+						t.Fatalf("wrong absence verdict: %+v", got)
+					}
+				}
+			}
+			after, _ := os.ReadFile(paths.Meta)
+			if !bytes.Equal(before, after) {
+				t.Fatal("inspection changed surviving cache")
+			}
+		})
+	}
+}
+
 func TestCheckpointManagedMixedCredentialsRequireExplicitAdmin(t *testing.T) {
 	checkpoint := managedCheckpointFixture("chk_admin_owned")
 	_, _ = configureManagedCheckpointTest(t, func(w http.ResponseWriter, r *http.Request) {

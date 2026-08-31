@@ -333,6 +333,11 @@ can use to remove their own reference:
 {"id":"chk_abc123","localState":"missing","providerState":"missing","nextAction":"forget"}
 ```
 
+For coordinator-managed checkpoints, this verdict requires both the local
+record and the checkpoint at the configured coordinator to be missing. An
+unsupported coordinator API, failed lookup, or surviving cache remains an
+error. A surviving source-capture binding instead reports
+`providerState: "unknown"` and `nextAction: "reconcile_capture"`.
 Human-readable inspection still reports a missing checkpoint as an error.
 
 ### Parallels: live VM snapshots
