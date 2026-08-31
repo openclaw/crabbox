@@ -653,7 +653,12 @@ lint/typecheck/tests/build) on every push and PR. Production releases use a
 serialized, draft-first process: preserve and verify the signed tag, build and
 Developer ID sign/notarize the macOS candidates locally, verify the exact draft
 on native Apple Silicon and Intel runners from protected-default code, then
-authorize publication and the Homebrew update as separate gates. See
+publish, verify the public release and public Go installation, update and prove
+Homebrew, and close out. One explicit full release/publish request authorizes
+this complete normal sequence without renewed chat approval at each stage.
+Narrow requests stay narrow. The original request supplies authorization;
+GitHub events alone do not. Sequential technical gates, separate trust domains,
+and cancellation boundaries remain mandatory. See
 [Release engineering](docs/RELEASING.md).
 
 Git-overlay integration tests use real Git with task-owned local and loopback
