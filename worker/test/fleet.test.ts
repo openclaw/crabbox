@@ -14044,6 +14044,197 @@ describe("fleet lease identity and idle", () => {
     expect(await returned.json()).toMatchObject({ entry: { state: "ready", identity } });
   });
 
+  it.each([false, true])(
+    "keeps borrowed leases exclusive across pool protocols (typed source: %s)",
+    async (typed) => {
+      const { fleet, headers, lease, source, sourceBody, destination, destinationBody, entry } =
+        await borrowedReadyPoolFixture(typed);
+
+      const duplicate = await fleet.fetch(
+        request("POST", `/v1/ready-pools/builders/register${destination}`, {
+          headers,
+          body: { leaseID: lease.id, ...destinationBody },
+        }),
+      );
+      const secondBorrow = await fleet.fetch(
+        request("POST", `/v1/ready-pools/builders/borrow${destination}`, {
+          headers,
+          body: destinationBody,
+        }),
+      );
+      expect([duplicate.status, secondBorrow.status]).toEqual([409, 409]);
+      expect(await duplicate.json()).toMatchObject({ error: "lease_pool_busy" });
+      const returned = await fleet.fetch(
+        request("POST", `/v1/ready-pools/builders/return${source}`, {
+          headers,
+          body: { ...sourceBody, leaseID: lease.id, borrowToken: entry.borrowToken },
+        }),
+      );
+      expect(returned.status).toBe(200);
+      const moved = await fleet.fetch(
+        request("POST", `/v1/ready-pools/builders/register${destination}`, {
+          headers,
+          body: { leaseID: lease.id, ...destinationBody },
+        }),
+      );
+      expect(moved.status).toBe(200);
+      const oldBorrow = await fleet.fetch(
+        request("POST", `/v1/ready-pools/builders/borrow${source}`, {
+          headers,
+          body: sourceBody,
+        }),
+      );
+      expect(oldBorrow.status).toBe(409);
+      expect(
+        (
+          await fleet.fetch(
+            request("POST", `/v1/ready-pools/builders/borrow${destination}`, {
+              headers,
+              body: destinationBody,
+            }),
+          )
+        ).status,
+      ).toBe(200);
+    },
+  );
+
+  it.each([false, true])(
+    "enforces pool borrow deadlines on ready return before maintenance (typed: %s)",
+    async (typed) => {
+      const {
+        fleet,
+        headers,
+        lease,
+        source: suffix,
+        sourceBody: body,
+        entry,
+      } = await borrowedReadyPoolFixture(typed);
+      const clock = vi
+        .spyOn(Date, "now")
+        .mockReturnValue(Date.parse(entry.borrowExpiresAt!) + Number(typed));
+      try {
+        const returned = await fleet.fetch(
+          request("POST", `/v1/ready-pools/builders/return${suffix}`, {
+            headers,
+            body: { ...body, leaseID: lease.id, borrowToken: entry.borrowToken, result: "ready" },
+          }),
+        );
+        expect(returned.status).toBe(409);
+        expect(await returned.json()).toMatchObject({ error: "borrow_expired" });
+        const reRegister = await fleet.fetch(
+          request("POST", `/v1/ready-pools/builders/register${suffix}`, {
+            headers,
+            body: { leaseID: lease.id, ...body },
+          }),
+        );
+        expect(reRegister.status).toBe(409);
+        expect(await reRegister.json()).toMatchObject({ error: "pool_entry_quarantined" });
+        const drained = await fleet.fetch(
+          request("POST", `/v1/ready-pools/builders/return${suffix}`, {
+            headers,
+            body: { leaseID: lease.id, result: "drain" },
+          }),
+        );
+        expect(drained.status).toBe(200);
+        expect(await drained.json()).toMatchObject({ lease: { state: "released" } });
+      } finally {
+        clock.mockRestore();
+      }
+    },
+  );
+
+  it.each([
+    { typed: false, result: "drain" },
+    { typed: true, result: "drain" },
+    { typed: false, result: "release" },
+    { typed: true, result: "release" },
+  ])(
+    "releases expired pool borrows before maintenance (typed: $typed, result: $result)",
+    async ({ typed, result }) => {
+      const { fleet, headers, lease, source, entry } = await borrowedReadyPoolFixture(typed);
+      const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse(entry.borrowExpiresAt!));
+      try {
+        const returned = await fleet.fetch(
+          request("POST", `/v1/ready-pools/builders/return${source}`, {
+            headers,
+            body: { leaseID: lease.id, borrowToken: entry.borrowToken, result },
+          }),
+        );
+        expect(returned.status).toBe(200);
+        expect(await returned.json()).toMatchObject({ lease: { state: "released" } });
+      } finally {
+        clock.mockRestore();
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "does not re-register quarantined leases across pool protocols (typed source: %s)",
+    async (typed) => {
+      const { fleet, headers, lease, destination, destinationBody, entry } =
+        await borrowedReadyPoolFixture(typed);
+      const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse(entry.borrowExpiresAt!));
+      try {
+        await fleet.alarm();
+        const register = await fleet.fetch(
+          request("POST", `/v1/ready-pools/other/register${destination}`, {
+            headers,
+            body: { leaseID: lease.id, ...destinationBody },
+          }),
+        );
+        expect(register.status).toBe(409);
+        expect(await register.json()).toMatchObject({ error: "pool_entry_quarantined" });
+      } finally {
+        clock.mockRestore();
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "does not borrow duplicate capacity left by older coordinators (typed source: %s)",
+    async (typed) => {
+      const { storage, headers, lease, destination, destinationBody, entry } =
+        await borrowedReadyPoolFixture(typed);
+      // v0.47.0 allowed a legacy registration to duplicate a typed lease.
+      // Keep that persisted shape across restart, including the inverse ownership order.
+      storage.seed<ReadyPoolEntry>(
+        `${typed ? "ready-pool" : "typed-ready-pool-v1"}:other:${lease.id}`,
+        {
+          key: "other",
+          leaseID: lease.id,
+          state: "ready",
+          owner: lease.owner,
+          org: lease.org,
+          createdAt: lease.createdAt,
+          updatedAt: lease.updatedAt,
+          expiresAt: lease.expiresAt,
+          ...destinationBody,
+        },
+      );
+      const reopened = testFleet(storage);
+      const duplicateBorrow = await reopened.fetch(
+        request("POST", `/v1/ready-pools/other/borrow${destination}`, {
+          headers,
+          body: destinationBody,
+        }),
+      );
+      expect(duplicateBorrow.status).toBe(409);
+      const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse(entry.borrowExpiresAt!));
+      try {
+        await reopened.alarm();
+        const quarantinedBorrow = await reopened.fetch(
+          request("POST", `/v1/ready-pools/other/borrow${destination}`, {
+            headers,
+            body: destinationBody,
+          }),
+        );
+        expect(quarantinedBorrow.status).toBe(409);
+      } finally {
+        clock.mockRestore();
+      }
+    },
+  );
+
   it("isolates typed desired capacity and structurally matches reordered fill-claim identities", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
@@ -38066,6 +38257,44 @@ function workerCloudReleaseCases() {
       provider: new GCPProvider({} as Env),
     },
   ];
+}
+
+async function borrowedReadyPoolFixture(typed: boolean) {
+  const storage = new MemoryStorage();
+  const fleet = testFleet(storage, { aws: fakeProvider(undefined, { provider: "aws" }) });
+  const headers = typedReadyPoolHeaders();
+  const lease = typedReadyPoolLease();
+  const metadata = typedReadyPoolMetadata();
+  const identity = await typedReadyPoolIdentity();
+  const source = typed ? "-identity" : "";
+  const sourceBody = { ...metadata, ...(typed ? { identity } : {}) };
+  storage.seed(`lease:${lease.id}`, lease);
+  const register = await fleet.fetch(
+    request("POST", `/v1/ready-pools/builders/register${source}`, {
+      headers,
+      body: { leaseID: lease.id, ...sourceBody },
+    }),
+  );
+  expect(register.status).toBe(200);
+  const borrowed = await fleet.fetch(
+    request("POST", `/v1/ready-pools/builders/borrow${source}`, {
+      headers,
+      body: { ...sourceBody, heartbeat: true },
+    }),
+  );
+  expect(borrowed.status).toBe(200);
+  const { entry } = (await borrowed.json()) as { entry: ReadyPoolEntry };
+  return {
+    storage,
+    fleet,
+    headers,
+    lease,
+    source,
+    sourceBody,
+    destination: typed ? "" : "-identity",
+    destinationBody: { ...metadata, ...(!typed ? { identity } : {}) },
+    entry,
+  };
 }
 
 function typedReadyPoolHeaders(): Record<string, string> {

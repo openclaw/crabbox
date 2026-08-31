@@ -91,6 +91,9 @@ stale      broker entry exists but the backing lease is gone or expired
 
 Only `ready` entries can be borrowed. Borrow marks exactly one entry `busy`.
 Return marks it `ready`, `draining`, or releases the backing lease.
+Lease ownership spans both pool protocols: a busy or quarantined lease cannot
+be registered or borrowed through another pool or protocol. Explicitly
+registering an idle ready lease in another pool removes its previous entry.
 
 ## Control plane
 
@@ -210,7 +213,9 @@ Borrow heartbeat enforcement is negotiated per borrow. `crabbox run --pool`
 opts in and refreshes its two-minute deadline every 30 seconds. Manual and
 older-client borrows have no deadline until their first successful
 `pool heartbeat`, which opts them in. A missed negotiated deadline quarantines
-the entry so a late borrower cannot silently return it to ready. This keeps a
+the entry so a late borrower cannot silently return it to ready, even before
+the next maintenance pass. Quarantined leases cannot be re-registered; drain
+or release them instead. This keeps a
 new worker compatible with already-deployed CLIs during rollout. Stale and
 quarantined records are pruned after 24 hours. The metrics route reports current
 state counts plus borrow, hit/miss, fill, heartbeat, quarantine, and prune
