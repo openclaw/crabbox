@@ -255,6 +255,12 @@ native records with missing image references are also held: a blank reference
 does not prove that submission never happened. Inspect and reconcile the
 original provider operation before removing any ownership evidence.
 
+An ordinary Machine0 capture that returns an error before attempting image
+submission removes its uncommitted reservation, so the source can still be
+released normally. A process interruption or attempted submission without a
+returned image identity remains unresolved; this does not unlock historical
+blank records.
+
 Older binaries do not understand these operation holds. Before downgrading,
 stop new capture admission and finish all operations with this binary; do not
 run older capture, release, or cleanup commands against unresolved records.

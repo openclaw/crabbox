@@ -151,26 +151,32 @@ func (Provider) NativeCheckpointWorkdir(req core.NativeCheckpointWorkdirRequest)
 
 func (p Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheckpointCreateRequest) (core.NativeCheckpointCreateResult, error) {
 	if core.NormalizeCheckpointStrategy(req.Strategy) == core.CheckpointStrategyDiskSnapshot {
-		return core.NativeCheckpointCreateResult{}, exit(2, "Machine0 reusable images require --strategy image; use `crabbox pause` for suspend snapshots")
+		return core.NativeCheckpointCreateResult{}, core.NativeCheckpointNotSubmittedError{Cause: exit(2, "Machine0 reusable images require --strategy image; use `crabbox pause` for suspend snapshots")}
 	}
 	claim, claimed, err := resolveClaim(req.LeaseID)
 	if err != nil {
-		return core.NativeCheckpointCreateResult{}, err
+		return core.NativeCheckpointCreateResult{}, core.NativeCheckpointNotSubmittedError{Cause: err}
 	}
 	if !claimed || claim.CloudID != req.Server.CloudID {
-		return core.NativeCheckpointCreateResult{}, exit(2, "refusing Machine0 image save without an exact source lease claim")
+		return core.NativeCheckpointCreateResult{}, core.NativeCheckpointNotSubmittedError{Cause: exit(2, "refusing Machine0 image save without an exact source lease claim")}
 	}
 	configured, err := p.Configure(req.Config, providerOperationRuntime(req.Stderr))
 	if err != nil {
-		return core.NativeCheckpointCreateResult{}, err
+		return core.NativeCheckpointCreateResult{}, core.NativeCheckpointNotSubmittedError{Cause: err}
 	}
 	return configured.(*backend).createNativeCheckpoint(ctx, req, claim)
 }
 
-func (b *backend) createNativeCheckpoint(ctx context.Context, req core.NativeCheckpointCreateRequest, claim LeaseClaim) (core.NativeCheckpointCreateResult, error) {
+func (b *backend) createNativeCheckpoint(ctx context.Context, req core.NativeCheckpointCreateRequest, claim LeaseClaim) (result core.NativeCheckpointCreateResult, err error) {
 	if req.Capture != nil {
 		return b.advanceCheckpointCapture(ctx, req, claim)
 	}
+	submissionStarted := false
+	defer func() {
+		if err != nil && !submissionStarted {
+			err = core.NativeCheckpointNotSubmittedError{Cause: err}
+		}
+	}()
 	if claim.CheckpointCapture != nil {
 		return core.NativeCheckpointCreateResult{}, core.AuthorizeCheckpointRelease(claim, "")
 	}
@@ -244,6 +250,9 @@ func (b *backend) createNativeCheckpoint(ctx context.Context, req core.NativeChe
 		}
 
 		if lifecycleErr == nil {
+			// Crossing this boundary makes a lost response ambiguous, even when
+			// no image identity can be observed before rollback or cancellation.
+			submissionStarted = true
 			if err := b.api.SaveImage(ctx, item.Name, name, remoteMetadata); err != nil {
 				lifecycleErr = err
 			} else {
@@ -267,7 +276,7 @@ func (b *backend) createNativeCheckpoint(ctx context.Context, req core.NativeChe
 		}
 		return server, target, stoppedByCheckpoint, nil
 	})
-	result := machine0NativeCheckpointResult(req, claim, name, createdImage, detail, version)
+	result = machine0NativeCheckpointResult(req, claim, name, createdImage, detail, version)
 	if actionErr != nil {
 		return result, errors.Join(lifecycleErr, actionErr)
 	}

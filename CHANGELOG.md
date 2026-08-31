@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Released ordinary Machine0 checkpoint reservations when the provider proves image submission was never attempted, keeping failed captures from blocking source cleanup while retaining interrupted or uncertain submissions.
 - Fixed Parallels clone destinations to pass the configured parent directory to `prlctl --dst`, letting Parallels name and create the VM bundle beneath it.
 
 ## 0.48.0 - 2026-08-30
