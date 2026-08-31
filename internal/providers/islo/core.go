@@ -62,8 +62,8 @@ func claimLeaseForRepoProvider(leaseID, slug, provider, repoRoot string, idleTim
 	return core.ClaimLeaseForRepoProvider(leaseID, slug, provider, repoRoot, idleTimeout, reclaim)
 }
 
-func claimLeaseForRepoProviderWithPond(leaseID, slug, provider, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return core.ClaimLeaseForRepoProviderWithPond(leaseID, slug, provider, pond, repoRoot, idleTimeout, reclaim)
+func claimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
+	return core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim)
 }
 
 func appendDirectPondTailscaleTag(cfg *Config) {
@@ -72,6 +72,10 @@ func appendDirectPondTailscaleTag(cfg *Config) {
 
 func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaim(identifier)
+}
+
+func withDurableLeaseClaimLock(leaseID string, action func(*core.LeaseClaim, bool, func() error) error) error {
+	return core.WithDurableLeaseClaimLock(leaseID, action)
 }
 
 func removeLeaseClaim(leaseID string) {

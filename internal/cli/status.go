@@ -259,14 +259,21 @@ func leaseStatusStateCanBeReady(lease LeaseTarget, state string) bool {
 }
 
 type StatusView struct {
-	ID                   string             `json:"id"`
-	Slug                 string             `json:"slug,omitempty"`
-	Provider             string             `json:"provider"`
-	TargetOS             string             `json:"target"`
-	WindowsMode          string             `json:"windowsMode,omitempty"`
-	State                string             `json:"state"`
-	ServerID             string             `json:"serverId"`
-	ServerType           string             `json:"serverType"`
+	ID          string `json:"id"`
+	Slug        string `json:"slug,omitempty"`
+	Provider    string `json:"provider"`
+	TargetOS    string `json:"target"`
+	WindowsMode string `json:"windowsMode,omitempty"`
+	State       string `json:"state"`
+	ServerID    string `json:"serverId"`
+	ServerType  string `json:"serverType"`
+	// ProviderResourceID is the provider's own immutable identity for the
+	// leased resource, when the provider assigns one separately from its name.
+	// ServerID carries the name, which identifies a slot in the provider's
+	// namespace rather than one specific resource: it can stop resolving once
+	// the resource is gone and then be reused by a later resource. Callers that
+	// must act on one exact resource key off ProviderResourceID.
+	ProviderResourceID   string             `json:"providerResourceId,omitempty"`
 	Host                 string             `json:"host"`
 	Pond                 string             `json:"pond,omitempty"`
 	Network              NetworkMode        `json:"network"`

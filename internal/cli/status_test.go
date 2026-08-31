@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -555,4 +556,32 @@ func (b *statusResolveRecordingBackend) Touch(_ context.Context, req TouchReques
 		return b.touchFn(req)
 	}
 	return req.Lease.Server, nil
+}
+
+// TestStatusViewOmitsProviderResourceIDWhenUnset pins the backward-compatible
+// half of the inspect JSON contract: providers whose only identity is the
+// resource name must not gain a new key in `crabbox inspect --json`.
+func TestStatusViewOmitsProviderResourceIDWhenUnset(t *testing.T) {
+	encoded, err := json.Marshal(statusView{ID: "cbx_example", Provider: "example", ServerID: "example-server"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := decoded["providerResourceId"]; ok {
+		t.Fatalf("inspect JSON = %s, want no providerResourceId key when the provider sets none", encoded)
+	}
+	decoded = nil
+	encoded, err = json.Marshal(statusView{ID: "cbx_example", Provider: "example", ServerID: "example-server", ProviderResourceID: "resource-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["providerResourceId"] != "resource-1" {
+		t.Fatalf("inspect JSON providerResourceId=%v, want the provider resource id", decoded["providerResourceId"])
+	}
 }

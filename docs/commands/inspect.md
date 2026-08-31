@@ -116,6 +116,28 @@ The key is the authoritative public half generated for provisioning, not a key
 learned later through `known_hosts` or `ssh-keyscan`. The field is omitted when
 the provider cannot inject a host key before boot.
 
+When the provider assigns a resource an immutable identifier separate from its
+name, JSON also includes `providerResourceId`:
+
+```json
+{
+  "serverId": "my-app-7f3a91",
+  "providerResourceId": "0195f3d2-5c1a-7c39-9c1e-6f0f2b7a41cd"
+}
+```
+
+`serverId` is the resource's name, which identifies a slot in the provider's
+namespace rather than one specific resource: it stops resolving as soon as the
+resource is deleted, and it can be occupied by a record other than the one you
+created. `providerResourceId` pins the exact resource, so automation that must
+act on one specific resource should key off it. The field is omitted for
+providers whose only identity is the name.
+
+When a lease's provider cannot be reached by its recorded resource id and the
+lookup falls back to the name, `labels.islo_resource_id_mismatch` is set to
+`true` and `labels.islo_claimed_resource_id` reports the id the lease claims,
+so `providerResourceId` is never silently attributed to a different resource.
+
 AWS leases also include authoritative provider metadata sourced from EC2
 `DescribeInstances`. Brokered inspection requests a fresh coordinator-side
 lookup; direct inspection uses the local AWS client:
