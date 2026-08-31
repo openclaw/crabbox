@@ -34,6 +34,7 @@ crabbox run --provider islo --id swift-crab --shell 'pnpm install && pnpm test'
 crabbox status --provider islo --id swift-crab --wait
 crabbox pause --provider islo swift-crab
 crabbox resume --provider islo swift-crab
+crabbox heartbeat --provider islo swift-crab
 crabbox stop --provider islo swift-crab
 crabbox list --provider islo --json
 ```
@@ -164,6 +165,32 @@ immediately with exit code 5.
 - Pause / resume: yes. `crabbox pause` snapshots the sandbox to disk and frees
   its CPU/memory via Islo's pause API; `crabbox resume` restores it. The lease
   claim is preserved across a pause.
+- Heartbeat: yes. `crabbox heartbeat` runs one no-op exec (`true`) against the
+  sandbox, because Islo exposes no dedicated heartbeat endpoint. An exec is what
+  registers sandbox activity: a sandbox left idle past its
+  `lifecycle.pause_after_idle` window pauses on its own, and an exec against a
+  paused sandbox resumes it. The exec touches no filesystem state and prints
+  nothing on success.
+
+  The command makes exactly two calls, a `GET` and the exec, and writes no
+  lifecycle policy at all, so it cannot move the absolute deadline
+  (`pause_after` or `delete_after`) in either direction. It also persists
+  nothing: the reported `lastTouchedAt` is when the sandbox was observed, so
+  `crabbox claims` keeps showing the claim's previous `lastUsed`.
+
+  The reported idle window is read from the live sandbox: `GET /sandboxes/{name}`
+  echoes `lifecycle` back, so `pause_after_idle` is reported when the sandbox
+  carries one. Crabbox never sends `lifecycle` on create, so any policy a
+  sandbox carries comes from Islo-side defaults Crabbox is not told about. When
+  the echoed lifecycle has no `pause_after_idle`, the command reports no idle
+  timeout and warns that it has no idle deadline to defer. `--idle-timeout` is
+  refused: Islo exposes no endpoint that changes a live sandbox's lifecycle.
+
+  A paused or terminal sandbox is refused rather than exec'd. The exec would
+  resume a paused sandbox and that resume is billed — on a tenant with no credit
+  the same call is rejected with HTTP 402 `BILLING_NOT_ALLOWED` ("Insufficient
+  credit balance to resume a sandbox") — so a heartbeat must never be what
+  starts billing compute.
 - Bounded run downloads: yes. Safe relative single-file `--require-artifact`
   and `--download` requests are retrieved through Islo exec after command
   success and capped at 64 KiB per file.

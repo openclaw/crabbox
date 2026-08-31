@@ -209,6 +209,26 @@ type PausableBackend interface {
 Declare `FeaturePauseResume` when implementing this interface so
 `crabbox providers` exposes the capability.
 
+Provider-owned lease heartbeats are optional, for providers with no
+Crabbox-managed SSH lease to touch:
+
+```go
+type LeaseHeartbeatBackend interface {
+	Backend
+
+	Heartbeat(ctx context.Context, req LeaseHeartbeatRequest) (LeaseHeartbeatResult, error)
+}
+```
+
+Declare `FeatureLeaseHeartbeat` when implementing this interface so
+`crabbox providers` exposes the capability. Core does no lease resolution,
+claim check, or state validation before calling, so the implementation owns
+every ownership and state check and must refuse an identifier it holds no local
+claim for. Report `LeaseHeartbeatResult.IdleTimeout` only from the provider's
+own view of the lease and leave it zero otherwise; core omits the field rather
+than substituting a local default. Never write a lease deadline from this
+capability: `--idle-timeout` is refused before the call for that reason.
+
 List JSON compatibility is optional:
 
 ```go
@@ -692,6 +712,7 @@ cli.FeatureModuleRun    // "module-run"
 cli.FeatureRunArtifacts // "run-artifacts"
 cli.FeatureRunDownloads // "run-downloads"
 cli.FeaturePauseResume  // "pause-resume"
+cli.FeatureLeaseHeartbeat // "lease-heartbeat"
 cli.FeatureMCP          // "mcp-attachments"
 ```
 
@@ -736,6 +757,10 @@ Checkpoint-related features are reserved for versioned workspaces:
   than over rsync.
 - `FeatureURLBridge`: delegated provider can expose a lease's port through the
   broker URL bridge.
+- `FeatureLeaseHeartbeat`: provider can keep a lease alive through its own API,
+  so `crabbox heartbeat` works without a Crabbox-managed SSH lease. The backend
+  implements `cli.LeaseHeartbeatBackend`. It must write no lease deadline of any
+  kind.
 
 Do not set the checkpoint flags for plain SSH access alone. Generic
 Git/archive/log checkpoints are core-owned and work even when a provider

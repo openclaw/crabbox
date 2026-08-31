@@ -294,7 +294,7 @@ provider filter values:
   kind: delegated-run,service-control,ssh-lease
   category: brokerable-cloud,byo-ssh,ci-proof-runner,delegated-sandbox,direct-cloud,external-provider,gpu-cloud,local-runtime,local-sandbox,local-vm,self-hosted-virtualization,service-control
   target: linux,macos,windows/normal,windows/wsl2,worker-runtime
-  feature: archive-sync,browser,cache-volume,cleanup,code,crabbox-sync,desktop,mcp-attachments,module-run,pause-resume,provider-snapshot,run-artifacts,run-downloads,run-proof,run-session,ssh,tailscale,url-bridge,workspace-checkpoint,workspace-fork,workspace-restore
+  feature: archive-sync,browser,cache-volume,cleanup,code,crabbox-sync,desktop,lease-heartbeat,mcp-attachments,module-run,pause-resume,provider-snapshot,run-artifacts,run-downloads,run-proof,run-session,ssh,tailscale,url-bridge,workspace-checkpoint,workspace-fork,workspace-restore
   runtime: ci-runner,delegated-command,interactive,local-runtime,local-sandbox,managed-sandbox,remote-dev,service-control,ssh-host,worker-module
   reachability: provider-url,ssh-tunnel,tailnet-egress,tailnet-peer
   workspace: checkpoint,fork,restore,snapshot-ref
