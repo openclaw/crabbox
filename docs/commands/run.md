@@ -158,6 +158,8 @@ final timing summary where a sync phase exists. These
 providers reject the SSH-run-only features `--capture-stdout`,
 `--capture-stderr`, `--capture-on-fail`, `--script`, `--script-stdin`, and
 `--fresh-pr` unless a delegated adapter advertises the matching capability.
+Delegated POSIX providers advertising `run-script`, including direct Daytona,
+accept standalone uploaded scripts with literal trailing arguments.
 Module-runtime delegated providers use `--script <file>` or `--script-stdin` as
 source module input and reject trailing `-- <command>` argv because they do not
 provide a Linux shell. Delegated artifact features such as `--artifact-glob`,
@@ -367,7 +369,8 @@ page.
 ## Scripts
 
 Use `--script <file>` or `--script-stdin` for multi-line remote commands. On
-POSIX SSH leases, Crabbox uploads a standalone, content-hashed copy into
+POSIX SSH leases and delegated providers advertising `run-script`, Crabbox
+uploads a standalone, content-hashed copy into
 `.crabbox/scripts/` under the remote workdir and executes that copy with the
 workdir as its process PWD. `$0` identifies the generated upload path, so
 `dirname "$0"` resolves to `.crabbox/scripts/`, not the script's original local
@@ -387,7 +390,8 @@ honored on POSIX targets; scripts without one run through `bash`. Native Windows
 targets run uploaded scripts through Windows PowerShell, and
 `--script-stdin` is treated as a PowerShell script; a non-`.ps1` script path
 gets a `.ps1` extension added before upload. Trailing arguments after `--` are
-passed to the script. This is an SSH-run feature for OS-backed providers.
+passed to the script. Script input is read completely before execution; it is
+not interactive stdin for the remote process.
 Delegated module-runtime providers that advertise `module-run` accept the same
 script flags as source module input, but they reject trailing command argv and
 `--shell`; they do not imply shell, SSH, rsync, or POSIX filesystem behavior.

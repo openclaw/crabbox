@@ -2,6 +2,11 @@
 
 ## 0.48.1 (Unreleased)
 
+### Added
+
+- Added fixed-ID Daytona warmup and native checkpoint forks that replay one exact sandbox, preserve uncertain creation attempts, and retain terminal identities after cleanup.
+- Added direct Daytona `--script` and `--script-stdin` execution with private, atomic standalone uploads, literal script arguments, and provider credentials excluded from command environments.
+
 ### Fixed
 
 - Preserved coordinator control-heartbeat failures when HTTP fallback also fails or has no remaining budget, without extending heartbeat deadlines or changing successful fallback.

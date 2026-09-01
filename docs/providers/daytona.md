@@ -43,6 +43,7 @@ crabbox checkpoint create --provider daytona --id swift-crab \
   --mode native --name after-install --no-reboot=false
 crabbox checkpoint inspect chk_<id> --verify
 crabbox checkpoint fork chk_<id> --slug snapshot-fork
+crabbox checkpoint fork chk_<id> --lease-id cbx_012345abcdef --json
 crabbox run --provider daytona --id snapshot-fork -- pnpm test
 crabbox checkpoint delete chk_<id>
 ```
@@ -52,8 +53,23 @@ active, then restarts the source. A stopped source stays stopped. The default
 `--no-reboot=true` refuses to stop a running source; explicitly allow the
 interruption with `--no-reboot=false`. The snapshot barrier applies even with
 `--wait=false`, bounded by `--wait-timeout`. Memory and running processes are
-not captured. Forks start independent sandboxes and relocate the saved workspace
-into the new lease's workdir.
+not captured. Finish commands and pause new work before capture; commands or SSH
+sessions already in progress may be interrupted. Forks start independent sandboxes
+and relocate the saved workspace into the new lease's workdir.
+
+Direct Daytona leases also accept `warmup --lease-id` and native checkpoint
+`fork --lease-id`. A fixed ID binds one checkpoint, immutable snapshot ID,
+create request, and API/organization/credential context. Repeating the same
+request adopts the same sandbox; a lost create response never submits another
+allocation. Existing sandboxes remain replayable when their source snapshot is
+retired; new allocations still require an available snapshot. Keep the local
+claim for reconciliation: a changed context, missing resource, conflicting
+request, or released ID fails instead of creating a
+replacement. Stop retains a terminal receipt so the ID cannot be reused.
+Provider credentials and short-lived SSH tokens are not stored in that receipt.
+If acquisition stops before any create attempt was durably authorized, `stop`
+can finalize that unused ID without provider credentials. Submitted or ambiguous
+attempts still require exact provider reconciliation.
 
 The local `daytona-snapshot` record binds the exact snapshot ID, organization,
 API endpoint, and source sandbox. Provider names include the checkpoint ID to
@@ -221,6 +237,11 @@ development endpoints.
 - SSH: yes, via a short-lived Daytona SSH access token.
 - Sync: direct mode uses Daytona toolbox archive sync; brokered mode uses normal
   Crabbox rsync over SSH.
+- Scripts: direct mode accepts `--script` and `--script-stdin`, including with
+  `--no-sync`. Bytes upload through the toolbox file API into private staging,
+  then publish atomically under `.crabbox/scripts/`. The standalone copy remains
+  on the lease after execution. Shebangs and literal trailing arguments are
+  honored; scripts without a shebang use bash. PWD is the lease workdir.
 - Desktop / browser / code: no — Daytona has no Crabbox VNC or `code` surface.
 - Actions hydration: no.
 - Coordinator (broker): yes for Linux SSH/sync/run. The coordinator owns the
@@ -241,7 +262,7 @@ development endpoints.
 - Daytona `run` is delegated to the toolbox APIs; it is not core-over-SSH
   execution. Because of that, the following `run` options are rejected:
   `--checksum`, `--full-resync`,
-  `--fresh-pr`, `--script` / `--script-stdin`, `--env-helper`,
+  `--fresh-pr`, `--env-helper`,
   `--capture-stdout` / `--capture-stderr`, `--capture-on-fail`, `--download`,
   `--artifact-glob`, `--require-artifact`, `--emit-proof`, and `--stop-after`.
 - Use `--sync-only` to pre-upload the archive into a kept sandbox before a later
@@ -250,6 +271,10 @@ development endpoints.
 - `--actions-runner` is rejected because it needs a normal SSH lease host.
 - `--keep-on-failure` keeps a newly created failed sandbox until Daytona
   auto-stop or an explicit `crabbox stop`.
+- Command environment values travel through the toolbox request body. Daytona
+  API-key, JWT, organization, and Crabbox coordinator-token variables are removed
+  even when explicitly selected by `--allow-env`; other allowed values and run
+  identity metadata are preserved.
 
 ## Related docs
 

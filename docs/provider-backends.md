@@ -123,7 +123,12 @@ are allowed while the rest stay rejected. The helper rejects checksum sync,
 full resync, local stdout/stderr captures, capture-on-fail, downloads, artifact
 globs, uploaded scripts, env helpers, `--stop-after`, fresh PR checkouts, and
 `--emit-proof` (unless the provider declares `FeatureRunProof`) unless another
-explicit feature covers the request. Providers that execute source modules
+explicit feature covers the request. Delegated POSIX providers may declare
+`FeatureRunScript` when they upload the standalone script privately and execute
+it with normal workdir, shebang, literal argv, env, and timeout semantics.
+`RunRequest.Script` supplies the already loaded bytes and generated path;
+`cli.POSIXRunScriptCommand` shares the invocation contract with SSH execution.
+Providers that execute source modules
 instead of shell commands may declare `FeatureModuleRun`; then `--script` and
 `--script-stdin` are accepted as module source input, while trailing shell
 command argv remains rejected. Delegated artifact globs require
@@ -688,6 +693,7 @@ cli.FeatureSnapshot     // "provider-snapshot"
 cli.FeatureCacheVolume  // "cache-volume"
 cli.FeatureRunProof     // "run-proof"
 cli.FeatureRunSession   // "run-session"
+cli.FeatureRunScript    // "run-script"
 cli.FeatureModuleRun    // "module-run"
 cli.FeatureRunArtifacts // "run-artifacts"
 cli.FeatureRunDownloads // "run-downloads"
@@ -730,6 +736,8 @@ Checkpoint-related features are reserved for versioned workspaces:
   successful command.
 - `FeatureModuleRun`: delegated provider accepts `--script` or `--script-stdin`
   as source module input and does not interpret trailing argv as a shell command.
+- `FeatureRunScript`: delegated POSIX provider accepts standalone uploaded
+  `--script` or `--script-stdin` input and literal trailing script arguments.
 - `FeatureMCP`: delegated provider can attach MCP server references during
   sandbox creation.
 - `FeatureArchiveSync`: provider syncs the checkout as an uploaded archive rather

@@ -25,6 +25,7 @@ type probeAdmissionProvider struct {
 	admissions                       []RunRequest
 	execution                        probeAdmissionObservation
 	warmupConfig                     Config
+	warmupRequest                    WarmupRequest
 }
 
 func (p *probeAdmissionProvider) Name() string       { return p.spec.Name }
@@ -70,9 +71,11 @@ type probeAdmissionBackend struct {
 	rt  Runtime
 }
 
-func (b *probeAdmissionBackend) Spec() ProviderSpec { return b.p.spec }
-func (b *probeAdmissionBackend) Warmup(context.Context, WarmupRequest) error {
+func (b *probeAdmissionBackend) Spec() ProviderSpec             { return b.p.spec }
+func (b *probeAdmissionBackend) SupportsRequestedLeaseID() bool { return true }
+func (b *probeAdmissionBackend) Warmup(_ context.Context, req WarmupRequest) error {
 	b.p.warmed++
+	b.p.warmupRequest = req
 	b.p.warmupConfig = b.cfg
 	fmt.Fprintln(b.rt.Stdout, "leased cbx_0123456789ab slug=probe")
 	return nil

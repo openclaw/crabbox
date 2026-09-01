@@ -1,15 +1,19 @@
 package daytona
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -36,9 +40,30 @@ type daytonaLifecycleFixture struct {
 	autoStopError bool
 	deleteError   bool
 	paths         []string
+	commands      []daytonaTestCommand
+	uploads       []string
+	uploadError   bool
+	uploadCancel  context.CancelFunc
+	privateUpload bool
+}
+
+type daytonaTestCommand struct {
+	Command string            `json:"command"`
+	Cwd     string            `json:"cwd"`
+	Envs    map[string]string `json:"envs"`
+	Timeout int               `json:"timeout"`
 }
 
 func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *daytonaLeaseBackend, Repo) {
+	t.Helper()
+	f, backend, repo := newDaytonaFixture(t)
+	if out, err := exec.Command("git", "init", "-q", repo.Root).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v %s", err, out)
+	}
+	return f, backend, repo
+}
+
+func newDaytonaFixture(t *testing.T) (*daytonaLifecycleFixture, *daytonaLeaseBackend, Repo) {
 	t.Helper()
 	testutil.IsolateUserDirs(t)
 	f := &daytonaLifecycleFixture{createState: api.SANDBOXSTATE_STARTED}
@@ -61,6 +86,13 @@ func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *dayton
 			f.sandbox = &api.Sandbox{}
 			f.sandbox.SetId("sandbox-test")
 			f.sandbox.SetName(f.create.GetName())
+			f.sandbox.SetOrganizationId("org-test")
+			f.sandbox.SetSnapshot(f.create.GetSnapshot())
+			if f.create.GetSnapshot() == "snapshot-exact-id" {
+				f.sandbox.SetSnapshot("test-snapshot")
+			}
+			f.sandbox.SetUser(f.create.GetUser())
+			f.sandbox.SetTarget(f.create.GetTarget())
 			f.sandbox.SetLabels(f.create.GetLabels())
 			f.sandbox.SetState(f.createState)
 			f.sandbox.SetToolboxProxyUrl(f.server.URL + "/toolbox")
@@ -89,6 +121,9 @@ func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *dayton
 				return
 			}
 			f.sandbox.SetState(api.SANDBOXSTATE_DESTROYED)
+			_ = json.NewEncoder(w).Encode(f.sandbox)
+		case r.Method == "POST" && r.URL.Path == "/sandbox/sandbox-test/start":
+			f.sandbox.SetState(api.SANDBOXSTATE_STARTED)
 			_ = json.NewEncoder(w).Encode(f.sandbox)
 		case strings.HasSuffix(r.URL.Path, "/labels"):
 			var body api.SandboxLabels
@@ -125,6 +160,10 @@ func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *dayton
 			}
 			defer file.Close()
 			data, err := io.ReadAll(file)
+			f.uploads = append(f.uploads, destination)
+			if parent, statErr := os.Stat(filepath.Dir(destination)); statErr == nil {
+				f.privateUpload = parent.Mode().Perm() == 0700
+			}
 			if err == nil {
 				err = os.WriteFile(destination, data, 0600)
 			}
@@ -133,19 +172,33 @@ func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *dayton
 				w.WriteHeader(500)
 				return
 			}
+			if f.uploadCancel != nil {
+				f.uploadCancel()
+			}
+			if f.uploadError {
+				w.WriteHeader(http.StatusBadGateway)
+				_, _ = io.WriteString(w, `{"message":"upload response failed"}`)
+				return
+			}
 			_, _ = io.WriteString(w, `{}`)
 		case strings.HasSuffix(r.URL.Path, "/process/execute"):
-			var body struct {
-				Command string `json:"command"`
-				Cwd     string `json:"cwd"`
-			}
+			var body daytonaTestCommand
 			_ = json.NewDecoder(r.Body).Decode(&body)
+			f.commands = append(f.commands, body)
 			command := exec.CommandContext(r.Context(), "bash", "-c", body.Command)
 			command.Dir = body.Cwd
+			command.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}
+			for name, value := range body.Envs {
+				command.Env = append(command.Env, name+"="+value)
+			}
 			out, err := command.CombinedOutput()
 			code := 0
 			if err != nil {
 				code = 1
+				var ee *exec.ExitError
+				if errors.As(err, &ee) {
+					code = ee.ExitCode()
+				}
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"result": string(out), "exitCode": code})
 		default:
@@ -160,10 +213,12 @@ func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *dayton
 	cfg.Daytona.APIURL = f.server.URL
 	cfg.Daytona.Snapshot = "test-snapshot"
 	cfg.Daytona.WorkRoot = t.TempDir()
-	repo := Repo{Root: t.TempDir(), Name: "fixture"}
-	if out, err := exec.Command("git", "init", "-q", repo.Root).CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v %s", err, out)
+	if root, err := filepath.EvalSymlinks(cfg.Daytona.WorkRoot); err == nil {
+		cfg.Daytona.WorkRoot = root
+	} else {
+		t.Fatal(err)
 	}
+	repo := Repo{Root: t.TempDir(), Name: "fixture"}
 	backend := &daytonaLeaseBackend{cfg: cfg, rt: Runtime{HTTP: f.server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
 	return f, backend, repo
 }
@@ -251,7 +306,7 @@ func TestDaytonaAllocationRecoveryIsBounded(t *testing.T) {
 
 func TestDaytonaDeleteWaitsForAlreadyDestroyingSandbox(t *testing.T) {
 	f, b, repo := newDaytonaLifecycleFixture(t)
-	sandbox, leaseID, _, err := b.createDaytonaSandbox(t.Context(), repo, true, false, "")
+	sandbox, leaseID, _, err := b.createDaytonaSandbox(t.Context(), AcquireRequest{Repo: repo, Keep: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,11 +349,11 @@ func TestDaytonaReadinessIgnoresStaleLabels(t *testing.T) {
 
 func TestDaytonaHeartbeatUpdatesProviderAndLabels(t *testing.T) {
 	f, b, repo := newDaytonaLifecycleFixture(t)
-	sandbox, leaseID, _, err := b.createDaytonaSandbox(t.Context(), repo, true, false, "")
+	sandbox, leaseID, _, err := b.createDaytonaSandbox(t.Context(), AcquireRequest{Repo: repo, Keep: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	metadata := map[string]string{"fixed_intent_sha256": strings.Repeat("a", 64), "optional_identity": ""}
+	metadata := map[string]string{"provider_fingerprint": strings.Repeat("a", 64), "optional_identity": ""}
 	for key, value := range metadata {
 		sandbox.GetLabels()[key] = value
 	}
@@ -319,7 +374,7 @@ func TestDaytonaHeartbeatUpdatesProviderAndLabels(t *testing.T) {
 
 func TestDaytonaHeartbeatPolicyFailureDoesNotPublishNewTimeout(t *testing.T) {
 	f, b, repo := newDaytonaLifecycleFixture(t)
-	sandbox, leaseID, _, err := b.createDaytonaSandbox(t.Context(), repo, true, false, "")
+	sandbox, leaseID, _, err := b.createDaytonaSandbox(t.Context(), AcquireRequest{Repo: repo, Keep: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +391,7 @@ func TestDaytonaHeartbeatPolicyFailureDoesNotPublishNewTimeout(t *testing.T) {
 
 func TestDaytonaStatusWaitFailsOnTerminalProviderState(t *testing.T) {
 	f, b, repo := newDaytonaLifecycleFixture(t)
-	_, leaseID, _, err := b.createDaytonaSandbox(t.Context(), repo, true, false, "")
+	_, leaseID, _, err := b.createDaytonaSandbox(t.Context(), AcquireRequest{Repo: repo, Keep: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +404,7 @@ func TestDaytonaStatusWaitFailsOnTerminalProviderState(t *testing.T) {
 
 func TestDaytonaActivityRefreshStopsWithRun(t *testing.T) {
 	f, b, repo := newDaytonaLifecycleFixture(t)
-	sandbox, _, _, err := b.createDaytonaSandbox(t.Context(), repo, true, false, "")
+	sandbox, _, _, err := b.createDaytonaSandbox(t.Context(), AcquireRequest{Repo: repo, Keep: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -413,6 +468,201 @@ func TestDaytonaRunPreservesDependenciesAndPrunesDeletedSource(t *testing.T) {
 	}
 	if f.deletes != 0 {
 		t.Fatal("reused sandbox was deleted")
+	}
+}
+
+func TestDaytonaRunUploadedScriptPreservesStandaloneContract(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("executes Linux toolbox shell commands against local POSIX paths")
+	}
+	for _, shebang := range []bool{false, true} {
+		t.Run(fmt.Sprintf("shebang=%t", shebang), func(t *testing.T) {
+			f, b, repo := newDaytonaLifecycleFixture(t)
+			_, leaseID, _, err := b.createDaytonaToolboxSandbox(t.Context(), repo, true, false, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			workdir := filepath.Join(b.cfg.Daytona.WorkRoot, leaseID, repo.Name)
+			body := "set -eu\nprintf '%s\\n' \"$PWD\" \"$0\" \"$1\" \"$SAFE_ENV\"\nexit \"$2\"\n"
+			if shebang {
+				body = "#!/bin/sh\n" + body
+			} else {
+				body = "[[ -n $BASH_VERSION ]] || exit 89\n" + body
+			}
+			data := []byte(body)
+			remotePath := fmt.Sprintf(".crabbox/scripts/%x-check.sh", sha256.Sum256(data))
+			script := &core.RunScriptSpec{Source: "stdin", Data: data, RemotePath: remotePath, Shebang: shebang}
+			arg := "a ' literal $(touch unexpected)\nsecond line"
+			var stdout bytes.Buffer
+			b.rt.Stdout = &stdout
+			ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
+			defer cancel()
+			result, runErr := b.Run(ctx, RunRequest{ID: leaseID, Repo: repo, NoSync: true, ScriptRequested: true, Script: script,
+				Command: []string{arg, "23"}, Env: map[string]string{"SAFE_ENV": "synthetic-value"}})
+			var ee core.ExitError
+			if !core.AsExitError(runErr, &ee) || ee.Code != 23 || result.ExitCode != 23 {
+				t.Fatalf("script exit result=%+v error=%v", result, runErr)
+			}
+			lines := strings.SplitN(stdout.String(), "\n", 3)
+			if len(lines) != 3 || lines[0] != workdir ||
+				(lines[1] != remotePath && lines[1] != filepath.Join(workdir, remotePath)) || lines[2] != arg+"\nsynthetic-value\n" {
+				t.Fatalf("standalone script PWD, identity, args, or env changed: %q", stdout.String())
+			}
+			for _, command := range f.commands {
+				if strings.Contains(command.Command, body) || strings.Contains(command.Command, "synthetic-value") {
+					t.Fatal("script body or environment value entered process command text")
+				}
+				if command.Cwd == workdir && (command.Timeout <= 0 || command.Timeout > 45) {
+					t.Fatalf("command timeout=%d", command.Timeout)
+				}
+			}
+			file := filepath.Join(workdir, remotePath)
+			if got, err := os.ReadFile(file); err != nil || !bytes.Equal(got, data) {
+				t.Fatalf("standalone script bytes changed: %v", err)
+			}
+			if info, err := os.Stat(file); err != nil || info.Mode().Perm() != 0700 {
+				t.Fatalf("script mode info=%v error=%v", info, err)
+			}
+			entries, err := os.ReadDir(filepath.Dir(file))
+			if err != nil || len(entries) != 1 {
+				t.Fatalf("temporary upload state remains: %v error=%v", entries, err)
+			}
+			if _, err := os.Stat(filepath.Join(workdir, "unexpected")); !os.IsNotExist(err) {
+				t.Fatal("literal script argument was evaluated")
+			}
+			if f.deletes != 0 {
+				t.Fatal("reused sandbox was deleted")
+			}
+			if !f.privateUpload {
+				t.Fatal("script bytes were uploaded before private staging existed")
+			}
+		})
+	}
+}
+
+func TestDaytonaRunFiltersProviderCredentials(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("executes Linux toolbox shell commands against local POSIX paths")
+	}
+	f, b, repo := newDaytonaLifecycleFixture(t)
+	_, leaseID, _, err := b.createDaytonaToolboxSandbox(t.Context(), repo, true, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := map[string]string{"SAFE_ENV": "value", "CRABBOX_RUN_ID": "run-fixture"}
+	for _, key := range []string{"DAYTONA_API_KEY", "CRABBOX_DAYTONA_API_KEY", "DAYTONA_CRABBOX_KEY", "DAYTONA_JWT_TOKEN", "CRABBOX_DAYTONA_JWT_TOKEN", "CRABBOX_COORDINATOR_TOKEN"} {
+		input[key] = "synthetic-control-credential"
+	}
+	if _, err := b.Run(t.Context(), RunRequest{ID: leaseID, Repo: repo, NoSync: true, Command: []string{"true"}, Env: input}); err != nil {
+		t.Fatal(err)
+	}
+	env := f.commands[len(f.commands)-1].Envs
+	if len(env) != 2 || env["SAFE_ENV"] != "value" || env["CRABBOX_RUN_ID"] != "run-fixture" {
+		t.Fatalf("provider credentials were forwarded or command metadata lost: names=%v", reflect.ValueOf(env).MapKeys())
+	}
+	if len(input) != 8 {
+		t.Fatal("request environment was mutated")
+	}
+}
+
+func TestDaytonaScriptUploadFailureCleansStagingWithoutExecuting(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("executes Linux toolbox shell commands against local POSIX paths")
+	}
+	for _, cancelUpload := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cancellation=%t", cancelUpload), func(t *testing.T) {
+			f, b, repo := newDaytonaLifecycleFixture(t)
+			_, leaseID, _, err := b.createDaytonaToolboxSandbox(t.Context(), repo, true, false, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			workdir := filepath.Join(b.cfg.Daytona.WorkRoot, leaseID, repo.Name)
+			data := []byte("printf x >> ran\n")
+			script := &core.RunScriptSpec{Source: "stdin", Data: data, RemotePath: fmt.Sprintf(".crabbox/scripts/%x-check.sh", sha256.Sum256(data))}
+			req := RunRequest{ID: leaseID, Repo: repo, NoSync: true, Script: script}
+			if _, err := b.Run(t.Context(), req); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if cancelUpload {
+				f.uploadCancel = cancel
+			} else {
+				f.uploadError = true
+			}
+			if _, err := b.Run(ctx, req); err == nil {
+				t.Fatal("failed upload reported success")
+			}
+			if got, err := os.ReadFile(filepath.Join(workdir, "ran")); err != nil || string(got) != "x" {
+				t.Fatalf("failed upload executed user script: %q %v", got, err)
+			}
+			if got, err := os.ReadFile(filepath.Join(workdir, script.RemotePath)); err != nil || !bytes.Equal(got, data) {
+				t.Fatalf("failed upload damaged previous script: %q %v", got, err)
+			}
+			entries, err := os.ReadDir(filepath.Join(workdir, ".crabbox", "scripts"))
+			if err != nil || len(entries) != 1 {
+				t.Fatalf("staged input leaked after failure: %v %v", entries, err)
+			}
+			if f.deletes != 0 {
+				t.Fatal("reused sandbox deleted after upload failure")
+			}
+		})
+	}
+}
+
+func TestDaytonaScriptRejectsSymlinkedStagingParent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("executes Linux toolbox shell commands against local POSIX paths")
+	}
+	for _, parent := range []string{".crabbox", ".crabbox/scripts"} {
+		t.Run(parent, func(t *testing.T) {
+			f, b, repo := newDaytonaLifecycleFixture(t)
+			_, leaseID, _, err := b.createDaytonaToolboxSandbox(t.Context(), repo, true, false, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			workdir := filepath.Join(b.cfg.Daytona.WorkRoot, leaseID, repo.Name)
+			link := filepath.Join(workdir, parent)
+			if err := os.MkdirAll(filepath.Dir(link), 0700); err != nil {
+				t.Fatal(err)
+			}
+			outside := t.TempDir()
+			if err := os.Symlink(outside, link); err != nil {
+				t.Fatal(err)
+			}
+			_, err = b.Run(t.Context(), RunRequest{ID: leaseID, Repo: repo, NoSync: true,
+				Script: &core.RunScriptSpec{Source: "stdin", Data: []byte("true\n"), RemotePath: ".crabbox/scripts/check.sh"}})
+			if err == nil || len(f.uploads) != 0 {
+				t.Fatalf("symlink accepted: uploads=%v error=%v", f.uploads, err)
+			}
+			entries, err := os.ReadDir(outside)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("outside staging directory was modified: %v %v", entries, err)
+			}
+		})
+	}
+}
+
+func TestDaytonaScriptMayDeleteItsUploadedCopy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("executes Linux toolbox shell commands against local POSIX paths")
+	}
+	_, b, repo := newDaytonaLifecycleFixture(t)
+	_, leaseID, _, err := b.createDaytonaToolboxSandbox(t.Context(), repo, true, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Snapshot preparation scrubs its own uploaded script and command environment.
+	data := []byte("#!/bin/sh\nmkdir -p .crabbox/env\nexec rm -rf -- .crabbox/env .crabbox/scripts\n")
+	result, err := b.Run(t.Context(), RunRequest{ID: leaseID, Repo: repo, NoSync: true,
+		Script: &core.RunScriptSpec{Source: "stdin", Data: data, Shebang: true,
+			RemotePath: fmt.Sprintf(".crabbox/scripts/%x-scrub.sh", sha256.Sum256(data))}})
+	if err != nil || result.ExitCode != 0 {
+		t.Fatalf("self-scrubbing script failed: result=%+v error=%v", result, err)
+	}
+	meta := filepath.Join(b.cfg.Daytona.WorkRoot, leaseID, repo.Name, ".crabbox")
+	if entries, err := os.ReadDir(meta); err != nil || len(entries) != 0 {
+		t.Fatalf("script or environment state survived self-scrub: %v %v", entries, err)
 	}
 }
 

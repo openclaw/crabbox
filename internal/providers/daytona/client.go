@@ -38,9 +38,10 @@ type daytonaSSHAccess struct {
 }
 
 type daytonaSDKClient struct {
-	api   *daytona.APIClient
-	token string
-	orgID string
+	api    *daytona.APIClient
+	apiURL string
+	token  string
+	orgID  string
 }
 
 const defaultDaytonaAPIURL = "https://app.daytona.io/api"
@@ -57,7 +58,7 @@ var newDaytonaClient = func(cfg Config, rt Runtime) (daytonaAPI, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &daytonaSDKClient{api: daytona.NewAPIClient(apiCfg), token: auth.token(), orgID: auth.OrganizationID}, nil
+	return &daytonaSDKClient{api: daytona.NewAPIClient(apiCfg), apiURL: apiURL, token: auth.token(), orgID: auth.OrganizationID}, nil
 }
 
 type daytonaAuth struct {

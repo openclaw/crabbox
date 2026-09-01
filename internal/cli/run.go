@@ -95,7 +95,8 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 	options := leaseOptionsFromConfig(cfg)
 	if delegated, ok := backend.(DelegatedRunBackend); ok {
 		return delegated.Warmup(ctx, WarmupRequest{
-			Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim,
+			RequestedLeaseID: strings.TrimSpace(*requestedLeaseID),
+			Repo:             repo, Options: options, Keep: *keep, Reclaim: *reclaim,
 			ActionsRunner: *actionsRunner, RequestedSlug: requestedSlug, TimingJSON: *timingJSON,
 			BeforeComplete: func() { a.syncExternalRunnersBestEffort(ctx, cfg, backend) },
 		})
@@ -280,7 +281,7 @@ func registerRunFlags(fs *flag.FlagSet, defaults Config, options leaseCreateFlag
 		CaptureOnFail:          fs.Bool("capture-on-fail", false, "compatibility alias; failure bundles are saved by default on non-zero exit"),
 		Preflight:              fs.Bool("preflight", false, "print remote capability preflight before running the command"),
 		PreflightTools:         fs.String("preflight-tools", "", "comma-separated preflight tools to probe; overrides run.preflightTools"),
-		ScriptPath:             fs.String("script", "", "on POSIX SSH leases, upload and run a standalone content-hashed copy under .crabbox/scripts/; delegated module runtimes use source input"),
+		ScriptPath:             fs.String("script", "", "on POSIX SSH leases or run-script providers, upload and run a standalone content-hashed copy under .crabbox/scripts/; delegated module runtimes use source input"),
 		ScriptStdin:            fs.Bool("script-stdin", false, "read a script from stdin, upload it, and run it"),
 		FreshPR:                fs.String("fresh-pr", "", "run from a fresh remote checkout of a GitHub PR: owner/repo#123, URL, or number"),
 		ApplyLocalPatch:        fs.Bool("apply-local-patch", false, "apply the local git diff on top of --fresh-pr checkout"),
@@ -966,7 +967,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 				return err
 			}
 		}
-		if scriptRequested && backend.Spec().Features.Has(FeatureModuleRun) {
+		if scriptRequested {
 			script, err = loadRunScript(*scriptPath, *scriptStdin, a.Stdin)
 			if err != nil {
 				return err

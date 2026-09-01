@@ -15,29 +15,64 @@ import (
 
 const daytonaActivityRequestTimeout = 10 * time.Second
 
-func (b *daytonaLeaseBackend) createDaytonaSandbox(ctx context.Context, repo Repo, keep, reclaim bool, requestedSlug string) (sandbox *daytona.Sandbox, leaseID, slug string, err error) {
-	if strings.TrimSpace(b.cfg.Daytona.Snapshot) == "" {
-		return nil, "", "", exit(2, "provider=daytona requires --daytona-snapshot or daytona.snapshot")
-	}
-	if b.cfg.TTL <= 0 || b.cfg.IdleTimeout <= 0 || durationMinutesCeil(b.cfg.TTL) > math.MaxInt32 || durationMinutesCeil(b.cfg.IdleTimeout) > math.MaxInt32 {
-		return nil, "", "", exit(2, "provider=daytona requires positive TTL and idle timeout within Daytona's minute range")
-	}
-	client, err := newDaytonaClient(b.cfg, b.rt)
+func ensureDaytonaRunning(ctx context.Context, client daytonaAPI, sandbox *daytona.Sandbox, leaseID string) (*daytona.Sandbox, error) {
+	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
 	if err != nil {
-		return nil, "", "", err
+		return nil, err
 	}
-	existing, err := client.ListCrabboxSandboxes(ctx)
-	if err != nil {
-		return nil, "", "", daytonaError("list sandboxes", err)
+	if (sandbox.GetLabels()["fixed_intent_sha256"] != "" || sandbox.GetLabels()["fixed_attempt"] != "") && (!exists || claim.FixedCreateIntent == nil) {
+		return nil, exit(4, "Daytona fixed sandbox lost its durable acquisition claim")
 	}
-	leaseID = newLeaseID()
-	slug, err = allocateDirectLeaseSlug(leaseID, requestedSlug, daytonaSandboxesToServers(existing, b.cfg))
-	if err != nil {
-		return nil, "", "", err
+	start := func() error {
+		if daytonaStateReady(daytonaSandboxState(sandbox)) {
+			return nil
+		}
+		if daytonaStateFailed(daytonaSandboxState(sandbox)) {
+			return exit(5, "daytona sandbox %s entered terminal state=%s", sandbox.GetId(), daytonaSandboxState(sandbox))
+		}
+		if _, err := client.StartSandbox(ctx, sandbox.GetId()); err != nil {
+			return daytonaError("start sandbox", err)
+		}
+		sandbox, err = waitForDaytonaReady(ctx, client, sandbox.GetId(), 5*time.Minute)
+		return err
 	}
-	cfg := b.cfg
+	if exists && claim.FixedCreateIntent != nil {
+		// A source capture must stay frozen. Hold the claim fence across resume
+		// and reject reuse even when callers suppress local endpoint updates.
+		err = core.WithLeaseClaimUnchangedShared(ctx, leaseID, claim, func() error {
+			if claim.FixedCreateIntent.State != "acquired" {
+				return exit(4, "Daytona fixed lease acquisition is incomplete; replay the original request or stop the lease")
+			}
+			if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+				return err
+			}
+			if err := validateFixedDaytonaSandbox(claim, sandbox); err != nil {
+				return err
+			}
+			if err := start(); err != nil {
+				return err
+			}
+			return validateFixedDaytonaSandbox(claim, sandbox)
+		})
+	} else {
+		err = start()
+	}
+	return sandbox, err
+}
+
+func validateDaytonaCreateConfig(cfg Config) error {
+	if strings.TrimSpace(cfg.Daytona.Snapshot) == "" {
+		return exit(2, "provider=daytona requires --daytona-snapshot or daytona.snapshot")
+	}
+	if cfg.TTL <= 0 || cfg.IdleTimeout <= 0 || durationMinutesCeil(cfg.TTL) > math.MaxInt32 || durationMinutesCeil(cfg.IdleTimeout) > math.MaxInt32 {
+		return exit(2, "provider=daytona requires positive TTL and idle timeout within Daytona's minute range")
+	}
+	return nil
+}
+
+func daytonaCreateBody(cfg Config, leaseID, slug string, keep bool, now time.Time) *daytona.CreateSandbox {
 	cfg.ServerType, cfg.WorkRoot, cfg.SSHUser, cfg.SSHPort = "snapshot", daytonaWorkRoot(cfg), daytonaUser(cfg), "22"
-	labels := directLeaseLabels(cfg, leaseID, slug, daytonaProvider, "", keep, time.Now().UTC())
+	labels := directLeaseLabels(cfg, leaseID, slug, daytonaProvider, "", keep, now)
 	labels["lease_name"], labels["work_root"] = leaseProviderName(leaseID, slug), cfg.WorkRoot
 	body := daytona.NewCreateSandbox()
 	body.SetName(labels["lease_name"])
@@ -52,6 +87,47 @@ func (b *daytonaLeaseBackend) createDaytonaSandbox(ctx context.Context, repo Rep
 	if target := strings.TrimSpace(cfg.Daytona.Target); target != "" {
 		body.SetTarget(target)
 	}
+	return body
+}
+
+func (b *daytonaLeaseBackend) createDaytonaSandbox(ctx context.Context, req AcquireRequest) (sandbox *daytona.Sandbox, leaseID, slug string, err error) {
+	repo, keep, reclaim, requestedSlug := req.Repo, req.Keep, req.Reclaim, req.RequestedSlug
+	if err := validateDaytonaCreateConfig(b.cfg); err != nil {
+		return nil, "", "", err
+	}
+	client, err := newDaytonaClient(b.cfg, b.rt)
+	if err != nil {
+		return nil, "", "", err
+	}
+	if req.CheckpointSource != nil {
+		snapshots, ok := client.(daytonaSnapshotAPI)
+		if !ok {
+			return nil, "", "", errors.New("Daytona client does not support snapshots")
+		}
+		snapshot, err := snapshots.GetSnapshot(ctx, req.CheckpointSource.ImageID)
+		if err != nil {
+			return nil, "", "", err
+		}
+		if err := validateDaytonaForkSnapshot(snapshot, req.CheckpointSource); err != nil {
+			return nil, "", "", err
+		}
+	}
+	existing, err := client.ListCrabboxSandboxes(ctx)
+	if err != nil {
+		return nil, "", "", daytonaError("list sandboxes", err)
+	}
+	leaseID = newLeaseID()
+	slug, err = allocateDirectLeaseSlug(leaseID, requestedSlug, daytonaSandboxesToServers(existing, b.cfg))
+	if err != nil {
+		return nil, "", "", err
+	}
+	cfg := b.cfg
+	if req.CheckpointSource != nil {
+		cfg.Daytona.Snapshot = req.CheckpointSource.ImageID
+	}
+	cfg.ServerType, cfg.WorkRoot, cfg.SSHUser, cfg.SSHPort = "snapshot", daytonaWorkRoot(cfg), daytonaUser(cfg), "22"
+	body := daytonaCreateBody(cfg, leaseID, slug, keep, time.Now().UTC())
+	labels := body.GetLabels()
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=daytona lease=%s slug=%s snapshot=%s target=%s keep=%v\n", leaseID, slug, cfg.Daytona.Snapshot, blank(cfg.Daytona.Target, "-"), keep)
 	created, createErr := client.CreateSandbox(ctx, *body)
 	if createErr != nil || created == nil || created.GetId() == "" {

@@ -8,11 +8,14 @@ import (
 
 type daytonaSnapshotAPI interface {
 	daytonaAPI
+	contextMetadata() (apiURL, organizationID string)
 	StopSandbox(context.Context, string) error
 	CreateSnapshot(context.Context, string, string) error
 	GetSnapshot(context.Context, string) (*api.SnapshotDto, error)
 	DeleteSnapshot(context.Context, string) error
 }
+
+func (c *daytonaSDKClient) contextMetadata() (string, string) { return c.apiURL, c.orgID }
 
 func (c *daytonaSDKClient) StopSandbox(ctx context.Context, id string) error {
 	req := c.api.SandboxAPI.StopSandbox(c.ctx(ctx), id)

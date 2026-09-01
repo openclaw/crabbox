@@ -154,6 +154,14 @@ func remoteRunScriptCommandWithEnvFile(workdir string, env map[string]string, en
 func remoteRunScriptCommandWithEnvFiles(workdir string, env map[string]string, envFiles []string, script *RunScriptSpec, args []string) string {
 	var b strings.Builder
 	writeRemoteCommandPrefix(&b, workdir, env, envFiles)
+	b.WriteString(POSIXRunScriptCommand(script, args))
+	return b.String()
+}
+
+// POSIXRunScriptCommand executes an already uploaded standalone copy. Transport
+// owners supply the workdir and environment separately; script bytes stay off argv.
+func POSIXRunScriptCommand(script *RunScriptSpec, args []string) string {
+	var b strings.Builder
 	if script.Shebang {
 		b.WriteString("bash -lc ")
 		b.WriteString(shellQuote(`exec "$@"`))

@@ -672,6 +672,7 @@ const (
 	FeatureRunSession   Feature = "run-session"
 	FeatureRunArtifacts Feature = "run-artifacts"
 	FeatureRunDownloads Feature = "run-downloads"
+	FeatureRunScript    Feature = "run-script"
 	FeatureModuleRun    Feature = "module-run"
 	FeaturePauseResume  Feature = "pause-resume"
 	FeatureMCP          Feature = "mcp-attachments"
@@ -942,7 +943,9 @@ type AcquireRequest struct {
 	Reclaim               bool
 	RequestedLeaseID      string
 	RequestedCheckpointID string
-	RequestedSlug         string
+	// CheckpointSource carries the recorded native image identity to its allocation owner.
+	CheckpointSource *NativeCheckpointForkRecord
+	RequestedSlug    string
 	// OnAcquired observes a fully validated raw provider identity before local
 	// routing, readiness, or claim side effects. Returning an error requires the
 	// provider adapter to roll back the acquired resource.
@@ -1125,13 +1128,14 @@ type RunRequest struct {
 }
 
 type WarmupRequest struct {
-	Repo          Repo
-	Options       LeaseOptions
-	Keep          bool
-	Reclaim       bool
-	ActionsRunner bool
-	RequestedSlug string
-	TimingJSON    bool
+	RequestedLeaseID string
+	Repo             Repo
+	Options          LeaseOptions
+	Keep             bool
+	Reclaim          bool
+	ActionsRunner    bool
+	RequestedSlug    string
+	TimingJSON       bool
 	// BeforeComplete runs synchronous, best-effort core bookkeeping once after
 	// successful acquisition/retention and before final output. Providers opting
 	// in must include it in total timing; it cannot fail or roll back the lease.
@@ -1832,7 +1836,7 @@ func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error 
 	if req.StopAfter != "" {
 		return exit(2, "%s delegates run execution; --stop-after is not supported", provider)
 	}
-	if (req.Script != nil || req.ScriptRequested) && !moduleRun {
+	if (req.Script != nil || req.ScriptRequested) && !moduleRun && !spec.Features.Has(FeatureRunScript) {
 		return exit(2, "%s delegates run execution; --script is not supported", provider)
 	}
 	if moduleRun && len(req.Command) > 0 {

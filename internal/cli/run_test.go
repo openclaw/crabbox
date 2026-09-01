@@ -33,6 +33,7 @@ func init() {
 	RegisterProvider(runReadyPoolPreflightTestProvider{})
 	RegisterProvider(runPrepareTestProvider{})
 	RegisterProvider(runModuleRuntimeTestProvider{})
+	RegisterProvider(runPOSIXScriptTestProvider{})
 	RegisterProvider(runArchiveSyncPreflightTestProvider{})
 }
 
@@ -1328,6 +1329,18 @@ type runModuleRuntimeTestBackend struct {
 	spec ProviderSpec
 }
 
+type runPOSIXScriptTestProvider struct{ runModuleRuntimeTestProvider }
+
+func (runPOSIXScriptTestProvider) Name() string { return "posix-script-test" }
+func (p runPOSIXScriptTestProvider) Spec() ProviderSpec {
+	return ProviderSpec{Name: p.Name(), Kind: ProviderKindSSHLease,
+		Targets: []TargetSpec{{OS: targetLinux}}, Features: FeatureSet{FeatureRunScript},
+		Coordinator: CoordinatorNever}
+}
+func (p runPOSIXScriptTestProvider) Configure(Config, Runtime) (Backend, error) {
+	return runModuleRuntimeTestBackend{spec: p.Spec()}, nil
+}
+
 var runModuleRuntimeTestRequests []RunRequest
 
 type countingReader struct {
@@ -1722,7 +1735,7 @@ func TestRunCommandRejectsUnsupportedDelegatedCaptureOptions(t *testing.T) {
 		{name: "islo unsafe require artifact", provider: "islo", args: []string{"--require-artifact", "../manifest.json"}, want: "--require-artifact contains unsupported characters or non-relative path"},
 		{name: "e2b require artifact", provider: "e2b", args: []string{"--require-artifact", "reports/data/manifest.json"}, want: "e2b delegates run execution; --require-artifact is not supported"},
 		{name: "e2b stop after", provider: "e2b", args: []string{"--stop-after", "never"}, want: "e2b delegates run execution; --stop-after is not supported"},
-		{name: "daytona script", provider: "daytona", args: []string{"--script", "testdata/missing.sh"}, want: "daytona delegates run execution; --script is not supported"},
+		{name: "e2b script", provider: "e2b", args: []string{"--script", "testdata/missing.sh"}, want: "e2b delegates run execution; --script is not supported"},
 		{name: "e2b fresh pr", provider: "e2b", args: []string{"--fresh-pr", "example-org/my-app#1"}, want: "e2b delegates sync; --fresh-pr is not supported"},
 		{name: "e2b full resync", provider: "e2b", args: []string{"--full-resync"}, want: "e2b delegates sync; --full-resync is not supported"},
 	}
@@ -2606,6 +2619,41 @@ func TestRunCommandPassesScriptToModuleDelegatedProvider(t *testing.T) {
 	}
 	if len(req.Command) != 0 {
 		t.Fatalf("command=%v, want none", req.Command)
+	}
+}
+
+func TestRunCommandPassesScriptToDelegatedPOSIXProvider(t *testing.T) {
+	for _, stdin := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stdin=%t", stdin), func(t *testing.T) {
+			clearConfigEnv(t)
+			runModuleRuntimeTestRequests = nil
+			dir := t.TempDir()
+			isolateRunTestUserDirs(t, dir)
+			t.Chdir(dir)
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+			body := "#!/bin/sh\nprintf '%s\\n' \"$1\"\n"
+			args := []string{"--provider", "posix-script-test", "--no-sync"}
+			if stdin {
+				args = append(args, "--script-stdin")
+			} else {
+				file := filepath.Join(dir, "check.sh")
+				writeFile(t, file, body)
+				args = append(args, "--script", file)
+			}
+			wantArgs := []string{"literal ' argument", "$(touch should-not-exist)"}
+			args = append(append(args, "--"), wantArgs...)
+			var stdout, stderr bytes.Buffer
+			if err := (App{Stdout: &stdout, Stderr: &stderr, Stdin: strings.NewReader(body)}).runCommand(t.Context(), args); err != nil {
+				t.Fatalf("script run: %v; stderr=%s", err, stderr.String())
+			}
+			if len(runModuleRuntimeTestRequests) != 1 {
+				t.Fatalf("run requests=%d", len(runModuleRuntimeTestRequests))
+			}
+			req := runModuleRuntimeTestRequests[0]
+			if req.Script == nil || string(req.Script.Data) != body || !reflect.DeepEqual(req.Command, wantArgs) || !req.NoSync {
+				t.Fatalf("script request=%+v", req)
+			}
+		})
 	}
 }
 

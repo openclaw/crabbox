@@ -817,6 +817,9 @@ func TestCheckpointForkJSONAndFixedLeaseReplay(t *testing.T) {
 			if backend.creates != tc.wantCreates {
 				t.Fatalf("created %d provider resources, want %d", backend.creates, tc.wantCreates)
 			}
+			if backend.checkpointSource == nil || backend.checkpointSource.ImageID != record.Native.ImageID || backend.checkpointSource.Name != record.Name {
+				t.Fatalf("allocation lost recorded checkpoint identity: %+v", backend.checkpointSource)
+			}
 			if strings.Contains(stdout.String(), "checkpoint forked") {
 				t.Fatalf("JSON output contains human progress: %q", stdout.String())
 			}
@@ -2710,10 +2713,11 @@ func (b *checkpointForkReleaseBackend) Touch(context.Context, TouchRequest) (Ser
 
 type checkpointFixedForkBackend struct {
 	*checkpointForkReleaseBackend
-	creates       int
-	failOnAcquire int
-	leases        map[string]string
-	checkpoints   map[string]string
+	creates          int
+	failOnAcquire    int
+	leases           map[string]string
+	checkpoints      map[string]string
+	checkpointSource *NativeCheckpointForkRecord
 }
 
 func (b *checkpointFixedForkBackend) SupportsRequestedLeaseID() bool { return true }
@@ -2721,6 +2725,7 @@ func (b *checkpointFixedForkBackend) SupportsRequestedLeaseID() bool { return tr
 func (b *checkpointFixedForkBackend) SupportsRequestedCheckpointID() bool { return true }
 
 func (b *checkpointFixedForkBackend) Acquire(_ context.Context, req AcquireRequest) (LeaseTarget, error) {
+	b.checkpointSource = req.CheckpointSource
 	b.acquireCalls++
 	if b.acquireCalls == b.failOnAcquire {
 		return LeaseTarget{}, errors.New("second provider acquisition failed")

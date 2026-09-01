@@ -63,11 +63,23 @@ func (b *daytonaLeaseBackend) Warmup(ctx context.Context, req WarmupRequest) err
 		return exit(2, "--actions-runner is not supported for provider=daytona SDK warmup")
 	}
 	started := time.Now()
-	sandbox, leaseID, slug, err := b.createDaytonaToolboxSandbox(ctx, req.Repo, req.Keep, req.Reclaim, req.RequestedSlug)
+	var sandboxID, leaseID, slug string
+	var err error
+	if req.RequestedLeaseID != "" {
+		var lease LeaseTarget
+		lease, err = b.Acquire(ctx, AcquireRequest{Repo: req.Repo, Options: req.Options, Keep: req.Keep, Reclaim: req.Reclaim, RequestedLeaseID: req.RequestedLeaseID, RequestedSlug: req.RequestedSlug})
+		sandboxID, leaseID, slug = lease.Server.CloudID, lease.LeaseID, serverSlug(lease.Server)
+	} else {
+		var sandbox *sdkdaytona.Sandbox
+		sandbox, leaseID, slug, err = b.createDaytonaToolboxSandbox(ctx, req.Repo, req.Keep, req.Reclaim, req.RequestedSlug)
+		if sandbox != nil {
+			sandboxID = sandbox.ID
+		}
+	}
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(b.rt.Stdout, "leased %s slug=%s provider=daytona sandbox=%s\n", leaseID, slug, sandbox.ID)
+	fmt.Fprintf(b.rt.Stdout, "leased %s slug=%s provider=daytona sandbox=%s\n", leaseID, slug, sandboxID)
 	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", time.Since(started).Round(time.Millisecond))
 	if req.TimingJSON {
 		return writeTimingJSON(b.rt.Stderr, timingReport{
@@ -175,13 +187,25 @@ func (b *daytonaLeaseBackend) Run(ctx context.Context, req RunRequest) (result R
 		return result, nil
 	}
 	command := daytonaCommandString(req.Command, req.ShellMode)
+	commandDisplay := strings.Join(req.Command, " ")
+	if req.Script != nil {
+		if err := uploadDaytonaRunScript(ctx, sandbox, commands, workdir, req.Script); err != nil {
+			return RunResult{Total: time.Since(started), SyncDelegated: true}, err
+		}
+		command = core.POSIXRunScriptCommand(req.Script, req.Command)
+		commandDisplay = "--script=" + req.Script.Source
+	}
 	if command == "" {
 		return RunResult{}, exit(2, "missing command")
 	}
 	commandStarted := time.Now()
-	fmt.Fprintf(b.rt.Stderr, "running on daytona %s\n", strings.Join(req.Command, " "))
+	fmt.Fprintf(b.rt.Stderr, "running on daytona %s\n", commandDisplay)
 	execOpts := []func(*sdkoptions.ExecuteCommand){sdkoptions.WithCwd(workdir)}
-	if env := req.Env; len(env) > 0 {
+	env, stripped := daytonaCommandEnv(req.Env)
+	if len(stripped) > 0 {
+		fmt.Fprintf(b.rt.Stderr, "warning: daytona did not forward provider authentication variables: %s\n", strings.Join(stripped, ","))
+	}
+	if len(env) > 0 {
 		execOpts = append(execOpts, sdkoptions.WithCommandEnv(env))
 	}
 	response, err := commands.ExecuteCommand(ctx, command, execOpts...)
@@ -268,6 +292,15 @@ func (b *daytonaLeaseBackend) Status(ctx context.Context, req StatusRequest) (st
 func (b *daytonaLeaseBackend) Stop(ctx context.Context, req StopRequest) error {
 	ctx, cancel := context.WithTimeout(ctx, daytonaCleanupTimeout)
 	defer cancel()
+	if claim, exists, err := resolveLeaseClaimForProvider(req.ID, daytonaProvider); err != nil {
+		return err
+	} else if exists && claim.FixedCreateIntent != nil {
+		if err := b.releaseFixed(ctx, claim, ""); err != nil {
+			return err
+		}
+		fmt.Fprintf(b.rt.Stderr, "released fixed lease=%s\n", claim.LeaseID)
+		return nil
+	}
 	client, err := newDaytonaClient(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -275,6 +308,15 @@ func (b *daytonaLeaseBackend) Stop(ctx context.Context, req StopRequest) error {
 	sandbox, leaseID, err := resolveDaytonaSandbox(ctx, client, b.cfg, req.ID)
 	if err != nil {
 		return err
+	}
+	if claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil {
+		return err
+	} else if exists && claim.FixedCreateIntent != nil {
+		if err := b.releaseFixed(ctx, claim, ""); err != nil {
+			return err
+		}
+		fmt.Fprintf(b.rt.Stderr, "released fixed lease=%s\n", leaseID)
+		return nil
 	}
 	if err := requireExactDaytonaClaim(leaseID, sandbox); err != nil {
 		return err
@@ -288,7 +330,7 @@ func (b *daytonaLeaseBackend) Stop(ctx context.Context, req StopRequest) error {
 }
 
 func (b *daytonaLeaseBackend) createDaytonaToolboxSandbox(ctx context.Context, repo Repo, keep, reclaim bool, requestedSlug string) (*sdkdaytona.Sandbox, string, string, error) {
-	sandbox, leaseID, slug, err := b.createDaytonaSandbox(ctx, repo, keep, reclaim, requestedSlug)
+	sandbox, leaseID, slug, err := b.createDaytonaSandbox(ctx, AcquireRequest{Repo: repo, Keep: keep, Reclaim: reclaim, RequestedSlug: requestedSlug})
 	if err != nil {
 		return nil, leaseID, slug, err
 	}
@@ -322,20 +364,9 @@ func (b *daytonaLeaseBackend) resolveDaytonaToolboxSandbox(ctx context.Context, 
 			return nil, "", err
 		}
 	}
-	if !daytonaStateReady(daytonaSandboxState(apiSandbox)) {
-		if daytonaStateFailed(daytonaSandboxState(apiSandbox)) {
-			return nil, "", exit(5, "daytona sandbox %s entered terminal state=%s", apiSandbox.GetId(), daytonaSandboxState(apiSandbox))
-		}
-		if _, err := apiClient.StartSandbox(ctx, apiSandbox.GetId()); err != nil {
-			return nil, "", daytonaError("start sandbox", err)
-		}
-		if apiSandbox, err = waitForDaytonaReady(ctx, apiClient, apiSandbox.GetId(), 5*time.Minute); err != nil {
-			return nil, "", err
-		}
-	}
-	apiSandbox, err = apiClient.GetSandbox(ctx, apiSandbox.GetId())
+	apiSandbox, err = ensureDaytonaRunning(ctx, apiClient, apiSandbox, leaseID)
 	if err != nil {
-		return nil, "", daytonaError("get sandbox", err)
+		return nil, "", err
 	}
 	sandbox, err := newDaytonaToolboxSandbox(b.cfg, b.rt, apiSandbox)
 	if err != nil {
