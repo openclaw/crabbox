@@ -274,10 +274,12 @@ with it today:
   that resolves is therefore not proof that a particular resource is live.
   Crabbox addresses sandboxes by name for lifecycle calls because it generates
   and normalizes those names itself and rejects non-Crabbox ones.
-- **Get-by-name is authoritative for existence.** `GetSandbox`
-  (`internal/providers/islo/client.go`) is what `status`, SSH resolution, and
-  lease reuse consult, and its `404` after a delete is immediate and
-  authoritative.
+- **Get-by-name is what the adapter treats as authoritative for existence.**
+  `GetSandbox` (`internal/providers/islo/client.go`) is what `status`, SSH
+  resolution, and lease reuse consult, and a `404` from it is how the adapter
+  concludes that a name does not resolve. It answers a question about a name at
+  one point in time; it is not a guarantee about a delete that was only
+  accepted.
 - **The list endpoint is eventually consistent and must not be used to prove
   absence.** It can keep returning a sandbox for seconds after that sandbox's
   own `GET` reports `404`. Crabbox calls `ListSandboxes` only for inventory
@@ -289,17 +291,28 @@ with it today:
   is the strongest available proof that one exact resource was removed, because
   it separates "this id was deleted" from "this name does not resolve right
   now". The adapter has no by-id code path today and does not retain sandbox
-  ids for teardown checks, so Crabbox currently confirms a delete only by name.
-  Basing teardown verification on the tombstone would be a code change; this
-  section does not describe existing adapter behavior.
+  ids for teardown checks. Basing teardown verification on the tombstone would
+  be a code change; this section does not describe existing adapter behavior.
 
-At the HTTP layer, `DeleteSandbox` (`internal/providers/islo/client.go`) treats
-a `404` as an idempotent success, so a delete that races another delete is not
-an error. That does not make a repeated `crabbox stop` a no-op: `Stop` requires
-an exact local lease claim before it deletes and drops the claim afterwards, so
-a second `stop` fails the claim check and exits `4` without reaching the API.
-Stopping again after a successful stop requires adopting the lease first with an
-explicit `--reclaim reuse`.
+`crabbox stop` issues a delete *request* and accepts the answer; it does not
+confirm absence. `Stop` (`internal/providers/islo/backend.go`) requires an exact
+local lease claim, calls `DeleteSandbox(name)`, and on any non-error response
+removes the local claim and prints `released` — with no follow-up read of the
+sandbox. `DeleteSandbox` (`internal/providers/islo/client.go`) treats every
+status below `400` as success, which includes an accepted-but-pending `202`, and
+carves `404` out of the failure range so a delete that races another delete is a
+success too. A successful `crabbox stop` therefore means Islo accepted a delete
+for that name, not that the named sandbox is already gone. Post-delete absence
+is not verified anywhere today, so anything that needs absence rather than
+acceptance has to ask for it — a get-by-name that returns `404`, or the by-id
+tombstone if the adapter starts retaining ids — and must not use the list
+endpoint for it.
+
+HTTP-level idempotency does not make a repeated `crabbox stop` a no-op, because
+the claim check happens locally: the claim is dropped after the first accepted
+delete, so a second `stop` fails that check and exits `4` without reaching the
+API. Stopping again after a successful stop requires adopting the lease first
+with an explicit `--reclaim reuse`.
 
 One create-time identity detail is worth recording even though Crabbox does not
 rely on it yet. `request_id` on a create is an idempotency key: replaying it
