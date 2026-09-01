@@ -2,6 +2,10 @@
 
 ## 0.48.1 (Unreleased)
 
+### Added
+
+- Added an opt-in Islo idle-pause policy behind `--islo-idle-pause` / `islo.idlePause` / `CRABBOX_ISLO_IDLE_PAUSE`, off by default: when enabled, `--idle-timeout` is sent on create as the sandbox `pause_after_idle` lifecycle field with `auto_resume` pinned to `never`, and a `--reclaim` whose idle timeout differs from the sandbox's immutable policy fails instead of adopting it. It stays opt-in because Islo does not document what counts as activity, so an opted-in run longer than `--idle-timeout` can be paused mid-exec; raise `--idle-timeout` past the longest run you expect. With the knob off, the create request carries no `lifecycle` object, exactly as before. `--ttl` is never handed to Islo as a deletion deadline; Crabbox remains the only thing that deletes an Islo lease.
+
 ### Fixed
 
 - Scoped automatic SSH failure bundles to the current uploaded script, excluding retained uploads and neighboring files while preserving explicit artifact/download selection.
@@ -15,6 +19,7 @@
 - Added exact-source abandonment for unresolved ordinary Machine0 checkpoints: dispose of the positively identified source through its existing claim owner while retaining the unknown image obligation and rejecting later fork, prune, or local deletion.
 - Released ordinary Machine0 checkpoint reservations when the provider proves image submission was never attempted, keeping failed captures from blocking source cleanup while retaining interrupted or uncertain submissions.
 - Made explicit coordinator Stop share one five-minute cancellation budget across inspection, claim waits, release, and observation, and made local daemon lock waits honor cancellation without losing confirmed cleanup results.
+- Fixed reused Islo leases being driven while paused: `run --id` now checks the sandbox status and resumes it before sync and exec, as `ssh` already did.
 - Fixed Parallels clone destinations to pass the configured parent directory to `prlctl --dst`, letting Parallels name and create the VM bundle beneath it.
 - Preserved exclusive ready-pool lease ownership across typed and legacy pools, including existing duplicate records, and prevented expired or quarantined borrows from becoming ready through return or re-registration.
 - Reduced SSH startup round trips by checking readiness before transport diagnosis and skipping unused run telemetry when no coordinator run handle exists.

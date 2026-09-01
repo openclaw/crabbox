@@ -61,6 +61,7 @@ type isloFlagValues struct {
 	VCPUs          *int
 	MemoryMB       *int
 	DiskGB         *int
+	IdlePause      *bool
 }
 
 func RegisterIsloProviderFlags(fs *flag.FlagSet, defaults Config) any {
@@ -73,6 +74,7 @@ func RegisterIsloProviderFlags(fs *flag.FlagSet, defaults Config) any {
 		VCPUs:          fs.Int("islo-vcpus", defaults.Islo.VCPUs, "Islo sandbox vCPUs"),
 		MemoryMB:       fs.Int("islo-memory-mb", defaults.Islo.MemoryMB, "Islo sandbox memory in MB"),
 		DiskGB:         fs.Int("islo-disk-gb", defaults.Islo.DiskGB, "Islo sandbox disk in GB"),
+		IdlePause:      fs.Bool("islo-idle-pause", defaults.Islo.IdlePause, "ask Islo to pause the sandbox after --idle-timeout of inactivity (off by default)"),
 	}
 }
 
@@ -108,6 +110,9 @@ func ApplyIsloProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if flagWasSet(fs, "islo-disk-gb") {
 		cfg.Islo.DiskGB = *v.DiskGB
 		core.MarkIsloDiskGBExplicit(cfg)
+	}
+	if flagWasSet(fs, "islo-idle-pause") {
+		cfg.Islo.IdlePause = *v.IdlePause
 	}
 	return nil
 }
@@ -216,6 +221,17 @@ func (b *isloBackend) Run(ctx context.Context, req RunRequest) (RunResult, error
 				}
 			}
 			tailnetReady = err == nil && meta.Enabled
+		}
+		// A reused lease can be paused: `crabbox pause` pauses it outright, an
+		// Islo tenant default can, and so can the opt-in idle pause policy
+		// (isloLifecycleForConfig). Crabbox does not drive a paused sandbox --
+		// whether Islo would accept a sync or exec request against one, or wake
+		// it, is not documented -- so bring it back first, exactly as the SSH
+		// resolve path does. This is unconditional: it does not depend on the
+		// idle-pause knob, because Crabbox is not the only thing that can pause
+		// a sandbox.
+		if _, err := b.resolveRunningSandbox(ctx, client, name, core.ResolveRequest{}); err != nil {
+			return RunResult{}, err
 		}
 	}
 	shouldStop := acquired && !req.Keep
@@ -633,6 +649,7 @@ func (b *isloBackend) createSandbox(ctx context.Context, client isloAPI, repo Re
 	if b.cfg.Islo.DiskGB > 0 && (b.cfg.Islo.DiskGB != base.Islo.DiskGB || core.IsloDiskGBExplicit(b.cfg)) {
 		create.DiskGb = intValue(b.cfg.Islo.DiskGB)
 	}
+	create.Lifecycle = isloLifecycleForConfig(b.cfg)
 	sandbox, err := client.CreateSandbox(ctx, create)
 	if err != nil {
 		return "", "", "", isloError("create sandbox", err)
@@ -772,6 +789,13 @@ func (b *isloBackend) resolveLeaseIDForRepo(ctx context.Context, client isloAPI,
 	}
 	if sandbox == nil || sandbox.GetName() != name {
 		return "", "", "", exit(4, "islo sandbox %q was not found; refusing to create a local claim", name)
+	}
+	// Islo fixes the lifecycle policy at create time, so when idle pausing is
+	// opted in, adopting a sandbox whose policy disagrees with this config must
+	// fail instead of leaving the caller with an idle timeout that was never sent
+	// for this sandbox. With the knob off this is a no-op.
+	if err := isloLifecycleConflict(name, sandbox, b.cfg); err != nil {
+		return "", "", "", err
 	}
 	if err := claimLeaseForRepoProviderWithPond(leaseID, slug, isloProvider, b.cfg.Pond, repoRoot, b.cfg.IdleTimeout, true); err != nil {
 		return "", "", "", err

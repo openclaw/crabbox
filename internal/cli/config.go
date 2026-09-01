@@ -868,6 +868,10 @@ type IsloConfig struct {
 	VCPUs          int
 	MemoryMB       int
 	DiskGB         int
+	// IdlePause opts a sandbox into a provider-enforced idle pause derived from
+	// IdleTimeout. Off by default: the provider adapter sends no lifecycle
+	// policy unless it is set.
+	IdlePause bool
 }
 
 type FreestyleConfig struct {
@@ -4225,6 +4229,7 @@ type fileIsloConfig struct {
 	VCPUs          int    `yaml:"vcpus,omitempty"`
 	MemoryMB       int    `yaml:"memoryMB,omitempty"`
 	DiskGB         int    `yaml:"diskGB,omitempty"`
+	IdlePause      *bool  `yaml:"idlePause,omitempty"`
 }
 
 type fileTenkiConfig struct {
@@ -6919,6 +6924,9 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Islo.DiskGB = file.Islo.DiskGB
 			cfg.isloDiskGBExplicit = true
 		}
+		if file.Islo.IdlePause != nil {
+			cfg.Islo.IdlePause = *file.Islo.IdlePause
+		}
 	}
 	if file.Freestyle != nil {
 		if file.Freestyle.APIURL != "" {
@@ -9204,6 +9212,9 @@ func applyEnv(cfg *Config) error {
 		if _, err := strconv.Atoi(raw); err == nil {
 			cfg.isloDiskGBExplicit = true
 		}
+	}
+	if value, ok := getenvBool("CRABBOX_ISLO_IDLE_PAUSE"); ok {
+		cfg.Islo.IdlePause = value
 	}
 	cfg.Freestyle.APIKey = getenv("CRABBOX_FREESTYLE_API_KEY", getenv("FREESTYLE_API_KEY", cfg.Freestyle.APIKey))
 	cfg.Freestyle.APIURL = getenv("CRABBOX_FREESTYLE_API_URL", getenv("FREESTYLE_API_URL", cfg.Freestyle.APIURL))
