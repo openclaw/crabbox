@@ -307,6 +307,7 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_ISLO_VCPUS",
 		"CRABBOX_ISLO_MEMORY_MB",
 		"CRABBOX_ISLO_DISK_GB",
+		"CRABBOX_ISLO_IDLE_PAUSE",
 		"CRABBOX_FREESTYLE_API_KEY",
 		"FREESTYLE_API_KEY",
 		"CRABBOX_FREESTYLE_API_URL",
@@ -665,6 +666,14 @@ func TestIsloIdlePauseDefaultsOffAndOptsInExplicitly(t *testing.T) {
 	}
 
 	clearConfigEnv(t)
+	sealed := base
+	if err := applyEnv(&sealed); err != nil {
+		t.Fatal(err)
+	}
+	if sealed.Islo.IdlePause {
+		t.Fatal("clearConfigEnv must unset CRABBOX_ISLO_IDLE_PAUSE; a value exported in the developer's shell must not opt in")
+	}
+
 	t.Setenv("CRABBOX_ISLO_IDLE_PAUSE", "1")
 	fromEnv := base
 	if err := applyEnv(&fromEnv); err != nil {

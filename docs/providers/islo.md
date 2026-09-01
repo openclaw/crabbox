@@ -153,18 +153,23 @@ asking Islo to pause a sandbox that has been idle that long instead of leaving
 it billing for CPU and memory.
 
 It is opt-in rather than a default with a caveat because the safety of the
-policy under an active workload is not established. Islo enforces
-`pause_after_idle` rather than merely recording it, and control-plane reads such
-as `crabbox status` do not count as activity. What else counts is undocumented:
-if an exec that is still running, or traffic to a published share or a tailnet
-peer, does not hold the idle clock off, then an opted-in `crabbox run` longer
-than `--idle-timeout` can be paused mid-exec, and a warm lease serving a share
-can be paused after the idle timeout elapses without a Crabbox call. Crabbox
-cannot detect that case — nothing in the Islo API reports why a sandbox paused —
-so raising `--idle-timeout` past the longest run you expect is the only
-mitigation, and `crabbox resume` recovers a sandbox that was paused under you.
-Turning the knob on is therefore a deliberate cost-versus-interruption tradeoff
-rather than something to inherit on upgrade.
+policy under an active workload is not established. On 2026-08-31, one manual
+check against the live API observed the field being enforced rather than merely
+recorded: a sandbox created with `pause_after_idle=60` still reported `running`
+at 75s and `paused` at 90s while `GET /sandboxes` polled it every 15s
+throughout, so control-plane reads of that kind — what `crabbox status` does —
+did not hold the idle clock off. That is provider behavior observed once at a
+point in time, not a contract Islo documents, and nothing in this repository
+reproduces it: the tests here cover only the request Crabbox sends. What else
+counts as activity is undocumented: if an exec that is still running, or
+traffic to a published share or a tailnet peer, does not hold the idle clock
+off, then an opted-in `crabbox run` longer than `--idle-timeout` can be paused
+mid-exec, and a warm lease serving a share can be paused after the idle timeout
+elapses without a Crabbox call. Crabbox cannot detect that case — nothing in
+the Islo API reports why a sandbox paused — so raising `--idle-timeout` past the
+longest run you expect is the only mitigation, and `crabbox resume` recovers a
+sandbox that was paused under you. Turning the knob on is therefore a deliberate
+cost-versus-interruption tradeoff rather than something to inherit on upgrade.
 
 `auto_resume` is pinned to `never` whenever the policy is sent, and Crabbox
 resumes a paused sandbox itself: `crabbox run --id` and `crabbox ssh` check the
