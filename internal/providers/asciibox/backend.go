@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"path"
 	"regexp"
 	"strings"
@@ -470,6 +471,12 @@ func boxToServer(cfg Config, box boxData, leaseID, slug string, keep bool) Serve
 func statusFromBox(cfg Config, box boxData, leaseID, slug string) StatusView {
 	server := boxToServer(cfg, box, leaseID, slug, true)
 	host := boxHost(box)
+	sshHost := host
+	port := "22"
+	if endpointHost, endpointPort, err := boxSSHConnection(box); err == nil {
+		sshHost = endpointHost
+		port = endpointPort
+	}
 	user := boxSSHUser(box)
 	return StatusView{
 		ID:         leaseID,
@@ -481,9 +488,9 @@ func statusFromBox(cfg Config, box boxData, leaseID, slug string) StatusView {
 		ServerType: server.ServerType.Name,
 		Host:       host,
 		Network:    networkPublic,
-		SSHHost:    host,
+		SSHHost:    sshHost,
 		SSHUser:    user,
-		SSHPort:    "22",
+		SSHPort:    port,
 		SSHKey:     boxSSHKey(cfg),
 		ExpiresAt:  boxExpiresAt(box),
 		Labels:     server.Labels,
@@ -493,9 +500,9 @@ func statusFromBox(cfg Config, box boxData, leaseID, slug string) StatusView {
 }
 
 func boxSSHTarget(cfg Config, box boxData) (SSHTarget, error) {
-	host := boxHost(box)
-	if host == "" {
-		return SSHTarget{}, exit(5, "ascii-box %s is missing ip for SSH", box.ID)
+	host, port, err := boxSSHConnection(box)
+	if err != nil {
+		return SSHTarget{}, err
 	}
 	user := boxSSHUser(box)
 	if user == "" {
@@ -505,12 +512,27 @@ func boxSSHTarget(cfg Config, box boxData) (SSHTarget, error) {
 		User:            user,
 		Host:            host,
 		Key:             boxSSHKey(cfg),
-		Port:            "22",
+		Port:            port,
 		TargetOS:        targetLinux,
 		NetworkKind:     networkPublic,
 		NoControlMaster: true,
 		ReadyCheck:      "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null && command -v python3 >/dev/null",
 	}, nil
+}
+
+func boxSSHConnection(box boxData) (string, string, error) {
+	if endpoint := strings.TrimSpace(firstNonBlank(box.SSHEndpoint, box.SSHEndpointAlt)); endpoint != "" {
+		host, port, err := net.SplitHostPort(endpoint)
+		if err != nil || strings.TrimSpace(host) == "" || strings.TrimSpace(port) == "" {
+			return "", "", exit(5, "ascii-box %s has invalid SSH endpoint %q", box.ID, endpoint)
+		}
+		return strings.TrimSpace(host), strings.TrimSpace(port), nil
+	}
+	host := boxHost(box)
+	if host == "" {
+		return "", "", exit(5, "ascii-box %s is missing ip for SSH", box.ID)
+	}
+	return host, "22", nil
 }
 
 func boxSSHKey(cfg Config) string {
