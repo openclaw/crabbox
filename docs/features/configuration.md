@@ -35,6 +35,12 @@ Lowest precedence is applied first: defaults, then user config, then repo
 config, then env vars, then flags. Each layer only overrides fields that are
 explicitly set; unset fields fall through to the layer below.
 
+For the replacement lists `env.allow`, `results.junit`, and
+`run.preflightTools`, omitting the key inherits the lower layer, `[]` clears
+it, and a nonempty list replaces it. This applies to user config and each
+repo-local file independently. Additive lists keep their own policy:
+`sync.exclude` and profile allowlists append rather than clear inherited entries.
+
 Two commands expose the resolved view:
 
 - `crabbox config show` prints the merged configuration as the CLI sees it
@@ -990,7 +996,8 @@ env:
 matching local env vars to the remote command. The default allowlist is
 `CI` and `NODE_OPTIONS`. Secrets do not belong in `env.allow`; pass them
 through provider-side mechanisms. A selected profile may provide its own
-allowlist, but `CRABBOX_ENV_ALLOW` replaces the fully resolved config/profile
+additive allowlist; clearing top-level `env.allow` does not remove profile
+additions. `CRABBOX_ENV_ALLOW` replaces the fully resolved config/profile
 list, and explicit `--allow-env` flags append afterward. See
 [Environment forwarding](env-forwarding.md).
 
@@ -1010,9 +1017,11 @@ include `go`, `cargo`, `cmake`, `uv`, `python`, and `python3` on POSIX, WSL2,
 and native Windows, plus `make` on POSIX and WSL2. The CMake probe invokes only
 the literal `cmake --version` command and reports its first output line or
 `cmake=missing`. Use `default` to include Crabbox's default built-ins and `none`
-to print only the workspace summary. Preflight probes are diagnostic only: a
-missing tool does not block the workload, and Crabbox does not install or
-upgrade toolchains.
+to print only the workspace summary. An omitted `run.preflightTools` inherits
+the lower layer (built-in probes by default); `preflightTools: []` clears the
+list and prints only the workspace summary, without restoring default probes.
+Preflight probes are diagnostic only: a missing tool does not block the
+workload, and Crabbox does not install or upgrade toolchains.
 
 ### Actions
 

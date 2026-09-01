@@ -4238,6 +4238,62 @@ exit 0
 	}
 }
 
+func TestRunCommandEmptyReplacementLists(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		flags     []string
+		auto      bool
+		wantAllow bool
+		wantJUnit bool
+	}{
+		{name: "cleared"},
+		{name: "CLI append and selection", flags: []string{"--allow-env", "BUILD_FLAVOR", "--junit", "new-report.xml"}, wantAllow: true, wantJUnit: true},
+		{name: "auto remains independent", auto: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			dir := t.TempDir()
+			t.Chdir(dir)
+			t.Setenv("CRABBOX_CONFIG", "")
+			logPath := installRecordingSSH(t, dir)
+			for _, name := range []string{"CI", "NODE_OPTIONS", "BUILD_FLAVOR"} {
+				t.Setenv(name, "synthetic-local-proof")
+			}
+			writeReplacementListConfig(t, "crabbox.yaml", fmt.Sprintf("env:\n  allow: [CI, NODE_OPTIONS, BUILD_FLAVOR]\nresults:\n  junit: [old-report.xml]\n  auto: %t\nrun:\n  preflightTools: [cmake]\n", tc.auto))
+			writeReplacementListConfig(t, ".crabbox.yaml", "env:\n  allow: []\nresults:\n  junit: []\nrun:\n  preflightTools: []\n")
+			args := []string{"--provider", "ssh", "--static-host", "127.0.0.1", "--static-user", "runner", "--static-work-root", "/tmp/crabbox-list-test", "--no-sync", "--preflight"}
+			args = append(args, tc.flags...)
+			args = append(args, "--", "true")
+			var stdout, stderr bytes.Buffer
+			if err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), args); err != nil {
+				t.Fatalf("run error=%v\nstderr=%s", err, stderr.String())
+			}
+			data, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			log := string(data)
+			for _, forbidden := range []string{"old-report.xml", "NODE_OPTIONS=", "CI=", "cmake --version"} {
+				if strings.Contains(log, forbidden) {
+					t.Errorf("cleared config reached SSH transport: %s", forbidden)
+				}
+			}
+			if strings.Contains(log, "BUILD_FLAVOR=") != tc.wantAllow {
+				t.Errorf("forwarding BUILD_FLAVOR does not match CLI append=%t", tc.wantAllow)
+			}
+			if strings.Contains(log, "new-report.xml") != tc.wantJUnit {
+				t.Errorf("result collection does not match CLI selection=%t", tc.wantJUnit)
+			}
+			if strings.Contains(log, remoteResultsMarker) != tc.auto {
+				t.Errorf("auto collection marker does not match results.auto=%t", tc.auto)
+			}
+			if !strings.Contains(log, "CRABBOX_RUN_ID=") {
+				t.Error("clearing allowlist removed independent execution metadata")
+			}
+		})
+	}
+}
+
 func TestRunCommandSkipsJSRuntimePreflightWithForwardedPATH(t *testing.T) {
 	dir := t.TempDir()
 	isolateRunTestUserDirs(t, dir)
@@ -5290,6 +5346,30 @@ func TestPreflightToolsForTargetFiltersByOS(t *testing.T) {
 	got = preflightToolsForTarget(SSHTarget{TargetOS: targetMacOS}, []string{"apt", "powershell"})
 	if len(got) != 0 {
 		t.Fatalf("unsupported mac tools=%v", got)
+	}
+}
+
+func TestPreflightToolsCSVOverridePreservesEmptySemantics(t *testing.T) {
+	for _, value := range []string{" ", ", ,", "go,GO", "none"} {
+		t.Run(value, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv("CRABBOX_PREFLIGHT_TOOLS", value)
+			cfg := baseConfig()
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			want := []string{"go"}
+			if value == "none" {
+				want = nil
+			} else if strings.Trim(value, " ,") == "" {
+				want = preflightToolsForTarget(SSHTarget{TargetOS: targetLinux}, nil)
+			}
+			for _, tools := range [][]string{cfg.Run.PreflightTools, parsePreflightToolsOverride(value)} {
+				if got := preflightToolsForTarget(SSHTarget{TargetOS: targetLinux}, tools); !reflect.DeepEqual(got, want) {
+					t.Fatalf("CSV override=%q probes=%v, want %v", value, got, want)
+				}
+			}
+		})
 	}
 }
 

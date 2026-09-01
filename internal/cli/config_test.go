@@ -24,6 +24,11 @@ func clearConfigEnv(t *testing.T) {
 	t.Helper()
 	isolateTestUserDirs(t)
 	for _, key := range []string{
+		"CRABBOX_ENV_ALLOW",
+		"CRABBOX_RESULTS_JUNIT",
+		"CRABBOX_RESULTS_AUTO",
+		"CRABBOX_RESULTS_FAIL_ON_FAILURES",
+		"CRABBOX_PREFLIGHT_TOOLS",
 		"CRABBOX_COORDINATOR",
 		"CRABBOX_COORDINATOR_MODE",
 		"CRABBOX_COORDINATOR_AUTO_WEBVNC",
@@ -5214,6 +5219,124 @@ func TestRepoConfigBareEnvWildcardDoesNotForwardEveryLocalVariable(t *testing.T)
 	}
 	if got := allowedEnv(cfg.EnvAllow); got["CRABBOX_PROOF_API_TOKEN"] != "" {
 		t.Fatalf("bare wildcard forwarded proof secret: %q", got["CRABBOX_PROOF_API_TOKEN"])
+	}
+}
+
+func writeReplacementListConfig(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConfigReplacementListsAcrossYAMLLayers(t *testing.T) {
+	for _, layers := range []struct{ lower, upper string }{
+		{"defaults", "user"},
+		{"defaults", "crabbox.yaml"},
+		{"defaults", ".crabbox.yaml"},
+		{"user", "crabbox.yaml"},
+		{"user", ".crabbox.yaml"},
+		{"crabbox.yaml", ".crabbox.yaml"},
+	} {
+		for _, value := range []struct {
+			name, yaml string
+		}{
+			{"absent", "{}\n"},
+			{"omitted", "env: {}\nresults: {}\nrun: {}\n"},
+			{"empty", "env:\n  allow: []\nresults:\n  junit: []\nrun:\n  preflightTools: []\n"},
+			{"replacement", "env:\n  allow: [BUILD_FLAVOR, BUILD_FLAVOR]\nresults:\n  junit: [new-report.xml, new-report.xml]\nrun:\n  preflightTools: [go, GO]\n"},
+		} {
+			t.Run(layers.lower+"/"+layers.upper+"/"+value.name, func(t *testing.T) {
+				clearConfigEnv(t)
+				t.Setenv("CRABBOX_CONFIG", "")
+				t.Chdir(t.TempDir())
+				path := func(layer string) string {
+					if layer == "user" {
+						return userConfigPath()
+					}
+					return layer
+				}
+				wantAllow, wantJUnit, wantTools := "CI,NODE_OPTIONS", "", ""
+				if layers.lower != "defaults" {
+					writeReplacementListConfig(t, path(layers.lower), "env:\n  allow: [CI, NODE_OPTIONS, BUILD_FLAVOR]\nresults:\n  junit: [old-report.xml]\n  auto: true\nrun:\n  preflightTools: [cmake]\n")
+					wantAllow, wantJUnit, wantTools = "CI,NODE_OPTIONS,BUILD_FLAVOR", "old-report.xml", "cmake"
+				}
+				writeReplacementListConfig(t, path(layers.upper), value.yaml)
+				if value.name == "empty" {
+					wantAllow, wantJUnit, wantTools = "", "", ""
+				} else if value.name == "replacement" {
+					wantAllow, wantJUnit, wantTools = "BUILD_FLAVOR", "new-report.xml", "go"
+				}
+				cfg, err := loadConfig()
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, list := range []struct {
+					name string
+					got  []string
+					want string
+				}{
+					{"env.allow", cfg.EnvAllow, wantAllow},
+					{"results.junit", cfg.Results.JUnit, wantJUnit},
+					{"run.preflightTools", cfg.Run.PreflightTools, wantTools},
+				} {
+					if got := strings.Join(list.got, ","); got != list.want {
+						t.Errorf("%s=%q, want %q", list.name, got, list.want)
+					}
+				}
+				if cfg.Results.Auto != (layers.lower != "defaults") {
+					t.Error("replacing results.junit changed independent results.auto")
+				}
+				if value.name == "empty" {
+					for _, name := range []string{"CI", "NODE_OPTIONS", "BUILD_FLAVOR"} {
+						t.Setenv(name, "synthetic-local-proof")
+					}
+					if got := allowedEnv(cfg.EnvAllow); len(got) != 0 {
+						t.Error("cleared allowlist still forwards local environment")
+					}
+					if got := preflightToolsForTarget(SSHTarget{TargetOS: targetLinux}, cfg.Run.PreflightTools); len(got) != 0 {
+						t.Errorf("cleared preflight tools restored probes: %v", got)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestConfigReplacementListsStayClearedAndRespectOverrides(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Chdir(t.TempDir())
+	writeReplacementListConfig(t, userConfigPath(), "env:\n  allow: [BUILD_FLAVOR]\nresults:\n  junit: [old-report.xml]\nrun:\n  preflightTools: [cmake]\n")
+	writeReplacementListConfig(t, "crabbox.yaml", "env:\n  allow: []\nresults:\n  junit: []\nrun:\n  preflightTools: []\n")
+	writeReplacementListConfig(t, ".crabbox.yaml", "env: {}\nresults: {}\nrun: {}\n")
+	for _, name := range []string{"CRABBOX_ENV_ALLOW", "CRABBOX_RESULTS_JUNIT", "CRABBOX_PREFLIGHT_TOOLS"} {
+		t.Setenv(name, "")
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.EnvAllow)+len(cfg.Results.JUnit)+len(cfg.Run.PreflightTools) != 0 {
+		t.Fatal("omitted fields or empty environment overrides restored cleared lists")
+	}
+	applyRunEnvAllowFlags(&cfg, []string{"BUILD_FLAVOR,BUILD_FLAVOR"})
+	if got := strings.Join(cfg.EnvAllow, ","); got != "BUILD_FLAVOR" {
+		t.Fatalf("CLI append after clear=%q", got)
+	}
+	t.Setenv("CRABBOX_ENV_ALLOW", "CI")
+	t.Setenv("CRABBOX_RESULTS_JUNIT", "env-report.xml")
+	t.Setenv("CRABBOX_PREFLIGHT_TOOLS", "go")
+	cfg, err = loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyRunEnvAllowFlags(&cfg, []string{"BUILD_FLAVOR"})
+	if strings.Join(cfg.EnvAllow, ",") != "CI,BUILD_FLAVOR" || strings.Join(cfg.Results.JUnit, ",") != "env-report.xml" || strings.Join(cfg.Run.PreflightTools, ",") != "go" {
+		t.Fatalf("higher precedence overrides not applied: allow=%v junit=%v tools=%v", cfg.EnvAllow, cfg.Results.JUnit, cfg.Run.PreflightTools)
 	}
 }
 

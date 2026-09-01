@@ -46,6 +46,13 @@ Or through the environment: `CRABBOX_RESULTS_JUNIT` (comma-separated paths),
 [`crabbox job run`](jobs.md) (from a job's `junit:` list) and
 [`crabbox capsule replay`](capsules.md).
 
+In layered YAML, omitting `results.junit` inherits the lower layer's paths,
+`results: {junit: []}` clears them, and a nonempty list replaces them. Clearing
+the list removes old explicit collection paths but does not disable independent
+`results.auto: true` discovery. Set `auto: false` too to stop both forms of
+collection. A higher `CRABBOX_RESULTS_JUNIT` override or explicit `--junit` can
+select paths again after a YAML clear.
+
 ## What happens after the command exits
 
 `crabbox run` collects results only when `--results-auto` is set or at least one

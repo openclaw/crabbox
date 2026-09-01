@@ -721,9 +721,19 @@ func validatePreflightTools(tools []string) error {
 	return nil
 }
 
+func parsePreflightToolsOverride(value string) []string {
+	tools := normalizePreflightToolNames(splitCommaList(value))
+	// Empty CSV overrides have always selected defaults, unlike YAML [].
+	if len(tools) == 0 {
+		return nil
+	}
+	return tools
+}
+
 func preflightToolsForTarget(target SSHTarget, configured []string) []string {
 	tools := normalizePreflightToolNames(configured)
-	if len(tools) == 0 {
+	// Only omission selects defaults; an explicit empty list disables probes.
+	if configured == nil {
 		tools = defaultPreflightToolNames
 	}
 	if len(tools) == 1 && tools[0] == "none" {
