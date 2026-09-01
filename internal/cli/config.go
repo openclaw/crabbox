@@ -868,6 +868,13 @@ type IsloConfig struct {
 	VCPUs          int
 	MemoryMB       int
 	DiskGB         int
+	// ForgetMissing is the operator opt-out from the identity-safe teardown
+	// gate: it drops a lease claim whose sandbox identity could not be proven
+	// instead of retaining it for a retry. It never authorizes a delete, so the
+	// sandbox may keep running and billing. Accepted from flags and the
+	// environment only, never from a config file, because it is an explicit
+	// per-invocation acknowledgement rather than a persisted preference.
+	ForgetMissing bool
 }
 
 type FreestyleConfig struct {
@@ -9204,6 +9211,9 @@ func applyEnv(cfg *Config) error {
 		if _, err := strconv.Atoi(raw); err == nil {
 			cfg.isloDiskGBExplicit = true
 		}
+	}
+	if value, ok := getenvBool("CRABBOX_ISLO_FORGET_MISSING"); ok {
+		cfg.Islo.ForgetMissing = value
 	}
 	cfg.Freestyle.APIKey = getenv("CRABBOX_FREESTYLE_API_KEY", getenv("FREESTYLE_API_KEY", cfg.Freestyle.APIKey))
 	cfg.Freestyle.APIURL = getenv("CRABBOX_FREESTYLE_API_URL", getenv("FREESTYLE_API_URL", cfg.Freestyle.APIURL))

@@ -92,6 +92,7 @@ Provider flags (each overrides the matching `islo.*` config key):
 --islo-vcpus
 --islo-memory-mb
 --islo-disk-gb
+--islo-forget-missing
 ```
 
 Every key also reads a `CRABBOX_ISLO_*` environment variable, which takes
@@ -99,6 +100,11 @@ precedence over the config file: `CRABBOX_ISLO_BASE_URL`, `CRABBOX_ISLO_IMAGE`,
 `CRABBOX_ISLO_WORKDIR`, `CRABBOX_ISLO_GATEWAY_PROFILE`,
 `CRABBOX_ISLO_SNAPSHOT_NAME`, `CRABBOX_ISLO_VCPUS`, `CRABBOX_ISLO_MEMORY_MB`,
 and `CRABBOX_ISLO_DISK_GB`.
+
+`--islo-forget-missing` / `CRABBOX_ISLO_FORGET_MISSING` is the exception: it has
+no `islo.*` config key, because it is an explicit per-invocation
+acknowledgement rather than a persisted preference. See
+[Teardown safety](#teardown-safety).
 
 The resolved defaults are kept in Crabbox config for display and override
 compatibility, but the Islo create request omits implicit default `image`,
@@ -147,6 +153,41 @@ the deadline; hitting the deadline also exits 5.
 sandbox is resumed automatically and given up to 2 minutes to report `running`
 again before the command fails. A sandbox in a terminal state fails
 immediately with exit code 5.
+
+### Teardown safety
+
+Every sandbox has an immutable id as well as a name, and Crabbox records that id
+on the lease claim. `DELETE /sandboxes/{name}` is name-only and a name becomes
+free for a new sandbox once its sandbox is deleted, so for a lease that records
+an id Crabbox will not delete a name it has not identified as that id. `stop`
+deletes, then proves the delete with the `GET /sandboxes/-/by-id/{id}` tombstone
+or a 404 on the exact name, and only a proven delete drops the local claim.
+
+When neither identity lookup can tie the recorded name to the claimed resource -
+during an API read outage, for instance - `stop` refuses to delete, keeps the
+claim, and exits 5. Retrying it once reads answer again is the normal fix, and
+the sandbox may be running and billable until then.
+
+`--islo-forget-missing` (or `CRABBOX_ISLO_FORGET_MISSING=1`) is the operator
+opt-out for a claim no retry can satisfy, such as a sandbox these credentials
+will never be able to read again:
+
+```sh
+crabbox stop --provider islo blue-lobster --islo-forget-missing
+```
+
+It drops the local claim and issues **no** delete, so it never deletes a name it
+could not identify. The sandbox may still exist and still bill, and Crabbox will
+no longer track it, so it must then be dealt with through the Islo API directly.
+Crabbox says so on stderr, naming the sandbox, and reports the release as
+`proof=unverified-forgotten`. The flag is off unless passed and changes no other
+teardown path: proven teardowns, the name-only delete of a claim with no
+recorded id, a positive identity mismatch, and an unproven confirmation all
+behave exactly as they do without it. It also only applies to an explicit
+`stop` - the cleanup that runs at the end of a `run` stays fail-closed even
+when the setting is on, because it knows its sandbox exists and its recovery
+claim is what keeps that sandbox reachable. It has no config-file key on
+purpose.
 
 ## Capabilities
 

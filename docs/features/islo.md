@@ -72,6 +72,13 @@ variable:
 | `vcpus`          | `--islo-vcpus`           | `CRABBOX_ISLO_VCPUS`           |
 | `memoryMB`       | `--islo-memory-mb`       | `CRABBOX_ISLO_MEMORY_MB`       |
 | `diskGB`         | `--islo-disk-gb`         | `CRABBOX_ISLO_DISK_GB`         |
+| (none)           | `--islo-forget-missing`  | `CRABBOX_ISLO_FORGET_MISSING`  |
+
+`--islo-forget-missing` has no config-file key on purpose. It drops a lease
+claim whose sandbox identity could not be proven, which leaves a possibly
+billing sandbox untracked, so it stays an explicit per-invocation
+acknowledgement instead of something a checked-in config file can turn on for
+everyone. See [Behavior](#behavior).
 
 `gatewayProfile` accepts an Islo gateway profile name or id and is passed
 opaquely in the sandbox create request. Gateway profiles are created and
@@ -121,8 +128,9 @@ crabbox stop --provider islo blue-lobster
   identity mismatch (the name resolves to a resource id the lease does not own)
   and it also refuses when neither lookup could identify the name at all, such
   as during an API read outage: deleting blind could destroy a different
-  sandbox. Such a `stop` fails, keeps the claim, and says to retry it - the
-  sandbox may still be running and billable until then. Creator attribution
+  sandbox. Such a `stop` fails, keeps the claim, names `--islo-forget-missing`,
+  and says to retry it - the sandbox may still be running and billable until
+  then. Creator attribution
   (`created_by` is the API key's name, `created_by_entity` its kind) only
   corroborates ownership - any key that can create a sandbox reproduces it - so
   a difference is reported as advisory and never blocks a teardown. It is not a
@@ -132,6 +140,19 @@ crabbox stop --provider islo blue-lobster
   the name-only delete and stays releasable: `stop` accepts a 404 on its exact
   name, reports the weaker `name-404-unbound` proof, and warns that the delete
   could not be confirmed against a specific resource.
+- `--islo-forget-missing` (or `CRABBOX_ISLO_FORGET_MISSING=1`) is the operator
+  opt-out from that refusal, for a claim no retry can ever satisfy - a sandbox
+  these credentials will never be able to read again. It drops the claim and
+  issues **no** delete, so the resource boundary is still never crossed: the
+  sandbox may still exist and still bill, and Crabbox stops tracking it. The
+  action is announced on stderr with the sandbox name and reported as
+  `proof=unverified-forgotten`, so it is never mistaken for a proven teardown.
+  It changes nothing else: a proven teardown, the name-only delete of a claim
+  with no recorded id, a positive identity mismatch, and an unproven
+  confirmation all behave exactly as they do without it. It applies only to an
+  explicit `stop`; run cleanup stays fail-closed even when the setting is on,
+  because it knows its sandbox exists and leaving an adoptable recovery claim
+  behind is what keeps that sandbox reachable.
 - **pause** snapshots the sandbox and releases its active compute while
   preserving the local lease claim; **resume** restores the sandbox to running.
 - The sandbox is deleted on release unless kept. `--keep-on-failure` keeps a

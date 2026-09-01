@@ -133,10 +133,13 @@ created. `providerResourceId` pins the exact resource, so automation that must
 act on one specific resource should key off it. The field is omitted for
 providers whose only identity is the name.
 
-When a lease's provider cannot be reached by its recorded resource id and the
-lookup falls back to the name, `labels.islo_resource_id_mismatch` is set to
-`true` and `labels.islo_claimed_resource_id` reports the id the lease claims,
-so `providerResourceId` is never silently attributed to a different resource.
+When the resource that answered reports a resource id different from the one the
+lease claims - which is what a lookup that fell back to the name can land on
+once the name has been reused - `labels.islo_resource_id_mismatch` is set to
+`true`, `labels.islo_claimed_resource_id` reports the id the lease claims, and
+`providerResourceId` is omitted entirely rather than attributed to a resource
+the lease does not own. A fallback to the name that still resolves to the
+claimed id is not a mismatch and sets neither label.
 
 AWS leases also include authoritative provider metadata sourced from EC2
 `DescribeInstances`. Brokered inspection requests a fresh coordinator-side

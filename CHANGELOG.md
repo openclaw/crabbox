@@ -5,6 +5,7 @@
 ### Added
 
 - Added `providerResourceId` to `crabbox inspect --json` for providers that assign a resource an immutable identifier separate from its name, and populated it for Islo sandboxes.
+- Added `--islo-forget-missing` / `CRABBOX_ISLO_FORGET_MISSING`, the operator opt-out from the identity-safe Islo teardown gate, for a lease claim no retry can satisfy. It drops the local claim without issuing a delete, so it never deletes a sandbox name it could not identify; the sandbox may still exist and still bill, which Crabbox announces on stderr with the sandbox name and reports as `proof=unverified-forgotten`. The refusal it resolves now names the flag. It is off unless passed, has no config-file key, applies only to an explicit `stop` (run cleanup stays fail-closed, since its recovery claim is the only handle on a sandbox it knows exists), and leaves proven teardowns, the name-only delete of a claim with no recorded resource id, positive identity mismatches, and unproven confirmations unchanged.
 
 ### Fixed
 

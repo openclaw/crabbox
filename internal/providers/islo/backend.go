@@ -61,6 +61,7 @@ type isloFlagValues struct {
 	VCPUs          *int
 	MemoryMB       *int
 	DiskGB         *int
+	ForgetMissing  *bool
 }
 
 func RegisterIsloProviderFlags(fs *flag.FlagSet, defaults Config) any {
@@ -73,6 +74,7 @@ func RegisterIsloProviderFlags(fs *flag.FlagSet, defaults Config) any {
 		VCPUs:          fs.Int("islo-vcpus", defaults.Islo.VCPUs, "Islo sandbox vCPUs"),
 		MemoryMB:       fs.Int("islo-memory-mb", defaults.Islo.MemoryMB, "Islo sandbox memory in MB"),
 		DiskGB:         fs.Int("islo-disk-gb", defaults.Islo.DiskGB, "Islo sandbox disk in GB"),
+		ForgetMissing:  fs.Bool("islo-forget-missing", defaults.Islo.ForgetMissing, "drop the local claim when teardown cannot prove which sandbox the lease owns, instead of keeping it for a retry (explicit operator-acknowledged action: no delete is issued, so the sandbox may keep running and billing)"),
 	}
 }
 
@@ -108,6 +110,9 @@ func ApplyIsloProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if flagWasSet(fs, "islo-disk-gb") {
 		cfg.Islo.DiskGB = *v.DiskGB
 		core.MarkIsloDiskGBExplicit(cfg)
+	}
+	if flagWasSet(fs, "islo-forget-missing") {
+		cfg.Islo.ForgetMissing = *v.ForgetMissing
 	}
 	return nil
 }
@@ -552,7 +557,9 @@ func (b *isloBackend) Stop(ctx context.Context, req StopRequest) error {
 	if err != nil {
 		return err
 	}
-	outcome, err := b.teardownIsloSandbox(ctx, client, claim, name, isloTeardownBudgets{})
+	// An explicit stop is the one teardown the operator is standing in front of,
+	// so it is the one that may act on their forget-missing acknowledgement.
+	outcome, err := b.teardownIsloSandbox(ctx, client, claim, name, isloTeardownBudgets{}, isloTeardownOptions{forgetUnverifiable: b.cfg.Islo.ForgetMissing})
 	if err != nil {
 		return err
 	}
@@ -585,7 +592,9 @@ func (b *isloBackend) releaseIsloLease(client isloAPI, leaseID, name string) err
 		}
 		return deleteIsloSandboxForCleanup(client, name)
 	}
-	if _, err := b.teardownIsloSandbox(context.Background(), client, claim, name, budgets); err != nil {
+	// No forget-unverifiable authority here: this defer knows the sandbox exists,
+	// so retaining an adoptable claim always beats forgetting one.
+	if _, err := b.teardownIsloSandbox(context.Background(), client, claim, name, budgets, isloTeardownOptions{}); err != nil {
 		return err
 	}
 	removeLeaseClaim(leaseID)

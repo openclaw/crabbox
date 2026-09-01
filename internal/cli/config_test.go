@@ -302,6 +302,7 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_ISLO_VCPUS",
 		"CRABBOX_ISLO_MEMORY_MB",
 		"CRABBOX_ISLO_DISK_GB",
+		"CRABBOX_ISLO_FORGET_MISSING",
 		"CRABBOX_FREESTYLE_API_KEY",
 		"FREESTYLE_API_KEY",
 		"CRABBOX_FREESTYLE_API_URL",
@@ -627,6 +628,31 @@ func TestIsloCreateDefaultsTrackExplicitConfigAndEnvironment(t *testing.T) {
 	}
 	if !IsloImageExplicit(fromEnv) || !IsloVCPUsExplicit(fromEnv) || !IsloMemoryMBExplicit(fromEnv) || !IsloDiskGBExplicit(fromEnv) {
 		t.Fatalf("environment explicit markers missing: %#v", fromEnv)
+	}
+}
+
+// TestIsloForgetMissingIsAnEnvAndFlagOnlyOptOut pins where the islo teardown
+// opt-out may come from. Setting it drops a lease claim whose sandbox identity
+// could not be proven, which leaves a possibly billing sandbox untracked, so it
+// has to be an explicit per-invocation acknowledgement: a checked-in repository
+// config file must never be able to turn it on for everyone who runs in that
+// repository. The environment variable is accepted like the other
+// CRABBOX_ISLO_* settings.
+func TestIsloForgetMissingIsAnEnvAndFlagOnlyOptOut(t *testing.T) {
+	if _, ok := reflect.TypeOf(fileIsloConfig{}).FieldByName("ForgetMissing"); ok {
+		t.Fatal("file config must not accept the islo teardown opt-out")
+	}
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if cfg.Islo.ForgetMissing {
+		t.Fatalf("islo forget-missing must default to off: %#v", cfg.Islo)
+	}
+	t.Setenv("CRABBOX_ISLO_FORGET_MISSING", "true")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Islo.ForgetMissing {
+		t.Fatalf("islo forget-missing env not applied: %#v", cfg.Islo)
 	}
 }
 
@@ -6417,6 +6443,7 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_ISLO_VCPUS", "8")
 	t.Setenv("CRABBOX_ISLO_MEMORY_MB", "16384")
 	t.Setenv("CRABBOX_ISLO_DISK_GB", "80")
+	t.Setenv("CRABBOX_ISLO_FORGET_MISSING", "true")
 	t.Setenv("FREESTYLE_API_KEY", "freestyle-key-file")
 	t.Setenv("CRABBOX_FREESTYLE_API_KEY", "freestyle-key-env")
 	t.Setenv("FREESTYLE_API_URL", "https://freestyle-file.example")
@@ -6678,7 +6705,7 @@ func TestEnvOverridesConfig(t *testing.T) {
 	if cfg.Vast.APIKey != "vast-key-env" || cfg.Vast.APIURL != "https://vast-env.example/api/v0" || cfg.Vast.InstanceType != "interruptible" || cfg.Vast.GPUName != "H100" || cfg.Vast.GPUCount != 4 || cfg.Vast.Image != "nvidia/cuda:vast-env" || cfg.Vast.TemplateID != "vast-tpl-env" || cfg.Vast.Runtype != "ssh_direct" || cfg.Vast.DiskGB != 80 || cfg.Vast.MaxDphTotal != 4.25 || cfg.Vast.MinReliability != 0.95 || cfg.Vast.Order != "dlperf desc" || cfg.Vast.User != "ubuntu" || cfg.Vast.WorkRoot != "/work/vast-env" || cfg.Vast.ReleaseAction != "keep" {
 		t.Fatalf("unexpected vast env: %#v", cfg.Vast)
 	}
-	if cfg.Islo.APIKey != "islo-api-env" || cfg.Islo.BaseURL != "https://islo-env.example" || cfg.Islo.Image != "ubuntu:env" || cfg.Islo.Workdir != "env-workdir" || cfg.Islo.GatewayProfile != "env-gateway" || cfg.Islo.SnapshotName != "env-snapshot" || cfg.Islo.VCPUs != 8 || cfg.Islo.MemoryMB != 16384 || cfg.Islo.DiskGB != 80 {
+	if cfg.Islo.APIKey != "islo-api-env" || cfg.Islo.BaseURL != "https://islo-env.example" || cfg.Islo.Image != "ubuntu:env" || cfg.Islo.Workdir != "env-workdir" || cfg.Islo.GatewayProfile != "env-gateway" || cfg.Islo.SnapshotName != "env-snapshot" || cfg.Islo.VCPUs != 8 || cfg.Islo.MemoryMB != 16384 || cfg.Islo.DiskGB != 80 || !cfg.Islo.ForgetMissing {
 		t.Fatalf("unexpected islo env: %#v", cfg.Islo)
 	}
 	if cfg.Freestyle.APIKey != "freestyle-key-env" || cfg.Freestyle.APIURL != "https://freestyle-env.example" || cfg.Freestyle.Workdir != "env/repo" || cfg.Freestyle.VCPUs != 6 || cfg.Freestyle.MemoryGB != 16 {

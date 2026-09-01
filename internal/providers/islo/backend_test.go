@@ -1472,6 +1472,40 @@ func TestIsloProviderFlagsMarkDefaultCreateFieldsExplicit(t *testing.T) {
 	}
 }
 
+// TestIsloForgetMissingFlagIsOffUntilAskedFor pins the registration of the
+// teardown opt-out: it is off unless the operator passes it, and passing it is
+// what makes the fail-closed gate drop an unverifiable claim. The help text has
+// to say that no delete happens, because that is the whole hazard.
+func TestIsloForgetMissingFlagIsOffUntilAskedFor(t *testing.T) {
+	cfg := core.BaseConfig()
+	fs := flag.NewFlagSet("islo", flag.ContinueOnError)
+	values := RegisterIsloProviderFlags(fs, cfg)
+	usage := fs.Lookup("islo-forget-missing")
+	if usage == nil {
+		t.Fatal("--islo-forget-missing is not registered")
+	}
+	for _, want := range []string{"cannot prove", "billing"} {
+		if !strings.Contains(usage.Usage, want) {
+			t.Fatalf("usage=%q, want it to state %q", usage.Usage, want)
+		}
+	}
+	if err := ApplyIsloProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Islo.ForgetMissing {
+		t.Fatal("islo forget-missing must stay off when the flag is not passed")
+	}
+	if err := fs.Parse([]string{"--islo-forget-missing"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyIsloProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Islo.ForgetMissing {
+		t.Fatalf("islo forget-missing flag not applied: %#v", cfg.Islo)
+	}
+}
+
 func TestIsloCreateSandboxRejectsMissingTailscaleAuthKeyBeforeAPI(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeIsloSyncClient{createName: "crabbox-repo-abcdef"}
