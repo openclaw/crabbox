@@ -649,8 +649,13 @@ CRABBOX_BIN=./bin/crabbox scripts/live-firecracker-smoke.sh
 
 CI runs the full gate (gofmt, vet, race tests, all Go modules, coverage
 threshold, repository script tests, docs link/build check, GoReleaser snapshot, and Worker
-lint/typecheck/tests/build) on every push and PR. Production releases use a
-serialized, draft-first process: preserve and verify the signed tag, build and
+lint/typecheck/tests/build) on every push and PR. The required `Go` check aggregates
+three independent 30-minute jobs: `Go test` (formatting, vet, deadcode, full race
+suite, Linux supervision proof, and build), `Go modules` (normal tests in every
+module, including the root), and `Go coverage` (90% core coverage threshold).
+Both the race suite and all-module normal tests use a 15-minute package timeout.
+Production releases use a serialized, draft-first process: preserve and verify
+the signed tag, build and
 Developer ID sign/notarize the macOS candidates locally, verify the exact draft
 on native Apple Silicon and Intel runners from protected-default code, then
 publish, verify the public release and public Go installation, update and prove
