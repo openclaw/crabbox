@@ -872,7 +872,12 @@ image references and never silently fall back to a mutable tag.
 ## Release Checklist
 
 The authoritative serialized release contract is [Release engineering](RELEASING.md).
-No event automatically publishes a tag or updates Homebrew.
+One explicit full release/publish request authorizes the complete normal sequence
+through closeout, without renewed chat approval at each stage. Narrow requests
+stay narrow. The original request supplies authorization; GitHub events alone
+do not. No event automatically publishes a tag or updates Homebrew. Technical
+gates, identity binding, credential isolation, immutability, exact frozen inputs,
+actual exclusive-writer coordination, and cancellation boundaries still apply.
 
 Before creating or reusing a signed release tag:
 
@@ -893,7 +898,7 @@ Before creating or reusing a signed release tag:
 - Live smoke at least one coordinator-backed `crabbox run`, then verify `crabbox attach`, `crabbox events`, `crabbox logs`, and lease cleanup.
 - Push, pull, and wait for CI green on the release commit.
 
-Then advance exactly one gate at a time:
+Then advance sequentially under that authorization as each technical gate passes:
 
 1. **Tag trust.** Create or reuse an annotated signed `vX.Y.Z` tag. Verify it
    against the repository-pinned signer policy, capture the tag-object and
@@ -908,7 +913,7 @@ Then advance exactly one gate at a time:
    `Developer ID Application: OpenClaw Foundation (FWJYW4S8P8)`, with hardened
    runtime and secure timestamps, then requires accepted notarization and
    online `codesign --check-notarization` proof before packaging.
-3. **Private draft.** With separate explicit authorization, create exactly one
+3. **Private draft.** After local verification succeeds, create exactly one
    GitHub draft for the captured pre-existing signed tag. Its title, exact eight
    assets, and body copied byte-for-byte from the tagged `CHANGELOG.md` section
    are immutable candidate inputs.
@@ -917,9 +922,11 @@ Then advance exactly one gate at a time:
    Intel jobs download assets with narrowly scoped credentials, remove all API,
    Actions, OIDC, and Homebrew credentials, then verify and execute the matching
    candidates in a clean environment.
-5. **Publication.** Stop for an explicit publication gate. Re-read and compare
-   the unchanged draft, successful native proofs, tag, protected verifier SHA,
-   notes, asset IDs, sizes, and digests. Publication is a single draft-state
+5. **Publication.** Establish and verify the administrative freeze of all release
+   writers required by [Release engineering](RELEASING.md#serialized-gates);
+   the release request is not evidence that the freeze is active. Re-read and
+   compare the unchanged draft, successful native proofs, tag, protected verifier
+   SHA, notes, asset IDs, sizes, and digests. Publication is a single draft-state
    transition; it does not rebuild, replace, or delete anything.
 6. **Published verification.** Re-download the public assets by immutable asset
    ID and repeat the exact metadata, checksum, signature, notarization, native
@@ -932,8 +939,8 @@ Then advance exactly one gate at a time:
    JSON Schema fork version, exact `--version`, `--help`, and `run --help` as
    documented in [Release engineering](RELEASING.md#operator-command-sequence).
 8. **Homebrew.** Only after published verification and the public Go-install
-   proof, grant a separate tap-update
-   gate. Bind every formula URL and SHA-256 to the frozen release record, then
+   proof succeed, update the tap under the original release authorization.
+   Bind every formula URL and SHA-256 to the frozen release record, then
    run the documented downstream verifier on clean native Apple Silicon and
    Intel hosts. The verifier re-fetches the current public release and run,
    authenticates both supplied native proof ZIPs against GitHub artifact
@@ -942,9 +949,16 @@ Then advance exactly one gate at a time:
    `brew test`, archive-to-install byte comparison, signature/notarization
    checks, exact `crabbox --version`, and the Apple Silicon helper's
    non-mutating `vmd-info` check. Those checks are the bounded installed-binary
-   smoke; they do not create a provider lease or authorize another mutation.
+   smoke; they do not create a provider lease or authorize unrelated provider
+   mutations.
+9. **Closeout.** After all public and Homebrew proofs succeed, add the next patch
+   `Unreleased` section, commit and push, wait for exact-head CI, pull with
+   `--ff-only`, and leave `main` clean and synchronized.
 
-On cancellation or uncertainty, stop all release and tap writes. Inspect and
-record the exact draft/public release and tap state, but do not delete a partial
-draft or release, replace assets, rewrite the tag, redispatch, publish, or
-update Homebrew. Resume only from a newly authorized serialized gate.
+On cancellation, a failed gate, or uncertainty, stop all release and tap writes.
+Inspect and record the exact draft/public release and tap state, but do not
+delete a partial draft or release, replace assets, rewrite the tag, redispatch, publish, or
+update Homebrew while stopped. Explicit cancellation requires renewed direction
+authorizing the next mutation. For a failed gate or uncertain state, resolve the
+blocker and re-establish the exact frozen state and required proofs before
+continuing under the original release authorization.

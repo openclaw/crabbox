@@ -976,6 +976,7 @@ describe("daytona coordinator client", () => {
 
   it("waits out snapshotting when the accepted snapshot response is lost", async () => {
     const methods: string[] = [];
+    const snapshotError = new TypeError("network reset after snapshot acceptance");
     let state = "started";
     let transitionPolls = 0;
     let snapshotAttempted = false;
@@ -1017,7 +1018,7 @@ describe("daytona coordinator client", () => {
       }
       if (request.method === "POST" && url.pathname.endsWith("/snapshot")) {
         snapshotAttempted = true;
-        throw new TypeError("network reset after snapshot acceptance");
+        throw snapshotError;
       }
       if (request.method === "DELETE") {
         deleteAttempts += 1;
@@ -1030,17 +1031,28 @@ describe("daytona coordinator client", () => {
       throw new Error(`unexpected request ${request.method} ${request.url}`);
     });
 
-    await expect(
-      client.bootstrapSnapshot("crabbox-ready-2x4x10", 2, 4, 10, baseImage),
-    ).rejects.toThrow("network reset after snapshot acceptance");
-    expect(methods.slice(-6)).toEqual([
-      "GET /api/sandbox/snapshot-builder",
-      "GET /api/sandbox/snapshot-builder",
-      "GET /api/sandbox/snapshot-builder",
-      "DELETE /api/sandbox/snapshot-builder",
-      "DELETE /api/sandbox/snapshot-builder",
-      "GET /api/sandbox/snapshot-builder",
-    ]);
+    // Keep the acceptance window independent of host scheduling.
+    vi.useFakeTimers();
+    try {
+      const result = client
+        .bootstrapSnapshot("crabbox-ready-2x4x10", 2, 4, 10, baseImage)
+        .catch((error: unknown) => error);
+
+      await vi.runAllTimersAsync();
+
+      expect(await result).toBe(snapshotError);
+      expect(transitionPolls).toBe(4);
+      expect(methods.slice(-6)).toEqual([
+        "GET /api/sandbox/snapshot-builder",
+        "GET /api/sandbox/snapshot-builder",
+        "GET /api/sandbox/snapshot-builder",
+        "DELETE /api/sandbox/snapshot-builder",
+        "DELETE /api/sandbox/snapshot-builder",
+        "GET /api/sandbox/snapshot-builder",
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("fails cleanup when Daytona accepts delete but never destroys the builder", async () => {

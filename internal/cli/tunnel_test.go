@@ -37,7 +37,7 @@ func TestResolvedSSHTunnelArgsBindLoopback(t *testing.T) {
 
 func TestReserveSSHLocalForwardPort(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	reservation, err := reserveSSHLocalForwardPort("")
+	reservation, err := reserveSSHLocalForwardPort(t.Context(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestReserveSSHLocalForwardPortIgnoresUDPUse(t *testing.T) {
 			t.Fatal(err)
 		}
 		port := strconv.Itoa(udp.LocalAddr().(*net.UDPAddr).Port)
-		reservation, err := reserveSSHLocalForwardPort(port)
+		reservation, err := reserveSSHLocalForwardPort(t.Context(), port)
 		_ = udp.Close()
 		if err == nil {
 			reservation.release()

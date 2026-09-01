@@ -1566,10 +1566,6 @@ func cleanupLeaseClaimIfUnchangedAfterContext(ctx context.Context, leaseID strin
 
 // Finalization keeps the original claim when remote cleanup is retained or
 // pending. The same fence covers admission, provider effects and local removal.
-func finalizeLeaseClaimIfUnchangedAfter(leaseID string, expected leaseClaim, expectedExists bool, action func() (bool, error), syncDirectory func(string) error) error {
-	return finalizeLeaseClaimIfUnchangedAfterContext(context.Background(), leaseID, expected, expectedExists, action, syncDirectory)
-}
-
 func finalizeLeaseClaimIfUnchangedAfterContext(ctx context.Context, leaseID string, expected leaseClaim, expectedExists bool, action func() (bool, error), syncDirectory func(string) error) error {
 	path, err := leaseClaimPath(leaseID)
 	if err != nil {

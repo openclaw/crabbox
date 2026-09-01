@@ -99,9 +99,20 @@ func TestCoordinatorHeartbeatControlFailure(t *testing.T) {
 				case <-time.After(3 * time.Second):
 					t.Fatal("live heartbeat budget did not fall back to HTTP")
 				}
+				select {
+				case warning := <-warnings:
+					t.Errorf("successful HTTP fallback reported a background failure: %q", warning)
+				case <-time.After(100 * time.Millisecond):
+				}
+				stop()
+				if got := httpRequests.Load(); got != 1 {
+					t.Errorf("HTTP heartbeat requests=%d, want one successful fallback", got)
+				}
+				t.Logf("httpHeartbeatRequests=%d; successful fallback stayed quiet", httpRequests.Load())
 			case "failed fallback":
 				select {
 				case warning := <-warnings:
+					t.Logf("httpHeartbeatRequests=%d warning=%q", httpRequests.Load(), warning)
 					if !strings.Contains(warning, "synthetic_rejection") || !strings.Contains(warning, "http 503") {
 						t.Errorf("lost one transport failure: %q", warning)
 					}
@@ -119,6 +130,7 @@ func TestCoordinatorHeartbeatControlFailure(t *testing.T) {
 					t.Errorf("caller cancellation reported a background failure: %q", warning)
 				default:
 				}
+				t.Logf("httpHeartbeatRequests=%d; canceled heartbeat owner joined without warning", httpRequests.Load())
 			}
 		})
 	}

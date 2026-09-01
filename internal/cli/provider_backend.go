@@ -310,6 +310,8 @@ type DelegatedRunBackend interface {
 	Run(ctx context.Context, req RunRequest) (RunResult, error)
 	List(ctx context.Context, req ListRequest) ([]LeaseView, error)
 	Status(ctx context.Context, req StatusRequest) (StatusView, error)
+	// Stop owns local claim finalization, including retention. Callers must not
+	// remove the claim afterward: a replacement may exist once Stop returns.
 	Stop(ctx context.Context, req StopRequest) error
 }
 
@@ -496,6 +498,13 @@ type NativeCheckpointCreateResult struct {
 	Metadata map[string]string
 }
 
+// NativeCheckpointNotSubmittedError attests that this invocation never attempted
+// image submission. An empty result or a failed request cannot establish this.
+type NativeCheckpointNotSubmittedError struct{ Cause error }
+
+func (e NativeCheckpointNotSubmittedError) Error() string { return e.Cause.Error() }
+func (e NativeCheckpointNotSubmittedError) Unwrap() error { return e.Cause }
+
 type NativeCheckpointWorkdirRequest struct {
 	Config   Config
 	Server   Server
@@ -511,6 +520,13 @@ type NativeCheckpointResourceRequest struct {
 	LoadConfig func() (Config, error)
 	Image      NativeCheckpointImage
 	Metadata   map[string]string
+	Capture    *NativeCheckpointCapture
+}
+
+// NativeCheckpointAbandonProvider binds positive source-cleanup evidence without
+// asserting that the original image was submitted, absent, or safe to discard.
+type NativeCheckpointAbandonProvider interface {
+	PrepareNativeCheckpointAbandon(context.Context, NativeCheckpointCreateRequest) (map[string]string, error)
 }
 
 // CheckpointSourceVerifier must use provider authority, not a filtered lease

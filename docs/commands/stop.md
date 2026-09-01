@@ -46,6 +46,9 @@ Crabbox lease ID and local slug:
   only after fresh native stdout confirms the exact ID in state `completed`.
   Failed native stops can reconcile through the same confirmation; ambiguous,
   failed or cancelled queries retain the original stop error and local state.
+  Verification and local artifact cleanup failures remain visible alongside the
+  native error and exit code. Failed artifact removal retains the exact claim;
+  an already absent lease key directory is safe to finalize.
   Legacy or lost claims require independently verified native Blacksmith cleanup;
   raw IDs alone never authorize stop. See
   [Blacksmith Testbox](../features/blacksmith-testbox.md).
@@ -187,9 +190,19 @@ chain has a 35-second budget, including coordinator guest network selection and
 reserving five-second windows for later egress
 and Tailscale cleanup. Responsive hydrated jobs keep their normal 20-second
 stop-marker grace; cancellation or the phase deadline ends that wait early.
-The local egress daemon stays alive through guest cleanup. Provider release uses
-the original caller context; this budget does not guarantee that provider deletion
-finishes before the caller's deadline. Static SSH attempts cleanup
+The local egress daemon stays alive through guest cleanup. Coordinator-backed
+explicit stops share one five-minute cancellation budget from the first lease
+inspection through claim acquisition, guest cleanup, release requests, and cleanup
+observation; an earlier caller deadline wins. Phase limits cannot restart this
+budget. Pending or failed provider cleanup still returns an error and preserves
+the local claim and SSH artifacts for a later retry.
+
+Local daemon lock waits also honor the operation context. Once provider deletion
+is confirmed, a canceled local daemon cleanup warns without undoing that result.
+Already-started local process teardown remains joined. Synchronous filesystem
+operations and existing process-inspection and termination helpers are not
+interrupted by this context, so this is not a strict wall-clock limit.
+Direct and delegated providers retain their existing caller lifetime. Static SSH attempts cleanup
 before local unclaiming, even without hydration state; remote failures warn
 but do not block unclaiming. See the [static provider details](../providers/ssh.md#connection-cleanup)
 for marker paths, Linux egress process-matching scope, and Tailscale limits.
