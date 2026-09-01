@@ -36261,6 +36261,11 @@ describe("fleet run history", () => {
 
   it.each([
     { log: "\ud800x\udc00", want: "�x�", truncated: true },
+    {
+      log: "a".repeat(64 * 1024) + "\ufeff😀",
+      want: "a".repeat(64 * 1024) + "\ufeff😀",
+      truncated: false,
+    },
     { log: "�", want: "�", truncated: false },
     {
       log: "a".repeat(8 * 1024 * 1024 - 3) + "€",
