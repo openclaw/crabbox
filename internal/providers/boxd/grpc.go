@@ -126,10 +126,18 @@ func (c *apiClient) authed(ctx context.Context, timeout time.Duration) (context.
 }
 
 // rpcError sanitizes a transport failure. Vendor status messages are
-// withheld from diagnostics; only the status code is reported.
+// withheld from diagnostics; only the status code is reported. A
+// cancellation can surface as a stream status before the local context
+// registers as expired, so those codes report as the context error.
 func rpcError(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
+	}
+	switch status.Code(err) {
+	case codes.DeadlineExceeded:
+		return context.DeadlineExceeded
+	case codes.Canceled:
+		return context.Canceled
 	}
 	if s, ok := status.FromError(err); ok {
 		return &grpcStatusError{Code: s.Code()}
