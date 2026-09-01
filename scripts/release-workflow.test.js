@@ -854,11 +854,60 @@ test("signing and verification enforce Foundation identity, runtime, timestamp, 
   assert.match(packager, /ALLOWED_SIGNERS RELEASE_RECORD/);
 });
 
-test("release documentation forbids automatic publication, deletion, and Homebrew coupling", () => {
+test("release documentation authorizes normal continuation from one full request and preserves safety gates", () => {
   const readme = read("README.md");
   const operations = read("docs/operations.md");
   const security = read("docs/security.md");
   const release = read("docs/RELEASING.md");
+  const documents = {
+    "docs/RELEASING.md": release,
+    "docs/operations.md": operations,
+    "AGENTS.md": read("AGENTS.md"),
+    "README.md": readme,
+    "docs/security.md": security,
+  };
+  const repeatedApproval = [
+    /approval for one gate does not authorize the next/i,
+    /\b(?:obtain|with|requires?|needs?) (?:a |its )?(?:(?:final|own|separate|new|explicit|tap-update|chat) ){1,4}(?:authorization|approval)\b/i,
+    /\bseparately authorized (?:tap(?:-update)?|Homebrew|publication)\b/i,
+    /\b(?:a separate tap-update authorization|grant a separate tap-update gate)\b/i,
+    /\bauthorize publication[^.!?]{0,80}\bseparate gates\b/i,
+    /\b(?:stop again|stop for (?:an explicit |the )?publication gate)\b/i,
+    /\bpublication requires a new explicit gate\b/i,
+  ];
+  const contradictions = [];
+  for (const [file, source] of Object.entries(documents)) {
+    const prose = source.replace(/\s+/g, " ");
+    for (const pattern of repeatedApproval) {
+      const match = prose.match(pattern);
+      if (match) contradictions.push(`${file}: ${match[0]}`);
+    }
+  }
+  assert.deepEqual(contradictions, [], "normal release stages must not require repeated chat approval");
+  for (const [file, source] of Object.entries(documents)) {
+    const prose = source.replace(/\s+/g, " ");
+    assert.match(prose, /\b(?:one|a single) explicit full (?:release(?:\/publish)?|publish) request authorizes\b/i, file);
+    assert.match(prose, /without (?:asking again|renewed chat approval)/i, file);
+    assert.match(prose, /narrow(?:er)? requests (?:remain|stay) narrow/i, file);
+  }
+  const opening = release.split("## Trust Anchors", 1)[0].replace(/\s+/g, " ");
+  for (const stage of [
+    /preparation/i, /tagging/i, /build/i, /sign/i, /private draft/i, /upload/i,
+    /native (?:dispatch|verification)/i, /proof/i, /publication/i,
+    /fresh public verification/i, /public Go installation/i, /Homebrew/i, /closeout/i,
+  ]) {
+    assert.match(opening, stage);
+  }
+  assert.match(opening, /original explicit (?:release\/publish |release )?request[^.!?]{0,80}authorization/i);
+  assert.match(opening, /GitHub events alone[^.!?]{0,80}(?:not|never)[^.!?]{0,40}authoriz/i);
+  const releaseProse = release.replace(/\s+/g, " ");
+  assert.match(releaseProse, /fail closed unless the administrative freeze[^.!?]{0,80}active/i);
+  assert.match(releaseProse, /release request[^.!?]{0,80}not evidence[^.!?]{0,80}freeze/i);
+  assert.match(releaseProse, /attests[^.!?]{0,100}actual exclusive-writer coordination/i);
+  assert.match(releaseProse, /does not request[^.!?]{0,40}chat approval/i);
+  assert.match(releaseProse, /explicit cancellation[^.!?]{0,100}renewed direction/i);
+  assert.match(releaseProse, /normal continuation[^.!?]{0,100}original (?:release )?authorization/i);
+  assert.match(operations.replace(/\s+/g, " "), /bounded[^.!?]{0,100}smoke[^.!?]{0,100}do not[^.!?]{0,100}unrelated provider mutations/i);
   assert.doesNotMatch(`${readme}\n${operations}\n${security}`, /repository_dispatch.*publish/s);
   assert.match(release, /Never delete a partial draft or release/);
   assert.match(release, /Publish with one draft-state transition/);

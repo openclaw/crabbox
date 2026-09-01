@@ -238,6 +238,8 @@ exit 0
 	runEnvProfileTestReleaseErr = nil
 	runEnvProfileTestConnectionCleanupSafe = true
 	runEnvProfileTestPreservesSSHWorkspace = false
+	runEnvProfileTestRetainsLease = false
+	runEnvProfileTestTerminalReleaseError = false
 	t.Cleanup(func() {
 		runEnvProfileTestAcquireLease = nil
 		runEnvProfileTestAcquireHook = nil
@@ -247,6 +249,8 @@ exit 0
 		runEnvProfileTestReleaseErr = nil
 		runEnvProfileTestConnectionCleanupSafe = true
 		runEnvProfileTestPreservesSSHWorkspace = false
+		runEnvProfileTestRetainsLease = false
+		runEnvProfileTestTerminalReleaseError = false
 		removeLeaseClaim("cbx_env_profile_test")
 	})
 	return dir
@@ -463,10 +467,12 @@ func TestRunCommandRetainedLeaseRetainsFailClosedRenewal(t *testing.T) {
 
 func TestRunFailureDigestCleanupOutcomes(t *testing.T) {
 	for _, test := range []struct {
-		name     string
-		flags    []string
-		stopErr  error
-		wantStop bool
+		name          string
+		flags         []string
+		stopErr       error
+		retained      bool
+		terminalError bool
+		wantStop      bool
 	}{
 		{name: "automatic failure cleanup", wantStop: true},
 		{name: "always", flags: []string{"--stop-after", "always"}, wantStop: true},
@@ -477,9 +483,13 @@ func TestRunFailureDigestCleanupOutcomes(t *testing.T) {
 		{name: "keep failed", flags: []string{"--keep-on-failure"}},
 		{name: "failed cleanup", stopErr: errors.New("release failed")},
 		{name: "ambiguous cleanup", stopErr: errors.New("release response lost")},
+		{name: "retained direct release", retained: true},
+		{name: "deleted with local cleanup error", stopErr: errors.New("local cleanup failed"), terminalError: true, wantStop: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			setupRunCleanupWorkspaceOwnerTest(t)
+			runEnvProfileTestRetainsLease = test.retained
+			runEnvProfileTestTerminalReleaseError = test.terminalError
 			var stdout, stderr bytes.Buffer
 			var releaseCalls int
 			runEnvProfileTestReleaseHook = func() error {
@@ -503,6 +513,9 @@ func TestRunFailureDigestCleanupOutcomes(t *testing.T) {
 			if report.ExitCode != 23 || (report.LeaseStopped != nil && *report.LeaseStopped) != test.wantStop {
 				t.Fatalf("timing outcome disagrees with cleanup: %#v", report)
 			}
+			if report.RunStatus != "failed" || (report.LeaseStopErr != "") != (test.stopErr != nil) {
+				t.Errorf("run status or release error changed: %#v", report)
+			}
 			if !strings.Contains(out, "failure digest") {
 				t.Fatalf("missing failure digest:\n%s", out)
 			}
@@ -511,7 +524,7 @@ func TestRunFailureDigestCleanupOutcomes(t *testing.T) {
 					t.Errorf("recovery %s present=%v, stopped=%v:\n%s", command, got, test.wantStop, out)
 				}
 			}
-			if (test.wantStop || test.stopErr != nil) != (releaseCalls == 1) {
+			if (test.wantStop || test.stopErr != nil || test.retained) != (releaseCalls == 1) {
 				t.Errorf("release calls=%d", releaseCalls)
 			}
 		})

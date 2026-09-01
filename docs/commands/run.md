@@ -655,7 +655,10 @@ record.
 
 When a remote command exits non-zero, `run` prints a compact failure digest
 after automatic cleanup. Lease recovery commands are omitted after confirmed
-release, and remain available when the lease is kept or cleanup is uncertain.
+terminal release, including deletion that leaves a fixed-ID receipt. They remain
+available for retained resources and pending or unconfirmed cleanup. Preserved
+recovery state does not imply that the resource is running or reachable; inspect
+its status before reuse, or retry the printed stop command to finish cleanup.
 The digest includes the failed phase when phase markers are known, a
 likely area (provider auth, SSH/connectivity, sync, install/setup, user command,
 model/tool/provider limit, or resource exhaustion), retryability when inferable, next commands
@@ -678,6 +681,13 @@ bootstrap, sync phases, command phases, command duration, command-path total,
 end-to-end duration, exit code, normalized `runStatus`, optional `errorKind`,
 stop command, artifacts, and Actions run URL when available. Failed runs also
 include `blockedStage`, `resourceExhaustion`, and `retryLikely` when classifiable.
+After an automatic cleanup attempt, `leaseStopped` reports whether the release
+owner confirmed that lease-based recovery is no longer available. An accepted
+release alone does not set it to true. `leaseStopError` independently records a
+cleanup error: it can accompany `leaseStopped=true` when the remote resource is
+gone but local finalization failed. An existing workload failure keeps its exit
+code. Accepted pending or retained cleanup does not itself turn a successful
+workload into a command failure.
 Commands can emit
 phase markers on stdout or stderr as
 `CRABBOX_PHASE:<name>`; Crabbox records those as `commandPhases` without removing

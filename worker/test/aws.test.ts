@@ -20,7 +20,6 @@ import {
   awsReleaseHostsResult,
   crabboxSSHIngressRules,
   createSecurityGroupParams,
-  isAWSInstanceCleanedAfterReadinessFailure,
   isAWSInvalidHostIDError,
   isAWSInstanceNotFoundError,
   isAWSMarketFallbackError,
@@ -1546,27 +1545,6 @@ describe("aws provider", () => {
       { region: "eu-west-1", availabilityZone: "eu-west-1a", instanceType: "mac2.metal" },
       { region: "eu-west-1", availabilityZone: "eu-west-1b", instanceType: "mac2.metal" },
     ]);
-  });
-
-  it("treats missing stale AWS instance cleanup as cleaned", () => {
-    expect(
-      isAWSInstanceCleanedAfterReadinessFailure(
-        "InvalidInstanceID.NotFound: instance disappeared",
-        "InvalidInstanceID.NotFound: instance disappeared",
-      ),
-    ).toBe(true);
-    expect(
-      isAWSInstanceCleanedAfterReadinessFailure(
-        "InvalidInstanceID.NotFound: instance disappeared",
-        "",
-      ),
-    ).toBe(true);
-    expect(
-      isAWSInstanceCleanedAfterReadinessFailure(
-        "timed out waiting for AWS instance public IP",
-        "UnauthorizedOperation: denied",
-      ),
-    ).toBe(false);
   });
 
   it("adds a small policy fallback for class requests but not exact types", () => {

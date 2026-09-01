@@ -378,6 +378,22 @@ type ReleaseLeaseReporter interface {
 	ReleaseLeaseMessage(lease LeaseTarget) string
 }
 
+// ReleaseLeaseOutcome describes the lease recovery outcome of one release invocation,
+// independently of errors finalizing local state. Zero means retained or unconfirmed.
+type ReleaseLeaseOutcome struct {
+	// Terminal means the release owner confirmed the end of the recoverable lease.
+	Terminal bool
+}
+
+// ReleaseLeaseOutcomeBackend performs the same guarded operation as ReleaseLease
+// once, preserving its ordinary error. Providers with retained or asynchronous
+// release semantics must implement this capability. Without it, a successful
+// ReleaseLease ends the recoverable lease; an error leaves the outcome unconfirmed.
+// Claim retention (including terminal receipts) does not determine this outcome.
+type ReleaseLeaseOutcomeBackend interface {
+	ReleaseLeaseWithOutcome(context.Context, ReleaseLeaseRequest) (ReleaseLeaseOutcome, error)
+}
+
 // ReleaseLeaseConnectionCleanupPolicy lets a provider defer generic connection
 // cleanup until after its guarded release succeeds.
 type ReleaseLeaseConnectionCleanupPolicy interface {
@@ -498,6 +514,13 @@ type NativeCheckpointCreateResult struct {
 	Metadata map[string]string
 }
 
+// NativeCheckpointNotSubmittedError attests that this invocation never attempted
+// image submission. An empty result or a failed request cannot establish this.
+type NativeCheckpointNotSubmittedError struct{ Cause error }
+
+func (e NativeCheckpointNotSubmittedError) Error() string { return e.Cause.Error() }
+func (e NativeCheckpointNotSubmittedError) Unwrap() error { return e.Cause }
+
 type NativeCheckpointWorkdirRequest struct {
 	Config   Config
 	Server   Server
@@ -513,6 +536,13 @@ type NativeCheckpointResourceRequest struct {
 	LoadConfig func() (Config, error)
 	Image      NativeCheckpointImage
 	Metadata   map[string]string
+	Capture    *NativeCheckpointCapture
+}
+
+// NativeCheckpointAbandonProvider binds positive source-cleanup evidence without
+// asserting that the original image was submitted, absent, or safe to discard.
+type NativeCheckpointAbandonProvider interface {
+	PrepareNativeCheckpointAbandon(context.Context, NativeCheckpointCreateRequest) (map[string]string, error)
 }
 
 // CheckpointSourceVerifier must use provider authority, not a filtered lease

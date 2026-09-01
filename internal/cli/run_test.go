@@ -678,6 +678,8 @@ var runEnvProfileTestReleaseHook func() error
 var runEnvProfileTestReleaseRequestHook func(ReleaseLeaseRequest) error
 var runEnvProfileTestConnectionCleanupSafe = true
 var runEnvProfileTestPreservesSSHWorkspace bool
+var runEnvProfileTestRetainsLease bool
+var runEnvProfileTestTerminalReleaseError bool
 var runEnvProfileTestAcquireHook func(AcquireRequest)
 var runEnvProfileTestAcquireLease func(AcquireRequest) (LeaseTarget, error)
 var runEnvProfileTestTouchHook func(TouchRequest) error
@@ -912,6 +914,15 @@ func (b runEnvProfileTestBackend) ReleaseLeaseConnectionCleanupSafe() bool {
 
 func (b runEnvProfileTestBackend) PreservesSSHWorkspaceAfterRelease() bool {
 	return runEnvProfileTestPreservesSSHWorkspace
+}
+
+func (b runEnvProfileTestBackend) RetainLeaseClaimAfterRelease(LeaseTarget) bool {
+	return runEnvProfileTestRetainsLease
+}
+
+func (b runEnvProfileTestBackend) ReleaseLeaseWithOutcome(ctx context.Context, req ReleaseLeaseRequest) (ReleaseLeaseOutcome, error) {
+	err := b.ReleaseLease(ctx, req)
+	return ReleaseLeaseOutcome{Terminal: runEnvProfileTestTerminalReleaseError || (err == nil && !runEnvProfileTestRetainsLease)}, err
 }
 
 type runWorkdirCase struct {
