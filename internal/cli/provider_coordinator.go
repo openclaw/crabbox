@@ -937,6 +937,17 @@ func isCoordinatorUnauthorized(err error) bool {
 }
 
 func (b *coordinatorLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+	_, err := b.ReleaseLeaseWithOutcome(ctx, req)
+	return err
+}
+
+func (b *coordinatorLeaseBackend) ReleaseLeaseWithOutcome(ctx context.Context, req ReleaseLeaseRequest) (ReleaseLeaseOutcome, error) {
+	var outcome ReleaseLeaseOutcome
+	err := b.releaseLease(ctx, req, &outcome)
+	return outcome, err
+}
+
+func (b *coordinatorLeaseBackend) releaseLease(ctx context.Context, req ReleaseLeaseRequest, outcome *ReleaseLeaseOutcome) error {
 	if req.Lease.LeaseID == "" {
 		return exit(2, "missing coordinator lease id")
 	}
@@ -955,11 +966,11 @@ func (b *coordinatorLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseL
 		if err := AuthorizeCheckpointRelease(authority, req.CheckpointID); err != nil {
 			return false, err
 		}
-		return b.releaseLeaseUnderClaimFence(ctx, req)
+		return b.releaseLeaseUnderClaimFence(ctx, req, outcome)
 	}, syncControllerDirectory)
 }
 
-func (b *coordinatorLeaseBackend) releaseLeaseUnderClaimFence(ctx context.Context, req ReleaseLeaseRequest) (bool, error) {
+func (b *coordinatorLeaseBackend) releaseLeaseUnderClaimFence(ctx context.Context, req ReleaseLeaseRequest, outcome *ReleaseLeaseOutcome) (bool, error) {
 	if req.Lease.LeaseID == "" {
 		return false, exit(2, "missing coordinator lease id")
 	}
@@ -1027,6 +1038,7 @@ func (b *coordinatorLeaseBackend) releaseLeaseUnderClaimFence(ctx context.Contex
 			return false, nil
 		}
 		if coordinatorProviderReleaseConfirmed(released) {
+			outcome.Terminal = true
 			if cleanupReleasedCoordinatorLeaseArtifacts(b.rt.Stderr, req.Lease.LeaseID) != nil {
 				return false, nil
 			}
@@ -1046,6 +1058,7 @@ func (b *coordinatorLeaseBackend) releaseLeaseUnderClaimFence(ctx context.Contex
 		return false, nil
 	}
 	if coordinatorProviderReleaseConfirmed(released) {
+		outcome.Terminal = true
 		if cleanupReleasedCoordinatorLeaseArtifacts(b.rt.Stderr, req.Lease.LeaseID) != nil {
 			return false, nil
 		}

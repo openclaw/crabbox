@@ -378,6 +378,22 @@ type ReleaseLeaseReporter interface {
 	ReleaseLeaseMessage(lease LeaseTarget) string
 }
 
+// ReleaseLeaseOutcome describes the lease recovery outcome of one release invocation,
+// independently of errors finalizing local state. Zero means retained or unconfirmed.
+type ReleaseLeaseOutcome struct {
+	// Terminal means the release owner confirmed the end of the recoverable lease.
+	Terminal bool
+}
+
+// ReleaseLeaseOutcomeBackend performs the same guarded operation as ReleaseLease
+// once, preserving its ordinary error. Providers with retained or asynchronous
+// release semantics must implement this capability. Without it, a successful
+// ReleaseLease ends the recoverable lease; an error leaves the outcome unconfirmed.
+// Claim retention (including terminal receipts) does not determine this outcome.
+type ReleaseLeaseOutcomeBackend interface {
+	ReleaseLeaseWithOutcome(context.Context, ReleaseLeaseRequest) (ReleaseLeaseOutcome, error)
+}
+
 // ReleaseLeaseConnectionCleanupPolicy lets a provider defer generic connection
 // cleanup until after its guarded release succeeds.
 type ReleaseLeaseConnectionCleanupPolicy interface {

@@ -923,6 +923,17 @@ func (b *backend) Doctor(ctx context.Context, req core.DoctorRequest) (core.Doct
 }
 
 func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
+	_, err := b.ReleaseLeaseWithOutcome(ctx, req)
+	return err
+}
+
+func (b *backend) ReleaseLeaseWithOutcome(ctx context.Context, req core.ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
+	var outcome core.ReleaseLeaseOutcome
+	err := b.releaseLease(ctx, req, &outcome)
+	return outcome, err
+}
+
+func (b *backend) releaseLease(ctx context.Context, req core.ReleaseLeaseRequest, outcome *core.ReleaseLeaseOutcome) error {
 	lease := req.Lease
 	scopeLabels := lease.Server.Labels
 	if snapshot, exists, set := core.ServerLeaseClaimSnapshot(lease.Server); set && exists {
@@ -944,7 +955,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	}
 	id := strings.TrimSpace(req.Lease.Server.CloudID)
 	if id == "" {
-		if handled, err := b.releaseMissingClaim(ctx, lease, req.CheckpointID); handled || err != nil {
+		if handled, err := b.releaseMissingClaim(ctx, lease, req.CheckpointID, outcome); handled || err != nil {
 			return err
 		}
 		container, leaseID, _, err := b.resolveContainer(ctx, req.Lease.LeaseID)
@@ -988,6 +999,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		if err := b.removeContainer(ctx, id); err != nil {
 			return err
 		}
+		outcome.Terminal = true
 		return b.cleanupContainerSidecars(lease.LeaseID, lease.Server.Labels, true)
 	})
 	if b.afterClaimCleanup != nil {
@@ -1072,7 +1084,7 @@ func (b *backend) AuthorizeStatusTouchClaim(ctx context.Context, lease core.Leas
 	return b.validateExactLocalContainerClaim(ctx, claim, lease.LeaseID, lease.Server.CloudID)
 }
 
-func (b *backend) releaseMissingClaim(ctx context.Context, lease core.LeaseTarget, checkpointID string) (bool, error) {
+func (b *backend) releaseMissingClaim(ctx context.Context, lease core.LeaseTarget, checkpointID string, outcome *core.ReleaseLeaseOutcome) (bool, error) {
 	leaseID := strings.TrimSpace(firstNonBlank(lease.LeaseID, lease.Server.Labels["lease"]))
 	if leaseID == "" || strings.TrimSpace(lease.Server.CloudID) != "" {
 		return false, nil
@@ -1095,6 +1107,7 @@ func (b *backend) releaseMissingClaim(ctx context.Context, lease core.LeaseTarge
 		if !absent {
 			return core.Exit(4, "local-container %s still exists; refusing to remove its claim", shortID(claim.CloudID))
 		}
+		outcome.Terminal = true
 		return b.cleanupContainerSidecars(leaseID, claim.Labels, true)
 	})
 	if b.afterClaimCleanup != nil {
