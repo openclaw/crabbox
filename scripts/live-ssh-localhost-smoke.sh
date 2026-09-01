@@ -171,7 +171,10 @@ fi
 cat >"$failure_project/first success ' script.sh" <<'SH'
 #!/bin/sh
 set -eu
-printf '%s/%s\n' "$PWD" "$0"
+case "$0" in
+  /*) printf '%s\n' "$0" ;;
+  *) printf '%s/%s\n' "$PWD" "$0" ;;
+esac
 SH
 cat >"$failure_project/current failure ' script.sh" <<'SH'
 #!/bin/sh

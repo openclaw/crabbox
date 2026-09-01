@@ -88,14 +88,14 @@ switch (tool) {
         fs.mkdirSync(store, { recursive: true });
         const uploaded = path.join(store, name);
         fs.writeFileSync(uploaded, data);
-        if (!args.includes("--keep-on-failure")) {
-          console.log(uploaded);
-          break;
-        }
         const workload = spawnSync("/bin/sh", [uploaded], { cwd: remote, encoding: "utf8" });
-        if (workload.status !== 23) throw new Error("fixture workload failed: " + workload.stderr);
         process.stdout.write(workload.stdout);
         process.stderr.write(workload.stderr);
+        if (!args.includes("--keep-on-failure")) {
+          if (workload.status !== 0) throw new Error("first fixture workload failed: " + workload.stderr);
+          break;
+        }
+        if (workload.status !== 23) throw new Error("fixture workload failed: " + workload.stderr);
         const selected = args[args.indexOf("--download-on-failure") + 1].split("=")[1];
         fs.copyFileSync(path.join(store, "prior.log"), selected);
         const project = process.cwd();
