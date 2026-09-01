@@ -191,8 +191,9 @@ immediately with exit code 5.
 - `--full-resync`, `--force-sync-large`, `--fresh-pr`, `--env-helper`, local
   stdout/stderr captures, `--capture-on-fail`, `--artifact-glob`,
   `--emit-proof`, and `--stop-after` are rejected because Islo owns sync and
-  command transport in delegated-run mode. Required artifacts and downloads accept only bounded single files, not
-  globs, absolute paths, URLs, `.git`, or `.crabbox` paths.
+  command transport in delegated-run mode. Required artifacts and downloads
+  accept only bounded single files, not globs, absolute paths, URLs, `.git`, or
+  `.crabbox` paths.
 - `--keep-on-failure` keeps a newly created failed sandbox until an explicit
   `stop` or provider-side expiry.
 - Large-sync guardrails still apply. Because `--force-sync-large` is rejected,
