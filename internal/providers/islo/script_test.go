@@ -232,3 +232,53 @@ func TestIsloRunScriptCleanupRefusesUnvalidatedPath(t *testing.T) {
 		t.Fatalf("stderr=%q, want a skipped-cleanup warning", stderr.String())
 	}
 }
+
+// TestIsloRunScriptHandsScriptToTheWorkloadUser pins the Tailnet ownership
+// invariant. Run repairs workspace ownership before the workload, but the
+// script archive is placed afterwards by the administrative user and is mode
+// 0700, so without an explicit chown the unprivileged workload user cannot read
+// the file it was asked to execute.
+func TestIsloRunScriptHandsScriptToTheWorkloadUser(t *testing.T) {
+	client := &fakeIsloSyncClient{}
+	backend := &isloBackend{
+		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+	spec := &core.RunScriptSpec{Data: []byte("echo hi\n"), RemotePath: ".crabbox/scripts/abc-script.sh"}
+	if _, err := backend.runScript(context.Background(), client, "sbx", "/workspace/crabbox",
+		RunRequest{Script: spec}, nil, isloWorkloadUser); err != nil {
+		t.Fatalf("runScript: %v", err)
+	}
+	var chown string
+	for _, c := range client.prepareCommands {
+		if strings.Contains(c, "chown") {
+			chown = c
+			break
+		}
+	}
+	if chown == "" {
+		t.Fatalf("no chown issued for a workload-user run; commands=%q", client.prepareCommands)
+	}
+	if !strings.Contains(chown, isloWorkloadUser+":"+isloWorkloadUser) || !strings.Contains(chown, ".crabbox/scripts/abc-script.sh") {
+		t.Fatalf("chown did not hand the script to the workload user: %q", chown)
+	}
+}
+
+// The administrative user already owns what it uploads, so no chown is needed.
+func TestIsloRunScriptSkipsChownWithoutAWorkloadUser(t *testing.T) {
+	client := &fakeIsloSyncClient{}
+	backend := &isloBackend{
+		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
+		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+	}
+	spec := &core.RunScriptSpec{Data: []byte("echo hi\n"), RemotePath: ".crabbox/scripts/abc-script.sh"}
+	if _, err := backend.runScript(context.Background(), client, "sbx", "/workspace/crabbox",
+		RunRequest{Script: spec}, nil, ""); err != nil {
+		t.Fatalf("runScript: %v", err)
+	}
+	for _, c := range client.prepareCommands {
+		if strings.Contains(c, "chown") {
+			t.Fatalf("unexpected chown with no workload user: %q", c)
+		}
+	}
+}

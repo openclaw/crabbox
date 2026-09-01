@@ -109,6 +109,23 @@ func (b *isloBackend) uploadRunScript(ctx context.Context, client isloAPI, name,
 	return true, nil
 }
 
+// restoreRunScriptOwnership hands the uploaded script to the workload user.
+//
+// Run repairs workspace ownership before the workload, but the script archive
+// is placed afterwards through the provider's file API, which writes as the
+// administrative user. The script is mode 0700, so on a Tailnet-enrolled lease -
+// the case where the workload runs as the unprivileged workload user rather
+// than as the administrative one - the workload would be unable to read the
+// very file it was asked to execute. Re-apply the same ownership the workspace
+// repair applies, scoped to the script itself.
+func (b *isloBackend) restoreRunScriptOwnership(ctx context.Context, client isloAPI, name, workspace, remote, user string) error {
+	if user == "" || user == isloAdminUser {
+		return nil
+	}
+	command := "chown " + shellQuote(user+":"+user) + " " + shellQuote(remote)
+	return b.execShellAs(ctx, client, name, command, isloAdminUser, io.Discard)
+}
+
 // removeRunScript deletes the uploaded script. Cleanup is best effort: the
 // script has already run by this point, and a delete failure must not change
 // the exit code the caller observes.
@@ -152,6 +169,11 @@ func (b *isloBackend) runScript(ctx context.Context, client isloAPI, name, works
 	}
 	if err != nil {
 		return 7, err
+	}
+	if remote, pathErr := isloScriptRemotePath(req.Script); pathErr == nil {
+		if err := b.restoreRunScriptOwnership(ctx, client, name, workspace, remote, user); err != nil {
+			return 7, err
+		}
 	}
 	execReq := &gosdk.ExecRequest{Command: isloScriptCommand(req.Script, req.Command)}
 	if user != "" {
