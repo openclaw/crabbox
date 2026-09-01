@@ -970,7 +970,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 				return err
 			}
 		}
-		if scriptRequested && backend.Spec().Features.Has(FeatureModuleRun) {
+		if scriptRequested && (backend.Spec().Features.Has(FeatureModuleRun) || backend.Spec().Features.Has(FeaturePOSIXScript)) {
 			script, err = loadRunScript(*scriptPath, *scriptStdin, a.Stdin)
 			if err != nil {
 				return err

@@ -634,9 +634,13 @@ profile and one fallback to show the richer record shape:
   `crabbox-sync`, `archive-sync`, `cleanup`, `desktop`, `browser`, `code`,
   `tailscale`, `url-bridge`, `workspace-checkpoint`, `workspace-fork`,
   `workspace-restore`, `provider-snapshot`, `run-proof`, `run-session`,
-  `mcp-attachments`, and `module-run`. `module-run` means delegated
-  `crabbox run --script` or `--script-stdin` source-module execution; it does
-  not imply POSIX command argv, archive sync, ports, or SSH access.
+  `mcp-attachments`, `module-run`, and `posix-script`. `module-run` means
+  delegated `crabbox run --script` or `--script-stdin` source-module execution;
+  it does not imply POSIX command argv, archive sync, ports, or SSH access.
+  `posix-script` means the delegated provider accepts the same `--script` and
+  `--script-stdin` payload and executes it as an ordinary POSIX shell script,
+  preserving stdout, stderr, and the exact exit code; it does not imply archive
+  sync, ports, or SSH access.
 - `runtime`: normalized execution-shape capabilities derived from kind,
   category, targets, and features. Possible values are `ssh-host`,
   `delegated-command`, `managed-sandbox`, `local-runtime`, `local-sandbox`,

@@ -2,6 +2,10 @@
 
 ## 0.48.1 (Unreleased)
 
+### Added
+
+- Added an opt-in provider-neutral `posix-script` capability so a delegated provider that advertises it can accept `--script` and `--script-stdin` and run the payload as an ordinary POSIX shell script, preserving stdout, stderr, and the exact exit code. islo is the first backend: it uploads the script into the sandbox workspace, passes the remote path as a positional argument rather than splicing it into shell text, and removes the uploaded file afterwards through a short bounded cleanup context that still runs when the run was cancelled or timed out.
+
 ### Fixed
 
 - Scoped automatic SSH failure bundles to the current uploaded script, excluding retained uploads and neighboring files while preserving explicit artifact/download selection.
