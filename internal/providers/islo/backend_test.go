@@ -1947,6 +1947,8 @@ func TestIsloPauseResumeCallProvider(t *testing.T) {
 type fakeIsloSyncClient struct {
 	prepareCommands          []string
 	execRequests             []*gosdk.ExecRequest
+	execNames                []string
+	execErrOut               string
 	uploadPath               string
 	uploaded                 bytes.Buffer
 	uploadErr                error
@@ -2052,11 +2054,15 @@ func (f *fakeIsloSyncClient) UploadArchive(_ context.Context, _ string, targetPa
 	return err
 }
 
-func (f *fakeIsloSyncClient) ExecStream(ctx context.Context, _ string, req *gosdk.ExecRequest, stdout, _ io.Writer) (int, error) {
+func (f *fakeIsloSyncClient) ExecStream(ctx context.Context, name string, req *gosdk.ExecRequest, stdout, stderr io.Writer) (int, error) {
 	if f.rejectCanceledContext && ctx.Err() != nil {
 		return 1, ctx.Err()
 	}
 	f.execRequests = append(f.execRequests, req)
+	f.execNames = append(f.execNames, name)
+	if f.execErrOut != "" && stderr != nil {
+		_, _ = io.WriteString(stderr, f.execErrOut)
+	}
 	callIndex := len(f.execRequests) - 1
 	command := strings.Join(req.GetCommand(), " ")
 	if f.execDeadlineCommand != "" && strings.Contains(command, f.execDeadlineCommand) {

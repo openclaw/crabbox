@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -502,4 +503,271 @@ func heartbeatDirectTestLease(leaseID, slug string) LeaseTarget {
 			"idle_timeout_secs": "1800",
 		},
 	}}
+}
+
+const (
+	heartbeatDelegatedProviderName            = "heartbeat-delegated-test"
+	heartbeatDelegatedUnsupportedProviderName = "heartbeat-delegated-unsupported-test"
+)
+
+// heartbeatDelegatedIdleTimeout is what the fake capability reports back by
+// default. It is deliberately unlike any Crabbox config default so an assertion
+// on the rendered value cannot pass by echoing config.
+const heartbeatDelegatedIdleTimeout = 7 * time.Minute
+
+// heartbeatDelegatedFixture holds the fake capability's observable state. The
+// provider registry is process-wide, so this is guarded rather than left as
+// plain package variables: a future t.Parallel() would otherwise race silently.
+type heartbeatDelegatedFixture struct {
+	mu          sync.Mutex
+	requests    []LeaseHeartbeatRequest
+	idleTimeout time.Duration
+}
+
+var heartbeatDelegated = &heartbeatDelegatedFixture{idleTimeout: heartbeatDelegatedIdleTimeout}
+
+// arm sets what the capability reports for one test and restores the default.
+func (f *heartbeatDelegatedFixture) arm(t *testing.T, idleTimeout time.Duration) {
+	t.Helper()
+	f.set(nil, idleTimeout)
+	t.Cleanup(func() { f.set(nil, heartbeatDelegatedIdleTimeout) })
+}
+
+func (f *heartbeatDelegatedFixture) set(requests []LeaseHeartbeatRequest, idleTimeout time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.requests = requests
+	f.idleTimeout = idleTimeout
+}
+
+// record logs one call and returns the idle window to report for it.
+func (f *heartbeatDelegatedFixture) record(req LeaseHeartbeatRequest) time.Duration {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.requests = append(f.requests, req)
+	return f.idleTimeout
+}
+
+func (f *heartbeatDelegatedFixture) recorded() []LeaseHeartbeatRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]LeaseHeartbeatRequest(nil), f.requests...)
+}
+
+func init() {
+	RegisterProvider(heartbeatDelegatedProvider{})
+	RegisterProvider(heartbeatDelegatedUnsupportedProvider{})
+}
+
+type heartbeatDelegatedProvider struct{}
+
+func (heartbeatDelegatedProvider) Name() string      { return heartbeatDelegatedProviderName }
+func (heartbeatDelegatedProvider) Aliases() []string { return nil }
+func (heartbeatDelegatedProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        heartbeatDelegatedProviderName,
+		Family:      "heartbeat-test",
+		Kind:        ProviderKindDelegatedRun,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureLeaseHeartbeat},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (heartbeatDelegatedProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
+func (heartbeatDelegatedProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (p heartbeatDelegatedProvider) Configure(Config, Runtime) (Backend, error) {
+	return heartbeatDelegatedBackend{spec: p.Spec()}, nil
+}
+
+type heartbeatDelegatedBackend struct {
+	spec ProviderSpec
+}
+
+func (b heartbeatDelegatedBackend) Spec() ProviderSpec { return b.spec }
+
+func (b heartbeatDelegatedBackend) Heartbeat(_ context.Context, req LeaseHeartbeatRequest) (LeaseHeartbeatResult, error) {
+	return LeaseHeartbeatResult{
+		LeaseID:       req.ID,
+		Slug:          "delegated-heartbeat",
+		State:         "running",
+		LastTouchedAt: time.Date(2026, 8, 16, 20, 0, 0, 0, time.UTC),
+		IdleTimeout:   heartbeatDelegated.record(req),
+	}, nil
+}
+
+// heartbeatDelegatedUnsupportedProvider is the same shape without the optional
+// capability, so the negative direction stays pinned to today's behaviour.
+type heartbeatDelegatedUnsupportedProvider struct{}
+
+func (heartbeatDelegatedUnsupportedProvider) Name() string {
+	return heartbeatDelegatedUnsupportedProviderName
+}
+func (heartbeatDelegatedUnsupportedProvider) Aliases() []string { return nil }
+func (heartbeatDelegatedUnsupportedProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        heartbeatDelegatedUnsupportedProviderName,
+		Family:      "heartbeat-test",
+		Kind:        ProviderKindDelegatedRun,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (heartbeatDelegatedUnsupportedProvider) RegisterFlags(*flag.FlagSet, Config) any {
+	return noProviderFlags{}
+}
+func (heartbeatDelegatedUnsupportedProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (p heartbeatDelegatedUnsupportedProvider) Configure(Config, Runtime) (Backend, error) {
+	return heartbeatUnsupportedBackend{spec: p.Spec()}, nil
+}
+
+type heartbeatUnsupportedBackend struct {
+	spec ProviderSpec
+}
+
+func (b heartbeatUnsupportedBackend) Spec() ProviderSpec { return b.spec }
+
+func TestHeartbeatDelegatedCapability(t *testing.T) {
+	tests := []struct {
+		name string
+		// registeredBroker configures broker.mode=registered plus a
+		// coordinator URL, the shape that used to disable the capability
+		// wholesale.
+		registeredBroker bool
+		provider         string
+		args             []string
+		wantErrCode      int
+		wantErr          string
+	}{
+		{
+			name:     "capability keeps a delegated lease alive",
+			provider: heartbeatDelegatedProviderName,
+		},
+		{
+			// A CoordinatorNever provider can never hold a
+			// coordinator-registered lease, so a team-wide registered broker
+			// config must not disable the capability for it.
+			name:             "registered broker does not disable a coordinator-never provider",
+			registeredBroker: true,
+			provider:         heartbeatDelegatedProviderName,
+		},
+		{
+			name:        "provider without the capability still fails",
+			provider:    heartbeatDelegatedUnsupportedProviderName,
+			wantErrCode: 2,
+			wantErr:     "provider=" + heartbeatDelegatedUnsupportedProviderName + " does not support lease heartbeat",
+		},
+		{
+			// The delegated path reports the provider's idle window and has no
+			// way to replace one, so the flag is refused instead of silently
+			// doing nothing.
+			name:        "idle timeout replacement is refused, not ignored",
+			provider:    heartbeatDelegatedProviderName,
+			args:        []string{"--idle-timeout", "20m"},
+			wantErrCode: 2,
+			wantErr:     "provider=" + heartbeatDelegatedProviderName + " does not support replacing the lease idle timeout while heartbeating",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+			if test.registeredBroker {
+				t.Setenv("CRABBOX_COORDINATOR", "https://coordinator.example.test")
+				t.Setenv("CRABBOX_COORDINATOR_MODE", string(BrokerModeRegistered))
+				t.Setenv("CRABBOX_COORDINATOR_TOKEN", "test-token")
+			}
+			heartbeatDelegated.arm(t, heartbeatDelegatedIdleTimeout)
+
+			args := append([]string{"--provider", test.provider, "--id", "cbx_delegated", "--json"}, test.args...)
+			var stdout, stderr bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: &stderr}).heartbeat(context.Background(), args)
+
+			if test.wantErr != "" {
+				var exitErr ExitError
+				if !AsExitError(err, &exitErr) || exitErr.Code != test.wantErrCode || exitErr.Message != test.wantErr {
+					t.Fatalf("error=%v, want exit %d %q", err, test.wantErrCode, test.wantErr)
+				}
+				if stdout.Len() != 0 {
+					t.Fatalf("refused heartbeat wrote stdout=%q", stdout.String())
+				}
+				if calls := heartbeatDelegated.recorded(); len(calls) != 0 {
+					t.Fatalf("refused heartbeat still reached the capability: %#v", calls)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("heartbeat error=%v stderr=%q", err, stderr.String())
+			}
+			calls := heartbeatDelegated.recorded()
+			if len(calls) != 1 {
+				t.Fatalf("capability calls=%#v", calls)
+			}
+			if calls[0].ID != "cbx_delegated" {
+				t.Fatalf("heartbeat request=%#v", calls[0])
+			}
+			var view leaseHeartbeatView
+			if err := json.Unmarshal(stdout.Bytes(), &view); err != nil {
+				t.Fatal(err)
+			}
+			if view.ID != "cbx_delegated" || view.Provider != heartbeatDelegatedProviderName || view.State != "running" ||
+				view.LastTouchedAt != "2026-08-16T20:00:00Z" {
+				t.Fatalf("heartbeat view=%#v", view)
+			}
+			// The rendered idle window is the provider's reported value, not
+			// Crabbox's configured default.
+			if view.IdleTimeout != heartbeatDelegatedIdleTimeout.String() {
+				t.Fatalf("heartbeat view idleTimeout=%q, want the provider-reported %q", view.IdleTimeout, heartbeatDelegatedIdleTimeout)
+			}
+			if view.IdleTimeout == defaultConfig().IdleTimeout.String() {
+				t.Fatalf("fixture is tautological: provider value equals the config default %q", view.IdleTimeout)
+			}
+			// LeaseHeartbeatResult carries no deadline field at all, so the
+			// rendered view structurally cannot claim an expiry here.
+			if view.ExpiresAt != "" {
+				t.Fatalf("heartbeat view invented an absolute deadline: %#v", view)
+			}
+		})
+	}
+}
+
+// TestHeartbeatDelegatedOmitsUnreportedIdleTimeout pins the other half of the
+// honest-reporting rule: a provider that reports no idle window renders none,
+// rather than falling back to the local config default.
+func TestHeartbeatDelegatedOmitsUnreportedIdleTimeout(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	heartbeatDelegated.arm(t, 0)
+
+	var stdout, stderr bytes.Buffer
+	if err := (App{Stdout: &stdout, Stderr: &stderr}).heartbeat(context.Background(), []string{
+		"--provider", heartbeatDelegatedProviderName, "--id", "cbx_delegated", "--json",
+	}); err != nil {
+		t.Fatalf("heartbeat error=%v stderr=%q", err, stderr.String())
+	}
+	var view leaseHeartbeatView
+	if err := json.Unmarshal(stdout.Bytes(), &view); err != nil {
+		t.Fatal(err)
+	}
+	if view.IdleTimeout != "" {
+		t.Fatalf("unreported idle window rendered as %q", view.IdleTimeout)
+	}
+
+	// The text view marks it absent rather than printing a number.
+	stdout.Reset()
+	if err := (App{Stdout: &stdout, Stderr: &stderr}).heartbeat(context.Background(), []string{
+		"--provider", heartbeatDelegatedProviderName, "--id", "cbx_delegated",
+	}); err != nil {
+		t.Fatalf("heartbeat error=%v stderr=%q", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "idle_timeout=-") {
+		t.Fatalf("text view=%q, want idle_timeout=-", stdout.String())
+	}
 }

@@ -2,6 +2,11 @@
 
 ## 0.48.1 (Unreleased)
 
+### Added
+
+- `crabbox heartbeat` now works for delegated-run providers that advertise the new `lease-heartbeat` feature, instead of failing with `does not support lease heartbeat`. Such a heartbeat reports the idle window the provider reports back, or none at all, and refuses `--idle-timeout` rather than ignoring it.
+- Islo implements `lease-heartbeat` with one no-op exec, which is what registers sandbox activity, since Islo exposes no heartbeat endpoint. It writes no lifecycle policy, so it cannot change a sandbox's absolute deadline, and it warns when the sandbox reports no `lifecycle.pause_after_idle` to defer. A paused sandbox is refused rather than resumed, because an exec would resume it and the resume is billed.
+
 ### Fixed
 
 - Scoped automatic SSH failure bundles to the current uploaded script, excluding retained uploads and neighboring files while preserving explicit artifact/download selection.

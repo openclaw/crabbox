@@ -68,6 +68,34 @@ func (a App) heartbeat(ctx context.Context, args []string) error {
 		}
 		return writeLeaseHeartbeatView(a.Stdout, heartbeatViewFromCoordinatorLease(lease), *jsonOut)
 	}
+	// A delegated-run provider has no Crabbox-managed SSH lease for the generic
+	// path below to touch, so heartbeat used to fail outright at the
+	// SSHLeaseBackend assertion. Providers whose API exposes a cheap
+	// authenticated no-op implement LeaseHeartbeatBackend and refresh the
+	// provider-side lease themselves.
+	//
+	// The coordinator stays the source of truth for expiry wherever a
+	// coordinator lease can exist, so a registered broker keeps the existing
+	// path - except for a CoordinatorNever provider, which by definition can
+	// never hold a coordinator-registered lease. Gating those on the global
+	// broker config would disable the capability for a whole team's config
+	// without any coordinator lease to defer to.
+	if !shouldRegisterCoordinatorLease(cfg) || backend.Spec().Coordinator == CoordinatorNever {
+		if delegated, ok := backend.(LeaseHeartbeatBackend); ok {
+			// This path reports the provider's own idle window; it has no way
+			// to replace one. Refuse the flag instead of accepting it and
+			// silently changing nothing.
+			if idleTimeoutSet {
+				return exit(2, "provider=%s does not support replacing the lease idle timeout while heartbeating", backend.Spec().Name)
+			}
+			result, err := delegated.Heartbeat(ctx, LeaseHeartbeatRequest{ID: *id})
+			if err != nil {
+				return err
+			}
+			return writeLeaseHeartbeatView(a.Stdout, heartbeatViewFromLeaseHeartbeat(backend.Spec().Name, result), *jsonOut)
+		}
+	}
+
 	var registeredCoord *CoordinatorClient
 	if shouldRegisterCoordinatorLease(cfg) {
 		coord, configured, err := newCoordinatorClient(cfg)
@@ -167,6 +195,26 @@ func heartbeatViewFromCoordinatorLease(lease CoordinatorLease) leaseHeartbeatVie
 		IdleTimeout:   formatSecondsDuration(lease.IdleTimeoutSeconds),
 		ExpiresAt:     lease.ExpiresAt,
 	}
+}
+
+func heartbeatViewFromLeaseHeartbeat(provider string, result LeaseHeartbeatResult) leaseHeartbeatView {
+	view := leaseHeartbeatView{
+		ID:       result.LeaseID,
+		Slug:     result.Slug,
+		Provider: provider,
+		State:    result.State,
+	}
+	if !result.LastTouchedAt.IsZero() {
+		view.LastTouchedAt = result.LastTouchedAt.UTC().Format(time.RFC3339)
+	}
+	// Only the provider's reported window is rendered. Crabbox's configured
+	// idle timeout is deliberately NOT substituted here: on this path the
+	// provider owns the idle policy, so echoing a local default would print a
+	// number unrelated to the lease.
+	if result.IdleTimeout > 0 {
+		view.IdleTimeout = result.IdleTimeout.String()
+	}
+	return view
 }
 
 func heartbeatViewFromServer(leaseID string, server Server) leaseHeartbeatView {

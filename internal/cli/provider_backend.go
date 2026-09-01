@@ -231,6 +231,48 @@ type LeaseTouchBackend interface {
 	Touch(ctx context.Context, req TouchRequest) (Server, error)
 }
 
+// LeaseHeartbeatBackend is implemented by providers that keep a lease alive
+// through their own API instead of a Crabbox-managed SSH lease touch. It is
+// optional: the `heartbeat` command reports the same unsupported error for
+// providers that do not implement it.
+//
+// Core performs NO validation before calling: unlike the SSH lease path it does
+// not resolve the lease, reject terminal states, or verify a claim. The
+// implementation therefore owns every ownership and state check, and MUST
+// refuse an identifier it holds no local claim for.
+//
+// A heartbeat only refreshes idle activity. Implementations must never write a
+// lease deadline of any kind, so a lease still ends on the provider's own
+// schedule no matter how often it is heartbeated. `--idle-timeout` is rejected
+// before this capability is reached, because a heartbeat here reports the
+// provider's idle window rather than replacing it.
+type LeaseHeartbeatBackend interface {
+	Backend
+	Heartbeat(ctx context.Context, req LeaseHeartbeatRequest) (LeaseHeartbeatResult, error)
+}
+
+type LeaseHeartbeatRequest struct {
+	// ID is the lease id, sandbox name, or slug exactly as the user typed it,
+	// unresolved and unvalidated.
+	ID string
+}
+
+type LeaseHeartbeatResult struct {
+	LeaseID string
+	Slug    string
+	State   string
+	// LastTouchedAt is when the provider observed the lease. Core renders it
+	// as-is and persists nothing on this path, so a local claim's own touch
+	// time is left alone.
+	LastTouchedAt time.Time
+	// IdleTimeout is the provider's OWN idle window, as reported by the
+	// provider for this lease. Leave it zero when the provider does not report
+	// one: the rendered view then omits the field rather than substituting
+	// Crabbox's configured default, which has no bearing on a lease whose idle
+	// policy the provider owns.
+	IdleTimeout time.Duration
+}
+
 type SSHLeaseBackend interface {
 	SSHLoginBackend
 	LeaseTouchBackend
@@ -654,27 +696,28 @@ type TargetSpec struct {
 type Feature string
 
 const (
-	FeatureSSH          Feature = "ssh"
-	FeatureCrabboxSync  Feature = "crabbox-sync"
-	FeatureArchiveSync  Feature = "archive-sync"
-	FeatureCleanup      Feature = "cleanup"
-	FeatureDesktop      Feature = "desktop"
-	FeatureBrowser      Feature = "browser"
-	FeatureCode         Feature = "code"
-	FeatureTailscale    Feature = "tailscale"
-	FeatureURLBridge    Feature = "url-bridge"
-	FeatureCheckpoint   Feature = "workspace-checkpoint"
-	FeatureFork         Feature = "workspace-fork"
-	FeatureRestore      Feature = "workspace-restore"
-	FeatureSnapshot     Feature = "provider-snapshot"
-	FeatureCacheVolume  Feature = "cache-volume"
-	FeatureRunProof     Feature = "run-proof"
-	FeatureRunSession   Feature = "run-session"
-	FeatureRunArtifacts Feature = "run-artifacts"
-	FeatureRunDownloads Feature = "run-downloads"
-	FeatureModuleRun    Feature = "module-run"
-	FeaturePauseResume  Feature = "pause-resume"
-	FeatureMCP          Feature = "mcp-attachments"
+	FeatureSSH            Feature = "ssh"
+	FeatureCrabboxSync    Feature = "crabbox-sync"
+	FeatureArchiveSync    Feature = "archive-sync"
+	FeatureCleanup        Feature = "cleanup"
+	FeatureDesktop        Feature = "desktop"
+	FeatureBrowser        Feature = "browser"
+	FeatureCode           Feature = "code"
+	FeatureTailscale      Feature = "tailscale"
+	FeatureURLBridge      Feature = "url-bridge"
+	FeatureCheckpoint     Feature = "workspace-checkpoint"
+	FeatureFork           Feature = "workspace-fork"
+	FeatureRestore        Feature = "workspace-restore"
+	FeatureSnapshot       Feature = "provider-snapshot"
+	FeatureCacheVolume    Feature = "cache-volume"
+	FeatureRunProof       Feature = "run-proof"
+	FeatureRunSession     Feature = "run-session"
+	FeatureRunArtifacts   Feature = "run-artifacts"
+	FeatureRunDownloads   Feature = "run-downloads"
+	FeatureModuleRun      Feature = "module-run"
+	FeaturePauseResume    Feature = "pause-resume"
+	FeatureLeaseHeartbeat Feature = "lease-heartbeat"
+	FeatureMCP            Feature = "mcp-attachments"
 )
 
 type FeatureSet []Feature
