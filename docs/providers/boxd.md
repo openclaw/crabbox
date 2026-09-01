@@ -143,6 +143,13 @@ stored idle timeout; an explicit heartbeat override changes it. Local TTL and
 idle expiry require a later `crabbox cleanup`; there is no Boxd server-side
 Crabbox janitor. Cleanup honors kept leases and supports dry-run.
 
+Claims written by the earlier console-based provider revision carry a
+pre-migration scope and remain visible to `list`, `status`, `stop`, and
+`cleanup` under the same identity and immutable-ID fences, so retained or
+failed-cleanup machines from before the migration can still be found and
+destroyed. Guest access on such a claim is refused; acquire a new lease for
+workloads. New acquisitions always write the current scope.
+
 Failed bootstrap rolls back under an independent bounded cleanup context,
 even after caller cancellation. `--keep` and `--keep-on-failure` preserve their
 normal Crabbox semantics. Cleanup failure retains the immutable ownership
