@@ -2187,6 +2187,7 @@ afterSync:
 	}
 	if stdoutCaptured {
 		stdoutEvents = nil
+		stdout = io.MultiWriter(stdout, capturedRunLogWriter{&logBuffer})
 	}
 	stderr, stderrCaptured, err := streamCaptures.stderr.writer(stderr, stderrPhaseWriter, a.Stderr)
 	if err != nil {
@@ -2194,6 +2195,7 @@ afterSync:
 	}
 	if stderrCaptured {
 		stderrEvents = nil
+		stderr = io.MultiWriter(stderr, capturedRunLogWriter{&logBuffer})
 	}
 	var terminalReceiptKey ed25519.PrivateKey
 	if recorder.runID != "" || strings.TrimSpace(*attestOut) != "" {
@@ -2201,11 +2203,6 @@ afterSync:
 		if err != nil {
 			return recordFailure(exit(2, "attest key: %v", err))
 		}
-	}
-	attestDigest := newAttestDigestWriter()
-	if strings.TrimSpace(*attestOut) != "" || recorder.runID != "" {
-		stdout = io.MultiWriter(stdout, attestDigest)
-		stderr = io.MultiWriter(stderr, attestDigest)
 	}
 	resultsMarker := ""
 	if cfg.Results.Auto {
@@ -2256,16 +2253,8 @@ afterSync:
 	attestPath := strings.TrimSpace(*attestOut)
 	var writtenAttestReceipt terminalRunReceipt
 	attestReceiptWritten := false
+	terminalLog := logBuffer.Snapshot()
 	buildTerminalReceipt := func(finalCode int) (terminalRunReceipt, error) {
-		retainedLog := logBuffer.String()
-		logTruncated := logBuffer.Truncated()
-		retainedLogDigest := sha256Digest([]byte(retainedLog))
-		fullLogDigest := attestDigest.sum()
-		if !logTruncated {
-			// The retained buffer owns stdout/stderr ordering. For complete logs its
-			// digest is also the independently verifiable full-stream digest.
-			fullLogDigest = retainedLogDigest
-		}
 		startedAt := recorder.startedAt
 		endedAt := time.Time{}
 		if !startedAt.IsZero() && !recorder.attachedAt.IsZero() {
@@ -2289,9 +2278,9 @@ afterSync:
 			CommandMs:         timings.command.Milliseconds(),
 			StartedAt:         startedAt,
 			EndedAt:           endedAt,
-			LogSHA256:         fullLogDigest,
-			RetainedLogSHA256: retainedLogDigest,
-			LogTruncated:      logTruncated,
+			LogSHA256:         terminalLog.FullSHA256,
+			RetainedLogSHA256: sha256Digest([]byte(terminalLog.Log)),
+			LogTruncated:      terminalLog.Truncated,
 		})
 	}
 	finalizeTerminalRun = func() {
@@ -2317,8 +2306,6 @@ afterSync:
 			classification = classifyRunOutcomeFailure(finalCode, classificationLog, timings.commandPhases, failureEvidence, false)
 		}
 
-		retainedLog := logBuffer.String()
-		logTruncated := logBuffer.Truncated()
 		receipt := writtenAttestReceipt
 		var receiptErr error
 		if !attestReceiptWritten || receipt.ExitCode != finalCode {
@@ -2340,7 +2327,7 @@ afterSync:
 				fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", artifact.Path, artifact.Bytes)
 			}
 		}
-		if finishErr := recorder.Finish(ctx, target, finalCode, timings.sync, timings.command, retainedLog, logTruncated, results, classification, &receipt); finishErr != nil {
+		if finishErr := recorder.Finish(ctx, target, finalCode, timings.sync, timings.command, terminalLog.Log, terminalLog.Truncated, results, classification, &receipt); finishErr != nil {
 			err = errors.Join(err, finishErr)
 			recordRunFailure(&runFailure, finishErr)
 			if attestPath != "" && receipt.ExitCode == 0 {

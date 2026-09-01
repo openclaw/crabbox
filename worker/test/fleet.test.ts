@@ -80,6 +80,10 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+function expandLogTextRuns(parts: Array<{ text: string; count: number }>): string {
+  return parts.map((part) => part.text.repeat(part.count)).join("");
+}
+
 async function testSHA256Digest(value: Uint8Array): Promise<string> {
   const hashed = new Uint8Array(await crypto.subtle.digest("SHA-256", value));
   return `sha256:${Buffer.from(hashed).toString("hex")}`;
@@ -36122,6 +36126,182 @@ describe("fleet run history", () => {
     expect(finished.run.results?.files).toEqual([]);
     expect(finished.run.results?.failed).toEqual([]);
   });
+
+  it.each([
+    "ascii",
+    "unicode",
+    "malformed",
+    "two-byte-tail",
+    "three-byte-tail",
+    "four-byte-tail",
+    "replacement-expansion",
+    "exact-cap",
+  ])("commits the Go FinishRun UTF-8 wire golden: %s", async (name) => {
+    type TextRun = { text: string; count: number };
+    type Fixture = {
+      name: string;
+      raw: Array<{ hex: string; count: number }>;
+      finish: {
+        log: TextRun[];
+        logChunks: Array<{ parts: TextRun[]; count: number }>;
+        logTruncated: boolean;
+        receipt: import("../src/types").TerminalRunReceipt;
+      };
+    };
+    const fixtures = JSON.parse(
+      await readFile(
+        new URL("../../internal/cli/testdata/terminal-log-wire.json", import.meta.url),
+        "utf8",
+      ),
+    ) as Fixture[];
+    const fixture = fixtures.find((entry) => entry.name === name)!;
+    const body = {
+      ...fixture.finish,
+      log: expandLogTextRuns(fixture.finish.log),
+      logChunks: fixture.finish.logChunks.flatMap((chunk) =>
+        Array<string>(chunk.count).fill(expandLogTextRuns(chunk.parts)),
+      ),
+    };
+    const raw = Buffer.concat(
+      fixture.raw.map((part) => {
+        const bytes = Buffer.from(part.hex, "hex");
+        return Buffer.alloc(bytes.length * part.count, bytes);
+      }),
+    );
+    expect(body.receipt.log_sha256).toBe(await testSHA256Digest(raw));
+    const log = body.logChunks.join("");
+    expect(body.receipt.retained_log_sha256).toBe(
+      await testSHA256Digest(new TextEncoder().encode(log)),
+    );
+    expect(body.logTruncated).toBe(!raw.equals(Buffer.from(log)));
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+    const run = testRun({
+      owner: "alice@example.com",
+      org: "example-org",
+      id: "run_unicode",
+      provider: "aws",
+      leaseID: undefined,
+      command: ["synthetic-output"],
+      startedAt: "2026-08-23T10:00:00Z",
+    });
+    storage.seed(`run:${run.id}`, run);
+    // Tampering still fails before storage, including logs whose full hash cannot
+    // be recomputed from the retained text.
+    const tamperedBodies = [
+      { ...body, logChunks: [...body.logChunks, "tampered"] },
+      { ...body, logTruncated: !body.logTruncated },
+      {
+        ...body,
+        receipt: {
+          ...body.receipt,
+          signature:
+            (body.receipt.signature.startsWith("A") ? "B" : "A") + body.receipt.signature.slice(1),
+        },
+      },
+    ];
+    await Promise.all(
+      tamperedBodies.map(async (tampered) => {
+        const rejected = await fleet.fetch(
+          request("POST", `/v1/runs/${run.id}/finish`, { headers, body: tampered }),
+        );
+        expect(rejected.status).toBe(400);
+        expect(storage.value<RunRecord>(`run:${run.id}`)?.state).toBe("running");
+      }),
+    );
+    const finish = await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/finish`, { headers, body }),
+    );
+    expect(finish.status).toBe(200);
+    const stored = storage.value<RunRecord>(`run:${run.id}`)!;
+    expect(stored.logBytes).toBe(Buffer.byteLength(log));
+    expect(stored.logBytes).toBeLessThanOrEqual(8 * 1024 * 1024);
+    expect(stored.logTruncated).toBe(body.logTruncated);
+    expect(stored.terminalReceipt).toEqual(body.receipt);
+    const values = await storage.list<string>({ prefix: stored.terminalLogPrefix! });
+    for (const value of values.values()) {
+      expect(value.isWellFormed()).toBe(true);
+      expect(Buffer.byteLength(value)).toBeLessThanOrEqual(64 * 1024);
+    }
+    const logs = await fleet.fetch(request("GET", `/v1/runs/${run.id}/logs`, { headers }));
+    expect(await logs.text()).toBe(log);
+    const receipt = await fleet.fetch(request("GET", `/v1/runs/${run.id}/receipt`, { headers }));
+    expect(await receipt.json()).toEqual({ receipt: body.receipt });
+  });
+
+  it.each([
+    ["é", 1],
+    ["€", 1],
+    ["€", 2],
+    ["😀", 1],
+    ["😀", 2],
+    ["😀", 3],
+  ])("bounds stored UTF-8 tails at whole codepoints: %s minus %i bytes", async (char, cut) => {
+    const cap = 8 * 1024 * 1024;
+    const tail = "a".repeat(cap - Buffer.byteLength(char) + cut);
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+    const run = testRun({ owner: "alice@example.com", org: "example-org", id: "run_unicode_tail" });
+    storage.seed(`run:${run.id}`, run);
+    const finish = await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/finish`, {
+        headers,
+        body: { exitCode: 0, log: char + tail },
+      }),
+    );
+    expect(finish.status).toBe(200);
+    const stored = storage.value<RunRecord>(`run:${run.id}`)!;
+    expect(stored.logBytes).toBe(tail.length);
+    expect(stored.logTruncated).toBe(true);
+    const logs = await fleet.fetch(request("GET", `/v1/runs/${run.id}/logs`, { headers }));
+    expect(await logs.text()).toBe(tail);
+  });
+
+  it.each([
+    { log: "\ud800x\udc00", want: "�x�", truncated: true },
+    { log: "�", want: "�", truncated: false },
+    {
+      log: "a".repeat(8 * 1024 * 1024 - 3) + "€",
+      want: "a".repeat(8 * 1024 * 1024 - 3) + "€",
+      truncated: false,
+    },
+    {
+      log: "x".repeat(8 * 1024 * 1024) + "\ufeff" + "a".repeat(8 * 1024 * 1024 - 3),
+      want: "\ufeff" + "a".repeat(8 * 1024 * 1024 - 3),
+      truncated: true,
+    },
+  ])(
+    "normalizes stored logs without losing literal replacements or BOMs ($truncated)",
+    async ({ log, want, truncated }) => {
+      const storage = new MemoryStorage();
+      const fleet = testFleet(storage);
+      const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+      const run = testRun({
+        owner: "alice@example.com",
+        org: "example-org",
+        id: "run_unicode_normalization",
+      });
+      storage.seed(`run:${run.id}`, run);
+      const finish = await fleet.fetch(
+        request("POST", `/v1/runs/${run.id}/finish`, {
+          headers,
+          body: { exitCode: 0, log },
+        }),
+      );
+      expect(finish.status).toBe(200);
+      const stored = storage.value<RunRecord>(`run:${run.id}`)!;
+      expect(stored.logBytes).toBe(Buffer.byteLength(want));
+      expect(stored.logTruncated).toBe(truncated);
+      const values = await storage.list<string>({ prefix: stored.terminalLogPrefix! });
+      expect([...values.values()].join("")).toBe(want);
+      for (const value of values.values()) {
+        expect(value.isWellFormed()).toBe(true);
+        expect(Buffer.byteLength(value)).toBeLessThanOrEqual(64 * 1024);
+      }
+    },
+  );
 
   it("records chunked run logs so failures do not disappear from long output", async () => {
     const storage = new MemoryStorage();

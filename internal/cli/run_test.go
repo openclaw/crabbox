@@ -3228,56 +3228,92 @@ exit 0
 }
 
 func TestRunCommandWritesTerminalReceiptOnSuccess(t *testing.T) {
-	dir := t.TempDir()
-	isolateRunTestUserDirs(t, dir)
-	sshPath := filepath.Join(dir, "ssh")
-	receiptPath := filepath.Join(dir, "receipt.json")
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	go func() {
-		for {
-			conn, err := listener.Accept()
+	for _, tc := range []struct{ name, raw, capture string }{
+		{name: "unicode", raw: "café € 😀\n"},
+		{name: "malformed", raw: "raw\xff\xfe\n"},
+		{name: "captured stdout", raw: "raw\xff\xfe\n", capture: "stdout"},
+		{name: "captured stderr", raw: "raw\xff\xfe\n", capture: "stderr"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			isolateRunTestUserDirs(t, dir)
+			sshPath := filepath.Join(dir, "ssh")
+			receiptPath := filepath.Join(dir, "receipt.json")
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
 			if err != nil {
-				return
+				t.Fatal(err)
 			}
-			_ = conn.Close()
-		}
-	}()
-	_, sshPort, err := net.SplitHostPort(listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	installWorkspaceOwnerAwareSSH(t, sshPath, "#!/bin/sh\nexit 0\n")
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
-	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+			defer listener.Close()
+			go func() {
+				for {
+					conn, err := listener.Accept()
+					if err != nil {
+						return
+					}
+					_ = conn.Close()
+				}
+			}()
+			_, sshPort, err := net.SplitHostPort(listener.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			payloadPath := filepath.Join(dir, "payload")
+			writeFile(t, payloadPath, tc.raw)
+			t.Setenv("CRABBOX_TEST_LOG_PAYLOAD", payloadPath)
+			redirect := ""
+			if tc.capture == "stderr" {
+				redirect = " >&2"
+			}
+			installWorkspaceOwnerAwareSSH(t, sshPath, "#!/bin/sh\ncase \"$1\" in *unicode-output-sentinel*) cat \"$CRABBOX_TEST_LOG_PAYLOAD\""+redirect+";; esac\nexit 0\n")
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
 
-	var stdout, stderr bytes.Buffer
-	err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
-		"--provider", "run-env-profile-test",
-		"--no-sync",
-		"--attest", receiptPath,
-		"--", "true",
-	})
-	if err != nil {
-		t.Fatalf("runCommand error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
-	}
-	data, err := os.ReadFile(receiptPath)
-	if err != nil {
-		t.Fatalf("read terminal receipt: %v", err)
-	}
-	receipt, err := decodeTerminalRunReceipt(data)
-	if err != nil {
-		t.Fatalf("decode terminal receipt: %v", err)
-	}
-	if receipt.SchemaVersion != terminalReceiptSchemaVersion || receipt.ReceiptType != terminalReceiptType || receipt.ExitCode != 0 {
-		t.Fatalf("receipt=%+v", receipt)
-	}
-	if !strings.Contains(stderr.String(), "artifact kind=receipt") {
-		t.Fatalf("missing terminal receipt output:\n%s", stderr.String())
+			var stdout, stderr bytes.Buffer
+			args := []string{
+				"--provider", "run-env-profile-test",
+				"--no-sync",
+				"--attest", receiptPath,
+			}
+			capturePath := filepath.Join(dir, "capture.raw")
+			if tc.capture != "" {
+				args = append(args, "--capture-"+tc.capture, capturePath)
+			}
+			args = append(args, "--", "unicode-output-sentinel")
+			err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), args)
+			if err != nil {
+				t.Fatalf("runCommand error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+			}
+			data, err := os.ReadFile(receiptPath)
+			if err != nil {
+				t.Fatalf("read terminal receipt: %v", err)
+			}
+			receipt, err := decodeTerminalRunReceipt(data)
+			if err != nil {
+				t.Fatalf("decode terminal receipt: %v", err)
+			}
+			if receipt.SchemaVersion != terminalReceiptSchemaVersion || receipt.ReceiptType != terminalReceiptType || receipt.ExitCode != 0 {
+				t.Fatalf("receipt=%+v", receipt)
+			}
+			if !strings.Contains(stderr.String(), "artifact kind=receipt") {
+				t.Fatalf("missing terminal receipt output:\n%s", stderr.String())
+			}
+
+			if receipt.LogSHA256 != sha256Digest([]byte(tc.raw)) {
+				t.Fatal("receipt lost raw stream digest")
+			}
+			retained, lossy := retainedRunLogText(tc.raw, maxRunLogBytes)
+			if tc.capture != "" {
+				captured, err := os.ReadFile(capturePath)
+				if err != nil || string(captured) != tc.raw {
+					t.Fatalf("raw capture changed: %v", err)
+				}
+				retained, lossy = "", true
+			}
+			if receipt.RetainedLogSHA256 != sha256Digest([]byte(retained)) || receipt.LogTruncated != lossy {
+				t.Fatal("receipt does not bind retained representation")
+			}
+		})
 	}
 }
 

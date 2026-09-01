@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Canonicalized retained logs as bounded UTF-8 before receipt signing and storage, preserving raw full-stream hashes and captures while marking lossy normalization or omitted bytes as truncated.
+
 - Honor explicit SSH port selection from a coordinator lease’s advertised endpoints before remote execution, preserving host trust and independent provider release.
 - Restored machine-readable missing-checkpoint inspection after coordinator-managed deletion, preserving surviving capture bindings and errors from unsupported or unavailable coordinators.
 - Preserved coordinator control-heartbeat failures when HTTP fallback also fails or has no remaining budget, without extending heartbeat deadlines or changing successful fallback.

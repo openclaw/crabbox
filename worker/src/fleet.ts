@@ -22635,13 +22635,12 @@ function normalizeRunLogInput(input: RunFinishRequest): {
     ? input.logChunks.map((chunk) => String(chunk)).join("")
     : "";
   const rawLog = chunkLog || input.log || "";
-  const bounded = truncateUtf8Tail(rawLog, maxStoredRunLogBytes);
-  const rawBytes = textEncoder.encode(rawLog).byteLength;
+  const bounded = retainedRunLogText(rawLog, maxStoredRunLogBytes);
   return {
     log: bounded,
     source: rawLog,
-    bytes: Math.min(rawBytes, maxStoredRunLogBytes),
-    truncated: Boolean(input.logTruncated) || rawBytes > maxStoredRunLogBytes,
+    bytes: textEncoder.encode(bounded).byteLength,
+    truncated: Boolean(input.logTruncated) || bounded !== rawLog,
   };
 }
 
@@ -22695,12 +22694,14 @@ function splitRunLogByBytes(log: string, maxBytes: number): string[] {
   return chunks;
 }
 
-function truncateUtf8Tail(value: string, maxBytes: number): string {
+function retainedRunLogText(value: string, maxBytes: number): string {
   const encoded = textEncoder.encode(value);
-  if (encoded.byteLength <= maxBytes) {
-    return value;
-  }
-  return textDecoder.decode(encoded.slice(encoded.byteLength - maxBytes));
+  let start = Math.max(0, encoded.byteLength - maxBytes);
+  while (start < encoded.byteLength && (encoded[start]! & 0xc0) === 0x80) start++;
+  // Normalize lone surrogates even below the cap, but preserve a literal BOM.
+  return new TextDecoder("utf-8", { fatal: false, ignoreBOM: true }).decode(
+    encoded.subarray(start),
+  );
 }
 
 const MAX_RESULT_FILES = 50;

@@ -20,10 +20,18 @@ end before the coordinator start or more than 30 seconds after the
 coordinator-observed terminal timestamp. It does not prove the client could not
 backdate its own signed timestamp.
 
-If the retained log is truncated, the receipt still signs the client's full
-observed stream hash, but the coordinator cannot independently recompute that
-hash from its retained tail. The receipt records `log_truncated: true`; the
-retained tail hash remains independently verified.
+The retained log is canonical UTF-8 text: each malformed output byte becomes
+U+FFFD, and the byte-bounded tail starts only at a complete codepoint. Its
+`retained_log_sha256` hashes exactly the text sent to and stored by the
+coordinator. Valid UTF-8 within the cap is unchanged.
+
+`log_truncated: true` means this text is not byte-complete: bytes were dropped
+at the tail cap, lost through UTF-8 normalization, or routed exclusively to
+local captures. The receipt's `log_sha256` still hashes the full **raw** stream,
+not normalized text. The coordinator cannot independently recompute that raw
+hash from an incomplete representation, but always verifies the retained-text
+hash and signature. When `log_truncated: false`, it also independently checks
+the full-stream hash. This uses the existing schema v2 fields and checks.
 
 If the run has no committed receipt, the command exits without inferring
 success or failure from logs, events, or lease state. The execution evidence
