@@ -749,3 +749,131 @@ func TestCreateAuthRejectionPreservesExistingLease(t *testing.T) {
 		t.Fatal("auth rejection deleted existing VM")
 	}
 }
+
+// rewriteClaimScope rewrites the stored claim to the exact serialization the
+// earlier console-based provider used, simulating an upgrade over it.
+func rewriteClaimScope(t *testing.T, leaseID, scope string) {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "claims", "*.json"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("claims=%v err=%v", files, err)
+	}
+	data, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw["lease_id"] != leaseID && raw["LeaseID"] != leaseID {
+		// Field naming is an implementation detail; find the scope key by value.
+		found := false
+		for key, value := range raw {
+			if s, ok := value.(string); ok && s == leaseID {
+				found = true
+				_ = key
+			}
+		}
+		if !found {
+			t.Fatalf("claim file does not reference lease %s: %s", leaseID, data)
+		}
+	}
+	rewritten := false
+	for key, value := range raw {
+		if s, ok := value.(string); ok && json.Valid([]byte(s)) && strings.HasPrefix(s, "[\"") {
+			raw[key] = scope
+			rewritten = true
+		}
+	}
+	if !rewritten {
+		t.Fatalf("no provider scope found in claim: %s", data)
+	}
+	out, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(files[0], out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLegacyClaimsRemainVisibleForCleanupAndRelease(t *testing.T) {
+	for _, mode := range []string{"release", "cleanup", "guest-refused", "account-fence"} {
+		t.Run(mode, func(t *testing.T) {
+			b, f := fixtureBackend(t)
+			lease := acquireFixture(t, b, false)
+			legacy := legacyClaimScope(b.cfg)
+			if legacy == b.scope() {
+				t.Fatal("legacy scope must differ from the current scope")
+			}
+			rewriteClaimScope(t, lease.LeaseID, legacy)
+			claim := onlyClaim(t)
+			if claim.ProviderScope != legacy {
+				t.Fatalf("scope rewrite failed: %q", claim.ProviderScope)
+			}
+			views, err := b.List(context.Background(), core.ListRequest{})
+			if err != nil || len(views) != 1 {
+				t.Fatalf("legacy claim invisible: views=%d err=%v", len(views), err)
+			}
+			switch mode {
+			case "release":
+				resolved, err := b.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, StatusOnly: true, ReleaseOnly: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: resolved}); err != nil {
+					t.Fatal(err)
+				}
+				assertNoClaims(t)
+				if f.count("DestroyVm vm-1") != 1 {
+					t.Fatal("legacy release did not destroy the exact immutable VM")
+				}
+			case "cleanup":
+				// A failed-cleanup claim from before the migration must stay
+				// reachable by cleanup after the upgrade.
+				failed := map[string]string{}
+				for k, v := range claim.Labels {
+					failed[k] = v
+				}
+				failed["recovery"] = "failed"
+				if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, failed); err != nil {
+					t.Fatal(err)
+				}
+				if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+					t.Fatal(err)
+				}
+				assertNoClaims(t)
+				if f.count("DestroyVm vm-1") != 1 {
+					t.Fatal("legacy cleanup did not destroy the exact immutable VM")
+				}
+			case "guest-refused":
+				_, err := b.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID})
+				if err == nil || !strings.Contains(err.Error(), "predates") {
+					t.Fatalf("legacy claim allowed guest access: %v", err)
+				}
+				_, err = b.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, StatusOnly: true, ReadyProbe: true})
+				if err == nil || !strings.Contains(err.Error(), "predates") {
+					t.Fatalf("legacy claim allowed a ready probe: %v", err)
+				}
+				onlyClaim(t)
+			case "account-fence":
+				f.mutate(func() { f.user = "mallory" })
+				resolved := core.LeaseTarget{LeaseID: lease.LeaseID, Server: lease.Server}
+				if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: resolved}); err == nil {
+					t.Fatal("legacy claim crossed the account fence")
+				}
+				if f.count("DestroyVm vm-1") != 0 {
+					t.Fatal("fenced legacy release mutated the machine")
+				}
+				onlyClaim(t)
+			}
+		})
+	}
+	// New acquisitions must always write the current scope.
+	b, _ := fixtureBackend(t)
+	acquireFixture(t, b, false)
+	if onlyClaim(t).ProviderScope != b.scope() {
+		t.Fatal("acquisition wrote a non-current scope")
+	}
+}

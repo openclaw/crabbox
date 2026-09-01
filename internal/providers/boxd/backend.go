@@ -65,6 +65,15 @@ func (b *backend) client() (*apiClient, error) {
 }
 func (b *backend) scope() string { return Provider{}.ClaimScope(b.cfg) }
 
+// scopeMatches accepts the current claim scope and the exact scope the
+// earlier console-based provider wrote, so pre-migration claims remain
+// visible to lifecycle inspection and cleanup. Every action on such a claim
+// still passes the authenticated-user, immutable-ID, and machine-context
+// fences; only new acquisitions write scopes, always in the current format.
+func (b *backend) scopeMatches(scope string) bool {
+	return scope == b.scope() || scope == legacyClaimScope(b.cfg)
+}
+
 func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
 	ctx, cancel := context.WithTimeout(ctx, b.readyTimeout)
 	defer cancel()
@@ -170,7 +179,7 @@ func (b *backend) authenticateClaim(ctx context.Context, c *apiClient, claim cor
 	if err != nil {
 		return err
 	}
-	if claim.Provider != providerName || claim.ProviderScope != b.scope() || claim.Labels["user_id"] != user || claim.Labels["lease"] != claim.LeaseID {
+	if claim.Provider != providerName || !b.scopeMatches(claim.ProviderScope) || claim.Labels["user_id"] != user || claim.Labels["lease"] != claim.LeaseID {
 		return core.Exit(4, "boxd claim origin, organization, or authenticated account does not match")
 	}
 	if claim.CloudID == "" || claim.Labels["vm_id"] != claim.CloudID {
@@ -337,18 +346,31 @@ func machineState(status string) string {
 
 func (b *backend) resolveClaim(identifier string) (core.LeaseClaim, error) {
 	claim, found, err := shared.ResolveProviderClaimStrict(identifier, providerName, b.scope())
+	if err == nil && found {
+		return claim, nil
+	}
+	// A canonical lease ID under the pre-migration scope resolves as a strict
+	// mismatch against the current scope; retry with the exact legacy scope
+	// before reporting the original outcome.
+	legacy, legacyFound, legacyErr := shared.ResolveProviderClaimStrict(identifier, providerName, legacyClaimScope(b.cfg))
+	if legacyErr == nil && legacyFound {
+		return legacy, nil
+	}
 	if err != nil {
 		return core.LeaseClaim{}, err
 	}
-	if !found {
-		return core.LeaseClaim{}, core.Exit(4, "boxd lease has no matching local ownership claim; machines are never adopted by name")
-	}
-	return claim, nil
+	return core.LeaseClaim{}, core.Exit(4, "boxd lease has no matching local ownership claim; machines are never adopted by name")
 }
 func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
 	claim, err := b.resolveClaim(req.ID)
 	if err != nil {
 		return core.LeaseTarget{}, err
+	}
+	// A pre-migration claim supports inspection and release only: its SSH
+	// bootstrap state predates this transport, so guest access requires a
+	// fresh acquisition under the current scope.
+	if claim.ProviderScope != b.scope() && !(req.ReleaseOnly || (req.StatusOnly && !req.ReadyProbe)) {
+		return core.LeaseTarget{}, core.Exit(4, "boxd claim predates the gRPC provider and supports status, stop, and cleanup only; acquire a new lease for guest access")
 	}
 	c, err := b.client()
 	if err != nil {
@@ -417,7 +439,11 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 func (b *backend) exactClaim(lease core.LeaseTarget) (core.LeaseClaim, error) {
 	claim, err := shared.RequireExactClaim(shared.ClaimBinding{Provider: providerName, ProviderScope: b.scope(), ExactProviderScope: true, LeaseID: lease.LeaseID, CloudID: lease.Server.CloudID})
 	if err != nil {
-		return core.LeaseClaim{}, err
+		legacy, legacyErr := shared.RequireExactClaim(shared.ClaimBinding{Provider: providerName, ProviderScope: legacyClaimScope(b.cfg), ExactProviderScope: true, LeaseID: lease.LeaseID, CloudID: lease.Server.CloudID})
+		if legacyErr != nil {
+			return core.LeaseClaim{}, err
+		}
+		claim = legacy
 	}
 	if snapshot, exists, set := core.ServerLeaseClaimSnapshot(lease.Server); set {
 		if !exists {
@@ -583,7 +609,7 @@ func (b *backend) List(ctx context.Context, _ core.ListRequest) ([]core.LeaseVie
 	}
 	out := make([]core.LeaseView, 0)
 	for _, claim := range claims {
-		if claim.Provider != providerName || claim.ProviderScope != b.scope() || claim.Labels["user_id"] != user {
+		if claim.Provider != providerName || !b.scopeMatches(claim.ProviderScope) || claim.Labels["user_id"] != user {
 			continue
 		}
 		var vm machine

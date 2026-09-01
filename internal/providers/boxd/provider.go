@@ -102,6 +102,20 @@ func (Provider) ClaimScope(cfg core.Config) string {
 	return string(data)
 }
 
+// legacyClaimScope is the exact scope serialization the earlier console-based
+// provider wrote: origin and organization, without the gRPC endpoint. Claims
+// carrying it stay visible for status, stop, and cleanup so retained or
+// failed-cleanup machines from before the migration can still be found and
+// destroyed; new acquisitions always write the current scope.
+func legacyClaimScope(cfg core.Config) string {
+	u, err := consoleURL(cfg.Boxd.APIURL)
+	if err != nil {
+		return "invalid-boxd-origin"
+	}
+	data, _ := json.Marshal([]string{u.String(), cfg.Boxd.Org})
+	return string(data)
+}
+
 func (Provider) DiagnosticSecrets(core.Config) []string {
 	return []string{os.Getenv("CRABBOX_BOXD_API_KEY"), os.Getenv("BOXD_API_KEY")}
 }

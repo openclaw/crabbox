@@ -15,6 +15,8 @@ import (
 	"github.com/openclaw/crabbox/internal/providers/boxd/boxdapi"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 const hostKeyMarker = "CRABBOX_BOXD_HOST_KEY "
@@ -92,13 +94,13 @@ func (c *apiClient) bootstrap(ctx context.Context, id, publicKey string) (string
 	defer cancel()
 	stream, err := c.api.Exec(ctx)
 	if err != nil {
-		return "", execError(ctx, "connect")
+		return "", execError(ctx, err, "connect")
 	}
 	if err := stream.Send(&boxdapi.ExecChunk{VmId: id, Command: command}); err != nil {
-		return "", execError(ctx, "write")
+		return "", execError(ctx, err, "write")
 	}
 	if err := stream.CloseSend(); err != nil {
-		return "", execError(ctx, "write")
+		return "", execError(ctx, err, "write")
 	}
 	var stdout strings.Builder
 	total, exitCode := 0, 0
@@ -108,7 +110,7 @@ func (c *apiClient) bootstrap(ctx context.Context, id, publicKey string) (string
 			break
 		}
 		if err != nil {
-			return "", execError(ctx, "disconnected without completion")
+			return "", execError(ctx, err, "disconnected without completion")
 		}
 		total += len(chunk.GetData())
 		if total > maxExecOutput {
@@ -127,9 +129,17 @@ func (c *apiClient) bootstrap(ctx context.Context, id, publicKey string) (string
 	return execHostKey(stdout.String())
 }
 
-func execError(ctx context.Context, phase string) error {
+func execError(ctx context.Context, err error, phase string) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
+	}
+	// A cancellation can surface as a stream status before the local context
+	// registers as expired; report it as the context error either way.
+	switch status.Code(err) {
+	case codes.DeadlineExceeded:
+		return context.DeadlineExceeded
+	case codes.Canceled:
+		return context.Canceled
 	}
 	// Stream errors can carry vendor status text or partial output. Withhold
 	// them from diagnostics.
