@@ -2,11 +2,15 @@ package islo
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
+	"context"
+	"errors"
 	"io"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -107,5 +111,124 @@ func TestIsloScriptCommandAppendsArgs(t *testing.T) {
 	got := isloScriptCommand(spec, []string{"--flag", "value"})
 	if !reflect.DeepEqual(got[4:], []string{"s.sh", "--flag", "value"}) {
 		t.Fatalf("args not forwarded: %q", got)
+	}
+}
+
+const isloScriptRemoveCommand = `rm -f -- "$1"`
+
+func isloScriptTestBackend(stderr io.Writer) *isloBackend {
+	return &isloBackend{rt: Runtime{Stdout: io.Discard, Stderr: stderr}}
+}
+
+func isloScriptTestRequest(remote string) RunRequest {
+	return RunRequest{Script: &core.RunScriptSpec{Data: []byte("echo hi\n"), RemotePath: remote}}
+}
+
+// A cancelled or timed-out run must still remove the script it uploaded: the
+// sandbox may be kept or reused, so a script left behind is script content
+// persisting past the run. Cleanup therefore has to reach the provider on a
+// live context even though the context the run was given is already dead.
+func TestIsloRunScriptRemovesScriptAfterRunContextCancelled(t *testing.T) {
+	withIsloCleanupTimeout(t, 30*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client := &fakeIsloSyncClient{
+		// Any exec handed a dead context fails, exactly as the real client
+		// does once it binds that context to its HTTP request.
+		rejectCanceledContext: true,
+		// The workload dies mid-flight and cancellation is what ends it.
+		execErrOnCommand:         context.Canceled,
+		execErrOnCommandContains: `exec bash "$@"`,
+		execErrOnCommandHook:     cancel,
+	}
+	var stderr bytes.Buffer
+	backend := isloScriptTestBackend(&stderr)
+
+	code, err := backend.runScript(ctx, client, "crabbox-test", "/workspace/repo", isloScriptTestRequest(".crabbox/scripts/abc-script.sh"), nil, "runner")
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("runScript err=%v, want context.Canceled", err)
+	}
+	if code != 1 {
+		t.Fatalf("exit code=%d, want the code the workload exec reported (1)", code)
+	}
+	if !client.commandContains(isloScriptRemoveCommand) {
+		t.Fatalf("cleanup exec was never issued after cancellation; commands=%q", client.prepareCommands)
+	}
+	state, ok := client.execCtxStateContaining(isloScriptRemoveCommand)
+	if !ok {
+		t.Fatal("cleanup exec context was not recorded")
+	}
+	if state.err != nil {
+		t.Fatalf("cleanup ran on an already-dead context: %v", state.err)
+	}
+	if !state.hasDeadline {
+		t.Fatal("cleanup context has no deadline; best-effort cleanup must stay bounded")
+	}
+	if remaining := time.Until(state.deadline); remaining <= 0 {
+		t.Fatalf("cleanup context deadline already passed (%s remaining)", remaining)
+	}
+}
+
+// A failed upload can still have landed the file (the failure may be in the
+// response, not the extraction), so cleanup is attempted; and the upload error
+// still reaches the caller unchanged.
+func TestIsloRunScriptRemovesScriptAfterFailedUpload(t *testing.T) {
+	uploadErr := errors.New("islo upload boom")
+	client := &fakeIsloSyncClient{uploadErr: uploadErr}
+	var stderr bytes.Buffer
+	backend := isloScriptTestBackend(&stderr)
+
+	code, err := backend.runScript(context.Background(), client, "crabbox-test", "/workspace/repo", isloScriptTestRequest(".crabbox/scripts/abc-script.sh"), nil, "")
+
+	if !errors.Is(err, uploadErr) {
+		t.Fatalf("runScript err=%v, want the upload error", err)
+	}
+	if code != 7 {
+		t.Fatalf("exit code=%d, want 7", code)
+	}
+	if !client.commandContains(isloScriptRemoveCommand) {
+		t.Fatalf("cleanup exec was never issued after a failed upload; commands=%q", client.prepareCommands)
+	}
+	if client.commandContains(`exec bash "$@"`) {
+		t.Fatal("the script was executed even though its upload failed")
+	}
+}
+
+// A path that never passed validation must never be handed to `rm` in the
+// sandbox, and no upload was issued for it either, so there is nothing to
+// clean up.
+func TestIsloRunScriptSkipsCleanupForRejectedPath(t *testing.T) {
+	client := &fakeIsloSyncClient{}
+	var stderr bytes.Buffer
+	backend := isloScriptTestBackend(&stderr)
+
+	code, err := backend.runScript(context.Background(), client, "crabbox-test", "/workspace/repo", isloScriptTestRequest("/etc/cron.d/payload"), nil, "")
+
+	if err == nil {
+		t.Fatal("an absolute script path was accepted")
+	}
+	if code != 7 {
+		t.Fatalf("exit code=%d, want 7", code)
+	}
+	if len(client.prepareCommands) != 0 {
+		t.Fatalf("a rejected path reached the sandbox: %q", client.prepareCommands)
+	}
+}
+
+// removeRunScript is the only place that builds an `rm` argv for the sandbox,
+// so it validates the path itself rather than trusting its caller.
+func TestIsloRemoveRunScriptRefusesUnvalidatedPath(t *testing.T) {
+	client := &fakeIsloSyncClient{}
+	var stderr bytes.Buffer
+	backend := isloScriptTestBackend(&stderr)
+
+	backend.removeRunScript(client, "crabbox-test", "/workspace/repo", &core.RunScriptSpec{RemotePath: "/etc/cron.d/payload"}, "")
+
+	if len(client.prepareCommands) != 0 {
+		t.Fatalf("an unvalidated path was handed to the sandbox: %q", client.prepareCommands)
+	}
+	if !strings.Contains(stderr.String(), "skipped run script cleanup") {
+		t.Fatalf("stderr=%q, want a skipped-cleanup warning", stderr.String())
 	}
 }

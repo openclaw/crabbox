@@ -167,6 +167,16 @@ immediately with exit code 5.
 - Bounded run downloads: yes. Safe relative single-file `--require-artifact`
   and `--download` requests are retrieved through Islo exec after command
   success and capped at 64 KiB per file.
+- Delegated POSIX script: yes (`posix-script`). `--script` and `--script-stdin`
+  payloads are packed into a gzipped tar, placed in the workspace through the
+  files-archive API with mode 0700, and run as `bash -lc 'exec bash "$@"' bash
+  <path>` (or `exec "$@"` when the script carries a shebang), so the remote path
+  is always a positional argument and never spliced into shell text. Trailing
+  argv is forwarded to the script. The uploaded file is then removed on a
+  best-effort basis through a short bounded cleanup context of its own, so a
+  cancelled or timed-out run still removes its script instead of leaving it in a
+  kept or reused sandbox; a failed removal is warned about on stderr and never
+  changes the exit code.
 - Desktop / browser / code: no.
 - Actions hydration: no.
 - Coordinator (broker): no — always direct from the CLI.
@@ -178,11 +188,10 @@ immediately with exit code 5.
   `CRABBOX_ISLO_API_KEY` alone only authenticates Crabbox.
 - `--sync-only` and `--checksum` are rejected because `run` still uses Islo's
   delegated archive/exec transport, not Crabbox-managed rsync.
-- `--full-resync`, `--force-sync-large`, `--script`, `--script-stdin`,
-  `--fresh-pr`, `--env-helper`, local stdout/stderr captures,
-  `--capture-on-fail`, `--artifact-glob`, `--emit-proof`, and `--stop-after`
-  are rejected because Islo owns sync and command transport in delegated-run
-  mode. Required artifacts and downloads accept only bounded single files, not
+- `--full-resync`, `--force-sync-large`, `--fresh-pr`, `--env-helper`, local
+  stdout/stderr captures, `--capture-on-fail`, `--artifact-glob`,
+  `--emit-proof`, and `--stop-after` are rejected because Islo owns sync and
+  command transport in delegated-run mode. Required artifacts and downloads accept only bounded single files, not
   globs, absolute paths, URLs, `.git`, or `.crabbox` paths.
 - `--keep-on-failure` keeps a newly created failed sandbox until an explicit
   `stop` or provider-side expiry.
