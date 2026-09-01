@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 )
@@ -128,12 +129,12 @@ func (b *coordinatorLeaseBackend) expectedProvider() (string, error) {
 	return canonicalProviderName(selectedProvider)
 }
 
-func (b *coordinatorLeaseBackend) coordinatorLeaseTarget(lease CoordinatorLease, coord *CoordinatorClient) (LeaseTarget, error) {
-	return b.coordinatorLeaseTargetForConfig(lease, b.cfg, coord)
-}
-
 func (b *coordinatorLeaseBackend) coordinatorLeaseTargetForConfig(lease CoordinatorLease, cfg Config, coord *CoordinatorClient) (LeaseTarget, error) {
 	if err := b.validateCoordinatorLeaseProviderIdentity(lease); err != nil {
+		return LeaseTarget{}, err
+	}
+	lease, err := selectCoordinatorLeaseSSHPort(lease, cfg)
+	if err != nil {
 		return LeaseTarget{}, err
 	}
 	server, target, leaseID := leaseToServerTarget(lease, cfg)
@@ -145,6 +146,19 @@ func (b *coordinatorLeaseBackend) coordinatorLeaseTargetForConfig(lease Coordina
 		return LeaseTarget{}, err
 	}
 	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord}, nil
+}
+
+func selectCoordinatorLeaseSSHPort(lease CoordinatorLease, cfg Config) (CoordinatorLease, error) {
+	if !IsSSHPortExplicit(&cfg) || lease.Host == "" || coordinatorProviderReleaseConfirmed(lease) {
+		return lease, nil
+	}
+	// Explicit selection pins an advertised route before any SSH delivery;
+	// it cannot add endpoints or replay a workload on another port.
+	if !slices.Contains(append([]string{lease.SSHPort}, lease.SSHFallbackPorts...), cfg.SSHPort) {
+		return CoordinatorLease{}, exit(2, "SSH port %s is not advertised by coordinator lease %s; select its primary or fallback port", cfg.SSHPort, lease.ID)
+	}
+	lease.SSHPort, lease.SSHFallbackPorts = cfg.SSHPort, []string{}
+	return lease, nil
 }
 
 func (b *coordinatorLeaseBackend) RebindResolvedLeaseTarget(target *LeaseTarget, leaseID string) error {
@@ -732,7 +746,10 @@ func isCoordinatorStaleInstanceCleanedSignal(err error) bool {
 const coordinatorReleaseResolveTimeout = 10 * time.Second
 
 func (b *coordinatorLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
+	cfg := b.cfg
 	if req.ReleaseOnly {
+		// Provider cleanup must not depend on an optional guest route selection.
+		cfg.explicitSSHPort = ""
 		// Leave the caller's budget available for the provider-scoped release fallback.
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, coordinatorReleaseResolveTimeout)
@@ -747,12 +764,12 @@ func (b *coordinatorLeaseBackend) Resolve(ctx context.Context, req ResolveReques
 			}
 			lease, adminErr = adminCoord.GetLease(ctx, req.ID)
 			if adminErr == nil {
-				return b.coordinatorLeaseTarget(lease, adminCoord)
+				return b.coordinatorLeaseTargetForConfig(lease, cfg, adminCoord)
 			}
 		}
 		return LeaseTarget{}, err
 	}
-	return b.coordinatorLeaseTarget(lease, b.coord)
+	return b.coordinatorLeaseTargetForConfig(lease, cfg, b.coord)
 }
 
 func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest) (statusView, error) {
@@ -767,6 +784,10 @@ func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest)
 		return statusView{}, err
 	}
 	if err := b.validateCoordinatorLeaseProviderIdentity(lease); err != nil {
+		return statusView{}, err
+	}
+	lease, err = selectCoordinatorLeaseSSHPort(lease, b.cfg)
+	if err != nil {
 		return statusView{}, err
 	}
 	server, target, leaseID := leaseToServerTarget(lease, b.cfg)

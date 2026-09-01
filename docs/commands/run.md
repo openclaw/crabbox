@@ -75,6 +75,17 @@ multiple scopes of one canonical provider, which that provider resolves; claims
 from different providers require a canonical ID or explicit provider. An
 explicit `--provider` remains authoritative.
 
+For an ordinary reused coordinator lease, `--ssh-port <port>` pins one of the
+lease's advertised primary or fallback SSH ports before workspace ownership or
+command delivery. An unadvertised port is rejected; the lease's host, user,
+credentials, and host-key policy remain unchanged. Explicit selection disables
+automatic port fallback for that connection and does not update the broker's
+lease metadata. Without an explicit selection, normal port probing is unchanged.
+The existing `ssh.port` configuration and `CRABBOX_SSH_PORT` environment input
+use the same selection rule, including for desktop commands that do not expose
+`--ssh-port`. Provider release remains independent of guest-port selection.
+Ready-pool runs retain their pool-recorded endpoint contract.
+
 With `--pool <key>`, Crabbox borrows one hydrated broker ready-pool lease,
 uses the pool-recorded SSH endpoint, keeps the borrow deadline alive while it
 runs the command and return-time scrub, and then returns the lease.
