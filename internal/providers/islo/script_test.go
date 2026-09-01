@@ -128,7 +128,7 @@ func isloScriptTestRequest(remote string) RunRequest {
 // sandbox may be kept or reused, so a script left behind is script content
 // persisting past the run. Cleanup therefore has to reach the provider on a
 // live context even though the context the run was given is already dead.
-func TestIsloRunScriptRemovesScriptAfterRunContextCancelled(t *testing.T) {
+func TestIsloRunScriptCleanupRunsAfterRunContextCancelled(t *testing.T) {
 	withIsloCleanupTimeout(t, 30*time.Second)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -173,7 +173,7 @@ func TestIsloRunScriptRemovesScriptAfterRunContextCancelled(t *testing.T) {
 // A failed upload can still have landed the file (the failure may be in the
 // response, not the extraction), so cleanup is attempted; and the upload error
 // still reaches the caller unchanged.
-func TestIsloRunScriptRemovesScriptAfterFailedUpload(t *testing.T) {
+func TestIsloRunScriptCleanupRunsAfterFailedUpload(t *testing.T) {
 	uploadErr := errors.New("islo upload boom")
 	client := &fakeIsloSyncClient{uploadErr: uploadErr}
 	var stderr bytes.Buffer
@@ -218,7 +218,7 @@ func TestIsloRunScriptSkipsCleanupForRejectedPath(t *testing.T) {
 
 // removeRunScript is the only place that builds an `rm` argv for the sandbox,
 // so it validates the path itself rather than trusting its caller.
-func TestIsloRemoveRunScriptRefusesUnvalidatedPath(t *testing.T) {
+func TestIsloRunScriptCleanupRefusesUnvalidatedPath(t *testing.T) {
 	client := &fakeIsloSyncClient{}
 	var stderr bytes.Buffer
 	backend := isloScriptTestBackend(&stderr)
