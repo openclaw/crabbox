@@ -596,9 +596,15 @@ The private draft has an exact eight-asset inventory, immutable source and
 build provenance, and release notes byte-equal to the tagged changelog section.
 Both native macOS verifier jobs must bind their proof to the same tag object,
 source commit, protected workflow SHA, numeric release ID, asset IDs, sizes, and
-digests. Publication requires a separate authorization and changes only the
-verified draft state. A fresh public verification must finish after every
-release mutation before a separately authorized Homebrew update can begin.
+digests. One explicit full release/publish request authorizes the complete normal
+sequence through closeout without renewed chat approval at each stage. Narrow
+requests stay narrow. The original request supplies authorization; GitHub events
+alone do not. Trust domains, sequential technical gates, credential isolation,
+identity binding, exact frozen inputs, immutability, actual exclusive-writer
+coordination, and cancellation boundaries remain mandatory. Authorization is
+not evidence of an administrative freeze. Publication changes only the verified
+draft state. Fresh public verification must finish after every release mutation,
+and public Go-install proof must succeed before the Homebrew update can begin.
 Homebrew proof re-fetches the current public record and exact successful public
 verifier run without credentials, authenticates both native proof ZIPs against
 GitHub's published artifact digests, requires the run to postdate publication

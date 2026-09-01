@@ -1,10 +1,19 @@
 # Release Engineering
 
-Crabbox releases are local-produced, draft-first, and serialized. Building a
-candidate, uploading a private draft, verifying it, publishing it, and updating
-Homebrew are distinct gates. Approval for one gate does not authorize the next.
-No tag push, repository dispatch, retry, or verifier run may collapse those
-boundaries.
+Crabbox releases are local-produced, draft-first, and serialized. One explicit
+full release/publish request authorizes the complete normal sequence:
+preparation, tagging, build and signing, private draft creation and upload,
+native dispatch and proof, publication, fresh public verification, public Go
+installation, Homebrew update and proof, and closeout, without renewed chat
+approval at each stage. Narrow requests stay narrow: a request to build or
+verify a candidate does not authorize publication.
+
+The original explicit release request is the authorization. GitHub events alone
+are not authorization: no tag push, repository dispatch, retry, or verifier run
+grants permission to release. Advance sequentially only as each technical gate
+passes. Identity binding, credential isolation, immutability, exact frozen
+inputs, actual exclusive-writer coordination, and cancellation boundaries
+remain mandatory.
 
 ## Trust Anchors
 
@@ -281,11 +290,11 @@ env -i \
     "$TAG_OBJECT" "$TAG_COMMIT" "$VERIFIER_COMMIT"
 ```
 
-Let that token-free verification process exit. Do not invoke draft creation
-from the same wrapper or ancestor environment as candidate execution. Stop
-here. Draft creation is the first remote mutation and needs its own
-authorization. It performs protected static verification only; the final
-positional argument is a deliberate exact-tag confirmation:
+Let that token-free verification process exit successfully. Do not invoke draft
+creation from the same wrapper or ancestor environment as candidate execution.
+Continue under the original full release authorization. Draft creation is the
+first remote mutation and performs protected static verification only; the
+final positional argument is a deliberate exact-tag confirmation:
 
 ```sh
 DRAFT_OUTPUT=$(scripts/create-release-draft.sh \
@@ -297,9 +306,9 @@ RELEASE_ID=$(printf '%s\n' "$DRAFT_OUTPUT" | \
 test -n "$RELEASE_ID"
 ```
 
-Stop again. With separate authorization, dispatch the protected verifier for
-that numeric draft. Capture the numeric ID of this exact run as
-`DRAFT_VERIFIER_RUN_ID`, then require both native jobs to succeed:
+After draft creation succeeds, dispatch the protected verifier for that numeric
+draft under the same release authorization. Capture the numeric ID of this
+exact run as `DRAFT_VERIFIER_RUN_ID`, then require both native jobs to succeed:
 
 ```sh
 gh workflow run release-assets.yml \
@@ -318,8 +327,9 @@ gh run watch "$DRAFT_VERIFIER_RUN_ID" \
   --repo openclaw/crabbox --exit-status
 ```
 
-Stop for the publication gate. Publication takes the exact successful draft
-run ID, its protected workflow commit, and repeats the tag as its explicit
+After the native draft proof succeeds and the publication checks below pass,
+continue to publication. Publication takes the exact successful draft run ID,
+its protected workflow commit, and repeats the tag as its explicit
 confirmation. The seven-argument compatibility form is only for historical
 runs where `WORKFLOW_COMMIT` exactly equals `VERIFIER_COMMIT`:
 
@@ -330,10 +340,11 @@ scripts/publish-release.sh \
   "$VERIFIER_COMMIT" "$WORKFLOW_COMMIT" "$DRAFT_VERIFIER_RUN_ID" "$TAG"
 ```
 
-Stop again. Dispatch a new native run against the published state; do not reuse
-the draft proof. `VERIFIER_COMMIT` remains the immutable candidate-provenance
-commit. Bind the new run separately to the current protected workflow commit,
-which must descend from that verifier, then capture and wait for the exact run:
+After publication succeeds, dispatch a new native run against the published
+state; do not reuse the draft proof. `VERIFIER_COMMIT` remains the immutable
+candidate-provenance commit. Bind the new run separately to the current protected
+workflow commit, which must descend from that verifier, then capture and wait
+for the exact run:
 
 ```sh
 WORKFLOW_COMMIT=$(git rev-parse HEAD)
@@ -378,7 +389,7 @@ mkdir -m 700 \
     HOME="$PUBLIC_GO_INSTALL/home" PATH="$PATH" TMPDIR="$PUBLIC_GO_INSTALL/tmp" \
     go install "github.com/openclaw/crabbox/cmd/crabbox@$TAG"
 )
-go version -m -json "$PUBLIC_GO_INSTALL/bin/crabbox" >"$PUBLIC_GO_INSTALL/build.json"
+GOTOOLCHAIN=local go version -m -json "$PUBLIC_GO_INSTALL/bin/crabbox" >"$PUBLIC_GO_INSTALL/build.json"
 jq -e --arg version "$TAG" \
   --arg forkVersion v6.0.3-0.20260817142523-966654abed4a '
   .Path == "github.com/openclaw/crabbox/cmd/crabbox" and
@@ -396,10 +407,11 @@ test "$(cd "$PUBLIC_GO_INSTALL/work" && "$PUBLIC_GO_INSTALL/bin/crabbox" --versi
 (cd "$PUBLIC_GO_INSTALL/work" && "$PUBLIC_GO_INSTALL/bin/crabbox" run --help >/dev/null 2>&1)
 ```
 
-Only after that public run and a separate tap-update authorization, update the
-formula with the four verified public archive hashes. Generate the only
-accepted Ruby program with protected tooling (the four digest arguments are
-Darwin amd64, Darwin arm64, Linux amd64, and Linux arm64, in that order):
+Only after that public run and the public Go-install proof succeed, update the
+formula under the original release authorization with the four verified public
+archive hashes. Generate the only accepted Ruby program with protected tooling
+(the four digest arguments are Darwin amd64, Darwin arm64, Linux amd64, and
+Linux arm64, in that order):
 
 ```sh
 node scripts/render-homebrew-formula.mjs \
@@ -407,11 +419,10 @@ node scripts/render-homebrew-formula.mjs \
   "$LINUX_AMD64_SHA256" "$LINUX_ARM64_SHA256" >crabbox.rb
 ```
 
-After the separately authorized tap commit, on both a clean
-native Apple Silicon host and a clean native Intel host, download all eight
-assets through their public URLs. While the GitHub token is still available,
-download the two proof ZIPs from the exact public verifier run by immutable
-artifact ID. The later verifier re-fetches their public metadata without a
+After the tap commit, on both a clean native Apple Silicon host and a clean
+native Intel host, download all eight assets through their public URLs. While
+the GitHub token is still available, download the two proof ZIPs from the exact
+public verifier run by immutable artifact ID. The later verifier re-fetches their public metadata without a
 token and requires each local ZIP to match GitHub's SHA-256 artifact digest:
 
 ```sh
@@ -517,10 +528,21 @@ asset.
 
 ### 1. Create the private draft
 
-After local package verification, obtain separate authorization to create one
-private draft and upload only the frozen eight files. Capture the numeric
-release ID and every asset ID from the response. Re-download into a fresh
-directory and prove that the remote draft matches the local record exactly.
+After local package verification succeeds, continue under the original release
+authorization to create one private draft and upload only the frozen eight
+files. Capture the numeric release ID and every asset ID from the response.
+Re-download into a fresh directory and prove that the remote draft matches the
+local record exactly.
+
+Static Go build-info inspection uses the installed local toolchain without
+switching or downloading one; the binary's recorded toolchain and build settings
+must still match the release contract. Draft creation removes its fresh private
+verification home, making read-only cache directories writable without following
+symlinks or changing operator caches. It prints success only after cleanup
+succeeds. Cleanup errors retain diagnostics and the temporary path, fail the
+command, and preserve any earlier verification, creation, or readback exit code.
+A cleanup failure does not undo draft creation; inspect the existing record
+read-only before considering any further action.
 
 ### 2. Verify the draft natively
 
@@ -550,7 +572,7 @@ last. Overall workflow success binds execution to the already frozen proofs.
 
 ### 3. Publish explicitly
 
-Publication requires a new explicit gate after both native draft jobs succeed.
+Continue to the publication checks after both native draft jobs succeed.
 Immediately before mutation, fetch the remote tag, protected workflow head,
 draft metadata, notes, and every asset record again. Require byte-for-byte
 equality with the frozen proof and require the successful native markers to
@@ -571,10 +593,14 @@ documented Update-a-release endpoint does not provide a conditional `If-Match`
 publication operation, so the final GET plus PATCH is not an atomic
 compare-and-swap. Fail closed unless the administrative freeze above is active,
 then acknowledge the exact draft with
-`CRABBOX_RELEASE_SERIALIZATION_CONFIRMED=vX.Y.Z:RELEASE_ID`. The publisher
-prepares its request body first, repeats the immutable numeric-ID draft read and
-comparison immediately before the sole PATCH, and repeats all protected-source
-and public-record checks afterward. A detected post-PATCH race is a publication
+`CRABBOX_RELEASE_SERIALIZATION_CONFIRMED=vX.Y.Z:RELEASE_ID`. This attests to
+actual exclusive-writer coordination for the non-atomic gate; it does not
+request another chat approval. The release request is not evidence that the
+administrative freeze is active. Establish and verify that coordination before
+setting the attestation; never infer it from authorization or a successful run.
+The publisher prepares its request body first, repeats the immutable numeric-ID
+draft read and comparison immediately before the sole PATCH, and repeats all
+protected-source and public-record checks afterward. A detected post-PATCH race is a publication
 incident to report; it is not permission to delete, rewrite, or republish.
 
 Publish with one draft-state transition. Do not rebuild, re-upload, rename,
@@ -600,12 +626,12 @@ proof. Do not substitute a checkout, `replace`, pseudo-version, local proxy, or
 
 ### 6. Update and prove Homebrew
 
-Homebrew mutation needs a final separate authorization and a successful public
-verifier proof. Re-download the frozen public assets immediately before the tap
-change. Generate four explicit, non-fallthrough formula routes for Darwin
-arm64, Darwin amd64, Linux arm64, and Linux amd64; every URL and SHA-256 must
-match the public record. Apple Silicon installs the helper; other targets do
-not.
+Continue to Homebrew under the original release authorization after successful
+public verifier and public Go-install proofs. Re-download the frozen public
+assets immediately before the tap change. Generate four explicit,
+non-fallthrough formula routes for Darwin arm64, Darwin amd64, Linux arm64, and
+Linux amd64; every URL and SHA-256 must match the public record. Apple Silicon
+installs the helper; other targets do not.
 
 On clean native Apple Silicon and Intel hosts, remove release/API credentials
 before the first formula evaluation, then run the downstream verifier shown
@@ -633,8 +659,13 @@ corrective mutation under the cancelled gate.
 Never delete a partial draft or release based on its tag, body, or incomplete
 inventory. Never overwrite assets, rewrite or recreate the signed tag,
 redispatch a release, publish, or update Homebrew to "clean up" a cancelled
-attempt. Preserve the evidence and resume only after a new serialized gate
-explicitly authorizes the next mutation.
+attempt. Preserve the evidence. Explicit cancellation requires renewed direction
+authorizing the next mutation before resuming the serialized sequence.
+
+A failed gate or uncertain state also stops writes. Resolve the blocker and
+re-establish the exact frozen state and required proofs before continuing.
+Normal continuation after successful checks uses the original release
+authorization; it does not require another chat approval.
 
 After the public release, public verifier, and both native Homebrew install
 proofs succeed, add the next patch `Unreleased` section to `CHANGELOG.md`,

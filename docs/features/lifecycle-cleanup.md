@@ -45,10 +45,14 @@ orphan sweep's complete-set and quarantine requirements.
 
 ### Heartbeats and expiry
 
-While a command runs, the CLI heartbeats the active lease (`POST
-/v1/leases/{id}/heartbeat`). A heartbeat is a touch: it bumps `lastTouchedAt`,
-recomputes `expiresAt`, clears stale cleanup metadata, and refreshes provider SSH
-access where the provider supports it. Heartbeats at or after `expiresAt` are
+While a command runs, the CLI heartbeats the active lease over the coordinator
+control WebSocket, falling back to `POST /v1/leases/{id}/heartbeat` within the
+same 20-second request budget. An exhausted control request keeps its original
+failure diagnosis instead of attempting HTTP with an expired context; when both
+transports fail, the warning retains both causes. A heartbeat
+bumps `lastTouchedAt`, recomputes `expiresAt`, and clears stale cleanup metadata;
+the HTTP path also refreshes provider SSH access where supported. Heartbeats at
+or after `expiresAt` are
 rejected so they cannot revive a lease once expiry cleanup owns it.
 
 Expiry is the minimum of two clocks (`leaseExpiresAt` in `worker/src/fleet.ts`):
@@ -76,6 +80,16 @@ does **not** exempt a lease from idle or TTL expiry.
 
 After one release mutation is accepted, an explicit CLI stop observes the lease
 with read-only requests until provider deletion is final or a bounded wait ends.
+The public `cleanupStatus` distinguishes normal pending creation or cleanup from
+an observed failure. Pending work uses that same observation loop and five-minute
+bound; the CLI does not send another release mutation after acceptance. Existing
+cleanup diagnostics remain intact for clients that predate this classification.
+New AWS instance IDs can be temporarily invisible. Cleanup observes visibility
+within the existing bound before verifying allocation ownership; unconfirmed
+visibility or termination retains cleanup debt rather than reporting deletion.
+Allocation claims carry the prepared account scope for AWS Mac instances.
+Storage failures while publishing or checking an allocation preserve its cleanup
+claim without retrying creation.
 The CLI removes its local per-lease SSH connection directory only after final
 cleanup state is observed. Pending or retrying cleanup, observation timeout or
 cancellation, provider errors, ownership mismatches, and retained resources keep

@@ -498,6 +498,13 @@ type NativeCheckpointCreateResult struct {
 	Metadata map[string]string
 }
 
+// NativeCheckpointNotSubmittedError attests that this invocation never attempted
+// image submission. An empty result or a failed request cannot establish this.
+type NativeCheckpointNotSubmittedError struct{ Cause error }
+
+func (e NativeCheckpointNotSubmittedError) Error() string { return e.Cause.Error() }
+func (e NativeCheckpointNotSubmittedError) Unwrap() error { return e.Cause }
+
 type NativeCheckpointWorkdirRequest struct {
 	Config   Config
 	Server   Server
@@ -513,6 +520,13 @@ type NativeCheckpointResourceRequest struct {
 	LoadConfig func() (Config, error)
 	Image      NativeCheckpointImage
 	Metadata   map[string]string
+	Capture    *NativeCheckpointCapture
+}
+
+// NativeCheckpointAbandonProvider binds positive source-cleanup evidence without
+// asserting that the original image was submitted, absent, or safe to discard.
+type NativeCheckpointAbandonProvider interface {
+	PrepareNativeCheckpointAbandon(context.Context, NativeCheckpointCreateRequest) (map[string]string, error)
 }
 
 // CheckpointSourceVerifier must use provider authority, not a filtered lease

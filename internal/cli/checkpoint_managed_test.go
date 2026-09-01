@@ -7,11 +7,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -739,17 +741,36 @@ func TestCheckpointManagedCurrentCoordinatorPreservesResourceNotFound(t *testing
 }
 
 func TestCheckpointManagedInspectAbsence(t *testing.T) {
+	testCheckpointManagedInspectAbsence(t, "")
+}
+
+func TestCheckpointManagedInspectAbsenceBuiltBinary(t *testing.T) {
+	binary, err := builtCLITestBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	testCheckpointManagedInspectAbsence(t, binary)
+}
+
+func testCheckpointManagedInspectAbsence(t *testing.T, binary string) {
+	t.Helper()
 	for _, tc := range []struct {
-		name      string
-		local     string
-		status    int
-		inventory string
-		want      string
+		name         string
+		local        string
+		lookupStatus int
+		status       int
+		inventory    string
+		want         string
 	}{
 		{name: "absent", status: 200, inventory: `{"checkpoints":[]}`, want: "forget"},
 		{name: "capture binding", local: "capture", status: 200, inventory: `{"checkpoints":[]}`, want: "reconcile_capture"},
 		{name: "surviving cache", local: "cache", status: 200, inventory: `{"checkpoints":[]}`},
+		{name: "wrong origin", local: "origin", status: 200, inventory: `{"checkpoints":[]}`},
 		{name: "corrupt cache", local: "corrupt", status: 200, inventory: `{"checkpoints":[]}`},
+		{name: "corrupt capture claim", local: "corrupt claim", status: 200, inventory: `{"checkpoints":[]}`},
+		{name: "lookup unauthorized", lookupStatus: 401},
+		{name: "lookup forbidden", lookupStatus: 403},
+		{name: "lookup unavailable", lookupStatus: 503},
 		{name: "unsupported route", status: 404},
 		{name: "unsupported method", status: 405},
 		{name: "probe unauthorized", status: 401},
@@ -759,11 +780,16 @@ func TestCheckpointManagedInspectAbsence(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			const id = "chk_absence"
+			var lookups, probes atomic.Int32
 			server, store := configureManagedCheckpointTest(t, func(w http.ResponseWriter, r *http.Request) {
 				if r.Method != http.MethodGet {
 					t.Errorf("inspection mutated coordinator: %s %s", r.Method, r.URL.Path)
 				}
+				if tc.local == "origin" {
+					t.Error("wrong-origin inspection contacted coordinator")
+				}
 				if r.URL.Path == "/v1/checkpoints" {
+					probes.Add(1)
 					w.WriteHeader(tc.status)
 					_, _ = io.WriteString(w, tc.inventory)
 					return
@@ -771,16 +797,25 @@ func TestCheckpointManagedInspectAbsence(t *testing.T) {
 				if r.URL.Path != "/v1/checkpoints/"+id {
 					t.Errorf("inspection queried another checkpoint: %s", r.URL.Path)
 				}
-				w.WriteHeader(http.StatusNotFound)
-				_, _ = io.WriteString(w, `{"error":"not_found"}`)
+				lookups.Add(1)
+				code := tc.lookupStatus
+				if code == 0 {
+					code = http.StatusNotFound
+				}
+				w.WriteHeader(code)
+				_, _ = io.WriteString(w, `{"error":"fixture_lookup_failure"}`)
 			})
 			paths, err := store.Paths(id)
 			if err != nil {
 				t.Fatal(err)
 			}
 			switch tc.local {
-			case "cache":
-				record, err := checkpointRecordFromCoordinator(managedCheckpointFixture(id), checkpointCoordinatorOrigin(server.URL))
+			case "cache", "origin":
+				origin := checkpointCoordinatorOrigin(server.URL)
+				if tc.local == "origin" {
+					origin += "/other-deployment"
+				}
+				record, err := checkpointRecordFromCoordinator(managedCheckpointFixture(id), origin)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -794,7 +829,7 @@ func TestCheckpointManagedInspectAbsence(t *testing.T) {
 				if err := os.WriteFile(paths.Meta, []byte("{"), 0o600); err != nil {
 					t.Fatal(err)
 				}
-			case "capture":
+			case "capture", "corrupt claim":
 				const leaseID = "cbx_abcdef123456"
 				if err := withDurableLeaseClaimLock(leaseID, func(claim *leaseClaim, _ bool, persist func() error) error {
 					*claim = leaseClaim{LeaseID: leaseID, Provider: "aws", CheckpointCapture: &CheckpointCaptureBinding{ID: id}}
@@ -802,37 +837,84 @@ func TestCheckpointManagedInspectAbsence(t *testing.T) {
 				}); err != nil {
 					t.Fatal(err)
 				}
+				if tc.local == "corrupt claim" {
+					path, err := leaseClaimPath(leaseID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
 			}
-			before, _ := os.ReadFile(paths.Meta)
+			stateRoot := os.Getenv("XDG_STATE_HOME")
+			before, err := snapshotTestTree(stateRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			root := t.TempDir()
+			env := []string{
+				"HOME=" + root,
+				"XDG_CONFIG_HOME=" + root,
+				"XDG_STATE_HOME=" + stateRoot,
+				"CRABBOX_CONFIG=" + filepath.Join(root, "missing.yaml"),
+				"CRABBOX_COORDINATOR=" + server.URL,
+				"CRABBOX_COORDINATOR_TOKEN=test-user-session",
+			}
 			for _, verify := range []bool{false, true} {
-				var stdout bytes.Buffer
-				args := []string{id, "--json"}
-				if verify {
-					args = append(args, "--verify")
-				}
-				err := (App{Stdout: &stdout, Stderr: io.Discard}).checkpointInspect(context.Background(), args)
-				if tc.want == "" {
-					if err == nil || stdout.Len() != 0 {
-						t.Fatalf("uncertain absence accepted: err=%v stdout=%s", err, &stdout)
+				for _, jsonOut := range []bool{false, true} {
+					args := []string{id}
+					if jsonOut {
+						args = append(args, "--json")
 					}
-				} else {
-					var got missingCheckpointAudit
-					if err != nil || json.Unmarshal(stdout.Bytes(), &got) != nil {
-						t.Fatalf("missing JSON verdict: err=%v stdout=%s", err, &stdout)
+					if verify {
+						args = append(args, "--verify")
 					}
-					providerState := "missing"
-					if tc.want == "reconcile_capture" {
-						providerState = "unknown"
+					var stdout bytes.Buffer
+					if binary == "" {
+						err = (App{Stdout: &stdout, Stderr: io.Discard}).checkpointInspect(context.Background(), args)
+					} else {
+						out, stderr, code := runDescribeTestBinary(binary, root, env, append([]string{"checkpoint", "inspect"}, args...)...)
+						stdout.Write(out)
+						err = nil
+						if code != 0 {
+							err = fmt.Errorf("exit %d: %s", code, stderr)
+						}
+						t.Logf("verify=%t json=%t exit=%d stdout=%s stderr=%s", verify, jsonOut, code, out, stderr)
 					}
-					if got != (missingCheckpointAudit{ID: id, LocalState: "missing", ProviderState: providerState, NextAction: tc.want}) {
-						t.Fatalf("wrong absence verdict: %+v", got)
+					if !jsonOut || tc.want == "" {
+						if err == nil || stdout.Len() != 0 {
+							t.Fatalf("uncertain or human absence accepted: err=%v stdout=%s", err, &stdout)
+						}
+					} else {
+						var got missingCheckpointAudit
+						if err != nil || json.Unmarshal(stdout.Bytes(), &got) != nil {
+							t.Fatalf("missing JSON verdict: err=%v stdout=%s", err, &stdout)
+						}
+						providerState := "missing"
+						if tc.want == "reconcile_capture" {
+							providerState = "unknown"
+						}
+						if got != (missingCheckpointAudit{ID: id, LocalState: "missing", ProviderState: providerState, NextAction: tc.want}) {
+							t.Fatalf("wrong absence verdict: %+v", got)
+						}
+					}
+					after, snapshotErr := snapshotTestTree(stateRoot)
+					if snapshotErr != nil || !reflect.DeepEqual(before, after) {
+						t.Fatalf("inspection changed cache or capture binding: %v", snapshotErr)
 					}
 				}
 			}
-			after, _ := os.ReadFile(paths.Meta)
-			if !bytes.Equal(before, after) {
-				t.Fatal("inspection changed surviving cache")
+			wantLookups, wantProbes := int32(4), int32(4)
+			if tc.local == "origin" {
+				wantLookups, wantProbes = 0, 0
+			} else if tc.lookupStatus != 0 {
+				wantProbes = 0
 			}
+			if lookups.Load() != wantLookups || probes.Load() != wantProbes {
+				t.Fatalf("unexpected GET counts: checkpoint=%d inventory=%d", lookups.Load(), probes.Load())
+			}
+			t.Logf("GET checkpoint=%d inventory=%d; local state unchanged", lookups.Load(), probes.Load())
 		})
 	}
 }

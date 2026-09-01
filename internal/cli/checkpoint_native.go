@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"time"
 )
@@ -162,6 +163,11 @@ func (coordinatorCheckpointDriver) Create(ctx context.Context, req NativeCheckpo
 		}
 		checkpoint, created, createErr := coord.CreateCheckpoint(ctx, createContext.Record, name, strategy, req.NoReboot, createContext.Retention)
 		if createErr != nil {
+			// A retained capture already owns its provider mutation; observe that exact
+			// operation instead of submitting another capture after an uncertain result.
+			if id, pending := checkpointPendingResponse(createErr, http.StatusServiceUnavailable); req.Wait && pending && id == req.CheckpointID {
+				return waitForCheckpointImage(ctx, coord, id, "", req.WaitTimeout, req.Stderr)
+			}
 			if checkpointRouteUnsupported(createErr) {
 				_, probeErr := coord.Checkpoints(ctx)
 				if checkpointRouteUnsupported(probeErr) && createContext.Retention.Mode == "manual" {
@@ -199,7 +205,6 @@ func (coordinatorCheckpointDriver) Create(ctx context.Context, req NativeCheckpo
 		var waited CoordinatorImage
 		if managed != nil {
 			waited, err = waitForCheckpointImage(ctx, coord, managed.ID, image.ID, req.WaitTimeout, req.Stderr)
-			waited.managedCheckpoint = managed
 		} else {
 			waited, err = waitForImage(ctx, coord, image.ID, imageRefFromCoordinatorImage(image), req.WaitTimeout, req.Stderr)
 		}
@@ -211,26 +216,61 @@ func (coordinatorCheckpointDriver) Create(ctx context.Context, req NativeCheckpo
 	return image, nil
 }
 
-func waitForCheckpointImage(ctx context.Context, coord *CoordinatorClient, checkpointID, imageID string, timeout time.Duration, stderr io.Writer) (CoordinatorImage, error) {
-	deadline := time.Now().Add(timeout)
+func waitForCheckpointImage(ctx context.Context, coord *CoordinatorClient, checkpointID, imageID string, timeout time.Duration, stderr io.Writer) (result CoordinatorImage, err error) {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("waiting for checkpoint %s; inspect retained capture with crabbox checkpoint inspect %s --verify: %w", checkpointID, checkpointID, err)
+			var failure ExitError
+			if errors.As(err, &failure) {
+				err = errors.Join(exit(failure.Code, "%s", err), err)
+			} else if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) && errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+				err = errors.Join(exit(5, "%s", err), err)
+			}
+		}
+	}()
 	for {
-		image, err := coord.CheckpointImage(ctx, checkpointID)
+		checkpoint, err := coord.Checkpoint(waitCtx, checkpointID)
 		if err != nil {
 			return CoordinatorImage{}, err
 		}
-		switch strings.ToLower(image.State) {
-		case "available", "ready", "succeeded", "completed":
-			return image, nil
-		case "failed", "invalid":
-			return CoordinatorImage{}, exit(5, "image %s failed", imageID)
+		state := checkpoint.State
+		switch state {
+		case "creating":
+		case "failed":
+			// Exhausted attempts retain a scheduled recovery while the provider
+			// mutation remains uncertain. Only a failure without a retry is terminal.
+			if checkpoint.RetryAt == "" {
+				return CoordinatorImage{}, exit(5, "checkpoint %s failed: %s", checkpointID, blank(checkpoint.LastError, "provider capture failed"))
+			}
+		case "ready":
+			if checkpoint.Image == nil || checkpoint.Image.ID == "" || (imageID != "" && checkpoint.Image.ID != imageID) {
+				return CoordinatorImage{}, exit(5, "checkpoint %s provider image identity changed or is missing", checkpointID)
+			}
+			imageID = checkpoint.Image.ID
+			image, err := coord.CheckpointImage(waitCtx, checkpointID)
+			if _, pending := checkpointPendingResponse(err, http.StatusConflict); err != nil && !pending {
+				return CoordinatorImage{}, err
+			} else if err == nil {
+				if image.ID != imageID || image.managedCheckpoint.CreatedAt != checkpoint.CreatedAt {
+					return CoordinatorImage{}, exit(5, "checkpoint %s provider image identity changed", checkpointID)
+				}
+				state = image.State
+				switch strings.ToLower(state) {
+				case "available", "ready", "succeeded", "completed":
+					return image, nil
+				case "failed", "invalid":
+					return CoordinatorImage{}, exit(5, "image %s failed", imageID)
+				}
+			}
+		default:
+			return CoordinatorImage{}, exit(5, "checkpoint %s cannot become ready in state %s", checkpointID, state)
 		}
-		if time.Now().After(deadline) {
-			return CoordinatorImage{}, exit(5, "timed out waiting for image %s; last state=%s", imageID, image.State)
-		}
-		_, _ = fmt.Fprintf(stderr, "waiting image=%s state=%s\n", imageID, blank(image.State, "pending"))
+		_, _ = fmt.Fprintf(stderr, "waiting checkpoint=%s image=%s state=%s\n", checkpointID, blank(imageID, "pending"), state)
 		select {
-		case <-ctx.Done():
-			return CoordinatorImage{}, ctx.Err()
+		case <-waitCtx.Done():
+			return CoordinatorImage{}, waitCtx.Err()
 		case <-time.After(15 * time.Second):
 		}
 	}
@@ -604,6 +644,7 @@ func nativeCheckpointResourceRequest(record checkpointRecord) NativeCheckpointRe
 			Direct:       record.Native.Direct,
 		},
 		Metadata: record.Native.Metadata,
+		Capture:  record.Capture,
 	}
 }
 
