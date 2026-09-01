@@ -2582,6 +2582,9 @@ afterSync:
 			StderrPath:     streamCaptures.stderr.path(),
 			CaptureFlagSet: *captureOnFail,
 		}
+		if script != nil {
+			capture.RemoteScriptPath = script.RemotePath
+		}
 		if local, bytes, captureErr := captureFailureBundle(ctx, target, workdir, leaseID, executionRunID, capture); captureErr != nil {
 			fmt.Fprintf(a.Stderr, "warning: failure bundle failed: %v\n", captureErr)
 			if local != "" {

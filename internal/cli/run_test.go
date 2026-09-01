@@ -6151,7 +6151,7 @@ func TestRemoteFailureCaptureCommandAvoidsDuplicateDirectoryChildren(t *testing.
 		t.Fatal(err)
 	}
 
-	command := remoteFailureCaptureCommand(workdir, ".crabbox/capture.tar.gz")
+	command := remoteFailureCaptureCommand(workdir, ".crabbox/capture.tar.gz", "")
 	if out, err := exec.Command("bash", "-lc", command).CombinedOutput(); err != nil {
 		t.Fatalf("capture command failed: %v\n%s", err, out)
 	}
@@ -6206,6 +6206,70 @@ func TestRemoteRemoveFailureCaptureCommandRemovesBundle(t *testing.T) {
 	}
 }
 
+func TestRemoteFailureCaptureSelectsOnlyAvailableScriptFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX capture command")
+	}
+	t.Setenv("COPYFILE_DISABLE", "1")
+	for _, kind := range []string{"file", "missing", "directory", "symlink", "no-script"} {
+		t.Run(kind, func(t *testing.T) {
+			workdir := filepath.Join(t.TempDir(), "work ' space")
+			store := filepath.Join(workdir, ".crabbox", "scripts")
+			if err := os.MkdirAll(store, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			selected := ".crabbox/scripts/abc-current.log"
+			fullPath := filepath.Join(workdir, filepath.FromSlash(selected))
+			switch kind {
+			case "file":
+				if err := os.WriteFile(fullPath, []byte("current bytes"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "directory":
+				if err := os.Mkdir(fullPath, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(fullPath, "junit.xml"), []byte("neighbor"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				if err := os.Symlink("prior.log", fullPath); err != nil {
+					t.Fatal(err)
+				}
+			case "no-script":
+				selected = ""
+			}
+			for _, name := range []string{".crabbox/scripts/prior.log", ".crabbox/scripts/junit.xml", ".crabbox/scripts-other/junit.xml", "other/.crabbox/scripts.log", "test-results/failure.log", "playwright-report/failure.log", "coverage/failure.log", "junit.xml", "results.xml"} {
+				full := filepath.Join(workdir, filepath.FromSlash(name))
+				if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(full, []byte("report"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			command := remoteFailureCaptureCommand(workdir, ".crabbox/capture.tar.gz", selected)
+			if out, err := exec.Command("sh", "-c", command).CombinedOutput(); err != nil {
+				t.Fatalf("capture: %v\n%s", err, out)
+			}
+			entries := readTarGzContents(t, filepath.Join(workdir, ".crabbox/capture.tar.gz"))
+			for name, data := range entries {
+				if strings.HasPrefix(name, ".crabbox/scripts/") && (kind != "file" || name != selected || string(data) != "current bytes") {
+					t.Fatalf("unexpected upload store entry %s", name)
+				}
+			}
+			if kind == "file" && string(entries[selected]) != "current bytes" {
+				t.Fatal("selected script missing")
+			}
+			for _, name := range []string{".crabbox/scripts-other/junit.xml", "other/.crabbox/scripts.log", "test-results/failure.log", "playwright-report/failure.log", "coverage/failure.log", "junit.xml", "results.xml"} {
+				if string(entries[name]) != "report" {
+					t.Fatalf("report lost: %s", name)
+				}
+			}
+		})
+	}
+}
+
 func TestFailureEnvSummaryRedactsSecretValues(t *testing.T) {
 	got := failureEnvSummary([]string{"API_TOKEN", "CI", "MISSING"}, map[string]string{
 		"API_TOKEN": "secret-value",
@@ -6246,7 +6310,7 @@ func TestWriteLocalFailureBundleIncludesMetadataStreamsAndRemoteFiles(t *testing
 	if err := os.WriteFile(filepath.Join(remoteWorkdir, "test-results", "failure.log"), []byte("failure"), 0o666); err != nil {
 		t.Fatal(err)
 	}
-	command := remoteFailureCaptureCommand(remoteWorkdir, ".crabbox/remote.tar.gz")
+	command := remoteFailureCaptureCommand(remoteWorkdir, ".crabbox/remote.tar.gz", "")
 	if out, err := exec.Command("bash", "-lc", command).CombinedOutput(); err != nil {
 		t.Fatalf("remote capture command failed: %v\n%s", err, out)
 	}
@@ -6432,16 +6496,17 @@ func TestNativeWindowsFailureBundleUsesLocalStreams(t *testing.T) {
 		t.Fatal(err)
 	}
 	local, _, err := captureFailureBundle(context.Background(), SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, "C:\\crabbox\\repo", "cbx_win", "run_win", FailureCaptureMetadata{
-		Provider:       "aws",
-		LeaseID:        "cbx_win",
-		RunID:          "run_win",
-		CommandDisplay: "dotnet test --configuration Release",
-		Workdir:        "C:\\crabbox\\repo",
-		ExitCode:       9,
-		Timing:         timingReport{Provider: "aws", LeaseID: "cbx_win", ExitCode: 9},
-		Config:         Config{Provider: "aws", TargetOS: targetWindows, WindowsMode: windowsModeNormal},
-		StdoutPath:     stdoutPath,
-		StderrPath:     stderrPath,
+		Provider:         "aws",
+		LeaseID:          "cbx_win",
+		RunID:            "run_win",
+		CommandDisplay:   "dotnet test --configuration Release",
+		Workdir:          "C:\\crabbox\\repo",
+		RemoteScriptPath: ".crabbox/scripts/current.ps1",
+		ExitCode:         9,
+		Timing:           timingReport{Provider: "aws", LeaseID: "cbx_win", ExitCode: 9},
+		Config:           Config{Provider: "aws", TargetOS: targetWindows, WindowsMode: windowsModeNormal},
+		StdoutPath:       stdoutPath,
+		StderrPath:       stderrPath,
 	})
 	if err != nil {
 		t.Fatal(err)

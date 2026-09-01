@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Scoped automatic SSH failure bundles to the current uploaded script, excluding retained uploads and neighboring files while preserving explicit artifact/download selection.
 - Honor explicit empty YAML replacement lists for environment forwarding, JUnit paths, and run preflight probes, preserving omission inheritance, additive profile/sync lists, and independent automatic result discovery.
 - Parsed nested JUnit suites without double-counting aggregates, preserving failed-case details and deriving missing counters so opt-in failure gating catches counterless nested failures.
 - Canonicalized retained logs as bounded UTF-8 before receipt signing and storage, preserving raw full-stream hashes and captures while marking lossy normalization or omitted bytes as truncated.

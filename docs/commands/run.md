@@ -397,8 +397,11 @@ invoke it as trailing argv so the project copy runs in place:
 crabbox run -- ./scripts/check.sh
 ```
 
-Crabbox includes the uploaded script directory in failure bundles. A shebang is
-honored on POSIX targets; scripts without one run through `bash`. Native Windows
+On POSIX SSH targets, automatic failure bundles include only the current run's
+uploaded script file, when still available—not the retained `.crabbox/scripts`
+directory or neighboring files. Runs without an uploaded script select none
+of that store. A shebang is honored on POSIX targets; scripts without one run
+through `bash`. Native Windows
 targets run uploaded scripts through Windows PowerShell, and
 `--script-stdin` is treated as a PowerShell script; a non-`.ps1` script path
 gets a `.ps1` extension added before upload. Trailing arguments after `--` are
@@ -619,11 +622,15 @@ reads or embeds the captured bytes. Any other live console output remains in
 the proof's redacted tail excerpt.
 
 When the remote command exits non-zero, Crabbox writes a local-only
-`.crabbox/captures/*.tar.gz` failure bundle by default. SSH-backed bundles
-include the uploaded script directory, redacted env/config summaries, timing
-JSON, command stdout/stderr, common debug paths such as `test-results`,
+`.crabbox/captures/*.tar.gz` failure bundle by default. POSIX SSH-backed bundles
+include the current run's uploaded script file (when available), redacted
+env/config summaries, timing JSON, command stdout/stderr, common debug paths such as `test-results`,
 `playwright-report`, `coverage`, JUnit XML files, nearby `*.log` files, and a
-gateway log tail when a known gateway log path exists. Implicit stdout/stderr
+gateway log tail when a known gateway log path exists. The exact `.crabbox/scripts`
+store is excluded from general report/log discovery, including prior uploads
+and report-looking neighbors. Explicit artifact/download selections remain
+independent; use `--download-on-failure` to request additional files after an
+eligible failure. Native Windows bundles remain local-only. Implicit stdout/stderr
 entries are capped to keep bundles bounded; explicit `--capture-stdout` /
 `--capture-stderr` files are included as caller-created local files.
 Remote archive entries are confined to the bundle subtree; unsafe links and
