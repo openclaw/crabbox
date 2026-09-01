@@ -389,7 +389,7 @@ mkdir -m 700 \
     HOME="$PUBLIC_GO_INSTALL/home" PATH="$PATH" TMPDIR="$PUBLIC_GO_INSTALL/tmp" \
     go install "github.com/openclaw/crabbox/cmd/crabbox@$TAG"
 )
-go version -m -json "$PUBLIC_GO_INSTALL/bin/crabbox" >"$PUBLIC_GO_INSTALL/build.json"
+GOTOOLCHAIN=local go version -m -json "$PUBLIC_GO_INSTALL/bin/crabbox" >"$PUBLIC_GO_INSTALL/build.json"
 jq -e --arg version "$TAG" \
   --arg forkVersion v6.0.3-0.20260817142523-966654abed4a '
   .Path == "github.com/openclaw/crabbox/cmd/crabbox" and
@@ -533,6 +533,16 @@ authorization to create one private draft and upload only the frozen eight
 files. Capture the numeric release ID and every asset ID from the response.
 Re-download into a fresh directory and prove that the remote draft matches the
 local record exactly.
+
+Static Go build-info inspection uses the installed local toolchain without
+switching or downloading one; the binary's recorded toolchain and build settings
+must still match the release contract. Draft creation removes its fresh private
+verification home, making read-only cache directories writable without following
+symlinks or changing operator caches. It prints success only after cleanup
+succeeds. Cleanup errors retain diagnostics and the temporary path, fail the
+command, and preserve any earlier verification, creation, or readback exit code.
+A cleanup failure does not undo draft creation; inspect the existing record
+read-only before considering any further action.
 
 ### 2. Verify the draft natively
 
