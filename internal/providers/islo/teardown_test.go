@@ -172,28 +172,104 @@ func TestIsloTeardownDeletesTheNameTheClaimedIDResolvesTo(t *testing.T) {
 	requireIsloClaimDropped(t, isloTeardownLeaseID)
 }
 
-// TestIsloTeardownDeletesWhenTheIdentityReadsFail is the resource-safety
-// property: a sandbox that exists is billed for, so a pre-flight read that
-// merely fails must never suppress the delete. Only a positive identity
-// mismatch may do that.
-func TestIsloTeardownDeletesWhenTheIdentityReadsFail(t *testing.T) {
+// TestIsloTeardownRefusesABlindNameDeleteForAnIDBoundClaim is the resource
+// boundary this identity binding exists to hold. DELETE is name-only and an
+// Islo sandbox name is reusable once its sandbox is deleted, so when both
+// identity reads fail there is nothing showing that the recorded name is still
+// the resource the lease owns - deleting it could destroy a different tenant
+// sandbox that has since taken the name. The teardown must fail closed and keep
+// the claim instead.
+func TestIsloTeardownRefusesABlindNameDeleteForAnIDBoundClaim(t *testing.T) {
+	for name, tc := range map[string]struct {
+		client func() *fakeIsloSyncClient
+	}{
+		// The control-plane outage the fail-closed path exists for: neither
+		// lookup answers, so nothing identifies the name.
+		"both identity reads fail": {
+			client: func() *fakeIsloSyncClient {
+				unavailable := errors.New("503 service unavailable")
+				return &fakeIsloSyncClient{byIDErr: unavailable, getSandboxErr: unavailable}
+			},
+		},
+		// The claimed resource is invisible to these credentials and the name
+		// read fails, so again nothing ties the name to the claimed id.
+		"claimed id is not visible and the name read fails": {
+			client: func() *fakeIsloSyncClient {
+				return &fakeIsloSyncClient{
+					byID:          map[string]*gosdk.SandboxResponse{isloTestResourceID: nil},
+					getSandboxErr: errors.New("i/o timeout"),
+				}
+			},
+		},
+		// The name answers, but with no resource id, so it shows only that
+		// something holds the name - not that it is still our sandbox.
+		"the name answers without a resource id": {
+			client: func() *fakeIsloSyncClient {
+				return &fakeIsloSyncClient{
+					byID:       map[string]*gosdk.SandboxResponse{isloTestResourceID: nil},
+					getSandbox: &gosdk.SandboxResponse{Name: isloTeardownName, Status: "running"},
+				}
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			isolateIsloTestHome(t)
+			claimIsloLeaseWithIdentity(t, isloTeardownLeaseID, "web", isloTeardownName, isloTestResourceID, isloTestClaimScope)
+			client := tc.client()
+			var stderr bytes.Buffer
+			backend := newIsloTeardownBackend(t, client, &stderr)
+
+			err := backend.Stop(context.Background(), StopRequest{ID: isloTeardownLeaseID})
+			if err == nil || !strings.Contains(err.Error(), "refused to delete sandbox") {
+				t.Fatalf("err=%v, want the delete refused because the target could not be identified", err)
+			}
+			// The refusal has to be actionable: an undeleted sandbox keeps
+			// billing, so the operator must be told the sandbox may still be
+			// running and exactly which command finishes the job.
+			for _, want := range []string{
+				isloTeardownName,
+				isloTestResourceID,
+				"may still be running and billable",
+				isloCleanupCommand(isloTeardownLeaseID),
+			} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("err=%v, want it to state %q", err, want)
+				}
+			}
+			if client.deleteCalls != 0 {
+				t.Fatalf("delete calls=%d names=%#v, want no delete: the recorded name was never shown to be our resource", client.deleteCalls, client.deletedNames)
+			}
+			requireIsloClaimRetained(t, isloTeardownLeaseID)
+		})
+	}
+}
+
+// TestIsloTeardownDeletesByNameForAClaimWithNoRecordedID is the other half of
+// the fail-closed rule. A claim written before the identity binding has no id to
+// cross, so the name is the only handle it has ever had: a failed read must not
+// strand it, and the name-only delete the pre-binding teardown always performed
+// stays correct.
+func TestIsloTeardownDeletesByNameForAClaimWithNoRecordedID(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	isolateIsloTestHome(t)
-	claimIsloLeaseWithIdentity(t, isloTeardownLeaseID, "web", isloTeardownName, isloTestResourceID, isloTestClaimScope)
-	unavailable := errors.New("503 service unavailable")
-	client := &fakeIsloSyncClient{byIDErr: unavailable, getSandboxErr: unavailable}
+	claimIsloLegacyLease(t, isloTeardownLeaseID)
+	client := &fakeIsloSyncClient{getSandboxErr: errors.New("503 service unavailable")}
 	var stderr bytes.Buffer
 	backend := newIsloTeardownBackend(t, client, &stderr)
 
 	err := backend.Stop(context.Background(), StopRequest{ID: isloTeardownLeaseID})
-	if err == nil || !strings.Contains(err.Error(), "confirm sandbox deletion by id") {
+	if err == nil || !strings.Contains(err.Error(), "confirm sandbox deletion by name") {
 		t.Fatalf("err=%v, want an unproven teardown after the confirmation read failed", err)
 	}
 	if client.deleteCalls != 1 || client.deletedNames[0] != isloTeardownName {
-		t.Fatalf("delete calls=%d names=%#v, want the delete issued despite the failed reads", client.deleteCalls, client.deletedNames)
+		t.Fatalf("delete calls=%d names=%#v, want the name delete still issued for a claim with no recorded id", client.deleteCalls, client.deletedNames)
+	}
+	if len(client.byIDCalls) != 0 {
+		t.Fatalf("by-id calls=%#v, want none: the claim records no resource id", client.byIDCalls)
 	}
 	if !strings.Contains(stderr.String(), "could not read sandbox") {
-		t.Fatalf("stderr=%q, want the failed identity reads reported", stderr.String())
+		t.Fatalf("stderr=%q, want the failed identity read reported", stderr.String())
 	}
 	requireIsloClaimRetained(t, isloTeardownLeaseID)
 }
@@ -420,46 +496,75 @@ func TestIsloRunCleanupDeletesWhenTheClaimIsGone(t *testing.T) {
 
 // TestIsloRunCleanupBoundsTheWholeTeardown pins the latency contract of the run
 // cleanup defer: the user waits on it, so a control plane that answers nothing
-// costs them one cleanup budget in total, not one per API call.
+// costs them one cleanup budget in total, not one per API call. The two cases
+// differ in what a starved read is allowed to lead to, which is the fail-closed
+// rule itself: a claim with no recorded id still gets its name delete, while an
+// id-bound claim refuses to delete a name it could not identify.
 func TestIsloRunCleanupBoundsTheWholeTeardown(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	isolateIsloTestHome(t)
 	const budget = 100 * time.Millisecond
-	withIsloCleanupTimeout(t, budget)
-	claimIsloLeaseWithIdentity(t, isloTeardownLeaseID, "web", isloTeardownName, isloTestResourceID, isloTestClaimScope)
-	client := &fakeIsloSyncClient{blockReads: true, blockDelete: true}
-	client.registerSandbox(isloTeardownName, isloTestResourceID)
-	backend := newIsloTeardownBackend(t, client, io.Discard)
+	for name, tc := range map[string]struct {
+		idBound     bool
+		wantErr     string
+		wantDeletes int
+	}{
+		// Two calls starve here: the pre-flight by-name read and the DELETE. A
+		// per-call budget would cost ~2x, and a call left unbounded would never
+		// return at all, so the wait is what is asserted.
+		"claim with no recorded id still deletes by name": {
+			wantErr:     "islo delete sandbox",
+			wantDeletes: 1,
+		},
+		// Both identity reads starve, so nothing shows the recorded name is
+		// still this lease's sandbox and no delete may go out.
+		"id-bound claim refuses an unidentified name": {
+			idBound:     true,
+			wantErr:     "refused to delete sandbox",
+			wantDeletes: 0,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			isolateIsloTestHome(t)
+			withIsloCleanupTimeout(t, budget)
+			if tc.idBound {
+				claimIsloLeaseWithIdentity(t, isloTeardownLeaseID, "web", isloTeardownName, isloTestResourceID, isloTestClaimScope)
+			} else {
+				claimIsloLegacyLease(t, isloTeardownLeaseID)
+			}
+			client := &fakeIsloSyncClient{blockReads: true, blockDelete: true}
+			client.registerSandbox(isloTeardownName, isloTestResourceID)
+			backend := newIsloTeardownBackend(t, client, io.Discard)
 
-	// Four calls starve here: the two pre-flight identity reads, the DELETE, and
-	// the tombstone confirmation. A per-call budget would cost ~4x, and a call
-	// left unbounded would never return at all, so the wait is what is asserted.
-	done := make(chan error, 1)
-	go func() { done <- backend.releaseIsloLease(client, isloTeardownLeaseID, isloTeardownName) }()
-	var err error
-	select {
-	case err = <-done:
-	case <-time.After(2 * budget):
-		t.Fatalf("cleanup did not return within %s, want the whole teardown bounded by one %s budget", 2*budget, budget)
+			done := make(chan error, 1)
+			go func() { done <- backend.releaseIsloLease(client, isloTeardownLeaseID, isloTeardownName) }()
+			var err error
+			select {
+			case err = <-done:
+			case <-time.After(2 * budget):
+				t.Fatalf("cleanup did not return within %s, want the whole teardown bounded by one %s budget", 2*budget, budget)
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err=%v, want %q when nothing answers", err, tc.wantErr)
+			}
+			if client.deleteCalls != tc.wantDeletes {
+				t.Fatalf("delete calls=%d, want %d", client.deleteCalls, tc.wantDeletes)
+			}
+			// Counting the call is not enough. Without the reserved slice the
+			// pre-flight read consumes the whole budget and the DELETE is
+			// dispatched on an already cancelled context, which a real transport
+			// refuses to send - the sandbox then keeps billing even though
+			// deleteCalls says the delete was attempted.
+			if len(client.deleteCtxErrs) != tc.wantDeletes {
+				t.Fatalf("delete context observations=%d, want %d", len(client.deleteCtxErrs), tc.wantDeletes)
+			}
+			for _, ctxErr := range client.deleteCtxErrs {
+				if ctxErr != nil {
+					t.Fatalf("delete dispatched on an expired context (%v), want the reserved slice of the budget to keep it live", ctxErr)
+				}
+			}
+			requireIsloClaimRetained(t, isloTeardownLeaseID)
+		})
 	}
-	if err == nil {
-		t.Fatal("err=nil, want an unproven teardown when nothing answers")
-	}
-	// The delete still has to be attempted: an undeleted sandbox keeps billing.
-	if client.deleteCalls != 1 {
-		t.Fatalf("delete calls=%d, want the delete attempted within the reserved slice of the budget", client.deleteCalls)
-	}
-	// Counting the call is not enough. Without the reserved slice the pre-flight
-	// reads consume the whole budget and the DELETE is dispatched on an already
-	// cancelled context, which a real transport refuses to send - the sandbox
-	// then keeps billing even though deleteCalls says the delete was attempted.
-	if len(client.deleteCtxErrs) != 1 {
-		t.Fatalf("delete context observations=%d, want exactly one", len(client.deleteCtxErrs))
-	}
-	if client.deleteCtxErrs[0] != nil {
-		t.Fatalf("delete dispatched on an expired context (%v), want the reserved slice of the budget to keep it live", client.deleteCtxErrs[0])
-	}
-	requireIsloClaimRetained(t, isloTeardownLeaseID)
 }
 
 // TestIsloTeardownIgnoresEventuallyConsistentList pins that absence is never

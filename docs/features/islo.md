@@ -115,17 +115,23 @@ crabbox stop --provider islo blue-lobster
   drops the local claim; an uncertain outcome keeps the claim so the command can
   be retried. Absence is never inferred from `GET /sandboxes`, which stays
   eventually consistent for seconds after a delete.
-- The teardown refuses only on a positive identity mismatch: the name resolves
-  to a resource id the lease does not own. A read that merely fails does not
-  suppress the delete, because an undeleted sandbox keeps billing. Creator
-  attribution (`created_by` is the API key's name, `created_by_entity` its kind)
-  only corroborates ownership - any key that can create a sandbox reproduces it -
-  so a difference is reported as advisory and never blocks a teardown. It is not
-  a security boundary.
+- `DELETE /sandboxes/{name}` is name-only and a name is reusable once its
+  sandbox is deleted, so for a lease that records a resource id the teardown
+  will not delete a name it has not identified. It refuses on a positive
+  identity mismatch (the name resolves to a resource id the lease does not own)
+  and it also refuses when neither lookup could identify the name at all, such
+  as during an API read outage: deleting blind could destroy a different
+  sandbox. Such a `stop` fails, keeps the claim, and says to retry it - the
+  sandbox may still be running and billable until then. Creator attribution
+  (`created_by` is the API key's name, `created_by_entity` its kind) only
+  corroborates ownership - any key that can create a sandbox reproduces it - so
+  a difference is reported as advisory and never blocks a teardown. It is not a
+  security boundary.
 - A claim written before Crabbox recorded resource ids has no id to anchor a
-  tombstone on. Such a lease is still releasable: `stop` accepts a 404 on its
-  exact name, reports the weaker `name-404-unbound` proof, and warns that the
-  delete could not be confirmed against a specific resource.
+  tombstone on, and no identity a name delete could cross. Such a lease keeps
+  the name-only delete and stays releasable: `stop` accepts a 404 on its exact
+  name, reports the weaker `name-404-unbound` proof, and warns that the delete
+  could not be confirmed against a specific resource.
 - **pause** snapshots the sandbox and releases its active compute while
   preserving the local lease claim; **resume** restores the sandbox to running.
 - The sandbox is deleted on release unless kept. `--keep-on-failure` keeps a

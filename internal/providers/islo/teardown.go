@@ -44,10 +44,13 @@ type isloTeardownBudgets struct {
 	overall time.Duration
 	// deleteReserve is the slice of overall that the pre-flight identity reads
 	// may not consume, because a DELETE that never goes out leaves a billed
-	// sandbox behind - the worst outcome available here. When the reads do burn
-	// everything up to that reserve, the confirmation afterwards is what gives
-	// way: the teardown then reports itself unproven and keeps the claim, so the
-	// delete is still retryable.
+	// sandbox behind. When the reads do burn everything up to that reserve, the
+	// confirmation afterwards is what gives way: the teardown then reports itself
+	// unproven and keeps the claim, so the delete is still retryable. The reserve
+	// buys nothing for a read that fails outright on an id-bound claim - that
+	// teardown declines to delete at all (see requireIsloVerifiedTarget) - but it
+	// is what lets a slow-but-successful read still reach the delete, and it is
+	// what keeps the name-only delete of a claim that records no id alive.
 	deleteReserve time.Duration
 }
 
@@ -76,10 +79,11 @@ func (budgets isloTeardownBudgets) preDeleteReadContext(ctx context.Context) (co
 type isloTeardownTarget struct {
 	name       string
 	resourceID string
-	// observed records that the resource answered under the current credentials
-	// during this teardown. Without it a later 404 is indistinguishable from
-	// "these credentials were never able to see this resource", so it must not
-	// count as proof of deletion.
+	// observed records that the resource this lease owns was positively
+	// identified under the current credentials during this teardown. Without it
+	// a later 404 is indistinguishable from "these credentials were never able
+	// to see this resource", so it must not count as proof of deletion - and for
+	// an id-bound claim it is also what licenses the name-only DELETE at all.
 	observed bool
 	// nameAbsentBefore records that the name already answered 404 before we
 	// touched anything, which makes DELETE a no-op.
@@ -87,6 +91,19 @@ type isloTeardownTarget struct {
 	// deleteIssued records whether a DELETE actually went out, so no message
 	// can describe an action that did not happen.
 	deleteIssued bool
+}
+
+// confirmObserved records a positive identification of the resource the claim
+// owns. For a claim that records an immutable id the live response must carry
+// that same id: a response that omits it shows only that *something* currently
+// holds the name, which is exactly what a reusable name cannot prove. A claim
+// with no recorded id has no id to match, so any live response identifies it as
+// well as anything ever could.
+func (t *isloTeardownTarget) confirmObserved(live isloIdentity) {
+	if t.resourceID != "" && live.ID != t.resourceID {
+		return
+	}
+	t.observed = true
 }
 
 func (t isloTeardownTarget) identity() isloIdentity {
@@ -117,10 +134,13 @@ type isloTeardownOutcome struct {
 // retrying the teardown. Dropping it on an unproven delete is how a paid
 // sandbox becomes unreachable garbage.
 //
-// Reads before the delete inform the confirmation and can refuse on a positive
-// identity mismatch. A read that merely FAILS must never suppress the delete:
-// the sandbox is billed for as long as it exists, so a transient control-plane
-// error falls through to the delete attempt.
+// Reads before the delete are not advisory: the delete endpoint is name-only and
+// an Islo sandbox name is reusable once its sandbox is deleted, so for a claim
+// that records an immutable id the reads are what establishes that the recorded
+// name still is the resource this lease owns. When they cannot establish it the
+// teardown declines to delete and keeps the claim (see requireIsloVerifiedTarget).
+// A claim that records no id has no identity to cross and keeps its name-only
+// delete.
 func (b *isloBackend) teardownIsloSandbox(ctx context.Context, client isloAPI, claim core.LeaseClaim, name string, budgets isloTeardownBudgets) (isloTeardownOutcome, error) {
 	if err := requireIsloClaimScope(claim, b.claimScope()); err != nil {
 		return isloTeardownOutcome{}, err
@@ -144,6 +164,9 @@ func (b *isloBackend) teardownIsloSandbox(ctx context.Context, client isloAPI, c
 		}
 	}
 	if !target.nameAbsentBefore {
+		if err := requireIsloVerifiedTarget(claim, target); err != nil {
+			return isloTeardownOutcome{name: target.name}, err
+		}
 		if err := client.DeleteSandbox(ctx, target.name); err != nil {
 			return isloTeardownOutcome{}, isloError("delete sandbox", err)
 		}
@@ -151,6 +174,32 @@ func (b *isloBackend) teardownIsloSandbox(ctx context.Context, client isloAPI, c
 	}
 	proof, err := b.confirmIsloTeardown(ctx, client, claim, target)
 	return isloTeardownOutcome{name: target.name, proof: proof}, err
+}
+
+// requireIsloVerifiedTarget is the fail-closed gate in front of the DELETE.
+//
+// `DELETE /sandboxes/{name}` is name-only, and an Islo sandbox name is a
+// namespace slot rather than a resource: once a sandbox is deleted the name is
+// free for a new one. So for a claim that records an immutable id, deleting the
+// recorded name without having identified it as that id would cross the lease's
+// resource boundary - and a control-plane read outage, the one situation where
+// both identity reads fail, is exactly when the delete would go out blind. This
+// refuses instead, and the caller keeps the claim, so the same teardown can be
+// retried against the same recorded id once reads answer again.
+//
+// A claim that records no immutable id predates the identity binding. It has no
+// identity to cross: the name is the only handle it has ever had, and deleting
+// by that name is precisely what the pre-binding teardown always did, so the
+// name-only delete remains correct for it.
+//
+// The competing cost is real - a sandbox that is not deleted keeps billing - so
+// the refusal names the sandbox, says the sandbox may still be running, and says
+// which command to retry.
+func requireIsloVerifiedTarget(claim core.LeaseClaim, target isloTeardownTarget) error {
+	if target.observed || isloClaimIdentity(claim).ID == "" {
+		return nil
+	}
+	return exit(5, "islo refused to delete sandbox %q for lease %q (%s): the sandbox could not be read under these credentials during this teardown, so the recorded name could not be shown to still be the resource this lease owns, and an islo sandbox name is reusable once its sandbox is deleted; deleting it blind could destroy a different sandbox. The sandbox may still be running and billable: the claim is retained, so run `%s` to retry the delete once the islo API answers reads again", target.name, claim.LeaseID, isloIdentityString(target.identity()), isloCleanupCommand(claim.LeaseID))
 }
 
 // locateIsloTargetByID resolves the claimed resource id. It reports done=true
@@ -176,9 +225,10 @@ func (b *isloBackend) locateIsloTargetByID(ctx context.Context, client isloAPI, 
 			return true, "", err
 		}
 		b.warnIsloAdvisory(advisory)
-		target.observed = true
+		target.confirmObserved(live)
 	case err != nil && !isloNotFound(err):
-		// Not a 404: we learned nothing, and that must not stop the delete.
+		// Not a 404: we learned nothing about this resource, so the by-name
+		// lookup is the only remaining way to identify it.
 		b.warnf("warning: islo could not read sandbox %s by id before delete: %v\n", target.resourceID, err)
 	}
 	// A 404 from the by-id lookup means the resource is not visible to these
@@ -202,7 +252,12 @@ func (b *isloBackend) locateIsloTargetByName(ctx context.Context, client isloAPI
 			return err
 		}
 		b.warnIsloAdvisory(advisory)
-		target.observed = true
+		target.confirmObserved(live)
+		if !target.observed {
+			// The name answered, but the response carries no id, so it cannot
+			// show that this name is still the resource the claim owns.
+			b.warnf("warning: islo read sandbox %q by name but the response carries no resource id, so it cannot be matched against resource %s, which this lease owns\n", target.name, target.resourceID)
+		}
 		if target.resourceID == "" {
 			// Claims written before the identity binding carry no id. The live
 			// response hands us one, so the tombstone check works for them too.
