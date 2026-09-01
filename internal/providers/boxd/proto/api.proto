@@ -1,0 +1,119 @@
+// Client subset of the public boxd gRPC API served with TLS at boxd.sh:9443.
+//
+// Source of truth: https://docs.boxd.sh/reference/grpc-proto (package
+// boxd.api.v1, service BoxdApi). This file declares only the RPCs Crabbox
+// calls and, within each message, only the fields Crabbox reads or writes.
+// Every field keeps the vendor's exact name, type, and number, so the wire
+// contract is unchanged: proto3 ignores unknown fields on decode, and omitted
+// fields are simply never sent. Field numbers were cross-checked against the
+// production endpoint's gRPC server reflection on 2026-09-01.
+//
+// Regenerate with scripts/gen-boxd-proto.sh.
+syntax = "proto3";
+package boxd.api.v1;
+
+option go_package = "github.com/openclaw/crabbox/internal/providers/boxd/boxdapi";
+
+service BoxdApi {
+  rpc CreateVm(CreateVmRequest) returns (CreateVmResponse);
+  rpc DestroyVm(DestroyVmRequest) returns (DestroyVmResponse);
+  rpc StartVm(StartVmRequest) returns (StartVmResponse);
+  rpc StopVm(StopVmRequest) returns (StopVmResponse);
+  rpc GetVm(GetVmRequest) returns (GetVmResponse);
+  rpc ExposePort(ExposePortRequest) returns (ExposePortResponse);
+  rpc Whoami(WhoamiRequest) returns (WhoamiResponse);
+  rpc Exec(stream ExecChunk) returns (stream ExecChunk);
+}
+
+message CreateVmRequest {
+  string name = 1;
+  // Org to create the VM in (name or id). Empty = personal.
+  string org = 9;
+  // Isolated sandbox creation; immutable after creation.
+  bool isolated = 12;
+}
+
+message CreateVmResponse {
+  string vm_id = 1;
+  string name = 2;
+  string public_ip = 3;
+  string url = 4;
+  string image = 5;
+  string status = 6;
+  uint64 boot_time_ms = 7;
+}
+
+message DestroyVmRequest {
+  string vm_id = 1;
+}
+message DestroyVmResponse {}
+
+message StartVmRequest {
+  string vm_id = 1;
+}
+message StartVmResponse {}
+
+message StopVmRequest {
+  string vm_id = 1;
+}
+message StopVmResponse {}
+
+message GetVmRequest {
+  string vm_id = 1;
+}
+
+message GetVmResponse {
+  string vm_id = 1;
+  string name = 2;
+  string public_ip = 4;
+  string status = 5;
+  // Org the VM is SHARED with (empty = private to its creator) and the org
+  // paying for it (empty = the owner's personal quota), plus that org's id.
+  string org = 10;
+  string billing_org = 11;
+  string billing_org_id = 23;
+  // Isolated sandbox; immutable after creation.
+  bool isolated = 26;
+}
+
+// vm addresses the machine (Crabbox always passes the immutable VM id and
+// verifies the response's vm_id). Re-exposing the same vm_port keeps its
+// public port.
+message ExposePortRequest {
+  uint32 vm_port = 2;
+  string protocol = 3;
+  string vm = 4;
+}
+
+message ExposePortResponse {
+  string vm_name = 1;
+  string dns = 2;
+  uint32 public_port = 3;
+  uint32 vm_port = 4;
+  string protocol = 5;
+  string vm_id = 6;
+}
+
+message WhoamiRequest {}
+
+message WhoamiResponse {
+  string user_id = 1;
+}
+
+// Bidirectional exec stream. The first client chunk carries vm_id and
+// command; the command string is run by a shell inside the guest. Server
+// chunks carry output in data (is_stderr distinguishes stderr for non-PTY
+// execs), a nonzero exit_code reports failure, and a stream that ends
+// cleanly without one completed with exit code zero.
+message ExecChunk {
+  bytes data = 1;
+  bool stdin = 2;
+  bool tty = 3;
+  string command = 4;
+  string vm_id = 5;
+  int32 exit_code = 6;
+  uint32 cols = 7;
+  uint32 rows = 8;
+  bool window_change = 9;
+  bool is_stderr = 10;
+}

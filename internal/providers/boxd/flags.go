@@ -9,6 +9,7 @@ import (
 
 type flagValues struct {
 	APIURL          *string
+	GRPCURL         *string
 	Org             *string
 	WorkRoot        *string
 	DeleteOnRelease *bool
@@ -16,7 +17,8 @@ type flagValues struct {
 
 func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return flagValues{
-		APIURL:          fs.String("boxd-api-url", defaults.Boxd.APIURL, "boxd HTTPS console origin (default https://app.boxd.sh)"),
+		APIURL:          fs.String("boxd-api-url", defaults.Boxd.APIURL, "boxd HTTPS console origin for the API-key exchange (default https://app.boxd.sh)"),
+		GRPCURL:         fs.String("boxd-grpc-url", defaults.Boxd.GRPCURL, "boxd TLS gRPC endpoint as host:port (default boxd.sh:9443)"),
 		Org:             fs.String("boxd-org", defaults.Boxd.Org, "boxd organization (empty = personal account)"),
 		WorkRoot:        fs.String("boxd-work-root", defaults.Boxd.WorkRoot, "remote Crabbox work root"),
 		DeleteOnRelease: fs.Bool("boxd-delete-on-release", defaults.Boxd.DeleteOnRelease, "destroy boxd machines on release instead of stopping them (default true)"),
@@ -41,6 +43,9 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "boxd-api-url") {
 		cfg.Boxd.APIURL = *v.APIURL
+	}
+	if core.FlagWasSet(fs, "boxd-grpc-url") {
+		cfg.Boxd.GRPCURL = *v.GRPCURL
 	}
 	if core.FlagWasSet(fs, "boxd-org") {
 		cfg.Boxd.Org = *v.Org

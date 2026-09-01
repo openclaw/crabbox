@@ -14,7 +14,8 @@ func init() {
 	core.RegisterProvider(Provider{})
 }
 
-// Provider uses the HTTPS console for lifecycle and authenticated guest bootstrap.
+// Provider uses the TLS gRPC API for lifecycle and authenticated guest
+// bootstrap; the HTTPS console is used only for the API-key exchange.
 type Provider struct{}
 
 func (Provider) Name() string      { return providerName }
@@ -42,6 +43,9 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 
 func (Provider) ValidateConfig(cfg core.Config) error {
 	if _, err := consoleURL(cfg.Boxd.APIURL); err != nil {
+		return err
+	}
+	if _, err := grpcTarget(cfg.Boxd.GRPCURL); err != nil {
 		return err
 	}
 	workRoot := cfg.Boxd.WorkRoot
@@ -90,12 +94,16 @@ func (Provider) ClaimScope(cfg core.Config) string {
 	if err != nil {
 		return "invalid-boxd-origin"
 	}
-	data, _ := json.Marshal([]string{u.String(), cfg.Boxd.Org})
+	target, err := grpcTarget(cfg.Boxd.GRPCURL)
+	if err != nil {
+		return "invalid-boxd-origin"
+	}
+	data, _ := json.Marshal([]string{u.String(), target, cfg.Boxd.Org})
 	return string(data)
 }
 
 func (Provider) DiagnosticSecrets(core.Config) []string {
-	return []string{os.Getenv("CRABBOX_BOXD_TOKEN"), os.Getenv("BOXD_TOKEN")}
+	return []string{os.Getenv("CRABBOX_BOXD_API_KEY"), os.Getenv("BOXD_API_KEY")}
 }
 
 // ServerTypeForConfig: boxd machine sizing follows the account/org quota, not
@@ -118,6 +126,9 @@ func applyDefaults(cfg *core.Config) {
 	}
 	if cfg.Boxd.APIURL == "" {
 		cfg.Boxd.APIURL = defaultConsoleURL
+	}
+	if strings.TrimSpace(cfg.Boxd.GRPCURL) == "" {
+		cfg.Boxd.GRPCURL = defaultGRPCTarget
 	}
 	if !core.IsBoxdWorkRootExplicit(cfg) && core.IsWorkRootExplicit(cfg) {
 		cfg.Boxd.WorkRoot = cfg.WorkRoot

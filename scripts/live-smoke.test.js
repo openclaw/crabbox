@@ -2829,19 +2829,19 @@ test("RunPod live smoke dispatches to the provider-specific script", () => {
   );
 });
 
-test("boxd live smoke requires an interactive session without API-key fallback", () => {
+test("boxd live smoke requires a bxd_ API key without legacy-token fallback", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-boxd-no-key-"));
   const marker = path.join(dir, "vendor-cli-ran");
   writeExecutable(path.join(dir, "boxd"), `#!/bin/sh\ntouch ${marker}\nexit 99\n`);
   const result = spawnSync("bash", [path.join(repoRoot, "scripts/live-smoke.sh")], {
     cwd: repoRoot,
     env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, CRABBOX_CONFIG: path.join(dir, "missing.yaml"),
-      CRABBOX_BOXD_TOKEN: "", BOXD_TOKEN: "", BOXD_API_KEY: "bxd_fixture-key", CRABBOX_LIVE: "1",
+      CRABBOX_BOXD_API_KEY: "", BOXD_API_KEY: "", CRABBOX_BOXD_TOKEN: "fixture-legacy-session", CRABBOX_LIVE: "1",
       CRABBOX_LIVE_COORDINATOR: "0", CRABBOX_LIVE_PROVIDERS: "boxd", CRABBOX_LIVE_REPO: dir },
     encoding: "utf8",
   });
   assert.equal(result.status, 2, result.stdout + result.stderr);
-  assert.match(result.stderr, /set BOXD_TOKEN or CRABBOX_BOXD_TOKEN/);
+  assert.match(result.stderr, /set BOXD_API_KEY or CRABBOX_BOXD_API_KEY/);
   assert.equal(fs.existsSync(marker), false);
 });
 
@@ -2866,7 +2866,7 @@ exit 0
     const result = spawnSync("bash", [path.join(repoRoot, "scripts/live-smoke.sh")], {
       cwd: repoRoot,
       env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, CRABBOX_BIN: path.join(dir, "crabbox"),
-        CRABBOX_CONFIG: path.join(dir, "missing.yaml"), CRABBOX_BOXD_TOKEN: "fixture-session", BOXD_TOKEN: "",
+        CRABBOX_CONFIG: path.join(dir, "missing.yaml"), CRABBOX_BOXD_API_KEY: "bxd_fixtureSecretfixtureSecretfixtureSecretf0", BOXD_API_KEY: "",
         CRABBOX_BOXD_API_URL: "", CRABBOX_BOXD_ORG: "", CRABBOX_LIVE: "1", CRABBOX_LIVE_COORDINATOR: "0",
         CRABBOX_LIVE_PROVIDERS: "boxd", CRABBOX_LIVE_REPO: dir },
       encoding: "utf8",
@@ -2878,7 +2878,7 @@ exit 0
     assert.match(seen, /crabbox:stop cbx_123456789abc /);
     assert.doesNotMatch(seen, /crabbox:stop boxd-smoke/);
     assert.match(seen, /api=https:\/\/app\.boxd\.sh org=/);
-    assert.doesNotMatch(seen + result.stdout + result.stderr, /fixture-session/);
+    assert.doesNotMatch(seen + result.stdout + result.stderr, /fixtureSecret/);
     if (!failure) assert.match(seen, /exit 37/);
   });
 }
@@ -2902,7 +2902,7 @@ exit 0
   const result = spawnSync("bash", [path.join(repoRoot, "scripts/live-smoke.sh")], {
     cwd: repoRoot,
     env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, CRABBOX_BIN: path.join(dir, "crabbox"),
-      CRABBOX_CONFIG: path.join(dir, "missing.yaml"), CRABBOX_BOXD_TOKEN: "fixture-session", BOXD_TOKEN: "",
+      CRABBOX_CONFIG: path.join(dir, "missing.yaml"), CRABBOX_BOXD_API_KEY: "bxd_fixtureSecretfixtureSecretfixtureSecretf0", BOXD_API_KEY: "",
       CRABBOX_BOXD_API_URL: "", CRABBOX_BOXD_ORG: "", CRABBOX_LIVE: "1", CRABBOX_LIVE_COORDINATOR: "0",
       CRABBOX_LIVE_PROVIDERS: "boxd", CRABBOX_LIVE_REPO: dir, CRABBOX_LIVE_BOXD_SLUG: "preexisting" },
     encoding: "utf8",
@@ -4511,19 +4511,19 @@ exit 99
   assert.equal(calls, "");
 });
 
-test("boxd live smoke rejects raw API keys before inventory or vendor CLI", () => {
+test("boxd live smoke rejects non-key credentials before inventory or vendor CLI", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-boxd-raw-key-"));
   const marker = path.join(dir, "unexpected-auth");
   for (const name of ["python3", "boxd"]) writeExecutable(path.join(dir, name), `#!/bin/sh\ntouch '${marker}'\nexit 99\n`);
   const result = spawnSync("bash", [path.join(repoRoot, "scripts/live-smoke.sh")], {
     cwd: repoRoot,
     env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, CRABBOX_CONFIG: path.join(dir, "missing.yaml"),
-      CRABBOX_BOXD_TOKEN: "bxd_fixture-never-log", BOXD_TOKEN: "unused-fixture-session", CRABBOX_LIVE: "1",
+      CRABBOX_BOXD_API_KEY: "fixture-legacy-session-never-log", BOXD_API_KEY: "unused-fixture-session", CRABBOX_LIVE: "1",
       CRABBOX_LIVE_COORDINATOR: "0", CRABBOX_LIVE_PROVIDERS: "boxd", CRABBOX_LIVE_REPO: dir },
     encoding: "utf8",
   });
   assert.equal(result.status, 2, result.stdout + result.stderr);
-  assert.match(result.stderr, /require an interactive session/);
-  assert.doesNotMatch(result.stdout + result.stderr, /bxd_fixture-never-log/);
+  assert.match(result.stderr, /requires a bxd_ API key/);
+  assert.doesNotMatch(result.stdout + result.stderr, /fixture-legacy-session-never-log/);
   assert.equal(fs.existsSync(marker), false);
 });
