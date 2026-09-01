@@ -55,7 +55,7 @@ func (b *isloBackend) Touch(_ context.Context, req core.TouchRequest) (Server, e
 // through this, so a sync, an exec, or a rendered SSH target is never built
 // against a paused sandbox. The paths that work straight off the lease ID -
 // PublishPeer and fetchRunFileAs - do not resolve and can still act on a paused
-// sandbox; see the idle pause policy in docs/providers/islo.md.
+// sandbox; see the opt-in idle pause policy in docs/providers/islo.md.
 func (b *isloBackend) resolveRunningSandbox(ctx context.Context, client isloAPI, name string, req core.ResolveRequest) (*gosdk.SandboxResponse, error) {
 	sandbox, err := client.GetSandbox(ctx, name)
 	if err != nil {

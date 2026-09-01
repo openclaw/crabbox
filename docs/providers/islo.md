@@ -79,6 +79,7 @@ islo:
   vcpus: 2
   memoryMB: 4096
   diskGB: 20
+  idlePause: false
 ```
 
 Provider flags (each overrides the matching `islo.*` config key):
@@ -92,13 +93,14 @@ Provider flags (each overrides the matching `islo.*` config key):
 --islo-vcpus
 --islo-memory-mb
 --islo-disk-gb
+--islo-idle-pause
 ```
 
 Every key also reads a `CRABBOX_ISLO_*` environment variable, which takes
 precedence over the config file: `CRABBOX_ISLO_BASE_URL`, `CRABBOX_ISLO_IMAGE`,
 `CRABBOX_ISLO_WORKDIR`, `CRABBOX_ISLO_GATEWAY_PROFILE`,
 `CRABBOX_ISLO_SNAPSHOT_NAME`, `CRABBOX_ISLO_VCPUS`, `CRABBOX_ISLO_MEMORY_MB`,
-and `CRABBOX_ISLO_DISK_GB`.
+`CRABBOX_ISLO_DISK_GB`, and `CRABBOX_ISLO_IDLE_PAUSE`.
 
 The resolved defaults are kept in Crabbox config for display and override
 compatibility, but the Islo create request omits implicit default `image`,
@@ -137,48 +139,61 @@ rejected before workspace preparation and sync.
 5. Require an `exit` event before treating a stream as successful.
 6. Delete the sandbox on release unless the lease is kept.
 
-### Idle pause policy
+### Idle pause policy (opt-in)
 
-Crabbox sends one lease setting to Islo in the create request's `lifecycle`
-object: `--idle-timeout` becomes `pause_after_idle` (seconds), asking Islo to
-pause a sandbox that has been idle that long instead of leaving it billing for
-CPU and memory. This is on by default rather than opt-in: `--idle-timeout`
-defaults to 30 minutes and Crabbox rejects a non-positive one, so every Islo
-sandbox created through the CLI carries an idle pause, where earlier releases
-sent no `lifecycle` object at all.
+`--islo-idle-pause` / `islo.idlePause` / `CRABBOX_ISLO_IDLE_PAUSE` opts a
+sandbox into a provider-enforced idle pause. It is **off by default**. When it
+is off, the create request carries no `lifecycle` object at all — the same wire
+request earlier releases sent — and `--idle-timeout` remains local Crabbox
+bookkeeping with no provider-side effect.
 
-`auto_resume` is pinned to `never`, and Crabbox resumes a paused sandbox itself:
-`crabbox run --id` and `crabbox ssh` check the sandbox status and resume it
-before driving it, and `crabbox resume` resumes on demand, so an explicit
-`crabbox pause` is not undone by a background policy. A resume is billable, so
-it is worth triggering deliberately rather than as the side effect of some other
-request.
+When it is on, Crabbox sends one lease setting to Islo in the create request's
+`lifecycle` object: `--idle-timeout` becomes `pause_after_idle` (seconds),
+asking Islo to pause a sandbox that has been idle that long instead of leaving
+it billing for CPU and memory.
 
-Islo enforces `pause_after_idle` rather than merely recording it, and
-control-plane reads such as `crabbox status` do not count as activity. What else
-counts is undocumented, and that matters: if an exec that is still running, or
-traffic to a published share or a tailnet peer, does not hold the idle clock
-off, then a `crabbox run` longer than `--idle-timeout` can be paused mid-exec,
-and a warm lease serving a share can be paused after the idle timeout elapses
-without a Crabbox call. Raise `--idle-timeout` past the longest run you expect
-if that matters to you; `crabbox resume` recovers a sandbox that was paused
-under you.
+It is opt-in rather than a default with a caveat because the safety of the
+policy under an active workload is not established. Islo enforces
+`pause_after_idle` rather than merely recording it, and control-plane reads such
+as `crabbox status` do not count as activity. What else counts is undocumented:
+if an exec that is still running, or traffic to a published share or a tailnet
+peer, does not hold the idle clock off, then an opted-in `crabbox run` longer
+than `--idle-timeout` can be paused mid-exec, and a warm lease serving a share
+can be paused after the idle timeout elapses without a Crabbox call. Crabbox
+cannot detect that case — nothing in the Islo API reports why a sandbox paused —
+so raising `--idle-timeout` past the longest run you expect is the only
+mitigation, and `crabbox resume` recovers a sandbox that was paused under you.
+Turning the knob on is therefore a deliberate cost-versus-interruption tradeoff
+rather than something to inherit on upgrade.
 
-`--ttl` is *not* sent as `delete_after`. A provider-side deletion deadline would
-let Islo destroy a sandbox that Crabbox still holds a lease claim on, possibly
-mid-run, so Crabbox stays the only thing that deletes a Crabbox lease. For Islo
-`--ttl` therefore has no provider-side effect: a kept sandbox lives until an
-explicit `stop` (or a `--stop-after` policy). `pause_after` is left to the Islo
-tenant default because Crabbox has no generic absolute pause deadline.
+`auto_resume` is pinned to `never` whenever the policy is sent, and Crabbox
+resumes a paused sandbox itself: `crabbox run --id` and `crabbox ssh` check the
+sandbox status and resume it before driving it, and `crabbox resume` resumes on
+demand, so an explicit `crabbox pause` is not undone by a background policy. A
+resume is billable, so it is worth triggering deliberately rather than as the
+side effect of some other request. The resume-before-reuse check runs whether or
+not the knob is set, because an Islo tenant default or an explicit `crabbox
+pause` can leave a reused lease paused either way.
+
+`--ttl` is *not* sent as `delete_after`, opted in or not. A provider-side
+deletion deadline would let Islo destroy a sandbox that Crabbox still holds a
+lease claim on, possibly mid-run, so Crabbox stays the only thing that deletes a
+Crabbox lease. For Islo `--ttl` therefore has no provider-side effect: a kept
+sandbox lives until an explicit `stop` (or a `--stop-after` policy).
+`pause_after` is left to the Islo tenant default because Crabbox has no generic
+absolute pause deadline.
 
 The policy is immutable once the sandbox exists — Islo exposes no lifecycle
-update — so an explicit `--reclaim` of a sandbox whose reported
-`pause_after_idle` disagrees with the current `--idle-timeout` fails with exit 2
-rather than adopting the lease under a policy that is not in force. Reuse it
-with a matching `--idle-timeout` or create a new lease. Commands that talk to a
-sandbox without resolving it first (for example `crabbox bridge` publishing a
-share) can still act on a paused sandbox; if Islo rejects the request, run
-`crabbox resume` and retry.
+update — so with the knob on, an explicit `--reclaim` of a sandbox whose
+reported `pause_after_idle` disagrees with the current `--idle-timeout` fails
+with exit 2 rather than adopting the lease under a policy that is not in force.
+Reuse it with a matching `--idle-timeout` or create a new lease. With the knob
+off, reclaim does not inspect the sandbox's lifecycle at all: Crabbox is
+claiming nothing about it, so a sandbox carrying a pause policy from an Islo
+tenant default, another tool, or an opted-in run stays adoptable. Commands that
+talk to a sandbox without resolving it first (for example `crabbox bridge`
+publishing a share) can still act on a paused sandbox; if Islo rejects the
+request, run `crabbox resume` and retry.
 
 `crabbox status --wait` polls the sandbox every 2 seconds until it reports
 `running`, bounded by `--wait-timeout` (default 5 minutes). If the sandbox

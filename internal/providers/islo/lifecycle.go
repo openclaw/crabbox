@@ -12,19 +12,42 @@ import (
 // configured idle timeout becomes pause_after_idle, asking Islo to pause a
 // sandbox that has been idle that long instead of leaving it billing.
 //
-// This is on by default, not opt-in. The lease idle timeout defaults to 30m and
-// internal/cli/lease_flags.go rejects a non-positive one, so every CLI-driven
-// islo create now carries an idle pause where it previously sent no lifecycle
-// at all; the seconds <= 0 guard below only fires for a Config built in-process.
+// This is OPT-IN and returns nil unless islo.idlePause / --islo-idle-pause is
+// set. The lease idle timeout defaults to 30m and internal/cli/lease_flags.go
+// rejects a non-positive one, so deriving the policy from it alone would push a
+// provider-enforced pause onto every sandbox of every existing user on their
+// next create, where earlier releases sent no lifecycle object at all. The
+// activity semantics below are why that is not a default worth inheriting.
 //
-// delete_after is deliberately never sent, even though --ttl would fit its
-// shape. Handing a deletion deadline to the provider lets Islo destroy a sandbox
-// that Crabbox still holds a lease claim on, possibly mid-run, leaving the lease
-// pointing at something that has simply vanished. The closest in-tree precedent
-// makes the same call in the other direction:
-// internal/providers/daytona/lifecycle.go pins the auto-delete interval off so
-// Crabbox stays the only thing that deletes a Crabbox lease. --ttl is therefore
-// not communicated to Islo at all and has no provider-side effect here.
+// UNKNOWN, and the reason this is opt-in rather than merely caveated: what Islo
+// counts as activity is not documented. If an exec that is still running, or
+// in-VM traffic to a published share or a tailnet peer, does not hold the idle
+// clock off, then an opted-in `crabbox run` longer than --idle-timeout can be
+// paused mid-exec, and a warm lease serving a share can be paused after the
+// idle timeout without a Crabbox call. Paths that resolve the lease first
+// recover, because they resume before driving the sandbox; PublishPeer and
+// fetchRunFileAs do not resolve, so they surface Islo's error and `crabbox
+// resume` is the fix. Crabbox cannot detect the case on its own - nothing in
+// the API reports why a sandbox paused - so raising --idle-timeout past the
+// longest expected run is the only mitigation, and an operator has to choose
+// the tradeoff before it applies to their runs.
+//
+// pause_after_idle is enforced by Islo, not merely echoed back: a sandbox
+// created with pause_after_idle=60 still reported "running" at 75s and reported
+// "paused" at 90s, so the policy does fire, with some scheduler lag past the
+// nominal window. That same observation polled GET /sandboxes every 15s
+// throughout without holding the pause off, so control-plane reads are not
+// activity.
+//
+// delete_after is deliberately never sent, even when the knob is on and even
+// though --ttl would fit its shape. Handing a deletion deadline to the provider
+// lets Islo destroy a sandbox that Crabbox still holds a lease claim on,
+// possibly mid-run, leaving the lease pointing at something that has simply
+// vanished. The closest in-tree precedent makes the same call in the other
+// direction: internal/providers/daytona/lifecycle.go pins the auto-delete
+// interval off so Crabbox stays the only thing that deletes a Crabbox lease.
+// --ttl is therefore not communicated to Islo at all and has no provider-side
+// effect here.
 //
 // auto_resume is pinned to "never" so that resuming stays Crabbox's decision: an
 // explicit `crabbox pause` is not undone behind the user's back, and Crabbox
@@ -34,28 +57,13 @@ import (
 // "Insufficient credit balance to resume a sandbox" - so it is a decision worth
 // making deliberately rather than inheriting as a side effect of some request.
 //
-// pause_after_idle is enforced by Islo, not merely echoed back: a sandbox
-// created with pause_after_idle=60 still reported "running" at 75s and reported
-// "paused" at 90s, so the policy does fire, with some scheduler lag past the
-// nominal window. That same observation polled GET /sandboxes every 15s
-// throughout without holding the pause off, so control-plane reads are not
-// activity.
-//
-// UNKNOWN, and not a safe unknown: what else Islo counts as activity is not
-// documented. If an exec that is still running, or in-VM traffic to a published
-// share or a tailnet peer, does not hold the idle clock off, then a `crabbox
-// run` longer than --idle-timeout can be paused mid-exec, and a warm lease
-// serving a share can be paused after 30m without a Crabbox call. Paths that
-// resolve the lease first recover, because they resume before driving the
-// sandbox; PublishPeer and fetchRunFileAs do not resolve, so they surface
-// Islo's error and `crabbox resume` is the fix. Crabbox cannot detect the case
-// on its own - nothing in the API reports why a sandbox paused - so raising
-// --idle-timeout past the longest expected run is the only mitigation.
-//
 // pause_after (an absolute pause deadline regardless of activity) is left unset:
 // Crabbox has no generic config for it, so Islo's tenant default applies rather
 // than a Crabbox-invented flag.
 func isloLifecycleForConfig(cfg Config) *gosdk.LifecyclePolicy {
+	if !cfg.Islo.IdlePause {
+		return nil
+	}
 	seconds := durationSecondsCeil(cfg.IdleTimeout)
 	if seconds <= 0 {
 		return nil
@@ -74,10 +82,21 @@ func isloLifecycleForConfig(cfg Config) *gosdk.LifecyclePolicy {
 // sandbox. Adopting the lease anyway would leave the caller believing an idle
 // timeout that is not in force, so the mismatch is surfaced as a conflict.
 //
+// The check only applies when idle pausing is opted in. With the knob off
+// Crabbox makes no provider-side lifecycle claim at all - the idle timeout is
+// local bookkeeping, exactly as it was before the knob existed - so a sandbox
+// carrying some other pause policy (an Islo tenant default, another tool, or an
+// opted-in Crabbox run) is still adoptable and nothing has been promised about
+// it. Refusing those would turn an opt-in feature into a reclaim regression for
+// operators who never asked for it.
+//
 // Only pause_after_idle is compared. auto_resume is not: Crabbox does not derive
 // it from config and does not depend on it, since every Crabbox path that
 // resolves a lease resumes the sandbox explicitly first.
 func isloLifecycleConflict(name string, sandbox *gosdk.SandboxResponse, cfg Config) error {
+	if !cfg.Islo.IdlePause {
+		return nil
+	}
 	actual := sandbox.GetLifecycle()
 	if actual == nil {
 		// Sandboxes created before Crabbox sent a lifecycle (or by another tool)

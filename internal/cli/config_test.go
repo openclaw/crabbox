@@ -635,6 +635,55 @@ func TestIsloCreateDefaultsTrackExplicitConfigAndEnvironment(t *testing.T) {
 	}
 }
 
+// TestIsloIdlePauseDefaultsOffAndOptsInExplicitly pins the opt-in: the shipped
+// config leaves the Islo idle pause off despite a positive default idle timeout,
+// and only an explicit config-file or environment opt-in turns it on.
+func TestIsloIdlePauseDefaultsOffAndOptsInExplicitly(t *testing.T) {
+	base := baseConfig()
+	if base.IdleTimeout <= 0 {
+		t.Fatalf("base idle timeout=%s want the positive shipped default", base.IdleTimeout)
+	}
+	if base.Islo.IdlePause {
+		t.Fatal("islo idle pause must ship off")
+	}
+
+	untouched := base
+	if err := applyFileConfig(&untouched, fileConfig{Islo: &fileIsloConfig{Workdir: "crabbox"}}); err != nil {
+		t.Fatal(err)
+	}
+	if untouched.Islo.IdlePause {
+		t.Fatal("an islo config block without idlePause must not opt in")
+	}
+
+	optIn := true
+	fromFile := base
+	if err := applyFileConfig(&fromFile, fileConfig{Islo: &fileIsloConfig{IdlePause: &optIn}}); err != nil {
+		t.Fatal(err)
+	}
+	if !fromFile.Islo.IdlePause {
+		t.Fatal("islo.idlePause: true did not opt in")
+	}
+
+	clearConfigEnv(t)
+	t.Setenv("CRABBOX_ISLO_IDLE_PAUSE", "1")
+	fromEnv := base
+	if err := applyEnv(&fromEnv); err != nil {
+		t.Fatal(err)
+	}
+	if !fromEnv.Islo.IdlePause {
+		t.Fatal("CRABBOX_ISLO_IDLE_PAUSE=1 did not opt in")
+	}
+
+	t.Setenv("CRABBOX_ISLO_IDLE_PAUSE", "0")
+	envOff := fromFile
+	if err := applyEnv(&envOff); err != nil {
+		t.Fatal(err)
+	}
+	if envOff.Islo.IdlePause {
+		t.Fatal("CRABBOX_ISLO_IDLE_PAUSE=0 did not override a config-file opt-in")
+	}
+}
+
 func TestProviderExplicitMarkerHelpers(t *testing.T) {
 	cfg := Config{
 		SSHUser:  "alice",
