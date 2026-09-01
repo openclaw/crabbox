@@ -520,8 +520,8 @@ func TestAWSFixedReleasePersistsTerminalTombstoneAndRejectsReplay(t *testing.T) 
 	strippedLease.Server.Labels = maps.Clone(lease.Server.Labels)
 	delete(strippedLease.Server.Labels, "fixed_intent_sha256")
 	creates := fake.createCalls
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: strippedLease}); err != nil {
-		t.Fatal(err)
+	if outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), ReleaseLeaseRequest{Lease: strippedLease}); err != nil || !outcome.Terminal {
+		t.Fatalf("fixed deletion outcome=%+v err=%v", outcome, err)
 	}
 	retained, err := backend.RetainLeaseClaimAfterReleaseWithClaim(strippedLease, liveClaim)
 	if err != nil {
@@ -1353,7 +1353,10 @@ func TestAWSReleaseRemovesClaimWhenProviderKeyDeletionFails(t *testing.T) {
 	t.Cleanup(func() { newAWSClient = oldClient })
 
 	backend := NewAWSLeaseBackend(ProviderSpec{}, cfg, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
-	err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{Server: server, LeaseID: leaseID}})
+	outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{Server: server, LeaseID: leaseID}})
+	if !outcome.Terminal {
+		t.Errorf("key cleanup error hid confirmed instance deletion: %+v", outcome)
+	}
 	if !errors.Is(err, keyErr) {
 		t.Fatalf("err=%v, want wrapped key deletion error", err)
 	}

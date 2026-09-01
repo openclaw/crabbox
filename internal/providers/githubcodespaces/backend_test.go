@@ -961,8 +961,8 @@ func TestReleaseDeleteRemovesOnlyClaimBackedCodespaceAndConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
-		t.Fatal(err)
+	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil || !outcome.Terminal {
+		t.Fatalf("deletion outcome=%+v err=%v", outcome, err)
 	}
 	if strings.Join(fc.deletes, ",") != "cs-delete" {
 		t.Fatalf("deletes=%#v", fc.deletes)
@@ -1095,8 +1095,8 @@ func TestReleaseDeleteFallsBackToStopForDirtyCodespace(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
-		t.Fatal(err)
+	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil || outcome.Terminal {
+		t.Fatalf("dirty fallback outcome=%+v err=%v", outcome, err)
 	}
 	if strings.Join(fc.stops, ",") != "cs-dirty" || len(fc.deletes) != 0 {
 		t.Fatalf("stops=%#v deletes=%#v", fc.stops, fc.deletes)
@@ -1296,8 +1296,8 @@ func TestReleaseRetainedRemovesClaimWhenCodespaceIsAlreadyAbsent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
-		t.Fatal(err)
+	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil || !outcome.Terminal {
+		t.Fatalf("absent resource under stop policy: outcome=%+v err=%v", outcome, err)
 	}
 	if _, ok, err := resolveLeaseClaimForProvider(leaseID, providerName); err != nil || ok {
 		t.Fatalf("claim ok=%t err=%v", ok, err)

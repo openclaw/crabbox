@@ -565,11 +565,22 @@ func (b *backend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
 }
 
 func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+	_, err := b.ReleaseLeaseWithOutcome(ctx, req)
+	return err
+}
+
+func (b *backend) ReleaseLeaseWithOutcome(ctx context.Context, req ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
+	var outcome core.ReleaseLeaseOutcome
+	err := b.releaseLease(ctx, req, &outcome)
+	return outcome, err
+}
+
+func (b *backend) releaseLease(ctx context.Context, req ReleaseLeaseRequest, outcome *core.ReleaseLeaseOutcome) error {
 	if err := core.ValidateLeaseTargetProviderIdentity(req.Lease, req.ExpectedProviderIdentity); err != nil {
 		return err
 	}
 	if req.CheckpointID != "" {
-		return b.releaseCheckpointSource(ctx, req)
+		return b.releaseCheckpointSource(ctx, req, outcome)
 	}
 	identifier := firstNonBlank(req.Lease.LeaseID, req.Lease.Server.Labels["lease"], req.Lease.Server.CloudID, req.Lease.Server.Name)
 	claim, claimed, err := resolveClaim(identifier)
@@ -577,7 +588,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 		return err
 	}
 	if claimed && fixedMachine0LeaseKind.IsFixedClaim(claim) && (claim.FixedCreateIntent.State == fixedMachine0IntentReleased || normalizeReleasePolicy(b.configForRun().Machine0.ReleasePolicy) == "destroy") {
-		return b.destroyClaimedMachine(ctx, claim, req.Lease)
+		return b.destroyClaimedMachineWithOutcome(ctx, claim, req.Lease, outcome)
 	}
 	if claimed && claim.Provider == providerName && claim.CloudID == "" && claim.Labels["recovery"] == "create-pending" {
 		name := machine0MachineName(claim.LeaseID, claim.Slug)
@@ -588,7 +599,11 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 			return exit(2, "pending machine0 lease=%s cannot be suspended before its resource identity is known; use --machine0-release-policy destroy", claim.LeaseID)
 		}
 		// Pending claims retain only the exact-name deletion already authorized by create rollback.
-		return core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error { return b.api.Remove(ctx, name) })
+		return core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
+			err := b.api.Remove(ctx, name)
+			outcome.Terminal = err == nil
+			return err
+		})
 	}
 	claim, item, err := b.releaseTarget(ctx, req.Lease)
 	if err != nil {
@@ -600,7 +615,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 	if normalizeReleasePolicy(b.configForRun().Machine0.ReleasePolicy) == "suspend" {
 		return b.suspendClaimedMachine(ctx, claim, item)
 	}
-	return b.destroyClaimedMachine(ctx, claim, LeaseTarget{LeaseID: claim.LeaseID, Server: b.serverFromMachine(item, claim, b.configForRun())})
+	return b.destroyClaimedMachineWithOutcome(ctx, claim, LeaseTarget{LeaseID: claim.LeaseID, Server: b.serverFromMachine(item, claim, b.configForRun())}, outcome)
 }
 
 func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {

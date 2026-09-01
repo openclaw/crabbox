@@ -281,6 +281,7 @@ type StatusView struct {
 	IdleFor              string             `json:"idleFor,omitempty"`
 	IdleTimeout          string             `json:"idleTimeout,omitempty"`
 	ExpiresAt            string             `json:"expiresAt,omitempty"`
+	CleanupStatus        string             `json:"cleanupStatus,omitempty"`
 	CleanupStartedAt     string             `json:"cleanupStartedAt,omitempty"`
 	CleanupError         string             `json:"cleanupError,omitempty"`
 	CleanupRetryAt       string             `json:"cleanupRetryAt,omitempty"`

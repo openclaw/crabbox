@@ -729,8 +729,8 @@ func TestNvidiaBrevKeptAmbiguousCreateClaimExpiresOnExplicitRelease(t *testing.T
 	if releaseTarget.LeaseID != "cbx_123456789abc" {
 		t.Fatalf("release target=%#v", releaseTarget)
 	}
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: releaseTarget}); err != nil {
-		t.Fatal(err)
+	if outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), ReleaseLeaseRequest{Lease: releaseTarget}); err != nil || !outcome.Terminal {
+		t.Fatalf("absent resource under stop policy: outcome=%+v err=%v", outcome, err)
 	}
 	if _, ok, claimErr := resolveLeaseClaimForProvider("cbx_123456789abc"); claimErr != nil || ok {
 		t.Fatalf("expired recovery claim retained ok=%v err=%v", ok, claimErr)
@@ -1196,8 +1196,8 @@ func TestNvidiaBrevReleaseDeleteRemovesClaimAfterProviderSuccess(t *testing.T) {
 		{args: "ls --json --all", stdout: `{"workspaces":[]}`},
 	}}
 	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
-		t.Fatal(err)
+	if outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil || !outcome.Terminal {
+		t.Fatalf("deletion outcome=%+v err=%v", outcome, err)
 	}
 	if _, ok, err := resolveLeaseClaimForProvider(leaseID); err != nil || ok {
 		t.Fatalf("claim retained ok=%v err=%v", ok, err)
@@ -1556,8 +1556,8 @@ func TestNvidiaBrevReleaseStopRetainsStoppedClaimOnSuccess(t *testing.T) {
 		{args: "stop ws-stop"},
 	}}
 	backend := NewNvidiaBrevBackend(Provider{}.Spec(), Config{}, Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
-		t.Fatal(err)
+	if outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil || outcome.Terminal {
+		t.Fatalf("stop outcome=%+v err=%v", outcome, err)
 	}
 	claim, ok, err := resolveLeaseClaimForProvider(leaseID)
 	if err != nil || !ok {

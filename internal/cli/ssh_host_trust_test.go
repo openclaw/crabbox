@@ -454,6 +454,98 @@ func TestCoordinatorReleaseRemovesOnlyPerLeaseConnectionArtifacts(t *testing.T) 
 	}
 }
 
+func TestCoordinatorReleaseObservesPendingCreation(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		cleanupFails bool
+	}{
+		{name: "late allocation cleanup completes"},
+		{name: "late allocation cleanup fails", cleanupFails: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cleanupFails := tc.cleanupFails
+			isolateTestUserDirs(t)
+			configureCoordinatorReleaseTestTiming(t, 5*time.Minute, 0)
+			const leaseID = "cbx_abcdef123456"
+			keyPath, err := testboxKeyPath(leaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(keyPath, []byte("private"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := claimLeaseTargetForConfig(leaseID, "release-test", Config{Provider: "aws"}, Server{Provider: "aws"}, SSHTarget{}, time.Hour); err != nil {
+				t.Fatal(err)
+			}
+			var releasePosts, observations atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				lease := map[string]any{
+					"id": leaseID, "provider": "aws", "state": "released", "cloudID": "",
+					"releaseDeletesServer": true, "cleanupStatus": "pending",
+					"cleanupError": "provider creation is unresolved; cleanup has not been confirmed",
+				}
+				switch {
+				case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/"+leaseID+"/release":
+					releasePosts.Add(1)
+				case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/"+leaseID:
+					observation := observations.Add(1)
+					if _, err := os.Stat(keyPath); err != nil {
+						t.Errorf("SSH artifacts removed before terminal observation: %v", err)
+					}
+					if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || !exists {
+						t.Errorf("claim removed before terminal observation: exists=%t err=%v", exists, err)
+					}
+					lease["cloudID"] = "i-late-allocation"
+					lease["cleanupStartedAt"] = "2026-08-30T00:01:00Z"
+					if observation >= 2 {
+						delete(lease, "cleanupStartedAt")
+						if cleanupFails {
+							lease["cleanupStatus"] = "failed"
+							lease["cleanupError"] = "redacted provider delete failure"
+							lease["cleanupRetryAt"] = "2026-08-30T00:06:00Z"
+						} else {
+							lease["cleanupStatus"] = "complete"
+							delete(lease, "cleanupError")
+						}
+					}
+				default:
+					http.NotFound(w, r)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+			}))
+			t.Cleanup(server.Close)
+			backend := coordinatorReleaseTestBackend(server, io.Discard)
+			err = backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{
+				LeaseID: leaseID, Server: Server{Provider: "aws"},
+			}})
+			if (err != nil) != cleanupFails {
+				t.Fatalf("release error=%v cleanupFails=%t", err, cleanupFails)
+			}
+			if cleanupFails && !strings.Contains(err.Error(), "reported a cleanup failure") {
+				t.Fatalf("cleanup failure was not reported: %v", err)
+			}
+			var exitErr ExitError
+			if cleanupFails && (!AsExitError(err, &exitErr) || exitErr.Code != 5) {
+				t.Fatalf("cleanup error=%v, want exit 5", err)
+			}
+			if posts, observed := releasePosts.Load(), observations.Load(); posts != 1 || observed != 2 {
+				t.Fatalf("release POSTs=%d observations=%d, want 1/2", posts, observed)
+			}
+			_, statErr := os.Stat(keyPath)
+			if cleanupFails && statErr != nil || !cleanupFails && !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("artifact state does not match confirmed cleanup: %v", statErr)
+			}
+			if _, exists, err := readLeaseClaimWithPresence(leaseID); err != nil || exists != cleanupFails {
+				t.Fatalf("claim exists=%t err=%v cleanupFails=%t", exists, err, cleanupFails)
+			}
+		})
+	}
+}
+
 func TestCoordinatorReleasePreservesArtifactsWithoutConfirmedDestroy(t *testing.T) {
 	configureCoordinatorReleaseTestTiming(t, 20*time.Millisecond, 2*time.Millisecond)
 	deleting := true
@@ -477,6 +569,10 @@ func TestCoordinatorReleasePreservesArtifactsWithoutConfirmedDestroy(t *testing.
 		{name: "automatic release defers pending observation", provider: "aws", postLease: CoordinatorLease{Provider: "aws", State: "released", CleanupStartedAt: "2026-08-19T00:00:00Z", ReleaseDeletesServer: &deleting}, deferObservation: true, wantClaim: true},
 		{name: "provider cleanup error", provider: "aws", postLease: CoordinatorLease{Provider: "aws", State: "released", CleanupError: "redacted failure", ReleaseDeletesServer: &deleting}, wantErr: true, wantClaim: true},
 		{name: "provider cleanup retry scheduled", provider: "aws", postLease: CoordinatorLease{Provider: "aws", State: "released", CleanupRetryAt: "2026-08-19T00:05:00Z", ReleaseDeletesServer: &deleting}, wantErr: true, wantClaim: true},
+		{name: "unknown cleanup status", provider: "aws", postLease: CoordinatorLease{Provider: "aws", State: "released", CleanupStatus: "unknown"}, wantErr: true, wantClaim: true},
+		{name: "complete status cannot hide cleanup debt", provider: "aws", postLease: CoordinatorLease{Provider: "aws", State: "released", CleanupStatus: "complete", CleanupError: "provider cleanup remains unconfirmed"}, wantErr: true, wantClaim: true},
+		{name: "pending creation never confirms deletion", provider: "aws", postLease: CoordinatorLease{Provider: "aws", State: "released", CleanupStatus: "pending", ReleaseDeletesServer: &deleting}, getLease: CoordinatorLease{Provider: "aws", State: "released", CleanupStatus: "pending", ReleaseDeletesServer: &deleting}, wantErr: true, wantObservations: true, wantClaim: true},
+		{name: "automatic release defers pending creation", provider: "aws", postLease: CoordinatorLease{Provider: "aws", State: "released", CleanupStatus: "pending", ReleaseDeletesServer: &deleting}, deferObservation: true, wantClaim: true},
 		{name: "accepted release observation not found", provider: "aws", postLease: CoordinatorLease{Provider: "aws", State: "released", CleanupStartedAt: "2026-08-19T00:00:00Z", ReleaseDeletesServer: &deleting}, getNotFound: true, wantErr: true, wantObservations: true, wantClaim: true},
 		{name: "immediate final deletion", provider: "aws", postLease: CoordinatorLease{Provider: "aws", State: "released"}, wantRemoved: true},
 		{name: "ownership mismatch", provider: "external", wantErr: true, wantClaim: true},
@@ -731,14 +827,14 @@ func configureCoordinatorReleaseTestTiming(t *testing.T, timeout, cadence time.D
 	// short synthetic observation deadlines independent of process startup time.
 	t.Setenv("CRABBOX_OWNER", "test@example.com")
 	originalBackoff := coordinatorReleaseBackoff
-	originalTimeout := coordinatorReleaseObservationTimeout
+	originalTimeout := coordinatorReleaseCompletionTimeout
 	originalCadence := coordinatorReleaseObservationCadence
 	coordinatorReleaseBackoff = func(int) time.Duration { return 0 }
-	coordinatorReleaseObservationTimeout = timeout
+	coordinatorReleaseCompletionTimeout = timeout
 	coordinatorReleaseObservationCadence = func(int) time.Duration { return cadence }
 	t.Cleanup(func() {
 		coordinatorReleaseBackoff = originalBackoff
-		coordinatorReleaseObservationTimeout = originalTimeout
+		coordinatorReleaseCompletionTimeout = originalTimeout
 		coordinatorReleaseObservationCadence = originalCadence
 	})
 }

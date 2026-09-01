@@ -165,6 +165,10 @@ func authorizeSourceCheckpointAdmission(store checkpointStore, claim leaseClaim)
 }
 
 func requireResolvedSourceCheckpoints(store checkpointStore, leaseID string) error {
+	return requireResolvedSourceCheckpointsExcept(store, leaseID, "")
+}
+
+func requireResolvedSourceCheckpointsExcept(store checkpointStore, leaseID, exceptID string) error {
 	if leaseID == "" {
 		return nil
 	}
@@ -173,7 +177,7 @@ func requireResolvedSourceCheckpoints(store checkpointStore, leaseID string) err
 		return err
 	}
 	for _, prior := range records {
-		if prior.LeaseID == leaseID && unresolvedCheckpoint(prior) {
+		if prior.ID != exceptID && prior.LeaseID == leaseID && unresolvedCheckpoint(prior) {
 			return exit(2, "source has unresolved checkpoint %s; inspect and reconcile it before capture, release, or reuse", prior.ID)
 		}
 	}
@@ -236,7 +240,7 @@ func AuthorizedCheckpointReleaseResource(claim LeaseClaim, checkpointID string) 
 		return NativeCheckpointResourceRequest{}, requireResolvedSourceCheckpoints(store, claim.LeaseID)
 	}
 	if checkpointID == "" || claim.CheckpointCapture.ID != checkpointID {
-		return NativeCheckpointResourceRequest{}, exit(2, "source is held by checkpoint %s; replay checkpoint create --retire-source with that --checkpoint-id", claim.CheckpointCapture.ID)
+		return NativeCheckpointResourceRequest{}, exit(2, "source is held by checkpoint %s; run checkpoint inspect %s --verify and replay its recorded source operation", claim.CheckpointCapture.ID, claim.CheckpointCapture.ID)
 	}
 	store, err := defaultCheckpointStore()
 	if err != nil {
@@ -257,6 +261,9 @@ func AuthorizedCheckpointReleaseResource(claim LeaseClaim, checkpointID string) 
 
 func (a App) advanceCheckpointCapture(ctx context.Context, cfg Config, repo Repo, store checkpointStore, record *checkpointRecord) error {
 	capture := record.Capture
+	if capture.SourceDisposition == "abandon" {
+		return exit(2, "checkpoint %s was abandoned; replay checkpoint abandon to finish source disposal", record.ID)
+	}
 	if capture.Phase == "retired" {
 		return nil
 	}
@@ -510,6 +517,10 @@ func (a App) retireCheckpointSource(ctx context.Context, cfg Config, repo Repo, 
 				return err
 			}
 			record.Capture.Phase = "retired"
+			if record.Capture.SourceDisposition == "abandon" {
+				record.Capture.Phase = "abandoned"
+				record.Capture.Error = "source disposed; original image submission remains unresolved; retain this checkpoint record"
+			}
 			return store.Write(*record)
 		})
 	}
@@ -519,7 +530,7 @@ func (a App) retireCheckpointSource(ctx context.Context, cfg Config, repo Repo, 
 	if err := ValidateCheckpointCaptureClaim(claim, record.ID, record.Capture); err != nil {
 		return err
 	}
-	if !record.Capture.DiscardFailed {
+	if !record.Capture.DiscardFailed && record.Capture.SourceDisposition != "abandon" {
 		audit, err := a.verifyCheckpointResource(ctx, store, *record)
 		if err != nil {
 			return err

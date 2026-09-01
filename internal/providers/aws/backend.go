@@ -567,6 +567,17 @@ func (b *awsLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (cor
 }
 
 func (b *awsLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+	_, err := b.ReleaseLeaseWithOutcome(ctx, req)
+	return err
+}
+
+func (b *awsLeaseBackend) ReleaseLeaseWithOutcome(ctx context.Context, req ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
+	var outcome core.ReleaseLeaseOutcome
+	err := b.releaseLease(ctx, req, &outcome)
+	return outcome, err
+}
+
+func (b *awsLeaseBackend) releaseLease(ctx context.Context, req ReleaseLeaseRequest, outcome *core.ReleaseLeaseOutcome) error {
 	if !isCrabboxAWSLease(req.Lease.Server) || req.Lease.LeaseID != req.Lease.Server.Labels["lease"] {
 		return exit(4, "refusing to release AWS instance %s without matching canonical Crabbox ownership tags", req.Lease.Server.DisplayID())
 	}
@@ -578,7 +589,7 @@ func (b *awsLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequ
 	if (claim.FixedCreateIntent != nil && claim.FixedCreateIntent.State == fixedAWSIntentReleased) ||
 		(snapshot.FixedCreateIntent != nil && snapshot.FixedCreateIntent.State == fixedAWSIntentReleased) ||
 		req.Lease.Server.Status == fixedAWSIntentReleased {
-		return b.releaseTerminalReceipt(ctx, req)
+		return b.releaseTerminalReceipt(ctx, req, outcome)
 	}
 	if strings.TrimSpace(req.Lease.Server.Labels["fixed_intent_sha256"]) != "" && (!exists || !fixedAWSLeaseKind.IsFixedClaim(claim)) {
 		return exit(4, "refusing to release fixed AWS lease %s without its durable create intent", req.Lease.LeaseID)
@@ -595,7 +606,10 @@ func (b *awsLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequ
 			if err := core.AuthorizeCheckpointRelease(exact, req.CheckpointID); err != nil {
 				return err
 			}
-			return deleteServer(ctx, awsConfigForServer(b.Cfg, req.Lease.Server), req.Lease.Server)
+			err := deleteServer(ctx, awsConfigForServer(b.Cfg, req.Lease.Server), req.Lease.Server)
+			var keyErr *awsProviderKeyCleanupError
+			outcome.Terminal = err == nil || errors.As(err, &keyErr)
+			return err
 		})
 	}
 	var providerKeyErr error
@@ -606,11 +620,13 @@ func (b *awsLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequ
 		if err := deleteServer(ctx, awsConfigForServer(b.Cfg, req.Lease.Server), req.Lease.Server); err != nil {
 			var keyErr *awsProviderKeyCleanupError
 			if errors.As(err, &keyErr) {
+				outcome.Terminal = true
 				providerKeyErr = err
 				return nil
 			}
 			return err
 		}
+		outcome.Terminal = true
 		return nil
 	}); err != nil {
 		return err

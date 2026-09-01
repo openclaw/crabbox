@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -239,6 +240,17 @@ func (b *nvidiaBrevBackend) List(ctx context.Context, req ListRequest) ([]LeaseV
 }
 
 func (b *nvidiaBrevBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+	_, err := b.ReleaseLeaseWithOutcome(ctx, req)
+	return err
+}
+
+func (b *nvidiaBrevBackend) ReleaseLeaseWithOutcome(ctx context.Context, req ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
+	var outcome core.ReleaseLeaseOutcome
+	err := b.releaseLease(ctx, req, &outcome)
+	return outcome, err
+}
+
+func (b *nvidiaBrevBackend) releaseLease(ctx context.Context, req ReleaseLeaseRequest, outcome *core.ReleaseLeaseOutcome) error {
 	client, err := b.client()
 	if err != nil {
 		return err
@@ -250,9 +262,9 @@ func (b *nvidiaBrevBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRe
 	if claim, claimed, claimErr := resolveNvidiaBrevClaim(identifier); claimErr != nil {
 		return claimErr
 	} else if claimed && strings.EqualFold(strings.TrimSpace(claim.Labels["state"]), "deleting") {
-		return b.reconcileDeletingClaim(ctx, client, claim)
+		return b.reconcileDeletingClaimWithOutcome(ctx, client, claim, outcome)
 	} else if claimed && createRecoveryClaim(claim) {
-		return b.reconcileCreateRecoveryClaim(ctx, client, claim)
+		return b.reconcileCreateRecoveryClaim(ctx, client, claim, outcome)
 	} else if claimed && strings.TrimSpace(claim.Labels["brev_org_id"]) != "" {
 		if _, err := verifyActiveBrevOrgScope(ctx, client, claim); err != nil {
 			return err
@@ -275,7 +287,7 @@ func (b *nvidiaBrevBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRe
 	if action == "stop" {
 		return b.stopWorkspaceAndPersistClaim(ctx, client, workspace, claim)
 	}
-	return b.deleteWorkspaceAndRemoveClaim(ctx, client, workspace, claim)
+	return b.deleteWorkspaceAndRemoveClaimWithOutcome(ctx, client, workspace, claim, outcome)
 }
 
 func (b *nvidiaBrevBackend) RetainLeaseClaimAfterRelease(lease LeaseTarget) bool {
@@ -511,6 +523,10 @@ func (b *nvidiaBrevBackend) stopWorkspaceAndPersistClaim(ctx context.Context, cl
 }
 
 func (b *nvidiaBrevBackend) deleteWorkspaceAndRemoveClaim(ctx context.Context, client *brevClient, workspace brevWorkspace, claim LeaseClaim) error {
+	return b.deleteWorkspaceAndRemoveClaimWithOutcome(ctx, client, workspace, claim, &core.ReleaseLeaseOutcome{})
+}
+
+func (b *nvidiaBrevBackend) deleteWorkspaceAndRemoveClaimWithOutcome(ctx context.Context, client *brevClient, workspace brevWorkspace, claim LeaseClaim, outcome *core.ReleaseLeaseOutcome) error {
 	updatedClaim, err := b.ensureClaimActiveBrevOrgScope(ctx, client, workspace, claim)
 	if err != nil {
 		return err
@@ -530,7 +546,7 @@ func (b *nvidiaBrevBackend) deleteWorkspaceAndRemoveClaim(ctx context.Context, c
 	if err := b.releaseWorkspace(ctx, client, workspace, "delete"); err != nil {
 		return err
 	}
-	return b.finishDeletingClaim(ctx, client, workspace, updated)
+	return b.finishDeletingClaimWithOutcome(ctx, client, workspace, updated, outcome)
 }
 
 func (b *nvidiaBrevBackend) ensureClaimActiveBrevOrgScope(ctx context.Context, client *brevClient, workspace brevWorkspace, claim LeaseClaim) (LeaseClaim, error) {
@@ -619,6 +635,10 @@ func (b *nvidiaBrevBackend) deletingClaimWorkspace(ctx context.Context, client *
 }
 
 func (b *nvidiaBrevBackend) reconcileDeletingClaim(ctx context.Context, client *brevClient, claim LeaseClaim) error {
+	return b.reconcileDeletingClaimWithOutcome(ctx, client, claim, &core.ReleaseLeaseOutcome{})
+}
+
+func (b *nvidiaBrevBackend) reconcileDeletingClaimWithOutcome(ctx context.Context, client *brevClient, claim LeaseClaim, outcome *core.ReleaseLeaseOutcome) error {
 	if strings.EqualFold(strings.TrimSpace(claim.Labels["brev_recovery"]), "org_changed") {
 		return exit(2, "nvidia-brev active organization changed during workspace creation; automatic deletion is unsafe and recovery claim for lease=%s was retained for manual reconciliation", claim.LeaseID)
 	}
@@ -641,6 +661,7 @@ func (b *nvidiaBrevBackend) reconcileDeletingClaim(ctx context.Context, client *
 				return exit(5, "nvidia-brev workspace for lease=%s has not appeared; ambiguous create recovery claim retained", claim.LeaseID)
 			}
 		}
+		outcome.Terminal = true
 		return removeLeaseClaimIfUnchanged(claim.LeaseID, claim)
 	}
 	if !strings.EqualFold(strings.TrimSpace(current.Status), "deleting") {
@@ -651,13 +672,18 @@ func (b *nvidiaBrevBackend) reconcileDeletingClaim(ctx context.Context, client *
 			return err
 		}
 	}
-	return b.finishDeletingClaim(ctx, client, current, claim)
+	return b.finishDeletingClaimWithOutcome(ctx, client, current, claim, outcome)
 }
 
 func (b *nvidiaBrevBackend) finishDeletingClaim(ctx context.Context, client *brevClient, workspace brevWorkspace, claim LeaseClaim) error {
+	return b.finishDeletingClaimWithOutcome(ctx, client, workspace, claim, &core.ReleaseLeaseOutcome{})
+}
+
+func (b *nvidiaBrevBackend) finishDeletingClaimWithOutcome(ctx context.Context, client *brevClient, workspace brevWorkspace, claim LeaseClaim, outcome *core.ReleaseLeaseOutcome) error {
 	if err := b.waitForWorkspaceDeleted(ctx, client, workspace, strings.TrimSpace(claim.Labels["brev_org_id"])); err != nil {
 		return err
 	}
+	outcome.Terminal = true
 	return removeLeaseClaimIfUnchanged(claim.LeaseID, claim)
 }
 
@@ -698,7 +724,7 @@ func createRecoveryLabels(labels map[string]string) bool {
 	}
 }
 
-func (b *nvidiaBrevBackend) reconcileCreateRecoveryClaim(ctx context.Context, client *brevClient, claim LeaseClaim) error {
+func (b *nvidiaBrevBackend) reconcileCreateRecoveryClaim(ctx context.Context, client *brevClient, claim LeaseClaim, outcome *core.ReleaseLeaseOutcome) error {
 	current, found, err := b.deletingClaimWorkspace(ctx, client, claim)
 	if err != nil {
 		return err
@@ -708,12 +734,13 @@ func (b *nvidiaBrevBackend) reconcileCreateRecoveryClaim(ctx context.Context, cl
 		if !ok || time.Since(createdAt) < brevCreateRecoveryGrace {
 			return exit(5, "nvidia-brev workspace for lease=%s has not appeared; create recovery claim retained", claim.LeaseID)
 		}
+		outcome.Terminal = true
 		return removeLeaseClaimIfUnchanged(claim.LeaseID, claim)
 	}
 	if b.releaseAction(claim.Labels) == "stop" {
 		return b.stopWorkspaceAndPersistClaim(ctx, client, current, claim)
 	}
-	return b.deleteWorkspaceAndRemoveClaim(ctx, client, current, claim)
+	return b.deleteWorkspaceAndRemoveClaimWithOutcome(ctx, client, current, claim, outcome)
 }
 
 func brevWorkspaceKey(workspace brevWorkspace) string {

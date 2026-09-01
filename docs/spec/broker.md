@@ -214,10 +214,10 @@ opts in and refreshes its two-minute deadline every 30 seconds. Manual and
 older-client borrows have no deadline until their first successful
 `pool heartbeat`, which opts them in. A missed negotiated deadline quarantines
 the entry so a late borrower cannot silently return it to ready, even before
-the next maintenance pass. Quarantined leases cannot be re-registered; drain
-or release them instead. This keeps a
-new worker compatible with already-deployed CLIs during rollout. Stale and
-quarantined records are pruned after 24 hours. The metrics route reports current
+the next maintenance pass. The deadline is expired at equality, not only after
+it. Quarantined leases cannot be re-registered; drain or release them instead.
+This keeps a new worker compatible with already-deployed CLIs during rollout.
+Stale and quarantined records are pruned after 24 hours. The metrics route reports current
 state counts plus borrow, hit/miss, fill, heartbeat, quarantine, and prune
 counters.
 

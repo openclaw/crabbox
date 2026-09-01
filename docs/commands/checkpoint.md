@@ -12,7 +12,7 @@ historical checkpoints remain owned by local records under
 `$XDG_STATE_HOME/crabbox/checkpoints`, or
 `<user-config-dir>/crabbox/state/checkpoints` when `XDG_STATE_HOME` is unset.
 
-Subcommands: `create`, `list`, `inspect`, `policy`, `restore`, `fork`, `delete`,
+Subcommands: `create`, `abandon`, `list`, `inspect`, `policy`, `restore`, `fork`, `delete`,
 `prune`.
 
 ## Two checkpoint kinds
@@ -144,6 +144,14 @@ Retention defaults to manual. Explicit expiry rejects direct, archive, recipe,
 and unsupported checkpoints before any resource mutation; an older coordinator
 returns an upgrade diagnostic instead of silently creating an unmanaged image.
 
+For brokered native checkpoints, `--wait` also follows a coordinator-retained
+capture while its provider result is being recovered. It observes the same
+checkpoint ID and never submits another capture. The wait timeout bounds both
+status requests and polling; cancellation or timeout leaves the owned checkpoint
+available for `crabbox checkpoint inspect <checkpoint-id> --verify`. With
+`--wait=false`, a pending creation response still reports an error and retains
+the checkpoint for inspection.
+
 **Strategy details**
 
 - `disk-snapshot` — EBS / Azure managed-OS-disk / GCP persistent-disk / direct
@@ -255,6 +263,16 @@ native records with missing image references are also held: a blank reference
 does not prove that submission never happened. Inspect and reconcile the
 original provider operation before removing any ownership evidence.
 
+An ordinary Machine0 capture that returns an error before attempting image
+submission removes its uncommitted reservation, so the source can still be
+released normally. A process interruption or attempted submission without a
+returned image identity remains unresolved; this does not unlock historical
+blank records.
+
+For an ordinary Machine0 record without an image identity, `abandon` can dispose
+of the exact source while retaining the unresolved image obligation. It does not
+prove whether the original image was submitted or whether an image is absent.
+
 Older binaries do not understand these operation holds. Before downgrading,
 stop new capture admission and finish all operations with this binary; do not
 run older capture, release, or cleanup commands against unresolved records.
@@ -267,6 +285,37 @@ it ignores the added fields. If it already ran, stop that writer, preserve all
 remaining records, and restore the checkpoint journal before resuming with the
 new binary. A surviving claim binding prevents recapture after a missing
 journal; it cannot undo a source deletion performed by an older binary.
+
+## abandon
+
+Dispose of a source held by an unresolved ordinary native checkpoint. Machine0
+currently supports this recovery; other providers refuse it without changing
+the record or source.
+
+```sh
+crabbox checkpoint abandon chk_0123456789abcdef \
+  --provider machine0 --id cbx_012345abcdef \
+  --expected-provider-resource-id <immutable-machine-id> --json
+```
+
+The first invocation must positively observe the exact source in the selected
+account and match its current local lease claim. An absent source, replacement,
+changed claim, or other unresolved capture prevents admission. The command
+records separate source-cleanup account evidence before disposing of the VM;
+it never treats that account as proof about the original image submission.
+
+Replay the same command if source removal is pending or the process was
+interrupted. The retained record reports `capture.phase: abandoned` only after
+exact source absence and claim finalization are verified. Its error text still
+reports the unresolved original image submission, and `inspect --verify`
+reports `nextAction: reconcile_image`. Keep this record and inspect the original
+provider operation/account to resolve any image storage obligation. A later
+image observation does not cause this command to adopt or delete the image.
+
+Abandonment never creates another snapshot, starts the source, or deletes an
+image. The record remains unavailable to fork, restore, delete, local-only
+delete, and prune, including to older readers that retain unknown capture
+phases. Source-only abandonment does not authorize forgetting the checkpoint.
 
 ## list and inspect
 
@@ -333,6 +382,11 @@ can use to remove their own reference:
 {"id":"chk_abc123","localState":"missing","providerState":"missing","nextAction":"forget"}
 ```
 
+For coordinator-managed checkpoints, this verdict requires both the local
+record and the checkpoint at the configured coordinator to be missing. An
+unsupported coordinator API, failed lookup, or surviving cache remains an
+error. A surviving source-capture binding instead reports
+`providerState: "unknown"` and `nextAction: "reconcile_capture"`.
 Human-readable inspection still reports a missing checkpoint as an error.
 
 ### Parallels: live VM snapshots

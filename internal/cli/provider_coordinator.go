@@ -296,7 +296,7 @@ func reportCoordinatorAcquisitionRollback(stderr io.Writer, leaseID, reason stri
 		state = "retained the provider resource"
 	case coordinatorReleaseCleanupFailed(released):
 		state = "reported a cleanup failure or scheduled retry"
-	case released.State == "released" && released.CleanupStartedAt != "":
+	case coordinatorReleaseCleanupPending(released):
 		state = "is still pending"
 	}
 	fmt.Fprintf(stderr, "warning: release after %s for %s did not confirm provider cleanup (%s); local SSH artifacts were preserved\n", reason, leaseID, state)
@@ -805,6 +805,7 @@ func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest)
 		IdleFor:              idleForString(lease.LastTouchedAt, time.Now()),
 		IdleTimeout:          formatSecondsDuration(lease.IdleTimeoutSeconds),
 		ExpiresAt:            lease.ExpiresAt,
+		CleanupStatus:        lease.CleanupStatus,
 		CleanupStartedAt:     lease.CleanupStartedAt,
 		CleanupError:         lease.CleanupError,
 		CleanupRetryAt:       lease.CleanupRetryAt,
@@ -936,6 +937,17 @@ func isCoordinatorUnauthorized(err error) bool {
 }
 
 func (b *coordinatorLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+	_, err := b.ReleaseLeaseWithOutcome(ctx, req)
+	return err
+}
+
+func (b *coordinatorLeaseBackend) ReleaseLeaseWithOutcome(ctx context.Context, req ReleaseLeaseRequest) (ReleaseLeaseOutcome, error) {
+	var outcome ReleaseLeaseOutcome
+	err := b.releaseLease(ctx, req, &outcome)
+	return outcome, err
+}
+
+func (b *coordinatorLeaseBackend) releaseLease(ctx context.Context, req ReleaseLeaseRequest, outcome *ReleaseLeaseOutcome) error {
 	if req.Lease.LeaseID == "" {
 		return exit(2, "missing coordinator lease id")
 	}
@@ -946,7 +958,7 @@ func (b *coordinatorLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseL
 	if err != nil {
 		return err
 	}
-	return finalizeLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, claim, exists, func() (bool, error) {
+	return finalizeLeaseClaimIfUnchangedAfterContext(ctx, req.Lease.LeaseID, claim, exists, func() (bool, error) {
 		authority := claim
 		if !exists {
 			authority.LeaseID = req.Lease.LeaseID
@@ -954,11 +966,11 @@ func (b *coordinatorLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseL
 		if err := AuthorizeCheckpointRelease(authority, req.CheckpointID); err != nil {
 			return false, err
 		}
-		return b.releaseLeaseUnderClaimFence(ctx, req)
+		return b.releaseLeaseUnderClaimFence(ctx, req, outcome)
 	}, syncControllerDirectory)
 }
 
-func (b *coordinatorLeaseBackend) releaseLeaseUnderClaimFence(ctx context.Context, req ReleaseLeaseRequest) (bool, error) {
+func (b *coordinatorLeaseBackend) releaseLeaseUnderClaimFence(ctx context.Context, req ReleaseLeaseRequest, outcome *ReleaseLeaseOutcome) (bool, error) {
 	if req.Lease.LeaseID == "" {
 		return false, exit(2, "missing coordinator lease id")
 	}
@@ -1026,12 +1038,13 @@ func (b *coordinatorLeaseBackend) releaseLeaseUnderClaimFence(ctx context.Contex
 			return false, nil
 		}
 		if coordinatorProviderReleaseConfirmed(released) {
+			outcome.Terminal = true
 			if cleanupReleasedCoordinatorLeaseArtifacts(b.rt.Stderr, req.Lease.LeaseID) != nil {
 				return false, nil
 			}
 			return true, nil
 		}
-		if coordinatorReleaseCleanupFailed(released) || released.State == "released" && released.CleanupStartedAt != "" {
+		if coordinatorReleaseCleanupFailed(released) || coordinatorReleaseCleanupPending(released) {
 			fmt.Fprintf(b.rt.Stderr, "warning: coordinator accepted release for %s; remote cleanup remains pending and local claim/SSH artifacts were preserved\n", req.Lease.LeaseID)
 			return false, nil
 		}
@@ -1045,6 +1058,7 @@ func (b *coordinatorLeaseBackend) releaseLeaseUnderClaimFence(ctx context.Contex
 		return false, nil
 	}
 	if coordinatorProviderReleaseConfirmed(released) {
+		outcome.Terminal = true
 		if cleanupReleasedCoordinatorLeaseArtifacts(b.rt.Stderr, req.Lease.LeaseID) != nil {
 			return false, nil
 		}

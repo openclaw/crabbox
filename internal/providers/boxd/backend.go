@@ -412,6 +412,10 @@ func (b *backend) exactClaim(lease core.LeaseTarget) (core.LeaseClaim, error) {
 }
 
 func (b *backend) deleteClaim(ctx context.Context, c *consoleClient, claim core.LeaseClaim) error {
+	return b.deleteClaimWithOutcome(ctx, c, claim, &core.ReleaseLeaseOutcome{})
+}
+
+func (b *backend) deleteClaimWithOutcome(ctx context.Context, c *consoleClient, claim core.LeaseClaim, outcome *core.ReleaseLeaseOutcome) error {
 	ctx, cancel := context.WithTimeout(ctx, b.rollbackTimeout)
 	defer cancel()
 	return core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
@@ -444,10 +448,22 @@ func (b *backend) deleteClaim(ctx context.Context, c *consoleClient, claim core.
 			}
 			return time.Since(absentSince) >= b.absenceGrace, nil
 		}, nil)
+		outcome.Terminal = err == nil
 		return err
 	})
 }
 func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
+	_, err := b.ReleaseLeaseWithOutcome(ctx, req)
+	return err
+}
+
+func (b *backend) ReleaseLeaseWithOutcome(ctx context.Context, req core.ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
+	var outcome core.ReleaseLeaseOutcome
+	err := b.releaseLease(ctx, req, &outcome)
+	return outcome, err
+}
+
+func (b *backend) releaseLease(ctx context.Context, req core.ReleaseLeaseRequest, outcome *core.ReleaseLeaseOutcome) error {
 	claim, err := b.exactClaim(req.Lease)
 	if err != nil {
 		return err
@@ -457,7 +473,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		return err
 	}
 	if deleteOnRelease(leaseFromClaim(claim, consoleMachine{}), b.cfg) {
-		return b.deleteClaim(ctx, c, claim)
+		return b.deleteClaimWithOutcome(ctx, c, claim, outcome)
 	}
 	labels := shared.CloneLabels(claim.Labels)
 	labels["state"], labels["release"] = "stopped", "stop"

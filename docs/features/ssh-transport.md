@@ -128,6 +128,12 @@ credentials documented by that command.
 
 ## Workspace-owner setup failures
 
+Linux, macOS, and native Windows readiness checks execute the ready command
+without a separate successful-login probe. A failed direct readiness check
+still probes transport to distinguish authentication from toolchain startup.
+Proxy routes try the ready command on each candidate port and select a port
+only after it succeeds.
+
 On reused POSIX and WSL2 leases, SSH readiness commands also run under the
 remote workspace owner. A successful SSH login or bootstrap readiness command
 does not prove that the host permits child observation and witness registration.
