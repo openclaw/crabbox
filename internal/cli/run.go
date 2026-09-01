@@ -812,6 +812,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			delegatedRoutePreflighted = true
 		}
 	}
+	if strings.TrimSpace(*readyPool) != "" {
+		// The borrowed pool owns its proven endpoint, including before Resolve.
+		cfg.explicitSSHPort = ""
+	}
 	backendRuntime := runtimeForApp(a)
 	if timingRecordEnabled {
 		delegatedTimingCapture = &capturedTimingReportWriter{writer: a.Stderr}

@@ -84,7 +84,8 @@ lease metadata. Without an explicit selection, normal port probing is unchanged.
 The existing `ssh.port` configuration and `CRABBOX_SSH_PORT` environment input
 use the same selection rule, including for desktop commands that do not expose
 `--ssh-port`. Provider release remains independent of guest-port selection.
-Ready-pool runs retain their pool-recorded endpoint contract.
+For `--pool`, the pool-recorded endpoint takes precedence over explicit port
+flags, configuration, and environment inputs.
 
 With `--pool <key>`, Crabbox borrows one hydrated broker ready-pool lease,
 uses the pool-recorded SSH endpoint, keeps the borrow deadline alive while it
