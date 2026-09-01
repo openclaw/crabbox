@@ -432,8 +432,8 @@ func TestFixedAcquireReleasedClaimRemainsTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
-		t.Fatal(err)
+	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil || !outcome.Terminal {
+		t.Fatalf("fixed deletion outcome=%+v err=%v", outcome, err)
 	}
 	claim, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
 	if err != nil || !exists || claim.Provider != core.FixedLocalContainerClaimProvider ||
@@ -605,8 +605,8 @@ func TestFixedAcquireMissingContainerReleasePreservesTerminalClaim(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
-		t.Fatal(err)
+	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil || !outcome.Terminal {
+		t.Fatalf("terminal release outcome=%+v err=%v", outcome, err)
 	}
 	claim, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
 	if err != nil || !exists || claim.Provider != core.FixedLocalContainerClaimProvider ||
@@ -5454,7 +5454,10 @@ func TestReleaseLeaseContinuesSidecarCleanupAndRetainsKeyAfterError(t *testing.T
 		return os.RemoveAll(path)
 	}
 	lease := core.LeaseTarget{LeaseID: leaseID, Server: core.Server{CloudID: "release-sidecar-container", Labels: labels}}
-	err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease})
+	outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: lease})
+	if !outcome.Terminal {
+		t.Errorf("sidecar error hid confirmed container removal: %+v", outcome)
+	}
 	if err == nil || !strings.Contains(err.Error(), "host cleanup failed") {
 		t.Fatalf("release error=%v", err)
 	}

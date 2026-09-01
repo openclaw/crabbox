@@ -45,10 +45,14 @@ orphan sweep's complete-set and quarantine requirements.
 
 ### Heartbeats and expiry
 
-While a command runs, the CLI heartbeats the active lease (`POST
-/v1/leases/{id}/heartbeat`). A heartbeat is a touch: it bumps `lastTouchedAt`,
-recomputes `expiresAt`, clears stale cleanup metadata, and refreshes provider SSH
-access where the provider supports it. Heartbeats at or after `expiresAt` are
+While a command runs, the CLI heartbeats the active lease over the coordinator
+control WebSocket, falling back to `POST /v1/leases/{id}/heartbeat` within the
+same 20-second request budget. An exhausted control request keeps its original
+failure diagnosis instead of attempting HTTP with an expired context; when both
+transports fail, the warning retains both causes. A heartbeat
+bumps `lastTouchedAt`, recomputes `expiresAt`, and clears stale cleanup metadata;
+the HTTP path also refreshes provider SSH access where supported. Heartbeats at
+or after `expiresAt` are
 rejected so they cannot revive a lease once expiry cleanup owns it.
 
 Expiry is the minimum of two clocks (`leaseExpiresAt` in `worker/src/fleet.ts`):

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 	"gopkg.in/yaml.v3"
 )
@@ -225,6 +226,17 @@ func (b *namespaceLeaseBackend) Doctor(ctx context.Context, _ DoctorRequest) (Do
 }
 
 func (b *namespaceLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+	_, err := b.ReleaseLeaseWithOutcome(ctx, req)
+	return err
+}
+
+func (b *namespaceLeaseBackend) ReleaseLeaseWithOutcome(ctx context.Context, req ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
+	var outcome core.ReleaseLeaseOutcome
+	err := b.releaseLease(ctx, req, &outcome)
+	return outcome, err
+}
+
+func (b *namespaceLeaseBackend) releaseLease(ctx context.Context, req ReleaseLeaseRequest, outcome *core.ReleaseLeaseOutcome) error {
 	name := strings.TrimSpace(req.Lease.Server.Name)
 	if name == "" {
 		name, _, _, _ = resolveNamespaceDevboxName(req.Lease.LeaseID, true)
@@ -247,7 +259,9 @@ func (b *namespaceLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLea
 	deleteDevbox := namespaceDeleteOnRelease(req.Lease, b.namespaceConfigForRun())
 	if deleteDevbox {
 		if err := shared.RemoveExactClaimAfter(claim, binding, func() error {
-			return b.deleteDevbox(ctx, name)
+			err := b.deleteDevbox(ctx, name)
+			outcome.Terminal = err == nil
+			return err
 		}); err != nil {
 			return err
 		}

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -507,6 +508,10 @@ func (b *leaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, 
 		return nil, err
 	}
 	return b.listServers(ctx, client, req.All)
+}
+
+func (b *leaseBackend) ReleaseLeaseWithOutcome(ctx context.Context, req ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
+	return core.ReleaseLeaseOutcome{}, b.ReleaseLease(ctx, req)
 }
 
 func (b *leaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {

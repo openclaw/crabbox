@@ -163,6 +163,15 @@ phases. Failed runs add `blockedStage` and `retryLikely` when Crabbox can
 classify the likely blocker; the human-readable run summary prints the same
 values as `blocked_stage` and `retry_likely`.
 
+Automatic run cleanup adds `leaseStopped`: true means the release owner confirmed
+the end of the recoverable lease, even when a terminal receipt remains locally.
+Retained resources and accepted but pending, failed, retry-scheduled, or otherwise
+unconfirmed cleanup report false and preserve failure recovery guidance. False
+does not certify a running or reachable resource. `leaseStopError` reports cleanup
+errors separately and may be present even after confirmed removal, for example
+when local finalization fails. Run finalization emits timing after cleanup and
+the failure digest; a failing CLI invocation can append its normal exit diagnostic.
+
 Commands can define their own phases by printing marker lines to stdout or
 stderr:
 

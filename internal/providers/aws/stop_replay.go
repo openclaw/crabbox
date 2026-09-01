@@ -97,7 +97,7 @@ func (b *awsLeaseBackend) resolveTerminalRelease(ctx context.Context, req Resolv
 	return lease, nil
 }
 
-func (b *awsLeaseBackend) releaseTerminalReceipt(ctx context.Context, req ReleaseLeaseRequest) error {
+func (b *awsLeaseBackend) releaseTerminalReceipt(ctx context.Context, req ReleaseLeaseRequest, outcome *core.ReleaseLeaseOutcome) error {
 	snapshot, snapshotExists, snapshotSet := core.ServerLeaseClaimSnapshot(req.Lease.Server)
 	return core.WithDurableLeaseClaimLock(req.Lease.LeaseID, func(claim *core.LeaseClaim, exists bool, _ func() error) error {
 		if !exists || !snapshotSet || !snapshotExists || !reflect.DeepEqual(snapshot, *claim) {
@@ -118,6 +118,8 @@ func (b *awsLeaseBackend) releaseTerminalReceipt(ctx context.Context, req Releas
 		if err != nil {
 			return err
 		}
-		return validateAWSTerminalInventory(*claim, servers)
+		err = validateAWSTerminalInventory(*claim, servers)
+		outcome.Terminal = err == nil
+		return err
 	})
 }

@@ -3,15 +3,19 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestCoordinatorResolveExplicitSSHPort(t *testing.T) {
@@ -24,6 +28,7 @@ func TestCoordinatorResolveExplicitSSHPort(t *testing.T) {
 		{name: "flag pins advertised fallback", source: "flag", port: "22", fallback: []string{"22"}, wantPort: "22"},
 		{name: "flag pins advertised primary", source: "flag", port: "2222", fallback: []string{"22"}, wantPort: "2222"},
 		{name: "environment pins advertised fallback", source: "environment", port: "22", fallback: []string{"22"}, wantPort: "22"},
+		{name: "config file pins advertised fallback", source: "config", port: "22", fallback: []string{"22"}, wantPort: "22"},
 		{name: "unadvertised port refuses resolution", source: "flag", port: "2200", fallback: []string{"22"}, wantError: "not advertised"},
 		{name: "missing fallback does not authorize port22", source: "flag", port: "22", wantError: "not advertised"},
 		{name: "provider identity remains authoritative", source: "flag", port: "22", provider: "external", fallback: []string{"22"}, wantError: "provider identity mismatch"},
@@ -50,6 +55,18 @@ func TestCoordinatorResolveExplicitSSHPort(t *testing.T) {
 			} else if tc.source == "environment" {
 				t.Setenv("CRABBOX_SSH_PORT", tc.port)
 				if err := applyEnv(&cfg); err != nil {
+					t.Fatal(err)
+				}
+			} else if tc.source == "config" {
+				configPath := filepath.Join(t.TempDir(), "config.yaml")
+				if err := os.WriteFile(configPath, []byte("ssh:\n  port: "+tc.port+"\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				file, err := readFileConfig(configPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := applyFileConfig(&cfg, file); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -138,5 +155,70 @@ func TestCoordinatorResolveExplicitSSHPort(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCoordinatorExplicitSSHPortBinary(t *testing.T) {
+	binary, err := builtCLITestBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, source := range []string{"config", "environment"} {
+		for _, port := range []string{"22", "2200"} {
+			t.Run(source+"/"+port, func(t *testing.T) {
+				clearConfigEnv(t)
+				dir := t.TempDir()
+				isolateRunTestUserDirs(t, dir)
+				const leaseID = "cbx_abcdef123456"
+				key := testOpenSSHPublicKey("ssh-ed25519", testBytes(32, 41))
+				// A terminal guest state makes Status report routing without an SSH
+				// readiness probe; the loopback coordinator is the only network peer.
+				lease := CoordinatorLease{ID: leaseID, Provider: "aws", State: "failed", Host: "192.0.2.25", SSHUser: "lease-user", SSHPort: "2222", SSHFallbackPorts: []string{"22"}, SSHHostKey: key, TargetOS: targetWindows, WindowsMode: windowsModeNormal}
+				var reads atomic.Int32
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+					if req.Method != http.MethodGet || req.URL.Path != "/v1/leases/"+leaseID {
+						t.Errorf("unexpected coordinator operation %s %s", req.Method, req.URL.Path)
+						http.NotFound(w, req)
+						return
+					}
+					reads.Add(1)
+					_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+				}))
+				defer server.Close()
+				config := "provider: aws\n"
+				if source == "config" {
+					config += "ssh:\n  port: " + port + "\n"
+				} else {
+					t.Setenv("CRABBOX_SSH_PORT", port)
+				}
+				configPath := filepath.Join(dir, "config.yaml")
+				if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("CRABBOX_CONFIG", configPath)
+				t.Setenv("CRABBOX_COORDINATOR", server.URL)
+				t.Setenv("CRABBOX_COORDINATOR_TOKEN", "test-token")
+				ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, binary, "status", "--id", leaseID, "--json")
+				cmd.Dir = dir
+				output, err := cmd.CombinedOutput()
+				t.Logf("built CLI status source=%s port=%s: %s", source, port, output)
+				if port == "2200" {
+					var exitErr *exec.ExitError
+					if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 || !strings.Contains(string(output), "not advertised") || !strings.Contains(string(output), "remove the --ssh-port, ssh.port, or CRABBOX_SSH_PORT override") {
+						t.Fatalf("unadvertised selection did not fail with actionable advice: %v\n%s", err, output)
+					}
+				} else {
+					var view statusView
+					if err != nil || json.Unmarshal(output, &view) != nil || view.SSHPort != port || len(view.SSHFallbackPorts) != 0 || view.SSHHost != lease.Host || view.SSHUser != lease.SSHUser || view.SSHHostKey != key || view.Ready {
+						t.Fatalf("Status ignored selection or changed endpoint authority: %v\n%s", err, output)
+					}
+				}
+				if reads.Load() != 1 || lease.SSHPort != "2222" || !slices.Equal(lease.SSHFallbackPorts, []string{"22"}) {
+					t.Fatal("selection mutated coordinator metadata or repeated the request")
+				}
+			})
+		}
 	}
 }

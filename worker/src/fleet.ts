@@ -12214,7 +12214,7 @@ export class FleetCoordinator {
         }
         const existingPoolEntries = [
           ...(await this.readyPoolEntries()),
-          ...(typed ? await this.readyPoolEntries(true) : []),
+          ...(await this.readyPoolEntries(true)),
         ].filter((entry) => entry.leaseID === leaseID);
         if (existingPoolEntries.some((entry) => entry.state === "busy")) {
           return json(
@@ -12222,6 +12222,12 @@ export class FleetCoordinator {
               error: "lease_pool_busy",
               message: "lease is currently borrowed from a ready pool",
             },
+            { status: 409 },
+          );
+        }
+        if (existingPoolEntries.some((entry) => entry.state === "quarantined")) {
+          return json(
+            { error: "pool_entry_quarantined", message: "quarantined leases must be drained" },
             { status: 409 },
           );
         }
@@ -12316,6 +12322,13 @@ export class FleetCoordinator {
         const entries = (await this.readyPoolStatusSnapshot(request, key, typed)).filter((entry) =>
           readyPoolEntryMatches(entry, input),
         );
+        // Older coordinators could register the same lease in both namespaces.
+        // Preserve an existing borrow or quarantine instead of lending its duplicate.
+        const unavailableLeases = new Set(
+          (await this.readyPoolEntries(!typed))
+            .filter((entry) => entry.state === "busy" || entry.state === "quarantined")
+            .map((entry) => entry.leaseID),
+        );
         const leases = new Map((await this.leaseRecords()).map((lease) => [lease.id, lease]));
         const nowMs = Date.now();
         const candidates: Array<{ entry: ReadyPoolEntry; lease: LeaseRecord }> = [];
@@ -12325,6 +12338,7 @@ export class FleetCoordinator {
           if (
             lease &&
             entry.state === "ready" &&
+            !unavailableLeases.has(entry.leaseID) &&
             lease.state === "active" &&
             Date.parse(lease.expiresAt) > nowMs
           ) {
@@ -12717,6 +12731,21 @@ export class FleetCoordinator {
           { status: 400 },
         );
       }
+      const nowMs = Date.now();
+      const deadline = readyPoolBorrowDeadline(current);
+      if (
+        result === "ready" &&
+        current.state === "busy" &&
+        deadline !== undefined &&
+        deadline <= nowMs
+      ) {
+        await this.quarantineReadyPoolEntry(current, "borrow heartbeat expired", nowMs, typed);
+        await this.state.runExclusive(() => this.scheduleAlarm());
+        return json(
+          { error: "borrow_expired", message: "pool borrow heartbeat expired" },
+          { status: 409 },
+        );
+      }
       if ((current.state === "quarantined" || current.state === "stale") && result === "ready") {
         return json(
           {
@@ -12786,23 +12815,8 @@ export class FleetCoordinator {
   ): ReadyPoolEntry {
     const now = new Date().toISOString();
     const failures = state === "ready" ? 0 : (current.failureCount ?? 0) + 1;
-    const {
-      borrowedAt: _borrowedAt,
-      borrowedBy: _borrowedBy,
-      borrowHeartbeatRequired: _borrowHeartbeatRequired,
-      borrowHeartbeatAt: _borrowHeartbeatAt,
-      borrowExpiresAt: _borrowExpiresAt,
-      borrowToken: _borrowToken,
-      ...base
-    } = current;
-    void _borrowedAt;
-    void _borrowedBy;
-    void _borrowHeartbeatRequired;
-    void _borrowHeartbeatAt;
-    void _borrowExpiresAt;
-    void _borrowToken;
     const returned: ReadyPoolEntry = {
-      ...base,
+      ...withoutReadyPoolBorrow(current),
       state,
       lastResult: nonSecretString(reason) || state,
       failureCount: failures,

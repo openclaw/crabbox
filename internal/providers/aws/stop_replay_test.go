@@ -446,7 +446,10 @@ func TestAWSFixedStopReleaseOwnerFence(t *testing.T) {
 				fresh.Cfg.Capacity.Regions = nil
 			}
 			before, _ := os.ReadFile(path)
-			err = fresh.ReleaseLease(t.Context(), ReleaseLeaseRequest{Lease: target, ExpectedProviderIdentity: tc.expected})
+			outcome, err := fresh.ReleaseLeaseWithOutcome(t.Context(), ReleaseLeaseRequest{Lease: target, ExpectedProviderIdentity: tc.expected})
+			if outcome.Terminal != (tc.name == "unchanged") {
+				t.Errorf("terminal receipt outcome=%+v case=%s", outcome, tc.name)
+			}
 			if tc.name == "unchanged" {
 				if err != nil {
 					t.Fatal(err)

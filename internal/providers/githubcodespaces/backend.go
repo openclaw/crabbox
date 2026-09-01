@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -573,6 +574,17 @@ func (b *backend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
 }
 
 func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+	_, err := b.ReleaseLeaseWithOutcome(ctx, req)
+	return err
+}
+
+func (b *backend) ReleaseLeaseWithOutcome(ctx context.Context, req ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
+	var outcome core.ReleaseLeaseOutcome
+	err := b.releaseLease(ctx, req, &outcome)
+	return outcome, err
+}
+
+func (b *backend) releaseLease(ctx context.Context, req ReleaseLeaseRequest, outcome *core.ReleaseLeaseOutcome) error {
 	leaseID := strings.TrimSpace(req.Lease.LeaseID)
 	if leaseID == "" {
 		return exit(2, "github-codespaces release requires a lease id")
@@ -620,22 +632,26 @@ func (b *backend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) err
 		}
 		if err == nil {
 			if err := validateDeleteSafe(item); err != nil {
-				return b.stopCodespaceAndRetain(ctx, api, leaseID, claim, server, name)
+				return b.stopCodespaceAndRetainWithOutcome(ctx, api, leaseID, claim, server, name, outcome)
 			}
 		}
-		if err := b.deleteClaimedCodespace(ctx, api, claim, name); err != nil {
+		if err := b.deleteClaimedCodespaceWithOutcome(ctx, api, claim, name, outcome); err != nil {
 			var unsafe *unsafeCodespaceDeleteError
 			if errors.As(err, &unsafe) {
-				return b.stopCodespaceAndRetain(ctx, api, leaseID, claim, server, name)
+				return b.stopCodespaceAndRetainWithOutcome(ctx, api, leaseID, claim, server, name, outcome)
 			}
 			return err
 		}
 		return nil
 	}
-	return b.stopCodespaceAndRetain(ctx, api, leaseID, claim, server, name)
+	return b.stopCodespaceAndRetainWithOutcome(ctx, api, leaseID, claim, server, name, outcome)
 }
 
 func (b *backend) stopCodespaceAndRetain(ctx context.Context, api codespacesAPI, leaseID string, claim LeaseClaim, server Server, name string) error {
+	return b.stopCodespaceAndRetainWithOutcome(ctx, api, leaseID, claim, server, name, &core.ReleaseLeaseOutcome{})
+}
+
+func (b *backend) stopCodespaceAndRetainWithOutcome(ctx context.Context, api codespacesAPI, leaseID string, claim LeaseClaim, server Server, name string, outcome *core.ReleaseLeaseOutcome) error {
 	server.Provider = providerName
 	server.CloudID = name
 	server.Name = name
@@ -664,6 +680,7 @@ func (b *backend) stopCodespaceAndRetain(ctx context.Context, api codespacesAPI,
 		item, err := api.getCodespace(ctx, name)
 		if isGitHubNotFound(err) {
 			absent = true
+			outcome.Terminal = true
 			return nil
 		}
 		if err != nil {
@@ -678,6 +695,7 @@ func (b *backend) stopCodespaceAndRetain(ctx context.Context, api codespacesAPI,
 		err = api.stopCodespace(ctx, name)
 		if isGitHubNotFound(err) {
 			absent = true
+			outcome.Terminal = true
 			return nil
 		}
 		return err
@@ -691,6 +709,10 @@ func (b *backend) stopCodespaceAndRetain(ctx context.Context, api codespacesAPI,
 }
 
 func (b *backend) deleteClaimedCodespace(ctx context.Context, api codespacesAPI, claim LeaseClaim, name string) error {
+	return b.deleteClaimedCodespaceWithOutcome(ctx, api, claim, name, &core.ReleaseLeaseOutcome{})
+}
+
+func (b *backend) deleteClaimedCodespaceWithOutcome(ctx context.Context, api codespacesAPI, claim LeaseClaim, name string, outcome *core.ReleaseLeaseOutcome) error {
 	name = strings.TrimSpace(name)
 	if name == "" || claim.CloudID != name || claim.Labels[labelCodespaceName] != name {
 		return exit(4, "refusing github-codespaces delete for lease=%s without its exact bound resource identity", claim.LeaseID)
@@ -701,6 +723,7 @@ func (b *backend) deleteClaimedCodespace(ctx context.Context, api codespacesAPI,
 
 		item, err := api.getCodespace(deleteCtx, name)
 		if isGitHubNotFound(err) {
+			outcome.Terminal = true
 			return removeStoredSSHConfig(claim.LeaseID)
 		}
 		if err != nil {
@@ -719,12 +742,14 @@ func (b *backend) deleteClaimedCodespace(ctx context.Context, api codespacesAPI,
 		// codespace gets a fresh status and identity check immediately before delete.
 		if err := api.stopCodespace(deleteCtx, name); err != nil {
 			if isGitHubNotFound(err) {
+				outcome.Terminal = true
 				return removeStoredSSHConfig(claim.LeaseID)
 			}
 			return err
 		}
 		item, err = b.waitForStopped(deleteCtx, api, name)
 		if isGitHubNotFound(err) {
+			outcome.Terminal = true
 			return removeStoredSSHConfig(claim.LeaseID)
 		}
 		if err != nil {
@@ -744,6 +769,7 @@ func (b *backend) deleteClaimedCodespace(ctx context.Context, api codespacesAPI,
 		}); err != nil {
 			return err
 		}
+		outcome.Terminal = true
 		return removeStoredSSHConfig(claim.LeaseID)
 	})
 }

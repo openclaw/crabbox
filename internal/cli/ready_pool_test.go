@@ -382,7 +382,7 @@ func TestRunReadyPoolEndpointPrecedesExplicitSSHPort(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("existing SSH recorder requires a POSIX host")
 	}
-	for _, selection := range []string{"implicit", "environment", "flag"} {
+	for _, selection := range []string{"implicit", "environment", "flag", "config"} {
 		t.Run(selection, func(t *testing.T) {
 			clearConfigEnv(t)
 			dir := t.TempDir()
@@ -454,6 +454,10 @@ func TestRunReadyPoolEndpointPrecedesExplicitSSHPort(t *testing.T) {
 			t.Setenv("CRABBOX_COORDINATOR_TOKEN", "test-token")
 			if selection == "environment" {
 				t.Setenv("CRABBOX_SSH_PORT", "2200")
+			} else if selection == "config" {
+				if err := os.WriteFile(configPath, []byte("ssh:\n  port: 2200\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
 			}
 			args := []string{"--provider", lease.Provider, "--pool", entry.Key, "--pool-return", "drain", "--no-sync", "--no-hydrate"}
 			if selection == "flag" {

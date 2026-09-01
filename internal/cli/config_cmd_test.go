@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -2593,5 +2596,191 @@ func TestConfigShowArchitectureExplicitnessOffline(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestConfigShowLocalContainerSettingsOffline(t *testing.T) {
+	binary, err := builtCLITestBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const configured = `localContainer:
+  runtime: docker
+  image: debian:bookworm
+  user: test-runner
+  workRoot: /work/custom
+  cpus: 3
+  memory: 6g
+  network: none
+  dockerSocket: true
+`
+	for _, tc := range []struct {
+		name, yaml, root, arch string
+		env, args              []string
+		local                  map[string]any
+		socketDefault          bool
+	}{
+		{name: "defaults", yaml: "provider: local-container\n"},
+		{name: "issue reproduction", yaml: "provider: local-container\nprofile: local-container-config-proof\n" + configured, root: "/work/custom", local: map[string]any{
+			"image": "debian:bookworm", "user": "test-runner", "cpus": float64(3), "memory": "6g", "network": "none", "dockerSocket": true,
+		}},
+		{name: "environment overrides file", yaml: "provider: local-container\n" + configured, root: "/work/env", env: []string{
+			"CRABBOX_LOCAL_CONTAINER_RUNTIME=podman", "CRABBOX_LOCAL_CONTAINER_IMAGE=example-org/custom:latest",
+			"CRABBOX_LOCAL_CONTAINER_USER=env-runner", "CRABBOX_LOCAL_CONTAINER_WORK_ROOT=/work/env",
+			"CRABBOX_LOCAL_CONTAINER_CPUS=4", "CRABBOX_LOCAL_CONTAINER_MEMORY=8g", "CRABBOX_LOCAL_CONTAINER_NETWORK=bridge",
+			"CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET=false",
+		}, local: map[string]any{"runtime": "podman", "image": "example-org/custom:latest", "user": "env-runner", "cpus": float64(4), "memory": "8g"}},
+		{name: "environment zero false and empty", yaml: "provider: local-container\n" + configured, root: "/work/custom", env: []string{
+			"CRABBOX_LOCAL_CONTAINER_RUNTIME=", "CRABBOX_LOCAL_CONTAINER_IMAGE=", "CRABBOX_LOCAL_CONTAINER_USER=",
+			"CRABBOX_LOCAL_CONTAINER_WORK_ROOT=", "CRABBOX_LOCAL_CONTAINER_CPUS=0", "CRABBOX_LOCAL_CONTAINER_MEMORY=",
+			"CRABBOX_LOCAL_CONTAINER_NETWORK=", "CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET=false",
+		}, local: map[string]any{"image": "debian:bookworm", "user": "test-runner", "memory": "6g", "network": "none"}},
+		{name: "file zero false and empty", yaml: "provider: local-container\nlocalContainer:\n  cpus: 0\n  memory: ''\n  dockerSocket: false\n"},
+		{name: "generic file root", yaml: "provider: local-container\nworkRoot: /work/generic\n", root: "/work/generic"},
+		{name: "generic environment root", yaml: "provider: local-container\nworkRoot: /work/file\n", env: []string{"CRABBOX_WORK_ROOT=/work/env"}, root: "/work/env"},
+		{name: "provider file beats generic environment", yaml: "provider: local-container\nlocalContainer:\n  workRoot: /work/provider\n", env: []string{"CRABBOX_WORK_ROOT=/work/env"}, root: "/work/provider"},
+		{name: "provider environment beats file", yaml: "provider: local-container\nworkRoot: /work/generic\nlocalContainer:\n  workRoot: /work/file\n", env: []string{"CRABBOX_LOCAL_CONTAINER_WORK_ROOT=/work/provider"}, root: "/work/provider"},
+		{name: "socket default root", yaml: "provider: local-container\nlocalContainer:\n  dockerSocket: true\n", socketDefault: true, local: map[string]any{"dockerSocket": true}},
+		{name: "socket explicit generic default", yaml: "provider: local-container\nworkRoot: /work/crabbox\nlocalContainer:\n  dockerSocket: true\n", local: map[string]any{"dockerSocket": true}},
+		{name: "socket explicit provider default", yaml: "provider: local-container\nlocalContainer:\n  workRoot: /work/crabbox\n  dockerSocket: true\n", local: map[string]any{"dockerSocket": true}},
+		{name: "socket generic custom root", yaml: "provider: local-container\nworkRoot: /work/generic\nlocalContainer:\n  dockerSocket: true\n", root: "/work/generic", local: map[string]any{"dockerSocket": true}},
+		{name: "socket environment explicit default", yaml: "provider: local-container\nlocalContainer:\n  dockerSocket: true\n", env: []string{"CRABBOX_LOCAL_CONTAINER_WORK_ROOT=/work/crabbox"}, local: map[string]any{"dockerSocket": true}},
+		{name: "no provider selected", local: map[string]any{"workRoot": ""}, arch: "amd64"},
+		{name: "other provider selected", yaml: "provider: hetzner\nworkRoot: /work/other\nlocalContainer:\n  workRoot: /work/local\n  dockerSocket: true\n", root: "/work/other", arch: "amd64", local: map[string]any{"workRoot": "/work/local", "dockerSocket": true}},
+		{name: "provider flag override", yaml: "provider: hetzner\nlocalContainer:\n  workRoot: /work/local\n", args: []string{"--provider", "local-container"}, root: "/work/local"},
+		{name: "explicit amd64", yaml: "provider: local-container\narchitecture: amd64\n", arch: "amd64"},
+		{name: "explicit arm64", yaml: "provider: local-container\narchitecture: arm64\n", arch: "arm64"},
+		{name: "environment architecture", yaml: "provider: local-container\narchitecture: arm64\n", env: []string{"CRABBOX_ARCH=amd64"}, arch: "amd64"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			home := filepath.Join(root, "home")
+			configPath := filepath.Join(root, "config.yaml")
+			if err := os.Mkdir(home, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(configPath, []byte(tc.yaml), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			wantRoot := tc.root
+			if wantRoot == "" {
+				wantRoot = "/work/crabbox"
+			}
+			cache := filepath.Join(root, "cache")
+			if tc.socketDefault && runtime.GOOS != "windows" {
+				if runtime.GOOS == "darwin" {
+					cache = filepath.Join(home, "Library", "Caches")
+				}
+				wantRoot = filepath.Join(cache, "crabbox", "local-container-work")
+			}
+			want := map[string]any{
+				"runtime": "docker", "image": baseConfig().LocalContainer.Image, "user": "crabbox", "workRoot": wantRoot,
+				"cpus": float64(0), "memory": "", "network": "bridge", "dockerSocket": false,
+			}
+			for key, value := range tc.local {
+				want[key] = value
+			}
+			arch := tc.arch
+			if arch == "" {
+				arch = "native"
+			}
+			explicit := strings.Contains(tc.yaml, "architecture:")
+			var baseline [2]string
+			for _, tools := range []string{"unavailable", "podman", "docker and podman"} {
+				binDir := filepath.Join(root, tools)
+				if err := os.Mkdir(binDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				trap := filepath.Join(root, "runtime-executed")
+				if runtime.GOOS != "windows" && tools != "unavailable" {
+					for _, name := range strings.Fields(tools) {
+						if name == "and" {
+							continue
+						}
+						if err := os.WriteFile(filepath.Join(binDir, name), []byte("#!/bin/sh\nprintf invoked > \"$RUNTIME_TRAP\"\nexit 97\n"), 0o700); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				for format := range 2 {
+					args := append([]string{"config", "show"}, tc.args...)
+					if format == 1 {
+						args = append(args, "--json")
+					}
+					cmd := exec.Command(binary, args...)
+					cmd.Dir = root
+					cmd.Env = append([]string{
+						"HOME=" + home, "USERPROFILE=" + home, "APPDATA=" + root, "LOCALAPPDATA=" + cache,
+						"XDG_CONFIG_HOME=" + root, "XDG_CACHE_HOME=" + cache, "XDG_STATE_HOME=" + root,
+						"CRABBOX_CONFIG=" + configPath, "PATH=" + binDir, "RUNTIME_TRAP=" + trap,
+					}, tc.env...)
+					var stderr bytes.Buffer
+					cmd.Stderr = &stderr
+					out, err := cmd.Output()
+					if err != nil || stderr.Len() != 0 {
+						t.Fatalf("config show format=%d tools=%s: %v stderr=%s", format, tools, err, &stderr)
+					}
+					if tools == "unavailable" {
+						baseline[format] = string(out)
+					} else if string(out) != baseline[format] {
+						t.Errorf("format=%d changed when %s became discoverable", format, tools)
+					}
+					if format == 1 {
+						var view map[string]any
+						if err := json.Unmarshal(out, &view); err != nil {
+							t.Fatal(err)
+						}
+						if !reflect.DeepEqual(view["localContainer"], want) {
+							t.Errorf("localContainer=%#v, want %#v", view["localContainer"], want)
+						}
+						if view["workRoot"] != wantRoot {
+							t.Errorf("workRoot=%v, want %s", view["workRoot"], wantRoot)
+						}
+						if view["architecture"] != arch || view["architectureExplicit"] != explicit {
+							t.Errorf("architecture=%v explicit=%v, want %s/%t", view["architecture"], view["architectureExplicit"], arch, explicit)
+						}
+					} else {
+						wantLine := fmt.Sprintf("local_container runtime=%s image=%s user=%s work_root=%s cpus=%g memory=%s network=%s docker_socket=%t\n",
+							want["runtime"], want["image"], want["user"], blank(want["workRoot"].(string), "-"), want["cpus"], blank(want["memory"].(string), "-"), want["network"], want["dockerSocket"])
+						if !strings.Contains(string(out), wantLine) {
+							t.Errorf("missing text line %q", wantLine)
+						}
+						if !strings.Contains(string(out), fmt.Sprintf("arch=%s architecture_explicit=%t", arch, explicit)) {
+							t.Errorf("missing architecture %s/%t", arch, explicit)
+						}
+					}
+				}
+				if _, err := os.Stat(trap); !os.IsNotExist(err) {
+					t.Fatalf("runtime trap executed: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestConfigShowLocalContainerExcludesInternalFields(t *testing.T) {
+	cfg := baseConfig()
+	cfg.LocalContainer.Volumes = []string{"/synthetic-private-volume:/mnt/data"}
+	cfg.LocalContainer.CheckpointMetadata = map[string]string{"fork_name": "synthetic-private-checkpoint"}
+	cfg.CoordToken = "synthetic-private-token"
+	cfg.Coordinator = "https://broker.example.test/api"
+	view := configShowView(cfg)
+	local, ok := view["localContainer"].(map[string]any)
+	if !ok || len(local) != 8 {
+		t.Fatalf("public localContainer fields=%#v", local)
+	}
+	data, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var text bytes.Buffer
+	writeConfigShowText(&text, cfg)
+	for name, output := range map[string]string{"json": string(data), "text": text.String()} {
+		if strings.Contains(output, "synthetic-private") || strings.Contains(strings.ToLower(output), "checkpointmetadata") {
+			t.Errorf("%s exposed internal fields or credentials", name)
+		}
+		if !strings.Contains(output, "broker.example.test/api") || !strings.Contains(output, "configured") {
+			t.Errorf("%s lost safe endpoint or token status", name)
+		}
 	}
 }

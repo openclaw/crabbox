@@ -1174,25 +1174,28 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			releaseApp.Stderr = io.Discard
 		}
 		cleanup.Attempted = true
-		cleanup.Err = releaseApp.releaseBackendLeaseBestEffort(context.Background(), sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord})
-		cleanup.Stopped = cleanup.Err == nil
-		if cleanup.Err == nil {
+		outcome, releaseErr := releaseApp.releaseBackendLeaseWithOutcomeBestEffort(context.Background(), sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord})
+		cleanup.Err = releaseErr
+		cleanup.Stopped = outcome.Terminal
+		if cleanup.Err == nil || cleanup.Stopped {
 			policy, ok := sshBackend.(ReleaseLeaseWorkspacePolicy)
 			if !ok || !policy.PreservesSSHWorkspaceAfterRelease() {
 				// Destructive cleanup owns the quiesced owner once the lease is gone.
 				lifecycleOwner = nil
 			}
+		}
+		if cleanup.Err == nil {
 			recorder.Event("lease.released", "released", "")
 		}
 		if !*timingJSON {
 			if cleanup.Err != nil {
-				fmt.Fprintf(a.Stderr, "lease cleanup stopped=false policy=%s lease=%s slug=%s error=%q\n", blank(*stopAfter, "auto"), leaseID, blank(serverSlug(server), "-"), cleanup.Err.Error())
+				fmt.Fprintf(a.Stderr, "lease cleanup stopped=%t policy=%s lease=%s slug=%s error=%q\n", cleanup.Stopped, blank(*stopAfter, "auto"), leaseID, blank(serverSlug(server), "-"), cleanup.Err.Error())
 				if err == nil {
 					err = exit(7, "lease cleanup failed for %s: %v", leaseID, cleanup.Err)
 				}
 				return
 			}
-			fmt.Fprintf(a.Stderr, "lease cleanup stopped=true policy=%s lease=%s slug=%s\n", blank(*stopAfter, "auto"), leaseID, blank(serverSlug(server), "-"))
+			fmt.Fprintf(a.Stderr, "lease cleanup stopped=%t policy=%s lease=%s slug=%s\n", cleanup.Stopped, blank(*stopAfter, "auto"), leaseID, blank(serverSlug(server), "-"))
 		}
 	}()
 	leaseDuration := time.Since(leaseStartedAt)
@@ -3694,12 +3697,17 @@ func (result leaseCleanupResult) apply(report *timingReport) {
 }
 
 func (a App) releaseBackendLeaseBestEffort(ctx context.Context, backend SSHLeaseBackend, cfg Config, lease LeaseTarget) error {
+	_, err := a.releaseBackendLeaseWithOutcomeBestEffort(ctx, backend, cfg, lease)
+	return err
+}
+
+func (a App) releaseBackendLeaseWithOutcomeBestEffort(ctx context.Context, backend SSHLeaseBackend, cfg Config, lease LeaseTarget) (ReleaseLeaseOutcome, error) {
 	connectionCleanupSafe := releaseLeaseConnectionCleanupSafe(backend)
 	if refresher, ok := backend.(ReleaseLeaseTargetRefresher); ok {
 		refreshed, err := refresher.RefreshReleaseLeaseTarget(ctx, lease)
 		if err != nil {
 			if errors.Is(err, ErrReleaseLeaseOwnershipChanged) {
-				return err
+				return ReleaseLeaseOutcome{}, err
 			}
 			fmt.Fprintf(a.Stderr, "warning: could not refresh lease %s before cleanup: %v; attempting release with acquired target\n", lease.LeaseID, err)
 		} else {
@@ -3715,13 +3723,14 @@ func (a App) releaseBackendLeaseBestEffort(ctx context.Context, backend SSHLease
 	if connectionCleanupSafe {
 		a.cleanupBackendLeaseConnectionsBestEffort(ctx, lease)
 	}
-	if err := a.releaseBackendLease(ctx, backend, cfg, lease); err != nil {
-		return err
+	outcome, err := a.releaseBackendLease(ctx, backend, cfg, lease)
+	if err != nil {
+		return outcome, err
 	}
 	if !connectionCleanupSafe {
 		a.cleanupBackendLeaseLocalConnectionsBestEffort(ctx, lease.LeaseID)
 	}
-	return nil
+	return outcome, nil
 }
 
 func releaseLeaseConnectionCleanupSafe(backend SSHLeaseBackend) bool {
@@ -3767,18 +3776,26 @@ func (a App) cleanupBackendLeaseRemoteConnectionsBestEffort(ctx context.Context,
 	a.logoutRemoteTailscaleBestEffort(cleanupCtx, lease)
 }
 
-func (a App) releaseBackendLease(ctx context.Context, backend SSHLeaseBackend, cfg Config, lease LeaseTarget) error {
+func (a App) releaseBackendLease(ctx context.Context, backend SSHLeaseBackend, cfg Config, lease LeaseTarget) (ReleaseLeaseOutcome, error) {
 	fmt.Fprintf(a.Stderr, "releasing %s server=%s\n", lease.LeaseID, lease.Server.DisplayID())
 	request := ReleaseLeaseRequest{Lease: lease, Force: true, DeferProviderCleanupObservation: true}
 	if !releaseLeaseConnectionCleanupSafe(backend) {
 		request.GuardedRemoteCleanup = a.cleanupBackendLeaseRemoteConnectionsBestEffort
 	}
-	if err := backend.ReleaseLease(ctx, request); err != nil {
+	var outcome ReleaseLeaseOutcome
+	var err error
+	if reporter, ok := backend.(ReleaseLeaseOutcomeBackend); ok {
+		outcome, err = reporter.ReleaseLeaseWithOutcome(ctx, request)
+	} else {
+		err = backend.ReleaseLease(ctx, request)
+		outcome.Terminal = err == nil
+	}
+	if err != nil {
 		fmt.Fprintf(a.Stderr, "warning: release failed for %s: %v\n", lease.LeaseID, err)
-		return err
+		return outcome, err
 	}
 	a.releaseRegisteredCoordinatorLeaseBestEffort(ctx, cfg, lease.LeaseID)
-	return nil
+	return outcome, nil
 }
 
 func startCoordinatorHeartbeat(ctx context.Context, coord *CoordinatorClient, leaseID, expectedProvider string, idleTimeout time.Duration, updateIdleTimeout *time.Duration, telemetryCollector leaseTelemetryCollector, stderr io.Writer) (func(), error) {
@@ -3803,28 +3820,26 @@ func startCoordinatorHeartbeat(ctx context.Context, coord *CoordinatorClient, le
 			telemetry := collectLeaseTelemetryBestEffort(rootCtx, telemetryCollector)
 			callCtx, heartbeatCancel := context.WithTimeout(rootCtx, 20*time.Second)
 			var err error
-			var idleTimeoutOverride *time.Duration
-			if updateIdleTimeout != nil {
-				idleTimeoutOverride = updateIdleTimeout
-			}
 			if control == nil {
-				control, _ = dialCoordinatorControl(callCtx, coord)
+				control, err = dialCoordinatorControl(callCtx, coord)
 			}
 			if control != nil {
-				err = control.heartbeat(callCtx, leaseID, expectedProvider, idleTimeoutOverride, telemetry)
+				err = control.heartbeat(callCtx, leaseID, expectedProvider, updateIdleTimeout, telemetry)
 				if err != nil {
 					control.close()
 					control = nil
 				}
 			}
-			if control == nil {
-				if updateIdleTimeout != nil {
-					_, err = coord.UpdateLeaseIdleTimeoutWithTelemetryForProvider(callCtx, leaseID, expectedProvider, *updateIdleTimeout, telemetry)
+			if err != nil {
+				err = fmt.Errorf("control heartbeat: %w", err)
+			}
+			// A spent shared budget cannot send HTTP; preserve the failed control stage.
+			if control == nil && callCtx.Err() == nil {
+				if _, fallbackErr := coord.heartbeatLease(callCtx, leaseID, expectedProvider, updateIdleTimeout, telemetry); fallbackErr != nil {
+					err = errors.Join(err, fallbackErr)
 				} else {
-					_, err = coord.TouchLeaseWithTelemetryForProvider(callCtx, leaseID, expectedProvider, telemetry)
+					err = nil
 				}
-			} else {
-				err = nil
 			}
 			heartbeatCancel()
 			if err != nil && rootCtx.Err() == nil {

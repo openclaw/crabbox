@@ -369,6 +369,17 @@ func (b *morphLeaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseV
 }
 
 func (b *morphLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+	_, err := b.ReleaseLeaseWithOutcome(ctx, req)
+	return err
+}
+
+func (b *morphLeaseBackend) ReleaseLeaseWithOutcome(ctx context.Context, req ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
+	var outcome core.ReleaseLeaseOutcome
+	err := b.releaseLease(ctx, req, &outcome)
+	return outcome, err
+}
+
+func (b *morphLeaseBackend) releaseLease(ctx context.Context, req ReleaseLeaseRequest, outcome *core.ReleaseLeaseOutcome) error {
 	cfg := b.configForRun()
 	client, err := b.api()
 	if err != nil {
@@ -395,7 +406,10 @@ func (b *morphLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRe
 		if claimErr != nil {
 			return claimErr
 		}
-		if claimErr = shared.RemoveExactClaimAfter(exact, binding, func() error { return nil }); claimErr != nil {
+		if claimErr = shared.RemoveExactClaimAfter(exact, binding, func() error {
+			outcome.Terminal = true
+			return nil
+		}); claimErr != nil {
 			return claimErr
 		}
 		removeStoredTestboxKey(claim.LeaseID)
@@ -495,6 +509,7 @@ func (b *morphLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRe
 			if err := client.DeleteInstance(ctx, instance.ID); err != nil && !isMorphNotFound(err) {
 				return exit(1, "morph delete instance %s failed: %v", instance.ID, err)
 			}
+			outcome.Terminal = true
 			return nil
 		}); err != nil {
 			return err

@@ -309,6 +309,10 @@ func (b *backend) bindFixedMachine0Claim(claim LeaseClaim, item machine) (LeaseC
 }
 
 func (b *backend) destroyClaimedMachine(ctx context.Context, expected LeaseClaim, lease LeaseTarget) error {
+	return b.destroyClaimedMachineWithOutcome(ctx, expected, lease, &core.ReleaseLeaseOutcome{})
+}
+
+func (b *backend) destroyClaimedMachineWithOutcome(ctx context.Context, expected LeaseClaim, lease LeaseTarget, outcome *core.ReleaseLeaseOutcome) error {
 	if expected.Provider != core.FixedMachine0ClaimProvider && expected.FixedCreateIntent == nil {
 		return fixedMachine0LeaseKind.FinalizeAfterCleanup(expected, func() error {
 			// Reservation holds the source before it changes the claim revision.
@@ -316,8 +320,11 @@ func (b *backend) destroyClaimedMachine(ctx context.Context, expected LeaseClaim
 				return err
 			}
 			if lease.Server.Name != "" {
-				return b.api.Remove(ctx, lease.Server.Name)
+				err := b.api.Remove(ctx, lease.Server.Name)
+				outcome.Terminal = err == nil
+				return err
 			}
+			outcome.Terminal = true
 			return nil
 		})
 	}
@@ -333,6 +340,7 @@ func (b *backend) destroyClaimedMachine(ctx context.Context, expected LeaseClaim
 		}
 		item, err := b.resolveFixedMachine0(ctx, *claim)
 		if err != nil || claim.FixedCreateIntent.State == fixedMachine0IntentReleased {
+			outcome.Terminal = err == nil
 			return err
 		}
 		resourceID := firstNonBlank(item.ID, claim.CloudID)
@@ -355,6 +363,7 @@ func (b *backend) destroyClaimedMachine(ctx context.Context, expected LeaseClaim
 			if err := b.api.Remove(ctx, item.Name); err != nil {
 				return err
 			}
+			outcome.Terminal = true
 		} else {
 			return exit(4, "fixed Machine0 lease %s is not visible in the current account; absence is unverified, retain its claim and inspect the original account", claim.LeaseID)
 		}
