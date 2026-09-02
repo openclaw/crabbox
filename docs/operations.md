@@ -551,6 +551,25 @@ change on `main`. Missing required backend configuration fails with
 `artifact_upload_unavailable` before any file upload. Checking artifact
 publishing configuration requires no compute lease.
 
+For workflow-managed R2 signing keys, set the optional GitHub environment
+secret `CRABBOX_ARTIFACTS_CREDENTIALS_JSON` in `coordinator` to exactly:
+
+```json
+{
+  "CRABBOX_ARTIFACTS_ACCESS_KEY_ID": "<access-key-id>",
+  "CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY": "<secret-access-key>"
+}
+```
+
+Both values must be nonempty strings; no other fields are accepted. Use
+dedicated keys with Object Read & Write access scoped to the existing artifact
+bucket, not shared deployment keys. Replace the entire bundle to rotate the
+pair atomically, then run **Deploy Coordinator**, the existing serialized
+deployment owner. It deploys both runtime secrets in the same Worker version,
+together with `CRABBOX_DAYTONA_SNAPSHOT` when configured. An absent bundle
+preserves the existing artifact credentials; it does not clear them or change
+unrelated secret bindings.
+
 A typical R2-compatible configuration looks like:
 
 ```text
