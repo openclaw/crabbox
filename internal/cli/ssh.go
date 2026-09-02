@@ -1094,10 +1094,6 @@ func runSSHQuietWithOptionsResolvePort(ctx context.Context, target *SSHTarget, r
 	return executeSSH(ctx, target, remote, nil, 0, 0, connectTimeout, connectionAttempts, io.Discard, io.Discard)
 }
 
-func runSSHQuietWithRemoteWaitTimeout(ctx context.Context, target SSHTarget, remote string, waitTimeout time.Duration, connectTimeout, connectionAttempts string) error {
-	return executeSSH(ctx, &target, remote, nil, 0, waitTimeout, connectTimeout, connectionAttempts, io.Discard, io.Discard)
-}
-
 func runSSHOutput(ctx context.Context, target SSHTarget, remote string) (string, error) {
 	return runSSHOutputWithRemoteWaitTimeout(ctx, target, remote, 0, "10", "3")
 }
