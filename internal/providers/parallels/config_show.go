@@ -21,6 +21,7 @@ func (Provider) ConfigShowSection(cfg core.Config) core.ProviderConfigShowSectio
 			{JSONName: "host", JSONValue: c.Host, TextName: "host", TextValue: core.Blank(c.Host, "local")},
 			{JSONName: "hostUser", JSONValue: c.HostUser},
 			{JSONName: "hostKey", JSONValue: core.ConfigShowSecretState(c.HostKey)},
+			{JSONName: "bootstrapKey", JSONValue: core.ConfigShowSecretState(c.BootstrapKey)},
 			{JSONName: "vmRoot", JSONValue: c.VMRoot},
 			{JSONName: "user", JSONValue: c.User, TextName: "user", TextValue: c.User},
 			{JSONName: "workRoot", JSONValue: c.WorkRoot, TextName: "work_root", TextValue: c.WorkRoot},

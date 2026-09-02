@@ -684,6 +684,7 @@ type ParallelsConfig struct {
 	Host             string
 	HostUser         string
 	HostKey          string
+	BootstrapKey     string
 	VMRoot           string
 	User             string
 	WorkRoot         string
@@ -2439,6 +2440,7 @@ type fileParallelsConfig struct {
 	Host             string                                 `yaml:"host,omitempty"`
 	HostUser         string                                 `yaml:"hostUser,omitempty"`
 	HostKey          string                                 `yaml:"hostKey,omitempty"`
+	BootstrapKey     string                                 `yaml:"bootstrapKey,omitempty"`
 	VMRoot           string                                 `yaml:"vmRoot,omitempty"`
 	User             string                                 `yaml:"user,omitempty"`
 	WorkRoot         string                                 `yaml:"workRoot,omitempty"`
@@ -3860,6 +3862,14 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Parallels.HostKey = expandUserPath(file.Parallels.HostKey)
 			recordConfigInput(cfg, "parallels", inputSource, true)
 			cfg.credentialProvenance.parallelsHostKey = credentialSource
+		}
+		// The bootstrap identity is consumed on the Parallels host and can sign
+		// authentication challenges from a newly cloned guest. Repository config
+		// must not choose that identity; keep it in trusted user config or supply
+		// it through an explicit environment/flag override.
+		if trusted && file.Parallels.BootstrapKey != "" {
+			cfg.Parallels.BootstrapKey = strings.TrimSpace(file.Parallels.BootstrapKey)
+			recordConfigInput(cfg, "parallels", inputSource, true)
 		}
 		if file.Parallels.VMRoot != "" {
 			cfg.Parallels.VMRoot = expandUserPath(file.Parallels.VMRoot)
@@ -5973,6 +5983,7 @@ func applyEnv(cfg *Config) error {
 		recordConfigInput(cfg, "parallels", configInputEnvironment, true)
 		cfg.credentialProvenance.parallelsHostKey = credentialSourceEnvironment
 	}
+	cfg.Parallels.BootstrapKey = strings.TrimSpace(configInputEnvString(cfg, "parallels", cfg.Parallels.BootstrapKey, "CRABBOX_PARALLELS_BOOTSTRAP_KEY"))
 	cfg.Parallels.VMRoot = expandUserPath(configInputEnvString(cfg, "parallels", cfg.Parallels.VMRoot, "CRABBOX_PARALLELS_VM_ROOT"))
 	cfg.Parallels.User = configInputEnvString(cfg, "parallels", cfg.Parallels.User, "CRABBOX_PARALLELS_USER")
 	cfg.Parallels.WorkRoot = configInputEnvString(cfg, "parallels", cfg.Parallels.WorkRoot, "CRABBOX_PARALLELS_WORK_ROOT")
