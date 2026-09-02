@@ -162,8 +162,13 @@ cleanup context, while the existing local claim lock remains held. Cleanup is
 acknowledged only when that query succeeds without cancellation and its stdout
 contains the native table header and one complete, unambiguous row identifying
 the **exact requested ID** with state **`completed`**. The IP cell may be empty
-after native stop clears it; the remaining columns must still be present and
-aligned with the header. Successful stops also require terminal confirmation.
+after native stop clears it. A Testbox stopped before leaving the queue may
+complete without ever receiving an IP or GitHub Actions run URL. Empty IP and
+`RUN URL` cells are allowed only in the complete native table: workflow/job/ref
+must match the exact claim, `CREATED` must be nonempty, and the row must retain
+its column alignment, padding through the `RUN URL` column, and final newline.
+A present run URL must be a valid GitHub Actions run URL. Successful stops also
+require terminal confirmation.
 Raw IDs without exact local ownership never reach native stop.
 
 Only `completed` establishes terminal status for this reconciliation. A 409 or

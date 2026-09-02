@@ -194,6 +194,14 @@ Failed stops report both the native failure and any independent verification or
 finalization failure, preserving the native exit code. Failed-query stderr is
 diagnostic only and never proves completion.
 
+A never-assigned Testbox can move directly from `queued` to `completed`, with
+empty IP and `RUN URL` cells. This permits cleanup only after a successful,
+uncanceled native status query returns the exact owned identity in a complete
+native table, with nonempty `CREATED`, aligned columns, trailing padding through
+the empty `RUN URL` cell, and the final newline. Present run URLs remain
+validated. Missing or failed status is still not completion evidence; the
+exclusive claim/status recheck and key-before-claim finalization remain required.
+
 Use the same organization/API route when reusing or stopping a lease. Workflow
 flags are still unnecessary for reuse; the provider checks stored native
 workflow/job/ref metadata. Token rotation within the same organization remains
