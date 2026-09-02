@@ -659,11 +659,7 @@ func applyStoredLeaseClaimConfig(cfg *Config, claim leaseClaim) {
 }
 
 func remoteJoin(cfg Config, parts ...string) string {
-	values := make([]string, 0, len(parts)+1)
-	if cfg.WorkRoot != "" {
-		values = append(values, cfg.WorkRoot)
-	}
-	values = append(values, parts...)
+	values := append([]string{cfg.WorkRoot}, parts...)
 	if cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeNormal {
 		return windowsPathJoin(values...)
 	}

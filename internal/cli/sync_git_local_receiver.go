@@ -89,7 +89,7 @@ func remoteGitLocalSeedCommand(workdir string, plan gitLocalSeedPlan, action str
 	script := `set -eu
 umask 077
 	` + strings.Replace(remotePlainManifestGitFunction(), "GIT_OPTIONAL_LOCKS=0", "GIT_NO_LAZY_FETCH=1 GIT_NO_REPLACE_OBJECTS=1 GIT_OPTIONAL_LOCKS=0", 1) + `
-workdir=` + shellQuote(workdir) + `
+workdir=` + shellPathQuote(workdir) + `
 expected_head=` + shellQuote(plan.Head) + `
 expected_tree=` + shellQuote(plan.Tree) + `
 expected_format=` + shellQuote(plan.ObjectFormat) + `

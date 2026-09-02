@@ -37,6 +37,11 @@ exact sync target or command working directory. An explicitly configured
 provider-specific work root or workdir takes precedence over the generic root
 and remains subject to that adapter's validation and path translation.
 
+POSIX workspace paths are literal paths: relative paths resolve from the remote
+shell's initial directory, including names beginning with `-`. Shell `CDPATH`
+and `OLDPWD` do not redirect workspace selection, and environment files or login
+startup commands cannot change the selected command directory.
+
 Actions hydration has final authority over the exact workspace. When a lease
 has a valid hydration marker, Crabbox uses the marker's canonical `WORKSPACE`
 for both sync and command execution instead of the base-derived candidate.
@@ -321,10 +326,13 @@ that would delete an unexpectedly large fraction of tracked files; set
 `CRABBOX_ALLOW_MASS_DELETIONS=1` to override it (this is also implied during
 Actions hydration).
 
-On the remote box, sync metadata (including the fingerprint) is stored under
-`.git/crabbox` when `.git` is a directory, and under `.crabbox` otherwise. The
-`.crabbox/` directory in your repository remains available for repository-owned
-files and config; Crabbox does not delete files there.
+At an exact Git worktree root, sync metadata (including the fingerprint) uses
+`git rev-parse --git-path crabbox`, including linked-worktree metadata. Other
+workspaces use `.crabbox`. Repository-owned files and config there are preserved.
+
+Actions hydration invalidates reusable fingerprints before setup and does not
+write a new one during its sync finalizer: setup can still change the workspace.
+A later ordinary sync must verify and certify its own completed transfer.
 
 ## Fingerprints and Git seeding
 

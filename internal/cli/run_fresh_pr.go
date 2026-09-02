@@ -110,10 +110,10 @@ func remoteFreshPRCheckoutCommand(workdir string, spec FreshPRSpec) string {
 	branch := fmt.Sprintf("crabbox-pr-%d", spec.Number)
 	ref := fmt.Sprintf("pull/%d/head:%s", spec.Number, branch)
 	script := "set -eu\n" +
-		"rm -rf " + shellQuote(workdir) + "\n" +
-		"mkdir -p " + shellQuote(parent) + "\n" +
-		"git clone --quiet --filter=blob:none " + shellQuote(repoURL) + " " + shellQuote(workdir) + "\n" +
-		"cd " + shellQuote(workdir) + "\n" +
+		"rm -rf " + shellPathQuote(workdir) + "\n" +
+		"mkdir -p " + shellPathQuote(parent) + "\n" +
+		"git clone --quiet --filter=blob:none " + shellQuote(repoURL) + " " + shellPathQuote(workdir) + "\n" +
+		"cd " + shellPathQuote(workdir) + "\n" +
 		"git fetch --quiet origin " + shellQuote(ref) + "\n" +
 		"git checkout --quiet " + shellQuote(branch) + "\n"
 	return "bash -lc " + shellQuote(script)
@@ -155,7 +155,7 @@ func localGitBinaryDiff(root string) ([]byte, error) {
 }
 
 func remoteApplyLocalPatchCommand(workdir string) string {
-	script := "set -eu\ncd " + shellQuote(workdir) + "\ngit apply --whitespace=nowarn -\n"
+	script := "set -eu\ncd " + shellPathQuote(workdir) + "\ngit apply --whitespace=nowarn -\n"
 	return "bash -lc " + shellQuote(script)
 }
 

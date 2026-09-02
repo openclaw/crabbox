@@ -29,7 +29,7 @@ func collectRemoteJUnitResults(ctx context.Context, target SSHTarget, workdir st
 }
 
 func remoteTouchResultsMarker(workdir string) string {
-	return "cd " + shellQuote(workdir) + " && marker=.crabbox/results-start; if git_marker=$(git rev-parse --git-path " + shellQuote(remoteResultsMarker) + " 2>/dev/null); then marker=$git_marker; fi; mkdir -p \"$(dirname \"$marker\")\" && : > \"$marker\""
+	return "cd " + shellPathQuote(workdir) + " && { marker=.crabbox/results-start; if git_marker=$(git rev-parse --git-path " + shellQuote(remoteResultsMarker) + " 2>/dev/null); then marker=$git_marker; fi; mkdir -p \"$(dirname \"$marker\")\" && : > \"$marker\"; }"
 }
 
 func resultSummaryLine(results *TestResultSummary) string {

@@ -615,7 +615,7 @@ try {
 	}
 	return fmt.Sprintf(
 		"cd %s && test -f %s && size=$(LC_ALL=C wc -c < %s) && printf '%s%%s\\n' \"$size\" && base64 < %s",
-		shellQuote(workdir),
+		shellPathQuote(workdir),
 		shellQuote(remotePath),
 		shellQuote(remotePath),
 		remoteDownloadHeaderPrefix,

@@ -167,7 +167,7 @@ fi
 
 func remoteReadyPoolScrub(workdir, ref, trustedRemoteURL string) string {
 	script := `set -euo pipefail
-workdir=` + shellQuote(workdir) + `
+workdir=` + shellPathQuote(workdir) + `
 ref=` + shellQuote(strings.TrimSpace(ref)) + `
 trusted_remote=` + shellQuote(strings.TrimSpace(trustedRemoteURL)) + `
 if [ -L "$workdir" ] || [ ! -d "$workdir" ]; then

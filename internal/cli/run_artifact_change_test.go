@@ -278,7 +278,7 @@ for arg do cmd="$arg"; done
 case "$cmd" in
   *TRANSPORT_BREAK*) exit 255 ;;
   *"__filesystem"*) CRABBOX_ARTIFACT_CHANGE_RUNNER_HELPER=1 exec ` + shellQuote(self) + ` -test.run='^TestArtifactChangeRunnerHelper$' ;;
-  mkdir\ -p*|cd\ *|bash\ -lc*|/bin/bash\ -lc*|*"uname -m"*|*"/tmp/crabbox-runtime-"*) exec sh -c "$cmd" ;;
+  mkdir\ -p*|cd\ *|\(cd\ *|bash\ -lc*|/bin/bash\ -lc*|*"uname -m"*|*"/tmp/crabbox-runtime-"*) exec sh -c "$cmd" ;;
 esac
 exit 0
 `

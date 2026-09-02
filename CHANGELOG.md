@@ -9,6 +9,7 @@
 ### Fixes
 
 - Preserve Vast leases' recorded heartbeat policy across fresh reads and upgrades, honor explicit idle-timeout changes without extending the stored TTL, and report stale claim updates as failures. [PR 2433](https://github.com/openclaw/crabbox/pull/2433).
+- Preserve literal relative and dash-prefixed workspace paths across shell commands and sync, and prepare immutable local Actions hydration before invalidating reusable state. [PR 1739](https://github.com/openclaw/crabbox/pull/1739). Thanks @steipete.
 - Daytona: omit unverified default class labels from snapshot forks and document opt-in workload concurrency and memory limits. [PR 2114](https://github.com/openclaw/crabbox/pull/2114). Thanks @Patrick-Erichsen.
 - Wait for fresh exe.dev VMs to advertise their SSH route, preserve its user, port, and ambient SSH configuration, and bound inventory refreshes by the bootstrap timeout while retaining verified rollback. [PR 2271](https://github.com/openclaw/crabbox/pull/2271). Thanks @salmonumbrella.
 - Preserve NVIDIA Brev deletion recovery claims when the CLI returns blank inventory output; only valid inventory can confirm a workspace is gone. [PR 2426](https://github.com/openclaw/crabbox/pull/2426). Thanks @vincentkoc.

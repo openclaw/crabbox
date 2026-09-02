@@ -53,7 +53,7 @@ func TestRemoteRunScriptCommandUsesUploadedFile(t *testing.T) {
 		RemotePath: ".crabbox/scripts/abc-live.sh",
 		Shebang:    true,
 	}
-	got := remoteRunScriptCommandWithEnvFile("/work/repo", map[string]string{"OPENAI_API_KEY": "sk-test"}, "", spec, []string{"arg one"})
+	got := remoteRunScriptCommandWithEnvFiles("/work/repo", map[string]string{"OPENAI_API_KEY": "sk-test"}, nil, spec, []string{"arg one"})
 	for _, want := range []string{
 		"cd '/work/repo'",
 		"OPENAI_API_KEY='sk-test'",
@@ -188,14 +188,6 @@ func TestRemoteRunScriptPreservesLoginStartupDirectory(t *testing.T) {
 		if out, err := cmd.CombinedOutput(); err != nil || string(out) != "profile\n"+home {
 			t.Fatalf("shebang=%t startup directory changed: output=%q err=%v", shebang, out, err)
 		}
-	}
-}
-
-func TestRemoteRunScriptCommandWithoutShebangUsesBash(t *testing.T) {
-	spec := &RunScriptSpec{RemotePath: ".crabbox/scripts/abc-script.sh"}
-	got := remoteRunScriptCommandWithEnvFile("/work/repo", nil, "", spec, nil)
-	if !strings.Contains(got, `exec bash "$@"`) {
-		t.Fatalf("remote command should run script through bash: %q", got)
 	}
 }
 

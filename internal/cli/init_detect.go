@@ -257,7 +257,7 @@ func subshellCommand(rel, command string) string {
 	if rel == "." {
 		return command
 	}
-	return "(cd " + shellQuote(rel) + " && " + command + ")"
+	return "(cd " + shellPathQuote(rel) + " && " + command + ")"
 }
 
 func hasMakeTestTarget(path string) bool {

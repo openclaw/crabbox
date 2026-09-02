@@ -1337,7 +1337,7 @@ func remoteFailureCaptureCommandWithLimits(workdir, remotePath, scriptPath strin
 func remoteFailureCaptureScript(workdir, remotePath, scriptPath string, limits runDownloadLimits) string {
 	var script bytes.Buffer
 	script.WriteString("set -eu\n")
-	script.WriteString("cd " + shellQuote(workdir) + "\n")
+	script.WriteString("cd " + shellPathQuote(workdir) + "\n")
 	script.WriteString("mkdir -p .crabbox\n")
 	script.WriteString("out=" + shellQuote(remotePath) + "\n")
 	script.WriteString("script=" + shellQuote(scriptPath) + "\n")
@@ -1498,7 +1498,7 @@ printf '%s\n' "$out"
 }
 
 func remoteRemoveFailureCaptureCommand(workdir, remotePath string) string {
-	script := "set -eu\ncd " + shellQuote(workdir) + "\nrm -f -- " + shellQuote(remotePath)
+	script := "set -eu\ncd " + shellPathQuote(workdir) + "\nrm -f -- " + shellQuote(remotePath)
 	return remotePortableShellInvocation(script, nil)
 }
 

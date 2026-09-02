@@ -229,7 +229,7 @@ func remoteCacheStats(enabled map[string]bool) string {
 }
 
 func remoteCacheWarmCommand(workdir string, env map[string]string, envFile string, command []string) string {
-	return remoteCommandWithEnvFile(workdir, env, envFile, command)
+	return remoteCommandWithEnvFiles(workdir, env, singleEnvFile(envFile), command)
 }
 
 func remoteCachePurge(kind string, enabled map[string]bool) string {

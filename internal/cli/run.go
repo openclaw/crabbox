@@ -1890,7 +1890,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		var err error
 		if plan == nil {
 			var prepared localActionsHydrationPlan
-			prepared, err = prepareLocalActionsHydration(cfg, repo, currentTarget, leaseID, cfg.Actions.Job, fields)
+			prepared, err = prepareLocalActionsHydration(ctx, cfg, repo, currentTarget, leaseID, cfg.Actions.Job, fields)
 			if err == nil {
 				plan = &prepared
 			}
@@ -2055,20 +2055,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	originDisposition := classifyGitOrigin(repo.RemoteURL)
 retrySync:
 	plainManifestMode := directorySync || (!localGitSeed && originDisposition != gitOriginRemoteAttemptSafe)
-	if fullResyncRequested && hydratedByActions && !*syncOnly {
-		if !autoHydrateActions {
-			return recordFailure(Exit(2, "--full-resync would invalidate the adopted Actions workspace for %s, but this run cannot rehydrate it; configure actions.workflow and omit --no-hydrate, or use --sync-only", leaseID))
-		}
-		localHydrateWorkdir := remoteJoin(cfg, leaseID, repo.Name)
-		if workdir != localHydrateWorkdir {
-			return recordFailure(Exit(2, "--full-resync cannot rehydrate adopted Actions workspace %s because local hydration uses %s; use --sync-only or hydrate the canonical workspace first", workdir, localHydrateWorkdir))
-		}
-		fields := actionsHydrateFields(leaseID, githubActionsLeaseLabel(leaseID), cfg.Actions.Job, 0, cfg.Actions.Fields)
-		plan, err := prepareLocalActionsHydration(cfg, repo, target, leaseID, cfg.Actions.Job, fields)
-		if err != nil {
-			return recordFailure(handleActionsHydrationFailure(target, err))
-		}
-		preparedActionsHydration = &plan
+	if fullResyncRequested && hydratedByActions && !*syncOnly && !autoHydrateActions {
+		return recordFailure(Exit(2, "--full-resync would invalidate the adopted Actions workspace for %s, but this run cannot rehydrate it; configure actions.workflow and omit --no-hydrate, or use --sync-only", leaseID))
 	}
 	if !*noSync {
 		syncStart := time.Now()
@@ -2102,6 +2090,21 @@ retrySync:
 			if resolved.FallbackReason != "" {
 				fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
 			}
+		}
+		if fullResyncRequested && hydratedByActions && !*syncOnly {
+			fields := actionsHydrateFields(leaseID, githubActionsLeaseLabel(leaseID), cfg.Actions.Job, 0, cfg.Actions.Fields)
+			plan, err := prepareLocalActionsHydration(ctx, cfg, repo, target, leaseID, cfg.Actions.Job, fields)
+			if err != nil {
+				return recordFailure(handleActionsHydrationFailure(target, err))
+			}
+			// Bind the configured path before comparing or mutating an adopted tree.
+			if workdir == remoteJoin(cfg, leaseID, repo.Name) {
+				workdir = plan.workdir
+			}
+			if workdir != plan.workdir {
+				return recordFailure(Exit(2, "--full-resync cannot rehydrate adopted Actions workspace %s because local hydration uses %s; use --sync-only or hydrate the canonical workspace first", workdir, plan.workdir))
+			}
+			preparedActionsHydration = &plan
 		}
 		if err := prepareRunRuntime(); err != nil {
 			return recordFailure(err)

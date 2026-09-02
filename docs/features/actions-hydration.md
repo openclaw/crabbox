@@ -64,6 +64,12 @@ Use `--sync-only` when the intent is to replace the synced tree without
 rehydrating or running a command. Reused leases keep this sequence inside the
 workspace lifecycle owner.
 
+Local hydration captures workflow and composite-action sources, resolves the
+remote workspace, and renders its setup script before invalidating markers or
+sync fingerprints. Invalid or unsupported selected steps therefore fail before
+those mutations; source edits during workspace resolution do not change the
+prepared setup.
+
 ## Local hydration details
 
 For local hydration Crabbox picks the workflow job to run in this order:
