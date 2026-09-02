@@ -105,6 +105,11 @@ network-address readiness do not hold that fence, so a slow new instance does
 not delay release of another lease. Every regional ingress attempt rechecks the
 creating lease and derives access from current lease records before writing.
 
+If a create attempt is canceled or its lease is released during AWS region
+preparation, the in-flight create returns `409 create_canceled` with the reason.
+It does not continue into another region or report an empty provider error.
+Cancellation does not confirm deletion; inspect the lease's cleanup status separately.
+
 ### Cleanup retries
 
 If deleting the cloud server during expiry fails, the lease stays `active` and

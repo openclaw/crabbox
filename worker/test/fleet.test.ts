@@ -20716,55 +20716,84 @@ describe("fleet lease identity and idle", () => {
     ).toEqual(["198.51.100.20/32"]);
   });
 
-  it("rejects a canceled AWS regional retry before it writes ingress", async () => {
-    const nextRegionStarted = deferred<void>();
-    const finishNextRegionPreparation = deferred<void>();
-    const { fleet, headers, create, creatingID, createAttemptID, requests } = awsIngressTestFleet(
-      async (action, _params, region) => {
-        if (action === "RunInstances" && region === "eu-west-1") {
-          return ec2XMLResponse(
-            "<Response><Errors><Error><Code>InsufficientInstanceCapacity</Code></Error></Errors></Response>",
-            400,
-          );
-        }
-        if (action === "DescribeKeyPairs" && region === "us-east-1") {
-          nextRegionStarted.resolve();
-          await finishNextRegionPreparation.promise;
-        }
-        return undefined;
-      },
-    );
-    const creating = create({
-      capacity: { market: "on-demand", fallback: "none", regions: ["eu-west-1", "us-east-1"] },
-    });
-    try {
-      await Promise.race([
-        nextRegionStarted.promise,
-        creating.then(async (response) => {
-          throw new Error(await response.text());
-        }),
-      ]);
-      const canceled = await fleet.fetch(
-        request("POST", `/v1/leases/${creatingID}/cancel-create`, {
-          headers,
-          body: { createAttemptID },
-        }),
+  it.each([
+    { action: "cancel-create", region: "eu-west-1" },
+    { action: "cancel-create", region: "us-east-1" },
+    { action: "release", region: "eu-west-1" },
+    { action: "release", region: "us-east-1" },
+  ] as const)(
+    "reports AWS $action in $region before writing ingress",
+    async ({ action, region }) => {
+      const preparationStarted = deferred<void>();
+      const finishPreparation = deferred<void>();
+      const { fleet, headers, create, creatingID, createAttemptID, requests } = awsIngressTestFleet(
+        async (operation, _params, requestRegion) => {
+          if (operation === "RunInstances" && requestRegion === "eu-west-1") {
+            return ec2XMLResponse(
+              "<Response><Errors><Error><Code>InsufficientInstanceCapacity</Code></Error></Errors></Response>",
+              400,
+            );
+          }
+          if (operation === "DescribeKeyPairs" && requestRegion === region) {
+            preparationStarted.resolve();
+            await finishPreparation.promise;
+          }
+          return undefined;
+        },
       );
-      expect(canceled.status).toBe(200);
-      finishNextRegionPreparation.resolve();
-      expect((await creating).status).not.toBe(201);
-      expect(
-        requests.filter(
-          ({ action, region }) =>
-            region === "us-east-1" &&
-            ["AuthorizeSecurityGroupIngress", "RunInstances"].includes(action),
-        ),
-      ).toEqual([]);
-    } finally {
-      finishNextRegionPreparation.resolve();
-      await Promise.allSettled([creating]);
-    }
-  });
+      const creating = create(
+        {
+          capacity: { market: "on-demand", fallback: "none", regions: ["eu-west-1", "us-east-1"] },
+        },
+        action === "release" ? "PUT" : "POST",
+      );
+      try {
+        await Promise.race([
+          preparationStarted.promise,
+          creating.then(async (response) => {
+            throw new Error(await response.clone().text());
+          }),
+        ]);
+        const canceled = await fleet.fetch(
+          request("POST", `/v1/leases/${creatingID}/${action}`, {
+            headers,
+            body: action === "release" ? { delete: true } : { createAttemptID },
+          }),
+        );
+        expect(canceled.status).toBe(200);
+        finishPreparation.resolve();
+        const response = await creating;
+        expect({ status: response.status, body: await response.json() }).toEqual({
+          status: 409,
+          body: {
+            error: "create_canceled",
+            message: "create attempt was canceled before completion",
+          },
+        });
+        expect(
+          requests.filter(
+            (providerRequest) =>
+              providerRequest.region === region &&
+              ["AuthorizeSecurityGroupIngress", "RunInstances"].includes(providerRequest.action),
+          ),
+        ).toEqual([]);
+        const observed = await fleet.fetch(request("GET", `/v1/leases/${creatingID}`, { headers }));
+        expect(await observed.json()).toMatchObject({
+          lease: {
+            state: "released",
+            cloudID: "",
+            releaseDeletesServer: true,
+            cleanupStatus: "failed",
+            cleanupError: "create attempt was canceled before completion",
+            provisioningResourceMayExist: true,
+          },
+        });
+      } finally {
+        finishPreparation.resolve();
+        await Promise.allSettled([creating]);
+      }
+    },
+  );
 
   it("reconciles AWS ingress after the final overlapping create drains", async () => {
     const storage = new MemoryStorage();
@@ -38552,13 +38581,12 @@ function awsIngressTestFleet(
       expiresAt: new Date(Date.now() + 600_000).toISOString(),
     }),
   );
-  const create = (overrides: Partial<LeaseRequest> = {}) =>
+  const create = (overrides: Partial<LeaseRequest> = {}, method: "POST" | "PUT" = "POST") =>
     fleet.fetch(
-      request("POST", "/v1/leases", {
+      request(method, method === "PUT" ? `/v1/leases/${creatingID}` : "/v1/leases", {
         headers: { ...headers, "x-crabbox-admin": "true", "cf-connecting-ip": "198.51.100.20" },
         body: {
-          leaseID: creatingID,
-          createAttemptID,
+          ...(method === "POST" ? { leaseID: creatingID, createAttemptID } : {}),
           provider: "aws",
           awsRegion: "eu-west-1",
           awsSGID: "sg-shared",
