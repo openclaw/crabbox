@@ -99,31 +99,56 @@ BOX_ORG
    state through `box info --json`.
 4. `crabbox stop` requires the exact, unchanged local claim and freshly matching
    native identity before remote teardown or each native mutation. It releases
-   the Box with `box stop --json`, deletes it with `box delete --json --yes`, and
-   removes the claim only after successful deletion completion and complete
-   `box list --all` inventory confirms absence. The claim stays locked through
+   the Box with `box stop --json`, requests deletion with `box delete --json --yes`,
+   and validates the returned deletion operation's ID, kind, and exact Box target.
+   Crabbox polls `box deletion status <operation-id>` while the operation is
+   pending, processing, or blocked. It removes the claim only after that exact
+   operation reports `completed` with a valid completion timestamp and complete
+   `box list --all` inventory confirms absence. A successful native process exit
+   alone does not prove deletion completion. The claim stays locked through
    teardown, deletion, retries, confirmation, and local removal. If the
    service temporarily refuses deletion until a recent snapshot exists,
    Crabbox shortens the Box TTL, waits for its managed stop transition, and
    retries deletion for up to two minutes, within a three-minute overall release
-   budget that also honors caller cancellation. The shared native CLI SSH key
-   is retained.
+   budget that also honors caller cancellation, including deletion-operation
+   polling. Missing, malformed, or changed operation evidence, failed operation
+   lookups, and cancellation retain the claim without recording completion. The
+   shared native CLI SSH key is retained.
 
-If native deletion completes but final inventory confirmation fails or is
-canceled, Crabbox durably records that completed deletion in the still-locked
-claim before returning the error. The record is bound to the original claim,
-including its provider scope, Box ID, creation timestamp, and repository owner.
+If this release observes a valid native deletion acceptance but cannot finish
+waiting because of a timeout, cancellation, or operation lookup failure, it
+durably records the exact operation ID and its claim binding before returning
+the error. The binding covers the original provider scope, Box ID, creation
+timestamp, and repository owner. This records acceptance, not completion. A later
+`crabbox stop` first reads that same operation. Pending, processing, or blocked
+operations retain the claim without normal Box lookups, SSH teardown, or another
+deletion request. Only a matching operation that explicitly reports `completed`
+with a valid completion timestamp can proceed to `box info` not-found and
+complete inventory absence checks. Crabbox repeats these operation and absence
+checks inside the actual release fence before removing the claim; an earlier
+lookup during lease resolution does not authorize finalization.
+
+If Crabbox finishes waiting for native deletion but final inventory confirmation
+fails or is canceled, it durably records that completed deletion in the
+still-locked claim before returning the error. The record is bound to the original
+claim, including its provider scope, Box ID, creation timestamp, and repository owner.
 A later `crabbox stop` can finish cleanup without repeating native deletion only
 when that record still matches, `box info` reports not-found, and complete native
 inventory confirms absence. Failed lookups, changed claims, or an observable Box
 retain the claim.
 
+Completion records from earlier unreleased builds that proved only native
+request acceptance are rejected, not upgraded into operation-completion evidence.
+
 Not-found and empty inventory alone are not deletion-completion evidence: ASCII
 can hide a Box while its deletion operation is still pending or blocked. Claims
-without Crabbox's completion record stay retained, including external deletions,
-interrupted native deletion commands, and a process termination before the record
-was durably written. There is no automatic adoption of an external deletion
-receipt or conversion of an old claim into completed-deletion authority.
+without either Crabbox's completion record or its bound accepted-operation
+reference stay retained, including external deletions, native commands interrupted
+before valid acceptance was observed, and a process termination before the record
+was durably written. Missing, malformed, changed, or incomplete record bindings
+are rejected. There is no automatic adoption of an external deletion receipt,
+replacement of a recorded operation, or conversion of an old claim into
+completed-deletion authority.
 
 Raw IDs, provider names, and legacy claims without the full ownership binding
 remain inspectable but cannot authorize reuse or deletion. Missing or changed
@@ -131,7 +156,11 @@ identity, failed lookups, incomplete inventory, and uncertain deletion preserve
 the local claim. There is no implicit adoption or legacy upgrade; inspect such
 resources with the native CLI and manage them explicitly there after verifying
 ownership. Setup rollback likewise targets only the original confirmed creation
-attempt and retains resources when ownership or completion cannot be proven.
+attempt. If that attempt already published an exact claim, rollback preserves
+accepted-operation references and completed-deletion records in that same claim
+for a later safe `crabbox stop` retry. Unpublished attempts keep their separate
+expected-absence guard; rollback never adopts a replacement claim. Resources are
+retained when ownership or completion cannot be proven.
 
 ## Limitations
 

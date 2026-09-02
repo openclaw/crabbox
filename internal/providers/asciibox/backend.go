@@ -111,7 +111,16 @@ func (b *backend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget,
 func (b *backend) rollbackBox(ctx context.Context, client api, leaseID string, box boxData, claim LeaseClaim, exists bool) error {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), boxReleaseTimeout)
 	defer cancel()
-	return core.CleanupLeaseClaimIfUnchangedAfter(leaseID, claim, exists, func() error {
+	if exists {
+		if claim.LeaseID != leaseID || box.ID != box.createdID || !concreteBoxID(box.createdID) {
+			return exit(2, "ascii-box rollback has no matching original publication identity")
+		}
+		if err := validateBoxIdentity(box, boxFromClaim(claim)); err != nil {
+			return err
+		}
+		return releaseClaimedBox(cleanupCtx, client, claim, nil)
+	}
+	return core.CleanupLeaseClaimIfUnchangedAfter(leaseID, claim, false, func() error {
 		if box.ID != box.createdID || !concreteBoxID(box.createdID) {
 			return exit(2, "ascii-box rollback has no original creation identity")
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -15,6 +16,10 @@ import (
 
 const boxCreationLabel = "ascii_box_created_at"
 const boxDeletionLabel = "ascii_box_deletion_completed"
+const boxDeletionBindingDomain = "completed-native-operation/v1\x00"
+const boxDeletionOperationLabel = "ascii_box_deletion_operation"
+const boxDeletionOperationBindingLabel = "ascii_box_deletion_operation_binding"
+const boxDeletionOperationBindingDomain = "accepted-native-operation/v1\x00"
 const boxReleaseTimeout = 3 * time.Minute
 
 func asciiBoxOrg() string { return blank(strings.TrimSpace(os.Getenv("BOX_ORG")), "personal") }
@@ -77,25 +82,53 @@ func boxClaimBinding(cfg Config, claim LeaseClaim) (shared.ClaimBinding, error) 
 	if recorded, ok := claim.Labels[boxDeletionLabel]; ok && recorded != boxDeletionBinding(claim) {
 		return want, exit(2, "ascii-box completed deletion witness does not match its claim; retaining claim")
 	}
+	if _, err := boxDeletionOperationFromClaim(claim); err != nil {
+		return want, err
+	}
 	return want, nil
 }
 
 func boxFromClaim(claim LeaseClaim) boxData {
+	operationID, _ := boxDeletionOperationFromClaim(claim)
 	return boxData{
 		ID: claim.CloudID, CreatedAt: claim.Labels[boxCreationLabel],
-		deletionCompleted: claim.Labels[boxDeletionLabel] == boxDeletionBinding(claim),
+		deletionCompleted:   claim.Labels[boxDeletionLabel] == boxDeletionBinding(claim),
+		deletionOperationID: operationID,
 	}
 }
 
 func boxDeletionBinding(claim LeaseClaim) string {
+	// Earlier unreleased witnesses proved only native request acceptance.
+	return fmt.Sprintf("%x", sha256.Sum256(append([]byte(boxDeletionBindingDomain), boxDeletionClaimBytes(claim)...)))
+}
+
+func boxDeletionOperationBinding(claim LeaseClaim, operationID string) string {
+	return fmt.Sprintf("%x", sha256.Sum256(append([]byte(boxDeletionOperationBindingDomain+operationID+"\x00"), boxDeletionClaimBytes(claim)...)))
+}
+
+func boxDeletionClaimBytes(claim LeaseClaim) []byte {
 	// The durable claim transaction refreshes these two fields when recording
-	// completion. All ownership, scope, and other claim content stays bound.
+	// deletion evidence. All ownership, scope, and other claim content stays bound.
 	claim.Revision = ""
 	claim.LastUsedAt = ""
 	claim.Labels = shared.CloneLabels(claim.Labels)
 	delete(claim.Labels, boxDeletionLabel)
+	delete(claim.Labels, boxDeletionOperationLabel)
+	delete(claim.Labels, boxDeletionOperationBindingLabel)
 	encoded, _ := json.Marshal(claim)
-	return fmt.Sprintf("%x", sha256.Sum256(encoded))
+	return encoded
+}
+
+func boxDeletionOperationFromClaim(claim LeaseClaim) (string, error) {
+	operationID, hasID := claim.Labels[boxDeletionOperationLabel]
+	binding, hasBinding := claim.Labels[boxDeletionOperationBindingLabel]
+	if !hasID && !hasBinding {
+		return "", nil
+	}
+	if !hasID || !hasBinding || !boxDeletionIDRE.MatchString(operationID) || binding != boxDeletionOperationBinding(claim, operationID) {
+		return "", exit(2, "ascii-box deletion operation reference does not match its claim; retaining claim")
+	}
+	return operationID, nil
 }
 
 func resolveOwnedBox(cfg Config, identifier string) (LeaseClaim, error) {
@@ -158,7 +191,7 @@ func (Provider) PrepareLeaseClaimEndpoint(existing LeaseClaim, provider, slug st
 		return Server{}, exit(2, "refusing to retarget ascii-box lease %s", existing.LeaseID)
 	}
 	labels := shared.CloneLabels(server.Labels)
-	for _, key := range []string{"provider", "box_id", "ascii_box_scope", boxCreationLabel, boxDeletionLabel} {
+	for _, key := range []string{"provider", "box_id", "ascii_box_scope", boxCreationLabel, boxDeletionLabel, boxDeletionOperationLabel, boxDeletionOperationBindingLabel} {
 		original := existing.Labels[key]
 		if original != "" && labels[key] != "" && labels[key] != original {
 			return Server{}, exit(2, "ascii-box lease %s changed %s", existing.LeaseID, key)
@@ -185,12 +218,24 @@ func releaseClaimedBox(ctx context.Context, client api, claim LeaseClaim, before
 			nativeCompleted = true
 		})
 	}, func(releaseErr error) (map[string]string, bool) {
-		if releaseErr != nil && !nativeCompleted {
+		if nativeCompleted || releaseErr == nil {
+			labels := shared.CloneLabels(claim.Labels)
+			labels[boxDeletionLabel] = boxDeletionBinding(claim)
+			return labels, releaseErr == nil
+		}
+		var incomplete *boxDeletionIncompleteError
+		if !errors.As(releaseErr, &incomplete) || incomplete == nil || validateBoxDeletionOperation(incomplete.operation, claim.CloudID, "") != nil {
+			return nil, false
+		}
+		existingOperation, err := boxDeletionOperationFromClaim(claim)
+		if err != nil || existingOperation != "" && existingOperation != incomplete.operation.ID {
 			return nil, false
 		}
 		labels := shared.CloneLabels(claim.Labels)
-		labels[boxDeletionLabel] = boxDeletionBinding(claim)
-		return labels, releaseErr == nil
+		delete(labels, boxDeletionLabel)
+		labels[boxDeletionOperationLabel] = incomplete.operation.ID
+		labels[boxDeletionOperationBindingLabel] = boxDeletionOperationBinding(claim, incomplete.operation.ID)
+		return labels, false
 	})
 	return err
 }
@@ -271,6 +316,24 @@ func releaseExactBox(ctx context.Context, client api, expected boxData, beforeRe
 func exactBoxForRelease(ctx context.Context, client api, expected boxData) (boxData, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return boxData{}, false, err
+	}
+	if expected.deletionOperationID != "" {
+		operation, err := client.GetDeletionOperation(ctx, expected.ID, expected.deletionOperationID)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return boxData{}, false, ctxErr
+		}
+		if err != nil {
+			return boxData{}, false, fmt.Errorf("ascii-box deletion operation lookup; retaining claim: %w", err)
+		}
+		if err := validateBoxDeletionOperation(operation, expected.ID, expected.deletionOperationID); err != nil {
+			return boxData{}, false, err
+		}
+		if operation.Status != "completed" {
+			return boxData{}, false, exit(2, "ascii-box deletion operation %s is %s; retaining claim", operation.ID, operation.Status)
+		}
+		// Recheck the recorded operation inside the release fence; a reference
+		// or an earlier resolution read is not completion authority.
+		expected.deletionCompleted = true
 	}
 	fresh, err := client.GetBox(ctx, expected.ID)
 	if ctxErr := ctx.Err(); ctxErr != nil {
