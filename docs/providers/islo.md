@@ -53,6 +53,14 @@ crabbox stop --provider islo --id isb_crabbox-repo-abcdef
 Read-only status lookup can still use a canonical sandbox name without a claim.
 Delete, pause, resume, SSH reuse, and delegated reuse cannot.
 
+A sandbox name is an addressing convenience, not the sandbox's identity: the
+immutable Islo sandbox `id` is. That Islo `id` is not what Crabbox's `--id`
+flag takes — `--id` accepts a Crabbox lease id, a Crabbox-generated sandbox
+name, or a slug, and rejects anything else with exit code 4. Existence is
+decided by a get on the exact sandbox, never by the eventually consistent list
+endpoint. See
+[identity and absence semantics](../features/islo.md#identity-and-absence-semantics).
+
 ## Auth
 
 ```sh
@@ -160,8 +168,8 @@ omission is not proof. Only confirmed cleanup removes the local claim.
 
 These checks are not an atomic delete-by-ID guarantee: the API's name-only
 DELETE can still race with an out-of-band resource replacement after the read.
-Legacy claims without an ID retain their weaker name-only cleanup contract and
-report `name-404-unbound` with a warning.
+Legacy claims without an ID can fall back to the weaker `name-404-unbound`
+proof with a warning when no resource was positively identified.
 
 When neither identity lookup can tie the recorded name to the claimed resource -
 during an API read outage, for instance - `stop` refuses to delete, keeps the
@@ -180,7 +188,10 @@ running and billable.
 
 - SSH: yes for direct login to existing Crabbox-created sandboxes. `crabbox ssh
   --provider islo --id <slug>` renders `ssh islo@<sandbox>.islo` on port 22
-  by default. Crabbox still does not use SSH for Islo `run` or sync.
+  by default. Crabbox still does not use SSH for Islo `run` or sync: its adapter
+  does not provision an SSH endpoint or manage a per-lease SSH credential,
+  expiry, and revocation. See
+  [why the provider kind stays delegated-run](../features/islo.md#why-the-provider-kind-stays-delegated-run).
 - Crabbox sync: yes, archive sync through the Islo files-archive API, with a
   base64 exec-upload fallback.
 - URL bridge: yes. Exposed ports become public HTTPS shares through Islo's
