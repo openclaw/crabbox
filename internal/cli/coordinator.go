@@ -245,6 +245,13 @@ type CoordinatorUsageResponse struct {
 	Limits CoordinatorCostLimits   `json:"limits"`
 }
 
+type CoordinatorCapacityResponse struct {
+	Owner          string `json:"owner"`
+	ActiveLeases   int    `json:"activeLeases"`
+	EffectiveLimit int    `json:"effectiveLimit"`
+	ObservedAt     string `json:"observedAt"`
+}
+
 type CoordinatorMarketplaceStatusResponse struct {
 	Marketplace CoordinatorMarketplaceStatus `json:"marketplace"`
 	Owner       string                       `json:"owner,omitempty"`
@@ -1513,6 +1520,32 @@ func (c *CoordinatorClient) doTypedReadyPool(ctx context.Context, method, key, a
 		return fmt.Errorf("typed ready pools are unsupported by this coordinator: %w", err)
 	}
 	return err
+}
+
+func (c *CoordinatorClient) Capacity(ctx context.Context) (CoordinatorCapacityResponse, error) {
+	// Pointers distinguish an explicit zero (limit off) from a missing field.
+	var payload struct {
+		Owner          string `json:"owner"`
+		ActiveLeases   *int   `json:"activeLeases"`
+		EffectiveLimit *int   `json:"effectiveLimit"`
+		ObservedAt     string `json:"observedAt"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/capacity", nil, &payload); err != nil {
+		var httpErr CoordinatorHTTPError
+		if errors.As(err, &httpErr) && (httpErr.StatusCode == http.StatusNotFound || httpErr.StatusCode == http.StatusMethodNotAllowed) {
+			return CoordinatorCapacityResponse{}, fmt.Errorf("capacity is unsupported by this coordinator: %w", err)
+		}
+		return CoordinatorCapacityResponse{}, err
+	}
+	observedAt, err := time.Parse(time.RFC3339Nano, payload.ObservedAt)
+	if strings.TrimSpace(payload.Owner) == "" || payload.ActiveLeases == nil || *payload.ActiveLeases < 0 ||
+		payload.EffectiveLimit == nil || *payload.EffectiveLimit < 0 || err != nil || !strings.HasSuffix(payload.ObservedAt, "Z") || observedAt.IsZero() {
+		return CoordinatorCapacityResponse{}, fmt.Errorf("invalid capacity response from coordinator")
+	}
+	return CoordinatorCapacityResponse{
+		Owner: payload.Owner, ActiveLeases: *payload.ActiveLeases,
+		EffectiveLimit: *payload.EffectiveLimit, ObservedAt: payload.ObservedAt,
+	}, nil
 }
 
 func (c *CoordinatorClient) Usage(ctx context.Context, scope, owner, org, month string) (CoordinatorUsageResponse, error) {

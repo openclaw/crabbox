@@ -48,6 +48,7 @@ type crabboxKongCLI struct {
 	Unshare     unshareKongCmd     `cmd:"" passthrough:"" help:"Remove lease sharing."`
 	Image       imageKongCmd       `cmd:"" help:"Create provider images and promote brokered AWS runner images."`
 	Usage       usageKongCmd       `cmd:"" passthrough:"" help:"Show cost and usage estimates by user, org, or fleet."`
+	Capacity    capacityKongCmd    `cmd:"" passthrough:"" help:"Show self-owner admission count and effective owner limit."`
 	Marketplace marketplaceKongCmd `cmd:"" help:"Preview the Crabbox credits gateway and smart routing quotes."`
 	Admin       adminKongCmd       `cmd:"" help:"Lease admin controls for trusted operators."`
 	Actions     actionsKongCmd     `cmd:"" help:"Register GitHub Actions runners or dispatch workflows."`
@@ -254,6 +255,9 @@ type unshareKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type usageKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type capacityKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type marketplaceKongCmd struct {
@@ -683,10 +687,11 @@ func (c *heartbeatKongCmd) Run(ctx context.Context, app App) error { return app.
 func (c *claimsListKongCmd) Run(_ context.Context, app App) error {
 	return app.claimsList(stripKongCommandPath(c.Args, "claims", "list"))
 }
-func (c *listKongCmd) Run(ctx context.Context, app App) error    { return app.list(ctx, c.Args) }
-func (c *shareKongCmd) Run(ctx context.Context, app App) error   { return app.share(ctx, c.Args) }
-func (c *unshareKongCmd) Run(ctx context.Context, app App) error { return app.unshare(ctx, c.Args) }
-func (c *usageKongCmd) Run(ctx context.Context, app App) error   { return app.usage(ctx, c.Args) }
+func (c *listKongCmd) Run(ctx context.Context, app App) error     { return app.list(ctx, c.Args) }
+func (c *shareKongCmd) Run(ctx context.Context, app App) error    { return app.share(ctx, c.Args) }
+func (c *unshareKongCmd) Run(ctx context.Context, app App) error  { return app.unshare(ctx, c.Args) }
+func (c *usageKongCmd) Run(ctx context.Context, app App) error    { return app.usage(ctx, c.Args) }
+func (c *capacityKongCmd) Run(ctx context.Context, app App) error { return app.capacity(ctx, c.Args) }
 func (c *marketplaceStatusKongCmd) Run(ctx context.Context, app App) error {
 	return app.marketplaceStatus(ctx, c.Args)
 }

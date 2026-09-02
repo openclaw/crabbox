@@ -399,6 +399,7 @@ import {
   isCoordinatorProvider,
 } from "./types";
 import {
+  activeLeaseLimitForOwner,
   addLeaseToCostLimitUsage,
   costLimits,
   createCostLimitUsage,
@@ -407,6 +408,7 @@ import {
   requestOrg,
   usageSummary,
   type CostLimitUsage,
+  type OwnerCapacity,
 } from "./usage";
 import { WebVNCCredentialHandoffs, type WebVNCCredentialHandoffResult } from "./webvnc-handoff";
 
@@ -1168,6 +1170,11 @@ export class FleetCoordinator {
         const authenticated = await this.authenticatedDeviceRequest(request);
         if (authenticated instanceof Response) return authenticated;
         request = authenticated;
+      }
+      // The lifecycle request queue already holds the admission snapshot boundary.
+      // This read must not trigger bridge reconciliation or other maintenance.
+      if (request.method === "GET" && pathParts(request).join("/") === "v1/capacity") {
+        return await this.capacity(request);
       }
       await this.reconcileAdminGrantVersion(request);
       if (!(await this.restoredBridgesReady())) {
@@ -14749,6 +14756,26 @@ export class FleetCoordinator {
     });
   }
 
+  private async capacity(request: Request): Promise<Response> {
+    if (new URL(request.url).searchParams.size > 0) {
+      return json({ error: "capacity does not accept query parameters" }, { status: 400 });
+    }
+    const now = new Date();
+    const owner = requestOwner(request);
+    const { costUsage } = await this.mergedLeaseAdmissionState(
+      { owner, org: requestOrg(request, this.env) },
+      now,
+      await this.readProviderAccessRecords(now.getTime()),
+    );
+    const capacity: OwnerCapacity = {
+      owner,
+      activeLeases: costUsage.ownerActiveLeases,
+      effectiveLimit: activeLeaseLimitForOwner(costLimits(this.env), owner),
+      observedAt: now.toISOString(),
+    };
+    return json(capacity);
+  }
+
   private async usage(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const requestedScope = url.searchParams.get("scope") ?? "user";
@@ -17345,6 +17372,15 @@ export class FleetCoordinator {
     excludedLeaseID?: string,
   ): Promise<{ accessLeases: LeaseRecord[]; costUsage: CostLimitUsage }> {
     const providerAccessLeases = await this.providerAccessRecords();
+    return this.mergedLeaseAdmissionState(candidate, now, providerAccessLeases, excludedLeaseID);
+  }
+
+  private async mergedLeaseAdmissionState(
+    candidate: Pick<LeaseRecord, "owner" | "org">,
+    now: Date,
+    providerAccessLeases: LeaseRecord[],
+    excludedLeaseID?: string,
+  ): Promise<{ accessLeases: LeaseRecord[]; costUsage: CostLimitUsage }> {
     const providerAccessByID = new Map(providerAccessLeases.map((lease) => [lease.id, lease]));
     const accessLeases: LeaseRecord[] = [];
     const costUsage = createCostLimitUsage(candidate, now);
@@ -17460,11 +17496,19 @@ export class FleetCoordinator {
     }
   }
 
+  private async readProviderAccessRecords(now: number): Promise<LeaseRecord[]> {
+    const active: LeaseRecord[] = [];
+    await this.visitStorageRecords<LeaseRecord>(providerAccessPrefix(), (record) => {
+      if (isActiveProviderAccessRecord(record, now)) active.push(record);
+    });
+    return active;
+  }
+
   private async providerAccessRecords(): Promise<LeaseRecord[]> {
     const now = Date.now();
     const active: LeaseRecord[] = [];
     await this.visitStorageRecords<LeaseRecord>(providerAccessPrefix(), async (record, key) => {
-      if (leaseIsLive(record) && Date.parse(record.expiresAt) > now) {
+      if (isActiveProviderAccessRecord(record, now)) {
         active.push(record);
         return;
       }
@@ -24071,6 +24115,10 @@ function activeSlugCollision(
       lease.org === org &&
       normalizeLeaseSlug(lease.slug) === slug,
   );
+}
+
+function isActiveProviderAccessRecord(lease: LeaseRecord, now: number): boolean {
+  return leaseIsLive(lease) && Date.parse(lease.expiresAt) > now;
 }
 
 function leaseIsLive(lease: LeaseRecord): boolean {

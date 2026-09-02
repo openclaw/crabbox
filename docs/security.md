@@ -138,6 +138,14 @@ their leases, including runs that later replace the active backing lease. See
 [auth and admin](features/auth-admin.md) and [broker auth
 routing](features/broker-auth-routing.md) for the full flow.
 
+The separate [`GET /v1/capacity`](commands/capacity.md) diagnostic is a narrow
+exception: normal authentication resolves the self-owner, including for admin
+requests, and the response reveals only that owner's admission count across all
+months/orgs, effective owner limit, resolved identity, and snapshot time. Query
+parameters are rejected. This does not widen monthly usage or lease visibility,
+expose membership or lease records, or reserve/approve allocation. The diagnostic
+performs no domain-storage writes, cleanup, alarm scheduling, or provider calls.
+
 ### Bearer-to-Portal WebVNC bootstrap
 
 `crabbox webvnc --open` does not require GitHub OAuth when the CLI is already
