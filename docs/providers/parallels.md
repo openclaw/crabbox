@@ -82,6 +82,25 @@ For macOS templates, use a user with SSH login permission and a writable
 templates, configure OpenSSH Server and PowerShell. For Windows WSL2 templates,
 make sure `wsl.exe` works for the SSH user.
 
+### macOS desktop credentials
+
+For `--desktop` leases, configure the real macOS guest account password with
+`CRABBOX_PARALLELS_PASSWORD` or `parallels.password` in the mode-0600 user
+configuration printed by `crabbox config path`. Crabbox uses that credential
+locally for Apple/ARD Screen Sharing authentication. It is never written to the
+guest, passed on the command line, or used to reset the macOS account password.
+There is intentionally no password flag.
+
+The Screen Sharing username is the resolved lease SSH user, normally
+`parallels.user`. Automatic login is optional image configuration: it lets a
+desktop lease reach Finder without operator input, while the account password
+continues to protect Screen Sharing. Do not put `parallels.password` in
+repository `crabbox.yaml` or `.crabbox.yaml`; repository configuration is not
+trusted to select this credential.
+
+When no account password is configured, the existing generated legacy VNC
+credential remains available for backward compatibility.
+
 ### macOS without Parallels Tools guest execution
 
 Some Apple-silicon macOS guests can boot normally while `prlctl` reports no IP
@@ -223,6 +242,7 @@ CRABBOX_PARALLELS_HOST_KEY
 CRABBOX_PARALLELS_BOOTSTRAP_KEY
 CRABBOX_PARALLELS_VM_ROOT
 CRABBOX_PARALLELS_USER
+CRABBOX_PARALLELS_PASSWORD
 CRABBOX_PARALLELS_WORK_ROOT
 CRABBOX_PARALLELS_STARTUP_TIMEOUT
 ```

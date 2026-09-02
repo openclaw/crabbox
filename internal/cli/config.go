@@ -687,6 +687,7 @@ type ParallelsConfig struct {
 	BootstrapKey     string
 	VMRoot           string
 	User             string
+	Password         string
 	WorkRoot         string
 	StartupTimeout   time.Duration
 	Templates        map[string]ParallelsTemplateConfig
@@ -2443,6 +2444,7 @@ type fileParallelsConfig struct {
 	BootstrapKey     string                                 `yaml:"bootstrapKey,omitempty"`
 	VMRoot           string                                 `yaml:"vmRoot,omitempty"`
 	User             string                                 `yaml:"user,omitempty"`
+	Password         string                                 `yaml:"password,omitempty"`
 	WorkRoot         string                                 `yaml:"workRoot,omitempty"`
 	StartupTimeout   string                                 `yaml:"startupTimeout,omitempty"`
 	Templates        map[string]fileParallelsTemplateConfig `yaml:"templates,omitempty"`
@@ -3877,6 +3879,13 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		}
 		if file.Parallels.User != "" {
 			cfg.Parallels.User = file.Parallels.User
+			recordConfigInput(cfg, "parallels", inputSource, true)
+		}
+		// The macOS account password authenticates the local ARD viewer. A
+		// repository must not supply or replace it; use trusted user config or
+		// the environment, matching the Tart desktop credential boundary.
+		if trusted && file.Parallels.Password != "" {
+			cfg.Parallels.Password = file.Parallels.Password
 			recordConfigInput(cfg, "parallels", inputSource, true)
 		}
 		if file.Parallels.WorkRoot != "" {
@@ -5986,6 +5995,7 @@ func applyEnv(cfg *Config) error {
 	cfg.Parallels.BootstrapKey = strings.TrimSpace(configInputEnvString(cfg, "parallels", cfg.Parallels.BootstrapKey, "CRABBOX_PARALLELS_BOOTSTRAP_KEY"))
 	cfg.Parallels.VMRoot = expandUserPath(configInputEnvString(cfg, "parallels", cfg.Parallels.VMRoot, "CRABBOX_PARALLELS_VM_ROOT"))
 	cfg.Parallels.User = configInputEnvString(cfg, "parallels", cfg.Parallels.User, "CRABBOX_PARALLELS_USER")
+	cfg.Parallels.Password = configInputEnvString(cfg, "parallels", cfg.Parallels.Password, "CRABBOX_PARALLELS_PASSWORD")
 	cfg.Parallels.WorkRoot = configInputEnvString(cfg, "parallels", cfg.Parallels.WorkRoot, "CRABBOX_PARALLELS_WORK_ROOT")
 	if startupTimeout := os.Getenv("CRABBOX_PARALLELS_STARTUP_TIMEOUT"); startupTimeout != "" {
 		recordConfigInput(cfg, "parallels", configInputEnvironment, applyLeaseDuration(&cfg.Parallels.StartupTimeout, startupTimeout))

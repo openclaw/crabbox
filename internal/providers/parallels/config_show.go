@@ -24,6 +24,7 @@ func (Provider) ConfigShowSection(cfg core.Config) core.ProviderConfigShowSectio
 			{JSONName: "bootstrapKey", JSONValue: core.ConfigShowSecretState(c.BootstrapKey)},
 			{JSONName: "vmRoot", JSONValue: c.VMRoot},
 			{JSONName: "user", JSONValue: c.User, TextName: "user", TextValue: c.User},
+			{JSONName: "auth", JSONValue: core.ConfigShowSecretState(c.Password), TextName: "auth", TextValue: core.ConfigShowSecretState(c.Password)},
 			{JSONName: "workRoot", JSONValue: c.WorkRoot, TextName: "work_root", TextValue: c.WorkRoot},
 			{JSONName: "startupTimeout", JSONValue: c.StartupTimeout.String(), TextName: "startup_timeout", TextValue: c.StartupTimeout.String()},
 			{JSONName: "templates", JSONValue: redactedParallelsTemplateConfigs(c.Templates), TextName: "templates", TextValue: strconv.Itoa(len(c.Templates))},
