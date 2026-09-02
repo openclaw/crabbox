@@ -132,26 +132,6 @@ Consumers can use this boolean to fail closed when a workload must not receive
 an IAM instance profile. The field is omitted when the backend cannot attest
 the association state.
 
-Local-container JSON inspection includes best-effort memory bounds read from the
-selected Docker or Podman runtime:
-
-```json
-{
-  "memory": {
-    "limitBytes": 12884901888,
-    "hostCapacityBytes": 8589934592,
-    "effectiveUpperBoundBytes": 8589934592
-  }
-}
-```
-
-`limitBytes` is the container's recorded limit, not the current CLI configuration;
-zero means no configured limit. `hostCapacityBytes` is the daemon's total memory,
-and `effectiveUpperBoundBytes` is the smaller positive observed bound. These
-values do not report free memory or reserve capacity. Unknown fields are omitted;
-unsupported or unavailable observations do not fail inspection or change lease
-ownership. See [local-container memory evidence](../providers/local-container.md#memory-failure-evidence).
-
 ## Flags
 
 ```text

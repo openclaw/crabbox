@@ -39,7 +39,6 @@ type TimingReport struct {
 	IdleTimeout        string                   `json:"idleTimeout,omitempty"`
 	BlockedStage       string                   `json:"blockedStage,omitempty"`
 	ResourceExhaustion ResourceExhaustionReason `json:"resourceExhaustion,omitempty"`
-	Memory             *MemoryCapacity          `json:"memory,omitempty"`
 	RetryLikely        string                   `json:"retryLikely,omitempty"`
 	Artifacts          []runArtifact            `json:"artifacts,omitempty"`
 

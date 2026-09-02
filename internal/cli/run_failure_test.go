@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -238,7 +237,6 @@ func TestTimingJSONIncludesFailureClassification(t *testing.T) {
 		resourceExhaustion: ResourceExhaustionMemory,
 		retryLikely:        "false",
 	}, time.Second, 1)
-	report.Memory = &MemoryCapacity{LimitBytes: new(int64(12 << 30)), HostCapacityBytes: 8 << 30, EffectiveUpperBoundBytes: 8 << 30}
 	var buf bytes.Buffer
 	if err := writeTimingJSON(&buf, report); err != nil {
 		t.Fatal(err)
@@ -249,9 +247,6 @@ func TestTimingJSONIncludesFailureClassification(t *testing.T) {
 	}
 	if got.BlockedStage != "resource_exhaustion" || got.ResourceExhaustion != ResourceExhaustionMemory || got.RetryLikely != "false" {
 		t.Fatalf("classification not encoded: %#v", got)
-	}
-	if got.Memory == nil || got.Memory.LimitBytes == nil || *got.Memory.LimitBytes != 12<<30 || got.Memory.HostCapacityBytes != 8<<30 || got.Memory.EffectiveUpperBoundBytes != 8<<30 {
-		t.Fatalf("observed memory bounds not encoded: %s", buf.String())
 	}
 }
 
@@ -279,51 +274,6 @@ func TestPrintRunFailureDigestIncludesMemoryGuidance(t *testing.T) {
 	}
 	if strings.Contains(out, "next: crabbox run") {
 		t.Fatalf("deterministic memory exhaustion should not suggest an unchanged retry:\n%s", out)
-	}
-}
-
-func TestPrintRunFailureDigestUsesObservedMemoryBounds(t *testing.T) {
-	for _, test := range []struct {
-		name     string
-		limit    int64
-		capacity int64
-		bound    int64
-		wantHint string
-	}{
-		{name: "host bound", limit: 12 << 30, capacity: 8 << 30, bound: 8 << 30, wantHint: "increase the runtime/host memory capacity or reduce workload concurrency before retrying; raising only the memory limit cannot help"},
-		{name: "container bound", limit: 64 << 20, capacity: 8 << 30, bound: 64 << 20, wantHint: "increase the memory limit or reduce workload concurrency before retrying"},
-		{name: "equal bounds", limit: 8 << 30, capacity: 8 << 30, bound: 8 << 30, wantHint: "increase both the memory limit and runtime/host memory capacity, or reduce workload concurrency before retrying"},
-		{name: "unlimited", capacity: 8 << 30, bound: 8 << 30, wantHint: "increase the runtime/host memory capacity or reduce workload concurrency before retrying; raising only the memory limit cannot help"},
-		{name: "unknown host", limit: 12 << 30, bound: 12 << 30, wantHint: "increase the memory limit or reduce workload concurrency before retrying"},
-		{name: "unlimited unknown host", wantHint: "check runtime/host memory capacity or reduce workload concurrency before retrying; no memory limit is configured"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			var buf bytes.Buffer
-			printRunFailureDigest(&buf, runFailureDigestInput{
-				LeaseID:        "cbx_memory",
-				CommandDisplay: "make test",
-				Classification: FailureClassification{BlockedStage: "resource_exhaustion", ResourceExhaustion: ResourceExhaustionMemory, RetryLikely: "false"},
-				Memory:         &MemoryCapacity{LimitBytes: &test.limit, HostCapacityBytes: test.capacity, EffectiveUpperBoundBytes: test.bound},
-			})
-			out := buf.String()
-			if !strings.Contains(out, "  hint: "+test.wantHint+"\n") {
-				t.Fatalf("wrong advice for observed memory bounds:\n%s", out)
-			}
-			for _, want := range []string{"resource_exhaustion: memory", "retryable: false", fmt.Sprintf("memory_limit_bytes: %d", test.limit)} {
-				if !strings.Contains(out, want) {
-					t.Fatalf("digest missing %q:\n%s", want, out)
-				}
-			}
-			if test.capacity > 0 && !strings.Contains(out, fmt.Sprintf("host_memory_capacity_bytes: %d", test.capacity)) {
-				t.Fatalf("digest missing observed host capacity:\n%s", out)
-			}
-			if test.bound > 0 && !strings.Contains(out, fmt.Sprintf("effective_memory_upper_bound_bytes: %d", test.bound)) {
-				t.Fatalf("digest missing effective upper bound:\n%s", out)
-			}
-			if strings.Contains(out, "next: crabbox run") {
-				t.Fatalf("memory exhaustion suggested an unchanged retry:\n%s", out)
-			}
-		})
 	}
 }
 

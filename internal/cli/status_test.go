@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -126,38 +125,6 @@ func TestStatusViewIncludesProviderMetadata(t *testing.T) {
 	}
 	if view.ProviderMetadata != nil {
 		t.Fatalf("providerMetadata=%v, want omitted invalid metadata", view.ProviderMetadata)
-	}
-}
-
-func TestStatusViewIncludesObservedMemoryCapacity(t *testing.T) {
-	cfg := defaultConfig()
-	cfg.Network = NetworkPublic
-	for _, limit := range []*int64{nil, new(int64(0)), new(int64(12 << 30))} {
-		var memory *MemoryCapacity
-		if limit != nil {
-			memory = &MemoryCapacity{LimitBytes: limit, HostCapacityBytes: 8 << 30, EffectiveUpperBoundBytes: 8 << 30}
-		}
-		view, err := statusViewFromLeaseTarget(t.Context(), cfg, LeaseTarget{
-			Server: Server{Provider: "evidence-test", Status: "stopped"},
-			Memory: memory,
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		data, err := json.Marshal(view)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var decoded StatusView
-		if err := json.Unmarshal(data, &decoded); err != nil {
-			t.Fatal(err)
-		}
-		if !reflect.DeepEqual(decoded.Memory, memory) {
-			t.Fatalf("inspection changed observed memory bounds: %s", data)
-		}
-		if memory == nil && bytes.Contains(data, []byte(`"memory"`)) {
-			t.Fatalf("inspection added memory evidence without a provider observation: %s", data)
-		}
 	}
 }
 

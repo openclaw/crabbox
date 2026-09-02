@@ -246,7 +246,6 @@ type runFailureDigestInput struct {
 	StopRouting           CommandRouting
 	StopCommand           string
 	Classification        FailureClassification
-	Memory                *MemoryCapacity
 	Phases                []TimingPhase
 	Results               *TestResultSummary
 }
@@ -269,7 +268,7 @@ func printRunFailureDigest(w io.Writer, input runFailureDigestInput) {
 		fmt.Fprintf(w, "  resource_exhaustion: %s\n", input.Classification.ResourceExhaustion)
 	}
 	if input.Classification.ResourceExhaustion == ResourceExhaustionMemory {
-		printMemoryFailureGuidance(w, input.Memory)
+		fmt.Fprintln(w, "  hint: increase the memory limit or reduce workload concurrency before retrying")
 	}
 	if input.LeaseStopped {
 		fmt.Fprintln(w, "  lease: stopped; lease-based recovery is unavailable")
@@ -283,33 +282,6 @@ func printRunFailureDigest(w io.Writer, input runFailureDigestInput) {
 	for _, command := range failureDigestNextCommands(input, retry) {
 		fmt.Fprintf(w, "  next: %s\n", command)
 	}
-}
-
-func printMemoryFailureGuidance(w io.Writer, memory *MemoryCapacity) {
-	hint := "increase the memory limit or reduce workload concurrency before retrying"
-	if memory != nil {
-		if memory.LimitBytes != nil {
-			fmt.Fprintf(w, "  memory_limit_bytes: %d\n", *memory.LimitBytes)
-		}
-		if memory.HostCapacityBytes > 0 {
-			fmt.Fprintf(w, "  host_memory_capacity_bytes: %d\n", memory.HostCapacityBytes)
-		}
-		if memory.EffectiveUpperBoundBytes > 0 {
-			fmt.Fprintf(w, "  effective_memory_upper_bound_bytes: %d\n", memory.EffectiveUpperBoundBytes)
-		}
-		if memory.LimitBytes != nil {
-			limit := *memory.LimitBytes
-			switch {
-			case memory.HostCapacityBytes > 0 && (limit == 0 || limit > memory.HostCapacityBytes):
-				hint = "increase the runtime/host memory capacity or reduce workload concurrency before retrying; raising only the memory limit cannot help"
-			case memory.HostCapacityBytes > 0 && limit == memory.HostCapacityBytes:
-				hint = "increase both the memory limit and runtime/host memory capacity, or reduce workload concurrency before retrying"
-			case limit == 0:
-				hint = "check runtime/host memory capacity or reduce workload concurrency before retrying; no memory limit is configured"
-			}
-		}
-	}
-	fmt.Fprintf(w, "  hint: %s\n", hint)
 }
 
 func printFailureDigestPhases(w io.Writer, phases []TimingPhase) {

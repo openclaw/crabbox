@@ -258,7 +258,8 @@ func (a App) hydrateActionsWithGitHubRunner(ctx context.Context, cfg Config, rep
 	if err := a.registerGitHubActionsRunnerOwned(ctx, cfg, target, leaseID, slug, ghRepo, "", nil, owner); err != nil {
 		return actionsHydrationState{}, err
 	}
-	if err := invalidateActionsHydrationWorkspaces(ctx, cfg, repo, target, leaseID); err != nil {
+	plainManifest := classifyGitOrigin(repo.RemoteURL) != gitOriginRemoteAttemptSafe
+	if err := invalidateActionsHydrationWorkspaces(ctx, target, leaseID, remoteJoin(cfg, leaseID, repo.Name), plainManifest); err != nil {
 		return actionsHydrationState{}, err
 	}
 	if err := clearActionsHydrationState(ctx, target, leaseID); err != nil {
@@ -589,27 +590,29 @@ func (a App) hydrateActionsLocally(ctx context.Context, cfg Config, repo Repo, t
 	if err != nil {
 		return actionsHydrationState{}, err
 	}
-	return a.executeLocalActionsHydration(ctx, cfg, repo, target, plan, waitTimeout, streamOutput, syncBefore, owner)
+	plainManifest := classifyGitOrigin(repo.RemoteURL) != gitOriginRemoteAttemptSafe
+	return a.executeLocalActionsHydration(ctx, cfg, repo, target, plan, waitTimeout, streamOutput, syncBefore, plainManifest, owner)
 }
 
-func (a App) executeLocalActionsHydration(ctx context.Context, cfg Config, repo Repo, target SSHTarget, plan localActionsHydrationPlan, waitTimeout time.Duration, streamOutput bool, syncBefore bool, owner *workspaceOwner) (actionsHydrationState, error) {
+func (a App) executeLocalActionsHydration(ctx context.Context, cfg Config, repo Repo, target SSHTarget, plan localActionsHydrationPlan, waitTimeout time.Duration, streamOutput bool, syncBefore bool, plainManifest bool, owner *workspaceOwner) (actionsHydrationState, error) {
 	target = targetWithConfigDefaults(target, cfg)
 	fmt.Fprint(a.Stderr, plan.warnings)
 	if streamOutput {
 		fmt.Fprintf(a.Stdout, "local actions hydrate workflow=%s job=%s workspace=%s\n", cfg.Actions.Workflow, plan.jobName, plan.workdir)
 	}
-	if err := invalidateActionsHydrationWorkspaces(ctx, cfg, repo, target, plan.leaseID); err != nil {
+	if err := invalidateActionsHydrationWorkspaces(ctx, target, plan.leaseID, plan.workdir, plainManifest); err != nil {
 		return actionsHydrationState{}, err
 	}
 	if err := clearActionsHydrationState(ctx, target, plan.leaseID); err != nil {
 		return actionsHydrationState{}, err
 	}
 	if syncBefore {
-		if err := a.syncLocalActionsWorkspace(ctx, cfg, repo, target, plan.workdir); err != nil {
+		var err error
+		if plainManifest, err = a.syncLocalActionsWorkspace(ctx, cfg, repo, target, plan.workdir, plainManifest); err != nil {
 			return actionsHydrationState{}, err
 		}
 	}
-	if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteInvalidateSyncFingerprintForTarget(target, plan.workdir), idempotentSSHRetryDelay); err != nil {
+	if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteInvalidateSyncFingerprintForTarget(target, plan.workdir, plainManifest), idempotentSSHRetryDelay); err != nil {
 		return actionsHydrationState{}, exit(7, "invalidate reusable sync fingerprint before Actions hydration: %v", err)
 	}
 	stdout := io.Discard
@@ -674,8 +677,8 @@ func (a App) executeLocalActionsHydration(ctx context.Context, cfg Config, repo 
 	return state, nil
 }
 
-func invalidateActionsHydrationWorkspaces(ctx context.Context, cfg Config, repo Repo, target SSHTarget, leaseID string) error {
-	workdirs := []string{remoteJoin(cfg, leaseID, repo.Name)}
+func invalidateActionsHydrationWorkspaces(ctx context.Context, target SSHTarget, leaseID, workdir string, plainManifest bool) error {
+	workdirs := []string{workdir}
 	state, err := readActionsHydrationState(ctx, target, leaseID)
 	if err != nil {
 		return exit(7, "read Actions workspace before fingerprint invalidation: %v", err)
@@ -684,86 +687,103 @@ func invalidateActionsHydrationWorkspaces(ctx context.Context, cfg Config, repo 
 		workdirs = appendUniqueStrings(workdirs, state.Workspace)
 	}
 	for _, workdir := range workdirs {
-		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteInvalidateSyncFingerprintForTarget(target, workdir), idempotentSSHRetryDelay); err != nil {
+		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteInvalidateSyncFingerprintForTarget(target, workdir, plainManifest), idempotentSSHRetryDelay); err != nil {
 			return exit(7, "invalidate reusable sync fingerprint before Actions hydration: %v", err)
 		}
 	}
 	return nil
 }
 
-func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Repo, target SSHTarget, workdir string) error {
+func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Repo, target SSHTarget, workdir string, plainManifest bool) (bool, error) {
 	if cfg.Sync.BaseRef == "" {
 		cfg.Sync.BaseRef = repo.BaseRef
 	}
 	excludes, err := syncExcludes(repo.Root, cfg)
 	if err != nil {
-		return err
+		return plainManifest, err
 	}
 	manifest, err := syncManifestFilteredRules(repo.Root, excludes, syncIncludes(cfg))
 	if err != nil {
-		return exit(6, "build sync file list: %v", err)
+		return plainManifest, exit(6, "build sync file list: %v", err)
 	}
 	if err := checkSyncPreflight(manifest, cfg, false, a.Stderr); err != nil {
-		return err
+		return plainManifest, err
 	}
 	if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteMkdir(workdir), idempotentSSHRetryDelay); err != nil {
-		return exit(7, "create remote workdir: %v", err)
+		return plainManifest, exit(7, "create remote workdir: %v", err)
 	}
 	coherence, credentialBlocked := syncGitCoherencePlan(cfg, repo)
 	if credentialBlocked {
 		warnCredentialBearingGitSeed(a.Stderr)
 	}
-	if coherence.seedEnabled() {
-		if out, err := runIdempotentSSHCombinedOutputLimit(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay, gitSeedDiagnosticLimit); err != nil {
-			warnRemoteGitSeedFailure(a.Stderr, out, err)
+	if plainManifest {
+		coherence = gitCoherencePlan{}
+	}
+	if !plainManifest && coherence.seedEnabled() {
+		if out, err := runIdempotentSSHGitOriginAttempt(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay); err != nil {
+			if reason, fallback := gitOriginRuntimeFallbackResult(coherence.RemoteURL, out, err); fallback {
+				plainManifest = true
+				coherence = gitCoherencePlan{}
+				fmt.Fprintf(a.Stderr, "git origin fallback reason=%s; using plain manifest sync\n", reason)
+			} else {
+				reportRemoteGitSeedFailure(a.Stderr, out, err, "aborting before file sync")
+				return plainManifest, exit(6, "remote git seed failed: %v", err)
+			}
 		}
 	}
 	manifestData := manifest.NUL()
 	deletedData := manifest.DeletedNUL()
 	finalizeToken, err := randomHex(16)
 	if err != nil {
-		return exit(6, "create sync finalize token: %v", err)
+		return plainManifest, exit(6, "create sync finalize token: %v", err)
 	}
 	manifestInput := syncManifestInputForTarget(target, manifestData, deletedData)
-	if err := runSSHInput(ctx, target, remoteWriteSyncManifestsNewForTarget(target, workdir, finalizeToken), strings.NewReader(manifestInput), io.Discard, a.Stderr); err != nil {
-		return exit(7, "write sync manifests: %v", err)
+	if err := runSSHInput(ctx, target, remoteWriteSyncManifestsNewForTargetMode(target, workdir, finalizeToken, plainManifest), strings.NewReader(manifestInput), io.Discard, a.Stderr); err != nil {
+		return plainManifest, exit(7, "write sync manifests: %v", err)
 	}
 	if shouldPruneRemoteSync(cfg.Sync.Delete, false) {
-		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteSeedSyncManifestFromGit(workdir), idempotentSSHRetryDelay); err != nil {
-			return exit(6, "remote sync seed manifest failed: %v", err)
+		if !plainManifest {
+			if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteSeedSyncManifestFromGit(workdir), idempotentSSHRetryDelay); err != nil {
+				return plainManifest, exit(6, "remote sync seed manifest failed: %v", err)
+			}
 		}
-		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remotePruneSyncManifestForTarget(target, workdir, finalizeToken), idempotentSSHRetryDelay); err != nil {
-			return exit(6, "remote sync prune failed: %v", err)
+		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remotePruneSyncManifestForTargetMode(target, workdir, finalizeToken, plainManifest, true), idempotentSSHRetryDelay); err != nil {
+			return plainManifest, exit(6, "remote sync prune failed: %v", err)
 		}
 	}
 	fmt.Fprintf(a.Stderr, "syncing %s -> %s:%s for local actions hydrate\n", repo.Root, target.Host, workdir)
 	if err := rsync(ctx, target, repo.Root, workdir, excludes.patterns(), a.Stdout, a.Stderr, rsyncOptions{Checksum: cfg.Sync.Checksum, UseFilesFrom: true, FilesFrom: manifestData, NoTimes: localContainerDockerSocketConfig(cfg), Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
-		return exit(6, "rsync failed: %v", err)
+		return plainManifest, exit(6, "rsync failed: %v", err)
 	}
 	fingerprint := ""
-	if cfg.Sync.Fingerprint {
+	if cfg.Sync.Fingerprint && !plainManifest {
 		if value, err := syncFingerprintForManifest(repo, cfg, manifest, excludes, coherence); err == nil {
 			fingerprint = value
 		} else {
 			fmt.Fprintf(a.Stderr, "warning: sync fingerprint failed: %v\n", err)
 		}
 	}
-	finalizeCommand := remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
+	out, finalizeErr, reason, fallback := runRemoteFinalizeSync(ctx, target, workdir, remoteSyncFinalizeOptions{
 		AllowMassDeletions: true,
-		HydrateGit:         true,
+		HydrateGit:         !plainManifest,
+		PlainManifest:      plainManifest,
 		BaseRef:            cfg.Sync.BaseRef,
 		BaseSHA:            gitHydrateBaseSHA(repo, cfg.Sync.BaseRef),
 		Fingerprint:        fingerprint,
 		Token:              finalizeToken,
 		Coherence:          coherence,
 	})
-	if out, err := runIdempotentSSHCombinedOutput(ctx, target, finalizeCommand, idempotentSSHRetryDelay); err != nil {
-		if out != "" {
-			return exit(6, "remote sync finalize failed: %s: %v", out, err)
-		}
-		return exit(6, "remote sync finalize failed: %v", err)
+	if fallback {
+		plainManifest = true
+		fmt.Fprintf(a.Stderr, "git origin fallback reason=%s; using plain manifest sync\n", reason)
 	}
-	return nil
+	if finalizeErr != nil {
+		if out != "" {
+			return plainManifest, exit(6, "remote sync finalize failed: %s: %v", out, finalizeErr)
+		}
+		return plainManifest, exit(6, "remote sync finalize failed: %v", finalizeErr)
+	}
+	return plainManifest, nil
 }
 
 func localActionsWorkflowPath(root, workflow string) (string, error) {

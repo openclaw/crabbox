@@ -31,9 +31,6 @@ const (
 	pendingRecoveryKind   = "ssh-readiness-pending"
 	pendingRecoveryReason = "post-create failure; exact claim retained"
 	readinessPollInterval = 250 * time.Millisecond
-
-	memoryCapacityTimeout     = 2 * time.Second
-	memoryCapacityOutputLimit = 128
 )
 
 var cgroupOOMCounterPaths = []string{
@@ -137,14 +134,14 @@ func (b *backend) BeginRunFailureEvidence(ctx context.Context, req core.RunFailu
 	return func(ctx context.Context) (core.RunFailureEvidence, error) {
 		current, err := b.readOOMKillCount(ctx, containerID)
 		if err == nil && current > baseline {
-			return core.RunFailureEvidence{ResourceExhaustion: core.ResourceExhaustionMemory, Memory: b.readMemoryCapacity(ctx, containerID)}, nil
+			return core.RunFailureEvidence{ResourceExhaustion: core.ResourceExhaustionMemory}, nil
 		}
 		if err == nil {
 			return core.RunFailureEvidence{}, nil
 		}
 		container, inspectErr := b.inspectContainer(ctx, containerID)
 		if inspectErr == nil && !baselineContainer.State.OOMKilled && container.State.OOMKilled {
-			return core.RunFailureEvidence{ResourceExhaustion: core.ResourceExhaustionMemory, Memory: b.readMemoryCapacity(ctx, containerID)}, nil
+			return core.RunFailureEvidence{ResourceExhaustion: core.ResourceExhaustionMemory}, nil
 		}
 		if inspectErr != nil {
 			return core.RunFailureEvidence{}, fmt.Errorf("%v; inspect container OOM state: %w", err, inspectErr)
@@ -186,107 +183,6 @@ func parseOOMKillCount(text string) (uint64, error) {
 		return count, nil
 	}
 	return 0, fmt.Errorf("oom_kill counter is missing")
-}
-
-func (b *backend) readMemoryCapacity(ctx context.Context, containerID string) *core.MemoryCapacity {
-	cfg := b.configForRun()
-	format := "{{.MemTotal}}"
-	if isPodmanRuntime(cfg.LocalContainer.Runtime) {
-		format = "{{.Host.MemTotal}}"
-	} else if !isDockerRuntime(cfg.LocalContainer.Runtime) {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(ctx, memoryCapacityTimeout)
-	defer cancel()
-	readOutput := func(limit int, args ...string) (string, bool) {
-		result, err := b.runContainerCommand(ctx, cfg, core.LocalCommandRequest{
-			Args: args, MaxCapturedOutputBytes: limit,
-		})
-		return strings.TrimSpace(result.Stdout), err == nil && result.ExitCode == 0 && len(result.Stdout) <= limit
-	}
-	scope := checkpointScopeFromMetadata(cfg.LocalContainer.CheckpointMetadata, cfg.LocalContainer.Runtime)
-	if scope.DaemonID != "" {
-		if scope.Context != "" && scope.Endpoint != "" {
-			if isPodmanRuntime(scope.Runtime) {
-				if scope.Context != "default" {
-					output, ok := readOutput(cgroupEvidenceLimit, "system", "connection", "list", "--format", "json")
-					var connections []podmanConnection
-					if !ok || json.Unmarshal([]byte(output), &connections) != nil {
-						return nil
-					}
-					matched := false
-					for _, connection := range connections {
-						if connection.Name == scope.Context && connection.URI == scope.Endpoint {
-							matched = true
-							break
-						}
-					}
-					if !matched {
-						return nil
-					}
-				}
-			} else {
-				endpoint, ok := readOutput(cgroupEvidenceLimit, "context", "inspect", scope.Context, "--format", `{{(index .Endpoints "docker").Host}}`)
-				if !ok || endpoint != scope.Endpoint {
-					return nil
-				}
-			}
-		}
-		identityFormat := "{{.ID}}"
-		if isPodmanRuntime(cfg.LocalContainer.Runtime) {
-			identityFormat = podmanRuntimeIdentityFormat
-		}
-		identity, ok := readOutput(cgroupEvidenceLimit, "info", "--format", identityFormat)
-		if !ok || identity == "" {
-			return nil
-		}
-		if isPodmanRuntime(cfg.LocalContainer.Runtime) {
-			identity = podmanRuntimeIdentity(identity)
-		}
-		if identity != scope.DaemonID {
-			return nil
-		}
-	}
-	readBytes := func(args ...string) (int64, bool) {
-		output, ok := readOutput(memoryCapacityOutputLimit, args...)
-		if !ok {
-			return 0, false
-		}
-		return parseMemoryBytes(output)
-	}
-	memory := &core.MemoryCapacity{}
-	// A reused lease's limit belongs to the container, not today's CLI config.
-	if limit, ok := readBytes("inspect", "--format", "{{.HostConfig.Memory}}", containerID); ok {
-		memory.LimitBytes = &limit
-		memory.EffectiveUpperBoundBytes = limit
-	}
-	if capacity, ok := readBytes("info", "--format", format); ok && capacity > 0 {
-		memory.HostCapacityBytes = capacity
-		if memory.EffectiveUpperBoundBytes == 0 || capacity < memory.EffectiveUpperBoundBytes {
-			memory.EffectiveUpperBoundBytes = capacity
-		}
-	}
-	if memory.LimitBytes == nil && memory.HostCapacityBytes == 0 {
-		return nil
-	}
-	return memory
-}
-
-func parseMemoryBytes(text string) (int64, bool) {
-	if len(text) > memoryCapacityOutputLimit {
-		return 0, false
-	}
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return 0, false
-	}
-	for _, r := range text {
-		if r < '0' || r > '9' {
-			return 0, false
-		}
-	}
-	value, err := strconv.ParseInt(text, 10, 64)
-	return value, err == nil
 }
 
 func (b *backend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID string) error {
@@ -960,9 +856,6 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		}
 	}
 	lease.Server.Labels = publicLocalContainerClaimLabels(lease.Server.Labels)
-	if readOnlyStatus {
-		lease.Memory = b.readMemoryCapacity(ctx, container.ID)
-	}
 	return lease, nil
 }
 
@@ -2575,11 +2468,6 @@ func (b *backend) docker(ctx context.Context, args []string, stdout, stderr io.W
 }
 
 func (b *backend) containerRuntime(ctx context.Context, cfg core.Config, args []string, stdout, stderr io.Writer) (core.LocalCommandResult, error) {
-	return b.runContainerCommand(ctx, cfg, core.LocalCommandRequest{Args: args, Stdout: stdout, Stderr: stderr})
-}
-
-func (b *backend) runContainerCommand(ctx context.Context, cfg core.Config, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
-	args := req.Args
 	var env []string
 	if metadata := cfg.LocalContainer.CheckpointMetadata; len(metadata) != 0 {
 		scope := checkpointScopeFromMetadata(metadata, cfg.LocalContainer.Runtime)
@@ -2590,10 +2478,13 @@ func (b *backend) runContainerCommand(ctx context.Context, cfg core.Config, req 
 		}
 		env = checkpointEnvForScope(scope)
 	}
-	req.Name = cfg.LocalContainer.Runtime
-	req.Args = args
-	req.Env = env
-	return b.rt.Exec.Run(ctx, req)
+	return b.rt.Exec.Run(ctx, core.LocalCommandRequest{
+		Name:   cfg.LocalContainer.Runtime,
+		Args:   args,
+		Env:    env,
+		Stdout: stdout,
+		Stderr: stderr,
+	})
 }
 
 func (b *backend) assertRequestedArchitecture(ctx context.Context, cfg core.Config) (string, error) {

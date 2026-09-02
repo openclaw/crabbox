@@ -94,21 +94,4 @@ func TestDockerOOMKillEvidenceProof(t *testing.T) {
 	if oomEvidence.ResourceExhaustion != core.ResourceExhaustionMemory {
 		t.Fatalf("OOM evidence=%#v, want memory resource exhaustion", oomEvidence)
 	}
-	if !isDockerRuntime(runtimeName) && !isPodmanRuntime(runtimeName) {
-		if oomEvidence.Memory != nil {
-			t.Fatal("unsupported runtime returned memory capacity evidence")
-		}
-		return
-	}
-	memory := oomEvidence.Memory
-	if memory == nil || memory.LimitBytes == nil || *memory.LimitBytes != 64<<20 {
-		t.Fatalf("memory=%#v, want actual 64 MiB container limit", memory)
-	}
-	if memory.HostCapacityBytes <= 0 {
-		t.Fatalf("memory=%#v, want positive observed daemon capacity", memory)
-	}
-	if want := min(*memory.LimitBytes, memory.HostCapacityBytes); memory.EffectiveUpperBoundBytes != want {
-		t.Fatalf("memory=%#v, want effective upper bound %d", memory, want)
-	}
-	t.Logf("observed memory: limit=%d hostCapacity=%d effectiveUpperBound=%d", *memory.LimitBytes, memory.HostCapacityBytes, memory.EffectiveUpperBoundBytes)
 }

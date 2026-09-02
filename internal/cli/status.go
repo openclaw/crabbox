@@ -235,7 +235,6 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 		ExpiresAt:        blank(leaseLabelTimeDisplay(server.Labels["expires_at"]), server.Labels["expires_at"]),
 		Labels:           server.Labels,
 		ProviderMetadata: inspectProviderMetadata(provider, server.ProviderMetadata),
-		Memory:           lease.Memory,
 		HasHost:          hasHost,
 		Ready:            ready,
 	}, nil
@@ -289,7 +288,6 @@ type StatusView struct {
 	ReleaseDeletesServer *bool              `json:"releaseDeletesServer,omitempty"`
 	Labels               map[string]string  `json:"labels,omitempty"`
 	ProviderMetadata     map[string]any     `json:"providerMetadata,omitempty"`
-	Memory               *MemoryCapacity    `json:"memory,omitempty"`
 	HasHost              bool               `json:"hasHost"`
 	Ready                bool               `json:"ready"`
 	Telemetry            *LeaseTelemetry    `json:"telemetry,omitempty"`

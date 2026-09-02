@@ -163,28 +163,10 @@ reused lease does not classify a later ordinary failure. Docker/Podman cgroup
 paths and counter parsing remain inside this provider.
 
 The failure digest marks this condition non-retryable with the unchanged
-configuration. After a verified OOM, Crabbox makes a bounded, best-effort read of
-the container's actual configured memory limit and the selected Docker or Podman
-daemon's total memory. When the container limit is the smaller bound, increase
-`localContainer.memory` (or `--local-container-memory`) or reduce workload
-concurrency. If the limit already exceeds the daemon's capacity, increase the
-runtime VM/host memory allocation or reduce concurrency; raising only the
-container limit cannot help. Equal limits require raising both bounds.
-
-The digest, failed run's timing JSON, and `inspect --json` expose the observed
-bounds. JSON includes an optional `memory` object with `limitBytes` (the runtime's
-recorded container limit, not the current CLI configuration), `hostCapacityBytes`
-(daemon total), and `effectiveUpperBoundBytes` (the smaller positive observed
-bound). `limitBytes: 0` means no configured container limit; omitted fields are
-unknown. These are upper bounds, not free memory or a memory reservation: other
-containers, host processes, and additional cgroup limits can reduce usable
-memory. Inspection refreshes this context without changing the lease.
-
-Unsupported or failed capacity observations are omitted and never change the
-verified OOM classification or cleanup behavior. If cgroup evidence cannot be
-read, Crabbox prints a diagnostic warning and preserves the original command
-failure and ordinary user-command classification. No capacity probe runs before
-the command, and Crabbox does not alter the runtime's memory-limit semantics.
+configuration and suggests increasing `localContainer.memory` (or
+`--local-container-memory`) or reducing workload concurrency. If cgroup evidence
+cannot be read, Crabbox prints a diagnostic warning and preserves the original
+command failure and ordinary user-command classification.
 
 Provider flags:
 

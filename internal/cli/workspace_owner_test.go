@@ -1537,10 +1537,12 @@ func TestWorkspaceOwnerPOSIXTransportIsLoginShellIndependent(t *testing.T) {
 				},
 			}) + " && " + privateCheck + "\nmkdir " + shellQuote(userDir) + " && cat > " + shellQuote(inputPath)
 			transportCommand := remoteWorkspaceOwnerPOSIXWitness(key, token, payload, true)
+			const transportLimit = 30_000
 			if !strings.HasPrefix(transportCommand, "exec /bin/sh -c '") || strings.Contains(transportCommand, "\n") || strings.Count(transportCommand, "'") != 2 {
 				t.Fatalf("workspace owner transport is raw login-shell input: %q", transportCommand[:min(len(transportCommand), 80)])
 			}
-			if len(transportCommand) >= 30_000 {
+			t.Logf("workspace owner transport bytes=%d margin=%d", len(transportCommand), transportLimit-len(transportCommand))
+			if len(transportCommand) >= transportLimit {
 				t.Fatalf("workspace owner transport is too large for a bounded Windows SSH command: %d bytes", len(transportCommand))
 			}
 			cmd := command(transportCommand)

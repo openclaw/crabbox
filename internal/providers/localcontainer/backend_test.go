@@ -977,9 +977,6 @@ func TestRunFailureEvidenceUsesPerRunOOMKillIncrement(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			index := 0
 			runner := &recordingRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
-				if req.Args[0] == "info" {
-					return core.LocalCommandResult{}, errors.New("capacity unavailable")
-				}
 				if req.Args[0] == "inspect" {
 					return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"Id":"container-123","State":{"Running":true,"OOMKilled":%t}}]`, tt.baselineOOMKilled)}, nil
 				}
@@ -1011,193 +1008,7 @@ func TestRunFailureEvidenceUsesPerRunOOMKillIncrement(t *testing.T) {
 			if index != 2 {
 				t.Fatalf("counter reads=%d, want 2", index)
 			}
-			if tt.expected == "" {
-				for _, call := range runner.calls {
-					if call.Args[0] == "info" || slices.Contains(call.Args, "{{.HostConfig.Memory}}") {
-						t.Fatalf("ordinary failure probed memory capacity: %v", call.Args)
-					}
-				}
-			}
 		})
-	}
-}
-
-func TestRunFailureEvidenceIncludesObservedMemoryCapacity(t *testing.T) {
-	for _, runtimeName := range []string{"docker", "podman"} {
-		t.Run(runtimeName, func(t *testing.T) {
-			for _, test := range []struct {
-				name                string
-				limit               string
-				capacity            string
-				capacityErr         error
-				identityUnavailable bool
-				wantLimit           *int64
-				wantCapacity        int64
-				wantBound           int64
-			}{
-				{name: "host bound", limit: "12884901888", capacity: "8589934592", wantLimit: new(int64(12 << 30)), wantCapacity: 8 << 30, wantBound: 8 << 30},
-				{name: "container bound", limit: "67108864", capacity: "8589934592", wantLimit: new(int64(64 << 20)), wantCapacity: 8 << 30, wantBound: 64 << 20},
-				{name: "unlimited", limit: "0", capacity: "8589934592", wantLimit: new(int64(0)), wantCapacity: 8 << 30, wantBound: 8 << 30},
-				{name: "missing limit", limit: "<no value>", capacity: "8589934592", wantCapacity: 8 << 30, wantBound: 8 << 30},
-				{name: "missing capacity", limit: "12884901888", capacity: "<no value>", wantLimit: new(int64(12 << 30)), wantBound: 12 << 30},
-				{name: "zero capacity", limit: "12884901888", capacity: "0", wantLimit: new(int64(12 << 30)), wantBound: 12 << 30},
-				{name: "invalid capacity", limit: "12884901888", capacity: "9223372036854775808", wantLimit: new(int64(12 << 30)), wantBound: 12 << 30},
-				{name: "capacity read failed", limit: "12884901888", capacity: "8589934592", capacityErr: errors.New("daemon unavailable"), wantLimit: new(int64(12 << 30)), wantBound: 12 << 30},
-				{name: "both unavailable", limit: "<no value>", capacity: "<no value>"},
-				{name: "identity unavailable", identityUnavailable: true, limit: "12884901888", capacity: "8589934592"},
-			} {
-				t.Run(test.name, func(t *testing.T) {
-					counterReads := 0
-					capacityFormat := "{{.MemTotal}}"
-					identityFormat := "{{.ID}}"
-					if runtimeName == "podman" {
-						capacityFormat = "{{.Host.MemTotal}}"
-						identityFormat = podmanRuntimeIdentityFormat
-					}
-					runner := &recordingRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
-						switch commandKey(req.Args) {
-						case commandKey([]string{"exec", "container-123", "cat", cgroupOOMCounterPaths[0]}):
-							counterReads++
-							return core.LocalCommandResult{Stdout: fmt.Sprintf("oom_kill %d\n", counterReads)}, nil
-						case commandKey([]string{"inspect", "container-123"}):
-							return core.LocalCommandResult{Stdout: `[{"Id":"container-123","State":{"Running":true}}]`}, nil
-						case commandKey([]string{"info", "--format", identityFormat}):
-							return core.LocalCommandResult{}, errors.New("identity unavailable")
-						case commandKey([]string{"inspect", "--format", "{{.HostConfig.Memory}}", "container-123"}):
-							if counterReads != 2 {
-								t.Fatal("container memory limit read before verified OOM")
-							}
-							return core.LocalCommandResult{Stdout: test.limit}, nil
-						case commandKey([]string{"info", "--format", capacityFormat}):
-							if counterReads != 2 {
-								t.Fatal("host memory capacity read before verified OOM")
-							}
-							return core.LocalCommandResult{Stdout: test.capacity}, test.capacityErr
-						default:
-							t.Fatalf("unexpected runtime request: %v", req.Args)
-							return core.LocalCommandResult{}, nil
-						}
-					}}
-					b := testBackend(runner)
-					b.cfg.LocalContainer.Runtime = runtimeName
-					b.cfg.LocalContainer.Memory = "1g"
-					if test.identityUnavailable {
-						b.cfg.LocalContainer.CheckpointMetadata = map[string]string{checkpointMetadataRuntime: runtimeName, checkpointMetadataDaemonID: "recorded-daemon"}
-					}
-					collector, err := b.BeginRunFailureEvidence(t.Context(), core.RunFailureEvidenceRequest{
-						Lease: core.LeaseTarget{Server: core.Server{CloudID: "container-123"}},
-					})
-					if err != nil {
-						t.Fatal(err)
-					}
-					evidence, err := collector(t.Context())
-					if err != nil || evidence.ResourceExhaustion != core.ResourceExhaustionMemory {
-						t.Fatalf("capacity observation changed OOM diagnosis: evidence=%#v err=%v", evidence, err)
-					}
-					var want *core.MemoryCapacity
-					if test.wantLimit != nil || test.wantCapacity != 0 {
-						want = &core.MemoryCapacity{LimitBytes: test.wantLimit, HostCapacityBytes: test.wantCapacity, EffectiveUpperBoundBytes: test.wantBound}
-					}
-					if !reflect.DeepEqual(evidence.Memory, want) {
-						t.Fatalf("memory=%#v, want %#v", evidence.Memory, want)
-					}
-				})
-			}
-		})
-	}
-}
-
-func TestMemoryCapacityUsesCapturedRuntimeRoute(t *testing.T) {
-	for _, test := range []struct {
-		name   string
-		scope  checkpointScope
-		prefix []string
-	}{
-		{name: "Docker context", scope: checkpointScope{Runtime: "docker", Context: "recorded-docker", Config: "/tmp/recorded-docker-config", Endpoint: "unix:///tmp/recorded.sock", DaemonID: "recorded-daemon"}, prefix: []string{"--context", "recorded-docker"}},
-		{name: "Podman connection", scope: checkpointScope{Runtime: "podman", Context: "recorded-podman", Endpoint: "ssh://runtime.example.test", DaemonID: "recorded-daemon"}, prefix: []string{"--connection", "recorded-podman"}},
-		{name: "Docker default endpoint", scope: checkpointScope{Runtime: "docker", Context: "default", Endpoint: "unix:///tmp/recorded.sock", DaemonID: "recorded-daemon"}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			t.Setenv("DOCKER_HOST", "tcp://ambient.invalid:2376")
-			t.Setenv("CONTAINER_HOST", "ssh://ambient.invalid")
-			identity := "recorded-daemon"
-			endpoint := test.scope.Endpoint
-			identityFormat := "{{.ID}}"
-			if isPodmanRuntime(test.scope.Runtime) {
-				test.scope.DaemonID = podmanRuntimeIdentity(identity)
-				identityFormat = podmanRuntimeIdentityFormat
-			}
-			runner := &recordingRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
-				if req.Name != test.scope.Runtime || len(req.Args) < len(test.prefix) || !slices.Equal(req.Args[:len(test.prefix)], test.prefix) {
-					t.Fatalf("runtime route changed: %s %v", req.Name, req.Args)
-				}
-				if req.MaxCapturedOutputBytes <= 0 || req.MaxCapturedOutputBytes > cgroupEvidenceLimit {
-					t.Fatal("memory observation did not bound runtime output")
-				}
-				if !slices.Equal(req.Env, checkpointEnvForScope(test.scope)) {
-					t.Fatal("memory observation did not preserve the captured runtime environment")
-				}
-				args := req.Args[len(test.prefix):]
-				if slices.Equal(args, []string{"context", "inspect", test.scope.Context, "--format", `{{(index .Endpoints "docker").Host}}`}) {
-					return core.LocalCommandResult{Stdout: endpoint}, nil
-				}
-				if slices.Equal(args, []string{"system", "connection", "list", "--format", "json"}) {
-					data, err := json.Marshal([]podmanConnection{{Name: test.scope.Context, URI: endpoint}})
-					return core.LocalCommandResult{Stdout: string(data)}, err
-				}
-				if slices.Equal(args, []string{"info", "--format", identityFormat}) {
-					return core.LocalCommandResult{Stdout: identity}, nil
-				}
-				return core.LocalCommandResult{Stdout: "8589934592"}, nil
-			}}
-			b := testBackend(runner)
-			b.cfg.LocalContainer.Runtime = test.scope.Runtime
-			b.cfg.LocalContainer.CheckpointMetadata = checkpointScopeMetadata(test.scope)
-			if memory := b.readMemoryCapacity(t.Context(), "container-123"); memory == nil || memory.HostCapacityBytes != 8<<30 {
-				t.Fatalf("memory=%#v, want recorded daemon capacity", memory)
-			}
-			if len(runner.calls) != 4 {
-				t.Fatalf("runtime calls=%d, want scope checks and two memory observations", len(runner.calls))
-			}
-			for _, invalid := range []string{"different-daemon", "", strings.Repeat("x", cgroupEvidenceLimit+1)} {
-				identity = invalid
-				calls := len(runner.calls)
-				if memory := b.readMemoryCapacity(t.Context(), "container-123"); memory != nil || len(runner.calls) != calls+2 {
-					t.Fatal("memory observation accepted an unavailable or changed runtime identity")
-				}
-			}
-			identity = "recorded-daemon"
-			endpoint = "ssh://changed.example.test"
-			calls := len(runner.calls)
-			if memory := b.readMemoryCapacity(t.Context(), "container-123"); memory != nil || len(runner.calls) != calls+1 {
-				t.Fatal("memory observation accepted a changed endpoint with the same daemon identity")
-			}
-		})
-	}
-}
-
-func TestParseMemoryBytesRejectsUntrustworthyCapacity(t *testing.T) {
-	for _, value := range []string{"", "<no value>", "null", "-1", "+1", "8GiB", "1.5", "1e6", "1\n2", "9223372036854775808", strings.Repeat("1", memoryCapacityOutputLimit+1)} {
-		if _, ok := parseMemoryBytes(value); ok {
-			t.Errorf("accepted invalid byte count %q", value)
-		}
-	}
-	for _, test := range []struct {
-		text string
-		want int64
-	}{{"0", 0}, {" 12884901888\n", 12 << 30}} {
-		if got, ok := parseMemoryBytes(test.text); !ok || got != test.want {
-			t.Errorf("parseMemoryBytes(%q)=%d,%t, want %d,true", test.text, got, ok, test.want)
-		}
-	}
-}
-
-func TestMemoryCapacityUnsupportedRuntimeIsOptional(t *testing.T) {
-	runner := &recordingRunner{}
-	b := testBackend(runner)
-	b.cfg.LocalContainer.Runtime = "nerdctl"
-	if memory := b.readMemoryCapacity(t.Context(), "container-123"); memory != nil || len(runner.calls) != 0 {
-		t.Fatal("unsupported runtime supplied memory bounds or ran an unsupported probe")
 	}
 }
 
@@ -1210,9 +1021,6 @@ func TestRunFailureEvidenceReusedLeaseGetsFreshBaseline(t *testing.T) {
 	}
 	index := 0
 	runner := &recordingRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
-		if req.Args[0] == "info" {
-			return core.LocalCommandResult{}, errors.New("capacity unavailable")
-		}
 		if req.Args[0] == "inspect" {
 			return core.LocalCommandResult{Stdout: `[{"Id":"container-reused","State":{"Running":true,"OOMKilled":false}}]`}, nil
 		}
@@ -1297,9 +1105,6 @@ func TestRunFailureEvidenceUsesContainerOOMStateWhenCounterBecomesUnreadable(t *
 	reads := 0
 	inspects := 0
 	runner := &recordingRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
-		if req.Args[0] == "info" {
-			return core.LocalCommandResult{}, errors.New("capacity unavailable")
-		}
 		if req.Args[0] == "exec" {
 			reads++
 			if reads == 1 {
@@ -5960,11 +5765,7 @@ func TestResolveStatusOnlyAllowsClaimlessLocalContainerWithoutClaiming(t *testin
 	inspectJSON := `[{"Id":"status-container","Name":"/status-container","Config":{"Image":"ubuntu:24.04","Labels":{"crabbox":"true","provider":"local-container","lease":"cbx_status_local","slug":"status-local","state":"ready","ssh_user":"runner","work_root":"/workspace/crabbox"}},"State":{"Status":"running","Running":true},"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49158"}]}}}]`
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
 		commandKey([]string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=local-container", "--format", "{{.ID}}"}): {Stdout: "status-container\n"},
-		commandKey([]string{"inspect", "status-container"}):                                                       {Stdout: inspectJSON},
-		commandKey([]string{"inspect", "--format", "{{.HostConfig.Memory}}", "status-container"}):                 {Stdout: "12884901888"},
-		commandKey([]string{"info", "--format", "{{.MemTotal}}"}):                                                 {Stdout: "8589934592"},
-		commandKey([]string{"info", "--format", "{{.ID}}"}):                                                       {Stdout: "daemon-test"},
-		commandKey([]string{"context", "inspect", "default", "--format", `{{(index .Endpoints "docker").Host}}`}): {Stdout: "unix:///tmp/docker-test.sock"},
+		commandKey([]string{"inspect", "status-container"}): {Stdout: inspectJSON},
 	}}
 	addDefaultLocalContainerScopeResponses(runner)
 	b := testBackend(runner)
@@ -5974,9 +5775,6 @@ func TestResolveStatusOnlyAllowsClaimlessLocalContainerWithoutClaiming(t *testin
 	}
 	if lease.Server.CloudID != "status-container" {
 		t.Fatalf("status lease=%#v", lease)
-	}
-	if lease.Memory == nil || lease.Memory.LimitBytes == nil || *lease.Memory.LimitBytes != 12<<30 || lease.Memory.HostCapacityBytes != 8<<30 || lease.Memory.EffectiveUpperBoundBytes != 8<<30 {
-		t.Fatalf("status missing observed memory bounds: %#v", lease.Memory)
 	}
 	if claim, err := core.ReadLeaseClaim("cbx_status_local"); err != nil {
 		t.Fatal(err)
@@ -5988,13 +5786,8 @@ func TestResolveStatusOnlyAllowsClaimlessLocalContainerWithoutClaiming(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner.responses[commandKey([]string{"inspect", "--format", "{{.HostConfig.Memory}}", "status-container"})] = core.LocalCommandResult{Stdout: "6442450944"}
-	lease, err = b.Resolve(context.Background(), core.ResolveRequest{ID: "status-container", Repo: core.Repo{Root: t.TempDir()}, StatusOnly: true})
-	if err != nil {
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "status-container", Repo: core.Repo{Root: t.TempDir()}, StatusOnly: true}); err != nil {
 		t.Fatalf("owned status-only resolve: %v", err)
-	}
-	if lease.Memory == nil || lease.Memory.LimitBytes == nil || *lease.Memory.LimitBytes != 6<<30 || lease.Memory.EffectiveUpperBoundBytes != 6<<30 {
-		t.Fatalf("status did not refresh retained container memory limit: %#v", lease.Memory)
 	}
 	after, err := core.ReadLeaseClaim("cbx_status_local")
 	if err != nil {

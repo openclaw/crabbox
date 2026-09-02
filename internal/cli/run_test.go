@@ -3854,14 +3854,11 @@ exit 0
 			logText := string(logData)
 			previous := -1
 			for _, want := range []string{"check_artifact_file()", "tar -czf", "base64 <", "rm -f --", "RELEASE"} {
-				index := strings.Index(logText, want)
-				if index < 0 {
+				relative := strings.Index(logText[previous+1:], want)
+				if relative < 0 {
 					t.Fatalf("ssh log missing %q:\n%s", want, logText)
 				}
-				if index <= previous {
-					t.Fatalf("ssh log has %q out of order:\n%s", want, logText)
-				}
-				previous = index
+				previous += relative + 1
 			}
 		})
 	}

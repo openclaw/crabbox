@@ -53,6 +53,14 @@ crabbox stop --provider islo --id isb_crabbox-repo-abcdef
 Read-only status lookup can still use a canonical sandbox name without a claim.
 Delete, pause, resume, SSH reuse, and delegated reuse cannot.
 
+A sandbox name is an addressing convenience, not the sandbox's identity: the
+immutable Islo sandbox `id` is. That Islo `id` is not what Crabbox's `--id`
+flag takes — `--id` accepts a Crabbox lease id, a Crabbox-generated sandbox
+name, or a slug, and rejects anything else with exit code 4. Existence is
+decided by a get on the exact sandbox, never by the eventually consistent list
+endpoint. See
+[identity and absence semantics](../features/islo.md#identity-and-absence-semantics).
+
 ## Auth
 
 ```sh
@@ -152,7 +160,10 @@ immediately with exit code 5.
 
 - SSH: yes for direct login to existing Crabbox-created sandboxes. `crabbox ssh
   --provider islo --id <slug>` renders `ssh islo@<sandbox>.islo` on port 22
-  by default. Crabbox still does not use SSH for Islo `run` or sync.
+  by default. Crabbox still does not use SSH for Islo `run` or sync: its adapter
+  does not provision an SSH endpoint or manage a per-lease SSH credential,
+  expiry, and revocation. See
+  [why the provider kind stays delegated-run](../features/islo.md#why-the-provider-kind-stays-delegated-run).
 - Crabbox sync: yes, archive sync through the Islo files-archive API, with a
   base64 exec-upload fallback.
 - URL bridge: yes. Exposed ports become public HTTPS shares through Islo's

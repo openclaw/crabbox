@@ -269,20 +269,21 @@ func TestRepoNameFromRootAndRemoteFallsBackToRemoteBasename(t *testing.T) {
 
 func TestParseGitTrackedPaths(t *testing.T) {
 	raw := []byte(
-		"H 100644 aaaa 0\tspace name.txt\x00" +
+		"h 100644 aaaa 0\tspace name.txt\x00" +
 			"S 120000 bbbb 0\ttab\tname\n.txt\x00" +
 			"M 100644 cccc 1\tconflict.txt\x00" +
 			"M 100755 dddd 2\tconflict.txt\x00" +
-			"H 160000 eeee 0\tvendor/submodule\x00",
+			"H 160000 eeee 0\tvendor/submodule\x00" +
+			"s 100644 ffff 0\thidden.txt\x00",
 	)
 	got, err := parseGitTrackedPaths(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 5 {
+	if len(got) != 6 {
 		t.Fatalf("tracked=%#v", got)
 	}
-	if got[0].name != "space name.txt" || got[0].mode != "100644" || got[0].stage != 0 || got[0].skipWorktree {
+	if got[0].name != "space name.txt" || got[0].mode != "100644" || got[0].stage != 0 || got[0].skipWorktree || !got[0].assumeUnchanged {
 		t.Fatalf("regular=%#v", got[0])
 	}
 	if got[1].name != "tab\tname\n.txt" || got[1].mode != "120000" || got[1].stage != 0 || !got[1].skipWorktree {
@@ -294,6 +295,9 @@ func TestParseGitTrackedPaths(t *testing.T) {
 	}
 	if got[4].mode != "160000" || got[4].stage != 0 {
 		t.Fatalf("gitlink=%#v", got[4])
+	}
+	if got[5].name != "hidden.txt" || !got[5].skipWorktree || !got[5].assumeUnchanged {
+		t.Fatalf("combined index flags=%#v", got[5])
 	}
 }
 
@@ -423,6 +427,13 @@ func TestGitCheckoutHasHiddenOmissions(t *testing.T) {
 	}
 	if omitted, err := GitCheckoutHasHiddenOmissions(dir); err != nil || !omitted {
 		t.Fatal("dense checkout missed absent skip-worktree path")
+	}
+	runGit(t, dir, "update-index", "--assume-unchanged", "included/keep.txt")
+	if omitted, err := GitCheckoutHasHiddenOmissions(dir); err != nil || !omitted {
+		t.Error("dense checkout missed absent skip-worktree path marked assume-unchanged")
+	}
+	if _, err := syncManifestFiltered(dir, nil, nil); err == nil || !strings.Contains(err.Error(), "skip-worktree") {
+		t.Errorf("combined index flags bypassed manifest omission guard: %v", err)
 	}
 }
 

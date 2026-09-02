@@ -711,14 +711,7 @@ not reconstruct secrets or hidden local shell state. Short-circuit explanations 
 When an SSH backend supplies per-run memory
 exhaustion evidence, the summary and digest use
 `blocked_stage=resource_exhaustion resource_exhaustion=memory retry_likely=false`
-and recommend increasing the binding memory limit or reducing workload
-concurrency. When the backend observes a lower runtime/host memory capacity,
-the digest advises increasing that capacity rather than an already-higher
-container limit. Available memory bounds appear in the digest and in timing
-JSON's optional `memory` object (`limitBytes`, `hostCapacityBytes`, and
-`effectiveUpperBoundBytes`). They describe observed upper bounds, not free or
-reserved memory; unknown fields are omitted and a zero `limitBytes` means no
-configured limit.
+and recommend increasing the memory limit or reducing workload concurrency.
 Evidence read failures are warnings and do not replace the original command
 failure.
 
