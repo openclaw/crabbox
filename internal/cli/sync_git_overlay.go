@@ -27,7 +27,7 @@ const (
 var (
 	gitOriginHTTPServerError = regexp.MustCompile(`(?i)(?:requested URL returned error:[[:space:]]*|HTTP(?:/[0-9.]+)?[[:space:]]+|HTTP code[[:space:]]*=[[:space:]]*)5[0-9][0-9]\b`)
 	gitOriginHTTPAuthError   = regexp.MustCompile(`(?i)authentication (?:failed|required)|could not read Username|unable to get password|terminal prompts disabled|access denied|permission denied|HTTP(?:/[0-9.]+)?[[:space:]]+(?:401|403)\b|requested URL returned error:[[:space:]]*(?:401|403)\b`)
-	gitOriginTransportError  = regexp.MustCompile(`(?i)Could not resolve (?:host|proxy)|Could not resolve hostname|Failed to connect|Couldn.t connect to server|Connection (?:refused|timed out|reset by peer)|Operation timed out|Network is unreachable|No route to host|SSL certificate problem|server certificate verification failed|TLS connect error|SSL connect error|gnutls_handshake\(\) failed|Empty reply from server|Recv failure|Send failure|Failed sending data to the peer`)
+	gitOriginTransportError  = regexp.MustCompile(`(?i)Could not resolve (?:host|proxy)|Could not resolve hostname|Failed to connect|Couldn.t connect to server|Connection (?:refused|timed out|reset by peer)|getpeername\(\) failed with errno [0-9]+: (?:Transport endpoint|Socket) is not connected\b|Operation timed out|Network is unreachable|No route to host|SSL certificate problem|server certificate verification failed|TLS connect error|SSL connect error|gnutls_handshake\(\) failed|Empty reply from server|Recv failure|Send failure|Failed sending data to the peer`)
 	gitOriginHTTPNotFound    = regexp.MustCompile(`(?i)\brepository not found\b`)
 	gitOriginFilesystemError = regexp.MustCompile(`(?i)does not appear to be a git repository|repository .* does not exist|No such file or directory|Permission denied|unable to access`)
 )
@@ -1679,7 +1679,7 @@ if [ -z "$reuse_hint_valid" ]; then
   set -e
   if [ "$transport_status" -ne 0 ]; then
     if [ "$transport_status" -eq 2 ]; then overlay_fallback advertised_branch_missing; fi
-    if /usr/bin/grep -Eiq 'authentication (failed|required)|could not read Username|unable to get password|terminal prompts disabled|access denied|permission denied|HTTP.*(401|403)|requested URL returned error: (401|403)|repository not found' "$git_runtime_root/transport-error"; then
+    if /usr/bin/grep -Eiq 'authentication (failed|required)|could not read Username|unable to get password|terminal prompts disabled|access denied|permission denied|HTTP(/[0-9.]+)?[[:space:]]+(401|403)([^0-9]|$)|requested URL returned error: (401|403)|repository not found' "$git_runtime_root/transport-error"; then
       overlay_fallback origin_auth_required
     fi
     overlay_fallback origin_unavailable
@@ -1709,7 +1709,7 @@ if [ -z "$reuse_hint_valid" ]; then
   transport_status=$?
   set -e
   if [ "$transport_status" -ne 0 ]; then
-    if /usr/bin/grep -Eiq 'authentication (failed|required)|could not read Username|unable to get password|terminal prompts disabled|access denied|permission denied|HTTP.*(401|403)|requested URL returned error: (401|403)|repository not found' "$git_runtime_root/transport-error"; then
+    if /usr/bin/grep -Eiq 'authentication (failed|required)|could not read Username|unable to get password|terminal prompts disabled|access denied|permission denied|HTTP(/[0-9.]+)?[[:space:]]+(401|403)([^0-9]|$)|requested URL returned error: (401|403)|repository not found' "$git_runtime_root/transport-error"; then
       overlay_fallback origin_auth_required
     fi
     overlay_fallback origin_unavailable

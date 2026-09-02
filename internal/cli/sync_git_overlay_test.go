@@ -2408,7 +2408,13 @@ func TestRemoteGitOverlayTransportFailuresFallBack(t *testing.T) {
 		t.Skip("POSIX overlay integration")
 	}
 	fixture := newGitOverlayFixture(t)
-	fetchOrigin, failedFetch := newFailingGitFetchHTTPServer(t, fixture.origin)
+	// Auth-like URL digits are not an HTTP authentication status.
+	fetchRepo := filepath.Join(t.TempDir(), "origin-401-403.git")
+	if err := os.Rename(fixture.origin, fetchRepo); err != nil {
+		t.Fatal(err)
+	}
+	fetchOrigin, failedFetch := newFailingGitFetchHTTPServer(t, fetchRepo)
+	unavailableOrigin := newGitTransportFailureHTTPServer(t) + "/unavailable-401-403.git"
 	tests := []struct {
 		name      string
 		plan      gitCoherencePlan
@@ -2417,7 +2423,7 @@ func TestRemoteGitOverlayTransportFailuresFallBack(t *testing.T) {
 		{
 			name: "ls-remote",
 			plan: gitCoherencePlan{
-				RemoteURL: "http://127.0.0.1:1/missing.git",
+				RemoteURL: unavailableOrigin,
 				Target:    strings.Repeat("a", 40),
 				Tree:      strings.Repeat("b", 40),
 				Branch:    "main",
@@ -3201,7 +3207,7 @@ func TestRunGitOverlaySuccessFallbackAndLateLocalEdit(t *testing.T) {
 	for _, mode := range []string{
 		"success", "file-origin", "runtime-state", "classified-fallback", "snapshot-prepare-fallback", "private-origin", "origin-unavailable", "missing-origin", "local-ineligible", "local-fingerprint-reuse", "remote-fingerprint-reuse", "unsafe-metadata",
 		"local-hidden-fingerprint", "local-sparse-hidden-fingerprint", "local-config-hidden-fingerprint", "remote-hidden-fingerprint", "remote-skip-hidden-fingerprint", "remote-inspection-hidden-fingerprint",
-		"ordinary-private-fresh", "ordinary-private-reused", "ordinary-unavailable-fresh", "ordinary-unavailable-reused", "ordinary-server-failure-reused",
+		"ordinary-private-fresh", "ordinary-private-reused", "ordinary-unavailable-fresh", "ordinary-unavailable-reused", "ordinary-disconnected-reused", "ordinary-server-failure-reused",
 		"symlinked-workdir", "symlinked-git", "symlinked-git-config", "symlinked-git-objects", "linked-worktree",
 		"checkout-file-obstruction", "post-reset-cache", "post-reset-mass-deletion", "late-local-edit", "workload-cleanup", "rsync-failure", "rsync-cleanup-failure", "empty-overlay-finalize",
 	} {
@@ -3213,13 +3219,13 @@ func TestRunGitOverlaySuccessFallbackAndLateLocalEdit(t *testing.T) {
 			hiddenFingerprint := strings.HasSuffix(mode, "-hidden-fingerprint")
 			fingerprintReuse := mode == "local-fingerprint-reuse" || mode == "remote-fingerprint-reuse" || hiddenFingerprint
 			privateOrigin := mode == "private-origin" || strings.HasPrefix(mode, "ordinary-private-")
-			unavailableOrigin := mode == "origin-unavailable" || strings.HasPrefix(mode, "ordinary-unavailable-")
+			unavailableOrigin := mode == "origin-unavailable" || strings.HasPrefix(mode, "ordinary-unavailable-") || mode == "ordinary-disconnected-reused"
 			switch mode {
 			case "file-origin":
 				runGit(t, fixture.root, "remote", "set-url", "origin", "file://"+filepath.ToSlash(fixture.origin))
 			case "missing-origin":
 				runGit(t, fixture.root, "remote", "remove", "origin")
-			case "origin-unavailable", "ordinary-unavailable-fresh", "ordinary-unavailable-reused":
+			case "origin-unavailable", "ordinary-unavailable-fresh", "ordinary-unavailable-reused", "ordinary-disconnected-reused":
 				unavailableOrigin := newGitTransportFailureHTTPServer(t) + "/unavailable.git"
 				runGit(t, fixture.root, "remote", "set-url", "origin", unavailableOrigin)
 			case "private-origin", "ordinary-private-fresh", "ordinary-private-reused":
@@ -3468,6 +3474,25 @@ export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/
 export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false GCM_INTERACTIVE=Never
 cmd="$1"
 printf '%%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
+# Replay the CI libcurl diagnostic only after a real coherence fetch failure.
+# Keep the remote command, cleanup, and exit status intact.
+if [ "$CRABBOX_FAKE_OVERLAY_MODE" = ordinary-disconnected-reused ]; then
+  case "$cmd" in
+    *"Git coherence fetch failed"*)
+      diagnostic="$(mktemp)"
+      /bin/bash --noprofile --norc -c "$cmd" 2>"$diagnostic"
+      code=$?
+      if [ "$code" -eq 78 ] && grep -q 'Git coherence fetch failed' "$diagnostic"; then
+        printf replayed > "$CRABBOX_FAKE_RSYNC_LOG.disconnected"
+        printf '%%s\n' 'remote sync finalize failed: Git coherence fetch failed' "fatal: unable to access 'http://127.0.0.1/unavailable.git/': getpeername() failed with errno 107: Transport endpoint is not connected" >&2
+      else
+        cat "$diagnostic" >&2
+      fi
+      rm -f "$diagnostic"
+      exit "$code"
+      ;;
+  esac
+fi
 case "$cmd" in
   *CRABBOX_SNAPSHOT_WORKLOAD_PROBE*)
     snapshot_root="$(cat "$CRABBOX_FAKE_RSYNC_SOURCE_LOG")"
@@ -3607,6 +3632,14 @@ exit 99
 				runArgs = []string{"--provider", providerName, "--no-hydrate", "--", "CRABBOX_SNAPSHOT_WORKLOAD_PROBE"}
 			}
 			runErr := app.runCommand(context.Background(), runArgs)
+			if mode == "ordinary-disconnected-reused" {
+				if replay, err := os.ReadFile(rsyncLog + ".disconnected"); err != nil || string(replay) != "replayed" {
+					t.Fatalf("disconnected diagnostic was not replayed after a real fetch failure: replay=%q err=%v", replay, err)
+				}
+				if runErr == nil && strings.Contains(stderr.String(), "getpeername") {
+					t.Fatalf("successful fallback leaked transport diagnostics: %s", stderr.String())
+				}
+			}
 			if credentialMarker != "" {
 				if _, err := os.Stat(credentialMarker); !os.IsNotExist(err) {
 					t.Fatalf("local SSH fixture consulted ambient Git credentials: %v", err)
@@ -3805,7 +3838,7 @@ exit 99
 					}
 				}
 			case "classified-fallback", "snapshot-prepare-fallback", "private-origin", "origin-unavailable", "missing-origin", "local-ineligible", "linked-worktree", "checkout-file-obstruction", "post-reset-cache",
-				"ordinary-private-fresh", "ordinary-private-reused", "ordinary-unavailable-fresh", "ordinary-unavailable-reused":
+				"ordinary-private-fresh", "ordinary-private-reused", "ordinary-unavailable-fresh", "ordinary-unavailable-reused", "ordinary-disconnected-reused":
 				transfer, err := os.ReadFile(rsyncLog)
 				if err != nil || !bytes.Contains(transfer, []byte("clean.txt\x00")) {
 					t.Fatalf("fallback omitted full manifest: data=%q err=%v", transfer, err)
