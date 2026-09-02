@@ -13,6 +13,7 @@ import (
 func runCheckpointMachine0StrategyContract(t *testing.T, repo, binary string) {
 	for _, strategy := range []string{"auto", "image", "disk-snapshot"} {
 		t.Run("Machine0 retirement strategy "+strategy, func(t *testing.T) {
+			t.Parallel()
 			f := newCheckpointCaptureFixture(t, repo, binary)
 			args := append(f.retireArgs(), "--strategy", strategy)
 			claimPath := filepath.Join(f.root, "state", "crabbox", "claims", captureFixtureLease+".json")
