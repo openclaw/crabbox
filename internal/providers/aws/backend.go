@@ -659,26 +659,6 @@ func (b *awsLeaseBackend) retainLeaseClaimAfterRelease(lease LeaseTarget, previo
 	})
 }
 
-func (b *awsLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
-	server := req.Lease.Server
-	if server.Labels == nil {
-		server.Labels = map[string]string{}
-	}
-	cfg := awsConfigForServer(b.Cfg, server)
-	if req.IdleTimeout > 0 {
-		cfg.IdleTimeout = req.IdleTimeout
-	}
-	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, req.State, time.Now().UTC())
-	client, err := newAWSClient(ctx, cfg)
-	if err != nil {
-		return server, err
-	}
-	if err := client.SetTags(ctx, server.CloudID, server.Labels); err != nil {
-		return server, err
-	}
-	return server, nil
-}
-
 func (b *awsLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	servers, err := b.List(ctx, ListRequest{Options: req.Options})
 	if err != nil {
@@ -896,10 +876,14 @@ func requireExactAWSClaim(server Server, expectedLeaseID string) (core.LeaseClai
 	if !exists {
 		return core.LeaseClaim{}, exit(2, "aws lease=%s has no exact local claim; refusing destructive operation", expectedLeaseID)
 	}
+	return claim, validateExactAWSClaim(server, expectedLeaseID, claim)
+}
+
+func validateExactAWSClaim(server Server, expectedLeaseID string, claim core.LeaseClaim) error {
 	if claim.FixedCreateIntent != nil && claim.FixedCreateIntent.State == fixedAWSIntentReleased {
-		return core.LeaseClaim{}, exit(4, "lease_id_conflict: AWS lease %s is terminal; refusing another destructive operation", expectedLeaseID)
+		return exit(4, "lease_id_conflict: AWS lease %s is terminal; refusing another operation", expectedLeaseID)
 	}
-	if !isCrabboxAWSLease(server) ||
+	if server.Provider != "aws" || !isCrabboxAWSLease(server) ||
 		claim.LeaseID != expectedLeaseID ||
 		!isAWSClaimProvider(claim.Provider) ||
 		claim.CloudID == "" ||
@@ -909,16 +893,16 @@ func requireExactAWSClaim(server Server, expectedLeaseID string) (core.LeaseClai
 		server.Labels["lease"] != expectedLeaseID ||
 		awsServerRegion(server) == "" ||
 		strings.TrimSpace(claim.Labels["aws_region"]) != awsServerRegion(server) {
-		return core.LeaseClaim{}, exit(2, "refusing to operate on AWS instance %s from a missing or stale exact local claim", server.DisplayID())
+		return exit(2, "refusing to operate on AWS instance %s from a missing or stale exact local claim", server.DisplayID())
 	}
 	expectedProviderKey := strings.TrimSpace(claim.Labels["provider_key"])
 	if expectedProviderKey == "" {
 		expectedProviderKey = core.ProviderKeyForLease(expectedLeaseID)
 	}
 	if strings.TrimSpace(core.ServerProviderKey(server)) != expectedProviderKey {
-		return core.LeaseClaim{}, exit(2, "refusing to operate on AWS instance %s whose provider key differs from its exact local claim", server.DisplayID())
+		return exit(2, "refusing to operate on AWS instance %s whose provider key differs from its exact local claim", server.DisplayID())
 	}
-	return claim, nil
+	return nil
 }
 
 func deleteClaimedAWSServerWithClient(ctx context.Context, client awsClient, server Server, claim core.LeaseClaim, cleanupKeyID string) error {

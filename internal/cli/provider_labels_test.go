@@ -168,23 +168,28 @@ func TestProviderLabelDisplayAndDurationHelpers(t *testing.T) {
 	}
 }
 
-func TestTouchDirectLeaseLabelsFallsBackForMalformedStoredValues(t *testing.T) {
+func TestTouchDirectLeaseLabelsRepairsLifecycleWithoutRewritingProviderMetadata(t *testing.T) {
 	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 	cfg := Config{TTL: 10 * time.Minute, IdleTimeout: 2 * time.Minute}
 	got := touchDirectLeaseLabels(map[string]string{
-		"created_at":        "bad",
-		"idle_timeout_secs": "bad",
-		"ttl_secs":          "bad",
-		"slug":              "blue lobster",
-	}, cfg, "", now)
+		"created_at":          "bad",
+		"idle_timeout_secs":   "bad",
+		"ttl_secs":            "bad",
+		"slug":                "blue lobster",
+		"fixed_intent_sha256": strings.Repeat("a", 64),
+		"native_resource":     "projects/example/locations/global/resources/owned",
+	}, cfg, "running/command", now)
 	if got["created_at"] != "1777636800" || got["last_touched_at"] != "1777636800" {
 		t.Fatalf("timestamps did not fall back to now: %#v", got)
 	}
 	if got["idle_timeout_secs"] != "120" || got["ttl_secs"] != "600" || got["expires_at"] != "1777636920" {
 		t.Fatalf("durations did not fall back to cfg: %#v", got)
 	}
-	if got["slug"] != "blue_lobster" {
-		t.Fatalf("slug was not sanitized: %#v", got)
+	if got["slug"] != "blue lobster" || got["fixed_intent_sha256"] != strings.Repeat("a", 64) || got["native_resource"] != "projects/example/locations/global/resources/owned" {
+		t.Fatalf("touch changed provider-owned identity: %#v", got)
+	}
+	if got["state"] != "running_command" {
+		t.Fatalf("new lifecycle state was not sanitized: %#v", got)
 	}
 }
 
