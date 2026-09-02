@@ -157,6 +157,16 @@ func (Provider) PrepareLeaseClaimEndpoint(existing LeaseClaim, provider, slug st
 func (b *backend) ReleaseLeaseConnectionCleanupSafe() bool { return false }
 
 func releaseExactBox(ctx context.Context, client api, expected boxData, beforeRelease func(boxData)) error {
+	fresh, absent, err := exactBoxForRelease(ctx, client, expected)
+	if err != nil {
+		return err
+	}
+	if absent {
+		return nil
+	}
+	if err := validateBoxIdentity(fresh, expected); err != nil {
+		return err
+	}
 	validate := func(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -211,4 +221,28 @@ func releaseExactBox(ctx context.Context, client api, expected boxData, beforeRe
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
+}
+
+func exactBoxForRelease(ctx context.Context, client api, expected boxData) (boxData, bool, error) {
+	fresh, err := client.GetBox(ctx, expected.ID)
+	if err == nil {
+		return fresh, false, nil
+	}
+	if !isNotFound(err) {
+		return boxData{}, false, fmt.Errorf("ascii-box ownership lookup; retaining claim: %w", err)
+	}
+	boxes, listErr := client.ListBoxes(ctx, true)
+	if listErr != nil {
+		return boxData{}, false, fmt.Errorf("ascii-box absence confirmation; retaining claim: %w", listErr)
+	}
+	for _, box := range boxes {
+		if box.ID != expected.ID {
+			continue
+		}
+		if identityErr := validateBoxIdentity(box, expected); identityErr != nil {
+			return boxData{}, false, identityErr
+		}
+		return boxData{}, false, fmt.Errorf("ascii-box ownership lookup; retaining claim: %w", err)
+	}
+	return boxData{}, true, nil
 }

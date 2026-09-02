@@ -105,7 +105,9 @@ func TestReleaseRetainsUncertainResources(t *testing.T) {
 			wantDelete := false
 			switch name {
 			case "wrong ID":
-				f.box.ID = "bx_other"
+				wrong := f.box
+				wrong.ID = "bx_other"
+				f.getHook = func(string) (boxData, error) { return wrong, nil }
 			case "missing timestamp":
 				f.box.CreatedAt = nil
 			case "changed timestamp":
@@ -134,6 +136,26 @@ func TestReleaseRetainsUncertainResources(t *testing.T) {
 			}
 			assertClaimRetained(t, claim)
 		})
+	}
+}
+
+func TestReleaseRemovesClaimAfterAuthoritativeNativeAbsence(t *testing.T) {
+	b, f, claim, _ := ownedFixture(t)
+	f.getHook = func(string) (boxData, error) { return boxData{}, fmt.Errorf("404 not found") }
+	f.listHook = func() ([]boxData, error) { return []boxData{}, nil }
+
+	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: claim.LeaseID, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.deletedIDs) != 0 {
+		t.Fatalf("deleted=%v, want no duplicate native deletion", f.deletedIDs)
+	}
+	if _, ok, err := core.ResolveLeaseClaim(claim.LeaseID); err != nil || ok {
+		t.Fatalf("claim ok=%t err=%v, want removed", ok, err)
 	}
 }
 

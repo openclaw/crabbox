@@ -159,9 +159,21 @@ func (b *backend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget,
 				return err
 			}
 		}
-		box, err := client.GetBox(ctx, claim.CloudID)
-		if err != nil {
-			return err
+		var box boxData
+		if req.ReleaseOnly {
+			var absent bool
+			box, absent, err = exactBoxForRelease(ctx, client, boxFromClaim(claim))
+			if err != nil {
+				return err
+			}
+			if absent {
+				box = boxFromClaim(claim)
+			}
+		} else {
+			box, err = client.GetBox(ctx, claim.CloudID)
+			if err != nil {
+				return err
+			}
 		}
 		if err := validateBoxIdentity(box, boxFromClaim(claim)); err != nil {
 			return err
