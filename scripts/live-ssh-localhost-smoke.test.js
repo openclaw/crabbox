@@ -26,11 +26,12 @@ function runSmoke(t, options = {}) {
   const python = spawnSync("python3", ["-c", "import sys; print(sys.executable)"], { encoding: "utf8" });
   assert.equal(python.status, 0, python.stderr);
 
-  // Only the JSON validator uses real Python. No SSH, service, or network command is real.
+  // Validators and tar fixtures use real Python. No SSH, service, or network command is real.
   const stub = path.join(bin, "stub.cjs");
   fs.writeFileSync(stub, `#!/usr/bin/env node
 const fs = require("node:fs");
 const path = require("node:path");
+const crypto = require("node:crypto");
 const { spawnSync } = require("node:child_process");
 const dir = process.env.CRABBOX_FIXTURE_DIR;
 const options = JSON.parse(fs.readFileSync(path.join(dir, "options.json"), "utf8"));
@@ -59,6 +60,12 @@ switch (tool) {
   case "crabbox": {
     const command = args[0];
     fs.appendFileSync(path.join(dir, "calls.jsonl"), JSON.stringify(args) + "\\n");
+    fs.appendFileSync(path.join(dir, "cwds.jsonl"), JSON.stringify(process.cwd()) + "\\n");
+    const repoRoot = path.join(dir, "repo-root");
+    if (command === "warmup") fs.writeFileSync(repoRoot, process.cwd());
+    if (command === "run" && fs.readFileSync(repoRoot, "utf8") !== process.cwd()) {
+      throw new Error("lease RepoRoot differs from warmup fixture cwd");
+    }
     if (command === options.failCommand) {
       process.stdout.write(options.stdout);
       process.stderr.write(options.stderr);
@@ -68,7 +75,62 @@ switch (tool) {
       case "doctor": console.log("doctor ok"); break;
       case "warmup": fs.writeFileSync(path.join(dir, "slug"), args[args.indexOf("--slug") + 1]); break;
       case "status": break;
-      case "run": console.log("crabbox-ssh-localhost-ok"); break;
+      case "run": {
+        if (!args.includes("--script")) {
+          console.log("crabbox-ssh-localhost-ok");
+          break;
+        }
+        const source = args[args.indexOf("--script") + 1];
+        const data = fs.readFileSync(source);
+        const name = crypto.createHash("sha256").update(data).digest("hex").slice(0, 12) + "-" + path.basename(source).replace(/[^a-zA-Z0-9._-]/g, "");
+        const remote = path.join(process.env.CRABBOX_STATIC_WORK_ROOT, "repo");
+        const store = path.join(remote, ".crabbox/scripts");
+        fs.mkdirSync(store, { recursive: true });
+        const uploaded = path.join(store, name);
+        fs.writeFileSync(uploaded, data);
+        const workload = spawnSync("/bin/sh", [uploaded], { cwd: remote, encoding: "utf8" });
+        process.stdout.write(workload.stdout);
+        process.stderr.write(workload.stderr);
+        if (!args.includes("--keep-on-failure")) {
+          if (workload.status !== 0) throw new Error("first fixture workload failed: " + workload.stderr);
+          break;
+        }
+        if (workload.status !== 23) throw new Error("fixture workload failed: " + workload.stderr);
+        const selected = args[args.indexOf("--download-on-failure") + 1].split("=")[1];
+        fs.copyFileSync(path.join(store, "prior.log"), selected);
+        const project = process.cwd();
+        const captures = path.join(project, ".crabbox/captures");
+        fs.mkdirSync(captures, { recursive: true });
+        const members = {
+          ["crabbox-artifacts/remote/.crabbox/scripts/" + name]: options.wrongScript ? "wrong bytes" : data.toString(),
+          "crabbox-artifacts/remote/test-results/failure.log": "current report\\n",
+          "crabbox-artifacts/crabbox-run.json": JSON.stringify({ exitCode: options.wrongMetadata ? 0 : 23 }),
+          "crabbox-artifacts/stdout.log": workload.stdout,
+          "crabbox-artifacts/stderr.log": workload.stderr,
+        };
+        if (options.staleEntry) members["crabbox-artifacts/remote/.crabbox/scripts/prior.log"] = "stale";
+        const pack = [
+          "import io, json, sys, tarfile",
+          "members = json.load(sys.stdin)",
+          "with tarfile.open(sys.argv[1], 'w:gz') as archive:",
+          "    for name, value in members.items():",
+          "        data = value.encode()",
+          "        header = tarfile.TarInfo(name)",
+          "        header.size = len(data)",
+          "        archive.addfile(header, io.BytesIO(data))",
+        ].join("\\n");
+        const tar = spawnSync(process.env.CRABBOX_FIXTURE_PYTHON, ["-c", pack, path.join(captures, "fixture.tar.gz")], { input: JSON.stringify(members), encoding: "utf8" });
+        if (tar.status !== 0) throw new Error(tar.stderr);
+        if (options.remoteArchive) fs.writeFileSync(path.join(remote, ".crabbox/leaked.tar.gz"), "leaked");
+        if (options.missingRetainedUpload) {
+          for (const entry of fs.readdirSync(store)) {
+            if (entry.endsWith("-firstsuccessscript.sh")) fs.unlinkSync(path.join(store, entry));
+          }
+        }
+        // A retained reused run does not attempt cleanup, so these fields are omitted.
+        process.stderr.write(JSON.stringify({ exitCode: 23, leaseStopped: options.badRetention, leaseStopError: options.stopError }) + "\\n");
+        process.exit(options.workloadExit ?? 23);
+      }
       case "cp": {
         const [source, destination] = args.slice(-2).map(value => value.replace(/^SANDBOX:/, ""));
         fs.copyFileSync(source, destination);
@@ -101,7 +163,7 @@ switch (tool) {
       PATH: `${bin}:/usr/bin:/bin`,
       HOME: fixtureHome,
       TMPDIR: temporary,
-      CRABBOX_BIN: path.join(bin, "crabbox"),
+      CRABBOX_BIN: options.relativeBin ? "./bin/crabbox" : path.join(bin, "crabbox"),
       CRABBOX_SSH_LOCALHOST_USER: "fixture",
       CRABBOX_FIXTURE_DIR: dir,
       CRABBOX_FIXTURE_PYTHON: python.stdout.trim(),
@@ -122,6 +184,9 @@ switch (tool) {
   assert.equal(fs.readFileSync(authorizedKeys, "utf8"), existingEntry);
   assert.deepEqual(fs.readdirSync(temporary), [], "smoke must remove its work directory and captures");
   const calls = fs.readFileSync(path.join(dir, "calls.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
+  const cwds = fs.readFileSync(path.join(dir, "cwds.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
+  assert.equal(new Set(cwds).size, 1, "every CLI invocation must use the same fixture RepoRoot");
+  assert.ok(cwds[0].startsWith(fs.realpathSync(temporary) + path.sep), "CLI cwd must be inside the owned temporary tree");
   return { ...result, calls };
 }
 
@@ -129,12 +194,21 @@ test("SSH localhost smoke accepts list JSON with diagnostics kept on stderr", (t
   const result = runSmoke(t, { listStderr: diagnostic + "\n" });
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /classification=live_ssh_localhost_smoke_passed .*cp=roundtrip tunnel=ready cleanup=complete/);
-  assert.equal(result.stderr, diagnostic + "\n");
+  assert.ok(result.stderr.includes(diagnostic + "\n"));
+  assert.match(result.stdout, /failure_bundle=passed exit=23 .*stale=absent neighbors=absent .*explicit_download=passed retained=true remote_archives=0/);
+  assert.doesNotMatch(result.stderr, /classification=environment_blocked/);
   assert.ok(!result.stdout.includes(diagnostic));
   const payload = JSON.parse(result.stdout.split("\n").find(line => line.startsWith("[")));
   const slug = result.calls.find(args => args[0] === "warmup")[4];
   assert.equal(payload[0].labels.slug, slug);
-  assert.deepEqual(result.calls.map(args => args[0]), ["doctor", "warmup", "status", "run", "cp", "cp", "tunnel", "list", "stop"]);
+  assert.deepEqual(result.calls.map(args => args[0]), ["doctor", "warmup", "status", "run", "run", "run", "status", "cp", "cp", "tunnel", "list", "stop"]);
+});
+
+test("SSH localhost smoke resolves a relative binary before entering its fixture", (t) => {
+  const result = runSmoke(t, { relativeBin: true });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /failure_bundle=passed/);
+  assert.match(result.stdout, /live_ssh_localhost_smoke_passed .*cleanup=complete/);
 });
 
 for (const { name, listOutput, error } of [
@@ -170,6 +244,21 @@ for (const fixture of [
       ? ["doctor"]
       : fixture.failCommand === "warmup"
         ? ["doctor", "warmup", "stop"]
-        : ["doctor", "warmup", "status", "run", "cp", "cp", "tunnel", "list", "stop"]);
+        : ["doctor", "warmup", "status", "run", "run", "run", "status", "cp", "cp", "tunnel", "list", "stop"]);
+  });
+}
+
+for (const options of [
+  { staleEntry: true }, { wrongScript: true }, { wrongMetadata: true },
+  { badRetention: true }, { badRetention: false }, { stopError: "fixture cleanup failed" },
+  { missingRetainedUpload: true }, { remoteArchive: true }, { workloadExit: 0 }, { workloadExit: 29 },
+]) {
+  test(`SSH localhost failure bundle rejects ${JSON.stringify(options)} and cleans up`, (t) => {
+    const result = runSmoke(t, options);
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, /classification=validation_failed/);
+    assert.doesNotMatch(result.stderr, /classification=environment_blocked/);
+    assert.doesNotMatch(result.stdout, /failure_bundle=passed|live_ssh_localhost_smoke_passed/);
+    assert.equal(result.calls.at(-1)[0], "stop");
   });
 }

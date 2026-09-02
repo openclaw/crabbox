@@ -46,6 +46,13 @@ Or through the environment: `CRABBOX_RESULTS_JUNIT` (comma-separated paths),
 [`crabbox job run`](jobs.md) (from a job's `junit:` list) and
 [`crabbox capsule replay`](capsules.md).
 
+In layered YAML, omitting `results.junit` inherits the lower layer's paths,
+`results: {junit: []}` clears them, and a nonempty list replaces them. Clearing
+the list removes old explicit collection paths but does not disable independent
+`results.auto: true` discovery. Set `auto: false` too to stop both forms of
+collection. A higher `CRABBOX_RESULTS_JUNIT` override or explicit `--junit` can
+select paths again after a YAML clear.
+
 ## What happens after the command exits
 
 `crabbox run` collects results only when `--results-auto` is set or at least one
@@ -96,8 +103,20 @@ failures, errors, skipped, total time in seconds), and a `failed` list of
 individual failing cases. Each `TestFailure` records its suite, test name,
 optional classname/file, the first failure or error message, the JUnit `type`,
 and a `kind` of `failure` or `error`. The parser accepts both `<testsuites>` and
-a bare `<testsuite>` root and derives counts from case elements when suite
-attributes are absent.
+a bare `<testsuite>` root, including nested `<testsuite>` children. Failed cases
+retain the name of their owning suite, not an enclosing aggregate suite. The
+suite count includes every visited `<testsuite>` element, including empty and
+aggregate suites; the `<testsuites>` wrapper itself does not count as a suite.
+
+Each suite combines its direct cases and child-suite summaries before applying
+its own counters. A nonzero reported test count is retained; a missing or zero
+count is derived. Failures, errors, and skips are at least the corresponding
+direct-case plus child-summary totals, so a reported zero cannot hide a failed
+case. Parent aggregate counters are not added again to their descendants.
+As with flat reports, a positive suite time is used when the suite reports a
+positive counter; otherwise time is derived from direct cases and child
+summaries, never added on top of them. A `<testsuites>` wrapper uses its child
+summaries when present, or its own aggregate attributes when it has no suites.
 
 ## Coordinator storage limits
 

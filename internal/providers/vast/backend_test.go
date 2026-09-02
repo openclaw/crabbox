@@ -939,8 +939,8 @@ func TestReleaseHonorsExplicitReleaseActionOverride(t *testing.T) {
 
 	b.cfg.Vast.ReleaseAction = "keep"
 	core.MarkDeleteOnReleaseExplicit(&b.cfg, providerName)
-	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
-		t.Fatal(err)
+	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil || outcome.Terminal {
+		t.Fatalf("keep outcome=%+v err=%v", outcome, err)
 	}
 	if len(api.destroyed) != 0 || len(api.detached) != 0 {
 		t.Fatalf("destroyed=%v detached=%v", api.destroyed, api.detached)
@@ -982,8 +982,8 @@ func TestReleaseStopIsExplicitAndTested(t *testing.T) {
 
 	b.cfg.Vast.ReleaseAction = "destroy"
 	core.MarkDeleteOnReleaseExplicit(&b.cfg, providerName)
-	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
-		t.Fatal(err)
+	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil || !outcome.Terminal {
+		t.Fatalf("destroy outcome=%+v err=%v", outcome, err)
 	}
 	if len(api.detached) != 1 || api.detached[0].id != 100 || api.detached[0].keyID != "key-100" {
 		t.Fatalf("detached=%v", api.detached)

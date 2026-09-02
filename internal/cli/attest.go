@@ -14,13 +14,11 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"hash"
 	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -503,27 +501,6 @@ func decodeTerminalRunReceipt(data []byte) (terminalRunReceipt, error) {
 
 func writeTerminalRunReceipt(path string, receipt terminalRunReceipt) (runArtifact, error) {
 	return writeReceiptFile(path, receipt, maxTerminalReceiptBytes)
-}
-
-type attestDigestWriter struct {
-	mu     sync.Mutex
-	digest hash.Hash
-}
-
-func newAttestDigestWriter() *attestDigestWriter {
-	return &attestDigestWriter{digest: sha256.New()}
-}
-
-func (w *attestDigestWriter) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.digest.Write(p)
-}
-
-func (w *attestDigestWriter) sum() string {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return "sha256:" + hex.EncodeToString(w.digest.Sum(nil))
 }
 
 // JSONHasDuplicateKeys scans one JSON value recursively. Callers remain

@@ -41,8 +41,17 @@ env:
     - PROJECT_*
 ```
 
-Setting `env.allow` replaces the built-in default. Profile-scoped allowlists are
-also supported through the profile's own `env.allow`.
+Setting top-level `env.allow` replaces the inherited list, including the built-in
+default. Omitting it inherits the lower layer; `env: {allow: []}` clears all
+inherited names, including `CI` and `NODE_OPTIONS`. A higher nonempty list
+replaces that selection, and `--allow-env` can append names after a clear.
+
+Profile-scoped allowlists (`profiles.<name>.env.allow` and `envAllow`) are
+additive, including across files: an empty profile list adds nothing and does
+not clear earlier profile entries. Selecting a profile can therefore add names
+after a top-level clear. Clearing `env.allow` only controls allowlisted
+forwarding, not profile/preset literal values, reserved execution metadata, or
+capability-injected variables.
 
 ### `CRABBOX_ENV_ALLOW`
 

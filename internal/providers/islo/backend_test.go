@@ -310,6 +310,7 @@ func TestResolveIsloLeaseIDForRepoRequiresExplicitVerifiedReclaim(t *testing.T) 
 	root := t.TempDir()
 	backend := &isloBackend{cfg: Config{IdleTimeout: 7 * time.Minute, Pond: "demo"}}
 	client := &fakeIsloSyncClient{getSandbox: &gosdk.SandboxResponse{
+		ID:     isloTestResourceID,
 		Name:   "crabbox-repo-abcdef",
 		Status: "running",
 	}}
@@ -480,7 +481,7 @@ func TestIsloResolveSSHResumesPausedSandbox(t *testing.T) {
 	isolateIsloTestHome(t)
 	root := t.TempDir()
 	client := &fakeIsloSyncClient{
-		getSandbox: &gosdk.SandboxResponse{Name: "crabbox-repo-abcdef", Status: "paused"},
+		getSandbox: &gosdk.SandboxResponse{ID: isloTestResourceID, Name: "crabbox-repo-abcdef", Status: "paused"},
 	}
 	restore := swapNewIsloClient(client)
 	defer restore()
@@ -1333,7 +1334,7 @@ func TestIsloCreateSandboxRejectsUnsafeWorkdirBeforeAPI(t *testing.T) {
 		cfg: Config{Islo: IsloConfig{Workdir: "../etc"}},
 		rt:  Runtime{Stderr: io.Discard},
 	}
-	_, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
+	_, _, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
 	if err == nil || !strings.Contains(err.Error(), "escapes /workspace") {
 		t.Fatalf("createSandbox err=%v, want workdir containment error", err)
 	}
@@ -1370,7 +1371,7 @@ func TestIsloCreateSandboxOmitsDefaultProviderCreateFields(t *testing.T) {
 	}
 	backend.cfg.Provider = isloProvider
 	backend.cfg.Islo.Workdir = "team/repo"
-	_, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
+	_, _, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1400,7 +1401,7 @@ func TestIsloCreateSandboxSendsNonDefaultProviderCreateFields(t *testing.T) {
 	backend.cfg.Islo.VCPUs = 4
 	backend.cfg.Islo.MemoryMB = 8192
 	backend.cfg.Islo.DiskGB = 80
-	_, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
+	_, _, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1431,7 +1432,7 @@ func TestIsloCreateSandboxSendsExplicitDefaultProviderCreateFields(t *testing.T)
 	core.MarkIsloMemoryMBExplicit(&cfg)
 	core.MarkIsloDiskGBExplicit(&cfg)
 	backend := &isloBackend{cfg: cfg, rt: Runtime{Stderr: io.Discard}}
-	_, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
+	_, _, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1472,40 +1473,6 @@ func TestIsloProviderFlagsMarkDefaultCreateFieldsExplicit(t *testing.T) {
 	}
 }
 
-// TestIsloForgetMissingFlagIsOffUntilAskedFor pins the registration of the
-// teardown opt-out: it is off unless the operator passes it, and passing it is
-// what makes the fail-closed gate drop an unverifiable claim. The help text has
-// to say that no delete happens, because that is the whole hazard.
-func TestIsloForgetMissingFlagIsOffUntilAskedFor(t *testing.T) {
-	cfg := core.BaseConfig()
-	fs := flag.NewFlagSet("islo", flag.ContinueOnError)
-	values := RegisterIsloProviderFlags(fs, cfg)
-	usage := fs.Lookup("islo-forget-missing")
-	if usage == nil {
-		t.Fatal("--islo-forget-missing is not registered")
-	}
-	for _, want := range []string{"cannot prove", "billing"} {
-		if !strings.Contains(usage.Usage, want) {
-			t.Fatalf("usage=%q, want it to state %q", usage.Usage, want)
-		}
-	}
-	if err := ApplyIsloProviderFlags(&cfg, fs, values); err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Islo.ForgetMissing {
-		t.Fatal("islo forget-missing must stay off when the flag is not passed")
-	}
-	if err := fs.Parse([]string{"--islo-forget-missing"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := ApplyIsloProviderFlags(&cfg, fs, values); err != nil {
-		t.Fatal(err)
-	}
-	if !cfg.Islo.ForgetMissing {
-		t.Fatalf("islo forget-missing flag not applied: %#v", cfg.Islo)
-	}
-}
-
 func TestIsloCreateSandboxRejectsMissingTailscaleAuthKeyBeforeAPI(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeIsloSyncClient{createName: "crabbox-repo-abcdef"}
@@ -1519,7 +1486,7 @@ func TestIsloCreateSandboxRejectsMissingTailscaleAuthKeyBeforeAPI(t *testing.T) 
 		},
 		rt: Runtime{Stderr: io.Discard},
 	}
-	_, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
+	_, _, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
 	if err == nil || !strings.Contains(err.Error(), "$TEST_TS_AUTH_KEY") {
 		t.Fatalf("expected missing auth key error, got %v", err)
 	}
@@ -1541,7 +1508,7 @@ func TestIsloCreateSandboxStoresPondClaimForList(t *testing.T) {
 		},
 		rt: Runtime{Stderr: io.Discard},
 	}
-	leaseID, _, slug, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "web")
+	leaseID, _, slug, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "web")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1584,7 +1551,7 @@ func TestIsloCreateSandboxTailscaleClaimAndOptions(t *testing.T) {
 		},
 		rt: Runtime{Stderr: io.Discard},
 	}
-	leaseID, _, slug, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "node-a")
+	leaseID, _, slug, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "node-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1631,30 +1598,53 @@ func TestIsloCreateSandboxTailscaleClaimAndOptions(t *testing.T) {
 }
 
 func TestIsloCreateSandboxRetainsClaimWhenTailscaleRollbackFails(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	client := &fakeIsloSyncClient{
-		createName: "crabbox-repo-abcdef",
-		execErr:    errors.New("tailscale failed"),
-		deleteErr:  errors.New("delete failed"),
-	}
-	backend := &isloBackend{
-		cfg: Config{
-			Pond: "Mesh Demo",
-			Islo: IsloConfig{Workdir: "repo"},
-			Tailscale: core.TailscaleConfig{
-				Enabled: true,
-				AuthKey: "tskey-secret",
-			},
-		},
-		rt: Runtime{Stderr: io.Discard},
-	}
-	_, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "node-a")
-	if err == nil || !strings.Contains(err.Error(), "cleanup failed") {
-		t.Fatalf("expected cleanup failure, got %v", err)
-	}
-	claim, ok, claimErr := resolveLeaseClaim("isb_crabbox-repo-abcdef")
-	if claimErr != nil || !ok {
-		t.Fatalf("claim should remain discoverable after failed rollback: ok=%t err=%v claim=%#v", ok, claimErr, claim)
+	for _, changedOwner := range []bool{false, true} {
+		t.Run(fmt.Sprintf("changed_owner=%t", changedOwner), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			isolateIsloTestHome(t)
+			client := &fakeIsloSyncClient{
+				createName:       isloTeardownName,
+				execErrOnCommand: errors.New("tailscale failed"),
+			}
+			var replacement core.LeaseClaim
+			if changedOwner {
+				client.execErrOnCommandHook = func() {
+					if err := core.ClaimLeaseForRepoProvider(isloTeardownLeaseID, "node-a", isloProvider, t.TempDir(), time.Hour, true); err != nil {
+						t.Fatal(err)
+					}
+					var ok bool
+					var err error
+					replacement, ok, err = resolveExactIsloLeaseClaim(isloTeardownLeaseID)
+					if err != nil || !ok {
+						t.Fatalf("replacement claim ok=%t err=%v", ok, err)
+					}
+				}
+			} else {
+				client.deleteErr = errors.New("delete failed")
+			}
+			backend := &isloBackend{
+				cfg: Config{
+					Pond: "Mesh Demo",
+					Islo: IsloConfig{Workdir: "repo"},
+					Tailscale: core.TailscaleConfig{
+						Enabled: true,
+						AuthKey: "tskey-secret",
+					},
+				},
+				rt: Runtime{Stderr: io.Discard},
+			}
+			_, _, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "node-a")
+			if err == nil || !strings.Contains(err.Error(), "cleanup failed") {
+				t.Fatalf("expected cleanup failure, got %v", err)
+			}
+			claim, ok, claimErr := resolveExactIsloLeaseClaim(isloTeardownLeaseID)
+			if claimErr != nil || !ok {
+				t.Fatalf("claim should remain discoverable after failed rollback: ok=%t err=%v claim=%#v", ok, claimErr, claim)
+			}
+			if changedOwner && (client.deleteCalls != 0 || !reflect.DeepEqual(claim, replacement)) {
+				t.Fatalf("rollback changed the replacement owner's sandbox or claim: deletes=%d claim=%#v want=%#v", client.deleteCalls, claim, replacement)
+			}
+		})
 	}
 }
 
@@ -2001,6 +1991,7 @@ type fakeIsloSyncClient struct {
 	rejectCanceledContext    bool
 	closeUploadReader        bool
 	createRequest            *gosdk.CreateSandboxRequest
+	createSandboxHook        func()
 	createName               string
 	createID                 string
 	createdBy                string
@@ -2008,8 +1999,11 @@ type fakeIsloSyncClient struct {
 	getSandbox               *gosdk.SandboxResponse
 	getSandboxes             []*gosdk.SandboxResponse
 	getSandboxErr            error
+	getSandboxHook           func()
+	getSandboxNames          []string
 	getSandboxGone           bool
 	byID                     map[string]*gosdk.SandboxResponse
+	byIDSandboxes            []*gosdk.SandboxResponse
 	byIDErr                  error
 	byIDCalls                []string
 	resumeErr                error
@@ -2071,11 +2065,17 @@ func (f *fakeIsloSyncClient) liveSandbox(name string) *gosdk.SandboxResponse {
 
 func (f *fakeIsloSyncClient) CreateSandbox(_ context.Context, req *gosdk.CreateSandboxRequest) (*gosdk.SandboxResponse, error) {
 	f.createRequest = req
+	if f.createID == "" {
+		f.createID = isloTestResourceID
+	}
 	name := f.createName
 	if name == "" {
 		name = "crabbox-test-abcdef"
 	}
 	f.registerSandbox(name, f.createID)
+	if f.createSandboxHook != nil {
+		f.createSandboxHook()
+	}
 	sandbox := &gosdk.SandboxResponse{ID: f.createID, Name: name}
 	if f.createdBy != "" {
 		sandbox.CreatedBy = stringValue(f.createdBy)
@@ -2104,6 +2104,10 @@ func (f *fakeIsloSyncClient) CreateSandbox(_ context.Context, req *gosdk.CreateS
 }
 
 func (f *fakeIsloSyncClient) GetSandbox(ctx context.Context, name string) (*gosdk.SandboxResponse, error) {
+	f.getSandboxNames = append(f.getSandboxNames, name)
+	if f.getSandboxHook != nil {
+		f.getSandboxHook()
+	}
 	if f.blockReads {
 		<-ctx.Done()
 		return nil, ctx.Err()
@@ -2136,6 +2140,11 @@ func (f *fakeIsloSyncClient) GetSandboxByID(ctx context.Context, id string) (*go
 	}
 	if f.byIDErr != nil {
 		return nil, f.byIDErr
+	}
+	if len(f.byIDSandboxes) > 0 {
+		sandbox := f.byIDSandboxes[0]
+		f.byIDSandboxes = f.byIDSandboxes[1:]
+		return sandbox, nil
 	}
 	if sandbox, ok := f.byID[id]; ok {
 		if sandbox == nil {

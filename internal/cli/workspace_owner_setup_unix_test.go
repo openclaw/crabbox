@@ -224,7 +224,7 @@ func TestWorkspaceOwnerPOSIXSetupStagesAreCredentialFree(t *testing.T) {
 }
 
 func TestWaitForSSHReadyWorkspaceOwnerSetupFailure(t *testing.T) {
-	for _, scenario := range []string{"direct", "proxy", "bootstrap", "identity"} {
+	for _, scenario := range []string{"direct", "proxy", "diagnostic", "identity"} {
 		t.Run(scenario, func(t *testing.T) {
 			home, owner := workspaceOwnerSetupFixture(t)
 			tools := t.TempDir()
@@ -237,8 +237,8 @@ func TestWaitForSSHReadyWorkspaceOwnerSetupFailure(t *testing.T) {
 			}
 			// Execute the generated remote script, without recording subprocess argv.
 			fakeSSH := "#!/bin/sh\nfor arg; do remote=\"$arg\"; done\n"
-			if scenario == "bootstrap" {
-				fakeSSH += "if [ ! -f " + shellQuote(filepath.Join(home, "transport-done")) + " ]; then touch " + shellQuote(filepath.Join(home, "transport-done")) + "; exit 0; fi\n"
+			if scenario == "diagnostic" {
+				fakeSSH += "if [ ! -f " + shellQuote(filepath.Join(home, "readiness-failed")) + " ]; then touch " + shellQuote(filepath.Join(home, "readiness-failed")) + "; exit 1; fi\n"
 			}
 			fakeSSH += "HOME=" + shellQuote(home) + "\nPATH=" + shellQuote(path) + "\nexport HOME PATH\nexec /bin/sh -c \"$remote\"\n"
 			writeExecutable(t, filepath.Join(tools, "ssh"), fakeSSH)

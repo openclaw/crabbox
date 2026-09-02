@@ -9,10 +9,67 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestRunRecorderCapturesTelemetryOnlyWithRunHandle(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell ssh fixture")
+	}
+	for _, test := range []struct {
+		name        string
+		coordinator bool
+		runID       string
+	}{
+		{name: "direct"},
+		{name: "awaiting run handle", coordinator: true},
+		{name: "recorded", coordinator: true, runID: "run_123"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			callsPath := filepath.Join(dir, "calls")
+			if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte("#!/bin/sh\nprintf 'telemetry\\n' >> \"$CRABBOX_FAKE_TELEMETRY_CALLS\"\nprintf 'cpuCount=2\\n'\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("CRABBOX_FAKE_TELEMETRY_CALLS", callsPath)
+			posts := 0
+			var client *CoordinatorClient
+			if test.coordinator {
+				client = &CoordinatorClient{BaseURL: "https://example.test", Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					if req.Method != http.MethodPost || req.URL.Path != "/v1/runs/run_123/telemetry" {
+						t.Fatalf("unexpected request %s %s", req.Method, req.URL.Path)
+					}
+					var body struct {
+						Telemetry LeaseTelemetry `json:"telemetry"`
+					}
+					if err := json.NewDecoder(req.Body).Decode(&body); err != nil || body.Telemetry.CPUCount == nil || *body.Telemetry.CPUCount != 2 {
+						t.Fatalf("telemetry=%+v error=%v", body.Telemetry, err)
+					}
+					posts++
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"run":{"id":"run_123"}}`)), Header: make(http.Header)}, nil
+				})}}
+			}
+			rec := newRunRecorder(t.Context(), client, Config{}, []string{"true"}, "", io.Discard, true)
+			rec.runID = test.runID
+			target := SSHTarget{User: "runner", Host: "example.test", Port: "22", FallbackPorts: []string{}}
+			rec.CaptureTelemetryStart(t.Context(), target)
+			rec.CaptureTelemetryStart(t.Context(), target)
+			calls, err := os.ReadFile(callsPath)
+			if test.runID == "" {
+				if !os.IsNotExist(err) || posts != 0 || rec.telemetryStart != nil || len(rec.telemetrySnapshot()) != 0 {
+					t.Fatalf("unrecorded run collected telemetry: SSH=%q posts=%d error=%v", calls, posts, err)
+				}
+			} else if err != nil || string(calls) != "telemetry\n" || posts != 1 || len(rec.telemetrySnapshot()) != 1 {
+				t.Fatalf("recorded run needs one start sample: SSH=%q posts=%d error=%v", calls, posts, err)
+			}
+		})
+	}
+}
 
 func TestRunRecorderRedactsCoordinatorDiagnosticEvents(t *testing.T) {
 	const (

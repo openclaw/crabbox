@@ -116,8 +116,8 @@ The key is the authoritative public half generated for provisioning, not a key
 learned later through `known_hosts` or `ssh-keyscan`. The field is omitted when
 the provider cannot inject a host key before boot.
 
-When the provider assigns a resource an immutable identifier separate from its
-name, JSON also includes `providerResourceId`:
+For Islo leases, JSON also includes the API-assigned sandbox ID as
+`providerResourceId`:
 
 ```json
 {
@@ -126,20 +126,19 @@ name, JSON also includes `providerResourceId`:
 }
 ```
 
-`serverId` is the resource's name, which identifies a slot in the provider's
-namespace rather than one specific resource: it stops resolving as soon as the
-resource is deleted, and it can be occupied by a record other than the one you
-created. `providerResourceId` pins the exact resource, so automation that must
-act on one specific resource should key off it. The field is omitted for
-providers whose only identity is the name.
+For Islo, `serverId` remains the sandbox name and `providerResourceId` identifies
+its resource generation. Other providers retain their existing `serverId`
+semantics and may omit `providerResourceId`; omission does not imply that their
+resource names are immutable.
 
-When the resource that answered reports a resource id different from the one the
-lease claims - which is what a lookup that fell back to the name can land on
-once the name has been reused - `labels.islo_resource_id_mismatch` is set to
+When an Islo name fallback does not report the resource ID the lease claims,
+`labels.islo_resource_id_mismatch` is set to
 `true`, `labels.islo_claimed_resource_id` reports the id the lease claims, and
 `providerResourceId` is omitted entirely rather than attributed to a resource
-the lease does not own. A fallback to the name that still resolves to the
-claimed id is not a mismatch and sets neither label.
+the lease does not own. The lease is not ready, and `status --wait` fails without
+running remote Tailscale checks. A fallback that reports the claimed ID sets
+neither label. Malformed by-ID responses fail rather than falling back to a
+different resource.
 
 AWS leases also include authoritative provider metadata sourced from EC2
 `DescribeInstances`. Brokered inspection requests a fresh coordinator-side

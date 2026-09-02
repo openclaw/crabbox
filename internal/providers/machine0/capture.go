@@ -183,7 +183,7 @@ func (b *backend) advanceCheckpointCapture(ctx context.Context, req core.NativeC
 	return result, err
 }
 
-func (b *backend) releaseCheckpointSource(ctx context.Context, req ReleaseLeaseRequest) error {
+func (b *backend) releaseCheckpointSource(ctx context.Context, req ReleaseLeaseRequest, outcome *core.ReleaseLeaseOutcome) error {
 	claim, exists, err := core.ReadLeaseClaimWithPresence(req.Lease.LeaseID)
 	if err != nil {
 		return err
@@ -230,6 +230,7 @@ func (b *backend) releaseCheckpointSource(ctx context.Context, req ReleaseLeaseR
 		}
 		found, err := findSource()
 		if err != nil || !found {
+			outcome.Terminal = err == nil
 			return err
 		}
 		item, err := b.readCheckpointSource(ctx, claim, name)
@@ -252,6 +253,7 @@ func (b *backend) releaseCheckpointSource(ctx context.Context, req ReleaseLeaseR
 			return err
 		}
 		if !found {
+			outcome.Terminal = true
 			return nil
 		}
 		if removeErr != nil {

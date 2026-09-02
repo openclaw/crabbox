@@ -24,6 +24,11 @@ func clearConfigEnv(t *testing.T) {
 	t.Helper()
 	isolateTestUserDirs(t)
 	for _, key := range []string{
+		"CRABBOX_ENV_ALLOW",
+		"CRABBOX_RESULTS_JUNIT",
+		"CRABBOX_RESULTS_AUTO",
+		"CRABBOX_RESULTS_FAIL_ON_FAILURES",
+		"CRABBOX_PREFLIGHT_TOOLS",
 		"CRABBOX_COORDINATOR",
 		"CRABBOX_COORDINATOR_MODE",
 		"CRABBOX_COORDINATOR_AUTO_WEBVNC",
@@ -302,7 +307,6 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_ISLO_VCPUS",
 		"CRABBOX_ISLO_MEMORY_MB",
 		"CRABBOX_ISLO_DISK_GB",
-		"CRABBOX_ISLO_FORGET_MISSING",
 		"CRABBOX_FREESTYLE_API_KEY",
 		"FREESTYLE_API_KEY",
 		"CRABBOX_FREESTYLE_API_URL",
@@ -628,31 +632,6 @@ func TestIsloCreateDefaultsTrackExplicitConfigAndEnvironment(t *testing.T) {
 	}
 	if !IsloImageExplicit(fromEnv) || !IsloVCPUsExplicit(fromEnv) || !IsloMemoryMBExplicit(fromEnv) || !IsloDiskGBExplicit(fromEnv) {
 		t.Fatalf("environment explicit markers missing: %#v", fromEnv)
-	}
-}
-
-// TestIsloForgetMissingIsAnEnvAndFlagOnlyOptOut pins where the islo teardown
-// opt-out may come from. Setting it drops a lease claim whose sandbox identity
-// could not be proven, which leaves a possibly billing sandbox untracked, so it
-// has to be an explicit per-invocation acknowledgement: a checked-in repository
-// config file must never be able to turn it on for everyone who runs in that
-// repository. The environment variable is accepted like the other
-// CRABBOX_ISLO_* settings.
-func TestIsloForgetMissingIsAnEnvAndFlagOnlyOptOut(t *testing.T) {
-	if _, ok := reflect.TypeOf(fileIsloConfig{}).FieldByName("ForgetMissing"); ok {
-		t.Fatal("file config must not accept the islo teardown opt-out")
-	}
-	clearConfigEnv(t)
-	cfg := baseConfig()
-	if cfg.Islo.ForgetMissing {
-		t.Fatalf("islo forget-missing must default to off: %#v", cfg.Islo)
-	}
-	t.Setenv("CRABBOX_ISLO_FORGET_MISSING", "true")
-	if err := applyEnv(&cfg); err != nil {
-		t.Fatal(err)
-	}
-	if !cfg.Islo.ForgetMissing {
-		t.Fatalf("islo forget-missing env not applied: %#v", cfg.Islo)
 	}
 }
 
@@ -5243,6 +5222,124 @@ func TestRepoConfigBareEnvWildcardDoesNotForwardEveryLocalVariable(t *testing.T)
 	}
 }
 
+func writeReplacementListConfig(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConfigReplacementListsAcrossYAMLLayers(t *testing.T) {
+	for _, layers := range []struct{ lower, upper string }{
+		{"defaults", "user"},
+		{"defaults", "crabbox.yaml"},
+		{"defaults", ".crabbox.yaml"},
+		{"user", "crabbox.yaml"},
+		{"user", ".crabbox.yaml"},
+		{"crabbox.yaml", ".crabbox.yaml"},
+	} {
+		for _, value := range []struct {
+			name, yaml string
+		}{
+			{"absent", "{}\n"},
+			{"omitted", "env: {}\nresults: {}\nrun: {}\n"},
+			{"empty", "env:\n  allow: []\nresults:\n  junit: []\nrun:\n  preflightTools: []\n"},
+			{"replacement", "env:\n  allow: [BUILD_FLAVOR, BUILD_FLAVOR]\nresults:\n  junit: [new-report.xml, new-report.xml]\nrun:\n  preflightTools: [go, GO]\n"},
+		} {
+			t.Run(layers.lower+"/"+layers.upper+"/"+value.name, func(t *testing.T) {
+				clearConfigEnv(t)
+				t.Setenv("CRABBOX_CONFIG", "")
+				t.Chdir(t.TempDir())
+				path := func(layer string) string {
+					if layer == "user" {
+						return userConfigPath()
+					}
+					return layer
+				}
+				wantAllow, wantJUnit, wantTools := "CI,NODE_OPTIONS", "", ""
+				if layers.lower != "defaults" {
+					writeReplacementListConfig(t, path(layers.lower), "env:\n  allow: [CI, NODE_OPTIONS, BUILD_FLAVOR]\nresults:\n  junit: [old-report.xml]\n  auto: true\nrun:\n  preflightTools: [cmake]\n")
+					wantAllow, wantJUnit, wantTools = "CI,NODE_OPTIONS,BUILD_FLAVOR", "old-report.xml", "cmake"
+				}
+				writeReplacementListConfig(t, path(layers.upper), value.yaml)
+				if value.name == "empty" {
+					wantAllow, wantJUnit, wantTools = "", "", ""
+				} else if value.name == "replacement" {
+					wantAllow, wantJUnit, wantTools = "BUILD_FLAVOR", "new-report.xml", "go"
+				}
+				cfg, err := loadConfig()
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, list := range []struct {
+					name string
+					got  []string
+					want string
+				}{
+					{"env.allow", cfg.EnvAllow, wantAllow},
+					{"results.junit", cfg.Results.JUnit, wantJUnit},
+					{"run.preflightTools", cfg.Run.PreflightTools, wantTools},
+				} {
+					if got := strings.Join(list.got, ","); got != list.want {
+						t.Errorf("%s=%q, want %q", list.name, got, list.want)
+					}
+				}
+				if cfg.Results.Auto != (layers.lower != "defaults") {
+					t.Error("replacing results.junit changed independent results.auto")
+				}
+				if value.name == "empty" {
+					for _, name := range []string{"CI", "NODE_OPTIONS", "BUILD_FLAVOR"} {
+						t.Setenv(name, "synthetic-local-proof")
+					}
+					if got := allowedEnv(cfg.EnvAllow); len(got) != 0 {
+						t.Error("cleared allowlist still forwards local environment")
+					}
+					if got := preflightToolsForTarget(SSHTarget{TargetOS: targetLinux}, cfg.Run.PreflightTools); len(got) != 0 {
+						t.Errorf("cleared preflight tools restored probes: %v", got)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestConfigReplacementListsStayClearedAndRespectOverrides(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Chdir(t.TempDir())
+	writeReplacementListConfig(t, userConfigPath(), "env:\n  allow: [BUILD_FLAVOR]\nresults:\n  junit: [old-report.xml]\nrun:\n  preflightTools: [cmake]\n")
+	writeReplacementListConfig(t, "crabbox.yaml", "env:\n  allow: []\nresults:\n  junit: []\nrun:\n  preflightTools: []\n")
+	writeReplacementListConfig(t, ".crabbox.yaml", "env: {}\nresults: {}\nrun: {}\n")
+	for _, name := range []string{"CRABBOX_ENV_ALLOW", "CRABBOX_RESULTS_JUNIT", "CRABBOX_PREFLIGHT_TOOLS"} {
+		t.Setenv(name, "")
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.EnvAllow)+len(cfg.Results.JUnit)+len(cfg.Run.PreflightTools) != 0 {
+		t.Fatal("omitted fields or empty environment overrides restored cleared lists")
+	}
+	applyRunEnvAllowFlags(&cfg, []string{"BUILD_FLAVOR,BUILD_FLAVOR"})
+	if got := strings.Join(cfg.EnvAllow, ","); got != "BUILD_FLAVOR" {
+		t.Fatalf("CLI append after clear=%q", got)
+	}
+	t.Setenv("CRABBOX_ENV_ALLOW", "CI")
+	t.Setenv("CRABBOX_RESULTS_JUNIT", "env-report.xml")
+	t.Setenv("CRABBOX_PREFLIGHT_TOOLS", "go")
+	cfg, err = loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyRunEnvAllowFlags(&cfg, []string{"BUILD_FLAVOR"})
+	if strings.Join(cfg.EnvAllow, ",") != "CI,BUILD_FLAVOR" || strings.Join(cfg.Results.JUnit, ",") != "env-report.xml" || strings.Join(cfg.Run.PreflightTools, ",") != "go" {
+		t.Fatalf("higher precedence overrides not applied: allow=%v junit=%v tools=%v", cfg.EnvAllow, cfg.Results.JUnit, cfg.Run.PreflightTools)
+	}
+}
+
 func TestProfileEnvConfigYAMLShape(t *testing.T) {
 	var env fileProfileEnvConfig
 	if err := yaml.Unmarshal([]byte("CI: 1\nNODE_OPTIONS: --max-old-space-size=4096\nallow:\n  - CUSTOM_*\n"), &env); err != nil {
@@ -6443,7 +6540,6 @@ func TestEnvOverridesConfig(t *testing.T) {
 	t.Setenv("CRABBOX_ISLO_VCPUS", "8")
 	t.Setenv("CRABBOX_ISLO_MEMORY_MB", "16384")
 	t.Setenv("CRABBOX_ISLO_DISK_GB", "80")
-	t.Setenv("CRABBOX_ISLO_FORGET_MISSING", "true")
 	t.Setenv("FREESTYLE_API_KEY", "freestyle-key-file")
 	t.Setenv("CRABBOX_FREESTYLE_API_KEY", "freestyle-key-env")
 	t.Setenv("FREESTYLE_API_URL", "https://freestyle-file.example")
@@ -6705,7 +6801,7 @@ func TestEnvOverridesConfig(t *testing.T) {
 	if cfg.Vast.APIKey != "vast-key-env" || cfg.Vast.APIURL != "https://vast-env.example/api/v0" || cfg.Vast.InstanceType != "interruptible" || cfg.Vast.GPUName != "H100" || cfg.Vast.GPUCount != 4 || cfg.Vast.Image != "nvidia/cuda:vast-env" || cfg.Vast.TemplateID != "vast-tpl-env" || cfg.Vast.Runtype != "ssh_direct" || cfg.Vast.DiskGB != 80 || cfg.Vast.MaxDphTotal != 4.25 || cfg.Vast.MinReliability != 0.95 || cfg.Vast.Order != "dlperf desc" || cfg.Vast.User != "ubuntu" || cfg.Vast.WorkRoot != "/work/vast-env" || cfg.Vast.ReleaseAction != "keep" {
 		t.Fatalf("unexpected vast env: %#v", cfg.Vast)
 	}
-	if cfg.Islo.APIKey != "islo-api-env" || cfg.Islo.BaseURL != "https://islo-env.example" || cfg.Islo.Image != "ubuntu:env" || cfg.Islo.Workdir != "env-workdir" || cfg.Islo.GatewayProfile != "env-gateway" || cfg.Islo.SnapshotName != "env-snapshot" || cfg.Islo.VCPUs != 8 || cfg.Islo.MemoryMB != 16384 || cfg.Islo.DiskGB != 80 || !cfg.Islo.ForgetMissing {
+	if cfg.Islo.APIKey != "islo-api-env" || cfg.Islo.BaseURL != "https://islo-env.example" || cfg.Islo.Image != "ubuntu:env" || cfg.Islo.Workdir != "env-workdir" || cfg.Islo.GatewayProfile != "env-gateway" || cfg.Islo.SnapshotName != "env-snapshot" || cfg.Islo.VCPUs != 8 || cfg.Islo.MemoryMB != 16384 || cfg.Islo.DiskGB != 80 {
 		t.Fatalf("unexpected islo env: %#v", cfg.Islo)
 	}
 	if cfg.Freestyle.APIKey != "freestyle-key-env" || cfg.Freestyle.APIURL != "https://freestyle-env.example" || cfg.Freestyle.Workdir != "env/repo" || cfg.Freestyle.VCPUs != 6 || cfg.Freestyle.MemoryGB != 16 {

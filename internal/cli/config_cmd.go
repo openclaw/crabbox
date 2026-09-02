@@ -82,6 +82,12 @@ func configArchitectureForShow(cfg Config) string {
 	return effectiveArchitectureForConfig(cfg)
 }
 
+// ProviderConfigShowNormalizer applies provider-owned defaults for offline
+// diagnostics only. It must not discover runtimes or change execution config.
+type ProviderConfigShowNormalizer interface {
+	NormalizeConfigForShow(cfg Config) Config
+}
+
 func effectiveConfigForShow(cfg Config) Config {
 	cfg.Hostinger.WorkRoot = EffectiveHostingerWorkRoot(cfg)
 	cfg.Vast.WorkRoot = EffectiveVastWorkRoot(cfg)
@@ -152,6 +158,13 @@ func effectiveConfigForShow(cfg Config) Config {
 		cfg.SSHFallbackPorts = nil
 	case "nvidia-brev", "brev", "nvidia":
 		cfg.WorkRoot = cfg.NvidiaBrev.WorkRoot
+	}
+	if providerSelectionIsActionable(cfg) {
+		if provider, err := ProviderFor(cfg.Provider); err == nil {
+			if normalizer, ok := provider.(ProviderConfigShowNormalizer); ok {
+				cfg = normalizer.NormalizeConfigForShow(cfg)
+			}
+		}
 	}
 	return cfg
 }
@@ -565,6 +578,16 @@ func configShowView(cfg Config) map[string]any {
 			"networkDenyOut":  cfg.Superserve.NetworkDenyOut,
 			"forgetMissing":   cfg.Superserve.ForgetMissing,
 		},
+		"localContainer": map[string]any{
+			"runtime":      cfg.LocalContainer.Runtime,
+			"image":        cfg.LocalContainer.Image,
+			"user":         cfg.LocalContainer.User,
+			"workRoot":     cfg.LocalContainer.WorkRoot,
+			"cpus":         cfg.LocalContainer.CPUs,
+			"memory":       cfg.LocalContainer.Memory,
+			"network":      cfg.LocalContainer.Network,
+			"dockerSocket": cfg.LocalContainer.DockerSocket,
+		},
 		"appleContainer": map[string]any{
 			"cliPath":  cfg.AppleContainer.CLIPath,
 			"image":    cfg.AppleContainer.Image,
@@ -841,6 +864,7 @@ func writeConfigShowText(w io.Writer, cfg Config) {
 	fmt.Fprintf(w, "nomad address=%s region=%s namespace=%s auth_env=%s auth=%s tls_ca=%s tls_capath=%s tls_cert=%s tls_key=%s tls_server_name=%s skip_verify=%t task=%s driver=%s image=%s workdir=%s jobspec_template=%s node_pool=%s datacenters=%s cpu=%d memory_mb=%d disk_mb=%d alloc_ready_timeout=%s eval_timeout=%s exec_timeout_secs=%d\n", blank(redactedConfigURL(cfg.Nomad.Address), "-"), blank(cfg.Nomad.Region, "-"), blank(cfg.Nomad.Namespace, "-"), nomadTextAuthEnv(cfg), nomadAuthState(cfg), blank(cfg.Nomad.CACert, "-"), blank(cfg.Nomad.CAPath, "-"), blank(cfg.Nomad.ClientCert, "-"), blank(cfg.Nomad.ClientKey, "-"), blank(cfg.Nomad.TLSServerName, "-"), cfg.Nomad.SkipVerify, cfg.Nomad.Task, cfg.Nomad.Driver, cfg.Nomad.Image, cfg.Nomad.Workdir, blank(cfg.Nomad.JobSpecTemplate, "-"), blank(cfg.Nomad.NodePool, "-"), blank(strings.Join(cfg.Nomad.Datacenters, ","), "-"), cfg.Nomad.CPU, cfg.Nomad.MemoryMB, cfg.Nomad.DiskMB, cfg.Nomad.AllocReadyTimeout, cfg.Nomad.EvalTimeout, cfg.Nomad.ExecTimeoutSecs)
 	fmt.Fprintf(w, "ascii_box base_url=%s cli=%s workdir=%s auth=%s\n", redactedConfigURL(cfg.AsciiBox.BaseURL), cfg.AsciiBox.CLIPath, cfg.AsciiBox.Workdir, tokenState(cfg.AsciiBox.APIKey))
 	fmt.Fprintf(w, "superserve base_url=%s template=%s snapshot=%s workdir=%s timeout_secs=%d exec_timeout_secs=%d network_allow_out=%s network_deny_out=%s forget_missing=%t auth=%s\n", redactedConfigURL(cfg.Superserve.BaseURL), blank(cfg.Superserve.Template, "-"), blank(cfg.Superserve.Snapshot, "-"), cfg.Superserve.Workdir, cfg.Superserve.TimeoutSecs, cfg.Superserve.ExecTimeoutSecs, blank(strings.Join(cfg.Superserve.NetworkAllowOut, ","), "-"), blank(strings.Join(cfg.Superserve.NetworkDenyOut, ","), "-"), cfg.Superserve.ForgetMissing, superserveAuthState())
+	fmt.Fprintf(w, "local_container runtime=%s image=%s user=%s work_root=%s cpus=%d memory=%s network=%s docker_socket=%t\n", cfg.LocalContainer.Runtime, cfg.LocalContainer.Image, cfg.LocalContainer.User, blank(cfg.LocalContainer.WorkRoot, "-"), cfg.LocalContainer.CPUs, blank(cfg.LocalContainer.Memory, "-"), cfg.LocalContainer.Network, cfg.LocalContainer.DockerSocket)
 	fmt.Fprintf(w, "apple_container cli=%s image=%s user=%s work_root=%s cpus=%d memory=%s\n", cfg.AppleContainer.CLIPath, cfg.AppleContainer.Image, cfg.AppleContainer.User, cfg.AppleContainer.WorkRoot, cfg.AppleContainer.CPUs, blank(cfg.AppleContainer.Memory, "-"))
 	fmt.Fprintf(w, "mxc cli=%s version=%s containment=%s network=%s readonly_paths=%d readwrite_paths=%d allowed_hosts=%d blocked_hosts=%d allow_dacl_mutation=%t allow_windows_ui=%t experimental=%t\n", cfg.MXC.CLIPath, cfg.MXC.Version, cfg.MXC.Containment, cfg.MXC.Network, len(cfg.MXC.ReadOnlyPaths), len(cfg.MXC.ReadWritePaths), len(cfg.MXC.AllowedHosts), len(cfg.MXC.BlockedHosts), cfg.MXC.AllowDACLMutation, cfg.MXC.AllowWindowsUI, cfg.MXC.Experimental)
 	fmt.Fprintf(w, "docker_sandbox cli=%s agent=%s template=%s cpus=%g memory=%s clone=%t workdir=%s extra_workspaces=%s mcp=%s kit=%s\n", cfg.DockerSandbox.CLIPath, cfg.DockerSandbox.Agent, blank(cfg.DockerSandbox.Template, "-"), cfg.DockerSandbox.CPUs, blank(cfg.DockerSandbox.Memory, "-"), cfg.DockerSandbox.Clone, blank(cfg.DockerSandbox.Workdir, "-"), blank(strings.Join(cfg.DockerSandbox.ExtraWorkspaces, ","), "-"), blank(strings.Join(cfg.DockerSandbox.MCP, ","), "-"), blank(strings.Join(cfg.DockerSandbox.Kit, ","), "-"))

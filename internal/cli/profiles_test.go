@@ -194,6 +194,65 @@ func TestProfileEnvAllowRespectsEnvironmentAndCLIPrecedence(t *testing.T) {
 	}
 }
 
+func TestEmptyReplacementListsPreserveAdditiveProfileAndSyncPolicy(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Chdir(t.TempDir())
+	writeReplacementListConfig(t, userConfigPath(), `profile: qa
+env:
+  allow: [BUILD_FLAVOR]
+sync:
+  exclude: [user-cache]
+profiles:
+  qa:
+    env:
+      allow: [PROFILE_FIRST]
+    envAllow: [PROFILE_SECOND]
+`)
+	writeReplacementListConfig(t, "crabbox.yaml", `env:
+  allow: []
+sync:
+  exclude: [repo-cache]
+profiles:
+  qa:
+    envAllow: [PROFILE_THIRD, PROFILE_FIRST]
+`)
+	writeReplacementListConfig(t, ".crabbox.yaml", `sync:
+  exclude: []
+profiles:
+  qa:
+    env:
+      allow: []
+    envAllow: []
+`)
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applySelectedProfileConfig(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(cfg.EnvAllow, ","); got != "PROFILE_FIRST,PROFILE_SECOND,PROFILE_THIRD" {
+		t.Fatalf("profile additions after top-level clear=%q", got)
+	}
+	wantExcludes := appendOrderedStrings(baseConfig().Sync.Excludes, "user-cache", "repo-cache")
+	if strings.Join(cfg.Sync.Excludes, ",") != strings.Join(wantExcludes, ",") {
+		t.Fatalf("empty sync.exclude cleared additive exclusions: %v", cfg.Sync.Excludes)
+	}
+	t.Setenv("CRABBOX_ENV_ALLOW", "BUILD_FLAVOR")
+	cfg, err = loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applySelectedProfileConfig(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	applyRunEnvAllowFlags(&cfg, []string{"CI"})
+	if got := strings.Join(cfg.EnvAllow, ","); got != "BUILD_FLAVOR,CI" {
+		t.Fatalf("env replacement followed by CLI append=%q", got)
+	}
+}
+
 func TestPresetCommandPreservesQuotedArguments(t *testing.T) {
 	cfg := Config{
 		Profile: "qa",

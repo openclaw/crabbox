@@ -17,8 +17,7 @@ type isloTeardownProof string
 
 const (
 	// isloProofTombstone is the strongest proof: `GET /sandboxes/-/by-id/{id}`
-	// answers 200 for a deleted sandbox with status "deleted" and deleted_at
-	// set, which pins the exact resource generation the lease owned.
+	// answers 200 with the exact requested ID and terminal status "deleted".
 	isloProofTombstone isloTeardownProof = "tombstone"
 	// isloProofNameAbsent is the fallback used when the tombstone is not
 	// available: a 404 on the exact name, which the API answers immediately
@@ -32,29 +31,7 @@ const (
 	// teardown implicitly relied on. It is reported distinctly and warned about
 	// rather than silently equated with the stronger proofs.
 	isloProofNameAbsentUnbound isloTeardownProof = "name-404-unbound"
-	// isloProofUnverifiedForgotten is not evidence of anything, and it is
-	// deliberately reported in the same field as the real proofs so the release
-	// line can never read like a proven teardown. It records that an operator
-	// explicitly asked, with islo forget-missing, to drop a claim whose sandbox
-	// identity the teardown could not establish. No delete is issued on this
-	// path, so the sandbox may still exist and still bill; the value exists so
-	// the release is auditable rather than indistinguishable from a real one.
-	isloProofUnverifiedForgotten isloTeardownProof = "unverified-forgotten"
 )
-
-// isloTeardownOptions carries the authority a caller was given, as distinct
-// from its latency budget.
-type isloTeardownOptions struct {
-	// forgetUnverifiable lets the fail-closed gate drop the claim instead of
-	// refusing, when the operator asked for that with islo forget-missing. Only
-	// an explicitly requested teardown (`crabbox stop`) passes it on: the run
-	// cleanup defer has a strictly better fallback than forgetting, because it
-	// knows the sandbox exists - this run created it moments ago - and leaving
-	// its recovery claim behind is what keeps that sandbox reachable. So the
-	// defer stays fail-closed even when the setting is on, and the setting
-	// cannot degrade a path the operator was not thinking about.
-	forgetUnverifiable bool
-}
 
 // isloTeardownBudgets bounds a teardown for a caller that cannot wait
 // indefinitely. A zero overall budget inherits the caller's context unchanged,
@@ -122,6 +99,9 @@ type isloTeardownTarget struct {
 // with no recorded id has no id to match, so any live response identifies it as
 // well as anything ever could.
 func (t *isloTeardownTarget) confirmObserved(live isloIdentity) {
+	if live.Name == "" || live.Name != t.name {
+		return
+	}
 	if t.resourceID != "" && live.ID != t.resourceID {
 		return
 	}
@@ -148,8 +128,24 @@ type isloTeardownOutcome struct {
 	proof isloTeardownProof
 }
 
-// teardownIsloSandbox deletes the exact resource a claim owns and reports what
-// it acted on, with the proof that the resource is gone. The caller must drop the local claim only on a nil
+func (b *isloBackend) teardownClaimedIsloSandbox(ctx context.Context, client isloAPI, claim core.LeaseClaim, name string, budgets isloTeardownBudgets) (isloTeardownOutcome, error) {
+	ctx, cancel := budgets.bound(ctx)
+	defer cancel()
+	var outcome isloTeardownOutcome
+	err := core.CleanupLeaseClaimIfUnchangedAfterContext(ctx, claim.LeaseID, claim, true, func() error {
+		var err error
+		outcome, err = b.teardownIsloSandbox(ctx, client, claim, name, budgets)
+		if err != nil {
+			return err
+		}
+		return core.RemoveStoredTestboxConnectionArtifacts(claim.LeaseID)
+	})
+	return outcome, err
+}
+
+// teardownIsloSandbox verifies the claimed resource before a name-based delete
+// and reports evidence of completion. The API does not make the final name
+// DELETE atomic with these reads. The caller must drop the local claim only on a nil
 // error: every uncertain outcome (network failure, ambiguous status, a resource
 // these credentials cannot address) returns an error and leaves the claim in
 // place, because the claim is the only handle a later `crabbox stop` has for
@@ -161,15 +157,8 @@ type isloTeardownOutcome struct {
 // that records an immutable id the reads are what establishes that the recorded
 // name still is the resource this lease owns. When they cannot establish it the
 // teardown declines to delete and keeps the claim (see requireIsloVerifiedTarget).
-// A claim that records no id has no identity to cross and keeps its name-only
-// delete.
-//
-// The single exception to "nil error means proven" is a caller that was given
-// forgetUnverifiable: the refusal above then returns nil so the caller drops the
-// claim, reporting the isloProofUnverifiedForgotten non-proof. It still issues no
-// delete, so it trades an untracked, possibly billing sandbox for an unstickable
-// claim - which is why it is opt-in per invocation and warned about loudly.
-func (b *isloBackend) teardownIsloSandbox(ctx context.Context, client isloAPI, claim core.LeaseClaim, name string, budgets isloTeardownBudgets, opts isloTeardownOptions) (isloTeardownOutcome, error) {
+// A legacy claim with no recorded ID keeps its weaker name-only cleanup.
+func (b *isloBackend) teardownIsloSandbox(ctx context.Context, client isloAPI, claim core.LeaseClaim, name string, budgets isloTeardownBudgets) (isloTeardownOutcome, error) {
 	if err := requireIsloClaimScope(claim, b.claimScope()); err != nil {
 		return isloTeardownOutcome{}, err
 	}
@@ -193,15 +182,7 @@ func (b *isloBackend) teardownIsloSandbox(ctx context.Context, client isloAPI, c
 	}
 	if !target.nameAbsentBefore {
 		if err := requireIsloVerifiedTarget(claim, target); err != nil {
-			if !opts.forgetUnverifiable {
-				return isloTeardownOutcome{name: target.name}, err
-			}
-			// The operator asked for the claim to be dropped anyway. That is
-			// the opposite trade from the default: it does not delete the
-			// sandbox, it only stops tracking it, so the exact resource
-			// boundary the gate protects is still never crossed.
-			b.warnIsloUnverifiedForget(claim, target)
-			return isloTeardownOutcome{name: target.name, proof: isloProofUnverifiedForgotten}, nil
+			return isloTeardownOutcome{name: target.name}, err
 		}
 		if err := client.DeleteSandbox(ctx, target.name); err != nil {
 			return isloTeardownOutcome{}, isloError("delete sandbox", err)
@@ -223,29 +204,17 @@ func (b *isloBackend) teardownIsloSandbox(ctx context.Context, client isloAPI, c
 // refuses instead, and the caller keeps the claim, so the same teardown can be
 // retried against the same recorded id once reads answer again.
 //
-// A claim that records no immutable id predates the identity binding. It has no
-// identity to cross: the name is the only handle it has ever had, and deleting
-// by that name is precisely what the pre-binding teardown always did, so the
-// name-only delete remains correct for it.
+// A legacy claim without an immutable ID preserves the existing name-only
+// cleanup contract; it cannot prove a resource generation.
 //
 // The competing cost is real - a sandbox that is not deleted keeps billing - so
-// the refusal names the sandbox, says the sandbox may still be running, says
-// which command to retry, and names the opt-out below, because a claim that can
-// never be retried successfully would otherwise have no CLI way out at all.
+// the refusal names the sandbox, says the sandbox may still be running, and says
+// which command to retry.
 func requireIsloVerifiedTarget(claim core.LeaseClaim, target isloTeardownTarget) error {
 	if target.observed || isloClaimIdentity(claim).ID == "" {
 		return nil
 	}
-	return exit(5, "islo refused to delete sandbox %q for lease %q (%s): the sandbox could not be read under these credentials during this teardown, so the recorded name could not be shown to still be the resource this lease owns, and an islo sandbox name is reusable once its sandbox is deleted; deleting it blind could destroy a different sandbox. The sandbox may still be running and billable: the claim is retained, so run `%s` to retry the delete once the islo API answers reads again. If the sandbox is already gone or is being dealt with outside crabbox, re-run with --islo-forget-missing (or CRABBOX_ISLO_FORGET_MISSING=1) to drop this claim without deleting anything", target.name, claim.LeaseID, isloIdentityString(target.identity()), isloCleanupCommand(claim.LeaseID))
-}
-
-// warnIsloUnverifiedForget reports the one action islo forget-missing takes.
-// Dropping the claim discards the only handle crabbox has on the sandbox, so the
-// warning has to name the sandbox and say plainly that it may still exist and
-// still bill; otherwise the opt-out silently converts a retryable teardown into
-// an untracked resource.
-func (b *isloBackend) warnIsloUnverifiedForget(claim core.LeaseClaim, target isloTeardownTarget) {
-	b.warnf("warning: islo is dropping the claim for lease %s (%s) WITHOUT deleting sandbox %q, because islo forget-missing was set: the sandbox could not be identified under these credentials, so no delete was issued. Sandbox %q may still exist and may still be billing, and crabbox will no longer track it - confirm through the islo API and delete it there if it is still running.\n", claim.LeaseID, isloIdentityString(target.identity()), target.name, target.name)
+	return exit(5, "islo refused to delete sandbox %q for lease %q (%s): the sandbox could not be read under these credentials during this teardown, so the recorded name could not be shown to still be the resource this lease owns, and an islo sandbox name is reusable once its sandbox is deleted; deleting it blind could destroy a different sandbox. The sandbox may still be running and billable: the claim is retained, so run `%s` to retry the delete once the islo API answers reads again", target.name, claim.LeaseID, isloIdentityString(target.identity()), isloCleanupCommand(claim.LeaseID))
 }
 
 // locateIsloTargetByID resolves the claimed resource id. It reports done=true
@@ -259,6 +228,9 @@ func (b *isloBackend) locateIsloTargetByID(ctx context.Context, client isloAPI, 
 	cancel()
 	switch {
 	case err == nil && sandbox != nil:
+		if err := requireIsloByIDResponse(target.resourceID, sandbox); err != nil {
+			return true, "", err
+		}
 		live := isloIdentityFromSandbox(sandbox)
 		if live.Name != "" {
 			target.name = live.Name
@@ -300,9 +272,7 @@ func (b *isloBackend) locateIsloTargetByName(ctx context.Context, client isloAPI
 		b.warnIsloAdvisory(advisory)
 		target.confirmObserved(live)
 		if !target.observed {
-			// The name answered, but the response carries no id, so it cannot
-			// show that this name is still the resource the claim owns.
-			b.warnf("warning: islo read sandbox %q by name but the response carries no resource id, so it cannot be matched against resource %s, which this lease owns\n", target.name, target.resourceID)
+			b.warnf("warning: islo read sandbox %q by name but the response did not identify that name as resource %s, which this lease owns\n", target.name, target.resourceID)
 		}
 		if target.resourceID == "" {
 			// Claims written before the identity binding carry no id. The live
@@ -318,6 +288,9 @@ func (b *isloBackend) confirmIsloTeardown(ctx context.Context, client isloAPI, c
 		tombstone, err := client.GetSandboxByID(ctx, target.resourceID)
 		switch {
 		case err == nil && tombstone != nil:
+			if err := requireIsloByIDResponse(target.resourceID, tombstone); err != nil {
+				return "", err
+			}
 			if isloSandboxDeleted(tombstone) {
 				return isloProofTombstone, nil
 			}

@@ -267,12 +267,9 @@ type StatusView struct {
 	State       string `json:"state"`
 	ServerID    string `json:"serverId"`
 	ServerType  string `json:"serverType"`
-	// ProviderResourceID is the provider's own immutable identity for the
-	// leased resource, when the provider assigns one separately from its name.
-	// ServerID carries the name, which identifies a slot in the provider's
-	// namespace rather than one specific resource: it can stop resolving once
-	// the resource is gone and then be reused by a later resource. Callers that
-	// must act on one exact resource key off ProviderResourceID.
+	// ProviderResourceID optionally exposes an immutable provider resource ID.
+	// ServerID keeps each provider's existing identity semantics; for Islo it
+	// is the sandbox name rather than the immutable sandbox ID.
 	ProviderResourceID   string             `json:"providerResourceId,omitempty"`
 	Host                 string             `json:"host"`
 	Pond                 string             `json:"pond,omitempty"`

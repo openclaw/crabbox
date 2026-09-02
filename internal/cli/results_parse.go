@@ -21,14 +21,15 @@ type junitTestSuites struct {
 }
 
 type junitTestSuite struct {
-	XMLName   xml.Name        `xml:"testsuite"`
-	Name      string          `xml:"name,attr"`
-	Tests     int             `xml:"tests,attr"`
-	Failures  int             `xml:"failures,attr"`
-	Errors    int             `xml:"errors,attr"`
-	Skipped   int             `xml:"skipped,attr"`
-	Time      float64         `xml:"time,attr"`
-	TestCases []junitTestCase `xml:"testcase"`
+	XMLName   xml.Name         `xml:"testsuite"`
+	Name      string           `xml:"name,attr"`
+	Tests     int              `xml:"tests,attr"`
+	Failures  int              `xml:"failures,attr"`
+	Errors    int              `xml:"errors,attr"`
+	Skipped   int              `xml:"skipped,attr"`
+	Time      float64          `xml:"time,attr"`
+	TestCases []junitTestCase  `xml:"testcase"`
+	Suites    []junitTestSuite `xml:"testsuite"`
 }
 
 type junitTestCase struct {
@@ -126,7 +127,6 @@ func addJUnitFile(summary *TestResultSummary, input io.Reader) error {
 
 func addJUnitSuites(summary *TestResultSummary, suites junitTestSuites) {
 	if len(suites.Suites) == 0 {
-		summary.Suites++
 		summary.Tests += suites.Tests
 		summary.Failures += suites.Failures
 		summary.Errors += suites.Errors
@@ -140,46 +140,36 @@ func addJUnitSuites(summary *TestResultSummary, suites junitTestSuites) {
 }
 
 func addJUnitSuite(summary *TestResultSummary, suite junitTestSuite) {
-	summary.Suites++
-	derivedTests := len(suite.TestCases)
-	derivedFailures := 0
-	derivedErrors := 0
-	derivedSkipped := 0
-	derivedTime := 0.0
+	derived := &TestResultSummary{Suites: 1, Tests: len(suite.TestCases)}
 	for _, tc := range suite.TestCases {
-		derivedTime += tc.Time
-		derivedFailures += len(tc.Failures)
-		derivedErrors += len(tc.Errors)
-		derivedSkipped += len(tc.Skipped)
-	}
-	if suite.Tests > 0 || suite.Failures > 0 || suite.Errors > 0 || suite.Skipped > 0 {
-		summary.Tests += suite.Tests
-		if suite.Tests == 0 {
-			summary.Tests += derivedTests
-		}
-		summary.Failures += max(suite.Failures, derivedFailures)
-		summary.Errors += max(suite.Errors, derivedErrors)
-		summary.Skipped += max(suite.Skipped, derivedSkipped)
-		if suite.Time > 0 {
-			summary.TimeSeconds += suite.Time
-		} else {
-			summary.TimeSeconds += derivedTime
-		}
-	} else {
-		summary.Tests += derivedTests
-		summary.Failures += derivedFailures
-		summary.Errors += derivedErrors
-		summary.Skipped += derivedSkipped
-		summary.TimeSeconds += derivedTime
-	}
-	for _, tc := range suite.TestCases {
+		derived.TimeSeconds += tc.Time
+		derived.Failures += len(tc.Failures)
+		derived.Errors += len(tc.Errors)
+		derived.Skipped += len(tc.Skipped)
 		for _, failure := range tc.Failures {
-			summary.Failed = append(summary.Failed, testFailureFromJUnit(suite, tc, failure, "failure"))
+			derived.Failed = append(derived.Failed, testFailureFromJUnit(suite, tc, failure, "failure"))
 		}
 		for _, failure := range tc.Errors {
-			summary.Failed = append(summary.Failed, testFailureFromJUnit(suite, tc, failure, "error"))
+			derived.Failed = append(derived.Failed, testFailureFromJUnit(suite, tc, failure, "error"))
 		}
 	}
+	for _, child := range suite.Suites {
+		addJUnitSuite(derived, child)
+	}
+	// Suite attributes summarize the descendants, not additional test executions.
+	// Keep observed failures/errors/skips as lower bounds even with partial counts.
+	if suite.Tests > 0 || suite.Failures > 0 || suite.Errors > 0 || suite.Skipped > 0 {
+		if suite.Tests != 0 {
+			derived.Tests = suite.Tests
+		}
+		derived.Failures = max(suite.Failures, derived.Failures)
+		derived.Errors = max(suite.Errors, derived.Errors)
+		derived.Skipped = max(suite.Skipped, derived.Skipped)
+		if suite.Time > 0 {
+			derived.TimeSeconds = suite.Time
+		}
+	}
+	mergeJUnitSummary(summary, derived)
 }
 
 func testFailureFromJUnit(suite junitTestSuite, tc junitTestCase, failure junitFailure, kind string) TestFailure {

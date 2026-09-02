@@ -62,8 +62,8 @@ to archive upload and command execution, so the working set still lands in
 Each config key has an equivalent flag and `CRABBOX_ISLO_*` environment
 variable:
 
-| Config key       | Flag                     | Env var                        |
-| ---------------- | ------------------------ | ------------------------------ |
+| Config key       | Flag                    | Env var                       |
+| ---------------- | ----------------------- | ----------------------------- |
 | `baseUrl`        | `--islo-base-url`        | `CRABBOX_ISLO_BASE_URL`        |
 | `image`          | `--islo-image`           | `CRABBOX_ISLO_IMAGE`           |
 | `workdir`        | `--islo-workdir`         | `CRABBOX_ISLO_WORKDIR`         |
@@ -72,13 +72,6 @@ variable:
 | `vcpus`          | `--islo-vcpus`           | `CRABBOX_ISLO_VCPUS`           |
 | `memoryMB`       | `--islo-memory-mb`       | `CRABBOX_ISLO_MEMORY_MB`       |
 | `diskGB`         | `--islo-disk-gb`         | `CRABBOX_ISLO_DISK_GB`         |
-| (none)           | `--islo-forget-missing`  | `CRABBOX_ISLO_FORGET_MISSING`  |
-
-`--islo-forget-missing` has no config-file key on purpose. It drops a lease
-claim whose sandbox identity could not be proven, which leaves a possibly
-billing sandbox untracked, so it stays an explicit per-invocation
-acknowledgement instead of something a checked-in config file can turn on for
-everyone. See [Behavior](#behavior).
 
 `gatewayProfile` accepts an Islo gateway profile name or id and is passed
 opaquely in the sandbox create request. Gateway profiles are created and
@@ -108,51 +101,42 @@ crabbox stop --provider islo blue-lobster
   `DELETE`. All three act only on Crabbox-created sandboxes. Identifiers may be a
   Crabbox slug, an `isb_...` lease ID, or a Crabbox-created sandbox name;
   non-Crabbox sandboxes are rejected.
-- Every sandbox has an immutable id in addition to its name. The name stops
-  resolving the moment the sandbox is deleted, while
-  `GET /sandboxes/-/by-id/{id}` keeps answering with a `deleted` tombstone, so
-  the id is the only handle that can identify one specific sandbox over its
-  whole lifetime. Crabbox records that id on the lease claim at create (and on
-  `--reclaim` adoption), reports it as `providerResourceId` in
-  `crabbox inspect --json`, and prefers it over the name when resolving a lease.
-- **stop** is an exact teardown. It resolves the claimed resource id, takes the
-  sandbox name to delete from that response, deletes, and then proves the delete
-  either with the `GET /sandboxes/-/by-id/{id}` tombstone (`status: deleted`
-  with `deleted_at` set) or with a 404 on the exact name. Only a proven delete
-  drops the local claim; an uncertain outcome keeps the claim so the command can
-  be retried. Absence is never inferred from `GET /sandboxes`, which stays
-  eventually consistent for seconds after a delete.
-- `DELETE /sandboxes/{name}` is name-only and a name is reusable once its
-  sandbox is deleted, so for a lease that records a resource id the teardown
+- Every sandbox has an immutable ID in addition to its name. Crabbox publishes
+  that ID with the local claim in one guarded write at create and `--reclaim`
+  adoption. A competing claim is not overwritten. `crabbox inspect --json`
+  reports it as `providerResourceId`, and status prefers a by-ID lookup over
+  the sandbox name. A malformed by-ID response fails closed; a name fallback
+  that cannot match the claimed ID is reported as not ready and cannot trigger
+  remote Tailscale checks.
+- **stop** validates the claimed resource ID and current name before sending a
+  name-based DELETE. It confirms completion with a matching
+  `GET /sandboxes/-/by-id/{id}` response whose status is `deleted`, or with a 404
+  on a name positively identified during the same teardown. A `deleted_at`
+  timestamp without terminal status is not proof. Only confirmed cleanup drops
+  the local claim; an uncertain outcome keeps it for retry. List omission is
+  never deletion evidence.
+- `DELETE /sandboxes/{name}` is name-only, so for a lease with a resource ID
+  the teardown
   will not delete a name it has not identified. It refuses on a positive
   identity mismatch (the name resolves to a resource id the lease does not own)
   and it also refuses when neither lookup could identify the name at all, such
   as during an API read outage: deleting blind could destroy a different
-  sandbox. Such a `stop` fails, keeps the claim, names `--islo-forget-missing`,
-  and says to retry it - the sandbox may still be running and billable until
-  then. Creator attribution
-  (`created_by` is the API key's name, `created_by_entity` its kind) only
-  corroborates ownership - any key that can create a sandbox reproduces it - so
-  a difference is reported as advisory and never blocks a teardown. It is not a
-  security boundary.
-- A claim written before Crabbox recorded resource ids has no id to anchor a
-  tombstone on, and no identity a name delete could cross. Such a lease keeps
-  the name-only delete and stays releasable: `stop` accepts a 404 on its exact
-  name, reports the weaker `name-404-unbound` proof, and warns that the delete
-  could not be confirmed against a specific resource.
-- `--islo-forget-missing` (or `CRABBOX_ISLO_FORGET_MISSING=1`) is the operator
-  opt-out from that refusal, for a claim no retry can ever satisfy - a sandbox
-  these credentials will never be able to read again. It drops the claim and
-  issues **no** delete, so the resource boundary is still never crossed: the
-  sandbox may still exist and still bill, and Crabbox stops tracking it. The
-  action is announced on stderr with the sandbox name and reported as
-  `proof=unverified-forgotten`, so it is never mistaken for a proven teardown.
-  It changes nothing else: a proven teardown, the name-only delete of a claim
-  with no recorded id, a positive identity mismatch, and an unproven
-  confirmation all behave exactly as they do without it. It applies only to an
-  explicit `stop`; run cleanup stays fail-closed even when the setting is on,
-  because it knows its sandbox exists and leaving an adoptable recovery claim
-  behind is what keeps that sandbox reachable.
+  sandbox. Such a `stop` fails, keeps the claim, and says to retry it - the
+  sandbox may still be running and billable until then. These checks do not
+  make DELETE atomic by ID: an out-of-band replacement between the read and
+  the name-based DELETE can still race with cleanup. Creator attribution
+  (`created_by` and `created_by_entity`) is diagnostic only; differences are
+  advisory, not an ownership or account boundary.
+- A legacy claim without a resource ID preserves the existing name-only
+  cleanup contract. A 404 on its name is reported as the weaker
+  `name-404-unbound` proof, with a warning that no specific resource generation
+  was confirmed. Recreate the lease to obtain an ID-bound claim.
+- Cleanup after a `run` retains its recovery claim when teardown is unproven.
+  Run cleanup and Tailscale setup rollback check the resource identity and
+  repository owner captured at acquisition, leaving a replacement claim untouched.
+  A missing or unreadable claim is also a cleanup failure, never authority to
+  delete by a stored name. Recover and verify the original resource ID before
+  cleaning up that sandbox; it may remain running and billable.
 - **pause** snapshots the sandbox and releases its active compute while
   preserving the local lease claim; **resume** restores the sandbox to running.
 - The sandbox is deleted on release unless kept. `--keep-on-failure` keeps a

@@ -336,6 +336,9 @@ func (b *isloBackend) ensureLeaseTailscale(ctx context.Context, client isloAPI, 
 	if !isloClaimTailscaleEnrolled(claim) {
 		return core.TailscaleMetadata{}, nil
 	}
+	if err := requireIsloClaimScope(claim, b.claimScope()); err != nil {
+		return core.TailscaleMetadata{}, err
+	}
 	sandbox, sandboxErr := client.GetSandbox(ctx, sandboxName)
 	if sandboxErr != nil {
 		if isloSandboxGoneError(sandboxErr) {
@@ -345,6 +348,12 @@ func (b *isloBackend) ensureLeaseTailscale(ctx context.Context, client isloAPI, 
 			return core.TailscaleMetadata{}, fmt.Errorf("%w: sandbox %s no longer exists", core.ErrTailnetPeerUnavailable, sandboxName)
 		}
 		return core.TailscaleMetadata{}, fmt.Errorf("%w: get sandbox: %v", core.ErrTailnetPeerValidationUnavailable, sandboxErr)
+	}
+	if sandbox != nil {
+		live := isloIdentityFromSandbox(sandbox)
+		if bound := isloClaimIdentity(claim).ID; bound != "" && (live.ID != bound || live.Name != sandboxName) {
+			return core.TailscaleMetadata{}, exit(4, "islo sandbox %q did not identify claimed resource %s before the Tailscale check; refusing remote execution", sandboxName, bound)
+		}
 	}
 	if sandbox == nil || isloStatusTerminal(sandbox.GetStatus()) {
 		if err := clearLeaseClaimTailscale(leaseID); err != nil {

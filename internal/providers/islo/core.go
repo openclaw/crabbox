@@ -74,15 +74,6 @@ func resolveLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
 	return core.ResolveLeaseClaim(identifier)
 }
 
-func withDurableLeaseClaimLock(leaseID string, action func(*core.LeaseClaim, bool, func() error) error) error {
-	return core.WithDurableLeaseClaimLock(leaseID, action)
-}
-
-func removeLeaseClaim(leaseID string) {
-	core.RemoveLeaseClaim(leaseID)
-	core.RemoveStoredTestboxKey(leaseID)
-}
-
 func updateLeaseClaimTailscale(leaseID, ipv4, fqdn string) error {
 	return core.UpdateLeaseClaimTailscale(leaseID, ipv4, fqdn)
 }

@@ -1,21 +1,32 @@
 # Changelog
 
-## 0.48.1 (Unreleased)
+## 0.48.1 - 2026-09-01
 
-### Added
+### Changes
 
-- Added `providerResourceId` to `crabbox inspect --json` for providers that assign a resource an immutable identifier separate from its name, and populated it for Islo sandboxes.
-- Added `--islo-forget-missing` / `CRABBOX_ISLO_FORGET_MISSING`, the operator opt-out from the identity-safe Islo teardown gate, for a lease claim no retry can satisfy. It drops the local claim without issuing a delete, so it never deletes a sandbox name it could not identify; the sandbox may still exist and still bill, which Crabbox announces on stderr with the sandbox name and reports as `proof=unverified-forgotten`. The refusal it resolves now names the flag. It is off unless passed, has no config-file key, applies only to an explicit `stop` (run cleanup stays fail-closed, since its recovery claim is the only handle on a sandbox it knows exists), and leaves proven teardowns, the name-only delete of a claim with no recorded resource id, positive identity mismatches, and unproven confirmations unchanged.
+- Corrected nested JUnit totals and preserved failed-case details so `--fail-on-test-failures` catches failures even when suite counters are missing or zero, without double-counting parent aggregates.
+- Fixed signed receipt/log mismatches by keeping retained output valid UTF-8 before signing and storage, preserving raw captures and full-stream hashes, and marking incomplete retained logs as truncated.
+- Kept automatic POSIX SSH failure bundles focused on the current uploaded script instead of earlier uploads and neighboring files. Explicit artifact and download selections remain independent.
+- Reduced SSH startup round trips by avoiding redundant successful-login checks and skipping telemetry when no coordinator run handle exists.
+- Made run summaries, timing JSON, and recovery guidance distinguish confirmed release from retained or pending cleanup, report local cleanup errors separately, and preserve an existing workload failure's exit code.
+- Made coordinator-backed `stop` use one five-minute cancellation budget across inspection, claim waits, cleanup, release, and observation; local daemon lock waits now honor cancellation without reversing confirmed cleanup.
+- Fixed coordinator-managed AWS cleanup during creation by tracking the exact allocation before readiness, continuing to observe pending cleanup, and retaining recovery evidence when storage or deletion is uncertain.
+- Prevented ready-pool leases from being borrowed concurrently across typed and legacy pools, including existing duplicate records, and blocked expired or quarantined borrows from returning to ready.
+- Honored explicit empty YAML lists for environment forwarding, JUnit paths, and preflight probes while preserving omitted-key inheritance, additive profile/sync lists, and independent automatic result discovery.
+- Honored explicit advertised SSH-port selection on ordinary reused coordinator leases without changing host trust or provider cleanup; ready-pool connections retain their pool-recorded endpoint.
+- Exposed local-container settings in `config show` text and JSON, including effective work-root defaults when selected, without Docker discovery or daemon access.
+- Kept brokered native checkpoint creation waiting through coordinator-owned capture recovery without submitting another capture, while respecting cancellation, timeouts, and terminal failures. Thanks @Copilot.
+- Restored machine-readable missing-checkpoint inspection after managed deletion without treating unresolved capture bindings or coordinator failures as confirmed deletion.
+- Unblocked ordinary Machine0 source cleanup when a failed checkpoint capture is proven not to have attempted image submission; interrupted or uncertain submissions retain their recovery records.
+- Added `checkpoint abandon` for unresolved ordinary Machine0 captures: dispose of the verified source through its existing ownership claim while retaining the unresolved image record and blocking image reuse, deletion, or pruning.
+- Preserved the original coordinator heartbeat transport error when HTTP fallback also fails or has no time left, without changing successful fallback behavior.
+- Fixed Parallels clone placement under the configured parent directory, leaving VM bundle naming and creation to Parallels.
 
-### Fixed
+### Upgrade notes
 
-- Added exact-source abandonment for unresolved ordinary Machine0 checkpoints: dispose of the positively identified source through its existing claim owner while retaining the unknown image obligation and rejecting later fork, prune, or local deletion.
-- Released ordinary Machine0 checkpoint reservations when the provider proves image submission was never attempted, keeping failed captures from blocking source cleanup while retaining interrupted or uncertain submissions.
-- Made explicit coordinator Stop share one five-minute cancellation budget across inspection, claim waits, release, and observation, and made local daemon lock waits honor cancellation without losing confirmed cleanup results.
-- Fixed Islo `stop` and run cleanup to act only on the sandbox a lease owns: a lease that records a resource id no longer issues a name-only delete when neither identity lookup could tie the recorded name to that resource, because an Islo sandbox name is reusable after deletion. Such a teardown now fails with the sandbox name, the command to retry, and a note that the sandbox may still be billable, and it keeps the claim; a lease with no recorded id keeps its name-only delete. Teardown also proves the sandbox is deleted before dropping the local claim, using the authoritative by-id tombstone or a 404 on the exact sandbox name, so an unproven teardown keeps the claim instead of losing the only handle on a running sandbox; `crabbox inspect` on a lease whose sandbox is gone reports state `deleted` rather than failing.
-- Fixed Parallels clone destinations to pass the configured parent directory to `prlctl --dst`, letting Parallels name and create the VM bundle beneath it.
-- Published exact AWS allocation identity and prepared account scope before readiness and kept explicit Stop observing pending creation cleanup, while preserving allocation claims through storage failures and local ownership until deletion is confirmed.
-- Kept brokered native checkpoint creation waiting through exact coordinator-owned recovery, without repeating capture, while bounding status requests and preserving cancellation and terminal failures.
+- Previously ignored SSH-port overrides now take effect on ordinary reused coordinator leases and reject unadvertised ports. Remove obsolete `--ssh-port`, `ssh.port`, or `CRABBOX_SSH_PORT` settings to retain automatic selection; explicit selection disables port fallback.
+- Empty YAML `env.allow`, `results.junit`, and `run.preflightTools` lists now clear inherited values. Omit the key to inherit instead; clearing JUnit paths does not disable `results.auto`, and profile allowlists remain additive.
+- Automatic POSIX SSH failure bundles no longer include the retained `.crabbox/scripts` store. Explicitly select additional files you need; use `--download-on-failure` for eligible Linux SSH failure downloads.
 
 ## 0.48.0 - 2026-08-30
 

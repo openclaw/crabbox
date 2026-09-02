@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
 	"time"
 
 	gosdk "github.com/islo-labs/go-sdk"
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 const isloTeardownLeaseID = "isb_crabbox-repo-abcdef"
@@ -17,18 +19,10 @@ const isloTeardownName = "crabbox-repo-abcdef"
 
 func newIsloTeardownBackend(t *testing.T, client *fakeIsloSyncClient, stderr io.Writer) *isloBackend {
 	t.Helper()
-	return newIsloForgetMissingTeardownBackend(t, client, stderr, false)
-}
-
-// newIsloForgetMissingTeardownBackend builds the same backend with the
-// operator opt-out set either way, so every test states which side of the
-// fail-closed gate it is pinning.
-func newIsloForgetMissingTeardownBackend(t *testing.T, client *fakeIsloSyncClient, stderr io.Writer, forgetMissing bool) *isloBackend {
-	t.Helper()
 	restore := swapNewIsloClient(client)
 	t.Cleanup(restore)
 	return &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test", ForgetMissing: forgetMissing}},
+		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
 		rt:  Runtime{Stdout: io.Discard, Stderr: stderr},
 	}
 }
@@ -49,11 +43,16 @@ func requireIsloClaimDropped(t *testing.T, leaseID string) {
 
 // claimIsloLegacyLease writes a claim in the shape used before the identity
 // binding existed: no resource id, no scope, no creator labels.
-func claimIsloLegacyLease(t *testing.T, leaseID string) {
+func claimIsloLegacyLease(t *testing.T, leaseID string) core.LeaseClaim {
 	t.Helper()
 	if err := claimLeaseForRepoProvider(leaseID, "web", isloProvider, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
+	claim, ok, err := resolveExactIsloLeaseClaim(leaseID)
+	if err != nil || !ok {
+		t.Fatalf("claim ok=%t err=%v", ok, err)
+	}
+	return claim
 }
 
 // TestIsloStopConfirmsTeardownWithTombstone pins the strong path: the exact
@@ -105,6 +104,82 @@ func TestIsloStopIsIdempotentOnAnAlreadyDeletedSandbox(t *testing.T) {
 		t.Fatalf("stderr=%q, want the tombstone proof reported", stderr.String())
 	}
 	requireIsloClaimDropped(t, isloTeardownLeaseID)
+}
+
+func TestIsloStopRejectsUnboundByIDTombstones(t *testing.T) {
+	for _, responseID := range []string{"", "0195f3d2-5c1a-7c39-9c1e-000000000000"} {
+		for _, afterDelete := range []bool{false, true} {
+			t.Run(fmt.Sprintf("response_id=%q/after_delete=%t", responseID, afterDelete), func(t *testing.T) {
+				t.Setenv("XDG_STATE_HOME", t.TempDir())
+				isolateIsloTestHome(t)
+				claimIsloLeaseWithIdentity(t, isloTeardownLeaseID, "web", isloTeardownName, isloTestResourceID, isloTestClaimScope)
+				client := &fakeIsloSyncClient{}
+				client.registerSandbox(isloTeardownName, isloTestResourceID)
+				wantDeletes := 0
+				if afterDelete {
+					client.byIDSandboxes = append(client.byIDSandboxes, client.liveSandbox(isloTeardownName))
+					wantDeletes = 1
+				}
+				client.byIDSandboxes = append(client.byIDSandboxes, &gosdk.SandboxResponse{
+					ID: responseID, Name: isloTeardownName, Status: "deleted", DeletedAt: stringValue("2026-01-01T00:00:01Z"),
+				})
+				backend := newIsloTeardownBackend(t, client, io.Discard)
+
+				if err := backend.Stop(context.Background(), StopRequest{ID: isloTeardownLeaseID}); err == nil || !strings.Contains(err.Error(), "by-id response") {
+					t.Errorf("err=%v, want an invalid by-id response to fail closed", err)
+				}
+				if client.deleteCalls != wantDeletes {
+					t.Errorf("delete calls=%d, want %d", client.deleteCalls, wantDeletes)
+				}
+				requireIsloClaimRetained(t, isloTeardownLeaseID)
+			})
+		}
+	}
+}
+
+func TestIsloStopDoesNotDeleteAStaleNameFromIncompleteByIDResponse(t *testing.T) {
+	for _, nameReadFails := range []bool{false, true} {
+		t.Run(fmt.Sprintf("name_read_fails=%t", nameReadFails), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			isolateIsloTestHome(t)
+			claimIsloLeaseWithIdentity(t, isloTeardownLeaseID, "web", isloTeardownName, isloTestResourceID, isloTestClaimScope)
+			client := &fakeIsloSyncClient{byID: map[string]*gosdk.SandboxResponse{
+				isloTestResourceID: {ID: isloTestResourceID, Status: "running"},
+			}}
+			client.registerSandbox(isloTeardownName, "0195f3d2-5c1a-7c39-9c1e-000000000000")
+			if nameReadFails {
+				client.getSandboxErr = errors.New("503 service unavailable")
+			}
+			backend := newIsloTeardownBackend(t, client, io.Discard)
+
+			if err := backend.Stop(context.Background(), StopRequest{ID: isloTeardownLeaseID}); err == nil {
+				t.Error("expected the stale, unidentified name to be refused")
+			}
+			if client.deleteCalls != 0 {
+				t.Errorf("deleted names=%#v, want no deletion without a verified current name", client.deletedNames)
+			}
+			requireIsloClaimRetained(t, isloTeardownLeaseID)
+		})
+	}
+}
+
+func TestIsloStopRequiresTerminalDeletionState(t *testing.T) {
+	for _, state := range []string{"stopping", "deleting", "running"} {
+		t.Run(state, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			isolateIsloTestHome(t)
+			claimIsloLeaseWithIdentity(t, isloTeardownLeaseID, "web", isloTeardownName, isloTestResourceID, isloTestClaimScope)
+			client := &fakeIsloSyncClient{byID: map[string]*gosdk.SandboxResponse{
+				isloTestResourceID: {ID: isloTestResourceID, Name: isloTeardownName, Status: state, DeletedAt: stringValue("2026-01-01T00:00:01Z")},
+			}}
+			backend := newIsloTeardownBackend(t, client, io.Discard)
+
+			if err := backend.Stop(context.Background(), StopRequest{ID: isloTeardownLeaseID}); err == nil {
+				t.Error("a deletion timestamp without terminal state must not confirm cleanup")
+			}
+			requireIsloClaimRetained(t, isloTeardownLeaseID)
+		})
+	}
 }
 
 // TestIsloStopConfirmsTeardownWithExactNameNotFound covers the fallback proof:
@@ -240,10 +315,6 @@ func TestIsloTeardownRefusesABlindNameDeleteForAnIDBoundClaim(t *testing.T) {
 				isloTestResourceID,
 				"may still be running and billable",
 				isloCleanupCommand(isloTeardownLeaseID),
-				// A claim whose sandbox can never be read again would
-				// otherwise be unstickable, so the refusal an operator
-				// actually sees has to name the way out.
-				"--islo-forget-missing",
 			} {
 				if !strings.Contains(err.Error(), want) {
 					t.Fatalf("err=%v, want it to state %q", err, want)
@@ -253,201 +324,6 @@ func TestIsloTeardownRefusesABlindNameDeleteForAnIDBoundClaim(t *testing.T) {
 				t.Fatalf("delete calls=%d names=%#v, want no delete: the recorded name was never shown to be our resource", client.deleteCalls, client.deletedNames)
 			}
 			requireIsloClaimRetained(t, isloTeardownLeaseID)
-		})
-	}
-}
-
-// TestIsloForgetMissingDropsAnUnverifiableClaimWithoutDeleting covers the
-// operator escape hatch from the fail-closed gate. The gate is correct but it
-// can leave a claim that no retry will ever satisfy - a sandbox whose id these
-// credentials can never read again - and with no way to drop it the lease is
-// stuck forever. islo forget-missing drops the claim on explicit request and
-// still issues NO delete, so the resource boundary the gate protects is never
-// crossed: the trade is an untracked, possibly billing sandbox, and it has to be
-// stated on stderr rather than happening quietly.
-func TestIsloForgetMissingDropsAnUnverifiableClaimWithoutDeleting(t *testing.T) {
-	for name, tc := range map[string]struct {
-		client func() *fakeIsloSyncClient
-	}{
-		"both identity reads fail": {
-			client: func() *fakeIsloSyncClient {
-				unavailable := errors.New("503 service unavailable")
-				return &fakeIsloSyncClient{byIDErr: unavailable, getSandboxErr: unavailable}
-			},
-		},
-		"claimed id is not visible and the name read fails": {
-			client: func() *fakeIsloSyncClient {
-				return &fakeIsloSyncClient{
-					byID:          map[string]*gosdk.SandboxResponse{isloTestResourceID: nil},
-					getSandboxErr: errors.New("i/o timeout"),
-				}
-			},
-		},
-		"the name answers without a resource id": {
-			client: func() *fakeIsloSyncClient {
-				return &fakeIsloSyncClient{
-					byID:       map[string]*gosdk.SandboxResponse{isloTestResourceID: nil},
-					getSandbox: &gosdk.SandboxResponse{Name: isloTeardownName, Status: "running"},
-				}
-			},
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			t.Setenv("XDG_STATE_HOME", t.TempDir())
-			isolateIsloTestHome(t)
-			claimIsloLeaseWithIdentity(t, isloTeardownLeaseID, "web", isloTeardownName, isloTestResourceID, isloTestClaimScope)
-			client := tc.client()
-			var stderr bytes.Buffer
-			backend := newIsloForgetMissingTeardownBackend(t, client, &stderr, true)
-
-			if err := backend.Stop(context.Background(), StopRequest{ID: isloTeardownLeaseID}); err != nil {
-				t.Fatalf("err=%v, want the claim dropped on explicit operator request", err)
-			}
-			// The opt-out only forgets. Deleting a name that was never
-			// identified is the exact thing the gate exists to prevent, and
-			// acknowledging a stuck claim must not buy that back.
-			if client.deleteCalls != 0 {
-				t.Fatalf("delete calls=%d names=%#v, want 0: forget-missing drops the claim, it does not authorize a blind delete", client.deleteCalls, client.deletedNames)
-			}
-			requireIsloClaimDropped(t, isloTeardownLeaseID)
-			// Dropping the claim discards the only handle on a resource that
-			// may still be charging the tenant, so the action has to be
-			// auditable from the terminal it ran in.
-			for _, want := range []string{
-				"WITHOUT deleting sandbox",
-				isloTeardownName,
-				isloTestResourceID,
-				"may still exist and may still be billing",
-				"no longer track it",
-				"proof=" + string(isloProofUnverifiedForgotten),
-			} {
-				if !strings.Contains(stderr.String(), want) {
-					t.Fatalf("stderr=%q, want it to state %q", stderr.String(), want)
-				}
-			}
-		})
-	}
-}
-
-// TestIsloForgetMissingDoesNotReachTheRunCleanupDefer bounds the opt-out to the
-// teardown the operator is actually standing in front of. The run cleanup defer
-// knows its sandbox exists - this run created it moments ago - so retaining an
-// adoptable recovery claim always beats forgetting one, and an environment-wide
-// acknowledgement must not silently turn every failed cleanup into a leaked,
-// untracked sandbox.
-func TestIsloForgetMissingDoesNotReachTheRunCleanupDefer(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	isolateIsloTestHome(t)
-	claimIsloLeaseWithIdentity(t, isloTeardownLeaseID, "web", isloTeardownName, isloTestResourceID, isloTestClaimScope)
-	unavailable := errors.New("503 service unavailable")
-	client := &fakeIsloSyncClient{byIDErr: unavailable, getSandboxErr: unavailable}
-	var stderr bytes.Buffer
-	backend := newIsloForgetMissingTeardownBackend(t, client, &stderr, true)
-
-	err := backend.releaseIsloLease(client, isloTeardownLeaseID, isloTeardownName)
-	if err == nil || !strings.Contains(err.Error(), "refused to delete sandbox") {
-		t.Fatalf("err=%v, want run cleanup to stay fail-closed with forget-missing set", err)
-	}
-	if client.deleteCalls != 0 {
-		t.Fatalf("delete calls=%d names=%#v, want 0", client.deleteCalls, client.deletedNames)
-	}
-	if strings.Contains(stderr.String(), string(isloProofUnverifiedForgotten)) {
-		t.Fatalf("stderr=%q, want no unverified-forget release from the run cleanup defer", stderr.String())
-	}
-	requireIsloClaimRetained(t, isloTeardownLeaseID)
-}
-
-// TestIsloForgetMissingLeavesEveryOtherTeardownPathAlone pins the blast radius
-// of the opt-out: it may only convert the one unverifiable-identity refusal into
-// a claim drop. A proven teardown, the pre-binding name-only delete, the
-// positive identity mismatch, and an unproven confirmation must all behave
-// exactly as they do without it - otherwise the flag quietly becomes "release
-// this lease no matter what the API said".
-func TestIsloForgetMissingLeavesEveryOtherTeardownPathAlone(t *testing.T) {
-	for name, tc := range map[string]struct {
-		legacyClaim bool
-		client      func() *fakeIsloSyncClient
-		wantErr     string
-		wantDeletes int
-		wantProof   isloTeardownProof
-		wantClaim   bool
-	}{
-		"a verified sandbox is still deleted and proven by tombstone": {
-			client: func() *fakeIsloSyncClient {
-				client := &fakeIsloSyncClient{createdBy: isloTestKeyName}
-				client.registerSandbox(isloTeardownName, isloTestResourceID)
-				return client
-			},
-			wantDeletes: 1,
-			wantProof:   isloProofTombstone,
-		},
-		"a claim with no recorded id still deletes by name and still needs proof": {
-			legacyClaim: true,
-			client: func() *fakeIsloSyncClient {
-				return &fakeIsloSyncClient{getSandboxErr: errors.New("503 service unavailable")}
-			},
-			wantErr:     "confirm sandbox deletion by name",
-			wantDeletes: 1,
-			wantClaim:   true,
-		},
-		"a foreign resource under the claimed name is still refused": {
-			client: func() *fakeIsloSyncClient {
-				client := &fakeIsloSyncClient{}
-				client.registerSandbox(isloTeardownName, "0195f3d2-5c1a-7c39-9c1e-000000000000")
-				return client
-			},
-			wantErr:   "this lease does not own",
-			wantClaim: true,
-		},
-		"a sandbox still running after the delete is still unproven": {
-			client: func() *fakeIsloSyncClient {
-				client := &fakeIsloSyncClient{byID: map[string]*gosdk.SandboxResponse{
-					isloTestResourceID: {ID: isloTestResourceID, Name: isloTeardownName, Status: "running"},
-				}}
-				client.registerSandbox(isloTeardownName, isloTestResourceID)
-				return client
-			},
-			wantErr:     "still reports status",
-			wantDeletes: 1,
-			wantClaim:   true,
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			t.Setenv("XDG_STATE_HOME", t.TempDir())
-			isolateIsloTestHome(t)
-			if tc.legacyClaim {
-				claimIsloLegacyLease(t, isloTeardownLeaseID)
-			} else {
-				claimIsloLeaseWithIdentity(t, isloTeardownLeaseID, "web", isloTeardownName, isloTestResourceID, isloTestClaimScope)
-			}
-			client := tc.client()
-			var stderr bytes.Buffer
-			backend := newIsloForgetMissingTeardownBackend(t, client, &stderr, true)
-
-			err := backend.Stop(context.Background(), StopRequest{ID: isloTeardownLeaseID})
-			if tc.wantErr == "" {
-				if err != nil {
-					t.Fatalf("err=%v, want nil", err)
-				}
-			} else if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Fatalf("err=%v, want %q", err, tc.wantErr)
-			}
-			if client.deleteCalls != tc.wantDeletes {
-				t.Fatalf("delete calls=%d names=%#v, want %d", client.deleteCalls, client.deletedNames, tc.wantDeletes)
-			}
-			if tc.wantProof != "" && !strings.Contains(stderr.String(), "proof="+string(tc.wantProof)) {
-				t.Fatalf("stderr=%q, want proof=%s reported", stderr.String(), tc.wantProof)
-			}
-			// The forget non-proof may never appear on a path the opt-out is
-			// not meant to reach.
-			if strings.Contains(stderr.String(), string(isloProofUnverifiedForgotten)) {
-				t.Fatalf("stderr=%q, want no unverified-forget release on this path", stderr.String())
-			}
-			if tc.wantClaim {
-				requireIsloClaimRetained(t, isloTeardownLeaseID)
-				return
-			}
-			requireIsloClaimDropped(t, isloTeardownLeaseID)
 		})
 	}
 }
@@ -656,11 +532,11 @@ func TestIsloRunCleanupReleaseKeepsAnAdoptableClaim(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			isolateIsloTestHome(t)
-			claimIsloLeaseWithIdentity(t, isloTeardownLeaseID, "web", isloTeardownName, isloTestResourceID, isloTestClaimScope)
+			acquired := claimIsloLeaseWithIdentity(t, isloTeardownLeaseID, "web", isloTeardownName, isloTestResourceID, isloTestClaimScope)
 			client := tc.client()
 			backend := newIsloTeardownBackend(t, client, io.Discard)
 
-			err := backend.releaseIsloLease(client, isloTeardownLeaseID, isloTeardownName)
+			err := backend.releaseIsloLease(client, acquired, isloTeardownName)
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("err=%v, want nil", err)
@@ -680,24 +556,30 @@ func TestIsloRunCleanupReleaseKeepsAnAdoptableClaim(t *testing.T) {
 	}
 }
 
-// TestIsloRunCleanupDeletesWhenTheClaimIsGone keeps a lost claim from turning
-// into a leaked, billed sandbox. There is no identity left to fence on, so the
-// defer falls back to the unconditional name delete it always performed.
-func TestIsloRunCleanupDeletesWhenTheClaimIsGone(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	isolateIsloTestHome(t)
-	client := &fakeIsloSyncClient{}
-	var stderr bytes.Buffer
-	backend := newIsloTeardownBackend(t, client, &stderr)
+func TestIsloRunCleanupRefusesNameDeleteWithoutAClaim(t *testing.T) {
+	for name, currentID := range map[string]string{
+		"original sandbox": isloTestResourceID,
+		"reused name":      "0195f3d2-5c1a-7c39-9c1e-000000000000",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			isolateIsloTestHome(t)
+			acquired := claimIsloLeaseWithIdentity(t, isloTeardownLeaseID, "web", isloTeardownName, isloTestResourceID, isloTestClaimScope)
+			if err := core.RemoveLeaseClaimIfUnchanged(isloTeardownLeaseID, acquired); err != nil {
+				t.Fatal(err)
+			}
+			client := &fakeIsloSyncClient{}
+			client.registerSandbox(isloTeardownName, currentID)
+			backend := newIsloTeardownBackend(t, client, io.Discard)
 
-	if err := backend.releaseIsloLease(client, isloTeardownLeaseID, isloTeardownName); err != nil {
-		t.Fatal(err)
-	}
-	if client.deleteCalls != 1 || client.deletedNames[0] != isloTeardownName {
-		t.Fatalf("delete calls=%d names=%#v, want the sandbox deleted rather than leaked", client.deleteCalls, client.deletedNames)
-	}
-	if !strings.Contains(stderr.String(), "has no exact local claim") {
-		t.Fatalf("stderr=%q, want the missing claim reported", stderr.String())
+			err := backend.releaseIsloLease(client, acquired, isloTeardownName)
+			if err == nil || !strings.Contains(err.Error(), "no exact local claim") || !strings.Contains(err.Error(), "no delete was issued") {
+				t.Errorf("err=%v, want actionable refusal when the original identity is unavailable", err)
+			}
+			if client.deleteCalls != 0 {
+				t.Errorf("deleted names=%#v, want the unverified resource retained", client.deletedNames)
+			}
+		})
 	}
 }
 
@@ -733,17 +615,18 @@ func TestIsloRunCleanupBoundsTheWholeTeardown(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			isolateIsloTestHome(t)
 			withIsloCleanupTimeout(t, budget)
+			var acquired core.LeaseClaim
 			if tc.idBound {
-				claimIsloLeaseWithIdentity(t, isloTeardownLeaseID, "web", isloTeardownName, isloTestResourceID, isloTestClaimScope)
+				acquired = claimIsloLeaseWithIdentity(t, isloTeardownLeaseID, "web", isloTeardownName, isloTestResourceID, isloTestClaimScope)
 			} else {
-				claimIsloLegacyLease(t, isloTeardownLeaseID)
+				acquired = claimIsloLegacyLease(t, isloTeardownLeaseID)
 			}
 			client := &fakeIsloSyncClient{blockReads: true, blockDelete: true}
 			client.registerSandbox(isloTeardownName, isloTestResourceID)
 			backend := newIsloTeardownBackend(t, client, io.Discard)
 
 			done := make(chan error, 1)
-			go func() { done <- backend.releaseIsloLease(client, isloTeardownLeaseID, isloTeardownName) }()
+			go func() { done <- backend.releaseIsloLease(client, acquired, isloTeardownName) }()
 			var err error
 			select {
 			case err = <-done:
