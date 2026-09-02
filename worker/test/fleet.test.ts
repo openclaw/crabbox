@@ -17150,7 +17150,7 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value("provider-access:cbx_abcdef123456")).toBeUndefined();
   });
 
-  it("removes a retained release when Tailscale preparation fails", async () => {
+  it("keeps cancellation authoritative when Tailscale preparation later fails", async () => {
     const storage = new MemoryStorage();
     let oauthStarted!: () => void;
     let finishOAuth!: () => void;
@@ -17217,7 +17217,9 @@ describe("fleet lease identity and idle", () => {
     });
 
     finishOAuth();
-    expect((await createPromise).status).toBe(502);
+    const canceled = await createPromise;
+    expect(canceled.status).toBe(409);
+    await expect(canceled.json()).resolves.toMatchObject({ error: "create_canceled" });
     expect(providerCalled).toBe(false);
     expect(storage.value("lease:cbx_abcdef123456")).toBeUndefined();
     expect(storage.value("provider-access:cbx_abcdef123456")).toBeUndefined();
@@ -21437,6 +21439,144 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  it("cancels a quota-rejected fixed admission without reserving usage and fences replay after restart", async () => {
+    const storage = new MemoryStorage();
+    let creates = 0;
+    const limits = { CRABBOX_MAX_ACTIVE_LEASES: "1" };
+    const fleet = testFleet(storage, { hetzner: fakeProvider(() => creates++) }, limits);
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const busyID = "cbx_ca1100000040";
+    const leaseID = "cbx_ca1100000041";
+    const now = new Date().toISOString();
+    storage.seed(
+      `lease:${busyID}`,
+      testLease({
+        id: busyID,
+        owner: "alice@example.com",
+        org: "example-org",
+        createdAt: now,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        maxEstimatedUSD: 1,
+      }),
+    );
+    const body = { provider: "hetzner", sshPublicKey: "ssh-ed25519 fixed-quota" };
+    const unknownRelease = await fleet.fetch(
+      request("POST", `/v1/leases/${leaseID}/release`, { headers, body: { delete: true } }),
+    );
+    expect(unknownRelease.status).toBe(404);
+
+    const create = await fleet.fetch(request("PUT", `/v1/leases/${leaseID}`, { headers, body }));
+    expect(create.status).toBe(429);
+    await expect(create.json()).resolves.toMatchObject({ error: "cost_limit_exceeded" });
+    const canceled = await fleet.fetch(
+      request("POST", `/v1/leases/${leaseID}/release`, {
+        headers,
+        body: { delete: true, expectedProvider: "hetzner" },
+      }),
+    );
+    expect(canceled.status).toBe(200);
+    await expect(canceled.json()).resolves.toMatchObject({
+      lease: { id: leaseID, provider: "hetzner", state: "released", cleanupStatus: "complete" },
+    });
+    expect(storage.value(`lease:${leaseID}`)).toBeUndefined();
+    const usage = await fleet.fetch(request("GET", "/v1/usage", { headers }));
+    await expect(usage.json()).resolves.toMatchObject({
+      usage: { leases: 1, activeLeases: 1, reservedUSD: 1 },
+    });
+
+    const released = await fleet.fetch(
+      request("POST", `/v1/leases/${busyID}/release`, { headers, body: { delete: true } }),
+    );
+    expect(released.status).toBe(200);
+    const reopenedStorage = new MemoryStorage(structuredClone(await storage.list()));
+    const reopened = testFleet(reopenedStorage, { hetzner: fakeProvider(() => creates++) }, limits);
+    await Promise.all(
+      [fleet, reopened].map(async (coordinator) => {
+        const replay = await coordinator.fetch(
+          request("PUT", `/v1/leases/${leaseID}`, { headers, body }),
+        );
+        expect(replay.status).toBe(409);
+        const repeatedRelease = await coordinator.fetch(
+          request("POST", `/v1/leases/${leaseID}/release`, { headers, body: { delete: true } }),
+        );
+        expect(repeatedRelease.status).toBe(200);
+        await expect(repeatedRelease.json()).resolves.toMatchObject({
+          lease: { id: leaseID, state: "released", cleanupStatus: "complete" },
+        });
+      }),
+    );
+    expect(creates).toBe(0);
+    expect(reopenedStorage.value(`lease:${leaseID}`)).toBeUndefined();
+    const reopenedUsage = await reopened.fetch(request("GET", "/v1/usage", { headers }));
+    await expect(reopenedUsage.json()).resolves.toMatchObject({
+      usage: { leases: 1, activeLeases: 0, reservedUSD: 1 },
+    });
+    const fresh = await reopened.fetch(
+      request("PUT", "/v1/leases/cbx_ca1100000042", { headers, body }),
+    );
+    expect(fresh.status).toBe(201);
+    expect(creates).toBe(1);
+  });
+
+  it("releases an exact fixed admission without resolving another lease's colliding slug", async () => {
+    const storage = new MemoryStorage();
+    let creates = 0;
+    const fleet = testFleet(
+      storage,
+      { hetzner: fakeProvider(() => creates++) },
+      { CRABBOX_MAX_ACTIVE_LEASES: "1" },
+    );
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const leaseID = "cbx_ca1100000048";
+    const otherID = "cbx_ca1100000049";
+    const friendlySlug = "cbx-ca1100000048";
+    const body = { provider: "hetzner", sshPublicKey: "ssh-ed25519 exact-admission" };
+    const other = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers,
+        body: { ...body, leaseID: otherID, slug: leaseID },
+      }),
+    );
+    expect(other.status).toBe(201);
+    await expect(other.json()).resolves.toMatchObject({
+      lease: { id: otherID, slug: friendlySlug, state: "active" },
+    });
+    const pending = await fleet.fetch(request("PUT", `/v1/leases/${leaseID}`, { headers, body }));
+    expect(pending.status).toBe(429);
+    await expect(pending.json()).resolves.toMatchObject({ error: "cost_limit_exceeded" });
+
+    const exact = await fleet.fetch(request("GET", `/v1/leases/${leaseID}`, { headers }));
+    expect.soft(exact.status).toBe(404);
+    const stopped = await fleet.fetch(
+      request("POST", `/v1/leases/${leaseID}/release`, {
+        headers,
+        body: { delete: true, expectedProvider: "hetzner" },
+      }),
+    );
+    expect(stopped.status).toBe(200);
+    await expect.soft(stopped.json()).resolves.toMatchObject({
+      lease: { id: leaseID, state: "released", cleanupStatus: "complete" },
+    });
+    await Promise.all(
+      [otherID, friendlySlug].map(async (identifier) => {
+        const untouched = await fleet.fetch(
+          request("GET", `/v1/leases/${identifier}`, { headers }),
+        );
+        expect.soft(untouched.status).toBe(200);
+        await expect.soft(untouched.json()).resolves.toMatchObject({
+          lease: { id: otherID, slug: friendlySlug, state: "active" },
+        });
+      }),
+    );
+    expect(creates).toBe(1);
+  });
+
   it("keeps expired managed leases inside active limits and rejects heartbeat revival", async () => {
     const storage = new MemoryStorage();
     let created = false;
@@ -21836,6 +21976,71 @@ describe("fleet lease identity and idle", () => {
     await expect(committedReplay.json()).resolves.toMatchObject({
       lease: { id: canonicalLeaseID, state: "active" },
     });
+  });
+
+  it("does not replay an old fixed create across retained Mac reactivation", async () => {
+    const storage = new MemoryStorage();
+    let creates = 0;
+    const fleet = testFleet(storage, {
+      aws: fakeProvider(() => creates++, {
+        provider: "aws",
+        serverType: "mac2.metal",
+        hostID: "h-fixed-incarnation",
+        cloudID: "i-fixed-incarnation",
+      }),
+    });
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const leaseID = "cbx_ca1100000046";
+    const fixedBody = {
+      provider: "aws",
+      target: "macos",
+      serverType: "mac2.metal",
+      capacity: { market: "on-demand" },
+      keep: true,
+      ttlSeconds: 1200,
+      sshPublicKey: "ssh-ed25519 fixed-incarnation",
+    };
+    const fixed = await fleet.fetch(
+      request("PUT", `/v1/leases/${leaseID}`, { headers, body: fixedBody }),
+    );
+    expect(fixed.status).toBe(201);
+    const retained = await fleet.fetch(
+      request("POST", `/v1/leases/${leaseID}/release`, { headers, body: { delete: false } }),
+    );
+    expect(retained.status).toBe(200);
+    await expect(retained.json()).resolves.toMatchObject({
+      lease: { id: leaseID, state: "released", cleanupStatus: "retained" },
+    });
+    const ordinaryBody = {
+      ...fixedBody,
+      leaseID: "cbx_ca1100000047",
+      createAttemptID: "cat_47000000000000000000000000000047",
+      hostId: "h-fixed-incarnation",
+      ttlSeconds: 2400,
+    };
+    const reactivated = await fleet.fetch(
+      request("POST", "/v1/leases", { headers, body: ordinaryBody }),
+    );
+    expect(reactivated.status).toBe(201);
+    await expect(reactivated.json()).resolves.toMatchObject({
+      lease: { id: leaseID, state: "active", cloudID: "i-fixed-incarnation", ttlSeconds: 2400 },
+    });
+
+    const stale = await fleet.fetch(
+      request("PUT", `/v1/leases/${leaseID}`, { headers, body: fixedBody }),
+    );
+    expect.soft(stale.status).toBe(409);
+    const replay = await fleet.fetch(
+      request("POST", "/v1/leases", { headers, body: ordinaryBody }),
+    );
+    expect(replay.status).toBe(200);
+    await expect(replay.json()).resolves.toMatchObject({
+      lease: { id: leaseID, state: "active", cloudID: "i-fixed-incarnation", ttlSeconds: 2400 },
+    });
+    expect(creates).toBe(1);
   });
 
   it("persists a cancel-before-create tombstone and rejects the later create without provisioning", async () => {
@@ -22443,22 +22648,81 @@ describe("fleet lease identity and idle", () => {
     expect(admin.status).toBe(200);
   });
 
-  it("lets cancellation win during slow config preparation before lease reservation", async () => {
+  it.each(["ordinary", "fixed"] as const)(
+    "lets cancellation win during slow %s config preparation before lease reservation",
+    async (kind) => {
+      const storage = new MemoryStorage();
+      const preparationStarted = deferred<void>();
+      const finishPreparation = deferred<void>();
+      let creates = 0;
+      const fleet = testFleet(storage, {
+        hetzner: fakeProvider(() => creates++, {
+          onPrepareLeaseConfig: async (config) => {
+            preparationStarted.resolve();
+            await finishPreparation.promise;
+            return config;
+          },
+        }),
+      });
+      const headers = {
+        "x-crabbox-owner": "alice@example.com",
+        "x-crabbox-org": "example-org",
+      };
+      const leaseID = "cbx_ca1100000004";
+      const createAttemptID = "cat_40000000000000000000000000000004";
+      const create = () =>
+        fleet.fetch(
+          request(
+            kind === "fixed" ? "PUT" : "POST",
+            kind === "fixed" ? `/v1/leases/${leaseID}` : "/v1/leases",
+            {
+              headers,
+              body: {
+                leaseID,
+                createAttemptID: kind === "ordinary" ? createAttemptID : undefined,
+                provider: "hetzner",
+                sshPublicKey: "ssh-ed25519 x",
+              },
+            },
+          ),
+        );
+      const creating = [create()];
+      await preparationStarted.promise;
+      if (kind === "fixed") creating.push(create());
+      const cancel = () =>
+        fleet.fetch(
+          request(
+            "POST",
+            `/v1/leases/${leaseID}/${kind === "fixed" ? "release" : "cancel-create"}`,
+            { headers, body: kind === "fixed" ? { delete: true } : { createAttemptID } },
+          ),
+        );
+      const cancellations: Response[] = [];
+      try {
+        cancellations.push(await cancel(), await cancel());
+      } finally {
+        finishPreparation.resolve();
+      }
+      const outcomes = await Promise.all(creating);
+      expect.soft(cancellations.map((response) => response.status)).toEqual([200, 200]);
+      expect
+        .soft(outcomes.map((response) => response.status))
+        .toEqual(kind === "fixed" ? [409, 409] : [409]);
+      expect.soft(creates).toBe(0);
+      expect(storage.value(`lease:${leaseID}`)).toBeUndefined();
+    },
+  );
+
+  it("rejects foreign owner, organization, and provider releases without canceling fixed preparation", async () => {
     const storage = new MemoryStorage();
-    let releasePreparation!: () => void;
-    let preparationStarted!: () => void;
-    const preparationStartedPromise = new Promise<void>(
-      (resolve) => (preparationStarted = resolve),
-    );
-    const releasePreparationPromise = new Promise<void>(
-      (resolve) => (releasePreparation = resolve),
-    );
+    const preparationStarted = deferred<void>();
+    const finishPreparation = deferred<void>();
     let creates = 0;
     const fleet = testFleet(storage, {
       hetzner: fakeProvider(() => creates++, {
         onPrepareLeaseConfig: async (config) => {
-          preparationStarted();
-          await releasePreparationPromise;
+          preparationStarted.resolve();
+          await finishPreparation.promise;
           return config;
         },
       }),
@@ -22467,26 +22731,35 @@ describe("fleet lease identity and idle", () => {
       "x-crabbox-owner": "alice@example.com",
       "x-crabbox-org": "example-org",
     };
-    const leaseID = "cbx_ca1100000004";
-    const createAttemptID = "cat_40000000000000000000000000000004";
+    const leaseID = "cbx_ca1100000043";
     const creating = fleet.fetch(
-      request("POST", "/v1/leases", {
+      request("PUT", `/v1/leases/${leaseID}`, {
         headers,
-        body: { leaseID, createAttemptID, provider: "hetzner", sshPublicKey: "ssh-ed25519 x" },
+        body: { provider: "hetzner", sshPublicKey: "ssh-ed25519 fixed-owner" },
       }),
     );
-    await preparationStartedPromise;
-    const canceled = await fleet.fetch(
-      request("POST", `/v1/leases/${leaseID}/cancel-create`, {
-        headers,
-        body: { createAttemptID },
-      }),
-    );
-    expect(canceled.status).toBe(200);
-    releasePreparation();
-    expect((await creating).status).toBe(409);
-    expect(storage.value(`lease:${leaseID}`)).toBeUndefined();
-    expect(creates).toBe(0);
+    await preparationStarted.promise;
+    let rejected: Response[];
+    try {
+      rejected = await Promise.all(
+        [
+          { headers: { ...headers, "x-crabbox-owner": "bob@example.com" } },
+          { headers: { ...headers, "x-crabbox-org": "other-org" } },
+          { headers, body: { delete: true, expectedProvider: "aws" } },
+        ].map((options) => fleet.fetch(request("POST", `/v1/leases/${leaseID}/release`, options))),
+      );
+    } finally {
+      finishPreparation.resolve();
+    }
+    const created = await creating;
+    expect(rejected.map((response) => response.status)).toEqual([404, 404, 409]);
+    expect(created.status).toBe(201);
+    expect(creates).toBe(1);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      owner: "alice@example.com",
+      org: orgKeyForLabel("example-org"),
+      state: "active",
+    });
   });
 
   it.each([
@@ -22494,6 +22767,7 @@ describe("fleet lease identity and idle", () => {
       name: "legacy ordinary POST",
       method: "POST",
       path: "/v1/leases",
+      expectedCancelStatus: 200,
       expectedStatus: 409,
       expectedCreates: 0,
     },
@@ -22501,12 +22775,13 @@ describe("fleet lease identity and idle", () => {
       name: "fixed PUT",
       method: "PUT",
       path: "/v1/leases/cbx_ca1100000013",
+      expectedCancelStatus: 409,
       expectedStatus: 201,
       expectedCreates: 1,
     },
   ])(
     "applies a racing unbound attempt tombstone to $name without crossing lifecycle ownership",
-    async ({ method, path, expectedStatus, expectedCreates }) => {
+    async ({ method, path, expectedCancelStatus, expectedStatus, expectedCreates }) => {
       const storage = new MemoryStorage();
       let releasePreparation!: () => void;
       let preparationStarted!: () => void;
@@ -22550,9 +22825,9 @@ describe("fleet lease identity and idle", () => {
           body: { createAttemptID },
         }),
       );
-      expect(canceled.status).toBe(200);
       releasePreparation();
       expect((await creating).status).toBe(expectedStatus);
+      expect(canceled.status).toBe(expectedCancelStatus);
       expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.state).toBe(
         expectedStatus === 201 ? "active" : undefined,
       );
@@ -22560,49 +22835,197 @@ describe("fleet lease identity and idle", () => {
     },
   );
 
-  it("cancels after ordinary reservation and deletes a provider resource that completes late", async () => {
+  it("fences a delayed duplicate fixed create after release during reserved preparation", async () => {
     const storage = new MemoryStorage();
-    let createStarted!: () => void;
-    let finishCreate!: () => void;
-    const createStartedPromise = new Promise<void>((resolve) => (createStarted = resolve));
-    const finishCreatePromise = new Promise<void>((resolve) => (finishCreate = resolve));
-    const deleted: string[] = [];
+    const firstConfigStarted = deferred<void>();
+    const secondConfigStarted = deferred<void>();
+    const finishFirstConfig = deferred<void>();
+    const finishSecondConfig = deferred<void>();
+    const reservationPrepared = deferred<void>();
+    const finishPreparation = deferred<void>();
+    let configs = 0;
+    let preparations = 0;
+    let creates = 0;
     const fleet = testFleet(storage, {
-      hetzner: fakeProvider(
-        async () => {
-          createStarted();
-          await finishCreatePromise;
+      hetzner: fakeProvider(() => creates++, {
+        async onPrepareLeaseConfig(config) {
+          configs += 1;
+          if (configs === 1) {
+            firstConfigStarted.resolve();
+            await finishFirstConfig.promise;
+          } else {
+            secondConfigStarted.resolve();
+            await finishSecondConfig.promise;
+          }
+          return config;
         },
-        { cloudID: "late-cloud" },
-        (id) => deleted.push(id),
-      ),
+        async onPrepareLeaseCreate(config, lease) {
+          preparations += 1;
+          if (preparations === 1) {
+            reservationPrepared.resolve();
+            await finishPreparation.promise;
+          }
+          return { config, lease };
+        },
+      }),
     });
     const headers = {
       "x-crabbox-owner": "alice@example.com",
       "x-crabbox-org": "example-org",
     };
-    const leaseID = "cbx_ca1100000005";
-    const createAttemptID = "cat_50000000000000000000000000000005";
-    const creating = fleet.fetch(
-      request("POST", "/v1/leases", {
-        headers,
-        body: { leaseID, createAttemptID, provider: "hetzner", sshPublicKey: "ssh-ed25519 x" },
-      }),
-    );
-    await createStartedPromise;
-    const canceled = await fleet.fetch(
-      request("POST", `/v1/leases/${leaseID}/cancel-create`, {
-        headers,
-        body: { createAttemptID },
-      }),
-    );
-    expect(canceled.status).toBe(200);
-    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.state).toBe("released");
-    finishCreate();
-    expect((await creating).status).toBe(409);
-    expect(deleted).toEqual(["123"]);
-    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.state).toBe("released");
+    const leaseID = "cbx_ca1100000045";
+    const body = { provider: "hetzner", sshPublicKey: "ssh-ed25519 reserved-cancellation" };
+    const first = fleet.fetch(request("PUT", `/v1/leases/${leaseID}`, { headers, body }));
+    await firstConfigStarted.promise;
+    const second = fleet.fetch(request("PUT", `/v1/leases/${leaseID}`, { headers, body }));
+    const release = () =>
+      fleet.fetch(
+        request("POST", `/v1/leases/${leaseID}/release`, { headers, body: { delete: true } }),
+      );
+    try {
+      await secondConfigStarted.promise;
+      finishFirstConfig.resolve();
+      await reservationPrepared.promise;
+      const canceled = await release();
+      expect(canceled.status).toBe(200);
+      await expect(canceled.json()).resolves.toMatchObject({
+        lease: { id: leaseID, state: "released", cleanupStatus: "complete" },
+      });
+      finishPreparation.resolve();
+      expect((await first).status).toBe(409);
+      const repeated = await release();
+      expect.soft(repeated.status).toBe(200);
+      await expect.soft(repeated.json()).resolves.toMatchObject({
+        lease: { id: leaseID, state: "released", cleanupStatus: "complete" },
+      });
+      finishSecondConfig.resolve();
+      expect.soft((await second).status).toBe(409);
+      expect(creates).toBe(0);
+    } finally {
+      finishFirstConfig.resolve();
+      finishSecondConfig.resolve();
+      finishPreparation.resolve();
+      await Promise.all([first, second]);
+    }
   });
+
+  it("does not project a missing canonical fixed lease as confirmed cleanup", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {
+      hetzner: fakeProvider(undefined, { cloudID: "missing-canonical-cloud" }),
+    });
+    const headers = {
+      "x-crabbox-owner": "alice@example.com",
+      "x-crabbox-org": "example-org",
+    };
+    const leaseID = "cbx_ca1100000044";
+    const create = await fleet.fetch(
+      request("PUT", `/v1/leases/${leaseID}`, {
+        headers,
+        body: { provider: "hetzner", sshPublicKey: "ssh-ed25519 missing-canonical" },
+      }),
+    );
+    expect(create.status).toBe(201);
+    await expect(create.json()).resolves.toMatchObject({
+      lease: { id: leaseID, state: "active", cloudID: "missing-canonical-cloud" },
+    });
+    await storage.delete(`lease:${leaseID}`);
+
+    const release = await fleet.fetch(
+      request("POST", `/v1/leases/${leaseID}/release`, {
+        headers,
+        body: { delete: true, expectedProvider: "hetzner" },
+      }),
+    );
+    expect(release.status).not.toBe(200);
+    expect(await release.json()).not.toMatchObject({ lease: { cleanupStatus: "complete" } });
+  });
+
+  it.each(["ordinary", "fixed"] as const)(
+    "cancels after %s reservation and deletes a provider resource that completes late",
+    async (kind) => {
+      const storage = new MemoryStorage();
+      const createStarted = deferred<void>();
+      const finishCreate = deferred<void>();
+      const cleanupStarted = deferred<void>();
+      const finishCleanup = deferred<void>();
+      const deleted: string[] = [];
+      const fleet = testFleet(storage, {
+        hetzner: fakeProvider(
+          async () => {
+            createStarted.resolve();
+            await finishCreate.promise;
+          },
+          { cloudID: "late-cloud" },
+          async (id) => {
+            deleted.push(id);
+            cleanupStarted.resolve();
+            await finishCleanup.promise;
+          },
+        ),
+      });
+      const headers = {
+        "x-crabbox-owner": "alice@example.com",
+        "x-crabbox-org": "example-org",
+      };
+      const leaseID = "cbx_ca1100000005";
+      const createAttemptID = "cat_50000000000000000000000000000005";
+      const creating = fleet.fetch(
+        request(
+          kind === "fixed" ? "PUT" : "POST",
+          kind === "fixed" ? `/v1/leases/${leaseID}` : "/v1/leases",
+          {
+            headers,
+            body: {
+              leaseID,
+              createAttemptID: kind === "ordinary" ? createAttemptID : undefined,
+              provider: "hetzner",
+              sshPublicKey: "ssh-ed25519 x",
+            },
+          },
+        ),
+      );
+      await createStarted.promise;
+      try {
+        const canceled = await fleet.fetch(
+          request(
+            "POST",
+            `/v1/leases/${leaseID}/${kind === "fixed" ? "release" : "cancel-create"}`,
+            {
+              headers,
+              body: kind === "fixed" ? { delete: true } : { createAttemptID },
+            },
+          ),
+        );
+        expect(canceled.status).toBe(200);
+        await expect(canceled.json()).resolves.toMatchObject({
+          lease: { id: leaseID, state: "released", cleanupStatus: "pending" },
+        });
+        expect(deleted).toEqual([]);
+        finishCreate.resolve();
+        expect(
+          await Promise.race([cleanupStarted.promise.then(() => true), creating.then(() => false)]),
+        ).toBe(true);
+        const pending = await fleet.fetch(request("GET", `/v1/leases/${leaseID}`, { headers }));
+        await expect(pending.json()).resolves.toMatchObject({
+          lease: { id: leaseID, state: "released", cleanupStatus: "pending" },
+        });
+      } finally {
+        finishCreate.resolve();
+        finishCleanup.resolve();
+        await creating;
+      }
+      expect((await creating).status).toBe(409);
+      const released = await fleet.fetch(
+        request("POST", `/v1/leases/${leaseID}/release`, { headers, body: { delete: true } }),
+      );
+      expect(released.status).toBe(200);
+      await expect(released.json()).resolves.toMatchObject({
+        lease: { id: leaseID, state: "released", cleanupStatus: "complete" },
+      });
+      expect(deleted).toEqual(["123"]);
+    },
+  );
 
   it("retains an explicit cleanup claim from a provider failure that arrives after cancellation", async () => {
     const storage = new MemoryStorage();
@@ -23503,35 +23926,36 @@ describe("fleet lease identity and idle", () => {
       }),
     );
     expect([fixedReplacement.status, workspaceReplacement.status]).toEqual([409, 409]);
-    expect(storage.value<{ token: string }>(`create-attempt:${fixedID}`)?.token).toBe(
-      canceledTokens.get(fixedID),
-    );
     expect(storage.value<{ token: string }>(`create-attempt:${workspaceID}`)?.token).toBe(
       canceledTokens.get(workspaceID),
     );
 
-    const delayedCanceledCreate = await fleet.fetch(
-      request("POST", "/v1/leases", {
-        headers: {
-          "x-crabbox-owner": "alice@example.com",
-          "x-crabbox-org": "example-org",
-        },
-        body: {
-          leaseID: ordinaryID,
-          createAttemptID: canceledTokens.get(ordinaryID),
-          provider: "hetzner",
-          sshPublicKey: "ssh-ed25519 delayed-old-create",
-        },
+    await Promise.all(
+      [fixedID, ordinaryID].map(async (leaseID) => {
+        const delayedCanceledCreate = await fleet.fetch(
+          request("POST", "/v1/leases", {
+            headers: {
+              "x-crabbox-owner": "alice@example.com",
+              "x-crabbox-org": "example-org",
+            },
+            body: {
+              leaseID,
+              createAttemptID: canceledTokens.get(leaseID),
+              provider: "hetzner",
+              sshPublicKey: "ssh-ed25519 delayed-old-create",
+            },
+          }),
+        );
+        expect(delayedCanceledCreate.status).toBe(409);
+        await expect(delayedCanceledCreate.json()).resolves.toMatchObject({
+          error: "create_canceled",
+        });
+        expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+          owner: "bob@example.com",
+          state: "active",
+        });
       }),
     );
-    expect(delayedCanceledCreate.status).toBe(409);
-    await expect(delayedCanceledCreate.json()).resolves.toMatchObject({
-      error: "create_canceled",
-    });
-    expect(storage.value<LeaseRecord>(`lease:${ordinaryID}`)).toMatchObject({
-      owner: "bob@example.com",
-      state: "active",
-    });
   });
 
   it("keeps pending and canonical-bound create attempts as global ID blockers", async () => {
