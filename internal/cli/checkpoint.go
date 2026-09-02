@@ -2067,18 +2067,10 @@ func deleteCheckpointResource(ctx context.Context, store checkpointStore, record
 		if err != nil {
 			return err
 		}
-		if err := client.GuardAccount(ctx, record.Native.AccountID); err != nil {
-			return err
-		}
-		if len(record.Native.SnapshotIDs) == 0 {
-			if image, err := client.GetImageCheckpoint(ctx, providerID); err == nil && len(image.SnapshotIDs) > 0 {
-				record.Native.SnapshotIDs = image.SnapshotIDs
-				if writeErr := store.Write(record); writeErr != nil {
-					return writeErr
-				}
-			}
-		}
-		return client.DeleteImageCheckpoint(ctx, providerID, record.Native.SnapshotIDs, record.Native.AccountID)
+		return client.DeleteImageCheckpoint(ctx, providerID, record.Native.SnapshotIDs, record.Native.AccountID, func(snapshotIDs []string) error {
+			record.Native.SnapshotIDs = snapshotIDs
+			return store.Write(record)
+		})
 	}
 	if cfg, ok := directAzureCheckpointConfig(record); ok {
 		client, err := NewAzureClient(ctx, cfg)

@@ -612,6 +612,12 @@ deregistered along with their backing EBS snapshots; disk snapshots are
 deleted), then removes the local record. Archive checkpoints just lose their
 tarball and record.
 
+Direct AWS deletion records all discovered backing snapshot IDs before
+deregistering the AMI. If deletion is interrupted or a snapshot cannot be
+removed, retry the same checkpoint deletion to finish its recorded cleanup.
+An unavailable backing mapping or failed discovery retains the checkpoint;
+it does not count as completed cleanup.
+
 Coordinator-managed checkpoints delete through the checkpoint endpoint, never
 the generic image endpoint. Active use claims, promoted-image catalog pins,
 pending deletion, provider errors, and ambiguous deletion retain coordinator
