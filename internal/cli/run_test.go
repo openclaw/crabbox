@@ -683,6 +683,14 @@ var runEnvProfileTestTerminalReleaseError bool
 var runEnvProfileTestAcquireHook func(AcquireRequest)
 var runEnvProfileTestAcquireLease func(AcquireRequest) (LeaseTarget, error)
 var runEnvProfileTestTouchHook func(TouchRequest) error
+var runEnvProfileTestEvidenceHook func(context.Context, RunFailureEvidenceRequest) (RunFailureEvidenceCollector, error)
+
+func (b runEnvProfileTestBackend) BeginRunFailureEvidence(ctx context.Context, req RunFailureEvidenceRequest) (RunFailureEvidenceCollector, error) {
+	if runEnvProfileTestEvidenceHook != nil {
+		return runEnvProfileTestEvidenceHook(ctx, req)
+	}
+	return nil, nil
+}
 
 func (b runEnvProfileTestBackend) Spec() ProviderSpec { return b.spec }
 func (b runEnvProfileTestBackend) Acquire(_ context.Context, req AcquireRequest) (LeaseTarget, error) {

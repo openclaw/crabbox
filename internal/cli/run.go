@@ -2353,6 +2353,7 @@ afterSync:
 	}
 	if code != 0 || streamErr != nil {
 		failureEvidence = collectRunFailureEvidence(ctx, failureEvidenceCollector, a.Stderr)
+		timings.failureEvidence = failureEvidence
 	}
 	streamCaptureErr := streamCaptures.closeAfterStream(streamErr, code, a.Stderr)
 	if streamCaptureErr != nil && failureEvidence.ResourceExhaustion == "" {
@@ -2556,6 +2557,7 @@ afterSync:
 			StopRouting:           CommandRoutingFor(cfg, leaseID, CommandRoutingStop),
 			StopCommand:           report.StopCommand,
 			Classification:        classification,
+			Evidence:              sanitizeRunFailureEvidence(failureEvidence),
 			Phases:                timings.commandPhases,
 			Results:               results,
 		}
@@ -2838,6 +2840,7 @@ type runTimings struct {
 	syncFallbackReason string
 	blockedStage       string
 	resourceExhaustion ResourceExhaustionReason
+	failureEvidence    RunFailureEvidence
 	retryLikely        string
 }
 

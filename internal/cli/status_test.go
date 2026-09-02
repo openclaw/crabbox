@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -13,6 +14,45 @@ import (
 	"testing"
 	"time"
 )
+
+func TestMemoryDiagnosticsPresentationRouting(t *testing.T) {
+	for _, mode := range []string{"inspect", "status", "wait", "helper"} {
+		t.Run(mode, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+			backend := &statusResolveRecordingBackend{state: "exited"}
+			testAWSBackendOverride = backend
+			t.Cleanup(func() { testAWSBackendOverride = nil })
+			app := App{Stdout: io.Discard, Stderr: io.Discard}
+			args := []string{"--provider", "aws", "--id", "cbx_status"}
+			switch mode {
+			case "inspect":
+				_ = app.inspect(t.Context(), append(args, "--json"))
+			case "status":
+				_ = app.status(t.Context(), append(args, "--json"))
+			case "wait":
+				_ = app.status(t.Context(), append(args, "--wait"))
+			case "helper":
+				cfg := defaultConfig()
+				cfg.Provider = "aws"
+				setProviderSelection(&cfg, "aws", providerSelectionFlag)
+				_, _ = app.leaseStatus(t.Context(), cfg, "cbx_status")
+			}
+			if len(backend.requests) != 1 {
+				t.Fatalf("resolve calls=%d", len(backend.requests))
+			}
+			req := backend.requests[0]
+			got := req.IncludeDiagnostics
+			if want := mode == "inspect" || mode == "status"; got != want {
+				t.Fatalf("presentation diagnostics=%t want %t", got, want)
+			}
+			data, err := json.Marshal(req)
+			if err != nil || strings.Contains(strings.ToLower(string(data)), "includediagnostics") {
+				t.Fatalf("internal flag entered wire request: %s err=%v", data, err)
+			}
+		})
+	}
+}
 
 func TestStatusWaitDoneTreatsTerminalStatesAsDone(t *testing.T) {
 	for _, state := range []string{"dead", "deleting", "exited", "expired", "failed", "missing", "released", "stopped", "stopped_with_code", "terminated"} {

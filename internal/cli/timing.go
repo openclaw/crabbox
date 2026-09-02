@@ -39,6 +39,7 @@ type TimingReport struct {
 	IdleTimeout        string                   `json:"idleTimeout,omitempty"`
 	BlockedStage       string                   `json:"blockedStage,omitempty"`
 	ResourceExhaustion ResourceExhaustionReason `json:"resourceExhaustion,omitempty"`
+	FailureEvidence    *RunFailureEvidence      `json:"failureEvidence,omitempty"`
 	RetryLikely        string                   `json:"retryLikely,omitempty"`
 	Artifacts          []runArtifact            `json:"artifacts,omitempty"`
 
@@ -72,6 +73,9 @@ func writeTimingJSON(w io.Writer, report TimingReport) error {
 }
 
 func finalizeTimingReport(report TimingReport) TimingReport {
+	if report.FailureEvidence != nil {
+		report.FailureEvidence = runFailureEvidenceSnapshot(*report.FailureEvidence)
+	}
 	if report.RunStatus == "" {
 		report.RunStatus = RunStatusForResult(RunResult{ExitCode: report.ExitCode}, nil)
 	}
@@ -141,6 +145,7 @@ func timingReportFromRun(provider, leaseID, slug string, timings runTimings, tot
 		ExitCode:           exitCode,
 		BlockedStage:       timings.blockedStage,
 		ResourceExhaustion: timings.resourceExhaustion,
+		FailureEvidence:    runFailureEvidenceSnapshot(timings.failureEvidence),
 		RetryLikely:        timings.retryLikely,
 	}
 }

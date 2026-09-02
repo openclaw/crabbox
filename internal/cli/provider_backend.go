@@ -255,7 +255,10 @@ type RunFailureEvidenceRequest struct {
 type RunFailureEvidenceCollector func(context.Context) (RunFailureEvidence, error)
 
 type RunFailureEvidence struct {
-	ResourceExhaustion ResourceExhaustionReason
+	ResourceExhaustion ResourceExhaustionReason `json:"resourceExhaustion,omitempty"`
+	// Hint and Details are optional, bounded presentation data, not classification inputs.
+	Hint    string            `json:"hint,omitempty"`
+	Details map[string]string `json:"details,omitempty"`
 }
 
 type ResourceExhaustionReason string
@@ -958,6 +961,9 @@ type ResolveRequest struct {
 	StatusOnly  bool
 	ReadyProbe  bool
 	Prepare     bool
+	// IncludeDiagnostics opts explicit presentation callers into optional observations.
+	// It is not a provider protocol field or authority to modify lease state.
+	IncludeDiagnostics bool `json:"-"`
 	// RejectAuthSecret prevents interactive callers from launching SSH probes
 	// for token-as-username targets they cannot safely execute.
 	RejectAuthSecret bool

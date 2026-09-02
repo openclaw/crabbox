@@ -65,6 +65,14 @@ key path, port, user, and host). Empty fields render as `-`.
 label map. Secrets such as broker tokens, provider keys, and VNC passwords are
 never included in either output mode.
 
+[Local Container](../providers/local-container.md#memory-failure-evidence)
+adds fresh, read-only `diagnostic.memory.*` labels to the returned view. They
+describe actual container settings and, when available, total RAM from its
+verified runtime route, not free memory or a universal effective limit. These
+facts are not persisted into claims or container labels, and do not reconstruct
+a previous command's OOM evidence. For a deleted one-shot container, use the
+run's timing/failure-bundle snapshot instead.
+
 For brokered leases, labels describe the current coordinator lease record,
 including allocation identity, target, capacity, timing, and capability facts.
 They are not a fresh read of provider tags. Only the documented
