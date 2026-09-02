@@ -939,12 +939,13 @@ func TestBlacksmithCollectRunArtifactsBoundsCommandOutput(t *testing.T) {
 }
 
 func TestBlacksmithRunCollectsArtifactsBeforeOneShotCleanup(t *testing.T) {
+	requireBlacksmithArtifactShell(t)
 	home := t.TempDir()
 	repo := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
-	archive := makeTarGz(t, map[string]string{"reports/manifest.json": `{"ok":true}`})
+	testWriteBlacksmithFile(t, repo, "reports/manifest.json", `{"ok":true}`)
 	runCalls := 0
 	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
 		if len(req.Args) >= 2 && req.Args[0] == "testbox" && req.Args[1] == "warmup" {
@@ -952,13 +953,7 @@ func TestBlacksmithRunCollectsArtifactsBeforeOneShotCleanup(t *testing.T) {
 		}
 		if len(req.Args) >= 2 && req.Args[0] == "testbox" && req.Args[1] == "run" {
 			runCalls++
-			if runCalls == 2 && req.Stdout != nil {
-				_, _ = req.Stdout.Write([]byte("required artifact reports/manifest.json matched=1\n"))
-				_, _ = req.Stdout.Write([]byte(core.DelegatedRunArtifactBeginMarker + "\n"))
-				_, _ = req.Stdout.Write([]byte(base64.StdEncoding.EncodeToString(archive)))
-				_, _ = req.Stdout.Write([]byte("\n" + core.DelegatedRunArtifactEndMarker + "\n"))
-			}
-			return LocalCommandResult{}, nil
+			return runSyntheticBlacksmithCommand(t, t.Context(), req)
 		}
 		if len(req.Args) >= 2 && req.Args[0] == "testbox" && req.Args[1] == "stop" {
 			return LocalCommandResult{}, nil
@@ -980,18 +975,16 @@ func TestBlacksmithRunCollectsArtifactsBeforeOneShotCleanup(t *testing.T) {
 	if len(result.Artifacts) != 1 {
 		t.Fatalf("artifacts=%#v", result.Artifacts)
 	}
-	if len(runner.calls) != 11 {
+	if len(runner.calls) != 9 || runCalls != 1 {
 		t.Fatalf("calls=%d, want scoped artifact retrieval and terminal finalization", len(runner.calls))
 	}
-	if runner.calls[1][1] != "warmup" || runner.calls[4][1] != "run" || runner.calls[6][1] != "run" || runner.calls[8][1] != "stop" {
+	if runner.calls[1][1] != "warmup" || runner.calls[4][1] != "run" || runner.calls[6][1] != "stop" {
 		t.Fatalf("unexpected call order: %#v", runner.calls)
-	}
-	if !strings.Contains(strings.Join(runner.calls[6], " "), core.DelegatedRunArtifactBeginMarker) {
-		t.Fatalf("second run was not artifact collection: %#v", runner.calls[2])
 	}
 }
 
 func TestBlacksmithRunArtifactFailureKeepsOneShotOnKeepOnFailure(t *testing.T) {
+	requireBlacksmithArtifactShell(t)
 	home := t.TempDir()
 	repo := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1005,13 +998,7 @@ func TestBlacksmithRunArtifactFailureKeepsOneShotOnKeepOnFailure(t *testing.T) {
 		}
 		if len(req.Args) >= 2 && req.Args[0] == "testbox" && req.Args[1] == "run" {
 			runCalls++
-			if runCalls == 2 {
-				if req.Stderr != nil {
-					_, _ = req.Stderr.Write([]byte("missing required artifact reports/manifest.json\n"))
-				}
-				return LocalCommandResult{ExitCode: 8}, errors.New("artifact missing")
-			}
-			return LocalCommandResult{}, nil
+			return runSyntheticBlacksmithCommand(t, t.Context(), req)
 		}
 		if len(req.Args) >= 2 && req.Args[0] == "testbox" && req.Args[1] == "stop" {
 			t.Fatalf("stop should not run after artifact failure with keep-on-failure: %#v", req.Args)
@@ -1037,14 +1024,14 @@ func TestBlacksmithRunArtifactFailureKeepsOneShotOnKeepOnFailure(t *testing.T) {
 	if !errors.As(err, &exitErr) || exitErr.Code != 7 {
 		t.Fatalf("err=%v want artifact exit 7", err)
 	}
-	if len(runner.calls) != 7 {
-		t.Fatalf("blacksmith calls=%d want warmup/run/artifact-run without stop: %#v", len(runner.calls), runner.calls)
+	if len(runner.calls) != 5 || runCalls != 1 {
+		t.Fatalf("blacksmith calls=%d want one warmup/run without stop: %#v", len(runner.calls), runner.calls)
 	}
 	if result.Session == nil || !result.Session.Kept {
 		t.Fatalf("session=%#v, want kept after artifact failure", result.Session)
 	}
 	got := stderr.String()
-	for _, want := range []string{"blacksmith artifact retrieval failed", "missing required artifact reports/manifest.json", "blacksmith run summary", "exit=7", `"runStatus":"failed"`, `"errorKind":"command-exit"`, "failure-bundle local=", "keep-on-failure: kept lease=tbx_artifactfail"} {
+	for _, want := range []string{"blacksmith artifact retrieval failed", "missing required artifact", "blacksmith run summary", "exit=7", `"runStatus":"failed"`, `"errorKind":"command-exit"`, "failure-bundle local=", "keep-on-failure: kept lease=tbx_artifactfail"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("stderr missing %q in:\n%s", want, got)
 		}

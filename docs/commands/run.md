@@ -559,6 +559,24 @@ limits as `--artifact-glob` apply. Delegated providers that support bounded run
 artifact retrieval enforce provider-owned file and byte limits before returning
 local artifacts.
 
+Blacksmith Testbox collects requested artifact globs in the **same native run**
+after a normal terminal exit, including nonzero exits below 128. It does not
+retry, re-sync, or recover files from stopped leases. A fresh complete invocation
+receipt and clean native CLI completion are both required before local
+publication under the original claim fence; cancellation, sync timeout, or
+transport failure withholds artifacts. Signal-like exits skip collection.
+Required globs remain all-or-nothing. Collection/cleanup errors preserve an
+earlier nonzero workload exit; collection failure after workload success still
+fails the run. Limits remain 256 files and 10 MiB compressed, with existing
+protected-path and symlink checks. Remote Linux `timeout` with `--kill-after`
+is required for a separate 30-second collection budget; caller cancellation
+wins and the local post-exit wait is also bounded. Collection uses the initial
+remote cwd even if the child changes directory. Command timing ends at the
+workload receipt, while collection and cleanup count toward total. Evidence
+retrieved after failure is not success proof or attestation of exact remote Git
+bytes; `--emit-proof` stays success-only. See the
+[Blacksmith contract](../features/blacksmith-testbox.md#run-artifacts).
+
 Use repeatable `--require-artifact-change <path>` for created-or-changed byte
 evidence on ordinary Linux SSH runs. Every exact relative path must be a regular
 file with no symlink components. Crabbox compares bounded content snapshots

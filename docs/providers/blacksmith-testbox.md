@@ -307,8 +307,21 @@ for inventory and enrichment semantics.
   `--download` are rejected because Blacksmith owns command transport and remote
   file transport. Use `--emit-proof` for PR-ready transcript proof.
 - `--artifact-glob` and `--require-artifact` run through the Blacksmith adapter:
-  after command success, Crabbox asks the same Testbox to validate required
-  globs and stream one bounded local tarball under `.crabbox/runs/<lease>/`.
+  an adapter-owned supervisor collects in the original native invocation after
+  a normal terminal workload exit, including failures below 128. No follow-up
+  native run or re-sync occurs. Signal-like exits skip collection. Publication
+  requires a fresh complete receipt, clean native transport, an uncanceled
+  caller, and the original unchanged claim fence; stopped-lease recovery is not
+  supported. Collection failures preserve an earlier workload failure; after
+  workload success they still fail the run. Required globs remain all-or-nothing.
+  The defaults are 256 files and 10 MiB compressed, stored privately under
+  `.crabbox/runs/<lease>/blacksmith-artifacts.tgz`, with protected paths and
+  symlink handling unchanged. Linux `timeout` with `--kill-after` is required
+  before execution; collection has its own 30-second budget and bounded local
+  wait, subordinate to caller cancellation, not a workload deadline. Command
+  timing ends at the workload receipt; collection and cleanup count toward total.
+  Artifacts from a failed run are not success proof or remote source attestation.
+  See the [artifact contract](../features/blacksmith-testbox.md#run-artifacts).
 - `--actions-runner` is rejected; Blacksmith owns runner hydration.
 - `--tailscale`, desktop helpers, screenshots, VNC, and `artifacts collect` are
   rejected because Blacksmith owns machine connectivity.
