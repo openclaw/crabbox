@@ -134,6 +134,62 @@ func TestApplyFlagsSetsMacOSBootstrapKey(t *testing.T) {
 	}
 }
 
+func TestDesktopCredentialsUseConfiguredMacOSAccount(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.TargetOS = core.TargetMacOS
+	cfg.Parallels.User = "configured-user"
+	cfg.Parallels.Password = " account password with spaces "
+
+	credentials, ok := (Provider{}).DesktopCredentials(cfg, core.SSHTarget{TargetOS: core.TargetMacOS, User: "lease-user"})
+	if !ok {
+		t.Fatal("Parallels should provide configured macOS account credentials")
+	}
+	if credentials.Username != "lease-user" || credentials.Password != cfg.Parallels.Password {
+		t.Fatalf("credentials=%#v", credentials)
+	}
+
+	cfg.Parallels.Password = ""
+	if credentials, ok = (Provider{}).DesktopCredentials(cfg, core.SSHTarget{TargetOS: core.TargetMacOS}); ok || credentials != (core.DesktopCredentials{}) {
+		t.Fatalf("empty password unexpectedly enabled account credentials: %#v", credentials)
+	}
+	cfg.Parallels.Password = "configured"
+	cfg.TargetOS = core.TargetLinux
+	if credentials, ok = (Provider{}).DesktopCredentials(cfg, core.SSHTarget{TargetOS: core.TargetLinux}); ok || credentials != (core.DesktopCredentials{}) {
+		t.Fatalf("Linux unexpectedly received macOS account credentials: %#v", credentials)
+	}
+}
+
+func TestParallelsSSHTargetScrubsDesktopPasswordEnvironment(t *testing.T) {
+	target := parallelsSSHTarget(core.BaseConfig(), "192.0.2.10")
+	if len(target.ChildEnvDenylist) != 1 || target.ChildEnvDenylist[0] != "CRABBOX_PARALLELS_PASSWORD" {
+		t.Fatalf("child environment denylist=%v", target.ChildEnvDenylist)
+	}
+}
+
+func TestApplyParallelsClaimSSHPort(t *testing.T) {
+	target := core.SSHTarget{Port: "2222", FallbackPorts: []string{"22"}}
+	claim := core.LeaseClaim{
+		LeaseID: "cbx_example",
+		CloudID: "vm-id",
+		SSHPort: 22,
+		Labels:  map[string]string{"host": "mac.example"},
+	}
+	if !applyParallelsClaimSSHPort(&target, claim, "cbx_example", "vm-id", "mac.example") {
+		t.Fatal("exact Parallels claim endpoint was not applied")
+	}
+	if target.Port != "22" || len(target.FallbackPorts) != 0 {
+		t.Fatalf("target endpoint=%#v", target)
+	}
+
+	wrong := core.SSHTarget{Port: "2222", FallbackPorts: []string{"22"}}
+	if applyParallelsClaimSSHPort(&wrong, claim, "cbx_other", "vm-id", "mac.example") {
+		t.Fatal("mismatched claim endpoint was applied")
+	}
+	if wrong.Port != "2222" || len(wrong.FallbackPorts) != 1 {
+		t.Fatalf("mismatched target was mutated: %#v", wrong)
+	}
+}
+
 func TestValidateConfigRestrictsBootstrapFallback(t *testing.T) {
 	tests := []struct {
 		name    string

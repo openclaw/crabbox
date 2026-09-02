@@ -5729,6 +5729,36 @@ func TestParallelsBootstrapKeyRequiresTrustedFileOrExplicitEnvironment(t *testin
 	}
 }
 
+func TestParallelsPasswordRequiresTrustedFileOrExplicitEnvironment(t *testing.T) {
+	file := fileConfig{Parallels: &fileParallelsConfig{Password: "user-config-password"}}
+
+	repositoryCfg := baseConfig()
+	if err := applyFileConfigWithTrust(&repositoryCfg, file, false); err != nil {
+		t.Fatal(err)
+	}
+	if repositoryCfg.Parallels.Password != "" {
+		t.Fatal("repository config selected the Parallels guest credential")
+	}
+
+	trustedCfg := baseConfig()
+	if err := applyFileConfigWithTrust(&trustedCfg, file, true); err != nil {
+		t.Fatal(err)
+	}
+	if trustedCfg.Parallels.Password != "user-config-password" {
+		t.Fatalf("trusted password was not loaded")
+	}
+
+	clearConfigEnv(t)
+	t.Setenv("CRABBOX_PARALLELS_PASSWORD", "environment-password")
+	envCfg := baseConfig()
+	if err := applyEnv(&envCfg); err != nil {
+		t.Fatal(err)
+	}
+	if envCfg.Parallels.Password != "environment-password" {
+		t.Fatalf("environment password was not loaded")
+	}
+}
+
 func TestParallelsServerTypeForConfig(t *testing.T) {
 	if got := parallelsServerTypeForConfig(Config{}); got != "template" {
 		t.Fatalf("empty=%q", got)

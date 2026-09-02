@@ -153,6 +153,23 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	return nil
 }
 
+// DesktopCredentials returns the macOS guest account credential used by the
+// local ARD client. There is intentionally no CLI password flag: the secret is
+// accepted only from trusted user config or CRABBOX_PARALLELS_PASSWORD.
+func (Provider) DesktopCredentials(cfg core.Config, target core.SSHTarget) (core.DesktopCredentials, bool) {
+	if cfg.TargetOS != core.TargetMacOS && target.TargetOS != core.TargetMacOS {
+		return core.DesktopCredentials{}, false
+	}
+	if cfg.Parallels.Password == "" {
+		return core.DesktopCredentials{}, false
+	}
+	username := strings.TrimSpace(target.User)
+	if username == "" {
+		username = strings.TrimSpace(cfg.Parallels.User)
+	}
+	return core.DesktopCredentials{Username: username, Password: cfg.Parallels.Password}, true
+}
+
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return NewBackend(p.Spec(), cfg, rt), nil
 }

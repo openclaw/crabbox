@@ -632,6 +632,45 @@ func TestParallelsEnsureGuestReadyEnablesMacOSScreenSharing(t *testing.T) {
 	}
 }
 
+func TestParallelsEnsureGuestReadyUsesMacOSAccountCredentialsWithoutReset(t *testing.T) {
+	runner := &parallelsFakeRunner{}
+	client := NewParallelsClient(Config{}, runner)
+	err := client.EnsureGuestReady(context.Background(), "vm1", Config{
+		SSHUser:  "runner",
+		WorkRoot: "/Users/runner/crabbox",
+		TargetOS: targetMacOS,
+		Desktop:  true,
+		Parallels: ParallelsConfig{
+			Password: "account-password-never-sent-to-guest",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(runner.lastReq.Args, "\n")
+	for _, want := range []string{
+		"-access -on -users \"$user\" -privs -all",
+		"VNCAlwaysStartOnConsole -bool true",
+		"com.apple.screensharing",
+		"nc -z 127.0.0.1 5900",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("macOS account desktop prep missing %q:\n%s", want, got)
+		}
+	}
+	for _, banned := range []string{
+		"account-password-never-sent-to-guest",
+		"/var/db/crabbox/vnc.password",
+		"setvncpw",
+		"dscl",
+		"-passwd",
+	} {
+		if strings.Contains(got, banned) {
+			t.Fatalf("macOS account desktop prep references %q:\n%s", banned, got)
+		}
+	}
+}
+
 func TestParallelsEnsureGuestReadySkipsWindows(t *testing.T) {
 	runner := &parallelsFakeRunner{}
 	client := NewParallelsClient(Config{}, runner)

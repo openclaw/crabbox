@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -127,7 +128,7 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 	if vm.IPSource != "" {
 		server.Labels["ip_source"] = vm.IPSource
 	}
-	target := core.SSHTargetFromConfig(cfg, vm.IP)
+	target := parallelsSSHTarget(cfg, vm.IP)
 	if cfg.TargetOS == core.TargetWindows && cfg.WindowsMode == core.WindowsModeNormal {
 		target.ReadyCheck = core.PowershellCommand(`$PSVersionTable.PSVersion | Out-Null`)
 	}
@@ -233,8 +234,15 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 						candidate.SSHUser = strings.TrimSpace(user)
 					}
 				}
-				target := core.SSHTargetFromConfig(candidate, vm.IP)
+				target := parallelsSSHTarget(candidate, vm.IP)
 				useStoredTestboxKey(&target, leaseID)
+				claim, claimOK, claimExact, claimErr := core.ResolveLeaseClaimForProviderWithExact(leaseID, "parallels")
+				if claimErr != nil {
+					return LeaseTarget{}, claimErr
+				}
+				if claimOK && claimExact {
+					applyParallelsClaimSSHPort(&target, claim, leaseID, vm.ID, parallelsHostName(candidate))
+				}
 				if candidate.Parallels.Host != "" {
 					target.ProxyCommand = parallelsProxyCommand(candidate, vm.IP)
 					target.SSHConfigProxy = true
@@ -252,6 +260,26 @@ func (b *leaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTa
 		return LeaseTarget{}, fmt.Errorf("parallels fleet inventory incomplete while resolving %s: %w", req.ID, errors.Join(hostErrs...))
 	}
 	return LeaseTarget{}, core.Exit(4, "parallels lease not found: %s", req.ID)
+}
+
+func parallelsSSHTarget(cfg Config, host string) SSHTarget {
+	target := core.SSHTargetFromConfig(cfg, host)
+	// The account credential is consumed only by Crabbox's local ARD client.
+	// Never inherit it into ssh, scp, rsync, ProxyCommand, or viewer children.
+	target.ChildEnvDenylist = append(target.ChildEnvDenylist, "CRABBOX_PARALLELS_PASSWORD")
+	return target
+}
+
+func applyParallelsClaimSSHPort(target *SSHTarget, claim core.LeaseClaim, leaseID, _, _ string) bool {
+	// Resolve already ownership-fences the exact lease/VM/host binding before
+	// this point. Reuse the transport endpoint that acquisition actually proved
+	// instead of replacing it with the command's generic SSH default.
+	if target == nil || claim.LeaseID != strings.TrimSpace(leaseID) || claim.SSHPort <= 0 || claim.SSHPort > 65535 {
+		return false
+	}
+	target.Port = strconv.Itoa(claim.SSHPort)
+	target.FallbackPorts = []string{}
+	return true
 }
 
 func authorizeParallelsResolve(req ResolveRequest, leaseID, vmID, host string) (bool, error) {
