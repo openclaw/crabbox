@@ -160,9 +160,9 @@ immediately with exit code 5.
 
 - SSH: yes for direct login to existing Crabbox-created sandboxes. `crabbox ssh
   --provider islo --id <slug>` renders `ssh islo@<sandbox>.islo` on port 22
-  by default. Crabbox still does not use SSH for Islo `run` or sync: no Islo API
-  operation Crabbox can call issues an SSH hostname or an SSH credential, so
-  there is nothing to lease, expire, or revoke. See
+  by default. Crabbox still does not use SSH for Islo `run` or sync: its adapter
+  does not provision an SSH endpoint or manage a per-lease SSH credential,
+  expiry, and revocation. See
   [why the provider kind stays delegated-run](../features/islo.md#why-the-provider-kind-stays-delegated-run).
 - Crabbox sync: yes, archive sync through the Islo files-archive API, with a
   base64 exec-upload fallback.

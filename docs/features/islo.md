@@ -229,16 +229,13 @@ Hetzner, AWS, static SSH, or Daytona instead.
 ## Why the provider kind stays delegated-run
 
 The provider declares `core.ProviderKindDelegatedRun` in its `Spec`
-(`internal/providers/islo/provider.go`) rather than an SSH lease. That is a
-consequence of the provider's API surface, not a preference:
+(`internal/providers/islo/provider.go`) rather than an SSH lease. The current
+adapter has an unattended API transport, but no Crabbox-managed SSH credential
+lifecycle:
 
-- No operation on either the control plane or the compute plane returns an SSH
-  hostname or endpoint for a sandbox. The compute plane's sandbox routes cover
-  lifecycle, events, exec, files, sessions, shares, and snapshots; none of them
-  return a host to connect to over SSH.
-- No API operation Crabbox can call mints an SSH key or certificate, so there is
-  no API-issued credential to lease — and therefore no expiry to honor and
-  nothing to revoke on release.
+- The adapter uses sandbox lifecycle, exec, and files APIs. It does not obtain
+  an SSH endpoint or issue a per-lease SSH key or certificate through those
+  calls, and it has no associated credential expiry or revocation operation.
 - The provider's SSH story for humans depends on the interactive one-time
   `islo ssh --setup` step described above, which installs the Islo CLI's own SSH
   proxy configuration and short-lived certificate support locally. Crabbox can
@@ -247,12 +244,13 @@ consequence of the provider's API surface, not a preference:
   runner, and cannot bound its lifetime — so it is not usable as automation
   transport.
 
-Converting the provider to an SSH lease today would therefore produce a lease
-that cannot be established headlessly and cannot be revoked, so `run`, sync, and
-teardown stay on the exec, files, and delete APIs Crabbox can drive unattended,
-and `crabbox ssh` stays a login helper.
+Changing the provider kind alone would not supply those missing integration
+steps. `run`, sync, and teardown therefore stay on the exec, files, and delete
+APIs Crabbox can drive unattended, and `crabbox ssh` stays a login helper. See
+the [Islo SSH setup documentation](https://docs.islo.dev/cli/sandbox-commands#islo-ssh)
+for the separate human-login workflow.
 
-Revisit the decision when all four of these exist as API operations:
+An unattended SSH-lease integration would need all four of these:
 
 1. an API-issued SSH hostname or endpoint for a sandbox;
 2. an API-issued short-lived credential bound to a known OS user;
@@ -261,17 +259,13 @@ Revisit the decision when all four of these exist as API operations:
 
 ## Identity and absence semantics
 
-What the Islo API guarantees about identity and absence, and what Crabbox does
-with it today:
+The identity and absence distinctions the adapter must preserve, and what
+Crabbox does with them today:
 
-- **`id` is the identity; `name` is not.** A sandbox `id` is an immutable UUIDv7
-  assigned at creation and is authoritative for one exact resource. There is no
-  rename, `PATCH`, or `PUT` operation for a sandbox, so neither the `id` nor the
-  `name` of an existing sandbox can be changed. `name` is nonetheless a
-  caller-supplied label and is reusable, so it is not unique over time: the same
-  name can be created again after a delete, and a create that fails after
-  admission still leaves a record in a failed state holding that name. A name
-  that resolves is therefore not proof that a particular resource is live.
+- **`id` identifies one resource; `name` is an addressing label.** The API
+  assigns a sandbox `id` at creation and exposes a lookup by that public UUID.
+  A caller-supplied `name` must not be treated as unique over time: a name that
+  resolves is not proof that a previously recorded resource is still live.
   Crabbox addresses sandboxes by name for lifecycle calls because it generates
   and normalizes those names itself and rejects non-Crabbox ones.
 - **Get-by-name is what the adapter treats as authoritative for existence.**
@@ -285,14 +279,14 @@ with it today:
   own `GET` reports `404`. Crabbox calls `ListSandboxes` only for inventory
   rendering, from `List` and `Doctor` (`internal/providers/islo/backend.go`),
   never to decide whether one specific sandbox still exists.
-- **A by-id lookup of a deleted sandbox returns a tombstone — available API
-  surface that Crabbox does not use.** `GET /sandboxes/-/by-id/{id}` answers
-  `200` for a deleted sandbox, with status `deleted` and `deleted_at` set. That
-  is the strongest available proof that one exact resource was removed, because
-  it separates "this id was deleted" from "this name does not resolve right
-  now". The adapter has no by-id code path today and does not retain sandbox
-  ids for teardown checks. Basing teardown verification on the tombstone would
-  be a code change; this section does not describe existing adapter behavior.
+- **By-id lookup and deletion state are available API surface that Crabbox
+  does not use.** The [by-id endpoint](https://docs.islo.dev/api-reference/sandboxes/get-sandbox-by-id)
+  exposes `id`, `status`, and `deleted_at`. A returned tombstone with the exact
+  recorded id, status `deleted`, and a deletion timestamp can distinguish
+  "this id was deleted" from "this name does not resolve right now". The
+  adapter has no by-id code path today and does not retain sandbox ids for
+  teardown checks. Using that evidence would be a code change, not existing
+  adapter behavior; a missing by-id response alone is not a tombstone.
 
 `crabbox stop` issues a delete *request* and accepts the answer; it does not
 confirm absence. `Stop` (`internal/providers/islo/backend.go`) requires an exact
@@ -301,29 +295,26 @@ removes the local claim and prints `released` — with no follow-up read of the
 sandbox. `DeleteSandbox` (`internal/providers/islo/client.go`) treats every
 status below `400` as success, which includes an accepted-but-pending `202`, and
 carves `404` out of the failure range so a delete that races another delete is a
-success too. A successful `crabbox stop` therefore means Islo accepted a delete
-for that name, not that the named sandbox is already gone. Post-delete absence
-is not verified anywhere today, so anything that needs absence rather than
-acceptance has to ask for it — a get-by-name that returns `404`, or the by-id
-tombstone if the adapter starts retaining ids — and must not use the list
-endpoint for it.
+success too. A successful `crabbox stop` therefore means the client accepted
+either a non-error delete response or a `404` as idempotent success. It does
+not confirm that the named sandbox is already gone. Post-delete absence is
+not verified anywhere today, so anything that needs absence rather than an
+accepted client result has to ask for it — a get-by-name that returns `404`,
+or the by-id tombstone if the adapter starts retaining ids — and must not use
+the list endpoint for it.
 
 HTTP-level idempotency does not make a repeated `crabbox stop` a no-op, because
-the claim check happens locally: the claim is dropped after the first accepted
-delete, so a second `stop` fails that check and exits `4` without reaching the
-API. Stopping again after a successful stop requires adopting the lease first
-with an explicit `--reclaim reuse`.
+the claim check happens locally: the claim is dropped after the first
+non-error or idempotent already-gone delete result, so a second `stop` fails
+that check and exits `4` without reaching the API. Stopping again after a
+successful stop requires adopting the lease first with an explicit
+`--reclaim reuse`.
 
-One create-time identity detail is worth recording even though Crabbox does not
-rely on it yet. `request_id` on a create is an idempotency key: replaying it
-with a byte-identical body returns the same sandbox `id` and creates nothing
-extra. Replaying the same `request_id` with any drift in the body instead fails
-with HTTP `503` `RESOURCE_UNAVAILABLE` and allocates nothing — a non-retryable
-conflict reported under a status code that normally invites a retry. Anything
-that starts sending `request_id` must not blind-retry that response, and should
-disambiguate with a follow-up get instead. The adapter does not send
-`request_id` today, so this is a constraint on adding it, not a description of
-current behavior.
+The [create API](https://docs.islo.dev/api-reference/sandboxes/create-sandbox)
+also accepts an optional `request_id`, which the adapter does not send today.
+Any future retry integration must establish its idempotency and conflict
+semantics rather than infer from an HTTP status that a failed create allocated
+nothing.
 
 ## Related docs
 
