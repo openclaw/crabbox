@@ -93,7 +93,7 @@ func runCheckpointAWSStrategyContract(t *testing.T, repo, binary string) {
 for arg do remote=$arg; done
 case "$remote" in
   'exit 0') printf 'probe\n' >> "$CAPTURE_AWS_SSH_CALLS";;
-  "bash -lc 'if command -v cloud-init >/dev/null 2>&1; then sudo cloud-init clean --logs; fi; sync'") printf 'prepare\n' >> "$CAPTURE_AWS_SSH_CALLS";;
+  ` + shellQuote("bash -lc "+shellQuote(remotePrepareNativeImageCommand())) + `) printf 'prepare\n' >> "$CAPTURE_AWS_SSH_CALLS";;
   *) printf 'unexpected SSH command: %s\n' "$remote" >&2; exit 97;;
 esac
 `

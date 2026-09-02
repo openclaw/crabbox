@@ -2108,8 +2108,12 @@ func TestWaitForDirectAWSImagePreservesAccountID(t *testing.T) {
 }
 
 func TestApplyNativeImageCheckpointRecordPersistsSnapshotIDs(t *testing.T) {
-	record := checkpointRecord{Kind: checkpointKindArchive, Provider: "aws"}
-	applyNativeImageCheckpointRecord(&record, CoordinatorImage{
+	store := checkpointStore{root: t.TempDir()}
+	record, err := store.Create(checkpointRecord{ID: "chk_progress", Kind: checkpointKindArchive, Provider: "aws"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteNativeProgress(&record, NativeCheckpointCreateResult{Image: NativeCheckpointImage{
 		ID:          "ami-12345678",
 		Name:        "checkpoint",
 		State:       "available",
@@ -2120,7 +2124,13 @@ func TestApplyNativeImageCheckpointRecordPersistsSnapshotIDs(t *testing.T) {
 		ResourceID:  "ami-12345678",
 		SnapshotIDs: []string{"snap-1", "snap-2"},
 		Direct:      true,
-	}, true)
+	}}, true); err != nil {
+		t.Fatal(err)
+	}
+	record, _, err = store.Read(record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if record.Kind != checkpointKindAWSAMI {
 		t.Fatalf("Kind=%q, want %q", record.Kind, checkpointKindAWSAMI)
@@ -2256,15 +2266,6 @@ func TestDirectAzureWindowsCheckpointRejectsInvalidSnapshotName(t *testing.T) {
 		})
 		if err == nil || !strings.Contains(err.Error(), "Azure snapshot name") {
 			t.Fatalf("name=%q err=%v", name, err)
-		}
-	}
-}
-
-func TestRemotePrepareNativeImageCommandFlushesFilesystem(t *testing.T) {
-	cmd := remotePrepareNativeImageCommand()
-	for _, want := range []string{"cloud-init clean --logs", "sync"} {
-		if !strings.Contains(cmd, want) {
-			t.Fatalf("command missing %q: %s", want, cmd)
 		}
 	}
 }

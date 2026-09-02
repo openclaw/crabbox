@@ -184,7 +184,18 @@ the checkpoint for inspection.
 
 Before a native snapshot, Crabbox cleans the source: on Linux it runs
 `cloud-init clean --logs` (so a forked box regenerates SSH host keys) and
-`sync` to flush filesystem writes.
+`sync` to flush filesystem writes. Preparation uses the distro's
+`/usr/bin/python3` and installed cloud-init module to resolve its configured
+runtime directory. It requires completed initialization and a runtime directory
+on `tmpfs`, outside cloud-init's disk cache. The existing completion records are
+copied there before cleaning, so the running source remains ready while a new
+VM must complete its own boot. Preparation errors stop capture before creating
+an image.
+
+Direct AWS and Hetzner captures record the accepted image identity before
+waiting for readiness. If the process is interrupted during that wait, the
+checkpoint remains available for `inspect --verify` and provider cleanup;
+do not submit a replacement capture just because the wait was interrupted.
 
 ### Replayable source retirement
 

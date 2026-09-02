@@ -133,6 +133,13 @@ func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheck
 		snapshot.Architecture = architecture
 	}
 	result := hetznerCheckpointResult(snapshot, location, metadata)
+	// Keep the exact image and ownership metadata recoverable while readiness
+	// polling is in flight, including after this process is interrupted.
+	if req.Persist != nil {
+		if err := req.Persist(result); err != nil {
+			return result, err
+		}
+	}
 	if err := validateCreatedHetznerSnapshot(snapshot, architecture); err != nil {
 		return result, err
 	}

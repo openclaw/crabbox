@@ -38,6 +38,17 @@ func (directAWSAMICheckpointDriver) Create(ctx context.Context, req NativeCheckp
 	if err != nil {
 		return CoordinatorImage{}, err
 	}
+	// Readiness can take minutes. Record the accepted AMI before another
+	// network call so interruption cannot lose its account-scoped cleanup identity.
+	if req.Persist != nil {
+		if err := req.Persist(NativeCheckpointCreateResult{Image: NativeCheckpointImage{
+			ID: image.ID, Name: image.Name, State: image.State, Provider: image.Provider,
+			Kind: image.Kind, Region: image.Region, AccountID: image.AccountID,
+			ResourceID: image.ResourceID, SnapshotIDs: image.SnapshotIDs, Direct: image.Direct,
+		}}); err != nil {
+			return image, err
+		}
+	}
 	if req.Wait {
 		waited, err := waitForDirectAWSImage(ctx, client, image.ID, image.AccountID, req.WaitTimeout, req.Stderr)
 		if err != nil {
@@ -410,7 +421,9 @@ func coordinatorImageFromNativeCheckpoint(image NativeCheckpointImage) Coordinat
 		Provider:     image.Provider,
 		Kind:         image.Kind,
 		Region:       image.Region,
+		AccountID:    image.AccountID,
 		ResourceID:   image.ResourceID,
+		SnapshotIDs:  image.SnapshotIDs,
 		Architecture: image.Architecture,
 		Direct:       image.Direct,
 	}
@@ -493,7 +506,52 @@ func prepareNativeImageSource(ctx context.Context, target SSHTarget) error {
 }
 
 func remotePrepareNativeImageCommand() string {
-	return "if command -v cloud-init >/dev/null 2>&1; then sudo cloud-init clean --logs; fi; sync"
+	// The distro interpreter owns cloud-init; project Python environments must not
+	// change its paths. Keep real completion facts in tmpfs before cleaning their
+	// disk targets, so the source stays ready without admitting an unbooted clone.
+	return `set -e
+if command -v cloud-init >/dev/null 2>&1; then
+sudo /usr/bin/python3 -I -c ` + shellQuote(`import json, os, pathlib, shutil, subprocess, sys, tempfile
+from cloudinit.cmd.devel import read_cfg_paths
+
+cloud_init = [sys.executable, "-I", "-m", "cloudinit.cmd.main"]
+def require_done():
+    result = subprocess.run(cloud_init + ["status", "--format=json"], check=True, capture_output=True, text=True, timeout=30)
+    if json.loads(result.stdout)["status"] != "done":
+        raise RuntimeError("native checkpoint requires completed cloud-init initialization")
+
+require_done()
+paths = read_cfg_paths()
+runtime = pathlib.Path(paths.run_dir).absolute()
+cache = pathlib.Path(paths.cloud_dir).resolve()
+for ancestor in (runtime, *runtime.parents):
+    resolved = ancestor.resolve()
+    if resolved == cache or cache in resolved.parents:
+        raise RuntimeError("cloud-init runtime directory must be outside its cleaned disk cache")
+runtime = runtime.resolve()
+filesystem = subprocess.check_output(["stat", "-f", "-c", "%T", str(runtime)], text=True).strip()
+if filesystem != "tmpfs":
+    raise RuntimeError("cloud-init runtime directory must use tmpfs to exclude completion state from the image")
+files = [runtime / "status.json", runtime / "result.json"]
+for path in files:
+    if not path.is_file():
+        raise RuntimeError("cloud-init completion file is missing: " + str(path))
+for path in files:
+    fd, temporary = tempfile.mkstemp(prefix="." + path.name + "-", dir=runtime)
+    os.close(fd)
+    try:
+        original = path.stat()
+        shutil.copy2(path, temporary)
+        os.chown(temporary, original.st_uid, original.st_gid)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+subprocess.run(cloud_init + ["clean", "--logs"], check=True)
+require_done()
+`) + `
+fi
+sync`
 }
 
 func nativeCheckpointKind(cfg Config, server Server, target SSHTarget, strategy string) (string, bool) {

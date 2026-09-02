@@ -467,7 +467,9 @@ type NativeCheckpointImage struct {
 	Provider     string
 	Kind         string
 	Region       string
+	AccountID    string
 	ResourceID   string
+	SnapshotIDs  []string
 	Architecture string
 	Direct       bool
 }
