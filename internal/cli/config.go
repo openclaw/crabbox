@@ -1245,6 +1245,7 @@ type ParallelsConfig struct {
 	Host             string
 	HostUser         string
 	HostKey          string
+	BootstrapKey     string
 	VMRoot           string
 	User             string
 	WorkRoot         string
@@ -3810,6 +3811,7 @@ type fileParallelsConfig struct {
 	Host             string                                 `yaml:"host,omitempty"`
 	HostUser         string                                 `yaml:"hostUser,omitempty"`
 	HostKey          string                                 `yaml:"hostKey,omitempty"`
+	BootstrapKey     string                                 `yaml:"bootstrapKey,omitempty"`
 	VMRoot           string                                 `yaml:"vmRoot,omitempty"`
 	User             string                                 `yaml:"user,omitempty"`
 	WorkRoot         string                                 `yaml:"workRoot,omitempty"`
@@ -5963,6 +5965,13 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if file.Parallels.HostKey != "" {
 			cfg.Parallels.HostKey = expandUserPath(file.Parallels.HostKey)
 			cfg.credentialProvenance.parallelsHostKey = credentialSource
+		}
+		// The bootstrap identity is consumed on the Parallels host and can sign
+		// authentication challenges from a newly cloned guest. Repository config
+		// must not choose that identity; keep it in trusted user config or supply
+		// it through an explicit environment/flag override.
+		if trusted && file.Parallels.BootstrapKey != "" {
+			cfg.Parallels.BootstrapKey = strings.TrimSpace(file.Parallels.BootstrapKey)
 		}
 		if file.Parallels.VMRoot != "" {
 			cfg.Parallels.VMRoot = expandUserPath(file.Parallels.VMRoot)
@@ -8728,6 +8737,9 @@ func applyEnv(cfg *Config) error {
 	if value := os.Getenv("CRABBOX_PARALLELS_HOST_KEY"); value != "" {
 		cfg.Parallels.HostKey = expandUserPath(value)
 		cfg.credentialProvenance.parallelsHostKey = credentialSourceEnvironment
+	}
+	if value := os.Getenv("CRABBOX_PARALLELS_BOOTSTRAP_KEY"); value != "" {
+		cfg.Parallels.BootstrapKey = strings.TrimSpace(value)
 	}
 	cfg.Parallels.VMRoot = expandUserPath(getenv("CRABBOX_PARALLELS_VM_ROOT", cfg.Parallels.VMRoot))
 	cfg.Parallels.User = getenv("CRABBOX_PARALLELS_USER", cfg.Parallels.User)

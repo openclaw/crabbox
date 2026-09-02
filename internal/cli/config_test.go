@@ -5699,6 +5699,36 @@ func TestApplyFileParallelsHostConfig(t *testing.T) {
 	}
 }
 
+func TestParallelsBootstrapKeyRequiresTrustedFileOrExplicitEnvironment(t *testing.T) {
+	file := fileConfig{Parallels: &fileParallelsConfig{BootstrapKey: "/Users/build/.ssh/bootstrap"}}
+
+	repositoryCfg := baseConfig()
+	if err := applyFileConfigWithTrust(&repositoryCfg, file, false); err != nil {
+		t.Fatal(err)
+	}
+	if repositoryCfg.Parallels.BootstrapKey != "" {
+		t.Fatalf("repository config selected bootstrap key %q", repositoryCfg.Parallels.BootstrapKey)
+	}
+
+	trustedCfg := baseConfig()
+	if err := applyFileConfigWithTrust(&trustedCfg, file, true); err != nil {
+		t.Fatal(err)
+	}
+	if trustedCfg.Parallels.BootstrapKey != "/Users/build/.ssh/bootstrap" {
+		t.Fatalf("trusted bootstrap key=%q", trustedCfg.Parallels.BootstrapKey)
+	}
+
+	clearConfigEnv(t)
+	t.Setenv("CRABBOX_PARALLELS_BOOTSTRAP_KEY", "/Users/build/.ssh/from-env")
+	envCfg := baseConfig()
+	if err := applyEnv(&envCfg); err != nil {
+		t.Fatal(err)
+	}
+	if envCfg.Parallels.BootstrapKey != "/Users/build/.ssh/from-env" {
+		t.Fatalf("environment bootstrap key=%q", envCfg.Parallels.BootstrapKey)
+	}
+}
+
 func TestParallelsServerTypeForConfig(t *testing.T) {
 	if got := parallelsServerTypeForConfig(Config{}); got != "template" {
 		t.Fatalf("empty=%q", got)

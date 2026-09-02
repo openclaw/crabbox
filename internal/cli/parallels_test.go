@@ -3,15 +3,18 @@ package cli
 import (
 	"context"
 	"errors"
+	"io"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseParallelsVMsUsesFullListIP(t *testing.T) {
 	vms, err := parseParallelsVMs(`[
 		{"uuid":"bd","status":"running","ip_configured":"10.211.55.3","name":"Ubuntu"},
-		{"ID":"id2","Name":"macOS","State":"running","Network":{"ipAddresses":[{"type":"ipv6","ip":"fe80::1"},{"type":"ipv4","ip":"10.211.55.6"}]}}
+		{"ID":"id2","Name":"macOS","State":"running","Hardware":{"net0":{"enabled":true,"mac":"00:1C:42:33:EE:DD"},"net1":{"enabled":false,"mac":"001C42FFFFFF"}},"Network":{"ipAddresses":[{"type":"ipv6","ip":"fe80::1"},{"type":"ipv4","ip":"10.211.55.6"}]}}
 	]`)
 	if err != nil {
 		t.Fatal(err)
@@ -22,8 +25,167 @@ func TestParseParallelsVMsUsesFullListIP(t *testing.T) {
 	if vms[0].ID != "bd" || vms[0].Name != "Ubuntu" || vms[0].IP != "10.211.55.3" {
 		t.Fatalf("first VM not normalized: %#v", vms[0])
 	}
-	if vms[1].ID != "id2" || vms[1].IP != "10.211.55.6" {
+	if vms[1].ID != "id2" || vms[1].IP != "10.211.55.6" || !reflect.DeepEqual(vms[1].MACs, []string{"001c4233eedd"}) {
 		t.Fatalf("network IP not normalized: %#v", vms[1])
+	}
+}
+
+func TestNormalizeParallelsMAC(t *testing.T) {
+	tests := []struct {
+		value string
+		want  string
+		ok    bool
+	}{
+		{value: "001C4233EEDD", want: "001c4233eedd", ok: true},
+		{value: "00:1c:42:33:ee:dd", want: "001c4233eedd", ok: true},
+		{value: "00-1C-42-33-EE-DD", want: "001c4233eedd", ok: true},
+		{value: "001c.4233.eedd", want: "001c4233eedd", ok: true},
+		{value: "001c4233eed", ok: false},
+		{value: "001c4233eedz", ok: false},
+	}
+	for _, test := range tests {
+		got, ok := normalizeParallelsMAC(test.value)
+		if got != test.want || ok != test.ok {
+			t.Errorf("normalizeParallelsMAC(%q)=(%q,%t), want (%q,%t)", test.value, got, ok, test.want, test.ok)
+		}
+	}
+}
+
+func TestResolveParallelsDHCPLeaseIP(t *testing.T) {
+	now := time.Unix(1_788_360_000, 0)
+	base := `[vnic0]
+10.211.55.3="1788360901,1800,001c4233eedd,01001c4233eedd"
+10.211.55.4="1784407577,1800,001c4207f695,01001c4207f695"
+`
+	tests := []struct {
+		name    string
+		data    string
+		macs    []string
+		want    string
+		wantErr string
+	}{
+		{name: "fresh exact match", data: base, macs: []string{"00:1C:42:33:EE:DD"}, want: "10.211.55.3"},
+		{name: "stale rejected", data: base, macs: []string{"001C4207F695"}, wantErr: "no fresh"},
+		{name: "missing rejected", data: base, macs: []string{"001C42000000"}, wantErr: "no Parallels DHCP lease"},
+		{name: "no VM MAC rejected", data: base, wantErr: "no usable NIC MAC"},
+		{name: "malformed rejected", data: "10.211.55.3=bad\n", macs: []string{"001C4233EEDD"}, wantErr: "invalid quoted record"},
+		{name: "duplicate same IP accepted", data: base + `10.211.55.3="1788360902,1800,001c4233eedd,01001c4233eedd"` + "\n", macs: []string{"001C4233EEDD"}, want: "10.211.55.3"},
+		{name: "ambiguous rejected", data: base + `10.211.55.9="1788360902,1800,001c4233eedd,01001c4233eedd"` + "\n", macs: []string{"001C4233EEDD"}, wantErr: "ambiguous"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := resolveParallelsDHCPLeaseIP(test.data, test.macs, now)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("got=%q err=%v, want error containing %q", got, err, test.wantErr)
+				}
+				return
+			}
+			if err != nil || got != test.want {
+				t.Fatalf("got=%q err=%v, want %q", got, err, test.want)
+			}
+		})
+	}
+}
+
+func TestParallelsWaitForIPPrefersToolsDiscovery(t *testing.T) {
+	runner := &parallelsDHCPRunner{vmJSON: `[{
+		"ID":"vm1","Name":"macOS","State":"running","ip_configured":"10.211.55.8",
+		"Hardware":{"net0":{"enabled":true,"mac":"001C4233EEDD"}}
+	}]`}
+	cfg := Config{TargetOS: targetMacOS, SSHPort: "22", Parallels: ParallelsConfig{BootstrapKey: "/Users/runner/.ssh/bootstrap"}}
+	vm, err := NewParallelsClient(cfg, runner).WaitForIP(context.Background(), "vm1", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vm.IP != "10.211.55.8" || vm.IPSource != "tools" {
+		t.Fatalf("vm=%#v", vm)
+	}
+	if len(runner.requests) != 1 {
+		t.Fatalf("Tools discovery should skip DHCP reads and probes: %#v", runner.requests)
+	}
+}
+
+func TestParallelsWaitForIPUsesDHCPFallbackAndVerifiesSSH(t *testing.T) {
+	expiry := time.Now().Add(time.Hour).Unix()
+	runner := &parallelsDHCPRunner{vmJSON: `[{
+		"ID":"vm1","Name":"macOS","State":"running",
+		"Hardware":{"net0":{"enabled":true,"mac":"001C4233EEDD"}},
+		"Network":{"ipAddresses":[]}
+	}]`, leases: "[vnic0]\n10.211.55.9=\"" + strconv.FormatInt(expiry, 10) + ",1800,001c4233eedd,01001c4233eedd\"\n"}
+	cfg := Config{TargetOS: targetMacOS, SSHPort: "22", Parallels: ParallelsConfig{BootstrapKey: "/Users/runner/.ssh/bootstrap"}}
+	vm, err := NewParallelsClient(cfg, runner).WaitForIP(context.Background(), "vm1", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vm.IP != "10.211.55.9" || vm.IPSource != "dhcp-mac" {
+		t.Fatalf("vm=%#v", vm)
+	}
+	if len(runner.requests) != 3 || runner.requests[1].Name != "/bin/cat" || runner.requests[2].Name != "/usr/bin/nc" {
+		t.Fatalf("requests=%#v", runner.requests)
+	}
+	if got := runner.requests[2].Args; !reflect.DeepEqual(got, []string{"-z", "-w", "2", "10.211.55.9", "22"}) {
+		t.Fatalf("nc args=%#v", got)
+	}
+}
+
+func TestParallelsDHCPFallbackRunsOnRemoteHost(t *testing.T) {
+	expiry := time.Now().Add(time.Hour).Unix()
+	runner := &parallelsDHCPRunner{vmJSON: `[{"ID":"vm1","Name":"macOS","State":"running","Hardware":{"net0":{"enabled":true,"mac":"001C4233EEDD"}}}]`, leases: "[vnic0]\n10.211.55.9=\"" + strconv.FormatInt(expiry, 10) + ",1800,001c4233eedd,01001c4233eedd\"\n"}
+	cfg := Config{TargetOS: targetMacOS, SSHPort: "22", Parallels: ParallelsConfig{Host: "mac.example", HostUser: "build", BootstrapKey: "/Users/build/.ssh/bootstrap"}}
+	vm, err := NewParallelsClient(cfg, runner).WaitForIP(context.Background(), "vm1", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vm.IPSource != "dhcp-mac" || len(runner.requests) != 3 {
+		t.Fatalf("vm=%#v requests=%#v", vm, runner.requests)
+	}
+	for _, req := range runner.requests {
+		if req.Name != directSSHExecutable() || !containsString(req.Args, "build@mac.example") {
+			t.Fatalf("fallback command did not stay on Parallels host: %#v", req)
+		}
+	}
+	if !strings.Contains(runner.requests[1].Args[len(runner.requests[1].Args)-1], parallelsDHCPLeasesPath) ||
+		!strings.Contains(runner.requests[2].Args[len(runner.requests[2].Args)-1], "/usr/bin/nc") {
+		t.Fatalf("remote fallback requests=%#v", runner.requests)
+	}
+}
+
+func TestParallelsWaitForIPDoesNotFallbackWithoutBootstrapIdentity(t *testing.T) {
+	runner := &parallelsDHCPRunner{vmJSON: `[{"ID":"vm1","Name":"macOS","State":"running","Hardware":{"net0":{"enabled":true,"mac":"001C4233EEDD"}}}]`}
+	_, err := NewParallelsClient(Config{TargetOS: targetMacOS}, runner).WaitForIP(context.Background(), "vm1", time.Nanosecond)
+	if err == nil || len(runner.requests) != 1 {
+		t.Fatalf("err=%v requests=%#v", err, runner.requests)
+	}
+}
+
+func TestParallelsWaitForGuestExecShortCircuitsOnlyForConfiguredMacOSFallback(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		target    string
+		bootstrap string
+		wantTools bool
+	}{
+		{name: "macOS fallback", target: targetMacOS, bootstrap: "/Users/build/.ssh/bootstrap", wantTools: true},
+		{name: "macOS without fallback", target: targetMacOS},
+		{name: "Linux", target: targetLinux, bootstrap: "/Users/build/.ssh/bootstrap"},
+		{name: "Windows", target: targetWindows, bootstrap: "/Users/build/.ssh/bootstrap"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			runner := &parallelsGuestExecUnavailableRunner{cancel: cancel}
+			cfg := Config{TargetOS: test.target, Parallels: ParallelsConfig{BootstrapKey: test.bootstrap}}
+			err := NewParallelsClient(cfg, runner).WaitForGuestExec(ctx, "vm1", cfg, time.Minute)
+			if test.wantTools {
+				if err == nil || !ParallelsGuestToolsUnavailable(err) {
+					t.Fatalf("err=%v, want Tools unavailable", err)
+				}
+				return
+			}
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("err=%v, want context cancellation after normal retry path", err)
+			}
+		})
 	}
 }
 
@@ -478,6 +640,105 @@ func TestParallelsEnsureGuestReadySkipsWindows(t *testing.T) {
 	}
 	if runner.lastReq.Name != "" {
 		t.Fatalf("unexpected command: %#v", runner.lastReq)
+	}
+}
+
+func TestParallelsBootstrapMacOSOverSSHUsesHostIdentityAndStreamsLeaseKey(t *testing.T) {
+	runner := &parallelsDHCPRunner{}
+	cfg := Config{
+		TargetOS: targetMacOS,
+		SSHUser:  "parallels-01",
+		SSHPort:  "22",
+		WorkRoot: "/Users/parallels-01/crabbox",
+		Parallels: ParallelsConfig{
+			BootstrapKey: "/Users/aiworker/.ssh/id_ed25519",
+		},
+	}
+	publicKey := "ssh-ed25519 AAAAlease fixture"
+	if err := NewParallelsClient(cfg, runner).BootstrapMacOSOverSSH(context.Background(), "10.211.55.9", cfg, publicKey); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.requests) != 1 {
+		t.Fatalf("requests=%#v", runner.requests)
+	}
+	req := runner.requests[0]
+	if req.Name != "/usr/bin/ssh" {
+		t.Fatalf("name=%q", req.Name)
+	}
+	rendered := strings.Join(req.Args, " ")
+	for _, want := range []string{"-i /Users/aiworker/.ssh/id_ed25519", "IdentitiesOnly=yes", "BatchMode=yes", "PasswordAuthentication=no", "parallels-01@10.211.55.9", "sudo -n /bin/sh -s"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("bootstrap args missing %q: %s", want, rendered)
+		}
+	}
+	if strings.Contains(rendered, publicKey) {
+		t.Fatalf("public key leaked onto argv: %s", rendered)
+	}
+	for _, want := range []string{publicKey, "authorized_keys", "cat >/usr/local/bin/crabbox-ready", "test -w '/Users/parallels-01/crabbox'"} {
+		if !strings.Contains(runner.stdin, want) {
+			t.Fatalf("bootstrap stdin missing %q", want)
+		}
+	}
+}
+
+func TestParallelsBootstrapMacOSOverSSHExecutesNestedSSHOnRemoteHost(t *testing.T) {
+	runner := &parallelsDHCPRunner{}
+	cfg := Config{
+		TargetOS: targetMacOS,
+		SSHUser:  "parallels-01",
+		SSHPort:  "22",
+		WorkRoot: "/Users/parallels-01/crabbox",
+		Parallels: ParallelsConfig{
+			Host:         "mac.example",
+			HostUser:     "build",
+			BootstrapKey: "/Users/build/.ssh/bootstrap",
+		},
+	}
+	if err := NewParallelsClient(cfg, runner).BootstrapMacOSOverSSH(context.Background(), "10.211.55.9", cfg, "ssh-ed25519 AAAAlease"); err != nil {
+		t.Fatal(err)
+	}
+	req := runner.requests[0]
+	if req.Name != directSSHExecutable() || !containsString(req.Args, "build@mac.example") {
+		t.Fatalf("request=%#v", req)
+	}
+	remote := req.Args[len(req.Args)-1]
+	for _, want := range []string{"'/usr/bin/ssh'", "'/Users/build/.ssh/bootstrap'", "'parallels-01@10.211.55.9'", "'sudo' '-n' '/bin/sh' '-s'"} {
+		if !strings.Contains(remote, want) {
+			t.Fatalf("remote bootstrap command missing %q: %s", want, remote)
+		}
+	}
+}
+
+type parallelsDHCPRunner struct {
+	vmJSON   string
+	leases   string
+	requests []LocalCommandRequest
+	stdin    string
+}
+
+type parallelsGuestExecUnavailableRunner struct {
+	cancel context.CancelFunc
+}
+
+func (r *parallelsGuestExecUnavailableRunner) Run(_ context.Context, _ LocalCommandRequest) (LocalCommandResult, error) {
+	r.cancel()
+	return LocalCommandResult{Stderr: "PRL_ERR_VM_EXEC_GUEST_TOOL_NOT_AVAILABLE"}, errors.New("exit status 1")
+}
+
+func (r *parallelsDHCPRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+	r.requests = append(r.requests, req)
+	if req.Stdin != nil {
+		data, _ := io.ReadAll(req.Stdin)
+		r.stdin = string(data)
+	}
+	rendered := req.Name + " " + strings.Join(req.Args, " ")
+	switch {
+	case strings.Contains(rendered, "prlctl") && strings.Contains(rendered, "list"):
+		return LocalCommandResult{Stdout: r.vmJSON}, nil
+	case strings.Contains(rendered, parallelsDHCPLeasesPath):
+		return LocalCommandResult{Stdout: r.leases}, nil
+	default:
+		return LocalCommandResult{}, nil
 	}
 }
 

@@ -800,6 +800,7 @@ func configShowView(cfg Config) map[string]any {
 			"host":             cfg.Parallels.Host,
 			"hostUser":         cfg.Parallels.HostUser,
 			"hostKey":          tokenState(cfg.Parallels.HostKey),
+			"bootstrapKey":     tokenState(cfg.Parallels.BootstrapKey),
 			"vmRoot":           cfg.Parallels.VMRoot,
 			"user":             cfg.Parallels.User,
 			"workRoot":         cfg.Parallels.WorkRoot,

@@ -2,6 +2,8 @@ package parallels
 
 import (
 	"flag"
+	"path/filepath"
+	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
@@ -54,6 +56,7 @@ type flagValues struct {
 	Host             *string
 	HostUser         *string
 	HostKey          *string
+	BootstrapKey     *string
 	VMRoot           *string
 	User             *string
 	WorkRoot         *string
@@ -71,6 +74,7 @@ func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
 		Host:             fs.String("parallels-host", defaults.Parallels.Host, "remote Mac host running Parallels"),
 		HostUser:         fs.String("parallels-host-user", defaults.Parallels.HostUser, "remote Mac SSH user"),
 		HostKey:          fs.String("parallels-host-key", defaults.Parallels.HostKey, "remote Mac SSH key"),
+		BootstrapKey:     fs.String("parallels-bootstrap-key", defaults.Parallels.BootstrapKey, "absolute guest bootstrap SSH key path on the Parallels host (macOS Tools fallback)"),
 		VMRoot:           fs.String("parallels-vm-root", defaults.Parallels.VMRoot, "destination directory for cloned VM bundles"),
 		User:             fs.String("parallels-user", defaults.Parallels.User, "guest SSH user"),
 		WorkRoot:         fs.String("parallels-work-root", defaults.Parallels.WorkRoot, "remote work root inside Parallels guests"),
@@ -127,6 +131,9 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	if core.FlagWasSet(fs, "parallels-host-key") {
 		cfg.Parallels.HostKey = core.ExpandUserPath(*v.HostKey)
 	}
+	if core.FlagWasSet(fs, "parallels-bootstrap-key") {
+		cfg.Parallels.BootstrapKey = *v.BootstrapKey
+	}
 	if core.FlagWasSet(fs, "parallels-vm-root") {
 		cfg.Parallels.VMRoot = core.ExpandUserPath(*v.VMRoot)
 	}
@@ -148,6 +155,20 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return NewBackend(p.Spec(), cfg, rt), nil
+}
+
+func (Provider) ValidateConfig(cfg core.Config) error {
+	key := strings.TrimSpace(cfg.Parallels.BootstrapKey)
+	if key == "" {
+		return nil
+	}
+	if cfg.TargetOS != core.TargetMacOS {
+		return core.Exit(2, "parallels.bootstrapKey is supported only for macOS guests")
+	}
+	if !filepath.IsAbs(key) || strings.ContainsAny(key, "\r\n\x00") {
+		return core.Exit(2, "parallels.bootstrapKey must be an absolute path on the Parallels host")
+	}
+	return nil
 }
 
 func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
