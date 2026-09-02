@@ -91,6 +91,37 @@ and process metadata.
 7. For `--desktop` leases, `tart exec` turns on the guest's built-in macOS Screen Sharing (native VNC on port 5900). No VNC password is provisioned — authentication uses the guest account's own credentials.
 8. `tart stop` + `tart delete` on release.
 
+### Startup failures and kept VMs
+
+The initial two-second startup observation is not the end of startup monitoring.
+Crabbox owns the foreground `tart run` process until IP discovery, guest-agent
+and key setup, optional Screen Sharing, SSH readiness, and lease-claim publication
+have all succeeded. If that process exits during acquisition (even with status
+zero), it interrupts in-flight readiness work and reports the original startup
+failure. For example:
+
+```text
+tart run crabbox-example failed during startup: The number of VMs exceeds the system limit
+```
+
+Startup errors include at most the first 64 KiB of Tart's stderr, rather than
+being replaced by a later "VM not running", guest-agent, or SSH symptom. If
+readiness fails while Tart is still alive, available pre-cleanup stderr is
+included as startup context alongside the readiness or cancellation cause. Startup
+stderr is captured in a private temporary file in both keep modes; it is not
+streamed to the terminal. Crabbox closes and removes that file when acquisition
+settles. After a successful acquisition, Tart still holds its inherited writable
+descriptor to the unlinked file until it exits: unlinking does **not** reclaim
+that storage or bound subsequent disk growth. The 64 KiB limit bounds diagnostic
+reads, not the VM's lifetime stderr writes. This direct-file strategy lets kept
+VMs survive Crabbox exit without a parent-owned stdout/stderr pipe reader.
+
+Any failed or cancelled acquisition kills and reaps only the `tart run` child
+it launched, including with `--keep`, before attempting ownership-fenced
+stop/delete of the new clone. `--keep` preserves a VM only after acquisition
+succeeds. After success, kept VMs survive caller cancellation; non-kept VMs
+remain tied to the caller's context.
+
 ## Built-in image identity
 
 New leases without an image override use the immutable Sequoia image above.
