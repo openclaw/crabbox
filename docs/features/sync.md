@@ -76,6 +76,9 @@ Git-ignored output, dependency folders, `.git`, and common local caches stay out
 of the transfer. This keeps a first sync close to what CI would see while still
 letting you test uncommitted local edits.
 
+Filesystem Git origins are resolved on the runner during Git seeding and must
+be readable from that runner; otherwise Crabbox falls back to a full manifest sync.
+
 ### Jujutsu workspaces
 
 Crabbox currently supports Jujutsu workspaces only when they are colocated with
@@ -231,16 +234,27 @@ userinfo, warns without printing the URL, and uses the normal file sync instead.
 This prevents credentials stored in local Git remotes from reaching lease
 command arguments or the seeded worktree's Git configuration.
 
-If seeding fails, ordinary runs, local Actions hydration, and native Windows
-sync warn with a fixed phase, advisory failure category, and command exit
-status. Categories distinguish missing Git, authentication/access, DNS,
-connectivity, TLS, repository/ref, and verification failures when recognizable.
-Raw Git/SSH output, URLs, paths, and credential-helper messages are never
-replayed in this warning. Capture is limited to 16 KiB in memory; oversized or
-unrecognized output produces an `unknown` diagnosis instead of guessing.
-Crabbox continues with file sync, but this does not guarantee that later Git
-coherence checks or the workload will succeed. Existing Git metadata may still
-be present; the failed seed has not established that it is current or usable.
+Git seeding, coherence finalization, and Git-state probes run in non-login Bash
+shells with `BASH_ENV` and `ENV` disabled. Runner login and logout hooks cannot
+replace these control-command exit statuses. User workload commands keep their
+existing login-shell behavior.
+
+If an otherwise forwardable origin requires authentication or is unreachable
+due to DNS, connectivity, or TLS transport errors, ordinary POSIX/WSL2 sync
+and local Actions hydration fall back to the full, plain manifest sync. This
+also covers a reused Git worktree whose fetch fails during finalization.
+Fallback warnings contain only a fixed reason. The plain manifest path clears
+reusable fingerprints and Git hydration markers and does not forward local
+credentials.
+
+Local Actions hydration keeps unclassified seeding failures fatal, including
+missing refs, verification failures, and HTTP 5xx or other server failures,
+and aborts before file sync. Seed failure diagnostics report a fixed phase,
+advisory category, and command exit status. Raw Git/SSH output, URLs, paths,
+and credential-helper messages are never replayed in warnings. Capture is
+limited to 16 KiB in memory; oversized or unrecognized output produces an
+`unknown` diagnosis instead of guessing. Existing Git metadata may still be
+present; a failed seed has not established that it is current or usable.
 
 ### Opt-in Git overlay
 
@@ -266,8 +280,14 @@ origins, private origins, unsafe Git configuration, and unavailable runner
 prerequisites fall back to the complete ordinary file manifest. Git commands
 never receive forwarded credentials, credential helpers, hooks, global Git
 configuration, external transports, or repository-defined filters.
-Anonymous HTTP authentication failures safely fall back; genuine DNS, TLS,
-firewall, and other eligible-origin transport failures remain fatal.
+Anonymous HTTP authentication failures and eligible-origin DNS, TLS, firewall,
+connection, and fetch failures safely fall back to the complete ordinary file
+manifest.
+
+A fallback involving `assume-unchanged` or `skip-worktree` index flags does
+not reuse or publish a sync fingerprint: Git can hide edits behind those
+flags. Crabbox transfers the full ordinary manifest instead. An index
+inspection failure also disables fingerprint reuse for that fallback.
 
 Only dependency caches ignored by verified `.gitignore` files from the exact
 target tree may survive overlay preparation: `node_modules`, `.pnpm-store`,

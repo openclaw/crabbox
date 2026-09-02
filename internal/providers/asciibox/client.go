@@ -24,6 +24,7 @@ type api interface {
 	PrepareSSH(context.Context, string) error
 	GetBox(context.Context, string) (boxData, error)
 	ListBoxes(context.Context, bool) ([]boxData, error)
+	GetDeletionOperation(context.Context, string, string) (boxDeletionOperation, error)
 	ReleaseBox(context.Context, string, func(context.Context) error) error
 }
 
@@ -48,23 +49,27 @@ func (e *boxIdentityError) Error() string {
 }
 
 type boxData struct {
-	createdID    string
-	ID           string `json:"id"`
-	Name         string `json:"name,omitempty"`
-	State        string `json:"state,omitempty"`
-	Status       string `json:"status,omitempty"`
-	MachineIP    string `json:"machineIp,omitempty"`
-	MachineIPAlt string `json:"machine_ip,omitempty"`
-	PublicIP     string `json:"publicIp,omitempty"`
-	IP           string `json:"ip,omitempty"`
-	SSHUser      string `json:"sshUser,omitempty"`
-	SSHUserAlt   string `json:"ssh_user,omitempty"`
-	URL          string `json:"url,omitempty"`
-	DesktopURL   string `json:"desktopUrl,omitempty"`
-	ArchiveAfter any    `json:"archiveAfter,omitempty"`
-	ExpiresAt    any    `json:"expiresAt,omitempty"`
-	CreatedAt    any    `json:"createdAt,omitempty"`
-	UpdatedAt    any    `json:"updatedAt,omitempty"`
+	createdID           string
+	deletionCompleted   bool
+	deletionOperationID string
+	ID                  string `json:"id"`
+	Name                string `json:"name,omitempty"`
+	State               string `json:"state,omitempty"`
+	Status              string `json:"status,omitempty"`
+	MachineIP           string `json:"machineIp,omitempty"`
+	MachineIPAlt        string `json:"machine_ip,omitempty"`
+	PublicIP            string `json:"publicIp,omitempty"`
+	IP                  string `json:"ip,omitempty"`
+	SSHEndpoint         string `json:"sshEndpoint,omitempty"`
+	SSHEndpointAlt      string `json:"ssh_endpoint,omitempty"`
+	SSHUser             string `json:"sshUser,omitempty"`
+	SSHUserAlt          string `json:"ssh_user,omitempty"`
+	URL                 string `json:"url,omitempty"`
+	DesktopURL          string `json:"desktopUrl,omitempty"`
+	ArchiveAfter        any    `json:"archiveAfter,omitempty"`
+	ExpiresAt           any    `json:"expiresAt,omitempty"`
+	CreatedAt           any    `json:"createdAt,omitempty"`
+	UpdatedAt           any    `json:"updatedAt,omitempty"`
 }
 
 var newAPI = func(cfg Config, rt Runtime) (api, error) {
@@ -147,10 +152,11 @@ func (c *client) CreateBox(ctx context.Context, req createRequest) (boxData, err
 			if parseErr != nil {
 				return partial, fmt.Errorf("ascii-box CLI new failed after creating %s: %s", partial.ID, c.formatError(result, err))
 			}
-			if ready, waitErr := c.waitForBoxReady(ctx, partial); waitErr == nil {
+			ready, waitErr := c.waitForBoxReady(ctx, partial)
+			if waitErr == nil {
 				return ready, nil
 			}
-			return partial, fmt.Errorf("ascii-box CLI new failed after creating %s: %s", partial.ID, c.formatError(result, err))
+			return ready, fmt.Errorf("ascii-box CLI new failed after creating %s: %s", partial.ID, c.formatError(result, err))
 		}
 		return boxData{}, fmt.Errorf("ascii-box CLI new failed: %s", c.formatError(result, err))
 	}
@@ -207,6 +213,8 @@ func (c *client) ReleaseBox(ctx context.Context, id string, validate func(contex
 	if !concreteBoxID(id) || validate == nil {
 		return fmt.Errorf("ascii-box release requires a concrete ID and ownership validator")
 	}
+	ctx, cancel := context.WithTimeout(ctx, boxReleaseTimeout)
+	defer cancel()
 	if err := c.ensureConfig(ctx); err != nil {
 		return fmt.Errorf("prepare ascii-box CLI release: %w", err)
 	}
@@ -219,7 +227,7 @@ func (c *client) ReleaseBox(ctx context.Context, id string, validate func(contex
 	}
 	deleteResult, deleteErr := c.runPrepared(ctx, "delete", id, "--yes")
 	if deleteErr == nil {
-		return nil
+		return c.waitForDeletion(ctx, id, deleteResult.Stdout)
 	}
 	if !c.snapshotGuardConflict(deleteResult, deleteErr) {
 		return c.releaseError(stopResult, stopErr, deleteResult, deleteErr, "")
@@ -307,7 +315,7 @@ func (c *client) releaseAfterSnapshotGuard(
 			}
 			retryResult, retryErr := c.runPrepared(recoveryCtx, "delete", id, "--yes")
 			if retryErr == nil {
-				return nil
+				return c.waitForDeletion(ctx, id, retryResult.Stdout)
 			}
 			if c.snapshotGuardConflict(retryResult, retryErr) {
 				continue
@@ -319,6 +327,117 @@ func (c *client) releaseAfterSnapshotGuard(
 				deleteErr,
 				"snapshot recovery delete: "+c.formatError(retryResult, retryErr),
 			)
+		}
+	}
+}
+
+type boxDeletionOperation struct {
+	ID          string `json:"id"`
+	Kind        string `json:"kind"`
+	TargetID    string `json:"targetId"`
+	Status      string `json:"status"`
+	CompletedAt string `json:"completedAt"`
+}
+
+type boxDeletionIncompleteError struct {
+	operation boxDeletionOperation
+	err       error
+}
+
+func (e *boxDeletionIncompleteError) Error() string { return e.err.Error() }
+func (e *boxDeletionIncompleteError) Unwrap() error { return e.err }
+
+var boxDeletionIDRE = regexp.MustCompile(`^bdop_[a-f0-9]{32}$`)
+
+func decodeBoxDeletionOperation(output, targetID, operationID string) (boxDeletionOperation, error) {
+	var response struct {
+		Operation *boxDeletionOperation `json:"operation"`
+	}
+	if err := json.Unmarshal([]byte(output), &response); err != nil {
+		return boxDeletionOperation{}, fmt.Errorf("decode ascii-box deletion operation: %w", err)
+	}
+	if response.Operation == nil {
+		return boxDeletionOperation{}, fmt.Errorf("ascii-box deletion operation identity is missing or changed; retaining claim")
+	}
+	operation := *response.Operation
+	if err := validateBoxDeletionOperation(operation, targetID, operationID); err != nil {
+		return boxDeletionOperation{}, err
+	}
+	return operation, nil
+}
+
+func validateBoxDeletionOperation(operation boxDeletionOperation, targetID, operationID string) error {
+	if !boxDeletionIDRE.MatchString(operation.ID) || operation.Kind != "box" || operation.TargetID != targetID || operationID != "" && operation.ID != operationID {
+		return fmt.Errorf("ascii-box deletion operation identity is missing or changed; retaining claim")
+	}
+	switch operation.Status {
+	case "pending", "processing", "blocked":
+	case "completed":
+		completedAt, err := time.Parse(time.RFC3339Nano, operation.CompletedAt)
+		if err != nil || completedAt.IsZero() {
+			return fmt.Errorf("ascii-box deletion operation has no valid completion timestamp; retaining claim")
+		}
+	default:
+		return fmt.Errorf("ascii-box deletion operation has an unknown status; retaining claim")
+	}
+	return nil
+}
+
+func (c *client) GetDeletionOperation(ctx context.Context, targetID, operationID string) (boxDeletionOperation, error) {
+	if !concreteBoxID(targetID) || !boxDeletionIDRE.MatchString(operationID) {
+		return boxDeletionOperation{}, fmt.Errorf("ascii-box deletion lookup requires exact Box and operation IDs")
+	}
+	if err := ctx.Err(); err != nil {
+		return boxDeletionOperation{}, err
+	}
+	result, err := c.run(ctx, "deletion", "status", operationID)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return boxDeletionOperation{}, ctxErr
+	}
+	if err != nil {
+		return boxDeletionOperation{}, fmt.Errorf("ascii-box deletion operation %s lookup failed; retaining claim: %s", operationID, c.formatError(result, err))
+	}
+	return decodeBoxDeletionOperation(result.Stdout, targetID, operationID)
+}
+
+func (c *client) waitForDeletion(ctx context.Context, targetID, output string) (resultErr error) {
+	operation, err := decodeBoxDeletionOperation(output, targetID, "")
+	if err != nil {
+		return err
+	}
+	accepted := operation
+	defer func() {
+		if resultErr != nil {
+			resultErr = &boxDeletionIncompleteError{operation: accepted, err: resultErr}
+		}
+	}()
+	operationID := operation.ID
+	pollInterval := c.releasePollInterval
+	if pollInterval <= 0 {
+		pollInterval = 2 * time.Second
+	}
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("ascii-box deletion operation %s did not complete; retaining claim: %w", operationID, err)
+		}
+		if operation.Status == "completed" {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("ascii-box deletion operation %s did not complete; retaining claim: %w", operationID, ctx.Err())
+		case <-ticker.C:
+		}
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("ascii-box deletion operation %s did not complete; retaining claim: %w", operationID, err)
+		}
+		// Accepted deletion hides normal Box reads, so poll only its exact
+		// operation. Native exit zero alone can still mean pending or blocked.
+		operation, err = c.GetDeletionOperation(ctx, targetID, operationID)
+		if err != nil {
+			return err
 		}
 	}
 }
@@ -672,6 +791,12 @@ func mergeBox(base, update boxData) boxData {
 	}
 	if update.PublicIP != "" {
 		base.PublicIP = update.PublicIP
+	}
+	if update.SSHEndpoint != "" {
+		base.SSHEndpoint = update.SSHEndpoint
+	}
+	if update.SSHEndpointAlt != "" {
+		base.SSHEndpointAlt = update.SSHEndpointAlt
 	}
 	if update.SSHUser != "" {
 		base.SSHUser = update.SSHUser

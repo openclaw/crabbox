@@ -683,6 +683,14 @@ var runEnvProfileTestTerminalReleaseError bool
 var runEnvProfileTestAcquireHook func(AcquireRequest)
 var runEnvProfileTestAcquireLease func(AcquireRequest) (LeaseTarget, error)
 var runEnvProfileTestTouchHook func(TouchRequest) error
+var runEnvProfileTestEvidenceHook func(context.Context, RunFailureEvidenceRequest) (RunFailureEvidenceCollector, error)
+
+func (b runEnvProfileTestBackend) BeginRunFailureEvidence(ctx context.Context, req RunFailureEvidenceRequest) (RunFailureEvidenceCollector, error) {
+	if runEnvProfileTestEvidenceHook != nil {
+		return runEnvProfileTestEvidenceHook(ctx, req)
+	}
+	return nil, nil
+}
 
 func (b runEnvProfileTestBackend) Spec() ProviderSpec { return b.spec }
 func (b runEnvProfileTestBackend) Acquire(_ context.Context, req AcquireRequest) (LeaseTarget, error) {
@@ -3228,56 +3236,92 @@ exit 0
 }
 
 func TestRunCommandWritesTerminalReceiptOnSuccess(t *testing.T) {
-	dir := t.TempDir()
-	isolateRunTestUserDirs(t, dir)
-	sshPath := filepath.Join(dir, "ssh")
-	receiptPath := filepath.Join(dir, "receipt.json")
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	go func() {
-		for {
-			conn, err := listener.Accept()
+	for _, tc := range []struct{ name, raw, capture string }{
+		{name: "unicode", raw: "café € 😀\n"},
+		{name: "malformed", raw: "raw\xff\xfe\n"},
+		{name: "captured stdout", raw: "raw\xff\xfe\n", capture: "stdout"},
+		{name: "captured stderr", raw: "raw\xff\xfe\n", capture: "stderr"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			isolateRunTestUserDirs(t, dir)
+			sshPath := filepath.Join(dir, "ssh")
+			receiptPath := filepath.Join(dir, "receipt.json")
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
 			if err != nil {
-				return
+				t.Fatal(err)
 			}
-			_ = conn.Close()
-		}
-	}()
-	_, sshPort, err := net.SplitHostPort(listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	installWorkspaceOwnerAwareSSH(t, sshPath, "#!/bin/sh\nexit 0\n")
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
-	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+			defer listener.Close()
+			go func() {
+				for {
+					conn, err := listener.Accept()
+					if err != nil {
+						return
+					}
+					_ = conn.Close()
+				}
+			}()
+			_, sshPort, err := net.SplitHostPort(listener.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			payloadPath := filepath.Join(dir, "payload")
+			writeFile(t, payloadPath, tc.raw)
+			t.Setenv("CRABBOX_TEST_LOG_PAYLOAD", payloadPath)
+			redirect := ""
+			if tc.capture == "stderr" {
+				redirect = " >&2"
+			}
+			installWorkspaceOwnerAwareSSH(t, sshPath, "#!/bin/sh\ncase \"$1\" in *unicode-output-sentinel*) cat \"$CRABBOX_TEST_LOG_PAYLOAD\""+redirect+";; esac\nexit 0\n")
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
 
-	var stdout, stderr bytes.Buffer
-	err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
-		"--provider", "run-env-profile-test",
-		"--no-sync",
-		"--attest", receiptPath,
-		"--", "true",
-	})
-	if err != nil {
-		t.Fatalf("runCommand error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
-	}
-	data, err := os.ReadFile(receiptPath)
-	if err != nil {
-		t.Fatalf("read terminal receipt: %v", err)
-	}
-	receipt, err := decodeTerminalRunReceipt(data)
-	if err != nil {
-		t.Fatalf("decode terminal receipt: %v", err)
-	}
-	if receipt.SchemaVersion != terminalReceiptSchemaVersion || receipt.ReceiptType != terminalReceiptType || receipt.ExitCode != 0 {
-		t.Fatalf("receipt=%+v", receipt)
-	}
-	if !strings.Contains(stderr.String(), "artifact kind=receipt") {
-		t.Fatalf("missing terminal receipt output:\n%s", stderr.String())
+			var stdout, stderr bytes.Buffer
+			args := []string{
+				"--provider", "run-env-profile-test",
+				"--no-sync",
+				"--attest", receiptPath,
+			}
+			capturePath := filepath.Join(dir, "capture.raw")
+			if tc.capture != "" {
+				args = append(args, "--capture-"+tc.capture, capturePath)
+			}
+			args = append(args, "--", "unicode-output-sentinel")
+			err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), args)
+			if err != nil {
+				t.Fatalf("runCommand error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+			}
+			data, err := os.ReadFile(receiptPath)
+			if err != nil {
+				t.Fatalf("read terminal receipt: %v", err)
+			}
+			receipt, err := decodeTerminalRunReceipt(data)
+			if err != nil {
+				t.Fatalf("decode terminal receipt: %v", err)
+			}
+			if receipt.SchemaVersion != terminalReceiptSchemaVersion || receipt.ReceiptType != terminalReceiptType || receipt.ExitCode != 0 {
+				t.Fatalf("receipt=%+v", receipt)
+			}
+			if !strings.Contains(stderr.String(), "artifact kind=receipt") {
+				t.Fatalf("missing terminal receipt output:\n%s", stderr.String())
+			}
+
+			if receipt.LogSHA256 != sha256Digest([]byte(tc.raw)) {
+				t.Fatal("receipt lost raw stream digest")
+			}
+			retained, lossy := retainedRunLogText(tc.raw, maxRunLogBytes)
+			if tc.capture != "" {
+				captured, err := os.ReadFile(capturePath)
+				if err != nil || string(captured) != tc.raw {
+					t.Fatalf("raw capture changed: %v", err)
+				}
+				retained, lossy = "", true
+			}
+			if receipt.RetainedLogSHA256 != sha256Digest([]byte(retained)) || receipt.LogTruncated != lossy {
+				t.Fatal("receipt does not bind retained representation")
+			}
+		})
 	}
 }
 
@@ -3818,14 +3862,11 @@ exit 0
 			logText := string(logData)
 			previous := -1
 			for _, want := range []string{"check_artifact_file()", "tar -czf", "base64 <", "rm -f --", "RELEASE"} {
-				index := strings.Index(logText, want)
-				if index < 0 {
+				relative := strings.Index(logText[previous+1:], want)
+				if relative < 0 {
 					t.Fatalf("ssh log missing %q:\n%s", want, logText)
 				}
-				if index <= previous {
-					t.Fatalf("ssh log has %q out of order:\n%s", want, logText)
-				}
-				previous = index
+				previous += relative + 1
 			}
 		})
 	}
@@ -4199,6 +4240,62 @@ exit 0
 	}
 	if strings.Contains(string(logData), "command -v") {
 		t.Fatalf("sync-only should not probe command runtime:\n%s", logData)
+	}
+}
+
+func TestRunCommandEmptyReplacementLists(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		flags     []string
+		auto      bool
+		wantAllow bool
+		wantJUnit bool
+	}{
+		{name: "cleared"},
+		{name: "CLI append and selection", flags: []string{"--allow-env", "BUILD_FLAVOR", "--junit", "new-report.xml"}, wantAllow: true, wantJUnit: true},
+		{name: "auto remains independent", auto: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			dir := t.TempDir()
+			t.Chdir(dir)
+			t.Setenv("CRABBOX_CONFIG", "")
+			logPath := installRecordingSSH(t, dir)
+			for _, name := range []string{"CI", "NODE_OPTIONS", "BUILD_FLAVOR"} {
+				t.Setenv(name, "synthetic-local-proof")
+			}
+			writeReplacementListConfig(t, "crabbox.yaml", fmt.Sprintf("env:\n  allow: [CI, NODE_OPTIONS, BUILD_FLAVOR]\nresults:\n  junit: [old-report.xml]\n  auto: %t\nrun:\n  preflightTools: [cmake]\n", tc.auto))
+			writeReplacementListConfig(t, ".crabbox.yaml", "env:\n  allow: []\nresults:\n  junit: []\nrun:\n  preflightTools: []\n")
+			args := []string{"--provider", "ssh", "--static-host", "127.0.0.1", "--static-user", "runner", "--static-work-root", "/tmp/crabbox-list-test", "--no-sync", "--preflight"}
+			args = append(args, tc.flags...)
+			args = append(args, "--", "true")
+			var stdout, stderr bytes.Buffer
+			if err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), args); err != nil {
+				t.Fatalf("run error=%v\nstderr=%s", err, stderr.String())
+			}
+			data, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			log := string(data)
+			for _, forbidden := range []string{"old-report.xml", "NODE_OPTIONS=", "CI=", "cmake --version"} {
+				if strings.Contains(log, forbidden) {
+					t.Errorf("cleared config reached SSH transport: %s", forbidden)
+				}
+			}
+			if strings.Contains(log, "BUILD_FLAVOR=") != tc.wantAllow {
+				t.Errorf("forwarding BUILD_FLAVOR does not match CLI append=%t", tc.wantAllow)
+			}
+			if strings.Contains(log, "new-report.xml") != tc.wantJUnit {
+				t.Errorf("result collection does not match CLI selection=%t", tc.wantJUnit)
+			}
+			if strings.Contains(log, remoteResultsMarker) != tc.auto {
+				t.Errorf("auto collection marker does not match results.auto=%t", tc.auto)
+			}
+			if !strings.Contains(log, "CRABBOX_RUN_ID=") {
+				t.Error("clearing allowlist removed independent execution metadata")
+			}
+		})
 	}
 }
 
@@ -5257,6 +5354,30 @@ func TestPreflightToolsForTargetFiltersByOS(t *testing.T) {
 	}
 }
 
+func TestPreflightToolsCSVOverridePreservesEmptySemantics(t *testing.T) {
+	for _, value := range []string{" ", ", ,", "go,GO", "none"} {
+		t.Run(value, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv("CRABBOX_PREFLIGHT_TOOLS", value)
+			cfg := baseConfig()
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			want := []string{"go"}
+			if value == "none" {
+				want = nil
+			} else if strings.Trim(value, " ,") == "" {
+				want = preflightToolsForTarget(SSHTarget{TargetOS: targetLinux}, nil)
+			}
+			for _, tools := range [][]string{cfg.Run.PreflightTools, parsePreflightToolsOverride(value)} {
+				if got := preflightToolsForTarget(SSHTarget{TargetOS: targetLinux}, tools); !reflect.DeepEqual(got, want) {
+					t.Fatalf("CSV override=%q probes=%v, want %v", value, got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestWindowsWSL2RemoteCapabilityPreflightUsesBoundedWrapper(t *testing.T) {
 	dir := t.TempDir()
 	logPath := installRecordingSSH(t, dir)
@@ -6035,7 +6156,7 @@ func TestRemoteFailureCaptureCommandAvoidsDuplicateDirectoryChildren(t *testing.
 		t.Fatal(err)
 	}
 
-	command := remoteFailureCaptureCommand(workdir, ".crabbox/capture.tar.gz")
+	command := remoteFailureCaptureCommand(workdir, ".crabbox/capture.tar.gz", "")
 	if out, err := exec.Command("bash", "-lc", command).CombinedOutput(); err != nil {
 		t.Fatalf("capture command failed: %v\n%s", err, out)
 	}
@@ -6090,6 +6211,70 @@ func TestRemoteRemoveFailureCaptureCommandRemovesBundle(t *testing.T) {
 	}
 }
 
+func TestRemoteFailureCaptureSelectsOnlyAvailableScriptFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX capture command")
+	}
+	t.Setenv("COPYFILE_DISABLE", "1")
+	for _, kind := range []string{"file", "missing", "directory", "symlink", "no-script"} {
+		t.Run(kind, func(t *testing.T) {
+			workdir := filepath.Join(t.TempDir(), "work ' space")
+			store := filepath.Join(workdir, ".crabbox", "scripts")
+			if err := os.MkdirAll(store, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			selected := ".crabbox/scripts/abc-current.log"
+			fullPath := filepath.Join(workdir, filepath.FromSlash(selected))
+			switch kind {
+			case "file":
+				if err := os.WriteFile(fullPath, []byte("current bytes"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "directory":
+				if err := os.Mkdir(fullPath, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(fullPath, "junit.xml"), []byte("neighbor"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				if err := os.Symlink("prior.log", fullPath); err != nil {
+					t.Fatal(err)
+				}
+			case "no-script":
+				selected = ""
+			}
+			for _, name := range []string{".crabbox/scripts/prior.log", ".crabbox/scripts/junit.xml", ".crabbox/scripts-other/junit.xml", "other/.crabbox/scripts.log", "test-results/failure.log", "playwright-report/failure.log", "coverage/failure.log", "junit.xml", "results.xml"} {
+				full := filepath.Join(workdir, filepath.FromSlash(name))
+				if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(full, []byte("report"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			command := remoteFailureCaptureCommand(workdir, ".crabbox/capture.tar.gz", selected)
+			if out, err := exec.Command("sh", "-c", command).CombinedOutput(); err != nil {
+				t.Fatalf("capture: %v\n%s", err, out)
+			}
+			entries := readTarGzContents(t, filepath.Join(workdir, ".crabbox/capture.tar.gz"))
+			for name, data := range entries {
+				if strings.HasPrefix(name, ".crabbox/scripts/") && (kind != "file" || name != selected || string(data) != "current bytes") {
+					t.Fatalf("unexpected upload store entry %s", name)
+				}
+			}
+			if kind == "file" && string(entries[selected]) != "current bytes" {
+				t.Fatal("selected script missing")
+			}
+			for _, name := range []string{".crabbox/scripts-other/junit.xml", "other/.crabbox/scripts.log", "test-results/failure.log", "playwright-report/failure.log", "coverage/failure.log", "junit.xml", "results.xml"} {
+				if string(entries[name]) != "report" {
+					t.Fatalf("report lost: %s", name)
+				}
+			}
+		})
+	}
+}
+
 func TestFailureEnvSummaryRedactsSecretValues(t *testing.T) {
 	got := failureEnvSummary([]string{"API_TOKEN", "CI", "MISSING"}, map[string]string{
 		"API_TOKEN": "secret-value",
@@ -6130,7 +6315,7 @@ func TestWriteLocalFailureBundleIncludesMetadataStreamsAndRemoteFiles(t *testing
 	if err := os.WriteFile(filepath.Join(remoteWorkdir, "test-results", "failure.log"), []byte("failure"), 0o666); err != nil {
 		t.Fatal(err)
 	}
-	command := remoteFailureCaptureCommand(remoteWorkdir, ".crabbox/remote.tar.gz")
+	command := remoteFailureCaptureCommand(remoteWorkdir, ".crabbox/remote.tar.gz", "")
 	if out, err := exec.Command("bash", "-lc", command).CombinedOutput(); err != nil {
 		t.Fatalf("remote capture command failed: %v\n%s", err, out)
 	}
@@ -6316,16 +6501,17 @@ func TestNativeWindowsFailureBundleUsesLocalStreams(t *testing.T) {
 		t.Fatal(err)
 	}
 	local, _, err := captureFailureBundle(context.Background(), SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, "C:\\crabbox\\repo", "cbx_win", "run_win", FailureCaptureMetadata{
-		Provider:       "aws",
-		LeaseID:        "cbx_win",
-		RunID:          "run_win",
-		CommandDisplay: "dotnet test --configuration Release",
-		Workdir:        "C:\\crabbox\\repo",
-		ExitCode:       9,
-		Timing:         timingReport{Provider: "aws", LeaseID: "cbx_win", ExitCode: 9},
-		Config:         Config{Provider: "aws", TargetOS: targetWindows, WindowsMode: windowsModeNormal},
-		StdoutPath:     stdoutPath,
-		StderrPath:     stderrPath,
+		Provider:         "aws",
+		LeaseID:          "cbx_win",
+		RunID:            "run_win",
+		CommandDisplay:   "dotnet test --configuration Release",
+		Workdir:          "C:\\crabbox\\repo",
+		RemoteScriptPath: ".crabbox/scripts/current.ps1",
+		ExitCode:         9,
+		Timing:           timingReport{Provider: "aws", LeaseID: "cbx_win", ExitCode: 9},
+		Config:           Config{Provider: "aws", TargetOS: targetWindows, WindowsMode: windowsModeNormal},
+		StdoutPath:       stdoutPath,
+		StderrPath:       stderrPath,
 	})
 	if err != nil {
 		t.Fatal(err)

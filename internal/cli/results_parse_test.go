@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -80,6 +81,118 @@ func TestParseJUnitResultsDerivesFailuresWhenSuiteCountersAreOmitted(t *testing.
 	}
 	if results == nil || results.Failures != 1 || len(results.Failed) != 1 {
 		t.Fatalf("testcase failure was not reflected in aggregate counters: %#v", results)
+	}
+}
+
+func TestParseJUnitResultsNested(t *testing.T) {
+	for _, counters := range []string{` tests="1" failures="1" time="0.25"`, "", ` tests="0" failures="0" errors="0" skipped="0"`} {
+		for _, root := range []string{"testsuite", "testsuites"} {
+			t.Run(root+"/"+counters, func(t *testing.T) {
+				report := `<testsuite name="project"` + counters + `><testsuite name="auth"` + counters + `><testcase name="testLogin" classname="AuthTest" file="tests/AuthTest.php" time="0.25"><failure type="AssertionError" message="expected 200, got 401">details</failure></testcase></testsuite></testsuite>`
+				if root == "testsuites" {
+					report = `<testsuites tests="1" failures="1" time="0.25">` + report + `</testsuites>`
+				}
+				got, err := parseJUnitResults(map[string]string{"junit.xml": report})
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := &TestResultSummary{Format: "junit", Files: []string{"junit.xml"}, Suites: 2, Tests: 1, Failures: 1, TimeSeconds: 0.25,
+					Failed: []TestFailure{{Suite: "auth", Name: "testLogin", Classname: "AuthTest", File: "tests/AuthTest.php", Message: "expected 200, got 401", Type: "AssertionError", Kind: "failure"}}}
+				if !reflect.DeepEqual(got, want) {
+					t.Errorf("nested summary=%+v, want %+v", got, want)
+				}
+				if !failRunForTestResults(0, ResultsConfig{FailOnFailures: true}, got) {
+					t.Error("nested failure did not reject a zero-exit command")
+				}
+				if failRunForTestResults(23, ResultsConfig{FailOnFailures: true}, got) {
+					t.Error("nested failure replaced authoritative command exit")
+				}
+			})
+		}
+	}
+}
+
+func TestParseJUnitResultsNestedAggregation(t *testing.T) {
+	const children = `<testcase name="direct" time="0.25"><failure message=" direct message ">ignored text</failure></testcase>
+<testsuite name="branch"><testsuite name="leaf" tests="3" errors="1" skipped="1" time="1.5">
+<testcase name="broken" classname="Example" file="example_test.go" time="0.5"><error type="RuntimeError"> error text </error></testcase>
+<testcase name="skipped" time="0.25"><skipped/></testcase><testcase name="passed" time="0.75"/>
+</testsuite></testsuite><testsuite name="sibling"><testcase name="last" time="0.25"><failure message=" "> last text </failure></testcase></testsuite>`
+	for _, tc := range []struct {
+		name, attrs                      string
+		tests, failures, errors, skipped int
+		time                             float64
+	}{
+		{"derived", "", 5, 2, 1, 1, 2},
+		{"aggregate", ` tests="5" failures="2" errors="1" skipped="1" time="2"`, 5, 2, 1, 1, 2},
+		{"partial", ` tests="5" time="3"`, 5, 2, 1, 1, 3},
+		{"zero", ` tests="0" failures="0" errors="0" skipped="0" time="0"`, 5, 2, 1, 1, 2},
+		{"omitted tests", ` failures="4" errors="3" skipped="2" time="4"`, 5, 4, 3, 2, 4},
+		{"observed lower bounds", ` tests="1" failures="1" errors="0" skipped="0"`, 1, 2, 1, 1, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseJUnitResults(map[string]string{"junit.xml": `<testsuite name="parent"` + tc.attrs + `>` + children + `</testsuite>`})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := &TestResultSummary{Format: "junit", Files: []string{"junit.xml"}, Suites: 4, Tests: tc.tests, Failures: tc.failures, Errors: tc.errors, Skipped: tc.skipped, TimeSeconds: tc.time,
+				Failed: []TestFailure{
+					{Suite: "parent", Name: "direct", Message: "direct message", Kind: "failure"},
+					{Suite: "leaf", Name: "broken", Classname: "Example", File: "example_test.go", Message: "error text", Type: "RuntimeError", Kind: "error"},
+					{Suite: "sibling", Name: "last", Message: "last text", Kind: "failure"},
+				}}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("summary=%+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+func TestParseJUnitResultsNestedFilesAndMalformedSibling(t *testing.T) {
+	got, err := parseJUnitResults(map[string]string{
+		"z.xml":   `<testsuites><testsuite name="z"><testsuite name="leaf"><testcase name="z"><failure message="last"/></testcase></testsuite></testsuite><testsuite name="sibling" tests="2" skipped="2" time="0.5"/></testsuites>`,
+		"bad.xml": `<testsuite tests="99"><testsuite><testcase name="partial"><failure/></testcase></testsuite>`,
+		"a.xml":   `<testsuite name="a"><testcase name="a"><failure message="first"/><failure>second</failure><error>third</error></testcase></testsuite>`,
+	})
+	if err == nil || !strings.Contains(err.Error(), "skip junit bad.xml") {
+		t.Fatalf("missing malformed-file warning: %v", err)
+	}
+	want := &TestResultSummary{Format: "junit", Files: []string{"a.xml", "z.xml"}, Suites: 4, Tests: 4, Failures: 3, Errors: 1, Skipped: 2, TimeSeconds: 0.5,
+		Failed: []TestFailure{
+			{Suite: "a", Name: "a", Message: "first", Kind: "failure"},
+			{Suite: "a", Name: "a", Message: "second", Kind: "failure"},
+			{Suite: "a", Name: "a", Message: "third", Kind: "error"},
+			{Suite: "leaf", Name: "z", Message: "last", Kind: "failure"},
+		}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("summary=%+v, want %+v", got, want)
+	}
+}
+
+func TestParseJUnitResultsFlatAccounting(t *testing.T) {
+	for _, tc := range []struct {
+		name, report                             string
+		suites, tests, failures, errors, skipped int
+		time                                     float64
+	}{
+		{"reported", `<testsuite tests="7" failures="3" errors="2" skipped="1" time="4"><testcase time="0.25"/></testsuite>`, 1, 7, 3, 2, 1, 4},
+		{"derived", `<testsuite><testcase time="0.25"><failure/><error/><skipped/></testcase></testsuite>`, 1, 1, 1, 1, 1, 0.25},
+		{"zero counters", `<testsuite tests="0" failures="0" errors="0" skipped="0"><testcase time="0.25"><failure/><error/><skipped/></testcase></testsuite>`, 1, 1, 1, 1, 1, 0.25},
+		{"time without counters", `<testsuite time="4"><testcase time="0.25"/></testsuite>`, 1, 1, 0, 0, 0, 0.25},
+		{"wrapper aggregates", `<testsuites tests="99" failures="99" time="99"><testsuite tests="2" time="0.5"/><testsuite tests="3" time="1"/></testsuites>`, 2, 5, 0, 0, 0, 1.5},
+		{"summary only", `<testsuites tests="7" failures="3" errors="2" skipped="1" time="4"/>`, 0, 7, 3, 2, 1, 4},
+		{"empty wrapper", `<testsuites/>`, 0, 0, 0, 0, 0, 0},
+		{"empty suite", `<testsuite/>`, 1, 0, 0, 0, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseJUnitResults(map[string]string{"junit.xml": tc.report})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Suites != tc.suites || got.Tests != tc.tests || got.Failures != tc.failures || got.Errors != tc.errors || got.Skipped != tc.skipped || got.TimeSeconds != tc.time {
+				t.Fatalf("summary=%+v, want %+v", got, tc)
+			}
+		})
 	}
 }
 

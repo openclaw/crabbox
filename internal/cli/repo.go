@@ -184,10 +184,11 @@ func repositoryGitEnvironment() []string {
 }
 
 type gitTrackedPath struct {
-	name         string
-	mode         string
-	stage        int
-	skipWorktree bool
+	name            string
+	mode            string
+	stage           int
+	skipWorktree    bool
+	assumeUnchanged bool
 }
 
 // GitCheckoutHasHiddenOmissions reports whether sparse rules or skip-worktree
@@ -229,7 +230,7 @@ func gitCheckoutSparseEnabled(root string) bool {
 }
 
 func loadGitTrackedPaths(root string) ([]gitTrackedPath, error) {
-	trackedCmd := exec.Command("git", "ls-files", "-t", "--stage", "-z")
+	trackedCmd := exec.Command("git", "ls-files", "-v", "--stage", "-z")
 	trackedCmd.Dir = root
 	trackedCmd.Env = repositoryGitEnvironment()
 	tagged, err := trackedCmd.Output()
@@ -319,10 +320,11 @@ func parseGitTrackedPaths(tagged []byte) ([]gitTrackedPath, error) {
 			return nil, fmt.Errorf("parse tracked path stage %q", fields[2])
 		}
 		tracked = append(tracked, gitTrackedPath{
-			name:         string(name),
-			mode:         mode,
-			stage:        stage,
-			skipWorktree: record[0] == 'S',
+			name:            string(name),
+			mode:            mode,
+			stage:           stage,
+			skipWorktree:    record[0] == 'S' || record[0] == 's',
+			assumeUnchanged: record[0] >= 'a' && record[0] <= 'z',
 		})
 	}
 	return tracked, nil

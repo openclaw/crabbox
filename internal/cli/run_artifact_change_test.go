@@ -226,6 +226,8 @@ func runArtifactChangeE2E(t *testing.T, failureDownloads bool) {
 		{"schema after change", "printf '\"new\"' > proof", "changed", 0, true},
 		{"changed before JUnit", "printf new > proof", "changed", 1, false},
 		{"stale before JUnit", "true", "unchanged", 7, false},
+		{"changed before nested JUnit", "printf new > proof", "changed", 1, false},
+		{"failed before nested JUnit", "exit 23", "not-evaluated", 23, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clearConfigEnv(t)
@@ -276,7 +278,7 @@ exit 0
 			t.Setenv("CRABBOX_WORK_ROOT", remoteRoot)
 			download := filepath.Join(dir, "failed-proof")
 			wantDownload := failureDownloads && tc.status == "not-evaluated" && tc.name != "transport"
-			wantArchive := tc.code == 0 || tc.name == "changed before JUnit"
+			wantArchive := tc.code == 0 || tc.name == "changed before JUnit" || tc.name == "changed before nested JUnit"
 			var stdout, stderr bytes.Buffer
 			releases := 0
 			runEnvProfileTestReleaseHook = func() error {
@@ -310,14 +312,38 @@ exit 0
 				args = append(args, "--require-artifact-schema", "proof=schema.json")
 			}
 			command := tc.command
+			receiptPath := filepath.Join(dir, "receipt.json")
 			if strings.HasSuffix(tc.name, "before JUnit") {
 				args = append(args, "--junit", "junit.xml", "--fail-on-test-failures")
 				command += `; printf '<testsuite tests="1" failures="1"><testcase name="failed"><failure message="expected"/></testcase></testsuite>' > junit.xml`
+			}
+			if strings.HasSuffix(tc.name, "before nested JUnit") {
+				args = append(args, "--junit", "junit.xml", "--fail-on-test-failures", "--attest", receiptPath)
+				command = `printf '<testsuites><testsuite name="project"><testsuite name="leaf"><testcase name="failed"><failure message="expected"/></testcase></testsuite></testsuite></testsuites>' > junit.xml; ` + command
 			}
 			args = append(args, "--", "sh", "-c", command)
 			err = (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), args)
 			if exitCodeForError(err, 0) != tc.code {
 				t.Fatalf("err=%v stdout=%s stderr=%s", err, stdout.String(), stderr.String())
+			}
+			if strings.HasSuffix(tc.name, "before nested JUnit") {
+				if !strings.Contains(stderr.String(), "test results files=1 tests=1 failures=1") {
+					t.Fatalf("nested report not collected and parsed: %s", stderr.String())
+				}
+				data, err := os.ReadFile(receiptPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				receipt, err := decodeTerminalRunReceipt(data)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if receipt.SchemaVersion != terminalReceiptSchemaVersion || receipt.ReceiptType != terminalReceiptType || receipt.ExitCode != tc.code {
+					t.Fatalf("finalized receipt=%+v, want exit %d", receipt, tc.code)
+				}
+				if err := verifyTerminalRunReceiptSignature(receipt); err != nil {
+					t.Fatalf("verify failure receipt: %v", err)
+				}
 			}
 			var report timingReport
 			for _, line := range strings.Split(stderr.String(), "\n") {
@@ -336,6 +362,11 @@ exit 0
 				}
 			} else if len(report.SchemaValidations) != 0 {
 				t.Fatalf("schema ran after stale guard: %+v", report)
+			}
+			if strings.HasSuffix(tc.name, "before nested JUnit") {
+				if report.ExitCode != tc.code || report.RunStatus != "failed" {
+					t.Fatalf("final report lost test/command failure: %+v", report)
+				}
 			}
 			if wantArchive {
 				if len(report.Artifacts) != 1 {
@@ -364,6 +395,13 @@ exit 0
 				t.Fatalf("ineligible failure evidence exists: %q err=%v", data, readErr)
 			}
 			lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+			if strings.HasSuffix(tc.name, "before nested JUnit") {
+				// Failure receipts finalize after the last timing record.
+				if !strings.HasPrefix(lines[len(lines)-1], "artifact kind=receipt path="+receiptPath+" bytes=") {
+					t.Fatalf("failure receipt is not the final artifact: %s", stderr.String())
+				}
+				lines = lines[:len(lines)-1]
+			}
 			if !strings.HasPrefix(lines[len(lines)-1], `{"provider"`) {
 				t.Fatalf("timing report is not the final record: %s", stderr.String())
 			}

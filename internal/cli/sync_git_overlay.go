@@ -4,20 +4,31 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 )
 
 const (
-	gitOverlayFallbackExitCode = 78
-	gitOverlayFallbackMarker   = "CRABBOX_GIT_OVERLAY_FALLBACK:"
-	gitOverlayMutationMarker   = "CRABBOX_GIT_OVERLAY_WORKSPACE_MUTATED"
+	gitOriginRuntimeFallbackExitCode = 78
+	gitOverlayFallbackExitCode       = 78
+	gitOverlayFallbackMarker         = "CRABBOX_GIT_OVERLAY_FALLBACK:"
+	gitOverlayMutationMarker         = "CRABBOX_GIT_OVERLAY_WORKSPACE_MUTATED"
+)
+
+var (
+	gitOriginHTTPServerError = regexp.MustCompile(`(?i)(?:requested URL returned error:[[:space:]]*|HTTP(?:/[0-9.]+)?[[:space:]]+|HTTP code[[:space:]]*=[[:space:]]*)5[0-9][0-9]\b`)
+	gitOriginHTTPAuthError   = regexp.MustCompile(`(?i)authentication (?:failed|required)|could not read Username|unable to get password|terminal prompts disabled|access denied|permission denied|HTTP(?:/[0-9.]+)?[[:space:]]+(?:401|403)\b|requested URL returned error:[[:space:]]*(?:401|403)\b`)
+	gitOriginTransportError  = regexp.MustCompile(`(?i)Could not resolve (?:host|proxy)|Could not resolve hostname|Failed to connect|Couldn.t connect to server|Connection (?:refused|timed out|reset by peer)|Operation timed out|Network is unreachable|No route to host|SSL certificate problem|server certificate verification failed|TLS connect error|SSL connect error|gnutls_handshake\(\) failed|Empty reply from server|Recv failure|Send failure|Failed sending data to the peer`)
+	gitOriginHTTPNotFound    = regexp.MustCompile(`(?i)\brepository not found\b`)
+	gitOriginFilesystemError = regexp.MustCompile(`(?i)does not appear to be a git repository|repository .* does not exist|No such file or directory|Permission denied|unable to access`)
 )
 
 var gitOverlayTransformAttributes = []string{
@@ -30,11 +41,20 @@ type gitOverlayDecision struct {
 	Reason    string
 }
 
+type gitOriginDisposition uint8
+
+const (
+	gitOriginAbsent gitOriginDisposition = iota
+	gitOriginRemoteAttemptSafe
+	gitOriginNonForwardable
+)
+
 func decideGitOverlay(cfg Config, repo Repo, target SSHTarget, manifest SyncManifest, coherence gitCoherencePlan, credentialBlocked, fullResync, hydratedByActions bool) gitOverlayDecision {
 	decision := gitOverlayDecision{Requested: cfg.Sync.GitOverlay}
 	if !decision.Requested {
 		return decision
 	}
+	originDisposition := classifyGitOrigin(repo.RemoteURL)
 	switch {
 	case target.TargetOS != targetLinux || isWindowsNativeTarget(target) || isWindowsWSL2Target(target):
 		decision.Reason = "unsupported_target"
@@ -50,7 +70,9 @@ func decideGitOverlay(cfg Config, repo Repo, target SSHTarget, manifest SyncMani
 		decision.Reason = "include_whitelist"
 	case credentialBlocked || gitRemoteURLHasCredentials(repo.RemoteURL):
 		decision.Reason = "credential_origin"
-	case !gitOverlayOriginTransportSupported(repo.RemoteURL) || !gitOverlayOriginTransportSupported(coherence.RemoteURL):
+	case originDisposition == gitOriginAbsent:
+		decision.Reason = "missing_origin"
+	case originDisposition != gitOriginRemoteAttemptSafe || !gitOverlayOriginTransportSupported(coherence.RemoteURL):
 		decision.Reason = "unsupported_origin_transport"
 	case !coherence.enabled():
 		decision.Reason = "unseedable_head"
@@ -65,25 +87,38 @@ func decideGitOverlay(cfg Config, repo Repo, target SSHTarget, manifest SyncMani
 }
 
 func gitOverlayOriginTransportSupported(remoteURL string) bool {
+	return classifyGitOrigin(remoteURL) == gitOriginRemoteAttemptSafe
+}
+
+func classifyGitOrigin(remoteURL string) gitOriginDisposition {
 	raw := strings.TrimSpace(remoteURL)
-	if raw == "" || gitRemoteURLHasCredentials(raw) {
-		return false
+	if raw == "" {
+		return gitOriginAbsent
+	}
+	if gitRemoteURLHasCredentials(raw) || strings.ContainsAny(raw, "?#") {
+		return gitOriginNonForwardable
 	}
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return false
+	if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.Opaque != "" {
+		return gitOriginNonForwardable
 	}
 	if parsed.Scheme != "" {
 		switch strings.ToLower(parsed.Scheme) {
 		case "http", "https":
-			return parsed.Host != ""
+			if parsed.Host != "" {
+				return gitOriginRemoteAttemptSafe
+			}
 		case "file":
-			return parsed.Host == "" || strings.EqualFold(parsed.Host, "localhost")
-		default:
-			return false
+			if parsed.Path != "" && (parsed.Host == "" || strings.EqualFold(parsed.Host, "localhost")) {
+				return gitOriginRemoteAttemptSafe
+			}
 		}
+		return gitOriginNonForwardable
 	}
-	return !strings.Contains(raw, ":") && !strings.HasPrefix(raw, "-")
+	if parsed.Host != "" || strings.HasPrefix(raw, "//") || strings.Contains(raw, ":") || strings.HasPrefix(raw, "-") {
+		return gitOriginNonForwardable
+	}
+	return gitOriginRemoteAttemptSafe
 }
 
 func validateGitOverlayManifest(repo Repo, manifest SyncManifest) error {
@@ -109,6 +144,9 @@ func validateGitOverlayManifest(repo Repo, manifest SyncManifest) error {
 		}
 		if entry.skipWorktree {
 			return fmt.Errorf("skip_worktree")
+		}
+		if entry.assumeUnchanged {
+			return fmt.Errorf("assume_unchanged_index")
 		}
 		if entry.mode == "160000" {
 			return fmt.Errorf("gitlink")
@@ -345,6 +383,31 @@ func gitOverlayFallbackResult(output string, err error) (string, bool) {
 	return reason, fallback
 }
 
+func gitOriginRuntimeFallbackResult(remoteURL, output string, err error) (string, bool) {
+	if err == nil || exitCode(err) != gitOriginRuntimeFallbackExitCode {
+		return "", false
+	}
+	var truncated *gitOriginDiagnosticsTruncatedError
+	if errors.As(err, &truncated) {
+		return "", false
+	}
+	parsed, parseErr := url.Parse(strings.TrimSpace(remoteURL))
+	isHTTP := parseErr == nil && (strings.EqualFold(parsed.Scheme, "http") || strings.EqualFold(parsed.Scheme, "https"))
+	switch {
+	case isHTTP && gitOriginHTTPAuthError.MatchString(output):
+		return "origin_auth_required", true
+	case isHTTP && gitOriginHTTPServerError.MatchString(output):
+		return "", false
+	case gitOriginTransportError.MatchString(output):
+		return "origin_unavailable", true
+	case isHTTP && gitOriginHTTPNotFound.MatchString(output):
+		return "origin_auth_required", true
+	case !isHTTP && gitOriginFilesystemError.MatchString(output):
+		return "origin_unavailable", true
+	}
+	return "", false
+}
+
 func gitOverlayFallbackOutcome(output string, err error) (string, bool, bool) {
 	if err == nil || exitCode(err) != gitOverlayFallbackExitCode {
 		return "", false, false
@@ -367,9 +430,32 @@ func gitOverlayFallbackOutcome(output string, err error) (string, bool, bool) {
 	return reason, true, mutated
 }
 
+// Hidden index flags omit worktree changes from ordinary fingerprint inputs.
+func gitOverlayLocalFingerprintUnsafe(root string) bool {
+	tracked, err := loadGitTrackedPaths(root)
+	if err != nil {
+		return true
+	}
+	for _, entry := range tracked {
+		if entry.skipWorktree || entry.assumeUnchanged {
+			return true
+		}
+	}
+	return false
+}
+
+func gitOverlayFallbackInvalidatesFingerprint(reason string) bool {
+	switch reason {
+	case "assume_unchanged_index", "skip_worktree_index", "index_inspection_failed":
+		return true
+	default:
+		return false
+	}
+}
+
 func gitOverlayBoundaryViolation(reason string) bool {
 	switch reason {
-	case "unsafe_remote_root", "symlink_remote_root", "symlink_git_directory", "symlink_git_config", "symlink_git_objects", "unsafe_overlay_metadata", "unsafe_runtime_state":
+	case "unsafe_remote_root", "symlink_remote_root", "symlink_remote_parent", "symlink_git_directory", "symlink_git_config", "symlink_git_objects", "symlink_git_info", "symlink_git_attributes", "symlink_git_exclude", "symlink_git_objects_info", "symlink_git_alternates", "unsafe_git_metadata", "unsafe_overlay_metadata", "unsafe_runtime_state":
 		return true
 	default:
 		return false
@@ -398,11 +484,21 @@ overlay_workspace_safe() {
   [ -d "$checkout_root/.git" ] && [ ! -L "$checkout_root/.git" ] || return 1
   [ -f "$checkout_root/.git/config" ] && [ ! -L "$checkout_root/.git/config" ] || return 1
   [ -d "$checkout_root/.git/objects" ] && [ ! -L "$checkout_root/.git/objects" ] || return 1
+  for metadata_dir in "$checkout_root/.git/info" "$checkout_root/.git/objects/info"; do
+    if [ -e "$metadata_dir" ] || [ -L "$metadata_dir" ]; then
+      [ -d "$metadata_dir" ] && [ ! -L "$metadata_dir" ] || return 1
+    fi
+  done
+  for metadata_file in "$checkout_root/.git/info/attributes" "$checkout_root/.git/info/exclude" "$checkout_root/.git/objects/info/alternates"; do
+    if [ -e "$metadata_file" ] || [ -L "$metadata_file" ]; then
+      [ -f "$metadata_file" ] && [ ! -L "$metadata_file" ] || return 1
+    fi
+  done
   [ ! -s "$checkout_root/.git/objects/info/alternates" ] || return 1
   [ ! -s "$checkout_root/.git/info/attributes" ] || return 1
   set +e
   unsafe_keys="$(git config --file "$checkout_root/.git/config" --no-includes --name-only --get-regexp \
-    '^(include([.]|$)|includeif[.]|url[.].*[.](insteadof|pushinsteadof)|protocol([.]|$)|http([.]|$)|credential([.]|$)|filter[.]|extensions[.]worktreeconfig|core[.](hookspath|attributesfile|excludesfile|fsmonitor|gitproxy|sshcommand|worktree)|remote[.].*[.](uploadpack|receivepack|proxy|vcs))' 2>/dev/null)"
+    '^(include([.]|$)|includeif[.]|url[.].*[.](insteadof|pushinsteadof)|protocol([.]|$)|http([.]|$)|credential([.]|$)|filter[.]|extensions[.]worktreeconfig|core[.](hookspath|attributesfile|excludesfile|fsmonitor|gitproxy|sshcommand|alternaterefscommand|worktree)|remote[.].*[.](uploadpack|receivepack|proxy|vcs))' 2>/dev/null)"
   config_status=$?
   set -e
   { [ "$config_status" -eq 0 ] || [ "$config_status" -eq 1 ]; } && [ -z "$unsafe_keys" ] || return 1
@@ -446,11 +542,33 @@ overlay_runtime_state_safe() {
     if [ -L "$runtime_path" ] || { [ -e "$runtime_path" ] && [ ! -d "$runtime_path" ]; }; then return 1; fi
   done
 }
+overlay_git_metadata_safe() (
+  checkout_root="$(cd -P -- "$1" 2>/dev/null && pwd -P)" || return 1
+  checkout_git_dir="$(git -C "$checkout_root" rev-parse --absolute-git-dir 2>/dev/null)" || return 1
+  [ ! -L "$checkout_root/.git" ] && [ -d "$checkout_root/.git" ] || return 1
+  checkout_git_dir="$(cd -P -- "$checkout_git_dir" 2>/dev/null && pwd -P)" || return 1
+  [ "$checkout_git_dir" = "$checkout_root/.git" ] || return 1
+  for metadata_dir in objects refs logs; do
+    metadata_path="$checkout_git_dir/$metadata_dir"
+    if [ -e "$metadata_path" ] || [ -L "$metadata_path" ]; then
+      [ ! -L "$metadata_path" ] && [ -d "$metadata_path" ] || return 1
+      [ "$(cd -P -- "$metadata_path" 2>/dev/null && pwd -P)" = "$metadata_path" ] || return 1
+      if ! /usr/bin/find -P "$metadata_path" -type l -print -quit > "$git_runtime_root/git-metadata-symlinks"; then return 1; fi
+      [ ! -s "$git_runtime_root/git-metadata-symlinks" ] || return 1
+    fi
+  done
+  for metadata_file in HEAD config config.worktree index packed-refs shallow; do
+    metadata_path="$checkout_git_dir/$metadata_file"
+    if [ -e "$metadata_path" ] || [ -L "$metadata_path" ]; then
+      [ ! -L "$metadata_path" ] && [ -f "$metadata_path" ] || return 1
+    fi
+  done
+)
 `
 }
 
 func remoteGitOverlayShellCommand(script string) string {
-	return "/usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /bin/bash --noprofile --norc -c " + shellQuote(script)
+	return "/usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C BASH_ENV=/dev/null ENV=/dev/null /bin/bash --noprofile --norc -c " + shellQuote(script)
 }
 
 func remotePrepareGitOverlay(workdir string, plan gitCoherencePlan) string {
@@ -479,10 +597,17 @@ overlay_fallback() {
 }
 case "$workdir" in "$parent"/*) ;; *) overlay_fallback unsafe_remote_root ;; esac
 if [ -L "$workdir" ]; then overlay_fallback symlink_remote_root; fi
+if [ -L "$parent" ]; then overlay_fallback symlink_remote_parent; fi
 for prerequisite in /bin/bash /bin/mkdir /bin/rm /bin/mv /bin/cp /usr/bin/env /usr/bin/git /usr/bin/find /usr/bin/mktemp /usr/bin/awk /usr/bin/grep; do
   [ -x "$prerequisite" ] || overlay_fallback remote_prerequisite_missing
 done
 /bin/mkdir -p "$parent"
+canonical_parent="$(cd -P -- "$parent" 2>/dev/null && pwd -P)" || overlay_fallback symlink_remote_parent
+git_overlay_parent_safe() {
+  [ ! -L "$parent" ] && [ -d "$parent" ] || return 1
+  [ "$(cd -P -- "$parent" 2>/dev/null && pwd -P)" = "$canonical_parent" ]
+}
+git_overlay_parent_safe || overlay_fallback symlink_remote_parent
 git_runtime_root="$(/usr/bin/mktemp -d "$parent/.overlay-git.XXXXXX")" || overlay_fallback remote_prerequisite_missing
 seed_tmp=
 baseline_tmp=
@@ -509,7 +634,7 @@ if [ "$transport_status" -ne 0 ]; then
   if /usr/bin/grep -Eiq 'authentication (failed|required)|could not read Username|unable to get password|terminal prompts disabled|access denied|permission denied|HTTP.*(401|403)|requested URL returned error: (401|403)|repository not found' "$git_runtime_root/transport-error"; then
     overlay_fallback origin_auth_required
   fi
-  case "$expected_origin" in http://*|https://*) /bin/cat "$git_runtime_root/transport-error" >&2; exit "$transport_status" ;; *) overlay_fallback origin_unavailable ;; esac
+  overlay_fallback origin_unavailable
 fi
 if ! /usr/bin/grep -Eq 'packet:.*< fetch=.*filter' "$git_runtime_root/packets"; then
   overlay_fallback filtered_history_unsupported
@@ -525,7 +650,13 @@ if [ -e "$workdir/.git" ] || [ -L "$workdir/.git" ]; then
 	if [ -L "$workdir/.git" ]; then overlay_fallback symlink_git_directory; fi
 	if [ -L "$workdir/.git/config" ]; then overlay_fallback symlink_git_config; fi
 	if [ -L "$workdir/.git/objects" ]; then overlay_fallback symlink_git_objects; fi
+  if [ -L "$workdir/.git/info" ]; then overlay_fallback symlink_git_info; fi
+  if [ -L "$workdir/.git/info/attributes" ]; then overlay_fallback symlink_git_attributes; fi
+  if [ -L "$workdir/.git/info/exclude" ]; then overlay_fallback symlink_git_exclude; fi
+  if [ -L "$workdir/.git/objects/info" ]; then overlay_fallback symlink_git_objects_info; fi
+  if [ -L "$workdir/.git/objects/info/alternates" ]; then overlay_fallback symlink_git_alternates; fi
   overlay_workspace_safe "$workdir" || overlay_fallback unsafe_git_workspace
+  overlay_git_metadata_safe "$workdir" || overlay_fallback unsafe_git_metadata
   overlay_metadata_safe "$workdir" || overlay_fallback unsafe_overlay_metadata
   overlay_runtime_state_safe "$workdir" || overlay_fallback unsafe_runtime_state
   [ "$(git -C "$workdir" remote get-url origin 2>/dev/null || true)" = "$expected_origin" ] || overlay_fallback origin_mismatch
@@ -533,6 +664,7 @@ elif [ -d "$workdir" ]; then
   overlay_fallback non_git_workspace
 fi
 if [ ! -d "$workdir/.git" ]; then
+  git_overlay_parent_safe || overlay_fallback symlink_remote_parent
   seed_tmp="$(/usr/bin/mktemp -d "$parent/.overlay-seed.XXXXXX")"
   git init --quiet "$seed_tmp" || overlay_fallback checkout_init_failed
   git -C "$seed_tmp" remote add origin "$expected_origin" || overlay_fallback checkout_init_failed
@@ -558,8 +690,7 @@ if [ "$transport_status" -ne 0 ]; then
   if /usr/bin/grep -Eiq 'authentication (failed|required)|could not read Username|unable to get password|terminal prompts disabled|access denied|permission denied|HTTP.*(401|403)|requested URL returned error: (401|403)|repository not found' "$git_runtime_root/transport-error"; then
     overlay_fallback origin_auth_required
   fi
-  /bin/cat "$git_runtime_root/transport-error" >&2
-  exit "$transport_status"
+  overlay_fallback origin_unavailable
 fi
 if /usr/bin/grep -Eiq 'filtering not recognized|filtering not supported|server does not support filter' "$git_runtime_root/transport-error"; then
   overlay_fallback filtered_history_unsupported
@@ -572,23 +703,35 @@ git -C "$checkout_root" merge-base --is-ancestor "$expected_target" "$fetched_br
 if [ -n "$base_ref" ] && [ "$(git -C "$checkout_root" rev-parse --verify "refs/remotes/origin/$base_ref^{commit}" 2>/dev/null || true)" != "$expected_base" ]; then
   overlay_fallback base_ref_mismatch
 fi
+git -C "$checkout_root" ls-files -t -z >"$git_runtime_root/index-skip-flags" || overlay_fallback index_inspection_failed
+while IFS= read -r -d '' index_entry; do
+  case "$index_entry" in
+    S\ *) overlay_fallback skip_worktree_index ;;
+  esac
+done <"$git_runtime_root/index-skip-flags"
+git -C "$checkout_root" ls-files -v -z >"$git_runtime_root/index-assume-flags" || overlay_fallback index_inspection_failed
+while IFS= read -r -d '' index_entry; do
+  case "$index_entry" in
+    [a-z]\ *) overlay_fallback assume_unchanged_index ;;
+  esac
+done <"$git_runtime_root/index-assume-flags"
 overlay_metadata_safe "$checkout_root" || overlay_fallback unsafe_overlay_metadata
 if [ -f "$checkout_root/.git/crabbox/sync-manifest" ]; then
   /bin/cp -- "$checkout_root/.git/crabbox/sync-manifest" "$git_runtime_root/previous-manifest"
 fi
 /bin/mkdir -p "$checkout_root/.git/crabbox"
 overlay_metadata_safe "$checkout_root" || overlay_fallback unsafe_overlay_metadata
-baseline_tmp="$checkout_root/.git/crabbox/sync-manifest.overlay.$$"
-if [ -e "$baseline_tmp" ] || [ -L "$baseline_tmp" ]; then overlay_fallback unsafe_overlay_metadata; fi
+baseline_tmp="$(/usr/bin/mktemp "$checkout_root/.git/crabbox/sync-manifest.overlay.XXXXXX")" || overlay_fallback baseline_failed
 if [ -f "$git_runtime_root/previous-manifest" ]; then
   /bin/cp -- "$git_runtime_root/previous-manifest" "$baseline_tmp" || overlay_fallback baseline_failed
 else
-  (set -C; : > "$baseline_tmp") || overlay_fallback baseline_failed
+  : > "$baseline_tmp" || overlay_fallback baseline_failed
 fi
 git -C "$checkout_root" ls-tree -r -z --name-only --full-tree "$expected_target" >> "$baseline_tmp" || overlay_fallback baseline_failed
 /bin/mv -- "$baseline_tmp" "$checkout_root/.git/crabbox/sync-manifest" || overlay_fallback baseline_failed
 baseline_tmp=
 if [ -n "$seed_tmp" ]; then
+  git_overlay_parent_safe || overlay_fallback symlink_remote_parent
   /bin/mv -- "$seed_tmp" "$workdir"
   seed_tmp=
 fi
@@ -609,10 +752,11 @@ clean_args=(-ffdx --quiet -e /.crabbox/)
   \( -type d -o -type l \) \( -iname node_modules -o -iname .pnpm-store -o -ipath '*/.yarn/cache' -o -ipath '*/.yarn/unplugged' \) \
   -print0 -prune >"$git_runtime_root/cache-paths" || overlay_fallback cache_discovery_failed
 while IFS= read -r -d '' cache_path; do
+  cache_lookup_path="$cache_path"
   cache_path="${cache_path#./}"
   if [ -L "$cache_path" ]; then overlay_fallback unsafe_cache_root; fi
   set +e
-  printf '%s\0' "$cache_path" | git check-ignore --no-index -v -z --stdin >"$git_runtime_root/cache-ignore" 2>/dev/null
+  printf '%s\0' "$cache_lookup_path" | git check-ignore --no-index -v -z --stdin >"$git_runtime_root/cache-ignore" 2>/dev/null
   ignore_status=$?
   set -e
   if [ "$ignore_status" -eq 1 ]; then continue; fi

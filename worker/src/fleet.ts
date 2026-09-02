@@ -437,6 +437,7 @@ const maxPendingWebVNCBytes = 1024 * 1024;
 const maxCodeWebSocketFrameChunkBytes = 15 * 1024;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
+const runLogTextDecoder = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true });
 const fatalTextDecoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
 const awsOrphanSweepRecordKey = "aws-orphan-sweep:last";
 const awsOrphanSweepFirstAlarmKey = "aws-orphan-sweep:first-alarm";
@@ -12214,7 +12215,7 @@ export class FleetCoordinator {
         }
         const existingPoolEntries = [
           ...(await this.readyPoolEntries()),
-          ...(typed ? await this.readyPoolEntries(true) : []),
+          ...(await this.readyPoolEntries(true)),
         ].filter((entry) => entry.leaseID === leaseID);
         if (existingPoolEntries.some((entry) => entry.state === "busy")) {
           return json(
@@ -12222,6 +12223,12 @@ export class FleetCoordinator {
               error: "lease_pool_busy",
               message: "lease is currently borrowed from a ready pool",
             },
+            { status: 409 },
+          );
+        }
+        if (existingPoolEntries.some((entry) => entry.state === "quarantined")) {
+          return json(
+            { error: "pool_entry_quarantined", message: "quarantined leases must be drained" },
             { status: 409 },
           );
         }
@@ -12316,6 +12323,13 @@ export class FleetCoordinator {
         const entries = (await this.readyPoolStatusSnapshot(request, key, typed)).filter((entry) =>
           readyPoolEntryMatches(entry, input),
         );
+        // Older coordinators could register the same lease in both namespaces.
+        // Preserve an existing borrow or quarantine instead of lending its duplicate.
+        const unavailableLeases = new Set(
+          (await this.readyPoolEntries(!typed))
+            .filter((entry) => entry.state === "busy" || entry.state === "quarantined")
+            .map((entry) => entry.leaseID),
+        );
         const leases = new Map((await this.leaseRecords()).map((lease) => [lease.id, lease]));
         const nowMs = Date.now();
         const candidates: Array<{ entry: ReadyPoolEntry; lease: LeaseRecord }> = [];
@@ -12325,6 +12339,7 @@ export class FleetCoordinator {
           if (
             lease &&
             entry.state === "ready" &&
+            !unavailableLeases.has(entry.leaseID) &&
             lease.state === "active" &&
             Date.parse(lease.expiresAt) > nowMs
           ) {
@@ -12717,6 +12732,21 @@ export class FleetCoordinator {
           { status: 400 },
         );
       }
+      const nowMs = Date.now();
+      const deadline = readyPoolBorrowDeadline(current);
+      if (
+        result === "ready" &&
+        current.state === "busy" &&
+        deadline !== undefined &&
+        deadline <= nowMs
+      ) {
+        await this.quarantineReadyPoolEntry(current, "borrow heartbeat expired", nowMs, typed);
+        await this.state.runExclusive(() => this.scheduleAlarm());
+        return json(
+          { error: "borrow_expired", message: "pool borrow heartbeat expired" },
+          { status: 409 },
+        );
+      }
       if ((current.state === "quarantined" || current.state === "stale") && result === "ready") {
         return json(
           {
@@ -12786,23 +12816,8 @@ export class FleetCoordinator {
   ): ReadyPoolEntry {
     const now = new Date().toISOString();
     const failures = state === "ready" ? 0 : (current.failureCount ?? 0) + 1;
-    const {
-      borrowedAt: _borrowedAt,
-      borrowedBy: _borrowedBy,
-      borrowHeartbeatRequired: _borrowHeartbeatRequired,
-      borrowHeartbeatAt: _borrowHeartbeatAt,
-      borrowExpiresAt: _borrowExpiresAt,
-      borrowToken: _borrowToken,
-      ...base
-    } = current;
-    void _borrowedAt;
-    void _borrowedBy;
-    void _borrowHeartbeatRequired;
-    void _borrowHeartbeatAt;
-    void _borrowExpiresAt;
-    void _borrowToken;
     const returned: ReadyPoolEntry = {
-      ...base,
+      ...withoutReadyPoolBorrow(current),
       state,
       lastResult: nonSecretString(reason) || state,
       failureCount: failures,
@@ -22621,13 +22636,12 @@ function normalizeRunLogInput(input: RunFinishRequest): {
     ? input.logChunks.map((chunk) => String(chunk)).join("")
     : "";
   const rawLog = chunkLog || input.log || "";
-  const bounded = truncateUtf8Tail(rawLog, maxStoredRunLogBytes);
-  const rawBytes = textEncoder.encode(rawLog).byteLength;
+  const bounded = retainedRunLogText(rawLog, maxStoredRunLogBytes);
   return {
     log: bounded,
     source: rawLog,
-    bytes: Math.min(rawBytes, maxStoredRunLogBytes),
-    truncated: Boolean(input.logTruncated) || rawBytes > maxStoredRunLogBytes,
+    bytes: textEncoder.encode(bounded).byteLength,
+    truncated: Boolean(input.logTruncated) || bounded !== rawLog,
   };
 }
 
@@ -22641,7 +22655,7 @@ async function writeTerminalRunLog(
     return;
   }
   await Promise.all(
-    splitRunLogByBytes(log, runLogChunkBytes).map((chunk, index) =>
+    splitRunLogByBytes(log).map((chunk, index) =>
       storage.put(terminalRunLogChunkKey(prefix, index), chunk),
     ),
   );
@@ -22661,32 +22675,24 @@ async function deleteStoragePrefix(
   }
 }
 
-function splitRunLogByBytes(log: string, maxBytes: number): string[] {
+function splitRunLogByBytes(log: string): string[] {
+  const encoded = textEncoder.encode(log);
   const chunks: string[] = [];
-  let current = "";
-  let currentBytes = 0;
-  for (const char of log) {
-    const charBytes = textEncoder.encode(char).byteLength;
-    if (current && currentBytes + charBytes > maxBytes) {
-      chunks.push(current);
-      current = "";
-      currentBytes = 0;
-    }
-    current += char;
-    currentBytes += charBytes;
-  }
-  if (current) {
-    chunks.push(current);
+  for (let start = 0; start < encoded.byteLength;) {
+    let end = Math.min(start + runLogChunkBytes, encoded.byteLength);
+    while (end < encoded.byteLength && (encoded[end]! & 0xc0) === 0x80) end--;
+    chunks.push(runLogTextDecoder.decode(encoded.subarray(start, end)));
+    start = end;
   }
   return chunks;
 }
 
-function truncateUtf8Tail(value: string, maxBytes: number): string {
+function retainedRunLogText(value: string, maxBytes: number): string {
   const encoded = textEncoder.encode(value);
-  if (encoded.byteLength <= maxBytes) {
-    return value;
-  }
-  return textDecoder.decode(encoded.slice(encoded.byteLength - maxBytes));
+  let start = Math.max(0, encoded.byteLength - maxBytes);
+  while (start < encoded.byteLength && (encoded[start]! & 0xc0) === 0x80) start++;
+  // Normalize lone surrogates even below the cap, but preserve a literal BOM.
+  return runLogTextDecoder.decode(encoded.subarray(start));
 }
 
 const MAX_RESULT_FILES = 50;

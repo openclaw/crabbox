@@ -558,8 +558,8 @@ it to commands, print it, or store it in repo config.
 ## Release Integrity
 
 Production releases use separate trust domains and serialized mutation gates;
-no tag push or repository event automatically publishes assets or changes the
-Homebrew tap. The source identity is an annotated `vMAJOR.MINOR.PATCH` tag whose
+no tag push or repository event automatically publishes assets. Public stable
+releases are eligible for ordinary tap updates and independent reconciliation. The source identity is an annotated `vMAJOR.MINOR.PATCH` tag whose
 signature verifies against the repository-pinned signer policy. Verification
 captures the exact tag-object and peeled commit IDs, confirms the remote tag has
 not moved, and requires the peeled commit to be an ancestor of protected
@@ -603,20 +603,29 @@ alone do not. Trust domains, sequential technical gates, credential isolation,
 identity binding, exact frozen inputs, immutability, actual exclusive-writer
 coordination, and cancellation boundaries remain mandatory. Authorization is
 not evidence of an administrative freeze. Publication changes only the verified
-draft state. Fresh public verification must finish after every release mutation,
-and public Go-install proof must succeed before the Homebrew update can begin.
-Homebrew proof re-fetches the current public record and exact successful public
-verifier run without credentials, authenticates both native proof ZIPs against
-GitHub's published artifact digests, requires the run to postdate publication
-and every release or asset update, binds formula URLs and checksums to that
-record, installs on a clean host, and re-verifies the installed binary and
-helper. It repeats the complete public metadata/proof comparison after the
-installed-candidate execution and fails if anything changed during the gate.
+draft state. Publication establishes eligibility for the existing ordinary tap
+updater. The explicit operator handoff supplies four validated archive names
+and hashes; public native and public Go installation smokes neither authorize
+nor delay it. A Homebrew failure is retried independently without rebuilding,
+creating another draft, or republishing.
+
+Homebrew verification anonymously validates the immutable public release and
+exact asset bytes before static artifact checks and installation. It needs no
+public run ID, native proof ZIP, witness, or post-candidate public approval
+state. Tap maintainers own executable formulae, evaluated only in a fresh,
+credential-free environment. Homebrew's structured metadata binds the native
+formula identity, version, URL, and checksum; it is not a Ruby sandbox or
+whole-formula ownership contract. Fresh fetch/install, installed-byte equality,
+architecture, signature/notarization, exact version, and arm64 helper/VMD trust
+checks remain. Both native architectures are independent installation smokes;
+the ordinary updater owns all four maintained URL/hash routes.
 
 Cancellation is fail-closed and non-destructive. Operators record the exact
 draft, public release, assets, and tap state, but never heuristically delete a
 partial release, replace assets, rewrite a tag, redispatch, publish, or change
-Homebrew while the gate is stopped. See [Release engineering](RELEASING.md) for
+Homebrew while the operator is stopped. This cannot stop independent tap
+reconciliation of a release already made public; a global stop needs separate
+administrative intervention. See [Release engineering](RELEASING.md) for
 the complete record and gate sequence.
 
 The preserved `v0.37.0` tag is explicitly publication-blocked in its protected

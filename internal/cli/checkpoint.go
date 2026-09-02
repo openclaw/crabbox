@@ -664,6 +664,10 @@ func (a App) readCheckpointRecord(ctx context.Context, store checkpointStore, id
 	previous := record
 	remote, err := coord.Checkpoint(ctx, id)
 	if err != nil {
+		// Both authorities must be missing; surviving cache evidence remains an error.
+		if isCheckpointNotFound(localErr) && isCoordinatorCheckpointNotFound(err) {
+			err = localErr
+		}
 		return checkpointRecord{}, checkpointPaths{}, err
 	}
 	record, err = checkpointRecordFromCoordinator(remote, origin)
@@ -1925,7 +1929,7 @@ func (a App) checkpointDelete(ctx context.Context, args []string) error {
 	if !*localOnly && (localErr != nil || !record.coordinatorManaged()) {
 		record, _, err = a.readCheckpointRecord(ctx, store, id)
 		if err != nil {
-			if isCheckpointNotFound(err) || isCheckpointNotFound(localErr) && isCoordinatorCheckpointNotFound(err) {
+			if isCheckpointNotFound(err) {
 				fmt.Fprintf(a.Stdout, "checkpoint absent id=%s\n", id)
 				return nil
 			}

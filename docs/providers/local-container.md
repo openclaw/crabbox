@@ -162,11 +162,42 @@ is reported as `resource_exhaustion=memory`; an OOM from an earlier command on a
 reused lease does not classify a later ordinary failure. Docker/Podman cgroup
 paths and counter parsing remain inside this provider.
 
-The failure digest marks this condition non-retryable with the unchanged
-configuration and suggests increasing `localContainer.memory` (or
-`--local-container-memory`) or reducing workload concurrency. If cgroup evidence
-cannot be read, Crabbox prints a diagnostic warning and preserves the original
-command failure and ordinary user-command classification.
+If the post-command counter cannot be read, a newly observed runtime
+`OOMKilled` transition can also establish OOM; a prior `OOMKilled=true`, reset
+counter, or exit 137 alone cannot. Evidence read failures are warnings and
+preserve the original exit and ordinary failure classification.
+
+After positive OOM evidence, the adapter optionally observes capacity through
+the same captured runtime/context/connection, with a 500ms aggregate budget
+(including bounded command-output draining), no retries, and bounded output.
+Probe failure never discards positive OOM evidence. Actual inspected container
+settings from **before the command** take precedence over invocation config;
+reusing `--id` does not apply a new `--local-container-memory` value. Legacy
+claims do not reconstruct the originally requested memory string.
+
+The digest, timing JSON `failureEvidence`, and local failure bundle keep these
+separate facts: container memory limit, combined memory-and-swap setting, and
+runtime total RAM when the captured runtime identity can still be verified.
+Limits are `finite`, `unlimited`, or `unknown`; a zero memory-and-swap setting is
+`default`, not a claim about available swap. Missing, malformed, overflowing,
+unverifiable, or timed-out observations remain unknown. There is no synthesized
+effective limit: total RAM is neither free memory nor necessarily the complete
+bound. Parent cgroups, rootless constraints, VM capacity, and swap availability
+can matter; Crabbox does not walk host cgroup ancestors or add privileged probes.
+The container's mounted Docker socket is not used to observe its runtime.
+
+Below observed RAM, advice to recreate with a larger limit is conditional on
+the limit being binding and actual headroom. At or above observed RAM, raising
+the flag does not add RAM; inspect runtime/VM, parent, and swap constraints.
+Unknown evidence advises reducing demand and checking active limits, not
+blindly raising a flag. No automatic resizing, refusal, or retry is introduced.
+
+`inspect` and non-wait `status --json` expose fresh facts in returned labels
+under `diagnostic.memory.*`, with `settings_phase=current`. These are output
+only, not stored claim/container labels or lifecycle authority. They do not
+reconstruct an old OOM. Failure snapshots survive one-shot deletion; fresh
+inspection requires a retained container. Ordinary resolution, heartbeat,
+checkpoint, release, and `status --wait` do not request capacity diagnostics.
 
 Provider flags:
 

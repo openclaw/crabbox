@@ -6081,10 +6081,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Sync.AllowLarge = *file.Sync.AllowLarge
 		}
 	}
-	if file.Run != nil && len(file.Run.PreflightTools) > 0 {
+	if file.Run != nil && file.Run.PreflightTools != nil {
 		cfg.Run.PreflightTools = normalizePreflightToolNames(file.Run.PreflightTools)
 	}
-	if file.Env != nil && len(file.Env.Allow) > 0 {
+	if file.Env != nil && file.Env.Allow != nil {
 		cfg.EnvAllow = appendUniqueStrings(nil, file.Env.Allow...)
 	}
 	if file.Capacity != nil {
@@ -7870,7 +7870,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		}
 	}
 	if file.Results != nil {
-		if len(file.Results.JUnit) > 0 {
+		if file.Results.JUnit != nil {
 			cfg.Results.JUnit = appendUniqueStrings(nil, file.Results.JUnit...)
 		}
 		if file.Results.Auto != nil {
@@ -9855,7 +9855,7 @@ func applyEnv(cfg *Config) error {
 		cfg.envAllowOverriddenByEnv = true
 	}
 	if tools := os.Getenv("CRABBOX_PREFLIGHT_TOOLS"); tools != "" {
-		cfg.Run.PreflightTools = normalizePreflightToolNames(splitCommaList(tools))
+		cfg.Run.PreflightTools = parsePreflightToolsOverride(tools)
 	}
 	return nil
 }

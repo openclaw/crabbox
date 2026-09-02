@@ -649,12 +649,21 @@ CRABBOX_BIN=./bin/crabbox scripts/live-firecracker-smoke.sh
 
 CI runs the full gate (gofmt, vet, race tests, all Go modules, coverage
 threshold, repository script tests, docs link/build check, GoReleaser snapshot, and Worker
-lint/typecheck/tests/build) on every push and PR. Production releases use a
-serialized, draft-first process: preserve and verify the signed tag, build and
+lint/typecheck/tests/build) on every push and PR. The required `Go` check aggregates
+three independent 30-minute jobs: `Go test` (formatting, vet, deadcode, full race
+suite, Linux supervision proof, and build), `Go modules` (normal tests in every
+module, including the root), and `Go coverage` (90% core coverage threshold).
+The race suite, all-module normal tests, and coverage collection use a 15-minute
+package timeout.
+Production releases use a serialized, draft-first process: preserve and verify
+the signed tag, build and
 Developer ID sign/notarize the macOS candidates locally, verify the exact draft
 on native Apple Silicon and Intel runners from protected-default code, then
-publish, verify the public release and public Go installation, update and prove
-Homebrew, and close out. One explicit full release/publish request authorizes
+publish those exact artifacts, dispatch the ordinary Homebrew tap update, and
+run independent public-download, public Go installation, and native Homebrew
+smokes. Publication establishes eligibility; retry a failed Homebrew update
+without rebuilding or republishing. The tap handoff is an explicit operator
+step, with generic tap reconciliation as an independent fallback. One explicit full release/publish request authorizes
 this complete normal sequence without renewed chat approval at each stage.
 Narrow requests stay narrow. The original request supplies authorization;
 GitHub events alone do not. Sequential technical gates, separate trust domains,
