@@ -228,6 +228,11 @@ printf '${installedArch ?? nativeArch}\\n'
 [ "$1" = -r ] && [ "$3" = -t ] && [ "$#" = 3 ] || exit 98
 printf '%s\\n' "$2"
 `);
+  // Required by the native verifier, but only invoked for VMD entitlements.
+  writeExecutable(path.join(mockBin, "plutil"), `#!/bin/sh
+printf 'unexpected plutil invocation\\n' >&2
+exit 98
+`);
   writeExecutable(path.join(mockBin, "codesign"), `#!/bin/bash
 set -eu
 ${credentialCanary}printf 'codesign:%s\\n' "$*" >>${shellQuote(log)}
