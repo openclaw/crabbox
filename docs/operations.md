@@ -543,6 +543,14 @@ artifact upload/read URLs. Scope them to the artifact bucket or prefix; they
 should not carry Cloudflare account, Worker deployment, lease-provider, or VM
 permissions.
 
+The shipped production configuration in `worker/wrangler.jsonc` wires the
+existing R2 artifact backend; signing keys remain deployed secrets, and reads
+use expiring signed URLs by default. The **Deploy Coordinator** workflow
+(`.github/workflows/coordinator-deploy.yml`) owns redeploys when these settings
+change on `main`. Missing required backend configuration fails with
+`artifact_upload_unavailable` before any file upload. Checking artifact
+publishing configuration requires no compute lease.
+
 A typical R2-compatible configuration looks like:
 
 ```text
