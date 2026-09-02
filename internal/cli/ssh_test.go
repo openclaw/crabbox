@@ -4849,12 +4849,14 @@ func TestRemoteGitMetadataControlsIgnoreShellHooks(t *testing.T) {
 	}
 	f := newGitCoherenceFixture(t)
 	for _, hook := range []string{"logout", "BASH_ENV"} {
-		for _, operation := range []string{"hydrate status", "fingerprint", "seed manifest"} {
+		for _, operation := range []string{"hydrate status", "fingerprint", "seed manifest", "discard pending"} {
 			t.Run(hook+"/"+operation, func(t *testing.T) {
 				workdir := f.workspace(t, f.c, false)
 				plan := f.plan(t, f.c)
 				meta := coherenceMetaDir(t, workdir)
 				var command, want string
+				var discarded []string
+				var preserved map[string]string
 				switch operation {
 				case "hydrate status":
 					mustWriteTestFile(t, filepath.Join(meta, "git-hydrate-base"), "main "+f.c+"\n")
@@ -4866,6 +4868,22 @@ func TestRemoteGitMetadataControlsIgnoreShellHooks(t *testing.T) {
 					command, want = remoteReadSyncFingerprint(workdir, plan), "coherent"
 				case "seed manifest":
 					command = remoteSeedSyncManifestFromGit(workdir)
+				case "discard pending":
+					const token = "81818181818181818181818181818181"
+					const neighbor = "82828282828282828282828282828282"
+					discarded = []string{remoteSyncPendingManifestName(token), remoteSyncPendingDeletedName(token)}
+					preserved = map[string]string{
+						remoteSyncPendingManifestName(neighbor): "neighbor.txt\x00",
+						remoteSyncPendingDeletedName(neighbor):  "neighbor-deleted.txt\x00",
+						"sync-manifest":                         "committed.txt\x00",
+					}
+					for _, name := range discarded {
+						mustWriteTestFile(t, filepath.Join(meta, name), "discard.txt\x00")
+					}
+					for name, value := range preserved {
+						mustWriteTestFile(t, filepath.Join(meta, name), value)
+					}
+					command = remoteDiscardSyncPendingMetadata(workdir, token, false)
 				}
 				out, err := runGitControlWithShellHook(t, hook, command)
 				if err != nil || string(out) != want {
@@ -4875,6 +4893,16 @@ func TestRemoteGitMetadataControlsIgnoreShellHooks(t *testing.T) {
 					wantManifest := "deleted.txt\x00modified.txt\x00other/omit.txt\x00src/keep.txt\x00tracked.txt\x00"
 					if data, readErr := os.ReadFile(filepath.Join(meta, "sync-manifest")); readErr != nil || string(data) != wantManifest {
 						t.Fatalf("seeded manifest=%q err=%v", data, readErr)
+					}
+				}
+				for _, name := range discarded {
+					if _, statErr := os.Stat(filepath.Join(meta, name)); !os.IsNotExist(statErr) {
+						t.Fatalf("discarded pending metadata %s survived: %v", name, statErr)
+					}
+				}
+				for name, value := range preserved {
+					if data, readErr := os.ReadFile(filepath.Join(meta, name)); readErr != nil || string(data) != value {
+						t.Fatalf("discard changed neighboring metadata %s: data=%q err=%v", name, data, readErr)
 					}
 				}
 			})

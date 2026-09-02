@@ -271,6 +271,13 @@ configured base ref, so `HEAD^`, `git merge-base`, and
 historical blobs. Origins that cannot support filtered history use ordinary
 sync instead.
 
+Before transferring an eligible overlay, Crabbox copies its payload to a local
+snapshot and checks it against the checkout's index, manifest, exclusions, and
+fingerprint. Rsync reads the accepted snapshot, so edits made after acceptance
+wait for the next sync. If preparation cannot produce a stable supported
+snapshot, Crabbox falls back to ordinary full-manifest sync after successful
+cleanup. Cleanup failures stop the run and report the retained snapshot path.
+
 The optimization is off by default and requires `sync.gitSeed: true`,
 `sync.delete: true`, an unrestricted, complete, conflict-free Git checkout
 without submodules, and an anonymous HTTP(S) or remotely readable filesystem

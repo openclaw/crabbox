@@ -2125,6 +2125,21 @@ func remoteWriteSyncManifestsNewForTargetMode(target SSHTarget, workdir, finaliz
 	return remoteWriteSyncManifestsNewMode(workdir, finalizeToken, plainManifest)
 }
 
+func remoteDiscardSyncPendingMetadata(workdir, finalizeToken string, plainManifest bool) string {
+	metadataScript := remoteSyncMetaDirScript()
+	shellCommand := remoteGitControlShellCommand
+	if plainManifest {
+		metadataScript = remotePlainManifestGitFunction() + remotePlainManifestSyncMetaDirScript()
+		shellCommand = remotePlainManifestShellCommand
+	}
+	script := `set -e
+cd ` + shellQuote(workdir) + `
+` + metadataScript + `
+/bin/rm -f -- "$meta_dir/` + remoteSyncPendingManifestName(finalizeToken) + `" "$meta_dir/` + remoteSyncPendingDeletedName(finalizeToken) + `"
+`
+	return shellCommand(script)
+}
+
 func remoteWriteSyncManifestsNewPython(workdir, finalizeToken string) string {
 	return remoteWriteSyncManifestsNewPythonMode(workdir, finalizeToken, false)
 }
