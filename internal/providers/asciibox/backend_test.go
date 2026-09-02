@@ -350,7 +350,7 @@ func TestClientPollsPartialCreateOutput(t *testing.T) {
 			`{"event":"state","id":"bx_2","state":"provisioning"}`,
 		}, "\n"),
 		newErr:        fmt.Errorf("exit status 1"),
-		infoResponses: []string{`{"box":{"id":"bx_2","state":"ready","ip":"203.0.113.20","expiresAt":"2026-06-10T12:00:00Z"}}`},
+		infoResponses: []string{`{"box":{"id":"bx_2","state":"ready","ip":"203.0.113.20","sshEndpoint":"198.51.100.20:19036","expiresAt":"2026-06-10T12:00:00Z"}}`},
 	}
 	client := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: home, runner: runner}
 	box, err := client.CreateBox(context.Background(), createRequest{TTL: 30 * time.Minute})
@@ -359,6 +359,9 @@ func TestClientPollsPartialCreateOutput(t *testing.T) {
 	}
 	if box.ID != "bx_2" || boxHost(box) != "203.0.113.20" {
 		t.Fatalf("box=%#v", box)
+	}
+	if box.SSHEndpoint != "198.51.100.20:19036" {
+		t.Fatalf("ssh endpoint=%q", box.SSHEndpoint)
 	}
 	if got := boxExpiresAt(box); got != "2026-06-10T12:00:00Z" {
 		t.Fatalf("boxExpiresAt=%q, want info response expiration", got)
@@ -434,6 +437,40 @@ func TestAcquireClaimsBoxAndReturnsSSHTarget(t *testing.T) {
 	}
 	if claim.Provider != providerName || claim.ProviderScope != (Provider{}).ClaimScope(testConfig()) || claim.Slug != "proof" {
 		t.Fatalf("claim=%#v", claim)
+	}
+}
+
+func TestAcquireUsesBoxSSHEndpoint(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := &fakeAPI{box: testBox()}
+	fake.box.SSHEndpoint = "198.51.100.20:19036"
+	withFakeAPI(t, fake)
+	stubSSHWait(t)
+
+	backend := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
+	lease, err := backend.Acquire(context.Background(), AcquireRequest{
+		Repo: core.Repo{Name: "repo", Root: t.TempDir()},
+		Keep: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.SSH.Host != "198.51.100.20" || lease.SSH.Port != "19036" {
+		t.Fatalf("lease SSH=%#v", lease.SSH)
+	}
+	if lease.Server.PublicNet.IPv4.IP != "203.0.113.10" {
+		t.Fatalf("public IP=%q, want provider box IP", lease.Server.PublicNet.IPv4.IP)
+	}
+}
+
+func TestBoxSSHTargetRejectsMalformedEndpoint(t *testing.T) {
+	_, err := boxSSHTarget(testConfig(), boxData{
+		ID:          "bx_malformed",
+		IP:          "203.0.113.10",
+		SSHEndpoint: "gateway-without-port",
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid SSH endpoint") {
+		t.Fatalf("err=%v, want malformed endpoint error", err)
 	}
 }
 
@@ -530,6 +567,20 @@ func TestStatusMapsBoxAPIFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	if view.ID != "ascii_bx_1" || view.ServerID != "bx_1" || view.SSHHost != "203.0.113.10" || view.SSHUser != "user" || !view.Ready {
+		t.Fatalf("view=%#v", view)
+	}
+}
+
+func TestStatusMapsBoxSSHEndpoint(t *testing.T) {
+	fake := &fakeAPI{box: testBox()}
+	fake.box.SSHEndpoint = "198.51.100.20:19036"
+	withFakeAPI(t, fake)
+	backend := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
+	view, err := backend.Status(context.Background(), StatusRequest{ID: "bx_1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Host != "203.0.113.10" || view.SSHHost != "198.51.100.20" || view.SSHPort != "19036" {
 		t.Fatalf("view=%#v", view)
 	}
 }

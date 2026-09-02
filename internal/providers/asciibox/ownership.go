@@ -2,6 +2,7 @@ package asciibox
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,6 +14,7 @@ import (
 )
 
 const boxCreationLabel = "ascii_box_created_at"
+const boxDeletionLabel = "ascii_box_deletion_completed"
 const boxReleaseTimeout = 3 * time.Minute
 
 func asciiBoxOrg() string { return blank(strings.TrimSpace(os.Getenv("BOX_ORG")), "personal") }
@@ -72,11 +74,28 @@ func boxClaimBinding(cfg Config, claim LeaseClaim) (shared.ClaimBinding, error) 
 	if boxCreationTime(boxFromClaim(claim)) == "" {
 		return want, exit(2, "ascii-box claim creation identity is invalid")
 	}
+	if recorded, ok := claim.Labels[boxDeletionLabel]; ok && recorded != boxDeletionBinding(claim) {
+		return want, exit(2, "ascii-box completed deletion witness does not match its claim; retaining claim")
+	}
 	return want, nil
 }
 
 func boxFromClaim(claim LeaseClaim) boxData {
-	return boxData{ID: claim.CloudID, CreatedAt: claim.Labels[boxCreationLabel]}
+	return boxData{
+		ID: claim.CloudID, CreatedAt: claim.Labels[boxCreationLabel],
+		deletionCompleted: claim.Labels[boxDeletionLabel] == boxDeletionBinding(claim),
+	}
+}
+
+func boxDeletionBinding(claim LeaseClaim) string {
+	// The durable claim transaction refreshes these two fields when recording
+	// completion. All ownership, scope, and other claim content stays bound.
+	claim.Revision = ""
+	claim.LastUsedAt = ""
+	claim.Labels = shared.CloneLabels(claim.Labels)
+	delete(claim.Labels, boxDeletionLabel)
+	encoded, _ := json.Marshal(claim)
+	return fmt.Sprintf("%x", sha256.Sum256(encoded))
 }
 
 func resolveOwnedBox(cfg Config, identifier string) (LeaseClaim, error) {
@@ -139,7 +158,7 @@ func (Provider) PrepareLeaseClaimEndpoint(existing LeaseClaim, provider, slug st
 		return Server{}, exit(2, "refusing to retarget ascii-box lease %s", existing.LeaseID)
 	}
 	labels := shared.CloneLabels(server.Labels)
-	for _, key := range []string{"provider", "box_id", "ascii_box_scope", boxCreationLabel} {
+	for _, key := range []string{"provider", "box_id", "ascii_box_scope", boxCreationLabel, boxDeletionLabel} {
 		original := existing.Labels[key]
 		if original != "" && labels[key] != "" && labels[key] != original {
 			return Server{}, exit(2, "ascii-box lease %s changed %s", existing.LeaseID, key)
@@ -156,7 +175,27 @@ func (Provider) PrepareLeaseClaimEndpoint(existing LeaseClaim, provider, slug st
 
 func (b *backend) ReleaseLeaseConnectionCleanupSafe() bool { return false }
 
-func releaseExactBox(ctx context.Context, client api, expected boxData, beforeRelease func(boxData)) error {
+func releaseClaimedBox(ctx context.Context, client api, claim LeaseClaim, beforeRelease func(boxData)) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	nativeCompleted := false
+	_, _, _, err := core.ResolveLeaseClaimAfterActionIfUnchanged(claim.LeaseID, claim, func() error {
+		return releaseExactBox(ctx, client, boxFromClaim(claim), beforeRelease, func() {
+			nativeCompleted = true
+		})
+	}, func(releaseErr error) (map[string]string, bool) {
+		if releaseErr != nil && !nativeCompleted {
+			return nil, false
+		}
+		labels := shared.CloneLabels(claim.Labels)
+		labels[boxDeletionLabel] = boxDeletionBinding(claim)
+		return labels, releaseErr == nil
+	})
+	return err
+}
+
+func releaseExactBox(ctx context.Context, client api, expected boxData, beforeRelease func(boxData), onDeletionCompleted func()) error {
 	fresh, absent, err := exactBoxForRelease(ctx, client, expected)
 	if err != nil {
 		return err
@@ -193,9 +232,15 @@ func releaseExactBox(ctx context.Context, client api, expected boxData, beforeRe
 	if err := client.ReleaseBox(ctx, expected.ID, validate); err != nil {
 		return err
 	}
+	if onDeletionCompleted != nil {
+		onDeletionCompleted()
+	}
 	// A failed/pending delete can hide the Box from inventory. Only successful
 	// native deletion completion followed by complete inventory is finalization.
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		boxes, err := client.ListBoxes(ctx, true)
 		if err != nil {
 			return fmt.Errorf("ascii-box deletion confirmation; retaining claim: %w", err)
@@ -224,14 +269,29 @@ func releaseExactBox(ctx context.Context, client api, expected boxData, beforeRe
 }
 
 func exactBoxForRelease(ctx context.Context, client api, expected boxData) (boxData, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return boxData{}, false, err
+	}
 	fresh, err := client.GetBox(ctx, expected.ID)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return boxData{}, false, ctxErr
+	}
 	if err == nil {
+		if expected.deletionCompleted {
+			return boxData{}, false, exit(2, "ascii-box %s is still observable after recorded deletion completion; retaining claim", expected.ID)
+		}
 		return fresh, false, nil
 	}
 	if !isNotFound(err) {
 		return boxData{}, false, fmt.Errorf("ascii-box ownership lookup; retaining claim: %w", err)
 	}
+	if !expected.deletionCompleted {
+		return boxData{}, false, exit(2, "ascii-box %s has no completed native deletion witness; absence alone cannot prove deletion completion; retaining claim", expected.ID)
+	}
 	boxes, listErr := client.ListBoxes(ctx, true)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return boxData{}, false, ctxErr
+	}
 	if listErr != nil {
 		return boxData{}, false, fmt.Errorf("ascii-box absence confirmation; retaining claim: %w", listErr)
 	}

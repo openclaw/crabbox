@@ -658,8 +658,11 @@ Production releases use a serialized, draft-first process: preserve and verify
 the signed tag, build and
 Developer ID sign/notarize the macOS candidates locally, verify the exact draft
 on native Apple Silicon and Intel runners from protected-default code, then
-publish, verify the public release and public Go installation, update and prove
-Homebrew, and close out. One explicit full release/publish request authorizes
+publish those exact artifacts, dispatch the ordinary Homebrew tap update, and
+run independent public-download, public Go installation, and native Homebrew
+smokes. Publication establishes eligibility; retry a failed Homebrew update
+without rebuilding or republishing. The tap handoff is an explicit operator
+step, with generic tap reconciliation as an independent fallback. One explicit full release/publish request authorizes
 this complete normal sequence without renewed chat approval at each stage.
 Narrow requests stay narrow. The original request supplies authorization;
 GitHub events alone do not. Sequential technical gates, separate trust domains,

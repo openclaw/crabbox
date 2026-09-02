@@ -39,6 +39,40 @@ func assertClaimRetained(t *testing.T, claim LeaseClaim) {
 	}
 }
 
+func assertCompletedDeletionRetained(t *testing.T, original LeaseClaim) LeaseClaim {
+	t.Helper()
+	claim, exists, err := core.ReadLeaseClaimWithPresence(original.LeaseID)
+	if err != nil || !exists || !boxFromClaim(claim).deletionCompleted {
+		t.Fatalf("completed deletion not retained: exists=%t err=%v", exists, err)
+	}
+	withoutCompletion := claim
+	withoutCompletion.Revision = original.Revision
+	withoutCompletion.LastUsedAt = original.LastUsedAt
+	withoutCompletion.Labels = make(map[string]string, len(claim.Labels))
+	for key, value := range claim.Labels {
+		if key != boxDeletionLabel {
+			withoutCompletion.Labels[key] = value
+		}
+	}
+	if !reflect.DeepEqual(withoutCompletion, original) {
+		t.Fatal("recording completion changed unrelated claim content")
+	}
+	return claim
+}
+
+func completedDeletionFixture(t *testing.T) (*backend, *fakeAPI, LeaseClaim) {
+	t.Helper()
+	b, f, claim, lease := ownedFixture(t)
+	inventoryErr := errors.New("complete inventory unavailable")
+	f.listHook = func() ([]boxData, error) { return nil, inventoryErr }
+	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); !errors.Is(err, inventoryErr) {
+		t.Fatalf("release err=%v, want inventory failure", err)
+	}
+	completed := assertCompletedDeletionRetained(t, claim)
+	f.listHook = nil
+	return b, f, completed
+}
+
 func TestReleaseRejectsUnownedAndChangedClaims(t *testing.T) {
 	for _, name := range []string{"missing snapshot", "changed revision", "removed claim", "wrong lease", "wrong cloud ID", "wrong box label", "wrong provider", "wrong scope", "missing creation", "changed slug", "changed owner", "changed organization"} {
 		t.Run(name, func(t *testing.T) {
@@ -134,16 +168,84 @@ func TestReleaseRetainsUncertainResources(t *testing.T) {
 			if err == nil || (len(f.deletedIDs) > 0) != wantDelete {
 				t.Fatalf("release err=%v deleted=%v", err, f.deletedIDs)
 			}
-			assertClaimRetained(t, claim)
+			if wantDelete {
+				assertCompletedDeletionRetained(t, claim)
+			} else {
+				assertClaimRetained(t, claim)
+			}
 		})
 	}
 }
 
-func TestReleaseRemovesClaimAfterAuthoritativeNativeAbsence(t *testing.T) {
-	b, f, claim, _ := ownedFixture(t)
+func TestReleaseRetainsAbsentBoxWithoutCompletedDeletion(t *testing.T) {
+	b, f, claim, lease := ownedFixture(t)
 	f.getHook = func(string) (boxData, error) { return boxData{}, fmt.Errorf("404 not found") }
 	f.listHook = func() ([]boxData, error) { return []boxData{}, nil }
 
+	if _, err := b.Resolve(context.Background(), ResolveRequest{ID: claim.LeaseID, ReleaseOnly: true}); err == nil {
+		t.Fatal("release-only resolution accepted absence without deletion completion")
+	}
+	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err == nil {
+		t.Fatal("release accepted absence without deletion completion")
+	}
+	if len(f.deletedIDs) != 0 {
+		t.Fatalf("deleted=%v, want no unverified native deletion", f.deletedIDs)
+	}
+	assertClaimRetained(t, claim)
+}
+
+func TestReleaseRejectsCancellationDuringAbsenceCheck(t *testing.T) {
+	b, f, claim := completedDeletionFixture(t)
+	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: claim.LeaseID, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.getHook = func(string) (boxData, error) { return boxData{}, fmt.Errorf("404 not found") }
+	f.listHook = func() ([]boxData, error) {
+		cancel()
+		return []boxData{}, nil
+	}
+	if err := b.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("release err=%v, want cancellation", err)
+	}
+	assertClaimRetained(t, claim)
+}
+
+func TestReleaseRetriesCompletedDeletionAfterConfirmationFailure(t *testing.T) {
+	b, f, claim := completedDeletionFixture(t)
+	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: claim.LeaseID, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	teardown := false
+	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease, GuardedRemoteCleanup: func(context.Context, LeaseTarget) {
+		teardown = true
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if teardown || len(f.deletedIDs) != 1 {
+		t.Fatalf("retry repeated native cleanup: teardown=%t deleted=%v", teardown, f.deletedIDs)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(claim.LeaseID); err != nil || exists {
+		t.Fatalf("finalized claim exists=%t err=%v", exists, err)
+	}
+}
+
+func TestReleaseRecordsCompletionWhenConfirmationCanceled(t *testing.T) {
+	b, f, claim, lease := ownedFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.listHook = func() ([]boxData, error) {
+		cancel()
+		return []boxData{}, nil
+	}
+	if err := b.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("release err=%v, want canceled confirmation", err)
+	}
+	assertCompletedDeletionRetained(t, claim)
+	f.listHook = nil
 	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: claim.LeaseID, ReleaseOnly: true})
 	if err != nil {
 		t.Fatal(err)
@@ -151,11 +253,118 @@ func TestReleaseRemovesClaimAfterAuthoritativeNativeAbsence(t *testing.T) {
 	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.deletedIDs) != 0 {
-		t.Fatalf("deleted=%v, want no duplicate native deletion", f.deletedIDs)
+	if len(f.deletedIDs) != 1 {
+		t.Fatalf("retry duplicated native deletion: %v", f.deletedIDs)
 	}
-	if _, ok, err := core.ResolveLeaseClaim(claim.LeaseID); err != nil || ok {
-		t.Fatalf("claim ok=%t err=%v, want removed", ok, err)
+}
+
+func TestReleaseRejectsChangedCompletionWitness(t *testing.T) {
+	for _, name := range []string{"missing", "corrupt", "owner", "resource", "creation", "scope", "revision"} {
+		t.Run(name, func(t *testing.T) {
+			b, f, claim := completedDeletionFixture(t)
+			lease, err := b.Resolve(context.Background(), ResolveRequest{ID: claim.LeaseID, ReleaseOnly: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			changed := claim
+			changed.Labels = make(map[string]string, len(claim.Labels))
+			for key, value := range claim.Labels {
+				changed.Labels[key] = value
+			}
+			switch name {
+			case "missing":
+				delete(changed.Labels, boxDeletionLabel)
+			case "corrupt":
+				changed.Labels[boxDeletionLabel] = "unverified"
+			case "owner":
+				changed.RepoRoot = t.TempDir()
+			case "resource":
+				changed.CloudID = "bx_replacement"
+				changed.Labels["box_id"] = changed.CloudID
+			case "creation":
+				changed.Labels[boxCreationLabel] = "2026-08-30T12:00:01Z"
+			case "scope":
+				t.Setenv("BOX_ORG", "other")
+				changed.ProviderScope = (Provider{}).ClaimScope(testConfig())
+				changed.Labels["ascii_box_scope"] = changed.ProviderScope
+			}
+			changed, err = core.ReplaceLeaseClaimIfUnchangedDurableReturning(claim.LeaseID, claim, changed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err == nil {
+				t.Fatal("stale release snapshot accepted replacement claim")
+			}
+			if name != "revision" {
+				if _, err := b.Resolve(context.Background(), ResolveRequest{ID: claim.LeaseID, ReleaseOnly: true}); err == nil {
+					t.Fatal("changed claim retained deletion authority")
+				}
+			}
+			assertClaimRetained(t, changed)
+			if len(f.deletedIDs) != 1 {
+				t.Fatalf("replacement claim caused another deletion: %v", f.deletedIDs)
+			}
+		})
+	}
+}
+
+func TestReleaseCompletedWitnessRetainsUncertainResource(t *testing.T) {
+	for _, name := range []string{"lookup failure", "observed Box", "incomplete inventory", "matching inventory", "replacement inventory"} {
+		t.Run(name, func(t *testing.T) {
+			b, f, claim := completedDeletionFixture(t)
+			lease, err := b.Resolve(context.Background(), ResolveRequest{ID: claim.LeaseID, ReleaseOnly: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch name {
+			case "lookup failure":
+				f.getHook = func(string) (boxData, error) { return boxData{}, errors.New("access denied") }
+			case "observed Box":
+				f.getHook = func(string) (boxData, error) { return f.box, nil }
+			case "incomplete inventory":
+				f.listHook = func() ([]boxData, error) { return nil, errors.New("incomplete inventory") }
+			case "matching inventory":
+				f.listHook = func() ([]boxData, error) { return []boxData{f.box}, nil }
+			case "replacement inventory":
+				replacement := f.box
+				replacement.CreatedAt = "2026-08-30T12:00:01Z"
+				f.listHook = func() ([]boxData, error) { return []boxData{replacement}, nil }
+			}
+			if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err == nil {
+				t.Fatal("uncertain resource finalized")
+			}
+			assertClaimRetained(t, claim)
+			if len(f.deletedIDs) != 1 {
+				t.Fatalf("uncertainty caused another deletion: %v", f.deletedIDs)
+			}
+		})
+	}
+}
+
+func TestReleaseRetainsHiddenPendingDeletion(t *testing.T) {
+	b, f, claim, lease := ownedFixture(t)
+	f.releaseHook = func(string) error {
+		f.deleted = true
+		return errors.New("deletion operation is pending")
+	}
+	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err == nil {
+		t.Fatal("pending native deletion succeeded")
+	}
+	assertClaimRetained(t, claim)
+	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err == nil {
+		t.Fatal("hidden pending deletion was mistaken for completed deletion")
+	}
+	assertClaimRetained(t, claim)
+}
+
+func TestBoxNotFoundRejectsIdentityErrors(t *testing.T) {
+	for _, err := range []error{
+		&boxIdentityError{id: "bx_404"},
+		fmt.Errorf("lookup failed: %w", &boxIdentityError{id: "bx_404"}),
+	} {
+		if isNotFound(err) {
+			t.Fatalf("identity mismatch classified as not-found: %v", err)
+		}
 	}
 }
 
@@ -402,6 +611,27 @@ func TestEndpointRefreshCannotRetargetOwnership(t *testing.T) {
 	if err != nil || updated.Labels[boxCreationLabel] != claim.Labels[boxCreationLabel] {
 		t.Fatalf("refresh lost binding: %v", err)
 	}
+	server.Labels[boxDeletionLabel] = boxDeletionBinding(claim)
+	updated, err = (Provider{}).PrepareLeaseClaimEndpoint(claim, providerName, claim.Slug, server, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := updated.Labels[boxDeletionLabel]; exists {
+		t.Fatal("endpoint refresh introduced an unrecorded deletion witness")
+	}
+
+	t.Run("completed deletion", func(t *testing.T) {
+		_, f, completed := completedDeletionFixture(t)
+		server := boxToServer(testConfig(), f.box, completed.LeaseID, completed.Slug, true)
+		updated, err := (Provider{}).PrepareLeaseClaimEndpoint(completed, providerName, completed.Slug, server, false)
+		if err != nil || updated.Labels[boxDeletionLabel] != completed.Labels[boxDeletionLabel] {
+			t.Fatalf("refresh lost completed deletion witness: %v", err)
+		}
+		server.Labels[boxDeletionLabel] = "replacement"
+		if _, err := (Provider{}).PrepareLeaseClaimEndpoint(completed, providerName, completed.Slug, server, false); err == nil {
+			t.Fatal("endpoint refresh replaced the deletion witness")
+		}
+	})
 }
 
 // Keep this compile-time check near cleanup tests: the provider owns teardown.

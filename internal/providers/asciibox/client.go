@@ -48,23 +48,26 @@ func (e *boxIdentityError) Error() string {
 }
 
 type boxData struct {
-	createdID    string
-	ID           string `json:"id"`
-	Name         string `json:"name,omitempty"`
-	State        string `json:"state,omitempty"`
-	Status       string `json:"status,omitempty"`
-	MachineIP    string `json:"machineIp,omitempty"`
-	MachineIPAlt string `json:"machine_ip,omitempty"`
-	PublicIP     string `json:"publicIp,omitempty"`
-	IP           string `json:"ip,omitempty"`
-	SSHUser      string `json:"sshUser,omitempty"`
-	SSHUserAlt   string `json:"ssh_user,omitempty"`
-	URL          string `json:"url,omitempty"`
-	DesktopURL   string `json:"desktopUrl,omitempty"`
-	ArchiveAfter any    `json:"archiveAfter,omitempty"`
-	ExpiresAt    any    `json:"expiresAt,omitempty"`
-	CreatedAt    any    `json:"createdAt,omitempty"`
-	UpdatedAt    any    `json:"updatedAt,omitempty"`
+	createdID         string
+	deletionCompleted bool
+	ID                string `json:"id"`
+	Name              string `json:"name,omitempty"`
+	State             string `json:"state,omitempty"`
+	Status            string `json:"status,omitempty"`
+	MachineIP         string `json:"machineIp,omitempty"`
+	MachineIPAlt      string `json:"machine_ip,omitempty"`
+	PublicIP          string `json:"publicIp,omitempty"`
+	IP                string `json:"ip,omitempty"`
+	SSHEndpoint       string `json:"sshEndpoint,omitempty"`
+	SSHEndpointAlt    string `json:"ssh_endpoint,omitempty"`
+	SSHUser           string `json:"sshUser,omitempty"`
+	SSHUserAlt        string `json:"ssh_user,omitempty"`
+	URL               string `json:"url,omitempty"`
+	DesktopURL        string `json:"desktopUrl,omitempty"`
+	ArchiveAfter      any    `json:"archiveAfter,omitempty"`
+	ExpiresAt         any    `json:"expiresAt,omitempty"`
+	CreatedAt         any    `json:"createdAt,omitempty"`
+	UpdatedAt         any    `json:"updatedAt,omitempty"`
 }
 
 var newAPI = func(cfg Config, rt Runtime) (api, error) {
@@ -672,6 +675,12 @@ func mergeBox(base, update boxData) boxData {
 	}
 	if update.PublicIP != "" {
 		base.PublicIP = update.PublicIP
+	}
+	if update.SSHEndpoint != "" {
+		base.SSHEndpoint = update.SSHEndpoint
+	}
+	if update.SSHEndpointAlt != "" {
+		base.SSHEndpointAlt = update.SSHEndpointAlt
 	}
 	if update.SSHUser != "" {
 		base.SSHUser = update.SSHUser

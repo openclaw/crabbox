@@ -109,6 +109,22 @@ BOX_ORG
    budget that also honors caller cancellation. The shared native CLI SSH key
    is retained.
 
+If native deletion completes but final inventory confirmation fails or is
+canceled, Crabbox durably records that completed deletion in the still-locked
+claim before returning the error. The record is bound to the original claim,
+including its provider scope, Box ID, creation timestamp, and repository owner.
+A later `crabbox stop` can finish cleanup without repeating native deletion only
+when that record still matches, `box info` reports not-found, and complete native
+inventory confirms absence. Failed lookups, changed claims, or an observable Box
+retain the claim.
+
+Not-found and empty inventory alone are not deletion-completion evidence: ASCII
+can hide a Box while its deletion operation is still pending or blocked. Claims
+without Crabbox's completion record stay retained, including external deletions,
+interrupted native deletion commands, and a process termination before the record
+was durably written. There is no automatic adoption of an external deletion
+receipt or conversion of an old claim into completed-deletion authority.
+
 Raw IDs, provider names, and legacy claims without the full ownership binding
 remain inspectable but cannot authorize reuse or deletion. Missing or changed
 identity, failed lookups, incomplete inventory, and uncertain deletion preserve
