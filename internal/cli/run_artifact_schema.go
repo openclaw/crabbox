@@ -1794,5 +1794,5 @@ try {
   [Convert]::ToBase64String($buffer, 0, $offset)
 } finally { $stream.Dispose() }`)
 	}
-	return fmt.Sprintf("cd %s && test -f %s && head -c %d %s | base64", shellQuote(workdir), shellQuote(remotePath), limit, shellQuote(remotePath))
+	return fmt.Sprintf("cd %s && test -f %s && head -c %d %s | base64", shellPathQuote(workdir), shellQuote(remotePath), limit, shellQuote(remotePath))
 }

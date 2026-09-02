@@ -75,7 +75,7 @@ func collectRemoteJUnitResultFilesAuto(ctx context.Context, target SSHTarget, wo
 func remoteReadResultFiles(workdir string, paths []string) string {
 	var b strings.Builder
 	b.WriteString("cd ")
-	b.WriteString(shellQuote(workdir))
+	b.WriteString(shellPathQuote(workdir))
 	b.WriteString(" && ")
 	b.WriteString(`root=$(pwd -P) || exit 0; crabbox_resolve_file() { p=$1; hops=0; while [ "$hops" -lt 40 ]; do dir=${p%/*}; base=${p##*/}; [ -n "$dir" ] || dir=/; dir=$(cd -P "$dir" 2>/dev/null && pwd -P) || return 1; p=$dir/$base; if [ -L "$p" ]; then target=$(readlink "$p") || return 1; case "$target" in /*) p=$target;; *) p=$dir/$target;; esac; hops=$((hops + 1)); continue; fi; [ -f "$p" ] || return 1; printf '%s\n' "$p"; return 0; done; return 1; }; `)
 	b.WriteString(`crabbox_read_file() { f=$1; case "$f" in /*) candidate=$f;; *) candidate=$root/$f;; esac; [ -f "$candidate" ] || return; exec 3<"$candidate" 2>/dev/null || return; resolved=$(crabbox_resolve_file "$candidate") || return; if [ "$root" != / ]; then case "$resolved" in "$root"/*) ;; *) return;; esac; fi; if [ -e /proc/self/fd/3 ]; then opened=$(readlink /proc/self/fd/3); elif command -v lsof >/dev/null 2>&1; then pidfile=$(mktemp) || return; sh -c 'echo $PPID > "$1"' sh "$pidfile" || { rm -f "$pidfile"; return; }; pid=$(cat "$pidfile"); rm -f "$pidfile"; opened=$(lsof -a -p "$pid" -d 3 -Fn 2>/dev/null | sed -n 's/^n//p'); else return; fi; [ "$opened" = "$resolved" ] || return; printf '\n`)
@@ -91,13 +91,13 @@ func remoteReadResultFiles(workdir string, paths []string) string {
 }
 
 func remoteTouchResultsMarker(workdir string) string {
-	return "cd " + shellQuote(workdir) + " && marker=.crabbox/results-start; if git_marker=$(git rev-parse --git-path " + shellQuote(remoteResultsMarker) + " 2>/dev/null); then marker=$git_marker; fi; mkdir -p \"$(dirname \"$marker\")\" && : > \"$marker\""
+	return "cd " + shellPathQuote(workdir) + " && { marker=.crabbox/results-start; if git_marker=$(git rev-parse --git-path " + shellQuote(remoteResultsMarker) + " 2>/dev/null); then marker=$git_marker; fi; mkdir -p \"$(dirname \"$marker\")\" && : > \"$marker\"; }"
 }
 
 func remoteFindJUnitResultFiles(workdir, marker string) string {
 	var b strings.Builder
 	b.WriteString("cd ")
-	b.WriteString(shellQuote(workdir))
+	b.WriteString(shellPathQuote(workdir))
 	b.WriteString(" && { ")
 	b.WriteString("tmp=$(mktemp) || exit 0; trap 'rm -f \"$tmp\"' EXIT; count=0; total=0; ")
 	if strings.TrimSpace(marker) != "" {

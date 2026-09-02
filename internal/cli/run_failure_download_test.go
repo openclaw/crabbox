@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -60,6 +61,44 @@ func TestRunExitWitnessCommand(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRunExitWitnessLiteralPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires POSIX shells")
+	}
+	root, workdir, selected, decoy, searchRoot := workspacePathFixture(t)
+	profile := ".crabbox/env/proof.env"
+	for _, item := range []struct{ dir, value string }{{selected, "selected"}, {decoy, "decoy"}} {
+		mustWriteTestFile(t, filepath.Join(item.dir, "proof"), item.value+"\n")
+		mustWriteTestFile(t, filepath.Join(item.dir, profile), formatShellEnvFile(map[string]string{
+			"PROFILE_VALUE": item.value, "__crabbox_workdir": "retained",
+		}))
+	}
+	var stdout, stderr bytes.Buffer
+	w, err := newRunExitWitness(&stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `read value; printf '%s|%s|%s|%s\n' "$PROFILE_VALUE" "$__crabbox_workdir" "$1" "$value"; cat proof; exit 23`
+	command := w.command(workdir, nil, []string{profile}, []string{"sh", "-c", body, "probe", "literal ' $value"}, false, nil)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	// The wrapper must leave its caller's positional arguments intact.
+	cmd := exec.CommandContext(ctx, "sh", "-c", "set -- retained; "+command+`; result=$?; [ "$1" = retained ] || exit 91; exit "$result"`)
+	cmd.Dir = root
+	cmd.Env = append(cmd.Environ(), "CDPATH="+searchRoot)
+	cmd.Stdout, cmd.Stderr = &stdout, w
+	cmd.Stdin = strings.NewReader("input\n")
+	cmd.WaitDelay = time.Second
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("witness transport: %v (%d diagnostic bytes)", err, stderr.Len())
+	}
+	code, err, eligible := w.finish(ctx, 0, nil)
+	if code != 23 || err != nil || !eligible || stdout.String() != "selected|retained|literal ' $value|input\nselected\n" || stderr.Len() != 0 {
+		t.Errorf("witness code=%d error=%v eligible=%t stdout=%q stderr=%q", code, err, eligible, stdout.String(), stderr.String())
+	}
+	requireWorkspaceFile(t, filepath.Join(decoy, "proof"), "decoy\n")
 }
 
 func TestRunExitWitnessExcludesSetup(t *testing.T) {
@@ -258,7 +297,7 @@ case "$cmd" in
     result=$?
     if [ "$CRABBOX_TEST_TRANSPORT_LOSS" = 1 ]; then exit 255; fi
     exit "$result" ;;
-  mkdir\ -p*|cd\ *|bash\ -lc*|/bin/bash\ -lc*) exec sh -c "$cmd" ;;
+  mkdir\ -p*|cd\ *|\(cd\ *|bash\ -lc*|/bin/bash\ -lc*) exec sh -c "$cmd" ;;
 esac
 exit 0
 `

@@ -463,8 +463,8 @@ func remotePrepareGitOverlayWithBase(workdir string, plan gitCoherencePlan, base
 	}
 	parent := filepath.ToSlash(filepath.Dir(workdir))
 	script := `set -e -o pipefail
-workdir=` + shellQuote(workdir) + `
-parent=` + shellQuote(parent) + `
+workdir=` + shellAbsolutePath(workdir) + `
+parent=` + shellAbsolutePath(parent) + `
 expected_origin=` + shellQuote(plan.RemoteURL) + `
 expected_target=` + shellQuote(plan.Target) + `
 expected_tree=` + shellQuote(plan.Tree) + `
@@ -740,7 +740,7 @@ for my $path (@deleted, @old) {
 die "remote sync sanity failed: " . scalar(@pending) . " pending deletions\n" if $ARGV[3] ne "1" && @pending >= 200;
 binmode STDOUT; print STDOUT map { $_ . "\0" } @pending;`
 	script := `set -e -o pipefail
-cd ` + shellQuote(workdir) + `
+cd ` + shellPathQuote(workdir) + `
 ` + gitOverlayHermeticFunctions() + metadataScript + `
 old="$meta_dir/sync-manifest"
 new="$meta_dir/` + manifestName + `"

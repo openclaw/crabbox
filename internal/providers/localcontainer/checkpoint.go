@@ -717,7 +717,7 @@ func checkpointCanonicalWorkdir(ctx context.Context, scope checkpointScope, cont
 	if workdir == "" {
 		return "", core.Exit(2, "docker-commit checkpoint requires a workspace path")
 	}
-	out, err := checkpointCommand(ctx, scope, "exec", containerID, "sh", "-c", `cd "$1" && pwd -P`, "sh", workdir).CombinedOutput()
+	out, err := checkpointCommand(ctx, scope, "exec", containerID, "sh", "-c", `cd "$1" && pwd -P`, "sh", core.LiteralPOSIXPath(workdir)).CombinedOutput()
 	if err != nil {
 		return "", core.Exit(7, "resolve docker workdir %s: %v: %s", workdir, err, trimCheckpointFailure(string(out)))
 	}

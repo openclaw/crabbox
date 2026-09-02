@@ -757,8 +757,8 @@ func posixDesktopLaunchRemoteCommand(target SSHTarget, workdir string, env map[s
 	command = desktopMacOpenWaitCommand(target, command)
 	b.WriteString("set -eu\n")
 	if workdir != "" {
-		b.WriteString("mkdir -p " + shellQuote(workdir) + "\n")
-		b.WriteString("cd " + shellQuote(workdir) + "\n")
+		b.WriteString("mkdir -p " + shellPathQuote(workdir) + "\n")
+		b.WriteString("cd " + shellPathQuote(workdir) + "\n")
 	}
 	for key, value := range env {
 		b.WriteString(key + "=" + shellQuote(value) + "\n")

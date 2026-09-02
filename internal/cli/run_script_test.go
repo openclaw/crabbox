@@ -53,7 +53,7 @@ func TestRemoteRunScriptCommandUsesUploadedFile(t *testing.T) {
 		RemotePath: ".crabbox/scripts/abc-live.sh",
 		Shebang:    true,
 	}
-	got := remoteRunScriptCommandWithEnvFile("/work/repo", map[string]string{"OPENAI_API_KEY": "sk-test"}, "", spec, []string{"arg one"})
+	got := remoteRunScriptCommandWithEnvFiles("/work/repo", map[string]string{"OPENAI_API_KEY": "sk-test"}, nil, spec, []string{"arg one"})
 	for _, want := range []string{
 		"cd '/work/repo'",
 		"OPENAI_API_KEY='sk-test'",
@@ -132,7 +132,7 @@ if [ "$script_dir" = "$upload_dir" ]; then echo DIR_UPLOAD=yes; fi
 		t.Fatalf("completed upload mode: info=%v err=%v", info, err)
 	}
 	spec := &RunScriptSpec{Source: "./scripts/check.sh", RemotePath: remotePath, Shebang: true}
-	command := remoteRunScriptCommandWithEnvFile(workdir, nil, "", spec, []string{workdir})
+	command := remoteRunScriptCommandWithEnvFiles(workdir, nil, nil, spec, []string{workdir})
 	run := exec.Command("bash", "-lc", command)
 	run.Env = upload.Env
 	output, err := run.CombinedOutput()
@@ -143,14 +143,6 @@ if [ "$script_dir" = "$upload_dir" ]; then echo DIR_UPLOAD=yes; fi
 		if !strings.Contains(string(output), want) {
 			t.Fatalf("script output missing %q:\n%s", want, output)
 		}
-	}
-}
-
-func TestRemoteRunScriptCommandWithoutShebangUsesBash(t *testing.T) {
-	spec := &RunScriptSpec{RemotePath: ".crabbox/scripts/abc-script.sh"}
-	got := remoteRunScriptCommandWithEnvFile("/work/repo", nil, "", spec, nil)
-	if !strings.Contains(got, `exec bash "$@"`) {
-		t.Fatalf("remote command should run script through bash: %q", got)
 	}
 }
 

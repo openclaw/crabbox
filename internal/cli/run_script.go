@@ -111,7 +111,7 @@ func uploadRunScript(ctx context.Context, target SSHTarget, workdir string, spec
 func remoteUploadRunScriptCommand(workdir, remotePath string) string {
 	dir := filepath.ToSlash(filepath.Dir(remotePath))
 	script := "set -eu\numask 077\n" +
-		"cd " + shellQuote(workdir) + "\n" +
+		"cd " + shellPathQuote(workdir) + "\n" +
 		"mkdir -p " + shellQuote(dir) + "\n" +
 		"cat > " + shellQuote(remotePath) + "\n" +
 		"chmod 700 " + shellQuote(remotePath) + "\n"
@@ -147,28 +147,12 @@ if ($hasBom) {
 	return powershellCommand(script)
 }
 
-func remoteRunScriptCommandWithEnvFile(workdir string, env map[string]string, envFile string, script *RunScriptSpec, args []string) string {
-	return remoteRunScriptCommandWithEnvFiles(workdir, env, singleEnvFile(envFile), script, args)
-}
-
 func remoteRunScriptCommandWithEnvFiles(workdir string, env map[string]string, envFiles []string, script *RunScriptSpec, args []string) string {
-	var b strings.Builder
-	writeRemoteCommandPrefix(&b, workdir, env, envFiles)
-	if script.Shebang {
-		b.WriteString("bash -lc ")
-		b.WriteString(shellQuote(`exec "$@"`))
-		b.WriteString(" bash ")
-	} else {
-		b.WriteString("bash -lc ")
-		b.WriteString(shellQuote(`exec bash "$@"`))
-		b.WriteString(" bash ")
+	command := append([]string{script.RemotePath}, args...)
+	if !script.Shebang {
+		command = append([]string{"bash"}, command...)
 	}
-	b.WriteString(shellQuote(script.RemotePath))
-	for _, arg := range args {
-		b.WriteByte(' ')
-		b.WriteString(shellQuote(arg))
-	}
-	return b.String()
+	return remoteCommandWithEnvFiles(workdir, env, envFiles, command)
 }
 
 func windowsRemoteRunScriptCommandWithEnvFiles(workdir string, env map[string]string, envFiles []string, script *RunScriptSpec, args []string) string {

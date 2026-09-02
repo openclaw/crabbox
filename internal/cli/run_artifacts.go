@@ -156,7 +156,7 @@ func remoteRemoveRunArtifactCommand(target SSHTarget, workdir, remotePath string
 	if target.TargetOS == targetMacOS {
 		rm = "/bin/rm"
 	}
-	script := "set -eu\ncd " + shellQuote(workdir) + "\n" + rm + " -f -- " + shellQuote(remotePath)
+	script := "set -eu\ncd " + shellPathQuote(workdir) + "\n" + rm + " -f -- " + shellQuote(remotePath)
 	return remoteRunArtifactShellCommand(target, script)
 }
 
@@ -188,7 +188,7 @@ func writeArtifactGlobEnumeration(b *strings.Builder, glob, addFunction string) 
 func runArtifactRequireScript(workdir string, globs []string) string {
 	var b strings.Builder
 	b.WriteString("set -euo pipefail\n")
-	b.WriteString("cd " + shellQuote(workdir) + "\n")
+	b.WriteString("cd " + shellPathQuote(workdir) + "\n")
 	b.WriteString("missing=()\n")
 	writeArtifactGlobMatcher(&b)
 	b.WriteString("check_artifact_file() { local f=\"$1\" rel; [ -f \"$f\" ] || return 1; rel=$(artifact_rel_path \"$f\") || return 1; return 0; }\n")
@@ -205,7 +205,7 @@ func runArtifactRequireScript(workdir string, globs []string) string {
 func runArtifactCollectScript(workdir, remotePath string, globs []string) string {
 	var b strings.Builder
 	b.WriteString("set -euo pipefail\n")
-	b.WriteString("cd " + shellQuote(workdir) + "\n")
+	b.WriteString("cd " + shellPathQuote(workdir) + "\n")
 	b.WriteString("mkdir -p .crabbox\n")
 	b.WriteString("files=()\n")
 	writeArtifactGlobMatcher(&b)
@@ -597,7 +597,7 @@ func profileDoctorScript(doctor DoctorProfileConfig, workdir string) string {
 		if diskPath == "" {
 			diskPath = "."
 		}
-		b.WriteString(fmt.Sprintf("free=$(df -Pk %s | awk 'NR==2 {print int($4/1024/1024)}'); if [ \"$free\" -ge %d ]; then printf 'ok      %%-16s free_gb=%%s path=%%s\\n' disk \"$free\" %s; else printf 'failed  %%-16s free_gb=%%s want>=%d path=%%s\\n' disk \"$free\" %s; fail=1; fi\n", shellQuote(diskPath), doctor.MinDiskGB, shellQuote(diskPath), doctor.MinDiskGB, shellQuote(diskPath)))
+		b.WriteString(fmt.Sprintf("free=$(df -Pk %s | awk 'NR==2 {print int($4/1024/1024)}'); if [ \"$free\" -ge %d ]; then printf 'ok      %%-16s free_gb=%%s path=%%s\\n' disk \"$free\" %s; else printf 'failed  %%-16s free_gb=%%s want>=%d path=%%s\\n' disk \"$free\" %s; fail=1; fi\n", shellPathQuote(diskPath), doctor.MinDiskGB, shellQuote(diskPath), doctor.MinDiskGB, shellQuote(diskPath)))
 	}
 	b.WriteString("printf 'ok      %-16s cpus=%s mem_mb=%s\\n' system \"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo unknown)\" \"$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo unknown)\"\n")
 	b.WriteString("exit $fail\n")

@@ -350,7 +350,7 @@ func validateRunEnvHelperTarget(target SSHTarget, helperPath string) error {
 func remoteProbeRunEnvProfileCommand(workdir, remotePath string, names []string) string {
 	var b strings.Builder
 	b.WriteString("set -eu\ncd ")
-	b.WriteString(shellQuote(workdir))
+	b.WriteString(shellPathQuote(workdir))
 	b.WriteByte('\n')
 	b.WriteString("test -f ")
 	b.WriteString(shellQuote(remotePath))
@@ -395,7 +395,7 @@ func remoteProbeRunEnvProfileCommand(workdir, remotePath string, names []string)
 func remoteUploadRunEnvHelperCommand(workdir, remotePath string) string {
 	dir := shellDir(remotePath)
 	script := "set -eu\n" +
-		"cd " + shellQuote(workdir) + "\n" +
+		"cd " + shellPathQuote(workdir) + "\n" +
 		"mkdir -p " + shellQuote(dir) + "\n" +
 		"umask 077\n" +
 		"cat > " + shellQuote(remotePath) + "\n" +
@@ -406,7 +406,7 @@ func remoteUploadRunEnvHelperCommand(workdir, remotePath string) string {
 func formatRunEnvHelper(profilePath string) string {
 	return "#!/usr/bin/env bash\n" +
 		"set -e\n" +
-		"cd \"$(dirname \"$0\")/../..\"\n" +
+		"CDPATH= cd -- \"$(dirname \"$0\")/../..\"\n" +
 		"profile=" + shellQuote(profilePath) + "\n" +
 		"if [ ! -f \"$profile\" ]; then echo \"crabbox env helper: missing $profile\" >&2; exit 127; fi\n" +
 		". \"$profile\"\n" +
@@ -417,7 +417,7 @@ func formatRunEnvHelper(profilePath string) string {
 func remoteUploadRunEnvProfileCommand(workdir, remotePath string) string {
 	dir := shellDir(remotePath)
 	script := "set -eu\n" +
-		"cd " + shellQuote(workdir) + "\n" +
+		"cd " + shellPathQuote(workdir) + "\n" +
 		"mkdir -p " + shellQuote(dir) + "\n" +
 		"umask 077\n" +
 		"cat > " + shellQuote(remotePath) + "\n" +
@@ -426,7 +426,7 @@ func remoteUploadRunEnvProfileCommand(workdir, remotePath string) string {
 }
 
 func remoteRemoveRunEnvProfileCommand(workdir, remotePath string) string {
-	script := "set -eu\ncd " + shellQuote(workdir) + "\nrm -f -- " + shellQuote(remotePath)
+	script := "set -eu\ncd " + shellPathQuote(workdir) + "\nrm -f -- " + shellQuote(remotePath)
 	return "bash -lc " + shellQuote(script)
 }
 

@@ -81,7 +81,7 @@ func snapshotArtifactChanges(ctx context.Context, target SSHTarget, workdir stri
 
 func artifactChangeSnapshotScript(workdir string, paths []string) string {
 	var b strings.Builder
-	b.WriteString("set -euo pipefail\ncd " + shellQuote(workdir) + "\n")
+	b.WriteString("set -euo pipefail\ncd " + shellPathQuote(workdir) + "\n")
 	fmt.Fprintf(&b, "total=0\nfile_limit=%d\ntotal_limit=%d\n", maxArtifactChangeFileBytes, maxArtifactChangeTotalBytes)
 	b.WriteString(`snapshot_artifact() {
   local rel="$1" rest="$1" component current= encoded size limit

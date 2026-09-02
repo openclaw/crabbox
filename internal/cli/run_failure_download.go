@@ -123,7 +123,7 @@ func (w *runExitWitness) command(workdir string, env map[string]string, envFiles
 		body, args = `exec "$@"`, command
 	}
 	start := "printf " + shellQuote(string(w.prefix)+"start\x1f") + " >&2; "
-	inner := "bash -lc " + shellQuote(remoteBashLoginScript(workdir, "{ "+start+"\n"+body+"\n}")) + " bash"
+	inner := "bash -lc " + shellQuote(remoteBashLoginScript("{ "+start+"\n"+body+"\n}")) + " bash \"$1\""
 	for _, arg := range args {
 		inner += " " + shellQuote(arg)
 	}
@@ -133,7 +133,7 @@ func (w *runExitWitness) command(workdir string, env map[string]string, envFiles
 	// the inner login shell retains ordinary startup, exec, and errexit behavior.
 	outer := `"$@"; result=$?; printf ` + shellQuote(string(w.prefix)+"exit:%d\x1f") + ` "$result" >&2; exit 0`
 	b.WriteString("/bin/sh -c " + shellQuote(outer) + " sh " + inner)
-	return b.String()
+	return b.String() + ")"
 }
 
 func validateFailureDownloadTarget(target SSHTarget, downloads []string) error {

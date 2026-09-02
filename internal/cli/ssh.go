@@ -826,10 +826,6 @@ func runSSHQuietWithOptionsResolvePort(ctx context.Context, target *SSHTarget, r
 	return executeSSH(ctx, target, remote, nil, 0, 0, connectTimeout, connectionAttempts, io.Discard, io.Discard)
 }
 
-func runSSHQuietWithRemoteWaitTimeout(ctx context.Context, target SSHTarget, remote string, waitTimeout time.Duration, connectTimeout, connectionAttempts string) error {
-	return executeSSH(ctx, &target, remote, nil, 0, waitTimeout, connectTimeout, connectionAttempts, io.Discard, io.Discard)
-}
-
 func runSSHOutput(ctx context.Context, target SSHTarget, remote string) (string, error) {
 	return runSSHOutputWithRemoteWaitTimeout(ctx, target, remote, 0, "10", "3")
 }
@@ -1559,6 +1555,27 @@ func ShellQuote(s string) string {
 	return shellQuote(s)
 }
 
+// LiteralPOSIXPath keeps CDPATH, OLDPWD, and option parsing out of path operands.
+func LiteralPOSIXPath(value string) string {
+	if value != "" && !strings.HasPrefix(value, "/") {
+		return "./" + value
+	}
+	return value
+}
+
+func shellPathQuote(value string) string {
+	return shellQuote(LiteralPOSIXPath(value))
+}
+
+// Capture relative paths in the receiving shell before its cwd changes.
+func shellAbsolutePath(value string) string {
+	value = LiteralPOSIXPath(value)
+	if strings.HasPrefix(value, "./") {
+		return `"$PWD"/` + shellQuote(value)
+	}
+	return shellQuote(value)
+}
+
 func psQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
@@ -1615,47 +1632,34 @@ func utf16LE(input []byte) []byte {
 }
 
 func remoteCommand(workdir string, env map[string]string, command []string) string {
-	return remoteCommandWithEnvFile(workdir, env, "", command)
-}
-
-func remoteCommandWithEnvFile(workdir string, env map[string]string, envFile string, command []string) string {
-	return remoteCommandWithEnvFiles(workdir, env, singleEnvFile(envFile), command)
+	return remoteCommandWithEnvFiles(workdir, env, nil, command)
 }
 
 func remoteCommandWithEnvFiles(workdir string, env map[string]string, envFiles []string, command []string) string {
 	var b strings.Builder
 	writeRemoteCommandPrefix(&b, workdir, env, envFiles)
-	b.WriteString("bash -lc ")
-	b.WriteString(shellQuote(remoteBashLoginScript(workdir, `exec "$@"`)))
-	b.WriteString(" bash")
+	fmt.Fprintf(&b, "bash -lc %s bash \"$1\"", shellQuote(remoteBashLoginScript(`exec "$@"`)))
 	for _, word := range command {
-		b.WriteByte(' ')
-		b.WriteString(shellQuote(word))
+		fmt.Fprintf(&b, " %s", shellQuote(word))
 	}
-	return b.String()
+	return b.String() + ")"
 }
 
 func remoteShellCommand(workdir string, env map[string]string, script string) string {
-	return remoteShellCommandWithEnvFile(workdir, env, "", script)
-}
-
-func remoteShellCommandWithEnvFile(workdir string, env map[string]string, envFile, script string) string {
-	return remoteShellCommandWithEnvFiles(workdir, env, singleEnvFile(envFile), script)
+	return remoteShellCommandWithEnvFiles(workdir, env, nil, script)
 }
 
 func remoteShellCommandWithEnvFiles(workdir string, env map[string]string, envFiles []string, script string) string {
 	var b strings.Builder
 	writeRemoteCommandPrefix(&b, workdir, env, envFiles)
-	b.WriteString("bash -lc ")
-	b.WriteString(shellQuote(remoteBashLoginScript(workdir, script)))
+	fmt.Fprintf(&b, "bash -lc %s bash \"$1\")", shellQuote(remoteBashLoginScript(script)))
 	return b.String()
 }
 
-func remoteBashLoginScript(workdir, script string) string {
-	// Some sandbox images run bash startup files that cd back to $HOME for
-	// login shells. Keep the outer cd for env-file loading, then restore cwd
-	// inside bash -lc before the user command runs.
-	return "cd " + shellQuote(workdir) + " && " + script
+func remoteBashLoginScript(script string) string {
+	// Restore the selected directory after env files or login startup change cwd.
+	// Passing the resolved path avoids evaluating a relative path twice.
+	return `cd -- "$1" && shift && ` + script
 }
 
 func shellScriptFromArgv(command []string) string {
@@ -1685,25 +1689,8 @@ func ShellScriptFromArgv(command []string) string {
 }
 
 func isShellEnvAssignment(word string) bool {
-	if word == "" {
-		return false
-	}
-	idx := strings.IndexByte(word, '=')
-	if idx <= 0 {
-		return false
-	}
-	for i, r := range word[:idx] {
-		if i == 0 {
-			if !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || r == '_') {
-				return false
-			}
-			continue
-		}
-		if !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_') {
-			return false
-		}
-	}
-	return true
+	key, _, ok := strings.Cut(word, "=")
+	return ok && validEnvName(key)
 }
 
 func isShellControlOperator(word string) bool {
@@ -1725,28 +1712,19 @@ func resetsShellCommandPosition(word string) bool {
 }
 
 func writeRemoteCommandPrefix(b *strings.Builder, workdir string, env map[string]string, envFiles []string) {
-	b.WriteString("cd ")
-	b.WriteString(shellQuote(workdir))
-	b.WriteString(" && ")
+	fmt.Fprintf(b, "(cd %s && set -- \"$PWD\" && ", shellPathQuote(workdir))
 	for _, envFile := range envFiles {
 		envFile = strings.TrimSpace(envFile)
 		if envFile == "" {
 			continue
 		}
-		b.WriteString("if [ -f ")
-		b.WriteString(shellQuote(envFile))
-		b.WriteString(" ]; then . ")
-		b.WriteString(shellQuote(envFile))
-		b.WriteString("; fi && ")
+		fmt.Fprintf(b, "if [ -f %s ]; then . %s; fi && ", shellQuote(envFile), shellQuote(envFile))
 	}
 	for k, v := range env {
 		if !validEnvName(k) {
 			continue
 		}
-		b.WriteString(k)
-		b.WriteByte('=')
-		b.WriteString(shellQuote(v))
-		b.WriteByte(' ')
+		fmt.Fprintf(b, "%s=%s ", k, shellQuote(v))
 	}
 }
 
@@ -1770,12 +1748,12 @@ func ShellWords(words []string) []string {
 }
 
 func remoteMkdir(workdir string) string {
-	return "mkdir -p " + shellQuote(workdir)
+	return "mkdir -p " + shellPathQuote(workdir)
 }
 
 func remoteResetWorkdir(workdir string) string {
 	parent := filepath.ToSlash(filepath.Dir(workdir))
-	script := "set -eu\nmkdir -p " + shellQuote(parent) + "\nrm -rf -- " + shellQuote(workdir) + "\nmkdir -p " + shellQuote(workdir)
+	script := "set -eu\nmkdir -p " + shellPathQuote(parent) + "\nrm -rf -- " + shellPathQuote(workdir) + "\nmkdir -p " + shellPathQuote(workdir)
 	return "bash -lc " + shellQuote(script)
 }
 
@@ -1818,7 +1796,7 @@ func remoteGitHydrateStatus(workdir, baseRef, expectedSHA string) string {
 	if baseRef == "" || expectedSHA == "" {
 		return "printf ''"
 	}
-	script := `cd ` + shellQuote(workdir) + ` && ` + remoteGitWorkspaceFunctions() + `
+	script := `cd ` + shellPathQuote(workdir) + ` && ` + remoteGitWorkspaceFunctions() + `
 if ! exact_git_root; then
   exit 0
 fi
@@ -1843,12 +1821,20 @@ func remoteGitSeed(workdir string, plan gitCoherencePlan) string {
 	if !plan.seedEnabled() {
 		return "true"
 	}
-	parent := filepath.ToSlash(filepath.Dir(workdir))
 	script := `set -e
 printf 'crabbox-git-seed phase=prerequisite\n'
 command -v git >/dev/null 2>&1 || exit 127
 printf 'crabbox-git-seed phase=prepare\n'
-workdir=` + shellQuote(workdir) + `
+workdir=` + shellAbsolutePath(workdir) + `
+# Keep clone publication and cleanup anchored across directory changes.
+[ -n "$workdir" ] || { echo 'crabbox-git-seed: missing workspace path' >&2; exit 2; }
+parent="$workdir"
+# Keep staging outside directory suffixes without changing the destination.
+while [[ "$parent" = */ || "$parent" = */. ]]; do
+  parent="${parent%/}"; parent="${parent%/.}"
+done
+parent="${parent%/*}"
+parent="${parent:-/}"
 expected_origin=` + shellQuote(plan.RemoteURL) + `
 expected_tree=` + shellQuote(plan.Tree) + `
 ` + remoteGitWorkspaceFunctions() + `
@@ -1860,8 +1846,8 @@ if [ -d "$workdir" ]; then
     exit 0
   fi
 fi
-mkdir -p ` + shellQuote(parent) + `
-tmp="$(mktemp -d ` + shellQuote(parent+"/.seed.XXXXXX") + `)"
+mkdir -p "$parent"
+tmp="$(mktemp -d "$parent/.seed.XXXXXX")"
 cleanup_seed() { rm -rf -- "$tmp"; }
 trap cleanup_seed EXIT
 printf 'crabbox-git-seed phase=clone\n'
@@ -1900,7 +1886,7 @@ func remoteReadSyncFingerprint(workdir string, plan gitCoherencePlan) string {
 	if !plan.enabled() {
 		return "printf ''"
 	}
-	script := "cd " + shellQuote(workdir) + " && " + `expected_origin=` + shellQuote(plan.RemoteURL) + `
+	script := "cd " + shellPathQuote(workdir) + " && " + `expected_origin=` + shellQuote(plan.RemoteURL) + `
 ` + remoteGitWorkspaceFunctions() + `
 if ! exact_git_root || ! origin_matches; then
   exit 0
@@ -1921,11 +1907,30 @@ func remoteInvalidateSyncFingerprintForTarget(target SSHTarget, workdir string) 
 	if isWindowsNativeTarget(target) {
 		return powershellCommand("exit 0")
 	}
+	workdir = LiteralPOSIXPath(workdir)
 	script := `set -e
-cd ` + shellQuote(workdir) + `
+if [ ! -d "$1" ]; then
+  # Check traversal separately: GNU rm -f also ignores ENOTDIR.
+  parent="$1"
+  while [ "$parent" != / ] && [ "${parent%/}" != "$parent" ]; do
+    parent=${parent%/}
+  done
+  while [ ! -e "$parent" ] && [ ! -L "$parent" ]; do
+    case "$parent" in
+      ""|/|.) break ;;
+      */*) parent=${parent%/*} ;;
+      *) parent=. ;;
+    esac
+    parent=${parent:-/}
+  done
+  (cd -- "$parent")
+  rm -f -- "$1/.crabbox/sync-fingerprint"
+  exit
+fi
+cd -- "$1"
 ` + remoteSyncMetaDirScript() + `
 rm -f "$meta_dir/sync-fingerprint"`
-	return "bash -lc " + shellQuote(script)
+	return "bash -lc " + shellQuote(script) + " bash " + shellQuote(workdir)
 }
 
 type remoteSyncFinalizeOptions struct {
@@ -1946,16 +1951,6 @@ func remoteSyncPendingManifestName(token string) string {
 
 func remoteSyncPendingDeletedName(token string) string {
 	return "sync-deleted." + token + ".new"
-}
-
-func remoteWriteSyncManifestNew(workdir string) string {
-	script := "cd " + shellQuote(workdir) + " && " + remoteSyncMetaDirScript() + "mkdir -p \"$meta_dir\" && cat > \"$meta_dir/sync-manifest.new\""
-	return "bash -lc " + shellQuote(script)
-}
-
-func remoteWriteSyncDeletedNew(workdir string) string {
-	script := "cd " + shellQuote(workdir) + " && " + remoteSyncMetaDirScript() + "mkdir -p \"$meta_dir\" && cat > \"$meta_dir/sync-deleted.new\""
-	return "bash -lc " + shellQuote(script)
 }
 
 func remoteSyncInterpreterCommand(python, perl, args string) string {
@@ -1982,7 +1977,7 @@ func remoteWriteSyncManifestsNewWithMetadataMode(workdir, finalizeToken, metadat
 	if hermetic {
 		metadataScript = gitOverlayHermeticFunctions() + metadataScript
 	}
-	script := "set -e\nmkdir -p " + shellQuote(workdir) + "\ncd " + shellQuote(workdir) + "\n" + metadataScript + `mkdir -p "$meta_dir"
+	script := "set -e\nmkdir -p " + shellPathQuote(workdir) + "\ncd " + shellPathQuote(workdir) + "\n" + metadataScript + `mkdir -p "$meta_dir"
 ` + remoteSyncAbandonedMetadataCleanup() + `
 if ! IFS= read -r manifest_len; then
   echo "invalid sync manifest length" >&2
@@ -2065,7 +2060,7 @@ with open(sys.argv[1], "wb") as handle:
 with open(sys.argv[2], "wb") as handle:
     handle.write(deleted)
 `
-	script := "set -e\nmkdir -p " + shellQuote(workdir) + "\ncd " + shellQuote(workdir) + "\n" + remoteSyncMetaDirScript() + "mkdir -p \"$meta_dir\"\n" +
+	script := "set -e\nmkdir -p " + shellPathQuote(workdir) + "\ncd " + shellPathQuote(workdir) + "\n" + remoteSyncMetaDirScript() + "mkdir -p \"$meta_dir\"\n" +
 		remoteSyncAbandonedMetadataCleanup() + "\n" +
 		"python3 -c " + shellQuote(python) + " \"$meta_dir/" + manifestName + "\" \"$meta_dir/" + deletedName + "\"\n"
 	return "bash -lc " + shellQuote(script)
@@ -2076,7 +2071,7 @@ func remoteSyncAbandonedMetadataCleanup() string {
 }
 
 func remoteSeedSyncManifestFromGit(workdir string) string {
-	script := "set -e\ncd " + shellQuote(workdir) + `
+	script := "set -e\ncd " + shellPathQuote(workdir) + `
 ` + remoteGitWorkspaceFunctions() + `
 ` + remoteSyncMetaDirScript() + `
 old="$meta_dir/sync-manifest"
@@ -2122,7 +2117,7 @@ my %new = map { $_ => 1 } read_manifest($ARGV[1]);
 binmode STDOUT;
 print STDOUT map { $_ . "\0" } grep { !$new{$_} } @old;
 `
-	script := "set -e -o pipefail\ncd " + shellQuote(workdir) + `
+	script := "set -e -o pipefail\ncd " + shellPathQuote(workdir) + `
 ` + remoteSyncMetaDirScript() + `
 old="$meta_dir/sync-manifest"
 new="$meta_dir/` + manifestName + `"
@@ -2157,7 +2152,7 @@ func remotePruneSyncManifestForTarget(target SSHTarget, workdir, finalizeToken s
 func remotePruneSyncManifestCoreutils(workdir, finalizeToken string) string {
 	manifestName := remoteSyncPendingManifestName(finalizeToken)
 	deletedName := remoteSyncPendingDeletedName(finalizeToken)
-	script := "set -e -o pipefail\ncd " + shellQuote(workdir) + `
+	script := "set -e -o pipefail\ncd " + shellPathQuote(workdir) + `
 ` + remoteSyncMetaDirScript() + `
 old="$meta_dir/sync-manifest"
 new="$meta_dir/` + manifestName + `"
@@ -2191,11 +2186,6 @@ fi
 	return "bash -lc " + shellQuote(script)
 }
 
-func remoteApplySyncManifest(workdir string) string {
-	script := "set -e; cd " + shellQuote(workdir) + "; " + remoteSyncMetaDirScript() + "mkdir -p \"$meta_dir\"; new=\"$meta_dir/sync-manifest.new\"; deleted=\"$meta_dir/sync-deleted.new\"; rm -f \"$deleted\"; mv \"$new\" \"$meta_dir/sync-manifest\""
-	return "bash -lc " + shellQuote(script)
-}
-
 func remoteFinalizeSync(workdir string, opts remoteSyncFinalizeOptions) string {
 	allowValue := ""
 	if opts.AllowMassDeletions {
@@ -2210,7 +2200,7 @@ func remoteFinalizeSync(workdir string, opts remoteSyncFinalizeOptions) string {
 		metadataScript = remotePlainSyncMetaDirScript()
 	}
 	script := `set -e
-cd ` + shellQuote(workdir) + `
+cd ` + shellPathQuote(workdir) + `
 ` + gitFunctions + `
 ` + metadataScript + `
 mkdir -p "$meta_dir"
@@ -2477,22 +2467,6 @@ func remotePlainSyncMetaDirScript() string {
 fi
 meta_dir="$PWD/.git/crabbox"
 `
-}
-
-func remoteSyncSanity(workdir string, allowMassDeletions bool) string {
-	allowValue := ""
-	if allowMassDeletions {
-		allowValue = "1"
-	}
-	return "cd " + shellQuote(workdir) + " && " +
-		"if test -d .git && git_status_output=$(git status --short 2>/dev/null); then " +
-		"deletions=$(printf '%s\\n' \"$git_status_output\" | awk '/^ D|^D / { n++ } END { print n+0 }'); " +
-		"if [ " + shellQuote(allowValue) + " != '1' ] && [ \"$deletions\" -ge 200 ]; then " +
-		"echo \"remote sync sanity failed: $deletions tracked deletions\" >&2; " +
-		"printf '%s\\n' \"$git_status_output\" | awk '/^ D|^D / { print \"  \" substr($0,4) }' | head -20 >&2; " +
-		"exit 66; " +
-		"fi; " +
-		"fi"
 }
 
 func exitCode(err error) int {

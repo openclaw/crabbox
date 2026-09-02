@@ -3766,7 +3766,7 @@ for arg do cmd="$arg"; done
 input="$(cat)"
 printf '%s\n%s\n---\n' "$cmd" "$input" >> "$CRABBOX_FAKE_SSH_LOG"
 case "$cmd" in
-  mkdir\ -p*|cd\ *|bash\ -lc*|/bin/bash\ -lc*) printf '%s' "$input" | sh -c "$cmd"; exit $? ;;
+  mkdir\ -p*|cd\ *|\(cd\ *|bash\ -lc*|/bin/bash\ -lc*) printf '%s' "$input" | sh -c "$cmd"; exit $? ;;
 esac
 exit 0
 `
@@ -3789,12 +3789,14 @@ exit 0
 			releases := 0
 			runEnvProfileTestReleaseHook = func() error {
 				releases++
-				remoteArchives, globErr := filepath.Glob(filepath.Join(remoteRoot, "cbx_env_profile_test", "crabbox", ".crabbox", "*-artifacts.tgz"))
-				if globErr != nil {
-					return globErr
+				remoteFiles, readErr := os.ReadDir(filepath.Join(remoteRoot, "cbx_env_profile_test", filepath.Base(dir), ".crabbox"))
+				if readErr != nil {
+					return readErr
 				}
-				if len(remoteArchives) != 0 {
-					return fmt.Errorf("remote archives still present at release: %v", remoteArchives)
+				for _, file := range remoteFiles {
+					if strings.HasSuffix(file.Name(), "-artifacts.tgz") {
+						return fmt.Errorf("remote archive still present at release: %s", file.Name())
+					}
 				}
 				file, openErr := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 				if openErr != nil {
@@ -3853,7 +3855,7 @@ exit 0
 			}
 			logText := string(logData)
 			previous := -1
-			for _, want := range []string{"check_artifact_file()", "tar -czf", "base64 <", "rm -f --", "RELEASE"} {
+			for _, want := range []string{"check_artifact_file()", "tar -czf", "base64 <", "RELEASE"} {
 				index := strings.Index(logText, want)
 				if index < 0 {
 					t.Fatalf("ssh log missing %q:\n%s", want, logText)
@@ -4440,6 +4442,8 @@ type fullResyncActionsTestOptions struct {
 	noHydrate        bool
 	syncOnly         bool
 	failInvalidation bool
+	failBinding      bool
+	workRoot         string
 	adoptedWorkspace string
 	workflow         string
 	mutateWorkflow   bool
@@ -4533,6 +4537,14 @@ $current"
   esac
 done
 if [ -n "$decoded_view" ]; then remote=$decoded_view; fi
+# Match the dedicated probe, not metadata programs which also contain pwd -P.
+# The decoded witness quotes its registrar's exec line once.
+if [ "$current" = 'pwd -P' ] || printf '%s\n' "$current" | grep -Fqx -- ` + shellQuote(`exec sh -c '\''pwd -P'\''`) + `; then
+  printf 'bind-workspace\n' >> "$CRABBOX_FAKE_EVENTS"
+  if [ "${CRABBOX_FAKE_BINDING_FAIL:-0}" = "1" ]; then exit 41; fi
+  printf '/fixture-root\n'
+  exit 0
+fi
 # A witness has its own rm commands; do not match them across payload lines.
 marker_mutation=$(printf '%s\n' "$remote" | awk '
   /rm -f/ && /[.]crabbox\/actions\/cbx_env_profile_test[.]env[.]sh/ { print "clear"; exit }
@@ -4619,7 +4631,11 @@ exit 0
 	if err := os.WriteFile(rsyncPath, []byte(rsyncScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(configPath, []byte("actions:\n  workflow: .github/workflows/hydrate.yml\nsync:\n  fingerprint: false\n  gitSeed: false\n"), 0o600); err != nil {
+	config := "actions:\n  workflow: .github/workflows/hydrate.yml\nsync:\n  fingerprint: false\n  gitSeed: false\n"
+	if opts.workRoot != "" {
+		config += fmt.Sprintf("workRoot: %q\n", opts.workRoot)
+	}
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -4633,13 +4649,23 @@ exit 0
 	t.Setenv("CRABBOX_FAKE_HYDRATION_SCRIPT", hydrationScriptPath)
 	t.Setenv("CRABBOX_FAKE_WORKFLOW_PATH", workflowPath)
 	t.Setenv("CRABBOX_FAKE_OWNER_CHILD", filepath.Join(dir, "owner-child"))
-	canonicalWorkspace := remoteJoin(defaultConfig(), "cbx_env_profile_test", "crabbox")
+	cfg := defaultConfig()
+	if opts.workRoot != "" {
+		cfg.WorkRoot = opts.workRoot
+	}
+	canonicalWorkspace := remoteJoin(cfg, "cbx_env_profile_test", "crabbox")
+	if !strings.HasPrefix(canonicalWorkspace, "/") {
+		canonicalWorkspace = "/fixture-root/" + canonicalWorkspace
+	}
 	adoptedWorkspace := opts.adoptedWorkspace
 	if adoptedWorkspace == "" {
 		adoptedWorkspace = canonicalWorkspace
 	}
 	t.Setenv("CRABBOX_FAKE_CANONICAL_WORKSPACE", canonicalWorkspace)
 	t.Setenv("CRABBOX_FAKE_ADOPTED_WORKSPACE", adoptedWorkspace)
+	if opts.failBinding {
+		t.Setenv("CRABBOX_FAKE_BINDING_FAIL", "1")
+	}
 	if opts.failInvalidation {
 		t.Setenv("CRABBOX_FAKE_INVALIDATE_FAIL", "1")
 	}
@@ -4708,17 +4734,85 @@ func TestRunCommandFullResyncRehydratesAdoptedActionsWorkspaceInOrderUnderOwner(
 	}
 }
 
-func TestRunCommandFullResyncRejectsUnsupportedWorkflowBeforeRemoteMutation(t *testing.T) {
-	result := runFullResyncActionsTest(t, fullResyncActionsTestOptions{workflow: `jobs:
-  hydrate:
-    steps:
-      - run: echo "${{ matrix.node }}"
-`})
-	var exitErr ExitError
-	if !AsExitError(result.err, &exitErr) || exitErr.Code != 2 {
-		t.Fatalf("error=%v, want exit 2\nstdout=%s\nstderr=%s", result.err, result.stdout, result.stderr)
+func TestRunCommandFullResyncBindsRelativeActionsWorkspaceBeforeMutation(t *testing.T) {
+	const rawWorkspace = "work/cbx_env_profile_test/crabbox"
+	const boundWorkspace = "/fixture-root/" + rawWorkspace
+	tests := []struct {
+		name        string
+		adopted     string
+		failBinding bool
+		wantExit    int
+		wantMessage string
+	}{
+		{name: "adopted-absolute", adopted: boundWorkspace},
+		{name: "configured-relative", adopted: rawWorkspace},
+		{name: "different-workspace", adopted: "/fixture-root/other", wantExit: 2, wantMessage: "local hydration uses"},
+		{name: "binding-failure", adopted: rawWorkspace, failBinding: true, wantExit: 7, wantMessage: "resolve local Actions workspace"},
 	}
-	assertRunEvents(t, result.events, []string{"owner-acquire", "owner-release"})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := runFullResyncActionsTest(t, fullResyncActionsTestOptions{
+				workRoot:         "work",
+				adoptedWorkspace: tt.adopted,
+				failBinding:      tt.failBinding,
+			})
+			if tt.wantExit != 0 {
+				var exitErr ExitError
+				if !AsExitError(result.err, &exitErr) || exitErr.Code != tt.wantExit || !strings.Contains(exitErr.Message, tt.wantMessage) {
+					t.Errorf("error=%v, want exit %d containing %q\nstdout=%s\nstderr=%s", result.err, tt.wantExit, tt.wantMessage, result.stdout, result.stderr)
+				}
+				if result.resetCommand != "" || result.syncTarget != "" || result.hydrationScript != "" {
+					t.Error("workspace mutation occurred after refused preparation")
+				}
+				if tt.failBinding {
+					assertRunEvents(t, result.events, []string{"owner-acquire", "bind-workspace", "owner-release"})
+				} else {
+					var effects []string
+					for _, event := range result.events {
+						if event != "bind-workspace" {
+							effects = append(effects, event)
+						}
+					}
+					assertRunEvents(t, effects, []string{"owner-acquire", "owner-release"})
+				}
+				return
+			}
+			if result.err != nil {
+				t.Fatalf("run error=%v\nstdout=%s\nstderr=%s", result.err, result.stdout, result.stderr)
+			}
+			assertRunEvents(t, result.events, []string{"owner-acquire", "bind-workspace", "invalidate", "reset", "sync", "clear", "hydrate", "command", "owner-release"})
+			for name, value := range map[string]string{
+				"reset command":    result.resetCommand,
+				"sync target":      result.syncTarget,
+				"hydration script": result.hydrationScript,
+			} {
+				if !strings.Contains(value, boundWorkspace) {
+					t.Errorf("%s does not retain bound workspace %q:\n%s", name, boundWorkspace, value)
+				}
+			}
+		})
+	}
+}
+
+func TestRunCommandFullResyncRejectsUnsupportedWorkflowBeforeRemoteMutation(t *testing.T) {
+	tests := []struct{ name, job string }{
+		{name: "expression", job: "    steps:\n      - run: echo \"${{ matrix.node }}\"\n"},
+		{name: "container", job: "    container: node:22\n    steps:\n      - run: echo unsupported\n"},
+		{name: "services", job: "    services:\n      cache:\n        image: redis:7\n    steps:\n      - run: echo unsupported\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := runFullResyncActionsTest(t, fullResyncActionsTestOptions{workflow: "jobs:\n  hydrate:\n" + tt.job})
+			var exitErr ExitError
+			if !AsExitError(result.err, &exitErr) || exitErr.Code != 2 {
+				t.Errorf("error=%v, want exit 2\nstdout=%s\nstderr=%s", result.err, result.stdout, result.stderr)
+			}
+			if result.resetCommand != "" || result.syncTarget != "" || result.hydrationScript != "" {
+				t.Error("unsupported workflow reached workspace mutation")
+			}
+			assertRunEvents(t, result.events, []string{"owner-acquire", "owner-release"})
+		})
+	}
 }
 
 func TestRunCommandFullResyncUsesPreparedWorkflowSnapshot(t *testing.T) {

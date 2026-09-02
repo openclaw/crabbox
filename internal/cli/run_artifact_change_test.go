@@ -265,7 +265,7 @@ cmd=""
 for arg do cmd="$arg"; done
 case "$cmd" in
   *TRANSPORT_BREAK*) exit 255 ;;
-  mkdir\ -p*|cd\ *|bash\ -lc*|/bin/bash\ -lc*) exec sh -c "$cmd" ;;
+  mkdir\ -p*|cd\ *|\(cd\ *|bash\ -lc*|/bin/bash\ -lc*) exec sh -c "$cmd" ;;
 esac
 exit 0
 `

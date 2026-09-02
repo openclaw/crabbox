@@ -388,5 +388,5 @@ $path = ` + psQuote(remotePath) + `
 if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "download file not found: $path" }
 [Convert]::ToBase64String([System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $path).Path))`)
 	}
-	return fmt.Sprintf("cd %s && test -f %s && base64 < %s", shellQuote(workdir), shellQuote(remotePath), shellQuote(remotePath))
+	return fmt.Sprintf("cd %s && test -f %s && base64 < %s", shellPathQuote(workdir), shellQuote(remotePath), shellQuote(remotePath))
 }

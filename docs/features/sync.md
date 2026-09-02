@@ -210,10 +210,13 @@ that would delete an unexpectedly large fraction of tracked files; set
 `CRABBOX_ALLOW_MASS_DELETIONS=1` to override it (this is also implied during
 Actions hydration).
 
-On the remote box, sync metadata (including the fingerprint) is stored under
-`.git/crabbox` when `.git` is a directory, and under `.crabbox` otherwise. The
-`.crabbox/` directory in your repository remains available for repository-owned
-files and config; Crabbox does not delete files there.
+At an exact Git worktree root, sync metadata (including the fingerprint) uses
+`git rev-parse --git-path crabbox`, including linked-worktree metadata. Other
+workspaces use `.crabbox`. Repository-owned files and config there are preserved.
+
+Actions hydration invalidates reusable fingerprints before setup and does not
+write a new one during its sync finalizer: setup can still change the workspace.
+A later ordinary sync must verify and certify its own completed transfer.
 
 ## Fingerprints and Git seeding
 

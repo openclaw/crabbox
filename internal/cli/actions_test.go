@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -550,13 +551,18 @@ func TestSelectLocalHydrateJobAllowsSingleJobWorkflow(t *testing.T) {
 
 func TestSyncLocalActionsWorkspaceUsesGitCoherenceFinalizer(t *testing.T) {
 	f := newGitCoherenceFixture(t)
+	runGit(t, f.source, "checkout", "--detach", f.b)
+	workdir := f.workspace(t, f.a, true)
+	fingerprint := filepath.Join(coherenceMetaDir(t, workdir), "sync-fingerprint")
+	mustWriteTestFile(t, fingerprint, "stale")
+	// Stage the transferred bytes, then execute the real generated SSH commands
+	// and finalizer against the older Git index and HEAD.
+	mustWriteTestFile(t, filepath.Join(workdir, "tracked.txt"), "B\n")
 	tools := t.TempDir()
-	logPath := filepath.Join(tools, "ssh.log")
 	sshScript := `#!/bin/sh
 last=
 for arg do last="$arg"; done
-printf '%s\n' "$last" >> "$CRABBOX_ACTIONS_SSH_LOG"
-cat >/dev/null
+exec bash -lc "$last"
 `
 	if err := os.WriteFile(filepath.Join(tools, "ssh"), []byte(sshScript), 0o755); err != nil {
 		t.Fatal(err)
@@ -565,7 +571,6 @@ cat >/dev/null
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("CRABBOX_ACTIONS_SSH_LOG", logPath)
 
 	cfg := baseConfig()
 	cfg.Sync.Fingerprint = true
@@ -573,22 +578,18 @@ cat >/dev/null
 	repo := Repo{Root: f.source, Name: "repo", RemoteURL: f.origin, Head: f.b, BaseRef: "main"}
 	var stderr bytes.Buffer
 	app := App{Stdout: io.Discard, Stderr: &stderr}
-	err := app.syncLocalActionsWorkspace(context.Background(), cfg, repo, SSHTarget{
+	if err := app.syncLocalActionsWorkspace(context.Background(), cfg, repo, SSHTarget{
 		User: "crabbox", Host: "example.test", Port: "22", TargetOS: targetLinux,
-	}, "/work/repo")
-	if err != nil {
-		t.Fatalf("sync local Actions workspace: %v\n%s", err, stderr.String())
+	}, workdir); err != nil {
+		t.Fatalf("sync local Actions workspace: %v (%d diagnostic bytes)", err, stderr.Len())
 	}
-	logData, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatal(err)
+	requireGitOutput(t, workdir, f.b, "rev-parse", "HEAD")
+	requireGitOutput(t, workdir, gitOutput(f.source, "rev-parse", f.b+"^{tree}"), "write-tree")
+	if data, err := os.ReadFile(filepath.Join(workdir, "tracked.txt")); err != nil || string(data) != "B\n" {
+		t.Fatalf("coherence finalization changed transferred bytes: %v", err)
 	}
-	log := string(logData)
-	plan := f.plan(t, f.b)
-	for _, want := range []string{plan.RemoteURL, plan.Target, plan.Tree, "refs/crabbox/sync-", "read-tree --reset", "update-ref --no-deref HEAD"} {
-		if !strings.Contains(log, want) {
-			t.Fatalf("Actions sync missing coherence contract %q:\n%s", want, log)
-		}
+	if _, err := os.Lstat(fingerprint); !os.IsNotExist(err) {
+		t.Fatalf("Actions setup must not retain a reusable fingerprint: %v", err)
 	}
 }
 
@@ -614,7 +615,7 @@ func TestLocalActionsHydrateScriptTranslatesCoreSteps(t *testing.T) {
 		},
 	}
 	workdir := "/work/cbx_123/my-app"
-	got, err := localActionsHydrateScript(cfg, repo, workflow, job, "hydrate", "cbx_123", actionsHydrateFields("cbx_123", "crabbox-cbx-123", "hydrate", 0, nil), workdir)
+	got, err := renderLocalActionsTestScript(cfg, repo, workflow, job, "hydrate", "cbx_123", actionsHydrateFields("cbx_123", "crabbox-cbx-123", "hydrate", 0, nil), workdir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -660,7 +661,7 @@ func TestLocalActionsHydrateScriptTracksCacheRestoreOutputs(t *testing.T) {
 		{Name: "Skip on hit", If: "steps.deps.outputs.cache-hit != 'false'", Run: "exit 99"},
 		{Name: "Report", Run: "echo ${{ steps.deps.outputs.cache-hit }}"},
 	}}
-	got, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
+	got, err := renderLocalActionsTestScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -731,7 +732,7 @@ runs:
 		{ID: "setup", Uses: "./.github/actions/setup-node-env", With: map[string]string{"install-bun": "false"}},
 		{If: "steps.setup.outputs.cache-hit == 'false'", Run: "echo outer install"},
 	}}
-	got, err := localActionsHydrateScript(defaultConfig(), Repo{Root: root, Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", actionsHydrateFields("cbx_123", "crabbox-cbx-123", "", 0, nil), "/work/cbx_123/repo")
+	got, err := renderLocalActionsTestScript(defaultConfig(), Repo{Root: root, Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", actionsHydrateFields("cbx_123", "crabbox-cbx-123", "", 0, nil), "/work/cbx_123/repo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -790,7 +791,7 @@ runs:
 		{If: "steps.cache.outputs.cache-enabled == 'true'", Run: "echo cache is enabled"},
 		{Run: "echo ${{ steps.cache.outputs.primary-key }}"},
 	}}
-	got, err := localActionsHydrateScript(defaultConfig(), Repo{Root: root, Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
+	got, err := renderLocalActionsTestScript(defaultConfig(), Repo{Root: root, Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -834,7 +835,7 @@ runs:
 		{ID: "dynamic", Uses: "./.github/actions/dynamic-output"},
 		{Run: "echo ${{ steps.dynamic.outputs.value }}"},
 	}}
-	_, err := localActionsHydrateScript(defaultConfig(), Repo{Root: root, Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
+	_, err := renderLocalActionsTestScript(defaultConfig(), Repo{Root: root, Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
 	if err == nil || !strings.Contains(err.Error(), "--github-runner") {
 		t.Fatalf("dynamic composite output should require GitHub fallback: %v", err)
 	}
@@ -867,7 +868,7 @@ runs:
 		{ID: "conditional", Uses: "./.github/actions/conditional-output"},
 		{If: "steps.conditional.outputs.enabled == 'true'", Run: "echo enabled"},
 	}}
-	_, err := localActionsHydrateScript(defaultConfig(), Repo{Root: root, Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
+	_, err := renderLocalActionsTestScript(defaultConfig(), Repo{Root: root, Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
 	if err == nil || !strings.Contains(err.Error(), "--github-runner") {
 		t.Fatalf("conditional composite output should require GitHub fallback: %v", err)
 	}
@@ -908,7 +909,7 @@ func TestLocalActionsHydrateScriptAllowsEmptySecrets(t *testing.T) {
 	}, Steps: []localHydrateStep{
 		{Run: "test -z \"$OPENAI_API_KEY\""},
 	}}
-	got, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
+	got, err := renderLocalActionsTestScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -918,7 +919,7 @@ func TestLocalActionsHydrateScriptAllowsEmptySecrets(t *testing.T) {
 }
 
 func TestLocalActionsHydrateScriptRejectsUnknownStepOutputs(t *testing.T) {
-	_, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
+	_, err := renderLocalActionsTestScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
 		Steps: []localHydrateStep{
 			{ID: "build", Run: "printf 'artifact=app\\n' >> \"$GITHUB_OUTPUT\""},
 			{Run: "echo ${{ steps.build.outputs.artifact }}"},
@@ -947,7 +948,7 @@ func TestLocalActionsHashFilesMatchesRecursiveGlobs(t *testing.T) {
 	if !ok || hash == "" {
 		t.Fatalf("recursive hashFiles did not match: ok=%v hash=%q", ok, hash)
 	}
-	got, err := localActionsHydrateScript(defaultConfig(), Repo{Root: root, Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
+	got, err := renderLocalActionsTestScript(defaultConfig(), Repo{Root: root, Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
 		Steps: []localHydrateStep{{Run: "echo ${{ hashFiles('**/pnpm-lock.yaml') }}"}},
 	}, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
 	if err != nil {
@@ -979,7 +980,7 @@ func TestLocalActionsHashFilesSkipsSymlinks(t *testing.T) {
 func TestLocalActionsHydrateScriptUsesFullGitHubRef(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.Actions.Ref = "refs/tags/v1.2.3"
-	got, err := localActionsHydrateScript(cfg, Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{}, "hydrate", "cbx_123", actionsHydrateFields("cbx_123", "crabbox-cbx-123", "hydrate", 0, nil), "/work/cbx_123/repo")
+	got, err := renderLocalActionsTestScript(cfg, Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{}, "hydrate", "cbx_123", actionsHydrateFields("cbx_123", "crabbox-cbx-123", "hydrate", 0, nil), "/work/cbx_123/repo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1002,7 +1003,7 @@ func TestLocalActionsHydrateScriptInterpolatesSetupInputs(t *testing.T) {
 		},
 	}
 	fields := actionsHydrateFields("cbx_123", "crabbox-cbx-123", "", 0, []string{"node=24", "go_file=go.mod", "python=3.12"})
-	got, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", fields, "/work/cbx_123/repo")
+	got, err := renderLocalActionsTestScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", fields, "/work/cbx_123/repo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1019,7 +1020,7 @@ func TestLocalActionsHydrateScriptInterpolatesSetupInputs(t *testing.T) {
 
 func TestLocalActionsHydrateScriptDoesNotDefaultSetupNodeVersion(t *testing.T) {
 	job := localHydrateJob{Steps: []localHydrateStep{{Uses: "actions/setup-node@v4"}}}
-	got, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", actionsHydrateFields("cbx_123", "crabbox-cbx-123", "", 0, nil), "/work/cbx_123/repo")
+	got, err := renderLocalActionsTestScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", actionsHydrateFields("cbx_123", "crabbox-cbx-123", "", 0, nil), "/work/cbx_123/repo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1030,7 +1031,7 @@ func TestLocalActionsHydrateScriptDoesNotDefaultSetupNodeVersion(t *testing.T) {
 
 func TestLocalActionsHydrateScriptRejectsUnsupportedSetupNodeVersion(t *testing.T) {
 	job := localHydrateJob{Steps: []localHydrateStep{{Uses: "actions/setup-node@v4", With: map[string]string{"node-version": "lts/*"}}}}
-	_, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", actionsHydrateFields("cbx_123", "crabbox-cbx-123", "", 0, nil), "/work/cbx_123/repo")
+	_, err := renderLocalActionsTestScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", actionsHydrateFields("cbx_123", "crabbox-cbx-123", "", 0, nil), "/work/cbx_123/repo")
 	if err == nil {
 		t.Fatal("expected unsupported setup-node version to fail")
 	}
@@ -1038,7 +1039,7 @@ func TestLocalActionsHydrateScriptRejectsUnsupportedSetupNodeVersion(t *testing.
 
 func TestLocalActionsHydrateScriptRejectsUnsupportedSetupNodeOptions(t *testing.T) {
 	job := localHydrateJob{Steps: []localHydrateStep{{Uses: "actions/setup-node@v4", With: map[string]string{"node-version": "22", "registry-url": "https://registry.npmjs.org"}}}}
-	_, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", actionsHydrateFields("cbx_123", "crabbox-cbx-123", "", 0, nil), "/work/cbx_123/repo")
+	_, err := renderLocalActionsTestScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", actionsHydrateFields("cbx_123", "crabbox-cbx-123", "", 0, nil), "/work/cbx_123/repo")
 	if err == nil {
 		t.Fatal("expected unsupported setup-node option to fail")
 	}
@@ -1049,7 +1050,7 @@ func TestLocalActionsHydrateScriptRejectsUnsupportedSetupNodeOptions(t *testing.
 
 func TestLocalActionsHydrateScriptAllowsSetupNodeCheckLatest(t *testing.T) {
 	job := localHydrateJob{Steps: []localHydrateStep{{Uses: "actions/setup-node@v4", With: map[string]string{"node-version": "22", "check-latest": "true"}}}}
-	got, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", actionsHydrateFields("cbx_123", "crabbox-cbx-123", "", 0, nil), "/work/cbx_123/repo")
+	got, err := renderLocalActionsTestScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", actionsHydrateFields("cbx_123", "crabbox-cbx-123", "", 0, nil), "/work/cbx_123/repo")
 	if err != nil {
 		t.Fatalf("setup-node check-latest should be allowed: %v", err)
 	}
@@ -1150,7 +1151,7 @@ exit 99
 func TestLocalActionsHydrateScriptKeepsToolCacheOffWorkRoot(t *testing.T) {
 	job := localHydrateJob{Steps: []localHydrateStep{{Uses: "actions/setup-node@v4", With: map[string]string{"node-version": "22"}}}}
 	workdir := "/work/cbx_123/repo"
-	got, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", nil, workdir)
+	got, err := renderLocalActionsTestScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "cbx_123", nil, workdir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1181,7 +1182,7 @@ func TestLocalActionsHydrateScriptKeepsToolCacheOffWorkRoot(t *testing.T) {
 func TestLocalActionsHydrateScriptUsesSafeRunnerRootName(t *testing.T) {
 	job := localHydrateJob{Steps: []localHydrateStep{{Run: "echo ok"}}}
 	workdir := "/work/cbx_123/repo"
-	got, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "../cbx_123/../../bad", nil, workdir)
+	got, err := renderLocalActionsTestScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, job, "hydrate", "../cbx_123/../../bad", nil, workdir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1202,7 +1203,7 @@ func TestLocalActionsHydrateScriptUsesSafeRunnerRootName(t *testing.T) {
 }
 
 func TestLocalActionsHydrateScriptRejectsMalformedFields(t *testing.T) {
-	_, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
+	_, err := renderLocalActionsTestScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
 		Steps: []localHydrateStep{{Run: "echo ok"}},
 	}, "hydrate", "cbx_123", []string{"node"}, "/work/cbx_123/repo")
 	if err == nil {
@@ -1214,7 +1215,7 @@ func TestLocalActionsHydrateScriptRejectsMalformedFields(t *testing.T) {
 }
 
 func TestLocalActionsHydrateScriptRestoresStepEnvBeforeApplyingGITHUBENV(t *testing.T) {
-	got, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
+	got, err := renderLocalActionsTestScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
 		Env: map[string]string{"FLAG": "job"},
 		Steps: []localHydrateStep{
 			{Env: map[string]string{"FLAG": "step"}, Run: "printf 'FLAG=next\\n' >> \"$GITHUB_ENV\""},
@@ -1242,7 +1243,7 @@ func TestLocalActionsHydrateScriptRestoresStepEnvBeforeApplyingGITHUBENV(t *test
 }
 
 func TestLocalActionsHydrateScriptClearsMissingOptionalInputs(t *testing.T) {
-	got, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
+	got, err := renderLocalActionsTestScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
 		Steps: []localHydrateStep{{Run: "job=\"${{inputs.crabbox_job}}\"\necho \"job=$job\""}},
 	}, "hydrate", "cbx_123", actionsHydrateFields("cbx_123", "crabbox-cbx-123", "", 0, nil), "/work/cbx_123/repo")
 	if err != nil {
@@ -1301,7 +1302,7 @@ jobs:
 	cfg.Actions.Workflow = ".github/workflows/hydrate.yml"
 	repo := Repo{Root: root, Name: "repo", Head: strings.Repeat("a", 40)}
 	fields := actionsHydrateFields("cbx_123", "crabbox-cbx-123", "legacy", 0, []string{"extra=value"})
-	plan, err := prepareLocalActionsHydration(cfg, repo, SSHTarget{}, "cbx_123", "legacy", fields)
+	plan, err := prepareLocalActionsHydration(t.Context(), cfg, repo, SSHTarget{}, "cbx_123", "legacy", fields)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1311,13 +1312,14 @@ jobs:
 	if want := remoteJoin(cfg, "cbx_123", "repo"); plan.workdir != want {
 		t.Fatalf("workdir=%q want %q", plan.workdir, want)
 	}
+	script := plan.script
 	for _, want := range []string{"export INPUT_SUITE='smoke'", "does not declare input crabbox_job", "does not declare input extra"} {
-		if !strings.Contains(plan.script+plan.warnings, want) {
-			t.Fatalf("prepared plan missing %q:\nscript=%s\nwarnings=%s", want, plan.script, plan.warnings)
+		if !strings.Contains(script+plan.warnings, want) {
+			t.Fatalf("prepared plan missing %q:\nscript=%s\nwarnings=%s", want, script, plan.warnings)
 		}
 	}
-	if strings.Contains(plan.script, "${{") {
-		t.Fatalf("prepared script retained expression:\n%s", plan.script)
+	if strings.Contains(script, "${{") {
+		t.Fatalf("prepared script retained expression:\n%s", script)
 	}
 }
 
@@ -1353,7 +1355,7 @@ func TestPrepareLocalActionsHydrationRejectsUnsupportedRenderedWorkflow(t *testi
 			}
 			cfg := defaultConfig()
 			cfg.Actions.Workflow = ".github/workflows/hydrate.yml"
-			_, err := prepareLocalActionsHydration(cfg, Repo{Root: root, Name: "repo"}, SSHTarget{}, "cbx_123", "", nil)
+			_, err := prepareLocalActionsHydration(t.Context(), cfg, Repo{Root: root, Name: "repo"}, SSHTarget{}, "cbx_123", "", nil)
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("error=%v want %q", err, tt.want)
 			}
@@ -1451,7 +1453,7 @@ exit 0
 }
 
 func TestLocalActionsHydrateScriptRejectsUnsupportedUses(t *testing.T) {
-	_, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
+	_, err := renderLocalActionsTestScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
 		Steps: []localHydrateStep{{Uses: "docker/login-action@v3"}},
 	}, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
 	if err == nil {
@@ -1460,7 +1462,7 @@ func TestLocalActionsHydrateScriptRejectsUnsupportedUses(t *testing.T) {
 }
 
 func TestLocalActionsHydrateScriptRejectsUnsupportedCheckoutOptions(t *testing.T) {
-	_, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
+	_, err := renderLocalActionsTestScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
 		Steps: []localHydrateStep{{Uses: "actions/checkout@v4", With: map[string]string{"submodules": "true"}}},
 	}, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
 	if err == nil {
@@ -1472,7 +1474,7 @@ func TestLocalActionsHydrateScriptRejectsUnsupportedCheckoutOptions(t *testing.T
 }
 
 func TestLocalActionsHydrateScriptIgnoresCheckoutRefExpression(t *testing.T) {
-	_, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
+	_, err := renderLocalActionsTestScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
 		Steps: []localHydrateStep{{Uses: "actions/checkout@v4", With: map[string]string{"ref": "${{ inputs.ref || github.ref }}"}}},
 	}, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
 	if err != nil {
@@ -1481,7 +1483,7 @@ func TestLocalActionsHydrateScriptIgnoresCheckoutRefExpression(t *testing.T) {
 }
 
 func TestLocalActionsHydrateScriptRejectsUnsupportedIf(t *testing.T) {
-	_, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
+	_, err := renderLocalActionsTestScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
 		Steps: []localHydrateStep{{If: "${{ inputs.enabled }}", Run: "echo nope"}},
 	}, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
 	if err == nil {
@@ -1490,7 +1492,7 @@ func TestLocalActionsHydrateScriptRejectsUnsupportedIf(t *testing.T) {
 }
 
 func TestLocalActionsHydrateScriptRejectsEnvIf(t *testing.T) {
-	_, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
+	_, err := renderLocalActionsTestScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
 		Steps: []localHydrateStep{
 			{Run: "printf 'RUN_TESTS=true\\n' >> \"$GITHUB_ENV\""},
 			{If: "env.RUN_TESTS == 'true'", Run: "echo nope"},
@@ -1502,7 +1504,7 @@ func TestLocalActionsHydrateScriptRejectsEnvIf(t *testing.T) {
 }
 
 func TestLocalActionsHydrateScriptEmptiesSecretsExpressions(t *testing.T) {
-	got, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
+	got, err := renderLocalActionsTestScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
 		Steps: []localHydrateStep{{Run: "echo '${{ secrets.NPM_TOKEN }}' '${{ secrets.MISSING_TOKEN }}'"}},
 	}, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
 	if err != nil {
@@ -1514,7 +1516,7 @@ func TestLocalActionsHydrateScriptEmptiesSecretsExpressions(t *testing.T) {
 }
 
 func TestLocalActionsHydrateScriptRejectsComplexSecretsExpressions(t *testing.T) {
-	_, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
+	_, err := renderLocalActionsTestScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
 		Steps: []localHydrateStep{{Run: "echo '${{ secrets.NPM_TOKEN != '' }}'"}},
 	}, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
 	if err == nil || !strings.Contains(err.Error(), "--github-runner") {
@@ -1523,7 +1525,7 @@ func TestLocalActionsHydrateScriptRejectsComplexSecretsExpressions(t *testing.T)
 }
 
 func TestLocalActionsHydrateScriptRejectsUnsupportedExpression(t *testing.T) {
-	_, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
+	_, err := renderLocalActionsTestScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, localHydrateJob{
 		Steps: []localHydrateStep{{Run: "echo '${{ matrix.node }}'"}},
 	}, "hydrate", "cbx_123", nil, "/work/cbx_123/repo")
 	if err == nil {
@@ -1539,14 +1541,14 @@ func TestLocalActionsHydrateScriptRejectsServicesAndContainers(t *testing.T) {
 		Services: map[string]yaml.Node{"postgres": {}},
 		Steps:    []localHydrateStep{{Run: "echo ok"}},
 	}
-	if _, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, serviceJob, "hydrate", "cbx_123", nil, "/work/cbx_123/repo"); err == nil {
+	if _, err := renderLocalActionsTestScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, serviceJob, "hydrate", "cbx_123", nil, "/work/cbx_123/repo"); err == nil {
 		t.Fatal("service container job accepted")
 	}
 	containerJob := localHydrateJob{
 		Container: yaml.Node{Kind: yaml.ScalarNode, Value: "node:22"},
 		Steps:     []localHydrateStep{{Run: "echo ok"}},
 	}
-	if _, err := localActionsHydrateScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, containerJob, "hydrate", "cbx_123", nil, "/work/cbx_123/repo"); err == nil {
+	if _, err := renderLocalActionsTestScript(defaultConfig(), Repo{Name: "repo"}, localHydrateWorkflow{}, containerJob, "hydrate", "cbx_123", nil, "/work/cbx_123/repo"); err == nil {
 		t.Fatal("container job accepted")
 	}
 }
@@ -1970,6 +1972,115 @@ exit 255
 				}
 			case <-time.After(3 * time.Second):
 				t.Fatal("hydration wait did not return within 3s after cancel; still blocked on bare sleep")
+			}
+		})
+	}
+}
+
+func renderLocalActionsTestScript(cfg Config, repo Repo, workflow localHydrateWorkflow, job localHydrateJob, jobName, leaseID string, fields []string, workdir string) (string, error) {
+	if err := validateLocalHydrateJob(job); err != nil {
+		return "", err
+	}
+	prepareLocalActionsSources(repo.Root, &workflow, &job)
+	return localActionsHydrateScript(cfg, repo, workflow, job, jobName, leaseID, fields, workdir)
+}
+
+func TestPrepareLocalActionsHydrationBindsBeforeBranchSelection(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("native POSIX SSH fixture")
+	}
+	tests := []struct {
+		name     string
+		initial  string
+		inverse  bool
+		absolute bool
+		wantErr  string
+	}{
+		{name: "newly-true-valid", initial: "valid"},
+		{name: "newly-true-missing", initial: "missing", wantErr: "not readable"},
+		{name: "newly-true-malformed", initial: "malformed", wantErr: "yaml:"},
+		{name: "newly-false-missing", initial: "missing", inverse: true},
+		{name: "absolute-skipped-missing", initial: "missing", absolute: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			remoteHome := filepath.Join(root, "remote ")
+			if err := os.Mkdir(remoteHome, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			remoteHome, err := filepath.EvalSymlinks(remoteHome)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := baseConfig()
+			cfg.WorkRoot = "work"
+			if tt.absolute {
+				cfg.WorkRoot = filepath.Join(remoteHome, "work")
+			}
+			cfg.Actions.Repo = "example/repo"
+			cfg.Actions.Workflow = ".github/workflows/hydrate.yml"
+			cfg.Actions.Job = "hydrate"
+			const leaseID = "cbx_prepared"
+			repo := Repo{Root: filepath.Join(root, "source"), Name: "repo", Head: strings.Repeat("a", 40)}
+			workdir := remoteJoin(cfg, leaseID, repo.Name)
+			condition := "steps.pick.outputs.where != '" + workdir + "'"
+			if tt.inverse {
+				condition = "steps.pick.outputs.where == '" + workdir + "'"
+			} else if tt.absolute {
+				condition = "false"
+			}
+			workflow := fmt.Sprintf(`jobs:
+  hydrate:
+    steps:
+      - id: pick
+        run: echo "where=${{ github.workspace }}" >> "$GITHUB_OUTPUT"
+      - if: %q
+        uses: ./conditional
+      - if: "false"
+        uses: ./cycle
+`, condition)
+			mustWriteTestFile(t, filepath.Join(repo.Root, cfg.Actions.Workflow), workflow)
+			mustWriteTestFile(t, filepath.Join(repo.Root, "cycle", "action.yml"), "runs:\n  using: composite\n  steps:\n    - uses: ./cycle\n")
+			mustWriteTestFile(t, filepath.Join(repo.Root, "proof.lock"), "original lock\n")
+			actionPath := filepath.Join(repo.Root, "conditional", "action.yml")
+			switch tt.initial {
+			case "valid":
+				mustWriteTestFile(t, actionPath, "runs:\n  using: composite\n  steps:\n    - run: echo original-${{ hashFiles('proof.lock') }}\n")
+			case "malformed":
+				mustWriteTestFile(t, actionPath, "runs: [\n")
+			}
+			changed := installActionsSourceMutationSSH(t, remoteHome, repo.Root)
+			target := SSHTarget{User: "fixture", Host: "127.0.0.1", Port: "22", TargetOS: targetLinux, NoControlMaster: true}
+			plan, err := prepareLocalActionsHydration(t.Context(), cfg, repo, target, leaseID, "hydrate", nil)
+			if !tt.absolute {
+				workdir = remoteHome + "/" + workdir
+			}
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("selected source lost its captured error after late repair: error=%v, want=%q", err, tt.wantErr)
+				}
+			} else if err != nil {
+				t.Errorf("bound branch selection failed: %v", err)
+			} else {
+				if plan.workdir != workdir {
+					t.Errorf("workspace=%q, want=%q", plan.workdir, workdir)
+				}
+				if tt.initial == "valid" {
+					want := "original-71f9ede0b30ceb06be7311abdc774e38756c24180b2b5f88fedfe4694024c977"
+					if !strings.Contains(plan.script, want) || strings.Contains(plan.script, "mutated") {
+						t.Errorf("bound renderer did not retain prepared source %q", want)
+					}
+				} else if strings.Contains(plan.script, "local actions: ./conditional") {
+					t.Error("bound renderer retained an unselected action")
+				}
+			}
+			if tt.absolute {
+				if _, statErr := os.Stat(changed); !os.IsNotExist(statErr) {
+					t.Errorf("absolute workspace unexpectedly ran a binding probe: %v", statErr)
+				}
+			} else {
+				requireWorkspaceFile(t, changed, "changed\n")
 			}
 		})
 	}

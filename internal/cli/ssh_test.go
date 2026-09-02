@@ -394,7 +394,7 @@ func TestRemoteCommandQuotesWorkdirEnvAndArgs(t *testing.T) {
 		"cd '/work/crabbox/cbx_1/my-app'",
 		"NODE_OPTIONS='--max-old-space-size=8192'",
 		"bash -lc",
-		`bash -lc 'cd '\''/work/crabbox/cbx_1/my-app'\'' && exec "$@"' bash 'pnpm' 'check:changed'`,
+		`bash -lc 'cd -- "$1" && shift && exec "$@"' bash "$1" 'pnpm' 'check:changed'`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("remoteCommand() missing %q in %q", want, got)
@@ -421,7 +421,7 @@ func TestRemoteShellCommandRunsScript(t *testing.T) {
 	for _, want := range []string{
 		"cd '/work/crabbox/cbx_1/repo'",
 		"CI='1'",
-		`bash -lc 'cd '\''/work/crabbox/cbx_1/repo'\'' && pnpm install && pnpm test'`,
+		`bash -lc 'cd -- "$1" && shift && pnpm install && pnpm test' bash "$1"`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("remoteShellCommand() missing %q in %q", want, got)
@@ -438,15 +438,15 @@ func TestShellScriptFromArgvPreservesArgumentsAroundOperators(t *testing.T) {
 }
 
 func TestRemoteCommandSourcesActionsEnvFile(t *testing.T) {
-	got := remoteCommandWithEnvFile("/home/runner/work/repo/repo", map[string]string{"CI": "1"}, "/home/runner/.crabbox/actions/cbx-123.env.sh", []string{"pnpm", "test"})
+	got := remoteCommandWithEnvFiles("/home/runner/work/repo/repo", map[string]string{"CI": "1"}, []string{"/home/runner/.crabbox/actions/cbx-123.env.sh"}, []string{"pnpm", "test"})
 	for _, want := range []string{
 		"cd '/home/runner/work/repo/repo'",
 		"if [ -f '/home/runner/.crabbox/actions/cbx-123.env.sh' ]; then . '/home/runner/.crabbox/actions/cbx-123.env.sh'; fi",
 		"CI='1'",
-		`bash -lc 'cd '\''/home/runner/work/repo/repo'\'' && exec "$@"' bash 'pnpm' 'test'`,
+		`bash -lc 'cd -- "$1" && shift && exec "$@"' bash "$1" 'pnpm' 'test'`,
 	} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("remoteCommandWithEnvFile() missing %q in %q", want, got)
+			t.Fatalf("remoteCommandWithEnvFiles() missing %q in %q", want, got)
 		}
 	}
 }
@@ -460,7 +460,7 @@ func TestRemoteCommandSourcesMultipleEnvFilesWithoutInlineSecret(t *testing.T) {
 		"if [ -f '/home/runner/.crabbox/actions/cbx-123.env.sh' ]; then . '/home/runner/.crabbox/actions/cbx-123.env.sh'; fi",
 		"if [ -f '.crabbox/env/run.env.sh' ]; then . '.crabbox/env/run.env.sh'; fi",
 		"CI='1'",
-		`bash -lc 'cd '\''/work/repo'\'' && exec "$@"' bash 'pnpm' 'test'`,
+		`bash -lc 'cd -- "$1" && shift && exec "$@"' bash "$1" 'pnpm' 'test'`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("remoteCommandWithEnvFiles() missing %q in %q", want, got)
@@ -2917,16 +2917,6 @@ func TestRemotePruneSyncManifestDoesNotSwallowReadErrors(t *testing.T) {
 	}
 }
 
-func TestRemoteApplySyncManifestOnlyCommitsManifest(t *testing.T) {
-	got := remoteApplySyncManifest("/work/repo")
-	if strings.Contains(got, "manifest_removed_paths") || strings.Contains(got, "delete_paths") {
-		t.Fatalf("remoteApplySyncManifest should not delete after rsync: %q", got)
-	}
-	if !strings.Contains(got, "mv \"$new\" \"$meta_dir/sync-manifest\"") {
-		t.Fatalf("remoteApplySyncManifest should commit new manifest: %q", got)
-	}
-}
-
 func TestRemoteFinalizeSyncCommitsMetadataInOneCommand(t *testing.T) {
 	const finalizeToken = "0123456789abcdef0123456789abcdef"
 	workdir := t.TempDir()
@@ -4776,20 +4766,6 @@ func TestRemoteGitHydrateStatusUsesMarkerAndRemoteBase(t *testing.T) {
 	}
 }
 
-func TestRemoteWriteSyncManifestNew(t *testing.T) {
-	got := remoteWriteSyncManifestNew("/work/repo")
-	if !strings.Contains(got, "cat > \"$meta_dir/sync-manifest.new\"") {
-		t.Fatalf("unexpected manifest write command: %q", got)
-	}
-}
-
-func TestRemoteWriteSyncDeletedNew(t *testing.T) {
-	got := remoteWriteSyncDeletedNew("/work/repo")
-	if !strings.Contains(got, "cat > \"$meta_dir/sync-deleted.new\"") {
-		t.Fatalf("unexpected deleted manifest write command: %q", got)
-	}
-}
-
 func TestRemoteWriteSyncManifestsNew(t *testing.T) {
 	const finalizeToken = "0123456789abcdef0123456789abcdef"
 	workdir := t.TempDir()
@@ -5119,13 +5095,21 @@ func mustWriteTestFailingCommand(t *testing.T, dir, name string, code int) {
 func TestRemoteSyncMetadataUsesGitDirForGitWorktree(t *testing.T) {
 	workdir := t.TempDir()
 	runGit(t, workdir, "init")
-	cmd := exec.Command("bash", "-lc", remoteWriteSyncManifestNew(workdir))
-	cmd.Stdin = strings.NewReader("tracked.txt\x00")
+	const token = "0123456789abcdef0123456789abcdef"
+	manifest, deleted := []byte("tracked.txt\x00"), []byte("old.txt\x00")
+	cmd := exec.Command("bash", "-lc", remoteWriteSyncManifestsNew(workdir, token))
+	cmd.Stdin = strings.NewReader(syncManifestInputForTarget(SSHTarget{TargetOS: targetLinux}, manifest, deleted))
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("write manifest failed: %v\n%s", err, out)
+		t.Fatalf("write manifests failed: %v\n%s", err, out)
 	}
-	if _, err := os.Stat(filepath.Join(workdir, ".git", "crabbox", "sync-manifest.new")); err != nil {
-		t.Fatalf("manifest should be written under .git/crabbox: %v", err)
+	for name, want := range map[string][]byte{
+		remoteSyncPendingManifestName(token): manifest,
+		remoteSyncPendingDeletedName(token):  deleted,
+	} {
+		got, err := os.ReadFile(filepath.Join(workdir, ".git", "crabbox", name))
+		if err != nil || !bytes.Equal(got, want) {
+			t.Errorf("tokenized manifest %s has incorrect bytes under .git/crabbox: %v", name, err)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(workdir, ".crabbox")); !os.IsNotExist(err) {
 		t.Fatalf("worktree .crabbox should not be created, stat err=%v", err)
@@ -5517,23 +5501,6 @@ func TestAWSRegionAndAvailabilityZoneCandidates(t *testing.T) {
 	}
 	if zone := awsAvailabilityZoneForRegion(cfg, "eu-west-1"); zone != "eu-west-1b" {
 		t.Fatalf("awsAvailabilityZoneForRegion=%q want eu-west-1b", zone)
-	}
-}
-
-func TestRemoteSyncSanityReportsDeletionSample(t *testing.T) {
-	got := remoteSyncSanity("/work/repo", false)
-	for _, want := range []string{
-		"remote sync sanity failed: $deletions tracked deletions",
-		`awk '/^ D|^D / { print "  " substr($0,4) }'`,
-		"head -20",
-		"exit 66",
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("remoteSyncSanity() missing %q in %q", want, got)
-		}
-	}
-	if strings.Contains(got, "/tmp/crabbox-git-status") {
-		t.Fatalf("remoteSyncSanity() uses a global status file: %q", got)
 	}
 }
 
