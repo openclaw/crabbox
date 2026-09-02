@@ -2,6 +2,7 @@ package localcontainer
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -275,6 +276,19 @@ func TestFixedAcquireCreatesRequestedIDAndReplays(t *testing.T) {
 	}
 	if creates := localContainerCreateCalls(runner); creates != 1 {
 		t.Fatalf("container creates=%d, want 1", creates)
+	}
+	// Fixed acquisition, replay, and Touch are not presentation requests. Neither
+	// the persisted intent nor the runtime actuator may gain diagnostic fields.
+	for _, value := range []any{claim, replayed, runner.calls} {
+		data, err := json.Marshal(value)
+		if err != nil || strings.Contains(string(data), memoryDiagnosticPrefix) {
+			t.Fatalf("fixed authority contains presentation diagnostics: %v", err)
+		}
+	}
+	for _, call := range runner.calls {
+		if strings.Contains(strings.Join(call.Args, " "), "MemTotal") {
+			t.Fatal("fixed lifecycle acquired a capacity probe")
+		}
 	}
 	if err := restarted.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: replayed}); err != nil {
 		t.Fatal(err)
@@ -1190,6 +1204,352 @@ func TestReadOOMKillCountFallsBackToCgroupV1(t *testing.T) {
 	}
 	if count != 7 {
 		t.Fatalf("count=%d, want 7", count)
+	}
+}
+
+func TestRunFailureMemoryContext(t *testing.T) {
+	for _, tc := range []struct {
+		name, memory, swap, kind, bytes, swapKind, hint string
+	}{
+		{"below", "1073741824", "2147483648", "finite", "1073741824", "finite", "recreate"},
+		{"equal", "8589934592", "0", "finite", "8589934592", "default", "does not add RAM"},
+		{"above", "12884901888", "-1", "finite", "12884901888", "unlimited", "does not add RAM"},
+		{"unlimited", "0", "0", "unlimited", "", "default", "No finite"},
+		{"missing", "null", "null", "unknown", "", "unknown", "Check"},
+		{"malformed", `"12g"`, `{}`, "unknown", "", "unknown", "Check"},
+		{"malformed swap only", "1073741824", `{}`, "finite", "1073741824", "unknown", "recreate"},
+		{"malformed limit only", `"12g"`, "2147483648", "unknown", "", "finite", "Check"},
+		{"negative", "-1", "-2", "unknown", "", "unknown", "Check"},
+		{"overflow", "18446744073709551616", "18446744073709551616", "unknown", "", "unknown", "Check"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reads, infos := 0, 0
+			runner := &recordingRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				switch req.Args[0] {
+				case "exec":
+					reads++
+					return core.LocalCommandResult{Stdout: fmt.Sprintf("oom_kill %d\n", reads)}, nil
+				case "inspect":
+					return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"Id":"container-123","State":{"Running":true},"HostConfig":{"Memory":%s,"MemorySwap":%s}}]`, tc.memory, tc.swap)}, nil
+				case "info":
+					infos++
+					if req.MaxCapturedOutputBytes <= 0 || req.MaxCapturedOutputBytes > 4096 {
+						t.Fatal("capacity probe must bound output at capture")
+					}
+					return core.LocalCommandResult{Stdout: "daemon-test\n8589934592\n"}, nil
+				default:
+					t.Fatalf("unexpected runtime command %v", req.Args)
+					return core.LocalCommandResult{}, nil
+				}
+			}}
+			b := testBackend(runner)
+			b.cfg.LocalContainer.Memory = "24g" // Invocation config is not the retained container's setting.
+			b.cfg.LocalContainer.CheckpointMetadata = testCapturedScopeLabels(nil)
+			collector, err := b.BeginRunFailureEvidence(t.Context(), core.RunFailureEvidenceRequest{Lease: core.LeaseTarget{Server: core.Server{CloudID: "container-123"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if infos != 0 {
+				t.Fatal("capacity queried before OOM")
+			}
+			evidence, err := collector(t.Context())
+			if err != nil || evidence.ResourceExhaustion != core.ResourceExhaustionMemory {
+				t.Fatalf("OOM lost: evidence=%+v err=%v", evidence, err)
+			}
+			data, err := json.Marshal(evidence)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got struct {
+				Hint    string
+				Details map[string]string
+			}
+			if err := json.Unmarshal(data, &got); err != nil {
+				t.Fatal(err)
+			}
+			for key, want := range map[string]string{
+				"container_memory_limit": tc.kind, "container_memory_limit_bytes": tc.bytes,
+				"container_memory_swap": tc.swapKind, "runtime_memory_total_bytes": "8589934592",
+				"settings_phase": "before-command", "container_id": "container-123",
+			} {
+				if got.Details[key] != want {
+					t.Errorf("%s=%q want %q", key, got.Details[key], want)
+				}
+			}
+			if infos != 1 || !strings.Contains(got.Hint, tc.hint) || !strings.Contains(got.Hint, "swap") || !strings.Contains(got.Hint, "parent") {
+				t.Errorf("capacity calls=%d hint=%q", infos, got.Hint)
+			}
+			if strings.Contains(string(data), "docker-test.sock") || strings.Contains(string(data), "24g") {
+				t.Fatal("private route or invocation setting leaked into evidence")
+			}
+		})
+	}
+}
+
+func TestMemoryDiagnosticsResolveDoesNotPersist(t *testing.T) {
+	leaseID, _, initial, runner := createLocalContainerTouchClaim(t, time.Minute)
+	labels := cloneLabels(initial.Labels)
+	labels["diagnostic.memory.stale"] = "old-observation"
+	var err error
+	initial, err = core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, initial, labels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := &recordingRunner{responses: runner.responses}
+	infos := 0
+	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		if req.Args[0] == "info" && strings.Contains(strings.Join(req.Args, " "), "MemTotal") {
+			infos++
+			return core.LocalCommandResult{Stdout: "daemon-test\n8589934592\n"}, nil
+		}
+		result, err := original.Run(t.Context(), req)
+		if req.Args[0] == "inspect" && err == nil {
+			var containers []map[string]any
+			if err := json.Unmarshal([]byte(result.Stdout), &containers); err != nil {
+				t.Fatal(err)
+			}
+			containers[0]["HostConfig"] = map[string]any{"Memory": 1073741824, "MemorySwap": 2147483648}
+			data, err := json.Marshal(containers)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result.Stdout = string(data)
+		}
+		return result, err
+	}
+	b := testBackend(runner)
+	req := core.ResolveRequest{ID: leaseID, StatusOnly: true, NoLocalStateMutations: true}
+	req.IncludeDiagnostics = true
+	lease, err := b.Resolve(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.Server.Labels["diagnostic.memory.container_memory_limit_bytes"] != "1073741824" || infos != 1 {
+		t.Fatalf("fresh memory diagnostics missing; info calls=%d", infos)
+	}
+	if _, exists := lease.Server.Labels["diagnostic.memory.stale"]; exists {
+		t.Fatal("later claim merge resurrected stale diagnostic")
+	}
+	after, err := core.ReadLeaseClaim(leaseID)
+	if err != nil || !reflect.DeepEqual(after, initial) {
+		t.Fatal("inspection changed stored claim")
+	}
+	snapshot, _, _ := core.ServerLeaseClaimSnapshot(lease.Server)
+	if !reflect.DeepEqual(snapshot, initial) {
+		t.Fatal("inspection changed claim snapshot")
+	}
+	req.IncludeDiagnostics = false
+	plain, err := b.Resolve(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if infos != 1 {
+		t.Fatal("non-presentation resolve queried memory")
+	}
+	if plain.Server.Labels["diagnostic.memory.container_memory_limit_bytes"] != "" {
+		t.Fatal("fresh diagnostics escaped presentation")
+	}
+	// An opt-in alone must not authorize observation on ordinary or ready-probe paths.
+	for _, guarded := range []core.ResolveRequest{
+		{ID: leaseID, IncludeDiagnostics: true, StatusOnly: true},
+		{ID: leaseID, IncludeDiagnostics: true, StatusOnly: true, NoLocalStateMutations: true, ReadyProbe: true},
+		{ID: leaseID, IncludeDiagnostics: true, StatusOnly: true, NoLocalStateMutations: true, ReleaseOnly: true},
+	} {
+		if _, err := b.Resolve(t.Context(), guarded); err != nil {
+			t.Fatal(err)
+		}
+		if infos != 1 {
+			t.Fatal("non-presentation path acquired a capacity probe")
+		}
+	}
+}
+
+type memoryEvidenceCommandRunner func(context.Context, core.LocalCommandRequest) (core.LocalCommandResult, error)
+
+func (f memoryEvidenceCommandRunner) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+	return f(ctx, req)
+}
+
+func TestRunFailureMemoryContextFreezesRuntime(t *testing.T) {
+	for _, runtimeName := range []string{"docker", "podman"} {
+		t.Run(runtimeName, func(t *testing.T) {
+			scope := checkpointScope{Runtime: runtimeName, Context: "owned", Endpoint: "unix:///synthetic-owned.sock", DaemonID: "daemon-test"}
+			identity := scope.DaemonID
+			if runtimeName == "podman" {
+				identity = "host|store|run|socket|true"
+				sum := sha256.Sum256([]byte(identity))
+				scope.DaemonID = fmt.Sprintf("podman-%x", sum[:16])
+			}
+			reads, infos := 0, 0
+			runner := &recordingRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				if req.Name != runtimeName || len(req.Args) < 3 || req.Args[1] != "owned" {
+					t.Fatal("command escaped the captured runtime/connection")
+				}
+				for _, value := range req.Env {
+					if strings.Contains(value, "synthetic-ambient-changed") {
+						t.Fatal("ambient route escaped snapshot")
+					}
+				}
+				args := req.Args[2:]
+				switch args[0] {
+				case "exec":
+					reads++
+					return core.LocalCommandResult{Stdout: fmt.Sprintf("oom_kill %d\n", reads)}, nil
+				case "inspect":
+					return core.LocalCommandResult{Stdout: `[{"Id":"container-123","HostConfig":{"Memory":1024,"MemorySwap":0}}]`}, nil
+				case "context":
+					return core.LocalCommandResult{Stdout: scope.Endpoint}, nil
+				case "system":
+					return core.LocalCommandResult{Stdout: `[{"Name":"owned","URI":"unix:///synthetic-owned.sock"}]`}, nil
+				case "info":
+					infos++
+					return core.LocalCommandResult{Stdout: identity + "\n8388608\n"}, nil
+				}
+				t.Fatalf("unexpected runtime command %v", args)
+				return core.LocalCommandResult{}, nil
+			}}
+			b := testBackend(runner)
+			b.cfg.LocalContainer.Runtime = runtimeName
+			b.cfg.LocalContainer.CheckpointMetadata = checkpointScopeMetadata(scope)
+			collector, err := b.BeginRunFailureEvidence(t.Context(), core.RunFailureEvidenceRequest{Lease: core.LeaseTarget{Server: core.Server{CloudID: "container-123"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			b.cfg.LocalContainer.Runtime = "wrong-runtime"
+			b.cfg.LocalContainer.CheckpointMetadata[checkpointMetadataContext] = "wrong-context"
+			t.Setenv("DOCKER_HOST", "synthetic-ambient-changed")
+			t.Setenv("CONTAINER_HOST", "synthetic-ambient-changed")
+			evidence, err := collector(t.Context())
+			if err != nil || evidence.ResourceExhaustion != core.ResourceExhaustionMemory || infos != 1 {
+				t.Fatalf("frozen collection failed: OOM=%s infos=%d err=%v", evidence.ResourceExhaustion, infos, err)
+			}
+		})
+	}
+}
+
+func TestRunFailureMemoryContextOptionalFailures(t *testing.T) {
+	for _, failure := range []string{"error", "empty", "malformed", "overflow", "oversized", "identity", "timeout", "unknown route", "budget spent", "ordinary", "reset"} {
+		t.Run(failure, func(t *testing.T) {
+			b := testBackend(&recordingRunner{})
+			b.cfg.LocalContainer.CheckpointMetadata = testCapturedScopeLabels(nil)
+			if failure == "unknown route" {
+				b.cfg.LocalContainer.CheckpointMetadata = nil
+			}
+			reads, infos := 0, 0
+			b.rt.Exec = memoryEvidenceCommandRunner(func(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				switch req.Args[0] {
+				case "exec":
+					reads++
+					count := reads + 4
+					if failure == "ordinary" {
+						count = 5
+					}
+					if failure == "reset" && reads > 1 {
+						count = 0
+					}
+					return core.LocalCommandResult{Stdout: fmt.Sprintf("oom_kill %d\n", count)}, nil
+				case "inspect":
+					return core.LocalCommandResult{Stdout: `[{"Id":"container-123","HostConfig":{"Memory":1024,"MemorySwap":0}}]`}, nil
+				case "info":
+					infos++
+					deadline, ok := ctx.Deadline()
+					if !ok || time.Until(deadline) > 500*time.Millisecond {
+						t.Fatal("optional probe has no bounded sub-budget")
+					}
+					switch failure {
+					case "error":
+						return core.LocalCommandResult{}, errors.New("synthetic optional error")
+					case "empty":
+						return core.LocalCommandResult{}, nil
+					case "malformed":
+						return core.LocalCommandResult{Stdout: "daemon-test\nnot-a-number"}, nil
+					case "overflow":
+						return core.LocalCommandResult{Stdout: "daemon-test\n18446744073709551616"}, nil
+					case "oversized":
+						return core.LocalCommandResult{Stdout: strings.Repeat("x", 4097)}, nil
+					case "identity":
+						return core.LocalCommandResult{Stdout: "different-daemon\n8388608"}, nil
+					case "timeout":
+						<-ctx.Done()
+						return core.LocalCommandResult{}, ctx.Err()
+					}
+				}
+				t.Fatalf("unexpected capacity probe after %s", failure)
+				return core.LocalCommandResult{}, nil
+			})
+			collector, err := b.BeginRunFailureEvidence(t.Context(), core.RunFailureEvidenceRequest{Lease: core.LeaseTarget{Server: core.Server{CloudID: "container-123"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			budget := time.Second
+			if failure == "budget spent" {
+				budget = 30 * time.Millisecond
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), budget)
+			defer cancel()
+			evidence, err := collector(ctx)
+			if err != nil {
+				t.Fatalf("optional failure replaced primary evidence: %v", err)
+			}
+			if failure == "ordinary" || failure == "reset" {
+				if evidence.ResourceExhaustion != "" || infos != 0 {
+					t.Fatal("non-OOM acquired capacity evidence")
+				}
+				return
+			}
+			if evidence.ResourceExhaustion != core.ResourceExhaustionMemory {
+				t.Fatal("lost verified OOM")
+			}
+			wantInfos := 1
+			if failure == "budget spent" || failure == "unknown route" {
+				wantInfos = 0
+			}
+			if infos != wantInfos {
+				t.Fatalf("optional calls=%d want %d", infos, wantInfos)
+			}
+			data, _ := json.Marshal(evidence)
+			var got struct{ Details map[string]string }
+			_ = json.Unmarshal(data, &got)
+			if got.Details["capacity_status"] != "unknown" || got.Details["runtime_memory_total_bytes"] != "" {
+				t.Fatalf("optional failure manufactured capacity: %s", data)
+			}
+		})
+	}
+}
+
+func TestRunFailureMemoryContextChangedRoute(t *testing.T) {
+	for _, runtimeName := range []string{"docker", "podman"} {
+		t.Run(runtimeName, func(t *testing.T) {
+			reads, infos := 0, 0
+			runner := &recordingRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				args := req.Args[2:]
+				switch args[0] {
+				case "exec":
+					reads++
+					return core.LocalCommandResult{Stdout: fmt.Sprintf("oom_kill %d\n", reads)}, nil
+				case "inspect":
+					return core.LocalCommandResult{Stdout: `[{"Id":"container-123","HostConfig":{"Memory":1024,"MemorySwap":0}}]`}, nil
+				case "context":
+					return core.LocalCommandResult{Stdout: "unix:///changed.sock"}, nil
+				case "system":
+					return core.LocalCommandResult{Stdout: `[{"Name":"owned","URI":"unix:///changed.sock"}]`}, nil
+				case "info":
+					infos++
+				}
+				return core.LocalCommandResult{}, nil
+			}}
+			b := testBackend(runner)
+			b.cfg.LocalContainer.Runtime = runtimeName
+			b.cfg.LocalContainer.CheckpointMetadata = checkpointScopeMetadata(checkpointScope{Runtime: runtimeName, Context: "owned", Endpoint: "unix:///original.sock", DaemonID: "original"})
+			collector, err := b.BeginRunFailureEvidence(t.Context(), core.RunFailureEvidenceRequest{Lease: core.LeaseTarget{Server: core.Server{CloudID: "container-123"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			evidence, err := collector(t.Context())
+			if err != nil || evidence.ResourceExhaustion != core.ResourceExhaustionMemory || evidence.Details["capacity_status"] != "unknown" || infos != 0 {
+				t.Fatalf("changed route was adopted or OOM lost: %+v calls=%d err=%v", evidence, infos, err)
+			}
+		})
 	}
 }
 

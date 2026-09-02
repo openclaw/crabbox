@@ -434,7 +434,7 @@ func TestEnsureLeaseTailscaleClearsClaimForMissingSandbox(t *testing.T) {
 func TestEnsureLeaseTailscaleReenrollsWithPersistedSettings(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "isb_crabbox-node-a"
-	if err := claimLeaseForRepoProviderWithPond(leaseID, "node-a", isloProvider, "mesh-demo", t.TempDir(), time.Minute, false); err != nil {
+	if err := claimLeaseForRepoProviderScopePond(leaseID, "node-a", isloProvider, "", "mesh-demo", t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := updateLeaseClaimTailscale(leaseID, "100.64.7.7", ""); err != nil {

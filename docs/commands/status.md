@@ -113,6 +113,11 @@ coordinator has retained recent samples (bounded to the latest 60 per lease) for
 portal trend charts. Under `--wait`, JSON is printed once the lease is ready or
 terminal rather than on every poll.
 
+For Local Container, non-wait JSON status includes fresh read-only
+`diagnostic.memory.*` labels, as described in
+[`inspect`](inspect.md). These optional observations are not requested by
+`status --wait`, heartbeat, or other lifecycle callers, and do not change claims.
+
 ## See also
 
 - [`inspect`](inspect.md) — fuller lease and provider detail.

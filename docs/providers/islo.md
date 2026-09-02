@@ -156,6 +156,34 @@ sandbox is resumed automatically and given up to 2 minutes to report `running`
 again before the command fails. A sandbox in a terminal state fails
 immediately with exit code 5.
 
+### Teardown safety
+
+Crabbox atomically records the API-assigned sandbox ID with a new or adopted
+claim; it never overwrites a claim that appeared during the API lookup.
+`DELETE /sandboxes/{name}` is name-only. For an ID-bound lease, `stop` first
+identifies the current name as the claimed ID. Cleanup requires a matching
+by-ID response with terminal status `deleted`, or a name 404 after positively
+identifying the resource during that teardown. A timestamp alone or list
+omission is not proof. Only confirmed cleanup removes the local claim.
+
+These checks are not an atomic delete-by-ID guarantee: the API's name-only
+DELETE can still race with an out-of-band resource replacement after the read.
+Legacy claims without an ID can fall back to the weaker `name-404-unbound`
+proof with a warning when no resource was positively identified.
+
+When neither identity lookup can tie the recorded name to the claimed resource -
+during an API read outage, for instance - `stop` refuses to delete, keeps the
+claim, and exits 5. Retrying it once reads answer again is the normal fix, and
+the sandbox may be running and billable until then.
+
+Run cleanup and Tailscale setup rollback use the resource identity and repository
+owner captured when the claim was published. They leave a replacement resource
+or repository claim untouched; a bookkeeping refresh does not transfer cleanup
+authority. An unproven teardown retains its recovery claim. If that claim is
+missing or unreadable, cleanup fails without deleting by the stored name. Verify
+the original resource ID and ownership before cleanup; the sandbox may remain
+running and billable.
+
 ## Capabilities
 
 - SSH: yes for direct login to existing Crabbox-created sandboxes. `crabbox ssh
@@ -235,7 +263,9 @@ CRABBOX_LIVE_ISLO_PAUSE_RESUME=1 ISLO_API_KEY=... \
 The lifecycle test honors `ISLO_BASE_URL` (default `https://api.islo.dev`) and
 `CRABBOX_LIVE_ISLO_IMAGE` (default `docker.io/library/ubuntu:26.04`). After it
 captures the lease ID, it attempts to delete the sandbox on exit even when a
-later assertion fails. If setup fails before lease capture or the process is
+later assertion fails. Success requires a matching terminal by-ID tombstone,
+name not-found, and local claim absence; a cleanup failure fails the test.
+If setup fails before lease capture or the process is
 interrupted, remove the leftover `crabbox-pause-resume-live-*` sandbox through
 the `--reclaim` adoption flow above followed by `crabbox stop`, or delete it on
 the Islo side.

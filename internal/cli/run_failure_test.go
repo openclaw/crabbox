@@ -5,6 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -266,7 +270,7 @@ func TestPrintRunFailureDigestIncludesMemoryGuidance(t *testing.T) {
 		"area: resource_exhaustion",
 		"retryable: false",
 		"resource_exhaustion: memory",
-		"hint: increase the memory limit or reduce workload concurrency before retrying",
+		"hint: reduce memory demand and inspect active limits and runtime capacity before retrying",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("digest missing %q:\n%s", want, out)
@@ -274,6 +278,183 @@ func TestPrintRunFailureDigestIncludesMemoryGuidance(t *testing.T) {
 	}
 	if strings.Contains(out, "next: crabbox run") {
 		t.Fatalf("deterministic memory exhaustion should not suggest an unchanged retry:\n%s", out)
+	}
+}
+
+func TestRunFailureEvidencePresentationSnapshot(t *testing.T) {
+	var evidence RunFailureEvidence
+	if err := json.Unmarshal([]byte(`{"resourceExhaustion":"memory","hint":"Check the selected runtime capacity","details":{"runtime_memory_total_bytes":"8388608","bad":"\u001b[2J","bad\nkey":"value"}}`), &evidence); err != nil {
+		t.Fatal(err)
+	}
+	got := collectRunFailureEvidence(t.Context(), func(context.Context) (RunFailureEvidence, error) { return evidence, nil }, nil)
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), "8388608") || strings.Contains(string(encoded), "bad") || !strings.Contains(string(encoded), "Check the selected") {
+		t.Fatalf("missing or unsafe presentation snapshot: %s", encoded)
+	}
+	var input runFailureDigestInput
+	if err := json.Unmarshal([]byte(`{"Evidence":`+string(encoded)+`}`), &input); err != nil {
+		t.Fatal(err)
+	}
+	input.Classification = ClassifyRunFailureWithEvidence(137, "", nil, got)
+	var out bytes.Buffer
+	printRunFailureDigest(&out, input)
+	if !strings.Contains(out.String(), "hint: Check the selected runtime capacity") || !strings.Contains(out.String(), "runtime_memory_total_bytes=8388608") {
+		t.Fatalf("digest lost evidence: %s", out.String())
+	}
+	var report TimingReport
+	if err := json.Unmarshal([]byte(`{"exitCode":137,"failureEvidence":`+string(encoded)+`}`), &report); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := writeTimingJSON(&out, report); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"failureEvidence"`) || !strings.Contains(out.String(), "8388608") {
+		t.Fatalf("timing lost evidence: %s", out.String())
+	}
+}
+
+func TestTimingReportFromRunFailureEvidenceSnapshot(t *testing.T) {
+	timings := runTimings{
+		blockedStage:       "resource_exhaustion",
+		resourceExhaustion: ResourceExhaustionMemory,
+		retryLikely:        "false",
+		failureEvidence: RunFailureEvidence{
+			ResourceExhaustion: ResourceExhaustionMemory,
+			Hint:               "Check active limits and runtime capacity",
+			Details:            map[string]string{"memory_limit_bytes": "1024", "unsafe": "\x1b[2J"},
+		},
+	}
+	report := timingReportFromRun("evidence-test", "cbx_test", "test", timings, time.Second, 137)
+	if report.FailureEvidence == nil || report.FailureEvidence.Hint != timings.failureEvidence.Hint ||
+		!reflect.DeepEqual(report.FailureEvidence.Details, map[string]string{"memory_limit_bytes": "1024"}) {
+		t.Fatalf("constructor lost or failed to sanitize failure evidence: %+v", report.FailureEvidence)
+	}
+	if report.ExitCode != 137 || report.ResourceExhaustion != ResourceExhaustionMemory || report.BlockedStage != "resource_exhaustion" || report.RetryLikely != "false" {
+		t.Fatalf("constructor changed failure classification: %+v", report)
+	}
+	timings.failureEvidence.Details["memory_limit_bytes"] = "2048"
+	if report.FailureEvidence.Details["memory_limit_bytes"] != "1024" {
+		t.Fatal("report aliases the timing input's evidence map")
+	}
+	rebuilt := timingReportFromRunWithActionsURL("evidence-test", "cbx_test", "test", timings, time.Second, 137, "")
+	if rebuilt.FailureEvidence == nil || rebuilt.FailureEvidence.Details["memory_limit_bytes"] != "2048" {
+		t.Fatal("reconstructed report did not project the timing input")
+	}
+	rebuilt.FailureEvidence.Details["memory_limit_bytes"] = "4096"
+	if timings.failureEvidence.Details["memory_limit_bytes"] != "2048" || report.FailureEvidence.Details["memory_limit_bytes"] != "1024" {
+		t.Fatal("reconstructed snapshot aliases its input or a prior report")
+	}
+}
+
+func TestRunFailureEvidencePresentationBounds(t *testing.T) {
+	for _, hint := range []string{"unsafe\x1b[2J", "bad\nline", "bad\u202e", string([]byte{0xff}), strings.Repeat("a", 769)} {
+		evidence := RunFailureEvidence{ResourceExhaustion: ResourceExhaustionMemory, Hint: hint, Details: map[string]string{
+			"good": "value", "bad/key": "value", "oversized": strings.Repeat("b", 257),
+		}}
+		got := collectRunFailureEvidence(t.Context(), func(context.Context) (RunFailureEvidence, error) { return evidence, nil }, nil)
+		if got.ResourceExhaustion != ResourceExhaustionMemory || got.Hint != "" || !reflect.DeepEqual(got.Details, map[string]string{"good": "value"}) {
+			t.Fatalf("optional fields affected classification or bounds: %+v", got)
+		}
+		evidence.Details["good"] = "mutated"
+		if got.Details["good"] != "value" {
+			t.Fatal("evidence was not cloned")
+		}
+	}
+	details := map[string]string{}
+	for i := range 30 {
+		details[fmt.Sprintf("key_%02d", i)] = strings.Repeat("v", 256)
+	}
+	got := sanitizeRunFailureEvidence(RunFailureEvidence{Hint: strings.Repeat("h", 768), Details: details})
+	size := len(got.Hint)
+	for key, value := range got.Details {
+		size += len(key) + len(value)
+	}
+	if size > 4096 || len(got.Details) > 16 || len(got.Details) == 0 {
+		t.Fatalf("unbounded snapshot size=%d entries=%d", size, len(got.Details))
+	}
+}
+
+func TestRunFailureEvidenceFinalization(t *testing.T) {
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repoRoot)
+	for _, keep := range []bool{false, true} {
+		t.Run(fmt.Sprintf("keep=%t", keep), func(t *testing.T) {
+			lease, _ := setupRunClaimSnapshotTest(t)
+			pathDir := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))[0]
+			t.Setenv("PATH", pathDir+string(os.PathListSeparator)+"/usr/bin:/bin")
+			installWorkspaceOwnerAwareSSH(t, filepath.Join(pathDir, "ssh"), "#!/bin/sh\ncase \"$1\" in *fixture-memory-command*) exit 137 ;; *'tar -cz'*) exit 1 ;; esac\nexit 0\n")
+			begins, collects, releases := 0, 0, 0
+			source := map[string]string{"runtime_memory_total_bytes": "8388608"}
+			runEnvProfileTestEvidenceHook = func(context.Context, RunFailureEvidenceRequest) (RunFailureEvidenceCollector, error) {
+				begins++
+				return func(context.Context) (RunFailureEvidence, error) {
+					collects++
+					return RunFailureEvidence{ResourceExhaustion: ResourceExhaustionMemory, Hint: "Check runtime capacity and swap", Details: source}, nil
+				}, nil
+			}
+			runEnvProfileTestReleaseRequestHook = func(req ReleaseLeaseRequest) error {
+				releases++
+				source["runtime_memory_total_bytes"] = "changed-after-collection"
+				data, _ := json.Marshal(req.Lease.Server)
+				if strings.Contains(string(data), "runtime_memory_total") {
+					t.Error("reporting evidence entered release authority")
+				}
+				return nil
+			}
+			t.Cleanup(func() { runEnvProfileTestEvidenceHook = nil })
+			args := []string{"--provider", runEnvProfileTestProvider{}.Name(), "--no-sync", "--no-hydrate", "--timing-json"}
+			if keep {
+				args = append(args, "--id", lease.LeaseID, "--keep")
+			}
+			args = append(args, "--", "fixture-memory-command")
+			var stdout, stderr bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(t.Context(), args)
+			var exitErr ExitError
+			if !AsExitError(err, &exitErr) || exitErr.Code != 137 {
+				t.Fatalf("original exit lost: %v\n%s", err, stderr.String())
+			}
+			wantReleases := 1
+			if keep {
+				wantReleases = 0
+			}
+			if begins != 1 || collects != 1 || releases != wantReleases || strings.Count(stderr.String(), "failure digest\n") != 1 {
+				t.Fatalf("lifecycle counts begin=%d collect=%d release=%d\n%s", begins, collects, releases, stderr.String())
+			}
+			var report TimingReport
+			bundle := ""
+			for _, line := range strings.Split(stderr.String(), "\n") {
+				if strings.HasPrefix(line, "{") {
+					_ = json.Unmarshal([]byte(line), &report)
+				}
+				if strings.HasPrefix(line, "failure-bundle local=") {
+					bundle = strings.Fields(strings.TrimPrefix(line, "failure-bundle local="))[0]
+				}
+			}
+			if report.ExitCode != 137 || report.ResourceExhaustion != ResourceExhaustionMemory || report.FailureEvidence == nil || report.FailureEvidence.Details["runtime_memory_total_bytes"] != "8388608" {
+				t.Fatalf("final timing lost snapshot: %+v\n%s", report, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "hint: Check runtime capacity and swap") || strings.Contains(stderr.String(), "changed-after-collection") {
+				t.Fatal("deferred digest did not retain sanitized snapshot")
+			}
+			if bundle == "" {
+				t.Fatalf("no failure bundle\n%s", stderr.String())
+			}
+			contents := readTarGzContents(t, bundle)
+			var captured TimingReport
+			if err := json.Unmarshal(contents["crabbox-artifacts/timings.json"], &captured); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(captured.FailureEvidence, report.FailureEvidence) {
+				t.Fatal("bundle and final evidence differ")
+			}
+		})
 	}
 }
 
