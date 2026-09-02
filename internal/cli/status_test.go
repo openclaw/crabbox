@@ -16,7 +16,7 @@ import (
 )
 
 func TestMemoryDiagnosticsPresentationRouting(t *testing.T) {
-	for _, mode := range []string{"inspect", "status", "wait", "helper"} {
+	for _, mode := range []string{"inspect", "status", "plain-status", "wait", "wait-json", "helper"} {
 		t.Run(mode, func(t *testing.T) {
 			clearConfigEnv(t)
 			t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
@@ -30,8 +30,12 @@ func TestMemoryDiagnosticsPresentationRouting(t *testing.T) {
 				_ = app.inspect(t.Context(), append(args, "--json"))
 			case "status":
 				_ = app.status(t.Context(), append(args, "--json"))
+			case "plain-status":
+				_ = app.status(t.Context(), args)
 			case "wait":
 				_ = app.status(t.Context(), append(args, "--wait"))
+			case "wait-json":
+				_ = app.status(t.Context(), append(args, "--wait", "--json"))
 			case "helper":
 				cfg := defaultConfig()
 				cfg.Provider = "aws"
