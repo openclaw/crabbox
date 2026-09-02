@@ -379,12 +379,39 @@ func TestRunEventStreamWriterCapsOutputEvents(t *testing.T) {
 
 func TestRunEventStreamWriterDoesNotBlockOnCoordinatorPost(t *testing.T) {
 	started := make(chan struct{})
+	releaseCtx, releasePost := context.WithCancel(context.Background())
 	client := &CoordinatorClient{
 		BaseURL: "https://example.test",
-		Client:  &http.Client{Transport: blockingRoundTripper{started: started}},
+		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			close(started)
+			select {
+			case <-releaseCtx.Done():
+				// Success keeps the worker alive until its queue is closed.
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"event":{"runID":"run_123","seq":1,"type":"stdout"}}`)),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			case <-req.Context().Done():
+				return nil, context.Cause(req.Context())
+			}
+		})},
 	}
 	rec := &runRecorder{coord: client, runID: "run_123", stderr: io.Discard}
 	stdout := rec.StreamWriter("stdout")
+	var joined chan struct{}
+	t.Cleanup(func() {
+		releasePost()
+		rec.waitForOutputEvents(time.Second)
+		if joined != nil {
+			select {
+			case <-joined:
+			case <-time.After(time.Second):
+				t.Error("output event queue did not join during cleanup")
+			}
+		}
+	})
 	chunk := bytes.Repeat([]byte("x"), runEventOutputChunkBytes)
 
 	start := time.Now()
@@ -402,6 +429,18 @@ func TestRunEventStreamWriterDoesNotBlockOnCoordinatorPost(t *testing.T) {
 	case <-started:
 	case <-time.After(time.Second):
 		t.Fatal("output event post did not start")
+	}
+	releasePost()
+	joined = make(chan struct{})
+	go func() {
+		rec.output.wg.Wait()
+		close(joined)
+	}()
+	rec.waitForOutputEvents(time.Second)
+	select {
+	case <-joined:
+	case <-time.After(time.Second):
+		t.Fatal("output event queue did not join")
 	}
 }
 
@@ -1035,20 +1074,6 @@ func TestRunRecorderResetTelemetryForLeaseReplacement(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("telemetry sampler was not stopped")
 	}
-}
-
-type blockingRoundTripper struct {
-	started chan struct{}
-}
-
-func (t blockingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	select {
-	case <-t.started:
-	default:
-		close(t.started)
-	}
-	<-req.Context().Done()
-	return nil, context.Cause(req.Context())
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
