@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { Script, createContext } from "node:vm";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -50,6 +51,7 @@ import {
 } from "../src/fleet";
 import { gcpProviderLabelValue } from "../src/gcp";
 import { HetznerClient, HetznerProvisioningError } from "../src/hetzner";
+import { errorMessage } from "../src/http";
 import { MISSING_ORG_KEY, isCurrentOrgKey, orgKeyForLabel } from "../src/org-identity";
 import { portalCode, portalVNC, webVNCCredentialsFromHistoryState } from "../src/portal";
 import { providerLabelValue } from "../src/provider-labels";
@@ -5142,26 +5144,57 @@ describe("fleet lease identity and idle", () => {
           public_key: "ssh-ed25519 workspace-test",
         },
       }),
-      jsonResponse({ error: { code: "server_error" } }, 503),
+      new Response(
+        JSON.stringify(
+          { error: { code: "server_error", message: "Service temporarily unavailable" } },
+          null,
+          2,
+        ),
+        { status: 503 },
+      ),
     ];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => responses.shift() ?? jsonResponse({}, 500)),
-    );
-    const client = new HetznerClient({ HETZNER_TOKEN: "test-token" } as Env);
-    const config = leaseConfig({
-      provider: "hetzner",
-      providerKey: "crabbox-workspace-test",
-      sshPublicKey: "ssh-ed25519 workspace-test",
+    let serverCreates = 0;
+    const server = createServer(async (incoming, response) => {
+      incoming.resume();
+      if (incoming.method === "POST" && incoming.url === "/v1/servers") serverCreates++;
+      const upstream = responses.shift() ?? jsonResponse({}, 500);
+      response.writeHead(upstream.status, { "content-type": "application/json" });
+      response.end(await upstream.text());
     });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("missing test HTTP address");
+    const nativeFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      expect(url.origin).toBe("https://api.hetzner.cloud");
+      return nativeFetch(`http://127.0.0.1:${address.port}${url.pathname}${url.search}`, init);
+    });
+    try {
+      const client = new HetznerClient({ HETZNER_TOKEN: "test-token" } as Env);
+      const config = leaseConfig({
+        provider: "hetzner",
+        providerKey: "crabbox-workspace-test",
+        sshPublicKey: "ssh-ed25519 workspace-test",
+      });
 
-    const error = await client
-      .createServerWithFallback(config, "cbx_abcdef123456", "fleet-is-100", "alice@example.com")
-      .catch((caught: unknown) => caught);
+      const error = await client
+        .createServerWithFallback(config, "cbx_abcdef123456", "fleet-is-100", "alice@example.com")
+        .catch((caught: unknown) => caught);
 
-    expect(error).toBeInstanceOf(HetznerProvisioningError);
-    expect((error as HetznerProvisioningError).resourceMayExist).toBe(true);
-    expect((error as HetznerProvisioningError).providerKeyCleanupID).toBeUndefined();
+      expect(error).toBeInstanceOf(HetznerProvisioningError);
+      expect((error as HetznerProvisioningError).resourceMayExist).toBe(true);
+      expect((error as HetznerProvisioningError).retryable).toBe(true);
+      expect((error as HetznerProvisioningError).providerKeyCleanupID).toBeUndefined();
+      expect(serverCreates).toBe(1);
+      expect(errorMessage(error)).toMatch(
+        /http 503:.*server_error.*Service temporarily unavailable/,
+      );
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
   });
 
   it("retains a newly created lease key when the server ID is unknown", async () => {
