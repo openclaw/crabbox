@@ -788,13 +788,37 @@ func TestProfileDoctorWorkdirUsesConfiguredWorkRoot(t *testing.T) {
 }
 
 func TestSafeArtifactGlob(t *testing.T) {
-	if !safeArtifactGlob(".artifacts/qa-e2e/**") {
-		t.Fatal("expected QA artifact glob to be accepted")
+	for _, glob := range []string{".artifacts/qa-e2e/**", "reports/result..json", "reports/.../proof.json", ".gitignore"} {
+		if !safeArtifactGlob(glob) {
+			t.Fatalf("expected safe glob %q to be accepted", glob)
+		}
 	}
-	for _, glob := range []string{"", "../secret", "/etc/passwd", ".//etc/passwd", ".artifacts/$(id)", "-C/tmp", "{/,}etc/passwd", ".{.,}/secret"} {
+	for _, glob := range []string{"", "..", "../secret", "reports/../secret", "/etc/passwd", ".//etc/passwd", ".artifacts/$(id)", "-C/tmp", "{/,}etc/passwd", ".{.,}/secret"} {
 		if safeArtifactGlob(glob) {
 			t.Fatalf("expected unsafe glob %q to be rejected", glob)
 		}
+	}
+}
+
+func TestRunArtifactGlobsValidateComponents(t *testing.T) {
+	for flag, validate := range map[string]func([]string) error{
+		"--artifact-glob":    ValidateRunArtifactGlobs,
+		"--require-artifact": ValidateRequiredRunArtifactGlobs,
+	} {
+		t.Run(flag, func(t *testing.T) {
+			for _, glob := range []string{"reports/result..json", "reports/.gitignore", "reports/.crabbox-report.json", "reports/.git-backup/**", "**/*"} {
+				if err := validate([]string{glob}); err != nil {
+					t.Fatalf("safe glob %q rejected: %v", glob, err)
+				}
+			}
+			for _, glob := range []string{"..", "reports/../proof.json", ".git", ".git/config", ".crabbox/evidence/proof.json", "reports/.git/config", "./reports/.crabbox/**", "reports/**/.git/config"} {
+				err := validate([]string{glob})
+				var exitErr ExitError
+				if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, flag) {
+					t.Fatalf("unsafe glob %q error=%v, want flag-specific exit 2", glob, err)
+				}
+			}
+		})
 	}
 }
 
@@ -843,6 +867,10 @@ func TestRunArtifactCollectScriptExcludesEnvProfiles(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, ".artifacts", "result.txt"), []byte("ok\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	proof := []byte("{\"ok\":true}\n")
+	if err := os.WriteFile(filepath.Join(dir, ".artifacts", "result..json"), proof, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	archivePath := filepath.Join(dir, ".crabbox", "artifacts.tgz")
 	script := runArtifactCollectScript(dir, ".crabbox/artifacts.tgz", []string{"./**"})
 	if out, err := exec.Command("bash", "-lc", script).CombinedOutput(); err != nil {
@@ -856,6 +884,9 @@ func TestRunArtifactCollectScriptExcludesEnvProfiles(t *testing.T) {
 	}
 	if !stringSliceContains(names, ".artifacts/result.txt") {
 		t.Fatalf("archive missing artifact file: %#v", names)
+	}
+	if got := readTarGzContents(t, archivePath)[".artifacts/result..json"]; !bytes.Equal(got, proof) {
+		t.Fatalf("archive lost consecutive-dot artifact bytes: %q", got)
 	}
 }
 
@@ -886,14 +917,22 @@ func TestRunArtifactRequireScriptMatchesRequiredArtifacts(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "reports", "data", "nested", "quality.json"), []byte("{}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	script := runArtifactRequireScript(dir, []string{"reports/data/manifest.json", "reports/data/**/*.json"})
+	if err := os.WriteFile(filepath.Join(dir, "reports", "data", "result..json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	globs := []string{"reports/data/manifest.json", "reports/data/result..json", "reports/data/**/*.json"}
+	if err := validateRequiredRunArtifactGlobs(globs); err != nil {
+		t.Fatal(err)
+	}
+	script := runArtifactRequireScript(dir, globs)
 	out, err := exec.Command("bash", "-lc", script).CombinedOutput()
 	if err != nil {
 		t.Fatalf("require script failed: %v\n%s", err, out)
 	}
 	for _, want := range []string{
 		"required artifact reports/data/manifest.json matched=1",
-		"required artifact reports/data/**/*.json matched=2",
+		"required artifact reports/data/result..json matched=1",
+		"required artifact reports/data/**/*.json matched=3",
 	} {
 		if !strings.Contains(string(out), want) {
 			t.Fatalf("output missing %q:\n%s", want, out)

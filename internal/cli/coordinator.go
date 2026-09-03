@@ -1050,7 +1050,7 @@ func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicK
 			path = "/v1/leases/" + url.PathEscape(leaseID) + "/from-checkpoint"
 		}
 	}
-	err = c.do(ctx, method, path, req, &res)
+	err = c.doWithHeaders(ctx, method, path, req, &res, http.Header{"Prefer": {"respond-async"}})
 	if err == nil && checkpointBacked && checkpointClaim.LeaseCreated != nil {
 		checkpointClaim.LeaseCreated()
 	}
@@ -2254,6 +2254,10 @@ func (c *CoordinatorClient) doControl(ctx context.Context, method, path string, 
 }
 
 func (c *CoordinatorClient) do(ctx context.Context, method, path string, body any, out any) error {
+	return c.doWithHeaders(ctx, method, path, body, out, nil)
+}
+
+func (c *CoordinatorClient) doWithHeaders(ctx context.Context, method, path string, body any, out any, headers http.Header) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -2265,7 +2269,7 @@ func (c *CoordinatorClient) do(ctx context.Context, method, path string, body an
 			return err
 		}
 	}
-	err = c.doHTTP(ctx, method, path, data, body != nil, out)
+	err = c.doHTTPWithHeaders(ctx, method, path, data, body != nil, out, headers)
 	if err == nil || !shouldUseCoordinatorCurlFallback(method, body != nil, err) {
 		return err
 	}
@@ -2277,12 +2281,19 @@ func (c *CoordinatorClient) do(ctx context.Context, method, path string, body an
 }
 
 func (c *CoordinatorClient) doHTTP(ctx context.Context, method, path string, data []byte, hasBody bool, out any) error {
+	return c.doHTTPWithHeaders(ctx, method, path, data, hasBody, out, nil)
+}
+
+func (c *CoordinatorClient) doHTTPWithHeaders(ctx context.Context, method, path string, data []byte, hasBody bool, out any, headers http.Header) error {
 	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
 	if hasBody {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	for name, values := range headers {
+		req.Header[name] = append([]string(nil), values...)
 	}
 	if err := c.addRequestHeaders(ctx, req.Header); err != nil {
 		return err

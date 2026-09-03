@@ -36,6 +36,21 @@ const baseEnv: Env = {
 
 afterEach(() => vi.useRealTimers());
 
+it("preserves explicit provider scope when creating a regional client", () => {
+  const client = new AzureClient(baseEnv, {
+    subscription: "pinned-subscription",
+    resourceGroup: "pinned-resource-group",
+  });
+  const regional = (
+    Reflect.get(client, "clientForLocation") as (
+      location: string,
+      multiRegion: boolean,
+    ) => AzureClient
+  ).call(client, "westus", true);
+  expect(regional.subscription).toBe("pinned-subscription");
+  expect(regional.resourceGroup).toBe("pinned-resource-group");
+});
+
 it("installs pinned TruffleHog once in Azure Linux cloud-init", () => {
   const got = azureLinuxCloudInit(testLeaseConfig());
 

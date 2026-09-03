@@ -2947,6 +2947,26 @@ func TestRunCommandRejectsProofAndArtifactsWithSyncOnly(t *testing.T) {
 			want: "--require-artifact cannot be combined with --sync-only",
 		},
 		{
+			name: "consecutive dots artifact glob",
+			args: []string{"--sync-only", "--artifact-glob", "reports/result..json"},
+			want: "--artifact-glob cannot be combined with --sync-only",
+		},
+		{
+			name: "consecutive dots required artifact",
+			args: []string{"--sync-only", "--require-artifact", "reports/result..json"},
+			want: "--require-artifact cannot be combined with --sync-only",
+		},
+		{
+			name: "protected artifact glob",
+			args: []string{"--sync-only", "--artifact-glob", "reports/.git/config"},
+			want: "--artifact-glob excludes protected path components",
+		},
+		{
+			name: "protected required artifact",
+			args: []string{"--sync-only", "--require-artifact", ".crabbox/evidence/proof.json"},
+			want: "--require-artifact excludes protected path components",
+		},
+		{
 			name: "emit proof",
 			args: []string{"--sync-only", "--emit-proof", filepath.Join(t.TempDir(), "proof.md")},
 			want: "--emit-proof cannot be combined with --sync-only",

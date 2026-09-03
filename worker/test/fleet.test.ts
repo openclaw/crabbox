@@ -26,7 +26,7 @@ import {
   AzureProvider,
   DaytonaProvider,
   FleetCoordinator,
-  FleetDurableObject,
+  FleetDurableObject as ProductionFleetDurableObject,
   GCPProvider,
   HetznerProvider,
   bridgeTicketFromRequest,
@@ -58,6 +58,7 @@ import {
   type ProviderProvisioningCleanupClaim,
 } from "../src/provider-provisioning";
 import { providerReconciliationFingerprint } from "../src/provider-reconciliation";
+import { verifyTerminalReceipt } from "../src/run-receipt";
 import {
   runtimeAdapterDesktopRelayTimeoutMs,
   runtimeAdapterRelayFrameLimit,
@@ -207,13 +208,72 @@ function workspaceFixtureKey(
   return `workspace:${orgKeyForLabel(org)}:${encodeURIComponent(owner)}:${workspaceID}`;
 }
 
+// These tests assert completed maintenance outcomes. The production runtime returns from its
+// alarm after the bounded tick; this fixture explicitly drains runtime-owned maintenance too.
+// Alarm latency and durable wake behavior are exercised separately with the real runtime.
+class FleetDurableObject extends ProductionFleetDurableObject {
+  private readonly initialized: Promise<unknown>;
+  private readonly tasks: Set<Promise<unknown>>;
+
+  constructor(...args: ConstructorParameters<typeof ProductionFleetDurableObject>) {
+    const [state, ...rest] = args;
+    const initializers: Promise<unknown>[] = [];
+    const tasks = new Set<Promise<unknown>>();
+    super(
+      {
+        ...state,
+        blockConcurrencyWhile<T>(callback: () => Promise<T>): Promise<T> {
+          const initialized = callback();
+          initializers.push(initialized);
+          return initialized;
+        },
+        waitUntil(task: Promise<unknown>): void {
+          tasks.add(task);
+          void task.then(
+            () => tasks.delete(task),
+            () => tasks.delete(task),
+          );
+        },
+      } as DurableObjectState,
+      ...rest,
+    );
+    this.initialized = Promise.all(initializers);
+    this.tasks = tasks;
+  }
+
+  override async fetch(incomingRequest: Request): Promise<Response> {
+    await this.initialized;
+    const response = await super.fetch(incomingRequest);
+    if (new URL(incomingRequest.url).pathname === "/v1/internal/scheduled")
+      await this.drainMaintenance();
+    return response;
+  }
+
+  override async alarm(): Promise<void> {
+    await this.initialized;
+    await super.alarm();
+    await this.drainMaintenance();
+  }
+
+  private async drainMaintenance(): Promise<void> {
+    while (this.tasks.size) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- a completed pass may latch a follow-up pass.
+      await Promise.all(this.tasks);
+    }
+  }
+}
+
 class MemoryStorage {
   private values: Map<string, unknown>;
   private alarmTime: number | undefined;
+  private alarmWritten = false;
+  private revision = 0;
+  private transactionTail = Promise.resolve();
   beforeGet?: (key: string) => Promise<void>;
   afterGet?: (key: string, value: unknown) => Promise<void> | void;
   beforePut?: (key: string, value: unknown) => Promise<void>;
   beforeDelete?: (key: string) => Promise<void>;
+  beforeSetAlarm?: (time: number) => Promise<void>;
   transactionPutCounts: number[] = [];
 
   constructor(values = new Map<string, unknown>()) {
@@ -230,15 +290,20 @@ class MemoryStorage {
   async put<T>(key: string, value: T, _options?: { noCache?: boolean }): Promise<void> {
     await this.beforePut?.(key, value);
     this.values.set(key, value);
+    this.revision += 1;
   }
 
   async delete(key: string): Promise<void> {
     await this.beforeDelete?.(key);
     this.values.delete(key);
+    this.revision += 1;
   }
 
   async deleteAlarm(): Promise<void> {
     this.alarmTime = undefined;
+    this.alarmWritten = true;
+    this.revision += 1;
+    this.alarmCommitted(undefined);
   }
 
   async getAlarm(): Promise<number | null> {
@@ -246,23 +311,95 @@ class MemoryStorage {
   }
 
   async setAlarm(time: number): Promise<void> {
+    await this.beforeSetAlarm?.(time);
     this.alarmTime = time;
+    this.alarmWritten = true;
+    this.revision += 1;
+    this.alarmCommitted(time);
   }
 
+  protected alarmCommitted(_time: number | undefined): void {}
+
   async transaction<T>(callback: (transaction: CoordinatorStorageView) => Promise<T>): Promise<T> {
-    const transaction = new MemoryStorage(new Map(this.values));
-    transaction.beforeGet = this.beforeGet;
+    const predecessor = this.transactionTail;
+    let release!: () => void;
+    this.transactionTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await predecessor;
+    try {
+      for (let attempt = 0; attempt < 12; attempt += 1) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- serialization retries must use the last committed snapshot.
+        const result = await this.transactionAttempt(callback);
+        if (result.committed) return result.value;
+      }
+      throw new Error("test storage serialization retry exhausted");
+    } finally {
+      release();
+    }
+  }
+
+  private async transactionAttempt<T>(
+    callback: (transaction: CoordinatorStorageView) => Promise<T>,
+  ): Promise<{ committed: true; value: T } | { committed: false }> {
+    const revision = this.revision;
+    const snapshot = structuredClone(this.values);
+    const originalAlarm = this.alarmTime;
+    const reads = new Set<string>();
+    const writes = new Set<string>();
+    const prefixes = new Set<string>();
+    const transaction = new MemoryStorage(structuredClone(snapshot));
+    transaction.alarmTime = this.alarmTime;
+    transaction.beforeGet = async (key) => {
+      reads.add(key);
+      await this.beforeGet?.(key);
+    };
     transaction.afterGet = this.afterGet;
+    transaction.beforeSetAlarm = this.beforeSetAlarm;
+    const list = transaction.list.bind(transaction);
+    transaction.list = async <Value>(
+      options: Parameters<CoordinatorStorageView["list"]>[0] = {},
+    ) => {
+      prefixes.add(options.prefix ?? "");
+      return list<Value>(options);
+    };
     let putCount = 0;
     transaction.beforePut = async (key, value) => {
       putCount += 1;
+      writes.add(key);
       await this.beforePut?.(key, value);
     };
-    transaction.beforeDelete = this.beforeDelete;
+    transaction.beforeDelete = async (key) => {
+      writes.add(key);
+      await this.beforeDelete?.(key);
+    };
     try {
       const result = await callback(transaction);
-      this.values = new Map(transaction.values);
-      return result;
+      if (this.revision !== revision) {
+        for (const key of new Set([...reads, ...writes])) {
+          if (JSON.stringify(snapshot.get(key)) !== JSON.stringify(this.values.get(key)))
+            return { committed: false };
+        }
+        for (const prefix of prefixes) {
+          const select = (values: Map<string, unknown>) =>
+            JSON.stringify(
+              [...values]
+                .filter(([key]) => key.startsWith(prefix))
+                .toSorted(([a], [b]) => a.localeCompare(b)),
+            );
+          if (select(snapshot) !== select(this.values)) return { committed: false };
+        }
+        if (originalAlarm !== this.alarmTime) return { committed: false };
+      }
+      for (const key of writes) {
+        if (transaction.values.has(key)) this.values.set(key, transaction.values.get(key));
+        else this.values.delete(key);
+      }
+      this.alarmTime = transaction.alarmTime;
+      this.revision += 1;
+      // Native alarm delivery observes committed writes, including same-timestamp rearming.
+      if (transaction.alarmWritten) this.alarmCommitted(this.alarmTime);
+      return { committed: true, value: result };
     } finally {
       this.transactionPutCounts.push(putCount);
     }
@@ -294,6 +431,7 @@ class MemoryStorage {
 
   seed<T>(key: string, value: T): void {
     this.values.set(key, currentOrgFixture(value));
+    this.revision += 1;
   }
 
   value<T>(key: string): T | undefined {
@@ -9711,7 +9849,7 @@ describe("fleet lease identity and idle", () => {
         },
       });
       expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.cleanupRetryAt).toBeUndefined();
-      expect(storage.alarm()).toBeUndefined();
+      expect(storage.alarm()).toBeLessThanOrEqual(Date.now());
 
       await fleet.alarm();
       expect(cleanupLeases).toHaveLength(0);
@@ -36199,10 +36337,20 @@ describe("fleet run history", () => {
 
   it("serializes control heartbeat provider validation with its mutation", async () => {
     const storage = new MemoryStorage();
-    const runtime = new CloudflareCoordinatorRuntime({ storage } as unknown as DurableObjectState);
+    let initialized: Promise<unknown> | undefined;
+    const runtime = new CloudflareCoordinatorRuntime({
+      storage,
+      blockConcurrencyWhile<T>(callback: () => Promise<T>) {
+        const run = callback();
+        initialized = run;
+        return run;
+      },
+      waitUntil() {},
+    } as unknown as DurableObjectState);
     const fleet = new FleetCoordinator(runtime, {
       CRABBOX_DEFAULT_ORG: "openclaw",
     } as Env);
+    await initialized;
     const leaseID = "cbx_control_provider_fence";
     const now = new Date();
     const original = testLease({
@@ -39290,6 +39438,744 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+describe("synthetic acknowledgement reliability", () => {
+  const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+  const leaseID = "cbx_aacc00000001";
+  const releaseID = "cbx_aacc00000002";
+
+  class RetainedAlarmStorage extends ObservedMemoryStorage {
+    queuedAlarm: number | undefined;
+    readonly alarmWrites: number[] = [];
+
+    protected override alarmCommitted(time: number | undefined): void {
+      if (time !== undefined) this.alarmWrites.push(time);
+      this.queuedAlarm = time;
+    }
+
+    async deliverAlarm(fleet: FleetDurableObject): Promise<void> {
+      if (this.queuedAlarm === undefined || this.queuedAlarm > Date.now()) {
+        throw new Error("no due alarm job is queued");
+      }
+      // Node consumes the job, but retains its persisted timestamp even if maintenance fails.
+      this.queuedAlarm = undefined;
+      await fleet.alarm();
+    }
+  }
+
+  function seedLease(storage: MemoryStorage, id = leaseID): LeaseRecord {
+    const now = new Date();
+    const lease = testLease({
+      id,
+      slug: `synthetic-${id}`,
+      owner: "alice@example.com",
+      org: "example-org",
+      keep: false,
+      createdAt: now.toISOString(),
+      lastTouchedAt: now.toISOString(),
+      idleTimeoutSeconds: 1800,
+      expiresAt: new Date(now.getTime() + 1800_000).toISOString(),
+    });
+    storage.seed(`lease:${id}`, lease);
+    return lease;
+  }
+
+  async function createRun(fleet: FleetCoordinator): Promise<RunRecord> {
+    const response = await fleet.fetch(
+      request("POST", "/v1/runs", {
+        headers,
+        body: { leaseID, command: ["printf", "synthetic acknowledgement\\n"] },
+      }),
+    );
+    expect(response.status).toBe(201);
+    return ((await response.json()) as { run: RunRecord }).run;
+  }
+
+  function addSocket(fleet: FleetCoordinator, clientID: string, fields = {}): FakeWebSocket {
+    const socket = new FakeWebSocket({
+      kind: "control",
+      clientID,
+      owner: "alice@example.com",
+      org: "example-org",
+      subscriptions: {},
+      ...fields,
+    });
+    (fleet as unknown as { controlSockets: Map<string, WebSocket> }).controlSockets.set(
+      clientID,
+      socket as unknown as WebSocket,
+    );
+    return socket;
+  }
+
+  it.each(["serializeAttachment", "deserializeAttachment"] as const)(
+    "acknowledges the terminal commit despite a subscribed socket %s failure",
+    async (method) => {
+      const storage = new MemoryStorage();
+      seedLease(storage);
+      const fleet = testFleet(storage);
+      const run = await createRun(fleet);
+      const subscriptions = { [run.id]: run.eventCount };
+      const broken = addSocket(fleet, "synthetic-broken", { subscriptions });
+      const healthy = addSocket(fleet, "synthetic-healthy", { subscriptions });
+      const unauthorized = addSocket(fleet, "synthetic-unauthorized", {
+        subscriptions,
+        owner: "mallory@example.com",
+      });
+      const revoked = addSocket(fleet, "synthetic-revoked", { subscriptions, admin: true });
+      const irrelevant = addSocket(fleet, "synthetic-irrelevant", { admin: true });
+      const log = "synthetic acknowledgement\n";
+      const body = {
+        exitCode: 0,
+        syncMs: 0,
+        commandMs: 1,
+        log,
+        receipt: await testTerminalReceipt({ run, exitCode: 0, syncMs: 0, commandMs: 1, log }),
+      };
+      vi.spyOn(broken, method).mockImplementation(() => {
+        expect(storage.value<RunRecord>(`run:${run.id}`)?.terminalReceipt).toEqual(body.receipt);
+        throw new Error("synthetic attachment failure after terminal commit");
+      });
+      const finish = await fleet.fetch(
+        request("POST", `/v1/runs/${run.id}/finish`, { headers, body }),
+      );
+      expect.soft(finish.status).toBe(200);
+      expect.soft(broken.closeCode).toBe(1011);
+      expect.soft(healthy.sentJSON()).toEqual([
+        expect.objectContaining({
+          type: "run_events",
+          runID: run.id,
+          events: [expect.objectContaining({ type: "command.finished", exitCode: 0 })],
+        }),
+      ]);
+      expect(unauthorized.sentJSON()).toEqual([]);
+      expect(revoked.sentJSON()).toEqual([]);
+      expect.soft(revoked.closeCode).toBe(1008);
+      expect.soft(irrelevant.closeCode).toBeUndefined();
+      const replacement = addSocket(fleet, "synthetic-broken");
+      const attachmentRead = vi.spyOn(broken, "deserializeAttachment");
+      attachmentRead.mockClear();
+      const retired = broken as unknown as WebSocket;
+      expect.soft(() => fleet.webSocketClose(retired, 1011, "delayed close", false)).not.toThrow();
+      expect.soft(() => fleet.webSocketError(retired, new Error("delayed error"))).not.toThrow();
+      await expect
+        .soft(Promise.resolve().then(() => fleet.webSocketMessage(retired, '{"type":"ping"}')))
+        .resolves.toBeUndefined();
+      await expect
+        .soft(
+          Promise.resolve().then(() =>
+            fleet.webSocketMessage(retired, JSON.stringify({ type: "heartbeat", leaseID })),
+          ),
+        )
+        .resolves.toBeUndefined();
+      expect.soft(attachmentRead).not.toHaveBeenCalled();
+      expect(broken.sentJSON()).toEqual([]);
+      await fleet.webSocketMessage(
+        replacement as unknown as WebSocket,
+        JSON.stringify({ type: "subscribe_run", runID: run.id, after: run.eventCount }),
+      );
+      expect(replacement.closeCode).toBeUndefined();
+      expect(replacement.sentJSON()).toEqual(healthy.sentJSON());
+      const persisted = structuredClone(storage.value<RunRecord>(`run:${run.id}`)!);
+      const recovered = await fleet.fetch(
+        request("GET", `/v1/runs/${run.id}/receipt`, { headers }),
+      );
+      expect(recovered.status).toBe(200);
+      expect(await recovered.json()).toEqual({ receipt: body.receipt });
+      await expect(
+        verifyTerminalReceipt(persisted.terminalReceipt, {
+          run: persisted,
+          ...body,
+          logTruncated: false,
+          observedAt: new Date(),
+        }),
+      ).resolves.toEqual(body.receipt);
+      const logs = await fleet.fetch(request("GET", `/v1/runs/${run.id}/logs`, { headers }));
+      expect(await logs.text()).toBe(log);
+      const replay = await fleet.fetch(
+        request("POST", `/v1/runs/${run.id}/finish`, { headers, body }),
+      );
+      expect(replay.status).toBe(200);
+      const conflict = await fleet.fetch(
+        request("POST", `/v1/runs/${run.id}/finish`, {
+          headers,
+          body: { ...body, exitCode: 1 },
+        }),
+      );
+      expect(conflict.status).toBe(409);
+      expect(storage.value(`run:${run.id}`)).toEqual(persisted);
+      const events = await fleet.fetch(request("GET", `/v1/runs/${run.id}/events`, { headers }));
+      const records = ((await events.json()) as { events: RunEventRecord[] }).events;
+      expect(records.filter((event) => event.type === "command.finished")).toHaveLength(1);
+      expect.soft(healthy.sentJSON()).toHaveLength(1);
+    },
+  );
+
+  it("ignores retired notification callbacks with cached attachments even when close fails", async () => {
+    const storage = new MemoryStorage();
+    seedLease(storage);
+    const runtime = new FakeCoordinatorRuntime(storage);
+    const accept = vi.spyOn(runtime, "acceptWebSocket");
+    const fleet = new FleetCoordinator(runtime, { CRABBOX_DEFAULT_ORG: "default-org" } as Env);
+    const run = await createRun(fleet);
+    await fleet.fetch(
+      request("GET", "/v1/control", { headers: { ...headers, upgrade: "websocket" } }),
+    );
+    const [socket, , , handlers] = accept.mock.calls[0]!;
+    const broken = runtime.createdSockets[0]!;
+    const { clientID } = broken.deserializeAttachment() as { clientID: string };
+    await handlers.message(JSON.stringify({ type: "subscribe_run", runID: run.id }));
+    vi.spyOn(broken, "serializeAttachment").mockImplementation(() => {
+      throw new Error("synthetic notification serialization failure");
+    });
+    const close = vi.spyOn(broken, "close").mockImplementation(() => {
+      throw new Error("synthetic socket close failure");
+    });
+    const finish = await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/finish`, {
+        headers,
+        body: { exitCode: 0, syncMs: 0, commandMs: 1 },
+      }),
+    );
+    expect(finish.status).toBe(200);
+    expect(close).toHaveBeenCalledTimes(2);
+    const replacement = addSocket(fleet, clientID);
+    const attachmentRead = vi.spyOn(runtime, "socketAttachment").mockImplementation(() => {
+      throw new Error("retired socket attachment must not be read");
+    });
+    const sentBefore = broken.sentJSON();
+    expect.soft(() => handlers.close(1011, "delayed close")).not.toThrow();
+    expect.soft(() => handlers.error()).not.toThrow();
+    await expect(handlers.message('{"type":"ping"}')).resolves.toBeUndefined();
+    await expect(
+      handlers.message(JSON.stringify({ type: "heartbeat", leaseID })),
+    ).resolves.toBeUndefined();
+    expect.soft(attachmentRead).not.toHaveBeenCalled();
+    expect.soft(close).toHaveBeenCalledTimes(2);
+    expect(broken.sentJSON()).toEqual(sentBefore);
+    attachmentRead.mockRestore();
+    await fleet.webSocketMessage(replacement as unknown as WebSocket, '{"type":"ping"}');
+    expect(replacement.sentJSON()).toEqual([{ type: "pong" }]);
+    expect(
+      (fleet as unknown as { controlSockets: Map<string, WebSocket> }).controlSockets.get(clientID),
+    ).not.toBe(socket);
+  });
+
+  it.each(["http", "control"])(
+    "arms %s heartbeats without global storage scans",
+    async (transport) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        const storage = new ObservedMemoryStorage();
+        seedLease(storage);
+        const fleet = testFleet(storage);
+        const socket = addSocket(fleet, "synthetic-heartbeat");
+        const get = vi.spyOn(storage, "get");
+        const put = vi.spyOn(storage, "put");
+        const getAlarm = vi.spyOn(storage, "getAlarm");
+        const setAlarm = vi.spyOn(storage, "setAlarm");
+        async function heartbeat(idleTimeoutSeconds?: number): Promise<void> {
+          storage.resetListOptions();
+          get.mockClear();
+          put.mockClear();
+          getAlarm.mockClear();
+          setAlarm.mockClear();
+          let acknowledged: boolean;
+          if (transport === "http") {
+            const response = await fleet.fetch(
+              request("POST", `/v1/leases/${leaseID}/heartbeat`, {
+                headers,
+                body: { idleTimeoutSeconds },
+              }),
+            );
+            acknowledged = response.status === 200;
+          } else {
+            await fleet.webSocketMessage(
+              socket as unknown as WebSocket,
+              JSON.stringify({
+                type: "heartbeat",
+                leaseID,
+                idleTimeoutSeconds,
+              }),
+            );
+            acknowledged = (socket.sentJSON().at(-1) as { ok?: boolean }).ok === true;
+          }
+          expect(acknowledged).toBe(true);
+          expect.soft(storage.listOptions).toEqual([]);
+          expect.soft(get.mock.calls.length).toBeLessThanOrEqual(3);
+          expect(put).toHaveBeenCalledTimes(1);
+          expect.soft(getAlarm).toHaveBeenCalledTimes(1);
+          expect(setAlarm.mock.calls.length).toBeLessThanOrEqual(1);
+        }
+        await heartbeat();
+        expect(storage.alarm()).toBe(
+          Date.parse(storage.value<LeaseRecord>(`lease:${leaseID}`)!.expiresAt),
+        );
+        expect(storage.alarm()! - Date.now()).toBe(1800_000);
+        const earlier = Date.now() + 10_000;
+        await storage.setAlarm(earlier);
+        await heartbeat();
+        expect.soft(storage.alarm()).toBe(earlier);
+        expect.soft(setAlarm).not.toHaveBeenCalled();
+        await storage.setAlarm(Date.now() + 1800_000);
+        await heartbeat(60);
+        expect(storage.alarm()).toBe(Date.now() + 60_000);
+        expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.idleTimeoutSeconds).toBe(60);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([
+    ["http heartbeat", 0],
+    ["http heartbeat", 1000],
+    ["control heartbeat", 0],
+    ["control heartbeat", 1000],
+    ["release", 0],
+    ["release", 1000],
+  ] as const)(
+    "rearms %s with a consumed alarm job and a timestamp overdue by %sms after reconstruction",
+    async (action, overdueMS) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        const storage = new RetainedAlarmStorage();
+        const lease = seedLease(storage);
+        const deleted: string[] = [];
+        const provider = fakeProvider(undefined, {}, async (id) => {
+          deleted.push(id);
+        });
+        let fleet = testFleet(storage, { hetzner: provider });
+        async function acknowledge(): Promise<void> {
+          storage.resetListOptions();
+          let acknowledged: boolean;
+          if (action === "control heartbeat") {
+            const socket = addSocket(fleet, "synthetic-retained-alarm");
+            await fleet.webSocketMessage(
+              socket as unknown as WebSocket,
+              JSON.stringify({ type: "heartbeat", leaseID }),
+            );
+            acknowledged = (socket.sentJSON().at(-1) as { ok?: boolean }).ok === true;
+          } else {
+            const response = await fleet.fetch(
+              request(
+                "POST",
+                `/v1/leases/${leaseID}/${action === "release" ? "release" : "heartbeat"}`,
+                {
+                  headers,
+                  body: action === "release" ? { delete: true } : {},
+                },
+              ),
+            );
+            acknowledged = response.status === 200;
+          }
+          expect(acknowledged).toBe(true);
+          expect(storage.listOptions).toEqual([]);
+        }
+
+        const future = Date.now() + 10_000;
+        await storage.setAlarm(future);
+        await acknowledge();
+        const earlier = action === "release" ? Date.now() : future;
+        expect(storage.alarm()).toBe(earlier);
+        expect(storage.queuedAlarm).toBe(earlier);
+        // Constructor recovery may rearm the same wake; no acknowledgement may postpone it.
+        expect([...new Set(storage.alarmWrites)]).toEqual(
+          action === "release" ? [future, earlier] : [future],
+        );
+        expect(deleted).toEqual([]);
+
+        vi.setSystemTime(earlier + overdueMS);
+        const list = storage.list.bind(storage);
+        const failure = vi.spyOn(storage, "list").mockImplementation(async (options = {}) => {
+          if (options.prefix === "workspace:")
+            throw new Error("synthetic maintenance failure before alarm reconciliation");
+          return list(options);
+        });
+        await storage.deliverAlarm(fleet);
+        expect(failure).toHaveBeenCalledWith(expect.objectContaining({ prefix: "workspace:" }));
+        failure.mockRestore();
+        const retryAt = Date.now() + 15_000;
+        expect(storage.alarm()).toBe(retryAt);
+        expect(storage.queuedAlarm).toBe(retryAt);
+        expect(deleted).toEqual([]);
+
+        // Simulate restart after consuming the retry job, before its handler can run.
+        vi.setSystemTime(retryAt + overdueMS);
+        storage.queuedAlarm = undefined;
+        fleet = testFleet(storage, { hetzner: provider });
+        const writesBefore = storage.alarmWrites.length;
+        await acknowledge();
+        expect(storage.alarmWrites.slice(writesBefore)).toContain(retryAt);
+        expect(storage.queuedAlarm).toBe(retryAt);
+        expect(storage.alarm()).toBe(retryAt);
+        expect(deleted).toEqual([]);
+        expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.releaseDeletesServer).toBe(
+          action === "release" ? true : undefined,
+        );
+        await storage.deliverAlarm(testFleet(storage, { hetzner: provider }));
+        expect(deleted).toEqual(action === "release" ? [lease.cloudID] : []);
+        expect(
+          storage.value<LeaseRecord>(`lease:${leaseID}`)?.releaseDeletesServer,
+        ).toBeUndefined();
+        expect(storage.queuedAlarm).toBe(
+          action === "release"
+            ? undefined
+            : Date.parse(storage.value<LeaseRecord>(`lease:${leaseID}`)!.expiresAt),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([true, false])(
+    "accepts release delete=%s with bounded storage work and an immediate wakeup",
+    async (deleteServer) => {
+      const storage = new RetainedAlarmStorage();
+      seedLease(storage);
+      const fleet = testFleet(storage);
+      await storage.setAlarm(Date.now() + 1800_000);
+      const get = vi.spyOn(storage, "get");
+      const put = vi.spyOn(storage, "put");
+      const before = Date.now();
+      const release = await fleet.fetch(
+        request("POST", `/v1/leases/${leaseID}/release`, {
+          headers,
+          body: { delete: deleteServer },
+        }),
+      );
+      expect(release.status).toBe(200);
+      expect.soft(storage.listOptions).toEqual([]);
+      expect.soft(get.mock.calls.length).toBeLessThanOrEqual(6);
+      expect(put).toHaveBeenCalledTimes(1);
+      expect.soft(storage.alarm()).toBeGreaterThanOrEqual(before);
+      expect.soft(storage.alarm()).toBeLessThanOrEqual(Date.now() + 1);
+      const earlier = before - 1;
+      await new CloudflareCoordinatorRuntime({
+        storage,
+      } as unknown as DurableObjectState).scheduleAlarm(earlier);
+      storage.resetListOptions();
+      const writesBefore = storage.alarmWrites.length;
+      const replay = await fleet.fetch(
+        request("POST", `/v1/leases/${leaseID}/release`, {
+          headers,
+          body: { delete: deleteServer },
+        }),
+      );
+      expect(replay.status).toBe(200);
+      expect.soft(storage.listOptions).toEqual([]);
+      expect.soft(storage.alarm()).toBe(earlier);
+      expect(storage.alarmWrites.slice(writesBefore)).toContain(earlier);
+    },
+  );
+
+  it.each([false, true])(
+    "recovers queued cleanup after reconstruction (alarm write failure=%s)",
+    async (failAlarmWrite) => {
+      const storage = new ObservedMemoryStorage();
+      seedLease(storage);
+      const deleted: string[] = [];
+      let failProvider = true;
+      const provider = fakeProvider(undefined, {}, async (id) => {
+        if (failProvider) throw new Error("synthetic provider deletion failure");
+        deleted.push(id);
+      });
+      const fleet = testFleet(storage, { hetzner: provider });
+      if (failAlarmWrite)
+        storage.beforeSetAlarm = async () => {
+          storage.beforeSetAlarm = undefined;
+          throw new Error("synthetic alarm storage failure");
+        };
+      const release = await fleet.fetch(
+        request("POST", `/v1/leases/${leaseID}/release`, { headers, body: { delete: true } }),
+      );
+      expect(release.status).toBe(failAlarmWrite ? 500 : 200);
+      const pending = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+      expect(pending.state).toBe("released");
+      expect(pending.releaseDeletesServer).toBe(true);
+      expect(pending.cleanupClaimExpiresAt).toBe(pending.cleanupStartedAt);
+      expect(deleted).toEqual([]);
+      expect(storage.alarm() === undefined).toBe(failAlarmWrite);
+      storage.resetListOptions();
+      const retry = await testFleet(storage, { hetzner: provider }).fetch(
+        request("POST", `/v1/leases/${leaseID}/release`, { headers, body: { delete: true } }),
+      );
+      expect(retry.status).toBe(200);
+      expect.soft(storage.listOptions).toEqual([]);
+      expect(storage.alarm()).toBeLessThanOrEqual(Date.now() + 1);
+      await storage.deleteAlarm(); // A delivered DO alarm is consumed before its handler runs.
+      await testFleet(storage, { hetzner: provider }).alarm();
+      const failed = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+      expect(failed.releaseDeletesServer).toBe(true);
+      expect(failed.cleanupError).toContain("synthetic provider deletion failure");
+      expect(storage.alarm()).toBe(Date.parse(failed.cleanupRetryAt!));
+      failProvider = false;
+      storage.seed(`lease:${leaseID}`, {
+        ...failed,
+        cleanupRetryAt: new Date(Date.now() - 1).toISOString(),
+      });
+      await storage.deleteAlarm();
+      await testFleet(storage, { hetzner: provider }).alarm();
+      expect(deleted).toEqual([pending.cloudID]);
+      expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.releaseDeletesServer).toBeUndefined();
+      expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.cleanupError).toBeUndefined();
+    },
+  );
+
+  it.each(["workspace:", "lease:"])(
+    "keeps run and release progress during repeated heartbeats with slow unrelated %s pages",
+    async (prefix) => {
+      const storage = new ObservedMemoryStorage();
+      seedLease(storage);
+      seedLease(storage, releaseID);
+      const unrelated = { ...seedLease(storage, "cbx_aacc00000010"), owner: "bob@example.com" };
+      storage.seed(`lease:${unrelated.id}`, unrelated);
+      storage.seed(workspaceFixtureKey("synthetic-unrelated", unrelated.owner), {
+        id: "synthetic-unrelated",
+        leaseID: unrelated.id,
+        owner: unrelated.owner,
+        org: unrelated.org,
+        createdAt: unrelated.createdAt,
+        updatedAt: unrelated.updatedAt,
+      });
+      const fleet = testFleet(storage);
+      const run = await createRun(fleet);
+      const log = "synthetic progress\n";
+      const body = {
+        exitCode: 0,
+        syncMs: 0,
+        commandMs: 1,
+        log,
+        receipt: await testTerminalReceipt({ run, exitCode: 0, syncMs: 0, commandMs: 1, log }),
+      };
+      const entered = deferred<void>();
+      const resume = deferred<void>();
+      const list = storage.list.bind(storage);
+      const hook = vi.spyOn(storage, "list").mockImplementation(async (options = {}) => {
+        if (options.prefix === prefix) {
+          entered.resolve();
+          await resume.promise;
+        }
+        return list(options);
+      });
+      const pending: Promise<unknown>[] = [];
+      const completed: string[] = [];
+      const track = (name: string, operation: Promise<Response>) => {
+        const result = operation.then((response) => {
+          completed.push(name);
+          return response;
+        });
+        pending.push(result);
+        return result;
+      };
+      try {
+        const heartbeat = track(
+          "heartbeat",
+          fleet.fetch(request("POST", `/v1/leases/${leaseID}/heartbeat`, { headers })),
+        );
+        const first = await Promise.race([
+          heartbeat.then(() => "acknowledged"),
+          entered.promise.then(() => "scan blocked"),
+        ]);
+        const event = track(
+          "event",
+          fleet.fetch(
+            request("POST", `/v1/runs/${run.id}/events`, {
+              headers,
+              body: { type: "stdout", data: "synthetic" },
+            }),
+          ),
+        );
+        const finish = track(
+          "finish",
+          fleet.fetch(request("POST", `/v1/runs/${run.id}/finish`, { headers, body })),
+        );
+        const receipt = track(
+          "receipt",
+          fleet.fetch(request("GET", `/v1/runs/${run.id}/receipt`, { headers })),
+        );
+        const release = track(
+          "release",
+          fleet.fetch(
+            request("POST", `/v1/leases/${releaseID}/release`, { headers, body: { delete: true } }),
+          ),
+        );
+        expect(first).toBe("acknowledged");
+        for (let iteration = 0; iteration < 3; iteration++) {
+          const repeated = track(
+            "repeated heartbeat",
+            fleet.fetch(request("POST", `/v1/leases/${leaseID}/heartbeat`, { headers })),
+          );
+          // oxlint-disable-next-line eslint/no-await-in-loop -- exercise successive heartbeats and fail before draining a newly blocked scan.
+          const response = await Promise.race([repeated, entered.promise.then(() => undefined)]);
+          expect(response?.status).toBe(200);
+        }
+        const progress = await Promise.race([
+          Promise.all(pending).then(() => "acknowledged"),
+          entered.promise.then(() => "scan blocked"),
+        ]);
+        expect(progress).toBe("acknowledged");
+        expect(completed).toEqual(
+          expect.arrayContaining(["heartbeat", "event", "finish", "receipt", "release"]),
+        );
+        expect((await event).status).toBe(201);
+        expect((await finish).status).toBe(200);
+        // The bodyless read can enter the queue before the buffered finish request.
+        expect([200, 404]).toContain((await receipt).status);
+        const recovered = await fleet.fetch(
+          request("GET", `/v1/runs/${run.id}/receipt`, { headers }),
+        );
+        expect(recovered.status).toBe(200);
+        expect(await recovered.json()).toEqual({ receipt: body.receipt });
+        expect((await release).status).toBe(200);
+        expect(
+          hook.mock.calls.filter(([options]) =>
+            ["workspace:", "lease:"].includes(options?.prefix ?? ""),
+          ),
+        ).toEqual([]);
+      } finally {
+        resume.resolve();
+        await Promise.allSettled(pending);
+        hook.mockRestore();
+      }
+    },
+  );
+
+  it.each(["heartbeat", "release"])(
+    "serializes %s arming behind an in-flight full reconciliation",
+    async (action) => {
+      const storage = new MemoryStorage();
+      const originalExpiresAt = seedLease(storage).expiresAt;
+      const fleet = testFleet(storage);
+      const scanned = deferred<void>();
+      const resume = deferred<void>();
+      const list = storage.list.bind(storage);
+      const hook = vi.spyOn(storage, "list").mockImplementation(async (options = {}) => {
+        const result = await list(options);
+        if (options.prefix === "checkpoint-due:" && options.limit === 1) {
+          scanned.resolve();
+          await resume.promise;
+        }
+        return result;
+      });
+      const pending: Promise<unknown>[] = [];
+      try {
+        const maintenance = fleet.alarm();
+        pending.push(maintenance);
+        expect(
+          await Promise.race([
+            scanned.promise.then(() => "scanned"),
+            maintenance.then(() => "completed"),
+          ]),
+        ).toBe("scanned"); // The full scheduler already read the old lease deadline.
+        let acknowledged = false;
+        const mutation = fleet
+          .fetch(
+            request("POST", `/v1/leases/${leaseID}/${action}`, {
+              headers,
+              body: action === "heartbeat" ? { idleTimeoutSeconds: 60 } : { delete: true },
+            }),
+          )
+          .then((response) => {
+            acknowledged = true;
+            return response;
+          });
+        pending.push(mutation);
+        for (let checkpoint = 0; checkpoint < 50; checkpoint++) {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- let queued requests reach the held mutex without a wall-clock sleep.
+          await Promise.resolve();
+        }
+        expect(acknowledged).toBe(false);
+        expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.expiresAt).toBe(originalExpiresAt);
+        resume.resolve();
+        await maintenance;
+        expect((await mutation).status).toBe(200);
+        const current = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+        expect(storage.alarm()).toBeLessThanOrEqual(
+          action === "heartbeat" ? Date.parse(current.expiresAt) : Date.now(),
+        );
+        expect(current.releaseDeletesServer).toBe(action === "release" ? true : undefined);
+      } finally {
+        resume.resolve();
+        await Promise.allSettled(pending);
+        hook.mockRestore();
+      }
+    },
+  );
+
+  it("keeps a queued deletion wakeup across heartbeat and full reconciliation", async () => {
+    const storage = new ObservedMemoryStorage();
+    seedLease(storage);
+    seedLease(storage, releaseID);
+    const fleet = testFleet(storage);
+    const release = await fleet.fetch(
+      request("POST", `/v1/leases/${releaseID}/release`, {
+        headers,
+        body: { delete: true },
+      }),
+    );
+    expect(release.status).toBe(200);
+    const immediate = storage.alarm();
+    const heartbeat = await fleet.fetch(
+      request("POST", `/v1/leases/${leaseID}/heartbeat`, { headers }),
+    );
+    expect(heartbeat.status).toBe(200);
+    expect(storage.alarm()).toBe(immediate);
+    // Registration invokes full reconciliation without performing cleanup.
+    const registration = await fleet.fetch(
+      request("PUT", "/v1/leases/cbx_aacc00000003/registration", {
+        headers,
+        body: { provider: "external", target: "linux", host: "192.0.2.30", ttlSeconds: 3600 },
+      }),
+    );
+    expect(registration.status).toBe(201);
+    expect(storage.listOptions.some((options) => options.prefix === "workspace:")).toBe(true);
+    const debt = storage.value<LeaseRecord>(`lease:${releaseID}`)!;
+    expect(debt.releaseDeletesServer).toBe(true);
+    expect(storage.alarm()).toBe(Date.parse(debt.cleanupClaimExpiresAt!));
+  });
+
+  it("reconstructs queued AWS deletion and ingress reconciliation from durable intent", async () => {
+    const storage = new ObservedMemoryStorage();
+    const lease = {
+      ...seedLease(storage),
+      provider: "aws",
+      cloudID: "i-synthetic-ack",
+      region: "eu-west-1",
+    } as LeaseRecord;
+    storage.seed(`lease:${leaseID}`, lease);
+    const deleted: string[] = [];
+    const reconciled: string[] = [];
+    const provider = fakeProvider(
+      undefined,
+      {
+        provider: "aws",
+        onReconcileLeaseAccess(anchor) {
+          reconciled.push(anchor.id);
+        },
+      },
+      async (id) => {
+        deleted.push(id);
+      },
+    );
+    const fleet = testFleet(storage, { aws: provider });
+    const response = await fleet.fetch(
+      request("POST", `/v1/leases/${leaseID}/release`, { headers, body: { delete: true } }),
+    );
+    expect(response.status).toBe(200);
+    expect(storage.listOptions).toEqual([]);
+    expect(storage.value("aws-ingress-reconcile:pending")).toBeDefined();
+    expect(storage.alarm()).toBeLessThanOrEqual(Date.now());
+    expect(deleted).toEqual([]);
+    expect(reconciled).toEqual([]);
+    await storage.deleteAlarm();
+    await testFleet(storage, { aws: provider }).alarm();
+    expect(deleted).toEqual([lease.cloudID]);
+    expect(reconciled).toEqual([leaseID]);
+    expect(storage.value("aws-ingress-reconcile:pending")).toBeUndefined();
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.releaseDeletesServer).toBeUndefined();
+  });
+});
+
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((next) => {
@@ -39345,7 +40231,7 @@ function testCoordinator(
     ).attachStorage?.(storage);
   }
   return new FleetCoordinator(
-    new CloudflareCoordinatorRuntime({ storage } as unknown as DurableObjectState),
+    new FakeCoordinatorRuntime(storage),
     { CRABBOX_DEFAULT_ORG: "default-org", ...env } as Env,
     providers,
     {},

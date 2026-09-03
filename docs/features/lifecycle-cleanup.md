@@ -1,5 +1,62 @@
 # Lifecycle and Cleanup
 
+## Durable provisioning ownership
+
+Eligible new Azure Windows creates can be admitted by the versioned durable
+controller described in [Coordinator](coordinator.md#durable-azure-provisioning).
+Their private operation owns all candidate resource identities until terminal
+publication or verified cleanup. Legacy interrupted-create recovery, expiry,
+deferred cleanup and orphan mutation must respect this ownership. Transactional
+legacy mutation fences prevent a new admission from overtaking cleanup that
+has already claimed its provider work. An unsuccessful legacy mutation retains
+its fence and existing cleanup evidence; a new job is never proof that old
+cleanup debt disappeared.
+
+Cancellation, including ordinary token cancellation with `keep=true`, stops
+forward provisioning and fallback. Already dispatched work must settle before
+the controller deletes verified resources. The journal retains immutable VM,
+NIC, public-IP and disk identities while deletion progress shrinks separately.
+An unexplained missing resource, identity replacement or unresolved dispatch
+remains cleanup debt. In particular, a network PUT with a lost acknowledgement
+followed by 404 is not permission to repeat allocation or move to another
+candidate. Completed machines retain their observed identity for the existing
+owned-deletion path.
+
+Explicit release with `{ "delete": false }` retains a provisioning resource and
+its private identity records. It stops forward provisioning and active
+publication, observes any dispatched work to settlement, and then removes the
+operation from the runnable queue. A later explicit release with `delete: true`
+resumes exact owned cleanup without decrypting the retired VM password/bootstrap.
+Ordinary token cancellation still requires cleanup,
+including when the original request used `keep=true`. A retention request cannot
+undo a deletion request that already owns cleanup.
+
+Healthy queued cleanup reports `cleanupStatus: pending` through release and GET.
+Verified final cleanup clears its transient metadata and reports `complete`;
+identity conflicts, missing successful-deletion proof and observed errors report
+`failed`. Retention reports `retained`. These states preserve the existing client
+rule to keep local credentials until cleanup is verified complete.
+
+Durable Azure cleanup uses the same owned-delete claims, immutable identity and
+attachment validation as ordinary release. Each bounded tick removes at most one
+resource or polls one acknowledged deletion operation. Intent alone, a lost
+DELETE response, or a failed successful-progress write never authorizes removal
+of the remaining members. An accepted asynchronous DELETE is recorded separately
+from successful progress; the operation must report success before that progress
+can be persisted. Retryable in-use errors trigger fresh ownership checks on the
+next tick. Completed deletion claims remain as exact completion evidence so a
+lost provisioning-result commit cannot erase cleanup proof.
+
+Nonsecret plans, attempt histories and completed deletion claims currently have
+the same manual retention lifecycle as lease history; there is no automatic
+history-pruning job. Understood operations retire sealed replay material in the
+same transaction that durably disables forward work through cancellation,
+retention or expiry, even when settlement or cleanup remains unresolved. Pending
+forward operations still require valid bound material; unsupported/quarantined
+records are not blindly purged. Successful publication also purges material.
+A future history pruner must preserve unresolved ownership and consume
+completed claims together with their operation history, never as orphan cleanup.
+
 Read this when:
 
 - changing how leases are released or expired;

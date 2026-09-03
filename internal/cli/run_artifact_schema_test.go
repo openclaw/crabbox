@@ -1091,12 +1091,14 @@ func TestValidateJSONAgainstDraft7AdditionalItemsReportsAbsoluteIndex(t *testing
 
 func TestParseRequireArtifactSchemaSpec(t *testing.T) {
 	t.Run("valid spec", func(t *testing.T) {
-		remote, schema, err := parseRequireArtifactSchemaSpec("reports/out.json=schema.json")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if remote != "reports/out.json" || schema != "schema.json" {
-			t.Fatalf("parsed spec wrong: remote=%q schema=%q", remote, schema)
+		for _, path := range []string{"reports/out.json", "reports/result..json"} {
+			remote, schema, err := parseRequireArtifactSchemaSpec(path + "=schema.json")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if remote != path || schema != "schema.json" {
+				t.Fatalf("parsed spec wrong: remote=%q schema=%q", remote, schema)
+			}
 		}
 	})
 

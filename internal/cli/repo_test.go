@@ -1751,24 +1751,29 @@ func TestSyncGitCoherencePlanRanksContainingOriginBranches(t *testing.T) {
 	runGit(t, f.source, "update-ref", "refs/remotes/origin/old", f.a)
 	tree := gitOutput(f.source, "rev-parse", f.b+"^{tree}")
 	for _, tc := range []struct {
-		name, baseRef, originHead, want string
+		name, configuredBase, baseRef, originHead, want string
 	}{
-		{"configured ancestor", "main", "trunk", "main"},
-		{"origin-prefixed ancestor", "origin/main", "trunk", "main"},
-		{"remote-ref ancestor", "refs/remotes/origin/main", "trunk", "main"},
-		{"heads-ref ancestor", "refs/heads/main", "trunk", "main"},
-		{"configured before default", "release", "trunk", "release"},
-		{"absent base", "", "trunk", "trunk"},
-		{"missing base", "missing", "trunk", "trunk"},
-		{"base lacks target", "old", "trunk", "trunk"},
-		{"invalid base", "main~1", "trunk", "trunk"},
-		{"default lacks target", "old", "old", "alpha"},
-		{"missing default", "missing", "missing", "alpha"},
+		{"repository ancestor", "", "main", "trunk", "main"},
+		{"origin-prefixed ancestor", "", "origin/main", "trunk", "main"},
+		{"remote-ref ancestor", "", "refs/remotes/origin/main", "trunk", "main"},
+		{"heads-ref ancestor", "", "refs/heads/main", "trunk", "main"},
+		{"repository base before default", "", "release", "trunk", "release"},
+		{"configured before inferred and default", "release", "main", "main", "release"},
+		{"absent base", "", "", "trunk", "trunk"},
+		{"missing base", "", "missing", "trunk", "trunk"},
+		{"base lacks target", "", "old", "trunk", "trunk"},
+		{"missing configured base", "missing", "main", "trunk", "trunk"},
+		{"configured base lacks target", "old", "main", "trunk", "trunk"},
+		{"invalid base", "", "main~1", "trunk", "trunk"},
+		{"default lacks target", "", "old", "old", "alpha"},
+		{"missing default", "", "missing", "missing", "alpha"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			runGit(t, f.source, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/"+tc.originHead)
 			refs := gitOutput(f.source, "for-each-ref", "--format=%(refname) %(objectname) %(symref)", "refs/remotes/origin")
-			plan, blocked := syncGitCoherencePlan(baseConfig(), Repo{
+			cfg := baseConfig()
+			cfg.Sync.BaseRef = tc.configuredBase
+			plan, blocked := syncGitCoherencePlan(cfg, Repo{
 				Root: f.source, RemoteURL: f.origin, Head: f.b, BaseRef: tc.baseRef,
 			})
 			if blocked || !plan.enabled() || plan.Branch != tc.want {

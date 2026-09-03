@@ -502,14 +502,15 @@ describe("coordinator-managed checkpoints", () => {
       expect(response.status).toBe(201);
       return ((await response.json()) as { claim: string }).claim;
     };
-    const fork = (claim: string, changes: Record<string, unknown> = {}) =>
-      coordinator.fetch(
-        checkpointRequest("PUT", `/v1/leases/${body.leaseID}/from-checkpoint`, {
-          ...body,
-          checkpointUseClaim: claim,
-          ...changes,
-        }),
-      );
+    const fork = (claim: string, changes: Record<string, unknown> = {}) => {
+      const request = checkpointRequest("PUT", `/v1/leases/${body.leaseID}/from-checkpoint`, {
+        ...body,
+        checkpointUseClaim: claim,
+        ...changes,
+      });
+      request.headers.set("prefer", "respond-async");
+      return coordinator.fetch(request);
+    };
     return { ...fixture, checkpointID, body, begin, fork, create };
   }
 

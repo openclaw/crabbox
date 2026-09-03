@@ -3701,6 +3701,7 @@ func newGitCoherenceFixtureWithDeletedTopic(t *testing.T) gitCoherenceFixture {
 	t.Helper()
 	f := newGitCoherenceFixture(t)
 	runGit(t, f.origin, "update-ref", "refs/heads/alpha-deleted", f.b)
+	runGit(t, f.origin, "update-ref", "refs/heads/release", f.c)
 	runGit(t, f.source, "fetch", "--no-prune", "origin", "+refs/heads/*:refs/remotes/origin/*")
 	runGit(t, f.origin, "update-ref", "-d", "refs/heads/alpha-deleted")
 	runGit(t, f.source, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
@@ -3721,10 +3722,23 @@ func TestRemoteGitSeedAndCoherencePreferContainingBranchOverDeletedTopic(t *test
 	}
 	t.Parallel()
 	f := newGitCoherenceFixtureWithDeletedTopic(t)
-	for _, baseRef := range []string{"main", "missing"} {
-		t.Run(baseRef, func(t *testing.T) {
-			plan, blocked := syncGitCoherencePlan(baseConfig(), Repo{
-				Root: f.source, RemoteURL: f.origin, Head: f.b, BaseRef: baseRef,
+	for _, tc := range []struct {
+		name, configuredBase, baseRef, want string
+	}{
+		{"repository base", "", "main", "main"},
+		{"origin default", "", "missing", "main"},
+		{"configured base after default deletion", "release", "main", "release"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reusedWorkdir := f.workspace(t, f.c, true)
+			if tc.configuredBase != "" {
+				runGit(t, f.origin, "update-ref", "-d", "refs/heads/main")
+				requireGitOutput(t, f.source, f.c, "rev-parse", "refs/remotes/origin/main")
+			}
+			cfg := baseConfig()
+			cfg.Sync.BaseRef = tc.configuredBase
+			plan, blocked := syncGitCoherencePlan(cfg, Repo{
+				Root: f.source, RemoteURL: f.origin, Head: f.b, BaseRef: tc.baseRef,
 			})
 			if blocked || !plan.enabled() {
 				t.Fatalf("coherence plan unavailable: blocked=%v plan=%#v", blocked, plan)
@@ -3738,7 +3752,7 @@ func TestRemoteGitSeedAndCoherencePreferContainingBranchOverDeletedTopic(t *test
 							t.Fatalf("seed via %q: %v\n%s", plan.Branch, err, out)
 						}
 					} else {
-						workdir = f.workspace(t, f.c, true)
+						workdir = reusedWorkdir
 						mustWriteTestFile(t, filepath.Join(workdir, "tracked.txt"), "B\n")
 						const token = "abababababababababababababababab"
 						stageCoherenceFinalize(t, workdir, token)
@@ -3749,12 +3763,12 @@ func TestRemoteGitSeedAndCoherencePreferContainingBranchOverDeletedTopic(t *test
 							t.Fatalf("coherent fingerprint=%q", got)
 						}
 					}
-					if plan.Branch != "main" {
-						t.Fatalf("branch=%q, want main", plan.Branch)
+					if plan.Branch != tc.want {
+						t.Fatalf("branch=%q, want %q", plan.Branch, tc.want)
 					}
 					requireGitOutput(t, workdir, f.b, "rev-parse", "HEAD")
 					requireGitOutput(t, workdir, gitOutput(f.source, "rev-parse", f.b+"^{tree}"), "write-tree")
-					requireGitOutput(t, workdir, f.c, "rev-parse", "refs/remotes/origin/main")
+					requireGitOutput(t, workdir, f.c, "rev-parse", "refs/remotes/origin/"+tc.want)
 					requireGitOutput(t, workdir, "", "status", "--porcelain")
 				})
 			}

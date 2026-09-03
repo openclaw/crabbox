@@ -388,6 +388,31 @@ the shutdown timeout.
 PostgreSQL state and pg-boss jobs are durable, but lifecycle serialization and
 live bridge ownership remain process-local. Do not horizontally scale yet.
 
+Durable provisioning uses the existing KV table for its private sorted due
+index and transactional wake outbox. pg-boss is a notification hint for this
+work: immediate startup reconciliation and a one-second scanner inspect the
+committed due index independently of the legacy alarm queue. Queue deletion,
+enqueue failure, or a missing queued job must not strand an admitted operation.
+Cloudflare commits due changes and native alarms in the same Durable Object
+transaction; legacy reschedule/clear operations preserve the earliest durable
+due time. Constructor repair performs bounded storage work only.
+
+Alarms await the bounded provisioning tick and wake commit. Slow legacy
+maintenance is a runtime-owned single-flight task, with sanitized failures and
+retry scheduling. Node tracks and drains that task during shutdown. Manual
+admin sweep endpoints still await their actual operation. `waitUntil` and
+pg-boss do not replace the durable operation/claim records.
+
+Keep `CRABBOX_DURABLE_PROVISIONING_ADMISSION` unset or `false` until the
+journal-aware version and a stable existing `CRABBOX_SESSION_SECRET` are ready.
+Setting the gate to `false` stops new admissions but resumes existing journals.
+The session secret must be distinct from the shared token and at least 32
+characters; missing, changed or lost encryption material blocks affected
+forward replay without deleting cleanup evidence. Do not provision or rotate a
+secret as an implicit part of enabling this feature. Resolve existing shared
+infrastructure and cleanup debt before enabling new admissions; never erase
+old cleanup records based on the presence of a new operation.
+
 ### Dedicated AWS private-workspace service
 
 Use the checked-in ECS Fargate deployment when one Node/PostgreSQL coordinator
@@ -991,3 +1016,20 @@ update Homebrew while stopped. Explicit cancellation requires renewed direction
 authorizing the next mutation. For a failed gate or uncertain state, resolve the
 blocker and re-establish the exact frozen state and required proofs before
 continuing under the original release authorization.
+
+### Durable provisioning record diagnostics
+
+The private `provisioning-quarantine:` namespace records unsupported operation
+schemas or inconsistent attempt revisions. Their original operation, attempt and
+material records remain untouched, and continue to fence legacy cleanup. The
+controller removes their runnable due entry so unrelated jobs can progress.
+Inspect these records with the corresponding implementation version before any
+manual repair; deleting a marker or changing a schema number does not establish
+provider ownership or successful cleanup. Stale due entries without a matching
+live operation are removed transactionally during the bounded controller tick.
+
+Nonsecret plan/attempt histories and exact completed Azure deletion claims are
+retained alongside lease history without automatic pruning. Do not remove
+retained or unresolved histories to clear a cleanup incident. The shared Azure
+scope lock is released after settled terminal/retained completion; an unresolved
+shared-infrastructure write intentionally keeps its lock pending resolution.

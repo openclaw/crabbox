@@ -2064,8 +2064,9 @@ func TestCoordinatorProviderIdentityValidationCanonicalizesAliases(t *testing.T)
 	}
 }
 
-func TestCoordinatorCreateRecoveryCanonicalProviderMatching(t *testing.T) {
+func TestCoordinatorCreateCanonicalProviderMatching(t *testing.T) {
 	cfg := Config{Provider: "gcp", TargetOS: targetLinux}
+	backend := &coordinatorLeaseBackend{cfg: cfg}
 	base := CoordinatorLease{ID: "cbx_recovered", State: "active", Host: "203.0.113.10", TargetOS: targetLinux}
 	for _, test := range []struct {
 		name     string
@@ -2082,7 +2083,7 @@ func TestCoordinatorCreateRecoveryCanonicalProviderMatching(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			lease := base
 			lease.Provider = test.provider
-			if got := coordinatorLeaseRecoveredFromCreateError(cfg, lease); got != test.want {
+			if got := backend.validateCoordinatorLeaseCreateResult(cfg, lease, lease.ID, false) == nil; got != test.want {
 				t.Fatalf("recovered=%t want %t for provider=%q", got, test.want, test.provider)
 			}
 		})
