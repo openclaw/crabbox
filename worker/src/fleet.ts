@@ -1071,6 +1071,7 @@ export class FleetCoordinator {
   private readonly runtimeAdapterDeleteQueues = new Map<string, Promise<void>>();
   private readonly daytonaSnapshotBootstrapQueues = new Map<string, Promise<void>>();
   private readonly controlSockets = new Map<string, WebSocket>();
+  private readonly failedControlSockets = new WeakSet<WebSocket>();
   private readonly workspaceTerminals = new Map<string, Set<WebSocket>>();
   private readonly restoredBridgeSockets = new Set<WebSocket>();
   private readonly adminGrantValidationTimes = new WeakMap<WebSocket, number>();
@@ -1786,6 +1787,7 @@ export class FleetCoordinator {
   }
 
   async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    if (this.failedControlSockets.has(socket)) return;
     const attachment = this.bridgeAttachment(socket);
     if (!attachment) {
       this.rejectRestoredBridgeSocket(socket, undefined);
@@ -2328,7 +2330,8 @@ export class FleetCoordinator {
     });
   }
 
-  private bridgeAttachment(socket: WebSocket): BridgeAttachment | undefined {
+  protected bridgeAttachment(socket: WebSocket): BridgeAttachment | undefined {
+    if (this.failedControlSockets.has(socket)) return undefined;
     return bridgeAttachment(this.state.socketAttachment(socket));
   }
 
@@ -2694,6 +2697,7 @@ export class FleetCoordinator {
     attachment: BridgeAttachment,
     message: string | ArrayBuffer | Blob,
   ): Promise<void> {
+    if (this.failedControlSockets.has(socket)) return;
     if (attachment.kind === "egress-host" || attachment.kind === "egress-client") {
       await this.hydrateEgressSessionState(attachment.leaseID);
     }
@@ -7229,7 +7233,7 @@ export class FleetCoordinator {
     lease.expiresAt = recomputeLeaseExpiresAt(lease, now).toISOString();
     clearLeaseCleanupMetadata(lease);
     await this.putLease(lease);
-    await this.scheduleAlarm();
+    await this.armAlarmNoLaterThan(nextLeaseAlarmTime(lease, this.coordinatorGeneration));
     return lease;
   }
 
@@ -7461,7 +7465,7 @@ export class FleetCoordinator {
           { status: 409 },
         );
       }
-      await this.scheduleAlarm();
+      await this.state.runExclusive(() => this.armAlarmNoLaterThan(Date.now()));
       return json({ lease: this.leaseForRequest(lease, request, admin) });
     }
     let released: LeaseRecord;
@@ -15794,6 +15798,20 @@ export class FleetCoordinator {
     );
   }
 
+  // Callers hold the lifecycle mutex, shared with full alarm reconciliation.
+  private async armAlarmNoLaterThan(deadline: number | undefined): Promise<void> {
+    if (deadline === undefined || !Number.isFinite(deadline)) {
+      return;
+    }
+    const current = await this.state.getAlarm();
+    // A due timestamp can outlive its consumed runtime job, so re-arm without postponing it.
+    if (current === undefined || current <= Date.now() || deadline < current) {
+      await this.state.scheduleAlarm(
+        current === undefined ? deadline : Math.min(current, deadline),
+      );
+    }
+  }
+
   private async scheduleAlarm(): Promise<void> {
     const now = Date.now();
     let alarmTime: number | undefined;
@@ -17691,16 +17709,18 @@ export class FleetCoordinator {
   }
 
   private async broadcastRunEvent(run: RunRecord, event: RunEventRecord): Promise<void> {
-    for (const socket of this.controlSockets.values()) {
+    for (const [clientID, socket] of this.controlSockets) {
       if (socket.readyState !== WebSocket.OPEN) {
         continue;
       }
-      const attachment = this.bridgeAttachment(socket);
-      if (!attachment || attachment.kind !== "control") {
+      let attachment: BridgeAttachment | undefined;
+      try {
+        attachment = this.bridgeAttachment(socket);
+      } catch {
+        this.retireFailedControlSocket(clientID, socket);
         continue;
       }
-      // oxlint-disable-next-line eslint/no-await-in-loop -- validate each control before its event can be sent.
-      if (!(await this.activeBridgeGrantIsCurrent(socket, attachment))) {
+      if (!attachment || attachment.kind !== "control") {
         continue;
       }
       const after = attachment.subscriptions?.[run.id];
@@ -17711,8 +17731,17 @@ export class FleetCoordinator {
       ) {
         continue;
       }
-      attachment.subscriptions = { ...attachment.subscriptions, [run.id]: event.seq };
-      this.serializeBridgeAttachment(socket, attachment);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- validate each subscriber before its event can be sent.
+      if (!(await this.activeBridgeGrantIsCurrent(socket, attachment))) {
+        continue;
+      }
+      try {
+        attachment.subscriptions = { ...attachment.subscriptions, [run.id]: event.seq };
+        this.serializeBridgeAttachment(socket, attachment);
+      } catch {
+        this.retireFailedControlSocket(clientID, socket);
+        continue;
+      }
       sendControl(socket, {
         type: "run_events",
         runID: run.id,
@@ -17720,6 +17749,15 @@ export class FleetCoordinator {
         nextSeq: event.seq,
       });
     }
+  }
+
+  private retireFailedControlSocket(clientID: string, socket: WebSocket): void {
+    // Retire before closing: delayed callbacks must not read the failed attachment again.
+    this.failedControlSockets.add(socket);
+    if (this.controlSockets.get(clientID) === socket) this.controlSockets.delete(clientID);
+    this.restoredBridgeSockets.delete(socket);
+    this.adminGrantValidationTimes.delete(socket);
+    closeSocket(socket, 1011, "control notification failed");
   }
 
   private provider(provider: Provider, region?: string, project?: string): CloudProvider {
@@ -18052,6 +18090,7 @@ export class FleetCoordinator {
           if (options.awaitProviderCleanup) {
             throw new LeaseCleanupInProgressError();
           }
+          await this.armAlarmNoLaterThan(Date.now());
           return { cleanup: false as const, blocked: false as const, lease: current };
         }
       }
@@ -18069,7 +18108,7 @@ export class FleetCoordinator {
         await this.putLease(released);
         await this.clearWorkspaceReleaseError(released);
         await this.markAWSIngressReconcilePending(released);
-        await this.scheduleAlarm();
+        await this.armAlarmNoLaterThan(Date.now());
         return { cleanup: false as const, blocked: false as const, lease: released };
       }
       if (!options.awaitProviderCleanup) {
@@ -18082,7 +18121,7 @@ export class FleetCoordinator {
         pending.cleanupClaimExpiresAt = queuedAt;
         await this.putLease(pending);
         await this.markAWSIngressReconcilePending(pending);
-        await this.scheduleAlarm();
+        await this.armAlarmNoLaterThan(Date.now());
         return { cleanup: false as const, blocked: false as const, lease: pending };
       }
       const now = new Date();
@@ -18186,7 +18225,7 @@ export class FleetDurableObject extends FleetCoordinator implements DurableObjec
   }
 
   override webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
-    const attachment = this.runtime.socketAttachment<{ kind?: string }>(socket);
+    const attachment = this.bridgeAttachment(socket);
     if (attachment?.kind !== "control" || controlMessageOwnsTransaction(message)) {
       return super.webSocketMessage(socket, message);
     }
