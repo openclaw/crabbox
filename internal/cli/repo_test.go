@@ -1742,6 +1742,46 @@ func TestSyncGitCoherencePlanSelectsEligibleOriginBranch(t *testing.T) {
 	})
 }
 
+func TestSyncGitCoherencePlanRanksContainingOriginBranches(t *testing.T) {
+	f := newGitCoherenceFixture(t)
+	runGit(t, f.source, "update-ref", "refs/remotes/origin/alpha", f.b)
+	runGit(t, f.source, "update-ref", "refs/remotes/origin/release", f.c)
+	runGit(t, f.source, "update-ref", "refs/remotes/origin/trunk", f.c)
+	runGit(t, f.source, "update-ref", "refs/remotes/origin/old", f.a)
+	tree := gitOutput(f.source, "rev-parse", f.b+"^{tree}")
+	for _, tc := range []struct {
+		name, baseRef, originHead, want string
+	}{
+		{"configured ancestor", "main", "trunk", "main"},
+		{"origin-prefixed ancestor", "origin/main", "trunk", "main"},
+		{"remote-ref ancestor", "refs/remotes/origin/main", "trunk", "main"},
+		{"heads-ref ancestor", "refs/heads/main", "trunk", "main"},
+		{"configured before default", "release", "trunk", "release"},
+		{"absent base", "", "trunk", "trunk"},
+		{"missing base", "missing", "trunk", "trunk"},
+		{"base lacks target", "old", "trunk", "trunk"},
+		{"invalid base", "main~1", "trunk", "trunk"},
+		{"default lacks target", "old", "old", "alpha"},
+		{"missing default", "missing", "missing", "alpha"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runGit(t, f.source, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/"+tc.originHead)
+			refs := gitOutput(f.source, "for-each-ref", "--format=%(refname) %(objectname) %(symref)", "refs/remotes/origin")
+			plan, blocked := syncGitCoherencePlan(baseConfig(), Repo{
+				Root: f.source, RemoteURL: f.origin, Head: f.b, BaseRef: tc.baseRef,
+			})
+			if blocked || !plan.enabled() || plan.Branch != tc.want {
+				t.Errorf("plan=%#v blocked=%v; want branch %q", plan, blocked, tc.want)
+			}
+			if plan.Target != f.b || plan.Tree != tree {
+				t.Errorf("plan changed selected commit/tree: %#v; want target=%s tree=%s", plan, f.b, tree)
+			}
+			requireGitOutput(t, f.source, refs, "for-each-ref", "--format=%(refname) %(objectname) %(symref)", "refs/remotes/origin")
+			requireGitOutput(t, f.source, f.c, "rev-parse", "HEAD")
+		})
+	}
+}
+
 func TestCheckSyncPreflightFailsLargeCandidate(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Sync.FailFiles = 2

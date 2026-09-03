@@ -3697,6 +3697,109 @@ func requireGitOutput(t *testing.T, workdir, want string, args ...string) {
 	}
 }
 
+func newGitCoherenceFixtureWithDeletedTopic(t *testing.T) gitCoherenceFixture {
+	t.Helper()
+	f := newGitCoherenceFixture(t)
+	runGit(t, f.origin, "update-ref", "refs/heads/alpha-deleted", f.b)
+	runGit(t, f.source, "fetch", "--no-prune", "origin", "+refs/heads/*:refs/remotes/origin/*")
+	runGit(t, f.origin, "update-ref", "-d", "refs/heads/alpha-deleted")
+	runGit(t, f.source, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+	runGit(t, f.source, "checkout", "--quiet", "--detach", f.b)
+	requireGitOutput(t, f.origin, "", "for-each-ref", "refs/heads/alpha-deleted")
+	requireGitOutput(t, f.source, f.b, "rev-parse", "refs/remotes/origin/alpha-deleted")
+	refs := gitOutput(f.source, "for-each-ref", "--format=%(refname) %(objectname) %(symref)", "refs/remotes/origin")
+	t.Cleanup(func() {
+		requireGitOutput(t, f.source, refs, "for-each-ref", "--format=%(refname) %(objectname) %(symref)", "refs/remotes/origin")
+		requireGitOutput(t, f.source, f.b, "rev-parse", "HEAD")
+	})
+	return f
+}
+
+func TestRemoteGitSeedAndCoherencePreferContainingBranchOverDeletedTopic(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell Git seed/coherence fixture")
+	}
+	f := newGitCoherenceFixtureWithDeletedTopic(t)
+	for _, baseRef := range []string{"main", "missing"} {
+		t.Run(baseRef, func(t *testing.T) {
+			plan, blocked := syncGitCoherencePlan(baseConfig(), Repo{
+				Root: f.source, RemoteURL: f.origin, Head: f.b, BaseRef: baseRef,
+			})
+			if blocked || !plan.enabled() {
+				t.Fatalf("coherence plan unavailable: blocked=%v plan=%#v", blocked, plan)
+			}
+			for _, mode := range []string{"seed", "coherence"} {
+				t.Run(mode, func(t *testing.T) {
+					var workdir string
+					if mode == "seed" {
+						workdir = filepath.Join(t.TempDir(), "work")
+						if out, err := exec.Command("/bin/sh", "-c", remoteGitSeed(workdir, plan)).CombinedOutput(); err != nil {
+							t.Fatalf("seed via %q: %v\n%s", plan.Branch, err, out)
+						}
+					} else {
+						workdir = f.workspace(t, f.c, true)
+						mustWriteTestFile(t, filepath.Join(workdir, "tracked.txt"), "B\n")
+						const token = "abababababababababababababababab"
+						stageCoherenceFinalize(t, workdir, token)
+						if out, err := runCoherenceFinalize(workdir, plan, token, "fp-b"); err != nil {
+							t.Fatalf("coherence via %q: %v\n%s", plan.Branch, err, out)
+						}
+						if got := readCoherentFingerprint(t, workdir, plan); got != "fp-b" {
+							t.Fatalf("coherent fingerprint=%q", got)
+						}
+					}
+					if plan.Branch != "main" {
+						t.Fatalf("branch=%q, want main", plan.Branch)
+					}
+					requireGitOutput(t, workdir, f.b, "rev-parse", "HEAD")
+					requireGitOutput(t, workdir, gitOutput(f.source, "rev-parse", f.b+"^{tree}"), "write-tree")
+					requireGitOutput(t, workdir, f.c, "rev-parse", "refs/remotes/origin/main")
+					requireGitOutput(t, workdir, "", "status", "--porcelain")
+				})
+			}
+		})
+	}
+}
+
+func TestWindowsGitSeedAndCoherenceUseContainingBranch(t *testing.T) {
+	f := newGitCoherenceFixtureWithDeletedTopic(t)
+	plan, blocked := syncGitCoherencePlan(baseConfig(), Repo{
+		Root: f.source, RemoteURL: f.origin, Head: f.b, BaseRef: "origin/main",
+	})
+	if blocked || !plan.enabled() {
+		t.Fatalf("coherence plan unavailable: blocked=%v plan=%#v", blocked, plan)
+	}
+	tree := gitOutput(f.source, "rev-parse", f.b+"^{tree}")
+	for _, tc := range []struct {
+		name, command string
+		want          []string
+	}{
+		{"seed", windowsGitSeed(`C:\work\repo`, plan), []string{
+			"--single-branch --branch 'main' $expectedOrigin $tmp",
+			"checkout --quiet --detach '" + f.b + "'",
+			"$expectedTree = '" + tree + "'",
+		}},
+		{"coherence", windowsGitCoherence(`C:\work\repo`, plan), []string{
+			`("+refs/heads/" + 'main' + ":" + $tmpRef)`,
+			"$target = '" + f.b + "'; $tree = '" + tree + "'",
+			"git merge-base --is-ancestor $target $tmpRef",
+			"git update-ref --no-deref HEAD $target $oldHead",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			decoded := decodePowerShellCommand(t, tc.command)
+			for _, want := range tc.want {
+				if !strings.Contains(decoded, want) {
+					t.Errorf("Windows %s missing %q (plan branch=%q)", tc.name, want, plan.Branch)
+				}
+			}
+			if strings.Contains(decoded, "alpha-deleted") || strings.Contains(decoded, f.c) {
+				t.Error("Windows command selected deleted topic or newer branch tip")
+			}
+		})
+	}
+}
+
 func TestRemoteGitCoherenceExitTrapBehavior(t *testing.T) {
 	fixture := newGitCoherenceFixture(t)
 
