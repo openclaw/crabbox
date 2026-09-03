@@ -7,8 +7,46 @@ import {
   cloudInit,
   windowsBootstrapPowerShell,
 } from "../src/bootstrap";
+import { sharedWindowsRuntime, sharedWindowsCore } from "../src/bootstrap.generated";
 import type { LeaseConfig } from "../src/config";
 import { linuxMinimalReadinessBootstrap } from "../src/linux-readiness.generated";
+
+describe("native Windows runtime readiness", () => {
+  for (const architecture of ["amd64", "arm64"] as const) {
+    for (const desktop of [false, true]) {
+      it(`gates AWS shared core and Azure extension on ${architecture}, desktop=${desktop}`, () => {
+        const windows: LeaseConfig = {
+          ...config,
+          target: "windows",
+          windowsMode: "normal",
+          architecture,
+          desktop,
+        };
+        const scripts = [
+          windowsBootstrapPowerShell(windows),
+          azureWindowsBootstrapPowerShell({ ...windows, provider: "azure" }),
+        ];
+        for (const script of scripts) {
+          expect(script).toContain(sharedWindowsRuntime());
+          expect(script).toContain(sharedWindowsCore());
+          const call = script.indexOf("\nEnsure-CrabboxWindowsRuntime\n");
+          const clear = script.indexOf(
+            "Remove-Item -LiteralPath $setupCompletePath -Force -ErrorAction Stop",
+          );
+          expect(clear).toBeGreaterThan(0);
+          expect(call).toBeGreaterThan(clear);
+          expect(script.split("\nEnsure-CrabboxWindowsRuntime\n")).toHaveLength(2);
+          const ready = script.indexOf(
+            "Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath",
+          );
+          if (ready >= 0) expect(ready).toBeGreaterThan(call);
+          else expect(desktop && script === scripts[1]).toBe(true);
+          if (!desktop || script === scripts[1]) expect(script).not.toContain("Restart-Computer");
+        }
+      });
+    }
+  }
+});
 
 const config: LeaseConfig = {
   provider: "aws",

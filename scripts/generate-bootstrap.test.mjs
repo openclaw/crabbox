@@ -289,6 +289,7 @@ test("check detects missing and stale outputs without rewriting, and regeneratio
   await cp(resolve(repoRoot, "recipes"), join(directory, "recipes"), { recursive: true });
   await mkdir(join(directory, "internal/cli"), { recursive: true });
   await mkdir(join(directory, "worker/src"), { recursive: true });
+  await mkdir(join(directory, "scripts"), { recursive: true });
   await assert.rejects(main(["--check"], directory), /is stale/u);
   await main([], directory);
   await main(["--check"], directory);

@@ -1,4 +1,10 @@
 
+$crabboxSetupWasComplete = Test-Path -LiteralPath $setupCompletePath
+if ($crabboxSetupWasComplete) {
+  Remove-Item -LiteralPath $setupCompletePath -Force -ErrorAction Stop
+}
+Ensure-CrabboxWindowsRuntime
+
 if (-not (Test-Path -LiteralPath $passwordPath)) {
   New-CrabboxPassword | Set-Content -NoNewline -Encoding ASCII -Path $passwordPath
 }

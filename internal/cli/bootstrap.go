@@ -117,7 +117,7 @@ tasks:
 }
 
 func windowsBootstrapHeaderPowerShell(cfg Config, publicKey, workRoot string) string {
-	return sharedWindowsHeader(cfg.SSHUser, publicKey, workRoot, sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts))
+	return sharedWindowsHeader(cfg.SSHUser, publicKey, workRoot, sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts)) + sharedWindowsRuntime()
 }
 
 func windowsBootstrapPowerShell(cfg Config, publicKey string) string {

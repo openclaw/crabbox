@@ -50,6 +50,7 @@ func TestSharedBootstrapFixtures(t *testing.T) {
 			case targetWindows:
 				fragments["header"] = sharedWindowsHeader(cfg.SSHUser, fixture.PublicKey, windowsBootstrapWorkRoot(cfg), fixture.Ports)
 				fragments["core"] = sharedWindowsCore()
+				fragments["runtime"] = sharedWindowsRuntime()
 				if cfg.WindowsMode == windowsModeWSL2 {
 					fragments["prelude"] = sharedWindowsNativePrelude()
 					fragments["trufflehog"] = sharedWslTruffleHogInstall()

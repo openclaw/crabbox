@@ -13,6 +13,7 @@ import {
   sharedCodeServerInstall,
   sharedMacOS,
   sharedWindowsCore,
+  sharedWindowsRuntime,
   sharedWindowsDesktop,
   sharedWindowsDesktopPrelude,
   sharedWindowsFinalize,
@@ -77,6 +78,7 @@ describe("shared bootstrap composition fixtures", () => {
             fixture.ports,
           ),
           sharedWindowsCore(),
+          sharedWindowsRuntime(),
         );
         if (config.windowsMode === "wsl2") {
           fragments.push(sharedWindowsNativePrelude(), sharedWslTruffleHogInstall());

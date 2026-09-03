@@ -1,6 +1,7 @@
 import {
   sharedWslTruffleHogInstall,
   sharedWindowsHeader,
+  sharedWindowsRuntime,
   sharedWindowsCore,
   sharedWindowsDesktopPrelude,
   sharedWindowsNativePrelude,
@@ -214,11 +215,9 @@ tasks:
 }
 
 function windowsBootstrapHeaderPowerShell(config: LeaseConfig): string {
-  return sharedWindowsHeader(
-    config.sshUser,
-    config.sshPublicKey,
-    config.workRoot,
-    sshPorts(config),
+  return (
+    sharedWindowsHeader(config.sshUser, config.sshPublicKey, config.workRoot, sshPorts(config)) +
+    sharedWindowsRuntime()
   );
 }
 
