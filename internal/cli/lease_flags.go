@@ -156,7 +156,8 @@ func applyLeaseCreateFlagsForTarget(cfg *Config, fs *flag.FlagSet, values leaseC
 		}
 		MarkSSHPortExplicit(cfg)
 	}
-	if flagWasSet(fs, "class") {
+	cfg.classFlagExplicit = flagWasSet(fs, "class")
+	if cfg.classFlagExplicit {
 		MarkClassExplicit(cfg)
 	}
 	if flagWasSet(fs, "arch") {

@@ -50,7 +50,7 @@ func (Provider) ServerTypeForClass(class string) string {
 }
 
 func (p Provider) ServerTypeForConfig(cfg Config) string {
-	if !core.ClassWasExplicit(cfg) {
+	if core.ShouldUseCoordinator(cfg, p.Spec()) || !core.ClassWasExplicit(cfg) {
 		return "snapshot"
 	}
 	if snapshot := strings.TrimSpace(cfg.Daytona.Snapshot); snapshot != "" {
@@ -60,7 +60,7 @@ func (p Provider) ServerTypeForConfig(cfg Config) string {
 }
 
 func (b *daytonaLeaseBackend) ValidateCoordinatorAcquire() error {
-	if core.ClassWasExplicit(b.cfg) {
+	if core.ClassFlagWasExplicit(b.cfg) {
 		return exit(2, "provider=daytona class selection requires direct mode; the coordinator selects its configured snapshot")
 	}
 	return nil

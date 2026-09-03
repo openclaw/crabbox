@@ -43,6 +43,7 @@ type Config struct {
 	Code                          bool
 	Network                       NetworkMode
 	Class                         string
+	classFlagExplicit             bool
 	classExplicitOrder            uint64
 	explicitSelectionOrder        uint64
 	Pond                          string

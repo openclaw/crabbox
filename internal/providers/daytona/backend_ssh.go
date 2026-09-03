@@ -457,6 +457,7 @@ func daytonaSSHTargetFromAccess(cfg Config, access daytonaSSHAccess) (SSHTarget,
 	}, nil
 }
 
+// Any response field may contain a credential; diagnostics report reasons only.
 func parseDaytonaSSHCommand(command string) (string, string, string, error) {
 	fields := strings.Fields(command)
 	if len(fields) == 0 {
@@ -472,21 +473,21 @@ func parseDaytonaSSHCommand(command string) (string, string, string, error) {
 		switch {
 		case field == "-p":
 			if i+1 >= len(fields) || strings.TrimSpace(fields[i+1]) == "" {
-				return "", "", "", fmt.Errorf("daytona ssh command missing -p value: %q", command)
+				return "", "", "", fmt.Errorf("daytona ssh command missing -p value")
 			}
 			i++
 			port = fields[i]
 		case strings.HasPrefix(field, "-p") && len(field) > 2:
 			port = strings.TrimPrefix(field, "-p")
 		case strings.HasPrefix(field, "-"):
-			return "", "", "", fmt.Errorf("daytona ssh command has unsupported option %q", field)
+			return "", "", "", fmt.Errorf("daytona ssh command has unsupported option")
 		default:
 			destination = field
 		}
 	}
 	user, host, ok := strings.Cut(destination, "@")
 	if !ok || strings.TrimSpace(user) == "" || strings.TrimSpace(host) == "" {
-		return "", "", "", fmt.Errorf("daytona ssh command missing user@host destination: %q", command)
+		return "", "", "", fmt.Errorf("daytona ssh command missing user@host destination")
 	}
 	return user, host, port, nil
 }

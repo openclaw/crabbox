@@ -472,16 +472,23 @@ func TestDaytonaEnvAuthOverridesCLIConfig(t *testing.T) {
 }
 
 func TestApplyDaytonaProviderFlagsAcceptsClassAndRejectsType(t *testing.T) {
-	cfg := baseConfig()
-	cfg.Provider = daytonaProvider
 	for _, tc := range []struct {
-		name string
-		args []string
+		name        string
+		args        []string
+		coordinator string
+		mode        core.BrokerMode
+		wantError   bool
 	}{
-		{name: "class", args: []string{"--class", "standard"}},
-		{name: "type", args: []string{"--type", "large"}},
+		{name: "direct class", args: []string{"--class", "standard"}},
+		{name: "registered class", args: []string{"--class", "standard"}, coordinator: "https://coordinator.example", mode: core.BrokerModeRegistered},
+		{name: "broker class", args: []string{"--class", "standard"}, coordinator: "https://coordinator.example"},
+		{name: "type", args: []string{"--type", "large"}, wantError: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Provider, cfg.Coordinator, cfg.BrokerMode = daytonaProvider, tc.coordinator, tc.mode
+			cfg.Class = "standard"
+			core.MarkClassExplicit(&cfg)
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
 			fs.String("class", "", "")
 			fs.String("type", "", "")
@@ -490,8 +497,15 @@ func TestApplyDaytonaProviderFlagsAcceptsClassAndRejectsType(t *testing.T) {
 				t.Fatal(err)
 			}
 			err := ApplyDaytonaProviderFlags(&cfg, fs, values)
-			if (err != nil) != (tc.name == "type") || err != nil && !strings.Contains(err.Error(), "provider=daytona") {
+			if (err != nil) != tc.wantError || err != nil && !strings.Contains(err.Error(), "provider=daytona") {
 				t.Fatalf("flag=%s err=%v", tc.name, err)
+			}
+			wantType := "daytona-medium"
+			if tc.coordinator != "" && tc.mode != core.BrokerModeRegistered {
+				wantType = "snapshot"
+			}
+			if err == nil && (Provider{}).ServerTypeForConfig(cfg) != wantType {
+				t.Fatalf("server type=%q, want %q", (Provider{}).ServerTypeForConfig(cfg), wantType)
 			}
 		})
 	}
@@ -830,6 +844,27 @@ func TestDaytonaSSHTargetFallsBackWhenCommandMissing(t *testing.T) {
 	}
 	if target.User != "tok_live_secret" || target.Host != "fallback.example" || target.Port != "22" {
 		t.Fatalf("target=%#v", target)
+	}
+}
+
+func TestDaytonaSSHTargetErrorsDoNotExposeCommandCredentials(t *testing.T) {
+	const credential = "synthetic-ssh-credential"
+	for _, tc := range []struct {
+		name, command, reason string
+	}{
+		{"missing-port", "ssh " + credential + "@ssh.example.invalid -p", "missing -p value"},
+		{"missing-destination", "ssh " + credential + "@", "missing user@host destination"},
+		{"unsupported-option", "ssh -oProxyCommand=" + credential + " " + credential + "@ssh.example.invalid", "unsupported option"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := daytonaSSHTargetFromAccess(baseConfig(), daytonaSSHAccess{Token: "synthetic-access-token", Command: tc.command})
+			if err == nil || !strings.Contains(err.Error(), tc.reason) {
+				t.Fatalf("error=%v, want useful validation reason %q", err, tc.reason)
+			}
+			if strings.Contains(err.Error(), credential) || strings.Contains(err.Error(), tc.command) {
+				t.Fatalf("error exposes a credential-bearing response: %s", err)
+			}
+		})
 	}
 }
 

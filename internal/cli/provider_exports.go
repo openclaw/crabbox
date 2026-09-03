@@ -474,6 +474,12 @@ func ClassWasExplicit(cfg Config) bool {
 	return cfg.classExplicitOrder != 0
 }
 
+// ClassFlagWasExplicit preserves CLI intent until checkpoint routing is final.
+// Config-file and environment selections still use ClassWasExplicit.
+func ClassFlagWasExplicit(cfg Config) bool {
+	return cfg.classFlagExplicit
+}
+
 func MarkClassExplicit(cfg *Config) {
 	cfg.explicitSelectionOrder++
 	cfg.classExplicitOrder = cfg.explicitSelectionOrder

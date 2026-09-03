@@ -231,8 +231,8 @@ Droplet size.
 Daytona maps adjacent classes to its three native container snapshot tiers.
 With a custom or captured snapshot, explicit class validates the same resource
 shape and preserves the selected snapshot. It never sends resize overrides.
-Brokered Daytona rejects explicit class selection; the coordinator owns its
-shared snapshot. See [Daytona configuration](daytona.md#config).
+Brokered Daytona rejects `--class`; existing YAML/environment class values do
+not override the coordinator's shared snapshot. See [Daytona configuration](daytona.md#config).
 
 Linode maps every canonical class to the smallest Phase 1 default size `g6-standard-1`.
 Use `--type <linode-type-slug>` when you need a different exact instance type.

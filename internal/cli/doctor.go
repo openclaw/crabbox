@@ -321,7 +321,7 @@ All flags:
 	useCoordinator := false
 	useCoordinatorForDoctor := cfg.BrokerMode != BrokerModeRegistered && strings.TrimSpace(cfg.Coordinator) != ""
 	if providerSelected {
-		useCoordinatorForDoctor = shouldUseCoordinator(cfg, providerDef.Spec())
+		useCoordinatorForDoctor = ShouldUseCoordinator(cfg, providerDef.Spec())
 	}
 	if useCoordinatorForDoctor {
 		if coord, coordinatorConfigured, err := newTargetCoordinatorClient(cfg); err != nil {

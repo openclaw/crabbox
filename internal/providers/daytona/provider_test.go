@@ -1,6 +1,7 @@
 package daytona
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -38,12 +39,32 @@ func TestProviderSupportsCoordinator(t *testing.T) {
 	}
 }
 
-func TestDaytonaClassScopeUsesConfigProvenance(t *testing.T) {
-	for _, source := range []string{"inherited", "yaml", "environment"} {
+func TestDaytonaBrokerPreservesConfiguredClasses(t *testing.T) {
+	for _, source := range []string{"yaml", "environment", "flag"} {
 		t.Run(source, func(t *testing.T) {
 			testutil.IsolateUserDirs(t)
+			var creates atomic.Int32
+			broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != "POST" || r.URL.Path != "/v1/leases" {
+					t.Errorf("unexpected broker operation %s %s", r.Method, r.URL.Path)
+				}
+				creates.Add(1)
+				var request struct {
+					Class, ServerType string
+				}
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Error(err)
+				}
+				if request.Class != "standard" || request.ServerType != "snapshot" {
+					t.Errorf("broker sizing changed: class=%q serverType=%q", request.Class, request.ServerType)
+				}
+				// Stop at the real request boundary without creating a lease or SSH target.
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `{"error":"synthetic allocation boundary"}`)
+			}))
+			defer broker.Close()
 			configPath := filepath.Join(t.TempDir(), "config.yaml")
-			data := "provider: daytona\n"
+			data := fmt.Sprintf("provider: daytona\nnetwork: public\ncoordinator: %s\ncoordinatorToken: fixture-broker-token\n", broker.URL)
 			if source == "yaml" {
 				data += "class: standard\n"
 			}
@@ -55,16 +76,17 @@ func TestDaytonaClassScopeUsesConfigProvenance(t *testing.T) {
 			if source == "environment" {
 				t.Setenv("CRABBOX_DEFAULT_CLASS", "standard")
 			}
-			cfg, err := core.LoadConfig()
-			if err != nil {
-				t.Fatal(err)
+			args := []string{"warmup", "--provider", "daytona", "--slug", "configured-class"}
+			if source == "flag" {
+				args = append(args, "--class", "standard")
 			}
-			if core.ClassWasExplicit(cfg) != (source != "inherited") {
-				t.Fatal("class provenance not preserved")
-			}
-			err = (&daytonaLeaseBackend{cfg: cfg}).ValidateCoordinatorAcquire()
-			if (err != nil) != (source != "inherited") || err != nil && !strings.Contains(err.Error(), "requires direct mode") {
-				t.Fatalf("source=%s err=%v", source, err)
+			err := (core.App{Stdout: io.Discard, Stderr: io.Discard}).Run(t.Context(), args)
+			if source == "flag" {
+				if err == nil || !strings.Contains(err.Error(), "requires direct mode") || creates.Load() != 0 {
+					t.Fatalf("explicit broker class: creates=%d err=%v", creates.Load(), err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "synthetic allocation boundary") || creates.Load() != 1 {
+				t.Fatalf("configured broker class: creates=%d err=%v", creates.Load(), err)
 			}
 		})
 	}

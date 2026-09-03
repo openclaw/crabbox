@@ -259,7 +259,8 @@ development endpoints.
 - Brokered release and rollback are idempotent when the owned sandbox was
   already deleted or expired.
 - Direct `--class` selects or validates snapshot sizing; `--type` remains
-  unsupported. Brokered mode rejects explicit class selection.
+  unsupported. Brokered mode rejects `--class` but preserves existing
+  YAML/environment class configuration without changing coordinator-owned sizing.
 - `--id <sandbox-id-or-slug>` is required to address an existing sandbox.
 - Daytona `run` is delegated to the toolbox APIs; it is not core-over-SSH
   execution. Because of that, the following `run` options are rejected:

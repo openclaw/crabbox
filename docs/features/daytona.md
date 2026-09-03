@@ -104,12 +104,14 @@ The snapshot must be active and available in the requested Daytona target.
 Crabbox resolves its exact ID before allocation and verifies the created
 sandbox's resources. Mismatches fail and any created sandbox is cleaned up.
 
-Explicit class intent includes `--class`, YAML `class`, and
+In direct mode, explicit class intent includes `--class`, YAML `class`, and
 `CRABBOX_DEFAULT_CLASS`. The inherited built-in class does not change native
 snapshot selection. Without explicit class, existing custom snapshots retain
-their own sizing. `--type` remains unsupported. Brokered mode rejects explicit
-class on new allocations because its coordinator selects the shared snapshot;
-inspection and cleanup of existing leases remain available.
+their own sizing. `--type` remains unsupported. Brokered mode continues to reject
+`--class`; existing YAML `class` and `CRABBOX_DEFAULT_CLASS` values remain accepted
+without changing the coordinator's shared snapshot or its sizing. Inspection
+and cleanup of existing leases remain available. Registered mode allocates
+directly and supports class selection.
 
 ```yaml
 provider: daytona
