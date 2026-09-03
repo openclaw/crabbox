@@ -58,8 +58,10 @@ leases owned by someone else and direct-only leases absent from the coordinator
 do not count.
 
 This read-only snapshot uses the same serialized boundary as admission on
-Cloudflare and Node. It neither allocates nor reconciles resources, deletes stale
-records, schedules maintenance, nor calls providers. It reveals no lease IDs,
+Cloudflare and Node. Normal service startup and background recovery retain their
+existing behavior; the capacity handler itself neither allocates nor reconciles
+resources, deletes stale records, schedules maintenance, nor calls providers.
+It reveals no lease IDs,
 records, org/provider breakdowns, costs, or other owners' counts. The aggregate
 is a narrow exception to owner/org visibility, not expanded access to lease
 records or monthly reports.

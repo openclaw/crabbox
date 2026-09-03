@@ -6,7 +6,8 @@ import { routeCoordinatorRequest } from "../src/coordinator-entry";
 import {
   CloudflareCoordinatorRuntime,
   coordinatorRequestQueue,
-  type CoordinatorStorageView,
+  legacyAlarmKey,
+  provisioningDuePrefix,
 } from "../src/coordinator-runtime";
 import { FleetCoordinator, FleetDurableObject } from "../src/fleet";
 import { orgKeyForLabel } from "../src/org-identity";
@@ -17,8 +18,12 @@ import {
   enforceCostLimitUsage,
   type CostLimitUsage,
 } from "../src/usage";
+import { ProvisioningTestStorage } from "./provisioning-fixtures";
 
-const nodeMocks = vi.hoisted(() => ({ storage: undefined as unknown }));
+const nodeMocks = vi.hoisted(() => ({
+  storage: undefined as unknown,
+  boss: undefined as unknown,
+}));
 vi.mock("../node/postgres-storage", () => ({
   PostgresCoordinatorStorage: function () {
     return nodeMocks.storage;
@@ -26,7 +31,7 @@ vi.mock("../node/postgres-storage", () => ({
 }));
 vi.mock("pg-boss", () => ({
   PgBoss: function () {
-    return { on() {}, async stop() {} };
+    return nodeMocks.boss;
   },
 }));
 import { NodeCoordinatorRuntime } from "../node/node-runtime";
@@ -35,22 +40,19 @@ const now = new Date("2026-09-02T12:00:00.000Z");
 const owner = "github:12345";
 const org = orgKeyForLabel("org-a");
 
-class CapacityStorage {
-  readonly values = new Map<string, unknown>();
+type CapacityTransaction = Parameters<Parameters<ProvisioningTestStorage["transaction"]>[0]>[0];
+type StorageMutation =
+  | { kind: "put"; key: string }
+  | { kind: "delete"; key: string }
+  | { kind: "setAlarm"; time: number }
+  | { kind: "deleteAlarm" };
+
+class CapacityStorage extends ProvisioningTestStorage {
+  readonly mutations: StorageMutation[] = [];
   beforeList?: (options: { prefix?: string; startAfter?: string }) => Promise<void>;
-  put = vi.fn<(key: string, value: unknown) => Promise<void>>(async (key, value) => {
-    this.values.set(key, value);
-  });
-  delete = vi.fn<(key: string) => Promise<void>>(async (key) => {
-    this.values.delete(key);
-  });
-  setAlarm = vi.fn<() => Promise<void>>(async () => {});
-  deleteAlarm = vi.fn<() => Promise<void>>(async () => {});
+  initialize = vi.fn<() => Promise<void>>(async () => {});
   close = vi.fn<() => Promise<void>>(async () => {});
-  async get<T>(key: string): Promise<T | undefined> {
-    return this.values.get(key) as T | undefined;
-  }
-  list = vi.fn<
+  override list = vi.fn<
     <T>(options?: {
       prefix?: string;
       limit?: number;
@@ -62,21 +64,31 @@ class CapacityStorage {
       options: { prefix?: string; limit?: number; startAfter?: string; noCache?: boolean } = {},
     ): Promise<Map<string, T>> => {
       await this.beforeList?.(options);
-      const entries = [...this.values.entries()]
-        .toSorted(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-        .filter(
-          ([key]) =>
-            key.startsWith(options.prefix ?? "") &&
-            (!options.startAfter || key > options.startAfter),
-        );
-      return new Map(entries.slice(0, options.limit).map(([key, value]) => [key, value as T]));
+      return super.list<T>(options);
     },
   );
-  async getAlarm() {
-    return null;
-  }
-  async transaction<T>(callback: (storage: CoordinatorStorageView) => Promise<T>): Promise<T> {
-    return callback(this);
+  override transaction<T>(callback: (storage: CapacityTransaction) => Promise<T>): Promise<T> {
+    return super.transaction(async (transaction) => {
+      // Observe transaction-local effects too; the shared fixture still owns commit/rollback.
+      const { put, delete: remove, setAlarm, deleteAlarm } = transaction;
+      transaction.put = async (key, value) => {
+        this.mutations.push({ kind: "put", key });
+        await put.call(transaction, key, value);
+      };
+      transaction.delete = async (key) => {
+        this.mutations.push({ kind: "delete", key });
+        await remove.call(transaction, key);
+      };
+      transaction.setAlarm = async (time) => {
+        this.mutations.push({ kind: "setAlarm", time });
+        await setAlarm.call(transaction, time);
+      };
+      transaction.deleteAlarm = async () => {
+        this.mutations.push({ kind: "deleteAlarm" });
+        await deleteAlarm.call(transaction);
+      };
+      return callback(transaction);
+    });
   }
 }
 
@@ -119,10 +131,15 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-function fixture(kind: "cloudflare" | "node", envOverrides: Partial<Env> = {}) {
-  vi.useFakeTimers({ toFake: ["Date"] });
+async function fixture(
+  kind: "cloudflare" | "node",
+  envOverrides: Partial<Env> = {},
+  beforeStartup?: (storage: CapacityStorage) => void,
+) {
+  vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
   vi.setSystemTime(now);
   const storage = new CapacityStorage();
+  beforeStartup?.(storage);
   const env = {
     CRABBOX_SHARED_TOKEN: "synthetic-shared",
     CRABBOX_SHARED_OWNER: owner,
@@ -134,16 +151,53 @@ function fixture(kind: "cloudflare" | "node", envOverrides: Partial<Env> = {}) {
   let fleet: FleetCoordinator;
   let runtime: CloudflareCoordinatorRuntime | NodeCoordinatorRuntime;
   let dispatch: (request: Request) => Promise<Response>;
+  const initializers: Promise<unknown>[] = [];
+  const maintenance: Promise<unknown>[] = [];
+  const jobs = {
+    on: vi.fn<(...args: unknown[]) => void>(),
+    start: vi.fn<() => Promise<void>>(async () => {}),
+    stop: vi.fn<() => Promise<void>>(async () => {}),
+    createQueue: vi.fn<(...args: unknown[]) => Promise<void>>(async () => {}),
+    work: vi.fn<(...args: unknown[]) => Promise<string>>(async () => "synthetic-worker"),
+    schedule: vi.fn<(...args: unknown[]) => Promise<void>>(async () => {}),
+    send: vi.fn<(...args: unknown[]) => Promise<string>>(async () => "synthetic-job"),
+    deleteQueuedJobs: vi.fn<(...args: unknown[]) => Promise<void>>(async () => {}),
+  };
+  // Fail closed for provider/network work during startup as well as requests.
+  const network = vi.fn<() => never>(() => {
+    throw new Error("unexpected network call");
+  });
+  vi.stubGlobal("fetch", network);
   if (kind === "cloudflare") {
     const durable = new FleetDurableObject(
-      { storage, getWebSockets: () => [] } as unknown as DurableObjectState,
+      {
+        storage,
+        getWebSockets: () => [],
+        blockConcurrencyWhile<T>(callback: () => Promise<T>): Promise<T> {
+          const initialized = callback();
+          initializers.push(initialized);
+          return initialized;
+        },
+        waitUntil(operation: Promise<unknown>): void {
+          maintenance.push(operation);
+        },
+      } as unknown as DurableObjectState,
       env,
     );
     fleet = durable;
     runtime = (durable as unknown as { runtime: CloudflareCoordinatorRuntime }).runtime;
-    dispatch = (request) => durable.fetch(request);
+    const initialized = Promise.all(initializers);
+    dispatch = async (request) => {
+      await initialized;
+      return durable.fetch(request);
+    };
+    await initialized;
+    cleanups.push(async () => {
+      await Promise.all(maintenance);
+    });
   } else {
     nodeMocks.storage = storage;
+    nodeMocks.boss = jobs;
     const node = new NodeCoordinatorRuntime("postgresql://synthetic.invalid/capacity");
     const mutex = new AsyncMutex();
     node.setOperationRunner((callback) => mutex.run(callback));
@@ -154,32 +208,40 @@ function fixture(kind: "cloudflare" | "node", envOverrides: Partial<Env> = {}) {
         ? fleet.fetch(request)
         : mutex.run(() => fleet.fetch(request));
     cleanups.push(() => node.stop());
+    await node.start(() => fleet.alarm());
   }
-  // Any accidental provider/network operation fails the test, including auth without its mock.
-  const network = vi.fn<() => never>(() => {
-    throw new Error("unexpected network call");
+  expect(initializers).toHaveLength(kind === "cloudflare" ? 1 : 0);
+  expect(network).not.toHaveBeenCalled();
+  const effects = () => ({
+    mutations: storage.mutations.length,
+    network: network.mock.calls.length,
+    maintenance: maintenance.length,
+    jobs: Object.fromEntries(
+      Object.entries(jobs).map(([key, spy]) => [key, spy.mock.calls.length]),
+    ),
   });
-  vi.stubGlobal("fetch", network);
-  const fetch = (
+  // Startup recovery is complete before observation; never clear evidence of its work.
+  const startup = { effects: effects(), lists: storage.list.mock.calls.length };
+  const fetch = async (
     query = "",
     headers: Record<string, string> = { authorization: "Bearer synthetic-shared" },
-  ) =>
-    routeCoordinatorRequest(
+  ) => {
+    const before = effects();
+    const response = await routeCoordinatorRequest(
       new Request(`https://coordinator.test/v1/capacity${query}`, { headers }),
       env,
       dispatch,
       { githubMembership: async () => {} },
     );
+    expect(effects()).toEqual(before);
+    return response;
+  };
   const seed = (record: LeaseRecord, prefix = "lease:") =>
     storage.values.set(prefix + record.id, record);
   const readonly = () => {
-    expect(storage.put).not.toHaveBeenCalled();
-    expect(storage.delete).not.toHaveBeenCalled();
-    expect(storage.setAlarm).not.toHaveBeenCalled();
-    expect(storage.deleteAlarm).not.toHaveBeenCalled();
-    expect(network).not.toHaveBeenCalled();
+    expect(effects()).toEqual(startup.effects);
   };
-  return { storage, env, fleet, runtime, fetch, seed, readonly };
+  return { storage, env, fleet, runtime, fetch, seed, readonly, startup, jobs };
 }
 
 type Admission = {
@@ -194,8 +256,50 @@ function admission(fleet: FleetCoordinator) {
 
 for (const kind of ["cloudflare", "node"] as const) {
   describe(`${kind} owner capacity`, () => {
+    it("keeps the diagnostic read-only after cold-start recovery with retained state", async () => {
+      const overdue = lease("cold-overdue", { expiresAt: "2026-09-01T00:00:00Z" });
+      const stale = lease("cold-stale", { expiresAt: now.toISOString() });
+      const dueAt = now.getTime() - 1;
+      const legacyAt = now.getTime() + 60_000;
+      const dueKey = `${provisioningDuePrefix}${String(dueAt).padStart(16, "0")}:missing-operation`;
+      const records = new Map([
+        [`lease:${overdue.id}`, overdue],
+        [`provider-access:${stale.id}`, stale],
+      ]);
+      const f = await fixture(kind, {}, (storage) => {
+        for (const [key, record] of records) storage.values.set(key, structuredClone(record));
+        storage.values.set(
+          kind === "cloudflare" ? "test:native-alarm" : "node-runtime:alarm-time",
+          legacyAt,
+        );
+        storage.values.set(dueKey, { operationID: "missing-operation", at: dueAt });
+      });
+
+      expect(f.startup.effects.mutations).toBeGreaterThan(0);
+      expect(await f.storage.get(legacyAlarmKey)).toBe(legacyAt);
+      // Cloudflare only rearms at construction; Node runs its controller scan before serving.
+      expect(await f.runtime.getAlarm()).toBe(kind === "cloudflare" ? dueAt : legacyAt);
+      expect(f.storage.values.has(dueKey)).toBe(kind === "cloudflare");
+      expect(f.storage.initialize).toHaveBeenCalledTimes(kind === "node" ? 1 : 0);
+      const nodeStartupJobs = [
+        ["coordinator-alarm", null, expect.objectContaining({ startAfter: new Date(legacyAt) })],
+        ["coordinator-reconcile", null, { singletonKey: "startup", singletonSeconds: 60 }],
+      ];
+      expect(f.jobs.send.mock.calls).toEqual(kind === "node" ? nodeStartupJobs : []);
+      for (const [key, record] of records) expect(f.storage.values.get(key)).toEqual(record);
+      const before = structuredClone(f.storage.values);
+      expect(await (await f.fetch()).json()).toEqual({
+        owner,
+        activeLeases: 1,
+        effectiveLimit: 10,
+        observedAt: now.toISOString(),
+      });
+      expect(f.storage.values).toEqual(before);
+      f.readonly();
+    });
+
     it("counts self-owner admission entries across months and orgs without leaking leases", async () => {
-      const f = fixture(kind);
+      const f = await fixture(kind);
       f.seed(lease("current"));
       f.seed(
         lease("previous", {
@@ -230,7 +334,7 @@ for (const kind of ["cloudflare", "node"] as const) {
     it.each([9, 10, 11])(
       "reports %i existing entries without the admission candidate",
       async (count) => {
-        const f = fixture(kind);
+        const f = await fixture(kind);
         for (let i = 0; i < count; i++) f.seed(lease(`count-${i}`));
         const response = await f.fetch();
         expect(response.status).toBe(200);
@@ -246,7 +350,7 @@ for (const kind of ["cloudflare", "node"] as const) {
     );
 
     it("uses live reservations once with precedence and ignores stale entries without deleting", async () => {
-      const f = fixture(kind);
+      const f = await fixture(kind);
       f.seed(lease("overlap", { state: "released", owner: "other" }));
       f.seed(lease("overlap"), "provider-access:");
       f.seed(lease("reservation-only"), "provider-access:");
@@ -261,7 +365,7 @@ for (const kind of ["cloudflare", "node"] as const) {
         f.seed(lease(id));
       }
       f.seed(lease("stale-only", { expiresAt: now.toISOString() }), "provider-access:");
-      const before = new Map(f.storage.values);
+      const before = structuredClone(f.storage.values);
       expect(await (await f.fetch()).json()).toMatchObject({ activeLeases: 5 });
       expect(f.storage.values).toEqual(before);
       f.readonly();
@@ -269,7 +373,13 @@ for (const kind of ["cloudflare", "node"] as const) {
         admission(f.fleet).leaseAdmissionState({ owner, org }, now),
       );
       expect(costUsage.ownerActiveLeases).toBe(5);
-      expect(f.storage.delete.mock.calls.map(([key]) => key).toSorted()).toEqual([
+      expect(
+        f.storage.mutations
+          .slice(f.startup.effects.mutations)
+          .filter((mutation) => mutation.kind === "delete")
+          .map((mutation) => mutation.key)
+          .toSorted(),
+      ).toEqual([
         "provider-access:equal",
         "provider-access:expired",
         "provider-access:stale-only",
@@ -278,7 +388,7 @@ for (const kind of ["cloudflare", "node"] as const) {
     });
 
     it("scans every bounded page of leases and reservations and propagates scan failures", async () => {
-      const f = fixture(kind);
+      const f = await fixture(kind);
       for (let i = 0; i < 260; i++) {
         f.seed(lease(`canonical-${i.toString().padStart(3, "0")}`));
         f.seed(lease(`reservation-${i.toString().padStart(3, "0")}`), "provider-access:");
@@ -300,7 +410,7 @@ for (const kind of ["cloudflare", "node"] as const) {
     });
 
     it("serializes the snapshot behind admission on the runtime's lifecycle boundary", async () => {
-      const f = fixture(kind);
+      const f = await fixture(kind);
       const request = new Request("https://coordinator.test/v1/capacity");
       expect(coordinatorRequestQueue(request)).toBe("lifecycle");
       expect(fleetRequestQueue(request)).toBe("lifecycle");
@@ -335,17 +445,13 @@ for (const kind of ["cloudflare", "node"] as const) {
     });
 
     it("does not run bridge reconciliation for a diagnostic", async () => {
-      const f = fixture(kind);
+      const f = await fixture(kind);
       const methods = f.fleet as unknown as {
         reconcileAdminGrantVersion(): Promise<void>;
         restoredBridgesReady(): Promise<boolean>;
       };
-      const admin = vi
-        .spyOn(methods, "reconcileAdminGrantVersion")
-        .mockRejectedValue(new Error("maintenance forbidden"));
-      const restored = vi
-        .spyOn(methods, "restoredBridgesReady")
-        .mockRejectedValue(new Error("maintenance forbidden"));
+      const admin = vi.spyOn(methods, "reconcileAdminGrantVersion");
+      const restored = vi.spyOn(methods, "restoredBridgesReady");
       expect(
         (await f.fetch("", { authorization: "Bearer synthetic-admin", "x-crabbox-owner": owner }))
           .status,
@@ -356,7 +462,7 @@ for (const kind of ["cloudflare", "node"] as const) {
     });
 
     it("uses immutable GitHub identity despite spoofed owner/org/admin headers", async () => {
-      const f = fixture(kind, { CRABBOX_SESSION_SECRET: "synthetic-session-secret" });
+      const f = await fixture(kind, { CRABBOX_SESSION_SECRET: "synthetic-session-secret" });
       const token = await issueUserToken(f.env, {
         owner,
         ownerSource: "github-verified-email",
@@ -384,7 +490,7 @@ for (const kind of ["cloudflare", "node"] as const) {
     });
 
     it("keeps shared identity and admin requests self-scoped without granting elevated capacity", async () => {
-      const f = fixture(kind, {
+      const f = await fixture(kind, {
         CRABBOX_CAPACITY_ADMIN_OWNERS: "github:99999",
         CRABBOX_MAX_ACTIVE_LEASES_PER_CAPACITY_ADMIN: "20",
       });
@@ -410,7 +516,7 @@ for (const kind of ["cloudflare", "node"] as const) {
     });
 
     it("preserves the unknown owner bucket", async () => {
-      const f = fixture(kind, { CRABBOX_SHARED_OWNER: undefined });
+      const f = await fixture(kind, { CRABBOX_SHARED_OWNER: undefined });
       f.seed(lease("unknown", { owner: "unknown" }));
       f.seed(lease("other"));
       expect(await (await f.fetch()).json()).toMatchObject({ owner: "unknown", activeLeases: 1 });
@@ -418,7 +524,7 @@ for (const kind of ["cloudflare", "node"] as const) {
     });
 
     it("rejects all selectors and denies absent or invalid authentication", async () => {
-      const f = fixture(kind);
+      const f = await fixture(kind);
       const responses = await Promise.all(
         [
           "?owner=other",
@@ -436,7 +542,7 @@ for (const kind of ["cloudflare", "node"] as const) {
       for (const response of responses) expect(response.status).toBe(400);
       expect((await f.fetch("", {})).status).toBe(401);
       expect((await f.fetch("", { authorization: "Bearer invalid" })).status).toBe(401);
-      expect(f.storage.list).not.toHaveBeenCalled();
+      expect(f.storage.list).toHaveBeenCalledTimes(f.startup.lists);
       f.readonly();
     });
   });
@@ -454,7 +560,7 @@ describe("owner capacity limit policy", () => {
   ])(
     "ordinary %i elevated %i membership %s selects %i",
     async (ordinary, elevated, member, expected) => {
-      const f = fixture("cloudflare", {
+      const f = await fixture("cloudflare", {
         CRABBOX_SHARED_OWNER: "Alice@Example.com",
         CRABBOX_MAX_ACTIVE_LEASES_PER_OWNER: String(ordinary),
         CRABBOX_CAPACITY_ADMIN_OWNERS: member ? "ALICE@example.COM" : "bob@example.com",
