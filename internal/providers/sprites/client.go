@@ -17,10 +17,26 @@ import (
 )
 
 type spritesAPI interface {
+	GetOrganization(context.Context) (string, error)
 	CreateSprite(context.Context, string, []string) (spritesInfo, error)
 	GetSprite(context.Context, string) (spritesInfo, error)
 	ListSprites(context.Context, string) ([]spritesInfo, error)
 	DeleteSprite(context.Context, string) error
+}
+
+func (c *spritesClient) GetOrganization(ctx context.Context) (string, error) {
+	var response struct {
+		Organization struct {
+			Slug string `json:"slug"`
+		} `json:"organization"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, "/v1/organization", nil, nil, &response); err != nil {
+		return "", err
+	}
+	if response.Organization.Slug == "" {
+		return "", fmt.Errorf("sprites organization response is missing its slug")
+	}
+	return response.Organization.Slug, nil
 }
 
 type spritesClient struct {

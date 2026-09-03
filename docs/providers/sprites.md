@@ -37,7 +37,7 @@ exposes SSH only through its proxy. Only `target=linux` is accepted.
 
 ## Auth
 
-Crabbox needs a Sprites API token. Keep it in the environment or user config;
+Crabbox needs a Sprites API token. Keep it in the environment;
 never pass it as a command-line argument.
 
 ```sh
@@ -54,9 +54,17 @@ Token lookup, in priority order:
 `SPRITE_TOKEN` and `SETUP_SPRITE_TOKEN` exist for compatibility with the Sprites
 installer. A missing token fails the lease before any API call.
 
-The authenticated `sprite` CLI must also be on `PATH`: Crabbox runs
-`sprite --version` before creating a lease, and uses `sprite proxy` for SSH and
-`sprite exec` for the one-time SSH bootstrap.
+The `sprite` CLI must also be on `PATH`: Crabbox runs `sprite --version` before
+creating a lease, and uses `sprite proxy` for SSH and `sprite exec` for SSH
+bootstrap. Crabbox passes its resolved token and API URL to both child
+processes, overriding the CLI's saved context and ambient `SPRITE_URL`.
+No separate CLI login is required for Crabbox-managed commands. Tokens are
+not placed in command-line arguments, generated SSH configuration, or lease claims.
+
+Use `crabbox connect --provider sprites --id <slug>` for an interactive session
+with those same credentials. `crabbox ssh` prints a standalone OpenSSH command;
+before running that command yourself, configure the Sprite CLI with the same
+`SPRITE_TOKEN` and `SPRITES_API_URL` (and unset any conflicting `SPRITE_URL`).
 
 ## Configuration
 
@@ -108,7 +116,7 @@ crabbox list --provider sprites
 
 ## Lifecycle
 
-1. Verify the `sprite` CLI is present and authenticated (`sprite --version`).
+1. Verify the `sprite` CLI is present (`sprite --version`).
 2. Create a sprite named `crabbox-<slug>`, labeled `crabbox`, `provider-sprites`,
    `lease-<lease-id>`, and `slug-<slug>`.
 3. Generate a per-lease Crabbox SSH key.
@@ -121,6 +129,21 @@ crabbox list --provider sprites
    and live lease ownership labels before deleting the sprite. Successful
    deletion removes the fenced claim and local key; failed deletion preserves
    the claim for a safe retry.
+
+Reuse validates the saved API endpoint, immutable Sprite ID, organization,
+and lease ownership before installing keys or running bootstrap. A replacement
+Sprite with the same name is not silently adopted, even with `--reclaim`.
+
+Plain `status` is API-only: it does not wake the Sprite, generate keys, install
+packages, or start services. It reports the provider state with `ready=false`
+until readiness is explicitly probed. `status --wait` probes SSH using the
+existing key; it can wake the Sprite but does not bootstrap it. Use a normal
+reuse command such as `run --id <slug>` when SSH bootstrap needs to be retried.
+
+If a Sprite has already been deleted, `stop` confirms the token's organization
+against the saved claim and rechecks absence before removing the local claim
+and key. Claims without the original organization and immutable ID are preserved,
+as are claims when the account differs or verification fails.
 
 Raw names and provider labels only discover sprites; they never authorize
 deletion. Explicit `--reclaim` can adopt a verified sprite through a normal
@@ -142,7 +165,7 @@ scripts/live-smoke.sh
 ```
 
 The shared harness exits before any Sprites `warmup`, `status`, `ssh`, `run`,
-`list`, or `stop` command when the authenticated `sprite` CLI is missing. With
+`list`, or `stop` command when the `sprite` CLI is missing. With
 the CLI and token configured, it creates one short-lived sprite, waits for SSH,
 verifies `ssh`, runs one command, lists normalized Sprites inventory, and stops
 the lease.
@@ -167,7 +190,7 @@ Expected results:
 
 - `warmup` creates a `crabbox-<slug>` sprite and prints `provider=sprites`, a
   Crabbox lease ID, a slug, and the sprite name.
-- `status --wait` reports a running Linux lease.
+- `status --wait` confirms SSH readiness for the Linux lease.
 - `ssh` prints a command that includes `ProxyCommand=sprite proxy -s %h -W 22`.
 - `run` prints `crabbox-sprites-ok`.
 - `list` shows Crabbox-owned sprites (those whose name starts with `crabbox-` or
@@ -179,8 +202,8 @@ Expected results:
 - An `--id` can be a Crabbox lease ID, a local slug, a `spr_<sprite-name>` ID, or
   a raw sprite name.
 - A raw sprite that Crabbox did not create can only be adopted with `--reclaim`.
-- If `sprite proxy` cannot connect, `status --wait`, `run`, and `ssh` fail even
-  when the Sprites API can see the sprite — SSH depends on the local CLI.
+- If `sprite proxy` cannot connect, SSH readiness and execution fail even when
+  the Sprites API can see the sprite. Plain `status` still uses only the API.
 
 ## Related docs
 

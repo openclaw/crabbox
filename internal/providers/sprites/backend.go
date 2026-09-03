@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io"
 	"path"
 	"strings"
 	"time"
@@ -168,12 +167,48 @@ func (b *spritesBackend) Resolve(ctx context.Context, req ResolveRequest) (Lease
 		sprite := spritesInfo{Name: name, Labels: spritesAPILabels(leaseID, slug)}
 		return LeaseTarget{Server: b.spriteToServer(sprite, true), LeaseID: leaseID}, nil
 	}
-	if err := b.ensureCLI(ctx); err != nil {
-		return LeaseTarget{}, err
-	}
 	sprite, err := b.client.GetSprite(ctx, name)
 	if err != nil {
 		return LeaseTarget{}, spritesError("get sprite", err)
+	}
+	if sprite.Name != name {
+		return LeaseTarget{}, exit(4, "sprite %q returned a different resource name %q", name, sprite.Name)
+	}
+	claim, hasClaim, err := resolveLeaseClaim(leaseID)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	if hasClaim {
+		if err := b.validateResolvedClaim(claim, sprite, req); err != nil {
+			return LeaseTarget{}, err
+		}
+	}
+	adopted := hasClaim && claim.Labels["sprites_ownership"] == "adopted" &&
+		claim.Labels["sprites_resource_id"] != "" && claim.Labels["sprites_resource_id"] == sprite.ID
+	if !spriteHasExactOwnership(sprite, leaseID, slug) {
+		if !req.Reclaim && !adopted {
+			return LeaseTarget{}, exit(4, "sprite %q has incomplete Crabbox ownership labels; use --reclaim to adopt it", sprite.Name)
+		}
+		if strings.TrimSpace(sprite.ID) == "" {
+			return LeaseTarget{}, exit(4, "refusing to adopt sprite %q without an immutable provider resource identity", sprite.Name)
+		}
+		adopted = true
+	}
+	target, err := b.sshTarget(name, "")
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	core.UseStoredTestboxKey(&target, leaseID)
+	resolved := LeaseTarget{Server: b.spriteToServer(sprite, true), SSH: target, LeaseID: leaseID}
+	resolved.Server.Labels["lease"], resolved.Server.Labels["slug"] = leaseID, slug
+	if err := core.ValidateLeaseTargetProviderIdentity(resolved, req.ExpectedProviderIdentity); err != nil {
+		return LeaseTarget{}, err
+	}
+	if req.StatusOnly || req.NoLocalStateMutations {
+		return resolved, nil
+	}
+	if err := b.ensureCLI(ctx); err != nil {
+		return LeaseTarget{}, err
 	}
 	keyPath, publicKey, err := ensureTestboxKey(leaseID)
 	if err != nil {
@@ -184,19 +219,7 @@ func (b *spritesBackend) Resolve(ctx context.Context, req ResolveRequest) (Lease
 		return LeaseTarget{}, err
 	}
 	if req.Repo.Root != "" {
-		if !spriteHasExactOwnership(sprite, leaseID, slug) {
-			adopted := req.Reclaim
-			if previous, ok, err := resolveLeaseClaim(leaseID); err != nil {
-				return LeaseTarget{}, err
-			} else if ok && previous.Labels["sprites_ownership"] == "adopted" && previous.Labels["sprites_resource_id"] == sprite.ID {
-				adopted = true
-			}
-			if !adopted {
-				return LeaseTarget{}, exit(4, "sprite %q has incomplete Crabbox ownership labels; use --reclaim to adopt it", sprite.Name)
-			}
-			if strings.TrimSpace(sprite.ID) == "" {
-				return LeaseTarget{}, exit(4, "refusing to adopt sprite %q without an immutable provider resource identity", sprite.Name)
-			}
+		if adopted {
 			lease.Server.Labels["sprites_ownership"] = "adopted"
 		}
 		if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, b.configForRun(), lease.Server, lease.SSH, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
@@ -204,6 +227,25 @@ func (b *spritesBackend) Resolve(ctx context.Context, req ResolveRequest) (Lease
 		}
 	}
 	return lease, nil
+}
+
+func (b *spritesBackend) validateResolvedClaim(claim LeaseClaim, sprite spritesInfo, req ResolveRequest) error {
+	if err := shared.ValidateClaimBinding(claim, b.claimBinding(claim.LeaseID, claim.Slug, sprite.Name)); err != nil {
+		return exit(4, "sprite %q does not match its ownership claim: %v", sprite.Name, err)
+	}
+	if id := claim.Labels["sprites_resource_id"]; id != "" && id != sprite.ID {
+		return exit(4, "sprite %q immutable provider resource identity does not match its ownership claim", sprite.Name)
+	}
+	if org := claim.Labels["sprites_organization"]; org != "" && org != sprite.Organization {
+		return exit(4, "sprite %q organization does not match its ownership claim", sprite.Name)
+	}
+	if liveLease := spritesLeaseID(sprite); liveLease != "" && liveLease != claim.LeaseID {
+		return exit(4, "sprite %q belongs to a different live lease %q", sprite.Name, liveLease)
+	}
+	if req.Repo.Root != "" && claim.RepoRoot != "" && req.Repo.Root != claim.RepoRoot && !req.Reclaim {
+		return exit(4, "lease %s is claimed by repo %s; use --reclaim to claim it for %s", claim.LeaseID, claim.RepoRoot, req.Repo.Root)
+	}
+	return nil
 }
 
 func (b *spritesBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
@@ -247,6 +289,9 @@ func (b *spritesBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseReque
 	if err := shared.RemoveExactClaimAfter(claim, binding, func() error {
 		sprite, err := b.client.GetSprite(ctx, name)
 		if err != nil {
+			if isSpritesNotFound(err) {
+				return b.confirmAbsentSprite(ctx, claim, name)
+			}
 			return spritesError("get sprite", err)
 		}
 		if sprite.Name != name {
@@ -266,7 +311,7 @@ func (b *spritesBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseReque
 		if organization := claim.Labels["sprites_organization"]; organization != "" && sprite.Organization != organization {
 			return exit(4, "refusing to delete sprite %q: organization does not match its ownership claim", name)
 		}
-		if err := b.client.DeleteSprite(ctx, name); err != nil {
+		if err := b.client.DeleteSprite(ctx, name); err != nil && !isSpritesNotFound(err) {
 			return spritesError("delete sprite", err)
 		}
 		return nil
@@ -276,6 +321,29 @@ func (b *spritesBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseReque
 	removeStoredTestboxKey(req.Lease.LeaseID)
 	fmt.Fprintf(b.rt.Stderr, "released lease=%s sprite=%s\n", req.Lease.LeaseID, name)
 	return nil
+}
+
+// A 404 alone cannot identify the account: another valid organization's token
+// can see the same name as missing. Confirm the original account and recheck
+// absence before removing only the exact fenced local claim and key.
+func (b *spritesBackend) confirmAbsentSprite(ctx context.Context, claim LeaseClaim, name string) error {
+	organization := claim.Labels["sprites_organization"]
+	if organization == "" || claim.Labels["sprites_resource_id"] == "" {
+		return exit(4, "cannot confirm absent sprite %q without its original organization and immutable identity; preserving the local claim", name)
+	}
+	current, err := b.client.GetOrganization(ctx)
+	if err != nil {
+		return spritesError("confirm organization for absent sprite", err)
+	}
+	if current != organization {
+		return exit(4, "refusing local cleanup for sprite %q: organization does not match its ownership claim", name)
+	}
+	if _, err := b.client.GetSprite(ctx, name); isSpritesNotFound(err) {
+		return nil
+	} else if err != nil {
+		return spritesError("confirm absent sprite", err)
+	}
+	return exit(4, "sprite %q appeared during cleanup; preserving its local claim for revalidation", name)
 }
 
 func (b *spritesBackend) claimBinding(leaseID, slug, name string) shared.ClaimBinding {
@@ -337,7 +405,10 @@ func (b *spritesBackend) prepareLease(ctx context.Context, sprite spritesInfo, l
 	if err := b.bootstrapSSH(ctx, sprite.Name, publicKey); err != nil {
 		return LeaseTarget{}, err
 	}
-	target := spritesSSHTarget(sprite.Name, keyPath)
+	target, err := b.sshTarget(sprite.Name, keyPath)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
 	target.ReadyCheck = "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null && command -v python3 >/dev/null"
 	server := b.spriteToServer(sprite, keep)
 	server.Labels["lease"] = leaseID
@@ -376,13 +447,9 @@ func (b *spritesBackend) bootstrapSSH(ctx context.Context, spriteName, publicKey
 func (b *spritesBackend) ensureCLI(ctx context.Context) error {
 	result, err := b.runSprite(ctx, []string{"--version"}, nil, nil)
 	if err != nil {
-		return ExitError{Code: result.ExitCode, Message: fmt.Sprintf("provider=sprites requires the sprite CLI on PATH and authenticated: %v", err)}
+		return ExitError{Code: result.ExitCode, Message: fmt.Sprintf("provider=sprites requires the sprite CLI on PATH: %v", err)}
 	}
 	return nil
-}
-
-func (b *spritesBackend) runSprite(ctx context.Context, args []string, stdout, stderr io.Writer) (LocalCommandResult, error) {
-	return b.rt.Exec.Run(ctx, LocalCommandRequest{Name: "sprite", Args: args, Stdout: stdout, Stderr: stderr})
 }
 
 func (b *spritesBackend) resolveSpriteName(ctx context.Context, identifier string, reclaim bool) (string, string, string, error) {
