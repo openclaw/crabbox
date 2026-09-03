@@ -417,9 +417,9 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     if (result.status >= 300) {
       throw new Error(`AWS qualification image verification failed: http ${result.status}`);
     }
-    const images = items(record(awsXMLRoot(result.body, "DescribeImages")["imagesSet"])["item"]).map(
-      record,
-    );
+    const images = items(
+      record(awsXMLRoot(result.body, "DescribeImages")["imagesSet"])["item"],
+    ).map(record);
     if (images.length !== 1) throw new Error("AWS qualification image is not uniquely visible");
     const image = images[0]!;
     const tags = awsTagMap(image["tagSet"]);
@@ -569,7 +569,11 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       await this.cleanup(policy, "DeleteKeyPair", { KeyPairId: keyPairId }, failures);
     }
     await this.verifyZeroResidue(recoveredLedger, policy, failures);
-    const residue = await this.inventoryRunResources(run, emptyLedger(recoveredLedger.launchCount), failures);
+    const residue = await this.inventoryRunResources(
+      run,
+      emptyLedger(recoveredLedger.launchCount),
+      failures,
+    );
     if (hasOwnedResources(residue)) failures.push("run-tag inventory still contains resources");
     if (failures.length > 0) {
       await this.ctx.storage.setAlarm(Date.now() + cleanupRetryMs);
@@ -729,12 +733,8 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
         if (result.status >= 300) throw new Error(`inventory http ${result.status}`);
       }
       ledger.instanceIds = reservationsFromXML(instances.body)
-        .flatMap((reservation) =>
-          items(record(reservation["instancesSet"])["item"]).map(record),
-        )
-        .filter(
-          (instance) => asString(record(instance["instanceState"])["name"]) !== "terminated",
-        )
+        .flatMap((reservation) => items(record(reservation["instancesSet"])["item"]).map(record))
+        .filter((instance) => asString(record(instance["instanceState"])["name"]) !== "terminated")
         .map((instance) => asString(instance["instanceId"]))
         .filter(Boolean);
       const imageRecords = items(
@@ -744,9 +744,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       ledger.snapshotIds = [
         ...new Set([
           ...imageRecords.flatMap(imageSnapshotIDs),
-          ...items(
-            record(awsXMLRoot(snapshots.body, "DescribeSnapshots")["snapshotSet"])["item"],
-          )
+          ...items(record(awsXMLRoot(snapshots.body, "DescribeSnapshots")["snapshotSet"])["item"])
             .map(record)
             .map((snapshot) => asString(snapshot["snapshotId"]))
             .filter(Boolean),
@@ -772,9 +770,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
         failures.push("run-tag inventory exceeds qualification resource bounds");
       }
     } catch (error) {
-      failures.push(
-        `run-tag inventory: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      failures.push(`run-tag inventory: ${error instanceof Error ? error.message : String(error)}`);
     }
     return ledger;
   }
@@ -872,12 +868,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     if (ids.length === 0) return;
     const parameters = Object.fromEntries(ids.map((id, index) => [`${idField}.${index + 1}`, id]));
     try {
-      const response = await this.signer.execute(
-        "ec2",
-        action,
-        policy.region,
-        parameters,
-      );
+      const response = await this.signer.execute("ec2", action, policy.region, parameters);
       const result = await boundedResponse(response);
       if (result.status >= 300) {
         if (result.body.includes("NotFound")) return;
@@ -988,14 +979,7 @@ async function authorizeRequest(
   }
   return {
     mutating: mutatingEC2Actions.has(request.action),
-    parameters: authorizeEC2(
-      request,
-      identity,
-      policy,
-      ledger,
-      physicalKeyName,
-      clientToken,
-    ),
+    parameters: authorizeEC2(request, identity, policy, ledger, physicalKeyName, clientToken),
   };
 }
 
@@ -1616,9 +1600,7 @@ function imageSnapshotIDs(image: Record<string, unknown>): string[] {
 }
 
 function reservationsFromXML(body: string): Record<string, unknown>[] {
-  return items(
-    record(awsXMLRoot(body, "DescribeInstances")["reservationSet"])["item"],
-  ).map(record);
+  return items(record(awsXMLRoot(body, "DescribeInstances")["reservationSet"])["item"]).map(record);
 }
 
 function valueDepth(value: unknown, depth = 0): number {

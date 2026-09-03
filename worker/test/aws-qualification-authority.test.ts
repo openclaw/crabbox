@@ -67,9 +67,9 @@ describe("AWS qualification authority deployment", () => {
 describe("AWS qualification authority", () => {
   it("rejects cross-run identity, policy drift, FSR, and foreign resources", async () => {
     const fixture = authorityFixture();
-    await expect(
-      fixture.run.enroll({ deploymentHash: "e".repeat(64) }, identity),
-    ).rejects.toThrow("not bound");
+    await expect(fixture.run.enroll({ deploymentHash: "e".repeat(64) }, identity)).rejects.toThrow(
+      "not bound",
+    );
     await fixture.run.enroll(controller, identity);
 
     await expect(
@@ -233,10 +233,7 @@ describe("AWS qualification authority", () => {
     const fixture = authorityFixture();
     await fixture.run.enroll(controller, identity);
     await expect(
-      fixture.run.execute(
-        identity,
-        request("GetCallerIdentity", { value: "x".repeat(70 * 1024) }),
-      ),
+      fixture.run.execute(identity, request("GetCallerIdentity", { value: "x".repeat(70 * 1024) })),
     ).rejects.toThrow("64 KiB");
     await importKey(fixture);
     await expect(
@@ -475,9 +472,7 @@ class FakeSigner {
   }
 }
 
-function imageOp(
-  calls: Array<{ action: string; parameters: Record<string, unknown> }>,
-): string {
+function imageOp(calls: Array<{ action: string; parameters: Record<string, unknown> }>): string {
   const create = calls.findLast((call) => call.action === "CreateImage");
   for (let index = 1; index <= 64; index += 1) {
     if (create?.parameters[`TagSpecification.1.Tag.${index}.Key`] === "crabbox_qualification_op") {
