@@ -1,3 +1,5 @@
+//go:build !windows
+
 package cli
 
 import (
@@ -9,10 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
-	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -80,9 +79,6 @@ func (b *sshScriptTestBackend) BeginSSHRunActivity(ctx context.Context, lease Le
 
 func setupSSHScriptRun(t *testing.T) (*sshScriptTestProvider, *sshScriptTestBackend, string) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX SSH script fixture")
-	}
 	clearConfigEnv(t)
 	dir := t.TempDir()
 	isolateRunTestUserDirs(t, dir)
@@ -104,6 +100,24 @@ func setupSSHScriptRun(t *testing.T) (*sshScriptTestProvider, *sshScriptTestBack
 	t.Cleanup(func() { delete(providerRegistry, p.Name()) })
 	t.Setenv("CRABBOX_SCRIPT_ACTIVITY", b.activityPath)
 	t.Setenv("CRABBOX_SCRIPT_SSH_LOG", filepath.Join(dir, "ssh.log"))
+	completions := filepath.Join(dir, "ssh-completions")
+	if err := os.Mkdir(completions, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_SCRIPT_COMPLETIONS", completions)
+	t.Cleanup(func() {
+		// Runs join renewal before teardown; cancellation waits for workload
+		// startup or a completed owner refusal, so registrations are settled.
+		entries, err := os.ReadDir(completions)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			if !strings.HasSuffix(entry.Name(), ".done") {
+				waitForWorkspaceOwnerTestFile(t, filepath.Join(completions, entry.Name()+".done"))
+			}
+		}
+	})
 	ssh := `#!/bin/sh
 for arg do
   if [ "$arg" = -G ]; then exec /usr/bin/ssh "$@"; fi
@@ -125,7 +139,12 @@ done
 case "$decoded" in
   *"/usr/local/bin/crabbox-ready"*) exit 0 ;;
 esac
-exec sh -c "$cmd"
+completion=$(mktemp "$CRABBOX_SCRIPT_COMPLETIONS/run.XXXXXXXX") || exit 1
+# Cancellation kills the SSH root, not this foreground remote supervisor.
+# Publish completion only after the full witness and launcher have exited.
+sh -c 'sh -c "$1"; code=$?; printf "%s\n" "$code" > "$2.done"; exit "$code"' sh "$cmd" "$completion"
+code=$?
+exit "$code"
 `
 	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(ssh), 0o755); err != nil {
 		t.Fatal(err)
@@ -256,7 +275,7 @@ func TestHybridSSHScriptCancellationAndSameLeaseReplay(t *testing.T) {
 	p, b, dir := setupSSHScriptRun(t)
 	started := filepath.Join(dir, "script-started")
 	stop := filepath.Join(dir, "script-stop")
-	source := "#!/bin/sh\nprintf '%s\\n' $$ > " + shellQuote(started) + "\nwhile [ ! -e " + shellQuote(stop) + " ]; do sleep 0.05; done\n"
+	source := "#!/bin/sh\ntouch " + shellQuote(started) + "\nwhile [ ! -e " + shellQuote(stop) + " ]; do sleep 0.05; done\n"
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	var stdout, stderr bytes.Buffer
@@ -268,6 +287,9 @@ func TestHybridSSHScriptCancellationAndSameLeaseReplay(t *testing.T) {
 	}()
 	joined := false
 	t.Cleanup(func() {
+		if err := os.WriteFile(stop, nil, 0o600); err != nil {
+			t.Error(err)
+		}
 		cancel()
 		if !joined {
 			<-done
@@ -288,31 +310,8 @@ func TestHybridSSHScriptCancellationAndSameLeaseReplay(t *testing.T) {
 			t.Fatal("script did not start")
 		}
 	}
-	pidBytes, err := os.ReadFile(started)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	child, err := os.FindProcess(pid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = os.WriteFile(stop, nil, 0o600)
-		deadline := time.Now().Add(time.Second)
-		for child.Signal(syscall.Signal(0)) == nil && time.Now().Before(deadline) {
-			time.Sleep(10 * time.Millisecond)
-		}
-		if child.Signal(syscall.Signal(0)) == nil {
-			_ = child.Kill()
-		}
-		_ = child.Release()
-	})
 	cancel()
-	err = <-done
+	err := <-done
 	joined = true
 	if err == nil || b.joined != 1 {
 		t.Fatalf("cancel=%v activity joins=%d", err, b.joined)
