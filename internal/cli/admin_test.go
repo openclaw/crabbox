@@ -4,12 +4,112 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestAdminLeasesUsesConfiguredAuthorization(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		noCredentials bool
+		tokenCommand  bool
+		adminToken    string
+		responseCode  int
+	}{
+		{name: "missing broker credentials", noCredentials: true, responseCode: http.StatusOK},
+		{name: "configured session", responseCode: http.StatusOK},
+		{name: "configured token command", tokenCommand: true, responseCode: http.StatusOK},
+		{name: "explicit admin token overrides session", adminToken: "explicit-admin", responseCode: http.StatusOK},
+		{name: "explicit admin token overrides command", tokenCommand: true, adminToken: "explicit-admin", responseCode: http.StatusOK},
+		{name: "server denies non-admin session", responseCode: http.StatusForbidden},
+		{name: "denied explicit token does not fall back", adminToken: "denied-admin", responseCode: http.StatusForbidden},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				wantToken := "configured-session"
+				if tt.adminToken != "" {
+					wantToken = tt.adminToken
+				}
+				if r.Method != http.MethodGet || r.URL.Path != "/v1/admin/leases" || r.Header.Get("Authorization") != "Bearer "+wantToken {
+					t.Errorf("unexpected admin request: %s %s, authorization matched=%t", r.Method, r.URL.Path, r.Header.Get("Authorization") == "Bearer "+wantToken)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.responseCode)
+				if tt.responseCode == http.StatusForbidden {
+					_, _ = io.WriteString(w, `{"error":"forbidden"}`)
+					return
+				}
+				_, _ = io.WriteString(w, `{"leases":[]}`)
+			}))
+			defer server.Close()
+			broker := map[string]any{"url": server.URL, "token": "configured-session"}
+			if tt.noCredentials {
+				delete(broker, "token")
+			}
+			if tt.tokenCommand {
+				broker["token"] = "superseded-session"
+				command := []string{os.Args[0], "-test.run=^TestCoordinatorTokenCommandHelper$"}
+				t.Setenv("CRABBOX_TOKEN_HELPER", "1")
+				t.Setenv("CRABBOX_TOKEN_HELPER_VALUE", "configured-session")
+				if tt.adminToken != "" {
+					// An explicit admin credential must not execute the normal credential command.
+					command = []string{filepath.Join(t.TempDir(), "must-not-run")}
+				}
+				encodedCommand, err := json.Marshal(command)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("CRABBOX_COORDINATOR_TOKEN_COMMAND", string(encodedCommand))
+			}
+			if tt.adminToken != "" {
+				broker["adminToken"] = tt.adminToken
+			}
+			config, err := json.Marshal(map[string]any{"broker": broker})
+			if err != nil {
+				t.Fatal(err)
+			}
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(configPath, config, 0600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CRABBOX_CONFIG", configPath)
+			app := App{Stdout: io.Discard, Stderr: io.Discard}
+			err = app.adminLeases(context.Background(), []string{"--json"})
+			if tt.noCredentials {
+				var exitErr ExitError
+				if !errors.As(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(err.Error(), "broker authentication") {
+					t.Errorf("err=%v, want missing broker authentication before request", err)
+				}
+				if requests != 0 {
+					t.Errorf("requests=%d, want no unauthenticated admin request", requests)
+				}
+				return
+			}
+			if tt.responseCode == http.StatusForbidden {
+				var httpErr CoordinatorHTTPError
+				if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusForbidden {
+					t.Fatalf("err=%v, want coordinator authorization denial", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if requests != 1 {
+				t.Fatalf("requests=%d, want one authoritative admin request", requests)
+			}
+		})
+	}
+}
 
 func TestAdminMacHostsRequiresForceForAllocate(t *testing.T) {
 	app := App{Stdout: io.Discard, Stderr: io.Discard}

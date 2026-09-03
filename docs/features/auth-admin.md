@@ -114,8 +114,11 @@ The broker matches an incoming bearer token in this precedence:
 On the CLI side the admin token is read from `broker.adminToken` in config or
 the `CRABBOX_COORDINATOR_ADMIN_TOKEN` / `CRABBOX_ADMIN_TOKEN` environment
 variable; the normal broker token comes from `broker.token` or
-`CRABBOX_COORDINATOR_TOKEN`. Admin commands fail fast if no admin token is
-configured.
+`CRABBOX_COORDINATOR_TOKEN`. Admin commands prefer the explicit admin token,
+disabling the normal token command when it is present. Otherwise they use the
+normal configured authentication, including a GitHub session with an existing
+immutable-owner admin grant. Authorization remains with the broker, and a denied
+explicit admin token does not trigger a retry with the normal credential.
 
 Never distribute the shared or admin token to untrusted users. Keep the admin
 token narrower and more closely held than the shared automation token.
@@ -162,9 +165,9 @@ POST /v1/leases/{id}/tailscale   owner, manage share, or admin
 GET/PUT/DELETE /v1/leases/{id}/share owner, manage share, or admin
 GET  /v1/runs and logs/events    own runs only
 GET  /v1/usage                   own usage only
-GET  /v1/pool                    admin token only
-POST /v1/leases with hostId      admin token only
-/v1/admin/*                      admin token only
+GET  /v1/pool                    admin authorization
+POST /v1/leases with hostId      admin, or owner's retained Mac host
+/v1/admin/*                      admin authorization
 ```
 
 A lease is **visible** to a caller who is the owner (matching immutable owner
@@ -207,7 +210,7 @@ keys between users.
 
 ## Trusted-operator and admin commands
 
-These require the admin token:
+These require admin authorization:
 
 ```sh
 crabbox admin leases --state active

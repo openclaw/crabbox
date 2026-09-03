@@ -129,8 +129,8 @@ callers. Raw, unverified Cloudflare Access email headers are stripped and never 
 
 The Node-specific alternative is trusted reverse-proxy identity. Requests from
 configured proxy CIDRs may use `CRABBOX_TRUSTED_USER_HEADER` without a Crabbox
-bearer token. The resulting identity is non-admin; admin routes still require
-`CRABBOX_ADMIN_TOKEN`.
+bearer token. The resulting identity is non-admin; admin routes require a
+separate admin token or an authorized GitHub admin session.
 
 ## GitHub browser login
 
@@ -287,8 +287,8 @@ smoke additionally proves the same route can lease, run, and release a real mach
   routes; Node may use any TLS/WebSocket-capable ingress.
 - The Access service token only clears Cloudflare Access; it is not a Crabbox admin token.
 - Trusted proxy identity is Node-only, CIDR-gated, and never grants admin.
-- Signed GitHub user tokens are never admin tokens — admin routes require the separate admin
-  token.
+- Signed GitHub user tokens grant admin access only when their immutable owner
+  matches the coordinator's `CRABBOX_GITHUB_ADMIN_OWNERS` grant.
 
 ## Related docs
 

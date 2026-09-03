@@ -265,7 +265,8 @@ GET  /v1/admin/azure-orphan-sweep
 POST /v1/admin/azure-orphan-sweep
 ```
 
-`GET /v1/pool` and `/v1/admin/*` require the admin token. User tokens scope
+`GET /v1/pool` and `/v1/admin/*` require admin authorization, from the admin token
+or an existing immutable-owner GitHub admin grant. Non-admin user tokens scope
 list, lookup, heartbeat, release, run mutation, and usage to the token's
 owner/org. Run reads also permit every recorded backing lease owner so
 shared-lease and replacement activity remains auditable without granting those

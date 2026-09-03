@@ -724,17 +724,20 @@ func configuredAdminCoordinator() (*CoordinatorClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.CoordAdminToken == "" {
-		return nil, exit(2, "admin command requires broker.adminToken or CRABBOX_COORDINATOR_ADMIN_TOKEN")
+	if cfg.CoordAdminToken != "" {
+		cfg.CoordToken = cfg.CoordAdminToken
+		cfg.CoordTokenCommand = nil
 	}
-	cfg.CoordToken = cfg.CoordAdminToken
-	cfg.CoordTokenCommand = nil
 	coord, ok, err := newCoordinatorClient(cfg)
 	if err != nil {
 		return nil, err
 	}
 	if !ok {
 		return nil, exit(2, "admin command requires a configured coordinator")
+	}
+	// Reject missing credentials before callers perform guest-side preparation.
+	if !coord.hasConfiguredAuth() {
+		return nil, exit(2, "admin command requires broker authentication; run crabbox login or configure broker credentials")
 	}
 	return coord, nil
 }

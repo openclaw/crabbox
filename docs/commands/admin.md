@@ -4,7 +4,7 @@
 
 ## Requirements
 
-Every `admin` subcommand needs both a configured coordinator and a separate admin bearer token. The token is read from `broker.adminToken` in config or the `CRABBOX_COORDINATOR_ADMIN_TOKEN` environment variable. The ordinary operator/shared token (`broker.token` / `CRABBOX_COORDINATOR_TOKEN`) is not sufficient for admin routes — commands fail with a configuration error when only the shared token is present.
+Coordinator-backed `admin` commands require server-authorized admin access. An explicit `broker.adminToken` or `CRABBOX_COORDINATOR_ADMIN_TOKEN` takes precedence over the normal broker credential and token command. Otherwise, the CLI uses its configured broker authentication, including a GitHub login whose immutable owner has an existing `CRABBOX_GITHUB_ADMIN_OWNERS` grant. The coordinator still rejects shared tokens and GitHub users without that grant; the CLI does not grant privileges or retry a denied explicit admin token with another credential. Policy-printing commands run locally without authentication.
 
 ## At a glance
 

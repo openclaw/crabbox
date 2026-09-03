@@ -23,11 +23,12 @@ crabbox image delete 123456789 --provider hetzner --region fsn1
 ```
 
 Every `image` subcommand except direct Hetzner snapshot deletion requires a
-configured coordinator (broker) **and** admin-token auth. Set `broker.adminToken` or `CRABBOX_COORDINATOR_ADMIN_TOKEN`
-locally; the Worker validates it against `CRABBOX_ADMIN_TOKEN`. Without an admin
-token the command exits early with `admin command requires broker.adminToken or
-CRABBOX_COORDINATOR_ADMIN_TOKEN`. These commands are intentionally unavailable
-to normal GitHub browser-login users.
+configured coordinator (broker) and server-authorized admin access. An explicit
+`broker.adminToken` or `CRABBOX_COORDINATOR_ADMIN_TOKEN` takes precedence;
+otherwise the CLI uses its configured broker authentication. GitHub login works
+when the coordinator already grants that immutable owner admin access through
+`CRABBOX_GITHUB_ADMIN_OWNERS`. Shared tokens and GitHub users without that grant
+remain unauthorized. See [admin](admin.md#requirements).
 
 Image bytes live in the provider account, never in git or coordinator durable
 state. AWS images are AMIs backed by EBS snapshots; Azure promotion uses
