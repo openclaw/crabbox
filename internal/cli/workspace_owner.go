@@ -380,7 +380,12 @@ func (o *workspaceOwner) renewLoopWithTicks(ticks <-chan time.Time, callTimeout 
 				continue
 			}
 			if err == nil {
-				err = fmt.Errorf("unexpected protocol response %q", response)
+				err = errors.New("unexpected protocol response")
+			}
+			// Only recognized states are safe to add to transport diagnostics.
+			switch response {
+			case "MISMATCH", "EXPIRED", "AMBIGUOUS":
+				err = fmt.Errorf("protocol state %s: %w", response, err)
 			}
 			o.mu.Lock()
 			o.renewErr = exit(7, "remote workspace owner renewal failed closed: %v", err)
