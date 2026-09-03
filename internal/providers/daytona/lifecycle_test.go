@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -219,6 +220,23 @@ func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *dayton
 	return f, backend, repo
 }
 
+func runDaytonaClassWarmup(t *testing.T, cfg Config, repo Repo) error {
+	t.Helper()
+	t.Chdir(repo.Root)
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	config := fmt.Sprintf("provider: daytona\nnetwork: public\ndaytona:\n  apiUrl: %q\n  workRoot: %q\n", cfg.Daytona.APIURL, cfg.Daytona.WorkRoot)
+	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_DAYTONA_API_KEY", cfg.Daytona.APIKey)
+	args := []string{"warmup", "--provider", daytonaProvider, "--class", cfg.Class, "--daytona-snapshot", cfg.Daytona.Snapshot, "--daytona-target", cfg.Daytona.Target}
+	if cfg.Architecture != "" {
+		args = append(args, "--arch", cfg.Architecture)
+	}
+	return (core.App{Stdout: io.Discard, Stderr: io.Discard}).Run(t.Context(), args)
+}
+
 func TestDaytonaCreationIsPrivateAndHasNativeTTL(t *testing.T) {
 	f, b, repo := newDaytonaLifecycleFixture(t)
 	sandbox, leaseID, _, err := b.createDaytonaToolboxSandbox(t.Context(), repo, true, false, "")
@@ -277,7 +295,6 @@ func TestDaytonaClassPreservesCustomSnapshotAndRejectsMismatches(t *testing.T) {
 		t.Run(blank(mismatch, "matching"), func(t *testing.T) {
 			f, b, repo := newDaytonaLifecycleFixture(t)
 			b.cfg.Class, b.cfg.Daytona.Snapshot, b.cfg.Daytona.Target = "standard", "custom-exact-id", "us"
-			core.MarkClassExplicit(&b.cfg)
 			f.classSnapshot = &api.SnapshotDto{Id: "custom-exact-id", Name: "my-prepared-project", State: api.SNAPSHOTSTATE_ACTIVE, Cpu: 2, Mem: 4, Disk: 8, RegionIds: []string{"us"}, Entrypoint: []string{}}
 			f.classSnapshot.SetSandboxClass("container")
 			switch mismatch {
@@ -300,7 +317,8 @@ func TestDaytonaClassPreservesCustomSnapshotAndRejectsMismatches(t *testing.T) {
 			case "response", "response-class", "empty-class", "missing-class", "snapshot-name":
 				f.responseMismatch = mismatch
 			}
-			_, leaseID, _, err := b.createDaytonaSandbox(t.Context(), repo, true, false, "")
+			err := runDaytonaClassWarmup(t, b.cfg, repo)
+			leaseID := f.create.GetLabels()["lease"]
 			if mismatch == "" || mismatch == "snapshot-name" || mismatch == "missing-class" {
 				if err != nil || f.create.GetSnapshot() != "custom-exact-id" {
 					t.Fatalf("custom snapshot was not preserved: snapshot=%s err=%v", f.create.GetSnapshot(), err)
@@ -324,7 +342,6 @@ func TestDaytonaClassKeepsNativeTargetResolution(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			f, b, repo := newDaytonaLifecycleFixture(t)
 			b.cfg.Class, b.cfg.Daytona.Target = "small", "east"
-			core.MarkClassExplicit(&b.cfg)
 			f.classSnapshot = &api.SnapshotDto{Id: "test-snapshot", Name: "prepared", State: api.SNAPSHOTSTATE_ACTIVE, Cpu: 1, Mem: 1, Disk: 3, RegionIds: []string{"region-one"}, Entrypoint: []string{}}
 			f.classSnapshot.SetSandboxClass("container")
 			f.responseTarget = "region-one"
@@ -338,7 +355,8 @@ func TestDaytonaClassKeepsNativeTargetResolution(t *testing.T) {
 			case "response-mismatch":
 				f.responseTarget = "wrong-region"
 			}
-			_, leaseID, _, err := b.createDaytonaSandbox(t.Context(), repo, true, false, "")
+			err := runDaytonaClassWarmup(t, b.cfg, repo)
+			leaseID := f.create.GetLabels()["lease"]
 			if scenario == "unavailable" {
 				if err == nil || !strings.Contains(err.Error(), "not available in requested region") || f.sandbox != nil || f.sandboxCreates != 0 || f.deletes != 0 {
 					t.Fatalf("native rejection created a resource: creates=%d deletes=%d err=%v", f.sandboxCreates, f.deletes, err)

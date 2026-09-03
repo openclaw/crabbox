@@ -229,8 +229,10 @@ DigitalOcean maps every canonical class to the smallest Phase 1 default size
 Droplet size.
 
 Daytona maps adjacent classes to its three native container snapshot tiers.
-With a custom or captured snapshot, explicit class validates the same resource
-shape and preserves the selected snapshot. It never sends resize overrides.
+With a custom or captured snapshot, `--class` validates the resource shape and
+preserves the selected snapshot. YAML/environment class values only select a
+tier when no snapshot is configured; existing snapshots retain their sizing.
+It never sends resize overrides.
 Brokered Daytona rejects `--class`; existing YAML/environment class values do
 not override the coordinator's shared snapshot. See [Daytona configuration](daytona.md#config).
 

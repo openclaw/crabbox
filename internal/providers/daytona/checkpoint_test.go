@@ -234,13 +234,15 @@ func TestDaytonaClassForkKeepsCapturedSnapshot(t *testing.T) {
 	f.snapshot.SetSandboxClass("container")
 	cfg := f.request.Config
 	cfg.Class = "standard"
-	core.MarkClassExplicit(&cfg)
 	if err := (Provider{}).ApplyNativeCheckpointForkConfig(core.NativeCheckpointForkRequest{Config: &cfg, Record: core.NativeCheckpointForkRecord{Kind: result.Image.Kind, ImageID: result.Image.ID, Name: result.Image.Name, Direct: true, Metadata: result.Metadata}}); err != nil {
 		t.Fatal(err)
 	}
 	f.classSnapshot = f.snapshot
-	b := &daytonaLeaseBackend{cfg: cfg, rt: Runtime{HTTP: f.server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
-	if _, _, _, err := b.createDaytonaSandbox(t.Context(), Repo{Root: t.TempDir()}, true, false, ""); err != nil {
+	claim, _, err := resolveLeaseClaimForProvider(f.request.LeaseID, daytonaProvider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runDaytonaClassWarmup(t, cfg, Repo{Root: claim.RepoRoot}); err != nil {
 		t.Fatal(err)
 	}
 	if f.create.GetSnapshot() != result.Image.ID || f.sandboxCreates != 2 {

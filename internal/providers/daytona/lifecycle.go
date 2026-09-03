@@ -27,7 +27,7 @@ func (b *daytonaLeaseBackend) createDaytonaSandbox(ctx context.Context, repo Rep
 		return nil, "", "", err
 	}
 	cfg := b.cfg
-	snapshot, err := selectClassSnapshot(ctx, client, &cfg)
+	snapshot, err := selectClassSnapshot(ctx, client, cfg)
 	if err != nil {
 		return nil, "", "", err
 	}
@@ -41,6 +41,10 @@ func (b *daytonaLeaseBackend) createDaytonaSandbox(ctx context.Context, repo Rep
 		return nil, "", "", err
 	}
 	cfg.ServerType, cfg.WorkRoot, cfg.SSHUser, cfg.SSHPort = (Provider{}).ServerTypeForConfig(cfg), daytonaWorkRoot(cfg), daytonaUser(cfg), "22"
+	if snapshot != nil {
+		// Carry the resolved selection; setting Snapshot changes configuration precedence.
+		cfg.Daytona.Snapshot, cfg.ServerType = snapshot.GetId(), snapshot.GetId()
+	}
 	labels := directLeaseLabels(cfg, leaseID, slug, daytonaProvider, "", keep, time.Now().UTC())
 	labels["lease_name"], labels["work_root"] = leaseProviderName(leaseID, slug), cfg.WorkRoot
 	body := daytona.NewCreateSandbox()

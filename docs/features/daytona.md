@@ -98,20 +98,23 @@ The same provider-owned mapping is exposed in `crabbox providers --json`.
 These profiles select Linux/amd64 containers without GPUs; they do not resize
 snapshots or fall back to a different tier.
 
-With a configured custom snapshot or a checkpoint fork, class validates that
-snapshot's CPU, memory, disk and container type without replacing its contents.
+With a configured custom snapshot or a checkpoint fork, an actual `--class`
+validates that snapshot's CPU, memory, disk and container type without replacing
+its contents. A YAML/environment class never constrains an existing snapshot;
+the explicitly selected snapshot retains its own sizing.
 The snapshot must be active and available in the requested Daytona target.
 Crabbox resolves its exact ID before allocation and verifies the created
 sandbox's resources and region. Daytona resolves target names or IDs and
 enforces snapshot availability before allocation. Mismatches fail and any
 created sandbox is cleaned up.
 
-In direct mode, explicit class intent includes `--class`, YAML `class`, and
-`CRABBOX_DEFAULT_CLASS`. The inherited built-in class does not change native
-snapshot selection. Without explicit class, existing custom snapshots retain
-their own sizing. Only exact lowercase canonical labels select a tier;
-noncanonical YAML/environment values retain native snapshot selection and
-still require a snapshot. An actual `--class` must name a canonical label.
+In direct mode, `--class` selects or validates a tier. YAML `class` and
+`CRABBOX_DEFAULT_CLASS` select a default tier only when no snapshot is configured.
+This preserves existing snapshots even when their resources differ from the
+configured class. The inherited built-in class does not change native snapshot
+selection. Only exact lowercase canonical labels select a tier; noncanonical
+YAML/environment values still require a snapshot. An actual `--class` must name
+a canonical label.
 `--type` remains unsupported. Brokered mode continues to reject
 `--class`; existing YAML `class` and `CRABBOX_DEFAULT_CLASS` values remain accepted
 without changing the coordinator's shared snapshot or its sizing. Inspection

@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	api "github.com/daytonaio/daytona/libs/api-client-go"
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/testutil"
 )
@@ -92,11 +93,13 @@ func TestDaytonaBrokerPreservesConfiguredClasses(t *testing.T) {
 	}
 }
 
-func TestDaytonaDirectPreservesNoncanonicalConfiguredClasses(t *testing.T) {
-	for _, class := range []string{"custom-ci", "STANDARD", " standard "} {
+func TestDaytonaDirectPreservesConfiguredSnapshots(t *testing.T) {
+	for _, class := range []string{"standard", "custom-ci", "STANDARD", " standard "} {
 		for _, source := range []string{"yaml", "environment", "flag"} {
 			t.Run(source+"/"+class, func(t *testing.T) {
 				f, b, repo := newDaytonaLifecycleFixture(t)
+				f.classSnapshot = &api.SnapshotDto{Id: "test-snapshot", Name: "custom-off-tier", State: api.SNAPSHOTSTATE_ACTIVE, Cpu: 1, Mem: 1, Disk: 3, RegionIds: []string{"us"}, Entrypoint: []string{}}
+				f.classSnapshot.SetSandboxClass("container")
 				config := fmt.Sprintf("provider: daytona\nnetwork: public\ndaytona:\n  apiUrl: %s\n  snapshot: test-snapshot\n", f.server.URL)
 				if source == "yaml" {
 					config += fmt.Sprintf("class: %q\n", class)
@@ -111,8 +114,12 @@ func TestDaytonaDirectPreservesNoncanonicalConfiguredClasses(t *testing.T) {
 				t.Setenv("CRABBOX_DAYTONA_API_KEY", b.cfg.Daytona.APIKey)
 				if source == "flag" {
 					err := (core.App{Stdout: io.Discard, Stderr: io.Discard}).Run(t.Context(), []string{"warmup", "--provider", "daytona", "--class", class})
-					if err == nil || !strings.Contains(err.Error(), "no class profile") || len(f.paths) != 0 {
-						t.Fatalf("unknown CLI class must fail before provider requests: paths=%v err=%v", f.paths, err)
+					wantError, reads := "no class profile", 0
+					if class == "standard" {
+						wantError, reads = "must be active container", 1
+					}
+					if err == nil || !strings.Contains(err.Error(), wantError) || len(f.paths) != reads || f.sandboxCreates != 0 {
+						t.Fatalf("CLI class must constrain the selected snapshot: paths=%v err=%v", f.paths, err)
 					}
 					return
 				}
@@ -129,10 +136,17 @@ func TestDaytonaDirectPreservesNoncanonicalConfiguredClasses(t *testing.T) {
 				}
 				for _, request := range f.paths {
 					if strings.Contains(request, "/snapshots/") || strings.Contains(request, "/regions") {
-						t.Fatal("noncanonical config unexpectedly selected a class snapshot")
+						t.Fatal("configured class unexpectedly replaced the selected snapshot")
 					}
 				}
 				b.cfg.Daytona.Snapshot = ""
+				if class == "standard" {
+					f.classSnapshot.Name, f.classSnapshot.Cpu, f.classSnapshot.Mem, f.classSnapshot.Disk = "daytona-medium", 2, 4, 8
+					if _, _, _, err := b.createDaytonaSandbox(t.Context(), repo, true, false, ""); err != nil || f.sandboxCreates != 2 || f.create.GetSnapshot() != "test-snapshot" || f.create.GetLabels()["server_type"] != "test-snapshot" {
+						t.Fatalf("configured tier lost resolved selection: creates=%d type=%q err=%v", f.sandboxCreates, f.create.GetLabels()["server_type"], err)
+					}
+					return
+				}
 				if _, _, _, err := b.createDaytonaSandbox(t.Context(), repo, true, false, ""); err == nil || !strings.Contains(err.Error(), "requires --daytona-snapshot") || f.sandboxCreates != 1 {
 					t.Fatalf("legacy path must still require a snapshot before allocation: creates=%d err=%v", f.sandboxCreates, err)
 				}

@@ -56,8 +56,9 @@ interruption with `--no-reboot=false`. The snapshot barrier applies even with
 not captured. Forks start independent sandboxes and relocate the saved workspace
 into the new lease's workdir.
 
-An explicit fork class validates the captured snapshot's resources and keeps
+An explicit fork `--class` validates the captured snapshot's resources and keeps
 its exact ID; it never substitutes a default snapshot or resizes the capture.
+Configured YAML/environment classes do not constrain an already selected snapshot.
 See [Daytona classes](../features/daytona.md#config) for the three container
 tiers and their six canonical class labels.
 
@@ -259,7 +260,8 @@ development endpoints.
 - Brokered release and rollback are idempotent when the owned sandbox was
   already deleted or expired.
 - Direct `--class` selects or validates snapshot sizing; `--type` remains
-  unsupported. Brokered mode rejects `--class` but preserves existing
+  unsupported. YAML/environment classes select a tier only without a snapshot;
+  existing snapshots keep precedence. Brokered mode rejects `--class` but preserves existing
   YAML/environment class configuration without changing coordinator-owned sizing.
 - `--id <sandbox-id-or-slug>` is required to address an existing sandbox.
 - Daytona `run` is delegated to the toolbox APIs; it is not core-over-SSH

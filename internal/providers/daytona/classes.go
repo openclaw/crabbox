@@ -49,10 +49,11 @@ func (Provider) ServerTypeForClass(class string) string {
 	return ""
 }
 
-// Existing configuration only gains class semantics for canonical labels.
-// Actual CLI requests remain explicit, including invalid labels to reject.
+// Configured snapshots retain precedence over configured classes. Only an
+// actual CLI class request constrains an already selected snapshot.
 func classSnapshotRequested(cfg Config) bool {
-	return core.ClassWasExplicit(cfg) && (core.ClassFlagWasExplicit(cfg) || core.IsCanonicalProviderClass(cfg.Class))
+	return core.ClassWasExplicit(cfg) && (core.ClassFlagWasExplicit(cfg) ||
+		core.IsCanonicalProviderClass(cfg.Class) && strings.TrimSpace(cfg.Daytona.Snapshot) == "")
 }
 
 func (p Provider) ServerTypeForConfig(cfg Config) string {
@@ -72,11 +73,11 @@ func (b *daytonaLeaseBackend) ValidateCoordinatorAcquire() error {
 	return nil
 }
 
-func selectClassSnapshot(ctx context.Context, client daytonaAPI, cfg *Config) (*api.SnapshotDto, error) {
-	if !classSnapshotRequested(*cfg) {
+func selectClassSnapshot(ctx context.Context, client daytonaAPI, cfg Config) (*api.SnapshotDto, error) {
+	if !classSnapshotRequested(cfg) {
 		return nil, nil
 	}
-	candidates, matched := core.ProviderClassCandidatesForProfiles(classProfiles, *cfg)
+	candidates, matched := core.ProviderClassCandidatesForProfiles(classProfiles, cfg)
 	if !matched {
 		return nil, exit(2, "provider=daytona has no class profile for class=%s target=%s architecture=%s", cfg.Class, cfg.TargetOS, cfg.Architecture)
 	}
@@ -98,9 +99,6 @@ func selectClassSnapshot(ctx context.Context, client daytonaAPI, cfg *Config) (*
 		snapshot.GetCpu() != shape.cpu || snapshot.GetMem() != shape.memory || snapshot.GetDisk() != shape.disk || snapshot.GetGpu() != 0 {
 		return nil, exit(2, "Daytona snapshot %s must be active container with %g CPU, %g GiB memory, %g GiB disk and no GPU for class=%s", selected, shape.cpu, shape.memory, shape.disk, cfg.Class)
 	}
-	// Custom and captured snapshots keep their exact identity. Class validates
-	// their resources; it must never replace a prepared filesystem with a default.
-	cfg.Daytona.Snapshot = snapshot.GetId()
 	return snapshot, nil
 }
 
