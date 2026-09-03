@@ -3,7 +3,7 @@
 ## Unreleased
 
 - Preserve finish-submission and receipt-verification errors, attempt counts, and recovery guidance when terminal run recording times out, without changing retry limits or receipt verification.
-- Closed and joined lease-owned SSH connection masters after confirmed brokered deletion, preserving warm reuse and exact route/host-key isolation while retaining failed local cleanup for a local-only retry.
+- Closed and joined lease-owned SSH connection masters after confirmed brokered deletion, preserving native connection reuse and lease/host-key isolation while retaining failed local cleanup for a local-only retry. [PR 1774](https://github.com/openclaw/crabbox/pull/1774). Thanks @steipete.
 
 ## 0.49.0 - 2026-09-03
 
