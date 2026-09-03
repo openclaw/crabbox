@@ -112,6 +112,11 @@ func validateRunArtifactGlobsForFlag(flag string, globs []string) error {
 		if !safeArtifactGlob(glob) {
 			return exit(2, "%s contains unsupported characters or non-relative path: %s", flag, glob)
 		}
+		for _, component := range strings.Split(filepath.ToSlash(strings.TrimSpace(glob)), "/") {
+			if component == ".git" || component == ".crabbox" {
+				return exit(2, "%s excludes protected path components: %s", flag, glob)
+			}
+		}
 	}
 	return nil
 }
@@ -133,12 +138,17 @@ func validateRunArtifactGlobTargetForFlag(target SSHTarget, globs []string, flag
 
 func safeArtifactGlob(glob string) bool {
 	glob = strings.TrimSpace(glob)
-	if glob == "" || strings.HasPrefix(glob, "-") || strings.HasPrefix(glob, "/") || strings.Contains(glob, "..") || strings.ContainsAny(glob, "{}") {
+	if glob == "" || strings.HasPrefix(glob, "-") || strings.HasPrefix(glob, "/") || strings.ContainsAny(glob, "{}") {
 		return false
 	}
 	rel := strings.TrimPrefix(filepath.ToSlash(glob), "./")
 	if strings.HasPrefix(rel, "/") {
 		return false
+	}
+	for _, component := range strings.Split(rel, "/") {
+		if component == ".." {
+			return false
+		}
 	}
 	return regexp.MustCompile(`^[A-Za-z0-9_./*?@+=:,-]+$`).MatchString(glob)
 }

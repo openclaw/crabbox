@@ -23,7 +23,7 @@ func TestArtifactChangePathValidation(t *testing.T) {
 			t.Errorf("accepted %q", p)
 		}
 	}
-	if err := validateArtifactChangePaths([]string{"reports/proof.json", "empty"}); err != nil {
+	if err := validateArtifactChangePaths([]string{"reports/proof.json", "reports/result..json", "empty"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := validateArtifactChangePaths(make([]string, maxArtifactChangePaths+1)); err == nil {
