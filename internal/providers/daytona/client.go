@@ -21,6 +21,7 @@ import (
 )
 
 type daytonaAPI interface {
+	GetSnapshot(context.Context, string) (*daytona.SnapshotDto, error)
 	CreateSandbox(context.Context, daytona.CreateSandbox) (*daytona.Sandbox, error)
 	GetSandbox(context.Context, string) (*daytona.Sandbox, error)
 	ListCrabboxSandboxes(context.Context) ([]daytona.Sandbox, error)

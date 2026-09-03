@@ -171,6 +171,11 @@ func (b *coordinatorLeaseBackend) RebindResolvedLeaseTarget(target *LeaseTarget,
 }
 
 func (b *coordinatorLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
+	if validator, ok := b.direct.(CoordinatorAcquireValidator); ok {
+		if err := validator.ValidateCoordinatorAcquire(); err != nil {
+			return LeaseTarget{}, err
+		}
+	}
 	claim, checkpointBacked := checkpointLeaseClaimFromContext(ctx)
 	if req.RequestedLeaseID != "" && ((req.RequestedCheckpointID != "") != checkpointBacked || checkpointBacked && req.RequestedCheckpointID != claim.CheckpointID) {
 		return LeaseTarget{}, exit(2, "fixed coordinator checkpoint acquisition requires its exact checkpoint use context")

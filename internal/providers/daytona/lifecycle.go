@@ -16,7 +16,7 @@ import (
 const daytonaActivityRequestTimeout = 10 * time.Second
 
 func (b *daytonaLeaseBackend) createDaytonaSandbox(ctx context.Context, repo Repo, keep, reclaim bool, requestedSlug string) (sandbox *daytona.Sandbox, leaseID, slug string, err error) {
-	if strings.TrimSpace(b.cfg.Daytona.Snapshot) == "" {
+	if strings.TrimSpace(b.cfg.Daytona.Snapshot) == "" && !core.ClassWasExplicit(b.cfg) {
 		return nil, "", "", exit(2, "provider=daytona requires --daytona-snapshot or daytona.snapshot")
 	}
 	if b.cfg.TTL <= 0 || b.cfg.IdleTimeout <= 0 || durationMinutesCeil(b.cfg.TTL) > math.MaxInt32 || durationMinutesCeil(b.cfg.IdleTimeout) > math.MaxInt32 {
@@ -26,17 +26,21 @@ func (b *daytonaLeaseBackend) createDaytonaSandbox(ctx context.Context, repo Rep
 	if err != nil {
 		return nil, "", "", err
 	}
+	cfg := b.cfg
+	snapshot, err := selectClassSnapshot(ctx, client, &cfg)
+	if err != nil {
+		return nil, "", "", err
+	}
 	existing, err := client.ListCrabboxSandboxes(ctx)
 	if err != nil {
 		return nil, "", "", daytonaError("list sandboxes", err)
 	}
 	leaseID = newLeaseID()
-	slug, err = allocateDirectLeaseSlug(leaseID, requestedSlug, daytonaSandboxesToServers(existing, b.cfg))
+	slug, err = allocateDirectLeaseSlug(leaseID, requestedSlug, daytonaSandboxesToServers(existing))
 	if err != nil {
 		return nil, "", "", err
 	}
-	cfg := b.cfg
-	cfg.ServerType, cfg.WorkRoot, cfg.SSHUser, cfg.SSHPort = "snapshot", daytonaWorkRoot(cfg), daytonaUser(cfg), "22"
+	cfg.ServerType, cfg.WorkRoot, cfg.SSHUser, cfg.SSHPort = (Provider{}).ServerTypeForConfig(cfg), daytonaWorkRoot(cfg), daytonaUser(cfg), "22"
 	labels := directLeaseLabels(cfg, leaseID, slug, daytonaProvider, "", keep, time.Now().UTC())
 	labels["lease_name"], labels["work_root"] = leaseProviderName(leaseID, slug), cfg.WorkRoot
 	body := daytona.NewCreateSandbox()
@@ -81,6 +85,9 @@ func (b *daytonaLeaseBackend) createDaytonaSandbox(ctx context.Context, repo Rep
 	}
 	sandbox, err = waitForDaytonaReady(ctx, client, resourceID, 5*time.Minute)
 	if err != nil {
+		return nil, leaseID, slug, err
+	}
+	if err = validateClassSandbox(sandbox, snapshot, cfg); err != nil {
 		return nil, leaseID, slug, err
 	}
 	labels["state"], labels["last_touched_at"] = "ready", leaseLabelTime(time.Now().UTC())

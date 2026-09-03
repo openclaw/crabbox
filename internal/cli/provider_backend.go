@@ -32,6 +32,12 @@ type ProviderConfigValidator interface {
 	ValidateConfig(cfg Config) error
 }
 
+// CoordinatorAcquireValidator keeps provider-owned creation policy at broker
+// acquisition; configuration checks must not prevent existing-lease cleanup.
+type CoordinatorAcquireValidator interface {
+	ValidateCoordinatorAcquire() error
+}
+
 // ProviderConfigDefaulter owns provider-specific defaults that must be applied
 // after generic config parsing and before target validation.
 type ProviderConfigDefaulter interface {

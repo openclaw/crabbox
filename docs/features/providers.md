@@ -156,6 +156,14 @@ fast      M
 large     L
 beast     XL
 
+Daytona (direct Linux containers)
+tiny      daytona-small (1 vCPU, 1 GiB RAM, 3 GiB disk)
+small     daytona-small (1 vCPU, 1 GiB RAM, 3 GiB disk)
+standard  daytona-medium (2 vCPU, 4 GiB RAM, 8 GiB disk)
+fast      daytona-medium (2 vCPU, 4 GiB RAM, 8 GiB disk)
+large     daytona-large (4 vCPU, 8 GiB RAM, 10 GiB disk)
+beast     daytona-large (4 vCPU, 8 GiB RAM, 10 GiB disk)
+
 Cloudflare Containers (each canonical class -> standard-4)
 lite, basic, standard-1, standard-2, standard-3, standard-4
 ```
@@ -168,7 +176,7 @@ Linux/amd64, Linux/arm64, Windows normal/amd64, Windows normal/arm64, and
 Windows WSL2/amd64. It intentionally has no Windows WSL2/arm64 profile because
 that combination is rejected. GCP, Hetzner, Namespace Devbox,
 Namespace Instance, Cloudflare, DigitalOcean, Linode, OVHcloud, Scaleway,
-Vultr, Phala, and Tencent Cloud declare Linux/amd64 profiles.
+Vultr, Phala, Tencent Cloud, and direct Daytona declare Linux/amd64 profiles.
 Windows with no mode normalizes to `normal`; selection prefers an exact
 architecture and may fall back only to a declared `mixed` profile. It never
 crosses Windows modes or amd64/arm64 profiles.
@@ -219,6 +227,12 @@ provider-native type overrides keep precedence.
 DigitalOcean maps every canonical class to the smallest Phase 1 default size
 `s-1vcpu-1gb`. Use `--type <droplet-size-slug>` when you need a larger exact
 Droplet size.
+
+Daytona maps adjacent classes to its three native container snapshot tiers.
+With a custom or captured snapshot, explicit class validates the same resource
+shape and preserves the selected snapshot. It never sends resize overrides.
+Brokered Daytona rejects explicit class selection; the coordinator owns its
+shared snapshot. See [Daytona configuration](daytona.md#config).
 
 Linode maps every canonical class to the smallest Phase 1 default size `g6-standard-1`.
 Use `--type <linode-type-slug>` when you need a different exact instance type.

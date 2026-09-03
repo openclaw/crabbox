@@ -1267,7 +1267,6 @@ func TestLeaseCreateFlagsRejectSnapshotSandboxResourceNoops(t *testing.T) {
 		name string
 		args []string
 	}{
-		{name: "class", args: []string{"--provider", "daytona", "--class", "standard"}},
 		{name: "type", args: []string{"--provider", "daytona", "--type", "large"}},
 		{name: "e2b class", args: []string{"--provider", "e2b", "--class", "standard"}},
 		{name: "e2b type", args: []string{"--provider", "e2b", "--type", "large"}},

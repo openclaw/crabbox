@@ -25,7 +25,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Targets:          []core.TargetSpec{{OS: core.TargetLinux}},
 		Features:         core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureArchiveSync, core.FeatureCheckpoint, core.FeatureFork, core.FeatureSnapshot},
 		Coordinator:      core.CoordinatorSupported,
-		ClassDisposition: core.ProviderClassDispositionUnmapped,
+		ClassDisposition: core.ProviderClassDispositionMapped,
 	}
 }
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {

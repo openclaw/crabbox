@@ -41,9 +41,6 @@ func RegisterDaytonaProviderFlags(fs *flag.FlagSet, defaults Config) any {
 
 func ApplyDaytonaProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == daytonaProvider {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=daytona; choose CPU, memory, and disk in the Daytona snapshot")
-		}
 		if flagWasSet(fs, "type") {
 			return exit(2, "--type is not supported for provider=daytona; choose CPU, memory, and disk in the Daytona snapshot")
 		}
@@ -100,7 +97,7 @@ func (b *daytonaLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (
 	}
 	cfg := b.cfg
 	cfg.WorkRoot = daytonaWorkRoot(cfg)
-	server := daytonaSandboxToServer(sandbox, cfg)
+	server := daytonaSandboxToServer(sandbox)
 	target, err := daytonaSSHTargetFor(ctx, client, cfg, server)
 	if err != nil {
 		return LeaseTarget{}, b.rollbackDaytonaSandbox(server.CloudID, leaseID, err)
@@ -135,7 +132,7 @@ func (b *daytonaLeaseBackend) resolve(ctx context.Context, req ResolveRequest, o
 	if err != nil {
 		return LeaseTarget{}, err
 	}
-	server := daytonaSandboxToServer(sandbox, b.cfg)
+	server := daytonaSandboxToServer(sandbox)
 	if req.StatusOnly {
 		server.Labels["state"] = server.Status
 	}
@@ -182,7 +179,7 @@ func (b *daytonaLeaseBackend) resolve(ctx context.Context, req ResolveRequest, o
 			return LeaseTarget{}, err
 		}
 	}
-	server = daytonaSandboxToServer(sandbox, b.cfg)
+	server = daytonaSandboxToServer(sandbox)
 	target, err := daytonaSSHTargetFor(ctx, client, b.cfg, server)
 	if err != nil {
 		return LeaseTarget{}, err
@@ -205,7 +202,7 @@ func (b *daytonaLeaseBackend) List(ctx context.Context, req ListRequest) ([]Leas
 		if _, owned := daytonaSandboxOwnership(&sandboxes[i]); !owned {
 			continue
 		}
-		servers = append(servers, daytonaSandboxToServer(&sandboxes[i], b.cfg))
+		servers = append(servers, daytonaSandboxToServer(&sandboxes[i]))
 	}
 	return servers, nil
 }
@@ -494,15 +491,15 @@ func parseDaytonaSSHCommand(command string) (string, string, string, error) {
 	return user, host, port, nil
 }
 
-func daytonaSandboxesToServers(sandboxes []daytona.Sandbox, cfg Config) []Server {
+func daytonaSandboxesToServers(sandboxes []daytona.Sandbox) []Server {
 	servers := make([]Server, 0, len(sandboxes))
 	for i := range sandboxes {
-		servers = append(servers, daytonaSandboxToServer(&sandboxes[i], cfg))
+		servers = append(servers, daytonaSandboxToServer(&sandboxes[i]))
 	}
 	return servers
 }
 
-func daytonaSandboxToServer(sandbox *daytona.Sandbox, cfg Config) Server {
+func daytonaSandboxToServer(sandbox *daytona.Sandbox) Server {
 	labels := map[string]string{}
 	if sandbox != nil && sandbox.Labels != nil {
 		for k, v := range sandbox.Labels {
@@ -518,7 +515,7 @@ func daytonaSandboxToServer(sandbox *daytona.Sandbox, cfg Config) Server {
 	if server.Name == "" {
 		server.Name = blank(labels["lease_name"], server.CloudID)
 	}
-	server.ServerType.Name = blank(labels["server_type"], serverTypeForProviderClass(cfg.Provider, cfg.Class))
+	server.ServerType.Name = blank(labels["server_type"], "snapshot")
 	return server
 }
 

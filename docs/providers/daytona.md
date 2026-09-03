@@ -27,6 +27,7 @@ desktop/browser/code, or Tailscale.
 ## Commands
 
 ```sh
+crabbox warmup --provider daytona --class standard
 crabbox warmup --provider daytona --daytona-snapshot crabbox-ready
 crabbox run --provider daytona --daytona-snapshot crabbox-ready -- pnpm test
 crabbox run --provider daytona --id swift-crab -- pnpm test:changed
@@ -54,6 +55,11 @@ interruption with `--no-reboot=false`. The snapshot barrier applies even with
 `--wait=false`, bounded by `--wait-timeout`. Memory and running processes are
 not captured. Forks start independent sandboxes and relocate the saved workspace
 into the new lease's workdir.
+
+An explicit fork class validates the captured snapshot's resources and keeps
+its exact ID; it never substitutes a default snapshot or resizes the capture.
+See [Daytona classes](../features/daytona.md#config) for the three container
+tiers and their six canonical class labels.
 
 The local `daytona-snapshot` record binds the exact snapshot ID, organization,
 API endpoint, and source sandbox. Provider names include the checkpoint ID to
@@ -191,7 +197,8 @@ timeout, including response-body reads. Earlier caller cancellation or deadlines
 still apply. Toolbox execution and archive uploads keep their caller-controlled
 lifetimes rather than inheriting this control-plane budget.
 
-1. Create or resolve a Daytona sandbox from `daytona.snapshot`.
+1. Create or resolve a Daytona sandbox from `daytona.snapshot` or an explicitly
+   selected class's default snapshot.
 2. Create private previews, configure Daytona's native wall-clock TTL and idle
    auto-stop interval, and store Crabbox labels and an exact local repo claim.
    The adapter records allocation before waiting for readiness, so a failed
@@ -246,11 +253,13 @@ development endpoints.
 
 ## Gotchas
 
-- Direct mode requires `daytona.snapshot` (or `--daytona-snapshot`). Brokered
+- Direct mode requires `daytona.snapshot` (or `--daytona-snapshot`) unless a
+  class explicitly selects a default container tier. Brokered
   mode uses the coordinator's optional `CRABBOX_DAYTONA_SNAPSHOT`.
 - Brokered release and rollback are idempotent when the owned sandbox was
   already deleted or expired.
-- `--class` and `--type` are rejected; size the sandbox through the snapshot.
+- Direct `--class` selects or validates snapshot sizing; `--type` remains
+  unsupported. Brokered mode rejects explicit class selection.
 - `--id <sandbox-id-or-slug>` is required to address an existing sandbox.
 - Daytona `run` is delegated to the toolbox APIs; it is not core-over-SSH
   execution. Because of that, the following `run` options are rejected:

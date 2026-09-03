@@ -220,6 +220,32 @@ func TestDaytonaSnapshotLifecycleWaitsEvenWithoutWaitFlag(t *testing.T) {
 	}
 }
 
+func TestDaytonaClassForkKeepsCapturedSnapshot(t *testing.T) {
+	f := newSnapshotFixture(t)
+	result, err := (Provider{}).CreateNativeCheckpoint(t.Context(), f.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.snapshot.SetCpu(2)
+	f.snapshot.SetMem(4)
+	f.snapshot.SetDisk(8)
+	f.snapshot.SetSandboxClass("container")
+	cfg := f.request.Config
+	cfg.Class = "standard"
+	core.MarkClassExplicit(&cfg)
+	if err := (Provider{}).ApplyNativeCheckpointForkConfig(core.NativeCheckpointForkRequest{Config: &cfg, Record: core.NativeCheckpointForkRecord{Kind: result.Image.Kind, ImageID: result.Image.ID, Name: result.Image.Name, Direct: true, Metadata: result.Metadata}}); err != nil {
+		t.Fatal(err)
+	}
+	f.classSnapshot = f.snapshot
+	b := &daytonaLeaseBackend{cfg: cfg, rt: Runtime{HTTP: f.server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
+	if _, _, _, err := b.createDaytonaSandbox(t.Context(), Repo{Root: t.TempDir()}, true, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if f.create.GetSnapshot() != result.Image.ID || f.sandboxCreates != 2 {
+		t.Fatalf("fork replaced captured filesystem: snapshot=%s creates=%d", f.create.GetSnapshot(), f.sandboxCreates)
+	}
+}
+
 func TestDaytonaSnapshotFailureRetainsIdentityAndRestoresSource(t *testing.T) {
 	for _, failure := range []string{"lost-response", "http-timeout", "http-timeout-unconfirmed", "snapshot-error", "unconfirmed"} {
 		t.Run(failure, func(t *testing.T) {

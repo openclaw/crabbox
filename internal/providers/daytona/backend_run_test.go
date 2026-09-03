@@ -471,7 +471,7 @@ func TestDaytonaEnvAuthOverridesCLIConfig(t *testing.T) {
 	}
 }
 
-func TestApplyDaytonaProviderFlagsRejectsResourceNoops(t *testing.T) {
+func TestApplyDaytonaProviderFlagsAcceptsClassAndRejectsType(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = daytonaProvider
 	for _, tc := range []struct {
@@ -490,8 +490,8 @@ func TestApplyDaytonaProviderFlagsRejectsResourceNoops(t *testing.T) {
 				t.Fatal(err)
 			}
 			err := ApplyDaytonaProviderFlags(&cfg, fs, values)
-			if err == nil || !strings.Contains(err.Error(), "provider=daytona") {
-				t.Fatalf("err=%v, want daytona resource flag rejection", err)
+			if (err != nil) != (tc.name == "type") || err != nil && !strings.Contains(err.Error(), "provider=daytona") {
+				t.Fatalf("flag=%s err=%v", tc.name, err)
 			}
 		})
 	}
@@ -704,7 +704,7 @@ func TestDaytonaRunResolutionPreparesWithoutPublishingClaim(t *testing.T) {
 			cfg := baseConfig()
 			cfg.Provider, cfg.Daytona.SSHAccessMinutes = daytonaProvider, 17
 			repoRoot := t.TempDir()
-			server := daytonaSandboxToServer(&sandbox, cfg)
+			server := daytonaSandboxToServer(&sandbox)
 			if err := claimLeaseTargetForRepoConfig(leaseID, "run-owned", cfg, server, SSHTarget{}, repoRoot, time.Hour, false); err != nil {
 				t.Fatal(err)
 			}

@@ -24,6 +24,33 @@ import (
 	"time"
 )
 
+type coordinatorAcquireValidationBackend struct {
+	testSSHBackend
+	err   error
+	calls int
+}
+
+func (b *coordinatorAcquireValidationBackend) ValidateCoordinatorAcquire() error {
+	b.calls++
+	return b.err
+}
+
+func TestCoordinatorAcquireValidatesBeforeAllocation(t *testing.T) {
+	t.Parallel()
+	for _, requestedID := range []string{"", "cbx_0123456789ab"} {
+		t.Run(blank(requestedID, "generated-id"), func(t *testing.T) {
+			cause := errors.New("provider allocation is unsupported")
+			direct := &coordinatorAcquireValidationBackend{err: cause}
+			// No client or key configuration: rejected acquisition must not reach
+			// allocation, including the fixed-ID and retry paths.
+			backend := &coordinatorLeaseBackend{direct: direct}
+			if _, err := backend.Acquire(t.Context(), AcquireRequest{RequestedLeaseID: requestedID}); !errors.Is(err, cause) || direct.calls != 1 {
+				t.Fatalf("calls=%d err=%v", direct.calls, err)
+			}
+		})
+	}
+}
+
 func TestCoordinatorListUsesUserLeasesWithoutAdminProbe(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

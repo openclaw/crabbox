@@ -84,9 +84,32 @@ SSH/rsync data plane, snapshot source, and current inventory count.
 ## Config
 
 The Daytona integration is snapshot-first: the snapshot owns CPU, memory, disk,
-and installed tooling. Crabbox does not expose Daytona resource flags, so
-`--class` and `--type` are rejected for `provider=daytona` — size the sandbox in
-the snapshot instead.
+and installed tooling. In direct mode, an explicitly selected class chooses a
+default container snapshot when `daytona.snapshot` is unset:
+
+| Classes | Default snapshot | vCPU | Memory | Disk |
+| --- | --- | --- | --- | --- |
+| `tiny`, `small` | `daytona-small` | 1 | 1 GiB | 3 GiB |
+| `standard`, `fast` | `daytona-medium` | 2 | 4 GiB | 8 GiB |
+| `large`, `beast` | `daytona-large` | 4 | 8 GiB | 10 GiB |
+
+Adjacent classes share Daytona's [three native container tiers](https://www.daytona.io/docs/en/snapshots/#default-snapshots).
+The same provider-owned mapping is exposed in `crabbox providers --json`.
+These profiles select Linux/amd64 containers without GPUs; they do not resize
+snapshots or fall back to a different tier.
+
+With a configured custom snapshot or a checkpoint fork, class validates that
+snapshot's CPU, memory, disk and container type without replacing its contents.
+The snapshot must be active and available in the requested Daytona target.
+Crabbox resolves its exact ID before allocation and verifies the created
+sandbox's resources. Mismatches fail and any created sandbox is cleaned up.
+
+Explicit class intent includes `--class`, YAML `class`, and
+`CRABBOX_DEFAULT_CLASS`. The inherited built-in class does not change native
+snapshot selection. Without explicit class, existing custom snapshots retain
+their own sizing. `--type` remains unsupported. Brokered mode rejects explicit
+class on new allocations because its coordinator selects the shared snapshot;
+inspection and cleanup of existing leases remain available.
 
 ```yaml
 provider: daytona
@@ -102,7 +125,7 @@ daytona:
 
 | Config key                 | Flag                           | Default                      |
 | -------------------------- | ------------------------------ | ---------------------------- |
-| `daytona.snapshot`         | `--daytona-snapshot`           | _(required)_                 |
+| `daytona.snapshot`         | `--daytona-snapshot`           | _(required without class)_   |
 | `daytona.target`           | `--daytona-target`             | _(empty)_                    |
 | `daytona.user`             | `--daytona-user`               | `daytona`                    |
 | `daytona.workRoot`         | `--daytona-work-root`          | `/home/daytona/crabbox`      |
@@ -110,12 +133,14 @@ daytona:
 | `daytona.sshAccessMinutes` | `--daytona-ssh-access-minutes` | `30`                         |
 | `daytona.apiUrl`           | `--daytona-api-url`            | `https://app.daytona.io/api` |
 
-A snapshot is required; `warmup`/`run` fail without `--daytona-snapshot` or
-`daytona.snapshot`.
+A snapshot or explicit class is required for direct `warmup`/`run`.
 
 ## Examples
 
 ```sh
+# Select the native 2-vCPU / 4-GiB container tier in direct mode.
+crabbox warmup --provider daytona --class standard
+
 # Lease a sandbox from a snapshot and keep it warm.
 crabbox warmup --provider daytona --daytona-snapshot my-app-ready
 
@@ -131,7 +156,7 @@ crabbox stop --provider daytona swift-crab
 
 ## Behavior
 
-- **`warmup`** creates a Daytona sandbox from `daytona.snapshot`, waits for it to
+- **`warmup`** creates a Daytona sandbox from the selected snapshot, waits for it to
   become ready, records Crabbox labels, then prints a normal Crabbox lease ID and
   slug.
   Both direct creation paths use private previews and Daytona's native hard TTL.
