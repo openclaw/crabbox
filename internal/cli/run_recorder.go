@@ -222,13 +222,18 @@ func (r *runRecorder) Finish(ctx context.Context, target SSHTarget, exitCode int
 	defer cancel()
 	var lastErr error
 	attempts := 0
-	for attempt := 1; attempt <= runRecorderFinishAttempts; attempt++ {
+	for attempt := 1; attempt <= runRecorderFinishAttempts && ctx.Err() == nil; attempt++ {
 		attempts = attempt
 		_, finishErr := r.coord.FinishRun(ctx, r.runID, exitCode, sync, command, log, truncated, results, telemetry, classification, receipt)
 		if finishErr == nil && receipt == nil {
 			r.finished = true
 			return nil
 		}
+		lastErr = nil
+		if finishErr != nil {
+			lastErr = fmt.Errorf("submit terminal result: %w", finishErr)
+		}
+		retryErr := finishErr
 		if receipt != nil {
 			committed, receiptErr := r.coord.RunReceipt(ctx, r.runID)
 			if receiptErr == nil {
@@ -239,31 +244,24 @@ func (r *runRecorder) Finish(ctx context.Context, target SSHTarget, exitCode int
 				lastErr = fmt.Errorf("stored terminal receipt differs from the signed finish payload")
 				break
 			}
-			if finishErr == nil {
-				lastErr = fmt.Errorf("verify persisted terminal receipt: %w", receiptErr)
-				if attempt == runRecorderFinishAttempts || !runRecorderFinishRetryable(receiptErr) {
-					break
-				}
-			} else {
-				lastErr = finishErr
-				if attempt == runRecorderFinishAttempts || !runRecorderFinishRetryable(finishErr) {
-					break
-				}
+			lastErr = errors.Join(lastErr, fmt.Errorf("verify persisted terminal receipt: %w", receiptErr))
+			// Preserve both diagnostics without letting a secondary read error
+			// change whether the original finish request can be retried.
+			if retryErr == nil {
+				retryErr = receiptErr
 			}
-		} else {
-			lastErr = finishErr
-			if attempt == runRecorderFinishAttempts || !runRecorderFinishRetryable(finishErr) {
-				break
-			}
+		}
+		if attempt == runRecorderFinishAttempts || !runRecorderFinishRetryable(retryErr) {
+			break
 		}
 		timer := time.NewTimer(runRecorderFinishRetry)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return exit(7, "run history terminal commit failed for %s: %v", r.runID, ctx.Err())
 		case <-timer.C:
 		}
 	}
+	lastErr = errors.Join(lastErr, ctx.Err())
 	return exit(7, "run history terminal commit failed for %s after %d attempts: %v; recover with `crabbox receipt %s`", r.runID, attempts, lastErr, r.runID)
 }
 

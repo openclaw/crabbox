@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Preserve finish-submission and receipt-verification errors, attempt counts, and recovery guidance when terminal run recording times out, without changing retry limits or receipt verification.
+
 ## 0.49.0 - 2026-09-03
 
 ### Highlights
