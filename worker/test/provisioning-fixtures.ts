@@ -11,6 +11,7 @@ class TransactionView implements CoordinatorStorageView {
     readonly values: Map<string, unknown>,
     private readonly fail: (key: string) => void,
     private readonly beforeGet?: (key: string) => Promise<void>,
+    private readonly observeList?: (options: Parameters<CoordinatorStorageView["list"]>[0]) => void,
   ) {}
   async get<T>(key: string): Promise<T | undefined> {
     await this.beforeGet?.(key);
@@ -27,6 +28,7 @@ class TransactionView implements CoordinatorStorageView {
   async list<T>(
     options: { prefix?: string; limit?: number; startAfter?: string } = {},
   ): Promise<Map<string, T>> {
+    this.observeList?.(options);
     const entries = [...this.values]
       .toSorted(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
       .filter(
@@ -56,13 +58,20 @@ export class ProvisioningTestStorage implements CoordinatorStorage {
   beforeGet: (key: string) => Promise<void> = async () => {};
   private tail = Promise.resolve();
   failKey?: string;
+  readonly writes: string[] = [];
+  readonly listOptions: Array<Parameters<CoordinatorStorageView["list"]>[0]> = [];
+
+  private checkWrite(key: string): void {
+    this.writes.push(key);
+    if (key === this.failKey) throw new Error("injected storage failure");
+  }
+
   private view(): TransactionView {
     return new TransactionView(
       this.values,
-      (key) => {
-        if (key === this.failKey) throw new Error("injected storage failure");
-      },
+      (key) => this.checkWrite(key),
       this.beforeGet,
+      (options) => this.listOptions.push(options),
     );
   }
   get<T>(key: string): Promise<T | undefined> {
@@ -95,10 +104,9 @@ export class ProvisioningTestStorage implements CoordinatorStorage {
     await previous;
     const view = new TransactionView(
       structuredClone(this.values),
-      (key) => {
-        if (key === this.failKey) throw new Error("injected storage failure");
-      },
+      (key) => this.checkWrite(key),
       this.beforeGet,
+      (options) => this.listOptions.push(options),
     );
     try {
       const value = await callback(view);
