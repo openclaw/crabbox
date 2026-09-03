@@ -49,8 +49,14 @@ func (Provider) ServerTypeForClass(class string) string {
 	return ""
 }
 
+// Existing configuration only gains class semantics for canonical labels.
+// Actual CLI requests remain explicit, including invalid labels to reject.
+func classSnapshotRequested(cfg Config) bool {
+	return core.ClassWasExplicit(cfg) && (core.ClassFlagWasExplicit(cfg) || core.IsCanonicalProviderClass(cfg.Class))
+}
+
 func (p Provider) ServerTypeForConfig(cfg Config) string {
-	if core.ShouldUseCoordinator(cfg, p.Spec()) || !core.ClassWasExplicit(cfg) {
+	if core.ShouldUseCoordinator(cfg, p.Spec()) || !classSnapshotRequested(cfg) {
 		return "snapshot"
 	}
 	if snapshot := strings.TrimSpace(cfg.Daytona.Snapshot); snapshot != "" {
@@ -67,7 +73,7 @@ func (b *daytonaLeaseBackend) ValidateCoordinatorAcquire() error {
 }
 
 func selectClassSnapshot(ctx context.Context, client daytonaAPI, cfg *Config) (*api.SnapshotDto, error) {
-	if !core.ClassWasExplicit(*cfg) {
+	if !classSnapshotRequested(*cfg) {
 		return nil, nil
 	}
 	candidates, matched := core.ProviderClassCandidatesForProfiles(classProfiles, *cfg)
@@ -92,24 +98,23 @@ func selectClassSnapshot(ctx context.Context, client daytonaAPI, cfg *Config) (*
 		snapshot.GetCpu() != shape.cpu || snapshot.GetMem() != shape.memory || snapshot.GetDisk() != shape.disk || snapshot.GetGpu() != 0 {
 		return nil, exit(2, "Daytona snapshot %s must be active container with %g CPU, %g GiB memory, %g GiB disk and no GPU for class=%s", selected, shape.cpu, shape.memory, shape.disk, cfg.Class)
 	}
-	if target := strings.TrimSpace(cfg.Daytona.Target); target != "" && !slices.Contains(snapshot.GetRegionIds(), target) {
-		return nil, exit(2, "Daytona snapshot %s is unavailable in target=%s", selected, target)
-	}
 	// Custom and captured snapshots keep their exact identity. Class validates
 	// their resources; it must never replace a prepared filesystem with a default.
 	cfg.Daytona.Snapshot = snapshot.GetId()
 	return snapshot, nil
 }
 
-func validateClassSandbox(sandbox *api.Sandbox, snapshot *api.SnapshotDto, cfg Config) error {
+func validateClassSandbox(sandbox *api.Sandbox, snapshot *api.SnapshotDto) error {
 	if snapshot == nil {
 		return nil
 	}
+	// Native creation resolves target names and enforces snapshot availability.
+	// The returned target and snapshot regions both carry region IDs.
 	if sandbox.GetCpu() != snapshot.GetCpu() || sandbox.GetMemory() != snapshot.GetMem() ||
 		sandbox.GetDisk() != snapshot.GetDisk() || sandbox.GetGpu() != snapshot.GetGpu() ||
 		(sandbox.HasSandboxClass() && sandbox.GetSandboxClass() != snapshot.GetSandboxClass()) ||
 		(sandbox.GetSnapshot() != snapshot.GetId() && sandbox.GetSnapshot() != snapshot.GetName()) ||
-		(strings.TrimSpace(cfg.Daytona.Target) != "" && sandbox.GetTarget() != strings.TrimSpace(cfg.Daytona.Target)) {
+		!slices.Contains(snapshot.GetRegionIds(), sandbox.GetTarget()) {
 		return exit(4, "Daytona sandbox %s does not match the selected class snapshot", sandbox.GetId())
 	}
 	return nil

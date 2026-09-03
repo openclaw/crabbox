@@ -16,7 +16,7 @@ import (
 const daytonaActivityRequestTimeout = 10 * time.Second
 
 func (b *daytonaLeaseBackend) createDaytonaSandbox(ctx context.Context, repo Repo, keep, reclaim bool, requestedSlug string) (sandbox *daytona.Sandbox, leaseID, slug string, err error) {
-	if strings.TrimSpace(b.cfg.Daytona.Snapshot) == "" && !core.ClassWasExplicit(b.cfg) {
+	if strings.TrimSpace(b.cfg.Daytona.Snapshot) == "" && !classSnapshotRequested(b.cfg) {
 		return nil, "", "", exit(2, "provider=daytona requires --daytona-snapshot or daytona.snapshot")
 	}
 	if b.cfg.TTL <= 0 || b.cfg.IdleTimeout <= 0 || durationMinutesCeil(b.cfg.TTL) > math.MaxInt32 || durationMinutesCeil(b.cfg.IdleTimeout) > math.MaxInt32 {
@@ -62,7 +62,8 @@ func (b *daytonaLeaseBackend) createDaytonaSandbox(ctx context.Context, repo Rep
 		if createErr == nil {
 			createErr = errors.New("create response missing sandbox id")
 		}
-		// Never retry allocation after an ambiguous response; recover only this attempt.
+		// Even HTTP 400 can follow allocation when native startup fails.
+		// Never retry the POST; recover only this attempt before cleanup.
 		recoveryCtx, cancel := daytonaCleanupContext()
 		defer cancel()
 		var recoveryErr error
@@ -87,7 +88,7 @@ func (b *daytonaLeaseBackend) createDaytonaSandbox(ctx context.Context, repo Rep
 	if err != nil {
 		return nil, leaseID, slug, err
 	}
-	if err = validateClassSandbox(sandbox, snapshot, cfg); err != nil {
+	if err = validateClassSandbox(sandbox, snapshot); err != nil {
 		return nil, leaseID, slug, err
 	}
 	labels["state"], labels["last_touched_at"] = "ready", leaseLabelTime(time.Now().UTC())

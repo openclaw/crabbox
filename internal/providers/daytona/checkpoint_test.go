@@ -85,6 +85,7 @@ func newSnapshotFixture(t *testing.T) *snapshotFixture {
 			}
 			s.snapshot = &api.SnapshotDto{Id: "snapshot-exact-id", Name: body.Name, State: api.SNAPSHOTSTATE_PENDING, Entrypoint: []string{}}
 			s.snapshot.SetOrganizationId("org-test")
+			s.snapshot.SetRegionIds([]string{f.sandbox.GetTarget()})
 			if s.snapshotResponseCanceled != nil {
 				s.snapshotMu.Unlock()
 				<-r.Context().Done()
