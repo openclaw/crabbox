@@ -3,6 +3,9 @@ import { readFile } from "node:fs/promises";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { CoordinatorStorageView } from "../src/coordinator-runtime";
+import { ProvisioningTestStorage } from "./provisioning-fixtures";
+
 type OperationRunner = <T>(callback: () => Promise<T>) => Promise<T>;
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
@@ -25,6 +28,11 @@ const mocks = vi.hoisted(() => {
     deleteQueuedJobs: vi.fn<(...args: unknown[]) => Promise<void>>(async () => {}),
   };
   const storage = {
+    transaction:
+      vi.fn<
+        (callback: (transaction: CoordinatorStorageView) => Promise<unknown>) => Promise<unknown>
+      >(),
+    list: vi.fn<(...args: unknown[]) => Promise<Map<string, unknown>>>(),
     initialize: vi.fn<() => Promise<void>>(async () => {}),
     close: vi.fn<() => Promise<void>>(async () => {}),
     get: vi.fn<(key: string) => Promise<unknown>>(async () => undefined),
@@ -53,6 +61,14 @@ import { AsyncMutex } from "../node/server-support";
 describe("NodeCoordinatorRuntime", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    const storage = new ProvisioningTestStorage();
+    mocks.storage.get.mockImplementation((key) => storage.get(key));
+    mocks.storage.put.mockImplementation((key, value) => storage.put(key, value));
+    mocks.storage.delete.mockImplementation((key) => storage.delete(key));
+    mocks.storage.transaction.mockImplementation((callback) => storage.transaction(callback));
+    mocks.storage.list.mockImplementation((options) =>
+      storage.list(options as Parameters<CoordinatorStorageView["list"]>[0]),
+    );
   });
 
   it("allows an active alarm to enqueue one successor", async () => {
@@ -72,10 +88,63 @@ describe("NodeCoordinatorRuntime", () => {
 
     await expect(runtime.getAlarm()).resolves.toBe(1234);
     await runtime.scheduleAlarm(5678);
+    await expect(runtime.getAlarm()).resolves.toBe(5678);
     await runtime.clearAlarm();
 
-    expect(mocks.storage.put).toHaveBeenCalledWith("node-runtime:alarm-time", 5678);
-    expect(mocks.storage.delete).toHaveBeenCalledWith("node-runtime:alarm-time");
+    await expect(runtime.getAlarm()).resolves.toBeUndefined();
+    expect(mocks.storage.transaction).toHaveBeenCalledTimes(2);
+  });
+
+  it("repairs a committed due marker with no queued job at startup and during slow maintenance", async () => {
+    vi.useFakeTimers();
+    const runtime = new NodeCoordinatorRuntime("postgresql://example.invalid/test");
+    const at = Date.now();
+    const due = `provisioning-due:${at.toString().padStart(16, "0")}:lease`;
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    mocks.boss.send.mockRejectedValueOnce(new Error("lost queue notification"));
+    await runtime.commitAndWake(async (transaction) => {
+      await transaction.put(due, { operationID: "lease", at });
+    });
+    await runtime.stop();
+    const restarted = new NodeCoordinatorRuntime("postgresql://example.invalid/test");
+    const ticks = vi.fn<() => Promise<void>>(async () => {
+      await restarted.storage.delete(due);
+    });
+    restarted.registerProvisioningTick(ticks);
+    await restarted.start(async () => {});
+    expect(ticks).toHaveBeenCalledTimes(1);
+    const maintenance = deferred<void>();
+    restarted.ownMaintenance(maintenance.promise);
+    await restarted.storage.put(due, { operationID: "lease", at: Date.now() });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(ticks).toHaveBeenCalledTimes(2);
+    maintenance.resolve();
+    await restarted.stop();
+    log.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it("keeps scanning due work when the queue hint is stalled", async () => {
+    vi.useFakeTimers();
+    const runtime = new NodeCoordinatorRuntime("postgresql://example.invalid/test");
+    const ticks = vi.fn<() => Promise<void>>(async () => {});
+    runtime.registerProvisioningTick(ticks);
+    await runtime.start(async () => {});
+    const stalled = deferred<void>();
+    mocks.boss.deleteQueuedJobs.mockImplementationOnce(() => stalled.promise);
+    const at = Date.now();
+    const committed = runtime.commitAndWake(async (transaction) => {
+      await transaction.put(`provisioning-due:${at.toString().padStart(16, "0")}:lease`, {
+        operationID: "lease",
+        at,
+      });
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    await committed;
+    expect(ticks).toHaveBeenCalled();
+    stalled.resolve();
+    await runtime.stop();
+    vi.useRealTimers();
   });
 
   it("contains WebSocket message handler failures to the offending socket", async () => {

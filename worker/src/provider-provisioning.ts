@@ -1,4 +1,78 @@
+import type { LeaseConfig } from "./config";
+import type { CoordinatorStorageView } from "./coordinator-runtime";
+import type { ProvisioningMaterial } from "./provisioning-material";
 import type { Provider } from "./types";
+import type { LeaseRecord, ProviderMachine, LeaseImageIdentity } from "./types";
+
+export type ProvisioningPhase =
+  | "prepared"
+  | "provisioning"
+  | "ready-to-publish"
+  | "settling"
+  | "cleanup"
+  | "blocked"
+  | "retained"
+  | "terminal";
+
+export interface FrozenProvisioningPlan {
+  version: 1;
+  provider: Provider;
+  scope: string;
+  // Cleanup readers use these exact identities even before the lease has a selected machine.
+  resources: Array<{ cloudID: string; region: string; scope: string }>;
+  data: unknown;
+}
+
+export interface ProvisioningPublication {
+  server: ProviderMachine;
+  serverType: string;
+  market: string;
+  image?: LeaseImageIdentity;
+  cost?: { hourlyUSD: number; maxUSD: number };
+}
+
+export interface ProvisioningStep {
+  phase: ProvisioningPhase;
+  attempt: number;
+  state: unknown;
+  nextWake: number;
+  delivery?: number;
+  coordinationKey?: string;
+  publication?: ProvisioningPublication;
+  // Provider diagnostics must be static codes, never remote response text.
+  blockedReason?: string;
+}
+
+export interface ProviderResumableProvisioning {
+  version: 1;
+  supports(config: LeaseConfig): boolean;
+  validateAdmission?(
+    storage: CoordinatorStorageView,
+    plan: FrozenProvisioningPlan,
+    lease: LeaseRecord,
+  ): Promise<void>;
+  prepare(
+    config: LeaseConfig,
+    lease: LeaseRecord,
+  ): Promise<{
+    plan: FrozenProvisioningPlan;
+    material: ProvisioningMaterial;
+    step: ProvisioningStep;
+  }>;
+  advance(
+    input: {
+      plan: FrozenProvisioningPlan;
+      step: ProvisioningStep;
+      lease: LeaseRecord;
+      deadline: number;
+      retain?: boolean;
+      recovering: boolean;
+    } & (
+      | { canceled: false; material: ProvisioningMaterial }
+      | { canceled: true; material?: never }
+    ),
+  ): Promise<ProvisioningStep>;
+}
 
 export interface ProviderProvisioningCleanupClaim {
   provider: Extract<Provider, "aws" | "azure" | "gcp" | "daytona">;

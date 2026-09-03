@@ -26,7 +26,7 @@ import {
   AzureProvider,
   DaytonaProvider,
   FleetCoordinator,
-  FleetDurableObject,
+  FleetDurableObject as ProductionFleetDurableObject,
   GCPProvider,
   HetznerProvider,
   bridgeTicketFromRequest,
@@ -207,9 +207,66 @@ function workspaceFixtureKey(
   return `workspace:${orgKeyForLabel(org)}:${encodeURIComponent(owner)}:${workspaceID}`;
 }
 
+// These tests assert completed maintenance outcomes. The production runtime returns from its
+// alarm after the bounded tick; this fixture explicitly drains runtime-owned maintenance too.
+// Alarm latency and durable wake behavior are exercised separately with the real runtime.
+class FleetDurableObject extends ProductionFleetDurableObject {
+  private readonly initialized: Promise<unknown>;
+  private readonly tasks: Set<Promise<unknown>>;
+
+  constructor(...args: ConstructorParameters<typeof ProductionFleetDurableObject>) {
+    const [state, ...rest] = args;
+    const initializers: Promise<unknown>[] = [];
+    const tasks = new Set<Promise<unknown>>();
+    super(
+      {
+        ...state,
+        blockConcurrencyWhile<T>(callback: () => Promise<T>): Promise<T> {
+          const initialized = callback();
+          initializers.push(initialized);
+          return initialized;
+        },
+        waitUntil(task: Promise<unknown>): void {
+          tasks.add(task);
+          void task.then(
+            () => tasks.delete(task),
+            () => tasks.delete(task),
+          );
+        },
+      } as DurableObjectState,
+      ...rest,
+    );
+    this.initialized = Promise.all(initializers);
+    this.tasks = tasks;
+  }
+
+  override async fetch(incomingRequest: Request): Promise<Response> {
+    await this.initialized;
+    const response = await super.fetch(incomingRequest);
+    if (new URL(incomingRequest.url).pathname === "/v1/internal/scheduled")
+      await this.drainMaintenance();
+    return response;
+  }
+
+  override async alarm(): Promise<void> {
+    await this.initialized;
+    await super.alarm();
+    await this.drainMaintenance();
+  }
+
+  private async drainMaintenance(): Promise<void> {
+    while (this.tasks.size) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- a completed pass may latch a follow-up pass.
+      await Promise.all(this.tasks);
+    }
+  }
+}
+
 class MemoryStorage {
   private values: Map<string, unknown>;
   private alarmTime: number | undefined;
+  private revision = 0;
+  private transactionTail = Promise.resolve();
   beforeGet?: (key: string) => Promise<void>;
   afterGet?: (key: string, value: unknown) => Promise<void> | void;
   beforePut?: (key: string, value: unknown) => Promise<void>;
@@ -230,15 +287,18 @@ class MemoryStorage {
   async put<T>(key: string, value: T, _options?: { noCache?: boolean }): Promise<void> {
     await this.beforePut?.(key, value);
     this.values.set(key, value);
+    this.revision += 1;
   }
 
   async delete(key: string): Promise<void> {
     await this.beforeDelete?.(key);
     this.values.delete(key);
+    this.revision += 1;
   }
 
   async deleteAlarm(): Promise<void> {
     this.alarmTime = undefined;
+    this.revision += 1;
   }
 
   async getAlarm(): Promise<number | null> {
@@ -247,22 +307,86 @@ class MemoryStorage {
 
   async setAlarm(time: number): Promise<void> {
     this.alarmTime = time;
+    this.revision += 1;
   }
 
   async transaction<T>(callback: (transaction: CoordinatorStorageView) => Promise<T>): Promise<T> {
-    const transaction = new MemoryStorage(new Map(this.values));
-    transaction.beforeGet = this.beforeGet;
+    const predecessor = this.transactionTail;
+    let release!: () => void;
+    this.transactionTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await predecessor;
+    try {
+      for (let attempt = 0; attempt < 12; attempt += 1) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- serialization retries must use the last committed snapshot.
+        const result = await this.transactionAttempt(callback);
+        if (result.committed) return result.value;
+      }
+      throw new Error("test storage serialization retry exhausted");
+    } finally {
+      release();
+    }
+  }
+
+  private async transactionAttempt<T>(
+    callback: (transaction: CoordinatorStorageView) => Promise<T>,
+  ): Promise<{ committed: true; value: T } | { committed: false }> {
+    const revision = this.revision;
+    const snapshot = structuredClone(this.values);
+    const originalAlarm = this.alarmTime;
+    const reads = new Set<string>();
+    const writes = new Set<string>();
+    const prefixes = new Set<string>();
+    const transaction = new MemoryStorage(structuredClone(snapshot));
+    transaction.alarmTime = this.alarmTime;
+    transaction.beforeGet = async (key) => {
+      reads.add(key);
+      await this.beforeGet?.(key);
+    };
     transaction.afterGet = this.afterGet;
+    const list = transaction.list.bind(transaction);
+    transaction.list = async <Value>(
+      options: Parameters<CoordinatorStorageView["list"]>[0] = {},
+    ) => {
+      prefixes.add(options.prefix ?? "");
+      return list<Value>(options);
+    };
     let putCount = 0;
     transaction.beforePut = async (key, value) => {
       putCount += 1;
+      writes.add(key);
       await this.beforePut?.(key, value);
     };
-    transaction.beforeDelete = this.beforeDelete;
+    transaction.beforeDelete = async (key) => {
+      writes.add(key);
+      await this.beforeDelete?.(key);
+    };
     try {
       const result = await callback(transaction);
-      this.values = new Map(transaction.values);
-      return result;
+      if (this.revision !== revision) {
+        for (const key of new Set([...reads, ...writes])) {
+          if (JSON.stringify(snapshot.get(key)) !== JSON.stringify(this.values.get(key)))
+            return { committed: false };
+        }
+        for (const prefix of prefixes) {
+          const select = (values: Map<string, unknown>) =>
+            JSON.stringify(
+              [...values]
+                .filter(([key]) => key.startsWith(prefix))
+                .toSorted(([a], [b]) => a.localeCompare(b)),
+            );
+          if (select(snapshot) !== select(this.values)) return { committed: false };
+        }
+        if (originalAlarm !== this.alarmTime) return { committed: false };
+      }
+      for (const key of writes) {
+        if (transaction.values.has(key)) this.values.set(key, transaction.values.get(key));
+        else this.values.delete(key);
+      }
+      this.alarmTime = transaction.alarmTime;
+      this.revision += 1;
+      return { committed: true, value: result };
     } finally {
       this.transactionPutCounts.push(putCount);
     }
@@ -294,6 +418,7 @@ class MemoryStorage {
 
   seed<T>(key: string, value: T): void {
     this.values.set(key, currentOrgFixture(value));
+    this.revision += 1;
   }
 
   value<T>(key: string): T | undefined {
@@ -36199,10 +36324,20 @@ describe("fleet run history", () => {
 
   it("serializes control heartbeat provider validation with its mutation", async () => {
     const storage = new MemoryStorage();
-    const runtime = new CloudflareCoordinatorRuntime({ storage } as unknown as DurableObjectState);
+    let initialized: Promise<unknown> | undefined;
+    const runtime = new CloudflareCoordinatorRuntime({
+      storage,
+      blockConcurrencyWhile<T>(callback: () => Promise<T>) {
+        const run = callback();
+        initialized = run;
+        return run;
+      },
+      waitUntil() {},
+    } as unknown as DurableObjectState);
     const fleet = new FleetCoordinator(runtime, {
       CRABBOX_DEFAULT_ORG: "openclaw",
     } as Env);
+    await initialized;
     const leaseID = "cbx_control_provider_fence";
     const now = new Date();
     const original = testLease({
@@ -39345,7 +39480,7 @@ function testCoordinator(
     ).attachStorage?.(storage);
   }
   return new FleetCoordinator(
-    new CloudflareCoordinatorRuntime({ storage } as unknown as DurableObjectState),
+    new FakeCoordinatorRuntime(storage),
     { CRABBOX_DEFAULT_ORG: "default-org", ...env } as Env,
     providers,
     {},

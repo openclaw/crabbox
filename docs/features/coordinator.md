@@ -57,6 +57,52 @@ the coordinator. The dedicated
 SSM-only workspace API path. See [Architecture](../architecture.md) for the full
 topology.
 
+## Durable Azure provisioning
+
+`CRABBOX_DURABLE_PROVISIONING_ADMISSION=true` opts new eligible creates into the
+versioned durable provisioning controller. It defaults to off. Eligibility is
+evaluated after provider defaults and promoted images resolve: initially only
+ordinary and fixed-ID Azure native Windows `normal`, amd64, managed OS disks
+created from VM images qualify. Snapshot/copy-disk, ephemeral, WSL2, workspace,
+registered and other-provider requests keep their existing provisioning paths.
+An unsupported effective default is not advertised as resumable by readiness.
+
+The existing server-only `CRABBOX_SESSION_SECRET` must be stable, distinct from
+the shared token, and at least 32 characters. Missing or unsuitable material
+configuration returns `424 continuation_unavailable` before durable admission;
+the coordinator does not create a key or fall back to a provider/shared token.
+Provider readiness includes `resumableProvisioning` with scope support,
+admission availability, and missing material configuration.
+
+Clients opt into an asynchronous create response with `Prefer: respond-async`.
+An admitted supported job returns `202 {lease}` with `lease.state=provisioning`,
+`Location`, `Retry-After`, and `Preference-Applied: respond-async`. The envelope
+does not change. A create-attempt token alone is not async negotiation. Initial
+requests without the preference retain a synchronous facade; ordinary token
+replay and fixed PUT keep their existing status/intent contracts. Older brokers
+may ignore the preference. Clients must confirm the canonical create intent,
+then observe readiness within their original acquisition budget.
+Durable fixed-ID admission also retains a private request fingerprint, allowing
+the same request to rebind after deployment defaults change without serializing
+the lease configuration or accepting a changed caller intent.
+
+Admission commits the canonical attempt, lease, private operation, sealed
+material and due entry atomically. Restarted controllers use the frozen
+provider plan and original deadline. Disabling new admissions does not disable
+existing journals. Publication is a separate durable phase; cancellation and
+expiry remain authoritative over late provider results. Fixed-ID caller
+disconnection does not cancel the retained operation; explicit release does.
+
+Operation plans, attempt journals, claims and sealed bootstrap/admin-password
+material live outside lease records and are never returned by lease GET/list or
+portal serialization. Material is purged at terminal publication or when durable
+cancellation, retention or expiry irrevocably disables forward work. Settlement
+and exact owned cleanup use the nonsecret journals and provider authentication,
+so retiring the VM password/bootstrap or losing the session key does not prevent
+cleanup. Key loss or tampering still blocks forward replay. Unsupported or
+quarantined records retain their material until their authority is understood;
+resource and deletion evidence are preserved independently.
+
 ## CLI request budgets
 
 The CLI bounds individual lease reads (including authoritative provider
