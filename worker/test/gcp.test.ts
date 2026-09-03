@@ -1606,7 +1606,7 @@ describe("gcp provider", () => {
     ]);
   });
 
-  it("observes one exact owned legacy cleanup identity from a safe numeric anchor", async () => {
+  it("observes one exact owned legacy cleanup identity from a historical numeric anchor", async () => {
     const name = leaseProviderName("cbx_abcdef123456", "blue-lobster");
     const lease = observedGCPLease({
       cloudID: name,
@@ -1629,6 +1629,52 @@ describe("gcp provider", () => {
       `https://compute.googleapis.com/compute/v1/projects/default-project/zones/us-central1-a/instances/${name}`,
     ]);
     expect(requests[0]).not.toContain("aggregated");
+  });
+
+  it("corroborates an unsafe raw ID through the historical numeric server ID", async () => {
+    const name = leaseProviderName("cbx_abcdef123456", "blue-lobster");
+    const rawID = "9223372036854775807";
+    const lease = observedGCPLease({
+      cloudID: name,
+      serverName: name,
+      serverID: Number(rawID),
+      providerResourceID: undefined,
+    });
+    const client = new GCPClient(env);
+    primeAccessToken(client);
+    client.fetcher = async () => Response.json(ownedGCPInstance(lease, { id: rawID }));
+
+    await expect(client.observeLegacyCleanupIdentity(lease)).resolves.toEqual({
+      providerResourceID: rawID,
+    });
+  });
+
+  it("keeps lossy adjacent aliases distinct only when a durable raw identity exists", async () => {
+    const name = leaseProviderName("cbx_abcdef123456", "blue-lobster");
+    const rawID = "9223372036854775807";
+    const adjacentID = "9223372036854775806";
+    const mismatchedID = "9223372036854774784";
+    const lease = observedGCPLease({
+      cloudID: name,
+      serverName: name,
+      serverID: Number(rawID),
+      providerResourceID: undefined,
+    });
+    const client = new GCPClient(env);
+    primeAccessToken(client);
+    client.fetcher = async () => Response.json(ownedGCPInstance(lease, { id: adjacentID }));
+
+    await expect(client.observeLegacyCleanupIdentity(lease)).resolves.toEqual({
+      providerResourceID: adjacentID,
+    });
+    await expect(
+      client.observeLegacyCleanupIdentity(lease, { resourceIdentity: rawID }),
+    ).rejects.toBeInstanceOf(ProviderResourceUnresolvedError);
+
+    client.fetcher = async () => Response.json(ownedGCPInstance(lease, { id: mismatchedID }));
+    await expect(client.observeLegacyCleanupIdentity(lease)).rejects.toBeInstanceOf(
+      ProviderResourceUnresolvedError,
+    );
   });
 
   it("prefers a durable legacy cleanup anchor over the lossy numeric server id", async () => {
@@ -1693,9 +1739,9 @@ describe("gcp provider", () => {
       requests: number;
     }> = [
       {
-        name: "unsafe numeric anchor",
-        lease: { ...baseLease, serverID: Number.MAX_SAFE_INTEGER + 1 },
-        instance: ownedGCPInstance(baseLease, { id: "9007199254740992" }),
+        name: "non-integral numeric anchor",
+        lease: { ...baseLease, serverID: 123.5 },
+        instance: ownedGCPInstance(baseLease, { id: "123" }),
         requests: 0,
       },
       {

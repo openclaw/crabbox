@@ -16636,7 +16636,11 @@ export class FleetCoordinator {
           }
           await this.state.runExclusive(async () => {
             const current = await this.getLease(lease.id);
-            if (!current || current.cleanupStartedAt !== claim) {
+            if (
+              !current ||
+              current.cleanupStartedAt !== claim ||
+              (await provisioningOwnsLease(this.state.storage, lease.id))
+            ) {
               return;
             }
             const nowDate = new Date();
@@ -18729,27 +18733,44 @@ export class FleetCoordinator {
           return structuredClone(current);
         });
         const observed = await cloudProvider.observeLegacyCleanupIdentity(expected, context);
-        if (!observed) return;
-        const providerResourceID = observed.providerResourceID;
-        if (!providerResourceID || providerResourceID !== providerResourceID.trim()) {
+        if (
+          observed &&
+          (!observed.providerResourceID ||
+            observed.providerResourceID !== observed.providerResourceID.trim())
+        ) {
           throw new ProviderResourceUnresolvedError(
             "provider returned an invalid legacy cleanup identity",
           );
         }
-        releaseLease = await this.state.runExclusive(async () => {
+        const resolvedLease = await this.state.runExclusive(async () => {
           const current = await this.getLease(expected.id);
           if (!current || (await provisioningOwnsLease(this.state.storage, expected.id))) {
             throw new ProviderResourceUnresolvedError(
               "lease cleanup authority changed before legacy provider identity capture",
             );
           }
+          if (!observed) {
+            if (
+              !sameLeaseRecord(current, expected) ||
+              !legacyCleanupIdentityCaptureEligible(current)
+            ) {
+              throw new ProviderResourceUnresolvedError(
+                "lease cleanup claim changed after legacy provider absence observation",
+              );
+            }
+            return undefined;
+          }
+          const providerResourceID = observed.providerResourceID;
           if (
             current.providerResourceID === providerResourceID &&
             sameLeaseAfterLegacyCleanupIdentityCapture(current, expected)
           ) {
             return current;
           }
-          if (!sameLeaseRecord(current, expected)) {
+          if (
+            !sameLeaseRecord(current, expected) ||
+            !legacyCleanupIdentityCaptureEligible(current)
+          ) {
             throw new ProviderResourceUnresolvedError(
               "lease cleanup claim changed before legacy provider identity capture",
             );
@@ -18762,6 +18783,8 @@ export class FleetCoordinator {
           await this.putLease(captured);
           return captured;
         });
+        if (!resolvedLease) return;
+        releaseLease = resolvedLease;
       }
       await cloudProvider.releaseLease(releaseLease, context);
     });

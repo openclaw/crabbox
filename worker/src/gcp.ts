@@ -321,6 +321,10 @@ export class GCPClient {
       context?.resourceIdentity === undefined
         ? undefined
         : canonicalNumericResourceID(context.resourceIdentity);
+    const historicalServerID =
+      Number.isFinite(lease.serverID) && Number.isInteger(lease.serverID) && lease.serverID > 0
+        ? lease.serverID
+        : undefined;
     if (
       lease.provider !== "gcp" ||
       !canonicalGCPProject(project) ||
@@ -333,8 +337,7 @@ export class GCPClient {
       name !== leaseProviderName(lease.id, lease.slug) ||
       lease.providerResourceID !== undefined ||
       (context?.resourceIdentity !== undefined && !resourceIdentity) ||
-      (resourceIdentity === undefined &&
-        (!Number.isSafeInteger(lease.serverID) || lease.serverID <= 0))
+      (resourceIdentity === undefined && historicalServerID === undefined)
     ) {
       throw new ProviderResourceUnresolvedError(
         `GCP lease ${lease.id} has no canonical legacy cleanup identity`,
@@ -350,10 +353,13 @@ export class GCPClient {
     }
     const server = toMachine(instance, zone);
     const providerResourceID = canonicalNumericResourceID(server.providerResourceID);
-    const anchor = resourceIdentity ?? String(lease.serverID);
+    const identityMatches =
+      resourceIdentity === undefined
+        ? Number(providerResourceID) === historicalServerID
+        : providerResourceID === resourceIdentity;
     if (
       !providerResourceID ||
-      providerResourceID !== anchor ||
+      !identityMatches ||
       !canonicalGCPMachine(server) ||
       !providerMachineOwnedByLease(server, lease, "gcp", gcpProviderLabelValue)
     ) {

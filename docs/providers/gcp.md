@@ -376,12 +376,15 @@ leases cannot use this interrupted-create path.
 For a fully bound pre-upgrade brokered lease that lacks only the numeric instance
 ID, manual deletion or expiry cleanup may perform one exact scoped lookup under
 the unchanged cleanup claim. The lookup must match all ownership labels and
-either a durable resource identity or the lease's positive, safely represented
-legacy numeric server ID. The coordinator persists only the observed raw ID,
-then performs the ordinary strict lookup again before deletion. It never uses
-project inventory or this migration path for registered, workspace,
-provisioning, or uncertain-create records. Absence completes cleanup; replacement
-or ambiguity retains the captured ID without deleting either instance.
+either the exact durable raw resource identity or, when that identity is absent,
+corroborate the observed raw ID through the lease's positive, finite, integral
+historical numeric server ID. The numeric comparison is intentionally lossy
+corroboration, not exact identity proof. The coordinator persists the observed
+raw ID, then performs the ordinary exact lookup again before deletion. It never
+uses project inventory or this migration path for registered, workspace,
+provisioning, or uncertain-create records. Absence completes cleanup only after
+the same post-lookup lease and cleanup fences pass; replacement or ambiguity
+retains the captured ID without deleting either instance.
 
 Brokered release requires the persisted numeric ID and refuses deletion when it
 is absent from or differs from the observed VM. These checks are defense-in-depth
