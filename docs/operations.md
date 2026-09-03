@@ -909,8 +909,8 @@ actual exclusive-writer coordination, and cancellation boundaries still apply.
 
 Before creating or reusing a signed release tag:
 
-- Rebase release preparation on the current `main`, restore the full changelog from the latest tag if concurrent work regressed it, and verify every published version remains represented.
-- Reorder `CHANGELOG.md` with the user-facing changes first, date the release section, and keep contributor thanks / co-author notes intact.
+- Rebase release preparation on the current `main`, restore missing published history from the latest tag while preserving `Unreleased` and other new entries, and verify every published version remains represented.
+- Finalize the `Unreleased` entries maintained as work lands into a versioned, dated release section in `CHANGELOG.md`, with user-facing changes first and contributor thanks / co-author notes intact.
 - Update every package metadata file that carries the project version. The current release surface is `worker/package.json` plus both root package entries in `worker/package-lock.json`; the removed root plugin package must not be recreated.
 - `go vet ./...`
 - `go test -race -timeout=15m ./...`
@@ -977,8 +977,10 @@ Then advance sequentially under that authorization as each technical gate passes
    trust checks are bounded smokes; they do not authorize unrelated provider mutations.
 8. **Closeout.** Record publication, tap update, and independent smoke results
    (including outstanding failures). Verify release notes match the finalized
-   changelog; do not prefill the next `Unreleased` section. Finish authorized
-   release commits and leave the intended checkout clean and synchronized.
+   release section in the changelog. Keep later user-visible work under
+   `Unreleased` on `main`, without rewriting the frozen tagged source or
+   published notes for downstream retries. Finish authorized release commits
+   and leave the intended checkout clean and synchronized.
 
 On cancellation, stop this operator’s release and tap writes. Cancellation
 cannot stop independent reconciliation of an already-public release. Before

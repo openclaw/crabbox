@@ -17,6 +17,12 @@ dispatch. Identity binding, credential isolation, immutability, exact frozen
 inputs, actual exclusive-writer coordination, and cancellation boundaries
 remain mandatory.
 
+Maintainers keep user-visible fixes and features in `CHANGELOG.md` under
+`Unreleased` as work lands, with full PR links and contributor thanks. Release
+preparation finalizes those accumulated entries into the versioned, dated release
+section. Later work starts a new `Unreleased` section on `main`; it does not change
+the frozen tagged source or published release notes.
+
 ## Trust Anchors
 
 > **v0.37.0 safety stop:** `release/records/v0.37.0.json` preserves tag object
@@ -672,6 +678,7 @@ authorization; it does not require another chat approval.
 
 For closeout, record the published release, tap result, and independent smoke
 results, including outstanding failures. Verify the published notes match the
-finalized changelog. Do not prefill a next `Unreleased` section or change release
-versions as part of downstream retries. Leave the intended checkout clean and
-synchronized after authorized release commits are complete.
+finalized release section in the changelog. Keep later user-visible changes in
+`Unreleased` on `main`; never change the frozen tagged source, published release
+notes, or release versions as part of downstream retries. Leave the intended
+checkout clean and synchronized after authorized release commits are complete.
