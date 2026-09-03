@@ -3719,6 +3719,7 @@ func TestRemoteGitSeedAndCoherencePreferContainingBranchOverDeletedTopic(t *test
 	if runtime.GOOS == "windows" {
 		t.Skip("shell Git seed/coherence fixture")
 	}
+	t.Parallel()
 	f := newGitCoherenceFixtureWithDeletedTopic(t)
 	for _, baseRef := range []string{"main", "missing"} {
 		t.Run(baseRef, func(t *testing.T) {
@@ -3762,6 +3763,7 @@ func TestRemoteGitSeedAndCoherencePreferContainingBranchOverDeletedTopic(t *test
 }
 
 func TestWindowsGitSeedAndCoherenceUseContainingBranch(t *testing.T) {
+	t.Parallel()
 	f := newGitCoherenceFixtureWithDeletedTopic(t)
 	plan, blocked := syncGitCoherencePlan(baseConfig(), Repo{
 		Root: f.source, RemoteURL: f.origin, Head: f.b, BaseRef: "origin/main",

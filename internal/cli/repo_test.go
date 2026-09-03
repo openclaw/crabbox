@@ -1743,6 +1743,7 @@ func TestSyncGitCoherencePlanSelectsEligibleOriginBranch(t *testing.T) {
 }
 
 func TestSyncGitCoherencePlanRanksContainingOriginBranches(t *testing.T) {
+	t.Parallel()
 	f := newGitCoherenceFixture(t)
 	runGit(t, f.source, "update-ref", "refs/remotes/origin/alpha", f.b)
 	runGit(t, f.source, "update-ref", "refs/remotes/origin/release", f.c)
